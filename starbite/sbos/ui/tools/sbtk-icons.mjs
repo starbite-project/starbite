@@ -32,6 +32,8 @@ mono('kb-shift', 20, 18, `<path d="${SHIFT}" stroke="currentColor" stroke-width=
 mono('kb-shift-on', 20, 18, `<path d="${SHIFT}" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>`);
 mono('kb-delete', 24, 18, '<path d="M8.2 2.2H20.4A2.4 2.4 0 0 1 22.8 4.6V13.4A2.4 2.4 0 0 1 20.4 15.8H8.2L1.6 9Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>' +
   '<path d="M11.6 6.2L17.2 11.8M17.2 6.2L11.6 11.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>');
+/* Starbite OS Next (helper D): the location arrow (Maps, its Location row) */
+mono('loc', 24, 24, '<path d="M20.6 3.4L3.6 10.6L11.2 12.8L13.4 20.4Z" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>');
 mono('thermometer', 12, 12, '<path d="M4.6 7V2A1.4 1.4 0 0 1 7.4 2V7A2.4 2.4 0 1 1 4.6 7Z" stroke="currentColor" stroke-width="1"/>' +
   '<circle cx="6" cy="8.95" r="1.35" fill="currentColor"/><path d="M6 8.4V3.6" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>');
 add('sb-wifi', q('[data-sbicons] svg', 0), 17, 12);

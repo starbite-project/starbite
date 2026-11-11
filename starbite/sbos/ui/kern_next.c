@@ -21,6 +21,8 @@
 #include "sbtk.h"
 #include "shell.h"
 #include "survival.h"
+#include "gnssfix.h"
+#include "store.h"
 #include "../guide/sbguide.h"
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
@@ -332,6 +334,36 @@ static int notif_now(void)
         if (q) sh_notify(q->who, q->title, q->text, q->hm);
     }
     return n > 0;
+}
+/* helper D: the boot menu's last choice (the loader's settings record on UFS) for the Systems widget: read once, at
+ * the first minute (UFS is up by then); the self test reads nothing */
+static void lastos_now(void)
+{
+#ifndef SBOS_SELFTEST_NEXT
+    static int done;
+    if (done || !ready) return;
+    done = 1;
+    struct star_settings st;
+    if (settings_load(&st)) sh_lastos(st.last_key);
+#endif
+}
+/* helper D: Maps' last fix (kern/gnssfix.c: Android's fix on the card, cached 5 minutes); the shell asks from idle */
+int sh_gnss(sh_gnss_t *o)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)o;
+    return 0;                                        /* the self test never touches the card */
+#else
+    struct gnss_fix f;
+    if (gnss_lastfix(&f, 0) != 1) return 0;
+    o->lat_e6 = f.lat_e6;
+    o->lon_e6 = f.lon_e6;
+    o->acc_dm = f.acc_dm;
+    o->sats = f.sats;
+    o->utc = (long long)f.utc;
+    sb_strcpy(o->src, sizeof(o->src), f.src);
+    return 1;
+#endif
 }
 static void status_now(void)
 {
@@ -945,6 +977,7 @@ void next_kminute(void)
     if (baking) return;
     if (!ready) { ui_kminute(); return; }
     status_now();
+    lastos_now();                                    /* helper D: once */
     if (!ticking) {
         tk_comp_frame(&comp, 0, 0);
         present();

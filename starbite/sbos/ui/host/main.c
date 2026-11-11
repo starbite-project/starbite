@@ -249,6 +249,15 @@ const char *sh_guide_page(int c, int p, const char *const **lines)
     return ch[c].pages[p].title;
 }
 const char *sh_sensors_why(void) { return surv_sensors_why(); }
+/* helper D: Maps' last GNSS fix: none unless a state gives one (gnss=LAT,LON in degrees: a pretend fix from Android) */
+static sh_gnss_t host_fix;
+static int host_have_fix;
+int sh_gnss(sh_gnss_t *f)
+{
+    if (!host_have_fix) return 0;
+    *f = host_fix;
+    return 1;
+}
 
 /* SBTK_CORES=n: the bands over n threads (the phone's four A55), to check that a split frame is bit for bit the
  * serial one and to time it */
@@ -319,6 +328,16 @@ static void apply_state(const char *st)
     /* date=WDAY:DAY (P3p): a new day as the phone's clock reports it (the Calendar icon follows) */
     if (!strcmp(what, "date")) { sh_status(21, 6, atoi(key), (int)v, 11, 87, 41); return; }
     if (!strcmp(what, "hostms")) { surv_host_now_ms = (uint64_t)v; return; }   /* survival-next: the simulation's clock */
+    if (!strcmp(what, "gnss")) {                 /* helper D: gnss=60.1699,24.9384 (a pretend fix: 8.5 m, 9 satellites) */
+        double la = 0, lo = 0;
+        if (sscanf(eq + 1, "%lf,%lf", &la, &lo) == 2) {
+            host_fix.lat_e6 = (int)(la * 1e6); host_fix.lon_e6 = (int)(lo * 1e6);
+            host_fix.acc_dm = 85; host_fix.sats = 9; host_fix.utc = 1794500000LL;
+            strcpy(host_fix.src, "gps");
+            host_have_fix = 1;
+        }
+        return;
+    }
     sh_set(what, key, v);
 }
 

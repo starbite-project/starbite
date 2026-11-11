@@ -208,5 +208,11 @@ const char *sh_sensors_why(void);         /* why there is no compass or level ye
  * Notification Centre, the banner and the lock's "N notifications" pill. who: the poster ("clock", "battery", "modem",
  * "heat", "survival" or an app's name); hm: local hh * 100 + mm (-1 unknown). Titles and lines go to the screen only. */
 void sh_notify(const char *who, const char *title, const char *body, int hm);
+/* the boot menu's last choice (the loader's settings record: a catalog key, "" unknown): the Systems widget's first */
+void sh_lastos(const char *key);
+/* the last GNSS fix (Maps; the kernel: kern/gnssfix.c, Android's fix on the card): 1 a fix, 0 none. Called from idle
+ * turns only (it may read the card) */
+typedef struct { int lat_e6, lon_e6, acc_dm, sats; long long utc; char src[12]; } sh_gnss_t;   /* acc_dm, sats: -1 unknown */
+int sh_gnss(sh_gnss_t *f);
 
 #endif

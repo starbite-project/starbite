@@ -19,6 +19,7 @@
 static void set_lock(float y);
 static float rubber(float over, float dim);
 static int sw_on(void);                    /* shell_switcher.inc */
+static int hx_set(const char *what, const char *key, float v);   /* the home's widgets and Maps (below) */
 
 /* ---- the store --------------------------------------------------------------------------------------------- */
 #define NC_MAX 20
@@ -183,7 +184,7 @@ static void pl_glass(tk_layer *v, float x, float y, float h, float a)
         v->clip = 0;
     } else {
         if (v->bmp.px) nc_unview(v);
-        v->solid = tk_premul(TK_RGBA(52, 58, 84, .8f));
+        v->solid = tk_premul(TK_RGBA(48, 52, 74, .95f));
         v->x = tk_floorf(PT(x) + .5f);
         v->y = tk_floorf(PT(y) + .5f);
         v->solid_w = PT(NC_W);
@@ -199,7 +200,23 @@ static void pl_glass(tk_layer *v, float x, float y, float h, float a)
 static void pl_peek(tk_layer *v, float x, float y, float h, float a)
 {
     int g = nc_peeksrc();
-    if (g < 0 || a <= .004f) { v->hidden = 1; if (g < 0 && v->bmp.px) nc_unview(v); return; }
+    if (a <= .004f) { v->hidden = 1; return; }
+    if (g < 0) {
+        /* no lock cards (Emergency): a solid lower card peeking under the solid platter */
+        if (v->bmp.px) nc_unview(v);
+        v->solid = tk_premul(TK_RGBA(48, 52, 74, .6f));
+        v->x = tk_floorf(PT(x + 10) + .5f);
+        v->y = tk_floorf(PT(y + h - 16) + .5f);
+        v->solid_w = PT(NC_W - 20);
+        v->solid_h = PT(16 + PEEK1);
+        v->clip = 1;
+        v->clip_r = (tk_rect){ v->x, v->y, v->solid_w, v->solid_h };
+        v->clip_radius = PT(14);
+        v->alpha = a;
+        v->hidden = 0;
+        return;
+    }
+    v->clip = 0;
     if (v->bmp.px != K[g].gh.bmp.px) nc_view(v, &K[g].gh);
     float top = LIST_TOP + K[g].y;
     v->x = tk_floorf(PT(x - CARD_X) + K[g].gh.bx + .5f);
@@ -1117,5 +1134,207 @@ static int nc_set(const char *what, const char *key, float v)
         nc_place();
         return 1;
     }
+    return hx_set(what, key, v);
+}
+
+/* ---- home's live widgets and Maps (helper D) ----------------------------------------------------------------------
+ *   - the Systems widget: the boot menu's last choice first (sh_lastos, the loader's settings record; the concept's
+ *     four otherwise), redrawn only when it changes; the lock's "LAST USED" follows it;
+ *   - the Clock widget (page 1, rows 3-4): iOS's small analog clock, its hands redrawn on the minute (sh_status);
+ *     a tap opens Clock from it;
+ *   - Maps: an honest screen, no map: what it needs and the state of each, live (Wi-Fi and mobile data as the
+ *     platform pushes them; the last GNSS fix asked from idle turns only, at most once a minute). */
+void sh_lastos(const char *key)
+{
+    if (!key || !key[0]) return;
+    for (int g = 0; g < NG; g++)
+        for (int i = 0; i < G[g].n; i++) {
+            const sys_t *s = &G[g].it[i];
+            if (tk_strcmp(s->k, key) || s->self) continue;
+            if (LAST && !tk_strcmp(LAST, s->k)) return;
+            LAST = s->k;
+            build_home_w();
+            relink();
+            prep_tree(home.child);
+            lock_ver++;
+            return;
+        }
+}
+#define WCK_Y (HOME_TOP1 + 2 * ROW_PITCH)
+static void build_wclock(void)
+{
+    tk_layer *l = &hparts[7];
+    relayer(l);
+    float x = WID_X(0), y = WCK_Y, s = WID_W, cx = x + s / 2, cy = y + s / 2;
+    dc d = mk(l, "home-clock", x, y, s, s + 30, 2, 0);
+    tk_col ink = tk_hex(0x1c1c1e, 1);
+    d_rrect(&d, x, y, s, s, 24, ink);                              /* iOS's Clock widget: a black plate, a white face */
+    d_rrect(&d, cx - 66, cy - 66, 132, 132, 66, W(1));
+    for (int i = 0; i < 60; i++) {
+        float a = 6.2831853f * i / 60, sn = tk_sinf(a), cs = tk_cosf(a), r0 = i % 5 ? 61.5f : 58;
+        d_seg(&d, cx + r0 * sn, cy - r0 * cs, cx + 63.5f * sn, cy - 63.5f * cs, i % 5 ? .7f : 1.8f, i % 5 ? tk_hex(0x9a9aa0, 1) : ink);
+    }
+    for (int h = 1; h <= 12; h++) {
+        char n[4];
+        n[put_dec(n, h)] = 0;
+        float a = 6.2831853f * h / 12, w = tw(TK_IT600, 12, n, 0, 0);
+        d_text(&d, TK_IT600, 12, cx + 47 * tk_sinf(a) - w / 2, cy - 47 * tk_cosf(a) + 4.4f, n, 0, 0, ink, 0);
+    }
+    float ha = 6.2831853f * ((ST.h % 12) + ST.mi / 60.0f) / 12, ma = 6.2831853f * ST.mi / 60;
+    d_seg(&d, cx, cy, cx + 31 * tk_sinf(ha), cy - 31 * tk_cosf(ha), 5, ink);
+    d_seg(&d, cx, cy, cx + 52 * tk_sinf(ma), cy - 52 * tk_cosf(ma), 3.4f, ink);
+    d_rrect(&d, cx - 4.5f, cy - 4.5f, 9, 9, 4.5f, ink);
+    d_rrect(&d, cx - 2, cy - 2, 4, 4, 2, tk_hex(0xff9500, 1));
+    float cw = tw(TK_IT500, 12, "Clock", 0, 0);
+    d_text(&d, TK_IT500, 12, cx - cw / 2, y + s + 18, "Clock", 0, 0, INK, 1);
+    trim(l);
+    tk_layer_prepare(l);
+    l->hidden = 0;
+    relink();
+}
+static int wclock_tap(float x, float y)
+{
+    float x0 = x - page_x;
+    if (x0 < WID_X(0) || x0 >= WID_X(0) + WID_W || y < WCK_Y || y >= WCK_Y + WID_W || page_x < -195) return 0;
+    for (int a = 0; a < NAPPS; a++)
+        if (!tk_strcmp(APPS[a].k, "clock")) {
+            ap_from_on = 1;
+            ap_from = (arect){ WID_X(0) + page_x, WCK_Y, WID_W, WID_W, 24 };
+            app_open(a);
+            return 1;
+        }
+    return 0;
+}
+
+/* Maps */
+static struct { int asked, have; float t; sh_gnss_t fix; } MP;
+static void mp_ask(void)
+{
+    sh_gnss_t f;
+    tk_memset(&f, 0, sizeof f);
+    int have = sh_gnss(&f) == 1;
+    int ch = !MP.asked || have != MP.have || (have && (f.lat_e6 != MP.fix.lat_e6 || f.lon_e6 != MP.fix.lon_e6 || f.utc != MP.fix.utc));
+    MP.asked = 1;
+    MP.have = have;
+    if (have) MP.fix = f;
+    MP.t = now_ms;
+    if (ch && is_app("maps") && !AP.closing) build_app_page(AP.a);
+}
+static void mp_idle(void)
+{
+    if (!AP.on || AP.closing || !is_app("maps") || ap_pending) return;
+    if (!MP.asked || now_ms - MP.t > 60000 || now_ms < MP.t) mp_ask();
+}
+/* degrees x 1e6 as "60.17° N" */
+static int mp_deg(char *b, int e6, const char *pos, const char *neg)
+{
+    int v = ((e6 < 0 ? -e6 : e6) + 5000) / 10000, n = put_dec(b, v / 100), c = v % 100;   /* to 0.01 degrees */
+    b[n++] = '.'; b[n++] = (char)('0' + c / 10); b[n++] = (char)('0' + c % 10);
+    const char *s = e6 < 0 ? neg : pos;
+    while (*s) b[n++] = *s++;
+    b[n] = 0;
+    return n;
+}
+static const char *mp_wifi(void)
+{
+    switch (WF.state) {
+    case SH_WIFI_CONNECTED: return WF.ssid[0] ? WF.ssid : "Connected";
+    case SH_WIFI_JOINING: case SH_WIFI_DHCP: return "Connecting\xe2\x80\xa6";
+    case SH_WIFI_STARTING: case SH_WIFI_UP: case SH_WIFI_SCANNING: return "Not Connected";
+    default: return "Off";
+    }
+}
+static const char *mp_cell(char *b)
+{
+    switch (CELL.data) {
+    case SH_DATA_UP: { const char *r = cell_rat(); int n = 0; for (const char *s = "On \xc2\xb7 "; *s;) b[n++] = *s++; while (*r) b[n++] = *r++; b[n] = 0; return b; }
+    case SH_DATA_STARTING: case SH_DATA_SEARCHING: case SH_DATA_REGISTERED: return "Connecting\xe2\x80\xa6";
+    case SH_DATA_NO_SIM: return "No SIM";
+    case SH_DATA_LOCKED: return "SIM Locked";
+    case SH_DATA_FAILED: return "Didn't Start";
+    default: return "Off";
+    }
+}
+static void page_maps(dc *d)
+{
+    /* the glyph: Maps' blue disc, the location arrow */
+    d_rrect(d, 195 - 44, 136, 88, 88, 44, tk_hex(0x0a84ff, 1));
+    const tk_bmp *lc = tk_icon("loc");
+    if (lc) { float f = 40.0f / 24, pad = tk_icon_pad("loc") * f; nc_blit_scaled(d->b, lc, PT(195 - 20 - 1.5f) - pad - d->ox, PT(180 - 20 + 1.5f) - pad - d->oy, f); }
+    char ln[4][96];
+    float wm;
+    int n = wrapn(ln, 2, TK_IT700, 22, "Maps Needs the Internet and Location", 300, &wm);
+    for (int k = 0; k < n; k++) d_text_box(d, TK_IT700, 22, 195, bl(TK_IT700, 22, 248 + 28.0f * k), CONTENT_W, 1, ln[k], 0, 0, W(.95f), 0);
+    float y = 248 + 28.0f * n + 10;
+    n = wrapn(ln, 3, TK_IT400, 15, "There are no maps stored on this phone. Maps can show one when the phone is online and knows where it is.", 310, &wm);
+    for (int k = 0; k < n; k++) d_text_box(d, TK_IT400, 15, 195, bl(TK_IT400, 15, y + 20.0f * k), CONTENT_W, 1, ln[k], 0, 0, W(.55f), 0);
+    /* what it needs, live */
+    float gy = 430;
+    d_text(d, TK_IT400, 13, ROW_TX, gy - 8, "STATUS", .52f, 0, W(.55f), 0);
+    d_rrect(d, GROUP_X, gy, GROUP_W, 47 * 3 - 1, 16, tk_hex(0x151c33, 1));
+    char cb[32], lb[48];
+    const char *L[3] = { "Wi-Fi", "Cellular Data", "Location" }, *G3[3] = { "cc-wifi", "cc-cell", "loc" };
+    const uint32_t col[3] = { 0x0a84ff, 0x30d158, 0x0a84ff };
+    const float gw[3] = { 19, 18, 18 }, gh[3] = { 14, 16, 18 };
+    const char *R[3] = { mp_wifi(), mp_cell(cb), "No Fix" };
+    if (MP.have) {
+        int k = mp_deg(lb, MP.fix.lat_e6, "\xc2\xb0 N", "\xc2\xb0 S");
+        lb[k++] = ','; lb[k++] = ' ';
+        mp_deg(lb + k, MP.fix.lon_e6, "\xc2\xb0 E", "\xc2\xb0 W");
+        R[2] = lb;
+    } else if (!MP.asked) R[2] = "Checking\xe2\x80\xa6";
+    for (int r = 0; r < 3; r++) {
+        float ry = gy + 47 * r;
+        d_rrect(d, ROW_TX, ry + 9, 29, 29, 7, tk_hex(col[r], 1));
+        const tk_bmp *ic = tk_icon(G3[r]);
+        if (ic) {
+            float pad = tk_icon_pad(G3[r]);
+            if (r == 2) nc_blit_scaled(d->b, ic, PT(ROW_TX + 5.5f) - pad * .75f - d->ox, PT(ry + 14.5f) - pad * .75f - d->oy, .75f);
+            else tk_blit_tinted(d->b, ic, (int)tk_floorf(PT(ROW_TX + (29 - gw[r]) / 2) - pad - d->ox + .5f),
+                                (int)tk_floorf(PT(ry + 9 + (29 - gh[r]) / 2) - pad - d->oy + .5f), W(1));
+        }
+        float lx = ROW_TX + 29 + 13;
+        d_text_box(d, TK_IT400, 16, lx, ry + 13 + 16, 140, 0, L[r], 0, 0, INK, 0);
+        d_text_box(d, TK_IT400, 16, CONTENT_R - 16, ry + 13 + 16, CONTENT_R - 16 - lx - 130, 2, R[r], 0, TK_TNUM, W(.55f), 0);
+        if (r < 2) d_rrect(d, lx, ry + 46, CONTENT_R - lx, .5f, 0, W(.08f));
+    }
+    /* the fix's details, or why there is none */
+    char ft[160];
+    int k = 0;
+    if (MP.have) {
+        long long z = MP.fix.utc / 86400 + 719468, era = (z >= 0 ? z : z - 146096) / 146097;
+        long long doe = z - era * 146097, yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        long long doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153;
+        int dd = (int)(doy - (153 * mp + 2) / 5 + 1), mm = (int)(mp < 10 ? mp + 3 : mp - 9), yy = (int)(yoe + era * 400 + (mm <= 2));
+        int sec = (int)(MP.fix.utc % 86400), hh = sec / 3600, mi = sec / 60 % 60;
+        for (const char *s = "Android's last fix: "; *s;) ft[k++] = *s++;
+        k += put_dec(ft + k, dd); ft[k++] = ' ';
+        for (int i = 0; i < 3; i++) ft[k++] = MO[(mm + 11) % 12][i];
+        ft[k++] = ' '; k += put_dec(ft + k, yy); ft[k++] = ','; ft[k++] = ' ';
+        ft[k++] = (char)('0' + hh / 10); ft[k++] = (char)('0' + hh % 10); ft[k++] = ':';
+        ft[k++] = (char)('0' + mi / 10); ft[k++] = (char)('0' + mi % 10);
+        for (const char *s = " UTC"; *s;) ft[k++] = *s++;
+        if (MP.fix.acc_dm >= 0) {
+            for (const char *s = " \xc2\xb7 \xc2\xb1"; *s;) ft[k++] = *s++;
+            k += put_dec(ft + k, MP.fix.acc_dm / 10);
+            if (MP.fix.acc_dm < 100) { ft[k++] = '.'; ft[k++] = (char)('0' + MP.fix.acc_dm % 10); }
+            ft[k++] = ' '; ft[k++] = 'm';
+        }
+        if (MP.fix.sats >= 0) { ft[k++] = ' '; ft[k++] = (char)0xc2; ft[k++] = (char)0xb7; ft[k++] = ' '; k += put_dec(ft + k, MP.fix.sats); for (const char *s = " satellites"; *s;) ft[k++] = *s++; }
+        ft[k] = 0;
+    } else {
+        const char *s = "Starbite OS can't use the GPS yet. The last fix Android saves to the memory card shows here.";
+        while (*s) ft[k++] = *s++;
+        ft[k] = 0;
+    }
+    n = wrapn(ln, 3, TK_IT400, 13, ft, CONTENT_W - 32, &wm);
+    for (int i = 0; i < n; i++) d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, gy + 47 * 3 + 8 + 17.0f * i), ln[i], 0, 0, W(.45f), 0);
+}
+/* the host's stills: "lastos" KEY (sh_lastos), "mapsfix" (Maps asks for the fix now) */
+static int hx_set(const char *what, const char *key, float v)
+{
+    (void)v;
+    if (!tk_strcmp(what, "lastos")) { sh_lastos(key); return 1; }
+    if (!tk_strcmp(what, "mapsfix")) { mp_ask(); return 1; }
     return 0;
 }

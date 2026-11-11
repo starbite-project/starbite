@@ -384,7 +384,6 @@ static int sw_tick(float dt, float t)
         }
     }
     if (SW.on) sw_place();
-    if (AP.on && !SW.on) sw_dirty = 1;          /* the page moved or changed: a new snapshot at the next rest */
     return mv;
 }
 static int sw_moving(void) { return sp_sw.live || sp_sws.live || SW.g == SWG_SCROLL || SW.g == SWG_THROW || SW.thrown >= 0 || SW.cov || SW.dragging; }
