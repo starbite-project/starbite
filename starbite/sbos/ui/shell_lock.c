@@ -188,6 +188,7 @@ static void d_rrect(dc *d, float x, float y, float w, float h, float r, tk_col c
 static struct { int state, bars, rat; } SB_CELL;      /* the status bar's copy of the modem's (sh_cell) */
 static struct { int h, mi, wday, day, mon, pct, temp; } ST = { 21, 5, 2, 10, 11, 87, 41 };
 static struct { int on, h, m; } ALM = { 1, 7, 0 };   /* the host's is the concept's 07:00 */
+static void prep_tree(tk_layer *l);   /* P3g: home's half copies again right after a live rebuild */
 static int sys_charging;           /* P2y: sh_sysinfo's (the status bar's battery is green while charging) */
 #define SYS_CHARGING() sys_charging
 static void status_bar(dc *d, const char *left)
@@ -1186,6 +1187,7 @@ static const appdef APPS[] = {
     { "power", "Power Saving", 0x1d2440, 1, { { "", 1, { { "Not in this version yet", "" } } } } },
     { "phone", "Phone", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "messages", "Messages", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
+    { "search", "Search", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
     { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "Not in this version" }, { "Mobile Data", "No SIM" }, { "Battery", "@pct" } } },
                                            { "", 5, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" } } },
                                            { "About", 3, { { "Model", "Galaxy S9 (SM-G960F)" }, { "Software", "@ver" }, { "Memory", "4 GB" } } } } },
@@ -1856,6 +1858,56 @@ static void kb_key(dc *d, float x, float y, float w, const char *t, int special)
     float tw0 = tw(TK_IT400, special ? 16 : 23, t, 0, 0);
     d_text(d, TK_IT400, special ? 16 : 23, x + (w - tw0) / 2, bl(TK_IT400, special ? 16 : 23, y + (special ? 13 : 9)), t, 0, 0, INK, 0);
 }
+/* the keyboard (Notes, Search): iOS's dark layout from y 540; kb_hit: 1 a character (*c), 2 shift, 3 123/ABC,
+ * 4 delete, 5 return (also *c = '\n'), 0 nothing */
+static void kb_draw(dc *d, int shift, int num)
+{
+    d_rrect(d, 0, 540, 390, 262, 0, tk_hex(0x1e2030, 1));
+    const char *const *R = KR[num];
+    for (int r = 0; r < 3; r++) {
+        int n = (int)tk_strlen(R[r]);
+        float x0 = r == 2 && !num ? 54 : 3 + (10 - n) * 19.5f;
+        for (int i = 0; i < n; i++) {
+            char k[2] = { R[r][i], 0 };
+            if (!num && shift) k[0] = (char)(k[0] - 32);
+            kb_key(d, x0 + 39 * i, 550 + 54 * r, 33, k, 0);
+        }
+    }
+    if (!num) {
+        float w = tw(TK_IT600, 13, "shift", 0, 0);
+        d_rrect(d, 3, 658, 42, 46, 6, shift ? W(.9f) : tk_hex(0x3a3d4a, 1));
+        d_text(d, TK_IT600, 13, 3 + (42 - w) / 2, bl(TK_IT600, 13, 672), "shift", 0, 0, shift ? tk_hex(0x1e2030, 1) : INK, 0);
+    }
+    d_rrect(d, 345, 658, 42, 46, 6, tk_hex(0x3a3d4a, 1));
+    d_icon(d, "back", 359, 670, 1);                              /* delete: the font has no erase glyph */
+    kb_key(d, 3, 712, 88, num ? "ABC" : "123", 1);
+    kb_key(d, 97, 712, 196, "space", 0);
+    kb_key(d, 299, 712, 88, "return", 1);
+}
+static int kb_hit(float x, float y, int shift, int num, char *c)
+{
+    const char *const *R = KR[num];
+    for (int r = 0; r < 3; r++) {
+        int n = (int)tk_strlen(R[r]);
+        float x0 = r == 2 && !num ? 54 : 3 + (10 - n) * 19.5f, ky = 550 + 54 * r;
+        if (y < ky || y >= ky + 50) continue;
+        for (int i = 0; i < n; i++)
+            if (x >= x0 + 39 * i - 3 && x < x0 + 39 * i + 36) {
+                *c = R[r][i];
+                if (!num && shift && *c >= 'a' && *c <= 'z') *c = (char)(*c - 32);
+                return 1;
+            }
+        if (r == 2 && x < 50 && !num) return 2;
+        if (r == 2 && x >= 340) return 4;
+    }
+    if (y >= 712 && y < 760) {
+        if (x < 94) return 3;
+        if (x < 296) { *c = ' '; return 1; }
+        *c = '\n';
+        return 5;
+    }
+    return 0;
+}
 static void page_notes(dc *d)
 {
     if (!NS.view) {
@@ -1873,30 +1925,7 @@ static void page_notes(dc *d)
     }
     d_icon(d, "back", 18, 53, 1);
     d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Notes", 0, 0, tk_hex(0xffd60a, 1), 0);
-    d_rrect(d, 0, 540, 390, 262, 0, tk_hex(0x1e2030, 1));
-    const char *const *R = KR[NS.num];
-    for (int r = 0; r < 3; r++) {
-        int n = (int)tk_strlen(R[r]);
-        float x0 = r == 2 ? 54 : 3 + (10 - n) * 19.5f;
-        if (r == 1 && NS.num) x0 = 3 + 19.5f * (10 - n);
-        if (r == 2 && NS.num) x0 = 3 + (10 - n) * 19.5f;
-        for (int i = 0; i < n; i++) {
-            char k[2] = { R[r][i], 0 };
-            if (!NS.num && NS.shift) k[0] = (char)(k[0] - 32);
-            kb_key(d, x0 + 39 * i, 550 + 54 * r, 33, k, 0);
-        }
-    }
-    if (!NS.num) {
-        if (NS.shift) { d_rrect(d, 3, 658, 42, 46, 6, W(.9f)); float w = tw(TK_IT600, 13, "shift", 0, 0);
-                        d_text(d, TK_IT600, 13, 3 + (42 - w) / 2, bl(TK_IT600, 13, 672), "shift", 0, 0, tk_hex(0x1e2030, 1), 0); }
-        else { d_rrect(d, 3, 658, 42, 46, 6, tk_hex(0x3a3d4a, 1)); float w = tw(TK_IT600, 13, "shift", 0, 0);
-               d_text(d, TK_IT600, 13, 3 + (42 - w) / 2, bl(TK_IT600, 13, 672), "shift", 0, 0, INK, 0); }
-    }
-    d_rrect(d, 345, 658, 42, 46, 6, tk_hex(0x3a3d4a, 1));
-    d_icon(d, "back", 359, 670, 1);                              /* delete: the font has no erase glyph */
-    kb_key(d, 3, 712, 88, NS.num ? "ABC" : "123", 1);
-    kb_key(d, 97, 712, 196, "space", 0);
-    kb_key(d, 299, 712, 88, "return", 1);
+    kb_draw(d, NS.shift, NS.num);
 }
 static void build_note(void)
 {
@@ -1960,29 +1989,85 @@ static void notes_tap(float x, float y)
     char *t = NOTES[NS.cur];
     int len = (int)tk_strlen(t), relayout = 0;
     char c = 0;
-    const char *const *R = KR[NS.num];
-    for (int r = 0; r < 3 && !c; r++) {
-        int n = (int)tk_strlen(R[r]);
-        float x0 = r == 2 && !NS.num ? 54 : 3 + (10 - n) * 19.5f, ky = 550 + 54 * r;
-        if (y < ky || y >= ky + 50) continue;
-        for (int i = 0; i < n; i++)
-            if (x >= x0 + 39 * i - 3 && x < x0 + 39 * i + 36) { c = R[r][i]; break; }
-        if (!c && r == 2) {
-            if (x < 50 && !NS.num) { NS.shift = !NS.shift; relayout = 1; }
-            else if (x >= 340 && len) t[len - 1] = 0;
-        }
-    }
-    if (!c && y >= 712 && y < 760) {
-        if (x < 94) { NS.num = !NS.num; relayout = 1; }
-        else if (x < 296) c = ' ';
-        else c = '\n';
-    }
-    if (c && len < NOTELEN - 1) {
-        if (!NS.num && NS.shift && c >= 'a' && c <= 'z') { c = (char)(c - 32); NS.shift = 0; relayout = 1; }
+    int k = kb_hit(x, y, NS.shift, NS.num, &c);
+    if (k == 2) { NS.shift = !NS.shift; relayout = 1; }
+    else if (k == 3) { NS.num = !NS.num; relayout = 1; }
+    else if (k == 4 && len) t[len - 1] = 0;
+    else if ((k == 1 || k == 5) && len < NOTELEN - 1) {
+        if (NS.shift && c >= 'A' && c <= 'Z') { NS.shift = 0; relayout = 1; }
         t[len] = c; t[len + 1] = 0;
-        if (c == '.' || c == '?' || c == '!') { /* the next sentence starts in capitals after a space, as iOS */ }
     }
     if (relayout) build_app_page(AP.a); else build_note();
+}
+
+/* ---- P3g: Search (the home's Search pill, as iOS's): a field, the keyboard, the apps whose names contain what is
+ * typed (all of them while it is empty) as icons; a tap opens one ---- */
+static struct { char q[24]; int shift, num, hits[8], nh; } SR;
+static tk_layer apsrch;
+static int ci_has(const char *s, const char *q)
+{
+    if (!q[0]) return 1;
+    for (; *s; s++) {
+        int k = 0;
+        while (q[k] && s[k] && (s[k] | 32) == (q[k] | 32)) k++;
+        if (!q[k]) return 1;
+    }
+    return 0;
+}
+static void page_search(dc *d)
+{
+    d_text(d, TK_IT400, 17, 316, bl(TK_IT400, 17, 70), "Cancel", 0, 0, ACCENT(), 0);
+    kb_draw(d, SR.shift, SR.num);
+}
+static void build_search(void)
+{
+    relayer(&apsrch);
+    if (!is_app("search")) { apsrch.hidden = 1; return; }
+    dc d = mk(&apsrch, "search-results", 12, 52, 366, 480, 0, 0);
+    d_lg_app(&d, 16, 56, 288, 40, 20, 1);
+    d_icon(&d, "search15", 30, 68.5f, 1);
+    if (SR.q[0]) d_text(&d, TK_IT400, 17, 53, bl(TK_IT400, 17, 65), SR.q, 0, 0, INK, 0);
+    else d_text(&d, TK_IT400, 17, 53, bl(TK_IT400, 17, 65), "Search", 0, 0, tk_hex(0xa9a9a9, 1), 0);
+    if (SR.q[0]) d_rrect(&d, 53 + tw(TK_IT400, 17, SR.q, 0, 0) + 1, 66, 2, 21, 1, ACCENT());
+    SR.nh = 0;
+    for (int a = 0; a < NAPPS && SR.nh < 8; a++) {
+        if (!tk_strcmp(APPS[a].k, "search") || !ci_has(APPS[a].name, SR.q)) continue;
+        char nm[24] = "a62-";
+        tk_memcpy(nm + 4, APPS[a].k, tk_strlen(APPS[a].k) + 1);
+        if (!tk_icon(nm)) continue;
+        SR.hits[SR.nh] = a;
+        float x = 22 + 86.5f * (SR.nh % 4) + 12.25f, y = 148 + 103 * (SR.nh / 4);
+        d_icon(&d, nm, x, y, 1);
+        float w = tw(TK_IT500, 12, APPS[a].name, 0, 0);
+        if (w > 84) w = 84;
+        d_text(&d, TK_IT500, 12, x + 31 - w / 2, bl(TK_IT500, 12, y + 67), APPS[a].name, 0, 0, INK, 0);
+        SR.nh++;
+    }
+    d_text(&d, TK_IT600, 13, 24, bl(TK_IT600, 13, 116), SR.nh ? (SR.q[0] ? "APPLICATIONS" : "SUGGESTIONS") : "NO RESULTS", .4f, 0, W(.55f), 0);
+    apsrch.hidden = 0;
+    relink();
+}
+static void app_finish_close(void);
+static void app_open(int a);
+static void app_close(float v);
+static void search_tap(float x, float y)
+{
+    if (y >= 52 && y < 92 && x >= 306) { app_close(0); return; }     /* Cancel: back into the pill */
+    if (y >= 148 && y < 148 + 206 && y < 540) {
+        int col = (int)((x - 22) / 86.5f), row = (int)((y - 148) / 103), i = row * 4 + col;
+        if (col >= 0 && col < 4 && i < SR.nh) { int a = SR.hits[i]; app_finish_close(); app_open(a); return; }
+    }
+    char c = 0;
+    int k = kb_hit(x, y, SR.shift, SR.num, &c), n = (int)tk_strlen(SR.q), relayout = 0;
+    if (k == 2) { SR.shift = !SR.shift; relayout = 1; }
+    else if (k == 3) { SR.num = !SR.num; relayout = 1; }
+    else if (k == 4 && n) SR.q[n - 1] = 0;
+    else if (k == 5) { if (SR.nh) { int a = SR.hits[0]; app_finish_close(); app_open(a); } return; }
+    else if (k == 1 && n < 22 && !(c == ' ' && !n)) {
+        if (SR.shift) { SR.shift = 0; relayout = 1; }
+        SR.q[n] = c; SR.q[n + 1] = 0;
+    }
+    if (relayout) build_app_page(AP.a); else build_search();
 }
 
 static tk_layer apkey, apnum;
@@ -2008,7 +2093,7 @@ void sh_alarm(int on, int h, int m)
 }
 void sh_sysinfo(int charging, const char *version)
 {
-    if (!!charging != sys_charging) { sys_charging = !!charging; build_lstatus(); build_home_sb(); build_home_w(); relink(); lock_ver++; }
+    if (!!charging != sys_charging) { sys_charging = !!charging; build_lstatus(); build_home_sb(); build_home_w(); relink(); lock_ver++; prep_tree(home.child); }
     SYS.charging = charging;
     int n = 0;
     while (version && version[n] && n < 39) { SYS.ver[n] = version[n]; n++; }
@@ -2040,7 +2125,8 @@ static void build_app_page(int a)
     const char *k = APPS[a].k;
     int own = !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
               !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
-              !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes");
+              !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes") ||
+              !tk_strcmp(k, "search");
     if (own) {
         for (int i = 0; i < NST; i++) {
             dc d = strip_dc(i, "app-page");
@@ -2055,12 +2141,14 @@ static void build_app_page(int a)
             else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
             else if (!tk_strcmp(k, "settings")) page_display(&d);
             else if (!tk_strcmp(k, "notes")) page_notes(&d);
+            else if (!tk_strcmp(k, "search")) page_search(&d);
             else page_camera(&d);
             tk_layer_prepare(&appst[i]);
         }
         build_apnum();
         if (!tk_strcmp(k, "calc")) build_calc();
         if (!tk_strcmp(k, "notes")) build_note();
+        if (!tk_strcmp(k, "search")) build_search();
         if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
         relink();
         return;
@@ -2157,6 +2245,7 @@ static arect icon_rect(int a)
     static const char *DK[4] = { "phone", "messages", "browser", "settings" };
     const char *k = APPS[a].k;
     for (int i = 0; i < 4; i++) if (!tk_strcmp(DK[i], k)) return (arect){ 22 + 86.5f * i + 12.25f, 705, 62, 62, 15 };
+    if (!tk_strcmp(k, "search")) return (arect){ 160, 640, 70, 30, 15 };   /* P3g: the Search pill */
     for (int i = 0; i < 8; i++) if (!tk_strcmp(P1[i], k)) return (arect){ 22 + 86.5f * (i % 4) + 12.25f + page_x, 258 + 103 * (i / 4), 62, 62, 15 };
     for (int i = 0; i < 8; i++) if (!tk_strcmp(P2[i], k)) return (arect){ 390 + 22 + 86.5f * (i % 4) + 12.25f + page_x, 62 + 103 * (i / 4), 62, 62, 15 };
     return (arect){ 164, 370, 62, 62, 15 };
@@ -2169,6 +2258,7 @@ static int app_hit(float x, float y)
     static const char *DK[4] = { "phone", "messages", "browser", "settings" };
     const char *k = 0;
     if (y >= 700 && y <= 772) { int i = (int)((x - 22) / 86.5f); if (i >= 0 && i < 4) k = DK[i]; }
+    else if (y >= 636 && y <= 674 && x >= 140 && x <= 250) k = "search";
     else {
         int pg = page_x < -195;
         float x0 = x - (pg ? 390 + page_x : page_x), top = pg ? 62 : 258;
@@ -2216,6 +2306,8 @@ static void app_finish_close(void)
     apsw.hidden = aptm.hidden = apctl.hidden = 1;
     relayer(&apcalc); apcalc.hidden = 1;
     relayer(&apnote); apnote.hidden = 1;
+    relayer(&apsrch); apsrch.hidden = 1;
+    SR.q[0] = 0; SR.shift = 0; SR.num = 0;                      /* Search opens empty */
     NS.view = 0;                                                /* Notes opens on its list again */                        /* the Calculator keeps its value (CAL) */
     apnum.hidden = apkey.hidden = 1;
     home.sx = home.sy = 1;
@@ -2495,6 +2587,8 @@ static void app_tap(float x, float y)
         calc_tap(x, y);
     } else if (is_app("notes")) {
         notes_tap(x, y);
+    } else if (is_app("search")) {
+        search_tap(x, y);
     } else if (is_app("light")) {
         if (x >= 135 && x < 255 && y >= 250 && y < 490) {
             Q[0].lit = !Q[0].lit;
@@ -2648,8 +2742,8 @@ static void relink(void)
 {
     tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
     link(&root, r, 14);
-    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl, &apcalc, &apnote };
-    link(&appg, ag, 9);
+    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch };
+    link(&appg, ag, 10);
     tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     link(&appc, st, NST);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
@@ -2990,6 +3084,7 @@ void sh_touch(int phase, float x, float y, float t)
             /* elsewhere but the dock, Search and the widgets: the pages (direction decided after 8 pt) */
             int on_w = page_x > -195 && y >= 60 && y <= 218 && ((x >= 24 && x <= 182) || (x >= 208 && x <= 366));
             if (y >= 688 && y < H_PT - 30) { T.kind = G_DOCK; return; }   /* the dock: a tap opens its app */
+            if (y >= 636 && y <= 674 && x >= 140 && x <= 250) { T.kind = G_DOCK; return; }   /* P3g: Search */
             if (y >= 56 && y < 688 && !(y >= 640 && y <= 670 && x >= 150 && x <= 240) && !on_w) {
                 T.kind = G_PAGE;
                 T.base = page_x;
@@ -3497,6 +3592,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
         build_home_w();                         /* P2y: home's battery widget shows the same live values */
         relink();
     }
+    if (tchange || wchange) prep_tree(home.child);   /* P3g: not in the next frame that shows home (22 ms) */
     if (tchange || wchange) lock_ver++;
 }
 
