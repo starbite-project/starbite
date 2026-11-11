@@ -61,6 +61,14 @@ static uint64_t now(struct sbnet *n) { return n->os.now_ms(n->os.ctx); }
 
 static void eth_send(struct sbnet *n, const uint8_t *dst, uint16_t type, uint8_t *f, uint32_t len)
 {
+    if (n->raw_ip) {                            /* point-to-point: the IPv4 packet alone (no ARP on such a link) */
+        if (type != ETH_IP || len <= 14)
+            return;
+        n->tx_frames++;
+        if (n->os.tx(n->os.ctx, f + 14, len - 14))
+            n->tx_errors++;
+        return;
+    }
     cpy(f, dst, 6);
     cpy(f + 6, n->mac, 6);
     p16(f + 12, type);
@@ -143,7 +151,7 @@ static int ip_send(struct sbnet *n, const uint8_t *dst, uint8_t proto, uint8_t *
     cpy(ip + 12, broadcast && n->state < SBNET_BOUND ? any_ip : n->ip, 4);
     cpy(ip + 16, dst, 4);
     p16(ip + 10, fold(sum16(ip, 20, 0)));
-    if (broadcast || eq(dst, bcast_ip, 4)) {
+    if (broadcast || eq(dst, bcast_ip, 4) || n->raw_ip) {
         eth_send(n, bcast_mac, ETH_IP, f, 14 + total);
         return 0;
     }
@@ -457,12 +465,12 @@ static void icmp_rx(struct sbnet *n, const uint8_t *ip, uint32_t ihl, const uint
     (void)ihl;
 }
 
+static void ip_rx(struct sbnet *n, const uint8_t *ip, uint32_t len);
+
 void sbnet_rx(struct sbnet *n, const uint8_t *f, uint32_t len)
 {
-    const uint8_t *ip, *u;
-    uint32_t ihl, total;
     n->rx_frames++;
-    if (len < 14 || n->state == SBNET_DOWN || (!(f[0] & 1) && !eq(f, n->mac, 6))) {
+    if (n->raw_ip || len < 14 || n->state == SBNET_DOWN || (!(f[0] & 1) && !eq(f, n->mac, 6))) {
         n->rx_ignored++;
         return;
     }
@@ -474,10 +482,27 @@ void sbnet_rx(struct sbnet *n, const uint8_t *f, uint32_t len)
         n->rx_ignored++;
         return;
     }
-    ip = f + 14;
+    ip_rx(n, f + 14, len - 14);
+}
+
+void sbnet_rx_ip(struct sbnet *n, const uint8_t *ip, uint32_t len)
+{
+    n->rx_frames++;
+    if (!n->raw_ip || n->state == SBNET_DOWN || len < 20) {
+        n->rx_ignored++;
+        return;
+    }
+    ip_rx(n, ip, len);
+}
+
+/* an IPv4 packet in (len: the bytes available from ip on) */
+static void ip_rx(struct sbnet *n, const uint8_t *ip, uint32_t len)
+{
+    const uint8_t *u;
+    uint32_t ihl, total;
     ihl = (uint32_t)(ip[0] & 15) * 4;
     total = g16(ip + 2);
-    if ((ip[0] >> 4) != 4 || ihl < 20 || total < ihl || 14 + total > len || fold(sum16(ip, ihl, 0)) != 0 ||
+    if ((ip[0] >> 4) != 4 || ihl < 20 || total < ihl || total > len || fold(sum16(ip, ihl, 0)) != 0 ||
         (g16(ip + 6) & 0x3fff)) {               /* no fragments */
         n->rx_ignored++;
         return;
@@ -552,6 +577,13 @@ void sbnet_static(struct sbnet *n, const uint8_t ip[4], const uint8_t mask[4], c
     n->bound_at = now(n);
     n->t1_at = n->t2_at = n->end_at = ~0ull;    /* no lease: never renewed, never expires */
     n->state = SBNET_BOUND;
+}
+
+void sbnet_init_raw(struct sbnet *n, const struct sbnet_os *os)
+{
+    static const uint8_t none[6] = { 0x02, 0, 0, 0, 0, 0 };     /* never on a wire: raw IP has no link address */
+    sbnet_init(n, os, none);
+    n->raw_ip = 1;
 }
 
 void sbnet_init(struct sbnet *n, const struct sbnet_os *os, const uint8_t mac[6])

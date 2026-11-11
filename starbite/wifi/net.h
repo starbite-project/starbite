@@ -62,9 +62,15 @@ struct sbnet {
     uint64_t dns_deadline;
     /* counters */
     uint32_t rx_frames, rx_ignored, tx_frames, tx_errors, ip_id;
+    int raw_ip;                         /* a point-to-point link (mobile data): bare IPv4, no Ethernet / ARP / DHCP */
 };
 
 void sbnet_init(struct sbnet *n, const struct sbnet_os *os, const uint8_t mac[6]);
+/* raw IP (the modem's PDP channel): os->tx gets bare IPv4 packets and sbnet_rx_ip takes them; bind it with
+ * sbnet_static (the PDP context's address and DNS; mask 255.255.255.255, no gateway needed); sbnet_start is not
+ * used (no DHCP) */
+void sbnet_init_raw(struct sbnet *n, const struct sbnet_os *os);
+void sbnet_rx_ip(struct sbnet *n, const uint8_t *ip, uint32_t len);
 void sbnet_start(struct sbnet *n);
 void sbnet_stop(struct sbnet *n);
 void sbnet_rx(struct sbnet *n, const uint8_t *frame, uint32_t len);

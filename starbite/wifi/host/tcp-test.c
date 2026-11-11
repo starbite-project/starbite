@@ -39,6 +39,7 @@ static struct {
 #define QN 4096
 static struct fr { uint64_t at; int to; uint32_t len; uint8_t b[1600]; } q[QN];
 static unsigned qn;
+static int raw_link;                            /* the hosts are on a raw-IP link (mobile data): no Ethernet */
 
 struct host {
     struct sbnet net;
@@ -56,7 +57,7 @@ static void enqueue(int to, const uint8_t *f, uint32_t len)
     q[qn].len = len;
     memcpy(q[qn].b, f, len);
     if (L.corrupt && rf() < L.corrupt && len > 40)
-        q[qn].b[34 + r32() % (len - 34)] ^= (uint8_t)(1 + r32() % 255);
+        q[qn].b[(raw_link ? 20 : 34) + r32() % (len - (raw_link ? 20 : 34))] ^= (uint8_t)(1 + r32() % 255);
     qn++;
 }
 
@@ -92,8 +93,12 @@ static void setup(void)
         H[i].id = i;
         os.ctx = &H[i];
         os.tx = tx, os.now_ms = now_ms, os.random = rnd, os.tcp = tcp_in;
-        sbnet_init(&H[i].net, &os, mac[i]);
-        sbnet_static(&H[i].net, i ? ip_b : ip_a, mask, none, none);
+        static const uint8_t host32[4] = { 255, 255, 255, 255 };
+        if (raw_link)
+            sbnet_init_raw(&H[i].net, &os);
+        else
+            sbnet_init(&H[i].net, &os, mac[i]);
+        sbnet_static(&H[i].net, i ? ip_b : ip_a, raw_link ? host32 : mask, none, none);
         sbtcp_init(&H[i].tcp, &H[i].net);
     }
 }
@@ -116,7 +121,10 @@ static void step(void)
         f = q[k];
         memmove(&q[k], &q[k + 1], (qn - k - 1) * sizeof(q[0]));
         qn--;
-        sbnet_rx(&H[f.to].net, f.b, f.len);
+        if (raw_link)
+            sbnet_rx_ip(&H[f.to].net, f.b, f.len);
+        else
+            sbnet_rx(&H[f.to].net, f.b, f.len);
     }
     if (t_ms % 10 == 0) {
         sbtcp_tick(&H[0].tcp), sbtcp_tick(&H[1].tcp);
@@ -232,6 +240,15 @@ int main(void)
     setup();
     L.delay = 150;
     bulk("a long path (300 ms round trip)", 200000, 600000);
+    /* the same on a raw-IP link (the modem's PDP channel: bare IPv4, no ARP) */
+    raw_link = 1;
+    setup();
+    bulk("raw IP (mobile data), clean", 1u << 20, 120000);
+    setup();
+    L.loss = 0.05, L.dup = 0.02, L.jitter = 20, L.delay = 25;
+    bulk("raw IP, 5% loss, 25-45 ms (LTE-like)", 300000, 600000);
+    CHECK(H[0].net.tx_frames > 0 && H[1].net.rx_ignored == 0 && H[0].net.held_len == 0, "raw IP: no ARP, nothing ignored");
+    raw_link = 0;
 
     /* 2. a closed port: refused */
     setup();
