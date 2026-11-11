@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only OR MIT */
 /* sbm host test: the fake CP (see fakecp.h). Payload shapes copy the ones seen on this phone's FMT traffic
  * (docs/MODEM.md section 3.4), with test values only. */
+#include <stdio.h>
 #include <string.h>
 #include "fakecp.h"
 
@@ -128,6 +129,176 @@ static void gen_res(struct fakecp *fc, uint8_t ch, uint8_t aseq, uint16_t cmd, u
     fakecp_send(fc, ch, aseq, SBM_GEN_PHONE_RES, SBM_IPC_RESP, d, 5);
 }
 
+#ifdef SBM_ATTENDED_TX
+/* ---- calls and SMS: the CP's side as libsec-ril sees it (docs/MODEM.md 7.11) ---------------------------------- */
+static void call_status(struct fakecp *fc, int state, int cls, int cause)
+{
+    uint8_t d[6] = { 0x00, 0x01, (uint8_t)fc->call.id, (uint8_t)state, (uint8_t)cls, (uint8_t)cause };
+    fakecp_send(fc, SBM_CH_FMT0, 0, SBM_CALL_STATUS, SBM_IPC_NOTI, d, 6);
+}
+
+static void call_list_resp(struct fakecp *fc, uint8_t ch, uint8_t aseq)
+{
+    uint8_t d[64] = { 0 };
+    unsigned o = 1;
+    if (fc->call.used) {
+        unsigned L = (unsigned)strlen(fc->call.number);
+        d[0] = 1;
+        d[o + 0] = 0x00, d[o + 1] = 0x01, d[o + 2] = (uint8_t)fc->call.id;
+        d[o + 3] = fc->call.outgoing ? 1 : 2;
+        d[o + 4] = (uint8_t)fc->call.state;
+        d[o + 5] = 0;
+        d[o + 6] = (uint8_t)L;
+        d[o + 7] = fc->call.number[0] == '+' ? 0x11 : 0x21;
+        memcpy(d + o + 8, fc->call.number, L);
+        o += 8 + L;
+    }
+    fakecp_send(fc, ch, aseq, SBM_CALL_LIST, SBM_IPC_RESP, d, (uint16_t)o);
+}
+
+void fakecp_ring(struct fakecp *fc, const char *number)
+{
+    memset(&fc->call, 0, sizeof(fc->call));
+    fc->call.used = 1;
+    fc->call.id = 2;
+    fc->call.state = SBM_CALL_INCOMING_ST;
+    snprintf(fc->call.number, sizeof(fc->call.number), "%s", number);
+    fakecp_send(fc, SBM_CH_FMT0, 0, SBM_CALL_INCOMING, SBM_IPC_NOTI, 0, 0);
+}
+
+void fakecp_sms_deliver(struct fakecp *fc, const uint8_t *tpdu, uint32_t n)
+{
+    uint8_t d[220];
+    static const uint8_t sca[] = { 0x07, 0x91, 0x00, 0x10, 0x10, 0x00, 0x00, 0xF0 };   /* a test SMSC */
+    fc->tpid++;
+    d[0] = 2, d[1] = 1, d[2] = 0, d[3] = 0, d[4] = fc->tpid;
+    d[5] = (uint8_t)(sizeof(sca) + n);
+    memcpy(d + 6, sca, sizeof(sca));
+    memcpy(d + 6 + sizeof(sca), tpdu, n);
+    fakecp_send(fc, SBM_CH_FMT0, 0, SBM_SMS_INCOMING, SBM_IPC_NOTI, d, (uint16_t)(6 + sizeof(sca) + n));
+}
+
+void fakecp_ecc(struct fakecp *fc, const char *const *numbers, unsigned n)
+{
+    uint8_t d[96] = { 0 };
+    unsigned o = 7;
+    d[6] = (uint8_t)n;
+    for (unsigned i = 0; i < n; ++i) {
+        unsigned L = (unsigned)strlen(numbers[i]);
+        d[o] = 0x01, d[o + 1] = (uint8_t)L;
+        memcpy(d + o + 2, numbers[i], L);
+        o += 2 + L;
+    }
+    fakecp_send(fc, SBM_CH_FMT0, 0, SBM_CALL_ECC_LIST, SBM_IPC_NOTI, d, (uint16_t)o);
+}
+
+/* the call moves on a few steps at a time: dialing -> alerting -> active (the far end answers) */
+static void fake_call_tick(struct fakecp *fc)
+{
+    if (!fc->call.used || !fc->call.outgoing)
+        return;
+    fc->call.steps++;
+    if (fc->call.state == SBM_CALL_DIALING && fc->call.steps == 3) {
+        fc->call.state = SBM_CALL_ALERTING;
+        call_status(fc, 2, 0, 0);
+    } else if (fc->call.state == SBM_CALL_ALERTING && fc->call.steps == 6) {
+        fc->call.state = SBM_CALL_ACTIVE;
+        call_status(fc, 3, 0, 0);
+    }
+}
+
+static int fake_comms(struct fakecp *fc, uint8_t ch, const struct sbm_ipc_msg *m)
+{
+    int known = m->cmd == SBM_CALL_DIAL || m->cmd == SBM_CALL_RELEASE || m->cmd == SBM_CALL_ANSWER ||
+                m->cmd == SBM_CALL_LIST || m->cmd == SBM_CALL_DTMF || m->cmd == SBM_SS_MANAGE_CALL ||
+                m->cmd == SBM_SMS_SEND || m->cmd == SBM_SMS_ACK || m->cmd == SBM_SMS_READY || m->cmd == SBM_SMS_SMSC ||
+                m->cmd == SBM_SND_PATH || m->cmd == SBM_SND_VOLUME || m->cmd == SBM_SND_MUTE;
+    if (!known)
+        return 0;
+    if (!sbm_ipc_attended_allowed(m->cmd, m->type, m->data, m->data_len)) {
+        fc->n_forbidden++;
+        gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x000a);
+        return 1;
+    }
+    switch (m->cmd) {
+    case SBM_CALL_DIAL:
+        fc->n_dial++;
+        memset(&fc->call, 0, sizeof(fc->call));
+        fc->call.used = 1, fc->call.id = 1, fc->call.outgoing = 1, fc->call.state = SBM_CALL_DIALING;
+        memcpy(fc->call.number, m->data + 5, m->data[3] < 23 ? m->data[3] : 23);
+        snprintf(fc->dialled, sizeof(fc->dialled), "%s", fc->call.number);
+        gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8001);
+        call_status(fc, 1, 0, 0);
+        break;
+    case SBM_CALL_ANSWER:
+        fc->n_answer++;
+        gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        if (fc->call.used && fc->call.state == SBM_CALL_INCOMING_ST) {
+            fc->call.state = SBM_CALL_ACTIVE;
+            call_status(fc, 3, 0, 0);
+        }
+        break;
+    case SBM_CALL_RELEASE:
+    case SBM_SS_MANAGE_CALL:
+        fc->n_release++;
+        gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        if (fc->call.used) {
+            call_status(fc, 4, 0, 5);                /* released, normal clearing */
+            fc->call.used = 0;
+        }
+        break;
+    case SBM_CALL_LIST:
+        fc->n_list++;
+        call_list_resp(fc, ch, m->mseq);
+        break;
+    case SBM_CALL_DTMF:
+        fc->n_dtmf++;
+        gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        break;
+    case SBM_SND_PATH:
+    case SBM_SND_VOLUME:
+    case SBM_SND_MUTE:
+        fc->n_snd++;
+        gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        break;
+    case SBM_SMS_READY:
+        fc->n_sms_ready++;
+        gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        break;
+    case SBM_SMS_SMSC: {
+        static const uint8_t smsc[] = { 0x07, 0x91, 0x00, 0x10, 0x10, 0x00, 0x00, 0xF0 };
+        fc->n_smsc++;
+        fakecp_send(fc, ch, m->mseq, m->cmd, SBM_IPC_RESP, smsc, sizeof(smsc));
+        break;
+    }
+    case SBM_SMS_SEND: {
+        unsigned k = fc->n_sms_sent < 4 ? fc->n_sms_sent : 3;
+        unsigned sca = m->data[4];
+        fc->sms_len[k] = (uint16_t)(m->data_len - 5 - sca);
+        memcpy(fc->sms_pdu[k], m->data + 5 + sca, fc->sms_len[k] < 200 ? fc->sms_len[k] : 200);
+        fc->n_sms_sent++;
+        gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        uint8_t r[5] = { 2, 0, 0, (uint8_t)(0x40 + fc->n_sms_sent), 0 };
+        if (fc->sms_fail) {
+            r[1] = 0x2a, r[2] = 0x80;                /* 0x802a: RP cause 42, congestion */
+            fc->sms_fail = 0;
+        }
+        fakecp_send(fc, ch, m->mseq, m->cmd, SBM_IPC_RESP, r, 5);
+        break;
+    }
+    case SBM_SMS_ACK:
+        if (m->data[3] == fc->tpid)
+            fc->n_ack++, fc->acked_tpid = m->data[3];
+        else
+            fc->n_ack_bad++;
+        break;
+    default:
+        break;
+    }
+    return 1;
+}
+#endif
+
 static void answer(struct fakecp *fc, uint8_t ch, const struct sbm_ipc_msg *m)
 {
     fc->n_req++;
@@ -144,6 +315,8 @@ static void answer(struct fakecp *fc, uint8_t ch, const struct sbm_ipc_msg *m)
         return;
     }
 #ifdef SBM_ATTENDED_TX
+    if (fake_comms(fc, ch, m))
+        return;
     if (m->cmd == SBM_NET_PLMN_SEL && m->type == SBM_IPC_SET &&
         sbm_ipc_attended_allowed(m->cmd, m->type, m->data, m->data_len)) {
         fc->n_net_auto++;
@@ -254,6 +427,9 @@ static void answer(struct fakecp *fc, uint8_t ch, const struct sbm_ipc_msg *m)
 int fakecp_step(struct fakecp *fc)
 {
     int handled = 0;
+#ifdef SBM_ATTENDED_TX
+    fake_call_tick(fc);
+#endif
     static const uint8_t fmt[] = { SBM_CH_FMT0, SBM_CH_FMT1 };
     for (unsigned k = 0; k < 2; ++k) {
         int id = sbm_sbd_id(&fc->sbd, fmt[k]);

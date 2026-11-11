@@ -1320,6 +1320,150 @@ static void test_attended_data(struct fakesoc *s, struct sbm_image *im, struct s
 }
 #endif
 
+static int submit_to_deliver(const uint8_t *s, uint32_t n, uint8_t *d);
+#ifdef SBM_ATTENDED_TX
+static struct sbm_inbox t_inbox;
+static void t_sms_rx(void *ctx, const struct sbm_sms *sm)
+{
+    (void)ctx;
+    sbm_inbox_add(&t_inbox, sm, 1000);
+}
+
+static void test_attended_comms(struct fakesoc *s, struct sbm_image *im, struct sbm_modem *mo, uint32_t boot_crc,
+                                uint32_t main_crc)
+{
+    struct sbm_plat p;
+    struct sbm_dial_policy pol, none;
+    static const char *const ecc[] = { "112", "911", "1234567" };   /* the last: a made-up operator emergency number */
+    memset(&pol, 0, sizeof(pol));
+    memset(&none, 0, sizeof(none));
+    pol.user_confirmed = SBM_DIAL_USER_CONFIRMED;
+    boot_image(im, 0);
+    fakesoc_init(s, &im->plan, boot_crc, main_crc);
+    s->sim_present = 2;
+    fakesoc_plat(s, &p, tlog);
+    memset(mo, 0, sizeof(*mo));
+    mo->attended = SBM_ATTENDED_DATA;
+    unsigned log0 = nlog;
+    CHECKEQ(sbm_modem_start(mo, &p, im), 0);
+    CHECKEQ(sbm_modem_radio(mo, 1), 0);
+    CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
+    fakecp_ecc(&s->fcp, ecc, 3);
+    CHECKEQ(sess_run(mo, &p, 200, 50, 0), 0);
+    CHECKEQ(mo->b.calls.n_ecc, 3);
+
+    /* the locks: no confirmation, the world list, the CP's own list, a short code */
+    CHECKEQ(sbm_modem_call_dial(mo, "+358401234567", &none), SBM_EPERM);
+    CHECKEQ(sbm_modem_call_dial(mo, "112", &pol), SBM_EPERM);
+    CHECKEQ(sbm_modem_call_dial(mo, "+44 999", &pol), SBM_EPERM);
+    CHECKEQ(sbm_modem_call_dial(mo, "1234567", &pol), SBM_EPERM);
+    CHECKEQ(sbm_modem_call_dial(mo, "16000", &pol), SBM_EPERM);
+    CHECKEQ(s->fcp.n_dial, 0);
+    {   /* and the builder refuses a hand-made emergency frame however it is called */
+        uint8_t d[SBM_CALL_DIAL_LEN] = { 0x00, 0x01, 0, 3, 0x21, '1', '1', '2' }, f[128];
+        CHECKEQ(sbm_ipc_frame_attended(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_CALL_DIAL, SBM_IPC_EXEC, d, sizeof(d)), SBM_EPERM);
+        uint8_t e[SBM_CALL_DIAL_LEN] = { 0x00, 0x07, 0, 7, 0x21, '0', '4', '0', '1', '2', '3', '4' };   /* the 07xx type */
+        CHECKEQ(sbm_ipc_frame_attended(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_CALL_DIAL, SBM_IPC_EXEC, e, sizeof(e)), SBM_EPERM);
+        uint8_t g[SBM_CALL_DIAL_LEN] = { 0x00, 0x01, 0, 7, 0x21, '1', '2', '3', '4', '5', '6', '7' };   /* the CP's list */
+        CHECKEQ(sbm_ipc_frame_attended(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_CALL_DIAL, SBM_IPC_EXEC, g, sizeof(g)), SBM_EPERM);
+    }
+
+    /* an outgoing call: dialing -> alerting -> active, DTMF, the CP's audio settings, hang up */
+    CHECKEQ(sbm_modem_call_dial(mo, "+358 40 123 4567", &pol), 0);
+    CHECKEQ(sess_run(mo, &p, 300, 50, 0), 0);
+    CHECK(mo->b.calls.dial_seen && mo->b.calls.dial_res == 0x8001);
+    CHECK(!strcmp(s->fcp.dialled, "+358401234567"));
+    CHECKEQ(mo->b.calls.n, 1);
+    CHECK(mo->b.calls.c[0].outgoing && !strcmp(mo->b.calls.c[0].number, "+358401234567"));
+    CHECKEQ(sess_run(mo, &p, 400, 50, 0), 0);
+    CHECKEQ(mo->b.calls.c[0].state, SBM_CALL_ACTIVE);
+    CHECKEQ(sbm_modem_call_dtmf(mo, '5', 1), 0);
+    CHECKEQ(sbm_modem_call_dtmf(mo, 0, 0), 0);
+    CHECKEQ(sbm_modem_snd(mo, 0, 4, 0), 0);
+    CHECKEQ(sess_run(mo, &p, 100, 50, 0), 0);
+    CHECKEQ(s->fcp.n_dtmf, 2);
+    CHECKEQ(s->fcp.n_snd, 3);
+    CHECKEQ(sbm_modem_call_hangup(mo, 0), 0);
+    CHECKEQ(sess_run(mo, &p, 300, 50, 0), 0);
+    CHECK(mo->b.calls.end_seen && mo->b.calls.end_cause == 5);
+    CHECKEQ(mo->b.calls.n, 0);
+
+    /* an incoming call: the list says who, answer, hang up */
+    fakecp_ring(&s->fcp, "+358409876543");
+    CHECKEQ(sess_run(mo, &p, 300, 50, 0), 0);
+    CHECKEQ(mo->b.calls.n, 1);
+    CHECK(!mo->b.calls.c[0].outgoing && mo->b.calls.c[0].state == SBM_CALL_INCOMING_ST &&
+          !strcmp(mo->b.calls.c[0].number, "+358409876543"));
+    CHECKEQ(sbm_modem_call_answer(mo), 0);
+    CHECKEQ(sess_run(mo, &p, 300, 50, 0), 0);
+    CHECKEQ(mo->b.calls.c[0].state, SBM_CALL_ACTIVE);
+    CHECKEQ(sbm_modem_call_hangup(mo, 0), 0);
+    CHECKEQ(sess_run(mo, &p, 300, 50, 0), 0);
+    CHECKEQ(mo->b.calls.n, 0);
+
+    /* SMS: ready + the SIM's SMSC, a two-part send, a refused one, an incoming one acknowledged */
+    CHECKEQ(sbm_modem_sms_ready(mo), 0);
+    CHECKEQ(sess_run(mo, &p, 200, 50, 0), 0);
+    CHECKEQ(mo->b.sms.smsc_len, 8);
+    static char lng[300];
+    for (unsigned i = 0; i < 200; ++i)
+        lng[i] = (char)('A' + i % 26);
+    lng[200] = 0;
+    CHECKEQ(sbm_modem_sms_send(mo, "112", "x", &pol, 3), SBM_EPERM);
+    CHECKEQ(sbm_modem_sms_send(mo, "+358401234567", lng, &none, 3), SBM_EPERM);
+    CHECKEQ(sbm_modem_sms_send(mo, "+358401234567", lng, &pol, 3), 2);
+    CHECKEQ(sess_run(mo, &p, 300, 50, 0), 0);
+    CHECK(mo->b.sms.done[0] && mo->b.sms.done[1] && mo->b.sms.res[0] == 0 && mo->b.sms.res[1] == 0);
+    CHECKEQ(mo->b.sms.sent, 2);
+    CHECKEQ(s->fcp.n_sms_sent, 2);
+    {   /* what reached the CP decodes back to the text, from the SIM's SMSC */
+        static char joined[400];
+        joined[0] = 0;
+        for (unsigned k = 0; k < 2; ++k) {
+            uint8_t dl[220];
+            struct sbm_sms m2;
+            int dn = submit_to_deliver(s->fcp.sms_pdu[k], s->fcp.sms_len[k], dl);
+            CHECKEQ(sbm_sms_deliver_decode(dl, (uint32_t)dn, &m2), 0);
+            strcat(joined, m2.text);
+        }
+        CHECK(!strcmp(joined, lng));
+    }
+    s->fcp.sms_fail = 1;
+    CHECKEQ(sbm_modem_sms_send(mo, "+358401234567", "fails", &pol, 4), 1);
+    CHECKEQ(sess_run(mo, &p, 200, 50, 0), 0);
+    CHECK(mo->b.sms.done[0] && mo->b.sms.res[0] == 0x802a);
+    CHECKEQ(mo->b.sms.failed, 1);
+    memset(&t_inbox, 0, sizeof(t_inbox));
+    sbm_modem_sms_rx_cb(t_sms_rx, 0);
+    {
+        static uint8_t pd[1][SBM_SMS_PDU_MAX];
+        uint16_t pl[1];
+        uint8_t dl[220];
+        CHECKEQ(sbm_sms_submit_parts(&pol, "+358409876543", "Moi! Toimiiko t\xc3\xa4m\xc3\xa4?", 9, pd, pl, 1), 1);
+        int dn = submit_to_deliver(pd[0], pl[0], dl);
+        fakecp_sms_deliver(&s->fcp, dl, (uint32_t)dn);
+    }
+    CHECKEQ(sess_run(mo, &p, 200, 50, 0), 0);
+    CHECKEQ(t_inbox.n, 1);
+    CHECK(!strcmp(t_inbox.m[0].text, "Moi! Toimiiko t\xc3\xa4m\xc3\xa4?") && !strcmp(t_inbox.m[0].from, "+358409876543"));
+    CHECKEQ(s->fcp.n_ack, 1);
+    CHECKEQ(s->fcp.n_ack_bad, 0);
+    CHECKEQ(mo->b.sms.acked, 1);
+    sbm_modem_sms_rx_cb(0, 0);
+
+    CHECKEQ(s->fcp.n_forbidden, 0);
+    unsigned leak = 0;
+    for (unsigned k = nlog > 256 ? nlog - 256 : 0; k < nlog; ++k)
+        leak += k >= log0 && (strstr(loglines[k % 256], "401234567") || strstr(loglines[k % 256], "409876543") ||
+                              strstr(loglines[k % 256], "Toimiiko") || strstr(loglines[k % 256], "ABCDEF"));
+    CHECKEQ(leak, 0);
+    CHECKEQ(sbm_modem_stop(mo), 0);
+    check_parked(s);
+    fakesoc_free(s);
+    boot_image(im, 0);
+}
+#endif
+
 #ifdef SBM_ATTENDED_TX
 /* the attended SIM test (modemsim.img only): what the builder allows, the guards off only for an attended session,
  * radio normal -> registered, low power -> detached, parked; nothing else on the wire; no PLMN in the log */
@@ -1338,10 +1482,15 @@ static void test_attended(struct fakesoc *s, struct sbm_image *im, struct sbm_mo
                 int a = sbm_ipc_attended_allowed(c, (uint8_t)t, dn, 2) || sbm_ipc_attended_allowed(c, (uint8_t)t, dl, 2) ||
                         sbm_ipc_attended_allowed(c, (uint8_t)t, 0, 0);
                 pass += a;
-                wrong += a && (g == SBM_G_CALL || g == SBM_G_SMS || g == SBM_G_SS || g == SBM_G_SAT || g == SBM_G_IMEI ||
-                               g == SBM_G_RFS);
+                /* CALL / SMS: only the no-data frames of 7.11 pass with these data shapes (the dial and the send need
+                 * a real number, checked below); SS, SAT, IMEI and RFS never */
+                int comms = (c == SBM_CALL_RELEASE && t == SBM_IPC_EXEC) || (c == SBM_CALL_ANSWER && t == SBM_IPC_EXEC) ||
+                            (c == SBM_CALL_LIST && t == SBM_IPC_GET) || (c == SBM_SMS_READY && t == SBM_IPC_SET) ||
+                            (c == SBM_SMS_SMSC && t == SBM_IPC_GET);
+                wrong += a && !comms && (g == SBM_G_CALL || g == SBM_G_SMS || g == SBM_G_SS || g == SBM_G_SAT ||
+                                         g == SBM_G_IMEI || g == SBM_G_RFS);
             }
-    CHECKEQ(pass, 12);                     /* the 11 status GETs + PWR_PHONE_STATE EXEC */
+    CHECKEQ(pass, 19);                     /* 11 status GETs, the radio EXEC, 5 no-data call / SMS frames, 2 sound SETs */
     CHECKEQ(wrong, 0);
     CHECK(!sbm_ipc_attended_allowed(SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, bad1, 2));
     CHECK(!sbm_ipc_attended_allowed(SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, bad3, 3));
@@ -1465,8 +1614,130 @@ static void test_attended(struct fakesoc *s, struct sbm_image *im, struct sbm_mo
     fakesoc_free(s);
     boot_image(im, 0);
     test_attended_data(s, im, mo, boot_crc, main_crc);
+    test_attended_comms(s, im, mo, boot_crc, main_crc);
 }
 #endif
+
+/* SMS-SUBMIT in parts, checked by turning each into the SMS-DELIVER the receiver gets and decoding it */
+static int submit_to_deliver(const uint8_t *s, uint32_t n, uint8_t *d)
+{
+    uint32_t o = 0, i = 0;
+    uint8_t fo = s[i++];
+    i++;                                             /* TP-MR */
+    uint32_t dal = s[i], dab = 2 + (dal + 1) / 2;
+    d[o++] = (uint8_t)(0x04 | (fo & 0x40));          /* SMS-DELIVER, UDHI kept */
+    memcpy(d + o, s + i, dab), o += dab, i += dab;   /* OA = DA */
+    d[o++] = s[i++];                                 /* PID */
+    d[o++] = s[i++];                                 /* DCS */
+    static const uint8_t scts[7] = { 0x62, 0x11, 0x11, 0x02, 0x00, 0x00, 0x00 };
+    memcpy(d + o, scts, 7), o += 7;
+    memcpy(d + o, s + i, n - i), o += n - i;         /* UDL + UD */
+    return (int)o;
+}
+
+static void test_sms_parts(void)
+{
+    static uint8_t pdu[SBM_SMS_MAX_PARTS][SBM_SMS_PDU_MAX];
+    uint16_t len[SBM_SMS_MAX_PARTS];
+    uint8_t dl[200];
+    struct sbm_sms m;
+    struct sbm_dial_policy pol;
+    memset(&pol, 0, sizeof(pol));
+    CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", "hi", 1, pdu, len, 4), SBM_EPERM);   /* no confirmation */
+    pol.user_confirmed = SBM_DIAL_USER_CONFIRMED;
+    CHECKEQ(sbm_sms_submit_parts(&pol, "112", "hi", 1, pdu, len, 4), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit_parts(&pol, "+358112", "hi", 1, pdu, len, 4), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit_parts(&pol, "0044999", "hi", 1, pdu, len, 4), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit_parts(&pol, "16000", "hi", 1, pdu, len, 4), SBM_EPERM);
+    CHECKEQ(sbm_dial_check(&pol, "+358401234567"), 0);
+    pol.user_confirmed = 0x55534553u;                /* not the magic */
+    CHECKEQ(sbm_dial_check(&pol, "+358401234567"), SBM_EPERM);
+    pol.user_confirmed = SBM_DIAL_USER_CONFIRMED;
+    static char lng[700], cyr[300];
+    for (unsigned i = 0; i < 400; ++i)
+        lng[i] = (char)('a' + i % 26);
+    lng[400] = 0;
+    unsigned k = 0;
+    for (unsigned i = 0; i < 100; ++i) {
+        cyr[k++] = (char)0xD0;
+        cyr[k++] = (char)(0x90 + i % 32);           /* А..Я */
+    }
+    cyr[k] = 0;
+    struct { const char *t; int parts, alpha; } T[] = {
+        { "Hei! T\xc3\xa4m\xc3\xa4 on testi: \xc3\xa4\xc3\xb6\xc3\xa5 \xc3\x84\xc3\x96\xc3\x85 \xe2\x82\xac [x] {y} ~", 1, 0 },
+        { "\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82 Starbite", 1, 2 },
+        { "Emoji \xf0\x9f\x98\x80 ok", 1, 2 },
+        { lng, 3, 0 },
+        { cyr, 2, 2 },
+    };
+    for (unsigned t = 0; t < sizeof(T) / sizeof(T[0]); ++t) {
+        int n = sbm_sms_submit_parts(&pol, "+358401234567", T[t].t, 0x5a, pdu, len, 4);
+        CHECKEQ(n, T[t].parts);
+        static char joined[1400];
+        joined[0] = 0;
+        for (int p = 0; p < n; ++p) {
+            int dn = submit_to_deliver(pdu[p], len[p], dl);
+            CHECKEQ(sbm_sms_deliver_decode(dl, (uint32_t)dn, &m), 0);
+            CHECKEQ(m.alphabet, T[t].alpha);
+            CHECK(!strcmp(m.from, "+358401234567"));
+            if (n > 1)
+                CHECK(m.concat && m.ref == 0x5a && m.total == n && m.seq == p + 1);
+            strcat(joined, m.text);
+        }
+        CHECK(!strcmp(joined, T[t].t));
+        if (strcmp(joined, T[t].t))
+            printf("  sms text %u: got \"%.80s\"\n", t, joined);
+    }
+    CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", lng, 1, pdu, len, 2), SBM_ERANGE);   /* 3 parts > 2 */
+    CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", "\xff\xfe", 1, pdu, len, 4), SBM_EINVAL);
+}
+
+static void test_inbox(void)
+{
+    static struct sbm_inbox ib;
+    struct sbm_sms a;
+    memset(&ib, 0, sizeof(ib));
+    memset(&a, 0, sizeof(a));
+    strcpy(a.from, "+358401234567");
+    strcpy(a.text, "single");
+    CHECKEQ(sbm_inbox_add(&ib, &a, 1000), 1);
+    /* three parts out of order, interleaved with another sender's two parts */
+    struct sbm_sms p[3], q[2];
+    for (unsigned i = 0; i < 3; ++i) {
+        memset(&p[i], 0, sizeof(p[i]));
+        strcpy(p[i].from, "+358401234567");
+        p[i].concat = 1, p[i].ref = 7, p[i].total = 3, p[i].seq = (uint8_t)(i + 1);
+        snprintf(p[i].text, sizeof(p[i].text), "<%u>", i + 1);
+    }
+    for (unsigned i = 0; i < 2; ++i) {
+        memset(&q[i], 0, sizeof(q[i]));
+        strcpy(q[i].from, "+358409876543");
+        q[i].concat = 1, q[i].ref = 7, q[i].total = 2, q[i].seq = (uint8_t)(i + 1);
+        snprintf(q[i].text, sizeof(q[i].text), "(%u)", i + 1);
+    }
+    CHECKEQ(sbm_inbox_add(&ib, &p[2], 2000), 0);
+    CHECKEQ(sbm_inbox_add(&ib, &q[0], 2001), 0);
+    CHECKEQ(sbm_inbox_add(&ib, &p[0], 2002), 0);
+    CHECKEQ(sbm_inbox_add(&ib, &q[1], 2003), 1);
+    CHECKEQ(sbm_inbox_add(&ib, &p[1], 2004), 1);
+    CHECKEQ(ib.n, 3);
+    CHECK(!strcmp(ib.m[1].text, "(1)(2)") && !strcmp(ib.m[1].from, "+358409876543"));
+    CHECK(!strcmp(ib.m[2].text, "<1><2><3>"));
+    /* a lost part: given up after the timeout, delivered with a mark */
+    CHECKEQ(sbm_inbox_add(&ib, &p[0], 3000), 0);
+    CHECKEQ(sbm_inbox_add(&ib, &p[2], 3001), 0);
+    CHECKEQ(sbm_inbox_add(&ib, 0, 3000 + SBM_INBOX_PART_MS + 10), 0);
+    CHECKEQ(ib.n, 4);
+    CHECK(!strcmp(ib.m[3].text, "<1>[...]<3>"));
+    /* the newest SBM_INBOX_MAX kept */
+    for (unsigned i = 0; i < 40; ++i) {
+        snprintf(a.text, sizeof(a.text), "m%u", i);
+        sbm_inbox_add(&ib, &a, 5000 + i);
+    }
+    CHECKEQ(ib.n, SBM_INBOX_MAX);
+    CHECK(!strcmp(ib.m[SBM_INBOX_MAX - 1].text, "m39") && !strcmp(ib.m[0].text, "m8"));
+    CHECK(ib.m[SBM_INBOX_MAX - 1].id > ib.m[0].id);
+}
 
 static void test_session(uint32_t boot_crc, uint32_t main_crc)
 {
@@ -2271,6 +2542,8 @@ int main(int argc, char **argv)
     test_clk();
     test_rfs();
     test_policy_sms();
+    test_sms_parts();
+    test_inbox();
     printf("sbm host test: %u checks, %u failed%s\n", checks, fails, radio ? " (with this phone's RADIO image)" : "");
     return fails ? 1 : 0;
 }
