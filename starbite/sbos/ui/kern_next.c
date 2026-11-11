@@ -322,7 +322,7 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
-    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3m");     /* P2y: the apps' live values */
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3n");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);
         sh_alarm(on, ah, am);
@@ -798,6 +798,16 @@ static void bake_step(void)
     ub_s(&u, " ms");
     sb_log(u.b);
     log_mb("UI heap in use: ", tk_heap_used());
+    {
+        /* P3n: the kernel's arena left once the services have started (in KiB: P3m was at 54 KiB when Cellular
+         * and Wi-Fi asked for memory), so the next large consumer shows in the log */
+        struct ub a;
+        ub_init(&a);
+        ub_s(&a, "next: arena free when ready: ");
+        ub_dec(&a, sb_arena_free() >> 10);
+        ub_s(&a, " KiB");
+        sb_log(a.b);
+    }
     next_kdraw();
     sh_idle();                                       /* the unlock's cache and the half copies, before a finger */
     log_mb("UI heap with the caches: ", tk_heap_used());
