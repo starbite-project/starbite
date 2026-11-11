@@ -562,8 +562,8 @@ _Static_assert(sizeof(tk_gpu_item) == sizeof(struct gc_quad), "tk_gpu_item is gp
 static int gpu_started;
 /* the wallpaper at full resolution in the GPU's pool, made once per ground (base_half 2x, bilinear, on the GPU):
  * every frame then reads it 1:1 (one load a pixel instead of a bilinear's four) */
-static uint32_t wall_gen;
-static int wall_ok;
+static uint32_t wall_gen, wall_seen, wall_made;
+static int wall_ok, wall_still;
 static tk_gpu_item gx[TK_GPU_MAX];
 _Static_assert(sizeof(tk_irect) == sizeof(struct gc_rect), "tk_irect is gpucomp's gc_rect");
 static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us)
@@ -572,13 +572,17 @@ static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, cons
     const tk_gpu_item *use = it;
     uint32_t *wall = (uint32_t *)gpucomp_pool();
     if (n > 0 && n <= TK_GPU_MAX && it[0].src == comp.base_half.px && gpucomp_pool_bytes() >= (uint64_t)TK_W * TK_H * 4U) {
-        if (!wall_ok || wall_gen != comp.ground_gen) {
+        /* a ground that changes every frame (Emergency's cross-fade) is read bilinearly as it is; the copy is made
+         * once it has kept still for two frames */
+        if (comp.ground_gen != wall_seen) { wall_seen = comp.ground_gen; wall_still = 0; }
+        else if (wall_still < 2) wall_still++;
+        if ((!wall_ok || wall_gen != comp.ground_gen) && wall_still >= 2) {
             uint64_t u2 = 0;
             wall_ok = gpucomp_compose(wall, 0xff000000U, (const struct gc_quad *)it, 1, &u2);
             wall_gen = comp.ground_gen;
-            if (wall_ok) sb_logx("next: gpu: the wallpaper at full resolution, us: ", u2);
+            if (wall_ok && !wall_made++) sb_logx("next: gpu: the wallpaper at full resolution (the first), us: ", u2);
         }
-        if (wall_ok) {
+        if (wall_ok && wall_gen == comp.ground_gen) {
             tk_memcpy(gx, it, sizeof(tk_gpu_item) * (size_t)n);
             gx[0].src = wall;
             gx[0].stride = TK_W;
@@ -624,6 +628,7 @@ void next_kinit(void)
     scan_init();
 #ifndef SBOS_NEXT_NOGPU
     /* P4: with two buffers (tear-free flips) and the GPU up (normal clocks, gpuheat's checks), the GPU composes */
+    gpucomp_add_ro(sbtk_pack_start, (uint64_t)(sbtk_pack_end - sbtk_pack_start));  /* icons point into the pack */
     if (flip_on && heap_mem && gpucomp_init(heap_mem, heap_size)) {
         comp.gpu = next_gpu;
         comp.gpu_clean = next_gpu_clean;
@@ -854,7 +859,8 @@ static void gpu_vs_cpu(void)
     ub_dec(&u, comp.gpu_frames);
     ub_s(&u, " frames on the GPU, ");
     ub_dec(&u, comp.gpu_fallbacks);
-    ub_s(&u, " given back to the CPU");
+    ub_s(&u, " given back to the CPU; full-resolution wallpapers made ");
+    ub_dec(&u, wall_made);
     sb_log(u.b);
     if (!gpu_started) {
         sb_log("selftest: FAILED: next: gpu: the GPU did not come up (see the gpucomp lines)");
