@@ -45,6 +45,19 @@ uint32_t star_crc32(uintptr_t p, uint64_t n);   /* store.c */
  * version-2 payload (same header, tools/payload-v2.py) says its kernel takes the 1024 layout: the boot-args
  * the loader builds may then grow to 1023 bytes (the payload's own line still holds 607). */
 #define XNU_LINE_MAX 1024
+/*
+ * Milestone breadcrumbs (docs/APPLE-S9-DRIVERS.md M1b): a page in the ramoops area that survives the
+ * watchdog reset and that neither S-Boot nor the loader's POST touches (the tail of the first 16 KiB zone,
+ * below the low WDT record at +0x800). The loader writes its hand-off at +0x000 for version-2 payloads; XNU
+ * (patch 0424, sbstop boots only) appends {code, value} pairs at +0x100; a chained test loader prints the
+ * previous run's page into pmsg before it starts its own payload.
+ *   +0x000 "SBCRUMB1"  +0x008 run   +0x010.. loader values (CR_* below)
+ *   +0x100 "XNUCRUMB"  +0x108 count +0x110.. 30 x {code, value}, a ring
+ */
+#define CRUMB_PA     0xFED13000UL
+#define CRUMB_MAGIC  0x31424d5552434253ULL  /* "SBCRUMB1" */
+#define CRUMB_XMAGIC 0x424d555243554e58ULL  /* "XNUCRUMB" */
+#define CRUMB_XRING  30U
 #define FAIL_DELAY_S 30U
 
 struct payload_seg {
@@ -1380,6 +1393,106 @@ star_rwd1_arm(void)
     pmsg_put("STARBITE: rwd1 SEC_ACTIVE gen 1, p3 cleared\n");
 }
 
+/* M1b: the hand-off a version-2 payload got, into the crumb page and pmsg (both survive a reset). */
+static void crumbs_handoff(const struct payload *p, uintptr_t rd_start, uint64_t length, uintptr_t adt_pa,
+    uintptr_t ba_pa, uintptr_t entry_pa, const char *cmdline, unsigned cap)
+{
+    volatile uint64_t *c = (volatile uint64_t *)CRUMB_PA;
+    unsigned n = 0, bad = 0;
+    while (n + 1 < cap && cmdline[n])
+        ++n;
+    for (uint32_t i = 0; i < p->nsegs; ++i) {     /* the copy, checked at both ends of every segment */
+        const struct payload_seg *g = &p->segs[i];
+        uintptr_t dst = p->phys_base + (g->vmaddr - p->virt_base);
+        if (g->file_size >= 8 &&
+            (*(volatile uint64_t *)dst != *(volatile uint64_t *)(rd_start + g->file_off) ||
+             *(volatile uint64_t *)(dst + g->file_size - 8) != *(volatile uint64_t *)(rd_start + g->file_off + g->file_size - 8)))
+            ++bad;
+    }
+    uint64_t run = c[0] == CRUMB_MAGIC ? c[1] + 1 : 1;
+    for (unsigned i = 0; i < 512; ++i)
+        c[i] = 0;
+    c[0] = CRUMB_MAGIC;
+    c[1] = run;
+    c[2] = rd_start;
+    c[3] = length;
+    c[4] = p->version;
+    c[5] = p->phys_base;
+    c[6] = p->mem_size;
+    c[7] = p->kernel_end;
+    c[8] = adt_pa;
+    c[9] = p->adt_size;
+    c[10] = ba_pa;
+    c[11] = entry_pa;
+    c[12] = *(volatile uint64_t *)entry_pa;       /* the first two instructions, after the copy */
+    c[13] = n;
+    c[14] = bad;
+    clean_bytes(CRUMB_PA, CRUMB_PA + PAGE_SIZE);
+    pmsg_put(p->version >= 2 ? "STARBITE: xnu hand-off (payload v2, boot_args 1024): payload "
+                             : "STARBITE: xnu hand-off (payload v1, boot_args 608): payload ");
+    pmsg_hex(rd_start);
+    pmsg_put("+");
+    pmsg_hex(length);
+    pmsg_put(" ram ");
+    pmsg_hex(p->phys_base);
+    pmsg_put("+");
+    pmsg_hex(p->mem_size);
+    pmsg_put(" adt ");
+    pmsg_hex(adt_pa);
+    pmsg_put("+");
+    pmsg_hex(p->adt_size);
+    pmsg_put(" boot_args ");
+    pmsg_hex(ba_pa);
+    pmsg_put(" entry ");
+    pmsg_hex(entry_pa);
+    pmsg_put(" insn ");
+    pmsg_hex(c[12]);
+    pmsg_put(" cmdline ");
+    pmsg_hex(n);
+    pmsg_put(bad ? " SEGMENT COPY MISMATCH\n" : " segments ok\n");
+}
+
+#ifdef STAR_CHAIN_AUTOBOOT
+/* The previous run's crumb page, into pmsg (the chained loader runs this before its own payload). */
+static void crumbs_print_previous(void)
+{
+    volatile uint64_t *c = (volatile uint64_t *)CRUMB_PA;
+    if (c[0] != CRUMB_MAGIC) {
+        pmsg_put("STARBITE: crumbs: no earlier run on record\n");
+        return;
+    }
+    /* names as one flat array: no pointers, no absolute relocations in the loader */
+    static const char name[15][16] = { "magic", "run", "payload", "length", "version", "ram", "ram-size",
+        "kernel-end", "adt", "adt-size", "boot_args", "entry", "insn", "cmdline", "seg-mismatch" };
+    pmsg_put("STARBITE: crumbs of the previous run (loader):");
+    for (unsigned i = 1; i < 15; ++i) {
+        pmsg_put(" ");
+        pmsg_put(name[i]);
+        pmsg_put("=");
+        pmsg_hex(c[i]);
+    }
+    pmsg_put("\n");
+    volatile uint64_t *x = c + 0x100 / 8;
+    if (x[0] != CRUMB_XMAGIC) {
+        pmsg_put("STARBITE: crumbs: XNU wrote none (it did not get past arm_vm_init, or it was not an sbstop boot)\n");
+        return;
+    }
+    uint64_t k = x[1];
+    pmsg_put("STARBITE: crumbs of the previous run (XNU): ");
+    pmsg_hex(k);
+    pmsg_put(" written, oldest first {code value}:\n");
+    uint64_t first = k > CRUMB_XRING ? k - CRUMB_XRING : 0;
+    for (uint64_t j = first; j < k; ++j) {
+        volatile uint64_t *e = x + 2 + 2 * (j % CRUMB_XRING);
+        pmsg_put("  ");
+        pmsg_hex(e[0]);
+        pmsg_put(" ");
+        pmsg_hex(e[1]);
+        pmsg_put("\n");
+    }
+}
+#endif
+
 /* Copy XNU's segments, ADT and boot_args into its window; returns the entry PA or 0. */
 static uintptr_t
 xnu_enter(volatile uint64_t *log, const struct payload *p, uintptr_t rd_start, uint64_t length,
@@ -1448,6 +1561,12 @@ xnu_enter(volatile uint64_t *log, const struct payload *p, uintptr_t rd_start, u
     uintptr_t entry_pa = p->phys_base + (p->entry_va - p->virt_base);
     if (entry_pa >= kernel_end)
         return fail(log, -6, "ENTRY OUTSIDE KERNEL");
+#ifdef STAR_CHAIN_AUTOBOOT
+    crumbs_handoff(p, rd_start, length, adt_pa, ba_pa, entry_pa, cmdline, cmdline_cap);   /* every test payload */
+#else
+    if (p->version >= 2)
+        crumbs_handoff(p, rd_start, length, adt_pa, ba_pa, entry_pa, cmdline, cmdline_cap);
+#endif
     log[15] = entry_pa;
     log[16] = p->nsegs;
     log[17] = ba_pa;
@@ -2201,6 +2320,7 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
      * stub's dead-man (pack.py --wdt) keeps running into the OS, which must not feed it (XNU: sbstop=).
      * If the payload cannot start, the normal menu of this loader follows.
      */
+    crumbs_print_previous();
     if (boot_p) {
         static struct cat_ent t;
         lscopy(t.key, sizeof(t.key), "chaintest");
@@ -2214,7 +2334,9 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
             return entry;
         pmsg_put("STARBITE: chain test loader: the appended payload did not start; menu\n");
     } else {
-        pmsg_put("STARBITE: chain test loader: no appended payload; menu\n");
+        /* a crumb reader (tools/apple/m1-chain.sh --read): print, then straight back to the BOOT loader */
+        pmsg_put("STARBITE: chain test loader: no appended payload: crumbs printed, back to the BOOT loader\n");
+        hw_reboot(INFORM_NORMAL);
     }
 #endif
     log[11] = boot_rd_start;

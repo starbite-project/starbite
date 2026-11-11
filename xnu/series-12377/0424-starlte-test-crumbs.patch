@@ -1,0 +1,208 @@
+From ce408f23ef1a6578501571c1c40fbfb0f4502883 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 11 Nov 2026 16:16:44 +0200
+Subject: [PATCH] patch: 0424-starlte-test-crumbs.patch - sbstop test boots
+ leave breadcrumbs in the ramoops page 0xFED13000 (survives a watchdog reset):
+ the early stage marks, every startup step entered (subsystem, rank,
+ function), the platform expert and the stop; read back by the next chained
+ test loader
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/herolte_ufs.c                    | 65 ++++++++++++++++++++++++
+ iokit/Kernel/arm/SweetPlatformExpert.cpp |  2 +
+ osfmk/arm/arm_init.c                     |  1 +
+ osfmk/arm64/sweet_early.c                |  1 +
+ osfmk/arm64/sweet_early.h                | 17 +++++++
+ osfmk/kern/startup.c                     |  8 +++
+ 6 files changed, 94 insertions(+)
+
+diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
+index acbc5e98..a8004897 100644
+--- a/bsd/dev/herolte_ufs.c
++++ b/bsd/dev/herolte_ufs.c
+@@ -16,6 +16,7 @@
+  * "USERDATA") as ufsroot0; writes need ufsrw=1 and stay inside it.
+  */
+ #if defined(ARM64_BOARD_CONFIG_HEROLTE)
++#include <arm64/sweet_early.h>
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/msgbuf.h>
+@@ -1222,6 +1223,69 @@ starlte_reboot_early(void)
+ 	}
+ }
+ 
++/*
++ * 0424: test-boot breadcrumbs (osfmk/arm64/sweet_early.h). Layout shared with the loader (shim/starlte/xnu_boot.c
++ * CRUMB_*): +0x100 "XNUCRUMB", +0x108 count, +0x110 30 x {code, value} as a ring. Codes: 0x101..0x114 = the early
++ * stage marks, 1 = page mapped (value: kernel slide), 2:subsystem:rank = a startup step entered (value: its
++ * function), 3 = platform expert reached (value: memSizeActual), 4 = sbstop reached. Device memory: no flush.
++ */
++#define STARLTE_CRUMB_PA        0xFED13000u
++#define STARLTE_CRUMB_XMAGIC    0x424d555243554e58ULL   /* "XNUCRUMB" */
++#define STARLTE_CRUMB_RING      30u
++static volatile uint64_t *starlte_crumb_va;
++static uint64_t starlte_crumb_held[16][2];
++static unsigned starlte_crumb_nheld;
++static bool starlte_crumb_off;
++
++static void
++starlte_crumb_put(uint64_t code, uint64_t value)
++{
++	volatile uint64_t *x = starlte_crumb_va + 0x100 / 8;
++	uint64_t n = x[1];
++	volatile uint64_t *e = x + 2 + 2 * (n % STARLTE_CRUMB_RING);
++	e[0] = code;
++	e[1] = value;
++	x[1] = n + 1;
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++void
++starlte_crumb(uint64_t code, uint64_t value)
++{
++	if (starlte_crumb_off) {
++		return;
++	}
++	if (starlte_crumb_va != NULL) {
++		starlte_crumb_put(code, value);
++	} else if (starlte_crumb_nheld < 16) {
++		starlte_crumb_held[starlte_crumb_nheld][0] = code;
++		starlte_crumb_held[starlte_crumb_nheld][1] = value;
++		starlte_crumb_nheld++;
++	}
++}
++
++void
++starlte_crumb_init(void)
++{
++	char stop[16] = "";
++	if (!PE_parse_boot_argn("sbstop", stop, sizeof(stop) - 1) || stop[0] == '\0') {
++		starlte_crumb_off = true;               /* not a test boot: the ramoops page is left alone */
++		return;
++	}
++	volatile uint64_t *va = (volatile uint64_t *)ml_io_map(STARLTE_CRUMB_PA, PAGE_SIZE);
++	if (va == NULL) {
++		starlte_crumb_off = true;
++		return;
++	}
++	va[0x100 / 8] = STARLTE_CRUMB_XMAGIC;
++	va[0x108 / 8] = 0;
++	starlte_crumb_va = va;
++	for (unsigned i = 0; i < starlte_crumb_nheld; i++) {
++		starlte_crumb_put(starlte_crumb_held[i][0], starlte_crumb_held[i][1]);
++	}
++	starlte_crumb_put(1, vm_kernel_slide);
++}
++
+ /*
+  * 0423: the self-stop point of a milestone test boot (sbstop=<stage>). starlte_sbstop_at(stage) says whether this
+  * boot stops there; starlte_sbstop_now(stage) dumps the console tail into the pmsg ring and resets into TWRP.
+@@ -1235,6 +1299,7 @@ starlte_sbstop_at(const char *stage)
+ void
+ starlte_sbstop_now(const char *stage)
+ {
++	starlte_crumb(4, 0);
+ 	printf("STARBITE: sbstop=%s: stage reached, resetting into TWRP\n", stage);
+ 	delay(300 * 1000);                      /* let the console ring take the lines above */
+ 	starlte_pmsg_save("STARBITE: sbstop (no panic), console tail:\n", NULL, false);
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index d9c2fd12..852d771c 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -12,6 +12,7 @@
+ extern "C" {
+ extern boot_args *BootArgs;
+ int starlte_sbstop_at(const char *stage);
++void starlte_crumb(uint64_t code, uint64_t value);
+ void starlte_sbstop_now(const char *stage);
+ }
+ #endif
+@@ -114,6 +115,7 @@ SweetPlatformExpert::starbiteReport(IOService *provider)
+ 	    ba ? ba->Revision : 0, ba ? ba->Version : 0, ba ? ba->memSize : 0ULL, ba ? ba->memSizeActual : 0ULL,
+ 	    ba ? ba->bootFlags : 0ULL,
+ 	    ba && ba->memSizeActual == ba->memSize ? "loader layout matches" : "LAYOUT MISMATCH (608-byte loader?)");
++	starlte_crumb(3, ba ? ba->memSizeActual : 0);
+ 	if (starlte_sbstop_at("pe")) {
+ 		starlte_sbstop_now("pe");
+ 	}
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 4da449ce..79d5f4a2 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -599,6 +599,7 @@ arm_init(
+ 	sweet_early_mark(7, "entering arm_vm_init");
+ 	arm_vm_init(xmaxmem, args);
+ 	sweet_early_mark(15, "arm_vm_init returned");
++	starlte_crumb_init();                   /* 0424: sbstop boots only */
+ 
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 375258f6..38f062e1 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -81,6 +81,7 @@ sweet_early_mark(unsigned int stage, const char *label)
+ 	if (!a5_active) {
+ 		return;
+ 	}
++	starlte_crumb(0x100 + stage, 0);
+ 	a5_string("A5 XNU STAGE ");
+ 	if (stage >= 10) {
+ 		sweet_early_putc((char)('0' + stage / 10 % 10));
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+index d7a25f2f..21f03c0e 100644
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -21,4 +21,21 @@ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ static inline void sweet_early_disable(void) {}
+ #endif
+ 
++/*
++ * 0424, docs/APPLE-S9-DRIVERS.md M1b: breadcrumbs into a ramoops page (0xFED13000) that survives a watchdog
++ * reset; written only on sbstop= test boots, read back by the next chained test loader. Before arm_vm_init the
++ * page is not mapped yet: crumbs are held and written out by starlte_crumb_init().
++ */
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++void starlte_crumb(uint64_t code, uint64_t value);
++void starlte_crumb_init(void);
++#else
++static inline void starlte_crumb(uint64_t code, uint64_t value)
++{
++	(void)code;
++	(void)value;
++}
++static inline void starlte_crumb_init(void) {}
++#endif
++
+ #endif
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index c977c983..55aad75c 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -66,6 +66,9 @@
+  *	Mach kernel startup.
+  */
+ 
++#if defined(__arm64__)
++#include <arm64/sweet_early.h>
++#endif
+ #include <debug.h>
+ #include <mach_kdp.h>
+ 
+@@ -477,6 +480,11 @@ kernel_startup_initialize_upto(startup_subsystem_id_t upto)
+ #endif /* __BUILDING_XNU_LIB_UNITTEST__ */
+ 		startup_phase = cur->subsystem - 1;
+ 		kernel_startup_log(cur->subsystem);
++#if defined(__arm64__)
++		/* 0424: which startup step a test boot entered last (code 2:subsystem:rank, value the function) */
++		starlte_crumb((2ULL << 56) | ((uint64_t)cur->subsystem << 16) | (uint64_t)(uint32_t)cur->rank,
++		    (uint64_t)(uintptr_t)cur->func);
++#endif
+ 		cur->func(cur->arg);
+ 		startup_entry_cur = ++cur;
+ 	}
+-- 
+2.53.0
+
