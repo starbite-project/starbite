@@ -290,6 +290,13 @@ FL 11_0 and D3D12 need tessellation, which the G72 doesn't have.
     those files;
   - it refuses to touch an `opengl32.dll` that isn't ours.
 
+**Night of 2026-11-11 (stages queued):**
+- **T45** (`sbwddm-t45`, runs only if T44's `sbload` passed): the ARM64X sbumd installed as `sbumd.dll`.
+  - Its gputest adds `sbd3d` (`tools/win/mesa/tests/sbd3d.cpp`, native + x64): the adapter a D3D11 program really
+    gets, whether `sbumd.dll` is loaded in it, and a clear + triangle read back.
+  - The goal line is `sbd3d x64 exit 0`: an emulated x64 program drawing on the Mali.
+  - The rest of the gputest checks that DWM and the native tests still work on the ARM64X file's native view.
+
 ## 7. What the user can do meanwhile
 
 - **Geometry Dash:** no fix to install yet. It needs our OpenGL driver (§5a, steps 1-2).

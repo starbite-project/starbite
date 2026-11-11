@@ -90,6 +90,12 @@ if exist %D%\glx86\sbgl32.exe pushd %D%\glx86
 if exist %D%\glx86\sbgl32.exe sbgl32.exe hw %D%\glx86\sbgl.log C:\ProgramData\Starbite\umdlog\sbgl-x86.ppm >> %D%\gputest.log 2>&1
 if exist %D%\glx86\sbgl32.exe echo sbgl x86 exit %errorlevel% >> %D%\gputest.log
 if exist %D%\glx86\sbgl32.exe popd
+rem T45 (docs/WIN11-GPU-CAPS.md 5c): D3D11 from a native and from an x64 (emulated) program: which adapter, is our
+rem sbumd.dll loaded in the process, and do a clear and a triangle come out right. Exit 0 = on the Mali.
+if exist %D%\sbd3d.exe sbd3d.exe %D%\sbd3d.log >> %D%\gputest.log 2>&1
+if exist %D%\sbd3d.exe echo sbd3d arm64 exit %errorlevel% >> %D%\gputest.log
+if exist %D%\sbd3d64.exe sbd3d64.exe %D%\sbd3d.log >> %D%\gputest.log 2>&1
+if exist %D%\sbd3d64.exe echo sbd3d x64 exit %errorlevel% >> %D%\gputest.log
 rem UMDX (docs/WIN11-GPU-CAPS.md 5c): does Windows load the ARM64X sbumd (one file, an ARM64 view for native
 rem processes and an ARM64EC view for x64 ones) and the ARM64EC one? Load only, from this folder: nothing is
 rem installed, DWM keeps the T44 sbumd.dll, and no DDI entry point is called.
