@@ -18,7 +18,7 @@ KEEP = set(['t46-' + k for k in ('apple', 'microsoft', 'google', 'linux', 'starb
             'call', 'search15', 'back', 'send', 'heart', 'star-e', 'em-flame', 'e46-heat', 'e46-power', 'e46-sos', 'e46-medical',
             'a62-heat', 'a62-power'] + [f'tab-{k}{v}' for k in ('fav', 'rec', 'con', 'pad') for v in ('', '-on')] +
            [f'cc-{k}{v}' for k in ('light', 'rot', 'save', 'timer', 'wifi2') for v in ('', '-on')])
-FONTS = ['it400', 'it500', 'it600', 'it700', 'it800', 'of300']
+FONTS = ['tx400', 'tx500', 'tx600', 'tx700', 'dp400', 'dp600', 'dp700', 'of300']   # sbtk.h's TK_TX400 .. TK_FOF300
 ents, blobs = [], []
 for i, n in enumerate(FONTS):
     ents.append((n, 1, 0, 0, i)); blobs.append(open(os.path.join(d, 'fonts', n + '.ttf'), 'rb').read())

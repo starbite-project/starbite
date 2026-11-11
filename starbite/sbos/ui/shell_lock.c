@@ -978,7 +978,9 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         for (int i = 0; i < nf; i++) {
             float b = 298 + 24 * i + 14;
             d_text(&d, TK_IT400, 14.5f, 34, b, dt[i], 0, 0, W(.55f), 0);
-            d_text(&d, TK_IT400, 14.5f, 34 + dtw + 14, b, dd[i], 0, TK_TNUM, INK, 0);
+            char fit[96];             /* P3p: SF-wide text ran past the card (x 376) and off the panel */
+            ellipsize(fit, sizeof fit, TK_IT400, 14.5f, dd[i], 356 - (34 + dtw + 14));
+            d_text(&d, TK_IT400, 14.5f, 34 + dtw + 14, b, fit, 0, TK_TNUM, INK, 0);
         }
         sy = 298 + 17 * nf + 7 * (nf - 1) + 18;
         /* the slider: dark glass whose backdrop is the card under it; its glass kept per position (2 or 3 facts) */
