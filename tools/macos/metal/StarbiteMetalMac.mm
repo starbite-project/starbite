@@ -6,16 +6,18 @@
  * NB* objects) over the metal2vulkan bridge (Rust, AIR -> SPIR-V and the Metal object model on Vulkan),
  * over PanVK (Contents/Frameworks/libvulkan_panfrost.dylib, Mesa 26.2.6), which reaches the GPU through
  * src/starbite-drm -> the kernel's StarbiteMali user client. Built for the macOS platform (dyld refuses
- * iOS-platform images in a macOS process), arm64: the processes that load it are started with
- * ptrauth_disabled=1 by the kernel (sweetinject, xnu 0324), which lets dyld take arm64 images into arm64e.
+ * iOS-platform images in a macOS process). The code is plain arm64 (no pointer authentication: the S9's
+ * Cortex-A75/A55 have none, and the root's a64e rewrite leaves no PAC in any Apple binary either); build.sh
+ * marks the finished images arm64e (tools/macos/metal/arm64e-tag.py), so dyld's arm64e grading takes them
+ * into arm64e processes such as WindowServer without ptrauth_disabled=1.
  *
  * Two ways in, one device per process:
- *  - sbmac.dylib (the injection, tools/macos/metal/sbmac.m) dlopens this bundle and calls sbmtl_device(),
- *    then MTLAddDevice(): no kernel accelerator service needed.
- *  - Metal's own discovery, once the kernel publishes an IOAccelerator whose MetalPluginName is
- *    "StarbiteMetal" and MetalPluginClassName "StarbiteMTLDevice" (xnu/patches/pending-macos26/
- *    0352-...): Metal finds the bundle with gpu_bundle_find_trusted() and calls
- *    -[StarbiteMTLDevice initWithAcceleratorPort:].
+ *  - Metal's own discovery (the driver path, macOS Sequoia): the kernel publishes an IOAccelerator whose
+ *    MetalPluginName is "StarbiteMetal" and MetalPluginClassName "StarbiteMTLDevice" (xnu 0361, sbmtl=2);
+ *    Metal finds the bundle with gpu_bundle_find_trusted() (SIP off in the ADT), checks the class is an
+ *    _MTLDevice and calls -[StarbiteMTLDevice initWithAcceleratorPort:] with that service.
+ *  - sbmac.dylib (the older injection, tools/macos/metal/sbmac.m; Ventura, macOS 26.5) dlopens this bundle
+ *    and calls sbmtl_device(), then MTLAddDevice().
  *
  * Who gets a device: the names in /private/var/local/mtl2-clients ("*" = all, "-NAME" = never NAME),
  * or, with no such file, WindowServer and sbmtltest (env STARBITE_MTL_CLIENTS replaces the default).
@@ -275,6 +277,70 @@ static id open_device(mach_port_t port)
 	return device;
 }
 
+/* Device selectors the frontend lacks: answered 0/nil and logged once each, instead of
+ * doesNotRecognizeSelector's exception (WindowServer aborted on -peerGroupID, macOS 26.5 boot 130455).
+ * respondsToSelector: stays honest: only real sends are forwarded here. */
+@interface SBMTLZeroStub : NSObject
+@end
+@implementation SBMTLZeroStub
+static id sbmtl_zero(id me, SEL s, ...)
+{
+	(void)me;
+	(void)s;
+	return nil;
+}
++ (BOOL)resolveInstanceMethod:(SEL)sel
+{
+	sm2_log("device: unimplemented selector -%s -> 0", sel_getName(sel));
+	class_addMethod(self, sel, (IMP)sbmtl_zero, "@16@0:8");
+	return YES;
+}
+@end
+
+/*
+ * What the device answers beyond the frontend (sbmac.dylib added these from outside on Ventura and 26.5; they
+ * are the driver's own answers now):
+ *  - acceleratorPort: SkyLight keys its compositor by it (WSGetDefaultMetalAccelerator takes the first
+ *    device's acceleratorPort, SLCADisplay::is_accelerated() is "!= 0", CompositorMetal picks the device
+ *    whose port matches); the bare _MTLDevice answers 0, and every frame stayed black (26.5 boots
+ *    102422-123708). Apple's devices answer their IOAccelerator service: so does this one (the port Metal
+ *    passed to -initWithAcceleratorPort:, held with our own reference), else the StarbiteMali service.
+ *  - peerGroupID 0, peerIndex 0, peerCount 1: one GPU, no peer group.
+ *  - forwardingTargetForSelector: the zero catch-all above.
+ */
+static void fill_device(id dev, mach_port_t port)
+{
+	Class c = object_getClass(dev);
+	class_addMethod(c, sel_registerName("peerGroupID"), imp_implementationWithBlock(^uint64_t(id me) { (void)me; return 0; }), "Q16@0:8");
+	class_addMethod(c, sel_registerName("peerIndex"), imp_implementationWithBlock(^uint32_t(id me) { (void)me; return 0; }), "I16@0:8");
+	class_addMethod(c, sel_registerName("peerCount"), imp_implementationWithBlock(^uint32_t(id me) { (void)me; return 1; }), "I16@0:8");
+	static id stub;
+	stub = [SBMTLZeroStub new];
+	class_addMethod(c, @selector(forwardingTargetForSelector:), imp_implementationWithBlock(^id(id me, SEL s) {
+		(void)me;
+		const char *n = sel_getName(s);
+		if (n[0] == '_' || !strncmp(n, "retain", 6) || !strncmp(n, "release", 7) || !strcmp(n, "dealloc"))
+			return nil;
+		return stub;
+	}), "@24@0:8:16");
+	static io_service_t accel;
+	const char *what = "IOAccelerator";
+	if (port && IOObjectRetain(port) == KERN_SUCCESS)
+		accel = port;	/* Metal releases its reference after -initWithAcceleratorPort: */
+	else {
+		accel = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("StarbiteMali"));
+		what = "StarbiteMali";
+	}
+	if (accel) {
+		SEL sel = sel_registerName("acceleratorPort");
+		Method m = class_getInstanceMethod(c, sel);
+		class_replaceMethod(c, sel, imp_implementationWithBlock(^io_service_t(id me) { (void)me; return accel; }),
+				    m ? method_getTypeEncoding(m) : "I16@0:8");
+	}
+	sm2_log("device %s: acceleratorPort %#x (%s service), peerGroupID/peerIndex/peerCount, zero catch-all",
+		class_getName(c), accel, accel ? what : "none");
+}
+
 static id gDevice;
 
 /* The process's one device (created on the first call; nil when refused, sbmtl_status says why). */
@@ -283,6 +349,8 @@ extern "C" id sbmtl_device(mach_port_t port)
 	static dispatch_once_t once;
 	dispatch_once(&once, ^{
 		gDevice = open_device(port);
+		if (gDevice)
+			fill_device(gDevice, port);
 	});
 	return gDevice;
 }

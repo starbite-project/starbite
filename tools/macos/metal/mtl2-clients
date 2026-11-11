@@ -1,3 +1,3 @@
 # Processes that get the Mali Metal device (StarbiteMetal.bundle): names, "*" = all, "-NAME" = never.
-# Only processes started with ptrauth_disabled=1 (sweetinject) can load the arm64 bundle at all.
+# Metal's own discovery (kernel 0361, sbmtl=2) loads the bundle (arm64e images) into every Metal process; only these get the device.
 WindowServer sbmtltest

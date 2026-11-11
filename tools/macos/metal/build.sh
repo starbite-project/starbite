@@ -2,7 +2,7 @@
 # The Metal layer for macOS 26.5 on the Galaxy S9 (docs/MACOS-METAL.md), built on the Mac:
 #   PanVK (Mesa 26.2.6's Vulkan driver for the Mali-G72, through starbite-drm -> StarbiteMali)
 #   + the metal2vulkan bridge (Rust) + the Metal frontend (tools/metal2, IOS-26-Hot/UniXNU, MIT)
-#   = StarbiteMetal.bundle for macOS arm64, plus
+#   = StarbiteMetal.bundle for macOS (plain arm64 code, images marked arm64e: arm64e-tag.py), plus
 #   sbmac.dylib  the injection (sweetinject=/usr/lib/sbmac.dylib,WindowServer,...): it publishes the
 #                bundle's device with MTLAddDevice before WindowServer's 30 s Metal device check
 #   sbmtltest    a command-line test: device, IOSurface, a Metal clear + triangle, readback, and the
@@ -12,27 +12,33 @@
 #
 # Big intermediates (Rust target ~1.5 GB, Mesa build ~200 MB) live in an APFS sparse image on the
 # external drive, mounted at $WORK (an exFAT drive puts "._" files beside every file, which Cargo
-# build scripts that hash src/ would pick up). Products: $WORK/out, copied to out/macos-metal/
-# (git-ignored; a few MB). Nothing here writes outside the repo, the image or the scratch dirs.
+# build scripts that hash src/ would pick up); WORK_DIR=/some/apfs/dir uses a plain directory instead.
+# Products: $WORK/out, copied to out/macos-metal/ (git-ignored; a few MB). Nothing here writes outside
+# the repo, the image or the scratch dirs.
+# Env: MINOS (default 15.0, macOS Sequoia), ARM64E (default 1: the bundle's images are marked arm64e, so
+# Metal's own discovery loads them into WindowServer, an arm64e process; ARM64E=0 keeps plain arm64 for
+# the sbmac/sweetinject path, whose processes run with ptrauth_disabled=1).
 set -eu
 cd "$(dirname "$0")/../../.."
 ROOT=$PWD
 HERE=$ROOT/tools/macos/metal
 IMAGE=${IMAGE:-/Volumes/Untitled/starbite-metal/sbmtl-build.sparseimage}
-WORK=${WORK:-/Volumes/sbmtl-build}
+WORK=${WORK_DIR:-${WORK:-/Volumes/sbmtl-build}}
 OUT=$WORK/out
 DEST=$ROOT/out/macos-metal
 JOBS=${JOBS:-4}
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode_16.4.app/Contents/Developer}
 SDK=$(xcrun --sdk macosx --show-sdk-path)
-MINOS=14.0
+MINOS=${MINOS:-15.0}
 CC="xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=$MINOS"
 export PATH=$HOME/.cargo/bin:/opt/homebrew/opt/rustup/bin:$PATH
 
 log() { printf '%s\n' "build.sh: $*"; }
 
 do_mount() {
-	if [ ! -d "$WORK" ] || ! mount | grep -q " on $WORK "; then
+	if [ -n "${WORK_DIR:-}" ]; then
+		mkdir -p "$WORK"
+	elif [ ! -d "$WORK" ] || ! mount | grep -q " on $WORK "; then
 		[ -f "$IMAGE" ] || hdiutil create -size 24g -type SPARSE -fs APFS -volname sbmtl-build "$IMAGE"
 		hdiutil attach -nobrowse -mountpoint "$WORK" "$IMAGE" >/dev/null
 	fi
@@ -42,15 +48,24 @@ do_mount() {
 
 # --- metal2vulkan bridge for aarch64-apple-darwin -------------------------------------------------
 # Sources: build/m2v/metal2vulkan (720ef1ce + tools/metal2/bridge/patches, as the iOS build) copied to
-# $WORK/m2v-src without the 1.5 GB validation corpus, plus tools/macos/metal/patches/m2v-*.patch
-# (a cache directory that cannot be written is no error with METAL2VULKAN_CACHE_OPTIONAL=1: the
-# macOS root is read-only).
+# $WORK/m2v-src without the 1.5 GB validation corpus (or, with no build/m2v, a sparse clone of
+# github.com/steelbrain/metal2vulkan at 720ef1ce without the corpus, patched the same way), plus
+# tools/macos/metal/patches/m2v-*.patch (a cache directory that cannot be written is no error with
+# METAL2VULKAN_CACHE_OPTIONAL=1: the macOS root is read-only).
 do_bridge() {
 	do_mount
 	SRC=$WORK/m2v-src
 	if [ ! -f "$SRC/.starbite-macos" ]; then
-		rsync -a --exclude .git --exclude target --exclude 'crates/metal2vulkan-validation/corpus' \
-			"$ROOT/build/m2v/metal2vulkan/" "$SRC/"
+		if [ -d "$ROOT/build/m2v/metal2vulkan" ]; then
+			rsync -a --exclude .git --exclude target --exclude 'crates/metal2vulkan-validation/corpus' \
+				"$ROOT/build/m2v/metal2vulkan/" "$SRC/"
+		else
+			rm -rf "$SRC"
+			git clone -q --filter=blob:none --no-checkout https://github.com/steelbrain/metal2vulkan "$SRC"
+			git -C "$SRC" sparse-checkout set --no-cone '/*' '!/crates/metal2vulkan-validation/corpus/'
+			git -C "$SRC" checkout -q 720ef1ce
+			for p in "$ROOT"/tools/metal2/bridge/patches/*.patch; do git -C "$SRC" apply "$p"; done
+		fi
 		for p in "$HERE"/patches/m2v-*.patch; do patch -s -p1 -d "$SRC" < "$p"; done
 		date > "$SRC/.starbite-macos"
 	fi
@@ -79,7 +94,7 @@ sha2 = { version = "0.10", features = ["asm"] }
 panic = "unwind"
 debug = 1
 EOF
-	[ -f "$B/Cargo.lock" ] || cp "$ROOT/build/m2v-bridge/Cargo.lock" "$B/Cargo.lock"
+	[ -f "$B/Cargo.lock" ] || [ ! -f "$ROOT/build/m2v-bridge/Cargo.lock" ] || cp "$ROOT/build/m2v-bridge/Cargo.lock" "$B/Cargo.lock"
 	log "bridge: cargo build (aarch64-apple-darwin, $JOBS jobs; log $B/build-macos.log)"
 	NMB_FIXTURE_AIR=$B/runtime_examples.air NMB_FC_AIR=$B/function_constant.air MACOSX_DEPLOYMENT_TARGET=$MINOS \
 		cargo +1.98.0 build --release -j "$JOBS" --manifest-path "$B/Cargo.toml" --target aarch64-apple-darwin \
@@ -90,12 +105,12 @@ EOF
 }
 
 # --- PanVK (Mesa 26.2.6) for macOS -----------------------------------------------------------------
-# The source tree is build/mesa-ios/mesa-26.2.6 (already carries tools/mesa-ios/mesa26-panvk-ios.patch,
+# The source tree is build/mesa-ios/mesa-26.2.6, or $MESA_DIR/mesa-26.2.6 (already carries tools/mesa-ios/mesa26-panvk-ios.patch,
 # whose changes are all #ifdef __APPLE__, and src/starbite-drm); the host tools (mesa_clc,
 # vtn_bindgen2, panfrost_compile) are build/mesa-ios/build-clc-host's (tools/mesa-ios/mk-panvk26-ios.sh).
 do_panvk() {
 	do_mount
-	M=$ROOT/build/mesa-ios
+	M=${MESA_DIR:-$ROOT/build/mesa-ios}	# MESA_DIR: a copy elsewhere (build/mesa-ios is parked off the Mac)
 	[ -d "$M/mesa-26.2.6/src/starbite-drm" ] || { log "run tools/mesa-ios/mk-panvk26-ios.sh once first"; exit 1; }
 	# starbite-drm may have changed since the iOS build copied it in
 	cmp -s "$ROOT/tools/mesa-ios/starbite-drm/starbite_drm.c" "$M/mesa-26.2.6/src/starbite-drm/starbite_drm.c" ||
@@ -163,6 +178,8 @@ do_bundle() {
 	cp "$OUT/libvulkan_panfrost.dylib" "$B/Contents/Frameworks/libvulkan_panfrost.dylib"
 	install_name_tool -id @loader_path/libvulkan_panfrost.dylib "$B/Contents/Frameworks/libvulkan_panfrost.dylib" 2>/dev/null
 	xcrun strip -x "$B/Contents/Frameworks/libvulkan_panfrost.dylib"
+	[ "${ARM64E:-1}" = 0 ] || python3 -I "$HERE/arm64e-tag.py" "$B/Contents/MacOS/StarbiteMetal" \
+		"$B/Contents/Frameworks/libvulkan_panfrost.dylib"
 	codesign -f -s - "$B/Contents/Frameworks/libvulkan_panfrost.dylib" 2>/dev/null
 	codesign -f -s - "$B" 2>/dev/null
 	log "bundle: $B"

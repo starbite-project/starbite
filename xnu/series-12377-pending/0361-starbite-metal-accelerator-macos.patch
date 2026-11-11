@@ -1,0 +1,123 @@
+From adf389d3750033886aa4abc9dbbc6227878c7df5 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 11 Nov 2026 21:58:10 +0200
+Subject: [PATCH] patch: 0361-starbite-metal-accelerator-macos.patch -
+ StarbiteAcceleratorMac (STARLTE, sbmtl=2): an IOAccelerator on StarbiteMali
+ (published once the GPU is ready for apps) with MetalPluginName StarbiteMetal
+ / MetalPluginClassName StarbiteMTLDevice, so macOS Metal's own discovery
+ (IOServiceMatching IOAccelerator + IOServicePublish notification,
+ gpu_bundle_find_trusted, isSubclassOfClass _MTLDevice,
+ initWithAcceleratorPort:) loads the Mali's Metal device with no injection;
+ ported from pending-macos26 (was on IOResources) to 0427 (KernelConfigTables
+ context: 0426's block); kernel seq1 = 0003-0427 + 0361, SweetFramebuffer kept
+ (no 0428)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ iokit/Kernel/arm/StarbiteAccelerator.cpp | 68 +++++++++++++++++++++++-
+ iokit/KernelConfigTables.cpp             |  5 ++
+ 2 files changed, 72 insertions(+), 1 deletion(-)
+
+diff --git a/iokit/Kernel/arm/StarbiteAccelerator.cpp b/iokit/Kernel/arm/StarbiteAccelerator.cpp
+index 519e9b4d..965191cc 100644
+--- a/iokit/Kernel/arm/StarbiteAccelerator.cpp
++++ b/iokit/Kernel/arm/StarbiteAccelerator.cpp
+@@ -9,7 +9,7 @@
+  * through StarbiteMali).
+  *
+  * Boot-arg sbmtl=1 publishes it; without it Metal finds no device and CoreAnimation keeps
+- * sbca's OpenGL ES renderer.
++ * sbca's OpenGL ES renderer. sbmtl=2 (macOS) also publishes StarbiteAcceleratorMac, below.
+  */
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+ #include <IOKit/IOService.h>
+@@ -54,4 +54,70 @@ StarbiteAccelerator::start(IOService *provider)
+ 	IOLog("STARBITE MTL: IOAcceleratorES published (MetalPluginName StarbiteMetal)\n");
+ 	return true;
+ }
++
++/*
++ * The same GPU as macOS's Metal.framework sees it (macOS 26/27): -[MTLIOAccelServiceGlobalContext init]
++ * matches IOServiceMatching("IOAccelerator") (IOAcceleratorES is iOS's name), and
++ * getMetalPluginClassForService() reads MetalPluginName, asks libsystem_sandbox's
++ * gpu_bundle_find_trusted() for <name>.bundle in /Library/GPUBundles, /System/Library/Extensions or
++ * /AppleInternal/Library/Extensions, loads it and takes MetalPluginClassName (or the principal class).
++ * The bundle (tools/macos/metal: StarbiteMetal.bundle, class StarbiteMTLDevice) is the macOS build of
++ * the same frontend + metal2vulkan + PanVK stack, reaching the GPU through StarbiteMali.
++ *
++ * Metal then checks [class isSubclassOfClass:_MTLDevice] and calls -initWithAcceleratorPort: with this
++ * service (macOS 27.2's Metal, read on the host; WindowServer's MTLCopyAllDevicesWithObserver sees it, and
++ * a late publish reaches its observer through the same IOServicePublish notification).
++ *
++ * Two userland conditions, not checked here: gpu_bundle_find_trusted() takes a path only when rootless
++ * trusts it, i.e. csr_check(CSR_ALLOW_UNRESTRICTED_FS) == 0 (ADT /chosen/asmb lp-sip0 with bit 1, as
++ * `csrutil disable`; the Mac ADTs carry lp-sip0 0x6f + lp-sip1, tools/macos/adt-sip.py checks it) or
++ * the root is an authenticated APFS volume; and the bundle must be an arm64e image to load into an
++ * arm64e process without ptrauth_disabled=1 (tools/macos/metal/build.sh builds it so).
++ *
++ * It matches on StarbiteMali (published by starlte_gpu.c once the GPU is ready for apps, some seconds into the
++ * boot), not on IOResources: the IOAccelerator, and with it the Metal device, appears only when the GPU behind
++ * it can take work. A WindowServer that started earlier gets it through Metal's IOServicePublish notification
++ * (its 30 s wait for a device-added event); a GPU that never comes up means no Metal device, as on a Mac.
++ *
++ * Boot-arg sbmtl=2 (macOS) publishes this class as well as IOAcceleratorES.
++ */
++class IOAccelerator : public IOService {
++	OSDeclareDefaultStructors(IOAccelerator);
++};
++
++OSDefineMetaClassAndStructors(IOAccelerator, IOService);
++
++class StarbiteAcceleratorMac : public IOAccelerator {
++	OSDeclareDefaultStructors(StarbiteAcceleratorMac);
++
++public:
++	IOService *probe(IOService *provider, SInt32 *score) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(StarbiteAcceleratorMac, IOAccelerator);
++
++IOService *
++StarbiteAcceleratorMac::probe(IOService *provider, SInt32 *score)
++{
++	uint32_t on = 0;
++	PE_parse_boot_argn("sbmtl", &on, sizeof(on));
++	return on == 2 ? IOService::probe(provider, score) : NULL;
++}
++
++bool
++StarbiteAcceleratorMac::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty("MetalPluginName", "StarbiteMetal");
++	setProperty("MetalPluginClassName", "StarbiteMTLDevice");
++	setProperty("model", "Mali-G72 MP18");
++	setProperty("gpu-core-count", 18ULL, 32);
++	registerService();
++	IOLog("STARBITE MTL: IOAccelerator published for macOS on %s (MetalPluginName StarbiteMetal, class StarbiteMTLDevice)\n",
++	    provider->getName());
++	return true;
++}
+ #endif /* ARM64_BOARD_CONFIG_STARLTE */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index f1afaf0a..886b4f0e 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -113,6 +113,11 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = StarbiteAccelerator;"
+     "   },"
++    "   {"
++    "     'IOClass'         = StarbiteAcceleratorMac;"
++    "     'IOProviderClass' = StarbiteMali;"
++    "     'IOMatchCategory' = StarbiteAcceleratorMac;"
++    "   },"
+ #endif
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+     /*
+-- 
+2.53.0
+
