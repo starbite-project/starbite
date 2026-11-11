@@ -799,7 +799,12 @@ struct sbm_dial_policy {
     unsigned n_allowed;
     const char *const *extra_emergency;          /* SIM ECC / network emergency numbers, if known */
     unsigned n_extra;
+    /* Starbite OS Next's Phone / Messages: the user typed the number and held to call / send. Then any number that
+     * passes the two locks (not an emergency number, at least SBM_DIAL_MIN_DIGITS digits) is allowed; the locks have
+     * no switch. Only SBM_DIAL_USER_CONFIRMED counts. */
+    uint32_t user_confirmed;
 };
+#define SBM_DIAL_USER_CONFIRMED 0x55534552u   /* "USER" */
 int sbm_is_emergency(const char *number, const char *const *extra, unsigned n_extra);   /* 1 = refuse */
 int sbm_dial_check(const struct sbm_dial_policy *pol, const char *number);              /* 0 or SBM_EPERM */
 
@@ -820,6 +825,12 @@ int sbm_sms_incoming(const struct sbm_ipc_msg *m, struct sbm_sms *s);
 /* TP-SUBMIT for number (allow-listed, never an emergency number: sbm_dial_check) and an ASCII text that fits one
  * GSM 7-bit message (160 characters, the common subset). Returns the PDU length or SBM_E*. Nothing sends it yet. */
 int sbm_sms_submit(const struct sbm_dial_policy *pol, const char *number, const char *text, uint8_t *out, uint32_t cap);
+#define SBM_SMS_PDU_MAX   176               /* SMS-SUBMIT: 1 + 1 + 12 (DA) + 1 + 1 + 1 + 140 (UD) and some room */
+#define SBM_SMS_MAX_PARTS 4
+/* the text (UTF-8) as 1..maxparts SMS-SUBMIT PDUs: GSM 7-bit (default + extension table) when it fits, else UCS-2;
+ * several parts carry a concatenation header with ref. Policy first. Returns the number of parts or SBM_E*. */
+int sbm_sms_submit_parts(const struct sbm_dial_policy *pol, const char *number, const char *utf8, uint8_t ref,
+                         uint8_t pdu[][SBM_SMS_PDU_MAX], uint16_t *len, unsigned maxparts);
 
 /* The session API (Starbite OS): sbm_modem_start loads, checks and starts the CP and brings the link online with the RFS
  * server (about 2 s, blocking); sbm_modem_poll is non-blocking, from the event loop (every few ms): mailbox, rings,

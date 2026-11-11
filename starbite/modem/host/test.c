@@ -1468,6 +1468,80 @@ static void test_attended(struct fakesoc *s, struct sbm_image *im, struct sbm_mo
 }
 #endif
 
+/* SMS-SUBMIT in parts, checked by turning each into the SMS-DELIVER the receiver gets and decoding it */
+static int submit_to_deliver(const uint8_t *s, uint32_t n, uint8_t *d)
+{
+    uint32_t o = 0, i = 0;
+    uint8_t fo = s[i++];
+    i++;                                             /* TP-MR */
+    uint32_t dal = s[i], dab = 2 + (dal + 1) / 2;
+    d[o++] = (uint8_t)(0x04 | (fo & 0x40));          /* SMS-DELIVER, UDHI kept */
+    memcpy(d + o, s + i, dab), o += dab, i += dab;   /* OA = DA */
+    d[o++] = s[i++];                                 /* PID */
+    d[o++] = s[i++];                                 /* DCS */
+    static const uint8_t scts[7] = { 0x62, 0x11, 0x11, 0x02, 0x00, 0x00, 0x00 };
+    memcpy(d + o, scts, 7), o += 7;
+    memcpy(d + o, s + i, n - i), o += n - i;         /* UDL + UD */
+    return (int)o;
+}
+
+static void test_sms_parts(void)
+{
+    static uint8_t pdu[SBM_SMS_MAX_PARTS][SBM_SMS_PDU_MAX];
+    uint16_t len[SBM_SMS_MAX_PARTS];
+    uint8_t dl[200];
+    struct sbm_sms m;
+    struct sbm_dial_policy pol;
+    memset(&pol, 0, sizeof(pol));
+    CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", "hi", 1, pdu, len, 4), SBM_EPERM);   /* no confirmation */
+    pol.user_confirmed = SBM_DIAL_USER_CONFIRMED;
+    CHECKEQ(sbm_sms_submit_parts(&pol, "112", "hi", 1, pdu, len, 4), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit_parts(&pol, "+358112", "hi", 1, pdu, len, 4), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit_parts(&pol, "0044999", "hi", 1, pdu, len, 4), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit_parts(&pol, "16000", "hi", 1, pdu, len, 4), SBM_EPERM);
+    CHECKEQ(sbm_dial_check(&pol, "+358401234567"), 0);
+    pol.user_confirmed = 0x55534553u;                /* not the magic */
+    CHECKEQ(sbm_dial_check(&pol, "+358401234567"), SBM_EPERM);
+    pol.user_confirmed = SBM_DIAL_USER_CONFIRMED;
+    static char lng[700], cyr[300];
+    for (unsigned i = 0; i < 400; ++i)
+        lng[i] = (char)('a' + i % 26);
+    lng[400] = 0;
+    unsigned k = 0;
+    for (unsigned i = 0; i < 100; ++i) {
+        cyr[k++] = (char)0xD0;
+        cyr[k++] = (char)(0x90 + i % 32);           /* А..Я */
+    }
+    cyr[k] = 0;
+    struct { const char *t; int parts, alpha; } T[] = {
+        { "Hei! T\xc3\xa4m\xc3\xa4 on testi: \xc3\xa4\xc3\xb6\xc3\xa5 \xc3\x84\xc3\x96\xc3\x85 \xe2\x82\xac [x] {y} ~", 1, 0 },
+        { "\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82 Starbite", 1, 2 },
+        { "Emoji \xf0\x9f\x98\x80 ok", 1, 2 },
+        { lng, 3, 0 },
+        { cyr, 2, 2 },
+    };
+    for (unsigned t = 0; t < sizeof(T) / sizeof(T[0]); ++t) {
+        int n = sbm_sms_submit_parts(&pol, "+358401234567", T[t].t, 0x5a, pdu, len, 4);
+        CHECKEQ(n, T[t].parts);
+        static char joined[1400];
+        joined[0] = 0;
+        for (int p = 0; p < n; ++p) {
+            int dn = submit_to_deliver(pdu[p], len[p], dl);
+            CHECKEQ(sbm_sms_deliver_decode(dl, (uint32_t)dn, &m), 0);
+            CHECKEQ(m.alphabet, T[t].alpha);
+            CHECK(!strcmp(m.from, "+358401234567"));
+            if (n > 1)
+                CHECK(m.concat && m.ref == 0x5a && m.total == n && m.seq == p + 1);
+            strcat(joined, m.text);
+        }
+        CHECK(!strcmp(joined, T[t].t));
+        if (strcmp(joined, T[t].t))
+            printf("  sms text %u: got \"%.80s\"\n", t, joined);
+    }
+    CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", lng, 1, pdu, len, 2), SBM_ERANGE);   /* 3 parts > 2 */
+    CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", "\xff\xfe", 1, pdu, len, 4), SBM_EINVAL);
+}
+
 static void test_session(uint32_t boot_crc, uint32_t main_crc)
 {
     static struct fakesoc s;
@@ -2271,6 +2345,7 @@ int main(int argc, char **argv)
     test_clk();
     test_rfs();
     test_policy_sms();
+    test_sms_parts();
     printf("sbm host test: %u checks, %u failed%s\n", checks, fails, radio ? " (with this phone's RADIO image)" : "");
     return fails ? 1 : 0;
 }
