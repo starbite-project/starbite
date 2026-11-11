@@ -602,8 +602,11 @@ static void build_card(int g)
      * height's glass at the tap was a 100-400 ms pause on the phone before the card moved) */
     tk_layer_init(&k->closed, "card");
     k->closed.hidden = 1;
-    dc d = mk(&k->face, "face", CARD_X, top, CARD_W, 68 + 12, FACE_MG, 0);
+    /* P3q (P3j-11): made with a glass mask so d_glass records the box's shape (the GPU row's live, refracted glass),
+     * the mask freed at once (the CPU path keeps the baked look; no heap kept) */
+    dc d = mk(&k->face, "face", CARD_X, top, CARD_W, 68 + 12, FACE_MG, 1);
     d_glass(&d, CARD_X, top, CARD_W, 68 + 12, 26, 0, 1);
+    tk_a8_free(&k->face.glass);
     k->face.slice = 1;
     k->face.slice_s0 = PT(38 + FACE_MG);
     k->face.slice_s1 = PT(30 + FACE_MG);
@@ -690,7 +693,7 @@ static const ecard_t EC[4] = {
 static void build_ecards(void)
 {
     /* the four cards in one layer (each card's backdrop is what is drawn before it, as in the list) */
-    dc d = mk(&ecard[0], "ecards", CARD_X, LIST_TOP + 10, CARD_W, 78 * 3 + 68, FACE_MG, 0);
+    dc d = mk(&ecard[0], "ecards", CARD_X, LIST_TOP + 10, CARD_W, 78 * 3 + 68, FACE_MG, 1);   /* P3q: shapes recorded (below) */
     for (int i = 0; i < 4; i++) {
         float top = LIST_TOP + 10 + 78 * i;
         /* P3i: no blur of the layer under each card (only the card above's shadow: ~200 ms for nothing seen) */
@@ -708,6 +711,7 @@ static void build_ecards(void)
     d = mk(&ecard[4], "eexit", x, top, w, 32, 44, 1);
     d_glass(&d, x, top, w, 32, 16, 1, 1);
     d_text(&d, TK_IT600, 13, x + 14, top + 8 + 13, "Exit Emergency", 0, 0, INK, 0);
+    tk_a8_free(&ecard[0].glass);
     tk_layer_prepare(&ecard[0]);
     tk_layer_prepare(&ecard[4]);
 }
@@ -1277,7 +1281,7 @@ static void cc_link(void)
 static void build_cc_grid(void)
 {
     relayer(&ccgrid);
-    dc d = mk(&ccgrid, "cc-grid", 24, 92, 342, 346, 44, 0);
+    dc d = mk(&ccgrid, "cc-grid", 24, 92, 342, 346, 44, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
     /* the connectivity tile and its four circles (air, cell / Wi-Fi, Bluetooth) */
     cc_tile(&d, 24, 92, 160.66f, 156, 28, 0);
     static const char *CI[4] = { "cc-air", "cc-cell", "cc-wifi", "cc-bt" };
@@ -1314,6 +1318,7 @@ static void build_cc_grid(void)
     cc_tile(&d, CCX[1], 354.66f, 70, 70, 35, 0); cc_glyph(&d, "cc-calc", CCX[1], 354.66f, 24, 24);
     cc_tile(&d, CCX[2], 354.66f, 70, 70, 35, 0); cc_glyph(&d, "cc-wifi2", CCX[2], 354.66f, 22, 22);
     cc_tile(&d, CCX[3], 354.66f, 70, 70, 35, 0); cc_glyph(&d, "cc-camera", CCX[3], 354.66f, 24, 24);
+    tk_a8_free(&ccgrid.glass);
     tk_layer_prepare(&ccgrid);
 }
 static void cc_levels(void)
