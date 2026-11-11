@@ -289,8 +289,8 @@ static void build_comp(nir_builder *b)
  *   +64  radius ccx ccy ex      (flag 128) the rounded clip: centre, half size - radius   +80  ey ft it fb
  *   +96  ib len k s0            (flag 8) fade = sat((fy-ft)*it) * sat((fb-fy)*ib); (16 / 32) the 3-slice
  *   +112 s1 mstride mask(64)    +128 backdrop(64) bstride bk   +144 bw bh -  -     (flag 4) glass
- * v6, (flags 4 | 256) Liquid Glass: the mask is the layer's lens map (sbos/kern/lens.h: a 32-bit word per px, mstride
- * in px), the backdrop refracted and dispersed (bilinear), tinted, shaded and rimmed (lens_px);
+ * v8, (flags 4 | 256) Liquid Glass: the mask is the layer's lens map (sbos/kern/lens.h: a 32-bit word per px, mstride
+ * in px), the backdrop refracted (bilinear), toned and lit (lens_px); +152 the lens's scale;
  * and the bins at O_BIN: one per 32 x 32 px (BIN_W per row), BIN_B bytes: [0] count (255: not damaged, the pixels
  * keep what the buffer holds), [1..] quad indices bottom to top. A pixel only visits its bin's quads. */
 #ifndef C2_PX
@@ -343,18 +343,9 @@ static nir_def *bil_bd(nir_builder *b, nir_def *bd, nir_def *bs, nir_def *bw, ni
    nir_def *bot = nir_flrp(b, fetch16(b, bd, bs, bw, bh, ju, jv1), fetch16(b, bd, bs, bw, bh, ju1, jv1), tu);
    return nir_fmul_imm(b, nir_f2f32(b, nir_flrp(b, top, bot, tv)), 1.0 / 255.0);
 }
-/* one channel (the byte at shift sh) of the backdrop's nearest px to the screen point (px, py), 0..1 */
-static nir_def *near_bd(nir_builder *b, nir_def *bd, nir_def *bs, nir_def *bw, nir_def *bh, nir_def *bk, nir_def *px,
-                        nir_def *py, unsigned sh)
-{
-   nir_def *ix = clampi(b, nir_f2i32(b, nir_ffloor(b, nir_fmul(b, px, bk))), bw);
-   nir_def *iy = clampi(b, nir_f2i32(b, nir_ffloor(b, nir_fmul(b, py, bk))), bh);
-   nir_def *p = ld32(b, addr_at(b, bd, nir_iadd(b, nir_imul(b, iy, bs), ix)));
-   return nir_fmul_imm(b, nir_u2f32(b, nir_iand_imm(b, nir_ushr_imm(b, p, sh), 0xff)), 1.0 / 255.0);
-}
-static nir_def *fsat_imm(nir_builder *b, nir_def *v) { return nir_fsat(b, v); }
-/* v6, Liquid Glass (flags 4 | 256): the mask is the layer's lens map (sbos/kern/lens.h, whose lens_shade this
- * follows step by step); returns the shaded backdrop (opaque) */
+/* v8, Liquid Glass (flags 4 | 256): the mask is the layer's lens map (sbos/kern/lens.h, whose lens_shade this
+ * follows step by step): the backdrop at p + o (bilinear), the tone by its luminance, the light e; returns the
+ * shaded backdrop (opaque) */
 static nir_def *lens_px(nir_builder *b, nir_def *M, nir_def *fx, nir_def *fy, nir_def *bd, nir_def *bs, nir_def *bw,
                         nir_def *bh, nir_def *bk, nir_def *ls)
 {
@@ -362,39 +353,18 @@ static nir_def *lens_px(nir_builder *b, nir_def *M, nir_def *fx, nir_def *fy, ni
    nir_def *q4 = nir_fmul_imm(b, ls, 0.25);
    nir_def *ox = nir_fmul(b, nir_i2f32(b, nir_ishr_imm(b, nir_ishl_imm(b, M, 16), 24)), q4);
    nir_def *oy = nir_fmul(b, nir_i2f32(b, nir_ishr_imm(b, nir_ishl_imm(b, M, 8), 24)), q4);
-   nir_def *d = nir_fmul_imm(b, nir_u2f32(b, nir_ushr_imm(b, M, 24)), 0.25);
+   nir_def *e = nir_fmul_imm(b, nir_i2f32(b, nir_ishr_imm(b, M, 24)), 1.0 / 127.0);
    nir_def *g = bil_bd(b, bd, bs, bw, bh, bk, nir_fadd(b, fx, ox), nir_fadd(b, fy, oy));
-   nir_variable *rgbv = nir_local_variable_create(b->impl, glsl_vec_type(3), "lens");
-   /* dispersion: red and blue nearest (the backdrop is the wallpaper blurred 14 pt: neighbours differ by a level) */
-   nir_def *r = near_bd(b, bd, bs, bw, bh, bk, nir_ffma_imm1(b, ox, 1.0 + LENS_D, fx), nir_ffma_imm1(b, oy, 1.0 + LENS_D, fy), 16);
-   nir_def *bl = near_bd(b, bd, bs, bw, bh, bk, nir_ffma_imm1(b, ox, 1.0 - LENS_D, fx), nir_ffma_imm1(b, oy, 1.0 - LENS_D, fy), 0);
-   nir_store_var(b, rgbv, nir_vec3(b, r, ch(b, g, 1), bl), 7);
-   nir_def *rgb = nir_load_var(b, rgbv);
-   /* the adaptive tint */
+   nir_def *rgb = nir_vec3(b, ch(b, g, 0), ch(b, g, 1), ch(b, g, 2));
+   /* the tone: .82 c + mix(.04, .18, sat((Y - .40) x 10)) */
    nir_def *Y = nir_fdot3(b, rgb, nir_imm_vec3(b, .2126f, .7152f, .0722f));
-   nir_def *wv = nir_fmul_imm(b, fsat_imm(b, nir_fmul_imm(b, nir_fadd_imm(b, nir_fneg(b, Y), .62), 2.0)), .10);
-   nir_def *kv = nir_fmul_imm(b, fsat_imm(b, nir_fmul_imm(b, nir_fadd_imm(b, Y, -.62), 2.5)), .12);
-   nir_def *keep = nir_fsub(b, nir_fsub(b, nir_imm_float(b, 1), wv), kv);
-   nir_store_var(b, rgbv, nir_ffma(b, rgb, keep, wv), 7);
-   /* the inner shadow and the rim */
-   nir_push_if(b, nir_flt_imm(b, d, LENS_SHW));
-   {
-      nir_def *m2 = nir_ffma(b, ox, ox, nir_fmul(b, oy, oy));
-      nir_def *im = nir_frsq(b, nir_fmax(b, m2, nir_imm_float(b, 1e-6f)));
-      nir_def *f = nir_fmul(b, nir_fneg(b, nir_ffma(b, ox, nir_imm_float(b, LENS_LX), nir_fmul_imm(b, oy, LENS_LY))), im);
-      f = nir_bcsel(b, nir_flt_imm(b, m2, 1e-6f), nir_imm_float(b, 0), f);
-      nir_def *e = nir_fadd_imm(b, nir_fmul_imm(b, d, -1.0 / LENS_SHW), 1.0);
-      nir_def *sh = nir_fmul(b, nir_fmul_imm(b, nir_fmul(b, e, e), .20), nir_fadd_imm(b, nir_fmul_imm(b, f, -.45), .55));
-      nir_def *fp = nir_fmax(b, f, nir_imm_float(b, 0)), *fn = nir_fmax(b, nir_fneg(b, f), nir_imm_float(b, 0));
-      nir_def *e1 = fsat_imm(b, nir_fadd_imm(b, nir_fmul_imm(b, d, -1.0 / LENS_RIM), 1.0));
-      nir_def *gg = fsat_imm(b, nir_fadd_imm(b, nir_fmul_imm(b, d, -1.0 / LENS_GLOW), 1.0));
-      nir_def *spec = nir_fadd_imm(b, nir_ffma(b, nir_fmul_imm(b, fp, .62), fp, nir_fmul_imm(b, nir_fmul(b, fn, fn), .30)), .16);
-      nir_def *sp = nir_ffma(b, e1, spec, nir_fmul(b, nir_fmul_imm(b, fp, .14), nir_fmul(b, gg, gg)));
-      nir_def *v = nir_fmul(b, nir_load_var(b, rgbv), nir_fsub(b, nir_imm_float(b, 1), sh));
-      nir_store_var(b, rgbv, nir_ffma(b, nir_fsub(b, nir_imm_float(b, 1), v), sp, v), 7);
-   }
-   nir_pop_if(b, NULL);
-   nir_def *o = nir_load_var(b, rgbv);
+   nir_def *lt = nir_fsat(b, nir_fmul_imm(b, nir_fadd_imm(b, Y, -.40), 10.0));
+   nir_def *add = nir_fadd_imm(b, nir_fmul_imm(b, lt, .14), .04);
+   nir_def *v = nir_ffma(b, rgb, nir_imm_float(b, .82f), add);
+   /* the light: e > 0 white added, else darkened */
+   nir_def *up = nir_ffma(b, nir_fsub(b, nir_imm_float(b, 1), v), e, v);
+   nir_def *dn = nir_fmul(b, v, nir_fadd_imm(b, e, 1.0));
+   nir_def *o = nir_bcsel(b, nir_flt(b, nir_imm_float(b, 0), e), up, dn);
    return nir_vec4(b, ch(b, o, 0), ch(b, o, 1), ch(b, o, 2), nir_imm_float(b, 1));
 }
 
