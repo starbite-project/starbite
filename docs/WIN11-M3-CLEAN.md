@@ -740,3 +740,26 @@ EParkSecondaries; levels 5/6 keep their behaviour. The module no longer fits src
 is no SOLO image this time; `windows-big4j.uefi` (86bf0192...) = t32s-nocache + this module, FV grown as big3i.
 Built with explicit (UINTN) register addresses (unsigned long is 32-bit in this ABI). Request:
 `win-m3-clean-big4j-request.md`. Not run.
+
+## 39. Evening batch: touchdiag-2, sbxta-2 service switch, big4k variants, big3b boost (staged, not run)
+
+- **Touch root cause (Fable read of S6SY761Touch + Exynos9810Hsi2c):** nothing must fail on an M3 only; ranked:
+  (1) ~40 % a transient I2C failure becomes an all-up: the touch driver sends all-up on one failed read with no retry
+  (Device.c 2771/2804), while libsb touch.c retries 3x; M3-specific suspect: the HSI2C driver soft-resets the
+  controller at every sequence start and completes on TRANSFER_DONE without waiting for MASTER_BUSY to clear
+  (controller.cpp 519/380/921), unlike libsb hsi2c.c. (2) ~30 % the chip itself releases (noise/heat; driver ignores
+  status events). (3) ~10 % installed binary older / queue flush. (4) ~5 % lost HSI2C interrupt (250 ms timeout).
+  (5) ~5 % scan time. (6) <5 % memory ordering (state is under locks; Device memory is in order). The overflow branch
+  is dead code (remain <= 63).
+- **touchdiag-2** (cbd9f5a, 070dad9a...): touchdiag-1 + up to 3 tries per I2C read before an all-up (SBTOUCH_RETRY),
+  DiagI2cRetry/RetryOk, chip status events in the trace, a second self-test pass 200 us apart.
+- **sbxta-2** (6328cd2, 5dfacf79...): opt-in Parameters\DisableOnM3Services (REG_MULTI_SZ): M3 boots set Start=4 and
+  save the original under sbxta\Saved (first value kept), per-user template instances too; A55 boots restore all
+  Saved values, list or no list. Default (no list) = sbxta-1. Offline switch: tools/woa/win-m3/hive-sbxta-services.py.
+- **M3Early v19, build flag M3VAR:** bits 0..1 at level 7 = FlexPMU mode (1 order only, 2 per-core steps without
+  reset, 3 reset only): big4k1 54464dce, big4k2 b5395d05, big4k3 4146c3e7 (pick by big4j's last =M3P line).
+  Bit 4 = boost governor (2314 MHz above 2002 only below 60 C, back to 2002 on the next beat at >= 70 C): big3b
+  e1152afb (level 5). Checked: big4j's module rebuilt with M3VAR 0 has identical code (8 debug-ID bytes differ);
+  big3b vs a level-5 rebuild differs only in the governor; the level-5 rebuild vs big3i's module differs by the
+  EParkCore code move only (same steps). Fixed: 93a46a8 had broken the level 5/6 builds (unused FlexPMU helpers).
+Queue for tonight with order and pass criteria: notes folder `win-m3-clean-queue-evening.md`.
