@@ -49,6 +49,21 @@ echo sbfps hw exit %errorlevel% >> gputest.log
 rem the SV_VertexID variant last: on the Mali it crashed (T13m: Panfrost has no load_vertex_id_zero_base)
 sbtex.exe hw sbtex-hw-vertexid.log vertexid >> gputest.log 2>&1
 echo sbtex hw vertexid exit %errorlevel% >> gputest.log
+rem GL1 (docs/WIN11-GPU-CAPS.md 5a): OpenGL on the Mali, Mesa WGL + Panfrost (sb-patches/0136), app-local in gl\
+rem (own folder: no other test may load that opengl32.dll); then the same ICD on softpipe, which checks the WGL
+rem plumbing alone. Output in gputest.log; the frames in umdlog\sbgl-*.ppm.
+if exist %D%\sbgl.exe (
+  if not exist %D%\gl mkdir %D%\gl
+  move /y %D%\sbgl.exe %D%\gl\ > nul
+  move /y %D%\opengl32.dll %D%\gl\ > nul
+  move /y %D%\libgallium_wgl.dll %D%\gl\ > nul
+)
+if exist %D%\gl\sbgl.exe pushd %D%\gl
+if exist %D%\gl\sbgl.exe sbgl.exe hw %D%\gl\sbgl.log C:\ProgramData\Starbite\umdlog\sbgl-hw.ppm >> %D%\gputest.log 2>&1
+if exist %D%\gl\sbgl.exe echo sbgl hw exit %errorlevel% >> %D%\gputest.log
+if exist %D%\gl\sbgl.exe cmd /c "set GALLIUM_DRIVER=softpipe&& sbgl.exe any %D%\gl\sbgl.log C:\ProgramData\Starbite\umdlog\sbgl-softpipe.ppm" >> %D%\gputest.log 2>&1
+if exist %D%\gl\sbgl.exe echo sbgl softpipe exit %errorlevel% >> %D%\gputest.log
+if exist %D%\gl\sbgl.exe popd
 rem T37: the sweep (sb-sweep.bat: ~27 surfaces, each as a GDI shot and a DWM dump, then the event logs); it replaces
 rem T36's shell steps (the keyboard A/B and the hit grids are in it). Run with --full-sec 900 and no keys self-test.
 if exist %D%\sb-sweep.bat call %D%\sb-sweep.bat

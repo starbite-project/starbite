@@ -217,11 +217,28 @@ FL 11_0 and D3D12 need tessellation, which the G72 doesn't have.
 | 5 | `SUPPORT_D3D10_1`, real `GetCaps` | cycle | games that probe 10_1 |
 | 6 | wined3d app-local for D3D9 games | user | D3D9 games |
 
-**Started today (no phone):**
-- **(a)** this plan;
-- **(b)** the GD crash read from WER (§2);
-- **(c)** the Mesa WGL target configured with Panfrost in the VM, to see what breaks;
-- **(d)** the toolchain question for x64/ARM64EC, settled with the research in §5a.
+**Done today (2026-11-11, no phone):**
+- **The plan, and the GD diagnosis** (§2).
+- **Mesa's GL stack builds for ARM64** in the VM (`~/sbmesa/build-wgl`: `-Dopengl=true`, softpipe + panfrost,
+  same cross file as sbumd). Two fixes were needed, both **sb-patches/0135**:
+  - UCRT's `wchar.h` pulls in `arm_neon.h` under clang-cl on ARM64, and its global `float16_t` (`__fp16`) clashed
+    with `ir.h`'s global alias of `mesa::float16_t`. The alias is gone; its six users say `mesa::float16_t`.
+  - The ARB program lexer called `isatty` (flex on a Linux build host). It is now `never-interactive`, like
+    Mesa's other two lexers.
+- **sb-patches/0136: Panfrost in the WGL target** (`targets/wgl/wgl.c`, meson):
+  - `panfrost` is tried first, unless `LIBGL_ALWAYS_SOFTWARE` is set;
+  - screen creation is d3d10umd's: `malikm_open()` takes the shim's D3DKMT path when no runtime is bound, plus
+    driconf;
+  - present maps the back buffer and `StretchDIBits` it into the window DC (one CPU copy).
+  - Output: `libgallium_wgl.dll` (18.4 MB) + `opengl32.dll`.
+- **`tools/win/mesa/tests/sbgl.cpp`:** the native GL test (clear, GL 1.1, GLSL + VBO, texture, FBO, swap rate;
+  `hw` fails on a software renderer).
+- **sb-gputest.cmd** runs it app-local from `gl\`, on the Mali and then on softpipe.
+- **Stage `sbwddm-t43`** = T42 + that test.
+- **Next, once T43 has run:**
+  - fix what sbgl finds;
+  - then the x64 question: an ARM64EC build needs clang ≥ 19 or MSVC, plus ARM64EC libraries; an x64 build needs
+    x64 libraries. Either way, GD is then tested with an app-local opengl32.dll in its folder.
 
 ## 7. What the user can do meanwhile
 

@@ -1,0 +1,169 @@
+diff --git a/src/gallium/targets/wgl/meson.build b/src/gallium/targets/wgl/meson.build
+index 3a194b3..3a6b045 100644
+--- a/src/gallium/targets/wgl/meson.build
++++ b/src/gallium/targets/wgl/meson.build
+@@ -3,6 +3,14 @@
+ 
+ gallium_wgl_link_args = []
+ 
++# sb-patches/0136: Panfrost (the Mali through sbwddm)
++wgl_panfrost_args = []
++wgl_panfrost_deps = []
++if with_gallium_panfrost
++  wgl_panfrost_args = ['-DGALLIUM_PANFROST']
++  wgl_panfrost_deps = [driver_panfrost, idep_xmlconfig]
++endif
++
+ wgl_def = custom_target(
+   'gallium_wgl.def',
+   input: 'gallium_wgl.def.in',
+@@ -14,6 +22,7 @@ gallium_wgl_name = get_option('gallium-wgl-dll-name')
+ libgallium_wgl = shared_library(
+   gallium_wgl_name,
+   ['wgl.c'],
++  c_args : wgl_panfrost_args,
+   vs_module_defs : wgl_def,
+   include_directories : [
+     inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux, inc_wgl, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers,
+@@ -24,7 +33,7 @@ libgallium_wgl = shared_library(
+   ],
+   dependencies : [
+     dep_ws2_32, idep_nir, idep_mesautil, driver_swrast,
+-    driver_d3d12, driver_zink, winsys_d3d12_wgl
++    driver_d3d12, driver_zink, winsys_d3d12_wgl, wgl_panfrost_deps
+   ],
+   link_args : gallium_wgl_link_args,
+   name_prefix : '',
+diff --git a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
+index ade8397..337f761 100644
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -63,6 +63,90 @@
+ #include "zink/zink_public.h"
+ #endif
+ 
++#ifdef GALLIUM_PANFROST
++/* Starbite (sb-patches/0136, docs/WIN11-GPU-CAPS.md 5a): OpenGL on the Mali. Panfrost reaches sbwddm through the
++ * libdrm shim's D3DKMT path (include/win32-compat/malikm_drm.c: one D3DKMT device and context per process, the
++ * same private-data ABI as sbumd); frames go to the window with GDI, one CPU copy, as d3d10umd's software runtime
++ * did on the G52. */
++#include <io.h>
++#include <stdlib.h>
++#include "panfrost/drm/panfrost_drm_public.h"
++#include "util/driconf.h"
++#include "util/macros.h"
++#include "util/xmlconfig.h"
++#include "util/u_inlines.h"
++#include "util/format/u_format.h"
++int malikm_open(void);
++void glsl_type_singleton_init_or_ref(void);
++static const driOptionDescription wgl_pan_driconf[] = {
++#include "panfrost/driinfo_panfrost.h"
++};
++static driOptionCache wgl_pan_info, wgl_pan_cache;
++static bool use_panfrost = false;
++
++static struct pipe_screen *
++wgl_panfrost_create(void)
++{
++   int fd = malikm_open();
++   if (fd < 0)
++      return NULL;
++   struct pipe_screen_config config = {
++      .options = &wgl_pan_cache,
++      .options_info = &wgl_pan_info,
++   };
++   if (!wgl_pan_info.info) {
++      glsl_type_singleton_init_or_ref();
++      driParseOptionInfo(&wgl_pan_info, wgl_pan_driconf, ARRAY_SIZE(wgl_pan_driconf));
++   }
++   struct pipe_screen *screen = panfrost_drm_screen_create(fd, &config);
++   _close(fd); /* the screen keeps its own duplicate */
++   return screen;
++}
++
++static void
++wgl_panfrost_present(struct pipe_context *pipe, struct pipe_resource *res, HDC hDC)
++{
++   const struct util_format_description *desc = util_format_description(res->format);
++   unsigned w = res->width0, h = res->height0;
++   struct pipe_transfer *xfer;
++
++   if (!pipe || !desc || desc->block.bits != 32 || !hDC)
++      return;
++   const uint8_t *map = pipe_texture_map(pipe, res, 0, 0, PIPE_MAP_READ, 0, 0, w, h, &xfer);
++   if (!map)
++      return;
++   /* GDI wants B, G, R, X in memory. */
++   bool rgba = desc->swizzle[0] == PIPE_SWIZZLE_X;
++   uint32_t *bits = malloc((size_t)w * h * 4);
++   if (bits) {
++      for (unsigned y = 0; y < h; y++) {
++         const uint32_t *src = (const uint32_t *)(map + (size_t)y * xfer->stride);
++         uint32_t *dst = bits + (size_t)y * w;
++         if (rgba) {
++            for (unsigned x = 0; x < w; x++) {
++               uint32_t p = src[x];
++               dst[x] = (p & 0xff00ff00u) | ((p & 0xffu) << 16) | ((p >> 16) & 0xffu);
++            }
++         } else {
++            memcpy(dst, src, (size_t)w * 4);
++         }
++      }
++   }
++   pipe_texture_unmap(pipe, xfer);
++   if (!bits)
++      return;
++   BITMAPINFO bmi = {0};
++   bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
++   bmi.bmiHeader.biWidth = (LONG)w;
++   bmi.bmiHeader.biHeight = -(LONG)h; /* top-down, as gdi_sw_display: the GL frontend flips window framebuffers */
++   bmi.bmiHeader.biPlanes = 1;
++   bmi.bmiHeader.biBitCount = 32;
++   bmi.bmiHeader.biCompression = BI_RGB;
++   StretchDIBits(hDC, 0, 0, (int)w, (int)h, 0, 0, (int)w, (int)h, bits, &bmi, DIB_RGB_COLORS, SRCCOPY);
++   free(bits);
++}
++#endif
++
+ #ifdef GALLIUM_LLVMPIPE
+ static bool use_llvmpipe = false;
+ #endif
+@@ -83,6 +167,13 @@ wgl_screen_create_by_name(HDC hDC, const char* driver, struct sw_winsys *winsys)
+ {
+    struct pipe_screen* screen = NULL;
+ 
++#ifdef GALLIUM_PANFROST
++   if (strcmp(driver, "panfrost") == 0) {
++      screen = wgl_panfrost_create();
++      if (screen)
++         use_panfrost = true;
++   }
++#endif
+ #ifdef GALLIUM_LLVMPIPE
+    if (strcmp(driver, "llvmpipe") == 0) {
+       screen = llvmpipe_create_screen(winsys);
+@@ -125,6 +216,9 @@ wgl_screen_create(HDC hDC)
+ 
+    const char *const drivers[] = {
+       debug_get_option_gallium_driver(),
++#ifdef GALLIUM_PANFROST
++      sw_only ? "" : "panfrost",
++#endif
+ #ifdef GALLIUM_D3D12
+       sw_only ? "" : "d3d12",
+ #endif
+@@ -178,6 +272,13 @@ wgl_present(struct pipe_screen *screen,
+    struct sw_displaytarget *dt = NULL;
+ #endif
+ 
++#ifdef GALLIUM_PANFROST
++   if (use_panfrost) {
++      wgl_panfrost_present(ctx, res, hDC);
++      return;
++   }
++#endif
++
+ #ifdef GALLIUM_LLVMPIPE
+    if (use_llvmpipe) {
+       winsys = llvmpipe_screen(screen)->winsys;
