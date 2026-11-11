@@ -66,8 +66,9 @@ if exist %D%\gl\sbgl.exe echo sbgl softpipe exit %errorlevel% >> %D%\gputest.log
 if exist %D%\gl\sbgl.exe popd
 rem GL2 (docs/WIN11-GPU-CAPS.md 5a step 2): the same test as an x64 program (sbgl64.exe, run by Windows' x64
 rem emulator like Geometry Dash) with the ICD built for x64 (opengl32-x64.dll, libgallium_wgl-x64.dll -> gl64\)
-rem and, if staged, built for ARM64EC (sbgl-ec.exe, opengl32-ec.dll, libgallium_wgl-ec.dll -> glec\).
-for %%A in (x64 ec) do (
+rem and, if staged, built for ARM64EC (sbgl-ec.exe, opengl32-ec.dll, libgallium_wgl-ec.dll -> glec\) and for x86
+rem (32-bit games: sbgl32.exe, opengl32-x86.dll, libgallium_wgl-x86.dll -> glx86\, run under WOW64).
+for %%A in (x64 ec x86) do (
   if exist %D%\libgallium_wgl-%%A.dll (
     if not exist %D%\gl%%A mkdir %D%\gl%%A
     move /y %D%\libgallium_wgl-%%A.dll %D%\gl%%A\libgallium_wgl.dll > nul
@@ -84,6 +85,11 @@ if exist %D%\glec\sbgl-ec.exe pushd %D%\glec
 if exist %D%\glec\sbgl-ec.exe sbgl-ec.exe hw %D%\glec\sbgl.log C:\ProgramData\Starbite\umdlog\sbgl-ec.ppm >> %D%\gputest.log 2>&1
 if exist %D%\glec\sbgl-ec.exe echo sbgl ec exit %errorlevel% >> %D%\gputest.log
 if exist %D%\glec\sbgl-ec.exe popd
+if exist %D%\sbgl32.exe move /y %D%\sbgl32.exe %D%\glx86\ > nul
+if exist %D%\glx86\sbgl32.exe pushd %D%\glx86
+if exist %D%\glx86\sbgl32.exe sbgl32.exe hw %D%\glx86\sbgl.log C:\ProgramData\Starbite\umdlog\sbgl-x86.ppm >> %D%\gputest.log 2>&1
+if exist %D%\glx86\sbgl32.exe echo sbgl x86 exit %errorlevel% >> %D%\gputest.log
+if exist %D%\glx86\sbgl32.exe popd
 rem T37: the sweep (sb-sweep.bat: ~27 surfaces, each as a GDI shot and a DWM dump, then the event logs); it replaces
 rem T36's shell steps (the keyboard A/B and the hit grids are in it). Run with --full-sec 900 and no keys self-test.
 if exist %D%\sb-sweep.bat call %D%\sb-sweep.bat

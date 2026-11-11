@@ -263,6 +263,10 @@ FL 11_0 and D3D12 need tessellation, which the G72 doesn't have.
   - **ARM64X** (one `libgallium_wgl.dll` for ARM64 and x64 processes, as a registered ICD needs) links only with
     two workarounds (`build/win/gl-ec/arm64x-experimental/`). Whether the loader accepts it is unknown;
   - it is in T44 as `glec\`, and in the GD kit as `gd-gl-on.cmd ec`.
+- **The x86 (32-bit) ICD builds too** (`~/sbmesa/build-wgl-x86`, `cross-x86.ini` + `-mfxsr`: clang-cl declares
+  `_fxsave`, used by `u_cpu_detect.c`, only with FXSR enabled). In T44 as `glx86\` with `sbgl32.exe`.
+- **ARM64X sbumd** (D3D11 for x64 games): being built (patches 0141+, `build/win/umd-arm64x/`). It needs a careful
+  phone test, since installing it replaces the UMD for DWM too.
 - **Stage `sbwddm-t44`:** T42 + the KMD hang forensics (WIN11-GPU.md §6.52) + the GL tests on ARM64 and x64.
 - **The attended GD kit `build/win/gl-kit`:**
   - `gd-gl-on.cmd` copies the x64 ICD into the Geometry Dash folder and marks it; `gd-gl-off.cmd` removes exactly
