@@ -75,6 +75,10 @@ int surv_last2(void);
 int surv_last2_set(int on, const char *why);
 int surv_last2_battery(int pct, int avg_mv, int charger); /* services.c: 1 = switch off now */
 
+/* ---- the offline survival guide (guide/sbguide.h; kern/guide.c) ---- */
+struct sbg_chapter;
+const struct sbg_chapter *surv_guide(int *n);      /* the chapters (struct in guide/sbguide.h) */
+
 /* ---- sensors ---- */
 const char *surv_sensors_why(void);
 
