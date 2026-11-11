@@ -162,6 +162,12 @@ static inline void lens_unword(uint32_t m, float *cov, float *ox, float *oy, flo
     *e = (float)(int8_t)(uint8_t)(m >> 24) * (1.0f / 127);
 }
 
+/* v10: the backdrop's saturation (about its luminance, clamped), before lens_shade */
+static inline void lens_saturate(float rgb[3], float k)
+{
+    float Y = .2126f * rgb[0] + .7152f * rgb[1] + .0722f * rgb[2];
+    for (int c = 0; c < 3; ++c) rgb[c] = lens_sat(Y + (rgb[c] - Y) * k);
+}
 /* rgb: the refracted backdrop, 0..1; shaded in place (the shader does exactly these steps: comp2, flag 256) */
 static inline void lens_shade(float rgb[3], float e)
 {

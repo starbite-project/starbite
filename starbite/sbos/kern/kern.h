@@ -539,6 +539,9 @@ struct gc_quad {
     uint32_t bw, bh;
     float lx, ly, lw, lh, lb, lt, lc, lr;   /* v9 (GC_LENS): the glass shape (screen px; radius in radius) and its lens
                                              * (lens.h lens_par); the quad is a transparent solid, its src unused */
+    float lsat;                         /* v10 (GC_LENS): the backdrop's saturation (0 = 1) */
+    uint32_t live;                      /* v10 (GC_LENS, the caller's): the backdrop is its first `live` quads, blurred
+                                         * (gpucomp_backdrop); 0: bd as given */
     const uint8_t *occ;                 /* (CPU only, may be 0) src's block map, occ_w x occ_h: bins skip empty blocks */
     uint32_t occ_w, occ_h;
     uint32_t gen;                       /* (CPU only) the caller's content stamp of src / mask / backdrop */
@@ -560,6 +563,11 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *q, unsi
                            unsigned nr, uint64_t *us);
 /* v7: a big move's frame: composed at half resolution (the pool's top), then 2x into dst (the whole screen) */
 int gpucomp_compose_half(void *dst, uint32_t bg, const struct gc_quad *q, unsigned n, uint64_t *us);
+/* v10, a live glass backdrop: the quads composed at a quarter of the screen, then blurred (dual filter down to 1/16,
+ * up to 1/8) into backdrop `level` (0 .. GPUCOMP_LEVELS - 1); *bd etc. are what a GC_LENS quad points at. 1 done */
+#define GPUCOMP_LEVELS 3
+int gpucomp_backdrop(unsigned level, uint32_t bg, const struct gc_quad *q, unsigned n, const void **bd,
+                     uint32_t *bstride, uint32_t *bw, uint32_t *bh, float *bk, uint64_t *us);
 int uibench_setup(void);                /* 1.2-alpha26 P0: the UI compositor's benchmark (uibench.c) */
 void uibench_set(const char *label, unsigned ncores, const unsigned *cores, int worker_only);
 int app_is_test(int a);
