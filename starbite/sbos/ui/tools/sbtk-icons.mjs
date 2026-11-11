@@ -51,7 +51,12 @@ try {
   add('cc-flame', q('#ccEm svg'), 20, 24, 'color:#fff');
   add('a30-calc', `sbIcons().apps.calc`, 30, 30);
   /* the apps' own glyphs (P2l): taken now, while their screen is open (later states replace the app window) */
-  const now = async (name, sel, w, h, style = '') => { const svg = await c.ev(q(sel)); add(name, JSON.stringify(svg), w, h, style); };
+  /* captured now, its ids made its own (the page's other tiles reuse the same gradient ids after a reload) */
+  const now = async (name, sel, w, h, style = '') => {
+    const svg = (await c.ev(q(sel))).replace(/id="([^"]+)"/g, `id="$1-${name}"`).replace(/url\(#([^)]+)\)/g, `url(#$1-${name})`)
+      .replace(/href="#([^"]+)"/g, `href="#$1-${name}"`);
+    add(name, JSON.stringify(svg), w, h, style);
+  };
   await c.ev(`sbSet('cc', 0); sbSet('app', ['phone', 1])`);
   for (const k of ['fav', 'rec', 'con', 'pad']) {
     await now('tab-' + k, `.tabs [data-tab=${k}] svg`, 22, 22, 'color:rgba(255,255,255,.6)');
@@ -64,6 +69,12 @@ try {
   await c.ev(`document.querySelector('[data-thread="Mum"]').click()`);
   await now('back', '#back svg', 12, 20, 'color:#6fb3ff');
   await now('send', '#send svg', 16, 16);
+  /* Emergency mode (P2m): its cards' tiles, the pill's flame, the star's warm glow */
+  await c.reload();
+  await c.ev(`sbSet('emergency', 1)`);
+  for (const [i, k] of ['heat', 'power', 'sos', 'medical'].entries()) await now('e46-' + k, `#nscroll .vgroup:nth-child(${i + 1}) .vhead > span svg`, 46, 46);
+  await now('em-flame', '#lock .empill svg', 10, 10);
+  add('star-e', q('svg.star'), 36, 36, 'opacity:.9', 30);
   /* the page as the lazy entries above expect it (the focus sheet's thumb, the Control Centre) */
   await c.reload();
   await c.ev(`sbSet('focus', 'win11'); sbSet('focus', ''); sbSet('unlock', 1); sbSet('cc', 1)`);
@@ -81,7 +92,7 @@ try {
       d.innerHTML = '<div style="position:absolute;left:${it.pad}px;top:${it.pad}px;width:${it.w}px;height:${it.h}px;${it.style}">' + ${JSON.stringify(svg)} + '</div>';
       const s = d.querySelector('svg'); s.style.display = 'block'; s.style.position = 'absolute'; s.style.left = '0'; s.style.top = '0';
       s.style.width = '${it.w}px'; s.style.height = '${it.h}px'; s.style.margin = '0'; s.style.opacity = '1'; s.removeAttribute('class');
-      ${it.name === 'star' ? "s.parentNode.style.filter = 'drop-shadow(0 0 18px rgba(170,200,255,.9))';" : ''} })()`);
+      ${it.name === 'star' ? "s.parentNode.style.filter = 'drop-shadow(0 0 18px rgba(170,200,255,.9))';" : it.name === 'star-e' ? "s.parentNode.style.filter = 'drop-shadow(0 0 18px rgba(255,170,120,.9))';" : ''} })()`);
     await c.frames(2);
     const W = it.w + 2 * it.pad, H = it.h + 2 * it.pad;
     await c.shot(join(out, it.name + '.png'), { x: 0, y: 0, width: W, height: H });

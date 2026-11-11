@@ -440,7 +440,7 @@ void sh_torch(int lit)
 /* ---- the self test --------------------------------------------------------------------------------------- */
 #ifdef SBOS_SELFTEST_NEXT
 typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
-static const char *const FILM_NAME[9] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages" };
+static const char *const FILM_NAME[10] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency" };
 /* tools/films.txt's scripts (pt, ms) */
 static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 1300 } };
 static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 354, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 195, 354, 0, 0, 80 },
@@ -465,6 +465,9 @@ static const step S_PHONE[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330,
 static const step S_MSGS[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 152, 736, 0, 0, 80 },
                                { 0, 0, 0, 0, 0, 1000 }, { 1, 195, 204, 0, 0, 80 }, { 0, 0, 0, 0, 0, 800 }, { 1, 50, 63, 0, 0, 80 },
                                { 0, 0, 0, 0, 0, 600 }, { 2, 195, 795, 200, 450, 260 }, { 0, 0, 0, 0, 0, 1200 } };
+static const step S_EMERG[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 318, 720, 0, 0, 950 }, { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 795, 195, 330, 220 },
+                                { 0, 0, 0, 0, 0, 900 }, { 2, 320, 450, 60, 450, 200 }, { 0, 0, 0, 0, 0, 900 }, { 2, 80, 20, 80, 640, 300 },
+                                { 0, 0, 0, 0, 0, 1200 }, { 1, 195, 650, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };
 static struct { const step *s; int n, i, down; uint64_t t0; float s0; int film; } F;
 static int st_started, st_failed, clock_ok;
 int next_selftest_clock_ok(void) { return clock_ok; }
@@ -488,7 +491,8 @@ static void film_start(int film)
     case 5: F.s = S_CC; F.n = 11; break;
     case 6: F.s = S_APP; F.n = 7; break;
     case 7: F.s = S_PHONE; F.n = 17; break;
-    default: F.s = S_MSGS; F.n = 11; break;
+    case 8: F.s = S_MSGS; F.n = 11; break;
+    default: F.s = S_EMERG; F.n = 11; break;
     }
     /* each film from the plain lock screen */
     sh_set("reset", "", 0);
@@ -520,7 +524,7 @@ int next_selftest_step(void)
             clock_ok = comp.last_px != 0;
             status_now();
         }
-        sb_log("selftest: next: the nine films (unlock, group, focus, holds, pages, cc, app, phone, messages) with synthetic touches");
+        sb_log("selftest: next: the ten films (unlock, group, focus, holds, pages, cc, app, phone, messages, emergency) with synthetic touches");
         film_start(0);
         return 1;
     }
@@ -549,7 +553,7 @@ int next_selftest_step(void)
     if (ticking || sh_moving()) return 1;          /* let it settle */
     stats_log(FILM_NAME[F.film]);
     frame_log = 0;
-    if (F.film < 8) { film_start(F.film + 1); return 1; }
+    if (F.film < 9) { film_start(F.film + 1); return 1; }
     {
         /* the present's kernels against uibench's loops, on these buffers and cores (boosted, workers on) */
         static const char *const BN[5] = { "the motion present (2x, rows in pairs)", "the rest copy (tk_memcpy rows)",

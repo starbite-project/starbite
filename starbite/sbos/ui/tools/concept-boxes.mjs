@@ -15,7 +15,7 @@ try {
       const ph = document.getElementById('phone').getBoundingClientRect(), sc = ph.width / 390;
       const f = v => +(v / sc).toFixed(2);
       const L = [];
-      const root = document.getElementById('appwin');
+      const root = document.querySelector(${JSON.stringify(process.env.ROOT || '#appwin')});
       const walk = (el, d) => {
         const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
         if (r.width) L.push('  '.repeat(d) + el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.split(' ').join('.') : '') +

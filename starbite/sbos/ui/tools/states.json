@@ -222,5 +222,46 @@
    "unlock=:1",
    "app=phone:0.5"
   ]
+ },
+ {
+  "name": "em-lock",
+  "js": "sbSet('emergency', 1)",
+  "host": [
+   "emergency=:1"
+  ]
+ },
+ {
+  "name": "em-home",
+  "js": "sbSet('emergency', 1); sbSet('unlock', 1)",
+  "host": [
+   "emergency=:1",
+   "unlock=:1"
+  ]
+ },
+ {
+  "name": "em-home-page2",
+  "js": "sbSet('emergency', 1); sbSet('unlock', 1); sbSet('page', 1)",
+  "host": [
+   "emergency=:1",
+   "unlock=:1",
+   "page=:1"
+  ]
+ },
+ {
+  "name": "em-cc",
+  "js": "sbSet('emergency', 1); sbSet('unlock', 1); sbSet('cc', 1)",
+  "host": [
+   "emergency=:1",
+   "unlock=:1",
+   "cc=:1"
+  ]
+ },
+ {
+  "name": "em-unlock-50",
+  "js": "sbSet('emergency', 1); sbSet('unlock', .5)",
+  "host": [
+   "emergency=:1",
+   "unlock=:0.5"
+  ]
  }
 ]

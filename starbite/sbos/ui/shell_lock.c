@@ -146,9 +146,10 @@ static tk_spring sp_thumb;
 static float boot_a, boot_t;
 static int booting;
 static float now_ms;
+static int EMG;                 /* Emergency mode (the concept's em-mode) */
 
 /* ---- the wallpaper and its glass backdrop ------------------------------------------------------------------ */
-static tk_layer star;
+static tk_layer star, star_e;
 static void build_wall(void)
 {
     /* the wallpaper at half resolution (smooth gradients; the rest frames scale it 2x), the star as a layer over
@@ -160,6 +161,13 @@ static void build_wall(void)
     star.bmp = *st;                       /* a view into the pack */
     star.x = (float)(int)tk_floorf(PT(390 - 34 - 36) - pad + .5f);
     star.y = (float)(int)tk_floorf(PT(56) - pad + .5f);
+    /* Emergency's star: the same with a warm glow (.7 s, with the wallpaper) */
+    tk_layer_init(&star_e, "star-e");
+    const tk_bmp *se = tk_icon("star-e");
+    if (se) star_e.bmp = *se;
+    star_e.x = (float)(int)tk_floorf(PT(390 - 34 - 36) - tk_icon_pad("star-e") + .5f);
+    star_e.y = star.y;
+    star_e.hidden = 1;
     tk_bmp src, sh;
     tk_bmp_new(&src, C->base_half.w, C->base_half.h);
     tk_bmp_copy(&src, 0, 0, &C->base_half, 0, 0, src.w, src.h);
@@ -260,6 +268,19 @@ static void build_lwidgets(void)
     dc d = mk(&lwidgets, "lock-widgets", 0, 210, 390, 92, 0, 1);
     char num[12];
     put_dec(num, ST.pct);
+    if (EMG) {
+        /* Emergency: the battery ring amber, Heat (ready, the phone's temperature), Saving (off) */
+        ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), tk_hex(0xffb547, 1), num, "BATTERY");
+        ring_widget(&d, 285, 0, tk_hex(0xff5a4e, 1), "Off", "SAVING");
+        d_glass(&d, 115, 220, 160, 72, 22, 1, 1);
+        d_text(&d, TK_IT700, 11, 129, 238 + 11, "HEAT", .33f, 0, W(.7f), 0);
+        char v[40] = "Ready \xc2\xb7 ";
+        int k = (int)tk_strlen(v);
+        k += put_dec(v + k, ST.temp);
+        v[k++] = ' '; v[k++] = (char)0xc2; v[k++] = (char)0xb0; v[k++] = 'C'; v[k] = 0;
+        d_text(&d, TK_IT700, 17, 129, 254 + 16, v, 0, 0, INK, 0);
+        return;
+    }
     ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), tk_hex(0x4cd964, 1), num, "BATTERY");
     int n = put_dec(num, ST.temp);
     num[n] = (char)0xc2; num[n + 1] = (char)0xb0; num[n + 2] = 0;
@@ -362,7 +383,7 @@ static float content_h(void)
     /* the last margin (22) collapses with the tools' 12; then their 32, margin 4, padding 14 */
     return y + 32 + 4 + 14;
 }
-static float max_scroll(void) { return tk_maxf(0, content_h() - LIST_H); }
+static float max_scroll(void) { return EMG ? 0 : tk_maxf(0, content_h() - LIST_H); }
 
 static void head_content(dc *d, int g, float top)
 {
@@ -506,6 +527,63 @@ static void build_etool(void)
     d_text(&d, TK_IT600, 13, x + 35, top + 8 + 13, "Lab", 0, 0, INK, 0);
 }
 
+/* Emergency's list (the concept's renderEmergency): four cards and Exit Emergency; made on entering, freed on
+ * leaving (they are about 15 MB) */
+static tk_layer ecard[5], empill;
+typedef struct { const char *icon, *t, *s, *act; } ecard_t;
+static const ecard_t EC[4] = {
+    { "e46-heat", "Survival Heat", "Warms your hands \xc2\xb7 stops at a 65 \xc2\xb0" "C battery", "Survival Heat" },
+    { "e46-power", "Power Saving", "Dims the screen and turns off radios", "Power Saving" },
+    { "e46-sos", "Emergency SOS", "Siren, flashing light and your medical card", "SOS" },
+    { "e46-medical", "Medical Card", "Shown here without unlocking", "Medical Card" } };
+static void build_ecards(void)
+{
+    /* the four cards in one layer (each card's backdrop is what is drawn before it, as in the list) */
+    dc d = mk(&ecard[0], "ecards", 14, LIST_TOP + 10, 362, 78 * 3 + 68, FACE_MG, 0);
+    for (int i = 0; i < 4; i++) {
+        float top = LIST_TOP + 10 + 78 * i;
+        tk_glass_local(d.b, d.b, PT(14) - d.ox, PT(top) - d.oy, PT(362), PT(68), PT(26));
+        d_glass(&d, 14, top, 362, 68, 26, 0, 1);
+        d_icon(&d, EC[i].icon, 25, top + 11, 1);
+        /* b: 19 / 800 / -.5, line-height 1.1 (half-leading floored); .sub 13.5, .82 */
+        d_text(&d, TK_IT800, 19, 83, top + 12.55f + tk_floorf(tk_ascent(TK_IT800, PT(19)) / TK_PT + .5f), EC[i].t, -.5f, 0, INK, 0);
+        d_text(&d, TK_IT400, 13.5f, 83, top + 37.44f + tk_floorf(tk_ascent(TK_IT400, PT(13.5f)) / TK_PT + .5f), EC[i].s, 0, 0, W(.82f), 0);
+        float col = tk_maxf(249, tk_maxf(tw(TK_IT800, 19, EC[i].t, -.5f, 0), tw(TK_IT400, 13.5f, EC[i].s, 0, 0)));
+        d_icon(&d, "chev", 83 + col + 12, top + 27, 1);
+    }
+    float top = LIST_TOP + 10 + 78 * 4 - 10 + 12, w = 14 + tw(TK_IT600, 13, "Exit Emergency", 0, 0) + 14, x = 195 - w / 2;
+    d = mk(&ecard[4], "eexit", x, top, w, 32, 44, 1);
+    d_glass(&d, x, top, w, 32, 16, 1, 1);
+    d_text(&d, TK_IT600, 13, x + 14, top + 8 + 13, "Exit Emergency", 0, 0, INK, 0);
+    tk_layer_prepare(&ecard[0]);
+    tk_layer_prepare(&ecard[4]);
+}
+static void free_ecards(void) { for (int i = 0; i < 5; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } }
+static int cards_pending;       /* vendor cards still to bake again after Emergency (one per idle turn) */
+static void build_card(int g);
+static void free_open(int g);
+static void free_vendor_cards(void)
+{
+    for (int g = 0; g < NG; g++) {
+        free_open(g);
+        relayer(&K[g].closed);
+        relayer(&K[g].chev);
+        tk_bmp_free(&K[g].chev0);
+    }
+    cards_pending = 0;
+}
+static void build_empill(void)
+{
+    /* .empill: 11 / 700 / .08 em, #ffd7d2, padding 4 11, gap 6, rgba(255, 90, 78, .22), a 1 pt inset ring */
+    float tw_ = tw(TK_IT700, 11, "EMERGENCY", .88f, 0), w = 11 + 10 + 6 + tw_ + 11, x = 195 - w / 2;
+    dc d = mk(&empill, "empill", x, 50, w, 22, 2, 0);
+    d_rrect(&d, x, 50, w, 22, 11, TK_RGBA(255, 90, 78, .22f));
+    tk_box_shadow(d.b, PT(x) - d.ox, PT(50) - d.oy, PT(w), PT(22), PT(11), 0, 0, 0, PT(1), TK_RGBA(255, 140, 120, .5f), 1);
+    d_icon(&d, "em-flame", x + 11, 56, 1);
+    d_text(&d, TK_IT700, 11, x + 27, 54 + tk_floorf(tk_ascent(TK_IT700, PT(11)) / TK_PT + .5f), "EMERGENCY", .88f, 0, tk_hex(0xffd7d2, 1), 0);
+    empill.hidden = 1;
+}
+
 /* place every list layer for the current scroll, heights and row animations */
 static void place_list(void)
 {
@@ -537,6 +615,12 @@ static void place_list(void)
     }
     float edy = PT(y - 448);
     etool.y = etool.by + edy;
+    for (int g = 0; g < NG; g++) {
+        if (EMG) K[g].closed.hidden = K[g].open.hidden = 1;
+        K[g].chev.hidden = EMG;
+    }
+    etool.hidden = EMG;
+    ecard[0].hidden = ecard[4].hidden = !EMG;
     list.y = PT(-scroll);
     list.clip_r = (tk_rect){ 0, PT(LIST_TOP), PT(390), PT(LIST_H) };
     lock_ver++;
@@ -582,22 +666,27 @@ static void build_home_sb(void)
 }
 
 /* ---- the home (P1: the concept's first page, drawn once; P2 builds the real one) --------------------------- */
-static void build_home(void)
+static const char *const P2K[8] = { "contacts", "files", "light", "battery", "terminal", "browser", "medical", "sos" };
+static const char *const P2E[8] = { "heat", "power", "sos", "medical", "light", "battery", "contacts", "files" };
+static void build_home_w(void)
 {
-    static const char *P1[8] = { "calendar", "weather", "clock", "camera", "photos", "music", "notes", "calc" };
-    static const char *P1N[8] = { "Calendar", "Weather", "Clock", "Camera", "Photos", "Music", "Notes", "Calculator" };
-    static const char *DK[4] = { "phone", "messages", "browser", "settings" };
-    build_home_sb();
-    dc d;
-    d = mk(&hparts[1], "home-w", 0, 50, 390, 200, 44, 1);
+    relayer(&hparts[1]);
+    dc d = mk(&hparts[1], "home-w", 0, 50, 390, 200, 44, 1);
     d_glass(&d, 24, 60, 158, 158, 24, 0, 1);
     d_glass(&d, 208, 60, 158, 158, 24, 0, 1);
     /* Battery: .lab, .big, three rows */
-    d_icon(&d, "home-batt", 38, 74 + 1.5f, 1);
+    if (EMG) {
+        /* Emergency: the battery glyph amber (#ffb547) */
+        const tk_bmp *ic = tk_icon("home-batt");
+        if (ic) tk_blit_tinted(d.b, ic, (int)tk_floorf(PT(38) - tk_icon_pad("home-batt") - d.ox + .5f),
+                               (int)tk_floorf(PT(74 + 1.5f) - tk_icon_pad("home-batt") - d.oy + .5f), tk_hex(0xffb547, 1));
+    } else
+        d_icon(&d, "home-batt", 38, 74 + 1.5f, 1);
     d_text(&d, TK_IT700, 11.5f, 56, base_of(TK_IT700, 11.5f, 74, 0), "Galaxy S9", .345f, 0, W(.7f), 0);
     d_text(&d, TK_IT800, 38, 38, base_of(TK_IT800, 38, 74 + 14 + 4, 0), "87%", -1.2f, TK_TNUM, INK, 0);
     {
-        static const char *L[3] = { "Battery", "Phone", "Lasts" }, *R[3] = { "31 \xc2\xb0" "C", "41 \xc2\xb0" "C", "19 h" };
+        static const char *L[3] = { "Battery", "Phone", "Lasts" };
+        const char *R[3] = { "31 \xc2\xb0" "C", "41 \xc2\xb0" "C", EMG ? "3 days" : "19 h" };
         float y = 74 + 14 + 4 + 46;
         for (int i = 0; i < 3; i++) {
             y += 3;
@@ -617,21 +706,17 @@ static void build_home(void)
     d_text(&d, TK_IT500, 12, 24 + 79 - cw / 2, 224 + 12, "Battery", 0, 0, INK, 1);
     cw = tw(TK_IT500, 12, "Systems", 0, 0);
     d_text(&d, TK_IT500, 12, 208 + 79 - cw / 2, 224 + 12, "Systems", 0, 0, INK, 1);
-    d = mk(&hparts[2], "home-apps", 0, 250, 390, 220, 4, 0);
-    for (int i = 0; i < 8; i++) {
-        float cx = 22 + 86.5f * (i % 4) + 43.25f, y = 258 + 103 * (i / 4);
-        char n[40] = "a62-";
-        tk_memcpy(n + 4, P1[i], tk_strlen(P1[i]) + 1);
-        d_icon(&d, n, cx - 31, y, 1);
-        float w = tw(TK_IT500, 12, P1N[i], 0, 0);
-        d_text(&d, TK_IT500, 12, cx - w / 2, y + 68 + 12, P1N[i], 0, 0, INK, 1);
-    }
+}
+static void build_home_apps2(void)
+{
     /* page 2: the second grid (top 62) */
     {
-        static const char *P2[8] = { "contacts", "files", "light", "battery", "terminal", "browser", "medical", "sos" };
-        static const char *P2N[8] = { "Contacts", "Files", "Flashlight", "Battery", "Terminal", "Browser", "Medical Card", "SOS" };
+        static const char *P2N_[8] = { "Contacts", "Files", "Flashlight", "Battery", "Terminal", "Browser", "Medical Card", "SOS" };
+        static const char *P2EN[8] = { "Survival Heat", "Power Saving", "SOS", "Medical Card", "Flashlight", "Battery", "Contacts", "Files" };
+        const char *const *P2 = EMG ? P2E : P2K, *const *P2N = EMG ? P2EN : P2N_;
+        relayer(&hparts[4]);
         /* drawn as if on screen, then moved one page to the right (layers never extend past the panel's sides) */
-        d = mk(&hparts[4], "home-apps2", 0, 55, 390, 220, 4, 0);
+        dc d = mk(&hparts[4], "home-apps2", 0, 55, 390, 220, 4, 0);
         for (int i = 0; i < 8; i++) {
             float cx = 22 + 86.5f * (i % 4) + 43.25f, y = 62 + 103 * (i / 4);
             char n[40] = "a62-";
@@ -642,6 +727,25 @@ static void build_home(void)
         }
         hparts[4].x = hparts[4].bx = hparts[4].x + PT(390);
     }
+}
+static void build_home(void)
+{
+    static const char *P1[8] = { "calendar", "weather", "clock", "camera", "photos", "music", "notes", "calc" };
+    static const char *P1N[8] = { "Calendar", "Weather", "Clock", "Camera", "Photos", "Music", "Notes", "Calculator" };
+    static const char *DK[4] = { "phone", "messages", "browser", "settings" };
+    build_home_sb();
+    dc d;
+    build_home_w();
+    d = mk(&hparts[2], "home-apps", 0, 250, 390, 220, 4, 0);
+    for (int i = 0; i < 8; i++) {
+        float cx = 22 + 86.5f * (i % 4) + 43.25f, y = 258 + 103 * (i / 4);
+        char n[40] = "a62-";
+        tk_memcpy(n + 4, P1[i], tk_strlen(P1[i]) + 1);
+        d_icon(&d, n, cx - 31, y, 1);
+        float w = tw(TK_IT500, 12, P1N[i], 0, 0);
+        d_text(&d, TK_IT500, 12, cx - w / 2, y + 68 + 12, P1N[i], 0, 0, INK, 1);
+    }
+    build_home_apps2();
     /* the Search pill, three ways: the word (at rest on a page), the page dots (moving, either page lit) */
     {
         float sw = 15 + 13 + 6 + tw(TK_IT600, 13, "Search", 0, 0) + 15, sx = 195 - sw / 2;
@@ -902,7 +1006,9 @@ static void build_cc_grid(void)
     int lit = Q[0].lit;
     cc_tile(&d, CCX[0], 264, 70, 70, 22, lit); cc_glyph(&d, lit ? "cc-light-on" : "cc-light", CCX[0], 264, 16, 24); cc_label(&d, "Flashlight", CCX[0], 264);
     cc_tile(&d, CCX[1], 264, 70, 70, 22, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], 264, 22, 22); cc_label(&d, "Rotation", CCX[1], 264);
-    cc_tile(&d, CCX[2], 264, 70, 70, 22, 0); cc_glyph(&d, "cc-flame", CCX[2], 264, 20, 24); cc_label(&d, "Emergency", CCX[2], 264);
+    cc_tile(&d, CCX[2], 264, 70, 70, 22, 0);
+    if (EMG) d_rrect(&d, CCX[2], 264, 70, 70, 22, tk_hex(0xff5a4e, 1));
+    cc_glyph(&d, "cc-flame", CCX[2], 264, 20, 24); cc_label(&d, "Emergency", CCX[2], 264);
     cc_tile(&d, CCX[3], 264, 70, 70, 22, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], 264, 24, 14); cc_label(&d, "Saving", CCX[3], 264);
     cc_tile(&d, CCX[0], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-timer", CCX[0], 350, 22, 22); cc_label(&d, "Timer", CCX[0], 350);
     cc_tile(&d, CCX[1], 350, 70, 70, 22, 0); cc_glyph(&d, "a30-calc", CCX[1], 350, 30, 30);
@@ -993,7 +1099,7 @@ static int cc_tap(float x, float y)
         if (c == 0) { Q[0].lit = !Q[0].lit; Q[0].facelit.hidden = Q[0].iconlit.hidden = !Q[0].lit; Q[0].face.hidden = Q[0].icon.hidden = Q[0].lit; sh_torch(Q[0].lit); lock_ver++; }
         else if (c == 1) CCS.rot = !CCS.rot;
         else if (c == 3) CCS.save = !CCS.save;
-        else return 1;                       /* Emergency: a hold in the concept; not in Next yet */
+        else return 1;                       /* Emergency: a hold (G_CCEM) */
     } else if (y >= 350 && y < 420 && x >= 24 && x < 366) {
         return 1;                            /* Timer, Calculator, Mirror, Camera: the apps come later */
     } else
@@ -1035,6 +1141,9 @@ static const appdef APPS[] = {
     { "browser", "Browser", 0x2f7bf6, 1, { { "Favourites", 3, { { "Starbite", "" }, { "Wikipedia", "" }, { "Weather", "" } } } } },
     { "medical", "Medical Card", 0x1d2440, 1, { { "Shown on the lock screen", 3, { { "Blood type", "Add" }, { "Allergies", "Add" }, { "Emergency contacts", "Add" } } } } },
     { "sos", "SOS", 0x1d2440, 1, { { "", 3, { { "Call 112", "Needs a SIM" }, { "Siren", "Off" }, { "Flashing light", "Off" } } } } },
+    { "heat", "Survival Heat", 0x1d2440, 2, { { "Mode", 3, { { "Unlimited", "Off" }, { "Brownout guard", "On" }, { "Battery limit", "65 \xc2\xb0" "C" } } },
+                                              { "Last session", 2, { { "Peak", "180 \xc2\xb0" "C" }, { "Length", "2 min 45 s" } } } } },
+    { "power", "Power Saving", 0x1d2440, 1, { { "", 3, { { "Extreme power saving", "Off" }, { "Radios", "Off" }, { "Screen", "Dimmed" } } } } },
     { "phone", "Phone", 0x16b34a, 1, { { "", 1, { { "Coming soon", "" } } } } },
     { "messages", "Messages", 0x16b34a, 1, { { "", 1, { { "Coming soon", "" } } } } },
     { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "Home" }, { "Mobile Data", "No SIM" }, { "Battery", "87 %" } } },
@@ -1413,7 +1522,7 @@ static void set_app_rect(arect R)
 static arect icon_rect(int a)
 {
     static const char *P1[8] = { "calendar", "weather", "clock", "camera", "photos", "music", "notes", "calc" };
-    static const char *P2[8] = { "contacts", "files", "light", "battery", "terminal", "browser", "medical", "sos" };
+    const char *const *P2 = EMG ? P2E : P2K;
     static const char *DK[4] = { "phone", "messages", "browser", "settings" };
     const char *k = APPS[a].k;
     for (int i = 0; i < 4; i++) if (!tk_strcmp(DK[i], k)) return (arect){ 22 + 86.5f * i + 12.25f, 705, 62, 62, 15 };
@@ -1425,7 +1534,7 @@ static arect icon_rect(int a)
 static int app_hit(float x, float y)
 {
     static const char *P1[8] = { "calendar", "weather", "clock", "camera", "photos", "music", "notes", "calc" };
-    static const char *P2[8] = { "contacts", "files", "light", "battery", "terminal", "browser", "medical", "sos" };
+    const char *const *P2 = EMG ? P2E : P2K;
     static const char *DK[4] = { "phone", "messages", "browser", "settings" };
     const char *k = 0;
     if (y >= 700 && y <= 772) { int i = (int)((x - 22) / 86.5f); if (i >= 0 && i < 4) k = DK[i]; }
@@ -1499,6 +1608,110 @@ static void toast(const char *msg)
     toast_t = 0;
     toast_left = 2000;
     toast_place();
+}
+
+/* ---- Emergency mode (the concept's setEmergency) ---------------------------------------------------------------
+ * The wallpaper and its glass backdrop cross-fade (.7 s ease) to the other ground: both move in place toward a
+ * target made once (two half-resolution buffers, freed at the end), so every glass element follows the fade. The
+ * lock's widgets, its list (four cards and Exit Emergency), the pill, the flame, home's battery widget and its second
+ * page, the Control Centre's tile change with it. Visual: no Emergency function runs. */
+static tk_bmp em_wall, em_bw;
+static float em_t = 1, em_e = 1;
+typedef struct { tk_bmp *a; const tk_bmp *t; int f; } lerp_ctx;
+static void lerp_rows(void *v, int y0, int y1)
+{
+    lerp_ctx *L = v;
+    for (int j = y0; j < y1; j++) {
+        uint32_t *a = L->a->px + (size_t)j * L->a->stride;
+        const uint32_t *t = L->t->px + (size_t)j * L->t->stride;
+        for (int i = 0; i < L->a->w; i++) {
+            uint32_t p = a[i], q = t[i], o = 0;
+            if (p == q) continue;
+            for (int sh = 0; sh < 32; sh += 8) {
+                int x = (int)(p >> sh & 255), y = (int)(q >> sh & 255);
+                o |= (uint32_t)(x + (((y - x) * L->f + 128) >> 8)) << sh;
+            }
+            a[i] = o;
+        }
+    }
+}
+static void em_step(float e)
+{
+    if (em_wall.px && em_bw.px) {
+        float f = e >= 1 ? 1 : (e - em_e) / (1 - em_e);
+        lerp_ctx L = { &C->base_half, &em_wall, (int)(f * 256 + .5f) };
+        if (L.f > 0) {
+            tk_par_rows(0, C->base_half.h, lerp_rows, &L);
+            L.a = &C->bw_half;
+            L.t = &em_bw;
+            tk_par_rows(0, C->bw_half.h, lerp_rows, &L);
+            C->ground_gen++;
+        }
+    }
+    em_e = e;
+    star.alpha = EMG ? 1 - e : e;
+    star_e.alpha = EMG ? e : 1 - e;
+    star.hidden = star.alpha <= 0;
+    star_e.hidden = star_e.alpha <= 0;
+    if (e >= 1) { tk_bmp_free(&em_wall); tk_bmp_free(&em_bw); }
+}
+static void build_home_w(void);
+static void build_home_apps2(void);
+static void build_cc_grid(void);
+static void cc_link(void);
+static void set_emergency(int on, int instant)
+{
+    if (on == EMG) return;
+    EMG = on;
+    if (!on) { free_ecards(); cards_pending = NG; }
+    /* the target ground: the other wallpaper, its backdrop with the star of that mode */
+    tk_bmp_free(&em_wall);
+    tk_bmp_free(&em_bw);
+    if (tk_bmp_new(&em_wall, C->base_half.w, C->base_half.h) && tk_bmp_new(&em_bw, C->bw_half.w, C->bw_half.h)) {
+        tk_wall_draw(&em_wall, on, .5f);
+        tk_bmp src, sh;
+        if (tk_bmp_new(&src, em_wall.w, em_wall.h)) {
+            tk_bmp_copy(&src, 0, 0, &em_wall, 0, 0, src.w, src.h);
+            const tk_bmp *st = tk_icon(on ? "star-e" : "star");
+            if (st && tk_bmp_new(&sh, (st->w + 1) / 2, (st->h + 1) / 2)) {
+                tk_bmp_down2(&sh, st);
+                tk_blit(&src, &sh, (int)(on ? star_e.x : star.x) / 2, (int)star.y / 2, 1);
+                tk_bmp_free(&sh);
+            }
+            tk_glass_backdrop(&em_bw, &src);
+            tk_bmp_free(&src);
+        }
+    } else {
+        tk_bmp_free(&em_wall);
+        tk_bmp_free(&em_bw);
+        tk_log("sbtk: Emergency: no room for the other wallpaper");
+    }
+    em_e = 0;
+    em_t = 0;
+    if (instant) { em_t = 1; em_step(1); }
+    /* the lock */
+    hold_t *q = &Q[1];
+    q->lit = on;
+    q->facelit.hidden = q->iconlit.hidden = !on;
+    q->face.hidden = q->icon.hidden = on;
+    for (int g = 0; g < NG; g++) if (K[g].isopen) toggle_group(g, 1);
+    scroll = 0;
+    sp_scroll.live = 0;
+    scroll_momentum = 0;
+    if (on) { free_vendor_cards(); build_ecards(); }
+    empill.hidden = !on;
+    build_lwidgets();
+    mark_t = on || lockY < 0 ? 0 : 1;
+    if (instant) mark_a = mark_t;
+    /* home and the Control Centre */
+    build_home_w();
+    build_home_apps2();
+    cc_stale = 1;
+    if (CCS.built) { build_cc_grid(); cc_link(); }
+    relink();
+    place_list();
+    lock_ver++;
+    toast(on ? "Emergency mode on" : "Emergency mode off");
 }
 
 /* ---- taps inside the apps -------------------------------------------------------------------------------- */
@@ -1586,8 +1799,8 @@ static void set_lock(float y)
     float la = 1 - tk_maxf(0, p - .55f) * 2.2f;
     home.alpha = tk_minf(1, p * 1.6f);
     home.sx = home.sy = .92f + .08f * tk_minf(1, p * 1.3f);
-    mark_t = p > .02f ? 0 : 1;
-    glyph_t = p > .02f ? 1 : 0;
+    mark_t = p > .02f || EMG ? 0 : 1;
+    glyph_t = p > .02f && !EMG ? 1 : 0;
     glyph_open = p > .06f;
     if (y == 0 && la >= 1) {
         lockg.hidden = 0;
@@ -1650,16 +1863,17 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 }
 static void relink(void)
 {
-    tk_layer *r[] = { &star, &home, &lockg, &lockflat, &appg, &focus, &ccl, &boot, &homebar, &toastl };
-    link(&root, r, 10);
+    tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &focus, &ccl, &boot, &homebar, &toastl };
+    link(&root, r, 11);
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum };
     link(&appg, ag, 4);
-    tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &list, &Q[0].grp, &Q[1].grp, &hint };
-    link(&lockg, lk, 10);
-    tk_layer *ls[3 * NG + 1];
+    tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
+    link(&lockg, lk, 11);
+    tk_layer *ls[3 * NG + 6];
     int n = 0;
     for (int g = 0; g < NG; g++) { ls[n++] = &K[g].closed; ls[n++] = &K[g].open; ls[n++] = &K[g].chev; }
     ls[n++] = &etool;
+    for (int i = 0; i < 5; i++) ls[n++] = &ecard[i];
     link(&list, ls, n);
     for (int i = 0; i < 2; i++) {
         tk_layer *q[] = { &Q[i].face, &Q[i].facelit, &Q[i].icon, &Q[i].iconlit, &Q[i].ring };
@@ -1711,6 +1925,9 @@ void sh_init_begin(tk_comp *c)
     tk_layer_init(&boot, "boot");
     boot.hidden = 1;
     for (int i = 0; i < 2; i++) tk_layer_init(&Q[i].grp, i ? "q-em" : "q-light");
+    for (int i = 0; i < 5; i++) { tk_layer_init(&ecard[i], "ecard"); ecard[i].hidden = 1; }
+    tk_layer_init(&empill, "empill");
+    empill.hidden = 1;
     layout_list();
     relink();
     c->root = &root;
@@ -1730,7 +1947,7 @@ int sh_init_step(void)
         lap("bake: lock status, clock, widgets");
         break;
     case 2: case 3: case 4: case 5: case 6: build_card(init_step - 3); lap("bake: a card"); break;
-    case 7: build_etool(); build_hold(0); build_hold(1); lap("bake: tools and holds"); break;
+    case 7: build_etool(); build_hold(0); build_hold(1); build_empill(); lap("bake: tools and holds"); break;
     case 8: build_home(); lap("bake: home"); break;
     case 9: {
         /* the flattened lock is only ever seen moving (half-resolution frames): kept at half resolution, drawn 2x */
@@ -1806,6 +2023,9 @@ void sh_set(const char *what, const char *key, float v)
         set_page(0);
         CCS.on = 0; sp_cc.live = 0; set_cc(0);
         if (AP.on) { sp_app.live = 0; app_finish_close(); }
+        if (EMG) set_emergency(0, 1);
+        while (cards_pending > 0) { build_card(NG - cards_pending); cards_pending--; }
+        relink();
         toast_t = 1; toast_to = toast_from = -90; toast_left = 0; toast_place();
         locked = 1;
         set_lock(0);
@@ -1820,6 +2040,11 @@ void sh_set(const char *what, const char *key, float v)
                 set_app_rect(lerpr(AP.icon, FULLR, v));
                 if (v >= 1) appg.clip = 0;
             }
+    } else if (!tk_strcmp(what, "emergency")) {
+        set_emergency(v > 0, 1);
+        toast_t = 1;
+        toast_to = toast_from = 0;
+        toast_place();
     } else if (!tk_strcmp(what, "tab")) {
         static const char *const TK[4] = { "fav", "rec", "con", "pad" };
         for (int t = 0; t < 4; t++) if (!tk_strcmp(TK[t], key)) { AS.tab = t; build_app_page(AP.a); }
@@ -1857,7 +2082,7 @@ void sh_set(const char *what, const char *key, float v)
 }
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
-enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK };
+enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM };
 static struct {
     int kind, arg, arg2, moved;
     float x0, y0, base, t0;
@@ -1920,6 +2145,7 @@ void sh_touch(int phase, float x, float y, float t)
         }
         if (!locked && CCS.on && !CCS.closing) {
             /* the open Control Centre: a slider, a tile, or outside it (closes it) */
+            if (x >= CCX[2] && x < CCX[2] + 70 && y >= 264 && y < 334) { T.kind = G_CCEM; T.arg = 0; return; }
             for (int i = 0; i < 2; i++) {
                 float sx = i ? 295.97f : 205.31f;
                 if (x >= sx && x < sx + 70 && y >= 92 && y < 248) { T.kind = G_CCSL; T.arg = i; sh_touch(1, x, y, t); return; }
@@ -1960,6 +2186,18 @@ void sh_touch(int phase, float x, float y, float t)
             }
         }
         int gi = -1, r;
+        if (EMG && y >= LIST_TOP && y < LIST_TOP + LIST_H && y < H_PT - 30) {
+            /* Emergency's list: a card (its app, by name: locked, a toast) or Exit Emergency */
+            T.kind = G_ETAP;
+            T.arg = -1;
+            for (int i = 0; i < 4; i++) {
+                float top = LIST_TOP + 10 + 78 * i;
+                if (y >= top && y < top + 68 && x >= 14 && x < 376) T.arg = i;
+            }
+            if (y >= 630 && y < 670 && x >= 120 && x < 270) T.arg = 4;
+            tk_tracker_add(&T.tr, y, t);
+            return;
+        }
         if (y >= H_PT - 30) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
         else if ((r = hit_row(x, y, &gi)) >= 0) { T.kind = G_TAP_ROW; T.arg = gi; T.arg2 = r; }
         else if ((r = hit_head(x, y)) >= 0) { T.kind = G_TAP_HEAD; T.arg = r; }
@@ -2057,6 +2295,19 @@ void sh_touch(int phase, float x, float y, float t)
         hold_ring(q, T.arg, 0);
         break;
     }
+    case G_ETAP:
+        if (!T.moved && T.arg >= 0) {
+            if (T.arg == 4) set_emergency(0, 0);
+            else {
+                char m[48] = "Opens ";
+                tk_memcpy(m + 6, EC[T.arg].act, tk_strlen(EC[T.arg].act) + 1);
+                toast(m);
+            }
+        }
+        break;
+    case G_CCEM:
+        if (!T.arg) toast("Press and hold");
+        break;
     case G_DOCK:
         if (!T.moved) { int a = app_hit(x, y); if (a >= 0) app_open(a); }
         break;
@@ -2170,6 +2421,15 @@ int sh_tick(float dt, float t)
         }
         mv = 1;
     }
+    if (em_t < 1) {
+        em_t = tk_minf(1, em_t + dt / .7f);
+        em_step(tk_bezier(.25f, .1f, .25f, 1, em_t));
+        mv = 1;
+    }
+    if (T.kind == G_CCEM && !T.arg) {
+        if (t - T.t0 >= 700) { T.arg = 1; set_emergency(!EMG, 0); }
+        mv = 1;
+    }
     if (toast_t < 1) {
         toast_t = tk_minf(1, toast_t + dt / .45f);
         toast_place();
@@ -2243,10 +2503,14 @@ int sh_tick(float dt, float t)
             hold_ring(q, i, p);
             if (p >= 1) {
                 q->fired = 1;
-                q->lit = !q->lit;
-                if (i == 0) { sh_torch(q->lit); toast(q->lit ? "Flashlight on" : "Flashlight off"); }
-                q->facelit.hidden = q->iconlit.hidden = !q->lit;
-                q->face.hidden = q->icon.hidden = q->lit;
+                if (i == 0) {
+                    q->lit = !q->lit;
+                    sh_torch(q->lit);
+                    toast(q->lit ? "Flashlight on" : "Flashlight off");
+                    q->facelit.hidden = q->iconlit.hidden = !q->lit;
+                    q->face.hidden = q->icon.hidden = q->lit;
+                } else
+                    set_emergency(!EMG, 0);
                 hold_ring(q, i, 0);
             }
             mv = 1;
@@ -2324,6 +2588,14 @@ void sh_idle(void)
 {
     if (sh_moving()) return;
     tk_comp_idle(C);
+    if (!EMG && cards_pending > 0) {
+        /* after Emergency: the vendor cards again, one per idle turn */
+        build_card(NG - cards_pending);
+        cards_pending--;
+        relink();
+        place_list();
+        return;
+    }
     if (locked && lockY == 0 && !focus_on) flatten_lock();
     /* home at rest: the Control Centre's snapshot and grid ready before the pull */
     if (!locked && !CCS.on && !AP.on && (!CCS.built || cc_stale)) { build_cc(); cc_stale = 0; }
@@ -2351,7 +2623,7 @@ int sh_moving(void)
 {
     int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB ||
             T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || T.kind == G_CC || T.kind == G_CCSL || sp_cc.live ||
-            T.kind == G_APP || sp_app.live || booting || toast_t < 1;
+            T.kind == G_APP || sp_app.live || booting || toast_t < 1 || em_t < 1 || T.kind == G_CCEM;
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live;
     return m;

@@ -15,7 +15,8 @@ KEEP = set(['t46-' + k for k in ('apple', 'microsoft', 'google', 'linux', 'starb
            ['sb-wifi', 'sb-batt', 'mark-star', 'star', 'chev', 'alarm', 'torch', 'torch-lit', 'flame', 'lock-c', 'lock-o', 'recovery', 'lab',
             'home-batt', 'home-star', 'search', 'arrow',
             'cc-air', 'cc-cell', 'cc-wifi', 'cc-bt', 'cc-sun', 'cc-vol', 'cc-flame', 'a30-calc', 'a30-camera',
-            'call', 'search15', 'back', 'send', 'heart'] + [f'tab-{k}{v}' for k in ('fav', 'rec', 'con', 'pad') for v in ('', '-on')] +
+            'call', 'search15', 'back', 'send', 'heart', 'star-e', 'em-flame', 'e46-heat', 'e46-power', 'e46-sos', 'e46-medical',
+            'a62-heat', 'a62-power'] + [f'tab-{k}{v}' for k in ('fav', 'rec', 'con', 'pad') for v in ('', '-on')] +
            [f'cc-{k}{v}' for k in ('light', 'rot', 'save', 'timer', 'wifi2') for v in ('', '-on')])
 FONTS = ['it400', 'it500', 'it600', 'it700', 'it800', 'of300']
 ents, blobs = [], []

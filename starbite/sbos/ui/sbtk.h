@@ -191,6 +191,7 @@ typedef struct {
     /* stats of the last frame */
     int last_half, last_px;
     uint64_t last_us, us_comp, us_present;
+    uint32_t ground_gen;       /* bumped when base_half / bw_half change: the next frame redraws everything */
 } tk_comp;
 int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocated */
 /* render a group's children (as if the group were at identity) into a screen-sized transparent bitmap and their

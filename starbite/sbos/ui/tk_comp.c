@@ -745,6 +745,8 @@ static void run_bands(tk_comp *c, job *J)
 int tk_comp_frame(tk_comp *c, int motion, int full)
 {
     if (motion) tk_comp_idle(c);             /* a finger came before the idle time did */
+    static uint32_t ground_seen;
+    if (c->ground_gen != ground_seen) { ground_seen = c->ground_gen; full = 1; }
     uint64_t t0 = tk_us();
     cur.n = 0;
     W = &cur;
