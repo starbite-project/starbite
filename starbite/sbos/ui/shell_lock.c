@@ -968,9 +968,10 @@ static float focus_sy;
 /* P3p (audit 15): MARGIN from the sides; the slide to start 20 pt inside it */
 #define FOC_X MARGIN
 #define FOC_W CONTENT_W
-#define FOC_Y 196.0f
+/* P3p (P3j-19): an iOS sheet: from the bottom (8 pt above it), its corners concentric with the display's */
 #define FOC_H 267.0f
-#define FOC_R 32.0f
+#define FOC_Y (H_PT - 8 - FOC_H)
+#define FOC_R CONCENTRIC(8)
 #define SL_X (FOC_X + 20)
 #define SL_W (FOC_W - 40)
 static tk_layer focus, funder, scrim, fgrp, fcard, ffill, flabel, fthumb;
@@ -997,7 +998,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         tk_bmp_blur(&q, PT(22) / 4);
         tk_bmp_satbright(&q, 1.3f, 1);
         /* the tint over it at this size (a constant over a smooth image: the same after the bilinear up) */
-        tk_bmp_tint(&q, TK_RGBA(4, 8, 26, .28f));
+        tk_bmp_tint(&q, TK_RGBA(0, 0, 0, .2f));       /* P3p (P3j-19): a neutral dim */
         tk_bmp_up(&scrim.bmp, &q, 0, 0, 2);
         tk_bmp_free(&q);
     }
@@ -1035,6 +1036,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         lap_us("focus: the card's backdrop and glass", tk_us() - tb0);
         char tn[40] = "t66-";
         tk_memcpy(tn + 4, s->k, tk_strlen(s->k) + 1);
+        d_rrect(&d, 195 - 18, FOC_Y + 5, 36, 5, 2.5f, W(.3f));     /* P3p: the sheet's grabber */
         d_icon(&d, tn, SL_X, FOC_Y + 20, 1);
         d_text(&d, TK_IT600, 13, FOC_X + 100, FOC_Y + 29.16f + 13, gr->name, 0, 0, W(.62f), 0);
         d_text(&d, TK_IT700, 27, FOC_X + 100, base_of(TK_IT700, 27, FOC_Y + 47.16f, 29.7f), s->name, 0, 0, INK, 0);
@@ -1113,19 +1115,53 @@ static void set_focus(float p)
 {
     focus_p = p;
     scrim.alpha = tk_minf(1, tk_maxf(0, p));
-    fgrp.alpha = tk_minf(1, tk_maxf(0, p * 1.5f));
-    fgrp.sx = fgrp.sy = .9f + .1f * p;
-    fgrp.y = PT((1 - p) * 40) / fgrp.sy;
+    /* P3p (P3j-19): the sheet rises from below the screen (no scale, no fade but its first frames) */
+    fgrp.alpha = tk_clampf(p * 4, 0, 1);
+    fgrp.sx = fgrp.sy = 1;
+    fgrp.y = PT((1 - p) * (FOC_H + 8 + 24));
     focus.hidden = !focus_on;
 }
 
 /* the lock as one cached layer for the unlock (its opacity applies to it as a whole, as CSS group opacity), made
  * while nothing moves so the swipe's first frame does not pay for it */
+/* P3p (P3j-9): iOS's cover sheet is opaque and slides off whole: the flattened lock gets its own ground under its
+ * content (the wallpaper, or the glass backdrop where its glass is, as the compositor would show them; the star),
+ * so it needs no glass of its own and covers what is under it (home settling in) */
+static tk_a8 flatmask;
+static uint32_t flat_ground = ~0u;
+typedef struct { tk_bmp *o; const tk_a8 *m; } under_ctx;
+static void under_rows(void *v, int y0, int y1)
+{
+    under_ctx *U = v;
+    for (int j = y0; j < y1 && j < C->base_half.h; j++) {
+        uint32_t *o = U->o->px + (size_t)j * U->o->stride;
+        const uint32_t *bs = C->base_half.px + (size_t)j * C->base_half.stride, *bw = C->bw_half.px + (size_t)j * C->bw_half.stride;
+        const uint8_t *m = U->m && U->m->v ? U->m->v + (size_t)j * U->m->w : 0;
+        for (int i = 0; i < U->o->w; i++) {
+            uint32_t s = o[i], a = s >> 24;
+            if (a == 255) continue;
+            uint32_t b = bs[i], w = m ? m[i] : 0, r = 0;
+            if (w) { uint32_t q = bw[i], t = 0; for (int sh = 0; sh < 32; sh += 8) t |= (((b >> sh & 255) * (255 - w) + (q >> sh & 255) * w + 127) / 255) << sh; b = t; }
+            for (int sh = 0; sh < 32; sh += 8) r |= ((s >> sh & 255) + ((b >> sh & 255) * (255 - a) + 127) / 255) << sh;
+            o[i] = r | 0xff000000u;
+        }
+    }
+}
 static void flatten_lock(void)
 {
-    if (flat_ver == lock_ver) return;
-    tk_flatten(&lockg, &lockflat.bmp, &lockflat.glass, .5f);
+    if (flat_ver == lock_ver && flat_ground == C->ground_gen) return;
+    tk_flatten(&lockg, &lockflat.bmp, &flatmask, .5f);
+    under_ctx U = { &lockflat.bmp, &flatmask };
+    tk_par_rows(0, lockflat.bmp.h, under_rows, &U);
+    /* the star (nothing of the lock's is drawn where it is) */
+    tk_layer *s[2] = { &star, &star_e };
+    for (int i = 0; i < 2; i++) {
+        if (s[i]->hidden || s[i]->alpha <= 0 || !s[i]->bmp.px) continue;
+        tk_layer_prepare(s[i]);
+        if (s[i]->half.px) tk_blit(&lockflat.bmp, &s[i]->half, (int)s[i]->x / 2, (int)s[i]->y / 2, s[i]->alpha);
+    }
     flat_ver = lock_ver;
+    flat_ground = C->ground_gen;
     tk_layer_dirty(&lockflat);
 }
 
@@ -1155,6 +1191,7 @@ static void set_page(float x)
  * are layers over it. setCC: scrim min(1, p), grid opacity min(1, 1.3 p), translateY((1 - p) x -30) scale(.86 +
  * .14 p) about 85 % 0 of the grid; spring cc 400 / 36; open past .35 or faster than .4 pt/ms. */
 static tk_layer ccl, ccscrim, ccsb, ccg, ccgrid, cclvl[2], ccic[2], cclit;   /* cclit: the torch's lit tile (P3i) */
+static tk_layer ccblur1;            /* P3p (P3j-20): a lighter blur (8 pt, quarter resolution) for the first part of the pull */
 static void cc_status_stale(void) { relayer(&ccsb); cc_stale = 1; }
 static struct { int on, built, closing, wifi, cell, bt, air, rot, save; float p, lvl[2]; } CCS = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, { .62f, .4f } };   /* P2y: Wi-Fi and rotation lock off (neither is real) */
 static void cc_levels(void);
@@ -1189,8 +1226,8 @@ static void cc_link(void)
     tk_layer *g[] = { &ccgrid, &cclit, &cclvl[0], &ccic[0], &cclvl[1], &ccic[1] };
     link(&ccg, g, 6);
     cclit.hidden = !Q[0].lit || !cclit.bmp.px;
-    tk_layer *k[] = { &ccscrim, &ccsb, &ccg };
-    link(&ccl, k, 3);
+    tk_layer *k[] = { &ccblur1, &ccscrim, &ccsb, &ccg };
+    link(&ccl, k, 4);
 }
 static void build_cc_grid(void)
 {
@@ -1267,9 +1304,21 @@ static void build_cc(void)
         tk_bmp_new(&q, TK_W / 4, TK_H / 4);
         tk_bmp_down2(&ccscrim.bmp, &C->fb);
         tk_bmp_down2(&q, &ccscrim.bmp);
+        /* P3p (P3j-20): the blur and the dim grow with the pull: an 8 pt level (dim .12, quarter resolution, 1 MB)
+         * comes in first, the 26 pt one (neutral dim .25, not a blue tint) over it */
+        relayer(&ccblur1);
+        tk_layer_init(&ccblur1, "cc-blur1");
+        if (tk_bmp_new(&ccblur1.bmp, q.w, q.h)) {
+            tk_bmp_copy(&ccblur1.bmp, 0, 0, &q, 0, 0, q.w, q.h);
+            tk_bmp_blur(&ccblur1.bmp, PT(8) / 4);
+            tk_bmp_satbright(&ccblur1.bmp, 1.15f, 1);
+            tk_bmp_tint(&ccblur1.bmp, TK_RGBA(0, 0, 0, .12f));
+            ccblur1.sx = ccblur1.sy = 4;
+            ccblur1.opaque = 1;
+        }
         tk_bmp_blur(&q, PT(26) / 4);
         tk_bmp_satbright(&q, 1.3f, 1);
-        tk_bmp_tint(&q, TK_RGBA(4, 8, 24, .3f));
+        tk_bmp_tint(&q, TK_RGBA(0, 0, 0, .25f));
         tk_bmp_up(&ccscrim.bmp, &q, 0, 0, 2);
         tk_bmp_free(&q);
         ccscrim.sx = ccscrim.sy = 2;
@@ -1303,16 +1352,23 @@ static void free_cc(void)
 {
     if (!CCS.built || CCS.on) return;
     relayer(&ccscrim);
+    relayer(&ccblur1);
     relayer(&ccgrid);
     CCS.built = 0;
 }
 static void set_cc(float p)
 {
     CCS.p = p;
-    ccscrim.alpha = tk_clampf(p, 0, 1);
+    /* P3p (P3j-20): the light blur first, the full one from .35; only the status bar's words cross over (.3 .. .6),
+     * so two bars never sit on each other; the grid grows to 1.04 at most on an over-pull */
+    ccblur1.alpha = tk_clampf(p * 2.2f, 0, 1);
+    ccscrim.alpha = tk_clampf((p - .35f) / .65f, 0, 1);
     ccg.alpha = tk_clampf(p * 1.3f, 0, 1);
-    ccg.sx = ccg.sy = .86f + .14f * p;
-    ccg.y = PT((1 - p) * -30) / ccg.sy;
+    ccg.sx = ccg.sy = tk_minf(1.04f, .86f + .14f * p);
+    ccg.y = PT((1 - tk_minf(1, p)) * -30) / ccg.sy;
+    float k = tk_clampf((p - .3f) / .3f, 0, 1);
+    ccsb.alpha = k;
+    hparts[0].alpha = 1 - k;
     ccl.hidden = !CCS.on;
 }
 static void cc_close(void)
@@ -3226,21 +3282,21 @@ static void set_lock(float y)
 {
     lockY = y;
     float p = tk_clampf(-y / H_PT, 0, 1);
-    float la = 1 - tk_maxf(0, p - .55f) * 2.2f;
-    home.alpha = tk_minf(1, p * 1.6f);
-    home.sx = home.sy = .92f + .08f * tk_minf(1, p * 1.3f);
+    /* P3p (P3j-9): the home settles from a little larger (1.06) and comes up from .35 under the sliding cover */
+    home.alpha = y < 0 ? tk_minf(1, .35f + p * 1.3f) : 0;
+    home.sx = home.sy = 1.06f - .06f * tk_minf(1, p * 1.3f);
     mark_t = p > .02f || EMG ? 0 : 1;
     glyph_t = p > .02f && !EMG ? 1 : 0;
     glyph_open = p > .06f;
-    if (y == 0 && la >= 1) {
+    if (y == 0) {
         lockg.hidden = 0;
         lockflat.hidden = 1;
     } else {
         flatten_lock();
         lockg.hidden = 1;
-        lockflat.hidden = la <= 0;
+        lockflat.hidden = 0;
         lockflat.y = PT(y) / 2;           /* the layer's offset is scaled with it */
-        lockflat.alpha = tk_maxf(0, la);
+        lockflat.alpha = 1;               /* P3p: the cover slides off whole (no fade) */
     }
 }
 
@@ -3402,9 +3458,9 @@ int sh_init_step(void)
     case 9: {
         /* the flattened lock is only ever seen moving (half-resolution frames): kept at half resolution, drawn 2x */
         tk_bmp_new(&lockflat.bmp, TK_W / 2, TK_H / 2);
-        tk_a8_new(&lockflat.glass, TK_W / 2, TK_H / 2);
+        tk_a8_new(&flatmask, TK_W / 2, TK_H / 2);    /* P3p: the glass goes into its own ground (flatten_lock) */
         lockflat.sx = lockflat.sy = 2;
-        lockflat.glass_opaque_only = 1;
+        lockflat.opaque = 1;
         lockflat.hidden = 1;
         break;
     }
@@ -3566,7 +3622,8 @@ void sh_set(const char *what, const char *key, float v)
 }
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
-enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL };
+enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL,
+       G_CCDRAG, G_FOCUSDRAG };
 static struct {
     int kind, arg, arg2, moved;
     float x0, y0, base, t0;
@@ -3776,6 +3833,7 @@ void sh_touch(int phase, float x, float y, float t)
             float sy = focus_sy;
             if (x >= SL_X + 5 + thumb_x && x <= SL_X + 57 + thumb_x && y >= sy + 5 && y <= sy + 57) { T.kind = G_THUMB; T.base = thumb_x; sp_thumb.live = 0; }
             else if (y < FOC_Y || y > FOC_Y + FOC_H) T.kind = G_SCRIM;
+            else { T.kind = G_FOCUSDRAG; sp_focus.live = 0; focus_closing = 0; tk_tracker_add(&T.tr, y, t); }   /* P3p: drag it down */
             return;
         }
         if (!locked && AP.on) {
@@ -3799,6 +3857,7 @@ void sh_touch(int phase, float x, float y, float t)
                 if (x >= sx && x < sx + 70 && y >= 92 && y < 248) { T.kind = G_CCSL; T.arg = i; sh_touch(1, x, y, t); return; }
             }
             T.kind = G_CCTAP;
+            tk_tracker_add(&T.tr, y, t);
             return;
         }
         if (!locked) {
@@ -3876,6 +3935,11 @@ void sh_touch(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, x, t);
             set_thumb(tk_clampf(T.base + x - T.x0, 0, SL_W - 62));
             break;
+        case G_FOCUSDRAG:
+            /* P3p (P3j-19): the sheet follows the finger down, rubber-bands up */
+            tk_tracker_add(&T.tr, y, t);
+            set_focus(dy >= 0 ? tk_maxf(0, 1 - dy / 300) : 1 + rubber(-dy, H_PT) * .3f / 300);
+            break;
         case G_APPTAP:
             if (T.moved && !apkey.hidden) key_down(-1);
             if (T.moved) hl_off();
@@ -3917,7 +3981,18 @@ void sh_touch(int phase, float x, float y, float t)
             CCS.on = 1;
             cclit.hidden = !Q[0].lit || !cclit.bmp.px;
             CCS.closing = 0;
-            set_cc(tk_minf(1, tk_maxf(0, dy) / 260));
+            /* P3p (P3j-10): past full the pull rubber-bands */
+            set_cc(dy <= 260 ? tk_maxf(0, dy) / 260 : 1 + rubber(dy - 260, H_PT) / 260);
+            break;
+        case G_CCTAP:
+            /* P3p (P3j-10): a vertical drag on the open Control Centre moves it (up closes it) */
+            tk_tracker_add(&T.tr, y, t);
+            if (T.moved && tk_fabsf(dy) > tk_fabsf(x - T.x0)) { T.kind = G_CCDRAG; sp_cc.live = 0; CCS.closing = 0; }
+            if (T.kind == G_CCDRAG) set_cc(tk_clampf(dy < 0 ? 1 + dy / 260 : 1 + rubber(dy, H_PT) / 260, 0, 1.3f));
+            break;
+        case G_CCDRAG:
+            tk_tracker_add(&T.tr, y, t);
+            set_cc(tk_clampf(dy < 0 ? 1 + dy / 260 : 1 + rubber(dy, H_PT) / 260, 0, 1.3f));
             break;
         case G_CCSL:
             CCS.lvl[T.arg] = tk_clampf((248 - y) / 156, 0, 1);
@@ -3958,6 +4033,13 @@ void sh_touch(int phase, float x, float y, float t)
         if (thumb_x > (SL_W - 62) * .86f) { set_thumb(SL_W - 62); booting = 1; boot_t = -100; }
         else tk_spring_start(&sp_thumb, thumb_x, 0, 0, TK_SPR_SHEET);
         break;
+    case G_FOCUSDRAG: {
+        /* P3p (P3j-19): dismissed where a flick would carry it below .6; the finger's speed goes to the spring */
+        float vp = -tk_tracker_v(&T.tr) * 1000 / 300;
+        if (focus_p + vp * .2f < .6f) { focus_closing = 1; tk_spring_start(&sp_focus, focus_p, 0, vp, TK_SPR_SHEET); }
+        else tk_spring_start(&sp_focus, focus_p, 1, vp, TK_SPR_SHEET);
+        break;
+    }
     case G_SCRIM:
         focus_closing = 1;
         tk_spring_start(&sp_focus, focus_p, 0, 0, TK_SPR_SHEET);
@@ -4013,6 +4095,7 @@ void sh_touch(int phase, float x, float y, float t)
         const sys_t *s = &G[T.arg].it[T.arg2];
         if (s->self) { toast("You are in Starbite OS"); break; }
         tk_comp_frame(C, 0, 0);
+        tk_comp_idle(C);                       /* P3p: the half canvas without the row's press light (the sheet's under-layer) */
         uint64_t t0 = tk_us();
         build_focus(s, &G[T.arg]);
         lap_us("focus: snapshot and bake", tk_us() - t0);
@@ -4037,6 +4120,13 @@ void sh_touch(int phase, float x, float y, float t)
     case G_CCTAP:
         if (!T.moved && !cc_tap(x, y)) cc_close();
         break;
+    case G_CCDRAG: {
+        /* P3p (P3j-10): where the flick would carry it (200 ms) decides; the finger's speed goes to the spring */
+        float vp = tk_tracker_v(&T.tr) * 1000 / 260;
+        if (CCS.p + vp * .2f < .65f) { CCS.closing = 1; tk_spring_start(&sp_cc, CCS.p, 0, vp, TK_SPR_CC); }
+        else tk_spring_start(&sp_cc, CCS.p, 1, vp, TK_SPR_CC);
+        break;
+    }
     case G_APP: {
         float v = tk_tracker_v(&T.tr);
         AP.following = 0;
@@ -4057,9 +4147,10 @@ void sh_touch(int phase, float x, float y, float t)
         }
         break;
     case G_RELOCK: {
+        /* P3p (P3j-10): decided by where the pull would carry it (200 ms), the finger's speed handed to the spring */
         float v = tk_tracker_v(&T.tr);
-        if (-lockY < H_PT * .7f || v > .4f) { locked = 1; tk_spring_start(&sp_lock, lockY, 0, 0, TK_SPR_UNLOCK); }
-        else tk_spring_start(&sp_lock, lockY, -H_PT, 0, TK_SPR_UNLOCK);
+        if (lockY + v * 200 > -H_PT * .5f) { locked = 1; tk_spring_start(&sp_lock, lockY, 0, v * 1000, TK_SPR_UNLOCK); }
+        else tk_spring_start(&sp_lock, lockY, -H_PT, v * 1000, TK_SPR_UNLOCK);
         break;
     }
     case G_LOCK:
@@ -4068,7 +4159,8 @@ void sh_touch(int phase, float x, float y, float t)
             tk_spring_start(&sp_lock, 0, 0, -700, TK_SPR_UNLOCK);
         } else {
             float v = tk_tracker_v(&T.tr), proj = lockY + v * 200;
-            if (proj < -H_PT * .38f && locked) tk_spring_start(&sp_lock, lockY, -H_PT, v * 1000, TK_SPR_UNLOCK);
+            /* P3p (P3j-9): unlocked as soon as it is decided: taps in the settle reach home */
+            if (proj < -H_PT * .38f && locked) { tk_spring_start(&sp_lock, lockY, -H_PT, v * 1000, TK_SPR_UNLOCK); locked = 0; }
             else tk_spring_start(&sp_lock, lockY, 0, v * 1000, TK_SPR_UNLOCK);
         }
         break;
@@ -4152,7 +4244,7 @@ int sh_tick(float dt, float t)
         set_page(sp_page.x);
         mv = 1;
     }
-    if (T.kind == G_CC || T.kind == G_CCSL || T.kind == G_APP) mv = 1;
+    if (T.kind == G_CC || T.kind == G_CCSL || T.kind == G_APP || T.kind == G_CCDRAG || T.kind == G_FOCUSDRAG) mv = 1;
     if (sp_app.live) {
         int live = tk_spring_step(&sp_app, dt);
         float u = AP.closing ? tk_minf(1.04f, sp_app.x) : sp_app.x;
@@ -4405,7 +4497,7 @@ int sh_moving(void)
     int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB ||
             T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || T.kind == G_CC || T.kind == G_CCSL || sp_cc.live ||
             T.kind == G_APP || sp_app.live || booting || toast_t < 1 || em_t < 1 || T.kind == G_CCEM ||
-            T.kind == G_CCCELL || CF.down || CF.a != CF.at || SL.dir;
+            T.kind == G_CCCELL || CF.down || CF.a != CF.at || SL.dir || T.kind == G_CCDRAG || T.kind == G_FOCUSDRAG;
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live;
     m |= IP.on && IP.t < 1;
