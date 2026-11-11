@@ -1770,6 +1770,50 @@ static void page_light(dc *d)
     d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 556), h, 0, 0, W(.5f), 0);
 }
 
+/* P3c: the Calendar: this month's grid (Monday first, as iOS in Finland), today in a red circle, from the phone's
+ * clock (sh_year: the year; the host's is 2026) */
+static int cal_year = 2026;
+void sh_year(int y) { if (y > 2000 && y < 2200) cal_year = y; }
+static void page_calendar(dc *d)
+{
+    const char *mo = MO[(ST.mon + 11) % 12];
+    d_text(d, TK_IT800, 34, 20, bl(TK_IT800, 34, 64), mo, -.8f, 0, INK, 0);
+    char yb[8];
+    put_dec(yb, cal_year);
+    d_text(d, TK_IT600, 17, 20 + tw(TK_IT800, 34, mo, -.8f, 0) + 10, bl(TK_IT800, 34, 64) - 0, yb, 0, 0, tk_hex(0xff453a, 1), 0);
+    static const char *const H[7] = { "M", "T", "W", "T", "F", "S", "S" };
+    for (int c = 0; c < 7; c++) {
+        float w = tw(TK_IT600, 13, H[c], 0, 0);
+        d_text(d, TK_IT600, 13, 20 + 50 * c + (50 - w) / 2, bl(TK_IT600, 13, 122), H[c], 0, 0, W(c >= 5 ? .4f : .6f), 0);
+    }
+    d_rrect(d, 16, 146, 358, .5f, 0, W(.15f));
+    static const int DIM[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    int m = (ST.mon + 11) % 12, nd = DIM[m];
+    if (m == 1 && ((cal_year % 4 == 0 && cal_year % 100 != 0) || cal_year % 400 == 0)) nd = 29;
+    /* the 1st's weekday from today's (Sunday 0), as a Monday-first column */
+    int wd1 = ((ST.wday - (ST.day - 1)) % 7 + 7) % 7, col0 = (wd1 + 6) % 7;
+    for (int day = 1; day <= nd; day++) {
+        int cell = col0 + day - 1, r = cell / 7, c = cell % 7;
+        float cx = 20 + 50 * c + 25, cy = 160 + 56 * r + 22;
+        char b[4];
+        put_dec(b, day);
+        int today = day == ST.day;
+        if (today) d_rrect(d, cx - 19, cy - 19, 38, 38, 19, tk_hex(0xff453a, 1));
+        float w = tw(today ? TK_IT700 : TK_IT400, 20, b, 0, TK_TNUM);
+        d_text(d, today ? TK_IT700 : TK_IT400, 20, cx - w / 2, bl(TK_IT400, 20, cy - 13), b, 0, TK_TNUM, today || c < 5 ? INK : W(.5f), 0);
+    }
+    float y = 160 + 56 * 6 + 10;
+    d_rrect(d, 16, y, 358, .5f, 0, W(.15f));
+    char dt[48];
+    const char *wd = WD[ST.wday % 7];
+    int n = (int)tk_strlen(wd);
+    tk_memcpy(dt, wd, (size_t)n); dt[n++] = ' ';
+    n += put_dec(dt + n, ST.day); dt[n++] = ' ';
+    tk_memcpy(dt + n, mo, tk_strlen(mo) + 1);
+    d_text(d, TK_IT600, 15, 20, bl(TK_IT600, 15, y + 18), dt, 0, 0, W(.85f), 0);
+    d_text(d, TK_IT400, 15, 20, bl(TK_IT400, 15, y + 46), "No events", 0, 0, W(.45f), 0);
+}
+
 static tk_layer apkey, apnum;
 static void build_apnum(void)
 {
@@ -1824,7 +1868,8 @@ static void build_app_page(int a)
 {
     const char *k = APPS[a].k;
     int own = !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
-              !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light");
+              !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
+              !tk_strcmp(k, "calendar");
     if (own) {
         for (int i = 0; i < NST; i++) {
             dc d = strip_dc(i, "app-page");
@@ -1836,6 +1881,7 @@ static void build_app_page(int a)
             else if (!tk_strcmp(k, "clock")) page_clock(&d);
             else if (!tk_strcmp(k, "calc")) page_calc(&d);
             else if (!tk_strcmp(k, "light")) page_light(&d);
+            else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
             else page_camera(&d);
             tk_layer_prepare(&appst[i]);
         }
@@ -3252,7 +3298,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
     int tchange = h != ST.h || mi != ST.mi || wday != ST.wday || day != ST.day || mon != ST.mon;
     int wchange = pct != ST.pct || temp != ST.temp;
     ST.h = h; ST.mi = mi; ST.wday = wday; ST.day = day; ST.mon = mon; ST.pct = pct; ST.temp = temp;
-    if (tchange && AP.on && is_app("clock") && !AP.closing) build_app_page(AP.a);   /* P2z: the page's time */
+    if (tchange && AP.on && (is_app("clock") || is_app("calendar")) && !AP.closing) build_app_page(AP.a);   /* the time, today */
     if (tchange) {
         /* the layers keep their place in the tree: rebuilt in place */
         build_lclock();

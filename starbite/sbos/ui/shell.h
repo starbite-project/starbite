@@ -55,6 +55,7 @@ void sh_alarm(int on, int h, int m);
  * platform's vibration for a timer that ran out (no sound) */
 int sh_next_update(float t_ms);
 int sh_refresh(float t_ms);
-void sh_vibrate(void);      /* the next alarm for the lock's widget (on 0: "No alarm") */
+void sh_vibrate(void);
+void sh_year(int y);                      /* P3c: the year (the Calendar's month) */      /* the next alarm for the lock's widget (on 0: "No alarm") */
 
 #endif

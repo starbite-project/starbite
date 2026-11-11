@@ -217,7 +217,7 @@ static void status_now(void)
     struct sbos_time t;
     struct sbos_battery b;
     int h = 0, mi = 0, wd = 0, d = 1, mo = 1;
-    if (clock_now(&t)) { h = t.h; mi = t.mi; wd = t.wday; d = t.d; mo = t.mo; }
+    if (clock_now(&t)) { h = t.h; mi = t.mi; wd = t.wday; d = t.d; mo = t.mo; sh_year(t.y); }
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
