@@ -146,6 +146,8 @@ static void apply_state(const char *st)
     const char *colon = strchr(eq + 1, ':');
     if (colon) { memcpy(key, eq + 1, (size_t)(colon - eq - 1)); v = (float)atof(colon + 1); }
     else strcpy(key, eq + 1);
+    /* date=WDAY:DAY (P3p): a new day as the phone's clock reports it (the Calendar icon follows) */
+    if (!strcmp(what, "date")) { sh_status(21, 6, atoi(key), (int)v, 11, 87, 41); return; }
     sh_set(what, key, v);
 }
 

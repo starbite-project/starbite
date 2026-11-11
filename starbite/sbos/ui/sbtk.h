@@ -5,8 +5,9 @@
  * (docs/concepts/starbite-os-shell/index.html):
  *   - every layer is drawn once into a cached premultiplied bitmap; a frame only composites the cached layers with
  *     their current translate / scale / opacity / clip (the compositor, tk_comp.c);
- *   - Liquid Glass is baked per element (tint, rims, specular, border, shadow) and its backdrop is the wallpaper
- *     blurred once (blur 14 pt, saturate 1.9, brightness 1.06), sampled under the element where it is now;
+ *   - Liquid Glass is baked per element (neutral tone, rim specular, depth, shadow: tk_glass.c's constants) and its
+ *     backdrop is the wallpaper blurred once (blur 14 pt, saturate TK_GLASS_SAT), sampled under the element where it
+ *     is now, or a static backdrop filtered and bent at the rim per element (the lens);
  *   - motion frames composite at half resolution and are scaled 2x to the panel; the first frame at rest is full;
  *   - the springs and the gestures are the concept's own (SPR, the 100 ms velocity window, the projections).
  * Units: panel px (1440 x 2960) unless a name ends in _pt (the concept's 390-pt-wide logical unit, x 1440/390). */
@@ -97,9 +98,15 @@ void tk_bmp_down2(tk_bmp *dst, const tk_bmp *src);              /* 2x2 box (prem
 void tk_bmp_up(tk_bmp *dst, const tk_bmp *src, int x0, int y0, float f);
 
 /* ---- text (stb_truetype on static instances; tk_text.c) ----------------------------------------------------- */
+/* the faces callers name: a weight (the names are Inter Tight's, the faces before P3p). The size picks the packed
+ * face as iOS picks SF Pro: Inter's Text cut (opsz 14) below 20 pt, its Display cut (opsz 32) from 20 pt; Display
+ * has 400 / 600 / 700 (500 draws as 400), and 800 draws as 700 everywhere. With ls == 0 the text gets SF's
+ * size-dependent tracking (tk_text.c); a non-zero ls (px after each glyph) replaces it. */
 enum { TK_IT400, TK_IT500, TK_IT600, TK_IT700, TK_IT800, TK_OF300, TK_NFONT };
+/* the packed faces, in tools/sbtk-fonts.py's / sbtk-pack.py's order (a pack entry's aux) */
+enum { TK_TX400, TK_TX500, TK_TX600, TK_TX700, TK_DP400, TK_DP600, TK_DP700, TK_FOF300, TK_NFACE };
 #define TK_TNUM 1          /* tabular figures (font-variant-numeric: tabular-nums) */
-int tk_font_load(int id, const uint8_t *ttf, const uint8_t *lay, uint32_t laylen);
+int tk_font_load(int face, const uint8_t *ttf, const uint8_t *lay, uint32_t laylen);
 float tk_ascent(int font, float size);                 /* hhea ascent / descent (> 0) in px for a size in px */
 float tk_descent(int font, float size);
 float tk_text_w(int font, float size, const char *s, float ls, int flags);   /* advance incl. ls after each */
@@ -118,27 +125,29 @@ int tk_pack_open(const uint8_t *pak, uint32_t len);    /* loads the fonts; icons
 const tk_bmp *tk_icon(const char *name);               /* NULL if missing */
 float tk_icon_pad(const char *name);                   /* the margin baked around it (glows), px */
 
-/* ---- Liquid Glass (tk_glass.c) ----------------------------------------------------------------------------- */
+/* ---- Liquid Glass (tk_glass.c; its header lists every constant, shared with the GPU path) ------------------- */
+#define TK_GLASS_SAT 1.2f          /* the backdrop's saturate() for regular glass */
+#define TK_GLASS_SAT_CLEAR 1.0f    /* clear glass */
+#define TK_GLASS_BRIGHT 1.0f       /* its brightness() */
+extern int tk_glass_lens;          /* 1: static backdrops are bent at the rim (tk_glass_local / _put / _from_half) */
 /* the wallpaper: the concept's .wall.n (inset -30 pt, three radials over a vertical gradient) at k px per panel px */
 void tk_wall_draw(tk_bmp *b, int emergency, float k);
-/* the backdrop the glass shows: blur 14 pt, saturate 1.9, brightness 1.06 of src (both half resolution) */
+/* the backdrop the glass shows: blur 14 pt, saturate TK_GLASS_SAT of src (both half resolution) */
 void tk_glass_backdrop(tk_bmp *dst, const tk_bmp *src);
-/* bake one .lg element into b at (x, y, w, h) with radius r: the drop shadow (outside), the tint gradient, the inset
- * rims and glow, the specular radials and the 1 pt gradient border; dark = .lg.dark. Its backdrop mask (the shape's
- * coverage) goes into mask (same frame as b) if given. */
+/* bake one glass element into b at (x, y, w, h) with radius r: the drop shadow (outside), and inside the neutral
+ * tone (dark / light by the backdrop's luminance), the depth and the thin rim specular; no tint, gloss or outline.
+ * dark = .lg.dark (a denser tone under labels). Its backdrop mask (the shape's coverage) goes into mask (same frame
+ * as b) if given. */
 void tk_glass_bake(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow);
-void tk_glass_bake_ref(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow);   /* the layered one */
+void tk_glass_bake_ref(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow);   /* the same, exact math, one core */
 /* the glass's backdrop filter applied in place to what b already holds under the shape (glass inside a backdrop
- * root, as the lock list's cards: Chrome filters only the list's own content, not the wallpaper) */
+ * root, as the lock list's cards: Chrome filters only the list's own content, not the wallpaper); bent at the rim */
 void tk_glass_local(tk_bmp *dst, const tk_bmp *src, float x, float y, float w, float h, float r);
 void tk_glass_local_put(tk_bmp *b, const tk_bmp *t, int X, int Y, float x, float y, float w, float h, float r);
 /* tk_glass_local over a backdrop held at half resolution (b's origin at the panel point (box, boy)) */
 void tk_glass_from_half(tk_bmp *b, int box, int boy, const tk_bmp *half, float x, float y, float w, float h, float r);
-/* P4 v6, Liquid Glass (../kern/lens.h): on (default), the glass is a lens: the backdrop refracted toward the rim,
- * dispersed, tinted by its luminance, with an inner shadow and a specular rim, by the compositor (GPU or CPU) for
- * a layer's glass mask and by tk_glass_local_put for glass baked into a layer; the bake then draws only the drop
- * shadow (and .lg.dark's tint). Off: the concept's .lg recipe (the tint, rims and specular radials baked). */
-extern int tk_glass_lens;
+/* P4 (the GPU row): glass with a mask (d_glass, which records its shape) is the compositor's lens (../kern/lens.h:
+ * comp2 on the GPU over a live backdrop, draw_lens on the CPU over the wallpaper's): its bake keeps only the shadow */
 /* rotate a small premultiplied bitmap about its centre (bilinear) into dst of the same size: a chevron's turn */
 void tk_bmp_rotate(tk_bmp *dst, const tk_bmp *src, float deg);
 /* CSS cubic-bezier(x1, y1, x2, y2) at t */

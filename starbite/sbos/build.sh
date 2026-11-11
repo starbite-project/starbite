@@ -75,7 +75,7 @@ relocs_only_relative() {
 "${CROSS}gcc" $CFLAGS "$here/sdk/sbapp_lib.c" -o "$ob/app_lib.o"
 "${CROSS}gcc" $CFLAGS "$ut/tz.c" -o "$ob/app_tz.o"
 apps=""
-for a in emergency light heat sos info clock battery settings wifi modem calc notes files test-loop test-fault; do
+for a in emergency light heat sos info clock battery settings wifi modem calc notes files guide test-loop test-fault; do
     "${CROSS}gcc" $CFLAGS "$here/apps/$a.c" -o "$ob/app_$a.o"
     extra=""
     [ "$a" = clock ] && extra="$ob/app_tz.o"
@@ -168,6 +168,8 @@ prbobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_probe.o#")
 vibobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_vib.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_GPUCOMP "$here/kern/uitest.c" -o "$ob/k_uitest_gpc.o"
 gpcobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_gpc.o#")
+"${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_SURVIVAL "$here/kern/uitest.c" -o "$ob/k_uitest_surv.o"
+survobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_surv.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_UIBENCH "$here/kern/uitest.c" -o "$ob/k_uitest_uib.o"
 uibobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_uib.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_GPU "$here/kern/uitest.c" -o "$ob/k_uitest_gpu.o"
@@ -270,6 +272,11 @@ relocs_only_relative "$out/starbite-os-gpucomp.elf"
 "${CROSS}objcopy" -O binary "$out/starbite-os-gpucomp.elf" "$out/starbite-os-gpucomp.bin"
 "${CROSS}nm" "$out/starbite-os-gpucomp.elf" | sort > "$out/starbite-os-gpucomp.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpucomp.bin" "$out/starbite-os-gpucomp.img" "$out/starbite-os-gpucomp.map"
+"${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $survobjs -o "$out/starbite-os-survival.elf"
+relocs_only_relative "$out/starbite-os-survival.elf"
+"${CROSS}objcopy" -O binary "$out/starbite-os-survival.elf" "$out/starbite-os-survival.bin"
+"${CROSS}nm" "$out/starbite-os-survival.elf" | sort > "$out/starbite-os-survival.map"
+python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-survival.bin" "$out/starbite-os-survival.img" "$out/starbite-os-survival.map"
 "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $uibobjs -o "$out/starbite-os-uibench.elf"
 relocs_only_relative "$out/starbite-os-uibench.elf"
 "${CROSS}objcopy" -O binary "$out/starbite-os-uibench.elf" "$out/starbite-os-uibench.bin"
@@ -320,6 +327,7 @@ if ! "${CROSS}nm" "$out/starbite-os.elf" | grep -q ' sbos_selftest_enabled$'; th
 fi
 
 leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" "$out/starbite-os-heatprobe.img" "$out/starbite-os-vibtest.img" "$out/starbite-os-uibench.img" "$out/starbite-os-gpucomp.img" "$out/starbite-os-gputest.img" "$out/starbite-os-gpualu.img" | head -3 || true)
+leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" "$out/starbite-os-heatprobe.img" "$out/starbite-os-survival.img" "$out/starbite-os-vibtest.img" "$out/starbite-os-uibench.img" "$out/starbite-os-gputest.img" "$out/starbite-os-gpualu.img" | head -3 || true)
 if [ -n "$leak" ]; then
     echo "sbos: the image contains build-host paths:" >&2
     echo "$leak" >&2
@@ -343,6 +351,8 @@ sha256sum "$out/starbite-os-heatprobe.img" | sed "s#  .*#  starbite-os-heatprobe
 echo "sbos: $(cat "$out/starbite-os-heatprobe.img.sha256") (heat probe H1 variant)"
 sha256sum "$out/starbite-os-gpucomp.img" | sed "s#  .*#  starbite-os-gpucomp.img#" > "$out/starbite-os-gpucomp.img.sha256"
 echo "sbos: $(cat "$out/starbite-os-gpucomp.img.sha256") (GPU compositor test P4)"
+sha256sum "$out/starbite-os-survival.img" | sed "s#  .*#  starbite-os-survival.img#" > "$out/starbite-os-survival.img.sha256"
+echo "sbos: $(cat "$out/starbite-os-survival.img.sha256") (survival tools self test)"
 sha256sum "$out/starbite-os-uibench.img" | sed "s#  .*#  starbite-os-uibench.img#" > "$out/starbite-os-uibench.img.sha256"
 echo "sbos: $(cat "$out/starbite-os-uibench.img.sha256") (UI compositor benchmark P0)"
 sha256sum "$out/starbite-os-vibtest.img" | sed "s#  .*#  starbite-os-vibtest.img#" > "$out/starbite-os-vibtest.img.sha256"

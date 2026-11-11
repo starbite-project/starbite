@@ -17,14 +17,19 @@ static char txt[CAP + 1];
 static int n = -1;                          /* bytes read from the card file, < 0 the error */
 
 /* the card written on the phone (the app's state) */
-#define NF 6
+/* 1.2-alpha27: "CRD2" adds two more people to call and notes (kern/survival.c reads the same record for the lock
+ * screen and Starbite OS Next); a "CRD1" card (the first six fields) is taken over as it is */
+#define NF 9
+#define NF1 6
 #define FL 64
-static const char *const label[NF] = { "Name", "Blood type", "Allergies", "Medicines", "Conditions", "Call" };
+static const char *const label[NF] = { "Name", "Blood type", "Allergies", "Medicines", "Conditions", "Call",
+                                       "Call 2", "Call 3", "Notes" };
 static const char *const hint[NF] = { "Your full name", "e.g. 0+", "e.g. penicillin", "What you take",
-                                      "e.g. asthma, diabetes", "A name and a number" };
-static const int maxlen[NF] = { 40, 8, 64, 64, 64, 64 };
+                                      "e.g. asthma, diabetes", "A name and a number", "A name and a number",
+                                      "A name and a number", "Anything a helper should know" };
+static const int maxlen[NF] = { 40, 8, 64, 64, 64, 64, 64, 64, 64 };
 static struct {
-    char magic[4];                          /* "CRD1" */
+    char magic[4];                          /* "CRD2" */
     char f[NF][FL + 1];
 } card;
 static int page, field = -1;                /* page 0 the card, 1 the editor, 2 one field being typed */
@@ -47,10 +52,14 @@ static void load(void)
 
 static void load_card(void)
 {
-    if (state_get(&card, sizeof(card)) != (int)sizeof(card) || card.magic[0] != 'C' || card.magic[1] != 'R' ||
-        card.magic[2] != 'D' || card.magic[3] != '1') {
+    int got = state_get(&card, sizeof(card));
+    int v1 = got == (int)(4 + NF1 * (FL + 1)) && card.magic[3] == '1', v2 = got == (int)sizeof(card) && card.magic[3] == '2';
+    if (!(v1 || v2) || card.magic[0] != 'C' || card.magic[1] != 'R' || card.magic[2] != 'D') {
         for (unsigned i = 0; i < sizeof(card); ++i)
             ((char *)&card)[i] = 0;
+    } else if (v1) {
+        for (int i = NF1; i < NF; ++i)
+            card.f[i][0] = 0;               /* the new fields empty; saved as CRD2 at the next change */
     }
     for (int i = 0; i < NF; ++i)
         card.f[i][FL] = 0;
@@ -58,7 +67,7 @@ static void load_card(void)
 
 static void save_card(void)
 {
-    card.magic[0] = 'C', card.magic[1] = 'R', card.magic[2] = 'D', card.magic[3] = '1';
+    card.magic[0] = 'C', card.magic[1] = 'R', card.magic[2] = 'D', card.magic[3] = '2';
     state_put(&card, sizeof(card));
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # sbtk-fonts.py OUTDIR: the toolkit's fonts. stb_truetype reads static TrueType only and does no OpenType layout,
 # so this makes, from the repo's variable fonts (tools/brand/fonts, OFL):
-#   OUTDIR/<name>.ttf    a static instance (Inter Tight 400..800, Outfit 300), subset to the toolkit's characters
+#   OUTDIR/<name>.ttf    a static instance (Inter Text 400..700, Display 400/600/700, Outfit 300), subset to the toolkit's characters
 #   OUTDIR/<name>.lay    what the C side needs of the layout HarfBuzz would do (as Chrome does):
 #                        "SBTKLAY1", u32 npairs, u32 ntnum, u32 colon_case,
 #                        ntnum x (u32 codepoint, u32 glyph), npairs x (u32 g1 << 16 | g2, i32 adjust in font units)
@@ -23,13 +23,21 @@ os.makedirs(out, exist_ok=True)
 
 CHARS = [c for c in range(0x20, 0x7f)] + [c for c in range(0xa0, 0x100)] + \
     [0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2026, 0x2212, 0x2192, 0x2190, 0x00b7, 0x2009, 0x202f]
-FONTS = [('it400', 'InterTight[wght].ttf', 400), ('it500', 'InterTight[wght].ttf', 500),
-         ('it600', 'InterTight[wght].ttf', 600), ('it700', 'InterTight[wght].ttf', 700),
-         ('it800', 'InterTight[wght].ttf', 800), ('of300', 'Outfit-wght.ttf', 300)]
+# P3p (audit P3j-1): SF Pro's stand-ins. Inter at its Text optical size (opsz 14: SF Pro Text, below 20 pt) and its
+# Display one (opsz 32: SF Pro Display, 20 pt and up); tk_text.c picks between them by size. Outfit 300 is the
+# wordmark. (Inter Tight, the tight display cut used before, is no longer packed.)
+IN = 'Inter[opsz,wght].ttf'
+FONTS = [('tx400', IN, {'opsz': 14, 'wght': 400}), ('tx500', IN, {'opsz': 14, 'wght': 500}),
+         ('tx600', IN, {'opsz': 14, 'wght': 600}), ('tx700', IN, {'opsz': 14, 'wght': 700}),
+         ('dp400', IN, {'opsz': 32, 'wght': 400}), ('dp600', IN, {'opsz': 32, 'wght': 600}),
+         ('dp700', IN, {'opsz': 32, 'wght': 700}), ('of300', 'Outfit-wght.ttf', {'wght': 300})]
+# what stb_truetype reads (cmap head hhea hmtx loca glyf maxp) and the licence's names: the layout tables only feed
+# the .lay (made from the subset font first), so the packed font drops them
+DROP = ['GSUB', 'GPOS', 'GDEF', 'STAT', 'kern', 'gasp', 'DSIG', 'meta']
 
-for name, file, w in FONTS:
+for name, file, axes in FONTS:
     vf = TTFont(os.path.join(src, file))
-    st = instancer.instantiateVariableFont(vf, {'wght': w}, updateFontNames=False)
+    st = instancer.instantiateVariableFont(vf, axes, updateFontNames=False)
     opts = subset.Options()
     opts.layout_features = ['kern', 'tnum', 'calt', 'case', 'ccmp', 'locl', 'liga']
     opts.name_IDs = ['*']
@@ -104,10 +112,22 @@ for name, file, w in FONTS:
             tnum.append((ord(c), inf[i].codepoint))
     inf, _ = shape('1:1')
     colon_case = inf[1].codepoint if len(inf) == 3 else gid.get('colon', 0)
+    # P3p: only pairs the C side can meet: the cmap's glyphs, the tabular figures, the raised colon (the subset
+    # keeps the features' other alternates, which run() never picks)
+    reach = {gid[n] for n in cmap.values()} | {g for _, g in tnum} | {colon_case}
+    pairs = {k: v for k, v in pairs.items() if k >> 16 in reach and k & 0xffff in reach}
     with open(os.path.join(out, name + '.lay'), 'wb') as o:
         o.write(b'SBTKLAY1' + struct.pack('<III', len(pairs), len(tnum), colon_case))
         for cp, g in tnum:
             o.write(struct.pack('<II', cp, g))
         for k in sorted(pairs):
             o.write(struct.pack('<Ii', k, pairs[k]))
-    print(f'{name}: {os.path.getsize(path)} bytes, {len(order)} glyphs, {len(pairs)} kern pairs, colon.case {order[colon_case]}')
+    cc_name = order[colon_case]
+    # the packed font: what the C side reads (glyph ids stay as they are: the .lay refers to them)
+    f = TTFont(path, lazy=False)
+    for t in DROP:
+        if t in f:
+            del f[t]
+    f['post'].formatType = 3.0
+    f.save(path)
+    print(f'{name}: {os.path.getsize(path)} bytes, {len(order)} glyphs, {len(pairs)} kern pairs, colon.case {cc_name}')

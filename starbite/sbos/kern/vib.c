@@ -202,7 +202,9 @@ static void motor_off(void)
     if (!(main_was & 0x80U))
         (void)max_rmw(MAINCTRL1, 0x80U, 0);             /* the bias as it was */
 #endif
-    sb_log("vib: off");
+    static unsigned offs;                   /* 1.2-alpha27: SOS's Morse pulses: the first few only */
+    if (++offs <= 5)
+        sb_log(offs == 5 ? "vib: off (not logged again)" : "vib: off");
 }
 
 /* on for ms (at most 5 s), then off by the UI timer; 0 if it runs */

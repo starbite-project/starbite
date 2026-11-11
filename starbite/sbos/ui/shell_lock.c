@@ -38,7 +38,7 @@ static tk_col W(float a) { return TK_RGBA(255, 255, 255, a); }
 static const tk_shadow SHTXT = { 0, 3.6923077f, 11.076923f, { 0, 0, 0, .28f } };   /* 0 1px 3px rgba(0,0,0,.28) */
 
 /* ---- drawing in pt into a layer's bitmap -------------------------------------------------------------------- */
-typedef struct { tk_bmp *b; tk_a8 *m; float ox, oy; tk_layer *l; } dc;   /* ox, oy: the bitmap's origin in screen px; l: v8 */
+typedef struct { tk_bmp *b; tk_a8 *m; float ox, oy; } dc;   /* ox, oy: the bitmap's origin in screen px */
 
 /* a layer whose bitmap covers the pt rect (plus a margin), placed at its rest position */
 static dc mk(tk_layer *l, const char *name, float x, float y, float w, float h, float mg, int glass)
@@ -51,7 +51,7 @@ static dc mk(tk_layer *l, const char *name, float x, float y, float w, float h, 
     if (glass) tk_a8_new(&l->glass, l->bmp.w, l->bmp.h);
     l->x = l->bx = (float)X;
     l->y = l->by = (float)Y;
-    dc d = { &l->bmp, glass ? &l->glass : 0, (float)X, (float)Y, l };
+    dc d = { &l->bmp, glass ? &l->glass : 0, (float)X, (float)Y };
     return d;
 }
 static void d_text(dc *d, int f, float size, float x, float base, const char *s, float ls, int fl, tk_col c, int shadow)
@@ -79,11 +79,10 @@ static void d_icon(dc *d, const char *name, float x, float y, float alpha)
 static void d_glass(dc *d, float x, float y, float w, float h, float r, int dark, int shadow)
 {
     /* the bake works in the bitmap's px: shift the rect */
-    if (tk_glass_lens && !d->m)              /* v8: glass over its own layer only (a lock card's face): the lens's tone
-                                              * and light baked over what the layer holds there */
-        tk_glass_local(d->b, d->b, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r));
     tk_glass_bake(d->b, d->m, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), dark, shadow);
-    if (d->m && d->l) tk_layer_glass_shape(d->l, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r));   /* v8: the lens */
+    /* P4: the compositor's lens: the shape on the layer (a mask is always a layer's glass, mk) */
+    if (d->m) tk_layer_glass_shape((tk_layer *)(void *)((char *)d->m - __builtin_offsetof(tk_layer, glass)),
+                                   PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r));
 }
 static void d_rrect(dc *d, float x, float y, float w, float h, float r, tk_col c)
 {
@@ -772,6 +771,43 @@ static void toggle_group(int g, int instant)
 }
 
 static tk_layer hparts[8], hsearch[3], pages;
+/* P3p: an app's 62 pt icon. Calendar shows today, as on iOS: the blank a62-calendar-bg with the weekday (red,
+ * semibold, .14 of the tile) over the date (regular, .45), composed once a day (one 62 pt bitmap, ~210 KB) and
+ * used wherever the icon is drawn: home, Search and the opening / closing icon (cal_newday() redraws home's) */
+static tk_bmp calic;
+static int calic_key = -1, calic_x = -1, calic_y;   /* calic_x, _y: where home's first page drew it (its px) */
+static int cal_key(void) { return ST.wday % 7 * 32 + ST.day; }
+static const tk_bmp *app_icon(const char *k, float *pad)
+{
+    char nm[24] = "a62-";
+    int n = tk_mini(tk_strlen(k), 19);
+    tk_memcpy(nm + 4, k, n);
+    nm[4 + n] = 0;
+    const tk_bmp *bg = tk_strcmp(k, "calendar") ? 0 : tk_icon("a62-calendar-bg");
+    if (!bg) { *pad = tk_icon_pad(nm); return tk_icon(nm); }
+    *pad = tk_icon_pad("a62-calendar-bg");
+    if (calic.px && calic_key == cal_key()) return &calic;
+    if (!calic.px && !tk_bmp_new(&calic, bg->w, bg->h)) return bg;
+    tk_bmp_copy(&calic, 0, 0, bg, 0, 0, bg->w, bg->h);
+    dc c = { &calic, 0, -*pad, -*pad };
+    char wd[4], day[4];
+    for (int i = 0; i < 3; i++) { char ch = WD[ST.wday % 7][i]; wd[i] = ch >= 'a' && ch <= 'z' ? (char)(ch - 32) : ch; }
+    wd[3] = 0;
+    day[put_dec(day, ST.day)] = 0;
+    d_text(&c, TK_IT600, 8.68f, 31 - tw(TK_IT600, 8.68f, wd, 0, 0) / 2, 18.6f, wd, 0, 0, tk_hex(0xff3b30, 1), 0);
+    d_text(&c, TK_IT400, 27.9f, 31 - tw(TK_IT400, 27.9f, day, 0, 0) / 2, 48.36f, day, 0, 0, tk_hex(0x1c1c1e, 1), 0);
+    calic_key = cal_key();
+    return &calic;
+}
+static void d_appicon(dc *d, const char *k, float x, float y)
+{
+    float pad;
+    const tk_bmp *ic = app_icon(k, &pad);
+    if (!ic) { tk_log(k); return; }
+    int X = (int)tk_floorf(PT(x) - pad - d->ox + .5f), Y = (int)tk_floorf(PT(y) - pad - d->oy + .5f);
+    tk_blit(d->b, ic, X, Y, 1);
+    if (ic == &calic && d->b == &hparts[2].bmp) { calic_x = X; calic_y = Y; }
+}
 static void build_home_sb(void)
 {
     relayer(&hparts[0]);
@@ -862,9 +898,7 @@ static void build_home(void)
     d = mk(&hparts[2], "home-apps", 0, 250, 390, 220, 4, 0);
     for (int i = 0; i < 8; i++) {
         float cx = 22 + 86.5f * (i % 4) + 43.25f, y = 258 + 103 * (i / 4);
-        char n[40] = "a62-";
-        tk_memcpy(n + 4, P1[i], tk_strlen(P1[i]) + 1);
-        d_icon(&d, n, cx - 31, y, 1);
+        d_appicon(&d, P1[i], cx - 31, y);
         float w = tw(TK_IT500, 12, P1N[i], 0, 0);
         d_text(&d, TK_IT500, 12, cx - w / 2, y + 68 + 12, P1N[i], 0, 0, INK, 1);
     }
@@ -984,7 +1018,9 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         for (int i = 0; i < nf; i++) {
             float b = 298 + 24 * i + 14;
             d_text(&d, TK_IT400, 14.5f, 34, b, dt[i], 0, 0, W(.55f), 0);
-            d_text(&d, TK_IT400, 14.5f, 34 + dtw + 14, b, dd[i], 0, TK_TNUM, INK, 0);
+            char fit[96];             /* P3p: SF-wide text ran past the card (x 376) and off the panel */
+            ellipsize(fit, sizeof fit, TK_IT400, 14.5f, dd[i], 356 - (34 + dtw + 14));
+            d_text(&d, TK_IT400, 14.5f, 34 + dtw + 14, b, fit, 0, TK_TNUM, INK, 0);
         }
         sy = 298 + 17 * nf + 7 * (nf - 1) + 18;
         /* the slider: dark glass whose backdrop is the card under it; its glass kept per position (2 or 3 facts) */
@@ -1166,25 +1202,10 @@ static void build_cc_grid(void)
     cc_glyph(&d, "cc-flame", CCX[2], 264, 20, 24);
     cc_tile(&d, CCX[3], 264, 70, 70, 35, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], 264, 24, 14);
     cc_tile(&d, CCX[0], 354.66f, 70, 70, 35, 0); cc_glyph(&d, "cc-timer", CCX[0], 354.66f, 22, 22);
-    cc_tile(&d, CCX[1], 354.66f, 70, 70, 35, 0);
-    {
-        /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place): a calculator */
-        float gx = CCX[1] + 26, gy = 354.66f + 22;
-        d_rrect(&d, gx, gy, 18, 26, 4, W(1));
-        d_rrect(&d, gx + 3, gy + 3, 12, 6, 1.5f, tk_hex(0x2a3150, 1));
-        for (int r = 0; r < 3; r++)
-            for (int c = 0; c < 3; c++) d_rrect(&d, gx + 3 + 4.5f * c, gy + 12 + 4.5f * r, 3, 3, 1.5f, tk_hex(0x2a3150, 1));
-    }
+    /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place); P3p: baked ones */
+    cc_tile(&d, CCX[1], 354.66f, 70, 70, 35, 0); cc_glyph(&d, "cc-calc", CCX[1], 354.66f, 24, 24);
     cc_tile(&d, CCX[2], 354.66f, 70, 70, 35, 0); cc_glyph(&d, "cc-wifi2", CCX[2], 354.66f, 22, 22);
-    cc_tile(&d, CCX[3], 354.66f, 70, 70, 35, 0);
-    {
-        /* and a camera */
-        float gx = CCX[3] + 23, gy = 354.66f + 25;
-        d_rrect(&d, gx + 8, gy - 2.5f, 8, 4, 1.5f, W(1));
-        d_rrect(&d, gx, gy, 24, 18, 4.5f, W(1));
-        d_rrect(&d, gx + 6.5f, gy + 3.5f, 11, 11, 5.5f, tk_hex(0x2a3150, 1));
-        d_rrect(&d, gx + 9, gy + 6, 6, 6, 3, W(1));
-    }
+    cc_tile(&d, CCX[3], 354.66f, 70, 70, 35, 0); cc_glyph(&d, "cc-camera", CCX[3], 354.66f, 24, 24);
     tk_layer_prepare(&ccgrid);
 }
 static void cc_levels(void)
@@ -1347,7 +1368,7 @@ static dc strip_dc(int i, const char *name)
     tk_bmp_new(&l->bmp, TK_W, y1 - y0);
     l->x = l->bx = 0;
     l->y = l->by = (float)y0;
-    dc d = { &l->bmp, 0, 0, (float)y0, 0 };
+    dc d = { &l->bmp, 0, 0, (float)y0 };
     return d;
 }
 static struct { int on, closing, following, a; arect icon, R, from, to; float travel; } AP;
@@ -1446,7 +1467,7 @@ static void d_lg_app(dc *d, float x, float y, float w, float h, float r, int dar
     if (!tk_bmp_new(&t, Wd, Hd)) return;
     tk_fill_rect_raw(&t, 0, 0, Wd, Hd, 0xff0a0f1fu);
     tk_blit(&t, d->b, -X, -Y, 1);
-    tk_bmp_blur_sat(&t, PT(14), 1.9f, 1.06f);
+    tk_bmp_blur_sat(&t, PT(14), TK_GLASS_SAT, TK_GLASS_BRIGHT);
     tk_glass_local_put(d->b, &t, X, Y, bx, by, PT(w), PT(h), PT(r));
     tk_bmp_free(&t);
     tk_glass_bake(d->b, 0, bx, by, PT(w), PT(h), PT(r), dark, 1);
@@ -1459,7 +1480,7 @@ static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int da
     uint32_t c = 0xff0a0f1fu;
     if (tk_bmp_new(&g, 1, 1)) {
         g.px[0] = c;
-        tk_bmp_satbright(&g, 1.9f, 1.06f);
+        tk_bmp_satbright(&g, TK_GLASS_SAT, TK_GLASS_BRIGHT);
         c = g.px[0];
         tk_bmp_free(&g);
     }
@@ -2193,7 +2214,7 @@ static void build_search(void)
     if (!sfield.px || sfield.w != d.b->w) {
         tk_bmp_free(&sfield);
         if (tk_bmp_new(&sfield, d.b->w, (int)PT(56 + 40 + 44 - 52))) {
-            dc f = { &sfield, 0, d.ox, d.oy, 0 };
+            dc f = { &sfield, 0, d.ox, d.oy };
             d_lg_flat(&f, 16, 56, 288, 40, 20, 1);
         }
     }
@@ -2206,12 +2227,11 @@ static void build_search(void)
     SR.nh = 0;
     for (int a = 0; a < NAPPS && SR.nh < 8; a++) {
         if (!tk_strcmp(APPS[a].k, "search") || !ci_has(APPS[a].name, SR.q)) continue;
-        char nm[24] = "a62-";
-        tk_memcpy(nm + 4, APPS[a].k, tk_strlen(APPS[a].k) + 1);
-        if (!tk_icon(nm)) continue;
+        float pad;
+        if (!app_icon(APPS[a].k, &pad)) continue;
         SR.hits[SR.nh] = a;
         float x = 22 + 86.5f * (SR.nh % 4) + 12.25f, y = 148 + 103 * (SR.nh / 4);
-        d_icon(&d, nm, x, y, 1);
+        d_appicon(&d, APPS[a].k, x, y);
         float w = tw(TK_IT500, 12, APPS[a].name, 0, 0);
         if (w > 84) w = 84;
         d_text(&d, TK_IT500, 12, x + 31 - w / 2, bl(TK_IT500, 12, y + 67), APPS[a].name, 0, 0, INK, 0);
@@ -2481,14 +2501,12 @@ static void build_app_page(int a)
 static tk_layer apicon;
 static void place_apicon(arect R, float p)
 {
-    char nm[24] = "a62-";
-    const char *k = APPS[AP.a].k;
-    tk_memcpy(nm + 4, k, tk_strlen(k) + 1);
-    const tk_bmp *ic = tk_icon(nm);
+    float pad;
+    const tk_bmp *ic = app_icon(APPS[AP.a].k, &pad);    /* P3p: Calendar's is today's */
     float a = 1 - tk_clampf(p * 3, 0, 1);
     if (!ic || !AP.on || a <= 0) { apicon.hidden = 1; return; }
     if (apicon.bmp.px != ic->px) { tk_layer_dirty(&apicon); apicon.bmp = *ic; }
-    float sx = R.w / 62, pad = tk_icon_pad(nm);
+    float sx = R.w / 62;
     apicon.sx = apicon.sy = sx;
     apicon.ox = apicon.oy = 0;
     apicon.x = (PT(R.x) - pad * sx) / sx;
@@ -3909,6 +3927,19 @@ int sh_tick(float dt, float t)
     return mv;
 }
 
+/* P3p: a new day: today's Calendar icon (app_icon() composes it again) over yesterday's on home's first page, in
+ * place (no page rebuild); Search and the opening icon take it when they next draw */
+static void cal_newday(void)
+{
+    float pad;
+    const tk_bmp *ic = app_icon("calendar", &pad);
+    if (ic != &calic) return;
+    if (apicon.bmp.px == calic.px) tk_layer_dirty(&apicon);
+    if (calic_x < 0 || !hparts[2].bmp.px) return;
+    tk_fill_rect_raw(&hparts[2].bmp, calic_x, calic_y, ic->w, ic->h, 0);
+    tk_blit(&hparts[2].bmp, ic, calic_x, calic_y, 1);
+    tk_layer_dirty(&hparts[2]);
+}
 void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
 {
     int tchange = h != ST.h || mi != ST.mi || wday != ST.wday || day != ST.day || mon != ST.mon;
@@ -3917,6 +3948,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
     if (tchange && AP.on && (is_app("clock") || is_app("calendar")) && !AP.closing) build_app_page(AP.a);   /* the time, today */
     if (tchange) {
         /* the layers keep their place in the tree: rebuilt in place */
+        if (calic_key != cal_key()) cal_newday();
         build_lclock();
         build_home_sb();
         if (AP.on && !AP.closing) build_apsb();

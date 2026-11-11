@@ -270,7 +270,21 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
                                 current / voltage throttle (a brownout may switch the phone off); 0 holds as before.
                                 Remembered */,
        SET_VIBRATE = 24 /* 1.2-alpha7: write (count << 16) | ms: count pulses (0 = 1) of ms (<= 5000) with ms gaps; 0 stops.
-                           Reads 1 when the motor works, 0 not tried yet, -1 refused */ };
+                           Reads 1 when the motor works, 0 not tried yet, -1 refused */,
+       /* 1.2-alpha27: the survival tools (kern/survival.h) */
+       SET_SURV_USB = 32 /* write 1 after the app's hold-to-arm: one burst of 5 V out of the USB-C port (at most 10 s);
+                            0 stops it. Reads 0 off, 1 on, 2 cooling down, -1 the last start was refused (the kernel
+                            posts the reason as a notification) */,
+       SET_SURV_USB_INFO = 33 /* read: seconds left (burst or cooldown) | the estimated output mA << 8 (0xfff unknown)
+                                 | the VBUS range's top in V << 20 (0xf unknown) | the battery C << 24 */,
+       SET_SURV_SOS = 34 /* SOS's options: 1 the torch in Morse, 2 the motor in Morse; beacon << 4: 0 white / red,
+                            1 white, 2 red, 3 with the Morse. Remembered */,
+       SET_SURV_LAT = 35, SET_SURV_LON = 36 /* the location for the sun, 0.01 degrees (N / E positive); 0x7fffffff
+                                               none. Remembered */,
+       SET_SURV_SUN = 37 /* read: sunrise | sunset << 16 in local minutes; -1 the sun stays up, -2 it stays down,
+                            -3 no location, -4 no clock */,
+       SET_SURV_LAST2 = 38 /* Last 2 % mode: 1 on, 0 off */,
+       SET_SURV_LAST2_AUTO = 39 /* Last 2 % at 3 % instead of switching off: 1 (the default) or 0. Remembered */ };
 
 /* 1.0-rc3: the full-heat battery data for the minutes-left estimates (Heat's confirmation and its live readout).
  * Measured on the phone (rc2, 2026-11-08, Manual flat out, 7 cores + GPU): 2.8 A at 3.67 V (about 10 W; peak 2.86 A),

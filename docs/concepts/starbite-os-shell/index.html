@@ -38,7 +38,7 @@ button{font-family:inherit;color:inherit}
 
 /* ---------- wallpaper: two grounds, crossfaded for Emergency ---------- */
 .wall{position:absolute;inset:-30px;transition:opacity .7s ease}
-.wall.n{background:radial-gradient(120% 70% at 92% 4%, rgba(70,120,255,.6), transparent 60%),radial-gradient(90% 60% at 8% 96%, rgba(40,80,210,.42), transparent 70%),radial-gradient(60% 40% at 50% 55%, rgba(30,60,160,.25), transparent 70%),linear-gradient(180deg,#071131 0%,#0b1a4c 45%,#050a1e 100%)}
+.wall.n{background:radial-gradient(120% 70% at 92% 4%, rgba(80,110,200,.34), transparent 60%),radial-gradient(90% 60% at 8% 96%, rgba(50,75,160,.22), transparent 70%),radial-gradient(60% 40% at 50% 55%, rgba(40,60,130,.14), transparent 70%),linear-gradient(180deg,#080e26 0%,#0c1636 45%,#04060f 100%)}
 .wall.e{opacity:0;background:radial-gradient(120% 70% at 92% 4%, rgba(255,96,60,.5), transparent 60%),radial-gradient(90% 60% at 8% 96%, rgba(255,150,60,.3), transparent 70%),linear-gradient(180deg,#260807 0%,#2c0e08 45%,#0d0403 100%)}
 .em-mode .wall.e{opacity:1}
 .star{position:absolute;right:34px;top:56px;width:36px;height:36px;opacity:.9;filter:drop-shadow(0 0 18px rgba(170,200,255,.9));transition:filter .7s}
@@ -383,13 +383,16 @@ function tracker() { const s = []; return {
   add(y, t = performance.now()) { s.push([y, t]); while (s.length > 2 && t - s[0][1] > 100) s.shift(); },
   v() { if (s.length < 2) return 0; const a = s[0], b = s[s.length - 1]; return (b[0] - a[0]) / Math.max(1, b[1] - a[1]); } }; }
 
-/* ---------- tiles: squircle + boot-menu tile map + sheen ---------- */
+/* ---------- tiles: squircle + boot-menu tile map + rim ---------- */
 const SQ = (() => { const n = 5, pts = []; for (let i = 0; i < 72; i++) { const a = i / 72 * Math.PI * 2, c = Math.cos(a), s = Math.sin(a);
   pts.push([50 + 50 * Math.sign(c) * Math.abs(c) ** (2 / n), 50 + 50 * Math.sign(s) * Math.abs(s) ** (2 / n)]); }
   return 'M' + pts.map(p => p.map(v => v.toFixed(2)).join(' ')).join('L') + 'Z'; })();
 let uid = 0;
+/* iOS 26 (HIG App icons): no baked gloss, bevel or outline; only a faint inner rim that catches the light at the
+ * top-left corner (and a little at the bottom-right), clipped to the squircle so nothing sits outside the mask.
+ * light (white tiles) is kept for the callers; it no longer changes anything. */
 function T(a, b, inner, light) { const i = ++uid;
-  return `<svg class="tile" viewBox="0 0 100 100" width="100%" height="100%" aria-hidden="true"><defs><clipPath id="c${i}"><path d="${SQ}"/></clipPath><linearGradient id="g${i}" x1="0" y1="0" x2=".75" y2="1"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient><linearGradient id="s${i}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="${light ? .4 : .28}"/><stop offset=".45" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".14"/></linearGradient></defs><g clip-path="url(#c${i})"><rect width="100" height="100" fill="url(#g${i})"/>${inner}<rect width="100" height="100" fill="url(#s${i})"/></g><path d="${SQ}" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="1.6"/></svg>`; }
+  return `<svg class="tile" viewBox="0 0 100 100" width="100%" height="100%" aria-hidden="true"><defs><clipPath id="c${i}"><path d="${SQ}"/></clipPath><linearGradient id="g${i}" x1="0" y1="0" x2=".75" y2="1"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient><linearGradient id="r${i}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".5"/><stop offset=".28" stop-color="#fff" stop-opacity="0"/><stop offset=".72" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#fff" stop-opacity=".22"/></linearGradient></defs><g clip-path="url(#c${i})"><rect width="100" height="100" fill="url(#g${i})"/>${inner}</g><path d="${SQ}" fill="none" stroke="url(#r${i})" stroke-width="1.4" clip-path="url(#c${i})"/></svg>`; }
 const STAR = 'M50 0C54 34 66 46 100 50 66 54 54 66 50 100 46 66 34 54 0 50 34 46 46 34 50 0Z';
 const APPLE = 'M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5 0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9-42.8 61.6-87.5 123.1-155.5 123.1s-85.5-39.5-164-39.5c-76.5 0-103.7 40.8-165.9 40.8s-105.6-57-155.5-127C46.7 790.7 0 663 0 541.8c0-194.4 126.4-297.5 250.8-297.5 66.1 0 121.2 43.4 162.7 43.4 39.5 0 101.1-46 176.3-46 28.5 0 130.9 2.6 198.3 99.2zm-234-181.5c31.1-36.9 53.1-88.1 53.1-139.3 0-7.1-.6-14.3-1.9-20.1-50.6 1.9-110.8 33.7-147.1 75.8-28.5 32.4-55.1 83.6-55.1 135.5 0 7.8 1.3 15.6 1.9 18.1 3.2.6 8.4 1.3 13.6 1.3 45.4 0 102.5-30.4 135.5-71.3z';
 const appleMark = (s = .044, col = '#fff') => `<path transform="translate(${50 - 407 * s} ${48 - 500 * s}) scale(${s})" d="${APPLE}" fill="${col}"/>`;
@@ -397,7 +400,7 @@ const GEAR = 'M77.25 38.71 L78.89 44.02 L86.67 45.07 L86.67 54.93 L78.89 55.98 L
 const ANDROID = 'M918.6 515.1h-918.6c14.7-155.7 103.7-288.7 235.1-359.9l-76.2-132c-4.3-7.4-1.8-16.8 5.6-21.1s16.8-1.8 21.1 5.6l77.2 133.7c58.9-26.9 125.2-41.9 196.5-41.9s137.6 15 196.5 41.9l77.2-133.7c4.2-7.4 13.7-9.9 21-5.6s9.9 13.7 5.6 21.1l-76.2 132c131.5 71.2 220.5 204.2 235.2 359.9zm-248.5-129c21.3 0 38.6-17.3 38.5-38.5 0-21.2-17.2-38.5-38.5-38.5-21.2 0-38.5 17.2-38.5 38.5 0 21.2 17.2 38.5 38.5 38.5zm-421.7 0c21.3 0 38.6-17.3 38.5-38.5 0-21.2-17.2-38.5-38.5-38.5-21.2 0-38.5 17.2-38.5 38.5 0 21.2 17.2 38.5 38.5 38.5z';
 const GOOG = '<g transform="translate(24 24) scale(2.17)"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></g>';
 const TUX = '<ellipse cx="50" cy="58" rx="20" ry="26" fill="#111"/><ellipse cx="50" cy="64" rx="13" ry="18" fill="#f4f1ea"/><circle cx="50" cy="36" r="13" fill="#111"/><circle cx="45.5" cy="34" r="3" fill="#fff"/><circle cx="54.5" cy="34" r="3" fill="#fff"/><path d="M44 41l6 4 6-4-6-2z" fill="#ffb627"/><ellipse cx="41" cy="84" rx="8" ry="3.5" fill="#ffb627"/><ellipse cx="59" cy="84" rx="8" ry="3.5" fill="#ffb627"/>';
-const FLAME = '<path transform="translate(26 18) scale(2)" d="M12 1c1.3 6 7.5 8 7.5 15.5A7.5 7.5 0 0 1 4.5 16.5c0-4 2.5-5.5 2.5-9 2.6 1.4 4 4 4 6.5 1.4-4 1.5-8.5 1-13z" fill="#fff"/>';
+const FLAME = '<path transform="translate(22.4 21.25) scale(2.3)" d="M12 1c1.3 6 7.5 8 7.5 15.5A7.5 7.5 0 0 1 4.5 16.5c0-4 2.5-5.5 2.5-9 2.6 1.4 4 4 4 6.5 1.4-4 1.5-8.5 1-13z" fill="#fff"/>';
 const ICON = {
   apple: () => T('#5b6478', '#262c3a', appleMark()),
   microsoft: () => T('#1a3d78', '#0b1a38', '<g transform="translate(27 27)"><rect width="21" height="21" fill="#f35325"/><rect x="25" width="21" height="21" fill="#81bc06"/><rect y="25" width="21" height="21" fill="#05a6f0"/><rect x="25" y="25" width="21" height="21" fill="#ffba08"/></g>'),
@@ -502,7 +505,7 @@ function renderEmergency() {
   const card = (ic, t, s, act) => `<div class="vgroup"><div class="vcard lg"><div class="vhead" role="button" tabindex="0" data-act="${act}"><span>${ic}</span><div><b style="font-size:19px">${t}</b><div class="sub">${s}</div></div>${chev}</div></div></div>`;
   nscroll.innerHTML =
     card(T('#ff7a45', '#b3261e', FLAME), 'Survival Heat', 'Warms your hands · stops at a 65 °C battery', 'Survival Heat') +
-    card(T('#ffd166', '#e09f1f', '<rect x="30" y="20" width="40" height="62" rx="8" fill="none" stroke="#3a2600" stroke-width="7"/><rect x="40" y="48" width="20" height="26" rx="3" fill="#3a2600"/>'), 'Power Saving', 'Dims the screen and turns off radios', 'Power Saving') +
+    card(T('#ffd166', '#e09f1f', '<rect x="32" y="21" width="36" height="58" rx="8" fill="none" stroke="#3a2600" stroke-width="7"/><rect x="41" y="47" width="18" height="25" rx="3" fill="#3a2600"/>'), 'Power Saving', 'Dims the screen and turns off radios', 'Power Saving') +
     card(T('#ff3b30', '#b3150c', '<text x="50" y="61" text-anchor="middle" font-family="Inter Tight,sans-serif" font-weight="800" font-size="27" fill="#fff">SOS</text>'), 'Emergency SOS', 'Siren, flashing light and your medical card', 'SOS') +
     card(T('#ff6b6b', '#d62f3f', '<rect x="22" y="28" width="56" height="44" rx="8" fill="#fff"/><path d="M50 40v20M40 50h20" stroke="#d62f3f" stroke-width="7" stroke-linecap="round"/>'), 'Medical Card', 'Shown here without unlocking', 'Medical Card') +
     `<div class="etool"><button class="lg dark" id="exitEm">Exit Emergency</button></div>`;
@@ -612,20 +615,21 @@ const gend = () => { if (!gd) return; const d = gd; gd = null; const v = d.tr.v(
 grab.addEventListener('pointerup', gend); grab.addEventListener('pointercancel', gend);
 
 /* ---------- home ---------- */
+const CAL_BG = ['#ffffff', '#f1f2f5'];   /* the Calendar tile without its text (the phone's a62-calendar-bg) */
 const AI = {
-  phone: () => T('#5ef08a', '#16b34a', '<path transform="translate(25 25) scale(2.1)" d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1z" fill="#fff"/>'),
+  phone: () => T('#5ef08a', '#16b34a', '<path transform="translate(15.2 15.2) scale(2.9)" d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1z" fill="#fff"/>'),
   messages: () => T('#5ef08a', '#16b34a', '<path d="M50 22c-19 0-34 12-34 27 0 8 4 15 11 20-1 5-4 9-7 11 6 0 12-2 16-5 4 1 9 2 14 2 19 0 34-12 34-28S69 22 50 22z" fill="#fff"/>'),
   contacts: () => T('#c9ccd3', '#8e939f', '<circle cx="50" cy="40" r="14" fill="#fff"/><path d="M24 78c3-14 14-21 26-21s23 7 26 21z" fill="#fff"/>', true),
   camera: () => T('#e4e6ea', '#9fa4ad', '<rect x="20" y="32" width="60" height="42" rx="9" fill="#2c2f36"/><rect x="38" y="25" width="24" height="10" rx="3" fill="#2c2f36"/><circle cx="50" cy="53" r="13" fill="#7b8190"/><circle cx="50" cy="53" r="8" fill="#2c2f36"/>', true),
-  photos: () => T('#ffffff', '#eef1f5', ['#ff9f0a','#ffd60a','#30d158','#64d2ff','#5e5ce6','#bf5af2','#ff375f','#ff6b3d'].map((c, i) => `<ellipse cx="50" cy="31" rx="9" ry="17" fill="${c}" opacity=".85" transform="rotate(${i * 45} 50 50)"/>`).join(''), true),
-  music: () => T('#ff6b81', '#ff2d55', '<path d="M42 30v30a8 8 0 1 1-5-7V34l28-6v26a8 8 0 1 1-5-7V30z" fill="#fff"/>'),
-  calendar: () => T('#ffffff', '#f1f2f5', '<rect x="0" y="0" width="100" height="0" fill="#ff3b30"/><text x="50" y="35" text-anchor="middle" font-family="Inter Tight,sans-serif" font-weight="700" font-size="14" fill="#ff3b30" id="calDay">TUE</text><text x="50" y="74" text-anchor="middle" font-family="Inter Tight,sans-serif" font-weight="500" font-size="40" fill="#1c1c1e" id="calNum">10</text>', true),
-  weather: () => T('#4aa3ff', '#1d5fd6', '<circle cx="42" cy="42" r="14" fill="#ffd34d"/><path d="M38 72h30a12 12 0 0 0 0-24 16 16 0 0 0-30 4 10 10 0 0 0 0 20z" fill="#fff"/>'),
-  clock: () => T('#1b1b1f', '#000', '<circle cx="50" cy="50" r="32" fill="#fff"/><path d="M50 30v20l13 8" stroke="#111" stroke-width="5" stroke-linecap="round" fill="none"/><circle cx="50" cy="50" r="3.5" fill="#ff7a00"/>'),
+  photos: () => T('#ffffff', '#eef1f5', ['#ff9f0a','#ffd60a','#30d158','#64d2ff','#5e5ce6','#bf5af2','#ff375f','#ff6b3d'].map((c, i) => `<ellipse cx="50" cy="31" rx="9" ry="17" fill="${c}" style="mix-blend-mode:multiply" transform="rotate(${i * 45} 50 50)"/>`).join(''), true),
+  music: () => T('#ff6b81', '#ff2d55', '<path d="M43 37.5L69 31.5V60.5a8.5 7 -20 1 1-5-6.2V42.2L48 45.8V66.5a8.5 7 -20 1 1-5-6.2ZM43 37.5V30.5L69 24.5V31.5Z" fill="#fff"/>'),
+  calendar: () => T(...CAL_BG, '<text x="50" y="30" text-anchor="middle" font-family="Inter Tight,sans-serif" font-weight="600" font-size="14" fill="#ff3b30" id="calDay">TUE</text><text x="50" y="78" text-anchor="middle" font-family="Inter Tight,sans-serif" font-weight="400" font-size="45" fill="#1c1c1e" id="calNum">10</text>', true),
+  weather: () => T('#4aa3ff', '#1d5fd6', '<g transform="translate(50 50) scale(1.12) translate(-54 -50)"><circle cx="42" cy="42" r="14" fill="#ffd34d"/><path d="M38 72h30a12 12 0 0 0 0-24 16 16 0 0 0-30 4 10 10 0 0 0 0 20z" fill="#fff"/></g>'),
+  clock: () => T('#1b1b1f', '#000', '<circle cx="50" cy="50" r="38" fill="#fff"/><g stroke="#111" stroke-width="2" stroke-linecap="round"><path d="M50 13V21" transform="rotate(0 50 50)"/><path d="M50 14V19" transform="rotate(30 50 50)"/><path d="M50 14V19" transform="rotate(60 50 50)"/><path d="M50 13V21" transform="rotate(90 50 50)"/><path d="M50 14V19" transform="rotate(120 50 50)"/><path d="M50 14V19" transform="rotate(150 50 50)"/><path d="M50 13V21" transform="rotate(180 50 50)"/><path d="M50 14V19" transform="rotate(210 50 50)"/><path d="M50 14V19" transform="rotate(240 50 50)"/><path d="M50 13V21" transform="rotate(270 50 50)"/><path d="M50 14V19" transform="rotate(300 50 50)"/><path d="M50 14V19" transform="rotate(330 50 50)"/></g><path d="M50 50l-13.9-8M50 50l20.8-12" stroke="#111" stroke-width="4.5" stroke-linecap="round" fill="none"/><path d="M54 43.1L36 74.2" stroke="#ff9500" stroke-width="1.6" stroke-linecap="round"/><circle cx="50" cy="50" r="3.2" fill="#ff9500"/><circle cx="50" cy="50" r="1.3" fill="#fff"/>'),
   calc: () => T('#3a3a3f', '#1d1d20', '<rect x="24" y="22" width="52" height="16" rx="4" fill="#9aa"/><g fill="#d8d8dc"><circle cx="32" cy="52" r="6"/><circle cx="50" cy="52" r="6"/><circle cx="32" cy="70" r="6"/><circle cx="50" cy="70" r="6"/></g><circle cx="68" cy="52" r="6" fill="#ff9f0a"/><circle cx="68" cy="70" r="6" fill="#ff9f0a"/>'),
   notes: () => T('#fffdf2', '#f3e7b4', '<rect x="0" y="0" width="100" height="24" fill="#ffd54a"/><g stroke="#c9bd8c" stroke-width="3"><path d="M20 44h60M20 58h60M20 72h44"/></g>', true),
   files: () => T('#4aa3ff', '#0b5fd6', '<path d="M18 34a6 6 0 0 1 6-6h17l7 7h28a6 6 0 0 1 6 6v29a6 6 0 0 1-6 6H24a6 6 0 0 1-6-6z" fill="#fff"/><path d="M18 44h64" stroke="#2b8cff" stroke-width="3"/>'),
-  settings: () => T('#9a9aa0', '#55555a', `<g transform="translate(14 14) scale(.72)"><path fill="#ececf1" fill-rule="evenodd" d="${GEAR}"/></g>`),
+  settings: () => T('#9a9aa0', '#55555a', `<g transform="translate(6 6) scale(.88)"><path fill="#ececf1" fill-rule="evenodd" d="${GEAR}"/></g><circle cx="50" cy="50" r="10" fill="none" stroke="#bdbdc4" stroke-width="3.5"/>`),
   light: () => T('#ffcc4d', '#f59e0b', '<path d="M38 20h24v12l-6 8v36a3 3 0 0 1-3 3h-6a3 3 0 0 1-3-3V40l-6-8z" fill="#3a2600"/><circle cx="50" cy="56" r="4" fill="#ffcc4d"/>'),
   battery: () => T('#34c759', '#14883a', '<rect x="22" y="34" width="50" height="32" rx="8" fill="none" stroke="#fff" stroke-width="6"/><rect x="31" y="43" width="26" height="14" rx="3" fill="#fff"/><rect x="74" y="44" width="6" height="12" rx="2" fill="#fff"/>'),
   medical: () => T('#ff6b6b', '#d62f3f', '<rect x="22" y="28" width="56" height="44" rx="8" fill="#fff"/><path d="M50 40v20M40 50h20" stroke="#d62f3f" stroke-width="7" stroke-linecap="round"/>'),
@@ -633,7 +637,7 @@ const AI = {
   terminal: () => T('#2c2c31', '#0c0c0e', '<path d="M26 36l16 14-16 14M48 66h26" stroke="#8ef58b" stroke-width="7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'),
   browser: () => T('#ffffff', '#e9eef6', '<circle cx="50" cy="50" r="30" fill="#2f7bf6"/><path d="M50 20v60M20 50h60M28 32c12 7 32 7 44 0M28 68c12-7 32-7 44 0" stroke="#fff" stroke-width="3" fill="none"/><ellipse cx="50" cy="50" rx="13" ry="30" stroke="#fff" stroke-width="3" fill="none"/>', true),
   heat: () => T('#ff7a45', '#b3261e', FLAME),
-  power: () => T('#ffd166', '#e09f1f', '<rect x="30" y="20" width="40" height="62" rx="8" fill="none" stroke="#3a2600" stroke-width="7"/><rect x="40" y="48" width="20" height="26" rx="3" fill="#3a2600"/>'),
+  power: () => T('#ffd166', '#e09f1f', '<rect x="32" y="21" width="36" height="58" rx="8" fill="none" stroke="#3a2600" stroke-width="7"/><rect x="41" y="47" width="18" height="25" rx="3" fill="#3a2600"/>'),
 };
 const APPS = [['phone','Phone'],['messages','Messages'],['contacts','Contacts'],['camera','Camera'],['photos','Photos'],['music','Music'],['calendar','Calendar'],['weather','Weather'],['clock','Clock'],['calc','Calculator'],['notes','Notes'],['files','Files'],['settings','Settings'],['light','Flashlight'],['battery','Battery'],['medical','Medical Card'],['sos','SOS'],['terminal','Terminal'],['browser','Browser'],['heat','Survival Heat'],['power','Power Saving']];
 const P1 = ['calendar','weather','clock','camera','photos','music','notes','calc'];
@@ -880,7 +884,8 @@ window.SB_SPEC = {
     return out; },
   systems: GROUPS.map(g => ({ vendor: g.name, items: g.items.map(i => ({ key: i.k, name: i.name, meta: i.meta, self: !!i.self, tag: i.k === LAST ? 'LAST USED' : i.tag || null })) })),
 };
-window.sbIcons = () => ({ systems: Object.fromEntries(Object.keys(ICON).map(k => [k, ICON[k]()])), apps: Object.fromEntries(Object.keys(AI).map(k => [k, AI[k]()])) });
+window.sbIcons = () => ({ systems: Object.fromEntries(Object.keys(ICON).map(k => [k, ICON[k]()])), apps: Object.fromEntries(Object.keys(AI).map(k => [k, AI[k]()])),
+  calendarBg: T(...CAL_BG, '', true) });
 window.sbSet = (what, v) => { // deterministic states, no springs
   switch (what) {
     case 'unlock': stopLock && stopLock(); lock.style.visibility = 'visible'; setLock(-H * v); locked = v < 1; break;
