@@ -1826,6 +1826,23 @@ Every app failure must be a removed device that the app or DWM recovers from.
   the freed ranges. Output: `Live_FaultLog` and `Live_FaultCount`.
 - **Stage:** `build/win/stage/sbwddm-t39`.
 
+### 6.49 T39's 0x7E (read from its own ledger) and T39c
+
+- **The ledger's first real record** (`build/win/results-t39/clean1`): `boot 1: BUGCHECK 0x7E
+  SYSTEM_THREAD_EXCEPTION_NOT_HANDLED (c0000005, …) at 390 s; p2 = dxgmms1.sys+0x41cd4`. The zone-0 location works.
+- **The KMD's last counters before it** (the next boot's hive):
+  - 50 GPU faults, so 0133 did not remove them. The fault log shows two addresses (0x3811000, 0x24a64000), neither
+    in a recently freed range.
+  - 4 job timeouts at 355-361 s, then the dxgmms1 access violation at 390 s.
+- **Likely chain:** 0133 lets `sbtex vertexid` (SV_VertexID, no vertex buffers; it crashed in user mode before) reach
+  the GPU. Its job hangs; Windows' TDR runs recovery; our DxgkDdiResetFromTimeout is a no-op (6.43); dxgmms1 crashes.
+- **Next:**
+  - find why that draw hangs (Panfrost and vertex IDs without attributes);
+  - make the KMD survive a TDR (Phase 1: real reset, report the hung fence);
+  - check where the remaining faults at 0x3811000/0x24a64000 come from.
+- **T39c:** T39 without 0133 (sbumd 16b44d96). The Mesa tree keeps 0133 on branch `sb-with-0133`; `main` has its
+  revert.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
