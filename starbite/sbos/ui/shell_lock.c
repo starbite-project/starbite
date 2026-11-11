@@ -1831,6 +1831,158 @@ static void page_display(dc *d)
     d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 262), "Four steps, as the Control Centre's slider.", 0, 0, W(.45f), 0);
 }
 
+/* ---- P3e: Notes with an iOS keyboard. The list (each note's first line), New, and the editor: the text with a
+ * caret over a dark keyboard (letters, shift, 123, space, return, delete). Kept in RAM until a restart (writing
+ * them to the phone's storage needs the Starbite OS session's sbos-state path). ---- */
+#define NNOTES 8
+#define NOTELEN 600
+static char NOTES[NNOTES][NOTELEN];
+static struct { int n, view, cur, shift, num; } NS;
+static tk_layer apnote;
+static void build_app_page(int a);
+static const char *const KR[2][3] = { { "qwertyuiop", "asdfghjkl", "zxcvbnm" }, { "1234567890", "-/:;()&@\"", ".,?!'" } };
+static void note_title(const char *t, char *out)
+{
+    int k = 0;
+    while (t[k] && t[k] != '\n' && k < 40) { out[k] = t[k]; k++; }
+    out[k] = 0;
+    if (!k) tk_memcpy(out, "New Note", 9);
+}
+static void kb_key(dc *d, float x, float y, float w, const char *t, int special)
+{
+    d_rrect(d, x, y, w, 46, 6, special ? tk_hex(0x3a3d4a, 1) : tk_hex(0x6b6e7a, 1));
+    float tw0 = tw(TK_IT400, special ? 16 : 23, t, 0, 0);
+    d_text(d, TK_IT400, special ? 16 : 23, x + (w - tw0) / 2, bl(TK_IT400, special ? 16 : 23, y + (special ? 13 : 9)), t, 0, 0, INK, 0);
+}
+static void page_notes(dc *d)
+{
+    if (!NS.view) {
+        d_h1(d, "Notes");
+        d_text(d, TK_IT600, 17, 330, bl(TK_IT600, 17, 53), "New", 0, 0, tk_hex(0xffd60a, 1), 0);
+        if (!NS.n) { d_empty(d, 330, "No Notes", "Tap New to write one. Notes are kept until the phone restarts."); return; }
+        d_rrect(d, 16, 117, 358, 56.0f * NS.n - 1, 16, tk_hex(0x151c33, 1));
+        for (int i = 0; i < NS.n; i++) {
+            char t[48];
+            note_title(NOTES[NS.n - 1 - i], t);
+            d_text(d, TK_IT600, 17, 32, bl(TK_IT600, 17, 117 + 56 * i + 17), t, 0, 0, INK, 0);
+            if (i + 1 < NS.n) d_rrect(d, 32, 117 + 56 * i + 55, 342, .5f, 0, W(.1f));
+        }
+        return;
+    }
+    d_icon(d, "back", 18, 53, 1);
+    d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Notes", 0, 0, tk_hex(0xffd60a, 1), 0);
+    d_rrect(d, 0, 540, 390, 262, 0, tk_hex(0x1e2030, 1));
+    const char *const *R = KR[NS.num];
+    for (int r = 0; r < 3; r++) {
+        int n = (int)tk_strlen(R[r]);
+        float x0 = r == 2 ? 54 : 3 + (10 - n) * 19.5f;
+        if (r == 1 && NS.num) x0 = 3 + 19.5f * (10 - n);
+        if (r == 2 && NS.num) x0 = 3 + (10 - n) * 19.5f;
+        for (int i = 0; i < n; i++) {
+            char k[2] = { R[r][i], 0 };
+            if (!NS.num && NS.shift) k[0] = (char)(k[0] - 32);
+            kb_key(d, x0 + 39 * i, 550 + 54 * r, 33, k, 0);
+        }
+    }
+    if (!NS.num) {
+        if (NS.shift) { d_rrect(d, 3, 658, 42, 46, 6, W(.9f)); float w = tw(TK_IT600, 13, "shift", 0, 0);
+                        d_text(d, TK_IT600, 13, 3 + (42 - w) / 2, bl(TK_IT600, 13, 672), "shift", 0, 0, tk_hex(0x1e2030, 1), 0); }
+        else { d_rrect(d, 3, 658, 42, 46, 6, tk_hex(0x3a3d4a, 1)); float w = tw(TK_IT600, 13, "shift", 0, 0);
+               d_text(d, TK_IT600, 13, 3 + (42 - w) / 2, bl(TK_IT600, 13, 672), "shift", 0, 0, INK, 0); }
+    }
+    d_rrect(d, 345, 658, 42, 46, 6, tk_hex(0x3a3d4a, 1));
+    d_icon(d, "back", 359, 670, 1);                              /* delete: the font has no erase glyph */
+    kb_key(d, 3, 712, 88, NS.num ? "ABC" : "123", 1);
+    kb_key(d, 97, 712, 196, "space", 0);
+    kb_key(d, 299, 712, 88, "return", 1);
+}
+static void build_note(void)
+{
+    relayer(&apnote);
+    if (!NS.view || !is_app("notes")) { apnote.hidden = 1; return; }
+    const char *t = NOTES[NS.cur];
+    dc d = mk(&apnote, "note-text", 16, 92, 358, 440, 0, 0);
+    /* the lines: the text's own line breaks, then words wrapped at 350 pt (17 pt, 24 pt lines), the caret after */
+    char line[NOTELEN + 2];
+    float y = 100;
+    int i = 0, n = (int)tk_strlen(t);
+    float cx = 20, cy = 100;
+    while (i <= n && y < 520) {
+        int k = 0, lastsp = -1, start = i;
+        while (i < n && t[i] != '\n') {
+            line[k] = t[i]; line[k + 1] = 0;
+            if (tw(TK_IT400, 17, line, 0, 0) > 350) {
+                if (lastsp > 0) { i = start + lastsp + 1; k = lastsp; }
+                break;
+            }
+            if (t[i] == ' ') lastsp = k;
+            k++; i++;
+        }
+        line[k] = 0;
+        d_text(&d, TK_IT400, 17, 20, bl(TK_IT400, 17, y), line, 0, 0, INK, 0);
+        cx = 20 + tw(TK_IT400, 17, line, 0, 0);
+        cy = y;
+        y += 24;
+        if (i < n && t[i] == '\n') { i++; if (i == n) { cx = 20; cy = y; } continue; }
+        if (i >= n) break;
+    }
+    d_rrect(&d, cx + 1, cy + 1, 2, 21, 1, tk_hex(0xffd60a, 1));          /* the caret */
+    apnote.hidden = 0;
+    relink();
+}
+static void notes_tap(float x, float y)
+{
+    if (!NS.view) {
+        if (y >= 40 && y < 86 && x >= 300) {
+            if (NS.n == NNOTES) { toast("Up to eight notes in this version"); return; }
+            NOTES[NS.n][0] = 0;
+            NS.cur = NS.n++;
+            NS.view = 1; NS.shift = 1; NS.num = 0;
+        } else if (y >= 117 && y < 117 + 56 * NS.n && x >= 16 && x < 374) {
+            NS.cur = NS.n - 1 - (int)((y - 117) / 56);
+            NS.view = 1; NS.shift = 0; NS.num = 0;
+        } else return;
+        build_app_page(AP.a);
+        return;
+    }
+    if (y >= 40 && y < 86 && x < 120) {               /* back: an empty note is dropped */
+        if (!NOTES[NS.cur][0]) {
+            for (int i = NS.cur; i + 1 < NS.n; i++) tk_memcpy(NOTES[i], NOTES[i + 1], NOTELEN);
+            NS.n--;
+        }
+        NS.view = 0;
+        build_app_page(AP.a);
+        return;
+    }
+    if (y < 548) return;
+    char *t = NOTES[NS.cur];
+    int len = (int)tk_strlen(t), relayout = 0;
+    char c = 0;
+    const char *const *R = KR[NS.num];
+    for (int r = 0; r < 3 && !c; r++) {
+        int n = (int)tk_strlen(R[r]);
+        float x0 = r == 2 && !NS.num ? 54 : 3 + (10 - n) * 19.5f, ky = 550 + 54 * r;
+        if (y < ky || y >= ky + 50) continue;
+        for (int i = 0; i < n; i++)
+            if (x >= x0 + 39 * i - 3 && x < x0 + 39 * i + 36) { c = R[r][i]; break; }
+        if (!c && r == 2) {
+            if (x < 50 && !NS.num) { NS.shift = !NS.shift; relayout = 1; }
+            else if (x >= 340 && len) t[len - 1] = 0;
+        }
+    }
+    if (!c && y >= 712 && y < 760) {
+        if (x < 94) { NS.num = !NS.num; relayout = 1; }
+        else if (x < 296) c = ' ';
+        else c = '\n';
+    }
+    if (c && len < NOTELEN - 1) {
+        if (!NS.num && NS.shift && c >= 'a' && c <= 'z') { c = (char)(c - 32); NS.shift = 0; relayout = 1; }
+        t[len] = c; t[len + 1] = 0;
+        if (c == '.' || c == '?' || c == '!') { /* the next sentence starts in capitals after a space, as iOS */ }
+    }
+    if (relayout) build_app_page(AP.a); else build_note();
+}
+
 static tk_layer apkey, apnum;
 static void build_apnum(void)
 {
@@ -1886,7 +2038,7 @@ static void build_app_page(int a)
     const char *k = APPS[a].k;
     int own = !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
               !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
-              !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub);
+              !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes");
     if (own) {
         for (int i = 0; i < NST; i++) {
             dc d = strip_dc(i, "app-page");
@@ -1900,11 +2052,13 @@ static void build_app_page(int a)
             else if (!tk_strcmp(k, "light")) page_light(&d);
             else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
             else if (!tk_strcmp(k, "settings")) page_display(&d);
+            else if (!tk_strcmp(k, "notes")) page_notes(&d);
             else page_camera(&d);
             tk_layer_prepare(&appst[i]);
         }
         build_apnum();
         if (!tk_strcmp(k, "calc")) build_calc();
+        if (!tk_strcmp(k, "notes")) build_note();
         if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
         relink();
         return;
@@ -2058,7 +2212,9 @@ static void app_finish_close(void)
     relayer(&apnum);
     relayer(&apsw); relayer(&aptm); relayer(&apctl);           /* P2z: the clock's (the timer keeps running) */
     apsw.hidden = aptm.hidden = apctl.hidden = 1;
-    relayer(&apcalc); apcalc.hidden = 1;                        /* the Calculator keeps its value (CAL) */
+    relayer(&apcalc); apcalc.hidden = 1;
+    relayer(&apnote); apnote.hidden = 1;
+    NS.view = 0;                                                /* Notes opens on its list again */                        /* the Calculator keeps its value (CAL) */
     apnum.hidden = apkey.hidden = 1;
     home.sx = home.sy = 1;
     home.alpha = 1;
@@ -2335,6 +2491,8 @@ static void app_tap(float x, float y)
         clk_tap(x, y);
     } else if (is_app("calc")) {
         calc_tap(x, y);
+    } else if (is_app("notes")) {
+        notes_tap(x, y);
     } else if (is_app("light")) {
         if (x >= 135 && x < 255 && y >= 250 && y < 490) {
             Q[0].lit = !Q[0].lit;
@@ -2488,8 +2646,8 @@ static void relink(void)
 {
     tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
     link(&root, r, 14);
-    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl, &apcalc };
-    link(&appg, ag, 8);
+    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl, &apcalc, &apnote };
+    link(&appg, ag, 9);
     tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     link(&appc, st, NST);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
