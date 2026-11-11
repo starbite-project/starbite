@@ -3799,6 +3799,7 @@ static void back_to_lock(int exit_em)
     focus_on = 0; focus_closing = 0; focus.hidden = 1; sp_focus.live = sp_thumb.live = 0;
     free_focus();
     booting = 0; boot.hidden = 1;
+    if (boot.solid) { relayer(&bootc); relayer(&bootbar); boot.solid = 0; boot.child = 0; }   /* P3s: made again for the next */
     ico_free(); hl_off();                          /* P3p */
     for (int g = 0; g < NG; g++) if (K[g].isopen) toggle_group(g, 1);
     scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
