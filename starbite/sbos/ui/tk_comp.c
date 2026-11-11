@@ -1357,12 +1357,49 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     return c->last_px;
 }
 
-static float fsh[24][5];
-static int nfsh;
+static float fsh[24][5], fk = 1;
+static lens_par fpar[24];
+static int nfsh, fit[24];                   /* fit: the shape's item in flist (its clip, fade and opacity) */
 void tk_flatten_shapes(tk_layer *dst)
 {
     dst->ngsh = 0;
     for (int i = 0; i < nfsh; i++) tk_layer_glass_shape(dst, fsh[i][0], fsh[i][1], fsh[i][2], fsh[i][3], fsh[i][4]);
+}
+uint32_t tk_flat_lens(const tk_comp *c, int x, int y, uint32_t fb)
+{
+    const tk_bmp *bw = &c->bw_half;
+    if (!tk_glass_lens || !bw->px) return fb;
+    float sx = (x + .5f) / fk, sy = (y + .5f) / fk;             /* screen px */
+    for (int q = 0; q < nfsh; q++) {
+        float X = fsh[q][0] / fk, Y = fsh[q][1] / fk, W = fsh[q][2] / fk, H = fsh[q][3] / fk, r = fsh[q][4] / fk;
+        if (sx < X - 1 || sy < Y - 1 || sx > X + W + 1 || sy > Y + H + 1) continue;
+        float gx, gy, ox = 0, oy = 0, e = .02f, rgb[3];
+        float sd = lens_sd(sx, sy, X + W * .5f, Y + H * .5f, W * .5f - r, H * .5f - r, r, &gx, &gy);
+        if (sd >= .5f) continue;
+        float sv = sd < 0 ? -sd : 0;
+        if (sv < fpar[q].lb) lens_eval(&fpar[q], sv, gx, gy, &ox, &oy, &e);
+        float bu = (sx + ox) * .5f - .5f, bv = (sy + oy) * .5f - .5f, uf = tk_floorf(bu), vf = tk_floorf(bv);
+        float tu = bu - uf, tv = bv - vf;
+        uint32_t p[4];
+        for (int k2 = 0; k2 < 4; k2++) {
+            int Xb = tk_mini(tk_maxi((int)uf + (k2 & 1), 0), bw->w - 1), Yb = tk_mini(tk_maxi((int)vf + (k2 >> 1), 0), bw->h - 1);
+            p[k2] = bw->px[(size_t)Yb * bw->stride + Xb];
+        }
+        for (int ch = 0; ch < 3; ch++) {
+            int sh = 16 - 8 * ch;
+            float a0 = (float)(p[0] >> sh & 255), a1 = (float)(p[1] >> sh & 255), b0 = (float)(p[2] >> sh & 255), b1 = (float)(p[3] >> sh & 255);
+            float top = a0 + (a1 - a0) * tu, bot = b0 + (b1 - b0) * tu;
+            rgb[ch] = (top + (bot - top) * tv) * (1.0f / 255);
+        }
+        lens_shade(rgb, e);
+        uint32_t o = 0xff000000u;
+        for (int ch = 0; ch < 3; ch++) {
+            int v = (int)(rgb[ch] * 255 + .5f);
+            o |= (uint32_t)(v < 0 ? 0 : v > 255 ? 255 : v) << (16 - 8 * ch);
+        }
+        return o;
+    }
+    return fb;
 }
 void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
 {
@@ -1375,6 +1412,7 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
     if (mask && mask->v) tk_memset(mask->v, 0, (size_t)mask->w * mask->h);
     tgt T = { &SCR[0], out, mask && mask->v ? mask : 0, 0, 1, 0 };
     nfsh = 0;
+    fk = k;
     for (int i = 0; i < flist.n; i++) {
         const item *it = &flist.it[i];
         draw_item(&T, it, screen);
@@ -1382,8 +1420,32 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
          * keeps its shapes) */
         if (mask && it->l->ngsh && !(it->l->glass_opaque_only && it->alpha < .999f))
             for (int q = 0; q < it->l->ngsh && nfsh < 24; q++, nfsh++)
+            {
+                fit[nfsh] = i;
                 shape_at(it, it->l->gsh[q], &fsh[nfsh][0], &fsh[nfsh][1], &fsh[nfsh][2], &fsh[nfsh][3], &fsh[nfsh][4]);
+                fpar[nfsh] = lens_params(fsh[nfsh][2] / k, fsh[nfsh][3] / k, fsh[nfsh][4] / k, TK_PT);   /* screen px */
+            }
     }
+    /* the shapes' coverage into the mask too (a layer that freed its mask after the bake drew none) */
+    if (mask && mask->v)
+        for (int q = 0; q < nfsh; q++) {
+            float x = fsh[q][0], y = fsh[q][1], w = fsh[q][2], h = fsh[q][3];
+            tk_r4 R = tk_radii(w, h, fsh[q][4]);
+            int X0 = tk_maxi(0, (int)tk_floorf(x) - 1), X1 = tk_mini(mask->w, (int)(x + w) + 2);
+            int Y0 = tk_maxi(0, (int)tk_floorf(y) - 1), Y1 = tk_mini(mask->h, (int)(y + h) + 2);
+            const item *it = &flist.it[fit[q]];
+            X0 = tk_maxi(X0, it->clip.x0); X1 = tk_mini(X1, it->clip.x1);
+            Y0 = tk_maxi(Y0, it->clip.y0); Y1 = tk_mini(Y1, it->clip.y1);
+            for (int j = Y0; j < Y1; j++) {
+                float al = it->alpha * fade_at(it, j + .5f);
+                if (al <= 0) continue;
+                for (int i = X0; i < X1; i++) {
+                    float cov = al * tk_clampf(.5f - tk_sd_rrect4(i + .5f, j + .5f, x, y, w, h, &R), 0, 1);
+                    uint8_t v = (uint8_t)(cov * 255 + .5f), *m = &mask->v[(size_t)j * mask->w + i];
+                    if (v > *m) *m = v;
+                }
+            }
+        }
 }
 
 void tk_layer_prepare(tk_layer *l) { if (l->bmp.px) half_of(l); }

@@ -41,9 +41,8 @@ static void cl_row(dc *d, float y, const char *l, const char *r, int last)
 
 static void page_cell(dc *d)
 {
-    d_icon(d, "back", 18, 53, 1);
-    d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Settings", 0, 0, ACCENT(), 0);
-    d_text(d, TK_IT700, 30, 20, bl(TK_IT700, 30, 96), "Cellular", 0, 0, INK, 0);
+    d_back(d, W(1));                       /* P3p (P3j-13): iOS 26's glass back and the inline title */
+    d_navtitle(d, "Cellular");
     /* the switch */
     int on = data_on();
     d_rrect(d, 16, CL_SW, 358, 47, 16, tk_hex(0x151c33, 1));

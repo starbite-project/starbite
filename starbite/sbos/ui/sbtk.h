@@ -272,7 +272,10 @@ int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocate
 /* render a group's children (as if the group were at identity) into a screen-sized transparent bitmap and their
  * glass masks into mask: one cached layer for a group that moves or fades as one (CALayer's shouldRasterize) */
 void tk_flatten(tk_layer *group, tk_bmp *out, tk_a8 *mask, float scale);   /* scale .5: a half-resolution cache */
-void tk_flatten_shapes(tk_layer *dst);    /* v8: the last tk_flatten's glass shapes (its mask's frame) into dst */
+void tk_flatten_shapes(tk_layer *dst);
+/* P4: the lens's glass at px (x, y) of the last tk_flatten's frame (its glass shapes, the wallpaper's backdrop
+ * c->bw_half bent, toned and lit as the compositor's lens): opaque; fb where no shape is */
+uint32_t tk_flat_lens(const tk_comp *c, int x, int y, uint32_t fb);    /* v8: the last tk_flatten's glass shapes (its mask's frame) into dst */
 /* draw a frame: motion = half resolution and 2x present; full = redraw everything; returns the drawn px */
 int tk_comp_frame(tk_comp *c, int motion, int full);
 void tk_comp_prepare(tk_comp *c);

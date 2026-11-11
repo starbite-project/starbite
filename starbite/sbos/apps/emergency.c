@@ -184,7 +184,7 @@ static void show(void)
         ui_button(32, "Sun", "Sunrise, sunset", UI_HALF);
         ui_button(33, "Last 2 %", "Only the essentials", UI_HALF);
         ui_button(34, "Survival guide", "First aid, water, shelter, signals", 0);
-        ui_textline("Compass and level: they need the sensor hub driver (not yet).", GREY);
+        ui_textline("Compass and level: the sensor hub driver is being tested; not in this version yet.", GREY);
         ui_textline("Calls and messages: emergency calls need the modem; nothing here calls or sends.", GREY);
     }
     ui_end();
