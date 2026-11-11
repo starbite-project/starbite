@@ -86,8 +86,55 @@ extern unsigned shub_sim_patch_len;
 #define PATCH_N shub_sim_patch_len
 #else
 extern const uint8_t shub_patch_start[], shub_patch_end[];     /* shub_blob.S: empty unless the build embeds it */
-#define PATCH_P shub_patch_start
-#define PATCH_N ((unsigned)(shub_patch_end - shub_patch_start))
+/* 1.2-alpha28: the patch is the image's own (the test image only) or the card's /STARBITE/FW/BCM4775.BIN, read once
+ * and checked (413864 bytes, CRC-32 0x544D3BFA = the blob whose sha256 is b1a3e138...08d0). Never in the repository */
+static const uint8_t *patch_p;
+static unsigned patch_n;
+#define PATCH_P patch_p
+#define PATCH_N patch_n
+#define SHUB_PATCH_LEN 413864U
+#define SHUB_PATCH_CRC 0x544d3bfaU
+#define SHUB_PATCH_CARD "/STARBITE/FW/BCM4775.BIN"
+static const char *patch_why;
+int kfile_read(const char *path, void *dst, uint32_t cap);   /* files.c (kern.h): the card, read only */
+#define SHUB_EINVAL (-22)                   /* SBOS_EINVAL: no such file */
+/* 1 the patch is at PATCH_P; else patch_why says why not */
+static int patch_ready(void)
+{
+    if (patch_n == SHUB_PATCH_LEN)
+        return 1;
+    unsigned emb = (unsigned)(shub_patch_end - shub_patch_start);
+    if (emb == SHUB_PATCH_LEN) {
+        patch_p = shub_patch_start;
+        patch_n = emb;
+        return 1;
+    }
+    static uint8_t *buf;
+    if (!buf)
+        buf = sb_alloc(SHUB_PATCH_LEN + 16U);
+    if (!buf) {
+        patch_why = "no memory for the sensor hub's firmware (405 KiB)";
+        return 0;
+    }
+    int n = kfile_read(SHUB_PATCH_CARD, buf, SHUB_PATCH_LEN + 16U);
+    if (n == SHUB_EINVAL) {
+        patch_why = "the sensor hub's firmware is not on the card (" SHUB_PATCH_CARD ")";
+        return 0;
+    }
+    if (n < 0) {
+        patch_why = "the card could not be read for the sensor hub's firmware";
+        return 0;
+    }
+    if ((unsigned)n != SHUB_PATCH_LEN || sb_crc32(buf, SHUB_PATCH_LEN) != SHUB_PATCH_CRC) {
+        sb_logx("shub: the card's firmware file is not the expected one: bytes ", (uint64_t)n);
+        patch_why = "the sensor hub's firmware file on the card is not the expected one";
+        return 0;
+    }
+    patch_p = buf;
+    patch_n = SHUB_PATCH_LEN;
+    sb_log("shub: the firmware patch from the card (" SHUB_PATCH_CARD ", CRC-32 checked)");
+    return 1;
+}
 #endif
 
 /* ---- registers ------------------------------------------------------------------------------------------------ */
@@ -1201,6 +1248,12 @@ int shub_step(void)
     M.wait = 20;
     switch (M.st) {
     case ST_LOOK:
+#ifndef SB_HOST
+        if (!M.probe && !patch_ready()) {   /* 1.2-alpha28: the firmware first (the card), before the chip wakes */
+            fail(patch_why);
+            return 0;
+        }
+#endif
         if (look())
             M.st = ST_BUSUP;
         return 0;
@@ -1369,6 +1422,12 @@ int shub_step(void)
             M.dl_off = 0;
             M.dl_recs = 0;
             M.dl_t0 = sb_ms();
+#ifndef SB_HOST
+            if (!patch_ready()) {
+                fail(patch_why);
+                return 0;
+            }
+#endif
             if (PATCH_N != 413864U) {
                 fail("the hub's firmware patch is not in this image (starbite/sbos/tools/shub-patch.py; never committed)");
                 return 0;

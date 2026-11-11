@@ -169,3 +169,27 @@ int surv_steps(uint32_t *n)
     *n = (uint32_t)(surv_host_now_ms / 600U);
     return 1;
 }
+
+/* the hub on demand, simulated: "starting" for 4 s after the first call, then running; off 60 s after the last */
+static uint64_t shub_t0, shub_last;
+static int shub_req;
+int surv_sensors_on(int on)
+{
+    if (!on) {
+        shub_req = 0;
+        return 0;
+    }
+    if (last2)
+        return -1;
+    if (!shub_req)
+        shub_t0 = surv_host_now_ms;
+    shub_req = 1;
+    shub_last = surv_host_now_ms;
+    return 0;
+}
+int surv_sensors_state(void)
+{
+    if (!shub_req || surv_host_now_ms - shub_last > 60000U)
+        return 0;                           /* SHUB_OFF */
+    return surv_host_now_ms - shub_t0 < 4000U ? 1 : 2;   /* SHUB_STARTING, SHUB_RUNNING */
+}
