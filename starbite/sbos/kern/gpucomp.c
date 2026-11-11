@@ -254,7 +254,16 @@ static float fmaxf_(float a, float b) { return a > b ? a : b; }
 static float fminf_(float a, float b) { return a < b ? a : b; }
 static int bins_used;                       /* the last frame's bin entries (the log) */
 
+/* only the bins the damage rects touch are drawn (nr 0: everything); the rest of dst keeps what it holds */
+static uint8_t dirty[GPUCOMP_BIN_W * GPUCOMP_BIN_H];
+int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, unsigned n, const struct gc_rect *r,
+                           unsigned nr, uint64_t *us);
 int gpucomp_compose(void *dst, uint32_t bg, const struct gc_quad *qs, unsigned n, uint64_t *us)
+{
+    return gpucomp_compose_damage(dst, bg, qs, n, 0, 0, us);
+}
+int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, unsigned n, const struct gc_rect *r,
+                           unsigned nr, uint64_t *us)
 {
     if (!gpucomp_ready() || n > GPUCOMP_MAX_QUADS)
         return 0;
@@ -356,11 +365,32 @@ int gpucomp_compose(void *dst, uint32_t bg, const struct gc_quad *qs, unsigned n
                 }
             }
     }
+    if (nr) {
+        /* the damage: a bin outside every rect is marked 255 (the shader leaves its pixels) */
+        for (unsigned k = 0; k < GPUCOMP_BIN_W * GPUCOMP_BIN_H; ++k)
+            dirty[k] = 0;
+        for (unsigned i = 0; i < nr; ++i) {
+            int bx0 = r[i].x0 / (int)GPUCOMP_BIN_PX, by0 = r[i].y0 / (int)GPUCOMP_BIN_PX;
+            int bx1 = (r[i].x1 - 1) / (int)GPUCOMP_BIN_PX, by1 = (r[i].y1 - 1) / (int)GPUCOMP_BIN_PX;
+            if (r[i].x1 <= r[i].x0 || r[i].y1 <= r[i].y0)
+                continue;
+            bx0 = bx0 < 0 ? 0 : bx0;
+            by0 = by0 < 0 ? 0 : by0;
+            bx1 = bx1 >= (int)GPUCOMP_BIN_W ? (int)GPUCOMP_BIN_W - 1 : bx1;
+            by1 = by1 >= (int)GPUCOMP_BIN_H ? (int)GPUCOMP_BIN_H - 1 : by1;
+            for (int by = by0; by <= by1; ++by)
+                for (int bx = bx0; bx <= bx1; ++bx)
+                    dirty[(unsigned)by * GPUCOMP_BIN_W + (unsigned)bx] = 1;
+        }
+        for (unsigned k = 0; k < GPUCOMP_BIN_W * GPUCOMP_BIN_H; ++k)
+            if (!dirty[k])
+                bins[k][0] = 255;
+    }
     volatile uint32_t *bw = CPU(GPUCOMP_O_BIN);
     for (unsigned k = 0; k < GPUCOMP_BIN_W * GPUCOMP_BIN_H; ++k) {
         const uint32_t *src = (const uint32_t *)(const void *)bins[k];
         volatile uint32_t *d = bw + k * (GPUCOMP_BIN_B / 4U);
-        for (unsigned w = 0, nw = (bins[k][0] + 4U) / 4U; w < nw; ++w)
+        for (unsigned w = 0, nw = bins[k][0] == 255 ? 1U : (bins[k][0] + 4U) / 4U; w < nw; ++w)
             d[w] = src[w];
     }
     uint64_t t = run(GPUCOMP_O_JOB_comp2_full, gpucomp_job_comp2_full, "the UI's frame");
@@ -976,9 +1006,70 @@ int gpucomp_selftest_step(void)
                 st = 5;
             } else {
                 sb_log("gpucomp: 572 MHz not taken (ACPM): that run is skipped");
-                st = 6;
+                st = 12;
             }
             return 0;
+        }
+        st = 12;
+        return 0;
+    }
+    case 12: {
+        /* the damage path: a full frame of the motion scene, then the scene moved 100 px drawn only inside one
+         * rect (200,1000)-(900,1300): inside must be the new scene, outside the old one */
+        motion_scene(0);
+        uint64_t us = 0, us2 = 0;
+        if (!gpucomp_compose((void *)SB_FB, bg, GM, ngm, &us)) {
+            fail("the damage test's full frame did not run");
+            st = 6;
+            return 0;
+        }
+        static struct gc_quad G0[20];
+        for (unsigned i = 0; i < ngm; ++i)
+            G0[i] = GM[i];
+        unsigned n0 = ngm;
+        motion_scene(-100);
+        const struct gc_rect d = { 200, 1000, 900, 1300 };
+        if (!gpucomp_compose_damage((void *)SB_FB, bg, GM, ngm, &d, 1, &us2)) {
+            fail("the damage frame did not run");
+            st = 6;
+            return 0;
+        }
+        static const unsigned dp[][2] = { { 205, 1005 }, { 550, 1150 }, { 895, 1295 }, { 450, 1100 },
+                                           { 100, 1100 }, { 950, 1150 }, { 550, 950 }, { 550, 1400 } };
+        unsigned bad = 0;
+        for (unsigned i = 0; i < sizeof dp / sizeof dp[0]; ++i) {
+            int inside = i < 4;
+            /* outside the rect but inside its 32 px bins the new scene is drawn too: those points are off-bin */
+            cq = inside ? GM : G0;
+            ncq = inside ? ngm : n0;
+            uint32_t want = cpu_px2(dp[i][0], dp[i][1], bg), got = fb[dp[i][1] * SB_FB_W + dp[i][0]];
+            if (!near(want, got, 3)) {
+                struct ub u;
+                ub_init(&u);
+                ub_s(&u, "gpucomp: damage: pixel ");
+                ub_dec(&u, dp[i][0]);
+                ub_c(&u, ',');
+                ub_dec(&u, dp[i][1]);
+                ub_s(&u, inside ? " (inside) GPU " : " (outside) GPU ");
+                ub_hex(&u, got, 8);
+                ub_s(&u, " CPU ");
+                ub_hex(&u, want, 8);
+                sb_log(u.b);
+                ++bad;
+            }
+        }
+        if (bad) {
+            sb_logx("gpucomp: FAILED: damage: points wrong, of 8: ", bad);
+            ++fails;
+        } else {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "gpucomp: damage: a 700 x 300 rect redrawn in ");
+            ub_dec(&u, us2);
+            ub_s(&u, " us (the full frame ");
+            ub_dec(&u, us);
+            ub_s(&u, " us); 8 points right inside and out");
+            sb_log(u.b);
         }
         st = 6;
         return 0;
