@@ -17,6 +17,7 @@ void sh_touch(int phase, float x, float y, float t_ms);
 int sh_tick(float dt, float t_ms);
 int sh_moving(void);
 void sh_idle(void);
+int sh_idle_pending(void);                /* idle work left (call sh_idle again soon) */
 /* the live values: local time (wday 0 = Sunday, mon 1..12), battery %, temperature C; rebuilds what changed */
 void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp);                       /* idle time: prepare the caches the next gesture needs */
 

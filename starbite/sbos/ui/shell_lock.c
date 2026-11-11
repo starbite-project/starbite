@@ -2907,12 +2907,13 @@ void sh_idle(void)
     if (sh_moving()) return;
     tk_comp_idle(C);
     if (!EMG && cards_pending > 0) {
-        /* after Emergency: the vendor cards again, one per idle turn */
+        /* after Emergency: the vendor cards again, one per idle turn (the platform calls again while
+         * sh_idle_pending); the half copies below are made in the same turn (P2w: an unlock right after
+         * Emergency made them in its first frame, 31 ms) */
         build_card(NG - cards_pending);
         cards_pending--;
         relink();
         place_list();
-        return;
     }
     if (locked && lockY == 0 && !focus_on) flatten_lock();
     /* home at rest: the Control Centre's snapshot and grid ready before the pull */
@@ -2938,6 +2939,8 @@ void sh_idle(void)
     }
     tk_layer_prepare(&mark); tk_layer_prepare(&glyph_c); tk_layer_prepare(&glyph_o); tk_layer_prepare(&hint);
 }
+
+int sh_idle_pending(void) { return !EMG && cards_pending > 0; }
 
 int sh_moving(void)
 {

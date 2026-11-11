@@ -495,6 +495,7 @@ static void frame(void)
         ticking = 0;
         last_tick = 0;
         sh_idle();
+        if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);   /* the rest of the idle work, a turn at a time */
         kt_set(KT_UI, 21, sb_ms(), 400, 0);         /* back to the screen-on clock unless something moves again */
         kt_set(KT_UI, 23, sb_ms(), 5000, 0);        /* and the band workers off after 5 s */
 #ifndef SBOS_SELFTEST_NEXT
@@ -662,6 +663,14 @@ void next_ktimer(unsigned id)
         if (!ticking && !sh_moving()) boost(0);
         return;
     }
+    if (ready && id == 24) {
+        if (!ticking && !sh_moving()) {
+            sh_idle();
+            if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);
+        } else
+            kt_set(KT_UI, 24, sb_ms(), 200, 0);
+        return;
+    }
     if (ready && id == 23) {
         if (!ticking && !sh_moving()) workers_stop();
         return;
@@ -780,6 +789,18 @@ static void film_start(int film)
     sh_set("reset", "", 0);
     need_full = 1;
     next_kdraw();
+    for (int i = 0; i < 8 && sh_idle_pending(); i++) { hw_wdt_feed(); sh_idle(); }   /* as the idle time would */
+    sh_idle();
+    {   /* P2w: a marker for the camera (the main session times its shots from the films' starts) */
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: film ");
+        ub_s(&u, FILM_NAME[film]);
+        ub_s(&u, " starts at +");
+        ub_dec(&u, sb_ms() - st_t0);
+        ub_s(&u, " ms (since the self test's first step)");
+        sb_log(u.b);
+    }
     stats_reset();
 }
 
