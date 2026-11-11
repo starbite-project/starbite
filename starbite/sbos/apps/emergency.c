@@ -128,7 +128,24 @@ static void show_sun(void)
     fmt_s(&f, "Longitude ");
     deg(&f, lon, 'E', 'W');
     ui_button(7, f.b, "Type it in", UI_HALF);
-    ui_textline("No GPS yet: the location is typed in (a map or a sign). South and west are negative.", GREY);
+    int age = setting_get(SET_SURV_GNSS);
+    if (age >= 0) {
+        fmt_init(&f);
+        fmt_s(&f, "Use the GPS fix (");
+        if (age < 120) {
+            fmt_u(&f, (uint64_t)age);
+            fmt_s(&f, " min old)");
+        } else if (age < 2880) {
+            fmt_u(&f, (uint64_t)(age / 60));
+            fmt_s(&f, " h old)");
+        } else {
+            fmt_u(&f, (uint64_t)(age / 1440));
+            fmt_s(&f, " days old)");
+        }
+        ui_button(8, f.b, "Left on the card by Android", 0);
+    }
+    ui_textline("No GPS in Starbite OS itself: type the location in, or take a fix in Android first "
+                "(it leaves it on the card). South and west are negative.", GREY);
 }
 
 static void show_last2(void)
@@ -254,6 +271,8 @@ void app_event(const struct sbos_event *ev)
             setting_set(SET_SURV_USB, 0);
         else if (ev->id == 6 || ev->id == 7)
             loc_field = (int)ev->id - 5;
+        else if (ev->id == 8 && page == P_SUN && setting_set(SET_SURV_GNSS, 1) != 0)
+            ui_toast_app("The GPS fix could not be read from the card", 2500);
         else if (ev->id == 21 || ev->id == 22) {
             char t[16];
             int v = 0, n = ui_input_get(t, sizeof(t));
