@@ -50,7 +50,7 @@ static void show(void)
     ui_begin();
     if (ch < 0) {
         ui_title("Survival guide");
-        text("! In danger: call 112 first if any network works.", RED);
+        text("In danger: call 112 first if any network works.", RED);
         for (int i = 0; i < SBG_NCH; ++i)
             ui_button((uint32_t)(10 + i), sbg_chapters[i].title, sbg_chapters[i].sub, 0);
         ui_textline("Offline help, not a substitute for training or a doctor.", GREY);
