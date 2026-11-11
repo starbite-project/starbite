@@ -2583,10 +2583,10 @@ static void kb_key(dc *d, float x, float y, float w, const char *t, int special)
 }
 /* the keyboard (Notes, Search): iOS's dark layout from y 540; kb_hit: 1 a character (*c), 2 shift, 3 123/ABC,
  * 4 delete, 5 return (also *c = '\n'), 0 nothing */
-static void kb_draw(dc *d, int shift, int num)
+/* helper I: the rows passed in (Messages' To: field has its own 123 layer, with +) */
+static void kb_draw_r(dc *d, const char *const *R, int shift, int num)
 {
     d_rrect(d, 0, 540, 390, 262, 0, tk_hex(0x1e2030, 1));
-    const char *const *R = KR[num];
     for (int r = 0; r < 3; r++) {
         int n = (int)tk_strlen(R[r]);
         float x0 = r == 2 && !num ? 61.5f : 3 + (10 - n) * 19.5f;
@@ -2607,9 +2607,11 @@ static void kb_draw(dc *d, int shift, int num)
     kb_key(d, 97, 712, 196, "space", 1);           /* P3i: 16 pt like the other function keys */
     kb_key(d, 299, 712, 88, "return", 1);
 }
-static int kb_hit(float x, float y, int shift, int num, char *c)
+static void kb_draw(dc *d, int shift, int num) { kb_draw_r(d, KR[num], shift, num); }
+static int kb_hit_r(float x, float y, const char *const *R, int shift, int num, char *c);
+static int kb_hit(float x, float y, int shift, int num, char *c) { return kb_hit_r(x, y, KR[num], shift, num, c); }
+static int kb_hit_r(float x, float y, const char *const *R, int shift, int num, char *c)
 {
-    const char *const *R = KR[num];
     for (int r = 0; r < 3; r++) {
         int n = (int)tk_strlen(R[r]);
         float x0 = r == 2 && !num ? 61.5f : 3 + (10 - n) * 19.5f, ky = 550 + 54 * r;
