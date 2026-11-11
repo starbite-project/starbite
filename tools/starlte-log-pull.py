@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Pull and decode the herolte persistent console log (patch 0206) via TWRP.
 
-  starlte-log-pull.py ADB OUT.txt [--part NAME]
+  starlte-log-pull.py ADB OUT.txt [--part NAME] [--window MIB]
 
 The log is the last 4 MiB + 4 KiB of the partition the kernel booted from with ufsroot=NAME
 (default USERDATA, the iOS 26 root; --part IOS14 for an iOS 14 userland boot with
 ufsroot=IOS14). Only the UFS root driver writes it, and only for rd=ufsroot0 with a writable
 root: a RAM-disk boot (rd=md0, e.g. the iOS 14 kernel test) writes no log at all, and this tool
 would then return an older boot's log. Check the flush number against the last pull.
+--window MIB: the root window the kernel used (boot-arg ufsrootlen=MIB, ufsrootoff=0): the log is then the last 4 MiB + 4 KiB
+of the WINDOW, not of the partition (iOS 27: ufsrootlen=19200 on a 19200.5 MiB USERDATA; 16384 for the old 16 GiB slot).
 Block 0 is the header
 ("HEROLOG1", version, ring size, total bytes, flush sequence), then the ring.
 The raw area is kept next to OUT as OUT.bin. Both may hold device
@@ -33,6 +35,13 @@ def adb(tool, *args):
 def main():
     args = sys.argv[1:]
     part = 'USERDATA'
+    window_mib = 0
+    if '--window' in args:
+        i = args.index('--window')
+        if i + 1 >= len(args) or not args[i + 1].isdigit():
+            raise SystemExit(__doc__)
+        window_mib = int(args[i + 1])
+        del args[i:i + 2]
     if '--part' in args:
         i = args.index('--part')
         if i + 1 >= len(args):
@@ -45,6 +54,11 @@ def main():
     dev = DEV.format(part)
     print(f'reading the log tail of {dev}')
     size = int(adb(tool, 'shell', f'blockdev --getsize64 {dev}').strip())
+    if window_mib:
+        if window_mib << 20 > size:
+            raise SystemExit(f'--window {window_mib} MiB is larger than {dev} ({size} bytes)')
+        size = window_mib << 20
+        print(f'root window: the first {window_mib} MiB of {dev}')
     first = size // BLOCK - (1 + RING // BLOCK)
     adb(tool, 'shell', f'dd if={dev} of=/tmp/herolog.bin bs={BLOCK} skip={first} '
         f'count={1 + RING // BLOCK} 2>/dev/null')
