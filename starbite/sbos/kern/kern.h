@@ -390,6 +390,7 @@ int vib_on(void);
 /* 1.2-alpha8: wake-up alarms (alarm.c) */
 int alarm_set(int i, int h, int m, int days, int on);
 int alarm_any(void);
+int alarm_first(int *h, int *m);    /* P2y: the earliest alarm on (time of day); 0 none */
 int alarm_ringing(void);
 void alarm_minute(const struct sbos_time *t);
 void alarm_timer(void);

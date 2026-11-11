@@ -186,6 +186,10 @@ static void build_wall(void)
 /* ---- the status bar (lock and home) -------------------------------------------------------------------------- */
 static void d_rrect(dc *d, float x, float y, float w, float h, float r, tk_col c);
 static struct { int state, bars, rat; } SB_CELL;      /* the status bar's copy of the modem's (sh_cell) */
+static struct { int h, mi, wday, day, mon, pct, temp; } ST = { 21, 5, 2, 10, 11, 87, 41 };
+static struct { int on, h, m; } ALM = { 1, 7, 0 };   /* the host's is the concept's 07:00 */
+static int sys_charging;           /* P2y: sh_sysinfo's (the status bar's battery is green while charging) */
+#define SYS_CHARGING() sys_charging
 static void status_bar(dc *d, const char *left)
 {
     d_text(d, TK_IT600, 15, 36, 29.5f, left, 0, 0, INK, 1);
@@ -196,8 +200,12 @@ static void status_bar(dc *d, const char *left)
         const char *r = SB_CELL.rat == 7 ? "4G" : SB_CELL.rat == 4 ? "3G" : SB_CELL.rat >= 1 && SB_CELL.rat <= 3 ? "2G" : "";
         if (r[0]) d_text(d, TK_IT600, 12, 286 - tk_text_w(TK_IT600, PT(12), r, 0, 0) / TK_PT, 29.5f, r, 0, 0, INK, 1);
     }
-    d_icon(d, "sb-wifi", 310, 18, 1);
-    d_icon(d, "sb-batt", 333, 17.5f, 1);
+    /* P2y: no Wi-Fi glyph (Next has no Wi-Fi connection); the battery drawn from the live charge (iOS's glyph:
+     * a translucent body, the fill by percent, red at 20 % or less, green while charging, the nub) */
+    float bx = 334, by = 18.5f, fw = 21.0f * tk_clampf(ST.pct / 100.0f, .04f, 1);
+    d_rrect(d, bx, by, 25, 12, 3.6f, W(.35f));
+    d_rrect(d, bx + 2, by + 2, fw, 8, 2, ST.pct <= 20 && !SYS_CHARGING() ? tk_hex(0xff453a, 1) : SYS_CHARGING() ? tk_hex(0x34c759, 1) : W(1));
+    d_rrect(d, bx + 26, by + 4, 1.6f, 4, .8f, W(.4f));
 }
 
 /* ---- the lock's static layer: status bar, date, clock, widgets ------------------------------------------------ */
@@ -212,7 +220,6 @@ static void ring_widget(dc *d, float x, float p, tk_col col, const char *num, co
     d_text(d, TK_IT700, 9.5f, x + 36 - w / 2, 220 + 50 + 9, lbl, .38f, 0, W(.72f), 0);
 }
 /* the live values (sh_status): the host's are the concept's */
-static struct { int h, mi, wday, day, mon, pct, temp; } ST = { 21, 5, 2, 10, 11, 87, 41 };
 static const char *const WD[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
 static const char *const MO[12] = { "January", "February", "March", "April", "May", "June", "July", "August",
                                     "September", "October", "November", "December" };
@@ -292,7 +299,10 @@ static void build_lwidgets(void)
     d_glass(&d, 115, 220, 160, 72, 22, 1, 1);
     d_icon(&d, "alarm", 129, 239.5f, 1);
     d_text(&d, TK_IT700, 11, 145, 238 + 11, "ALARM", .33f, 0, W(.7f), 0);
-    d_text(&d, TK_IT700, 17, 129, 254 + 16, "07:00 \xc2\xb7 Vibrate", 0, 0, INK, 0);
+    char at[16] = "No alarm";                  /* P2y: the kernel's next alarm (sh_alarm), not the concept's */
+    if (ALM.on) { at[0] = (char)('0' + ALM.h / 10); at[1] = (char)('0' + ALM.h % 10); at[2] = ':';
+                  at[3] = (char)('0' + ALM.m / 10); at[4] = (char)('0' + ALM.m % 10); at[5] = 0; }
+    d_text(&d, TK_IT700, 17, 129, 254 + 16, at, 0, 0, INK, 0);
 }
 
 static void build_marks(void)
@@ -687,12 +697,19 @@ static void build_home_w(void)
     } else
         d_icon(&d, "home-batt", 38, 74 + 1.5f, 1);
     d_text(&d, TK_IT700, 11.5f, 56, base_of(TK_IT700, 11.5f, 74, 0), "Galaxy S9", .345f, 0, W(.7f), 0);
-    d_text(&d, TK_IT800, 38, 38, base_of(TK_IT800, 38, 74 + 14 + 4, 0), "87%", -1.2f, TK_TNUM, INK, 0);
+    char big[8];
+    int bn0 = put_dec(big, ST.pct);
+    big[bn0] = '%'; big[bn0 + 1] = 0;
+    d_text(&d, TK_IT800, 38, 38, base_of(TK_IT800, 38, 74 + 14 + 4, 0), big, -1.2f, TK_TNUM, INK, 0);
     {
-        static const char *L[3] = { "Battery", "Phone", "Lasts" };
-        const char *R[3] = { "31 \xc2\xb0" "C", "41 \xc2\xb0" "C", EMG ? "3 days" : "19 h" };
+        /* P2y: the live charge, temperature and charging (the concept's "Phone" and "Lasts" have no source) */
+        static const char *L[2] = { "Temperature", "Charging" };
+        char tb[12];
+        int tn = put_dec(tb, ST.temp);
+        tk_memcpy(tb + tn, " \xc2\xb0" "C", 5);
+        const char *R[2] = { tb, sys_charging ? "Yes" : "No" };
         float y = 74 + 14 + 4 + 46;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 2; i++) {
             y += 3;
             float b = base_of(TK_IT400, 12.5f, y, 0);
             d_text(&d, TK_IT400, 12.5f, 38, b, L[i], 0, TK_TNUM, W(.82f), 0);
@@ -774,7 +791,7 @@ static void build_home(void)
         char n[40] = "a62-";
         tk_memcpy(n + 4, DK[i], tk_strlen(DK[i]) + 1);
         d_icon(&d, n, x, 705, 1);
-        if (i < 2) {
+        if (0) {                                   /* P2y: no badges (no calls or messages to count) */
             const char *bn = i ? "2" : "1";
             float bw = tk_maxf(20, tw(TK_IT700, 12, bn, 0, 0) + 10);
             d_rrect(&d, x + 60 - bw, 699, bw, 20, 10, tk_hex(0xff3b30, 1));
@@ -971,7 +988,7 @@ static void set_page(float x)
  * are layers over it. setCC: scrim min(1, p), grid opacity min(1, 1.3 p), translateY((1 - p) x -30) scale(.86 +
  * .14 p) about 85 % 0 of the grid; spring cc 400 / 36; open past .35 or faster than .4 pt/ms. */
 static tk_layer ccl, ccscrim, ccsb, ccg, ccgrid, cclvl[2], ccic[2];
-static struct { int on, built, closing, wifi, cell, bt, air, rot, save; float p, lvl[2]; } CCS = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, { .62f, .4f } };
+static struct { int on, built, closing, wifi, cell, bt, air, rot, save; float p, lvl[2]; } CCS = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, { .62f, .4f } };   /* P2y: Wi-Fi and rotation lock off (neither is real) */
 static void cc_levels(void);
 static int cc_bright;           /* the panel's brightness level the slider last sent (1..4; 0: none yet) */
 /* the platform's brightness now (1..4; 0: the boot's own): the slider starts there */
@@ -1109,23 +1126,26 @@ static void cc_close(void)
     tk_spring_start(&sp_cc, CCS.p, 0, 0, TK_SPR_CC);
 }
 /* a tap on the open Control Centre: a tile, a circle, or outside (close); 1 if it was on the grid */
+static void toast(const char *msg);
 static int cc_tap(float x, float y)
 {
     float ex = 0, ey = 0;
     (void)ex; (void)ey;
     if (x >= 24 && x < 184.66f && y >= 92 && y < 248) {
         int i = (x >= 104) + 2 * (y >= 170);
-        int *f[4] = { &CCS.air, &CCS.cell, &CCS.wifi, &CCS.bt };
         if (i == 1) return 1;                /* the modem: a hold (G_CCCELL) */
-        *f[i] = !*f[i];
+        /* P2y: no switch pretends: Airplane, Wi-Fi and Bluetooth have nothing to switch in Next yet */
+        toast(i == 0 ? "Airplane mode isn't in this version yet" : i == 2 ? "Wi-Fi isn't in this version yet" : "Bluetooth isn't available yet");
+        return 1;
     } else if (y >= 264 && y < 334) {
         int c = x < 94 ? 0 : x < 184.66f ? 1 : x < 275.31f ? 2 : 3;
         if (c == 0) { Q[0].lit = !Q[0].lit; Q[0].facelit.hidden = Q[0].iconlit.hidden = !Q[0].lit; Q[0].face.hidden = Q[0].icon.hidden = Q[0].lit; sh_torch(Q[0].lit); lock_ver++; }
-        else if (c == 1) CCS.rot = !CCS.rot;
-        else if (c == 3) CCS.save = !CCS.save;
+        else if (c == 1) { toast("The screen doesn't rotate yet"); return 1; }
+        else if (c == 3) { toast("Power Saving isn't in this version yet"); return 1; }
         else return 1;                       /* Emergency: a hold (G_CCEM) */
     } else if (y >= 350 && y < 420 && x >= 24 && x < 366) {
-        return 1;                            /* Timer, Calculator, Mirror, Camera: the apps come later */
+        toast("Not in this version yet");    /* Timer, Calculator, Mirror, Camera: the apps come later */
+        return 1;
     } else
         return 0;
     build_cc_grid();
@@ -1145,34 +1165,30 @@ typedef struct { const char *l, *r; } arow;
 typedef struct { const char *cap; int n; arow rows[8]; } asec;
 typedef struct { const char *k, *name; uint32_t tint; int ns; asec sec[4]; } appdef;
 static const appdef APPS[] = {
-    { "calendar", "Calendar", 0x1d2440, 2, { { "Today", 2, { { "Exam", "09:00" }, { "Starbite: big cores", "19:00" } } },
-                                           { "Tomorrow", 1, { { "Nothing planned", "" } } } } },
-    { "weather", "Weather", 0x1d2440, 1, { { "Helsinki", 3, { { "Now", "3 \xc2\xb0" "C \xc2\xb7 Cloudy" }, { "Tonight", "\xe2\x88\x92" "1 \xc2\xb0" "C" }, { "Tomorrow", "4 \xc2\xb0" "C \xc2\xb7 Rain" } } } } },
-    { "clock", "Clock", 0x1d2440, 2, { { "World clock", 3, { { "Helsinki", "Today" }, { "Tokyo", "+7 h" }, { "New York", "\xe2\x88\x92" "7 h" } } },
-                                     { "Alarms", 2, { { "07:00", "Vibrate" }, { "08:30", "Off" } } } } },
-    { "camera", "Camera", 0x1d2440, 1, { { "", 1, { { "The camera needs its driver first", "" } } } } },
-    { "photos", "Photos", 0x1d2440, 1, { { "", 1, { { "Coming soon", "" } } } } },
-    { "music", "Music", 0x1d2440, 1, { { "Library", 2, { { "Songs", "42" }, { "Playlists", "3" } } } } },
-    { "notes", "Notes", 0x1d2440, 1, { { "Notes", 2, { { "Shopping list", "Today" }, { "Ideas", "Yesterday" } } } } },
-    { "calc", "Calculator", 0x1d2440, 1, { { "Recent", 2, { { "12 \xc3\x97 7", "84" }, { "230 \xc3\xb7 4", "57.5" } } } } },
-    { "contacts", "Contacts", 0x1d2440, 1, { { "", 1, { { "Coming soon", "" } } } } },
-    { "files", "Files", 0x1d2440, 2, { { "Locations", 2, { { "On this phone", "12.4 GB free" }, { "Memory card", "118 GB free" } } },
-                                     { "Recent", 2, { { "Photos", "Folder" }, { "Downloads", "Folder" } } } } },
-    { "light", "Flashlight", 0x1d2440, 1, { { "", 2, { { "Flashlight", "Off" }, { "Screen light", "Full white" } } } } },
-    { "battery", "Battery", 0x1d2440, 2, { { "Now", 3, { { "Charge", "87 %" }, { "Battery temperature", "31 \xc2\xb0" "C" }, { "Phone temperature", "41 \xc2\xb0" "C" } } },
-                                         { "Last 24 hours", 2, { { "Screen on", "3 h 12 min" }, { "Survival Heat", "2 min 45 s" } } } } },
-    { "terminal", "Terminal", 0x1d2440, 1, { { "Linux apps", 3, { { "Terminal", "Open" }, { "Firefox", "Get" }, { "GIMP", "Get" } } } } },
-    { "browser", "Browser", 0x2f7bf6, 1, { { "Favourites", 3, { { "Starbite", "" }, { "Wikipedia", "" }, { "Weather", "" } } } } },
-    { "medical", "Medical Card", 0x1d2440, 1, { { "Shown on the lock screen", 3, { { "Blood type", "Add" }, { "Allergies", "Add" }, { "Emergency contacts", "Add" } } } } },
-    { "sos", "SOS", 0x1d2440, 1, { { "", 3, { { "Call 112", "Needs a SIM" }, { "Siren", "Off" }, { "Flashing light", "Off" } } } } },
-    { "heat", "Survival Heat", 0x1d2440, 2, { { "Mode", 3, { { "Unlimited", "Off" }, { "Brownout guard", "On" }, { "Battery limit", "65 \xc2\xb0" "C" } } },
-                                              { "Last session", 2, { { "Peak", "180 \xc2\xb0" "C" }, { "Length", "2 min 45 s" } } } } },
-    { "power", "Power Saving", 0x1d2440, 1, { { "", 3, { { "Extreme power saving", "Off" }, { "Radios", "Off" }, { "Screen", "Dimmed" } } } } },
-    { "phone", "Phone", 0x16b34a, 1, { { "", 1, { { "Coming soon", "" } } } } },
-    { "messages", "Messages", 0x16b34a, 1, { { "", 1, { { "Coming soon", "" } } } } },
-    { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "Home" }, { "Mobile Data", "No SIM" }, { "Battery", "87 %" } } },
-                                           { "", 4, { { "Display & Brightness", "" }, { "Wallpaper", "" }, { "Date & Time", "Automatic" }, { "Startup system", "Starbite OS" } } },
-                                           { "", 1, { { "About", "Galaxy S9" } } } } },
+    /* P2y: what each app can honestly show today; "@..." rows take a live value (live_text) */
+    { "calendar", "Calendar", 0x1d2440, 1, { { "Today", 2, { { "@date", "" }, { "No events", "" } } } } },
+    { "weather", "Weather", 0x1d2440, 1, { { "", 2, { { "Weather needs the internet", "" }, { "Not available yet", "" } } } } },
+    { "clock", "Clock", 0x1d2440, 1, { { "Now", 2, { { "@time", "" }, { "@date", "" } } } } },
+    { "camera", "Camera", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
+    { "photos", "Photos", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
+    { "music", "Music", 0x1d2440, 1, { { "", 1, { { "No music on this phone", "" } } } } },
+    { "notes", "Notes", 0x1d2440, 1, { { "", 1, { { "No notes yet", "" } } } } },
+    { "calc", "Calculator", 0x1d2440, 1, { { "", 1, { { "Not in this version yet", "" } } } } },
+    { "contacts", "Contacts", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
+    { "files", "Files", 0x1d2440, 1, { { "", 1, { { "Not in this version yet", "" } } } } },
+    { "light", "Flashlight", 0x1d2440, 1, { { "", 2, { { "Flashlight", "@torch" }, { "Hold the torch button on the lock screen", "" } } } } },
+    { "battery", "Battery", 0x1d2440, 1, { { "Now", 3, { { "Charge", "@pct" }, { "Charging", "@chg" }, { "Battery temperature", "@temp" } } } } },
+    { "terminal", "Terminal", 0x1d2440, 1, { { "", 1, { { "Linux apps run in Starbite OS", "" } } } } },
+    { "browser", "Browser", 0x2f7bf6, 1, { { "", 1, { { "The browser needs the internet", "" } } } } },
+    { "medical", "Medical Card", 0x1d2440, 1, { { "", 1, { { "Nothing is stored on this phone yet", "" } } } } },
+    { "sos", "SOS", 0x1d2440, 1, { { "", 2, { { "Call 112", "Needs a SIM" }, { "Siren and light", "In Starbite OS" } } } } },
+    { "heat", "Survival Heat", 0x1d2440, 1, { { "", 1, { { "Survival Heat runs in Starbite OS", "" } } } } },
+    { "power", "Power Saving", 0x1d2440, 1, { { "", 1, { { "Not in this version yet", "" } } } } },
+    { "phone", "Phone", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
+    { "messages", "Messages", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
+    { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "Not in this version" }, { "Mobile Data", "No SIM" }, { "Battery", "@pct" } } },
+                                           { "", 5, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" } } },
+                                           { "About", 3, { { "Model", "Galaxy S9 (SM-G960F)" }, { "Software", "@ver" }, { "Memory", "4 GB" } } } } },
 };
 #define NAPPS ((int)(sizeof APPS / sizeof APPS[0]))
 static tk_layer appg, appbg, appc, appst[4];      /* the page: a group of four strips (no 17 MB block) */
@@ -1310,7 +1326,7 @@ static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int da
 static void d_h1(dc *d, const char *t) { d_text(d, TK_IT800, 34, 20, bl(TK_IT800, 34, 64), t, -.8f, 0, INK, 0); }
 static tk_col ACCENT(void) { return tk_hex(0x6fb3ff, 1); }
 /* a .row with an avatar: the name, an optional second line, the right-hand text, an optional unread dot */
-static float d_prow(dc *d, float y, const char *name, int nfw, tk_col nc, const char *sub, const char *right, int dot, int last)
+__attribute__((unused)) static float d_prow(dc *d, float y, const char *name, int nfw, tk_col nc, const char *sub, const char *right, int dot, int last)
 {
     float who = sub ? 36 : 34, rh = who + 26;
     d_av(d, 32, y + 13 + (who - 34) / 2, 34, name, 13);
@@ -1332,11 +1348,12 @@ static float d_prow(dc *d, float y, const char *name, int nfw, tk_col nc, const 
     if (!last) d_rrect(d, 16, y + rh, 358, 1, 0, W(.08f));
     return rh + 1;
 }
-static void d_group(dc *d, float y, int n, int sub) { d_rrect(d, 16, y, 358, (sub ? 63.0f : 61.0f) * n - 1, 16, tk_hex(0x151c33, 1)); }
+__attribute__((unused)) static void d_group(dc *d, float y, int n, int sub) { d_rrect(d, 16, y, 358, (sub ? 63.0f : 61.0f) * n - 1, 16, tk_hex(0x151c33, 1)); }
 
 static const char *const KD[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#" };
 static const char *const KL[12] = { "", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ", "", "+", "" };
-static struct { int tab; char num[16]; int thread; } AS;        /* the phone's tab (0 fav .. 3 pad), the dialled number, the open thread */
+static struct { int tab; char num[16]; int thread, sub; } AS;   /* the phone's tab (0 fav .. 3 pad), the dialled number, the open
+                                                                 * thread; sub: Settings' Display & Brightness page (P3d) */
 static char cell_hint[48] = "No SIM \xc2\xb7 emergency calls only";
 
 static void phone_tabs(dc *d)
@@ -1356,12 +1373,23 @@ static void phone_tabs(dc *d)
         d_text(d, TK_IT600, 10.5f, bx + (89.5f - w) / 2, bl(TK_IT600, 10.5f, 754.5f), TL[i], 0, 0, i == AS.tab ? ACCENT() : W(.6f), 0);
     }
 }
+/* P2y: an honest empty state (iOS's ContentUnavailableView): a title and up to three lines, centred, grey */
+static void d_empty(dc *d, float top, const char *title, const char *line)
+{
+    float w = tw(TK_IT700, 22, title, 0, 0);
+    d_text(d, TK_IT700, 22, (390 - w) / 2, bl(TK_IT700, 22, top), title, 0, 0, W(.9f), 0);
+    char ln[4][96];
+    float wm;
+    int n = line ? wrap(ln, TK_IT400, 15, line, 300, &wm) : 0;
+    for (int k = 0; k < n && k < 3; k++) {
+        float lw = tw(TK_IT400, 15, ln[k], 0, 0);
+        d_text(d, TK_IT400, 15, (390 - lw) / 2, bl(TK_IT400, 15, top + 36 + 20 * k), ln[k], 0, 0, W(.5f), 0);
+    }
+}
 static void page_contacts(dc *d)
 {
     d_h1(d, "Contacts");
-    d_group(d, 117, 6, 0);
-    float y = 117;
-    for (int i = 0; i < 6; i++) y += d_prow(d, y, PEOPLE[i].n, TK_IT600, INK, 0, 0, 0, i == 5);
+    d_empty(d, 330, "No Contacts", "Contacts can't be added on this phone yet.");
 }
 static void page_phone(dc *d)
 {
@@ -1382,18 +1410,12 @@ static void page_phone(dc *d)
         d_icon(d, "call", 180, 590, 1);
     } else if (AS.tab == 1) {
         d_h1(d, "Recents");
-        d_group(d, 117, 3, 1);
-        float y = 117;
-        y += d_prow(d, y, "Mum", TK_IT600, tk_hex(0xff453a, 1), "Missed", "18:12", 0, 0);
-        y += d_prow(d, y, "Aino Virtanen", TK_IT600, W(1), "Outgoing", "Yesterday", 0, 0);
-        d_prow(d, y, "Mikko Laine", TK_IT600, W(1), "Incoming", "Monday", 0, 1);
+        d_empty(d, 330, "No Recent Calls", cell_hint);
     } else if (AS.tab == 2) {
         page_contacts(d);
     } else {
         d_h1(d, "Favourites");
-        d_group(d, 117, 3, 1);
-        float y = 117;
-        for (int i = 0; i < 3; i++) y += d_prow(d, y, PEOPLE[i].n, TK_IT600, INK, "mobile", 0, 0, i == 2);
+        d_empty(d, 330, "No Favourites", cell_hint);
     }
     phone_tabs(d);
 }
@@ -1409,10 +1431,7 @@ static void page_messages(dc *d)
         d_lg_app(d, 16, 117, 358, 44, 22, 1);
         d_icon(d, "search15", 30, 131.5f, 1);
         d_text(d, TK_IT400, 17, 53, 128 + 1 + tk_floorf(tk_ascent(TK_IT400, PT(17)) / TK_PT + .5f), "Search", 0, 0, tk_hex(0xa9a9a9, 1), 0);
-        d_group(d, 173, 5, 1);
-        float y = 173;
-        for (int i = 0; i < 5; i++)
-            y += d_prow(d, y, THREADS[i].n, THREADS[i].unread ? TK_IT700 : TK_IT600, INK, THREADS[i].m, THREADS[i].t, THREADS[i].unread, i == 4);
+        d_empty(d, 360, "No Messages", "Text messages need a SIM card. This phone doesn't send or receive any yet.");
         return;
     }
     const thread_t *th = &THREADS[AS.thread];
@@ -1451,7 +1470,7 @@ static void page_messages(dc *d)
     d_rrect(d, 342, 736, 36, 36, 18, tk_hex(0x2f7bf6, 1));
     d_icon(d, "send", 352, 746, 1);
 }
-static void hsl(float h, float s, float l, float *r, float *g, float *b)
+__attribute__((unused)) static void hsl(float h, float s, float l, float *r, float *g, float *b)
 {
     float c = (1 - tk_fabsf(2 * l - 1)) * s, hp = h / 60, x = c * (1 - tk_fabsf(tk_fmodf(hp, 2) - 1)), m = l - c / 2;
     float R = 0, G2 = 0, B = 0;
@@ -1462,29 +1481,510 @@ static void hsl(float h, float s, float l, float *r, float *g, float *b)
 static void page_photos(dc *d)
 {
     d_h1(d, "Photos");
-    float cw = (390 - 4) / 3.0f;
-    for (int i = 0; i < 15; i++) {
-        float x = (cw + 2) * (i % 3), y = 117 + (cw + 2) * (i / 3), r, g, b;
-        tk_stop st[2];
-        hsl((float)((i * 47) % 360), .6f, .45f, &r, &g, &b);
-        st[0] = (tk_stop){ 0, TK_RGBA(r, g, b, 1) };
-        hsl((float)((i * 47 + 60) % 360), .7f, .3f, &r, &g, &b);
-        st[1] = (tk_stop){ 1, TK_RGBA(r, g, b, 1) };
-        tk_paint p = tk_linear((float)(i * 37), PT(x) - d->ox, PT(y) - d->oy, PT(cw), PT(cw), 2, st);
-        tk_fill_rrect(d->b, PT(x) - d->ox, PT(y) - d->oy, PT(cw), PT(cw), 0, &p, 1);
-    }
-    d_text(d, TK_IT400, 12.5f, 36, bl(TK_IT400, 12.5f, 777.36f), "Screenshots from Starbite OS", 0, 0, W(.5f), 0);
+    d_empty(d, 330, "No Photos", "The camera doesn't work on this phone yet, so there is nothing here.");
 }
 static void page_camera(dc *d)
 {
     d_h1(d, "Camera");
-    char ln[4][96];
-    float wm;
-    int n = wrap(ln, TK_IT400, 13.5f, "The camera needs its driver first. It is on the roadmap after the GPU.", 330, &wm);
-    d_rrect(d, 16, 117, 358, 20 + 18.225f * n, 14, TK_RGBA(255, 181, 71, .14f));
-    for (int k = 0; k < n; k++)
-        d_text(d, TK_IT400, 13.5f, 30, bl(TK_IT400, 13.5f, 128 + 18.225f * k), ln[k], 0, 0, tk_hex(0xffd8a0, 1), 0);
+    d_empty(d, 330, "Camera Not Available", "The Galaxy S9's camera needs its driver first.");
 }
+/* ---- P2z: the Clock app: the live time, a stopwatch, a timer that vibrates (no sound). The page's static part is
+ * drawn in the strips; the stopwatch's and the timer's digits and the buttons are three small layers, redrawn
+ * only when their text changes (the platform asks sh_next_update when to come back) ---- */
+static int is_app(const char *k);
+static float toast_left;
+static tk_layer apsw, aptm, apctl;
+static struct { int sw_run, laps, tm_run, sw_ds, tm_s, ctl_ver, ctl_drawn; float sw_t0, sw_acc, lap_at, tm_end; } CLK = { 0, 0, 0, -1, -1, 1, 0, 0, 0, 0, 0 };
+static float clk_sw_ms(float t) { return CLK.sw_acc + (CLK.sw_run ? t - CLK.sw_t0 : 0); }
+static int fmt_ms(char *b, float ms, int tenths)
+{
+    int ds = (int)(ms / 100), s = ds / 10, m = s / 60;
+    int n = 0;
+    if (m >= 60) { n += put_dec(b, m / 60); b[n++] = ':'; m %= 60; }
+    b[n++] = (char)('0' + m / 10 % 10); b[n++] = (char)('0' + m % 10); b[n++] = ':';
+    b[n++] = (char)('0' + s % 60 / 10); b[n++] = (char)('0' + s % 10);
+    if (tenths) { b[n++] = '.'; b[n++] = (char)('0' + ds % 10); }
+    b[n] = 0;
+    return n;
+}
+static void page_clock(dc *d)
+{
+    d_h1(d, "Clock");
+    char hm[8], dt[48];
+    fmt_hm(hm);
+    float w = tw(TK_IT600, 64, hm, 0, TK_TNUM);
+    d_text(d, TK_IT600, 64, (390 - w) / 2, bl(TK_IT600, 64, 112), hm, 0, TK_TNUM, INK, 0);
+    const char *wd = WD[ST.wday % 7], *mo = MO[(ST.mon + 11) % 12];
+    int n = (int)tk_strlen(wd);
+    tk_memcpy(dt, wd, (size_t)n); dt[n++] = ' ';
+    n += put_dec(dt + n, ST.day); dt[n++] = ' ';
+    tk_memcpy(dt + n, mo, tk_strlen(mo) + 1);
+    w = tw(TK_IT400, 15, dt, 0, 0);
+    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 192), dt, 0, 0, W(.55f), 0);
+    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 236), "STOPWATCH", .52f, 0, W(.55f), 0);
+    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 462), "TIMER", .52f, 0, W(.55f), 0);
+}
+static void clk_digits(tk_layer *l, float y, const char *txt, const char *sub)
+{
+    relayer(l);
+    dc d = mk(l, "clock-digits", 20, y, 350, 84, 0, 0);
+    float w = tw(TK_IT400, 54, txt, 0, TK_TNUM);
+    d_text(&d, TK_IT400, 54, (390 - w) / 2, bl(TK_IT400, 54, y), txt, 0, TK_TNUM, INK, 0);
+    if (sub && sub[0]) {
+        w = tw(TK_IT400, 14, sub, 0, TK_TNUM);
+        d_text(&d, TK_IT400, 14, (390 - w) / 2, bl(TK_IT400, 14, y + 66), sub, 0, TK_TNUM, W(.55f), 0);
+    }
+    l->hidden = 0;
+}
+static void clk_button(dc *d, float x, float y, float wd, float h, const char *t, tk_col bg, tk_col fg)
+{
+    d_rrect(d, x, y, wd, h, h / 2, bg);
+    float w = tw(TK_IT600, 16, t, 0, 0);
+    d_text(d, TK_IT600, 16, x + (wd - w) / 2, bl(TK_IT600, 16, y + h / 2 - 10), t, 0, 0, fg, 0);
+}
+static void clk_controls(void)
+{
+    relayer(&apctl);
+    dc d = mk(&apctl, "clock-buttons", 20, 344, 350, 270, 0, 0);
+    float sw = clk_sw_ms(now_ms);
+    clk_button(&d, 36, 350, 78, 78, CLK.sw_run ? "Lap" : "Reset", W(CLK.sw_run || sw > 0 ? .16f : .07f), W(CLK.sw_run || sw > 0 ? 1 : .4f));
+    clk_button(&d, 276, 350, 78, 78, CLK.sw_run ? "Stop" : "Start", CLK.sw_run ? TK_RGBA(255, 69, 58, .28f) : TK_RGBA(48, 209, 88, .28f),
+               CLK.sw_run ? tk_hex(0xff6961, 1) : tk_hex(0x4cd964, 1));
+    if (CLK.tm_run) clk_button(&d, 125, 570, 140, 44, "Cancel", TK_RGBA(255, 159, 10, .25f), tk_hex(0xffb340, 1));
+    else {
+        static const char *const P[3] = { "1 min", "5 min", "10 min" };
+        for (int i = 0; i < 3; i++) clk_button(&d, 24 + 125 * i, 570, 92, 44, P[i], W(.14f), INK);
+    }
+    apctl.hidden = 0;
+    CLK.ctl_drawn = CLK.ctl_ver;
+}
+/* the digits and the buttons as of t (ms); 1 if anything was redrawn. A timer that ran out vibrates (sh_vibrate). */
+static int clk_update(float t)
+{
+    int any = 0;
+    if (CLK.tm_run && t >= CLK.tm_end) {
+        CLK.tm_run = 0;
+        CLK.ctl_ver++;
+        sh_vibrate();                       /* the platform also wakes the screen (P3f) */
+        toast("Timer done");
+        toast_left = 6000;                  /* an alert stays longer than a toast */
+        any = 1;
+    }
+    if (!is_app("clock") || !AP.on) return any;
+    float sw = clk_sw_ms(t);
+    int ds = (int)(sw / 100);
+    if (ds != CLK.sw_ds || !apsw.bmp.px) {
+        CLK.sw_ds = ds;
+        char b[16], l[32] = "";
+        fmt_ms(b, sw, 1);
+        if (CLK.laps) { tk_memcpy(l, "Lap ", 4); int n = 4 + put_dec(l + 4, CLK.laps); l[n++] = ' '; l[n++] = ' '; fmt_ms(l + n, CLK.lap_at, 1); }
+        clk_digits(&apsw, 254, b, l);
+        any = 1;
+    }
+    int ts = CLK.tm_run ? (int)((CLK.tm_end - t + 999) / 1000) : 0;
+    if (ts != CLK.tm_s || !aptm.bmp.px) {
+        CLK.tm_s = ts;
+        char b[16];
+        fmt_ms(b, ts * 1000.0f, 0);
+        clk_digits(&aptm, 478, CLK.tm_run ? b : "00:00", CLK.tm_run ? "" : "Choose a time");
+        any = 1;
+    }
+    if (CLK.ctl_drawn != CLK.ctl_ver || !apctl.bmp.px) { clk_controls(); any = 1; }
+    if (any) relink();
+    return any;
+}
+static void clk_tap(float x, float y)
+{
+    float t = now_ms;
+    if (y >= 350 && y < 428) {
+        if (x >= 276 && x < 354) {                       /* Start / Stop */
+            if (CLK.sw_run) { CLK.sw_acc += t - CLK.sw_t0; CLK.sw_run = 0; }
+            else { CLK.sw_t0 = t; CLK.sw_run = 1; }
+            CLK.ctl_ver++;
+        } else if (x >= 36 && x < 114) {                 /* Lap / Reset */
+            if (CLK.sw_run) { CLK.laps++; CLK.lap_at = clk_sw_ms(t); CLK.sw_ds = -1; }
+            else { CLK.sw_acc = 0; CLK.laps = 0; CLK.sw_ds = -1; CLK.ctl_ver++; }
+        }
+    } else if (y >= 570 && y < 614) {
+        if (CLK.tm_run) { if (x >= 125 && x < 265) { CLK.tm_run = 0; CLK.ctl_ver++; } }
+        else for (int i = 0; i < 3; i++)
+            if (x >= 24 + 125 * i && x < 116 + 125 * i) {
+                static const int M[3] = { 1, 5, 10 };
+                CLK.tm_end = t + M[i] * 60000.0f;
+                CLK.tm_run = 1;
+                CLK.ctl_ver++;
+            }
+    }
+    clk_update(t);
+}
+/* when the platform should come back for the clock (ms; < 0: nothing pending) */
+int sh_next_update(float t)
+{
+    int open = AP.on && is_app("clock");
+    float best = -1;
+    if (CLK.sw_run && open) best = 100 - (float)((int)clk_sw_ms(t) % 100);
+    if (CLK.tm_run) {
+        float tl = CLK.tm_end - t, nx = open ? (float)((int)tl % 1000) + 1 : tl;
+        if (nx < 1) nx = 1;
+        if (best < 0 || nx < best) best = nx;
+    }
+    return (int)best;
+}
+int sh_refresh(float t) { now_ms = t; return clk_update(t); }
+
+/* ---- P2z: the Calculator (iOS's layout: the display right-aligned, the keys in five rows: grey functions, dark
+ * digits, orange operators). The keys are the page; the display a small layer redrawn per key ---- */
+static tk_layer apcalc;
+static struct { double acc, cur; int op, entering, err, has_dot, ndig, frac; } CAL;
+static const char *const CK[19] = { "AC", "\xc2\xb1", "%", "\xc3\xb7", "7", "8", "9", "\xc3\x97", "4", "5", "6", "\xe2\x88\x92",
+                                    "1", "2", "3", "+", "0", ".", "=" };
+static void calc_key_rect(int i, float *x, float *y, float *w)
+{
+    int r = i < 16 ? i / 4 : 4, c = i < 16 ? i % 4 : i == 16 ? 0 : i == 17 ? 2 : 3;
+    *x = 16 + 92 * c;
+    *y = 318 + 90 * r;
+    *w = i == 16 ? 170 : 78;
+}
+static void page_calc(dc *d)
+{
+    for (int i = 0; i < 19; i++) {
+        float x, y, w;
+        calc_key_rect(i, &x, &y, &w);
+        int fn = i < 3, op = (i % 4 == 3 && i < 16) || i == 18;
+        d_rrect(d, x, y, w, 78, 39, op ? tk_hex(0xff9f0a, 1) : fn ? tk_hex(0xa5a5a5, 1) : tk_hex(0x333333, 1));
+        float tw0 = tw(TK_IT500, 32, CK[i], 0, 0);
+        float tx = i == 16 ? x + 31 : x + (78 - tw0) / 2;
+        d_text(d, TK_IT500, 32, tx, bl(TK_IT500, 32, y + 19), CK[i], 0, 0, fn ? tk_hex(0x000000, 1) : INK, 0);
+    }
+}
+static int calc_fmt(char *b, double v)
+{
+    if (v != v || v > 1e15 || v < -1e15) { tk_memcpy(b, "Error", 6); return 5; }
+    int n = 0;
+    if (v < 0) { b[n++] = '-'; v = -v; }
+    double ip = (double)(long long)v, fp = v - ip;
+    long long I = (long long)ip;
+    char t[24];
+    int k = 0;
+    do { t[k++] = (char)('0' + I % 10); I /= 10; } while (I);
+    int intd = k;
+    while (k) b[n++] = t[--k];
+    int room = 9 - intd;                    /* nine digits in all, as iOS's portrait display */
+    if (room > 0) {
+        long long f = 1;
+        for (int i = 0; i < room; i++) f *= 10;
+        long long F = (long long)(fp * (double)f + .5);
+        if (F >= f) F = f - 1;
+        int m = room;
+        while (m > 0 && F % 10 == 0) { F /= 10; m--; }
+        if (m > 0) {
+            b[n++] = '.';
+            char u[16];
+            for (int i = m - 1; i >= 0; i--) { u[i] = (char)('0' + F % 10); F /= 10; }
+            for (int i = 0; i < m; i++) b[n++] = u[i];
+        }
+    }
+    b[n] = 0;
+    return n;
+}
+static void build_calc(void)
+{
+    relayer(&apcalc);
+    char b[32];
+    if (CAL.err) tk_memcpy(b, "Error", 6);
+    else {
+        int n = calc_fmt(b, CAL.cur);
+        if (CAL.entering && CAL.has_dot && CAL.frac == 0) { b[n++] = '.'; b[n] = 0; }
+        else if (CAL.entering && CAL.has_dot && CAL.frac > 0) {   /* keep the typed trailing zeros */
+            int have = 0;
+            for (int i = 0; b[i]; i++) if (b[i] == '.') { have = (int)tk_strlen(b + i + 1); break; }
+            if (!have) { b[n++] = '.'; }
+            for (; have < CAL.frac && n < 30; have++) b[n++] = '0';
+            b[n] = 0;
+        }
+    }
+    float size = tk_strlen(b) > 7 ? 64 : 84;
+    float w = tw(TK_IT400, size, b, 0, TK_TNUM);
+    dc d = mk(&apcalc, "calc-display", 20, 186, 350, 118, 0, 0);
+    d_text(&d, TK_IT400, size, 362 - w, bl(TK_IT400, size, 300 - size * 1.21f), b, 0, TK_TNUM, INK, 0);
+    apcalc.hidden = 0;
+    relink();
+}
+static double calc_apply(double a, double b, int op, int *err)
+{
+    switch (op) {
+    case 1: if (b == 0) { *err = 1; return 0; } return a / b;
+    case 2: return a * b;
+    case 3: return a - b;
+    case 4: return a + b;
+    default: return b;
+    }
+}
+static void calc_tap(float x, float y)
+{
+    int k = -1;
+    for (int i = 0; i < 19; i++) {
+        float kx, ky, kw;
+        calc_key_rect(i, &kx, &ky, &kw);
+        if (x >= kx && x < kx + kw && y >= ky && y < ky + 78) { k = i; break; }
+    }
+    if (k < 0) return;
+    const char *c = CK[k];
+    if (k == 0) { CAL.acc = CAL.cur = 0; CAL.op = 0; CAL.entering = CAL.err = CAL.has_dot = CAL.ndig = CAL.frac = 0; }
+    else if (CAL.err) return;
+    else if (k == 1) { CAL.cur = -CAL.cur; }
+    else if (k == 2) { CAL.cur /= 100; CAL.entering = 0; }
+    else if (c[0] >= '0' && c[0] <= '9' && !c[1]) {
+        if (!CAL.entering) { CAL.cur = 0; CAL.entering = 1; CAL.has_dot = CAL.ndig = CAL.frac = 0; }
+        if (CAL.ndig >= 9) return;
+        int dg = c[0] - '0';
+        if (CAL.has_dot) {
+            double f = 1;
+            for (int i = 0; i <= CAL.frac; i++) f /= 10;
+            CAL.cur += (CAL.cur < 0 ? -dg : dg) * f;
+            CAL.frac++;
+        } else CAL.cur = CAL.cur * 10 + (CAL.cur < 0 ? -dg : dg);
+        if (CAL.cur != 0 || CAL.has_dot) CAL.ndig++;
+    } else if (k == 17) {
+        if (!CAL.entering) { CAL.cur = 0; CAL.entering = 1; CAL.ndig = CAL.frac = 0; }
+        CAL.has_dot = 1;
+    } else {
+        /* an operator or =: the pending operation first (left to right, as iOS's basic calculator chains) */
+        if (CAL.op && (CAL.entering || k == 18)) CAL.cur = calc_apply(CAL.acc, CAL.cur, CAL.op, &CAL.err);
+        CAL.acc = CAL.cur;
+        CAL.op = k == 18 ? 0 : k == 3 ? 1 : k == 7 ? 2 : k == 11 ? 3 : 4;
+        CAL.entering = 0;
+    }
+    build_calc();
+}
+
+/* P3b: the Flashlight app: one big switch (iOS's torch control), the same LED as the lock's button and the CC */
+static void page_light(dc *d)
+{
+    d_h1(d, "Flashlight");
+    int on = Q[0].lit;
+    d_rrect(d, 135, 250, 120, 240, 34, on ? tk_hex(0xffffff, 1) : W(.16f));
+    d_rrect(d, 135, on ? 250 : 370, 120, 120, 34, on ? tk_hex(0xffd60a, 1) : W(.32f));
+    const char *t = on ? "On" : "Off";
+    float w = tw(TK_IT600, 20, t, 0, 0);
+    d_text(d, TK_IT600, 20, (390 - w) / 2, bl(TK_IT600, 20, 520), t, 0, 0, INK, 0);
+    const char *h = "Tap to turn the LED on or off";
+    w = tw(TK_IT400, 15, h, 0, 0);
+    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 556), h, 0, 0, W(.5f), 0);
+}
+
+/* P3c: the Calendar: this month's grid (Monday first, as iOS in Finland), today in a red circle, from the phone's
+ * clock (sh_year: the year; the host's is 2026) */
+static int cal_year = 2026;
+void sh_year(int y) { if (y > 2000 && y < 2200) cal_year = y; }
+static void page_calendar(dc *d)
+{
+    const char *mo = MO[(ST.mon + 11) % 12];
+    d_text(d, TK_IT800, 34, 20, bl(TK_IT800, 34, 64), mo, -.8f, 0, INK, 0);
+    char yb[8];
+    put_dec(yb, cal_year);
+    d_text(d, TK_IT600, 17, 20 + tw(TK_IT800, 34, mo, -.8f, 0) + 10, bl(TK_IT800, 34, 64) - 0, yb, 0, 0, tk_hex(0xff453a, 1), 0);
+    static const char *const H[7] = { "M", "T", "W", "T", "F", "S", "S" };
+    for (int c = 0; c < 7; c++) {
+        float w = tw(TK_IT600, 13, H[c], 0, 0);
+        d_text(d, TK_IT600, 13, 20 + 50 * c + (50 - w) / 2, bl(TK_IT600, 13, 122), H[c], 0, 0, W(c >= 5 ? .4f : .6f), 0);
+    }
+    d_rrect(d, 16, 146, 358, .5f, 0, W(.15f));
+    static const int DIM[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    int m = (ST.mon + 11) % 12, nd = DIM[m];
+    if (m == 1 && ((cal_year % 4 == 0 && cal_year % 100 != 0) || cal_year % 400 == 0)) nd = 29;
+    /* the 1st's weekday from today's (Sunday 0), as a Monday-first column */
+    int wd1 = ((ST.wday - (ST.day - 1)) % 7 + 7) % 7, col0 = (wd1 + 6) % 7;
+    for (int day = 1; day <= nd; day++) {
+        int cell = col0 + day - 1, r = cell / 7, c = cell % 7;
+        float cx = 20 + 50 * c + 25, cy = 160 + 56 * r + 22;
+        char b[4];
+        put_dec(b, day);
+        int today = day == ST.day;
+        if (today) d_rrect(d, cx - 19, cy - 19, 38, 38, 19, tk_hex(0xff453a, 1));
+        float w = tw(today ? TK_IT700 : TK_IT400, 20, b, 0, TK_TNUM);
+        d_text(d, today ? TK_IT700 : TK_IT400, 20, cx - w / 2, bl(TK_IT400, 20, cy - 13), b, 0, TK_TNUM, today || c < 5 ? INK : W(.5f), 0);
+    }
+    float y = 160 + 56 * 6 + 10;
+    d_rrect(d, 16, y, 358, .5f, 0, W(.15f));
+    char dt[48];
+    const char *wd = WD[ST.wday % 7];
+    int n = (int)tk_strlen(wd);
+    tk_memcpy(dt, wd, (size_t)n); dt[n++] = ' ';
+    n += put_dec(dt + n, ST.day); dt[n++] = ' ';
+    tk_memcpy(dt + n, mo, tk_strlen(mo) + 1);
+    d_text(d, TK_IT600, 15, 20, bl(TK_IT600, 15, y + 18), dt, 0, 0, W(.85f), 0);
+    d_text(d, TK_IT400, 15, 20, bl(TK_IT400, 15, y + 46), "No events", 0, 0, W(.45f), 0);
+}
+
+/* P3d: Settings > Display & Brightness: iOS's brightness bar (a tap sets the panel's level 1..4) */
+static void page_display(dc *d)
+{
+    d_icon(d, "back", 18, 53, 1);
+    d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Settings", 0, 0, ACCENT(), 0);
+    d_text(d, TK_IT800, 30, 20, bl(TK_IT800, 30, 96), "Display & Brightness", -.6f, 0, INK, 0);
+    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 162), "BRIGHTNESS", .52f, 0, W(.55f), 0);
+    d_rrect(d, 16, 184, 358, 64, 16, tk_hex(0x151c33, 1));
+    int lv = cc_bright ? cc_bright : 3;
+    d_rrect(d, 60, 208, 270, 16, 8, W(.18f));
+    d_rrect(d, 60, 208, 270.0f * lv / 4, 16, 8, W(.95f));
+    d_icon(d, "cc-sun", 26, 202, .6f);
+    d_icon(d, "cc-sun", 340, 200, 1);
+    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 262), "Four steps, as the Control Centre's slider.", 0, 0, W(.45f), 0);
+}
+
+/* ---- P3e: Notes with an iOS keyboard. The list (each note's first line), New, and the editor: the text with a
+ * caret over a dark keyboard (letters, shift, 123, space, return, delete). Kept in RAM until a restart (writing
+ * them to the phone's storage needs the Starbite OS session's sbos-state path). ---- */
+#define NNOTES 8
+#define NOTELEN 600
+static char NOTES[NNOTES][NOTELEN];
+static struct { int n, view, cur, shift, num; } NS;
+static tk_layer apnote;
+static void build_app_page(int a);
+static const char *const KR[2][3] = { { "qwertyuiop", "asdfghjkl", "zxcvbnm" }, { "1234567890", "-/:;()&@\"", ".,?!'" } };
+static void note_title(const char *t, char *out)
+{
+    int k = 0;
+    while (t[k] && t[k] != '\n' && k < 40) { out[k] = t[k]; k++; }
+    out[k] = 0;
+    if (!k) tk_memcpy(out, "New Note", 9);
+}
+static void kb_key(dc *d, float x, float y, float w, const char *t, int special)
+{
+    d_rrect(d, x, y, w, 46, 6, special ? tk_hex(0x3a3d4a, 1) : tk_hex(0x6b6e7a, 1));
+    float tw0 = tw(TK_IT400, special ? 16 : 23, t, 0, 0);
+    d_text(d, TK_IT400, special ? 16 : 23, x + (w - tw0) / 2, bl(TK_IT400, special ? 16 : 23, y + (special ? 13 : 9)), t, 0, 0, INK, 0);
+}
+static void page_notes(dc *d)
+{
+    if (!NS.view) {
+        d_h1(d, "Notes");
+        d_text(d, TK_IT600, 17, 330, bl(TK_IT600, 17, 53), "New", 0, 0, tk_hex(0xffd60a, 1), 0);
+        if (!NS.n) { d_empty(d, 330, "No Notes", "Tap New to write one. Notes are kept until the phone restarts."); return; }
+        d_rrect(d, 16, 117, 358, 56.0f * NS.n - 1, 16, tk_hex(0x151c33, 1));
+        for (int i = 0; i < NS.n; i++) {
+            char t[48];
+            note_title(NOTES[NS.n - 1 - i], t);
+            d_text(d, TK_IT600, 17, 32, bl(TK_IT600, 17, 117 + 56 * i + 17), t, 0, 0, INK, 0);
+            if (i + 1 < NS.n) d_rrect(d, 32, 117 + 56 * i + 55, 342, .5f, 0, W(.1f));
+        }
+        return;
+    }
+    d_icon(d, "back", 18, 53, 1);
+    d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Notes", 0, 0, tk_hex(0xffd60a, 1), 0);
+    d_rrect(d, 0, 540, 390, 262, 0, tk_hex(0x1e2030, 1));
+    const char *const *R = KR[NS.num];
+    for (int r = 0; r < 3; r++) {
+        int n = (int)tk_strlen(R[r]);
+        float x0 = r == 2 ? 54 : 3 + (10 - n) * 19.5f;
+        if (r == 1 && NS.num) x0 = 3 + 19.5f * (10 - n);
+        if (r == 2 && NS.num) x0 = 3 + (10 - n) * 19.5f;
+        for (int i = 0; i < n; i++) {
+            char k[2] = { R[r][i], 0 };
+            if (!NS.num && NS.shift) k[0] = (char)(k[0] - 32);
+            kb_key(d, x0 + 39 * i, 550 + 54 * r, 33, k, 0);
+        }
+    }
+    if (!NS.num) {
+        if (NS.shift) { d_rrect(d, 3, 658, 42, 46, 6, W(.9f)); float w = tw(TK_IT600, 13, "shift", 0, 0);
+                        d_text(d, TK_IT600, 13, 3 + (42 - w) / 2, bl(TK_IT600, 13, 672), "shift", 0, 0, tk_hex(0x1e2030, 1), 0); }
+        else { d_rrect(d, 3, 658, 42, 46, 6, tk_hex(0x3a3d4a, 1)); float w = tw(TK_IT600, 13, "shift", 0, 0);
+               d_text(d, TK_IT600, 13, 3 + (42 - w) / 2, bl(TK_IT600, 13, 672), "shift", 0, 0, INK, 0); }
+    }
+    d_rrect(d, 345, 658, 42, 46, 6, tk_hex(0x3a3d4a, 1));
+    d_icon(d, "back", 359, 670, 1);                              /* delete: the font has no erase glyph */
+    kb_key(d, 3, 712, 88, NS.num ? "ABC" : "123", 1);
+    kb_key(d, 97, 712, 196, "space", 0);
+    kb_key(d, 299, 712, 88, "return", 1);
+}
+static void build_note(void)
+{
+    relayer(&apnote);
+    if (!NS.view || !is_app("notes")) { apnote.hidden = 1; return; }
+    const char *t = NOTES[NS.cur];
+    dc d = mk(&apnote, "note-text", 16, 92, 358, 440, 0, 0);
+    /* the lines: the text's own line breaks, then words wrapped at 350 pt (17 pt, 24 pt lines), the caret after */
+    char line[NOTELEN + 2];
+    float y = 100;
+    int i = 0, n = (int)tk_strlen(t);
+    float cx = 20, cy = 100;
+    while (i <= n && y < 520) {
+        int k = 0, lastsp = -1, start = i;
+        while (i < n && t[i] != '\n') {
+            line[k] = t[i]; line[k + 1] = 0;
+            if (tw(TK_IT400, 17, line, 0, 0) > 350) {
+                if (lastsp > 0) { i = start + lastsp + 1; k = lastsp; }
+                break;
+            }
+            if (t[i] == ' ') lastsp = k;
+            k++; i++;
+        }
+        line[k] = 0;
+        d_text(&d, TK_IT400, 17, 20, bl(TK_IT400, 17, y), line, 0, 0, INK, 0);
+        cx = 20 + tw(TK_IT400, 17, line, 0, 0);
+        cy = y;
+        y += 24;
+        if (i < n && t[i] == '\n') { i++; if (i == n) { cx = 20; cy = y; } continue; }
+        if (i >= n) break;
+    }
+    d_rrect(&d, cx + 1, cy + 1, 2, 21, 1, tk_hex(0xffd60a, 1));          /* the caret */
+    apnote.hidden = 0;
+    relink();
+}
+static void notes_tap(float x, float y)
+{
+    if (!NS.view) {
+        if (y >= 40 && y < 86 && x >= 300) {
+            if (NS.n == NNOTES) { toast("Up to eight notes in this version"); return; }
+            NOTES[NS.n][0] = 0;
+            NS.cur = NS.n++;
+            NS.view = 1; NS.shift = 1; NS.num = 0;
+        } else if (y >= 117 && y < 117 + 56 * NS.n && x >= 16 && x < 374) {
+            NS.cur = NS.n - 1 - (int)((y - 117) / 56);
+            NS.view = 1; NS.shift = 0; NS.num = 0;
+        } else return;
+        build_app_page(AP.a);
+        return;
+    }
+    if (y >= 40 && y < 86 && x < 120) {               /* back: an empty note is dropped */
+        if (!NOTES[NS.cur][0]) {
+            for (int i = NS.cur; i + 1 < NS.n; i++) tk_memcpy(NOTES[i], NOTES[i + 1], NOTELEN);
+            NS.n--;
+        }
+        NS.view = 0;
+        build_app_page(AP.a);
+        return;
+    }
+    if (y < 548) return;
+    char *t = NOTES[NS.cur];
+    int len = (int)tk_strlen(t), relayout = 0;
+    char c = 0;
+    const char *const *R = KR[NS.num];
+    for (int r = 0; r < 3 && !c; r++) {
+        int n = (int)tk_strlen(R[r]);
+        float x0 = r == 2 && !NS.num ? 54 : 3 + (10 - n) * 19.5f, ky = 550 + 54 * r;
+        if (y < ky || y >= ky + 50) continue;
+        for (int i = 0; i < n; i++)
+            if (x >= x0 + 39 * i - 3 && x < x0 + 39 * i + 36) { c = R[r][i]; break; }
+        if (!c && r == 2) {
+            if (x < 50 && !NS.num) { NS.shift = !NS.shift; relayout = 1; }
+            else if (x >= 340 && len) t[len - 1] = 0;
+        }
+    }
+    if (!c && y >= 712 && y < 760) {
+        if (x < 94) { NS.num = !NS.num; relayout = 1; }
+        else if (x < 296) c = ' ';
+        else c = '\n';
+    }
+    if (c && len < NOTELEN - 1) {
+        if (!NS.num && NS.shift && c >= 'a' && c <= 'z') { c = (char)(c - 32); NS.shift = 0; relayout = 1; }
+        t[len] = c; t[len + 1] = 0;
+        if (c == '.' || c == '?' || c == '!') { /* the next sentence starts in capitals after a space, as iOS */ }
+    }
+    if (relayout) build_app_page(AP.a); else build_note();
+}
+
 static tk_layer apkey, apnum;
 static void build_apnum(void)
 {
@@ -1496,11 +1996,51 @@ static void build_apnum(void)
     d_text(&d, TK_IT500, 36, (390 - w) / 2, bl(TK_IT500, 36, 86), AS.num, 1, TK_TNUM, INK, 0);
     relink();
 }
+/* P2y: the live values the app rows show ("@..."; anything else as it is) */
+static struct { int charging; char ver[40]; } SYS = { 0, "Starbite OS Next" };
+void sh_alarm(int on, int h, int m)
+{
+    if (ALM.on == !!on && (!on || (ALM.h == h && ALM.m == m))) return;
+    ALM.on = !!on; ALM.h = h; ALM.m = m;
+    build_lwidgets();
+    relink();
+    lock_ver++;
+}
+void sh_sysinfo(int charging, const char *version)
+{
+    if (!!charging != sys_charging) { sys_charging = !!charging; build_lstatus(); build_home_sb(); build_home_w(); relink(); lock_ver++; }
+    SYS.charging = charging;
+    int n = 0;
+    while (version && version[n] && n < 39) { SYS.ver[n] = version[n]; n++; }
+    if (version) SYS.ver[n] = 0;
+}
+static const char *live_text(const char *s, char *buf)
+{
+    if (s[0] != '@') return s;
+    int n = 0;
+    if (!tk_strcmp(s, "@pct")) { n = put_dec(buf, ST.pct); buf[n++] = ' '; buf[n++] = '%'; buf[n] = 0; }
+    else if (!tk_strcmp(s, "@chg")) return SYS.charging ? "Yes" : "No";
+    else if (!tk_strcmp(s, "@temp")) { n = put_dec(buf, ST.temp); tk_memcpy(buf + n, " \xc2\xb0" "C", 5); }
+    else if (!tk_strcmp(s, "@torch")) return Q[0].lit ? "On" : "Off";
+    else if (!tk_strcmp(s, "@bright")) {
+        if (!cc_bright) return "Default";
+        tk_memcpy(buf, "Level ", 6); n = 6 + put_dec(buf + 6, cc_bright); tk_memcpy(buf + n, " of 4", 6);
+    } else if (!tk_strcmp(s, "@time")) fmt_hm(buf);
+    else if (!tk_strcmp(s, "@date")) {
+        const char *w = WD[ST.wday % 7], *m = MO[(ST.mon + 11) % 12];
+        n = (int)tk_strlen(w); tk_memcpy(buf, w, (size_t)n); buf[n++] = ' ';
+        n += put_dec(buf + n, ST.day); buf[n++] = ' ';
+        tk_memcpy(buf + n, m, tk_strlen(m) + 1);
+    } else if (!tk_strcmp(s, "@ver")) return SYS.ver;
+    else return "";
+    return buf;
+}
 static void build_app_page(int a)
 {
     const char *k = APPS[a].k;
     int own = !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
-              !tk_strcmp(k, "camera");
+              !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
+              !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes");
     if (own) {
         for (int i = 0; i < NST; i++) {
             dc d = strip_dc(i, "app-page");
@@ -1509,10 +2049,19 @@ static void build_app_page(int a)
             else if (!tk_strcmp(k, "messages")) page_messages(&d);
             else if (!tk_strcmp(k, "contacts")) page_contacts(&d);
             else if (!tk_strcmp(k, "photos")) page_photos(&d);
+            else if (!tk_strcmp(k, "clock")) page_clock(&d);
+            else if (!tk_strcmp(k, "calc")) page_calc(&d);
+            else if (!tk_strcmp(k, "light")) page_light(&d);
+            else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
+            else if (!tk_strcmp(k, "settings")) page_display(&d);
+            else if (!tk_strcmp(k, "notes")) page_notes(&d);
             else page_camera(&d);
             tk_layer_prepare(&appst[i]);
         }
         build_apnum();
+        if (!tk_strcmp(k, "calc")) build_calc();
+        if (!tk_strcmp(k, "notes")) build_note();
+        if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
         relink();
         return;
     }
@@ -1542,8 +2091,9 @@ static void build_app_page(int a)
         d_rrect(&d, 16, y, 358, gh, 16, tk_hex(0x151c33, 1));
         for (int r = 0; r < S->n; r++) {
             float ry = y + 47 * r;
-            d_text(&d, TK_IT400, 16, 32, ry + 13 + 16, S->rows[r].l, 0, 0, INK, 0);
-            const char *rt = S->rows[r].r;
+            char lb[48], rb[48];
+            d_text(&d, TK_IT400, 16, 32, ry + 13 + 16, live_text(S->rows[r].l, lb), 0, 0, INK, 0);
+            const char *rt = live_text(S->rows[r].r, rb);
             if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Mobile Data")) rt = md_text();
             if (rt[0]) {
                 float w = tw(TK_IT400, 16, rt, 0, TK_TNUM);
@@ -1638,6 +2188,7 @@ static void app_open(int a)
     AS.tab = 3;
     AS.num[0] = 0;
     AS.thread = -1;
+    AS.sub = 0;
     apkey.hidden = 1;
     build_app_page(a);
     AP.icon = icon_rect(a);
@@ -1661,6 +2212,11 @@ static void app_finish_close(void)
     /* the page (a whole screen) is not kept: the next open draws it again */
     for (int i = 0; i < NST; i++) relayer(&appst[i]);
     relayer(&apnum);
+    relayer(&apsw); relayer(&aptm); relayer(&apctl);           /* P2z: the clock's (the timer keeps running) */
+    apsw.hidden = aptm.hidden = apctl.hidden = 1;
+    relayer(&apcalc); apcalc.hidden = 1;
+    relayer(&apnote); apnote.hidden = 1;
+    NS.view = 0;                                                /* Notes opens on its list again */                        /* the Calculator keeps its value (CAL) */
     apnum.hidden = apkey.hidden = 1;
     home.sx = home.sy = 1;
     home.alpha = 1;
@@ -1933,14 +2489,37 @@ static void app_tap(float x, float y)
         if (dx * dx + dy * dy <= 39 * 39)
             toast(!tk_strcmp(AS.num, "112") ? "Calling 112 needs the modem (receive-only today)" :
                   AS.num[0] ? "No SIM: only emergency calls" : "Enter a number");
+    } else if (is_app("clock")) {
+        clk_tap(x, y);
+    } else if (is_app("calc")) {
+        calc_tap(x, y);
+    } else if (is_app("notes")) {
+        notes_tap(x, y);
+    } else if (is_app("light")) {
+        if (x >= 135 && x < 255 && y >= 250 && y < 490) {
+            Q[0].lit = !Q[0].lit;
+            Q[0].facelit.hidden = Q[0].iconlit.hidden = !Q[0].lit;
+            Q[0].face.hidden = Q[0].icon.hidden = Q[0].lit;
+            sh_torch(Q[0].lit);
+            lock_ver++;
+            build_app_page(AP.a);
+        }
+    } else if (is_app("settings") && AS.sub) {
+        if (x < 120 && y >= 40 && y < 86) { AS.sub = 0; build_app_page(AP.a); return; }
+        if (y >= 184 && y < 248 && x >= 40 && x < 350) {
+            int lv = 1 + (int)tk_clampf((x - 60) / 270 * 4, 0, 3.999f);
+            if (lv != cc_bright) { cc_bright = lv; sh_brightness(lv); CCS.lvl[0] = (lv - .5f) / 4; if (CCS.built) cc_levels(); }
+            build_app_page(AP.a);
+        }
     } else if (is_app("settings")) {
+        if (x >= 16 && x < 374 && y >= 293 && y < 340) { AS.sub = 1; build_app_page(AP.a); return; }
         if (x >= 16 && x < 374 && y >= 182 && y < 229) {
             if (cell_running()) { sh_modem(0); toast("Modem stopped"); }
             else if (sh_modem(1) < 0) toast("The modem can't start now");
         }
     } else if (is_app("messages")) {
         if (AS.thread < 0) {
-            if (x >= 16 && x < 374 && y >= 173 && y < 173 + 5 * 63) { AS.thread = (int)((y - 173) / 63); build_app_page(AP.a); }
+            (void)x; (void)y;                         /* P2y: no conversations (no SIM): nothing to open */
         } else if (x < 120 && y >= 40 && y < 86) {
             AS.thread = -1;
             build_app_page(AP.a);
@@ -2069,8 +2648,8 @@ static void relink(void)
 {
     tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
     link(&root, r, 14);
-    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum };
-    link(&appg, ag, 4);
+    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl, &apcalc, &apnote };
+    link(&appg, ag, 9);
     tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     link(&appc, st, NST);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
@@ -2696,6 +3275,7 @@ int sh_tick(float dt, float t)
 {
     int mv = 0;
     now_ms = t;
+    clk_update(t);
     if (SL.dir) {
         SL.t = tk_minf(1, SL.t + dt / (SL.dir < 0 ? SL_OUT : SL_IN));
         if (SL.t >= 1) {
@@ -2905,6 +3485,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
     int tchange = h != ST.h || mi != ST.mi || wday != ST.wday || day != ST.day || mon != ST.mon;
     int wchange = pct != ST.pct || temp != ST.temp;
     ST.h = h; ST.mi = mi; ST.wday = wday; ST.day = day; ST.mon = mon; ST.pct = pct; ST.temp = temp;
+    if (tchange && AP.on && (is_app("clock") || is_app("calendar")) && !AP.closing) build_app_page(AP.a);   /* the time, today */
     if (tchange) {
         /* the layers keep their place in the tree: rebuilt in place */
         build_lclock();
@@ -2913,6 +3494,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
     }
     if (wchange) {
         build_lwidgets();
+        build_home_w();                         /* P2y: home's battery widget shows the same live values */
         relink();
     }
     if (tchange || wchange) lock_ver++;

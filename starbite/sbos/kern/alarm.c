@@ -35,6 +35,20 @@ int alarm_set(int i, int h, int m, int days, int on)
     return 0;
 }
 
+/* P2y (Next's lock widget): the earliest alarm that is on, by time of day; 1 found, 0 none. Read only. */
+int alarm_first(int *h, int *m)
+{
+    int best = -1;
+    for (int i = 0; i < NALARM; ++i)
+        if (al[i].on && (best < 0 || al[i].h * 60 + al[i].m < al[best].h * 60 + al[best].m))
+            best = i;
+    if (best < 0)
+        return 0;
+    *h = al[best].h;
+    *m = al[best].m;
+    return 1;
+}
+
 int alarm_any(void)
 {
     for (int i = 0; i < NALARM; ++i)

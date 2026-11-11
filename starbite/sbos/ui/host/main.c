@@ -25,6 +25,7 @@ int sh_modem(int on)
 }
 void sh_confirmed(int ok) { fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled"); }
 void sh_brightness(int level) { fprintf(stderr, "brightness: level %d\n", level); }
+void sh_vibrate(void) { fprintf(stderr, "vibrate: the timer ran out\n"); }
 static int screen_off;
 void sh_slept(void) { screen_off = 1; fprintf(stderr, "sleep: the screen would go off now\n"); }
 

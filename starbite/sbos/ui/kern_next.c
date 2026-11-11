@@ -219,10 +219,15 @@ static void status_now(void)
     struct sbos_time t;
     struct sbos_battery b;
     int h = 0, mi = 0, wd = 0, d = 1, mo = 1;
-    if (clock_now(&t)) { h = t.h; mi = t.mi; wd = t.wday; d = t.d; mo = t.mo; }
+    if (clock_now(&t)) { h = t.h; mi = t.mi; wd = t.wday; d = t.d; mo = t.mo; sh_year(t.y); }
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P2y");     /* P2y: the apps' live values */
+    {
+        int ah = 0, am = 0, on = alarm_first(&ah, &am);
+        sh_alarm(on, ah, am);
+    }
     cell_now();
 }
 
@@ -488,6 +493,23 @@ static void stats_log(const char *what)
 /* one frame: the springs and transitions advanced by the real time since the last, composed, presented */
 static int slept_now;                        /* the shell's fade to black ended: the screen off after its frame */
 void sh_slept(void) { slept_now = 1; }
+/* P2z: the Clock app's stopwatch and timer without 60 Hz frames: a one-shot at the time the shell asks for, a
+ * frame only if its digits changed (a timer that runs out vibrates even with the screen off) */
+static void clock_again(void)
+{
+    int ms = sh_next_update((float)sb_ms());
+    if (ms >= 0) kt_set(KT_UI, 25, sb_ms(), (uint32_t)(ms < 15 ? 15 : ms), 0);
+    else kt_cancel(KT_UI, 25);
+}
+void sh_vibrate(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: timer done: would vibrate (a dry run: the self test)");
+#else
+    if (vib_buzz(3, 400, 300) < 0) sb_log("next: timer done: the vibration motor did not answer");
+#endif
+    if (!K.screen_on) power_screen_set(1);           /* P3f: as iOS, the alert wakes the screen (its fade in) */
+}
 static uint64_t tick3;                      /* the next frame's time in thirds of a ms: 16.67 ms apart (the TE's) */
 static void frame(void)
 {
@@ -520,6 +542,7 @@ static void frame(void)
         last_tick = 0;
         sh_idle();
         if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);   /* the rest of the idle work, a turn at a time */
+        clock_again();                                               /* P2z: the Clock's next digit */
         kt_set(KT_UI, 21, sb_ms(), 400, 0);         /* back to the screen-on clock unless something moves again */
         kt_set(KT_UI, 23, sb_ms(), 5000, 0);        /* and the band workers off after 5 s */
 #ifndef SBOS_SELFTEST_NEXT
@@ -752,6 +775,16 @@ void next_ktimer(unsigned id)
     if (ready && id == 20) { frame(); return; }
     if (ready && id == 21) {
         if (!ticking && !sh_moving()) boost(0);
+        return;
+    }
+    if (ready && id == 25) {
+        if (!ticking) {
+            if (sh_refresh((float)sb_ms()) && K.screen_on) {
+                tk_comp_frame(&comp, 0, 0);
+                present();
+            }
+            clock_again();
+        }
         return;
     }
     if (ready && id == 24) {
