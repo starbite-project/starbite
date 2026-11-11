@@ -1,0 +1,20 @@
+# IONetworkingFamily-188 built into xnu-12377 (paths relative to build/families/IONetworkingFamily).
+# Every file gets the kext view (../kext-view.h) and __PRIVATE_SPI__ (Apple's GCC_PREPROCESSOR_DEFINITIONS for the
+# kext target: it selects the private IONetworkInterface API; the public header view keeps the same vtable through
+# reserved slots, so StarbiteUSBNCM may be compiled with or without it):
+@cflags -include kext-view.h -D__PRIVATE_SPI__
+# This is the whole source list of Apple's IONetworkingFamily kext target; nothing is left out.
+# Compile-checked: macOS target (tools/apple/kcheck.py uses the macOS STARLTE kernel's flags).
+
+IONetworkController.cpp   # IONetworkController base class
+IOEthernetController.cpp  # IOEthernetController (StarbiteUSBNCM's superclass)
+IONetworkInterface.cpp    # IONetworkInterface: the ifnet KPI glue (ifnet_allocate_extended, input/output, BPF)
+IOEthernetInterface.cpp   # IOEthernetInterface (en0 ...)
+IONetworkStack.cpp        # IONetworkStack: names and attaches interfaces (IOResources/IOBSD personality)
+IONetworkData.cpp         # statistics objects
+IONetworkMedium.cpp       # media types / link status
+IONetworkUserClient.cpp   # user client (ifconfig/networksetup statistics)
+IOOutputQueue.cpp         # IOBasicOutputQueue / IOGatedOutputQueue
+IOPacketQueue.cpp         # mbuf packet queue
+IOMbufMemoryCursor.cpp    # mbuf -> DMA segment cursors
+IOKernelDebugger.cpp      # IOKernelDebugger + IOKDP (KDP over Ethernet; "Kernel Debugging Driver" personality)

@@ -1,0 +1,112 @@
+# IOHIDFamily-2238.120.5 built into xnu-12377 (paths relative to build/families/IOHIDFamily; "_gen/..." = iig output
+# from starbite/apple-families/stage.sh). Every file gets the kext view (see ../kext-view.h and INTEGRATION.md):
+@cflags -include kext-view.h
+# Tags: [both] = in Apple's IOHIDFamily (macOS) and IOHIDFamily-Embedded (iOS) kext targets; [osx] = macOS target only.
+# Compile-checked: macOS target only (tools/apple/kcheck.py uses the macOS STARLTE kernel's flags).
+
+# --- event services: what StarbiteTouch / StarbiteButtons subclass, and the user clients backboardd/WindowServer open
+IOHIDFamily/IOHIDEventService.cpp                 # [both] patched (0003: no fast-path user client)
+IOHIDFamily/IOHIDEvent.cpp                        # [both] event layouts from missing-headers/ (see NOTES.md)
+IOHIDFamily/IOHIDEventServiceQueue.cpp            # [both]
+IOHIDFamily/IOHIDEventServiceUserClient.cpp       # [both]
+IOHIDFamily/IOHIDEventSource.cpp                  # [both]
+IOHIDFamily/IOHIDFamilyPrivate.cpp                # [both]
+IOHIDFamily/IOHIDProviderPropertyMerger.cpp       # [both] carries HIDServiceSupport onto every IOHIDEventService
+IOHIDFamily/AppleEmbeddedHIDEventService.cpp      # [both]
+IOHIDFamily/IOHIDEventDummyService/IOHIDEventDummyService.cpp  # [both]
+IOHIDFamily/IOHIDDebug.c                          # [both]
+_gen/IOHIDFamily/HIDDriverKit/IOHIDEventService.iig.cpp       # [both] kernel side of HIDDriverKit/IOHIDEventService.iig
+
+# --- HID device / interface stack (link dependencies of IOHIDEventService; USB/BT/virtual HID devices)
+IOHIDFamily/IOHIDDevice.cpp                       # [both]
+IOHIDFamily/IOHIDInterface.cpp                    # [both]
+IOHIDFamily/IOHIDElementContainer.cpp             # [both]
+IOHIDFamily/IOHIDDeviceElementContainer.cpp       # [both]
+IOHIDFamily/IOHIDElementPrivate.cpp               # [both]
+IOHIDFamily/IOHIDEventQueue.cpp                   # [both]
+IOHIDFamily/IOHIDReportElementQueue.cpp           # [both]
+IOHIDFamily/IOHIDLibUserClient.cpp                # [both] uses compat/ipc/ipc_port.h
+IOHIDFamily/IOHIDUserDevice.cpp                   # [both] IOHIDUserDeviceCreate (virtual HID devices)
+IOHIDFamily/IOHIDResource.cpp                     # [both]
+IOHIDFamily/IOHIDResourceUserClient.cpp           # [both]
+IOHIDFamily/AppleUserHIDDevice.cpp                # [both] DriverKit HID device dexts
+IOHIDFamily/Cosmo_USB2ADB.c                       # [both]
+IOHIDSystem/IOHIDIO.cpp                           # [both]
+_gen/IOHIDFamily/HIDDriverKit/IOHIDDevice.iig.cpp      # [both]
+_gen/IOHIDFamily/HIDDriverKit/IOHIDInterface.iig.cpp   # [both]
+
+# --- HID report-descriptor parser (plain C)
+IOHIDSystem/IOHIDDescriptorParser/HIDGetButtonCaps.c          # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDGetCaps.c                # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDGetCollectionNodes.c     # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDGetValueCaps.c           # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDHasUsage.c               # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDMaxUsageListLength.c     # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDNextItem.c               # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDOpenCloseDescriptor.c    # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDParseDescriptor.c        # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDProcessCollection.c      # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDProcessGlobalItem.c      # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDProcessLocalItem.c       # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDProcessMainItem.c        # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDProcessReportItem.c      # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDUsageInRange.c           # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDCountDescriptorItems.c   # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDGetReportLength.c        # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDIsButtonOrValue.c        # [both]
+IOHIDSystem/IOHIDDescriptorParser/HIDCheckReport.c            # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDGetButtonsOnPage.c       # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDGetButtons.c             # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDGetUsageValue.c          # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDGetUsageValueArray.c     # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDGetNextUsageValueInfo.c  # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDGetNextButtonInfo.c      # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDGetData.c                # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDInitReport.c             # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDPostProcessRIValue.c     # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDPutData.c                # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDScaleUsageValue.c        # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDUsageListDifference.c    # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDUsageAndPageFromIndex.c  # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDSetUsageValueArray.c     # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDSetUsageValue.c          # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDSetScaledUsageValue.c    # [osx]
+IOHIDSystem/IOHIDDescriptorParser/HIDSetButtons.c             # [osx]
+
+# --- macOS legacy HID system (IOHIDSystem, NX events, IOHIKeyboard/IOHIPointing shims); replaces SweetHIDSystem.cpp
+IOHIDFamily/IOHIDActionQueue.cpp                  # [osx]
+IOHIDFamily/IOHIDConsumer.cpp                     # [osx]
+IOHIDFamily/IOHIDKeyboard.cpp                     # [osx]
+IOHIDFamily/IOHIDPointing.cpp                     # [osx]
+IOHIDSystem/IOHIDSystem.cpp                       # [osx]
+IOHIDSystem/IOHIDUserClient.cpp                   # [osx]
+IOHIDSystem/IOHIDSystemCursorHelper.cpp           # [osx]
+IOHIDSystem/IOHIDWorkLoop.cpp                     # [osx]
+IOHIDSystem/IOHIDevice.cpp                        # [osx]
+IOHIDSystem/IOHIKeyboard.cpp                      # [osx]
+IOHIDSystem/IOHIKeyboardMapper.cpp                # [osx]
+IOHIDSystem/IOHIPointing.cpp                      # [osx]
+IOHIDSystem/IOHITablet.cpp                        # [osx]
+IOHIDSystem/IOHITabletPointer.cpp                 # [osx]
+IOHIDSystem/IOHIDDeviceShim.cpp                   # [osx]
+IOHIDSystem/IOHIDKeyboardDevice.cpp               # [osx]
+IOHIDSystem/IOHIDPointingDevice.cpp               # [osx]
+IOHIDSystem/IOHIDKeyboardEventDevice.cpp          # [osx]
+IOHIDSystem/IOHIDPointingEventDevice.cpp          # [osx]
+IOHIDSystem/IOHIDPrivate.cpp                      # [osx]
+IOHIDSystem/IOFixed64.cpp                         # [osx]
+IOHIDSystem/IOFixedPoint64.cpp                    # [osx]
+
+# --- NOT built (see NOTES.md "Left out"):
+# BLOCKED, unpublished Apple-vendor usage tables (~30 constants used as switch cases; values not recoverable):
+#   IOHIDFamily/IOHIDEventDriver.cpp              [both] the generic HID-report event driver
+#   IOHIDFamily/IOHIDEventRepairDriver.cpp        [osx]  subclass of IOHIDEventDriver (compiles; link needs it)
+#   IOHIDFamily/AppleEmbeddedKeyboard.cpp         [both] subclass of IOHIDEventDriver (compiles; link needs it)
+#   IOHIDFamily/AppleUserHIDEventService.cpp      [both] subclass of IOHIDEventDriver (compiles; link needs it)
+# Not open source (header says "confidential and proprietary", and their headers are unpublished):
+#   IOHIDFamily/IOFastPath/IOFastPath{Service,HIDService,UserClient}.cpp
+#   IOHIDFamily/IOHIDComplexEventDriver/IOHID{ComplexEventDriver,ElementProcessor}.cpp
+# Not published at all (referenced by IOHIDFamily.xcodeproj):
+#   IOHIDEventServiceFastPathUserClient.cpp, IOHIDTimeSyncService.cpp, IOHIDBTCETimeSyncService.cpp,
+#   IOHIDTestTimeSyncService.cpp
+# Not part of the kext: IOHIDFamily/IOHIDUtility.cpp (user-space event-filter plug-ins only)

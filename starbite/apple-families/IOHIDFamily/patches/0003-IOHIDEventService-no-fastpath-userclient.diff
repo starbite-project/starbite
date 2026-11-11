@@ -1,0 +1,28 @@
+diff --git a/IOHIDFamily/IOHIDEventService.cpp b/IOHIDFamily/IOHIDEventService.cpp
+index 846b298..4545dcf 100644
+--- a/IOHIDFamily/IOHIDEventService.cpp
++++ b/IOHIDFamily/IOHIDEventService.cpp
+@@ -59,7 +59,10 @@
+ #include <stdatomic.h>
+ 
+ #include "IOHIDEventServiceUserClient.h"
++/* Starbite: IOHIDEventServiceFastPathUserClient.{h,cpp} are not published; built only when they are supplied. */
++#if IOHIDFAMILY_FASTPATH_USERCLIENT
+ #include "IOHIDEventServiceFastPathUserClient.h"
++#endif
+ 
+ extern "C" int  kern_stack_snapshot_with_reason(char *reason);
+ extern "C" kern_return_t sysdiagnose_notify_user(uint32_t keycode);
+@@ -2426,10 +2429,12 @@ IOReturn  IOHIDEventService::newUserClient (
+         
+         client = OSTypeAlloc(IOHIDEventServiceUserClient);
+     
++#if IOHIDFAMILY_FASTPATH_USERCLIENT
+     } else if (type == kIOHIDEventServiceFastPathUserClientType) {
+     
+         client = OSTypeAlloc(IOHIDEventServiceFastPathUserClient);
+     
++#endif /* Starbite: without it a fast-path open falls through to IOService (kIOReturnUnsupported) */
+     } else {
+     
+         return super::newUserClient(owningTask, securityID, type, properties, handler);

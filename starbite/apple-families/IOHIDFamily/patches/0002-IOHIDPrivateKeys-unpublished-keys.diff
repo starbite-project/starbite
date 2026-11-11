@@ -1,0 +1,117 @@
+diff --git a/IOHIDFamily/IOHIDPrivateKeys.h b/IOHIDFamily/IOHIDPrivateKeys.h
+index d411d30..6876f9b 100644
+--- a/IOHIDFamily/IOHIDPrivateKeys.h
++++ b/IOHIDFamily/IOHIDPrivateKeys.h
+@@ -215,6 +215,112 @@ typedef enum {
+ } IOHIDHomeButtonType;
+ 
+ 
++/*
++ * Starbite: keys the 2238.120.5 sources use but no published header defines. The string values are the ones
++ * Apple's own IOHIDFamily binary uses: read from the cstrings of the macOS 27.2 BootKernelCollection.kc next to
++ * the class that uses each key (IOHIDUserDevice, AppleUserHIDDevice, IOHIDDevice, IOHIDInterface,
++ * IOHIDLibUserClient, IOHIDEventService, IOHIDResourceDeviceUserClient, IOHIDEventDriver), in the order the
++ * source uses them. Userland (hidd, IOHIDLib, backboardd) and dexts read/write these names, so they must match.
++ */
++#ifndef kIOHIDDevicePrivilegedKey
++#define kIOHIDDevicePrivilegedKey               "Privileged"
++#endif
++#ifndef kIOHIDRegisterServiceKey
++#define kIOHIDRegisterServiceKey                "RegisterService"
++#endif
++#ifndef kIOHIDDKStartKey
++#define kIOHIDDKStartKey                        "HIDDKStart"
++#endif
++#ifndef kIOHIDMultipleInterfaceEnabledKey
++#define kIOHIDMultipleInterfaceEnabledKey       "MultipleInterfaceEnabled"
++#endif
++#ifndef kIOHIDSupportsIOFastPathKey
++#define kIOHIDSupportsIOFastPathKey             "SupportsIOFastPath"
++#endif
++#ifndef kIOHIDSpatialBluetoothAccessoryKey
++#define kIOHIDSpatialBluetoothAccessoryKey      "IsSpatialBluetoothHID"
++#endif
++#ifndef kIOHIDSupportsInputTopology
++#define kIOHIDSupportsInputTopology             "SupportsHIDInputTopology"
++#endif
++#ifndef kIOHIDUserDeviceSuspendKey
++#define kIOHIDUserDeviceSuspendKey              "IOHIDUserDeviceSuspend"
++#endif
++#ifndef kIOHIDRMDeviceStateKey
++#define kIOHIDRMDeviceStateKey                  "HIDRMDeviceState"
++#endif
++#ifndef kIOHIDDeviceTypeHintKey
++#define kIOHIDDeviceTypeHintKey                 "DeviceTypeHint"
++#endif
++#ifndef kIOHIDDeviceTypeHeadsetKey
++#define kIOHIDDeviceTypeHeadsetKey              "Headset"
++#endif
++#ifndef kIOHIDProtectedAccessKey
++#define kIOHIDProtectedAccessKey                "ProtectedAccess"
++#endif
++#ifndef kIOHIDExtendedDataKey
++#define kIOHIDExtendedDataKey                   "ExtendedData"
++#endif
++#ifndef kIOHIDDeviceGameControllerSupportKey
++#define kIOHIDDeviceGameControllerSupportKey    "GameControllerSupportedHIDDevice"
++#endif
++#ifndef kIOHIDDeviceForceInterfaceRematchKey
++#define kIOHIDDeviceForceInterfaceRematchKey    "IOHIDDeviceForceInterfaceRematch"
++#endif
++#ifndef kIOHIDTimeSyncEnabledKey
++#define kIOHIDTimeSyncEnabledKey                "TimeSyncEnabled"
++#endif
++#ifndef kIOHIDRequiresTCCAuthorizationKey
++#define kIOHIDRequiresTCCAuthorizationKey       "RequiresTCCAuthorization"
++#endif
++#ifndef kIOHIDEventDriverBlessedUsagePairsKey
++#define kIOHIDEventDriverBlessedUsagePairsKey   "BlessedUsagePairs"
++#endif
++#ifndef kIOHIDEventDriverBlessedUsagePageKey
++#define kIOHIDEventDriverBlessedUsagePageKey    "BlessedUsagePage"
++#endif
++#ifndef kIOHIDEventDriverBlessedUsageKey
++#define kIOHIDEventDriverBlessedUsageKey        "BlessedUsage"
++#endif
++#ifndef kIOHIDDigitizerCollectionDispatchKey
++#define kIOHIDDigitizerCollectionDispatchKey    "DigitizerCollectionDispatch"
++#endif
++#ifndef kIOHIDPrimaryVendorUsagesKey
++#define kIOHIDPrimaryVendorUsagesKey            "PrimaryVendorUsages"
++#endif
++/*
++ * Lists of property names (comma-separated C strings) that IOHIDEventService::setSystemProperties and
++ * IOHIDInterface::setProperty forward down to the HID device, and that IOHIDDevice::setProperty re-sends to its
++ * clients. Apple's lists are not published and cannot be recovered reliably from the binary; they are left empty,
++ * so nothing is forwarded. That only matters for real HID devices under IOHIDInterface (USB/BT HID), which the
++ * S9 build does not have.
++ */
++#ifndef kIOHIDPropagatePropertyKeys
++#define kIOHIDPropagatePropertyKeys
++#endif
++#ifndef kIOHIDDeviceMessagePropertyUpdateKeys
++#define kIOHIDDeviceMessagePropertyUpdateKeys
++#endif
++/*
++ * Private IOHIDLib open options. The bit values are not published; 0 means the option can never be seen, i.e.
++ * IOHIDLibUserClient keeps its default behaviour (drop reports while the client is suspended, honour task suspend).
++ */
++#ifndef kIOHIDOptionsPrivateTypeNoDroppedReports
++#define kIOHIDOptionsPrivateTypeNoDroppedReports  0u
++#endif
++#ifndef kIOHIDOptionsPrivateTypeIgnoreTaskSuspend
++#define kIOHIDOptionsPrivateTypeIgnoreTaskSuspend 0u
++#endif
++/* HID "restricted mode" (accessory approval) state: compared only inside the kernel, any distinct values do. */
++#ifndef kHIDRMDeviceStateUnknown
++typedef enum {
++    kHIDRMDeviceStateUnknown   = 0,
++    kHIDRMDeviceStateApproving = 1,
++    kHIDRMDeviceStateAllowed   = 2,
++    kHIDRMDeviceStateDenied    = 3,
++} HIDRMDeviceState;
++#endif
++
+ __END_DECLS
+ 
+ #endif /* !_IOKIT_HID_IOHIDPRIVATEKEYS_H_ */
