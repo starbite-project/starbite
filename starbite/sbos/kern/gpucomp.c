@@ -819,13 +819,16 @@ static void make_comp2_scene(void)
         }
     /* the lens card's map, as the toolkit makes one for a rounded box: the distance in, the inward offset */
     uint32_t *lm = POOL_CPU(LENS_CARD);
+    lens_cls lc = lens_class(600 / LENS_PT, 300 / LENS_PT, 40 / LENS_PT);
     for (unsigned y = 0; y < 300U; ++y)
         for (unsigned x = 0; x < 600U; ++x) {
             float px = (float)x + .5f, py = (float)y + .5f, sd = sd_rr(px, py, 600, 300, 40);
             float gx = sd_rr(px + .5f, py, 600, 300, 40) - sd_rr(px - .5f, py, 600, 300, 40);
             float gy = sd_rr(px, py + .5f, 600, 300, 40) - sd_rr(px, py - .5f, 600, 300, 40);
-            float d = sd < 0 ? -sd : 0, o = lens_disp(d, LENS_B);
-            lm[y * 600U + x] = sd < .5f ? lens_word(.5f - sd, -gx * o, -gy * o, d) : 0;
+            float gl = lens_sqrt(gx * gx + gy * gy), ox, oy, e;
+            if (gl > 1e-6f) { gx /= gl; gy /= gl; }
+            lens_at(&lc, (sd < 0 ? -sd : 0) / LENS_PT, gx, gy, &ox, &oy, &e);
+            lm[y * 600U + x] = sd < .5f ? lens_word(.5f - sd, ox, oy, e) : 0;
         }
     uint32_t *pl = POOL_CPU(TEX_PILL);
     for (unsigned y = 0; y < 60U; ++y)
@@ -905,13 +908,13 @@ static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
             int iu = (int)u, iv = (int)v;
             if ((q->flags & (GC_GLASS | GC_LENS)) == (GC_GLASS | GC_LENS)) {
                 uint32_t M = ((const uint32_t *)q->mask)[(unsigned)iv * q->mstride + (unsigned)iu];
-                float cov, ox, oy, d, bc[4], rgb[3];
-                lens_unword(M, &cov, &ox, &oy, &d);
+                float cov, ox, oy, e, rgb[3];
+                lens_unword(M, &cov, &ox, &oy, &e);
                 ox *= .5f / q->bk;              /* v7: the lens's scale (1 at full resolution, .5 in a half frame) */
                 oy *= .5f / q->bk;
                 float m = cov * al;
                 if (m > 0) {
-                    /* comp2's lens_px: green bilinear at p + o, red and blue nearest at o x (1 +- D) */
+                    /* comp2's lens_px: the backdrop bilinear at p + o, the tone, the light */
                     float uu = (fx + ox) * q->bk - .5f, vv = (fy + oy) * q->bk - .5f, u0 = fl(uu), v0 = fl(vv);
                     float tu = uu - u0, tv = vv - v0, t[4][4];
                     for (int k = 0; k < 4; ++k)
@@ -920,13 +923,7 @@ static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
                         float top = t[0][c] + (t[1][c] - t[0][c]) * tu, bot = t[2][c] + (t[3][c] - t[2][c]) * tu;
                         rgb[c] = top + (bot - top) * tv;
                     }
-                    fetch_c((const uint32_t *)q->bd, q->bstride, (int)q->bw, (int)q->bh, (int)fl((fx + ox * (1 + LENS_D)) * q->bk),
-                            (int)fl((fy + oy * (1 + LENS_D)) * q->bk), bc);
-                    rgb[0] = bc[0];
-                    fetch_c((const uint32_t *)q->bd, q->bstride, (int)q->bw, (int)q->bh, (int)fl((fx + ox * (1 - LENS_D)) * q->bk),
-                            (int)fl((fy + oy * (1 - LENS_D)) * q->bk), bc);
-                    rgb[2] = bc[2];
-                    lens_shade(rgb, ox, oy, d);
+                    lens_shade(rgb, e);
                     for (int c = 0; c < 3; ++c)
                         acc[c] = acc[c] + (rgb[c] - acc[c]) * m;
                     acc[3] = acc[3] + (1 - acc[3]) * m;
