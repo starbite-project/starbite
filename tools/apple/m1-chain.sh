@@ -13,7 +13,7 @@ set -eu
 cd "$(dirname "$0")/../.."
 payload=$1 out=$2 wdt=${3:-60}
 [ "$payload" = --read ] || head -c 8 "$payload" | grep -q SWEETXNU || { echo "$payload: not a SWEETXNU payload"; exit 1; }
-work=build/apple-chain
+work=build/apple-chain-$$          # a new folder per run: the VM's view of a just-deleted one can be stale
 rm -rf "$work"; mkdir -p "$work"
 cp -R shim "$work/shim"
 rm -rf "$work/shim/starlte/out"

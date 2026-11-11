@@ -1452,14 +1452,13 @@ static void crumbs_handoff(const struct payload *p, uintptr_t rd_start, uint64_t
     pmsg_put(bad ? " SEGMENT COPY MISMATCH\n" : " segments ok\n");
 }
 
-#ifdef STAR_CHAIN_AUTOBOOT
-/* The previous run's crumb page, into pmsg (the chained loader runs this before its own payload). */
+/* The previous test run's crumb page, into pmsg, once: every loader start runs this (prepare), and the page's
+ * magic is cleared after printing, so a page is printed by exactly one start. */
 static void crumbs_print_previous(void)
 {
     volatile uint64_t *c = (volatile uint64_t *)CRUMB_PA;
     if (c[0] != CRUMB_MAGIC) {
-        pmsg_put("STARBITE: crumbs: no earlier run on record\n");
-        return;
+        return;                                   /* no test run on record: nothing to say */
     }
     /* names as one flat array: no pointers, no absolute relocations in the loader */
     static const char name[15][16] = { "magic", "run", "payload", "length", "version", "ram", "ram-size",
@@ -1475,6 +1474,8 @@ static void crumbs_print_previous(void)
     volatile uint64_t *x = c + 0x100 / 8;
     if (x[0] != CRUMB_XMAGIC) {
         pmsg_put("STARBITE: crumbs: XNU wrote none (it did not get past arm_vm_init, or it was not an sbstop boot)\n");
+        c[0] = 0;
+        clean_bytes(CRUMB_PA, CRUMB_PA + PAGE_SIZE);
         return;
     }
     uint64_t k = x[1];
@@ -1490,8 +1491,10 @@ static void crumbs_print_previous(void)
         pmsg_hex(e[1]);
         pmsg_put("\n");
     }
+    c[0] = 0;                                     /* printed: this page is not printed again */
+    x[0] = 0;
+    clean_bytes(CRUMB_PA, CRUMB_PA + PAGE_SIZE);
 }
-#endif
 
 /* Copy XNU's segments, ADT and boot_args into its window; returns the entry PA or 0. */
 static uintptr_t
@@ -2290,6 +2293,7 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
     boot_el = el;
     boot_sctlr = sctlr;
     star_dump_latches();
+    crumbs_print_previous();
     /* The boot-next keys the loader itself takes (mailbox cleared at once): rescue, and Starbite
      * Maintenance's maint / maint-prev / maint-rescue (docs/MAINTENANCE.md 4.2 R2). */
     int next = rec_next_take();
@@ -2320,7 +2324,6 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
      * stub's dead-man (pack.py --wdt) keeps running into the OS, which must not feed it (XNU: sbstop=).
      * If the payload cannot start, the normal menu of this loader follows.
      */
-    crumbs_print_previous();
     if (boot_p) {
         static struct cat_ent t;
         lscopy(t.key, sizeof(t.key), "chaintest");
@@ -2334,8 +2337,14 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
             return entry;
         pmsg_put("STARBITE: chain test loader: the appended payload did not start; menu\n");
     } else {
-        /* a crumb reader (tools/apple/m1-chain.sh --read): print, then straight back to the BOOT loader */
-        pmsg_put("STARBITE: chain test loader: no appended payload: crumbs printed, back to the BOOT loader\n");
+        /* A crumb reader (tools/apple/m1-chain.sh --read): the crumbs were printed at this start (above, in
+         * prepare). Then the BOOT loader in its fastboot mode (boot-next "fastboot"), so nothing starts
+         * automatically and the Mac reaches the phone (`fastboot oem log pmsg`). */
+        pmsg_put("STARBITE: chain test loader: no appended payload: crumbs printed; BOOT loader in fastboot next\n");
+        rec_mailbox_write("fastboot");
+        clean_bytes(PMSG_BASE, PMSG_BASE + 0x4000UL);
+        for (volatile unsigned d = 0; d < 20000000U; ++d)
+            ;
         hw_reboot(INFORM_NORMAL);
     }
 #endif
