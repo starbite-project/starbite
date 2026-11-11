@@ -1556,6 +1556,35 @@ static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int da
     tk_fill_rrect(d->b, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), &p, 1);
     tk_glass_bake(d->b, 0, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), dark, 1);
 }
+/* P3p (P3j-13): a pushed page's nav row, as iOS 26: a 44 pt glass circle at the leading edge with the back chevron
+ * (no text), the title inline (17 pt / 600) centred. The circle's glass is baked once (init; 300 KB) and copied. */
+static tk_bmp backbmp;
+static float back_ox, back_oy;
+#define BACK_X MARGIN
+#define BACK_D 44.0f
+#define BACK_HIT(x, y) (IN_NAV(y) && (x) < BACK_X + BACK_D + 12)
+static void back_bake(void)
+{
+    if (backbmp.px) return;
+    float mg = 20;
+    back_ox = tk_floorf(PT(BACK_X - mg));
+    back_oy = tk_floorf(PT(SAFE_TOP - mg));
+    if (!tk_bmp_new(&backbmp, (int)PT(BACK_D + 2 * mg) + 2, (int)PT(BACK_D + 2 * mg) + 2)) return;
+    dc d = { &backbmp, 0, back_ox, back_oy };
+    d_lg_flat(&d, BACK_X, SAFE_TOP, BACK_D, BACK_D, BACK_D / 2, 1);
+}
+static void d_back(dc *d, tk_col chev)
+{
+    back_bake();
+    if (backbmp.px) tk_blit(d->b, &backbmp, (int)(back_ox - d->ox), (int)(back_oy - d->oy), 1);
+    const tk_bmp *ic = tk_icon("back");
+    if (ic) tk_blit_tinted(d->b, ic, (int)tk_floorf(PT(BACK_X + BACK_D / 2 - 7) - tk_icon_pad("back") - d->ox + .5f),
+                           (int)tk_floorf(PT(NAV_MID - 10) - tk_icon_pad("back") - d->oy + .5f), chev);
+}
+static void d_navtitle(dc *d, const char *t)
+{
+    d_text_box(d, TK_IT600, 17, 195, NAV_BASE, 390 - 2 * (BACK_X + BACK_D + 10), 1, t, 0, 0, INK, 0);
+}
 static void d_h1(dc *d, const char *t) { d_text_box(d, TK_IT700, 34, MARGIN, LARGE_BASE, CONTENT_W, 0, t, 0, 0, INK, 0); }   /* P3j: iOS's Large Title, Bold; P3p: in its row */
 static tk_col ACCENT(void) { return tk_hex(0x6fb3ff, 1); }
 /* a .row with an avatar: the name, an optional second line, the right-hand text, an optional unread dot */
@@ -1668,19 +1697,16 @@ static void page_messages(dc *d)
         return;
     }
     const thread_t *th = &THREADS[AS.thread];
-    d_icon(d, "back", 18, 53, 1);
-    d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Messages", 0, 0, ACCENT(), 0);
-    d_av(d, 169, 60, 52, th->n, 18);
-    float w = tw(TK_IT600, 13, th->n, 0, 0);
-    d_text(d, TK_IT600, 13, (390 - w) / 2, bl(TK_IT600, 13, 116), th->n, 0, 0, INK, 0);
-    w = tw(TK_IT400, 12, "Today 20:55", 0, 0);
-    d_text(d, TK_IT400, 12, (390 - w) / 2, bl(TK_IT400, 12, 142), "Today 20:55", 0, 0, W(.45f), 0);
+    d_back(d, W(1));                               /* P3p (P3j-13): the glass back, the name inline */
+    d_navtitle(d, th->n);
+    float w = tw(TK_IT400, 12, "Today 20:55", 0, 0);
+    d_text(d, TK_IT400, 12, (390 - w) / 2, bl(TK_IT400, 12, PUSHED_TOP), "Today 20:55", 0, 0, W(.45f), 0);
     static const char *const AINO[3] = { "Hey! Did the big-core thing work?", "Getting closer, three tests passed tonight",
                                          "Are you bringing the phone tomorrow?" };
     static const char *const MUM[2] = { "Good luck with the exam!", "Thanks" };
     const char *const *msg = AS.thread == 0 ? AINO : AS.thread == 1 ? MUM : 0;
     int nm = AS.thread == 0 ? 3 : AS.thread == 1 ? 2 : 1;
-    float y = 167;
+    float y = PUSHED_TOP + 26;
     for (int i = 0; i < nm; i++) {
         const char *s = msg ? msg[i] : "Hi!";
         int out = i % 2 == 1;
@@ -2075,19 +2101,27 @@ static void page_calendar(dc *d)
 }
 
 /* P3d: Settings > Display & Brightness: iOS's brightness bar (a tap sets the panel's level 1..4) */
+#define DSP_Y 150.0f                         /* P3p: its group (where Wi-Fi's and Cellular's start) */
+#define DSP_TX (GROUP_X + 42)                /* the track */
+#define DSP_TW (GROUP_W - 84)
 static void page_display(dc *d)
 {
-    d_icon(d, "back", 18, 53, 1);
-    d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Settings", 0, 0, ACCENT(), 0);
-    d_text(d, TK_IT700, 30, 20, bl(TK_IT700, 30, 96), "Display & Brightness", 0, 0, INK, 0);
-    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 162), "BRIGHTNESS", .52f, 0, W(.55f), 0);
-    d_rrect(d, GROUP_X, 184, GROUP_W, 64, 16, tk_hex(0x151c33, 1));
+    /* P3p (P3j-13): the inline title and the glass back; iOS's slider (a 6 pt track, a 28 pt knob) between the dim
+     * and the bright sun, the group where the other Settings pages start theirs */
+    d_back(d, W(1));
+    d_navtitle(d, "Display & Brightness");
+    d_text(d, TK_IT400, 13, ROW_TX, DSP_Y - 10, "BRIGHTNESS", .52f, 0, W(.55f), 0);
+    d_rrect(d, GROUP_X, DSP_Y, GROUP_W, 64, 16, tk_hex(0x151c33, 1));
     int lv = cc_bright ? cc_bright : 3;
-    d_rrect(d, 60, 208, 270, 16, 8, W(.18f));
-    d_rrect(d, 60, 208, 270.0f * lv / 4, 16, 8, W(.95f));
-    d_icon(d, "cc-sun", 26, 202, .6f);
-    d_icon(d, "cc-sun", 340, 200, 1);
-    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 262), "Four steps, as the Control Centre's slider.", 0, 0, W(.45f), 0);
+    float kx = DSP_TX + DSP_TW * lv / 4, cy = DSP_Y + 32;
+    d_rrect(d, DSP_TX, cy - 3, DSP_TW, 6, 3, W(.18f));
+    d_rrect(d, DSP_TX, cy - 3, kx - DSP_TX, 6, 3, W(.95f));
+    kx = tk_clampf(kx, DSP_TX + 14, DSP_TX + DSP_TW - 14);
+    tk_box_shadow(d->b, PT(kx - 14) - d->ox, PT(cy - 14) - d->oy, PT(28), PT(28), PT(14), 0, PT(2), PT(8), 0, TK_RGBA(0, 0, 0, .3f), 0);
+    d_rrect(d, kx - 14, cy - 14, 28, 28, 14, W(1));
+    d_icon(d, "cc-sun", GROUP_X + 10, cy - 11, .5f);
+    d_icon(d, "cc-sun", DSP_TX + DSP_TW + 8, cy - 11, 1);
+    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, DSP_Y + 64 + 8), "Four steps, as the Control Centre's slider.", 0, 0, W(.45f), 0);
 }
 
 /* ---- P3e: Notes with an iOS keyboard. The list (each note's first line), New, and the editor: the text with a
@@ -2178,8 +2212,7 @@ static void page_notes(dc *d)
         }
         return;
     }
-    d_icon(d, "back", 18, 53, 1);
-    d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Notes", 0, 0, tk_hex(0xffd60a, 1), 0);
+    d_back(d, tk_hex(0xffd60a, 1));                /* P3p (audit 13): Notes' yellow, on the glass circle */
     kb_draw(d, NS.shift, NS.num);
 }
 static void build_note(void)
@@ -2187,12 +2220,12 @@ static void build_note(void)
     relayer(&apnote);
     if (!NS.view || !is_app("notes")) { apnote.hidden = 1; return; }
     const char *t = NOTES[NS.cur];
-    dc d = mk(&apnote, "note-text", 16, 92, 358, 440, 0, 0);
+    dc d = mk(&apnote, "note-text", MARGIN - 4, PUSHED_TOP - 12, CONTENT_W + 8, 532 - PUSHED_TOP, 0, 0);
     /* the lines: the text's own line breaks, then words wrapped at 350 pt (17 pt, 24 pt lines), the caret after */
     char line[NOTELEN + 2];
-    float y = 100;
+    float y = PUSHED_TOP;
     int i = 0, n = (int)tk_strlen(t);
-    float cx = 20, cy = 100;
+    float cx = 20, cy = PUSHED_TOP;
     while (i <= n && y < 520) {
         int k = 0, lastsp = -1, start = i;
         while (i < n && t[i] != '\n') {
@@ -2231,7 +2264,7 @@ static void notes_tap(float x, float y)
         build_app_page(AP.a);
         return;
     }
-    if (y >= 40 && y < 86 && x < 120) {               /* back: an empty note is dropped */
+    if (BACK_HIT(x, y)) {                             /* back: an empty note is dropped */
         if (!NOTES[NS.cur][0]) {
             for (int i = NS.cur; i + 1 < NS.n; i++) tk_memcpy(NOTES[i], NOTES[i + 1], NOTELEN);
             NS.n--;
@@ -3007,9 +3040,9 @@ static void app_tap(float x, float y)
     } else if (is_app("settings") && AS.sub == 3) {
         cell_tap(x, y);
     } else if (is_app("settings") && AS.sub) {
-        if (x < 120 && y >= 40 && y < 86) { AS.sub = 0; build_app_page(AP.a); return; }
-        if (y >= 184 && y < 248 && x >= 40 && x < 350) {
-            int lv = 1 + (int)tk_clampf((x - 60) / 270 * 4, 0, 3.999f);
+        if (BACK_HIT(x, y)) { AS.sub = 0; build_app_page(AP.a); return; }
+        if (y >= DSP_Y && y < DSP_Y + 64 && x >= GROUP_X && x < CONTENT_R) {
+            int lv = 1 + (int)tk_clampf((x - DSP_TX) / DSP_TW * 4, 0, 3.999f);
             if (lv != cc_bright) { cc_bright = lv; sh_brightness(lv); CCS.lvl[0] = (lv - .5f) / 4; if (CCS.built) cc_levels(); }
             build_app_page(AP.a);
         }
@@ -3022,7 +3055,7 @@ static void app_tap(float x, float y)
     } else if (is_app("messages")) {
         if (AS.thread < 0) {
             (void)x; (void)y;                         /* P2y: no conversations (no SIM): nothing to open */
-        } else if (x < 120 && y >= 40 && y < 86) {
+        } else if (BACK_HIT(x, y)) {
             AS.thread = -1;
             build_app_page(AP.a);
         }
@@ -3282,7 +3315,7 @@ int sh_init_step(void)
         break;
     case 2: case 3: case 4: case 5: case 6: build_card(init_step - 3); lap("bake: a card"); break;
     case 7: build_etool(); build_hold(0); build_hold(1); build_empill(); lap("bake: tools and holds"); break;
-    case 8: build_home(); lap("bake: home"); break;
+    case 8: build_home(); back_bake(); lap("bake: home"); break;
     case 9: {
         /* the flattened lock is only ever seen moving (half-resolution frames): kept at half resolution, drawn 2x */
         tk_bmp_new(&lockflat.bmp, TK_W / 2, TK_H / 2);
@@ -3584,7 +3617,12 @@ static void app_press(float x, float y)
     float rad = 0;
     tk_col c = W(.1f);
     int ok = 0;
-    if (is_app("settings") && !AS.sub) {
+    int pushed = (is_app("settings") && AS.sub && !(AS.sub == 2 && WV.view == 1)) || (is_app("messages") && AS.thread >= 0) ||
+                 (is_app("notes") && NS.view);
+    if (pushed && BACK_HIT(x, y)) {
+        r = g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D };   /* the glass back lights */
+        rad = BACK_D / 2; c = W(.16f); ok = 1;
+    } else if (is_app("settings") && !AS.sub) {
         const appdef *A = &APPS[AP.a];
         for (int s = 0; s < A->ns && !ok; s++)
             for (int i = 0; i < A->sec[s].n && !ok; i++) {
