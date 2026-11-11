@@ -1556,6 +1556,26 @@ static void build_app_page(int a)
     tk_layer_prepare(&appst[0]);
     relink();
 }
+/* P2x: the app's icon over the window while it is small (iOS: the icon grows into the app and the app shrinks back
+ * into its icon, so a closing window never ends as an empty tile); a view into the pack, never freed */
+static tk_layer apicon;
+static void place_apicon(arect R, float p)
+{
+    char nm[24] = "a62-";
+    const char *k = APPS[AP.a].k;
+    tk_memcpy(nm + 4, k, tk_strlen(k) + 1);
+    const tk_bmp *ic = tk_icon(nm);
+    float a = 1 - tk_clampf(p * 3, 0, 1);
+    if (!ic || !AP.on || a <= 0) { apicon.hidden = 1; return; }
+    if (apicon.bmp.px != ic->px) { tk_layer_dirty(&apicon); apicon.bmp = *ic; }
+    float sx = R.w / 62, pad = tk_icon_pad(nm);
+    apicon.sx = apicon.sy = sx;
+    apicon.ox = apicon.oy = 0;
+    apicon.x = (PT(R.x) - pad * sx) / sx;
+    apicon.y = (PT(R.y + (R.h - R.w) / 2) - pad * sx) / sx;    /* centred in a window still taller than wide */
+    apicon.alpha = a;
+    apicon.hidden = 0;
+}
 static void set_app_rect(arect R)
 {
     AP.R = R;
@@ -1578,6 +1598,7 @@ static void set_app_rect(arect R)
     home.sx = home.sy = 1 + .05f * p;
     home.alpha = 1 - .4f * tk_clampf(p, 0, 1);
     appg.hidden = !AP.on;
+    place_apicon(R, p);
 }
 static arect icon_rect(int a)
 {
@@ -1636,6 +1657,7 @@ static void app_finish_close(void)
 {
     AP.on = AP.closing = 0;
     appg.hidden = 1;
+    apicon.hidden = 1;
     /* the page (a whole screen) is not kept: the next open draws it again */
     for (int i = 0; i < NST; i++) relayer(&appst[i]);
     relayer(&apnum);
@@ -2045,8 +2067,8 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 }
 static void relink(void)
 {
-    tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
-    link(&root, r, 13);
+    tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
+    link(&root, r, 14);
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum };
     link(&appg, ag, 4);
     tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
@@ -2097,6 +2119,8 @@ void sh_init_begin(tk_comp *c)
     apkey.hidden = 1;
     tk_layer_init(&apnum, "dial");
     apnum.hidden = 1;
+    tk_layer_init(&apicon, "app-icon");
+    apicon.hidden = 1;
     tk_layer_init(&toastl, "toast");
     toastl.hidden = 1;
     tk_layer_init(&cfl, "confirm");
