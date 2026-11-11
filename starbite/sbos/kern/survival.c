@@ -567,11 +567,13 @@ const char *surv_last2_why(void)
     return last2_why;
 }
 
+static int last2_force;                     /* the self test: the charging refusal skipped (it runs on the cable) */
+
 int surv_last2_set(int on, const char *why)
 {
     if (!on == !last2)
         return 0;
-    if (on) {
+    if (on && !last2_force) {
         struct sbos_battery b;
         battery_get(&b);
         if (b.ok && b.charger) {
@@ -748,12 +750,13 @@ void surv_unpack(const uint8_t in[16])
 static int st_phase;
 static uint64_t st_t;
 static unsigned st_fails;
+static const char *st_first_fail;           /* named again in the last line: pmsg may keep only the run's end */
 
 static void st_check(const char *what, int ok)
 {
     sb_logf(ok ? "selftest: survival: passed: " : "selftest: survival: FAILED: ", what);
-    if (!ok)
-        ++st_fails;
+    if (!ok && !st_fails++)
+        st_first_fail = what;
 }
 
 static void st_sun(const char *place, int32_t lat, int32_t lon, int y, int mo, int d, int off, int er, int es, int ec)
@@ -778,8 +781,8 @@ static void st_sun(const char *place, int32_t lat, int32_t lon, int y, int mo, i
     int ok = c == ec && (c != 0 || ((r - er < 0 ? er - r : r - er) <= 3 && (s - es < 0 ? es - s : s - es) <= 3));
     ub_s(&u, ok ? " (as expected)" : " (NOT as expected)");
     sb_log(u.b);
-    if (!ok)
-        ++st_fails;
+    if (!ok && !st_fails++)
+        st_first_fail = "the sun table (a NOT as expected line)";
 }
 
 int surv_selftest_step(void)
@@ -869,8 +872,19 @@ int surv_selftest_step(void)
         return 0;
     }
     case 3:
-        /* Last 2 %: on (the A55 to 455 MHz), checked, off */
+        /* Last 2 %: on (the A55 to 455 MHz), checked, off. The self test runs on the USB cable, where Last 2 % is
+         * refused (1.2-alpha28): that refusal is checked, then the mode itself is entered past it */
+        {
+            struct sbos_battery b;
+            battery_get(&b);
+            if (b.ok && b.charger) {
+                int r = surv_last2_set(1, "the self test (charging: expect a refusal)");
+                st_check("Last 2 % refused while charging, with a reason", r < 0 && surv_last2_why() && !surv_last2());
+            }
+        }
+        last2_force = 1;
         surv_last2_set(1, "the self test");
+        last2_force = 0;
         sb_mdelay(20);
         sb_logx("selftest: survival: A55 kHz in Last 2 %: ", hw_a55_khz());
         st_check("Last 2 % on: the A55 at its lowest step", hw_a55_khz() > 0 && hw_a55_khz() <= 470000U);
@@ -931,6 +945,8 @@ int surv_selftest_step(void)
         st_check("the sensor hub off again", surv_sensors_state() == SHUB_OFF);
         sb_logx(st_fails ? "selftest: survival: done, FAILED checks: " : "selftest: survival: done, every check passed ",
                 st_fails);
+        if (st_fails)
+            sb_logf("selftest: survival: the first failed check: ", st_first_fail ? st_first_fail : "(not named)");
         st_phase = 6;
         return 1;
     }
