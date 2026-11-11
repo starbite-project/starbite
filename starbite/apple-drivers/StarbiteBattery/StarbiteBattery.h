@@ -10,6 +10,8 @@
  *   sbbattest=1       log every sample (PHONE-TEST.md M11)
  *   sbbatload=S       test: after a 10 s baseline, busy every CPU for S s (max 60), then the M11 verdict line
  *   sbstop=battery    0423 self-stop after the verdict (or after the first sample without sbbatload)
+ *   sbchgwdt=0        do not clear the charger watchdog (default: cleared every 30 s, the driver's ONE write)
+ *   sbchgtest=S       M11b: after S s log whether charging held on the cable the whole time (no self-stop)
  */
 #ifndef STARBITE_BATTERY_H
 #define STARBITE_BATTERY_H
@@ -35,7 +37,14 @@ private:
 	vm_address_t fBase;
 	IOWorkLoop *fLoop;
 	IOTimerEventSource *fTimer;
-	bool fTimerAdded, fRunning, fReal, fTestLog;
+	IOTimerEventSource *fKickTimer;
+	bool fTimerAdded, fKickAdded, fRunning, fReal, fTestLog, fKick, fKickLogged;
+	uint32_t fKicks, fKickFails;
+	/* M11b */
+	uint32_t fChgTestS;
+	bool fChgHeld, fChgDone;
+	uint64_t fChgBadT;
+	int32_t fChgBadDtls;
 	struct hsi2c fBus;
 	struct hsi2c_io fIo;
 	struct max77705_bus fGauge;
@@ -55,6 +64,9 @@ private:
 	void poll(void);
 	void testStep(uint64_t now_s);
 	static void timerFired(OSObject *owner, IOTimerEventSource *sender);
+	static void kickFired(OSObject *owner, IOTimerEventSource *sender);
+	void chgTestStep(uint64_t now_s);
+	static int gaugeWrite(void *ctx, uint8_t addr7, uint8_t reg, uint8_t value);
 	static IOReturn stopPolling(OSObject *owner, void *, void *, void *, void *);
 
 	static uint32_t ioRd(void *ctx, uint32_t off);

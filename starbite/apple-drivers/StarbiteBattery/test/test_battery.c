@@ -33,8 +33,23 @@ static struct {
 	unsigned nack_next;
 	/* checks */
 	unsigned long_writes, clear_on_read, msgs, rs_reads, resets;
+	unsigned writes, bad_writes;    /* 2-byte register writes; any not 0x69:0xbd with WDTCLR = 01 is bad */
+	uint8_t last_write;
 	uint64_t now;
+	/* the charger's watchdog (S-Boot enables it: CNFG_00 WDTEN) */
+	uint64_t wdt_last;
+	bool wdt_expired;
 } b;
+
+#define MOCK_CHG_WDT_US 80000000ull     /* a mock timeout; the real one is unknown (NOTES.md) */
+
+static void
+chg_wdt_update(void)
+{
+	if ((b.chg[CHG_CNFG_00] & CHG_CNFG_00_WDTEN) && !b.wdt_expired && b.now - b.wdt_last > MOCK_CHG_WDT_US) {
+		b.wdt_expired = true;           /* sticky, stricter than the chip: the clear must come in time */
+	}
+}
 
 #define REG(o) b.reg[(o) / 4]
 
@@ -85,10 +100,15 @@ start(void)
 				uint16_t w = b.fg[(uint8_t)(b.ptr_fg + i / 2)];
 				v = (uint8_t)(i & 1 ? w >> 8 : w);
 			} else {
-				if ((uint8_t)(b.ptr_chg + i) == CHG_INT) {
+				uint8_t r = (uint8_t)(b.ptr_chg + i);
+				if (r == CHG_INT) {
 					b.clear_on_read++;
 				}
-				v = b.chg[(uint8_t)(b.ptr_chg + i)];
+				chg_wdt_update();
+				v = b.chg[r];
+				if (r == CHG_DETAILS_01 && b.wdt_expired) {
+					v = (uint8_t)((v & 0xf0u) | 0x0bu);        /* CHG_DTLS: watchdog expired */
+				}
 			}
 			b.rx[b.rx_n++ % 64] = v;
 		}
@@ -104,8 +124,24 @@ tx_byte(uint8_t v)
 	}
 	b.txbuf[b.got++ % 64] = v;
 	if (b.got == b.count) {
+		if (b.count == 2) {             /* a register write */
+			b.writes++;
+			b.last_write = b.txbuf[1];
+			if (b.addr != MAX77705_CHG_ADDR || b.txbuf[0] != CHG_CNFG_06 || (b.txbuf[1] & 3u) != 1u ||
+			    (b.txbuf[1] & 0xf0u)) {
+				b.bad_writes++;
+			} else {
+				chg_wdt_update();
+				if (!b.wdt_expired) {
+					b.wdt_last = b.now;
+				}
+				b.chg[CHG_CNFG_06] = b.txbuf[1] & 0x0cu;      /* WDTCLR reads back 0 */
+			}
+			complete(0x80);
+			return;
+		}
 		if (b.count != 1) {
-			b.long_writes++;        /* a register write: must never happen */
+			b.long_writes++;
 		}
 		if (b.addr == MAX77705_FG_ADDR) {
 			b.ptr_fg = b.txbuf[0];
@@ -184,7 +220,15 @@ bus_read(void *ctx, uint8_t addr7, uint8_t reg, uint8_t *buf, unsigned len)
 	return hsi2c_read_reg(&h, addr7, reg, buf, len);
 }
 
-static const struct max77705_bus bus = { NULL, bus_read };
+static int
+bus_write(void *ctx, uint8_t addr7, uint8_t reg, uint8_t value)
+{
+	(void)ctx;
+	return hsi2c_write_reg(&h, addr7, reg, value);
+}
+
+static const struct max77705_bus bus = { NULL, bus_read, bus_write };
+static const struct max77705_bus bus_ro = { NULL, bus_read, NULL };
 
 static void
 model(void)
@@ -210,6 +254,8 @@ model(void)
 	b.chg[CHG_DETAILS_00] = 0x00;
 	b.chg[CHG_DETAILS_01] = 0x38;           /* BAT_DTLS 3 (ok), CHG_DTLS 8 (off) */
 	b.chg[CHG_INT] = 0x55;
+	b.chg[CHG_CNFG_00] = 0x15;              /* as S-Boot leaves it: charge mode + WDTEN */
+	b.chg[CHG_CNFG_06] = 0x0c;              /* CHGPROT unlocked (example) */
 	memset(&h, 0, sizeof(h));
 	hsi2c_init(&h, &io);
 }
@@ -278,7 +324,7 @@ t_discharging(void)
 	CHECK(st.minutes_to_empty == 180 && st.minutes_to_full == -1);
 	CHECK(!st.critical && !st.warn);
 	CHECK(b.rs_reads > 0);                  /* repeated starts used */
-	CHECK(b.long_writes == 0 && b.clear_on_read == 0);
+	CHECK(b.long_writes == 0 && b.clear_on_read == 0 && b.writes == 0);
 	CHECK(h.errors == 0);
 }
 
@@ -316,7 +362,7 @@ t_charging(void)
 	max77705_sample(&bus, &raw);
 	max77705_state(&raw, &st, &low);
 	CHECK(st.measured && st.charging && st.external && st.chg_dtls == -1);
-	CHECK(b.clear_on_read == 0 && b.long_writes == 0);
+	CHECK(b.clear_on_read == 0 && b.long_writes == 0 && b.writes == 0);
 }
 
 static void
@@ -441,6 +487,108 @@ t_bus_quirks(void)
 	CHECK(hsi2c_msg(&h, 0x36, true, &x, 0, true) != 0);
 }
 
+static void
+charging_model(void)
+{
+	model();
+	b.chg[CHG_INT_OK] = 0x5f;
+	b.chg[CHG_DETAILS_00] = 0x60;
+	b.chg[CHG_DETAILS_01] = 0x31;
+	b.fg[FG_CURRENT] = b.fg[FG_AVGCURRENT] = 3200;
+}
+
+/* minutes on the cable, a sample every 30 s, the clear every kick_s (0 = never); returns the first expired sample
+ * (or 0), counts the samples that were charging */
+static unsigned
+run_cable(unsigned minutes, unsigned kick_s, unsigned *charging)
+{
+	struct max77705_raw raw;
+	struct battery_state st;
+	uint32_t low = 0;
+	uint64_t next_kick = 0;
+	unsigned first_bad = 0;
+	*charging = 0;
+	for (unsigned i = 1; i <= minutes * 2; i++) {
+		if (kick_s && b.now >= next_kick) {
+			CHECK(max77705_wdt_kick(&bus, NULL) == MAX77705_KICK_OK);
+			next_kick = b.now + (uint64_t)kick_s * 1000000u;
+		}
+		b.now += 30000000u;
+		max77705_sample(&bus, &raw);
+		max77705_state(&raw, &st, &low);
+		*charging += st.charging;
+		if (st.charger_wdt_expired && !first_bad) {
+			first_bad = i;
+		}
+	}
+	return first_bad;
+}
+
+static void
+t_charger_watchdog(void)
+{
+	unsigned charging = 0, bad;
+	/* without the clear: the watchdog expires (the old cut-off) and charging stops */
+	charging_model();
+	bad = run_cable(10, 0, &charging);
+	CHECK(bad == 3);                        /* expired at the third 30 s sample (> 80 s) */
+	CHECK(charging == 2);
+	CHECK(b.writes == 0);
+	/* with the clear every 30 s: 20 minutes on the cable, never expired, charging throughout */
+	charging_model();
+	bad = run_cable(20, MAX77705_WDT_KICK_S, &charging);
+	CHECK(bad == 0 && charging == 40);
+	CHECK(b.writes == 40 && b.bad_writes == 0 && b.long_writes == 0 && b.clear_on_read == 0);
+	CHECK(b.last_write == 0x0d);            /* CHGPROT (0x0c) kept, WDTCLR = 01 */
+	/* the mock is meaningful: a clear every 90 s is too slow for its 80 s */
+	charging_model();
+	bad = run_cable(10, 90, &charging);
+	CHECK(bad != 0);
+	/* CHGPROT kept as read, never more than [3:0] */
+	charging_model();
+	uint8_t w = 0;
+	b.chg[CHG_CNFG_06] = 0x00;
+	CHECK(max77705_wdt_kick(&bus, &w) == MAX77705_KICK_OK && w == 0x01 && b.last_write == 0x01);
+	b.chg[CHG_CNFG_06] = 0xf7;
+	CHECK(max77705_wdt_kick(&bus, &w) == MAX77705_KICK_OK && w == 0x05);
+	CHECK(b.bad_writes == 0);
+	/* WDTEN clear: nothing written */
+	charging_model();
+	b.chg[CHG_CNFG_00] = 0x05;
+	CHECK(max77705_wdt_kick(&bus, &w) == MAX77705_KICK_OFF && b.writes == 0);
+	/* read-only bus: refused */
+	charging_model();
+	CHECK(max77705_wdt_kick(&bus_ro, &w) == MAX77705_KICK_EREFUSED && b.writes == 0);
+	/* charger absent: read error, nothing written */
+	charging_model();
+	b.chg_present = false;
+	CHECK(max77705_wdt_kick(&bus, &w) == MAX77705_KICK_EREAD && b.writes == 0);
+	/* the HSI2C layer refuses every other register / address without bus traffic */
+	charging_model();
+	unsigned m0 = b.msgs;
+	CHECK(hsi2c_write_reg(&h, MAX77705_CHG_ADDR, CHG_CNFG_00, 0x05) != 0);
+	CHECK(hsi2c_write_reg(&h, MAX77705_CHG_ADDR, CHG_INT, 0x00) != 0);
+	CHECK(hsi2c_write_reg(&h, MAX77705_FG_ADDR, CHG_CNFG_06, 0x01) != 0);
+	CHECK(hsi2c_write_reg(&h, MAX77705_PMIC_ADDR, 0x50, 0x00) != 0);
+	CHECK(b.msgs == m0 && b.writes == 0);
+	/* the policy, exhaustively: one register, one value per current content */
+	static const uint8_t addrs[] = { 0x25, 0x36, 0x62, 0x66, 0x69 };
+	unsigned allowed = 0, wrong = 0;
+	for (unsigned a = 0; a < sizeof(addrs); a++) {
+		for (unsigned r = 0; r < 256; r++) {
+			for (unsigned v = 0; v < 256; v++) {
+				for (unsigned c = 0; c < 256; c += 5) {
+					if (max77705_write_allowed(addrs[a], (uint8_t)r, (uint8_t)v, (uint8_t)c)) {
+						allowed++;
+						wrong += !(addrs[a] == 0x69 && r == 0xbd && v == ((c & 0x0cu) | 1u));
+					}
+				}
+			}
+		}
+	}
+	CHECK(allowed == 52 && wrong == 0);     /* one value for each of the 52 sampled current contents */
+}
+
 int
 main(void)
 {
@@ -453,6 +601,7 @@ main(void)
 	t_critical();
 	t_percent_moves();
 	t_bus_quirks();
+	t_charger_watchdog();
 	printf("StarbiteBattery host tests: %d checks, %d failed\n", checks, fails);
 	return fails != 0;
 }

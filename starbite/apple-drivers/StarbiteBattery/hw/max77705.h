@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: APSL-2.0 */
 /*
- * MAX77705 fuel gauge (I2C 0x36) and charger (0x69) on the S9, read only, plain C. Register facts with sources:
+ * MAX77705 fuel gauge (I2C 0x36) and charger (0x69) on the S9, plain C. Read only, except the one allowed write:
+ * the charger watchdog clear (CNFG_06 WDTCLR = 01, max77705_wdt_kick). Register facts with sources:
  * ../NOTES.md (build/em-research-battery.md, the vendor DTB). Fixed-point conversions for the S9's
  * fg_resistor = 2 (5 mOhm sense):
  *   VCELL / AvgVCELL      mV  = raw * 78.125 uV          = raw * 5 / 64
@@ -47,6 +48,12 @@ extern "C" {
 #define CHG_DETAILS_02          0xb5u
 #define CHG_CNFG_00             0xb7u
 
+#define CHG_CNFG_06             0xbdu   /* [3:2] CHGPROT, [1:0] WDTCLR: the ONE register ever written */
+#define CHG_CNFG_00_WDTEN       0x10u
+#define CHG_CNFG_06_CHGPROT     0x0cu
+#define CHG_CNFG_06_WDTCLR_KICK 0x01u
+#define MAX77705_WDT_KICK_S     30u     /* clear interval (s): Engineer OS's feed; Linux clears on every health poll */
+
 #define CHG_INT_OK_WCIN         0x20u
 #define CHG_INT_OK_CHGIN        0x40u
 
@@ -60,6 +67,12 @@ extern "C" {
 /* Is this (addr, reg) safe to read? (no clear-on-read interrupt registers; no debug slave) */
 bool max77705_read_allowed(uint8_t addr7, uint8_t reg);
 
+/*
+ * The only write the driver may make (your decision, 2026-11-11 19:12): the charger watchdog clear, CNFG_06
+ * WDTCLR = 01 with CHGPROT kept as read, i.e. value == (cur & 0x0c) | 0x01 at 0x69:0xbd. Everything else: false.
+ */
+bool max77705_write_allowed(uint8_t addr7, uint8_t reg, uint8_t value, uint8_t cur);
+
 /* fixed-point conversions */
 static inline int32_t max77705_mv(uint16_t raw) { return (int32_t)((uint32_t)raw * 5u / 64u); }
 static inline int32_t max77705_ma(uint16_t raw) { return (int32_t)(int16_t)raw * 5 / 16; }
@@ -72,7 +85,17 @@ static inline uint32_t max77705_cycles(uint16_t raw) { return raw / 100u; }
 struct max77705_bus {
 	void *ctx;
 	int (*read)(void *ctx, uint8_t addr7, uint8_t reg, uint8_t *buf, unsigned len);
+	int (*write)(void *ctx, uint8_t addr7, uint8_t reg, uint8_t value);     /* may be NULL: read only */
 };
+
+/* The charger watchdog clear. Reads CNFG_00 (WDTEN) and CNFG_06; writes (CNFG_06 & 0x0c) | 0x01 when the watchdog
+ * is enabled. Results: */
+#define MAX77705_KICK_OK        0
+#define MAX77705_KICK_OFF       1       /* WDTEN clear: nothing to do, nothing written */
+#define MAX77705_KICK_EREAD     (-1)
+#define MAX77705_KICK_EWRITE    (-2)
+#define MAX77705_KICK_EREFUSED  (-3)
+int max77705_wdt_kick(const struct max77705_bus *bus, uint8_t *written);
 
 struct max77705_raw {
 	uint16_t repsoc, vcell, avgvcell, current, avgcurrent, temp, repcap, fullcaprep, designcap, cycles, status,

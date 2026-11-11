@@ -31,9 +31,12 @@ start) and keep `max77705_read_allowed` in front of it.
 
 ## 4. Boot-args
 
-`sbbattery=0` (static, no bus access), `sbbatpoll=S`, `sbbattest=1`, `sbbatload=S`, `sbstop=battery`.
+`sbbattery=0` (static, no bus access), `sbbatpoll=S`, `sbbattest=1`, `sbbatload=S`, `sbstop=battery`,
+`sbchgwdt=0` (no charger watchdog clear: fully read only), `sbchgtest=S` (M11b verdict).
 
-## 5. Not done here (needs a decision)
+## 5. The one write: charger watchdog clear
 
-The MAX77705 charger watchdog (NOTES.md, open question 1): kicking it is a write to the charger and is not in this
-driver. Without it, charging stops some minutes into an Apple OS session.
+On by default (allowed 2026-11-11): CNFG_06 (0x69:0xbd) = (read & 0x0c) | 0x01 every 30 s on the driver's work loop,
+only while CNFG_00 WDTEN is set. Logged once: `StarbiteBattery: charger watchdog: cleared every 30 s (...)`;
+`ChargerWatchdogClears` counts them. No other driver may write the charger (when StarbiteHSI2C lands, keep this the
+only write it forwards to 0x69).

@@ -134,3 +134,19 @@ hsi2c_read_reg(struct hsi2c *h, uint8_t addr7, uint8_t reg, uint8_t *buf, unsign
 	}
 	return -1;
 }
+
+int
+hsi2c_write_reg(struct hsi2c *h, uint8_t addr7, uint8_t reg, uint8_t value)
+{
+	uint8_t m[2] = { reg, value };
+	if (addr7 != HSI2C_WRITE_ADDR || reg != HSI2C_WRITE_REG) {
+		return -1;
+	}
+	for (unsigned attempt = 0; attempt < 2; attempt++) {
+		if (hsi2c_msg(h, addr7, false, m, 2, true) == 0) {
+			return 0;
+		}
+		hsi2c_reset(h);
+	}
+	return -1;
+}

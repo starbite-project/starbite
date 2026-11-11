@@ -3,7 +3,8 @@
  * StarbiteBattery (docs/APPLE-S9-DRIVERS.md Part 3 row 22): see StarbiteBattery.h, hw/, NOTES.md.
  * The published key set follows what SweetBattery (xnu/series-12377 0220/0221) publishes for powerd, written
  * anew here; capacities are in percent (MaxCapacity 100) as Apple's own batteries publish them, mAh in the
- * AppleRaw* keys. Every bus access happens on the work loop (timer), never in start's caller beyond the first.
+ * AppleRaw* keys. Every bus access happens on the work loop (timers), never in start's caller beyond the first.
+ * One register write only: the MAX77705 charger watchdog clear (CNFG_06 WDTCLR = 01, allowed 2026-11-11).
  */
 #include "StarbiteBattery.h"
 #include <IOKit/IOLib.h>
@@ -54,6 +55,14 @@ StarbiteBattery::gaugeRead(void *ctx, uint8_t addr7, uint8_t reg, uint8_t *buf, 
 {
 	StarbiteBattery *me = (StarbiteBattery *)ctx;
 	return hsi2c_read_reg(&me->fBus, addr7, reg, buf, len);
+}
+
+/* The one write (0x69:0xbd, checked again in hsi2c_write_reg and max77705_wdt_kick). */
+int
+StarbiteBattery::gaugeWrite(void *ctx, uint8_t addr7, uint8_t reg, uint8_t value)
+{
+	StarbiteBattery *me = (StarbiteBattery *)ctx;
+	return hsi2c_write_reg(&me->fBus, addr7, reg, value);
 }
 
 static uint64_t
@@ -293,6 +302,9 @@ StarbiteBattery::timerFired(OSObject *owner, IOTimerEventSource *sender)
 		return;
 	}
 	me->poll();
+	if (me->fChgTestS) {
+		me->chgTestStep(uptime_s());
+	}
 	if (me->fLoadS) {
 		me->testStep(uptime_s());
 	}
@@ -304,12 +316,68 @@ StarbiteBattery::timerFired(OSObject *owner, IOTimerEventSource *sender)
 	sender->setTimeoutMS(me->fPollMs);
 }
 
+/* The charger watchdog clear, every MAX77705_WDT_KICK_S s on the work loop (serialised with the sampling). */
+void
+StarbiteBattery::kickFired(OSObject *owner, IOTimerEventSource *sender)
+{
+	StarbiteBattery *me = OSDynamicCast(StarbiteBattery, owner);
+	if (me == NULL || !me->fRunning || !me->fKick) {
+		return;
+	}
+	uint8_t w = 0;
+	int r = max77705_wdt_kick(&me->fGauge, &w);
+	if (r == MAX77705_KICK_OK) {
+		me->fKicks++;
+		if (!me->fKickLogged) {
+			me->fKickLogged = true;
+			IOLog("StarbiteBattery: charger watchdog: cleared every %u s (CNFG_06 0xbd = %#x: WDTCLR 01, CHGPROT kept)\n",
+			    MAX77705_WDT_KICK_S, w);
+		}
+	} else if (r == MAX77705_KICK_OFF) {
+		if (!me->fKickLogged) {
+			me->fKickLogged = true;
+			IOLog("StarbiteBattery: charger watchdog: not enabled (CNFG_00 WDTEN 0): nothing written\n");
+		}
+	} else if (me->fKickFails++ < 4) {
+		IOLog("StarbiteBattery: charger watchdog clear failed (%d)\n", r);
+	}
+	me->setProperty("ChargerWatchdogClears", me->fKicks, 32);
+	sender->setTimeoutMS(MAX77705_WDT_KICK_S * 1000u);
+}
+
+/* PHONE-TEST.md M11b: on the cable for fChgTestS s, did charging hold (no CHG_DTLS 0x0b, charging or full)? */
+void
+StarbiteBattery::chgTestStep(uint64_t now_s)
+{
+	uint64_t t = now_s - fT0;
+	if (fChgDone) {
+		return;
+	}
+	bool ok = fState.measured && fState.external && !fState.charger_wdt_expired && (fState.charging || fState.full);
+	if (!ok && fChgHeld) {
+		fChgHeld = false;
+		fChgBadT = t;
+		fChgBadDtls = fState.chg_dtls;
+	}
+	if (t < fChgTestS) {
+		return;
+	}
+	fChgDone = true;
+	if (fChgHeld) {
+		IOLog("StarbiteBattery: M11b PASS: on the cable %llu s, charging throughout, %u watchdog clears, never expired\n",
+		    t, fKicks);
+	} else {
+		IOLog("StarbiteBattery: M11b FAIL: charging lost at %llu s (CHG_DTLS %d), %u watchdog clears (clear %s)\n",
+		    fChgBadT, fChgBadDtls, fKicks, fKick ? "on" : "off: sbchgwdt=0");
+	}
+}
+
 /* ---- start / stop ---- */
 
 bool
 StarbiteBattery::start(IOService *provider)
 {
-	uint32_t on = 1, poll_s = 30, test = 0, load = 0;
+	uint32_t on = 1, poll_s = 30, test = 0, load = 0, kick = 1, chgtest = 0;
 
 	if (!super::start(provider)) {
 		return false;
@@ -318,6 +386,11 @@ StarbiteBattery::start(IOService *provider)
 	(void)PE_parse_boot_argn("sbbatpoll", &poll_s, sizeof(poll_s));
 	(void)PE_parse_boot_argn("sbbattest", &test, sizeof(test));
 	(void)PE_parse_boot_argn("sbbatload", &load, sizeof(load));
+	(void)PE_parse_boot_argn("sbchgwdt", &kick, sizeof(kick));
+	(void)PE_parse_boot_argn("sbchgtest", &chgtest, sizeof(chgtest));
+	fChgTestS = chgtest;
+	fChgHeld = true;
+	fTestLog = fTestLog || chgtest != 0;
 	poll_s = poll_s < 2 ? 2 : poll_s > 300 ? 300 : poll_s;
 	fPollMs = poll_s * 1000u;
 	fTestLog = test != 0 || load != 0;
@@ -339,6 +412,8 @@ StarbiteBattery::start(IOService *provider)
 			hsi2c_init(&fBus, &fIo);
 			fGauge.ctx = this;
 			fGauge.read = gaugeRead;
+			fGauge.write = kick ? gaugeWrite : NULL;
+			fKick = kick != 0;
 			uint8_t id = 0;
 			bool pmic = hsi2c_read_reg(&fBus, MAX77705_PMIC_ADDR, 0x00, &id, 1) == 0;
 			IOLog("StarbiteBattery: HSI2C %#llx, timing FS1 %#x FS2 %#x FS3 %#x (S-Boot's), MAX77705 PMICID %s%#x\n",
@@ -359,6 +434,17 @@ StarbiteBattery::start(IOService *provider)
 		fTimerAdded = true;
 		fRunning = true;
 		fTimer->setTimeoutMS(fPollMs);
+		if (fKick) {
+			fKickTimer = IOTimerEventSource::timerEventSource(this, &StarbiteBattery::kickFired);
+			if (fKickTimer && fLoop->addEventSource(fKickTimer) == kIOReturnSuccess) {
+				fKickAdded = true;
+				fKickTimer->setTimeoutMS(1);    /* the first clear at once, then every 30 s */
+			} else {
+				IOLog("StarbiteBattery: charger watchdog: no timer, not cleared\n");
+			}
+		} else if (fReal) {
+			IOLog("StarbiteBattery: charger watchdog: sbchgwdt=0, not cleared (read only)\n");
+		}
 	} else {
 		IOLog("StarbiteBattery: no timer: the first sample stays\n");
 	}
@@ -376,6 +462,10 @@ StarbiteBattery::stopPolling(OSObject *owner, void *, void *, void *, void *)
 	me->fRunning = false;
 	me->fTimer->cancelTimeout();
 	me->fTimer->disable();
+	if (me->fKickTimer) {
+		me->fKickTimer->cancelTimeout();
+		me->fKickTimer->disable();
+	}
 	return kIOReturnSuccess;
 }
 
@@ -386,6 +476,10 @@ StarbiteBattery::stop(IOService *provider)
 		(void)fLoop->runAction(&StarbiteBattery::stopPolling, this);
 		fLoop->removeEventSource(fTimer);
 		fTimerAdded = false;
+		if (fKickAdded) {
+			fLoop->removeEventSource(fKickTimer);
+			fKickAdded = false;
+		}
 	}
 	super::stop(provider);
 }
@@ -394,6 +488,7 @@ void
 StarbiteBattery::free(void)
 {
 	OSSafeReleaseNULL(fTimer);
+	OSSafeReleaseNULL(fKickTimer);
 	OSSafeReleaseNULL(fLoop);
 	OSSafeReleaseNULL(fMap);
 	super::free();

@@ -53,7 +53,20 @@ DesignCap = 0x0b97, init result != 0xff.., Bst = 0.
 | 0xb2 | CHG_INT_OK | b5 WCIN_OK (wireless), b6 CHGIN_OK (USB) | RES [S], LIBSB [V] |
 | 0xb3 | CHG_DETAILS_00 | [6:5] CHGIN_DTLS, 3 = valid | RES [S] |
 | 0xb4 | CHG_DETAILS_01 | [3:0] CHG_DTLS: 0-2 charging, 3-4 full, 5-7 not charging, 8/0xa/0xb discharging (0xb: charger watchdog expired); [6:4] BAT_DTLS | RES [S], LIBSB [V] |
-| 0xb5 / 0xb7 | DETAILS_02 / CNFG_00 | read for the log only | RES [S] |
+| 0xb5 | DETAILS_02 | read for the log only | RES [S] |
+| 0xb7 | CNFG_00 | [3:0] mode, **b4 WDTEN**; S-Boot writes 0x15 (charge mode + watchdog on) | RES (S-Boot log SBL:237, 267; max77705_charger.h:121) [V log, S bit] |
+| 0xbd | CNFG_06 | [3:2] CHGPROT, [1:0] WDTCLR; **the one register written**: `(read & 0x0c) | 0x01` | RES (max77705_charger.c:225-232, 298) [S]; Engineer OS policy / lab (GPL, facts) [V design, write "unverified" on the phone per docs/ENGINEER-OS.md] |
+
+### The charger watchdog clear (allowed by you, 2026-11-11 19:12)
+
+| Item | Value | Source |
+|---|---|---|
+| Register / bit | charger 0x69, CNFG_06 = 0xbd, WDTCLR [1:0] = 01; CHGPROT [3:2] written back as read; [7:4] = 0 | RES: Linux kicks it with CNFG_06 WDTCLR = 01 on every health poll [S]; Engineer OS writes `(v & 0x0c) | 1` and its policy allows only `(val & 3) == 1`, `val <= 0x0f` [V code] |
+| When | only if CNFG_00 WDTEN (bit 4) is set; nothing is written otherwise | RES [S] |
+| Interval | **30 s**, from the driver's start (first clear at once), on its own timer, independent of `sbbatpoll` | Engineer OS's feed "every 30 s, as Linux does" (docs/ENGINEER-OS.md, starbite/engineer/lab.c) [V design]; Linux clears on each health poll [S] |
+| Timeout it guards | **unknown**: not in the sources (RES says so). The Maxim charger family's watchdog is about 80 s [I]; 30 s leaves margin for anything above ~35 s. M11b measures the real cut-off first (clear off) | [I] |
+| Symptom without it | CHG_DTLS = 0x0b (watchdog expired), charging stops on the cable | RES [S] |
+| Enforced | `max77705_write_allowed` (one register, one value per read value), `hsi2c_write_reg` (refuses any other address or register before bus traffic), `max77705_wdt_kick` (reads CNFG_00 and CNFG_06 first). Host test: the mock charger's watchdog expires without the clear, never with it over 20 minutes, a 90 s clear is too slow for the mock's 80 s, and no other register is ever written (exhaustive policy check) | |
 
 Other clear-on-read registers refused by `max77705_read_allowed`: PMIC 0x22 / 0x24, USB-C 0x02..0x05 [S RES].
 
@@ -74,14 +87,18 @@ three samples in a row), `LegacyBatteryInfo`, plus `StarbiteBattery*` diagnostic
 
 ## Hardware-safety notes
 
-- **Nothing is written to the MAX77705.** The only bytes sent to a slave are one-byte register pointers. There is
-  no write function. Clear-on-read registers are refused.
+- **One register is written in the MAX77705: CNFG_06's WDTCLR (the charger watchdog clear), nothing else.** All
+  other traffic is one-byte register pointers before reads. Clear-on-read registers are refused. `sbchgwdt=0`
+  turns the clear off (back to fully read only).
+- The clear keeps charging going under the charger's own limits as S-Boot configured them (current, voltage, the
+  4350 mV float); it changes no charge setting. It is what Linux / Android does on every health poll.
 - The HSI2C controller itself is reset and re-programmed with S-Boot's own timing (no other values unless S-Boot
   left none).
-- **Charging stops under Apple OSes after the charger's watchdog expires** (S-Boot enables it, CNFG_00 WDTEN;
-  Linux kicks it with a CNFG_06 write; we write nothing) [S RES]. The phone then runs on battery even when plugged
-  in. Not harmful, but a long session drains it; `ChargerWatchdogExpired` and the log line show it. Kicking it is a
-  charger write and needs your decision (open question 1).
+- Without the clear (`sbchgwdt=0`, or before this change) charging stops once the charger's watchdog expires and the
+  phone runs on battery on the cable; `ChargerWatchdogExpired` shows it.
+- Charging under an Apple OS has no thermal supervision of ours (the FG temperature is stale; Android's charging
+  temperature limits come from its battery driver, which is not running). The charger's own protections (JEITA,
+  thermal regulation, timers as S-Boot set them) still apply. Watch M11b's battery temperature from TWRP afterwards.
 - A wrong low reading could make powerd shut down: guarded by the gates (fallback is 100 %, never 0 %) and by the
   three-sample rule for AtCriticalLevel.
 - The M11 load test busies every CPU for at most 60 s at the clocks S-Boot / 0302 set (<= 1794 MHz, no
@@ -90,7 +107,7 @@ three samples in a row), `LegacyBatteryInfo`, plus `StarbiteBattery*` diagnostic
 
 ## Open questions
 
-1. Kick the charger watchdog (CNFG_06 WDTCLR = 01, a write) so charging continues? Not done without your yes.
+1. Done (allowed 2026-11-11): the charger watchdog clear. Still open: its real timeout (M11b control run).
 2. Cycles LSB (1 % assumed).
 3. A live battery temperature needs the CMGP ADC (0x14230000, channel 4) and the DTB's temp table: a later
    StarbiteADC.

@@ -4,8 +4,9 @@
  * Re-implemented from our own build/xnu-12377/bsd/dev/starlte_touch.c (st_bus_init / st_message) and
  * herolte_battery.c (fg_message, repeated start). Facts: ../NOTES.md.
  *
- * Read-only towards the devices: the only bytes ever sent to a slave are one-byte register pointers before a
- * read. There is no write API. Clear-on-read registers are refused (max77705.h lists them).
+ * Towards the devices: one-byte register pointers before a read, and ONE register write, the MAX77705 charger
+ * watchdog clear (0x69:0xbd, value (cur & 0x0c) | 1; allowed 2026-11-11). hsi2c_write_reg refuses anything else
+ * itself, before any bus traffic. Clear-on-read registers are refused (max77705.h lists them).
  * When StarbiteHSI2C (row 13) exists this file is replaced by its provider API (INTEGRATION.md).
  */
 #ifndef STARBITE_EXYNOS_HSI2C_H
@@ -70,6 +71,12 @@ int hsi2c_msg(struct hsi2c *h, uint8_t addr7, bool receive, uint8_t *buf, unsign
 /* Register read: pointer byte without STOP, then a read with STOP (repeated start); if that fails, the same
  * with a STOP between the halves. 0 = ok. */
 int hsi2c_read_reg(struct hsi2c *h, uint8_t addr7, uint8_t reg, uint8_t *buf, unsigned len);
+
+/* The one write: (0x69, 0xbd) only; any other address or register returns -1 without touching the bus. The
+ * caller checks the value with max77705_write_allowed. 0 = ok. */
+#define HSI2C_WRITE_ADDR        0x69u
+#define HSI2C_WRITE_REG         0xbdu
+int hsi2c_write_reg(struct hsi2c *h, uint8_t addr7, uint8_t reg, uint8_t value);
 
 #ifdef __cplusplus
 }

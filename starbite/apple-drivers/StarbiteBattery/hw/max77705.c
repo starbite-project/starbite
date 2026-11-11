@@ -19,6 +19,13 @@ max77705_read_allowed(uint8_t addr7, uint8_t reg)
 	}
 }
 
+bool
+max77705_write_allowed(uint8_t addr7, uint8_t reg, uint8_t value, uint8_t cur)
+{
+	return addr7 == MAX77705_CHG_ADDR && reg == CHG_CNFG_06 &&
+	    value == (uint8_t)((cur & CHG_CNFG_06_CHGPROT) | CHG_CNFG_06_WDTCLR_KICK);
+}
+
 static int
 rd(const struct max77705_bus *bus, uint8_t addr7, uint8_t reg, uint8_t *buf, unsigned len)
 {
@@ -172,4 +179,31 @@ max77705_state(const struct max77705_raw *raw, struct battery_state *st, uint32_
 	*low_count = low ? *low_count + 1 : 0;
 	st->critical = *low_count >= 3;
 	st->warn = !st->external && st->soc_x10 <= 100;
+}
+
+int
+max77705_wdt_kick(const struct max77705_bus *bus, uint8_t *written)
+{
+	uint8_t cnfg00 = 0, cnfg06 = 0;
+	if (bus->write == 0) {
+		return MAX77705_KICK_EREFUSED;
+	}
+	if (rd(bus, MAX77705_CHG_ADDR, CHG_CNFG_00, &cnfg00, 1) != 0 ||
+	    rd(bus, MAX77705_CHG_ADDR, CHG_CNFG_06, &cnfg06, 1) != 0) {
+		return MAX77705_KICK_EREAD;
+	}
+	if (!(cnfg00 & CHG_CNFG_00_WDTEN)) {
+		return MAX77705_KICK_OFF;
+	}
+	uint8_t v = (uint8_t)((cnfg06 & CHG_CNFG_06_CHGPROT) | CHG_CNFG_06_WDTCLR_KICK);
+	if (!max77705_write_allowed(MAX77705_CHG_ADDR, CHG_CNFG_06, v, cnfg06)) {
+		return MAX77705_KICK_EREFUSED;
+	}
+	if (bus->write(bus->ctx, MAX77705_CHG_ADDR, CHG_CNFG_06, v) != 0) {
+		return MAX77705_KICK_EWRITE;
+	}
+	if (written) {
+		*written = v;
+	}
+	return MAX77705_KICK_OK;
 }
