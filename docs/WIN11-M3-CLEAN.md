@@ -712,3 +712,18 @@ services stay the user's call, section 25, and switching them off would not make
 Module diff vs m3all3i (disassembly): park loop 2 -> 3 cores, marker 5 -> 6, core-0 FlexPMU steps (section 22).
 Folder `build/woa/cores/big4i-ATTENDED/`: `windows-big4i.uefi` 036d620d..., `starbite-uefi-m3all4i.bin` 6ed81172....
 Request: notes folder `win-m3-clean-big4i-request.md`. Not run.
+
+## 37. Touch: one drag arrives as many touches on the big-core row; diagnostic driver touchdiag-1
+
+User report (big3i row): dragging (desktop selection, moving a window) restarts again and again as if the finger
+lifted; fine on the A55 row. The installed driver is S6SY761Touch 6.0.5058.3 (ref/exynos9810-woa/drivers/
+S6SY761Touch). In that source Windows gets "all fingers up" only from the chip's RELEASE event, a failed or slow
+(> 250 ms) I2C read, a chip event-stack overflow, or a full report queue. Its shutdown counters are absent from all
+pulled hives. Ruled out on paper: GIC interface numbers (M3 = 4..7 in the MADT); sbumd.dll (2 LSE words, latch-guarded).
+`starbite/win/s6touchdiag/` = that source + logging only (Diag* values in Device Parameters, flushed every second;
+trace of press/release/all-up/gap; I2C timing and a 200-read self-test; ISR per CPU; clock pair). Built with
+tools/win/build.sh kmdf, test-signed: `build/woa/cores/touchdiag-1/s6touchdiag.sys` a53995b8..., build bc25ab7.
+`tools/woa/win-m3/hive-touchdiag.py` switches the service's ImagePath to it offline (original kept in
+Parameters\SbOrigImagePath; restore puts it back) and decodes the Diag* values. Test: A55 then big-core unattended
+(self-test, idle IRQs), then one attended drag on each row. Request: notes folder `win-m3-clean-touchdiag-request.md`.
+hive-localdumps.py now takes EXE names (e.g. GeometryDash.exe); GD pull list: `win-m3-clean-gd-pulls.md`.

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """T3 (docs/WIN11-M3-X86.md section 3): WER LocalDumps for the emulated test programs, in an OFFLINE SOFTWARE hive.
 
-  hive-localdumps.py IN show
-  hive-localdumps.py IN OUT set       LocalDumps\\sbcpu-x64.exe and \\sbcpu-x86.exe:
+  hive-localdumps.py IN show [EXE...]
+  hive-localdumps.py IN OUT set [EXE...]     LocalDumps\\<EXE> for each EXE (default sbcpu-x64.exe sbcpu-x86.exe):
                                        DumpType 2 (full), DumpFolder C:\\sbdumps (REG_EXPAND_SZ), DumpCount 2
-  hive-localdumps.py IN OUT remove    delete those two app keys again; LocalDumps itself goes too when it has no
+  hive-localdumps.py IN OUT remove [EXE...]  delete those app keys again; LocalDumps itself goes too when it has no
                                        values and no other subkeys (pull-1111 had no LocalDumps key at all)
 
 Key: HKLM\\SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps\\<exe>. WER writes <exe>.<pid>.dmp into
@@ -25,7 +25,7 @@ hs = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hs)
 
 LD = 'Microsoft\\Windows\\Windows Error Reporting\\LocalDumps'
-APPS = ('sbcpu-x64.exe', 'sbcpu-x86.exe')
+APPS = ('sbcpu-x64.exe', 'sbcpu-x86.exe')     # default; e.g. GeometryDash.exe on the command line
 VALUES = {'DumpType': hs.dword(2), 'DumpFolder': hs.sz(2, 'C:\\sbdumps'), 'DumpCount': hs.dword(2)}
 
 
@@ -64,6 +64,15 @@ def ensure(h, path, made):
 
 
 def main(a):
+    global APPS
+    if len(a) >= 2 and a[1] == 'show' and len(a) > 2:
+        APPS = tuple(a[2:])
+        a = a[:2]
+    elif len(a) > 3 and a[2] in ('set', 'remove'):
+        APPS = tuple(a[3:])
+        a = a[:3]
+    if any(('\\' in x) or ('/' in x) or not x.lower().endswith('.exe') for x in APPS):
+        raise SystemExit('EXE names only, e.g. GeometryDash.exe')
     if len(a) == 2 and a[1] == 'show':
         hs.check(a[0])
         show(hs.Hive(a[0]))
@@ -90,7 +99,7 @@ def main(a):
             s += f'cd \\{key}\ndel\n'
     if cmd == 'remove' and hs.exists(h, LD):          # LocalDumps empty apart from ours: remove it too
         _, k = h.find(LD)
-        others = [n for n in subkey_names(h, k) if n.lower() not in APPS]
+        others = [n for n in subkey_names(h, k) if n.lower() not in [x.lower() for x in APPS]]
         if not h.values(k) and not others:
             s = f'cd \\{LD}\ndel\n'
     if not s:
