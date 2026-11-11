@@ -36,8 +36,10 @@ static void heap_init(uint64_t want)
     tk_heap_init(m, want);
     heap_size = want;
 }
+static unsigned heap_full;          /* refusals: in the self test a failure (a part of the screen stayed empty) */
 void tk_heap_oom(uint64_t n, uint64_t used)
 {
+    heap_full++;
     struct ub u;
     ub_init(&u);
     ub_s(&u, "next: the UI heap is full: ");
@@ -474,7 +476,7 @@ static struct { const step *s; int n, i, down; uint64_t t0; float s0; int film; 
 static int st_started, st_failed, clock_ok;
 int next_selftest_clock_ok(void) { return clock_ok; }
 static uint64_t st_t0;
-int next_selftest_failed(void) { return st_failed; }
+int next_selftest_failed(void) { return st_failed || heap_full; }
 
 static void film_start(int film)
 {
@@ -560,6 +562,14 @@ int next_selftest_step(void)
         /* the present's kernels against uibench's loops, on these buffers and cores (boosted, workers on) */
         static const char *const BN[5] = { "the motion present (2x, rows in pairs)", "the rest copy (tk_memcpy rows)",
                                            "uibench's copy", "uibench's 2x", "the half canvas following (2x2 down)" };
+        if (heap_full) {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "selftest: FAILED: next: the UI heap was full ");
+            ub_dec(&u, heap_full);
+            ub_s(&u, " times (parts of the screen stayed empty)");
+            sb_log(u.b);
+        }
         boost(1);
         workers_start();
         for (int k = 0; k < 5; k++) {
