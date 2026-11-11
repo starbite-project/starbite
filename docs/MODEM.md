@@ -836,6 +836,34 @@ The user asked for full calling in Next. What was built tonight, with no SIM and
   - Calls therefore connect without sound until then; kcall.audio_ok says so.
   - The CP also asks RFS for `CP_AUDIO_SLSI.bin`, which One UI probably serves from VENDOR; we answer ENOENT.
 
+### 7.12 Call audio (2026-11-11 night, offline; not yet run on the phone)
+Code on branch claude/sbos-calls (fa4061d; image starbite-next-p3u-audio-ead4511).
+- **The path:** CP <-> VSS (the CP's voice codec, run by ABOX's Calliope firmware) <-> RDMA4 / WDMA2 <-> SIFS0 / NSRC1
+  <-> UAIF1 (the MAX98512 amp: the earpiece is the 0x39 die in "Receiver Left") / UAIF0 (the CS47L93 codec: the main
+  mic). The AP only configures; no call audio passes through Starbite's memory.
+- **kern/abox.c** (Samsung's GPL abox driver, ported):
+  - AUD power + the TZPC SMC, clocks / PLL_AUD;
+  - SysMMU on our own tables (VSS at IOVA 0xA0000000 -> 0xF7900000, VSS PARAM 0xA1000000 -> 0xF9000000);
+  - Calliope's three files from VENDOR (bcmw_sb_vendor_read), the GIC, the CPU, BOOT_DONE "CRL0" (13 logged steps);
+  - START_VSS once the CP is online;
+  - the call routes, UAIF1 / UAIF0 I2S masters at 48 kHz 2 x 16, RDMA4 / WDMA2;
+  - abox_poll every 10 ms, which copies Calliope's own log as `abox: fw:` lines.
+- **kern/amp.c, kern/codec.c:**
+  - the earpiece at One UI's handset gain at most;
+  - the speaker capped 15 dB below One UI's (no speaker protection);
+  - the codec on SPI (USI01, its divider kept under 25 MHz), the main mic via CLKOUT0 + FLL1 to AIF1 on UAIF0.
+- **The modem core:** clears the VSS magic word (VSS + 0x600000) before the CP starts; the CP sets it, and Calliope's
+  VSS waits for it.
+- **The order in kern/modem.c:** when Cellular starts, probe the amp and the codec and boot ABOX, then start the CP;
+  START_VSS once online; the routes follow an active call; everything goes down with the modem. A failure leaves
+  calls and data working (audio_ok 0) and names the step in the log.
+- **Host tests:** abox 313, amp / codec 153 (incl. a bus error at every step).
+- **Open:**
+  - the RFS file `CP_AUDIO_SLSI.bin`, which we answer ENOENT; VENDOR has `CP_AUDIO_SLSI_SWA.bin` (565 KB) and
+    `_SEA` (5 bytes);
+  - ABOX's CPU clock: 295 MHz without ACPM AUD DVFS;
+  - the VSS start-up order, inferred from code and strings.
+
 ## 8. Later stages (not started)
 
 
