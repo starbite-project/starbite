@@ -115,9 +115,8 @@ static void wf_list(dc *d)
 {
     wlay L;
     wf_lay(&L);
-    d_icon(d, "back", 18, 53, 1);
-    d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Settings", 0, 0, ACCENT(), 0);
-    d_text(d, TK_IT700, 30, 20, bl(TK_IT700, 30, 96), "Wi-Fi", 0, 0, INK, 0);
+    d_back(d, W(1));                       /* P3p (P3j-13): iOS 26's glass back and the inline title */
+    d_navtitle(d, "Wi-Fi");
     /* the switch */
     d_rrect(d, 16, L.sw, 358, 47, 16, tk_hex(0x151c33, 1));
     d_text(d, TK_IT400, 16, 32, L.sw + 13 + 16, "Wi-Fi", 0, 0, INK, 0);
@@ -262,11 +261,11 @@ static int wf_pass_ok(void)
 static void wf_pass(dc *d)
 {
     int ok = wf_pass_ok();
-    d_text(d, TK_IT400, 17, 20, bl(TK_IT400, 17, 53), "Cancel", 0, 0, ACCENT(), 0);
+    d_text(d, TK_IT400, 17, MARGIN, NAV_BASE, "Cancel", 0, 0, ACCENT(), 0);     /* P3p: in the nav row */
     float w = tw(TK_IT600, 17, "Enter Password", 0, 0);
-    d_text(d, TK_IT600, 17, (390 - w) / 2, bl(TK_IT600, 17, 53), "Enter Password", 0, 0, INK, 0);
+    d_text(d, TK_IT600, 17, (390 - w) / 2, NAV_BASE, "Enter Password", 0, 0, INK, 0);
     w = tw(TK_IT600, 17, "Join", 0, 0);
-    d_text(d, TK_IT600, 17, 370 - w, bl(TK_IT600, 17, 53), "Join", 0, 0, ok ? ACCENT() : W(.3f), 0);
+    d_text(d, TK_IT600, 17, CONTENT_R - w, NAV_BASE, "Join", 0, 0, ok ? ACCENT() : W(.3f), 0);
     char nm[40], line[64];
     wf_fit(nm, WV.ssid, 15, 300);
     int n = 0;
