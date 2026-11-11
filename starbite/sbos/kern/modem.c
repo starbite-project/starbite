@@ -111,18 +111,27 @@ static int load(void)
         return 0;
     struct ub u;
     ub_init(&u);
-    ub_s(&u, "modem: loading RADIO and EFS (read only); free RAM ");
+    ub_s(&u, "modem: loading RADIO and EFS (read only); reserved at boot ");
+    ub_size(&u, sbm_sb_reserved());
+    ub_s(&u, ", free RAM ");
     ub_size(&u, sb_arena_free());
     sb_log(u.b);
-    if (sb_arena_free() < MIN_ARENA) {
-        set_state(SBOS_MODEM_FAILED, "Not enough free RAM for the modem's image");
+    if (!sbm_sb_reserved() && sb_arena_free() < MIN_ARENA) {
+        sb_log("modem: not enough free RAM for the modem's buffers (and none reserved at boot)");
+        set_state(SBOS_MODEM_FAILED, "Not enough memory for the modem");
         return -1;
     }
     sbm_sb_plat(&plat, mlog);
     uint64_t used0 = sb_arena_used();
     int r = sbm_sb_load_image_stream(&im, mlog);    /* RADIO streamed at each start; NV + its pristine copy kept */
     if (r < 0) {
-        set_state(SBOS_MODEM_FAILED, "Reading RADIO / EFS failed");
+        struct ub e;
+        ub_init(&e);
+        ub_s(&e, "modem: loading RADIO / EFS failed (");
+        ub_s(&e, sbm_strerror(r));
+        ub_s(&e, ")");
+        sb_log(e.b);
+        set_state(SBOS_MODEM_FAILED, r == SBM_ENOSPC ? "Not enough memory for the modem" : "Reading RADIO / EFS failed");
         return -1;
     }
     ub_init(&u);
@@ -148,6 +157,8 @@ static void start_now(void)
 #ifndef SB_HOST
     if (load() < 0) {
         sb_storage_hold(0);
+        if (mo.attended == SBM_ATTENDED_DATA)
+            cell_stopped(why, 1);           /* the switch shows why (P3m: it stayed on "Starting") */
         return;
     }
     armed = 1;                              /* the core puts NV back from its pristine copy before the start */
@@ -163,6 +174,8 @@ static void start_now(void)
         ub_s(&u, sbm_strerror(r));
         ub_s(&u, "); parked");
         sb_log(u.b);
+        if (mo.attended == SBM_ATTENDED_DATA)
+            cell_stopped("The modem did not come online", 1);
         stopped(SBOS_MODEM_FAILED, "The modem did not come online (parked)");
         return;
     }
@@ -762,6 +775,24 @@ static void cell_step(void)
     }
 }
 
+/* boot (main.c, before the UI's heap): the modem's 2.25 MiB taken from the arena now, so the Cellular switch still
+ * works when the UI, Wi-Fi and the GPU have used the rest (P3m: 54 KiB left). No partition is read. */
+void kmodem_reserve(void)
+{
+    uint64_t f0 = sb_arena_free();
+    int r = sbm_sb_reserve(0x100000);       /* nv_data.bin is 1 MiB on this phone (RADIO's plan checks it) */
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, r == 0 ? "modem: reserved at boot: " : "modem: could not reserve its memory at boot: ");
+    ub_size(&u, sbm_sb_reserved());
+    ub_s(&u, " (arena free before ");
+    ub_size(&u, f0);
+    ub_s(&u, ", after ");
+    ub_size(&u, sb_arena_free());
+    ub_s(&u, ")");
+    sb_log(u.b);
+}
+
 int kmodem_cellular(int on)
 {
     if (!on) {
@@ -848,6 +879,7 @@ void kmodem_cell(struct kcell *c)
     }
 }
 #else
+void kmodem_reserve(void) { }
 int kmodem_cellular(int on) { (void)on; return SBOS_EAGAIN; }
 int kmodem_netif(struct sbnet **net, struct sbtcp **tcp) { (void)net; (void)tcp; return 0; }
 void kmodem_cell(struct kcell *c) { memset(c, 0, sizeof(*c)); c->bars = -1; }

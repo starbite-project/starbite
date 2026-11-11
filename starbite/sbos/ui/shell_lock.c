@@ -2943,7 +2943,7 @@ static const char *md_text(void)
     case SH_DATA_STOPPING: return "Turning off\xe2\x80\xa6";
     case SH_DATA_NO_SIM: return "No SIM";
     case SH_DATA_LOCKED: return "SIM PIN on";
-    case SH_DATA_FAILED: return "Could not connect";
+    case SH_DATA_FAILED: return CELL.why[0] ? CELL.why : "Could not connect";
     default: break;
     }
     switch (CELL.state) {
@@ -2959,7 +2959,7 @@ static void build_home_sb(void);
 void sh_cell(const sh_cell_t *c)
 {
     if (c->state == CELL.state && c->sim == CELL.sim && c->emergency_only == CELL.emergency_only && c->rat == CELL.rat &&
-        c->bars == CELL.bars && c->data == CELL.data && !tk_strcmp(c->oper, CELL.oper))
+        c->bars == CELL.bars && c->data == CELL.data && !tk_strcmp(c->oper, CELL.oper) && !tk_strcmp(c->why, CELL.why))
         return;
     CELL = *c;
     /* the lock's status bar: the network's honest line (the operator's name once registered) */
@@ -3276,7 +3276,7 @@ void sh_set(const char *what, const char *key, float v)
         toast_place();
     } else if (!tk_strcmp(what, "cell")) {
         /* the modem's state for the host's stills: "on" (emergency-only, GSM, v bars), "starting", "off" */
-        sh_cell_t c = { SH_CELL_OFF, -1, 0, 0, -1, SH_DATA_OFF, "" };
+        sh_cell_t c = { SH_CELL_OFF, -1, 0, 0, -1, SH_DATA_OFF, "", "" };
         if (!tk_strcmp(key, "on")) { c.state = SH_CELL_ON; c.sim = 0x80; c.emergency_only = 1; c.rat = 1; c.bars = (int)v; }
         else if (!tk_strcmp(key, "starting")) c.state = SH_CELL_STARTING;
         sh_cell(&c);

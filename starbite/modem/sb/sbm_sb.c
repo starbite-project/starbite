@@ -510,10 +510,28 @@ int sbm_sb_load_image(struct sbm_image *im, void (*line)(const char *))
 /* The small footprint: RADIO's TOC, map and plan, and EFS's nv_data.bin (read only) with a pristine copy; BOOT, MAIN
  * and VSS stay on the partition and are streamed through a 256 KiB chunk at each start (sbm_image.chunk). The
  * buffers are taken once and reused by every later call (libsb's arena has no free). About 2.3 MiB in all. */
+static uint8_t *s_chunk, *s_nv, *s_pristine;
+static uint32_t s_nv_cap, s_nv_size;
+
+/* Starbite OS: the stream loader's buffers taken at boot, before the UI's heap and the other services fill libsb's
+ * arena (P3m: 54 KiB left when the user turned Cellular on). No partition is read here. 0, or SBM_ENOSPC. */
+int sbm_sb_reserve(uint32_t nv_cap)
+{
+    if (!s_chunk && !(s_chunk = sb_alloc(SBM_SB_CHUNK)))
+        return SBM_ENOSPC;
+    if (!s_nv_cap) {
+        s_nv = sb_alloc(nv_cap);
+        s_pristine = sb_alloc(nv_cap);
+        if (!s_nv || !s_pristine)
+            return SBM_ENOSPC;
+        s_nv_cap = nv_cap;
+    }
+    return 0;
+}
+uint32_t sbm_sb_reserved(void) { return s_chunk && s_nv_cap ? SBM_SB_CHUNK + 2 * s_nv_cap : 0; }
+
 int sbm_sb_load_image_stream(struct sbm_image *im, void (*line)(const char *))
 {
-    static uint8_t *chunk, *nv, *pristine;
-    static uint32_t nv_size;
     uint8_t head[0x400];
     char s[160];
     memset(im, 0, sizeof(*im));
@@ -530,7 +548,7 @@ int sbm_sb_load_image_stream(struct sbm_image *im, void (*line)(const char *))
         line(s);
         return r < 0 ? r : SBM_EINVAL;
     }
-    if (!chunk && !(chunk = sb_alloc(SBM_SB_CHUNK)))
+    if (!s_chunk && !(s_chunk = sb_alloc(SBM_SB_CHUNK)))
         return SBM_ENOSPC;
     for (unsigned k = 0; k < im->plan.n; ++k) {
         const struct sbm_load *l = &im->plan.l[k];
@@ -540,27 +558,32 @@ int sbm_sb_load_image_stream(struct sbm_image *im, void (*line)(const char *))
             line(s);
             continue;
         }
-        if (!nv) {
-            nv = sb_alloc(l->size);
-            pristine = sb_alloc(l->size);
-            if (!nv || !pristine)
+        if (!s_nv_size) {
+            if (s_nv_cap && l->size > s_nv_cap) {
+                line("load: nv_data.bin is larger than the space reserved at boot");
                 return SBM_ENOSPC;
-            line("load: EFS /nv_data.bin (read only)");
-            int e = efs_nv(pristine, l->size, line);
-            if (e < 0) {
-                nv = 0;                        /* (the arena keeps the space; a retry reads again) */
-                return e;
             }
-            nv_size = l->size;
+            if (!s_nv_cap) {
+                s_nv = sb_alloc(l->size);
+                s_pristine = sb_alloc(l->size);
+                if (!s_nv || !s_pristine)
+                    return SBM_ENOSPC;
+                s_nv_cap = l->size;
+            }
+            line("load: EFS /nv_data.bin (read only)");
+            int e = efs_nv(s_pristine, l->size, line);
+            if (e < 0)
+                return e;                      /* (the buffers stay; a retry reads again) */
+            s_nv_size = l->size;
         }
-        if (l->size != nv_size)
+        if (l->size != s_nv_size)
             return SBM_EINVAL;
-        memcpy(nv, pristine, l->size);
-        im->data[k] = nv;
+        memcpy(s_nv, s_pristine, l->size);
+        im->data[k] = s_nv;
     }
-    im->chunk = chunk;
+    im->chunk = s_chunk;
     im->chunk_size = SBM_SB_CHUNK;
-    im->nv_pristine = pristine;
+    im->nv_pristine = s_pristine;
     return 0;
 }
 

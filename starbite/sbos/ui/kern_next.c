@@ -180,14 +180,16 @@ static int has(const char *s, const char *w)
 }
 static int cell_now(void)
 {
-    static sh_cell_t last = { -1, 0, 0, 0, 0, 0, "" };
+    static sh_cell_t last = { -1, 0, 0, 0, 0, 0, "", "" };
     struct sbos_phone ph;
     kmodem_status(&ph);
-    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars, 0, "" };
+    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars, 0, "", "" };
     struct kcell kc;
     kmodem_cell(&kc);
     c.data = kc.state;                      /* KCELL_* = SH_DATA_* */
     sb_strcpy(c.oper, sizeof(c.oper), kc.oper);
+    if (kc.state == KCELL_FAILED)
+        sb_strcpy(c.why, sizeof(c.why), kc.why);
     if (kc.want || kc.state != KCELL_OFF) {
         c.state = kc.state == KCELL_STARTING || kc.state == KCELL_STOPPING ? SH_CELL_STARTING :
                   kc.state == KCELL_SEARCHING || kc.state == KCELL_REGISTERED || kc.state == KCELL_DATA ? SH_CELL_ON :
@@ -274,6 +276,12 @@ static int wifi_now(void)
     return 1;
 }
 int sh_wifi_power(int on) { return wifi_power(on); }
+const char *sh_wifi_why(void)
+{
+    static struct sbos_wifi s;
+    wifi_status(&s);
+    return s.why;
+}
 int sh_wifi_scan(void) { return wifi_scan(); }
 int sh_wifi_join(const char *ssid, const char *pass)
 {

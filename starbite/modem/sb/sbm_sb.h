@@ -17,6 +17,9 @@ int sbm_sb_load_image(struct sbm_image *im, void (*line)(const char *));
  * RADIO at each start through a SBM_SB_CHUNK buffer; about 2.3 MiB, taken once (later calls reuse it). */
 #define SBM_SB_CHUNK (256u * 1024u)
 int sbm_sb_load_image_stream(struct sbm_image *im, void (*line)(const char *));
+/* take the stream loader's buffers now (the chunk, nv_data and its pristine copy of nv_cap bytes); no I/O */
+int sbm_sb_reserve(uint32_t nv_cap);
+uint32_t sbm_sb_reserved(void);          /* bytes reserved, 0 if not */
 /* SErrors that were already pending before a probe read (not caused by it). */
 unsigned sbm_sb_stale_serrors(void);
 #endif

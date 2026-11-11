@@ -620,6 +620,7 @@ struct kcell {
     char why[64];                           /* the last failure or step, in words */
     uint32_t tx_packets, rx_packets;
 };
+void kmodem_reserve(void);              /* boot, before the UI's heap: the modem's buffers (no I/O) */
 int kmodem_cellular(int on);
 void kmodem_cell(struct kcell *c);
 struct sbnet;
