@@ -136,6 +136,8 @@ static int gc_up(void)
     put(GPUCOMP_O_SH_up, gpucomp_sh_up, sizeof gpucomp_sh_up / 4U);
     put(GPUCOMP_O_SH_comp2, gpucomp_sh_comp2, sizeof gpucomp_sh_comp2 / 4U);
     put(GPUCOMP_O_RSD_comp2, gpucomp_rsd_comp2, sizeof gpucomp_rsd_comp2 / 4U);
+    put(GPUCOMP_O_SH_up2x, gpucomp_sh_up2x, sizeof gpucomp_sh_up2x / 4U);
+    put(GPUCOMP_O_RSD_up2x, gpucomp_rsd_up2x, sizeof gpucomp_rsd_up2x / 4U);
     put(GPUCOMP_O_RSD_fill, gpucomp_rsd_fill, sizeof gpucomp_rsd_fill / 4U);
     put(GPUCOMP_O_RSD_comp, gpucomp_rsd_comp, sizeof gpucomp_rsd_comp / 4U);
     put(GPUCOMP_O_RSD_down, gpucomp_rsd_down, sizeof gpucomp_rsd_down / 4U);
@@ -232,7 +234,12 @@ int gpucomp_ready(void)
 /* the GPU-only pool (a destination or source gpucomp_compose takes): the UI's own use, e.g. a full-resolution
  * wallpaper (the self test uses it for its textures) */
 void *gpucomp_pool(void) { return (void *)(uintptr_t)SB_GPU_POOL; }
-uint64_t gpucomp_pool_bytes(void) { return SB_GPU_POOL_SIZE; }
+/* v7: the half-resolution canvas of big moves at the pool's top; the caller's part is what lies below it */
+#define HALF_W (SB_FB_W / 2U)
+#define HALF_H (SB_FB_H / 2U)
+#define HALF_BYTES ((((uint64_t)HALF_W * HALF_H * 4U) + 0xfffU) & ~0xfffULL)
+#define HALF_CPU (SB_GPU_POOL + SB_GPU_POOL_SIZE - HALF_BYTES)
+uint64_t gpucomp_pool_bytes(void) { return SB_GPU_POOL_SIZE - HALF_BYTES; }
 
 /* a CPU address the GPU can reach: its GPU address, or 0 */
 uint64_t gpucomp_va(const void *p)
@@ -270,6 +277,9 @@ static uint8_t bins[GPUCOMP_BIN_W * GPUCOMP_BIN_H][GPUCOMP_BIN_B] __attribute__(
 _Static_assert(GPUCOMP_O_C2 + 64U + GPUCOMP_MAX_QUADS * GPUCOMP_C2_QB <= GPUCOMP_O_BIN, "comp2's quads run into the bins");
 _Static_assert(GPUCOMP_O_BIN + GPUCOMP_BIN_W * GPUCOMP_BIN_H * GPUCOMP_BIN_B <= GPUCOMP_O_SH_comp2, "the bins run into comp2's code");
 _Static_assert(GPUCOMP_O_SH_comp2 + sizeof gpucomp_sh_comp2 <= SB_GPU_DATA_SIZE, "comp2's code is outside the window");
+_Static_assert(GPUCOMP_O_SH_up + 0x2000U <= GPUCOMP_O_SH_up2x && GPUCOMP_O_SH_up2x + sizeof gpucomp_sh_up2x <= GPUCOMP_O_RSD_fill,
+               "up2x's code overlaps another's or the RSDs");
+_Static_assert(GPUCOMP_O_PAR_up2x + 64U <= GPUCOMP_O_C2, "up2x's parameters run into comp2's quads");
 static int floor_i(float v)
 {
     int i = (int)v;
@@ -307,6 +317,7 @@ static int occ_rect(const struct gc_quad *s, float u0, float v0, float u1, float
 
 /* only the bins the damage rects touch are drawn (nr 0: everything); the rest of dst keeps what it holds */
 static uint8_t dirty[GPUCOMP_BIN_W * GPUCOMP_BIN_H];
+static uint32_t frame_w = SB_FB_W, frame_h = SB_FB_H;   /* v7: the half canvas while gpucomp_compose_half draws */
 int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, unsigned n, const struct gc_rect *r,
                            unsigned nr, uint64_t *us);
 int gpucomp_compose(void *dst, uint32_t bg, const struct gc_quad *qs, unsigned n, uint64_t *us)
@@ -323,9 +334,9 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         return 0;
     volatile uint32_t *p = CPU(GPUCOMP_O_C2);
     put64(p, dva);
-    p[2] = SB_FB_W;
-    p[3] = SB_FB_W;
-    p[4] = SB_FB_H;
+    p[2] = frame_w;
+    p[3] = frame_w;
+    p[4] = frame_h;
     p[5] = n;
     p[6] = bg;
     for (unsigned k = 0; k < GPUCOMP_BIN_W * GPUCOMP_BIN_H; ++k)
@@ -392,7 +403,8 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         q[35] = fbits(s->bk);
         q[36] = s->bw;
         q[37] = s->bh;
-        q[38] = q[39] = 0;
+        q[38] = fbits(s->bk > 0 ? .5f / s->bk : 1);     /* v7: the lens's scale (the backdrop is the half wallpaper) */
+        q[39] = 0;
         /* its bins: the clip, within the source's extent on screen (u in [0, w or len), v in [0, h or len)) */
         if (!(s->alpha > 0))
             continue;
@@ -492,6 +504,60 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
     }
     if (us)
         *us = t;
+    return 1;
+}
+
+/* v7: a big move's frame at half resolution (a quarter of the pixels): the quads scaled by .5 (screen px; their
+ * sources as they are, sampled bilinear: at exactly 2x that is the CPU's half copies' 2 x 2 box), composed into the
+ * pool's half canvas, then UP2X (the CPU present's 1/4 3/4 weights) into dst, all of it */
+static struct gc_quad hq[GPUCOMP_MAX_QUADS];
+static void half_quads(const struct gc_quad *qs, unsigned n)
+{
+    for (unsigned i = 0; i < n; ++i) {
+        struct gc_quad *h = &hq[i];
+        *h = qs[i];
+        h->cx0 *= .5f; h->cy0 *= .5f; h->cx1 *= .5f; h->cy1 *= .5f;
+        h->dx0 *= .5f; h->dy0 *= .5f;
+        h->isx *= 2; h->isy *= 2;
+        h->radius *= .5f;
+        h->ft0 *= .5f; h->ft1 *= .5f; h->fb0 *= .5f; h->fb1 *= .5f;
+        if (h->flags & GC_GLASS)
+            h->bk *= 2;
+        if (!(h->flags & GC_SOLID))
+            h->flags |= GC_BILINEAR;
+    }
+}
+int gpucomp_compose_half(void *dst, uint32_t bg, const struct gc_quad *qs, unsigned n, uint64_t *us)
+{
+    if (!gpucomp_ready() || n > GPUCOMP_MAX_QUADS)
+        return 0;
+    uint64_t dva = gpucomp_va(dst);
+    if (!dva)
+        return 0;
+    half_quads(qs, n);
+    uint64_t t1 = 0;
+    frame_w = HALF_W;
+    frame_h = HALF_H;
+    int ok = gpucomp_compose_damage((void *)(uintptr_t)HALF_CPU, bg, hq, n, 0, 0, &t1);
+    frame_w = SB_FB_W;
+    frame_h = SB_FB_H;
+    if (!ok)
+        return 0;
+    volatile uint32_t *p = CPU(GPUCOMP_O_PAR_up2x);
+    put64(p, VA_POOL + (HALF_CPU - SB_GPU_POOL));
+    p[2] = HALF_W;
+    p[3] = HALF_W;
+    p[4] = HALF_H;
+    put64(p + 6, dva);
+    p[8] = SB_FB_W;
+    uint64_t t2 = run(GPUCOMP_O_JOB_up2x_half, gpucomp_job_up2x_half, "the 2x of a half frame");
+    if (!t2) {
+        disabled = 1;
+        gc_down("a fault in the 2x of a half frame: the CPU draws from now on");
+        return 0;
+    }
+    if (us)
+        *us = t1 + t2;
     return 1;
 }
 
@@ -841,6 +907,8 @@ static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
                 uint32_t M = ((const uint32_t *)q->mask)[(unsigned)iv * q->mstride + (unsigned)iu];
                 float cov, ox, oy, d, bc[4], rgb[3];
                 lens_unword(M, &cov, &ox, &oy, &d);
+                ox *= .5f / q->bk;              /* v7: the lens's scale (1 at full resolution, .5 in a half frame) */
+                oy *= .5f / q->bk;
                 float m = cov * al;
                 if (m > 0) {
                     /* comp2's lens_px: green bilinear at p + o, red and blue nearest at o x (1 +- D) */
@@ -890,6 +958,28 @@ static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
     for (int c = 0; c < 4; ++c) {
         uint32_t u = (uint32_t)(clampf(acc[c]) * 255.0f + .5f);
         o |= u << (c == 3 ? 24 : c == 0 ? 16 : c == 1 ? 8 : 0);
+    }
+    return o;
+}
+
+/* v7: a half frame's 2x on the CPU (UP2X's weights) from cpu_px2 at half resolution (cq: the half quads) */
+static uint32_t cpu_up2x(unsigned x, unsigned y, uint32_t bg)
+{
+    int i = (int)(x >> 1), j = (int)(y >> 1), sx = (x & 1U) ? 1 : -1, sy = (y & 1U) ? 1 : -1;
+    int i2 = i + sx < 0 ? 0 : i + sx >= (int)HALF_W ? (int)HALF_W - 1 : i + sx;
+    int j2 = j + sy < 0 ? 0 : j + sy >= (int)HALF_H ? (int)HALF_H - 1 : j + sy;
+    const int pi[4] = { i, i2, i, i2 }, pj[4] = { j, j, j2, j2 };
+    const float w[4] = { .5625f, .1875f, .1875f, .0625f };
+    float acc[4] = { 0, 0, 0, 0 }, c[4];
+    for (int k = 0; k < 4; ++k) {
+        unpack_f(cpu_px2((unsigned)pi[k], (unsigned)pj[k], bg), c);
+        for (int q = 0; q < 4; ++q)
+            acc[q] += c[q] * w[k];
+    }
+    uint32_t o = 0;
+    for (int q = 0; q < 4; ++q) {
+        uint32_t u = (uint32_t)(clampf(acc[q]) * 255.0f + .5f);
+        o |= u << (q == 3 ? 24 : q == 0 ? 16 : q == 1 ? 8 : 0);
     }
     return o;
 }
@@ -1060,6 +1150,43 @@ int gpucomp_selftest_step(void)
         } else {
             sb_log("gpucomp: comp2: 20 points within 3 levels of the CPU's (glass, Liquid Glass, fade, 3-slice, solid)");
         }
+        /* v7: the same scene as a big move's half frame (composed at half resolution, then UP2X into the panel) */
+        uint64_t uh = 0;
+        if (!gpucomp_compose_half((void *)SB_FB, bg, G, ng, &uh)) {
+            fail("the half frame did not run");
+            st = 8;
+            return 0;
+        }
+        log_us("comp2 at half resolution + the 2x (a big move's frame), full scanout", uh);
+        cq = hq;
+        ncq = ng;
+        unsigned hbad = 0;
+        for (unsigned i = 0; i < sizeof pt / sizeof pt[0]; ++i) {
+            uint32_t want = cpu_up2x(pt[i][0], pt[i][1], bg), got = fb[pt[i][1] * SB_FB_W + pt[i][0]];
+            if (!near(want, got, 3)) {
+                if (hbad < 4) {
+                    struct ub u;
+                    ub_init(&u);
+                    ub_s(&u, "gpucomp: half frame: pixel ");
+                    ub_dec(&u, pt[i][0]);
+                    ub_c(&u, ',');
+                    ub_dec(&u, pt[i][1]);
+                    ub_s(&u, " GPU ");
+                    ub_hex(&u, got, 8);
+                    ub_s(&u, " CPU ");
+                    ub_hex(&u, want, 8);
+                    sb_log(u.b);
+                }
+                ++hbad;
+            }
+        }
+        if (hbad) {
+            sb_logx("gpucomp: FAILED: half frame: points off by more than 3 levels, of 20: ", hbad);
+            ++fails;
+        } else {
+            sb_log("gpucomp: half frame: 20 points within 3 levels of the CPU's (2x of the half canvas)");
+        }
+        cq = G;
         st = 13;
         return 0;
     }

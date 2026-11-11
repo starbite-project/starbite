@@ -547,6 +547,8 @@ struct gc_rect { int x0, y0, x1, y1; };     /* half-open, screen px (the toolkit
 /* as gpucomp_compose, but only the 32 x 32 px tiles the rects touch are drawn; the rest of dst stays */
 int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *q, unsigned n, const struct gc_rect *r,
                            unsigned nr, uint64_t *us);
+/* v7: a big move's frame: composed at half resolution (the pool's top), then 2x into dst (the whole screen) */
+int gpucomp_compose_half(void *dst, uint32_t bg, const struct gc_quad *q, unsigned n, uint64_t *us);
 int uibench_setup(void);                /* 1.2-alpha26 P0: the UI compositor's benchmark (uibench.c) */
 void uibench_set(const char *label, unsigned ncores, const unsigned *cores, int worker_only);
 int app_is_test(int a);

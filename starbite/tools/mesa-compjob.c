@@ -69,7 +69,7 @@ void disassemble_bifrost(FILE *fp, const void *code, size_t size, bool verbose);
 #define GPU_ID_G72 0x6221u
 #define VA_BASE 0x02000000ull           /* SB_GPU_VA: the data window */
 /* gpucomp's layout in the data window (offsets): shaders 8 KiB each, then the descriptors, then the parameter blocks */
-#define O_SH(i) ((i) == SH_COMP2 ? 0x100000u : 0x1000u + (i) * 0x2000u)  /* 0x1000 .. 0x9000; COMP2 (v3) its own 64 KiB at 1 MiB,
+#define O_SH(i) ((i) == SH_COMP2 ? 0x100000u : (i) == SH_UP2X ? 0x9000u : 0x1000u + (i) * 0x2000u)  /* 0x1000 .. 0x9000; COMP2 (v3) its own 64 KiB at 1 MiB,
                                                                       * clear of the bins (O_BIN .. +BIN_W*BIN_H*BIN_B) */
 #define SH_MAX(i) ((i) == SH_COMP2 ? 0x10000u : 0x2000u)
 #define O_RSD(i) (0xb000u + (i) * 0x80u)
@@ -85,8 +85,8 @@ void disassemble_bifrost(FILE *fp, const void *code, size_t size, bool verbose);
 _Static_assert(O_BIN + BIN_W * BIN_H * BIN_B <= 0x100000u, "the bins run into COMP2's code");
 #define WG 16u
 
-enum { SH_FILL, SH_COMP, SH_DOWN, SH_UP, SH_COMP2, NSH };
-static const char *const sh_name[NSH] = { "fill", "comp", "down", "up", "comp2" };
+enum { SH_FILL, SH_COMP, SH_DOWN, SH_UP, SH_COMP2, SH_UP2X, NSH };   /* UP2X (v7) in comp2's old slot, 0x9000 */
+static const char *const sh_name[NSH] = { "fill", "comp", "down", "up", "comp2", "up2x" };
 
 /* ---- helpers ------------------------------------------------------------------------------------------- */
 /* Bifrost takes no 64-bit constants (drivers load addresses from memory; a constant address would be folded into
@@ -356,10 +356,12 @@ static nir_def *fsat_imm(nir_builder *b, nir_def *v) { return nir_fsat(b, v); }
 /* v6, Liquid Glass (flags 4 | 256): the mask is the layer's lens map (sbos/kern/lens.h, whose lens_shade this
  * follows step by step); returns the shaded backdrop (opaque) */
 static nir_def *lens_px(nir_builder *b, nir_def *M, nir_def *fx, nir_def *fy, nir_def *bd, nir_def *bs, nir_def *bw,
-                        nir_def *bh, nir_def *bk)
+                        nir_def *bh, nir_def *bk, nir_def *ls)
 {
-   nir_def *ox = nir_fmul_imm(b, nir_i2f32(b, nir_ishr_imm(b, nir_ishl_imm(b, M, 16), 24)), 0.25);
-   nir_def *oy = nir_fmul_imm(b, nir_i2f32(b, nir_ishr_imm(b, nir_ishl_imm(b, M, 8), 24)), 0.25);
+   /* v7: ls, frame px per lens-map px (+152: .5 / bk, the CPU's: 1 at full resolution, .5 in a half frame) */
+   nir_def *q4 = nir_fmul_imm(b, ls, 0.25);
+   nir_def *ox = nir_fmul(b, nir_i2f32(b, nir_ishr_imm(b, nir_ishl_imm(b, M, 16), 24)), q4);
+   nir_def *oy = nir_fmul(b, nir_i2f32(b, nir_ishr_imm(b, nir_ishl_imm(b, M, 8), 24)), q4);
    nir_def *d = nir_fmul_imm(b, nir_u2f32(b, nir_ushr_imm(b, M, 24)), 0.25);
    nir_def *g = bil_bd(b, bd, bs, bw, bh, bk, nir_fadd(b, fx, ox), nir_fadd(b, fy, oy));
    nir_variable *rgbv = nir_local_variable_create(b->impl, glsl_vec_type(3), "lens");
@@ -524,7 +526,7 @@ static void build_comp2(nir_builder *b)
                            nir_def *wv = nir_fmul(b, nir_fmul_imm(b, nir_u2f32(b, nir_iand_imm(b, M, 0xff)), 1.0 / 255.0), alpha);
                            nir_push_if(b, nir_flt(b, nir_imm_float(b, 0), wv));
                            {
-                              nir_def *bc = lens_px(b, M, fx[k], fy, p64(b, v8, 0), ch(b, v8, 2), ch(b, v9, 0), ch(b, v9, 1), bk);
+                              nir_def *bc = lens_px(b, M, fx[k], fy, p64(b, v8, 0), ch(b, v8, 2), ch(b, v9, 0), ch(b, v9, 1), bk, ch(b, v9, 2));
                               nir_store_var(b, acc[k], nir_flrp(b, nir_load_var(b, acc[k]), bc, wv), 0xf);
                            }
                            nir_pop_if(b, NULL);
@@ -641,6 +643,39 @@ static void build_up(nir_builder *b)
    nir_pop_if(b, NULL);
 }
 
+/* ---- UP2X (v7): a half-resolution frame (a big move) 2x into the panel with the CPU present's 1/4 3/4 weights (a
+ * bilinear at the 2x points): a thread per source px writes its 2 x 2 (two 64-bit stores). [0..7] src, [8] src
+ * stride px, [12] src w, [16] src h, [24..31] dst, [32] dst stride px ----------------------------------------- */
+static void build_up2x(nir_builder *b)
+{
+   nir_def *x, *y;
+   thread_xy(b, &x, &y);
+   nir_def *sw = ld32(b, par_addr(b, SH_UP2X, 12)), *sh = ld32(b, par_addr(b, SH_UP2X, 16));
+   nir_push_if(b, nir_iand(b, nir_ult(b, x, sw), nir_ult(b, y, sh)));
+   {
+      nir_def *src = ld64(b, par_addr(b, SH_UP2X, 0)), *ss = ld32(b, par_addr(b, SH_UP2X, 8));
+      nir_def *xl = nir_iadd_imm(b, x, -1), *xr = nir_iadd_imm(b, x, 1), *yu = nir_iadd_imm(b, y, -1), *yd = nir_iadd_imm(b, y, 1);
+      /* each source row's two horizontal points: .75 the px + .25 its left / right neighbour */
+      nir_def *rowL[3], *rowR[3], *ys[3] = { yu, y, yd };
+      for (unsigned k = 0; k < 3; ++k) {
+         nir_def *c = fetch(b, src, ss, sw, sh, x, ys[k]);
+         nir_def *c75 = nir_fmul_imm(b, c, 0.75);
+         rowL[k] = nir_ffma(b, fetch(b, src, ss, sw, sh, xl, ys[k]), nir_imm_float(b, 0.25), c75);
+         rowR[k] = nir_ffma(b, fetch(b, src, ss, sw, sh, xr, ys[k]), nir_imm_float(b, 0.25), c75);
+      }
+      nir_def *dst = ld64(b, par_addr(b, SH_UP2X, 24)), *ds = ld32(b, par_addr(b, SH_UP2X, 32));
+      nir_def *x2 = nir_ishl_imm(b, x, 1), *y2 = nir_ishl_imm(b, y, 1);
+      for (unsigned r = 0; r < 2; ++r) {
+         nir_def *o0 = nir_ffma(b, rowL[r ? 2 : 0], nir_imm_float(b, 0.25), nir_fmul_imm(b, rowL[1], 0.75));
+         nir_def *o1 = nir_ffma(b, rowR[r ? 2 : 0], nir_imm_float(b, 0.25), nir_fmul_imm(b, rowR[1], 0.75));
+         nir_def *row = nir_iadd_imm(b, y2, (int)r);
+         nir_build_store_global(b, nir_vec2(b, pack(b, o0), pack(b, o1)),
+                                addr_at(b, dst, nir_iadd(b, nir_imul(b, row, ds), x2)), .align_mul = 8, .write_mask = 3);
+      }
+   }
+   nir_pop_if(b, NULL);
+}
+
 static void words(const char *name, const void *p, unsigned bytes)
 {
    const uint8_t *b = p;
@@ -663,6 +698,7 @@ static const struct { unsigned sh, w, h; const char *name; } jobs[] = {
    { SH_UP, 720, 1480, "up_half" },
    { SH_UP, 1440, 2960, "up_full" },
    { SH_COMP2, 1440, 2960, "comp2_full" },
+   { SH_UP2X, 720, 1480, "up2x_half" },
 };
 #define NJOB (sizeof(jobs) / sizeof(jobs[0]))
 
@@ -688,7 +724,8 @@ int main(void)
       else if (i == SH_COMP) build_comp(&b);
       else if (i == SH_DOWN) build_down(&b);
       else if (i == SH_UP) build_up(&b);
-      else build_comp2(&b);
+      else if (i == SH_COMP2) build_comp2(&b);
+      else build_up2x(&b);
       nir_shader *s = b.shader;
       NIR_PASS(_, s, nir_lower_vars_to_ssa);
       NIR_PASS(_, s, nir_lower_compute_system_values, NULL);
