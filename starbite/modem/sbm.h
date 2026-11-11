@@ -39,6 +39,7 @@
 /* DT fallbacks for the CP memory map; the MEMn table (sbm_memmap_parse) overrides them              */
 #define SBM_DT_CP_SIZE      0x07900000U
 #define SBM_DT_VSS_SIZE     0x00700000U
+#define SBM_VSS_MAGIC_OFF   0x00600000U    /* abox DT magic_offset: the CP's "VSS is ready" word */
 #define SBM_DT_IPC_OFF      0x08000000U
 #define SBM_DT_IPC_SIZE     0x00500000U
 #define SBM_DT_ZMB_OFF      0x08500000U
