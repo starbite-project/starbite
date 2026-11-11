@@ -4,8 +4,10 @@ Design: docs/STARBITE-LINUX-APPS.md (sections 5, 7, 8, 12). Linux runs on the fo
 Next (the guest kernel of its own, sbwl, our Wayland compositor, contract v2 in `starbite/guest/sbshm.h`).
 
 - **Home page 3 ("Linux")**: the App Store, then the catalog's apps. Each icon is the guest's 160 px icon on a dark
-  rounded tile with a small Tux badge, so Linux apps read as Linux beside Starbite's own. The grid is page 2's
-  (top 62, 4 x 103 pt), with up to 19 apps (5 rows). The Search pill shows three page dots while the pages move.
+  rounded tile with a small Tux badge, so Linux apps read as Linux beside Starbite's own. The grid is E's lattice
+  (`COL_CX`, `HOME_TOP2`, `ROW_PITCH`, 84 pt `d_text_box` labels), with up to 19 apps (5 rows). Icons are drawn once
+  into the page; a press or an open copies its icon back out. The Search pill shows three page dots while the pages
+  move: one pill plus a small dots layer redrawn when the page changes (the toolkit had a pill per page).
 - **A Linux app opens like any app**: it springs from its icon. Its page is the app's window from 44 pt to 772 pt
   (720 x 1344 surface px at 2x, pixel-doubled). The page shows "Starting Linux" / "Opening <name>" until the
   window arrives. The keyboard comes up when the app's text field has the focus (text-input-v3) or the app has the
@@ -16,11 +18,12 @@ Next (the guest kernel of its own, sbwl, our Wayland compositor, contract v2 in 
   `foot`), and page 3 leaves foot out. Why: its place and icon are in the approved concept, the L2 self test opens it
   by key, and there is no second icon for the same app. It also works before any catalog exists: an L2 guest (no
   catalog 2 s after HELLO) shows foot by itself, so the staged L2 bundle still passes the phone test.
-- **The App Store** (a Starbite app on `sbshm_store`): the title with the free space on the memory card, a search
-  field with the shell's keyboard (name, package, summary, category), up to three FEATURED cards, and the list
+- **The App Store** (a Starbite app on `sbshm_store`), in P3q's bands: the large title (`d_h1` on `LARGE_BASE`) with
+  the free space on the memory card, a search field at `CONTENT_TOP` (its glass baked once per opening, not in a tap)
+  with the shell's keyboard (name, package, summary, category), up to three FEATURED cards, and the list
   (icon, name, category and size or the state, GET / OPEN / RETRY, or a progress ring with a stop square). Rows are
   drawn in 2-row chunks that are reused as the list scrolls, so the whole index never sits in the heap.
-- **A package's page**: icon, name, package, GET / OPEN / CANCEL / RETRY with a progress bar and its state. It warns
+- **A package's page** (a pushed page: the glass back circle, content from `PUSHED_TOP`): icon, name, package, GET / OPEN / CANCEL / RETRY with a progress bar and its state. It warns
   for TOO_BIG (amber: the honest RAM need against Linux's total; installing is allowed), refuses for NO_SPACE (red:
   needed vs free, GET dimmed) and shows FAILED with the guest's error. Then the summary, Category, Download,
   Installed size, Memory in use and Free space. **Remove App** (tap twice within 3 s) appears only for installed
@@ -28,20 +31,57 @@ Next (the guest kernel of its own, sbwl, our Wayland compositor, contract v2 in 
 
 ## The patch
 
-`next-linux.patch` applies to the toolkit tip **d8a69de** (`git apply --check` passes on a clean
-`git archive d8a69de starbite/sbos starbite/guest/sbos starbite/libsb`). It contains L2 (rebased from fb9114a, same
-behaviour, the `next-linuxtest` self test) and L3. It supersedes `l2-next.patch` (kept for history, against fb9114a).
+`next-linux.patch` applies to the toolkit tip **c29ca0d** (`git apply --check` passes on a clean
+`git archive c29ca0d starbite/sbos starbite/guest/sbos starbite/libsb`). It contains L2 (the `next-linuxtest` self
+test) and L3, and supersedes `l2-next.patch` (kept for history, against fb9114a).
+
+The UI is in its own file, `starbite/sbos/ui/shell_linux.inc` (like shell_media.inc), included after
+shell_media.inc. shell_lock.c only gets one or two lines at each hook:
+
+| shell_lock.c place | hook |
+|---|---|
+| after `hparts[]` | the `lx_*` prototypes; `home_dots()` (the pill's three dots) |
+| `app_icon` | `lx_icon()`: the App Store's icon, a Linux app's (Search lists the App Store, never "linux") |
+| `build_home` | `lx_home()` (page 3, `hparts[5]`); the dots pill built once, `home_dots(0)` |
+| `set_page` | the dots follow the page (three pages) |
+| APPS | `linux` (the open Linux app) and `store` |
+| `app_own` / `own_strip` / `own_extras` | `lx_is()`; no strips unless `lx_strips()` (a package's page), `lx_page()`, `lx_build()` |
+| `icon_rect` / `app_hit` | `lx_icon_rect()` / `lx_hit()` for page 3; `app_hit` picks one of three pages |
+| `app_open` / `app_finish_close` / `app_tap` | `lx_open()`, `lx_close()`, `lx_tap()` |
+| includes | `#include "shell_linux.inc"` |
+| `relink` | `lx_layers()` under `appc`; `hparts[5]` under `pages` |
+| `sh_set` | `lx_set()` (`lapp=ID:v`, `store=PKG:v`, `storeq=TEXT:v`); `app=` closes the open app (L2) |
+| gestures | `G_LINUX` (`lx_touch()`: a Linux window, the store's list); page swipes over three pages |
+| `sh_tick` / `sh_moving` | `lx_moving()` |
+
+Other files:
 
 | File | What changes |
 |------|--------------|
-| `starbite/sbos/ui/shell.h` | the `sh_linux_*` API below (replaces L2's), `SH_LINUX_H` 1344, `SH_LINUX_HKB` 916 |
-| `starbite/sbos/ui/shell_lock.c` | page 3 (`hparts[5]`, `build_home_apps3`, `lh_update`), three page dots (`hsearch[4]`), page swipes over three pages, `app_hit` / `icon_rect` for page 3. APPS gains `linux` (the open Linux app, `LX`) and `store`. The window is four strip layers `aplin[4]` (3.9 MiB each) filled through a row table, and the last strip is freed while the keyboard is up. The keyboard is one layer, `apkb`, shared with the store's search. Linux pages and the store's list draw no page strips. The App Store (`SS`, `page_store`, `build_store`, chunks `apstl[5]`, `apsth`, `apstb`). `G_STORE` (the list's scroll). `sh_set` gains `lapp=ID:v`, `store=PKG:v`, `storeq=TEXT:v` |
+| `starbite/sbos/ui/shell.h` | the `sh_linux_*` API below, `SH_LINUX_H` 1344, `SH_LINUX_HKB` 916 |
 | `starbite/sbos/ui/host/main.c`, `host/linux_fake.inc` (new) | the host's pretend Linux: 6 apps, 14 packages in every state (QUEUED, INSTALLING 40 %, REMOVING, FAILED, TOO_BIG, NO_SPACE, SYSTEM, FEATURED). Icons are drawn and windows rendered with the pack's fonts (foot from `SBTK_LINUX=foot.ppm`); every call is logged as `linux: ...`. `SBTK_LINUX=cold` starts with Linux off, `=starting` / `=fail` as in L2. Still-only states: `lx=focus:1`, `lx=type:TEXT`. `SBTK_NO_LINUX_FAKE` drops it (gwin-host) |
-| `starbite/sbos/ui/kern_next.c` | `next_kdraw`: `gwin_now()` every loop turn; `next_ready()` (as L2) |
-| `starbite/sbos/build.sh`, `starbite/sbos/kern/uitest.c` | gwin.c in every Next image; `starbite-next-linuxtest.img` (as L2) |
-| `starbite/guest/sbos/guest.{c,h}` | `GUEST_WL` mode (L2), the surface 720 x **1344**, `cfg.v2 = 1` for GUEST_WL (the tables cleared at load), `guest_blit_rows()` (the 2x copy into a row table), `guest_keep(on)` (no idle stop while the App Store is open or a package operation runs). **guest.{c,h} belong to the starbite-os session**: the same change should go to master (it only adds things) |
+| `starbite/sbos/ui/kern_next.c` | `next_kdraw`: `gwin_now()` every loop turn; `next_ready()` |
+| `starbite/sbos/build.sh`, `starbite/sbos/kern/uitest.c` | gwin.c in every Next image; `starbite-next-linuxtest.img` |
+| `starbite/guest/sbos/guest.{c,h}` | see below. **guest.{c,h} belong to the starbite-os session**: the same change should go to master (it only adds things) |
 
-New files outside the toolkit: `starbite/guest/next/gwin.c` (the platform), `host/` (gwin-host), `wl-bundle.sh`.
+guest.c, the functions it touches (for the card-backed block devices patch on top): the `names[3][3]` table and
+`surf_w` / `surf_h` (GUEST_WL); `guest_available_mode` and `guest_start_mode` (real and host fake: GUEST_WL); a new
+`static int kept` beside `sb_up` and a new `guest_keep()` after `guest_shown()`; `cfg_init` (one line,
+`.v2 = mode == GUEST_WL`); `guest_timer` (real and fake: the idle-stop condition gets `!kept &&`); `guest_blit`
+(real and fake), which becomes a wrapper of a new `blit_any()` with the new `guest_blit_rows()` beside it (the row
+addresses through a `TROW()` macro); the host fake's marker check (any non-APP mode). guest.h: `GUEST_WL_*`
+(H 1344), `guest_blit_rows`, `guest_keep`.
+
+### Memory (the host with SBTK_HEAP_MB=160, the phone's UI heap)
+- The window is four 3.9 MiB strip layers, freed whenever the app leaves the screen (closed, home, another app).
+  The last strip is freed while the keyboard is up. No page strips sit under the window.
+- The store's list is five chunk layers of two rows (2.5 MiB each), reused as it scrolls. A package's page uses the
+  usual strips.
+- Page 3 is one layer sized to its rows. No icon bitmaps are kept besides the open app's.
+- Our film: peak **146 MB**, no refusal. The toolkit's own films (tools/films.txt via `sbtk-host PAK selftest`):
+  peak **156 MiB** with the patch, the same as without it. Heap refusals: 16 with the patch (9 x 8.4 MB and
+  3 x 9.6 MB, which c29ca0d has too) against 392 without it (c29ca0d alone refuses a 1.3 MB block 347 times). The
+  single dots pill saves more than page 3 costs at those moments.
 
 ## The API (shell.h)
 ```c
@@ -72,7 +112,7 @@ this run's catalog. The last catalog is kept while Linux is off, so the icons st
   (`unlock=:1 page=:2`), the store (`store=:1`), the search (`storeq=fire:1`), the package pages
   (`store=gimp|chromium|gnome-text-editor|libreoffice-writer|inkscape:1`), the Text Editor
   (`lapp=org.gnome.TextEditor:1`, plus `lx=focus:1 "lx=type:Hello"` for the keyboard), the Terminal (`app=terminal:1`).
-- A film through the real gestures (with `SBTK_HEAP_MB=160`, the phone's heap: no refusal, peak 148 MB): unlock, two
+- A film through the real gestures (with `SBTK_HEAP_MB=160`, the phone's heap: no refusal, peak 146 MB): unlock, two
   swipes to page 3, App Store, the field, `f i r e`, return, GET on Firefox ESR, the progress to OPEN, OPEN (it
   springs from page 3's new icon, "Opening Firefox ESR"), tap the address bar, `h i`, return, home, the icon again
   (raised at once), home.
@@ -82,15 +122,19 @@ this run's catalog. The last catalog is kept while Linux is off, so the icons st
   home (ACTIVATE none), the store's GET (SBG_MSG_PKG with the store's seq), the install to the end, no Remove for
   SYSTEM, the hold released. `GWIN_L2=1` (an L2 guest, no catalog): PASSED. `GWIN_STORE=none`: fails with the
   store's reason.
-- The whole `starbite/sbos/build.sh` at d8a69de + the patch + gwin.c + the current sbghost / sbshm.h in the Lima VM:
-  every image builds and links (2026-11-11, /mnt/build/l3tree), host tests 320 + 680 checks passed;
-  `starbite-next-linuxtest.img` 19a473be..., `starbite-next.img` d69b72d9....
+- The whole `starbite/sbos/build.sh` at c29ca0d + the patch + gwin.c + the current sbghost / sbshm.h in the Lima VM:
+  every image builds and links (2026-11-11, /mnt/build/l3tree-c29); host tests 320 + 704 checks and shub's 83
+  passed. The Next images are starbite-next, -selftest, -wifitest and -linuxtest.
+- The same with `starbite/guest/blk/guest-card.patch` (e2f6642) applied after this patch and the current
+  sbghost.{c,h} (with `sbg_set_blk`), at /mnt/build/l3tree-c29card: both apply, every image links, and the host
+  tests pass (320 + 704, shub 83 + 64).
 
-## Needed from the guest side (sbwl / sbpkg)
-- sbwl: send TEXT_FOCUS after each ACTIVATE (the shell assumes no focus for a newly activated app), and WINDOW
-  (index, 1) only once that app's window is in the surface. gwin.c shows no rows before then.
-- The catalog should list foot as `org.codeberg.dnkl.foot` (or `foot`). Its pool icons go under the catalog's seq,
-  the store's under the store's seq.
+## The guest side (sbwl v2, committed)
+- sbwl sends WINDOW (index, 1) only after that app's first published frame, and sends TEXT_FOCUS again after each
+  ACTIVATE. gwin.c shows no rows before the WINDOW message.
+- LAUNCH carries the catalog's `layout_seq`. foot is `org.codeberg.dnkl.foot` (or `foot`) and is KEYBOARD, so it
+  gets keys even though it reports text focus (purpose terminal).
+- Pool icons are read under their table's seq. sbblk wants 4 KiB alignment (sbshm.h), which needs nothing here.
 
 ## Not done (follow-ups)
 - An app that quits by itself while shown leaves its last frame (WINDOW has_window 0 is not shown yet): the page
