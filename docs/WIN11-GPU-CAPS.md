@@ -314,7 +314,28 @@ FL 11_0 and D3D12 need tessellation, which the G72 doesn't have.
   - `gd-gl-on.cmd [x64|ec] [log]`: `log` sets the user's `MESA_DEBUG` (GL errors; elsewhere it only makes Mesa's
     logs more verbose);
   - `gd-gl-off.cmd` copies the game's logs into `gd-logs\` and removes the setting.
-- **GD1:** T45 and T46's gputests run the game unattended through Steam with our x64 driver, so overnight cycles
+- **GD run 1's logs (`build/win/gd-run1/umdlog`, pulled 21:58):**
+- **GD's own log:**
+  - 2 GPU submits in 11 s, 166 MiB of GPU memory, no driver error;
+  - then the abort stack: the only frame in our DLL is the handler.
+  - Above it, GeometryDash.exe calls `abort()` after exception dispatch (runtime and ntdll frames). The exception
+    came from a large module, most likely libcocos2d, calling a small one.
+  - So the game caught an exception during startup and aborted. Mesa was not on the stack.
+- **System memory ran out:**
+  - DWM's log: `allocation of 16652 KiB failed: 0x8876017c` (OUTOFVIDEOMEMORY) while holding 261 MiB;
+  - sblinkd: even a 64 KiB allocation failed;
+  - all processes together held ~700 MiB, far below the 1.5 GB aperture segment. So the failure is system commit:
+    3.4 GB RAM, memory load 86-93%, and a pagefile that cannot grow on a C: with ~850 MB free.
+  - DWM failing its allocations explains "everything closed". GD's exception is plausibly `std::bad_alloc` from the
+    same exhaustion.
+- **sb-patches/0137** (the shim; all four ICD builds rebuilt, in gl-kit v2 and T45/T46's GD1):
+  - abort stacks name every frame `module+offset`;
+  - in the OpenGL ICD only, a vectored handler logs the process's first 12 exceptions (code, place, AV address,
+    C++ type, stack) and always continues the search.
+- **For the user:** before the retry, free C: (2-3 GB or more) or give Windows a fixed larger pagefile (a Windows
+  setting: the user's call), restart Windows, and start GD with nothing else open.
+
+**GD1:** T45 and T46's gputests run the game unattended through Steam with our x64 driver, so overnight cycles
   reproduce it without the user.
 
 ## 7. What the user can do meanwhile

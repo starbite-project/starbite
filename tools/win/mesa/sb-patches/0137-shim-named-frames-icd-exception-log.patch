@@ -1,0 +1,162 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index c245ede..d6476a4 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -26,6 +26,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <signal.h>
++#include <stdarg.h>
+ 
+ #include "util/os_time.h"
+ #include "drm-uapi/drm.h"
+@@ -151,27 +152,126 @@ void malikm_note(unsigned id, unsigned value);
+ 
+ /* A Mesa abort() (no recovery point exists for it) ends the process; before that, the stack as offsets in
+  * this DLL, so the call that aborted can be found with the build's map/PDB. */
++/* sb-patches/0137 (docs/WIN11-GPU-CAPS.md 2): name every frame "module+0xoffset" (Geometry Dash's first run
++ * aborted with a stack of bare addresses), written with WriteFile so a handler never waits on the CRT's stream
++ * lock. */
+ static void
+-sb_on_abort(int sig)
++sb_raw(const char *fmt, ...)
++{
++   char buf[512];
++   va_list ap;
++   DWORD n;
++   va_start(ap, fmt);
++   int len = vsnprintf(buf, sizeof(buf), fmt, ap);
++   va_end(ap);
++   if (len < 0)
++      return;
++   if (len >= (int)sizeof(buf))
++      len = sizeof(buf) - 1;
++   HANDLE h = (HANDLE)_get_osfhandle(_fileno(stderr));
++   if (h && h != INVALID_HANDLE_VALUE)
++      WriteFile(h, buf, (DWORD)len, &n, NULL);
++}
++
++static void
++sb_where(const char *pfx, const void *pc)
++{
++   HMODULE m = NULL;
++   char name[MAX_PATH];
++   if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                          (LPCSTR)pc, &m) && m && GetModuleFileNameA(m, name, sizeof(name))) {
++      const char *b = strrchr(name, '\\');
++      sb_raw("%s%s+0x%llx\n", pfx, b ? b + 1 : name, (unsigned long long)((const char *)pc - (const char *)m));
++   } else {
++      sb_raw("%s%p\n", pfx, pc);
++   }
++}
++
++static void
++sb_stack(unsigned skip)
+ {
+    void *frames[48];
+-   HMODULE self = NULL;
+-   USHORT n = RtlCaptureStackBackTrace(0, 48, frames, NULL);
++   char pfx[16];
++   USHORT n = RtlCaptureStackBackTrace(skip, 48, frames, NULL);
++   for (USHORT i = 0; i < n; i++) {
++      snprintf(pfx, sizeof(pfx), "  #%u ", i);
++      sb_where(pfx, frames[i]);
++   }
++}
++
++/* A Mesa abort() (no recovery point exists for it) ends the process; before that, the stack. */
++static void
++sb_on_abort(int sig)
++{
+    (void)sig;
+-   GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+-                      (LPCSTR)(void *)sb_on_abort, &self);
+    malikm_note(16, (unsigned)GetCurrentProcessId());   /* UmdNote_16: a process aborted */
+-   fprintf(stderr, "sbumd: abort(), stack (+offset in this DLL, else absolute):\n");
+-   for (USHORT i = 0; i < n; i++) {
+-      HMODULE m = NULL;
+-      GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+-                         (LPCSTR)frames[i], &m);
+-      if (m && m == self)
+-         fprintf(stderr, "  #%u sbumd+0x%llx\n", i, (unsigned long long)((char *)frames[i] - (char *)self));
+-      else
+-         fprintf(stderr, "  #%u %p\n", i, frames[i]);
++   sb_raw("sbumd: abort(), stack:\n");
++   sb_stack(0);
++}
++
++/* sb-patches/0137: in the OpenGL ICD only (never in DWM's or any D3D process's sbumd), log the process's first
++ * exceptions as they are raised: code, where (module+offset), for an access violation the address, for a C++
++ * exception the thrown type, and the stack. Logging only: the handler always continues the search. Geometry
++ * Dash's first run threw something inside its own code during startup and then called abort(). */
++static volatile LONG sb_veh_count;
++
++static int
++sb_peek(const void *at, void *out, size_t n)
++{
++   SIZE_T got = 0;
++   return ReadProcessMemory(GetCurrentProcess(), at, out, n, &got) && got == n;
++}
++
++static LONG CALLBACK
++sb_veh(EXCEPTION_POINTERS *ep)
++{
++   const EXCEPTION_RECORD *r = ep->ExceptionRecord;
++   DWORD c = r->ExceptionCode;
++   if (c == 0x406D1388 || c == 0x40010006 || c == 0x4001000A || c == 0x40010005 || c == 0x40010008)
++      return EXCEPTION_CONTINUE_SEARCH;   /* thread naming, OutputDebugString, Ctrl-C/Break */
++   if (InterlockedIncrement(&sb_veh_count) > 12)
++      return EXCEPTION_CONTINUE_SEARCH;
++   sb_raw("sbumd: exception 0x%08lx (flags 0x%lx, %lu params)\n", (unsigned long)c,
++          (unsigned long)r->ExceptionFlags, (unsigned long)r->NumberParameters);
++   sb_where("  at ", r->ExceptionAddress);
++   if (c == 0xC0000005 && r->NumberParameters >= 2)
++      sb_raw("  access %s 0x%llx\n", r->ExceptionInformation[0] == 0 ? "read" : r->ExceptionInformation[0] == 1 ?
++             "write" : "execute", (unsigned long long)r->ExceptionInformation[1]);
++   if (c == 0xE06D7363 && r->NumberParameters >= 3) {   /* MSVC C++ throw: the type from ThrowInfo */
++      ULONG_PTR ti = r->ExceptionInformation[2];
++#ifdef _WIN64
++      ULONG_PTR base = r->NumberParameters >= 4 ? r->ExceptionInformation[3] : 0;
++#else
++      ULONG_PTR base = 0;
++#endif
++      int32_t th[4], cta[2], ct[2];
++      if (ti && sb_peek((void *)ti, th, sizeof(th)) && th[3] &&
++          sb_peek((void *)(base + (ULONG_PTR)(uint32_t)th[3]), cta, sizeof(cta)) && cta[0] > 0 &&
++          sb_peek((void *)(base + (ULONG_PTR)(uint32_t)cta[1]), ct, sizeof(ct)) && ct[1]) {
++         char name[96] = {0};
++         const char *td = (const char *)(base + (ULONG_PTR)(uint32_t)ct[1]) + 2 * sizeof(void *);
++         if (sb_peek(td, name, sizeof(name) - 1))
++            sb_raw("  C++ type %s (%d catchable)\n", name, cta[0]);
++      }
++      sb_where("  thrown object's ThrowInfo in ", (void *)ti);
+    }
+-   fflush(stderr);
++   sb_stack(1);
++   return EXCEPTION_CONTINUE_SEARCH;
++}
++
++static void
++sb_veh_install(void)
++{
++   HMODULE self = NULL;
++   char name[MAX_PATH];
++   if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                           (LPCSTR)(void *)sb_veh_install, &self) || !GetModuleFileNameA(self, name, sizeof(name)))
++      return;
++   const char *b = strrchr(name, '\\');
++   if (_stricmp(b ? b + 1 : name, "libgallium_wgl.dll") != 0)
++      return;
++   AddVectoredExceptionHandler(1, sb_veh);
++   sb_raw("sbumd: OpenGL ICD, first-chance exception log on (up to 12)\n");
+ }
+ 
+ static void
+@@ -207,6 +307,7 @@ sb_log_open(void)
+    setvbuf(stderr, NULL, _IONBF, 0);
+    sb_log_active = 1;
+    signal(SIGABRT, sb_on_abort);
++   sb_veh_install();
+    sb_log_trace = GetFileAttributesA("C:\\ProgramData\\Starbite\\umdlog\\trace") != INVALID_FILE_ATTRIBUTES;
+    /* sb-patches/0129: umdlog\trace-<image name> traces only processes of that name (T36: File Explorer) */
+    if (!sb_log_trace) {
