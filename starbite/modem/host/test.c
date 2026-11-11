@@ -1259,6 +1259,7 @@ static void test_session(uint32_t boot_crc, uint32_t main_crc)
     CHECK(!mo.up && mo.b.parked);
     check_parked(&s);
     CHECKEQ((s.pmu[SBM_PMU_RESET_SEQ_STATUS / 4] & 7), 5);       /* as on the phone: the sequencer stays 5 */
+    CHECKEQ(s.ctrl[SBM_CP_CTRL_S] & 8, 0);                      /* and CP_START reads 0 (night-1111) */
     sbm_modem_snapshot(&mo, &sn2);
     CHECKEQ(sn2.state, SBM_MS_OFF);
     CHECK(sn2.gen != sn.gen && sn2.bars == 0xFF && !sn2.have_plmn && sn2.sim == 0xFF);

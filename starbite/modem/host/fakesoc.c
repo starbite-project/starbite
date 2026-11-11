@@ -3,8 +3,8 @@
  * CP_PWRON + CP_START -> the reset sequencer reads 5 and the GIC bit pends; mode 2 -> 0x0b; mode 0 checks the
  * carve-out's BOOT/MAIN against the "signed" CRCs -> 0 or 0x0e; AP2CP_CFG = 1 after a valid mode 0 -> the CP sets
  * cp_status 1 in ISSR3 30 ms later; CENTRAL_SEQ_CP_CONFIGURATION bit 16 = 0 with CP_RESET_SET -> status 0x80 (in
- * reset), the reset sequencer stays 5 (as soak-1's park read it on the phone); CP_START written again while in reset
- * (PMUCAL's reset_release) -> status 0, the GIC bit; MCUCTLR bit 0 clears the mailbox. */
+ * reset) and CP_START clear in CP_CTRL_S, the reset sequencer stays 5 (as the phone's parks read it); CP_START
+ * written again while in reset (PMUCAL's reset_release) -> status 0, the GIC bit; MCUCTLR bit 0 clears the mailbox. */
 #include <stdlib.h>
 #include <string.h>
 #include "fakesoc.h"
@@ -279,6 +279,7 @@ static int mmio_wr(void *ctx, uint64_t pa, uint32_t v)
         s->pmu[(pa - SBM_PMU_PA) / 4] = v;
         if (pa == SBM_PMU_PA + SBM_PMU_CENTRAL_SEQ_CP_CFG && !(v & (1u << 16)) && (s->ctrl[SBM_CP_CTRL_NS] & 4)) {
             s->pmu[PMU_CST] = 0x80u << 16;      /* reset asserted; the reset sequencer keeps its 5 */
+            s->ctrl[SBM_CP_CTRL_S] &= ~(1u << 3); /* and CP_START reads 0 (night-1111: 0x8 -> 0x0 over the park) */
             s->cp_running = 0;
             s->validated = 0;
             s->link = L_IDLE;

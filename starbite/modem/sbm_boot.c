@@ -417,9 +417,12 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
      * sequencer but keeps CP_PWRON in CP_CTRL_NS (T7 21:21 after One UI: 0x002016a2, sequencer 0); cal_cp_init
      * sets it anyway. A running sequencer or CP_START set means a CP that is up: not touched. */
     /* a CP parked earlier in this boot (by us: the sequencer stays 5 and the central sequencer reads 0x80 "in
-     * reset") restarts as Android restarts it: ss310ap_reset, no second cp_init. A CP that runs is never touched. */
+     * reset") restarts as Android restarts it: ss310ap_reset, no second cp_init. A CP that runs is never touched.
+     * The reset assert clears CP_START in CP_CTRL_S on this phone (night-1111: 0x8 before the park, 0x0 after it;
+     * that is why PMUCAL's reset_release sets it again), so CP_START is no part of the test: the central
+     * sequencer's 0x80 is what says "held in reset". */
     uint32_t cst = central_st(p);
-    int restart = b->reset_seq_before == 5 && cst == 0x80 && (b->ctrl_s & (1u << 3));
+    int restart = b->reset_seq_before == 5 && cst == 0x80;
     if (!restart && (b->reset_seq_before != 0 || (b->ctrl_s & (1u << 3)))) {
         sbm_logf(p, "boot: sequencer %u, central sequencer 0x%02x, CP_CTRL_S 0x%08x: a CP that runs", b->reset_seq_before,
                  cst, b->ctrl_s);
