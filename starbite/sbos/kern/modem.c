@@ -383,7 +383,10 @@ static void recover(void)
 enum { CS_IDLE, CS_SIM, CS_RADIO, CS_ATTACH, CS_REG, CS_CYCLE_OFF, CS_CYCLE_ON, CS_DEFINE, CS_ACT, CS_IP, CS_UP,
        CS_RETRY, CS_DEACT, CS_DETACH };
 #define CELL_APN "internet"                /* Elisa, DNA, Telia (FI); others: a setting later */
-static int cell_want, cst = KCELL_OFF, cstep = CS_IDLE, c_lf, c_esc, cnet_up, c_check;
+static int cell_want, cst = KCELL_OFF, cstep = CS_IDLE, c_lf, c_esc, cnet_up, c_check, c_ntp;
+static uint64_t c_ntp_t;
+static uint8_t c_ntp_nonce[8], c_ntp_server[4];
+#define C_NTP_PORT 50124
 static uint64_t c_t0, c_step_t;
 static char c_why[64];
 static struct sbnet cnet;
@@ -438,6 +441,52 @@ static void c_tcp_in(void *ctx, const uint8_t from[4], const uint8_t *seg, uint3
     (void)ctx;
     sbtcp_input(&ctcp, from, seg, len);
 }
+/* the NTP answer over mobile data (as wifi.c's: the server asked, our nonce, synchronised, after 2020) */
+static uint32_t c_be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static void c_udp(void *ctx, uint16_t port, const uint8_t from[4], uint16_t from_port, const uint8_t *d, uint32_t len)
+{
+    (void)ctx;
+    if (port != C_NTP_PORT || from_port != 123 || c_ntp != 2 || len < 48 || (d[0] & 7) != 4 ||
+        memcmp(from, c_ntp_server, 4) || memcmp(d + 24, c_ntp_nonce, 8) || (d[0] >> 6) == 3 || d[1] == 0 || d[1] >= 16)
+        return;
+    uint32_t secs = c_be32(d + 40);
+    if (secs < 2208988800U + 1577836800U)
+        return;
+    uint64_t rtt = sb_ms() - c_ntp_t;
+    int64_t utc = (int64_t)(secs - 2208988800U) + (int64_t)((rtt / 2 + 500) / 1000U);
+    int was_set = 0;
+    int64_t d_s = clock_set_net(utc, &was_set);
+    wifi_clock_checked_by(was_set ? 3 : d_s ? 2 : 1);
+    c_ntp = 3;
+    sb_log(was_set ? "cell: the clock was set over mobile data (NTP)" : d_s ? "cell: the clock was corrected over mobile data (NTP)"
+                                                                           : "cell: the clock was checked over mobile data (NTP): right");
+}
+
+/* NTP over mobile data before the first HTTPS (certificates need a checked clock when Wi-Fi never ran):
+ * 0 not yet, 1 DNS, 2 asked, 3 done, -1 no answer */
+static void c_ntp_step(void)
+{
+    if (c_ntp == 0) {
+        c_ntp = sbnet_dns_query(&cnet, "pool.ntp.org") == 0 ? 1 : -1;
+        c_ntp_t = sb_ms();
+    } else if (c_ntp == 1 && cnet.dns_state == SBNET_DNS_DONE) {
+        uint8_t q[48];
+        memset(q, 0, sizeof(q));
+        q[0] = 0x23;                         /* NTP version 4, client */
+        for (unsigned i = 0; i < 8; i += 4) {
+            uint32_t r = c_random(0);
+            memcpy(c_ntp_nonce + i, &r, 4);
+        }
+        memcpy(q + 40, c_ntp_nonce, 8);
+        memcpy(c_ntp_server, cnet.dns_result, 4);
+        c_ntp_t = sb_ms();
+        c_ntp = sbnet_udp_send(&cnet, cnet.dns_result, 123, C_NTP_PORT, q, sizeof(q)) == 0 ? 2 : -1;
+    } else if ((c_ntp == 1 && cnet.dns_state == SBNET_DNS_FAILED) || ((c_ntp == 1 || c_ntp == 2) && sb_ms() - c_ntp_t > 8000)) {
+        c_ntp = -1;
+        sb_log("cell: no NTP answer over mobile data (HTTPS needs a checked clock)");
+    }
+}
+
 static void c_log(void *ctx, const char *l)
 {
     (void)ctx;
@@ -470,9 +519,12 @@ static void cell_net_up(void)
     static const uint8_t host32[4] = { 255, 255, 255, 255 };
     struct sbnet_os os;
     memset(&os, 0, sizeof(os));
-    os.tx = c_tx_ip, os.now_ms = c_now, os.random = c_random, os.tcp = c_tcp_in, os.log = c_log;
+    os.tx = c_tx_ip, os.now_ms = c_now, os.random = c_random, os.tcp = c_tcp_in, os.log = c_log, os.udp = c_udp;
     sbnet_init_raw(&cnet, &os);
     sbnet_static(&cnet, mo.b.pdp.ip, host32, mo.b.pdp.gw, mo.b.pdp.dns1);
+    /* the PDP's MTU when the CP gave one (IP_CONFIGURATION flag bit 13), else sbnet's raw default (1400) */
+    if ((mo.b.pdp.ip_flags & (1u << 13)) && mo.b.pdp.mtu >= 576 && mo.b.pdp.mtu <= 1500)
+        cnet.mtu = mo.b.pdp.mtu;
     sbtcp_init(&ctcp, &cnet);
     sbm_modem_ip_rx_cb(c_rx_ip, 0);
     cnet_up = 1;
@@ -620,6 +672,7 @@ static void cell_step(void)
             cell_net_up();
             cset(KCELL_DATA, "Mobile data on");
             c_check = 0;
+            c_ntp = 0;
             cgo(CS_UP);
         } else if ((mo.b.pdp.have_status && mo.b.pdp.status != 1 && mo.b.pdp.status_notis) || cin() > 30000) {
             struct ub u;
@@ -635,7 +688,9 @@ static void cell_step(void)
         /* once per session, as Android's connectivity check: one HTTPS GET over mobile data (the fetch path the
          * browser uses), its result in the log (steps, status, sizes and times; never the address) and a
          * notification */
-        if (c_check == 0 && cin() > 1500) {
+        if (c_ntp >= 0 && c_ntp < 3)
+            c_ntp_step();
+        if (c_check == 0 && cin() > 1500 && (c_ntp == 3 || c_ntp < 0)) {
             c_check = wifi_fetch("https://example.com/") == 0 ? 1 : 3;
         } else if (c_check == 1) {
             struct sbos_wifi_fetch f;

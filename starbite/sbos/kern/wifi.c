@@ -498,6 +498,13 @@ static int fx_result;
 static char fx_host[64];
 static int fx_cell;                         /* this fetch runs over mobile data (kmodem_netif), not Wi-Fi */
 
+/* the clock was checked over mobile data (kern/modem.c's NTP on the cellular interface): certificates may use it */
+void wifi_clock_checked_by(int how)
+{
+    if (how > clock_checked)
+        clock_checked = how;
+}
+
 static uint64_t nio_unix(void *ctx)
 {
     (void)ctx;

@@ -63,6 +63,8 @@ struct sbnet {
     /* counters */
     uint32_t rx_frames, rx_ignored, tx_frames, tx_errors, ip_id;
     int raw_ip;                         /* a point-to-point link (mobile data): bare IPv4, no Ethernet / ARP / DHCP */
+    uint16_t mtu;                       /* the largest IPv4 packet sent (1500; raw IP: the PDP's, else 1400); sbtcp's
+                                         * MSS follows it (mtu - 40) */
 };
 
 void sbnet_init(struct sbnet *n, const struct sbnet_os *os, const uint8_t mac[6]);

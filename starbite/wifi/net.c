@@ -140,7 +140,7 @@ static int ip_send(struct sbnet *n, const uint8_t *dst, uint8_t proto, uint8_t *
     uint8_t *ip = f + 14, hop[4];
     const uint8_t *mac;
     uint32_t total = 20 + plen;
-    if (total > 1500)
+    if (total > 1500 || total > n->mtu)
         return -1;
     ip[0] = 0x45, ip[1] = 0;
     p16(ip + 2, (uint16_t)total);
@@ -560,7 +560,7 @@ static void ip_rx(struct sbnet *n, const uint8_t *ip, uint32_t len)
 
 int sbnet_ip_send(struct sbnet *n, const uint8_t dst[4], uint8_t proto, uint8_t *f, uint32_t plen)
 {
-    if (n->state < SBNET_BOUND || zero4(dst) || eq(dst, bcast_ip, 4))
+    if (n->state < SBNET_BOUND || zero4(dst) || eq(dst, bcast_ip, 4) || 20 + plen > n->mtu)
         return -1;
     return ip_send(n, dst, proto, f, plen, 0);
 }
@@ -584,6 +584,7 @@ void sbnet_init_raw(struct sbnet *n, const struct sbnet_os *os)
     static const uint8_t none[6] = { 0x02, 0, 0, 0, 0, 0 };     /* never on a wire: raw IP has no link address */
     sbnet_init(n, os, none);
     n->raw_ip = 1;
+    n->mtu = 1400;                              /* LTE PDP MTUs are often 1400-1450: the caller sets the PDP's own */
 }
 
 void sbnet_init(struct sbnet *n, const struct sbnet_os *os, const uint8_t mac[6])
@@ -594,6 +595,7 @@ void sbnet_init(struct sbnet *n, const struct sbnet_os *os, const uint8_t mac[6]
     n->state = SBNET_DOWN;
     n->ip_id = os->random(os->ctx);
     n->ping_id = (uint16_t)os->random(os->ctx);
+    n->mtu = 1500;
 }
 
 void sbnet_start(struct sbnet *n)

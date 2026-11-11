@@ -40,6 +40,7 @@ static struct {
 static struct fr { uint64_t at; int to; uint32_t len; uint8_t b[1600]; } q[QN];
 static unsigned qn;
 static int raw_link;                            /* the hosts are on a raw-IP link (mobile data): no Ethernet */
+static unsigned oversize;                       /* raw IP: packets above the link's MTU (must stay 0) */
 
 struct host {
     struct sbnet net;
@@ -64,6 +65,8 @@ static void enqueue(int to, const uint8_t *f, uint32_t len)
 static int tx(void *ctx, const uint8_t *f, uint32_t len)
 {
     struct host *h = ctx;
+    if (raw_link && len > 1400)              /* either way: the peer must follow our MSS too */
+        oversize++;
     if (L.cut || (L.loss && rf() < L.loss))
         return 0;
     enqueue(1 - h->id, f, len);
@@ -99,6 +102,8 @@ static void setup(void)
         else
             sbnet_init(&H[i].net, &os, mac[i]);
         sbnet_static(&H[i].net, i ? ip_b : ip_a, raw_link ? host32 : mask, none, none);
+        if (raw_link)
+            H[i].net.mtu = i ? 1500 : 1400;     /* an LTE-sized MTU on the phone's side, a full one at the peer */
         sbtcp_init(&H[i].tcp, &H[i].net);
     }
 }
@@ -248,6 +253,7 @@ int main(void)
     L.loss = 0.05, L.dup = 0.02, L.jitter = 20, L.delay = 25;
     bulk("raw IP, 5% loss, 25-45 ms (LTE-like)", 300000, 600000);
     CHECK(H[0].net.tx_frames > 0 && H[1].net.rx_ignored == 0 && H[0].net.held_len == 0, "raw IP: no ARP, nothing ignored");
+    CHECK(oversize == 0, "raw IP: %u packets above the 1400 MTU (the MSS must follow it both ways)", oversize);
     raw_link = 0;
 
     /* 2. a closed port: refused */
