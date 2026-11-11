@@ -10,6 +10,7 @@
 
 static struct notif nl[NN];
 static int nn, unread;
+static unsigned seq;               /* Starbite OS Next: posts so far (its shell copies the new ones) */
 
 static void cpy(char *d, unsigned cap, const char *s)
 {
@@ -32,6 +33,7 @@ void notif_post(const char *who, const char *title, const char *text)
     if (nn < NN)
         ++nn;
     ++unread;
+    ++seq;
     struct ub u;
     ub_init(&u);
     ub_s(&u, "notif: ");
@@ -40,6 +42,11 @@ void notif_post(const char *who, const char *title, const char *text)
     ub_s(&u, n->title);
     sb_log(u.b);
     ui_mark_dirty();
+}
+
+unsigned notif_seq(void)
+{
+    return seq;
 }
 
 int notif_count(void)

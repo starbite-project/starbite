@@ -49,6 +49,7 @@ static struct {
     float usb_next;
     int usb_secs, usb_ma, usb_c, usb_vl, usb_vh;
     const char *usb_why;
+    unsigned usb_ev;                    /* acb417e: sh_usb's events at the last draw */
     int gch, gpg;                       /* the guide: chapter (-1 the list), page (-1 the chapter's list) */
     int cf;                             /* Settings > Medical Card: the field edited (-1 the list) */
     sh_card_t card;
@@ -628,7 +629,7 @@ static void last2_tap(float x, float y)
     if (x < GROUP_X || x >= CONTENT_R || y < L2_ROW || y >= L2_ROW + 94) return;
     if (y < L2_ROW + 47) {
         int on = !sh_last2();
-        if (sh_last2_set(on) < 0) toast("Last 2 % can't change now");
+        if (sh_last2_set(on) < 0) { const char *w = sh_last2_why(); toast(w && w[0] ? w : "Last 2 % can't change now"); }
         else toast(on ? "Last 2 % on" : "Last 2 % off");     /* (the lock's SAVING widget: sv_idle) */
     } else
         sh_last2_auto_set(!sh_last2_auto());
@@ -685,6 +686,7 @@ static void usb_text(void)
     SV.usb_secs = usb_secs();
     SV.usb_ma = SV.usb.est_ma; SV.usb_c = SV.usb.bat_c10; SV.usb_vl = SV.usb.vbus_lo_mv; SV.usb_vh = SV.usb.vbus_hi_mv;
     SV.usb_why = SV.usb.why;
+    SV.usb_ev = SV.usb.events;
     if (SV.usb.state == SH_USB_ON) {
         dc d = mk(l, "sv-usb-txt", 24, 474, 342, 210, 1, 0);
         put_dec(b, SV.usb_secs);
@@ -750,7 +752,7 @@ static void usb_poll(float t)
     sh_usb(&SV.usb);
     if (SV.usb.state != was) { usb_controls(); usb_text(); relink(); return; }
     if (usb_secs() != SV.usb_secs || SV.usb.est_ma / 10 != SV.usb_ma / 10 || SV.usb.bat_c10 != SV.usb_c ||
-        SV.usb.vbus_lo_mv != SV.usb_vl || SV.usb.vbus_hi_mv != SV.usb_vh || SV.usb.why != SV.usb_why) {
+        SV.usb.vbus_lo_mv != SV.usb_vl || SV.usb.vbus_hi_mv != SV.usb_vh || SV.usb.events != SV.usb_ev) {
         usb_text();
         relink();
     }
@@ -1216,7 +1218,11 @@ static int sv_moving(void) { return SV.hold != 0; }
 static float sv_next_update(float t)
 {
     float best = -1;
-    if (SV.sos_on) best = 50;
+    if (SV.sos_on) {
+        /* acb417e: the kernel says when the beacon changes next; the countdown's seconds at most 1 s apart */
+        int n = sh_sos_next();
+        best = n > 0 ? tk_minf((float)n, 1000) : 50;
+    }
     if (AP.on && !AP.closing && is_app("usb") && SV.usb.state != SH_USB_OFF) {
         float n = tk_maxf(1, SV.usb_next - t);
         if (best < 0 || n < best) best = n;

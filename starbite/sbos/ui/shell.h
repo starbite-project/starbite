@@ -170,6 +170,7 @@ void sh_linux_textfocus(int on);         /* the active app's text field wants th
 #define SH_BEACON_SHIFT 4                 /* the screen: 0 white / red, 1 white, 2 red, 3 lit with the Morse */
 int sh_sos_set(int on);                   /* 1: the kernel's SOS (a 3 s countdown, then flashing); 0 stops; < 0 refused */
 int sh_sos_frame(uint32_t *argb);         /* 1 while SOS owns the screen: the beacon's colour now (0xAARRGGBB) */
+int sh_sos_next(void);                    /* ms until the beacon can change next; -1 SOS off */
 int sh_sos_secs(void);                    /* the countdown's seconds left (> 0); 0 while flashing */
 unsigned sh_sos_opts(void);
 void sh_sos_opts_set(unsigned opts);      /* kept with the settings */
@@ -179,6 +180,7 @@ typedef struct {
     int vbus_lo_mv, vbus_hi_mv;           /* -1 unknown */
     int bat_c10, limit_c10, ilim_ma, refused;
     const char *why;                      /* refused / the last stop, plain words (NULL none) */
+    unsigned events;                      /* bumped at every refusal and stop (a new why) */
 } sh_usb_t;
 int sh_usb_start(void);                   /* USB power out: one burst after the hold; < 0 refused (why in sh_usb) */
 void sh_usb_stop(void);
@@ -195,6 +197,7 @@ int sh_card(sh_card_t *c);                /* 1 there is a card */
 int sh_card_set(const sh_card_t *c);      /* 1 kept (the Info app's record, saved with the settings) */
 const char *sh_card_label(int i);
 int sh_last2(void);
+const char *sh_last2_why(void);           /* why the last sh_last2_set was refused (NULL none) */
 int sh_last2_set(int on);                 /* everything off but the clock, the torch and SOS */
 int sh_last2_auto(void);
 void sh_last2_auto_set(int on);           /* "automatically at 3 %", kept with the settings */
@@ -202,5 +205,17 @@ int sh_guide_n(void);                     /* the offline guide (guide/sbguide.h)
 const char *sh_guide_chapter(int c, const char **sub, unsigned *argb, int *npages);
 const char *sh_guide_page(int c, int p, const char *const **lines);   /* lines NULL-terminated; "! " a warning */
 const char *sh_sensors_why(void);         /* why there is no compass or level yet */
+
+/* Starbite OS Next (helper D, shell_nc.inc): notifications. The platform pushes each new one (the kernel: notif.c's
+ * posts, copied by kern_next.c's bridge outside the frames); the shell keeps the last 20 (RAM only) for the
+ * Notification Centre, the banner and the lock's "N notifications" pill. who: the poster ("clock", "battery", "modem",
+ * "heat", "survival" or an app's name); hm: local hh * 100 + mm (-1 unknown). Titles and lines go to the screen only. */
+void sh_notify(const char *who, const char *title, const char *body, int hm);
+/* the boot menu's last choice (the loader's settings record: a catalog key, "" unknown): the Systems widget's first */
+void sh_lastos(const char *key);
+/* the last GNSS fix (Maps; the kernel: kern/gnssfix.c, Android's fix on the card): 1 a fix, 0 none. Called from idle
+ * turns only (it may read the card) */
+typedef struct { int lat_e6, lon_e6, acc_dm, sats; long long utc; char src[12]; } sh_gnss_t;   /* acc_dm, sats: -1 unknown */
+int sh_gnss(sh_gnss_t *f);
 
 #endif

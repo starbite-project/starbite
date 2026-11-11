@@ -359,6 +359,7 @@ int sos_set(int on);
 void sos_status(struct sbos_sos *s);
 int sos_active(void);
 int sos_frame(uint32_t *argb);      /* 1 while SOS owns the screen: the colour to show */
+uint64_t sos_next_ms(uint64_t now); /* 1.2-alpha28: when sos_frame can change next (sb_ms time; 0 off) */
 int clock_now(struct sbos_time *t);
 int64_t clock_set_net(int64_t utc, int *was_set);  /* NTP: the correction, s (never written to the PMIC) */
 /* the flashlight LED (torch.c) */
@@ -404,6 +405,7 @@ struct notif {
 void notif_post(const char *who, const char *title, const char *text);
 void power_last2_clock(int on);      /* 1.2-alpha27: Last 2 % (survival.c): the A55 at 455 MHz, screen on or off */
 int notif_count(void);
+unsigned notif_seq(void);           /* posts since boot (Starbite OS Next's shell copies the new ones) */
 int notif_unread(void);
 const struct notif *notif_get(int i);
 void notif_seen(void);

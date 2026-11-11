@@ -180,7 +180,7 @@ static struct {
     uint8_t byp, chg;
     unsigned low_ticks, back_fail;
     int vbus_seen;                          /* VBADC showed 4.5-5.5 V in this burst: the short check trusts it */
-    uint32_t bursts;
+    uint32_t bursts, events;
     int refused;
     const char *why;
 } U;
@@ -262,6 +262,7 @@ void surv_usb_stop(const char *why)
     usb_back();
     int fault = why && why[0] == '!';
     U.why = fault ? why + 1 : why;
+    ++U.events;
     U.state = SURV_USB_COOL;
     U.t_cool = sb_ms() + (fault ? SURV_USB_COOL_FAULT_MS : SURV_USB_COOL_MS);
     kt_set(KT_SURV, KT_SURV_USB, sb_ms(), U.written ? 100 : 1000, 1);
@@ -280,6 +281,7 @@ static int refuse(const char *why)
 {
     U.why = why;
     U.refused = 1;
+    ++U.events;
     if (U.written)
         kt_set(KT_SURV, KT_SURV_USB, sb_ms(), 100, 1);    /* the charger's old mode is retried every 100 ms */
     sb_logf("survival: usb out: refused: ", why);
@@ -481,6 +483,7 @@ void surv_usb_status(struct surv_usb *s)
     s->chg_dtls = U.chg;
     s->why = U.why;
     s->refused = U.refused;
+    s->events = U.events;
 }
 
 /* ---- the emergency card: the Info app's state ("CRD2"; "CRD1" had the first six fields) --------------------- */
@@ -554,10 +557,26 @@ static void last2_keep(void)
         (void)guest_stop();
 }
 
+static const char *last2_why;
+
+const char *surv_last2_why(void)
+{
+    return last2_why;
+}
+
 int surv_last2_set(int on, const char *why)
 {
     if (!on == !last2)
         return 0;
+    if (on) {
+        struct sbos_battery b;
+        battery_get(&b);
+        if (b.ok && b.charger) {
+            last2_why = "The phone is charging: Last 2 % is for when it can't be.";
+            return -1;
+        }
+    }
+    last2_why = 0;
     last2 = on != 0;
     if (last2) {
         last2_keep();

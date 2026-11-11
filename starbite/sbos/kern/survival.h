@@ -35,6 +35,7 @@ struct surv_usb {
     int32_t ilim_ma;            /* the chip's current limit as read back */
     uint32_t bursts;            /* since the start */
     int32_t refused;            /* 1: the last start was refused (why) */
+    uint32_t events;            /* bumped at every refusal and stop: a new `why` (why is always a string literal) */
     uint8_t byp_dtls, chg_dtls; /* the chip's own status nibbles (logged) */
     const char *why;            /* refused / last stop, plain words */
 };
@@ -72,7 +73,8 @@ int surv_card_set(const struct surv_card *c);      /* 1 kept (saved with the set
 /* ---- last 2 % ---- */
 extern int surv_last2_auto;     /* enter it at 3 % instead of switching off (1, the default) */
 int surv_last2(void);
-int surv_last2_set(int on, const char *why);
+int surv_last2_set(int on, const char *why);       /* 0 done (or already so), -1 refused: surv_last2_why() */
+const char *surv_last2_why(void);
 int surv_last2_battery(int pct, int avg_mv, int charger); /* services.c: 1 = switch off now */
 
 /* ---- the offline survival guide (guide/sbguide.h; kern/guide.c) ---- */

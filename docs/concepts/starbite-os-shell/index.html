@@ -638,10 +638,12 @@ const AI = {
   browser: () => T('#ffffff', '#e9eef6', '<circle cx="50" cy="50" r="30" fill="#2f7bf6"/><path d="M50 20v60M20 50h60M28 32c12 7 32 7 44 0M28 68c12-7 32-7 44 0" stroke="#fff" stroke-width="3" fill="none"/><ellipse cx="50" cy="50" rx="13" ry="30" stroke="#fff" stroke-width="3" fill="none"/>', true),
   heat: () => T('#ff7a45', '#b3261e', FLAME),
   power: () => T('#ffd166', '#e09f1f', '<rect x="32" y="21" width="36" height="58" rx="8" fill="none" stroke="#3a2600" stroke-width="7"/><rect x="41" y="47" width="18" height="25" rx="3" fill="#3a2600"/>'),
+  /* Starbite OS Next (helper D): Maps, a street map with a park, water, a highway and the location arrow */
+  maps: () => T('#f6f3ea', '#e3decd', '<path d="M0 60C17 57 31 70 35 100H0Z" fill="#a5dc8c"/><path d="M60 0H100V46C84 42 67 27 60 0Z" fill="#86c9f6"/><path d="M0 31H100M31 0V100M74 55V100M48 76H100" stroke="#fff" stroke-width="5"/><path d="M-6 90L106 20" stroke="#fff" stroke-width="14"/><path d="M-6 90L106 20" stroke="#f5c542" stroke-width="8"/><path d="M57 33L72 69L57 61L42 69Z" fill="#0a84ff" stroke="#fff" stroke-width="4" stroke-linejoin="round"/>', true),
 };
-const APPS = [['phone','Phone'],['messages','Messages'],['contacts','Contacts'],['camera','Camera'],['photos','Photos'],['music','Music'],['calendar','Calendar'],['weather','Weather'],['clock','Clock'],['calc','Calculator'],['notes','Notes'],['files','Files'],['settings','Settings'],['light','Flashlight'],['battery','Battery'],['medical','Medical Card'],['sos','SOS'],['terminal','Terminal'],['browser','Browser'],['heat','Survival Heat'],['power','Power Saving']];
+const APPS = [['phone','Phone'],['messages','Messages'],['contacts','Contacts'],['camera','Camera'],['photos','Photos'],['music','Music'],['calendar','Calendar'],['weather','Weather'],['clock','Clock'],['calc','Calculator'],['notes','Notes'],['files','Files'],['settings','Settings'],['light','Flashlight'],['battery','Battery'],['medical','Medical Card'],['sos','SOS'],['terminal','Terminal'],['browser','Browser'],['heat','Survival Heat'],['power','Power Saving'],['maps','Maps']];
 const P1 = ['calendar','weather','clock','camera','photos','music','notes','calc'];
-const P2N = ['contacts','files','light','battery','terminal','browser','medical','sos'];
+const P2N = ['contacts','files','light','battery','terminal','browser','medical','sos','maps'];
 const P2E = ['heat','power','sos','medical','light','battery','contacts','files'];
 const DOCK = ['phone','messages','browser','settings'];
 const BADGE = { messages: 2, phone: 1 };
