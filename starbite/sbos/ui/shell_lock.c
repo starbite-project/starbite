@@ -18,6 +18,27 @@
 #define H_PT TK_HPT
 static tk_comp *C;
 
+/* P3p (audit 15): the safe margins. The S9's long edges curve away from x < 72 px and x > 1368 px (rims and
+ * highlights bend and dim there): every card, group, dock and sheet keeps MARGIN pt from the sides (iOS: 16 pt on a
+ * flat panel, 20 on the large phones), and its corners stay concentric with the display's (S9_CORNER_PT ~ 118 px) */
+#define MARGIN 20.0f
+#define CONTENT_W (390 - 2 * MARGIN)
+#define CONTENT_R (390 - MARGIN)                       /* the content's right edge */
+#define S9_CORNER_PT 32.0f
+#define CONCENTRIC(inset) tk_maxf(S9_CORNER_PT - (inset), 24)
+/* the lock's cards: the card, the lower cards of a stack 10 / 20 pt in from it, the head's icon / title / names */
+#define CARD_X MARGIN
+#define CARD_W CONTENT_W
+#define CARD_ICON (CARD_X + 11)
+#define CARD_TX (CARD_X + 69)
+#define CARD_SX (CARD_X + 81)
+#define CARD_CHEV (CARD_X + CARD_W - 32)
+/* the inset-grouped lists (Settings, Notes, the Phone's tab bar): the group and its rows' text */
+#define GROUP_X MARGIN
+#define GROUP_W CONTENT_W
+#define ROW_TX (MARGIN + 16)
+#define TAB_W (GROUP_W / 4)
+
 /* ---- the catalog as the concept groups it (P2: from the store's catalog, as the boot menu) ----------------- */
 typedef struct { const char *k, *name, *meta, *tag; int self; } sys_t;
 typedef struct { const char *key, *name; int n; sys_t it[3]; } grp_t;
@@ -457,9 +478,9 @@ static void head_content(dc *d, int g, float top)
     const grp_t *gr = &G[g];
     char tilename[40] = "t46-";
     tk_memcpy(tilename + 4, gr->key, tk_strlen(gr->key) + 1);
-    d_icon(d, tilename, 25, top + 11, 1);
+    d_icon(d, tilename, CARD_ICON, top + 11, 1);
     float b = base_of(TK_IT700, 20, top + 13.45f, 23.1f);
-    d_text(d, TK_IT700, 20, 83, b, gr->name, 0, 0, INK, 0);       /* P3j: Bold, untracked (ExtraBold -0.5 was heavy) */
+    d_text(d, TK_IT700, 20, CARD_TX, b, gr->name, 0, 0, INK, 0);       /* P3j: Bold, untracked (ExtraBold -0.5 was heavy) */
     char names[160];
     int n = 0;
     for (int i = 0; i < gr->n; i++) {
@@ -473,16 +494,16 @@ static void head_content(dc *d, int g, float top)
     em[3] = (char)('0' + gr->n);
     if (gr->n > 1) { em[11] = 's'; em[12] = 0; }
     float sb = base_of(TK_IT400, 13.5f, top + 38.55f, 0);
-    d_rrect(d, 83, sb - 7, 6, 6, 3, tk_hex(0x4cd964, 1));
+    d_rrect(d, CARD_TX, sb - 7, 6, 6, 3, tk_hex(0x4cd964, 1));
     /* P3i: the chevron at one place on every card (iOS: a row's chevron never moves); the names give way with an
      * ellipsis so the count stays whole */
-    K[g].chx = 344;
+    K[g].chx = CARD_CHEV;
     char fit[160];
-    ellipsize(fit, sizeof fit, TK_IT400, 13.5f, names, K[g].chx - 12 - 95 - tw(TK_IT400, 13.5f, em, 0, 0));
+    ellipsize(fit, sizeof fit, TK_IT400, 13.5f, names, K[g].chx - 12 - CARD_SX - tw(TK_IT400, 13.5f, em, 0, 0));
     int fl = tk_strlen(fit);
     if (tk_strcmp(fit, names)) {
         /* whole names and the rest as "+N" (audit 4: "iOS 16, macOS Ventura +1"), never cut mid-word */
-        float mw = K[g].chx - 12 - 95 - tw(TK_IT400, 13.5f, em, 0, 0);
+        float mw = K[g].chx - 12 - CARD_SX - tw(TK_IT400, 13.5f, em, 0, 0);
         int kept = gr->n;
         for (int c = n - 1; c > 0; c--) {
             if (names[c] != ',') continue;
@@ -494,8 +515,8 @@ static void head_content(dc *d, int g, float top)
         fl = tk_strlen(fit);
     }
     if (fl && fit[fl - 1] != ' ' && fl < 158) { fit[fl] = ' '; fit[fl + 1] = 0; }
-    d_text(d, TK_IT400, 13.5f, 95, sb, fit, 0, 0, W(.82f), 0);
-    d_text(d, TK_IT400, 13.5f, 95 + tw(TK_IT400, 13.5f, fit, 0, 0), sb, em, 0, 0, W(.48f), 0);
+    d_text(d, TK_IT400, 13.5f, CARD_SX, sb, fit, 0, 0, W(.82f), 0);
+    d_text(d, TK_IT400, 13.5f, CARD_SX + tw(TK_IT400, 13.5f, fit, 0, 0), sb, em, 0, 0, W(.48f), 0);
 }
 /* P3i: a lower card of the stack, iOS-style: the whole card's shape (narrower, its radius scaled with it) baked in
  * its own bitmap and faded as one; what the cards above it cover is taken out afterwards (erase_rrect) */
@@ -538,12 +559,12 @@ static void build_card(int g)
     k->gh.hidden = 1;
     if (stack(g)) {
         /* only the band that can show: from where the top card's corners begin to the lowest card's edge */
-        dc e = mk(&k->gh, "stack", 24, top + 68 - 26, 342, 26 + PEEK2, 2, 0);
+        dc e = mk(&k->gh, "stack", CARD_X + 10, top + 68 - 26, CARD_W - 20, 26 + PEEK2, 2, 0);
         float b1 = top + 68 + PEEK1, b2 = top + 68 + PEEK2;
-        ghost(e.b, e.ox, e.oy, 34, b2 - 68 * .94f, 322, 68 * .94f, 26 * .89f, .55f);
-        erase_rrect(e.b, e.ox, e.oy, 24, b1 - 68 * .97f, 342, 68 * .97f, 26 * .945f);
-        ghost(e.b, e.ox, e.oy, 24, b1 - 68 * .97f, 342, 68 * .97f, 26 * .945f, .8f);
-        erase_rrect(e.b, e.ox, e.oy, 14, top, 362, 68, 26);
+        ghost(e.b, e.ox, e.oy, CARD_X + 20, b2 - 68 * .94f, CARD_W - 40, 68 * .94f, 26 * .89f, .55f);
+        erase_rrect(e.b, e.ox, e.oy, CARD_X + 10, b1 - 68 * .97f, CARD_W - 20, 68 * .97f, 26 * .945f);
+        ghost(e.b, e.ox, e.oy, CARD_X + 10, b1 - 68 * .97f, CARD_W - 20, 68 * .97f, 26 * .945f, .8f);
+        erase_rrect(e.b, e.ox, e.oy, CARD_X, top, CARD_W, 68, 26);
         k->gh.hidden = 0;
     }
     /* P3i: the card is its face (the glass only, baked here once: a 3-slice drawn 68 pt tall when closed and as
@@ -551,13 +572,13 @@ static void build_card(int g)
      * height's glass at the tap was a 100-400 ms pause on the phone before the card moved) */
     tk_layer_init(&k->closed, "card");
     k->closed.hidden = 1;
-    dc d = mk(&k->face, "face", 14, top, 362, 68 + 12, FACE_MG, 0);
-    d_glass(&d, 14, top, 362, 68 + 12, 26, 0, 1);
+    dc d = mk(&k->face, "face", CARD_X, top, CARD_W, 68 + 12, FACE_MG, 0);
+    d_glass(&d, CARD_X, top, CARD_W, 68 + 12, 26, 0, 1);
     k->face.slice = 1;
     k->face.slice_s0 = PT(38 + FACE_MG);
     k->face.slice_s1 = PT(30 + FACE_MG);
     k->face.slice_h = PT(68 + 2 * FACE_MG);
-    d = mk(&k->head, "head", 25, top + 9, 310, 52, 1, 0);
+    d = mk(&k->head, "head", CARD_ICON, top + 9, CARD_CHEV - 4 - CARD_ICON, 52, 1, 0);
     head_content(&d, g, top);
     tk_layer_init(&k->members, "members");
     tk_layer_init(&k->open, "card");
@@ -584,17 +605,17 @@ static void build_open(int g)
     for (int i = 0; i < gr->n; i++) {
         const sys_t *s = &gr->it[i];
         float ry = top + 68 + 60 * i;
-        d = mk(&k->rows[i], "row", 20, ry - 2, 350, 58, 1, 0);
-        if (i) d_rrect(&d, 82, ry - 2, 278, .5f, 0, W(.14f));
+        d = mk(&k->rows[i], "row", CARD_X + 6, ry - 2, CARD_W - 12, 58, 1, 0);
+        if (i) d_rrect(&d, CARD_X + 68, ry - 2, CARD_W - 84, .5f, 0, W(.14f));
         char tn[40] = "t38-";
         tk_memcpy(tn + 4, s->k, tk_strlen(s->k) + 1);
-        d_icon(&d, tn, 35, ry + 9, 1);
-        d_text(&d, TK_IT700, 16.5f, 85, ry + 9.5f + 16, s->name, -.2f, 0, INK, 0);
-        d_text(&d, TK_IT400, 13, 85, ry + 30.5f + 13, s->meta, 0, 0, W(.72f), 0);
+        d_icon(&d, tn, CARD_X + 21, ry + 9, 1);
+        d_text(&d, TK_IT700, 16.5f, CARD_X + 71, ry + 9.5f + 16, s->name, -.2f, 0, INK, 0);
+        d_text(&d, TK_IT400, 13, CARD_X + 71, ry + 30.5f + 13, s->meta, 0, 0, W(.72f), 0);
         const char *tag = s->self ? "RUNNING" : !tk_strcmp(s->k, LAST) ? "LAST USED" : s->tag;
         if (tag) {
             float w = tw(TK_IT700, 10.5f, tag, .42f, 0) + 14;
-            float tx = 356 - w, ty = ry + 18.5f;
+            float tx = CARD_X + CARD_W - 20 - w, ty = ry + 18.5f;
             d_rrect(&d, tx, ty, w, 19, 9.5f, s->self ? TK_RGBA(76, 217, 100, .18f) : TK_RGBA(111, 179, 255, .18f));
             d_text(&d, TK_IT700, 10.5f, tx + 7, ty + 3 + 10, tag, .42f, 0, s->self ? tk_hex(0xc9f7d3, 1) : tk_hex(0xcfe4ff, 1), 0);
         }
@@ -639,19 +660,19 @@ static const ecard_t EC[4] = {
 static void build_ecards(void)
 {
     /* the four cards in one layer (each card's backdrop is what is drawn before it, as in the list) */
-    dc d = mk(&ecard[0], "ecards", 14, LIST_TOP + 10, 362, 78 * 3 + 68, FACE_MG, 0);
+    dc d = mk(&ecard[0], "ecards", CARD_X, LIST_TOP + 10, CARD_W, 78 * 3 + 68, FACE_MG, 0);
     for (int i = 0; i < 4; i++) {
         float top = LIST_TOP + 10 + 78 * i;
         /* P3i: no blur of the layer under each card (only the card above's shadow: ~200 ms for nothing seen) */
-        d_glass(&d, 14, top, 362, 68, 26, 0, 1);
-        d_icon(&d, EC[i].icon, 25, top + 11, 1);
+        d_glass(&d, CARD_X, top, CARD_W, 68, 26, 0, 1);
+        d_icon(&d, EC[i].icon, CARD_ICON, top + 11, 1);
         /* b: 19 / 800 / -.5, line-height 1.1 (half-leading floored); .sub 13.5, .82 */
-        d_text(&d, TK_IT700, 19, 83, top + 12.55f + tk_floorf(tk_ascent(TK_IT700, PT(19)) / TK_PT + .5f), EC[i].t, 0, 0, INK, 0);
+        d_text(&d, TK_IT700, 19, CARD_TX, top + 12.55f + tk_floorf(tk_ascent(TK_IT700, PT(19)) / TK_PT + .5f), EC[i].t, 0, 0, INK, 0);
         /* P3i: the chevron where the systems' is; a long line gives way with an ellipsis (it ran past the card) */
         char sub[96];
-        ellipsize(sub, sizeof sub, TK_IT400, 13.5f, EC[i].s, 344 - 12 - 83);
-        d_text(&d, TK_IT400, 13.5f, 83, top + 37.44f + tk_floorf(tk_ascent(TK_IT400, PT(13.5f)) / TK_PT + .5f), sub, 0, 0, W(.82f), 0);
-        d_icon(&d, "chev", 344, top + 27, 1);
+        ellipsize(sub, sizeof sub, TK_IT400, 13.5f, EC[i].s, CARD_CHEV - 12 - CARD_TX);
+        d_text(&d, TK_IT400, 13.5f, CARD_TX, top + 37.44f + tk_floorf(tk_ascent(TK_IT400, PT(13.5f)) / TK_PT + .5f), sub, 0, 0, W(.82f), 0);
+        d_icon(&d, "chev", CARD_CHEV, top + 27, 1);
     }
     float top = LIST_TOP + 10 + 78 * 4 - 10 + 12, w = 14 + tw(TK_IT600, 13, "Exit Emergency", 0, 0) + 14, x = 195 - w / 2;
     d = mk(&ecard[4], "eexit", x, top, w, 32, 44, 1);
@@ -711,10 +732,10 @@ static void place_list(void)
         k->face.y = k->face.by + dy;
         k->head.y = k->head.by + dy;
         k->chev.y = k->chev.by + dy;
-        k->chev.clip_r = (tk_rect){ PT(14), PT(top), PT(362), PT(68) };
+        k->chev.clip_r = (tk_rect){ PT(CARD_X), PT(top), PT(CARD_W), PT(68) };
         float h = 68 + k->memh;
         k->face.slice_h = PT(h + 2 * FACE_MG);
-        k->members.clip_r = (tk_rect){ PT(14), PT(top + 68), PT(362), PT(k->memh) };
+        k->members.clip_r = (tk_rect){ PT(CARD_X), PT(top + 68), PT(CARD_W), PT(k->memh) };
         float p = k->full > 0 ? k->memh / (k->to > k->from ? k->full : tk_maxf(1, k->from)) : 0;
         if (!k->sp.live) p = k->isopen ? 1 : 0;
         for (int i = 0; i < G[g].n; i++) {
@@ -883,7 +904,7 @@ static void build_home(void)
         hsearch[1].hidden = hsearch[2].hidden = 1;
     }
     d = mk(&hparts[3], "home-dock", 0, 650, 390, 152, 0, 1);
-    d_glass(&d, 12, 688, 366, 96, 36, 0, 1);
+    d_glass(&d, MARGIN, 688, CONTENT_W, 96, CONCENTRIC(MARGIN), 0, 1);   /* P3p: off the curved edges, concentric */
     for (int i = 0; i < 4; i++) {
         float x = 22 + 86.5f * i + 12.25f;
         char n[40] = "a62-";
@@ -904,6 +925,14 @@ static void build_home(void)
 static float focus_sy;
 
 /* ---- the focus sheet --------------------------------------------------------------------------------------- */
+/* P3p (audit 15): MARGIN from the sides; the slide to start 20 pt inside it */
+#define FOC_X MARGIN
+#define FOC_W CONTENT_W
+#define FOC_Y 196.0f
+#define FOC_H 267.0f
+#define FOC_R 32.0f
+#define SL_X (FOC_X + 20)
+#define SL_W (FOC_W - 40)
 static tk_layer focus, funder, scrim, fgrp, fcard, ffill, flabel, fthumb;
 /* a closed sheet keeps nothing of its own (about 19 MB); the glass faces made once stay */
 static void free_focus(void)
@@ -949,26 +978,26 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     for (int pass = 0; pass < 1; pass++) {
         tk_layer *L = &fcard;
         relayer(L);
-        dc d = mk(L, "fcard", 14, 196, 362, 267, 44, 0);
+        dc d = mk(L, "fcard", FOC_X, FOC_Y, FOC_W, FOC_H, 44, 0);
         if (!pass) {
             /* straight from the half-resolution scrim (it is already a blur) */
-            tk_glass_from_half(d.b, (int)d.ox, (int)d.oy, &scrim.bmp, PT(14) - d.ox, PT(196) - d.oy, PT(362), PT(267), PT(32));
+            tk_glass_from_half(d.b, (int)d.ox, (int)d.oy, &scrim.bmp, PT(FOC_X) - d.ox, PT(FOC_Y) - d.oy, PT(FOC_W), PT(FOC_H), PT(FOC_R));
         }
         /* the card's glass (geometry only: the same for every system) is baked once and kept */
         {
             static tk_layer face;
             if (!face.bmp.px) {
-                dc fd = mk(&face, "fcard-face", 14, 196, 362, 267, 44, 0);
-                d_glass(&fd, 14, 196, 362, 267, 32, 0, 1);
+                dc fd = mk(&face, "fcard-face", FOC_X, FOC_Y, FOC_W, FOC_H, 44, 0);
+                d_glass(&fd, FOC_X, FOC_Y, FOC_W, FOC_H, FOC_R, 0, 1);
             }
             tk_blit(d.b, &face.bmp, (int)(face.x - d.ox), (int)(face.y - d.oy), 1);
         }
         lap_us("focus: the card's backdrop and glass", tk_us() - tb0);
         char tn[40] = "t66-";
         tk_memcpy(tn + 4, s->k, tk_strlen(s->k) + 1);
-        d_icon(&d, tn, 34, 216, 1);
-        d_text(&d, TK_IT600, 13, 114, 225.16f + 13, gr->name, 0, 0, W(.62f), 0);
-        d_text(&d, TK_IT700, 27, 114, base_of(TK_IT700, 27, 243.16f, 29.7f), s->name, 0, 0, INK, 0);
+        d_icon(&d, tn, SL_X, FOC_Y + 20, 1);
+        d_text(&d, TK_IT600, 13, FOC_X + 100, FOC_Y + 29.16f + 13, gr->name, 0, 0, W(.62f), 0);
+        d_text(&d, TK_IT700, 27, FOC_X + 100, base_of(TK_IT700, 27, FOC_Y + 47.16f, 29.7f), s->name, 0, 0, INK, 0);
         int last = !tk_strcmp(s->k, LAST);
         const char *dt[3] = { "Version", last ? "Last used" : "When it shuts down", "When it shuts down" };
         const char *dd[3] = { s->meta, last ? "Today" : "Back to Starbite", "Back to Starbite" };
@@ -976,49 +1005,49 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         float dtw = 0;
         for (int i = 0; i < nf; i++) dtw = tk_maxf(dtw, tw(TK_IT400, 14.5f, dt[i], 0, 0));
         for (int i = 0; i < nf; i++) {
-            float b = 298 + 24 * i + 14;
-            d_text(&d, TK_IT400, 14.5f, 34, b, dt[i], 0, 0, W(.55f), 0);
-            d_text(&d, TK_IT400, 14.5f, 34 + dtw + 14, b, dd[i], 0, TK_TNUM, INK, 0);
+            float b = FOC_Y + 102 + 24 * i + 14;
+            d_text(&d, TK_IT400, 14.5f, SL_X, b, dt[i], 0, 0, W(.55f), 0);
+            d_text(&d, TK_IT400, 14.5f, SL_X + dtw + 14, b, dd[i], 0, TK_TNUM, INK, 0);
         }
-        sy = 298 + 17 * nf + 7 * (nf - 1) + 18;
+        sy = FOC_Y + 102 + 17 * nf + 7 * (nf - 1) + 18;
         /* the slider: dark glass whose backdrop is the card under it; its glass kept per position (2 or 3 facts) */
-        tk_glass_local(d.b, d.b, PT(34) - d.ox, PT(sy) - d.oy, PT(322), PT(62), PT(31));
+        tk_glass_local(d.b, d.b, PT(SL_X) - d.ox, PT(sy) - d.oy, PT(SL_W), PT(62), PT(31));
         {
             static tk_layer sface[2];
             tk_layer *sf = &sface[nf == 3];
             if (!sf->bmp.px) {
-                dc fd = mk(sf, "slider-face", 34, sy, 322, 62, 44, 0);
-                d_glass(&fd, 34, sy, 322, 62, 31, 1, 1);
+                dc fd = mk(sf, "slider-face", SL_X, sy, SL_W, 62, 44, 0);
+                d_glass(&fd, SL_X, sy, SL_W, 62, 31, 1, 1);
             }
             tk_blit(d.b, &sf->bmp, (int)(sf->x - d.ox), (int)(sf->y - d.oy), 1);
         }
     }
     relayer(&ffill);
     focus_sy = sy;
-    dc f = mk(&ffill, "fill", 34, sy, 62, 62, 1, 0);
-    d_rrect(&f, 34, sy, 62, 62, 31, TK_RGBA(111, 179, 255, .28f));
+    dc f = mk(&ffill, "fill", SL_X, sy, 62, 62, 1, 0);
+    d_rrect(&f, SL_X, sy, 62, 62, 31, TK_RGBA(111, 179, 255, .28f));
     ffill.slice = 2;
     ffill.slice_s0 = PT(32);
     ffill.slice_s1 = PT(32);
     relayer(&flabel);
-    dc l = mk(&flabel, "label", 34, sy, 322, 62, 1, 0);
+    dc l = mk(&flabel, "label", SL_X, sy, SL_W, 62, 1, 0);
     {
         char lbl[96] = "slide to start ";
         tk_memcpy(lbl + 15, s->name, tk_strlen(s->name) + 1);
         float w = tw(TK_IT600, 16.5f, lbl, 0, 0);
         /* background: 90 deg .4 -> 1 @45 % -> .4 @60 % over 200 % of the box, position 0 (the shine at rest) */
         tk_stop st[3] = { { 0, W(.4f) }, { .45f, W(1) }, { .6f, W(.4f) } };
-        tk_paint p = tk_linear(90, PT(34) - l.ox, PT(sy) - l.oy, PT(644), PT(62), 3, st);
-        tk_text(l.b, TK_IT600, PT(16.5f), PT(34 + 44 + (322 - 44 - w) / 2) - l.ox, PT(base_of(TK_IT600, 16.5f, sy + 21, 0)) - l.oy, lbl, 0, 0, &p, 0);
+        tk_paint p = tk_linear(90, PT(SL_X) - l.ox, PT(sy) - l.oy, PT(2 * SL_W), PT(62), 3, st);
+        tk_text(l.b, TK_IT600, PT(16.5f), PT(SL_X + 44 + (SL_W - 44 - w) / 2) - l.ox, PT(base_of(TK_IT600, 16.5f, sy + 21, 0)) - l.oy, lbl, 0, 0, &p, 0);
     }
     relayer(&fthumb);
-    dc t = mk(&fthumb, "thumb", 39, sy + 5, 52, 52, 20, 0);
-    tk_box_shadow(t.b, PT(39) - t.ox, PT(sy + 5) - t.oy, PT(52), PT(52), PT(26), 0, PT(2), PT(12), 0, TK_RGBA(0, 0, 0, .35f), 0);
-    d_rrect(&t, 39, sy + 5, 52, 52, 26, W(1));
-    d_icon(&t, "arrow", 54, sy + 20, 1);
+    dc t = mk(&fthumb, "thumb", SL_X + 5, sy + 5, 52, 52, 20, 0);
+    tk_box_shadow(t.b, PT(SL_X + 5) - t.ox, PT(sy + 5) - t.oy, PT(52), PT(52), PT(26), 0, PT(2), PT(12), 0, TK_RGBA(0, 0, 0, .35f), 0);
+    d_rrect(&t, SL_X + 5, sy + 5, 52, 52, 26, W(1));
+    d_icon(&t, "arrow", SL_X + 20, sy + 20, 1);
     tk_layer_init(&fgrp, "fgrp");
     fgrp.ox = PT(195);
-    fgrp.oy = PT(196 + .4f * 267);
+    fgrp.oy = PT(FOC_Y + .4f * FOC_H);
     tk_layer_add(&fgrp, &fcard);
     tk_layer_add(&fgrp, &ffill);
     tk_layer_add(&fgrp, &flabel);
@@ -1482,10 +1511,10 @@ __attribute__((unused)) static float d_prow(dc *d, float y, const char *name, in
         d_text(d, TK_IT400, 16, rx, rb, right, 0, TK_TNUM, W(.55f), 0);
         if (dot) d_rrect(d, 358 - 9, rb - 9, 9, 9, 4.5f, tk_hex(0x2f7bf6, 1));
     }
-    if (!last) d_rrect(d, 16, y + rh, 358, 1, 0, W(.08f));
+    if (!last) d_rrect(d, GROUP_X, y + rh, GROUP_W, 1, 0, W(.08f));
     return rh + 1;
 }
-__attribute__((unused)) static void d_group(dc *d, float y, int n, int sub) { d_rrect(d, 16, y, 358, (sub ? 63.0f : 61.0f) * n - 1, 16, tk_hex(0x151c33, 1)); }
+__attribute__((unused)) static void d_group(dc *d, float y, int n, int sub) { d_rrect(d, GROUP_X, y, GROUP_W, (sub ? 63.0f : 61.0f) * n - 1, 16, tk_hex(0x151c33, 1)); }
 
 static const char *const KD[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#" };
 static const char *const KL[12] = { "", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ", "", "+", "" };
@@ -1497,17 +1526,17 @@ static void phone_tabs(dc *d)
 {
     static const char *const TK[4] = { "fav", "rec", "con", "pad" };
     static const char *const TL[4] = { "Favourites", "Recents", "Contacts", "Keypad" };
-    d_lg_flat(d, 16, 718, 358, 62, 31, 1);   /* P3i: over the flat ground (the backdrop's blur cost ~40 ms a build) */
+    d_lg_flat(d, GROUP_X, 718, GROUP_W, 62, 31, 1);   /* P3i: over the flat ground (the backdrop's blur cost ~40 ms a build) */
     for (int i = 0; i < 4; i++) {
-        float bx = 16 + 89.5f * i;
+        float bx = GROUP_X + TAB_W * i;
         char n[16] = "tab-";
         int k = 4;
         for (const char *c = TK[i]; *c; c++) n[k++] = *c;
         if (i == AS.tab) { n[k++] = '-'; n[k++] = 'o'; n[k++] = 'n'; }
         n[k] = 0;
-        d_icon(d, n, bx + 33.75f, 730.5f, 1);
+        d_icon(d, n, bx + (TAB_W - 22) / 2, 730.5f, 1);
         float w = tw(TK_IT600, 10.5f, TL[i], 0, 0);
-        d_text(d, TK_IT600, 10.5f, bx + (89.5f - w) / 2, bl(TK_IT600, 10.5f, 754.5f), TL[i], 0, 0, i == AS.tab ? ACCENT() : W(.6f), 0);
+        d_text(d, TK_IT600, 10.5f, bx + (TAB_W - w) / 2, bl(TK_IT600, 10.5f, 754.5f), TL[i], 0, 0, i == AS.tab ? ACCENT() : W(.6f), 0);
     }
 }
 /* P2y: an honest empty state (iOS's ContentUnavailableView): a title and up to three lines, centred, grey */
@@ -1565,9 +1594,9 @@ static void page_messages(dc *d)
 {
     if (AS.thread < 0) {
         d_h1(d, "Messages");
-        d_lg_flat(d, 16, 117, 358, 44, 22, 1);   /* P3i: over the flat ground (the backdrop's blur cost ~40 ms a build) */
-        d_icon(d, "search15", 30, 131.5f, 1);
-        d_text(d, TK_IT400, 17, 53, 128 + 1 + tk_floorf(tk_ascent(TK_IT400, PT(17)) / TK_PT + .5f), "Search", 0, 0, tk_hex(0xa9a9a9, 1), 0);
+        d_lg_flat(d, GROUP_X, 117, GROUP_W, 44, 22, 1);   /* P3i: over the flat ground (the backdrop's blur cost ~40 ms a build) */
+        d_icon(d, "search15", GROUP_X + 14, 131.5f, 1);
+        d_text(d, TK_IT400, 17, GROUP_X + 37, 128 + 1 + tk_floorf(tk_ascent(TK_IT400, PT(17)) / TK_PT + .5f), "Search", 0, 0, tk_hex(0xa9a9a9, 1), 0);
         d_empty(d, 360, "No Messages", "Text messages need a SIM card. This phone doesn't send or receive any yet.");
         return;
     }
@@ -1593,7 +1622,7 @@ static void page_messages(dc *d)
         int n = wrap(ln, TK_IT400, 16, s, 267.88f, &wmax);
         int heart = AS.thread == 1 && i == 1;
         if (heart) wmax += tw(TK_IT400, 16, " ", 0, 0) + 20;
-        float bw = (n > 1 ? 267.88f : wmax) + 26, bh = 18 + 20.8f * n, bx = out ? 376 - bw : 14;
+        float bw = (n > 1 ? 267.88f : wmax) + 26, bh = 18 + 20.8f * n, bx = out ? CONTENT_R - bw : MARGIN;
         tk_corner = (tk_r4){ PT(20), PT(20), PT(out ? 6 : 20), PT(out ? 20 : 6) };
         tk_use_r4 = 1;
         d_rrect(d, bx, y, bw, bh, 20, tk_hex(out ? 0x2f7bf6 : 0x262c3e, 1));
@@ -1602,10 +1631,10 @@ static void page_messages(dc *d)
         if (heart) d_icon(d, "heart", bx + 13 + tw(TK_IT400, 16, "Thanks ", 0, 0), y + 9, 1);
         y += bh + 5;
     }
-    d_lg_app(d, 12, 734, 322, 40, 20, 1);
-    d_text(d, TK_IT400, 16, 28, 734 + 10 + tk_floorf(tk_ascent(TK_IT400, PT(16)) / TK_PT + .5f), "Text message", 0, 0, tk_hex(0xa9a9a9, 1), 0);
-    d_rrect(d, 342, 736, 36, 36, 18, tk_hex(0x2f7bf6, 1));
-    d_icon(d, "send", 352, 746, 1);
+    d_lg_app(d, MARGIN, 734, CONTENT_W - 44, 40, 20, 1);
+    d_text(d, TK_IT400, 16, MARGIN + 16, 734 + 10 + tk_floorf(tk_ascent(TK_IT400, PT(16)) / TK_PT + .5f), "Text message", 0, 0, tk_hex(0xa9a9a9, 1), 0);
+    d_rrect(d, CONTENT_R - 36, 736, 36, 36, 18, tk_hex(0x2f7bf6, 1));
+    d_icon(d, "send", CONTENT_R - 26, 746, 1);
 }
 __attribute__((unused)) static void hsl(float h, float s, float l, float *r, float *g, float *b)
 {
@@ -1947,7 +1976,7 @@ static void page_calendar(dc *d)
         float w = tw(TK_IT600, 13, H[c], 0, 0);
         d_text(d, TK_IT600, 13, 20 + 50 * c + (50 - w) / 2, bl(TK_IT600, 13, 122), H[c], 0, 0, W(c >= 5 ? .4f : .6f), 0);
     }
-    d_rrect(d, 16, 146, 358, .5f, 0, W(.15f));
+    d_rrect(d, MARGIN, 146, CONTENT_W, .5f, 0, W(.15f));
     static const int DIM[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
     int m = (ST.mon + 11) % 12, nd = DIM[m];
     if (m == 1 && ((cal_year % 4 == 0 && cal_year % 100 != 0) || cal_year % 400 == 0)) nd = 29;
@@ -1964,7 +1993,7 @@ static void page_calendar(dc *d)
         d_text(d, today ? TK_IT700 : TK_IT400, 20, cx - w / 2, bl(TK_IT400, 20, cy - 13), b, 0, TK_TNUM, today || c < 5 ? INK : W(.5f), 0);
     }
     float y = 160 + 56 * 6 + 10;
-    d_rrect(d, 16, y, 358, .5f, 0, W(.15f));
+    d_rrect(d, MARGIN, y, CONTENT_W, .5f, 0, W(.15f));
     char dt[48];
     const char *wd = WD[ST.wday % 7];
     int n = (int)tk_strlen(wd);
@@ -1982,7 +2011,7 @@ static void page_display(dc *d)
     d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Settings", 0, 0, ACCENT(), 0);
     d_text(d, TK_IT700, 30, 20, bl(TK_IT700, 30, 96), "Display & Brightness", 0, 0, INK, 0);
     d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 162), "BRIGHTNESS", .52f, 0, W(.55f), 0);
-    d_rrect(d, 16, 184, 358, 64, 16, tk_hex(0x151c33, 1));
+    d_rrect(d, GROUP_X, 184, GROUP_W, 64, 16, tk_hex(0x151c33, 1));
     int lv = cc_bright ? cc_bright : 3;
     d_rrect(d, 60, 208, 270, 16, 8, W(.18f));
     d_rrect(d, 60, 208, 270.0f * lv / 4, 16, 8, W(.95f));
@@ -2070,12 +2099,12 @@ static void page_notes(dc *d)
         d_h1(d, "Notes");
         d_text(d, TK_IT600, 17, 330, bl(TK_IT600, 17, 53), "New", 0, 0, tk_hex(0xffd60a, 1), 0);
         if (!NS.n) { d_empty(d, 330, "No Notes", "Tap New to write one. Notes are kept until the phone restarts."); return; }
-        d_rrect(d, 16, 117, 358, 56.0f * NS.n - 1, 16, tk_hex(0x151c33, 1));
+        d_rrect(d, GROUP_X, 117, GROUP_W, 56.0f * NS.n - 1, 16, tk_hex(0x151c33, 1));
         for (int i = 0; i < NS.n; i++) {
             char t[48];
             note_title(NOTES[NS.n - 1 - i], t);
-            d_text(d, TK_IT600, 17, 32, bl(TK_IT600, 17, 117 + 56 * i + 17), t, 0, 0, INK, 0);
-            if (i + 1 < NS.n) d_rrect(d, 32, 117 + 56 * i + 55, 342, .5f, 0, W(.1f));
+            d_text(d, TK_IT600, 17, ROW_TX, bl(TK_IT600, 17, 117 + 56 * i + 17), t, 0, 0, INK, 0);
+            if (i + 1 < NS.n) d_rrect(d, ROW_TX, 117 + 56 * i + 55, CONTENT_R - ROW_TX, .5f, 0, W(.1f));
         }
         return;
     }
@@ -2125,7 +2154,7 @@ static void notes_tap(float x, float y)
             NOTES[NS.n][0] = 0;
             NS.cur = NS.n++;
             NS.view = 1; NS.shift = 1; NS.num = 0;
-        } else if (y >= 117 && y < 117 + 56 * NS.n && x >= 16 && x < 374) {
+        } else if (y >= 117 && y < 117 + 56 * NS.n && x >= GROUP_X && x < GROUP_X + GROUP_W) {
             NS.cur = NS.n - 1 - (int)((y - 117) / 56);
             NS.view = 1; NS.shift = 0; NS.num = 0;
         } else return;
@@ -2435,34 +2464,34 @@ static void build_app_page(int a)
         } else
             y += 18;
         float gh = 47.0f * S->n - 1;
-        d_rrect(&d, 16, y, 358, gh, 16, tk_hex(0x151c33, 1));
+        d_rrect(&d, GROUP_X, y, GROUP_W, gh, 16, tk_hex(0x151c33, 1));
         for (int r = 0; r < S->n; r++) {
             float ry = y + 47 * r;
             char lb[48], rb[48];
-            float lx = 32;
+            float lx = ROW_TX;
             const setico *si = set_icon(A->k, S->rows[r].l);
             if (si) {
                 /* P3i: iOS Settings' 29 pt colour square with its white glyph; the label and the rule after it */
-                d_rrect(&d, 32, ry + 9, 29, 29, 7, tk_hex(si->col, 1));
+                d_rrect(&d, ROW_TX, ry + 9, 29, 29, 7, tk_hex(si->col, 1));
                 const tk_bmp *ic = tk_icon(si->glyph);
                 if (ic) {
                     float pad = tk_icon_pad(si->glyph);
-                    tk_blit_tinted(d.b, ic, (int)tk_floorf(PT(32 + (29 - si->w) / 2) - pad - d.ox + .5f),
+                    tk_blit_tinted(d.b, ic, (int)tk_floorf(PT(ROW_TX + (29 - si->w) / 2) - pad - d.ox + .5f),
                                    (int)tk_floorf(PT(ry + 9 + (29 - si->h) / 2) - pad - d.oy + .5f), W(1));
                 }
-                lx = 32 + 29 + 13;
+                lx = ROW_TX + 29 + 13;
             }
             d_text(&d, TK_IT400, 16, lx, ry + 13 + 16, live_text(S->rows[r].l, lb), 0, 0, INK, 0);
             int nav = !tk_strcmp(A->k, "settings") && (!tk_strcmp(S->rows[r].l, "Display & Brightness") || !tk_strcmp(S->rows[r].l, "Wi-Fi") ||
                                                        !tk_strcmp(S->rows[r].l, "Cellular"));
-            if (nav) d_icon(&d, "chev", 344, ry + 16.5f, .45f);
+            if (nav) d_icon(&d, "chev", CONTENT_R - 30, ry + 16.5f, .45f);
             const char *rt = live_text(S->rows[r].r, rb);
             if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Cellular")) rt = md_text();
             if (rt[0]) {
                 float w = tw(TK_IT400, 16, rt, 0, TK_TNUM);
-                d_text(&d, TK_IT400, 16, (nav ? 338 : 358) - w, ry + 13 + 16, rt, 0, TK_TNUM, W(.55f), 0);
+                d_text(&d, TK_IT400, 16, (nav ? CONTENT_R - 36 : CONTENT_R - 16) - w, ry + 13 + 16, rt, 0, TK_TNUM, W(.55f), 0);
             }
-            if (r + 1 < S->n) d_rrect(&d, lx, ry + 46, 374 - lx, .5f, 0, W(.08f));
+            if (r + 1 < S->n) d_rrect(&d, lx, ry + 46, CONTENT_R - lx, .5f, 0, W(.08f));
         }
         y += gh;
     }
@@ -2854,8 +2883,8 @@ static int is_app(const char *k) { return AP.on && !tk_strcmp(APPS[AP.a].k, k); 
 static void app_tap(float x, float y)
 {
     if (is_app("phone")) {
-        if (y >= 718 && y <= 780 && x >= 16 && x < 374) {
-            int t = (int)((x - 16) / 89.5f);
+        if (y >= 718 && y <= 780 && x >= GROUP_X && x < GROUP_X + GROUP_W) {
+            int t = tk_mini(3, (int)((x - GROUP_X) / TAB_W));
             if (t != AS.tab) { AS.tab = t; if (t != 3) AS.num[0] = 0; build_app_page(AP.a); }
             return;
         }
@@ -2903,9 +2932,9 @@ static void app_tap(float x, float y)
             build_app_page(AP.a);
         }
     } else if (is_app("settings")) {
-        if (x >= 16 && x < 374 && y >= 293 && y < 340) { AS.sub = 1; build_app_page(AP.a); return; }
-        if (x >= 16 && x < 374 && y >= 135 && y < 182) { AS.sub = 2; build_app_page(AP.a); return; }   /* Wi-Fi */
-        if (x >= 16 && x < 374 && y >= 182 && y < 229) { AS.sub = 3; build_app_page(AP.a); return; }   /* Cellular */
+        if (x >= GROUP_X && x < CONTENT_R && y >= 293 && y < 340) { AS.sub = 1; build_app_page(AP.a); return; }
+        if (x >= GROUP_X && x < CONTENT_R && y >= 135 && y < 182) { AS.sub = 2; build_app_page(AP.a); return; }   /* Wi-Fi */
+        if (x >= GROUP_X && x < CONTENT_R && y >= 182 && y < 229) { AS.sub = 3; build_app_page(AP.a); return; }   /* Cellular */
     } else if (is_app("messages")) {
         if (AS.thread < 0) {
             (void)x; (void)y;                         /* P2y: no conversations (no SIM): nothing to open */
@@ -3291,6 +3320,20 @@ void sh_set(const char *what, const char *key, float v)
     } else if (!tk_strcmp(what, "thread")) {
         AS.thread = key[0] - '0';
         build_app_page(AP.a);
+    } else if (!tk_strcmp(what, "sub")) {
+        /* the stills: a Settings page (display, wifi, cell; nothing is switched on) */
+        AS.sub = !tk_strcmp(key, "display") ? 1 : !tk_strcmp(key, "wifi") ? 2 : !tk_strcmp(key, "cell") ? 3 : 0;
+        if (AP.on) build_app_page(AP.a);
+    } else if (!tk_strcmp(what, "note")) {
+        /* the stills: a note with this text open in the editor (v 0), or back to the list (v 1) */
+        if (key[0] && NS.n < NNOTES) {
+            int n = 0;
+            while (key[n] && n < NOTELEN - 1) { NOTES[NS.n][n] = key[n]; n++; }
+            NOTES[NS.n][n] = 0;
+            NS.cur = NS.n++;
+        }
+        NS.view = v < 1;
+        if (AP.on) build_app_page(AP.a);
     } else if (!tk_strcmp(what, "toast")) {
         toast(key);
         toast_t = 1;
@@ -3332,13 +3375,13 @@ static int hit_head(float x, float y)
         float top = 10, yy = 10;
         for (int h = 0; h < g; h++) yy += 68 + K[h].memh + STACK_GAP(h);
         top = yy;
-        if (cy >= top && cy < top + 68 && x >= 14 && x < 376) return g;
+        if (cy >= top && cy < top + 68 && x >= CARD_X && x < CARD_X + CARD_W) return g;
     }
     return -1;
 }
 static int hit_row(float x, float y, int *gi)
 {
-    if (y < LIST_TOP || y > LIST_TOP + LIST_H || x < 20 || x > 370) return -1;
+    if (y < LIST_TOP || y > LIST_TOP + LIST_H || x < CARD_X + 6 || x > CARD_X + CARD_W - 6) return -1;
     float cy = y - LIST_TOP + scroll, yy = 10;
     for (int g = 0; g < NG; g++) {
         if (K[g].memh > 1)
@@ -3370,8 +3413,8 @@ void sh_touch(int phase, float x, float y, float t)
         }
         if (focus_on) {
             float sy = focus_sy;
-            if (x >= 39 + thumb_x && x <= 91 + thumb_x && y >= sy + 5 && y <= sy + 57) { T.kind = G_THUMB; T.base = thumb_x; sp_thumb.live = 0; }
-            else if (y < 196 || y > 463) T.kind = G_SCRIM;
+            if (x >= SL_X + 5 + thumb_x && x <= SL_X + 57 + thumb_x && y >= sy + 5 && y <= sy + 57) { T.kind = G_THUMB; T.base = thumb_x; sp_thumb.live = 0; }
+            else if (y < FOC_Y || y > FOC_Y + FOC_H) T.kind = G_SCRIM;
             return;
         }
         if (!locked && AP.on) {
@@ -3436,7 +3479,7 @@ void sh_touch(int phase, float x, float y, float t)
             T.arg = -1;
             for (int i = 0; i < 4; i++) {
                 float top = LIST_TOP + 10 + 78 * i;
-                if (y >= top && y < top + 68 && x >= 14 && x < 376) T.arg = i;
+                if (y >= top && y < top + 68 && x >= CARD_X && x < CARD_X + CARD_W) T.arg = i;
             }
             if (y >= 630 && y < 670 && x >= 120 && x < 270) T.arg = 4;
             tk_tracker_add(&T.tr, y, t);
@@ -3456,7 +3499,7 @@ void sh_touch(int phase, float x, float y, float t)
         switch (T.kind) {
         case G_THUMB:
             tk_tracker_add(&T.tr, x, t);
-            set_thumb(tk_clampf(T.base + x - T.x0, 0, 322 - 62));
+            set_thumb(tk_clampf(T.base + x - T.x0, 0, SL_W - 62));
             break;
         case G_APPTAP:
             if (T.moved && !apkey.hidden) key_down(-1);
@@ -3530,7 +3573,7 @@ void sh_touch(int phase, float x, float y, float t)
     /* up */
     switch (T.kind) {
     case G_THUMB:
-        if (thumb_x > (322 - 62) * .86f) { set_thumb(322 - 62); booting = 1; boot_t = -100; }
+        if (thumb_x > (SL_W - 62) * .86f) { set_thumb(SL_W - 62); booting = 1; boot_t = -100; }
         else tk_spring_start(&sp_thumb, thumb_x, 0, 0, TK_SPR_SHEET);
         break;
     case G_SCRIM:
