@@ -1,0 +1,534 @@
+--- a/starbite/guest/sbos/guest.c
++++ b/starbite/guest/sbos/guest.c
+@@ -74,12 +74,13 @@
+ /* 1.2-alpha3: two guests from the same service: the app demo (the S9 Linux, 720 x 1440 at 2x) and the terminal
+  * (the guest kernel of its own, a shell on fbcon in Terminus 16 x 32, 720 x 1060 at 2x above Starbite's keyboard) */
+ static int mode = GUEST_APP, term_ok;
+-static const char *const names[2][3] __attribute__((unused)) = {
++static const char *const names[3][3] __attribute__((unused)) = {
+     {GUEST_STORE_IMAGE, GUEST_STORE_DTB, GUEST_STORE_RD},
+     {GUEST_TERM_IMAGE, GUEST_TERM_DTB, GUEST_TERM_RD},
++    {GUEST_WL_IMAGE, GUEST_WL_DTB, GUEST_WL_RD},
+ };
+-static unsigned surf_w(void) { return mode == GUEST_TERM ? GUEST_TERM_W : SW; }
+-static unsigned surf_h(void) { return mode == GUEST_TERM ? GUEST_TERM_H : SH; }
++static unsigned surf_w(void) { return mode == GUEST_TERM ? GUEST_TERM_W : mode == GUEST_WL ? GUEST_WL_W : SW; }
++static unsigned surf_h(void) { return mode == GUEST_TERM ? GUEST_TERM_H : mode == GUEST_WL ? GUEST_WL_H : SH; }
+ int guest_mode(void) { return mode; }
+ int guest_scale(void) { return 2; }      /* (the terminal: a 16 x 32 font instead of 8 x 16 at 4x) */
+ int guest_term_ok(void) { return term_ok; }
+@@ -189,7 +190,7 @@
+ int guest_available_mode(int m)
+ {
+     struct store_ent e;
+-    m = m == GUEST_TERM ? GUEST_TERM : GUEST_APP;
++    m = m == GUEST_TERM || m == GUEST_WL ? m : GUEST_APP;
+     return store_find(names[m][0], &e) && store_find(names[m][1], &e) && store_find(names[m][2], &e);
+ }
+ int guest_available(void) { return guest_available_mode(GUEST_APP); }
+@@ -205,7 +206,7 @@
+ 
+ int guest_start_mode(int m)
+ {
+-    m = m == GUEST_TERM ? GUEST_TERM : GUEST_APP;
++    m = m == GUEST_TERM || m == GUEST_WL ? m : GUEST_APP;
+     if (!sb_up)
+         return -1;
+     if (st != GUEST_OFF && st != GUEST_FAILED)
+@@ -219,7 +220,8 @@
+         return -3;
+     }
+     if (!store_find(names[m][0], &ld_i) || !store_find(names[m][1], &ld_d) || !store_find(names[m][2], &ld_r)) {
+-        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" : "the Linux files are not in the store";
++        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" :
++              m == GUEST_WL ? "the Linux apps' files are not in the store" : "the Linux files are not in the store";
+         return -4;
+     }
+     why = "";
+@@ -506,14 +508,14 @@
+ int guest_available_mode(int m)
+ {
+     const char *g = getenv("SBOS_HOST_GUEST");
+-    return g && (m != GUEST_TERM || g[0] != 'a');
++    return g && (m == GUEST_APP || g[0] != 'a');
+ }
+ int guest_available(void) { return guest_available_mode(GUEST_APP); }
+ int guest_start(void) { return guest_start_mode(GUEST_APP); }
+ 
+ int guest_start_mode(int m)
+ {
+-    m = m == GUEST_TERM ? GUEST_TERM : GUEST_APP;
++    m = m == GUEST_TERM || m == GUEST_WL ? m : GUEST_APP;
+     if (!sb_up || (st != GUEST_OFF && st != GUEST_FAILED))
+         return -1;
+     if (heater_m3_busy()) {
+@@ -521,7 +523,8 @@
+         return -2;
+     }
+     if (!guest_available_mode(m)) {
+-        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" : "the Linux files are not in the store";
++        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" :
++              m == GUEST_WL ? "the Linux apps' files are not in the store" : "the Linux files are not in the store";
+         return -4;
+     }
+     mode = m;
+@@ -663,7 +666,7 @@
+         int hit = 0;
+         for (int i = 0; typed[i]; ++i)
+             hit |= sb_prefix(typed + i, "STARBITE-TERM-OK");
+-        if (hit && mode == GUEST_TERM) {
++        if (hit && mode != GUEST_APP) {
+             term_ok = 1;
+             sb_log("linux| STARBITE-TERM-OK (fake)");
+         }
+--- a/starbite/guest/sbos/guest.h
++++ b/starbite/guest/sbos/guest.h
+@@ -20,14 +20,21 @@
+ #define GUEST_TERM_RD     "guest-term-rd.img"
+ #define GUEST_TERM_W 720U
+ #define GUEST_TERM_H 1060U
+-enum { GUEST_APP = 0, GUEST_TERM = 1 };
++/* L2 (docs/STARBITE-LINUX-APPS.md): Linux apps for Starbite OS Next: the guest kernel of its own with sbwl (our
++ * Wayland compositor) and foot; the window between Next's status bar and keyboard: 720 x 916 = 1440 x 1832 at 2x */
++#define GUEST_WL_IMAGE    "guest-wl.img"
++#define GUEST_WL_DTB      "guest-wl.dtb"
++#define GUEST_WL_RD       "guest-wl-rd.img"
++#define GUEST_WL_W 720U
++#define GUEST_WL_H 916U
++enum { GUEST_APP = 0, GUEST_TERM = 1, GUEST_WL = 2 };
+ 
+ enum { GUEST_OFF = 0, GUEST_STARTING, GUEST_RUNNING, GUEST_STOPPING, GUEST_FAILED };
+ 
+ void guest_init(void);                     /* once, after hw_irq_init (routes the host doorbell) */
+ int guest_available(void);                 /* 1: the three store entries exist */
+ int guest_start(void);                     /* 0 started, < 0 refused (heater busy, no files, a load error) */
+-int guest_start_mode(int mode);            /* GUEST_APP (= guest_start) or GUEST_TERM */
++int guest_start_mode(int mode);            /* GUEST_APP (= guest_start), GUEST_TERM or GUEST_WL */
+ int guest_available_mode(int mode);
+ int guest_mode(void);                      /* the last started */
+ int guest_scale(void);                     /* the view's scale: 2 (both; the blit also does 4) */
+--- a/starbite/sbos/build.sh
++++ b/starbite/sbos/build.sh
+@@ -188,6 +188,9 @@
+         "${CROSS}gcc" $NFLAGS "$ui/$f.c" -o "$ob/n_$f.o"
+         nui="$nui $ob/n_$f.o"
+     done
++    # L2 (docs/STARBITE-LINUX-APPS.md): the Terminal's Linux window (the platform side of shell.h's sh_linux_*)
++    "${CROSS}gcc" $NFLAGS "$root/starbite/guest/next/gwin.c" -o "$ob/n_gwin.o"
++    nui="$nui $ob/n_gwin.o"
+     "${CROSS}gcc" $NFLAGS -DSBOS_SELFTEST_NEXT "$ui/kern_next.c" -o "$ob/n_kern_next_st.o"
+     "${CROSS}gcc" $CFLAGS -DSBTK_PACK="\"$PAK\"" "$ui/next_pack.S" -o "$ob/n_pack.o"
+     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_NEXT "$here/kern/main.c" -o "$ob/k_main_next.o"
+@@ -197,6 +200,9 @@
+     # wifi-sbos-next: Next with the silent Wi-Fi self test (the TLS self-check, one scan, no join; then recovery)
+     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_WIFI "$here/kern/uitest.c" -o "$ob/k_uitest_nwifi.o"
+     nwobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_nwifi.o#")
++    # L2: Next with the Linux self test (the Terminal, foot on the M3 cores, a typed command; then recovery)
++    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_LINUX "$here/kern/uitest.c" -o "$ob/k_uitest_nlinux.o"
++    nlobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_nlinux.o#")
+ else
+     echo "sbos: no build/sbtk/sbtk-phone.pak: the starbite-next images are not built" >&2
+ fi
+@@ -284,8 +290,8 @@
+ "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
+ python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
+ if [ -n "$nobjs" ]; then
+-    for v in next next-selftest next-wifitest; do
+-        case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; *) vo=$nwobjs ;; esac
++    for v in next next-selftest next-wifitest next-linuxtest; do
++        case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;; *) vo=$nwobjs ;; esac
+         "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
+         und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)
+         if [ -n "$und" ]; then
+--- a/starbite/sbos/kern/uitest.c
++++ b/starbite/sbos/kern/uitest.c
+@@ -149,6 +149,10 @@
+     ++steps;
+ }
+ 
++#ifdef SBOS_SELFTEST_NEXT_LINUX
++int next_ready(void), gwin_selftest_step(void);     /* ui/kern_next.c, starbite/guest/next/gwin.c */
++void guest_power_off(void);
++#endif
+ #ifdef SBOS_SELFTEST_NEXT
+ void next_selftest_begin(void);
+ int next_selftest_step(void), next_selftest_ready(void), next_selftest_failed(void), next_selftest_clock_ok(void);
+@@ -244,6 +248,19 @@
+             return;
+         }
+ #endif
++#ifdef SBOS_SELFTEST_NEXT_LINUX
++        {
++            /* Starbite OS Next, Linux apps (L2, starbite/guest/next/gwin.c): the Terminal opened, foot on the M3
++             * cores, a typed command, a tap, the Terminal closed, the cluster off; no storage writes; then recovery
++             * (pmsg). The watchdog at 30 s, fed by the loop (the guest's load from the store feeds it too). */
++            unsigned w = hw_wdt_selftest(30);
++            sb_logx(w ? "selftest: next-linux: the watchdog at 30 s, fed by the loop: seconds " :
++                        "selftest: next-linux: the watchdog could not be set (the loader's stays): ", w);
++            phase = 97;
++            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
++            return;
++        }
++#endif
+ #ifdef SBOS_SELFTEST_NEXT_WIFI
+         {
+             /* Starbite OS Next, Wi-Fi (wifi-sbos-next): silent: the TLS self-check (no network), the radio on, one
+@@ -619,6 +636,28 @@
+     case 43:
+         active = 0;
+         vib_off();
++        power_restart_recovery();
++        return;
++#endif
++#ifdef SBOS_SELFTEST_NEXT_LINUX
++    case 97: {                              /* every 100 ms once the shell is baked; 120 s at most */
++        int r = next_ready() ? gwin_selftest_step() : 0;
++        if (!r && sb_ms() - t0 < 120000U) {
++            kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
++            return;
++        }
++        sb_logx(r > 0 ? "selftest: next-linux: PASSED; a restart into recovery (pmsg) after seconds " :
++                r < 0 ? "selftest: next-linux: FAILED (see above); a restart into recovery (pmsg) after seconds " :
++                        "selftest: next-linux: FAILED: not done within 120 s; a restart into recovery (pmsg) after seconds ",
++                (sb_ms() - t0) / 1000U);
++        if (!r)
++            guest_power_off();              /* the cluster off before the restart */
++        phase = 94;
++        kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
++        return;
++    }
++    case 94:
++        active = 0;
+         power_restart_recovery();
+         return;
+ #endif
+--- a/starbite/sbos/ui/host/main.c
++++ b/starbite/sbos/ui/host/main.c
+@@ -36,6 +36,54 @@
+ void sh_brightness(int level) { fprintf(stderr, "brightness: level %d\n", level); }
+ void sh_vibrate(void) { fprintf(stderr, "vibrate: the timer ran out\n"); }
+ void sh_haptic(void) { }
++/* L2: the Linux window's platform (the kernel's is starbite/guest/next/gwin.c). SBTK_LINUX = a 720 x 916 P6 PPM is
++ * the guest's frame (e.g. foot from the QEMU run); "starting" / "fail" show those states; unset: a test pattern.
++ * SBTK_NO_LINUX_FAKE: none (starbite/guest/next/host/gwin-host.c links gwin.c itself) */
++#ifndef SBTK_NO_LINUX_FAKE
++static int lin_seq, lin_drawn = -1;
++static uint8_t *lin_rgb;
++int sh_linux_open(void)
++{
++    const char *e = getenv("SBTK_LINUX");
++    if (e && !strcmp(e, "fail")) { sh_linux_state(SH_LINUX_FAILED, "The Linux files are not on this phone yet."); return -4; }
++    if (e && !strcmp(e, "starting")) { sh_linux_state(SH_LINUX_STARTING, ""); return 0; }
++    if (e && !lin_rgb) {
++        FILE *f = fopen(e, "rb");
++        int w = 0, h = 0, mx = 0;
++        if (f && fscanf(f, "P6 %d %d %d", &w, &h, &mx) == 3 && w == SH_LINUX_W && h == SH_LINUX_H && fgetc(f) != EOF) {
++            lin_rgb = malloc((size_t)w * h * 3);
++            if (lin_rgb && fread(lin_rgb, 3, (size_t)w * h, f) != (size_t)w * h) { free(lin_rgb); lin_rgb = 0; }
++        }
++        if (!lin_rgb) fprintf(stderr, "linux: %s is not a %dx%d P6 PPM: the test pattern\n", e, SH_LINUX_W, SH_LINUX_H);
++        if (f) fclose(f);
++    }
++    lin_seq++;
++    sh_linux_state(SH_LINUX_RUNNING, "");
++    return 0;
++}
++void sh_linux_hide(void) { fprintf(stderr, "linux: the window hidden\n"); }
++int sh_linux_blit(uint32_t *px, int stride_px, int first, int *y0, int *y1)
++{
++    if (!first && lin_drawn == lin_seq) return 0;
++    lin_drawn = lin_seq;
++    for (int y = 0; y < SH_LINUX_H; y++)
++        for (int x = 0; x < SH_LINUX_W; x++) {
++            uint32_t c;
++            if (lin_rgb) {
++                const uint8_t *p = lin_rgb + ((size_t)y * SH_LINUX_W + x) * 3;
++                c = 0xff000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
++            } else
++                c = 0xff000000u | (uint32_t)(x * 255 / SH_LINUX_W) << 16 | (uint32_t)(y * 255 / SH_LINUX_H) << 8 | 0x60;
++            uint32_t *d = px + (size_t)(2 * y) * stride_px + 2 * x;
++            d[0] = d[1] = d[stride_px] = d[stride_px + 1] = c;
++        }
++    *y0 = 0;
++    *y1 = 2 * SH_LINUX_H - 1;
++    return SH_LINUX_H;
++}
++int sh_linux_touch(int phase, int x, int y) { fprintf(stderr, "linux: touch %s at %d,%d\n", phase == 0 ? "down" : phase == 1 ? "move" : "up", x, y); return 1; }
++int sh_linux_char(char c) { fprintf(stderr, "linux: typed 0x%02x '%c'\n", (unsigned char)c, c >= 32 ? c : '.'); return 1; }
++#endif
+ /* wifi-sbos-next: a pretend Wi-Fi for the previews (made-up network names; nothing is joined): on lists four
+  * networks, a join connects, the Internet test answers 200 */
+ static sh_wifi_t HW;
+--- a/starbite/sbos/ui/kern_next.c
++++ b/starbite/sbos/ui/kern_next.c
+@@ -795,9 +795,16 @@
+     log_mb("UI heap with the caches: ", tk_heap_used());
+ }
+ 
++int gwin_now(void);                                  /* L2: starbite/guest/next/gwin.c */
++int next_ready(void) { return ready; }               /* L2: the shell baked (uitest.c's next-linux variant) */
+ void next_kdraw(void)
+ {
+     if (!ready && !baking) { ui_kdraw(); return; }
++    /* L2: the Terminal's Linux window: a state change or a new frame (rows copied into the window) drawn at once */
++    if (ready && gwin_now() && !ticking && K.screen_on) {
++        tk_comp_frame(&comp, 0, 0);
++        present();
++    }
+     if (!K.screen_on) return;
+     if (need_full) {
+         need_full = 0;
+--- a/starbite/sbos/ui/shell.h
++++ b/starbite/sbos/ui/shell.h
+@@ -86,4 +86,25 @@
+ int sh_wifi_join(const char *ssid, const char *pass);   /* pass: NULL or "" for open or known networks */
+ int sh_wifi_fetch(const char *url);                      /* P3c: the year (the Calendar's month) */      /* the next alarm for the lock's widget (on 0: "No alarm") */
+ 
++/* L2 (docs/STARBITE-LINUX-APPS.md): the Terminal app is a Linux app's window (foot under sbwl on the M3 cores) shown
++ * as a layer of the app's page, between the status bar and the keyboard: SH_LINUX_W x SH_LINUX_H surface px at 2x
++ * (1440 x 1832 panel px from y 162 = 44 pt to 540 pt). The platform (the kernel: starbite/guest/next/gwin.c on
++ * kern/guest.c) starts the guest, copies its new rows into the shell's window bitmap and takes the input; the shell
++ * draws the page around it. States are the kernel's GUEST_* order. */
++enum { SH_LINUX_OFF, SH_LINUX_STARTING, SH_LINUX_RUNNING, SH_LINUX_STOPPING, SH_LINUX_FAILED };
++#define SH_LINUX_W 720
++#define SH_LINUX_H 916
++#define SH_LINUX_Y 162                                    /* the window's first panel row (44 pt) */
++int sh_linux_open(void);                 /* the platform: start the guest (if off) and show it; < 0 refused */
++void sh_linux_hide(void);                /* the platform: the window hidden (the guest keeps running a while) */
++/* the platform: the rows newer than the last copy, at 2x, into px (2 SH_LINUX_W x 2 SH_LINUX_H, stride in px);
++ * *y0..*y1 the bitmap rows written; returns the surface rows copied (0: nothing new). first: copy every row. */
++int sh_linux_blit(uint32_t *px, int stride_px, int first, int *y0, int *y1);
++int sh_linux_touch(int phase, int x, int y);   /* the platform: surface px, phase 0 down / 1 move / 2 up */
++int sh_linux_char(char c);               /* the platform: one character typed ('\n' Return, '\b' delete) */
++/* provided by the shell: the platform's state changed (why: the reason when FAILED, else "") */
++void sh_linux_state(int state, const char *why);
++/* provided by the shell: the platform has a new frame; 1 when the window took rows (the caller draws a frame) */
++int sh_linux_frame(void);
++
+ #endif
+--- a/starbite/sbos/ui/shell_lock.c
++++ b/starbite/sbos/ui/shell_lock.c
+@@ -2238,6 +2238,103 @@
+     if (relayout) build_app_page(AP.a); else build_search();
+ }
+ 
++/* ---- L2: the Terminal = a Linux app's window (foot under sbwl on the M3 cores, docs/STARBITE-LINUX-APPS.md) as a
++ * layer between the status bar and the keyboard (44 to 540 pt); the platform copies the guest's new rows into it
++ * (sh_linux_frame) and takes the touches in it (G_LINUX) and the typed characters. Its bitmap (1440 x 1832 px,
++ * 10.1 MiB) lives while the app is open; a line over it tells the state until the first frame. ---- */
++static struct { int state, got, first, shift, num; char why[64]; } LX;
++static tk_layer aplin, aplst;
++static int is_app(const char *k);
++static int ap_pending;                           /* (P3i, below: the page still being drawn) */
++static void build_linstate(void)
++{
++    relayer(&aplst);
++    aplst.hidden = 1;
++    aplin.hidden = LX.state != SH_LINUX_RUNNING || !aplin.bmp.px;
++    if (!AP.on || tk_strcmp(APPS[AP.a].k, "terminal") || (LX.state == SH_LINUX_RUNNING && LX.got)) return;
++    const char *t = LX.state == SH_LINUX_FAILED ? "Linux Didn't Start" : LX.state == SH_LINUX_STOPPING ? "Linux Is Stopping" :
++                    LX.state == SH_LINUX_OFF ? "Linux Is Off" : "Starting Linux";
++    const char *l = LX.state == SH_LINUX_FAILED ? (LX.why[0] ? LX.why : "The big cores did not start.") :
++                    LX.state == SH_LINUX_OFF || LX.state == SH_LINUX_STOPPING ? "Open Terminal again to start it." :
++                    "The terminal opens on the big cores in a few seconds.";
++    dc d = mk(&aplst, "linux-state", 0, 236, 390, 120, 0, 0);
++    d_empty(&d, 250, t, l);
++    aplst.hidden = 0;
++}
++static void build_lin(void)
++{
++    if (!aplin.bmp.px) {
++        relayer(&aplin);
++        tk_layer_init(&aplin, "linux-window");
++        LX.got = 0;
++        if (!tk_bmp_new(&aplin.bmp, 2 * SH_LINUX_W, 2 * SH_LINUX_H)) {
++            LX.state = SH_LINUX_FAILED;
++            tk_memcpy(LX.why, "No memory for the window.", 26);
++        }
++        aplin.x = aplin.bx = 0;
++        aplin.y = aplin.by = SH_LINUX_Y;
++        LX.first = 1;
++    }
++    build_linstate();
++    (void)sh_linux_frame();                       /* what the guest has drawn so far, every row */
++}
++int sh_linux_frame(void)
++{
++    if (!aplin.bmp.px || !AP.on || tk_strcmp(APPS[AP.a].k, "terminal")) return 0;
++    int y0 = -1, y1 = -1;
++    if (sh_linux_blit(aplin.bmp.px, aplin.bmp.stride, LX.first, &y0, &y1) <= 0) return 0;
++    LX.first = 0;
++    tk_layer_dirty(&aplin);
++    if (!LX.got) {
++        LX.got = 1;
++        aplin.opaque = 1;                         /* the guest's pixels are opaque (alpha forced): nothing under */
++        build_linstate();
++    }
++    return 1;
++}
++void sh_linux_state(int state, const char *why)
++{
++    int k = 0;
++    if (!why) why = "";
++    if (state == LX.state && !tk_strcmp(why, LX.why)) return;
++    LX.state = state;
++    while (why[k] && k < 63) { LX.why[k] = why[k]; k++; }
++    LX.why[k] = 0;
++    if (state != SH_LINUX_RUNNING) { LX.got = 0; LX.first = 1; }   /* a new guest: every row again */
++    if (AP.on && !tk_strcmp(APPS[AP.a].k, "terminal") && !ap_pending) build_linstate();
++}
++static int lin_at(float x, float y)
++{
++    (void)x;
++    return aplin.bmp.px && !aplin.hidden && PT(y) >= SH_LINUX_Y && PT(y) < SH_LINUX_Y + 2 * SH_LINUX_H;
++}
++static void lin_touch(int phase, float x, float y)
++{
++    int sx = (int)(PT(x) / 2), sy = (int)((PT(y) - SH_LINUX_Y) / 2);
++    sx = sx < 0 ? 0 : sx >= SH_LINUX_W ? SH_LINUX_W - 1 : sx;
++    sy = sy < 0 ? 0 : sy >= SH_LINUX_H ? SH_LINUX_H - 1 : sy;
++    sh_linux_touch(phase, sx, sy);
++}
++static void page_terminal(dc *d)
++{
++    d_rrect(d, 0, 44, 390, 496, 0, tk_hex(0x000000, 1));   /* the window's place, black until its first frame */
++    kb_draw(d, LX.shift, LX.num);
++}
++static void terminal_tap(float x, float y)
++{
++    if (y < 548) return;                          /* the window's own touches went to Linux (G_LINUX) */
++    char c = 0;
++    int k = kb_hit(x, y, LX.shift, LX.num, &c);
++    if (k) sh_haptic();
++    if (k == 2) { LX.shift = !LX.shift; build_app_page(AP.a); }
++    else if (k == 3) { LX.num = !LX.num; build_app_page(AP.a); }
++    else if (k == 4) (void)sh_linux_char('\b');
++    else if (k == 1 || k == 5) {
++        (void)sh_linux_char(c);
++        if (LX.shift && c >= 'A' && c <= 'Z') { LX.shift = 0; build_app_page(AP.a); }
++    }
++}
++
+ static tk_layer apkey, apnum, apdel;   /* apdel: the keypad's delete (P3j) */
+ static void build_apnum(void)
+ {
+@@ -2324,7 +2421,6 @@
+     { "weather", "No Weather", "Weather needs the internet. This phone isn't online yet." },
+     { "music", "No Music", "There is no music on this phone." },
+     { "files", "No Files", "Files isn't in this version yet." },
+-    { "terminal", "Not Here Yet", "The terminal and Linux apps run in Starbite OS." },
+     { "browser", "No Internet", "The browser needs the internet. This phone isn't online yet." },
+     { "medical", "No Medical Card", "Nothing is stored on this phone yet." },
+     { "heat", "Not Here Yet", "Survival Heat runs in Starbite OS." },
+@@ -2355,7 +2451,7 @@
+     return !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
+            !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
+            !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes") ||
+-           !tk_strcmp(k, "search") || info_of(k);
++           !tk_strcmp(k, "search") || !tk_strcmp(k, "terminal") || info_of(k);
+ }
+ static void own_strip(int a, int i)
+ {
+@@ -2374,6 +2470,7 @@
+     else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else page_display(&d); }
+     else if (!tk_strcmp(k, "notes")) page_notes(&d);
+     else if (!tk_strcmp(k, "search")) page_search(&d);
++    else if (!tk_strcmp(k, "terminal")) page_terminal(&d);
+     else if (inf) { d_h1(&d, APPS[a].name); d_empty(&d, 330, inf->title, inf->line); }
+     else page_camera(&d);
+     tk_layer_prepare(&appst[i]);
+@@ -2385,6 +2482,7 @@
+     if (!tk_strcmp(k, "calc")) build_calc();
+     if (!tk_strcmp(k, "notes")) build_note();
+     if (!tk_strcmp(k, "search")) build_search();
++    if (!tk_strcmp(k, "terminal")) build_lin();
+     if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
+     relink();
+ }
+@@ -2565,6 +2663,11 @@
+         ap_pending = 1;
+     } else
+         build_app_page(a);
++    if (!tk_strcmp(APPS[a].k, "terminal")) {     /* L2: start Linux (or show the running one) */
++        LX.shift = LX.num = 0;
++        LX.first = 1;
++        (void)sh_linux_open();                    /* refused: the platform's sh_linux_state says why */
++    }
+     AP.icon = icon_rect(a);
+     AP.from = AP.icon;
+     AP.to = FULLR;
+@@ -2580,6 +2683,9 @@
+ }
+ static void app_finish_close(void)
+ {
++    if (AP.on && !tk_strcmp(APPS[AP.a].k, "terminal")) sh_linux_hide();
++    relayer(&aplin); aplin.hidden = 1;            /* L2: the window's 10 MiB not kept */
++    relayer(&aplst); aplst.hidden = 1;
+     ap_pending = 0;
+     AP.on = AP.closing = 0;
+     appg.hidden = 1;
+@@ -2882,6 +2988,8 @@
+         notes_tap(x, y);
+     } else if (is_app("search")) {
+         search_tap(x, y);
++    } else if (is_app("terminal")) {
++        terminal_tap(x, y);
+     } else if (is_app("light")) {
+         if (x >= 135 && x < 255 && y >= 250 && y < 490) {
+             Q[0].lit = !Q[0].lit;
+@@ -3068,8 +3176,8 @@
+     link(&root, r, 14);
+     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb };
+     link(&appg, ag, 12);
+-    tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
+-    link(&appc, st, NST);
++    tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3], &aplin, &aplst };
++    link(&appc, st, NST + 2);
+     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
+     link(&lockg, lk, 11);
+     tk_layer *ls[4 * NG + 6];
+@@ -3261,6 +3369,7 @@
+     } else if (!tk_strcmp(what, "sleep")) {        /* the films: the Power key's fade (v 1) and the wake (v 0) */
+         if (v > 0) sh_sleep(0); else sh_wake();
+     } else if (!tk_strcmp(what, "app")) {
++        if (!key[0] && AP.on) app_finish_close();       /* L2: "app=" closes the open app at once */
+         for (int a = 0; a < NAPPS; a++)
+             if (!tk_strcmp(APPS[a].k, key)) {
+                 app_open(a);
+@@ -3317,7 +3426,7 @@
+ }
+ 
+ /* ---- gestures ---------------------------------------------------------------------------------------------- */
+-enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL };
++enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL, G_LINUX };
+ static struct {
+     int kind, arg, arg2, moved;
+     float x0, y0, base, t0;
+@@ -3377,6 +3486,7 @@
+         if (!locked && AP.on) {
+             /* an open app: the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
+             if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
++            else if (!sp_app.live && !AP.closing && is_app("terminal") && lin_at(x, y)) { T.kind = G_LINUX; lin_touch(0, x, y); }
+             else if (!sp_app.live) {
+                 /* a tap on the app's page (a key lights while the finger is on it) */
+                 T.kind = G_APPTAP;
+@@ -3461,6 +3571,9 @@
+         case G_APPTAP:
+             if (T.moved && !apkey.hidden) key_down(-1);
+             break;
++        case G_LINUX:
++            lin_touch(1, x, y);
++            break;
+         case G_TAP_HEAD: case G_TAP_ROW:
+             if (T.moved) { T.kind = G_LIST; T.base = scroll; T.y0 = y; sp_scroll.live = 0; }
+             tk_tracker_add(&T.tr, y, t);
+@@ -3580,6 +3693,9 @@
+     case G_APPTAP:
+         if (!apkey.hidden) key_down(-1);
+         if (!T.moved) app_tap(x, y);
++        break;
++    case G_LINUX:
++        lin_touch(2, x, y);
+         break;
+     case G_TAP_HEAD:
+         toggle_group(T.arg, 0);

@@ -13,6 +13,12 @@
  *     sends a scripted tap / drag / key, checks the touch mark landed in the app's pixels, writes the panel as
  *     a PPM (semihosting), stops the guest, waits for PSCI AFFINITY_INFO OFF on all four guest CPUs, and boots
  *     it again (cold) to show it restarts. Last line: "sbsim: RESULT PASS|FAIL ...".
+ *   - sbblk (contract v2, run-desktop.sh): when the store's manifest page carries a block-device table (struct
+ *     blkman at STORE + BLKMAN_OFF: host file names), sbsim opens the files through semihosting and serves them
+ *     as the guest's block devices (sbghost's blk_io: SYS_SEEK + SYS_READ / SYS_WRITE on the request's slot).
+ *     Writes go straight to the overlay's file, so they persist across QEMU runs. Flag F_BLKTEST: no scripted
+ *     input; the run ends when the guest's log says SBBLK-TEST-DONE (then MSG_STOP and the usual wait for the
+ *     cluster to be off) and passes when no "sbblk-test: FAIL" line came before it.
  */
 #include <stdint.h>
 #include "../sbshm.h"
@@ -32,7 +38,7 @@
 #define PSCI_SYSTEM_OFF    0x84000008UL
 #define PSCI_VERSION       0x84000000UL
 
-enum { F_REPAIR = 1, F_STRICT = 2, F_STUB = 4, F_TERM = 8 };
+enum { F_REPAIR = 1, F_STRICT = 2, F_STUB = 4, F_TERM = 8, F_POPUP = 32, F_BLKTEST = 64 };
 
 struct manifest {
     uint64_t magic;                     /* "SBSTORE1" */
@@ -42,6 +48,19 @@ struct manifest {
     uint32_t surf_w, surf_h;
     uint32_t touch_x, touch_y;
     uint32_t boot_timeout_s, pad;
+};
+
+/* the block devices (optional, in the manifest page): files next to QEMU, by semihosting */
+#define BLKMAN_OFF   0x200U
+#define BLKMAN_MAGIC 0x5645444b4c424253ULL      /* "SBBLKDEV" */
+struct blkman {
+    uint64_t magic;
+    struct {
+        uint32_t flags;                 /* SBSHM_BLKDEV_PRESENT | SBSHM_BLKDEV_RO; 0 = no device */
+        uint32_t pad;
+        char name[20];                  /* sbshm_blkdev.name */
+        char path[228];                 /* the host file, NUL-terminated */
+    } d[SBSHM_BLK_DEVS];
 };
 
 uint64_t sbsim_hvc(uint64_t fn, uint64_t a, uint64_t b, uint64_t c);
@@ -186,6 +205,65 @@ static void semi_close(int h)
 {
     uint64_t blk[1] = {(uint64_t)h};
     sbsim_semi(0x02, blk);
+}
+
+/* ---- sbblk: file-backed block devices ------------------------------------------------------------------- */
+static struct sbshm_blkdev blkdevs[SBSHM_BLK_DEVS];
+static int blk_fd[SBSHM_BLK_DEVS];
+static unsigned blk_n;
+
+static void blk_open(void)
+{
+    const struct blkman *bm = (const struct blkman *)(STORE + BLKMAN_OFF);
+    if (bm->magic != BLKMAN_MAGIC)
+        return;
+    for (unsigned i = 0; i < SBSHM_BLK_DEVS; ++i) {
+        blk_fd[i] = -1;
+        if (!(bm->d[i].flags & SBSHM_BLKDEV_PRESENT) || !bm->d[i].path[0])
+            continue;
+        int ro = (bm->d[i].flags & SBSHM_BLKDEV_RO) != 0;
+        unsigned long n = 0;
+        while (bm->d[i].path[n])
+            ++n;
+        uint64_t ob[3] = {(uint64_t)(uintptr_t)bm->d[i].path, ro ? 1 /* "rb" */ : 3 /* "r+b" */, n};
+        int h = (int)sbsim_semi(0x01, ob);
+        uint64_t fb[1] = {(uint64_t)h};
+        int64_t len = h < 0 ? -1 : (int64_t)sbsim_semi(0x0c, fb);      /* SYS_FLEN */
+        puts_("sbsim: sbblk");
+        putu(i);
+        puts_(" \"");
+        puts_(bm->d[i].name);
+        puts_("\" = ");
+        puts_(bm->d[i].path);
+        if (h < 0 || len < 512) {
+            puts_(": cannot open (the device is absent)\n");
+            continue;
+        }
+        blk_fd[i] = h;
+        blkdevs[i].sectors = (uint64_t)len / 512U;
+        blkdevs[i].flags = SBSHM_BLKDEV_PRESENT | (ro ? SBSHM_BLKDEV_RO : 0U);
+        for (unsigned k = 0; k < sizeof(blkdevs[i].name) - 1 && bm->d[i].name[k]; ++k)
+            blkdevs[i].name[k] = bm->d[i].name[k];
+        ++blk_n;
+        puts_(", ");
+        putu((uint64_t)len >> 20);
+        puts_(ro ? " MiB, read-only\n" : " MiB, read-write\n");
+    }
+}
+
+/* sbghost's blk_io. SYS_READ / SYS_WRITE return the bytes NOT transferred. A flush has nothing to do: QEMU has
+ * written the bytes to the host file already (its page cache; the test host does not lose power). */
+static int blk_io(uint32_t dev, uint32_t op, uint64_t sector, uint32_t count, void *buf)
+{
+    if (dev >= SBSHM_BLK_DEVS || blk_fd[dev] < 0)
+        return -SBG_ENODEV;
+    if (op == SBG_BLK_FLUSH)
+        return 0;
+    uint64_t sk[2] = {(uint64_t)blk_fd[dev], sector * 512U};
+    if (sbsim_semi(0x0a, sk))                                           /* SYS_SEEK */
+        return -SBG_EIO;
+    uint64_t io[3] = {(uint64_t)blk_fd[dev], (uint64_t)(uintptr_t)buf, (uint64_t)count * 512U};
+    return sbsim_semi(op == SBG_BLK_WRITE ? 0x05 : 0x06, io) ? -SBG_EIO : 0;
 }
 
 /* ---- the panel ------------------------------------------------------------------------------------- */
@@ -336,12 +414,27 @@ static void own_check(uint64_t t)
 
 /* ---- the shim for sbghost ------------------------------------------------------------------------- */
 static void host_log(const char *l) { puts_("sbsim: "); puts_(l); puts_("\n"); }
-static int term_ok_seen;
+static int term_ok_seen, blktest_done, blktest_fail;
+static int has(const char *l, const char *w)
+{
+    for (; *l; ++l) {
+        unsigned i = 0;
+        while (w[i] && l[i] == w[i])
+            ++i;
+        if (!w[i])
+            return 1;
+    }
+    return 0;
+}
 static void guest_log(const char *l)
 {
     puts_("  linux| ");
     puts_(l);
     puts_("\n");
+    if (mf->flags & F_BLKTEST) {            /* the block tests' verdict lines (blk/test-sbinit) */
+        blktest_done |= has(l, "SBBLK-TEST-DONE");
+        blktest_fail |= has(l, "sbblk-test: FAIL");
+    }
     for (const char *p = l; *p; ++p) {      /* the terminal scenario's typed command, run by the guest's shell */
         const char *w = "STARBITE-TERM-OK";
         unsigned i = 0;
@@ -365,6 +458,37 @@ static int cluster_off(void)
 static const struct sbg_os shim = {
     .ms = now_ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
 };
+static const struct sbg_os shim_blk = {     /* with block devices in the manifest */
+    .ms = now_ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
+    .blk_io = blk_io,
+};
+static void blk_report(unsigned run)
+{
+    const struct sbg_stats *s = sbg_stats();
+    puts_("sbsim: run ");
+    putu(run);
+    puts_(": sbblk reads ");
+    putu(s->blk_reads);
+    puts_(" (");
+    putu(s->blk_rd_sectors >> 11);
+    puts_(" MiB), writes ");
+    putu(s->blk_writes);
+    puts_(" (");
+    putu(s->blk_wr_sectors >> 11);
+    puts_(" MiB), flushes ");
+    putu(s->blk_flushes);
+    puts_(", errors ");
+    putu(s->blk_errors);
+    puts_(", completion doorbells ");
+    putu(s->blk_doorbells);
+    puts_(", most requests in one poll ");
+    putu(s->blk_batch_max);
+    puts_(", polls cut at the bound ");
+    putu(s->blk_capped);
+    puts_(", longest poll ");
+    putu(s->blk_poll_ms_max);
+    puts_(" ms (totals since sbsim started)\n");
+}
 
 /* ---- one guest run ----------------------------------------------------------------------------------- */
 static int run_guest(unsigned run)
@@ -381,6 +505,7 @@ static int run_guest(unsigned run)
     uint32_t seq = 0, tstep = 0, touch_seq = 0, frames = 0, typed = 0, last_pub = 0;
     uint64_t t_pub = 0;
     term_ok_seen = 0;
+    blktest_done = blktest_fail = 0;
     uint64_t last_comp = 0, t_touch = 0;
     int touch_ok = 0;
     const struct sbg_stats *s = sbg_stats();
@@ -402,9 +527,39 @@ static int run_guest(unsigned run)
             composite(px, stride, seq);
             frames++;
         }
+        if (mf->flags & F_BLKTEST) {        /* the block tests run in the guest; its log says when they are done */
+            if (blktest_done && tstep == 0) {
+                puts_(blktest_fail ? "sbsim: the guest's block tests are done, with a FAIL line\n"
+                                   : "sbsim: the guest's block tests are done\n");
+                tstep = 5;
+                sbg_stop();
+            }
+            continue;
+        }
+        if (mf->flags & F_POPUP) {          /* L2: popuptest's window (blue) and its popup (yellow) composited */
+            if (s->state == SBG_RUNNING && !t_touch)
+                t_touch = t;
+            if (tstep == 0 && t_touch && px && seq == h->surf_seq) {
+                uint32_t pop = panel_px(150, BAR + 150) & 0xffffffU, win = panel_px(500, BAR + 500) & 0xffffffU;
+                if ((pop == 0xffd700U && win == 0x2040c0U) || t - t_touch > 20000) {
+                    puts_("sbsim: the popup check: at the popup ");
+                    putx(pop);
+                    puts_(", in the window ");
+                    putx(win);
+                    touch_ok = pop == 0xffd700U && win == 0x2040c0U;
+                    puts_(touch_ok ? " (popup over its window: PASS)\n" : " (NOT as expected)\n");
+                    char name[] = "sbsim-term-run0.ppm";
+                    name[14] = (char)('0' + run % 10);
+                    write_ppm(name);
+                    tstep = 5;
+                    sbg_stop();
+                }
+            }
+            continue;
+        }
         if (mf->flags & F_TERM) {           /* the terminal: type a command, the shell runs it */
             static const char cmd[] = "echo STARBITE-TERM-OK > /dev/kmsg\n";
-            if (s->state == SBG_RUNNING && frames >= 2 && tstep == 0 && t_touch && t - t_touch > 2000) {
+            if (s->state == SBG_RUNNING && frames >= 1 && tstep == 0 && t_touch && t - t_touch > 2000) {
                 tstep = 1;
                 typed = 0;
                 touch_seq = h->surf_seq;        /* any frame after the typing began shows the result */
@@ -445,6 +600,15 @@ static int run_guest(unsigned run)
                 char name[] = "sbsim-term-run0.ppm";
                 name[14] = (char)('0' + run % 10);
                 write_ppm(name);
+                /* a tap in the middle of the window (the guest logs where it went), then the stop */
+                sbg_touch(0, SBG_TOUCH_DOWN, (int32_t)mf->surf_w / 2, (int32_t)mf->surf_h / 2);
+                sbg_touch(0, SBG_TOUCH_UP, (int32_t)mf->surf_w / 2, (int32_t)mf->surf_h / 2);
+                tstep = 4;
+                t_touch = t;
+            } else if (tstep == 4 && (h->touches_seen >= 2 || t - t_touch > 2000)) {
+                puts_("sbsim: the tap: touches seen by the guest ");
+                putu(h->touches_seen);
+                puts_("\n");
                 tstep = 5;
                 sbg_stop();
             } else if (tstep == 2 && t - t_touch > 20000) {
@@ -515,6 +679,10 @@ static int run_guest(unsigned run)
     putu(frames_drawn ? rows_copied / frames_drawn : 0);
     puts_(sbg_rows() ? " (row table)" : " (whole surface)");
     puts_("\n");
+    if (blk_n)
+        blk_report(run);
+    if (mf->flags & F_BLKTEST)
+        return (blktest_done && !blktest_fail) ? 0 : -1;
     return (s->hello && frames >= 3 && touch_ok && !damage_bad) ? 0 : -1;
 }
 
@@ -626,6 +794,7 @@ void sbsim_main(void)
     ph = mf->surf_h + 2 * BAR;
     db_host_id = mf->db_host;
     gic_reset();
+    blk_open();
     struct sbg_cfg cfg = {
         .linux_base = SBG_QEMU_LINUX_BASE, .linux_size = SBG_QEMU_LINUX_SIZE,
         .shm_base = SBG_QEMU_SHM_BASE, .shm_size = SBG_QEMU_SHM_SIZE,
@@ -636,8 +805,11 @@ void sbsim_main(void)
         .repair = (mf->flags & F_REPAIR) ? 1U : 0U,
         .boot_timeout_ms = (mf->boot_timeout_s ? mf->boot_timeout_s : 300) * 1000U,
         .stop_timeout_ms = 60000,
+        .v2 = blk_n ? 1U : 0U,                  /* contract v2 only with block devices: the rest stays v1 */
     };
-    sbg_init(&shim, &cfg, me);
+    for (unsigned i = 0; i < SBSHM_BLK_DEVS; ++i)
+        cfg.blk[i] = blkdevs[i];
+    sbg_init(blk_n ? &shim_blk : &shim, &cfg, me);
     sbg_gic_prepare();
     puts_("sbsim: flags ");
     putx(mf->flags);

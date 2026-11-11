@@ -1,0 +1,2339 @@
+diff --git a/starbite/guest/sbos/guest.c b/starbite/guest/sbos/guest.c
+index 5e8db3d..32ddbad 100644
+--- a/starbite/guest/sbos/guest.c
++++ b/starbite/guest/sbos/guest.c
+@@ -71,15 +71,17 @@ static uint32_t seq_seen = 0, seq_blit = 0;
+ static uint32_t blits, blit_ms_max, rows_copied;   /* the view's frames drawn, its slowest copy, rows copied */
+ static uint64_t t_hidden, t_screen_off;
+ static int sb_up;
++static int kept;                            /* L3: guest_keep: no idle stop */
+ /* 1.2-alpha3: two guests from the same service: the app demo (the S9 Linux, 720 x 1440 at 2x) and the terminal
+  * (the guest kernel of its own, a shell on fbcon in Terminus 16 x 32, 720 x 1060 at 2x above Starbite's keyboard) */
+ static int mode = GUEST_APP, term_ok;
+-static const char *const names[2][3] __attribute__((unused)) = {
++static const char *const names[3][3] __attribute__((unused)) = {
+     {GUEST_STORE_IMAGE, GUEST_STORE_DTB, GUEST_STORE_RD},
+     {GUEST_TERM_IMAGE, GUEST_TERM_DTB, GUEST_TERM_RD},
++    {GUEST_WL_IMAGE, GUEST_WL_DTB, GUEST_WL_RD},
+ };
+-static unsigned surf_w(void) { return mode == GUEST_TERM ? GUEST_TERM_W : SW; }
+-static unsigned surf_h(void) { return mode == GUEST_TERM ? GUEST_TERM_H : SH; }
++static unsigned surf_w(void) { return mode == GUEST_TERM ? GUEST_TERM_W : mode == GUEST_WL ? GUEST_WL_W : SW; }
++static unsigned surf_h(void) { return mode == GUEST_TERM ? GUEST_TERM_H : mode == GUEST_WL ? GUEST_WL_H : SH; }
+ int guest_mode(void) { return mode; }
+ int guest_scale(void) { return 2; }      /* (the terminal: a 16 x 32 font instead of 8 x 16 at 4x) */
+ int guest_term_ok(void) { return term_ok; }
+@@ -95,6 +97,12 @@ int guest_state(void) { return st; }
+ const char *guest_why(void) { return why; }
+ unsigned guest_db_host(void) { return GUEST_DB_HOST; }
+ int guest_shown(void) { return shown && st == GUEST_RUNNING; }
++void guest_keep(int on)
++{
++    if (kept && !on && !shown)
++        t_hidden = sb_ms();                 /* the 60 s from now (an install that ran for minutes) */
++    kept = on ? 1 : 0;
++}
+ 
+ #ifndef SB_HOST
+ /* ===================================== the guest (phone, QEMU) ===================================== */
+@@ -168,6 +176,7 @@ static void cfg_init(void)
+         .host_lines = {0},                  /* the guest kernel has the shared-distributor patch */
+         .repair = 0,
+         .boot_timeout_ms = 30000, .stop_timeout_ms = 5000,
++        .v2 = mode == GUEST_WL,             /* L3: the catalog, the store and the icons (sbshm.h contract v2) */
+     };
+     sbg_init(&shim, &cfg, me_if ? me_if : 1);
+ }
+@@ -189,7 +198,7 @@ int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED ? 1 : hw_
+ int guest_available_mode(int m)
+ {
+     struct store_ent e;
+-    m = m == GUEST_TERM ? GUEST_TERM : GUEST_APP;
++    m = m == GUEST_TERM || m == GUEST_WL ? m : GUEST_APP;
+     return store_find(names[m][0], &e) && store_find(names[m][1], &e) && store_find(names[m][2], &e);
+ }
+ int guest_available(void) { return guest_available_mode(GUEST_APP); }
+@@ -205,7 +214,7 @@ int guest_start(void) { return guest_start_mode(GUEST_APP); }
+ 
+ int guest_start_mode(int m)
+ {
+-    m = m == GUEST_TERM ? GUEST_TERM : GUEST_APP;
++    m = m == GUEST_TERM || m == GUEST_WL ? m : GUEST_APP;
+     if (!sb_up)
+         return -1;
+     if (st != GUEST_OFF && st != GUEST_FAILED)
+@@ -219,7 +228,8 @@ int guest_start_mode(int m)
+         return -3;
+     }
+     if (!store_find(names[m][0], &ld_i) || !store_find(names[m][1], &ld_d) || !store_find(names[m][2], &ld_r)) {
+-        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" : "the Linux files are not in the store";
++        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" :
++              m == GUEST_WL ? "the Linux apps' files are not in the store" : "the Linux files are not in the store";
+         return -4;
+     }
+     why = "";
+@@ -356,8 +366,8 @@ void guest_timer(unsigned id)
+         if (h->surf_seq != seq_seen && shown)
+             ui_mark_dirty();
+         uint64_t now = sb_ms();
+-        if ((!shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
+-            (!screen && t_screen_off && now - t_screen_off > IDLE_STOP_MS)) {
++        if (!kept && ((!shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
++                      (!screen && t_screen_off && now - t_screen_off > IDLE_STOP_MS))) {
+             sb_log("guest: unused for 60 s: stopping (the M3 cluster off)");
+             guest_stop();
+         }
+@@ -383,7 +393,17 @@ int guest_frame_new(void)
+ /* the guest's front buffer at 2x (app: 1440 x 2880; terminal: 1440 x 2120) into the back buffer at (x0, y0).
+  * 1.2-alpha3: damage per row (sbshm.h): only the rows newer than the frame drawn last (all after a show, when
+  * seq_blit is 0, or when the guest keeps no table). Returns the rows copied; *py0 / *py1 the panel rows touched. */
++static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0,
++                    int *py1);
+ int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0, int *py1)
++{
++    return blit_any(0, back, stride_px, x0, y0, py0, py1);
++}
++int guest_blit_rows(uint32_t *const *rows, int *py0, int *py1) { return blit_any(rows, 0, 0, 0, 0, py0, py1); }
++/* the target's row r: the table's (L3), else the back buffer's at (x0, y0 + r) */
++#define TROW(r) (rowt ? rowt[r] : back + (uintptr_t)(y0 + (r)) * stride_px + x0)
++static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0,
++                    int *py1)
+ {
+     const volatile uint32_t *px;
+     uint32_t stride;
+@@ -406,7 +426,7 @@ int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int
+         if (rows && drawn && !sbshm_row_newer(rows[y], drawn))
+             continue;
+         const volatile uint32_t *s = (const volatile uint32_t *)((uintptr_t)px + (uintptr_t)y * stride);
+-        uint64_t *d = (uint64_t *)(back + (uintptr_t)(y0 + k * y) * stride_px + x0);
++        uint64_t *d = (uint64_t *)TROW(k * y);
+         for (uint32_t x = 0; x < w; ++x) {
+             uint64_t c = s[x] | 0xff000000U;
+             c |= c << 32;
+@@ -414,7 +434,7 @@ int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int
+                 d[x * (k / 2) + i] = c;
+         }
+         for (uint32_t r = 1; r < k; ++r) {  /* the same row k times */
+-            uint64_t *e = (uint64_t *)(back + (uintptr_t)(y0 + k * y + r) * stride_px + x0);
++            uint64_t *e = (uint64_t *)TROW(k * y + r);
+             for (uint32_t x = 0; x < w * k / 2; ++x)
+                 e[x] = d[x];
+         }
+@@ -506,14 +526,14 @@ int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED ? 1 : fak
+ int guest_available_mode(int m)
+ {
+     const char *g = getenv("SBOS_HOST_GUEST");
+-    return g && (m != GUEST_TERM || g[0] != 'a');
++    return g && (m == GUEST_APP || g[0] != 'a');
+ }
+ int guest_available(void) { return guest_available_mode(GUEST_APP); }
+ int guest_start(void) { return guest_start_mode(GUEST_APP); }
+ 
+ int guest_start_mode(int m)
+ {
+-    m = m == GUEST_TERM ? GUEST_TERM : GUEST_APP;
++    m = m == GUEST_TERM || m == GUEST_WL ? m : GUEST_APP;
+     if (!sb_up || (st != GUEST_OFF && st != GUEST_FAILED))
+         return -1;
+     if (heater_m3_busy()) {
+@@ -521,7 +541,8 @@ int guest_start_mode(int m)
+         return -2;
+     }
+     if (!guest_available_mode(m)) {
+-        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" : "the Linux files are not in the store";
++        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" :
++              m == GUEST_WL ? "the Linux apps' files are not in the store" : "the Linux files are not in the store";
+         return -4;
+     }
+     mode = m;
+@@ -582,8 +603,8 @@ void guest_timer(unsigned id)
+             fake_seq++;
+             ui_mark_dirty();
+         }
+-        if ((!shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
+-            (!screen && t_screen_off && now - t_screen_off > IDLE_STOP_MS)) {
++        if (!kept && ((!shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
++                      (!screen && t_screen_off && now - t_screen_off > IDLE_STOP_MS))) {
+             sb_log("guest: unused for 60 s: stopping (the M3 cluster off)");
+             guest_stop();
+         }
+@@ -601,7 +622,16 @@ void guest_show(int on)
+ 
+ int guest_frame_new(void) { return guest_shown() && (uint32_t)fake_seq != seq_blit; }
+ 
++static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0,
++                    int *py1);
+ int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0, int *py1)
++{
++    return blit_any(0, back, stride_px, x0, y0, py0, py1);
++}
++int guest_blit_rows(uint32_t *const *rows, int *py0, int *py1) { return blit_any(rows, 0, 0, 0, 0, py0, py1); }
++#define TROW(r) (rowt ? rowt[r] : back + (uintptr_t)(y0 + (r)) * stride_px + x0)
++static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0,
++                    int *py1)
+ {
+     *py0 = *py1 = -1;
+     if (!guest_shown())
+@@ -610,7 +640,7 @@ int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int
+     ++blits;
+     uint32_t k = (uint32_t)guest_scale(), w = surf_w(), hh = surf_h();
+     for (uint32_t y = 0; y < k * hh; ++y) {
+-        uint32_t *d = back + (uintptr_t)(y0 + y) * stride_px + x0;
++        uint32_t *d = TROW(y);
+         uint32_t sy = y / k;
+         for (uint32_t x = 0; x < k * w; ++x) {
+             uint32_t sx = x / k, c;
+@@ -663,7 +693,7 @@ int guest_type(char c)
+         int hit = 0;
+         for (int i = 0; typed[i]; ++i)
+             hit |= sb_prefix(typed + i, "STARBITE-TERM-OK");
+-        if (hit && mode == GUEST_TERM) {
++        if (hit && mode != GUEST_APP) {
+             term_ok = 1;
+             sb_log("linux| STARBITE-TERM-OK (fake)");
+         }
+diff --git a/starbite/guest/sbos/guest.h b/starbite/guest/sbos/guest.h
+index 4503183..6a4f80d 100644
+--- a/starbite/guest/sbos/guest.h
++++ b/starbite/guest/sbos/guest.h
+@@ -20,14 +20,22 @@
+ #define GUEST_TERM_RD     "guest-term-rd.img"
+ #define GUEST_TERM_W 720U
+ #define GUEST_TERM_H 1060U
+-enum { GUEST_APP = 0, GUEST_TERM = 1 };
++/* L2 + L3 (docs/STARBITE-LINUX-APPS.md): Linux apps for Starbite OS Next: the guest kernel of its own with sbwl (our
++ * Wayland compositor), the apps' catalog and the App Store (contract v2); the window between Next's status bar and
++ * the home bar: 720 x 1344 = 1440 x 2688 at 2x (the guest's viewport 916 rows with the keyboard up) */
++#define GUEST_WL_IMAGE    "guest-wl.img"
++#define GUEST_WL_DTB      "guest-wl.dtb"
++#define GUEST_WL_RD       "guest-wl-rd.img"
++#define GUEST_WL_W 720U
++#define GUEST_WL_H 1344U
++enum { GUEST_APP = 0, GUEST_TERM = 1, GUEST_WL = 2 };
+ 
+ enum { GUEST_OFF = 0, GUEST_STARTING, GUEST_RUNNING, GUEST_STOPPING, GUEST_FAILED };
+ 
+ void guest_init(void);                     /* once, after hw_irq_init (routes the host doorbell) */
+ int guest_available(void);                 /* 1: the three store entries exist */
+ int guest_start(void);                     /* 0 started, < 0 refused (heater busy, no files, a load error) */
+-int guest_start_mode(int mode);            /* GUEST_APP (= guest_start) or GUEST_TERM */
++int guest_start_mode(int mode);            /* GUEST_APP (= guest_start), GUEST_TERM or GUEST_WL */
+ int guest_available_mode(int mode);
+ int guest_mode(void);                      /* the last started */
+ int guest_scale(void);                     /* the view's scale: 2 (both; the blit also does 4) */
+@@ -49,6 +57,11 @@ int guest_shown(void);
+ int guest_frame_new(void);                 /* 1 when the guest published a frame since the last blit */
+ /* the rows newer than the frame drawn (damage per row) at 2x / 4x: the rows copied; *py0..*py1 the panel rows */
+ int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0, int *py1);
++/* L3: the same at 2x into a row table (rows[y]: the target's row y, 2 surf_w px; 2 surf_h rows), *py0..*py1 rows */
++int guest_blit_rows(uint32_t *const *rows, int *py0, int *py1);
++/* L3: 1 while something of Linux runs without a window shown (the App Store open, a package being installed):
++ * no idle stop; 0: the 60 s count starts again (while hidden) */
++void guest_keep(int on);
+ int guest_input(int kin_type, int x, int y);  /* KIN_PRESS/MOVE/RELEASE in panel pixels: 1 taken */
+ int guest_key(unsigned linux_code, int down);
+ 
+diff --git a/starbite/sbos/build.sh b/starbite/sbos/build.sh
+index 30112f9..38a552c 100644
+--- a/starbite/sbos/build.sh
++++ b/starbite/sbos/build.sh
+@@ -221,6 +221,9 @@ if [ -n "$PAK" ]; then
+         "${CROSS}gcc" $NFLAGS "$ui/$f.c" -o "$ob/n_$f.o"
+         nui="$nui $ob/n_$f.o"
+     done
++    # L2 + L3 (docs/STARBITE-LINUX-APPS.md): Linux apps and the App Store (the platform side of shell.h's sh_linux_*)
++    "${CROSS}gcc" $NFLAGS "$root/starbite/guest/next/gwin.c" -o "$ob/n_gwin.o"
++    nui="$nui $ob/n_gwin.o"
+     "${CROSS}gcc" $NFLAGS -DSBOS_SELFTEST_NEXT "$ui/kern_next.c" -o "$ob/n_kern_next_st.o"
+     "${CROSS}gcc" $CFLAGS -DSBTK_PACK="\"$PAK\"" "$ui/next_pack.S" -o "$ob/n_pack.o"
+     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_NEXT "$here/kern/main.c" -o "$ob/k_main_next.o"
+@@ -230,6 +233,9 @@ if [ -n "$PAK" ]; then
+     # wifi-sbos-next: Next with the silent Wi-Fi self test (the TLS self-check, one scan, no join; then recovery)
+     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_WIFI "$here/kern/uitest.c" -o "$ob/k_uitest_nwifi.o"
+     nwobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_nwifi.o#")
++    # L2: Next with the Linux self test (the Terminal, foot on the M3 cores, a typed command; then recovery)
++    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_LINUX "$here/kern/uitest.c" -o "$ob/k_uitest_nlinux.o"
++    nlobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_nlinux.o#")
+ else
+     echo "sbos: no build/sbtk/sbtk-phone.pak: the starbite-next images are not built" >&2
+ fi
+@@ -336,8 +342,8 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
+ "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
+ python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
+ if [ -n "$nobjs" ]; then
+-    for v in next next-selftest next-wifitest; do
+-        case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; *) vo=$nwobjs ;; esac
++    for v in next next-selftest next-wifitest next-linuxtest; do
++        case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;; *) vo=$nwobjs ;; esac
+         "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
+         und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)
+         if [ -n "$und" ]; then
+diff --git a/starbite/sbos/kern/uitest.c b/starbite/sbos/kern/uitest.c
+index 37da568..ea1b443 100644
+--- a/starbite/sbos/kern/uitest.c
++++ b/starbite/sbos/kern/uitest.c
+@@ -153,6 +153,10 @@ static void logline(const char *what, int a)
+     ++steps;
+ }
+ 
++#ifdef SBOS_SELFTEST_NEXT_LINUX
++int next_ready(void), gwin_selftest_step(void);     /* ui/kern_next.c, starbite/guest/next/gwin.c */
++void guest_power_off(void);
++#endif
+ #ifdef SBOS_SELFTEST_NEXT
+ void next_selftest_begin(void);
+ int next_selftest_step(void), next_selftest_ready(void), next_selftest_failed(void), next_selftest_clock_ok(void);
+@@ -275,6 +279,19 @@ void selftest_timer(unsigned id)
+             return;
+         }
+ #endif
++#ifdef SBOS_SELFTEST_NEXT_LINUX
++        {
++            /* Starbite OS Next, Linux apps (L2, starbite/guest/next/gwin.c): the Terminal opened, foot on the M3
++             * cores, a typed command, a tap, the Terminal closed, the cluster off; no storage writes; then recovery
++             * (pmsg). The watchdog at 30 s, fed by the loop (the guest's load from the store feeds it too). */
++            unsigned w = hw_wdt_selftest(30);
++            sb_logx(w ? "selftest: next-linux: the watchdog at 30 s, fed by the loop: seconds " :
++                        "selftest: next-linux: the watchdog could not be set (the loader's stays): ", w);
++            phase = 97;
++            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
++            return;
++        }
++#endif
+ #ifdef SBOS_SELFTEST_NEXT_WIFI
+         {
+             /* Starbite OS Next, Wi-Fi (wifi-sbos-next): silent: the TLS self-check (no network), the radio on, one
+@@ -690,6 +707,28 @@ void selftest_timer(unsigned id)
+         power_restart_recovery();
+         return;
+ #endif
++#ifdef SBOS_SELFTEST_NEXT_LINUX
++    case 97: {                              /* every 100 ms once the shell is baked; 120 s at most */
++        int r = next_ready() ? gwin_selftest_step() : 0;
++        if (!r && sb_ms() - t0 < 120000U) {
++            kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
++            return;
++        }
++        sb_logx(r > 0 ? "selftest: next-linux: PASSED; a restart into recovery (pmsg) after seconds " :
++                r < 0 ? "selftest: next-linux: FAILED (see above); a restart into recovery (pmsg) after seconds " :
++                        "selftest: next-linux: FAILED: not done within 120 s; a restart into recovery (pmsg) after seconds ",
++                (sb_ms() - t0) / 1000U);
++        if (!r)
++            guest_power_off();              /* the cluster off before the restart */
++        phase = 94;
++        kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
++        return;
++    }
++    case 94:
++        active = 0;
++        power_restart_recovery();
++        return;
++#endif
+ #ifdef SBOS_SELFTEST_NEXT_WIFI
+     case 95: {
+         int done = 0;
+diff --git a/starbite/sbos/ui/host/linux_fake.inc b/starbite/sbos/ui/host/linux_fake.inc
+new file mode 100644
+index 0000000..7799a6a
+--- /dev/null
++++ b/starbite/sbos/ui/host/linux_fake.inc
+@@ -0,0 +1,566 @@
++/* SPDX-License-Identifier: MIT
++ * sbtk-host: a pretend Linux for the stills and films (L3, docs/STARBITE-LINUX-APPS.md; the kernel's platform is
++ * starbite/guest/next/gwin.c). A catalog of six apps and a store of fourteen packages in every state, icons drawn
++ * here, app windows drawn with the pack's fonts (foot: SBTK_LINUX = a 720 x 916 P6 PPM, its real frame from QEMU).
++ * Every platform call is logged ("linux: ..."). Time is the film's (lin_fake_poll); a still settles first.
++ *   SBTK_LINUX unset or a PPM: Linux ran earlier in this boot (running, the catalog and the store known)
++ *   SBTK_LINUX=cold: off, nothing known yet (the first open starts it: 1.5 s, then the catalog and the store)
++ *   SBTK_LINUX=starting / fail: stays starting / fails ("The Linux files are not on this phone yet.")
++ * Host-only states for stills: lx=focus:1 (the open app's text field focused), lx=type:TEXT (typed into it). */
++static sh_lcat_t FCAT;
++static sh_lstore_t FST;
++static struct {
++    int state, shown, hold, want, win, vp, focus, settling, nstart, pends;
++    float now, t_state, win_t, op_t[SH_LPKGS];
++    char pend[40];
++    unsigned seq, drawn;
++    char text[SH_LAPPS][160];
++    int loaded[SH_LAPPS];
++    uint8_t *foot;
++    tk_bmp w;                                   /* the window as the app drew it (720 x 1344) */
++} LF = { .want = -1, .win = -1, .vp = SH_LINUX_H };
++
++/* ---- icons (160 x 160 premultiplied): simple shapes, anti-aliased, and the pack's fonts ---- */
++static uint32_t pm(uint32_t rgb, float a) { return tk_premul(tk_hex(rgb, a)); }
++static void ic_over(uint32_t *px, int i, uint32_t c, float cov)
++{
++    if (cov <= 0) return;
++    if (cov > 1) cov = 1;
++    uint32_t d = px[i], ca = (uint32_t)((c >> 24) * cov + .5f), ia = 255 - ca;
++    uint32_t o = 0;
++    for (int s = 0; s < 32; s += 8) {
++        uint32_t sc = (uint32_t)(((c >> s) & 255) * cov + .5f), dc = (d >> s) & 255;
++        o |= ((sc + dc * ia / 255) & 255) << s;
++    }
++    (void)ca;
++    px[i] = o;
++}
++static void ic_rrect(uint32_t *px, float x, float y, float w, float h, float r, uint32_t c)
++{
++    for (int j = 0; j < 160; j++) for (int i = 0; i < 160; i++)
++        ic_over(px, j * 160 + i, c, .5f - tk_sd_rrect(i + .5f, j + .5f, x, y, w, h, r));
++}
++static void ic_circle(uint32_t *px, float cx, float cy, float r, uint32_t c)
++{
++    for (int j = 0; j < 160; j++) for (int i = 0; i < 160; i++) {
++        float dx = i + .5f - cx, dy = j + .5f - cy;
++        ic_over(px, j * 160 + i, c, r + .5f - tk_sqrtf(dx * dx + dy * dy));
++    }
++}
++static void ic_line(uint32_t *px, float ax, float ay, float bx, float by, float r, uint32_t c)
++{
++    for (int j = 0; j < 160; j++) for (int i = 0; i < 160; i++) {
++        float x = i + .5f, y = j + .5f, dx = bx - ax, dy = by - ay;
++        float t = ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy);
++        t = t < 0 ? 0 : t > 1 ? 1 : t;
++        float ex = x - ax - t * dx, ey = y - ay - t * dy;
++        ic_over(px, j * 160 + i, c, r + .5f - tk_sqrtf(ex * ex + ey * ey));
++    }
++}
++static void ic_text(uint32_t *px, float size, float cx, float base, const char *s, uint32_t rgb, int font)
++{
++    tk_bmp b = { 160, 160, 160, px };
++    tk_paint p = tk_solid(tk_hex(rgb, 1));
++    tk_text(&b, font, size, cx - tk_text_w(font, size, s, 0, 0) / 2, base, s, 0, 0, &p, 0);
++}
++enum { K_FOOT, K_EDIT, K_CALC, K_FILES, K_HTOP, K_MINES, K_FOX, K_GIMP, K_CHROM, K_WRITER, K_INK, K_VLC, K_TUX, K_GEANY };
++static void draw_icon(int k, uint32_t *px)
++{
++    memset(px, 0, 160 * 160 * 4);
++    switch (k) {
++    case K_FOOT:
++        ic_rrect(px, 14, 22, 132, 116, 18, pm(0x2a2f3a, 1));
++        ic_rrect(px, 14, 22, 132, 22, 18, pm(0x4a5266, 1));
++        ic_line(px, 42, 70, 62, 88, 6, pm(0x7dd87a, 1)); ic_line(px, 62, 88, 42, 106, 6, pm(0x7dd87a, 1));
++        ic_line(px, 74, 106, 112, 106, 6, pm(0xe6e6e6, 1));
++        break;
++    case K_EDIT:
++        ic_rrect(px, 30, 14, 100, 132, 12, pm(0xf6f5f4, 1));
++        for (int i = 0; i < 6; i++) ic_line(px, 46, 44 + 15 * i, i % 3 == 2 ? 92 : 114, 44 + 15 * i, 3, pm(0x9a9996, 1));
++        ic_line(px, 92, 128, 136, 66, 8, pm(0x3584e4, 1));
++        ic_line(px, 136, 66, 142, 58, 8, pm(0xe5a50a, 1));
++        break;
++    case K_CALC:
++        ic_rrect(px, 26, 12, 108, 136, 16, pm(0x3d3846, 1));
++        ic_rrect(px, 38, 24, 84, 30, 6, pm(0xc0bfbc, 1));
++        for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++)
++            ic_rrect(px, 38 + 30.0f * c, 64 + 26.0f * r, 22, 18, 5, c == 2 ? pm(0xff7800, 1) : pm(0x77767b, 1));
++        break;
++    case K_FILES:
++        ic_rrect(px, 14, 30, 64, 30, 10, pm(0x438de6, 1));
++        ic_rrect(px, 14, 44, 132, 96, 12, pm(0x62a0ea, 1));
++        ic_rrect(px, 14, 58, 132, 82, 12, pm(0x99c1f1, 1));
++        break;
++    case K_HTOP:
++        ic_rrect(px, 14, 18, 132, 124, 16, pm(0x111111, 1));
++        for (int i = 0; i < 4; i++) {
++            ic_rrect(px, 30, 36 + 24.0f * i, 100, 12, 3, pm(0x333333, 1));
++            ic_rrect(px, 30, 36 + 24.0f * i, 30 + 18.0f * ((i * 7) % 4), 12, 3, pm(i == 3 ? 0xe01b24 : i ? 0xf6d32d : 0x33d17a, 1));
++        }
++        break;
++    case K_MINES:
++        for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++)
++            ic_rrect(px, 18 + 43.0f * c, 18 + 43.0f * r, 38, 38, 6, pm((r + c) % 2 ? 0x8ff0a4 : 0x57e389, 1));
++        ic_circle(px, 80, 80, 16, pm(0x241f31, 1));
++        ic_line(px, 58, 80, 102, 80, 3, pm(0x241f31, 1)); ic_line(px, 80, 58, 80, 102, 3, pm(0x241f31, 1));
++        break;
++    case K_FOX:
++        ic_circle(px, 80, 80, 66, pm(0xff9500, 1));
++        ic_circle(px, 86, 74, 46, pm(0x7542e5, 1));
++        ic_circle(px, 92, 68, 30, pm(0x2b1a6b, 1));
++        ic_line(px, 34, 50, 60, 30, 14, pm(0xffcf33, 1));
++        break;
++    case K_GIMP:
++        ic_circle(px, 80, 90, 56, pm(0x8a6d4b, 1));
++        ic_circle(px, 62, 76, 16, pm(0xffffff, 1)); ic_circle(px, 98, 76, 16, pm(0xffffff, 1));
++        ic_circle(px, 64, 78, 7, pm(0x000000, 1)); ic_circle(px, 100, 78, 7, pm(0x000000, 1));
++        ic_line(px, 112, 40, 140, 16, 7, pm(0x8a6d4b, 1));
++        ic_rrect(px, 64, 108, 32, 10, 5, pm(0xe5a50a, 1));
++        break;
++    case K_CHROM:
++        ic_circle(px, 80, 80, 66, pm(0x5c8fdc, 1));
++        ic_circle(px, 80, 80, 32, pm(0xffffff, 1));
++        ic_circle(px, 80, 80, 24, pm(0x1a5fc8, 1));
++        break;
++    case K_WRITER:
++        ic_rrect(px, 30, 14, 100, 132, 10, pm(0x2a7ad6, 1));
++        ic_text(px, 64, 80, 104, "W", 0xffffff, TK_IT800);
++        break;
++    case K_INK:
++        ic_circle(px, 80, 80, 64, pm(0x1c1c1c, 1));
++        ic_line(px, 44, 104, 80, 44, 10, pm(0xffffff, 1)); ic_line(px, 80, 44, 116, 104, 10, pm(0xffffff, 1));
++        ic_circle(px, 80, 122, 9, pm(0xffffff, 1));
++        break;
++    case K_VLC:
++        ic_line(px, 80, 22, 50, 118, 12, pm(0xff8800, 1)); ic_line(px, 80, 22, 110, 118, 12, pm(0xff8800, 1));
++        ic_rrect(px, 50, 50, 60, 70, 6, pm(0xff8800, 1));
++        ic_rrect(px, 50, 66, 60, 8, 2, pm(0xffffff, 1)); ic_rrect(px, 44, 96, 72, 8, 2, pm(0xffffff, 1));
++        ic_rrect(px, 26, 120, 108, 22, 6, pm(0xff8800, 1));
++        break;
++    case K_TUX:
++        ic_circle(px, 80, 92, 48, pm(0x1c1c1c, 1)); ic_circle(px, 80, 100, 34, pm(0xf4f1ea, 1));
++        ic_circle(px, 80, 46, 30, pm(0x1c1c1c, 1));
++        ic_circle(px, 70, 42, 7, pm(0xffffff, 1)); ic_circle(px, 90, 42, 7, pm(0xffffff, 1));
++        ic_rrect(px, 66, 54, 28, 10, 5, pm(0xffb627, 1));
++        break;
++    default:
++        ic_rrect(px, 14, 14, 132, 132, 24, pm(0x2190a4, 1));
++        ic_text(px, 60, 80, 102, "{ }", 0xffffff, TK_IT700);
++        break;
++    }
++}
++
++/* ---- the catalog and the store ---- */
++typedef struct { const char *pkg, *name, *summary, *cat, *err; unsigned dl, inst, ram, flags, state, pct; int kind; const char *app; } fpkg;
++static const fpkg FP[] = {
++    { "firefox-esr", "Firefox ESR", "Mozilla's web browser, the extended support release. Software rendering on the big cores.", "Internet", "", 72000, 262000, 520, SH_PKG_FEATURED, 0, 0, K_FOX, "firefox-esr" },
++    { "gnome-text-editor", "Text Editor", "A simple editor for notes, lists and code.", "Utilities", "", 2100, 7800, 90, SH_PKG_INSTALLED | SH_PKG_FEATURED, 0, 0, K_EDIT, "org.gnome.TextEditor" },
++    { "gimp", "GIMP", "The GNU Image Manipulation Program: photos, painting, layers.", "Graphics", "", 58000, 236000, 300, SH_PKG_FEATURED, SH_PKG_INSTALLING, 40, K_GIMP, "gimp" },
++    { "chromium", "Chromium", "The open-source browser behind Chrome.", "Internet", "", 98000, 352000, 900, SH_PKG_TOO_BIG, 0, 0, K_CHROM, "chromium" },
++    { "libreoffice-writer", "LibreOffice Writer", "Word processing with the LibreOffice suite: documents, letters, books.", "Office", "", 160000, 1400000, 330, SH_PKG_NO_SPACE, 0, 0, K_WRITER, "libreoffice-writer" },
++    { "inkscape", "Inkscape", "Vector graphics: drawings, logos, diagrams.", "Graphics", "Download stopped: no network", 41000, 168000, 220, 0, SH_PKG_FAILED, 0, K_INK, "org.inkscape.Inkscape" },
++    { "vlc", "VLC", "Plays most video and audio files.", "Utilities", "", 24000, 96000, 140, 0, SH_PKG_QUEUED, 0, K_VLC, "vlc" },
++    { "gnome-calculator", "Calculator", "Basic, advanced and financial calculations.", "Utilities", "", 1600, 6200, 60, SH_PKG_INSTALLED, 0, 0, K_CALC, "org.gnome.Calculator" },
++    { "nautilus", "Files", "Browse the files in Linux's home folder.", "Utilities", "", 4300, 16500, 110, SH_PKG_INSTALLED, 0, 0, K_FILES, "org.gnome.Nautilus" },
++    { "htop", "htop", "What runs in Linux and how much memory it takes, in a terminal.", "Development", "", 180, 420, 8, SH_PKG_INSTALLED, 0, 0, K_HTOP, "htop" },
++    { "gnome-mines", "Mines", "Clear the minefield without stepping on a mine.", "Games", "", 900, 3100, 45, SH_PKG_INSTALLED, SH_PKG_REMOVING, 60, K_MINES, "org.gnome.Mines" },
++    { "foot", "Foot", "The terminal: a fast Wayland terminal emulator.", "Development", "", 350, 1100, 20, SH_PKG_INSTALLED | SH_PKG_SYSTEM, 0, 0, K_FOOT, SH_LINUX_TERMINAL },
++    { "supertux", "SuperTux", "A classic 2D jump-and-run with Tux.", "Games", "", 61000, 98000, 120, 0, 0, 0, K_TUX, "supertux2" },
++    { "geany", "Geany", "A small, fast code editor with build and run.", "Development", "", 3800, 13900, 70, 0, 0, 0, K_GEANY, "geany" },
++};
++#define NFP ((int)(sizeof FP / sizeof FP[0]))
++static void fake_push_store(void)
++{
++    FST.seq += 2;
++    sh_linux_store(&FST);
++}
++static void fake_catalog_rebuild(void)
++{
++    /* the installed packages' apps, in the store's order (foot first: the Terminal) */
++    sh_lcat_t old = FCAT;
++    memset(&FCAT, 0, sizeof FCAT);
++    FCAT.seq = old.seq + 2;
++    FCAT.mem_total_kb = 1490000;
++    FCAT.mem_avail_kb = 1180000;
++    static const int order[] = { 11, 1, 7, 8, 9, 10, 0, 2, 3, 4, 5, 6, 12, 13 };
++    for (int o = 0; o < NFP; o++) {
++        int i = order[o];
++        if (!(FST.pkg[i].flags & SH_PKG_INSTALLED)) continue;
++        sh_lapp_t *a = &FCAT.app[FCAT.n];
++        snprintf(a->id, sizeof a->id, "%s", FP[i].app);
++        snprintf(a->name, sizeof a->name, "%s", i == 11 ? "Foot" : FP[i].name);
++        a->flags = i == 11 || i == 9 ? SH_LAPP_KEYBOARD : 0;
++        if (i == 9) a->flags |= SH_LAPP_TERMINAL;
++        if (FP[i].flags & SH_PKG_SYSTEM) a->flags |= SH_LAPP_SYSTEM;
++        a->icon = FCAT.n;                       /* the catalog's pool icons 0..63 */
++        a->pkg = i;
++        for (int k = 0; k < old.n; k++)
++            if (!strcmp(old.app[k].id, a->id)) { a->flags |= old.app[k].flags & (SH_LAPP_RUNNING | SH_LAPP_WINDOW); a->rss_kb = old.app[k].rss_kb; }
++        FCAT.n++;
++    }
++}
++static int fake_kind_of_icon(int icon)
++{
++    if (icon >= 64 && icon < 64 + NFP) return FP[icon - 64].kind;
++    if (icon >= 0 && icon < FCAT.n) return FP[FCAT.app[icon].pkg].kind;
++    return -1;
++}
++static void fake_publish(void)
++{
++    if (!FST.n) {
++        FST.n = NFP;
++        FST.repo_ok = 1;
++        FST.overlay_total_kb = 3900000;
++        FST.overlay_free_kb = 1100000;
++        FST.mem_total_kb = 1490000;
++        for (int i = 0; i < NFP; i++) {
++            sh_lpkg_t *p = &FST.pkg[i];
++            snprintf(p->pkg, sizeof p->pkg, "%s", FP[i].pkg);
++            snprintf(p->name, sizeof p->name, "%s", FP[i].name);
++            snprintf(p->summary, sizeof p->summary, "%s", FP[i].summary);
++            snprintf(p->category, sizeof p->category, "%s", FP[i].cat);
++            snprintf(p->err, sizeof p->err, "%s", FP[i].err);
++            p->dl_kb = FP[i].dl; p->inst_kb = FP[i].inst; p->ram_mb = FP[i].ram;
++            p->flags = FP[i].flags; p->state = FP[i].state; p->pct = FP[i].pct;
++            p->icon = 64 + i;
++        }
++    }
++    fake_catalog_rebuild();
++    sh_linux_catalog(&FCAT);
++    fake_push_store();
++}
++static int fcat_find(const char *id)
++{
++    for (int i = 0; i < FCAT.n; i++) if (!strcmp(FCAT.app[i].id, id) || (!strcmp(id, "foot") && !strcmp(FCAT.app[i].id, SH_LINUX_TERMINAL))) return i;
++    return -1;
++}
++static void fake_state(int s, const char *why)
++{
++    LF.state = s;
++    LF.t_state = LF.now;
++    fprintf(stderr, "linux: state %s\n", s == SH_LINUX_STARTING ? "starting" : s == SH_LINUX_RUNNING ? "running" : s == SH_LINUX_FAILED ? "failed" : s == SH_LINUX_OFF ? "off" : "stopping");
++    sh_linux_state(s, why);
++}
++static int fake_start(void)
++{
++    const char *e = getenv("SBTK_LINUX");
++    if (LF.state == SH_LINUX_RUNNING || LF.state == SH_LINUX_STARTING) return 0;
++    if (e && !strcmp(e, "fail")) { fake_state(SH_LINUX_FAILED, "The Linux files are not on this phone yet."); return -4; }
++    LF.nstart++;
++    fake_state(SH_LINUX_STARTING, "");
++    return 0;
++}
++
++/* ---- the windows: what each app draws (720 x vp, 1x surface px; the shell shows them at 2x) ---- */
++static void wfill(int x, int y, int w, int h, uint32_t rgb) { tk_fill_rect_raw(&LF.w, x, y, w, h, 0xff000000u | rgb); }
++static void wrr(float x, float y, float w, float h, float r, uint32_t rgb) { tk_paint p = tk_solid(tk_hex(rgb, 1)); tk_fill_rrect(&LF.w, x, y, w, h, r, &p, 1); }
++static void wtext(int font, float size, float x, float base, const char *s, uint32_t rgb)
++{
++    tk_paint p = tk_solid(tk_hex(rgb, 1));
++    tk_text(&LF.w, font, size, x, base, s, 0, 0, &p, 0);
++}
++static float wtw(int font, float size, const char *s) { return tk_text_w(font, size, s, 0, 0); }
++static void headerbar(const char *title, int h)
++{
++    wfill(0, 0, 720, h, 0xebebeb);
++    wfill(0, h - 1, 720, 1, 0xd0d0d0);
++    wtext(TK_IT700, 24, 360 - wtw(TK_IT700, 24, title) / 2, h / 2 + 9, title, 0x2e2e2e);
++    for (int i = 0; i < 3; i++) wrr(660, h / 2 - 11 + 9.0f * i, 30, 4, 2, 0x5e5c64);
++}
++static void draw_window(int ci)
++{
++    if (!LF.w.px) {                              /* the guest's memory, not the UI heap */
++        LF.w.px = calloc((size_t)SH_LINUX_W * SH_LINUX_H, 4);
++        if (!LF.w.px) return;
++        LF.w.w = LF.w.stride = SH_LINUX_W;
++        LF.w.h = SH_LINUX_H;
++    }
++    const char *id = FCAT.app[ci].id, *t = LF.text[ci];
++    int vp = LF.vp;
++    wfill(0, 0, 720, SH_LINUX_H, 0xffffff);
++    if (!strcmp(id, SH_LINUX_TERMINAL)) {
++        wfill(0, 0, 720, SH_LINUX_H, 0x242424);
++        if (LF.foot) {
++            for (int y = 0; y < 916 && y < vp; y++)
++                for (int x = 0; x < 720; x++) {
++                    const uint8_t *p = LF.foot + ((size_t)y * 720 + x) * 3;
++                    LF.w.px[(size_t)y * LF.w.stride + x] = 0xff000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
++                }
++        } else {
++            char l[200];
++            snprintf(l, sizeof l, "user@starbite:~$ %s", t);
++            wtext(TK_IT500, 26, 12, 40, l, 0xdddddd);
++        }
++    } else if (!strcmp(id, "org.gnome.TextEditor")) {
++        headerbar(t[0] ? "Untitled Document 1 \xe2\x80\xa2" : "Untitled Document 1", 92);
++        wrr(20, 26, 88, 40, 8, 0xdcdcdc);
++        wtext(TK_IT600, 22, 36, 54, "Open", 0x2e2e2e);
++        float y = 150, x = 24;
++        char line[160];
++        int n = 0;
++        for (const char *c = t;; c++) {                      /* the text, its own lines, then the caret */
++            if (*c == '\n' || !*c) {
++                line[n] = 0;
++                wtext(TK_IT400, 30, 24, y, line, 0x1e1e1e);
++                x = 24 + wtw(TK_IT400, 30, line);
++                if (!*c) break;
++                y += 42; n = 0;
++                continue;
++            }
++            if (n < 150) line[n++] = *c;
++        }
++        if (LF.focus) wfill((int)x + 2, (int)y - 30, 3, 38, 0x3584e4);
++        if (!t[0] && !LF.focus) wtext(TK_IT400, 24, 24, 150, "Tap to write", 0xa0a0a0);
++        char st[64];
++        snprintf(st, sizeof st, "Ln 1, Col %d", (int)strlen(t) + 1);
++        wfill(0, vp - 52, 720, 52, 0xf6f5f4);
++        wtext(TK_IT400, 20, 700 - wtw(TK_IT400, 20, st), vp - 18, st, 0x77767b);
++    } else if (!strcmp(id, "firefox-esr")) {
++        wfill(0, 0, 720, 60, 0xf0f0f4);
++        wrr(10, 10, 230, 44, 8, 0xffffff);
++        wtext(TK_IT500, 20, 30, 40, LF.loaded[ci] ? "Problem loading page" : "New Tab", 0x15141a);
++        wfill(0, 60, 720, 74, 0xf9f9fb);
++        wrr(16, 72, 688, 50, 12, LF.focus ? 0xffffff : 0xe8e8ed);
++        if (LF.focus) { wrr(16, 72, 688, 50, 12, 0x0060df); wrr(19, 75, 682, 44, 10, 0xffffff); }
++        if (t[0]) wtext(TK_IT400, 24, 40, 105, t, 0x15141a);
++        else wtext(TK_IT400, 24, 40, 105, "Search or enter address", 0x8f8f9d);
++        if (LF.focus) wfill(40 + (int)wtw(TK_IT400, 24, t) + 2, 82, 3, 30, 0x0060df);
++        if (LF.loaded[ci]) {
++            wtext(TK_IT700, 36, 60, 300, "Hmm. We're having trouble", 0x15141a);
++            wtext(TK_IT700, 36, 60, 346, "finding that site.", 0x15141a);
++            wtext(TK_IT400, 24, 60, 410, "Linux has no network yet: it comes", 0x5b5b66);
++            wtext(TK_IT400, 24, 60, 444, "through Starbite's Wi-Fi in L5.", 0x5b5b66);
++        } else {
++            for (int r = 0; r < 70; r++) for (int c = 0; c < 140; c++) {
++                float dx = c - 70.0f, dy = r * 2 - 70.0f;
++                if (dx * dx + dy * dy < 70 * 70) LF.w.px[(size_t)(260 + r * 2) * LF.w.stride + 290 + c] = LF.w.px[(size_t)(261 + r * 2) * LF.w.stride + 290 + c] = 0xffff9500u;
++            }
++            wtext(TK_IT700, 40, 360 - wtw(TK_IT700, 40, "Firefox") / 2, 470, "Firefox", 0x15141a);
++            wrr(60, 520, 600, 64, 32, 0xf0f0f4);
++            wtext(TK_IT400, 24, 100, 561, "Search the web", 0x8f8f9d);
++        }
++    } else if (!strcmp(id, "org.gnome.Calculator")) {
++        headerbar("Calculator", 92);
++        wtext(TK_IT400, 72, 680 - wtw(TK_IT400, 72, "1,337"), 300, "1,337", 0x2e2e2e);
++        static const char *const K[16] = { "7", "8", "9", "\xc3\xb7", "4", "5", "6", "\xc3\x97", "1", "2", "3", "\xe2\x88\x92", "0", ".", "=", "+" };
++        for (int i = 0; i < 16; i++) {
++            float x = 24 + 172.0f * (i % 4), y = 380 + 120.0f * (i / 4);
++            wrr(x, y, 156, 104, 14, i == 14 ? 0xff7800 : i % 4 == 3 ? 0xdeddda : 0xf6f5f4);
++            wtext(TK_IT500, 40, x + 78 - wtw(TK_IT500, 40, K[i]) / 2, y + 66, K[i], i == 14 ? 0xffffff : 0x2e2e2e);
++        }
++    } else if (!strcmp(id, "htop")) {
++        wfill(0, 0, 720, SH_LINUX_H, 0x000000);
++        static const char *const P[] = { "  PID USER   RES CPU% Command", "  412 user  22M  3.1 foot", "  398 user  14M  1.2 sbwl",
++                                         "  431 user  88M  0.4 gnome-text-editor", "    1 root 1.2M  0.0 sbinit" };
++        for (int i = 0; i < 4; i++) {
++            char l[48];
++            snprintf(l, sizeof l, "%d", i);
++            wtext(TK_IT500, 22, 12, 36 + 34.0f * i, l, 0x33c7de);
++            wfill(40, 16 + 34 * i, 600, 24, 0x262626);
++            wfill(40, 16 + 34 * i, 120 + 90 * ((i * 5) % 4), 24, 0x33d17a);
++        }
++        for (int i = 0; i < 5; i++) {
++            if (!i) wfill(0, 182, 720, 34, 0x33d17a);
++            wtext(TK_IT500, 22, 12, 208 + 40.0f * i, P[i], i ? 0xdddddd : 0x000000);
++        }
++    } else {
++        headerbar(FCAT.app[ci].name, 92);
++        float w = wtw(TK_IT700, 40, FCAT.app[ci].name);
++        wtext(TK_IT700, 40, 360 - w / 2, vp / 2, FCAT.app[ci].name, 0x77767b);
++    }
++    if (vp < SH_LINUX_H) wfill(0, vp, 720, SH_LINUX_H - vp, 0x000000);   /* below the viewport: under the keyboard */
++}
++
++/* ---- the platform (shell.h) ---- */
++int sh_linux_open(const char *id)
++{
++    fprintf(stderr, "linux: open %s\n", id);
++    snprintf(LF.pend, sizeof LF.pend, "%s", id);
++    LF.shown = 1;
++    LF.focus = 0;
++    int r = fake_start();
++    return r;
++}
++void sh_linux_hide(void)
++{
++    fprintf(stderr, "linux: hide (activate none; the apps keep running)\n");
++    LF.shown = 0;
++    LF.want = LF.win = -1;
++    LF.pend[0] = 0;
++    LF.focus = 0;
++}
++int sh_linux_blit(uint32_t *const *rows, int first, int *y0, int *y1)
++{
++    *y0 = *y1 = -1;
++    if (!LF.shown || LF.win < 0 || LF.win != LF.want) return 0;
++    if (!first && LF.drawn == LF.seq) return 0;
++    LF.drawn = LF.seq;
++    draw_window(LF.win);
++    for (int y = 0; y < SH_LINUX_H; y++)
++        for (int x = 0; x < SH_LINUX_W; x++) {
++            uint32_t c = LF.w.px[(size_t)y * LF.w.stride + x] | 0xff000000u;
++            rows[2 * y][2 * x] = rows[2 * y][2 * x + 1] = rows[2 * y + 1][2 * x] = rows[2 * y + 1][2 * x + 1] = c;
++        }
++    *y0 = 0;
++    *y1 = 2 * SH_LINUX_H - 1;
++    return SH_LINUX_H;
++}
++int sh_linux_touch(int phase, int x, int y)
++{
++    static int dy;
++    fprintf(stderr, "linux: touch %s at %d,%d\n", phase == 0 ? "down" : phase == 1 ? "move" : "up", x, y);
++    if (phase == 0) dy = y;
++    if (phase != 2 || LF.win < 0) return 1;
++    const char *id = FCAT.app[LF.win].id;
++    int f = LF.focus;
++    if (!strcmp(id, "org.gnome.TextEditor")) f = dy > 92;              /* the text area / the header bar */
++    else if (!strcmp(id, "firefox-esr")) f = dy >= 60 && dy < 134;      /* the address field / the page */
++    if (f != LF.focus) {
++        LF.focus = f;
++        LF.seq++;
++        fprintf(stderr, "linux: text focus %d (text-input-v3)\n", f);
++        sh_linux_textfocus(f);
++    }
++    return 1;
++}
++int sh_linux_char(char c)
++{
++    if (LF.win < 0) return 0;
++    char *t = LF.text[LF.win];
++    size_t n = strlen(t);
++    int keys = (FCAT.app[LF.win].flags & SH_LAPP_KEYBOARD) || !LF.focus;
++    if (c == '\n' || c == '\b' || keys) fprintf(stderr, "linux: key %s\n", c == '\n' ? "Return" : c == '\b' ? "BackSpace" : (char[2]){ c, 0 });
++    else fprintf(stderr, "linux: text '%c'\n", c);
++    if (c == '\b') { if (n) t[n - 1] = 0; }
++    else if (c == '\n' && !strcmp(FCAT.app[LF.win].id, "firefox-esr")) {
++        LF.loaded[LF.win] = 1;
++        LF.focus = 0;
++        fprintf(stderr, "linux: text focus 0 (text-input-v3)\n");
++        sh_linux_textfocus(0);
++    } else if (n + 1 < sizeof LF.text[0] && (LF.focus || keys)) { t[n] = c; t[n + 1] = 0; }
++    LF.seq++;
++    return 1;
++}
++int sh_linux_viewport(int rows)
++{
++    fprintf(stderr, "linux: viewport %d x %d\n", SH_LINUX_W, rows);
++    if (rows != LF.vp) { LF.vp = rows; LF.seq++; }
++    return 1;
++}
++int sh_linux_icon(int icon, uint32_t *px)
++{
++    int k = fake_kind_of_icon(icon);
++    if (k < 0) return 0;
++    draw_icon(k, px);
++    return 1;
++}
++int sh_linux_hold(int on)
++{
++    fprintf(stderr, "linux: hold %d (the App Store %s)\n", on, on ? "open" : "closed");
++    LF.hold = on;
++    return on ? fake_start() : 0;
++}
++int sh_linux_pkg(int i, int op)
++{
++    if (LF.state != SH_LINUX_RUNNING || i < 0 || i >= FST.n) return -1;
++    sh_lpkg_t *p = &FST.pkg[i];
++    fprintf(stderr, "linux: pkg %s %s\n", op == SH_PKG_OP_INSTALL ? "install" : op == SH_PKG_OP_REMOVE ? "remove" : "cancel", p->pkg);
++    if (op == SH_PKG_OP_INSTALL) { p->state = SH_PKG_QUEUED; p->pct = 0; p->err[0] = 0; }
++    else if (op == SH_PKG_OP_REMOVE) { p->state = SH_PKG_REMOVING; p->pct = 0; }
++    else { p->state = SH_PKG_IDLE; p->pct = 0; }
++    LF.op_t[i] = LF.now;
++    fake_push_store();
++    return 0;
++}
++
++/* ---- time ---- */
++static void lin_fake_init(void)
++{
++    const char *e = getenv("SBTK_LINUX");
++    if (e && strcmp(e, "cold") && strcmp(e, "fail") && strcmp(e, "starting")) {
++        FILE *f = fopen(e, "rb");
++        int w = 0, h = 0, mx = 0;
++        if (f && fscanf(f, "P6 %d %d %d", &w, &h, &mx) == 3 && w == 720 && h == 916 && fgetc(f) != EOF) {
++            LF.foot = malloc((size_t)w * h * 3);
++            if (LF.foot && fread(LF.foot, 3, (size_t)w * h, f) != (size_t)w * h) { free(LF.foot); LF.foot = 0; }
++        }
++        if (!LF.foot) fprintf(stderr, "linux: %s is not a 720x916 P6 PPM: foot drawn\n", e);
++        if (f) fclose(f);
++    }
++    if (e && (!strcmp(e, "cold") || !strcmp(e, "fail") || !strcmp(e, "starting"))) return;
++    LF.state = SH_LINUX_RUNNING;                  /* Linux ran earlier in this boot: still up, its tables known */
++    sh_linux_state(SH_LINUX_RUNNING, "");
++    fake_publish();
++}
++static void lin_fake_poll(float t)
++{
++    LF.now = t;
++    const char *e = getenv("SBTK_LINUX");
++    if (LF.state == SH_LINUX_STARTING && !(e && !strcmp(e, "starting")) && t - LF.t_state >= 1500) {
++        fake_state(SH_LINUX_RUNNING, "");
++        fake_publish();
++    }
++    if (LF.state != SH_LINUX_RUNNING) return;
++    if (LF.pend[0]) {                            /* the open: once the catalog has the app */
++        int ci = fcat_find(LF.pend);
++        if (ci >= 0) {
++            int warm = (FCAT.app[ci].flags & SH_LAPP_RUNNING) != 0;
++            fprintf(stderr, "linux: launch %s (catalog %d, seq %u)%s; activate %d; viewport %d\n", FCAT.app[ci].id, ci, FCAT.seq,
++                    warm ? " (running: raised)" : "", ci, LF.vp);
++            LF.want = ci;
++            LF.win = -1;
++            LF.win_t = t + (LF.settling ? 0 : warm ? 80 : !strcmp(FCAT.app[ci].id, "firefox-esr") ? 2000 : !strcmp(FCAT.app[ci].id, SH_LINUX_TERMINAL) ? 600 : 1200);
++            LF.pend[0] = 0;
++        }
++    }
++    if (LF.want >= 0 && LF.win != LF.want && t >= LF.win_t) {
++        LF.win = LF.want;
++        FCAT.app[LF.win].flags |= SH_LAPP_RUNNING | SH_LAPP_WINDOW;
++        FCAT.app[LF.win].rss_kb = 60000;
++        FCAT.seq += 2;
++        LF.seq++;
++        fprintf(stderr, "linux: window of %s mapped\n", FCAT.app[LF.win].id);
++        sh_linux_catalog(&FCAT);
++    }
++    if (LF.shown && LF.win >= 0 && LF.drawn != LF.seq) sh_linux_frame();
++    /* the packages the user started advance (GIMP, VLC and Mines wait in the queue of the stills) */
++    if (LF.settling) return;
++    int changed = 0, cat = 0;
++    for (int i = 0; i < FST.n; i++) {
++        sh_lpkg_t *p = &FST.pkg[i];
++        if (!LF.op_t[i]) continue;
++        if (p->state == SH_PKG_QUEUED && t - LF.op_t[i] >= 400) { p->state = SH_PKG_INSTALLING; p->pct = 0; LF.op_t[i] = t; changed = 1; }
++        else if ((p->state == SH_PKG_INSTALLING || p->state == SH_PKG_REMOVING) && t - LF.op_t[i] >= 70) {
++            p->pct += p->state == SH_PKG_INSTALLING ? 3 : 5;
++            LF.op_t[i] = t;
++            changed = 1;
++            if (p->pct >= 100) {
++                p->pct = 100;
++                if (p->state == SH_PKG_INSTALLING) { p->flags |= SH_PKG_INSTALLED; FST.overlay_free_kb -= p->inst_kb; }
++                else { p->flags &= ~(unsigned)SH_PKG_INSTALLED; FST.overlay_free_kb += p->inst_kb; }
++                fprintf(stderr, "linux: pkg %s %s\n", p->pkg, p->state == SH_PKG_INSTALLING ? "installed" : "removed");
++                p->state = SH_PKG_IDLE;
++                p->pct = 0;
++                LF.op_t[i] = 0;
++                cat = 1;
++            }
++        }
++    }
++    if (cat) { fake_catalog_rebuild(); sh_linux_catalog(&FCAT); }
++    if (changed) fake_push_store();
++}
++/* a still: what would have happened in the next seconds (the start, the launches; not the packages) */
++static void lin_fake_settle(void)
++{
++    LF.settling = 1;
++    for (int i = 0; i < 40; i++) lin_fake_poll(LF.now + 100);
++    LF.settling = 0;
++}
++/* the stills' host-only states: "focus:1" (the open app's text field focused), "type:TEXT" (typed into it) */
++static void lin_fake_state(const char *st)
++{
++    lin_fake_settle();
++    if (!strncmp(st, "focus:", 6) && LF.win >= 0) { LF.focus = atof(st + 6) > 0; LF.seq++; sh_linux_textfocus(LF.focus); }
++    else if (!strncmp(st, "type:", 5)) for (const char *c = st + 5; *c; c++) sh_linux_char(*c);
++    lin_fake_settle();
++}
+diff --git a/starbite/sbos/ui/host/main.c b/starbite/sbos/ui/host/main.c
+index 7f4538c..0cfdd7c 100644
+--- a/starbite/sbos/ui/host/main.c
++++ b/starbite/sbos/ui/host/main.c
+@@ -36,6 +36,17 @@ int sh_cellular(int on)
+ void sh_brightness(int level) { fprintf(stderr, "brightness: level %d\n", level); }
+ void sh_vibrate(void) { fprintf(stderr, "vibrate: the timer ran out\n"); }
+ void sh_haptic(void) { }
++/* L2 + L3: Linux apps and the App Store (the kernel's platform is starbite/guest/next/gwin.c): host/linux_fake.inc,
++ * a pretend Linux with a catalog and a store. SBTK_NO_LINUX_FAKE: none (starbite/guest/next/host/gwin-host.c links
++ * gwin.c itself and drives the shell) */
++#ifndef SBTK_NO_LINUX_FAKE
++#include "linux_fake.inc"
++#else
++static void lin_fake_init(void) {}
++static void lin_fake_poll(float t) { (void)t; }
++static void lin_fake_settle(void) {}
++static void lin_fake_state(const char *st) { (void)st; }
++#endif
+ /* wifi-sbos-next: a pretend Wi-Fi for the previews (made-up network names; nothing is joined): on lists four
+  * networks, a join connects, the Internet test answers 200 */
+ static sh_wifi_t HW;
+@@ -216,6 +227,7 @@ static void apply_state(const char *st)
+     float v = 1;
+     const char *eq = strchr(st, '=');
+     if (!eq) return;
++    if (!strncmp(st, "lx=", 3)) { lin_fake_state(st + 3); return; }   /* L3: the pretend Linux's own states */
+     memcpy(what, st, (size_t)(eq - st));
+     const char *colon = strchr(eq + 1, ':');
+     if (colon) { memcpy(key, eq + 1, (size_t)(colon - eq - 1)); v = (float)atof(colon + 1); }
+@@ -301,6 +313,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
+                 sh_touch(1, p->x0 + (p->x1 - p->x0) * e, p->y0 + (p->y1 - p->y0) * e, te);
+             }
+         }
++        lin_fake_poll(t);                     /* L3: the pretend Linux (gwin_now's part on the phone) */
+         int mv = sh_tick(dt / 1000, t);
+         double shell_ms = (tk_us() - sh0) / 1000.0;
+         int motion = mv || sh_moving();
+@@ -465,8 +478,9 @@ int main(int argc, char **argv)
+     sh_init(&c);
+     fprintf(stderr, "bake: %.1f ms; heap %.1f MB (peak %.1f MB)\n", (tk_us() - t0) / 1000.0, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
+     if (getenv("SBTK_MEM")) fprintf(stderr, "mem: layers %.1f MB\n", memwalk(c.root, 0) / 1e6);
++    lin_fake_init();
+     if (!strcmp(argv[2], "still") && argc >= 4) {
+-        for (int i = 4; i < argc; i++) apply_state(argv[i]);
++        for (int i = 4; i < argc; i++) { apply_state(argv[i]); lin_fake_settle(); }
+         tk_comp_frame(&c, 0, 1);
+         fprintf(stderr, "frame: %.2f ms; heap %.1f MB (peak %.1f MB)\n", c.last_us / 1000.0, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
+         write_ppm(argv[3], &c.panel);
+diff --git a/starbite/sbos/ui/kern_next.c b/starbite/sbos/ui/kern_next.c
+index d4510b7..937c6c7 100644
+--- a/starbite/sbos/ui/kern_next.c
++++ b/starbite/sbos/ui/kern_next.c
+@@ -826,9 +826,16 @@ static void bake_step(void)
+     log_mb("UI heap with the caches: ", tk_heap_used());
+ }
+ 
++int gwin_now(void);                                  /* L2 + L3: starbite/guest/next/gwin.c */
++int next_ready(void) { return ready; }               /* L2: the shell baked (uitest.c's next-linux variant) */
+ void next_kdraw(void)
+ {
+     if (!ready && !baking) { ui_kdraw(); return; }
++    /* L2 + L3: Linux apps: a state change, the catalog or the store, or a new frame (rows copied) drawn at once */
++    if (ready && gwin_now() && !ticking && K.screen_on) {
++        tk_comp_frame(&comp, 0, 0);
++        present();
++    }
+     if (!K.screen_on) return;
+     if (need_full) {
+         need_full = 0;
+diff --git a/starbite/sbos/ui/shell.h b/starbite/sbos/ui/shell.h
+index b07d906..69257a6 100644
+--- a/starbite/sbos/ui/shell.h
++++ b/starbite/sbos/ui/shell.h
+@@ -108,4 +108,58 @@ int sh_card_mount(void);
+ int sh_card_list(const char *path, sh_dirent_t *out, int max, int first);
+ int sh_card_read(const char *path, uint64_t off, void *dst, uint32_t len);                      /* P3c: the year (the Calendar's month) */      /* the next alarm for the lock's widget (on 0: "No alarm") */
+ 
++/* Linux apps (docs/STARBITE-LINUX-APPS.md 5, 7, 8; L2 + L3): every Linux app's window (an app under sbwl on the M3
++ * cores) is a layer of its app page: SH_LINUX_W x SH_LINUX_H surface px at 2x from y 162 (44 pt) to 2850 (772 pt);
++ * with the keyboard up the guest's viewport is SH_LINUX_HKB rows (44 to 540 pt) and the rest is under the keyboard.
++ * The platform (the kernel: starbite/guest/next/gwin.c on kern/guest.c and sbghost's contract v2) starts the guest,
++ * keeps the catalog (the home's Linux page) and the App Store's packages, copies the active window's new rows into
++ * the shell's bitmap and takes the input. Apps are named by their desktop id ("org.gnome.TextEditor"); the shell's
++ * Terminal (page 2) is the catalog's foot, SH_LINUX_TERMINAL. States are the kernel's GUEST_* order. */
++enum { SH_LINUX_OFF, SH_LINUX_STARTING, SH_LINUX_RUNNING, SH_LINUX_STOPPING, SH_LINUX_FAILED };
++#define SH_LINUX_W 720
++#define SH_LINUX_H 1344                                   /* the surface: 44 to 772 pt at 2x */
++#define SH_LINUX_HKB 916                                  /* the rows shown with the keyboard up: 44 to 540 pt */
++#define SH_LINUX_Y 162                                    /* the window's first panel row (44 pt) */
++#define SH_LINUX_ICON 160                                 /* catalog and store icons: 160 x 160 premultiplied ARGB */
++#define SH_LINUX_TERMINAL "org.codeberg.dnkl.foot"        /* the Terminal app's desktop id (also "foot") */
++/* the catalog (the guest's .desktop apps): flags as sbshm.h's SBSHM_APP_* */
++enum { SH_LAPP_RUNNING = 1, SH_LAPP_WINDOW = 2, SH_LAPP_TERMINAL = 4, SH_LAPP_KEYBOARD = 8, SH_LAPP_SYSTEM = 16 };
++#define SH_LAPPS 64
++typedef struct { char id[40], name[32]; unsigned flags; int icon, pkg; unsigned rss_kb; } sh_lapp_t;   /* icon, pkg: -1 none */
++typedef struct { unsigned seq; int n; unsigned mem_total_kb, mem_avail_kb; sh_lapp_t app[SH_LAPPS]; } sh_lcat_t;
++/* the App Store's packages: state, flags and ops as sbshm.h's SBG_PKG_*, SBSHM_PKG_*, SBG_PKG_OP_* */
++enum { SH_PKG_IDLE, SH_PKG_QUEUED, SH_PKG_INSTALLING, SH_PKG_REMOVING, SH_PKG_FAILED };
++enum { SH_PKG_INSTALLED = 1, SH_PKG_SYSTEM = 2, SH_PKG_TOO_BIG = 4, SH_PKG_NO_SPACE = 8, SH_PKG_FEATURED = 16 };
++enum { SH_PKG_OP_INSTALL = 1, SH_PKG_OP_REMOVE = 2, SH_PKG_OP_CANCEL = 3 };
++#define SH_LPKGS 160
++typedef struct {
++    char pkg[40], name[32], summary[96], category[16], err[32];
++    unsigned dl_kb, inst_kb, ram_mb, flags, state, pct;
++    int icon;                                             /* -1 none */
++} sh_lpkg_t;
++typedef struct { unsigned seq; int n, repo_ok; unsigned overlay_total_kb, overlay_free_kb, mem_total_kb; sh_lpkg_t pkg[SH_LPKGS]; } sh_lstore_t;
++
++/* the platform */
++int sh_linux_open(const char *id);       /* start Linux if off, launch the app (once the catalog has it), put its window
++                                          * in the surface; < 0 refused (sh_linux_state says why) */
++void sh_linux_hide(void);                /* home: no window in the surface (ACTIVATE none); the apps keep running */
++/* the active app's rows newer than the last copy, at 2x (pixel-doubled), into the shell's window: rows[y] is its
++ * bitmap row y (2 SH_LINUX_W px; 2 SH_LINUX_H rows, kept in strips); *y0..*y1 the bitmap rows written; returns the
++ * surface rows copied (0: nothing new, or not the app's window yet). first: copy every row. */
++int sh_linux_blit(uint32_t *const *rows, int first, int *y0, int *y1);
++int sh_linux_touch(int phase, int x, int y);   /* surface px, phase 0 down / 1 move / 2 up */
++int sh_linux_char(char c);               /* one character typed: committed text for a focused text field, else keys
++                                          * (Shift around capitals); '\n' Return and '\b' BackSpace are always keys */
++int sh_linux_viewport(int rows);         /* the rows the shell shows (SH_LINUX_H, or SH_LINUX_HKB with the keyboard) */
++int sh_linux_icon(int icon, uint32_t *px);     /* a pool icon into px (SH_LINUX_ICON squared); 0: none */
++int sh_linux_hold(int on);               /* 1: the App Store is open: Linux started if off and not stopped while idle */
++int sh_linux_pkg(int pkg, int op);       /* install / remove / cancel a store package; < 0 refused */
++/* the shell, called by the platform */
++void sh_linux_state(int state, const char *why);   /* the guest's state changed (why: the reason when FAILED) */
++int sh_linux_frame(void);                /* the active window has new rows; 1 when the window took them (draw) */
++void sh_linux_catalog(const sh_lcat_t *c);         /* the catalog changed (also its RUNNING flags); copied */
++void sh_linux_store(const sh_lstore_t *s);         /* the packages changed (progress too); the platform's copy,
++                                                    * kept by the shell: valid until the next call */
++void sh_linux_textfocus(int on);         /* the active app's text field wants the keyboard (1) or not (0) */
++
+ #endif
+diff --git a/starbite/sbos/ui/shell_linux.inc b/starbite/sbos/ui/shell_linux.inc
+new file mode 100644
+index 0000000..911816c
+--- /dev/null
++++ b/starbite/sbos/ui/shell_linux.inc
+@@ -0,0 +1,1002 @@
++/* SPDX-License-Identifier: MIT
++ * Linux apps and the App Store for Starbite OS Next (docs/STARBITE-LINUX-APPS.md 5, 7, 8; milestones L2 + L3),
++ * included by shell_lock.c after shell_media.inc. The platform (shell.h sh_linux_*: the kernel's
++ * starbite/guest/next/gwin.c, the host's host/linux_fake.inc) runs Linux on the M3 cores. Here:
++ *   - home page 3: the App Store, then the catalog's apps (each the guest's icon on a tile with a small Tux badge),
++ *     on E's lattice (COL_CX, HOME_TOP2, ROW_PITCH); the Terminal stays on page 2 (it is the catalog's foot);
++ *   - a Linux app's page: its window (the active window slot) from 44 to 772 pt, 540 with the keyboard up (a focused
++ *     text field, or a KEYBOARD app); touches go to Linux, the keyboard's characters as text or keys. The window is
++ *     four strip layers of 672 px rows (3.9 MiB each, filled through a row table), freed whenever the app closes;
++ *     with the keyboard up the last strip is not kept. No page strips under it;
++ *   - the App Store: a large-title page (its own layers, no strips: the header with the search field and the
++ *     featured cards, the list in 2-row chunks re-used as it scrolls) and a pushed page per package (the page's
++ *     strips, the glass back circle) with install / remove / cancel and progress.
++ * shell_lock.c calls only the lx_* hooks at the end of this file (and the shell.h callbacks come here). ---- */
++static struct { int state, got, first, shift, num, kb, text; unsigned flags; char why[64], id[40], name[32]; } LX;
++static sh_lcat_t LCAT;                           /* the shell's copy of the catalog (kept while Linux is off) */
++static const sh_lstore_t *LST;                   /* the platform's packages (sh_linux_store) */
++static tk_layer aplin[4], aplst;
++static tk_bmp lx_ic;                             /* the open Linux app's icon (the open and close springs) */
++static int lx_pick = -1;                         /* the catalog index the next app_open of "linux" opens */
++#define LHOME 19                                 /* page 3: the App Store and up to 19 apps (5 rows of 4) */
++static int lx_baked;                            /* the home exists (catalog pushes before it wait) */
++static struct { int n, cat[LHOME], ix[LHOME + 1], iy[LHOME + 1]; uint32_t sig; } LH;   /* ix, iy: each icon in hparts[5]'s px */
++static int lx_ic_slot = -1;                      /* page 3's slot lx_ic was copied from (-1 none, -2 drawn itself) */
++static tk_bmp store_ic;
++static void st_build(void);
++static void st_changed(void);
++static int lx_term_id(const char *id) { return !tk_strcmp(id, SH_LINUX_TERMINAL) || !tk_strcmp(id, "foot"); }
++static int lx_is_lin(void) { return is_app("terminal") || is_app("linux"); }
++static int lx_cat_find(const char *id)
++{
++    for (int i = 0; i < LCAT.n; i++) if (!tk_strcmp(LCAT.app[i].id, id)) return i;
++    if (lx_term_id(id)) for (int i = 0; i < LCAT.n; i++) if (lx_term_id(LCAT.app[i].id)) return i;
++    return -1;
++}
++static int lx_app_index(const char *k) { for (int a = 0; a < NAPPS; a++) if (!tk_strcmp(APPS[a].k, k)) return a; return 0; }
++static void lx_scopy(char *d, const char *s, int cap) { int k = 0; while (s[k] && k < cap - 1) { d[k] = s[k]; k++; } d[k] = 0; }
++/* sizes as the store shows them: 850 KB, 72 MB, 1.4 GB (a no-break space: a wrapped note keeps them whole) */
++static void lx_fmt_kb(char *b, unsigned kb)
++{
++    int n;
++    if (kb >= 1000u * 1000u) {
++        unsigned t = (kb + 50000u) / 100000u;            /* tenths of a GB */
++        n = put_dec(b, (int)(t / 10)); b[n++] = '.'; b[n++] = (char)('0' + t % 10); tk_memcpy(b + n, "\xc2\xa0GB", 5);
++    } else if (kb >= 1000u) { n = put_dec(b, (int)((kb + 500u) / 1000u)); tk_memcpy(b + n, "\xc2\xa0MB", 5); }
++    else { n = put_dec(b, (int)kb); tk_memcpy(b + n, "\xc2\xa0KB", 5); }
++}
++
++/* ---- icons: a premultiplied bitmap scaled into another (an area average down, bilinear up) ---- */
++static void lx_bmp_fit(tk_bmp *dst, const tk_bmp *src)
++{
++    if (!dst->px || !src->px) return;
++    if (dst->w >= src->w) { tk_bmp_up(dst, src, 0, 0, (float)dst->w / (float)src->w); return; }
++    float s = (float)src->w / (float)dst->w;
++    for (int j = 0; j < dst->h; j++)
++        for (int i = 0; i < dst->w; i++) {
++            int x0 = (int)(i * s), x1 = tk_maxi(x0 + 1, (int)((i + 1) * s)), y0 = (int)(j * s), y1 = tk_maxi(y0 + 1, (int)((j + 1) * s));
++            uint32_t a = 0, r = 0, g = 0, b = 0, n = 0;
++            for (int y = y0; y < y1 && y < src->h; y++)
++                for (int x = x0; x < x1 && x < src->w; x++) {
++                    uint32_t p = src->px[(size_t)y * src->stride + x];
++                    a += p >> 24; r += p >> 16 & 255; g += p >> 8 & 255; b += p & 255; n++;
++                }
++            if (n) dst->px[(size_t)j * dst->stride + i] = (a / n) << 24 | (r / n) << 16 | (g / n) << 8 | (b / n);
++        }
++}
++/* a Linux app's icon as the home draws icons: the pool's icon at 74 % on a dark rounded tile (iOS's 22 % corner), a
++ * small Tux badge in the corner (Linux apps beside Starbite's own); no icon: the name's first letter */
++static int lx_make_icon(tk_bmp *out, int px, int icon, const char *name, int badge)
++{
++    tk_bmp_free(out);
++    if (!tk_bmp_new(out, px, px)) return 0;
++    tk_stop s[2] = { { 0, tk_hex(0x3d4763, 1) }, { 1, tk_hex(0x1b2133, 1) } };
++    tk_paint p = tk_linear(180, 0, 0, (float)px, (float)px, 2, s);
++    tk_fill_rrect(out, 0, 0, (float)px, (float)px, px * .2237f, &p, 1);
++    tk_box_shadow(out, 0, 0, (float)px, (float)px, px * .2237f, 0, px * .006f, 0, 0, W(.16f), 1);
++    int done = 0;
++    tk_bmp src = { SH_LINUX_ICON, SH_LINUX_ICON, SH_LINUX_ICON, 0 };
++    if (icon >= 0 && (src.px = tk_alloc((size_t)SH_LINUX_ICON * SH_LINUX_ICON * 4)) && sh_linux_icon(icon, src.px)) {
++        tk_bmp sc;
++        int n = (int)(px * .74f + .5f);
++        if (tk_bmp_new(&sc, n, n)) {
++            lx_bmp_fit(&sc, &src);
++            tk_blit(out, &sc, (px - n) / 2, (px - n) / 2, 1);
++            tk_bmp_free(&sc);
++            done = 1;
++        }
++    }
++    if (src.px) tk_free(src.px);
++    if (!done && name && name[0]) {
++        char c[2] = { name[0] >= 'a' && name[0] <= 'z' ? (char)(name[0] - 32) : name[0], 0 };
++        float fs = px * .5f, w = tk_text_w(TK_IT700, fs, c, 0, 0);
++        tk_paint wp = tk_solid(W(.92f));
++        tk_text(out, TK_IT700, fs, (px - w) / 2, px * .5f + tk_ascent(TK_IT700, fs) * .36f, c, 0, 0, &wp, 0);
++    }
++    const tk_bmp *tux = badge ? tk_icon("t46-linux") : 0;
++    if (tux) {
++        tk_bmp b;
++        int n = (int)(px * .3f + .5f), m = (int)(px * .035f);
++        if (tk_bmp_new(&b, n, n)) {
++            lx_bmp_fit(&b, tux);
++            tk_box_shadow(out, (float)(px - n - m), (float)(px - n - m), (float)n, (float)n, n * .24f, 0, 0, n * .12f, 0, TK_RGBA(0, 0, 0, .45f), 0);
++            tk_blit(out, &b, px - n - m, px - n - m, 1);
++            tk_bmp_free(&b);
++        }
++    }
++    return 1;
++}
++/* the App Store's icon: a blue tile with a white "A" of three strokes (round caps) */
++static void lx_make_store_icon(tk_bmp *out, int px)
++{
++    tk_bmp_free(out);
++    if (!tk_bmp_new(out, px, px)) return;
++    tk_stop s[2] = { { 0, tk_hex(0x1cb4ff, 1) }, { 1, tk_hex(0x0a5ad6, 1) } };
++    tk_paint p = tk_linear(180, 0, 0, (float)px, (float)px, 2, s);
++    tk_fill_rrect(out, 0, 0, (float)px, (float)px, px * .2237f, &p, 1);
++    tk_fm m;
++    if (!tk_fm_new(&m, px, px)) return;
++    static const float SEG[3][4] = { { .305f, .735f, .515f, .275f }, { .485f, .275f, .695f, .735f }, { .27f, .595f, .73f, .595f } };
++    float hw = px * .042f;
++    for (int j = 0; j < px; j++)
++        for (int i = 0; i < px; i++) {
++            float x = i + .5f, y = j + .5f, best = 1e9f;
++            for (int k = 0; k < 3; k++) {
++                float ax = SEG[k][0] * px, ay = SEG[k][1] * px, bx = SEG[k][2] * px, by = SEG[k][3] * px;
++                float dx = bx - ax, dy = by - ay, t = tk_clampf(((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy), 0, 1);
++                float ex = x - ax - t * dx, ey = y - ay - t * dy, dd = tk_sqrtf(ex * ex + ey * ey);
++                if (dd < best) best = dd;
++            }
++            m.v[j * px + i] = tk_clampf(hw - best + .5f, 0, 1);
++        }
++    tk_paint wp = tk_solid(W(1));
++    tk_draw_fm(out, &m, 0, 0, &wp, 1);
++    tk_fm_free(&m);
++}
++
++
++/* ---- the home's third page: the App Store, then the catalog's apps (not the Terminal: page 2 has it) ---- */
++static void lx_build_page3(void)
++{
++    if (!store_ic.px) lx_make_store_icon(&store_ic, (int)(PT(ICON_PT) + .5f));
++    relayer(&hparts[5]);
++    int n = 1 + LH.n, rows = (n + 3) / 4;
++    dc d = mk(&hparts[5], "home-apps3", 0, HOME_TOP2 - 5, 390, ROW_PITCH * rows + 24, 4, 0);
++    for (int i = 0; i < n; i++) {
++        float cx = COL_CX(i % 4), y = HOME_TOP2 + ROW_PITCH * (i / 4);
++        /* the icons are drawn once into the page (none kept: a press or an open copies its one back out) */
++        tk_bmp t = { 0, 0, 0, 0 };
++        if (i) lx_make_icon(&t, (int)(PT(ICON_PT) + .5f), LCAT.app[LH.cat[i - 1]].icon, LCAT.app[LH.cat[i - 1]].name, 1);
++        const tk_bmp *ic = i ? &t : &store_ic;
++        LH.ix[i] = (int)tk_floorf(PT(cx - ICON_PT / 2) - d.ox + .5f);
++        LH.iy[i] = (int)tk_floorf(PT(y) - d.oy + .5f);
++        if (ic->px) tk_blit(d.b, ic, LH.ix[i], LH.iy[i], 1);
++        tk_bmp_free(&t);
++        d_text_box(&d, TK_IT500, 12, cx, y + 68 + 12, 84, 1, i ? LCAT.app[LH.cat[i - 1]].name : "App Store", 0, 0, INK, 1);
++    }
++    hparts[5].x = hparts[5].bx = hparts[5].x + PT(780);   /* drawn as if on screen, then two pages right */
++}
++/* the catalog's apps for page 3 again when what it shows changed (ids, names, icons; not the RUNNING flags) */
++static void lx_page3_update(void)
++{
++    uint32_t h = 2166136261u;
++    for (int i = 0; i < LCAT.n; i++) {
++        const sh_lapp_t *a = &LCAT.app[i];
++        for (const char *s = a->id; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
++        for (const char *s = a->name; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
++        h = (h ^ (uint32_t)a->icon) * 16777619u;
++    }
++    h = (h ^ (uint32_t)LCAT.n) * 16777619u;
++    if (h == LH.sig && LH.sig) return;
++    LH.sig = h;
++    LH.n = 0;
++    for (int i = 0; i < LCAT.n && LH.n < LHOME; i++)
++        if (!lx_term_id(LCAT.app[i].id)) LH.cat[LH.n++] = i;
++    if (lx_ic_slot >= 0 && !is_app("linux")) lx_ic_slot = -1;   /* (an open app keeps its icon) */
++    lx_build_page3();
++    relink();
++}
++/* page 3's icon of slot s (an app) copied out of the page into lx_ic (the press's and the open's): 1 done */
++static int lx_slot_icon(int s)
++{
++    int n = (int)(PT(ICON_PT) + .5f), X = LH.ix[s + 1], Y = LH.iy[s + 1];
++    if (lx_ic_slot == s && lx_ic.px) return 1;
++    if (!hparts[5].bmp.px || X < 0 || Y < 0 || X + n > hparts[5].bmp.w || Y + n > hparts[5].bmp.h) return 0;
++    if (lx_ic.w != n && (tk_bmp_free(&lx_ic), !tk_bmp_new(&lx_ic, n, n))) return 0;
++    if (!lx_ic.px && !tk_bmp_new(&lx_ic, n, n)) return 0;
++    tk_bmp_copy(&lx_ic, 0, 0, &hparts[5].bmp, X, Y, n, n);
++    lx_ic_slot = s;
++    return 1;
++}
++/* ---- the window: four strip layers of 672 bitmap rows (3.9 MiB each: no 15.5 MiB block in the UI heap), filled
++ * through a row table; with the keyboard up the last strip is not kept (its rows are under the keyboard) ---- */
++#define LSTRIP (2 * SH_LINUX_H / 4)
++static uint32_t *lrow[2 * SH_LINUX_H];           /* the window's bitmap rows (a hidden strip's: lsink) */
++static uint32_t lsink[2 * SH_LINUX_W] __attribute__((aligned(16)));
++static tk_layer apkb;                            /* the keyboard (Linux apps, the App Store's search) */
++static void lx_build_kb(int on, int shift, int num)
++{
++    static int drawn = -1;                       /* the layout in the bitmap (redrawn only when it changes) */
++    int key = on ? 1 + 2 * !!shift + 4 * !!num : 0;
++    if (on && key == drawn && apkb.bmp.px) { apkb.hidden = 0; return; }
++    relayer(&apkb);
++    apkb.hidden = 1;
++    drawn = key;
++    if (!on) return;
++    dc d = mk(&apkb, "keyboard", 0, 540, 390, 262, 0, 0);
++    kb_draw(&d, shift, num);
++    apkb.hidden = 0;
++}
++static void lx_build_state(void)
++{
++    relayer(&aplst);
++    aplst.hidden = 1;
++    for (int k = 0; k < 4; k++) {
++        aplin[k].hidden = LX.state != SH_LINUX_RUNNING || !aplin[k].bmp.px || !LX.got;
++        aplin[k].clip = LX.kb;                   /* the keyboard up: the rows under it are not shown */
++        aplin[k].clip_r = (tk_rect){ 0, SH_LINUX_Y, TK_W, 2.0f * SH_LINUX_HKB };
++    }
++    if (!lx_is_lin() || (LX.state == SH_LINUX_RUNNING && LX.got)) return;
++    char t[64], l[96];
++    const char *nm = LX.name[0] ? LX.name : "the app";
++    if (LX.state == SH_LINUX_FAILED) { lx_scopy(t, "Linux Didn't Start", 64); lx_scopy(l, LX.why[0] ? LX.why : "The big cores did not start.", 96); }
++    else if (LX.state == SH_LINUX_OFF || LX.state == SH_LINUX_STOPPING) {
++        lx_scopy(t, LX.state == SH_LINUX_OFF ? "Linux Is Off" : "Linux Is Stopping", 64);
++        lx_scopy(l, "Open the app again to start it.", 96);
++    } else if (LX.state == SH_LINUX_STARTING) {
++        lx_scopy(t, "Starting Linux", 64);
++        int k = 0;
++        for (const char *s = nm; *s && k < 40; s++) l[k++] = *s;
++        lx_scopy(l + k, " opens on the big cores in a few seconds.", 96 - k);
++    } else {
++        tk_memcpy(t, "Opening ", 8);
++        char e[40];
++        ellipsize(e, sizeof e, TK_IT700, 22, nm, 250);
++        lx_scopy(t + 8, e, 56);
++        l[0] = 0;
++    }
++    float a0 = SAFE_TOP, a1 = LX.kb ? 540 : EMPTY_BOT, mid = tk_floorf((a0 + a1) / 2);
++    dc d = mk(&aplst, "linux-state", 0, mid - 60, 390, 120, 0, 0);   /* the text's band only */
++    d_empty(&d, a0, a1, t, l[0] ? l : 0);
++    aplst.hidden = 0;
++}
++static void lx_build_win(void)
++{
++    for (int k = 0; k < 4; k++) {
++        int want = k < 3 || !LX.kb;
++        if (want && !aplin[k].bmp.px) {
++            relayer(&aplin[k]);
++            tk_layer_init(&aplin[k], "linux-window");
++            if (!tk_bmp_new(&aplin[k].bmp, 2 * SH_LINUX_W, LSTRIP)) {
++                LX.state = SH_LINUX_FAILED;
++                lx_scopy(LX.why, "No memory for the window.", 64);
++            }
++            aplin[k].x = aplin[k].bx = 0;
++            aplin[k].y = aplin[k].by = (float)(SH_LINUX_Y + LSTRIP * k);
++            aplin[k].opaque = 1;                  /* the guest's pixels are opaque (alpha forced): nothing under */
++            LX.first = 1;                         /* a new strip: every row again */
++        } else if (!want && aplin[k].bmp.px) {
++            relayer(&aplin[k]);
++            aplin[k].hidden = 1;
++        }
++        for (int r = 0; r < LSTRIP; r++)
++            lrow[LSTRIP * k + r] = aplin[k].bmp.px ? aplin[k].bmp.px + (size_t)r * aplin[k].bmp.stride : lsink;
++    }
++    lx_build_kb(LX.kb, LX.shift, LX.num);
++    lx_build_state();
++    relink();
++    (void)sh_linux_frame();                       /* what the app has drawn so far */
++}
++int sh_linux_frame(void)
++{
++    if (!aplin[0].bmp.px || !lx_is_lin()) return 0;
++    int y0 = -1, y1 = -1;
++    if (sh_linux_blit(lrow, LX.first, &y0, &y1) <= 0) return 0;
++    LX.first = 0;
++    for (int k = 0; k < 4; k++)                   /* only the strips the new rows are in */
++        if (aplin[k].bmp.px && (y0 < 0 || (y1 >= LSTRIP * k && y0 < LSTRIP * (k + 1)))) tk_layer_dirty(&aplin[k]);
++    if (!LX.got) {
++        LX.got = 1;
++        lx_build_state();
++    }
++    return 1;
++}
++void sh_linux_state(int state, const char *why)
++{
++    int k = 0;
++    if (!why) why = "";
++    if (state == LX.state && !tk_strcmp(why, LX.why)) return;
++    LX.state = state;
++    while (why[k] && k < 63) { LX.why[k] = why[k]; k++; }
++    LX.why[k] = 0;
++    if (state != SH_LINUX_RUNNING) { LX.got = 0; LX.first = 1; }   /* a new guest: every row again */
++    if (lx_is_lin() && !ap_pending) lx_build_state();
++    if (is_app("store") && !ap_pending) st_changed();
++}
++/* the keyboard: up for a terminal (foot, Terminal=true apps) and while a text field has the focus; the guest's
++ * viewport follows it (the app gets a configure with the new size) */
++static void lx_kb_update(int rebuild)
++{
++    int kb = is_app("terminal") || (LX.flags & SH_LAPP_KEYBOARD) || LX.text;
++    if (kb == LX.kb) return;
++    LX.kb = kb;
++    LX.shift = LX.num = 0;
++    sh_linux_viewport(kb ? SH_LINUX_HKB : SH_LINUX_H);
++    if (rebuild && !ap_pending) lx_build_win();
++}
++void sh_linux_textfocus(int on)
++{
++    LX.text = !!on;
++    if (lx_is_lin()) lx_kb_update(1);
++}
++void sh_linux_catalog(const sh_lcat_t *c)
++{
++    /* the apps and their packages (the store's "Open"): the store redrawn only when these changed (the catalog
++     * itself changes every ~2 s while apps run: their memory) */
++    static uint32_t pkgsig;
++    uint32_t h = 2166136261u;
++    for (int i = 0; i < c->n && i < SH_LAPPS; i++) {
++        for (const char *t = c->app[i].id; *t; t++) h = (h ^ (uint8_t)*t) * 16777619u;
++        h = (h ^ (uint32_t)c->app[i].pkg) * 16777619u;
++    }
++    int pk = h != pkgsig;
++    pkgsig = h;
++    LCAT = *c;
++    if (LCAT.n > SH_LAPPS) LCAT.n = SH_LAPPS;
++    if (LCAT.n < 0) LCAT.n = 0;
++    if (!lx_baked) return;
++    lx_page3_update();
++    if (lx_is_lin()) {
++        int i = lx_cat_find(LX.id);
++        if (i >= 0) { LX.flags = LCAT.app[i].flags; lx_kb_update(1); }
++    }
++    if (pk && is_app("store") && !ap_pending) st_changed();   /* "Open" follows what is installed */
++}
++static int lx_at(float x, float y)
++{
++    (void)x;
++    return aplin[0].bmp.px && !aplin[0].hidden && PT(y) >= SH_LINUX_Y && PT(y) < SH_LINUX_Y + 2 * (LX.kb ? SH_LINUX_HKB : SH_LINUX_H);
++}
++static void lx_win_touch(int phase, float x, float y)
++{
++    int sx = (int)(PT(x) / 2), sy = (int)((PT(y) - SH_LINUX_Y) / 2), hh = LX.kb ? SH_LINUX_HKB : SH_LINUX_H;
++    sx = sx < 0 ? 0 : sx >= SH_LINUX_W ? SH_LINUX_W - 1 : sx;
++    sy = sy < 0 ? 0 : sy >= hh ? hh - 1 : sy;
++    sh_linux_touch(phase, sx, sy);
++}
++static void lx_kb_tap(float x, float y)
++{
++    if (!LX.kb || y < 548) return;                /* the window's own touches went to Linux (G_LINUX) */
++    char c = 0;
++    int k = kb_hit(x, y, LX.shift, LX.num, &c);
++    if (k) sh_haptic();
++    if (k == 2) { LX.shift = !LX.shift; lx_build_kb(1, LX.shift, LX.num); relink(); }
++    else if (k == 3) { LX.num = !LX.num; lx_build_kb(1, LX.shift, LX.num); relink(); }
++    else if (k == 4) (void)sh_linux_char('\b');
++    else if (k == 1 || k == 5) {
++        (void)sh_linux_char(c);
++        if (LX.shift && c >= 'A' && c <= 'Z') { LX.shift = 0; lx_build_kb(1, LX.shift, LX.num); relink(); }
++    }
++}
++/* app_open of the Terminal or a Linux app (lx_pick): which app, its icon, the keyboard and the viewport first */
++static void lx_prepare(int a)
++{
++    int term = !tk_strcmp(APPS[a].k, "terminal");
++    int ci = term ? lx_cat_find(SH_LINUX_TERMINAL) : lx_pick;
++    lx_pick = -1;
++    if (!term && (ci < 0 || ci >= LCAT.n)) ci = 0;
++    LX.shift = LX.num = LX.text = 0;
++    LX.first = 1;
++    LX.got = 0;
++    lx_scopy(LX.id, term ? SH_LINUX_TERMINAL : ci < LCAT.n ? LCAT.app[ci].id : "", 40);
++    lx_scopy(LX.name, term ? "Terminal" : ci < LCAT.n ? LCAT.app[ci].name : "", 32);
++    LX.flags = ci >= 0 && ci < LCAT.n ? LCAT.app[ci].flags : SH_LAPP_KEYBOARD;
++    LX.kb = -1;
++    lx_kb_update(0);
++    if (!term) {
++        int s = -1;
++        for (int k = 0; k < LH.n; k++) if (!tk_strcmp(LCAT.app[LH.cat[k]].id, LX.id)) s = k;
++        if (s < 0 || !lx_slot_icon(s)) {
++            lx_make_icon(&lx_ic, (int)(PT(ICON_PT) + .5f), ci < LCAT.n ? LCAT.app[ci].icon : -1, LX.name, 1);
++            lx_ic_slot = -2;
++        }
++    }
++}
++
++/* ---- the App Store ---- */
++/* the list is drawn in chunks of two rows (64 pt each), five layers re-used as it scrolls (a whole index never
++ * lives in the heap: 2.5 MiB a chunk) */
++#define ST_CH 5
++#define ST_CHR 2
++#define DT PUSHED_TOP                            /* a package's page: its content under the nav row */
++#define FIELD_Y CONTENT_TOP                      /* the search field, under the large title */
++#define FEAT_W ((CONTENT_W - 18) / 3)
++#define ROW_BTN (CONTENT_R - 68)                 /* a row's GET / OPEN */
++static struct {
++    int det, kb, shift, num, n, rows[SH_LPKGS], nfeat, feat[3], rm_arm, dkey, chunk[ST_CH];
++    float scroll, top, bot, rm_y, rm_t;
++    char q[24], pkg[40];
++} SS;
++static tk_layer apsth, apstl[ST_CH], apstb;      /* the list's head, its rows' chunks (scrolled, clipped), the detail's button */
++static tk_bmp st_dic;                            /* the detail's 100 pt icon */
++static tk_bmp st_field[2];                       /* the search field's glass (full width, beside Cancel): baked once
++                                                  * per opening in the page's first build, copied at each key */
++static struct { int icon; uint32_t key; tk_bmp b; } SIC[24];   /* the packages' 48 pt icons */
++static int st_find(const char *pkg)
++{
++    if (!LST) return -1;
++    for (int i = 0; i < LST->n && i < SH_LPKGS; i++) if (!tk_strcmp(LST->pkg[i].pkg, pkg)) return i;
++    return -1;
++}
++static int st_busy(const sh_lpkg_t *p) { return p->state == SH_PKG_QUEUED || p->state == SH_PKG_INSTALLING || p->state == SH_PKG_REMOVING; }
++static const tk_bmp *st_icon(int i)
++{
++    const sh_lpkg_t *p = &LST->pkg[i];
++    uint32_t key = 2166136261u;
++    for (const char *s = p->pkg; *s; s++) key = (key ^ (uint8_t)*s) * 16777619u;
++    int free_k = -1;
++    for (int k = 0; k < 24; k++) {
++        if (SIC[k].b.px && SIC[k].icon == p->icon && SIC[k].key == key) return &SIC[k].b;
++        if (!SIC[k].b.px && free_k < 0) free_k = k;
++    }
++    if (free_k < 0) { free_k = (int)(key % 24); tk_bmp_free(&SIC[free_k].b); }
++    SIC[free_k].icon = p->icon;
++    SIC[free_k].key = key;
++    lx_make_icon(&SIC[free_k].b, (int)(PT(48) + .5f), p->icon, p->name, 0);
++    return &SIC[free_k].b;
++}
++static void st_icons_free(void)
++{
++    for (int k = 0; k < 24; k++) tk_bmp_free(&SIC[k].b);
++    tk_bmp_free(&st_dic);
++    tk_bmp_free(&st_field[0]);
++    tk_bmp_free(&st_field[1]);
++}
++/* the catalog app a package brought (its "Open"), or -1 */
++static int st_app(int i)
++{
++    for (int a = 0; a < LCAT.n; a++) if (LCAT.app[a].pkg == i) return a;
++    return -1;
++}
++static void st_filter(void)
++{
++    SS.n = SS.nfeat = 0;
++    if (!LST) return;
++    for (int i = 0; i < LST->n && i < SH_LPKGS; i++) {
++        const sh_lpkg_t *p = &LST->pkg[i];
++        if (!SS.q[0] && (p->flags & SH_PKG_FEATURED) && SS.nfeat < 3) SS.feat[SS.nfeat++] = i;
++        if (SS.q[0] && !ci_has(p->name, SS.q) && !ci_has(p->pkg, SS.q) && !ci_has(p->summary, SS.q) && !ci_has(p->category, SS.q)) continue;
++        SS.rows[SS.n++] = i;
++    }
++}
++static void st_line(const sh_lpkg_t *p, char *b, tk_col *c)
++{
++    char s[16];
++    int n;
++    *c = W(.55f);
++    if (p->state == SH_PKG_QUEUED) { lx_scopy(b, "Waiting to install", 48); return; }
++    if (p->state == SH_PKG_INSTALLING || p->state == SH_PKG_REMOVING) {
++        lx_scopy(b, p->state == SH_PKG_INSTALLING ? "Installing \xc2\xb7 " : "Removing \xc2\xb7 ", 48);
++        n = (int)tk_strlen(b);
++        n += put_dec(b + n, (int)tk_mini((int)p->pct, 100));
++        tk_memcpy(b + n, " %", 3);
++        *c = ACCENT();
++        return;
++    }
++    if (p->state == SH_PKG_FAILED) { lx_scopy(b, p->err[0] ? p->err : "Didn't install", 48); *c = tk_hex(0xff6961, 1); return; }
++    lx_scopy(b, p->category[0] ? p->category : "Linux", 48);
++    n = (int)tk_strlen(b);
++    tk_memcpy(b + n, " \xc2\xb7 ", 4);
++    n += 4;
++    if (p->flags & SH_PKG_INSTALLED) lx_scopy(b + n, "Installed", 48 - n);
++    else { lx_fmt_kb(s, p->dl_kb); lx_scopy(b + n, s, 48 - n); }
++}
++/* the row's button (68 x 30 at x, y): GET / OPEN / RETRY, or a progress ring with a stop square */
++static void st_button(dc *d, float x, float y, const sh_lpkg_t *p)
++{
++    if (st_busy(p)) {
++        float cx = x + 52, cy = y + 15;
++        d_ring(d, cx, cy, 13, 3, 1, W(.18f), 0);
++        float f = p->state == SH_PKG_QUEUED ? .08f : tk_clampf(p->pct / 100.0f, .02f, 1);
++        d_ring(d, cx, cy, 13, 3, f, ACCENT(), 1);
++        if (p->state != SH_PKG_REMOVING) d_rrect(d, cx - 4, cy - 4, 8, 8, 1.5f, ACCENT());
++        return;
++    }
++    int inst = (p->flags & SH_PKG_INSTALLED) != 0, dim = !inst && (p->flags & SH_PKG_NO_SPACE);
++    const char *t = inst ? "OPEN" : p->state == SH_PKG_FAILED ? "RETRY" : "GET";
++    d_rrect(d, x, y, 68, 30, 15, W(.14f));
++    float w = tw(TK_IT700, 15, t, .3f, 0);
++    tk_col c = ACCENT();
++    if (dim) c.a = .35f;
++    d_text(d, TK_IT700, 15, x + (68 - w) / 2, bl(TK_IT700, 15, y + 6), t, .3f, 0, c, 0);
++}
++static void st_chunk_draw(int L, int c)
++{
++    relayer(&apstl[L]);
++    apstl[L].hidden = 1;
++    SS.chunk[L] = c;
++    int r0 = c * ST_CHR, r1 = tk_mini(SS.n, r0 + ST_CHR);
++    if (c < 0 || r0 >= r1) return;
++    dc d = mk(&apstl[L], "store-rows", MARGIN, SS.top + 64.0f * r0, CONTENT_W, 64.0f * (r1 - r0), 0, 0);
++    for (int k = r0; k < r1; k++) {
++        const sh_lpkg_t *p = &LST->pkg[SS.rows[k]];
++        float y = SS.top + 64.0f * k;
++        const tk_bmp *ic = st_icon(SS.rows[k]);
++        if (ic->px) tk_blit(d.b, ic, (int)tk_floorf(PT(MARGIN) - d.ox + .5f), (int)tk_floorf(PT(y + 8) - d.oy + .5f), 1);
++        d_text_box(&d, TK_IT600, 16, MARGIN + 60, bl(TK_IT600, 16, y + 12), ROW_BTN - 8 - MARGIN - 60, 0, p->name, 0, 0, INK, 0);
++        char ln[48];
++        tk_col col;
++        st_line(p, ln, &col);
++        d_text_box(&d, TK_IT400, 13, MARGIN + 60, bl(TK_IT400, 13, y + 35), ROW_BTN - 8 - MARGIN - 60, 0, ln, 0, 0, col, 0);
++        st_button(&d, ROW_BTN, y + 17, p);
++        if (k + 1 < SS.n) d_rrect(&d, MARGIN + 60, y + 63.5f, CONTENT_R - MARGIN - 60, .5f, 0, W(.1f));
++    }
++    apstl[L].hidden = 0;
++}
++/* the chunks the list shows at its scroll: drawn where missing (re-using the ones out of view), moved and clipped */
++static void st_place(void)
++{
++    float h = 64.0f * SS.n, area = SS.bot - SS.top, m = tk_maxf(0, h - area);
++    SS.scroll = tk_clampf(SS.scroll, 0, m);
++    int c0 = (int)(SS.scroll / (64 * ST_CHR)), c1 = (int)((SS.scroll + area) / (64 * ST_CHR));
++    if (c1 > c0 + ST_CH - 1) c1 = c0 + ST_CH - 1;
++    for (int c = c0; c <= c1 && c * ST_CHR < SS.n; c++) {
++        int have = -1, spare = -1;
++        for (int L = 0; L < ST_CH; L++) {
++            if (SS.chunk[L] == c && apstl[L].bmp.px) have = L;
++            else if (spare < 0 && (SS.chunk[L] < c0 || SS.chunk[L] > c1 || !apstl[L].bmp.px)) spare = L;
++        }
++        if (have < 0 && spare >= 0) st_chunk_draw(spare, c);
++    }
++    for (int L = 0; L < ST_CH; L++) {
++        tk_layer *l = &apstl[L];
++        if (!l->bmp.px) continue;
++        l->hidden = SS.chunk[L] < c0 || SS.chunk[L] > c1;
++        l->y = l->by - tk_floorf(PT(SS.scroll) + .5f);
++        l->clip = 1;
++        l->clip_r = (tk_rect){ 0, PT(SS.top), TK_W, PT(area) };
++        l->fade_top = SS.scroll > 0 ? PT(12) : 0;   /* the rows fade out at the clip's edges */
++        l->fade_bot = h - SS.scroll > area + 1 ? PT(28) : 0;
++    }
++    relink();
++}
++static void st_head(void)
++{
++    relayer(&apsth);
++    relayer(&aplst);                              /* (the Linux page's state line: the empty store's words here) */
++    apsth.hidden = aplst.hidden = 1;
++    int empty = !LST || LST->n <= 0;
++    float bottom = empty ? CONTENT_TOP : SS.top;
++    dc d = mk(&apsth, "store-head", 0, SAFE_TOP, 390, bottom - SAFE_TOP, 0, 0);
++    if (!empty) {
++        /* the field's glass, baked in the page's first build (not in a tap) and copied in (it overwrites: first) */
++        int k = SS.kb != 0;
++        float fw = k ? CONTENT_W - 74 : CONTENT_W;
++        for (int f = 0; f < 2; f++)
++            if (!st_field[f].px && tk_bmp_new(&st_field[f], d.b->w, (int)(PT(FIELD_Y + 36 + 16) - d.oy))) {
++                dc g = { &st_field[f], 0, d.ox, d.oy };
++                d_lg_flat(&g, MARGIN, FIELD_Y, f ? CONTENT_W - 74 : CONTENT_W, 36, 18, 1);
++            }
++        if (st_field[k].px) tk_bmp_copy(d.b, 0, 0, &st_field[k], 0, 0, st_field[k].w, tk_mini(st_field[k].h, d.b->h));
++        d_icon(&d, "search15", MARGIN + 13, FIELD_Y + 10.5f, 1);
++        float tx = MARGIN + 37;
++        if (SS.q[0]) {
++            d_text_box(&d, TK_IT400, 17, tx, bl(TK_IT400, 17, FIELD_Y + 7), fw - 50, 0, SS.q, 0, 0, INK, 0);
++            if (SS.kb) d_rrect(&d, tx + tk_minf(tw(TK_IT400, 17, SS.q, 0, 0), fw - 50) + 1, FIELD_Y + 8, 2, 21, 1, ACCENT());
++        } else
++            d_text(&d, TK_IT400, 17, tx, bl(TK_IT400, 17, FIELD_Y + 7), "Apps and Packages", 0, 0, tk_hex(0xa9a9a9, 1), 0);
++        if (SS.kb) d_text_box(&d, TK_IT400, 17, CONTENT_R, bl(TK_IT400, 17, FIELD_Y + 7), 64, 2, "Cancel", 0, 0, ACCENT(), 0);
++    }
++    d_h1(&d, "App Store");
++    if (LST && LST->repo_ok) {
++        char f[24], b[40];
++        lx_fmt_kb(f, LST->overlay_free_kb);
++        lx_scopy(b, f, 40);
++        lx_scopy(b + tk_strlen(b), " free", 40 - (int)tk_strlen(b));
++        d_text_box(&d, TK_IT400, 13, CONTENT_R, LARGE_BASE - 4, 120, 2, b, 0, 0, W(.55f), 0);
++    }
++    if (empty) {
++        const char *t, *l;
++        if (LX.state == SH_LINUX_FAILED) { t = "Linux Didn't Start"; l = LX.why[0] ? LX.why : "The big cores did not start."; }
++        else if (LX.state != SH_LINUX_RUNNING) { t = "Starting Linux"; l = "The App Store opens when Linux is up, in a few seconds."; }
++        else if (!LST) { t = "Reading the Index"; l = "The package list comes from the memory card."; }
++        else { t = "No Packages"; l = LST->repo_ok ? "The package index is empty." : "The package source isn't on the memory card yet."; }
++        float mid = tk_floorf((CONTENT_TOP + EMPTY_BOT) / 2);
++        dc e = mk(&aplst, "store-empty", 0, mid - 60, 390, 120, 0, 0);
++        d_empty(&e, CONTENT_TOP, EMPTY_BOT, t, l);
++        aplst.hidden = 0;
++        apsth.hidden = 0;
++        return;
++    }
++    int searching = SS.q[0] || SS.kb;
++    if (!searching && SS.nfeat) {
++        d_text(&d, TK_IT600, 13, ROW_TX, bl(TK_IT600, 13, FIELD_Y + 52), "FEATURED", .4f, 0, W(.55f), 0);
++        for (int k = 0; k < SS.nfeat; k++) {
++            const sh_lpkg_t *p = &LST->pkg[SS.feat[k]];
++            float x = MARGIN + (FEAT_W + 9) * k, cx = x + FEAT_W / 2, y = FIELD_Y + 70;
++            d_rrect(&d, x, y, FEAT_W, 128, 16, tk_hex(0x151c33, 1));
++            const tk_bmp *ic = st_icon(SS.feat[k]);
++            if (ic->px) tk_blit(d.b, ic, (int)tk_floorf(PT(cx - 24) - d.ox + .5f), (int)tk_floorf(PT(y + 14) - d.oy + .5f), 1);
++            d_text_box(&d, TK_IT600, 14, cx, bl(TK_IT600, 14, y + 72), FEAT_W - 12, 1, p->name, 0, 0, INK, 0);
++            d_text_box(&d, TK_IT400, 12, cx, bl(TK_IT400, 12, y + 94), FEAT_W - 12, 1, p->category, 0, 0, W(.55f), 0);
++        }
++    }
++    const char *cap = !SS.n ? "NO RESULTS" : searching ? "RESULTS" : "ALL APPS";
++    d_text(&d, TK_IT600, 13, ROW_TX, bl(TK_IT600, 13, SS.top - 22), cap, .4f, 0, W(.55f), 0);
++    apsth.hidden = 0;
++}
++static void st_list(void)
++{
++    for (int L = 0; L < ST_CH; L++) { relayer(&apstl[L]); apstl[L].hidden = 1; SS.chunk[L] = -1; }
++    if (!LST || !SS.n) return;
++    st_place();
++}
++/* the detail's button and progress (rebuilt alone while only the progress moves) */
++static void st_btn(void)
++{
++    relayer(&apstb);
++    apstb.hidden = 1;
++    int i = st_find(SS.pkg);
++    if (!SS.det || i < 0) return;
++    const sh_lpkg_t *p = &LST->pkg[i];
++    dc d = mk(&apstb, "store-button", 136, DT + 62, CONTENT_R - 136, 50, 0, 0);
++    int inst = (p->flags & SH_PKG_INSTALLED) != 0, busy = st_busy(p), dim = !inst && !busy && (p->flags & SH_PKG_NO_SPACE);
++    float bx = 136;
++    if (p->state != SH_PKG_REMOVING) {
++        const char *t = busy ? "CANCEL" : inst ? "OPEN" : p->state == SH_PKG_FAILED ? "RETRY" : "GET";
++        tk_col fill = busy ? W(.14f) : ACCENT(), fg = busy ? ACCENT() : W(1);
++        if (dim) { fill = W(.1f); fg = W(.35f); }
++        d_rrect(&d, 136, DT + 68, 84, 32, 16, fill);
++        d_text_box(&d, TK_IT700, 15, 136 + 42, bl(TK_IT700, 15, DT + 75), 80, 1, t, .3f, 0, fg, 0);
++        bx = 232;
++    }
++    if (busy) {
++        float bw = CONTENT_R - bx, f = p->state == SH_PKG_QUEUED ? 0 : tk_clampf(p->pct / 100.0f, 0, 1);
++        d_rrect(&d, bx, DT + 72, bw, 6, 3, W(.15f));
++        if (f > 0) d_rrect(&d, bx, DT + 72, tk_maxf(6, bw * f), 6, 3, ACCENT());
++        char ln[48];
++        tk_col c;
++        st_line(p, ln, &c);
++        d_text_box(&d, TK_IT400, 13, bx, bl(TK_IT400, 13, DT + 85), bw, 0, ln, 0, 0, W(.6f), 0);
++    } else if (p->state == SH_PKG_FAILED)
++        d_text_box(&d, TK_IT600, 13, 232, bl(TK_IT600, 13, DT + 76), CONTENT_R - 232, 0, "Didn't install", 0, 0, tk_hex(0xff6961, 1), 0);
++    else if (inst)
++        d_text_box(&d, TK_IT400, 13, 232, bl(TK_IT400, 13, DT + 76), CONTENT_R - 232, 0, (p->flags & SH_PKG_SYSTEM) ? "Part of the system" : "Installed", 0, 0, W(.55f), 0);
++    else if (dim)
++        d_text_box(&d, TK_IT600, 13, 232, bl(TK_IT600, 13, DT + 76), CONTENT_R - 232, 0, "Not enough space", 0, 0, tk_hex(0xff6961, 1), 0);
++    apstb.hidden = 0;
++}
++/* a coloured note (a warning) at y: its title and wrapped lines; returns the y after it */
++static float st_note(dc *d, float y, uint32_t col, const char *title, const char *text)
++{
++    char ln[4][96];
++    float wm;
++    int n = wrap(ln, TK_IT400, 14, text, GROUP_W - 32, &wm);
++    float h = 14 + 19 + 19.0f * n + 10;
++    d_rrect(d, GROUP_X, y, GROUP_W, h, 16, tk_hex(col, .16f));
++    d_text_box(d, TK_IT600, 15, ROW_TX, bl(TK_IT600, 15, y + 11), GROUP_W - 32, 0, title, 0, 0, tk_hex(col, 1), 0);
++    for (int k = 0; k < n; k++) d_text(d, TK_IT400, 14, ROW_TX, bl(TK_IT400, 14, y + 33 + 19.0f * k), ln[k], 0, 0, W(.85f), 0);
++    return y + h + 12;
++}
++static void st_page(dc *d)
++{
++    int i = SS.det ? st_find(SS.pkg) : -1;
++    if (!SS.det || i < 0) return;                 /* the list: its own layers (st_head, the chunks) */
++    const sh_lpkg_t *p = &LST->pkg[i];
++    char b[96], s[24];
++    (void)b;
++    d_back(d, ACCENT());                          /* P3p's pushed page: the glass back circle */
++    if (st_dic.px) tk_blit(d->b, &st_dic, (int)tk_floorf(PT(MARGIN) - d->ox + .5f), (int)tk_floorf(PT(DT) - d->oy + .5f), 1);
++    d_text_box(d, TK_IT700, 24, 136, bl(TK_IT700, 24, DT + 2), CONTENT_R - 136, 0, p->name, 0, 0, INK, 0);
++    d_text_box(d, TK_IT400, 15, 136, bl(TK_IT400, 15, DT + 34), CONTENT_R - 136, 0, p->pkg, 0, 0, W(.55f), 0);
++    float y = DT + 124;
++    int inst = (p->flags & SH_PKG_INSTALLED) != 0;
++    if (p->flags & SH_PKG_TOO_BIG) {
++        char t[200], m[16];
++        lx_fmt_kb(s, p->ram_mb * 1000u);
++        lx_fmt_kb(m, LST->mem_total_kb);
++        int n = 0;
++        const char *parts[] = { "About ", s, " of memory while in use; Linux has ", m[0] != '0' ? m : "1.5 GB",
++                                " in all. It may run slowly, and other Linux apps may be closed while it runs." };
++        for (unsigned k = 0; k < 5; k++) for (const char *c = parts[k]; *c && n < 198; c++) t[n++] = *c;
++        t[n] = 0;
++        y = st_note(d, y, 0xffb340, "Needs a lot of memory", t);
++    }
++    if ((p->flags & SH_PKG_NO_SPACE) && !inst) {
++        char t[200], f[16];
++        lx_fmt_kb(s, p->inst_kb);
++        lx_fmt_kb(f, LST->overlay_free_kb);
++        int n = 0;
++        const char *parts[] = { "It needs ", s, " on the memory card and ", f, " is free. Remove an app to make room." };
++        for (unsigned k = 0; k < 5; k++) for (const char *c = parts[k]; *c && n < 198; c++) t[n++] = *c;
++        t[n] = 0;
++        y = st_note(d, y, 0xff6961, "Not enough space", t);
++    }
++    if (p->state == SH_PKG_FAILED) y = st_note(d, y, 0xff6961, "Didn't install", p->err[0] ? p->err : "The package manager stopped with an error.");
++    {
++        char ln[4][96];
++        float wm;
++        int n = wrapn(ln, 3, TK_IT400, 16, p->summary[0] ? p->summary : p->name, CONTENT_W, &wm);
++        for (int k = 0; k < n; k++) d_text(d, TK_IT400, 16, MARGIN, bl(TK_IT400, 16, y + 2 + 22.0f * k), ln[k], 0, 0, INK, 0);
++        y += 22.0f * tk_mini(n, 3) + 16;
++    }
++    static const char *const L[5] = { "Category", "Download", "Installed size", "Memory in use", "Free space" };
++    d_rrect(d, GROUP_X, y, GROUP_W, 47 * 5 - 1, 16, tk_hex(0x151c33, 1));
++    for (int r = 0; r < 5; r++) {
++        float ry = y + 47.0f * r;
++        if (r == 0) lx_scopy(s, p->category[0] ? p->category : "Linux", 24);
++        else if (r == 1) lx_fmt_kb(s, p->dl_kb);
++        else if (r == 2) lx_fmt_kb(s, p->inst_kb);
++        else if (r == 3) { char m[16]; lx_fmt_kb(m, p->ram_mb * 1000u); lx_scopy(s, "about ", 24); lx_scopy(s + 6, m, 18); }
++        else lx_fmt_kb(s, LST->overlay_free_kb);
++        d_text(d, TK_IT400, 16, ROW_TX, ry + 13 + 16, L[r], 0, 0, INK, 0);
++        d_text_box(d, TK_IT400, 16, CONTENT_R - 16, ry + 13 + 16, 170, 2, s, 0, TK_TNUM, W(.55f), 0);
++        if (r < 4) d_rrect(d, ROW_TX, ry + 46, CONTENT_R - ROW_TX, .5f, 0, W(.08f));
++    }
++    y += 47 * 5 + 14;
++    SS.rm_y = -1;
++    if (inst && !st_busy(p)) {
++        if (p->flags & SH_PKG_SYSTEM)
++            d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y), "Part of the system: it can't be removed.", 0, 0, W(.45f), 0);
++        else {
++            d_rrect(d, GROUP_X, y, GROUP_W, 46, 16, tk_hex(0x151c33, 1));
++            d_text(d, TK_IT400, 16, ROW_TX, y + 13 + 16, "Remove App", 0, 0, tk_hex(0xff453a, 1), 0);
++            SS.rm_y = y;
++        }
++    }
++}
++/* the detail's look depends on these; only the progress changed: the button layer alone */
++static int st_dkey(const sh_lpkg_t *p)
++{
++    return (int)(p->flags & 0x1f) | (st_busy(p) ? 32 : 0) | (p->state == SH_PKG_FAILED ? 64 : 0);
++}
++static void st_detail(int i)
++{
++    SS.det = 1;
++    lx_scopy(SS.pkg, LST->pkg[i].pkg, 40);
++    SS.dkey = st_dkey(&LST->pkg[i]);
++    SS.rm_arm = 0;
++    lx_make_icon(&st_dic, (int)(PT(100) + .5f), LST->pkg[i].icon, LST->pkg[i].name, 0);
++}
++/* the store's layers for what SS says (the page strips are drawn by st_page) */
++static void st_build(void)
++{
++    relayer(&apsth); relayer(&apstb);
++    apsth.hidden = apstb.hidden = 1;
++    for (int L = 0; L < ST_CH; L++) { relayer(&apstl[L]); apstl[L].hidden = 1; }
++    if (!is_app("store")) return;
++    if (SS.det && st_find(SS.pkg) < 0) SS.det = 0;
++    lx_build_kb(SS.kb && !SS.det, SS.shift, SS.num);
++    if (SS.det) { st_btn(); relink(); return; }
++    st_filter();
++    int searching = SS.q[0] || SS.kb;
++    SS.top = searching ? FIELD_Y + 70 : FIELD_Y + 230;
++    SS.bot = SS.kb ? 540 : 772;
++    st_head();
++    st_list();
++    relink();
++}
++static void st_changed(void)
++{
++    if (!is_app("store")) return;
++    int i = SS.det ? st_find(SS.pkg) : -1;
++    if (SS.det && i >= 0 && st_dkey(&LST->pkg[i]) == SS.dkey) { st_btn(); relink(); return; }
++    if (SS.det && i >= 0) SS.dkey = st_dkey(&LST->pkg[i]);
++    build_app_page(AP.a);                         /* the strips (a detail's notes) and the layers */
++}
++void sh_linux_store(const sh_lstore_t *s)
++{
++    LST = s && s->n >= 0 ? s : 0;
++    if (lx_baked && is_app("store") && !ap_pending) st_changed();
++}
++static void lx_open_app(int ci);
++static void st_act(int i)
++{
++    const sh_lpkg_t *p = &LST->pkg[i];
++    char m[64];
++    if (p->state == SH_PKG_REMOVING) return;
++    if (st_busy(p)) { sh_linux_pkg(i, SH_PKG_OP_CANCEL); return; }
++    if (p->flags & SH_PKG_INSTALLED) {
++        int a = st_app(i);
++        if (a >= 0) lx_open_app(a);
++        else toast("Installed. It has no window of its own");
++        return;
++    }
++    if (p->flags & SH_PKG_NO_SPACE) { toast("Not enough space on the memory card"); return; }
++    if (sh_linux_pkg(i, SH_PKG_OP_INSTALL) < 0) { toast("Linux isn't running: try again in a moment"); return; }
++    if (p->flags & SH_PKG_TOO_BIG) toast("It needs a lot of memory: it may run slowly");
++    else { lx_scopy(m, "Installing ", 64); lx_scopy(m + 11, p->name, 53); toast(m); }
++}
++static int st_list_at(float x, float y)
++{
++    (void)x;
++    return !SS.det && SS.n && y >= SS.top && y < SS.bot;
++}
++static void st_tap(float x, float y)
++{
++    if (!LST || LST->n <= 0) return;
++    if (SS.det) {
++        int i = st_find(SS.pkg);
++        if (BACK_HIT(x, y)) { SS.det = 0; tk_bmp_free(&st_dic); build_app_page(AP.a); return; }
++        if (i < 0) return;
++        if (x >= 130 && x < 226 && y >= DT + 62 && y < DT + 106) { st_act(i); return; }
++        if (SS.rm_y > 0 && y >= SS.rm_y && y < SS.rm_y + 46 && x >= GROUP_X && x < GROUP_X + GROUP_W) {
++            char m[64];
++            if (SS.rm_arm && now_ms - SS.rm_t < 3000) {
++                SS.rm_arm = 0;
++                if (sh_linux_pkg(i, SH_PKG_OP_REMOVE) < 0) { toast("Linux isn't running: try again in a moment"); return; }
++                lx_scopy(m, "Removing ", 64); lx_scopy(m + 9, LST->pkg[i].name, 55);
++            } else {
++                SS.rm_arm = 1; SS.rm_t = now_ms;
++                lx_scopy(m, "Tap again to remove ", 64); lx_scopy(m + 20, LST->pkg[i].name, 44);
++            }
++            toast(m);
++        }
++        return;
++    }
++    if (y >= FIELD_Y - 4 && y < FIELD_Y + 40) {   /* the field: the keyboard; Cancel: the list again */
++        if (SS.kb && x >= CONTENT_R - 70) { SS.kb = 0; SS.q[0] = 0; SS.scroll = 0; st_build(); return; }
++        if (!SS.kb) { SS.kb = 1; SS.shift = SS.num = 0; SS.scroll = 0; st_build(); }
++        return;
++    }
++    if (SS.kb && y >= 548) {
++        char c = 0;
++        int k = kb_hit(x, y, SS.shift, SS.num, &c), n = (int)tk_strlen(SS.q), relayout = 0;
++        if (k) sh_haptic();
++        if (k == 2) SS.shift = !SS.shift;
++        else if (k == 3) SS.num = !SS.num;
++        else if (k == 4 && n) SS.q[n - 1] = 0;
++        else if (k == 5) SS.kb = 0;               /* return: the results without the keyboard */
++        else if (k == 1 && n < 22 && !(c == ' ' && !n)) {
++            if (SS.shift) SS.shift = 0;
++            SS.q[n] = c; SS.q[n + 1] = 0;
++        }
++        (void)relayout;
++        SS.scroll = 0;
++        st_build();
++        return;
++    }
++    if (!SS.q[0] && !SS.kb && y >= FIELD_Y + 70 && y < FIELD_Y + 198) {   /* a featured card */
++        int k = (int)((x - MARGIN) / (FEAT_W + 9));
++        if (x >= MARGIN && k < SS.nfeat && x - MARGIN - (FEAT_W + 9) * k < FEAT_W) { st_detail(SS.feat[k]); build_app_page(AP.a); }
++        return;
++    }
++    if (y >= SS.top && y < SS.bot) {
++        int k = (int)((y - SS.top + SS.scroll) / 64);
++        if (k < 0 || k >= SS.n) return;
++        if (x >= ROW_BTN - 8) { st_act(SS.rows[k]); return; }
++        st_detail(SS.rows[k]);
++        build_app_page(AP.a);
++    }
++}
++/* a catalog app opened from the store's "Open" (the Terminal's own page for foot) */
++static void lx_open_app(int ci)
++{
++    int a = lx_term_id(LCAT.app[ci].id) ? lx_app_index("terminal") : lx_app_index("linux");
++    lx_pick = ci;
++    if (AP.on) app_finish_close();
++    app_open(a);
++}
++
++
++/* ==== the hooks shell_lock.c calls (one or two lines at each place) ========================================== */
++static int lx_is(const char *k) { return !tk_strcmp(k, "terminal") || !tk_strcmp(k, "linux") || !tk_strcmp(k, "store"); }
++/* page 3's slot of "linux": the open app's, else the one a press on home picked (lx_hit); -1 none */
++static int lx_slot(void)
++{
++    const char *id = is_app("linux") ? LX.id : !AP.on && lx_pick >= 0 && lx_pick < LCAT.n ? LCAT.app[lx_pick].id : 0;
++    for (int i = 0; id && i < LH.n; i++) if (!tk_strcmp(LCAT.app[LH.cat[i]].id, id)) return i;
++    return -1;
++}
++/* app_icon: the App Store's and the Linux apps' icons are bitmaps of ours (1: k is ours, *ic may be NULL: Search
++ * lists the App Store, never "linux") */
++static int lx_icon(const char *k, float *pad, const tk_bmp **ic)
++{
++    if (!tk_strcmp(k, "store")) { *pad = 0; *ic = store_ic.px ? &store_ic : 0; return 1; }
++    if (tk_strcmp(k, "linux")) return 0;
++    int s = lx_slot();
++    *pad = 0;
++    *ic = is_app("linux") && lx_ic.px ? &lx_ic : !AP.on && s >= 0 && lx_slot_icon(s) ? &lx_ic : 0;
++    return 1;
++}
++/* build_home: page 3 (hparts[5]) */
++static void lx_home(void) { lx_baked = 1; LH.sig = 0; lx_page3_update(); }
++/* app_hit on page 3 (x0: the page's own x): the APPS index of the App Store or of "linux" (lx_pick set), or -1 */
++static int lx_hit(float x0, float y)
++{
++    int col = (int)((x0 - 15) / 90), row = (int)((y - HOME_TOP2) / ROW_PITCH), i = row * 4 + col;
++    if (x0 < 15 || y < HOME_TOP2 || col >= 4 || row >= 5 || y - HOME_TOP2 - row * ROW_PITCH >= 83 || i > LH.n) return -1;
++    if (!i) return lx_app_index("store");
++    lx_pick = LH.cat[i - 1];
++    return lx_app_index("linux");
++}
++/* icon_rect: page 3's slots (the open Linux app's, the App Store's) */
++static int lx_icon_rect(const char *k, arect *r)
++{
++    int s = !tk_strcmp(k, "store") ? 0 : !tk_strcmp(k, "linux") && lx_slot() >= 0 ? lx_slot() + 1 : -1;
++    if (s < 0) return 0;
++    *r = (arect){ 780 + COL_CX(s % 4) - ICON_PT / 2 + page_x, HOME_TOP2 + ROW_PITCH * (s / 4), ICON_PT, ICON_PT, 15 };
++    return 1;
++}
++/* own_strip: the page strips only for a package's page (the window, the store's list: own layers) */
++static int lx_strips(const char *k) { return !tk_strcmp(k, "store") && SS.det; }
++static void lx_page(dc *d) { st_page(d); }
++/* own_extras */
++static void lx_build(void)
++{
++    if (lx_is_lin()) lx_build_win();
++    else if (is_app("store")) st_build();
++}
++/* app_open, after the page's build is under way: which app, its keyboard and viewport, Linux started / held */
++static void lx_open(int a)
++{
++    const char *k = APPS[a].k;
++    if (!tk_strcmp(k, "store")) {                /* the App Store opens on its list */
++        tk_memset(&SS, 0, sizeof SS);
++        SS.top = FIELD_Y + 230; SS.bot = 772;
++        (void)sh_linux_hold(1);                   /* Linux started for the package index, kept while open */
++        return;
++    }
++    lx_prepare(a);
++    (void)sh_linux_open(LX.id);                   /* refused: sh_linux_state says why */
++}
++/* app_finish_close: every layer of ours freed (the window's 15.5 MiB the moment the app leaves the screen) */
++static void lx_close(void)
++{
++    if (AP.on && lx_is_lin()) sh_linux_hide();
++    if (AP.on && is_app("store")) (void)sh_linux_hold(0);
++    for (int k = 0; k < 4; k++) { relayer(&aplin[k]); aplin[k].hidden = 1; aplin[k].clip = 0; }
++    relayer(&apkb); apkb.hidden = 1;
++    relayer(&aplst); aplst.hidden = 1;
++    LX.text = 0; LX.kb = 0;
++    relayer(&apsth); relayer(&apstb);
++    apsth.hidden = apstb.hidden = 1;
++    for (int L = 0; L < ST_CH; L++) { relayer(&apstl[L]); apstl[L].hidden = 1; }
++    st_icons_free();
++}
++/* app_tap: 1 taken */
++static int lx_tap(float x, float y)
++{
++    if (lx_is_lin()) { lx_kb_tap(x, y); return 1; }
++    if (is_app("store")) { st_tap(x, y); return 1; }
++    return 0;
++}
++/* sh_touch inside an open app (T.kind G_LINUX while it returns 1 for the down): the window's touches, the store's
++ * list (a drag scrolls it, a tap is st_tap) */
++static struct { int mode, moved; float y0, base; } LT;
++static int lx_touch(int ph, float x, float y)
++{
++    if (ph == 0) {
++        LT.mode = 0;
++        if (lx_is_lin() && lx_at(x, y)) { LT.mode = 1; lx_win_touch(0, x, y); }
++        else if (is_app("store") && st_list_at(x, y)) { LT.mode = 2; LT.moved = 0; LT.y0 = y; LT.base = SS.scroll; }
++        return LT.mode != 0;
++    }
++    if (LT.mode == 1) lx_win_touch(ph, x, y);
++    else if (LT.mode == 2) {
++        if (tk_fabsf(y - LT.y0) > 5) LT.moved = 1;
++        if (ph == 1 && LT.moved) { SS.scroll = LT.base - (y - LT.y0); st_place(); }
++        if (ph == 2 && !LT.moved) st_tap(x, y);
++    }
++    if (ph == 2) LT.mode = 0;
++    return 1;
++}
++static int lx_moving(void) { return LT.mode == 2; }
++/* relink: our layers under the page (appc), over its strips */
++static int lx_layers(tk_layer **o)
++{
++    int n = 0;
++    for (int k = 0; k < 4; k++) o[n++] = &aplin[k];
++    o[n++] = &aplst;
++    o[n++] = &apsth;
++    for (int L = 0; L < ST_CH; L++) o[n++] = &apstl[L];
++    o[n++] = &apstb;
++    o[n++] = &apkb;
++    return n;
++}
++/* sh_set: "lapp=ID:v" a Linux app by its desktop id; "store=PKG:v" the App Store (on PKG's page if given);
++ * "storeq=TEXT:v" its search typed (v 1: the keyboard up) */
++static int lx_set(const char *what, const char *key, float v)
++{
++    if (!tk_strcmp(what, "lapp")) {
++        int ci = lx_cat_find(key);
++        if (ci < 0) return 1;
++        lx_pick = ci;
++        sh_set("app", lx_term_id(key) ? "terminal" : "linux", v);
++        return 1;
++    }
++    if (!tk_strcmp(what, "store")) {
++        sh_set("app", "store", v);
++        if (key[0] && st_find(key) >= 0) { st_detail(st_find(key)); build_app_page(AP.a); }
++        return 1;
++    }
++    if (!tk_strcmp(what, "storeq")) {
++        if (!is_app("store")) return 1;
++        lx_scopy(SS.q, key, 23);
++        SS.kb = v > 0;
++        SS.det = 0;
++        build_app_page(AP.a);
++        return 1;
++    }
++    return 0;
++}
+diff --git a/starbite/sbos/ui/shell_lock.c b/starbite/sbos/ui/shell_lock.c
+index dfa1ae8..fe6e677 100644
+--- a/starbite/sbos/ui/shell_lock.c
++++ b/starbite/sbos/ui/shell_lock.c
+@@ -823,6 +823,34 @@ static void toggle_group(int g, int instant)
+ }
+ 
+ static tk_layer hparts[8], hsearch[3], pages;
++/* L3, shell_linux.inc (Linux apps, the App Store): the hooks this file calls */
++static int lx_is(const char *k);
++static int lx_icon(const char *k, float *pad, const tk_bmp **ic);
++static void lx_home(void);
++/* L3: the Search pill's page dots, the lit one page pg's (redrawn only when it changes: a 40 x 8 pt layer) */
++static void home_dots(int pg)
++{
++    static int lit = -1;
++    if (pg == lit && hsearch[2].bmp.px) return;
++    lit = pg;
++    int hid = hsearch[2].hidden;
++    relayer(&hsearch[2]);
++    dc d = mk(&hsearch[2], "search-dots", 189.5f, 650.5f, 30, 6, 1, 0);
++    for (int j = 0; j < 3; j++) d_rrect(&d, 189.5f + 12 * j, 650.5f, 6, 6, 3, pg == j ? W(1) : W(.4f));
++    hsearch[2].hidden = hid;
++    relink();
++}
++static int lx_hit(float x0, float y);
++static int lx_strips(const char *k);
++static void lx_page(dc *d);
++static void lx_build(void);
++static void lx_open(int a);
++static void lx_close(void);
++static int lx_tap(float x, float y);
++static int lx_touch(int ph, float x, float y);
++static int lx_moving(void);
++static int lx_layers(tk_layer **o);
++static int lx_set(const char *what, const char *key, float v);
+ /* P3p: an app's 62 pt icon. Calendar shows today, as on iOS: the blank a62-calendar-bg with the weekday (red,
+  * semibold, .14 of the tile) over the date (regular, .45), composed once a day (one 62 pt bitmap, ~210 KB) and
+  * used wherever the icon is drawn: home, Search and the opening / closing icon (cal_newday() redraws home's) */
+@@ -831,6 +859,8 @@ static int calic_key = -1, calic_x = -1, calic_y;   /* calic_x, _y: where home's
+ static int cal_key(void) { return ST.wday % 7 * 32 + ST.day; }
+ static const tk_bmp *app_icon(const char *k, float *pad)
+ {
++    const tk_bmp *li;
++    if (lx_icon(k, pad, &li)) return li;          /* L3: the App Store's, a Linux app's */
+     char nm[24] = "a62-";
+     int n = tk_mini(tk_strlen(k), 19);
+     tk_memcpy(nm + 4, k, n);
+@@ -968,21 +998,21 @@ static void build_home(void)
+         d_text_box(&d, TK_IT500, 12, cx, y + 68 + 12, 84, 1, P1N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
+     }
+     build_home_apps2();
+-    /* the Search pill, three ways: the word (at rest on a page), the page dots (moving, either page lit) */
++    lx_home();                                  /* L3: page 3, the Linux apps */
++    /* the Search pill, four ways: the word (at rest on a page), the page dots (moving, one of three pages lit) */
+     {
+         float sw = 15 + 13 + 6 + tw(TK_IT600, 13, "Search", 0, 0) + 15, sx = 195 - sw / 2;
+         d = mk(&hsearch[0], "search", sx, 640, sw, 30, 44, 1);
+         d_glass(&d, sx, 640, sw, 30, 15, 1, 1);
+         d_icon(&d, "search", sx + 15, 640 + 8.5f, 1);
+         d_text(&d, TK_IT600, 13, sx + 34, 640 + 7 + 13, "Search", 0, 0, INK, 1);
+-        for (int k = 0; k < 2; k++) {
+-            d = mk(&hsearch[1 + k], "search-dots", 161.5f, 640, 67, 27, 44, 1);
+-            d_glass(&d, 161.5f, 640, 67, 27, 13.5f, 1, 1);
+-            d_icon(&d, "search", 161.5f + 15, 640 + 7, 1);
+-            d_rrect(&d, 195.5f, 650.5f, 6, 6, 3, k == 0 ? W(1) : W(.4f));
+-            d_rrect(&d, 207.5f, 650.5f, 6, 6, 3, k == 1 ? W(1) : W(.4f));
+-        }
+-        for (int k = 0; k < 3; k++) tk_a8_free(&hsearch[k].glass);
++        /* L3: one pill for the dots and a small layer of the three dots over it (home_dots: the lit one follows the
++         * page), not a pill per page */
++        d = mk(&hsearch[1], "search-pill", 155.5f, 640, 79, 27, 44, 1);
++        d_glass(&d, 155.5f, 640, 79, 27, 13.5f, 1, 1);
++        d_icon(&d, "search", 155.5f + 15, 640 + 7, 1);
++        for (int k = 0; k < 2; k++) tk_a8_free(&hsearch[k].glass);
++        home_dots(0);
+         hsearch[1].hidden = hsearch[2].hidden = 1;
+     }
+     d = mk(&hparts[3], "home-dock", 0, 650, 390, 152, 0, 1);
+@@ -1228,8 +1258,8 @@ static void set_page(float x)
+     float fr = p - tk_floorf(p + .5f);
+     int moving = tk_fabsf(fr) > .02f || page_dragging;
+     hsearch[0].hidden = moving;
+-    hsearch[1].hidden = !moving || p >= .5f;
+-    hsearch[2].hidden = !moving || p < .5f;
++    hsearch[1].hidden = hsearch[2].hidden = !moving;
++    if (moving) home_dots(tk_mini(2, tk_maxi(0, (int)tk_floorf(p + .5f))));   /* L3: three pages */
+ }
+ 
+ 
+@@ -1483,6 +1513,8 @@ static const appdef APPS[] = {
+     { "phone", "Phone", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
+     { "messages", "Messages", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
+     { "search", "Search", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
++    { "linux", "Linux", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },      /* L3: the open Linux app (shell_linux.inc) */
++    { "store", "App Store", 0x0a6fe8, 1, { { "", 1, { { "", "" } } } } },
+     { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "@wifi" }, { "Cellular", "No SIM" }, { "Battery", "@pct" } } },
+                                            { "", 5, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" } } },
+                                            { "About", 3, { { "Model", "Galaxy S9 (SM-G960F)" }, { "Software", "@ver" }, { "Memory", "4 GB" } } } } },
+@@ -2676,13 +2708,14 @@ static int app_own(int a)
+     return !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
+            !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
+            !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes") ||
+-           !tk_strcmp(k, "search") || info_of(k) || med_is(k);
++           !tk_strcmp(k, "search") || info_of(k) || med_is(k) || lx_is(k);
+ }
+ static void own_strip(int a, int i)
+ {
+     const char *k = APPS[a].k;
+     const infopg *inf = info_of(k);
+     if (med_is(k)) { relayer(&appst[i]); return; }      /* shell_media.inc: its own layers (med_build), no strips */
++    if (lx_is(k) && !lx_strips(k)) { relayer(&appst[i]); appst[i].hidden = 1; return; }   /* shell_linux.inc: the same */
+     dc d = strip_dc(i, "app-page");
+     if (!d.b->px) return;
+     if (!tk_strcmp(k, "phone")) page_phone(&d);
+@@ -2696,6 +2729,7 @@ static void own_strip(int a, int i)
+     else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else page_display(&d); }
+     else if (!tk_strcmp(k, "notes")) page_notes(&d);
+     else if (!tk_strcmp(k, "search")) page_search(&d);
++    else if (lx_is(k)) lx_page(&d);
+     else if (inf) { d_h1(&d, APPS[a].name); d_empty(&d, CONTENT_TOP, EMPTY_BOT, inf->title, inf->line); }
+     else page_camera(&d);
+     tk_layer_prepare(&appst[i]);
+@@ -2708,6 +2742,7 @@ static void own_extras(int a)
+     if (!tk_strcmp(k, "calc")) build_calc();
+     if (!tk_strcmp(k, "notes")) build_note();
+     if (!tk_strcmp(k, "search")) build_search();
++    if (lx_is(k)) lx_build();
+     if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
+     relink();
+ }
+@@ -2849,6 +2884,7 @@ static void set_app_rect(arect R)
+     appg.hidden = !AP.on;
+     place_apicon(R, p);
+ }
++static int lx_icon_rect(const char *k, arect *r);
+ static arect icon_rect(int a)
+ {
+     static const char *P1[8] = { "calendar", "weather", "clock", "camera", "photos", "music", "notes", "calc" };
+@@ -2857,6 +2893,7 @@ static arect icon_rect(int a)
+     const char *k = APPS[a].k;
+     for (int i = 0; i < 4; i++) if (!tk_strcmp(DK[i], k)) return (arect){ COL_CX(i) - ICON_PT / 2, DOCK_Y, ICON_PT, ICON_PT, 15 };
+     if (!tk_strcmp(k, "search")) return (arect){ 160, 640, 70, 30, 15 };   /* P3g: the Search pill */
++    { arect r; if (lx_icon_rect(k, &r)) return r; }                       /* L3: page 3 */
+     for (int i = 0; i < 8; i++) if (!tk_strcmp(P1[i], k)) return (arect){ COL_CX(i % 4) - ICON_PT / 2 + page_x, HOME_TOP1 + ROW_PITCH * (i / 4), ICON_PT, ICON_PT, 15 };
+     for (int i = 0; i < 8; i++) if (!tk_strcmp(P2[i], k)) return (arect){ 390 + COL_CX(i % 4) - ICON_PT / 2 + page_x, HOME_TOP2 + ROW_PITCH * (i / 4), ICON_PT, ICON_PT, 15 };
+     return (arect){ 164, 370, 62, 62, 15 };
+@@ -2871,9 +2908,10 @@ static int app_hit(float x, float y)
+     if (y >= 700 && y <= 772 && x >= 15) { int i = (int)((x - 15) / 90); if (i < 4) k = DK[i]; }
+     else if (y >= 636 && y <= 674 && x >= 140 && x <= 250) k = "search";
+     else {
+-        int pg = page_x < -195;
+-        float x0 = x - (pg ? 390 + page_x : page_x), top = pg ? HOME_TOP2 : HOME_TOP1;
++        int pg = tk_mini(2, tk_maxi(0, (int)tk_floorf(-page_x / 390 + .5f)));
++        float x0 = x - (390 * pg + page_x), top = pg ? HOME_TOP2 : HOME_TOP1;
+         int col = (int)((x0 - 15) / 90), row = (int)((y - top) / ROW_PITCH);
++        if (pg == 2) return lx_hit(x0, y);           /* L3: the Linux page */
+         if (x0 >= 15 && y >= top && col < 4 && row < 2 && y - top - row * ROW_PITCH < 83) k = (pg ? P2 : P1)[row * 4 + col];
+     }
+     if (!k) return -1;
+@@ -2900,6 +2938,7 @@ static void app_open(int a)
+         ap_pending = 1;
+     } else
+         build_app_page(a);
++    if (lx_is(APPS[a].k)) lx_open(a);            /* L3: the Linux app (started), or the App Store */
+     AP.icon = icon_rect(a);
+     AP.from = AP.icon;
+     AP.to = FULLR;
+@@ -2915,6 +2954,7 @@ static void app_close(float v)
+ }
+ static void app_finish_close(void)
+ {
++    lx_close();                                  /* L3: the window's strips, the store's layers */
+     ap_pending = 0;
+     AP.on = AP.closing = 0;
+     appg.hidden = 1;
+@@ -3189,6 +3229,7 @@ static void key_down(int i)
+ static int is_app(const char *k) { return AP.on && !tk_strcmp(APPS[AP.a].k, k); }
+ static void app_tap(float x, float y)
+ {
++    if (lx_tap(x, y)) return;                    /* L3: a Linux app's keyboard, the App Store */
+     if (is_app("phone")) {
+         if (y >= 718 && y <= 780 && x >= GROUP_X && x < GROUP_X + GROUP_W) {
+             int t = tk_mini(3, (int)((x - GROUP_X) / TAB_W));
+@@ -3331,6 +3372,7 @@ void sh_cell(const sh_cell_t *c)
+ #include "shell_cell.inc"
+ #include "shell_media_img.inc"
+ #include "shell_media.inc"
++#include "shell_linux.inc"
+ 
+ /* ---- the unlock -------------------------------------------------------------------------------------------- */
+ static void set_lock(float y)
+@@ -3408,8 +3450,9 @@ static void relink(void)
+     link(&root, r, 14);
+     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb, &apphl };
+     link(&appg, ag, 13);
+-    tk_layer *st[NST + 32] = { &appst[0], &appst[1], &appst[2], &appst[3] };
+-    link(&appc, st, NST + med_layers(st + NST));
++    tk_layer *st[NST + 64] = { &appst[0], &appst[1], &appst[2], &appst[3] };
++    int na = NST + med_layers(st + NST);
++    link(&appc, st, na + lx_layers(st + na));    /* L3: shell_linux.inc's */
+     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
+     link(&lockg, lk, 11);
+     tk_layer *ls[4 * NG + 7];
+@@ -3423,8 +3466,8 @@ static void relink(void)
+         tk_layer *q[] = { &Q[i].face, &Q[i].facelit, &Q[i].icon, &Q[i].iconlit, &Q[i].ring };
+         link(&Q[i].grp, q, 5);
+     }
+-    tk_layer *pg[] = { &hparts[1], &hparts[2], &hparts[4] };
+-    link(&pages, pg, 3);
++    tk_layer *pg[] = { &hparts[1], &hparts[2], &hparts[4], &hparts[5] };
++    link(&pages, pg, 4);
+     tk_layer *h[] = { &hparts[0], &pages, &hsearch[0], &hsearch[1], &hsearch[2], &hparts[3], &icobg, &icofg };
+     link(&home, h, 8);
+ }
+@@ -3606,7 +3649,9 @@ void sh_set(const char *what, const char *key, float v)
+         back_to_lock(1);
+     } else if (!tk_strcmp(what, "sleep")) {        /* the films: the Power key's fade (v 1) and the wake (v 0) */
+         if (v > 0) sh_sleep(0); else sh_wake();
++    } else if (lx_set(what, key, v)) {            /* L3: lapp=, store=, storeq= (shell_linux.inc) */
+     } else if (!tk_strcmp(what, "app")) {
++        if (!key[0] && AP.on) app_finish_close();       /* L2: "app=" closes the open app at once */
+         for (int a = 0; a < NAPPS; a++)
+             if (!tk_strcmp(APPS[a].k, key)) {
+                 app_open(a);
+@@ -3679,7 +3724,7 @@ void sh_set(const char *what, const char *key, float v)
+ 
+ /* ---- gestures ---------------------------------------------------------------------------------------------- */
+ enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL,
+-       G_CCDRAG, G_FOCUSDRAG, G_MEDIA };
++       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX };
+ static struct {
+     int kind, arg, arg2, moved;
+     float x0, y0, base, t0;
+@@ -3894,6 +3939,7 @@ void sh_touch(int phase, float x, float y, float t)
+             /* an open app: the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
+             if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
+             else if (!sp_app.live && med_is(APPS[AP.a].k)) { T.kind = G_MEDIA; med_touch(0, x, y, t); }
++            else if (!sp_app.live && !AP.closing && lx_touch(0, x, y)) T.kind = G_LINUX;   /* L3 */
+             else if (!sp_app.live) {
+                 /* a tap on the app's page (a key lights while the finger is on it) */
+                 T.kind = G_APPTAP;
+@@ -3982,6 +4028,11 @@ void sh_touch(int phase, float x, float y, float t)
+         tk_tracker_add(&T.tr, y, t);
+         return;
+     }
++    if (T.kind == G_LINUX) {                 /* L3, shell_linux.inc: a Linux window, the App Store's list */
++        lx_touch(phase, x, y);
++        if (phase == 2) T.kind = G_NONE;
++        return;
++    }
+     if (T.kind == G_MEDIA) {                 /* shell_media.inc: its lists, the viewer */
+         med_touch(phase, x, y, t);
+         if (phase == 2) T.kind = G_NONE;
+@@ -4070,7 +4121,7 @@ void sh_touch(int phase, float x, float y, float t)
+                 page_dragging = 1;
+                 float px = T.base + dx;
+                 if (px > 0) px *= .3f;
+-                if (px < -390) px = -390 + (px + 390) * .3f;
++                if (px < -780) px = -780 + (px + 780) * .3f;   /* L3: three pages */
+                 set_page(px);
+             }
+             break;
+@@ -4201,7 +4252,10 @@ void sh_touch(int phase, float x, float y, float t)
+             break;
+         }
+         if (page_dir == 1) {
+-            float v = tk_tracker_v(&T.tr), target = page_x + v * 220 < -195 ? -390 : 0;
++            /* L3: three pages, at most one from where the drag began */
++            float v = tk_tracker_v(&T.tr);
++            int bp = (int)tk_floorf(-T.base / 390 + .5f), tp = (int)tk_floorf(-(page_x + v * 220) / 390 + .5f);
++            float target = -390.0f * tk_mini(tk_mini(bp + 1, 2), tk_maxi(tk_maxi(bp - 1, 0), tp));
+             page_dragging = 0;
+             tk_spring_start(&sp_page, page_x, target, v * 1000, TK_SPR_ROWS);
+         }
+@@ -4317,6 +4371,7 @@ int sh_tick(float dt, float t)
+     }
+     mv |= ico_step(dt);                          /* P3p: the pressed icon */
+     mv |= med_tick(dt);
++    mv |= lx_moving();                           /* L3: the App Store's list under the finger */
+     if (em_t < 1) {
+         em_t = tk_minf(1, em_t + dt / .7f);
+         em_step(tk_bezier(.25f, .1f, .25f, 1, em_t));
+@@ -4576,7 +4631,7 @@ int sh_moving(void)
+             T.kind == G_APP || sp_app.live || booting || toast_t < 1 || em_t < 1 || T.kind == G_CCEM ||
+             T.kind == G_CCCELL || CF.down || CF.a != CF.at || SL.dir || T.kind == G_CCDRAG || T.kind == G_FOCUSDRAG;
+     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
+-    m |= sp_focus.live || sp_thumb.live || med_moving();
++    m |= sp_focus.live || sp_thumb.live || med_moving() || lx_moving();
+     m |= IP.on && IP.t < 1;
+     return m;
+ }

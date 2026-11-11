@@ -826,6 +826,34 @@ static void toggle_group(int g, int instant)
 }
 
 static tk_layer hparts[8], hsearch[3], pages;
+/* L3, shell_linux.inc (Linux apps, the App Store): the hooks this file calls */
+static int lx_is(const char *k);
+static int lx_icon(const char *k, float *pad, const tk_bmp **ic);
+static void lx_home(void);
+/* L3: the Search pill's page dots, the lit one page pg's (redrawn only when it changes: a 40 x 8 pt layer) */
+static void home_dots(int pg)
+{
+    static int lit = -1;
+    if (pg == lit && hsearch[2].bmp.px) return;
+    lit = pg;
+    int hid = hsearch[2].hidden;
+    relayer(&hsearch[2]);
+    dc d = mk(&hsearch[2], "search-dots", 189.5f, 650.5f, 30, 6, 1, 0);
+    for (int j = 0; j < 3; j++) d_rrect(&d, 189.5f + 12 * j, 650.5f, 6, 6, 3, pg == j ? W(1) : W(.4f));
+    hsearch[2].hidden = hid;
+    relink();
+}
+static int lx_hit(float x0, float y);
+static int lx_strips(const char *k);
+static void lx_page(dc *d);
+static void lx_build(void);
+static void lx_open(int a);
+static void lx_close(void);
+static int lx_tap(float x, float y);
+static int lx_touch(int ph, float x, float y);
+static int lx_moving(void);
+static int lx_layers(tk_layer **o);
+static int lx_set(const char *what, const char *key, float v);
 /* P3p: an app's 62 pt icon. Calendar shows today, as on iOS: the blank a62-calendar-bg with the weekday (red,
  * semibold, .14 of the tile) over the date (regular, .45), composed once a day (one 62 pt bitmap, ~210 KB) and
  * used wherever the icon is drawn: home, Search and the opening / closing icon (cal_newday() redraws home's) */
@@ -834,6 +862,8 @@ static int calic_key = -1, calic_x = -1, calic_y;   /* calic_x, _y: where home's
 static int cal_key(void) { return ST.wday % 7 * 32 + ST.day; }
 static const tk_bmp *app_icon(const char *k, float *pad)
 {
+    const tk_bmp *li;
+    if (lx_icon(k, pad, &li)) return li;          /* L3: the App Store's, a Linux app's */
     char nm[24] = "a62-";
     int n = tk_mini(tk_strlen(k), 19);
     tk_memcpy(nm + 4, k, n);
@@ -971,21 +1001,21 @@ static void build_home(void)
         d_text_box(&d, TK_IT500, 12, cx, y + 68 + 12, 84, 1, P1N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
     }
     build_home_apps2();
-    /* the Search pill, three ways: the word (at rest on a page), the page dots (moving, either page lit) */
+    lx_home();                                  /* L3: page 3, the Linux apps */
+    /* the Search pill, four ways: the word (at rest on a page), the page dots (moving, one of three pages lit) */
     {
         float sw = 15 + 13 + 6 + tw(TK_IT600, 13, "Search", 0, 0) + 15, sx = 195 - sw / 2;
         d = mk(&hsearch[0], "search", sx, 640, sw, 30, 44, 1);
         d_glass(&d, sx, 640, sw, 30, 15, 1, 1);
         d_icon(&d, "search", sx + 15, 640 + 8.5f, 1);
         d_text(&d, TK_IT600, 13, sx + 34, 640 + 7 + 13, "Search", 0, 0, INK, 1);
-        for (int k = 0; k < 2; k++) {
-            d = mk(&hsearch[1 + k], "search-dots", 161.5f, 640, 67, 27, 44, 1);
-            d_glass(&d, 161.5f, 640, 67, 27, 13.5f, 1, 1);
-            d_icon(&d, "search", 161.5f + 15, 640 + 7, 1);
-            d_rrect(&d, 195.5f, 650.5f, 6, 6, 3, k == 0 ? W(1) : W(.4f));
-            d_rrect(&d, 207.5f, 650.5f, 6, 6, 3, k == 1 ? W(1) : W(.4f));
-        }
-        for (int k = 0; k < 3; k++) tk_a8_free(&hsearch[k].glass);   /* v9: the lens needs only the shapes */
+        /* L3: one pill for the dots and a small layer of the three dots over it (home_dots: the lit one follows the
+         * page), not a pill per page */
+        d = mk(&hsearch[1], "search-pill", 155.5f, 640, 79, 27, 44, 1);
+        d_glass(&d, 155.5f, 640, 79, 27, 13.5f, 1, 1);
+        d_icon(&d, "search", 155.5f + 15, 640 + 7, 1);
+        for (int k = 0; k < 2; k++) tk_a8_free(&hsearch[k].glass);
+        home_dots(0);
         hsearch[1].hidden = hsearch[2].hidden = 1;
     }
     d = mk(&hparts[3], "home-dock", 0, 650, 390, 152, 0, 1);
@@ -1233,8 +1263,8 @@ static void set_page(float x)
     float fr = p - tk_floorf(p + .5f);
     int moving = tk_fabsf(fr) > .02f || page_dragging;
     hsearch[0].hidden = moving;
-    hsearch[1].hidden = !moving || p >= .5f;
-    hsearch[2].hidden = !moving || p < .5f;
+    hsearch[1].hidden = hsearch[2].hidden = !moving;
+    if (moving) home_dots(tk_mini(2, tk_maxi(0, (int)tk_floorf(p + .5f))));   /* L3: three pages */
 }
 
 
@@ -1471,12 +1501,12 @@ static const appdef APPS[] = {
     { "weather", "Weather", 0x1d2440, 1, { { "", 2, { { "Weather needs the internet", "" }, { "Not available yet", "" } } } } },
     { "clock", "Clock", 0x1d2440, 1, { { "Now", 2, { { "@time", "" }, { "@date", "" } } } } },
     { "camera", "Camera", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
-    { "photos", "Photos", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
-    { "music", "Music", 0x1d2440, 1, { { "", 1, { { "No music on this phone", "" } } } } },
+    { "photos", "Photos", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },       /* photos, music, files: shell_media.inc */
+    { "music", "Music", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
     { "notes", "Notes", 0x1d2440, 1, { { "", 1, { { "No notes yet", "" } } } } },
     { "calc", "Calculator", 0x1d2440, 1, { { "", 1, { { "Not in this version yet", "" } } } } },
     { "contacts", "Contacts", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
-    { "files", "Files", 0x1d2440, 1, { { "", 1, { { "Not in this version yet", "" } } } } },
+    { "files", "Files", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
     { "light", "Flashlight", 0x1d2440, 1, { { "", 2, { { "Flashlight", "@torch" }, { "Hold the torch button on the lock screen", "" } } } } },
     { "battery", "Battery", 0x1d2440, 1, { { "Now", 3, { { "Charge", "@pct" }, { "Charging", "@chg" }, { "Battery temperature", "@temp" } } } } },
     { "terminal", "Terminal", 0x1d2440, 1, { { "", 1, { { "Linux apps run in Starbite OS", "" } } } } },
@@ -1488,6 +1518,8 @@ static const appdef APPS[] = {
     { "phone", "Phone", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "messages", "Messages", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "search", "Search", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
+    { "linux", "Linux", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },      /* L3: the open Linux app (shell_linux.inc) */
+    { "store", "App Store", 0x0a6fe8, 1, { { "", 1, { { "", "" } } } } },
     { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "@wifi" }, { "Cellular", "No SIM" }, { "Battery", "@pct" } } },
                                            { "", 5, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" } } },
                                            { "About", 3, { { "Model", "Galaxy S9 (SM-G960F)" }, { "Software", "@ver" }, { "Memory", "4 GB" } } } } },
@@ -1903,6 +1935,17 @@ static void page_camera(dc *d)
  * drawn in the strips; the stopwatch's and the timer's digits and the buttons are three small layers, redrawn
  * only when their text changes (the platform asks sh_next_update when to come back) ---- */
 static int is_app(const char *k);
+/* shell_media.inc: Photos, Files and Music (the microSD card, read only) */
+static int med_is(const char *k);
+static void med_build(void);
+static void med_close(void);
+static int med_layers(tk_layer **o);
+static int med_tick(float dt);
+static int med_moving(void);
+static int med_pending(void);
+static int med_work(uint32_t us, int slow);
+static void med_touch(int ph, float x, float y, float t);
+static int med_set(const char *what, const char *key, float v);
 static float toast_left;
 static tk_layer apsw, aptm, apctl;
 static struct { int sw_run, laps, tm_run, sw_ds, tm_s, ctl_ver, ctl_drawn; float sw_t0, sw_acc, lap_at, tm_end; } CLK = { 0, 0, 0, -1, -1, 1, 0, 0, 0, 0, 0 };
@@ -2041,9 +2084,16 @@ int sh_next_update(float t)
         if (nx < 1) nx = 1;
         if (best < 0 || nx < best) best = nx;
     }
+    if (med_pending() && (best < 0 || best > 4)) best = 4;      /* the card's work, a turn at a time */
     return (int)best;
 }
-int sh_refresh(float t) { now_ms = t; return clk_update(t); }
+int sh_refresh(float t)
+{
+    now_ms = t;
+    int ch = clk_update(t);
+    if (med_pending() && !sh_moving()) ch |= med_work(10000, 1);
+    return ch;
+}
 
 /* ---- P2z: the Calculator (iOS's layout: the display right-aligned, the keys in five rows: grey functions, dark
  * digits, orange operators). The keys are the page; the display a small layer redrawn per key ---- */
@@ -2663,12 +2713,14 @@ static int app_own(int a)
     return !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
            !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
            !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes") ||
-           !tk_strcmp(k, "search") || info_of(k);
+           !tk_strcmp(k, "search") || info_of(k) || med_is(k) || lx_is(k);
 }
 static void own_strip(int a, int i)
 {
     const char *k = APPS[a].k;
     const infopg *inf = info_of(k);
+    if (med_is(k)) { relayer(&appst[i]); return; }      /* shell_media.inc: its own layers (med_build), no strips */
+    if (lx_is(k) && !lx_strips(k)) { relayer(&appst[i]); appst[i].hidden = 1; return; }   /* shell_linux.inc: the same */
     dc d = strip_dc(i, "app-page");
     if (!d.b->px) return;
     if (!tk_strcmp(k, "phone")) page_phone(&d);
@@ -2682,6 +2734,7 @@ static void own_strip(int a, int i)
     else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else page_display(&d); }
     else if (!tk_strcmp(k, "notes")) page_notes(&d);
     else if (!tk_strcmp(k, "search")) page_search(&d);
+    else if (lx_is(k)) lx_page(&d);
     else if (inf) { d_h1(&d, APPS[a].name); d_empty(&d, CONTENT_TOP, EMPTY_BOT, inf->title, inf->line); }
     else page_camera(&d);
     tk_layer_prepare(&appst[i]);
@@ -2690,9 +2743,11 @@ static void own_extras(int a)
 {
     const char *k = APPS[a].k;
     build_apnum();
+    if (med_is(k)) med_build();
     if (!tk_strcmp(k, "calc")) build_calc();
     if (!tk_strcmp(k, "notes")) build_note();
     if (!tk_strcmp(k, "search")) build_search();
+    if (lx_is(k)) lx_build();
     if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
     relink();
 }
@@ -2834,6 +2889,7 @@ static void set_app_rect(arect R)
     appg.hidden = !AP.on;
     place_apicon(R, p);
 }
+static int lx_icon_rect(const char *k, arect *r);
 static arect icon_rect(int a)
 {
     static const char *P1[8] = { "calendar", "weather", "clock", "camera", "photos", "music", "notes", "calc" };
@@ -2842,6 +2898,7 @@ static arect icon_rect(int a)
     const char *k = APPS[a].k;
     for (int i = 0; i < 4; i++) if (!tk_strcmp(DK[i], k)) return (arect){ COL_CX(i) - ICON_PT / 2, DOCK_Y, ICON_PT, ICON_PT, 15 };
     if (!tk_strcmp(k, "search")) return (arect){ 160, 640, 70, 30, 15 };   /* P3g: the Search pill */
+    { arect r; if (lx_icon_rect(k, &r)) return r; }                       /* L3: page 3 */
     for (int i = 0; i < 8; i++) if (!tk_strcmp(P1[i], k)) return (arect){ COL_CX(i % 4) - ICON_PT / 2 + page_x, HOME_TOP1 + ROW_PITCH * (i / 4), ICON_PT, ICON_PT, 15 };
     for (int i = 0; i < 8; i++) if (!tk_strcmp(P2[i], k)) return (arect){ 390 + COL_CX(i % 4) - ICON_PT / 2 + page_x, HOME_TOP2 + ROW_PITCH * (i / 4), ICON_PT, ICON_PT, 15 };
     return (arect){ 164, 370, 62, 62, 15 };
@@ -2856,9 +2913,10 @@ static int app_hit(float x, float y)
     if (y >= 700 && y <= 772 && x >= 15) { int i = (int)((x - 15) / 90); if (i < 4) k = DK[i]; }
     else if (y >= 636 && y <= 674 && x >= 140 && x <= 250) k = "search";
     else {
-        int pg = page_x < -195;
-        float x0 = x - (pg ? 390 + page_x : page_x), top = pg ? HOME_TOP2 : HOME_TOP1;
+        int pg = tk_mini(2, tk_maxi(0, (int)tk_floorf(-page_x / 390 + .5f)));
+        float x0 = x - (390 * pg + page_x), top = pg ? HOME_TOP2 : HOME_TOP1;
         int col = (int)((x0 - 15) / 90), row = (int)((y - top) / ROW_PITCH);
+        if (pg == 2) return lx_hit(x0, y);           /* L3: the Linux page */
         if (x0 >= 15 && y >= top && col < 4 && row < 2 && y - top - row * ROW_PITCH < 83) k = (pg ? P2 : P1)[row * 4 + col];
     }
     if (!k) return -1;
@@ -2885,6 +2943,7 @@ static void app_open(int a)
         ap_pending = 1;
     } else
         build_app_page(a);
+    if (lx_is(APPS[a].k)) lx_open(a);            /* L3: the Linux app (started), or the App Store */
     AP.icon = icon_rect(a);
     AP.from = AP.icon;
     AP.to = FULLR;
@@ -2900,6 +2959,7 @@ static void app_close(float v)
 }
 static void app_finish_close(void)
 {
+    lx_close();                                  /* L3: the window's strips, the store's layers */
     ap_pending = 0;
     AP.on = AP.closing = 0;
     appg.hidden = 1;
@@ -2913,6 +2973,7 @@ static void app_finish_close(void)
     relayer(&apcalc); apcalc.hidden = 1;
     relayer(&apnote); apnote.hidden = 1;
     relayer(&apsrch); apsrch.hidden = 1;
+    med_close();
     tk_bmp_free(&sfield);
     relayer(&apsb); apsb.hidden = 1;
     SR.q[0] = 0; SR.shift = 0; SR.num = 0;                      /* Search opens empty */
@@ -3173,6 +3234,7 @@ static void key_down(int i)
 static int is_app(const char *k) { return AP.on && !tk_strcmp(APPS[AP.a].k, k); }
 static void app_tap(float x, float y)
 {
+    if (lx_tap(x, y)) return;                    /* L3: a Linux app's keyboard, the App Store */
     if (is_app("phone")) {
         if (y >= 718 && y <= 780 && x >= GROUP_X && x < GROUP_X + GROUP_W) {
             int t = tk_mini(3, (int)((x - GROUP_X) / TAB_W));
@@ -3313,6 +3375,9 @@ void sh_cell(const sh_cell_t *c)
 
 #include "shell_wifi.inc"
 #include "shell_cell.inc"
+#include "shell_media_img.inc"
+#include "shell_media.inc"
+#include "shell_linux.inc"
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
@@ -3390,8 +3455,9 @@ static void relink(void)
     link(&root, r, 14);
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb, &apphl };
     link(&appg, ag, 13);
-    tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
-    link(&appc, st, NST);
+    tk_layer *st[NST + 64] = { &appst[0], &appst[1], &appst[2], &appst[3] };
+    int na = NST + med_layers(st + NST);
+    link(&appc, st, na + lx_layers(st + na));    /* L3: shell_linux.inc's */
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
     link(&lockg, lk, 11);
     tk_layer *ls[4 * NG + 7];
@@ -3405,8 +3471,8 @@ static void relink(void)
         tk_layer *q[] = { &Q[i].face, &Q[i].facelit, &Q[i].icon, &Q[i].iconlit, &Q[i].ring };
         link(&Q[i].grp, q, 5);
     }
-    tk_layer *pg[] = { &hparts[1], &hparts[2], &hparts[4] };
-    link(&pages, pg, 3);
+    tk_layer *pg[] = { &hparts[1], &hparts[2], &hparts[4], &hparts[5] };
+    link(&pages, pg, 4);
     tk_layer *h[] = { &hparts[0], &pages, &hsearch[0], &hsearch[1], &hsearch[2], &hparts[3], &icobg, &icofg };
     link(&home, h, 8);
 }
@@ -3588,7 +3654,9 @@ void sh_set(const char *what, const char *key, float v)
         back_to_lock(1);
     } else if (!tk_strcmp(what, "sleep")) {        /* the films: the Power key's fade (v 1) and the wake (v 0) */
         if (v > 0) sh_sleep(0); else sh_wake();
+    } else if (lx_set(what, key, v)) {            /* L3: lapp=, store=, storeq= (shell_linux.inc) */
     } else if (!tk_strcmp(what, "app")) {
+        if (!key[0] && AP.on) app_finish_close();       /* L2: "app=" closes the open app at once */
         for (int a = 0; a < NAPPS; a++)
             if (!tk_strcmp(APPS[a].k, key)) {
                 app_open(a);
@@ -3650,6 +3718,7 @@ void sh_set(const char *what, const char *key, float v)
     } else if (!tk_strcmp(what, "hint")) {
         hint_a = v;
         apply_tweens();
+    } else if (what[0] == 'm' && med_set(what, key, v)) {
     } else if (!tk_strcmp(what, "hold")) {
         int i = key && key[0] == 'e';
         Q[i].grp.sx = Q[i].grp.sy = v > 0 ? 1.22f : 1;
@@ -3660,7 +3729,7 @@ void sh_set(const char *what, const char *key, float v)
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
 enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL,
-       G_CCDRAG, G_FOCUSDRAG };
+       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX };
 static struct {
     int kind, arg, arg2, moved;
     float x0, y0, base, t0;
@@ -3874,6 +3943,8 @@ void sh_touch(int phase, float x, float y, float t)
         if (!locked && AP.on) {
             /* an open app: the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
             if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
+            else if (!sp_app.live && med_is(APPS[AP.a].k)) { T.kind = G_MEDIA; med_touch(0, x, y, t); }
+            else if (!sp_app.live && !AP.closing && lx_touch(0, x, y)) T.kind = G_LINUX;   /* L3 */
             else if (!sp_app.live) {
                 /* a tap on the app's page (a key lights while the finger is on it) */
                 T.kind = G_APPTAP;
@@ -3962,6 +4033,16 @@ void sh_touch(int phase, float x, float y, float t)
         tk_tracker_add(&T.tr, y, t);
         return;
     }
+    if (T.kind == G_LINUX) {                 /* L3, shell_linux.inc: a Linux window, the App Store's list */
+        lx_touch(phase, x, y);
+        if (phase == 2) T.kind = G_NONE;
+        return;
+    }
+    if (T.kind == G_MEDIA) {                 /* shell_media.inc: its lists, the viewer */
+        med_touch(phase, x, y, t);
+        if (phase == 2) T.kind = G_NONE;
+        return;
+    }
     if (phase == 1) {
         float dy = y - T.y0;
         if (tk_fabsf(dy) > 5 || tk_fabsf(x - T.x0) > 5) T.moved = 1;
@@ -4045,7 +4126,7 @@ void sh_touch(int phase, float x, float y, float t)
                 page_dragging = 1;
                 float px = T.base + dx;
                 if (px > 0) px *= .3f;
-                if (px < -390) px = -390 + (px + 390) * .3f;
+                if (px < -780) px = -780 + (px + 780) * .3f;   /* L3: three pages */
                 set_page(px);
             }
             break;
@@ -4176,7 +4257,10 @@ void sh_touch(int phase, float x, float y, float t)
             break;
         }
         if (page_dir == 1) {
-            float v = tk_tracker_v(&T.tr), target = page_x + v * 220 < -195 ? -390 : 0;
+            /* L3: three pages, at most one from where the drag began */
+            float v = tk_tracker_v(&T.tr);
+            int bp = (int)tk_floorf(-T.base / 390 + .5f), tp = (int)tk_floorf(-(page_x + v * 220) / 390 + .5f);
+            float target = -390.0f * tk_mini(tk_mini(bp + 1, 2), tk_maxi(tk_maxi(bp - 1, 0), tp));
             page_dragging = 0;
             tk_spring_start(&sp_page, page_x, target, v * 1000, TK_SPR_ROWS);
         }
@@ -4291,6 +4375,8 @@ int sh_tick(float dt, float t)
         mv = 1;
     }
     mv |= ico_step(dt);                          /* P3p: the pressed icon */
+    mv |= med_tick(dt);
+    mv |= lx_moving();                           /* L3: the App Store's list under the finger */
     if (em_t < 1) {
         em_t = tk_minf(1, em_t + dt / .7f);
         em_step(tk_bezier(.25f, .1f, .25f, 1, em_t));
@@ -4550,7 +4636,7 @@ int sh_moving(void)
             T.kind == G_APP || sp_app.live || booting || toast_t < 1 || em_t < 1 || T.kind == G_CCEM ||
             T.kind == G_CCCELL || CF.down || CF.a != CF.at || SL.dir || T.kind == G_CCDRAG || T.kind == G_FOCUSDRAG;
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
-    m |= sp_focus.live || sp_thumb.live;
+    m |= sp_focus.live || sp_thumb.live || med_moving() || lx_moving();
     m |= IP.on && IP.t < 1;
     return m;
 }

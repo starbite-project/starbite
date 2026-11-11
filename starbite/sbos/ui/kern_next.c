@@ -332,7 +332,7 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
-    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3q");     /* P2y: the apps' live values */
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3r");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);
         sh_alarm(on, ah, am);
@@ -1035,9 +1035,16 @@ static void bake_step(void)
     log_mb("UI heap with the caches: ", tk_heap_used());
 }
 
+int gwin_now(void);                                  /* L2 + L3: starbite/guest/next/gwin.c */
+int next_ready(void) { return ready; }               /* L2: the shell baked (uitest.c's next-linux variant) */
 void next_kdraw(void)
 {
     if (!ready && !baking) { ui_kdraw(); return; }
+    /* L2 + L3: Linux apps: a state change, the catalog or the store, or a new frame (rows copied) drawn at once */
+    if (ready && gwin_now() && !ticking && K.screen_on) {
+        tk_comp_frame(&comp, 0, 0);
+        present();
+    }
     if (!K.screen_on) return;
     if (need_full) {
         need_full = 0;
@@ -1121,6 +1128,58 @@ void next_kminute(void)
         present();
         sh_idle();
     }
+}
+
+/* Photos, Files, Music (shell_media.inc): the card's exFAT partition through kern/files.c, read only. The self test
+ * never touches the card: there it is "no card". */
+int sh_card_status(const char **why)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    if (why) *why = "";
+    return SH_CARD_NONE;
+#else
+    int s = kfile_state(why);
+    return s > 0 ? SH_CARD_READY : !s ? SH_CARD_MOUNTING : s == -1 ? SH_CARD_NONE : SH_CARD_ERROR;
+#endif
+}
+int sh_card_mount(void)
+{
+#ifndef SBOS_SELFTEST_NEXT
+    hw_wdt_feed();
+    kfile_mount();
+#endif
+    return sh_card_status(0);
+}
+int sh_card_list(const char *path, sh_dirent_t *out, int max, int first)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)path; (void)out; (void)max; (void)first;
+    return -1;
+#else
+    static struct kfile_ent e[32];
+    int k = 0;
+    while (k < max) {
+        int want = max - k < 32 ? max - k : 32, n = kfile_list_at(path, e, want, first + k);
+        if (n < 0) return -1;
+        for (int i = 0; i < n; i++, k++) {
+            tk_memcpy(out[k].name, e[i].name, sizeof out[k].name);
+            out[k].size = e[i].size;
+            out[k].dir = e[i].dir;
+            out[k].date = e[i].mtime;
+        }
+        if (n < want) break;
+    }
+    return k;
+#endif
+}
+int sh_card_read(const char *path, uint64_t off, void *dst, uint32_t len)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)path; (void)off; (void)dst; (void)len;
+    return -1;
+#else
+    return kfile_read_at(path, off, dst, len);
+#endif
 }
 
 /* slide to start (shell_lock.c): the loader's one-shot next boot */

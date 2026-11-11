@@ -425,6 +425,14 @@ void kui_aod_frame(void);           /* draws and sends the dim clock's picture *
 int kfile_read(const char *path, void *dst, uint32_t cap);
 /* 1.2-alpha21: entries [first, first + max) of a folder: stored n, *total all (read only) */
 int kfile_list(const char *path, struct sbos_dirent *out, int max, int first, int *total);
+/* Next's Photos / Files / Music (read only): the state without touching the card (1 mounted, 0 not tried, -1 no card,
+ * -2 a card that cannot be read; *why in words), the mount (blocks: from an idle turn), a folder of any size a page
+ * at a time with dates (exFAT's stamp, see exfat.h), a file's bytes from an offset (how many were read) */
+struct kfile_ent { char name[128]; uint64_t size; int32_t dir; uint32_t mtime; };
+int kfile_state(const char **why);
+int kfile_mount(void);
+int kfile_list_at(const char *path, struct kfile_ent *out, int max, int first);
+int kfile_read_at(const char *path, uint64_t off, void *dst, uint32_t len);
 extern int sos_led_on;              /* settings: the LED flashes with SOS */
 
 /* apps (app.c; struct kapp in kapp.h) */

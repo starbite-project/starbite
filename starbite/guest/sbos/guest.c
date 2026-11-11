@@ -71,15 +71,17 @@ static uint32_t seq_seen = 0, seq_blit = 0;
 static uint32_t blits, blit_ms_max, rows_copied;   /* the view's frames drawn, its slowest copy, rows copied */
 static uint64_t t_hidden, t_screen_off;
 static int sb_up;
+static int kept;                            /* L3: guest_keep: no idle stop */
 /* 1.2-alpha3: two guests from the same service: the app demo (the S9 Linux, 720 x 1440 at 2x) and the terminal
  * (the guest kernel of its own, a shell on fbcon in Terminus 16 x 32, 720 x 1060 at 2x above Starbite's keyboard) */
 static int mode = GUEST_APP, term_ok;
-static const char *const names[2][3] __attribute__((unused)) = {
+static const char *const names[3][3] __attribute__((unused)) = {
     {GUEST_STORE_IMAGE, GUEST_STORE_DTB, GUEST_STORE_RD},
     {GUEST_TERM_IMAGE, GUEST_TERM_DTB, GUEST_TERM_RD},
+    {GUEST_WL_IMAGE, GUEST_WL_DTB, GUEST_WL_RD},
 };
-static unsigned surf_w(void) { return mode == GUEST_TERM ? GUEST_TERM_W : SW; }
-static unsigned surf_h(void) { return mode == GUEST_TERM ? GUEST_TERM_H : SH; }
+static unsigned surf_w(void) { return mode == GUEST_TERM ? GUEST_TERM_W : mode == GUEST_WL ? GUEST_WL_W : SW; }
+static unsigned surf_h(void) { return mode == GUEST_TERM ? GUEST_TERM_H : mode == GUEST_WL ? GUEST_WL_H : SH; }
 int guest_mode(void) { return mode; }
 int guest_scale(void) { return 2; }      /* (the terminal: a 16 x 32 font instead of 8 x 16 at 4x) */
 int guest_term_ok(void) { return term_ok; }
@@ -95,6 +97,12 @@ int guest_state(void) { return st; }
 const char *guest_why(void) { return why; }
 unsigned guest_db_host(void) { return GUEST_DB_HOST; }
 int guest_shown(void) { return shown && st == GUEST_RUNNING; }
+void guest_keep(int on)
+{
+    if (kept && !on && !shown)
+        t_hidden = sb_ms();                 /* the 60 s from now (an install that ran for minutes) */
+    kept = on ? 1 : 0;
+}
 
 #ifndef SB_HOST
 /* ===================================== the guest (phone, QEMU) ===================================== */
@@ -150,9 +158,11 @@ static int m3_prep(void)
     hw_m3_core_on(4, 1);
     return 1;
 }
+#include "guest-card.h"                     /* sbblk: the guest's block devices from files on the microSD card */
 static const struct sbg_os shim = {
     .ms = ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
     .m3_prep = m3_prep,
+    .blk_io = gcard_io,
 };
 
 static uint8_t me_if;
@@ -168,6 +178,7 @@ static void cfg_init(void)
         .host_lines = {0},                  /* the guest kernel has the shared-distributor patch */
         .repair = 0,
         .boot_timeout_ms = 30000, .stop_timeout_ms = 5000,
+        .v2 = mode == GUEST_WL,             /* L3: the catalog, the store and the icons (sbshm.h contract v2) */
     };
     sbg_init(&shim, &cfg, me_if ? me_if : 1);
 }
@@ -189,7 +200,7 @@ int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED ? 1 : hw_
 int guest_available_mode(int m)
 {
     struct store_ent e;
-    m = m == GUEST_TERM ? GUEST_TERM : GUEST_APP;
+    m = m == GUEST_TERM || m == GUEST_WL ? m : GUEST_APP;
     return store_find(names[m][0], &e) && store_find(names[m][1], &e) && store_find(names[m][2], &e);
 }
 int guest_available(void) { return guest_available_mode(GUEST_APP); }
@@ -205,7 +216,7 @@ int guest_start(void) { return guest_start_mode(GUEST_APP); }
 
 int guest_start_mode(int m)
 {
-    m = m == GUEST_TERM ? GUEST_TERM : GUEST_APP;
+    m = m == GUEST_TERM || m == GUEST_WL ? m : GUEST_APP;
     if (!sb_up)
         return -1;
     if (st != GUEST_OFF && st != GUEST_FAILED)
@@ -219,7 +230,8 @@ int guest_start_mode(int m)
         return -3;
     }
     if (!store_find(names[m][0], &ld_i) || !store_find(names[m][1], &ld_d) || !store_find(names[m][2], &ld_r)) {
-        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" : "the Linux files are not in the store";
+        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" :
+              m == GUEST_WL ? "the Linux apps' files are not in the store" : "the Linux files are not in the store";
         return -4;
     }
     why = "";
@@ -236,6 +248,7 @@ int guest_start_mode(int m)
 static int load_and_start(void)
 {
     cfg_init();                             /* this mode's surface */
+    gcard_offer();                          /* the card's files as block devices, for this start (guest-card.h) */
     /* the bounce window below 4 GiB: the Image, then the DTB and the initrd, each at a MiB boundary */
     uintptr_t pi = G_BOUNCE, pd = up_mib(pi + ld_i.size), pr = up_mib(pd + ld_d.size);
     if (ld_i.size > G_LINUX_SIZE || ld_d.size > G_LINUX_SIZE || ld_r.size > G_LINUX_SIZE ||
@@ -356,8 +369,8 @@ void guest_timer(unsigned id)
         if (h->surf_seq != seq_seen && shown)
             ui_mark_dirty();
         uint64_t now = sb_ms();
-        if ((!shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
-            (!screen && t_screen_off && now - t_screen_off > IDLE_STOP_MS)) {
+        if (!kept && ((!shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
+                      (!screen && t_screen_off && now - t_screen_off > IDLE_STOP_MS))) {
             sb_log("guest: unused for 60 s: stopping (the M3 cluster off)");
             guest_stop();
         }
@@ -383,7 +396,17 @@ int guest_frame_new(void)
 /* the guest's front buffer at 2x (app: 1440 x 2880; terminal: 1440 x 2120) into the back buffer at (x0, y0).
  * 1.2-alpha3: damage per row (sbshm.h): only the rows newer than the frame drawn last (all after a show, when
  * seq_blit is 0, or when the guest keeps no table). Returns the rows copied; *py0 / *py1 the panel rows touched. */
+static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0,
+                    int *py1);
 int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0, int *py1)
+{
+    return blit_any(0, back, stride_px, x0, y0, py0, py1);
+}
+int guest_blit_rows(uint32_t *const *rows, int *py0, int *py1) { return blit_any(rows, 0, 0, 0, 0, py0, py1); }
+/* the target's row r: the table's (L3), else the back buffer's at (x0, y0 + r) */
+#define TROW(r) (rowt ? rowt[r] : back + (uintptr_t)(y0 + (r)) * stride_px + x0)
+static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0,
+                    int *py1)
 {
     const volatile uint32_t *px;
     uint32_t stride;
@@ -406,7 +429,7 @@ int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int
         if (rows && drawn && !sbshm_row_newer(rows[y], drawn))
             continue;
         const volatile uint32_t *s = (const volatile uint32_t *)((uintptr_t)px + (uintptr_t)y * stride);
-        uint64_t *d = (uint64_t *)(back + (uintptr_t)(y0 + k * y) * stride_px + x0);
+        uint64_t *d = (uint64_t *)TROW(k * y);
         for (uint32_t x = 0; x < w; ++x) {
             uint64_t c = s[x] | 0xff000000U;
             c |= c << 32;
@@ -414,7 +437,7 @@ int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int
                 d[x * (k / 2) + i] = c;
         }
         for (uint32_t r = 1; r < k; ++r) {  /* the same row k times */
-            uint64_t *e = (uint64_t *)(back + (uintptr_t)(y0 + k * y + r) * stride_px + x0);
+            uint64_t *e = (uint64_t *)TROW(k * y + r);
             for (uint32_t x = 0; x < w * k / 2; ++x)
                 e[x] = d[x];
         }
@@ -506,14 +529,14 @@ int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED ? 1 : fak
 int guest_available_mode(int m)
 {
     const char *g = getenv("SBOS_HOST_GUEST");
-    return g && (m != GUEST_TERM || g[0] != 'a');
+    return g && (m == GUEST_APP || g[0] != 'a');
 }
 int guest_available(void) { return guest_available_mode(GUEST_APP); }
 int guest_start(void) { return guest_start_mode(GUEST_APP); }
 
 int guest_start_mode(int m)
 {
-    m = m == GUEST_TERM ? GUEST_TERM : GUEST_APP;
+    m = m == GUEST_TERM || m == GUEST_WL ? m : GUEST_APP;
     if (!sb_up || (st != GUEST_OFF && st != GUEST_FAILED))
         return -1;
     if (heater_m3_busy()) {
@@ -521,7 +544,8 @@ int guest_start_mode(int m)
         return -2;
     }
     if (!guest_available_mode(m)) {
-        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" : "the Linux files are not in the store";
+        why = m == GUEST_TERM ? "the terminal's Linux files are not in the store" :
+              m == GUEST_WL ? "the Linux apps' files are not in the store" : "the Linux files are not in the store";
         return -4;
     }
     mode = m;
@@ -582,8 +606,8 @@ void guest_timer(unsigned id)
             fake_seq++;
             ui_mark_dirty();
         }
-        if ((!shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
-            (!screen && t_screen_off && now - t_screen_off > IDLE_STOP_MS)) {
+        if (!kept && ((!shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
+                      (!screen && t_screen_off && now - t_screen_off > IDLE_STOP_MS))) {
             sb_log("guest: unused for 60 s: stopping (the M3 cluster off)");
             guest_stop();
         }
@@ -601,7 +625,16 @@ void guest_show(int on)
 
 int guest_frame_new(void) { return guest_shown() && (uint32_t)fake_seq != seq_blit; }
 
+static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0,
+                    int *py1);
 int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0, int *py1)
+{
+    return blit_any(0, back, stride_px, x0, y0, py0, py1);
+}
+int guest_blit_rows(uint32_t *const *rows, int *py0, int *py1) { return blit_any(rows, 0, 0, 0, 0, py0, py1); }
+#define TROW(r) (rowt ? rowt[r] : back + (uintptr_t)(y0 + (r)) * stride_px + x0)
+static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0,
+                    int *py1)
 {
     *py0 = *py1 = -1;
     if (!guest_shown())
@@ -610,7 +643,7 @@ int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int
     ++blits;
     uint32_t k = (uint32_t)guest_scale(), w = surf_w(), hh = surf_h();
     for (uint32_t y = 0; y < k * hh; ++y) {
-        uint32_t *d = back + (uintptr_t)(y0 + y) * stride_px + x0;
+        uint32_t *d = TROW(y);
         uint32_t sy = y / k;
         for (uint32_t x = 0; x < k * w; ++x) {
             uint32_t sx = x / k, c;
@@ -663,7 +696,7 @@ int guest_type(char c)
         int hit = 0;
         for (int i = 0; typed[i]; ++i)
             hit |= sb_prefix(typed + i, "STARBITE-TERM-OK");
-        if (hit && mode == GUEST_TERM) {
+        if (hit && mode != GUEST_APP) {
             term_ok = 1;
             sb_log("linux| STARBITE-TERM-OK (fake)");
         }

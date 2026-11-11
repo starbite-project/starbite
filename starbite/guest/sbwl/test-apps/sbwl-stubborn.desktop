@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Stubborn
+Comment=no window, ignores SIGTERM: APP_CLOSE must SIGKILL it at 6 s
+Exec=sh -c "trap '' TERM; exec sleep 600"
+Icon=dialog-warning

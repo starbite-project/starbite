@@ -223,6 +223,9 @@ if [ -n "$PAK" ]; then
         "${CROSS}gcc" $NFLAGS "$ui/$f.c" -o "$ob/n_$f.o"
         nui="$nui $ob/n_$f.o"
     done
+    # L2 + L3 (docs/STARBITE-LINUX-APPS.md): Linux apps and the App Store (the platform side of shell.h's sh_linux_*)
+    "${CROSS}gcc" $NFLAGS "$root/starbite/guest/next/gwin.c" -o "$ob/n_gwin.o"
+    nui="$nui $ob/n_gwin.o"
     "${CROSS}gcc" $NFLAGS -DSBOS_SELFTEST_NEXT "$ui/kern_next.c" -o "$ob/n_kern_next_st.o"
     "${CROSS}gcc" $CFLAGS -DSBTK_PACK="\"$PAK\"" "$ui/next_pack.S" -o "$ob/n_pack.o"
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_NEXT "$here/kern/main.c" -o "$ob/k_main_next.o"
@@ -232,6 +235,9 @@ if [ -n "$PAK" ]; then
     # wifi-sbos-next: Next with the silent Wi-Fi self test (the TLS self-check, one scan, no join; then recovery)
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_WIFI "$here/kern/uitest.c" -o "$ob/k_uitest_nwifi.o"
     nwobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_nwifi.o#")
+    # L2: Next with the Linux self test (the Terminal, foot on the M3 cores, a typed command; then recovery)
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_LINUX "$here/kern/uitest.c" -o "$ob/k_uitest_nlinux.o"
+    nlobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_nlinux.o#")
 else
     echo "sbos: no build/sbtk/sbtk-phone.pak: the starbite-next images are not built" >&2
 fi
@@ -343,8 +349,8 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
 "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
 if [ -n "$nobjs" ]; then
-    for v in next next-selftest next-wifitest; do
-        case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; *) vo=$nwobjs ;; esac
+    for v in next next-selftest next-wifitest next-linuxtest; do
+        case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;; *) vo=$nwobjs ;; esac
         "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
         und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)
         if [ -n "$und" ]; then

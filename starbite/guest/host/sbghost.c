@@ -13,6 +13,13 @@ static uint32_t log_pos;
 static int log_seen;
 static char line[160];
 static unsigned line_n;
+/* contract v2: what the guest said last */
+static unsigned v2_changes;
+static uint32_t v2_window = SBSHM_NONE, v2_purpose;
+static int v2_has_window, v2_text;
+/* sbblk: the host's own ring indices (never read back from the region: the guest can write there) */
+static uint32_t blk_tail, blk_head;
+static int blk_ring_bad;
 
 #define SHM(off) ((uintptr_t)(cfg.shm_base + (off)))
 #define HDR ((volatile struct sbshm_hdr *)SHM(SBSHM_HDR_OFF))
@@ -158,6 +165,15 @@ void sbg_init(const struct sbg_os *o, const struct sbg_cfg *c, uint8_t cpuif)
     st = (struct sbg_stats){0};
 }
 
+void sbg_set_blk(const struct sbshm_blkdev *blk)
+{
+    for (unsigned i = 0; i < SBSHM_BLK_DEVS; ++i) {
+        cfg.blk[i] = blk ? blk[i] : (struct sbshm_blkdev){0};
+        if (cfg.blk[i].flags & SBSHM_BLKDEV_PRESENT)
+            cfg.v2 = 1;
+    }
+}
+
 volatile struct sbshm_hdr *sbg_hdr(void) { return HDR; }
 const struct sbg_stats *sbg_stats(void)
 {
@@ -210,8 +226,25 @@ static int load(const void *image, uint64_t image_size, const void *dtb, uint64_
         fail("the surface does not fit the shared region");
         return -4;
     }
+    if (SBSHM_SURF_OFF + 2 * surf > (cfg.v2 ? SBSHM_CAT_OFF : cfg.shm_size)) {
+        fail("the surface does not fit below the v2 tables");
+        return -4;
+    }
     zero_words(SHM(0), SBSHM_SURF_OFF);              /* header, rings, the ramoops zone: a fresh log */
     zero_words(SHM(SBSHM_SURF_OFF), 2 * surf);
+    v2_changes = 0;
+    v2_window = SBSHM_NONE;
+    v2_has_window = v2_text = 0;
+    v2_purpose = 0;
+    if (cfg.v2) {                                   /* the tables empty (seq 0, n 0); the block devices offered */
+        zero_words(SHM(SBSHM_CAT_OFF), sizeof(struct sbshm_cat));
+        zero_words(SHM(SBSHM_STORE_OFF), sizeof(struct sbshm_store));
+        zero_words(SHM(SBSHM_BLK_OFF), sizeof(struct sbshm_blk));
+        if (os->blk_io)                             /* no server, no devices */
+            copy_words(SHM(SBSHM_BLK_OFF), cfg.blk, sizeof(cfg.blk));
+    }
+    blk_tail = blk_head = 0;
+    blk_ring_bad = 0;
     img_pa = cfg.linux_base + text_off;
     if (!placed) {
         copy_words((uintptr_t)img_pa, image, image_size);
@@ -221,7 +254,7 @@ static int load(const void *image, uint64_t image_size, const void *dtb, uint64_
     }
     volatile struct sbshm_hdr *h = HDR;
     h->magic = SBSHM_MAGIC;
-    h->version = SBSHM_VERSION;
+    h->version = cfg.v2 ? SBSHM_VERSION_V2 : SBSHM_VERSION;
     h->hdr_size = sizeof(struct sbshm_hdr);
     h->boot_count = st.boots;
     h->gicd_base = cfg.gicd;
@@ -319,7 +352,7 @@ static void log_stream(void)
     }
 }
 
-static int put(uint16_t type, uint32_t a, uint32_t b, int32_t x, int32_t y)
+static int put_c(uint16_t type, uint32_t a, uint32_t b, uint32_t c, int32_t x, int32_t y)
 {
     if (st.state != SBG_RUNNING && !(type == SBG_MSG_STOP && st.state == SBG_BOOTING))
         return 0;
@@ -327,6 +360,7 @@ static int put(uint16_t type, uint32_t a, uint32_t b, int32_t x, int32_t y)
     m.type = type;
     m.a = a;
     m.b = b;
+    m.c = c;
     m.x = x;
     m.y = y;
     m.t_ms = (uint32_t)os->ms();
@@ -338,6 +372,8 @@ static int put(uint16_t type, uint32_t a, uint32_t b, int32_t x, int32_t y)
     }
     return 1;
 }
+
+static int put(uint16_t type, uint32_t a, uint32_t b, int32_t x, int32_t y) { return put_c(type, a, b, 0, x, y); }
 
 int sbg_touch(uint32_t slot, uint32_t phase, int32_t x, int32_t y)
 {
@@ -372,6 +408,59 @@ int sbg_stop(void)
 
 void sbg_doorbell(void) { /* the poll that follows reads the ring; the count is the host's own */ }
 
+/* ---- contract v2 ------------------------------------------------------------------------------------------ */
+unsigned sbg_changes(void)
+{
+    unsigned c = v2_changes;
+    v2_changes = 0;
+    return c;
+}
+const volatile struct sbshm_cat *sbg_cat(void) { return (const volatile struct sbshm_cat *)SHM(SBSHM_CAT_OFF); }
+const volatile struct sbshm_store *sbg_store(void) { return (const volatile struct sbshm_store *)SHM(SBSHM_STORE_OFF); }
+const volatile uint32_t *sbg_icon(uint32_t i)
+{
+    return i < SBSHM_ICONS_MAX ? (const volatile uint32_t *)SHM(SBSHM_ICON_OFF + i * SBSHM_ICON_BYTES) : 0;
+}
+uint32_t sbg_window(int *has_window)
+{
+    if (has_window)
+        *has_window = v2_has_window;
+    return v2_window;
+}
+int sbg_text_focus(uint32_t *purpose)
+{
+    if (purpose)
+        *purpose = v2_purpose;
+    return v2_text;
+}
+int sbg_launch(uint32_t idx, uint32_t cat_seq) { return put(SBG_MSG_LAUNCH, idx, cat_seq, 0, 0); }
+int sbg_activate(uint32_t idx) { return put(SBG_MSG_ACTIVATE, idx, 0, 0, 0); }
+int sbg_app_close(uint32_t idx) { return put(SBG_MSG_APP_CLOSE, idx, 0, 0, 0); }
+int sbg_viewport(uint32_t rows, uint32_t width) { return put(SBG_MSG_VIEWPORT, rows, width, 0, 0); }
+int sbg_pkg(uint32_t idx, uint32_t op, uint32_t store_seq) { return put_c(SBG_MSG_PKG, idx, op, store_seq, 0, 0); }
+int sbg_text(const char *s)
+{
+    while (*s) {
+        uint8_t b[8] = {0};
+        unsigned n = 0;
+        while (s[n]) {                              /* whole UTF-8 characters, up to 8 bytes */
+            unsigned c = (uint8_t)s[n], len = c < 0x80 ? 1 : c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : c >= 0xc0 ? 2 : 1;
+            if (n + len > 8)
+                break;
+            for (unsigned k = 0; k < len && s[n]; ++k, ++n)
+                b[n] = (uint8_t)s[n];
+        }
+        if (!n)
+            return 0;
+        uint32_t a = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+        uint32_t w = (uint32_t)b[4] | (uint32_t)b[5] << 8 | (uint32_t)b[6] << 16 | (uint32_t)b[7] << 24;
+        if (!put_c(SBG_MSG_TEXT, a, w, n, 0, 0))
+            return 0;
+        s += n;
+    }
+    return 1;
+}
+
 const volatile uint32_t *sbg_rows(void)
 {
     return HDR->rows_valid ? (const volatile uint32_t *)SHM(SBSHM_ROWS_OFF) : 0;
@@ -393,6 +482,121 @@ int sbg_frame(uint32_t *seq, const volatile uint32_t **pixels, uint32_t *stride_
     return 1;
 }
 
+/* ---- sbblk: serve the guest's block requests (sbshm.h "v2: sbblk") -----------------------------------------
+ * In ring order, a bounded number per poll. Per request: read req_head, dmb, copy the entry (once: the guest
+ * could change it under us), check it against cfg.blk (never against the table in the region), run os->blk_io on
+ * the request's slot, write the completion entry, dmb, then req_tail and done_head; one doorbell per batch. */
+static int32_t blk_one(const struct sbshm_blkreq *r)
+{
+    if (r->dev >= SBSHM_BLK_DEVS || !(cfg.blk[r->dev].flags & SBSHM_BLKDEV_PRESENT))
+        return -SBG_ENODEV;
+    const struct sbshm_blkdev *d = &cfg.blk[r->dev];
+    if (r->op == SBG_BLK_FLUSH) {
+        if (d->flags & SBSHM_BLKDEV_RO)
+            return 0;
+        int e = os->blk_io(r->dev, SBG_BLK_FLUSH, 0, 0, 0);
+        if (!e)
+            st.blk_flushes++;
+        return e;
+    }
+    if (r->op != SBG_BLK_READ && r->op != SBG_BLK_WRITE)
+        return -SBG_EINVAL;
+    if (r->data_slot >= SBSHM_BLK_SLOTS || !r->count || r->count > SBSHM_BLK_SLOT / 512U)
+        return -SBG_EINVAL;
+    if (r->sector >= d->sectors || r->count > d->sectors - r->sector)
+        return -SBG_EINVAL;
+    if (r->op == SBG_BLK_WRITE && (d->flags & SBSHM_BLKDEV_RO))
+        return -SBG_EROFS;
+    int e = os->blk_io(r->dev, r->op, r->sector, r->count,
+                       (void *)SHM(SBSHM_BLKDATA_OFF + (uint64_t)r->data_slot * SBSHM_BLK_SLOT));
+    if (!e) {
+        if (r->op == SBG_BLK_READ) {
+            st.blk_reads++;
+            st.blk_rd_sectors += r->count;
+        } else {
+            st.blk_writes++;
+            st.blk_wr_sectors += r->count;
+        }
+    }
+    return e > 0 ? -SBG_EIO : e;
+}
+
+static void blk_serve(void)
+{
+    if (!cfg.v2 || !os->blk_io || blk_ring_bad)
+        return;
+    volatile struct sbshm_blk *b = (volatile struct sbshm_blk *)SHM(SBSHM_BLK_OFF);
+    uint32_t max = cfg.blk_per_poll ? cfg.blk_per_poll : SBG_BLK_PER_POLL;
+    uint32_t max_ms = cfg.blk_poll_ms ? cfg.blk_poll_ms : SBG_BLK_POLL_MS, n = 0;
+    uint64_t t0 = os->ms(), t1 = t0;
+    for (;;) {
+        uint32_t head = b->req_head;
+        if (head == blk_tail)
+            break;
+        if (head - blk_tail > SBSHM_BLK_RING) {     /* not a ring any more: stop serving, say so once */
+            blk_ring_bad = 1;
+            st.blk_errors++;
+            struct tb t = {.n = 0};
+            t_s(&t, "guest: sbblk: the request ring is broken (req_head ");
+            t_u(&t, head);
+            t_s(&t, ", req_tail ");
+            t_u(&t, blk_tail);
+            t_s(&t, "): block service stopped");
+            say(&t);
+            break;
+        }
+        if (blk_head - b->done_tail >= SBSHM_BLK_RING)      /* the guest has not reaped: wait for it */
+            break;
+        if (n >= max || (n && t1 - t0 >= max_ms)) {
+            st.blk_capped++;
+            break;
+        }
+        sbshm_dmb();
+        struct sbshm_blkreq r;
+        const volatile uint32_t *s = (const volatile uint32_t *)&b->req[blk_tail & (SBSHM_BLK_RING - 1)];
+        uint32_t *d = (uint32_t *)&r;
+        for (unsigned i = 0; i < sizeof(r) / 4; ++i)
+            d[i] = s[i];
+        r.status = blk_one(&r);
+        r.pad = 0;
+        if (r.status) {
+            st.blk_errors++;
+            if (st.blk_errors <= 8) {
+                struct tb t = {.n = 0};
+                t_s(&t, "guest: sbblk: dev ");
+                t_u(&t, r.dev);
+                t_s(&t, " op ");
+                t_u(&t, r.op);
+                t_s(&t, " sector ");
+                t_u(&t, r.sector);
+                t_s(&t, " + ");
+                t_u(&t, r.count);
+                t_s(&t, ": error -");
+                t_u(&t, (uint64_t)-(int64_t)r.status);
+                say(&t);
+            }
+        }
+        volatile uint32_t *c = (volatile uint32_t *)&b->done[blk_head & (SBSHM_BLK_RING - 1)];
+        for (unsigned i = 0; i < sizeof(r) / 4; ++i)
+            c[i] = d[i];
+        sbshm_dmb();                                /* the slot's data and the entry, then the indices */
+        b->req_tail = ++blk_tail;
+        b->done_head = ++blk_head;
+        ++n;
+        t1 = os->ms();
+    }
+    if (!n)
+        return;
+    sbshm_dmb();
+    if (cfg.db_guest)
+        wr32((uintptr_t)cfg.gicd + 0x200 + 4 * (cfg.db_guest / 32), 1U << (cfg.db_guest % 32));   /* ISPENDR */
+    st.blk_doorbells++;
+    if (n > st.blk_batch_max)
+        st.blk_batch_max = n;
+    if (t1 - t0 > st.blk_poll_ms_max)
+        st.blk_poll_ms_max = (uint32_t)(t1 - t0);
+}
+
 void sbg_poll(void)
 {
     if (st.state == SBG_OFF || st.state == SBG_LOADED)
@@ -402,6 +606,7 @@ void sbg_poll(void)
     h->host_time_ms = t;
     lines_check();
     log_stream();
+    blk_serve();
     struct sbshm_msg m;
     while (sbshm_get(G2H, &m)) {
         st.msgs_in++;
@@ -429,6 +634,20 @@ void sbg_poll(void)
             struct tb tb = {.n = 0};
             t_s(&tb, "guest: BYE");
             say(&tb);
+        } else if (m.type == SBG_MSG_CATALOG) {
+            v2_changes |= SBG_CH_CATALOG;
+        } else if (m.type == SBG_MSG_STORE) {
+            v2_changes |= SBG_CH_STORE;
+        } else if (m.type == SBG_MSG_PKG_STATUS) {
+            v2_changes |= SBG_CH_PKG;
+        } else if (m.type == SBG_MSG_WINDOW) {
+            v2_window = m.a;
+            v2_has_window = m.b != 0;
+            v2_changes |= SBG_CH_WINDOW;
+        } else if (m.type == SBG_MSG_TEXT_FOCUS) {
+            v2_text = m.a != 0;
+            v2_purpose = m.b;
+            v2_changes |= SBG_CH_TEXT;
         }
     }
     if (st.state == SBG_BOOTING && t - t_start > cfg.boot_timeout_ms) {
