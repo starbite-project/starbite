@@ -1,6 +1,7 @@
 #!/bin/sh
 # Apple-on-S9 milestone test as a chained test loader (no BOOT write), docs/APPLE-S9-DRIVERS.md Part 5:
 #   sh tools/apple/m1-chain.sh PAYLOAD.xnu OUT.img [WDT_S]
+#   SHIM_REV=HEAD sh tools/apple/m1-chain.sh ...      build the loader from a commit (others may be editing shim/)
 #   sh tools/apple/m1-chain.sh --read OUT.img          a crumb reader: prints the last test run's breadcrumbs
 #                                                      (ramoops page 0xFED13000) into pmsg, then reboots normally
 # 1. builds the loader (shim/starlte, from a private copy of the tree) with -DSTAR_CHAIN_AUTOBOOT: it boots the
@@ -15,7 +16,11 @@ payload=$1 out=$2 wdt=${3:-60}
 [ "$payload" = --read ] || head -c 8 "$payload" | grep -q SWEETXNU || { echo "$payload: not a SWEETXNU payload"; exit 1; }
 work=build/apple-chain-$$          # a new folder per run: the VM's view of a just-deleted one can be stale
 rm -rf "$work"; mkdir -p "$work"
-cp -R shim "$work/shim"
+if [ -n "${SHIM_REV:-}" ]; then              # SHIM_REV=HEAD: the committed loader, not the working tree
+    git archive "$SHIM_REV" shim | tar -x -C "$work"
+else
+    cp -R shim "$work/shim"
+fi
 rm -rf "$work/shim/starlte/out"
 limactl shell starbite -- env EXTRA_CFLAGS=-DSTAR_CHAIN_AUTOBOOT sh "$PWD/$work/shim/starlte/build.sh" | tail -1
 if [ "$payload" = --read ]; then
