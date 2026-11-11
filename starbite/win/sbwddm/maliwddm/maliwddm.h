@@ -314,6 +314,9 @@ struct _MW_ADAPTER {
     struct { ULONG64 Va, FreedVa; ULONG Status, Js, Ms, AgoMs, FreedPages, Creator[2], Kind, Submits; } Faults[16];
     volatile LONG FaultCount;
     LONG FaultLogged;
+    /* T41: GPU hang recovery */
+    ULONG64 SubStart;                       /* when the head submission's first chain started */
+    ULONG TdrEngineResets, TdrAdapterResets, TdrQueriedHung;
 };
 
 /* ---- trace: Seen_<ddi>, Fail_<ddi> in the device's registry key ---- */

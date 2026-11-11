@@ -1855,6 +1855,31 @@ Every app failure must be a removed device that the app or DWM recovers from.
   - Next: a control run of plain T38 with the same free space.
   - The ledger itself recorded all three crashes correctly across 6 boots (`build/win/results-t40a/crash.log`).
 
+### 6.50 The T38 control crashed too: the workload hangs the GPU, and our TDR handling turns it into a bugcheck (T41)
+
+- **The control:** plain T38 (the user's default, `build/win/results-t38control`) hit the same 0x7E,
+  dxgmms1+0x41cd4. So the ledger and T39's other changes are innocent.
+- **The trigger is in the workload,** most likely Widgets:
+  - this morning (0.43 GB free) its board showed grey placeholders only; now (1.6 GB) its web content loads;
+  - the crash time matches the sweep's first steps;
+  - Widgets is WebView2 (Chromium/ANGLE/D3D11);
+  - the user's WER history has Widgets (WebExperience) crashes.
+- **Why a hang ended in a bugcheck:**
+  - our chain timeout (2000 ms) raced Windows' TDR (2 s);
+  - `MwResetEngine` dropped the queue but returned `LastAbortedFenceId = LastCompletedFence`, so dxgkrnl's packet
+    queue no longer matched ours;
+  - `MwQueryEngineStatus` always said "responsive".
+- **T41 (sbwddm 21950bef):**
+  - chain timeout 750 ms, plus a 1500 ms submission budget (`SubStart`), so we hard-stop and complete the fence
+    before Windows' TDR;
+  - `ResetEngine`/`ResetFromTimeout` report everything dropped as aborted, up to `LastSubmittedFence`;
+  - `QueryEngineStatus` reports overdue chains as unresponsive;
+  - counters `Live_TdrEngineResets`, `Live_TdrAdapterResets`, `Live_TdrQueriedHung`.
+- **Still open:**
+  - **why the GPU hangs:** find the surface, then the job;
+  - **DMA_FAULTED instead of DMA_COMPLETED for faulted work** (Phase 1);
+  - the GPU-fault fix (0133) once hangs are survivable.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

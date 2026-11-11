@@ -19,7 +19,12 @@ NTKERNELAPI PCHAR PsGetProcessImageFileName(PEPROCESS Process);   /* T27: export
 #define MW_DMA_MAGIC            0x4D57444Du /* 'MWDM' in the private data */
 #define MW_DMA_BUFFER_SIZE      (16 * 1024)
 #define MW_LIST_SIZE            256     /* Panfrost submits reference many BOs */
-#define MW_JOB_TIMEOUT_MS       2000
+/* T41 (docs/WIN11-GPU.md 6.50): a hang is ours to end, before Windows' TDR (TdrDelay 2 s) takes the engine. T38-T40a
+ * hung the GPU (4 chains of 2 s each), and dxgmms1 then faulted (0x7E +0x41cd4): our 2000 ms chain timeout raced
+ * Windows' 2 s packet timeout, and ResetEngine misreported what it dropped. Now a chain gets 750 ms and a whole
+ * submission 1500 ms; past either, the GPU is hard-stopped and the rest of the submission completes (dropped). */
+#define MW_JOB_TIMEOUT_MS       750
+#define MW_SUB_TIMEOUT_MS       1500
 #define MW_POLL_MS              1
 
 /* ---- devices and contexts ---- */
@@ -981,6 +986,8 @@ static void Kick(MW_ADAPTER *A)
         A->RunningSlot = c->Slot;
         A->Running = TRUE;
         A->JobStart = KeQueryInterruptTime();
+        if (s->Next == 1)
+            A->SubStart = A->JobStart;        /* T41: the submission's first chain */
         (void)MkJobTakeStatus(&A->Gpu, c->Slot);
         InterlockedExchange(&A->Gpu.MmuIrqStatus, 0);
         A->RunningJc = c->Jc;
@@ -1004,7 +1011,8 @@ static BOOLEAN Reap(MW_ADAPTER *A, BOOLEAN CheckTimeout)
         failed = TRUE;
     } else if (bits & (1u << slot)) {
         failed = FALSE;
-    } else if (CheckTimeout && (KeQueryInterruptTime() - A->JobStart) / 10000 > MW_JOB_TIMEOUT_MS) {
+    } else if (CheckTimeout && ((KeQueryInterruptTime() - A->JobStart) / 10000 > MW_JOB_TIMEOUT_MS ||
+                                (KeQueryInterruptTime() - A->SubStart) / 10000 > MW_SUB_TIMEOUT_MS)) {
         A->LastJsStatus = MkJobSlotStatus(gpu, slot);
         MkJobHardStop(gpu, slot);
         A->JobsTimedOut++;
@@ -1403,6 +1411,9 @@ NTSTATUS APIENTRY MwResetFromTimeout(IN_CONST_HANDLE hAdapter)
 {
     MW_ADAPTER *a = (MW_ADAPTER *)hAdapter;
     (void)Synchronize(a, SyncReset, a);
+    /* T41: everything submitted is gone: the fence we report from now on says so (dxgkrnl discards the rest) */
+    a->LastCompletedFence = a->LastSubmittedFence;
+    a->TdrAdapterResets++;
     return STATUS_SUCCESS;
 }
 
@@ -1445,14 +1456,23 @@ NTSTATUS APIENTRY MwResetEngine(IN_CONST_HANDLE hAdapter, DXGKARG_RESETENGINE *A
 {
     MW_ADAPTER *a = (MW_ADAPTER *)hAdapter;
     (void)Synchronize(a, SyncReset, a);
-    Arg->LastAbortedFenceId = a->LastCompletedFence;
+    /* T41: SyncReset dropped the running and every queued submission, so all of them are aborted, up to the newest
+     * fence handed to us. T13-T40 reported LastCompletedFence here, so dxgkrnl thought nothing was dropped while those
+     * packets silently vanished from our queue. */
+    Arg->LastAbortedFenceId = a->LastSubmittedFence;
+    a->LastCompletedFence = a->LastSubmittedFence;
+    a->TdrEngineResets++;
     return STATUS_SUCCESS;
 }
 
 NTSTATUS APIENTRY MwQueryEngineStatus(IN_CONST_HANDLE hAdapter, DXGKARG_QUERYENGINESTATUS *Arg)
 {
-    UNREFERENCED_PARAMETER(hAdapter);
-    Arg->EngineStatus.Responsive = 1;
+    MW_ADAPTER *a = (MW_ADAPTER *)hAdapter;
+    /* T41: not responsive while a chain is overdue (was always 1) */
+    BOOLEAN overdue = a->Running && (KeQueryInterruptTime() - a->JobStart) / 10000 > MW_JOB_TIMEOUT_MS;
+    Arg->EngineStatus.Responsive = overdue ? 0 : 1;
+    if (overdue)
+        a->TdrQueriedHung++;
     return STATUS_SUCCESS;
 }
 

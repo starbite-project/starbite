@@ -174,6 +174,9 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         { L"Live_Ne0N", a->NeN[0] }, { L"Live_Ne0Ms", (ULONG)(a->NeCopy100ns[0] / 10000) },
         { L"Live_Ne0MPx", (ULONG)(a->NePx[0] >> 20) }, { L"Live_Ne1N", a->NeN[1] },
         { L"Live_Ne1Ms", (ULONG)(a->NeCopy100ns[1] / 10000) }, { L"Live_Ne1MPx", (ULONG)(a->NePx[1] >> 20) },
+        /* T41: Windows' TDR calls (per engine, whole adapter) and status queries that found a hang */
+        { L"Live_TdrEngineResets", a->TdrEngineResets }, { L"Live_TdrAdapterResets", a->TdrAdapterResets },
+        { L"Live_TdrQueriedHung", a->TdrQueriedHung },
     };
     static_assert(sizeof(c) / sizeof(c[0]) < SBW_LIVE_MAX, "Live_ table too long");
     for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]); i++)
