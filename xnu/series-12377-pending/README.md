@@ -23,3 +23,4 @@ SweetFramebuffer and SweetPlatformExpert + 0361, compiled with the tree's own fl
 0428-0432's objects; the same recipe without 0361 reproduces sd427 except the three objects' N_OSO mtimes), then the
 tree was restored and relinked to sd432's sha256.
 | 0433-starbite-m8b-display-fb-from-adt.patch | Fix to 0428 (boot framebuffer from the ADT); sits on 0432 | with 0428 |
+| 0434-starbite-m8c-display-carveout.patch | Fix to 0428: flip/scaler buffers from the board ADT's scan-out carve-out (decon starbite,scanout-carveout, 0xa0000000 + 64 MiB); sits on 0433 | with 0428 |

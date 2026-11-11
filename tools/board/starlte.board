@@ -25,6 +25,7 @@ pram = [0x8f8000000, 0x100000]             # panic region (/pram, embedded-panic
 sbfw = [0x91ffe000, 0x1000]                # Starbite firmware hand-off page (docs/STARBITE-FIRMWARE-LAYER.md)
 loader_log = [0x91fff000, 0x1000]          # loader status page (LOG_BASE)
 pmsg = [0xfed14000, 0x4000]                # ramoops pmsg ring (TWRP /sys/fs/pstore/pmsg-ramoops-0)
+display = [0xa0000000, 0x4000000]         # scan-out carve-out (M8c): XNU payloads own bank 2 only, the IDMA takes 32-bit addresses
 
 # The eight cores. MPIDR as the hardware reports it; psci = the CPU_ON target (SMC, PSCI 0.1).
 # Cluster 0 = E (Cortex-A55, ARMv8.2: LSE, RCpc, FP16, DotProd; no PAC), cluster 1 = P (Exynos M3,
@@ -338,6 +339,7 @@ reg = [0x16030000, 0x10000,                 # 0 DECON_F
        0x16070000, 0x7000,                  # 1 DPU_DMA: IDMA G0 G1 VG0 VG1 VGF0 VGF1 (flip base addresses)
        0x16020000, 0x7000]                  # 2 DPP: the six channels (scaler)
 spi = [0xb6, 0xb7, 0xbc, 0x1a5]
+u64 = { "starbite,scanout-carveout" = [0xa0000000, 0x4000000] }   # = [memory] display: flip/scaler buffers (M8c)
 driver = "StarbiteDisplay"
 today = "SweetFramebuffer / AppleCLCD (disp0, S-Boot's scan-out)"
 source = "dts decon_f@0x16030000"

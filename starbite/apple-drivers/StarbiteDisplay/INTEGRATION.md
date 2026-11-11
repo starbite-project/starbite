@@ -76,6 +76,14 @@ start. That needs the low RAM window (0x92000000..0xaf800000) to be XNU-managed 
 starts early enough today. If the allocation ever fails the driver says so and stays in copy mode. A carve-out in the
 board file for display buffers is the alternative; not needed for M8.
 
+**M8b (2026-11-12) showed the allocation can never succeed:** the Mac payloads give XNU only DRAM bank 2
+(0x880000000 + 0x70000000), so no XNU page is below 4 GiB. Since M8c (kernel patch 0434) the buffers come from the
+board's carve-out first: `[memory] display` = the decon node's `starbite,scanout-carveout` <0xa0000000 0x4000000>
+(u64 base, size), in the low window, clear of the loader's crash buffers (0x9A000000..0x9F030000) and UFS DMA
+(0xaf000000..). It is refused if any page is XNU-managed (pmap_valid_address), overlaps S-Boot's framebuffer or fails
+bufferOK; buffers are bump-allocated (the last one freed is reusable) and mapped write-combined. The allocation path
+stays as the fallback for ADTs without the property.
+
 ## 6. Boot-args
 
 New: `sbdisp=flip|scale|copy`, `sbdisp_irq=0`, `sbdisp_panel=0..3`, `sbdisp_bl=N`, `sbdisp_selftest=N`,

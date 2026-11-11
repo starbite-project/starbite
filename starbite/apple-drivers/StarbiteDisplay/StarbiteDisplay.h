@@ -126,6 +126,7 @@ struct StarbiteTarget {
 	uint64_t            phys;
 	uint32_t            width, height, rowBytes;
 	IOMemoryDescriptor *memory;         /* for the cache store before a flip */
+	IOMemoryMap        *map;            /* the kernel mapping of a carve-out buffer (NULL for an allocated one) */
 };
 
 enum {
@@ -148,6 +149,9 @@ class AppleCLCD : public IOMobileFramebuffer {
 	bool setupFlip();
 	bool setupScaler();
 	bool allocTarget(StarbiteTarget *t, uint32_t width, uint32_t height, uint32_t rowBytes);
+	bool allocCarveout(StarbiteTarget *t, uint32_t width, uint32_t height, uint32_t rowBytes, vm_size_t bytes);
+	void freeTarget(StarbiteTarget *t);
+	void readCarveout();
 	void publishProperties();
 	void fillTestPattern(const StarbiteTarget *t, uint32_t seed);
 	static void selfTestThread(void *arg, void *unused);
@@ -185,6 +189,7 @@ public:
 
 	uint32_t      fMode;                        /* kStarbitePresent* */
 	StarbiteTarget fTargets[2];
+	uint64_t      fCarveBase, fCarveSize, fCarveNext;   /* the board's scan-out carve-out (M8c), bump-allocated */
 	uint32_t      fFront;                       /* which of fTargets the DECON reads, when fFrontOwn */
 	bool          fFrontOwn;                    /* false: the DECON reads a client's surface (zero copy) */
 	SweetSurface *fShown, *fShownBefore;        /* kept alive while the DECON may read them */

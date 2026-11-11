@@ -1,0 +1,218 @@
+From cd01662e029f63f110c8ff275b8a9c10387b2137 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Thu, 12 Nov 2026 01:23:26 +0200
+Subject: [PATCH] patch: 0434-starbite-m8c-display-carveout.patch -
+ StarbiteDisplay's flip/scaler buffers from the board ADT's scan-out carve-out
+ (decon starbite,scanout-carveout = 0xa0000000 + 64 MiB, the low window
+ outside XNU's RAM): the Mac payloads give XNU only bank 2, so no contiguous
+ buffer below 4 GiB can ever be allocated (M8b 2026-11-12: "no contiguous
+ 16652 KiB below 4 GiB", flips not possible); refused if any page is
+ XNU-managed, overlaps S-Boot's framebuffer or fails bufferOK; mapped
+ write-combined; the allocation path stays as the fallback
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../StarbiteDisplay/StarbiteDisplay.cpp       | 111 +++++++++++++++++-
+ .../StarbiteDisplay/StarbiteDisplay.h         |   5 +
+ 2 files changed, 111 insertions(+), 5 deletions(-)
+
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.cpp b/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.cpp
+index 944ac10a..4223cec9 100644
+--- a/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.cpp
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.cpp
+@@ -484,10 +484,108 @@ sbd_nub_u32(IOService *nub, const char *key)
+ 	return v;
+ }
+ 
++/*
++ * The scan-out carve-out (M8c, 2026-11-12). The Mac payloads give XNU only DRAM bank 2 (0x880000000 +
++ * 0x70000000, M8b's StarbitePE line), so XNU manages no page below 4 GiB and inTaskWithPhysicalMask(0xfffff000)
++ * can never succeed ("no contiguous 16652 KiB below 4 GiB"). The board ADT names a range of the low window
++ * (tools/board/starlte.board [memory] display, 0xa0000000 + 64 MiB: free in the starlte DTB, outside every
++ * XNU payload's RAM) on the decon node as starbite,scanout-carveout = <base size> (u64 each). It is used only if
++ * no page of it is XNU-managed (pmap_valid_address), it stays clear of S-Boot's framebuffer and below the
++ * scan-out limit (bufferOK); buffers are mapped write-combined, as the allocated ones were.
++ */
++extern "C" boolean_t pmap_valid_address(uint64_t addr);
++
++void
++AppleCLCD::readCarveout()
++{
++	IOService *nub = fHw != NULL ? fHw->getProvider() : NULL;
++	OSData *d = nub != NULL ? OSDynamicCast(OSData, nub->getProperty("starbite,scanout-carveout")) : NULL;
++	uint64_t v[2];
++
++	fCarveBase = fCarveSize = fCarveNext = 0;
++	if (d == NULL || d->getLength() < sizeof(v)) {
++		return;
++	}
++	memcpy(v, d->getBytesNoCopy(), sizeof(v));
++	uint64_t fbEnd = fPhys + (uint64_t)fRowBytes * fHeight;
++	if (v[0] == 0 || (v[0] & PAGE_MASK) || v[1] < PAGE_SIZE || (v[1] & PAGE_MASK) || v[0] + v[1] < v[0] ||
++	    (v[0] < fbEnd && fPhys < v[0] + v[1])) {
++		IOLog("StarbiteDisplay: scan-out carve-out %#llx + %#llx refused (alignment, size or S-Boot's framebuffer)\n",
++		    v[0], v[1]);
++		return;
++	}
++	for (uint64_t off = 0; off < v[1]; off += PAGE_SIZE) {
++		if (pmap_valid_address(v[0] + off)) {
++			IOLog("StarbiteDisplay: scan-out carve-out %#llx + %#llx refused: %#llx is XNU's RAM\n", v[0], v[1],
++			    v[0] + off);
++			return;
++		}
++	}
++	fCarveBase = fCarveNext = v[0];
++	fCarveSize = v[1];
++	IOLog("StarbiteDisplay: scan-out carve-out %#llx + %llu KiB (board ADT), outside XNU's RAM\n", v[0], v[1] >> 10);
++}
++
++bool
++AppleCLCD::allocCarveout(StarbiteTarget *t, uint32_t width, uint32_t height, uint32_t rowBytes, vm_size_t bytes)
++{
++	uint64_t pa = fCarveNext;
++
++	if (fCarveSize == 0) {
++		return false;
++	}
++	if ((uint64_t)bytes > fCarveBase + fCarveSize - pa) {
++		IOLog("StarbiteDisplay: carve-out full: %lu KiB wanted at %#llx, %llu KiB left\n", (unsigned long)(bytes >> 10),
++		    pa, (fCarveBase + fCarveSize - pa) >> 10);
++		return false;
++	}
++	int err = fHw->bufferOK(pa, (uint64_t)rowBytes * height, rowBytes);
++	if (err != SBD_OK) {
++		IOLog("StarbiteDisplay: carve-out buffer at %#llx not usable by the IDMA: %s\n", pa, sbd_decon_strerror(err));
++		return false;
++	}
++	IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(pa, bytes, kIODirectionInOut);
++	IOMemoryMap *map = md != NULL ? md->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapWriteCombineCache) :
++	    NULL;
++	if (map == NULL || map->getVirtualAddress() == 0) {
++		IOLog("StarbiteDisplay: carve-out buffer at %#llx: no kernel mapping\n", pa);
++		OSSafeReleaseNULL(map);
++		OSSafeReleaseNULL(md);
++		return false;
++	}
++	t->va = (uintptr_t)map->getVirtualAddress();
++	t->phys = pa;
++	t->width = width;
++	t->height = height;
++	t->rowBytes = rowBytes;
++	t->memory = md;
++	t->map = map;
++	fCarveNext = pa + bytes;
++	bzero((void *)t->va, bytes);
++	IOLog("StarbiteDisplay: scan-out buffer %ux%u stride %u at %#llx (carve-out)\n", width, height, rowBytes, pa);
++	return true;
++}
++
++void
++AppleCLCD::freeTarget(StarbiteTarget *t)
++{
++	if (t->map != NULL && t->phys + round_page((vm_size_t)t->rowBytes * t->height) == fCarveNext) {
++		fCarveNext = t->phys;           /* the last carve-out buffer: its space is free again */
++	}
++	OSSafeReleaseNULL(t->map);
++	OSSafeReleaseNULL(t->memory);
++	t->va = 0;
++	t->phys = 0;
++}
++
+ bool
+ AppleCLCD::allocTarget(StarbiteTarget *t, uint32_t width, uint32_t height, uint32_t rowBytes)
+ {
+ 	vm_size_t bytes = round_page((vm_size_t)rowBytes * height);
++
++	if (allocCarveout(t, width, height, rowBytes, bytes)) {
++		return true;
++	}
+ 	/* physically contiguous, below 4 GiB (the IDMA takes 32-bit addresses), write-combined like S-Boot's buffer:
+ 	 * what is drawn is in RAM without a cache flush */
+ 	IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+@@ -511,6 +609,7 @@ AppleCLCD::allocTarget(StarbiteTarget *t, uint32_t width, uint32_t height, uint3
+ 	t->height = height;
+ 	t->rowBytes = rowBytes;
+ 	t->memory = md;
++	t->map = NULL;
+ 	bzero((void *)t->va, bytes);
+ 	return true;
+ }
+@@ -524,7 +623,7 @@ AppleCLCD::setupFlip()
+ 	int err = fHw->attachFlip();
+ 	if (err != SBD_OK) {
+ 		IOLog("StarbiteDisplay: flips not attached: %s\n", sbd_decon_strerror(err));
+-		OSSafeReleaseNULL(fTargets[1].memory);
++		freeTarget(&fTargets[1]);
+ 		return false;
+ 	}
+ 	fMode = kStarbitePresentFlip;
+@@ -541,16 +640,16 @@ AppleCLCD::setupScaler()
+ 	StarbiteTarget a = {}, b = {};
+ 
+ 	if (!allocTarget(&a, fLogicalW, fLogicalH, rowBytes) || !allocTarget(&b, fLogicalW, fLogicalH, rowBytes)) {
+-		OSSafeReleaseNULL(a.memory);
+-		OSSafeReleaseNULL(b.memory);
++		freeTarget(&b);
++		freeTarget(&a);
+ 		return false;
+ 	}
+ 	sbd_decon_fit(fLogicalW, fLogicalH, fWidth, fHeight, &dst);
+ 	int err = fHw->attachScaler(a.phys, fLogicalW, fLogicalH, rowBytes, &dst);
+ 	if (err != SBD_OK) {
+ 		IOLog("StarbiteDisplay: VGF0's scaler not attached: %s; S-Boot's window stays\n", sbd_decon_strerror(err));
+-		OSSafeReleaseNULL(a.memory);
+-		OSSafeReleaseNULL(b.memory);
++		freeTarget(&b);
++		freeTarget(&a);
+ 		return false;
+ 	}
+ 	IOLog("StarbiteDisplay: VGF0 scales %ux%u to %ux%u at %u,%u\n", fLogicalW, fLogicalH, dst.w, dst.h, dst.x, dst.y);
+@@ -642,6 +741,7 @@ AppleCLCD::start(IOService *provider)
+ 	fTargets[0].height = fHeight;
+ 	fTargets[0].rowBytes = fRowBytes;
+ 	fTargets[0].memory = NULL;
++	fTargets[0].map = NULL;
+ 	fMode = kStarbitePresentCopy;
+ 	fFront = 0;
+ 	fFrontOwn = true;
+@@ -657,6 +757,7 @@ AppleCLCD::start(IOService *provider)
+ 		IOLog("StarbiteDisplay: AppleCLCD: no StarbiteDisplay service (no decon node?): CPU copy, timer vsync\n");
+ 	} else if (strcmp(want, "copy") != 0) {
+ 		if (fHw->probe(fPhys, fWidth, fHeight, fRowBytes) == SBD_OK) {
++			readCarveout();
+ 			if (strcmp(want, "scale") == 0 && fScaled && !setupScaler()) {
+ 				IOLog("StarbiteDisplay: sbdisp=scale not possible: trying flips\n");
+ 			}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.h b/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.h
+index f19cb365..a558a6e9 100644
+--- a/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.h
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.h
+@@ -126,6 +126,7 @@ struct StarbiteTarget {
+ 	uint64_t            phys;
+ 	uint32_t            width, height, rowBytes;
+ 	IOMemoryDescriptor *memory;         /* for the cache store before a flip */
++	IOMemoryMap        *map;            /* the kernel mapping of a carve-out buffer (NULL for an allocated one) */
+ };
+ 
+ enum {
+@@ -148,6 +149,9 @@ class AppleCLCD : public IOMobileFramebuffer {
+ 	bool setupFlip();
+ 	bool setupScaler();
+ 	bool allocTarget(StarbiteTarget *t, uint32_t width, uint32_t height, uint32_t rowBytes);
++	bool allocCarveout(StarbiteTarget *t, uint32_t width, uint32_t height, uint32_t rowBytes, vm_size_t bytes);
++	void freeTarget(StarbiteTarget *t);
++	void readCarveout();
+ 	void publishProperties();
+ 	void fillTestPattern(const StarbiteTarget *t, uint32_t seed);
+ 	static void selfTestThread(void *arg, void *unused);
+@@ -185,6 +189,7 @@ public:
+ 
+ 	uint32_t      fMode;                        /* kStarbitePresent* */
+ 	StarbiteTarget fTargets[2];
++	uint64_t      fCarveBase, fCarveSize, fCarveNext;   /* the board's scan-out carve-out (M8c), bump-allocated */
+ 	uint32_t      fFront;                       /* which of fTargets the DECON reads, when fFrontOwn */
+ 	bool          fFrontOwn;                    /* false: the DECON reads a client's surface (zero copy) */
+ 	SweetSurface *fShown, *fShownBefore;        /* kept alive while the DECON may read them */
+-- 
+2.53.0
+
