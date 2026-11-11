@@ -1,0 +1,3815 @@
+From 72a46a192b3de5894ce60e119ae1ba6d0f83dbf4 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 11 Nov 2026 19:29:28 +0200
+Subject: [PATCH] patch: 0428-starbite-m8a-display.patch - StarbiteDisplay
+ replaces SweetFramebuffer on STARLTE (copy of
+ starbite/apple-drivers/StarbiteDisplay at 0d957fd, STARLTE-only build units,
+ legacy ties on): StarbiteDisplay on the board ADT's starbite,decon nub,
+ AppleCLCD on disp0 (or starbite,display); with today's ADTs (no decon node)
+ AppleCLCD waits 3 s for StarbiteDisplay, then CPU copy with timer vsync, a
+ rewrite of SweetFramebuffer's path (sbdisp=copy on daily lines is the
+ driver's recommendation); SweetSurface.h forwarder for the driver's include
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp         |    5 +-
+ iokit/Kernel/arm/starbite/StarbiteDisplay.cpp |   11 +
+ .../StarbiteDisplay/StarbiteDisplay.cpp       | 1862 +++++++++++++++++
+ .../StarbiteDisplay/StarbiteDisplay.h         |  229 ++
+ .../starbite/StarbiteDisplay/SweetSurface.h   |    4 +
+ .../starbite/StarbiteDisplay/hw/sbd_decon.c   |  524 +++++
+ .../starbite/StarbiteDisplay/hw/sbd_decon.h   |  143 ++
+ .../starbite/StarbiteDisplay/hw/sbd_dsim.c    |  168 ++
+ .../starbite/StarbiteDisplay/hw/sbd_dsim.h    |   50 +
+ .../arm/starbite/StarbiteDisplay/hw/sbd_io.h  |   56 +
+ .../starbite/StarbiteDisplay/hw/sbd_panel.c   |  178 ++
+ .../starbite/StarbiteDisplay/hw/sbd_panel.h   |   56 +
+ .../starbite/StarbiteDisplay/hw/sbd_regs.h    |  150 ++
+ .../starbite/StarbiteDisplay/hw/sbd_swap.c    |   63 +
+ .../starbite/StarbiteDisplay/hw/sbd_swap.h    |   48 +
+ iokit/Kernel/arm/starbite/sbd_decon.c         |   11 +
+ iokit/Kernel/arm/starbite/sbd_dsim.c          |   11 +
+ iokit/Kernel/arm/starbite/sbd_panel.c         |   11 +
+ iokit/Kernel/arm/starbite/sbd_swap.c          |   11 +
+ iokit/KernelConfigTables.cpp                  |   11 +-
+ iokit/conf/files.arm64                        |    6 +
+ 21 files changed, 3605 insertions(+), 3 deletions(-)
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/SweetSurface.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_decon.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_decon.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_dsim.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_dsim.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_io.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_panel.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_panel.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_regs.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_swap.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_swap.h
+ create mode 100644 iokit/Kernel/arm/starbite/sbd_decon.c
+ create mode 100644 iokit/Kernel/arm/starbite/sbd_dsim.c
+ create mode 100644 iokit/Kernel/arm/starbite/sbd_panel.c
+ create mode 100644 iokit/Kernel/arm/starbite/sbd_swap.c
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index ddecb8b4..a4ed651c 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -42,7 +42,8 @@ extern "C" uint64_t sweet_last_present_abs;     /* 0413: iokit/Kernel/arm/hid/Sw
+ extern "C" uint64_t a5xelte_power_pressed_at;   /* bsd/dev/a5xelte_keys.c */
+ #endif
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++/* STARLTE: StarbiteDisplay (iokit/Kernel/arm/starbite) defines these classes and globals instead (0428). */
++#if (defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)) && !defined(ARM64_BOARD_CONFIG_STARLTE)
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -1395,4 +1396,4 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 	}
+ 	return ret;
+ }
+-#endif /* SWEET || A5XELTE */
++#endif /* (SWEET || A5XELTE) && !STARLTE */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay.cpp b/iokit/Kernel/arm/starbite/StarbiteDisplay.cpp
+new file mode 100644
+index 00000000..d91b1f9d
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay.cpp
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteDisplay/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteDisplay/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteDisplay/StarbiteDisplay.cpp"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.cpp b/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.cpp
+new file mode 100644
+index 00000000..705d1031
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.cpp
+@@ -0,0 +1,1862 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteDisplay + AppleCLCD (see StarbiteDisplay.h and NOTES.md).
++ *
++ * The Apple-facing half (the IOMobileFramebuffer user client, its selectors, the swap record, the vsync
++ * notification, the copy / scale / pointer-blend code) is SweetFramebuffer.cpp's, patches 0046..0398 of
++ * xnu/series-12377: our own code, moved here and reshaped so that a frame can be drawn into any buffer and
++ * then shown by an address flip instead of being copied into the buffer the DECON is reading.
++ *
++ * Built into the kernel (milestones M1-M8) or into a kext; INTEGRATION.md has the file list.
++ */
++#include "StarbiteDisplay.h"
++
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IODeviceTreeSupport.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/system.h>
++#include <libkern/OSAtomic.h>
++#include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSNumber.h>
++#include <libkern/c++/OSArray.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSString.h>
++#include <pexpert/pexpert.h>
++#include <kern/clock.h>
++#include <kern/thread_call.h>
++#include <sys/proc.h>
++
++/* The IOSurface service (driver 19, StarbiteSurface; today SweetSurface.cpp in the kernel). */
++#include "SweetSurface.h"
++
++/*
++ * STARBITE_DISPLAY_LEGACY (default on): link against, and stand in for, today's in-kernel pieces:
++ *   uses     sweet_console_muted (serial_console.c), sweet_last_present_abs (SweetHID.cpp),
++ *            starlte_gpu_present_* (starlte_gpu.c, sweetfb_gpu=1 in copy mode), starlte_sbstop_* (0423)
++ *   defines  sweet_fb_first_present (0421's dead-man reads it), sweet_fb_cur_x/y/seq (SweetHID.cpp),
++ *            sweet_fb_hold_until and sweet_fb_last_surface (herolte_gpu.c)
++ * so that SweetFramebuffer.cpp can leave the build with nothing else changed. Set to 0 once those are gone.
++ */
++#ifndef STARBITE_DISPLAY_LEGACY
++#define STARBITE_DISPLAY_LEGACY 1
++#endif
++
++#if STARBITE_DISPLAY_LEGACY
++extern "C" {
++extern int sweet_console_muted;
++extern uint64_t sweet_last_present_abs;
++int  starlte_gpu_present_ready(void);
++int  starlte_gpu_present_slot(uint32_t id, uint64_t first_pa);
++int  starlte_gpu_present_map(uint32_t id, const uint64_t *pages, unsigned n);
++bool starlte_gpu_present_draw(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h);
++int  starlte_sbstop_at(const char *stage);
++void starlte_sbstop_now(const char *stage);
++
++uint64_t sweet_fb_first_present;
++uint64_t sweet_fb_hold_until;
++volatile int32_t sweet_fb_cur_x, sweet_fb_cur_y;
++volatile uint32_t sweet_fb_cur_seq;
++bool sweet_fb_last_surface(uint64_t *pages, unsigned max_pages, unsigned *npages, uint32_t *offset, uint32_t *stride,
++    uint32_t *width, uint32_t *height, uintptr_t *kva);
++}
++static uint32_t sbd_last_surface_id;
++#define SBD_GPU_MAX_PAGES 3072          /* one 12 MiB GPU slot (starlte_gpu.c) */
++#endif
++
++#define SBD_SU_MAX      320             /* pointer save-under: at most 320 x 320 target pixels */
++#define SBD_COLUMNS     4096
++
++enum {
++	kSBDGetLayerDefaultSurface  = 3,
++	kSBDSwapBegin               = 4,
++	kSBDSwapEnd                 = 5,
++	kSBDSwapWait                = 6,
++	kSBDGetID                   = 7,
++	kSBDGetDisplaySize          = 8,
++	kSBDRequestPowerChange      = 12,
++	kSBDIsMainDisplay           = 18,
++	kSBDGetDotPitch             = 28,
++	kSBDNotifications           = 72,
++};
++
++static uint64_t
++sbd_uptime_ms(void)
++{
++	uint64_t ns = 0;
++
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000000ULL;
++}
++
++static const char *
++sbd_mode_name(uint32_t mode)
++{
++	return mode == kStarbitePresentScaler ? "scale" : (mode == kStarbitePresentFlip ? "flip" : "copy");
++}
++
++/* ------------------------------------------------------------------------------------------------------------
++ * StarbiteDisplay: the hardware
++ * ------------------------------------------------------------------------------------------------------------ */
++
++OSDefineMetaClassAndStructors(StarbiteDisplay, IOService);
++
++uint32_t
++StarbiteDisplay::ioRead(void *ctx, unsigned block, uint32_t off)
++{
++	StarbiteDisplay *me = (StarbiteDisplay *)ctx;
++
++	if (block >= SBD_BLK_COUNT || me->fBase[block] == 0 || off + 4 > me->fSize[block]) {
++		return 0;
++	}
++	return *(volatile uint32_t *)(me->fBase[block] + off);
++}
++
++void
++StarbiteDisplay::ioWrite(void *ctx, unsigned block, uint32_t off, uint32_t val)
++{
++	StarbiteDisplay *me = (StarbiteDisplay *)ctx;
++
++	if (block >= SBD_BLK_COUNT || me->fBase[block] == 0 || off + 4 > me->fSize[block]) {
++		return;
++	}
++	*(volatile uint32_t *)(me->fBase[block] + off) = val;
++	OSSynchronizeIO();
++}
++
++void
++StarbiteDisplay::ioDelay(void *ctx __unused, uint32_t us)
++{
++	if (us >= 1000) {
++		IOSleep(us / 1000);
++	} else {
++		IODelay(us);
++	}
++}
++
++bool
++StarbiteDisplay::start(IOService *provider)
++{
++	static const uint32_t minSize[SBD_BLK_COUNT] = { 0x2000, 0x7000, 0x7000, 0x100 };
++	struct sbd_io io = { &StarbiteDisplay::ioRead, &StarbiteDisplay::ioWrite, &StarbiteDisplay::ioDelay, this };
++	uint32_t irq = 1;
++	uint64_t limit = 0;
++
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	/* the decon nub: reg 0 DECON_F, reg 1 DPU_DMA (IDMA), reg 2 DPP. Addresses come from nowhere else. */
++	for (unsigned i = 0; i < 3 && i < provider->getDeviceMemoryCount(); i++) {
++		fMap[i] = provider->mapDeviceMemoryWithIndex(i);
++		if (fMap[i] != NULL && fMap[i]->getLength() >= minSize[i]) {
++			fBase[i] = (uintptr_t)fMap[i]->getVirtualAddress();
++			fSize[i] = (uint32_t)fMap[i]->getLength();
++		}
++	}
++	if (fBase[SBD_BLK_DECON] == 0) {
++		IOLog("StarbiteDisplay: the decon node has no usable reg: not started\n");
++		return false;
++	}
++	/* the dsim nub: reg 0 DSIM0 (reg 1, the D-PHY, is never touched) */
++	OSDictionary *match = IOService::nameMatching("dsim");
++	IOService *dsim = match != NULL ? IOService::waitForMatchingService(match, 2ULL * NSEC_PER_SEC) : NULL;
++	OSSafeReleaseNULL(match);
++	if (dsim != NULL && dsim->getDeviceMemoryCount() >= 1) {
++		fMap[SBD_BLK_DSIM] = dsim->mapDeviceMemoryWithIndex(0);
++		if (fMap[SBD_BLK_DSIM] != NULL && fMap[SBD_BLK_DSIM]->getLength() >= minSize[SBD_BLK_DSIM]) {
++			fBase[SBD_BLK_DSIM] = (uintptr_t)fMap[SBD_BLK_DSIM]->getVirtualAddress();
++			fSize[SBD_BLK_DSIM] = (uint32_t)fMap[SBD_BLK_DSIM]->getLength();
++		}
++	}
++	OSSafeReleaseNULL(dsim);
++
++	fHwLock = IOSimpleLockAlloc();
++	fPanelLock = IOLockAlloc();
++	fWorkLoop = IOWorkLoop::workLoop();
++	if (fHwLock == NULL || fPanelLock == NULL || fWorkLoop == NULL) {
++		return false;
++	}
++	sbd_decon_init(&fDecon, &io);
++	sbd_panel_init(&fPanel, &io);
++	if (PE_parse_boot_argn("sbdisp_limit", &limit, sizeof(limit)) && limit != 0) {
++		fDecon.scan_limit = limit;
++	}
++	fPanelPolicy = 1;
++	PE_parse_boot_argn("sbdisp_panel", &fPanelPolicy, sizeof(fPanelPolicy));
++	fHaveDsim = fBase[SBD_BLK_DSIM] != 0 && sbd_dsim_ready(&fPanel.io);
++
++	fTimer = IOTimerEventSource::timerEventSource(this, &StarbiteDisplay::timerFired);
++	if (fTimer == NULL || fWorkLoop->addEventSource(fTimer) != kIOReturnSuccess) {
++		IOLog("StarbiteDisplay: no timer\n");
++		return false;
++	}
++	/* interrupts 1 (frame start), 2 (frame done), 3 (extra); 0 is the FIFO's, video mode only */
++	PE_parse_boot_argn("sbdisp_irq", &irq, sizeof(irq));
++	if (irq != 0) {
++		unsigned made = 0;
++
++		for (unsigned i = 0; i < 3; i++) {
++			fIrq[i] = IOFilterInterruptEventSource::filterInterruptEventSource(this, &StarbiteDisplay::irqAction,
++			    &StarbiteDisplay::irqFilter, provider, (int)i + 1);
++			if (fIrq[i] != NULL && fWorkLoop->addEventSource(fIrq[i]) == kIOReturnSuccess) {
++				made++;
++			} else {
++				OSSafeReleaseNULL(fIrq[i]);
++			}
++		}
++		if (made == 0) {
++			IOLog("StarbiteDisplay: the decon node gives no interrupts: refreshes are counted by polling\n");
++		}
++	}
++	registerService();
++	IOLog("StarbiteDisplay: decon %s, idma %s, dpp %s, dsim %s (%s), interrupts %s, panel policy %u\n",
++	    fBase[SBD_BLK_DECON] ? "mapped" : "-", fBase[SBD_BLK_IDMA] ? "mapped" : "MISSING (reg 1)",
++	    fBase[SBD_BLK_DPP] ? "mapped" : "MISSING (reg 2)", fBase[SBD_BLK_DSIM] ? "mapped" : "MISSING",
++	    fHaveDsim ? "HS command mode" : "not usable", (fIrq[0] || fIrq[1] || fIrq[2]) ? "registered" : "none",
++	    fPanelPolicy);
++	return true;
++}
++
++void
++StarbiteDisplay::stop(IOService *provider)
++{
++	if (fTimer != NULL) {
++		fTimer->cancelTimeout();
++	}
++	for (unsigned i = 0; i < 3; i++) {
++		if (fIrq[i] != NULL) {
++			fIrq[i]->disable();
++		}
++	}
++	if (fIrqOn) {
++		sbd_decon_irq_enable(&fDecon, false);
++		fIrqOn = false;
++	}
++	IOService::stop(provider);
++}
++
++int
++StarbiteDisplay::probe(uint64_t fbPhys, uint32_t width, uint32_t height, uint32_t rowBytes)
++{
++	int err;
++
++	if (!haveChannels()) {
++		return SBD_ERR_NOT_PROBED;
++	}
++	err = sbd_decon_probe(&fDecon, fbPhys, width, height, rowBytes);
++	if (err == SBD_OK) {
++		IOLog("StarbiteDisplay: DECON as expected: window %u on channel block %u reads %#x, %ux%u, trigger %#x, "
++		    "frame count %u\n", fDecon.win, fDecon.boot_type, fDecon.boot_base, width, height, fDecon.boot_trig,
++		    ioRead(this, SBD_BLK_DECON, 0x2a0));
++	} else {
++		IOLog("StarbiteDisplay: DECON left alone: %s (control %#x, windows %#x, channels %#x)\n",
++		    sbd_decon_strerror(err), ioRead(this, SBD_BLK_DECON, 0x0), ioRead(this, SBD_BLK_DECON, 0x214),
++		    ioRead(this, SBD_BLK_DECON, 0x218));
++	}
++	return err;
++}
++
++/* attach and detach sleep, so they run only before the refresh client starts (no interrupt or timer yet) */
++int
++StarbiteDisplay::attachFlip()
++{
++	return fVsyncFn != NULL ? SBD_ERR_BUSY : sbd_decon_attach_flip(&fDecon);
++}
++
++int
++StarbiteDisplay::attachScaler(uint64_t phys, uint32_t w, uint32_t h, uint32_t rowBytes, const struct sbd_rect *dst)
++{
++	return fVsyncFn != NULL ? SBD_ERR_BUSY : sbd_decon_attach_scaler(&fDecon, phys, w, h, rowBytes, dst);
++}
++
++void
++StarbiteDisplay::detach()
++{
++	if (fVsyncFn == NULL) {
++		sbd_decon_detach(&fDecon);
++	}
++}
++
++int
++StarbiteDisplay::bufferOK(uint64_t phys, uint64_t bytes, uint32_t rowBytes)
++{
++	return sbd_decon_buffer_ok(&fDecon, phys, bytes, rowBytes);
++}
++
++int
++StarbiteDisplay::flip(uint64_t phys, uint32_t rowBytes)
++{
++	IOInterruptState state = IOSimpleLockLockDisableInterrupt(fHwLock);
++	int err = sbd_decon_flip(&fDecon, phys, rowBytes);
++
++	IOSimpleLockUnlockEnableInterrupt(fHwLock, state);
++	return err;
++}
++
++bool
++StarbiteDisplay::latched()
++{
++	IOInterruptState state = IOSimpleLockLockDisableInterrupt(fHwLock);
++	bool taken = !fDecon.pending || sbd_decon_latched(&fDecon);
++
++	IOSimpleLockUnlockEnableInterrupt(fHwLock, state);
++	return taken;
++}
++
++void
++StarbiteDisplay::counters(struct sbd_decon *copy)
++{
++	IOInterruptState state = IOSimpleLockLockDisableInterrupt(fHwLock);
++
++	*copy = fDecon;
++	IOSimpleLockUnlockEnableInterrupt(fHwLock, state);
++}
++
++void
++StarbiteDisplay::setVsyncClient(StarbiteDisplayVsync fn, void *target)
++{
++	fVsyncTarget = target;
++	fVsyncFn = fn;
++	if (fn == NULL) {
++		return;
++	}
++	if (fIrq[0] != NULL || fIrq[1] != NULL || fIrq[2] != NULL) {
++		IOInterruptState state = IOSimpleLockLockDisableInterrupt(fHwLock);
++
++		sbd_decon_irq_enable(&fDecon, true);
++		IOSimpleLockUnlockEnableInterrupt(fHwLock, state);
++		fIrqOn = true;
++		for (unsigned i = 0; i < 3; i++) {
++			if (fIrq[i] != NULL) {
++				fIrq[i]->enable();
++			}
++		}
++	}
++	fTimer->setTimeoutUS(SBD_VSYNC_US);
++}
++
++/* Primary interrupt: read and clear the DECON's interrupt registers, count, stamp. Nothing else. */
++bool
++StarbiteDisplay::irqFilter(OSObject *owner, IOFilterInterruptEventSource *src __unused)
++{
++	StarbiteDisplay *me = (StarbiteDisplay *)owner;
++	uint32_t ev;
++
++	IOSimpleLockLock(me->fHwLock);
++	ev = sbd_decon_irq(&me->fDecon);
++	IOSimpleLockUnlock(me->fHwLock);
++	if (ev == 0) {
++		return false;           /* another of the three lines already handled it */
++	}
++	if (ev & SBD_EV_VSYNC) {
++		me->fIrqStamp = mach_absolute_time();
++		OSIncrementAtomic((volatile SInt32 *)&me->fIrqVsyncs);
++	}
++	OSBitOrAtomic(ev, (volatile UInt32 *)&me->fIrqEvents);
++	return true;
++}
++
++/* On the work loop, after the filter: one refresh to the client for each frame start. */
++void
++StarbiteDisplay::irqAction(OSObject *owner, IOInterruptEventSource *src __unused, int count __unused)
++{
++	StarbiteDisplay *me = (StarbiteDisplay *)owner;
++	uint32_t ev, n;
++
++	do {
++		ev = me->fIrqEvents;
++	} while (!OSCompareAndSwap(ev, 0, (volatile UInt32 *)&me->fIrqEvents));
++	do {
++		n = me->fIrqVsyncs;
++	} while (!OSCompareAndSwap(n, 0, (volatile UInt32 *)&me->fIrqVsyncs));
++	if (ev & (SBD_EV_TIMEOUT | SBD_EV_CONFLICT)) {
++		static uint32_t said;
++
++		if (said < 8) {
++			said++;
++			IOLog("StarbiteDisplay: DECON extra interrupt:%s%s\n", (ev & SBD_EV_TIMEOUT) ? " timeout" : "",
++			    (ev & SBD_EV_CONFLICT) ? " resource conflict" : "");
++		}
++	}
++	if (n != 0) {
++		me->deliver(me->fIrqStamp, ev, false);
++	}
++}
++
++/*
++ * The 60 Hz backstop. If the interrupt delivered a refresh since the last tick, nothing to do. Otherwise count
++ * refreshes from FRAME_COUNT, and if the hardware had none at all (TE masked, panel asleep, no DECON), make one,
++ * so that CoreAnimation's display link never stops.
++ */
++void
++StarbiteDisplay::timerFired(OSObject *owner, IOTimerEventSource *sender)
++{
++	StarbiteDisplay *me = (StarbiteDisplay *)owner;
++	static uint64_t deliveredAtLastTick;
++
++	if (me->fVsyncFn != NULL && me->fVsyncCount == deliveredAtLastTick) {
++		uint32_t refreshes = 0, ev = 0;
++
++		if (me->fDecon.probed > 0) {
++			IOInterruptState state = IOSimpleLockLockDisableInterrupt(me->fHwLock);
++
++			ev = sbd_decon_poll(&me->fDecon, &refreshes);
++			IOSimpleLockUnlockEnableInterrupt(me->fHwLock, state);
++		}
++		me->deliver(mach_absolute_time(), ev, refreshes == 0);
++	}
++	deliveredAtLastTick = me->fVsyncCount;
++	sender->setTimeoutUS(SBD_VSYNC_US);
++}
++
++void
++StarbiteDisplay::deliver(uint64_t stamp, uint32_t events, bool synthetic)
++{
++	StarbiteDisplayVsync fn = fVsyncFn;
++
++	fVsyncCount++;
++	if (synthetic) {
++		fSyntheticVsyncs++;
++	}
++	if (fn != NULL) {
++		fn(fVsyncTarget, fVsyncCount, stamp, events);
++	}
++}
++
++IOReturn
++StarbiteDisplay::setBrightness(int level)
++{
++	int err;
++
++	if (!panelUsable()) {
++		return kIOReturnUnsupported;
++	}
++	IOLockLock(fPanelLock);
++	err = sbd_panel_set_brightness(&fPanel, level);
++	IOLockUnlock(fPanelLock);
++	static uint32_t said;
++	if (said < 16 || err != SBD_DSIM_OK) {
++		said++;
++		IOLog("StarbiteDisplay: brightness %d -> AOR %#06x: %s (packets %u, timeouts %u)\n", level,
++		    sbd_panel_aor_for_level(level), err == SBD_DSIM_OK ? "sent" : "NOT sent", fPanel.stats.packets,
++		    fPanel.stats.timeouts);
++	}
++	return err == SBD_DSIM_OK ? kIOReturnSuccess : kIOReturnTimeout;
++}
++
++IOReturn
++StarbiteDisplay::panelPower(bool on)
++{
++	int err = SBD_DSIM_OK;
++
++	if (!fHaveDsim || fPanelPolicy < 2) {
++		return kIOReturnSuccess;        /* dark by a black frame alone (AMOLED: black pixels are off) */
++	}
++	IOLockLock(fPanelLock);
++	if (fPanelPolicy >= 3) {
++		err = sbd_panel_sleep(&fPanel, !on);
++	} else {
++		err = sbd_panel_display(&fPanel, on);
++	}
++	IOLockUnlock(fPanelLock);
++	IOLog("StarbiteDisplay: panel %s (%s): %s\n", on ? "on" : "off", fPanelPolicy >= 3 ? "sleep" : "display",
++	    err == SBD_DSIM_OK ? "sent" : "NOT sent");
++	return err == SBD_DSIM_OK ? kIOReturnSuccess : kIOReturnTimeout;
++}
++
++/* ------------------------------------------------------------------------------------------------------------
++ * AppleCLCD: the IOMobileFramebuffer service
++ * ------------------------------------------------------------------------------------------------------------ */
++
++OSDefineMetaClassAndStructors(IOMobileFramebuffer, IOService);
++OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
++OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
++
++static uint32_t
++sbd_nub_u32(IOService *nub, const char *key)
++{
++	OSData *data = nub != NULL ? OSDynamicCast(OSData, nub->getProperty(key)) : NULL;
++	uint32_t v = 0;
++
++	if (data != NULL && data->getLength() >= sizeof(v)) {
++		memcpy(&v, data->getBytesNoCopy(), sizeof(v));
++	}
++	return v;
++}
++
++bool
++AppleCLCD::allocTarget(StarbiteTarget *t, uint32_t width, uint32_t height, uint32_t rowBytes)
++{
++	vm_size_t bytes = round_page((vm_size_t)rowBytes * height);
++	/* physically contiguous, below 4 GiB (the IDMA takes 32-bit addresses), write-combined like S-Boot's buffer:
++	 * what is drawn is in RAM without a cache flush */
++	IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
++	    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache, bytes, 0x00000000fffff000ULL);
++	IOByteCount len = 0;
++
++	if (md == NULL) {
++		IOLog("StarbiteDisplay: no contiguous %lu KiB below 4 GiB for a scan-out buffer\n", (unsigned long)(bytes >> 10));
++		return false;
++	}
++	addr64_t pa = md->getPhysicalSegment(0, &len, kIOMemoryMapperNone);
++	if (pa == 0 || len < bytes || fHw->bufferOK(pa, (uint64_t)rowBytes * height, rowBytes) != SBD_OK) {
++		IOLog("StarbiteDisplay: scan-out buffer at %#llx (%llu of %lu bytes in one piece) not usable by the IDMA\n",
++		    (unsigned long long)pa, (unsigned long long)len, (unsigned long)bytes);
++		md->release();
++		return false;
++	}
++	t->va = (uintptr_t)md->getBytesNoCopy();
++	t->phys = pa;
++	t->width = width;
++	t->height = height;
++	t->rowBytes = rowBytes;
++	t->memory = md;
++	bzero((void *)t->va, bytes);
++	return true;
++}
++
++bool
++AppleCLCD::setupFlip()
++{
++	if (!allocTarget(&fTargets[1], fWidth, fHeight, fRowBytes)) {
++		return false;
++	}
++	int err = fHw->attachFlip();
++	if (err != SBD_OK) {
++		IOLog("StarbiteDisplay: flips not attached: %s\n", sbd_decon_strerror(err));
++		OSSafeReleaseNULL(fTargets[1].memory);
++		return false;
++	}
++	fMode = kStarbitePresentFlip;
++	fFront = 0;                     /* S-Boot's framebuffer is on screen */
++	fFrontOwn = true;
++	return true;
++}
++
++bool
++AppleCLCD::setupScaler()
++{
++	struct sbd_rect dst;
++	uint32_t rowBytes = (fLogicalW * 4 + 63) & ~63u;
++	StarbiteTarget a = {}, b = {};
++
++	if (!allocTarget(&a, fLogicalW, fLogicalH, rowBytes) || !allocTarget(&b, fLogicalW, fLogicalH, rowBytes)) {
++		OSSafeReleaseNULL(a.memory);
++		OSSafeReleaseNULL(b.memory);
++		return false;
++	}
++	sbd_decon_fit(fLogicalW, fLogicalH, fWidth, fHeight, &dst);
++	int err = fHw->attachScaler(a.phys, fLogicalW, fLogicalH, rowBytes, &dst);
++	if (err != SBD_OK) {
++		IOLog("StarbiteDisplay: VGF0's scaler not attached: %s; S-Boot's window stays\n", sbd_decon_strerror(err));
++		OSSafeReleaseNULL(a.memory);
++		OSSafeReleaseNULL(b.memory);
++		return false;
++	}
++	IOLog("StarbiteDisplay: VGF0 scales %ux%u to %ux%u at %u,%u\n", fLogicalW, fLogicalH, dst.w, dst.h, dst.x, dst.y);
++	fTargets[0] = a;
++	fTargets[1] = b;
++	fMode = kStarbitePresentScaler;
++	fFront = 0;
++	fFrontOwn = true;
++	return true;
++}
++
++bool
++AppleCLCD::start(IOService *provider)
++{
++	PE_Video video;
++	char want[16] = "flip";
++	uint32_t hz = 10, lw = 0, lh = 0, selftest = 0;
++	int native = 0, gpu = 0, bl = -1;
++
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	/* S-Boot's framebuffer, as the loader's boot_args describe it */
++	PE_current_console(&video);
++	fPhys = video.v_baseAddr;
++	fWidth = (uint32_t)video.v_width;
++	fHeight = (uint32_t)video.v_height;
++	fRowBytes = (uint32_t)video.v_rowBytes;
++	if (fPhys == 0 || fWidth == 0 || fHeight == 0 || fRowBytes < fWidth * 4) {
++		IOLog("StarbiteDisplay: AppleCLCD: no boot framebuffer\n");
++		return false;
++	}
++	/* The canvas userland draws: the ADT's (IOMobileFramebuffer.framework reads the same two properties from
++	 * this service's provider), else sweetfb_lw / sweetfb_lh, else the panel. sweetfb_native=1: the panel. */
++	fLogicalW = fWidth;
++	fLogicalH = fHeight;
++	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
++	if (!native) {
++		lw = sbd_nub_u32(provider, "canvas-width");
++		lh = sbd_nub_u32(provider, "canvas-height");
++		if (lw == 0 || lh == 0) {
++			PE_parse_boot_argn("sweetfb_lw", &lw, sizeof(lw));
++			PE_parse_boot_argn("sweetfb_lh", &lh, sizeof(lh));
++		}
++		if (lw >= 320 && lw <= fWidth && lh >= 480 && lh <= fHeight) {
++			fLogicalW = lw;
++			fLogicalH = lh;
++		}
++	}
++	fScaled = fLogicalW != fWidth || fLogicalH != fHeight;
++
++	fLock = IOLockAlloc();
++	fClients = OSArray::withCapacity(4);
++	fWorkLoop = IOWorkLoop::workLoop();
++	fSuBuf = (uint32_t *)IOMallocData(SBD_SU_MAX * SBD_SU_MAX * sizeof(uint32_t));
++	fPanelSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SBD_FORMAT_BGRA);
++	if (fLock == NULL || fClients == NULL || fWorkLoop == NULL || fSuBuf == NULL || fPanelSurface == NULL ||
++	    fPanelSurface->kernelAddress() == 0) {
++		IOLog("StarbiteDisplay: AppleCLCD: setup failed\n");
++		return false;
++	}
++	fTargets[0].va = fPanelSurface->kernelAddress();
++	fTargets[0].phys = fPhys;
++	fTargets[0].width = fWidth;
++	fTargets[0].height = fHeight;
++	fTargets[0].rowBytes = fRowBytes;
++	fTargets[0].memory = NULL;
++	fMode = kStarbitePresentCopy;
++	fFront = 0;
++	fFrontOwn = true;
++
++	/* the hardware half, if the ADT has a decon node and the DECON is in the state we know */
++	PE_parse_boot_argn("sbdisp", want, sizeof(want));
++	OSDictionary *match = IOService::serviceMatching("StarbiteDisplay");
++	IOService *hw = match != NULL ? IOService::waitForMatchingService(match, 3ULL * NSEC_PER_SEC) : NULL;
++	OSSafeReleaseNULL(match);
++	fHw = OSDynamicCast(StarbiteDisplay, hw);
++	if (fHw == NULL) {
++		OSSafeReleaseNULL(hw);
++		IOLog("StarbiteDisplay: AppleCLCD: no StarbiteDisplay service (no decon node?): CPU copy, timer vsync\n");
++	} else if (strcmp(want, "copy") != 0) {
++		if (fHw->probe(fPhys, fWidth, fHeight, fRowBytes) == SBD_OK) {
++			if (strcmp(want, "scale") == 0 && fScaled && !setupScaler()) {
++				IOLog("StarbiteDisplay: sbdisp=scale not possible: trying flips\n");
++			}
++			if (fMode == kStarbitePresentCopy && !setupFlip()) {
++				IOLog("StarbiteDisplay: flips not possible: CPU copy\n");
++			}
++		}
++	}
++	PE_parse_boot_argn("sweetfb_gpu", &gpu, sizeof(gpu));
++	fGpu = gpu != 0 && fMode == kStarbitePresentCopy && fScaled;
++
++	/* The default framebuffer surface has the canvas's size. While the DECON reads S-Boot's buffer directly
++	 * (copy mode, canvas = panel) it is that buffer; otherwise a buffer of its own, presented like any other. */
++	if (fMode == kStarbitePresentCopy && !fScaled) {
++		fSurface = fPanelSurface;
++		fSurface->retain();
++	} else {
++		fSurface = sweet_surface_create_buffer(fLogicalW, fLogicalH, SBD_FORMAT_BGRA);
++	}
++	if (fSurface == NULL) {
++		IOLog("StarbiteDisplay: AppleCLCD: no default surface\n");
++		return false;
++	}
++
++	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
++	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
++
++	publishProperties();
++	if (fHw != NULL) {
++		if (PE_parse_boot_argn("sbdisp_bl", &bl, sizeof(bl)) && bl >= 0) {
++			(void)fHw->setBrightness(bl);
++		}
++		fHw->setVsyncClient(&AppleCLCD::hwVsync, this);
++	} else {
++		fTimer = IOTimerEventSource::timerEventSource(this, &AppleCLCD::timerFired);
++		if (fTimer == NULL || fWorkLoop->addEventSource(fTimer) != kIOReturnSuccess) {
++			IOLog("StarbiteDisplay: AppleCLCD: no vsync timer\n");
++			return false;
++		}
++		fTimer->setTimeoutUS(SBD_VSYNC_US);
++	}
++	registerService();
++	IOLog("StarbiteDisplay: AppleCLCD %ux%u stride %u at %#llx, canvas %ux%u, default surface %u, mode %s%s, "
++	    "vsync by %s\n", fWidth, fHeight, fRowBytes, fPhys, fLogicalW, fLogicalH, fSurface->id, sbd_mode_name(fMode),
++	    fGpu ? " (Mali scales)" : "", fHw == NULL ? "timer" : (fHw->interruptsOn() ? "DECON interrupt" : "FRAME_COUNT poll"));
++
++	if (PE_parse_boot_argn("sbdisp_selftest", &selftest, sizeof(selftest)) && selftest != 0 &&
++	    fMode != kStarbitePresentCopy) {
++		fSelfTestFlips = selftest > 600 ? 600 : selftest;
++		thread_call_t call = thread_call_allocate(&AppleCLCD::selfTestThread, this);
++		if (call != NULL) {
++			thread_call_enter(call);
++		}
++	}
++	return true;
++}
++
++/*
++ * What CoreAnimation reads from this service (QuartzCore's CA::WindowServer::AppleDisplay::update_display_limits,
++ * macOS 27.2, and the shapes a real IOMobileFramebufferShim publishes: NOTES.md "Colour and capability
++ * properties"). A key CoreAnimation does not find is taken as "supported" for several of them (multi-plane RGB,
++ * compressed framebuffers), so what the DECON cannot scan out is said here.
++ */
++static void
++sbd_set_num(OSDictionary *d, const char *key, uint64_t value)
++{
++	OSNumber *n = OSNumber::withNumber(value, 32);
++
++	if (n != NULL) {
++		d->setObject(key, n);
++		n->release();
++	}
++}
++
++void
++AppleCLCD::publishProperties()
++{
++	uint32_t maxW = fWidth > 4096 ? fWidth : 4096, maxH = fHeight > 4096 ? fHeight : 4096;
++	OSDictionary *d;
++
++	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
++	setProperty("external", false);
++	setProperty("DisplayWidth", (unsigned long long)fLogicalW, 32);
++	setProperty("DisplayHeight", (unsigned long long)fLogicalH, 32);
++
++	/* buffer layout the pipe takes: any 4-byte row multiple, 64-byte base alignment (flips need 256) */
++	if ((d = OSDictionary::withCapacity(4)) != NULL) {
++		sbd_set_num(d, "PlaneBaseAlignmentLinear", 256);
++		sbd_set_num(d, "LinearX_Alignment", 64);
++		sbd_set_num(d, "LinearY_Alignment", 1);
++		sbd_set_num(d, "DefaultStride", (fLogicalW * 4 + 63) & ~63u);
++		setProperty("DisplayPipePlaneBaseAlignment", d);
++		d->release();
++	}
++	if ((d = OSDictionary::withCapacity(2)) != NULL) {
++		sbd_set_num(d, "StrideLinearHorizontal", 64);
++		sbd_set_num(d, "StrideLinearVertical", 1);
++		setProperty("DisplayPipeStrideRequirements", d);
++		d->release();
++	}
++	/* source limits; the compression answers live in this dictionary */
++	if ((d = OSDictionary::withCapacity(12)) != NULL) {
++		sbd_set_num(d, "MaxSrcBufferWidth", maxW);
++		sbd_set_num(d, "MaxSrcBufferHeight", maxH);
++		sbd_set_num(d, "MaxSrcRectWidth", maxW);
++		sbd_set_num(d, "MaxSrcRectTotal", (uint64_t)maxW * maxH);
++		sbd_set_num(d, "MaxVideoSrcDownscalingWidth", maxW);
++		sbd_set_num(d, "IOMFBMaxCompressedSizeInBytes", 0);
++		sbd_set_num(d, "IOMFBCompressionSupport", 0);           /* no AGX-compressed framebuffers */
++		sbd_set_num(d, "IOMFBAsyncRGBCompressionSupport", 0);
++		setProperty("IOMFBMaxSrcPixels", d);
++		d->release();
++	}
++	/* one window is driven today: every frame is one full layer (the pointer is blended by this driver) */
++	if ((d = OSDictionary::withCapacity(2)) != NULL) {
++		sbd_set_num(d, "MaxNumLayers", SBD_SWAP_LAYERS);
++		sbd_set_num(d, "FullFrameRequired", 0);
++		setProperty("IOMFBNumLayers", d);
++		d->release();
++	}
++	if ((d = OSDictionary::withCapacity(4)) != NULL) {
++		sbd_set_num(d, "RGBLayer_MaxScale", 1);
++		sbd_set_num(d, "RGBLayer_MinScaleFraction", 1);
++		sbd_set_num(d, "YUVLayer_MaxScale", 1);
++		sbd_set_num(d, "YUVLayer_MinScaleFraction", 1);
++		setProperty("IOMFBScalingLimits", d);
++		d->release();
++	}
++	/* colour formats: 8-bit BGRA only. No multi-plane RGB ('b3a8'), no YUV layers, no ICC, no rotation. */
++	setProperty("IOMFBRGBMultiPlaneSupportKey", false);
++	setProperty("IOMFBYUVSupportKey", false);
++	setProperty("IOMFBYUVPackedUnSupported", true);
++	setProperty("IOMFBYUV420UnSupported", true);
++	setProperty("IOMFBSupportsICC", false);
++	setProperty("IOMFBSupportsRotation", false);
++	setProperty("IOMFBSwapAppleLookSupported", false);
++	setProperty("IOMFBRGBSupportsCursorOnSCLregionKey", false);
++	setProperty("W40a_Blending_OK", 0ULL, 32);
++	setProperty("IOMFBAsyncSwapDisabledKey", true);                 /* no vsync-off swaps */
++	/* 60 Hz, fixed: intervals in 2^-32 s and in timebase ticks */
++	if ((d = OSDictionary::withCapacity(6)) != NULL) {
++		uint64_t ticks = 0;
++
++		nanoseconds_to_absolutetime(1000000000ULL / 60, &ticks);
++		sbd_set_num(d, "displayMinRefreshInterval", 0x100000000ULL / 60);
++		sbd_set_num(d, "displayMaxRefreshInterval", 0x100000000ULL / 60);
++		sbd_set_num(d, "displayMinRefreshIntervalMachTime", ticks);
++		sbd_set_num(d, "displayMaxRefreshIntervalMachTime", ticks);
++		sbd_set_num(d, "displayRefreshStep", 0);
++		sbd_set_num(d, "displayRefreshStepMachTime", 0);
++		setProperty("IOMFBDisplayRefresh", d);
++		d->release();
++	}
++	/* DisplayAttributes: SkyLight's SLCADisplay::copy_ioav_display_attributes (optional; the real panel's facts) */
++	if ((d = OSDictionary::withCapacity(2)) != NULL) {
++		OSDictionary *product = OSDictionary::withCapacity(4), *tiled = OSDictionary::withCapacity(1);
++
++		if (product != NULL) {
++			OSString *name = OSString::withCString("S6E3HA8");
++			OSString *maker = OSString::withCString("SDC");                 /* Samsung Display's PNP ID */
++
++			sbd_set_num(product, "LegacyManufacturerID", 0x4c83);           /* 'SDC' packed as EDID does */
++			sbd_set_num(product, "ProductID", 0x910444);                    /* the panel's DCS ID bytes 91 04 44 */
++			if (maker != NULL) {
++				product->setObject("ManufacturerID", maker);
++				maker->release();
++			}
++			if (name != NULL) {
++				product->setObject("ProductName", name);
++				name->release();
++			}
++			d->setObject("ProductAttributes", product);
++			product->release();
++		}
++		if (tiled != NULL) {
++			d->setObject("TiledDisplayInfo", tiled);
++			tiled->release();
++		}
++		setProperty("DisplayAttributes", d);
++		d->release();
++	}
++	/* brightness, as IOGraphics names a display's parameters: 0..65536, set through setProperties() */
++	if (fHw != NULL && fHw->panelUsable() && (d = OSDictionary::withCapacity(2)) != NULL) {
++		static const char *const names[2] = { "brightness", "linear-brightness" };
++
++		for (unsigned i = 0; i < 2; i++) {
++			OSDictionary *range = OSDictionary::withCapacity(3);
++
++			if (range != NULL) {
++				sbd_set_num(range, "min", 0);
++				sbd_set_num(range, "max", 65536);
++				sbd_set_num(range, "value", 65536);
++				d->setObject(names[i], range);
++				range->release();
++			}
++		}
++		setProperty("IODisplayParameters", d);
++		d->release();
++	}
++}
++
++/* "brightness" / "linear-brightness": a number, or a dictionary with "value"; 0..65536 */
++IOReturn
++AppleCLCD::setProperties(OSObject *properties)
++{
++	OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
++	static const char *const names[2] = { "brightness", "linear-brightness" };
++
++	if (dict == NULL) {
++		return kIOReturnBadArgument;
++	}
++	for (unsigned i = 0; i < 2; i++) {
++		OSObject *o = dict->getObject(names[i]);
++		OSDictionary *inner = OSDynamicCast(OSDictionary, o);
++		OSNumber *n = OSDynamicCast(OSNumber, inner != NULL ? inner->getObject("value") : o);
++
++		if (n != NULL) {
++			uint64_t v = n->unsigned64BitValue();
++
++			if (fHw == NULL) {
++				return kIOReturnUnsupported;
++			}
++			return fHw->setBrightness((int)((v > 65536 ? 65536 : v) * 255 / 65536));
++		}
++	}
++	return kIOReturnUnsupported;
++}
++
++void
++AppleCLCD::addClient(IOMobileFramebufferUserClient *client)
++{
++	IOLockLock(fLock);
++	fClients->setObject(client);
++	IOLockUnlock(fLock);
++}
++
++void
++AppleCLCD::removeClient(IOMobileFramebufferUserClient *client)
++{
++	IOLockLock(fLock);
++	unsigned int i = fClients->getNextIndexOfObject(client, 0);
++	if (i != (unsigned int)-1) {
++		fClients->removeObject(i);
++	}
++	IOLockUnlock(fLock);
++}
++
++/*
++ * A swap only records the frame. The refresh tick shows the latest one: at every refresh when it can go out by
++ * address alone, every fFlushTicks ticks when it has to be drawn first (sweetfb_hz, default 10 Hz).
++ */
++void
++AppleCLCD::swap(const uint8_t *rec, uint32_t size)
++{
++	static uint64_t count;
++	static uint32_t dumped;
++	struct sbd_swap s;
++
++	IOLockLock(fLock);
++	memcpy(fPending, rec, SBD_SWAP_REC_MAX);
++	fDirty = true;
++	IOLockUnlock(fLock);
++	/* the first records, every non-zero word (a new OS release may move the fields again) */
++	if (dumped < 4 && sbd_swap_parse(rec, size, &s) && s.enabled != 0) {
++		char line[160];
++		int n = 0;
++
++		dumped++;
++		IOLog("StarbiteDisplay: swap record %llu size %#x, fields at +%#x\n", count, size, s.shift);
++		for (uint32_t off = 0; off + 4 <= size && off + 4 <= SBD_SWAP_REC_MAX; off += 4) {
++			uint32_t v;
++
++			memcpy(&v, rec + off, 4);
++			if (v == 0) {
++				continue;
++			}
++			n += snprintf(line + n, sizeof(line) - (size_t)n, " %x=%x", off, v);
++			if (n > (int)sizeof(line) - 24) {
++				IOLog("StarbiteDisplay: rec%s\n", line);
++				n = 0;
++			}
++		}
++		if (n != 0) {
++			IOLog("StarbiteDisplay: rec%s\n", line);
++		}
++	}
++	count++;
++}
++
++void
++AppleCLCD::timerFired(OSObject *owner, IOTimerEventSource *sender)
++{
++	AppleCLCD *fb = (AppleCLCD *)owner;
++
++	fb->tick(++fb->fVsyncs, mach_absolute_time());
++	sender->setTimeoutUS(SBD_VSYNC_US);
++}
++
++void
++AppleCLCD::hwVsync(void *target, uint64_t count, uint64_t abstime, uint32_t events __unused)
++{
++	AppleCLCD *fb = (AppleCLCD *)target;
++
++	fb->fVsyncs = count;
++	fb->tick(count, abstime);
++}
++
++void
++AppleCLCD::tick(uint64_t count, uint64_t abstime)
++{
++	uint64_t values[6] = {
++		(uint32_t)count, (uint32_t)(count >> 32),
++		(uint32_t)abstime, (uint32_t)(abstime >> 32),
++		0, 0,
++	};
++	static bool blanked;
++	uint8_t *rec = NULL;
++	bool wake = false;
++
++	IOLockLock(fLock);
++	for (unsigned int i = 0; i < fClients->getCount(); i++) {
++		IOMobileFramebufferUserClient *client = (IOMobileFramebufferUserClient *)fClients->getObject(i);
++
++		client->notify(SBD_NOTIFY_VSYNC, values, 6);
++	}
++	bool off = fPowerOff;
++	bool flush = !off && fDirty && fSelfTestFlips == 0;
++	if (flush && (count % fFlushTicks) != 0) {
++		/* off the copy schedule: only a frame that needs no drawing goes out now. The last full frame having
++		 * gone out by address (the DECON reads a client's surface) is the sign that this one can too. */
++		struct sbd_swap s;
++
++		flush = fMode != kStarbitePresentCopy && !fFrontOwn && sbd_swap_parse(fPending, SBD_SWAP_REC_MAX, &s) &&
++		    s.enabled == 1 && s.layer[0].enabled;
++	}
++#if STARBITE_DISPLAY_LEGACY
++	if (flush && abstime < sweet_fb_hold_until) {
++		flush = false;          /* herolte_gpu.c holds the panel for its test frames */
++	}
++#endif
++	if (flush) {
++		rec = (uint8_t *)IOMallocData(SBD_SWAP_REC_MAX);
++		if (rec != NULL) {
++			memcpy(rec, fPending, SBD_SWAP_REC_MAX);
++			fDirty = false;
++		}
++	}
++	IOLockUnlock(fLock);
++
++	if (off && !blanked) {
++		/* display off: a black frame (AMOLED black is off), then the panel by policy */
++		const StarbiteTarget *t = &fTargets[fMode == kStarbitePresentCopy ? 0 : (fFrontOwn ? 1 - fFront : 0)];
++
++		blanked = true;
++		bzero((void *)t->va, (size_t)t->rowBytes * t->height);
++		if (fMode != kStarbitePresentCopy && fHw->flip(t->phys, t->rowBytes) == SBD_OK) {
++			fFront = (uint32_t)(t - fTargets);
++			fFrontOwn = true;
++		}
++		fSuHave = false;
++		if (fHw != NULL) {
++			(void)fHw->panelPower(false);
++		}
++	} else if (!off && blanked) {
++		blanked = false;
++		wake = true;
++		if (fHw != NULL) {
++			(void)fHw->panelPower(true);
++		}
++	}
++	if (wake && fHaveLastFull && rec == NULL) {
++		(void)present(fLastFull);       /* the frame that was on screen before */
++	}
++	if (rec != NULL) {
++		(void)present(rec);
++#if STARBITE_DISPLAY_LEGACY
++		sweet_last_present_abs = mach_absolute_time();  /* 0413: the stall probe */
++#endif
++		IOFreeData(rec, SBD_SWAP_REC_MAX);
++	}
++
++	/* every 30 s, and for a milestone test boot (sbstop=display): the counters */
++	if ((count % 1800) == 0) {
++		reportAndStop(NULL);
++	}
++#if STARBITE_DISPLAY_LEGACY
++	if ((count % 30) == 0 && starlte_sbstop_at("display")) {
++		struct sbd_decon c = {};
++		uint32_t limit = 45, want = 60;
++
++		PE_parse_boot_argn("sbdisp_stop_s", &limit, sizeof(limit));
++		PE_parse_boot_argn("sbdisp_stop_flips", &want, sizeof(want));
++		if (fHw != NULL) {
++			fHw->counters(&c);
++		}
++		if (fSelfTestFlips == 0 && c.flips_latched >= want && c.vsync_irqs >= 120) {
++			reportAndStop("PASS");
++			starlte_sbstop_now("display");
++		} else if (sbd_uptime_ms() >= (uint64_t)limit * 1000) {
++			reportAndStop("FAIL");
++			starlte_sbstop_now("display");
++		}
++	}
++#endif
++}
++
++void
++AppleCLCD::reportAndStop(const char *verdict)
++{
++	struct sbd_decon c = {};
++
++	if (fHw != NULL) {
++		fHw->counters(&c);
++	}
++	if (verdict != NULL && strcmp(verdict, "PASS") == 0) {
++		IOLog("StarbiteDisplay: M8 PASS: frame flips by address %llu, vsync IRQ counted %llu\n", c.flips_latched,
++		    c.vsync_irqs);
++	} else if (verdict != NULL) {
++		IOLog("StarbiteDisplay: M8 FAIL: frame flips by address %llu, vsync IRQ counted %llu at %llu ms\n",
++		    c.flips_latched, c.vsync_irqs, sbd_uptime_ms());
++	}
++	IOLog("StarbiteDisplay: mode %s: flips requested %llu latched %llu replaced %llu (zero-copy %llu, drawn %llu, "
++	    "refused %llu), in place %llu, copies %llu; vsync irq %llu, frame done %llu, polled %llu, synthetic %llu, "
++	    "delivered %llu; DECON timeouts %llu conflicts %llu; shown %#x\n", sbd_mode_name(fMode), c.flips_requested,
++	    c.flips_latched, c.flips_replaced, fZeroCopyFlips, fCopyFlips, fFlipRefused, fInPlace, fCopies, c.vsync_irqs,
++	    c.frame_done_irqs, c.refreshes_polled, fHw != NULL ? fHw->syntheticVsyncs() : 0, fVsyncs, c.timeout_irqs,
++	    c.conflict_irqs, c.shown_base);
++}
++
++/* ---- self test: flips with no userland ---- */
++
++void
++AppleCLCD::fillTestPattern(const StarbiteTarget *t, uint32_t seed)
++{
++	/* eight colour bars, rotated by the seed, with a white line that moves down: tearing would show */
++	static const uint32_t bars[8] = {
++		0xffffffff, 0xffffff00, 0xff00ffff, 0xff00ff00, 0xffff00ff, 0xffff0000, 0xff0000ff, 0xff202020,
++	};
++	uint32_t line = (seed * 97) % t->height;
++
++	for (uint32_t y = 0; y < t->height; y++) {
++		uint32_t *row = (uint32_t *)(t->va + (uintptr_t)y * t->rowBytes);
++		uint32_t colour = bars[((y * 8 / t->height) + seed) & 7];
++
++		if (y >= line && y < line + 8) {
++			colour = 0xffffffff;
++		}
++		for (uint32_t x = 0; x < t->width; x++) {
++			row[x] = colour;
++		}
++	}
++}
++
++void
++AppleCLCD::selfTestThread(void *arg, void *unused __unused)
++{
++	AppleCLCD *fb = (AppleCLCD *)arg;
++
++	fb->selfTest(fb->fSelfTestFlips);
++}
++
++void
++AppleCLCD::selfTest(uint32_t flips)
++{
++	struct sbd_decon before = {}, after = {};
++	uint32_t latched = 0, late = 0;
++	/* S-Boot's framebuffer keeps its picture (flip mode: target 0): only the second buffer is drawn into,
++	 * and the test flips between the two */
++	uint32_t draw = 1;
++
++	IOSleep(500);
++	fHw->counters(&before);
++	IOLog("StarbiteDisplay: self test: %u flips between %#llx and %#llx (%s mode)\n", flips, fTargets[0].phys,
++	    fTargets[1].phys, sbd_mode_name(fMode));
++	for (uint32_t i = 0; i < flips; i++) {
++		uint32_t to = (i & 1) ? 0 : 1;
++		unsigned waited = 0;
++
++		if (to == draw || fMode == kStarbitePresentScaler) {
++			fillTestPattern(&fTargets[to], i / 2);
++		}
++		if (fHw->flip(fTargets[to].phys, fTargets[to].rowBytes) != SBD_OK) {
++			IOLog("StarbiteDisplay: self test: flip %u refused\n", i);
++			break;
++		}
++		while (!fHw->latched() && waited < 100) {
++			IOSleep(2);
++			waited += 2;
++		}
++		if (fHw->latched()) {
++			latched++;
++			late += waited > 34;
++		}
++		fFront = to;
++		fFrontOwn = true;
++		IOSleep(34);            /* two refreshes on screen */
++	}
++	IOSleep(50);
++	fHw->counters(&after);
++	IOLog("StarbiteDisplay: self test: %u of %u flips taken by the DECON (%u later than two refreshes); "
++	    "flips latched +%llu, vsync IRQ +%llu, FRAME_COUNT polled +%llu, synthetic %llu: %s\n", latched, flips, late,
++	    after.flips_latched - before.flips_latched, after.vsync_irqs - before.vsync_irqs,
++	    after.refreshes_polled - before.refreshes_polled, fHw->syntheticVsyncs(),
++	    latched == flips && after.vsync_irqs > before.vsync_irqs ? "ok" : "NOT ok");
++	fSelfTestFlips = 0;             /* presents may run again */
++}
++
++/* ---- drawing ---- */
++
++static uint16_t sbd_column[SBD_COLUMNS];
++
++/*
++ * Where the canvas rectangle (dx, dy, w, h) lands in target t: one to one when the target has the canvas's
++ * size, otherwise scaled to the largest rectangle of the target with the canvas's aspect, centred.
++ */
++void
++AppleCLCD::mapRect(const StarbiteTarget *t, int32_t dx, int32_t dy, int32_t w, int32_t h, int32_t *x0, int32_t *y0,
++    int32_t *x1, int32_t *y1, int32_t *barX, int32_t *barY, int32_t *outW, int32_t *outH)
++{
++	int32_t lw = (int32_t)fLogicalW, lh = (int32_t)fLogicalH, tw = (int32_t)t->width, th = (int32_t)t->height;
++
++	if (tw == lw && th == lh) {
++		*barX = *barY = 0;
++		*outW = tw;
++		*outH = th;
++		*x0 = dx;
++		*y0 = dy;
++		*x1 = dx + w;
++		*y1 = dy + h;
++	} else {
++		*outW = (int32_t)((int64_t)lw * th / lh);
++		*outH = th;
++		if (*outW > tw) {
++			*outW = tw;
++			*outH = (int32_t)((int64_t)lh * tw / lw);
++		}
++		*barX = (tw - *outW) / 2;
++		*barY = (th - *outH) / 2;
++		*x0 = *barX + (int32_t)((int64_t)dx * *outW / lw);
++		*x1 = *barX + (int32_t)(((int64_t)(dx + w) * *outW + lw - 1) / lw);
++		*y0 = *barY + (int32_t)((int64_t)dy * *outH / lh);
++		*y1 = *barY + (int32_t)(((int64_t)(dy + h) * *outH + lh - 1) / lh);
++	}
++	if (*x0 < *barX) {
++		*x0 = *barX;
++	}
++	if (*y0 < *barY) {
++		*y0 = *barY;
++	}
++	if (*x1 > *barX + *outW) {
++		*x1 = *barX + *outW;
++	}
++	if (*y1 > *barY + *outH) {
++		*y1 = *barY + *outH;
++	}
++}
++
++/* save (true) the target's pixels of the current save-under rectangle, or put the saved ones back (false) */
++void
++AppleCLCD::saveUnder(const StarbiteTarget *t, bool save)
++{
++	if (fSuW <= 0 || fSuH <= 0 || (!save && fSuTarget != t->va)) {
++		fSuHave = false;
++		return;
++	}
++	for (int32_t y = 0; y < fSuH; y++) {
++		uint32_t *pixels = (uint32_t *)(t->va + (uintptr_t)(fSuY + y) * t->rowBytes + (uintptr_t)fSuX * 4);
++		uint32_t *buf = &fSuBuf[y * SBD_SU_MAX];
++
++		if (save) {
++			memcpy(buf, pixels, (size_t)fSuW * 4);
++		} else {
++			memcpy(pixels, buf, (size_t)fSuW * 4);
++		}
++	}
++	fSuHave = save;
++	fSuTarget = t->va;
++}
++
++/* sweetfbstats=1: what is in a full-size surface, at most once a second, without eyes on the panel */
++void
++AppleCLCD::surfaceStats(SweetSurface *s, uint32_t swapID)
++{
++	static int on = -1;
++	static uint64_t last;
++	uintptr_t src = s->kernelAddress();
++
++	if (on < 0) {
++		on = 0;
++		PE_parse_boot_argn("sweetfbstats", &on, sizeof(on));
++	}
++	if (!on || src == 0 || s->bytesPerElement != 4 || s->width < 256 || s->height < 256 || sbd_uptime_ms() - last < 1000) {
++		return;
++	}
++	last = sbd_uptime_ms();
++	uint32_t lit = 0;
++	uint64_t r = 0, g = 0, b = 0;
++	char rows[16][17];
++	for (uint32_t gy = 0; gy < 16; gy++) {
++		for (uint32_t gx = 0; gx < 16; gx++) {
++			uint32_t px = (gx * 2 + 1) * s->width / 32, py = (gy * 2 + 1) * s->height / 32;
++			uint32_t v = *(const volatile uint32_t *)(src + s->offset + (size_t)py * s->bytesPerRow + px * 4);
++			uint32_t B = v & 0xff, G = (v >> 8) & 0xff, R = (v >> 16) & 0xff;
++			uint32_t y = (R * 3 + G * 6 + B) / 10;
++
++			lit += y > 16;
++			r += R;
++			g += G;
++			b += B;
++			rows[gy][gx] = " .:-=+*#%@"[y * 10 / 256];
++		}
++		rows[gy][16] = 0;
++	}
++	IOLog("SWEET FBSTAT: swap %u surface %u %ux%u: %u/256 lit, avg rgb %llu,%llu,%llu\n", swapID, s->id, s->width,
++	    s->height, lit, r / 256, g / 256, b / 256);
++	for (uint32_t gy = 0; gy < 16; gy++) {
++		IOLog("SWEET FBSTAT: |%s|\n", rows[gy]);
++	}
++}
++
++/*
++ * One layer into a target. Layer 0 is copied (scaled, nearest neighbour, when the target is not canvas-sized);
++ * the layers above it (the pointer, overlays) are blended, premultiplied BGRA over what is there.
++ */
++uint64_t
++AppleCLCD::drawLayer(const StarbiteTarget *t, SweetSurface *s, const struct sbd_swap_layer *layer, uint32_t index)
++{
++	int32_t sx = layer->sx, sy = layer->sy, dx = layer->dx, dy = layer->dy, w = layer->dw, h = layer->dh;
++	int32_t x0, y0, x1, y1, barX, barY, outW, outH;
++	uintptr_t base = s->kernelAddress();
++	bool blend = index > 0;
++	bool oneToOne = t->width == fLogicalW && t->height == fLogicalH;
++
++	if (base == 0 || s->bytesPerElement != 4 || s->elementWidth != 1 || s->elementHeight != 1 || s->memory == NULL) {
++		return 0;
++	}
++	if (w <= 0 || h <= 0) {
++		w = (int32_t)s->width;
++		h = (int32_t)s->height;
++	}
++	if (sx < 0 || sy < 0) {
++		sx = sy = 0;
++	}
++	if (dx < 0 || dy < 0) {
++		dx = dy = 0;
++	}
++	if (w > (int32_t)s->width - sx) {
++		w = (int32_t)s->width - sx;
++	}
++	if (h > (int32_t)s->height - sy) {
++		h = (int32_t)s->height - sy;
++	}
++	if (w > (int32_t)fLogicalW - dx) {
++		w = (int32_t)fLogicalW - dx;
++	}
++	if (h > (int32_t)fLogicalH - dy) {
++		h = (int32_t)fLogicalH - dy;
++	}
++	if (w <= 0 || h <= 0) {
++		return 0;
++	}
++	uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow + (uint64_t)(sx + w) * 4;
++	if (last > s->memory->getLength()) {
++		return 0;
++	}
++	uintptr_t src = base + s->offset + (uintptr_t)sy * s->bytesPerRow + (uintptr_t)sx * 4;
++
++	if (blend && w <= 256 && h <= 256) {
++#if STARBITE_DISPLAY_LEGACY
++		/* 0397: where the pointer layer is drawn (canvas coordinates), for the touch driver's direct touch */
++		sweet_fb_cur_x = dx - sx;
++		sweet_fb_cur_y = dy - sy;
++		__atomic_fetch_add(&sweet_fb_cur_seq, 1, __ATOMIC_RELEASE);
++#endif
++	}
++	mapRect(t, dx, dy, w, h, &x0, &y0, &x1, &y1, &barX, &barY, &outW, &outH);
++	int32_t pw = x1 - x0;
++	if (pw <= 0 || y1 <= y0 || pw > SBD_COLUMNS) {
++		return 0;
++	}
++	if (blend) {
++		/* 0396: the target's pixels under the layer are saved before it is blended in */
++		fSuX = x0;
++		fSuY = y0;
++		fSuW = pw > SBD_SU_MAX ? SBD_SU_MAX : pw;
++		fSuH = y1 - y0 > SBD_SU_MAX ? SBD_SU_MAX : y1 - y0;
++		saveUnder(t, true);
++	}
++	if (oneToOne && !blend) {
++		for (int32_t y = 0; y < h; y++) {
++			memcpy((void *)(t->va + (uintptr_t)(y0 + y) * t->rowBytes + (uintptr_t)x0 * 4),
++			    (const void *)(src + (uintptr_t)y * s->bytesPerRow), (size_t)pw * 4);
++		}
++		return (uint64_t)pw * (uint64_t)h * 4;
++	}
++	for (int32_t x = 0; x < pw; x++) {
++		int32_t c = oneToOne ? x : (int32_t)((int64_t)(x0 + x - barX) * (int32_t)fLogicalW / outW) - dx;
++
++		sbd_column[x] = (uint16_t)(c < 0 ? 0 : (c >= w ? w - 1 : c));
++	}
++	int32_t prev = -1;
++	uint32_t *prevRow = NULL;
++	for (int32_t py = y0; py < y1; py++) {
++		int32_t r = oneToOne ? py - y0 : (int32_t)((int64_t)(py - barY) * (int32_t)fLogicalH / outH) - dy;
++		uint32_t *out = (uint32_t *)(t->va + (uintptr_t)py * t->rowBytes + (uintptr_t)x0 * 4);
++
++		r = r < 0 ? 0 : (r >= h ? h - 1 : r);
++		const uint32_t *in = (const uint32_t *)(src + (uintptr_t)r * s->bytesPerRow);
++		if (blend) {
++			for (int32_t x = 0; x < pw; x++) {
++				uint32_t v = in[sbd_column[x]], a = v >> 24;
++
++				if (a == 0) {
++					continue;
++				}
++				if (a == 255) {
++					out[x] = v;
++					continue;
++				}
++				uint32_t o = out[x], k = 255 - a, res = 0xff000000u;
++				for (uint32_t sh = 0; sh < 24; sh += 8) {
++					uint32_t c = ((v >> sh) & 0xff) + (((o >> sh) & 0xff) * k + 127) / 255;
++
++					res |= (c > 255 ? 255 : c) << sh;
++				}
++				out[x] = res;
++			}
++			continue;
++		}
++		if (r == prev && prevRow != NULL) {
++			memcpy(out, prevRow, (size_t)pw * 4);   /* a repeated source row: copy the row just made */
++		} else {
++			for (int32_t x = 0; x < pw; x++) {
++				out[x] = in[sbd_column[x]];
++			}
++			prev = r;
++		}
++		prevRow = out;
++	}
++	return (uint64_t)pw * (uint64_t)(y1 - y0) * 4;
++}
++
++uint64_t
++AppleCLCD::drawLayers(const struct sbd_swap *swap, const StarbiteTarget *t)
++{
++	bool l0 = swap->layer[0].enabled, upper = false;
++	uint64_t drawn = 0;
++	static uint32_t logged;
++	static uintptr_t cleared[2];
++
++	/* bars beside a scaled picture are black: clear a target once before its first scaled frame */
++	if (l0 && (t->width != fLogicalW || t->height != fLogicalH) && cleared[0] != t->va && cleared[1] != t->va) {
++		cleared[cleared[0] == 0 ? 0 : 1] = t->va;
++		bzero((void *)t->va, (size_t)t->rowBytes * t->height);
++	}
++	for (uint32_t i = 0; i < SBD_SWAP_LAYERS; i++) {
++		const struct sbd_swap_layer *layer = &swap->layer[i];
++
++		if (!layer->enabled) {
++			continue;
++		}
++		SweetSurface *s = sweet_surface_copy(layer->surface);
++		if (logged < 16) {
++			logged++;
++			IOLog("StarbiteDisplay: swap %u layer %u surface %u %ux%u fmt %#x bpr %u a %d,%d %dx%d b %d,%d %dx%d\n",
++			    swap->swap_id, i, layer->surface, s ? s->width : 0, s ? s->height : 0, s ? s->pixelFormat : 0,
++			    s ? s->bytesPerRow : 0, layer->sx, layer->sy, layer->sw, layer->sh, layer->dx, layer->dy, layer->dw,
++			    layer->dh);
++		}
++		if (s == NULL) {
++			continue;
++		}
++		if (s == fPanelSurface && t->va == fTargets[0].va && fMode != kStarbitePresentScaler) {
++			s->release();           /* drawn straight into S-Boot's framebuffer: nothing to copy */
++			continue;
++		}
++		if (i == 0) {
++			surfaceStats(s, swap->swap_id);
++#if STARBITE_DISPLAY_LEGACY
++			if (s->width == fLogicalW && s->height == fLogicalH) {
++				__atomic_store_n(&sbd_last_surface_id, s->id, __ATOMIC_RELEASE);
++			}
++#endif
++		} else {
++			/* a pointer-only swap first puts back what was under the pointer */
++			if (!upper && fSuHave && !l0) {
++				saveUnder(t, false);
++			}
++			upper = true;
++		}
++		drawn += drawLayer(t, s, layer, i);
++		s->release();
++	}
++	if (l0 && !upper) {
++		fSuHave = false;                /* the new frame has no pointer on it */
++	} else if (!l0 && !upper && fSuHave) {
++		saveUnder(t, false);            /* pointer hidden: put the frame back */
++		fSuHave = false;
++	}
++	return drawn;
++}
++
++/*
++ * Can the DECON read this surface where it is? One full-canvas layer whose pixels are one physically contiguous
++ * piece below the scan-out limit, 32-bit BGRA, of the size the current channel is set up for. Its pixels are
++ * pushed out of the processor's cache first (the DMA reads RAM).
++ */
++bool
++AppleCLCD::surfaceFlippable(SweetSurface *s, const struct sbd_swap_layer *layer, uint64_t *phys)
++{
++	uint32_t wantW = fMode == kStarbitePresentScaler ? fLogicalW : fWidth;
++	uint32_t wantH = fMode == kStarbitePresentScaler ? fLogicalH : fHeight;
++	IOByteCount len = 0;
++
++	if (s->memory == NULL || s->bytesPerElement != 4 || s->elementWidth != 1 || s->elementHeight != 1 ||
++	    s->pixelFormat != SBD_FORMAT_BGRA || s->width != wantW || s->height != wantH ||
++	    layer->sx > 0 || layer->sy > 0 || layer->dx > 0 || layer->dy > 0) {
++		return false;
++	}
++	uint64_t bytes = (uint64_t)s->bytesPerRow * s->height;
++	if ((uint64_t)s->offset + bytes > s->memory->getLength()) {
++		return false;
++	}
++	addr64_t pa = s->memory->getPhysicalSegment(s->offset, &len, kIOMemoryMapperNone);
++	if (pa == 0 || len < bytes || fHw->bufferOK(pa, bytes, s->bytesPerRow) != SBD_OK) {
++		return false;
++	}
++	if (s->memory->performOperation(kIOMemoryIncoherentIOStore, s->offset, (IOByteCount)bytes) != kIOReturnSuccess) {
++		return false;           /* cannot promise the pixels are in RAM: draw a copy instead */
++	}
++	*phys = pa;
++	return true;
++}
++
++uint64_t
++AppleCLCD::present(const uint8_t *rec)
++{
++	struct sbd_swap swap;
++	uint64_t drawn = 0;
++
++	if (!sbd_swap_parse(rec, SBD_SWAP_REC_MAX, &swap)) {
++		return 0;
++	}
++	if (!fConsolePaused) {
++		int quiet = 0;
++
++		fConsolePaused = true;
++#if STARBITE_DISPLAY_LEGACY
++		if (PE_parse_boot_argn("sweetfb_noconsole", &quiet, sizeof(quiet)) && quiet != 0) {
++			sweet_console_muted = 1;
++		}
++#else
++		(void)quiet;
++#endif
++	}
++	bool l0 = swap.layer[0].enabled;
++
++	if (fMode == kStarbitePresentCopy) {
++#if STARBITE_DISPLAY_LEGACY
++		/* sweetfb_gpu: the Mali scales a lone full-canvas layer into S-Boot's framebuffer */
++		if (fGpu && l0 && swap.enabled == 1) {
++			SweetSurface *s = sweet_surface_copy(swap.layer[0].surface);
++			bool done = s != NULL && s->width == fLogicalW && s->height == fLogicalH && s->bytesPerElement == 4 &&
++			    gpuPresent(s, 0, 0, (int32_t)fLogicalW, (int32_t)fLogicalH);
++
++			OSSafeReleaseNULL(s);
++			if (done) {
++				fCopies++;
++				drawn = (uint64_t)fWidth * fHeight * 4;
++				goto shown;
++			}
++		}
++#endif
++		drawn = drawLayers(&swap, &fTargets[0]);
++		fCopies += drawn != 0;
++		goto shown;
++	}
++
++	if (l0) {
++		memcpy(fLastFull, rec, SBD_SWAP_REC_MAX);
++		fHaveLastFull = true;
++		/* by address alone? */
++		if (swap.enabled == 1) {
++			SweetSurface *s = sweet_surface_copy(swap.layer[0].surface);
++			uint64_t phys = 0;
++
++			if (s != NULL && surfaceFlippable(s, &swap.layer[0], &phys) && fHw->flip(phys, s->bytesPerRow) == SBD_OK) {
++				surfaceStats(s, swap.swap_id);
++				OSSafeReleaseNULL(fShownBefore);        /* two flips ago: the DECON has let go of it */
++				fShownBefore = fShown;
++				fShown = s;
++				fFrontOwn = false;
++				fSuHave = false;
++				fZeroCopyFlips++;
++				drawn = (uint64_t)s->bytesPerRow * s->height;
++				goto shown;
++			}
++			if (s != NULL) {
++				fFlipRefused++;
++				s->release();
++			}
++		}
++		/* draw it into the buffer the DECON is not reading, then flip to that */
++		uint32_t back = fFrontOwn ? 1 - fFront : 0;
++		const StarbiteTarget *t = &fTargets[back];
++
++		drawn = drawLayers(&swap, t);
++		if (drawn != 0 && fHw->flip(t->phys, t->rowBytes) == SBD_OK) {
++			fFront = back;
++			fFrontOwn = true;
++			fCopyFlips++;
++		}
++		goto shown;
++	}
++
++	/* no layer 0: a small update (the pointer) on top of the frame that is showing */
++	if (fFrontOwn) {
++		drawn = drawLayers(&swap, &fTargets[fFront]);
++		fInPlace += drawn != 0;
++	} else if (fHaveLastFull) {
++		/* the DECON reads a client's surface: it is not ours to draw on. Rebuild the frame in a buffer of ours. */
++		struct sbd_swap full;
++		const StarbiteTarget *t = &fTargets[0];
++
++		if (sbd_swap_parse(fLastFull, SBD_SWAP_REC_MAX, &full)) {
++			fSuHave = false;
++			drawn = drawLayers(&full, t) + drawLayers(&swap, t);
++			if (drawn != 0 && fHw->flip(t->phys, t->rowBytes) == SBD_OK) {
++				fFront = 0;
++				fFrontOwn = true;
++				fCopyFlips++;
++			}
++		}
++	}
++
++shown:
++#if STARBITE_DISPLAY_LEGACY
++	if (drawn != 0 && sweet_fb_first_present == 0) {
++		sweet_fb_first_present = mach_absolute_time();  /* 0421's dead-man: a first frame was shown */
++	}
++#endif
++	return drawn;
++}
++
++void
++AppleCLCD::setPower(bool off)
++{
++	IOLockLock(fLock);
++	if (off != fPowerOff) {
++		fPowerOff = off;
++		fDirty = true;          /* on: show the latest frame again */
++	}
++	IOLockUnlock(fLock);
++	IOLog("StarbiteDisplay: display %s\n", off ? "off" : "on");
++}
++
++#if STARBITE_DISPLAY_LEGACY
++/*
++ * sweetfb_gpu (copy mode): the Mali draws the whole canvas scaled into S-Boot's framebuffer (starlte_gpu.c, 0332).
++ * The surface's pages are mapped into a GPU slot the first time; its pixels are cleaned out of the cache first.
++ * Called only from present(). False: use the CPU.
++ */
++bool
++AppleCLCD::gpuPresent(SweetSurface *s, int32_t sx, int32_t sy, int32_t w, int32_t h)
++{
++	static uint64_t pages[SBD_GPU_MAX_PAGES];
++	static uint32_t failures;
++	IOByteCount len = 0;
++
++	if (!starlte_gpu_present_ready() || failures >= 8 || s->memory == NULL) {
++		return false;
++	}
++	addr64_t pa0 = s->memory->getPhysicalSegment(0, &len, kIOMemoryMapperNone);
++	int slot = pa0 ? starlte_gpu_present_slot(s->id, pa0 & ~0xfffULL) : -1;
++	if (slot < 0 && pa0 != 0) {
++		unsigned n = (unsigned)((s->memory->getLength() + 0xfff) / 0x1000);
++		bool ok = n <= SBD_GPU_MAX_PAGES;
++
++		for (unsigned i = 0; ok && i < n; i++) {
++			addr64_t pa = s->memory->getPhysicalSegment((IOByteCount)i * 0x1000, &len, kIOMemoryMapperNone);
++
++			ok = pa != 0;
++			pages[i] = pa & ~0xfffULL;
++		}
++		slot = ok ? starlte_gpu_present_map(s->id, pages, n) : -1;
++	}
++	if (slot < 0) {
++		IOLog("StarbiteDisplay: GPU present: surface %u not mapped (%u of 8)\n", s->id, ++failures);
++		return false;
++	}
++	uint64_t off = (uint64_t)s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4;
++	uint64_t bytes = (uint64_t)(h - 1) * s->bytesPerRow + (uint64_t)w * 4;
++	if (s->memory->performOperation(kIOMemoryIncoherentIOStore, (IOByteCount)off, (IOByteCount)bytes) != kIOReturnSuccess) {
++		failures++;
++		return false;
++	}
++	if (!starlte_gpu_present_draw(slot, (uint32_t)off, s->bytesPerRow, (uint32_t)w, (uint32_t)h)) {
++		IOLog("StarbiteDisplay: GPU present: %dx%d stride %u not drawn (%u of 8)\n", w, h, s->bytesPerRow, ++failures);
++		return false;
++	}
++	return true;
++}
++
++/* For the GPU copy test (herolte_gpu.c): the pages of the last full-canvas surface shown, its layout and address. */
++bool
++sweet_fb_last_surface(uint64_t *pages, unsigned max_pages, unsigned *npages, uint32_t *offset, uint32_t *stride,
++    uint32_t *width, uint32_t *height, uintptr_t *kva)
++{
++	uint32_t id = __atomic_load_n(&sbd_last_surface_id, __ATOMIC_ACQUIRE);
++	SweetSurface *s = id ? sweet_surface_copy(id) : NULL;
++
++	if (s == NULL) {
++		return false;
++	}
++	bool ok = s->memory != NULL && s->bytesPerElement == 4 && s->elementWidth == 1 && s->elementHeight == 1;
++	unsigned n = ok ? (unsigned)((s->memory->getLength() + 0xfff) / 0x1000) : 0;
++	if (ok && n <= max_pages) {
++		for (unsigned i = 0; i < n; i++) {
++			IOByteCount len = 0;
++			addr64_t pa = s->memory->getPhysicalSegment((IOByteCount)i * 0x1000, &len, kIOMemoryMapperNone);
++
++			if (pa == 0) {
++				ok = false;
++				break;
++			}
++			pages[i] = pa & ~0xfffULL;
++		}
++	} else {
++		ok = false;
++	}
++	if (ok) {
++		*npages = n;
++		*offset = s->offset;
++		*stride = s->bytesPerRow;
++		*width = s->width;
++		*height = s->height;
++		*kva = s->kernelAddress();
++	}
++	s->release();
++	return ok && *kva != 0;
++}
++#else
++bool
++AppleCLCD::gpuPresent(SweetSurface *s __unused, int32_t sx __unused, int32_t sy __unused, int32_t w __unused,
++    int32_t h __unused)
++{
++	return false;
++}
++#endif /* STARBITE_DISPLAY_LEGACY */
++
++/* ------------------------------------------------------------------------------------------------------------
++ * IOMobileFramebufferUserClient: the selector ABI, unchanged from SweetFramebuffer.cpp
++ *   3  GetLayerDefaultSurface -> [IOSurface port name]     4  SwapBegin -> [swap id]
++ *   5  SwapEnd (struct 0x400..0x600)                       6  SwapWait
++ *   7  GetID                                               8  GetDisplaySize -> [w, h]
++ *   12 RequestPowerChange [state]                          18 IsMainDisplay
++ *   28 GetDotPitch                                         72 Enable/DisableNotifications [func, refcon, type]
++ * Everything else is accepted, answered with zeros and logged once.
++ * ------------------------------------------------------------------------------------------------------------ */
++
++bool
++IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
++{
++	if (!IOUserClient::initWithTask(owningTask, securityID, type)) {
++		return false;
++	}
++	fTask = owningTask;
++	return true;
++}
++
++bool
++IOMobileFramebufferUserClient::start(IOService *provider)
++{
++	fFB = OSDynamicCast(AppleCLCD, provider);
++	if (fFB == NULL || !IOUserClient::start(provider)) {
++		return false;
++	}
++	fFB->addClient(this);
++	return true;
++}
++
++IOReturn
++IOMobileFramebufferUserClient::clientClose(void)
++{
++	if (fFB != NULL) {
++		fFB->removeClient(this);
++		IOLockLock(fFB->fLock);
++		mach_port_t old = fPort;
++		fPort = MACH_PORT_NULL;
++		IOLockUnlock(fFB->fLock);
++		if (old != MACH_PORT_NULL) {
++			releaseNotificationPort(old);
++		}
++	}
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++IOMobileFramebufferUserClient::registerNotificationPort(mach_port_t port, __unused UInt32 type,
++    __unused io_user_reference_t refCon)
++{
++	mach_port_t old;
++
++	IOLockLock(fFB->fLock);
++	old = fPort;
++	fPort = port;
++	IOLockUnlock(fFB->fLock);
++	if (old != MACH_PORT_NULL) {
++		releaseNotificationPort(old);
++	}
++	return kIOReturnSuccess;
++}
++
++/* Called with the framebuffer lock held. */
++void
++IOMobileFramebufferUserClient::notify(uint32_t type, const uint64_t *values, uint32_t count)
++{
++	OSAsyncReference64 ref;
++
++	if (type >= SBD_NOTIFY_TYPES || fFunc[type] == 0 || fPort == MACH_PORT_NULL) {
++		return;
++	}
++	bzero(ref, sizeof(ref));
++	setAsyncReference64(ref, fPort, (mach_vm_address_t)fFunc[type], fRefcon[type], fTask);
++	sendAsyncResult64WithOptions(ref, kIOReturnSuccess, (io_user_reference_t *)values, count, kIOUserNotifyOptionCanDrop);
++}
++
++static uint64_t sbd_selectors_logged;   /* selectors already logged (< 64) */
++
++IOReturn
++IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target, __unused void *reference)
++{
++	IOReturn ret = kIOReturnSuccess;
++	uint64_t out[2] = { 0, 0 };
++	uint32_t outCount = 0;
++
++	switch (selector) {
++	case kSBDGetLayerDefaultSurface:
++		out[0] = sweet_surface_port_in_task(fFB->fSurface, fTask);
++		outCount = 1;
++		break;
++	case kSBDSwapBegin:
++		IOLockLock(fFB->fLock);
++		out[0] = ++fFB->fSwapID;
++		IOLockUnlock(fFB->fLock);
++		outCount = 1;
++		break;
++	case kSBDSwapEnd: {
++		if (args->structureInputDescriptor != NULL || args->structureInputSize < SBD_SWAP_REC_MIN) {
++			ret = kIOReturnBadArgument;
++			break;
++		}
++		uint8_t *rec = (uint8_t *)IOMallocData(SBD_SWAP_REC_MAX);
++		if (rec == NULL) {
++			ret = kIOReturnNoMemory;
++			break;
++		}
++		uint32_t size = (uint32_t)args->structureInputSize;
++		if (size > SBD_SWAP_REC_MAX) {
++			size = SBD_SWAP_REC_MAX;
++		}
++		bzero(rec, SBD_SWAP_REC_MAX);
++		memcpy(rec, args->structureInput, size);
++		fFB->swap(rec, size);
++		IOFreeData(rec, SBD_SWAP_REC_MAX);
++		break;
++	}
++	case kSBDGetID:
++		out[0] = 0;
++		outCount = 1;
++		break;
++	case kSBDGetDisplaySize:
++		out[0] = fFB->fLogicalW;
++		out[1] = fFB->fLogicalH;
++		outCount = 2;
++		break;
++	case kSBDIsMainDisplay:
++		out[0] = 1;
++		outCount = 1;
++		break;
++	case kSBDGetDotPitch:
++		out[0] = SBD_DOT_PITCH;
++		outCount = 1;
++		break;
++	case kSBDNotifications:
++		if (args->scalarInputCount >= 3 && args->scalarInput[2] < SBD_NOTIFY_TYPES) {
++			uint32_t type = (uint32_t)args->scalarInput[2];
++			char name[32];
++
++			IOLockLock(fFB->fLock);
++			fFunc[type] = args->scalarInput[0];
++			fRefcon[type] = args->scalarInput[1];
++			IOLockUnlock(fFB->fLock);
++			proc_selfname(name, sizeof(name));
++			IOLog("StarbiteDisplay: %s notifications type %u %s\n", name, type, args->scalarInput[0] ? "on" : "off");
++		}
++		break;
++	case kSBDRequestPowerChange:
++		if (args->scalarInputCount >= 1) {
++			fFB->setPower(args->scalarInput[0] == 0);
++		}
++		break;
++	case kSBDSwapWait:
++	default:
++		break;
++	}
++
++	for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
++		args->scalarOutput[i] = i < outCount ? out[i] : 0;
++	}
++	if (args->structureOutputDescriptor == NULL && args->structureOutput != NULL) {
++		bzero(args->structureOutput, args->structureOutputSize);
++	}
++	if (selector >= 64 || !(sbd_selectors_logged & (1ULL << selector))) {
++		char name[32];
++
++		if (selector < 64) {
++			sbd_selectors_logged |= 1ULL << selector;
++		}
++		proc_selfname(name, sizeof(name));
++		IOLog("StarbiteDisplay: %s sel %u in %u/%u out %u/%u -> %#x\n", name, selector, args->scalarInputCount,
++		    args->structureInputSize, args->scalarOutputCount, args->structureOutputSize, ret);
++	}
++	return ret;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.h b/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.h
+new file mode 100644
+index 00000000..f19cb365
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/StarbiteDisplay.h
+@@ -0,0 +1,229 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteDisplay: the Galaxy S9's display for Apple's OSes (docs/APPLE-S9-DRIVERS.md Part 3, row 18).
++ *
++ * Two services:
++ *
++ *   StarbiteDisplay   the hardware. Matches the ADT node "decon" (compatible starbite,decon). Takes every address
++ *                     and interrupt from that nub and from the "dsim" nub: DECON_F, the DPU's DMA and DPP blocks,
++ *                     DSIM0. Does address flips, counts frame interrupts, sends the panel's DCS commands.
++ *
++ *   AppleCLCD         what Apple's userland sees: an IOMobileFramebuffer on the ADT's "disp0" node (which carries
++ *                     canvas-width / canvas-height), with IOMobileFramebufferUserClient and the selector ABI that
++ *                     iOS 16, iPadOS 18, iOS 26, macOS 13 and macOS 26.5 accept (SweetFramebuffer.cpp, patches
++ *                     0046..0398, ours). Swaps go to StarbiteDisplay's flips; the CPU copy into S-Boot's
++ *                     framebuffer stays as the fallback (boot-arg sbdisp=copy, or whenever the hardware is not as
++ *                     expected).
++ *
++ * Boot-args (all optional):
++ *   sbdisp=flip|scale|copy   flip (default): flips between buffers of the panel's size on S-Boot's channel;
++ *                            scale: the window on VGF0, canvas-sized buffers scaled by the DPP;
++ *                            copy: no DECON writes at all, today's CPU copy.
++ *   sbdisp_irq=0             no interrupts: refreshes are counted from FRAME_COUNT by the timer.
++ *   sbdisp_panel=0|1|2|3     DSIM writes: 0 none; 1 brightness only (default); 2 also display off/on with the
++ *                            power state; 3 also sleep in/out.
++ *   sbdisp_bl=N              brightness 0-255 once at start.
++ *   sbdisp_selftest=N        N flips between two test pictures at start, no userland needed (PHONE-TEST.md).
++ *   sbdisp_limit=0x...       scan-out address limit (default 0xe0000000).
++ *   sweetfb_hz, sweetfb_noconsole, sweetfb_native, sweetfb_lw, sweetfb_lh, sweetfbstats: as in SweetFramebuffer.
++ */
++#ifndef _STARBITE_DISPLAY_H
++#define _STARBITE_DISPLAY_H
++
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOLocks.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOFilterInterruptEventSource.h>
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IOMemoryDescriptor.h>
++
++#include "hw/sbd_decon.h"
++#include "hw/sbd_dsim.h"
++#include "hw/sbd_panel.h"
++#include "hw/sbd_swap.h"
++
++class SweetSurface;
++class AppleCLCD;
++class IOMobileFramebufferUserClient;
++
++#define SBD_VSYNC_US            16667
++#define SBD_NOTIFY_TYPES        8
++#define SBD_NOTIFY_VSYNC        5
++#define SBD_DOT_PITCH           458             /* ppi reported, as the iPhone X panel (kept from SweetFramebuffer) */
++#define SBD_FORMAT_BGRA         0x42475241      /* 'BGRA' */
++
++/* a refresh, delivered on StarbiteDisplay's work loop */
++typedef void (*StarbiteDisplayVsync)(void *target, uint64_t count, uint64_t abstime, uint32_t events);
++
++class StarbiteDisplay : public IOService {
++	OSDeclareDefaultStructors(StarbiteDisplay);
++
++	IOMemoryMap        *fMap[SBD_BLK_COUNT];
++	uintptr_t           fBase[SBD_BLK_COUNT];
++	uint32_t            fSize[SBD_BLK_COUNT];
++	IOWorkLoop         *fWorkLoop;
++	IOTimerEventSource *fTimer;
++	IOFilterInterruptEventSource *fIrq[3];  /* frame start, frame done, extra */
++	IOSimpleLock       *fHwLock;            /* the DECON state: flips against the interrupt filter */
++	IOLock             *fPanelLock;         /* DSIM packets, one sequence at a time */
++	struct sbd_decon    fDecon;
++	struct sbd_panel    fPanel;
++	bool                fHaveDsim, fIrqOn;
++	uint32_t            fPanelPolicy;       /* sbdisp_panel */
++	volatile uint32_t   fIrqEvents;         /* SBD_EV_* gathered by the filter for the action */
++	volatile uint32_t   fIrqVsyncs;         /* frame starts seen by the filter and not yet delivered */
++	uint64_t            fIrqStamp;          /* mach_absolute_time() of the last frame start */
++	uint64_t            fVsyncCount;        /* refreshes delivered to the client, whatever the source */
++	uint64_t            fSyntheticVsyncs;   /* of them, made by the timer because the hardware had none */
++	StarbiteDisplayVsync fVsyncFn;
++	void               *fVsyncTarget;
++
++	static uint32_t ioRead(void *ctx, unsigned block, uint32_t off);
++	static void     ioWrite(void *ctx, unsigned block, uint32_t off, uint32_t val);
++	static void     ioDelay(void *ctx, uint32_t us);
++	static bool     irqFilter(OSObject *owner, IOFilterInterruptEventSource *src);
++	static void     irqAction(OSObject *owner, IOInterruptEventSource *src, int count);
++	static void     timerFired(OSObject *owner, IOTimerEventSource *sender);
++	void            deliver(uint64_t stamp, uint32_t events, bool synthetic);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++
++	/* scan-out; every call may be made from a thread, none from an interrupt */
++	int  probe(uint64_t fbPhys, uint32_t width, uint32_t height, uint32_t rowBytes);
++	bool haveChannels() const { return fBase[SBD_BLK_IDMA] != 0 && fBase[SBD_BLK_DPP] != 0; }
++	int  attachFlip();
++	int  attachScaler(uint64_t phys, uint32_t w, uint32_t h, uint32_t rowBytes, const struct sbd_rect *dst);
++	void detach();
++	int  bufferOK(uint64_t phys, uint64_t bytes, uint32_t rowBytes);
++	int  flip(uint64_t phys, uint32_t rowBytes);
++	bool latched();
++	void counters(struct sbd_decon *copy);
++	uint64_t syntheticVsyncs() const { return fSyntheticVsyncs; }
++	bool interruptsOn() const { return fIrqOn; }
++
++	/* refreshes: one client */
++	void setVsyncClient(StarbiteDisplayVsync fn, void *target);
++
++	/* panel */
++	bool     panelUsable() const { return fHaveDsim && fPanelPolicy != 0; }
++	uint32_t panelPolicy() const { return fPanelPolicy; }
++	IOReturn setBrightness(int level);      /* 0-255 */
++	int      brightness() const { return fPanel.level; }
++	IOReturn panelPower(bool on);           /* by policy: nothing, 28/29, or sleep in/out */
++};
++
++class IOMobileFramebuffer : public IOService {
++	OSDeclareDefaultStructors(IOMobileFramebuffer);
++};
++
++/* one buffer this driver draws into and the DECON can read */
++struct StarbiteTarget {
++	uintptr_t           va;
++	uint64_t            phys;
++	uint32_t            width, height, rowBytes;
++	IOMemoryDescriptor *memory;         /* for the cache store before a flip */
++};
++
++enum {
++	kStarbitePresentCopy   = 0,         /* CPU copy into S-Boot's framebuffer (SweetFramebuffer's path) */
++	kStarbitePresentFlip   = 1,         /* own panel-sized buffers, flipped by address */
++	kStarbitePresentScaler = 2          /* canvas-sized buffers on VGF0, flipped by address */
++};
++
++class AppleCLCD : public IOMobileFramebuffer {
++	OSDeclareDefaultStructors(AppleCLCD);
++
++	IOWorkLoop         *fWorkLoop;
++	IOTimerEventSource *fTimer;         /* only without StarbiteDisplay */
++	StarbiteDisplay    *fHw;
++
++	static void timerFired(OSObject *owner, IOTimerEventSource *sender);
++	static void hwVsync(void *target, uint64_t count, uint64_t abstime, uint32_t events);
++	void tick(uint64_t count, uint64_t abstime);
++
++	bool setupFlip();
++	bool setupScaler();
++	bool allocTarget(StarbiteTarget *t, uint32_t width, uint32_t height, uint32_t rowBytes);
++	void publishProperties();
++	void fillTestPattern(const StarbiteTarget *t, uint32_t seed);
++	static void selfTestThread(void *arg, void *unused);
++	void selfTest(uint32_t flips);
++	void reportAndStop(const char *why);
++
++	/* drawing (called only from present(), which the tick serialises) */
++	bool surfaceFlippable(SweetSurface *s, const struct sbd_swap_layer *layer, uint64_t *phys);
++	uint64_t drawLayers(const struct sbd_swap *swap, const StarbiteTarget *t);
++	uint64_t drawLayer(const StarbiteTarget *t, SweetSurface *s, const struct sbd_swap_layer *layer, uint32_t index);
++	void mapRect(const StarbiteTarget *t, int32_t dx, int32_t dy, int32_t w, int32_t h,
++	    int32_t *x0, int32_t *y0, int32_t *x1, int32_t *y1, int32_t *barX, int32_t *barY, int32_t *outW, int32_t *outH);
++	void saveUnder(const StarbiteTarget *t, bool save);
++	void surfaceStats(SweetSurface *s, uint32_t swapID);
++	bool gpuPresent(SweetSurface *s, int32_t sx, int32_t sy, int32_t w, int32_t h);
++
++public:
++	uint64_t      fPhys;                        /* S-Boot's framebuffer */
++	uint32_t      fWidth, fHeight, fRowBytes;   /* the panel */
++	uint32_t      fLogicalW, fLogicalH;         /* the canvas userland draws */
++	bool          fScaled;                      /* canvas != panel */
++	bool          fGpu;                         /* sweetfb_gpu: the Mali scales (copy mode only) */
++	SweetSurface *fSurface;                     /* the default framebuffer surface */
++	SweetSurface *fPanelSurface;                /* S-Boot's framebuffer as a surface (its mapping) */
++	IOLock       *fLock;                        /* swaps and the client list */
++	OSArray      *fClients;
++	uint32_t      fSwapID;
++	uint8_t       fPending[SBD_SWAP_REC_MAX];   /* the latest swap, not yet shown */
++	uint8_t       fLastFull[SBD_SWAP_REC_MAX];  /* the latest swap with a full layer 0 */
++	bool          fHaveLastFull;
++	bool          fDirty;
++	bool          fConsolePaused;
++	uint32_t      fFlushTicks;
++	bool          fPowerOff;
++
++	uint32_t      fMode;                        /* kStarbitePresent* */
++	StarbiteTarget fTargets[2];
++	uint32_t      fFront;                       /* which of fTargets the DECON reads, when fFrontOwn */
++	bool          fFrontOwn;                    /* false: the DECON reads a client's surface (zero copy) */
++	SweetSurface *fShown, *fShownBefore;        /* kept alive while the DECON may read them */
++	uint64_t      fZeroCopyFlips, fCopyFlips, fInPlace, fCopies, fFlipRefused;
++	uint32_t      fSelfTestFlips;
++	uint64_t      fVsyncs;
++
++	/* pointer save-under (0396), on the buffer it was drawn on */
++	uint32_t     *fSuBuf;
++	int32_t       fSuX, fSuY, fSuW, fSuH;
++	bool          fSuHave;
++	uintptr_t     fSuTarget;
++
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
++	void addClient(IOMobileFramebufferUserClient *client);
++	void removeClient(IOMobileFramebufferUserClient *client);
++	void swap(const uint8_t *rec, uint32_t size);
++	uint64_t present(const uint8_t *rec);
++	void setPower(bool off);
++};
++
++class IOMobileFramebufferUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
++
++public:
++	AppleCLCD          *fFB;
++	task_t              fTask;
++	mach_port_t         fPort;
++	io_user_reference_t fFunc[SBD_NOTIFY_TYPES];
++	io_user_reference_t fRefcon[SBD_NOTIFY_TYPES];
++
++	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn registerNotificationPort(mach_port_t port, UInt32 type, io_user_reference_t refCon) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args, IOExternalMethodDispatch *dispatch,
++	    OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
++	void notify(uint32_t type, const uint64_t *values, uint32_t count);
++};
++
++#endif /* _STARBITE_DISPLAY_H */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/SweetSurface.h b/iokit/Kernel/arm/starbite/StarbiteDisplay/SweetSurface.h
+new file mode 100644
+index 00000000..72260af2
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/SweetSurface.h
+@@ -0,0 +1,4 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/* 0428 glue (not part of the driver copy): StarbiteDisplay.cpp includes "SweetSurface.h" (StarbiteDisplay/INTEGRATION.md
++ * section 2: "include paths: ... iokit/Kernel/arm for SweetSurface.h"); the kernel build has no such -I. */
++#include "../../SweetSurface.h"
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_decon.c b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_decon.c
+new file mode 100644
+index 00000000..fbbbb000
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_decon.c
+@@ -0,0 +1,524 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * DECON_F scan-out control (see sbd_decon.h). Register facts and their sources: NOTES.md.
++ *
++ * How a flip works on this hardware. The window's DMA channel (an IDMA block) holds the buffer's physical
++ * address in IN_BASE_ADDR. Writes to it land in a shadow copy. SHADOW_REG_UPDATE_REQ asks the DECON to take
++ * the shadow registers at the start of its next frame, which in command mode is the panel's next TE pulse
++ * (HW trigger). The DECON clears the request when it has taken them. So: write the address, request the
++ * update, and the new buffer is read from the next refresh on, never in the middle of one.
++ */
++#include "sbd_decon.h"
++#include "sbd_regs.h"
++
++#define DECON   SBD_BLK_DECON
++#define IDMA    SBD_BLK_IDMA
++#define DPP     SBD_BLK_DPP
++
++/* DATA_PATH_CONTROL_1 channel number -> channel block (G0 G1 VG0 VG1 VGF0 VGF1), -1 = none */
++static const int sbd_type_of_channel[8] = { SBD_CH_VG0, SBD_CH_VGF0, SBD_CH_VGF1, SBD_CH_G1, SBD_CH_VG1, SBD_CH_G0, -1, -1 };
++
++static uint32_t
++idma_rd(const struct sbd_decon *d, unsigned type, uint32_t reg)
++{
++	return sbd_rd(&d->io, IDMA, IDMA_CH(type) + reg);
++}
++
++static void
++idma_wr(const struct sbd_decon *d, unsigned type, uint32_t reg, uint32_t val)
++{
++	sbd_wr(&d->io, IDMA, IDMA_CH(type) + reg, val);
++}
++
++static uint32_t
++dpp_rd(const struct sbd_decon *d, unsigned type, uint32_t reg)
++{
++	return sbd_rd(&d->io, DPP, DPP_CH(type) + reg);
++}
++
++static void
++dpp_wr(const struct sbd_decon *d, unsigned type, uint32_t reg, uint32_t val)
++{
++	sbd_wr(&d->io, DPP, DPP_CH(type) + reg, val);
++}
++
++void
++sbd_decon_init(struct sbd_decon *d, const struct sbd_io *io)
++{
++	unsigned char *p = (unsigned char *)d;
++
++	for (size_t i = 0; i < sizeof(*d); i++) {
++		p[i] = 0;
++	}
++	d->io = *io;
++	d->scan_limit = SBD_SCANOUT_LIMIT;
++}
++
++const char *
++sbd_decon_strerror(int err)
++{
++	switch (err) {
++	case SBD_OK:                  return "ok";
++	case SBD_ERR_NOT_PROBED:      return "the DECON was not probed as expected";
++	case SBD_ERR_GEOMETRY:        return "not the S9's 1440x2960x4 boot framebuffer";
++	case SBD_ERR_WINDOWS:         return "not exactly one window on";
++	case SBD_ERR_CHANNEL:         return "the window's channel cannot be used";
++	case SBD_ERR_NOT_BOOT_BUFFER: return "the channel does not read the boot framebuffer";
++	case SBD_ERR_NOT_RUNNING:     return "the DECON is not running in command mode";
++	case SBD_ERR_ADDRESS:         return "buffer address above the limit or misaligned";
++	case SBD_ERR_STRIDE:          return "row length not usable";
++	case SBD_ERR_MODE:            return "wrong mode for this call";
++	case SBD_ERR_BUSY:            return "a shadow update is pending or the channel is busy";
++	case SBD_ERR_SIZE:            return "size outside the scaler's limits";
++	case SBD_ERR_HW:              return "the hardware reported a configuration error";
++	default:                      return "unknown";
++	}
++}
++
++int
++sbd_decon_probe(struct sbd_decon *d, uint64_t fb_phys, uint32_t width, uint32_t height, uint32_t rowbytes)
++{
++	uint32_t gc, path0, path1, on = 0;
++	int type;
++
++	if (d->probed != 0) {
++		return d->probed > 0 ? SBD_OK : d->probe_err;
++	}
++	d->probed = -1;
++	if (fb_phys == 0 || (fb_phys >> 32) != 0 || width != 1440 || height != 2960 || rowbytes != width * 4) {
++		return d->probe_err = SBD_ERR_GEOMETRY;
++	}
++	gc = sbd_rd(&d->io, DECON, DECON_GLOBAL_CONTROL);
++	path0 = sbd_rd(&d->io, DECON, DECON_DATA_PATH_0);
++	path1 = sbd_rd(&d->io, DECON, DECON_DATA_PATH_1);
++	for (unsigned w = 0; w < DECON_WINDOWS; w++) {
++		if (path0 & (1u << (4 * w))) {
++			on++;
++			d->win = w;
++		}
++	}
++	if (on != 1) {
++		return d->probe_err = SBD_ERR_WINDOWS;
++	}
++	type = sbd_type_of_channel[(path1 >> (4 * d->win)) & 7];
++	if (type < 0) {
++		return d->probe_err = SBD_ERR_CHANNEL;
++	}
++	d->boot_type = (unsigned)type;
++	d->boot_base = idma_rd(d, d->boot_type, IDMA_BASE_Y);
++	d->boot_img_size = idma_rd(d, d->boot_type, IDMA_IMG_SIZE);
++	d->boot_src_size = idma_rd(d, d->boot_type, IDMA_SRC_SIZE);
++	d->boot_in_con = idma_rd(d, d->boot_type, IDMA_IN_CON);
++	if (d->boot_base != (uint32_t)fb_phys || d->boot_img_size != ((height << 16) | width) ||
++	    (d->boot_src_size & 0xffffu) * 4 != rowbytes) {
++		return d->probe_err = SBD_ERR_NOT_BOOT_BUFFER;
++	}
++	if (!(gc & DECON_GC_CMD_MODE) || !(gc & DECON_GC_RUN)) {
++		return d->probe_err = SBD_ERR_NOT_RUNNING;
++	}
++	d->boot_path1 = path1;
++	d->boot_win_start = sbd_rd(&d->io, DECON, DECON_WIN_START(d->win));
++	d->boot_win_end = sbd_rd(&d->io, DECON, DECON_WIN_END(d->win));
++	d->boot_trig = sbd_rd(&d->io, DECON, DECON_TRIG_CONTROL);
++	d->panel_w = width;
++	d->panel_h = height;
++	d->chan_type = d->boot_type;
++	d->stride_px = d->boot_src_size & 0xffffu;
++	d->src_w = width;
++	d->src_h = height;
++	d->shown_base = d->boot_base;
++	d->mode = SBD_MODE_BOOT;
++	d->probed = 1;
++	d->probe_err = SBD_OK;
++	return SBD_OK;
++}
++
++int
++sbd_decon_buffer_ok(const struct sbd_decon *d, uint64_t phys, uint64_t bytes, uint32_t rowbytes)
++{
++	if (phys == 0 || (phys >> 32) != 0 || (phys & 0xffu) != 0 || bytes == 0 || phys + bytes > d->scan_limit) {
++		return SBD_ERR_ADDRESS;
++	}
++	if ((rowbytes & 3u) != 0 || rowbytes / 4 < d->src_w || rowbytes / 4 > 0xffffu) {
++		return SBD_ERR_STRIDE;
++	}
++	return SBD_OK;
++}
++
++int
++sbd_decon_attach_flip(struct sbd_decon *d)
++{
++	if (d->probed <= 0) {
++		return SBD_ERR_NOT_PROBED;
++	}
++	if (d->mode != SBD_MODE_BOOT) {
++		return SBD_ERR_MODE;
++	}
++	d->mode = SBD_MODE_FLIP;
++	d->chan_type = d->boot_type;
++	d->src_w = d->panel_w;
++	d->src_h = d->panel_h;
++	return SBD_OK;
++}
++
++void
++sbd_decon_trigger(struct sbd_decon *d, bool on)
++{
++	/* HW trigger: enable = EN set and MASK clear; disable = MASK set and EN clear (the vendor's pairing) */
++	sbd_wr_mask(&d->io, DECON, DECON_TRIG_CONTROL, on ? DECON_HW_TRIG_EN : DECON_HW_TRIG_MASK,
++	    DECON_HW_TRIG_EN | DECON_HW_TRIG_MASK);
++}
++
++static void
++request_shadow_update(struct sbd_decon *d)
++{
++	sbd_wr(&d->io, DECON, DECON_SHADOW_REQ, sbd_rd(&d->io, DECON, DECON_SHADOW_REQ) | DECON_SHADOW_ALL);
++}
++
++int
++sbd_decon_flip(struct sbd_decon *d, uint64_t phys, uint32_t rowbytes)
++{
++	uint32_t trig;
++	int err;
++
++	if (d->probed <= 0) {
++		return SBD_ERR_NOT_PROBED;
++	}
++	if (d->mode == SBD_MODE_BOOT) {
++		return SBD_ERR_MODE;
++	}
++	err = sbd_decon_buffer_ok(d, phys, (uint64_t)rowbytes * d->src_h, rowbytes);
++	if (err != SBD_OK) {
++		return err;
++	}
++	/* a masked or disabled trigger would never take the update: frames must be running first */
++	trig = sbd_rd(&d->io, DECON, DECON_TRIG_CONTROL);
++	if ((trig & DECON_HW_TRIG_MASK) || !(trig & DECON_HW_TRIG_EN)) {
++		sbd_decon_trigger(d, true);
++	}
++	if (rowbytes / 4 != d->stride_px) {
++		idma_wr(d, d->chan_type, IDMA_SRC_SIZE,
++		    (idma_rd(d, d->chan_type, IDMA_SRC_SIZE) & 0xffff0000u) | (rowbytes / 4));
++		d->stride_px = rowbytes / 4;
++	}
++	idma_wr(d, d->chan_type, IDMA_BASE_Y, (uint32_t)phys);
++	idma_wr(d, d->chan_type, IDMA_BASE_C, (uint32_t)phys);
++	request_shadow_update(d);
++	if (d->pending) {
++		d->flips_replaced++;
++	}
++	d->pending = true;
++	d->pending_base = (uint32_t)phys;
++	d->flips_requested++;
++	return SBD_OK;
++}
++
++bool
++sbd_decon_latched(struct sbd_decon *d)
++{
++	return (sbd_rd(&d->io, DECON, DECON_SHADOW_REQ) & DECON_SHADOW_ALL) == 0;
++}
++
++/* the pending flip, if the DECON has taken it */
++static uint32_t
++account_latch(struct sbd_decon *d)
++{
++	if (d->pending && sbd_decon_latched(d)) {
++		d->pending = false;
++		d->shown_base = d->pending_base;
++		d->flips_latched++;
++		return SBD_EV_LATCHED;
++	}
++	return 0;
++}
++
++static int
++wait_latched(struct sbd_decon *d, unsigned ms)
++{
++	for (unsigned i = 0; i <= ms; i++) {
++		if (sbd_decon_latched(d)) {
++			return 0;
++		}
++		d->io.udelay(d->io.ctx, 1000);
++	}
++	return -1;
++}
++
++void
++sbd_decon_irq_enable(struct sbd_decon *d, bool on)
++{
++	/* clear what is pending, so the first interrupt is a new frame's */
++	sbd_wr(&d->io, DECON, DECON_INT_PENDING, DECON_INT_FRAME_DONE | DECON_INT_FRAME_START | DECON_INT_EXTRA);
++	sbd_wr(&d->io, DECON, DECON_EXTRA_INT_PENDING, DECON_XINT_CONFLICT | DECON_XINT_TIMEOUT);
++	if (on) {
++		sbd_wr_mask(&d->io, DECON, DECON_INT_ENABLE,
++		    DECON_INT_FRAME_DONE | DECON_INT_FRAME_START | DECON_INT_EXTRA | DECON_INT_EN, DECON_INT_ENABLE_MASK);
++		sbd_wr(&d->io, DECON, DECON_EXTRA_INT_ENABLE, DECON_XINT_CONFLICT | DECON_XINT_TIMEOUT);
++	} else {
++		sbd_wr_mask(&d->io, DECON, DECON_INT_ENABLE, 0, DECON_INT_EXTRA | DECON_INT_EN);
++	}
++}
++
++uint32_t
++sbd_decon_irq(struct sbd_decon *d)
++{
++	uint32_t pend = sbd_rd(&d->io, DECON, DECON_INT_PENDING), ev = 0;
++
++	if (pend & DECON_INT_FRAME_START) {
++		sbd_wr(&d->io, DECON, DECON_INT_PENDING, DECON_INT_FRAME_START);
++		d->vsync_irqs++;
++		ev |= SBD_EV_VSYNC | account_latch(d);
++	}
++	if (pend & DECON_INT_FRAME_DONE) {
++		sbd_wr(&d->io, DECON, DECON_INT_PENDING, DECON_INT_FRAME_DONE);
++		d->frame_done_irqs++;
++		ev |= SBD_EV_FRAME_DONE | account_latch(d);
++	}
++	if (pend & DECON_INT_EXTRA) {
++		uint32_t extra;
++
++		sbd_wr(&d->io, DECON, DECON_INT_PENDING, DECON_INT_EXTRA);
++		extra = sbd_rd(&d->io, DECON, DECON_EXTRA_INT_PENDING);
++		if (extra & DECON_XINT_CONFLICT) {
++			sbd_wr(&d->io, DECON, DECON_EXTRA_INT_PENDING, DECON_XINT_CONFLICT);
++			d->conflict_irqs++;
++			ev |= SBD_EV_CONFLICT;
++		}
++		if (extra & DECON_XINT_TIMEOUT) {
++			sbd_wr(&d->io, DECON, DECON_EXTRA_INT_PENDING, DECON_XINT_TIMEOUT);
++			d->timeout_irqs++;
++			ev |= SBD_EV_TIMEOUT;
++		}
++	}
++	return ev;
++}
++
++uint32_t
++sbd_decon_poll(struct sbd_decon *d, uint32_t *refreshes)
++{
++	uint32_t count = sbd_rd(&d->io, DECON, DECON_FRAME_COUNT), delta = 0;
++
++	if (d->have_frame_count) {
++		delta = count - d->last_frame_count;    /* wraps with the register */
++	}
++	d->have_frame_count = true;
++	d->last_frame_count = count;
++	d->refreshes_polled += delta;
++	if (refreshes != NULL) {
++		*refreshes = delta;
++	}
++	return account_latch(d) | (delta ? SBD_EV_VSYNC : 0);
++}
++
++void
++sbd_decon_fit(uint32_t src_w, uint32_t src_h, uint32_t panel_w, uint32_t panel_h, struct sbd_rect *out)
++{
++	uint32_t w, h;
++
++	if (src_w == 0 || src_h == 0) {
++		out->x = out->y = 0;
++		out->w = panel_w;
++		out->h = panel_h;
++		return;
++	}
++	w = (uint32_t)(((uint64_t)src_w * panel_h) / src_h);
++	h = panel_h;
++	if (w > panel_w) {
++		w = panel_w;
++		h = (uint32_t)(((uint64_t)src_h * panel_w) / src_w);
++	}
++	w &= ~1u;
++	h &= ~1u;
++	out->w = w;
++	out->h = h;
++	out->x = ((panel_w - w) / 2) & ~1u;
++	out->y = ((panel_h - h) / 2) & ~1u;
++}
++
++/* Catmull-Rom weight of pixel k (-1 .. 2) for a point t/16 past pixel 0, in 1/512 */
++static int
++cubic_weight(int k, int t)
++{
++	int x = k * 16 - t, a = x < 0 ? -x : x;
++	long long w;
++
++	/* in 1/(2 * 16^3): |x| <= 1: 3|x|^3 - 5|x|^2 + 2;  1 < |x| < 2: -|x|^3 + 5|x|^2 - 8|x| + 4 */
++	if (a <= 16) {
++		w = 3LL * a * a * a - 5LL * 16 * a * a + 2LL * 16 * 16 * 16;
++	} else if (a < 32) {
++		w = -1LL * a * a * a + 5LL * 16 * a * a - 8LL * 16 * 16 * a + 4LL * 16 * 16 * 16;
++	} else {
++		w = 0;
++	}
++	return (int)((w * 512 + (w >= 0 ? 4096 : -4096)) / 8192);
++}
++
++void
++sbd_decon_scaler_coefficients(int16_t table[9][4])
++{
++	for (int t = 0; t < 9; t++) {
++		int sum = 0;
++
++		for (int k = 0; k < 4; k++) {
++			table[t][k] = (int16_t)cubic_weight(k - 1, t);
++			sum += table[t][k];
++		}
++		/* the rounding remainder goes to the nearest pixel's tap */
++		table[t][t < 8 ? 1 : 2] = (int16_t)(table[t][t < 8 ? 1 : 2] + (512 - sum));
++	}
++}
++
++static void
++setup_scaler(struct sbd_decon *d, uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh)
++{
++	int16_t c[9][4];
++	uint32_t hpos, vpos;
++
++	sbd_decon_scaler_coefficients(c);
++	for (unsigned bank = 0; bank < 2; bank++) {     /* luma and chroma banks, both written */
++		for (unsigned phase = 0; phase < 9; phase++) {
++			/* 8 taps across: the four used are taps 2..5; 4 taps down */
++			for (unsigned tap = 0; tap < 8; tap++) {
++				int v = (tap >= 2 && tap <= 5) ? c[phase][tap - 2] : 0;
++
++				dpp_wr(d, SBD_CH_VGF0, DPP_H_COEF(phase, tap, bank), (uint32_t)v & 0x7ffu);
++			}
++			for (unsigned tap = 0; tap < 4; tap++) {
++				dpp_wr(d, SBD_CH_VGF0, DPP_V_COEF(phase, tap, bank), (uint32_t)c[phase][tap] & 0x7ffu);
++			}
++		}
++	}
++	dpp_wr(d, SBD_CH_VGF0, DPP_H_RATIO, (uint32_t)(((uint64_t)sw << 20) / dw));
++	dpp_wr(d, SBD_CH_VGF0, DPP_V_RATIO, (uint32_t)(((uint64_t)sh << 20) / dh));
++	/* start positions: (source - destination) / (2 destination), 12.20, two's complement */
++	hpos = (uint32_t)(int32_t)((((long long)sw - (long long)dw) * (1LL << 20)) / (2 * (long long)dw));
++	vpos = (uint32_t)(int32_t)((((long long)sh - (long long)dh) * (1LL << 20)) / (2 * (long long)dh));
++	dpp_wr(d, SBD_CH_VGF0, DPP_YH_POS, hpos);
++	dpp_wr(d, SBD_CH_VGF0, DPP_YV_POS, vpos);
++	dpp_wr(d, SBD_CH_VGF0, DPP_CH_POS, hpos);
++	dpp_wr(d, SBD_CH_VGF0, DPP_CV_POS, vpos);
++}
++
++void
++sbd_decon_detach(struct sbd_decon *d)
++{
++	if (d->probed <= 0 || d->mode == SBD_MODE_BOOT) {
++		return;
++	}
++	if (d->mode == SBD_MODE_SCALER) {
++		sbd_wr(&d->io, DECON, DECON_DATA_PATH_1, d->boot_path1);
++		sbd_wr(&d->io, DECON, DECON_WIN_START(d->win), d->boot_win_start);
++		sbd_wr(&d->io, DECON, DECON_WIN_END(d->win), d->boot_win_end);
++	}
++	idma_wr(d, d->boot_type, IDMA_SRC_SIZE, d->boot_src_size);
++	idma_wr(d, d->boot_type, IDMA_BASE_Y, d->boot_base);
++	idma_wr(d, d->boot_type, IDMA_BASE_C, d->boot_base);
++	sbd_decon_trigger(d, true);
++	request_shadow_update(d);
++	(void)wait_latched(d, 100);
++	d->mode = SBD_MODE_BOOT;
++	d->chan_type = d->boot_type;
++	d->stride_px = d->boot_src_size & 0xffffu;
++	d->src_w = d->panel_w;
++	d->src_h = d->panel_h;
++	d->pending = false;
++	d->shown_base = d->boot_base;
++}
++
++int
++sbd_decon_attach_scaler(struct sbd_decon *d, uint64_t phys, uint32_t src_w, uint32_t src_h, uint32_t rowbytes,
++    const struct sbd_rect *dst)
++{
++	uint32_t path1, frames, dpp_in;
++
++	if (d->probed <= 0) {
++		return SBD_ERR_NOT_PROBED;
++	}
++	if (d->mode != SBD_MODE_BOOT) {
++		return SBD_ERR_MODE;
++	}
++	path1 = d->boot_path1;
++	dpp_in = dpp_rd(d, d->boot_type, DPP_IN_CON);
++	for (unsigned w = 0; w < DECON_WINDOWS; w++) {
++		if (((path1 >> (4 * w)) & 7) == SBD_PATH_CH_VGF0 &&
++		    (sbd_rd(&d->io, DECON, DECON_DATA_PATH_0) & (1u << (4 * w)))) {
++			return SBD_ERR_CHANNEL;
++		}
++	}
++	if (d->boot_type == SBD_CH_VGF0 ||
++	    (d->boot_in_con & (IDMA_IN_ROT_FLIP_MASK | IDMA_IN_AFBC_MASK | IDMA_IN_BLOCK_EN)) || (dpp_in & 7u) != 0) {
++		return SBD_ERR_CHANNEL;
++	}
++	/* the boot window must be the whole panel, with inclusive end coordinates (what the rectangle maths assumes) */
++	if (d->boot_win_start != 0 || d->boot_win_end != (((d->panel_h - 1) << 16) | (d->panel_w - 1))) {
++		return SBD_ERR_CHANNEL;
++	}
++	if (dst->w < 16 || dst->h < 16 || src_w < 16 || src_h < 16 || src_w > 4096 || src_h > 4096 ||
++	    dst->x + dst->w > d->panel_w || dst->y + dst->h > d->panel_h ||
++	    src_w > 2 * dst->w || src_h > 2 * dst->h || dst->w > 8 * src_w || dst->h > 8 * src_h) {
++		return SBD_ERR_SIZE;
++	}
++	if ((phys >> 32) != 0 || (phys & 0xffu) != 0 || phys == 0 || phys + (uint64_t)rowbytes * src_h > d->scan_limit) {
++		return SBD_ERR_ADDRESS;
++	}
++	if ((rowbytes & 3u) != 0 || rowbytes / 4 < src_w || rowbytes / 4 > 0xffffu) {
++		return SBD_ERR_STRIDE;
++	}
++	if (idma_rd(d, SBD_CH_VGF0, IDMA_ENABLE) & IDMA_OP_BUSY) {
++		return SBD_ERR_BUSY;
++	}
++
++	/* VGF0's IDMA: the boot channel's format and bus settings, this buffer and its sizes */
++	idma_wr(d, SBD_CH_VGF0, IDMA_IN_CON, d->boot_in_con & (IDMA_IN_IC_MAX_MASK | IDMA_IN_FORMAT_MASK));
++	idma_wr(d, SBD_CH_VGF0, IDMA_OUT_CON, idma_rd(d, d->boot_type, IDMA_OUT_CON));
++	idma_wr(d, SBD_CH_VGF0, IDMA_SRC_SIZE, (src_h << 16) | (rowbytes / 4));
++	idma_wr(d, SBD_CH_VGF0, IDMA_SRC_OFFSET, 0);
++	idma_wr(d, SBD_CH_VGF0, IDMA_IMG_SIZE, (src_h << 16) | src_w);
++	idma_wr(d, SBD_CH_VGF0, IDMA_BASE_Y, (uint32_t)phys);
++	idma_wr(d, SBD_CH_VGF0, IDMA_BASE_C, (uint32_t)phys);
++	idma_wr(d, SBD_CH_VGF0, IDMA_DEADLOCK_NUM, idma_rd(d, d->boot_type, IDMA_DEADLOCK_NUM));
++	idma_wr(d, SBD_CH_VGF0, IDMA_BUS_CON, idma_rd(d, d->boot_type, IDMA_BUS_CON));
++	idma_wr(d, SBD_CH_VGF0, IDMA_DYN_GATING, idma_rd(d, d->boot_type, IDMA_DYN_GATING));
++	idma_wr(d, SBD_CH_VGF0, IDMA_REQ_DEST, idma_rd(d, d->boot_type, IDMA_REQ_DEST));
++	/* VGF0's DPP: the boot channel's input format, the sizes, the scaler */
++	dpp_wr(d, SBD_CH_VGF0, DPP_IN_CON, (dpp_rd(d, SBD_CH_VGF0, DPP_IN_CON) & ~DPP_IN_KEEP) | (dpp_in & DPP_IN_KEEP));
++	dpp_wr(d, SBD_CH_VGF0, DPP_IMG_SIZE, (src_h << 16) | src_w);
++	dpp_wr(d, SBD_CH_VGF0, DPP_SCALED_SIZE, (dst->h << 16) | dst->w);
++	setup_scaler(d, src_w, src_h, dst->w, dst->h);
++	dpp_wr(d, SBD_CH_VGF0, DPP_DYN_GATING, dpp_rd(d, d->boot_type, DPP_DYN_GATING));
++	/* VGF0 is idle, so its registers are forced in now rather than at a frame of its own */
++	idma_wr(d, SBD_CH_VGF0, IDMA_ENABLE, idma_rd(d, SBD_CH_VGF0, IDMA_ENABLE) | IDMA_SFR_UPDATE_FORCE);
++	dpp_wr(d, SBD_CH_VGF0, DPP_ENABLE, dpp_rd(d, SBD_CH_VGF0, DPP_ENABLE) | DPP_SFR_UPDATE_FORCE);
++	if (wait_latched(d, 100) != 0) {
++		return SBD_ERR_BUSY;            /* nothing of the window was changed yet */
++	}
++
++	/* move the window: its rectangle, then its channel, taken together at the next frame */
++	frames = sbd_rd(&d->io, DECON, DECON_FRAME_COUNT);
++	d->mode = SBD_MODE_SCALER;
++	d->chan_type = SBD_CH_VGF0;
++	d->stride_px = rowbytes / 4;
++	d->src_w = src_w;
++	d->src_h = src_h;
++	sbd_decon_trigger(d, true);
++	sbd_wr(&d->io, DECON, DECON_WIN_START(d->win), (dst->y << 16) | dst->x);
++	sbd_wr(&d->io, DECON, DECON_WIN_END(d->win), ((dst->y + dst->h - 1) << 16) | (dst->x + dst->w - 1));
++	sbd_wr(&d->io, DECON, DECON_DATA_PATH_1,
++	    (path1 & ~(7u << (4 * d->win))) | ((uint32_t)SBD_PATH_CH_VGF0 << (4 * d->win)));
++	request_shadow_update(d);
++	if (wait_latched(d, 100) != 0) {
++		sbd_decon_detach(d);
++		return SBD_ERR_BUSY;
++	}
++	/* three refreshes on the new channel, then its error state */
++	for (unsigned ms = 0; ms < 100 && sbd_rd(&d->io, DECON, DECON_FRAME_COUNT) - frames < 3; ms++) {
++		d->io.udelay(d->io.ctx, 1000);
++	}
++	if ((idma_rd(d, SBD_CH_VGF0, IDMA_CFG_ERR) & 0x7ffu) || (dpp_rd(d, SBD_CH_VGF0, DPP_CFG_ERR) & 0x1fu) ||
++	    (idma_rd(d, SBD_CH_VGF0, IDMA_IRQ) & IDMA_IRQ_ERRORS) || (dpp_rd(d, SBD_CH_VGF0, DPP_IRQ) & DPP_IRQ_CONFIG_ERROR)) {
++		sbd_decon_detach(d);
++		return SBD_ERR_HW;
++	}
++	d->shown_base = (uint32_t)phys;
++	return SBD_OK;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_decon.h b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_decon.h
+new file mode 100644
+index 00000000..50bbc265
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_decon.h
+@@ -0,0 +1,143 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * DECON_F scan-out control for the Galaxy S9 (Exynos 9810): address flips on the window S-Boot left on,
++ * an optional move of that window to the VGF0 channel (hardware scaler), the frame interrupt model and
++ * refresh accounting. Plain C, no IOKit: shared by StarbiteDisplay.cpp and test/.
++ *
++ * The flip and scaler sequences follow what an earlier port's public driver does on this phone
++ * (refport-kernel drivers/display/dpu/exynos_dpu.c, APSL-2.0, an earlier port; credited in NOTES.md).
++ * This file is written anew around a testable register back end.
++ */
++#ifndef SBD_DECON_H
++#define SBD_DECON_H
++
++#include "sbd_io.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum sbd_decon_mode {
++	SBD_MODE_BOOT   = 0,    /* S-Boot's window and buffer: nothing of ours written */
++	SBD_MODE_FLIP   = 1,    /* address flips on S-Boot's channel, buffers of the panel's size */
++	SBD_MODE_SCALER = 2     /* window on VGF0: smaller buffers scaled to a rectangle of the panel */
++};
++
++/* why a call was refused (negative returns) */
++enum sbd_decon_err {
++	SBD_OK                  = 0,
++	SBD_ERR_NOT_PROBED      = -1,
++	SBD_ERR_GEOMETRY        = -2,   /* not the 1440 x 2960 x 4 boot buffer we know */
++	SBD_ERR_WINDOWS         = -3,   /* not exactly one window on */
++	SBD_ERR_CHANNEL         = -4,   /* the window's channel is no IDMA's, or VGF0 is taken */
++	SBD_ERR_NOT_BOOT_BUFFER = -5,   /* the channel does not read the boot framebuffer */
++	SBD_ERR_NOT_RUNNING     = -6,   /* not command mode, or not running */
++	SBD_ERR_ADDRESS         = -7,   /* above 4 GiB, above the scan-out limit, or misaligned */
++	SBD_ERR_STRIDE          = -8,
++	SBD_ERR_MODE            = -9,
++	SBD_ERR_BUSY            = -10,  /* a shadow update is still pending, or the channel is busy */
++	SBD_ERR_SIZE            = -11,  /* outside the scaler's limits */
++	SBD_ERR_HW              = -12   /* the hardware reported a configuration error */
++};
++
++/* events returned by sbd_decon_irq() / sbd_decon_poll() */
++#define SBD_EV_VSYNC            (1u << 0)       /* a frame started (one refresh) */
++#define SBD_EV_FRAME_DONE       (1u << 1)
++#define SBD_EV_LATCHED          (1u << 2)       /* the pending flip was taken: shown_base changed */
++#define SBD_EV_TIMEOUT          (1u << 3)
++#define SBD_EV_CONFLICT         (1u << 4)
++
++/* an earlier port's observation on this phone: nothing drawn from 0xE0000000 up reaches the panel ([S], NOTES.md). */
++#define SBD_SCANOUT_LIMIT       0xe0000000ull
++
++struct sbd_rect {
++	uint32_t x, y, w, h;
++};
++
++struct sbd_decon {
++	struct sbd_io io;
++	int      probed;                /* 0 not yet, 1 as expected, -1 refused (nothing was written) */
++	int      probe_err;
++	enum sbd_decon_mode mode;
++	uint32_t panel_w, panel_h;
++	uint64_t scan_limit;
++
++	/* what S-Boot left, read at probe and put back by sbd_decon_detach() */
++	unsigned win;                   /* the one window that is on */
++	unsigned boot_type;             /* its channel block */
++	uint32_t boot_base, boot_path1, boot_src_size, boot_img_size, boot_in_con;
++	uint32_t boot_win_start, boot_win_end, boot_trig;
++
++	/* the channel flips go to now */
++	unsigned chan_type;
++	uint32_t stride_px;             /* what IDMA_SRC_SIZE holds */
++	uint32_t src_w, src_h;          /* the buffers' size in this mode */
++
++	/* flips */
++	bool     pending;               /* a base was written and its shadow update not yet seen taken */
++	uint32_t pending_base;
++	uint32_t shown_base;            /* what the DECON reads now */
++	uint64_t flips_requested;
++	uint64_t flips_latched;         /* "frame flips by address" */
++	uint64_t flips_replaced;        /* a newer flip overwrote one the DECON had not taken */
++
++	/* refresh accounting */
++	uint64_t vsync_irqs;            /* frame-start interrupts: "vsync IRQ counted" */
++	uint64_t frame_done_irqs;
++	uint64_t timeout_irqs, conflict_irqs;
++	uint64_t refreshes_polled;      /* from FRAME_COUNT, the timer's path */
++	uint32_t last_frame_count;
++	bool     have_frame_count;
++};
++
++void sbd_decon_init(struct sbd_decon *d, const struct sbd_io *io);
++
++/* Reads only. 0 when the DECON is in the state S-Boot and our loader leave it in. */
++int  sbd_decon_probe(struct sbd_decon *d, uint64_t fb_phys, uint32_t width, uint32_t height, uint32_t rowbytes);
++
++/* Is this buffer one the IDMA can read? (physical, contiguous is the caller's check) */
++int  sbd_decon_buffer_ok(const struct sbd_decon *d, uint64_t phys, uint64_t bytes, uint32_t rowbytes);
++
++/* Mode 1: flips on S-Boot's channel. Writes nothing by itself. */
++int  sbd_decon_attach_flip(struct sbd_decon *d);
++
++/*
++ * Mode 2: the window moves to VGF0, which reads src_w x src_h (rowbytes a row) at phys and scales it to
++ * `dst` on the panel. Sleeps (io.udelay). On any error the boot window is put back.
++ */
++int  sbd_decon_attach_scaler(struct sbd_decon *d, uint64_t phys, uint32_t src_w, uint32_t src_h,
++    uint32_t rowbytes, const struct sbd_rect *dst);
++
++/* Show `phys` from the next refresh on. May be called again before the last flip was taken. */
++int  sbd_decon_flip(struct sbd_decon *d, uint64_t phys, uint32_t rowbytes);
++
++/* Has every requested shadow update been taken? */
++bool sbd_decon_latched(struct sbd_decon *d);
++
++/* Back to S-Boot's channel, window and buffer (the kernel console and a panic draw there). */
++void sbd_decon_detach(struct sbd_decon *d);
++
++/* The TE trigger: on = a frame at every TE; off = masked, the panel shows its own memory. */
++void sbd_decon_trigger(struct sbd_decon *d, bool on);
++
++/* Frame-start, frame-done and extra interrupts on or off (pending ones are cleared first). */
++void sbd_decon_irq_enable(struct sbd_decon *d, bool on);
++
++/* The interrupt handler's register work: read, clear, count. Returns SBD_EV_*. No sleeping. */
++uint32_t sbd_decon_irq(struct sbd_decon *d);
++
++/* Without interrupts: refreshes since the last call from FRAME_COUNT (`*refreshes`), and SBD_EV_LATCHED. */
++uint32_t sbd_decon_poll(struct sbd_decon *d, uint32_t *refreshes);
++
++/* The letterbox: src scaled to the largest rectangle of the panel with its aspect, centred, even sizes. */
++void sbd_decon_fit(uint32_t src_w, uint32_t src_h, uint32_t panel_w, uint32_t panel_h, struct sbd_rect *out);
++
++/* Catmull-Rom weight table for the scaler (nine phases, four taps, units of 1/512; each row sums to 512). */
++void sbd_decon_scaler_coefficients(int16_t table[9][4]);
++
++const char *sbd_decon_strerror(int err);
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* SBD_DECON_H */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_dsim.c b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_dsim.c
+new file mode 100644
+index 00000000..8ce43832
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_dsim.c
+@@ -0,0 +1,168 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * MIPI DSIM0 command FIFO (see sbd_dsim.h). Register facts: NOTES.md (build/em-research-brightness.md holds the
++ * derivation; the loader's EngineerMode sends the same packets on this phone). Written for this driver.
++ */
++#include "sbd_dsim.h"
++#include "sbd_regs.h"
++
++#define DSIM    SBD_BLK_DSIM
++
++bool
++sbd_dsim_ready(const struct sbd_io *io)
++{
++	return (sbd_rd(io, DSIM, DSIM_CLK_CTRL) & DSIM_TX_REQUEST_HSCLK) != 0 &&
++	       (sbd_rd(io, DSIM, DSIM_CONFIG) & DSIM_VIDEO_MODE) == 0;
++}
++
++/* The packet has left when the header FIFO is empty: the interrupt bit, or the FIFO's own state. */
++static int
++wait_header_sent(const struct sbd_io *io, uint32_t timeout_us)
++{
++	for (uint32_t t = 0; ; t += SBD_DSIM_POLL_US) {
++		uint32_t src = sbd_rd(io, DSIM, DSIM_INTSRC), fifo = sbd_rd(io, DSIM, DSIM_FIFOCTRL);
++
++		if ((src & DSIM_INT_PH_EMPTY) || ((fifo & DSIM_FIFO_PH_EMPTY) && DSIM_FIFO_PH_COUNT(fifo) == 0)) {
++			sbd_wr(io, DSIM, DSIM_INTSRC, DSIM_INT_PH_EMPTY);
++			return SBD_DSIM_OK;
++		}
++		if (t >= timeout_us) {
++			return SBD_DSIM_TIMEOUT;        /* no reset of the DSIM: the caller retries later */
++		}
++		io->udelay(io->ctx, SBD_DSIM_POLL_US);
++	}
++}
++
++static void
++write_header(const struct sbd_io *io, uint32_t type, uint32_t d0, uint32_t d1, bool bta)
++{
++	uint32_t keep = sbd_rd(io, DSIM, DSIM_PKTHDR) & DSIM_PKTHDR_KEEP;
++
++	sbd_wr(io, DSIM, DSIM_PKTHDR, keep | (bta ? DSIM_PKTHDR_BTA : 0) | ((d1 & 0xffu) << 16) | ((d0 & 0xffu) << 8) |
++	    (type & 0xffu));
++}
++
++int
++sbd_dsim_dcs_write(const struct sbd_io *io, const uint8_t *bytes, uint32_t n, struct sbd_dsim_stats *st)
++{
++	int err;
++
++	if (bytes == NULL || n == 0 || n > SBD_DSIM_MAX_PAYLOAD) {
++		return SBD_DSIM_BAD_ARG;
++	}
++	if (!sbd_dsim_ready(io)) {
++		return SBD_DSIM_NOT_READY;
++	}
++	/* a header still queued (a frame in flight holds commands back): let it go first */
++	if (DSIM_FIFO_PH_COUNT(sbd_rd(io, DSIM, DSIM_FIFOCTRL)) != 0 &&
++	    wait_header_sent(io, SBD_DSIM_TX_TIMEOUT_US) != SBD_DSIM_OK) {
++		if (st != NULL) {
++			st->timeouts++;
++		}
++		return SBD_DSIM_TIMEOUT;
++	}
++	sbd_wr(io, DSIM, DSIM_INTSRC, DSIM_INT_PH_EMPTY);       /* clear a stale one */
++	if (n == 1) {
++		write_header(io, DSI_DCS_SHORT, bytes[0], 0, false);
++	} else {
++		for (uint32_t i = 0; i < n; i += 4) {
++			uint32_t word = 0;
++
++			for (uint32_t k = 0; k < 4 && i + k < n; k++) {
++				word |= (uint32_t)bytes[i + k] << (8 * k);
++			}
++			sbd_wr(io, DSIM, DSIM_PAYLOAD, word);
++		}
++		write_header(io, DSI_DCS_LONG, n & 0xffu, n >> 8, false);
++	}
++	err = wait_header_sent(io, SBD_DSIM_TX_TIMEOUT_US);
++	if (st != NULL) {
++		st->packets++;
++		if (err != SBD_DSIM_OK) {
++			st->timeouts++;
++		}
++	}
++	return err;
++}
++
++static void
++drain_rx(const struct sbd_io *io)
++{
++	for (int i = 0; i < SBD_DSIM_RX_WORDS && !(sbd_rd(io, DSIM, DSIM_FIFOCTRL) & DSIM_FIFO_RX_EMPTY); i++) {
++		(void)sbd_rd(io, DSIM, DSIM_RXFIFO);
++	}
++}
++
++int
++sbd_dsim_dcs_read(const struct sbd_io *io, uint8_t reg, uint8_t *out, uint32_t n, struct sbd_dsim_stats *st)
++{
++	if (out == NULL || n == 0 || n > 16) {
++		return SBD_DSIM_BAD_ARG;
++	}
++	if (!sbd_dsim_ready(io)) {
++		return SBD_DSIM_NOT_READY;
++	}
++	drain_rx(io);
++	sbd_wr(io, DSIM, DSIM_INTSRC, DSIM_INT_RX_DONE | DSIM_INT_PH_EMPTY);
++	/* the panel answers with at most n bytes */
++	write_header(io, DSI_SET_MAX_RETURN, n, 0, false);
++	if (wait_header_sent(io, SBD_DSIM_TX_TIMEOUT_US) != SBD_DSIM_OK) {
++		goto timeout;
++	}
++	sbd_wr(io, DSIM, DSIM_INTSRC, DSIM_INT_RX_DONE);
++	write_header(io, DSI_DCS_READ, reg, 0, true);           /* the bus is turned round for the answer */
++	for (uint32_t t = 0; !(sbd_rd(io, DSIM, DSIM_INTSRC) & DSIM_INT_RX_DONE); t += SBD_DSIM_POLL_US) {
++		if (t >= SBD_DSIM_RX_TIMEOUT_US) {
++			goto timeout;
++		}
++		io->udelay(io->ctx, SBD_DSIM_POLL_US);
++	}
++	sbd_wr(io, DSIM, DSIM_INTSRC, DSIM_INT_RX_DONE | DSIM_INT_PH_EMPTY);
++	if (st != NULL) {
++		st->packets++;
++	}
++	for (int i = 0; i < SBD_DSIM_RX_WORDS && !(sbd_rd(io, DSIM, DSIM_FIFOCTRL) & DSIM_FIFO_RX_EMPTY); i++) {
++		uint32_t word = sbd_rd(io, DSIM, DSIM_RXFIFO);
++
++		switch (word & 0xffu) {
++		case DSI_RX_DCS_LONG:
++		case DSI_RX_GEN_LONG: {
++			uint32_t count = (word >> 8) & 0xffffu, got = 0;
++
++			for (uint32_t off = 0; off < count; off += 4) {
++				uint32_t data = sbd_rd(io, DSIM, DSIM_RXFIFO);
++
++				for (uint32_t k = 0; k < 4 && off + k < count; k++) {
++					if (got < n) {
++						out[got++] = (uint8_t)(data >> (8 * k));
++					}
++				}
++			}
++			return (int)got;
++		}
++		case DSI_RX_DCS_SHORT_1:
++		case DSI_RX_GEN_SHORT_1:
++			out[0] = (uint8_t)(word >> 8);
++			return 1;
++		case DSI_RX_DCS_SHORT_2:
++		case DSI_RX_GEN_SHORT_2:
++			out[0] = (uint8_t)(word >> 8);
++			if (n > 1) {
++				out[1] = (uint8_t)(word >> 16);
++			}
++			return n > 1 ? 2 : 1;
++		case DSI_RX_ACK_ERROR:
++			if (st != NULL) {
++				st->rx_errors++;
++			}
++			return SBD_DSIM_RX_ERROR;
++		default:                /* end of transmission and the like */
++			break;
++		}
++	}
++timeout:
++	if (st != NULL) {
++		st->timeouts++;
++	}
++	return SBD_DSIM_TIMEOUT;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_dsim.h b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_dsim.h
+new file mode 100644
+index 00000000..eca4f500
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_dsim.h
+@@ -0,0 +1,50 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * MIPI DSIM0 command FIFO (Exynos 9810), command mode: DCS writes and reads while the DECON keeps sending
++ * frames. Only the packet FIFO registers are touched; the link (PLL, clocks, escape mode, FIFOCTRL, resets)
++ * stays as S-Boot left it. Plain C, shared by the kext and the host tests.
++ */
++#ifndef SBD_DSIM_H
++#define SBD_DSIM_H
++
++#include "sbd_io.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define SBD_DSIM_TX_TIMEOUT_US  50000u          /* the vendor's 50 ms: a frame holds commands back ~10 ms */
++#define SBD_DSIM_RX_TIMEOUT_US  100000u
++#define SBD_DSIM_POLL_US        100u
++#define SBD_DSIM_RX_WORDS       64
++#define SBD_DSIM_MAX_PAYLOAD    512u
++
++enum sbd_dsim_err {
++	SBD_DSIM_OK        = 0,
++	SBD_DSIM_NOT_READY = -1,        /* the link is not in HS command mode */
++	SBD_DSIM_TIMEOUT   = -2,        /* the header FIFO did not drain / no answer */
++	SBD_DSIM_BAD_ARG   = -3,
++	SBD_DSIM_RX_ERROR  = -4         /* the panel answered with an error report */
++};
++
++struct sbd_dsim_stats {
++	uint32_t packets, timeouts, rx_errors;
++};
++
++/* Did the loader leave the link usable (HS clock requested, command mode)? Reads only. */
++bool sbd_dsim_ready(const struct sbd_io *io);
++
++/*
++ * One DCS write. n == 1: a short write (0x05, the command alone). n >= 2: a long write (0x39), which is how
++ * the vendor driver and S-Boot send every command with parameters on this panel, two-byte ones included.
++ * Payload words go into the FIFO first, then the header; then the header FIFO is waited empty.
++ */
++int sbd_dsim_dcs_write(const struct sbd_io *io, const uint8_t *bytes, uint32_t n, struct sbd_dsim_stats *st);
++
++/* DCS read of `n` bytes (1..16) of register `reg` from offset 0. Returns the count read or an error. */
++int sbd_dsim_dcs_read(const struct sbd_io *io, uint8_t reg, uint8_t *out, uint32_t n, struct sbd_dsim_stats *st);
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* SBD_DSIM_H */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_io.h b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_io.h
+new file mode 100644
+index 00000000..6023d012
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_io.h
+@@ -0,0 +1,56 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteDisplay register access: one small back end shared by the kext (real MMIO from the ADT nubs)
++ * and the host tests (a mock register file). No IOKit, no libc.
++ */
++#ifndef SBD_IO_H
++#define SBD_IO_H
++
++#include <stdint.h>
++#include <stddef.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Register blocks. The kext maps each from a "reg" entry of the decon / dsim nub (INTEGRATION.md). */
++enum sbd_block {
++	SBD_BLK_DECON = 0,      /* DECON_F, 0x16030000 */
++	SBD_BLK_IDMA  = 1,      /* DPU_DMA, 0x16070000: channel block k at 0x1000 * (k + 1) */
++	SBD_BLK_DPP   = 2,      /* DPP, 0x16020000: channel block k at 0x1000 * (k + 1) */
++	SBD_BLK_DSIM  = 3,      /* MIPI DSIM0, 0x16080000 */
++	SBD_BLK_COUNT = 4
++};
++
++struct sbd_io {
++	uint32_t (*rd)(void *ctx, unsigned block, uint32_t off);
++	void     (*wr)(void *ctx, unsigned block, uint32_t off, uint32_t val);
++	void     (*udelay)(void *ctx, uint32_t us);     /* may sleep; never called from the interrupt path */
++	void     *ctx;
++};
++
++static inline uint32_t
++sbd_rd(const struct sbd_io *io, unsigned block, uint32_t off)
++{
++	return io->rd(io->ctx, block, off);
++}
++
++static inline void
++sbd_wr(const struct sbd_io *io, unsigned block, uint32_t off, uint32_t val)
++{
++	io->wr(io->ctx, block, off, val);
++}
++
++/* read-modify-write: bits in mask become those of val */
++static inline void
++sbd_wr_mask(const struct sbd_io *io, unsigned block, uint32_t off, uint32_t val, uint32_t mask)
++{
++	uint32_t old = io->rd(io->ctx, block, off);
++	io->wr(io->ctx, block, off, (old & ~mask) | (val & mask));
++}
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* SBD_IO_H */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_panel.c b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_panel.c
+new file mode 100644
+index 00000000..e6b7b206
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_panel.c
+@@ -0,0 +1,178 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/* S6E3HA8 panel commands (see sbd_panel.h). Command facts and their sources: NOTES.md. */
++#include "sbd_panel.h"
++
++void
++sbd_panel_init(struct sbd_panel *p, const struct sbd_io *io)
++{
++	unsigned char *b = (unsigned char *)p;
++
++	for (size_t i = 0; i < sizeof(*p); i++) {
++		b[i] = 0;
++	}
++	p->io = *io;
++	p->level = -1;
++}
++
++bool
++sbd_panel_cmd_allowed(uint8_t cmd)
++{
++	switch (cmd) {
++	case 0xf0:      /* level-2 key */
++	case 0x9f:      /* level-1 key */
++	case 0xb1:      /* AOR (only at offset 0: this driver never sends the B0 offset command) */
++	case 0xf7:      /* take gamma / AOR */
++	case 0x28:      /* display off */
++	case 0x29:      /* display on */
++	case 0x10:      /* sleep in */
++	case 0x11:      /* sleep out */
++		return true;
++	default:
++		/* never: C0/C1 (the panel's flash), C8/B3/A1 (calibration), B5/F4/FC (supply voltages), CA (gamma
++		 * without the calibration maths), 01 (reset), 34 (TE off: the DECON's trigger would stop), 53 (AOD),
++		 * B0 (offset: turns a harmless register write into another one) */
++		return false;
++	}
++}
++
++static int
++panel_send(struct sbd_panel *p, const uint8_t *bytes, uint32_t n)
++{
++	if (n == 0 || !sbd_panel_cmd_allowed(bytes[0])) {
++		p->refused++;
++		return SBD_DSIM_BAD_ARG;
++	}
++	return sbd_dsim_dcs_write(&p->io, bytes, n, &p->stats);
++}
++
++uint32_t
++sbd_panel_aor_for_level(int level)
++{
++	uint32_t l, on_min, on_max, on;
++
++	if (level < 0) {
++		level = 0;
++	}
++	if (level > 255) {
++		level = 255;
++	}
++	l = (uint32_t)level;
++	/* lit lines of the frame: light is about proportional to them; the square makes steps look even */
++	on_min = SBD_PANEL_LINES - SBD_PANEL_AOR_DIMMEST;
++	on_max = SBD_PANEL_LINES - SBD_PANEL_AOR_MIN;
++	on = on_min + ((on_max - on_min) * l * l + (255u * 255u) / 2) / (255u * 255u);
++	return SBD_PANEL_LINES - on;
++}
++
++int
++sbd_panel_set_aor(struct sbd_panel *p, uint32_t aor)
++{
++	static const uint8_t key_on[3] = { 0xf0, 0x5a, 0x5a }, commit[2] = { 0xf7, 0x03 }, key_off[3] = { 0xf0, 0xa5, 0xa5 };
++	uint8_t b1[3];
++	int err = SBD_DSIM_OK;
++
++	if (aor < SBD_PANEL_AOR_MIN) {
++		aor = SBD_PANEL_AOR_MIN;
++	}
++	if (aor > SBD_PANEL_AOR_MAX) {
++		aor = SBD_PANEL_AOR_MAX;
++	}
++	b1[0] = 0xb1;
++	b1[1] = (uint8_t)(aor >> 8);
++	b1[2] = (uint8_t)aor;
++	if (!sbd_dsim_ready(&p->io)) {
++		return SBD_DSIM_NOT_READY;
++	}
++	for (int attempt = 0; attempt < 2; attempt++) {
++		err = panel_send(p, key_on, sizeof(key_on));
++		if (err == SBD_DSIM_OK) {
++			err = panel_send(p, b1, sizeof(b1));
++		}
++		if (err == SBD_DSIM_OK) {
++			err = panel_send(p, commit, sizeof(commit));
++		}
++		(void)panel_send(p, key_off, sizeof(key_off));          /* never leave the key open */
++		if (err == SBD_DSIM_OK) {
++			p->aor = aor;
++			break;
++		}
++		p->io.udelay(p->io.ctx, 20000);
++	}
++	return err;
++}
++
++int
++sbd_panel_set_brightness(struct sbd_panel *p, int level)
++{
++	int err;
++
++	level = level < 0 ? 0 : (level > 255 ? 255 : level);
++	err = sbd_panel_set_aor(p, sbd_panel_aor_for_level(level));
++	if (err == SBD_DSIM_OK) {
++		p->level = level;
++	}
++	return err;
++}
++
++/* one command between the level-1 key, the key closed again whatever happened */
++static int
++keyed(struct sbd_panel *p, uint8_t cmd)
++{
++	static const uint8_t key1_on[3] = { 0x9f, 0xa5, 0xa5 }, key1_off[3] = { 0x9f, 0x5a, 0x5a };
++	int err = panel_send(p, key1_on, sizeof(key1_on));
++
++	if (err == SBD_DSIM_OK) {
++		err = panel_send(p, &cmd, 1);
++	}
++	(void)panel_send(p, key1_off, sizeof(key1_off));
++	return err;
++}
++
++int
++sbd_panel_display(struct sbd_panel *p, bool on)
++{
++	int err = keyed(p, on ? 0x29 : 0x28);
++
++	if (err == SBD_DSIM_OK) {
++		p->display_off = !on;
++	}
++	return err;
++}
++
++int
++sbd_panel_sleep(struct sbd_panel *p, bool in)
++{
++	int err;
++
++	if (in) {
++		err = sbd_panel_display(p, false);
++		p->io.udelay(p->io.ctx, 20000);                 /* a frame and more */
++		if (err == SBD_DSIM_OK) {
++			err = keyed(p, 0x10);
++		}
++		p->io.udelay(p->io.ctx, 100000);                /* the vendor's wait after sleep-in */
++		if (err == SBD_DSIM_OK) {
++			p->asleep = true;
++		}
++		return err;
++	}
++	err = keyed(p, 0x11);
++	p->io.udelay(p->io.ctx, 30000);                         /* the vendor's 10 ms and a frame more */
++	if (err != SBD_DSIM_OK) {
++		return err;
++	}
++	p->asleep = false;
++	if (p->level >= 0) {
++		(void)sbd_panel_set_brightness(p, p->level);
++	}
++	p->io.udelay(p->io.ctx, 20000);
++	return sbd_panel_display(p, true);
++}
++
++int
++sbd_panel_read_id(struct sbd_panel *p, uint8_t id[3])
++{
++	int n = sbd_dsim_dcs_read(&p->io, 0x04, id, 3, &p->stats);
++
++	return n == 3 ? SBD_DSIM_OK : (n < 0 ? n : SBD_DSIM_RX_ERROR);
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_panel.h b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_panel.h
+new file mode 100644
+index 00000000..fb1d2cb7
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_panel.h
+@@ -0,0 +1,56 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Samsung S6E3HA8 (Galaxy S9, 1440 x 2960 AMOLED, MIPI command mode, DSC) through sbd_dsim: brightness by AOR
++ * (the method S-Boot itself uses on this phone), display on/off, sleep in/out, panel ID.
++ *
++ * Every command goes through one allow-list. Registers that write the panel's flash, its calibration or its
++ * supply voltages can never be sent from this driver.
++ */
++#ifndef SBD_PANEL_H
++#define SBD_PANEL_H
++
++#include "sbd_dsim.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define SBD_PANEL_AOR_MIN       0x000cu         /* brightest: the vendor's 400-nit AOR */
++#define SBD_PANEL_AOR_DIMMEST   0x0b76u         /* the vendor's 2-nit AOR: level 0 */
++#define SBD_PANEL_AOR_MAX       0x0ba3u         /* S-Boot's darkest; never above (the frame is 2979 lines) */
++#define SBD_PANEL_LINES         2979u           /* vertical total: AOR counts dark lines of it */
++
++struct sbd_panel {
++	struct sbd_io io;
++	struct sbd_dsim_stats stats;
++	int      level;                 /* last brightness set, 0-255; -1 never */
++	uint32_t aor;                   /* last AOR sent */
++	bool     display_off, asleep;
++	uint32_t refused;               /* commands the allow-list stopped */
++};
++
++void sbd_panel_init(struct sbd_panel *p, const struct sbd_io *io);
++
++/* May this DCS command byte be sent at all? */
++bool sbd_panel_cmd_allowed(uint8_t cmd);
++
++/* Brightness level 0-255 -> AOR (0x0b76 .. 0x000c), monotonic, light roughly with the square of the level. */
++uint32_t sbd_panel_aor_for_level(int level);
++
++/* F0 5A 5A, B1 hi lo, F7 03, F0 A5 A5. One retry of the whole sequence; the key is always locked again. */
++int sbd_panel_set_aor(struct sbd_panel *p, uint32_t aor);
++int sbd_panel_set_brightness(struct sbd_panel *p, int level);
++
++/* Display off (28) / on (29) between the level-1 key. The panel keeps its memory and its link. */
++int sbd_panel_display(struct sbd_panel *p, bool on);
++
++/* Sleep in (10) / out (11) between the level-1 key, with the vendor's waits. Off unless asked (NOTES.md). */
++int sbd_panel_sleep(struct sbd_panel *p, bool in);
++
++/* DCS 04, three bytes. This phone's panel answers 91 04 44. */
++int sbd_panel_read_id(struct sbd_panel *p, uint8_t id[3]);
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* SBD_PANEL_H */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_regs.h b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_regs.h
+new file mode 100644
+index 00000000..e0835489
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_regs.h
+@@ -0,0 +1,150 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Exynos 9810 display registers used by StarbiteDisplay. Offsets and bit positions are hardware facts;
++ * NOTES.md lists the source of each ([V] verified in a source we hold, [S] stated by an earlier port's public driver,
++ * [I] inferred). No code was taken from the GPL sources that document them.
++ */
++#ifndef SBD_REGS_H
++#define SBD_REGS_H
++
++/* ---- DECON_F (SBD_BLK_DECON) ---- */
++#define DECON_GLOBAL_CONTROL            0x0000
++#define  DECON_GC_CMD_MODE              (1u << 8)       /* MIPI command mode */
++#define  DECON_GC_IDLE                  (1u << 5)
++#define  DECON_GC_RUN                   (1u << 4)
++#define DECON_INT_ENABLE                0x0040
++#define  DECON_INT_FRAME_DONE           (1u << 13)
++#define  DECON_INT_FRAME_START          (1u << 12)
++#define  DECON_INT_EXTRA                (1u << 4)
++#define  DECON_INT_EN                   (1u << 0)
++#define  DECON_INT_ENABLE_MASK          0x3111u
++#define DECON_EXTRA_INT_ENABLE          0x0044
++#define  DECON_XINT_CONFLICT            (1u << 8)       /* resource conflict */
++#define  DECON_XINT_TIMEOUT             (1u << 4)
++#define DECON_INT_PENDING               0x004c          /* write 1 to clear */
++#define DECON_EXTRA_INT_PENDING         0x0050          /* write 1 to clear */
++#define DECON_SHADOW_REQ                0x0060          /* cleared by hardware when the update is taken */
++#define  DECON_SHADOW_GLOBAL            (1u << 31)
++#define  DECON_SHADOW_WINS              0x3fu
++#define  DECON_SHADOW_ALL               (DECON_SHADOW_GLOBAL | DECON_SHADOW_WINS)
++#define DECON_TRIG_CONTROL              0x0070
++#define  DECON_HW_TRIG_ACTIVE_VALUE     (1u << 13)
++#define  DECON_HW_TRIG_EDGE_POLARITY    (1u << 12)
++#define  DECON_SW_TRIG_EN               (1u << 8)
++#define  DECON_HW_TRIG_MASK             (1u << 4)       /* TE ignored: the panel shows its own memory */
++#define  DECON_HW_TRIG_EN               (1u << 0)
++#define DECON_DATA_PATH_0               0x0214          /* bit 4w: window w on */
++#define DECON_DATA_PATH_1               0x0218          /* bits 4w..4w+2: window w's DMA channel */
++#define DECON_FRAME_COUNT               0x02a0
++#define DECON_WIN_START(w)              (0x1008u + 0x30u * (w)) /* y << 16 | x */
++#define DECON_WIN_END(w)                (0x100cu + 0x30u * (w)) /* last line << 16 | last column */
++#define DECON_WINDOWS                   6
++
++/* ---- DPU_DMA (SBD_BLK_IDMA), per channel block ---- */
++#define IDMA_CH(type)                   (0x1000u * ((type) + 1u))
++#define IDMA_ENABLE                     0x0000
++#define  IDMA_SFR_UPDATE_FORCE          (1u << 4)
++#define  IDMA_OP_BUSY                   (1u << 2)
++#define IDMA_IRQ                        0x0004
++#define  IDMA_IRQ_CONFIG_ERROR          (1u << 21)
++#define  IDMA_IRQ_READ_SLAVE_ERROR      (1u << 19)
++#define  IDMA_IRQ_DEADLOCK              (1u << 17)
++#define  IDMA_IRQ_ERRORS                (IDMA_IRQ_CONFIG_ERROR | IDMA_IRQ_READ_SLAVE_ERROR | IDMA_IRQ_DEADLOCK)
++#define IDMA_IN_CON                     0x0008
++#define  IDMA_IN_IC_MAX_MASK            (0xffu << 19)
++#define  IDMA_IN_FORMAT_SHIFT           11
++#define  IDMA_IN_FORMAT_MASK            (0x1fu << 11)
++#define  IDMA_IN_ROT_FLIP_MASK          (7u << 8)
++#define  IDMA_IN_AFBC_MASK              (3u << 6)
++#define  IDMA_IN_BLOCK_EN               (1u << 3)
++#define IDMA_OUT_CON                    0x000c
++#define IDMA_SRC_SIZE                   0x0010          /* height << 16 | stride in pixels */
++#define IDMA_SRC_OFFSET                 0x0014
++#define IDMA_IMG_SIZE                   0x0018          /* height << 16 | width */
++#define IDMA_BASE_Y                     0x0040          /* 32-bit physical address */
++#define IDMA_BASE_C                     0x0044
++#define IDMA_DEADLOCK_NUM               0x0050
++#define IDMA_BUS_CON                    0x0054
++#define IDMA_DYN_GATING                 0x0058
++#define IDMA_REQ_DEST                   0x0068
++#define IDMA_CFG_ERR                    0x0870          /* 11 bits */
++
++/* IDMA_IN_CON format codes */
++#define IDMA_FMT_ARGB8888               0
++#define IDMA_FMT_ABGR8888               1
++#define IDMA_FMT_RGBA8888               2
++#define IDMA_FMT_BGRA8888               3
++#define IDMA_FMT_XRGB8888               4
++#define IDMA_FMT_ARGB2101010            16
++#define IDMA_FMT_ABGR2101010            17
++#define IDMA_FMT_RGBA2101010            18
++#define IDMA_FMT_BGRA2101010            19
++
++/* ---- DPP (SBD_BLK_DPP), per channel block ---- */
++#define DPP_CH(type)                    (0x1000u * ((type) + 1u))
++#define DPP_ENABLE                      0x0000
++#define  DPP_SFR_UPDATE_FORCE           (1u << 4)
++#define DPP_IRQ                         0x0004
++#define  DPP_IRQ_CONFIG_ERROR           (1u << 21)
++#define DPP_IN_CON                      0x0008
++#define  DPP_IN_KEEP                    ((1u << 3) | 7u)        /* per-pixel alpha select, format */
++#define DPP_IMG_SIZE                    0x0018
++#define DPP_SCALED_SIZE                 0x002c
++#define DPP_H_RATIO                     0x0044          /* source / destination, 12.20 */
++#define DPP_V_RATIO                     0x0048
++#define DPP_V_COEF(phase, tap, bank)    (0x200u + 4u * (phase) + 0x24u * (tap) + 0x200u * (bank))
++#define DPP_H_COEF(phase, tap, bank)    (0x290u + 4u * (phase) + 0x24u * (tap) + 0x200u * (bank))
++#define DPP_YH_POS                      0x05b0
++#define DPP_YV_POS                      0x05b4
++#define DPP_CH_POS                      0x05b8
++#define DPP_CV_POS                      0x05bc
++#define DPP_DYN_GATING                  0x0a54
++#define DPP_CFG_ERR                     0x0d08          /* 5 bits */
++
++/* Channel blocks in address order, and DATA_PATH_CONTROL_1's channel number for each. */
++#define SBD_CH_G0                       0
++#define SBD_CH_G1                       1
++#define SBD_CH_VG0                      2
++#define SBD_CH_VG1                      3
++#define SBD_CH_VGF0                     4       /* has a scaler */
++#define SBD_CH_VGF1                     5       /* scaler + HDR */
++#define SBD_PATH_CH_VGF0                1       /* DATA_PATH_CONTROL_1 value for VGF0 */
++
++/* ---- MIPI DSIM0 (SBD_BLK_DSIM) ---- */
++#define DSIM_CLK_CTRL                   0x0020
++#define  DSIM_TX_REQUEST_HSCLK          (1u << 20)      /* the loader left the link in HS */
++#define DSIM_CONFIG                     0x004c
++#define  DSIM_VIDEO_MODE                (1u << 18)
++#define DSIM_INTSRC                     0x0050          /* write 1 to clear */
++#define  DSIM_INT_PH_EMPTY              (1u << 28)      /* header FIFO drained: the packet went out */
++#define  DSIM_INT_LPRX_TIMEOUT          (1u << 21)
++#define  DSIM_INT_BTA_TIMEOUT           (1u << 20)
++#define  DSIM_INT_RX_DONE               (1u << 18)
++#define DSIM_PKTHDR                     0x0058
++#define  DSIM_PKTHDR_KEEP               0xfe000000u     /* bits the vendor and S-Boot preserve */
++#define  DSIM_PKTHDR_BTA                (1u << 24)
++#define DSIM_PAYLOAD                    0x005c
++#define DSIM_RXFIFO                     0x0060
++#define DSIM_FIFOCTRL                   0x0068          /* read only here: never written */
++#define  DSIM_FIFO_PH_COUNT(v)          (((v) >> 16) & 0x3fu)
++#define  DSIM_FIFO_RX_EMPTY             (1u << 12)
++#define  DSIM_FIFO_PH_FULL              (1u << 11)
++#define  DSIM_FIFO_PH_EMPTY             (1u << 10)
++#define  DSIM_FIFO_PL_FULL              (1u << 9)
++
++/* MIPI DSI data types */
++#define DSI_DCS_SHORT                   0x05
++#define DSI_DCS_SHORT_PARAM             0x15
++#define DSI_DCS_READ                    0x06
++#define DSI_SET_MAX_RETURN              0x37
++#define DSI_DCS_LONG                    0x39
++#define DSI_RX_ACK_ERROR                0x02
++#define DSI_RX_EOT                      0x08
++#define DSI_RX_GEN_SHORT_1              0x11
++#define DSI_RX_GEN_SHORT_2              0x12
++#define DSI_RX_GEN_LONG                 0x1a
++#define DSI_RX_DCS_LONG                 0x1c
++#define DSI_RX_DCS_SHORT_1              0x21
++#define DSI_RX_DCS_SHORT_2              0x22
++
++#endif /* SBD_REGS_H */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_swap.c b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_swap.c
+new file mode 100644
+index 00000000..f0b084b5
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_swap.c
+@@ -0,0 +1,63 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/* Swap record decoding (see sbd_swap.h); the layout knowledge is SweetFramebuffer.cpp's (ours, 0046..0398). */
++#include "sbd_swap.h"
++
++static uint32_t
++get32(const uint8_t *p, uint32_t off)
++{
++	return (uint32_t)p[off] | ((uint32_t)p[off + 1] << 8) | ((uint32_t)p[off + 2] << 16) | ((uint32_t)p[off + 3] << 24);
++}
++
++bool
++sbd_swap_parse(const uint8_t *rec, uint32_t size, struct sbd_swap *out)
++{
++	uint32_t sh;
++
++	if (rec == 0 || out == 0 || size < SBD_SWAP_REC_MIN) {
++		return false;
++	}
++	sh = (get32(rec, 0x98) != 0 && get32(rec, 0x50) == 0) ? 0x48 : 0;
++	out->shift = sh;
++	out->swap_id = get32(rec, 0x50 + sh);
++	out->mask = get32(rec, 0x104 + sh);
++	out->enabled = 0;
++	for (uint32_t l = 0; l < SBD_SWAP_LAYERS; l++) {
++		struct sbd_swap_layer *y = &out->layer[l];
++		uint32_t a = 0x64 + sh + 16 * l, b = 0xc4 + sh + 16 * l;
++
++		y->surface = get32(rec, 0x54 + sh + 4 * l);
++		y->sx = (int32_t)get32(rec, a);
++		y->sy = (int32_t)get32(rec, a + 4);
++		y->sw = (int32_t)get32(rec, a + 8);
++		y->sh = (int32_t)get32(rec, a + 12);
++		y->dx = (int32_t)get32(rec, b);
++		y->dy = (int32_t)get32(rec, b + 4);
++		y->dw = (int32_t)get32(rec, b + 8);
++		y->dh = (int32_t)get32(rec, b + 12);
++		y->enabled = (out->mask & (1u << l)) != 0 && y->surface != 0;
++		out->enabled += y->enabled ? 1 : 0;
++	}
++	return true;
++}
++
++bool
++sbd_swap_single_full_layer(const struct sbd_swap *s, uint32_t canvas_w, uint32_t canvas_h, uint32_t surface_w,
++    uint32_t surface_h)
++{
++	const struct sbd_swap_layer *y = &s->layer[0];
++	int32_t w, h;
++
++	if (s->enabled != 1 || !y->enabled) {
++		return false;
++	}
++	if (surface_w != canvas_w || surface_h != canvas_h) {
++		return false;
++	}
++	/* an empty destination rectangle means "the whole surface" (SweetFramebuffer's reading) */
++	w = y->dw > 0 ? y->dw : (int32_t)surface_w;
++	h = y->dh > 0 ? y->dh : (int32_t)surface_h;
++	if (y->sx > 0 || y->sy > 0 || y->dx > 0 || y->dy > 0) {
++		return false;
++	}
++	return w == (int32_t)canvas_w && h == (int32_t)canvas_h;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_swap.h b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_swap.h
+new file mode 100644
+index 00000000..b9f5a880
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteDisplay/hw/sbd_swap.h
+@@ -0,0 +1,48 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * The IOMobileFramebuffer swap record (selector 5, SwapEnd / swap_submit) as AppleCLCD has decoded it since
++ * patch 0046: the fields CoreAnimation fills that this driver uses. Two layouts are known:
++ *   iOS 16 (0x46c bytes), macOS 13 (0x468):   swap id 0x50, surfaces 0x54, rects 0x64 / 0xc4, layer mask 0x104
++ *   iPadOS 18 (0x514), iOS 26 and macOS 26.5 (0x588): the same fields 0x48 further in
++ * The second is told from the first by the swap id: 0x98 set and 0x50 zero.
++ */
++#ifndef SBD_SWAP_H
++#define SBD_SWAP_H
++
++#include <stdint.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define SBD_SWAP_REC_MIN        0x400u          /* the shortest record taken */
++#define SBD_SWAP_REC_MAX        0x600u
++#define SBD_SWAP_LAYERS         4
++
++struct sbd_swap_layer {
++	bool     enabled;               /* in the mask and a surface named */
++	uint32_t surface;               /* IOSurface id */
++	int32_t  sx, sy, sw, sh;        /* rect a: source */
++	int32_t  dx, dy, dw, dh;        /* rect b: destination on the canvas */
++};
++
++struct sbd_swap {
++	uint32_t swap_id;
++	uint32_t mask;
++	uint32_t shift;                 /* 0 or 0x48 */
++	uint32_t enabled;               /* number of enabled layers */
++	struct sbd_swap_layer layer[SBD_SWAP_LAYERS];
++};
++
++/* rec must hold SBD_SWAP_REC_MAX bytes (zero-filled past what the client sent). False: size too small. */
++bool sbd_swap_parse(const uint8_t *rec, uint32_t size, struct sbd_swap *out);
++
++/* Is this swap one full-canvas layer 0 and nothing else (the case a DECON window can show by address)? */
++bool sbd_swap_single_full_layer(const struct sbd_swap *s, uint32_t canvas_w, uint32_t canvas_h,
++    uint32_t surface_w, uint32_t surface_h);
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* SBD_SWAP_H */
+diff --git a/iokit/Kernel/arm/starbite/sbd_decon.c b/iokit/Kernel/arm/starbite/sbd_decon.c
+new file mode 100644
+index 00000000..6c8faf0f
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbd_decon.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteDisplay/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteDisplay/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteDisplay/hw/sbd_decon.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbd_dsim.c b/iokit/Kernel/arm/starbite/sbd_dsim.c
+new file mode 100644
+index 00000000..2e2dd0e4
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbd_dsim.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteDisplay/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteDisplay/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteDisplay/hw/sbd_dsim.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbd_panel.c b/iokit/Kernel/arm/starbite/sbd_panel.c
+new file mode 100644
+index 00000000..46faad10
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbd_panel.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteDisplay/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteDisplay/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteDisplay/hw/sbd_panel.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbd_swap.c b/iokit/Kernel/arm/starbite/sbd_swap.c
+new file mode 100644
+index 00000000..bb4cc98e
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbd_swap.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteDisplay/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteDisplay/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteDisplay/hw/sbd_swap.c"
++#endif
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index f1afaf0a..f1c915b1 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -77,7 +77,10 @@ const char * gIOKernelConfigTables =
+     "   {"
+     "     'IOClass'         = AppleCLCD;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+-#if defined(ARM64_BOARD_CONFIG_A5XELTE)
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++    /* 0428: StarbiteDisplay's AppleCLCD; disp0 as before (every ADT), starbite,display for later ADTs */
++    "     'IONameMatch'     = ('starbite,display', 'samsung,a5xelte-display');"
++#elif defined(ARM64_BOARD_CONFIG_A5XELTE)
+     "     'IONameMatch'     = 'samsung,a5xelte-display';"
+ #else
+     "     'IONameMatch'     = 'sweet,display';"
+@@ -150,6 +153,12 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOPlatformDevice;"
+     "     'IONameMatch'     = 'starbite,dwc3';"
+     "   },"
++    /* 0428, M8a: the DECON / DSIM hardware half of the display (board ADT decon node) */
++    "   {"
++    "     'IOClass'         = StarbiteDisplay;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'starbite,decon';"
++    "   },"
+ #endif
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+     "   {"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index 7d4587e1..41dad101 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -47,3 +47,9 @@ iokit/Kernel/arm/starbite/sbusb_ep0.c                            optional iokitc
+ iokit/Kernel/arm/starbite/sbusb_func.c                           optional iokitcpp
+ iokit/Kernel/arm/starbite/sbusb_ncm.c                            optional iokitcpp
+ iokit/Kernel/arm/starbite/sbusb_phy.c                            optional iokitcpp
++# M8a: StarbiteDisplay (DECON flips + AppleCLCD); replaces SweetFramebuffer.cpp on STARLTE (StarbiteDisplay/INTEGRATION.md).
++iokit/Kernel/arm/starbite/StarbiteDisplay.cpp                    optional iokitcpp
++iokit/Kernel/arm/starbite/sbd_decon.c                            optional iokitcpp
++iokit/Kernel/arm/starbite/sbd_dsim.c                             optional iokitcpp
++iokit/Kernel/arm/starbite/sbd_panel.c                            optional iokitcpp
++iokit/Kernel/arm/starbite/sbd_swap.c                             optional iokitcpp
+-- 
+2.53.0
+

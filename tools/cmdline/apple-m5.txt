@@ -1,0 +1,1 @@
+debug=0xc serial=3 cpus=8 -v rd=sdroot0 sdroot=lba:216442880,31457280 wdt=-1 -wdt_no_pmu a5fb_keep_on=1 sweetfb_native=1 sweetfb_scale=1 sweetfb_lw=828 sweetfb_lh=1792 vm_compression_limit=196608 startouch=0 sbbattest=1 sbbatpoll=2 sbstop=m5

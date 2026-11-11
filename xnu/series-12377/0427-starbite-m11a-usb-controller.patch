@@ -1,0 +1,3604 @@
+From 63f518009e6a49c84f0250a742c7d447f7c46b44 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 11 Nov 2026 19:26:02 +0200
+Subject: [PATCH] patch: 0427-starbite-m11a-usb-controller.patch - StarbiteUSB
+ (DWC3 device controller + CDC-NCM function + built-in ping responder; copy of
+ starbite/apple-drivers/StarbiteUSB at 0d957fd, STARLTE-only build units) on
+ the board ADT's starbite,dwc3 nub, off unless sbusb=1; StarbiteUSBNCM
+ (IONetworkingFamily) not built; sbstop_s=S: an sbstop test boot that has not
+ reached its stage by S s of uptime stops anyway with the console tail in pmsg
+ ("STAGE NOT REACHED")
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/herolte_ufs.c                         |  43 +
+ iokit/Kernel/arm/SweetPlatformExpert.cpp      |   2 +
+ iokit/Kernel/arm/starbite/StarbiteUSB.cpp     |  11 +
+ .../arm/starbite/StarbiteUSB/StarbiteUSB.cpp  | 499 ++++++++++
+ .../arm/starbite/StarbiteUSB/StarbiteUSB.h    |  85 ++
+ .../arm/starbite/StarbiteUSB/hw/sbusb_desc.c  | 173 ++++
+ .../arm/starbite/StarbiteUSB/hw/sbusb_desc.h  |  54 ++
+ .../arm/starbite/StarbiteUSB/hw/sbusb_dwc3.c  | 897 ++++++++++++++++++
+ .../arm/starbite/StarbiteUSB/hw/sbusb_dwc3.h  | 112 +++
+ .../arm/starbite/StarbiteUSB/hw/sbusb_echo.c  | 198 ++++
+ .../arm/starbite/StarbiteUSB/hw/sbusb_echo.h  |  31 +
+ .../arm/starbite/StarbiteUSB/hw/sbusb_ep0.c   | 223 +++++
+ .../arm/starbite/StarbiteUSB/hw/sbusb_ep0.h   |  42 +
+ .../arm/starbite/StarbiteUSB/hw/sbusb_func.c  | 238 +++++
+ .../arm/starbite/StarbiteUSB/hw/sbusb_func.h  |  53 ++
+ .../arm/starbite/StarbiteUSB/hw/sbusb_io.h    |  48 +
+ .../arm/starbite/StarbiteUSB/hw/sbusb_ncm.c   | 155 +++
+ .../arm/starbite/StarbiteUSB/hw/sbusb_ncm.h   |  61 ++
+ .../arm/starbite/StarbiteUSB/hw/sbusb_phy.c   | 109 +++
+ .../arm/starbite/StarbiteUSB/hw/sbusb_phy.h   |  21 +
+ .../arm/starbite/StarbiteUSB/hw/sbusb_regs.h  | 178 ++++
+ iokit/Kernel/arm/starbite/sbusb_desc.c        |  11 +
+ iokit/Kernel/arm/starbite/sbusb_dwc3.c        |  11 +
+ iokit/Kernel/arm/starbite/sbusb_echo.c        |  11 +
+ iokit/Kernel/arm/starbite/sbusb_ep0.c         |  11 +
+ iokit/Kernel/arm/starbite/sbusb_func.c        |  11 +
+ iokit/Kernel/arm/starbite/sbusb_ncm.c         |  11 +
+ iokit/Kernel/arm/starbite/sbusb_phy.c         |  11 +
+ iokit/KernelConfigTables.cpp                  |   6 +
+ iokit/conf/files.arm64                        |  10 +
+ 30 files changed, 3326 insertions(+)
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSB.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSB.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_desc.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_desc.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_dwc3.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_dwc3.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_echo.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_echo.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ep0.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ep0.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_func.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_func.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_io.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ncm.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ncm.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_phy.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_phy.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_regs.h
+ create mode 100644 iokit/Kernel/arm/starbite/sbusb_desc.c
+ create mode 100644 iokit/Kernel/arm/starbite/sbusb_dwc3.c
+ create mode 100644 iokit/Kernel/arm/starbite/sbusb_echo.c
+ create mode 100644 iokit/Kernel/arm/starbite/sbusb_ep0.c
+ create mode 100644 iokit/Kernel/arm/starbite/sbusb_func.c
+ create mode 100644 iokit/Kernel/arm/starbite/sbusb_ncm.c
+ create mode 100644 iokit/Kernel/arm/starbite/sbusb_phy.c
+
+diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
+index cd61177b..dda3eed6 100644
+--- a/bsd/dev/herolte_ufs.c
++++ b/bsd/dev/herolte_ufs.c
+@@ -1324,6 +1324,49 @@ starlte_sbstop_no_root(void)
+ 	return 1;
+ }
+ 
++/*
++ * 0427: sbstop_s=S, a stage's time limit. A test whose stage depends on something outside the phone (M11a: a host
++ * that pings) may never reach it; the loader's watchdog still resets it, but leaves no log. At S s of uptime the
++ * boot stops anyway, with the console tail in pmsg, and the line says the stage was not reached. Armed by the
++ * platform expert's start (thread calls are up by then); keep S well inside the dead-man's budget.
++ */
++static thread_call_t starlte_sbstop_tc;
++static uint32_t starlte_sbstop_limit_s;
++
++static void
++starlte_sbstop_deadline(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
++{
++	starlte_crumb(4, 1);
++	printf("STARBITE: sbstop=%s: STAGE NOT REACHED in sbstop_s=%u s, resetting into TWRP\n", starlte_sbstop,
++	    starlte_sbstop_limit_s);
++	delay(300 * 1000);
++	starlte_pmsg_save("STARBITE: sbstop time limit (no panic), console tail:\n", NULL, false);
++	starlte_reset(SBH_INFORM3_RECOVERY);
++}
++
++void starlte_sbstop_arm_limit(void);
++void
++starlte_sbstop_arm_limit(void)
++{
++	uint64_t now_ns = 0, deadline;
++	if (starlte_sbstop[0] == '\0' || starlte_sbstop_tc != NULL ||
++	    !PE_parse_boot_argn("sbstop_s", &starlte_sbstop_limit_s, sizeof(starlte_sbstop_limit_s)) ||
++	    starlte_sbstop_limit_s == 0) {
++		return;
++	}
++	absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
++	uint64_t left_ms = (uint64_t)starlte_sbstop_limit_s * 1000 > now_ns / NSEC_PER_MSEC ?
++	    (uint64_t)starlte_sbstop_limit_s * 1000 - now_ns / NSEC_PER_MSEC : 1;
++	starlte_sbstop_tc = thread_call_allocate_with_priority(starlte_sbstop_deadline, NULL, THREAD_CALL_PRIORITY_HIGH);
++	if (starlte_sbstop_tc == NULL) {
++		return;
++	}
++	clock_interval_to_deadline((uint32_t)left_ms, (uint32_t)NSEC_PER_MSEC, &deadline);
++	(void)thread_call_enter_delayed(starlte_sbstop_tc, deadline);
++	printf("STARBITE: sbstop=%s: time limit sbstop_s=%u (stops in %llu ms if the stage is not reached)\n",
++	    starlte_sbstop, starlte_sbstop_limit_s, left_ms);
++}
++
+ void
+ starlte_sbstop_now(const char *stage)
+ {
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index 875411da..a18bca2e 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -14,6 +14,7 @@ extern boot_args *BootArgs;
+ int starlte_sbstop_at(const char *stage);
+ void starlte_crumb(uint64_t code, uint64_t value);
+ void starlte_sbstop_now(const char *stage);
++void starlte_sbstop_arm_limit(void);
+ }
+ #include <kern/thread.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -64,6 +65,7 @@ SweetPlatformExpert::start(IOService *provider)
+ 	if (starlte_sbstop_at("m5")) {
+ 		starbiteM5Start();
+ 	}
++	starlte_sbstop_arm_limit();             /* 0427: sbstop_s=S */
+ #endif
+ #if defined(A5XELTE)
+ 	IOLog("A5XELTE: starting device-tree platform expert\n");
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB.cpp b/iokit/Kernel/arm/starbite/StarbiteUSB.cpp
+new file mode 100644
+index 00000000..10578586
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB.cpp
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUSB/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUSB/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUSB/StarbiteUSB.cpp"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSB.cpp b/iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSB.cpp
+new file mode 100644
+index 00000000..834f80d9
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSB.cpp
+@@ -0,0 +1,499 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB (StarbiteUSB.h): the IOKit shell around hw/. Register logic, USB and NCM are all in hw/ and
++ * host-tested; this file maps the nubs, allocates the DMA block, and runs hw/ from one work loop.
++ *
++ * Boot-args (all optional):
++ *   sbusb=1          start the driver. Default 0: phase 1 is opt-in until M11 has passed on the phone, so no
++ *                    other milestone's boot touches the USB hardware.
++ *   sbusb_ring=1     ring transfers on the data endpoints (hw/sbusb_dwc3.h). Default: the single-TRB model.
++ *   sbusb_irq=1      use the usb-drd nub's interrupt when it has one. Default: a 1 ms timer.
++ *   sbusb_echo=1     answer ping from the driver itself: IPv6 on the link-local address of the device MAC,
++ *                    IPv4 on 169.254.83.66 (hw/sbusb_echo.h, PHONE-TEST.md).
++ *   sbusb_serial=S   USB serial number (the MAC addresses derive from it). Default: IOPlatformSerialNumber,
++ *                    else "STARBITE".
++ *   sbstop=usbncm    (kernel 0423) with sbusb_echo=1: after the third echo reply the test boot stops itself
++ *                    and returns to TWRP.
++ * start() never waits for a host and never blocks boot: every wait in hw/ is bounded (0.35 s at worst), and
++ * a failure returns false with one log line.
++ */
++#include "StarbiteUSB.h"
++#include <IOKit/IOLib.h>
++#include <IOKit/IOCommandGate.h>
++#include <IOKit/IOPlatformExpert.h>
++#include <IOKit/IODeviceTreeSupport.h>
++#include <pexpert/pexpert.h>
++#include <kern/clock.h>
++#include <libkern/OSAtomic.h>
++
++extern "C" {
++#include "hw/sbusb_echo.h"
++}
++
++/* The one use of a symbol outside the public KPIs: the milestone self-stop of our own kernel (0423,
++ * bsd/dev/herolte_ufs.c). Build with -DSTARBITE_USB_SBSTOP=0 for a kernel collection. */
++#ifndef STARBITE_USB_SBSTOP
++#define STARBITE_USB_SBSTOP 1
++#endif
++#if STARBITE_USB_SBSTOP
++extern "C" int starlte_sbstop_at(const char *stage);
++extern "C" void starlte_sbstop_now(const char *stage);
++#endif
++
++#define super IOService
++OSDefineMetaClassAndStructors(StarbiteUSB, IOService);
++
++#define LOG(fmt, ...) IOLog("StarbiteUSB: " fmt "\n", ##__VA_ARGS__)
++#define POLL_ACTIVE_MS  1
++#define POLL_IDLE_MS    20
++
++static const char *const kLineNames[4] = { "SE0", "J", "K", "SE1" };
++
++/* ---- hw backend ----------------------------------------------------------------------------- */
++
++int
++StarbiteUSB::ioHas(void *ctx, unsigned blk)
++{
++	StarbiteUSB *me = (StarbiteUSB *)ctx;
++	return blk < SBUSB_BLK_COUNT && me->fMap[blk] != NULL;
++}
++
++uint32_t
++StarbiteUSB::ioRead(void *ctx, unsigned blk, uint32_t off)
++{
++	StarbiteUSB *me = (StarbiteUSB *)ctx;
++	IOMemoryMap *map = blk < SBUSB_BLK_COUNT ? me->fMap[blk] : NULL;
++
++	if (map == NULL || (uint64_t)off + 4 > map->getLength()) {
++		return 0;
++	}
++	uint32_t value = *(volatile uint32_t *)(map->getVirtualAddress() + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return value;
++}
++
++void
++StarbiteUSB::ioWrite(void *ctx, unsigned blk, uint32_t off, uint32_t value)
++{
++	StarbiteUSB *me = (StarbiteUSB *)ctx;
++	IOMemoryMap *map = blk < SBUSB_BLK_COUNT ? me->fMap[blk] : NULL;
++
++	if (map == NULL || (uint64_t)off + 4 > map->getLength()) {
++		return;
++	}
++	__asm__ volatile ("dsb st" ::: "memory");       /* TRB and buffer stores reach memory before a doorbell */
++	*(volatile uint32_t *)(map->getVirtualAddress() + off) = value;
++}
++
++void
++StarbiteUSB::ioDelay(void *, unsigned us)
++{
++	if (us >= 1000) {
++		IOSleep((us + 999) / 1000);
++	} else {
++		IODelay(us);
++	}
++}
++
++uint64_t
++StarbiteUSB::ioNow(void *)
++{
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000;
++}
++
++void
++StarbiteUSB::ioSync(void *ctx, uint32_t off, uint32_t len, int toDevice)
++{
++	StarbiteUSB *me = (StarbiteUSB *)ctx;
++	/* The block is asked for uncached; this keeps it right even if that request was not honoured. */
++	(void)me->fDMA->performOperation(toDevice ? kIOMemoryIncoherentIOStore : kIOMemoryIncoherentIOFlush, off, len);
++}
++
++/* ---- function callbacks --------------------------------------------------------------------- */
++
++void
++StarbiteUSB::echo(const uint8_t *frame, uint32_t length)
++{
++	static const uint8_t ip[4] = SBUSB_ECHO_IP;
++	uint8_t reply[SBUSB_DG_MAX];
++	int kind = SBUSB_ECHO_NONE, stall = 0;
++	uint32_t n = sbusb_echo(ip, fFunc.d.st.id.dev_mac, frame, length, reply, sizeof(reply), &kind);
++
++	if (n == 0) {
++		return;
++	}
++	uint8_t *out = sbusb_func_tx_begin(&fFunc, n, &stall);
++	if (out == NULL) {
++		return;
++	}
++	bcopy(reply, out, n);
++	sbusb_func_tx_commit(&fFunc);
++	if (kind == SBUSB_ECHO_ARP || kind == SBUSB_ECHO_ND) {
++		if (fEchoReplies == 0) {
++			LOG("echo: %s answered", kind == SBUSB_ECHO_ARP ? "ARP for 169.254.83.66" : "neighbour solicitation");
++		}
++	} else if (++fEchoReplies <= 3) {
++		LOG("M11 PASS: echo reply %u sent over %s (ping over NCM)", fEchoReplies,
++		    kind == SBUSB_ECHO_ICMP6 ? "IPv6" : "IPv4");
++#if STARBITE_USB_SBSTOP
++		if (fEchoReplies == 3 && starlte_sbstop_at("usbncm")) {
++			fStopWanted = true;             /* after the reply has gone out: poll() */
++			fStopAt = ioNow(this) + 300000;
++		}
++#endif
++	}
++}
++
++void
++StarbiteUSB::funcRx(void *ctx, const uint8_t *frame, uint32_t len)
++{
++	StarbiteUSB *me = (StarbiteUSB *)ctx;
++	if (me->fEcho) {
++		me->echo(frame, len);
++	}
++	if (me->fClient.rx != NULL) {
++		me->fClient.rx(me->fClient.owner, frame, len);
++	}
++}
++
++void
++StarbiteUSB::funcLink(void *ctx, int up, int fullSpeed)
++{
++	StarbiteUSB *me = (StarbiteUSB *)ctx;
++	LOG("NCM data interface %s (%s speed)", up ? "open: link up" : "closed: link down", fullSpeed ? "full" : "high");
++	me->setProperty("SBUSBLinkUp", up ? kOSBooleanTrue : kOSBooleanFalse);
++	if (me->fClient.link != NULL) {
++		me->fClient.link(me->fClient.owner, up != 0, fullSpeed != 0);
++	}
++}
++
++void
++StarbiteUSB::funcTxReady(void *ctx)
++{
++	StarbiteUSB *me = (StarbiteUSB *)ctx;
++	if (me->fClient.txReady != NULL) {
++		me->fClient.txReady(me->fClient.owner);
++	}
++}
++
++/* ---- client API ----------------------------------------------------------------------------- */
++
++void
++StarbiteUSB::setClient(const StarbiteUSBClient *client)
++{
++	if (client != NULL) {
++		fClient = *client;
++		if (fClient.link != NULL) {
++			fClient.link(fClient.owner, fFunc.up != 0, fFunc.d.st.full_speed != 0);
++		}
++	} else {
++		bzero(&fClient, sizeof(fClient));
++	}
++}
++
++uint8_t *
++StarbiteUSB::txBegin(uint32_t length, bool *stall)
++{
++	int s = 0;
++	uint8_t *p = fRunning ? sbusb_func_tx_begin(&fFunc, length, &s) : NULL;
++	*stall = s != 0;
++	return p;
++}
++
++void
++StarbiteUSB::txCommit(void)
++{
++	sbusb_func_tx_commit(&fFunc);
++}
++
++bool
++StarbiteUSB::linkUp(void) const
++{
++	return fRunning && fFunc.up != 0;
++}
++
++bool
++StarbiteUSB::fullSpeed(void) const
++{
++	return fFunc.d.st.full_speed != 0;
++}
++
++void
++StarbiteUSB::getAddresses(uint8_t device[6], uint8_t host[6]) const
++{
++	bcopy(fFunc.d.st.id.dev_mac, device, 6);
++	bcopy(fFunc.d.st.id.host_mac, host, 6);
++}
++
++IOWorkLoop *
++StarbiteUSB::getWorkLoop(void) const
++{
++	return fLoop;
++}
++
++/* ---- polling -------------------------------------------------------------------------------- */
++
++void
++StarbiteUSB::report(void)
++{
++	const struct sbusb_stats *n = &fFunc.d.n;
++
++	if (n->conndone != fSeenConn) {
++		fSeenConn = n->conndone;
++		LOG("host connected, %s speed (resets %u)", fFunc.d.st.full_speed ? "full" : "high", n->resets);
++	}
++	if (n->set_configs != fSeenCfg) {
++		fSeenCfg = n->set_configs;
++		LOG("configuration %u set by the host (setups %u, stalls %u)", fFunc.d.st.config, n->setups, n->stalls);
++	}
++	if (n->restarts != fSeenRestarts) {
++		fSeenRestarts = n->restarts;
++		LOG("link restarted from the PHY (%u): %s", n->restarts,
++		    fFunc.d.started ? "running" : fFunc.d.why != NULL ? fFunc.d.why : "failed");
++	}
++	/* while no host has configured us: one line every 10 s, six times, so a photo or pmsg says how far it got */
++	if (fFunc.d.st.config == 0 && fIdleLogs < 6) {
++		uint64_t now = ioNow(this);
++		if (now >= fNextIdleLog) {
++			fNextIdleLog = now + 10000000;
++			++fIdleLogs;
++			LOG("no host yet: line %s, events %u resets %u setups %u stalls %u cmd failures %u (0x%08x)",
++			    kLineNames[sbusb_phy_line(&fFunc.d.io) & 3], n->events, n->resets, n->setups, n->stalls, n->cmd_fail,
++			    n->last_cmd_fail);
++		}
++	}
++}
++
++void
++StarbiteUSB::poll(void)
++{
++	if (!fRunning) {
++		return;
++	}
++	uint32_t before = fFunc.n.rx_frames;
++	(void)sbusb_func_poll(&fFunc);
++	if (fFunc.n.rx_frames != before && fClient.rxBatchDone != NULL) {
++		fClient.rxBatchDone(fClient.owner);
++	}
++	report();
++#if STARBITE_USB_SBSTOP
++	if (fStopWanted && (fFunc.tx_inflight == 0 || ioNow(this) >= fStopAt)) {
++		fStopWanted = false;
++		LOG("sbstop=usbncm: rx %u frames in %u NTBs (%u bad), tx %u frames in %u NTBs; stopping",
++		    fFunc.n.rx_frames, fFunc.n.rx_ntb, fFunc.n.rx_bad, fFunc.n.tx_frames, fFunc.n.tx_ntb);
++		sbusb_func_stop(&fFunc);                /* off the bus cleanly: the Mac sees a disconnect */
++		fRunning = false;
++		starlte_sbstop_now("usbncm");
++	}
++#endif
++}
++
++void
++StarbiteUSB::timerFired(OSObject *owner, IOTimerEventSource *sender)
++{
++	StarbiteUSB *me = OSDynamicCast(StarbiteUSB, owner);
++	if (me == NULL || !me->fRunning) {
++		return;
++	}
++	me->poll();
++	if (me->fRunning) {
++		/* with the interrupt: only the timeouts and the link watch need the timer */
++		sender->setTimeoutMS(me->fIRQ != NULL ? 100 : me->fFunc.d.connected ? POLL_ACTIVE_MS : POLL_IDLE_MS);
++	}
++}
++
++void
++StarbiteUSB::interruptFired(OSObject *owner, IOInterruptEventSource *, int)
++{
++	StarbiteUSB *me = OSDynamicCast(StarbiteUSB, owner);
++	if (me != NULL) {
++		me->poll();
++	}
++}
++
++/* ---- start / stop --------------------------------------------------------------------------- */
++
++bool
++StarbiteUSB::mapBlocks(IOService *provider)
++{
++	/* usb-drd "reg" 0 = the DWC3. usb-phy "reg" 0 = USBCON, then (INTEGRATION.md) the two PMU isolation
++	 * registers and the three clock gates, in SBUSB_BLK_* order. */
++	fMap[SBUSB_BLK_DWC3] = provider->mapDeviceMemoryWithIndex(0);
++	if (fMap[SBUSB_BLK_DWC3] == NULL || fMap[SBUSB_BLK_DWC3]->getLength() < 0xd000) {
++		LOG("the usb-drd nub has no usable \"reg\" (need 0x10000 bytes of DWC3)");
++		return false;
++	}
++	OSDictionary *match = IOService::nameMatching("usb-phy");
++	if (match != NULL) {
++		fPhyNub = IOService::waitForMatchingService(match, 1000000000ULL);     /* at most 1 s */
++		match->release();
++	}
++	if (fPhyNub == NULL) {
++		LOG("no usb-phy nub: the PHY cannot be brought up");
++		return false;
++	}
++	for (unsigned i = 0; i + SBUSB_BLK_PHY < SBUSB_BLK_COUNT; ++i) {
++		fMap[SBUSB_BLK_PHY + i] = fPhyNub->mapDeviceMemoryWithIndex(i);
++	}
++	if (fMap[SBUSB_BLK_PHY] == NULL || fMap[SBUSB_BLK_PHY]->getLength() < 0x120) {
++		LOG("the usb-phy nub has no usable \"reg\" (need 0x200 bytes of USBCON)");
++		return false;
++	}
++	return true;
++}
++
++void
++StarbiteUSB::unmapBlocks(void)
++{
++	for (unsigned i = 0; i < SBUSB_BLK_COUNT; ++i) {
++		OSSafeReleaseNULL(fMap[i]);
++	}
++	OSSafeReleaseNULL(fPhyNub);
++}
++
++bool
++StarbiteUSB::start(IOService *provider)
++{
++	uint32_t on = 0, ring = 0, irq = 0, echoArg = 0;
++	char serial[33] = "";
++	struct sbusb_io io = { this, ioHas, ioRead, ioWrite, ioDelay, ioNow, ioSync };
++	struct sbusb_func_ops ops = { this, funcRx, funcLink, funcTxReady };
++	struct sbusb_dma dma;
++	IOByteCount segment = 0;
++	unsigned flags = 0;
++	int r;
++
++	(void)PE_parse_boot_argn("sbusb", &on, sizeof(on));
++	if (on == 0) {
++		return false;                           /* quietly: phase 1 is opt-in */
++	}
++	if (!super::start(provider)) {
++		return false;
++	}
++	(void)PE_parse_boot_argn("sbusb_ring", &ring, sizeof(ring));
++	(void)PE_parse_boot_argn("sbusb_irq", &irq, sizeof(irq));
++	(void)PE_parse_boot_argn("sbusb_echo", &echoArg, sizeof(echoArg));
++	fEcho = echoArg != 0;
++	if (!PE_parse_boot_argn("sbusb_serial", serial, sizeof(serial)) || serial[0] == '\0') {
++		IORegistryEntry *root = IORegistryEntry::fromPath("/", gIOServicePlane);
++		OSString *s = root != NULL ? OSDynamicCast(OSString, root->getProperty("IOPlatformSerialNumber")) : NULL;
++		if (s != NULL) {
++			strlcpy(serial, s->getCStringNoCopy(), sizeof(serial));
++		}
++		OSSafeReleaseNULL(root);
++	}
++
++	if (!mapBlocks(provider)) {
++		goto fail;
++	}
++	/* One block the controller reaches: below 4 GiB like the loader's, 16 KiB aligned, physically
++	 * contiguous, asked for uncached (the loader's DMA window is non-cacheable too). */
++	fDMA = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
++	    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapInhibitCache, SBUSB_DMA_BYTES, 0x00000000ffffc000ULL);
++	if (fDMA == NULL || fDMA->prepare() != kIOReturnSuccess) {
++		LOG("no DMA memory (%u bytes, contiguous, below 4 GiB)", SBUSB_DMA_BYTES);
++		goto fail;
++	}
++	fDMAPrepared = true;
++	dma.va = (uint8_t *)fDMA->getBytesNoCopy();
++	dma.pa = fDMA->getPhysicalSegment(0, &segment);
++	dma.size = SBUSB_DMA_BYTES;
++	if (dma.va == NULL || dma.pa == 0 || segment < SBUSB_DMA_BYTES) {
++		LOG("the DMA block is not one physical segment (%llu of %u bytes)", (uint64_t)segment, SBUSB_DMA_BYTES);
++		goto fail;
++	}
++
++	fLoop = IOWorkLoop::workLoop();
++	fTimer = fLoop != NULL ? IOTimerEventSource::timerEventSource(this, timerFired) : NULL;
++	if (fTimer == NULL || fLoop->addEventSource(fTimer) != kIOReturnSuccess) {
++		LOG("no work loop or timer");
++		goto fail;
++	}
++	if (irq != 0) {
++		fIRQ = IOInterruptEventSource::interruptEventSource(this, interruptFired, provider, 0);
++		if (fIRQ == NULL || fLoop->addEventSource(fIRQ) != kIOReturnSuccess) {
++			LOG("sbusb_irq=1 but the usb-drd nub has no interrupt (SPI 244): polling");
++			OSSafeReleaseNULL(fIRQ);
++		}
++	}
++	flags = (ring != 0 ? SBUSB_F_RING : 0) | (fIRQ != NULL ? SBUSB_F_IRQ : 0);
++	sbusb_func_init(&fFunc, &io, &dma, serial, flags, &ops);
++	LOG("start: transfers %s, events by %s, echo %s, serial %s, DMA 0x%llx", ring != 0 ? "ring" : "single",
++	    fIRQ != NULL ? "interrupt" : "timer", fEcho ? "on" : "off", fFunc.d.st.id.serial, dma.pa);
++	{
++		const uint8_t *m = fFunc.d.st.id.dev_mac;
++		LOG("device %02x:%02x:%02x:%02x:%02x:%02x = fe80::%x:%02xff:fe%02x:%02x%02x, host MAC ends %02x", m[0], m[1],
++		    m[2], m[3], m[4], m[5], ((m[0] ^ 2) << 8) | m[1], m[2], m[3], m[4], m[5], fFunc.d.st.id.host_mac[5]);
++	}
++
++	r = sbusb_func_start(&fFunc);
++	if (fFunc.d.phy.missing != 0) {
++		LOG("usb-phy nub lacks reg entries (block mask 0x%x): PMU isolation / clock gates left as the loader set them",
++		    fFunc.d.phy.missing);
++	}
++	if (r != 0) {
++		LOG("start failed at stage %d: %s (GSNPSID 0x%08x, UTMI 0x%08x, HSP_TEST 0x%08x)", r,
++		    fFunc.d.why != NULL ? fFunc.d.why : "?", fFunc.d.id, fFunc.d.phy.utmi, fFunc.d.phy.hsp_test);
++		sbusb_func_stop(&fFunc);
++		goto fail;
++	}
++	fRunning = true;
++	LOG("PHY up (line %s), DWC3 0x%08x running as %04x:%04x, waiting for a host", kLineNames[fFunc.d.phy.line & 3],
++	    fFunc.d.id, fFunc.d.st.id.vid, fFunc.d.st.id.pid);
++	setProperty("SBUSBSerial", fFunc.d.st.id.serial);
++	setProperty("SBUSBLinkUp", kOSBooleanFalse);
++	if (fIRQ != NULL) {
++		fIRQ->enable();
++	}
++	fTimer->setTimeoutMS(POLL_IDLE_MS);
++	registerService();                              /* StarbiteUSBNCM matches here */
++	return true;
++
++fail:
++	stop(provider);
++	return false;
++}
++
++IOReturn
++StarbiteUSB::stopGated(OSObject *owner, void *, void *, void *, void *)
++{
++	StarbiteUSB *me = (StarbiteUSB *)owner;
++	if (me->fRunning) {
++		me->fRunning = false;
++		sbusb_func_stop(&me->fFunc);
++	}
++	return kIOReturnSuccess;
++}
++
++void
++StarbiteUSB::stop(IOService *provider)
++{
++	if (fLoop != NULL) {
++		(void)fLoop->runAction(stopGated, this);
++		if (fTimer != NULL) {
++			fTimer->cancelTimeout();
++			fLoop->removeEventSource(fTimer);
++		}
++		if (fIRQ != NULL) {
++			fIRQ->disable();
++			fLoop->removeEventSource(fIRQ);
++		}
++	}
++	OSSafeReleaseNULL(fTimer);
++	OSSafeReleaseNULL(fIRQ);
++	if (fDMA != NULL && fDMAPrepared) {
++		fDMA->complete();
++		fDMAPrepared = false;
++	}
++	OSSafeReleaseNULL(fDMA);
++	unmapBlocks();
++	super::stop(provider);
++}
++
++void
++StarbiteUSB::free(void)
++{
++	OSSafeReleaseNULL(fLoop);
++	super::free();
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSB.h b/iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSB.h
+new file mode 100644
+index 00000000..4c7b1f15
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSB.h
+@@ -0,0 +1,85 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB: the S9's USB port for Apple's OSes, phase 1 (docs/APPLE-S9-DRIVERS.md Part 3 row 23, M11).
++ *
++ *   StarbiteUSB      IOService on the usb-drd nub ("starbite,dwc3"). Owns the DWC3 in device mode, the PHY
++ *                    (the usb-phy nub's registers) and the CDC-NCM function (hw/). Needs only XNU's own IOKit.
++ *                    With sbusb_echo=1 it answers ping by itself (PHONE-TEST.md), no network stack involved.
++ *   StarbiteUSBNCM   IOEthernetController on StarbiteUSB (StarbiteUSBNCM.cpp). Needs IONetworkingFamily.
++ *
++ * All addresses come from the two nubs. Public KPIs only, with one marked exception (STARBITE_USB_SBSTOP).
++ */
++#ifndef STARBITE_USB_H
++#define STARBITE_USB_H
++
++#include <IOKit/IOService.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IOMemoryDescriptor.h>
++
++extern "C" {
++#include "hw/sbusb_func.h"
++}
++
++/* what a network client (StarbiteUSBNCM) gives; every call comes on StarbiteUSB's work loop */
++struct StarbiteUSBClient {
++	void *owner;
++	void (*rx)(void *owner, const uint8_t *frame, uint32_t length);
++	void (*rxBatchDone)(void *owner);
++	void (*link)(void *owner, bool up, bool fullSpeed);
++	void (*txReady)(void *owner);
++};
++
++class StarbiteUSB : public IOService {
++	OSDeclareDefaultStructors(StarbiteUSB);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
++	IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE;
++
++	/* for the client; work loop only */
++	void setClient(const StarbiteUSBClient *client);
++	uint8_t *txBegin(uint32_t length, bool *stall);
++	void txCommit(void);
++	bool linkUp(void) const;
++	bool fullSpeed(void) const;
++	void getAddresses(uint8_t device[6], uint8_t host[6]) const;
++
++private:
++	IOWorkLoop *fLoop;
++	IOTimerEventSource *fTimer;
++	IOInterruptEventSource *fIRQ;
++	IOService *fPhyNub;
++	IOMemoryMap *fMap[SBUSB_BLK_COUNT];
++	IOBufferMemoryDescriptor *fDMA;
++	bool fDMAPrepared, fRunning, fEcho, fStopWanted;
++	StarbiteUSBClient fClient;
++	struct sbusb_func fFunc;
++	uint32_t fSeenConn, fSeenCfg, fSeenRestarts, fEchoReplies, fIdleLogs;
++	uint64_t fNextIdleLog, fStopAt;
++
++	bool mapBlocks(IOService *provider);
++	void unmapBlocks(void);
++	void poll(void);
++	void report(void);
++	void echo(const uint8_t *frame, uint32_t length);
++	static void timerFired(OSObject *owner, IOTimerEventSource *sender);
++	static void interruptFired(OSObject *owner, IOInterruptEventSource *sender, int count);
++	static IOReturn stopGated(OSObject *owner, void *, void *, void *, void *);
++
++	/* hw/sbusb_io.h backend */
++	static int ioHas(void *ctx, unsigned blk);
++	static uint32_t ioRead(void *ctx, unsigned blk, uint32_t off);
++	static void ioWrite(void *ctx, unsigned blk, uint32_t off, uint32_t value);
++	static void ioDelay(void *ctx, unsigned us);
++	static uint64_t ioNow(void *ctx);
++	static void ioSync(void *ctx, uint32_t off, uint32_t len, int toDevice);
++	/* hw/sbusb_func.h callbacks */
++	static void funcRx(void *ctx, const uint8_t *frame, uint32_t len);
++	static void funcLink(void *ctx, int up, int fullSpeed);
++	static void funcTxReady(void *ctx);
++};
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_desc.c b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_desc.c
+new file mode 100644
+index 00000000..e2a4fb53
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_desc.c
+@@ -0,0 +1,173 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB descriptors (sbusb_desc.h).
++ */
++#include "sbusb_desc.h"
++#include "sbusb_io.h"
++
++enum { DT_DEVICE = 1, DT_CONFIG = 2, DT_STRING = 3, DT_INTERFACE = 4, DT_ENDPOINT = 5, DT_QUALIFIER = 6,
++       DT_OTHER_SPEED = 7, DT_IAD = 11, DT_CS_INTERFACE = 0x24 };
++
++void
++sbusb_ident_init(struct sbusb_ident *id, const char *serial)
++{
++	uint32_t h = 2166136261u;       /* FNV-1a over the serial */
++	unsigned n = 0;
++
++	for (n = 0; n < sizeof(*id); ++n) {
++		((uint8_t *)id)[n] = 0;
++	}
++	n = 0;
++	id->vid = SBUSB_VID;
++	id->pid = SBUSB_PID;
++	id->bcd = SBUSB_BCD_DEVICE;
++	if (serial == 0 || serial[0] == 0) {
++		serial = "STARBITE";
++	}
++	for (; serial[n] != 0 && n + 1 < sizeof(id->serial); ++n) {
++		char c = serial[n];
++		id->serial[n] = (c > 0x20 && c < 0x7f) ? c : '_';
++		h = (h ^ (uint8_t)c) * 16777619u;
++	}
++	id->serial[n] = 0;
++	id->dev_mac[0] = 0x02;          /* locally administered, unicast */
++	id->dev_mac[1] = 0x53;          /* 'S' */
++	id->dev_mac[2] = 0x42;          /* 'B' */
++	id->dev_mac[3] = (uint8_t)(h >> 16);
++	id->dev_mac[4] = (uint8_t)(h >> 8);
++	id->dev_mac[5] = (uint8_t)(h & 0xfeu);
++	for (n = 0; n < 6; ++n) {
++		id->host_mac[n] = id->dev_mac[n];
++	}
++	id->host_mac[5] |= 1u;
++}
++
++unsigned
++sbusb_bulk_mps(int full_speed)
++{
++	return full_speed ? 64u : 512u;
++}
++
++unsigned
++sbusb_desc_device(const struct sbusb_ident *id, uint8_t *o)
++{
++	o[0] = 18; o[1] = DT_DEVICE;
++	sbusb_put16(o + 2, 0x0200);
++	o[4] = 0xef; o[5] = 0x02; o[6] = 0x01;          /* miscellaneous / common / IAD */
++	o[7] = SBUSB_EP0_MPS;
++	sbusb_put16(o + 8, id->vid);
++	sbusb_put16(o + 10, id->pid);
++	sbusb_put16(o + 12, id->bcd);
++	o[14] = SBUSB_STR_MANUFACTURER; o[15] = SBUSB_STR_PRODUCT; o[16] = SBUSB_STR_SERIAL;
++	o[17] = 1;
++	return 18;
++}
++
++unsigned
++sbusb_desc_qualifier(uint8_t *o)
++{
++	o[0] = 10; o[1] = DT_QUALIFIER;
++	sbusb_put16(o + 2, 0x0200);
++	o[4] = 0xef; o[5] = 0x02; o[6] = 0x01;
++	o[7] = SBUSB_EP0_MPS; o[8] = 1; o[9] = 0;
++	return 10;
++}
++
++static unsigned
++put(uint8_t *o, unsigned n, const uint8_t *src, unsigned len)
++{
++	for (unsigned i = 0; i < len; ++i) {
++		o[n + i] = src[i];
++	}
++	return n + len;
++}
++
++static unsigned
++endpoint(uint8_t *o, unsigned n, unsigned addr, unsigned attr, unsigned mps, unsigned interval)
++{
++	o[n] = 7; o[n + 1] = DT_ENDPOINT; o[n + 2] = (uint8_t)addr; o[n + 3] = (uint8_t)attr;
++	sbusb_put16(o + n + 4, mps);
++	o[n + 6] = (uint8_t)interval;
++	return n + 7;
++}
++
++unsigned
++sbusb_desc_config(uint8_t *o, int fs, unsigned type)
++{
++	static const uint8_t iad[8] = { 8, DT_IAD, SBUSB_IF_CTRL, 2, 0x02, 0x0d, 0x00, SBUSB_STR_FUNCTION };
++	static const uint8_t if_ctrl[9] = { 9, DT_INTERFACE, SBUSB_IF_CTRL, 0, 1, 0x02, 0x0d, 0x00, SBUSB_STR_FUNCTION };
++	static const uint8_t cdc_header[5] = { 5, DT_CS_INTERFACE, 0x00, 0x10, 0x01 };          /* bcdCDC 1.10 */
++	static const uint8_t cdc_union[5] = { 5, DT_CS_INTERFACE, 0x06, SBUSB_IF_CTRL, SBUSB_IF_DATA };
++	static const uint8_t cdc_ether[13] = { 13, DT_CS_INTERFACE, 0x0f, SBUSB_STR_MAC,
++		                               0, 0, 0, 0,                                      /* bmEthernetStatistics */
++		                               SBUSB_MAX_SEGMENT & 0xff, SBUSB_MAX_SEGMENT >> 8,
++		                               0, 0,                                            /* wNumberMCFilters */
++		                               0 };                                             /* bNumberPowerFilters */
++	/* bmNetworkCapabilities bit 0: SetEthernetPacketFilter is answered. Nothing else is offered. */
++	static const uint8_t cdc_ncm[6] = { 6, DT_CS_INTERFACE, 0x1a, 0x00, 0x01, 0x01 };       /* bcdNcmVersion 1.00 */
++	static const uint8_t if_data0[9] = { 9, DT_INTERFACE, SBUSB_IF_DATA, 0, 0, 0x0a, 0x00, 0x01, 0 };
++	static const uint8_t if_data1[9] = { 9, DT_INTERFACE, SBUSB_IF_DATA, 1, 2, 0x0a, 0x00, 0x01, 0 };
++	unsigned n = 9, mps = sbusb_bulk_mps(fs);
++
++	o[0] = 9; o[1] = (uint8_t)type;
++	sbusb_put16(o + 2, SBUSB_CONFIG_LEN);
++	o[4] = 2;               /* interfaces */
++	o[5] = 1;               /* configuration value */
++	o[6] = 0;
++	o[7] = 0xc0;            /* self-powered (the battery) */
++	o[8] = 50;              /* 100 mA */
++	n = put(o, n, iad, sizeof(iad));
++	n = put(o, n, if_ctrl, sizeof(if_ctrl));
++	n = put(o, n, cdc_header, sizeof(cdc_header));
++	n = put(o, n, cdc_union, sizeof(cdc_union));
++	n = put(o, n, cdc_ether, sizeof(cdc_ether));
++	n = put(o, n, cdc_ncm, sizeof(cdc_ncm));
++	n = endpoint(o, n, SBUSB_EP_NOTIFY, 0x03, SBUSB_NOTIFY_MPS, fs ? 32 : 9);      /* 32 ms either way */
++	n = put(o, n, if_data0, sizeof(if_data0));
++	n = put(o, n, if_data1, sizeof(if_data1));
++	n = endpoint(o, n, SBUSB_EP_IN, 0x02, mps, 0);
++	n = endpoint(o, n, SBUSB_EP_OUT, 0x02, mps, 0);
++	return n;
++}
++
++static unsigned
++ascii_string(uint8_t *o, const char *s)
++{
++	unsigned n = 0;
++	for (; s[n] != 0 && n < 63; ++n) {
++		o[2 + 2 * n] = (uint8_t)s[n];
++		o[3 + 2 * n] = 0;
++	}
++	o[0] = (uint8_t)(2 + 2 * n);
++	o[1] = DT_STRING;
++	return o[0];
++}
++
++unsigned
++sbusb_desc_string(const struct sbusb_ident *id, unsigned i, uint8_t *o)
++{
++	static const char hex[] = "0123456789ABCDEF";
++	char mac[13];
++
++	switch (i) {
++	case SBUSB_STR_LANG:
++		o[0] = 4; o[1] = DT_STRING; o[2] = 0x09; o[3] = 0x04;      /* English (US) */
++		return 4;
++	case SBUSB_STR_MANUFACTURER:
++		return ascii_string(o, "Starbite");
++	case SBUSB_STR_PRODUCT:
++		return ascii_string(o, "Starbite S9 network (NCM)");
++	case SBUSB_STR_SERIAL:
++		return ascii_string(o, id->serial);
++	case SBUSB_STR_MAC:             /* ECM 1.2 5.4: 12 upper-case hexadecimal digits, no separators */
++		for (unsigned b = 0; b < 6; ++b) {
++			mac[2 * b] = hex[id->host_mac[b] >> 4];
++			mac[2 * b + 1] = hex[id->host_mac[b] & 0xfu];
++		}
++		mac[12] = 0;
++		return ascii_string(o, mac);
++	case SBUSB_STR_FUNCTION:
++		return ascii_string(o, "CDC NCM");
++	default:
++		return 0;
++	}
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_desc.h b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_desc.h
+new file mode 100644
+index 00000000..a11632f5
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_desc.h
+@@ -0,0 +1,54 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB: the USB identity and descriptors of the phase 1 device: one CDC-NCM function.
++ *   interface 0  CDC control, subclass 0x0d (NCM)     EP 0x81 interrupt IN (notifications)
++ *   interface 1  CDC data, protocol 0x01 (NCM data)   alt 0: no endpoints; alt 1: EP 0x82 bulk IN, EP 0x02 bulk OUT
++ * USB 2.0 chapter 9; CDC 1.2 (header, union); ECM 1.2 section 5.4 (Ethernet networking functional
++ * descriptor); NCM 1.0 section 5.2 (NCM functional descriptor).
++ */
++#ifndef SBUSB_DESC_H
++#define SBUSB_DESC_H
++#include <stdint.h>
++
++#define SBUSB_VID               0x18d1u         /* the loader's (shim/starlte/usb_desc.h USB_VID) */
++#define SBUSB_PID               0x4ee0u         /* the loader's (USB_PID): an identity the Mac has already approved */
++#define SBUSB_BCD_DEVICE        0x0200u         /* the loader is 0x0100: tells the two apart on the Mac */
++
++#define SBUSB_IF_CTRL           0u
++#define SBUSB_IF_DATA           1u
++#define SBUSB_EP_NOTIFY         0x81u
++#define SBUSB_EP_IN             0x82u
++#define SBUSB_EP_OUT            0x02u
++#define SBUSB_EP0_MPS           64u
++#define SBUSB_NOTIFY_MPS        16u
++#define SBUSB_CONFIG_LEN        94u
++#define SBUSB_MAX_SEGMENT       1514u           /* Ethernet frame without FCS */
++
++/* DWC3 physical endpoint of a USB endpoint address */
++#define SBUSB_PHYS(addr)        ((((unsigned)(addr) & 0x0fu) << 1) | (((unsigned)(addr) & 0x80u) ? 1u : 0u))
++
++#define SBUSB_STR_LANG          0u
++#define SBUSB_STR_MANUFACTURER  1u
++#define SBUSB_STR_PRODUCT       2u
++#define SBUSB_STR_SERIAL        3u
++#define SBUSB_STR_MAC           4u
++#define SBUSB_STR_FUNCTION      5u
++
++struct sbusb_ident {
++	uint16_t vid, pid, bcd;
++	char serial[33];
++	uint8_t dev_mac[6];     /* the phone's end (IOEthernetController address) */
++	uint8_t host_mac[6];    /* the Mac's end (iMACAddress) */
++};
++
++/* Defaults; MACs are locally administered and derived from the serial, so the Mac sees the same adapter each boot. */
++void sbusb_ident_init(struct sbusb_ident *id, const char *serial);
++
++unsigned sbusb_bulk_mps(int full_speed);                        /* 64 or 512 */
++unsigned sbusb_desc_device(const struct sbusb_ident *id, uint8_t *out);         /* 18 bytes */
++unsigned sbusb_desc_qualifier(uint8_t *out);                                    /* 10 bytes */
++/* configuration (type 2) or other-speed configuration (type 7) for a speed: SBUSB_CONFIG_LEN bytes */
++unsigned sbusb_desc_config(uint8_t *out, int full_speed, unsigned type);
++/* string index i; 0 when there is none. out: at least 2 + 2 x 63 bytes */
++unsigned sbusb_desc_string(const struct sbusb_ident *id, unsigned i, uint8_t *out);
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_dwc3.c b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_dwc3.c
+new file mode 100644
+index 00000000..3591f819
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_dwc3.c
+@@ -0,0 +1,897 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB DWC3 device controller (sbusb_dwc3.h).
++ *
++ * Register facts and the order that enumerates on this phone come from our loader's polling driver
++ * (shim/starlte/usb_dwc3.c, read as documentation: that file is marked GPL-2.0-only) and from the Synopsys
++ * programming model; an earlier port's dwc3.c (APSL-2.0) agrees on the core start. NOTES.md says per item
++ * which is verified on the phone and which is inferred. Written new for this driver.
++ *
++ * Endpoint 0 on a DWC3: a SETUP TRB on physical endpoint 0; a data stage TRB (IN on 1, OUT on 0) started at
++ * once; the status TRB only when the core reports XferNotReady(status). SET_ADDRESS goes into DCFG during the
++ * setup stage (the core applies it after the status stage).
++ */
++#include "sbusb_dwc3.h"
++#include "sbusb_regs.h"
++#include "sbusb_ncm.h"
++
++enum { E0_SETUP = 0, E0_DATA, E0_WAIT_STATUS, E0_STATUS };
++
++#define QCAP            (sizeof(((struct sbusb_dwc3 *)0)->q) / sizeof(struct sbusb_ev))
++#define E0_TIMEOUT_US   1000000u
++#define STORM_RESETS    12u             /* bus resets without one SETUP before the link is restarted */
++#define RESTART_MIN_MS  2000u
++#define RESTART_MAX_MS  32000u
++
++static const uint8_t ring_addr[SBUSB_RINGS] = { SBUSB_EP_NOTIFY, SBUSB_EP_IN, SBUSB_EP_OUT };
++
++static uint32_t rd(struct sbusb_dwc3 *d, uint32_t off) { return d->io.rd(d->io.ctx, SBUSB_BLK_DWC3, off); }
++static void wr(struct sbusb_dwc3 *d, uint32_t off, uint32_t v) { d->io.wr(d->io.ctx, SBUSB_BLK_DWC3, off, v); }
++static void wait_us(struct sbusb_dwc3 *d, unsigned us) { d->io.delay_us(d->io.ctx, us); }
++
++static void
++sync(struct sbusb_dwc3 *d, uint32_t off, uint32_t len, int to_dev)
++{
++	if (d->io.sync != 0 && len != 0) {
++		d->io.sync(d->io.ctx, off, len, to_dev);
++	}
++}
++
++static void
++dctl(struct sbusb_dwc3 *d, uint32_t v)
++{
++	wr(d, D3_DCTL, v & ~D3_DCTL_ULSTCHNGREQ_MASK);
++}
++
++static int
++wait_for(struct sbusb_dwc3 *d, uint32_t off, uint32_t mask, uint32_t want, unsigned us)
++{
++	for (unsigned t = 0; t < us; t += 10) {
++		if ((rd(d, off) & mask) == want) {
++			return 1;
++		}
++		wait_us(d, 10);
++	}
++	return (rd(d, off) & mask) == want;
++}
++
++static void
++push(struct sbusb_dwc3 *d, int type, unsigned ring, unsigned cookie, uint32_t value, uint32_t status)
++{
++	struct sbusb_ev *e;
++
++	if (d->qn >= QCAP) {
++		return;
++	}
++	e = &d->q[(d->qh + d->qn++) % QCAP];
++	e->type = type;
++	e->ring = ring;
++	e->cookie = cookie;
++	e->value = value;
++	e->status = status;
++}
++
++static int
++depcmd(struct sbusb_dwc3 *d, unsigned phys, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
++{
++	wr(d, D3_DEPCMDPAR2(phys), p2);
++	wr(d, D3_DEPCMDPAR1(phys), p1);
++	wr(d, D3_DEPCMDPAR0(phys), p0);
++	wr(d, D3_DEPCMD(phys), cmd | D3_CMD_ACT);
++	for (unsigned i = 0; i < 5000; ++i) {
++		uint32_t v = rd(d, D3_DEPCMD(phys));
++		if ((v & D3_CMD_ACT) == 0) {
++			unsigned status = D3_CMD_STATUS(v);
++			if (status != 0) {
++				++d->n.cmd_fail;
++				d->n.last_cmd_fail = phys << 24 | (cmd & 0xffu) << 16 | (v & 0xffffu);
++				return -(int)status;
++			}
++			return 0;
++		}
++		wait_us(d, 1);
++	}
++	++d->n.cmd_fail;
++	d->n.last_cmd_fail = 0x80000000u | phys << 24 | (cmd & 0xffu) << 16;
++	return -16;
++}
++
++static int
++ep_config(struct sbusb_dwc3 *d, unsigned phys, unsigned type, unsigned mps, uint32_t action, unsigned interval)
++{
++	uint32_t p0 = D3_CFG0_TYPE(type) | D3_CFG0_MPS(mps) | action;
++	uint32_t p1 = D3_CFG1_XFERCOMPLETE | D3_CFG1_EPNUM(phys);
++
++	if ((phys & 1u) != 0) {
++		p0 |= D3_CFG0_FIFO(phys >> 1);          /* TX FIFO number = endpoint number */
++	}
++	if (phys < 2) {
++		p1 |= D3_CFG1_XFERNOTREADY;
++	} else if ((d->flags & SBUSB_F_RING) != 0) {
++		p1 |= D3_CFG1_XFERINPROGRESS;
++	}
++	if (interval != 0) {
++		p1 |= D3_CFG1_INTERVAL_M1(interval - 1u);
++	}
++	return depcmd(d, phys, D3_CMD_SETEPCONFIG, p0, p1, 0);
++}
++
++static void
++trb_write(struct sbusb_dwc3 *d, uint32_t off, uint64_t buf_pa, uint32_t size, uint32_t ctl)
++{
++	uint8_t *t = d->dma.va + off;
++
++	sbusb_put32(t + 0, (uint32_t)buf_pa);
++	sbusb_put32(t + 4, (uint32_t)(buf_pa >> 32));
++	sbusb_put32(t + 8, size & D3_TRB_SIZE_MASK);
++	sbusb_put32(t + 12, ctl);
++	sync(d, off, D3_TRB_BYTES, 1);
++}
++
++static int
++start_transfer(struct sbusb_dwc3 *d, unsigned phys, uint32_t trb_off, uint8_t *res)
++{
++	uint64_t pa = d->dma.pa + trb_off;
++	int r = depcmd(d, phys, D3_CMD_STARTXFER, (uint32_t)(pa >> 32), (uint32_t)pa, 0);
++
++	if (r == 0) {
++		*res = (uint8_t)D3_CMD_RESIDX(rd(d, D3_DEPCMD(phys)));
++	}
++	return r;
++}
++
++static void
++end_transfer(struct sbusb_dwc3 *d, unsigned phys, unsigned res)
++{
++	(void)depcmd(d, phys, D3_CMD_ENDXFER | D3_CMD_IOC | D3_CMD_FORCERM | D3_CMD_PARAM(res), 0, 0, 0);
++	wait_us(d, 100);
++}
++
++/* ---- endpoint 0 ----------------------------------------------------------------------------- */
++
++static int
++e0_start(struct sbusb_dwc3 *d, unsigned phys, uint32_t buf, uint32_t len, uint32_t type)
++{
++	uint32_t ctl = type | D3_TRB_HWO | D3_TRB_LST | D3_TRB_IOC;
++	uint32_t trb = SBUSB_DMA_TRB_EP0 + D3_TRB_BYTES * phys;
++	int r;
++
++	if (phys == 0) {
++		ctl |= D3_TRB_ISP;
++	} else {
++		sync(d, buf, len, 1);
++	}
++	trb_write(d, trb, d->dma.pa + buf, len, ctl);
++	r = start_transfer(d, phys, trb, &d->e0_res[phys]);
++	if (r == 0) {
++		d->e0_busy[phys] = 1;
++		d->e0_len[phys] = len;
++	}
++	return r;
++}
++
++static void
++e0_end(struct sbusb_dwc3 *d, unsigned phys)
++{
++	if (d->e0_busy[phys]) {
++		end_transfer(d, phys, d->e0_res[phys]);
++		d->e0_busy[phys] = 0;
++	}
++}
++
++static void
++e0_arm_setup(struct sbusb_dwc3 *d)
++{
++	d->e0 = E0_SETUP;
++	d->e0_pending = 0;
++	if (!d->e0_busy[0] && e0_start(d, 0, SBUSB_DMA_SETUP, 8, D3_TRB_TYPE_SETUP) != 0) {
++		d->why = "ep0: the SETUP TRB was refused";
++	}
++}
++
++static void
++e0_stall(struct sbusb_dwc3 *d)
++{
++	e0_end(d, 0);
++	e0_end(d, 1);
++	(void)depcmd(d, 0, D3_CMD_SETSTALL, 0, 0, 0);
++	++d->n.stalls;
++	e0_arm_setup(d);
++}
++
++static void
++e0_status(struct sbusb_dwc3 *d, unsigned phys)
++{
++	if (e0_start(d, phys, SBUSB_DMA_EP0BUF, 0, d->e0_three ? D3_TRB_TYPE_STATUS3 : D3_TRB_TYPE_STATUS2) != 0) {
++		e0_stall(d);
++		return;
++	}
++	d->e0 = E0_STATUS;
++}
++
++static void
++e0_to_status(struct sbusb_dwc3 *d)
++{
++	d->e0 = E0_WAIT_STATUS;
++	if (d->e0_pending != 0) {               /* its XferNotReady already came */
++		unsigned phys = (unsigned)d->e0_pending - 1u;
++		d->e0_pending = 0;
++		e0_status(d, phys);
++	}
++}
++
++/* ---- data rings ----------------------------------------------------------------------------- */
++
++static uint32_t
++ring_trb(const struct sbusb_ring *r, unsigned i)
++{
++	return r->off + D3_TRB_BYTES * i;
++}
++
++static void
++ring_reset(struct sbusb_dwc3 *d, struct sbusb_ring *r)
++{
++	r->enq = r->deq = r->inflight = r->started = 0;
++	for (unsigned i = 0; i < SBUSB_RING_TRBS * D3_TRB_BYTES; ++i) {
++		d->dma.va[r->off + i] = 0;
++	}
++	if ((d->flags & SBUSB_F_RING) != 0) {
++		/* the link TRB: back to TRB 0, owned by the controller for good */
++		trb_write(d, ring_trb(r, SBUSB_RING_USABLE), d->dma.pa + r->off, 0, D3_TRB_TYPE_LINK | D3_TRB_HWO);
++	}
++	sync(d, r->off, SBUSB_RING_TRBS * D3_TRB_BYTES, 1);
++}
++
++static void
++ring_end(struct sbusb_dwc3 *d, struct sbusb_ring *r)
++{
++	if (r->started) {
++		end_transfer(d, r->phys, r->res);
++	}
++	ring_reset(d, r);
++}
++
++static void
++ring_kick(struct sbusb_dwc3 *d, struct sbusb_ring *r)
++{
++	if (r->inflight == 0) {
++		return;
++	}
++	if (!r->started) {
++		if (start_transfer(d, r->phys, ring_trb(r, r->deq), &r->res) == 0) {
++			r->started = 1;
++		}
++	} else if ((d->flags & SBUSB_F_RING) != 0) {
++		(void)depcmd(d, r->phys, D3_CMD_UPDATEXFER | D3_CMD_PARAM(r->res), 0, 0, 0);
++	}
++}
++
++static void
++ring_complete_one(struct sbusb_dwc3 *d, struct sbusb_ring *r)
++{
++	uint32_t off = ring_trb(r, r->deq), size, left, len = r->m[r->deq].len, moved;
++
++	size = sbusb_get32(d->dma.va + off + 8);
++	left = size & D3_TRB_SIZE_MASK;
++	moved = left <= len ? len - left : 0;
++	if ((r->phys & 1u) == 0) {
++		sync(d, r->m[r->deq].buf, moved, 0);
++	}
++	push(d, SBUSB_EV_DONE, (unsigned)(r - d->ring), r->m[r->deq].cookie, moved, D3_TRB_STATUS(size));
++	if (++r->deq == SBUSB_RING_USABLE) {
++		r->deq = 0;
++		++r->wraps;
++	}
++	--r->inflight;
++}
++
++static void
++ring_event(struct sbusb_dwc3 *d, struct sbusb_ring *r, unsigned type)
++{
++	if (!r->on || r->inflight == 0 || !r->started) {
++		return;                                 /* ended by us: stale */
++	}
++	sync(d, r->off, SBUSB_RING_TRBS * D3_TRB_BYTES, 0);
++	if ((d->flags & SBUSB_F_RING) == 0) {
++		if (type != D3_EVT_XFERCOMPLETE) {
++			return;
++		}
++		r->started = 0;
++		ring_complete_one(d, r);
++		ring_kick(d, r);                        /* the next TRB, if one waits */
++		return;
++	}
++	if (type != D3_EVT_XFERINPROGRESS && type != D3_EVT_XFERCOMPLETE) {
++		return;
++	}
++	while (r->inflight != 0 && (sbusb_get32(d->dma.va + ring_trb(r, r->deq) + 12) & D3_TRB_HWO) == 0) {
++		ring_complete_one(d, r);
++	}
++	if (type == D3_EVT_XFERCOMPLETE) {              /* not expected without LST: start again */
++		r->started = 0;
++		ring_kick(d, r);
++	}
++}
++
++int
++sbusb_dwc3_queue(struct sbusb_dwc3 *d, unsigned ring, uint32_t buf, uint32_t len, unsigned cookie)
++{
++	struct sbusb_ring *r;
++	uint32_t ctl = D3_TRB_TYPE_NORMAL | D3_TRB_HWO | D3_TRB_IOC;
++
++	if (ring >= SBUSB_RINGS || !d->started) {
++		return -1;
++	}
++	r = &d->ring[ring];
++	if (!r->on || r->inflight >= SBUSB_RING_USABLE || (uint64_t)buf + len > d->dma.size) {
++		return -1;
++	}
++	if ((r->phys & 1u) == 0) {
++		ctl |= D3_TRB_ISP;                      /* OUT: an event on a short packet too */
++		if ((d->flags & SBUSB_F_RING) != 0) {
++			ctl |= D3_TRB_CSP;              /* and go on to the next TRB after one */
++		}
++	} else {
++		sync(d, buf, len, 1);
++	}
++	if ((d->flags & SBUSB_F_RING) == 0) {
++		ctl |= D3_TRB_LST;
++	}
++	r->m[r->enq].buf = buf;
++	r->m[r->enq].len = len;
++	r->m[r->enq].cookie = (uint16_t)cookie;
++	trb_write(d, ring_trb(r, r->enq), d->dma.pa + buf, len, ctl);
++	if (++r->enq == SBUSB_RING_USABLE) {
++		r->enq = 0;
++	}
++	++r->inflight;
++	ring_kick(d, r);
++	return 0;
++}
++
++unsigned
++sbusb_dwc3_ring_free(const struct sbusb_dwc3 *d, unsigned ring)
++{
++	if (ring >= SBUSB_RINGS || !d->ring[ring].on) {
++		return 0;
++	}
++	return SBUSB_RING_USABLE - d->ring[ring].inflight;
++}
++
++/* Transfers of the rings from `first` on are ended; completions of theirs still waiting in the class queue
++ * go with them, so the class layer never queues again on a ring that was just emptied. */
++static void
++rings_down(struct sbusb_dwc3 *d, unsigned first)
++{
++	unsigned kept = 0;
++
++	for (unsigned i = first; i < SBUSB_RINGS; ++i) {
++		if (d->ring[i].on) {
++			ring_end(d, &d->ring[i]);
++		}
++	}
++	for (unsigned i = 0; i < d->qn; ++i) {
++		struct sbusb_ev e = d->q[(d->qh + i) % QCAP];
++
++		if (e.type == SBUSB_EV_DONE && e.ring >= first) {
++			continue;
++		}
++		d->q[(d->qh + kept++) % QCAP] = e;
++	}
++	d->qn = kept;
++}
++
++/* ---- configuration -------------------------------------------------------------------------- */
++
++static void
++configure(struct sbusb_dwc3 *d, unsigned cfg)
++{
++	uint32_t enabled = 3;
++
++	rings_down(d, 0);
++	for (unsigned i = 0; i < SBUSB_RINGS; ++i) {
++		d->ring[i].on = 0;
++	}
++	wr(d, D3_DALEPENA, enabled);
++	if (cfg == 1) {
++		(void)depcmd(d, 0, D3_CMD_STARTCFG | D3_CMD_PARAM(2), 0, 0, 0);
++		for (unsigned i = 0; i < SBUSB_RINGS; ++i) {
++			struct sbusb_ring *r = &d->ring[i];
++			int notify = i == SBUSB_RING_NOTIFY;
++			unsigned mps = notify ? SBUSB_NOTIFY_MPS : sbusb_bulk_mps(d->st.full_speed);
++
++			if (ep_config(d, r->phys, notify ? 3u : 2u, mps, D3_CFG0_ACTION_INIT, notify ? 9u : 0u) != 0 ||
++			    depcmd(d, r->phys, D3_CMD_SETXFERRES, 1, 0, 0) != 0) {
++				d->why = "a data endpoint was refused (DEPCMD)";
++				continue;
++			}
++			ring_reset(d, r);
++			r->on = 1;
++			enabled |= 1u << r->phys;
++		}
++		wr(d, D3_DALEPENA, enabled);
++		d->restart_wait_ms = RESTART_MIN_MS;    /* a host that configures us is a healthy link */
++	}
++	++d->n.set_configs;
++	push(d, SBUSB_EV_CONFIGURED, 0, 0, cfg, 0);
++}
++
++static void
++set_halt(struct sbusb_dwc3 *d, unsigned addr, int set)
++{
++	for (unsigned i = 0; i < SBUSB_RINGS; ++i) {
++		struct sbusb_ring *r = &d->ring[i];
++
++		if (ring_addr[i] != addr || !r->on) {
++			continue;
++		}
++		ring_end(d, r);                         /* the class layer queues again on SBUSB_EV_REARM */
++		for (unsigned k = 0, kept = 0, qn = d->qn; k < qn; ++k) {
++			struct sbusb_ev e = d->q[(d->qh + k) % QCAP];
++
++			if (e.type == SBUSB_EV_DONE && e.ring == i) {
++				--d->qn;
++				continue;
++			}
++			d->q[(d->qh + kept++) % QCAP] = e;
++		}
++		(void)depcmd(d, r->phys, set ? D3_CMD_SETSTALL : D3_CMD_CLEARSTALL, 0, 0, 0);
++		if (!set) {
++			push(d, SBUSB_EV_REARM, i, 0, 0, 0);
++		}
++	}
++}
++
++static void
++e0_setup(struct sbusb_dwc3 *d)
++{
++	struct sbusb_ep0_res *res = &d->res;
++	unsigned wlen;
++
++	sync(d, SBUSB_DMA_SETUP, 8, 0);
++	for (unsigned i = 0; i < 8; ++i) {
++		d->setup[i] = d->dma.va[SBUSB_DMA_SETUP + i];
++	}
++	++d->n.setups;
++	d->resets_no_setup = 0;
++	d->e0_t0 = d->io.now_us(d->io.ctx);
++	sbusb_ep0_setup(&d->st, d->setup, res);
++	if (res->set_address >= 0) {
++		wr(d, D3_DCFG, (rd(d, D3_DCFG) & ~D3_DCFG_ADDR_MASK) | D3_DCFG_ADDR(res->set_address));
++	}
++	if (res->set_config >= 0) {
++		configure(d, (unsigned)res->set_config);
++	}
++	if (res->set_alt >= 0) {
++		rings_down(d, SBUSB_RING_IN);           /* the bulk pair; the endpoints stay configured */
++		push(d, SBUSB_EV_ALT, 0, 0, (uint32_t)res->set_alt, 0);
++	}
++	if (res->halt_ep >= 0) {
++		set_halt(d, (unsigned)res->halt_ep, res->halt_set);
++	}
++	wlen = sbusb_get16(d->setup + 6);
++	d->e0_pending = 0;
++	switch (res->action) {
++	case SBUSB_EP0_ACK:
++		d->e0_three = 0;
++		d->e0 = E0_WAIT_STATUS;
++		break;
++	case SBUSB_EP0_IN:
++		for (unsigned i = 0; i < res->len; ++i) {
++			d->dma.va[SBUSB_DMA_EP0BUF + i] = res->data[i];
++		}
++		d->e0_three = 1;
++		d->e0_phys = 1;
++		d->e0_zlp = res->len < wlen && res->len % SBUSB_EP0_MPS == 0;
++		d->e0 = E0_DATA;
++		if (e0_start(d, 1, SBUSB_DMA_EP0BUF, res->len, D3_TRB_TYPE_DATA) != 0) {
++			e0_stall(d);
++		}
++		break;
++	case SBUSB_EP0_OUT:
++		d->e0_three = 1;
++		d->e0_phys = 0;
++		d->e0_zlp = 0;
++		d->e0 = E0_DATA;
++		/* an OUT TRB is a whole number of packets */
++		if (e0_start(d, 0, SBUSB_DMA_EP0BUF, (res->len + SBUSB_EP0_MPS - 1u) / SBUSB_EP0_MPS * SBUSB_EP0_MPS,
++		    D3_TRB_TYPE_DATA) != 0) {
++			e0_stall(d);
++		}
++		break;
++	default:
++		e0_stall(d);
++	}
++}
++
++static void
++e0_event(struct sbusb_dwc3 *d, unsigned phys, unsigned type, unsigned status)
++{
++	if (type == D3_EVT_XFERCOMPLETE) {
++		uint32_t size, left, moved;
++
++		if (!d->e0_busy[phys]) {
++			return;                         /* ended by us: stale */
++		}
++		sync(d, SBUSB_DMA_TRB_EP0, 2 * D3_TRB_BYTES, 0);
++		size = sbusb_get32(d->dma.va + SBUSB_DMA_TRB_EP0 + D3_TRB_BYTES * phys + 8);
++		left = size & D3_TRB_SIZE_MASK;
++		moved = left <= d->e0_len[phys] ? d->e0_len[phys] - left : 0;
++		d->e0_busy[phys] = 0;
++		if (d->e0 == E0_SETUP) {
++			if (phys == 0) {
++				e0_setup(d);
++			}
++		} else if (d->e0 == E0_DATA && phys == (unsigned)d->e0_phys) {
++			if (D3_TRB_STATUS(size) == D3_TRBSTS_SETUP_PENDING) {
++				e0_arm_setup(d);        /* the host gave up and sent a new SETUP */
++				return;
++			}
++			if (phys == 1 && d->e0_zlp) {
++				d->e0_zlp = 0;
++				if (e0_start(d, 1, SBUSB_DMA_EP0BUF, 0, D3_TRB_TYPE_DATA) != 0) {
++					e0_stall(d);
++				}
++				return;
++			}
++			if (phys == 0) {
++				if (moved > 64) {
++					moved = 64;
++				}
++				sync(d, SBUSB_DMA_EP0BUF, moved, 0);
++				if (!sbusb_ep0_out(&d->st, d->setup, d->dma.va + SBUSB_DMA_EP0BUF, moved)) {
++					e0_stall(d);
++					return;
++				}
++			}
++			e0_to_status(d);
++		} else if (d->e0 == E0_STATUS) {
++			e0_arm_setup(d);
++		}
++	} else if (type == D3_EVT_XFERNOTREADY) {
++		unsigned phase = status & 3u;
++
++		if (phase == 2u) {                      /* the host is in the status stage */
++			if (d->e0 == E0_WAIT_STATUS) {
++				e0_status(d, phys);
++			} else if (d->e0 == E0_DATA) {
++				d->e0_pending = (int)phys + 1;
++			}
++		} else if (phase == 1u && d->e0 == E0_DATA && phys != (unsigned)d->e0_phys) {
++			e0_stall(d);                    /* a data stage in the other direction */
++		}
++	}
++}
++
++/* ---- device events -------------------------------------------------------------------------- */
++
++static void
++on_reset(struct sbusb_dwc3 *d)
++{
++	++d->n.resets;
++	++d->resets_no_setup;
++	rings_down(d, 0);
++	for (unsigned i = 0; i < SBUSB_RINGS; ++i) {
++		d->ring[i].on = 0;
++	}
++	wr(d, D3_DALEPENA, 3);
++	wr(d, D3_DCFG, rd(d, D3_DCFG) & ~D3_DCFG_ADDR_MASK);
++	sbusb_state_reset(&d->st);
++	d->suspended = 0;
++	if (d->e0 != E0_SETUP) {
++		e0_end(d, 0);
++		e0_end(d, 1);
++	}
++	e0_arm_setup(d);
++	push(d, SBUSB_EV_RESET, 0, 0, 0, 0);
++}
++
++static void
++on_connect_done(struct sbusb_dwc3 *d)
++{
++	unsigned speed = rd(d, D3_DSTS) & D3_DSTS_SPEED_MASK;
++
++	++d->n.conndone;
++	d->st.full_speed = speed == 1u || speed == 3u;
++	d->connected = 1;
++	/* endpoint 0's max packet for this link: 64 at high and full speed */
++	(void)ep_config(d, 0, 0, SBUSB_EP0_MPS, D3_CFG0_ACTION_MODIFY, 0);
++	(void)ep_config(d, 1, 0, SBUSB_EP0_MPS, D3_CFG0_ACTION_MODIFY, 0);
++	push(d, SBUSB_EV_CONNECT, 0, 0, (uint32_t)d->st.full_speed, 0);
++}
++
++static void
++device_event(struct sbusb_dwc3 *d, uint32_t ev)
++{
++	switch (D3_EV_DEV_TYPE(ev)) {
++	case 0:
++		++d->n.disconnects;
++		d->connected = 0;
++		sbusb_state_reset(&d->st);
++		push(d, SBUSB_EV_DISCONNECT, 0, 0, 0, 0);
++		break;
++	case 1:
++		on_reset(d);
++		break;
++	case 2:
++		on_connect_done(d);
++		break;
++	case 3: {
++		unsigned link = D3_EV_DEV_INFO(ev) & 0xfu;
++		if (link == D3_LINK_U3 && !d->suspended) {
++			d->suspended = 1;
++			++d->n.suspends;
++			push(d, SBUSB_EV_SUSPEND, 0, 0, 0, 0);
++		} else if (link == D3_LINK_U0 && d->suspended) {
++			d->suspended = 0;
++			push(d, SBUSB_EV_RESUME, 0, 0, 0, 0);
++		}
++		break;
++	}
++	default:
++		++d->n.unknown_events;
++	}
++}
++
++static void
++hw_events(struct sbusb_dwc3 *d)
++{
++	uint32_t count = rd(d, D3_GEVNTCOUNT) & D3_GEVNTCOUNT_MASK;
++
++	if (count == 0) {
++		return;
++	}
++	sync(d, SBUSB_DMA_EVT, SBUSB_EVT_BYTES, 0);
++	/* one hardware event makes at most a ring's worth of class events */
++	while (count >= 4 && d->qn + SBUSB_RING_TRBS <= QCAP) {
++		uint32_t ev = sbusb_get32(d->dma.va + SBUSB_DMA_EVT + d->evt_pos);
++
++		d->evt_pos = (d->evt_pos + 4u) & (SBUSB_EVT_BYTES - 1u);
++		count -= 4;
++		wr(d, D3_GEVNTCOUNT, 4);
++		++d->n.events;
++		if (D3_EV_IS_DEV(ev)) {
++			if (D3_EV_DEV_KIND(ev) == 0) {
++				device_event(d, ev);
++			}
++		} else {
++			unsigned phys = D3_EV_EP_PHYS(ev), type = D3_EV_EP_TYPE(ev);
++
++			if (phys < 2) {
++				e0_event(d, phys, type, D3_EV_EP_STATUS(ev));
++			} else {
++				for (unsigned i = 0; i < SBUSB_RINGS; ++i) {
++					if (d->ring[i].phys == phys) {
++						ring_event(d, &d->ring[i], type);
++					}
++				}
++			}
++		}
++		if (!d->started) {
++			return;
++		}
++	}
++}
++
++/* ---- start, stop, poll ---------------------------------------------------------------------- */
++
++void
++sbusb_dwc3_init(struct sbusb_dwc3 *d, const struct sbusb_io *io, const struct sbusb_dma *dma, const char *serial,
++    unsigned flags)
++{
++	uint8_t *p = (uint8_t *)d;
++
++	for (size_t i = 0; i < sizeof(*d); ++i) {
++		p[i] = 0;
++	}
++	d->io = *io;
++	d->dma = *dma;
++	d->flags = flags;
++	d->restart_wait_ms = RESTART_MIN_MS;
++	sbusb_state_init(&d->st, serial);
++	for (unsigned i = 0; i < SBUSB_RINGS; ++i) {
++		d->ring[i].off = SBUSB_DMA_RING(i);
++		d->ring[i].phys = (uint8_t)SBUSB_PHYS(ring_addr[i]);
++	}
++}
++
++static void
++halt_core(struct sbusb_dwc3 *d)
++{
++	dctl(d, rd(d, D3_DCTL) & ~D3_DCTL_RUN_STOP);
++	/* the core halts once its event buffer is drained */
++	for (unsigned i = 0; i < 1000 && (rd(d, D3_DSTS) & D3_DSTS_DEVCTRLHLT) == 0; ++i) {
++		uint32_t c = rd(d, D3_GEVNTCOUNT) & D3_GEVNTCOUNT_MASK;
++		if (c != 0) {
++			wr(d, D3_GEVNTCOUNT, c);
++		}
++		wait_us(d, 100);
++	}
++	wr(d, D3_DEVTEN, 0);
++	wr(d, D3_GEVNTSIZ, D3_GEVNTSIZ_INTMASK | (rd(d, D3_GEVNTSIZ) & 0xffffu));
++}
++
++static int
++fail(struct sbusb_dwc3 *d, int stage, const char *why)
++{
++	d->why = why;
++	return stage;
++}
++
++int
++sbusb_dwc3_start(struct sbusb_dwc3 *d)
++{
++	uint32_t v, rev;
++	uint64_t evt_pa = d->dma.pa + SBUSB_DMA_EVT;
++
++	d->why = 0;
++	d->want_up = 1;
++	d->started = d->connected = d->suspended = 0;
++	if (d->dma.va == 0 || d->dma.size < SBUSB_DMA_CLASS) {
++		return fail(d, -6, "the DMA block is too small");
++	}
++	for (uint32_t i = 0; i < SBUSB_DMA_CLASS; ++i) {
++		d->dma.va[i] = 0;
++	}
++	sync(d, 0, SBUSB_DMA_CLASS, 1);
++	d->e0_busy[0] = d->e0_busy[1] = 0;
++	d->qh = d->qn = 0;
++	d->evt_pos = 0;
++	d->resets_no_setup = 0;
++	sbusb_state_reset(&d->st);
++	for (unsigned i = 0; i < SBUSB_RINGS; ++i) {
++		d->ring[i].on = d->ring[i].started = d->ring[i].inflight = d->ring[i].enq = d->ring[i].deq = 0;
++	}
++
++	/* Whatever ran before: the loader stops and resets the core before every OS (fbbg_off), S-Boot may
++	 * not have. A core left running is halted before its PHY is reset under it. */
++	if ((rd(d, D3_DCTL) & D3_DCTL_RUN_STOP) != 0) {
++		halt_core(d);
++	}
++	if (sbusb_phy_start(&d->io, &d->phy) != 0) {
++		return fail(d, -1, "USBCON did not take the PHY settings");
++	}
++	d->id = rd(d, D3_GSNPSID);
++	if ((d->id >> 16) != D3_ID_USB3 && (d->id >> 16) != D3_ID_USB31) {
++		return fail(d, -2, "no DWC3 behind the usb-drd nub (GSNPSID)");
++	}
++	/* core soft reset: completes only with the PHY's clock running */
++	dctl(d, D3_DCTL_CSFTRST);
++	if (!wait_for(d, D3_DCTL, D3_DCTL_CSFTRST, 0, 200000)) {
++		return fail(d, -3, "DWC3 soft reset stuck (no PHY clock?)");
++	}
++	wait_us(d, 10000);
++
++	/* USB 2.0 PHY interface: no PHY suspend, no LPM sleep signal, no free-running clock, PHY out of reset */
++	wr(d, D3_GUSB2PHYCFG,
++	    rd(d, D3_GUSB2PHYCFG) & ~(D3_U2_SUSPHY | D3_U2_FREECLK_EXISTS | D3_U2_ENBLSLPM | D3_U2_PHYSOFTRST));
++	wr(d, D3_GUSB3PIPECTL, rd(d, D3_GUSB3PIPECTL) & ~D3_U3_SUSPHY);
++
++	rev = d->id & 0xffffu;
++	v = rd(d, D3_GCTL) & ~(D3_GCTL_SCALEDOWN_MASK | D3_GCTL_PRTCAP_MASK | D3_GCTL_DSBLCLKGTNG);
++	if ((d->id >> 16) == D3_ID_USB3 && rev >= 0x210au && rev <= 0x250au) {
++		v |= D3_GCTL_DSBLCLKGTNG;               /* clock gating is unreliable on 2.10a..2.50a */
++	}
++	wr(d, D3_GCTL, v | D3_GCTL_PRTCAP_DEVICE | D3_GCTL_SOFITPSYNC);
++	/* the AXI master as Samsung's BSP sets it: INCR bursts up to 16, cache hints, burst request limit 3 */
++	v = rd(d, D3_GSBUSCFG0) | D3_GSBUSCFG0_INCRBRST | D3_GSBUSCFG0_INCR16;
++	if ((d->id >> 16) == D3_ID_USB31 || d->id >= 0x5533220au) {
++		v |= D3_GSBUSCFG0_REQINFO_2;
++	}
++	wr(d, D3_GSBUSCFG0, v);
++	wr(d, D3_GSBUSCFG1, (rd(d, D3_GSBUSCFG1) & ~D3_GSBUSCFG1_BREQLIMIT_MASK) | D3_GSBUSCFG1_BREQLIMIT_3);
++	wr(d, D3_GUCTL, (rd(d, D3_GUCTL) & ~D3_GUCTL_REFCLKPER_MASK) | D3_GUCTL_REFCLKPER_0x14 | D3_GUCTL_HSTINAUTORETRY);
++	if ((d->id >> 16) != D3_ID_USB3 || rev >= 0x250au) {
++		v = rd(d, D3_GFLADJ);                   /* frame length adjustment 0x20 (the dts quirk) */
++		if ((v & D3_GFLADJ_30MHZ_MASK) != 0x20u) {
++			wr(d, D3_GFLADJ, (v & ~D3_GFLADJ_30MHZ_MASK) | D3_GFLADJ_30MHZ_SDBND_SEL | 0x20u);
++		}
++	}
++	/* high speed, address 0, no LPM */
++	wr(d, D3_DCFG, rd(d, D3_DCFG) & ~(D3_DCFG_SPEED_MASK | D3_DCFG_ADDR_MASK | D3_DCFG_LPM_CAP));
++
++	/* one event buffer; its interrupt masked unless the caller takes the nub's interrupt */
++	wr(d, D3_GEVNTADRLO, (uint32_t)evt_pa);
++	wr(d, D3_GEVNTADRHI, (uint32_t)(evt_pa >> 32));
++	wr(d, D3_GEVNTSIZ, ((d->flags & SBUSB_F_IRQ) != 0 ? 0 : D3_GEVNTSIZ_INTMASK) | SBUSB_EVT_BYTES);
++	wr(d, D3_GEVNTCOUNT, rd(d, D3_GEVNTCOUNT) & D3_GEVNTCOUNT_MASK);
++	wr(d, D3_DEVTEN, D3_DEVTEN_DISCONN | D3_DEVTEN_USBRST | D3_DEVTEN_CONNDONE | D3_DEVTEN_ULSTCNG);
++
++	/* endpoint 0: transfer resources from 0, both directions at 512 until Connect Done says 64 */
++	if (depcmd(d, 0, D3_CMD_STARTCFG | D3_CMD_PARAM(0), 0, 0, 0) != 0 ||
++	    ep_config(d, 0, 0, 512, D3_CFG0_ACTION_INIT, 0) != 0 || depcmd(d, 0, D3_CMD_SETXFERRES, 1, 0, 0) != 0 ||
++	    ep_config(d, 1, 0, 512, D3_CFG0_ACTION_INIT, 0) != 0 || depcmd(d, 1, D3_CMD_SETXFERRES, 1, 0, 0) != 0) {
++		return fail(d, -4, "ep0 configuration refused (DEPCMD)");
++	}
++	wr(d, D3_DALEPENA, 3);
++	d->started = 1;
++	e0_arm_setup(d);
++	if (!d->e0_busy[0]) {
++		d->started = 0;
++		return fail(d, -4, "ep0: the SETUP TRB was refused");
++	}
++	d->e0_t0 = d->io.now_us(d->io.ctx);
++	dctl(d, rd(d, D3_DCTL) | D3_DCTL_RUN_STOP);     /* the pull-up: the host sees a device from here */
++	if (!wait_for(d, D3_DSTS, D3_DSTS_DEVCTRLHLT, 0, 100000)) {
++		d->started = 0;
++		return fail(d, -5, "DWC3 did not leave halt (run/stop)");
++	}
++	return 0;
++}
++
++static void
++core_stop(struct sbusb_dwc3 *d)
++{
++	if (!d->started) {
++		return;
++	}
++	rings_down(d, 0);
++	for (unsigned i = 0; i < SBUSB_RINGS; ++i) {
++		d->ring[i].on = 0;
++	}
++	e0_end(d, 0);
++	e0_end(d, 1);
++	halt_core(d);
++	wr(d, D3_DALEPENA, 0);
++	dctl(d, D3_DCTL_CSFTRST);
++	(void)wait_for(d, D3_DCTL, D3_DCTL_CSFTRST, 0, 100000);
++	wr(d, D3_GEVNTADRLO, 0);
++	wr(d, D3_GEVNTADRHI, 0);
++	wr(d, D3_GEVNTSIZ, D3_GEVNTSIZ_INTMASK);
++	wr(d, D3_GEVNTCOUNT, 0);
++	d->started = d->connected = d->suspended = 0;
++	sbusb_state_reset(&d->st);
++}
++
++void
++sbusb_dwc3_stop(struct sbusb_dwc3 *d)
++{
++	d->want_up = 0;
++	core_stop(d);
++}
++
++/* A replug cannot be seen by the controller (VBUS is forced valid in the PHY), and a link left as it was
++ * has been seen to take the host's resets but never a SETUP again (the loader's and an earlier port's notes). So a
++ * run of resets without one SETUP restarts the link from the PHY up, with a growing pause between tries. */
++static void
++link_watch(struct sbusb_dwc3 *d, uint64_t now)
++{
++	/* also: a restart that failed is tried again after the pause */
++	if (!d->want_up || now < d->restart_after || (d->started && d->resets_no_setup < STORM_RESETS)) {
++		return;
++	}
++	core_stop(d);
++	++d->n.restarts;
++	d->restart_after = now + (uint64_t)d->restart_wait_ms * 1000u;
++	if (d->restart_wait_ms < RESTART_MAX_MS) {
++		d->restart_wait_ms *= 2;
++	}
++	(void)sbusb_dwc3_start(d);                      /* a failure leaves it stopped, with d->why */
++	d->want_up = 1;
++	push(d, SBUSB_EV_RESTART, 0, 0, (uint32_t)d->started, 0);
++}
++
++int
++sbusb_dwc3_poll(struct sbusb_dwc3 *d, struct sbusb_ev *ev)
++{
++	if (d->qn == 0 && (d->started || d->want_up)) {
++		uint64_t now;
++
++		if (d->started) {
++			hw_events(d);
++		}
++		now = d->io.now_us(d->io.ctx);
++		/* a control transfer the host abandoned, or a status stage we missed: start over */
++		if (d->started && d->e0 != E0_SETUP && now - d->e0_t0 > E0_TIMEOUT_US) {
++			++d->n.e0_timeouts;
++			e0_stall(d);
++		}
++		link_watch(d, now);
++	}
++	if (d->qn == 0) {
++		return 0;
++	}
++	*ev = d->q[d->qh];
++	d->qh = (d->qh + 1) % QCAP;
++	--d->qn;
++	return 1;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_dwc3.h b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_dwc3.h
+new file mode 100644
+index 00000000..e31de90c
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_dwc3.h
+@@ -0,0 +1,112 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB: the DWC3 at 0x10c00000 as a USB 2.0 high-speed device. Core start and stop, the event
++ * buffer, endpoint 0, and one TRB ring per data endpoint. Plain C; one caller at a time (the kext's work loop).
++ *
++ * Two ways to run the data endpoints (flag SBUSB_F_RING):
++ *   single (default)  one TRB armed at a time, LST set, restarted on XferComplete: the loader's model, which
++ *                     is the one that has run on this phone;
++ *   ring              TRBs without LST, a link TRB closing the ring, Start Transfer once then Update Transfer,
++ *                     completions by XferInProgress: the DWC3 databook's model, not yet run on this phone.
++ * The bookkeeping (enqueue, dequeue, wrap) is the same in both.
++ */
++#ifndef SBUSB_DWC3_H
++#define SBUSB_DWC3_H
++#include "sbusb_io.h"
++#include "sbusb_ep0.h"
++#include "sbusb_phy.h"
++
++#define SBUSB_F_RING            0x1u    /* ring mode for the data endpoints */
++#define SBUSB_F_IRQ             0x2u    /* leave the event interrupt unmasked (the caller has the nub's interrupt) */
++
++/* DMA block layout (offsets) */
++#define SBUSB_EVT_BYTES         4096u
++#define SBUSB_DMA_EVT           0x0000u
++#define SBUSB_DMA_TRB_EP0       0x1000u         /* two TRBs: physical endpoint 0 and 1 */
++#define SBUSB_RING_TRBS         8u              /* 7 transfer TRBs + the link TRB */
++#define SBUSB_RING_USABLE       (SBUSB_RING_TRBS - 1u)
++#define SBUSB_DMA_RING(i)       (0x1100u + 0x100u * (i))
++#define SBUSB_DMA_SETUP         0x1400u
++#define SBUSB_DMA_EP0BUF        0x1600u         /* 512 bytes */
++#define SBUSB_DMA_CLASS         0x1800u         /* from here: the class layer's buffers (sbusb_func.h) */
++
++#define SBUSB_RING_NOTIFY       0u
++#define SBUSB_RING_IN           1u
++#define SBUSB_RING_OUT          2u
++#define SBUSB_RINGS             3u
++
++enum {
++	SBUSB_EV_RESET = 1,     /* bus reset: every data transfer is gone */
++	SBUSB_EV_CONNECT,       /* value: 1 full speed, 0 high speed */
++	SBUSB_EV_DISCONNECT,
++	SBUSB_EV_CONFIGURED,    /* value: configuration (0 = deconfigured); data transfers are gone */
++	SBUSB_EV_ALT,           /* value: the data interface's alternate setting; bulk transfers are gone */
++	SBUSB_EV_DONE,          /* ring, cookie, value = bytes moved, status = TRB status */
++	SBUSB_EV_REARM,         /* ring: a halt was cleared, its transfers are gone */
++	SBUSB_EV_SUSPEND,
++	SBUSB_EV_RESUME,
++	SBUSB_EV_RESTART,       /* the link was restarted from the PHY up; everything is gone */
++};
++
++struct sbusb_ev {
++	int type;
++	unsigned ring, cookie;
++	uint32_t value, status;
++};
++
++struct sbusb_ring {
++	uint32_t off;                   /* DMA offset of TRB 0 */
++	uint8_t phys, on;               /* physical endpoint; configured */
++	uint8_t enq, deq, inflight;     /* indexes 0..SBUSB_RING_USABLE-1 */
++	uint8_t started, res;           /* a transfer resource is active; its index */
++	uint32_t wraps;
++	struct { uint32_t buf, len; uint16_t cookie; } m[SBUSB_RING_USABLE];
++};
++
++struct sbusb_stats {
++	uint32_t events, resets, conndone, disconnects, setups, stalls, e0_timeouts, set_configs;
++	uint32_t cmd_fail, last_cmd_fail, restarts, suspends, unknown_events;
++};
++
++struct sbusb_dwc3 {
++	struct sbusb_io io;
++	struct sbusb_dma dma;
++	struct sbusb_state st;
++	struct sbusb_phy_report phy;
++	unsigned flags;
++	int started, connected, suspended;
++	int want_up;                    /* the caller started it and has not stopped it: the link watch may restart it */
++	uint32_t id, evt_pos;
++	/* endpoint 0 */
++	int e0, e0_three, e0_phys, e0_zlp, e0_pending;
++	uint8_t e0_busy[2], e0_res[2];
++	uint32_t e0_len[2];
++	uint8_t setup[8];
++	uint64_t e0_t0;
++	struct sbusb_ep0_res res;
++	struct sbusb_ring ring[SBUSB_RINGS];
++	/* events for the class layer */
++	struct sbusb_ev q[32];
++	unsigned qh, qn;
++	/* link watch */
++	uint32_t resets_no_setup, restart_wait_ms;
++	uint64_t restart_after;
++	struct sbusb_stats n;
++	const char *why;
++};
++
++void sbusb_dwc3_init(struct sbusb_dwc3 *d, const struct sbusb_io *io, const struct sbusb_dma *dma,
++    const char *serial, unsigned flags);
++/* PHY, then the core, endpoint 0 armed, pull-up on. Bounded: about 0.35 s at worst. 0, or a negative stage
++ * with d->why: -1 PHY, -2 no DWC3 (GSNPSID), -3 soft reset stuck, -4 ep0 refused, -5 did not leave halt,
++ * -6 DMA block too small. */
++int sbusb_dwc3_start(struct sbusb_dwc3 *d);
++/* Pull-up off, transfers ended, core soft reset, event buffer taken away. Safe to call twice. */
++void sbusb_dwc3_stop(struct sbusb_dwc3 *d);
++/* Service the controller; 1 with an event in *ev. Call until 0. */
++int sbusb_dwc3_poll(struct sbusb_dwc3 *d, struct sbusb_ev *ev);
++/* One transfer on a data ring: len bytes at DMA offset buf (OUT: a multiple of the max packet size).
++ * 0 queued, -1 not configured or the ring is full. */
++int sbusb_dwc3_queue(struct sbusb_dwc3 *d, unsigned ring, uint32_t buf, uint32_t len, unsigned cookie);
++unsigned sbusb_dwc3_ring_free(const struct sbusb_dwc3 *d, unsigned ring);
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_echo.c b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_echo.c
+new file mode 100644
+index 00000000..9b944bb4
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_echo.c
+@@ -0,0 +1,198 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB test responder (sbusb_echo.h).
++ */
++#include "sbusb_echo.h"
++
++static int
++same(const uint8_t *a, const uint8_t *b, unsigned n)
++{
++	for (unsigned i = 0; i < n; ++i) {
++		if (a[i] != b[i]) {
++			return 0;
++		}
++	}
++	return 1;
++}
++
++static void
++copy(uint8_t *d, const uint8_t *s, uint32_t n)
++{
++	for (uint32_t i = 0; i < n; ++i) {
++		d[i] = s[i];
++	}
++}
++
++/* the Internet checksum of p[0..len), ready to store big-endian */
++uint16_t
++sbusb_inet_sum(const uint8_t *p, uint32_t len)
++{
++	uint32_t sum = 0;
++
++	for (uint32_t i = 0; i + 1 < len; i += 2) {
++		sum += (uint32_t)p[i] << 8 | p[i + 1];
++	}
++	if ((len & 1u) != 0) {
++		sum += (uint32_t)p[len - 1] << 8;
++	}
++	while ((sum >> 16) != 0) {
++		sum = (sum & 0xffffu) + (sum >> 16);
++	}
++	return (uint16_t)~sum;
++}
++
++void
++sbusb_echo_ip6(const uint8_t mac[6], uint8_t ip6[16])
++{
++	for (unsigned i = 0; i < 16; ++i) {
++		ip6[i] = 0;
++	}
++	ip6[0] = 0xfe; ip6[1] = 0x80;
++	ip6[8] = mac[0] ^ 0x02u; ip6[9] = mac[1]; ip6[10] = mac[2];
++	ip6[11] = 0xff; ip6[12] = 0xfe;
++	ip6[13] = mac[3]; ip6[14] = mac[4]; ip6[15] = mac[5];
++}
++
++/* ICMPv6 checksum: the pseudo-header (source, destination, length, next header 58) and the message */
++static uint16_t
++icmp6_sum(const uint8_t *ip6_header, const uint8_t *icmp, uint32_t icmp_len)
++{
++	uint32_t sum = icmp_len + 58u;
++
++	for (unsigned i = 8; i < 40; i += 2) {
++		sum += (uint32_t)ip6_header[i] << 8 | ip6_header[i + 1];
++	}
++	for (uint32_t i = 0; i + 1 < icmp_len; i += 2) {
++		sum += (uint32_t)icmp[i] << 8 | icmp[i + 1];
++	}
++	if ((icmp_len & 1u) != 0) {
++		sum += (uint32_t)icmp[icmp_len - 1] << 8;
++	}
++	while ((sum >> 16) != 0) {
++		sum = (sum & 0xffffu) + (sum >> 16);
++	}
++	return (uint16_t)~sum;
++}
++
++static uint32_t
++echo6(const uint8_t mac[6], const uint8_t *in, uint32_t len, uint8_t *out, int *kind)
++{
++	static const uint8_t all_nodes[16] = { 0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
++	static const uint8_t unspecified[16] = { 0 };
++	uint8_t ours[16], solicited[16];
++	const uint8_t *ip = in + 14, *icmp = in + 54;
++	uint32_t plen, total;
++	uint16_t sum;
++
++	if (len < 14 + 40 + 8 || (ip[0] >> 4) != 6 || ip[6] != 58) {     /* ICMPv6 right after the fixed header */
++		return 0;
++	}
++	plen = (uint32_t)ip[4] << 8 | ip[5];
++	if (plen < 8 || 54 + plen > len || same(ip + 8, unspecified, 16) || icmp6_sum(ip, icmp, plen) != 0) {
++		return 0;
++	}
++	sbusb_echo_ip6(mac, ours);
++	copy(solicited, all_nodes, 16);                 /* ff02::1:ffXX:XXXX */
++	solicited[11] = 1; solicited[12] = 0xff;
++	copy(solicited + 13, ours + 13, 3);
++	if (icmp[0] == 128 && icmp[1] == 0 && (same(ip + 24, ours, 16) || same(ip + 24, all_nodes, 16))) {
++		total = 54 + plen;
++		copy(out, in, total);
++		out[54] = 129;                          /* echo reply */
++		*kind = SBUSB_ECHO_ICMP6;
++	} else if (icmp[0] == 135 && icmp[1] == 0 && plen >= 24 && ip[7] == 255 && same(icmp + 8, ours, 16) &&
++	    (same(ip + 24, ours, 16) || same(ip + 24, solicited, 16))) {
++		total = 54 + 32;
++		plen = 32;
++		copy(out, in, 54);
++		out[54] = 136;                          /* neighbour advertisement */
++		out[55] = 0;
++		out[58] = 0x60; out[59] = out[60] = out[61] = 0;        /* solicited, override */
++		copy(out + 62, ours, 16);
++		out[78] = 2; out[79] = 1;               /* option: target link-layer address */
++		copy(out + 80, mac, 6);
++		out[18] = 0; out[19] = 32;
++		*kind = SBUSB_ECHO_ND;
++	} else {
++		return 0;
++	}
++	copy(out, in + 6, 6);
++	copy(out + 6, mac, 6);
++	out[21] = (uint8_t)(icmp[0] == 135 ? 255 : 64);         /* hop limit */
++	copy(out + 22, ours, 16);
++	copy(out + 38, ip + 8, 16);
++	out[56] = out[57] = 0;
++	sum = icmp6_sum(out + 14, out + 54, plen);
++	out[56] = (uint8_t)(sum >> 8);
++	out[57] = (uint8_t)sum;
++	return total;
++}
++
++uint32_t
++sbusb_echo(const uint8_t ip[4], const uint8_t mac[6], const uint8_t *in, uint32_t len, uint8_t *out, uint32_t cap,
++    int *kind)
++{
++	unsigned ethertype;
++
++	*kind = SBUSB_ECHO_NONE;
++	if (len < 14 || len > cap || cap < 86) {
++		return 0;
++	}
++	ethertype = (unsigned)in[12] << 8 | in[13];
++	if (ethertype == 0x0806u) {
++		static const uint8_t request[8] = { 0, 1, 8, 0, 6, 4, 0, 1 };  /* Ethernet, IPv4, 6, 4, request */
++
++		if (len < 42 || !same(in + 14, request, 8) || !same(in + 38, ip, 4)) {
++			return 0;
++		}
++		copy(out, in + 6, 6);                   /* to the asker */
++		copy(out + 6, mac, 6);
++		copy(out + 12, in + 12, 2);
++		copy(out + 14, request, 7);
++		out[21] = 2;                            /* reply */
++		copy(out + 22, mac, 6);
++		copy(out + 28, ip, 4);
++		copy(out + 32, in + 22, 10);            /* the asker's MAC and IP */
++		*kind = SBUSB_ECHO_ARP;
++		return 42;
++	}
++	if (ethertype == 0x86ddu) {
++		return echo6(mac, in, len, out, kind);
++	}
++	if (ethertype == 0x0800u) {
++		uint32_t ihl, total, icmp, icmp_len;
++		uint16_t sum;
++
++		if (len < 14 + 20 + 8 || (in[14] >> 4) != 4) {
++			return 0;
++		}
++		ihl = (in[14] & 0xfu) * 4u;
++		total = (uint32_t)in[16] << 8 | in[17];
++		if (ihl < 20 || total < ihl + 8 || 14 + total > len || in[23] != 1 || !same(in + 30, ip, 4) ||
++		    ((in[20] & 0x3fu) != 0 || in[21] != 0)) {           /* not ICMP, not for us, or a fragment */
++			return 0;
++		}
++		icmp = 14 + ihl;
++		icmp_len = total - ihl;
++		if (in[icmp] != 8 || in[icmp + 1] != 0 || sbusb_inet_sum(in + icmp, icmp_len) != 0) {
++			return 0;
++		}
++		copy(out, in, 14 + total);
++		copy(out, in + 6, 6);
++		copy(out + 6, mac, 6);
++		out[22] = 64;                           /* TTL */
++		copy(out + 26, ip, 4);
++		copy(out + 30, in + 26, 4);
++		out[24] = out[25] = 0;
++		sum = sbusb_inet_sum(out + 14, ihl);
++		out[24] = (uint8_t)(sum >> 8);
++		out[25] = (uint8_t)sum;
++		out[icmp] = 0;                          /* echo reply */
++		out[icmp + 2] = out[icmp + 3] = 0;
++		sum = sbusb_inet_sum(out + icmp, icmp_len);
++		out[icmp + 2] = (uint8_t)(sum >> 8);
++		out[icmp + 3] = (uint8_t)sum;
++		*kind = SBUSB_ECHO_ICMP;
++		return 14 + total;
++	}
++	return 0;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_echo.h b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_echo.h
+new file mode 100644
+index 00000000..cb7c1e28
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_echo.h
+@@ -0,0 +1,31 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB: a tiny ping responder for the first phone test (PHONE-TEST.md): the phone answers from the
++ * driver itself, so the test needs no network stack and no user space on the phone.
++ *   IPv6 (the one the test uses: the Mac has a link-local address as soon as the interface is up, nothing to
++ *   assign): neighbour solicitation for, and ICMPv6 echo to, the link-local address made from the device MAC
++ *   (sbusb_echo_ip6), and echo to ff02::1.
++ *   IPv4: ARP for, and ICMP echo to, 169.254.83.66 (works once the Mac has self-assigned a 169.254 address).
++ * RFC 826 (ARP), RFC 791/792 (IPv4, ICMP), RFC 8200/4443 (IPv6, ICMPv6), RFC 4861 (ND), RFC 4291 2.5.6 and
++ * appendix A (link-local, modified EUI-64), RFC 1071 (checksum).
++ */
++#ifndef SBUSB_ECHO_H
++#define SBUSB_ECHO_H
++#include <stdint.h>
++
++#define SBUSB_ECHO_IP   { 169, 254, 83, 66 }    /* link-local: the Mac's self-assigned address reaches it */
++#define SBUSB_ECHO_NONE 0
++#define SBUSB_ECHO_ARP  1
++#define SBUSB_ECHO_ICMP 2
++#define SBUSB_ECHO_ND   3       /* neighbour advertisement */
++#define SBUSB_ECHO_ICMP6 4
++
++/* fe80::/64 + the modified EUI-64 of mac */
++void sbusb_echo_ip6(const uint8_t mac[6], uint8_t ip6[16]);
++
++/* If the frame in[0..len) is one of the requests above, writes the reply frame to out (cap bytes; an echo reply is
++ * as long as its request, ARP 42, a neighbour advertisement 86) and returns its length, with *kind set. Else 0. */
++uint32_t sbusb_echo(const uint8_t ip[4], const uint8_t mac[6], const uint8_t *in, uint32_t len, uint8_t *out,
++    uint32_t cap, int *kind);
++uint16_t sbusb_inet_sum(const uint8_t *p, uint32_t len);
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ep0.c b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ep0.c
+new file mode 100644
+index 00000000..c6fb2c4c
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ep0.c
+@@ -0,0 +1,223 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB control requests (sbusb_ep0.h).
++ */
++#include "sbusb_ep0.h"
++#include "sbusb_ncm.h"
++#include "sbusb_io.h"
++
++enum { REQ_GET_STATUS = 0, REQ_CLEAR_FEATURE = 1, REQ_SET_FEATURE = 3, REQ_SET_ADDRESS = 5, REQ_GET_DESCRIPTOR = 6,
++       REQ_GET_CONFIGURATION = 8, REQ_SET_CONFIGURATION = 9, REQ_GET_INTERFACE = 10, REQ_SET_INTERFACE = 11 };
++
++void
++sbusb_state_reset(struct sbusb_state *s)
++{
++	s->config = 0;
++	s->data_alt = 0;
++	s->packet_filter = 0;
++	s->ntb_in_max = SBUSB_NTB_MAX;
++}
++
++void
++sbusb_state_init(struct sbusb_state *s, const char *serial)
++{
++	sbusb_ident_init(&s->id, serial);
++	s->full_speed = 0;
++	sbusb_state_reset(s);
++}
++
++static int
++known_endpoint(unsigned addr)
++{
++	return addr == 0x00u || addr == 0x80u || addr == SBUSB_EP_NOTIFY || addr == SBUSB_EP_IN || addr == SBUSB_EP_OUT;
++}
++
++static void
++standard(struct sbusb_state *s, unsigned type, unsigned req, unsigned value, unsigned index, struct sbusb_ep0_res *r)
++{
++	unsigned recipient = type & 0x1fu, in = type & 0x80u;
++
++	switch (req) {
++	case REQ_GET_STATUS:
++		if (!in || (recipient == 1 && index > SBUSB_IF_DATA) || (recipient == 2 && !known_endpoint(index & 0xffu)) ||
++		    recipient > 2) {
++			return;
++		}
++		r->data[0] = recipient == 0 ? 1 : 0;    /* device: self-powered; halt is never left set */
++		r->data[1] = 0;
++		r->len = 2;
++		r->action = SBUSB_EP0_IN;
++		return;
++	case REQ_CLEAR_FEATURE:
++	case REQ_SET_FEATURE:
++		if (in) {
++			return;
++		}
++		if (recipient == 2 && value == 0 && known_endpoint(index & 0xffu)) {    /* ENDPOINT_HALT */
++			if ((index & 0x0fu) != 0) {
++				r->halt_ep = (int)(index & 0xffu);
++				r->halt_set = req == REQ_SET_FEATURE;
++			}
++			r->action = SBUSB_EP0_ACK;
++		} else if (recipient == 0 && value == 1 && req == REQ_CLEAR_FEATURE) {  /* remote wake-up: never on */
++			r->action = SBUSB_EP0_ACK;
++		}
++		return;
++	case REQ_SET_ADDRESS:
++		if (type == 0x00u && value < 128) {
++			r->set_address = (int)value;
++			r->action = SBUSB_EP0_ACK;
++		}
++		return;
++	case REQ_GET_DESCRIPTOR:
++		if (type != 0x80u) {
++			return;
++		}
++		switch (value >> 8) {
++		case 1:
++			r->len = sbusb_desc_device(&s->id, r->data);
++			break;
++		case 2:
++			r->len = (value & 0xffu) == 0 ? sbusb_desc_config(r->data, s->full_speed, 2) : 0;
++			break;
++		case 3:
++			r->len = sbusb_desc_string(&s->id, value & 0xffu, r->data);
++			break;
++		case 6:
++			r->len = sbusb_desc_qualifier(r->data);
++			break;
++		case 7:
++			r->len = (value & 0xffu) == 0 ? sbusb_desc_config(r->data, !s->full_speed, 7) : 0;
++			break;
++		default:
++			r->len = 0;             /* BOS and the rest: not a USB 2.1 device */
++		}
++		if (r->len != 0) {
++			r->action = SBUSB_EP0_IN;
++		}
++		return;
++	case REQ_GET_CONFIGURATION:
++		if (type == 0x80u) {
++			r->data[0] = s->config;
++			r->len = 1;
++			r->action = SBUSB_EP0_IN;
++		}
++		return;
++	case REQ_SET_CONFIGURATION:
++		if (type == 0x00u && value <= 1) {
++			s->config = (uint8_t)value;
++			s->data_alt = 0;
++			r->set_config = (int)value;
++			r->action = SBUSB_EP0_ACK;
++		}
++		return;
++	case REQ_GET_INTERFACE:
++		if (type == 0x81u && s->config != 0 && index <= SBUSB_IF_DATA) {
++			r->data[0] = index == SBUSB_IF_DATA ? s->data_alt : 0;
++			r->len = 1;
++			r->action = SBUSB_EP0_IN;
++		}
++		return;
++	case REQ_SET_INTERFACE:
++		if (type != 0x01u || s->config == 0) {
++			return;
++		}
++		if (index == SBUSB_IF_CTRL && value == 0) {
++			r->action = SBUSB_EP0_ACK;
++		} else if (index == SBUSB_IF_DATA && value <= 1) {
++			s->data_alt = (uint8_t)value;
++			r->set_alt = (int)value;
++			r->action = SBUSB_EP0_ACK;
++		}
++		return;
++	default:
++		return;
++	}
++}
++
++static void
++ncm_class(struct sbusb_state *s, unsigned type, unsigned req, unsigned value, unsigned index, unsigned length,
++    struct sbusb_ep0_res *r)
++{
++	if (index != SBUSB_IF_CTRL) {
++		return;
++	}
++	if (type == 0xa1u) {
++		switch (req) {
++		case SBUSB_REQ_GET_NTB_PARAMETERS:
++			r->len = sbusb_ncm_params(r->data);
++			break;
++		case SBUSB_REQ_GET_NTB_INPUT_SIZE:
++			sbusb_put32(r->data, s->ntb_in_max);
++			r->len = 4;
++			break;
++		case SBUSB_REQ_GET_NTB_FORMAT:
++			sbusb_put16(r->data, 0);                /* 16-bit */
++			r->len = 2;
++			break;
++		default:
++			return;
++		}
++		r->action = SBUSB_EP0_IN;
++	} else if (type == 0x21u) {
++		switch (req) {
++		case SBUSB_REQ_SET_ETH_PACKET_FILTER:
++			if (length == 0) {
++				s->packet_filter = (uint16_t)value;
++				r->action = SBUSB_EP0_ACK;
++			}
++			break;
++		case SBUSB_REQ_SET_NTB_FORMAT:
++			if (length == 0 && value == 0) {
++				r->action = SBUSB_EP0_ACK;
++			}
++			break;
++		case SBUSB_REQ_SET_NTB_INPUT_SIZE:
++			if (length == 4) {
++				r->len = 4;
++				r->action = SBUSB_EP0_OUT;
++			}
++			break;
++		default:
++			break;
++		}
++	}
++}
++
++void
++sbusb_ep0_setup(struct sbusb_state *s, const uint8_t setup[8], struct sbusb_ep0_res *r)
++{
++	unsigned type = setup[0], req = setup[1];
++	unsigned value = sbusb_get16(setup + 2), index = sbusb_get16(setup + 4), length = sbusb_get16(setup + 6);
++
++	r->action = SBUSB_EP0_STALL;
++	r->len = 0;
++	r->set_address = r->set_config = r->set_alt = r->halt_ep = -1;
++	r->halt_set = 0;
++	if ((type & 0x60u) == 0x00u) {
++		standard(s, type, req, value, index, r);
++	} else if ((type & 0x60u) == 0x20u && (type & 0x1fu) == 1) {
++		ncm_class(s, type, req, value, index, length, r);
++	}
++	if (r->action == SBUSB_EP0_IN) {
++		if (r->len > length) {
++			r->len = length;
++		}
++		if (r->len == 0) {
++			r->action = SBUSB_EP0_STALL;    /* an IN request for nothing */
++		}
++	}
++}
++
++int
++sbusb_ep0_out(struct sbusb_state *s, const uint8_t setup[8], const uint8_t *data, unsigned len)
++{
++	if (setup[0] == 0x21u && setup[1] == SBUSB_REQ_SET_NTB_INPUT_SIZE && len == 4) {
++		uint32_t v = sbusb_get32(data);
++		if (v < SBUSB_NTB_MIN || v > SBUSB_NTB_MAX) {
++			return 0;
++		}
++		s->ntb_in_max = v;
++		return 1;
++	}
++	return 0;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ep0.h b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ep0.h
+new file mode 100644
+index 00000000..db117952
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ep0.h
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB: what the control endpoint answers. Pure: a SETUP packet and the device state in, the action
++ * out. The controller side (stages, TRBs) is sbusb_dwc3.c. USB 2.0 chapter 9; NCM 1.0 6.2; ECM 1.2 6.2.4.
++ */
++#ifndef SBUSB_EP0_H
++#define SBUSB_EP0_H
++#include <stdint.h>
++#include "sbusb_desc.h"
++
++#define SBUSB_EP0_STALL 0
++#define SBUSB_EP0_ACK   1       /* no data stage */
++#define SBUSB_EP0_IN    2       /* data[0..len) to the host */
++#define SBUSB_EP0_OUT   3       /* len bytes from the host, then sbusb_ep0_out() */
++
++struct sbusb_state {
++	struct sbusb_ident id;
++	int full_speed;
++	uint8_t config;                 /* 0 or 1 */
++	uint8_t data_alt;               /* alternate setting of the data interface: 0 or 1 */
++	uint16_t packet_filter;         /* the last SetEthernetPacketFilter value */
++	uint32_t ntb_in_max;            /* the host's NTB input size: SBUSB_NTB_MIN..SBUSB_NTB_MAX */
++};
++
++struct sbusb_ep0_res {
++	int action;
++	unsigned len;
++	uint8_t data[256];
++	int set_address;                /* -1, or the address */
++	int set_config;                 /* -1, or 0 / 1 */
++	int set_alt;                    /* -1, or the data interface's new alternate setting */
++	int halt_ep;                    /* -1, or a USB endpoint address ... */
++	int halt_set;                   /* ... whose halt is set (1) or cleared (0) */
++};
++
++void sbusb_state_init(struct sbusb_state *s, const char *serial);
++/* a bus reset: address 0, not configured, the class defaults back */
++void sbusb_state_reset(struct sbusb_state *s);
++void sbusb_ep0_setup(struct sbusb_state *s, const uint8_t setup[8], struct sbusb_ep0_res *r);
++/* The data stage of a request sbusb_ep0_setup answered with SBUSB_EP0_OUT. 1 accepted, 0 refused (stall). */
++int sbusb_ep0_out(struct sbusb_state *s, const uint8_t setup[8], const uint8_t *data, unsigned len);
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_func.c b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_func.c
+new file mode 100644
+index 00000000..9f5fcdbe
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_func.c
+@@ -0,0 +1,238 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB NCM function (sbusb_func.h).
++ */
++#include "sbusb_func.h"
++
++static void
++rx_dg(void *ctx, const uint8_t *frame, uint32_t len)
++{
++	struct sbusb_func *f = (struct sbusb_func *)ctx;
++
++	++f->n.rx_frames;
++	if (f->ops.rx != 0) {
++		f->ops.rx(f->ops.ctx, frame, len);
++	}
++}
++
++static void
++tx_reset(struct sbusb_func *f)
++{
++	for (unsigned i = 0; i < SBUSB_TX_SLOTS; ++i) {
++		f->tx_state[i] = 0;
++	}
++	f->tx_open = -1;
++	f->tx_inflight = 0;
++}
++
++static void
++set_up(struct sbusb_func *f, int up)
++{
++	if (f->up == up) {
++		return;
++	}
++	f->up = up;
++	if (f->ops.link != 0) {
++		f->ops.link(f->ops.ctx, up, f->d.st.full_speed);
++	}
++	if (up && f->tx_was_full && f->ops.tx_ready != 0) {
++		f->tx_was_full = 0;
++		f->ops.tx_ready(f->ops.ctx);
++	}
++}
++
++static void
++rx_arm(struct sbusb_func *f)
++{
++	for (unsigned i = 0; i < SBUSB_RX_SLOTS; ++i) {
++		(void)sbusb_dwc3_queue(&f->d, SBUSB_RING_OUT, SBUSB_DMA_RX(i), SBUSB_NTB_MAX, i);
++	}
++}
++
++/* speed first, then "connected": the order hosts expect (NCM 1.0 7.1) */
++static void
++notify(struct sbusb_func *f)
++{
++	uint8_t *va = f->d.dma.va;
++	unsigned a = sbusb_ncm_notify_speed(va + SBUSB_DMA_NOTIFY(0), f->d.st.full_speed ? 12000000u : 480000000u);
++	unsigned b = sbusb_ncm_notify_connection(va + SBUSB_DMA_NOTIFY(1), 1);
++
++	if (sbusb_dwc3_queue(&f->d, SBUSB_RING_NOTIFY, SBUSB_DMA_NOTIFY(0), a, 0) == 0 &&
++	    sbusb_dwc3_queue(&f->d, SBUSB_RING_NOTIFY, SBUSB_DMA_NOTIFY(1), b, 1) == 0) {
++		f->n.notifies += 2;
++	}
++}
++
++static void
++tx_submit(struct sbusb_func *f)
++{
++	int slot = f->tx_open;
++	uint32_t len;
++
++	if (slot < 0 || f->w.ndg == 0) {
++		return;
++	}
++	len = sbusb_ntb_end(&f->w, sbusb_bulk_mps(f->d.st.full_speed));
++	f->tx_open = -1;
++	if (sbusb_dwc3_queue(&f->d, SBUSB_RING_IN, SBUSB_DMA_TX((unsigned)slot), len, (unsigned)slot) != 0) {
++		f->tx_state[slot] = 0;                  /* the link went away under us: the frames are lost */
++		return;
++	}
++	f->tx_state[slot] = 2;
++	++f->tx_inflight;
++	++f->n.tx_ntb;
++}
++
++static int
++tx_open_slot(struct sbusb_func *f)
++{
++	for (unsigned i = 0; i < SBUSB_TX_SLOTS; ++i) {
++		if (f->tx_state[i] == 0) {
++			f->tx_state[i] = 1;
++			f->tx_open = (int)i;
++			sbusb_ntb_begin(&f->w, f->d.dma.va + SBUSB_DMA_TX(i), f->d.st.ntb_in_max, f->seq++);
++			return 1;
++		}
++	}
++	return 0;
++}
++
++uint8_t *
++sbusb_func_tx_begin(struct sbusb_func *f, uint32_t len, int *stall)
++{
++	uint8_t *p;
++
++	*stall = 0;
++	if (!f->up || len < SBUSB_DG_MIN || len > SBUSB_DG_MAX) {
++		return 0;
++	}
++	if (f->tx_open >= 0) {
++		p = sbusb_ntb_add(&f->w, len);
++		if (p != 0) {
++			return p;
++		}
++		tx_submit(f);                           /* full: send it and take another */
++	}
++	if (!tx_open_slot(f)) {
++		*stall = 1;
++		f->tx_was_full = 1;
++		++f->n.tx_stalls;
++		return 0;
++	}
++	return sbusb_ntb_add(&f->w, len);
++}
++
++void
++sbusb_func_tx_commit(struct sbusb_func *f)
++{
++	++f->n.tx_frames;
++	/* nothing on the wire: send now. Otherwise keep filling; the next completion sends it. */
++	if (f->tx_inflight == 0) {
++		tx_submit(f);
++	}
++}
++
++static void
++on_done(struct sbusb_func *f, const struct sbusb_ev *e)
++{
++	if (e->ring == SBUSB_RING_OUT && e->cookie < SBUSB_RX_SLOTS) {
++		if (e->value != 0) {
++			int r = sbusb_ntb_parse(f->d.dma.va + SBUSB_DMA_RX(e->cookie), e->value, rx_dg, f);
++			++f->n.rx_ntb;
++			if (r < 0) {
++				++f->n.rx_bad;
++				f->n.rx_last_error = (uint32_t)-r;
++			}
++		}
++		if (f->alt1) {
++			(void)sbusb_dwc3_queue(&f->d, SBUSB_RING_OUT, SBUSB_DMA_RX(e->cookie), SBUSB_NTB_MAX, e->cookie);
++		}
++	} else if (e->ring == SBUSB_RING_IN && e->cookie < SBUSB_TX_SLOTS && f->tx_state[e->cookie] == 2) {
++		f->tx_state[e->cookie] = 0;
++		--f->tx_inflight;
++		tx_submit(f);
++		if (f->tx_was_full && f->ops.tx_ready != 0) {
++			f->tx_was_full = 0;
++			f->ops.tx_ready(f->ops.ctx);
++		}
++	}
++}
++
++unsigned
++sbusb_func_poll(struct sbusb_func *f)
++{
++	struct sbusb_ev e;
++	unsigned n = 0;
++
++	while (n < 64 && sbusb_dwc3_poll(&f->d, &e)) {
++		++n;
++		switch (e.type) {
++		case SBUSB_EV_DONE:
++			on_done(f, &e);
++			break;
++		case SBUSB_EV_ALT:
++			tx_reset(f);
++			f->alt1 = e.value == 1;
++			if (f->alt1) {
++				rx_arm(f);
++				notify(f);
++			}
++			set_up(f, f->alt1);
++			break;
++		case SBUSB_EV_REARM:
++			if (e.ring == SBUSB_RING_OUT && f->alt1) {
++				rx_arm(f);
++			} else if (e.ring == SBUSB_RING_IN) {
++				tx_reset(f);
++			}
++			break;
++		case SBUSB_EV_SUSPEND:
++			set_up(f, 0);
++			break;
++		case SBUSB_EV_RESUME:
++			set_up(f, f->alt1);
++			break;
++		case SBUSB_EV_RESET:
++		case SBUSB_EV_DISCONNECT:
++		case SBUSB_EV_CONFIGURED:
++		case SBUSB_EV_RESTART:
++			tx_reset(f);
++			f->alt1 = 0;
++			set_up(f, 0);
++			break;
++		default:
++			break;
++		}
++	}
++	return n;
++}
++
++void
++sbusb_func_init(struct sbusb_func *f, const struct sbusb_io *io, const struct sbusb_dma *dma, const char *serial,
++    unsigned flags, const struct sbusb_func_ops *ops)
++{
++	sbusb_dwc3_init(&f->d, io, dma, serial, flags);
++	f->ops = *ops;
++	f->up = f->alt1 = f->tx_was_full = 0;
++	f->seq = 0;
++	f->n = (struct sbusb_func_stats){ 0 };
++	tx_reset(f);
++}
++
++int
++sbusb_func_start(struct sbusb_func *f)
++{
++	if (f->d.dma.size < SBUSB_DMA_BYTES) {
++		f->d.why = "the DMA block is too small";
++		return -6;
++	}
++	return sbusb_dwc3_start(&f->d);
++}
++
++void
++sbusb_func_stop(struct sbusb_func *f)
++{
++	sbusb_dwc3_stop(&f->d);
++	tx_reset(f);
++	f->alt1 = 0;
++	set_up(f, 0);
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_func.h b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_func.h
+new file mode 100644
+index 00000000..c2e5a747
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_func.h
+@@ -0,0 +1,53 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB: the NCM function on top of the controller: who owns which buffer, when NTBs go out and come
++ * in, the two notifications, the link state. Plain C; the kext only copies frames in and out.
++ */
++#ifndef SBUSB_FUNC_H
++#define SBUSB_FUNC_H
++#include "sbusb_dwc3.h"
++#include "sbusb_ncm.h"
++
++#define SBUSB_TX_SLOTS          4u
++#define SBUSB_RX_SLOTS          4u
++#define SBUSB_DMA_NOTIFY(i)     (SBUSB_DMA_CLASS + 0x40u * (i))         /* two 64-byte lines */
++#define SBUSB_DMA_TX(i)         (0x2000u + SBUSB_NTB_MAX * (i))
++#define SBUSB_DMA_RX(i)         (SBUSB_DMA_TX(SBUSB_TX_SLOTS) + SBUSB_NTB_MAX * (i))
++#define SBUSB_DMA_BYTES         SBUSB_DMA_RX(SBUSB_RX_SLOTS)            /* 0x22000: what the kext allocates */
++
++struct sbusb_func_ops {
++	void *ctx;
++	void (*rx)(void *ctx, const uint8_t *frame, uint32_t len);      /* one Ethernet frame from the host */
++	void (*link)(void *ctx, int up, int full_speed);                /* the data interface opened / closed */
++	void (*tx_ready)(void *ctx);                                    /* sbusb_func_tx_begin can succeed again */
++};
++
++struct sbusb_func_stats {
++	uint32_t tx_ntb, tx_frames, tx_stalls, rx_ntb, rx_frames, rx_bad, rx_last_error, notifies;
++};
++
++struct sbusb_func {
++	struct sbusb_dwc3 d;
++	struct sbusb_func_ops ops;
++	int up;                         /* configured, data interface alt 1, not suspended */
++	int alt1;
++	uint8_t tx_state[SBUSB_TX_SLOTS];       /* 0 free, 1 open (being filled), 2 with the controller */
++	int tx_open;                    /* slot being filled, or -1 */
++	unsigned tx_inflight;
++	int tx_was_full;
++	uint16_t seq;
++	struct sbusb_ntb_w w;
++	struct sbusb_func_stats n;
++};
++
++void sbusb_func_init(struct sbusb_func *f, const struct sbusb_io *io, const struct sbusb_dma *dma, const char *serial,
++    unsigned flags, const struct sbusb_func_ops *ops);
++int sbusb_func_start(struct sbusb_func *f);             /* sbusb_dwc3_start's result */
++void sbusb_func_stop(struct sbusb_func *f);
++/* Service everything once. Returns the number of controller events handled. */
++unsigned sbusb_func_poll(struct sbusb_func *f);
++/* Room for one frame of len bytes to the host: copy it there, then sbusb_func_tx_commit(). NULL: the link is
++ * down (drop the frame: *stall = 0) or every NTB is in flight (keep it: *stall = 1, ops.tx_ready comes later). */
++uint8_t *sbusb_func_tx_begin(struct sbusb_func *f, uint32_t len, int *stall);
++void sbusb_func_tx_commit(struct sbusb_func *f);
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_io.h b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_io.h
+new file mode 100644
+index 00000000..c543fe75
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_io.h
+@@ -0,0 +1,48 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB hardware layer: the backend the register logic runs on. Plain C, no IOKit. The kext gives
++ * mapped nub memory; the host tests give a mock (test/mock.c).
++ */
++#ifndef SBUSB_IO_H
++#define SBUSB_IO_H
++#include <stdint.h>
++#include <stddef.h>
++
++/* Register blocks. DWC3 and PHY are the "reg" of the usb-drd and usb-phy nubs. The other five are single
++ * 32-bit registers (offset 0) that the usb-phy nub must carry as extra "reg" entries 1..5 (INTEGRATION.md);
++ * a missing one is skipped and reported, never guessed. */
++enum {
++	SBUSB_BLK_DWC3 = 0,     /* 0x10c00000 + 0x10000 */
++	SBUSB_BLK_PHY,          /* USBCON 0x11100000 + 0x200 */
++	SBUSB_BLK_PMU_USB2,     /* 0x1406072c: USB 2.0 PHY isolation, bit 0 = enabled */
++	SBUSB_BLK_PMU_USB3DP,   /* 0x14060704: USB3/DP PHY isolation, bit 0 = enabled */
++	SBUSB_BLK_GATE_TOP,     /* 0x1a242064: GATE_CLKCMU_FSYS0_USB30DRD */
++	SBUSB_BLK_GATE_REF,     /* 0x1100206c: FSYS0 USB30DRD_REF_CLK */
++	SBUSB_BLK_GATE_DPPHY,   /* 0x11002008: FSYS0 USBDPPHY_REF_SOC_PLL */
++	SBUSB_BLK_COUNT
++};
++
++struct sbusb_io {
++	void *ctx;
++	int (*has)(void *ctx, unsigned blk);                      /* is this block mapped */
++	uint32_t (*rd)(void *ctx, unsigned blk, uint32_t off);
++	void (*wr)(void *ctx, unsigned blk, uint32_t off, uint32_t v);
++	void (*delay_us)(void *ctx, unsigned us);
++	uint64_t (*now_us)(void *ctx);
++	/* DMA memory coherence around [off, off+len) of the DMA block: to_dev = CPU wrote and the controller
++	 * will read; else the controller wrote and the CPU will read. May be NULL (memory mapped uncached). */
++	void (*sync)(void *ctx, uint32_t off, uint32_t len, int to_dev);
++};
++
++/* One physically contiguous block the controller reaches (layout: sbusb_dwc3.h). */
++struct sbusb_dma {
++	uint8_t *va;
++	uint64_t pa;
++	uint32_t size;
++};
++
++static inline void sbusb_put16(uint8_t *p, unsigned v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
++static inline void sbusb_put32(uint8_t *p, uint32_t v) { sbusb_put16(p, v & 0xffffU); sbusb_put16(p + 2, v >> 16); }
++static inline unsigned sbusb_get16(const uint8_t *p) { return (unsigned)p[0] | (unsigned)p[1] << 8; }
++static inline uint32_t sbusb_get32(const uint8_t *p) { return (uint32_t)sbusb_get16(p) | (uint32_t)sbusb_get16(p + 2) << 16; }
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ncm.c b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ncm.c
+new file mode 100644
+index 00000000..70168758
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ncm.c
+@@ -0,0 +1,155 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB CDC-NCM framing (sbusb_ncm.h).
++ */
++#include "sbusb_ncm.h"
++#include "sbusb_io.h"
++#include "sbusb_desc.h"
++
++unsigned
++sbusb_ncm_params(uint8_t *o)
++{
++	sbusb_put16(o + 0, 28);                         /* wLength */
++	sbusb_put16(o + 2, 0x0001);                     /* bmNtbFormatsSupported: 16-bit only */
++	sbusb_put32(o + 4, SBUSB_NTB_MAX);              /* dwNtbInMaxSize */
++	sbusb_put16(o + 8, SBUSB_NTB_DIVISOR);          /* wNdpInDivisor */
++	sbusb_put16(o + 10, 0);                         /* wNdpInPayloadRemainder */
++	sbusb_put16(o + 12, SBUSB_NTB_DIVISOR);         /* wNdpInAlignment */
++	sbusb_put16(o + 14, 0);                         /* reserved */
++	sbusb_put32(o + 16, SBUSB_NTB_MAX);             /* dwNtbOutMaxSize */
++	sbusb_put16(o + 20, SBUSB_NTB_DIVISOR);         /* wNdpOutDivisor */
++	sbusb_put16(o + 22, 0);                         /* wNdpOutPayloadRemainder */
++	sbusb_put16(o + 24, SBUSB_NTB_DIVISOR);         /* wNdpOutAlignment */
++	sbusb_put16(o + 26, 0);                         /* wNtbOutMaxDatagrams: no limit */
++	return 28;
++}
++
++unsigned
++sbusb_ncm_notify_connection(uint8_t *o, int connected)
++{
++	o[0] = 0xa1; o[1] = 0x00;                       /* NETWORK_CONNECTION */
++	sbusb_put16(o + 2, connected ? 1 : 0);
++	sbusb_put16(o + 4, SBUSB_IF_CTRL);
++	sbusb_put16(o + 6, 0);
++	return 8;
++}
++
++unsigned
++sbusb_ncm_notify_speed(uint8_t *o, uint32_t bps)
++{
++	o[0] = 0xa1; o[1] = 0x2a;                       /* CONNECTION_SPEED_CHANGE */
++	sbusb_put16(o + 2, 0);
++	sbusb_put16(o + 4, SBUSB_IF_CTRL);
++	sbusb_put16(o + 6, 8);
++	sbusb_put32(o + 8, bps);                        /* downlink */
++	sbusb_put32(o + 12, bps);                       /* uplink */
++	return 16;
++}
++
++void
++sbusb_ntb_begin(struct sbusb_ntb_w *w, uint8_t *buf, uint32_t cap, uint16_t seq)
++{
++	w->buf = buf;
++	w->cap = cap > SBUSB_NTB_MAX ? SBUSB_NTB_MAX : cap < SBUSB_NTB_MIN ? SBUSB_NTB_MIN : cap;
++	w->len = SBUSB_NTB_DATA;
++	w->ndg = 0;
++	w->seq = seq;
++	for (uint32_t i = 0; i < SBUSB_NTB_DATA; ++i) {
++		buf[i] = 0;
++	}
++}
++
++uint8_t *
++sbusb_ntb_add(struct sbusb_ntb_w *w, uint32_t len)
++{
++	uint32_t at = (w->len + SBUSB_NTB_DIVISOR - 1u) & ~(SBUSB_NTB_DIVISOR - 1u);
++	uint8_t *e;
++
++	/* one byte kept free for sbusb_ntb_end's short-packet byte */
++	if (len < SBUSB_DG_MIN || len > SBUSB_DG_MAX || w->ndg >= SBUSB_NTB_MAXDG ||
++	    at + len + 1u > w->cap) {
++		return 0;
++	}
++	for (uint32_t i = w->len; i < at; ++i) {
++		w->buf[i] = 0;
++	}
++	e = w->buf + SBUSB_NTH16_LEN + 8u + 4u * w->ndg;
++	sbusb_put16(e, at);
++	sbusb_put16(e + 2, len);
++	++w->ndg;
++	w->len = at + len;
++	return w->buf + at;
++}
++
++uint32_t
++sbusb_ntb_end(struct sbusb_ntb_w *w, unsigned mps)
++{
++	uint8_t *b = w->buf;
++
++	if (w->len < w->cap && mps != 0 && w->len % mps == 0) {
++		b[w->len++] = 0;
++	}
++	sbusb_put32(b + 0, SBUSB_NTH16_SIG);
++	sbusb_put16(b + 4, SBUSB_NTH16_LEN);
++	sbusb_put16(b + 6, w->seq);
++	sbusb_put16(b + 8, w->len);                     /* wBlockLength */
++	sbusb_put16(b + 10, SBUSB_NTH16_LEN);           /* wNdpIndex: right after the header */
++	sbusb_put32(b + 12, SBUSB_NDP16_SIG);
++	sbusb_put16(b + 16, SBUSB_NDP16_LEN(w->ndg));   /* entries used + the zero terminator */
++	sbusb_put16(b + 18, 0);                         /* wNextNdpIndex */
++	return w->len;
++}
++
++int
++sbusb_ntb_parse(const uint8_t *b, uint32_t len, sbusb_dg_fn fn, void *ctx)
++{
++	uint32_t block, ndp;
++	int count = 0;
++
++	if (len < SBUSB_NTH16_LEN) {
++		return SBUSB_NTB_E_SHORT;
++	}
++	if (sbusb_get32(b) != SBUSB_NTH16_SIG || sbusb_get16(b + 4) != SBUSB_NTH16_LEN) {
++		return SBUSB_NTB_E_NTH;
++	}
++	block = sbusb_get16(b + 8);
++	if (block == 0) {
++		block = len;                            /* "ended by a short packet" */
++	}
++	if (block < SBUSB_NTH16_LEN || block > len) {
++		return SBUSB_NTB_E_NTH;
++	}
++	ndp = sbusb_get16(b + 10);
++	for (unsigned hops = 0; ndp != 0; ++hops) {
++		uint32_t ndp_len, entries;
++
++		if (hops >= 16) {
++			return SBUSB_NTB_E_LOOP;
++		}
++		if (ndp < SBUSB_NTH16_LEN || (ndp & 3u) != 0 || ndp + 8u > block) {
++			return SBUSB_NTB_E_NDP;
++		}
++		ndp_len = sbusb_get16(b + ndp + 4);
++		if (sbusb_get32(b + ndp) != SBUSB_NDP16_SIG || ndp_len < 16u || (ndp_len & 3u) != 0 ||
++		    ndp + ndp_len > block) {
++			return SBUSB_NTB_E_NDP;
++		}
++		entries = (ndp_len - 8u) / 4u;
++		for (uint32_t i = 0; i < entries; ++i) {
++			uint32_t at = sbusb_get16(b + ndp + 8u + 4u * i);
++			uint32_t dl = sbusb_get16(b + ndp + 10u + 4u * i);
++
++			if (at == 0 || dl == 0) {
++				break;                  /* the terminator */
++			}
++			if (at < SBUSB_NTH16_LEN || dl < SBUSB_DG_MIN || dl > SBUSB_DG_MAX || at + dl > block) {
++				return SBUSB_NTB_E_DG;
++			}
++			if (fn != 0) {
++				fn(ctx, b + at, dl);
++			}
++			++count;
++		}
++		ndp = sbusb_get16(b + ndp + 6);
++	}
++	return count;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ncm.h b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ncm.h
+new file mode 100644
+index 00000000..046279b6
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_ncm.h
+@@ -0,0 +1,61 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB: CDC-NCM 1.0 framing and class data. 16-bit NTBs only (NTH16 + NDP16, no CRC).
++ * NCM 1.0: 3.2 (NTB layout), 3.3 (NDP16), 6.2.1 (NTB parameters), 6.3 (notifications).
++ */
++#ifndef SBUSB_NCM_H
++#define SBUSB_NCM_H
++#include <stdint.h>
++
++#define SBUSB_NTB_MAX           16384u          /* dwNtbInMaxSize and dwNtbOutMaxSize */
++#define SBUSB_NTB_MIN           2048u           /* the smallest dwNtbInMaxSize a host may set (NCM 1.0 6.2.7) */
++#define SBUSB_NTB_DIVISOR       4u
++#define SBUSB_NTB_MAXDG         40u             /* datagrams per NTB we build */
++#define SBUSB_NTH16_LEN         12u
++#define SBUSB_NDP16_LEN(n)      (8u + 4u * ((n) + 1u))
++#define SBUSB_NTB_DATA          (SBUSB_NTH16_LEN + SBUSB_NDP16_LEN(SBUSB_NTB_MAXDG))    /* first datagram: 184 */
++#define SBUSB_NTH16_SIG         0x484d434eu     /* "NCMH" */
++#define SBUSB_NDP16_SIG         0x304d434eu     /* "NCM0" */
++#define SBUSB_DG_MIN            14u             /* an Ethernet header */
++#define SBUSB_DG_MAX            1514u
++
++/* class requests (bRequest) */
++#define SBUSB_REQ_SET_ETH_PACKET_FILTER 0x43u
++#define SBUSB_REQ_GET_NTB_PARAMETERS    0x80u
++#define SBUSB_REQ_GET_NTB_FORMAT        0x83u
++#define SBUSB_REQ_SET_NTB_FORMAT        0x84u
++#define SBUSB_REQ_GET_NTB_INPUT_SIZE    0x85u
++#define SBUSB_REQ_SET_NTB_INPUT_SIZE    0x86u
++
++/* the 28-byte answer to GetNtbParameters */
++unsigned sbusb_ncm_params(uint8_t *out);
++/* notifications for the interrupt endpoint: 8 and 16 bytes */
++unsigned sbusb_ncm_notify_connection(uint8_t *out, int connected);
++unsigned sbusb_ncm_notify_speed(uint8_t *out, uint32_t bits_per_second);
++
++/* ---- building an NTB (to the host) ---- */
++struct sbusb_ntb_w {
++	uint8_t *buf;
++	uint32_t cap;           /* the host's dwNtbInMaxSize, kept within SBUSB_NTB_MIN..SBUSB_NTB_MAX; buf holds SBUSB_NTB_MAX */
++	uint32_t len;           /* bytes used so far */
++	uint16_t ndg;
++	uint16_t seq;
++};
++void sbusb_ntb_begin(struct sbusb_ntb_w *w, uint8_t *buf, uint32_t cap, uint16_t seq);
++/* Room for one datagram of len bytes: where to copy it, or NULL when this NTB cannot take it. */
++uint8_t *sbusb_ntb_add(struct sbusb_ntb_w *w, uint32_t len);
++/* Headers written; the transfer length. Below cap it is never a multiple of mps (one zero byte is added),
++ * so the transfer ends with a short packet and no zero-length packet is needed. */
++uint32_t sbusb_ntb_end(struct sbusb_ntb_w *w, unsigned mps);
++
++/* ---- taking an NTB apart (from the host) ---- */
++#define SBUSB_NTB_E_SHORT       (-1)    /* shorter than a header */
++#define SBUSB_NTB_E_NTH         (-2)    /* bad NTH16 signature, header length or block length */
++#define SBUSB_NTB_E_NDP         (-3)    /* NDP16 outside the block, misaligned, bad signature or length */
++#define SBUSB_NTB_E_DG          (-4)    /* a datagram outside the block or of an impossible size */
++#define SBUSB_NTB_E_LOOP        (-5)    /* too many NDPs */
++typedef void (*sbusb_dg_fn)(void *ctx, const uint8_t *frame, uint32_t len);
++/* Calls fn for every datagram of the NTB in b[0..len). The count, or a negative error with nothing delivered
++ * after the error (datagrams before it were delivered). Never reads outside b[0..len). */
++int sbusb_ntb_parse(const uint8_t *b, uint32_t len, sbusb_dg_fn fn, void *ctx);
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_phy.c b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_phy.c
+new file mode 100644
+index 00000000..f26d7f36
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_phy.c
+@@ -0,0 +1,109 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB PHY bring-up (sbusb_phy.h).
++ *
++ * The sequence is Samsung's CAL enable for USBCON version 3.0.0, as two files that run on this phone
++ * describe it: an earlier port's glue (build/refport27/refport-kernel/drivers/usb/exynos_usb.c, APSL-2.0, its steps
++ * a to l) and our loader (shim/starlte/usb_phy.c), which adds the three clock gates, the USB3/DP isolation
++ * bit, the parked ReWA block and the stock device tuning, and is the variant that enumerates on the Mac.
++ * This file follows the loader's superset as a table of register facts. NOTES.md section 2.
++ */
++#include "sbusb_phy.h"
++#include "sbusb_regs.h"
++
++struct step {
++	uint8_t blk;
++	uint16_t off;
++	uint32_t clear, set;
++	uint16_t wait_before_us, wait_after_us;         /* around the write */
++};
++
++static const struct step steps[] = {
++	/* clocks and power: manual gate control with the clock on; PHYs out of isolation */
++	{ SBUSB_BLK_GATE_TOP, 0, 0, GATE_MANUAL_CGVAL, 0, 0 },
++	{ SBUSB_BLK_GATE_REF, 0, 0, GATE_MANUAL_CGVAL, 0, 0 },
++	{ SBUSB_BLK_GATE_DPPHY, 0, 0, GATE_MANUAL_CGVAL, 0, 0 },
++	{ SBUSB_BLK_PMU_USB2, 0, 0, PMU_PHY_ENABLE, 0, 0 },
++	{ SBUSB_BLK_PMU_USB3DP, 0, 0, PMU_PHY_ENABLE, 0, 10 },
++	/* the Q-channel held active: the four DIS_QACT bits with FORCE_QACT low, then FORCE_QACT high */
++	{ SBUSB_BLK_PHY, UC_LINK_CTRL, UC_LC_FORCE_QACT,
++	  UC_LC_DIS_QACT_ID0 | UC_LC_DIS_QACT_VBUS_VALID | UC_LC_DIS_QACT_BVALID | UC_LC_DIS_QACT_LINKGATE, 500, 500 },
++	{ SBUSB_BLK_PHY, UC_LINK_CTRL, 0, UC_LC_FORCE_QACT, 500, 0 },
++	/* link reset pulse */
++	{ SBUSB_BLK_PHY, UC_CLKRST, 0, UC_CR_LINK_SW_RST, 0, 10 },
++	{ SBUSB_BLK_PHY, UC_CLKRST, UC_CR_LINK_SW_RST, 0, 0, 0 },
++	/* PHY in reset, powered, UTMI overrides off, common block kept on in suspend */
++	{ SBUSB_BLK_PHY, UC_CLKRST, 0, UC_CR_PHY_SW_RST | UC_CR_PHY_RST_SEL, 0, 0 },
++	{ SBUSB_BLK_PHY, UC_HSP_TEST, UC_HSP_TEST_SIDDQ, 0, 0, 0 },
++	{ SBUSB_BLK_PHY, UC_UTMI, UC_UTMI_FORCE_SUSPEND | UC_UTMI_FORCE_SLEEP | UC_UTMI_DP_PULLDOWN | UC_UTMI_DM_PULLDOWN,
++	  0, 0, 0 },
++	{ SBUSB_BLK_PHY, UC_HSP, 0, UC_HSP_EN_UTMISUSPEND | UC_HSP_COMMONONN, 0, 100 },
++	/* PHY out of reset */
++	{ SBUSB_BLK_PHY, UC_CLKRST, UC_CR_PHY_SW_RST | UC_CR_PORT_RST, UC_CR_PHY_RST_SEL, 0, 0 },
++	/* this board has no VBUS pad on the PHY: VBUS forced valid, the bus filter bypassed */
++	{ SBUSB_BLK_PHY, UC_LINK_CTRL, 0, UC_LC_BUS_FILTER_BYPASS, 0, 0 },
++	{ SBUSB_BLK_PHY, UC_UTMI, 0, UC_UTMI_FORCE_BVALID | UC_UTMI_FORCE_VBUSVALID, 0, 0 },
++	{ SBUSB_BLK_PHY, UC_HSP, 0, UC_HSP_VBUSVLDEXTSEL | UC_HSP_VBUSVLDEXT, 0, 0 },
++	{ SBUSB_BLK_PHY, UC_LINK_PORT, 0, UC_LP_HUB_PORT_SEL_OCD_U3 | UC_LP_HUB_PORT_SEL_OCD_U2, 0, 0 },
++	/* remote wake-up assist parked */
++	{ SBUSB_BLK_PHY, UC_REWA_ENABLE, 1u, 0, 0, 0 },
++	{ SBUSB_BLK_PHY, UC_HSREWA_CTRL, 1u << 24, 1u << 28, 0, 0 },
++	{ SBUSB_BLK_PHY, UC_HSREWA_HSTK, 0xffffffffu, 0x1u, 0, 0 },
++	{ SBUSB_BLK_PHY, UC_HSREWA_REFTO, 0xffffffffu, 0xff00u, 0, 0 },
++	{ SBUSB_BLK_PHY, UC_HSREWA_INT1_MASK, 0, (1u << 18) | (1u << 17) | (1u << 16) | 7u, 0, 0 },
++	/* the SuperSpeed side: PIPE3 forced idle, its PMA in low power */
++	{ SBUSB_BLK_PHY, UC_LINK_CTRL, UC_LC_PIPE3_FORCE_PHY_STATUS, UC_LC_PIPE3_FORCE_EN | UC_LC_PIPE3_FORCE_RX_ELEC_IDLE,
++	  0, 0 },
++	{ SBUSB_BLK_PHY, UC_COMBO_PMA, 0, UC_PMA_LOW_PWRN, 0, 0 },
++	/* high-speed transmitter and receiver tuning, the stock device-mode values */
++	{ SBUSB_BLK_PHY, UC_HSP_TUNE, UC_TUNE_MASK, UC_TUNE_VALUE, 0, 100 },
++};
++
++unsigned
++sbusb_phy_step_count(void)
++{
++	return (unsigned)(sizeof(steps) / sizeof(steps[0]));
++}
++
++unsigned
++sbusb_phy_line(const struct sbusb_io *io)
++{
++	return UC_HSP_TEST_LINESTATE(io->rd(io->ctx, SBUSB_BLK_PHY, UC_HSP_TEST));
++}
++
++int
++sbusb_phy_start(const struct sbusb_io *io, struct sbusb_phy_report *rep)
++{
++	const uint32_t forced = UC_UTMI_FORCE_BVALID | UC_UTMI_FORCE_VBUSVALID;
++
++	rep->missing = 0;
++	rep->utmi = rep->hsp_test = 0;
++	rep->line = 0;
++	if (!io->has(io->ctx, SBUSB_BLK_PHY)) {
++		rep->missing = 1u << SBUSB_BLK_PHY;
++		return -2;
++	}
++	for (unsigned i = 0; i < sbusb_phy_step_count(); ++i) {
++		const struct step *s = &steps[i];
++		uint32_t v;
++
++		if (!io->has(io->ctx, s->blk)) {
++			rep->missing |= 1u << s->blk;
++			continue;
++		}
++		v = (io->rd(io->ctx, s->blk, s->off) & ~s->clear) | s->set;
++		if (s->wait_before_us != 0) {
++			io->delay_us(io->ctx, s->wait_before_us);
++		}
++		io->wr(io->ctx, s->blk, s->off, v);
++		if (s->wait_after_us != 0) {
++			io->delay_us(io->ctx, s->wait_after_us);
++		}
++	}
++	rep->utmi = io->rd(io->ctx, SBUSB_BLK_PHY, UC_UTMI);
++	rep->hsp_test = io->rd(io->ctx, SBUSB_BLK_PHY, UC_HSP_TEST);
++	rep->line = UC_HSP_TEST_LINESTATE(rep->hsp_test);
++	if ((rep->hsp_test & UC_HSP_TEST_SIDDQ) != 0 || (rep->utmi & forced) != forced) {
++		return -1;
++	}
++	return 0;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_phy.h b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_phy.h
+new file mode 100644
+index 00000000..c988d0c8
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_phy.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSB: the Exynos 9810 USB 2.0 PHY glue (USBCON) brought up for a high-speed device link, with the
++ * SuperSpeed side held idle. Clock gates and PMU isolation only where the nub carries them (sbusb_io.h).
++ */
++#ifndef SBUSB_PHY_H
++#define SBUSB_PHY_H
++#include "sbusb_io.h"
++
++struct sbusb_phy_report {
++	uint32_t missing;       /* bit per SBUSB_BLK_* that was not mapped and therefore skipped */
++	uint32_t utmi, hsp_test;        /* as read back at the end */
++	unsigned line;          /* D+/D- as the PHY sees them: 0 SE0, 1 J, 2 K, 3 SE1 */
++};
++
++/* 0, -1 when USBCON did not keep the settings, -2 when the usb-phy block is not mapped at all. */
++int sbusb_phy_start(const struct sbusb_io *io, struct sbusb_phy_report *rep);
++unsigned sbusb_phy_line(const struct sbusb_io *io);
++/* how many register steps the sequence has (the host test checks the mock saw each once) */
++unsigned sbusb_phy_step_count(void);
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_regs.h b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_regs.h
+new file mode 100644
+index 00000000..26c90f6a
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/hw/sbusb_regs.h
+@@ -0,0 +1,178 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * Register facts for the Exynos 9810 USB DRD (Synopsys DWC3) and its USB 2.0 PHY glue ("USBCON").
++ * Sources per group in NOTES.md. Offsets and bit positions are hardware facts; no code is taken from the
++ * loader (shim/starlte/usb_*.c, marked GPL-2.0-only) or from Linux.
++ */
++#ifndef SBUSB_REGS_H
++#define SBUSB_REGS_H
++
++/* ---- DWC3 global (block SBUSB_BLK_DWC3) ---- */
++#define D3_GSBUSCFG0            0xc100u
++#define  D3_GSBUSCFG0_INCRBRST          (1u << 0)
++#define  D3_GSBUSCFG0_INCR16            (1u << 3)
++#define  D3_GSBUSCFG0_REQINFO_2         ((2u << 16) | (2u << 20) | (2u << 24) | (2u << 28))
++#define D3_GSBUSCFG1            0xc104u
++#define  D3_GSBUSCFG1_BREQLIMIT_MASK    (0xfu << 8)
++#define  D3_GSBUSCFG1_BREQLIMIT_3       (3u << 8)
++#define D3_GCTL                 0xc110u
++#define  D3_GCTL_DSBLCLKGTNG            (1u << 0)
++#define  D3_GCTL_SCALEDOWN_MASK         (3u << 4)
++#define  D3_GCTL_SOFITPSYNC             (1u << 10)
++#define  D3_GCTL_PRTCAP_MASK            (3u << 12)
++#define  D3_GCTL_PRTCAP_DEVICE          (2u << 12)
++#define D3_GSTS                 0xc118u
++#define D3_GSNPSID              0xc120u
++#define  D3_ID_USB3                     0x5533u         /* GSNPSID >> 16 */
++#define  D3_ID_USB31                    0x3331u
++#define D3_GUCTL                0xc12cu
++#define  D3_GUCTL_HSTINAUTORETRY        (1u << 14)
++#define  D3_GUCTL_REFCLKPER_MASK        (0x3ffu << 22)
++#define  D3_GUCTL_REFCLKPER_0x14        (0x14u << 22)
++#define D3_GUSB2PHYCFG          0xc200u
++#define  D3_U2_SUSPHY                   (1u << 6)
++#define  D3_U2_ENBLSLPM                 (1u << 8)
++#define  D3_U2_FREECLK_EXISTS           (1u << 30)
++#define  D3_U2_PHYSOFTRST               (1u << 31)
++#define D3_GUSB3PIPECTL         0xc2c0u
++#define  D3_U3_SUSPHY                   (1u << 17)
++#define D3_GEVNTADRLO           0xc400u
++#define D3_GEVNTADRHI           0xc404u
++#define D3_GEVNTSIZ             0xc408u
++#define  D3_GEVNTSIZ_INTMASK            (1u << 31)
++#define D3_GEVNTCOUNT           0xc40cu
++#define  D3_GEVNTCOUNT_MASK             0xfffcu
++#define D3_GFLADJ               0xc630u
++#define  D3_GFLADJ_30MHZ_MASK           0x3fu
++#define  D3_GFLADJ_30MHZ_SDBND_SEL      (1u << 7)
++#define D3_DCFG                 0xc700u
++#define  D3_DCFG_SPEED_MASK             7u              /* 0 = high speed */
++#define  D3_DCFG_ADDR_MASK              (0x7fu << 3)
++#define  D3_DCFG_ADDR(a)                ((uint32_t)(a) << 3)
++#define  D3_DCFG_LPM_CAP                (1u << 22)
++#define D3_DCTL                 0xc704u
++#define  D3_DCTL_ULSTCHNGREQ_MASK       (0xfu << 5)     /* write 0: never request a link state */
++#define  D3_DCTL_CSFTRST                (1u << 30)
++#define  D3_DCTL_RUN_STOP               (1u << 31)
++#define D3_DEVTEN               0xc708u
++#define  D3_DEVTEN_DISCONN              (1u << 0)
++#define  D3_DEVTEN_USBRST               (1u << 1)
++#define  D3_DEVTEN_CONNDONE             (1u << 2)
++#define  D3_DEVTEN_ULSTCNG              (1u << 3)
++#define D3_DSTS                 0xc70cu
++#define  D3_DSTS_SPEED_MASK             7u              /* 0 high, 1 or 3 full */
++#define  D3_DSTS_DEVCTRLHLT             (1u << 22)
++#define D3_DALEPENA             0xc720u
++/* per physical endpoint n (2 x number + 1 for IN): parameters then command */
++#define D3_DEPCMDPAR2(n)        (0xc800u + 0x10u * (n))
++#define D3_DEPCMDPAR1(n)        (0xc804u + 0x10u * (n))
++#define D3_DEPCMDPAR0(n)        (0xc808u + 0x10u * (n))
++#define D3_DEPCMD(n)            (0xc80cu + 0x10u * (n))
++#define  D3_CMD_SETEPCONFIG             1u
++#define  D3_CMD_SETXFERRES              2u
++#define  D3_CMD_SETSTALL                4u
++#define  D3_CMD_CLEARSTALL              5u
++#define  D3_CMD_STARTXFER               6u
++#define  D3_CMD_UPDATEXFER              7u
++#define  D3_CMD_ENDXFER                 8u
++#define  D3_CMD_STARTCFG                9u
++#define  D3_CMD_IOC                     (1u << 8)
++#define  D3_CMD_ACT                     (1u << 10)
++#define  D3_CMD_FORCERM                 (1u << 11)
++#define  D3_CMD_STATUS(v)               (((v) >> 12) & 0xfu)
++#define  D3_CMD_PARAM(x)                ((uint32_t)(x) << 16)   /* resource index / STARTCFG base */
++#define  D3_CMD_RESIDX(v)               (((v) >> 16) & 0x7fu)
++/* SETEPCONFIG parameter 0 / 1 */
++#define  D3_CFG0_TYPE(t)                ((uint32_t)(t) << 1)    /* 0 control, 2 bulk, 3 interrupt */
++#define  D3_CFG0_MPS(m)                 ((uint32_t)(m) << 3)
++#define  D3_CFG0_FIFO(f)                ((uint32_t)(f) << 17)
++#define  D3_CFG0_ACTION_INIT            (0u << 30)
++#define  D3_CFG0_ACTION_MODIFY          (2u << 30)
++#define  D3_CFG1_XFERCOMPLETE           (1u << 8)
++#define  D3_CFG1_XFERINPROGRESS         (1u << 9)
++#define  D3_CFG1_XFERNOTREADY           (1u << 10)
++#define  D3_CFG1_INTERVAL_M1(i)         ((uint32_t)(i) << 16)
++#define  D3_CFG1_EPNUM(phys)            ((uint32_t)(phys) << 25)
++
++/* TRB: four little-endian words: buffer low, buffer high, size | status << 28, control */
++#define D3_TRB_BYTES            16u
++#define  D3_TRB_SIZE_MASK               0x00ffffffu
++#define  D3_TRB_STATUS(sz)              ((sz) >> 28)
++#define  D3_TRBSTS_SETUP_PENDING        2u
++#define  D3_TRB_HWO                     (1u << 0)
++#define  D3_TRB_LST                     (1u << 1)
++#define  D3_TRB_CHN                     (1u << 2)
++#define  D3_TRB_CSP                     (1u << 3)
++#define  D3_TRB_TYPE_NORMAL             (1u << 4)
++#define  D3_TRB_TYPE_SETUP              (2u << 4)
++#define  D3_TRB_TYPE_STATUS2            (3u << 4)
++#define  D3_TRB_TYPE_STATUS3            (4u << 4)
++#define  D3_TRB_TYPE_DATA               (5u << 4)
++#define  D3_TRB_TYPE_LINK               (8u << 4)
++#define  D3_TRB_ISP                     (1u << 10)
++#define  D3_TRB_IOC                     (1u << 11)
++
++/* event word */
++#define D3_EV_IS_DEV(e)         ((e) & 1u)
++#define D3_EV_DEV_KIND(e)       (((e) >> 1) & 0x7fu)    /* 0 = device event */
++#define D3_EV_DEV_TYPE(e)       (((e) >> 8) & 0xfu)     /* 0 disconnect, 1 reset, 2 connect done, 3 link state */
++#define D3_EV_DEV_INFO(e)       (((e) >> 16) & 0x1ffu)  /* link state in bits 3:0 for type 3 */
++#define D3_EV_EP_PHYS(e)        (((e) >> 1) & 0x1fu)
++#define D3_EV_EP_TYPE(e)        (((e) >> 6) & 0xfu)     /* 1 complete, 2 in progress, 3 not ready */
++#define D3_EV_EP_STATUS(e)      (((e) >> 12) & 0xfu)    /* not ready: bits 1:0 = 1 data, 2 status */
++#define  D3_EVT_XFERCOMPLETE            1u
++#define  D3_EVT_XFERINPROGRESS          2u
++#define  D3_EVT_XFERNOTREADY            3u
++#define  D3_LINK_U0                     0u
++#define  D3_LINK_U3                     3u              /* USB 2.0 suspend */
++
++/* ---- USBCON, the PHY glue (block SBUSB_BLK_PHY) ---- */
++#define UC_LINK_CTRL            0x04u
++#define  UC_LC_FORCE_QACT               (1u << 8)
++#define  UC_LC_DIS_QACT_BVALID          (1u << 9)
++#define  UC_LC_DIS_QACT_VBUS_VALID      (1u << 10)
++#define  UC_LC_DIS_QACT_ID0             (1u << 11)
++#define  UC_LC_DIS_QACT_LINKGATE        (1u << 12)
++#define  UC_LC_BUS_FILTER_BYPASS        (0xfu << 4)
++#define  UC_LC_PIPE3_FORCE_EN           (1u << 16)
++#define  UC_LC_PIPE3_FORCE_PHY_STATUS   (1u << 17)
++#define  UC_LC_PIPE3_FORCE_RX_ELEC_IDLE (1u << 18)
++#define UC_LINK_PORT            0x08u
++#define  UC_LP_HUB_PORT_SEL_OCD_U2      (1u << 2)
++#define  UC_LP_HUB_PORT_SEL_OCD_U3      (1u << 3)
++#define UC_CLKRST               0x20u
++#define  UC_CR_LINK_SW_RST              (1u << 0)
++#define  UC_CR_PORT_RST                 (1u << 1)
++#define  UC_CR_PHY_RST_SEL              (1u << 2)
++#define  UC_CR_PHY_SW_RST               (1u << 3)
++#define UC_COMBO_PMA            0x48u
++#define  UC_PMA_LOW_PWRN                (1u << 4)
++#define UC_UTMI                 0x50u
++#define  UC_UTMI_FORCE_SLEEP            (1u << 0)
++#define  UC_UTMI_FORCE_SUSPEND          (1u << 1)
++#define  UC_UTMI_DM_PULLDOWN            (1u << 2)
++#define  UC_UTMI_DP_PULLDOWN            (1u << 3)
++#define  UC_UTMI_FORCE_BVALID           (1u << 4)
++#define  UC_UTMI_FORCE_VBUSVALID        (1u << 5)
++#define UC_HSP                  0x54u
++#define  UC_HSP_COMMONONN               (1u << 8)
++#define  UC_HSP_EN_UTMISUSPEND          (1u << 9)
++#define  UC_HSP_VBUSVLDEXT              (1u << 12)
++#define  UC_HSP_VBUSVLDEXTSEL           (1u << 13)
++#define UC_HSP_TUNE             0x58u
++/* stock star2lte device-mode high-speed tuning: tx_vref 0xd, tx_rise 1, tx_res 3, tx_pre_emp 3, rx_sqrx 4, compdis 3 */
++#define  UC_TUNE_MASK   ((0xfu << 28) | (0x3u << 24) | (0x3u << 21) | (0x3u << 18) | (0x7u << 8) | 0x7u)
++#define  UC_TUNE_VALUE  ((0xdu << 28) | (0x1u << 24) | (0x3u << 21) | (0x3u << 18) | (0x4u << 8) | 0x3u)
++#define UC_HSP_TEST             0x5cu
++#define  UC_HSP_TEST_LINESTATE(v)       (((v) >> 20) & 3u)      /* 0 SE0, 1 J, 2 K, 3 SE1 */
++#define  UC_HSP_TEST_SIDDQ              (1u << 24)
++#define UC_REWA_ENABLE          0x100u
++#define UC_HSREWA_CTRL          0x108u
++#define UC_HSREWA_REFTO         0x10cu
++#define UC_HSREWA_HSTK          0x110u
++#define UC_HSREWA_INT1_MASK     0x11cu
++
++/* single-register blocks */
++#define PMU_PHY_ENABLE          (1u << 0)
++#define GATE_MANUAL_CGVAL       ((1u << 20) | (1u << 21))
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbusb_desc.c b/iokit/Kernel/arm/starbite/sbusb_desc.c
+new file mode 100644
+index 00000000..07afd460
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbusb_desc.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUSB/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUSB/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUSB/hw/sbusb_desc.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbusb_dwc3.c b/iokit/Kernel/arm/starbite/sbusb_dwc3.c
+new file mode 100644
+index 00000000..b5c5f2c7
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbusb_dwc3.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUSB/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUSB/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUSB/hw/sbusb_dwc3.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbusb_echo.c b/iokit/Kernel/arm/starbite/sbusb_echo.c
+new file mode 100644
+index 00000000..4fe09a3f
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbusb_echo.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUSB/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUSB/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUSB/hw/sbusb_echo.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbusb_ep0.c b/iokit/Kernel/arm/starbite/sbusb_ep0.c
+new file mode 100644
+index 00000000..05f83b5a
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbusb_ep0.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUSB/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUSB/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUSB/hw/sbusb_ep0.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbusb_func.c b/iokit/Kernel/arm/starbite/sbusb_func.c
+new file mode 100644
+index 00000000..04b1c985
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbusb_func.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUSB/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUSB/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUSB/hw/sbusb_func.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbusb_ncm.c b/iokit/Kernel/arm/starbite/sbusb_ncm.c
+new file mode 100644
+index 00000000..c48e1c10
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbusb_ncm.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUSB/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUSB/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUSB/hw/sbusb_ncm.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbusb_phy.c b/iokit/Kernel/arm/starbite/sbusb_phy.c
+new file mode 100644
+index 00000000..0da32380
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbusb_phy.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUSB/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUSB/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUSB/hw/sbusb_phy.c"
++#endif
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 8a3d2ff8..f1afaf0a 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -144,6 +144,12 @@ const char * gIOKernelConfigTables =
+     "     'IONameMatch'     = 'hsi2c-pmic';"
+     "     'IOMatchCategory' = StarbiteBattery;"
+     "   },"
++    /* 0427, M11a: the DWC3 device controller; off unless sbusb=1 (StarbiteUSB/INTEGRATION.md) */
++    "   {"
++    "     'IOClass'         = StarbiteUSB;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'starbite,dwc3';"
++    "   },"
+ #endif
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+     "   {"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index cb2a57d2..7d4587e1 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -37,3 +37,13 @@ iokit/Kernel/arm/starbite/sbwdt.c                                optional iokitc
+ iokit/Kernel/arm/starbite/StarbiteBattery.cpp                    optional iokitcpp
+ iokit/Kernel/arm/starbite/exynos_hsi2c.c                         optional iokitcpp
+ iokit/Kernel/arm/starbite/max77705.c                             optional iokitcpp
++# M11a: StarbiteUSB, the DWC3 device controller + CDC-NCM function and its built-in ping responder (sbusb=1).
++# StarbiteUSBNCM (IONetworkingFamily) is not built in.
++iokit/Kernel/arm/starbite/StarbiteUSB.cpp                        optional iokitcpp
++iokit/Kernel/arm/starbite/sbusb_desc.c                           optional iokitcpp
++iokit/Kernel/arm/starbite/sbusb_dwc3.c                           optional iokitcpp
++iokit/Kernel/arm/starbite/sbusb_echo.c                           optional iokitcpp
++iokit/Kernel/arm/starbite/sbusb_ep0.c                            optional iokitcpp
++iokit/Kernel/arm/starbite/sbusb_func.c                           optional iokitcpp
++iokit/Kernel/arm/starbite/sbusb_ncm.c                            optional iokitcpp
++iokit/Kernel/arm/starbite/sbusb_phy.c                            optional iokitcpp
+-- 
+2.53.0
+

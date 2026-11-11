@@ -1,0 +1,4258 @@
+From c95919886b9eccba1ad375a15985e5aae2735384 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 11 Nov 2026 19:21:45 +0200
+Subject: [PATCH] patch: 0426-starbite-m5-power-drivers.patch - StarbiteACPM,
+ StarbiteRTC, StarbiteWatchdog, StarbiteBattery built in for STARLTE (copies
+ of starbite/apple-drivers at 4a7ec17 under iokit/Kernel/arm/starbite,
+ STARLTE-only build units), matched on the board ADT's acpm-ipc / wdt-cl1 /
+ hsi2c-pmic nodes; SweetWatchdog.cpp off on STARLTE (StarbiteWatchdog defines
+ IOWatchdog), the IOResources IOWatchdog and SweetBattery wait for
+ StarbiteLegacyBoard, which the platform expert publishes only without board
+ nodes, so today's ADTs boot as before; starlte_touch.c's ACPM client steps
+ aside for StarbiteACPM when the ADT has acpm-ipc (PMIC/DVFS calls routed
+ through it, hazard H1); the platform expert takes the time of day from
+ StarbiteRTC; sbstop test boots skip the root search (sbstoproot=1 to search);
+ sbstop=m5 waits up to 50 s for the four drivers, prints a summary and stops
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/herolte_ufs.c                         |  23 +
+ bsd/dev/starlte_touch.c                       |  40 ++
+ iokit/Kernel/arm/SweetPlatformExpert.cpp      | 125 +++++
+ iokit/Kernel/arm/SweetWatchdog.cpp            |   5 +-
+ iokit/Kernel/arm/starbite/StarbiteACPM.cpp    |  11 +
+ .../starbite/StarbiteACPM/StarbiteACPM.cpp    | 402 ++++++++++++++
+ .../arm/starbite/StarbiteACPM/StarbiteACPM.h  |  79 +++
+ .../arm/starbite/StarbiteACPM/hw/acpm_ipc.c   | 319 +++++++++++
+ .../arm/starbite/StarbiteACPM/hw/acpm_ipc.h   | 153 ++++++
+ .../starbite/StarbiteACPM/hw/s2mps18_policy.c | 140 +++++
+ .../starbite/StarbiteACPM/hw/s2mps18_policy.h |  80 +++
+ iokit/Kernel/arm/starbite/StarbiteBattery.cpp |  11 +
+ .../StarbiteBattery/StarbiteBattery.cpp       | 495 ++++++++++++++++++
+ .../StarbiteBattery/StarbiteBattery.h         |  78 +++
+ .../StarbiteBattery/hw/exynos_hsi2c.c         | 152 ++++++
+ .../StarbiteBattery/hw/exynos_hsi2c.h         |  84 +++
+ .../starbite/StarbiteBattery/hw/max77705.c    | 209 ++++++++
+ .../starbite/StarbiteBattery/hw/max77705.h    | 139 +++++
+ iokit/Kernel/arm/starbite/StarbiteRTC.cpp     |  11 +
+ .../arm/starbite/StarbiteRTC/StarbiteRTC.cpp  | 187 +++++++
+ .../arm/starbite/StarbiteRTC/StarbiteRTC.h    |  47 ++
+ .../arm/starbite/StarbiteRTC/hw/s2mps18_rtc.c | 276 ++++++++++
+ .../arm/starbite/StarbiteRTC/hw/s2mps18_rtc.h |  97 ++++
+ .../Kernel/arm/starbite/StarbiteWatchdog.cpp  |  11 +
+ .../StarbiteWatchdog/StarbiteWatchdog.cpp     | 258 +++++++++
+ .../StarbiteWatchdog/StarbiteWatchdog.h       |  73 +++
+ .../arm/starbite/StarbiteWatchdog/hw/sbwdt.c  | 127 +++++
+ .../arm/starbite/StarbiteWatchdog/hw/sbwdt.h  |  85 +++
+ iokit/Kernel/arm/starbite/acpm_ipc.c          |  11 +
+ iokit/Kernel/arm/starbite/exynos_hsi2c.c      |  11 +
+ iokit/Kernel/arm/starbite/max77705.c          |  11 +
+ iokit/Kernel/arm/starbite/s2mps18_policy.c    |  11 +
+ iokit/Kernel/arm/starbite/s2mps18_rtc.c       |  11 +
+ iokit/Kernel/arm/starbite/sbwdt.c             |  11 +
+ iokit/KernelConfigTables.cpp                  |  39 ++
+ iokit/bsddev/IOKitBSDInit.cpp                 |   9 +
+ iokit/conf/files.arm64                        |  13 +
+ 37 files changed, 3842 insertions(+), 2 deletions(-)
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteACPM.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteACPM/StarbiteACPM.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteACPM/StarbiteACPM.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteACPM/hw/acpm_ipc.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteACPM/hw/acpm_ipc.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteACPM/hw/s2mps18_policy.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteACPM/hw/s2mps18_policy.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteBattery.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteBattery/StarbiteBattery.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteBattery/StarbiteBattery.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteBattery/hw/exynos_hsi2c.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteBattery/hw/exynos_hsi2c.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteBattery/hw/max77705.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteBattery/hw/max77705.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteRTC.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteRTC/StarbiteRTC.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteRTC/StarbiteRTC.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteRTC/hw/s2mps18_rtc.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteRTC/hw/s2mps18_rtc.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteWatchdog.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteWatchdog/StarbiteWatchdog.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteWatchdog/StarbiteWatchdog.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteWatchdog/hw/sbwdt.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteWatchdog/hw/sbwdt.h
+ create mode 100644 iokit/Kernel/arm/starbite/acpm_ipc.c
+ create mode 100644 iokit/Kernel/arm/starbite/exynos_hsi2c.c
+ create mode 100644 iokit/Kernel/arm/starbite/max77705.c
+ create mode 100644 iokit/Kernel/arm/starbite/s2mps18_policy.c
+ create mode 100644 iokit/Kernel/arm/starbite/s2mps18_rtc.c
+ create mode 100644 iokit/Kernel/arm/starbite/sbwdt.c
+
+diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
+index a808785f..cd61177b 100644
+--- a/bsd/dev/herolte_ufs.c
++++ b/bsd/dev/herolte_ufs.c
+@@ -1301,6 +1301,29 @@ starlte_sbstop_at(const char *stage)
+ 	return starlte_sbstop[0] != '\0' && strcmp(starlte_sbstop, stage) == 0;
+ }
+ 
++/*
++ * 0426: an sbstop test boot never looks for its root (IOFindBSDRoot asks this first): the stages are driver stages
++ * that IOKit matching reaches, and the root search on STARLTE starts this file's ACPM, touch, GPU and microSD
++ * users, which must not run beside the Starbite drivers under test (ACPM hazard H1) or mount anything. The
++ * bootstrap thread then waits for the stop or the loader's watchdog. sbstoproot=1 looks for the root anyway.
++ */
++int starlte_sbstop_no_root(void);
++int
++starlte_sbstop_no_root(void)
++{
++	uint32_t root = 0;
++	if (starlte_sbstop[0] == '\0') {
++		return 0;
++	}
++	(void)PE_parse_boot_argn("sbstoproot", &root, sizeof(root));
++	if (root) {
++		return 0;
++	}
++	printf("STARBITE: sbstop=%s: test boot, no root search (sbstoproot=1 to search); waiting for the stop\n",
++	    starlte_sbstop);
++	return 1;
++}
++
+ void
+ starlte_sbstop_now(const char *stage)
+ {
+diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
+index 49476736..f751d057 100644
+--- a/bsd/dev/starlte_touch.c
++++ b/bsd/dev/starlte_touch.c
+@@ -29,6 +29,7 @@
+ #include <kern/locks.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
+@@ -372,9 +373,39 @@ pmic_write(uint32_t type, uint32_t reg, uint8_t val)
+ bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
+ bool starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val);
+ 
++/*
++ * 0426: one owner per ACPM channel (StarbiteACPM/INTEGRATION.md hazard H1). With the board ADT's acpm-ipc node
++ * (and sbacpm not 0) StarbiteACPM owns the APM mailbox: this file's own client stays off (no touch rails, no CPU
++ * DVFS, no governor) and starlte_pmic_read / _write / starlte_acpm_dvfs go through StarbiteACPM's C entry points,
++ * under its lock, sequence numbers and write policy. They return false until StarbiteACPM has started.
++ */
++extern bool starbite_acpm_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
++extern bool starbite_acpm_pmic_write(uint32_t type, uint32_t reg, uint8_t val);
++extern bool starbite_acpm_dvfs(uint32_t domain, uint32_t khz);
++
++static bool
++acpm_owned_by_iokit(void)
++{
++	static int owner = -1;          /* -1 not decided, 0 this file, 1 StarbiteACPM */
++	if (owner < 0) {
++		DTEntry node;
++		uint32_t on = 1;
++		(void)PE_parse_boot_argn("sbacpm", &on, sizeof(on));
++		owner = on != 0 && SecureDTLookupEntry(NULL, "/arm-io/acpm-ipc", &node) == kSuccess;
++		if (owner) {
++			printf("STARLTE ACPM: the board ADT has acpm-ipc: StarbiteACPM owns the APM channel; this file's "
++			    "client is off (touch rails, CPU DVFS, governor), PMIC and DVFS calls go through StarbiteACPM\n");
++		}
++	}
++	return owner == 1;
++}
++
+ static bool
+ acpm_ready(void)
+ {
++	if (acpm_owned_by_iokit()) {
++		return false;
++	}
+ 	lck_mtx_lock(&acpm_lock);
+ 	bool ok = acpm_ch || acpm_init();
+ 	lck_mtx_unlock(&acpm_lock);
+@@ -384,12 +415,18 @@ acpm_ready(void)
+ bool
+ starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val)
+ {
++	if (acpm_owned_by_iokit()) {
++		return starbite_acpm_pmic_read(type, reg, val);
++	}
+ 	return acpm_ready() && pmic_read(type, reg, val);
+ }
+ 
+ bool
+ starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val)
+ {
++	if (acpm_owned_by_iokit()) {
++		return starbite_acpm_pmic_write(type, reg, val);
++	}
+ 	return acpm_ready() && pmic_write(type, reg, val);
+ }
+ 
+@@ -402,6 +439,9 @@ bool starlte_acpm_dvfs(uint32_t domain, uint32_t khz);
+ bool
+ starlte_acpm_dvfs(uint32_t domain, uint32_t khz)
+ {
++	if (acpm_owned_by_iokit()) {
++		return starbite_acpm_dvfs(domain, khz);
++	}
+ 	if (!acpm_ready() || acpm_chans == 0) {
+ 		return false;
+ 	}
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index 852d771c..875411da 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -15,6 +15,9 @@ int starlte_sbstop_at(const char *stage);
+ void starlte_crumb(uint64_t code, uint64_t value);
+ void starlte_sbstop_now(const char *stage);
+ }
++#include <kern/thread.h>
++#include <IOKit/IOKitKeys.h>
++#include "starbite/StarbiteRTC/StarbiteRTC.h"        /* 0426: the time of day from the S2MPS18 RTC */
+ #endif
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
+@@ -29,14 +32,39 @@ public:
+ 	const char *excludeList(void) APPLE_KEXT_OVERRIDE;
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+ 	void starbiteReport(IOService *provider);
++	long getGMTTimeOfDay(void) APPLE_KEXT_OVERRIDE;
++	void setGMTTimeOfDay(long secs) APPLE_KEXT_OVERRIDE;
+ #endif
+ };
+ 
+ OSDefineMetaClassAndStructors(SweetPlatformExpert, IODTPlatformExpert);
+ 
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++static unsigned starbiteCountChildren(const char *path, unsigned *withProp, const char *prop);
++static void starbiteM5Start(void);
++#endif
++
+ bool
+ SweetPlatformExpert::start(IOService *provider)
+ {
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	/*
++	 * 0426: the Starbite S9 drivers (KernelConfigTables) match arm-io nodes only the board ADT has. Without
++	 * them (today's ADTs) the old IOResources services IOWatchdog and SweetBattery stay as they were: they
++	 * wait for this resource. With them, StarbiteWatchdog and StarbiteBattery take those roles.
++	 */
++	unsigned boardNodes = 0;
++	(void)starbiteCountChildren("/arm-io", &boardNodes, "starbite,driver");
++	if (boardNodes == 0) {
++		publishResource("StarbiteLegacyBoard");
++	} else {
++		IOLog("StarbitePE: board ADT (%u arm-io nodes with drivers): Starbite drivers, no IOResources "
++		    "IOWatchdog / SweetBattery\n", boardNodes);
++	}
++	if (starlte_sbstop_at("m5")) {
++		starbiteM5Start();
++	}
++#endif
+ #if defined(A5XELTE)
+ 	IOLog("A5XELTE: starting device-tree platform expert\n");
+ #else
+@@ -120,6 +148,103 @@ SweetPlatformExpert::starbiteReport(IOService *provider)
+ 		starlte_sbstop_now("pe");
+ 	}
+ }
++
++/*
++ * 0426: XNU's calendar (PEGetUTCTimeOfDay) and settimeofday (PESetUTCTimeOfDay) through StarbiteRTC, as Apple's
++ * AppleARMPE does with its RTC (StarbiteRTC/INTEGRATION.md 3). 0 (as before) until StarbiteRTC has started;
++ * StarbiteRTC writes only with sbrtcwrite=1.
++ */
++long
++SweetPlatformExpert::getGMTTimeOfDay(void)
++{
++	StarbiteRTC *rtc = StarbiteRTC::shared();
++	return rtc ? rtc->getGMTTimeOfDay() : 0;
++}
++
++void
++SweetPlatformExpert::setGMTTimeOfDay(long secs)
++{
++	StarbiteRTC *rtc = StarbiteRTC::shared();
++	if (rtc) {
++		rtc->setGMTTimeOfDay(secs);
++	}
++}
++
++/*
++ * 0426, sbstop=m5 (docs/APPLE-S9-DRIVERS.md M5, one boot for four drivers): wait until StarbiteACPM, StarbiteRTC,
++ * StarbiteWatchdog and StarbiteBattery are registered (each has logged its own report by then), let StarbiteBattery
++ * take one timed sample (sbbatpoll=2 sbbattest=1 log it), print one summary line and stop into TWRP. Bounded: at
++ * most 50 s of waiting from the platform expert's start, then the summary says what is missing and the boot stops
++ * anyway, well before the loader's watchdog (never fed on sbstop boots, 0423).
++ */
++static uint64_t
++starbiteUptimeNs(void)
++{
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns;
++}
++
++static unsigned
++starbiteNumberProp(IOService *s, const char *key, bool *found)
++{
++	OSNumber *n = s ? OSDynamicCast(OSNumber, s->getProperty(key)) : NULL;
++	if (found) {
++		*found = n != NULL;
++	}
++	return n ? n->unsigned32BitValue() : 0;
++}
++
++static void
++starbiteM5Thread(__unused void *arg, __unused wait_result_t wr)
++{
++	static const char *const names[] = { "StarbiteACPM", "StarbiteRTC", "StarbiteWatchdog", "StarbiteBattery" };
++	IOService *svc[4] = { };
++	uint64_t t0 = starbiteUptimeNs(), deadline = t0 + 50ULL * NSEC_PER_SEC;
++	unsigned up = 0;
++
++	IOLog("StarbiteM5: waiting up to 50 s for StarbiteACPM, StarbiteRTC, StarbiteWatchdog, StarbiteBattery\n");
++	for (unsigned i = 0; i < 4; i++) {
++		uint64_t now = starbiteUptimeNs();
++		OSDictionary *m = IOService::serviceMatching(names[i]);
++		if (m != NULL) {
++			svc[i] = IOService::waitForMatchingService(m, now < deadline ? deadline - now : 1);
++			m->release();
++		}
++		up += svc[i] != NULL;
++		IOLog("StarbiteM5: %s %s at %llu ms\n", names[i], svc[i] ? "registered" : "MISSING",
++		    starbiteUptimeNs() / NSEC_PER_MSEC);
++	}
++	if (svc[3] != NULL) {
++		IOSleep(3000);          /* one timed battery sample (sbbatpoll=2) */
++	}
++	StarbiteRTC *rtc = StarbiteRTC::shared();
++	long secs = rtc ? rtc->getGMTTimeOfDay() : 0;
++	bool haveCap = false, haveMv = false;
++	unsigned cap = starbiteNumberProp(svc[3], "CurrentCapacity", &haveCap);
++	unsigned mv = starbiteNumberProp(svc[3], "Voltage", &haveMv);
++	int ma = (int)starbiteNumberProp(svc[3], "Amperage", NULL);
++	bool iortc = IOService::getResourceService()->getProperty("IORTC") != NULL;
++	IOLog("StarbiteM5: %u/4 up: ACPM %s, RTC %s (IORTC %s, clock %ld), Watchdog %s, Battery %s (%s%u %%, %s%u mV, "
++	    "%d mA): %s\n", up, svc[0] ? "up" : "MISSING", svc[1] ? "up" : "MISSING", iortc ? "published" : "not published",
++	    secs, svc[2] ? "up" : "MISSING", svc[3] ? "up" : "MISSING", haveCap ? "" : "no ", cap, haveMv ? "" : "no ", mv,
++	    ma, up == 4 ? "M5 drivers PASS" : "M5 drivers FAIL");
++	for (unsigned i = 0; i < 4; i++) {
++		OSSafeReleaseNULL(svc[i]);
++	}
++	starlte_sbstop_now("m5");
++}
++
++static void
++starbiteM5Start(void)
++{
++	thread_t th;
++	if (kernel_thread_start(starbiteM5Thread, NULL, &th) == KERN_SUCCESS) {
++		thread_deallocate(th);
++	} else {
++		IOLog("StarbiteM5: no thread: the loader's watchdog ends this boot\n");
++	}
++}
+ #endif
+ 
+ const char *
+diff --git a/iokit/Kernel/arm/SweetWatchdog.cpp b/iokit/Kernel/arm/SweetWatchdog.cpp
+index 8f53742a..b296b5b4 100644
+--- a/iokit/Kernel/arm/SweetWatchdog.cpp
++++ b/iokit/Kernel/arm/SweetWatchdog.cpp
+@@ -16,7 +16,8 @@
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+-#if defined(SWEET)
++/* STARLTE: StarbiteWatchdog (iokit/Kernel/arm/starbite) defines IOWatchdog and its user client instead (0426). */
++#if defined(SWEET) && !defined(ARM64_BOARD_CONFIG_STARLTE)
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -104,4 +105,4 @@ IOWatchdogUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
+ 	}
+ 	return kIOReturnSuccess;
+ }
+-#endif /* SWEET */
++#endif /* SWEET && !STARLTE */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteACPM.cpp b/iokit/Kernel/arm/starbite/StarbiteACPM.cpp
+new file mode 100644
+index 00000000..46bbf30b
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteACPM.cpp
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteACPM/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteACPM/
++ * (commit 4a7ec17); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteACPM/StarbiteACPM.cpp"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteACPM/StarbiteACPM.cpp b/iokit/Kernel/arm/starbite/StarbiteACPM/StarbiteACPM.cpp
+new file mode 100644
+index 00000000..89592a19
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteACPM/StarbiteACPM.cpp
+@@ -0,0 +1,402 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteACPM (docs/APPLE-S9-DRIVERS.md Part 3 row 7): see StarbiteACPM.h, hw/acpm_ipc.c, NOTES.md.
++ * Polled, one request at a time under fLock (as starlte_touch.c 0302); the IPC interrupt (SPI 0x44) is not used
++ * and the mailbox's INTMR1 is left as found.
++ */
++#include "StarbiteACPM.h"
++#include <IOKit/IOLib.h>
++#include <IOKit/IODeviceMemory.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSNumber.h>
++#include <libkern/c++/OSString.h>
++#include <libkern/libkern.h>
++#include <kern/clock.h>
++#include <pexpert/pexpert.h>
++#include <stdarg.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++extern "C" int starlte_sbstop_at(const char *stage);
++extern "C" void starlte_sbstop_now(const char *stage);
++#endif
++
++#define super IOService
++OSDefineMetaClassAndStructors(StarbiteACPM, IOService);
++
++static StarbiteACPM *gStarbiteACPM;
++
++StarbiteACPM *
++StarbiteACPM::shared(void)
++{
++	return gStarbiteACPM;
++}
++
++/* ---- MMIO for hw/ ---- */
++
++uint32_t
++StarbiteACPM::ioSramRd(void *ctx, uint32_t off)
++{
++	StarbiteACPM *me = (StarbiteACPM *)ctx;
++	uint32_t v = *(volatile uint32_t *)(me->fSram + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++void
++StarbiteACPM::ioSramWr(void *ctx, uint32_t off, uint32_t v)
++{
++	StarbiteACPM *me = (StarbiteACPM *)ctx;
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(me->fSram + off) = v;
++}
++
++uint32_t
++StarbiteACPM::ioMboxRd(void *ctx, uint32_t off)
++{
++	StarbiteACPM *me = (StarbiteACPM *)ctx;
++	uint32_t v = *(volatile uint32_t *)(me->fMbox + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++void
++StarbiteACPM::ioMboxWr(void *ctx, uint32_t off, uint32_t v)
++{
++	StarbiteACPM *me = (StarbiteACPM *)ctx;
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(me->fMbox + off) = v;
++}
++
++void
++StarbiteACPM::ioBarrier(void *)
++{
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++void
++StarbiteACPM::ioDelay(void *, uint32_t us)
++{
++	IODelay(us);
++}
++
++uint64_t
++StarbiteACPM::ioNow(void *)
++{
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000u;
++}
++
++void
++StarbiteACPM::ioLog(void *, const char *fmt, ...)
++{
++	char line[256];
++	va_list ap;
++	va_start(ap, fmt);
++	vsnprintf(line, sizeof(line), fmt, ap);
++	va_end(ap);
++	IOLog("StarbiteACPM: %s", line);
++}
++
++/* ---- start ---- */
++
++static bool
++u64pair(OSData *d, uint64_t *a, uint64_t *b)
++{
++	if (d == NULL || d->getLength() < 16) {
++		return false;
++	}
++	const uint8_t *p = (const uint8_t *)d->getBytesNoCopy();
++	memcpy(a, p, 8);
++	memcpy(b, p + 8, 8);
++	return true;
++}
++
++bool
++StarbiteACPM::mapRegions(IOService *provider, uint32_t *sramSize, uint32_t *initdata)
++{
++	fMboxMap = provider->mapDeviceMemoryWithIndex(0);
++	if (fMboxMap == NULL || fMboxMap->getLength() < 0x100) {
++		IOLog("StarbiteACPM: no mailbox (reg 0) on the nub\n");
++		return false;
++	}
++	if (provider->getDeviceMemoryCount() >= 2) {
++		fSramMap = provider->mapDeviceMemoryWithIndex(1);
++	} else {
++		uint64_t pa = 0, size = 0;
++		OSData *d = OSDynamicCast(OSData, provider->getProperty("sram"));
++		if (u64pair(d, &pa, &size) && size >= 0x1000 && size <= 0x100000) {
++			fSramMem = IODeviceMemory::withRange((IOPhysicalAddress)pa, (IOPhysicalLength)size);
++			if (fSramMem) {
++				fSramMap = fSramMem->map(kIOMapInhibitCache);
++			}
++		}
++	}
++	if (fSramMap == NULL) {
++		IOLog("StarbiteACPM: no APM SRAM (reg 1 or \"sram\") on the nub; see INTEGRATION.md\n");
++		return false;
++	}
++	*sramSize = (uint32_t)fSramMap->getLength();
++	*initdata = ACPM_S9_INITDATA;
++	OSData *id = OSDynamicCast(OSData, provider->getProperty("initdata-base"));
++	if (id && id->getLength() >= 4) {
++		memcpy(initdata, id->getBytesNoCopy(), 4);
++	}
++	fMbox = fMboxMap->getVirtualAddress();
++	fSram = fSramMap->getVirtualAddress();
++	IOLog("StarbiteACPM: mailbox %#llx, SRAM %#llx + %#x, initdata-base %#x\n",
++	    (unsigned long long)fMboxMap->getPhysicalAddress(), (unsigned long long)fSramMap->getPhysicalAddress(),
++	    *sramSize, *initdata);
++	return true;
++}
++
++/* One read-only look at the PMIC: the line PHONE-TEST.md's pass checks. No write. */
++void
++StarbiteACPM::report(void)
++{
++	static const struct {
++		uint8_t type, reg;
++		const char *name;
++	} regs[] = {
++		{ 0, 0x00, "PMICID" }, { 1, 0x6c, "LDO35" }, { 1, 0x74, "LDO43" }, { 1, 0x2b, "BUCK6" },
++		{ 1, 0x68, "LDO31" }, { 1, 0x4a, "LDO2" }, { 2, 0x00, "RTC_CTRL" }, { 2, 0x03, "RTC_CAPSEL" },
++	};
++	char line[200];
++	size_t o = 0;
++	unsigned ok = 0;
++	for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
++		uint8_t v = 0;
++		IOReturn r = pmicRead(regs[i].type, regs[i].reg, &v);
++		ok += r == kIOReturnSuccess;
++		o += (size_t)snprintf(line + o, sizeof(line) - o, "%s%s=%s%02x", i ? " " : "", regs[i].name,
++		    r == kIOReturnSuccess ? "0x" : "ERR", r == kIOReturnSuccess ? v : 0);
++		if (o >= sizeof(line)) {
++			o = sizeof(line) - 1;
++		}
++	}
++	IOLog("StarbiteACPM: firmware \"%s\", PMIC channel %u: %s (%u/%u reads), %u timeouts, %u stale drained, "
++	    "INTMR1 %#x INTSR1 %#x\n", fAcpm.version, ACPM_CH_PMIC, line, ok, (unsigned)(sizeof(regs) / sizeof(regs[0])),
++	    fAcpm.st.timeouts, fAcpm.st.stale_drained, ioMboxRd(this, ACPM_MB_INTMR1), ioMboxRd(this, ACPM_MB_INTSR1));
++}
++
++void
++StarbiteACPM::publishStats(void)
++{
++	setProperty("ACPMFirmware", fAcpm.version);
++	setProperty("ACPMRequests", fAcpm.st.requests, 32);
++	setProperty("ACPMTimeouts", fAcpm.st.timeouts, 32);
++	setProperty("ACPMResends", fAcpm.st.resends, 32);
++	setProperty("ACPMStatusErrors", fAcpm.st.status_errors, 32);
++	setProperty("ACPMRefused", fAcpm.st.refused, 32);
++}
++
++bool
++StarbiteACPM::start(IOService *provider)
++{
++	uint32_t sramSize = 0, initdata = 0;
++	uint32_t off = 0;
++
++	if (!super::start(provider)) {
++		return false;
++	}
++	if (PE_parse_boot_argn("sbacpm", &off, sizeof(off)) && off == 0) {
++		IOLog("StarbiteACPM: sbacpm=0: not started\n");
++		return false;
++	}
++	fLock = IOLockAlloc();
++	if (fLock == NULL || !mapRegions(provider, &sramSize, &initdata)) {
++		return false;
++	}
++	fIo.ctx = this;
++	fIo.sram_rd = ioSramRd;
++	fIo.sram_wr = ioSramWr;
++	fIo.mbox_rd = ioMboxRd;
++	fIo.mbox_wr = ioMboxWr;
++	fIo.barrier = ioBarrier;
++	fIo.delay_us = ioDelay;
++	fIo.now_us = ioNow;
++	fIo.log = ioLog;
++	IOLockLock(fLock);
++	int e = acpm_setup(&fAcpm, &fIo, sramSize, ACPM_S9_SRAM_FIRST, initdata);
++	IOLockUnlock(fLock);
++	if (e != ACPM_OK) {
++		IOLog("StarbiteACPM: setup failed: %s\n", acpm_strerror(e));
++		return false;
++	}
++	fReady = true;
++	gStarbiteACPM = this;
++	report();
++	publishStats();
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	if (starlte_sbstop_at("acpm")) {
++		starlte_sbstop_now("acpm");
++	}
++#endif
++	registerService();
++	return true;
++}
++
++void
++StarbiteACPM::stop(IOService *provider)
++{
++	if (gStarbiteACPM == this) {
++		gStarbiteACPM = NULL;
++	}
++	if (fLock) {
++		IOLockLock(fLock);
++		fReady = false;
++		IOLockUnlock(fLock);
++	}
++	super::stop(provider);
++}
++
++void
++StarbiteACPM::free(void)
++{
++	OSSafeReleaseNULL(fMboxMap);
++	OSSafeReleaseNULL(fSramMap);
++	OSSafeReleaseNULL(fSramMem);
++	if (fLock) {
++		IOLockFree(fLock);
++		fLock = NULL;
++	}
++	super::free();
++}
++
++/* ---- client API ---- */
++
++static IOReturn
++toIOReturn(int e)
++{
++	switch (e) {
++	case ACPM_OK: return kIOReturnSuccess;
++	case ACPM_E_TIMEOUT: return kIOReturnTimeout;
++	case ACPM_E_STATUS: return kIOReturnIOError;
++	case ACPM_E_REFUSED: return kIOReturnNotPermitted;
++	case ACPM_E_ARG: return kIOReturnBadArgument;
++	default: return kIOReturnNotReady;
++	}
++}
++
++IOReturn
++StarbiteACPM::pmicRead(uint32_t type, uint32_t reg, uint8_t *value)
++{
++	if (value == NULL) {
++		return kIOReturnBadArgument;
++	}
++	if (!s2mps18_read_allowed(type, reg)) {
++		return kIOReturnNotPermitted;
++	}
++	IOLockLock(fLock);
++	int e = fReady ? acpm_pmic_read(&fAcpm, type, reg, value) : ACPM_E_NODEV;
++	if (e == ACPM_OK) {
++		s2mps18_note_read(&fPolicy, type, reg, *value);
++	}
++	IOLockUnlock(fLock);
++	return toIOReturn(e);
++}
++
++IOReturn
++StarbiteACPM::pmicWrite(uint32_t type, uint32_t reg, uint8_t value)
++{
++	const char *why = NULL;
++	uint8_t cur = 0;
++
++	IOLockLock(fLock);
++	int e = fReady ? acpm_pmic_read(&fAcpm, type, reg, &cur) : ACPM_E_NODEV;
++	if (e == ACPM_OK) {
++		s2mps18_note_read(&fPolicy, type, reg, cur);
++		if (s2mps18_write_allowed(&fPolicy, type, reg, value, cur, &why)) {
++			e = acpm_pmic_write_raw(&fAcpm, type, reg, value);
++		} else {
++			fAcpm.st.refused++;
++			e = ACPM_E_REFUSED;
++		}
++	}
++	IOLockUnlock(fLock);
++	if (e == ACPM_E_REFUSED) {
++		IOLog("StarbiteACPM: write %u:%#x = %#x (now %#x) REFUSED: %s\n", type, reg, value, cur, why);
++	} else if (e != ACPM_OK) {
++		IOLog("StarbiteACPM: write %u:%#x = %#x failed: %s\n", type, reg, value, acpm_strerror(e));
++	}
++	return toIOReturn(e);
++}
++
++IOReturn
++StarbiteACPM::dvfsSet(uint32_t domain, uint32_t khz)
++{
++	const char *why = NULL;
++	IOLockLock(fLock);
++	int e = ACPM_E_NODEV;
++	if (fReady) {
++		e = acpm_dvfs_allowed(domain, khz, fGovernor, &why) ? acpm_dvfs_request(&fAcpm, domain, khz, false, NULL) :
++		    ACPM_E_REFUSED;
++	}
++	if (e == ACPM_E_REFUSED) {
++		fAcpm.st.refused++;
++	}
++	IOLockUnlock(fLock);
++	if (e == ACPM_E_REFUSED) {
++		IOLog("StarbiteACPM: DVFS domain %u %u kHz REFUSED: %s\n", domain, khz, why);
++	}
++	return toIOReturn(e);
++}
++
++IOReturn
++StarbiteACPM::dvfsGet(uint32_t domain, uint32_t *khz)
++{
++	IOLockLock(fLock);
++	int e = fReady ? acpm_dvfs_request(&fAcpm, domain, 0, true, khz) : ACPM_E_NODEV;
++	IOLockUnlock(fLock);
++	return toIOReturn(e);
++}
++
++void
++StarbiteACPM::setThermalGovernor(bool active)
++{
++	IOLockLock(fLock);
++	fGovernor = active;
++	IOLockUnlock(fLock);
++	IOLog("StarbiteACPM: thermal governor %s: cpucl1 limit %u kHz\n", active ? "on" : "off",
++	    active ? 2704000u : 1794000u);
++}
++
++/* callPlatformFunction("starbite-acpm-pmic-read", false, type, reg, uint8_t *val, NULL) and
++ * "starbite-acpm-pmic-write" (type, reg, (void *)(uintptr_t)val), "starbite-acpm-dvfs" (domain, khz):
++ * for clients that only hold an IOService *. */
++IOReturn
++StarbiteACPM::callPlatformFunction(const OSSymbol *functionName, bool waitForFunction, void *p1, void *p2, void *p3,
++    void *p4)
++{
++	if (functionName->isEqualTo("starbite-acpm-pmic-read")) {
++		return pmicRead((uint32_t)(uintptr_t)p1, (uint32_t)(uintptr_t)p2, (uint8_t *)p3);
++	}
++	if (functionName->isEqualTo("starbite-acpm-pmic-write")) {
++		return pmicWrite((uint32_t)(uintptr_t)p1, (uint32_t)(uintptr_t)p2, (uint8_t)(uintptr_t)p3);
++	}
++	if (functionName->isEqualTo("starbite-acpm-dvfs")) {
++		return dvfsSet((uint32_t)(uintptr_t)p1, (uint32_t)(uintptr_t)p2);
++	}
++	return super::callPlatformFunction(functionName, waitForFunction, p1, p2, p3, p4);
++}
++
++extern "C" bool
++starbite_acpm_pmic_read(uint32_t type, uint32_t reg, uint8_t *val)
++{
++	StarbiteACPM *a = gStarbiteACPM;
++	return a != NULL && a->pmicRead(type, reg, val) == kIOReturnSuccess;
++}
++
++extern "C" bool
++starbite_acpm_pmic_write(uint32_t type, uint32_t reg, uint8_t val)
++{
++	StarbiteACPM *a = gStarbiteACPM;
++	return a != NULL && a->pmicWrite(type, reg, val) == kIOReturnSuccess;
++}
++
++extern "C" bool
++starbite_acpm_dvfs(uint32_t domain, uint32_t khz)
++{
++	StarbiteACPM *a = gStarbiteACPM;
++	return a != NULL && a->dvfsSet(domain, khz) == kIOReturnSuccess;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteACPM/StarbiteACPM.h b/iokit/Kernel/arm/starbite/StarbiteACPM/StarbiteACPM.h
+new file mode 100644
+index 00000000..fdddb8f5
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteACPM/StarbiteACPM.h
+@@ -0,0 +1,79 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteACPM: the provider service for the Exynos 9810 APM mailbox (ACPM IPC). Clients (StarbiteRTC, and later
++ * StarbiteTouch / StarbiteSD / StarbiteMali / StarbiteTMU) reach the S2MPS18 PMIC and the DVFS domains through it.
++ * Every PMIC write passes hw/s2mps18_policy.c; every DVFS request passes the clock limits below.
++ *
++ * Matching: IONameMatch "starbite,acpm-ipc" on the arm-io nub (tools/board/starlte.board block "acpm-ipc").
++ * Addresses: the nub's reg 0 (mailbox), reg 1 or the property "sram" <u64 pa, u64 size> (the APM SRAM),
++ * "initdata-base" (u32, default 0x7f00 as device/dtb/starlte.dts). Nothing is hard-coded.
++ */
++#ifndef STARBITE_ACPM_H
++#define STARBITE_ACPM_H
++
++#include <IOKit/IOService.h>
++#include <IOKit/IOLocks.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include "hw/acpm_ipc.h"
++#include "hw/s2mps18_policy.h"
++
++class StarbiteACPM : public IOService {
++	OSDeclareDefaultStructors(StarbiteACPM);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
++	IOReturn callPlatformFunction(const OSSymbol *functionName, bool waitForFunction, void *param1, void *param2,
++	    void *param3, void *param4) APPLE_KEXT_OVERRIDE;
++
++	/* S2MPS18 access. type: 0 TOP, 1 PMIC, 2 RTC. Reads of clear-on-read interrupt registers are refused. */
++	virtual IOReturn pmicRead(uint32_t type, uint32_t reg, uint8_t *value);
++	/* Read-check-write: the current value is read, the policy decides, then the write. */
++	virtual IOReturn pmicWrite(uint32_t type, uint32_t reg, uint8_t value);
++	/* DVFS (channel at table index 0). Limits: cpucl0/cpucl1 <= 1794000 kHz; cpucl1 up to 2704000 only while a
++	 * thermal governor has registered (setThermalGovernor); g3d only the six levels of starlte_gpu.c; no other
++	 * domain (MIF/INT froze the phone, boot69). */
++	virtual IOReturn dvfsSet(uint32_t domain, uint32_t khz);
++	virtual IOReturn dvfsGet(uint32_t domain, uint32_t *khz);
++	virtual void setThermalGovernor(bool active);
++
++	static StarbiteACPM *shared(void);      /* the started instance, or NULL */
++
++private:
++	IOMemoryMap *fMboxMap;
++	IOMemoryMap *fSramMap;
++	IODeviceMemory *fSramMem;               /* when it came from the "sram" property */
++	IOLock *fLock;
++	struct acpm fAcpm;
++	struct acpm_io fIo;
++	struct s2mps18_policy fPolicy;
++	vm_address_t fMbox;
++	vm_address_t fSram;
++	bool fGovernor;
++	bool fReady;
++
++	bool mapRegions(IOService *provider, uint32_t *sramSize, uint32_t *initdata);
++	void report(void);
++	void publishStats(void);
++
++	static uint32_t ioSramRd(void *ctx, uint32_t off);
++	static void ioSramWr(void *ctx, uint32_t off, uint32_t v);
++	static uint32_t ioMboxRd(void *ctx, uint32_t off);
++	static void ioMboxWr(void *ctx, uint32_t off, uint32_t v);
++	static void ioBarrier(void *ctx);
++	static void ioDelay(void *ctx, uint32_t us);
++	static uint64_t ioNow(void *ctx);
++	static void ioLog(void *ctx, const char *fmt, ...) __printflike(2, 3);
++};
++
++/* C entry points for today's bsd/dev drivers (starlte_touch.c, starlte_gpu.c, starlte_sd.c) once integration
++ * routes starlte_pmic_read / starlte_pmic_write / starlte_acpm_dvfs here (INTEGRATION.md). false until
++ * StarbiteACPM has started. Same policy and limits as the methods. */
++extern "C" {
++bool starbite_acpm_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
++bool starbite_acpm_pmic_write(uint32_t type, uint32_t reg, uint8_t val);
++bool starbite_acpm_dvfs(uint32_t domain, uint32_t khz);
++}
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteACPM/hw/acpm_ipc.c b/iokit/Kernel/arm/starbite/StarbiteACPM/hw/acpm_ipc.c
+new file mode 100644
+index 00000000..e6e80ef6
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteACPM/hw/acpm_ipc.c
+@@ -0,0 +1,319 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Exynos 9810 ACPM IPC, AP side (see acpm_ipc.h and ../NOTES.md). Written from our own
++ * build/xnu-12377/bsd/dev/starlte_touch.c (0302, run on the phone) and the facts in an earlier port's
++ * drivers/soc/exynos/exynos_acpm.c (APSL-2.0, an earlier port; credited in ../NOTES.md): the faulting first SRAM
++ * pages, 32-bit-only access, stale answers drained before each request, 600 ms per answer, three sends.
++ */
++#include "acpm_ipc.h"
++
++#define LOG(a, ...) do { if ((a)->io->log) (a)->io->log((a)->io->ctx, __VA_ARGS__); } while (0)
++
++static bool
++sram_ok(const struct acpm *a, uint32_t off, uint32_t bytes)
++{
++	return off >= a->sram_first && off <= a->sram_size && bytes <= a->sram_size - off && (off & 3u) == 0;
++}
++
++/* Reads outside the usable SRAM read as 0 (never touched); the setup checks every offset first. */
++static uint32_t
++srd(const struct acpm *a, uint32_t off)
++{
++	if (!sram_ok(a, off, 4)) {
++		return 0;
++	}
++	return a->io->sram_rd(a->io->ctx, off);
++}
++
++static void
++swr(const struct acpm *a, uint32_t off, uint32_t v)
++{
++	if (sram_ok(a, off, 4)) {
++		a->io->sram_wr(a->io->ctx, off, v);
++	}
++}
++
++static void
++barrier(const struct acpm *a)
++{
++	if (a->io->barrier) {
++		a->io->barrier(a->io->ctx);
++	}
++}
++
++const char *
++acpm_strerror(int e)
++{
++	switch (e) {
++	case ACPM_OK: return "ok";
++	case ACPM_E_NODEV: return "no such channel";
++	case ACPM_E_TIMEOUT: return "no answer";
++	case ACPM_E_STATUS: return "APM status error (SPEEDY)";
++	case ACPM_E_REFUSED: return "refused by the write policy";
++	case ACPM_E_TABLE: return "firmware table unusable";
++	case ACPM_E_ARG: return "bad argument";
++	default: return "?";
++	}
++}
++
++/* Every answer in a queue channel's answer queue taken out of the way, and its interrupt cleared. */
++static void
++drain(struct acpm *a, struct acpm_chan *c, uint32_t id)
++{
++	uint32_t front = srd(a, c->out_front), rear = srd(a, c->out_rear);
++	if (front < c->len && rear != front) {
++		swr(a, c->out_rear, front);
++		a->st.stale_drained++;
++	}
++	a->io->mbox_wr(a->io->ctx, ACPM_MB_INTCR1, 1u << id);
++}
++
++int
++acpm_setup(struct acpm *a, const struct acpm_io *io, uint32_t sram_size, uint32_t sram_first, uint32_t initdata)
++{
++	uint32_t i;
++
++	for (i = 0; i < sizeof(*a); i++) {
++		((uint8_t *)a)[i] = 0;
++	}
++	a->io = io;
++	a->sram_size = sram_size;
++	a->sram_first = sram_first;
++	a->initdata = initdata;
++	a->room_us = ACPM_ROOM_US;
++	a->answer_us = ACPM_ANSWER_US;
++	a->buffer_us = ACPM_BUFFER_US;
++	a->poll_us = ACPM_POLL_US;
++	a->sends = ACPM_SENDS;
++	if (!sram_ok(a, initdata, 0x80)) {
++		LOG(a, "acpm: initdata-base %#x not in usable SRAM (%#x..%#x)\n", initdata, sram_first, sram_size);
++		return ACPM_E_TABLE;
++	}
++	for (i = 0; i < 24; i += 4) {
++		uint32_t w = srd(a, initdata + ACPM_ID_STRINGS + i);
++		for (uint32_t b = 0; b < 4; b++) {
++			char ch = (char)(w >> (8 * b));
++			a->version[i + b] = (ch >= 32 && ch < 127) ? ch : '.';
++		}
++	}
++	a->version[24] = 0;
++	a->table = srd(a, initdata + ACPM_ID_CHANNELS);
++	a->nchannels = srd(a, initdata + ACPM_ID_NCHANNELS);
++	a->ap_max = srd(a, initdata + ACPM_ID_AP_MAX);
++	LOG(a, "acpm: firmware \"%s\", channel table at %#x, %u channels, %u the AP's\n", a->version, a->table,
++	    a->nchannels, a->ap_max);
++	if (a->ap_max == 0 || a->ap_max > ACPM_AP_MAX_LIMIT || !sram_ok(a, a->table, a->ap_max * ACPM_CH_SIZE)) {
++		LOG(a, "acpm: the channel table is not where it may be read: not used\n");
++		return ACPM_E_TABLE;
++	}
++	for (i = 0; i < a->ap_max; i++) {
++		uint32_t d = a->table + i * ACPM_CH_SIZE;
++		uint32_t id = srd(a, d + ACPM_CH_ID) & 0xffu;
++		struct acpm_chan n;
++		for (uint32_t k = 0; k < sizeof(n); k++) {
++			((uint8_t *)&n)[k] = 0;
++		}
++		n.desc = d;
++		n.owner = srd(a, d + ACPM_CH_OWNER);
++		n.type = srd(a, d + ACPM_CH_TYPE);
++		n.ap_poll = srd(a, d + ACPM_CH_AP_POLL);
++		n.in_rear = srd(a, d + ACPM_CH_IN_REAR);
++		n.in_front = srd(a, d + ACPM_CH_IN_FRONT);
++		n.in_base = srd(a, d + ACPM_CH_IN_BASE);
++		n.out_rear = srd(a, d + ACPM_CH_OUT_REAR);
++		n.out_front = srd(a, d + ACPM_CH_OUT_FRONT);
++		n.out_base = srd(a, d + ACPM_CH_OUT_BASE);
++		n.len = srd(a, d + ACPM_CH_QLEN);
++		n.elem = srd(a, d + ACPM_CH_ELEM);
++		n.buffer = n.len <= 1;
++		if (i == 0) {
++			a->index0_id = id;
++		}
++		if (n.buffer) {
++			n.usable = sram_ok(a, n.in_base, 16) && sram_ok(a, n.out_base, 16);
++		} else {
++			n.usable = n.len <= 64 && n.elem >= 16 && n.elem <= 256 && (n.elem & 3u) == 0 &&
++			    sram_ok(a, n.in_rear, 4) && sram_ok(a, n.in_front, 4) && sram_ok(a, n.out_rear, 4) &&
++			    sram_ok(a, n.out_front, 4) && sram_ok(a, n.in_base, n.len * n.elem) &&
++			    sram_ok(a, n.out_base, n.len * n.elem);
++		}
++		LOG(a, "acpm: channel %u (index %u): owner %u type %u, %s %u x %u, %s, %s\n", id, i, n.owner, n.type,
++		    n.buffer ? "buffer" : "queue", n.len, n.elem, n.ap_poll ? "polled" : "irq",
++		    n.usable ? "usable" : "NOT usable (offsets outside the SRAM)");
++		if (id >= ACPM_MAX_ID || a->ch[id].usable || !n.usable) {
++			continue;
++		}
++		a->ch[id] = n;
++		if (!n.buffer) {
++			drain(a, &a->ch[id], id);
++		}
++	}
++	a->ready = a->ch[ACPM_CH_PMIC].usable;
++	if (!a->ready) {
++		LOG(a, "acpm: no usable channel %u (PMIC)\n", ACPM_CH_PMIC);
++		return ACPM_E_NODEV;
++	}
++	return ACPM_OK;
++}
++
++/* The answer with our sequence number, if it has come: copied out, and the answer queue emptied. */
++static bool
++take_answer(struct acpm *a, struct acpm_chan *c, uint32_t id, uint32_t seq, uint32_t cmd[4])
++{
++	uint32_t rear = srd(a, c->out_rear), front = srd(a, c->out_front);
++	bool found = false;
++
++	if (rear >= c->len || front >= c->len || rear == front) {
++		return false;
++	}
++	for (uint32_t i = rear; i != front; i = (i + 1) % c->len) {
++		uint32_t slot = c->out_base + i * c->elem;
++		if (((srd(a, slot) & ACPM_SEQ_MASK) >> ACPM_SEQ_SHIFT) == seq) {
++			for (uint32_t w = 0; w < 4; w++) {
++				cmd[w] = srd(a, slot + 4 * w);
++			}
++			found = true;
++		}
++	}
++	drain(a, c, id);
++	return found;
++}
++
++static int
++request_queue(struct acpm *a, struct acpm_chan *c, uint32_t id, uint32_t cmd[4])
++{
++	uint32_t sent[4];
++
++	for (uint32_t w = 0; w < 4; w++) {
++		sent[w] = cmd[w];
++	}
++	for (uint32_t send = 0; send < a->sends; send++) {
++		if (send) {
++			a->st.resends++;
++		}
++		drain(a, c, id);                /* never into a queue with stale answers in it */
++		uint32_t front = srd(a, c->in_front);
++		if (front >= c->len) {
++			return ACPM_E_TABLE;
++		}
++		uint32_t next = (front + 1) % c->len;
++		uint64_t t0 = a->io->now_us(a->io->ctx);
++		while (srd(a, c->in_rear) == next && a->io->now_us(a->io->ctx) - t0 < a->room_us) {
++			a->io->delay_us(a->io->ctx, a->poll_us);
++		}
++		if (srd(a, c->in_rear) == next) {
++			continue;               /* the APM has not taken our earlier requests */
++		}
++		c->seq = c->seq % 63u + 1u;
++		sent[0] = (sent[0] & ~ACPM_SEQ_MASK) | c->seq << ACPM_SEQ_SHIFT;
++		uint32_t slot = c->in_base + front * c->elem;
++		for (uint32_t w = 0; w < c->elem / 4; w++) {
++			swr(a, slot + 4 * w, w < 4 ? sent[w] : 0);
++		}
++		barrier(a);                     /* the words before the index, the index before the doorbell */
++		swr(a, c->in_front, next);
++		barrier(a);
++		a->io->mbox_wr(a->io->ctx, ACPM_MB_INTGR0, 1u << (16 + id));
++		t0 = a->io->now_us(a->io->ctx);
++		for (;;) {
++			if (take_answer(a, c, id, c->seq, cmd)) {
++				return ACPM_OK;
++			}
++			if (a->io->now_us(a->io->ctx) - t0 >= a->answer_us) {
++				break;
++			}
++			a->io->delay_us(a->io->ctx, a->poll_us);
++		}
++	}
++	a->st.timeouts++;
++	LOG(a, "acpm: channel %u: no answer after %u sends (w0 %#x)\n", id, a->sends, cmd[0]);
++	return ACPM_E_TIMEOUT;
++}
++
++static int
++request_buffer(struct acpm *a, struct acpm_chan *c, uint32_t id, uint32_t cmd[4])
++{
++	c->seq = c->seq % 63u + 1u;
++	cmd[0] = (cmd[0] & ~ACPM_SEQ_MASK) | c->seq << ACPM_SEQ_SHIFT;
++	a->io->mbox_wr(a->io->ctx, ACPM_MB_INTCR1, 1u << id);
++	for (uint32_t w = 0; w < 4; w++) {
++		swr(a, c->in_base + 4 * w, cmd[w]);
++	}
++	barrier(a);
++	a->io->mbox_wr(a->io->ctx, ACPM_MB_INTGR0, 1u << (16 + id));
++	uint64_t t0 = a->io->now_us(a->io->ctx);
++	while (!(a->io->mbox_rd(a->io->ctx, ACPM_MB_INTSR1) & (1u << id))) {
++		if (a->io->now_us(a->io->ctx) - t0 >= a->buffer_us) {
++			a->st.timeouts++;
++			return ACPM_E_TIMEOUT;
++		}
++		a->io->delay_us(a->io->ctx, a->poll_us);
++	}
++	for (uint32_t w = 0; w < 4; w++) {
++		cmd[w] = srd(a, c->out_base + 4 * w);
++	}
++	a->io->mbox_wr(a->io->ctx, ACPM_MB_INTCR1, 1u << id);
++	return ACPM_OK;
++}
++
++int
++acpm_request(struct acpm *a, uint32_t id, uint32_t cmd[4])
++{
++	if (a == 0 || !a->ready || id >= ACPM_MAX_ID || !a->ch[id].usable) {
++		return ACPM_E_NODEV;
++	}
++	a->st.requests++;
++	struct acpm_chan *c = &a->ch[id];
++	return c->buffer ? request_buffer(a, c, id, cmd) : request_queue(a, c, id, cmd);
++}
++
++int
++acpm_pmic_read(struct acpm *a, uint32_t type, uint32_t reg, uint8_t *value)
++{
++	uint32_t cmd[4] = { acpm_pmic_w0(type, reg), acpm_pmic_w1(ACPM_FUNC_READ, 0, 0), 0, 0 };
++	if (type > 0xfu || reg > 0xffu || value == 0) {
++		return ACPM_E_ARG;
++	}
++	int e = acpm_request(a, ACPM_CH_PMIC, cmd);
++	if (e != ACPM_OK) {
++		return e;
++	}
++	if (cmd[1] >> 24) {
++		a->st.status_errors++;
++		return ACPM_E_STATUS;
++	}
++	*value = (uint8_t)(cmd[1] >> 8);
++	return ACPM_OK;
++}
++
++int
++acpm_pmic_write_raw(struct acpm *a, uint32_t type, uint32_t reg, uint8_t value)
++{
++	uint32_t cmd[4] = { acpm_pmic_w0(type, reg), acpm_pmic_w1(ACPM_FUNC_WRITE, value, 0), 0, 0 };
++	if (type > 0xfu || reg > 0xffu) {
++		return ACPM_E_ARG;
++	}
++	int e = acpm_request(a, ACPM_CH_PMIC, cmd);
++	if (e != ACPM_OK) {
++		return e;
++	}
++	if (cmd[1] >> 24) {
++		a->st.status_errors++;
++		return ACPM_E_STATUS;
++	}
++	return ACPM_OK;
++}
++
++int
++acpm_dvfs_request(struct acpm *a, uint32_t domain, uint32_t khz, bool get, uint32_t *answer_khz)
++{
++	uint32_t cmd[4] = { domain, get ? 0u : khz, get ? 1u : 0u, 0 };
++	if (a == 0 || !a->ready) {
++		return ACPM_E_NODEV;
++	}
++	int e = acpm_request(a, a->index0_id, cmd);
++	if (e == ACPM_OK && answer_khz) {
++		*answer_khz = cmd[1];
++	}
++	return e;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteACPM/hw/acpm_ipc.h b/iokit/Kernel/arm/starbite/StarbiteACPM/hw/acpm_ipc.h
+new file mode 100644
+index 00000000..0fc504aa
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteACPM/hw/acpm_ipc.h
+@@ -0,0 +1,153 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Exynos 9810 ACPM IPC: the AP's side of the APM mailbox (0x14100000) and the APM's SRAM (0x02039000), plain C,
++ * no IOKit. Shared by StarbiteACPM.cpp and the host tests (test/). Register facts and sources: ../NOTES.md.
++ *
++ * All MMIO goes through struct acpm_io, so the same code runs against a mock APM on the Mac. Every SRAM access is
++ * 32 bits wide and at or above sram_first (the pages below it fault on the phone).
++ */
++#ifndef STARBITE_ACPM_IPC_H
++#define STARBITE_ACPM_IPC_H
++
++#include <stdint.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* mailbox registers (offsets in the 0x14100000 block) */
++#define ACPM_MB_INTGR0          0x08u   /* AP -> APM doorbell: bit 16 + channel id */
++#define ACPM_MB_INTCR1          0x20u   /* APM -> AP clear: bit = channel id */
++#define ACPM_MB_INTMR1          0x24u   /* APM -> AP mask (read only here) */
++#define ACPM_MB_INTSR1          0x28u   /* APM -> AP status: bit = channel id */
++
++/* firmware "initdata" (offsets from initdata-base) */
++#define ACPM_ID_CHANNELS        0x08u   /* SRAM offset of the channel table */
++#define ACPM_ID_NCHANNELS       0x0cu
++#define ACPM_ID_AP_MAX          0x18u   /* how many of them are the AP's */
++#define ACPM_ID_STRINGS         0x60u   /* version / build text (24 bytes logged) */
++
++/* one channel descriptor, 0x48 bytes */
++#define ACPM_CH_SIZE            0x48u
++#define ACPM_CH_ID              0x00u   /* low byte */
++#define ACPM_CH_OWNER           0x08u
++#define ACPM_CH_TYPE            0x0cu
++#define ACPM_CH_IN_REAR         0x10u   /* AP -> APM: where the APM reads (SRAM offset of an index word) */
++#define ACPM_CH_IN_FRONT        0x14u   /* AP -> APM: where we write */
++#define ACPM_CH_IN_BASE         0x18u   /* AP -> APM: queue base */
++#define ACPM_CH_OUT_REAR        0x28u   /* APM -> AP: where we read */
++#define ACPM_CH_OUT_FRONT       0x2cu   /* APM -> AP: where the APM writes */
++#define ACPM_CH_OUT_BASE        0x30u
++#define ACPM_CH_QLEN            0x34u
++#define ACPM_CH_ELEM            0x38u
++#define ACPM_CH_AP_POLL         0x44u
++
++#define ACPM_SEQ_SHIFT          16u
++#define ACPM_SEQ_MASK           (0x3fu << ACPM_SEQ_SHIFT)
++#define ACPM_MAX_ID             16u     /* channel ids we keep (the S9 uses 0..11) */
++#define ACPM_AP_MAX_LIMIT       32u
++
++/* S9 values (device/dtb/starlte.dts acpm_ipc, s2mps18mfd; an earlier port exynos9810_soc.h) */
++#define ACPM_S9_SRAM_SIZE       0x30000u
++#define ACPM_S9_SRAM_FIRST      0x3000u
++#define ACPM_S9_INITDATA        0x7f00u
++#define ACPM_CH_PMIC            2u      /* s2mps18mfd acpm-ipc-channel */
++
++/* timing (us) */
++#define ACPM_ROOM_US            20000u  /* a place in the request queue */
++#define ACPM_ANSWER_US          600000u /* an answer, per send */
++#define ACPM_BUFFER_US          1000000u
++#define ACPM_POLL_US            50u
++#define ACPM_SENDS              3u
++
++/* results */
++#define ACPM_OK                 0
++#define ACPM_E_NODEV            (-1)    /* no such channel, or not set up */
++#define ACPM_E_TIMEOUT          (-2)    /* no answer / no room */
++#define ACPM_E_STATUS           (-3)    /* the APM answered with a non-zero status (SPEEDY failed) */
++#define ACPM_E_REFUSED          (-4)    /* the write policy said no */
++#define ACPM_E_TABLE            (-5)    /* the firmware's table makes no sense */
++#define ACPM_E_ARG              (-6)
++
++struct acpm_io {
++	void *ctx;
++	uint32_t (*sram_rd)(void *ctx, uint32_t off);           /* off: from the SRAM's start, 4-aligned */
++	void (*sram_wr)(void *ctx, uint32_t off, uint32_t v);
++	uint32_t (*mbox_rd)(void *ctx, uint32_t off);
++	void (*mbox_wr)(void *ctx, uint32_t off, uint32_t v);
++	void (*barrier)(void *ctx);                             /* DSB SY */
++	void (*delay_us)(void *ctx, uint32_t us);
++	uint64_t (*now_us)(void *ctx);                          /* monotonic */
++	void (*log)(void *ctx, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
++};
++
++struct acpm_chan {
++	bool usable, buffer;
++	uint32_t desc;                                          /* SRAM offset of the descriptor */
++	uint32_t owner, type, ap_poll;
++	uint32_t in_rear, in_front, in_base, out_rear, out_front, out_base, len, elem;
++	uint32_t seq;
++};
++
++struct acpm_stats {
++	uint32_t requests, resends, timeouts, status_errors, stale_drained, refused;
++};
++
++struct acpm {
++	const struct acpm_io *io;
++	uint32_t sram_size, sram_first, initdata;
++	uint32_t table, nchannels, ap_max;
++	uint32_t index0_id;                                     /* id of the channel at table index 0 (DVFS) */
++	bool ready;
++	char version[25];
++	struct acpm_chan ch[ACPM_MAX_ID];
++	struct acpm_stats st;
++	/* timing, settable by the tests */
++	uint32_t room_us, answer_us, buffer_us, poll_us, sends;
++};
++
++/* Parse the firmware's table. Returns ACPM_OK when the PMIC channel (2) is usable. Reads, plus a drain of stale
++ * answers (the answer queue's read index set to its write index, INTCR1) on each queue channel. */
++int acpm_setup(struct acpm *a, const struct acpm_io *io, uint32_t sram_size, uint32_t sram_first, uint32_t initdata);
++
++/* One request on channel id; cmd[4] in, the answer's four words out. Caller serialises (one at a time). */
++int acpm_request(struct acpm *a, uint32_t id, uint32_t cmd[4]);
++
++/* PMIC framing (channel 2): w0 = type << 8 | reg; w1 = func | value << 8 | mask << 16; answer w1 [15:8] value,
++ * [31:24] status (0 = good). type: 0 TOP, 1 PMIC, 2 RTC (the S2MPS18's blocks). */
++#define ACPM_PMIC_TOP           0u
++#define ACPM_PMIC_PMIC          1u
++#define ACPM_PMIC_RTC           2u
++#define ACPM_FUNC_READ          0u
++#define ACPM_FUNC_WRITE         1u
++#define ACPM_FUNC_UPDATE        2u
++
++static inline uint32_t
++acpm_pmic_w0(uint32_t type, uint32_t reg)
++{
++	return (type & 0xfu) << 8 | (reg & 0xffu);
++}
++
++static inline uint32_t
++acpm_pmic_w1(uint32_t func, uint8_t value, uint8_t mask)
++{
++	return (func & 0xffu) | (uint32_t)value << 8 | (uint32_t)mask << 16;
++}
++
++/* Unchecked PMIC access (no policy): StarbiteACPM.cpp applies s2mps18_policy first. */
++int acpm_pmic_read(struct acpm *a, uint32_t type, uint32_t reg, uint8_t *value);
++int acpm_pmic_write_raw(struct acpm *a, uint32_t type, uint32_t reg, uint8_t value);
++
++/* DVFS framing (channel at table index 0, as Linux): { domain, kHz, 0 = set | 1 = get, 0 }. */
++#define ACPM_DVFS_CPUCL0        2u      /* Cortex-A55 */
++#define ACPM_DVFS_CPUCL1        3u      /* Exynos M3 */
++#define ACPM_DVFS_G3D           4u
++int acpm_dvfs_request(struct acpm *a, uint32_t domain, uint32_t khz, bool get, uint32_t *answer_khz);
++
++const char *acpm_strerror(int e);
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* STARBITE_ACPM_IPC_H */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteACPM/hw/s2mps18_policy.c b/iokit/Kernel/arm/starbite/StarbiteACPM/hw/s2mps18_policy.c
+new file mode 100644
+index 00000000..2bf2b384
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteACPM/hw/s2mps18_policy.c
+@@ -0,0 +1,140 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/* The S2MPS18 access policy of StarbiteACPM: see s2mps18_policy.h for the table and its sources. */
++#include "s2mps18_policy.h"
++#include "acpm_ipc.h"
++
++bool
++s2mps18_read_allowed(uint32_t type, uint32_t reg)
++{
++	if (type > ACPM_PMIC_RTC || reg > 0xffu) {
++		return false;
++	}
++	/* INT1..INT7 of the PMIC block clear when read (s2mps18-private.h); the TOP block's INTSRC does not. */
++	return !(type == ACPM_PMIC_PMIC && reg <= 0x06u);
++}
++
++void
++s2mps18_note_read(struct s2mps18_policy *p, uint32_t type, uint32_t reg, uint8_t value)
++{
++	if (type == ACPM_PMIC_PMIC && reg == S2MPS18_B6OUT && !p->b6_seen) {
++		p->b6_seen = true;
++		p->b6_boot = value;
++	}
++}
++
++static bool
++deny(const char **why, const char *s)
++{
++	if (why) {
++		*why = s;
++	}
++	return false;
++}
++
++static bool
++rtc_field_ok(uint32_t reg, uint8_t v)
++{
++	/* binary or BCD: the largest legal byte of each field in either coding */
++	switch (reg) {
++	case 0x05: return v <= 0x59u;          /* SEC  (binary 59 = 0x3b < 0x59) */
++	case 0x06: return v <= 0x59u;          /* MIN */
++	case 0x07: return (v & 0x3fu) <= 0x23u && !(v & 0x80u);        /* HOUR [5:0], bit 6 PM */
++	case 0x08: return v != 0 && v <= 0x40u && !(v & (v - 1u));      /* WEEK: one bit a day */
++	case 0x09: return v >= 1u && v <= 0x31u;                        /* DAY */
++	case 0x0a: return v >= 1u && v <= 0x12u;                        /* MONTH */
++	case 0x0b: return v <= 0x99u;                                   /* YEAR since 2000 */
++	default: return false;
++	}
++}
++
++bool
++s2mps18_write_allowed(const struct s2mps18_policy *p, uint32_t type, uint32_t reg, uint8_t value, uint8_t cur,
++    const char **why)
++{
++	uint8_t vs = cur & S2MPS18_LDO_VSEL;
++
++	if (why) {
++		*why = "ok";
++	}
++	if (type == ACPM_PMIC_RTC) {
++		if (reg == S2MPS18_RTC_UPDATE) {
++			if (value == (cur | S2MPS18_RTC_RUDR) || value == (cur | S2MPS18_RTC_WUDR)) {
++				return true;
++			}
++			return deny(why, "RTC UPDATE: only RUDR or WUDR may be added");
++		}
++		if (reg >= S2MPS18_RTC_SEC && reg <= S2MPS18_RTC_YEAR) {
++			return rtc_field_ok(reg, value) ? true : deny(why, "RTC time field out of range");
++		}
++		return deny(why, "RTC register not writable (CTRL, WTSR/SMPL, CAPSEL, MSEC, alarms, OSCCTRL)");
++	}
++	if (type != ACPM_PMIC_PMIC) {
++		return deny(why, "only the PMIC and RTC blocks are writable");
++	}
++	switch (reg) {
++	case S2MPS18_L35CTRL:
++		if (value != 0xecu) {
++			return deny(why, "LDO35: only 0xec (on, 1.8 V)");
++		}
++		return (vs == 0x2cu || vs == 0) ? true : deny(why, "LDO35: programmed vsel unexpected");
++	case S2MPS18_L43CTRL:
++		if (value != 0xf0u) {
++			return deny(why, "LDO43: only 0xf0 (on, 3.0 V)");
++		}
++		return (vs == 0 || (vs >= 0x28u && vs <= 0x3cu)) ? true : deny(why, "LDO43: programmed vsel unexpected");
++	case S2MPS18_B6OUT:
++		if (value == 0x68u) {
++			return true;
++		}
++		if (p && p->b6_seen && value == p->b6_boot && value >= 0x20u && value <= 0x70u) {
++			return true;
++		}
++		return deny(why, "BUCK6: only 0x68 (950 mV) or its boot value");
++	case S2MPS18_L31CTRL:
++		if (value != 0x28u && value != 0xe8u) {
++			return deny(why, "LDO31: only 0x28 / 0xe8 (2.8 V off / on)");
++		}
++		return (vs == 0 || (vs >= 0x24u && vs <= 0x3cu)) ? true : deny(why, "LDO31: programmed vsel unexpected");
++	case S2MPS18_L2CTRL1:
++		if (value == 0xc0u || value == 0xfcu || value == 0x3cu || value == vs) {
++			return true;
++		}
++		return deny(why, "LDO2: only 0xc0 / 0xfc / 0x3c or off at its vsel");
++	default:
++		return deny(why, "PMIC register not on the write list");
++	}
++}
++
++bool
++acpm_dvfs_allowed(uint32_t domain, uint32_t khz, bool governor, const char **why)
++{
++	static const uint32_t g3d[] = { 572000, 546000, 455000, 338000, 299000, 260000 };
++
++	if (why) {
++		*why = "ok";
++	}
++	if (khz == 0) {
++		return deny(why, "0 kHz");
++	}
++	switch (domain) {
++	case ACPM_DVFS_CPUCL0:
++		return khz <= 1794000u ? true : deny(why, "cpucl0 above 1794000 kHz");
++	case ACPM_DVFS_CPUCL1:
++		if (khz <= 1794000u) {
++			return true;
++		}
++		if (!governor) {
++			return deny(why, "cpucl1 above 1794000 kHz without a thermal governor");
++		}
++		return khz <= 2704000u ? true : deny(why, "cpucl1 above 2704000 kHz");
++	case ACPM_DVFS_G3D:
++		for (unsigned i = 0; i < sizeof(g3d) / sizeof(g3d[0]); i++) {
++			if (khz == g3d[i]) {
++				return true;
++			}
++		}
++		return deny(why, "g3d: not one of starlte_gpu.c's levels");
++	default:
++		return deny(why, "domain not allowed (MIF/INT froze the phone)");
++	}
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteACPM/hw/s2mps18_policy.h b/iokit/Kernel/arm/starbite/StarbiteACPM/hw/s2mps18_policy.h
+new file mode 100644
+index 00000000..d9fac997
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteACPM/hw/s2mps18_policy.h
+@@ -0,0 +1,80 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * What StarbiteACPM lets its clients do to the S2MPS18 through ACPM. The rule (docs/APPLE-S9-DRIVERS.md row 7,
++ * task brief): no regulator write beyond what today's kernel already does on the phone. Every allowed write is
++ * listed here with the patch that does it today; anything else is refused before it reaches the APM.
++ *
++ * Reads: everything except the PMIC block's clear-on-read interrupt registers INT1..INT7 (type 1, 0x00..0x06).
++ * Writes (type 1 = PMIC block):
++ *   0x6c L35CTRL tsp_io      0xec (on, 1.8 V)              starlte_touch.c st_power_on (0302); only if the
++ *                                                          programmed vsel is 0x2c or 0
++ *   0x74 L43CTRL tsp_avdd    0xf0 (on, 3.0 V)              same; only if vsel is 0 or 0x28..0x3c
++ *   0x2b B6OUT   vdd_g3d     0x68 (950 mV), or the value read first this boot when that was in 0x20..0x70
++ *                                                          starlte_gpu.c stage 2 (0301 / 0412)
++ *   0x68 L31CTRL vmmc (SD)   0x28 (off, 2.8 V), 0xe8 (on, 2.8 V); only if vsel is 0 or 0x24..0x3c
++ *                                                          starlte_sd.c rails / park (0345, 0400, 4aeec8f)
++ *   0x4a L2CTRL1 vqmmc (SD)  0xc0 (on 1.8 V), 0xfc (on 3.3 V), 0x3c (off 3.3 V), or off at the vsel it has
++ *                                                          starlte_sd.c (0345, 0353)
++ * Writes (type 2 = RTC block), for StarbiteRTC only:
++ *   0x02 UPDATE              the value read + RUDR (bit 0) or + WUDR (bit 1), nothing else changed
++ *   0x05..0x0b SEC..YEAR     a value in its field's range
++ * Never: type 0 (TOP), any other PMIC register (bucks, LDOs, OCP, SMPL/WTSR, ramp), RTC CTRL 0x00, WTSR_SMPL 0x01,
++ * CAPSEL 0x03 (the 32 kHz oscillator's load), MSEC 0x04, the alarms 0x0c.. and OSCCTRL 0x1a.
++ */
++#ifndef STARBITE_S2MPS18_POLICY_H
++#define STARBITE_S2MPS18_POLICY_H
++
++#include <stdint.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define S2MPS18_B6OUT           0x2bu
++#define S2MPS18_L2CTRL1         0x4au
++#define S2MPS18_L31CTRL         0x68u
++#define S2MPS18_L35CTRL         0x6cu
++#define S2MPS18_L43CTRL         0x74u
++
++#define S2MPS18_RTC_CTRL        0x00u
++#define S2MPS18_RTC_WTSR_SMPL   0x01u
++#define S2MPS18_RTC_UPDATE      0x02u
++#define S2MPS18_RTC_CAPSEL      0x03u
++#define S2MPS18_RTC_MSEC        0x04u
++#define S2MPS18_RTC_SEC         0x05u
++#define S2MPS18_RTC_YEAR        0x0bu
++#define S2MPS18_RTC_RUDR        0x01u
++#define S2MPS18_RTC_WUDR        0x02u
++
++/* LDO control: [7:6] enable (3 = on), [5:0] vsel */
++#define S2MPS18_LDO_ON          0xc0u
++#define S2MPS18_LDO_VSEL        0x3fu
++
++struct s2mps18_policy {
++	bool b6_seen;                   /* B6OUT read once: its boot value kept for the restore rule */
++	uint8_t b6_boot;
++};
++
++/* May (type, reg) be read? (false: a clear-on-read interrupt register) */
++bool s2mps18_read_allowed(uint32_t type, uint32_t reg);
++
++/* Record a value read (the policy remembers B6OUT's first value). */
++void s2mps18_note_read(struct s2mps18_policy *p, uint32_t type, uint32_t reg, uint8_t value);
++
++/* May value be written to (type, reg) whose current content is cur? why: the reason when not. */
++bool s2mps18_write_allowed(const struct s2mps18_policy *p, uint32_t type, uint32_t reg, uint8_t value, uint8_t cur,
++    const char **why);
++
++/*
++ * DVFS limits (the clocks today's kernel asks for): cpucl0 (2) and cpucl1 (3) at most 1794000 kHz
++ * (starlte_touch.c st_cpu_dvfs, "not without thermal control"); cpucl1 up to 2704000 kHz only with a thermal
++ * governor running (0411 starcpugov); g3d (4) only 572000 546000 455000 338000 299000 260000 (starlte_gpu.c);
++ * every other domain refused (MIF 2093000 / INT 667000 froze the phone at once, boot69). 0 kHz is refused.
++ */
++bool acpm_dvfs_allowed(uint32_t domain, uint32_t khz, bool governor, const char **why);
++
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteBattery.cpp b/iokit/Kernel/arm/starbite/StarbiteBattery.cpp
+new file mode 100644
+index 00000000..b27f3e5e
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteBattery.cpp
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteBattery/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteBattery/
++ * (commit 4a7ec17); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteBattery/StarbiteBattery.cpp"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteBattery/StarbiteBattery.cpp b/iokit/Kernel/arm/starbite/StarbiteBattery/StarbiteBattery.cpp
+new file mode 100644
+index 00000000..321a7829
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteBattery/StarbiteBattery.cpp
+@@ -0,0 +1,495 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteBattery (docs/APPLE-S9-DRIVERS.md Part 3 row 22): see StarbiteBattery.h, hw/, NOTES.md.
++ * The published key set follows what SweetBattery (xnu/series-12377 0220/0221) publishes for powerd, written
++ * anew here; capacities are in percent (MaxCapacity 100) as Apple's own batteries publish them, mAh in the
++ * AppleRaw* keys. Every bus access happens on the work loop (timers), never in start's caller beyond the first.
++ * One register write only: the MAX77705 charger watchdog clear (CNFG_06 WDTCLR = 01, allowed 2026-11-11).
++ */
++#include "StarbiteBattery.h"
++#include <IOKit/IOLib.h>
++#include <libkern/c++/OSCollectionIterator.h>
++#include <libkern/c++/OSNumber.h>
++#include <libkern/c++/OSString.h>
++#include <libkern/c++/OSSymbol.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++extern "C" int starlte_sbstop_at(const char *stage);
++extern "C" void starlte_sbstop_now(const char *stage);
++#endif
++
++#define super IOPMPowerSource
++OSDefineMetaClassAndStructors(StarbiteBattery, IOPMPowerSource);
++
++/* ---- MMIO for hw/ ---- */
++
++uint32_t
++StarbiteBattery::ioRd(void *ctx, uint32_t off)
++{
++	StarbiteBattery *me = (StarbiteBattery *)ctx;
++	uint32_t v = *(volatile uint32_t *)(me->fBase + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++void
++StarbiteBattery::ioWr(void *ctx, uint32_t off, uint32_t v)
++{
++	StarbiteBattery *me = (StarbiteBattery *)ctx;
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(me->fBase + off) = v;
++}
++
++void
++StarbiteBattery::ioDelay(void *, uint32_t us)
++{
++	IODelay(us);
++}
++
++int
++StarbiteBattery::gaugeRead(void *ctx, uint8_t addr7, uint8_t reg, uint8_t *buf, unsigned len)
++{
++	StarbiteBattery *me = (StarbiteBattery *)ctx;
++	return hsi2c_read_reg(&me->fBus, addr7, reg, buf, len);
++}
++
++/* The one write (0x69:0xbd, checked again in hsi2c_write_reg and max77705_wdt_kick). */
++int
++StarbiteBattery::gaugeWrite(void *ctx, uint8_t addr7, uint8_t reg, uint8_t value)
++{
++	StarbiteBattery *me = (StarbiteBattery *)ctx;
++	return hsi2c_write_reg(&me->fBus, addr7, reg, value);
++}
++
++static uint64_t
++uptime_s(void)
++{
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / NSEC_PER_SEC;
++}
++
++/* ---- the M11 load: one busy kernel thread per CPU until the deadline ---- */
++
++static uint64_t gLoadUntil;     /* absolute time */
++static volatile uint64_t gLoadSink;
++
++static void
++load_thread(void *, wait_result_t)
++{
++	uint64_t x = 0;
++	while (mach_absolute_time() < gLoadUntil) {
++		for (uint32_t i = 0; i < 100000; i++) {
++			x = x * 6364136223846793005ULL + i;
++		}
++		gLoadSink = x;
++	}
++	thread_terminate(current_thread());
++}
++
++static void
++load_start(uint32_t secs)
++{
++	unsigned n = ml_wait_max_cpus();
++	uint64_t interval = 0;
++	nanoseconds_to_absolutetime((uint64_t)secs * NSEC_PER_SEC, &interval);
++	gLoadUntil = mach_absolute_time() + interval;
++	for (unsigned i = 0; i < n; i++) {
++		thread_t th;
++		if (kernel_thread_start(load_thread, NULL, &th) == KERN_SUCCESS) {
++			thread_deallocate(th);
++		}
++	}
++	IOLog("StarbiteBattery: M11 load: %u busy threads for %u s\n", n, secs);
++}
++
++/* ---- init / properties ---- */
++
++bool
++StarbiteBattery::init(OSDictionary *dictionary)
++{
++	/* This XNU's IOPMPowerSource has only init(void): run it, then keep the personality's keys. */
++	if (!super::init()) {
++		return false;
++	}
++	if (dictionary) {
++		OSCollectionIterator *it = OSCollectionIterator::withCollection(dictionary);
++		if (it == NULL) {
++			return false;
++		}
++		const OSSymbol *key;
++		while ((key = OSDynamicCast(OSSymbol, it->getNextObject())) != NULL) {
++			setProperty(key, dictionary->getObject(key));
++		}
++		it->release();
++	}
++	return true;
++}
++
++void
++StarbiteBattery::putNumber(const char *key, int64_t value)
++{
++	const OSSymbol *k = OSSymbol::withCString(key);
++	OSNumber *n = OSNumber::withNumber((unsigned long long)value, 64);
++	if (k && n) {
++		setPSProperty(k, n);
++	}
++	OSSafeReleaseNULL(n);
++	OSSafeReleaseNULL(k);
++}
++
++void
++StarbiteBattery::putBool(const char *key, bool value)
++{
++	const OSSymbol *k = OSSymbol::withCString(key);
++	if (k) {
++		setPSProperty(k, value ? kOSBooleanTrue : kOSBooleanFalse);
++		k->release();
++	}
++}
++
++void
++StarbiteBattery::putString(const char *key, const char *value)
++{
++	const OSSymbol *k = OSSymbol::withCString(key);
++	OSString *s = OSString::withCString(value ? value : "");
++	if (k && s) {
++		setPSProperty(k, s);
++	}
++	OSSafeReleaseNULL(s);
++	OSSafeReleaseNULL(k);
++}
++
++void
++StarbiteBattery::publish(const struct battery_state *st)
++{
++	setBatteryInstalled(st->present);
++	setMaxCapacity(100);
++	setCurrentCapacity(st->percent);
++	setExternalConnected(st->external);
++	setExternalChargeCapable(st->charge_capable);
++	setIsCharging(st->charging);
++	setAtWarnLevel(st->warn);
++	setAtCriticalLevel(st->critical);
++	setVoltage(st->mv);
++	setAmperage(st->ma);
++	setTimeRemaining(st->charging ? st->minutes_to_full : st->minutes_to_empty);
++	setCycleCount(st->cycles);
++	putBool("FullyCharged", st->full);
++	putNumber("DesignCapacity", st->design_mah);
++	putNumber("NominalChargeCapacity", st->max_mah);
++	putNumber("AppleRawCurrentCapacity", st->cur_mah);
++	putNumber("AppleRawMaxCapacity", st->max_mah);
++	putBool("AppleRawExternalConnected", st->external);
++	putNumber("AppleRawBatteryVoltage", st->mv);
++	putNumber("InstantAmperage", st->ma);
++	putNumber("AvgTimeToEmpty", st->minutes_to_empty >= 0 ? st->minutes_to_empty : 65535);
++	putNumber("AvgTimeToFull", st->minutes_to_full >= 0 ? st->minutes_to_full : 65535);
++	putNumber("Temperature", st->temp_c10 * 10);   /* centi-degrees C */
++	putBool("StarbiteBatteryMeasured", st->measured);
++	putString("StarbiteBatteryNote", st->why);
++	putNumber("StarbiteBatterySOCx10", st->soc_x10);
++	putBool("StarbiteBatteryTemperatureEstimated", true);
++	putBool("ChargerWatchdogExpired", st->charger_wdt_expired);
++	putNumber("ChargerDetails", st->chg_dtls);
++
++	OSDictionary *legacy = OSDictionary::withCapacity(6);
++	if (legacy) {
++		const char *keys[] = { kIOBatteryCurrentChargeKey, kIOBatteryCapacityKey, kIOBatteryVoltageKey,
++			               kIOBatteryAmperageKey, kIOBatteryCycleCountKey, kIOBatteryFlagsKey };
++		UInt32 values[] = { st->cur_mah, st->max_mah, st->mv, (UInt32)st->ma, st->cycles,
++			            (UInt32)(kIOBatteryInstalled | (st->external ? kIOBatteryChargerConnect : 0) |
++			            (st->charging ? kIOBatteryCharge : 0)) };
++		for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
++			OSNumber *n = OSNumber::withNumber(values[i], 32);
++			if (n) {
++				legacy->setObject(keys[i], n);
++				n->release();
++			}
++		}
++		setLegacyIOBatteryInfo(legacy);
++		legacy->release();
++	}
++	updateStatus();
++}
++
++/* ---- sampling ---- */
++
++void
++StarbiteBattery::poll(void)
++{
++	struct max77705_raw raw;
++	struct battery_state st;
++
++	bzero(&raw, sizeof(raw));
++	if (fReal) {
++		(void)max77705_sample(&fGauge, &raw);
++		max77705_state(&raw, &st, &fLow);
++	} else {
++		battery_fallback(&st, "sbbattery=0: static");
++	}
++	fSamples++;
++	bool modeChanged = fSamples == 1 || st.measured != (fLastMeasured != 0);
++	fLastMeasured = st.measured;
++	if (modeChanged || fTestLog || fSamples % 20 == 0) {
++		IOLog("StarbiteBattery: t=%llu s %s: %d.%d %% (%u%%) %u mV %d mA (avg %d) %d.%d C %u/%u mAh cycles %u "
++		    "ext %d chg %d full %d dtls %d/%d/%d%s; bus errors %u fallbacks %u; %s\n", uptime_s(),
++		    st.measured ? "MAX77705" : "fallback", st.soc_x10 / 10, st.soc_x10 % 10, st.percent, st.mv, st.ma,
++		    st.avg_ma, st.temp_c10 / 10, (st.temp_c10 < 0 ? -st.temp_c10 : st.temp_c10) % 10, st.cur_mah,
++		    st.max_mah, st.cycles, st.external, st.charging, st.full, st.chg_dtls, st.bat_dtls, st.chgin_dtls,
++		    st.charger_wdt_expired ? " CHARGER WATCHDOG EXPIRED" : "", fBus.errors, fBus.fallbacks, st.why);
++	}
++	fState = st;
++	publish(&st);
++}
++
++/* PHONE-TEST.md M11: baseline 10 s, load fLoadS s, then the verdict. */
++void
++StarbiteBattery::testStep(uint64_t now_s)
++{
++	uint64_t t = now_s - fT0;
++	if (fPhase == 2) {
++		return;
++	}
++	fAllMeasured = fAllMeasured && fState.measured;
++	if (fState.soc_x10 < fMinSoc) {
++		fMinSoc = fState.soc_x10;
++	}
++	if (fState.soc_x10 > fMaxSoc) {
++		fMaxSoc = fState.soc_x10;
++	}
++	if (fPhase == 0) {
++		fBaseSoc = fState.soc_x10;
++		fBaseMa = fState.ma;
++		if (t >= 10) {
++			fPhase = 1;
++			fMinSoc = fMaxSoc = fState.soc_x10;
++			fLoadMa = 0;
++			load_start(fLoadS);
++		}
++		return;
++	}
++	if (fState.ma < fLoadMa) {
++		fLoadMa = fState.ma;            /* the most negative: the heaviest discharge */
++	}
++	if (t < 10 + (uint64_t)fLoadS + 2) {
++		return;
++	}
++	fPhase = 2;
++	bool socMoved = fMinSoc != fMaxSoc || fState.soc_x10 != fBaseSoc;
++	bool currentRose = fLoadMa <= fBaseMa - 200;
++	bool pass = fAllMeasured && socMoved && currentRose;
++	IOLog("StarbiteBattery: M11 %s: measured %s, SOC %d.%d %% -> %d.%d %% (range %d..%d x0.1 %%), current %d mA "
++	    "idle -> %d mA under load (%s), percent shown %u%%\n", pass ? "PASS" : "FAIL", fAllMeasured ? "yes" : "NO",
++	    fBaseSoc / 10, fBaseSoc % 10, fState.soc_x10 / 10, fState.soc_x10 % 10, fMinSoc, fMaxSoc, fBaseMa,
++	    fLoadMa, currentRose ? "rose" : "did not rise 200 mA", fState.percent);
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	if (starlte_sbstop_at("battery")) {
++		starlte_sbstop_now("battery");
++	}
++#endif
++}
++
++void
++StarbiteBattery::timerFired(OSObject *owner, IOTimerEventSource *sender)
++{
++	StarbiteBattery *me = OSDynamicCast(StarbiteBattery, owner);
++	if (me == NULL || !me->fRunning) {
++		return;
++	}
++	me->poll();
++	if (me->fChgTestS) {
++		me->chgTestStep(uptime_s());
++	}
++	if (me->fLoadS) {
++		me->testStep(uptime_s());
++	}
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	else if (me->fSamples == 1 && starlte_sbstop_at("battery")) {
++		starlte_sbstop_now("battery");
++	}
++#endif
++	sender->setTimeoutMS(me->fPollMs);
++}
++
++/* The charger watchdog clear, every MAX77705_WDT_KICK_S s on the work loop (serialised with the sampling). */
++void
++StarbiteBattery::kickFired(OSObject *owner, IOTimerEventSource *sender)
++{
++	StarbiteBattery *me = OSDynamicCast(StarbiteBattery, owner);
++	if (me == NULL || !me->fRunning || !me->fKick) {
++		return;
++	}
++	uint8_t w = 0;
++	int r = max77705_wdt_kick(&me->fGauge, &w);
++	if (r == MAX77705_KICK_OK) {
++		me->fKicks++;
++		if (!me->fKickLogged) {
++			me->fKickLogged = true;
++			IOLog("StarbiteBattery: charger watchdog: cleared every %u s (CNFG_06 0xbd = %#x: WDTCLR 01, CHGPROT kept)\n",
++			    MAX77705_WDT_KICK_S, w);
++		}
++	} else if (r == MAX77705_KICK_OFF) {
++		if (!me->fKickLogged) {
++			me->fKickLogged = true;
++			IOLog("StarbiteBattery: charger watchdog: not enabled (CNFG_00 WDTEN 0): nothing written\n");
++		}
++	} else if (me->fKickFails++ < 4) {
++		IOLog("StarbiteBattery: charger watchdog clear failed (%d)\n", r);
++	}
++	me->setProperty("ChargerWatchdogClears", me->fKicks, 32);
++	sender->setTimeoutMS(MAX77705_WDT_KICK_S * 1000u);
++}
++
++/* PHONE-TEST.md M11b: on the cable for fChgTestS s, did charging hold (no CHG_DTLS 0x0b, charging or full)? */
++void
++StarbiteBattery::chgTestStep(uint64_t now_s)
++{
++	uint64_t t = now_s - fT0;
++	if (fChgDone) {
++		return;
++	}
++	bool ok = fState.measured && fState.external && !fState.charger_wdt_expired && (fState.charging || fState.full);
++	if (!ok && fChgHeld) {
++		fChgHeld = false;
++		fChgBadT = t;
++		fChgBadDtls = fState.chg_dtls;
++	}
++	if (t < fChgTestS) {
++		return;
++	}
++	fChgDone = true;
++	if (fChgHeld) {
++		IOLog("StarbiteBattery: M11b PASS: on the cable %llu s, charging throughout, %u watchdog clears, never expired\n",
++		    t, fKicks);
++	} else {
++		IOLog("StarbiteBattery: M11b FAIL: charging lost at %llu s (CHG_DTLS %d), %u watchdog clears (clear %s)\n",
++		    fChgBadT, fChgBadDtls, fKicks, fKick ? "on" : "off: sbchgwdt=0");
++	}
++}
++
++/* ---- start / stop ---- */
++
++bool
++StarbiteBattery::start(IOService *provider)
++{
++	uint32_t on = 1, poll_s = 30, test = 0, load = 0, kick = 1, chgtest = 0;
++
++	if (!super::start(provider)) {
++		return false;
++	}
++	(void)PE_parse_boot_argn("sbbattery", &on, sizeof(on));
++	(void)PE_parse_boot_argn("sbbatpoll", &poll_s, sizeof(poll_s));
++	(void)PE_parse_boot_argn("sbbattest", &test, sizeof(test));
++	(void)PE_parse_boot_argn("sbbatload", &load, sizeof(load));
++	(void)PE_parse_boot_argn("sbchgwdt", &kick, sizeof(kick));
++	(void)PE_parse_boot_argn("sbchgtest", &chgtest, sizeof(chgtest));
++	fChgTestS = chgtest;
++	fChgHeld = true;
++	fTestLog = fTestLog || chgtest != 0;
++	poll_s = poll_s < 2 ? 2 : poll_s > 300 ? 300 : poll_s;
++	fPollMs = poll_s * 1000u;
++	fTestLog = test != 0 || load != 0;
++	fLoadS = load > 60 ? 60 : load;
++	fT0 = uptime_s();
++	fAllMeasured = true;
++	fMinSoc = 1000;
++	fMaxSoc = 0;
++
++	fReal = false;
++	if (on) {
++		fMap = provider->mapDeviceMemoryWithIndex(0);
++		if (fMap && fMap->getLength() >= 0x100) {
++			fBase = fMap->getVirtualAddress();
++			fIo.ctx = this;
++			fIo.rd = ioRd;
++			fIo.wr = ioWr;
++			fIo.delay_us = ioDelay;
++			hsi2c_init(&fBus, &fIo);
++			fGauge.ctx = this;
++			fGauge.read = gaugeRead;
++			fGauge.write = kick ? gaugeWrite : NULL;
++			fKick = kick != 0;
++			uint8_t id = 0;
++			bool pmic = hsi2c_read_reg(&fBus, MAX77705_PMIC_ADDR, 0x00, &id, 1) == 0;
++			IOLog("StarbiteBattery: HSI2C %#llx, timing FS1 %#x FS2 %#x FS3 %#x (S-Boot's), MAX77705 PMICID %s%#x\n",
++			    (unsigned long long)fMap->getPhysicalAddress(), fBus.fs1, fBus.fs2, fBus.fs3,
++			    pmic ? "" : "unreadable ", id);
++			fReal = true;
++		} else {
++			IOLog("StarbiteBattery: no reg 0 on the nub: static fallback\n");
++		}
++	} else {
++		IOLog("StarbiteBattery: sbbattery=0: static fallback, no bus access\n");
++	}
++	/* A complete source before registerService wakes powerd. */
++	poll();
++	fLoop = IOWorkLoop::workLoop();
++	fTimer = IOTimerEventSource::timerEventSource(this, &StarbiteBattery::timerFired);
++	if (fLoop && fTimer && fLoop->addEventSource(fTimer) == kIOReturnSuccess) {
++		fTimerAdded = true;
++		fRunning = true;
++		fTimer->setTimeoutMS(fPollMs);
++		if (fKick) {
++			fKickTimer = IOTimerEventSource::timerEventSource(this, &StarbiteBattery::kickFired);
++			if (fKickTimer && fLoop->addEventSource(fKickTimer) == kIOReturnSuccess) {
++				fKickAdded = true;
++				fKickTimer->setTimeoutMS(1);    /* the first clear at once, then every 30 s */
++			} else {
++				IOLog("StarbiteBattery: charger watchdog: no timer, not cleared\n");
++			}
++		} else if (fReal) {
++			IOLog("StarbiteBattery: charger watchdog: sbchgwdt=0, not cleared (read only)\n");
++		}
++	} else {
++		IOLog("StarbiteBattery: no timer: the first sample stays\n");
++	}
++	registerService();
++	return true;
++}
++
++IOReturn
++StarbiteBattery::stopPolling(OSObject *owner, void *, void *, void *, void *)
++{
++	StarbiteBattery *me = OSDynamicCast(StarbiteBattery, owner);
++	if (me == NULL) {
++		return kIOReturnBadArgument;
++	}
++	me->fRunning = false;
++	me->fTimer->cancelTimeout();
++	me->fTimer->disable();
++	if (me->fKickTimer) {
++		me->fKickTimer->cancelTimeout();
++		me->fKickTimer->disable();
++	}
++	return kIOReturnSuccess;
++}
++
++void
++StarbiteBattery::stop(IOService *provider)
++{
++	if (fLoop && fTimerAdded) {
++		(void)fLoop->runAction(&StarbiteBattery::stopPolling, this);
++		fLoop->removeEventSource(fTimer);
++		fTimerAdded = false;
++		if (fKickAdded) {
++			fLoop->removeEventSource(fKickTimer);
++			fKickAdded = false;
++		}
++	}
++	super::stop(provider);
++}
++
++void
++StarbiteBattery::free(void)
++{
++	OSSafeReleaseNULL(fTimer);
++	OSSafeReleaseNULL(fKickTimer);
++	OSSafeReleaseNULL(fLoop);
++	OSSafeReleaseNULL(fMap);
++	super::free();
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteBattery/StarbiteBattery.h b/iokit/Kernel/arm/starbite/StarbiteBattery/StarbiteBattery.h
+new file mode 100644
+index 00000000..6ecd8900
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteBattery/StarbiteBattery.h
+@@ -0,0 +1,78 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteBattery: IOPMPowerSource for the S9's MAX77705 (fuel gauge 0x36, charger 0x69) on HSI2C 0x14360000,
++ * read only. Matching: IONameMatch "hsi2c-pmic" (the arm-io node name; tools/board/starlte.board) with its own
++ * IOMatchCategory, so StarbiteHSI2C can sit on the same nub later. Address: the nub's reg 0.
++ *
++ * Boot-args:
++ *   sbbattery=0       no bus access: SweetBattery's static 100 % on AC (as today)
++ *   sbbatpoll=S       poll period in seconds (default 30; 2..300)
++ *   sbbattest=1       log every sample (PHONE-TEST.md M11)
++ *   sbbatload=S       test: after a 10 s baseline, busy every CPU for S s (max 60), then the M11 verdict line
++ *   sbstop=battery    0423 self-stop after the verdict (or after the first sample without sbbatload)
++ *   sbchgwdt=0        do not clear the charger watchdog (default: cleared every 30 s, the driver's ONE write)
++ *   sbchgtest=S       M11b: after S s log whether charging held on the cable the whole time (no self-stop)
++ */
++#ifndef STARBITE_BATTERY_H
++#define STARBITE_BATTERY_H
++
++#include <IOKit/pwr_mgt/IOPMPowerSource.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include "hw/exynos_hsi2c.h"
++#include "hw/max77705.h"
++
++class StarbiteBattery : public IOPMPowerSource {
++	OSDeclareDefaultStructors(StarbiteBattery);
++
++public:
++	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
++
++private:
++	IOMemoryMap *fMap;
++	vm_address_t fBase;
++	IOWorkLoop *fLoop;
++	IOTimerEventSource *fTimer;
++	IOTimerEventSource *fKickTimer;
++	bool fTimerAdded, fKickAdded, fRunning, fReal, fTestLog, fKick, fKickLogged;
++	uint32_t fKicks, fKickFails;
++	/* M11b */
++	uint32_t fChgTestS;
++	bool fChgHeld, fChgDone;
++	uint64_t fChgBadT;
++	int32_t fChgBadDtls;
++	struct hsi2c fBus;
++	struct hsi2c_io fIo;
++	struct max77705_bus fGauge;
++	struct battery_state fState;
++	uint32_t fLow, fPollMs, fSamples, fLastMeasured;
++	/* M11 test */
++	uint32_t fLoadS;
++	uint64_t fT0;
++	int fPhase;                     /* 0 baseline, 1 load, 2 done */
++	int32_t fBaseSoc, fBaseMa, fMinSoc, fMaxSoc, fLoadMa;
++	bool fAllMeasured;
++
++	void putNumber(const char *key, int64_t value);
++	void putBool(const char *key, bool value);
++	void putString(const char *key, const char *value);
++	void publish(const struct battery_state *st);
++	void poll(void);
++	void testStep(uint64_t now_s);
++	static void timerFired(OSObject *owner, IOTimerEventSource *sender);
++	static void kickFired(OSObject *owner, IOTimerEventSource *sender);
++	void chgTestStep(uint64_t now_s);
++	static int gaugeWrite(void *ctx, uint8_t addr7, uint8_t reg, uint8_t value);
++	static IOReturn stopPolling(OSObject *owner, void *, void *, void *, void *);
++
++	static uint32_t ioRd(void *ctx, uint32_t off);
++	static void ioWr(void *ctx, uint32_t off, uint32_t v);
++	static void ioDelay(void *ctx, uint32_t us);
++	static int gaugeRead(void *ctx, uint8_t addr7, uint8_t reg, uint8_t *buf, unsigned len);
++};
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteBattery/hw/exynos_hsi2c.c b/iokit/Kernel/arm/starbite/StarbiteBattery/hw/exynos_hsi2c.c
+new file mode 100644
+index 00000000..c868106a
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteBattery/hw/exynos_hsi2c.c
+@@ -0,0 +1,152 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/* Polled read-only Exynos USI HSI2C master (see exynos_hsi2c.h). */
++#include "exynos_hsi2c.h"
++
++static uint32_t
++R(struct hsi2c *h, uint32_t off)
++{
++	return h->io->rd(h->io->ctx, off);
++}
++
++static void
++W(struct hsi2c *h, uint32_t off, uint32_t v)
++{
++	h->io->wr(h->io->ctx, off, v);
++}
++
++void
++hsi2c_init(struct hsi2c *h, const struct hsi2c_io *io)
++{
++	h->io = io;
++	h->errors = h->resets = h->fallbacks = 0;
++	if (!h->saved) {
++		h->fs1 = R(h, HSI2C_TIMING_FS1);
++		h->fs2 = R(h, HSI2C_TIMING_FS2);
++		h->fs3 = R(h, HSI2C_TIMING_FS3);
++		if (((h->fs3 >> 16) & 0xffu) == 0) {
++			/* nothing from S-Boot: 400 kHz from a 200 MHz IPCLK, as the touch bus (exynos9810-woa) */
++			h->fs3 = (h->fs3 & ~0x00ff0000u) | (0x21u << 16);
++			h->fs2 = (h->fs2 & ~0x000000ffu) | 0xe0u;
++			h->fs1 = (h->fs1 & ~0x00ff0000u) | (0xf0u << 16);
++		}
++		h->saved = true;
++	}
++	hsi2c_reset(h);
++}
++
++void
++hsi2c_reset(struct hsi2c *h)
++{
++	h->resets++;
++	W(h, HSI2C_INT_EN, 0);
++	W(h, HSI2C_USI_CON, 0);                 /* USI reset released */
++	W(h, HSI2C_CTL, R(h, HSI2C_CTL) | 0x80000000u);
++	W(h, HSI2C_CTL, R(h, HSI2C_CTL) & ~0x80000000u);
++	W(h, HSI2C_TIMING_FS3, h->fs3);
++	W(h, HSI2C_TIMING_FS2, h->fs2);
++	W(h, HSI2C_TIMING_FS1, h->fs1);
++	W(h, HSI2C_CTL, 0x8u);                  /* master */
++	W(h, HSI2C_TRAILING_CTL, 0x00ffffffu);
++	W(h, HSI2C_TIMEOUT, R(h, HSI2C_TIMEOUT) & ~0x80000000u);
++	W(h, HSI2C_CONF, R(h, HSI2C_CONF) | 0x80000000u);      /* AUTO mode */
++	W(h, HSI2C_INT_STAT, R(h, HSI2C_INT_STAT) & 0xfffu);
++}
++
++int
++hsi2c_msg(struct hsi2c *h, uint8_t addr7, bool receive, uint8_t *buf, unsigned count, bool stop)
++{
++	uint32_t last = 0;
++	unsigned done = 0, tx_idle = 0;
++	bool xfer_done = false;
++
++	if (count == 0 || count > 32 || addr7 > 0x7fu) {
++		return -1;
++	}
++	unsigned trig = count < 8 ? count : 8;
++	W(h, HSI2C_FIFO_CTL, 3u | (trig << 4) | (trig << 16));
++	W(h, HSI2C_ADDR, (uint32_t)addr7 << 10);
++	W(h, HSI2C_CTL, 0x8u | (receive ? 0x40u : 0x80u));
++	W(h, HSI2C_INT_EN, HSI2C_INT_XFER_DONE);
++	W(h, HSI2C_AUTO_CONF, count | (receive ? 0x10000u : 0) | (stop ? 0x20000u : 0));
++	W(h, HSI2C_AUTO_CONF, R(h, HSI2C_AUTO_CONF) | 0x80000000u);
++	for (unsigned us = 0; us < HSI2C_POLLS; us++) {
++		uint32_t irq = R(h, HSI2C_INT_STAT);
++		if (irq) {
++			last |= irq;
++			W(h, HSI2C_INT_STAT, irq);
++		}
++		if (irq & HSI2C_INT_ERRORS) {
++			break;
++		}
++		if (irq & HSI2C_INT_XFER_DONE) {
++			xfer_done = true;
++		}
++		if (receive) {
++			while (done < count && !(R(h, HSI2C_FIFO_STAT) & HSI2C_FIFO_RX_EMPTY)) {
++				buf[done++] = (uint8_t)R(h, HSI2C_RX_DATA);
++			}
++		} else {
++			while (done < count && !(R(h, HSI2C_FIFO_STAT) & HSI2C_FIFO_TX_FULL)) {
++				W(h, HSI2C_TX_DATA, buf[done++]);
++			}
++			if (!stop && done == count && (R(h, HSI2C_FIFO_STAT) & HSI2C_FIFO_TX_EMPTY)) {
++				tx_idle++;
++			}
++		}
++		if (done == count && (xfer_done || (receive && stop) || tx_idle > HSI2C_TX_IDLE_POLLS)) {
++			W(h, HSI2C_INT_EN, 0);
++			if (!stop) {
++				return 0;
++			}
++			for (unsigned n = 0; n < 10000; n++) {
++				if (!(R(h, HSI2C_TRANS_STATUS) & (1u << 17))) {
++					return 0;
++				}
++				h->io->delay_us(h->io->ctx, 1);
++			}
++			break;
++		}
++		h->io->delay_us(h->io->ctx, 1);
++	}
++	h->errors++;
++	h->last_int = last;
++	h->last_fifo = R(h, HSI2C_FIFO_STAT);
++	h->last_trans = R(h, HSI2C_TRANS_STATUS);
++	W(h, HSI2C_INT_EN, 0);
++	hsi2c_reset(h);
++	return -1;
++}
++
++int
++hsi2c_read_reg(struct hsi2c *h, uint8_t addr7, uint8_t reg, uint8_t *buf, unsigned len)
++{
++	for (unsigned attempt = 0; attempt < 2; attempt++) {
++		if (hsi2c_msg(h, addr7, false, &reg, 1, false) == 0 && hsi2c_msg(h, addr7, true, buf, len, true) == 0) {
++			return 0;
++		}
++		hsi2c_reset(h);
++		h->fallbacks++;
++		if (hsi2c_msg(h, addr7, false, &reg, 1, true) == 0 && hsi2c_msg(h, addr7, true, buf, len, true) == 0) {
++			return 0;
++		}
++		hsi2c_reset(h);
++		h->io->delay_us(h->io->ctx, 300);
++	}
++	return -1;
++}
++
++int
++hsi2c_write_reg(struct hsi2c *h, uint8_t addr7, uint8_t reg, uint8_t value)
++{
++	uint8_t m[2] = { reg, value };
++	if (addr7 != HSI2C_WRITE_ADDR || reg != HSI2C_WRITE_REG) {
++		return -1;
++	}
++	for (unsigned attempt = 0; attempt < 2; attempt++) {
++		if (hsi2c_msg(h, addr7, false, m, 2, true) == 0) {
++			return 0;
++		}
++		hsi2c_reset(h);
++	}
++	return -1;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteBattery/hw/exynos_hsi2c.h b/iokit/Kernel/arm/starbite/StarbiteBattery/hw/exynos_hsi2c.h
+new file mode 100644
+index 00000000..4e5cec82
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteBattery/hw/exynos_hsi2c.h
+@@ -0,0 +1,84 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * A polled, read-only Exynos 9810 USI HSI2C master in AUTO mode, for the MAX77705 on HSI2C 0x14360000 (USI_CMGP03).
++ * Re-implemented from our own build/xnu-12377/bsd/dev/starlte_touch.c (st_bus_init / st_message) and
++ * herolte_battery.c (fg_message, repeated start). Facts: ../NOTES.md.
++ *
++ * Towards the devices: one-byte register pointers before a read, and ONE register write, the MAX77705 charger
++ * watchdog clear (0x69:0xbd, value (cur & 0x0c) | 1; allowed 2026-11-11). hsi2c_write_reg refuses anything else
++ * itself, before any bus traffic. Clear-on-read registers are refused (max77705.h lists them).
++ * When StarbiteHSI2C (row 13) exists this file is replaced by its provider API (INTEGRATION.md).
++ */
++#ifndef STARBITE_EXYNOS_HSI2C_H
++#define STARBITE_EXYNOS_HSI2C_H
++
++#include <stdint.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define HSI2C_CTL               0x00u   /* [31] soft reset, [7] TXCHON, [6] RXCHON, [3] master */
++#define HSI2C_FIFO_CTL          0x04u   /* [0] RX FIFO en, [1] TX FIFO en, [10:4] RX trigger, [22:16] TX trigger */
++#define HSI2C_TRAILING_CTL      0x08u
++#define HSI2C_INT_EN            0x20u
++#define HSI2C_INT_STAT          0x24u   /* [7] TRANSFER_DONE (auto), [11:8] errors (NACKs, timeout) */
++#define HSI2C_FIFO_STAT         0x30u   /* [7] TX full, [8] TX empty, [22:16] RX level, [24] RX empty */
++#define HSI2C_TX_DATA           0x34u
++#define HSI2C_RX_DATA           0x38u
++#define HSI2C_CONF              0x40u   /* [31] AUTO mode */
++#define HSI2C_AUTO_CONF         0x44u   /* [15:0] count, [16] read, [17] STOP after, [31] MASTER_RUN */
++#define HSI2C_TIMEOUT           0x48u   /* [31] timeout enable */
++#define HSI2C_TRANS_STATUS      0x50u   /* [17] master busy */
++#define HSI2C_TIMING_FS1        0x60u
++#define HSI2C_TIMING_FS2        0x64u
++#define HSI2C_TIMING_FS3        0x68u
++#define HSI2C_ADDR              0x70u   /* [16:10] slave address (master) */
++#define HSI2C_USI_CON           0xc4u   /* [0] USI reset, active high */
++
++#define HSI2C_INT_XFER_DONE     0x80u
++#define HSI2C_INT_ERRORS        0xf00u
++#define HSI2C_FIFO_TX_FULL      (1u << 7)
++#define HSI2C_FIFO_TX_EMPTY     (1u << 8)
++#define HSI2C_FIFO_RX_EMPTY     (1u << 24)
++
++#define HSI2C_POLLS             50000u  /* x 1 us per message */
++#define HSI2C_TX_IDLE_POLLS      200u    /* TX empty this long without TRANSFER_DONE: a no-STOP write is out */
++
++struct hsi2c_io {
++	void *ctx;
++	uint32_t (*rd)(void *ctx, uint32_t off);
++	void (*wr)(void *ctx, uint32_t off, uint32_t v);
++	void (*delay_us)(void *ctx, uint32_t us);
++};
++
++struct hsi2c {
++	const struct hsi2c_io *io;
++	uint32_t fs1, fs2, fs3;         /* S-Boot's timing, saved before the first reset */
++	bool saved;
++	uint32_t errors, resets, fallbacks;
++	uint32_t last_int, last_fifo, last_trans;
++};
++
++/* Save S-Boot's timing (0x21 / 0xe0 / 0xf0 for 400 kHz from 200 MHz if it left none), then reset the controller. */
++void hsi2c_init(struct hsi2c *h, const struct hsi2c_io *io);
++void hsi2c_reset(struct hsi2c *h);
++
++/* One AUTO-mode message; stop = false leaves the bus for a repeated START. 1..32 bytes. 0 = ok. */
++int hsi2c_msg(struct hsi2c *h, uint8_t addr7, bool receive, uint8_t *buf, unsigned count, bool stop);
++
++/* Register read: pointer byte without STOP, then a read with STOP (repeated start); if that fails, the same
++ * with a STOP between the halves. 0 = ok. */
++int hsi2c_read_reg(struct hsi2c *h, uint8_t addr7, uint8_t reg, uint8_t *buf, unsigned len);
++
++/* The one write: (0x69, 0xbd) only; any other address or register returns -1 without touching the bus. The
++ * caller checks the value with max77705_write_allowed. 0 = ok. */
++#define HSI2C_WRITE_ADDR        0x69u
++#define HSI2C_WRITE_REG         0xbdu
++int hsi2c_write_reg(struct hsi2c *h, uint8_t addr7, uint8_t reg, uint8_t value);
++
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteBattery/hw/max77705.c b/iokit/Kernel/arm/starbite/StarbiteBattery/hw/max77705.c
+new file mode 100644
+index 00000000..dc95ff52
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteBattery/hw/max77705.c
+@@ -0,0 +1,209 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/* MAX77705 fuel gauge and charger, read only (see max77705.h and ../NOTES.md). */
++#include "max77705.h"
++
++bool
++max77705_read_allowed(uint8_t addr7, uint8_t reg)
++{
++	switch (addr7) {
++	case MAX77705_FG_ADDR:
++		return true;
++	case MAX77705_CHG_ADDR:
++		return reg != CHG_INT;                  /* CHG_INT clears on read */
++	case MAX77705_PMIC_ADDR:
++		return reg != 0x22u && reg != 0x24u;    /* INTSRC, SYSTEM_INT clear on read */
++	case 0x25u:                                     /* USB-C: UIC/CC/PD/VDM_INT clear on read */
++		return reg < 0x02u || reg > 0x05u;
++	default:
++		return false;                           /* 0x62 debug and anything else */
++	}
++}
++
++bool
++max77705_write_allowed(uint8_t addr7, uint8_t reg, uint8_t value, uint8_t cur)
++{
++	return addr7 == MAX77705_CHG_ADDR && reg == CHG_CNFG_06 &&
++	    value == (uint8_t)((cur & CHG_CNFG_06_CHGPROT) | CHG_CNFG_06_WDTCLR_KICK);
++}
++
++static int
++rd(const struct max77705_bus *bus, uint8_t addr7, uint8_t reg, uint8_t *buf, unsigned len)
++{
++	if (!max77705_read_allowed(addr7, reg)) {
++		return -1;
++	}
++	return bus->read(bus->ctx, addr7, reg, buf, len);
++}
++
++/* A gauge word, up to three reads; with lo < hi a value outside [lo, hi] is read again, then rejected. */
++static bool
++fg_word(const struct max77705_bus *bus, uint8_t reg, uint16_t *v, uint32_t lo, uint32_t hi, uint32_t *retries)
++{
++	for (unsigned a = 0; a < 3; a++) {
++		uint8_t b[2];
++		if (a) {
++			(*retries)++;
++		}
++		if (rd(bus, MAX77705_FG_ADDR, reg, b, 2) != 0) {
++			continue;
++		}
++		uint16_t w = (uint16_t)(b[0] | (uint32_t)b[1] << 8);
++		if (lo < hi && (w < lo || w > hi)) {
++			continue;
++		}
++		*v = w;
++		return true;
++	}
++	return false;
++}
++
++int
++max77705_sample(const struct max77705_bus *bus, struct max77705_raw *raw)
++{
++	uint32_t *rt = &raw->fg_retries;
++	raw->fg_retries = 0;
++	/* RepSOC <= 101 %, VCELL 2.5..4.7 V: a failed or impossible read never becomes 0 % / 0 mV */
++	raw->fg_ok = fg_word(bus, FG_REPSOC, &raw->repsoc, 0, 0x6500, rt) &&
++	    fg_word(bus, FG_VCELL, &raw->vcell, 32000, 60160, rt);
++	if (raw->fg_ok) {
++		if (!fg_word(bus, FG_AVGVCELL, &raw->avgvcell, 32000, 60160, rt)) {
++			raw->avgvcell = raw->vcell;
++		}
++		if (!fg_word(bus, FG_CURRENT, &raw->current, 0, 0, rt)) {
++			raw->current = 0;
++		}
++		if (!fg_word(bus, FG_AVGCURRENT, &raw->avgcurrent, 0, 0, rt)) {
++			raw->avgcurrent = raw->current;
++		}
++		raw->fg_ok = fg_word(bus, FG_DESIGNCAP, &raw->designcap, 0, 0, rt) &&
++		    fg_word(bus, FG_STATUS, &raw->status, 0, 0, rt) &&
++		    fg_word(bus, FG_INIT_RESULT, &raw->init_result, 0, 0, rt) &&
++		    fg_word(bus, FG_REPCAP, &raw->repcap, 0, 6000, rt) &&
++		    fg_word(bus, FG_FULLCAPREP, &raw->fullcaprep, 0, 6000, rt);
++		if (!fg_word(bus, FG_TEMP, &raw->temp, 0, 0, rt)) {
++			raw->temp = 25u << 8;
++		}
++		if (!fg_word(bus, FG_CYCLES, &raw->cycles, 0, 0, rt)) {
++			raw->cycles = 0;
++		}
++	}
++	raw->chg_ok = rd(bus, MAX77705_CHG_ADDR, CHG_INT_OK, &raw->int_ok, 1) == 0 &&
++	    rd(bus, MAX77705_CHG_ADDR, CHG_DETAILS_00, &raw->dtls00, 1) == 0 &&
++	    rd(bus, MAX77705_CHG_ADDR, CHG_DETAILS_01, &raw->dtls01, 1) == 0;
++	if (raw->chg_ok) {
++		(void)rd(bus, MAX77705_CHG_ADDR, CHG_DETAILS_02, &raw->dtls02, 1);
++		(void)rd(bus, MAX77705_CHG_ADDR, CHG_CNFG_00, &raw->cnfg00, 1);
++	}
++	return raw->fg_ok ? 0 : -1;
++}
++
++void
++battery_fallback(struct battery_state *st, const char *why)
++{
++	struct battery_state z = { 0 };
++	*st = z;
++	st->measured = false;
++	st->why = why;
++	st->percent = 100;
++	st->soc_x10 = 1000;
++	st->mv = st->avg_mv = 4200;
++	st->temp_c10 = 250;
++	st->cur_mah = st->max_mah = st->design_mah = S9_FULL_CAPACITY_MAH;
++	st->external = st->charge_capable = true;
++	st->full = true;
++	st->present = true;
++	st->chg_dtls = st->bat_dtls = st->chgin_dtls = -1;
++	st->minutes_to_empty = st->minutes_to_full = -1;
++}
++
++void
++max77705_state(const struct max77705_raw *raw, struct battery_state *st, uint32_t *low_count)
++{
++	if (!raw->fg_ok) {
++		battery_fallback(st, "fuel gauge not answering (or an implausible RepSOC / VCELL)");
++		*low_count = 0;
++		return;
++	}
++	if (raw->designcap != S9_DESIGN_RAW || (raw->init_result >> 8) == 0xffu) {
++		battery_fallback(st, "fuel gauge model not loaded (DesignCap != 0x0b97 or init result 0xff)");
++		*low_count = 0;
++		return;
++	}
++	if (raw->status & 0x0008u) {
++		battery_fallback(st, "fuel gauge says no battery (Status.Bst)");
++		*low_count = 0;
++		return;
++	}
++	struct battery_state z = { 0 };
++	*st = z;
++	st->measured = true;
++	st->why = raw->chg_ok ? "measured; temperature is S-Boot's last write (not live)" :
++	    "measured; charger not answering: cable from the current's sign";
++	st->present = true;
++	st->soc_x10 = max77705_soc_x10(raw->repsoc) * 1000 / (int32_t)S9_CAPACITY_MAX;
++	if (st->soc_x10 > 1000) {
++		st->soc_x10 = 1000;
++	}
++	st->percent = (uint32_t)(st->soc_x10 + 5) / 10u;
++	st->mv = (uint32_t)max77705_mv(raw->vcell);
++	st->avg_mv = (uint32_t)max77705_mv(raw->avgvcell);
++	st->ma = max77705_ma(raw->current);
++	st->avg_ma = max77705_ma(raw->avgcurrent);
++	st->temp_c10 = max77705_temp_c10(raw->temp);
++	st->cur_mah = (uint32_t)max77705_mah(raw->repcap);
++	st->max_mah = (uint32_t)max77705_mah(raw->fullcaprep);
++	st->design_mah = (uint32_t)max77705_mah(raw->designcap);
++	st->cycles = max77705_cycles(raw->cycles);
++	if (raw->chg_ok) {
++		st->wireless = (raw->int_ok & CHG_INT_OK_WCIN) != 0;
++		st->external = st->wireless || (raw->int_ok & CHG_INT_OK_CHGIN) != 0;
++		st->chgin_dtls = (raw->dtls00 >> 5) & 3;
++		st->chg_dtls = raw->dtls01 & 0xf;
++		st->bat_dtls = (raw->dtls01 >> 4) & 7;
++		st->charge_capable = st->external && (st->wireless || st->chgin_dtls == 3);
++		st->charging = st->external && st->chg_dtls <= 2;
++		st->full = st->external && (st->chg_dtls == 3 || st->chg_dtls == 4);
++		st->charger_wdt_expired = st->chg_dtls == 0x0b;
++	} else {
++		st->chg_dtls = st->bat_dtls = st->chgin_dtls = -1;
++		st->charging = st->external = st->charge_capable = st->avg_ma > 20;
++	}
++	st->minutes_to_empty = st->minutes_to_full = -1;
++	if (st->avg_ma < -20) {
++		st->minutes_to_empty = (int32_t)(st->cur_mah * 60u / (uint32_t)(-st->avg_ma));
++	} else if (st->charging && st->avg_ma > 20 && st->max_mah > st->cur_mah) {
++		st->minutes_to_full = (int32_t)((st->max_mah - st->cur_mah) * 60u / (uint32_t)st->avg_ma);
++	}
++	/* low: three samples in a row at <= 2 % and <= 3.45 V on battery before AtCriticalLevel */
++	bool low = !st->external && st->soc_x10 <= 20 && st->mv <= 3450;
++	*low_count = low ? *low_count + 1 : 0;
++	st->critical = *low_count >= 3;
++	st->warn = !st->external && st->soc_x10 <= 100;
++}
++
++int
++max77705_wdt_kick(const struct max77705_bus *bus, uint8_t *written)
++{
++	uint8_t cnfg00 = 0, cnfg06 = 0;
++	if (bus->write == 0) {
++		return MAX77705_KICK_EREFUSED;
++	}
++	if (rd(bus, MAX77705_CHG_ADDR, CHG_CNFG_00, &cnfg00, 1) != 0 ||
++	    rd(bus, MAX77705_CHG_ADDR, CHG_CNFG_06, &cnfg06, 1) != 0) {
++		return MAX77705_KICK_EREAD;
++	}
++	if (!(cnfg00 & CHG_CNFG_00_WDTEN)) {
++		return MAX77705_KICK_OFF;
++	}
++	uint8_t v = (uint8_t)((cnfg06 & CHG_CNFG_06_CHGPROT) | CHG_CNFG_06_WDTCLR_KICK);
++	if (!max77705_write_allowed(MAX77705_CHG_ADDR, CHG_CNFG_06, v, cnfg06)) {
++		return MAX77705_KICK_EREFUSED;
++	}
++	if (bus->write(bus->ctx, MAX77705_CHG_ADDR, CHG_CNFG_06, v) != 0) {
++		return MAX77705_KICK_EWRITE;
++	}
++	if (written) {
++		*written = v;
++	}
++	return MAX77705_KICK_OK;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteBattery/hw/max77705.h b/iokit/Kernel/arm/starbite/StarbiteBattery/hw/max77705.h
+new file mode 100644
+index 00000000..8b89725f
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteBattery/hw/max77705.h
+@@ -0,0 +1,139 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * MAX77705 fuel gauge (I2C 0x36) and charger (0x69) on the S9, plain C. Read only, except the one allowed write:
++ * the charger watchdog clear (CNFG_06 WDTCLR = 01, max77705_wdt_kick). Register facts with sources:
++ * ../NOTES.md (build/em-research-battery.md, the vendor DTB). Fixed-point conversions for the S9's
++ * fg_resistor = 2 (5 mOhm sense):
++ *   VCELL / AvgVCELL      mV  = raw * 78.125 uV          = raw * 5 / 64
++ *   Current / AvgCurrent  mA  = s16 * 0.3125 (+ = into the battery)  = s * 5 / 16
++ *   RepSOC                %   = raw / 256 (0.1 %: hi * 10 + lo * 10 / 256)
++ *   RepCap / FullCapRep / DesignCap  mAh = raw (fg_resistor / 2 = 1)
++ *   Temperature           C   = s16 / 256 (host-written on the S9: S-Boot's ADC reading, stale)
++ *   Cycles                cycles = raw / 100 [inferred: ModelGauge m5 1 % LSB; not confirmed for the MAX77705]
++ */
++#ifndef STARBITE_MAX77705_H
++#define STARBITE_MAX77705_H
++
++#include <stdint.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define MAX77705_PMIC_ADDR      0x66u
++#define MAX77705_FG_ADDR        0x36u
++#define MAX77705_CHG_ADDR       0x69u
++
++/* fuel gauge (16 bit, little endian) */
++#define FG_STATUS               0x00u
++#define FG_REPCAP               0x05u
++#define FG_REPSOC               0x06u
++#define FG_TEMP                 0x08u
++#define FG_VCELL                0x09u
++#define FG_CURRENT              0x0au
++#define FG_AVGCURRENT           0x0bu
++#define FG_FULLCAP              0x10u
++#define FG_CYCLES               0x17u
++#define FG_DESIGNCAP            0x18u
++#define FG_AVGVCELL             0x19u
++#define FG_FULLCAPREP           0x35u
++#define FG_INIT_RESULT          0xb2u   /* hi byte 0xff: S-Boot's model load failed */
++
++/* charger (8 bit) */
++#define CHG_INT                 0xb0u   /* clear on read: NEVER read */
++#define CHG_INT_OK              0xb2u
++#define CHG_DETAILS_00          0xb3u
++#define CHG_DETAILS_01          0xb4u
++#define CHG_DETAILS_02          0xb5u
++#define CHG_CNFG_00             0xb7u
++
++#define CHG_CNFG_06             0xbdu   /* [3:2] CHGPROT, [1:0] WDTCLR: the ONE register ever written */
++#define CHG_CNFG_00_WDTEN       0x10u
++#define CHG_CNFG_06_CHGPROT     0x0cu
++#define CHG_CNFG_06_WDTCLR_KICK 0x01u
++#define MAX77705_WDT_KICK_S     30u     /* clear interval (s): Engineer OS's feed; Linux clears on every health poll */
++
++#define CHG_INT_OK_WCIN         0x20u
++#define CHG_INT_OK_CHGIN        0x40u
++
++/* S9 calibration (device/dtb/starlte.dts battery / fuelgauge nodes) */
++#define S9_FG_RESISTOR          2u      /* fuelgauge,fg_resistor */
++#define S9_DESIGN_RAW           0x0b97u /* fuelgauge,capacity: S-Boot's "initialized" marker, 2967 mAh */
++#define S9_CAPACITY_MAX         1000u   /* fuelgauge,capacity_max (0.1 %): no rescaling */
++#define S9_FULL_CAPACITY_MAH    3000u   /* battery,battery_full_capacity */
++#define S9_FLOAT_MV             4350u   /* battery,chg_float_voltage */
++
++/* Is this (addr, reg) safe to read? (no clear-on-read interrupt registers; no debug slave) */
++bool max77705_read_allowed(uint8_t addr7, uint8_t reg);
++
++/*
++ * The only write the driver may make (your decision, 2026-11-11 19:12): the charger watchdog clear, CNFG_06
++ * WDTCLR = 01 with CHGPROT kept as read, i.e. value == (cur & 0x0c) | 0x01 at 0x69:0xbd. Everything else: false.
++ */
++bool max77705_write_allowed(uint8_t addr7, uint8_t reg, uint8_t value, uint8_t cur);
++
++/* fixed-point conversions */
++static inline int32_t max77705_mv(uint16_t raw) { return (int32_t)((uint32_t)raw * 5u / 64u); }
++static inline int32_t max77705_ma(uint16_t raw) { return (int32_t)(int16_t)raw * 5 / 16; }
++static inline int32_t max77705_soc_x10(uint16_t raw) { return (int32_t)(raw >> 8) * 10 + (int32_t)((raw & 0xffu) * 10u / 256u); }
++static inline int32_t max77705_mah(uint16_t raw) { return (int32_t)((uint32_t)raw * S9_FG_RESISTOR / 2u); }
++static inline int32_t max77705_temp_c10(uint16_t raw) { return (int32_t)(int16_t)raw * 10 / 256; }
++static inline uint32_t max77705_cycles(uint16_t raw) { return raw / 100u; }
++
++/* A register reader: 0 = ok. On the phone hsi2c_read_reg, in the tests a model. */
++struct max77705_bus {
++	void *ctx;
++	int (*read)(void *ctx, uint8_t addr7, uint8_t reg, uint8_t *buf, unsigned len);
++	int (*write)(void *ctx, uint8_t addr7, uint8_t reg, uint8_t value);     /* may be NULL: read only */
++};
++
++/* The charger watchdog clear. Reads CNFG_00 (WDTEN) and CNFG_06; writes (CNFG_06 & 0x0c) | 0x01 when the watchdog
++ * is enabled. Results: */
++#define MAX77705_KICK_OK        0
++#define MAX77705_KICK_OFF       1       /* WDTEN clear: nothing to do, nothing written */
++#define MAX77705_KICK_EREAD     (-1)
++#define MAX77705_KICK_EWRITE    (-2)
++#define MAX77705_KICK_EREFUSED  (-3)
++int max77705_wdt_kick(const struct max77705_bus *bus, uint8_t *written);
++
++struct max77705_raw {
++	uint16_t repsoc, vcell, avgvcell, current, avgcurrent, temp, repcap, fullcaprep, designcap, cycles, status,
++	    init_result;
++	uint8_t int_ok, dtls00, dtls01, dtls02, cnfg00;
++	bool fg_ok, chg_ok;
++	uint32_t fg_retries;
++};
++
++/* What the IOPMPowerSource publishes. */
++struct battery_state {
++	bool measured;                  /* false: the safe static fallback (100 %, on AC), never 0 % */
++	const char *why;                /* why not measured / what is estimated */
++	uint32_t percent;               /* 0..100 */
++	int32_t soc_x10;
++	uint32_t mv, avg_mv;
++	int32_t ma, avg_ma;             /* + = charging */
++	int32_t temp_c10;
++	uint32_t cur_mah, max_mah, design_mah;
++	uint32_t cycles;
++	bool external, wireless, charge_capable, charging, full, present;
++	bool charger_wdt_expired;       /* CHG_DTLS 0x0b: S-Boot's charger watchdog ran out (nobody kicks it) */
++	int32_t chg_dtls, bat_dtls, chgin_dtls;
++	int32_t minutes_to_empty, minutes_to_full;      /* -1 unknown */
++	bool critical, warn;
++};
++
++/* Read one sample (fuel gauge words checked against plausible ranges, retried; charger bytes). 0 = gauge ok. */
++int max77705_sample(const struct max77705_bus *bus, struct max77705_raw *raw);
++
++/* Turn a sample into the published state. low_count: consecutive low samples so far (in/out), for the critical
++ * flag, which needs three in a row (one bad sample must never shut the phone down). */
++void max77705_state(const struct max77705_raw *raw, struct battery_state *st, uint32_t *low_count);
++
++/* The fallback SweetBattery has always published: 100 %, 4200 mV, on AC, not charging. */
++void battery_fallback(struct battery_state *st, const char *why);
++
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteRTC.cpp b/iokit/Kernel/arm/starbite/StarbiteRTC.cpp
+new file mode 100644
+index 00000000..c09794fa
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteRTC.cpp
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteRTC/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteRTC/
++ * (commit 4a7ec17); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteRTC/StarbiteRTC.cpp"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteRTC/StarbiteRTC.cpp b/iokit/Kernel/arm/starbite/StarbiteRTC/StarbiteRTC.cpp
+new file mode 100644
+index 00000000..b9ff95fa
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteRTC/StarbiteRTC.cpp
+@@ -0,0 +1,187 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/* StarbiteRTC (docs/APPLE-S9-DRIVERS.md Part 3 row 8): see StarbiteRTC.h, hw/s2mps18_rtc.c, NOTES.md. */
++#include "StarbiteRTC.h"
++#include "../StarbiteACPM/StarbiteACPM.h"
++#include <IOKit/IOLib.h>
++#include <kern/clock.h>
++#include <pexpert/pexpert.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++extern "C" int starlte_sbstop_at(const char *stage);
++extern "C" void starlte_sbstop_now(const char *stage);
++#endif
++
++#define super IORTC
++OSDefineMetaClassAndStructors(StarbiteRTC, IORTC);
++
++static StarbiteRTC *gStarbiteRTC;
++
++StarbiteRTC *
++StarbiteRTC::shared(void)
++{
++	return gStarbiteRTC;
++}
++
++int
++StarbiteRTC::opRd(void *ctx, uint8_t reg, uint8_t *v)
++{
++	StarbiteRTC *me = (StarbiteRTC *)ctx;
++	return me->fACPM->pmicRead(ACPM_PMIC_RTC, reg, v) == kIOReturnSuccess ? 0 : -1;
++}
++
++/* Policy-gated in StarbiteACPM: only UPDATE (+RUDR / +WUDR) and SEC..YEAR are writable. */
++int
++StarbiteRTC::opWr(void *ctx, uint8_t reg, uint8_t v)
++{
++	StarbiteRTC *me = (StarbiteRTC *)ctx;
++	return me->fACPM->pmicWrite(ACPM_PMIC_RTC, reg, v) == kIOReturnSuccess ? 0 : -1;
++}
++
++void
++StarbiteRTC::opDelay(void *, uint32_t us)
++{
++	IODelay(us);
++}
++
++static void
++fmt_date(uint64_t t, char *out, size_t n)
++{
++	struct s2m_tm tm;
++	s2m_unix_to_tm(t, &tm);
++	snprintf(out, n, "%04u-%02u-%02u %02u:%02u:%02u UTC", tm.year, tm.month, tm.day, tm.hour, tm.min, tm.sec);
++}
++
++static uint64_t
++uptime_s(void)
++{
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / NSEC_PER_SEC;
++}
++
++int
++StarbiteRTC::readNow(uint64_t *secs, const char **why)
++{
++	uint8_t r[S2M_RTC_NREGS];
++	int e = s2m_rtc_read(&fOps, secs, r, why);
++	if (e == S2M_E_IO) {
++		fReadFails++;
++	}
++	return e;
++}
++
++bool
++StarbiteRTC::start(IOService *provider)
++{
++	uint32_t on = 1, wr = 0, setTo = 0;
++	char date[40];
++	uint8_t r[S2M_RTC_NREGS] = { 0 };
++	uint64_t t = 0;
++	const char *why = "?";
++
++	if (PE_parse_boot_argn("sbrtc", &on, sizeof(on)) && on == 0) {
++		IOLog("StarbiteRTC: sbrtc=0: not started\n");
++		return false;
++	}
++	fACPM = OSDynamicCast(StarbiteACPM, provider);
++	if (fACPM == NULL || !super::start(provider)) {
++		return false;
++	}
++	fOps.ctx = this;
++	fOps.rd = opRd;
++	fOps.wr = opWr;
++	fOps.delay_us = opDelay;
++	(void)PE_parse_boot_argn("sbrtcwrite", &wr, sizeof(wr));
++	fWrite = wr != 0;
++
++	int e = s2m_rtc_read(&fOps, &t, r, &why);
++	IOLog("StarbiteRTC: S2MPS18 RTC CTRL %#x UPDATE %#x CAPSEL %#x MSEC %#x SEC %#x MIN %#x HOUR %#x WEEK %#x "
++	    "DAY %#x MONTH %#x YEAR %#x\n", r[0], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11]);
++	fValid = e == S2M_OK;
++	if (fValid) {
++		fmt_date(t, date, sizeof(date));
++		IOLog("StarbiteRTC: clock %s (%llu), %s; writes %s\n", date, t, why, fWrite ? "on" : "off (sbrtcwrite=1)");
++	} else {
++		IOLog("StarbiteRTC: clock not used: %s (%s); writes %s\n", s2m_strerror(e), why,
++		    fWrite ? "on" : "off (sbrtcwrite=1)");
++	}
++	setProperty("RTCValid", fValid);
++	setProperty("RTCWrites", fWrite);
++
++	if (PE_parse_boot_argn("sbrtcset", &setTo, sizeof(setTo)) && setTo != 0) {
++		uint64_t want = (uint64_t)setTo + uptime_s();
++		if (!fWrite) {
++			IOLog("StarbiteRTC: sbrtcset=%u ignored: needs sbrtcwrite=1\n", setTo);
++		} else {
++			e = s2m_rtc_write(&fOps, want, &why);
++			uint64_t back = 0;
++			const char *rwhy = "?";
++			int re = s2m_rtc_read(&fOps, &back, r, &rwhy);
++			fmt_date(want, date, sizeof(date));
++			IOLog("StarbiteRTC: sbrtcset: wrote %s (%llu): %s (%s); reads back %llu (%s)\n", date, want,
++			    s2m_strerror(e), why, re == S2M_OK ? back : 0ULL, rwhy);
++			fValid = re == S2M_OK;
++		}
++	}
++	gStarbiteRTC = this;
++	registerService();
++	publishResource("IORTC", this);
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	if (starlte_sbstop_at("rtc")) {
++		starlte_sbstop_now("rtc");
++	}
++#endif
++	return true;
++}
++
++void
++StarbiteRTC::stop(IOService *provider)
++{
++	if (gStarbiteRTC == this) {
++		gStarbiteRTC = NULL;
++	}
++	super::stop(provider);
++}
++
++/* 0 when the clock cannot be read or was never set: the calendar then starts as it does today (card clock). */
++long
++StarbiteRTC::getGMTTimeOfDay(void)
++{
++	uint64_t t = 0;
++	const char *why = "?";
++	int e = readNow(&t, &why);
++	if (e != S2M_OK) {
++		static uint32_t said;
++		if (said++ < 4) {
++			IOLog("StarbiteRTC: getGMTTimeOfDay: %s (%s): 0\n", s2m_strerror(e), why);
++		}
++		return 0;
++	}
++	return (long)t;
++}
++
++void
++StarbiteRTC::setGMTTimeOfDay(long secs)
++{
++	const char *why = "?";
++	char date[40];
++	if (!fWrite || secs <= 0) {
++		return;
++	}
++	int e = s2m_rtc_write(&fOps, (uint64_t)secs, &why);
++	fmt_date((uint64_t)secs, date, sizeof(date));
++	if (e == S2M_OK) {
++		if (fWrites++ < 4) {
++			IOLog("StarbiteRTC: set to %s (%ld)\n", date, secs);
++		}
++		fValid = true;
++	} else if (fWriteFails++ < 8) {
++		IOLog("StarbiteRTC: set to %s FAILED: %s (%s)\n", date, s2m_strerror(e), why);
++	}
++}
++
++void
++StarbiteRTC::setAlarmEnable(IOOptionBits)
++{
++	/* no alarms: the alarm registers (0x0c..) are never written */
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteRTC/StarbiteRTC.h b/iokit/Kernel/arm/starbite/StarbiteRTC/StarbiteRTC.h
+new file mode 100644
+index 00000000..d046ecb2
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteRTC/StarbiteRTC.h
+@@ -0,0 +1,47 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteRTC: an IORTC (public iokit/Kernel/IORTC.cpp) on the S2MPS18's RTC block, reached through StarbiteACPM
++ * (ACPM PMIC type 2). Publishes the "IORTC" resource that IOKitInitializeTime waits for; the platform expert
++ * forwards getGMTTimeOfDay / setGMTTimeOfDay here (INTEGRATION.md), as Apple's AppleARMPE does with its RTC.
++ *
++ * Boot-args:
++ *   sbrtc=0          not started (the card clock, 0393, stays the only source)
++ *   sbrtcwrite=1     setGMTTimeOfDay writes the RTC (off by default until PHONE-TEST.md M5b passed)
++ *   sbrtcset=SECS    test: write SECS + uptime once at start (needs sbrtcwrite=1), read back, log
++ *   sbstop=rtc       0423 self-stop after the first read (and after sbrtcset)
++ */
++#ifndef STARBITE_RTC_H
++#define STARBITE_RTC_H
++
++#include <IOKit/rtc/IORTCController.h>
++#include "hw/s2mps18_rtc.h"
++
++class StarbiteACPM;
++
++class StarbiteRTC : public IORTC {
++	OSDeclareDefaultStructors(StarbiteRTC);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++
++	long getGMTTimeOfDay(void) APPLE_KEXT_OVERRIDE;
++	void setGMTTimeOfDay(long secs) APPLE_KEXT_OVERRIDE;
++	void setAlarmEnable(IOOptionBits message) APPLE_KEXT_OVERRIDE;
++
++	static StarbiteRTC *shared(void);       /* the started instance, or NULL (for the platform expert) */
++
++private:
++	StarbiteACPM *fACPM;
++	struct s2m_rtc_ops fOps;
++	bool fWrite;
++	bool fValid;
++	uint32_t fWrites, fWriteFails, fReadFails;
++
++	int readNow(uint64_t *secs, const char **why);
++	static int opRd(void *ctx, uint8_t reg, uint8_t *v);
++	static int opWr(void *ctx, uint8_t reg, uint8_t v);
++	static void opDelay(void *ctx, uint32_t us);
++};
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteRTC/hw/s2mps18_rtc.c b/iokit/Kernel/arm/starbite/StarbiteRTC/hw/s2mps18_rtc.c
+new file mode 100644
+index 00000000..34eebaee
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteRTC/hw/s2mps18_rtc.c
+@@ -0,0 +1,276 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * S2MPS18 RTC: decode/encode, the RUDR latch before a read, the WUDR update after a write. See s2mps18_rtc.h and
++ * ../NOTES.md. The read-only decode follows the facts in an earlier port's drivers/power/s2mps18_rtc.c (APSL-2.0,
++ * an earlier port; credited in NOTES.md); the latch and the write are new.
++ */
++#include "s2mps18_rtc.h"
++
++const char *
++s2m_strerror(int e)
++{
++	switch (e) {
++	case S2M_OK: return "ok";
++	case S2M_E_IO: return "ACPM access failed";
++	case S2M_E_NOTSET: return "clock not set";
++	case S2M_E_RANGE: return "field out of range";
++	case S2M_E_VERIFY: return "read-back differs";
++	case S2M_E_MODE: return "not in 24-hour mode";
++	default: return "?";
++	}
++}
++
++/* days since 1970-01-01 of a civil date (y >= 1970) */
++static int64_t
++days_from_civil(int64_t y, uint32_t m, uint32_t d)
++{
++	y -= m <= 2;
++	int64_t era = y / 400;
++	int64_t yoe = y - era * 400;
++	int64_t doy = (153 * ((int64_t)m + (m > 2 ? -3 : 9)) + 2) / 5 + (int64_t)d - 1;
++	int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
++	return era * 146097 + doe - 719468;
++}
++
++uint64_t
++s2m_tm_to_unix(const struct s2m_tm *tm)
++{
++	int64_t days = days_from_civil((int64_t)tm->year, tm->month, tm->day);
++	return (uint64_t)days * 86400u + tm->hour * 3600u + tm->min * 60u + tm->sec;
++}
++
++void
++s2m_unix_to_tm(uint64_t t, struct s2m_tm *tm)
++{
++	int64_t z = (int64_t)(t / 86400u) + 719468;
++	uint64_t rem = t % 86400u;
++	int64_t era = z / 146097;
++	int64_t doe = z - era * 146097;
++	int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
++	int64_t y = yoe + era * 400;
++	int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
++	int64_t mp = (5 * doy + 2) / 153;
++	uint32_t d = (uint32_t)(doy - (153 * mp + 2) / 5 + 1);
++	uint32_t m = (uint32_t)(mp < 10 ? mp + 3 : mp - 9);
++	tm->year = (uint32_t)(y + (m <= 2));
++	tm->month = m;
++	tm->day = d;
++	tm->hour = (uint32_t)(rem / 3600u);
++	tm->min = (uint32_t)(rem / 60u % 60u);
++	tm->sec = (uint32_t)(rem % 60u);
++	tm->wday = (uint32_t)(((t / 86400u) + 4u) % 7u);    /* 1970-01-01 was a Thursday */
++}
++
++static uint32_t
++days_in_month(uint32_t y, uint32_t m)
++{
++	static const uint8_t n[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
++	bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
++	return m == 2 && leap ? 29u : n[(m - 1) % 12];
++}
++
++/* a field: binary, or BCD (both nibbles must be digits; bad -> 0xff) */
++static uint32_t
++field(uint8_t v, uint8_t mask, bool bcd)
++{
++	v &= mask;
++	if (!bcd) {
++		return v;
++	}
++	if ((v & 0xfu) > 9u || (v >> 4) > 9u) {
++		return 0xffu;
++	}
++	return (uint32_t)(v >> 4) * 10u + (v & 0xfu);
++}
++
++static uint8_t
++to_bcd(uint32_t v)
++{
++	return (uint8_t)((v / 10u) << 4 | (v % 10u));
++}
++
++int
++s2m_rtc_decode(const uint8_t r[S2M_RTC_NREGS], struct s2m_tm *tm, const char **why)
++{
++	uint8_t ctrl = r[S2M_RTC_CTRL];
++	bool bcd = (ctrl & S2M_CTRL_BCD) != 0, h24 = (ctrl & S2M_CTRL_24H) != 0;
++	const char *dummy;
++
++	if (why == 0) {
++		why = &dummy;
++	}
++	*why = "ok";
++	tm->sec = field(r[S2M_RTC_SEC], 0x7f, bcd);
++	tm->min = field(r[S2M_RTC_MIN], 0x7f, bcd);
++	if (h24) {
++		tm->hour = field(r[S2M_RTC_HOUR], bcd ? 0x3f : 0x1f, bcd);
++	} else {
++		uint32_t h = field(r[S2M_RTC_HOUR], 0x1f, bcd);
++		bool pm = (r[S2M_RTC_HOUR] & S2M_HOUR_PM) != 0;
++		tm->hour = (h >= 1 && h <= 12) ? h % 12u + (pm ? 12u : 0u) : 0xffu;
++	}
++	tm->day = field(r[S2M_RTC_DAY], bcd ? 0x3f : 0x1f, bcd);
++	tm->month = field(r[S2M_RTC_MONTH], bcd ? 0x1f : 0x0f, bcd);
++	uint32_t y = field(r[S2M_RTC_YEAR], bcd ? 0xff : 0x7f, bcd);
++	tm->year = y == 0xffu ? 0 : 2000u + y;
++	tm->wday = 0;
++	if (tm->sec > 59 || tm->min > 59 || tm->hour > 23 || tm->month < 1 || tm->month > 12 || tm->day < 1 ||
++	    tm->year == 0 || tm->day > days_in_month(tm->year, tm->month)) {
++		*why = "a field out of range";
++		return S2M_E_RANGE;
++	}
++	struct s2m_tm t2;
++	s2m_unix_to_tm(s2m_tm_to_unix(tm), &t2);
++	tm->wday = t2.wday;
++	if (!h24 || (r[S2M_RTC_CAPSEL] & 0xf0u) != 0xf0u) {
++		*why = "CTRL not 24-hour or CAPSEL[7:4] != 0xF: the RTC was reset";
++		return S2M_E_NOTSET;
++	}
++	if (tm->year < S2M_YEAR_MIN || tm->year > S2M_YEAR_MAX) {
++		*why = "the year is not 2024-2099: the clock was never set";
++		return S2M_E_NOTSET;
++	}
++	return S2M_OK;
++}
++
++int
++s2m_rtc_encode(const struct s2m_tm *tm, uint8_t ctrl, uint8_t out[7])
++{
++	bool bcd = (ctrl & S2M_CTRL_BCD) != 0;
++	if (!(ctrl & S2M_CTRL_24H)) {
++		return S2M_E_MODE;
++	}
++	if (tm->year < 2000u || tm->year > 2099u || tm->month < 1 || tm->month > 12 || tm->day < 1 ||
++	    tm->day > days_in_month(tm->year, tm->month) || tm->hour > 23 || tm->min > 59 || tm->sec > 59 ||
++	    tm->wday > 6) {
++		return S2M_E_RANGE;
++	}
++	uint32_t f[6] = { tm->sec, tm->min, tm->hour, tm->day, tm->month, tm->year - 2000u };
++	uint8_t e[6];
++	for (unsigned i = 0; i < 6; i++) {
++		e[i] = bcd ? to_bcd(f[i]) : (uint8_t)f[i];
++	}
++	out[0] = e[0];                                          /* SEC */
++	out[1] = e[1];                                          /* MIN */
++	out[2] = (uint8_t)(e[2] | (tm->hour >= 12 ? S2M_HOUR_PM : 0));   /* HOUR (+PM, as the vendor driver) */
++	out[3] = (uint8_t)(1u << tm->wday);                     /* WEEK */
++	out[4] = e[3];                                          /* DAY */
++	out[5] = e[4];                                          /* MONTH */
++	out[6] = e[5];                                          /* YEAR */
++	return S2M_OK;
++}
++
++/* Set one UPDATE bit (the register read first, nothing else changed) and wait for it to clear. */
++static int
++update_bit(const struct s2m_rtc_ops *ops, uint8_t bit, bool *cleared)
++{
++	uint8_t u = 0;
++	*cleared = false;
++	if (ops->rd(ops->ctx, S2M_RTC_UPDATE, &u) != 0) {
++		return S2M_E_IO;
++	}
++	if (ops->wr(ops->ctx, S2M_RTC_UPDATE, (uint8_t)(u | bit)) != 0) {
++		return S2M_E_IO;
++	}
++	for (unsigned i = 0; i < S2M_UPDATE_POLLS; i++) {
++		ops->delay_us(ops->ctx, S2M_UPDATE_POLL_US);
++		if (ops->rd(ops->ctx, S2M_RTC_UPDATE, &u) != 0) {
++			return S2M_E_IO;
++		}
++		if (!(u & bit)) {
++			*cleared = true;
++			break;
++		}
++	}
++	return S2M_OK;
++}
++
++int
++s2m_rtc_read_raw(const struct s2m_rtc_ops *ops, uint8_t r[S2M_RTC_NREGS], bool *latched)
++{
++	bool l = false;
++	int e = update_bit(ops, S2M_UPDATE_RUDR, &l);
++	if (latched) {
++		*latched = l;
++	}
++	if (e != S2M_OK) {
++		return e;
++	}
++	for (uint8_t i = 0; i < S2M_RTC_NREGS; i++) {
++		if (ops->rd(ops->ctx, i, &r[i]) != 0) {
++			return S2M_E_IO;
++		}
++	}
++	return S2M_OK;
++}
++
++int
++s2m_rtc_read(const struct s2m_rtc_ops *ops, uint64_t *unix_secs, uint8_t r[S2M_RTC_NREGS], const char **why)
++{
++	struct s2m_tm tm;
++	bool latched = false;
++	const char *dummy;
++	if (why == 0) {
++		why = &dummy;
++	}
++	int e = s2m_rtc_read_raw(ops, r, &latched);
++	if (e != S2M_OK) {
++		*why = "ACPM access failed";
++		return e;
++	}
++	e = s2m_rtc_decode(r, &tm, why);
++	if (e == S2M_OK) {
++		*unix_secs = s2m_tm_to_unix(&tm);
++		if (!latched) {
++			*why = "ok, but RUDR did not clear within 50 ms (the value may be an older latch)";
++		}
++	}
++	return e;
++}
++
++int
++s2m_rtc_write(const struct s2m_rtc_ops *ops, uint64_t unix_secs, const char **why)
++{
++	struct s2m_tm tm;
++	uint8_t ctrl = 0, out[7], r[S2M_RTC_NREGS];
++	bool cleared = false;
++	const char *dummy;
++	if (why == 0) {
++		why = &dummy;
++	}
++	*why = "ok";
++	if (ops->rd(ops->ctx, S2M_RTC_CTRL, &ctrl) != 0) {
++		*why = "CTRL unreadable";
++		return S2M_E_IO;
++	}
++	s2m_unix_to_tm(unix_secs, &tm);
++	if (tm.year < S2M_YEAR_MIN || tm.year > S2M_YEAR_MAX) {
++		*why = "refusing to write a year outside 2024-2099";
++		return S2M_E_RANGE;
++	}
++	int e = s2m_rtc_encode(&tm, ctrl, out);
++	if (e != S2M_OK) {
++		*why = e == S2M_E_MODE ? "CTRL is not 24-hour (and CTRL is never written)" : "encode failed";
++		return e;
++	}
++	for (uint8_t i = 0; i < 7; i++) {
++		if (ops->wr(ops->ctx, (uint8_t)(S2M_RTC_SEC + i), out[i]) != 0) {
++			*why = "a time register write failed";
++			return S2M_E_IO;
++		}
++	}
++	e = update_bit(ops, S2M_UPDATE_WUDR, &cleared);
++	if (e != S2M_OK) {
++		*why = "UPDATE (WUDR) failed";
++		return e;
++	}
++	uint64_t back = 0;
++	const char *rwhy = 0;
++	e = s2m_rtc_read(ops, &back, r, &rwhy);
++	if (e != S2M_OK || back < unix_secs || back > unix_secs + 3u) {
++		*why = cleared ? "read-back differs from what was written" :
++		    "read-back differs (and WUDR did not clear within 50 ms)";
++		return S2M_E_VERIFY;
++	}
++	return S2M_OK;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteRTC/hw/s2mps18_rtc.h b/iokit/Kernel/arm/starbite/StarbiteRTC/hw/s2mps18_rtc.h
+new file mode 100644
+index 00000000..ff2bd417
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteRTC/hw/s2mps18_rtc.h
+@@ -0,0 +1,97 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * The S2MPS18 RTC block (ACPM PMIC type 2), plain C. Register facts: ../NOTES.md.
++ *   0x00 CTRL       bit 0 BCD_EN (0 = binary), bit 1 MODEL24 (1 = 24 h)
++ *   0x01 WTSR_SMPL  never touched
++ *   0x02 UPDATE     bit 0 RUDR (latch the counters into 0x04..0x0b), bit 1 WUDR (move 0x05..0x0b into the
++ *                   counters), bit 2 FREEZE, bit 4 AUDR (alarms): only RUDR and WUDR are ever set here
++ *   0x03 CAPSEL     [7:4] = 0xF once the clock has been set up (Linux's test); never written
++ *   0x04 MSEC       0x05 SEC  0x06 MIN  0x07 HOUR (bit 6 PM)  0x08 WEEK (one bit a day)
++ *   0x09 DAY        0x0a MONTH (1-12)   0x0b YEAR (since 2000)
++ * All access goes through struct s2m_rtc_ops (StarbiteACPM on the phone, a model in the tests).
++ */
++#ifndef STARBITE_S2MPS18_RTC_H
++#define STARBITE_S2MPS18_RTC_H
++
++#include <stdint.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define S2M_RTC_CTRL            0x00u
++#define S2M_RTC_UPDATE          0x02u
++#define S2M_RTC_CAPSEL          0x03u
++#define S2M_RTC_MSEC            0x04u
++#define S2M_RTC_SEC             0x05u
++#define S2M_RTC_MIN             0x06u
++#define S2M_RTC_HOUR            0x07u
++#define S2M_RTC_WEEK            0x08u
++#define S2M_RTC_DAY             0x09u
++#define S2M_RTC_MONTH           0x0au
++#define S2M_RTC_YEAR            0x0bu
++#define S2M_RTC_NREGS           12u
++
++#define S2M_CTRL_BCD            0x01u
++#define S2M_CTRL_24H            0x02u
++#define S2M_UPDATE_RUDR         0x01u
++#define S2M_UPDATE_WUDR         0x02u
++#define S2M_HOUR_PM             0x40u
++
++/* trusted years; outside: "never set" (the phone read 2018-01-01 when nothing had set it) */
++#define S2M_YEAR_MIN            2024u
++#define S2M_YEAR_MAX            2099u
++
++/* latch / write-update waits */
++#define S2M_UPDATE_POLLS        50u
++#define S2M_UPDATE_POLL_US      1000u
++
++struct s2m_rtc_ops {
++	void *ctx;
++	int (*rd)(void *ctx, uint8_t reg, uint8_t *v);  /* 0 = ok */
++	int (*wr)(void *ctx, uint8_t reg, uint8_t v);
++	void (*delay_us)(void *ctx, uint32_t us);
++};
++
++struct s2m_tm {
++	uint32_t year;          /* 2000.. */
++	uint32_t month;         /* 1..12 */
++	uint32_t day;           /* 1..31 */
++	uint32_t hour, min, sec;
++	uint32_t wday;          /* 0 = Sunday */
++};
++
++/* results */
++#define S2M_OK                  0
++#define S2M_E_IO                (-1)    /* an ACPM read/write failed */
++#define S2M_E_NOTSET            (-2)    /* CTRL / CAPSEL say the clock was reset, or the year is not plausible */
++#define S2M_E_RANGE             (-3)    /* a field out of range */
++#define S2M_E_VERIFY            (-4)    /* the read-back after a write disagrees */
++#define S2M_E_MODE              (-5)    /* not 24-hour mode: we never write CTRL, so no writes */
++
++/* Days-from-civil (proleptic Gregorian), Unix seconds of a date from 1970 on; the inverse. */
++uint64_t s2m_tm_to_unix(const struct s2m_tm *tm);
++void s2m_unix_to_tm(uint64_t t, struct s2m_tm *tm);
++
++/* Decode registers 0x00..0x0b (r[0] = CTRL). Fields decoded per CTRL's BCD and 24 h bits. */
++int s2m_rtc_decode(const uint8_t r[S2M_RTC_NREGS], struct s2m_tm *tm, const char **why);
++
++/* Encode SEC..YEAR (7 bytes for 0x05..0x0b) in the coding CTRL says. 24-hour mode only. */
++int s2m_rtc_encode(const struct s2m_tm *tm, uint8_t ctrl, uint8_t out[7]);
++
++/* Latch (RUDR, wait for it to clear) and read 0x00..0x0b. latched: whether RUDR cleared in time. */
++int s2m_rtc_read_raw(const struct s2m_rtc_ops *ops, uint8_t r[S2M_RTC_NREGS], bool *latched);
++
++/* Read and decode: Unix seconds, or an error (why says which check). */
++int s2m_rtc_read(const struct s2m_rtc_ops *ops, uint64_t *unix_secs, uint8_t r[S2M_RTC_NREGS], const char **why);
++
++/* Set the clock: SEC..YEAR written, then WUDR, its clearing waited for, then read back (within 2 s). */
++int s2m_rtc_write(const struct s2m_rtc_ops *ops, uint64_t unix_secs, const char **why);
++
++const char *s2m_strerror(int e);
++
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteWatchdog.cpp b/iokit/Kernel/arm/starbite/StarbiteWatchdog.cpp
+new file mode 100644
+index 00000000..1be6f3bf
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteWatchdog.cpp
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteWatchdog/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteWatchdog/
++ * (commit 4a7ec17); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteWatchdog/StarbiteWatchdog.cpp"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteWatchdog/StarbiteWatchdog.cpp b/iokit/Kernel/arm/starbite/StarbiteWatchdog/StarbiteWatchdog.cpp
+new file mode 100644
+index 00000000..78a3d9a6
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteWatchdog/StarbiteWatchdog.cpp
+@@ -0,0 +1,258 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteWatchdog (docs/APPLE-S9-DRIVERS.md Part 3 row 9): see StarbiteWatchdog.h, hw/sbwdt.c, NOTES.md.
++ * The IOWatchdog front end answers watchdogd as SweetWatchdog (0040/0045) did: every selector accepted with zeroed
++ * outputs, IOPMUPrimary = 1; selector 1 counts as a check-in [inferred, NOTES.md].
++ */
++#include "StarbiteWatchdog.h"
++#include <IOKit/IOLib.h>
++#include <IOKit/IOKitKeys.h>
++#include <kern/clock.h>
++#include <kern/debug.h>
++#include <pexpert/pexpert.h>
++#include <sys/proc.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++extern "C" uint64_t sweet_fb_first_present;     /* SweetFramebuffer: first frame on the panel (0421) */
++#endif
++#if defined(STARBITE_WDT_VETO_HOOK)
++extern "C" void starlte_wdt_veto(const char *why);      /* herolte_ufs.c, added by integration */
++#endif
++
++/* ---- IOWatchdog (Apple's name, for watchdogd) ---- */
++
++OSDefineMetaClassAndStructors(IOWatchdog, IOService);
++
++bool
++IOWatchdog::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "IOWatchdogUserClient");
++	setProperty("IOPMUPrimary", 1ULL, 32);     /* watchdogd writes the boot stage to the IOPMUPrimary service */
++	if (getMetaClass() == IOWatchdog::metaClass) {
++		registerService();              /* the plain front end (IOResources fallback); subclasses register later */
++		IOLog("StarbiteWatchdog: plain IOWatchdog (check-ins only, no hardware)\n");
++	}
++	return true;
++}
++
++IOReturn
++IOWatchdog::setProperties(OSObject *)
++{
++	return kIOReturnSuccess;
++}
++
++void
++IOWatchdog::userCheckIn(void)
++{
++}
++
++/* ---- the user client ---- */
++
++OSDefineMetaClassAndStructors(IOWatchdogUserClient, IOUserClient);
++
++bool
++IOWatchdogUserClient::start(IOService *provider)
++{
++	if (!IOUserClient::start(provider)) {
++		return false;
++	}
++	fOwner = OSDynamicCast(IOWatchdog, provider);
++	return fOwner != NULL;
++}
++
++IOReturn
++IOWatchdogUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++static uint64_t gWdtLogged;
++
++IOReturn
++IOWatchdogUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args, IOExternalMethodDispatch *,
++    OSObject *, void *)
++{
++	for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
++		args->scalarOutput[i] = 0;
++	}
++	if (args->structureOutputDescriptor != NULL) {
++		static const uint64_t zero = 0;
++		IOByteCount len = args->structureOutputDescriptor->getLength();
++		for (IOByteCount off = 0; off < len; off += 8) {
++			args->structureOutputDescriptor->writeBytes(off, &zero, len - off < 8 ? len - off : 8);
++		}
++	} else if (args->structureOutput != NULL) {
++		bzero(args->structureOutput, args->structureOutputSize);
++	}
++	if (selector == 1 && fOwner) {
++		fOwner->userCheckIn();
++	}
++	if (selector < 64 && !(gWdtLogged & (1ULL << selector))) {
++		gWdtLogged |= 1ULL << selector;
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		IOLog("StarbiteWatchdog: %s selector %u (in %u/%u, out %u/%u) -> ok\n", name, selector,
++		    args->scalarInputCount, args->structureInputSize, args->scalarOutputCount, args->structureOutputSize);
++	}
++	return kIOReturnSuccess;
++}
++
++/* ---- StarbiteWatchdog ---- */
++
++OSDefineMetaClassAndStructors(StarbiteWatchdog, IOWatchdog);
++
++static uint64_t
++uptime_ms(void)
++{
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / NSEC_PER_MSEC;
++}
++
++bool
++StarbiteWatchdog::start(IOService *provider)
++{
++	struct sbwdt_cfg c;
++	char stop[16] = "";
++	uint32_t own = 0;
++
++	if (!IOWatchdog::start(provider)) {
++		return false;
++	}
++	bzero(&c, sizeof(c));
++	fLock = IOLockAlloc();
++	fMap = provider->mapDeviceMemoryWithIndex(0);
++	if (fLock == NULL || fMap == NULL || fMap->getLength() < 0x10) {
++		IOLog("StarbiteWatchdog: no reg 0 on the nub: check-ins only\n");
++		registerService();
++		return true;
++	}
++	fBase = fMap->getVirtualAddress();
++	c.wtcon = *(volatile uint32_t *)(fBase + SBWDT_WTCON);
++	c.wtdat = *(volatile uint32_t *)(fBase + SBWDT_WTDAT);
++	uint32_t cnt = *(volatile uint32_t *)(fBase + SBWDT_WTCNT);
++	c.sbwdt_found = PE_parse_boot_argn("sbwdt", &c.sbwdt_s, sizeof(c.sbwdt_s));
++	c.test_boot = PE_parse_boot_argn("sbstop", stop, sizeof(stop) - 1) && stop[0] != '\0';
++	(void)PE_parse_boot_argn("sweetreboot", &c.sweetreboot_s, sizeof(c.sweetreboot_s));
++	c.noui_s = 300;
++	(void)PE_parse_boot_argn("sbnoui", &c.noui_s, sizeof(c.noui_s));
++	(void)PE_parse_boot_argn("sbwdtuser", &c.user_timeout_s, sizeof(c.user_timeout_s));
++	/* The PMU's mask words are not in this nub: treat the reset as masked, so without sbwdt= nothing is fed. */
++	c.pmu_mask = 1u << SBWDT_PMU_BIT;
++	sbwdt_plan(&c, &fW);
++#if defined(STARBITE_WDT_OWNER)
++	(void)PE_parse_boot_argn("sbwdtown", &own, sizeof(own));
++#endif
++	fOwner = own != 0 && fW.may_feed;
++	IOLog("StarbiteWatchdog: cluster 1 WTCON %#x WTDAT %u WTCNT %u (%u ms); %s; mode %s, period %u ms, userspace "
++	    "timeout %u s\n", c.wtcon, c.wtdat, cnt, fW.hw_ms, fW.why, fOwner ? "OWNER (feeds)" : "observer (never writes)",
++	    fW.period_ms, c.user_timeout_s);
++	setProperty("StarbiteWatchdogMode", fOwner ? "owner" : "observer");
++	setProperty("StarbiteWatchdogPlan", fW.why);
++	if (fW.may_feed) {
++		fLoop = IOWorkLoop::workLoop();
++		fTimer = IOTimerEventSource::timerEventSource(this, &StarbiteWatchdog::timerFired);
++		if (fLoop && fTimer && fLoop->addEventSource(fTimer) == kIOReturnSuccess) {
++			fTimerAdded = fRunning = true;
++			fTimer->setTimeoutMS(fOwner ? fW.period_ms : 1000);
++		}
++	}
++	registerService();
++	return true;
++}
++
++void
++StarbiteWatchdog::userCheckIn(void)
++{
++	if (fLock) {
++		IOLockLock(fLock);
++		sbwdt_checkin(&fW, uptime_ms());
++		IOLockUnlock(fLock);
++	}
++}
++
++void
++StarbiteWatchdog::tick(void)
++{
++	bool frame = true;
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	frame = sweet_fb_first_present != 0;
++#endif
++	IOLockLock(fLock);
++	int was = fW.stopped;
++	bool feed = sbwdt_tick(&fW, uptime_ms(), panic_active() != 0, frame);
++	int now = fW.stopped;
++	IOLockUnlock(fLock);
++	if (feed && fOwner) {
++		__asm__ volatile ("dmb oshst" ::: "memory");
++		*(volatile uint32_t *)(fBase + SBWDT_WTCNT) = fW.reload;
++	}
++	if (now != was) {
++		IOLog("StarbiteWatchdog: %s after %llu feeds, %llu check-ins; the watchdog resets the phone\n",
++		    sbwdt_stop_name(now), fW.feeds, fW.checkins);
++		fRunning = false;
++		if (!fOwner && !fVetoSent) {
++			fVetoSent = true;
++#if defined(STARBITE_WDT_VETO_HOOK)
++			starlte_wdt_veto(sbwdt_stop_name(now));         /* today's feeder stops for good */
++#else
++			IOLog("StarbiteWatchdog: observer without the veto hook: today's feeder keeps feeding\n");
++#endif
++		}
++	}
++}
++
++void
++StarbiteWatchdog::timerFired(OSObject *owner, IOTimerEventSource *sender)
++{
++	StarbiteWatchdog *me = OSDynamicCast(StarbiteWatchdog, owner);
++	if (me == NULL || !me->fRunning) {
++		return;
++	}
++	me->tick();
++	if (me->fRunning) {
++		sender->setTimeoutMS(me->fOwner ? me->fW.period_ms : 1000);
++	}
++}
++
++IOReturn
++StarbiteWatchdog::stopPolling(OSObject *owner, void *, void *, void *, void *)
++{
++	StarbiteWatchdog *me = OSDynamicCast(StarbiteWatchdog, owner);
++	if (me == NULL) {
++		return kIOReturnBadArgument;
++	}
++	me->fRunning = false;
++	me->fTimer->cancelTimeout();
++	me->fTimer->disable();
++	return kIOReturnSuccess;
++}
++
++void
++StarbiteWatchdog::stop(IOService *provider)
++{
++	/* Stopping the driver stops feeding: the watchdog then resets the phone (fail-safe). */
++	if (fLoop && fTimerAdded) {
++		(void)fLoop->runAction(&StarbiteWatchdog::stopPolling, this);
++		fLoop->removeEventSource(fTimer);
++		fTimerAdded = false;
++	}
++	IOWatchdog::stop(provider);
++}
++
++void
++StarbiteWatchdog::free(void)
++{
++	OSSafeReleaseNULL(fTimer);
++	OSSafeReleaseNULL(fLoop);
++	OSSafeReleaseNULL(fMap);
++	if (fLock) {
++		IOLockFree(fLock);
++		fLock = NULL;
++	}
++	IOWatchdog::free();
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteWatchdog/StarbiteWatchdog.h b/iokit/Kernel/arm/starbite/StarbiteWatchdog/StarbiteWatchdog.h
+new file mode 100644
+index 00000000..7a0aeffb
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteWatchdog/StarbiteWatchdog.h
+@@ -0,0 +1,73 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteWatchdog: Apple's IOWatchdog interface for watchdogd (IOServiceMatching("IOWatchdog"), a user client,
++ * IOPMUPrimary) on cluster 1's Exynos watchdog (0x10060000), keeping the loader's dead-man contract (hw/sbwdt.h).
++ *
++ * Two modes:
++ *   observer (default)  the watchdog is never written. Today's feeder in herolte_ufs.c (0399/0421/0423) keeps the
++ *                       contract. With sbwdtuser=T and the integration hook (STARBITE_WDT_VETO_HOOK), a watchdogd
++ *                       that stops checking in for T s stops that feeder for good (starlte_wdt_veto), so a userspace
++ *                       hang resets the phone where INFORM3 says.
++ *   owner (sbwdtown=1, only when built with STARBITE_WDT_OWNER, i.e. after integration removed the herolte_ufs.c
++ *                       feeder): this driver writes WTCNT = WTDAT itself, under the same contract.
++ * Never arms or re-programs the watchdog (WTCON / WTDAT are only read).
++ *
++ * IOWatchdog / IOWatchdogUserClient are defined here; SweetWatchdog.cpp (0040/0045), which defines the same
++ * classes, must not be built alongside (INTEGRATION.md).
++ */
++#ifndef STARBITE_WATCHDOG_H
++#define STARBITE_WATCHDOG_H
++
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include "hw/sbwdt.h"
++
++class IOWatchdog : public IOService {
++	OSDeclareDefaultStructors(IOWatchdog);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
++	virtual void userCheckIn(void);
++};
++
++class StarbiteWatchdog : public IOWatchdog {
++	OSDeclareDefaultStructors(StarbiteWatchdog);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
++	void userCheckIn(void) APPLE_KEXT_OVERRIDE;
++
++private:
++	IOMemoryMap *fMap;
++	vm_address_t fBase;
++	IOWorkLoop *fLoop;
++	IOTimerEventSource *fTimer;
++	bool fTimerAdded, fRunning, fOwner, fVetoSent;
++	IOLock *fLock;
++	struct sbwdt fW;
++
++	void tick(void);
++	static void timerFired(OSObject *owner, IOTimerEventSource *sender);
++	static IOReturn stopPolling(OSObject *owner, void *, void *, void *, void *);
++};
++
++class IOWatchdogUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(IOWatchdogUserClient);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args, IOExternalMethodDispatch *dispatch,
++	    OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
++
++private:
++	IOWatchdog *fOwner;
++};
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteWatchdog/hw/sbwdt.c b/iokit/Kernel/arm/starbite/StarbiteWatchdog/hw/sbwdt.c
+new file mode 100644
+index 00000000..6115a166
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteWatchdog/hw/sbwdt.c
+@@ -0,0 +1,127 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/* Cluster 1 watchdog maths and the dead-man contract (see sbwdt.h). */
++#include "sbwdt.h"
++
++uint32_t
++sbwdt_hw_ms(uint32_t wtcon, uint32_t wtdat)
++{
++	uint64_t pre = ((wtcon >> 8) & 0xffu) + 1u;
++	uint64_t div = 16u << ((wtcon >> 3) & 3u);
++	if (!(wtcon & SBWDT_WTCON_ENABLE) || !(wtcon & SBWDT_WTCON_RSTEN) || (wtdat & 0xffffu) == 0) {
++		return 0;
++	}
++	return (uint32_t)((uint64_t)(wtdat & 0xffffu) * pre * div * 1000u / SBWDT_CLK_HZ);
++}
++
++uint32_t
++sbwdt_period_ms(uint32_t secs, uint32_t hw_ms)
++{
++	uint64_t t = (uint64_t)secs * 1000u;
++	if (secs == 0 || hw_ms == 0) {
++		return 0;
++	}
++	if (hw_ms < t) {
++		t = hw_ms;
++	}
++	t /= 3u;
++	if (t < SBWDT_PERIOD_MIN_MS) {
++		t = SBWDT_PERIOD_MIN_MS;
++	}
++	if (t > SBWDT_PERIOD_MAX_MS) {
++		t = SBWDT_PERIOD_MAX_MS;
++	}
++	return (uint32_t)t;
++}
++
++const char *
++sbwdt_stop_name(int stopped)
++{
++	switch (stopped) {
++	case SBWDT_STOP_NONE: return "feeding";
++	case SBWDT_STOP_PANIC: return "stopped: panic";
++	case SBWDT_STOP_DEADMAN: return "stopped: sweetreboot + 60 s dead-man (0421)";
++	case SBWDT_STOP_NOUI: return "stopped: no frame on the panel by sbnoui (0421)";
++	case SBWDT_STOP_USERSPACE: return "stopped: watchdogd missed its check-ins";
++	default: return "?";
++	}
++}
++
++void
++sbwdt_plan(const struct sbwdt_cfg *cfg, struct sbwdt *w)
++{
++	struct sbwdt z = { 0 };
++	*w = z;
++	w->hw_ms = sbwdt_hw_ms(cfg->wtcon, cfg->wtdat);
++	w->reload = cfg->wtdat & 0xffffu;
++	if (cfg->test_boot) {
++		w->why = "sbstop= test boot (0423): XNU never feeds; the loader's watchdog resets the phone";
++		return;
++	}
++	if (cfg->sbwdt_found && cfg->sbwdt_s == 0) {
++		w->why = "sbwdt=0: never fed";
++		return;
++	}
++	if (w->hw_ms == 0) {
++		w->why = "the watchdog is not armed (left off; never armed here)";
++		return;
++	}
++	if (cfg->sbwdt_found) {
++		w->feed_s = cfg->sbwdt_s;
++	} else if ((cfg->pmu_dis | cfg->pmu_mask) & (1u << SBWDT_PMU_BIT)) {
++		w->why = "no sbwdt= and the PMU masks its reset: not the loader's, not fed";
++		return;
++	} else {
++		w->feed_s = (w->hw_ms + 999u) / 1000u;
++	}
++	w->period_ms = sbwdt_period_ms(w->feed_s, w->hw_ms);
++	if (w->period_ms == 0) {
++		w->why = "no feed period";
++		return;
++	}
++	if (cfg->sweetreboot_s) {
++		w->deadman_ms = ((uint64_t)cfg->sweetreboot_s + 60u) * 1000u;
++		w->noui_ms = (uint64_t)cfg->noui_s * 1000u;
++	}
++	w->user_timeout_ms = cfg->user_timeout_s * 1000u;
++	w->may_feed = true;
++	w->why = cfg->sbwdt_found ? "sbwdt=N: fed until a panic, a dead-man or a userspace stop" :
++	    "armed by the loader without sbwdt=: fed for its own timeout";
++}
++
++void
++sbwdt_checkin(struct sbwdt *w, uint64_t now_ms)
++{
++	w->checkins++;
++	w->last_checkin_ms = now_ms;
++	w->user_armed = true;
++}
++
++bool
++sbwdt_tick(struct sbwdt *w, uint64_t now_ms, bool panic, bool first_frame)
++{
++	if (!w->may_feed || w->stopped != SBWDT_STOP_NONE) {
++		return false;
++	}
++	if (panic) {
++		w->stopped = SBWDT_STOP_PANIC;
++		return false;
++	}
++	if (w->deadman_ms && now_ms >= w->deadman_ms) {
++		w->stopped = SBWDT_STOP_DEADMAN;
++		return false;
++	}
++	if (w->noui_ms) {
++		if (first_frame) {
++			w->noui_ms = 0;
++		} else if (now_ms >= w->noui_ms) {
++			w->stopped = SBWDT_STOP_NOUI;
++			return false;
++		}
++	}
++	if (w->user_timeout_ms && w->user_armed && now_ms - w->last_checkin_ms > w->user_timeout_ms) {
++		w->stopped = SBWDT_STOP_USERSPACE;
++		return false;
++	}
++	w->feeds++;
++	return true;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteWatchdog/hw/sbwdt.h b/iokit/Kernel/arm/starbite/StarbiteWatchdog/hw/sbwdt.h
+new file mode 100644
+index 00000000..a0d1d936
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteWatchdog/hw/sbwdt.h
+@@ -0,0 +1,85 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Cluster 1's Exynos watchdog (0x10060000, samsung,exynos7-wdt, OSCCLK 26 MHz) and the loader's dead-man contract,
++ * plain C. The register maths and the "may XNU feed it" rule are the same as our build/xnu-12377/bsd/dev/
++ * starlte_health.h (0399, host-tested in tools/xnu-health-test against the loader); re-stated here so the driver and
++ * its tests stand alone. Facts and the contract: ../NOTES.md.
++ *
++ * The contract (never broken here):
++ *   1. sbstop=<stage> (0423): a test boot. XNU NEVER feeds; the loader's watchdog resets the phone in wdt s.
++ *   2. sbwdt=0: never fed.
++ *   3. Never armed, never re-programmed: WTCON / WTDAT are only read. A watchdog the loader did not arm stays off.
++ *   4. Once a panic starts: never fed again.
++ *   5. 0421 dead-man: with sweetreboot=S, feeding stops at S + 60 s, and at sbnoui= s (default 300) if no frame
++ *      reached the panel.
++ *   6. Userspace monitoring (new): once watchdogd has checked in and sbwdtuser=T is set, a gap of T s between
++ *      check-ins stops feeding for good (the phone then resets where INFORM3 says).
++ *   Stopping is one-way: nothing here ever resumes feeding.
++ */
++#ifndef STARBITE_SBWDT_H
++#define STARBITE_SBWDT_H
++
++#include <stdint.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define SBWDT_WTCON             0x00u
++#define SBWDT_WTDAT             0x04u
++#define SBWDT_WTCNT             0x08u
++#define SBWDT_WTCON_RSTEN       (1u << 0)
++#define SBWDT_WTCON_ENABLE      (1u << 5)
++#define SBWDT_CLK_HZ            26000000u
++#define SBWDT_PMU_BIT           23u     /* cluster 1 in AUTOMATIC_WDT_RESET_DISABLE / MASK_WDT_RESET_REQUEST */
++#define SBWDT_PERIOD_MIN_MS     1000u
++#define SBWDT_PERIOD_MAX_MS     27500u
++
++/* What the boot gives: boot-args and the registers as found (read only). */
++struct sbwdt_cfg {
++	bool sbwdt_found;
++	uint32_t sbwdt_s;
++	bool test_boot;                 /* sbstop= present */
++	uint32_t sweetreboot_s;         /* 0 = none */
++	uint32_t noui_s;                /* sbnoui (default 300), 0 = off; only with sweetreboot */
++	uint32_t user_timeout_s;        /* sbwdtuser, 0 = no userspace monitoring */
++	uint32_t wtcon, wtdat, pmu_dis, pmu_mask;
++};
++
++#define SBWDT_STOP_NONE         0
++#define SBWDT_STOP_PANIC        1
++#define SBWDT_STOP_DEADMAN      2
++#define SBWDT_STOP_NOUI         3
++#define SBWDT_STOP_USERSPACE    4
++
++struct sbwdt {
++	bool may_feed;                  /* decided once at start */
++	const char *why;                /* why (not) */
++	uint32_t hw_ms, feed_s, period_ms, reload;
++	uint64_t deadman_ms, noui_ms;   /* uptime limits, 0 = none */
++	uint32_t user_timeout_ms;
++	bool user_armed;                /* watchdogd checked in at least once */
++	uint64_t last_checkin_ms;
++	uint64_t checkins, feeds;
++	int stopped;                    /* SBWDT_STOP_* */
++};
++
++uint32_t sbwdt_hw_ms(uint32_t wtcon, uint32_t wtdat);
++uint32_t sbwdt_period_ms(uint32_t secs, uint32_t hw_ms);
++
++/* Decide at start whether this boot's watchdog may be fed at all, and how often. */
++void sbwdt_plan(const struct sbwdt_cfg *cfg, struct sbwdt *w);
++
++/* At each timer tick: true = write WTCNT = reload now. first_frame: a frame has reached the panel. */
++bool sbwdt_tick(struct sbwdt *w, uint64_t now_ms, bool panic, bool first_frame);
++
++/* watchdogd checked in. */
++void sbwdt_checkin(struct sbwdt *w, uint64_t now_ms);
++
++const char *sbwdt_stop_name(int stopped);
++
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/iokit/Kernel/arm/starbite/acpm_ipc.c b/iokit/Kernel/arm/starbite/acpm_ipc.c
+new file mode 100644
+index 00000000..c29c2550
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/acpm_ipc.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteACPM/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteACPM/
++ * (commit 4a7ec17); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteACPM/hw/acpm_ipc.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/exynos_hsi2c.c b/iokit/Kernel/arm/starbite/exynos_hsi2c.c
+new file mode 100644
+index 00000000..cfb50917
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/exynos_hsi2c.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteBattery/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteBattery/
++ * (commit 4a7ec17); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteBattery/hw/exynos_hsi2c.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/max77705.c b/iokit/Kernel/arm/starbite/max77705.c
+new file mode 100644
+index 00000000..1cedd55c
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/max77705.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteBattery/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteBattery/
++ * (commit 4a7ec17); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteBattery/hw/max77705.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/s2mps18_policy.c b/iokit/Kernel/arm/starbite/s2mps18_policy.c
+new file mode 100644
+index 00000000..1cbf53ac
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/s2mps18_policy.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteACPM/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteACPM/
++ * (commit 4a7ec17); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteACPM/hw/s2mps18_policy.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/s2mps18_rtc.c b/iokit/Kernel/arm/starbite/s2mps18_rtc.c
+new file mode 100644
+index 00000000..45f566a2
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/s2mps18_rtc.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteRTC/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteRTC/
++ * (commit 4a7ec17); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteRTC/hw/s2mps18_rtc.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbwdt.c b/iokit/Kernel/arm/starbite/sbwdt.c
+new file mode 100644
+index 00000000..a3a082c7
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbwdt.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteWatchdog/hw/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteWatchdog/
++ * (commit 4a7ec17); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteWatchdog/hw/sbwdt.c"
++#endif
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index d82e5171..8a3d2ff8 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -64,6 +64,10 @@ const char * gIOKernelConfigTables =
+     "     'IOClass'         = IOWatchdog;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = IOWatchdog;"
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++    /* 0426: only without the board ADT's arm-io nodes; with them StarbiteWatchdog is IOWatchdog (wdt-cl1) */
++    "     'IOResourceMatch' = 'StarbiteLegacyBoard';"
++#endif
+     "   },"
+     "   {"
+     "     'IOClass'         = IOCoreSurfaceRoot;"
+@@ -99,6 +103,10 @@ const char * gIOKernelConfigTables =
+     "     'IOClass'         = SweetBattery;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetBattery;"
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++    /* 0426: only without the board ADT's arm-io nodes; with them StarbiteBattery is the power source */
++    "     'IOResourceMatch' = 'StarbiteLegacyBoard';"
++#endif
+     "   },"
+     "   {"
+     "     'IOClass'         = StarbiteAccelerator;"
+@@ -106,6 +114,37 @@ const char * gIOKernelConfigTables =
+     "     'IOMatchCategory' = StarbiteAccelerator;"
+     "   },"
+ #endif
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++    /*
++     * 0426, Starbite S9 platform drivers (iokit/Kernel/arm/starbite, docs/APPLE-S9-DRIVERS.md M5). They match
++     * arm-io nubs that only the board ADT (tools/board/mkadt-board.py) has, so boots with today's ADTs are
++     * unchanged; with the board ADT, SweetPlatformExpert does not publish StarbiteLegacyBoard and the
++     * IOResources IOWatchdog and SweetBattery above stay off.
++     */
++    "   {"
++    "     'IOClass'         = StarbiteACPM;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'starbite,acpm-ipc';"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
++    "   {"
++    "     'IOClass'         = StarbiteRTC;"
++    "     'IOProviderClass' = StarbiteACPM;"
++    "     'IOMatchCategory' = StarbiteRTC;"
++    "   },"
++    "   {"
++    "     'IOClass'         = StarbiteWatchdog;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'wdt-cl1';"
++    "     'IOMatchCategory' = IOWatchdog;"
++    "   },"
++    "   {"
++    "     'IOClass'         = StarbiteBattery;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'hsi2c-pmic';"
++    "     'IOMatchCategory' = StarbiteBattery;"
++    "   },"
++#endif
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+     "   {"
+     "     'IOClass'         = A5XELTEGPU;"
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+index 47acdd93..ed2c58c3 100644
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -801,6 +801,15 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 	}
+ 
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
++	{
++		/* 0426: sbstop test boots end at a driver stage, never at a root (herolte_ufs.c) */
++		extern int starlte_sbstop_no_root(void);
++		if (starlte_sbstop_no_root()) {
++			for (;;) {
++				IOSleep(60 * 1000);
++			}
++		}
++	}
+ 	/* Exynos 9810: GPIO keys with S9 pins (a5xelte_keys.c) and the
+ 	 * S6SY761 touch driver (starlte_touch.c); no S7 PMIC/GPU code.
+ 	 * Boot-arg ufsprobe=1: read-only UFS host state and LUN 0 GPT. */
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index feb3fe7e..cb2a57d2 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -24,3 +24,16 @@ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitc
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHIDSystem.cpp                          optional iokitcpp
++
++# Starbite S9 platform drivers (docs/APPLE-S9-DRIVERS.md; empty translation units on other boards).
++# M5: power, clock, watchdog, battery. Matched only on an ADT v2 (tools/board) that has their arm-io nodes.
++iokit/Kernel/arm/starbite/StarbiteACPM.cpp                       optional iokitcpp
++iokit/Kernel/arm/starbite/acpm_ipc.c                             optional iokitcpp
++iokit/Kernel/arm/starbite/s2mps18_policy.c                       optional iokitcpp
++iokit/Kernel/arm/starbite/StarbiteRTC.cpp                        optional iokitcpp
++iokit/Kernel/arm/starbite/s2mps18_rtc.c                          optional iokitcpp
++iokit/Kernel/arm/starbite/StarbiteWatchdog.cpp                   optional iokitcpp
++iokit/Kernel/arm/starbite/sbwdt.c                                optional iokitcpp
++iokit/Kernel/arm/starbite/StarbiteBattery.cpp                    optional iokitcpp
++iokit/Kernel/arm/starbite/exynos_hsi2c.c                         optional iokitcpp
++iokit/Kernel/arm/starbite/max77705.c                             optional iokitcpp
+-- 
+2.53.0
+
