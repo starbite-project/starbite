@@ -1487,6 +1487,148 @@ static void page_camera(dc *d)
     d_h1(d, "Camera");
     d_empty(d, 330, "Camera Not Available", "The Galaxy S9's camera needs its driver first.");
 }
+/* ---- P2z: the Clock app: the live time, a stopwatch, a timer that vibrates (no sound). The page's static part is
+ * drawn in the strips; the stopwatch's and the timer's digits and the buttons are three small layers, redrawn
+ * only when their text changes (the platform asks sh_next_update when to come back) ---- */
+static int is_app(const char *k);
+static tk_layer apsw, aptm, apctl;
+static struct { int sw_run, laps, tm_run, sw_ds, tm_s, ctl_ver, ctl_drawn; float sw_t0, sw_acc, lap_at, tm_end; } CLK = { 0, 0, 0, -1, -1, 1, 0, 0, 0, 0, 0 };
+static float clk_sw_ms(float t) { return CLK.sw_acc + (CLK.sw_run ? t - CLK.sw_t0 : 0); }
+static int fmt_ms(char *b, float ms, int tenths)
+{
+    int ds = (int)(ms / 100), s = ds / 10, m = s / 60;
+    int n = 0;
+    if (m >= 60) { n += put_dec(b, m / 60); b[n++] = ':'; m %= 60; }
+    b[n++] = (char)('0' + m / 10 % 10); b[n++] = (char)('0' + m % 10); b[n++] = ':';
+    b[n++] = (char)('0' + s % 60 / 10); b[n++] = (char)('0' + s % 10);
+    if (tenths) { b[n++] = '.'; b[n++] = (char)('0' + ds % 10); }
+    b[n] = 0;
+    return n;
+}
+static void page_clock(dc *d)
+{
+    d_h1(d, "Clock");
+    char hm[8], dt[48];
+    fmt_hm(hm);
+    float w = tw(TK_IT600, 64, hm, 0, TK_TNUM);
+    d_text(d, TK_IT600, 64, (390 - w) / 2, bl(TK_IT600, 64, 112), hm, 0, TK_TNUM, INK, 0);
+    const char *wd = WD[ST.wday % 7], *mo = MO[(ST.mon + 11) % 12];
+    int n = (int)tk_strlen(wd);
+    tk_memcpy(dt, wd, (size_t)n); dt[n++] = ' ';
+    n += put_dec(dt + n, ST.day); dt[n++] = ' ';
+    tk_memcpy(dt + n, mo, tk_strlen(mo) + 1);
+    w = tw(TK_IT400, 15, dt, 0, 0);
+    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 192), dt, 0, 0, W(.55f), 0);
+    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 236), "STOPWATCH", .52f, 0, W(.55f), 0);
+    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 462), "TIMER", .52f, 0, W(.55f), 0);
+}
+static void clk_digits(tk_layer *l, float y, const char *txt, const char *sub)
+{
+    relayer(l);
+    dc d = mk(l, "clock-digits", 20, y, 350, 84, 0, 0);
+    float w = tw(TK_IT400, 54, txt, 0, TK_TNUM);
+    d_text(&d, TK_IT400, 54, (390 - w) / 2, bl(TK_IT400, 54, y), txt, 0, TK_TNUM, INK, 0);
+    if (sub && sub[0]) {
+        w = tw(TK_IT400, 14, sub, 0, TK_TNUM);
+        d_text(&d, TK_IT400, 14, (390 - w) / 2, bl(TK_IT400, 14, y + 66), sub, 0, TK_TNUM, W(.55f), 0);
+    }
+    l->hidden = 0;
+}
+static void clk_button(dc *d, float x, float y, float wd, float h, const char *t, tk_col bg, tk_col fg)
+{
+    d_rrect(d, x, y, wd, h, h / 2, bg);
+    float w = tw(TK_IT600, 16, t, 0, 0);
+    d_text(d, TK_IT600, 16, x + (wd - w) / 2, bl(TK_IT600, 16, y + h / 2 - 10), t, 0, 0, fg, 0);
+}
+static void clk_controls(void)
+{
+    relayer(&apctl);
+    dc d = mk(&apctl, "clock-buttons", 20, 344, 350, 270, 0, 0);
+    float sw = clk_sw_ms(now_ms);
+    clk_button(&d, 36, 350, 78, 78, CLK.sw_run ? "Lap" : "Reset", W(CLK.sw_run || sw > 0 ? .16f : .07f), W(CLK.sw_run || sw > 0 ? 1 : .4f));
+    clk_button(&d, 276, 350, 78, 78, CLK.sw_run ? "Stop" : "Start", CLK.sw_run ? TK_RGBA(255, 69, 58, .28f) : TK_RGBA(48, 209, 88, .28f),
+               CLK.sw_run ? tk_hex(0xff6961, 1) : tk_hex(0x4cd964, 1));
+    if (CLK.tm_run) clk_button(&d, 125, 570, 140, 44, "Cancel", TK_RGBA(255, 159, 10, .25f), tk_hex(0xffb340, 1));
+    else {
+        static const char *const P[3] = { "1 min", "5 min", "10 min" };
+        for (int i = 0; i < 3; i++) clk_button(&d, 24 + 125 * i, 570, 92, 44, P[i], W(.14f), INK);
+    }
+    apctl.hidden = 0;
+    CLK.ctl_drawn = CLK.ctl_ver;
+}
+/* the digits and the buttons as of t (ms); 1 if anything was redrawn. A timer that ran out vibrates (sh_vibrate). */
+static int clk_update(float t)
+{
+    int any = 0;
+    if (CLK.tm_run && t >= CLK.tm_end) {
+        CLK.tm_run = 0;
+        CLK.ctl_ver++;
+        sh_vibrate();
+        toast("Timer done");
+        any = 1;
+    }
+    if (!is_app("clock") || !AP.on) return any;
+    float sw = clk_sw_ms(t);
+    int ds = (int)(sw / 100);
+    if (ds != CLK.sw_ds || !apsw.bmp.px) {
+        CLK.sw_ds = ds;
+        char b[16], l[32] = "";
+        fmt_ms(b, sw, 1);
+        if (CLK.laps) { tk_memcpy(l, "Lap ", 4); int n = 4 + put_dec(l + 4, CLK.laps); l[n++] = ' '; l[n++] = ' '; fmt_ms(l + n, CLK.lap_at, 1); }
+        clk_digits(&apsw, 254, b, l);
+        any = 1;
+    }
+    int ts = CLK.tm_run ? (int)((CLK.tm_end - t + 999) / 1000) : 0;
+    if (ts != CLK.tm_s || !aptm.bmp.px) {
+        CLK.tm_s = ts;
+        char b[16];
+        fmt_ms(b, ts * 1000.0f, 0);
+        clk_digits(&aptm, 478, CLK.tm_run ? b : "00:00", CLK.tm_run ? "" : "Choose a time");
+        any = 1;
+    }
+    if (CLK.ctl_drawn != CLK.ctl_ver || !apctl.bmp.px) { clk_controls(); any = 1; }
+    if (any) relink();
+    return any;
+}
+static void clk_tap(float x, float y)
+{
+    float t = now_ms;
+    if (y >= 350 && y < 428) {
+        if (x >= 276 && x < 354) {                       /* Start / Stop */
+            if (CLK.sw_run) { CLK.sw_acc += t - CLK.sw_t0; CLK.sw_run = 0; }
+            else { CLK.sw_t0 = t; CLK.sw_run = 1; }
+            CLK.ctl_ver++;
+        } else if (x >= 36 && x < 114) {                 /* Lap / Reset */
+            if (CLK.sw_run) { CLK.laps++; CLK.lap_at = clk_sw_ms(t); CLK.sw_ds = -1; }
+            else { CLK.sw_acc = 0; CLK.laps = 0; CLK.sw_ds = -1; CLK.ctl_ver++; }
+        }
+    } else if (y >= 570 && y < 614) {
+        if (CLK.tm_run) { if (x >= 125 && x < 265) { CLK.tm_run = 0; CLK.ctl_ver++; } }
+        else for (int i = 0; i < 3; i++)
+            if (x >= 24 + 125 * i && x < 116 + 125 * i) {
+                static const int M[3] = { 1, 5, 10 };
+                CLK.tm_end = t + M[i] * 60000.0f;
+                CLK.tm_run = 1;
+                CLK.ctl_ver++;
+            }
+    }
+    clk_update(t);
+}
+/* when the platform should come back for the clock (ms; < 0: nothing pending) */
+int sh_next_update(float t)
+{
+    int open = AP.on && is_app("clock");
+    float best = -1;
+    if (CLK.sw_run && open) best = 100 - (float)((int)clk_sw_ms(t) % 100);
+    if (CLK.tm_run) {
+        float tl = CLK.tm_end - t, nx = open ? (float)((int)tl % 1000) + 1 : tl;
+        if (nx < 1) nx = 1;
+        if (best < 0 || nx < best) best = nx;
+    }
+    return (int)best;
+}
+int sh_refresh(float t) { now_ms = t; return clk_update(t); }
+
 static tk_layer apkey, apnum;
 static void build_apnum(void)
 {
@@ -1541,7 +1683,7 @@ static void build_app_page(int a)
 {
     const char *k = APPS[a].k;
     int own = !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
-              !tk_strcmp(k, "camera");
+              !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock");
     if (own) {
         for (int i = 0; i < NST; i++) {
             dc d = strip_dc(i, "app-page");
@@ -1550,10 +1692,12 @@ static void build_app_page(int a)
             else if (!tk_strcmp(k, "messages")) page_messages(&d);
             else if (!tk_strcmp(k, "contacts")) page_contacts(&d);
             else if (!tk_strcmp(k, "photos")) page_photos(&d);
+            else if (!tk_strcmp(k, "clock")) page_clock(&d);
             else page_camera(&d);
             tk_layer_prepare(&appst[i]);
         }
         build_apnum();
+        if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
         relink();
         return;
     }
@@ -1703,6 +1847,8 @@ static void app_finish_close(void)
     /* the page (a whole screen) is not kept: the next open draws it again */
     for (int i = 0; i < NST; i++) relayer(&appst[i]);
     relayer(&apnum);
+    relayer(&apsw); relayer(&aptm); relayer(&apctl);           /* P2z: the clock's (the timer keeps running) */
+    apsw.hidden = aptm.hidden = apctl.hidden = 1;
     apnum.hidden = apkey.hidden = 1;
     home.sx = home.sy = 1;
     home.alpha = 1;
@@ -1975,6 +2121,8 @@ static void app_tap(float x, float y)
         if (dx * dx + dy * dy <= 39 * 39)
             toast(!tk_strcmp(AS.num, "112") ? "Calling 112 needs the modem (receive-only today)" :
                   AS.num[0] ? "No SIM: only emergency calls" : "Enter a number");
+    } else if (is_app("clock")) {
+        clk_tap(x, y);
     } else if (is_app("settings")) {
         if (x >= 16 && x < 374 && y >= 182 && y < 229) {
             if (cell_running()) { sh_modem(0); toast("Modem stopped"); }
@@ -2111,8 +2259,8 @@ static void relink(void)
 {
     tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
     link(&root, r, 14);
-    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum };
-    link(&appg, ag, 4);
+    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl };
+    link(&appg, ag, 7);
     tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     link(&appc, st, NST);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
@@ -2738,6 +2886,7 @@ int sh_tick(float dt, float t)
 {
     int mv = 0;
     now_ms = t;
+    clk_update(t);
     if (SL.dir) {
         SL.t = tk_minf(1, SL.t + dt / (SL.dir < 0 ? SL_OUT : SL_IN));
         if (SL.t >= 1) {
@@ -2947,6 +3096,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
     int tchange = h != ST.h || mi != ST.mi || wday != ST.wday || day != ST.day || mon != ST.mon;
     int wchange = pct != ST.pct || temp != ST.temp;
     ST.h = h; ST.mi = mi; ST.wday = wday; ST.day = day; ST.mon = mon; ST.pct = pct; ST.temp = temp;
+    if (tchange && AP.on && is_app("clock") && !AP.closing) build_app_page(AP.a);   /* P2z: the page's time */
     if (tchange) {
         /* the layers keep their place in the tree: rebuilt in place */
         build_lclock();

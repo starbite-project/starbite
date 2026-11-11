@@ -50,6 +50,11 @@ void sh_brightness(int level);
 void sh_bright_now(int level);
 /* P2y: the apps' live values besides sh_status: charging or not, the software's name and version */
 void sh_sysinfo(int charging, const char *version);
-void sh_alarm(int on, int h, int m);      /* the next alarm for the lock's widget (on 0: "No alarm") */
+void sh_alarm(int on, int h, int m);
+/* P2z, the Clock app: when to come back (ms; < 0 nothing pending), the redraw then (1: something changed), and the
+ * platform's vibration for a timer that ran out (no sound) */
+int sh_next_update(float t_ms);
+int sh_refresh(float t_ms);
+void sh_vibrate(void);      /* the next alarm for the lock's widget (on 0: "No alarm") */
 
 #endif
