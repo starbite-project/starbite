@@ -813,6 +813,7 @@ static void gidle_tree(tk_comp *c, tk_layer *l, uint64_t t0)
         gidle_tree(c, l->child, t0);
     }
 }
+const tk_bmp *tk_comp_shown(const tk_comp *c) { return c->gpu_stale && c->panel.px ? &c->panel : &c->fb; }
 int tk_comp_idle_pending(tk_comp *c) { return c->gpu && gidle_more; }
 void tk_comp_idle(tk_comp *c)
 {
