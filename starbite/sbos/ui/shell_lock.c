@@ -373,7 +373,7 @@ static void build_lwidgets(void)
     if (EMG) {
         /* Emergency: the battery ring amber, Heat (ready, the phone's temperature), Saving (off) */
         ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), tk_hex(0xffb547, 1), num, "BATTERY");
-        ring_widget(&d, 285, 0, tk_hex(0xff5a4e, 1), "Off", "SAVING");
+        ring_widget(&d, 285, sh_last2() ? 1 : 0, tk_hex(0xff5a4e, 1), sh_last2() ? "On" : "Off", "SAVING");   /* survival-next: Last 2 % */
         char v[40];
         int k = put_dec(v, ST.temp);
         tk_memcpy(v + k, " \xc2\xb0" "C battery", 13);
@@ -467,6 +467,25 @@ static void hold_ring(hold_t *q, int i, float p)
     tk_layer_dirty(&q->ring);
 }
 
+/* survival-next: Emergency mode's tools (shell_survival.inc) */
+static float sv_ec_max_scroll(void);
+static int sv_tile(dc *d, const char *k, float x, float y, float s);
+static const char *sv_ec_sub(int i, char *b);
+static int sv_ec_hit(float x, float y);
+static void sv_ec_tap(int i);
+static int sv_idle_pending(void);
+static void sv_idle(void);
+static int sv_own(const char *k);
+static int sv_page(const char *k, dc *d);
+static void sv_page_card_edit(dc *d);
+static void sv_extras(const char *k);
+static int sv_tap(float x, float y);
+static void sv_opened(void);
+static void sv_closed(void);
+static uint32_t sv_ground(int a);
+static float sv_next_update(float t);
+static int sv_refresh(float t);
+
 /* ---- the Systems list ------------------------------------------------------------------------------------------ */
 #define FACE_MG 44.0f            /* the margin around a card's face (its shadow) */
 #define LIST_TOP 310.0f
@@ -501,7 +520,7 @@ static float content_h(void)
     /* the last margin (22) collapses with the tools' 12; then their 32, margin 4, padding 14 */
     return y + 32 + 4 + 14;
 }
-static float max_scroll(void) { return EMG ? 0 : tk_maxf(0, content_h() - LIST_H); }
+static float max_scroll(void) { return EMG ? sv_ec_max_scroll() : tk_maxf(0, content_h() - LIST_H); }
 
 static void head_content(dc *d, int g, float top)
 {
@@ -681,41 +700,55 @@ static void build_etool(void)
     d_text(&d, TK_IT600, 13, x + 35, top + 8 + 13, "Lab", 0, 0, INK, 0);
 }
 
-/* Emergency's list (the concept's renderEmergency): four cards and Exit Emergency; made on entering, freed on
- * leaving (they are about 15 MB) */
-static tk_layer ecard[5], empill;
-typedef struct { const char *icon, *t, *s, *act; } ecard_t;
-static const ecard_t EC[4] = {
+/* Emergency's list (the concept's renderEmergency): eight cards and Exit Emergency; made on entering, freed on
+ * leaving. survival-next: the four tools after the concept's four (USB Power, Sun, Guide, Compass / Level); the
+ * list scrolls; ecard[5] holds cards 4..7, drawn one per idle turn (shell_survival.inc: sv_idle) */
+#define NEC 6                           /* 0 cards 0..3, 4 Exit, 5 cards 4..7 */
+static tk_layer ecard[NEC], empill;
+static int ec_next = 8;                 /* survival-next: cards 4..7 drawn so far */
+typedef struct { const char *icon, *t, *s, *act; } ecard_t;   /* act: the app it opens (none: a toast) */
+static const ecard_t EC[8] = {
     { "e46-heat", "Survival Heat", "Warms your hands \xc2\xb7 stops at a 65 \xc2\xb0" "C battery", "Survival Heat" },
-    { "e46-power", "Power Saving", "Dims the screen and turns off radios", "Power Saving" },
-    { "e46-sos", "Emergency SOS", "Siren, flashing light and your medical card", "SOS" },
-    { "e46-medical", "Medical Card", "Shown here without unlocking", "Medical Card" } };
+    { "e46-power", "Last 2 %", "Everything off but the clock, the torch and SOS", "power" },
+    { "e46-sos", "Emergency SOS", "Morse SOS on the torch, the motor and the screen", "sos" },
+    { "e46-medical", "Medical Card", "Shown here without unlocking", "medical" },
+    { "usb", "USB Power", "5 V out of the USB-C port: a fire starter", "usb" },
+    { "sun", "Sun", 0, "sun" },
+    { "guide", "Survival Guide", "First aid, water, shelter, signals: offline", "guide" },
+    { "compass", "Compass / Level", 0, "compass" } };
+static void ec_card(dc *d, int i, float top)
+{
+    /* P3i: no blur of the layer under each card (only the card above's shadow: ~200 ms for nothing seen) */
+    int off = !tk_strcmp(EC[i].act, "compass");          /* survival-next: no sensor driver yet: a dimmed card */
+    d_glass(d, CARD_X, top, CARD_W, 68, 26, 0, 1);
+    if (!sv_tile(d, EC[i].icon, CARD_ICON, top + 11, 46)) d_icon(d, EC[i].icon, CARD_ICON, top + 11, 1);
+    if (off) d_rrect(d, CARD_ICON, top + 11, 46, 46, 10.35f, TK_RGBA(30, 12, 12, .45f));
+    /* b: 19 / 800 / -.5, line-height 1.1 (half-leading floored); .sub 13.5, .82 */
+    d_text(d, TK_IT700, 19, CARD_TX, top + 12.55f + tk_floorf(tk_ascent(TK_IT700, PT(19)) / TK_PT + .5f), EC[i].t, 0, 0, off ? W(.55f) : INK, 0);
+    /* P3i: the chevron where the systems' is; a long line gives way with an ellipsis (it ran past the card) */
+    char sub[96], sb[64];
+    ellipsize(sub, sizeof sub, TK_IT400, 13.5f, EC[i].s ? EC[i].s : sv_ec_sub(i, sb), CARD_CHEV - 12 - CARD_TX);
+    d_text(d, TK_IT400, 13.5f, CARD_TX, top + 37.44f + tk_floorf(tk_ascent(TK_IT400, PT(13.5f)) / TK_PT + .5f), sub, 0, 0, W(off ? .5f : .82f), 0);
+    d_icon(d, "chev", CARD_CHEV, top + 27, off ? .4f : 1);
+}
 static void build_ecards(void)
 {
-    /* the four cards in one layer (each card's backdrop is what is drawn before it, as in the list) */
+    /* the first four cards in one layer (each card's backdrop is what is drawn before it, as in the list) */
     dc d = mk(&ecard[0], "ecards", CARD_X, LIST_TOP + 10, CARD_W, 78 * 3 + 68, FACE_MG, 1);   /* P3q: shapes recorded (below) */
-    for (int i = 0; i < 4; i++) {
-        float top = LIST_TOP + 10 + 78 * i;
-        /* P3i: no blur of the layer under each card (only the card above's shadow: ~200 ms for nothing seen) */
-        d_glass(&d, CARD_X, top, CARD_W, 68, 26, 0, 1);
-        d_icon(&d, EC[i].icon, CARD_ICON, top + 11, 1);
-        /* b: 19 / 800 / -.5, line-height 1.1 (half-leading floored); .sub 13.5, .82 */
-        d_text(&d, TK_IT700, 19, CARD_TX, top + 12.55f + tk_floorf(tk_ascent(TK_IT700, PT(19)) / TK_PT + .5f), EC[i].t, 0, 0, INK, 0);
-        /* P3i: the chevron where the systems' is; a long line gives way with an ellipsis (it ran past the card) */
-        char sub[96];
-        ellipsize(sub, sizeof sub, TK_IT400, 13.5f, EC[i].s, CARD_CHEV - 12 - CARD_TX);
-        d_text(&d, TK_IT400, 13.5f, CARD_TX, top + 37.44f + tk_floorf(tk_ascent(TK_IT400, PT(13.5f)) / TK_PT + .5f), sub, 0, 0, W(.82f), 0);
-        d_icon(&d, "chev", CARD_CHEV, top + 27, 1);
-    }
-    float top = LIST_TOP + 10 + 78 * 4 - 10 + 12, w = 14 + tw(TK_IT600, 13, "Exit Emergency", 0, 0) + 14, x = 195 - w / 2;
+    for (int i = 0; i < 4; i++) ec_card(&d, i, LIST_TOP + 10 + 78 * i);
+    float top = LIST_TOP + 10 + 78 * 8 - 10 + 12, w = 14 + tw(TK_IT600, 13, "Exit Emergency", 0, 0) + 14, x = 195 - w / 2;
     d = mk(&ecard[4], "eexit", x, top, w, 32, 44, 1);
     d_glass(&d, x, top, w, 32, 16, 1, 1);
     d_text(&d, TK_IT600, 13, x + 14, top + 8 + 13, "Exit Emergency", 0, 0, INK, 0);
     tk_a8_free(&ecard[0].glass);
     tk_layer_prepare(&ecard[0]);
     tk_layer_prepare(&ecard[4]);
+    /* survival-next: cards 4..7 below the fold: their layer now, the cards at the next idle turns */
+    mk(&ecard[5], "ecards2", CARD_X, LIST_TOP + 10 + 78 * 4, CARD_W, 78 * 3 + 68, FACE_MG, 0);
+    ecard[5].hidden = 1;
+    ec_next = 4;
 }
-static void free_ecards(void) { for (int i = 0; i < 5; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } }
+static void free_ecards(void) { for (int i = 0; i < NEC; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } ec_next = 8; }
 static int cards_pending;       /* vendor cards still to bake again after Emergency (one per idle turn) */
 static void build_card(int g);
 static void free_open(int g);
@@ -788,6 +821,7 @@ static void place_list(void)
     }
     etool.hidden = EMG;
     ecard[0].hidden = ecard[4].hidden = !EMG;
+    ecard[5].hidden = !EMG || ec_next == 4;          /* survival-next: shown from its first card */
     list.y = PT(-scroll);
     list.clip_r = (tk_rect){ 0, PT(LIST_TOP), PT(390), PT(LIST_H) };
     lock_ver++;
@@ -886,7 +920,8 @@ static void build_home_sb(void)
 #define WID_W 158.0f
 #define DOCK_Y 705.0f
 static const char *const P2K[8] = { "contacts", "files", "light", "battery", "terminal", "browser", "medical", "sos" };
-static const char *const P2E[8] = { "heat", "power", "sos", "medical", "light", "battery", "contacts", "files" };
+static const char *const P2E[12] = { "heat", "power", "sos", "medical", "usb", "sun", "guide", "compass", "light", "battery", "contacts", "files" };
+#define NP2 (EMG ? 12 : 8)                  /* survival-next: Emergency's page 2 has a third row (the tools) */
 static void build_home_w(void)
 {
     relayer(&hparts[1]);
@@ -938,16 +973,17 @@ static void build_home_apps2(void)
     /* page 2: the second grid (top 62) */
     {
         static const char *P2N_[8] = { "Contacts", "Files", "Flashlight", "Battery", "Terminal", "Browser", "Medical Card", "SOS" };
-        static const char *P2EN[8] = { "Survival Heat", "Power Saving", "SOS", "Medical Card", "Flashlight", "Battery", "Contacts", "Files" };
+        static const char *P2EN[12] = { "Survival Heat", "Last 2 %", "SOS", "Medical Card", "USB Power", "Sun", "Guide", "Compass",
+                                        "Flashlight", "Battery", "Contacts", "Files" };
         const char *const *P2 = EMG ? P2E : P2K, *const *P2N = EMG ? P2EN : P2N_;
         relayer(&hparts[4]);
         /* drawn as if on screen, then moved one page to the right (layers never extend past the panel's sides) */
-        dc d = mk(&hparts[4], "home-apps2", 0, 55, 390, 220, 4, 0);
-        for (int i = 0; i < 8; i++) {
+        dc d = mk(&hparts[4], "home-apps2", 0, 55, 390, 220 + (EMG ? ROW_PITCH : 0), 4, 0);
+        for (int i = 0; i < NP2; i++) {
             float cx = COL_CX(i % 4), y = HOME_TOP2 + ROW_PITCH * (i / 4);
             char n[40] = "a62-";
             tk_memcpy(n + 4, P2[i], tk_strlen(P2[i]) + 1);
-            d_icon(&d, n, cx - 31, y, 1);
+            if (!sv_tile(&d, P2[i], cx - 31, y, 62)) d_icon(&d, n, cx - 31, y, 1);
             d_text_box(&d, TK_IT500, 12, cx, y + 68 + 12, 84, 1, P2N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
         }
         hparts[4].x = hparts[4].bx = hparts[4].x + PT(390);
@@ -1476,15 +1512,20 @@ static const appdef APPS[] = {
     { "battery", "Battery", 0x1d2440, 1, { { "Now", 3, { { "Charge", "@pct" }, { "Charging", "@chg" }, { "Battery temperature", "@temp" } } } } },
     { "terminal", "Terminal", 0x1d2440, 1, { { "", 1, { { "Linux apps run in Starbite OS", "" } } } } },
     { "browser", "Browser", 0x2f7bf6, 1, { { "", 1, { { "The browser needs the internet", "" } } } } },
-    { "medical", "Medical Card", 0x1d2440, 1, { { "", 1, { { "Nothing is stored on this phone yet", "" } } } } },
-    { "sos", "SOS", 0x1d2440, 1, { { "", 2, { { "Call 112", "Needs a SIM" }, { "Siren and light", "In Starbite OS" } } } } },
+    { "medical", "Medical Card", 0xd62f3f, 1, { { "", 1, { { "", "" } } } } },     /* survival-next */
+    { "sos", "SOS", 0xb3150c, 1, { { "", 1, { { "", "" } } } } },
     { "heat", "Survival Heat", 0x1d2440, 1, { { "", 1, { { "Survival Heat runs in Starbite OS", "" } } } } },
-    { "power", "Power Saving", 0x1d2440, 1, { { "", 1, { { "Not in this version yet", "" } } } } },
+    { "power", "Last 2 %", 0xe09f1f, 1, { { "", 1, { { "", "" } } } } },      /* survival-next: shell_survival.inc */
+    { "usb", "USB Power", 0xe0461f, 1, { { "", 1, { { "", "" } } } } },
+    { "sun", "Sun", 0xff8a00, 1, { { "", 1, { { "", "" } } } } },
+    { "guide", "Survival Guide", 0x1f8a4c, 1, { { "", 1, { { "", "" } } } } },
+    { "compass", "Compass / Level", 0x55555c, 1, { { "", 1, { { "", "" } } } } },
     { "phone", "Phone", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "messages", "Messages", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "search", "Search", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
     { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "@wifi" }, { "Cellular", "No SIM" }, { "Battery", "@pct" } } },
-                                           { "", 5, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" } } },
+                                           { "", 6, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" },
+                                                      { "Medical Card", "" } } },
                                            { "About", 3, { { "Model", "Galaxy S9 (SM-G960F)" }, { "Software", "@ver" }, { "Memory", "4 GB" } } } } },
 };
 #define NAPPS ((int)(sizeof APPS / sizeof APPS[0]))
@@ -2048,6 +2089,8 @@ int sh_next_update(float t)
         if (best < 0 || nx < best) best = nx;
     }
     if (med_pending() && (best < 0 || best > 4)) best = 4;      /* the card's work, a turn at a time */
+    float sv = sv_next_update(t);                       /* survival-next: SOS's beacon, USB power's state */
+    if (sv >= 0 && (best < 0 || sv < best)) best = sv;
     return (int)best;
 }
 int sh_refresh(float t)
@@ -2055,7 +2098,7 @@ int sh_refresh(float t)
     now_ms = t;
     int ch = clk_update(t);
     if (med_pending() && !sh_moving()) ch |= med_work(10000, 1);
-    return ch;
+    return sv_refresh(t) | ch;                          /* survival-next: SOS's beacon, USB power's state */
 }
 
 /* ---- P2z: the Calculator (iOS's layout: the display right-aligned, the keys in five rows: grey functions, dark
@@ -2632,6 +2675,7 @@ static const setico SETICO[] = {
     { "Wi-Fi", "cc-wifi", 0x0a84ff, 19, 14 }, { "Cellular", "cc-cell", 0x30d158, 18, 16 }, { "Battery", "cc-save", 0x30d158, 20, 12 },
     { "Display & Brightness", "cc-sun", 0x0a84ff, 20, 20 }, { "Sounds & Haptics", "cc-vol", 0xff375f, 20, 20 },
     { "Bluetooth", "cc-bt", 0x0a84ff, 12, 18 }, { "Airplane Mode", "cc-air", 0xff9f0a, 18, 18 }, { "Date & Time", "cc-timer", 0x8e8e93, 19, 19 },
+    { "Medical Card", "heart", 0xff3b30, 18, 18 },      /* survival-next */
 };
 static const setico *set_icon(const char *app, const char *row)
 {
@@ -2647,9 +2691,7 @@ static const infopg INFO[] = {
     { "files", "No Files", "Files isn't in this version yet." },
     { "terminal", "Not Here Yet", "The terminal and Linux apps run in Starbite OS." },
     { "browser", "No Internet", "The browser needs the internet. This phone isn't online yet." },
-    { "medical", "No Medical Card", "Nothing is stored on this phone yet." },
     { "heat", "Not Here Yet", "Survival Heat runs in Starbite OS." },
-    { "power", "Not Available", "Power Saving isn't in this version yet." },
 };
 static const infopg *info_of(const char *k)
 {
@@ -2676,7 +2718,7 @@ static int app_own(int a)
     return !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
            !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
            !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes") ||
-           !tk_strcmp(k, "search") || info_of(k) || med_is(k);
+           !tk_strcmp(k, "search") || info_of(k) || med_is(k) || sv_own(k);
 }
 static void own_strip(int a, int i)
 {
@@ -2693,9 +2735,10 @@ static void own_strip(int a, int i)
     else if (!tk_strcmp(k, "calc")) page_calc(&d);
     else if (!tk_strcmp(k, "light")) page_light(&d);
     else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
-    else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else page_display(&d); }
+    else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else if (AS.sub == 4) sv_page_card_edit(&d); else page_display(&d); }
     else if (!tk_strcmp(k, "notes")) page_notes(&d);
     else if (!tk_strcmp(k, "search")) page_search(&d);
+    else if (sv_page(k, &d)) ;                       /* survival-next */
     else if (inf) { d_h1(&d, APPS[a].name); d_empty(&d, CONTENT_TOP, EMPTY_BOT, inf->title, inf->line); }
     else page_camera(&d);
     tk_layer_prepare(&appst[i]);
@@ -2709,6 +2752,7 @@ static void own_extras(int a)
     if (!tk_strcmp(k, "notes")) build_note();
     if (!tk_strcmp(k, "search")) build_search();
     if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
+    sv_extras(k);                                    /* survival-next: the tools' live layers */
     relink();
 }
 /* P3i: an opening app's own page drawn over its first frames (two strips a frame, then the extras) instead of all
@@ -2788,7 +2832,7 @@ static void build_app_page(int a)
                 lx = ROW_TX + 29 + 13;
             }
             int nav = !tk_strcmp(A->k, "settings") && (!tk_strcmp(S->rows[r].l, "Display & Brightness") || !tk_strcmp(S->rows[r].l, "Wi-Fi") ||
-                                                       !tk_strcmp(S->rows[r].l, "Cellular"));
+                                                       !tk_strcmp(S->rows[r].l, "Cellular") || !tk_strcmp(S->rows[r].l, "Medical Card"));
             if (nav) d_icon(&d, "chev", CONTENT_R - 30, ry + 16.5f, .45f);
             const char *rt = live_text(S->rows[r].r, rb);
             if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Cellular")) rt = md_text();
@@ -2838,19 +2882,24 @@ static void set_app_rect(arect R)
     float p = (R.w - 62) / (390 - 62);
     appc.alpha = ap_pending ? 0 : tk_clampf(p * 1.6f - .2f, 0, 1);
     apsb.alpha = appc.alpha;
-    uint32_t t = APPS[AP.a].tint, b = 0x0a0f1f;
+    uint32_t t = APPS[AP.a].tint, b = sv_ground(AP.a);
     float m = tk_clampf(p * 2, 0, 1);
     uint32_t cr = (uint32_t)((t >> 16 & 255) * (1 - m) + (b >> 16 & 255) * m + .5f), cg = (uint32_t)((t >> 8 & 255) * (1 - m) + (b >> 8 & 255) * m + .5f),
              cb = (uint32_t)((t & 255) * (1 - m) + (b & 255) * m + .5f);
     appbg.solid = 0xff000000u | cr << 16 | cg << 8 | cb;
     appbg.gen++;
-    home.sx = home.sy = 1 + .05f * p;
-    home.alpha = 1 - .4f * tk_clampf(p, 0, 1);
+    if (!locked) {                       /* survival-next: an app over the lock (Emergency's cards): home stays away */
+        home.sx = home.sy = 1 + .05f * p;
+        home.alpha = 1 - .4f * tk_clampf(p, 0, 1);
+    }
     appg.hidden = !AP.on;
     place_apicon(R, p);
 }
+static int sv_icon_rect(int a, arect *r);
 static arect icon_rect(int a)
 {
+    arect lr;
+    if (sv_icon_rect(a, &lr)) return lr;                 /* survival-next: opened from the lock's Emergency card */
     static const char *P1[8] = { "calendar", "weather", "clock", "camera", "photos", "music", "notes", "calc" };
     const char *const *P2 = EMG ? P2E : P2K;
     static const char *DK[4] = { "phone", "messages", "browser", "settings" };
@@ -2858,7 +2907,7 @@ static arect icon_rect(int a)
     for (int i = 0; i < 4; i++) if (!tk_strcmp(DK[i], k)) return (arect){ COL_CX(i) - ICON_PT / 2, DOCK_Y, ICON_PT, ICON_PT, 15 };
     if (!tk_strcmp(k, "search")) return (arect){ 160, 640, 70, 30, 15 };   /* P3g: the Search pill */
     for (int i = 0; i < 8; i++) if (!tk_strcmp(P1[i], k)) return (arect){ COL_CX(i % 4) - ICON_PT / 2 + page_x, HOME_TOP1 + ROW_PITCH * (i / 4), ICON_PT, ICON_PT, 15 };
-    for (int i = 0; i < 8; i++) if (!tk_strcmp(P2[i], k)) return (arect){ 390 + COL_CX(i % 4) - ICON_PT / 2 + page_x, HOME_TOP2 + ROW_PITCH * (i / 4), ICON_PT, ICON_PT, 15 };
+    for (int i = 0; i < NP2; i++) if (!tk_strcmp(P2[i], k)) return (arect){ 390 + COL_CX(i % 4) - ICON_PT / 2 + page_x, HOME_TOP2 + ROW_PITCH * (i / 4), ICON_PT, ICON_PT, 15 };
     return (arect){ 164, 370, 62, 62, 15 };
 }
 /* the app under a tap on home (the page's grid or the dock), or -1 */
@@ -2874,7 +2923,7 @@ static int app_hit(float x, float y)
         int pg = page_x < -195;
         float x0 = x - (pg ? 390 + page_x : page_x), top = pg ? HOME_TOP2 : HOME_TOP1;
         int col = (int)((x0 - 15) / 90), row = (int)((y - top) / ROW_PITCH);
-        if (x0 >= 15 && y >= top && col < 4 && row < 2 && y - top - row * ROW_PITCH < 83) k = (pg ? P2 : P1)[row * 4 + col];
+        if (x0 >= 15 && y >= top && col < 4 && row < (pg && EMG ? 3 : 2) && y - top - row * ROW_PITCH < 83) k = (pg ? P2 : P1)[row * 4 + col];
     }
     if (!k) return -1;
     for (int a = 0; a < NAPPS; a++) if (!tk_strcmp(APPS[a].k, k)) return a;
@@ -2890,6 +2939,7 @@ static void app_open(int a)
     AS.num[0] = 0;
     AS.thread = -1;
     AS.sub = 0;
+    sv_opened();
     apkey.hidden = 1;
     if (app_own(a)) {
         /* the page over the first frames (app_build_step); the previous app's strips gone now */
@@ -2936,6 +2986,7 @@ static void app_finish_close(void)
     apnum.hidden = apkey.hidden = 1;
     home.sx = home.sy = 1;
     home.alpha = 1;
+    sv_closed();                                                /* survival-next (over the lock: home hidden again) */
 }
 
 /* ---- the toast (the concept's #toast: dark glass, 13 pt / 600, from 90 pt above with an overshoot, 2 s) ------ */
@@ -3189,6 +3240,7 @@ static void key_down(int i)
 static int is_app(const char *k) { return AP.on && !tk_strcmp(APPS[AP.a].k, k); }
 static void app_tap(float x, float y)
 {
+    if (sv_tap(x, y)) return;                                   /* survival-next: the tools, Settings > Medical Card */
     if (is_app("phone")) {
         if (y >= 718 && y <= 780 && x >= GROUP_X && x < GROUP_X + GROUP_W) {
             int t = tk_mini(3, (int)((x - GROUP_X) / TAB_W));
@@ -3331,6 +3383,7 @@ void sh_cell(const sh_cell_t *c)
 #include "shell_cell.inc"
 #include "shell_media_img.inc"
 #include "shell_media.inc"
+#include "shell_survival.inc"
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
@@ -3412,11 +3465,11 @@ static void relink(void)
     link(&appc, st, NST + med_layers(st + NST));
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
     link(&lockg, lk, 11);
-    tk_layer *ls[4 * NG + 7];
+    tk_layer *ls[4 * NG + 2 + NEC];
     int n = 0;
     for (int g = 0; g < NG; g++) { ls[n++] = &K[g].gh; ls[n++] = &K[g].closed; ls[n++] = &K[g].open; ls[n++] = &K[g].chev; }
     ls[n++] = &etool;
-    for (int i = 0; i < 5; i++) ls[n++] = &ecard[i];
+    for (int i = 0; i < NEC; i++) ls[n++] = &ecard[i];
     ls[n++] = &lockhl;
     link(&list, ls, n);
     for (int i = 0; i < 2; i++) {
@@ -3427,6 +3480,7 @@ static void relink(void)
     link(&pages, pg, 3);
     tk_layer *h[] = { &hparts[0], &pages, &hsearch[0], &hsearch[1], &hsearch[2], &hparts[3], &icobg, &icofg };
     link(&home, h, 8);
+    sv_relink();                                     /* survival-next: the tools' live layers, SOS's beacon */
 }
 
 /* the bake in steps (the kernel runs one per loop turn: the watchdog is fed and the screen fills in as it goes);
@@ -3482,7 +3536,7 @@ void sh_init_begin(tk_comp *c)
     tk_layer_init(&boot, "boot");
     boot.hidden = 1;
     for (int i = 0; i < 2; i++) tk_layer_init(&Q[i].grp, i ? "q-em" : "q-light");
-    for (int i = 0; i < 5; i++) { tk_layer_init(&ecard[i], "ecard"); ecard[i].hidden = 1; }
+    for (int i = 0; i < NEC; i++) { tk_layer_init(&ecard[i], "ecard"); ecard[i].hidden = 1; }
     tk_layer_init(&empill, "empill");
     empill.hidden = 1;
     tk_layer_init(&icobg, "icon-ground"); icobg.hidden = 1;     /* P3p: press feedback */
@@ -3617,6 +3671,8 @@ void sh_set(const char *what, const char *key, float v)
             }
     } else if (!tk_strcmp(what, "emergency")) {
         set_emergency(v > 0, 1);
+        while (sv_idle_pending()) sv_idle();         /* survival-next: a set state is whole at once */
+        place_list();
         toast_t = 1;
         toast_to = toast_from = 0;
         toast_place();
@@ -3669,6 +3725,8 @@ void sh_set(const char *what, const char *key, float v)
         hint_a = v;
         apply_tweens();
     } else if (what[0] == 'm' && med_set(what, key, v)) {
+    } else if (!tk_strcmp(what, "sv")) {
+        sv_set(key, v);                              /* survival-next: the tools' states (shell_survival.inc) */
     } else if (!tk_strcmp(what, "hold")) {
         int i = key && key[0] == 'e';
         Q[i].grp.sx = Q[i].grp.sy = v > 0 ? 1.22f : 1;
@@ -3870,6 +3928,7 @@ static void app_press(float x, float y)
 void sh_touch(int phase, float x, float y, float t)
 {
     now_ms = t;
+    if (sv_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* survival-next: SOS's beacon, a tool's hold */
     if (phase == 0) {
         tk_tracker_reset(&T.tr);
         T.moved = 0;
@@ -3890,8 +3949,8 @@ void sh_touch(int phase, float x, float y, float t)
             else { T.kind = G_FOCUSDRAG; sp_focus.live = 0; focus_closing = 0; tk_tracker_add(&T.tr, y, t); }   /* P3p: drag it down */
             return;
         }
-        if (!locked && AP.on) {
-            /* an open app: the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
+        if (AP.on) {
+            /* an open app (survival-next: also over the lock, from Emergency's cards): the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
             if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
             else if (!sp_app.live && med_is(APPS[AP.a].k)) { T.kind = G_MEDIA; med_touch(0, x, y, t); }
             else if (!sp_app.live) {
@@ -3951,15 +4010,10 @@ void sh_touch(int phase, float x, float y, float t)
         }
         int gi = -1, r;
         if (EMG && y >= LIST_TOP && y < LIST_TOP + LIST_H && y < H_PT - 30) {
-            /* Emergency's list: a card (its app, by name: locked, a toast) or Exit Emergency */
+            /* Emergency's list: a card (survival-next: its tool over the lock), Exit Emergency, or a scroll */
             T.kind = G_ETAP;
-            T.arg = -1;
-            for (int i = 0; i < 4; i++) {
-                float top = LIST_TOP + 10 + 78 * i;
-                if (y >= top && y < top + 68 && x >= CARD_X && x < CARD_X + CARD_W) T.arg = i;
-            }
-            if (y >= 630 && y < 670 && x >= 120 && x < 270) T.arg = 4;
-            if (T.arg >= 0 && T.arg < 4) {
+            T.arg = sv_ec_hit(x, y);                    /* survival-next: 0..7 a card, 8 Exit (the list scrolls) */
+            if (T.arg >= 0 && T.arg < 8) {
                 tk_rect c = { CARD_X, LIST_TOP + 10 + 78.0f * T.arg, CARD_W, 68 };
                 hl_set(&lockhl, c, c, 26, W(.1f));
             }
@@ -4004,10 +4058,10 @@ void sh_touch(int phase, float x, float y, float t)
             if (T.moved && !apkey.hidden) key_down(-1);
             if (T.moved) hl_off();
             break;
-        case G_DOCK: case G_ETAP:
+        case G_DOCK:
             if (T.moved) press_cancel();
             break;
-        case G_TAP_HEAD: case G_TAP_ROW:
+        case G_TAP_HEAD: case G_TAP_ROW: case G_ETAP:
             if (T.moved) hl_off();
             if (T.moved) { T.kind = G_LIST; T.base = scroll; T.y0 = y; sp_scroll.live = 0; }
             tk_tracker_add(&T.tr, y, t);
@@ -4113,14 +4167,7 @@ void sh_touch(int phase, float x, float y, float t)
         break;
     }
     case G_ETAP:
-        if (!T.moved && T.arg >= 0) {
-            if (T.arg == 4) set_emergency(0, 0);
-            else {
-                char m[48] = "Opens ";
-                tk_memcpy(m + 6, EC[T.arg].act, tk_strlen(EC[T.arg].act) + 1);
-                toast(m);
-            }
-        }
+        if (!T.moved && T.arg >= 0) sv_ec_tap(T.arg);   /* survival-next */
         break;
     case G_CCEM:
         if (!T.arg) toast("Press and hold");
@@ -4479,6 +4526,7 @@ int sh_tick(float dt, float t)
             }
         }
     }
+    mv |= sv_tick(dt, t);                       /* survival-next: a tool's hold, its polls */
     return mv;
 }
 
@@ -4542,6 +4590,7 @@ void sh_idle(void)
         relink();
         place_list();
     }
+    sv_idle();                                   /* survival-next: Emergency's next card, the lock's widgets */
     if (locked && lockY == 0 && !focus_on) flatten_lock(1);
     /* home at rest: the Control Centre's snapshot and grid ready before the pull */
     if (!locked && !CCS.on && !AP.on && (!CCS.built || cc_stale)) { build_cc(); cc_stale = 0; }
@@ -4567,14 +4616,14 @@ void sh_idle(void)
     tk_layer_prepare(&mark); tk_layer_prepare(&glyph_c); tk_layer_prepare(&glyph_o); tk_layer_prepare(&hint);
 }
 
-int sh_idle_pending(void) { return !EMG && cards_pending > 0; }
+int sh_idle_pending(void) { return (!EMG && cards_pending > 0) || sv_idle_pending(); }
 
 int sh_moving(void)
 {
     int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB ||
             T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || T.kind == G_CC || T.kind == G_CCSL || sp_cc.live ||
             T.kind == G_APP || sp_app.live || booting || toast_t < 1 || em_t < 1 || T.kind == G_CCEM ||
-            T.kind == G_CCCELL || CF.down || CF.a != CF.at || SL.dir || T.kind == G_CCDRAG || T.kind == G_FOCUSDRAG;
+            T.kind == G_CCCELL || CF.down || CF.a != CF.at || SL.dir || T.kind == G_CCDRAG || T.kind == G_FOCUSDRAG || sv_moving();
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live || med_moving();
     m |= IP.on && IP.t < 1;
