@@ -1847,6 +1847,13 @@ Every app failure must be a removed device that the app or DWM recovers from.
 - **Bisect (`build/win/stage/sbwddm-t40a/b/c`):** T38 plus only the zone-0 ledger, plus only the KMD fault rings,
   plus only sbumd 0132/0134.
 - **Independently:** a GPU hang must not end in a bugcheck. That needs a real DxgkDdiResetFromTimeout (Phase 1).
+- **t40a (T38 plus only the zone-0 ledger) crashed the same way** (328 s). So all three crashing builds share exactly
+  the ledger at 0xFED13C00. T38 (ledger at 0xFED1E000) ran the same early sweep surfaces at the same time without a
+  timeout. The other difference is C: free space (1.6 GB against 0.43 GB).
+  - No mechanism yet: the page is a pre-boot diagnostic zone for UEFI's UFS and ACPI drivers, and nothing Windows
+    runs touches it.
+  - Next: a control run of plain T38 with the same free space.
+  - The ledger itself recorded all three crashes correctly across 6 boots (`build/win/results-t40a/crash.log`).
 
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
