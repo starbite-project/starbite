@@ -225,6 +225,7 @@ void *tk_alloc(size_t n);          /* zeroed, 64-byte aligned */
 void tk_free(void *p);
 size_t tk_heap_used(void);
 size_t tk_heap_peak(void);
+uint64_t tk_heap_largest(void);    /* the largest free block (the kernel's heap; the host's with SBTK_HEAP_MB) */
 uint64_t tk_us(void);
 void tk_log(const char *s);
 

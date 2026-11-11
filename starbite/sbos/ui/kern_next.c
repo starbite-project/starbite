@@ -270,7 +270,9 @@ static void stats_log(const char *what)
     ub_dec(&u, tk_heap_used() >> 20);
     ub_s(&u, " MiB (peak ");
     ub_dec(&u, tk_heap_peak() >> 20);
-    ub_s(&u, ")");
+    ub_s(&u, "), largest free ");
+    ub_dec(&u, tk_heap_largest() >> 20);
+    ub_s(&u, " MiB");
     sb_log(u.b);
 }
 

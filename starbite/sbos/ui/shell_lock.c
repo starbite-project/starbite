@@ -56,6 +56,8 @@ static dc mk(tk_layer *l, const char *name, float x, float y, float w, float h, 
 }
 static void d_text(dc *d, int f, float size, float x, float base, const char *s, float ls, int fl, tk_col c, int shadow)
 {
+    float by = PT(base) - d->oy;                /* nothing of it in this bitmap (a strip of a page): nothing to do */
+    if (by + PT(size * .6f) < 0 || by - PT(size * 1.3f) > d->b->h) return;
     tk_paint p = tk_solid(c);
     tk_text(d->b, f, PT(size), PT(x) - d->ox, PT(base) - d->oy, s, PT(ls), fl, &p, shadow ? &SHTXT : 0);
 }
@@ -103,7 +105,7 @@ static void relayer(tk_layer *l) { tk_layer_dirty(l); tk_bmp_free(&l->bmp); tk_a
 
 /* ---- state ------------------------------------------------------------------------------------------------- */
 static tk_layer root, home, lockflat, lockg, mark, glyph_c, glyph_o, list, etool, hint, homebar;
-static tk_layer focus, funder, scrim, fgrp, fcard, ffill, flabel, fthumb, boot, bootc, bootbar;
+static tk_layer boot, bootc, bootbar;
 typedef struct {
     tk_layer face, facelit, icon, iconlit, ring, grp;
     tk_bmp ringbuf;
@@ -785,6 +787,13 @@ static void build_home(void)
 static float focus_sy;
 
 /* ---- the focus sheet --------------------------------------------------------------------------------------- */
+static tk_layer focus, funder, scrim, fgrp, fcard, ffill, flabel, fthumb;
+/* a closed sheet keeps nothing of its own (about 19 MB); the glass faces made once stay */
+static void free_focus(void)
+{
+    relayer(&scrim); relayer(&funder); relayer(&fcard); relayer(&ffill); relayer(&flabel); relayer(&fthumb);
+    focus.child = 0;
+}
 static void build_focus(const sys_t *s, const grp_t *gr)
 {
     /* the scrim: what is on the panel now, blurred 22 pt, saturated 1.3, under rgba(4, 8, 26, .28) */
@@ -1151,7 +1160,21 @@ static const appdef APPS[] = {
                                            { "", 1, { { "About", "Galaxy S9" } } } } },
 };
 #define NAPPS ((int)(sizeof APPS / sizeof APPS[0]))
-static tk_layer appg, appbg, appc;
+static tk_layer appg, appbg, appc, appst[4];      /* the page: a group of four strips (no 17 MB block) */
+#define NST 4
+/* strip i of the page: exact panel rows, so the strips meet without overlap */
+static dc strip_dc(int i, const char *name)
+{
+    tk_layer *l = &appst[i];
+    relayer(l);
+    tk_layer_init(l, name);
+    int y0 = TK_H * i / NST, y1 = TK_H * (i + 1) / NST;
+    tk_bmp_new(&l->bmp, TK_W, y1 - y0);
+    l->x = l->bx = 0;
+    l->y = l->by = (float)y0;
+    dc d = { &l->bmp, 0, 0, (float)y0 };
+    return d;
+}
 static struct { int on, closing, following, a; arect icon, R, from, to; float travel; } AP;
 static tk_spring sp_app;
 static const arect FULLR = { 0, 0, 390, H_PT, 52 };
@@ -1242,6 +1265,7 @@ static int wrap(char lines[4][96], int f, float size, const char *s, float maxw,
 static void d_lg_app(dc *d, float x, float y, float w, float h, float r, int dark)
 {
     float bx = PT(x) - d->ox, by = PT(y) - d->oy;
+    if (by + PT(h + 48) < 0 || by - PT(8) > d->b->h) return;          /* its shadow included */
     int X = (int)tk_floorf(bx), Y = (int)tk_floorf(by), Wd = (int)(bx + PT(w) + .999f) - X, Hd = (int)(by + PT(h) + .999f) - Y;
     tk_bmp t;
     if (!tk_bmp_new(&t, Wd, Hd)) return;
@@ -1447,14 +1471,16 @@ static void build_app_page(int a)
     int own = !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
               !tk_strcmp(k, "camera");
     if (own) {
-        relayer(&appc);
-        dc d = mk(&appc, "app-page", 0, 0, 390, H_PT, 0, 0);
-        if (!tk_strcmp(k, "phone")) page_phone(&d);
-        else if (!tk_strcmp(k, "messages")) page_messages(&d);
-        else if (!tk_strcmp(k, "contacts")) page_contacts(&d);
-        else if (!tk_strcmp(k, "photos")) page_photos(&d);
-        else page_camera(&d);
-        tk_layer_prepare(&appc);
+        for (int i = 0; i < NST; i++) {
+            dc d = strip_dc(i, "app-page");
+            if (!d.b->px) continue;
+            if (!tk_strcmp(k, "phone")) page_phone(&d);
+            else if (!tk_strcmp(k, "messages")) page_messages(&d);
+            else if (!tk_strcmp(k, "contacts")) page_contacts(&d);
+            else if (!tk_strcmp(k, "photos")) page_photos(&d);
+            else page_camera(&d);
+            tk_layer_prepare(&appst[i]);
+        }
         build_apnum();
         relink();
         return;
@@ -1464,9 +1490,10 @@ static void build_app_page(int a)
     float y = 56 + 8 + 41 + 12;                         /* the title's box and margins */
     float h = y;
     for (int i = 0; i < A->ns; i++) h += (A->sec[i].cap[0] ? 34 : 18) + 47.0f * A->sec[i].n;
-    relayer(&appc);
+    for (int i = 1; i < NST; i++) relayer(&appst[i]);
+    relayer(&appst[0]);
     apnum.hidden = 1;
-    dc d = mk(&appc, "app-page", 0, 0, 390, h + 4, 0, 0);
+    dc d = mk(&appst[0], "app-page", 0, 0, 390, h + 4, 0, 0);
     d_text(&d, TK_IT800, 34, 20, 64 + 33, A->name, -.8f, 0, INK, 0);
     for (int i = 0; i < A->ns; i++) {
         const asec *S = &A->sec[i];
@@ -1493,7 +1520,7 @@ static void build_app_page(int a)
         }
         y += gh;
     }
-    tk_layer_prepare(&appc);
+    tk_layer_prepare(&appst[0]);
     relink();
 }
 static void set_app_rect(arect R)
@@ -1577,7 +1604,7 @@ static void app_finish_close(void)
     AP.on = AP.closing = 0;
     appg.hidden = 1;
     /* the page (a whole screen) is not kept: the next open draws it again */
-    relayer(&appc);
+    for (int i = 0; i < NST; i++) relayer(&appst[i]);
     relayer(&apnum);
     apnum.hidden = apkey.hidden = 1;
     home.sx = home.sy = 1;
@@ -1867,6 +1894,8 @@ static void relink(void)
     link(&root, r, 11);
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum };
     link(&appg, ag, 4);
+    tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
+    link(&appc, st, NST);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
     link(&lockg, lk, 11);
     tk_layer *ls[3 * NG + 6];
@@ -1908,6 +1937,7 @@ void sh_init_begin(tk_comp *c)
     appbg.solid_h = TK_H;
     appbg.opaque = 1;
     tk_layer_init(&appc, "app-page");
+    for (int i = 0; i < NST; i++) tk_layer_init(&appst[i], "app-strip");
     tk_layer_init(&apkey, "key-down");
     apkey.hidden = 1;
     tk_layer_init(&apnum, "dial");
@@ -2015,6 +2045,7 @@ void sh_set(const char *what, const char *key, float v)
     } else if (!tk_strcmp(what, "reset")) {
         /* back to the plain lock screen: the sheet and the boot overlay gone, every card closed, the top */
         focus_on = 0; focus_closing = 0; focus.hidden = 1; sp_focus.live = sp_thumb.live = 0;
+        free_focus();
         booting = 0; boot.hidden = 1;
         for (int g = 0; g < NG; g++) if (K[g].isopen) toggle_group(g, 1);
         scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
@@ -2520,7 +2551,7 @@ int sh_tick(float dt, float t)
         if (sp_focus.live) {
             int live = tk_spring_step(&sp_focus, dt);
             set_focus(tk_maxf(0, sp_focus.x));
-            if (!live && focus_closing) { focus_on = 0; focus.hidden = 1; }
+            if (!live && focus_closing) { focus_on = 0; focus.hidden = 1; free_focus(); }
             mv = 1;
         }
         if (sp_thumb.live) { tk_spring_step(&sp_thumb, dt); set_thumb(sp_thumb.x); mv = 1; }

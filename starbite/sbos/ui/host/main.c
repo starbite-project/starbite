@@ -115,10 +115,11 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
     float total = 0;
     for (int i = 0; i < n; i++) total += st[i].ms;
     total += 1500;     /* let everything settle */
-    FILE *f = !strcmp(out, "-") ? stdout : fopen(out, "wb");
+    int none = !strcmp(out, "none");
+    FILE *f = none ? 0 : !strcmp(out, "-") ? stdout : fopen(out, "wb");
     FILE *log = f == stdout ? stderr : stdout;
-    tk_bmp h;
-    tk_bmp_new(&h, TK_W / 2, TK_H / 2);
+    tk_bmp h = { 0 };
+    if (!none) tk_bmp_new(&h, TK_W / 2, TK_H / 2);
     const float dt = 1000.0f / 60;
     float t = 0, s0 = 0;
     int si = 0, phase = -1, frame = 0, rest_frames = 0;
@@ -155,7 +156,8 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         tk_comp_frame(c, motion, 0);
         fprintf(log, "F %d %.1f %s px %d comp %.2f present %.2f total %.2f\n", frame, t, c->last_half ? "half" : "full",
                c->last_px, c->us_comp / 1000.0, c->us_present / 1000.0, c->last_us / 1000.0);
-        if (half) {
+        if (none) ;
+        else if (half) {
             tk_bmp_down2(&h, &c->panel);
             fwrite(h.px, 4, (size_t)h.w * h.h, f);
         } else
@@ -167,7 +169,9 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         if (t > total + 8000) break;
     }
     (void)rest_frames;
-    if (f != stdout) fclose(f); else fflush(f);
+    tk_bmp_free(&h);
+    if (none) ;
+    else if (f != stdout) fclose(f); else fflush(f);
     if (getenv("SBTK_MEM")) fprintf(stderr, "mem: layers %.1f MB\n", memwalk(c->root, 0) / 1e6);
     fprintf(stderr, "film: %d frames; heap %.1f MB (peak %.1f MB)\n", frame, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
     return 0;
@@ -261,7 +265,9 @@ int main(int argc, char **argv)
     if (!strcmp(argv[2], "bench")) { bench(); return 0; }
     if (!tk_pack_open(pak, len)) { fprintf(stderr, "bad pack\n"); return 1; }
     static tk_comp c;
-    if (!tk_comp_init(&c, 0, 0)) return 1;
+    /* the phone's frame buffers are not in its UI heap (the old UI's back buffer, the framebuffer) */
+    if (!tk_comp_init(&c, getenv("SBTK_HEAP_MB") ? calloc((size_t)TK_W * TK_H, 4) : 0,
+                      getenv("SBTK_HEAP_MB") ? calloc((size_t)TK_W * TK_H, 4) : 0)) return 1;
     if (getenv("SBTK_CORES")) { ncores = atoi(getenv("SBTK_CORES")); if (ncores > 1) { c.par = host_par; tk_par = host_par; } }
     uint64_t t0 = tk_us();
     sh_init(&c);
@@ -294,6 +300,22 @@ int main(int argc, char **argv)
             tk_comp_frame(&c, m, 1);
             for (int i = 0; i < n; i++) { tk_comp_frame(&c, m, 1); tc += c.us_comp; tp += c.us_present; }
             printf("frames %s: %s compose %.2f present %.2f ms\n", argc > 3 ? argv[3] : "lock", m ? "motion" : "rest", tc / n / 1000, tp / n / 1000);
+        }
+        return 0;
+    }
+    if (!strcmp(argv[2], "selftest") && argc >= 4) {
+        /* the phone's self test: every film of FILMS.txt in one run, each from the reset lock screen; the heap after
+         * each (with SBTK_HEAP_MB=160: the phone's heap) */
+        FILE *ff = fopen(argv[3], "r");
+        char line[2048];
+        while (ff && fgets(line, sizeof line, ff)) {
+            char *colon = strchr(line, ':');
+            if (!colon) continue;
+            *colon = 0;
+            sh_set("reset", "", 0);
+            film(&c, "none", colon + 1, 1);
+            fprintf(stderr, "selftest: %s: heap %zu MiB (peak %zu), largest free %llu MiB\n", line, tk_heap_used() >> 20,
+                    tk_heap_peak() >> 20, (unsigned long long)(tk_heap_largest() >> 20));
         }
         return 0;
     }

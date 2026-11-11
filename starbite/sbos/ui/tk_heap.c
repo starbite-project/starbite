@@ -21,10 +21,42 @@ void tk_heap_init(void *mem, uint64_t size)
     h_used = h_peak = 0;
 }
 
+/* a big block (a bitmap) is carved from the top end of the highest free block that holds it, small ones first fit
+ * from the bottom: the two kinds stay apart, so freed bitmaps leave whole holes for the next bitmap instead of
+ * holes split by the small blocks made meanwhile (P2l: a 17 MB page refused with 35 MiB free) */
+#define BIG (1u << 20)
+static void *take(struct blk *b)
+{
+    b->free = 0;
+    h_used += b->size;
+    if (h_used > h_peak) h_peak = h_used;
+    tk_memset(b + 1, 0, b->size);
+    return b + 1;
+}
 void *tk_alloc(size_t n)
 {
     n = (n + 63) & ~(size_t)63;
     if (!n) n = 64;
+    if (n >= BIG) {
+        struct blk *last = heap;
+        while (last && last->next) last = last->next;
+        for (struct blk *b = last; b; b = b->prev) {
+            if (!b->free || b->size < n) continue;
+            if (b->size >= n + sizeof(struct blk) + 4096) {
+                struct blk *r = (struct blk *)((uint8_t *)(b + 1) + b->size - n - sizeof(struct blk));
+                r->size = n;
+                r->next = b->next;
+                r->prev = b;
+                if (b->next) b->next->prev = r;
+                b->next = r;
+                b->size -= n + sizeof(struct blk);
+                return take(r);
+            }
+            return take(b);
+        }
+        tk_heap_oom(n, h_used);
+        return 0;
+    }
     for (struct blk *b = heap; b; b = b->next) {
         if (!b->free || b->size < n) continue;
         if (b->size >= n + sizeof(struct blk) + 4096) {
@@ -37,11 +69,7 @@ void *tk_alloc(size_t n)
             b->next = r;
             b->size = n;
         }
-        b->free = 0;
-        h_used += b->size;
-        if (h_used > h_peak) h_peak = h_used;
-        tk_memset(b + 1, 0, b->size);
-        return b + 1;
+        return take(b);
     }
     tk_heap_oom(n, h_used);
     return 0;
@@ -66,6 +94,13 @@ void tk_free(void *p)
         q->next = b->next;
         if (b->next) b->next->prev = q;
     }
+}
+/* the largest free block (how big a bitmap can still be had) */
+uint64_t tk_heap_largest(void)
+{
+    uint64_t m = 0;
+    for (struct blk *b = heap; b; b = b->next) if (b->free && b->size > m) m = b->size;
+    return m;
 }
 size_t tk_heap_used(void) { return h_used; }
 size_t tk_heap_peak(void) { return h_peak; }
