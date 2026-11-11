@@ -38,6 +38,19 @@
 #ifndef STARBITE_M3_EARLY
 #define STARBITE_M3_EARLY 0
 #endif
+
+//
+// v19 variant bits (build flag M3VAR, default 0 = big3i/big4j as before):
+//   bits 0..1, with STARBITE_M3_EARLY >= 7 only: FlexPMU mode. 0 = reset + per-core steps (big4j); 1 = no FlexPMU
+//             writes at all (order only); 2 = per-core steps, no reset; 3 = reset only, no per-core steps.
+//   bit 4:    boost governor: 2314 MHz allowed from 2002 after 10 s below 60 C, and back to 2002 at once (any beat)
+//             at 70 C or more; 80 C throttle and 100 C reset unchanged.
+//
+#ifndef STARBITE_M3_VAR
+#define STARBITE_M3_VAR 0
+#endif
+#define E_FPMODE  (STARBITE_M3_VAR & 3)
+#define E_BOOST   ((STARBITE_M3_VAR & 0x10) != 0)
 #ifndef STARBITE_M3_LITE
 #define STARBITE_M3_LITE 0               // v14: daily big-core boot: no =M3K / =M3N diagnostics (room in the DXE slot)
 #endif
@@ -587,13 +600,33 @@ __asm__ (
   "  mov   w6, #0\n"
   "  b     136f\n"
   "134:\n"
+#if E_BOOST
+  "  ldr   w6, [x19, #0x24]\n"            // v19 boost: at 2314 MHz, 70 C or more = back to 2002 at once
+  "  cmp   w6, #2\n"
+  "  b.ne  133f\n"
+  "  cmp   w13, #70\n"
+  "  b.lt  133f\n"
+  "  mov   w6, #1\n"
+  "  b     136f\n"
+  "133:\n"
+#endif
   "  cmp   w5, #20\n"                     // v17: at most one change per 10 s (big3h overshot to 85 C at 3 s)
   "  b.lo  139f\n"
   "  ldr   w6, [x19, #0x24]\n"
   "  cmp   w13, #65\n"                    // v16: up only below 65 C
   "  b.ge  135f\n"
+#if E_BOOST
+  "  cmp   w6, #2\n"                      // v19 boost: top step 2 = 2314 MHz
+  "  b.hs  139f\n"
+  "  cmp   w6, #1\n"
+  "  b.lo  125f\n"
+  "  cmp   w13, #60\n"                    // 2002 -> 2314 only below 60 C
+  "  b.ge  139f\n"
+  "125:\n"
+#else
   "  cmp   w6, #1\n"                      // v17: capped at step 1 = 2002 MHz (2314 heated past 85 C between beats)
   "  b.hs  139f\n"
+#endif
   "  add   w6, w6, #1\n"
   "  b     136f\n"
   "135:\n"
@@ -1792,6 +1825,7 @@ EMboxForUid (
 // started 1, 2, 3 with no FlexPMU steps and core 0 last, and hung in core 0's start (big4i-run1). Every write and
 // the SMC get a "=M3P" line before them (the log rings sit in UEFI's uncached Device window), so a hang names its step.
 //
+#if STARBITE_M3_EARLY >= 7
 #define E_FP_INFORM(c)  ((UINTN)0x14060860u + 4u * (c))      // c = 4 + M3 core
 #define E_FP_GRP2_BID   ((UINTN)0x14070200u)
 #define E_FP_EVT_GRP2   ((UINTN)0x14067F08u)
@@ -1839,6 +1873,10 @@ EFpReset (
   UINT32  c;
 
   EFpWords ("before reset");
+ #if (E_FPMODE == 1) || (E_FPMODE == 2)
+  SbLog ("=M3P reset skipped (M3VAR mode %d)", E_FPMODE);
+  return;
+ #endif
   for (c = 4; c < 8; c++) {
     SbLog ("=M3P reset: inform(%d) = 0", c);
     *(volatile UINT32 *)E_FP_INFORM (c) = 0;
@@ -1863,6 +1901,10 @@ EFpCoreOn (
 {
   UINT32  b = 1u << Core;
 
+ #if (E_FPMODE == 1) || (E_FPMODE == 3)
+  SbLog ("=M3P core %d on: steps skipped (M3VAR mode %d)", Core, E_FPMODE);
+  return;
+ #endif
   if (First) {
     SbLog ("=M3P core %d on: mbox bit 24 = 0 (first core)", Core);
     EFpRmw (E_FP_MBOX, 1u << 24, 0);
@@ -1876,6 +1918,8 @@ EFpCoreOn (
   SbLog ("=M3P core %d on: evtgrp2 &= ~%x", Core, b);
   EFpRmw (E_FP_EVT_GRP2, b, 0);
 }
+
+#endif
 
 //
 // v11 (STARBITE_M3_EARLY >= 5): M3 cores 2 and 3 (>= 6: then core 0, last; >= 7: core 0 alone, BEFORE core 1, and
