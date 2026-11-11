@@ -383,7 +383,7 @@ static void recover(void)
 enum { CS_IDLE, CS_SIM, CS_RADIO, CS_ATTACH, CS_REG, CS_CYCLE_OFF, CS_CYCLE_ON, CS_DEFINE, CS_ACT, CS_IP, CS_UP,
        CS_RETRY, CS_DEACT, CS_DETACH };
 #define CELL_APN "internet"                /* Elisa, DNA, Telia (FI); others: a setting later */
-static int cell_want, cst = KCELL_OFF, cstep = CS_IDLE, c_lf, c_esc, cnet_up;
+static int cell_want, cst = KCELL_OFF, cstep = CS_IDLE, c_lf, c_esc, cnet_up, c_check;
 static uint64_t c_t0, c_step_t;
 static char c_why[64];
 static struct sbnet cnet;
@@ -619,6 +619,7 @@ static void cell_step(void)
         if (mo.b.pdp.have_ip && mo.b.pdp.have_status && mo.b.pdp.status == 1) {
             cell_net_up();
             cset(KCELL_DATA, "Mobile data on");
+            c_check = 0;
             cgo(CS_UP);
         } else if ((mo.b.pdp.have_status && mo.b.pdp.status != 1 && mo.b.pdp.status_notis) || cin() > 30000) {
             struct ub u;
@@ -631,6 +632,42 @@ static void cell_step(void)
         }
         break;
     case CS_UP:
+        /* once per session, as Android's connectivity check: one HTTPS GET over mobile data (the fetch path the
+         * browser uses), its result in the log (steps, status, sizes and times; never the address) and a
+         * notification */
+        if (c_check == 0 && cin() > 1500) {
+            c_check = wifi_fetch("https://example.com/") == 0 ? 1 : 3;
+        } else if (c_check == 1) {
+            struct sbos_wifi_fetch f;
+            wifi_fetch_status(&f);
+            if (f.state == 2) {
+                struct ub u;
+                ub_init(&u);
+                ub_s(&u, "cell: HTTPS check over mobile data: ");
+                ub_s(&u, f.result == 1 && f.status == 200 ? "PASS" : "FAIL");
+                ub_s(&u, ", status ");
+                ub_dec(&u, (uint32_t)(f.status < 0 ? 0 : f.status));
+                ub_s(&u, ", TLS ");
+                ub_dec(&u, f.tls_version);
+                ub_s(&u, ", ");
+                ub_dec(&u, f.bytes);
+                ub_s(&u, " bytes; DNS ");
+                ub_dec(&u, f.dns_ms);
+                ub_s(&u, " ms, connect ");
+                ub_dec(&u, f.connect_ms);
+                ub_s(&u, " ms, TLS ");
+                ub_dec(&u, f.tls_ms);
+                ub_s(&u, " ms, total ");
+                ub_dec(&u, f.total_ms);
+                ub_s(&u, " ms (");
+                ub_s(&u, f.why);
+                ub_s(&u, ")");
+                sb_log(u.b);
+                notif_post("modem", "Mobile data", f.result == 1 && f.status == 200 ? "The Internet works over LTE (HTTPS)"
+                                                                                  : "Connected, but the HTTPS check failed");
+                c_check = 2;
+            }
+        }
         if (!c_registered(&sn) || (mo.b.pdp.have_status && mo.b.pdp.status != 1)) {
             cell_net_down(c_registered(&sn) ? "the data context ended" : "the registration was lost");
             mo.b.pdp.have_ip = 0;
