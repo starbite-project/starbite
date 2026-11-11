@@ -529,6 +529,7 @@ struct gc_quad {
 int gpucomp_init(void *heap, uint64_t bytes);
 int gpucomp_ready(void);
 void *gpucomp_pool(void);
+void gpucomp_add_ro(const void *p, uint64_t bytes);   /* before gpucomp_init: read-only memory layers point into */
 uint64_t gpucomp_pool_bytes(void);
 uint64_t gpucomp_va(const void *p);
 void gpucomp_clean(const void *p, uint64_t n);
