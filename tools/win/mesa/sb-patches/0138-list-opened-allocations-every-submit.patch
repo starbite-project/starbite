@@ -1,0 +1,18 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index d6476a4..bc73717 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -1910,7 +1910,12 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+       }
+       for (uint32_t i = 0; i < d->bo_cap && n < d->alloc_size; i++) {
+          struct wbo *bo = &d->bo[i];
+-         if (!bo->h || bo->listed == d->mark || (bo->listed_once && !refresh))
++         /* sb-patches/0138 (docs/WIN11-GPU.md 6.54, T46): an allocation opened from another process (kind 2: a
++          * window surface DWM composes) goes into EVERY submission. T46 resolved all its GPU faults to such
++          * allocations: owned by explorer / TextInputHost, unmapped by VidMm (mapped 0, unmaps > 0), not listed by
++          * the faulting DWM fragment job (last listed thousands of renders before). Under memory pressure VidMm
++          * evicts what a submission does not name, and listing once plus every 64th submission (T25) left gaps. */
++         if (!bo->h || bo->listed == d->mark || (bo->listed_once && !refresh && bo->kind != 2))
+             continue;
+          bo->listed = d->mark;
+          bo->listed_once = 1;

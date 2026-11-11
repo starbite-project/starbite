@@ -1971,6 +1971,35 @@ Every app failure must be a removed device that the app or DWM recovers from.
 - **Recovery and timeouts are unchanged.**
 - **Stage `sbwddm-t46`:** diagnostic, no install.
 
+### 6.54 T45 and T46 read (night of 2026-11-11/12); T47 = the GPU-fault fix (sb-patches/0138)
+
+- **T45 (the ARM64X sbumd installed; retry `build/win/results-t45b`): passed.**
+  - No bugcheck; boots clean (873 s / 902 s).
+  - Every native test passes on the ARM64X file's native view: triangle, sbtwo, sbtext, sbtex (minus the known
+    vertexid), sbshare, sbdwm, sbfps.
+  - **`sbd3d x64 exit 0`:** an emulated x64 program got a D3D11 device on "Starbite Display", with `sbumd.dll`
+    loaded in the process, and its clear and triangle read back right. `sbd3d arm64 exit 0` too. Feature level 10_0
+    (0xa000).
+  - The lines are in `pre/gputest/gputest.log`. The peer's script looked in ours.log and reinstalled T44, so T45
+    still has to be installed.
+  - **GD1:** Steam started Geometry Dash within 75 s. Its GPU memory went 191 -> 308 -> 435 MiB in 30 s, one
+    allocation failed and its retry succeeded, then the game exited by itself (no exception, no abort, no WER
+    report).
+  - At the same time **the system ran out of memory:** commit free fell to 15 MiB and C: to 60 MiB free. DWM
+    fail-fasted (`c00001ad` in dwmcore), as did Steam's web helper (Chromium's `e0000008`) and Paint (`c0000409`).
+- **T46 (fault forensics, `build/win/results-t46`): passed.**
+  - It resolved 74 of 74 faults to a **live allocation of another process** (explorer, TextInputHost; 64 KiB
+    surfaces), `mapped 0 pte 0` after unmaps, and **not listed** by the faulting job.
+  - The faulting jobs are fragment jobs in DWM's job memory; the 13 hangs are DWM `indexed-vertex` (IDVS) jobs.
+- **The cause:** the shim lists a BO the batch doesn't name only until it was resident once, then in every 64th
+  submission (T25). Under memory pressure VidMm evicts what a submission doesn't name, and DWM's GPU reads other
+  processes' window surfaces it did not name in that submission.
+- **sb-patches/0138:** every allocation opened from another process (kind 2) goes into every submission.
+- **T47** = the ARM64X sbumd 1114ac95 (0137 + 0138, both views rebuilt; static checks 0 failures) + KMD 951c37e4
+  (T46's forensics), to measure the faults.
+- **The memory pressure itself** (C: 0.06-0.6 GB free, a 631 MB pagefile) is the user's disk: WIN11-GPU-CAPS.md §2
+  and the morning note.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
