@@ -1685,7 +1685,8 @@ static void sl_place(void)
     else if (SL.dir > 0) {
         float e = tk_bezier(.2f, .7f, .2f, 1, SL.t);
         a = 1 - tk_minf(1, SL.t * 1.6f) * (2 - tk_minf(1, SL.t * 1.6f));     /* the black goes in 60 % of the time */
-        s = SL.back ? 1 : 1.05f - .05f * e;
+        (void)e;
+        s = 1;      /* P2v: no growing (the phone: a scaled lock is 15 ms a frame; at 1:1 its half copies draw fast) */
     }
     slp.alpha = a;
     slp.hidden = a <= 0;

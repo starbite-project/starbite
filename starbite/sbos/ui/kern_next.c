@@ -543,6 +543,8 @@ static void next_screen(int on)
             tk_comp_frame(&comp, 0, 0);
             present();
         }
+        sh_idle();                                   /* P2v: the half canvas and the lock's caches now, in the dark
+                                                      * (the wake's first frame spent 8 ms on them) */
 #ifndef SBOS_SELFTEST_NEXT
         stats_reset();
 #endif
