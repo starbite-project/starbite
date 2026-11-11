@@ -510,6 +510,27 @@ void wifi_boot_time_check(void);
 void power_boot_os(const char *key);    /* 1.2-alpha25: the lock screen's OS card (sb_boot_next) */
 int kui_test_os_card(void);
 int gpucomp_selftest_step(void);        /* P4: the GPU compositor's test (gpucomp.c); 1 when done */
+/* P4: the GPU compositor's backend for the UI (gpucomp.c). A quad is one of the toolkit's draw items: a bitmap (or a
+ * solid of w x h), scaled (isx / isy: source px per screen px) from the screen point (dx0, dy0), alpha, clipped to a
+ * rect with a rounded edge, faded by screen y, 3-sliced, and glass (the backdrop bd through the 8-bit mask) under it */
+#define GPUCOMP_MAX_QUADS 127U
+enum { GC_SOLID = 1, GC_BILINEAR = 2, GC_GLASS = 4, GC_FADE = 8, GC_SLICE_V = 16, GC_SLICE_H = 32 };
+struct gc_quad {
+    const void *src;
+    uint32_t stride, w, h, flags, solid;
+    float alpha, dx0, dy0, isx, isy, cx0, cy0, cx1, cy1, radius, ft0, ft1, fb0, fb1, len, s0, s1;
+    const void *mask;
+    uint32_t mstride;
+    const void *bd;
+    uint32_t bstride;
+    float bk;
+    uint32_t bw, bh;
+};
+int gpucomp_init(void *heap, uint64_t bytes);
+int gpucomp_ready(void);
+uint64_t gpucomp_va(const void *p);
+void gpucomp_clean(const void *p, uint64_t n);
+int gpucomp_compose(void *dst, uint32_t bg, const struct gc_quad *q, unsigned n, uint64_t *us);
 int uibench_setup(void);                /* 1.2-alpha26 P0: the UI compositor's benchmark (uibench.c) */
 void uibench_set(const char *label, unsigned ncores, const unsigned *cores, int worker_only);
 int app_is_test(int a);
