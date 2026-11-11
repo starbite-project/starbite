@@ -104,6 +104,24 @@ void sos_timer(unsigned id)
     ui_mark_dirty();
 }
 
+/* 1.2-alpha28 (Next asked): when sos_frame's answer can change next, in sb_ms() time (0: SOS is off). A few ms after
+ * the kernel's own timer for that edge, so the new colour is already there when the caller looks */
+uint64_t sos_next_ms(uint64_t now)
+{
+    if (!sos_st)
+        return 0;
+    if (sos_st == 2) {                      /* the countdown: each second (its number) and the start */
+        uint64_t left = sos_t0 > now ? sos_t0 - now : 0;
+        return now + (left % 1000U ? left % 1000U : left ? 1000U : 0U) + 5U;
+    }
+    uint32_t at = (uint32_t)(now - sos_phase_t), next = 0;
+    if (((surv_sos_opts >> SURV_BEACON_SHIFT) & 3U) == 3U) {
+        (void)surv_morse_at(at, &next);     /* the Morse beacon: its next edge */
+        return sos_phase_t + next + 5U;
+    }
+    return sos_phase_t + (at / 250U + 1U) * 250U + 5U;   /* the 250 ms flashes */
+}
+
 int sos_frame(uint32_t *argb)
 {
     if (!sos_st)
