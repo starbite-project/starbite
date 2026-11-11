@@ -655,7 +655,11 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         return 0;
     }
     case SET_SURV_LAST2:
-        return surv_last2_set(arg[1] != 0, "the switch in Emergency");
+        if (surv_last2_set(arg[1] != 0, "the switch in Emergency") < 0) {
+            notif_post("survival", "Last 2 % did not turn on", surv_last2_why());
+            return SBOS_EAGAIN;
+        }
+        return 0;
     case SET_SURV_LAST2_AUTO:
         surv_last2_auto = arg[1] != 0;
         return 0;

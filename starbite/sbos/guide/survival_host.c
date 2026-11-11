@@ -9,7 +9,7 @@
 uint64_t surv_host_now_ms;                  /* the harness's clock, ms */
 static uint64_t t_on, t_cool;
 static int st = SURV_USB_OFF, refused;
-static uint32_t bursts;
+static uint32_t bursts, events;
 static const char *why;
 
 const char *const surv_usb_guide[] = {
@@ -40,6 +40,7 @@ int surv_usb_start(void)
     if (st == SURV_USB_COOL) {
         why = "cooling down after the last burst";
         refused = 1;
+        ++events;
         return -1;
     }
     st = SURV_USB_ON;
@@ -58,6 +59,7 @@ void surv_usb_stop(const char *w)
     st = SURV_USB_COOL;
     t_cool = surv_host_now_ms + SURV_USB_COOL_MS;
     why = w;
+    ++events;
 }
 
 void surv_usb_status(struct surv_usb *s)
@@ -78,6 +80,7 @@ void surv_usb_status(struct surv_usb *s)
     s->ilim_ma = 1500;
     s->bursts = bursts;
     s->refused = refused;
+    s->events = events;
     s->why = why;
 }
 
@@ -132,6 +135,7 @@ int surv_last2_auto = 1;
 static int last2;
 int surv_last2(void) { return last2; }
 int surv_last2_set(int on, const char *w) { (void)w; last2 = on != 0; return 0; }
+const char *surv_last2_why(void) { return 0; }
 int surv_last2_battery(int pct, int mv, int chg) { (void)pct, (void)mv, (void)chg; return -1; }
 
 const char *surv_sensors_why(void)

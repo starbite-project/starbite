@@ -359,6 +359,7 @@ int sos_set(int on);
 void sos_status(struct sbos_sos *s);
 int sos_active(void);
 int sos_frame(uint32_t *argb);      /* 1 while SOS owns the screen: the colour to show */
+uint64_t sos_next_ms(uint64_t now); /* 1.2-alpha28: when sos_frame can change next (sb_ms time; 0 off) */
 int clock_now(struct sbos_time *t);
 int64_t clock_set_net(int64_t utc, int *was_set);  /* NTP: the correction, s (never written to the PMIC) */
 /* the flashlight LED (torch.c) */
