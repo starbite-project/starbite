@@ -18,6 +18,21 @@ for a in $(cat /proc/cmdline); do
     sbguest.mode=*) mode=${a#sbguest.mode=} ;;
     esac
 done
+if [ "$mode" = wayland ] && [ -x /sbwl ]; then
+    # Linux apps (docs/STARBITE-LINUX-APPS.md, L1): sbwl, our Wayland compositor, publishes the app window into the
+    # shared surface and owns the ring (no guestd); it starts the app (foot) and keeps it running
+    mount -t tmpfs -o mode=0700 run /run
+    mkdir -p /dev/pts && mount -t devpts -o ptmxmode=0666 devpts /dev/pts     # the terminal app's PTY
+    mkdir -p /dev/shm && mount -t tmpfs -o mode=1777 shm /dev/shm             # wlroots' buffers (shm_open)
+    mkdir -p /root /tmp
+    export XDG_RUNTIME_DIR=/run HOME=/root SHELL=/bin/sh LC_ALL=C.UTF-8 PATH=/bin:/usr/bin
+    echo "guest-init: Wayland mode (sbwl + the app)" > /dev/kmsg
+    while true; do
+        /sbwl </dev/null >/dev/null 2>&1
+        echo "guest-init: sbwl exited ($?); starting it again" > /dev/kmsg
+        sleep 1
+    done
+fi
 if [ "$mode" = term ] && [ -e /dev/tty1 ]; then
     # the terminal (docs 12 step 3): fbcon draws tty1 into the shared surface, guestd publishes the changed rows and
     # turns Starbite's keys into a uinput keyboard; a shell on tty1, started again if it exits

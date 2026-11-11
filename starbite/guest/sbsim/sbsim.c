@@ -404,7 +404,7 @@ static int run_guest(unsigned run)
         }
         if (mf->flags & F_TERM) {           /* the terminal: type a command, the shell runs it */
             static const char cmd[] = "echo STARBITE-TERM-OK > /dev/kmsg\n";
-            if (s->state == SBG_RUNNING && frames >= 2 && tstep == 0 && t_touch && t - t_touch > 2000) {
+            if (s->state == SBG_RUNNING && frames >= 1 && tstep == 0 && t_touch && t - t_touch > 2000) {
                 tstep = 1;
                 typed = 0;
                 touch_seq = h->surf_seq;        /* any frame after the typing began shows the result */
@@ -445,6 +445,15 @@ static int run_guest(unsigned run)
                 char name[] = "sbsim-term-run0.ppm";
                 name[14] = (char)('0' + run % 10);
                 write_ppm(name);
+                /* a tap in the middle of the window (the guest logs where it went), then the stop */
+                sbg_touch(0, SBG_TOUCH_DOWN, (int32_t)mf->surf_w / 2, (int32_t)mf->surf_h / 2);
+                sbg_touch(0, SBG_TOUCH_UP, (int32_t)mf->surf_w / 2, (int32_t)mf->surf_h / 2);
+                tstep = 4;
+                t_touch = t;
+            } else if (tstep == 4 && (h->touches_seen >= 2 || t - t_touch > 2000)) {
+                puts_("sbsim: the tap: touches seen by the guest ");
+                putu(h->touches_seen);
+                puts_("\n");
                 tstep = 5;
                 sbg_stop();
             } else if (tstep == 2 && t - t_touch > 20000) {
