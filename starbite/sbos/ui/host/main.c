@@ -627,6 +627,11 @@ int main(int argc, char **argv)
             *colon = 0;
             extern int host_ooms;
             sh_set("reset", "", 0);
+            if (getenv("SBTK_TICKS")) {          /* P3s: a new minute (and charge, temperature) before each film: rebuilds */
+                static int m;
+                m++;
+                sh_status(21, m % 60, 2, 10, 11, 87 - m % 20, 41 + m % 5);
+            }
             int oom0 = host_ooms;
             size_t rest0 = tk_heap_used();
             tk_heap_peak_reset();
