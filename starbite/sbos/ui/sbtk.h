@@ -5,8 +5,9 @@
  * (docs/concepts/starbite-os-shell/index.html):
  *   - every layer is drawn once into a cached premultiplied bitmap; a frame only composites the cached layers with
  *     their current translate / scale / opacity / clip (the compositor, tk_comp.c);
- *   - Liquid Glass is baked per element (tint, rims, specular, border, shadow) and its backdrop is the wallpaper
- *     blurred once (blur 14 pt, saturate 1.9, brightness 1.06), sampled under the element where it is now;
+ *   - Liquid Glass is baked per element (neutral tone, rim specular, depth, shadow: tk_glass.c's constants) and its
+ *     backdrop is the wallpaper blurred once (blur 14 pt, saturate TK_GLASS_SAT), sampled under the element where it
+ *     is now, or a static backdrop filtered and bent at the rim per element (the lens);
  *   - motion frames composite at half resolution and are scaled 2x to the panel; the first frame at rest is full;
  *   - the springs and the gestures are the concept's own (SPR, the 100 ms velocity window, the projections).
  * Units: panel px (1440 x 2960) unless a name ends in _pt (the concept's 390-pt-wide logical unit, x 1440/390). */
@@ -124,18 +125,23 @@ int tk_pack_open(const uint8_t *pak, uint32_t len);    /* loads the fonts; icons
 const tk_bmp *tk_icon(const char *name);               /* NULL if missing */
 float tk_icon_pad(const char *name);                   /* the margin baked around it (glows), px */
 
-/* ---- Liquid Glass (tk_glass.c) ----------------------------------------------------------------------------- */
+/* ---- Liquid Glass (tk_glass.c; its header lists every constant, shared with the GPU path) ------------------- */
+#define TK_GLASS_SAT 1.2f          /* the backdrop's saturate() for regular glass */
+#define TK_GLASS_SAT_CLEAR 1.0f    /* clear glass */
+#define TK_GLASS_BRIGHT 1.0f       /* its brightness() */
+extern int tk_glass_lens;          /* 1: static backdrops are bent at the rim (tk_glass_local / _put / _from_half) */
 /* the wallpaper: the concept's .wall.n (inset -30 pt, three radials over a vertical gradient) at k px per panel px */
 void tk_wall_draw(tk_bmp *b, int emergency, float k);
-/* the backdrop the glass shows: blur 14 pt, saturate 1.9, brightness 1.06 of src (both half resolution) */
+/* the backdrop the glass shows: blur 14 pt, saturate TK_GLASS_SAT of src (both half resolution) */
 void tk_glass_backdrop(tk_bmp *dst, const tk_bmp *src);
-/* bake one .lg element into b at (x, y, w, h) with radius r: the drop shadow (outside), the tint gradient, the inset
- * rims and glow, the specular radials and the 1 pt gradient border; dark = .lg.dark. Its backdrop mask (the shape's
- * coverage) goes into mask (same frame as b) if given. */
+/* bake one glass element into b at (x, y, w, h) with radius r: the drop shadow (outside), and inside the neutral
+ * tone (dark / light by the backdrop's luminance), the depth and the thin rim specular; no tint, gloss or outline.
+ * dark = .lg.dark (a denser tone under labels). Its backdrop mask (the shape's coverage) goes into mask (same frame
+ * as b) if given. */
 void tk_glass_bake(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow);
-void tk_glass_bake_ref(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow);   /* the layered one */
+void tk_glass_bake_ref(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, float r, int dark, int shadow);   /* the same, exact math, one core */
 /* the glass's backdrop filter applied in place to what b already holds under the shape (glass inside a backdrop
- * root, as the lock list's cards: Chrome filters only the list's own content, not the wallpaper) */
+ * root, as the lock list's cards: Chrome filters only the list's own content, not the wallpaper); bent at the rim */
 void tk_glass_local(tk_bmp *dst, const tk_bmp *src, float x, float y, float w, float h, float r);
 void tk_glass_local_put(tk_bmp *b, const tk_bmp *t, int X, int Y, float x, float y, float w, float h, float r);
 /* tk_glass_local over a backdrop held at half resolution (b's origin at the panel point (box, boy)) */

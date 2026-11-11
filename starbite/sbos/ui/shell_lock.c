@@ -1461,7 +1461,7 @@ static void d_lg_app(dc *d, float x, float y, float w, float h, float r, int dar
     if (!tk_bmp_new(&t, Wd, Hd)) return;
     tk_fill_rect_raw(&t, 0, 0, Wd, Hd, 0xff0a0f1fu);
     tk_blit(&t, d->b, -X, -Y, 1);
-    tk_bmp_blur_sat(&t, PT(14), 1.9f, 1.06f);
+    tk_bmp_blur_sat(&t, PT(14), TK_GLASS_SAT, TK_GLASS_BRIGHT);
     tk_glass_local_put(d->b, &t, X, Y, bx, by, PT(w), PT(h), PT(r));
     tk_bmp_free(&t);
     tk_glass_bake(d->b, 0, bx, by, PT(w), PT(h), PT(r), dark, 1);
@@ -1474,7 +1474,7 @@ static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int da
     uint32_t c = 0xff0a0f1fu;
     if (tk_bmp_new(&g, 1, 1)) {
         g.px[0] = c;
-        tk_bmp_satbright(&g, 1.9f, 1.06f);
+        tk_bmp_satbright(&g, TK_GLASS_SAT, TK_GLASS_BRIGHT);
         c = g.px[0];
         tk_bmp_free(&g);
     }
