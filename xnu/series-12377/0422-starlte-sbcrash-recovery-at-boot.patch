@@ -1,0 +1,72 @@
+From 3b37a3ae8a9b6c205181f2d3ebfca8ab97e4ae38 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 11 Nov 2026 06:44:37 +0200
+Subject: [PATCH] patch: 0422-starlte-sbcrash-recovery-at-boot.patch -
+ sbcrash=recovery writes INFORM3 = recovery at boot, so a watchdog reset (the
+ 0421 dead-man, a hang) or a forced restart comes back to TWRP, not to the
+ loader's menu; T37 was a panic at 0 s (the progress assert), comments
+ corrected
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/herolte_ufs.c | 22 ++++++++++++++++------
+ pexpert/arm/pe_init.c |  3 ++-
+ 2 files changed, 18 insertions(+), 7 deletions(-)
+
+diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
+index 8c6cf566..09a73916 100644
+--- a/bsd/dev/herolte_ufs.c
++++ b/bsd/dev/herolte_ufs.c
+@@ -1186,8 +1186,17 @@ starlte_reboot_early(void)
+ 		__asm__ volatile ("dsb sy" ::: "memory");
+ 		printf("STARBITE HEALTH: sbcrash=loader: INFORM3 0x%08x -> 0x%08x; panics and resets come back to the loader\n",
+ 		    was, SBH_INFORM3_NORMAL);
+-	} else if (starlte_crash_mode == SBH_CRASH_RECOVERY) {
+-		printf("STARBITE HEALTH: sbcrash=recovery: panics reset into TWRP\n");
++	} else if (starlte_crash_mode == SBH_CRASH_RECOVERY && starlte_pmu_va != NULL) {
++		/*
++		 * 0422: the same at boot for TWRP, so the watchdog (the 0421 dead-man, a hang) and a forced restart
++		 * come back to TWRP too, not to the loader's crash screen and menu, which wait for a person. T37
++		 * (2026-11-11) panicked at 0 s with sbcrash=loader and sat in the loader's menu for four hours.
++		 */
++		uint32_t was = starlte_pmu_va[SBH_PMU_INFORM3 / 4];
++		starlte_pmu_va[SBH_PMU_INFORM3 / 4] = SBH_INFORM3_RECOVERY;
++		__asm__ volatile ("dsb sy" ::: "memory");
++		printf("STARBITE HEALTH: sbcrash=recovery: INFORM3 0x%08x -> 0x%08x; panics and resets come back to TWRP (0422)\n",
++		    was, SBH_INFORM3_RECOVERY);
+ 	} else if (mode[0] != '\0' && starlte_crash_mode == SBH_CRASH_UNSET) {
+ 		printf("STARBITE HEALTH: sbcrash=%s: unknown (loader, recovery), ignored\n", mode);
+ 	}
+@@ -1209,10 +1218,11 @@ starlte_wdt_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p
+ 		return;
+ 	}
+ 	/*
+-	 * 0421: a timed test boot (sweetreboot=S) gets a dead-man that needs nothing but this thread call. T37
+-	 * (2026-11-11) hung on the splash with the watchdog fed and the sweetreboot thread never resetting (it
+-	 * writes its dump files first and can block there): feeding now stops 60 s after S, and at sbnoui= s
+-	 * (default 300) if no frame has reached the panel by then. The watchdog then resets within sbwdt= s.
++	 * 0421: a timed test boot (sweetreboot=S) gets a dead-man that needs nothing but this thread call: if the
++	 * sweetreboot thread never resets (it writes its dump files first and can block there), feeding stops 60 s
++	 * after S, and at sbnoui= s (default 300) if no frame has reached the panel by then. The watchdog then
++	 * resets within sbwdt= s; where to (TWRP or the loader) is INFORM3 as sbcrash= left it at boot (0422).
++	 * (T37 itself was a panic at 0 s, the progress assert in pe_init.c, which went to the loader's menu.)
+ 	 */
+ 	if (starlte_deadman_abs != 0 && mach_absolute_time() >= starlte_deadman_abs) {
+ 		starlte_wdt_stop = true;
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index 871aa1d7..01fac51a 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -326,7 +326,8 @@ PE_init_iokit(void)
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+ 	/*
+ 	 * Starbite 0421: no boot progress animation unless -progress. Every STARLTE command line had -noprogress
+-	 * until T37 (2026-11-11), the one without it: the boot froze on the loader's splash with the watchdog fed.
++	 * until T37 (2026-11-11), the one without it: the progress image does not fit, and the assert in the
++	 * shrink loop below panicked the kernel at 0 s.
+ 	 */
+ 	show_progress = PE_parse_boot_argn("-progress", &notused, sizeof(notused)) ? TRUE : FALSE;
+ #endif
+-- 
+2.53.0
+
