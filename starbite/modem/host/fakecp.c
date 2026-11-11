@@ -85,7 +85,8 @@ static void regist(struct fakecp *fc, uint8_t ch, uint8_t aseq, uint8_t type, ui
         break;
     case FAKE_SIM:
         d[0] = fc->radio_normal ? SBM_ACT_LTE : SBM_ACT_GSM;
-        d[2] = fc->radio_normal && !fc->pin_lock ? SBM_REG_HOME : fc->radio_normal ? SBM_REG_EMERGENCY : SBM_REG_NONE;
+        d[2] = fc->radio_normal && !fc->pin_lock && (!fc->need_attach_apn || fc->n_attach_apn) ? SBM_REG_HOME
+             : fc->radio_normal && fc->pin_lock ? SBM_REG_EMERGENCY : SBM_REG_NONE;
         break;
     }
     d[1] = domain;
@@ -143,9 +144,23 @@ static void answer(struct fakecp *fc, uint8_t ch, const struct sbm_ipc_msg *m)
         return;
     }
 #ifdef SBM_ATTENDED_TX
+    if (m->cmd == SBM_NET_PLMN_SEL && m->type == SBM_IPC_SET &&
+        sbm_ipc_attended_allowed(m->cmd, m->type, m->data, m->data_len)) {
+        fc->n_net_auto++;
+        gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        return;
+    }
     if ((m->cmd >> 8) == SBM_G_GPRS && sbm_ipc_attended_allowed(m->cmd, m->type, m->data, m->data_len)) {
         fc->n_gprs++;
-        if (m->cmd == SBM_GPRS_DEFINE_PDP) {
+        if (m->cmd == SBM_GPRS_LTE_ATTACH) {
+            fc->n_attach_apn++;
+            gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+            regist(fc, SBM_CH_FMT0, 0, SBM_IPC_NOTI, SBM_DOMAIN_CS);
+            regist(fc, SBM_CH_FMT0, 0, SBM_IPC_NOTI, SBM_DOMAIN_PS);
+        } else if (m->cmd == SBM_GPRS_PS) {
+            fc->n_ps_attach++;
+            gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        } else if (m->cmd == SBM_GPRS_DEFINE_PDP) {
             fc->n_define++;
             memcpy(fc->apn, m->data + 3, 100);
             fc->apn[100] = 0;

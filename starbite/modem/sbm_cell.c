@@ -373,7 +373,9 @@ void sbm_frame_line(const uint8_t *fr, uint32_t len, int from_cp, char *out, siz
     if (sbm_ch_is_fmt(f.ch) && !f.multi && sbm_ipc_parse(f.payload, f.payload_len, &m) == 0) {
         char nb[12];
         ADD(" | %s %s seq %u/%u", sbm_ipc_name(m.cmd, nb), sbm_ipc_type_name(m.type, from_cp), m.mseq, m.aseq);
-        if (m.data_len && sbm_ipc_payload_loggable(m.cmd)) {
+        if (m.cmd == SBM_NET_REGIST && m.data_len >= 11) {   /* no LAC / cell id: act, domain, state, reject */
+            ADD(" | act 0x%02x dom %u state %u rej %u", m.data[0], m.data[1], m.data[2], m.data[10]);
+        } else if (m.data_len && sbm_ipc_payload_loggable(m.cmd)) {
             ADD(" |");
             for (unsigned i = 0; i < m.data_len && i < 16; ++i)
                 ADD(" %02x", m.data[i]);

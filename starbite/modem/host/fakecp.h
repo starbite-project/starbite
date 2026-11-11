@@ -30,7 +30,9 @@ struct fakecp {
     uint32_t n_radio_exec;      /* the attended radio EXECs (exact data); not counted in n_forbidden */
     /* the attended data test: GPRS and a fake network behind the PS rings (DNS answers, an HTTP server on :80) */
     uint32_t n_gprs, n_define, n_act, n_deact;
-    int pdp_up, act_refuse_short;   /* act_refuse_short: the short PDP_CONTEXT form is refused (0x000a) */
+    int pdp_up, act_refuse_short;
+    int need_attach_apn;            /* FAKE_SIM: no registration until the LTE attach APN came (0x0D14) */
+    uint32_t n_attach_apn, n_net_auto, n_ps_attach;   /* act_refuse_short: the short PDP_CONTEXT form is refused (0x000a) */
     char apn[104];
     uint32_t net_ul, net_dl, net_dl_zc, net_dns, net_syn, net_http, net_bad, net_zc_full;
     int net_drop_first_syn;         /* lose the first SYN (the client retransmits) */

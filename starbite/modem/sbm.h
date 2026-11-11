@@ -373,6 +373,9 @@ int sbm_sbd_id(const struct sbm_sbd *s, uint16_t ch);   /* ring id of a channel,
 #define SBM_GPRS_PDP_CONTEXT     SBM_CMD(SBM_G_GPRS, 0x04)   /* SET 112 (or 248) bytes: act, cid, flags=0, ...  */
 #define SBM_GPRS_IP_CONFIG       SBM_CMD(SBM_G_GPRS, 0x09)   /* NOTI: cid, u16 flags, ip, dns1, dns2, gw, mask */
 #define SBM_GPRS_CALL_STATUS     SBM_CMD(SBM_G_GPRS, 0x10)   /* NOTI: cid, status (1 connected), cause */
+#define SBM_GPRS_LTE_ATTACH      SBM_CMD(SBM_G_GPRS, 0x14)   /* SET 201 (or 337): the LTE initial-attach APN */
+#define SBM_GPRS_ATTACH_LEN      194
+#define SBM_GPRS_ATTACH_LONG_LEN 330
 #define SBM_GPRS_DEFINE_LEN      149
 #define SBM_GPRS_ACT_LEN         112
 #define SBM_GPRS_ACT_LONG_LEN    248
@@ -725,6 +728,10 @@ struct sbm_boot {
         uint32_t status_notis, ip_notis;
     } pdp;
     uint32_t data_tx, data_rx, data_rx_zc, data_rx_bad, data_tx_err;
+    /* the attended registration helpers (attach APN, network selection automatic, PS attach): the last one's answer */
+    uint8_t ctl_seq, ctl_seen;
+    uint16_t ctl_cmd, ctl_res;
+    uint32_t noti_logged;              /* attended: unsolicited frames logged after the first ONLINE_LOG_MAX */
     uint32_t fmt_stale;                /* a seq came round again (188 queries later) while its query was still open */
     struct sbm_cell_state cell;        /* what the CP reported (decoded, identity-free) */
     uint32_t udl_resp[2], init_start_ms, phone_start_ms, n_msgs, last_msg, crash_cmd;
@@ -895,6 +902,12 @@ int sbm_modem_stop(struct sbm_modem *m);
 int sbm_modem_radio(struct sbm_modem *m, int on);
 /* the attended data test: define the PDP context (cid 1, IPv4, apn); activate (on 1) or deactivate it (long: the
  * 248-byte form); answers and NOTIs land in m->b.pdp */
+/* registration helpers (SBM_ATTENDED_MAGIC or _DATA); the answer lands in m->b.ctl_res / ctl_seen:
+ * the LTE initial-attach APN (pdp_type 2 IPv4 / 6 IPv4v6, profile 1, no credentials), network selection
+ * automatic, PS attach */
+int sbm_modem_attach_apn(struct sbm_modem *m, const char *apn, uint8_t pdp_type, int long_form);
+int sbm_modem_net_auto(struct sbm_modem *m);
+int sbm_modem_ps_attach(struct sbm_modem *m);
 int sbm_modem_pdp_define(struct sbm_modem *m, const char *apn);
 int sbm_modem_pdp_activate(struct sbm_modem *m, int on, int long_form);
 /* raw IPv4 out on the PDP channel (rmnet0, ch 10), and the receive callback for packets from either PS ring */

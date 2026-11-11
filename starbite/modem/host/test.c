@@ -1350,6 +1350,23 @@ static void test_attended(struct fakesoc *s, struct sbm_image *im, struct sbm_mo
     CHECKEQ(sbm_ipc_frame_attended(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_CMD(SBM_G_CALL, 1), SBM_IPC_EXEC, dn, 2), SBM_EPERM);
     CHECKEQ(sbm_ipc_frame(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, dn, 2), SBM_EPERM);
     CHECKEQ(sbm_ipc_frame_attended(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, dn, 2), 4 + 7 + 2);
+    {
+        static uint8_t a[SBM_GPRS_ATTACH_LONG_LEN];
+        static const uint8_t autosel[8] = { 2, 0, 0, 0, 0, 0, 0, 0xff }, manual[8] = { 1, 0, 0, 0, 0, 0, 0, 0xff };
+        memset(a, 0, sizeof(a));
+        a[0] = 1; a[1] = 1; a[2] = 6; memcpy(a + 3, "internet", 8); a[192] = 6;
+        CHECK(sbm_ipc_attended_allowed(SBM_GPRS_LTE_ATTACH, SBM_IPC_SET, a, SBM_GPRS_ATTACH_LEN));
+        a[127] = 'u';                                                   /* a user name */
+        CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_LTE_ATTACH, SBM_IPC_SET, a, SBM_GPRS_ATTACH_LEN));
+        a[127] = 0; a[192] = 2;                                         /* roaming type differs */
+        CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_LTE_ATTACH, SBM_IPC_SET, a, SBM_GPRS_ATTACH_LEN));
+        a[192] = 0; a[328] = 6;
+        CHECK(sbm_ipc_attended_allowed(SBM_GPRS_LTE_ATTACH, SBM_IPC_SET, a, SBM_GPRS_ATTACH_LONG_LEN));
+        a[2] = 5; a[328] = 5;                                           /* IPv6 only: not offered */
+        CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_LTE_ATTACH, SBM_IPC_SET, a, SBM_GPRS_ATTACH_LONG_LEN));
+        CHECK(sbm_ipc_attended_allowed(SBM_NET_PLMN_SEL, SBM_IPC_SET, autosel, 8));
+        CHECK(!sbm_ipc_attended_allowed(SBM_NET_PLMN_SEL, SBM_IPC_SET, manual, 8));   /* no manual selection */
+    }
     CHECK(sbm_operator_name("00101#") && !strcmp(sbm_operator_name("00101#"), "Test network"));
     CHECK(sbm_operator_name("24405F") && !strcmp(sbm_operator_name("24405F"), "Elisa"));
     CHECK(!sbm_operator_name("99999") && !sbm_operator_name("1234") && !sbm_operator_name(0));
@@ -1385,10 +1402,27 @@ static void test_attended(struct fakesoc *s, struct sbm_image *im, struct sbm_mo
     sbm_modem_snapshot(mo, &sn);
     CHECKEQ(sn.sim, SBM_SIM_INIT_COMPLETE);
     CHECK(sn.cs != SBM_REG_HOME && sn.ps != SBM_REG_HOME && mo->state == SBM_MS_ONLINE);
+    s->fcp.need_attach_apn = 1;                /* as the phone (simtest-a1): no attach without the attach APN */
     CHECKEQ(sbm_modem_radio(mo, 1), 0);
     CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
     CHECK(mo->b.radio_res_seen);
     CHECKEQ(mo->b.radio_res, 0x8000);
+    sbm_modem_snapshot(mo, &sn);
+    CHECK(sn.cs == SBM_REG_NONE && sn.ps == SBM_REG_NONE);
+    CHECKEQ(sbm_modem_net_auto(mo), 0);
+    CHECKEQ(sess_run(mo, &p, 500, 0, 0), 0);
+    CHECK(mo->b.ctl_seen && mo->b.ctl_res == 0x8000 && mo->b.ctl_cmd == SBM_NET_PLMN_SEL);
+    CHECKEQ(sbm_modem_ps_attach(mo), 0);
+    CHECKEQ(sess_run(mo, &p, 500, 0, 0), 0);
+    CHECK(mo->b.ctl_seen && mo->b.ctl_res == 0x8000 && mo->b.ctl_cmd == SBM_GPRS_PS);
+    CHECKEQ(sbm_modem_attach_apn(mo, "internet", 0x07, 0), SBM_EINVAL);
+    CHECKEQ(sbm_modem_attach_apn(mo, "inter net", 0x06, 0), SBM_EPERM);      /* the builder refuses the APN */
+    CHECKEQ(sbm_modem_attach_apn(mo, "internet", 0x06, 0), 0);
+    CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
+    CHECK(mo->b.ctl_seen && mo->b.ctl_res == 0x8000 && mo->b.ctl_cmd == SBM_GPRS_LTE_ATTACH);
+    CHECKEQ(s->fcp.n_attach_apn, 1);
+    CHECKEQ(s->fcp.n_net_auto, 1);
+    CHECKEQ(s->fcp.n_ps_attach, 1);
     sbm_modem_snapshot(mo, &sn);
     CHECK(sn.cs == SBM_REG_HOME && sn.ps == SBM_REG_HOME);
     CHECKEQ(sn.rat, SBM_ACT_LTE);

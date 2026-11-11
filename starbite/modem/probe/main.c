@@ -511,6 +511,12 @@ static int done_reg(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
     (void)mo;
     return sim_registered(sn);
 }
+static int done_ctl(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)sn;
+    return mo->b.ctl_seen;
+}
+
 static int done_ps(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
 {
     (void)mo;
@@ -676,10 +682,8 @@ static void simtest(const char *key)
     int registered = 0, data_done = 0;
     const char *data_fail = 0;
     uint8_t rat_reg = 0;
-    unsigned reg_s = arg("sim_reg_s", 180), hold_s = arg("sim_hold", 60), bmin = 99, bmax = 0;
+    unsigned hold_s = arg("sim_hold", 60), bmin = 99, bmax = 0;
     const char *fail = 0;
-    if (reg_s > 600)
-        reg_s = 600;
     if (hold_s > 600)
         hold_s = 600;
     sb_storage_hold("modem SIM test: no storage writes");
@@ -750,8 +754,60 @@ static void simtest(const char *key)
         goto out;
     }
 
-    /* 3. registration */
-    r = sim_phase(&mo, "REG", reg_s * 1000u, 5000, done_reg, &reg_ms);
+    /* 3. the LTE initial-attach APN (libsec-ril sends it at IMSI-ready and after radio-up; simtest-a1 camped on LTE
+     * for 180 s without it and never tried to attach), then registration with escalation while not registered:
+     * network selection automatic, PS attach, a radio off / on cycle (as airplane mode) */
+    char apn[SBM_APN_MAX + 1];
+    if (!cat_line || !token(cat_line, "sim_apn", apn, sizeof(apn)) || !apn[0])
+        sb_strcpy(apn, sizeof(apn), "internet");
+    uint8_t iat = arg("sim_ia_type", 6) == 2 ? 0x02 : 0x06;
+    for (int lf = 0; lf < 2; ++lf) {
+        if ((r = sbm_modem_attach_apn(&mo, apn, iat, lf)) < 0) {
+            sbm_fmt(s, sizeof(s), "ATTACH: the attach APN could not be sent (%s)", sbm_strerror(r));
+            line(s);
+            break;
+        }
+        r = sim_phase(&mo, "ATTACH", 10000, 5000, done_ctl, &took);
+        sbm_fmt(s, sizeof(s), "ATTACH: initial-attach APN \"%s\" (%s, %s form): %s 0x%04x after %u ms", apn,
+                iat == 0x06 ? "IPv4v6" : "IPv4", lf ? "long" : "short", mo.b.ctl_seen ? "answered" : "no answer",
+                mo.b.ctl_res, took);
+        line(s);
+        if (r < 0 || (mo.b.ctl_seen && mo.b.ctl_res == 0x8000))
+            break;                      /* else (refused or no answer) the long form once */
+    }
+    if (r < 0) {
+        fail = "attach APN (down)";
+        goto out;
+    }
+    {
+        static const struct { const char *tag; uint32_t ms; } step[] = {
+            { "REG", 60000 }, { "REG+AUTO", 40000 }, { "REG+PS", 40000 }, { "REG+CYCLE", 60000 },
+        };
+        uint32_t total = 0;
+        for (unsigned k = 0; k < 4; ++k) {
+            if (k == 1)
+                sbm_modem_net_auto(&mo);
+            if (k == 2)
+                sbm_modem_ps_attach(&mo);
+            if (k == 3) {
+                line("REG: radio off / on (airplane mode), then the attach APN again");
+                sbm_modem_radio(&mo, 0);
+                sim_phase(&mo, "CYCLE", 5000, 5000, 0, &took);
+                sbm_modem_radio(&mo, 1);
+                sim_phase(&mo, "CYCLE", 2000, 5000, 0, &took);
+                sbm_modem_attach_apn(&mo, apn, iat, 0);
+            }
+            r = sim_phase(&mo, step[k].tag, step[k].ms, 5000, done_reg, &took);
+            total += took;
+            if (k >= 1 && mo.b.ctl_seen) {
+                sbm_fmt(s, sizeof(s), "%s: the request answered 0x%04x", step[k].tag, mo.b.ctl_res);
+                line(s);
+            }
+            if (r != 0)
+                break;
+        }
+        reg_ms = total;
+    }
     sbm_modem_snapshot(&mo, &sn);
     if (r < 0) {
         fail = "registration (down)";
@@ -793,9 +849,6 @@ static void simtest(const char *key)
 
     /* 5. data (sim_data=1): PDP, DNS, HTTP, deactivate */
     if (registered && arg("sim_data", 1)) {
-        char apn[SBM_APN_MAX + 1];
-        if (!cat_line || !token(cat_line, "sim_apn", apn, sizeof(apn)) || !apn[0])
-            sb_strcpy(apn, sizeof(apn), "internet");
         int dr = sim_data(&mo, apn, &data_fail);
         data_done = dr == 0;
         if (mo.up == 0) {

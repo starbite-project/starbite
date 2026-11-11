@@ -698,6 +698,25 @@ transmits, so it has its own image, gated twice:
 - **Not in this image:** data (PDP). It needs the GPRS layouts from libsec-ril, the zero-copy downlink pool and a
   small raw-IP stack (sbnet is Ethernet-based); that is the next image.
 
+#### Result simtest-a1 (2026-11-11 15:40, 4c4b544, the user's SIM, no PIN; `build/modem/simtest-a1/pmsg.txt`)
+- **SIM:** status `00` (ready) after 5 s. With a SIM in, PWR_PHONE_PWR_UP reads `aa` (`53` without).
+- **Not registered.** For 180 s: CS state 1 (not registered, not searching) on LTE (act 0x21), PLMN set,
+  bars 2..4, -65..-108 dBm, reject cause 0; PS never answered as PS.
+- **Answer codes:**
+  - radio normal answered `0x8005` at once. That is the same code every PWR_PHONE_STATE GET gets with a SIM in, so
+    probably not a refusal of the radio.
+  - low power answered `0x8000`, then parked.
+- **Reading:** the CP camps but never starts the LTE attach and the network sends no reject. libsec-ril sends the LTE
+  initial-attach APN (`0x0D14`) at IMSI-ready and after radio-up; we did not.
+- **A2 (modemsim 2nd image):**
+  - after radio-on: `GPRS_LTE_ATTACH 0x0D14 SET` (legacy 194 bytes, the long 330 if refused): `01`, profile 1,
+    IPv4v6 (`sim_ia_type=2` for IPv4), the APN, the roaming type = the type, no credentials;
+  - then registration with escalation while not registered: 60 s; network selection automatic
+    (`NET_PLMN_SEL SET 02 00x6 ff`) and 40 s; PS attach (`0x0D03 SET 01 00 00`) and 40 s; a radio off/on cycle
+    plus the attach APN again and 60 s;
+  - FMT lines decode NET_REGIST as act/domain/state/reject (never LAC/cell); attended runs log up to 120 more
+    unsolicited frames.
+
 ### 7.9 The attended data test (`modemsim`, part B, 2026-11-11)
 Same image and gates as 7.8, with a second session magic: `SBM_ATTENDED_DATA` ("ATTN", `sim_data=1`, the default)
 also fills the zero-copy ring at link setup and allows the GPRS frames and the IP channel. `SBM_ATTENDED_MAGIC`

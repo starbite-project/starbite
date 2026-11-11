@@ -689,6 +689,14 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
                                     }
                                 }
                             }
+                            if (m.cmd == SBM_GEN_PHONE_RES && b->ctl_seq && seq == b->ctl_seq) {
+                                struct sbm_gen_res gr;
+                                if (sbm_gen_res_decode(&m, &gr) == 0) {
+                                    b->ctl_res = gr.code;
+                                    b->ctl_seen = 1;
+                                }
+                                b->ctl_seq = 0;
+                            }
                             if (m.cmd == SBM_GEN_PHONE_RES && b->radio_seq && seq == b->radio_seq) {
                                 struct sbm_gen_res gr;
                                 if (sbm_gen_res_decode(&m, &gr) == 0) {
@@ -703,11 +711,17 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
                                 b->fmt_resp++;
                         }
                     }
-                    if (o_logged < ONLINE_LOG_MAX) {
+                    int unsolicited = m.type != SBM_IPC_RESP;
+                    if (o_logged < ONLINE_LOG_MAX ||
+                        (SBM_IS_ATTENDED(b->attended) && unsolicited && b->noti_logged < 120 &&
+                         (m.cmd != SBM_DISP_RSSI_INFO && m.cmd != SBM_DISP_ICON_INFO))) {
                         char line[200];
                         sbm_frame_line(fb, fl, 1, line, sizeof(line));
                         sbm_logf(p, "FMT: +%u %s", ms, line);
-                        o_logged++;
+                        if (o_logged < ONLINE_LOG_MAX)
+                            o_logged++;
+                        else
+                            b->noti_logged++;
                     }
                 } else {
                     b->bad_rx++;
@@ -989,6 +1003,46 @@ static int send_tracked(struct sbm_modem *m, uint16_t cmd, uint8_t type, const u
     if (s_silent_since == NONE)
         s_silent_since = m->ms;
     return 0;
+}
+
+static int ctl_send(struct sbm_modem *m, uint16_t cmd, const uint8_t *d, uint16_t n, const char *what)
+{
+    if (!m->up || !SBM_IS_ATTENDED(m->b.attended))
+        return SBM_EPERM;
+    m->b.ctl_seen = 0;
+    m->b.ctl_cmd = cmd;
+    int r = send_tracked(m, cmd, SBM_IPC_SET, d, n, &m->b.ctl_seq);
+    sbm_logf(m->p, "FMT: +%u TX ch235 | %s (%s)", m->ms, what, r == 0 ? "sent" : sbm_strerror(r));
+    return r;
+}
+
+int sbm_modem_attach_apn(struct sbm_modem *m, const char *apn, uint8_t pdp_type, int long_form)
+{
+    static uint8_t d[SBM_GPRS_ATTACH_LONG_LEN];
+    uint32_t l = sbm_strlen(apn);
+    uint16_t n = long_form ? SBM_GPRS_ATTACH_LONG_LEN : SBM_GPRS_ATTACH_LEN;
+    if (l == 0 || l > SBM_APN_MAX || (pdp_type != 0x02 && pdp_type != 0x06))
+        return SBM_EINVAL;
+    sbm_memset(d, 0, sizeof(d));
+    d[0] = 1;
+    d[1] = 1;                            /* profile 1 */
+    d[2] = pdp_type;
+    sbm_memcpy(d + 3, apn, l);
+    d[long_form ? 328 : 192] = pdp_type; /* roaming PDP type */
+    return ctl_send(m, SBM_GPRS_LTE_ATTACH, d, n, long_form ? "GPRS_LTE_ATTACH SET (initial-attach APN, long form)"
+                                                            : "GPRS_LTE_ATTACH SET (initial-attach APN)");
+}
+
+int sbm_modem_net_auto(struct sbm_modem *m)
+{
+    static const uint8_t d[8] = { 0x02, 0, 0, 0, 0, 0, 0, 0xff };
+    return ctl_send(m, SBM_NET_PLMN_SEL, d, 8, "NET_PLMN_SEL SET automatic");
+}
+
+int sbm_modem_ps_attach(struct sbm_modem *m)
+{
+    static const uint8_t d[3] = { 1, 0, 0 };
+    return ctl_send(m, SBM_GPRS_PS, d, 3, "GPRS_PS SET attach");
 }
 
 int sbm_modem_pdp_define(struct sbm_modem *m, const char *apn)

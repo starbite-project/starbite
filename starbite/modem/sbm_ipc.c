@@ -101,10 +101,40 @@ static const struct { uint16_t cmd; uint8_t type; uint8_t n; uint8_t d[2]; } att
  *   DEFINE_PDP SET (149): 01, cid 1, type 02 (IPv4), the APN (1..100 of [A-Za-z0-9.-], zero-padded), all else 0
  *   PDP_CONTEXT SET (112 or 248): act 1 / deactivate 0, cid 1, everything else 0 (no user, password or auth)
  *   PS SET (3): 01 00 00 (attach) */
+static int apn_ok(const uint8_t *a)
+{
+    unsigned k = 0;
+    while (k < SBM_APN_MAX && a[k]) {
+        char c = (char)a[k];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-'))
+            return 0;
+        ++k;
+    }
+    return k > 0 && k < 101 ? (int)k : 0;
+}
+
+static int zeros(const uint8_t *d, unsigned from, unsigned to)
+{
+    for (unsigned i = from; i < to; ++i)
+        if (d[i])
+            return 0;
+    return 1;
+}
+
 static int gprs_ok(uint16_t cmd, uint8_t type, const uint8_t *d, uint16_t n)
 {
     if (type != SBM_IPC_SET || !d)
         return 0;
+    /* LTE attach profile (libsec-ril IpcTxSetLteAttachProfile): 01, profile 1, type 2/6, APN [3..103], zeros (no
+     * address, user, password or auth), the roaming PDP type (legacy [192], long [328]) = the type */
+    if (cmd == SBM_GPRS_LTE_ATTACH) {
+        unsigned rt = n == SBM_GPRS_ATTACH_LEN ? 192 : 328;
+        if ((n != SBM_GPRS_ATTACH_LEN && n != SBM_GPRS_ATTACH_LONG_LEN) || d[0] != 1 || d[1] != 1 ||
+            (d[2] != 0x02 && d[2] != 0x06) || d[rt] != d[2])
+            return 0;
+        unsigned k = (unsigned)apn_ok(d + 3);
+        return k && zeros(d, 3 + k, rt) && zeros(d, rt + 1, n);
+    }
     if (cmd == SBM_GPRS_PS)
         return n == 3 && d[0] == 1 && d[1] == 0 && d[2] == 0;
     if (cmd == SBM_GPRS_PDP_CONTEXT) {
@@ -147,8 +177,12 @@ int sbm_ipc_attended_allowed(uint16_t cmd, uint8_t type, const uint8_t *data, ui
     }
     if (allowed_idx(cmd, type) >= 0)
         return 1;
-    if (cmd == SBM_GPRS_DEFINE_PDP || cmd == SBM_GPRS_PDP_CONTEXT || cmd == SBM_GPRS_PS)
+    if (cmd == SBM_GPRS_DEFINE_PDP || cmd == SBM_GPRS_PDP_CONTEXT || cmd == SBM_GPRS_PS || cmd == SBM_GPRS_LTE_ATTACH)
         return gprs_ok(cmd, type, data, dlen);
+    if (cmd == SBM_NET_PLMN_SEL && type == SBM_IPC_SET) {       /* automatic selection: 02, 00 x6, ff */
+        static const uint8_t autosel[8] = { 0x02, 0, 0, 0, 0, 0, 0, 0xff };
+        return dlen == 8 && data && sbm_memcmp(data, autosel, 8) == 0;
+    }
     for (unsigned i = 0; i < sizeof(attended) / sizeof(attended[0]); ++i)
         if (attended[i].cmd == cmd && attended[i].type == type && attended[i].n == dlen && data &&
             sbm_memcmp(attended[i].d, data, dlen) == 0)
