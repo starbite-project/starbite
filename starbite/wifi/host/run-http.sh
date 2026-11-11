@@ -19,6 +19,9 @@ for f in $(cat "$br/FILES" "$br/FILES.test"); do
     objs="$objs $o"
 done
 # shellcheck disable=SC2086
+$CC $flags -o "$OUT/selfcheck-test" "$core/tls/tls_check.c" "$core/tls/tls_chains.c" "$core/tls/ta.c" "$here/selfcheck-test.c" $objs
+"$OUT/selfcheck-test"
+# shellcheck disable=SC2086
 $CC $flags -o "$OUT/http-test" "$core/http.c" "$core/tls/ta.c" "$here/http-test.c" $objs
 d="$OUT/http-pki"
 mkdir -p "$d"

@@ -1,4 +1,5 @@
 aead/ccm.c
+aead/gcm.c
 codec/ccopy.c
 codec/dec32be.c
 codec/dec32le.c

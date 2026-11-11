@@ -186,6 +186,7 @@ static void build_wall(void)
 /* ---- the status bar (lock and home) -------------------------------------------------------------------------- */
 static void d_rrect(dc *d, float x, float y, float w, float h, float r, tk_col c);
 static struct { int state, bars, rat; } SB_CELL;      /* the status bar's copy of the modem's (sh_cell) */
+static int SB_WIFI;                                  /* wifi-sbos-next: joined with an address (sh_wifi) */
 static struct { int h, mi, wday, day, mon, pct, temp; } ST = { 21, 5, 2, 10, 11, 87, 41 };
 static struct { int on, h, m; } ALM = { 1, 7, 0 };   /* the host's is the concept's 07:00 */
 static void prep_tree(tk_layer *l);   /* P3g: home's half copies again right after a live rebuild */
@@ -202,8 +203,10 @@ static void status_bar(dc *d, const char *left)
         const char *r = SB_CELL.rat == 7 ? "4G" : SB_CELL.rat == 4 ? "3G" : SB_CELL.rat >= 1 && SB_CELL.rat <= 3 ? "2G" : "";
         if (r[0]) d_text(d, TK_IT600, 12, 286 - tk_text_w(TK_IT600, PT(12), r, 0, 0) / TK_PT, 29.5f, r, 0, 0, INK, 1);
     }
-    /* P2y: no Wi-Fi glyph (Next has no Wi-Fi connection); the battery drawn from the live charge (iOS's glyph:
-     * a translucent body, the fill by percent, red at 20 % or less, green while charging, the nub) */
+    /* wifi-sbos-next: the Wi-Fi glyph while joined with an address (the concept's place); the battery drawn from
+     * the live charge (iOS's glyph: a translucent body, the fill by percent, red at 20 % or less, green while
+     * charging, the nub) */
+    if (SB_WIFI) d_icon(d, "sb-wifi", 310, 18, 1);
     float bx = 334, by = 18.5f, fw = 21.0f * tk_clampf(ST.pct / 100.0f, .04f, 1);
     d_rrect(d, bx, by, 25, 12, 3.6f, W(.35f));
     d_rrect(d, bx + 2, by + 2, fw, 8, 2, ST.pct <= 20 && !SYS_CHARGING() ? tk_hex(0xff453a, 1) : SYS_CHARGING() ? tk_hex(0x34c759, 1) : W(1));
@@ -1223,7 +1226,13 @@ static int cc_tap(float x, float y)
         int i = (x >= 104) + 2 * (y >= 170);
         if (i == 1) return 1;                /* the modem: a hold (G_CCCELL) */
         /* P2y: no switch pretends: Airplane, Wi-Fi and Bluetooth have nothing to switch in Next yet */
-        toast(i == 0 ? "Airplane mode isn't in this version yet" : i == 2 ? "Wi-Fi isn't in this version yet" : "Bluetooth isn't available yet");
+        if (i == 2) {                        /* wifi-sbos-next: Wi-Fi is real */
+            int on = CCS.wifi;
+            if (sh_wifi_power(!on) < 0) toast(on ? "Wi-Fi can't stop now" : "Wi-Fi can't start now");
+            else toast(on ? "Wi-Fi off" : "Wi-Fi on: Settings > Wi-Fi to join");
+            return 1;
+        }
+        toast(i == 0 ? "Airplane mode isn't in this version yet" : "Bluetooth isn't available yet");
         return 1;
     } else if (y >= 264 && y < 334) {
         int c = x < 94 ? 0 : x < 184.66f ? 1 : x < 275.31f ? 2 : 3;
@@ -1279,7 +1288,7 @@ static const appdef APPS[] = {
     { "phone", "Phone", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "messages", "Messages", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "search", "Search", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
-    { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "Not in this version" }, { "Mobile Data", "No SIM" }, { "Battery", "@pct" } } },
+    { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "@wifi" }, { "Mobile Data", "No SIM" }, { "Battery", "@pct" } } },
                                            { "", 5, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" } } },
                                            { "About", 3, { { "Model", "Galaxy S9 (SM-G960F)" }, { "Software", "@ver" }, { "Memory", "4 GB" } } } } },
 };
@@ -2203,8 +2212,12 @@ void sh_sysinfo(int charging, const char *version)
     while (version && version[n] && n < 39) { SYS.ver[n] = version[n]; n++; }
     if (version) SYS.ver[n] = 0;
 }
+static const char *wf_row_text(void);               /* shell_wifi.inc */
+static void page_wifi(dc *d);
+static void wifi_tap(float x, float y);
 static const char *live_text(const char *s, char *buf)
 {
+    if (!tk_strcmp(s, "@wifi")) return wf_row_text();
     if (s[0] != '@') return s;
     int n = 0;
     if (!tk_strcmp(s, "@pct")) { n = put_dec(buf, ST.pct); buf[n++] = ' '; buf[n++] = '%'; buf[n] = 0; }
@@ -2290,7 +2303,7 @@ static void own_strip(int a, int i)
     else if (!tk_strcmp(k, "calc")) page_calc(&d);
     else if (!tk_strcmp(k, "light")) page_light(&d);
     else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
-    else if (!tk_strcmp(k, "settings")) page_display(&d);
+    else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else page_display(&d); }
     else if (!tk_strcmp(k, "notes")) page_notes(&d);
     else if (!tk_strcmp(k, "search")) page_search(&d);
     else if (inf) { d_h1(&d, APPS[a].name); d_empty(&d, 330, inf->title, inf->line); }
@@ -2372,7 +2385,7 @@ static void build_app_page(int a)
                 lx = 32 + 29 + 13;
             }
             d_text(&d, TK_IT400, 16, lx, ry + 13 + 16, live_text(S->rows[r].l, lb), 0, 0, INK, 0);
-            int nav = !tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Display & Brightness");
+            int nav = !tk_strcmp(A->k, "settings") && (!tk_strcmp(S->rows[r].l, "Display & Brightness") || !tk_strcmp(S->rows[r].l, "Wi-Fi"));
             if (nav) d_icon(&d, "chev", 344, ry + 16.5f, .45f);
             const char *rt = live_text(S->rows[r].r, rb);
             if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Mobile Data")) rt = md_text();
@@ -2805,6 +2818,8 @@ static void app_tap(float x, float y)
             lock_ver++;
             build_app_page(AP.a);
         }
+    } else if (is_app("settings") && AS.sub == 2) {
+        wifi_tap(x, y);
     } else if (is_app("settings") && AS.sub) {
         if (x < 120 && y >= 40 && y < 86) { AS.sub = 0; build_app_page(AP.a); return; }
         if (y >= 184 && y < 248 && x >= 40 && x < 350) {
@@ -2814,6 +2829,7 @@ static void app_tap(float x, float y)
         }
     } else if (is_app("settings")) {
         if (x >= 16 && x < 374 && y >= 293 && y < 340) { AS.sub = 1; build_app_page(AP.a); return; }
+        if (x >= 16 && x < 374 && y >= 135 && y < 182) { AS.sub = 2; build_app_page(AP.a); return; }   /* Wi-Fi */
         if (x >= 16 && x < 374 && y >= 182 && y < 229) {
             if (cell_running()) { sh_modem(0); toast("Modem stopped"); }
             else if (sh_modem(1) < 0) toast("The modem can't start now");
@@ -2874,6 +2890,8 @@ void sh_cell(const sh_cell_t *c)
     relink();
     lock_ver++;
 }
+
+#include "shell_wifi.inc"
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)

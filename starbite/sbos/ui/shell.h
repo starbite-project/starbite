@@ -57,6 +57,28 @@ int sh_next_update(float t_ms);
 int sh_refresh(float t_ms);
 void sh_vibrate(void);
 void sh_year(int y);
-void sh_haptic(void);                     /* P3h: a key's light tap (the vibration motor, ~10 ms) */                      /* P3c: the year (the Calendar's month) */      /* the next alarm for the lock's widget (on 0: "No alarm") */
+void sh_haptic(void);                     /* P3h: a key's light tap (the vibration motor, ~10 ms) */
+/* wifi-sbos-next: Wi-Fi for Settings > Wi-Fi, the status bar and the Control Centre. The platform pushes its state
+ * with sh_wifi (only on a change); the shell asks with sh_wifi_power / _scan / _join / _fetch (< 0 refused). The
+ * passphrase goes straight to the kernel's join (kept in RAM until a restart, never stored or logged); names and
+ * addresses are shown, never logged. */
+enum { SH_WIFI_OFF, SH_WIFI_STARTING, SH_WIFI_UP, SH_WIFI_SCANNING, SH_WIFI_JOINING, SH_WIFI_DHCP, SH_WIFI_CONNECTED,
+       SH_WIFI_FAILED };
+#define SH_WIFI_NETS 12
+typedef struct { char ssid[33]; int rssi, secure, saved, band5; } sh_wifi_net_t;
+typedef struct {
+    int state, nnets, rssi, clock_checked;
+    char ssid[33], why[64], ip[16];
+    sh_wifi_net_t nets[SH_WIFI_NETS];
+    /* the last Internet test (sh_wifi_fetch): 0 none, 1 running, 2 finished; its result in words */
+    int fetch_state, fetch_ok, fetch_status;
+    unsigned fetch_bytes, fetch_ms, fetch_tls_ms;
+    char fetch_host[48], fetch_why[64];
+} sh_wifi_t;
+void sh_wifi(const sh_wifi_t *w);
+int sh_wifi_power(int on);
+int sh_wifi_scan(void);
+int sh_wifi_join(const char *ssid, const char *pass);   /* pass: NULL or "" for open or known networks */
+int sh_wifi_fetch(const char *url);                      /* P3c: the year (the Calendar's month) */      /* the next alarm for the lock's widget (on 0: "No alarm") */
 
 #endif
