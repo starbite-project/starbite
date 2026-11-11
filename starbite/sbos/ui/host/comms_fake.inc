@@ -142,6 +142,9 @@ static void fm_inbox(void)
     if (FM.n) return;
     fm_receive("+15550100", "Are you bringing the phone tomorrow?", 1);
     fm_receive("+15550142", "The parcel is at the pick-up point. Code 4471.", 1);
+    fm_receive("+15550100", "Yes, after lunch", 1);              /* one we sent (the stills' comms=failed marks it) */
+    FM.m[FM.n - 1].incoming = 0;
+    FM.m[FM.n - 1].state = SH_SMS_SENT;
     fm_receive("+15550100", "I can bring the cable if you need it", 1);
     fm_bump();
 }

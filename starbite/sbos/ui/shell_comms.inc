@@ -824,12 +824,15 @@ void sh_call(const sh_call_t *c)
     if (c->state != SH_CALL_INCOMING) CV.answering = 0;
     if (!cm_live(c->state) || c->state == SH_CALL_ENDING) CV.ending = 0;
     cm_track(c);
+    if (CM.decl) {                            /* declined here: no screen for its last pushes (ENDING ...) */
+        if (!cm_live(c->state)) CM.decl = 0;
+        lock_ver++;
+        return;
+    }
     if (c->state == SH_CALL_INCOMING) {
-        if (CM.decl) return;                  /* declined here: its last pushes before it ended */
         if (CV.on && CV.at > 0 && (CV.mode == CVM_INCOMING || CV.answering)) cv_refresh();
         else cv_show(CVM_INCOMING);
     } else {
-        CM.decl = 0;
         if (cm_live(c->state)) {
             if (CV.on && CV.at > 0 && CV.mode == CVM_CALL) cv_refresh();
             else cv_show(CVM_CALL);
@@ -910,7 +913,11 @@ static void cv_up(void)
     case CVB_DEC:
         sh_haptic();
         CM.decl = 1;                          /* Recents: declined, no missed-call notification */
-        sh_hangup();
+        {
+            int r = sh_hangup();
+            if (!cm_live(CALL.state)) CM.decl = 0;                    /* over already (its push came) */
+            else if (r < 0) { CM.decl = 0; toast("The call couldn't be declined"); break; }
+        }
         cv_hide();
         break;
     case CVB_ACC:
