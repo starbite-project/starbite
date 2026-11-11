@@ -149,6 +149,36 @@ static uint8_t *vendor_file(const char *path, uint32_t *len)
     return 0;
 }
 
+/* Starbite OS's other VENDOR users (the ABOX audio DSP's Calliope firmware, kern/abox.c): a file at path into dst,
+ * at most cap bytes, read only. Its length, or -1 (no VENDOR, missing, larger than cap, unreadable). */
+static void vendor_quiet(const char *s) { sb_log(s); }
+long bcmw_sb_vendor_read(const char *path, void *dst, uint32_t cap)
+{
+    if (fs_state == 0)
+        bcmw_sb_vendor(vendor_quiet);
+    if (fs_state == 1) {
+        uint32_t ino;
+        uint8_t inode[EXT4_INODE_MAX];
+        uint64_t size;
+        if (ext4_lookup(&fs, path, &ino) || ext4_inode(&fs, ino, inode))
+            return -1;
+        size = ext4_size(inode);
+        if (size == 0 || size > cap || ext4_read(&fs, inode, 0, dst, (uint32_t)size))
+            return -1;
+        return (long)size;
+    }
+    if (fs_state == 2) {
+        uint64_t nid;
+        struct erofs_inode in;
+        if (erofs_lookup(&efs, path, &nid) || erofs_inode(&efs, nid, &in))
+            return -1;
+        if (in.size == 0 || in.size > cap || erofs_read_all(&efs, &in, dst))
+            return -1;
+        return (long)in.size;
+    }
+    return -1;
+}
+
 static int sb_file(void *ctx, const char *name, const uint8_t **data, uint32_t *len)
 {
     static const char *const dirs[] = { "firmware/", "etc/wifi/" };
