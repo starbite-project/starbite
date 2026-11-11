@@ -25,6 +25,7 @@
 void tk_heap_init(void *mem, uint64_t size);
 uint64_t tk_heap_size(void);
 static uint64_t heap_size;
+static void *heap_mem;
 static void heap_init(uint64_t want)
 {
     uint64_t avail = sb_arena_free();
@@ -35,6 +36,7 @@ static void heap_init(uint64_t want)
     if (!m) { sb_log("next: no arena for the UI heap"); return; }
     tk_heap_init(m, want);
     heap_size = want;
+    heap_mem = m;
 }
 static unsigned heap_full;          /* refusals: in the self test a failure (a part of the screen stayed empty) */
 void tk_heap_oom(uint64_t n, uint64_t used)
@@ -354,6 +356,13 @@ static void stats_add(void)
         ub_s(&u, " us present ");
         ub_dec(&u, comp.us_present);
         ub_s(&u, " us");
+        if (comp.gpu) {                          /* P4: the GPU's own time in it, and the frames it gave back */
+            ub_s(&u, " gpu ");
+            ub_dec(&u, comp.us_gpu);
+            ub_s(&u, " us (fallbacks ");
+            ub_dec(&u, comp.gpu_fallbacks);
+            ub_s(&u, ")");
+        }
         sb_log(u.b);
     }
     FS.sumus += us;
@@ -514,6 +523,19 @@ static void next_screen(int on)
     kt_set(KT_UI, 20, sb_ms(), 16, 1);
 }
 
+/* ---- P4: the GPU compositor (kern/gpucomp.c): the frames on the Mali-G72, full resolution ---------------------- */
+_Static_assert(sizeof(tk_gpu_item) == sizeof(struct gc_quad), "tk_gpu_item is gpucomp's gc_quad");
+static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, uint64_t *us)
+{
+    (void)ctx;
+    return gpucomp_compose(dst, 0xff000000U, (const struct gc_quad *)it, (unsigned)n, us);
+}
+static void next_gpu_clean(void *ctx, const void *p, uint64_t n)
+{
+    (void)ctx;
+    gpucomp_clean(p, n);
+}
+
 /* ---- the kernel's UI entry points in this image ------------------------------------------------------------- */
 void next_kinit(void)
 {
@@ -533,6 +555,17 @@ void next_kinit(void)
         return;
     }
     scan_init();
+#ifndef SBOS_NEXT_NOGPU
+    /* P4: with two buffers (tear-free flips) and the GPU up (normal clocks, gpuheat's checks), the GPU composes */
+    if (flip_on && heap_mem && gpucomp_init(heap_mem, heap_size)) {
+        comp.gpu = next_gpu;
+        comp.gpu_clean = next_gpu_clean;
+        sb_log("next: the GPU composes the frames (Mali-G72 compute jobs, full resolution; the CPU if it refuses)");
+    } else {
+        sb_log(flip_on ? "next: the CPU composes the frames (the GPU did not come up)" :
+                         "next: the CPU composes the frames (one buffer: no GPU frames without flips)");
+    }
+#endif
 #ifndef SBOS_NEXT_ONECORE
     comp.par = kpar;
     tk_par = kpar;                                   /* the bakes' row loops too */

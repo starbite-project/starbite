@@ -166,6 +166,7 @@ struct tk_layer {
     tk_layer *child, *next;
     uint32_t gen;              /* bumped when bmp changes (redraw its area) */
     /* compositor state */
+    uint32_t gpu_gen;          /* P4: gen + 1 when the GPU last had this layer's bitmap and mask flushed to it */
     tk_irect last;             /* screen rect drawn last frame */
     uint32_t last_gen;
     float last_key[8];
@@ -174,6 +175,23 @@ void tk_layer_init(tk_layer *l, const char *name);
 void tk_layer_add(tk_layer *parent, tk_layer *child);     /* appended on top */
 void tk_layer_dirty(tk_layer *l);                         /* its bitmap changed */
 void tk_layer_prepare(tk_layer *l);                       /* make its half copy now (idle time), not on first motion */
+
+/* P4, the GPU compositor (kernel gpucomp.c): one draw item as the GPU takes it, the layout of the kernel's struct
+ * gc_quad (a bitmap or a solid of w x h, isx / isy source px per screen px from (dx0, dy0), alpha, the clip rect with
+ * a rounded edge, fades by screen y, a 3-slice, glass: the backdrop bd through the 8-bit mask first) */
+enum { TK_GPU_SOLID = 1, TK_GPU_BILINEAR = 2, TK_GPU_GLASS = 4, TK_GPU_FADE = 8, TK_GPU_SLICE_V = 16, TK_GPU_SLICE_H = 32 };
+typedef struct {
+    const void *src;
+    uint32_t stride, w, h, flags, solid;
+    float alpha, dx0, dy0, isx, isy, cx0, cy0, cx1, cy1, radius, ft0, ft1, fb0, fb1, len, s0, s1;
+    const void *mask;
+    uint32_t mstride;
+    const void *bd;
+    uint32_t bstride;
+    float bk;
+    uint32_t bw, bh;
+} tk_gpu_item;
+#define TK_GPU_MAX 127
 
 typedef struct {
     tk_bmp fb;                 /* the full-resolution frame in RAM (blends read it) */
@@ -202,7 +220,14 @@ typedef struct {
     int npd, pd_half;
     uint64_t us_wait, us_catch;
     uint64_t us_idle, us_halfs;
-    uint32_t sharp_motion;     /* motion frames drawn at full resolution (small: P2s) */  /* the last frame's half-canvas catch-up (tk_comp_idle) and half copies made in it */  /* the last frame's wait for the free buffer and its catch-up pass */
+    uint32_t sharp_motion;     /* motion frames drawn at full resolution (small: P2s) */
+    /* P4: the GPU compositor (NULL: the CPU draws). gpu composes the whole frame into dst (a scanout buffer from
+     * acquire): 1 done, 0 not (the CPU draws this frame); gpu_clean flushes what the CPU wrote before the GPU reads */
+    int (*gpu)(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, uint64_t *us);
+    void (*gpu_clean)(void *ctx, const void *p, uint64_t n);
+    void *gpu_ctx;
+    uint32_t gpu_frames, gpu_fallbacks, gpu_ground;
+    uint64_t us_gpu;  /* the last frame's half-canvas catch-up (tk_comp_idle) and half copies made in it */  /* the last frame's wait for the free buffer and its catch-up pass */
 } tk_comp;
 int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocated */
 /* render a group's children (as if the group were at identity) into a screen-sized transparent bitmap and their

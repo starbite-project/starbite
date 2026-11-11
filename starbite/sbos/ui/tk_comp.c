@@ -706,6 +706,7 @@ static void dband(void *a, int i)
  * and layers that never move never need half copies: in idle time, or before the next motion frame */
 void tk_comp_idle(tk_comp *c)
 {
+    if (c->gpu) return;                         /* P4: the GPU draws whole frames: no half canvas to keep */
     if (!have_pend) return;
     have_pend = 0;
     djob J = { c, (tk_irect){ pend.x0 & ~1, pend.y0, pend.x1, pend.y1 } };
@@ -792,6 +793,86 @@ static void run_bands(tk_comp *c, job *J)
     else for (int i = 0; i < TK_NBAND; i++) band(J, i);
 }
 
+/* P4: the frame on the GPU (c->gpu): the wallpaper and every item as quads, the whole screen into the free scanout
+ * buffer at full resolution (no half canvas, no catch-up: each GPU frame is whole). The px drawn, or -1 (the CPU draws
+ * this frame: too many items, or the GPU refused) */
+static tk_gpu_item gq[TK_GPU_MAX];
+static void gpu_flush_layer(tk_comp *c, tk_layer *l)
+{
+    if (l->gpu_gen == l->gen + 1u || !c->gpu_clean) return;
+    if (l->bmp.px) c->gpu_clean(c->gpu_ctx, l->bmp.px, (uint64_t)l->bmp.stride * 4u * (uint64_t)l->bmp.h);
+    if (l->glass.v) c->gpu_clean(c->gpu_ctx, l->glass.v, (uint64_t)l->glass.w * (uint64_t)l->glass.h);
+    l->gpu_gen = l->gen + 1u;
+}
+static int gpu_frame(tk_comp *c)
+{
+    int n = 0;
+    if (c->ground_gen + 1u != c->gpu_ground && c->gpu_clean) {
+        c->gpu_clean(c->gpu_ctx, c->base_half.px, (uint64_t)c->base_half.stride * 4u * (uint64_t)c->base_half.h);
+        c->gpu_clean(c->gpu_ctx, c->bw_half.px, (uint64_t)c->bw_half.stride * 4u * (uint64_t)c->bw_half.h);
+        c->gpu_ground = c->ground_gen + 1u;
+    }
+    /* the ground: the wallpaper from its half-resolution copy, smooth (bilinear 2x), as the CPU's rest frames */
+    gq[n++] = (tk_gpu_item){ c->base_half.px, (uint32_t)c->base_half.stride, (uint32_t)c->base_half.w, (uint32_t)c->base_half.h,
+                             TK_GPU_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, TK_W, TK_H, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (int i = 0; i < cur.n; i++) {
+        const item *it = &cur.it[i];
+        tk_layer *l = it->l;
+        if (n >= TK_GPU_MAX) return -1;
+        tk_gpu_item *q = &gq[n++];
+        tk_memset(q, 0, sizeof *q);
+        q->alpha = it->alpha;
+        q->dx0 = it->tx;
+        q->dy0 = it->ty;
+        q->isx = 1.0f / it->a;
+        q->isy = 1.0f / it->b;
+        q->cx0 = (float)it->clip.x0; q->cy0 = (float)it->clip.y0;
+        q->cx1 = (float)it->clip.x1; q->cy1 = (float)it->clip.y1;
+        q->radius = it->crad > 0 ? it->crad : 0;
+        if (it->fade) {
+            q->flags |= TK_GPU_FADE;
+            q->ft0 = it->ft0; q->ft1 = it->ft1; q->fb0 = it->fb0; q->fb1 = it->fb1;
+        }
+        if (l->solid) {
+            q->flags |= TK_GPU_SOLID;
+            q->solid = l->solid;
+            q->w = (uint32_t)(l->solid_w + .5f);
+            q->h = (uint32_t)(l->solid_h + .5f);
+            continue;
+        }
+        gpu_flush_layer(c, l);
+        q->src = l->bmp.px;
+        q->stride = (uint32_t)l->bmp.stride;
+        q->w = (uint32_t)l->bmp.w;
+        q->h = (uint32_t)l->bmp.h;
+        float fx = it->tx - tk_floorf(it->tx), fy = it->ty - tk_floorf(it->ty);
+        if (tk_fabsf(it->a - 1) > 1e-4f || tk_fabsf(it->b - 1) > 1e-4f || fx > 1e-3f || fy > 1e-3f) q->flags |= TK_GPU_BILINEAR;
+        if (l->slice) {
+            q->flags |= l->slice == 1 ? TK_GPU_SLICE_V : TK_GPU_SLICE_H;
+            q->len = l->slice_h; q->s0 = l->slice_s0; q->s1 = l->slice_s1;
+        }
+        if (l->glass.v && c->bw_half.px && !(l->glass_opaque_only && it->alpha < .999f)) {
+            q->flags |= TK_GPU_GLASS;
+            q->mask = l->glass.v;
+            q->mstride = (uint32_t)l->glass.w;
+            q->bd = c->bw_half.px;
+            q->bstride = (uint32_t)c->bw_half.stride;
+            q->bk = .5f;
+            q->bw = (uint32_t)c->bw_half.w;
+            q->bh = (uint32_t)c->bw_half.h;
+        }
+    }
+    uint64_t tw = tk_us();
+    uint32_t *dst = c->acquire(c->acq_ctx);
+    c->us_wait = tk_us() - tw;
+    uint64_t us = 0;
+    if (!c->gpu(c->gpu_ctx, dst, gq, n, &us)) return -1;
+    c->panel.px = dst;
+    c->us_gpu = us;
+    c->gpu_frames++;
+    return TK_W * TK_H;
+}
+
 int tk_comp_frame(tk_comp *c, int motion, int full)
 {
     uint64_t ti = tk_us();
@@ -856,6 +937,35 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
                         break;
                     }
         }
+    }
+    /* P4: the GPU draws the whole frame (sharp in motion too); if it cannot, the CPU draws this one, everything */
+    if (c->gpu && c->acquire && nd) {
+        uint64_t tg = tk_us();
+        int gpx = gpu_frame(c);
+        if (gpx > 0) {
+            tk_irect all = { 0, 0, TK_W, TK_H };
+            c->pd[0] = all;             /* the other buffer lacks everything (a CPU frame after this redraws it) */
+            c->npd = 1;
+            c->pd_half = 0;
+            c->nd = 1;
+            c->dmg[0] = all;
+            c->have_moved = 0;
+            prev = cur;
+            was_motion = 0;
+            c->last_half = 0;
+            c->last_px = gpx;
+            c->us_catch = 0;
+            c->us_comp = tk_us() - tg - c->us_wait;
+            c->us_present = 0;
+            c->last_us = tk_us() - t0 - c->us_wait;
+            return gpx;
+        }
+        c->gpu_fallbacks++;
+        D[0] = screen;                  /* the CPU takes over: everything, both buffers */
+        nd = 1;
+        c->npd = 1;
+        c->pd[0] = screen;
+        c->pd_half = 0;
     }
     /* P2s: a small motion (a toast, a hold ring, a chevron, a key, a toggle) at full resolution, sharp as at rest,
      * while the motion so far has been small (a large one stays at half resolution to its end) */
