@@ -148,7 +148,6 @@ static int ready, baking, need_full, ticking, boosted;
 static uint64_t last_tick, boot_t0;
 /* the frame statistics of the current gesture (logged per film in the self test, per gesture otherwise) */
 static struct { uint32_t n, nhalf, over16, maxus, nboost, nwait; uint64_t sumus, sumwait; uint32_t hist[64]; uint8_t ms[120]; } FS;
-static int frame_log;                        /* the self test: one line per frame of the films it names */
 
 static void log_mb(const char *what, uint64_t v)
 {
@@ -365,7 +364,7 @@ static void stats_add(void)
     FS.n++;
     FS.nhalf += comp.last_half;
     FS.nboost += boosted;
-    if (frame_log && us > 12000) {               /* only the slow frames (pmsg keeps the last 16 KB) */
+    if (us > 16700) {                             /* P2u: the frames over budget only, in every image (pmsg: 16 KB) */
         struct ub u;
         ub_init(&u);
         ub_s(&u, "next: f ");
@@ -377,6 +376,19 @@ static void stats_add(void)
         ub_s(&u, " us present ");
         ub_dec(&u, comp.us_present);
         ub_s(&u, " us");
+        /* P2u: where a slow frame's time went: the half canvas catching up, half copies made in the frame, the
+         * catch-up of an older buffer (inside present), the rects, the A55's clock */
+        ub_s(&u, " (idle ");
+        ub_dec(&u, comp.us_idle);
+        ub_s(&u, " halfs ");
+        ub_dec(&u, comp.us_halfs);
+        ub_s(&u, " catch ");
+        ub_dec(&u, comp.us_catch);
+        ub_s(&u, " rects ");
+        ub_dec(&u, (uint64_t)comp.nd);
+        ub_s(&u, " MHz ");
+        ub_dec(&u, hw_a55_khz() / 1000);
+        ub_s(&u, ")");
         if (comp.gpu) {                          /* P4: the GPU's own time in it, and the frames it gave back */
             ub_s(&u, " gpu ");
             ub_dec(&u, comp.us_gpu);
@@ -493,6 +505,7 @@ static void frame(void)
         ticking = 0;
         last_tick = 0;
         sh_idle();
+        if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);   /* the rest of the idle work, a turn at a time */
         kt_set(KT_UI, 21, sb_ms(), 400, 0);         /* back to the screen-on clock unless something moves again */
         kt_set(KT_UI, 23, sb_ms(), 5000, 0);        /* and the band workers off after 5 s */
 #ifndef SBOS_SELFTEST_NEXT
@@ -541,6 +554,8 @@ static void next_screen(int on)
             tk_comp_frame(&comp, 0, 0);
             present();
         }
+        sh_idle();                                   /* P2v: the half canvas and the lock's caches now, in the dark
+                                                      * (the wake's first frame spent 8 ms on them) */
 #ifndef SBOS_SELFTEST_NEXT
         stats_reset();
 #endif
@@ -725,6 +740,14 @@ void next_ktimer(unsigned id)
         if (!ticking && !sh_moving()) boost(0);
         return;
     }
+    if (ready && id == 24) {
+        if (!ticking && !sh_moving()) {
+            sh_idle();
+            if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);
+        } else
+            kt_set(KT_UI, 24, sb_ms(), 200, 0);
+        return;
+    }
     if (ready && id == 23) {
         if (!ticking && !sh_moving()) workers_stop();
         return;
@@ -826,7 +849,6 @@ static void film_start(int film)
     F.down = 0;
     F.s0 = 0;
     F.t0 = sb_ms();
-    frame_log = 1;                               /* every film: its slow frames */          /* the unlock and the focus sheet: every frame's split */
     switch (film) {
     case 0: F.s = S_UNLOCK; F.n = 3; break;
     case 1: F.s = S_GROUP; F.n = 9; break;
@@ -844,6 +866,18 @@ static void film_start(int film)
     sh_set("reset", "", 0);
     need_full = 1;
     next_kdraw();
+    for (int i = 0; i < 8 && sh_idle_pending(); i++) { hw_wdt_feed(); sh_idle(); }   /* as the idle time would */
+    sh_idle();
+    {   /* P2w: a marker for the camera (the main session times its shots from the films' starts) */
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: film ");
+        ub_s(&u, FILM_NAME[film]);
+        ub_s(&u, " starts at +");
+        ub_dec(&u, sb_ms() - st_t0);
+        ub_s(&u, " ms (since the self test's first step)");
+        sb_log(u.b);
+    }
     stats_reset();
 }
 
@@ -1003,7 +1037,6 @@ int next_selftest_step(void)
     }
     if (ticking || sh_moving()) return 1;          /* let it settle */
     stats_log(FILM_NAME[F.film]);
-    frame_log = 0;
     if (F.film == 10 && !K.screen_on) {
         sb_log("selftest: FAILED: next: the sleep film ended with the screen off");
         st_failed = 1;
