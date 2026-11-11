@@ -13,6 +13,7 @@ static unsigned prio_of(unsigned owner)
     case KT_POWER: return 1;
     case KT_INPUT: return 2;
     case KT_SOS: return 3;
+    case KT_SURV: return 1;             /* 1.2-alpha27: USB power out's 100 ms watch */
     case KT_UI: return 4;
     default: return owner < KT_APP0 ? 5 : 6;
     }

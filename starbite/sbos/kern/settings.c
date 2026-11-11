@@ -14,6 +14,7 @@
 #include "kern.h"
 #include "kapp.h"
 #include "sbapp.h"
+#include "survival.h"
 
 #define REC "sbos.settings"
 #define SAVE_DELAY_MS 3000U
@@ -146,6 +147,11 @@ void settings_restore(void)
             heat_rec.running = 0;
         }
         d = 0;
+    }
+    {
+        const uint8_t *q = 0;               /* 1.2-alpha27: the survival tools' options (SOS, Last 2 %, the location) */
+        if (state_find(half[cur_half], "sbos.surv", &q) == 16 && q)
+            surv_unpack(q);
     }
     int n = state_find(half[cur_half], REC, &d);
     struct saved s;
@@ -295,6 +301,12 @@ void settings_timer(unsigned id)
     if (state_add(&b, REC, &s, sizeof(s)) < 0) {
         sb_log("settings: not saved: the record did not fit");
         return;
+    }
+    {
+        uint8_t sv[16];
+        surv_pack(sv);
+        if (state_add(&b, "sbos.surv", sv, 16) < 0)
+            sb_log("settings: the survival options did not fit");
     }
     if (heat_rec.magic == 0x31435248U && state_add(&b, "heat", &heat_rec, sizeof(heat_rec)) < 0)
         sb_log("settings: the heat record did not fit");
