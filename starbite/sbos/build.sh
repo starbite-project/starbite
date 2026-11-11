@@ -55,6 +55,31 @@ if [ "$native" = 1 ]; then
     sh "$here/../tools/sbos-host-test.sh"
 fi
 
+# The sensor hub's firmware patch (docs/SENSOR-HUB.md 2.2): never in the repository. Only the staged test image
+# starbite-os-shub.img embeds it, from a file outside the checkout (starbite/sbos/tools/shub-patch.py makes it from
+# a Samsung kernel tree); without the file that image is skipped.
+SHUB_PATCH=${SHUB_PATCH:-"$HOME/sbos-shub-blob/bcm4775-star-q.bin"}
+shub_sha=b1a3e138ab808f2be247ad195d71d6aef2f2d3ecc7bd3e13e141b1443da408d0
+shub_blob=""
+if [ -f "$SHUB_PATCH" ]; then
+    case "$(cd "$(dirname "$SHUB_PATCH")" && pwd)/" in
+    "$root"/*)
+        echo "sbos: $SHUB_PATCH is inside the checkout: the patch blob stays outside it" >&2
+        exit 1 ;;
+    esac
+    if [ "$(sha256sum "$SHUB_PATCH" | cut -d' ' -f1)" != "$shub_sha" ]; then
+        echo "sbos: $SHUB_PATCH is not the known sensor hub patch (sha256)" >&2
+        exit 1
+    fi
+    shub_blob=$SHUB_PATCH
+fi
+if [ "$native" = 1 ]; then
+    # the hub's wire formats against the GPL sample frames (and the blob's records when it is there)
+    gcc -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I"$here/kern" \
+        -o "$ob/shub-host-test" "$root/starbite/tools/shub-host-test.c" "$here/kern/shub_proto.c" -lm
+    "$ob/shub-host-test" $shub_blob
+fi
+
 CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie -fvisibility=hidden \
 -nostdlib -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-plt -mstrict-align -mcpu=cortex-a55 \
 -fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$here/kern -I$here/sdk -I$ut -I$root/starbite/wifi -I$root/starbite/guest/sbos"
@@ -160,6 +185,20 @@ uibobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_uib.o#")
 gpuobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_gpu.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_GPUALU "$here/kern/uitest.c" -o "$ob/k_uitest_gpualu.o"
 gpualuobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_gpualu.o#")
+"${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_SHUBPROBE "$here/kern/uitest.c" -o "$ob/k_uitest_shubprobe.o"
+shubprobeobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_shubprobe.o#")
+shubobjs=""
+if [ -n "$shub_blob" ]; then
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_SHUB "$here/kern/uitest.c" -o "$ob/k_uitest_shub.o"
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSHUB_PATCH_FILE="\"$shub_blob\"" "$here/kern/shub_blob.S" -o "$ob/k_shub_blob_on.o"
+    shubobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_shub.o#; s#$ob/k_shub_blob_S.o#$ob/k_shub_blob_on.o#")
+    case "$shubobjs" in
+    *k_shub_blob_on.o*) ;;
+    *)
+        echo "sbos: the sensor hub test image did not get the patch object" >&2
+        exit 1 ;;
+    esac
+fi
 if [ "$stobjs" = "$objs" ]; then
     echo "sbos: the self-test variant did not get k_uitest_on.o" >&2
     exit 1
@@ -253,12 +292,35 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
 "${CROSS}objcopy" -O binary "$out/starbite-os-gpualu.elf" "$out/starbite-os-gpualu.bin"
 "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
+"${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $shubprobeobjs -o "$out/starbite-os-shubprobe.elf"
+relocs_only_relative "$out/starbite-os-shubprobe.elf"
+"${CROSS}objcopy" -O binary "$out/starbite-os-shubprobe.elf" "$out/starbite-os-shubprobe.bin"
+"${CROSS}nm" "$out/starbite-os-shubprobe.elf" | sort > "$out/starbite-os-shubprobe.map"
+python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-shubprobe.bin" "$out/starbite-os-shubprobe.img" "$out/starbite-os-shubprobe.map"
+shubimg=""
+rm -f "$out/starbite-os-shub.img" "$out/starbite-os-shub.img.sha256"
+if [ -n "$shubobjs" ]; then
+    "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $shubobjs -o "$out/starbite-os-shub.elf"
+    relocs_only_relative "$out/starbite-os-shub.elf"
+    "${CROSS}objcopy" -O binary "$out/starbite-os-shub.elf" "$out/starbite-os-shub.bin"
+    "${CROSS}nm" "$out/starbite-os-shub.elf" | sort > "$out/starbite-os-shub.map"
+    python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-shub.bin" "$out/starbite-os-shub.img" "$out/starbite-os-shub.map"
+    shubimg="$out/starbite-os-shub.img"
+fi
+# the patch is in the test image only: never in the image people install or in any other variant
+for f in "$out/starbite-os.elf" "$out/starbite-os-selftest.elf" "$out/starbite-os-shubprobe.elf"; do
+    sz=$("${CROSS}nm" "$f" | awk '$3 == "shub_patch_start" { a = $1 } $3 == "shub_patch_end" { b = $1 } END { print (a == b && a != "") ? "empty" : "not empty" }')
+    if [ "$sz" != empty ]; then
+        echo "sbos: $(basename "$f") carries the sensor hub patch (or has no shub_patch symbols)" >&2
+        exit 1
+    fi
+done
 if ! "${CROSS}nm" "$out/starbite-os.elf" | grep -q ' sbos_selftest_enabled$'; then
     echo "sbos: no sbos_selftest_enabled in the image" >&2
     exit 1
 fi
 
-leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" "$out/starbite-os-heatprobe.img" "$out/starbite-os-vibtest.img" "$out/starbite-os-uibench.img" "$out/starbite-os-gpucomp.img" "$out/starbite-os-survival.img" "$out/starbite-os-gputest.img" "$out/starbite-os-gpualu.img" | head -3 || true)
+leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" "$out/starbite-os-heatprobe.img" "$out/starbite-os-vibtest.img" "$out/starbite-os-uibench.img" "$out/starbite-os-gpucomp.img" "$out/starbite-os-survival.img" "$out/starbite-os-gputest.img" "$out/starbite-os-gpualu.img" "$out/starbite-os-shubprobe.img" $shubimg | head -3 || true)
 if [ -n "$leak" ]; then
     echo "sbos: the image contains build-host paths:" >&2
     echo "$leak" >&2
@@ -292,4 +354,12 @@ sha256sum "$out/starbite-os-gputest.img" | sed "s#  .*#  starbite-os-gputest.img
 echo "sbos: $(cat "$out/starbite-os-gputest.img.sha256") (GPU ladder H2 variant)"
 sha256sum "$out/starbite-os-gpualu.img" | sed "s#  .*#  starbite-os-gpualu.img#" > "$out/starbite-os-gpualu.img.sha256"
 echo "sbos: $(cat "$out/starbite-os-gpualu.img.sha256") (GPU compute H2d variant)"
+sha256sum "$out/starbite-os-shubprobe.img" | sed "s#  .*#  starbite-os-shubprobe.img#" > "$out/starbite-os-shubprobe.img.sha256"
+echo "sbos: $(cat "$out/starbite-os-shubprobe.img.sha256") (sensor hub read-only probe)"
+if [ -n "$shubimg" ]; then
+    sha256sum "$shubimg" | sed "s#  .*#  starbite-os-shub.img#" > "$out/starbite-os-shub.img.sha256"
+    echo "sbos: $(cat "$out/starbite-os-shub.img.sha256") (sensor hub full start; carries the patch blob: a test image, not for release)"
+else
+    echo "sbos: starbite-os-shub.img skipped: no patch blob at $SHUB_PATCH (starbite/sbos/tools/shub-patch.py)"
+fi
 echo "sbos: $(cat "$out/starbite-os.img.sha256") ($(wc -c < "$out/starbite-os.img") bytes)"

@@ -26,6 +26,9 @@
 #include "kapp.h"
 #include "sbapp.h"
 #include "survival.h"
+#if defined(SBOS_SELFTEST_SHUBPROBE) || defined(SBOS_SELFTEST_SHUB)
+#include "shub.h"
+#endif
 #ifdef SB_HOST
 #include <stdlib.h>
 #endif
@@ -175,6 +178,9 @@ void selftest_input(void)
     kt_cancel(KT_SELFTEST, 0);
     if (phase == 13)
         wifi_power(0);                      /* stopped during its Wi-Fi step: the radio off again */
+#if defined(SBOS_SELFTEST_SHUBPROBE) || defined(SBOS_SELFTEST_SHUB)
+    shub_leave();                           /* stopped mid-probe: the hub in standby, every register as found */
+#endif
     sb_log("selftest: a touch or key: stopped; back to the menu after 10 minutes without input");
 }
 
@@ -247,6 +253,18 @@ void selftest_timer(unsigned id)
             sb_logx(w ? "selftest: survival: the watchdog at 30 s, fed by the loop: seconds " :
                         "selftest: survival: the watchdog could not be set (the loader's stays): ", w);
             phase = 100;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
+#if defined(SBOS_SELFTEST_SHUBPROBE) || defined(SBOS_SELFTEST_SHUB)
+        {
+            /* the sensor hub (shub.c; docs/SENSOR-HUB.md): the read-only probe (section 5), or the full start with
+             * 10 s of samples; every register back as found; then recovery (pmsg) */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: shub: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: shub: the watchdog could not be set (the loader's stays): ", w);
+            phase = 110;
             kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
             return;
         }
@@ -530,6 +548,28 @@ void selftest_timer(unsigned id)
     case 101:
         sb_log("selftest: survival: done; a restart into recovery (pmsg)");
         active = 0;
+        power_restart_recovery();
+        return;
+#endif
+#if defined(SBOS_SELFTEST_SHUBPROBE) || defined(SBOS_SELFTEST_SHUB)
+    case 110: {                             /* one slice a turn (at most about 100 ms: the loop feeds the watchdog) */
+#ifdef SBOS_SELFTEST_SHUBPROBE
+        int done = shub_probe_selftest_step();
+#else
+        int done = shub_selftest_step();
+#endif
+        if (!done) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), shub_wait_ms(), 0);
+            return;
+        }
+        phase = 111;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+        return;
+    }
+    case 111:
+        sb_log("selftest: shub: done; a restart into recovery (pmsg)");
+        active = 0;
+        shub_leave();                       /* (already left; a no-op then) */
         power_restart_recovery();
         return;
 #endif
