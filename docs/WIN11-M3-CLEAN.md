@@ -674,3 +674,14 @@ Host only, nothing booted. Details and the pull list: notes folder `win-m3-clean
   LLVM build. Patches A/B/C: `tools/woa/win-m3/fex/0001-starbite-23h2-m3.patch` (applies to e3b30dd; not compiled);
   script `tools/woa/win-m3/fex/build-fex-arm64ec.sh`. Not run: the Mac has 4.5 GiB free; the script needs >= 6.
 - Windows Update fails on the big-core row (same winsqlite3 crash); noted in the user status note.
+
+## 34. sbxta.sys: XtaCache per CPU class (after T2 passed)
+
+T2 (main session, x86t2-2): with the XtaCache service Start=4 and C:\Windows\XtaCache renamed, sbcpu-x64, x86 and
+x64fresh exit 0 on the big-core row and SysWOW64 cmd runs. The persistent cache made on the A55 (LSE, LDAPR) is what
+broke emulation on the M3. Permanent switch: `starbite/win/sbxta/sbxta.c`, a WDM system-start driver (Start 1, before
+the SCM). It reads MIDR_EL1: M3 -> `Services\XtaCache\Start` = 4; A55 -> back to 2 if it is 4; other -> nothing. It
+logs to `Services\sbxta\State`. An optional folder swap (`Parameters\SwapCache` = 1: XtaCache <-> XtaCache.a55 /
+XtaCache.m3, keyed on XtaCache.a55 existing) is for the case T2b shows the folder must also go; it is off by default.
+Staged build/woa/cores/sbxta-1/sbxta.sys 81ea774f..., build 42056cc, test-signed; install line and two-boot test in
+the notes folder `win-m3-clean-sbxta-request.md`. Not yet run on the phone.
