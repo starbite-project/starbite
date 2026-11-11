@@ -120,6 +120,16 @@ static void handle_input(void)
         ui_kevent(&e);
     }
 }
+#ifdef SBOS_NEXT
+/* P3k (Next only): the touch read and handed to the UI now, at the start of a frame, so every frame sees the
+ * finger where it is (the 16 ms input timer alone beat against the 60 Hz frames: a frame without a new position
+ * every ~0.4 s) */
+void next_input_now(void)
+{
+    input_poll();
+    handle_input();
+}
+#endif
 
 #ifndef SB_HOST
 void sbos_spsel1(void);

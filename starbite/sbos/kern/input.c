@@ -21,6 +21,7 @@ static uint64_t t_power, t_bixby, vol_next;
 static unsigned vol_key;
 static int power_long_sent, bixby_long_sent, t_down;
 static uint64_t last_input;
+int input_fast;                    /* P3k: set by Starbite OS Next: 16 ms reads while the screen is on (no 50 ms first touch) */
 
 void kin_push(int type, int x, int y)
 {
@@ -154,7 +155,7 @@ int input_poll(void)
      * key, 20 (the first touch then waits up to 50 ms), back to 60 at once. Screen off: 20 (services.c). */
     if (K.screen_on) {
         static unsigned period = 16;
-        unsigned want = (t_down || t_power || t_bixby || vol_key || now - last_input < 5000U) ? 16U : 50U;
+        unsigned want = (input_fast || t_down || t_power || t_bixby || vol_key || now - last_input < 5000U) ? 16U : 50U;
         if (want != period) {
             period = want;
             kt_set(KT_INPUT, 1, now, want, 1);

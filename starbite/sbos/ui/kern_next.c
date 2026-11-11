@@ -222,7 +222,7 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
-    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3j");     /* P2y: the apps' live values */
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3k");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);
         sh_alarm(on, ah, am);
@@ -253,6 +253,8 @@ static uint32_t scan_fno = 1;
 static int flip_on, scan_cur, scan_win;
 static unsigned flips, flip_waits, flip_timeouts, flips_replaced;
 static int scan_next;
+static uint64_t present_us, last_us;   /* P3k: the last flip's request; the last frame's start */
+static unsigned pace_looks;            /* P3k: 1 ms looks for a queued flip's latch */
 static uint32_t drd(uintptr_t a) { uint32_t v = *(volatile uint32_t *)a; __asm__ volatile("dmb oshld" ::: "memory"); return v; }
 static void dwr(uintptr_t a, uint32_t v) { __asm__ volatile("dmb oshst" ::: "memory"); *(volatile uint32_t *)a = v; }
 static int flip_pending(void) { return (drd(DECON + 0x60) & (1U << scan_win)) != 0; }
@@ -353,6 +355,7 @@ static void present(void)
             scan_cur = scan_next;
             buf_fno[scan_cur] = (int)scan_fno++;
             scan_point(scan_pa[scan_cur]);
+            present_us = sb_us();
             flips++;
         } else
             __asm__ volatile("dsb sy" ::: "memory");
@@ -438,7 +441,10 @@ static void stats_log(const char *what)
     ub_dec(&u, tk_heap_peak() >> 20);
     ub_s(&u, "), largest free ");
     ub_dec(&u, tk_heap_largest() >> 20);
-    ub_s(&u, " MiB; shell max ");
+    ub_s(&u, " MiB; latch looks ");
+    ub_dec(&u, pace_looks);
+    pace_looks = 0;
+    ub_s(&u, "; shell max ");
     ub_dec(&u, FS.shmax / 1000);
     ub_s(&u, " ms, over 8 ms: ");
     ub_dec(&u, FS.shover);
@@ -515,22 +521,40 @@ static void shell_time(const char *what, uint64_t t0)
     ub_s(&u, " ms");
     sb_log(u.b);
 }
-static uint64_t tick3;                      /* the next frame's time in thirds of a ms: 16.67 ms apart (the TE's) */
+static uint64_t tick3;                      /* the next frame's time in thirds of a ms (one buffer: a free timer) */
+/* P3k: frames paced by the panel. A frame starts just after the last flip has latched at a TE (looks 1 ms apart
+ * from 14.7 ms after the last start), so each TE gets one new frame: the free 16.67 ms timer drifted against the
+ * TE (P3h: frames replaced while queued, 4-25 a film, and TEs showing an old frame). The animations advance by
+ * whole TE periods (dt a multiple of 16.67 ms), and the touch is read at the frame's start. */
+void next_input_now(void);
 static void frame(void)
 {
-    /* the next frame first (a one-shot at the next 16.67 ms step: P2t, the panel's rate, so with three buffers
-     * a frame is neither replaced while queued nor shown twice, except as the two clocks drift) */
-    {
+    if (flip_on && comp.acquire && K.screen_on && flip_pending() && sb_us() - present_us < 40000) {
+        pace_looks++;
+        kt_set(KT_UI, 20, sb_ms() + 1, 0, 0);
+        return;
+    }
+    uint64_t nus = sb_us();
+    if (flip_on && comp.acquire)
+        kt_set(KT_UI, 20, (nus + 14700) / 1000, 0, 0);
+    else {
+        /* one buffer: the next frame at the next 16.67 ms step (P2t) */
         uint64_t n3 = sb_ms() * 3;
         if (!tick3) tick3 = n3;
         tick3 += 50;
         if (tick3 <= n3) tick3 = n3 + 50;           /* fell behind: from now */
         kt_set(KT_UI, 20, tick3 / 3, 0, 0);
     }
+    next_input_now();                            /* the finger where it is now */
     if (!boosted) boost(1);                      /* a wake: the kernel set the screen-on clock after the hook */
     uint64_t now = sb_ms();
     float dt = last_tick ? (float)(now - last_tick) / 1000.0f : 1.0f / 60;
+    if (flip_on && comp.acquire && last_us) {
+        uint64_t te = (nus - last_us + 8333) / 16667;          /* whole TE periods since the last frame */
+        dt = (float)(te ? te : 1) / 60.0f;
+    }
     last_tick = now;
+    last_us = nus;
     uint64_t st0 = tk_us();
     int mv = sh_tick(dt, (float)now);
     shell_time("tick", st0);
@@ -546,7 +570,7 @@ static void frame(void)
     if (!motion) {
         kt_cancel(KT_UI, 20);
         ticking = 0;
-        last_tick = 0;
+        last_tick = 0; last_us = 0;
         sh_idle();
         if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);   /* the rest of the idle work, a turn at a time */
         clock_again();                                               /* P2z: the Clock's next digit */
@@ -568,8 +592,9 @@ static void start_ticking(void)
     if (ticking) return;
     ticking = 1;
     last_tick = sb_ms();
+    last_us = 0;
     tick3 = 0;
-    kt_set(KT_UI, 20, sb_ms() + 16, 0, 0);
+    kt_set(KT_UI, 20, sb_ms() + 1, 0, 0);       /* P3k: the first frame now (it waits for a queued flip's latch) */
 }
 
 /* ---- sleep and wake (P2r): the Power key's screen off is the shell's fade to black first, the screen on its fade
@@ -590,7 +615,7 @@ static void next_screen(int on)
     if (!on) {
         kt_cancel(KT_UI, 20);
         ticking = 0;
-        last_tick = 0;
+        last_tick = 0; last_us = 0;
         boosted = 0;                                 /* the kernel takes the A55 down with the screen */
         kt_set(KT_UI, 23, sb_ms(), 5000, 0);         /* the band workers off in 5 s */
         if (!sh_sleeping()) {
@@ -611,7 +636,7 @@ static void next_screen(int on)
                                                       * frame takes the top step (frame()) */
     workers_start();
     ticking = 1;
-    last_tick = 0;
+    last_tick = 0; last_us = 0;
     tick3 = 0;
     kt_set(KT_UI, 20, sb_ms() + 16, 0, 0);
 }
@@ -626,6 +651,7 @@ void next_kinit(void)
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
     kui_sleep_hook = next_sleep;
+    input_fast = 1;                              /* P3k: touch read every 16 ms while the screen is on (no 50 ms first touch) */
     if (!tk_pack_open(sbtk_pack_start, (uint32_t)(sbtk_pack_end - sbtk_pack_start))) {
         sb_log("next: the sbtk pack is missing or bad: the regular UI runs");
         return;

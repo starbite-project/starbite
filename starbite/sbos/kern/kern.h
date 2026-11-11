@@ -334,6 +334,7 @@ extern int pocket_lock;             /* 0.6: heating with the screen kept on: tou
 /* tasks */
 void input_init(void);
 int input_poll(void);               /* 1 if something happened */
+extern int input_fast;              /* P3k: Next keeps touch reads at 16 ms while the screen is on */
 void ui_kinit(void);
 void ui_kdraw(void);                /* draw what changed and present */
 void ui_kevent(const void *ev);     /* struct ui_ev from sbui */
