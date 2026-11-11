@@ -685,8 +685,10 @@ static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, cons
             un = n - cache_n + 1;
         }
     }
-    int ok = gpucomp_compose_damage(dst, 0xff000000U, (const struct gc_quad *)use, (unsigned)un, (const struct gc_rect *)dmg,
-                                    (unsigned)(ndmg > 0 ? ndmg : 0), us);
+    /* v7: a big move's frame at half resolution, 2x into dst (all of it) */
+    int ok = comp.gpu_half ? gpucomp_compose_half(dst, 0xff000000U, (const struct gc_quad *)use, (unsigned)un, us)
+                           : gpucomp_compose_damage(dst, 0xff000000U, (const struct gc_quad *)use, (unsigned)un,
+                                                    (const struct gc_rect *)dmg, (unsigned)(ndmg > 0 ? ndmg : 0), us);
     if (!ok && !gpucomp_ready()) {               /* a fault (gpucomp logged it, the GPU is off): the CPU from now on */
         comp.gpu = 0;
         sb_log("next: the GPU stopped: the CPU composes the frames from now on");
@@ -978,7 +980,9 @@ static void gpu_vs_cpu(void)
     ub_init(&u);
     ub_s(&u, "next: gpu: ");
     ub_dec(&u, comp.gpu_frames);
-    ub_s(&u, " frames on the GPU, ");
+    ub_s(&u, " frames on the GPU (");
+    ub_dec(&u, comp.gpu_halves);
+    ub_s(&u, " at half resolution), ");
     ub_dec(&u, comp.gpu_fallbacks);
     ub_s(&u, " given back to the CPU; bottom caches made ");
     ub_dec(&u, cache_made);

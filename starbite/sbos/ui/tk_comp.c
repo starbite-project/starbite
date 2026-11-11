@@ -1147,10 +1147,26 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
         }
     }
     /* P4: the GPU draws the whole frame (sharp in motion too); if it cannot, the CPU draws this one, everything */
-    if (c->gpu && c->acquire && nd) {
+    /* v7: a big motion (more than a sixth of the screen changing) is drawn at half resolution by the GPU to its end
+     * (as the CPU's half canvas); a half frame covers everything, and the first frame at rest after one redraws
+     * everything sharp */
+    static int gpu_big, gpu_last_half;
+    if (!motion) gpu_big = 0;
+    if (c->gpu && c->acquire && (nd || (!motion && gpu_last_half))) {
         uint64_t tg = tk_us();
+        int half = 0;
+        if (motion) {
+            long a = 0;
+            for (int q = 0; q < nd; q++) a += (long)(D[q].x1 - D[q].x0) * (D[q].y1 - D[q].y0);
+            if (gpu_big || a > (long)TK_W * TK_H / 6) gpu_big = half = 1;
+        }
+        if (half || gpu_last_half) { D[0] = screen; nd = 1; }
+        c->gpu_half = half;
         int gpx = gpu_frame(c, D, nd);
+        c->gpu_half = 0;
         if (gpx > 0) {
+            gpu_last_half = half;
+            if (half) c->gpu_halves++;
             c->gpu_stale = 1;           /* the RAM frame and the half canvas did not see this frame */
             c->nd = nd;
             for (int q = 0; q < nd; q++) c->dmg[q] = D[q];
