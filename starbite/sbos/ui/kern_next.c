@@ -62,7 +62,7 @@ static struct {
     void *arg;
     uint32_t pad[8];
 } JOB __attribute__((aligned(64)));
-static int workers_on;
+static int workers_on, workers_ever;   /* workers_ever: a launch has worked (P3o: the self test checks it) */
 static uint32_t worker_bands[4];
 
 static void take_bands(unsigned core)
@@ -128,6 +128,7 @@ static void workers_start(void)
         }
     }
     workers_on = any;
+    if (any) workers_ever = 1;
 }
 static void workers_stop(void)
 {
@@ -322,7 +323,7 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
-    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3n");     /* P2y: the apps' live values */
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3o");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);
         sh_alarm(on, ah, am);
@@ -749,6 +750,18 @@ void next_kinit(void)
     log_mb("arena free before the UI heap: ", sb_arena_free());
     heap_init(160ULL << 20);
     log_mb("UI heap: ", heap_size);
+    /* P3o: the band workers' stacks (3 x 64 KiB from libsb's arena, taken at their first start and kept) now,
+     * before the services fill the arena. P3n skipped the old wallpaper, so the boot's Wi-Fi time check got its
+     * buffers and took the rest: every later start failed (-102, no stack) and the frames ran on one core. */
+    workers_start();
+    {
+        struct ub a;
+        ub_init(&a);
+        ub_s(&a, "next: arena free after the UI heap and the workers: ");
+        ub_dec(&a, sb_arena_free() >> 10);
+        ub_s(&a, " KiB");
+        sb_log(a.b);
+    }
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
     kui_sleep_hook = next_sleep;
@@ -1037,6 +1050,10 @@ int next_selftest_step(void)
             if (!comp.last_px) st_failed = 1;
             clock_ok = comp.last_px != 0;
             status_now();
+        }
+        if (!workers_ever) {
+            sb_log("selftest: FAILED: next: the band workers never started (cores 1-3: no stack?); every frame on one core");
+            st_failed = 1;
         }
         sb_log("selftest: next: the eleven films (unlock, group, focus, holds, pages, cc, app, phone, messages, emergency, sleep) with synthetic touches; sleep presses the real Power path");
         film_start(0);
