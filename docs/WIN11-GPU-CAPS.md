@@ -297,6 +297,26 @@ FL 11_0 and D3D12 need tessellation, which the G72 doesn't have.
   - The goal line is `sbd3d x64 exit 0`: an emulated x64 program drawing on the Mali.
   - The rest of the gputest checks that DWM and the native tests still work on the ARM64X file's native view.
 
+**The first Geometry Dash run (user, T44 installed, 21:48-21:54, `build/win/gd-run1`):**
+- **What happened:** with the x64 kit the game loaded our driver (`libgallium_wgl.dll` is in the module list) and
+  showed its splash. At 19:54:01 local time (the event log's clock) it then `abort()`ed: ucrtbase.dll c0000409,
+  fast-fail code 7.
+- **The rest of the log:**
+  - no TDR and no bugcheck;
+  - T44's hang recorder logged 8 timeouts ~35 s later, all `dwm.exe` `indexed-vertex` (IDVS) jobs on slot 1, during
+    the user's restart (Steam's shutdown veto at 19:54:59);
+  - the WER report has no stack.
+- **Who called `abort()`:** not known yet. Candidates in Mesa include `panfrost_bo_munmap` (aborts if `munmap`
+  fails); the game itself is the other option.
+- **The answer is in `umdlog\GeometryDash.exe-*.log`,** which our shim writes for every process using it, with the
+  stack of any abort (`sb_on_abort`). It was requested from the phone.
+- **gl-kit v2:**
+  - `gd-gl-on.cmd [x64|ec] [log]`: `log` sets the user's `MESA_DEBUG` (GL errors; elsewhere it only makes Mesa's
+    logs more verbose);
+  - `gd-gl-off.cmd` copies the game's logs into `gd-logs\` and removes the setting.
+- **GD1:** T45 and T46's gputests run the game unattended through Steam with our x64 driver, so overnight cycles
+  reproduce it without the user.
+
 ## 7. What the user can do meanwhile
 
 - **Geometry Dash:** no fix to install yet. It needs our OpenGL driver (§5a, steps 1-2).

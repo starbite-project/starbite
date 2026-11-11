@@ -105,6 +105,43 @@ if exist %D%\sbumd-arm64x.dll sbload64.exe %D%\sbumd-arm64x.dll OpenAdapter10 Op
 if exist %D%\sbumd-arm64x.dll echo sbload x64 arm64x exit %errorlevel% >> %D%\gputest.log
 if exist %D%\sbumd-ec.dll sbload64.exe %D%\sbumd-ec.dll OpenAdapter10 OpenAdapter10_2 >> %D%\gputest.log 2>&1
 if exist %D%\sbumd-ec.dll echo sbload x64 ec exit %errorlevel% >> %D%\gputest.log
+rem GD1 (docs/WIN11-GPU-CAPS.md 2, 5a): Geometry Dash itself on our x64 OpenGL driver, unattended. Only if the
+rem game is installed and opengl32-gd.dll is staged (the x64 ICD): our two DLLs go into the game folder (marked as ours, never
+rem over a foreign opengl32.dll), Steam starts it, 45 s later a screenshot, then the game is closed and our files
+rem removed (left in place if the user's kit had put them there). The game's driver log is umdlog\GeometryDash.exe-*.log.
+set G=C:\Program Files (x86)\Steam\steamapps\common\Geometry Dash
+set GDKIT=0
+if not exist %D%\opengl32-gd.dll goto gd1_done
+if not exist "%G%\GeometryDash.exe" goto gd1_clean
+if exist "%G%\opengl32.dll.starbite" set GDKIT=1
+if exist "%G%\opengl32.dll" if "%GDKIT%"=="0" (echo GD1 skipped: a foreign opengl32.dll is in the game folder >> %D%\gputest.log & goto gd1_clean)
+copy /y %D%\opengl32-gd.dll "%G%\opengl32.dll" > nul
+copy /y %D%\libgallium_wgl-gd.dll "%G%\libgallium_wgl.dll" > nul
+echo starbite > "%G%\opengl32.dll.starbite"
+echo GD1 start %time% (kit already there: %GDKIT%) >> %D%\gputest.log
+start "" steam://rungameid/322170
+set /a GDW=0
+:gd1_wait
+ping -n 6 127.0.0.1 > nul
+set /a GDW+=5
+tasklist /fi "imagename eq GeometryDash.exe" | find /i "GeometryDash.exe" > nul && goto gd1_up
+if %GDW% lss 180 goto gd1_wait
+echo GD1 GeometryDash.exe never appeared in 180 s (Steam not signed in or too slow) >> %D%\gputest.log
+goto gd1_stop
+:gd1_up
+echo GD1 GeometryDash.exe up after %GDW% s >> %D%\gputest.log
+ping -n 41 127.0.0.1 > nul
+:gd1_stop
+tasklist /fi "imagename eq GeometryDash.exe" >> %D%\gputest.log 2>&1
+sbshow.exe snap 27-geometrydash >> %D%\gputest.log 2>&1
+ping -n 3 127.0.0.1 > nul
+taskkill /f /im GeometryDash.exe >> %D%\gputest.log 2>&1
+ping -n 4 127.0.0.1 > nul
+echo GD1 end %time% >> %D%\gputest.log
+if "%GDKIT%"=="0" del /f "%G%\opengl32.dll" "%G%\libgallium_wgl.dll" "%G%\opengl32.dll.starbite"
+:gd1_clean
+del /f %D%\opengl32-gd.dll %D%\libgallium_wgl-gd.dll
+:gd1_done
 rem T44: free the ~110 MB the GL and UMD tests brought before the sweep (C: had 841 MiB in T42 and Explorer's
 rem pagefile growth took 490 of it); their results are in gputest.log and umdlog already.
 for %%F in (gl glx64 glec glx86) do if exist %D%\%%F rmdir /s /q %D%\%%F
