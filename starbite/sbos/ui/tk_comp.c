@@ -40,6 +40,8 @@ void tk_layer_dirty(tk_layer *l)
 {
     l->gen++;
     tk_bmp_free(&l->half);
+    tk_free(l->hspan);
+    l->hspan = 0;
     tk_a8_free(&l->ghalf);
 }
 
@@ -228,6 +230,16 @@ static const tk_bmp *half_of(tk_layer *l)
     if (!l->half.px) {
         tk_bmp_new(&l->half, (l->bmp.w + 1) / 2, (l->bmp.h + 1) / 2);
         tk_bmp_down2(&l->half, &l->bmp);
+        /* where each row has anything: a scaled draw (the app's zoom) then skips the empty rows and margins */
+        if (l->half.px && (l->hspan = tk_alloc((size_t)l->half.h * 4)) != 0)
+            for (int j = 0; j < l->half.h; j++) {
+                const uint32_t *r = l->half.px + (size_t)j * l->half.stride;
+                int a0 = 0, a1 = l->half.w;
+                while (a0 < a1 && !r[a0]) a0++;
+                while (a1 > a0 && !r[a1 - 1]) a1--;
+                l->hspan[2 * j] = (uint16_t)a0;
+                l->hspan[2 * j + 1] = (uint16_t)a1;
+            }
         if (l->glass.v) {
             tk_a8_new(&l->ghalf, l->half.w, l->half.h);
             for (int j = 0; j < l->ghalf.h; j++)
@@ -394,11 +406,20 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
                     colok = 1;
                 }
                 const uint32_t *sr = src->px + (size_t)v * src->stride;
-                for (int q = 0; q < n; q++) {
+                int qa = 0, qb = n;
+                if (src == &l->half && l->hspan) {
+                    /* only the target px whose source column can hold anything */
+                    int u0 = l->hspan[2 * v], u1 = l->hspan[2 * v + 1];
+                    if (u1 <= u0) continue;
+                    qa = tk_maxi(0, (int)tk_floorf(u0 * A + TX) - d.x0 - 1);
+                    qb = tk_mini(n, (int)tk_floorf(u1 * A + TX) - d.x0 + 2);
+                    if (qb <= qa) continue;
+                }
+                for (int q = qa; q < qb; q++) {
                     int u = colu[q];
                     rowbuf[q] = u >= 0 && u < src->w ? sr[u] : 0;
                 }
-                row_over(dst, rowbuf, n, al);
+                row_over(dst + qa, rowbuf + qa, qb - qa, al);
                 continue;
             }
             /* bilinear, separable: the two source rows blended once over the span, then each target px from two
@@ -704,25 +725,46 @@ static void band(void *arg, int i)
         if (y1 <= y0) continue;
         tk_irect b = { r.x0, y0, r.x1, y1 };
         if (J->phase == 0) {
-            /* the topmost opaque layer that covers the whole band at full opacity: nothing under it is drawn */
+            /* the topmost opaque layer at full opacity that covers most of the band: under it nothing is drawn;
+             * the rest of the band (its edges, a rounded window's corner rows) gets the ground and every layer */
             int first = 0;
             float k = T.k;
-            for (int q2 = cur.n - 1; q2 >= 0; q2--) {
+            tk_irect cov = { 0, 0, 0, 0 };
+            long ab = (long)(b.x1 - b.x0) * (b.y1 - b.y0);
+            for (int q2 = cur.n - 1; q2 > 0; q2--) {
                 const item *it = &cur.it[q2];
-                if (!it->l->opaque || it->alpha < .999f || it->fade || it->crad > 0) continue;
+                if (!it->l->opaque || it->alpha < .999f || it->fade) continue;
                 tk_irect cv = { (int)(it->r.x0 * k + .999f), (int)(it->r.y0 * k + .999f), (int)(it->r.x1 * k), (int)(it->r.y1 * k) };
-                if (cv.x0 <= b.x0 && cv.y0 <= b.y0 && cv.x1 >= b.x1 && cv.y1 >= b.y1) { first = q2; break; }
+                if (it->crad > 0) {
+                    int cr = (int)(it->crad * k + .999f) + 1;
+                    cv.y0 += cr;
+                    cv.y1 -= cr;
+                }
+                tk_irect in = isect(cv, b);
+                if (iempty(in) || (long)(in.x1 - in.x0) * (in.y1 - in.y0) * 2 < ab) continue;
+                first = q2;
+                cov = in;
+                break;
             }
+            tk_irect part[5];
+            int np = 0;
             if (first) {
-                for (int k2 = first; k2 < cur.n; k2++) draw_item(&T, &cur.it[k2], b);
-                continue;
+                if (cov.y0 > b.y0) part[np++] = (tk_irect){ b.x0, b.y0, b.x1, cov.y0 };
+                if (cov.y1 < b.y1) part[np++] = (tk_irect){ b.x0, cov.y1, b.x1, b.y1 };
+                if (cov.x0 > b.x0) part[np++] = (tk_irect){ b.x0, cov.y0, cov.x0, cov.y1 };
+                if (cov.x1 < b.x1) part[np++] = (tk_irect){ cov.x1, cov.y0, b.x1, cov.y1 };
+                for (int k2 = first; k2 < cur.n; k2++) draw_item(&T, &cur.it[k2], cov);
+            } else
+                part[np++] = b;
+            for (int pi = 0; pi < np; pi++) {
+                tk_irect pr = part[pi];
+                if (J->motion)
+                    for (int y = pr.y0; y < pr.y1; y++)
+                        tk_memcpy(T.t->px + (size_t)y * T.t->stride + pr.x0, J->c->base_half.px + (size_t)y * J->c->base_half.stride + pr.x0, (size_t)(pr.x1 - pr.x0) * 4);
+                else
+                    up2x_out(&J->c->fb, &J->c->base_half, pr, T.S);
+                for (int k2 = 0; k2 < cur.n; k2++) draw_item(&T, &cur.it[k2], pr);
             }
-            if (J->motion)
-                for (int y = b.y0; y < b.y1; y++)
-                    tk_memcpy(T.t->px + (size_t)y * T.t->stride + b.x0, J->c->base_half.px + (size_t)y * J->c->base_half.stride + b.x0, (size_t)(b.x1 - b.x0) * 4);
-            else
-                up2x_out(&J->c->fb, &J->c->base_half, b, T.S);
-            for (int k = 0; k < cur.n; k++) draw_item(&T, &cur.it[k], b);
         } else if (J->motion) {
             /* the damage 2x into the panel, a half px of margin for the bilinear neighbours (the margin rows only
              * by the first and last band) */

@@ -146,6 +146,7 @@ struct tk_layer {
     const char *name;
     tk_bmp bmp;                /* cached content, premultiplied; may be empty (a group) */
     tk_bmp half;               /* its 2x2-downscaled copy for motion frames (made on first use) */
+    uint16_t *hspan;           /* per row of half: the first and one past the last column with anything (0 0: none) */
     tk_a8 glass, ghalf;        /* backdrop mask: the wallpaper glass shows through it (same frame as bmp) */
     int glass_opaque_only;     /* the backdrop only while the composed opacity is 1 (Chrome's backdrop root) */
     float x, y;                /* bitmap origin in the parent's space, px */
