@@ -306,6 +306,25 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
                 if (L.err_log_left > 0) {
                     --L.err_log_left;
                     sb_logx("shub: SPI: the bytes did not come back in 20 ms (the clock?): STATUS ", st);
+                    struct ub u;
+                    ub_init(&u);
+                    ub_s(&u, "shub: SPI: then CH_CFG ");
+                    ub_hexn(&u, rd(SPI_CH_CFG), 8);
+                    ub_s(&u, " CLK_CFG ");
+                    ub_hexn(&u, rd(SPI_CLK_CFG), 8);
+                    ub_s(&u, " MODE_CFG ");
+                    ub_hexn(&u, rd(SPI_MODE_CFG), 8);
+                    ub_s(&u, " SLAVE_SEL ");
+                    ub_hexn(&u, rd(SPI_SLAVE_SEL), 8);
+                    ub_s(&u, " PACKET_CNT ");
+                    ub_hexn(&u, rd(SPI_PACKET_CNT), 8);
+                    ub_s(&u, " USI_CON ");
+                    ub_hexn(&u, rd(USI_CON), 8);
+                    ub_s(&u, " USI_OPTION ");
+                    ub_hexn(&u, rd(USI_OPTION), 8);
+                    ub_s(&u, " div ");
+                    ub_hexn(&u, rd(CMU_DIV), 8);
+                    sb_log(u.b);
                 }
                 spi_flush();
                 return 0;
@@ -321,12 +340,22 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
     return 1;
 }
 
+/* Samsung's enable_cs (spi-s3c64xx.c) asserts the controller's own nSSout (SLAVE_SEL bit 0 = 0, manual mode) for
+ * every message even when chip select is a GPIO: in manual mode the controller does not clock data out while it is
+ * inactive (probe 1ec3763 on the phone: 32 bytes stayed in the TX FIFO). gph0-3 is a GPIO here, so nSSout reaches no
+ * pin; it is only the controller's start condition. Back to inactive after the message, as disable_cs does. */
 static int cs_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 {
     pin_set(GPH0, P_CS, 0);
+#ifndef SB_HOST
+    wr(SPI_SLAVE_SEL, 0);
+#endif
     sb_udelay(5);
     int ok = spi_xfer(tx, rx, n);
     sb_udelay(5);
+#ifndef SB_HOST
+    wr(SPI_SLAVE_SEL, 1);
+#endif
     pin_set(GPH0, P_CS, 1);
     sb_udelay(10);
     return ok;
@@ -771,6 +800,26 @@ static int look(void)
     ub_s(&u, "; USI mode word (0x13A13000) ");
     ub_hexn(&u, pr(USI_MODE), 8);
     sb_log(u.b);
+    /* the USI00 mux's parent (1 = the CHUB bus clock), read only: CMU_CHUB's bus muxes and divider, CMU_TOP's
+     * CLKCMU_CHUB_BUS (0x1A240000: mux +1014, div +1810, gate +2014; cmucal-sfr.c) */
+    int faulted_was = faulted;              /* these reads are diagnostics only: a fault here does not stop the probe */
+    ub_init(&u);
+    ub_s(&u, "shub: step 0: CHUB bus clock: BUS_USER (+0100) ");
+    ub_hexn(&u, pr(CMU + 0x0100UL), 8);
+    ub_s(&u, " DLL_BUS_USER (+0120) ");
+    ub_hexn(&u, pr(CMU + 0x0120UL), 8);
+    ub_s(&u, " mux (+1004) ");
+    ub_hexn(&u, pr(CMU + 0x1004UL), 8);
+    ub_s(&u, " div (+1800) ");
+    ub_hexn(&u, pr(CMU + 0x1800UL), 8);
+    ub_s(&u, "; CMU_TOP CLKCMU_CHUB_BUS mux ");
+    ub_hexn(&u, pr(0x1a241014UL), 8);
+    ub_s(&u, " div ");
+    ub_hexn(&u, pr(0x1a241810UL), 8);
+    ub_s(&u, " gate ");
+    ub_hexn(&u, pr(0x1a242014UL), 8);
+    sb_log(u.b);
+    faulted = faulted_was;
     ub_init(&u);
     ub_s(&u, "shub: step 0: ");
     log_bank(&u, "gph0 (0-2 bus, 3 CS, 4 MCU_RESP, 5 MCU_REQ)", GPH0);
