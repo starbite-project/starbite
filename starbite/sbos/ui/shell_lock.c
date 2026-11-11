@@ -353,6 +353,17 @@ static void build_lclock(void)
     tk_text(d.b, TK_IT700, PT(106), PT(x0 + wh + gap) - d.ox, PT(base - 9.6f) - d.oy, ":", 0, 0, &p, 0);
     tk_text(d.b, TK_IT700, PT(106), PT(x0 + wh + gap + wc + gap) - d.ox, PT(base) - d.oy, mm, PT(-1), 0, &p, 0);
 }
+/* P3p (P3j-17): iOS's accessoryRectangular between the two gauges: no platter or border, left-aligned vibrant
+ * text: a glyph and the label (15 / 600, .7), the value 30 pt / 600 tabular, a 13 pt second line */
+static int alm_when = -1;          /* the alarm's "Today" / "Tomorrow" as drawn (sh_status redraws it on a change) */
+static void rect_widget(dc *d, const char *glyph, const char *label, const char *value, const char *sub)
+{
+    float x = 123;
+    if (glyph) { d_icon(d, glyph, x, 225, 1); x += 15; }
+    d_text_box(d, TK_IT600, 15, x, 235, 275 - x, 0, label, 0, 0, W(.7f), 0);
+    d_text_box(d, TK_IT600, 30, 122, 266, 150, 0, value, 0, TK_TNUM, INK, 0);
+    d_text_box(d, TK_IT400, 13, 123, 285, 150, 0, sub, 0, 0, W(.6f), 0);
+}
 static void build_lwidgets(void)
 {
     relayer(&lwidgets);
@@ -363,26 +374,21 @@ static void build_lwidgets(void)
         /* Emergency: the battery ring amber, Heat (ready, the phone's temperature), Saving (off) */
         ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), tk_hex(0xffb547, 1), num, "BATTERY");
         ring_widget(&d, 285, 0, tk_hex(0xff5a4e, 1), "Off", "SAVING");
-        d_glass(&d, 115, 220, 160, 72, 22, 1, 1);
-        d_text(&d, TK_IT700, 11, 129, 238 + 11, "HEAT", .33f, 0, W(.7f), 0);
-        char v[40] = "Ready \xc2\xb7 ";
-        int k = (int)tk_strlen(v);
-        k += put_dec(v + k, ST.temp);
-        v[k++] = ' '; v[k++] = (char)0xc2; v[k++] = (char)0xb0; v[k++] = 'C'; v[k] = 0;
-        d_text(&d, TK_IT700, 17, 129, 254 + 16, v, 0, 0, INK, 0);
+        char v[40];
+        int k = put_dec(v, ST.temp);
+        tk_memcpy(v + k, " \xc2\xb0" "C battery", 13);
+        rect_widget(&d, 0, "Heat", "Ready", v);
         return;
     }
     ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), tk_hex(0x4cd964, 1), num, "BATTERY");
     int n = put_dec(num, ST.temp);
     num[n] = (char)0xc2; num[n + 1] = (char)0xb0; num[n + 2] = 0;
     ring_widget(&d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), tk_hex(0x6fb3ff, 1), num, "TEMP");
-    d_glass(&d, 115, 220, 160, 72, 22, 1, 1);
-    d_icon(&d, "alarm", 129, 239.5f, 1);
-    d_text(&d, TK_IT700, 11, 145, 238 + 11, "ALARM", .33f, 0, W(.7f), 0);
-    char at[16] = "No alarm";                  /* P2y: the kernel's next alarm (sh_alarm), not the concept's */
+    char at[16] = "Off";                       /* P2y: the kernel's next alarm (sh_alarm), not the concept's */
     if (ALM.on) { at[0] = (char)('0' + ALM.h / 10); at[1] = (char)('0' + ALM.h % 10); at[2] = ':';
                   at[3] = (char)('0' + ALM.m / 10); at[4] = (char)('0' + ALM.m % 10); at[5] = 0; }
-    d_text(&d, TK_IT700, 17, 129, 254 + 16, at, 0, 0, INK, 0);
+    alm_when = !ALM.on ? 0 : ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? 1 : 2;
+    rect_widget(&d, "alarm", "Alarm", at, alm_when == 1 ? "Today" : alm_when == 2 ? "Tomorrow" : "No alarm set");
 }
 
 static void build_marks(void)
@@ -403,38 +409,42 @@ static void build_marks(void)
 }
 
 /* ---- the press-and-hold buttons ---------------------------------------------------------------------------- */
+#define HOLD_X(i) ((i) ? 293.0f : 47.0f)          /* P3p: 50 pt, centred at 72 / 318 */
+#define HOLD_Y 695.0f
+/* the glass backdrop (the wallpaper's blur) inside a circle: the layer's backdrop mask */
+static void d_mask_circle(dc *d, float cx, float cy, float r)
+{
+    if (!d->m || !d->m->v) return;
+    float X = PT(cx) - d->ox, Y = PT(cy) - d->oy, R = PT(r);
+    int x0 = tk_maxi(0, (int)(X - R) - 1), x1 = tk_mini(d->m->w, (int)(X + R) + 2);
+    int y0 = tk_maxi(0, (int)(Y - R) - 1), y1 = tk_mini(d->m->h, (int)(Y + R) + 2);
+    for (int j = y0; j < y1; j++)
+        for (int i = x0; i < x1; i++) {
+            float dx = i + .5f - X, dy = j + .5f - Y, c = tk_clampf(R - tk_sqrtf(dx * dx + dy * dy) + .5f, 0, 1);
+            uint8_t v = (uint8_t)(c * 255 + .5f), *p = &d->m->v[j * d->m->w + i];
+            if (v > *p) *p = v;
+        }
+}
 static void build_hold(int i)
 {
     hold_t *q = &Q[i];
-    float x = i ? 292 : 46, y = 694;
-    q->grp.ox = PT(x + 26);
-    q->grp.oy = PT(y + 26);
-    dc d = mk(&q->face, "q-face", x, y, 52, 52, 44, 1);
-    d_glass(&d, x, y, 52, 52, 26, 1, 1);
-    /* lit: the background is white (torch) or the Emergency red instead of the tint, the rest of the glass stays */
-    d = mk(&q->facelit, "q-lit", x, y, 52, 52, 44, 1);
-    d_glass(&d, x, y, 52, 52, 26, 1, 1);
-    d_rrect(&d, x, y, 52, 52, 26, i ? tk_hex(0xff5a4e, 1) : W(1));
-    tk_box_shadow(d.b, PT(x) - d.ox, PT(y) - d.oy, PT(52), PT(52), PT(26), 0, PT(1.5f), 0, 0, W(.42f), 1);
-    tk_box_shadow(d.b, PT(x) - d.ox, PT(y) - d.oy, PT(52), PT(52), PT(26), 0, PT(-1), 0, 0, W(.12f), 1);
-    d = mk(&q->icon, "q-icon", x + 16, y + 14, 20, 24, 2, 0);
-    d_icon(&d, i ? "flame" : "torch", x + 16, y + 14, 1);
-    d = mk(&q->iconlit, "q-iconlit", x + 16, y + 14, 20, 24, 2, 0);
-    d_icon(&d, i ? "flame" : "torch-lit", x + 16, y + 14, 1);
-    d = mk(&q->ring, "q-ring", x - 4, y - 4, 60, 60, 1, 0);
-    /* the ring's tables: circle r 28 in a 60 pt box, stroke 2 (#fff / #ff8a7a), from 12 o'clock clockwise */
-    int n = q->ring.bmp.w * q->ring.bmp.h;
-    q->ang = tk_alloc((size_t)n * 4);
-    q->cov = tk_alloc((size_t)n * 4);
-    if (!q->ang || !q->cov) n = 0;
-    for (int j = 0; n && j < q->ring.bmp.h; j++)
-        for (int k = 0; k < q->ring.bmp.w; k++) {
-            float px = k + .5f + d.ox - PT(x + 26), py = j + .5f + d.oy - PT(y + 26);
-            float a = tk_atan2f(px, -py);
-            if (a < 0) a += 6.2831853f;
-            q->ang[j * q->ring.bmp.w + k] = a;
-            q->cov[j * q->ring.bmp.w + k] = tk_clampf(.5f - (tk_fabsf(tk_sqrtf(px * px + py * py) - PT(28)) - PT(1)), 0, 1);
-        }
+    /* P3p (P3j-17): iOS's lock-screen buttons: 50 pt, a neutral W(.10) disc over the wallpaper's blur (no blue tint,
+     * no rim, no ring: the hold fires at its threshold with a haptic tap, the button still growing to 1.22); lit:
+     * the torch a white disc with a dark glyph, Emergency red */
+    float x = HOLD_X(i), y = HOLD_Y;
+    q->grp.ox = PT(x + 25);
+    q->grp.oy = PT(y + 25);
+    dc d = mk(&q->face, "q-face", x, y, 50, 50, 2, 1);
+    d_mask_circle(&d, x + 25, y + 25, 25);
+    d_rrect(&d, x, y, 50, 50, 25, W(.10f));
+    d = mk(&q->facelit, "q-lit", x, y, 50, 50, 2, 0);
+    d_rrect(&d, x, y, 50, 50, 25, i ? tk_hex(0xff5a4e, 1) : W(1));
+    d = mk(&q->icon, "q-icon", x + 15, y + 13, 20, 24, 2, 0);
+    d_icon(&d, i ? "flame" : "torch", x + 15, y + 13, 1);
+    d = mk(&q->iconlit, "q-iconlit", x + 15, y + 13, 20, 24, 2, 0);
+    d_icon(&d, i ? "flame" : "torch-lit", x + 15, y + 13, 1);
+    tk_layer_init(&q->ring, "q-ring");               /* no ring (no bitmap, no tables): hold_ring does nothing */
+    q->ang = q->cov = 0;
     q->ms = i ? 700 : 420;
     q->scale_t = q->scale_from = q->scale_to = 1;
     q->facelit.hidden = q->iconlit.hidden = 1;
@@ -3885,8 +3895,8 @@ void sh_touch(int phase, float x, float y, float t)
             return;
         }
         for (int i = 0; i < 2; i++) {
-            float bx = i ? 292 : 46;
-            if (x >= bx && x <= bx + 52 && y >= 694 && y <= 746) {
+            float bx = HOLD_X(i);
+            if (x >= bx - 4 && x <= bx + 54 && y >= HOLD_Y - 4 && y <= HOLD_Y + 54) {
                 T.kind = G_HOLD;
                 T.arg = i;
                 Q[i].down = 1; Q[i].fired = 0; Q[i].t0 = t;
@@ -4357,6 +4367,7 @@ int sh_tick(float dt, float t)
             hold_ring(q, i, p);
             if (p >= 1) {
                 q->fired = 1;
+                sh_haptic();                     /* P3p (P3j-17): the threshold, felt (no ring) */
                 if (i == 0) {
                     q->lit = !q->lit;
                     sh_torch(q->lit);
@@ -4426,6 +4437,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
     int wchange = pct != ST.pct || temp != ST.temp;
     ST.h = h; ST.mi = mi; ST.wday = wday; ST.day = day; ST.mon = mon; ST.pct = pct; ST.temp = temp;
     if (tchange && AP.on && (is_app("clock") || is_app("calendar")) && !AP.closing) build_app_page(AP.a);   /* the time, today */
+    if (tchange && ALM.on && alm_when != (ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? 1 : 2)) wchange = 1;   /* P3p: Today / Tomorrow */
     if (tchange) {
         /* the layers keep their place in the tree: rebuilt in place */
         build_lclock();
