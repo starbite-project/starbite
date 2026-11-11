@@ -4,6 +4,8 @@
   hive-sbxta-services.py IN show
   hive-sbxta-services.py IN OUT set NAME...    Services\\sbxta\\Parameters\\DisableOnM3Services = NAME... (REG_MULTI_SZ)
   hive-sbxta-services.py IN OUT off            delete that value (the next A55 boot still restores what was saved)
+  hive-sbxta-services.py IN OUT param NAME N   Parameters\\NAME = N (DWORD), NAME in DisableOnM3, SwapCache
+                                               (per-CPU XtaCache: DisableOnM3 0 + SwapCache 1; back: 1 + 0)
 
 Suggested list (the user's decision): WpnUserService DiagTrack OneSyncSvc UsoSvc wuauserv.
 Needs sbxta v2 (build/woa/cores/sbxta-2) installed; v1 ignores the value. Writes go through hivexsh in the lima VM
@@ -39,6 +41,8 @@ def show(h):
         return
     par = f'{base}\\Parameters'
     v = vals(h, par) if hs.exists(h, par) else {}
+    for pn in ('DisableOnM3', 'SwapCache'):
+        print(f'{pn}: ' + (str(int.from_bytes(v[pn][1], "little")) if pn in v else 'absent (default)'))
     if 'DisableOnM3Services' in v:
         names = [x for x in v['DisableOnM3Services'][1].decode('utf-16-le').split('\0') if x]
         print('DisableOnM3Services:', ' '.join(names))
@@ -62,9 +66,12 @@ def main(a):
         hs.check(a[0])
         show(hs.Hive(a[0]))
         return
-    if len(a) < 3 or a[2] not in ('set', 'off') or (a[2] == 'set' and len(a) < 4):
+    if len(a) < 3 or a[2] not in ('set', 'off', 'param') or (a[2] == 'set' and len(a) < 4) or \
+            (a[2] == 'param' and (len(a) != 5 or a[3] not in ('DisableOnM3', 'SwapCache') or a[4] not in ('0', '1'))):
         raise SystemExit(__doc__)
     src, out, cmd, names = a[0], a[1], a[2], a[3:]
+    if cmd == 'param':
+        names = []
     if any(('\\' in n) or ('/' in n) or not n for n in names) or len(names) > 16:
         raise SystemExit('service names only, at most 16')
     hs.check(src)
@@ -75,7 +82,9 @@ def main(a):
     if not hs.exists(h, par):
         raise SystemExit(f'{par}: missing: install sbxta first')
     v = vals(h, par)
-    if cmd == 'set':
+    if cmd == 'param':
+        s = hs.setvals(h, par, {a[3]: hs.dword(int(a[4]))})
+    elif cmd == 'set':
         data = ('\0'.join(names) + '\0\0').encode('utf-16-le')
         s = hs.setvals(h, par, {'DisableOnM3Services': (7, data)})
     else:
@@ -100,6 +109,13 @@ def main(a):
     hs.check(out)
     h2 = hs.Hive(out)
     v2 = vals(h2, par)
+    if cmd == 'param':
+        if v2.get(a[3], (0, b''))[1] != hs.dword(int(a[4]))[1]:
+            os.remove(out)
+            raise SystemExit('read-back disagrees; output removed')
+        print(f'{par}\\{a[3]} = {a[4]}')
+        print(f'{out}: sha256 {hs.sha(out)}')
+        return
     if (cmd == 'set') != ('DisableOnM3Services' in v2) or \
             (cmd == 'set' and v2['DisableOnM3Services'][1] != ('\0'.join(names) + '\0\0').encode('utf-16-le')):
         os.remove(out)
