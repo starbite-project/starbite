@@ -702,3 +702,13 @@ Main session, `build/woa/cores/sbxta-run1/` (log `sbxta-run1.log`), sbxta-1 inst
 sbxta stays installed (pre-install SYSTEM backup `backup/*-pre-sbxta`). This is the x86/x64 fix for the big-core row;
 docs/WIN11-M3-X86.md section 5 has the summary. The 4 -> 2 restore on the next A55 boot is checked by the main session
 after its T38 cycles. Still open on the big-core row: the winsqlite3 services (section 25) and the 4th M3.
+
+## 36. windows-big4i: big3i on all four M3s (prepared, ATTENDED ONLY)
+
+Next step for the big-core row after x86 (main session's choice between this and the winsqlite3 services; the
+services stay the user's call, section 25, and switching them off would not make Windows Update work).
+`KILL_SERIAL=1 SOLO=m3all4i M3EARLY=6 M3KHZ=1794000 tools/woa/build-win-usbhost.sh`, then the big3i splice into
+`windows-t32s-nocache.uefi` (c3e43fd2) with FV_GROW=1. Same recipe with the m3all3i module reproduces big3i byte for byte.
+Module diff vs m3all3i (disassembly): park loop 2 -> 3 cores, marker 5 -> 6, core-0 FlexPMU steps (section 22).
+Folder `build/woa/cores/big4i-ATTENDED/`: `windows-big4i.uefi` 036d620d..., `starbite-uefi-m3all4i.bin` 6ed81172....
+Request: notes folder `win-m3-clean-big4i-request.md`. Not run.
