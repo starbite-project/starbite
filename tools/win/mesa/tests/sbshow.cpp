@@ -11,6 +11,13 @@
 //   sbshow list               every visible top-level window: class, title, rectangle, process
 //   sbshow frame              rewrite C:\ProgramData\Starbite\umdlog\dwmframe (DWM dumps its next composed frame),
 //                             then flash a 1x1 window so DWM presents at all
+//   sbshow transparency 0|1|restore
+//                             T36: HKCU ...\Themes\Personalize EnableTransparency (Settings > Personalisation >
+//                             Colours > Transparency effects) and the broadcast Settings sends; the first change saves
+//                             the user's value to C:\starbite\auto\gpu\transparency.orig, restore puts it back
+//   sbshow hit                T36: which window a touch would land in (WindowFromPoint) on a grid over the lower half
+//                             of the screen, where the touch keyboard sits
+//   sbshow key start|esc      T36: press the Windows key (the Start menu) or Escape
 //
 // Exit code 0, or 1 when the action failed (the line says why).
 //
@@ -24,6 +31,7 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "advapi32.lib")
 
 struct __declspec(uuid("37c994e7-432b-4834-a2f7-dce1f13b834b")) ITipInvocation : IUnknown {
     virtual HRESULT STDMETHODCALLTYPE Toggle(HWND wnd) = 0;
@@ -131,8 +139,99 @@ static void nudge(void)
     DestroyWindow(w);
 }
 
+static const char *PERSONALIZE = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+static const char *ORIG = "C:\\starbite\\auto\\gpu\\transparency.orig";
+
+static int set_transparency(DWORD v)
+{
+    HKEY k;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, PERSONALIZE, 0, nullptr, 0, KEY_READ | KEY_WRITE, nullptr, &k, nullptr)) {
+        printf("sbshow: Personalize key not opened\n");
+        return 1;
+    }
+    DWORD cur = 1, len = sizeof(cur), type = 0;
+    bool had = RegQueryValueExA(k, "EnableTransparency", nullptr, &type, (BYTE *)&cur, &len) == 0 && type == REG_DWORD;
+    FILE *f = fopen(ORIG, "r");
+    if (f)
+        fclose(f);
+    else if ((f = fopen(ORIG, "w")) != nullptr) {    /* the user's own value, once */
+        fprintf(f, "%s %lu\n", had ? "set" : "absent", had ? cur : 1UL);
+        fclose(f);
+    }
+    LONG r = RegSetValueExA(k, "EnableTransparency", 0, REG_DWORD, (const BYTE *)&v, sizeof(v));
+    RegCloseKey(k);
+    DWORD_PTR res;
+    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"ImmersiveColorSet", SMTO_ABORTIFHUNG, 3000, &res);
+    printf("sbshow: EnableTransparency %lu -> %lu (%s), broadcast sent\n", had ? cur : 1UL, v, r ? "FAILED" : "set");
+    return r ? 1 : 0;
+}
+
+static int restore_transparency(void)
+{
+    char what[16] = "";
+    unsigned long v = 1;
+    FILE *f = fopen(ORIG, "r");
+    if (!f) {
+        printf("sbshow: nothing to restore (no %s)\n", ORIG);
+        return 0;
+    }
+    int n = fscanf(f, "%15s %lu", what, &v);
+    fclose(f);
+    if (n != 2)
+        return 1;
+    if (!strcmp(what, "absent")) {
+        HKEY k;
+        if (!RegOpenKeyExA(HKEY_CURRENT_USER, PERSONALIZE, 0, KEY_WRITE, &k)) {
+            RegDeleteValueA(k, "EnableTransparency");
+            RegCloseKey(k);
+        }
+        DWORD_PTR res;
+        SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"ImmersiveColorSet", SMTO_ABORTIFHUNG, 3000,
+                            &res);
+        printf("sbshow: EnableTransparency restored (absent)\n");
+    } else {
+        set_transparency((DWORD)v);
+        printf("sbshow: EnableTransparency restored to %lu\n", v);
+    }
+    DeleteFileA(ORIG);
+    return 0;
+}
+
+static void hit_grid(void)
+{
+    int w = GetSystemMetrics(SM_CXSCREEN), h = GetSystemMetrics(SM_CYSCREEN);
+    printf("sbshow: screen %dx%d\n", w, h);
+    for (int ry = 0; ry < 6; ry++) {
+        int y = h / 2 + (h / 2) * ry / 6 + h / 24;
+        printf("sbshow:   y %4d:", y);
+        for (int rx = 0; rx < 5; rx++) {
+            POINT pt = { w / 10 + (w * 8 / 10) * rx / 4, y };
+            HWND hw = WindowFromPoint(pt), top = hw ? GetAncestor(hw, GA_ROOT) : nullptr;
+            char cls[48] = "", exe[40] = "?";
+            DWORD pid = 0;
+            if (top) {
+                GetClassNameA(top, cls, sizeof cls);
+                GetWindowThreadProcessId(top, &pid);
+                exe_of(pid, exe, sizeof exe);
+            }
+            printf(" [%d: %s %s]", (int)pt.x, top ? exe : "-", cls);
+        }
+        printf("\n");
+    }
+}
+
+static void key(WORD vk)
+{
+    INPUT in[2] = {};
+    in[0].type = in[1].type = INPUT_KEYBOARD;
+    in[0].ki.wVk = in[1].ki.wVk = vk;
+    in[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    printf("sbshow: key 0x%02x sent %u\n", vk, SendInput(2, in, sizeof(INPUT)));
+}
+
 int main(int argc, char **argv)
 {
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);   /* physical pixels */
     if (argc < 2) {
         printf("usage: sbshow mincon | max CLASS SEC | kbd | list | frame\n");
         return 2;
@@ -197,6 +296,19 @@ int main(int argc, char **argv)
         CloseHandle(h);
         nudge();
         printf("sbshow: dwmframe rewritten, DWM nudged\n");
+        return 0;
+    }
+    if (!strcmp(argv[1], "transparency") && argc >= 3) {
+        if (!strcmp(argv[2], "restore"))
+            return restore_transparency();
+        return set_transparency((DWORD)atoi(argv[2]));
+    }
+    if (!strcmp(argv[1], "hit")) {
+        hit_grid();
+        return 0;
+    }
+    if (!strcmp(argv[1], "key") && argc >= 3) {
+        key(!strcmp(argv[2], "start") ? VK_LWIN : VK_ESCAPE);
         return 0;
     }
     printf("sbshow: unknown command\n");

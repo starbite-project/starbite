@@ -49,11 +49,11 @@ echo sbfps hw exit %errorlevel% >> gputest.log
 rem the SV_VertexID variant last: on the Mali it crashed (T13m: Panfrost has no load_vertex_id_zero_base)
 sbtex.exe hw sbtex-hw-vertexid.log vertexid >> gputest.log 2>&1
 echo sbtex hw vertexid exit %errorlevel% >> gputest.log
-rem T32c/T33c: the shell surfaces the user saw fail (File Explorer, Settings, the touch keyboard), so sbumd's present
-rem sampling and dumps (umdlog\dump-*.ppm/.pgm, sb-patches/0126) see them; they stay open until the restart.
-rem T33c: sbshow maximises each window, toggles the keyboard through ITipInvocation (starting TabTip.exe alone does
-rem not show it on Windows 11) and rewrites umdlog\dwmframe, so DWM dumps the screen (sb-patches/0128). Run the cycle
-rem without --keys-selftest and with --full-sec 540: this part needs ~90 s after sbtex (the 363 s self-test cut it off).
+rem T32c/T33c/T36: the shell surfaces the user saw fail (File Explorer, Settings, the touch keyboard, the Start menu).
+rem sbshow (tools/win/mesa/tests/sbshow.cpp) maximises each window, toggles the keyboard through ITipInvocation,
+rem lists the windows, and rewrites umdlog\dwmframe so DWM dumps the screen (sb-patches/0128, up to 8 per boot).
+rem T36: the keyboard twice, with the user's transparency effects and with them off (restored at the end), each
+rem with a touch hit-test grid; then the Start menu. Run without --keys-selftest and with --full-sec 600.
 sbshow.exe mincon >> gputest.log 2>&1
 start "" explorer.exe C:\
 sbshow.exe max CabinetWClass 30 >> gputest.log 2>&1
@@ -71,7 +71,26 @@ ping -n 4 127.0.0.1 > nul
 sbshow.exe kbd >> gputest.log 2>&1
 ping -n 6 127.0.0.1 > nul
 sbshow.exe list >> gputest.log 2>&1
+sbshow.exe hit >> gputest.log 2>&1
 sbshow.exe frame >> gputest.log 2>&1
 ping -n 4 127.0.0.1 > nul
+sbshow.exe transparency 0 >> gputest.log 2>&1
+sbshow.exe kbd >> gputest.log 2>&1
+ping -n 3 127.0.0.1 > nul
+sbshow.exe kbd >> gputest.log 2>&1
+ping -n 6 127.0.0.1 > nul
+sbshow.exe list >> gputest.log 2>&1
+sbshow.exe hit >> gputest.log 2>&1
+sbshow.exe frame >> gputest.log 2>&1
+ping -n 4 127.0.0.1 > nul
+sbshow.exe transparency restore >> gputest.log 2>&1
+sbshow.exe kbd >> gputest.log 2>&1
+ping -n 3 127.0.0.1 > nul
+sbshow.exe key start >> gputest.log 2>&1
+ping -n 5 127.0.0.1 > nul
+sbshow.exe list >> gputest.log 2>&1
+sbshow.exe frame >> gputest.log 2>&1
+ping -n 4 127.0.0.1 > nul
+sbshow.exe key esc >> gputest.log 2>&1
 echo shell surfaces opened %time% >> gputest.log
 echo sb-gputest end %date% %time% >> gputest.log
