@@ -1,0 +1,169 @@
+# macOS 15.6 (24G84) OS volume, desktop tier (2026-11-11): nearly the whole system volume, as
+# ventura-desktop.list does for 13.5, generated from 15.6's own /System/Library listing.
+# Left out by build-macos-root.sh (MAXFILE): every file over 16 MiB, listed in $W/skipped-desktop.txt.
+# Left out here: /System/Library/{Extensions,DriverExtensions,KernelCollections,Kernels,PrelinkedKernels}
+# (kexts, dexts and Apple kernels: our kernel loads none), /System/iOSSupport (Catalyst resources;
+# their code is in the cache), /System/DriverKit. Framework code lives in the shared cache (SystemOS
+# cryptex), so this is executables, plists and resources. --thin keeps only arm64e slices.
+/etc
+/var
+/tmp
+/bin
+/sbin
+/usr
+/private/
+/dev/
+/Library
+/Applications
+/System/Cryptexes/OS
+/System/Cryptexes/App
+/System/Applications
+/System/Volumes
+/System/Library/AWD
+/System/Library/Accessibility
+/System/Library/Accounts
+/System/Library/Address Book Plug-Ins
+/System/Library/AppIntents
+/System/Library/AppleMediaServices
+/System/Library/AppleUSBDevice
+/System/Library/AssetTypeDescriptors
+/System/Library/Assets
+/System/Library/AssetsV2
+/System/Library/Assistant
+/System/Library/Audio
+/System/Library/Automator
+/System/Library/BridgeSupport
+/System/Library/CacheDelete
+/System/Library/Caches
+/System/Library/CardKit
+/System/Library/Classroom
+/System/Library/ColorSync
+/System/Library/Colors
+/System/Library/Components
+/System/Library/Compositions
+/System/Library/ConfigurationProfiles
+/System/Library/CoreAccessories
+/System/Library/CoreImage
+/System/Library/CoreServices
+/System/Library/CryptoTokenKit
+/System/Library/DTDs
+/System/Library/DarwinDirectory
+/System/Library/DefaultsConfigurations
+/System/Library/Desktop Pictures
+/System/Library/DeviceOMatic
+/System/Library/DifferentialPrivacy
+/System/Library/DigitalSeparation
+/System/Library/DirectoryServices
+/System/Library/Display
+/System/Library/Displays
+/System/Library/DistributedEvaluation
+/System/Library/DoNotDisturb
+/System/Library/DuetActivityScheduler
+/System/Library/DuetExpertCenter
+/System/Library/DuetKnowledgeBase
+/System/Library/ExtensionKit
+/System/Library/FDR
+/System/Library/FeatureFlags
+/System/Library/Filesystems
+/System/Library/Filters
+/System/Library/Fonts
+/System/Library/Frameworks
+/System/Library/GeoServicesData
+/System/Library/Graphics
+/System/Library/HIDPlugins
+/System/Library/IdentityServices
+/System/Library/Image Capture
+/System/Library/ImagingNetworks
+/System/Library/Input Methods
+/System/Library/InternetAccounts
+/System/Library/Isp
+/System/Library/Jet
+/System/Library/KerberosPlugins
+/System/Library/Keyboard Layouts
+/System/Library/Keychain
+/System/Library/Keychains
+/System/Library/LASecureIO
+/System/Library/LaunchAgents
+/System/Library/LaunchDaemons
+/System/Library/LifecyclePolicy
+/System/Library/LinguisticData
+/System/Library/LocationBundles
+/System/Library/LoginPlugins
+/System/Library/MLHost
+/System/Library/MediaCapture
+/System/Library/MediaStreamPlugins
+/System/Library/Messages
+/System/Library/ModelManager
+/System/Library/MonitorPanels
+/System/Library/MultiversePlugins
+/System/Library/NearbyInteractionBundles
+/System/Library/NetworkServiceProxy
+/System/Library/Obliteration
+/System/Library/OnBoardingBundles
+/System/Library/OpenDirectory
+/System/Library/OpenSSL
+/System/Library/PDF Services
+/System/Library/PairedSyncServices
+/System/Library/Password Server Filters
+/System/Library/PerfPowerTelemetry
+/System/Library/Perl
+/System/Library/Photos
+/System/Library/PreferenceBundles
+/System/Library/PreferenceManifests
+/System/Library/PreferencePanes
+/System/Library/Preferences
+/System/Library/PreferencesSyncBundles
+/System/Library/PreinstalledAssets
+/System/Library/PreinstalledAssetsV2
+/System/Library/Printers
+/System/Library/PrivateFrameworks
+/System/Library/ProductDocuments
+/System/Library/ProxySigningStubs
+/System/Library/QuickLook
+/System/Library/Receipts
+/System/Library/Recents
+/System/Library/RunningBoard
+/System/Library/SESStorage
+/System/Library/Sandbox
+/System/Library/Screen Savers
+/System/Library/ScreenCaptureKitMetal
+/System/Library/ScreenReader
+/System/Library/Script Editor Plugins
+/System/Library/ScriptingAdditions
+/System/Library/ScriptingDefinitions
+/System/Library/Security
+/System/Library/SecurityResearch
+/System/Library/Services
+/System/Library/Siri
+/System/Library/Snippets
+/System/Library/SoftwareUpdateCertificates
+/System/Library/Sounds
+/System/Library/SpaceAttribution
+/System/Library/Speech
+/System/Library/SpeechBase
+/System/Library/Spotlight
+/System/Library/StartupItems
+/System/Library/StreamingExtractorPlugins
+/System/Library/SyncServices
+/System/Library/SystemConfiguration
+/System/Library/SystemMigrationPlugins
+/System/Library/SystemProfiler
+/System/Library/SystemStatus
+/System/Library/TTSPlugins
+/System/Library/Tcl
+/System/Library/Templates
+/System/Library/TextEncodings
+/System/Library/TextInput
+/System/Library/Trace
+/System/Library/Trial
+/System/Library/UnifiedAssetFramework
+/System/Library/User Template
+/System/Library/UserEventPlugins
+/System/Library/UserManagement
+/System/Library/UserNotifications
+/System/Library/Video
+/System/Library/VideoProcessors
+/System/Library/Wallpapers
+/System/Library/iCloudSettings
+/System/Library/replicatord
+/System/Library/xpc

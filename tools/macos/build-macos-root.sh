@@ -25,8 +25,18 @@
 #       reads them at random through libAppleArchive over ranged GETs (keys in $W/keys.txt, asked of
 #       Apple's key service once). Everything large is on the USB drive (W=); the Mac keeps nothing.
 #
-# Env: MACOS (13 or 26), IPSW_URL, OS_DMG, SYS_DMG, W, OUT, SIZE_MB, KEEP_MOUNTED=1,
-#      RESUME=1 (keep the image and its OS files, redo from the cache step), CENSUS=0, TRANSLATE_A64E=0.
+# macOS 15.6 Sequoia (24G84), MacBookAir10,1 identity, the driver path (docs/APPLE-S9-DRIVERS.md): MACOS=15.
+#   MACOS=15 tools/macos/build-macos-root.sh t0      -> /Volumes/SBWORK/starbite-macos15/root-15t0.img (64 MiB)
+#       launchd + dyld + launchd.plist + /private (sequoia-t0.list), no cache; launchd and dyld rewritten.
+#   MACOS=15 tools/macos/build-macos-root.sh desktop -> /Volumes/SBWORK/starbite-macos15/root-15desktop.img (16 GiB)
+#       nearly the whole OS volume (sequoia-desktop.list, --thin, files over MAXFILE left out and listed) + the
+#       arm64e cache from the SystemOS cryptex, translated; then EVERY arm64e Mach-O on the root is rewritten
+#       and re-signed ad hoc in place (a64e-rewrite.py root; A64E_ALL=0 keeps Apple's bytes outside the cache).
+#       AEA keys in $W/keys.txt. RESERVE_MB (5900) stays free on the shared stick.
+#
+# Env: MACOS (13, 15 or 26), IPSW_URL, OS_DMG, SYS_DMG, W, OUT, SIZE_MB, KEEP_MOUNTED=1,
+#      RESUME=1 (keep the image and its OS files, redo from the cache step), CENSUS=0, TRANSLATE_A64E=0,
+#      A64E_ALL (MACOS=15: 1), RESERVE_MB.
 # Apple software stays local (build/ is gitignored; the USB folder is not a repository).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -52,6 +62,28 @@ if [ "${MACOS:-13}" = 26 ]; then
         *) echo "usage: MACOS=26 $0 t1"; exit 2 ;;
     esac
     [ -d "$W" ] || { echo "$W missing (the USB drive)"; exit 1; }
+elif [ "${MACOS:-13}" = 15 ]; then
+    # macOS 15.6 Sequoia (24G84), MacBookAir10,1 (J313AP) identity; docs/APPLE-S9-DRIVERS.md (M9).
+    URL=${IPSW_URL:-https://updates.cdn-apple.com/2025SummerFCS/fullrestores/082-08674/51294E4D-A273-44BE-A280-A69FC347FB87/UniversalMac_15.6_24G84_Restore.ipsw}
+    OS_DMG=${OS_DMG:-043-18152-096.dmg.aea}    # BuildManifest OS (AEA: raw APFS, "Macintosh HD", 9.26 GB)
+    SYS_DMG=${SYS_DMG:-043-18205-097.dmg.aea}  # Cryptex1,SystemOS (AEA: raw APFS, 5.17 GB)
+    W=${W:-/Volumes/SBWORK/starbite-macos15}
+    KEYS=(--keys "$W/keys.txt")
+    # 15.6's arm64e cache is two files (2.71 + 2.20 GB) like 13.5's; the x86_64 and aot_* (Rosetta) caches are not taken
+    CACHE=(dyld_shared_cache_arm64e dyld_shared_cache_arm64e.01 dyld_shared_cache_arm64e.map dyld_shared_cache_arm64e.atlas)
+    # Every arm64e Mach-O on the root is rewritten too (a64e-rewrite.py root: re-hashed, ad hoc), not only the cache
+    A64E_ALL=${A64E_ALL:-1}
+    BUILD_DEFAULT=24G84
+    RESERVE_MB=${RESERVE_MB:-5900}   # SBWORK is shared: leave 5 GB for the other sessions after the image
+    case $TIER in
+        t0) SIZE_MB=${SIZE_MB:-64}; LISTS=(--list tools/macos/sequoia-t0.list); OUT=${OUT:-$W/root-15t0.img}; CACHE_TIER= ;;
+        # 16 GiB, not Ventura's 15: the list is 10.5 GiB of fat files (418k items) + a 4.6 GiB cache; 16 GiB is
+        # the card range apple-m1.txt already names (sdroot=lba:182888448,33554432)
+        desktop) SIZE_MB=${SIZE_MB:-16384}; LISTS=(--list tools/macos/sequoia-desktop.list); OUT=${OUT:-$W/root-15desktop.img}
+              CACHE_TIER=1; MAXFILE=${MAXFILE:-16777216} ;;
+        *) echo "usage: MACOS=15 $0 t0|desktop"; exit 2 ;;
+    esac
+    [ -d "$W" ] || { echo "$W missing (the USB drive)"; exit 1; }
 else
     URL=${IPSW_URL:-https://updates.cdn-apple.com/2023SummerFCS/fullrestores/032-69606/D3E05CDF-E105-434C-A4A1-4E3DC7668DD0/UniversalMac_13.5_22G74_Restore.ipsw}
     OS_DMG=${OS_DMG:-096-63007-081.dmg}       # BuildManifest OS (UDIF, stored in the zip)
@@ -69,26 +101,42 @@ fi
 mkdir -p "$W"
 RD=(python3 -I -B "$ROOT/tools/macos/ipsw-apfs.py" "$URL")
 free_mb=$(df -m "$W" | awk 'NR==2 {print $4}')
-[ -n "${RESUME:-}" ] || (( free_mb > SIZE_MB + 800 )) || { echo "need $((SIZE_MB + 800)) MB free in $W, have $free_mb"; exit 1; }
+[ -n "${RESUME:-}" ] || (( free_mb > SIZE_MB + ${RESERVE_MB:-800} )) || { echo "need $((SIZE_MB + ${RESERVE_MB:-800})) MB free in $W, have $free_mb"; exit 1; }
 
 owners=$W/owners-$TIER.json
 attach() { hdiutil attach -nobrowse -imagekey diskimage-class=CRawDiskImage "$@" 2>/dev/null; }
+# Detach only by mount point, only this script's own image, never by /dev/diskN, never -force
+# (2026-11-11 house rule: a device-number detach once killed another session's build).
+own_detach() {
+    python3 -I - "$OUT" "$1" <<'PY' || { echo "not detaching $1: hdiutil info does not show $OUT mounted there"; return 1; }
+import os, plistlib, subprocess, sys
+img, mnt = os.path.realpath(sys.argv[1]), os.path.realpath(sys.argv[2])
+info = plistlib.loads(subprocess.run(['hdiutil', 'info', '-plist'], capture_output=True, check=True).stdout)
+ok = any(os.path.realpath(i.get('image-path', '')) == img and
+         any(os.path.realpath(e.get('mount-point', '/nonexistent')) == mnt for e in i.get('system-entities', []))
+         for i in info.get('images', []))
+sys.exit(0 if ok else 1)
+PY
+    hdiutil detach "$1" >/dev/null 2>&1
+}
 if [ -n "${RESUME:-}" ] && [ -f "$OUT" ] && [ -f "$owners" ]; then
     # RESUME=1: the OS files are in place from an earlier run; redo from the cache step.
     mnt=$(attach "$OUT" | awk -F'\t' '/\/Volumes\// {print $NF}')
     [ -d "$mnt" ] || { echo "could not mount $OUT"; exit 1; }
-    cleanup() { [ -n "${KEEP_MOUNTED:-}" ] || hdiutil detach "$mnt" >/dev/null 2>&1 || true; }
+    cleanup() { [ -n "${KEEP_MOUNTED:-}" ] || own_detach "$mnt" || true; }
     trap cleanup EXIT
     echo "resuming $OUT at $mnt"
 else
 rm -f "$OUT" "$owners"
 truncate -s "${SIZE_MB}m" "$OUT"          # sparse until written
 dev=$(attach -nomount "$OUT" | awk 'NR==1 {print $1}')
+[ -n "$dev" ] || { echo "could not attach $OUT"; exit 1; }
 /sbin/newfs_hfs -s -b 4096 -v MACROOT "/dev/r${dev#/dev/}"   # case-sensitive, no journal
-hdiutil detach "$dev" >/dev/null 2>&1
-mnt=$(attach "$OUT" | awk -F'\t' '/\/Volumes\// {print $NF}')
+# mount the new volume on the same attachment (no detach by device), then work by mount point
+diskutil mount "$dev" >/dev/null
+mnt=$(diskutil info "$dev" | sed -n 's/^ *Mount Point: *//p')
 [ -d "$mnt" ] || { echo "could not mount $OUT"; exit 1; }
-cleanup() { [ -n "${KEEP_MOUNTED:-}" ] || hdiutil detach "$mnt" >/dev/null 2>&1 || true; }
+cleanup() { [ -n "${KEEP_MOUNTED:-}" ] || own_detach "$mnt" || true; }
 trap cleanup EXIT
 touch "$mnt/.metadata_never_index"               # no Spotlight on the build mount
 echo "image $OUT mounted at $mnt"
@@ -126,10 +174,11 @@ mkdir -p "$mnt$CRYPTEX/System/Library/dyld" "$mnt/dev" "$mnt/private/var/tmp" "$
 # tier 1 log, open("/System/Library/dyld/") = ENOENT), so point that at the cryptex copy.
 [ -e "$mnt/System/Library/dyld" ] || ln -s ../Volumes/Preboot/Cryptexes/OS/System/Library/dyld "$mnt/System/Library/dyld"
 # dyld-1378 (26.5) also tries /private/preboot/Cryptexes/OS/ (the iOS layout) after the Preboot path.
-[ "${MACOS:-13}" != 26 ] || [ -e "$mnt/private/preboot" ] || ln -s ../System/Volumes/Preboot "$mnt/private/preboot"
+[ "${MACOS:-13}" = 13 ] || [ -e "$mnt/private/preboot" ] || ln -s ../System/Volumes/Preboot "$mnt/private/preboot"
 fi
 
-build=$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$W/BuildManifest.plist" 2>/dev/null || echo 22G74)
+build=${BUILD_DEFAULT:-22G74}   # PlistBuddy prints "File Doesn't Exist" to stdout with status 0, so test first
+[ ! -f "$W/BuildManifest.plist" ] || build=$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$W/BuildManifest.plist" 2>/dev/null || echo "$build")
 # 3. cache tiers: the arm64e shared cache from the SystemOS cryptex, translated in place
 if [ -n "$CACHE_TIER" ]; then
     "${RD[@]}" get "$SYS_DMG" "$mnt$CRYPTEX" --index "$W/systemos.idx" ${KEYS[@]+"${KEYS[@]}"} \
@@ -145,6 +194,14 @@ if [ -n "$CACHE_TIER" ]; then
             "$mnt$CRYPTEX/System/Library/dyld/dyld_shared_cache_arm64e" --skip libcorecrypto
     fi
 fi
+# 3b. MACOS=15 (A64E_ALL=1): every arm64e Mach-O outside the cache, rewritten the same way and re-signed
+#     ad hoc in place (code slots re-hashed; entitlements, identifier, flags and size kept). Idempotent,
+#     so a RESUME=1 run repeats it harmlessly. Per-file counts: $W/a64e-root-$TIER.txt
+if [ "${A64E_ALL:-0}" = 1 ] && [ "${TRANSLATE_A64E:-1}" = 1 ]; then
+    [ -x "$ROOT/build/venv/bin/python" ] || { echo "build/venv (numpy) missing: see tools/build-ios-root.sh"; exit 1; }
+    "$ROOT/build/venv/bin/python" -I "$ROOT/tools/a64e/a64e-rewrite.py" root "$mnt" \
+        --log "$W/a64e-root-$TIER.txt" 2> "$W/a64e-root-$TIER.err" | tee "$W/a64e-root-$TIER.sum"
+fi
 
 printf 'Starbite macOS root, tier %s, build %s, made %s by tools/macos/build-macos-root.sh\n' \
     "$TIER" "$build" "$(date -u +%Y-%m-%dT%H:%MZ)" > "$mnt/.starbite-macos"
@@ -152,14 +209,17 @@ printf 'Starbite macOS root, tier %s, build %s, made %s by tools/macos/build-mac
 # sbmtltest job): tools/macos/macos26-post.sh, docs/MACOS.md section 12
 [ "${MACOS:-13}" != 26 ] || W="$W" tools/macos/macos26-post.sh "$mnt" "$owners"
 df -h "$mnt" | tail -1
-hdiutil detach "$mnt" >/dev/null
+own_detach "$mnt"
 trap - EXIT
 
 # 4. owners, then a read-only fsck of the result
 python3 -I "$ROOT/tools/macos/hfs-owners.py" "$OUT" "$owners"
-dev=$(attach -nomount "$OUT" | awk 'NR==1 {print $1}')
-/sbin/fsck_hfs -fn "/dev/r${dev#/dev/}" || { hdiutil detach "$dev" >/dev/null 2>&1; echo "fsck_hfs failed"; exit 1; }
-hdiutil detach "$dev" >/dev/null 2>&1
+# (read-only mount, fsck of its raw device, detach by mount point)
+line=$(attach -readonly "$OUT" | awk -F'\t' '/\/Volumes\// {print}')
+dev=$(echo "$line" | awk '{print $1}'); mnt=$(echo "$line" | awk -F'\t' '{print $NF}')
+[ -d "$mnt" ] || { echo "could not mount $OUT read-only for fsck"; exit 1; }
+/sbin/fsck_hfs -fn "/dev/r${dev#/dev/}" || { own_detach "$mnt"; echo "fsck_hfs failed"; exit 1; }
+own_detach "$mnt"
 xxd -s 1024 -l 2 -p "$OUT" | grep -qx 4858 || { echo "$OUT: no HX signature at 1024"; exit 1; }
 ls -l "$OUT"
 shasum -a 256 "$OUT"
