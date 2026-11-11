@@ -1731,6 +1731,7 @@ static void calc_tap(float x, float y)
         if (x >= kx && x < kx + kw && y >= ky && y < ky + 78) { k = i; break; }
     }
     if (k < 0) return;
+    sh_haptic();
     const char *c = CK[k];
     if (k == 0) { CAL.acc = CAL.cur = 0; CAL.op = 0; CAL.entering = CAL.err = CAL.has_dot = CAL.ndig = CAL.frac = 0; }
     else if (CAL.err) return;
@@ -1990,6 +1991,7 @@ static void notes_tap(float x, float y)
     int len = (int)tk_strlen(t), relayout = 0;
     char c = 0;
     int k = kb_hit(x, y, NS.shift, NS.num, &c);
+    if (k) sh_haptic();                                  /* P3h: a key's light tap, as iOS's keyboard */
     if (k == 2) { NS.shift = !NS.shift; relayout = 1; }
     else if (k == 3) { NS.num = !NS.num; relayout = 1; }
     else if (k == 4 && len) t[len - 1] = 0;
@@ -2059,6 +2061,7 @@ static void search_tap(float x, float y)
     }
     char c = 0;
     int k = kb_hit(x, y, SR.shift, SR.num, &c), n = (int)tk_strlen(SR.q), relayout = 0;
+    if (k) sh_haptic();
     if (k == 2) { SR.shift = !SR.shift; relayout = 1; }
     else if (k == 3) { SR.num = !SR.num; relayout = 1; }
     else if (k == 4 && n) SR.q[n - 1] = 0;
@@ -2573,6 +2576,7 @@ static void app_tap(float x, float y)
         if (AS.tab != 3) return;
         int i = key_hit(x, y);
         if (i >= 0) {
+            sh_haptic();
             int n = (int)tk_strlen(AS.num);
             if (n < 15) { AS.num[n] = KD[i][0]; AS.num[n + 1] = 0; build_apnum(); }
             return;
