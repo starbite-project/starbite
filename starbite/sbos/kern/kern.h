@@ -535,6 +535,8 @@ struct gc_quad {
 };
 int gpucomp_init(void *heap, uint64_t bytes);
 int gpucomp_ready(void);
+void *gpucomp_pool(void);
+uint64_t gpucomp_pool_bytes(void);
 uint64_t gpucomp_va(const void *p);
 void gpucomp_clean(const void *p, uint64_t n);
 int gpucomp_compose(void *dst, uint32_t bg, const struct gc_quad *q, unsigned n, uint64_t *us);

@@ -211,6 +211,11 @@ int gpucomp_ready(void)
     return up && !disabled;
 }
 
+/* the GPU-only pool (a destination or source gpucomp_compose takes): the UI's own use, e.g. a full-resolution
+ * wallpaper (the self test uses it for its textures) */
+void *gpucomp_pool(void) { return (void *)(uintptr_t)SB_GPU_POOL; }
+uint64_t gpucomp_pool_bytes(void) { return SB_GPU_POOL_SIZE; }
+
 /* a CPU address the GPU can reach: its GPU address, or 0 */
 uint64_t gpucomp_va(const void *p)
 {
