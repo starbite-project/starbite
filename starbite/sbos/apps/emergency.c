@@ -123,11 +123,11 @@ static void show_sun(void)
     fmt_init(&f);
     fmt_s(&f, "Latitude ");
     deg(&f, lat, 'N', 'S');
-    ui_button(6, f.b, "Type it in", UI_HALF);
+    ui_button(6, f.b, "Tap to type it in", 0);
     fmt_init(&f);
     fmt_s(&f, "Longitude ");
     deg(&f, lon, 'E', 'W');
-    ui_button(7, f.b, "Type it in", UI_HALF);
+    ui_button(7, f.b, "Tap to type it in", 0);
     int age = setting_get(SET_SURV_GNSS);
     if (age >= 0) {
         fmt_init(&f);
@@ -144,8 +144,8 @@ static void show_sun(void)
         }
         ui_button(8, f.b, "Left on the card by Android", 0);
     }
-    ui_textline("No GPS in Starbite OS itself: type the location in, or take a fix in Android first "
-                "(it leaves it on the card). South and west are negative.", GREY);
+    ui_textline("No GPS in Starbite OS itself: type the location in (south and west are negative),", GREY);
+    ui_textline("or take a GPS fix in Android first: it leaves it on the card for this page.", GREY);
 }
 
 static void show_last2(void)
