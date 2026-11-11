@@ -273,6 +273,32 @@ static int floor_i(float v)
 static float fmaxf_(float a, float b) { return a > b ? a : b; }
 static float fminf_(float a, float b) { return a < b ? a : b; }
 static int bins_used;                       /* the last frame's bin entries (the log) */
+static uint32_t bins_culled, bins_empty;
+void gpucomp_last_stats(uint32_t *entries, uint32_t *culled, uint32_t *empty)
+{
+    *entries = (uint32_t)bins_used;
+    *culled = bins_culled;
+    *empty = bins_empty;
+}
+/* what src shows in the source rect [u0, u1) x [v0, v1) (clamped): 0 nothing, 1 something, 2 opaque everywhere */
+static int occ_rect(const struct gc_quad *s, float u0, float v0, float u1, float v1)
+{
+    int a0 = floor_i(u0), b0 = floor_i(v0), a1 = floor_i(u1), b1 = floor_i(v1);
+    a0 = a0 < 0 ? 0 : a0;
+    b0 = b0 < 0 ? 0 : b0;
+    a1 = a1 >= (int)s->w ? (int)s->w - 1 : a1;
+    b1 = b1 >= (int)s->h ? (int)s->h - 1 : b1;
+    if (a1 < a0 || b1 < b0)
+        return 0;
+    int any = 0, all = 1;
+    for (int y = b0 / GC_OCC_PX; y <= b1 / GC_OCC_PX && y < (int)s->occ_h; ++y)
+        for (int x = a0 / GC_OCC_PX; x <= a1 / GC_OCC_PX && x < (int)s->occ_w; ++x) {
+            uint8_t o = s->occ[(unsigned)y * s->occ_w + (unsigned)x];
+            any |= o != 0;
+            all &= o == 2;
+        }
+    return all ? 2 : any;
+}
 
 /* only the bins the damage rects touch are drawn (nr 0: everything); the rest of dst keeps what it holds */
 static uint8_t dirty[GPUCOMP_BIN_W * GPUCOMP_BIN_H];
@@ -300,6 +326,7 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
     for (unsigned k = 0; k < GPUCOMP_BIN_W * GPUCOMP_BIN_H; ++k)
         bins[k][0] = 0;
     bins_used = 0;
+    bins_culled = bins_empty = 0;
     for (unsigned i = 0; i < n; ++i) {
         const struct gc_quad *s = &qs[i];
         volatile uint32_t *q = p + 16 + i * (GPUCOMP_C2_QB / 4U);
@@ -382,9 +409,42 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         by0 = by0 < 0 ? 0 : by0;
         bx1 = bx1 >= (int)GPUCOMP_BIN_W ? (int)GPUCOMP_BIN_W - 1 : bx1;
         by1 = by1 >= (int)GPUCOMP_BIN_H ? (int)GPUCOMP_BIN_H - 1 : by1;
+        /* v4: per bin, what the quad shows there. Its block map (a bitmap's, not a 3-slice's or glass's: glass draws
+         * the backdrop wherever its mask is) skips bins where it is empty; an opaque quad at full alpha without a fade
+         * that covers a whole bin (inside its clip less the corner radius) drops everything under it there */
+        int solid = (s->flags & GC_SOLID) != 0;
+        if (solid && !(s->solid >> 24))
+            continue;
+        int full = s->alpha >= .999f && !(s->flags & GC_FADE);
+        int opq = full && (solid ? (s->solid >> 24) == 255U : (s->flags & GC_OPAQUE) != 0);
+        int mapped = !solid && s->occ && !(s->flags & (GC_SLICE_H | GC_SLICE_V | GC_GLASS)) && s->isx > 0 && s->isy > 0;
+        float m = (s->flags & GC_BILINEAR) ? 1.0f : 0;     /* a bilinear tap reaches a px further */
+        float crad = s->radius >= .01f ? s->radius : 0;
+        float ix0 = fmaxf_(x0, s->cx0 + crad), iy0 = fmaxf_(y0, s->cy0 + crad);
+        float ix1 = fminf_(x1, s->cx1 - crad), iy1 = fminf_(y1, s->cy1 - crad);
         for (int by = by0; by <= by1; ++by)
             for (int bx = bx0; bx <= bx1; ++bx) {
+                float X0 = (float)(bx * (int)GPUCOMP_BIN_PX), Y0 = (float)(by * (int)GPUCOMP_BIN_PX);
+                float X1 = X0 + (float)GPUCOMP_BIN_PX, Y1 = Y0 + (float)GPUCOMP_BIN_PX;
+                int cover = X0 >= ix0 && X1 <= ix1 && Y0 >= iy0 && Y1 <= iy1;
+                int o = opq ? 2 : 1;
+                if (mapped) {
+                    float rx0 = fmaxf_(X0, x0), ry0 = fmaxf_(Y0, y0), rx1 = fminf_(X1, x1), ry1 = fminf_(Y1, y1);
+                    int oc = occ_rect(s, (rx0 - s->dx0) * s->isx - m, (ry0 - s->dy0) * s->isy - m,
+                                      (rx1 - s->dx0) * s->isx + m, (ry1 - s->dy0) * s->isy + m);
+                    if (!oc) {
+                        ++bins_empty;
+                        continue;
+                    }
+                    if (oc == 2 && full)
+                        o = 2;
+                }
                 uint8_t *e = bins[(unsigned)by * GPUCOMP_BIN_W + (unsigned)bx];
+                if (o == 2 && cover && e[0]) {
+                    bins_culled += e[0];
+                    bins_used -= e[0];
+                    e[0] = 0;
+                }
                 if (e[0] < GPUCOMP_BIN_B - 1U) {
                     e[1U + e[0]] = (uint8_t)i;
                     ++e[0];
@@ -664,6 +724,7 @@ static unsigned check_scene(const volatile uint32_t *fb, uint32_t bg, const char
 /* ---- comp2 (the UI's item model) against the CPU ----------------------------------------------------------- */
 #define MASK_CARD (VA_POOL + 0xa50000ULL)                   /* 600 x 300 A8: the card's glass mask (rounded) */
 #define TEX_PILL (VA_POOL + 0xa80000ULL)                    /* 200 x 60: a pill drawn 3-sliced to 500 wide */
+#define TEX_SPARSE (VA_POOL + 0xb00000ULL)                  /* 256 x 256: only its top-left 32 x 32 block shows */
 static struct gc_quad G[8];
 static unsigned ng;
 
@@ -685,14 +746,14 @@ static void make_comp2_scene(void)
     const uint32_t *bgp = POOL_CPU(TEX_BG), *cd = POOL_CPU(TEX_CARD), *half = POOL_CPU(BUF_HALF);
     /* the wallpaper (bilinear 2x), a glass card (the blurred half buffer through the mask, then the card at .8),
      * a faded card (fades at 1500..1600 and 1900..2000), a 3-sliced pill, a solid inside a rounded clip */
-    G[ng++] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    G[ng++] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     G[ng++] = (struct gc_quad){ cd, 600, 600, 300, GC_GLASS, 0, .8f, 400, 500, 1, 1, 400, 500, 1000, 800, 0, 0, 0, 0, 0, 0, 0, 0,
-                                POOL_CPU(MASK_CARD), 600, half, 720, .5f, 720, 1480 };
+                                POOL_CPU(MASK_CARD), 600, half, 720, .5f, 720, 1480, 0, 0, 0 };
     G[ng++] = (struct gc_quad){ cd, 600, 600, 300, GC_FADE | GC_BILINEAR, 0, 1, 100, 1450, .5f, 1, 100, 1450, 1300, 2050, 0,
-                                1500, 1600, 1900, 2000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                                1500, 1600, 1900, 2000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     G[ng++] = (struct gc_quad){ pl, 200, 200, 60, GC_SLICE_H, 0, 1, 300, 2300, 1, 1, 300, 2300, 800, 2360, 0, 0, 0, 0, 0,
-                                500, 30, 30, 0, 0, 0, 0, 0, 0, 0 };
-    G[ng++] = (struct gc_quad){ 0, 0, 200, 100, GC_SOLID, 0xccffffffU, 1, 1000, 2500, 1, 1, 900, 2450, 1250, 2650, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                                500, 30, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    G[ng++] = (struct gc_quad){ 0, 0, 200, 100, GC_SOLID, 0xccffffffU, 1, 1000, 2500, 1, 1, 900, 2450, 1250, 2650, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 }
 
 static float slice_c(float v, float len, float s0, float s1, float srch)
@@ -788,14 +849,14 @@ static void motion_scene(float dy)
 {
     const uint32_t *bgp = POOL_CPU(TEX_BG), *cd = POOL_CPU(TEX_CARD);
     ngm = 0;
-    GM[ngm++] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    GM[ngm++] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     for (unsigned i = 0; i < 16U; ++i) {
         float x = 120.0f + (float)(i % 2) * 40.0f, y = 600.0f + (float)i * 260.0f + dy;
         GM[ngm++] = (struct gc_quad){ cd, 600, 600, 300, GC_BILINEAR, 0, .92f, x, y, .5f, 1, x, y, x + 1200.0f, y + 300.0f, 60,
-                                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     }
     GM[ngm++] = (struct gc_quad){ 0, 0, 400, 18, GC_SOLID, 0xccffffffU, 1, 520, 2880, 1, 1, 520, 2880, 920, 2898, 9,
-                                  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                                  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 }
 
 /* ---- the self test's steps ---------------------------------------------------------------------------------- */
@@ -808,6 +869,7 @@ static unsigned gpu_mhz(void)
     uint64_t hz = sb_gpu_hz(&off);
     return off ? 0 : (unsigned)(hz / 1000000U);
 }
+unsigned gpucomp_mhz(void) { return up ? gpu_mhz() : 0; }
 
 int gpucomp_selftest_step(void)
 {
@@ -943,6 +1005,76 @@ int gpucomp_selftest_step(void)
         } else {
             sb_log("gpucomp: comp2: 14 points within 3 levels of the CPU's (glass, fade, 3-slice, solid)");
         }
+        st = 13;
+        return 0;
+    }
+    case 13: {
+        /* v4's bins: a sparse bitmap with its block map (only its top-left 32 x 32 block shows: the rest is skipped)
+         * and an opaque solid over a card (what is under it is culled); the pixels must be what drawing everything
+         * gives (the CPU's twin ignores the maps) */
+        uint32_t *sp = POOL_CPU(TEX_SPARSE);
+        for (unsigned y = 0; y < 256U; ++y)
+            for (unsigned x = 0; x < 256U; ++x)
+                sp[y * 256U + x] = x < 32U && y < 32U ? 0xff20a0e0U : 0;
+        static uint8_t occ[64];
+        for (unsigned k = 0; k < 64U; ++k)
+            occ[k] = 0;
+        occ[0] = 2;
+        __asm__ volatile("dsb sy" ::: "memory");
+        static struct gc_quad V[4];
+        const uint32_t *bgp = POOL_CPU(TEX_BG), *cd = POOL_CPU(TEX_CARD);
+        V[0] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        V[1] = (struct gc_quad){ sp, 256, 256, 256, 0, 0, 1, 600, 1600, 1, 1, 600, 1600, 856, 1856, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        V[1].occ = occ;
+        V[1].occ_w = V[1].occ_h = 8;
+        V[2] = (struct gc_quad){ cd, 600, 600, 300, 0, 0, .9f, 200, 300, 1, 1, 200, 300, 800, 600, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        V[3] = (struct gc_quad){ 0, 0, 900, 900, GC_SOLID, 0xff402060U, 1, 100, 100, 1, 1, 100, 100, 1000, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        uint64_t us = 0;
+        if (!gpucomp_compose((void *)SB_FB, bg, V, 4, &us)) {
+            fail("the bins' test did not run");
+            st = 4;
+            return 0;
+        }
+        uint32_t ent = 0, cul = 0, emp = 0;
+        gpucomp_last_stats(&ent, &cul, &emp);
+        cq = V;
+        ncq = 4;
+        static const unsigned vp[][2] = { { 610, 1610 }, { 700, 1700 }, { 850, 1850 }, { 300, 400 }, { 900, 900 },
+                                           { 1100, 500 }, { 500, 1100 }, { 620, 1625 } };
+        unsigned bad = 0;
+        for (unsigned i = 0; i < sizeof vp / sizeof vp[0]; ++i) {
+            uint32_t want = cpu_px2(vp[i][0], vp[i][1], bg), got = fb[vp[i][1] * SB_FB_W + vp[i][0]];
+            if (!near(want, got, 3)) {
+                if (bad < 4) {
+                    struct ub u;
+                    ub_init(&u);
+                    ub_s(&u, "gpucomp: bins: pixel ");
+                    ub_dec(&u, vp[i][0]);
+                    ub_c(&u, ',');
+                    ub_dec(&u, vp[i][1]);
+                    ub_s(&u, " GPU ");
+                    ub_hex(&u, got, 8);
+                    ub_s(&u, " CPU ");
+                    ub_hex(&u, want, 8);
+                    sb_log(u.b);
+                }
+                ++bad;
+            }
+        }
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, bad ? "gpucomp: FAILED: bins (culling, skipping): points wrong; entries " :
+                       "gpucomp: bins: culled and skipped tiles give the same pixels (8 points); entries ");
+        ub_dec(&u, ent);
+        ub_s(&u, ", culled ");
+        ub_dec(&u, cul);
+        ub_s(&u, ", empty ");
+        ub_dec(&u, emp);
+        sb_log(u.b);
+        if (bad || !cul || !emp)
+            ++fails;
+        if (!bad && (!cul || !emp))
+            sb_log("gpucomp: FAILED: bins: nothing was culled or skipped (the maps are not used)");
         st = 4;
         return 0;
     }
