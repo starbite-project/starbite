@@ -137,7 +137,7 @@ float tk_text_w(int font, float size, const char *s, float ls, int flags)
     for (int i = 0; i < n; i++) {
         int adv, lsb;
         stbtt_GetGlyphHMetrics(&f->info, g[i], &adv, &lsb);
-        w += (adv + (i + 1 < n ? kern(f, g[i], g[i + 1]) : 0)) * sc + ls;
+        w += (adv + (i + 1 < n ? kern(f, g[i], g[i + 1]) : 0)) * sc + (i + 1 < n ? ls : 0);   /* P3i: no tracking after the last glyph (it shifted centred text by ls / 2) */
     }
     return w;
 }
