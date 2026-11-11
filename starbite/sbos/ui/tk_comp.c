@@ -802,6 +802,7 @@ static tk_gpu_item gq[TK_GPU_MAX];
  * the four cores, 2 px per 64-bit read, and the cache clean of those rows in the same pass (the phone's first frame
  * with a new full-screen layer spent ~30 ms scanning and cleaning on one core) */
 typedef struct { tk_comp *c; tk_layer *l; int map; uint32_t ow; } occ_job;
+typedef uint64_t __attribute__((aligned(4), may_alias)) u64a;
 static void occ_rows(void *a, int r0, int r1)
 {
     occ_job *J = a;
@@ -818,8 +819,7 @@ static void occ_rows(void *a, int r0, int r1)
                     int x = x0;
                     if (x & 1) { any |= (uint64_t)r[x] << 32; all &= (uint64_t)r[x] << 32 | 0xff000000u; x++; }
                     for (; x + 2 <= x1; x += 2) {
-                        uint64_t v;
-                        tk_memcpy(&v, r + x, 8);
+                        uint64_t v = *(const u64a *)(r + x);        /* one load (tk_memcpy was a call per 2 px) */
                         any |= v;
                         all &= v;
                     }
@@ -884,7 +884,8 @@ static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
     }
     /* the ground: the wallpaper from its half-resolution copy, smooth (bilinear 2x), as the CPU's rest frames */
     gq[n++] = (tk_gpu_item){ c->base_half.px, (uint32_t)c->base_half.stride, (uint32_t)c->base_half.w, (uint32_t)c->base_half.h,
-                             TK_GPU_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, TK_W, TK_H, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                             TK_GPU_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, TK_W, TK_H, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                             c->ground_gen };
     for (int i = 0; i < cur.n; i++) {
         const item *it = &cur.it[i];
         tk_layer *l = it->l;
@@ -913,6 +914,7 @@ static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
             continue;
         }
         gpu_flush_layer(c, l);
+        q->gen = l->gen;
         if (l->gpu_occ_ok) {
             q->occ = l->gpu_occ;
             q->occ_w = l->gpu_occ_w;
@@ -930,6 +932,7 @@ static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
         }
         if (l->glass.v && c->bw_half.px && !(l->glass_opaque_only && it->alpha < .999f)) {
             q->flags |= TK_GPU_GLASS;
+            q->gen += c->ground_gen << 20;      /* the backdrop is the ground's */
             q->mask = l->glass.v;
             q->mstride = (uint32_t)l->glass.w;
             q->bd = c->bw_half.px;

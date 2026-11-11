@@ -196,6 +196,8 @@ typedef struct {
     uint32_t bw, bh;
     const uint8_t *occ;        /* the layer's block map (gpu_occ), or 0 */
     uint32_t occ_w, occ_h;
+    uint32_t gen;              /* the content's stamp (the layer's gen, the ground's): what a cache of the frame's
+                                * unchanged bottom items compares */
 } tk_gpu_item;
 #define TK_GPU_MAX 127
 

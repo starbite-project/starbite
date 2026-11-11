@@ -612,40 +612,72 @@ static void next_screen(int on)
 /* ---- P4: the GPU compositor (kern/gpucomp.c): the frames on the Mali-G72, full resolution ---------------------- */
 _Static_assert(sizeof(tk_gpu_item) == sizeof(struct gc_quad), "tk_gpu_item is gpucomp's gc_quad");
 static int gpu_started;
-/* the wallpaper at full resolution in the GPU's pool, made once per ground (base_half 2x, bilinear, on the GPU):
- * every frame then reads it 1:1 (one load a pixel instead of a bilinear's four) */
-static uint32_t wall_gen, wall_seen, wall_made;
-static int wall_ok, wall_still;
-static tk_gpu_item gx[TK_GPU_MAX];
+/* v5.1, the bottom cache: the frame's bottom items that have not changed for two frames (the wallpaper; the lock
+ * screen under the sleep fade; home under Control Centre) composed once into the GPU's pool, and frames draw that
+ * (one load a pixel) plus the items above it. A ground that changes every frame (Emergency's cross-fade) is never
+ * cached: its frames read base_half bilinearly as they come. */
+static int same_item(const tk_gpu_item *a, const tk_gpu_item *b)
+{
+    return a->src == b->src && a->stride == b->stride && a->w == b->w && a->h == b->h && a->flags == b->flags &&
+           a->solid == b->solid && a->alpha == b->alpha && a->dx0 == b->dx0 && a->dy0 == b->dy0 && a->isx == b->isx &&
+           a->isy == b->isy && a->cx0 == b->cx0 && a->cy0 == b->cy0 && a->cx1 == b->cx1 && a->cy1 == b->cy1 &&
+           a->radius == b->radius && a->ft0 == b->ft0 && a->ft1 == b->ft1 && a->fb0 == b->fb0 && a->fb1 == b->fb1 &&
+           a->len == b->len && a->s0 == b->s0 && a->s1 == b->s1 && a->mask == b->mask && a->mstride == b->mstride &&
+           a->bd == b->bd && a->bstride == b->bstride && a->bk == b->bk && a->bw == b->bw && a->bh == b->bh &&
+           a->gen == b->gen;
+}
+static tk_gpu_item prevq[TK_GPU_MAX], cacheq[TK_GPU_MAX], gx[TK_GPU_MAX];
+static int prev_n, cache_n, stable_p = -1, stable_k;
+static uint32_t wall_made, cache_made;
 _Static_assert(sizeof(tk_irect) == sizeof(struct gc_rect), "tk_irect is gpucomp's gc_rect");
 static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us)
 {
     (void)ctx;
     const tk_gpu_item *use = it;
-    uint32_t *wall = (uint32_t *)gpucomp_pool();
-    if (n > 0 && n <= TK_GPU_MAX && it[0].src == comp.base_half.px && gpucomp_pool_bytes() >= (uint64_t)TK_W * TK_H * 4U) {
-        /* a ground that changes every frame (Emergency's cross-fade) is read bilinearly as it is; the copy is made
-         * once it has kept still for two frames */
-        if (comp.ground_gen != wall_seen) { wall_seen = comp.ground_gen; wall_still = 0; }
-        else if (wall_still < 2) wall_still++;
-        if ((!wall_ok || wall_gen != comp.ground_gen) && wall_still >= 2) {
+    int un = n;
+    uint32_t *cache = (uint32_t *)gpucomp_pool();
+    if (n > 0 && n <= TK_GPU_MAX && gpucomp_pool_bytes() >= (uint64_t)TK_W * TK_H * 4U && it[0].src == comp.base_half.px) {
+        /* the prefix unchanged since the last frame, and how long it has been that length */
+        int p = 0;
+        while (p < n && p < prev_n && same_item(&it[p], &prevq[p])) p++;
+        tk_memcpy(prevq, it, sizeof(tk_gpu_item) * (size_t)n);
+        prev_n = n;
+        if (p == stable_p) { if (stable_k < 2) stable_k++; }
+        else { stable_p = p; stable_k = 0; }
+        int valid = cache_n > 0 && cache_n <= n;
+        for (int i = 0; valid && i < cache_n; i++) valid = same_item(&it[i], &cacheq[i]);
+        /* a longer still prefix than the cache holds, still for two frames: the cache again (all of it, at most
+         * n - 1 items: the top one is usually what moves) */
+        int want = p < n ? p : n - 1;
+        if (stable_k >= 2 && want >= 1 && (!valid || want > cache_n)) {
             uint64_t u2 = 0;
-            wall_ok = gpucomp_compose(wall, 0xff000000U, (const struct gc_quad *)it, 1, &u2);
-            wall_gen = comp.ground_gen;
-            if (wall_ok && !wall_made++) sb_logx("next: gpu: the wallpaper at full resolution (the first), us: ", u2);
+            if (gpucomp_compose(cache, 0xff000000U, (const struct gc_quad *)it, (unsigned)want, &u2)) {
+                tk_memcpy(cacheq, it, sizeof(tk_gpu_item) * (size_t)want);
+                cache_n = want;
+                valid = 1;
+                cache_made++;
+                if (want == 1 && !wall_made++) sb_logx("next: gpu: the wallpaper at full resolution (the first), us: ", u2);
+            } else
+                cache_n = 0, valid = 0;
         }
-        if (wall_ok && wall_gen == comp.ground_gen) {
-            tk_memcpy(gx, it, sizeof(tk_gpu_item) * (size_t)n);
-            gx[0].src = wall;
+        if (valid) {
+            /* the cache as one opaque 1:1 quad, then the items above it */
+            tk_memset(&gx[0], 0, sizeof gx[0]);
+            gx[0].src = cache;
             gx[0].stride = TK_W;
             gx[0].w = TK_W;
             gx[0].h = TK_H;
-            gx[0].flags = 0;
+            gx[0].flags = TK_GPU_OPAQUE;
+            gx[0].alpha = 1;
             gx[0].isx = gx[0].isy = 1;
+            gx[0].cx1 = TK_W;
+            gx[0].cy1 = TK_H;
+            tk_memcpy(&gx[1], &it[cache_n], sizeof(tk_gpu_item) * (size_t)(n - cache_n));
             use = gx;
+            un = n - cache_n + 1;
         }
     }
-    int ok = gpucomp_compose_damage(dst, 0xff000000U, (const struct gc_quad *)use, (unsigned)n, (const struct gc_rect *)dmg,
+    int ok = gpucomp_compose_damage(dst, 0xff000000U, (const struct gc_quad *)use, (unsigned)un, (const struct gc_rect *)dmg,
                                     (unsigned)(ndmg > 0 ? ndmg : 0), us);
     if (!ok && !gpucomp_ready()) {               /* a fault (gpucomp logged it, the GPU is off): the CPU from now on */
         comp.gpu = 0;
@@ -940,8 +972,8 @@ static void gpu_vs_cpu(void)
     ub_dec(&u, comp.gpu_frames);
     ub_s(&u, " frames on the GPU, ");
     ub_dec(&u, comp.gpu_fallbacks);
-    ub_s(&u, " given back to the CPU; full-resolution wallpapers made ");
-    ub_dec(&u, wall_made);
+    ub_s(&u, " given back to the CPU; bottom caches made ");
+    ub_dec(&u, cache_made);
     sb_log(u.b);
     if (!gpu_started) {
         sb_log("selftest: FAILED: next: gpu: the GPU did not come up (see the gpucomp lines)");
