@@ -166,6 +166,7 @@ static void show(void)
         ui_button(31, "SOS options", "Morse, beacon", UI_HALF);
         ui_button(32, "Sun", "Sunrise, sunset", UI_HALF);
         ui_button(33, "Last 2 %", "Only the essentials", UI_HALF);
+        ui_button(34, "Survival guide", "First aid, water, shelter, signals", 0);
         ui_textline("Compass and level: they need the sensor hub driver (not yet).", GREY);
         ui_textline("Calls and messages: emergency calls need the modem; nothing here calls or sends.", GREY);
     }
@@ -243,6 +244,8 @@ void app_event(const struct sbos_event *ev)
     case EV_APP_BUTTON:
         if (ev->id == 5)
             app_open("info");
+        else if (ev->id == 34)
+            app_open("guide");              /* 1.2-alpha28 */
         else if (ev->id >= 30 && ev->id <= 33) {
             page = P_USB + (int)(ev->id - 30);
             if (page == P_USB && setting_get(SET_SURV_USB) > 0)
