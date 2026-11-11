@@ -1875,6 +1875,15 @@ Every app failure must be a removed device that the app or DWM recovers from.
   - `ResetEngine`/`ResetFromTimeout` report everything dropped as aborted, up to `LastSubmittedFence`;
   - `QueryEngineStatus` reports overdue chains as unresponsive;
   - counters `Live_TdrEngineResets`, `Live_TdrAdapterResets`, `Live_TdrQueriedHung`.
+- **T41's run (`build/win/results-t41`): passed.**
+  - No bugcheck. The KMD recovered **45 hangs** itself (`Live_JobsTimedOut` 45); `Live_TdrEngineResets`,
+    `Live_TdrAdapterResets` and `Live_TdrQueriedHung` are all 0.
+  - One DWM process (no restarts), `sweep end` reached, tests as T38, no new WER reports.
+  - **The trigger is not only Widgets:** Widgets was skipped (C: 980 MiB, under the 1.5 GB gate), and the hangs came
+    during Quick Settings (Win+A: 19 s) and the Notification Centre (Win+N: 15 s), ShellExperienceHost's
+    XAML/acrylic.
+  - T41 became the user's default (13:50).
+
 - **Still open:**
   - **why the GPU hangs:** find the surface, then the job;
   - **DMA_FAULTED instead of DMA_COMPLETED for faulted work** (Phase 1);
