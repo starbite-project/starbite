@@ -1784,6 +1784,23 @@ Every app failure must be a removed device that the app or DWM recovers from.
   time slot. It writes `report.md` and a reference | ours | difference PNG per surface.
 - **Stage:** `build/win/stage/sbwddm-t37`.
 
+### 6.47 The user's history (pull 2026-11-11) and T38: linear STAGING/DYNAMIC textures (sb-patches/0131)
+
+- **Sources:** `build/win/pull-1111` (448 WER reports) and `build/win/user-evtx-1111` (System/Application.evtx,
+  parsed with python-evtx).
+- **sblinkd.exe:** 14 crashes in T32c's sbumd at `pan_access_tiled_image_generic_aligned+0xaf4`.
+  - It maps a D3D11 STAGING copy of the desktop (`starbite/link/win/sender/capture_win.c`).
+  - `panfrost_should_tile` accepted it (no bind flags), so STAGING textures were u-interleaved or AFBC. Every Map
+    de-tiled the 1440x2960 subresource on the CPU, and crashed there with AFBC off.
+- **0131:** `panfrost_best_modifier` returns LINEAR for STAGING and DYNAMIC textures. GPU copies into them use the
+  0105 blit; Map is a plain view.
+- **Bluescreens:** Kernel-Power 41 always has BugcheckCode 0, there are no 1001 events, and the 6008s are mostly
+  test-cycle resets. The ledger (6.45) is the source from now on.
+- **Since T32b:** no keyboard/InputApp crash and no DWM crash in our builds.
+- **For the big-core track:** 121 illegal-instruction (0xc000001d) crashes in winsqlite3.dll, all from 11-10 19:48
+  UTC, when the M3 boots of the same install began.
+- **Stage:** `build/win/stage/sbwddm-t38` (= T37 + sbumd 4828e13d).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

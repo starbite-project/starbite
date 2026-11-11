@@ -1,0 +1,20 @@
+diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
+index e6365c2..0ec7f97 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -802,6 +802,15 @@ panfrost_best_modifier(struct pipe_screen *pscreen,
+    if (unlikely(dev->debug & PAN_DBG_LINEAR))
+       return DRM_FORMAT_MOD_LINEAR;
+ 
++   /* Starbite (sb-patches/0131, docs/WIN11-GPU.md 6.47): D3D's CPU-access textures are linear. A STAGING texture
++    * (no bind flags: the GPU only copies into or out of it, through sb_resource_copy_region's blit) was tiled
++    * u-interleaved (or AFBC), so every Map detiled the whole subresource on the CPU: 17 MB per frame for sblinkd's
++    * 1440x2960 desktop copy, which crashed in pan_access_tiled_image_generic_aligned (14 WER reports with T32c,
++    * where AFBC is off). DYNAMIC textures are CPU-written every Map: linear too, so no tiling on the CPU at all. */
++   if (pres->base.target != PIPE_BUFFER &&
++       (pres->base.usage == PIPE_USAGE_STAGING || pres->base.usage == PIPE_USAGE_DYNAMIC))
++      return DRM_FORMAT_MOD_LINEAR;
++
+    int afrc_rate = screen->force_afrc_rate;
+    if (afrc_rate < 0)
+       afrc_rate = pres->base.compression_rate;
