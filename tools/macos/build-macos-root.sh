@@ -74,6 +74,7 @@ elif [ "${MACOS:-13}" = 15 ]; then
     # Every arm64e Mach-O on the root is rewritten too (a64e-rewrite.py root: re-hashed, ad hoc), not only the cache
     A64E_ALL=${A64E_ALL:-1}
     BUILD_DEFAULT=24G84
+    PREFILL=${PREFILL-1}             # the stick is exFAT: paced zero-fill first (see the image step)
     RESERVE_MB=${RESERVE_MB:-5900}   # SBWORK is shared: leave 5 GB for the other sessions after the image
     case $TIER in
         t0) SIZE_MB=${SIZE_MB:-64}; LISTS=(--list tools/macos/sequoia-t0.list); OUT=${OUT:-$W/root-15t0.img}; CACHE_TIER= ;;
@@ -129,7 +130,32 @@ if [ -n "${RESUME:-}" ] && [ -f "$OUT" ] && [ -f "$owners" ]; then
     echo "resuming $OUT at $mnt"
 else
 rm -f "$OUT" "$owners"
-truncate -s "${SIZE_MB}m" "$OUT"          # sparse until written
+if [ -n "${PREFILL:-}" ]; then
+    # PREFILL=1 (default for MACOS=15): the image file is written with zeros front to back in paced 64 MiB chunks,
+    # each synced, before anything else. On exFAT (no sparse files) a plain truncate leaves the zero-fill to the first
+    # write past the end (newfs_hfs's alternate volume header): one 16 GiB burst in a single write call, during which
+    # the SBWORK stick dropped off the USB bus (2026-11-11). Stops if the volume vanishes.
+    python3 -I - "$OUT" "$SIZE_MB" <<'PY' || { echo "prefill of $OUT failed"; exit 1; }
+import os, sys, time
+out, mb = sys.argv[1], int(sys.argv[2])
+chunk = 64 << 20
+zero = bytes(chunk)
+total = mb << 20
+t0 = time.time()
+with open(out, 'wb', buffering=0) as f:
+    done = 0
+    while done < total:
+        n = min(chunk, total - done)
+        f.write(zero[:n])
+        os.fsync(f.fileno())
+        done += n
+        if done % (1 << 30) == 0 or done == total:
+            print(f'prefill {done >> 20} / {mb} MiB, {done / (time.time() - t0) / 1e6:.1f} MB/s', flush=True)
+        time.sleep(0.05)
+PY
+else
+    truncate -s "${SIZE_MB}m" "$OUT"          # sparse until written
+fi
 dev=$(attach -nomount "$OUT" | awk 'NR==1 {print $1}')
 [ -n "$dev" ] || { echo "could not attach $OUT"; exit 1; }
 /sbin/newfs_hfs -s -b 4096 -v MACROOT "/dev/r${dev#/dev/}"   # case-sensitive, no journal
