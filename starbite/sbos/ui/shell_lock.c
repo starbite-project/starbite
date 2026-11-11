@@ -38,6 +38,18 @@ static tk_comp *C;
 #define GROUP_W CONTENT_W
 #define ROW_TX (MARGIN + 16)
 #define TAB_W (GROUP_W / 4)
+/* P3p (P3j-5): iOS's header bands under the status bar: the nav row (44 pt: its items centred on NAV_MID, 17 pt
+ * text on NAV_BASE), then the large title row (52 pt; 34 pt Bold on LARGE_BASE); a page's content from
+ * CONTENT_TOP, a pushed page's (inline title, no large one) from PUSHED_TOP */
+#define SAFE_TOP 44.0f
+#define NAVBAR_H 44.0f
+#define LARGE_H 52.0f
+#define NAV_MID (SAFE_TOP + NAVBAR_H / 2)
+#define NAV_BASE (SAFE_TOP + 28.2f)
+#define LARGE_BASE (SAFE_TOP + NAVBAR_H + 36)
+#define CONTENT_TOP (SAFE_TOP + NAVBAR_H + LARGE_H + 10)
+#define PUSHED_TOP (SAFE_TOP + NAVBAR_H + 16)
+#define IN_NAV(y) ((y) >= SAFE_TOP - 4 && (y) < SAFE_TOP + NAVBAR_H)
 
 /* ---- the catalog as the concept groups it (P2: from the store's catalog, as the boot menu) ----------------- */
 typedef struct { const char *k, *name, *meta, *tag; int self; } sys_t;
@@ -215,21 +227,29 @@ static void prep_tree(tk_layer *l);   /* P3g: home's half copies again right aft
 static void build_apsb(void);
 static int sys_charging;           /* P2y: sh_sysinfo's (the status bar's battery is green while charging) */
 #define SYS_CHARGING() sys_charging
+static void d_text_box(dc *d, int f, float size, float x, float base, float maxw, int align, const char *s, float ls, int fl, tk_col c, int shadow);
+/* P3p (P3j-5): iOS's status bar metrics: the left text 17 pt / 600 at MARGIN + 16, cap-centred on y 30 (baseline
+ * 36.2); the battery centred on y 30 with its right edge at 390 - MARGIN - 16; the Wi-Fi glyph and the bars (with
+ * the RAT, 15 pt / 600) to its left, each 6 pt apart */
+#define SB_MID 30.0f
+#define SB_BASE 36.2f
 static void status_bar(dc *d, const char *left)
 {
-    d_text(d, TK_IT600, 15, 36, 29.5f, left, 0, 0, INK, 1);
+    d_text_box(d, TK_IT600, 17, MARGIN + 16, SB_BASE, 150, 0, left, 0, 0, INK, 1);   /* the carrier: at most 150 pt */
+    float bx = CONTENT_R - 16 - 27.6f, by = SB_MID - 6, x = bx - 6;
+    /* wifi-sbos-next: the Wi-Fi glyph while joined with an address */
+    if (SB_WIFI) { x -= 17; d_icon(d, "sb-wifi", x, SB_MID - 6, 1); x -= 6; }
     if (SB_CELL.state == 1 && SB_CELL.bars >= 0) {
         /* four bars (0..5 from the CP: 5 is four), the RAT before them: only while the modem is on */
         int n = SB_CELL.bars >= 4 ? 4 : SB_CELL.bars;
-        for (int i = 0; i < 4; i++) d_rrect(d, 289 + 4.5f * i, 30 - (4.5f + 2.5f * i), 3, 4.5f + 2.5f * i, 1, W(i < n ? 1 : .3f));
+        x -= 16.5f;
+        for (int i = 0; i < 4; i++) d_rrect(d, x + 4.5f * i, by + 12 - (4.5f + 2.5f * i), 3, 4.5f + 2.5f * i, 1, W(i < n ? 1 : .3f));
         const char *r = SB_CELL.rat == 7 ? "LTE" : SB_CELL.rat == 4 ? "3G" : SB_CELL.rat >= 1 && SB_CELL.rat <= 3 ? "2G" : "";
-        if (r[0]) d_text(d, TK_IT600, 12, 286 - tk_text_w(TK_IT600, PT(12), r, 0, 0) / TK_PT, 29.5f, r, 0, 0, INK, 1);
+        if (r[0]) d_text(d, TK_IT600, 15, x - 4 - tk_text_w(TK_IT600, PT(15), r, 0, 0) / TK_PT, SB_MID + 5.5f, r, 0, 0, INK, 1);
     }
-    /* wifi-sbos-next: the Wi-Fi glyph while joined with an address (the concept's place); the battery drawn from
-     * the live charge (iOS's glyph: a translucent body, the fill by percent, red at 20 % or less, green while
-     * charging, the nub) */
-    if (SB_WIFI) d_icon(d, "sb-wifi", 310, 18, 1);
-    float bx = 334, by = 18.5f, fw = 21.0f * tk_clampf(ST.pct / 100.0f, .04f, 1);
+    /* the battery drawn from the live charge (iOS's glyph: a translucent body, the fill by percent, red at 20 % or
+     * less, green while charging, the nub) */
+    float fw = 21.0f * tk_clampf(ST.pct / 100.0f, .04f, 1);
     d_rrect(d, bx, by, 25, 12, 3.6f, W(.35f));
     d_rrect(d, bx + 2, by + 2, fw, 8, 2, ST.pct <= 20 && !SYS_CHARGING() ? tk_hex(0xff453a, 1) : SYS_CHARGING() ? tk_hex(0x34c759, 1) : W(1));
     d_rrect(d, bx + 26, by + 4, 1.6f, 4, .8f, W(.4f));
@@ -1426,6 +1446,31 @@ static void ellipsize(char *out, int cap, int f, float size, const char *s, floa
         if (tw(f, size, t, 0, 0) <= maxw) { tk_memcpy(out, t, (size_t)k + 1); return; }
     }
 }
+/* P3p (P3j-14): a one-line label in maxw pt, as UILabel's default (one line, tail truncation): measured with its own
+ * tracking and flags, cut after a whole UTF-8 character (trailing spaces dropped) with U+2026 when it is wider;
+ * align 0: starts at x, 1: centred on x, 2: ends at x */
+static void d_text_box(dc *d, int f, float size, float x, float base, float maxw, int align, const char *s, float ls, int fl, tk_col c, int shadow)
+{
+    char out[164];
+    int n = 0;
+    while (s[n] && n < 156) { out[n] = s[n]; n++; }
+    while (n > 0 && s[n] && ((unsigned char)s[n] & 0xc0) == 0x80) n--;      /* never half a character */
+    out[n] = 0;
+    float w = tw(f, size, out, ls, fl);
+    if (w > maxw || s[n]) {
+        while (n > 0) {
+            n--;
+            while (n > 0 && ((unsigned char)out[n] & 0xc0) == 0x80) n--;
+            int k = n;
+            while (k > 0 && out[k - 1] == ' ') k--;
+            out[k] = (char)0xe2; out[k + 1] = (char)0x80; out[k + 2] = (char)0xa6; out[k + 3] = 0;
+            w = tw(f, size, out, ls, fl);
+            if (w <= maxw) break;
+        }
+    }
+    float x0 = align == 1 ? x - w / 2 : align == 2 ? x - w : x;
+    d_text(d, f, size, x0, base, out, ls, fl, c, shadow);
+}
 /* greedy word wrap into at most 4 lines of maxw; returns the line count, the widest line in *wmax */
 static int wrap(char lines[4][96], int f, float size, const char *s, float maxw, float *wmax)
 {
@@ -1489,7 +1534,7 @@ static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int da
     tk_fill_rrect(d->b, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), &p, 1);
     tk_glass_bake(d->b, 0, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), dark, 1);
 }
-static void d_h1(dc *d, const char *t) { d_text(d, TK_IT700, 34, 20, bl(TK_IT700, 34, 64), t, 0, 0, INK, 0); }   /* P3j: iOS's Large Title, Bold */
+static void d_h1(dc *d, const char *t) { d_text_box(d, TK_IT700, 34, MARGIN, LARGE_BASE, CONTENT_W, 0, t, 0, 0, INK, 0); }   /* P3j: iOS's Large Title, Bold; P3p: in its row */
 static tk_col ACCENT(void) { return tk_hex(0x6fb3ff, 1); }
 /* a .row with an avatar: the name, an optional second line, the right-hand text, an optional unread dot */
 __attribute__((unused)) static float d_prow(dc *d, float y, const char *name, int nfw, tk_col nc, const char *sub, const char *right, int dot, int last)
@@ -1594,9 +1639,9 @@ static void page_messages(dc *d)
 {
     if (AS.thread < 0) {
         d_h1(d, "Messages");
-        d_lg_flat(d, GROUP_X, 117, GROUP_W, 44, 22, 1);   /* P3i: over the flat ground (the backdrop's blur cost ~40 ms a build) */
-        d_icon(d, "search15", GROUP_X + 14, 131.5f, 1);
-        d_text(d, TK_IT400, 17, GROUP_X + 37, 128 + 1 + tk_floorf(tk_ascent(TK_IT400, PT(17)) / TK_PT + .5f), "Search", 0, 0, tk_hex(0xa9a9a9, 1), 0);
+        d_lg_flat(d, GROUP_X, CONTENT_TOP, GROUP_W, 44, 22, 1);   /* P3i: over the flat ground (the backdrop's blur cost ~40 ms a build) */
+        d_icon(d, "search15", GROUP_X + 14, CONTENT_TOP + 14.5f, 1);
+        d_text(d, TK_IT400, 17, GROUP_X + 37, CONTENT_TOP + 11 + 1 + tk_floorf(tk_ascent(TK_IT400, PT(17)) / TK_PT + .5f), "Search", 0, 0, tk_hex(0xa9a9a9, 1), 0);
         d_empty(d, 360, "No Messages", "Text messages need a SIM card. This phone doesn't send or receive any yet.");
         return;
     }
@@ -1661,6 +1706,7 @@ static int is_app(const char *k);
 static float toast_left;
 static tk_layer apsw, aptm, apctl;
 static struct { int sw_run, laps, tm_run, sw_ds, tm_s, ctl_ver, ctl_drawn; float sw_t0, sw_acc, lap_at, tm_end; } CLK = { 0, 0, 0, -1, -1, 1, 0, 0, 0, 0, 0 };
+#define CLK_DY 27.0f              /* P3p: the page under the iOS header band */
 static float clk_sw_ms(float t) { return CLK.sw_acc + (CLK.sw_run ? t - CLK.sw_t0 : 0); }
 static int fmt_ms(char *b, float ms, int tenths)
 {
@@ -1679,16 +1725,16 @@ static void page_clock(dc *d)
     char hm[8], dt[48];
     fmt_hm(hm);
     float w = tw(TK_IT600, 64, hm, 0, TK_TNUM);
-    d_text(d, TK_IT600, 64, (390 - w) / 2, bl(TK_IT600, 64, 112), hm, 0, TK_TNUM, INK, 0);
+    d_text(d, TK_IT600, 64, (390 - w) / 2, bl(TK_IT600, 64, 112 + CLK_DY), hm, 0, TK_TNUM, INK, 0);
     const char *wd = WD[ST.wday % 7], *mo = MO[(ST.mon + 11) % 12];
     int n = (int)tk_strlen(wd);
     tk_memcpy(dt, wd, (size_t)n); dt[n++] = ' ';
     n += put_dec(dt + n, ST.day); dt[n++] = ' ';
     tk_memcpy(dt + n, mo, tk_strlen(mo) + 1);
     w = tw(TK_IT400, 15, dt, 0, 0);
-    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 192), dt, 0, 0, W(.55f), 0);
-    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 236), "STOPWATCH", .52f, 0, W(.55f), 0);
-    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 462), "TIMER", .52f, 0, W(.55f), 0);
+    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 192 + CLK_DY), dt, 0, 0, W(.55f), 0);
+    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 236 + CLK_DY), "STOPWATCH", .52f, 0, W(.55f), 0);
+    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 462 + CLK_DY), "TIMER", .52f, 0, W(.55f), 0);
 }
 static void clk_digits(tk_layer *l, float y, const char *txt, const char *sub)
 {
@@ -1711,15 +1757,15 @@ static void clk_button(dc *d, float x, float y, float wd, float h, const char *t
 static void clk_controls(void)
 {
     relayer(&apctl);
-    dc d = mk(&apctl, "clock-buttons", 20, 344, 350, 270, 0, 0);
+    dc d = mk(&apctl, "clock-buttons", 20, 344 + CLK_DY, 350, 270, 0, 0);
     float sw = clk_sw_ms(now_ms);
-    clk_button(&d, 36, 350, 78, 78, CLK.sw_run ? "Lap" : "Reset", W(CLK.sw_run || sw > 0 ? .16f : .07f), W(CLK.sw_run || sw > 0 ? 1 : .4f));
-    clk_button(&d, 276, 350, 78, 78, CLK.sw_run ? "Stop" : "Start", CLK.sw_run ? TK_RGBA(255, 69, 58, .28f) : TK_RGBA(48, 209, 88, .28f),
+    clk_button(&d, 36, 350 + CLK_DY, 78, 78, CLK.sw_run ? "Lap" : "Reset", W(CLK.sw_run || sw > 0 ? .16f : .07f), W(CLK.sw_run || sw > 0 ? 1 : .4f));
+    clk_button(&d, 276, 350 + CLK_DY, 78, 78, CLK.sw_run ? "Stop" : "Start", CLK.sw_run ? TK_RGBA(255, 69, 58, .28f) : TK_RGBA(48, 209, 88, .28f),
                CLK.sw_run ? tk_hex(0xff6961, 1) : tk_hex(0x4cd964, 1));
-    if (CLK.tm_run) clk_button(&d, 125, 570, 140, 44, "Cancel", TK_RGBA(255, 159, 10, .25f), tk_hex(0xffb340, 1));
+    if (CLK.tm_run) clk_button(&d, 125, 570 + CLK_DY, 140, 44, "Cancel", TK_RGBA(255, 159, 10, .25f), tk_hex(0xffb340, 1));
     else {
         static const char *const P[3] = { "1 min", "5 min", "10 min" };
-        for (int i = 0; i < 3; i++) clk_button(&d, 24 + 125 * i, 570, 92, 44, P[i], W(.14f), INK);
+        for (int i = 0; i < 3; i++) clk_button(&d, 24 + 125 * i, 570 + CLK_DY, 92, 44, P[i], W(.14f), INK);
     }
     apctl.hidden = 0;
     CLK.ctl_drawn = CLK.ctl_ver;
@@ -1744,7 +1790,7 @@ static int clk_update(float t)
         char b[16], l[32] = "";
         fmt_ms(b, sw, 1);
         if (CLK.laps) { tk_memcpy(l, "Lap ", 4); int n = 4 + put_dec(l + 4, CLK.laps); l[n++] = ' '; l[n++] = ' '; fmt_ms(l + n, CLK.lap_at, 1); }
-        clk_digits(&apsw, 254, b, l);
+        clk_digits(&apsw, 254 + CLK_DY, b, l);
         any = 1;
     }
     int ts = CLK.tm_run ? (int)((CLK.tm_end - t + 999) / 1000) : 0;
@@ -1752,7 +1798,7 @@ static int clk_update(float t)
         CLK.tm_s = ts;
         char b[16];
         fmt_ms(b, ts * 1000.0f, 0);
-        clk_digits(&aptm, 478, CLK.tm_run ? b : "00:00", CLK.tm_run ? "" : "Choose a time");
+        clk_digits(&aptm, 478 + CLK_DY, CLK.tm_run ? b : "00:00", CLK.tm_run ? "" : "Choose a time");
         any = 1;
     }
     if (CLK.ctl_drawn != CLK.ctl_ver || !apctl.bmp.px) { clk_controls(); any = 1; }
@@ -1762,6 +1808,7 @@ static int clk_update(float t)
 static void clk_tap(float x, float y)
 {
     float t = now_ms;
+    y -= CLK_DY;
     if (y >= 350 && y < 428) {
         if (x >= 276 && x < 354) {                       /* Start / Stop */
             if (CLK.sw_run) { CLK.sw_acc += t - CLK.sw_t0; CLK.sw_run = 0; }
@@ -1963,20 +2010,21 @@ static void page_light(dc *d)
 /* P3c: the Calendar: this month's grid (Monday first, as iOS in Finland), today in a red circle, from the phone's
  * clock (sh_year: the year; the host's is 2026) */
 static int cal_year = 2026;
+#define CAL_DY 27.0f              /* P3p: the grid under the iOS header band */
 void sh_year(int y) { if (y > 2000 && y < 2200) cal_year = y; }
 static void page_calendar(dc *d)
 {
     const char *mo = MO[(ST.mon + 11) % 12];
-    d_text(d, TK_IT700, 34, 20, bl(TK_IT700, 34, 64), mo, 0, 0, INK, 0);
+    d_text(d, TK_IT700, 34, MARGIN, LARGE_BASE, mo, 0, 0, INK, 0);
     char yb[8];
     put_dec(yb, cal_year);
-    d_text(d, TK_IT600, 17, 20 + tw(TK_IT700, 34, mo, 0, 0) + 10, bl(TK_IT700, 34, 64) - 0, yb, 0, 0, tk_hex(0xff453a, 1), 0);
+    d_text(d, TK_IT600, 17, MARGIN + tw(TK_IT700, 34, mo, 0, 0) + 10, LARGE_BASE, yb, 0, 0, tk_hex(0xff453a, 1), 0);
     static const char *const H[7] = { "M", "T", "W", "T", "F", "S", "S" };
     for (int c = 0; c < 7; c++) {
         float w = tw(TK_IT600, 13, H[c], 0, 0);
-        d_text(d, TK_IT600, 13, 20 + 50 * c + (50 - w) / 2, bl(TK_IT600, 13, 122), H[c], 0, 0, W(c >= 5 ? .4f : .6f), 0);
+        d_text(d, TK_IT600, 13, 20 + 50 * c + (50 - w) / 2, bl(TK_IT600, 13, 122 + CAL_DY), H[c], 0, 0, W(c >= 5 ? .4f : .6f), 0);
     }
-    d_rrect(d, MARGIN, 146, CONTENT_W, .5f, 0, W(.15f));
+    d_rrect(d, MARGIN, 146 + CAL_DY, CONTENT_W, .5f, 0, W(.15f));
     static const int DIM[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
     int m = (ST.mon + 11) % 12, nd = DIM[m];
     if (m == 1 && ((cal_year % 4 == 0 && cal_year % 100 != 0) || cal_year % 400 == 0)) nd = 29;
@@ -1984,7 +2032,7 @@ static void page_calendar(dc *d)
     int wd1 = ((ST.wday - (ST.day - 1)) % 7 + 7) % 7, col0 = (wd1 + 6) % 7;
     for (int day = 1; day <= nd; day++) {
         int cell = col0 + day - 1, r = cell / 7, c = cell % 7;
-        float cx = 20 + 50 * c + 25, cy = 160 + 56 * r + 22;
+        float cx = 20 + 50 * c + 25, cy = 160 + CAL_DY + 56 * r + 22;
         char b[4];
         put_dec(b, day);
         int today = day == ST.day;
@@ -1992,7 +2040,7 @@ static void page_calendar(dc *d)
         float w = tw(today ? TK_IT700 : TK_IT400, 20, b, 0, TK_TNUM);
         d_text(d, today ? TK_IT700 : TK_IT400, 20, cx - w / 2, bl(TK_IT400, 20, cy - 13), b, 0, TK_TNUM, today || c < 5 ? INK : W(.5f), 0);
     }
-    float y = 160 + 56 * 6 + 10;
+    float y = 160 + CAL_DY + 56 * 6 + 10;
     d_rrect(d, MARGIN, y, CONTENT_W, .5f, 0, W(.15f));
     char dt[48];
     const char *wd = WD[ST.wday % 7];
@@ -2097,14 +2145,14 @@ static void page_notes(dc *d)
 {
     if (!NS.view) {
         d_h1(d, "Notes");
-        d_text(d, TK_IT600, 17, 330, bl(TK_IT600, 17, 53), "New", 0, 0, tk_hex(0xffd60a, 1), 0);
+        d_text(d, TK_IT600, 17, CONTENT_R - tw(TK_IT600, 17, "New", 0, 0), NAV_BASE, "New", 0, 0, tk_hex(0xffd60a, 1), 0);
         if (!NS.n) { d_empty(d, 330, "No Notes", "Tap New to write one. Notes are kept until the phone restarts."); return; }
-        d_rrect(d, GROUP_X, 117, GROUP_W, 56.0f * NS.n - 1, 16, tk_hex(0x151c33, 1));
+        d_rrect(d, GROUP_X, CONTENT_TOP, GROUP_W, 56.0f * NS.n - 1, 16, tk_hex(0x151c33, 1));
         for (int i = 0; i < NS.n; i++) {
             char t[48];
             note_title(NOTES[NS.n - 1 - i], t);
-            d_text(d, TK_IT600, 17, ROW_TX, bl(TK_IT600, 17, 117 + 56 * i + 17), t, 0, 0, INK, 0);
-            if (i + 1 < NS.n) d_rrect(d, ROW_TX, 117 + 56 * i + 55, CONTENT_R - ROW_TX, .5f, 0, W(.1f));
+            d_text(d, TK_IT600, 17, ROW_TX, bl(TK_IT600, 17, CONTENT_TOP + 56 * i + 17), t, 0, 0, INK, 0);
+            if (i + 1 < NS.n) d_rrect(d, ROW_TX, CONTENT_TOP + 56 * i + 55, CONTENT_R - ROW_TX, .5f, 0, W(.1f));
         }
         return;
     }
@@ -2149,13 +2197,13 @@ static void build_note(void)
 static void notes_tap(float x, float y)
 {
     if (!NS.view) {
-        if (y >= 40 && y < 86 && x >= 300) {
+        if (IN_NAV(y) && x >= 300) {
             if (NS.n == NNOTES) { toast("Up to eight notes in this version"); return; }
             NOTES[NS.n][0] = 0;
             NS.cur = NS.n++;
             NS.view = 1; NS.shift = 1; NS.num = 0;
-        } else if (y >= 117 && y < 117 + 56 * NS.n && x >= GROUP_X && x < GROUP_X + GROUP_W) {
-            NS.cur = NS.n - 1 - (int)((y - 117) / 56);
+        } else if (y >= CONTENT_TOP && y < CONTENT_TOP + 56 * NS.n && x >= GROUP_X && x < GROUP_X + GROUP_W) {
+            NS.cur = NS.n - 1 - (int)((y - CONTENT_TOP) / 56);
             NS.view = 1; NS.shift = 0; NS.num = 0;
         } else return;
         build_app_page(AP.a);
@@ -2429,6 +2477,18 @@ static void app_build_step(void)
     own_extras(AP.a);
     ap_pending = 0;
 }
+/* P3p: the generic page's layout: the top of row r of section s (its drawing and the taps share it) */
+static float gen_row_y(const appdef *A, int s, int r)
+{
+    float y = CONTENT_TOP - 18;
+    for (int i = 0; i < A->ns; i++) {
+        const asec *S = &A->sec[i];
+        y += S->cap[0] ? (i ? 18 : 16) + 16 + 6 : 18;
+        if (i == s) return y + 47.0f * r;
+        y += 47.0f * S->n - 1;
+    }
+    return y;
+}
 static void build_app_page(int a)
 {
     const infopg *inf = info_of(APPS[a].k);
@@ -2443,14 +2503,14 @@ static void build_app_page(int a)
     (void)inf;
     /* the concept's genericScreen: the large title, captions (or an 18 pt gap), grouped rows */
     const appdef *A = &APPS[a];
-    float y = 56 + 8 + 41 + 12;                         /* the title's box and margins */
+    float y = CONTENT_TOP - 18;                         /* P3p: under the large title's row */
     float h = y;
     for (int i = 0; i < A->ns; i++) h += (A->sec[i].cap[0] ? 34 : 18) + 47.0f * A->sec[i].n;
     for (int i = 1; i < NST; i++) relayer(&appst[i]);
     relayer(&appst[0]);
     apnum.hidden = 1;
     dc d = mk(&appst[0], "app-page", 0, 0, 390, h + 4, 0, 0);
-    d_text(&d, TK_IT700, 34, 20, 64 + 33, A->name, 0, 0, INK, 0);
+    d_h1(&d, A->name);
     for (int i = 0; i < A->ns; i++) {
         const asec *S = &A->sec[i];
         if (S->cap[0]) {
@@ -2459,8 +2519,8 @@ static void build_app_page(int a)
             int k = 0;
             for (const char *c = S->cap; *c && k < 63; c++) up[k++] = *c >= 'a' && *c <= 'z' ? (char)(*c - 32) : *c;
             up[k] = 0;
-            d_text(&d, TK_IT400, 13, 36, y + (i ? 18 : 6) + 13, up, .52f, 0, W(.55f), 0);
-            y += (i ? 18 : 6) + 16 + 6;
+            d_text(&d, TK_IT400, 13, ROW_TX, y + (i ? 18 : 16) + 13, up, .52f, 0, W(.55f), 0);
+            y += (i ? 18 : 16) + 16 + 6;
         } else
             y += 18;
         float gh = 47.0f * S->n - 1;
@@ -2932,9 +2992,11 @@ static void app_tap(float x, float y)
             build_app_page(AP.a);
         }
     } else if (is_app("settings")) {
-        if (x >= GROUP_X && x < CONTENT_R && y >= 293 && y < 340) { AS.sub = 1; build_app_page(AP.a); return; }
-        if (x >= GROUP_X && x < CONTENT_R && y >= 135 && y < 182) { AS.sub = 2; build_app_page(AP.a); return; }   /* Wi-Fi */
-        if (x >= GROUP_X && x < CONTENT_R && y >= 182 && y < 229) { AS.sub = 3; build_app_page(AP.a); return; }   /* Cellular */
+        /* P3p: the rows where build_app_page draws them (Wi-Fi, Cellular; Display & Brightness) */
+        float yw = gen_row_y(&APPS[AP.a], 0, 0), yd = gen_row_y(&APPS[AP.a], 1, 0);
+        if (x >= GROUP_X && x < CONTENT_R && y >= yd && y < yd + 47) { AS.sub = 1; build_app_page(AP.a); return; }
+        if (x >= GROUP_X && x < CONTENT_R && y >= yw && y < yw + 47) { AS.sub = 2; build_app_page(AP.a); return; }   /* Wi-Fi */
+        if (x >= GROUP_X && x < CONTENT_R && y >= yw + 47 && y < yw + 94) { AS.sub = 3; build_app_page(AP.a); return; }   /* Cellular */
     } else if (is_app("messages")) {
         if (AS.thread < 0) {
             (void)x; (void)y;                         /* P2y: no conversations (no SIM): nothing to open */

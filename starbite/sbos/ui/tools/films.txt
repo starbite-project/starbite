@@ -11,7 +11,7 @@ messages: wait 300; drag 195 795 195 330 220; wait 900; tap 152 736; wait 1000; 
 emergency: wait 300; hold 318 720 950; wait 1200; drag 195 795 195 330 220; wait 900; drag 320 450 60 450 200; wait 900; drag 80 20 80 640 300; wait 1200; tap 195 650; wait 1200
 modem: wait 300; drag 195 795 195 330 220; wait 900; drag 320 20 320 330 260; wait 900; hold 138 137 800; wait 900; hold 195 467 1700; wait 900
 sleep: wait 300; drag 195 795 195 330 220; wait 900; tap 158 290; wait 1100; power; wait 900; power; wait 1200; power; wait 120; power; wait 1000
-clock: wait 300; drag 195 795 195 330 220; wait 900; tap 238 289; wait 1100; tap 315 389; wait 1500; tap 75 389; wait 800; tap 315 389; wait 500; tap 70 592; wait 1500
+clock: wait 300; drag 195 795 195 330 220; wait 900; tap 238 289; wait 1100; tap 315 389; wait 1500; tap 75 389; wait 800; tap 315 389; wait 500; tap 70 619; wait 1500
 calc: wait 300; drag 195 795 195 330 220; wait 900; tap 325 392; wait 1100; tap 55 627; wait 250; tap 147 627; wait 250; tap 331 447; wait 250; tap 55 447; wait 250; tap 331 717; wait 250; tap 331 627; wait 250; tap 55 717; wait 250; tap 239 717; wait 250; tap 147 537; wait 250; tap 331 717; wait 250; tap 331 357; wait 250; tap 55 717; wait 250; tap 331 717; wait 250; wait 800
 light: wait 300; drag 195 795 195 330 220; wait 900; drag 320 450 60 450 200; wait 900; tap 238 93; wait 1100; tap 195 370; wait 800
 display: wait 300; drag 195 795 195 330 220; wait 900; tap 325 736; wait 1100; tap 195 316; wait 600; tap 300 216; wait 800
