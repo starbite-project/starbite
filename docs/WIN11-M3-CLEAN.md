@@ -722,7 +722,7 @@ S6SY761Touch). In that source Windows gets "all fingers up" only from the chip's
 pulled hives. Ruled out on paper: GIC interface numbers (M3 = 4..7 in the MADT); sbumd.dll (2 LSE words, latch-guarded).
 `starbite/win/s6touchdiag/` = that source + logging only (Diag* values in Device Parameters, flushed every second;
 trace of press/release/all-up/gap; I2C timing and a 200-read self-test; ISR per CPU; clock pair). Built with
-tools/win/build.sh kmdf, test-signed: `build/woa/cores/touchdiag-1/s6touchdiag.sys` a53995b8..., build bc25ab7.
+tools/win/build.sh kmdf, test-signed: `build/woa/cores/touchdiag-1/s6touchdiag.sys` 875637d0..., build 57c4008.
 `tools/woa/win-m3/hive-touchdiag.py` switches the service's ImagePath to it offline (original kept in
 Parameters\SbOrigImagePath; restore puts it back) and decodes the Diag* values. Test: A55 then big-core unattended
 (self-test, idle IRQs), then one attended drag on each row. Request: notes folder `win-m3-clean-touchdiag-request.md`.
