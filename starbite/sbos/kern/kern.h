@@ -529,6 +529,7 @@ struct gc_quad {
     uint32_t bw, bh;
     const uint8_t *occ;                 /* (CPU only, may be 0) src's block map, occ_w x occ_h: bins skip empty blocks */
     uint32_t occ_w, occ_h;
+    uint32_t gen;                       /* (CPU only) the caller's content stamp of src / mask / backdrop */
 };
 int gpucomp_init(void *heap, uint64_t bytes);
 /* the last compose's bins: entries drawn, entries culled under opaque quads, entries skipped over empty blocks */
