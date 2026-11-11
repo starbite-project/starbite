@@ -111,6 +111,15 @@ fi
 $CC -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -nostdlib -c -I"$core" "$core/net.c" -o "$OUT/net-free.o"
 $CC $flags "$core/net.c" "$here/net-test.c" -o "$OUT/net-test"
 "$OUT/net-test"
+# sbtcp (tcp.c), netio and sbhttp: freestanding too; sbtcp's own test on a simulated link (sbhttp's tests need
+# a server and the network: host/run-http.sh on the Mac, host/run-tap.sh in the VM)
+$CC -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -nostdlib -c -I"$core" "$core/tcp.c" -o "$OUT/tcp-free.o"
+for f in http netio; do
+    $CC -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -nostdlib -c -I"$core" -I"$core/tls/bearssl/inc" \
+        "$core/$f.c" -o "$OUT/$f-free.o"
+done
+$CC $flags "$core/net.c" "$core/tcp.c" "$here/tcp-test.c" -o "$OUT/tcp-test"
+"$OUT/tcp-test"
 if [ -n "$dir" ]; then
     echo "bcmw: the phone's files from $dir (read only)"
     "$OUT/bcmw-test" "$dir"

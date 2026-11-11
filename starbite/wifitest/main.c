@@ -194,7 +194,7 @@ static void join_test(struct bcmw *w)
     }
     before = rx_frames;
     {
-        static const struct sbnet_os nos = { 0, net_tx, net_now, net_random, net_log, 0 };
+        static const struct sbnet_os nos = { 0, net_tx, net_now, net_random, net_log, 0, 0 };
         uint32_t replies;
         net_w = w;
         net_seed = sb_us() | 1;

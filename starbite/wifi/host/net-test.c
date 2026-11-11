@@ -251,7 +251,7 @@ static void pump(struct sbnet *n, unsigned ms)
 int main(void)
 {
     static struct sbnet n;
-    struct sbnet_os os = { 0, lan_tx, os_now, os_random, os_log, os_udp };
+    struct sbnet_os os = { 0, lan_tx, os_now, os_random, os_log, os_udp, 0 };
 
     sbnet_init(&n, &os, me);
     sbnet_start(&n);

@@ -2,7 +2,7 @@
  * sbnet: a small IPv4 layer on Ethernet frames for the bare-metal Wi-Fi core (Starbite OS, the libsb test image):
  * DHCP (discover, request, renewal at half the lease, rebinding, a NAK restarts), ARP (answers, a small cache,
  * resolution with one frame held per destination), ICMP echo (answers and pings), UDP (send, receive through a
- * callback) and DNS (one A-record query at a time). No TCP yet.
+ * callback) and DNS (one A-record query at a time). TCP is sbtcp (tcp.h), on the `tcp` hook and sbnet_ip_send.
  *
  * Freestanding C: no C library, no allocation, no globals; the caller owns `struct sbnet` and calls
  *   sbnet_rx()   for every received Ethernet frame (from the core's os->rx),
@@ -21,6 +21,8 @@ struct sbnet_os {
     void (*log)(void *ctx, const char *line);                     /* optional */
     /* optional: a UDP datagram to one of our ports (not DHCP/DNS, which sbnet keeps) */
     void (*udp)(void *ctx, uint16_t port, const uint8_t from[4], uint16_t from_port, const uint8_t *data, uint32_t len);
+    /* optional: a TCP segment addressed to our address while bound (sbtcp_input; unchecked: the checksum is its) */
+    void (*tcp)(void *ctx, const uint8_t from[4], const uint8_t *segment, uint32_t len);
 };
 
 enum { SBNET_DOWN, SBNET_DISCOVERING, SBNET_REQUESTING, SBNET_BOUND, SBNET_RENEWING, SBNET_REBINDING };
@@ -73,5 +75,11 @@ int sbnet_udp_send(struct sbnet *n, const uint8_t ip[4], uint16_t port, uint16_t
 int sbnet_ping(struct sbnet *n, const uint8_t ip[4]);
 /* an A-record query for name (dotted, at most 253 characters) to the lease's DNS server; then dns_state */
 int sbnet_dns_query(struct sbnet *n, const char *name);
+/* an IPv4 packet to dst (not broadcast) while bound: f has 34 bytes of room in front of the payload's plen bytes
+ * (at f + 34; at most 1480); 0 sent or held for ARP, -1 not */
+int sbnet_ip_send(struct sbnet *n, const uint8_t dst[4], uint8_t proto, uint8_t *f, uint32_t plen);
+/* a fixed address instead of DHCP (tests, a network without DHCP): bound at once, no lease to renew */
+void sbnet_static(struct sbnet *n, const uint8_t ip[4], const uint8_t mask[4], const uint8_t gateway[4],
+                  const uint8_t dns[4]);
 
 #endif

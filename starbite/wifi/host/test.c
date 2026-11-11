@@ -601,7 +601,7 @@ static uint32_t tnet_rand(void *ctx) { static uint32_t r = 77; (void)ctx; r = r 
 static void test_open_sbnet(struct bcmw *w)
 {
     static const uint8_t router[4] = { 192, 168, 4, 1 }, leased[4] = { 192, 168, 4, 23 };
-    static const struct sbnet_os nos = { 0, tnet_tx, tnet_now, tnet_rand, 0, 0 };
+    static const struct sbnet_os nos = { 0, tnet_tx, tnet_now, tnet_rand, 0, 0, 0 };
     int jr;
     CHECK(bcmw_leave(w) == BCMW_OK, "open: leaving the WPA2 join");
     model_ap_reset();
