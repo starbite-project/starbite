@@ -379,7 +379,9 @@ struct sbshm_store {
  * (db_to_guest); the guest's doorbell handler reaps completions. Data lives in the data window:
  * a request's buffer is slot data_slot (SBSHM_BLK_SLOT bytes each), so count <= SBSHM_BLK_SLOT / 512. Reads: the
  * host fills the slot before the completion. Writes: the guest fills it before the request. Flush: everything
- * completed before it is on the host's storage when it completes. Sector = 512 bytes. */
+ * completed before it is on the host's storage when it completes. Sector = 512 bytes, but the guest uses 4096-byte
+ * logical blocks: every request starts at a multiple of 8 sectors and is a multiple of 8 sectors long (the phone's
+ * storage is 4 KiB blocks; a host may refuse anything else with -EINVAL). Overlay file systems: mkfs with -b 4096. */
 #define SBSHM_BLK_DEVS      4U
 #define SBSHM_BLK_RING      64U             /* power of two */
 #define SBSHM_BLK_SLOT      0x10000U        /* 64 KiB */
