@@ -189,6 +189,7 @@ static struct { int state, bars, rat; } SB_CELL;      /* the status bar's copy o
 static struct { int h, mi, wday, day, mon, pct, temp; } ST = { 21, 5, 2, 10, 11, 87, 41 };
 static struct { int on, h, m; } ALM = { 1, 7, 0 };   /* the host's is the concept's 07:00 */
 static void prep_tree(tk_layer *l);   /* P3g: home's half copies again right after a live rebuild */
+static void build_apsb(void);
 static int sys_charging;           /* P2y: sh_sysinfo's (the status bar's battery is green while charging) */
 #define SYS_CHARGING() sys_charging
 static void status_bar(dc *d, const char *left)
@@ -217,8 +218,9 @@ static void ring_widget(dc *d, float x, float p, tk_col col, const char *num, co
     d_ring(d, x + 36, 256, 31, 4.5f, p, col, 1);
     float w = tw(TK_IT700, 17, num, 0, TK_TNUM);
     d_text(d, TK_IT700, 17, x + 36 - w / 2, 220 + 22 + 16, num, 0, TK_TNUM, INK, 0);
-    w = tw(TK_IT700, 9.5f, lbl, .38f, 0);
-    d_text(d, TK_IT700, 9.5f, x + 36 - w / 2, 220 + 50 + 9, lbl, .38f, 0, W(.72f), 0);
+    /* P3i: the label inside the ring's chord at its line (9.5 pt with .38 spacing ran into the ring) */
+    w = tw(TK_IT700, 8, lbl, .2f, 0);
+    d_text(d, TK_IT700, 8, x + 36 - w / 2, 220 + 48 + 8, lbl, .2f, 0, W(.72f), 0);
 }
 /* the live values (sh_status): the host's are the concept's */
 static const char *const WD[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
@@ -1067,7 +1069,7 @@ static void cc_glyph(dc *d, const char *name, float tx, float ty, float w, float
 {
     d_icon(d, name, tx + (70 - w) / 2, ty + (70 - h) / 2, 1);
 }
-static void cc_label(dc *d, const char *t, float tx, float ty)
+__attribute__((unused)) static void cc_label(dc *d, const char *t, float tx, float ty)
 {
     float w = tw(TK_IT600, 10.5f, t, 0, 0);
     d_text(d, TK_IT600, 10.5f, tx + 35 - w / 2, ty + 74 + 10, t, 0, 0, W(.8f), 0);
@@ -1098,16 +1100,32 @@ static void build_cc_grid(void)
     cc_tile(&d, 295.97f, 92, 70, 156, 24, 0);
     /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Mirror, Camera */
     int lit = Q[0].lit;
-    cc_tile(&d, CCX[0], 264, 70, 70, 22, lit); cc_glyph(&d, lit ? "cc-light-on" : "cc-light", CCX[0], 264, 16, 24); cc_label(&d, "Flashlight", CCX[0], 264);
-    cc_tile(&d, CCX[1], 264, 70, 70, 22, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], 264, 22, 22); cc_label(&d, "Rotation", CCX[1], 264);
+    cc_tile(&d, CCX[0], 264, 70, 70, 22, lit); cc_glyph(&d, lit ? "cc-light-on" : "cc-light", CCX[0], 264, 16, 24);
+    cc_tile(&d, CCX[1], 264, 70, 70, 22, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], 264, 22, 22);
     cc_tile(&d, CCX[2], 264, 70, 70, 22, 0);
     if (EMG) d_rrect(&d, CCX[2], 264, 70, 70, 22, tk_hex(0xff5a4e, 1));
-    cc_glyph(&d, "cc-flame", CCX[2], 264, 20, 24); cc_label(&d, "Emergency", CCX[2], 264);
-    cc_tile(&d, CCX[3], 264, 70, 70, 22, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], 264, 24, 14); cc_label(&d, "Saving", CCX[3], 264);
-    cc_tile(&d, CCX[0], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-timer", CCX[0], 350, 22, 22); cc_label(&d, "Timer", CCX[0], 350);
-    cc_tile(&d, CCX[1], 350, 70, 70, 22, 0); cc_glyph(&d, "a30-calc", CCX[1], 350, 30, 30);
-    cc_tile(&d, CCX[2], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-wifi2", CCX[2], 350, 22, 22); cc_label(&d, "Mirror", CCX[2], 350);
-    cc_tile(&d, CCX[3], 350, 70, 70, 22, 0); cc_glyph(&d, "a30-camera", CCX[3], 350, 30, 30);
+    cc_glyph(&d, "cc-flame", CCX[2], 264, 20, 24);
+    cc_tile(&d, CCX[3], 264, 70, 70, 22, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], 264, 24, 14);
+    cc_tile(&d, CCX[0], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-timer", CCX[0], 350, 22, 22);
+    cc_tile(&d, CCX[1], 350, 70, 70, 22, 0);
+    {
+        /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place): a calculator */
+        float gx = CCX[1] + 26, gy = 350 + 22;
+        d_rrect(&d, gx, gy, 18, 26, 4, W(1));
+        d_rrect(&d, gx + 3, gy + 3, 12, 6, 1.5f, tk_hex(0x2a3150, 1));
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++) d_rrect(&d, gx + 3 + 4.5f * c, gy + 12 + 4.5f * r, 3, 3, 1.5f, tk_hex(0x2a3150, 1));
+    }
+    cc_tile(&d, CCX[2], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-wifi2", CCX[2], 350, 22, 22);
+    cc_tile(&d, CCX[3], 350, 70, 70, 22, 0);
+    {
+        /* and a camera */
+        float gx = CCX[3] + 23, gy = 350 + 25;
+        d_rrect(&d, gx + 8, gy - 2.5f, 8, 4, 1.5f, W(1));
+        d_rrect(&d, gx, gy, 24, 18, 4.5f, W(1));
+        d_rrect(&d, gx + 6.5f, gy + 3.5f, 11, 11, 5.5f, tk_hex(0x2a3150, 1));
+        d_rrect(&d, gx + 9, gy + 6, 6, 6, 3, W(1));
+    }
     tk_layer_prepare(&ccgrid);
 }
 static void cc_levels(void)
@@ -2151,7 +2169,7 @@ void sh_alarm(int on, int h, int m)
 }
 void sh_sysinfo(int charging, const char *version)
 {
-    if (!!charging != sys_charging) { sys_charging = !!charging; build_lstatus(); build_home_sb(); build_home_w(); relink(); lock_ver++; prep_tree(home.child); }
+    if (!!charging != sys_charging) { sys_charging = !!charging; build_lstatus(); build_home_sb(); build_home_w(); if (AP.on) build_apsb(); relink(); lock_ver++; prep_tree(home.child); }
     SYS.charging = charging;
     int n = 0;
     while (version && version[n] && n < 39) { SYS.ver[n] = version[n]; n++; }
@@ -2178,13 +2196,59 @@ static const char *live_text(const char *s, char *buf)
     else return "";
     return buf;
 }
+/* P3i: Settings' row icons (the Control Centre's glyphs, tinted white) */
+typedef struct { const char *row, *glyph; uint32_t col; float w, h; } setico;
+static const setico SETICO[] = {
+    { "Wi-Fi", "cc-wifi", 0x0a84ff, 19, 14 }, { "Mobile Data", "cc-cell", 0x30d158, 18, 16 }, { "Battery", "cc-save", 0x30d158, 20, 12 },
+    { "Display & Brightness", "cc-sun", 0x0a84ff, 20, 20 }, { "Sounds & Haptics", "cc-vol", 0xff375f, 20, 20 },
+    { "Bluetooth", "cc-bt", 0x0a84ff, 12, 18 }, { "Airplane Mode", "cc-air", 0xff9f0a, 18, 18 }, { "Date & Time", "cc-timer", 0x8e8e93, 19, 19 },
+};
+static const setico *set_icon(const char *app, const char *row)
+{
+    if (tk_strcmp(app, "settings")) return 0;
+    for (unsigned i = 0; i < sizeof SETICO / sizeof SETICO[0]; i++) if (!tk_strcmp(SETICO[i].row, row)) return &SETICO[i];
+    return 0;
+}
+/* P3i: the apps with nothing to show yet get iOS's centred empty state, not a lone grey row */
+typedef struct { const char *k, *title, *line; } infopg;
+static const infopg INFO[] = {
+    { "weather", "No Weather", "Weather needs the internet. This phone isn't online yet." },
+    { "music", "No Music", "There is no music on this phone." },
+    { "files", "No Files", "Files isn't in this version yet." },
+    { "terminal", "Not Here Yet", "The terminal and Linux apps run in Starbite OS." },
+    { "browser", "No Internet", "The browser needs the internet. This phone isn't online yet." },
+    { "medical", "No Medical Card", "Nothing is stored on this phone yet." },
+    { "heat", "Not Here Yet", "Survival Heat runs in Starbite OS." },
+    { "power", "Not Available", "Power Saving isn't in this version yet." },
+};
+static const infopg *info_of(const char *k)
+{
+    for (unsigned i = 0; i < sizeof INFO / sizeof INFO[0]; i++) if (!tk_strcmp(INFO[i].k, k)) return &INFO[i];
+    return 0;
+}
+/* P3i: the status bar over every app (iOS never hides it); rebuilt with the minute and the charger */
+static tk_layer apsb;
+static void build_apsb(void)
+{
+    relayer(&apsb);
+    if (!AP.on) { apsb.hidden = 1; return; }
+    dc d = mk(&apsb, "app-sb", 0, 0, 390, 44, 0, 0);
+    char hm[8];
+    fmt_hm(hm);
+    status_bar(&d, hm);
+    apsb.hidden = 0;
+    apsb.alpha = appc.alpha;
+    tk_layer_prepare(&apsb);
+}
 static void build_app_page(int a)
 {
     const char *k = APPS[a].k;
+    const infopg *inf = info_of(k);
     int own = !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
               !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
               !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes") ||
-              !tk_strcmp(k, "search");
+              !tk_strcmp(k, "search") || inf;
+    build_apsb();
     if (own) {
         for (int i = 0; i < NST; i++) {
             dc d = strip_dc(i, "app-page");
@@ -2200,6 +2264,7 @@ static void build_app_page(int a)
             else if (!tk_strcmp(k, "settings")) page_display(&d);
             else if (!tk_strcmp(k, "notes")) page_notes(&d);
             else if (!tk_strcmp(k, "search")) page_search(&d);
+            else if (inf) { d_h1(&d, APPS[a].name); d_empty(&d, 330, inf->title, inf->line); }
             else page_camera(&d);
             tk_layer_prepare(&appst[i]);
         }
@@ -2238,14 +2303,29 @@ static void build_app_page(int a)
         for (int r = 0; r < S->n; r++) {
             float ry = y + 47 * r;
             char lb[48], rb[48];
-            d_text(&d, TK_IT400, 16, 32, ry + 13 + 16, live_text(S->rows[r].l, lb), 0, 0, INK, 0);
+            float lx = 32;
+            const setico *si = set_icon(A->k, S->rows[r].l);
+            if (si) {
+                /* P3i: iOS Settings' 29 pt colour square with its white glyph; the label and the rule after it */
+                d_rrect(&d, 32, ry + 9, 29, 29, 7, tk_hex(si->col, 1));
+                const tk_bmp *ic = tk_icon(si->glyph);
+                if (ic) {
+                    float pad = tk_icon_pad(si->glyph);
+                    tk_blit_tinted(d.b, ic, (int)tk_floorf(PT(32 + (29 - si->w) / 2) - pad - d.ox + .5f),
+                                   (int)tk_floorf(PT(ry + 9 + (29 - si->h) / 2) - pad - d.oy + .5f), W(1));
+                }
+                lx = 32 + 29 + 13;
+            }
+            d_text(&d, TK_IT400, 16, lx, ry + 13 + 16, live_text(S->rows[r].l, lb), 0, 0, INK, 0);
+            int nav = !tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Display & Brightness");
+            if (nav) d_icon(&d, "chev", 344, ry + 16.5f, .45f);
             const char *rt = live_text(S->rows[r].r, rb);
             if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Mobile Data")) rt = md_text();
             if (rt[0]) {
                 float w = tw(TK_IT400, 16, rt, 0, TK_TNUM);
-                d_text(&d, TK_IT400, 16, 358 - w, ry + 13 + 16, rt, 0, TK_TNUM, W(.55f), 0);
+                d_text(&d, TK_IT400, 16, (nav ? 338 : 358) - w, ry + 13 + 16, rt, 0, TK_TNUM, W(.55f), 0);
             }
-            if (r + 1 < S->n) d_rrect(&d, 16, ry + 46, 358, .5f, 0, W(.08f));
+            if (r + 1 < S->n) d_rrect(&d, lx, ry + 46, 374 - lx, .5f, 0, W(.08f));
         }
         y += gh;
     }
@@ -2285,6 +2365,7 @@ static void set_app_rect(arect R)
     appg.clip_radius = PT(R.r);
     float p = (R.w - 62) / (390 - 62);
     appc.alpha = tk_clampf(p * 1.6f - .2f, 0, 1);
+    apsb.alpha = appc.alpha;
     uint32_t t = APPS[AP.a].tint, b = 0x0a0f1f;
     float m = tk_clampf(p * 2, 0, 1);
     uint32_t cr = (uint32_t)((t >> 16 & 255) * (1 - m) + (b >> 16 & 255) * m + .5f), cg = (uint32_t)((t >> 8 & 255) * (1 - m) + (b >> 8 & 255) * m + .5f),
@@ -2365,6 +2446,7 @@ static void app_finish_close(void)
     relayer(&apcalc); apcalc.hidden = 1;
     relayer(&apnote); apnote.hidden = 1;
     relayer(&apsrch); apsrch.hidden = 1;
+    relayer(&apsb); apsb.hidden = 1;
     SR.q[0] = 0; SR.shift = 0; SR.num = 0;                      /* Search opens empty */
     NS.view = 0;                                                /* Notes opens on its list again */                        /* the Calculator keeps its value (CAL) */
     apnum.hidden = apkey.hidden = 1;
@@ -2801,8 +2883,8 @@ static void relink(void)
 {
     tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
     link(&root, r, 14);
-    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch };
-    link(&appg, ag, 10);
+    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb };
+    link(&appg, ag, 11);
     tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     link(&appc, st, NST);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
@@ -3644,6 +3726,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
         /* the layers keep their place in the tree: rebuilt in place */
         build_lclock();
         build_home_sb();
+        if (AP.on && !AP.closing) build_apsb();
         relink();
     }
     if (wchange) {
