@@ -12,7 +12,7 @@ out=$(mkdir -p "$1" && cd "$1" && pwd); shift
 extra="$*"
 limactl shell starbite -- bash -lc "set -eu; cd '$root/shim/starlte'
 O='$out'
-CFLAGS='-c -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie -nostdlib -fno-asynchronous-unwind-tables -fno-jump-tables -fno-tree-switch-conversion -fno-tree-loop-distribute-patterns -mgeneral-regs-only -mstrict-align -mcpu=cortex-a53 -Wall -Wextra -Werror'
+CFLAGS='-c -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie -nostdlib -fno-asynchronous-unwind-tables -fno-jump-tables -fno-tree-switch-conversion -fno-tree-loop-distribute-patterns -mgeneral-regs-only -mstrict-align -mcpu=cortex-a53 -Wall -Wextra -Werror $extra'
 CFLAGS_V7='-c -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie -nostdlib -fno-asynchronous-unwind-tables -fno-jump-tables -fno-tree-switch-conversion -fno-tree-loop-distribute-patterns -mstrict-align -mcpu=cortex-a55 -fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror $extra'
 V7=\"\$(ls glass*.c) menu7.c intro7.c sb7.c\"
 USB='usb_dwc3.c usb_phy.c usb_desc.c max77705_muic.c fastboot.c fastboot_dev.c'
