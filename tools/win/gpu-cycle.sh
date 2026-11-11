@@ -138,6 +138,16 @@ boot_and_return() {
         log "the phone is still in TWRP 60 s after boot-next: $key did not start"; exit 2
     fi
     until fastboot devices 2>/dev/null | grep -q fastboot; do
+        # T39b: a crash can bring the phone back to TWRP instead of the menu (T39: a 0x7E, the loader went to
+        # recovery, and the run waited out its 1500 s reporting "stuck"). That is a return: take the pmsg ring
+        # (the crashed boot's =UFSBUGCHECK) and carry on as after the menu.
+        if [ "$(adb get-state 2>/dev/null)" = recovery ]; then
+            log "back in TWRP after $(( $(date +%s) - start )) s without the menu (a crash or reset took the phone to recovery)"
+            sleep 3
+            adb shell 'cat /sys/fs/pstore/pmsg-ramoops-0' 2>/dev/null | LC_ALL=C tr -c '[:print:]\n' '.' > "$dir/loader-pmsg.txt" || true
+            grep -a -o '=UFSBUGCHECK BC=[ -~]*' "$dir/loader-pmsg.txt" | tail -1 | sed 's/^/  pmsg: /' | tee -a "$out/cycle.log" || true
+            return 0
+        fi
         if [ $(( $(date +%s) - start )) -gt "$limit" ]; then
             log "NO MENU after ${limit}s: the phone is stuck (needs the user)"; exit 2
         fi
