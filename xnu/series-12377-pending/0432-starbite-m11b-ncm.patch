@@ -1,0 +1,915 @@
+From 9c5bdfc21fbc4de6de1d262cfd0251111a5cba40 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 11 Nov 2026 20:17:54 +0200
+Subject: [PATCH] patch: 0432-starbite-m11b-ncm.patch - StarbiteUSBNCM built in
+ for STARLTE (copy of starbite/apple-drivers/StarbiteUSB/StarbiteUSBNCM.* at
+ 0d957fd, STARLTE-only build unit with __PRIVATE_SPI__ like the family, so
+ IONetworkController's vtable slots 2-5 resolve) as an IOEthernetController on
+ StarbiteUSB (sbusb=1); sbstop=ncm, the M11b test without user space:
+ StarbiteM11b.cpp waits for its IOEthernetInterface, names it through
+ IONetworkStack (as IORegisterNetworkInterface does for a network root),
+ bsd/dev/starlte_m11b.c brings it up, attaches IPv6 and starts the EUI-64
+ link-local address through ifioctl() on kernel sockets (SIOCSIFFLAGS,
+ SIOCPROTOATTACH_IN6, SIOCLL_START, as configd would), then XNU's ICMPv6
+ counters: each echo reply the stack sends is an "M11b PASS" line, and after
+ the third (plus the Mac's last pings or 3 s) the boot stops into TWRP
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/conf/files                                |   1 +
+ bsd/dev/starlte_m11b.c                        | 168 ++++++++++
+ iokit/Kernel/arm/SweetPlatformExpert.cpp      |   4 +
+ iokit/Kernel/arm/starbite/StarbiteM11b.cpp    | 216 ++++++++++++
+ .../starbite/StarbiteUSB/StarbiteUSBNCM.cpp   | 317 ++++++++++++++++++
+ .../arm/starbite/StarbiteUSB/StarbiteUSBNCM.h |  54 +++
+ iokit/Kernel/arm/starbite/StarbiteUSBNCM.cpp  |  17 +
+ iokit/KernelConfigTables.cpp                  |   5 +
+ iokit/conf/Makefile.template                  |   2 +
+ iokit/conf/files.arm64                        |   4 +
+ 10 files changed, 788 insertions(+)
+ create mode 100644 bsd/dev/starlte_m11b.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteM11b.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSBNCM.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSBNCM.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUSBNCM.cpp
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index ba9d06c6..e90a6db5 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -112,6 +112,7 @@ bsd/dev/starlte_smp.c			standard
+ bsd/dev/starlte_gpu.c			standard
+ bsd/dev/starlte_overlay.c		standard
+ bsd/dev/starlte_sd.c			standard
++bsd/dev/starlte_m11b.c			standard
+ bsd/dev/herolte_battery.c		standard
+ bsd/dev/herolte_gpu.c			standard
+ bsd/dev/a5xelte_keys.c			standard
+diff --git a/bsd/dev/starlte_m11b.c b/bsd/dev/starlte_m11b.c
+new file mode 100644
+index 00000000..afe5bd68
+--- /dev/null
++++ b/bsd/dev/starlte_m11b.c
+@@ -0,0 +1,168 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * 0432, M11b (docs/APPLE-S9-DRIVERS.md M11, StarbiteUSB/PHONE-TEST.md): the BSD half of the sbstop=ncm test. With no
++ * user space, nobody names or configures StarbiteUSBNCM's interface; iokit/Kernel/arm/starbite/StarbiteM11b.cpp
++ * names it through IONetworkStack (as IOKitBSDInit does for a network root) and then calls this file, which does
++ * what configd would: interface up (SIOCSIFFLAGS), IPv6 attached (SIOCPROTOATTACH_IN6) and the EUI-64 link-local
++ * address started (SIOCLL_START, with DAD), all through ifioctl() on kernel sockets, the path netboot.c uses. The
++ * ping answers then come from XNU's own IPv6 stack (no echo responder: sbusb_echo stays 0). The counters below are
++ * XNU's ICMPv6 histograms; only this one interface (plus lo0, which nobody pings) exists in an sbstop boot.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <sys/socket.h>
++#include <sys/socketvar.h>
++#include <sys/sockio.h>
++#include <net/if.h>
++#include <net/if_var.h>
++#include <net/if_var_private.h>
++#include <net/init.h>
++#include <net/kpi_interface.h>
++#include <netinet/in.h>
++#include <netinet/ip6.h>
++#include <netinet/icmp6.h>
++#include <netinet6/in6_var.h>
++#include <libkern/libkern.h>
++
++int starlte_m11b_net_ready(void);
++int starlte_m11b_ifup(const char *name);
++void starlte_m11b_counts(uint64_t *echo_in, uint64_t *reply_out, uint64_t *ns_in, uint64_t *na_out);
++void starlte_m11b_ifstats(uint64_t *ipackets, uint64_t *opackets, uint64_t *ierrors, uint64_t *oerrors);
++int starlte_m11b_lladdr(char *buf, size_t len);
++
++static volatile int m11b_net_inited;
++static int m11b_net_asked;
++static ifnet_t m11b_ifp;
++
++static void
++m11b_net_init_done(void)
++{
++	m11b_net_inited = 1;
++}
++
++/* bsd_init publishes IOBSD (IONetworkStack starts) before net_init_run(): wait for the delayed IPv6 init too */
++int
++starlte_m11b_net_ready(void)
++{
++	if (!m11b_net_asked) {
++		m11b_net_asked = 1;
++		if (net_init_add(m11b_net_init_done) == EALREADY) {
++			m11b_net_inited = 1;
++		}
++	}
++	return m11b_net_inited;
++}
++
++static int
++m11b_ioctl(int family, u_long cmd, void *data, size_t len, const char *what)
++{
++	struct socket *so = NULL;
++	int error = socreate(family, &so, SOCK_DGRAM, 0);
++
++	if (error != 0) {
++		printf("StarbiteM11b: socreate(%d) for %s: error %d\n", family, what, error);
++		return error;
++	}
++	(void)len;
++	error = ifioctl(so, cmd, (caddr_t)data, current_proc());
++	if (error != 0) {
++		printf("StarbiteM11b: %s: error %d\n", what, error);
++	}
++	soclose(so);
++	return error;
++}
++
++int
++starlte_m11b_ifup(const char *name)
++{
++	struct ifreq ifr;
++	struct in6_aliasreq_64 ifra;
++	ifnet_t ifp = NULL;
++	int error;
++
++	error = ifnet_find_by_name(name, &ifp);
++	if (error != 0 || ifp == NULL) {
++		printf("StarbiteM11b: %s: no such interface (%d)\n", name, error);
++		return error ? error : ENXIO;
++	}
++	m11b_ifp = ifp;                         /* kept (retained) for the counters until the stop */
++
++	bzero(&ifr, sizeof(ifr));
++	strlcpy(ifr.ifr_name, name, sizeof(ifr.ifr_name));
++	ifr.ifr_flags = (short)(ifnet_flags(ifp) | IFF_UP);
++	error = m11b_ioctl(AF_INET, SIOCSIFFLAGS, &ifr, sizeof(ifr), "SIOCSIFFLAGS IFF_UP");
++	if (error != 0) {
++		return error;
++	}
++	bzero(&ifra, sizeof(ifra));
++	strlcpy(ifra.ifra_name, name, sizeof(ifra.ifra_name));
++	error = m11b_ioctl(AF_INET6, SIOCPROTOATTACH_IN6_64, &ifra, sizeof(ifra), "SIOCPROTOATTACH_IN6");
++	if (error != 0 && error != EEXIST) {
++		return error;
++	}
++	bzero(&ifra, sizeof(ifra));             /* no address given: the EUI-64 link-local of the interface's MAC */
++	strlcpy(ifra.ifra_name, name, sizeof(ifra.ifra_name));
++	error = m11b_ioctl(AF_INET6, SIOCLL_START_64, &ifra, sizeof(ifra), "SIOCLL_START");
++	if (error != 0) {
++		return error;
++	}
++	printf("StarbiteM11b: %s up (flags 0x%x), IPv6 attached, link-local started (DAD running)\n", name,
++	    (unsigned)ifnet_flags(ifp));
++	return 0;
++}
++
++/* the first IPv6 address of the interface (its link-local), printable; 0 if there is one */
++int
++starlte_m11b_lladdr(char *buf, size_t len)
++{
++	ifaddr_t *addrs = NULL;
++	int found = 0;
++
++	buf[0] = '\0';
++	if (m11b_ifp == NULL || ifnet_get_address_list_family(m11b_ifp, &addrs, AF_INET6) != 0 || addrs == NULL) {
++		return ENOENT;
++	}
++	for (int i = 0; addrs[i] != NULL && !found; i++) {
++		struct sockaddr_in6 sin6;
++		if (ifaddr_address(addrs[i], (struct sockaddr *)&sin6, sizeof(sin6)) != 0 || sin6.sin6_family != AF_INET6) {
++			continue;
++		}
++		if (IN6_IS_ADDR_LINKLOCAL(&sin6.sin6_addr)) {
++			sin6.sin6_addr.s6_addr16[1] = 0;        /* embedded scope */
++		}
++		(void)inet_ntop(AF_INET6, &sin6.sin6_addr, buf, (socklen_t)len);
++		found = 1;
++	}
++	ifnet_free_address_list(addrs);
++	return found ? 0 : ENOENT;
++}
++
++void
++starlte_m11b_counts(uint64_t *echo_in, uint64_t *reply_out, uint64_t *ns_in, uint64_t *na_out)
++{
++	*echo_in = icmp6stat.icp6s_inhist[ICMP6_ECHO_REQUEST];
++	*reply_out = icmp6stat.icp6s_outhist[ICMP6_ECHO_REPLY];
++	*ns_in = icmp6stat.icp6s_inhist[ND_NEIGHBOR_SOLICIT];
++	*na_out = icmp6stat.icp6s_outhist[ND_NEIGHBOR_ADVERT];
++}
++
++void
++starlte_m11b_ifstats(uint64_t *ipackets, uint64_t *opackets, uint64_t *ierrors, uint64_t *oerrors)
++{
++	struct ifnet_stats_param st;
++
++	bzero(&st, sizeof(st));
++	if (m11b_ifp != NULL) {
++		(void)ifnet_stat(m11b_ifp, &st);
++	}
++	*ipackets = st.packets_in;
++	*opackets = st.packets_out;
++	*ierrors = st.errors_in;
++	*oerrors = st.errors_out;
++}
++#endif /* ARM64_BOARD_CONFIG_STARLTE */
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index a18bca2e..44d72556 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -43,6 +43,7 @@ OSDefineMetaClassAndStructors(SweetPlatformExpert, IODTPlatformExpert);
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+ static unsigned starbiteCountChildren(const char *path, unsigned *withProp, const char *prop);
+ static void starbiteM5Start(void);
++void starbiteM11bStart(void);                /* 0432: sbstop=ncm (starbite/StarbiteM11b.cpp) */
+ #endif
+ 
+ bool
+@@ -65,6 +66,9 @@ SweetPlatformExpert::start(IOService *provider)
+ 	if (starlte_sbstop_at("m5")) {
+ 		starbiteM5Start();
+ 	}
++	if (starlte_sbstop_at("ncm")) {
++		starbiteM11bStart();
++	}
+ 	starlte_sbstop_arm_limit();             /* 0427: sbstop_s=S */
+ #endif
+ #if defined(A5XELTE)
+diff --git a/iokit/Kernel/arm/starbite/StarbiteM11b.cpp b/iokit/Kernel/arm/starbite/StarbiteM11b.cpp
+new file mode 100644
+index 00000000..e0002f01
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteM11b.cpp
+@@ -0,0 +1,216 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * 0432, sbstop=ncm (docs/APPLE-S9-DRIVERS.md M11, StarbiteUSB/PHONE-TEST.md "ping over NCM" with the real stack):
++ * StarbiteUSB (sbusb=1, no sbusb_echo) + StarbiteUSBNCM + IONetworkingFamily + XNU's IPv6, no user space. Started by
++ * the platform expert on an sbstop=ncm boot, this thread
++ *   1. waits (up to 50 s) for the IOEthernetInterface that StarbiteUSBNCM publishes,
++ *   2. names it through IONetworkStack (as IOKitBSDInit's IORegisterNetworkInterface does for a network root):
++ *      the lowest free unit, en0 in this boot,
++ *   3. has bsd/dev/starlte_m11b.c bring it up, attach IPv6 and start its EUI-64 link-local address (the address the
++ *      Mac's mac-ping.sh computes from the phone's MAC),
++ *   4. watches XNU's ICMPv6 counters: each echo reply the stack sends is logged as an M11b PASS line; after the third
++ *      it waits for the Mac's last two pings (mac-ping.sh sends 5) or 3 s, prints the interface counters and stops
++ *      the boot into TWRP. sbstop_s= (0427) stops it if the Mac never pings.
++ * The loader's watchdog is never fed on an sbstop boot (0423), whatever happens here.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOBSD.h>
++#include <IOKit/IOKitKeys.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSNumber.h>
++#include <libkern/c++/OSString.h>
++#include <kern/thread.h>
++
++extern "C" {
++int starlte_sbstop_at(const char *stage);
++void starlte_sbstop_now(const char *stage);
++int starlte_m11b_net_ready(void);
++int starlte_m11b_ifup(const char *name);
++void starlte_m11b_counts(uint64_t *echo_in, uint64_t *reply_out, uint64_t *ns_in, uint64_t *na_out);
++void starlte_m11b_ifstats(uint64_t *ipackets, uint64_t *opackets, uint64_t *ierrors, uint64_t *oerrors);
++int starlte_m11b_lladdr(char *buf, size_t len);
++}
++
++void starbiteM11bStart(void);
++
++#define LOG(fmt, ...) IOLog("StarbiteM11b: " fmt "\n", ##__VA_ARGS__)
++
++/* IONetworkStack.h / IONetworkInterface.h values (kept as literals: this file is built in the kernel's view) */
++#define M11B_STACK_COMMAND      "IONetworkStackUserCommand"
++#define M11B_REGISTER_LOWEST    1               /* kIONetworkStackRegisterInterfaceWithLowestUnit */
++#define M11B_UNIT               "IOInterfaceUnit"
++
++static uint64_t
++m11bMs(void)
++{
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / NSEC_PER_MSEC;
++}
++
++static IOService *
++m11bWait(const char *cls, uint64_t timeout_ms)
++{
++	OSDictionary *m = IOService::serviceMatching(cls);
++	IOService *s = NULL;
++	if (m != NULL) {
++		s = IOService::waitForMatchingService(m, timeout_ms * NSEC_PER_MSEC);
++		m->release();
++	}
++	return s;
++}
++
++static bool
++m11bLinkUp(IOService *netif)
++{
++	/* StarbiteUSB publishes SBUSBLinkUp (NCM data interface open) on itself: netif -> NCM -> StarbiteUSB */
++	IOService *ncm = netif->getProvider();
++	IOService *usb = ncm ? ncm->getProvider() : NULL;
++	return usb != NULL && usb->getProperty("SBUSBLinkUp") == kOSBooleanTrue;
++}
++
++static bool
++m11bName(IOService *stack, IOService *netif, char *name, size_t len)
++{
++	OSString *bsd = NULL;
++	for (unsigned tries = 0; tries < 50; tries++) {             /* 10 s: the stack may not have seen it yet */
++		bsd = OSDynamicCast(OSString, netif->getProperty(kIOBSDNameKey));
++		if (bsd != NULL) {
++			break;
++		}
++		OSDictionary *d = OSDictionary::withCapacity(3);
++		OSNumber *unit = OSNumber::withNumber((unsigned long long)0, 32);
++		OSNumber *cmd = OSNumber::withNumber((unsigned long long)M11B_REGISTER_LOWEST, 32);
++		uint64_t id = netif->getRegistryEntryID();
++		OSData *idData = OSData::withBytes(&id, sizeof(id));
++		if (d != NULL && unit != NULL && cmd != NULL && idData != NULL) {
++			d->setObject(M11B_UNIT, unit);
++			d->setObject(M11B_STACK_COMMAND, cmd);
++			d->setObject(kIORegistryEntryIDKey, idData);
++			IOReturn r = stack->setProperties(d);
++			if (tries == 0 || (r != kIOReturnSuccess && tries % 10 == 9)) {
++				LOG("IONetworkStack naming request: 0x%x", r);
++			}
++		}
++		OSSafeReleaseNULL(d);
++		OSSafeReleaseNULL(unit);
++		OSSafeReleaseNULL(cmd);
++		OSSafeReleaseNULL(idData);
++		bsd = OSDynamicCast(OSString, netif->getProperty(kIOBSDNameKey));
++		if (bsd != NULL) {
++			break;
++		}
++		IOSleep(200);
++	}
++	if (bsd == NULL) {
++		return false;
++	}
++	strlcpy(name, bsd->getCStringNoCopy(), len);
++	return true;
++}
++
++static void
++m11bThread(__unused void *arg, __unused wait_result_t wr)
++{
++	char name[16] = "", ll[64] = "";
++	uint64_t echoIn = 0, replyOut = 0, nsIn = 0, naOut = 0;
++	uint64_t base[4] = { };
++	uint64_t ip = 0, op = 0, ie = 0, oe = 0;
++	uint64_t lastReport = 0, thirdAt = 0;
++	unsigned logged = 0;
++	bool sawEcho = false, sawNs = false, sawLl = false;
++	IOService *stack = NULL;
++
++	LOG("waiting up to 50 s for StarbiteUSBNCM's Ethernet interface (sbusb=1, sbusb_echo off)");
++	IOService *netif = m11bWait("IOEthernetInterface", 50000);
++	if (netif == NULL || netif->getProvider() == NULL || !netif->getProvider()->metaCast("StarbiteUSBNCM")) {
++		LOG("no Ethernet interface from StarbiteUSBNCM by %llu ms (StarbiteUSB not started? see its lines): "
++		    "waiting for sbstop_s=", m11bMs());
++		OSSafeReleaseNULL(netif);
++		return;
++	}
++	LOG("IOEthernetInterface from StarbiteUSBNCM at %llu ms (link %s)", m11bMs(), m11bLinkUp(netif) ? "up" : "down");
++	stack = m11bWait("IONetworkStack", 20000);
++	if (stack == NULL) {
++		LOG("no IONetworkStack by %llu ms: waiting for sbstop_s=", m11bMs());
++		netif->release();
++		return;
++	}
++	if (!m11bName(stack, netif, name, sizeof(name))) {
++		LOG("IONetworkStack gave the interface no BSD name: waiting for sbstop_s=");
++		stack->release();
++		netif->release();
++		return;
++	}
++	LOG("named %s by IONetworkStack at %llu ms", name, m11bMs());
++	for (unsigned i = 0; i < 100 && !starlte_m11b_net_ready(); i++) {      /* net_init_run (IPv6 delayed init) */
++		IOSleep(100);
++	}
++	if (starlte_m11b_ifup(name) != 0) {
++		LOG("%s could not be configured: waiting for sbstop_s=", name);
++		stack->release();
++		netif->release();
++		return;
++	}
++	starlte_m11b_counts(&base[0], &base[1], &base[2], &base[3]);
++	for (;;) {
++		uint64_t now = m11bMs();
++		starlte_m11b_counts(&echoIn, &replyOut, &nsIn, &naOut);
++		echoIn -= base[0];
++		replyOut -= base[1];
++		nsIn -= base[2];
++		naOut -= base[3];
++		if (!sawLl && starlte_m11b_lladdr(ll, sizeof(ll)) == 0) {
++			sawLl = true;
++			LOG("%s link-local %s (the Mac pings it as %s%%enX)", name, ll, ll);
++		}
++		if (!sawNs && nsIn != 0) {
++			sawNs = true;
++			LOG("neighbour solicitation from the Mac received (%llu), %llu advertisement(s) sent", nsIn, naOut);
++		}
++		if (!sawEcho && echoIn != 0) {
++			sawEcho = true;
++			LOG("first ICMPv6 echo request received at %llu ms", now);
++		}
++		while (logged < replyOut && logged < 3) {
++			logged++;
++			LOG("M11b PASS: echo reply %u sent by the BSD IPv6 stack over %s (ping over NCM)", logged, name);
++			if (logged == 3) {
++				thirdAt = now;
++			}
++		}
++		if (thirdAt != 0 && (replyOut >= 5 || now >= thirdAt + 3000)) {
++			break;
++		}
++		if (now >= lastReport + 10000) {
++			lastReport = now;
++			starlte_m11b_ifstats(&ip, &op, &ie, &oe);
++			LOG("%s at %llu ms: link %s, in %llu out %llu packets (errors %llu/%llu), ICMPv6 echo in %llu reply out "
++			    "%llu, NS in %llu NA out %llu", name, now, m11bLinkUp(netif) ? "up" : "down", ip, op, ie, oe, echoIn,
++			    replyOut, nsIn, naOut);
++		}
++		IOSleep(100);
++	}
++	starlte_m11b_ifstats(&ip, &op, &ie, &oe);
++	LOG("sbstop=ncm: %s in %llu out %llu packets (errors %llu/%llu), ICMPv6 echo in %llu reply out %llu, NS in %llu "
++	    "NA out %llu; stopping", name, ip, op, ie, oe, echoIn, replyOut, nsIn, naOut);
++	stack->release();
++	netif->release();
++	starlte_sbstop_now("ncm");
++}
++
++void
++starbiteM11bStart(void)
++{
++	thread_t th;
++	if (kernel_thread_start(m11bThread, NULL, &th) == KERN_SUCCESS) {
++		thread_deallocate(th);
++	} else {
++		LOG("no thread: sbstop_s= or the loader's watchdog ends this boot");
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_STARLTE */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSBNCM.cpp b/iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSBNCM.cpp
+new file mode 100644
+index 00000000..96597d5f
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSBNCM.cpp
+@@ -0,0 +1,317 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSBNCM (StarbiteUSBNCM.h). Everything runs on StarbiteUSB's work loop: the output queue is a gated
++ * queue on it, enable/disable come through IONetworkController's command gate on it, and StarbiteUSB calls
++ * back from its timer or interrupt on it.
++ *   out: outputPacket() copies the mbuf chain into the NTB StarbiteUSB is filling (hw/sbusb_func.c decides
++ *        when it goes on the wire); when every NTB is in flight the queue stalls and usbTxReady restarts it.
++ *   in:  usbRx() gets one Ethernet frame per datagram of a received NTB, copies it into a fresh mbuf and
++ *        queues it on the interface; usbRxBatchDone() flushes the input queue once per poll.
++ */
++#include "StarbiteUSBNCM.h"
++#include <IOKit/IOLib.h>
++#include <sys/kpi_mbuf.h>
++
++#define super IOEthernetController
++OSDefineMetaClassAndStructors(StarbiteUSBNCM, IOEthernetController);
++
++#define LOG(fmt, ...) IOLog("StarbiteUSBNCM: " fmt "\n", ##__VA_ARGS__)
++
++IOWorkLoop *
++StarbiteUSBNCM::getWorkLoop(void) const
++{
++	return fUSB != NULL ? fUSB->getWorkLoop() : NULL;
++}
++
++IOOutputQueue *
++StarbiteUSBNCM::createOutputQueue(void)
++{
++	return IOGatedOutputQueue::withTarget(this, getWorkLoop());
++}
++
++const OSString *
++StarbiteUSBNCM::newVendorString(void) const
++{
++	return OSString::withCString("Starbite");
++}
++
++const OSString *
++StarbiteUSBNCM::newModelString(void) const
++{
++	return OSString::withCString("S9 USB network (CDC-NCM device side)");
++}
++
++IOReturn
++StarbiteUSBNCM::getHardwareAddress(IOEthernetAddress *address)
++{
++	uint8_t host[6];
++	fUSB->getAddresses(address->bytes, host);
++	return kIOReturnSuccess;
++}
++
++IOReturn
++StarbiteUSBNCM::getPacketFilters(const OSSymbol *group, UInt32 *filters) const
++{
++	if (group == gIOEthernetWakeOnLANFilterGroup) {
++		*filters = 0;
++		return kIOReturnSuccess;
++	}
++	if (group == gIONetworkFilterGroup) {
++		/* a point-to-point cable: every frame the host sends is handed up */
++		*filters = kIOPacketFilterUnicast | kIOPacketFilterBroadcast | kIOPacketFilterMulticast |
++		    kIOPacketFilterMulticastAll | kIOPacketFilterPromiscuous;
++		return kIOReturnSuccess;
++	}
++	return super::getPacketFilters(group, filters);
++}
++
++IOReturn StarbiteUSBNCM::setPromiscuousMode(bool) { return kIOReturnSuccess; }
++IOReturn StarbiteUSBNCM::setMulticastMode(bool) { return kIOReturnSuccess; }
++IOReturn StarbiteUSBNCM::setMulticastList(IOEthernetAddress *, UInt32) { return kIOReturnSuccess; }
++
++bool
++StarbiteUSBNCM::configureInterface(IONetworkInterface *interface)
++{
++	IONetworkData *data;
++
++	if (!super::configureInterface(interface)) {
++		return false;
++	}
++	data = interface->getNetworkData(kIONetworkStatsKey);
++	fNetStats = data != NULL ? (IONetworkStats *)data->getBuffer() : NULL;
++	data = interface->getNetworkData(kIOEthernetStatsKey);
++	fEtherStats = data != NULL ? (IOEthernetStats *)data->getBuffer() : NULL;
++	return fNetStats != NULL;
++}
++
++void
++StarbiteUSBNCM::publishLink(void)
++{
++	const IONetworkMedium *medium = fFullSpeed ? fMediumFull : fMediumHigh;
++
++	if (fLinkUp) {
++		setLinkStatus(kIONetworkLinkValid | kIONetworkLinkActive, medium, fFullSpeed ? 12000000ULL : 480000000ULL);
++	} else {
++		setLinkStatus(kIONetworkLinkValid, medium, 0);
++	}
++}
++
++/* ---- StarbiteUSB callbacks (work loop) ------------------------------------------------------ */
++
++void
++StarbiteUSBNCM::usbLink(void *owner, bool up, bool fullSpeed)
++{
++	StarbiteUSBNCM *me = (StarbiteUSBNCM *)owner;
++
++	me->fLinkUp = up;
++	me->fFullSpeed = fullSpeed;
++	me->publishLink();
++	if (me->fQueue != NULL && me->fEnabled) {
++		if (up) {
++			me->fQueue->start();
++		} else {
++			me->fQueue->stop();
++			me->fQueue->flush();            /* nothing waits for a cable that is gone */
++		}
++	}
++}
++
++void
++StarbiteUSBNCM::usbTxReady(void *owner)
++{
++	StarbiteUSBNCM *me = (StarbiteUSBNCM *)owner;
++	if (me->fQueue != NULL && me->fEnabled) {
++		me->fQueue->service(IOBasicOutputQueue::kServiceAsync);
++	}
++}
++
++void
++StarbiteUSBNCM::usbRx(void *owner, const uint8_t *frame, uint32_t length)
++{
++	StarbiteUSBNCM *me = (StarbiteUSBNCM *)owner;
++	mbuf_t m;
++
++	if (!me->fEnabled || me->fNetif == NULL) {
++		return;
++	}
++	m = me->allocatePacket(length);
++	if (m == NULL || mbuf_copyback(m, 0, length, frame, MBUF_DONTWAIT) != 0) {
++		if (m != NULL) {
++			me->freePacket(m);
++		}
++		if (me->fNetStats != NULL) {
++			++me->fNetStats->inputErrors;
++		}
++		return;
++	}
++	(void)me->fNetif->inputPacket(m, length, IONetworkInterface::kInputOptionQueuePacket);
++	if (me->fNetStats != NULL) {
++		++me->fNetStats->inputPackets;
++	}
++}
++
++void
++StarbiteUSBNCM::usbRxBatchDone(void *owner)
++{
++	StarbiteUSBNCM *me = (StarbiteUSBNCM *)owner;
++	if (me->fEnabled && me->fNetif != NULL) {
++		(void)me->fNetif->flushInputQueue();
++	}
++}
++
++/* ---- data out ------------------------------------------------------------------------------- */
++
++UInt32
++StarbiteUSBNCM::outputPacket(mbuf_t packet, void *)
++{
++	size_t length = mbuf_pkthdr_len(packet);
++	bool stall = false;
++	uint8_t *room;
++
++	if (!fEnabled || !fLinkUp || length < 14 || length > SBUSB_DG_MAX) {
++		freePacket(packet);
++		if (fNetStats != NULL) {
++			++fNetStats->outputErrors;
++		}
++		return kIOReturnOutputDropped;
++	}
++	room = fUSB->txBegin((uint32_t)length, &stall);
++	if (room == NULL) {
++		if (stall) {
++			return kIOReturnOutputStall;    /* the queue keeps the packet; usbTxReady restarts it */
++		}
++		freePacket(packet);
++		if (fNetStats != NULL) {
++			++fNetStats->outputErrors;
++		}
++		return kIOReturnOutputDropped;
++	}
++	if (mbuf_copydata(packet, 0, length, room) != 0) {
++		bzero(room, length);                    /* cannot happen for a well-formed chain; never send stale bytes */
++	}
++	fUSB->txCommit();
++	freePacket(packet);
++	if (fNetStats != NULL) {
++		++fNetStats->outputPackets;
++	}
++	return kIOReturnOutputSuccess;
++}
++
++IOReturn
++StarbiteUSBNCM::enable(IONetworkInterface *)
++{
++	fEnabled = true;
++	publishLink();
++	if (fQueue != NULL && fLinkUp) {
++		fQueue->start();
++	}
++	return kIOReturnSuccess;
++}
++
++IOReturn
++StarbiteUSBNCM::disable(IONetworkInterface *)
++{
++	fEnabled = false;
++	if (fQueue != NULL) {
++		fQueue->stop();
++		fQueue->flush();
++	}
++	return kIOReturnSuccess;
++}
++
++/* ---- start / stop --------------------------------------------------------------------------- */
++
++IOReturn
++StarbiteUSBNCM::attachGated(OSObject *owner, void *, void *, void *, void *)
++{
++	StarbiteUSBNCM *me = (StarbiteUSBNCM *)owner;
++	StarbiteUSBClient client = { me, usbRx, usbRxBatchDone, usbLink, usbTxReady };
++
++	me->fUSB->setClient(&client);           /* calls usbLink with the state now */
++	me->fClientSet = true;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++StarbiteUSBNCM::detachGated(OSObject *owner, void *, void *, void *, void *)
++{
++	StarbiteUSBNCM *me = (StarbiteUSBNCM *)owner;
++
++	if (me->fClientSet) {
++		me->fUSB->setClient(NULL);
++		me->fClientSet = false;
++	}
++	me->fEnabled = false;
++	return kIOReturnSuccess;
++}
++
++bool
++StarbiteUSBNCM::start(IOService *provider)
++{
++	IOWorkLoop *loop;
++
++	fUSB = OSDynamicCast(StarbiteUSB, provider);
++	if (fUSB == NULL || fUSB->getWorkLoop() == NULL) {
++		return false;
++	}
++	fUSB->retain();
++	if (!super::start(provider)) {
++		return false;
++	}
++	loop = getWorkLoop();
++	fQueue = getOutputQueue();
++	if (fQueue == NULL) {
++		LOG("no output queue");
++		goto fail;
++	}
++	fQueue->retain();
++	fQueue->setCapacity(256);
++
++	fMedia = OSDictionary::withCapacity(2);
++	fMediumHigh = IONetworkMedium::medium(kIOMediumEthernetAuto | kIOMediumOptionFullDuplex, 480000000ULL);
++	fMediumFull = IONetworkMedium::medium(kIOMediumEthernetAuto, 12000000ULL);
++	if (fMedia == NULL || fMediumHigh == NULL || fMediumFull == NULL ||
++	    !IONetworkMedium::addMedium(fMedia, fMediumHigh) || !IONetworkMedium::addMedium(fMedia, fMediumFull) ||
++	    !publishMediumDictionary(fMedia) || !setCurrentMedium(fMediumHigh)) {
++		LOG("no medium dictionary");
++		goto fail;
++	}
++	publishLink();
++	if (!attachInterface((IONetworkInterface **)&fNetif, false) || fNetif == NULL) {
++		LOG("no Ethernet interface");
++		goto fail;
++	}
++	(void)loop->runAction(attachGated, this);
++	fNetif->registerService();
++	LOG("Ethernet interface attached (link %s)", fLinkUp ? "up" : "down");
++	return true;
++
++fail:
++	stop(provider);
++	return false;
++}
++
++void
++StarbiteUSBNCM::stop(IOService *provider)
++{
++	IOWorkLoop *loop = getWorkLoop();
++
++	if (loop != NULL) {
++		(void)loop->runAction(detachGated, this);
++	}
++	if (fNetif != NULL) {
++		detachInterface(fNetif);
++	}
++	OSSafeReleaseNULL(fNetif);
++	OSSafeReleaseNULL(fQueue);
++	super::stop(provider);
++}
++
++void
++StarbiteUSBNCM::free(void)
++{
++	OSSafeReleaseNULL(fMedia);
++	OSSafeReleaseNULL(fMediumHigh);
++	OSSafeReleaseNULL(fMediumFull);
++	OSSafeReleaseNULL(fUSB);
++	super::free();
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSBNCM.h b/iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSBNCM.h
+new file mode 100644
+index 00000000..a6b18e91
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSB/StarbiteUSBNCM.h
+@@ -0,0 +1,54 @@
++/* SPDX-License-Identifier: APSL-2.0
++ * StarbiteUSBNCM: the phone's end of the USB network link as an Ethernet controller (IONetworkingFamily's
++ * public KPI), so macOS / iOS on the phone gets an "en" interface. A client of StarbiteUSB (StarbiteUSB.h).
++ */
++#ifndef STARBITE_USB_NCM_H
++#define STARBITE_USB_NCM_H
++
++#include <IOKit/network/IOEthernetController.h>
++#include <IOKit/network/IOEthernetInterface.h>
++#include <IOKit/network/IOGatedOutputQueue.h>
++#include <IOKit/network/IONetworkMedium.h>
++#include "StarbiteUSB.h"
++
++class StarbiteUSBNCM : public IOEthernetController {
++	OSDeclareDefaultStructors(StarbiteUSBNCM);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
++	IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE;
++
++	IOReturn enable(IONetworkInterface *interface) APPLE_KEXT_OVERRIDE;
++	IOReturn disable(IONetworkInterface *interface) APPLE_KEXT_OVERRIDE;
++	UInt32 outputPacket(mbuf_t packet, void *param) APPLE_KEXT_OVERRIDE;
++	IOOutputQueue *createOutputQueue(void) APPLE_KEXT_OVERRIDE;
++	bool configureInterface(IONetworkInterface *interface) APPLE_KEXT_OVERRIDE;
++	IOReturn getHardwareAddress(IOEthernetAddress *address) APPLE_KEXT_OVERRIDE;
++	IOReturn getPacketFilters(const OSSymbol *group, UInt32 *filters) const APPLE_KEXT_OVERRIDE;
++	IOReturn setPromiscuousMode(bool active) APPLE_KEXT_OVERRIDE;
++	IOReturn setMulticastMode(bool active) APPLE_KEXT_OVERRIDE;
++	IOReturn setMulticastList(IOEthernetAddress *addresses, UInt32 count) APPLE_KEXT_OVERRIDE;
++	const OSString *newVendorString(void) const APPLE_KEXT_OVERRIDE;
++	const OSString *newModelString(void) const APPLE_KEXT_OVERRIDE;
++
++private:
++	StarbiteUSB *fUSB;
++	IOEthernetInterface *fNetif;
++	IOOutputQueue *fQueue;
++	IONetworkStats *fNetStats;
++	IOEthernetStats *fEtherStats;
++	OSDictionary *fMedia;
++	const IONetworkMedium *fMediumHigh, *fMediumFull;
++	bool fEnabled, fLinkUp, fFullSpeed, fClientSet;
++
++	void publishLink(void);
++	static IOReturn attachGated(OSObject *owner, void *, void *, void *, void *);
++	static IOReturn detachGated(OSObject *owner, void *, void *, void *, void *);
++	static void usbRx(void *owner, const uint8_t *frame, uint32_t length);
++	static void usbRxBatchDone(void *owner);
++	static void usbLink(void *owner, bool up, bool fullSpeed);
++	static void usbTxReady(void *owner);
++};
++
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUSBNCM.cpp b/iokit/Kernel/arm/starbite/StarbiteUSBNCM.cpp
+new file mode 100644
+index 00000000..2b58d694
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUSBNCM.cpp
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUSB/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUSB/
++ * (commit 0d957fd); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++/*
++ * __PRIVATE_SPI__ as for IONetworkingFamily itself (0431): the family is built with it, so IONetworkController's
++ * vtable slots 2-5 are real methods there, not _RESERVED placeholders; a client built without it would reference
++ * placeholders that do not exist. The public and private views have the same slots.
++ */
++#define __PRIVATE_SPI__ 1
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUSB/StarbiteUSBNCM.cpp"
++#endif
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 28d68492..88a9ca0f 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -153,6 +153,11 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOPlatformDevice;"
+     "     'IONameMatch'     = 'starbite,dwc3';"
+     "   },"
++    /* 0432, M11b: the Ethernet controller on StarbiteUSB (its NCM function), IONetworkingFamily (StarbiteUSB/INTEGRATION.md) */
++    "   {"
++    "     'IOClass'         = StarbiteUSBNCM;"
++    "     'IOProviderClass' = StarbiteUSB;"
++    "   },"
+     /* 0428, M8a: the DECON / DSIM hardware half of the display (board ADT decon node) */
+     "   {"
+     "     'IOClass'         = StarbiteDisplay;"
+diff --git a/iokit/conf/Makefile.template b/iokit/conf/Makefile.template
+index b7a8a9ef..09e7635a 100644
+--- a/iokit/conf/Makefile.template
++++ b/iokit/conf/Makefile.template
+@@ -220,6 +220,8 @@ IONF_OBJS = IONetworkController.cpo IOEthernetController.cpo IONetworkInterface.
+ 	IONetworkStack.cpo IONetworkData.cpo IONetworkMedium.cpo IONetworkUserClient.cpo IOOutputQueue.cpo \
+ 	IOPacketQueue.cpo IOMbufMemoryCursor.cpo IOKernelDebugger.cpo
+ $(foreach o,$(IONF_OBJS),$(eval $(o)_INCFLAGS += -I$(IONF_ROOT) -I$(IONF_ROOT)/include -I$(SRCROOT)/bsd))
++# 0432 (STARLTE, M11b): StarbiteUSBNCM is an IOEthernetController: the family's <IOKit/network/...> headers
++StarbiteUSBNCM.cpo_INCFLAGS += -I$(IONF_ROOT)/include -I$(SRCROOT)/bsd
+ 
+ # Rebuild if per-file overrides change
+ ${OBJS}: $(firstword $(MAKEFILE_LIST))
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index 3efec0dc..b336a935 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -89,3 +89,7 @@ iokit/Families/units/IOOutputQueue.cpp                           optional iokitc
+ iokit/Families/units/IOPacketQueue.cpp                           optional iokitcpp
+ iokit/Families/units/IOMbufMemoryCursor.cpp                      optional iokitcpp
+ iokit/Families/units/IOKernelDebugger.cpp                        optional iokitcpp
++# M11b: StarbiteUSBNCM (IOEthernetController on StarbiteUSB, needs IONetworkingFamily above) and the sbstop=ncm test
++# (StarbiteM11b.cpp + bsd/dev/starlte_m11b.c: names and configures its interface without user space).
++iokit/Kernel/arm/starbite/StarbiteUSBNCM.cpp                     optional iokitcpp
++iokit/Kernel/arm/starbite/StarbiteM11b.cpp                       optional iokitcpp
+-- 
+2.53.0
+

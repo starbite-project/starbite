@@ -1,0 +1,3474 @@
+From a1f4d51ed9aebc4ab2cca1f9da98acfe840d69c3 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 11 Nov 2026 20:10:58 +0200
+Subject: [PATCH] patch: 0430-starbite-m4-ufs.patch - StarbiteUFS built in for
+ STARLTE (copy of starbite/apple-drivers/StarbiteUFS at 5faf32f, STARLTE-only
+ build units, the IOStorageFamily include path for its unit): the fenced UFS
+ host as one IOBlockStorageDevice per allowed range on the board ADT's
+ starbite,ufs nub; it starts only with a filled fence allow-list (the loader
+ fills the ADT placeholders from the live GPT), never writes unless the ADT
+ says starbite,writes-allowed and sbufsrw=1, never together with herolte_ufs
+ (rd=ufsroot0 / ufsprobe); test stops sbstop=ufs (IOMedia tree settled) and
+ sbstop=ufsroot (after the sbufsreport= report)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ iokit/Kernel/arm/starbite/StarbiteUFS.cpp     |   11 +
+ .../arm/starbite/StarbiteUFS/StarbiteUFS.cpp  | 1336 +++++++++++++++++
+ .../arm/starbite/StarbiteUFS/StarbiteUFS.h    |  190 +++
+ .../arm/starbite/StarbiteUFS/hw/sbufs_fence.c |  289 ++++
+ .../arm/starbite/StarbiteUFS/hw/sbufs_fence.h |  119 ++
+ .../arm/starbite/StarbiteUFS/hw/sbufs_hc.c    |  549 +++++++
+ .../arm/starbite/StarbiteUFS/hw/sbufs_hc.h    |  125 ++
+ .../arm/starbite/StarbiteUFS/hw/sbufs_port.h  |   54 +
+ .../arm/starbite/StarbiteUFS/hw/sbufs_proto.c |  385 +++++
+ .../arm/starbite/StarbiteUFS/hw/sbufs_proto.h |   93 ++
+ .../arm/starbite/StarbiteUFS/hw/sbufs_regs.h  |  108 ++
+ iokit/Kernel/arm/starbite/sbufs_fence.c       |   11 +
+ iokit/Kernel/arm/starbite/sbufs_hc.c          |   11 +
+ iokit/Kernel/arm/starbite/sbufs_proto.c       |   11 +
+ iokit/KernelConfigTables.cpp                  |   10 +
+ iokit/conf/Makefile.template                  |    2 +
+ iokit/conf/files.arm64                        |    5 +
+ 17 files changed, 3309 insertions(+)
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUFS.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUFS/StarbiteUFS.cpp
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUFS/StarbiteUFS.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_fence.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_fence.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_hc.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_hc.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_port.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_proto.c
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_proto.h
+ create mode 100644 iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_regs.h
+ create mode 100644 iokit/Kernel/arm/starbite/sbufs_fence.c
+ create mode 100644 iokit/Kernel/arm/starbite/sbufs_hc.c
+ create mode 100644 iokit/Kernel/arm/starbite/sbufs_proto.c
+
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUFS.cpp b/iokit/Kernel/arm/starbite/StarbiteUFS.cpp
+new file mode 100644
+index 00000000..d41b3315
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUFS.cpp
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUFS/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUFS/
++ * (commit 5faf32f); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUFS/StarbiteUFS.cpp"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUFS/StarbiteUFS.cpp b/iokit/Kernel/arm/starbite/StarbiteUFS/StarbiteUFS.cpp
+new file mode 100644
+index 00000000..b06b66e8
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUFS/StarbiteUFS.cpp
+@@ -0,0 +1,1336 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteUFS: IOKit glue for the fenced UFS host (see StarbiteUFS.h, NOTES.md, PHONE-TEST.md).
++ *
++ * Register facts come from Starbite's own build/xnu-12377/bsd/dev/herolte_ufs.c (patches 0204/0300, proven on the
++ * S9 since 2026-10-25) and, as facts only, from an earlier port's APSL-2.0 drivers/storage/ufs/ufshc.c (an earlier port
++ * Project, "an earlier port"): credit in NOTES.md. No GPL code (starbite/libsb, Linux) is used.
++ *
++ * Addresses come only from the provider nub (ADT "reg" of /arm-io/ufs: HCI, vendor HCI, UniPro, UFSP), the
++ * interrupt only from its "interrupts". The allow-list, deny-list and write switch come from the nub's
++ * "starbite,allowed-ranges", "starbite,denied-ranges", "starbite,writes-allowed" (format: NOTES.md).
++ *
++ * Boot-args (all optional):
++ *   sbufsrw=1       writes, if the ADT also says starbite,writes-allowed = 1 and the range is WRITABLE (default 0)
++ *   sbufsirq=0      polled only (default 1: the nub's interrupt, with a 20 ms safety poll)
++ *   sbufsmulti=0    one 4 KiB block per command (default 1: 16 after the read-only self test passes)
++ *   sbufsqd=N       slots in use, 1..8 (default 4)
++ *   sbufsbounce=1   every transfer through the slot bounce buffers (default 0: direct DMA where it fits)
++ *   sbufs64=1       allow DMA above 4 GiB if CAP.64AS (default 0)
++ *   sbufscached=1   cacheable descriptor memory with explicit maintenance, one slot (default 0: write-combined)
++ *   sbufsreport=S   S s after start: IOMedia tree, root line, fence summary again (default 0: off). The tree is
++ *                   always printed once the media settle, the root line once the root is mounted.
++ *   sbstop=ufs      (0423) after the first IOMedia tree: stop and reset into TWRP
++ *   sbstop=ufsroot  after the sbufsreport report: stop and reset into TWRP
++ */
++#include "StarbiteUFS.h"
++
++#include <IOKit/IOLib.h>
++#include <IOKit/IOBSD.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/storage/IOMedia.h>
++#include <IOKit/storage/IOStorageDeviceCharacteristics.h>
++#include <IOKit/storage/IOStorageProtocolCharacteristics.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSNumber.h>
++#include <libkern/c++/OSString.h>
++#include <libkern/c++/OSBoolean.h>
++#include <pexpert/pexpert.h>
++#include <kern/clock.h>
++#include <sys/vnode.h>
++#include <sys/mount.h>
++
++#ifndef STARBITEUFS_SBSTOP
++#define STARBITEUFS_SBSTOP 1            /* built into a STARLTE kernel: herolte_ufs.c (0423) provides these */
++#endif
++#if STARBITEUFS_SBSTOP
++extern "C" int starlte_sbstop_at(const char *stage);
++extern "C" void starlte_sbstop_now(const char *stage);
++#endif
++
++#define LOG(fmt, ...)   IOLog("StarbiteUFS: " fmt "\n", ##__VA_ARGS__)
++
++static const uint32_t kPollUsPolled = 250;      /* polled mode, while commands are in flight */
++static const uint32_t kPollMsIrq = 20;          /* interrupt mode: lost-interrupt safety net and timeouts */
++static const uint32_t kTreeSettleMs = 3000;
++static const unsigned kMaxUARetries = 3;
++
++OSDefineMetaClassAndStructors(StarbiteUFS, IOService);
++OSDefineMetaClassAndStructors(StarbiteUFSRange, IOBlockStorageDevice);
++
++/* ---------------------------------------------------------------------------------------------------------------- */
++/* sbufs_hw_ops                                                                                                      */
++
++uint32_t
++StarbiteUFS::hwRead(void *ctx, unsigned bank, uint32_t off)
++{
++	StarbiteUFS *self = (StarbiteUFS *)ctx;
++	volatile uint32_t *b = bank == SBUFS_BANK_HCI ? self->fHci : bank == SBUFS_BANK_VS ? self->fVs : NULL;
++	return (b != NULL && off < 0x200) ? b[off / 4] : 0xffffffffu;
++}
++
++void
++StarbiteUFS::hwWrite(void *ctx, unsigned bank, uint32_t off, uint32_t v)
++{
++	StarbiteUFS *self = (StarbiteUFS *)ctx;
++	/* the UniPro and UFSP banks are never written */
++	volatile uint32_t *b = bank == SBUFS_BANK_HCI ? self->fHci : bank == SBUFS_BANK_VS ? self->fVs : NULL;
++	if (b != NULL && off < 0x200) {
++		b[off / 4] = v;
++	}
++}
++
++void
++StarbiteUFS::hwBarrier(void *ctx)
++{
++	(void)ctx;
++	__builtin_arm_dsb(0xf);
++}
++
++uint64_t
++StarbiteUFS::hwNowUs(void *ctx)
++{
++	(void)ctx;
++	uint64_t ns;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000;
++}
++
++void
++StarbiteUFS::hwDelayUs(void *ctx, uint32_t us)
++{
++	(void)ctx;
++	IODelay(us);
++}
++
++void
++StarbiteUFS::hwLog(void *ctx, const char *line)
++{
++	(void)ctx;
++	IOLog("StarbiteUFS: %s\n", line);
++}
++
++void
++StarbiteUFS::hwClean(void *ctx, uint32_t off, uint32_t len)
++{
++	StarbiteUFS *self = (StarbiteUFS *)ctx;
++	self->fDma->performOperation(kIOMemoryIncoherentIOStore, off, len);
++}
++
++void
++StarbiteUFS::hwInval(void *ctx, uint32_t off, uint32_t len)
++{
++	StarbiteUFS *self = (StarbiteUFS *)ctx;
++	self->fDma->performOperation(kIOMemoryIncoherentIOFlush, off, len);
++}
++
++/* ---------------------------------------------------------------------------------------------------------------- */
++/* start-up                                                                                                          */
++
++static uint32_t
++bootArg(const char *name, uint32_t dflt)
++{
++	uint32_t v = dflt;
++	(void)PE_parse_boot_argn(name, &v, sizeof(v));
++	return v;
++}
++
++bool
++StarbiteUFS::readConfig(IOService *provider)
++{
++	char rd[32] = "";
++	char err[160] = "";
++	uint32_t probe = 0;
++
++	/* herolte_ufs.c drives the same host for rd=ufsroot0 / ufsprobe=1: never both */
++	if ((PE_parse_boot_argn("rd", rd, sizeof(rd) - 1) && strncmp(rd, "ufsroot", 7) == 0) ||
++	    (PE_parse_boot_argn("ufsprobe", &probe, sizeof(probe)) && probe != 0)) {
++		LOG("rd=%s ufsprobe=%u: herolte_ufs owns the host in this boot, not starting", rd, probe);
++		return false;
++	}
++	fArgRW = bootArg("sbufsrw", 0);
++	fArgIrq = bootArg("sbufsirq", 1);
++	fArgMulti = bootArg("sbufsmulti", 1);
++	fArgQD = bootArg("sbufsqd", 4);
++	fArgBounce = bootArg("sbufsbounce", 0);
++	fArg64 = bootArg("sbufs64", 0);
++	fArgCached = bootArg("sbufscached", 0);
++	fArgReport = bootArg("sbufsreport", 0);
++	if (!PE_parse_boot_argn("sbstop", fStop, sizeof(fStop) - 1)) {
++		fStop[0] = '\0';
++	}
++	if (fArgQD < 1) {
++		fArgQD = 1;
++	}
++	if (fArgQD > SBUFS_MAX_SLOTS) {
++		fArgQD = SBUFS_MAX_SLOTS;
++	}
++	if (fArgCached) {
++		fArgQD = 1;     /* cached descriptors: two slots share a cache line, so only one slot (as herolte_ufs) */
++	}
++
++	OSData *allow = OSDynamicCast(OSData, provider->getProperty("starbite,allowed-ranges"));
++	OSData *deny = OSDynamicCast(OSData, provider->getProperty("starbite,denied-ranges"));
++	OSData *wa = OSDynamicCast(OSData, provider->getProperty("starbite,writes-allowed"));
++	if (allow == NULL) {
++		LOG("no starbite,allowed-ranges on the nub: nothing may be exposed, not starting");
++		return false;
++	}
++	if (sbufs_fence_parse(&fFence, allow->getBytesNoCopy(), allow->getLength(),
++	    deny ? deny->getBytesNoCopy() : NULL, deny ? deny->getLength() : 0, err, sizeof(err)) != SBUFS_OK) {
++		LOG("fence properties refused (%s): not starting", err);
++		return false;
++	}
++	fAdtWrites = wa != NULL && wa->getLength() >= 4 && *(const uint32_t *)wa->getBytesNoCopy() == 1;
++	fFence.writes_enabled = fAdtWrites && fArgRW == 1;
++	LOG("fence: %u allowed ranges, %u denied extents%s; writes %s (ADT %u, sbufsrw=%u)", fFence.nallow,
++	    fFence.ndeny, deny ? "" : " (no deny-list: allow-list + built-in GPT floors)",
++	    fFence.writes_enabled ? "ON" : "off", fAdtWrites, fArgRW);
++	return fFence.nallow != 0;
++}
++
++bool
++StarbiteUFS::mapRegisters(IOService *provider)
++{
++	if (provider->getDeviceMemoryCount() < 2) {
++		LOG("nub has %u reg ranges, need HCI and vendor HCI", provider->getDeviceMemoryCount());
++		return false;
++	}
++	fHciMap = provider->mapDeviceMemoryWithIndex(0, kIOMapInhibitCache);
++	fVsMap = provider->mapDeviceMemoryWithIndex(1, kIOMapInhibitCache);
++	if (fHciMap == NULL || fVsMap == NULL || fHciMap->getLength() < 0x200 || fVsMap->getLength() < 0x70) {
++		LOG("cannot map the HCI / vendor HCI registers");
++		return false;
++	}
++	fHci = (volatile uint32_t *)fHciMap->getVirtualAddress();
++	fVs = (volatile uint32_t *)fVsMap->getVirtualAddress();
++	if (provider->getDeviceMemoryCount() >= 4) {
++		fUfspMap = provider->mapDeviceMemoryWithIndex(SBUFS_BANK_UFSP, kIOMapInhibitCache);  /* read only */
++		if (fUfspMap != NULL && fUfspMap->getLength() >= 0x100) {
++			fUfsp = (volatile uint32_t *)fUfspMap->getVirtualAddress();
++		}
++	}
++	LOG("HCI at 0x%llx, vendor HCI at 0x%llx, UFSP %s", (unsigned long long)fHciMap->getPhysicalAddress(),
++	    (unsigned long long)fVsMap->getPhysicalAddress(), fUfsp ? "mapped (read only)" : "not mapped");
++	return true;
++}
++
++bool
++StarbiteUFS::allocDMA(void)
++{
++	IOByteCount seglen = 0;
++	size_t size = (SBUFS_DMA_SIZE(fArgQD) + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
++	IOOptionBits opts = kIODirectionInOut | kIOMemoryPhysicallyContiguous |
++	    (fArgCached ? 0 : kIOMapWriteCombineCache);
++	mach_vm_address_t mask = fArg64 ? 0x0000000FFFFFF000ULL : 0x00000000FFFFF000ULL;
++
++	fDma = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, opts, size, mask);
++	if (fDma == NULL || fDma->prepare() != kIOReturnSuccess) {
++		LOG("no %zu bytes of contiguous DMA memory", size);
++		OSSafeReleaseNULL(fDma);
++		return false;
++	}
++	addr64_t pa = fDma->getPhysicalSegment(0, &seglen, kIOMemoryMapperNone);
++	if (pa == 0 || seglen < size) {
++		LOG("DMA memory not contiguous (0x%llx, %llu of %zu bytes)", (unsigned long long)pa,
++		    (unsigned long long)seglen, size);
++		return false;
++	}
++	fDmaCached = fArgCached != 0;
++	bzero(fDma->getBytesNoCopy(), size);
++	if (fDmaCached) {
++		fDma->performOperation(kIOMemoryIncoherentIOFlush, 0, size);
++	}
++	struct sbufs_hw_ops ops = {
++		.ctx = this, .rd = hwRead, .wr = hwWrite, .barrier = hwBarrier, .now_us = hwNowUs,
++		.delay_us = hwDelayUs, .log = hwLog,
++		.dma_clean = fDmaCached ? hwClean : NULL, .dma_inval = fDmaCached ? hwInval : NULL,
++	};
++	struct sbufs_cfg cfg = {
++		.nslots = fArgQD, .clr_one = true, .nexus = true, .dma64 = fArg64 != 0, .irq = false,
++		.timeout_us = 5 * 1000 * 1000,
++	};
++	if (sbufs_hc_init(&fHc, &ops, &cfg, (uint8_t *)fDma->getBytesNoCopy(), pa, size, &fFence) != SBUFS_OK) {
++		LOG("core refused the DMA area at 0x%llx", (unsigned long long)pa);
++		return false;
++	}
++	LOG("DMA area 0x%llx, %zu bytes, %s", (unsigned long long)pa, size,
++	    fDmaCached ? "cacheable (explicit maintenance)" : "write-combined");
++	return true;
++}
++
++void
++StarbiteUFS::logUFSP(void)
++{
++	if (fUfsp == NULL) {
++		return;
++	}
++	/* S-Boot leaves region 0 open (0..0xffffffff, all LUs, ctrl 0xf1: phone, 2026-10-25); only read here */
++	LOG("ufsp: rctrl 0x%x rsecurity 0x%x region0 begin 0x%x end 0x%x lun 0x%x ctrl 0x%x",
++	    fUfsp[SBUFS_UFSP_RCTRL / 4], fUfsp[SBUFS_UFSP_RSECURITY / 4], fUfsp[SBUFS_UFSP_REGION(0) / 4],
++	    fUfsp[SBUFS_UFSP_REGION(0) / 4 + 1], fUfsp[SBUFS_UFSP_REGION(0) / 4 + 2], fUfsp[SBUFS_UFSP_REGION(0) / 4 + 3]);
++}
++
++bool
++StarbiteUFS::bringUp(void)
++{
++	bool probed[SBUFS_MAX_GENERAL_LU] = { false };
++	bool inquired = false;
++
++	if (sbufs_hc_take_over(&fHc) != SBUFS_OK) {
++		return false;
++	}
++	logUFSP();
++	(void)sbufs_hc_wake(&fHc);              /* as herolte_ufs: a failed wake shows up in the LU probes */
++	/* only the LUs the allow-list names are spoken to at all */
++	for (unsigned i = 0; i < fFence.nallow; i++) {
++		uint32_t lun = fFence.allow[i].lun;
++		uint64_t blocks = 0;
++		uint32_t bs = 0;
++		if (probed[lun]) {
++			continue;
++		}
++		probed[lun] = true;
++		if (sbufs_hc_probe_lu(&fHc, (uint8_t)lun, &blocks, &bs) != SBUFS_OK) {
++			LOG("lun %u: not ready: its ranges are not exposed", lun);
++			continue;
++		}
++		if (bs != SBUFS_BLOCK) {
++			LOG("lun %u: %u-byte blocks, not 4096: its ranges are not exposed", lun, bs);
++			continue;
++		}
++		sbufs_fence_set_capacity(&fFence, lun, blocks);
++		if (!inquired && sbufs_hc_inquiry(&fHc, (uint8_t)lun, fVendor, fProduct, fRevision) == SBUFS_OK) {
++			inquired = true;
++			LOG("device: %s %s rev %s", fVendor, fProduct, fRevision);
++		}
++	}
++	if (!inquired) {
++		strlcpy(fVendor, "SAMSUNG", sizeof(fVendor));
++		strlcpy(fProduct, "UFS", sizeof(fProduct));
++		strlcpy(fRevision, "?", sizeof(fRevision));
++	}
++	unsigned usable = sbufs_fence_seal(&fFence);
++	logRanges();
++	if (usable == 0) {
++		LOG("no usable range: nothing exposed");
++		return false;
++	}
++	if (fArgMulti) {
++		for (unsigned i = 0; i < fFence.nallow; i++) {
++			const struct sbufs_range *r = &fFence.allow[i];
++			if (r->usable && r->count >= SBUFS_MULTI_BLOCKS) {
++				(void)sbufs_hc_multi_selftest(&fHc, (uint8_t)r->lun, r->first);
++				break;
++			}
++		}
++	}
++	return true;
++}
++
++static void
++uuidString(const uint8_t u[16], char out[37])
++{
++	static const char hex[] = "0123456789ABCDEF";
++	unsigned o = 0;
++	for (unsigned i = 0; i < 16; i++) {
++		if (i == 4 || i == 6 || i == 8 || i == 10) {
++			out[o++] = '-';
++		}
++		out[o++] = hex[u[i] >> 4];
++		out[o++] = hex[u[i] & 15];
++	}
++	out[o] = '\0';
++}
++
++void
++StarbiteUFS::logRanges(void)
++{
++	for (unsigned i = 0; i < fFence.nallow; i++) {
++		const struct sbufs_range *r = &fFence.allow[i];
++		char u[37];
++		uuidString(r->uuid, u);
++		LOG("range %u \"%s\" lun %u lba %llu +%llu (%llu MiB) %s%s uuid %s: %s", i, r->name, r->lun,
++		    (unsigned long long)r->first, (unsigned long long)r->count, (unsigned long long)(r->count >> 8),
++		    sbufs_fence_range_writable(&fFence, i) ? "rw" : "ro", (r->flags & SBUFS_RANGE_ROOT) ? " root" : "", u,
++		    r->usable ? "EXPOSED" : r->why);
++	}
++}
++
++bool
++StarbiteUFS::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	fNub = provider;
++	fStartAbs = mach_absolute_time();
++	for (unsigned i = 0; i < kPool; i++) {
++		fPool[i].pooled = true;
++		fPool[i].dma = IODMACommand::withSpecification(IODMACommand::OutputHost64, 64, SBUFS_PRD_MAX_BYTES,
++		    IODMACommand::kMapped, 0, 1);
++		if (fPool[i].dma == NULL) {
++			goto fail;
++		}
++	}
++	if (!readConfig(provider) || !mapRegisters(provider) || !allocDMA() || !bringUp()) {
++		goto fail;
++	}
++
++	fWorkLoop = IOWorkLoop::workLoop();
++	fGate = IOCommandGate::commandGate(this);
++	fPollTimer = IOTimerEventSource::timerEventSource(this,
++	    OSMemberFunctionCast(IOTimerEventSource::Action, this, &StarbiteUFS::handlePollTimer));
++	fTreeTimer = IOTimerEventSource::timerEventSource(this,
++	    OSMemberFunctionCast(IOTimerEventSource::Action, this, &StarbiteUFS::handleTreeTimer));
++	fReportTimer = IOTimerEventSource::timerEventSource(this,
++	    OSMemberFunctionCast(IOTimerEventSource::Action, this, &StarbiteUFS::handleReportTimer));
++	if (fWorkLoop == NULL || fGate == NULL || fPollTimer == NULL || fTreeTimer == NULL || fReportTimer == NULL ||
++	    fWorkLoop->addEventSource(fGate) != kIOReturnSuccess ||
++	    fWorkLoop->addEventSource(fPollTimer) != kIOReturnSuccess ||
++	    fWorkLoop->addEventSource(fTreeTimer) != kIOReturnSuccess ||
++	    fWorkLoop->addEventSource(fReportTimer) != kIOReturnSuccess) {
++		LOG("no work loop / event sources");
++		goto fail;
++	}
++	if (fArgIrq) {
++		fIrq = IOInterruptEventSource::interruptEventSource(this,
++		    OSMemberFunctionCast(IOInterruptEventAction, this, &StarbiteUFS::handleInterrupt), provider, 0);
++		if (fIrq != NULL && fWorkLoop->addEventSource(fIrq) == kIOReturnSuccess) {
++			sbufs_hc_enable_irq(&fHc, true);
++			fIrq->enable();
++			LOG("interrupt: the nub's interrupt 0, %u ms safety poll", kPollMsIrq);
++		} else {
++			OSSafeReleaseNULL(fIrq);
++			LOG("interrupt: none from the nub, polled every %u us", kPollUsPolled);
++		}
++	} else {
++		LOG("interrupt: off (sbufsirq=0), polled every %u us", kPollUsPolled);
++	}
++
++	fMediaNotifier = addMatchingNotification(gIOPublishNotification, serviceMatching("IOMedia"),
++	    OSMemberFunctionCast(IOServiceMatchingNotificationHandler, this, &StarbiteUFS::mediaPublished), this);
++	fReportTimer->setTimeoutMS(1000);    /* the root watch, and the sbufsreport= report */
++	publishRanges();
++	registerService();
++	LOG("up: %u slot(s), %u block(s) per command, %s DMA, %s", fHc.cfg.nslots, maxBlocksPerCommand(),
++	    fArgBounce ? "bounce" : "direct", fIrq ? "interrupts" : "polled");
++	return true;
++
++fail:
++	LOG("not started: Apple's software sees no UFS in this boot");
++	stop(provider);
++	return false;
++}
++
++void
++StarbiteUFS::publishRanges(void)
++{
++	for (unsigned i = 0; i < fFence.nallow; i++) {
++		if (!fFence.allow[i].usable) {
++			continue;
++		}
++		StarbiteUFSRange *r = OSTypeAlloc(StarbiteUFSRange);
++		if (r == NULL || !r->initRange(this, i) || !r->attach(this)) {
++			OSSafeReleaseNULL(r);
++			LOG("range %u: could not publish", i);
++			continue;
++		}
++		fRanges[i] = r;
++		r->registerService();
++	}
++}
++
++void
++StarbiteUFS::stop(IOService *provider)
++{
++	if (fMediaNotifier != NULL) {
++		fMediaNotifier->remove();
++		fMediaNotifier = NULL;
++	}
++	if (fIrq != NULL) {
++		fIrq->disable();
++		sbufs_hc_enable_irq(&fHc, false);
++	}
++	if (fWorkLoop != NULL) {
++		if (fIrq != NULL) {
++			fWorkLoop->removeEventSource(fIrq);
++		}
++		IOTimerEventSource *t[3] = { fPollTimer, fTreeTimer, fReportTimer };
++		for (unsigned i = 0; i < 3; i++) {
++			if (t[i] != NULL) {
++				t[i]->cancelTimeout();
++				fWorkLoop->removeEventSource(t[i]);
++			}
++		}
++		if (fGate != NULL) {
++			fWorkLoop->removeEventSource(fGate);
++		}
++	}
++	for (unsigned i = 0; i < SBUFS_MAX_RANGES; i++) {
++		OSSafeReleaseNULL(fRanges[i]);
++	}
++	IOService::stop(provider);
++}
++
++void
++StarbiteUFS::free(void)
++{
++	OSSafeReleaseNULL(fIrq);
++	OSSafeReleaseNULL(fPollTimer);
++	OSSafeReleaseNULL(fTreeTimer);
++	OSSafeReleaseNULL(fReportTimer);
++	OSSafeReleaseNULL(fGate);
++	OSSafeReleaseNULL(fWorkLoop);
++	for (unsigned i = 0; i < kPool; i++) {
++		OSSafeReleaseNULL(fPool[i].dma);
++	}
++	if (fDma != NULL) {
++		fDma->complete();
++		OSSafeReleaseNULL(fDma);
++	}
++	OSSafeReleaseNULL(fHciMap);
++	OSSafeReleaseNULL(fVsMap);
++	OSSafeReleaseNULL(fUfspMap);
++	IOService::free();
++}
++
++/* ---------------------------------------------------------------------------------------------------------------- */
++/* requests                                                                                                          */
++
++const struct sbufs_range *
++StarbiteUFS::rangeInfo(unsigned range) const
++{
++	return range < fFence.nallow ? &fFence.allow[range] : NULL;
++}
++
++bool
++StarbiteUFS::rangeWritable(unsigned range) const
++{
++	return sbufs_fence_range_writable(&fFence, range);
++}
++
++uint32_t
++StarbiteUFS::maxBlocksPerCommand() const
++{
++	return sbufs_hc_max_xfer(&fHc) / SBUFS_BLOCK;
++}
++
++StarbiteUFSXfer *
++StarbiteUFS::getXfer(void)
++{
++	for (unsigned i = 0; i < kPool; i++) {
++		if (!fPool[i].used) {
++			IODMACommand *d = fPool[i].dma;
++			bzero(&fPool[i], sizeof(fPool[i]));
++			fPool[i].dma = d;
++			fPool[i].pooled = true;
++			fPool[i].used = true;
++			return &fPool[i];
++		}
++	}
++	/* never sleep for one: a completion running on the work loop may submit the next request */
++	StarbiteUFSXfer *x = IONewZero(StarbiteUFSXfer, 1);
++	if (x != NULL) {
++		x->dma = IODMACommand::withSpecification(IODMACommand::OutputHost64, 64, SBUFS_PRD_MAX_BYTES,
++		    IODMACommand::kMapped, 0, 1);
++		if (x->dma == NULL) {
++			IODelete(x, StarbiteUFSXfer, 1);
++			return NULL;
++		}
++		x->used = true;
++	}
++	return x;
++}
++
++void
++StarbiteUFS::putXfer(StarbiteUFSXfer *x)
++{
++	if (x->pooled) {
++		x->used = false;
++		x->buffer = NULL;
++	} else {
++		OSSafeReleaseNULL(x->dma);
++		IODelete(x, StarbiteUFSXfer, 1);
++	}
++}
++
++void
++StarbiteUFS::fenceRefusal(int verdict, unsigned range, uint64_t block, uint64_t nblks, bool write)
++{
++	/* the fence log: the first 32 in full, then every 1000th */
++	if (fRefusalsLogged < 32 || fFence.refused % 1000 == 0) {
++		fRefusalsLogged++;
++		LOG("fence: REFUSED %s range %u block %llu +%llu: %s (refusal #%llu)", write ? "write" : "read", range,
++		    (unsigned long long)block, (unsigned long long)nblks, sbufs_fence_verdict_name(verdict),
++		    (unsigned long long)fFence.refused);
++	}
++}
++
++struct SubmitArgs {
++	int phase;
++	unsigned range;
++	IOMemoryDescriptor *buffer;
++	UInt64 block, nblks;
++	IOStorageAttributes *attributes;
++	IOStorageCompletion *completion;
++	StarbiteUFSXfer *x;
++};
++
++IOReturn
++StarbiteUFS::gatedSubmit(OSObject *owner, void *a0, void *, void *, void *)
++{
++	StarbiteUFS *self = (StarbiteUFS *)owner;
++	SubmitArgs *a = (SubmitArgs *)a0;
++	uint32_t lun = 0;
++	uint64_t lba = 0;
++
++	switch (a->phase) {
++	case 0: {
++		bool write = a->buffer->getDirection() == kIODirectionOut;
++		int v = sbufs_fence_map(&self->fFence, a->range, a->block, a->nblks, write, &lun, &lba);
++		if (v != SBUFS_FENCE_OK) {
++			self->fenceRefusal(v, a->range, a->block, a->nblks, write);
++			return v == SBUFS_FENCE_READONLY ? kIOReturnNotWritable : kIOReturnNotPermitted;
++		}
++		if (self->fHc.dead) {
++			return kIOReturnNoDevice;
++		}
++		a->x = self->getXfer();
++		if (a->x == NULL) {
++			return kIOReturnNoMemory;
++		}
++		a->x->range = a->range;
++		a->x->lun = lun;
++		a->x->lba = lba;
++		a->x->nblks = a->nblks;
++		a->x->write = write;
++		a->x->fua = a->attributes != NULL && (a->attributes->options & kIOStorageOptionForceUnitAccess);
++		a->x->buffer = a->buffer;
++		a->x->completion = *a->completion;
++		self->fActive++;
++		self->fReqs++;
++		return kIOReturnSuccess;
++	}
++	case 1:
++		a->x->next = NULL;
++		if (self->fReadyTail != NULL) {
++			self->fReadyTail->next = a->x;
++		} else {
++			self->fReadyHead = a->x;
++		}
++		self->fReadyTail = a->x;
++		self->pump();
++		return kIOReturnSuccess;
++	default:
++		self->fActive--;
++		self->putXfer(a->x);
++		return kIOReturnSuccess;
++	}
++}
++
++IOReturn
++StarbiteUFS::submit(unsigned range, IOMemoryDescriptor *buffer, UInt64 block, UInt64 nblks,
++    IOStorageAttributes *attributes, IOStorageCompletion *completion)
++{
++	SubmitArgs a = { 0, range, buffer, block, nblks, attributes, completion, NULL };
++	IOReturn ret;
++
++	if (fGate == NULL || buffer == NULL || completion == NULL) {
++		return kIOReturnNotReady;
++	}
++	if (nblks > UINT64_MAX / SBUFS_BLOCK || buffer->getLength() < nblks * SBUFS_BLOCK) {
++		return kIOReturnBadArgument;
++	}
++	ret = fGate->runAction(gatedSubmit, &a);
++	if (ret != kIOReturnSuccess) {
++		return ret;
++	}
++	/* wire the buffer outside the gate: prepare() may page */
++	ret = a.x->dma->setMemoryDescriptor(buffer, true);
++	if (ret != kIOReturnSuccess) {
++		LOG("buffer prepare failed 0x%x", ret);
++		a.phase = 2;
++		fGate->runAction(gatedSubmit, &a);
++		return ret;
++	}
++	a.phase = 1;
++	return fGate->runAction(gatedSubmit, &a);
++}
++
++void
++StarbiteUFS::pump(void)
++{
++	while (fReadyHead != NULL) {
++		StarbiteUFSXfer *x = fReadyHead;
++		fReadyHead = x->next;
++		if (fReadyHead == NULL) {
++			fReadyTail = NULL;
++		}
++		if (!startChunk(x)) {
++			x->next = fReadyHead;           /* no free slot: back to the head, wait for a completion */
++			fReadyHead = x;
++			if (fReadyTail == NULL) {
++				fReadyTail = x;
++			}
++			break;
++		}
++	}
++	armPoll();
++}
++
++static IOReturn
++errReturn(int err)
++{
++	switch (err) {
++	case SBUFS_OK: return kIOReturnSuccess;
++	case SBUFS_E_TIMEOUT: return kIOReturnTimeout;
++	case SBUFS_E_NODEV: return kIOReturnNoDevice;
++	case SBUFS_E_FENCE: case SBUFS_E_GATE: return kIOReturnNotPermitted;
++	case SBUFS_E_ROFS: return kIOReturnNotWritable;
++	default: return kIOReturnIOError;
++	}
++}
++
++/* Returns false only when no slot is free (the xfer stays queued); every other outcome consumes it. */
++bool
++StarbiteUFS::startChunk(StarbiteUFSXfer *x)
++{
++	struct sbufs_cmd c;
++	struct sbufs_seg segs[SBUFS_MULTI_BLOCKS];
++	unsigned nsegs = 0;
++	int s = sbufs_hc_alloc_slot(&fHc);
++
++	if (s == SBUFS_E_BUSY) {
++		return false;
++	}
++	if (s < 0) {
++		finish(x, kIOReturnNoDevice);
++		return true;
++	}
++	if (x->sync) {
++		(void)sbufs_cdb_sync(&c, (uint8_t)x->lun, x->lba, (uint32_t)x->nblks);
++		x->chunk = (uint32_t)x->nblks;
++		fSlotXfer[s] = x;
++		int e = sbufs_hc_issue(&fHc, (unsigned)s, &c, NULL, 0, x);
++		if (e != SBUFS_OK) {
++			finish(x, errReturn(e));
++		}
++		return true;
++	}
++
++	uint64_t left = x->nblks - x->done;
++	uint32_t n = (uint32_t)(left < maxBlocksPerCommand() ? left : maxBlocksPerCommand());
++	uint64_t off = x->done * SBUFS_BLOCK;
++	uint32_t bytes = n * SBUFS_BLOCK;
++	if (x->write) {
++		(void)sbufs_cdb_write(&c, (uint8_t)x->lun, x->lba + x->done, n, x->fua);
++	} else {
++		(void)sbufs_cdb_read(&c, (uint8_t)x->lun, x->lba + x->done, n);
++	}
++
++	/* direct DMA: the buffer's physical segments, if each is cache-line aligned and they cover the chunk */
++	bool direct = fArgBounce == 0;
++	if (direct) {
++		IODMACommand::Segment64 seg[SBUFS_MULTI_BLOCKS];
++		UInt32 num = n;
++		UInt64 o = off;
++		uint32_t covered = 0;
++		if (x->dma->genIOVMSegments(&o, seg, &num) != kIOReturnSuccess) {
++			num = 0;
++		}
++		for (UInt32 i = 0; i < num && covered < bytes; i++) {
++			uint32_t len = (uint32_t)seg[i].fLength;
++			if (len > bytes - covered) {
++				len = bytes - covered;
++			}
++			if ((seg[i].fIOVMAddr & 63) != 0 || (len & 63) != 0) {
++				break;
++			}
++			segs[nsegs].pa = seg[i].fIOVMAddr;
++			segs[nsegs].len = len;
++			nsegs++;
++			covered += len;
++		}
++		direct = covered == bytes;
++	}
++	if (direct) {
++		x->buffer->performOperation(x->write ? kIOMemoryIncoherentIOStore : kIOMemoryIncoherentIOFlush, off, bytes);
++		int e = sbufs_hc_issue(&fHc, (unsigned)s, &c, segs, nsegs, x);
++		if (e == SBUFS_OK) {
++			x->chunk = n;
++			x->bounce = false;
++			fSlotXfer[s] = x;
++			return true;
++		}
++		if (e != SBUFS_E_DMA) {
++			finish(x, errReturn(e));
++			return true;
++		}
++		s = sbufs_hc_alloc_slot(&fHc);  /* issue freed it: the same slot comes back */
++		if (s < 0) {
++			finish(x, kIOReturnNoDevice);
++			return true;
++		}
++	}
++	fBounced++;
++	if (x->write && x->buffer->readBytes(off, sbufs_hc_bounce_va(&fHc, (unsigned)s), bytes) != bytes) {
++		sbufs_hc_free_slot(&fHc, (unsigned)s);
++		finish(x, kIOReturnIOError);
++		return true;
++	}
++	int e = sbufs_hc_issue(&fHc, (unsigned)s, &c, NULL, 0, x);
++	if (e != SBUFS_OK) {
++		finish(x, errReturn(e));
++		return true;
++	}
++	x->chunk = n;
++	x->bounce = true;
++	fSlotXfer[s] = x;
++	return true;
++}
++
++void
++StarbiteUFS::doneThunk(void *ctx, unsigned slot, void *cookie, const struct sbufs_result *r)
++{
++	StarbiteUFS *self = (StarbiteUFS *)ctx;
++	self->fSlotXfer[slot] = NULL;
++	self->chunkDone((StarbiteUFSXfer *)cookie, slot, r);
++}
++
++static void
++pushHead(StarbiteUFSXfer **head, StarbiteUFSXfer **tail, StarbiteUFSXfer *x)
++{
++	x->next = *head;
++	*head = x;
++	if (*tail == NULL) {
++		*tail = x;
++	}
++}
++
++void
++StarbiteUFS::chunkDone(StarbiteUFSXfer *x, unsigned slot, const struct sbufs_result *r)
++{
++	uint64_t off = x->done * SBUFS_BLOCK;
++	uint32_t bytes = x->chunk * SBUFS_BLOCK;
++
++	if (r->err == SBUFS_OK) {
++		if (x->sync) {
++			finish(x, kIOReturnSuccess);
++			return;
++		}
++		if (!x->write) {
++			if (x->bounce) {
++				x->buffer->writeBytes(off, sbufs_hc_bounce_va(&fHc, slot), bytes);
++			} else {
++				x->buffer->performOperation(kIOMemoryIncoherentIOFlush, off, bytes);
++			}
++		}
++		x->done += x->chunk;
++		x->retries = 0;
++		if (x->done == x->nblks) {
++			finish(x, kIOReturnSuccess);
++		} else {
++			pushHead(&fReadyHead, &fReadyTail, x);
++		}
++		return;
++	}
++	bool attention = r->err == SBUFS_E_IO && (r->sense_key == SBUFS_SENSE_UNIT_ATTN ||
++	    (r->sense_key == SBUFS_SENSE_NOT_READY && r->asc == 0x04));
++	if (attention && x->retries < kMaxUARetries) {
++		x->retries++;
++		fUARetries++;
++		pushHead(&fReadyHead, &fReadyTail, x);  /* the same chunk again */
++		return;
++	}
++	LOG("%s lun %u lba %llu +%u failed (%d)", x->sync ? "sync" : x->write ? "write" : "read", x->lun,
++	    (unsigned long long)(x->lba + x->done), x->chunk, r->err);
++	finish(x, errReturn(r->err));
++}
++
++void
++StarbiteUFS::finish(StarbiteUFSXfer *x, IOReturn status)
++{
++	if (x->sync) {
++		x->status = status;
++		x->finished = true;
++		fGate->commandWakeup(x);
++		return;
++	}
++	IOStorageCompletion completion = x->completion;
++	UInt64 bytes = x->done * SBUFS_BLOCK;
++	x->dma->clearMemoryDescriptor(true);
++	putXfer(x);
++	fActive--;
++	IOStorage::complete(&completion, status, bytes);
++}
++
++void
++StarbiteUFS::reap(bool fromIrq)
++{
++	(void)sbufs_hc_poll(&fHc, fromIrq, doneThunk, this);
++}
++
++void
++StarbiteUFS::armPoll(void)
++{
++	if (fHc.inflight == 0 || fPollArmed || fPollTimer == NULL) {
++		return;
++	}
++	fPollArmed = true;
++	if (fIrq != NULL) {
++		fPollTimer->setTimeoutMS(kPollMsIrq);
++	} else {
++		fPollTimer->setTimeoutUS(kPollUsPolled);
++	}
++}
++
++void
++StarbiteUFS::handleInterrupt(IOInterruptEventSource *src, int count)
++{
++	(void)src;
++	(void)count;
++	reap(true);
++	pump();
++}
++
++void
++StarbiteUFS::handlePollTimer(IOTimerEventSource *src)
++{
++	(void)src;
++	fPollArmed = false;
++	reap(false);
++	pump();
++}
++
++struct SyncArgs {
++	unsigned range;
++	UInt64 block, nblks;
++};
++
++IOReturn
++StarbiteUFS::gatedSync(OSObject *owner, void *a0, void *, void *, void *)
++{
++	StarbiteUFS *self = (StarbiteUFS *)owner;
++	SyncArgs *a = (SyncArgs *)a0;
++	return self->syncGated(a->range, a->block, a->nblks);
++}
++
++IOReturn
++StarbiteUFS::syncGated(unsigned range, UInt64 block, UInt64 nblks)
++{
++	const struct sbufs_range *r = rangeInfo(range);
++	uint32_t lun;
++	uint64_t lba;
++
++	if (r == NULL) {
++		return kIOReturnBadArgument;
++	}
++	if (nblks == 0) {               /* "everything": the whole range, never the whole LU */
++		block = 0;
++		nblks = r->count;
++	}
++	if (nblks > UINT32_MAX) {
++		return kIOReturnBadArgument;
++	}
++	int v = sbufs_fence_map(&fFence, range, block, nblks, true, &lun, &lba);
++	if (v != SBUFS_FENCE_OK) {
++		fenceRefusal(v, range, block, nblks, true);
++		return kIOReturnNotPermitted;
++	}
++	StarbiteUFSXfer *x = getXfer();
++	if (x == NULL) {
++		return kIOReturnNoMemory;
++	}
++	x->sync = true;
++	x->range = range;
++	x->lun = lun;
++	x->lba = lba;
++	x->nblks = nblks;
++	x->next = NULL;
++	if (fReadyTail != NULL) {
++		fReadyTail->next = x;
++	} else {
++		fReadyHead = x;
++	}
++	fReadyTail = x;
++	pump();
++	while (!x->finished) {
++		fGate->commandSleep(x, THREAD_UNINT);
++	}
++	IOReturn ret = x->status;
++	putXfer(x);
++	return ret;
++}
++
++IOReturn
++StarbiteUFS::synchronize(unsigned range, UInt64 block, UInt64 nblks)
++{
++	if (!rangeWritable(range)) {
++		return kIOReturnSuccess;        /* nothing was ever written: nothing to flush */
++	}
++	if (fGate == NULL || fWorkLoop->onThread()) {
++		return kIOReturnNotReady;       /* must not sleep on the work loop's own thread */
++	}
++	SyncArgs a = { range, block, nblks };
++	return fGate->runAction(gatedSync, &a);
++}
++
++/* ---------------------------------------------------------------------------------------------------------------- */
++/* the IOMedia tree, the root line, the fence log                                                                    */
++
++bool
++StarbiteUFS::underUs(IORegistryEntry *e) const
++{
++	for (unsigned depth = 0; e != NULL && depth < 32; depth++) {
++		if (OSDynamicCast(StarbiteUFSRange, e) != NULL && e->getParentEntry(gIOServicePlane) == this) {
++			return true;
++		}
++		e = e->getParentEntry(gIOServicePlane);
++	}
++	return false;
++}
++
++bool
++StarbiteUFS::mediaPublished(void *ref, IOService *media, IONotifier *notifier)
++{
++	(void)ref;
++	(void)notifier;
++	if (underUs(media) && fTreeTimer != NULL) {
++		fTreeTimer->setTimeoutMS(kTreeSettleMs);        /* re-armed by each new IOMedia: dump once they settle */
++	}
++	return true;
++}
++
++static const char *
++str(IORegistryEntry *e, const char *key, char *buf, size_t len)
++{
++	OSObject *o = e->getProperty(key);
++	OSString *s = OSDynamicCast(OSString, o);
++	OSNumber *n = OSDynamicCast(OSNumber, o);
++	OSBoolean *b = OSDynamicCast(OSBoolean, o);
++	if (s != NULL) {
++		return s->getCStringNoCopy();
++	}
++	if (n != NULL) {
++		snprintf(buf, len, "%llu", n->unsigned64BitValue());
++		return buf;
++	}
++	if (b != NULL) {
++		return b->isTrue() ? "Yes" : "No";
++	}
++	return NULL;
++}
++
++void
++StarbiteUFS::dumpEntry(IORegistryEntry *e, unsigned depth)
++{
++	char ind[2 * 12 + 1];
++	char line[300];
++	char b1[24], b2[24];
++	unsigned d = depth < 12 ? depth : 12;
++	memset(ind, ' ', 2 * d);
++	ind[2 * d] = '\0';
++	int o = snprintf(line, sizeof(line), "%s+-o %s  <class %s", ind, e->getName(), e->getMetaClass()->getClassName());
++	if (OSDynamicCast(IOMedia, e) != NULL && o > 0 && (size_t)o < sizeof(line)) {
++		const char *bsd = str(e, kIOBSDNameKey, b1, sizeof(b1));
++		const char *uuid = str(e, kIOMediaUUIDKey, b2, sizeof(b2));
++		IOMedia *m = (IOMedia *)e;
++		snprintf(line + o, sizeof(line) - (size_t)o, ", Size %llu, Whole %s, Writable %s, Content \"%s\", UUID %s, BSD Name %s",
++		    m->getSize(), m->isWhole() ? "Yes" : "No", m->isWritable() ? "Yes" : "No",
++		    m->getContent() ? m->getContent() : "", uuid ? uuid : "-", bsd ? bsd : "-");
++	} else if (OSDynamicCast(StarbiteUFSRange, e) != NULL && o > 0 && (size_t)o < sizeof(line)) {
++		const struct sbufs_range *r = rangeInfo(((StarbiteUFSRange *)e)->index());
++		snprintf(line + o, sizeof(line) - (size_t)o, ", range \"%s\" lun %u lba %llu +%llu", r ? r->name : "?",
++		    r ? r->lun : 0, r ? (unsigned long long)r->first : 0ULL, r ? (unsigned long long)r->count : 0ULL);
++	}
++	IOLog("StarbiteUFS: tree| %s>\n", line);
++	if (depth >= 12) {
++		return;
++	}
++	OSIterator *it = e->getChildIterator(gIOServicePlane);
++	if (it != NULL) {
++		IORegistryEntry *c;
++		while ((c = OSDynamicCast(IORegistryEntry, it->getNextObject())) != NULL) {
++			dumpEntry(c, depth + 1);
++		}
++		it->release();
++	}
++}
++
++void
++StarbiteUFS::dumpTree(const char *why)
++{
++	LOG("IOMedia tree (%s):", why);
++	dumpEntry(this, 0);
++}
++
++void
++StarbiteUFS::fenceSummary(void)
++{
++	uint64_t foreign = fHc.foreign_touched;
++	LOG("fence: %llu requests checked, %llu refused (%llu writes), %llu blocks allowed; doorbell audit refused %llu; "
++	    "foreign LBA touched %llu", (unsigned long long)fFence.checked, (unsigned long long)fFence.refused,
++	    (unsigned long long)fFence.refused_write, (unsigned long long)fFence.blocks_ok,
++	    (unsigned long long)fHc.ngate, (unsigned long long)foreign);
++	LOG("host: %llu commands, %llu errors, %llu timeouts, %llu fatal, %llu UIC errors, %llu UA retries, %llu bounced, "
++	    "completions %llu irq / %llu poll, last IS 0x%x%s", (unsigned long long)fHc.ncmds, (unsigned long long)fHc.nerr,
++	    (unsigned long long)fHc.ntimeout, (unsigned long long)fHc.nfatal, (unsigned long long)fHc.nue,
++	    (unsigned long long)fUARetries, (unsigned long long)fBounced, (unsigned long long)fHc.ncompl_irq,
++	    (unsigned long long)fHc.ncompl_poll, fHc.last_is, fHc.dead ? ", HOST GIVEN UP" : "");
++}
++
++bool
++StarbiteUFS::reportRoot(void)
++{
++	char from[MAXPATHLEN];
++	vnode_t vp = vfs_rootvnode();
++	if (vp == NULLVP) {
++		return false;
++	}
++	strlcpy(from, vfs_statfs(vnode_mount(vp))->f_mntfromname, sizeof(from));
++	vnode_put(vp);
++
++	const char *bsd = strncmp(from, "/dev/", 5) == 0 ? from + 5 : from;
++	const OSSymbol *key = OSSymbol::withCString(kIOBSDNameKey);
++	OSString *val = OSString::withCString(bsd);
++	OSDictionary *match = IOService::serviceMatching("IOMedia");
++	IOService *media = NULL;
++	if (key != NULL && val != NULL && match != NULL) {
++		match = IOService::propertyMatching(key, val, match);
++		media = match ? IOService::copyMatchingService(match) : NULL;
++	}
++	OSSafeReleaseNULL(match);
++	OSSafeReleaseNULL(val);
++	OSSafeReleaseNULL(key);
++	if (media == NULL || !underUs(media)) {
++		LOG("root = %s, not on StarbiteUFS (no pass line)", from);
++		OSSafeReleaseNULL(media);
++		return true;
++	}
++	char ubuf[37];
++	OSString *uuid = OSDynamicCast(OSString, media->getProperty(kIOMediaUUIDKey));
++	const char *u = uuid ? uuid->getCStringNoCopy() : NULL;
++	if (u == NULL) {
++		/* a whole-range IOMedia has no GPT UUID: the range's own (from the allow-list) */
++		for (IORegistryEntry *e = media; e != NULL; e = e->getParentEntry(gIOServicePlane)) {
++			StarbiteUFSRange *r = OSDynamicCast(StarbiteUFSRange, e);
++			if (r != NULL) {
++				uuidString(rangeInfo(r->index())->uuid, ubuf);
++				u = ubuf;
++				break;
++			}
++		}
++	}
++	if (fHc.foreign_touched == 0) {
++		LOG("root = IOMedia %s, fence log shows no foreign LBA touched", u ? u : "?");
++	} else {
++		LOG("root = IOMedia %s, fence log shows %llu FOREIGN commands: FAIL", u ? u : "?",
++		    (unsigned long long)fHc.foreign_touched);
++	}
++	media->release();
++	return true;
++}
++
++void
++StarbiteUFS::handleTreeTimer(IOTimerEventSource *src)
++{
++	(void)src;
++	bool first = !fTreeDumped;
++	fTreeDumped = true;
++	dumpTree("media settled");
++	fenceSummary();
++#if STARBITEUFS_SBSTOP
++	if (first && !fStopped && starlte_sbstop_at("ufs")) {
++		fStopped = true;
++		starlte_sbstop_now("ufs");
++	}
++#else
++	(void)first;
++#endif
++}
++
++/* Every second: the root line as soon as the root is mounted (before a userland crash can bury it in the console),
++ * and at sbufsreport= s the full report, then sbstop=ufsroot. Stops ticking after 600 s or when both are done. */
++void
++StarbiteUFS::handleReportTimer(IOTimerEventSource *src)
++{
++	(void)src;
++	fReportTicks++;
++	if (!fRootReported && reportRoot()) {
++		fRootReported = true;
++		fenceSummary();
++	}
++	if (fArgReport != 0 && !fReportDone && fReportTicks >= fArgReport) {
++		fReportDone = true;
++		LOG("report at sbufsreport=%u s", fArgReport);
++		dumpTree("report");
++		if (!reportRoot()) {
++			LOG("root: not mounted by now");
++		}
++		fenceSummary();
++#if STARBITEUFS_SBSTOP
++		if (!fStopped && starlte_sbstop_at("ufsroot")) {
++			fStopped = true;
++			starlte_sbstop_now("ufsroot");
++		}
++#endif
++	}
++	if ((!fRootReported || (fArgReport != 0 && !fReportDone)) && fReportTicks < 600) {
++		fReportTimer->setTimeoutMS(1000);
++	}
++}
++
++/* ---------------------------------------------------------------------------------------------------------------- */
++/* StarbiteUFSRange                                                                                                  */
++
++static void
++setNum(IOService *s, const char *key, uint64_t v, unsigned bits)
++{
++	OSNumber *n = OSNumber::withNumber(v, bits);
++	if (n != NULL) {
++		s->setProperty(key, n);
++		n->release();
++	}
++}
++
++bool
++StarbiteUFSRange::initRange(StarbiteUFS *controller, unsigned index)
++{
++	if (!IOBlockStorageDevice::init(NULL)) {
++		return false;
++	}
++	fController = controller;
++	fIndex = index;
++	const struct sbufs_range *r = controller->rangeInfo(index);
++	char u[37];
++	uuidString(r->uuid, u);
++	strlcpy(fVendor, controller->vendor(), sizeof(fVendor));
++	strlcpy(fProduct, controller->product(), sizeof(fProduct));
++	strlcpy(fRevision, controller->revision(), sizeof(fRevision));
++	snprintf(fInfo, sizeof(fInfo), "Starbite range %s, LU %u", r->name, r->lun);
++
++	setProperty(kIOBlockStorageDeviceTypeKey, kIOBlockStorageDeviceTypeGeneric);
++	OSDictionary *dev = OSDictionary::withCapacity(3);
++	OSDictionary *proto = OSDictionary::withCapacity(2);
++	if (dev != NULL && proto != NULL) {
++		OSString *v = OSString::withCString(fVendor), *p = OSString::withCString(fProduct),
++		    *rv = OSString::withCString(fRevision);
++		OSString *ic = OSString::withCString("UFS"), *loc = OSString::withCString(kIOPropertyInternalKey);
++		if (v) { dev->setObject(kIOPropertyVendorNameKey, v); v->release(); }
++		if (p) { dev->setObject(kIOPropertyProductNameKey, p); p->release(); }
++		if (rv) { dev->setObject(kIOPropertyProductRevisionLevelKey, rv); rv->release(); }
++		if (ic) { proto->setObject(kIOPropertyPhysicalInterconnectTypeKey, ic); ic->release(); }
++		if (loc) { proto->setObject(kIOPropertyPhysicalInterconnectLocationKey, loc); loc->release(); }
++		setProperty(kIOPropertyDeviceCharacteristicsKey, dev);
++		setProperty(kIOPropertyProtocolCharacteristicsKey, proto);
++	}
++	OSSafeReleaseNULL(dev);
++	OSSafeReleaseNULL(proto);
++
++	/* what IOBlockStorageDriver splits and aligns requests by; anything else is bounced here */
++	const uint64_t maxBlocks = 256;
++	setNum(this, kIOMaximumBlockCountReadKey, maxBlocks, 64);
++	setNum(this, kIOMaximumBlockCountWriteKey, maxBlocks, 64);
++	setNum(this, kIOMaximumByteCountReadKey, maxBlocks * SBUFS_BLOCK, 64);
++	setNum(this, kIOMaximumByteCountWriteKey, maxBlocks * SBUFS_BLOCK, 64);
++	setNum(this, kIOMaximumSegmentCountReadKey, maxBlocks, 64);
++	setNum(this, kIOMaximumSegmentCountWriteKey, maxBlocks, 64);
++	setNum(this, kIOMaximumSegmentByteCountReadKey, SBUFS_PRD_MAX_BYTES, 64);
++	setNum(this, kIOMaximumSegmentByteCountWriteKey, SBUFS_PRD_MAX_BYTES, 64);
++	setNum(this, kIOMaximumSegmentAddressableBitCountKey, 32, 64);
++
++	OSString *name = OSString::withCString(r->name), *uu = OSString::withCString(u);
++	if (name) { setProperty("Starbite Range Name", name); name->release(); }
++	if (uu) { setProperty("Starbite Range UUID", uu); uu->release(); }
++	setNum(this, "Starbite Range LUN", r->lun, 32);
++	setNum(this, "Starbite Range First LBA", r->first, 64);
++	setNum(this, "Starbite Range Blocks", r->count, 64);
++	setProperty("Starbite Range Root", (r->flags & SBUFS_RANGE_ROOT) != 0);
++	setProperty("Starbite Range Writable", controller->rangeWritable(index));
++	setLocation(r->name);
++	return true;
++}
++
++IOReturn
++StarbiteUFSRange::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block, UInt64 nblks,
++    IOStorageAttributes *attributes, IOStorageCompletion *completion)
++{
++	return fController->submit(fIndex, buffer, block, nblks, attributes, completion);
++}
++
++IOReturn
++StarbiteUFSRange::doSynchronize(UInt64 block, UInt64 nblks, IOStorageSynchronizeOptions options)
++{
++	(void)options;
++	return fController->synchronize(fIndex, block, nblks);
++}
++
++IOReturn
++StarbiteUFSRange::doUnmap(IOBlockStorageDeviceExtent *extents, UInt32 extentsCount, IOStorageUnmapOptions options)
++{
++	(void)extents;
++	(void)extentsCount;
++	(void)options;
++	return kIOReturnUnsupported;    /* UNMAP is not on the whitelist */
++}
++
++IOReturn StarbiteUFSRange::doEjectMedia(void) { return kIOReturnUnsupported; }
++IOReturn StarbiteUFSRange::doFormatMedia(UInt64 byteCapacity) { (void)byteCapacity; return kIOReturnUnsupported; }
++
++UInt32
++StarbiteUFSRange::doGetFormatCapacities(UInt64 *capacities, UInt32 capacitiesMaxCount) const
++{
++	if (capacities != NULL && capacitiesMaxCount > 0) {
++		capacities[0] = fController->rangeInfo(fIndex)->count * SBUFS_BLOCK;
++	}
++	return 1;
++}
++
++char *StarbiteUFSRange::getVendorString(void) { return fVendor; }
++char *StarbiteUFSRange::getProductString(void) { return fProduct; }
++char *StarbiteUFSRange::getRevisionString(void) { return fRevision; }
++char *StarbiteUFSRange::getAdditionalDeviceInfoString(void) { return fInfo; }
++
++IOReturn StarbiteUFSRange::reportBlockSize(UInt64 *blockSize) { *blockSize = SBUFS_BLOCK; return kIOReturnSuccess; }
++IOReturn StarbiteUFSRange::reportEjectability(bool *isEjectable) { *isEjectable = false; return kIOReturnSuccess; }
++
++IOReturn
++StarbiteUFSRange::reportMaxValidBlock(UInt64 *maxBlock)
++{
++	*maxBlock = fController->rangeInfo(fIndex)->count - 1;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++StarbiteUFSRange::reportMediaState(bool *mediaPresent, bool *changedState)
++{
++	*mediaPresent = true;
++	if (changedState != NULL) {
++		*changedState = false;
++	}
++	return kIOReturnSuccess;
++}
++
++IOReturn StarbiteUFSRange::reportRemovability(bool *isRemovable) { *isRemovable = false; return kIOReturnSuccess; }
++
++IOReturn
++StarbiteUFSRange::reportWriteProtection(bool *isWriteProtected)
++{
++	*isWriteProtected = !fController->rangeWritable(fIndex);
++	return kIOReturnSuccess;
++}
++
++#if TARGET_OS_OSX
++IOReturn StarbiteUFSRange::doLockUnlockMedia(bool doLock) { (void)doLock; return kIOReturnUnsupported; }
++IOReturn StarbiteUFSRange::doSynchronizeCache(void) { return doSynchronize(0, 0, 0); }
++IOReturn StarbiteUFSRange::reportLockability(bool *isLockable) { *isLockable = false; return kIOReturnSuccess; }
++
++IOReturn
++StarbiteUFSRange::reportPollRequirements(bool *pollRequired, bool *pollIsExpensive)
++{
++	*pollRequired = false;
++	*pollIsExpensive = false;
++	return kIOReturnSuccess;
++}
++#endif
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUFS/StarbiteUFS.h b/iokit/Kernel/arm/starbite/StarbiteUFS/StarbiteUFS.h
+new file mode 100644
+index 00000000..9e71cdc3
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUFS/StarbiteUFS.h
+@@ -0,0 +1,190 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteUFS: the Galaxy S9's (Exynos 9810) UFS 2.1 host as IOBlockStorageDevices, FENCED.
++ *
++ *   /arm-io/ufs nub ("starbite,ufs")
++ *     StarbiteUFS (IOService)                 the controller: takes the UFSHCI over as S-Boot left it, owns the
++ *       |                                     request list, the doorbell/completion state machine, the fence
++ *       +-- StarbiteUFSRange (IOBlockStorageDevice)  one per usable Starbite-owned range of the allow-list
++ *             IOBlockStorageDriver -> IOMedia (whole range) -> IOGUIDPartitionScheme -> IOMedia ...
++ *
++ * Block 0 of a StarbiteUFSRange is the range's first LBA: Apple's software never sees an Android LBA, not even the
++ * LU's GPT. The plain-C core (hw/) does the protocol, the fence and the state machine; this file is the IOKit glue.
++ * Boot-args, ADT properties and log lines: PHONE-TEST.md, NOTES.md.
++ */
++#ifndef STARBITEUFS_H
++#define STARBITEUFS_H
++
++#include <IOKit/IOService.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOCommandGate.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IODMACommand.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/storage/IOBlockStorageDevice.h>
++
++#include "hw/sbufs_hc.h"
++
++class StarbiteUFSRange;
++
++struct StarbiteUFSXfer {
++	StarbiteUFSXfer *next;          /* ready queue */
++	bool used, pooled;
++	unsigned range;
++	uint32_t lun;
++	uint64_t lba, nblks, done;      /* absolute start, total, blocks finished */
++	bool write, fua;
++	bool sync;                      /* SYNCHRONIZE CACHE over [lba, lba+nblks): no data */
++	bool finished;                  /* sync: done, status valid */
++	IOReturn status;
++	uint32_t chunk;                 /* blocks in flight */
++	bool bounce;                    /* the chunk in flight went through the slot's bounce buffer */
++	unsigned retries;
++	IOMemoryDescriptor *buffer;
++	IODMACommand *dma;
++	IOStorageCompletion completion;
++};
++
++class StarbiteUFS : public IOService
++{
++	OSDeclareDefaultStructors(StarbiteUFS);
++
++public:
++	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	virtual void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	virtual void free(void) APPLE_KEXT_OVERRIDE;
++
++	/* for StarbiteUFSRange */
++	IOReturn submit(unsigned range, IOMemoryDescriptor *buffer, UInt64 block, UInt64 nblks,
++	    IOStorageAttributes *attributes, IOStorageCompletion *completion);
++	IOReturn synchronize(unsigned range, UInt64 block, UInt64 nblks);
++	const struct sbufs_range *rangeInfo(unsigned range) const;
++	bool rangeWritable(unsigned range) const;
++	const char *vendor() const { return fVendor; }
++	const char *product() const { return fProduct; }
++	const char *revision() const { return fRevision; }
++	uint32_t maxBlocksPerCommand() const;
++
++	/* sbufs_hw_ops back ends (static: C callbacks) */
++	static uint32_t hwRead(void *ctx, unsigned bank, uint32_t off);
++	static void hwWrite(void *ctx, unsigned bank, uint32_t off, uint32_t v);
++	static void hwBarrier(void *ctx);
++	static uint64_t hwNowUs(void *ctx);
++	static void hwDelayUs(void *ctx, uint32_t us);
++	static void hwLog(void *ctx, const char *line);
++	static void hwClean(void *ctx, uint32_t off, uint32_t len);
++	static void hwInval(void *ctx, uint32_t off, uint32_t len);
++	static void doneThunk(void *ctx, unsigned slot, void *cookie, const struct sbufs_result *r);
++
++private:
++	bool readConfig(IOService *provider);
++	bool mapRegisters(IOService *provider);
++	bool allocDMA(void);
++	bool bringUp(void);
++	void logRanges(void);
++	void publishRanges(void);
++	void logUFSP(void);
++
++	StarbiteUFSXfer *getXfer(void);
++	void putXfer(StarbiteUFSXfer *x);
++	IOReturn submitGated(StarbiteUFSXfer *x);
++	void pump(void);
++	bool startChunk(StarbiteUFSXfer *x);
++	void chunkDone(StarbiteUFSXfer *x, unsigned slot, const struct sbufs_result *r);
++	void finish(StarbiteUFSXfer *x, IOReturn status);
++	void reap(bool fromIrq);
++	void armPoll(void);
++	IOReturn syncGated(unsigned range, UInt64 block, UInt64 nblks);
++	void fenceRefusal(int verdict, unsigned range, uint64_t block, uint64_t nblks, bool write);
++
++	void handleInterrupt(IOInterruptEventSource *src, int count);
++	void handlePollTimer(IOTimerEventSource *src);
++	void handleTreeTimer(IOTimerEventSource *src);
++	void handleReportTimer(IOTimerEventSource *src);
++	bool mediaPublished(void *ref, IOService *media, IONotifier *notifier);
++
++	void dumpTree(const char *why);
++	void dumpEntry(IORegistryEntry *e, unsigned depth);
++	bool reportRoot(void);
++	void fenceSummary(void);
++	bool underUs(IORegistryEntry *e) const;
++
++	static IOReturn gatedSubmit(OSObject *owner, void *a0, void *a1, void *a2, void *a3);
++	static IOReturn gatedSync(OSObject *owner, void *a0, void *a1, void *a2, void *a3);
++
++	IOService *fNub;
++	IOWorkLoop *fWorkLoop;
++	IOCommandGate *fGate;
++	IOInterruptEventSource *fIrq;
++	IOTimerEventSource *fPollTimer, *fTreeTimer, *fReportTimer;
++	IONotifier *fMediaNotifier;
++	IOMemoryMap *fHciMap, *fVsMap, *fUfspMap;
++	volatile uint32_t *fHci, *fVs, *fUfsp;
++	IOBufferMemoryDescriptor *fDma;
++	bool fDmaCached;
++
++	struct sbufs_fence fFence;
++	struct sbufs_hc fHc;
++	StarbiteUFSRange *fRanges[SBUFS_MAX_RANGES];
++
++	enum { kPool = 32 };
++	StarbiteUFSXfer fPool[kPool];
++	StarbiteUFSXfer *fReadyHead, *fReadyTail;
++	StarbiteUFSXfer *fSlotXfer[SBUFS_MAX_SLOTS];
++	unsigned fActive;               /* xfers accepted, not completed */
++
++	/* boot-args */
++	uint32_t fArgRW, fArgIrq, fArgMulti, fArgQD, fArgBounce, fArg64, fArgReport, fArgCached;
++	bool fAdtWrites;
++	char fStop[16];
++
++	char fVendor[9], fProduct[17], fRevision[5];
++	uint64_t fReqs, fBounced, fUARetries, fRefusalsLogged;
++	bool fTreeDumped, fStopped, fPollArmed, fRootReported, fReportDone;
++	unsigned fReportTicks;
++	uint64_t fStartAbs;
++};
++
++class StarbiteUFSRange : public IOBlockStorageDevice
++{
++	OSDeclareDefaultStructors(StarbiteUFSRange);
++
++public:
++	bool initRange(StarbiteUFS *controller, unsigned index);
++	unsigned index() const { return fIndex; }
++
++	virtual IOReturn doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block, UInt64 nblks,
++	    IOStorageAttributes *attributes, IOStorageCompletion *completion) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn doSynchronize(UInt64 block, UInt64 nblks, IOStorageSynchronizeOptions options = 0)
++	APPLE_KEXT_OVERRIDE;
++	virtual IOReturn doUnmap(IOBlockStorageDeviceExtent *extents, UInt32 extentsCount,
++	    IOStorageUnmapOptions options = 0) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn doEjectMedia(void) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn doFormatMedia(UInt64 byteCapacity) APPLE_KEXT_OVERRIDE;
++	virtual UInt32 doGetFormatCapacities(UInt64 *capacities, UInt32 capacitiesMaxCount) const APPLE_KEXT_OVERRIDE;
++	virtual char *getVendorString(void) APPLE_KEXT_OVERRIDE;
++	virtual char *getProductString(void) APPLE_KEXT_OVERRIDE;
++	virtual char *getRevisionString(void) APPLE_KEXT_OVERRIDE;
++	virtual char *getAdditionalDeviceInfoString(void) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn reportBlockSize(UInt64 *blockSize) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn reportEjectability(bool *isEjectable) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn reportMaxValidBlock(UInt64 *maxBlock) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn reportMediaState(bool *mediaPresent, bool *changedState = NULL) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn reportRemovability(bool *isRemovable) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn reportWriteProtection(bool *isWriteProtected) APPLE_KEXT_OVERRIDE;
++#if TARGET_OS_OSX
++	virtual IOReturn doLockUnlockMedia(bool doLock) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn doSynchronizeCache(void) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn reportLockability(bool *isLockable) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn reportPollRequirements(bool *pollRequired, bool *pollIsExpensive) APPLE_KEXT_OVERRIDE;
++#endif
++
++private:
++	StarbiteUFS *fController;
++	unsigned fIndex;
++	char fVendor[9], fProduct[40], fRevision[5], fInfo[64];
++};
++
++#endif /* STARBITEUFS_H */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_fence.c b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_fence.c
+new file mode 100644
+index 00000000..7052bb27
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_fence.c
+@@ -0,0 +1,289 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteUFS fence (see sbufs_fence.h). The policy follows docs/ENGINEER-OS.md section 8 and docs/APPLE-S9-DRIVERS.md
++ * 2.6; it is written new here (starbite/libsb/fence.c is GPL-2.0-only and was read for the policy only).
++ */
++#include "sbufs_fence.h"
++
++static void
++say(char *err, size_t errlen, const char *msg)
++{
++	if (err != NULL && errlen != 0) {
++		size_t n = strlen(msg);
++		if (n >= errlen) {
++			n = errlen - 1;
++		}
++		memcpy(err, msg, n);
++		err[n] = '\0';
++	}
++}
++
++static void
++copy_name(char dst[17], const uint8_t *src)
++{
++	unsigned i;
++	for (i = 0; i < 16 && src[i] != 0; i++) {
++		dst[i] = (src[i] >= 0x20 && src[i] < 0x7f) ? (char)src[i] : '?';
++	}
++	dst[i] = '\0';
++}
++
++/* [a, a+an) and [b, b+bn) meet; neither wraps (checked before). */
++static bool
++meets(uint64_t a, uint64_t an, uint64_t b, uint64_t bn)
++{
++	return a < b + bn && b < a + an;
++}
++
++static int
++header(const uint8_t *p, size_t len, uint32_t magic, uint32_t recsize, uint32_t max, uint32_t *count)
++{
++	if (p == NULL || len < SBUFS_FENCE_HDR_SIZE) {
++		return SBUFS_E_INVAL;
++	}
++	if (sbufs_le32(p) != magic || sbufs_le32(p + 4) != SBUFS_FENCE_VERSION || sbufs_le32(p + 8) != recsize) {
++		return SBUFS_E_INVAL;
++	}
++	*count = sbufs_le32(p + 12);
++	/* exactly count records, or a loader-filled placeholder: whole records up to max, the unused ones zero */
++	if (*count > max || len < SBUFS_FENCE_HDR_SIZE + (size_t)*count * recsize ||
++	    (len - SBUFS_FENCE_HDR_SIZE) % recsize != 0 || len > SBUFS_FENCE_HDR_SIZE + (size_t)max * recsize) {
++		return SBUFS_E_INVAL;
++	}
++	for (size_t i = SBUFS_FENCE_HDR_SIZE + (size_t)*count * recsize; i < len; i++) {
++		if (p[i] != 0) {
++			return SBUFS_E_INVAL;
++		}
++	}
++	return SBUFS_OK;
++}
++
++int
++sbufs_fence_parse(struct sbufs_fence *f, const void *allow, size_t allow_len, const void *deny, size_t deny_len,
++    char *err, size_t errlen)
++{
++	const uint8_t *a = (const uint8_t *)allow, *d = (const uint8_t *)deny;
++	uint32_t na = 0, nd = 0;
++
++	memset(f, 0, sizeof(*f));
++	if (header(a, allow_len, SBUFS_ALLOW_MAGIC, SBUFS_ALLOW_REC_SIZE, SBUFS_MAX_RANGES, &na) != SBUFS_OK) {
++		say(err, errlen, "allowed-ranges: missing or malformed header/length");
++		return SBUFS_E_INVAL;
++	}
++	if (d != NULL && header(d, deny_len, SBUFS_DENY_MAGIC, SBUFS_DENY_REC_SIZE, SBUFS_MAX_DENY, &nd) != SBUFS_OK) {
++		say(err, errlen, "denied-ranges: malformed header/length (nothing exposed)");
++		return SBUFS_E_INVAL;
++	}
++	for (uint32_t i = 0; i < na; i++) {
++		const uint8_t *r = a + SBUFS_FENCE_HDR_SIZE + (size_t)i * SBUFS_ALLOW_REC_SIZE;
++		struct sbufs_range *x = &f->allow[i];
++		x->lun = sbufs_le32(r);
++		x->flags = sbufs_le32(r + 4);
++		x->first = sbufs_le64(r + 8);
++		x->count = sbufs_le64(r + 16);
++		memcpy(x->uuid, r + 24, 16);
++		copy_name(x->name, r + 40);
++		if (x->lun >= SBUFS_MAX_GENERAL_LU || (x->flags & ~SBUFS_RANGE_KNOWN_FLAGS) != 0 || x->count == 0 ||
++		    x->first > UINT64_MAX - x->count || sbufs_le64(r + 56) != 0) {
++			memset(f, 0, sizeof(*f));
++			say(err, errlen, "allowed-ranges: a record is malformed (lun, flags, empty, wrapping or reserved): nothing exposed");
++			return SBUFS_E_INVAL;
++		}
++		x->why = "not sealed";
++	}
++	for (uint32_t i = 0; i < nd; i++) {
++		const uint8_t *r = d + SBUFS_FENCE_HDR_SIZE + (size_t)i * SBUFS_DENY_REC_SIZE;
++		struct sbufs_extent *x = &f->deny[i];
++		x->lun = sbufs_le32(r);
++		x->first = sbufs_le64(r + 8);
++		x->count = sbufs_le64(r + 16);
++		copy_name(x->name, r + 24);
++		/* a denied extent that wraps is taken to the end of the LU's address space: denying more is safe */
++		if (x->count == 0 || sbufs_le32(r + 4) != 0) {
++			memset(f, 0, sizeof(*f));
++			say(err, errlen, "denied-ranges: a record is malformed (empty or reserved bits): nothing exposed");
++			return SBUFS_E_INVAL;
++		}
++		if (x->first > UINT64_MAX - x->count) {
++			x->count = UINT64_MAX - x->first;
++		}
++	}
++	f->nallow = na;
++	f->ndeny = nd;
++	say(err, errlen, na ? "ok" : "allowed-ranges: empty, nothing exposed");
++	return SBUFS_OK;
++}
++
++void
++sbufs_fence_set_capacity(struct sbufs_fence *f, uint32_t lun, uint64_t blocks)
++{
++	if (lun < SBUFS_MAX_GENERAL_LU && !f->sealed) {
++		f->lu_blocks[lun] = blocks;
++	}
++}
++
++static int
++floors(const struct sbufs_fence *f, uint32_t lun, uint64_t lba, uint64_t n)
++{
++	uint64_t cap = f->lu_blocks[lun];
++	if (cap <= SBUFS_HEAD_FLOOR + SBUFS_TAIL_FLOOR || lba < SBUFS_HEAD_FLOOR ||
++	    lba + n > cap - SBUFS_TAIL_FLOOR) {
++		return SBUFS_FENCE_FLOOR;
++	}
++	return SBUFS_FENCE_OK;
++}
++
++static const struct sbufs_extent *
++denied(const struct sbufs_fence *f, uint32_t lun, uint64_t lba, uint64_t n)
++{
++	for (unsigned i = 0; i < f->ndeny; i++) {
++		const struct sbufs_extent *e = &f->deny[i];
++		if (e->lun == lun && meets(lba, n, e->first, e->count)) {
++			return e;
++		}
++	}
++	return NULL;
++}
++
++unsigned
++sbufs_fence_seal(struct sbufs_fence *f)
++{
++	unsigned usable = 0;
++	for (unsigned i = 0; i < f->nallow; i++) {
++		struct sbufs_range *r = &f->allow[i];
++		r->usable = false;
++		if (f->lu_blocks[r->lun] == 0) {
++			r->why = "LU capacity unknown (not probed or not 4 KiB blocks)";
++			continue;
++		}
++		if (floors(f, r->lun, r->first, r->count) != SBUFS_FENCE_OK) {
++			r->why = "meets the GPT head/tail floor or runs past the LU";
++			continue;
++		}
++		if (denied(f, r->lun, r->first, r->count) != NULL) {
++			r->why = "meets a denied extent";
++			continue;
++		}
++		bool overlap = false;
++		for (unsigned j = 0; j < i; j++) {
++			const struct sbufs_range *o = &f->allow[j];
++			if (o->usable && o->lun == r->lun && meets(r->first, r->count, o->first, o->count)) {
++				overlap = true;
++			}
++		}
++		if (overlap) {
++			r->why = "overlaps an earlier allowed range";
++			continue;
++		}
++		r->usable = true;
++		r->why = "ok";
++		usable++;
++	}
++	f->sealed = true;
++	return usable;
++}
++
++int
++sbufs_fence_check_quiet(const struct sbufs_fence *f, uint32_t lun, uint64_t lba, uint64_t n, bool write)
++{
++	if (n == 0) {
++		return SBUFS_FENCE_EMPTY;
++	}
++	if (lba > UINT64_MAX - n) {
++		return SBUFS_FENCE_WRAP;
++	}
++	if (lun >= SBUFS_MAX_GENERAL_LU) {
++		return SBUFS_FENCE_BAD_LUN;
++	}
++	if (!f->sealed) {
++		return SBUFS_FENCE_OUTSIDE;
++	}
++	if (floors(f, lun, lba, n) != SBUFS_FENCE_OK) {
++		return SBUFS_FENCE_FLOOR;
++	}
++	if (denied(f, lun, lba, n) != NULL) {
++		return SBUFS_FENCE_DENIED;
++	}
++	for (unsigned i = 0; i < f->nallow; i++) {
++		const struct sbufs_range *r = &f->allow[i];
++		if (!r->usable || r->lun != lun || lba < r->first || lba - r->first >= r->count ||
++		    n > r->count - (lba - r->first)) {
++			continue;
++		}
++		if (write && (!f->writes_enabled || !(r->flags & SBUFS_RANGE_WRITABLE))) {
++			return SBUFS_FENCE_READONLY;
++		}
++		return SBUFS_FENCE_OK;
++	}
++	return SBUFS_FENCE_OUTSIDE;
++}
++
++static int
++tally(struct sbufs_fence *f, int v, uint64_t n, bool write)
++{
++	f->checked++;
++	if (v == SBUFS_FENCE_OK) {
++		f->blocks_ok += n;
++	} else {
++		f->refused++;
++		if (write) {
++			f->refused_write++;
++		}
++	}
++	return v;
++}
++
++int
++sbufs_fence_check(struct sbufs_fence *f, uint32_t lun, uint64_t lba, uint64_t n, bool write)
++{
++	return tally(f, sbufs_fence_check_quiet(f, lun, lba, n, write), n, write);
++}
++
++int
++sbufs_fence_map(struct sbufs_fence *f, unsigned range, uint64_t block, uint64_t nblks, bool write, uint32_t *lun,
++    uint64_t *lba)
++{
++	if (range >= f->nallow || !f->allow[range].usable || !f->sealed) {
++		return tally(f, SBUFS_FENCE_BAD_RANGE, nblks, write);
++	}
++	const struct sbufs_range *r = &f->allow[range];
++	if (nblks == 0) {
++		return tally(f, SBUFS_FENCE_EMPTY, nblks, write);
++	}
++	if (block > UINT64_MAX - nblks) {
++		return tally(f, SBUFS_FENCE_WRAP, nblks, write);
++	}
++	if (block >= r->count || nblks > r->count - block) {
++		return tally(f, SBUFS_FENCE_OUTSIDE, nblks, write);
++	}
++	int v = sbufs_fence_check(f, r->lun, r->first + block, nblks, write);
++	if (v == SBUFS_FENCE_OK) {
++		*lun = r->lun;
++		*lba = r->first + block;
++	}
++	return v;
++}
++
++bool
++sbufs_fence_range_writable(const struct sbufs_fence *f, unsigned range)
++{
++	return range < f->nallow && f->allow[range].usable && f->writes_enabled &&
++	       (f->allow[range].flags & SBUFS_RANGE_WRITABLE);
++}
++
++const char *
++sbufs_fence_verdict_name(int v)
++{
++	switch (v) {
++	case SBUFS_FENCE_OK: return "ok";
++	case SBUFS_FENCE_EMPTY: return "empty";
++	case SBUFS_FENCE_WRAP: return "wraps";
++	case SBUFS_FENCE_BAD_LUN: return "not a general LU";
++	case SBUFS_FENCE_OUTSIDE: return "outside every allowed range";
++	case SBUFS_FENCE_DENIED: return "denied extent";
++	case SBUFS_FENCE_FLOOR: return "GPT floor / past the LU";
++	case SBUFS_FENCE_READONLY: return "read-only";
++	case SBUFS_FENCE_BAD_RANGE: return "no such range";
++	default: return "?";
++	}
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_fence.h b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_fence.h
+new file mode 100644
+index 00000000..32641bdc
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_fence.h
+@@ -0,0 +1,119 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteUFS fence: the driver may touch ONLY the LBA ranges Starbite owns.
++ *
++ * Three layers, all inside the driver (none trusts the caller):
++ *  1. the allow-list, "starbite,allowed-ranges" on /arm-io/ufs (the loader writes it from the store / GPT):
++ *     every data command must lie wholly inside ONE allowed range;
++ *  2. the deny-list, "starbite,denied-ranges" (optional): Android's partitions by name (EFS, CPEFS, PARAM,
++ *     KEYSTORAGE, PERSISTENT, STEADY, BOTA*, DTB, DTBO, BOOT, RECOVERY, RADIO, the GPT head and tail ...). An
++ *     allowed range that meets a denied extent is dropped at start, and every command is checked against it again;
++ *  3. built-in floors that need no property: the first SBUFS_HEAD_FLOOR and last SBUFS_TAIL_FLOOR blocks of
++ *     every LU (protective MBR, primary and backup GPT) are never inside a usable range, nor is a block past the
++ *     LU's READ CAPACITY; well-known LUs and LUs 8.. are never data targets.
++ * Writes need the range's WRITABLE flag AND the global write switch (ADT "starbite,writes-allowed" = 1 AND
++ * boot-arg sbufsrw=1). M4 runs with neither: read-only.
++ * The property layout is in NOTES.md ("Fence property format"); the host tests build it byte by byte.
++ */
++#ifndef SBUFS_FENCE_H
++#define SBUFS_FENCE_H
++
++#include "sbufs_port.h"
++#include "sbufs_regs.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define SBUFS_MAX_RANGES        8u
++#define SBUFS_MAX_DENY          48u
++#define SBUFS_HEAD_FLOOR        6u      /* LBA 0 (MBR), 1 (GPT header), 2..5 (128 x 128-byte entries, 4 KiB blocks) */
++#define SBUFS_TAIL_FLOOR        6u      /* backup entries + backup header, with one block of margin */
++
++/* "starbite,allowed-ranges": header + records */
++#define SBUFS_ALLOW_MAGIC       0x52464253u     /* "SBFR" little endian */
++#define SBUFS_DENY_MAGIC        0x44464253u     /* "SBFD" */
++#define SBUFS_FENCE_VERSION     1u
++#define SBUFS_ALLOW_REC_SIZE    64u
++#define SBUFS_DENY_REC_SIZE     40u
++#define SBUFS_FENCE_HDR_SIZE    16u
++
++/* allowed range flags */
++#define SBUFS_RANGE_WRITABLE    0x1u    /* writes allowed here once the global switch is on */
++#define SBUFS_RANGE_ROOT        0x2u    /* the loader's root candidate (informational: logged, published) */
++#define SBUFS_RANGE_KNOWN_FLAGS (SBUFS_RANGE_WRITABLE | SBUFS_RANGE_ROOT)
++
++struct sbufs_range {
++	uint32_t lun;
++	uint32_t flags;
++	uint64_t first;                 /* absolute LBA, 4 KiB blocks */
++	uint64_t count;
++	uint8_t uuid[16];
++	char name[17];
++	bool usable;                    /* survived validation (capacity known, floors, deny-list, overlaps) */
++	const char *why;                /* why not usable */
++};
++
++struct sbufs_extent {
++	uint32_t lun;
++	uint64_t first, count;
++	char name[17];
++};
++
++/* verdicts */
++enum {
++	SBUFS_FENCE_OK = 0,
++	SBUFS_FENCE_EMPTY,              /* zero blocks */
++	SBUFS_FENCE_WRAP,               /* lba + n overflows */
++	SBUFS_FENCE_BAD_LUN,            /* well-known or >= 8 */
++	SBUFS_FENCE_OUTSIDE,            /* not wholly inside one usable allowed range */
++	SBUFS_FENCE_DENIED,             /* meets a denied extent */
++	SBUFS_FENCE_FLOOR,              /* meets the LU's head or tail floor, or past its capacity */
++	SBUFS_FENCE_READONLY,           /* a write where writes are not allowed */
++	SBUFS_FENCE_BAD_RANGE,          /* no such (usable) range index */
++};
++
++struct sbufs_fence {
++	struct sbufs_range allow[SBUFS_MAX_RANGES];
++	unsigned nallow;
++	struct sbufs_extent deny[SBUFS_MAX_DENY];
++	unsigned ndeny;
++	uint64_t lu_blocks[SBUFS_MAX_GENERAL_LU];       /* READ CAPACITY, 0 = unknown: nothing on that LU is usable */
++	bool writes_enabled;                            /* global switch (ADT property AND boot-arg) */
++	bool sealed;                                    /* sbufs_fence_seal() ran: ranges fixed */
++	/* the fence log */
++	uint64_t checked, refused, refused_write, blocks_ok;
++	uint64_t foreign_touched;                       /* commands that reached a doorbell outside the fence: must stay 0 */
++};
++
++/* Parse the two ADT properties: exactly the header's records, or the loader-filled placeholder (capacity for
++ * SBUFS_MAX_RANGES / SBUFS_MAX_DENY records, unused records all zero). Fail closed: any malformed byte leaves nallow = 0 (nothing exposed).
++ * deny may be NULL (no deny-list). Returns 0 or SBUFS_E_*; err gets a one-line reason. */
++int sbufs_fence_parse(struct sbufs_fence *f, const void *allow, size_t allow_len, const void *deny,
++    size_t deny_len, char *err, size_t errlen);
++
++/* The capacity of a general LU, from READ CAPACITY (blocks). */
++void sbufs_fence_set_capacity(struct sbufs_fence *f, uint32_t lun, uint64_t blocks);
++
++/* After every capacity is known: validate each allowed range (floors, capacity, deny-list, overlaps) and fix the
++ * set. Ranges that fail stay listed with usable = false and a reason. Returns the number of usable ranges. */
++unsigned sbufs_fence_seal(struct sbufs_fence *f);
++
++/* The core check, absolute addressing. Counts into the fence log. */
++int sbufs_fence_check(struct sbufs_fence *f, uint32_t lun, uint64_t lba, uint64_t n, bool write);
++
++/* Same, without touching the counters (for the doorbell audit and tests). */
++int sbufs_fence_check_quiet(const struct sbufs_fence *f, uint32_t lun, uint64_t lba, uint64_t n, bool write);
++
++/* Range-relative (an IOBlockStorageDevice's block numbers) to absolute; checks everything. */
++int sbufs_fence_map(struct sbufs_fence *f, unsigned range, uint64_t block, uint64_t nblks, bool write,
++    uint32_t *lun, uint64_t *lba);
++
++bool sbufs_fence_range_writable(const struct sbufs_fence *f, unsigned range);
++const char *sbufs_fence_verdict_name(int verdict);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SBUFS_FENCE_H */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_hc.c b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_hc.c
+new file mode 100644
+index 00000000..32505075
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_hc.c
+@@ -0,0 +1,549 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteUFS host controller core (sbufs_hc.h). The take-over, the wake-up and the multi-block self test follow
++ * what build/xnu-12377/bsd/dev/herolte_ufs.c (Starbite, patches 0204/0300) proved on the S9; the slot state machine,
++ * the doorbell audit and the fence are new. Facts and sources: NOTES.md.
++ */
++#include "sbufs_hc.h"
++
++#define SAY(hc, ...) do { \
++	if ((hc)->ops.log != NULL) { \
++	        snprintf((hc)->line, sizeof((hc)->line), __VA_ARGS__); \
++	        (hc)->ops.log((hc)->ops.ctx, (hc)->line); \
++	} \
++} while (0)
++
++static inline uint32_t rd(struct sbufs_hc *hc, unsigned bank, uint32_t off) { return hc->ops.rd(hc->ops.ctx, bank, off); }
++static inline void wr(struct sbufs_hc *hc, unsigned bank, uint32_t off, uint32_t v) { hc->ops.wr(hc->ops.ctx, bank, off, v); }
++static inline void barrier(struct sbufs_hc *hc) { if (hc->ops.barrier) hc->ops.barrier(hc->ops.ctx); }
++static inline void clean(struct sbufs_hc *hc, uint32_t off, uint32_t len) { if (hc->ops.dma_clean) hc->ops.dma_clean(hc->ops.ctx, off, len); }
++static inline void inval(struct sbufs_hc *hc, uint32_t off, uint32_t len) { if (hc->ops.dma_inval) hc->ops.dma_inval(hc->ops.ctx, off, len); }
++
++static uint32_t utrd_off(unsigned slot) { return SBUFS_DMA_UTRL + slot * 32u; }
++static uint32_t ucd_off(unsigned slot) { return SBUFS_DMA_UCD + slot * SBUFS_UCD_SIZE; }
++static uint32_t bounce_off(unsigned slot) { return SBUFS_DMA_BOUNCE + slot * SBUFS_BOUNCE_SIZE; }
++
++int
++sbufs_hc_init(struct sbufs_hc *hc, const struct sbufs_hw_ops *ops, const struct sbufs_cfg *cfg, uint8_t *dma_va,
++    uint64_t dma_pa, size_t dma_size, struct sbufs_fence *fence)
++{
++	memset(hc, 0, sizeof(*hc));
++	hc->ops = *ops;
++	hc->cfg = *cfg;
++	if (hc->cfg.nslots == 0 || hc->cfg.nslots > SBUFS_MAX_SLOTS || hc->cfg.timeout_us == 0 || dma_va == NULL ||
++	    fence == NULL || ops->rd == NULL || ops->wr == NULL || ops->now_us == NULL || ops->delay_us == NULL) {
++		return SBUFS_E_INVAL;
++	}
++	if ((dma_pa & 0xfff) != 0 || dma_size < SBUFS_DMA_SIZE(hc->cfg.nslots) ||
++	    (!cfg->dma64 && dma_pa + dma_size > (1ull << 32))) {
++		return SBUFS_E_DMA;
++	}
++	hc->dma = dma_va;
++	hc->dma_pa = dma_pa;
++	hc->dma_size = dma_size;
++	hc->fence = fence;
++	sbufs_layout_s9(&hc->L, 1, cfg->dma64);         /* one 4 KiB entry per command until the self test says more */
++	return SBUFS_OK;
++}
++
++int
++sbufs_hc_take_over(struct sbufs_hc *hc)
++{
++	hc->cap = rd(hc, SBUFS_BANK_HCI, SBUFS_CAP);
++	hc->ver = rd(hc, SBUFS_BANK_HCI, SBUFS_VER);
++	hc->hcs = rd(hc, SBUFS_BANK_HCI, SBUFS_HCS);
++	hc->hce = rd(hc, SBUFS_BANK_HCI, SBUFS_HCE);
++	SAY(hc, "host: cap 0x%x ver 0x%x hcs 0x%x hce 0x%x utrlba 0x%x:%08x dbr 0x%x rsr 0x%x nexus 0x%x",
++	    hc->cap, hc->ver, hc->hcs, hc->hce, rd(hc, SBUFS_BANK_HCI, SBUFS_UTRLBAU), rd(hc, SBUFS_BANK_HCI, SBUFS_UTRLBA),
++	    rd(hc, SBUFS_BANK_HCI, SBUFS_UTRLDBR), rd(hc, SBUFS_BANK_HCI, SBUFS_UTRLRSR),
++	    rd(hc, SBUFS_BANK_VS, SBUFS_VS_UTRL_NEXUS_TYPE));
++	/* Exynos 9810 after S-Boot: HCE reads 0 while HCS reports the device present and the list ready (phone,
++	 * 2026-10-25). Go by HCS. */
++	if (!(hc->hcs & SBUFS_HCS_DP) || !(hc->hcs & SBUFS_HCS_UTRLRDY)) {
++		SAY(hc, "host not ready (hcs 0x%x): not taken", hc->hcs);
++		return SBUFS_E_NODEV;
++	}
++	if (rd(hc, SBUFS_BANK_HCI, SBUFS_UTRLDBR) != 0) {
++		SAY(hc, "requests outstanding from the bootloader: not taken");
++		return SBUFS_E_NODEV;
++	}
++	if (hc->cfg.nslots > SBUFS_CAP_NUTRS(hc->cap)) {
++		hc->cfg.nslots = SBUFS_CAP_NUTRS(hc->cap);
++	}
++	if (hc->cfg.dma64 && !(hc->cap & SBUFS_CAP_64AS)) {
++		hc->cfg.dma64 = false;
++		hc->L.dma_limit = 1ull << 32;
++	}
++	if (hc->dma_pa + hc->dma_size > (1ull << 32) && !(hc->cap & SBUFS_CAP_64AS)) {
++		SAY(hc, "DMA area at 0x%llx but no 64-bit addressing: not taken", (unsigned long long)hc->dma_pa);
++		return SBUFS_E_DMA;
++	}
++	memset(hc->dma + SBUFS_DMA_UTRL, 0, 32u * 32u);
++	clean(hc, SBUFS_DMA_UTRL, 32u * 32u);
++	wr(hc, SBUFS_BANK_HCI, SBUFS_IE, 0);
++	wr(hc, SBUFS_BANK_HCI, SBUFS_AHIT, 0);          /* auto-hibernate drops completions on the 9810 */
++	wr(hc, SBUFS_BANK_HCI, SBUFS_IS, rd(hc, SBUFS_BANK_HCI, SBUFS_IS));
++	wr(hc, SBUFS_BANK_HCI, SBUFS_UTRLRSR, 0);
++	uint64_t list = hc->dma_pa + SBUFS_DMA_UTRL;
++	wr(hc, SBUFS_BANK_HCI, SBUFS_UTRLBA, (uint32_t)list);
++	wr(hc, SBUFS_BANK_HCI, SBUFS_UTRLBAU, (uint32_t)(list >> 32));
++	wr(hc, SBUFS_BANK_HCI, SBUFS_UTRLRSR, 1);
++	barrier(hc);
++	/* never ring a doorbell unless the host reads OUR list */
++	if (rd(hc, SBUFS_BANK_HCI, SBUFS_UTRLBA) != (uint32_t)list ||
++	    rd(hc, SBUFS_BANK_HCI, SBUFS_UTRLBAU) != (uint32_t)(list >> 32) ||
++	    !(rd(hc, SBUFS_BANK_HCI, SBUFS_UTRLRSR) & 1)) {
++		SAY(hc, "host did not take our request list");
++		return SBUFS_E_NODEV;
++	}
++	for (unsigned i = 0; i < 4; i++) {
++		static const uint32_t vs[4] = { SBUFS_VS_TXPRDT_ENTRY_SIZE, SBUFS_VS_RXPRDT_ENTRY_SIZE,
++			                        SBUFS_VS_DATA_REORDER, SBUFS_VS_AXIDMA_RWDATA_BURST };
++		hc->vs_saved[i] = rd(hc, SBUFS_BANK_VS, vs[i]);
++	}
++	hc->ready = true;
++	SAY(hc, "host taken: list at 0x%llx, %u slots, %s DMA, %s", (unsigned long long)list, hc->cfg.nslots,
++	    hc->cfg.dma64 ? "64-bit" : "32-bit", hc->cfg.irq ? "interrupts" : "polled");
++	return SBUFS_OK;
++}
++
++void
++sbufs_hc_enable_irq(struct sbufs_hc *hc, bool on)
++{
++	hc->cfg.irq = on;
++	wr(hc, SBUFS_BANK_HCI, SBUFS_IS, rd(hc, SBUFS_BANK_HCI, SBUFS_IS));
++	wr(hc, SBUFS_BANK_HCI, SBUFS_IE, on ? SBUFS_IE_WANTED : 0);
++}
++
++int
++sbufs_hc_alloc_slot(struct sbufs_hc *hc)
++{
++	if (!hc->ready || hc->dead) {
++		return SBUFS_E_NODEV;
++	}
++	for (unsigned s = 0; s < hc->cfg.nslots; s++) {
++		if (!hc->slot[s].busy) {
++			hc->slot[s].busy = true;
++			hc->slot[s].cookie = NULL;
++			return (int)s;
++		}
++	}
++	return SBUFS_E_BUSY;
++}
++
++void
++sbufs_hc_free_slot(struct sbufs_hc *hc, unsigned slot)
++{
++	if (slot < SBUFS_MAX_SLOTS && !(hc->inflight & (1u << slot))) {
++		hc->slot[slot].busy = false;
++	}
++}
++
++uint8_t *
++sbufs_hc_bounce_va(struct sbufs_hc *hc, unsigned slot)
++{
++	return hc->dma + bounce_off(slot);
++}
++
++uint64_t
++sbufs_hc_bounce_pa(struct sbufs_hc *hc, unsigned slot)
++{
++	return hc->dma_pa + bounce_off(slot);
++}
++
++uint32_t
++sbufs_hc_max_xfer(const struct sbufs_hc *hc)
++{
++	return hc->L.max_entries * SBUFS_BLOCK;
++}
++
++int
++sbufs_hc_issue(struct sbufs_hc *hc, unsigned slot, const struct sbufs_cmd *cmd, const struct sbufs_seg *segs,
++    unsigned nsegs, void *cookie)
++{
++	struct sbufs_seg bseg[SBUFS_BOUNCE_SIZE / SBUFS_PRD_MAX_BYTES];
++	struct sbufs_decoded d;
++	uint8_t *utrd = hc->dma + utrd_off(slot), *ucd = hc->dma + ucd_off(slot);
++	bool bounce = false;
++	int err;
++
++	if (slot >= hc->cfg.nslots || !hc->slot[slot].busy || (hc->inflight & (1u << slot))) {
++		return SBUFS_E_INVAL;
++	}
++	if (!hc->ready || hc->dead) {
++		hc->slot[slot].busy = false;
++		return SBUFS_E_NODEV;
++	}
++	if (cmd->xfer_len != 0 && segs == NULL) {
++		if (cmd->xfer_len > SBUFS_BOUNCE_SIZE) {
++			hc->slot[slot].busy = false;
++			return SBUFS_E_INVAL;
++		}
++		nsegs = 0;
++		for (uint32_t done = 0; done < cmd->xfer_len; done += SBUFS_PRD_MAX_BYTES) {
++			uint32_t left = cmd->xfer_len - done;
++			bseg[nsegs].pa = sbufs_hc_bounce_pa(hc, slot) + done;
++			bseg[nsegs].len = left < SBUFS_PRD_MAX_BYTES ? left : SBUFS_PRD_MAX_BYTES;
++			nsegs++;
++		}
++		segs = bseg;
++		bounce = true;
++	}
++	err = sbufs_build(&hc->L, utrd, ucd, hc->dma_pa + ucd_off(slot), cmd, (uint8_t)slot, segs, nsegs, hc->cfg.irq);
++	if (err == SBUFS_OK) {
++		err = sbufs_gate(&hc->L, utrd, ucd, hc->fence, &d);
++		if (err != SBUFS_OK) {
++			hc->ngate++;
++			SAY(hc, "fence: AUDIT refused slot %u lun 0x%x op 0x%02x lba 0x%llx n %llu: %s", slot, d.lun, d.opcode,
++			    (unsigned long long)d.lba, (unsigned long long)d.nblks, d.why);
++		}
++	}
++	if (err != SBUFS_OK) {
++		memset(utrd, 0, 32);
++		hc->slot[slot].busy = false;
++		return err;
++	}
++	clean(hc, utrd_off(slot), 32);
++	clean(hc, ucd_off(slot), hc->L.prdt_off + nsegs * hc->L.stride);
++	if (bounce) {
++		/* a write's data out of the cache; a read's lines cleaned so no dirty line lands on the DMA'd data */
++		clean(hc, bounce_off(slot), cmd->xfer_len);
++	}
++	if (hc->cfg.nexus) {
++		wr(hc, SBUFS_BANK_VS, SBUFS_VS_UTRL_NEXUS_TYPE, rd(hc, SBUFS_BANK_VS, SBUFS_VS_UTRL_NEXUS_TYPE) | (1u << slot));
++	}
++	hc->slot[slot].bounce = bounce;
++	hc->slot[slot].cmd = *cmd;
++	hc->slot[slot].cookie = cookie;
++	hc->slot[slot].deadline = hc->ops.now_us(hc->ops.ctx) + hc->cfg.timeout_us;
++	hc->inflight |= 1u << slot;
++	barrier(hc);
++	wr(hc, SBUFS_BANK_HCI, SBUFS_UTRLDBR, 1u << slot);
++	hc->ncmds++;
++	/* the fence log's own count, independent of the gate's verdict: what was rung, decoded again */
++	if (d.data && sbufs_fence_check_quiet(hc->fence, d.lun, d.lba, d.nblks, d.write) != SBUFS_FENCE_OK) {
++		hc->foreign_touched++;
++	}
++	return SBUFS_OK;
++}
++
++static void
++finish(struct sbufs_hc *hc, unsigned s, struct sbufs_result *r, sbufs_done_fn done, void *ctx)
++{
++	void *cookie = hc->slot[s].cookie;
++	hc->inflight &= ~(1u << s);
++	hc->slot[s].busy = false;
++	if (r->err != SBUFS_OK) {
++		hc->nerr++;
++	}
++	if (done != NULL) {
++		done(ctx, s, cookie, r);
++	}
++}
++
++unsigned
++sbufs_hc_poll(struct sbufs_hc *hc, bool from_irq, sbufs_done_fn done, void *ctx)
++{
++	unsigned n = 0;
++	struct sbufs_result r;
++
++	if (!hc->ready) {
++		return 0;
++	}
++	uint32_t is = rd(hc, SBUFS_BANK_HCI, SBUFS_IS);
++	if (is != 0) {
++		wr(hc, SBUFS_BANK_HCI, SBUFS_IS, is);
++		hc->last_is = is;
++	}
++	if (is & SBUFS_IS_UE) {
++		hc->nue++;
++		SAY(hc, "UIC error (IS 0x%x), #%llu", is, (unsigned long long)hc->nue);
++	}
++	if ((is & SBUFS_IS_FATAL) != 0 && !hc->dead) {
++		hc->nfatal++;
++		hc->dead = true;
++		SAY(hc, "FATAL host error IS 0x%x: every command fails from now on (no reset: the link is S-Boot's)", is);
++	}
++	if (hc->dead) {
++		for (unsigned s = 0; s < hc->cfg.nslots; s++) {
++			if (hc->inflight & (1u << s)) {
++				memset(&r, 0, sizeof(r));
++				r.err = SBUFS_E_NODEV;
++				finish(hc, s, &r, done, ctx);
++				n++;
++			}
++		}
++		return n;
++	}
++	if (hc->inflight == 0) {
++		return 0;
++	}
++	uint32_t dbr = rd(hc, SBUFS_BANK_HCI, SBUFS_UTRLDBR);
++	uint32_t ready = hc->inflight & ~dbr;
++	for (unsigned s = 0; s < hc->cfg.nslots; s++) {
++		if (!(ready & (1u << s))) {
++			continue;
++		}
++		barrier(hc);
++		inval(hc, utrd_off(s), 32);
++		inval(hc, ucd_off(s) + hc->L.rsp_off, hc->L.rsp_len);
++		if (hc->slot[s].bounce && hc->slot[s].cmd.dir == SBUFS_DIR_READ) {
++			inval(hc, bounce_off(s), hc->slot[s].cmd.xfer_len);
++		}
++		sbufs_parse_response(&hc->L, hc->dma + utrd_off(s), hc->dma + ucd_off(s), (uint8_t)s, &r);
++		if (r.err != SBUFS_OK) {
++			SAY(hc, "lun 0x%x op 0x%02x failed: ocs 0x%x upiu 0x%x resp 0x%x status 0x%x sense %x/%02x/%02x resid %u",
++			    hc->slot[s].cmd.lun, hc->slot[s].cmd.cdb[0], r.ocs, r.upiu, r.response, r.status, r.sense_key,
++			    r.asc, r.ascq, r.residual);
++		}
++		if (from_irq) {
++			hc->ncompl_irq++;
++		} else {
++			hc->ncompl_poll++;
++		}
++		finish(hc, s, &r, done, ctx);
++		n++;
++	}
++	uint64_t now = hc->ops.now_us(hc->ops.ctx);
++	for (unsigned s = 0; s < hc->cfg.nslots; s++) {
++		if (!(hc->inflight & (1u << s)) || now < hc->slot[s].deadline) {
++			continue;
++		}
++		uint32_t bit = 1u << s;
++		wr(hc, SBUFS_BANK_HCI, SBUFS_UTRLCLR, hc->cfg.clr_one ? bit : ~bit);
++		bool cleared = false;
++		for (unsigned i = 0; i < 1000 && !cleared; i++) {
++			cleared = !(rd(hc, SBUFS_BANK_HCI, SBUFS_UTRLDBR) & bit);
++			if (!cleared) {
++				hc->ops.delay_us(hc->ops.ctx, 10);
++			}
++		}
++		hc->ntimeout++;
++		SAY(hc, "slot %u lun 0x%x op 0x%02x timed out%s", s, hc->slot[s].cmd.lun, hc->slot[s].cmd.cdb[0],
++		    cleared ? ", slot cleared" : " and would not clear: host given up");
++		if (!cleared) {
++			hc->dead = true;
++		}
++		memset(&r, 0, sizeof(r));
++		r.err = SBUFS_E_TIMEOUT;
++		finish(hc, s, &r, done, ctx);
++		n++;
++	}
++	return n;
++}
++
++struct run_ctx {
++	bool done;
++	struct sbufs_result r;
++};
++
++static void
++run_done(void *ctx, unsigned slot, void *cookie, const struct sbufs_result *r)
++{
++	struct run_ctx *c = (struct run_ctx *)ctx;
++	(void)slot;
++	(void)cookie;
++	c->done = true;
++	c->r = *r;
++}
++
++int
++sbufs_hc_run(struct sbufs_hc *hc, const struct sbufs_cmd *cmd, uint8_t *data, uint32_t data_len,
++    struct sbufs_result *r)
++{
++	struct run_ctx c;
++	int s, err;
++
++	memset(&c, 0, sizeof(c));
++	if (hc->inflight != 0) {
++		return SBUFS_E_BUSY;            /* would steal another request's completion */
++	}
++	if (data_len != cmd->xfer_len || (data_len != 0 && data == NULL)) {
++		return SBUFS_E_INVAL;
++	}
++	s = sbufs_hc_alloc_slot(hc);
++	if (s < 0) {
++		return s;
++	}
++	if (cmd->dir == SBUFS_DIR_WRITE) {
++		memcpy(sbufs_hc_bounce_va(hc, (unsigned)s), data, data_len);
++	}
++	err = sbufs_hc_issue(hc, (unsigned)s, cmd, NULL, 0, &c);
++	if (err != SBUFS_OK) {
++		return err;
++	}
++	while (!c.done) {
++		if (sbufs_hc_poll(hc, false, run_done, &c) == 0) {
++			hc->ops.delay_us(hc->ops.ctx, 5);
++		}
++	}
++	if (c.r.err == SBUFS_OK && cmd->dir == SBUFS_DIR_READ) {
++		memcpy(data, sbufs_hc_bounce_va(hc, (unsigned)s), data_len);
++	}
++	if (r != NULL) {
++		*r = c.r;
++	}
++	return c.r.err;
++}
++
++static int
++run_retry(struct sbufs_hc *hc, const struct sbufs_cmd *cmd, uint8_t *data, uint32_t len, struct sbufs_result *r,
++    unsigned tries)
++{
++	int err = SBUFS_E_IO;
++	for (unsigned i = 0; i < tries; i++) {
++		err = sbufs_hc_run(hc, cmd, data, len, r);
++		if (err == SBUFS_OK || err == SBUFS_E_GATE || err == SBUFS_E_NODEV || hc->dead) {
++			break;
++		}
++	}
++	return err;
++}
++
++int
++sbufs_hc_wake(struct sbufs_hc *hc)
++{
++	struct sbufs_cmd c;
++	struct sbufs_result r;
++	int e1, e2;
++
++	/* After S-Boot the device W-LUN reports a unit attention / not ready (OCS 7, sense 2/04/02 on the phone);
++	 * START STOP UNIT (ACTIVE) wakes it, as ufshcd_set_dev_pwr_mode() does. */
++	sbufs_cdb_tur(&c, SBUFS_WLUN_DEVICE);
++	e1 = run_retry(hc, &c, NULL, 0, &r, 3);
++	sbufs_cdb_ssu_active(&c);
++	e2 = run_retry(hc, &c, NULL, 0, &r, 3);
++	SAY(hc, "device W-LUN: TEST UNIT READY %d, START STOP UNIT (ACTIVE) %d", e1, e2);
++	return e2;
++}
++
++int
++sbufs_hc_probe_lu(struct sbufs_hc *hc, uint8_t lun, uint64_t *blocks, uint32_t *blksz)
++{
++	struct sbufs_cmd c;
++	struct sbufs_result r;
++	uint8_t buf[32];
++	int err;
++
++	*blocks = 0;
++	*blksz = 0;
++	if (lun >= SBUFS_MAX_GENERAL_LU) {
++		return SBUFS_E_INVAL;
++	}
++	sbufs_cdb_tur(&c, lun);
++	err = run_retry(hc, &c, NULL, 0, &r, 3);        /* the first command may report a unit attention */
++	if (err != SBUFS_OK) {
++		SAY(hc, "lun %u: TEST UNIT READY %d", lun, err);
++		return err;
++	}
++	sbufs_cdb_read_cap10(&c, lun);
++	err = run_retry(hc, &c, buf, 8, &r, 2);
++	if (err != SBUFS_OK) {
++		return err;
++	}
++	uint64_t last = sbufs_be32(buf);
++	*blksz = sbufs_be32(buf + 4);
++	if (last == 0xffffffffu) {
++		sbufs_cdb_read_cap16(&c, lun);
++		err = run_retry(hc, &c, buf, 32, &r, 2);
++		if (err != SBUFS_OK) {
++			return err;
++		}
++		last = sbufs_be64(buf);
++		*blksz = sbufs_be32(buf + 8);
++	}
++	*blocks = last + 1;
++	SAY(hc, "lun %u: %llu blocks of %u bytes (%llu MiB)", lun, (unsigned long long)*blocks, *blksz,
++	    (unsigned long long)((*blocks * *blksz) >> 20));
++	return SBUFS_OK;
++}
++
++static void
++trim(char *dst, const uint8_t *src, unsigned n)
++{
++	unsigned i;
++	for (i = 0; i < n; i++) {
++		dst[i] = (src[i] >= 0x20 && src[i] < 0x7f) ? (char)src[i] : ' ';
++	}
++	while (i > 0 && dst[i - 1] == ' ') {
++		i--;
++	}
++	dst[i] = '\0';
++}
++
++int
++sbufs_hc_inquiry(struct sbufs_hc *hc, uint8_t lun, char vendor[9], char product[17], char rev[5])
++{
++	struct sbufs_cmd c;
++	struct sbufs_result r;
++	uint8_t buf[36];
++	sbufs_cdb_inquiry(&c, lun, sizeof(buf));
++	int err = run_retry(hc, &c, buf, sizeof(buf), &r, 2);
++	if (err != SBUFS_OK) {
++		vendor[0] = product[0] = rev[0] = '\0';
++		return err;
++	}
++	trim(vendor, buf + 8, 8);
++	trim(product, buf + 16, 16);
++	trim(rev, buf + 32, 4);
++	return SBUFS_OK;
++}
++
++static void
++vs_program(struct sbufs_hc *hc, const uint32_t v[4])
++{
++	wr(hc, SBUFS_BANK_VS, SBUFS_VS_TXPRDT_ENTRY_SIZE, v[0]);
++	wr(hc, SBUFS_BANK_VS, SBUFS_VS_RXPRDT_ENTRY_SIZE, v[1]);
++	wr(hc, SBUFS_BANK_VS, SBUFS_VS_DATA_REORDER, v[2]);
++	wr(hc, SBUFS_BANK_VS, SBUFS_VS_AXIDMA_RWDATA_BURST, v[3]);
++	barrier(hc);
++}
++
++int
++sbufs_hc_multi_selftest(struct sbufs_hc *hc, uint8_t lun, uint64_t lba)
++{
++	static const uint32_t want[4] = { SBUFS_VS_PRDT_PREFETCH_4K, SBUFS_VS_PRDT_PREFETCH_4K, SBUFS_VS_REORDER_VAL,
++		                          SBUFS_VS_AXIDMA_VAL };
++	const uint32_t nb = SBUFS_MULTI_BLOCKS, bytes = SBUFS_MULTI_BLOCKS * SBUFS_BLOCK;
++	uint8_t *ref = hc->dma + SBUFS_DMA_SCRATCH + bytes, *got = hc->dma + SBUFS_DMA_SCRATCH;
++	struct sbufs_cmd c;
++	int e0 = SBUFS_OK, e1 = SBUFS_OK, e2;
++
++	/* reads only, and only inside the fence: the gate refuses anything else */
++	if (sbufs_fence_check_quiet(hc->fence, lun, lba, nb, false) != SBUFS_FENCE_OK) {
++		SAY(hc, "multi-block self test: lun %u lba 0x%llx +%u is not inside the fence: one block per command", lun,
++		    (unsigned long long)lba, nb);
++		return SBUFS_E_FENCE;
++	}
++	hc->L.max_entries = 1;
++	for (uint32_t i = 0; i < nb && e0 == SBUFS_OK; i++) {
++		(void)sbufs_cdb_read(&c, lun, lba + i, 1);
++		e0 = run_retry(hc, &c, ref + i * SBUFS_BLOCK, SBUFS_BLOCK, NULL, 2);
++	}
++	vs_program(hc, want);
++	memset(got, 0xa5, bytes);
++	for (uint32_t i = 0; i < nb && e1 == SBUFS_OK; i++) {
++		(void)sbufs_cdb_read(&c, lun, lba + i, 1);
++		e1 = run_retry(hc, &c, got + i * SBUFS_BLOCK, SBUFS_BLOCK, NULL, 2);
++	}
++	bool single_ok = e0 == SBUFS_OK && e1 == SBUFS_OK && memcmp(got, ref, bytes) == 0;
++	SAY(hc, "vs_hci was tx 0x%x rx 0x%x reorder 0x%x axidma 0x%x, now programmed: single-block %d/%d %s",
++	    hc->vs_saved[0], hc->vs_saved[1], hc->vs_saved[2], hc->vs_saved[3], e0, e1, single_ok ? "same" : "DIFFERENT");
++	if (single_ok) {
++		hc->L.max_entries = nb;
++		memset(got, 0xa5, bytes);
++		(void)sbufs_cdb_read(&c, lun, lba, nb);
++		e2 = run_retry(hc, &c, got, bytes, NULL, 1);
++		if (e2 == SBUFS_OK && memcmp(got, ref, bytes) == 0) {
++			SAY(hc, "multi-block commands on: %u x 4 KiB entries per command (16-byte entries)", nb);
++			return SBUFS_OK;
++		}
++		SAY(hc, "%u-entry read %d %s", nb, e2, e2 == SBUFS_OK ? "differs" : "failed");
++	}
++	hc->L.max_entries = 1;
++	if (!hc->dead) {
++		vs_program(hc, hc->vs_saved);
++	}
++	SAY(hc, "multi-block self test failed: vendor registers restored, one block per command");
++	return SBUFS_E_IO;
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_hc.h b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_hc.h
+new file mode 100644
+index 00000000..8cf541bf
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_hc.h
+@@ -0,0 +1,125 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteUFS host controller core: takes the UFSHCI over as S-Boot left it (link up, HS gear, UniPro/M-PHY
++ * configured: never reset here), owns the transfer request list, runs the doorbell/completion state machine.
++ * Plain C; the kext gives it MMIO, time and DMA memory through sbufs_hw_ops, the host tests a mock controller.
++ *
++ * Every command goes: build (sbufs_build) -> doorbell audit (sbufs_gate, against the whitelist and the fence)
++ * -> vendor nexus bit -> barrier -> doorbell. A command the audit refuses never reaches the doorbell.
++ */
++#ifndef SBUFS_HC_H
++#define SBUFS_HC_H
++
++#include "sbufs_proto.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define SBUFS_MAX_SLOTS         8u
++
++/* the DMA area (physically contiguous, below 4 GiB unless dma64): */
++#define SBUFS_DMA_UTRL          0x00000u                        /* 32 x 32 bytes, 1 KiB aligned */
++#define SBUFS_DMA_UCD           0x01000u                        /* SBUFS_MAX_SLOTS x SBUFS_UCD_SIZE */
++#define SBUFS_DMA_SCRATCH       (SBUFS_DMA_UCD + SBUFS_MAX_SLOTS * SBUFS_UCD_SIZE)
++#define SBUFS_SCRATCH_SIZE      0x20000u                        /* 2 x 64 KiB: probes and the multi-block self test */
++#define SBUFS_DMA_BOUNCE        (SBUFS_DMA_SCRATCH + SBUFS_SCRATCH_SIZE)
++#define SBUFS_BOUNCE_SIZE       0x10000u                        /* per slot: 16 blocks */
++#define SBUFS_DMA_SIZE(nslots)  (SBUFS_DMA_BOUNCE + (nslots) * SBUFS_BOUNCE_SIZE)
++#define SBUFS_MULTI_BLOCKS      16u                             /* blocks per command once multi-entry is proven */
++
++struct sbufs_hw_ops {
++	void *ctx;
++	uint32_t (*rd)(void *ctx, unsigned bank, uint32_t off);
++	void (*wr)(void *ctx, unsigned bank, uint32_t off, uint32_t v);
++	void (*barrier)(void *ctx);                             /* dsb sy */
++	uint64_t (*now_us)(void *ctx);
++	void (*delay_us)(void *ctx, uint32_t us);
++	void (*log)(void *ctx, const char *line);               /* one line, no newline */
++	/* cache maintenance of the DMA area, by offset; NULL when the area is mapped non-cacheable */
++	void (*dma_clean)(void *ctx, uint32_t off, uint32_t len);
++	void (*dma_inval)(void *ctx, uint32_t off, uint32_t len);
++};
++
++struct sbufs_cfg {
++	unsigned nslots;                /* slots used, 1..SBUFS_MAX_SLOTS (and <= the host's NUTRS) */
++	bool clr_one;                   /* Exynos: UTRLCLR takes a 1 to clear a slot (BROKEN_REQ_LIST_CLR) */
++	bool nexus;                     /* Exynos: vendor UTRL_NEXUS_TYPE bit per SCSI slot */
++	bool dma64;                     /* host may address >= 4 GiB (needs CAP.64AS too) */
++	bool irq;                       /* set the I bit and IE; else polled */
++	uint32_t timeout_us;            /* per command */
++};
++
++struct sbufs_slot {
++	bool busy;
++	bool bounce;                    /* data in this slot's bounce buffer */
++	uint64_t deadline;
++	struct sbufs_cmd cmd;
++	void *cookie;
++};
++
++typedef void (*sbufs_done_fn)(void *ctx, unsigned slot, void *cookie, const struct sbufs_result *r);
++
++struct sbufs_hc {
++	struct sbufs_hw_ops ops;
++	struct sbufs_cfg cfg;
++	struct sbufs_layout L;
++	uint8_t *dma;                   /* VA of the DMA area */
++	uint64_t dma_pa;
++	size_t dma_size;
++	struct sbufs_fence *fence;
++	struct sbufs_slot slot[SBUFS_MAX_SLOTS];
++	uint32_t inflight;              /* slots rung and not completed */
++	bool ready, dead;
++	uint32_t cap, ver, hcs, hce;
++	uint32_t vs_saved[4];           /* TX/RX PRDT size, reorder, AXI DMA as S-Boot left them */
++	/* counters */
++	uint64_t ncmds, nerr, ntimeout, ngate, nfatal, nue, ncompl_poll, ncompl_irq;
++	uint64_t foreign_touched;       /* data commands rung outside the fence (re-decoded after the doorbell): 0 */
++	uint32_t last_is;
++	char line[200];
++};
++
++int sbufs_hc_init(struct sbufs_hc *hc, const struct sbufs_hw_ops *ops, const struct sbufs_cfg *cfg, uint8_t *dma_va,
++    uint64_t dma_pa, size_t dma_size, struct sbufs_fence *fence);
++
++/* Adopt the host: HCS says device present and list ready (HCE may read 0 on the 9810), nothing in flight, our
++ * list taken (read back). IE 0, AHIT 0. Never resets anything. */
++int sbufs_hc_take_over(struct sbufs_hc *hc);
++
++/* After the take-over: enable the interrupts this core handles (only if cfg.irq). */
++void sbufs_hc_enable_irq(struct sbufs_hc *hc, bool on);
++
++/* Slot management for the asynchronous path. */
++int sbufs_hc_alloc_slot(struct sbufs_hc *hc);                   /* slot or SBUFS_E_BUSY / SBUFS_E_NODEV */
++void sbufs_hc_free_slot(struct sbufs_hc *hc, unsigned slot);    /* a slot allocated and never issued */
++uint8_t *sbufs_hc_bounce_va(struct sbufs_hc *hc, unsigned slot);
++uint64_t sbufs_hc_bounce_pa(struct sbufs_hc *hc, unsigned slot);
++uint32_t sbufs_hc_max_xfer(const struct sbufs_hc *hc);          /* bytes per command */
++
++/* Issue cmd in slot. segs == NULL with data: the slot's bounce buffer (the caller fills it for a write).
++ * On error the slot is freed and nothing was rung. */
++int sbufs_hc_issue(struct sbufs_hc *hc, unsigned slot, const struct sbufs_cmd *cmd, const struct sbufs_seg *segs,
++    unsigned nsegs, void *cookie);
++
++/* Reap: acknowledge IS, complete every slot whose doorbell bit cleared, time out the late ones, fail everything
++ * on a fatal error. from_irq only picks the counter. Returns the number completed. */
++unsigned sbufs_hc_poll(struct sbufs_hc *hc, bool from_irq, sbufs_done_fn done, void *ctx);
++
++/* Synchronous: one command, polled to completion (start-up, probes, the self test). */
++int sbufs_hc_run(struct sbufs_hc *hc, const struct sbufs_cmd *cmd, uint8_t *data_out, uint32_t data_len,
++    struct sbufs_result *r);
++
++/* Start-up steps. */
++int sbufs_hc_wake(struct sbufs_hc *hc);                         /* device W-LUN: TUR (UA), SSU ACTIVE */
++int sbufs_hc_probe_lu(struct sbufs_hc *hc, uint8_t lun, uint64_t *blocks, uint32_t *blksz);
++int sbufs_hc_inquiry(struct sbufs_hc *hc, uint8_t lun, char vendor[9], char product[17], char rev[5]);
++/* Multi-entry PRDTs (16 x 4 KiB per command): program the vendor registers, prove it with reads of 16 blocks at
++ * lun/lba (which must be inside the fence) against single-block reads; restore and stay at 1 on any mismatch. */
++int sbufs_hc_multi_selftest(struct sbufs_hc *hc, uint8_t lun, uint64_t lba);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SBUFS_HC_H */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_port.h b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_port.h
+new file mode 100644
+index 00000000..ce6af7b0
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_port.h
+@@ -0,0 +1,54 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/* StarbiteUFS core: the few things the plain-C core needs from its host (the kernel or the Mac test build). */
++#ifndef SBUFS_PORT_H
++#define SBUFS_PORT_H
++
++#include <stdint.h>
++#include <stddef.h>
++#include <stdbool.h>
++#include <string.h>
++#if defined(KERNEL)
++#include <libkern/libkern.h>      /* snprintf */
++#else
++#include <stdio.h>
++#endif
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* error codes of the core (negative, so a slot number or count can share the return) */
++#define SBUFS_OK                0
++#define SBUFS_E_INVAL           (-1)    /* malformed request or property */
++#define SBUFS_E_FENCE           (-2)    /* refused by the fence */
++#define SBUFS_E_BUSY            (-3)    /* no free slot */
++#define SBUFS_E_IO              (-4)    /* device or host reported an error */
++#define SBUFS_E_TIMEOUT         (-5)
++#define SBUFS_E_NODEV           (-6)    /* host not ready / not ours / dead */
++#define SBUFS_E_DMA             (-7)    /* a segment the host cannot take (address, alignment, size) */
++#define SBUFS_E_ROFS            (-8)    /* write while writes are off */
++#define SBUFS_E_GATE            (-9)    /* the doorbell audit refused the descriptor as built */
++
++static inline uint16_t sbufs_be16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
++static inline uint32_t sbufs_be32(const uint8_t *p)
++{
++	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
++}
++static inline uint64_t sbufs_be64(const uint8_t *p) { return ((uint64_t)sbufs_be32(p) << 32) | sbufs_be32(p + 4); }
++static inline void sbufs_put_be16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
++static inline void sbufs_put_be32(uint8_t *p, uint32_t v)
++{
++	p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
++}
++static inline void sbufs_put_be64(uint8_t *p, uint64_t v) { sbufs_put_be32(p, (uint32_t)(v >> 32)); sbufs_put_be32(p + 4, (uint32_t)v); }
++static inline uint32_t sbufs_le32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++static inline uint64_t sbufs_le64(const uint8_t *p) { return (uint64_t)sbufs_le32(p) | ((uint64_t)sbufs_le32(p + 4) << 32); }
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SBUFS_PORT_H */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_proto.c b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_proto.c
+new file mode 100644
+index 00000000..4211f851
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_proto.c
+@@ -0,0 +1,385 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteUFS protocol (sbufs_proto.h). Layouts: UFSHCI 2.1 (JESD223C) 6.1 (UTRD), 6.1.2 (PRDT); UFS 2.1
++ * (JESD220C) 10.7.1 (COMMAND UPIU), 10.7.2 (RESPONSE UPIU). Exynos differences (offsets/lengths in bytes, 4 KiB
++ * per PRDT entry, the vendor nexus bit) as herolte_ufs.c runs them on the phone; see NOTES.md.
++ */
++#include "sbufs_proto.h"
++
++static void
++put_le32(uint8_t *p, uint32_t v)
++{
++	p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
++}
++
++void
++sbufs_layout_s9(struct sbufs_layout *L, uint32_t max_entries, bool dma64)
++{
++	L->rsp_off = 512;
++	L->rsp_len = 512;
++	L->prdt_off = 1024;
++	L->ucd_size = SBUFS_UCD_SIZE;
++	L->stride = 16;
++	L->max_entries = max_entries ? max_entries : 1;
++	if (L->max_entries > (L->ucd_size - L->prdt_off) / L->stride) {
++		L->max_entries = (L->ucd_size - L->prdt_off) / L->stride;
++	}
++	L->byte_gran = true;
++	L->dma_limit = dma64 ? 0 : (1ull << 32);
++}
++
++static void
++cmd_init(struct sbufs_cmd *c, uint8_t lun, uint8_t dir, uint8_t cdb_len, uint32_t xfer)
++{
++	memset(c, 0, sizeof(*c));
++	c->lun = lun;
++	c->dir = dir;
++	c->cdb_len = cdb_len;
++	c->xfer_len = xfer;
++}
++
++static int
++rw(struct sbufs_cmd *c, uint8_t lun, uint64_t lba, uint32_t nblks, bool write, bool fua)
++{
++	if (nblks == 0 || nblks > UINT32_MAX / SBUFS_BLOCK || lba > UINT64_MAX - nblks) {
++		return SBUFS_E_INVAL;
++	}
++	uint32_t xfer = nblks * SBUFS_BLOCK;
++	if (lba + nblks - 1 <= UINT32_MAX && nblks <= 0xffffu) {
++		cmd_init(c, lun, write ? SBUFS_DIR_WRITE : SBUFS_DIR_READ, 10, xfer);
++		c->cdb[0] = write ? SBUFS_SCSI_WRITE10 : SBUFS_SCSI_READ10;
++		sbufs_put_be32(&c->cdb[2], (uint32_t)lba);
++		sbufs_put_be16(&c->cdb[7], (uint16_t)nblks);
++	} else {
++		cmd_init(c, lun, write ? SBUFS_DIR_WRITE : SBUFS_DIR_READ, 16, xfer);
++		c->cdb[0] = write ? SBUFS_SCSI_WRITE16 : SBUFS_SCSI_READ16;
++		sbufs_put_be64(&c->cdb[2], lba);
++		sbufs_put_be32(&c->cdb[10], nblks);
++	}
++	if (write && fua) {
++		c->cdb[1] = 0x08;
++	}
++	return SBUFS_OK;
++}
++
++int
++sbufs_cdb_read(struct sbufs_cmd *c, uint8_t lun, uint64_t lba, uint32_t nblks)
++{
++	return rw(c, lun, lba, nblks, false, false);
++}
++
++int
++sbufs_cdb_write(struct sbufs_cmd *c, uint8_t lun, uint64_t lba, uint32_t nblks, bool fua)
++{
++	return rw(c, lun, lba, nblks, true, fua);
++}
++
++int
++sbufs_cdb_sync(struct sbufs_cmd *c, uint8_t lun, uint64_t lba, uint32_t nblks)
++{
++	/* never 0 blocks: SYNCHRONIZE CACHE with 0 means "to the end of the LU" */
++	if (nblks == 0 || lba > UINT64_MAX - nblks) {
++		return SBUFS_E_INVAL;
++	}
++	if (lba + nblks - 1 <= UINT32_MAX && nblks <= 0xffffu) {
++		cmd_init(c, lun, SBUFS_DIR_NONE, 10, 0);
++		c->cdb[0] = SBUFS_SCSI_SYNC10;
++		sbufs_put_be32(&c->cdb[2], (uint32_t)lba);
++		sbufs_put_be16(&c->cdb[7], (uint16_t)nblks);
++	} else {
++		cmd_init(c, lun, SBUFS_DIR_NONE, 16, 0);
++		c->cdb[0] = SBUFS_SCSI_SYNC16;
++		sbufs_put_be64(&c->cdb[2], lba);
++		sbufs_put_be32(&c->cdb[10], nblks);
++	}
++	return SBUFS_OK;
++}
++
++void
++sbufs_cdb_tur(struct sbufs_cmd *c, uint8_t lun)
++{
++	cmd_init(c, lun, SBUFS_DIR_NONE, 6, 0);
++	c->cdb[0] = SBUFS_SCSI_TUR;
++}
++
++void
++sbufs_cdb_inquiry(struct sbufs_cmd *c, uint8_t lun, uint8_t alloc)
++{
++	cmd_init(c, lun, SBUFS_DIR_READ, 6, alloc);
++	c->cdb[0] = SBUFS_SCSI_INQUIRY;
++	sbufs_put_be16(&c->cdb[3], alloc);
++}
++
++void
++sbufs_cdb_read_cap10(struct sbufs_cmd *c, uint8_t lun)
++{
++	cmd_init(c, lun, SBUFS_DIR_READ, 10, 8);
++	c->cdb[0] = SBUFS_SCSI_READ_CAP10;
++}
++
++void
++sbufs_cdb_read_cap16(struct sbufs_cmd *c, uint8_t lun)
++{
++	cmd_init(c, lun, SBUFS_DIR_READ, 16, 32);
++	c->cdb[0] = SBUFS_SCSI_SAI16;
++	c->cdb[1] = SBUFS_SAI_READ_CAP16;
++	sbufs_put_be32(&c->cdb[10], 32);
++}
++
++void
++sbufs_cdb_ssu_active(struct sbufs_cmd *c)
++{
++	cmd_init(c, SBUFS_WLUN_DEVICE, SBUFS_DIR_NONE, 6, 0);
++	c->cdb[0] = SBUFS_SCSI_SSU;
++	c->cdb[4] = 0x10;               /* POWER CONDITION 1 = ACTIVE, START 0 */
++}
++
++int
++sbufs_build(const struct sbufs_layout *L, uint8_t *utrd, uint8_t *ucd, uint64_t ucd_pa, const struct sbufs_cmd *c,
++    uint8_t tag, const struct sbufs_seg *segs, unsigned nsegs, bool irq)
++{
++	uint32_t total = 0;
++
++	if ((ucd_pa & 0x7f) != 0 || c->cdb_len > 16 || (c->xfer_len == 0) != (c->dir == SBUFS_DIR_NONE)) {
++		return SBUFS_E_INVAL;
++	}
++	if (c->dir != SBUFS_DIR_NONE) {
++		if (segs == NULL || nsegs == 0 || nsegs > L->max_entries) {
++			return SBUFS_E_DMA;
++		}
++		for (unsigned i = 0; i < nsegs; i++) {
++			uint64_t pa = segs[i].pa;
++			uint32_t len = segs[i].len;
++			if (len == 0 || len > SBUFS_PRD_MAX_BYTES || (len & 3) != 0 || (pa & 3) != 0 ||
++			    pa > UINT64_MAX - len || (L->dma_limit != 0 && pa + len > L->dma_limit) ||
++			    total > UINT32_MAX - len) {
++				return SBUFS_E_DMA;
++			}
++			total += len;
++		}
++		if (total != c->xfer_len) {
++			return SBUFS_E_DMA;
++		}
++	} else if (nsegs != 0) {
++		return SBUFS_E_INVAL;
++	}
++
++	memset(ucd, 0, L->prdt_off + (size_t)nsegs * L->stride);
++	ucd[0] = SBUFS_UPIU_COMMAND;
++	ucd[1] = c->dir == SBUFS_DIR_READ ? SBUFS_UPIU_FLAG_R : c->dir == SBUFS_DIR_WRITE ? SBUFS_UPIU_FLAG_W : 0;
++	ucd[2] = c->lun;
++	ucd[3] = tag;
++	sbufs_put_be32(&ucd[12], c->xfer_len);
++	memcpy(&ucd[16], c->cdb, c->cdb_len);
++	for (unsigned i = 0; i < nsegs; i++) {
++		uint8_t *e = ucd + L->prdt_off + (size_t)i * L->stride;
++		put_le32(e + 0, (uint32_t)segs[i].pa);
++		put_le32(e + 4, (uint32_t)(segs[i].pa >> 32));
++		put_le32(e + 8, 0);
++		put_le32(e + 12, (segs[i].len - 1) & 0x3ffffu);  /* bits 28-31 (FMP FAS/DAS) 0: no encryption */
++	}
++
++	uint32_t dd = c->dir == SBUFS_DIR_READ ? SBUFS_UTRD_DD_READ : c->dir == SBUFS_DIR_WRITE ? SBUFS_UTRD_DD_WRITE :
++	    SBUFS_UTRD_DD_NONE;
++	uint32_t rsp = L->byte_gran ? (L->rsp_off << 16 | L->rsp_len) : ((L->rsp_off / 4) << 16 | (L->rsp_len / 4));
++	uint32_t prdt = L->byte_gran ? (L->prdt_off << 16 | (nsegs * L->stride)) : ((L->prdt_off / 4) << 16 | nsegs);
++	put_le32(utrd + 0, SBUFS_UTRD_CT_UFS | dd | (irq ? SBUFS_UTRD_I : 0));
++	put_le32(utrd + 4, 0);
++	put_le32(utrd + 8, SBUFS_OCS_INVALID);
++	put_le32(utrd + 12, 0);
++	put_le32(utrd + 16, (uint32_t)ucd_pa);
++	put_le32(utrd + 20, (uint32_t)(ucd_pa >> 32));
++	put_le32(utrd + 24, rsp);
++	put_le32(utrd + 28, prdt);
++	return SBUFS_OK;
++}
++
++static int
++refuse(struct sbufs_decoded *d, const char *why)
++{
++	d->why = why;
++	return SBUFS_E_GATE;
++}
++
++static bool
++zero_from(const uint8_t *cdb, unsigned from)
++{
++	for (unsigned i = from; i < 16; i++) {
++		if (cdb[i] != 0) {
++			return false;
++		}
++	}
++	return true;
++}
++
++int
++sbufs_gate(const struct sbufs_layout *L, const uint8_t *utrd, const uint8_t *ucd, const struct sbufs_fence *f,
++    struct sbufs_decoded *d)
++{
++	const uint8_t *cdb = ucd + 16;
++	uint32_t dw0 = sbufs_le32(utrd), dw6 = sbufs_le32(utrd + 24), dw7 = sbufs_le32(utrd + 28);
++	uint32_t want_rsp = L->byte_gran ? (L->rsp_off << 16 | L->rsp_len) : ((L->rsp_off / 4) << 16 | (L->rsp_len / 4));
++	uint32_t n, total = 0;
++
++	memset(d, 0, sizeof(*d));
++	d->opcode = cdb[0];
++	d->lun = ucd[2];
++	d->xfer_len = sbufs_be32(ucd + 12);
++	if ((dw0 >> 28) != 1 || (dw0 & 0x00ffffffu & ~SBUFS_UTRD_I) != 0 || (dw0 & (1u << 27)) != 0) {
++		return refuse(d, "UTRD: not a plain UFS storage command");
++	}
++	if (ucd[0] != SBUFS_UPIU_COMMAND || (ucd[1] & ~(SBUFS_UPIU_FLAG_R | SBUFS_UPIU_FLAG_W)) != 0 ||
++	    ucd[4] != 0 || ucd[5] != 0 || ucd[6] != 0 || ucd[7] != 0 || sbufs_be32(ucd + 8) != 0) {
++		return refuse(d, "UPIU: not a plain SCSI COMMAND UPIU");
++	}
++	switch (dw0 & SBUFS_UTRD_DD_MASK) {
++	case SBUFS_UTRD_DD_NONE: d->dir = SBUFS_DIR_NONE; break;
++	case SBUFS_UTRD_DD_READ: d->dir = SBUFS_DIR_READ; break;
++	case SBUFS_UTRD_DD_WRITE: d->dir = SBUFS_DIR_WRITE; break;
++	default: return refuse(d, "UTRD: bad data direction");
++	}
++	uint8_t want_flags = d->dir == SBUFS_DIR_READ ? SBUFS_UPIU_FLAG_R : d->dir == SBUFS_DIR_WRITE ? SBUFS_UPIU_FLAG_W : 0;
++	if (ucd[1] != want_flags || (d->dir == SBUFS_DIR_NONE) != (d->xfer_len == 0)) {
++		return refuse(d, "UPIU flags / length disagree with the UTRD direction");
++	}
++	if (dw6 != want_rsp || (dw7 >> 16) != (L->byte_gran ? L->prdt_off : L->prdt_off / 4)) {
++		return refuse(d, "UTRD: response/PRDT offsets not ours");
++	}
++	if (L->byte_gran) {
++		if ((dw7 & 0xffffu) % L->stride != 0) {
++			return refuse(d, "UTRD: PRDT length not a whole number of entries");
++		}
++		n = (dw7 & 0xffffu) / L->stride;
++	} else {
++		n = dw7 & 0xffffu;
++	}
++	if (n > L->max_entries || (n == 0) != (d->xfer_len == 0)) {
++		return refuse(d, "PRDT: entry count");
++	}
++	for (uint32_t i = 0; i < n; i++) {
++		const uint8_t *e = ucd + L->prdt_off + (size_t)i * L->stride;
++		uint32_t dbc = sbufs_le32(e + 12);
++		if ((dbc & ~0x3ffffu) != 0 || dbc + 1 > SBUFS_PRD_MAX_BYTES || (sbufs_le32(e) & 3) != 0) {
++			return refuse(d, "PRDT: entry too large, encrypted or misaligned");
++		}
++		total += dbc + 1;
++	}
++	if (total != d->xfer_len) {
++		return refuse(d, "PRDT: lengths do not add up to the expected transfer");
++	}
++
++	bool wlun = d->lun == SBUFS_WLUN_DEVICE;
++	if (!wlun && d->lun >= SBUFS_MAX_GENERAL_LU) {
++		return refuse(d, "LUN: not a general LU nor the device W-LUN");
++	}
++	if (wlun && cdb[0] != SBUFS_SCSI_TUR && cdb[0] != SBUFS_SCSI_SSU) {
++		return refuse(d, "device W-LUN: only TEST UNIT READY and START STOP UNIT (ACTIVE)");
++	}
++	switch (cdb[0]) {
++	case SBUFS_SCSI_TUR:
++		if (d->dir != SBUFS_DIR_NONE || !zero_from(cdb, 1)) {
++			return refuse(d, "TEST UNIT READY: malformed");
++		}
++		return SBUFS_OK;
++	case SBUFS_SCSI_SSU:
++		if (!wlun || d->dir != SBUFS_DIR_NONE || (cdb[1] & ~1u) != 0 || cdb[2] != 0 || cdb[3] != 0 ||
++		    cdb[4] != 0x10 || !zero_from(cdb, 5)) {
++			return refuse(d, "START STOP UNIT: only ACTIVE to the device W-LUN");
++		}
++		return SBUFS_OK;
++	case SBUFS_SCSI_INQUIRY:
++		if (d->dir != SBUFS_DIR_READ || cdb[1] != 0 || cdb[2] != 0 || sbufs_be16(cdb + 3) != d->xfer_len ||
++		    d->xfer_len > 255 || !zero_from(cdb, 5)) {
++			return refuse(d, "INQUIRY: malformed");
++		}
++		return SBUFS_OK;
++	case SBUFS_SCSI_READ_CAP10:
++		if (d->dir != SBUFS_DIR_READ || d->xfer_len != 8 || !zero_from(cdb, 1)) {
++			return refuse(d, "READ CAPACITY(10): malformed");
++		}
++		return SBUFS_OK;
++	case SBUFS_SCSI_SAI16:
++		if ((cdb[1] & 0x1f) != SBUFS_SAI_READ_CAP16 || d->dir != SBUFS_DIR_READ || d->xfer_len != 32 ||
++		    sbufs_be32(cdb + 10) != 32 || cdb[2] | cdb[3] | cdb[4] | cdb[5] | cdb[6] | cdb[7] | cdb[8] | cdb[9] ||
++		    !zero_from(cdb, 14)) {
++			return refuse(d, "SERVICE ACTION IN: only READ CAPACITY(16)");
++		}
++		return SBUFS_OK;
++	case SBUFS_SCSI_READ10:
++	case SBUFS_SCSI_WRITE10:
++	case SBUFS_SCSI_SYNC10:
++		d->lba = sbufs_be32(cdb + 2);
++		d->nblks = sbufs_be16(cdb + 7);
++		if (cdb[6] != 0 || !zero_from(cdb, 9)) {
++			return refuse(d, "10-byte CDB: group/control/trailing bytes set");
++		}
++		break;
++	case SBUFS_SCSI_READ16:
++	case SBUFS_SCSI_WRITE16:
++	case SBUFS_SCSI_SYNC16:
++		d->lba = sbufs_be64(cdb + 2);
++		d->nblks = sbufs_be32(cdb + 10);
++		if (cdb[14] != 0 || cdb[15] != 0) {
++			return refuse(d, "16-byte CDB: group/control set");
++		}
++		break;
++	default:
++		return refuse(d, "opcode not on the whitelist");
++	}
++	d->data = true;
++	bool rd = cdb[0] == SBUFS_SCSI_READ10 || cdb[0] == SBUFS_SCSI_READ16;
++	bool sync = cdb[0] == SBUFS_SCSI_SYNC10 || cdb[0] == SBUFS_SCSI_SYNC16;
++	d->write = !rd;
++	if (d->nblks == 0) {
++		return refuse(d, "zero blocks (SYNCHRONIZE CACHE 0 = the whole LU)");
++	}
++	if (rd && (d->dir != SBUFS_DIR_READ || cdb[1] != 0)) {
++		return refuse(d, "READ: direction or flags");
++	}
++	if (!rd && !sync && (d->dir != SBUFS_DIR_WRITE || (cdb[1] & ~0x08u) != 0)) {
++		return refuse(d, "WRITE: direction or flags (FUA only)");
++	}
++	if (sync && (d->dir != SBUFS_DIR_NONE || (cdb[1] & ~0x02u) != 0)) {
++		return refuse(d, "SYNCHRONIZE CACHE: direction or flags (IMMED only)");
++	}
++	if (!sync && (d->nblks > UINT32_MAX / SBUFS_BLOCK || d->xfer_len != d->nblks * SBUFS_BLOCK)) {
++		return refuse(d, "expected length is not blocks x 4096");
++	}
++	if (sbufs_fence_check_quiet(f, d->lun, d->lba, d->nblks, d->write) != SBUFS_FENCE_OK) {
++		return refuse(d, "fence: outside the Starbite-owned ranges or not writable");
++	}
++	return SBUFS_OK;
++}
++
++void
++sbufs_parse_response(const struct sbufs_layout *L, const uint8_t *utrd, const uint8_t *ucd, uint8_t tag,
++    struct sbufs_result *r)
++{
++	const uint8_t *rsp = ucd + L->rsp_off;
++	memset(r, 0, sizeof(*r));
++	r->ocs = (uint8_t)(sbufs_le32(utrd + 8) & 0xff);
++	r->upiu = rsp[0];
++	r->response = rsp[6];
++	r->status = rsp[7];
++	r->residual = sbufs_be32(rsp + 12);
++	r->sense_key = r->asc = r->ascq = 0xff;
++	uint16_t slen = sbufs_be16(rsp + 32);
++	if (slen > L->rsp_len - 34) {
++		slen = (uint16_t)(L->rsp_len - 34);
++	}
++	if (slen >= 3) {
++		r->sense_key = rsp[34 + 2] & 0x0f;
++	}
++	if (slen >= 14) {
++		r->asc = rsp[34 + 12];
++		r->ascq = rsp[34 + 13];
++	}
++	if (r->ocs != SBUFS_OCS_SUCCESS || r->upiu != SBUFS_UPIU_RESPONSE || rsp[3] != tag || r->response != 0 ||
++	    r->status != SBUFS_STATUS_GOOD) {
++		r->err = SBUFS_E_IO;
++	} else if ((rsp[1] & (SBUFS_RESP_FLAG_U | SBUFS_RESP_FLAG_O)) != 0 && r->residual != 0) {
++		r->err = SBUFS_E_IO;            /* short or long transfer */
++	} else {
++		r->err = SBUFS_OK;
++	}
++}
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_proto.h b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_proto.h
+new file mode 100644
+index 00000000..8be090cd
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_proto.h
+@@ -0,0 +1,93 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteUFS protocol: SCSI CDBs, the command UPIU, the UTP transfer request descriptor (UTRD), the PRDT, the
++ * response UPIU, and the doorbell audit ("gate") that decodes what was actually written into a slot.
++ */
++#ifndef SBUFS_PROTO_H
++#define SBUFS_PROTO_H
++
++#include "sbufs_port.h"
++#include "sbufs_regs.h"
++#include "sbufs_fence.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum { SBUFS_DIR_NONE = 0, SBUFS_DIR_READ = 1, SBUFS_DIR_WRITE = 2 };
++
++struct sbufs_cmd {
++	uint8_t lun;
++	uint8_t dir;
++	uint8_t cdb_len;
++	uint8_t cdb[16];
++	uint32_t xfer_len;              /* expected data transfer length, bytes */
++};
++
++struct sbufs_seg {
++	uint64_t pa;
++	uint32_t len;
++};
++
++/* the command descriptor's layout (the host reads it from the UTRD) */
++struct sbufs_layout {
++	uint32_t rsp_off, rsp_len;      /* bytes into the UCD */
++	uint32_t prdt_off;
++	uint32_t ucd_size;              /* room for UPIUs + PRDT */
++	uint32_t stride;                /* bytes per PRDT entry: 16 (DESCTYPE 0) or 128 (FMP DESCTYPE 3) */
++	uint32_t max_entries;           /* PRDT entries per command, <= (ucd_size - prdt_off) / stride */
++	bool byte_gran;                 /* Exynos: UTRD offsets/lengths in bytes (else dwords / entries) */
++	uint64_t dma_limit;             /* first address the host cannot reach (1 << 32, or 0 = none) */
++};
++
++/* the S9's layout: as herolte_ufs.c runs it on the phone (cmd 0..511, response 512..1023, PRDT from 1024) */
++#define SBUFS_UCD_SIZE          0x800u
++void sbufs_layout_s9(struct sbufs_layout *L, uint32_t max_entries, bool dma64);
++
++/* CDB builders. Data commands pick the 10-byte form when it fits, else the 16-byte form. */
++int sbufs_cdb_read(struct sbufs_cmd *c, uint8_t lun, uint64_t lba, uint32_t nblks);
++int sbufs_cdb_write(struct sbufs_cmd *c, uint8_t lun, uint64_t lba, uint32_t nblks, bool fua);
++int sbufs_cdb_sync(struct sbufs_cmd *c, uint8_t lun, uint64_t lba, uint32_t nblks);
++void sbufs_cdb_tur(struct sbufs_cmd *c, uint8_t lun);
++void sbufs_cdb_inquiry(struct sbufs_cmd *c, uint8_t lun, uint8_t alloc);
++void sbufs_cdb_read_cap10(struct sbufs_cmd *c, uint8_t lun);
++void sbufs_cdb_read_cap16(struct sbufs_cmd *c, uint8_t lun);
++void sbufs_cdb_ssu_active(struct sbufs_cmd *c);  /* START STOP UNIT, power condition ACTIVE, device W-LUN */
++
++/* Write the UPIU, the PRDT and the UTRD of one slot. Every segment must be dword-aligned, a dword multiple,
++ * at most SBUFS_PRD_MAX_BYTES, below dma_limit, and they must add up to xfer_len: else SBUFS_E_DMA (the caller
++ * then bounces). */
++int sbufs_build(const struct sbufs_layout *L, uint8_t *utrd, uint8_t *ucd, uint64_t ucd_pa,
++    const struct sbufs_cmd *c, uint8_t tag, const struct sbufs_seg *segs, unsigned nsegs, bool irq);
++
++/* What a slot says, decoded from its bytes. */
++struct sbufs_decoded {
++	uint8_t opcode, lun, dir;
++	bool data;                      /* addresses the medium (read, write, sync) */
++	bool write;                     /* write class (write, sync): needs write permission */
++	uint64_t lba, nblks;
++	uint32_t xfer_len;
++	const char *why;                /* gate refusal reason */
++};
++
++/* The doorbell audit: decode the slot as built and check it against the whitelist and the fence (quietly).
++ * Returns SBUFS_OK or SBUFS_E_GATE (d->why says why). */
++int sbufs_gate(const struct sbufs_layout *L, const uint8_t *utrd, const uint8_t *ucd,
++    const struct sbufs_fence *f, struct sbufs_decoded *d);
++
++struct sbufs_result {
++	int err;                        /* SBUFS_OK, SBUFS_E_IO, SBUFS_E_TIMEOUT, ... */
++	uint8_t ocs, upiu, response, status;
++	uint8_t sense_key, asc, ascq;
++	uint32_t residual;
++};
++
++/* Read the slot's OCS and response UPIU after the doorbell bit cleared. */
++void sbufs_parse_response(const struct sbufs_layout *L, const uint8_t *utrd, const uint8_t *ucd, uint8_t tag,
++    struct sbufs_result *r);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SBUFS_PROTO_H */
+diff --git a/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_regs.h b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_regs.h
+new file mode 100644
+index 00000000..f71c80a8
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/StarbiteUFS/hw/sbufs_regs.h
+@@ -0,0 +1,108 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * StarbiteUFS: register and protocol constants of the Exynos 9810 UFS 2.1 host (UFSHCI 2.1, JESD223C) and of
++ * UFS 2.1 UPIUs (JESD220C). Plain C, shared by the kext and the host tests. Sources for every fact: NOTES.md.
++ */
++#ifndef SBUFS_REGS_H
++#define SBUFS_REGS_H
++
++/* ---- register banks: the ADT "reg" entries of /arm-io/ufs, in order (tools/board/starlte.board) ---- */
++#define SBUFS_BANK_HCI          0       /* 0x11120000, 0x200: standard UFSHCI */
++#define SBUFS_BANK_VS           1       /* 0x11121100, 0x200: Exynos vendor HCI (vs_hci) */
++#define SBUFS_BANK_UNIPRO       2       /* 0x11110000, 0x8000: never mapped by this driver */
++#define SBUFS_BANK_UFSP         3       /* 0x11130000, 0x100: UFS protector, only ever read */
++
++/* ---- UFSHCI standard registers (bank HCI) ---- */
++#define SBUFS_CAP               0x00
++#define SBUFS_VER               0x08
++#define SBUFS_AHIT              0x18    /* auto-hibernate idle timer: 0 on Exynos 9810 (drops completions) */
++#define SBUFS_IS                0x20    /* write 1 to clear */
++#define SBUFS_IE                0x24
++#define SBUFS_HCS               0x30
++#define SBUFS_HCE               0x34
++#define SBUFS_UTRLBA            0x50
++#define SBUFS_UTRLBAU           0x54
++#define SBUFS_UTRLDBR           0x58
++#define SBUFS_UTRLCLR           0x5c
++#define SBUFS_UTRLRSR           0x60
++
++#define SBUFS_CAP_NUTRS(c)      (((c) & 0x1fu) + 1u)
++#define SBUFS_CAP_64AS          (1u << 24)
++
++#define SBUFS_HCS_DP            (1u << 0)
++#define SBUFS_HCS_UTRLRDY       (1u << 1)
++
++#define SBUFS_IS_UTRCS          (1u << 0)       /* transfer request completion */
++#define SBUFS_IS_UE             (1u << 2)       /* UIC error */
++#define SBUFS_IS_DFES           (1u << 11)      /* device fatal */
++#define SBUFS_IS_UTPES          (1u << 12)      /* UTP error */
++#define SBUFS_IS_HCFES          (1u << 16)      /* host controller fatal */
++#define SBUFS_IS_SBFES          (1u << 17)      /* system bus fatal */
++#define SBUFS_IS_FATAL          (SBUFS_IS_DFES | SBUFS_IS_UTPES | SBUFS_IS_HCFES | SBUFS_IS_SBFES)
++#define SBUFS_IE_WANTED         (SBUFS_IS_UTRCS | SBUFS_IS_UE | SBUFS_IS_FATAL)
++
++/* ---- Exynos vendor HCI (bank VS, offsets from 0x11121100) ---- */
++#define SBUFS_VS_TXPRDT_ENTRY_SIZE      0x00
++#define SBUFS_VS_RXPRDT_ENTRY_SIZE      0x04
++#define SBUFS_VS_UTRL_NEXUS_TYPE        0x40    /* bit n set: slot n carries a SCSI command */
++#define SBUFS_VS_DATA_REORDER           0x60
++#define SBUFS_VS_AXIDMA_RWDATA_BURST    0x6c
++/* values both Linux and the exynos9810-woa UEFI program, needed for multi-entry PRDTs (herolte_ufs.c, phone) */
++#define SBUFS_VS_PRDT_PREFETCH_4K       0x8000000cu     /* PRDT_PREFECT_EN | PRDT_SET_SIZE(12) */
++#define SBUFS_VS_REORDER_VAL            0x0000000au
++#define SBUFS_VS_AXIDMA_VAL             0x98000003u     /* WLU_EN | BURST_LEN(3) */
++
++/* ---- UFS protector (bank UFSP), read for the log only ---- */
++#define SBUFS_UFSP_RCTRL        0x000
++#define SBUFS_UFSP_RSECURITY    0x010
++#define SBUFS_UFSP_REGION(n)    (0x200u + (n) * 0x10u)  /* begin, end, lun, ctrl */
++
++/* ---- UTP transfer request descriptor (32 bytes) ---- */
++#define SBUFS_UTRD_CT_UFS       (1u << 28)      /* command type: UFS storage */
++#define SBUFS_UTRD_DD_NONE      (0u << 25)
++#define SBUFS_UTRD_DD_WRITE     (1u << 25)      /* system memory to device */
++#define SBUFS_UTRD_DD_READ      (2u << 25)      /* device to system memory */
++#define SBUFS_UTRD_DD_MASK      (3u << 25)
++#define SBUFS_UTRD_I            (1u << 24)      /* interrupt on completion */
++#define SBUFS_OCS_SUCCESS       0x00u
++#define SBUFS_OCS_INVALID       0x0fu
++
++/* ---- UPIU ---- */
++#define SBUFS_UPIU_COMMAND      0x01
++#define SBUFS_UPIU_RESPONSE     0x21
++#define SBUFS_UPIU_FLAG_W       0x20
++#define SBUFS_UPIU_FLAG_R       0x40
++#define SBUFS_RESP_FLAG_U       0x20            /* underflow: residual count valid */
++#define SBUFS_RESP_FLAG_O       0x40            /* overflow */
++
++/* well-known LUs (JESD220C 10.8.5); only the device W-LUN is ever addressed, and only to wake it */
++#define SBUFS_WLUN_REPORT_LUNS  0x81
++#define SBUFS_WLUN_BOOT         0xb0
++#define SBUFS_WLUN_RPMB         0xc4
++#define SBUFS_WLUN_DEVICE       0xd0
++#define SBUFS_MAX_GENERAL_LU    8u              /* general LUs 0..7 */
++
++/* ---- SCSI ---- */
++#define SBUFS_SCSI_TUR          0x00
++#define SBUFS_SCSI_INQUIRY      0x12
++#define SBUFS_SCSI_SSU          0x1b
++#define SBUFS_SCSI_READ_CAP10   0x25
++#define SBUFS_SCSI_READ10       0x28
++#define SBUFS_SCSI_WRITE10      0x2a
++#define SBUFS_SCSI_SYNC10       0x35
++#define SBUFS_SCSI_READ16       0x88
++#define SBUFS_SCSI_WRITE16      0x8a
++#define SBUFS_SCSI_SYNC16       0x91
++#define SBUFS_SCSI_SAI16        0x9e            /* SERVICE ACTION IN(16) */
++#define SBUFS_SAI_READ_CAP16    0x10
++
++#define SBUFS_STATUS_GOOD       0x00
++#define SBUFS_STATUS_CHECK      0x02
++#define SBUFS_SENSE_NOT_READY   0x02
++#define SBUFS_SENSE_UNIT_ATTN   0x06
++
++/* ---- geometry ---- */
++#define SBUFS_BLOCK             4096u           /* the device's logical block (READ CAPACITY must agree) */
++#define SBUFS_PRD_MAX_BYTES     4096u           /* the protector's data unit: one PRDT entry carries at most this */
++
++#endif /* SBUFS_REGS_H */
+diff --git a/iokit/Kernel/arm/starbite/sbufs_fence.c b/iokit/Kernel/arm/starbite/sbufs_fence.c
+new file mode 100644
+index 00000000..426ca06f
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbufs_fence.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUFS/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUFS/
++ * (commit 5faf32f); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUFS/hw/sbufs_fence.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbufs_hc.c b/iokit/Kernel/arm/starbite/sbufs_hc.c
+new file mode 100644
+index 00000000..4eb65e23
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbufs_hc.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUFS/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUFS/
++ * (commit 5faf32f); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUFS/hw/sbufs_hc.c"
++#endif
+diff --git a/iokit/Kernel/arm/starbite/sbufs_proto.c b/iokit/Kernel/arm/starbite/sbufs_proto.c
+new file mode 100644
+index 00000000..dd80afd4
+--- /dev/null
++++ b/iokit/Kernel/arm/starbite/sbufs_proto.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: APSL-2.0 */
++/*
++ * Build unit for a Starbite S9 platform driver (docs/APPLE-S9-DRIVERS.md), STARLTE only. The driver source under
++ * StarbiteUFS/ is a verbatim copy of the main repository's starbite/apple-drivers/StarbiteUFS/
++ * (commit 5faf32f); edit it there and copy it here again. Other boards get an empty translation unit.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include "StarbiteUFS/hw/sbufs_proto.c"
++#endif
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index aa30d50a..dad5f316 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -159,6 +159,16 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOPlatformDevice;"
+     "     'IONameMatch'     = 'starbite,decon';"
+     "   },"
++    /*
++     * 0430, M4: StarbiteUFS on the board ADT's ufs node. It starts only with a filled fence allow-list (the loader
++     * fills the ADT placeholders from the live GPT), read-only unless ADT + sbufsrw=1 (StarbiteUFS/INTEGRATION.md).
++     */
++    "   {"
++    "     'IOClass'         = StarbiteUFS;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'starbite,ufs';"
++    "     'IOProbeScore'    = 1000:32;"
++    "   },"
+     /*
+      * 0429, M4: Apple's IOStorageFamily personalities (generated from the family's Info.plist by
+      * starbite/apple-families/plist2kct.py, macOS target). They match only IOBlockStorageDevice / IOMedia objects,
+diff --git a/iokit/conf/Makefile.template b/iokit/conf/Makefile.template
+index e52491b8..e23d1eb9 100644
+--- a/iokit/conf/Makefile.template
++++ b/iokit/conf/Makefile.template
+@@ -211,6 +211,8 @@ IOSF_OBJS = IOStorage.cpo IOMedia.cpo IOBlockStorageDevice.cpo IOBlockStorageDri
+ 	IOApplePartitionScheme.cpo IOAppleLabelScheme.cpo IORequest.cpo IORequestsPool.cpo \
+ 	IOUserBlockStorageDevice_kext.cpo IOUserBlockStorageDevice_iig.cpo
+ $(foreach o,$(IOSF_OBJS),$(eval $(o)_INCFLAGS += -I$(IOSF_ROOT) -I$(IOSF_ROOT)/include))
++# 0430 (STARLTE, M4): StarbiteUFS is an IOBlockStorageDevice: the family's <IOKit/storage/...> headers
++StarbiteUFS.cpo_INCFLAGS += -I$(IOSF_ROOT)/include
+ 
+ # Rebuild if per-file overrides change
+ ${OBJS}: $(firstword $(MAKEFILE_LIST))
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index 54fc1885..9755fe6e 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -70,3 +70,8 @@ iokit/Families/units/IORequest.cpp                               optional iokitc
+ iokit/Families/units/IORequestsPool.cpp                          optional iokitcpp
+ iokit/Families/units/IOUserBlockStorageDevice_kext.cpp           optional iokitcpp
+ iokit/Families/units/IOUserBlockStorageDevice_iig.cpp            optional iokitcpp
++# M4: StarbiteUFS, the fenced UFS host as IOBlockStorageDevices (needs IOStorageFamily above; StarbiteUFS/INTEGRATION.md).
++iokit/Kernel/arm/starbite/StarbiteUFS.cpp                        optional iokitcpp
++iokit/Kernel/arm/starbite/sbufs_fence.c                          optional iokitcpp
++iokit/Kernel/arm/starbite/sbufs_proto.c                          optional iokitcpp
++iokit/Kernel/arm/starbite/sbufs_hc.c                             optional iokitcpp
+-- 
+2.53.0
+

@@ -1,0 +1,1 @@
+debug=0xc serial=3 cpus=8 -v wdt=-1 -wdt_no_pmu a5fb_keep_on=1 sweetfb_native=1 sweetfb_scale=1 sweetfb_lw=828 sweetfb_lh=1792 vm_compression_limit=196608 sbdisp=copy sbdisp_irq=0 sbufsirq=0 sbstop=ufs sbstop_s=60
