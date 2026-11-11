@@ -23,6 +23,14 @@ int main(void)
         int i = rand() % N;
         if (p[i]) {
             for (size_t k = 0; k < sz[i]; k += 4093) if (p[i][k] != (unsigned char)i) { printf("FAIL: block %d overwritten\n", i); return 1; }
+            if (rand() % 3 == 0 && sz[i] > 64) {
+                /* P3s: a shrink keeps the first bytes (the block may move) */
+                size_t k = (size_t)(rand() % (int)sz[i]) + 1;
+                p[i] = tk_shrink(p[i], k);
+                for (size_t q = 0; q < k; q += 991) if (p[i][q] != (unsigned char)i) { printf("FAIL: shrink lost bytes\n"); return 1; }
+                sz[i] = k;
+                continue;
+            }
             tk_free(p[i]);
             p[i] = 0;
         } else {

@@ -346,6 +346,7 @@ static int parse(const char *s, step *st, int max)
 }
 
 static double memwalk(tk_layer *l, int depth);
+void host_memdump(const char *tag);
 static int film(tk_comp *c, const char *out, const char *script, int half)
 {
     step st[192];               /* survival-next: the survival film is long */
@@ -409,7 +410,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         fprintf(log, " idle %.2f halfs %.2f shell %.2f", c->us_idle / 1000.0, c->us_halfs / 1000.0, shell_ms);
         if (getenv("SBTK_HASH")) {             /* what the display shows now (two buffers: the one just presented) */
             uint64_t hh = 1469598103934665603ULL;
-            for (size_t i = 0; i < (size_t)TK_W * TK_H; i++) hh = (hh ^ c->panel.px[i]) * 1099511628211ULL;
+            for (size_t i = 0; i < (size_t)TK_W * TK_H; i++) hh = (hh ^ (c->panel.px[i] & 0xffffffu)) * 1099511628211ULL;   /* what shows: no alpha */
             fprintf(log, " hash %016llx", (unsigned long long)hh);
         }
         fputc('\n', log);
@@ -423,6 +424,15 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         t += dt;
         frame++;
         rest_frames = motion ? 0 : rest_frames + 1;
+        if (getenv("SBTK_CHECK") && rest_frames == 4) {
+            /* P3s: at rest a while: everything composed again at full resolution, its hash (what the screen should
+             * show, without the damage borders a motion frame's present leaves) */
+            tk_comp_frame(c, 0, 1);
+            uint64_t hh = 1469598103934665603ULL;
+            for (size_t i = 0; i < (size_t)TK_W * TK_H; i++) hh = (hh ^ (c->panel.px[i] & 0xffffffu)) * 1099511628211ULL;
+            fprintf(log, "R %d %.1f hash %016llx\n", frame, t, (unsigned long long)hh);
+            if (getenv("SBTK_DUMPR") && frame == atoi(getenv("SBTK_DUMPR"))) write_ppm(getenv("SBTK_DUMPTO"), &c->panel);
+        }
         if (!motion) sh_idle();     /* between frames: on the phone, the time left in the frame */
         /* the phone's refresh timer (the Clock's digits, the card's work a turn at a time): a frame if it drew */
         if (!motion && sh_next_update(t) >= 0 && sh_refresh(t)) tk_comp_frame(c, 0, 0);
@@ -433,6 +443,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
     if (none) ;
     else if (f != stdout) fclose(f); else fflush(f);
     if (getenv("SBTK_MEM")) fprintf(stderr, "mem: layers %.1f MB\n", memwalk(c->root, 0) / 1e6);
+    host_memdump("film");
     fprintf(stderr, "film: %d frames; heap %.1f MB (peak %.1f MB)\n", frame, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
     return 0;
 }
@@ -511,7 +522,15 @@ static double memwalk(tk_layer *l, int depth)
     for (; l; l = l->next) {
         double b = (double)l->bmp.w * l->bmp.h * 4, h = (double)l->half.w * l->half.h * 4;
         double g = (double)l->glass.w * l->glass.h + (double)l->ghalf.w * l->ghalf.h;
-        if (b + h + g > 2e5) fprintf(stderr, "mem %*s%-14s %6.1f MB (half %.1f, glass %.1f)%s\n", depth * 2, "", l->name, (b + h + g) / 1e6, h / 1e6, g / 1e6, l->hidden ? " hidden" : "");
+        if (b + h + g > 2e5) {
+            int x0 = l->bmp.w, y0 = l->bmp.h, x1 = 0, y1 = 0;
+            for (int j = 0; j < l->bmp.h; j++) for (int i = 0; i < l->bmp.w; i++)
+                if (l->bmp.px[(size_t)j * l->bmp.stride + i] || (l->glass.v && l->glass.v[(size_t)j * l->glass.w + i])) {
+                    if (i < x0) x0 = i; if (i >= x1) x1 = i + 1; if (j < y0) y0 = j; if (j >= y1) y1 = j + 1; }
+            double used = x1 > x0 ? (double)(x1 - x0) * (y1 - y0) * 4 : 0;
+            fprintf(stderr, "mem %*s%-14s %6.1f MB (half %.1f, glass %.1f)%s %dx%d bounds %d,%d..%d,%d trim-> %.1f MB\n", depth * 2, "", l->name, (b + h + g) / 1e6, h / 1e6, g / 1e6, l->hidden ? " hidden" : "",
+                    l->bmp.w, l->bmp.h, x0, y0, x1, y1, used / 1e6);
+        }
         t += b + h + g + memwalk(l->child, depth + 1);
     }
     return t;
@@ -564,11 +583,13 @@ int main(int argc, char **argv)
     sh_init(&c);
     fprintf(stderr, "bake: %.1f ms; heap %.1f MB (peak %.1f MB)\n", (tk_us() - t0) / 1000.0, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
     if (getenv("SBTK_MEM")) fprintf(stderr, "mem: layers %.1f MB\n", memwalk(c.root, 0) / 1e6);
+    host_memdump("bake");
     lin_fake_init();
     if (!strcmp(argv[2], "still") && argc >= 4) {
         for (int i = 4; i < argc; i++) { apply_state(argv[i]); lin_fake_settle(); }
         tk_comp_frame(&c, 0, 1);
         fprintf(stderr, "frame: %.2f ms; heap %.1f MB (peak %.1f MB)\n", c.last_us / 1000.0, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
+        host_memdump("still");
         write_ppm(argv[3], &c.panel);
         return 0;
     }
@@ -604,10 +625,14 @@ int main(int argc, char **argv)
             char *colon = strchr(line, ':');
             if (!colon) continue;
             *colon = 0;
+            extern int host_ooms;
             sh_set("reset", "", 0);
+            int oom0 = host_ooms;
+            size_t rest0 = tk_heap_used();
+            tk_heap_peak_reset();
             film(&c, "none", colon + 1, 1);
-            fprintf(stderr, "selftest: %s: heap %zu MiB (peak %zu), largest free %llu MiB\n", line, tk_heap_used() >> 20,
-                    tk_heap_peak() >> 20, (unsigned long long)(tk_heap_largest() >> 20));
+            fprintf(stderr, "selftest: %s: heap %zu MiB (peak %zu, start %zu), largest free %llu MiB, refusals %d\n", line, tk_heap_used() >> 20,
+                    tk_heap_peak() >> 20, rest0 >> 20, (unsigned long long)(tk_heap_largest() >> 20), host_ooms - oom0);
         }
         return 0;
     }

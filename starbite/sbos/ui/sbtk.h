@@ -251,8 +251,10 @@ float tk_tracker_v(const tk_tracker *t);                             /* units pe
 /* ---- platform ---------------------------------------------------------------------------------------------- */
 void *tk_alloc(size_t n);          /* zeroed, 64-byte aligned */
 void tk_free(void *p);
+void *tk_shrink(void *p, size_t n);  /* keep the first n bytes, give the rest back; the block may move */
 size_t tk_heap_used(void);
 size_t tk_heap_peak(void);
+void tk_heap_peak_reset(void);      /* the peak from now (the host self test: per film) */
 uint64_t tk_heap_largest(void);    /* the largest free block (the kernel's heap; the host's with SBTK_HEAP_MB) */
 uint64_t tk_us(void);
 void tk_log(const char *s);
