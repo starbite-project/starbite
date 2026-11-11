@@ -1542,6 +1542,53 @@ static void test_sms_parts(void)
     CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", "\xff\xfe", 1, pdu, len, 4), SBM_EINVAL);
 }
 
+static void test_inbox(void)
+{
+    static struct sbm_inbox ib;
+    struct sbm_sms a;
+    memset(&ib, 0, sizeof(ib));
+    memset(&a, 0, sizeof(a));
+    strcpy(a.from, "+358401234567");
+    strcpy(a.text, "single");
+    CHECKEQ(sbm_inbox_add(&ib, &a, 1000), 1);
+    /* three parts out of order, interleaved with another sender's two parts */
+    struct sbm_sms p[3], q[2];
+    for (unsigned i = 0; i < 3; ++i) {
+        memset(&p[i], 0, sizeof(p[i]));
+        strcpy(p[i].from, "+358401234567");
+        p[i].concat = 1, p[i].ref = 7, p[i].total = 3, p[i].seq = (uint8_t)(i + 1);
+        snprintf(p[i].text, sizeof(p[i].text), "<%u>", i + 1);
+    }
+    for (unsigned i = 0; i < 2; ++i) {
+        memset(&q[i], 0, sizeof(q[i]));
+        strcpy(q[i].from, "+358409876543");
+        q[i].concat = 1, q[i].ref = 7, q[i].total = 2, q[i].seq = (uint8_t)(i + 1);
+        snprintf(q[i].text, sizeof(q[i].text), "(%u)", i + 1);
+    }
+    CHECKEQ(sbm_inbox_add(&ib, &p[2], 2000), 0);
+    CHECKEQ(sbm_inbox_add(&ib, &q[0], 2001), 0);
+    CHECKEQ(sbm_inbox_add(&ib, &p[0], 2002), 0);
+    CHECKEQ(sbm_inbox_add(&ib, &q[1], 2003), 1);
+    CHECKEQ(sbm_inbox_add(&ib, &p[1], 2004), 1);
+    CHECKEQ(ib.n, 3);
+    CHECK(!strcmp(ib.m[1].text, "(1)(2)") && !strcmp(ib.m[1].from, "+358409876543"));
+    CHECK(!strcmp(ib.m[2].text, "<1><2><3>"));
+    /* a lost part: given up after the timeout, delivered with a mark */
+    CHECKEQ(sbm_inbox_add(&ib, &p[0], 3000), 0);
+    CHECKEQ(sbm_inbox_add(&ib, &p[2], 3001), 0);
+    CHECKEQ(sbm_inbox_add(&ib, 0, 3000 + SBM_INBOX_PART_MS + 10), 0);
+    CHECKEQ(ib.n, 4);
+    CHECK(!strcmp(ib.m[3].text, "<1>[...]<3>"));
+    /* the newest SBM_INBOX_MAX kept */
+    for (unsigned i = 0; i < 40; ++i) {
+        snprintf(a.text, sizeof(a.text), "m%u", i);
+        sbm_inbox_add(&ib, &a, 5000 + i);
+    }
+    CHECKEQ(ib.n, SBM_INBOX_MAX);
+    CHECK(!strcmp(ib.m[SBM_INBOX_MAX - 1].text, "m39") && !strcmp(ib.m[0].text, "m8"));
+    CHECK(ib.m[SBM_INBOX_MAX - 1].id > ib.m[0].id);
+}
+
 static void test_session(uint32_t boot_crc, uint32_t main_crc)
 {
     static struct fakesoc s;
@@ -2346,6 +2393,7 @@ int main(int argc, char **argv)
     test_rfs();
     test_policy_sms();
     test_sms_parts();
+    test_inbox();
     printf("sbm host test: %u checks, %u failed%s\n", checks, fails, radio ? " (with this phone's RADIO image)" : "");
     return fails ? 1 : 0;
 }

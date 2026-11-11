@@ -173,3 +173,23 @@ uint32_t sbm_strlen(const char *s)
         ++n;
     return n;
 }
+
+void *sbm_memmove(void *d, const void *s, size_t n)
+{
+    uint8_t *a = d;
+    const uint8_t *b = s;
+    if (a < b)
+        for (size_t i = 0; i < n; ++i)
+            a[i] = b[i];
+    else
+        for (size_t i = n; i-- > 0;)
+            a[i] = b[i];
+    return d;
+}
+
+int sbm_strcmp(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        ++a, ++b;
+    return (int)(uint8_t)*a - (int)(uint8_t)*b;
+}

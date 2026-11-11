@@ -832,6 +832,35 @@ int sbm_sms_submit(const struct sbm_dial_policy *pol, const char *number, const 
 int sbm_sms_submit_parts(const struct sbm_dial_policy *pol, const char *number, const char *utf8, uint8_t ref,
                          uint8_t pdu[][SBM_SMS_PDU_MAX], uint16_t *len, unsigned maxparts);
 
+/* The incoming inbox (RAM only): concatenated parts joined by sender + reference + count; the newest SBM_INBOX_MAX
+ * messages kept; a part missing for SBM_INBOX_PART_MS is given up ("[...]" in its place). */
+#define SBM_INBOX_MAX     32
+#define SBM_INBOX_PEND    4
+#define SBM_INBOX_TEXT    1024
+#define SBM_INBOX_PART_MS (10u * 60u * 1000u)
+struct sbm_inbox_msg {
+    uint32_t id;
+    char from[24];                    /* the user's data: the screen only */
+    uint8_t scts[7];
+    char text[SBM_INBOX_TEXT];
+};
+struct sbm_inbox_pend {
+    int used;
+    uint8_t ref, total, got;
+    uint32_t at;
+    char from[24];
+    uint8_t scts[7];
+    char part[SBM_SMS_MAX_PARTS][SBM_SMS_TEXT_MAX];
+};
+struct sbm_inbox {
+    struct sbm_inbox_msg m[SBM_INBOX_MAX];
+    unsigned n;
+    struct sbm_inbox_pend p[SBM_INBOX_PEND];
+    uint32_t next_id, gen;
+};
+/* one received message (or part); s NULL just ages the pending parts. 1 = a whole message landed in m[] */
+int sbm_inbox_add(struct sbm_inbox *ib, const struct sbm_sms *s, uint32_t now_ms);
+
 /* The session API (Starbite OS): sbm_modem_start loads, checks and starts the CP and brings the link online with the RFS
  * server (about 2 s, blocking); sbm_modem_poll is non-blocking, from the event loop (every few ms): mailbox, rings,
  * RFS, guards; a guard (a SIM that is not absent, a registration) or a crash parks the CP and returns 1 / SBM_E*.
@@ -982,6 +1011,8 @@ void sbm_memset(void *d, int c, size_t n);
 int sbm_memcmp(const void *a, const void *b, size_t n);
 uint32_t sbm_strlen(const char *s);
 size_t sbm_strlcpy(char *d, const char *s, size_t cap);
+void *sbm_memmove(void *d, const void *s, size_t n);
+int sbm_strcmp(const char *a, const char *b);
 /* tiny formatter: %s %u %d %x %c %% with width / zero pad, l / ll; returns the full length */
 int sbm_fmt(char *out, size_t cap, const char *fmt, ...);
 /* formats, redacts, then p->log */

@@ -433,3 +433,81 @@ int sbm_sms_submit_parts(const struct sbm_dial_policy *pol, const char *number, 
         return SBM_ERANGE;                           /* the escape / surrogate cuts pushed it past maxparts */
     return (int)parts;
 }
+
+/* ---- the inbox: concatenated parts joined (by sender, reference and count), the newest SBM_INBOX_MAX kept --------
+ * A part missing for SBM_INBOX_PART_MS is given up: what came is delivered with a "[...]" mark where parts are
+ * missing. Text and senders stay in this RAM structure; nothing here logs. */
+static void inbox_push(struct sbm_inbox *ib, const char *from, const uint8_t scts[7], const char *text)
+{
+    if (ib->n == SBM_INBOX_MAX) {
+        sbm_memmove(&ib->m[0], &ib->m[1], (SBM_INBOX_MAX - 1) * sizeof(ib->m[0]));
+        ib->n--;
+    }
+    struct sbm_inbox_msg *m = &ib->m[ib->n++];
+    sbm_memset(m, 0, sizeof(*m));
+    sbm_strlcpy(m->from, from, sizeof(m->from));
+    sbm_memcpy(m->scts, scts, 7);
+    sbm_strlcpy(m->text, text, sizeof(m->text));
+    m->id = ++ib->next_id;
+    ib->gen++;
+}
+
+static void pend_flush(struct sbm_inbox *ib, struct sbm_inbox_pend *p)
+{
+    char t[SBM_INBOX_TEXT];
+    uint32_t o = 0;
+    for (unsigned i = 0; i < p->total && i < SBM_SMS_MAX_PARTS; ++i) {
+        const char *s = p->got & (1u << i) ? p->part[i] : "[...]";
+        while (*s && o + 1 < sizeof(t))
+            t[o++] = *s++;
+    }
+    t[o] = 0;
+    inbox_push(ib, p->from, p->scts, t);
+    p->used = 0;
+}
+
+int sbm_inbox_add(struct sbm_inbox *ib, const struct sbm_sms *s, uint32_t now_ms)
+{
+    for (unsigned i = 0; i < SBM_INBOX_PEND; ++i)      /* parts given up */
+        if (ib->p[i].used && now_ms - ib->p[i].at > SBM_INBOX_PART_MS)
+            pend_flush(ib, &ib->p[i]);
+    if (!s)
+        return 0;
+    if (!s->concat || s->total <= 1 || s->total > SBM_SMS_MAX_PARTS || s->seq < 1 || s->seq > s->total) {
+        inbox_push(ib, s->from, s->scts, s->text);
+        return 1;
+    }
+    struct sbm_inbox_pend *p = 0, *free_slot = 0, *oldest = 0;
+    for (unsigned i = 0; i < SBM_INBOX_PEND; ++i) {
+        struct sbm_inbox_pend *q = &ib->p[i];
+        if (q->used && q->ref == s->ref && q->total == s->total && !sbm_strcmp(q->from, s->from))
+            p = q;
+        else if (!q->used && !free_slot)
+            free_slot = q;
+        if (q->used && (!oldest || q->at - oldest->at > 0x80000000u))
+            oldest = q;
+    }
+    if (!p) {
+        if (!free_slot) {
+            pend_flush(ib, oldest);                    /* the oldest incomplete one makes room */
+            free_slot = oldest;
+        }
+        p = free_slot;
+        sbm_memset(p, 0, sizeof(*p));
+        p->used = 1;
+        p->ref = s->ref;
+        p->total = s->total;
+        sbm_strlcpy(p->from, s->from, sizeof(p->from));
+        sbm_memcpy(p->scts, s->scts, 7);
+    }
+    p->at = now_ms;
+    sbm_strlcpy(p->part[s->seq - 1], s->text, sizeof(p->part[0]));
+    p->got |= 1u << (s->seq - 1);
+    if (p->got == (1u << p->total) - 1) {
+        if (s->seq == 1)
+            sbm_memcpy(p->scts, s->scts, 7);
+        pend_flush(ib, p);
+        return 1;
+    }
+    return 0;
+}
