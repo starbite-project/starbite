@@ -1,0 +1,43 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index 57d97c5..c245ede 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -208,6 +208,12 @@ sb_log_open(void)
+    sb_log_active = 1;
+    signal(SIGABRT, sb_on_abort);
+    sb_log_trace = GetFileAttributesA("C:\\ProgramData\\Starbite\\umdlog\\trace") != INVALID_FILE_ATTRIBUTES;
++   /* sb-patches/0129: umdlog\trace-<image name> traces only processes of that name (T36: File Explorer) */
++   if (!sb_log_trace) {
++      char tp[MAX_PATH];
++      snprintf(tp, sizeof(tp), "C:\\ProgramData\\Starbite\\umdlog\\trace-%s", base);
++      sb_log_trace = GetFileAttributesA(tp) != INVALID_FILE_ATTRIBUTES;
++   }
+    GetLocalTime(&st);
+    fprintf(stderr, "sbumd: %s pid %lu at %02u:%02u:%02u.%03u, driver-call trace %s\n", exe,
+            (unsigned long)GetCurrentProcessId(), st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+diff --git a/src/gallium/frontends/d3d10umd/Debug.cpp b/src/gallium/frontends/d3d10umd/Debug.cpp
+index 6ad35ee..a2d20c0 100644
+--- a/src/gallium/frontends/d3d10umd/Debug.cpp
++++ b/src/gallium/frontends/d3d10umd/Debug.cpp
+@@ -25,12 +25,20 @@ st_debug_parse(void)
+ 
+ /* Starbite (sb-patches/0116, docs/WIN11-GPU.md 6.27): shader, element-layout and draw dumps, only while
+  * C:\ProgramData\Starbite\umdlog\trace exists (gpu-cycle's test boots; never the user's install). */
++extern "C" const char *malikm_exe(void);   /* sb-patches/0126 (the shim) */
++
+ extern "C" int
+ sb_dump_on(void)
+ {
+    static int on = -1;
+-   if (on < 0)
++   if (on < 0) {
++      char tp[MAX_PATH];
+       on = GetFileAttributesA("C:\\ProgramData\\Starbite\\umdlog\\trace") != INVALID_FILE_ATTRIBUTES;
++      /* sb-patches/0129: or umdlog\trace-<image name> for this process only */
++      snprintf(tp, sizeof(tp), "C:\\ProgramData\\Starbite\\umdlog\\trace-%s", malikm_exe());
++      if (!on)
++         on = GetFileAttributesA(tp) != INVALID_FILE_ATTRIBUTES;
++   }
+    return on;
+ }
+ 

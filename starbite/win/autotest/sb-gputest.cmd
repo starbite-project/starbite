@@ -55,12 +55,15 @@ rem lists the windows, and rewrites umdlog\dwmframe so DWM dumps the screen (sb-
 rem T36: the keyboard twice, with the user's transparency effects and with them off (restored at the end), each
 rem with a touch hit-test grid; then the Start menu. Run without --keys-selftest and with --full-sec 600.
 sbshow.exe mincon >> gputest.log 2>&1
+rem T36: the driver-call trace for the File Explorer process only (sb-patches/0129), removed again below
+echo on> C:\ProgramData\Starbite\umdlog\trace-explorer.exe
 start "" explorer.exe C:\
 sbshow.exe max CabinetWClass 30 >> gputest.log 2>&1
 ping -n 6 127.0.0.1 > nul
 sbshow.exe list >> gputest.log 2>&1
 sbshow.exe frame >> gputest.log 2>&1
 ping -n 4 127.0.0.1 > nul
+del C:\ProgramData\Starbite\umdlog\trace-explorer.exe
 start "" ms-settings:display
 sbshow.exe max ApplicationFrameWindow 30 >> gputest.log 2>&1
 ping -n 6 127.0.0.1 > nul
