@@ -8,6 +8,7 @@
 #define ETH_IP 0x0800
 #define IP_ICMP 1
 #define IP_UDP 17
+#define IP_TCP 6
 #define DHCP_SERVER 67
 #define DHCP_CLIENT 68
 #define DNS_PORT 53
@@ -495,6 +496,13 @@ void sbnet_rx(struct sbnet *n, const uint8_t *f, uint32_t len)
         icmp_rx(n, ip, ihl, ip + ihl, total - ihl);
         return;
     }
+    if (ip[9] == IP_TCP) {                      /* to sbtcp (tcp.c), only what is addressed to us */
+        if (n->os.tcp && n->state >= SBNET_BOUND && eq(ip + 16, n->ip, 4))
+            n->os.tcp(n->os.ctx, ip + 12, ip + ihl, total - ihl);
+        else
+            n->rx_ignored++;
+        return;
+    }
     if (ip[9] != IP_UDP || total - ihl < 8) {
         n->rx_ignored++;
         return;
@@ -524,6 +532,27 @@ void sbnet_rx(struct sbnet *n, const uint8_t *f, uint32_t len)
 }
 
 /* ---- the public calls ------------------------------------------------------------------------------------- */
+
+int sbnet_ip_send(struct sbnet *n, const uint8_t dst[4], uint8_t proto, uint8_t *f, uint32_t plen)
+{
+    if (n->state < SBNET_BOUND || zero4(dst) || eq(dst, bcast_ip, 4))
+        return -1;
+    return ip_send(n, dst, proto, f, plen, 0);
+}
+
+void sbnet_static(struct sbnet *n, const uint8_t ip[4], const uint8_t mask[4], const uint8_t gateway[4],
+                  const uint8_t dns[4])
+{
+    set((uint8_t *)n->arp, 0, sizeof(n->arp));
+    n->held_len = 0;
+    n->dns_state = SBNET_DNS_IDLE;
+    cpy(n->ip, ip, 4), cpy(n->mask, mask, 4), cpy(n->gateway, gateway, 4), cpy(n->dns, dns, 4);
+    set(n->server, 0, 4);
+    n->lease_s = 0;
+    n->bound_at = now(n);
+    n->t1_at = n->t2_at = n->end_at = ~0ull;    /* no lease: never renewed, never expires */
+    n->state = SBNET_BOUND;
+}
 
 void sbnet_init(struct sbnet *n, const struct sbnet_os *os, const uint8_t mac[6])
 {
