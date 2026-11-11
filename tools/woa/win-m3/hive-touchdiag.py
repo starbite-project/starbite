@@ -28,7 +28,7 @@ _spec.loader.exec_module(hs)
 
 NEW = '\\SystemRoot\\System32\\drivers\\s6touchdiag.sys'
 KINDS = {1: 'press', 2: 'release', 3: 'ALL-UP i2c', 4: 'ALL-UP overflow', 5: 'queue-flush', 6: 'gap', 7: 'i2c-error',
-         8: 'press-while-active', 9: 'release-inactive', 10: 'selftest'}
+         8: 'press-while-active', 9: 'release-inactive', 10: 'selftest', 11: 'chip-status', 12: 'i2c-retry'}
 
 
 def cs(h):
@@ -73,9 +73,11 @@ def show(h):
     if 'DiagCpu' in diag:
         print('  DiagCpu (ISR runs per CPU 0..7) =', list(struct.unpack('<8I', diag['DiagCpu'][1])))
     if 'DiagSelf' in diag:
-        s = struct.unpack('<8I', diag['DiagSelf'][1])
-        print(f'  DiagSelf: {s[0]} SPB reads, {s[1]} errors (last 0x{s[2]:08X}), max {s[3]} us, avg {s[4]} us, '
-              f'{s[5]} non-empty, {s[6]} slower than 20 ms, on CPU {s[7]}')
+        raw = diag['DiagSelf'][1]
+        for k, label in enumerate(('back to back', '200 us apart')[:len(raw) // 32]):
+            s = struct.unpack_from('<8I', raw, 32 * k)
+            print(f'  DiagSelf ({label}): {s[0]} SPB reads, {s[1]} errors (last 0x{s[2]:08X}), max {s[3]} us, '
+                  f'avg {s[4]} us, {s[5]} non-empty, {s[6]} slower than 20 ms, on CPU {s[7]}')
     if 'DiagClock' in diag:
         it, qpc, f = struct.unpack('<3Q', diag['DiagClock'][1])
         print(f'  DiagClock: interrupt time {it / 1e7:.3f} s, QPC {qpc} @ {f} Hz = {qpc / f if f else 0:.3f} s')
@@ -91,7 +93,8 @@ def show(h):
             dt = '' if prev is None else f' (+{ms - prev} ms)'
             prev = ms
             extra = {6: f'{a} ms without an event', 3: f'spb {a} ms, status low 0x{b:03X}',
-                     7: f'remain {a}, status low 0x{b:03X}', 10: f'errors {a}, max {b * 100} us'}.get(kind, f'x {a} y {b}')
+                     7: f'remain {a}, status low 0x{b:03X}', 10: f'errors {a}, max {b * 100} us',
+                     11: f'status type {cid} bytes {a:03X} {b:03X}', 12: f'try {cid + 1}, status low 0x{b:03X}'}.get(kind, f'x {a} y {b}')
             print(f'    {ms:>10} ms{dt:<12} {KINDS.get(kind, kind):<18} id {cid}  {extra}')
 
 

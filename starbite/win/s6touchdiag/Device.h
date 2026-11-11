@@ -157,7 +157,9 @@ typedef struct _DEVICE_CONTEXT
     LONGLONG                DiagLastEventQpc;               // under InputLock
     ULONG                   DiagTraceHead;                  // under InputLock
     ULONG                   DiagTrace[2 * 64];              // under InputLock: {ms, kind<<28|id<<24|x<<12|y}
-    ULONG                   DiagSelf[8];                    // D0Entry SPB self-test
+    ULONG                   DiagSelf[16];                   // D0Entry SPB self-test: [0..7] back to back, [8..15] 200 us apart
+    volatile LONG           DiagI2cRetry;                   // SBTOUCH_RETRY: failed reads that were retried
+    volatile LONG           DiagI2cRetryOk;                 // ... and a retry then succeeded (no all-up sent)
 
     PVOID PoFxPowerSettingCallbackHandle1;
     PVOID PoFxPowerSettingCallbackHandle2;

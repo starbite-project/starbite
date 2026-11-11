@@ -196,6 +196,11 @@ RecordStartValue(
 #define SBDIAG_K_PRESS_ACTIVE      8
 #define SBDIAG_K_RELEASE_INACTIVE  9
 #define SBDIAG_K_SELFTEST          10
+#define SBDIAG_K_STATUS            11
+#define SBDIAG_K_RETRY             12
+#ifndef SBTOUCH_RETRY
+#define SBTOUCH_RETRY              1      // touchdiag-2: up to 3 tries per I2C read before an all-up (0 = touchdiag-1)
+#endif
 
 static
 VOID
@@ -356,6 +361,9 @@ DiagFlush(
 	DiagAssignULong(key, L"DiagStatusEvent", (ULONG)DeviceContext->DiagStatusEvent);
 	DiagAssignULong(key, L"DiagI2cError", (ULONG)DeviceContext->InputI2cErrorCount);
 	DiagAssignULong(key, L"DiagI2cLastStatus", (ULONG)DeviceContext->DiagI2cLastStatus);
+	DiagAssignULong(key, L"DiagI2cRetry", (ULONG)DeviceContext->DiagI2cRetry);
+	DiagAssignULong(key, L"DiagI2cRetryOk", (ULONG)DeviceContext->DiagI2cRetryOk);
+	DiagAssignULong(key, L"DiagRetryBuild", SBTOUCH_RETRY);
 	DiagAssignULong(key, L"DiagOverflow", (ULONG)DeviceContext->InputOverflowCount);
 	DiagAssignULong(key, L"DiagQueueFlush", (ULONG)DeviceContext->InputQueueFlushCount);
 	DiagAssignULong(key, L"DiagCoalesce", (ULONG)DeviceContext->InputReportCoalesceCount);
@@ -407,35 +415,49 @@ DiagSelfTest(
 	LONGLONG sumUs = 0;
 	ULONG n;
 
+	ULONG pass;
+
 	RtlZeroMemory(DeviceContext->DiagSelf, sizeof(DeviceContext->DiagSelf));
+	for (pass = 0; pass < 2; pass++)
+	{
+	PULONG self = &DeviceContext->DiagSelf[8 * pass];
+
+	sumUs = 0;
 	for (n = 0; n < 200; n++)
 	{
-		LONGLONG t0 = DiagQpc();
+		LONGLONG t0;
+
+		if (pass == 1)
+		{
+			KeStallExecutionProcessor(200);
+		}
+		t0 = DiagQpc();
 		NTSTATUS status = SpbDeviceWriteRead(DeviceContext, S6SY761_READ_ONE_EVENT, buf, 1, sizeof(buf));
 		LONG us = DiagUs(DeviceContext, DiagQpc() - t0);
 
 		sumUs += us;
-		if ((ULONG)us > DeviceContext->DiagSelf[3])
+		if ((ULONG)us > self[3])
 		{
-			DeviceContext->DiagSelf[3] = (ULONG)us;
+			self[3] = (ULONG)us;
 		}
 		if (us > SBDIAG_SPB_SLOW_US)
 		{
-			DeviceContext->DiagSelf[6]++;
+			self[6]++;
 		}
 		if (!NT_SUCCESS(status))
 		{
-			DeviceContext->DiagSelf[1]++;
-			DeviceContext->DiagSelf[2] = (ULONG)status;
+			self[1]++;
+			self[2] = (ULONG)status;
 		}
 		else if (buf[0] != 0)
 		{
-			DeviceContext->DiagSelf[5]++;
+			self[5]++;
 		}
 	}
-	DeviceContext->DiagSelf[0] = n;
-	DeviceContext->DiagSelf[4] = (ULONG)(sumUs / n);
-	DeviceContext->DiagSelf[7] = KeGetCurrentProcessorNumberEx(NULL);
+	self[0] = n;
+	self[4] = (ULONG)(sumUs / n);
+	self[7] = KeGetCurrentProcessorNumberEx(NULL);
+	}
 	DiagTrace(DeviceContext, SBDIAG_K_SELFTEST, 0, DeviceContext->DiagSelf[1] & 0xFFF, DeviceContext->DiagSelf[3] / 100);
 }
 
@@ -3029,6 +3051,46 @@ Return Value:
 		WdfRequestComplete(request, status);
 	}
 }
+
+// SBTOUCH_RETRY: one failed I2C read no longer ends every contact. Up to 3 tries 0.5 ms apart (passive level), as
+// Starbite OS's own touch code (libsb touch.c) does; only when all fail does the caller send the all-up as before.
+static
+NTSTATUS
+TouchReadWithRetry(
+	_In_ PDEVICE_CONTEXT pDevice,
+	_In_ PVOID Command,
+	_Out_ PVOID Out,
+	_In_ size_t OutLength
+)
+{
+	NTSTATUS status = STATUS_UNSUCCESSFUL;
+	ULONG tries;
+
+	for (tries = 0; tries < (SBTOUCH_RETRY ? 3u : 1u); tries++)
+	{
+		if (tries != 0)
+		{
+			LARGE_INTEGER delay;
+
+			InterlockedIncrement(&pDevice->DiagI2cRetry);
+			InterlockedExchange(&pDevice->DiagI2cLastStatus, (LONG)status);
+			DiagTrace(pDevice, SBDIAG_K_RETRY, tries, 0, (ULONG)status);
+			delay.QuadPart = -5000;            // 0.5 ms
+			KeDelayExecutionThread(KernelMode, FALSE, &delay);
+		}
+		status = SpbDeviceWriteRead(pDevice, Command, Out, 1, OutLength);
+		if (NT_SUCCESS(status))
+		{
+			if (tries != 0)
+			{
+				InterlockedIncrement(&pDevice->DiagI2cRetryOk);
+			}
+			break;
+		}
+	}
+	return status;
+}
+
 BOOLEAN
 OnInterruptIsr(
 	_In_  WDFINTERRUPT FxInterrupt,
@@ -3077,7 +3139,7 @@ OnInterruptIsr(
 
 	// get some
 	spbStart = DiagQpc();
-	status = SpbDeviceWriteRead(pDevice, S6SY761_READ_ONE_EVENT, eventbuf, 1, S6SY761_EVENT_SIZE);
+	status = TouchReadWithRetry(pDevice, S6SY761_READ_ONE_EVENT, eventbuf, S6SY761_EVENT_SIZE);
 	spbUs = DiagUs(pDevice, DiagQpc() - spbStart);
 	DiagMax(&pDevice->DiagSpbMaxUs, spbUs);
 	if (spbUs > SBDIAG_SPB_SLOW_US)
@@ -3122,7 +3184,7 @@ OnInterruptIsr(
 	if (remain)
 	{
         //DbgPrint("events remaining: %d\n", remain);
-        status = SpbDeviceWriteRead(pDevice, S6SY761_READ_ALL_EVENTS, eventbuf + S6SY761_EVENT_SIZE, 1, remain * S6SY761_EVENT_SIZE);
+        status = TouchReadWithRetry(pDevice, S6SY761_READ_ALL_EVENTS, eventbuf + S6SY761_EVENT_SIZE, remain * S6SY761_EVENT_SIZE);
 		if (!NT_SUCCESS(status))
 		{
 			InterlockedIncrement(&pDevice->InputI2cErrorCount);
@@ -3241,6 +3303,8 @@ OnInterruptIsr(
 		}
 		case S6SY761_EVENT_ID_STATUS:
 			InterlockedIncrement(&pDevice->DiagStatusEvent);
+			DiagTraceLocked(pDevice, SBDIAG_K_STATUS, event[0] >> 4, ((ULONG)event[1] << 4) | (event[2] >> 4),
+				((ULONG)(event[2] & 0xF) << 8) | event[3]);
 			break;
 		default:
 			break;
