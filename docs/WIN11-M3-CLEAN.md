@@ -685,3 +685,7 @@ logs to `Services\sbxta\State`. An optional folder swap (`Parameters\SwapCache` 
 XtaCache.m3, keyed on XtaCache.a55 existing) is for the case T2b shows the folder must also go; it is off by default.
 Staged build/woa/cores/sbxta-1/sbxta.sys 81ea774f..., build 42056cc, test-signed; install line and two-boot test in
 the notes folder `win-m3-clean-sbxta-request.md`. Not yet run on the phone.
+
+T2b (main session, x86t2b-1): XtaCache Start=4 with the A55 cache folder left in place also passes (sbcpu arm64/x64/
+x86/x64fresh exit 0, SysWOW64 cmd, Steam client + steamwebhelper ran 150 s with a window, no Steam crash events).
+The service switch alone is enough: sbxta with SwapCache 0 (default). Two-boot sbxta test pending.
