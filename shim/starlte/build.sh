@@ -8,7 +8,7 @@ set -eu
 cd "$(dirname "$0")"
 : "${CROSS:=}"   # native gcc in the aarch64 VM; set aarch64-linux-gnu- elsewhere
 mkdir -p out
-CFLAGS="-c -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie -nostdlib -fno-asynchronous-unwind-tables -fno-jump-tables -fno-tree-switch-conversion -fno-tree-loop-distribute-patterns -mgeneral-regs-only -mstrict-align -mcpu=cortex-a53 -Wall -Wextra -Werror"
+CFLAGS="-c -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie -nostdlib -fno-asynchronous-unwind-tables -fno-jump-tables -fno-tree-switch-conversion -fno-tree-loop-distribute-patterns -mgeneral-regs-only -mstrict-align -mcpu=cortex-a53 -Wall -Wextra -Werror ${EXTRA_CFLAGS:-}"
 # Menu v7 (docs/MENU7-PORT.md section 2): its renderer and menu use FP/SIMD (xnu_boot.S enables it
 # for the loader and restores S-Boot's CPACR before an OS starts); every other file stays
 # general-regs-only.

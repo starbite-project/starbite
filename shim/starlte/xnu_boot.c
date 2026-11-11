@@ -2193,6 +2193,30 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
         return fatal(log, -11, "MMU ALREADY ON");
     boot_info();
     char *cmdline = boot_cmdline;
+#ifdef STAR_CHAIN_AUTOBOOT
+    /*
+     * A chained test loader (tools/menu/chain, built with EXTRA_CFLAGS=-DSTAR_CHAIN_AUTOBOOT, e.g.
+     * tools/apple/m1-chain.sh): BOOT's payload is the one appended to this Image, and it starts at once.
+     * No POST, no menu, no launch record, no watchdog of the loader's own and no log fragments: the chain
+     * stub's dead-man (pack.py --wdt) keeps running into the OS, which must not feed it (XNU: sbstop=).
+     * If the payload cannot start, the normal menu of this loader follows.
+     */
+    if (boot_p) {
+        static struct cat_ent t;
+        lscopy(t.key, sizeof(t.key), "chaintest");
+        lscopy(t.name, sizeof(t.name), "Chained test payload");
+        lscopy(t.file[0], sizeof(t.file[0]), "@boot");
+        t.method = M_XNU;
+        launch_clear();
+        pmsg_put("STARBITE: chain test loader: starting the appended payload (no menu, no launch record)\n");
+        entry = boot_xnu(log, &t, boot_cmdline);
+        if (entry)
+            return entry;
+        pmsg_put("STARBITE: chain test loader: the appended payload did not start; menu\n");
+    } else {
+        pmsg_put("STARBITE: chain test loader: no appended payload; menu\n");
+    }
+#endif
     log[11] = boot_rd_start;
     log[12] = boot_rd_end;
     /* Rescue mode (the recovery menu's reboot): no POST, no menu. A failure comes back to recovery. */
