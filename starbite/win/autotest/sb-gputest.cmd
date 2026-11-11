@@ -99,6 +99,12 @@ if exist %D%\sbumd-arm64x.dll sbload64.exe %D%\sbumd-arm64x.dll OpenAdapter10 Op
 if exist %D%\sbumd-arm64x.dll echo sbload x64 arm64x exit %errorlevel% >> %D%\gputest.log
 if exist %D%\sbumd-ec.dll sbload64.exe %D%\sbumd-ec.dll OpenAdapter10 OpenAdapter10_2 >> %D%\gputest.log 2>&1
 if exist %D%\sbumd-ec.dll echo sbload x64 ec exit %errorlevel% >> %D%\gputest.log
+rem T44: free the ~110 MB the GL and UMD tests brought before the sweep (C: had 841 MiB in T42 and Explorer's
+rem pagefile growth took 490 of it); their results are in gputest.log and umdlog already.
+for %%F in (gl glx64 glec glx86) do if exist %D%\%%F rmdir /s /q %D%\%%F
+if exist %D%\sbumd-arm64x.dll del /f %D%\sbumd-arm64x.dll
+if exist %D%\sbumd-ec.dll del /f %D%\sbumd-ec.dll
+sbshow.exe disk >> %D%\gputest.log 2>&1
 rem T37: the sweep (sb-sweep.bat: ~27 surfaces, each as a GDI shot and a DWM dump, then the event logs); it replaces
 rem T36's shell steps (the keyboard A/B and the hit grids are in it). Run with --full-sec 900 and no keys self-test.
 if exist %D%\sb-sweep.bat call %D%\sb-sweep.bat

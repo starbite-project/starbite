@@ -1905,6 +1905,21 @@ Every app failure must be a removed device that the app or DWM recovers from.
 - **Geometry Dash:** see docs/WIN11-GPU-CAPS.md §2. In short, it is an x64 OpenGL app (cocos2d-x via glew) and
   Windows has no OpenGL driver for our GPU, so it gets GDI's GL 1.1 and crashes in libcocos2d.dll.
 
+- **T42's run (`build/win/results-t42`, 2026-11-11 19:58-20:17): passed the cycle rules.**
+  - The ledger: "boot 1: clean shutdown or restart after 829 s". The 0x7E lines still in History are T39, T39c and
+    the T38 control (before T41).
+  - `sweep end`; tests as T41 (`sbtex softpipe` 1 and `sbtex vertexid` crashing in user mode are the known two;
+    0133 does not change vertexid, which is T13m's missing `load_vertex_id_zero_base`).
+  - `Live_TdrEngineResets`/`AdapterResets`/`QueriedHung` 0.
+  - **Counters:** `Live_JobsTimedOut` 27 (T41: 45), but `Live_FaultCount` 115 (T41: 90). The faults are still
+    level-3 read translation faults from many shader cores (`mmu 0x..9002c3`) at a few VAs (0x36ad000,
+    0x3496000), not in recently freed ranges. So 0133 did not remove that fault class.
+  - **No verdict on Explorer's header:** C: was at 841 MiB, and opening Explorer grew the pagefile (commit limit 4430
+    -> 4892 MB) to 352 MiB free. Every shot from `07-explorer-c` on was skipped by the 600 MiB guard.
+    - From T44 on, the gputest deletes its GL/UMD test files before the sweep.
+    - The real fix is more free space on C: (the user's call).
+  - **Plan:** not installed by itself. T44 carries the same sbumd: install T44 if it passes, else T42.
+
 ### 6.52 T44: GPU-hang forensics in the KMD (sbwddm 274f0837)
 
 - **The gap:** T41's 45 timeouts left only `js 0x08 ... no MMU fault` in `Live_FaultLog`. That names neither the job
