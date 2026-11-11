@@ -203,6 +203,9 @@ typedef struct {
     float bk;
     uint32_t bw, bh;
     float lx, ly, lw, lh, lb, lt, lc, lr;   /* v9 (LENS): the glass shape (screen px) and its lens (kern/lens.h) */
+    float lsat;                /* v10 (LENS): the backdrop's saturation (0 = 1) */
+    uint32_t live;             /* v10 (LENS): the backdrop is the frame's first `live` items, blurred (the platform's
+                                * gpu makes it; 0, or a platform without it: bd, the blurred wallpaper) */
     const uint8_t *occ;        /* the layer's block map (gpu_occ), or 0 */
     uint32_t occ_w, occ_h;
     uint32_t gen;              /* the content's stamp (the layer's gen, the ground's): what a cache of the frame's

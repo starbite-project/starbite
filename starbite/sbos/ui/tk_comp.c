@@ -991,7 +991,7 @@ static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
     for (int i = 0; i < cur.n; i++) {
         const item *it = &cur.it[i];
         tk_layer *l = it->l;
-        int lens = !l->solid && c->bw_half.px && lens_on(l, it);
+        int lens = !l->solid && c->bw_half.px && lens_on(l, it), below = n;
         if (lens)                               /* v9: Liquid Glass: a quad per glass shape, under the layer's */
             for (int k = 0; k < l->ngsh; k++) {
                 if (n >= TK_GPU_MAX) return -1;
@@ -1021,6 +1021,8 @@ static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
                 e->bh = (uint32_t)c->bw_half.h;
                 e->lx = X; e->ly = Y; e->lw = W; e->lh = H;
                 e->lb = P.lb; e->lt = P.lt; e->lc = P.lc; e->lr = P.lr;
+                e->lsat = 1;                    /* the wallpaper's blur is saturated already */
+                e->live = below > 1 ? (uint32_t)below : 0;   /* v10: what lies under it (more than the ground) */
                 e->gen = c->ground_gen;
             }
         if (n >= TK_GPU_MAX) return -1;

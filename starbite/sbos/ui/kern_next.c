@@ -789,15 +789,92 @@ static int same_item(const tk_gpu_item *a, const tk_gpu_item *b)
            a->len == b->len && a->s0 == b->s0 && a->s1 == b->s1 && a->mask == b->mask && a->mstride == b->mstride &&
            a->bd == b->bd && a->bstride == b->bstride && a->bk == b->bk && a->bw == b->bw && a->bh == b->bh &&
            a->gen == b->gen && a->lx == b->lx && a->ly == b->ly && a->lw == b->lw && a->lh == b->lh && a->lb == b->lb &&
-           a->lt == b->lt && a->lc == b->lc && a->lr == b->lr;
+           a->lt == b->lt && a->lc == b->lc && a->lr == b->lr && a->lsat == b->lsat && a->live == b->live;
 }
 static tk_gpu_item prevq[TK_GPU_MAX], cacheq[TK_GPU_MAX], gx[TK_GPU_MAX];
 static int prev_n, cache_n, stable_p = -1, stable_k;
 static uint32_t wall_made, cache_made;
 _Static_assert(sizeof(tk_irect) == sizeof(struct gc_rect), "tk_irect is gpucomp's gc_rect");
+/* v10, live glass backdrops: a lens quad with `live` gets the blur of the frame's first `live` items (glass over
+ * moving content, glass over glass). Up to GPUCOMP_LEVELS distinct prefixes a frame (more: the last level's); a
+ * level is made again only when its items (or a lower level) changed, and then the glass over it is redrawn in the
+ * next three frames (every buffer) */
+static tk_gpu_item lq[TK_GPU_MAX], lvq[GPUCOMP_LEVELS][TK_GPU_MAX];
+static int lvn[GPUCOMP_LEVELS], lv_ok[GPUCOMP_LEVELS], lv_redraw;
+static uint32_t lv_made, lv_us_max;
+static tk_irect ldmg[96];
+static const tk_gpu_item *live_backdrops(const tk_gpu_item *it, int n, const tk_irect **dmg, int *ndmg)
+{
+    int lv[GPUCOMP_LEVELS], nl = 0, any = 0;
+    for (int i = 0; i < n; i++)
+        if ((it[i].flags & TK_GPU_LENS) && it[i].live > 1 && it[i].live <= (uint32_t)n) {
+            any = 1;
+            if (!nl || (lv[nl - 1] != (int)it[i].live && nl < GPUCOMP_LEVELS)) lv[nl++] = (int)it[i].live;
+        }
+    if (!any) return it;
+    tk_memcpy(lq, it, sizeof(tk_gpu_item) * (size_t)n);
+    int remade = 0, budget = comp.gpu_half ? 1 : GPUCOMP_LEVELS;   /* a big move's frame: one level a frame */
+    for (int L = 0; L < nl; L++) {
+        int p = lv[L];
+        int same = lv_ok[L] && lvn[L] == p && !remade;
+        for (int k = 0; same && k < p; k++) same = same_item(&lq[k], &lvq[L][k]);
+        if (!same && !budget && lv_ok[L]) same = 1;     /* over budget: last frame's (it is made next frame) */
+        if (!same) budget--;
+        const void *bd = 0;
+        uint32_t bs = 0, bw = 0, bh = 0;
+        float bk = 0;
+        if (!same) {
+            uint64_t u = 0;
+            /* the level's backdrop pointers (stable) even when it fails: then this frame's glass shows the wallpaper */
+            if (!gpucomp_backdrop((unsigned)L, 0xff000000U, (const struct gc_quad *)lq, (unsigned)p, &bd, &bs, &bw, &bh, &bk, &u)) {
+                lv_ok[L] = 0;
+                return lq;
+            }
+            tk_memcpy(lvq[L], lq, sizeof(tk_gpu_item) * (size_t)p);
+            lvn[L] = p;
+            lv_ok[L] = 1;
+            remade = 1;
+            lv_made++;
+            if (u > lv_us_max) lv_us_max = (uint32_t)u;
+        }
+        /* the level's result: where gpucomp keeps it (the same every frame) */
+        static const void *lbd[GPUCOMP_LEVELS];
+        static uint32_t lbs[GPUCOMP_LEVELS], lbw[GPUCOMP_LEVELS], lbh[GPUCOMP_LEVELS];
+        static float lbk[GPUCOMP_LEVELS];
+        if (!same) { lbd[L] = bd; lbs[L] = bs; lbw[L] = bw; lbh[L] = bh; lbk[L] = bk; }
+        /* its glass: the quads whose prefix is this level's (the last level takes the deeper ones too) */
+        for (int i = p; i < n; i++) {
+            tk_gpu_item *q = &lq[i];
+            if (!(q->flags & TK_GPU_LENS) || q->live <= 1) continue;
+            int mine = (int)q->live == p || (L == nl - 1 && (int)q->live > p);
+            if (!mine) continue;
+            q->bd = lbd[L];
+            q->bstride = lbs[L];
+            q->bk = lbk[L];
+            q->bw = lbw[L];
+            q->bh = lbh[L];
+            q->lsat = 1.2f;                     /* the audit's regular glass */
+        }
+    }
+    if (remade) lv_redraw = 3;
+    if (lv_redraw > 0 && *ndmg > 0) {
+        /* the glass over a level that changed: in this frame's damage (and the next two, for the other buffers) */
+        int m = 0;
+        for (int i = 0; i < *ndmg && m < 96; i++) ldmg[m++] = (*dmg)[i];
+        for (int i = 0; i < n && m < 96; i++)
+            if ((lq[i].flags & TK_GPU_LENS) && lq[i].live > 1)
+                ldmg[m++] = (tk_irect){ (int)lq[i].cx0, (int)lq[i].cy0, (int)lq[i].cx1 + 1, (int)lq[i].cy1 + 1 };
+        *dmg = ldmg;
+        *ndmg = m;
+    }
+    if (lv_redraw > 0) lv_redraw--;
+    return lq;
+}
+
 static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us)
 {
     (void)ctx;
+    if (n > 0 && n <= TK_GPU_MAX) it = live_backdrops(it, n, &dmg, &ndmg);
     const tk_gpu_item *use = it;
     int un = n;
     uint32_t *cache = (uint32_t *)gpucomp_pool();
@@ -1180,6 +1257,11 @@ static void gpu_vs_cpu(void)
     ub_dec(&u, gpu_clock_steps);
     ub_s(&u, "; layers flushed in idle time ");
     ub_dec(&u, comp.gpu_idle_flushed);
+    ub_s(&u, "; live glass backdrops made ");
+    ub_dec(&u, lv_made);
+    ub_s(&u, " (max us ");
+    ub_dec(&u, lv_us_max);
+    ub_c(&u, ')');
     sb_log(u.b);
     if (!gpu_started) {
         sb_log("selftest: FAILED: next: gpu: the GPU did not come up (see the gpucomp lines)");
