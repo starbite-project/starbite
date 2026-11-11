@@ -11,10 +11,11 @@ phone = '--phone' in sys.argv
 SYS = ['ios16', 'mac13', 'ios26', 'win11', 'android', 'chromeos', 'linux-ubuntu', 'linux-pmos', 'starbite-os', 'engineer', 'utility']
 KEEP = set(['t46-' + k for k in ('apple', 'microsoft', 'google', 'linux', 'starbite')] + ['t38-' + k for k in SYS] + ['t66-' + k for k in SYS] +
            ['t52-' + k for k in ('win11', 'ios26', 'engineer', 'ios16')] +
-           ['a62-' + k for k in ('calendar', 'weather', 'clock', 'camera', 'photos', 'music', 'notes', 'calc', 'phone', 'messages', 'browser', 'settings', 'contacts', 'files', 'light', 'battery', 'terminal', 'medical', 'sos')] +
+           ['a62-' + k for k in ('calendar-bg', 'weather', 'clock', 'camera', 'photos', 'music', 'notes', 'calc', 'phone', 'messages', 'browser', 'settings', 'contacts', 'files', 'light', 'battery', 'terminal', 'medical', 'sos')] +
            ['sb-wifi', 'sb-batt', 'mark-star', 'star', 'chev', 'alarm', 'torch', 'torch-lit', 'flame', 'lock-c', 'lock-o', 'recovery', 'lab',
             'home-batt', 'home-star', 'search', 'arrow',
-            'cc-air', 'cc-cell', 'cc-wifi', 'cc-bt', 'cc-sun', 'cc-vol', 'cc-flame', 'a30-calc', 'a30-camera',
+            'cc-air', 'cc-cell', 'cc-wifi', 'cc-bt', 'cc-sun', 'cc-vol', 'cc-flame', 'cc-calc', 'cc-camera',
+            'kb-shift', 'kb-shift-on', 'kb-delete', 'thermometer',
             'call', 'search15', 'back', 'send', 'heart', 'star-e', 'em-flame', 'e46-heat', 'e46-power', 'e46-sos', 'e46-medical',
             'a62-heat', 'a62-power'] + [f'tab-{k}{v}' for k in ('fav', 'rec', 'con', 'pad') for v in ('', '-on')] +
            [f'cc-{k}{v}' for k in ('light', 'rot', 'save', 'timer', 'wifi2') for v in ('', '-on')])
