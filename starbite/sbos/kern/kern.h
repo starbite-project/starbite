@@ -533,6 +533,10 @@ uint64_t gpucomp_pool_bytes(void);
 uint64_t gpucomp_va(const void *p);
 void gpucomp_clean(const void *p, uint64_t n);
 int gpucomp_compose(void *dst, uint32_t bg, const struct gc_quad *q, unsigned n, uint64_t *us);
+struct gc_rect { int x0, y0, x1, y1; };     /* half-open, screen px (the toolkit's tk_irect) */
+/* as gpucomp_compose, but only the 32 x 32 px tiles the rects touch are drawn; the rest of dst stays */
+int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *q, unsigned n, const struct gc_rect *r,
+                           unsigned nr, uint64_t *us);
 int uibench_setup(void);                /* 1.2-alpha26 P0: the UI compositor's benchmark (uibench.c) */
 void uibench_set(const char *label, unsigned ncores, const unsigned *cores, int worker_only);
 int app_is_test(int a);
