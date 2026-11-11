@@ -484,6 +484,7 @@ void sh_vibrate(void)
 #else
     if (vib_buzz(3, 400, 300) < 0) sb_log("next: timer done: the vibration motor did not answer");
 #endif
+    if (!K.screen_on) power_screen_set(1);           /* P3f: as iOS, the alert wakes the screen (its fade in) */
 }
 static uint64_t tick3;                      /* the next frame's time in thirds of a ms: 16.67 ms apart (the TE's) */
 static void frame(void)

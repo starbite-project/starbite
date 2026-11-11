@@ -1187,7 +1187,7 @@ static const appdef APPS[] = {
     { "phone", "Phone", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "messages", "Messages", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "Not in this version" }, { "Mobile Data", "No SIM" }, { "Battery", "@pct" } } },
-                                           { "", 4, { { "Display & Brightness", "@bright" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" } } },
+                                           { "", 5, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" } } },
                                            { "About", 3, { { "Model", "Galaxy S9 (SM-G960F)" }, { "Software", "@ver" }, { "Memory", "4 GB" } } } } },
 };
 #define NAPPS ((int)(sizeof APPS / sizeof APPS[0]))
@@ -1492,6 +1492,7 @@ static void page_camera(dc *d)
  * drawn in the strips; the stopwatch's and the timer's digits and the buttons are three small layers, redrawn
  * only when their text changes (the platform asks sh_next_update when to come back) ---- */
 static int is_app(const char *k);
+static float toast_left;
 static tk_layer apsw, aptm, apctl;
 static struct { int sw_run, laps, tm_run, sw_ds, tm_s, ctl_ver, ctl_drawn; float sw_t0, sw_acc, lap_at, tm_end; } CLK = { 0, 0, 0, -1, -1, 1, 0, 0, 0, 0, 0 };
 static float clk_sw_ms(float t) { return CLK.sw_acc + (CLK.sw_run ? t - CLK.sw_t0 : 0); }
@@ -1564,8 +1565,9 @@ static int clk_update(float t)
     if (CLK.tm_run && t >= CLK.tm_end) {
         CLK.tm_run = 0;
         CLK.ctl_ver++;
-        sh_vibrate();
+        sh_vibrate();                       /* the platform also wakes the screen (P3f) */
         toast("Timer done");
+        toast_left = 6000;                  /* an alert stays longer than a toast */
         any = 1;
     }
     if (!is_app("clock") || !AP.on) return any;
