@@ -234,6 +234,7 @@ typedef struct {
     int audio, muted, audio_ok;         /* SH_AUDIO_*; audio_ok 0: connected, but no audio path yet */
     char number[24];                    /* "" withheld */
     char why[SH_WHY];                   /* how it ended, in words */
+    char audio_why[SH_WHY];             /* fa4ec7f: audio_ok 0: the missing part; audio_ok 1: a warning (the mic) */
 } sh_call_t;
 #define SH_SMS_MAX 32
 enum { SH_SMS_RECEIVED, SH_SMS_SENDING, SH_SMS_SENT, SH_SMS_FAILED };

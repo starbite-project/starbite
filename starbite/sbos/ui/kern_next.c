@@ -1337,6 +1337,7 @@ static int comms_now(void)
         s.audio = c.audio; s.muted = c.muted; s.audio_ok = c.audio_ok;        /* KAUDIO_* = SH_AUDIO_* */
         sb_strcpy(s.number, sizeof(s.number), c.number);
         sb_strcpy(s.why, sizeof(s.why), c.why);
+        sb_strcpy(s.audio_why, sizeof(s.audio_why), c.audio_why);
         sh_call(&s);
         if (c.state == KCALL_INCOMING && !K.screen_on) power_screen_set(1);
         ch = 1;
