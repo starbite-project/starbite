@@ -1,0 +1,1 @@
+debug=0xc serial=3 cpus=8 -v rd=sdroot0 sdroot=lba:182888448,33554432 rootrw=1 wdt=-1 a5fb_keep_on=1 sweetfb_native=1 sweetfb_scale=1 sweetfb_lw=828 sweetfb_lh=1792 sbstop=pe

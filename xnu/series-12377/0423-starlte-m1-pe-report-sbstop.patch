@@ -1,0 +1,189 @@
+From 0db831684e42cf69890254e27cc9dea92e03d928 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 11 Nov 2026 15:51:05 +0200
+Subject: [PATCH] patch: 0423-starlte-m1-pe-report-sbstop.patch - StarbitePE
+ report line at platform-expert start (board, arm-io and cpu nodes, boot_args
+ layout check via memSizeActual) and sbstop=<stage>: a test boot that never
+ feeds the loader's watchdog, sends panics/resets to TWRP, and resets into
+ TWRP itself at the stage (M1: sbstop=pe)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/herolte_ufs.c                    | 39 ++++++++++++
+ iokit/Kernel/arm/SweetPlatformExpert.cpp | 78 ++++++++++++++++++++++++
+ 2 files changed, 117 insertions(+)
+
+diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
+index 09a73916..acbc5e98 100644
+--- a/bsd/dev/herolte_ufs.c
++++ b/bsd/dev/herolte_ufs.c
+@@ -989,6 +989,9 @@ static volatile bool starlte_wdt_stop;          /* a panic began, or sbtesthang:
+ static thread_call_t starlte_wdt_call;
+ static uint64_t starlte_test_hang_abs;          /* sbtesthang as an absolute time, 0 = off */
+ static uint32_t starlte_test_panic_s;           /* boot-arg sbtestpanic */
++static char starlte_sbstop[16];                 /* 0423: boot-arg sbstop=<stage> (M1: "pe") */
++int starlte_sbstop_at(const char *stage);
++void starlte_sbstop_now(const char *stage);
+ extern void (*sweet_panic_hook)(void);
+ extern char *debug_buf_base;
+ extern char *debug_buf_ptr;
+@@ -1175,6 +1178,18 @@ starlte_reboot_early(void)
+ 		starlte_crash_mode = sbh_crash_mode(mode);
+ 	}
+ 	wdt_found = PE_parse_boot_argn("sbwdt", &starlte_sbwdt_s, sizeof(starlte_sbwdt_s)) ? true : false;
++	/*
++	 * 0423: sbstop=<stage> (docs/APPLE-S9-DRIVERS.md M1) is a test boot that must come back on its own, whatever
++	 * XNU does: the watchdog the loader armed is never fed (it resets sbwdt= s after the hand-off), and panics,
++	 * that reset and the stop itself all go to TWRP (INFORM3 = recovery at boot, 0422), even when the loader
++	 * appends sbcrash=loader. The T37 lesson: an XNU-fed watchdog cannot catch a hang XNU keeps feeding through.
++	 */
++	if (PE_parse_boot_argn("sbstop", starlte_sbstop, sizeof(starlte_sbstop) - 1) && starlte_sbstop[0] != '\0') {
++		starlte_wdt_stop = true;
++		starlte_crash_mode = SBH_CRASH_RECOVERY;
++	} else {
++		starlte_sbstop[0] = '\0';
++	}
+ 	starlte_wdt_early(wdt_found);
+ 	if (starlte_sweetreboot_s != 0 || starlte_crash_mode != SBH_CRASH_UNSET || starlte_wdt_period_ms != 0) {
+ 		starlte_reboot_setup();
+@@ -1200,6 +1215,30 @@ starlte_reboot_early(void)
+ 	} else if (mode[0] != '\0' && starlte_crash_mode == SBH_CRASH_UNSET) {
+ 		printf("STARBITE HEALTH: sbcrash=%s: unknown (loader, recovery), ignored\n", mode);
+ 	}
++	if (starlte_sbstop[0] != '\0') {
++		printf("STARBITE HEALTH: sbstop=%s: test boot (0423): the watchdog is never fed (it resets in sbwdt=%u s "
++		    "whatever XNU does), panics and resets go to TWRP%s\n", starlte_sbstop, starlte_sbwdt_s,
++		    starlte_wdt_period_ms != 0 ? "" : "; WARNING: the loader armed no watchdog, only the stop itself resets");
++	}
++}
++
++/*
++ * 0423: the self-stop point of a milestone test boot (sbstop=<stage>). starlte_sbstop_at(stage) says whether this
++ * boot stops there; starlte_sbstop_now(stage) dumps the console tail into the pmsg ring and resets into TWRP.
++ */
++int
++starlte_sbstop_at(const char *stage)
++{
++	return starlte_sbstop[0] != '\0' && strcmp(starlte_sbstop, stage) == 0;
++}
++
++void
++starlte_sbstop_now(const char *stage)
++{
++	printf("STARBITE: sbstop=%s: stage reached, resetting into TWRP\n", stage);
++	delay(300 * 1000);                      /* let the console ring take the lines above */
++	starlte_pmsg_save("STARBITE: sbstop (no panic), console tail:\n", NULL, false);
++	starlte_reset(SBH_INFORM3_RECOVERY);
+ }
+ STARTUP(KMEM, STARTUP_RANK_LAST, starlte_reboot_early);
+ 
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index 193845fc..d9c2fd12 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -7,6 +7,14 @@
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOPlatformExpert.h>
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++#include <pexpert/arm64/boot.h>
++extern "C" {
++extern boot_args *BootArgs;
++int starlte_sbstop_at(const char *stage);
++void starlte_sbstop_now(const char *stage);
++}
++#endif
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
+ 
+@@ -18,6 +26,9 @@ public:
+ 	void processTopLevel(IORegistryEntry *root) APPLE_KEXT_OVERRIDE;
+ 	const char *deleteList(void) APPLE_KEXT_OVERRIDE;
+ 	const char *excludeList(void) APPLE_KEXT_OVERRIDE;
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	void starbiteReport(IOService *provider);
++#endif
+ };
+ 
+ OSDefineMetaClassAndStructors(SweetPlatformExpert, IODTPlatformExpert);
+@@ -38,10 +49,77 @@ SweetPlatformExpert::start(IOService *provider)
+ 	IOLog("A5XELTE: platform expert registered\n");
+ #else
+ 	IOLog("SWEET: platform expert registered\n");
++#endif
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	starbiteReport(provider);
+ #endif
+ 	return true;
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++/*
++ * 0423, docs/APPLE-S9-DRIVERS.md M1: what the loader and the board ADT (tools/board/mkadt-board.py) handed over,
++ * in one line, then the M1 self-stop (sbstop=pe). memSizeActual is non-zero only when the loader wrote the
++ * 1024-byte boot_args layout (a version-2 payload): with the old 608-byte layout it lands inside CommandLine.
++ */
++static unsigned
++starbiteCountChildren(const char *path, unsigned *withProp, const char *prop)
++{
++	unsigned n = 0;
++	IORegistryEntry *e = IORegistryEntry::fromPath(path, gIODTPlane);
++	if (withProp != NULL) {
++		*withProp = 0;
++	}
++	if (e == NULL) {
++		return 0;
++	}
++	OSIterator *it = e->getChildIterator(gIODTPlane);
++	if (it != NULL) {
++		IORegistryEntry *c;
++		while ((c = OSDynamicCast(IORegistryEntry, it->getNextObject())) != NULL) {
++			n++;
++			if (withProp != NULL && c->getProperty(prop) != NULL) {
++				(*withProp)++;
++			}
++		}
++		it->release();
++	}
++	e->release();
++	return n;
++}
++
++void
++SweetPlatformExpert::starbiteReport(IOService *provider)
++{
++	char board[48] = "?";
++	OSData *comp = OSDynamicCast(OSData, provider->getProperty("compatible"));
++	if (comp != NULL && comp->getLength() > 1) {
++		const char *b = (const char *)comp->getBytesNoCopy();
++		unsigned len = comp->getLength(), last = 0;
++		for (unsigned i = 0; i + 1 < len; i++) {
++			if (b[i] == '\0') {
++				last = i + 1;
++			}
++		}
++		strlcpy(board, b + last, (len - last + 1) < sizeof(board) ? (len - last + 1) : sizeof(board));
++	}
++	unsigned armio_board = 0, cpus_board = 0;
++	unsigned armio = starbiteCountChildren("/arm-io", &armio_board, "starbite,driver");
++	unsigned cpus = starbiteCountChildren("/cpus", &cpus_board, "starbite,cluster");
++	boot_args *ba = BootArgs;
++	unsigned used = ba != NULL ? (unsigned)strnlen(ba->CommandLine, BOOT_LINE_LENGTH) : 0;
++	IOLog("StarbitePE: board %s, %u arm-io nodes (%u from the board file), %u cpus (%u with clusters), "
++	    "cmdline %u (%u used), boot_args %u.%u memSize=0x%llx memSizeActual=0x%llx bootFlags=0x%llx: %s\n",
++	    board, armio, armio_board, cpus, cpus_board, (unsigned)BOOT_LINE_LENGTH, used,
++	    ba ? ba->Revision : 0, ba ? ba->Version : 0, ba ? ba->memSize : 0ULL, ba ? ba->memSizeActual : 0ULL,
++	    ba ? ba->bootFlags : 0ULL,
++	    ba && ba->memSizeActual == ba->memSize ? "loader layout matches" : "LAYOUT MISMATCH (608-byte loader?)");
++	if (starlte_sbstop_at("pe")) {
++		starlte_sbstop_now("pe");
++	}
++}
++#endif
++
+ const char *
+ SweetPlatformExpert::deleteList(void)
+ {
+-- 
+2.53.0
+
