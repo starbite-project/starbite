@@ -57,7 +57,7 @@ fi
 
 CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie -fvisibility=hidden \
 -nostdlib -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-plt -mstrict-align -mcpu=cortex-a55 \
--fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$here/kern -I$here/sdk -I$ut -I$root/starbite/wifi -I$root/starbite/guest/sbos"
+-fno-math-errno -ffp-contract=fast -Wall -Wextra -Werror -ffile-prefix-map=$root=. -I$lib -I$here/kern -I$here/sdk -I$ut -I$root/starbite/wifi -I$root/starbite/wifi/tls/bearssl/inc -I$root/starbite/guest/sbos"
 V80FLAGS=$(echo "$CFLAGS" | sed 's/-mcpu=cortex-a55/-march=armv8-a+simd -mtune=cortex-a55/')
 LDFLAGS="-pie --no-dynamic-linker -z text -z norelro -z noexecstack --build-id=none --no-warn-rwx-segments --hash-style=gnu"
 
@@ -106,15 +106,31 @@ wifi="$root/starbite/wifi"
 for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$ut/exfat.c" \
            "$wifi/core.c" "$wifi/exynos_pcie.c" "$wifi/chip.c" "$wifi/fw.c" "$wifi/ring.c" "$wifi/msgbuf.c" "$wifi/link.c" \
            "$wifi/wpa.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" \
+           "$wifi/tcp.c" "$wifi/netio.c" "$wifi/http.c" "$wifi/tls/ta.c" "$wifi/tls/tls_chains.c" "$wifi/tls/tls_check.c" \
            "$root/starbite/guest/sbos/guest.c" "$root/starbite/guest/host/sbghost.c"; do
     obj="$ob/k_$(basename "$src" | tr . _).o"
     flags=$CFLAGS
+    case "$src" in                          # BearSSL's headers include <string.h>: the shim's, not the C library's
+    */kern/wifi.c|*/wifi/http.c|*/wifi/netio.c|*/wifi/tls/*) flags="$flags -I$wifi/tls/shim" ;;
+    */kern/modem.c) flags="$flags -DSBM_ATTENDED_TX" ;;   # mobile data: the user's Cellular switch (docs/MODEM.md 7.10)
+    esac
     case " smp.c heatk.c ocp.c " in
     *" $(basename "$src") "*)
         flags=$V80FLAGS
         v80objs="$v80objs $obj" ;;
     esac
     "${CROSS}gcc" $flags -DSBOS_KERNEL -DSB_ASSETS="\"$ob/sbassets.sb7\"" -DSBOS_APPS="\"$ob/apps.pack\"" "$src" -o "$obj"
+    objs="$objs $obj"
+done
+# Next (wifi-sbos-next): BearSSL for HTTPS (starbite/wifi/tls/bearssl: the files a TLS 1.2 client links, MIT,
+# unmodified, so built without our warnings), with no OS randomness or clock of its own, byte-wise loads (the
+# kernel is -mstrict-align), and <string.h> from the shim (libsb has the five functions it uses)
+brs="$wifi/tls/bearssl"
+BRFLAGS="$(echo "$CFLAGS" | sed 's/ -Wall -Wextra -Werror//') -w -I$wifi/tls/shim -I$brs/src -DBR_USE_URANDOM=0 \
+-DBR_USE_UNIX_TIME=0 -DBR_USE_GETENTROPY=0 -DBR_RDRAND=0 -DBR_LE_UNALIGNED=0 -DBR_BE_UNALIGNED=0"
+for f in $(cat "$brs/FILES"); do
+    obj="$ob/br_$(echo "$f" | tr / _ | sed 's/\.c$/.o/')"
+    "${CROSS}gcc" $BRFLAGS "$brs/src/$f" -o "$obj"
     objs="$objs $obj"
 done
 # 1.2-alpha21: modem-core (docs/MODEM.md 7.6) for the Modem app, receive only. Its ext4 reader (a superset of
@@ -124,7 +140,7 @@ MREN="-Dext4_open=m_ext4_open -Dext4_inode=m_ext4_inode -Dext4_size=m_ext4_size 
 -Dext4_lookup=m_ext4_lookup -Dext4_bmap=m_ext4_bmap -Dext4_list=m_ext4_list"
 for src in "$modem"/sbm_*.c "$modem/sb/sbm_sb.c" "$modem/sb/ext4.c" "$modem/sb/jbd2.c"; do
     obj="$ob/km_$(basename "$src" | tr . _).o"
-    "${CROSS}gcc" $CFLAGS $MREN -I"$modem" "$src" -o "$obj"
+    "${CROSS}gcc" $CFLAGS $MREN -DSBM_ATTENDED_TX -I"$modem" "$src" -o "$obj"
     objs="$objs $obj"
 done
 # the rule of the modem images: no partition write from the modem code (libsb's storage hold is on while it runs)
@@ -180,6 +196,9 @@ if [ -n "$PAK" ]; then
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT "$here/kern/uitest.c" -o "$ob/k_uitest_next.o"
     nobjs="$(echo "$objs" | sed "s#$ob/k_main_c.o#$ob/k_main_next.o#") $nui $ob/n_pack.o"
     nstobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_next.o#; s#$ob/n_kern_next.o#$ob/n_kern_next_st.o#")
+    # wifi-sbos-next: Next with the silent Wi-Fi self test (the TLS self-check, one scan, no join; then recovery)
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_WIFI "$here/kern/uitest.c" -o "$ob/k_uitest_nwifi.o"
+    nwobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_nwifi.o#")
 else
     echo "sbos: no build/sbtk/sbtk-phone.pak: the starbite-next images are not built" >&2
 fi
@@ -272,8 +291,8 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
 "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
 if [ -n "$nobjs" ]; then
-    for v in next next-selftest; do
-        if [ "$v" = next ]; then vo=$nobjs; else vo=$nstobjs; fi
+    for v in next next-selftest next-wifitest; do
+        case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; *) vo=$nwobjs ;; esac
         "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
         und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)
         if [ -n "$und" ]; then

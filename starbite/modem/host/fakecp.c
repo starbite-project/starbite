@@ -83,6 +83,11 @@ static void regist(struct fakecp *fc, uint8_t ch, uint8_t aseq, uint8_t type, ui
         d[0] = SBM_ACT_GSM;
         d[2] = SBM_REG_SEARCHING;
         break;
+    case FAKE_SIM:
+        d[0] = fc->radio_normal ? SBM_ACT_LTE : SBM_ACT_GSM;
+        d[2] = fc->radio_normal && !fc->pin_lock && (!fc->need_attach_apn || fc->n_attach_apn) ? SBM_REG_HOME
+             : fc->radio_normal && fc->pin_lock ? SBM_REG_EMERGENCY : SBM_REG_NONE;
+        break;
     }
     d[1] = domain;
     d[4] = 0x12; d[5] = 0x34;                       /* test LAC / cell id */
@@ -92,7 +97,9 @@ static void regist(struct fakecp *fc, uint8_t ch, uint8_t aseq, uint8_t type, ui
 
 static void pin_status(struct fakecp *fc, uint8_t ch, uint8_t aseq, uint8_t type)
 {
-    uint8_t d[2] = { fc->sc == FAKE_NOSIM ? SBM_SIM_ABSENT : SBM_SIM_INIT_COMPLETE, 0 };
+    uint8_t d[2] = { fc->sc == FAKE_NOSIM ? SBM_SIM_ABSENT : fc->sc == FAKE_SIM && fc->pin_lock ? SBM_SIM_LOCK_SC
+                                                                                                : SBM_SIM_INIT_COMPLETE,
+                     (uint8_t)(fc->sc == FAKE_SIM && fc->pin_lock ? 0x01 : 0) };
     fakecp_send(fc, ch, aseq, SBM_SEC_PIN_STATUS, type, d, 2);
 }
 
@@ -126,6 +133,68 @@ static void answer(struct fakecp *fc, uint8_t ch, const struct sbm_ipc_msg *m)
     fc->n_req++;
     if ((m->cmd >> 8) == SBM_G_CALL)
         fc->n_call++;
+    if (m->cmd == SBM_PWR_PHONE_STATE && m->type == SBM_IPC_EXEC && m->data_len == 2 &&
+        ((m->data[0] == 0x02 && m->data[1] == 0x02) || (m->data[0] == 0x01 && m->data[1] == 0x00))) {
+        fc->n_radio_exec++;
+        if (fc->sc == FAKE_SIM)
+            fc->radio_normal = m->data[0] == 0x02;
+        gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        regist(fc, SBM_CH_FMT0, 0, SBM_IPC_NOTI, SBM_DOMAIN_CS);
+        regist(fc, SBM_CH_FMT0, 0, SBM_IPC_NOTI, SBM_DOMAIN_PS);
+        return;
+    }
+#ifdef SBM_ATTENDED_TX
+    if (m->cmd == SBM_NET_PLMN_SEL && m->type == SBM_IPC_SET &&
+        sbm_ipc_attended_allowed(m->cmd, m->type, m->data, m->data_len)) {
+        fc->n_net_auto++;
+        gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        return;
+    }
+    if ((m->cmd >> 8) == SBM_G_GPRS && sbm_ipc_attended_allowed(m->cmd, m->type, m->data, m->data_len)) {
+        fc->n_gprs++;
+        if (m->cmd == SBM_GPRS_LTE_ATTACH) {
+            fc->n_attach_apn++;
+            gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+            regist(fc, SBM_CH_FMT0, 0, SBM_IPC_NOTI, SBM_DOMAIN_CS);
+            regist(fc, SBM_CH_FMT0, 0, SBM_IPC_NOTI, SBM_DOMAIN_PS);
+        } else if (m->cmd == SBM_GPRS_PS) {
+            fc->n_ps_attach++;
+            gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        } else if (m->cmd == SBM_GPRS_DEFINE_PDP) {
+            fc->n_define++;
+            memcpy(fc->apn, m->data + 3, 100);
+            fc->apn[100] = 0;
+            gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        } else if (m->cmd == SBM_GPRS_PDP_CONTEXT) {
+            if (m->data_len == SBM_GPRS_ACT_LEN && fc->act_refuse_short) {
+                gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x000a);
+                return;
+            }
+            gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+            if (m->data[0] == 1 && fc->n_define) {
+                uint8_t ipc[160] = { 1, 0x19, 0x20 };   /* cid 1, flags IPv4 | gw | mask | MTU (0x2019) */
+                const uint8_t ip[4] = { 10, 11, 12, 13 }, d1[4] = { 10, 0, 0, 53 }, gw[4] = { 10, 11, 12, 1 };
+                memcpy(ipc + 3, ip, 4);
+                memcpy(ipc + 7, d1, 4);
+                memcpy(ipc + 15, gw, 4);
+                ipc[152] = 0xdc; ipc[153] = 0x05;       /* MTU 1500 */
+                fc->pdp_up = 1;
+                fc->n_act++;
+                fakecp_send(fc, SBM_CH_FMT0, 0, SBM_GPRS_IP_CONFIG, SBM_IPC_NOTI, ipc, sizeof(ipc));
+                uint8_t st[9] = { 1, 1, 0 };
+                fakecp_send(fc, SBM_CH_FMT0, 0, SBM_GPRS_CALL_STATUS, SBM_IPC_NOTI, st, sizeof(st));
+            } else if (m->data[0] == 0) {
+                fc->pdp_up = 0;
+                fc->n_deact++;
+                uint8_t st[9] = { 1, 0, 0 };
+                fakecp_send(fc, SBM_CH_FMT0, 0, SBM_GPRS_CALL_STATUS, SBM_IPC_NOTI, st, sizeof(st));
+            }
+        } else {
+            gen_res(fc, ch, m->mseq, m->cmd, m->type, 0x8000);
+        }
+        return;
+    }
+#endif
     if (!sbm_ipc_allowed(m->cmd, m->type))
         fc->n_forbidden++;
     if (m->type != SBM_IPC_GET) {
@@ -155,7 +224,7 @@ static void answer(struct fakecp *fc, uint8_t ch, const struct sbm_ipc_msg *m)
     case SBM_NET_SERVING_NETWORK: {
         /* u8, state, u8, plmn[6] ASCII ('#' padding), lac, then zeros to this firmware's 26 bytes */
         uint8_t d[26] = { 0x02, 0x01, 0xff, '#', '#', '#', '#', '#', '#' };
-        if (fc->sc == FAKE_HOME || fc->nosim_plmn)
+        if (fc->sc == FAKE_HOME || fc->nosim_plmn || (fc->sc == FAKE_SIM && fc->radio_normal))
             memcpy(d + 3, "00101#", 6);
         fakecp_send(fc, ch, m->mseq, m->cmd, SBM_IPC_RESP, d, sizeof(d));
         break;
@@ -166,7 +235,7 @@ static void answer(struct fakecp *fc, uint8_t ch, const struct sbm_ipc_msg *m)
         break;
     }
     case SBM_DISP_ICON_INFO: {
-        uint8_t d[12] = { 0x01, fc->sc == FAKE_HOME ? 3 : 0 };
+        uint8_t d[12] = { 0x01, fc->sc == FAKE_HOME || (fc->sc == FAKE_SIM && fc->radio_normal && !fc->pin_lock) ? 3 : 0 };
         fakecp_send(fc, ch, m->mseq, m->cmd, SBM_IPC_RESP, d, sizeof(d));
         break;
     }
@@ -319,4 +388,183 @@ uint64_t fakeregs_smc(void *ctx, uint64_t id, uint64_t a1, uint64_t a2, uint64_t
         return 0xFFFF;
     uint32_t v = r->ctrl[a3];
     return (uint64_t)((a2 ? v >> 16 : v & 0xFFFF) << 16);
+}
+
+/* ---- the fake network behind the PS rings ------------------------------------------------------------------ */
+
+static uint16_t f_csum_add(uint32_t s, const uint8_t *b, uint32_t n)
+{
+    for (uint32_t i = 0; i + 1 < n; i += 2)
+        s += (uint32_t)b[i] << 8 | b[i + 1];
+    if (n & 1)
+        s += (uint32_t)b[n - 1] << 8;
+    while (s >> 16)
+        s = (s & 0xFFFF) + (s >> 16);
+    return (uint16_t)s;
+}
+static void f_put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
+static void f_put32(uint8_t *p, uint32_t v) { f_put16(p, (uint16_t)(v >> 16)); f_put16(p + 2, (uint16_t)v); }
+static uint16_t f_get16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
+static uint32_t f_get32(const uint8_t *p) { return (uint32_t)f_get16(p) << 16 | f_get16(p + 2); }
+
+/* an IPv4 packet from src to the phone (10.11.12.13), checksums filled */
+static uint32_t f_ip(uint8_t *pk, const uint8_t src[4], uint8_t proto, uint32_t l4len)
+{
+    static const uint8_t me[4] = { 10, 11, 12, 13 };
+    uint32_t tot = 20 + l4len;
+    memset(pk, 0, 20);
+    pk[0] = 0x45;
+    f_put16(pk + 2, (uint16_t)tot);
+    f_put16(pk + 6, 0x4000);
+    pk[8] = 60;
+    pk[9] = proto;
+    memcpy(pk + 12, src, 4);
+    memcpy(pk + 16, me, 4);
+    f_put16(pk + 10, (uint16_t)~f_csum_add(0, pk, 20));
+    uint8_t ph[12];
+    memcpy(ph, src, 4);
+    memcpy(ph + 4, me, 4);
+    ph[8] = 0;
+    ph[9] = proto;
+    f_put16(ph + 10, (uint16_t)l4len);
+    uint8_t *l4 = pk + 20;
+    unsigned co = proto == 6 ? 16 : 6;
+    f_put16(l4 + co, 0);
+    uint16_t c = (uint16_t)~f_csum_add(f_csum_add(0, ph, 12), l4, l4len);
+    f_put16(l4 + co, proto == 17 && !c ? 0xFFFF : c);
+    return tot;
+}
+
+/* DL: ch 10 (plain) or the zero-copy ring ch 11 (the CP takes the cell offset the AP put in the slot at wp) */
+static void f_dl(struct fakecp *fc, const uint8_t *pk, uint32_t len, int zc)
+{
+    if (!zc) {
+        if (sbm_sbd_put(&fc->sbd, SBM_CH_PDP0, SBM_DL, pk, len, 0) == 0)
+            fc->net_dl++;
+        return;
+    }
+    int id = sbm_sbd_id(&fc->sbd, SBM_CH_PDP_HI);
+    struct sbm_ring *r = &fc->sbd.r[id][SBM_DL];
+    unsigned w = sbm_sbd_wp(&fc->sbd, (unsigned)id, SBM_DL), rp = sbm_sbd_rp(&fc->sbd, (unsigned)id, SBM_DL);
+    if (w == rp) {                       /* no empty cell handed over */
+        fc->net_zc_full++;
+        return;
+    }
+    uint8_t *slot = fc->sbd.ipc + r->buff_off + w * r->size;
+    uint64_t off = (uint64_t)sbm_le32(slot) | (uint64_t)sbm_le32(slot + 4) << 32;
+    memcpy(fc->sbd.ipc + off, pk, len);
+    sbm_put32(fc->sbd.ipc + r->size_v_off + 4 * w, (len & 0xFFFF) | (uint32_t)SBM_CH_PDP0 << 16);
+    uint16_t nw = (uint16_t)((w + 1) % r->len);
+    memcpy(fc->sbd.ipc + fc->sbd.rbps_off + 2u * (fc->sbd.n * 3u + (unsigned)id), &nw, 2);   /* DL wp */
+    fc->net_dl_zc++;
+}
+
+static void f_tcp(struct fakecp *fc, const uint8_t *src_ip, const uint8_t *t, uint32_t tl)
+{
+    static const char resp[] = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    uint8_t pk[1600];
+    uint8_t *o = pk + 20;
+    uint8_t fl = t[13];
+    uint32_t hl = (uint32_t)(t[12] >> 4) * 4, seq = f_get32(t + 4), dl = tl - hl;
+    memset(o, 0, 20);
+    f_put16(o, f_get16(t + 2));
+    f_put16(o + 2, f_get16(t));
+    o[12] = 5 << 4;
+    f_put16(o + 14, 65535);
+    if (fl & 0x02) {
+        fc->net_syn++;
+        if (fc->net_drop_first_syn && fc->net_syn == 1)
+            return;
+        fc->tcp_isn = 0x10000000;
+        fc->tcp_rcv = seq + 1;
+        fc->tcp_snd = fc->tcp_isn + 1;
+        f_put32(o + 4, fc->tcp_isn);
+        f_put32(o + 8, fc->tcp_rcv);
+        o[13] = 0x12;
+        f_dl(fc, pk, f_ip(pk, src_ip, 6, 20), 1);
+        fc->tcp_state = 1;
+        return;
+    }
+    if (dl && seq == fc->tcp_rcv && fc->tcp_state == 1) {
+        fc->tcp_rcv += dl;
+        if (dl > 4 && !memcmp(t + hl, "GET ", 4))
+            fc->net_http++;
+        /* the response in one segment, then FIN */
+        f_put32(o + 4, fc->tcp_snd);
+        f_put32(o + 8, fc->tcp_rcv);
+        o[13] = 0x18;
+        memcpy(o + 20, resp, sizeof(resp) - 1);
+        f_dl(fc, pk, f_ip(pk, src_ip, 6, 20 + sizeof(resp) - 1), 1);
+        fc->tcp_snd += sizeof(resp) - 1;
+        memset(o + 4, 0, 10);
+        f_put32(o + 4, fc->tcp_snd);
+        f_put32(o + 8, fc->tcp_rcv);
+        o[12] = 5 << 4;
+        o[13] = 0x11;
+        f_dl(fc, pk, f_ip(pk, src_ip, 6, 20), 1);
+        fc->tcp_snd += 1;
+        fc->tcp_state = 2;
+        return;
+    }
+    if ((fl & 0x01) && fc->tcp_state == 2) {             /* the client's FIN: ACK it */
+        fc->tcp_rcv = seq + dl + 1;
+        f_put32(o + 4, fc->tcp_snd);
+        f_put32(o + 8, fc->tcp_rcv);
+        o[13] = 0x10;
+        f_dl(fc, pk, f_ip(pk, src_ip, 6, 20), 1);
+        fc->tcp_state = 3;
+    }
+}
+
+static void f_udp_dns(struct fakecp *fc, const uint8_t *src_ip, const uint8_t *u, uint32_t ul)
+{
+    uint8_t pk[600];
+    uint8_t *o = pk + 20;
+    const uint8_t *q = u + 8;
+    uint32_t ql = ul - 8;
+    if (ql < 12 || ql > 300)
+        return;
+    fc->net_dns++;
+    f_put16(o, 53);
+    f_put16(o + 2, f_get16(u));
+    memcpy(o + 8, q, ql);
+    o[8 + 2] = 0x81;
+    o[8 + 3] = 0x80;
+    f_put16(o + 8 + 6, 1);
+    static const uint8_t ans[16] = { 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 93, 184, 216, 34 };
+    memcpy(o + 8 + ql, ans, sizeof(ans));
+    f_put16(o + 4, (uint16_t)(8 + ql + sizeof(ans)));
+    f_dl(fc, pk, f_ip(pk, src_ip, 17, 8 + ql + sizeof(ans)), 0);
+}
+
+int fakecp_net_step(struct fakecp *fc)
+{
+    int id = sbm_sbd_id(&fc->sbd, SBM_CH_PDP0), handled = 0;
+    if (id < 0)
+        return 0;
+    for (;;) {
+        const uint8_t *f;
+        int n = sbm_sbd_get(&fc->sbd, (unsigned)id, SBM_UL, &f, 0);
+        if (n == 0)
+            break;
+        if (n < 0 || (fc->sbd.last_size_v >> 16) != SBM_CH_PDP0 || !fc->pdp_up || n < 28 || (f[0] >> 4) != 4) {
+            fc->net_bad++;
+            if (n >= 0)
+                sbm_sbd_get_done(&fc->sbd, (unsigned)id, SBM_UL, 0);
+            continue;
+        }
+        fc->net_ul++;
+        handled++;
+        uint32_t ihl = (uint32_t)(f[0] & 15) * 4;
+        uint8_t dst[4];
+        memcpy(dst, f + 16, 4);
+        if (f[9] == 17 && f_get16(f + ihl + 2) == 53)
+            f_udp_dns(fc, dst, f + ihl, (uint32_t)n - ihl);
+        else if (f[9] == 6)
+            f_tcp(fc, dst, f + ihl, (uint32_t)n - ihl);
+        else
+            fc->net_bad++;
+        sbm_sbd_get_done(&fc->sbd, (unsigned)id, SBM_UL, 0);
+    }
+    return handled;
 }

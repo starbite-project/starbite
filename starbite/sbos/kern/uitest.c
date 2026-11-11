@@ -244,6 +244,20 @@ void selftest_timer(unsigned id)
             return;
         }
 #endif
+#ifdef SBOS_SELFTEST_NEXT_WIFI
+        {
+            /* Starbite OS Next, Wi-Fi (wifi-sbos-next): silent: the TLS self-check (no network), the radio on, one
+             * scan, the radio off; never a join, never a transmission beyond the scan's probes; then recovery (pmsg).
+             * The watchdog at 30 s, fed by the loop; the 180 s STALLED timer restarts into recovery too. */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: next-wifi: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: next-wifi: the watchdog could not be set (the loader's stays): ", w);
+            sb_log("selftest: next-wifi: the TLS self-check, then on, the bring-up, one scan (no join), off");
+            wifi_selftest_scan_only = 1;
+            phase = 95;
+            break;
+        }
+#endif
 #ifdef SBOS_SELFTEST_NEXT
         {
             /* Starbite OS Next (ui/kern_next.c): the bake's times, the four films with synthetic touches and every
@@ -631,6 +645,25 @@ void selftest_timer(unsigned id)
     case 43:
         active = 0;
         vib_off();
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_NEXT_WIFI
+    case 95: {
+        int done = 0;
+        if (!wifi_selftest_phase(&done))
+            ++fails;
+        if (!done)
+            break;
+        sb_logx(fails ? "selftest: next-wifi: FAILED (see above); a restart into recovery (pmsg) after seconds " :
+                        "selftest: next-wifi: PASSED; a restart into recovery (pmsg) after seconds ",
+                (sb_ms() - t0) / 1000U);
+        phase = 96;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
+        return;
+    }
+    case 96:
+        active = 0;
         power_restart_recovery();
         return;
 #endif

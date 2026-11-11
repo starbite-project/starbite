@@ -154,6 +154,7 @@ static int booting;
 static float now_ms;
 static int EMG;                 /* Emergency mode (the concept's em-mode) */
 static int cell_running(void);  /* the modem runs (sh_cell) */
+static void cell_toggle(void);  /* the Cellular switch (sh_cellular) */
 static const char *md_text(void);
 
 /* ---- the wallpaper and its glass backdrop ------------------------------------------------------------------ */
@@ -190,6 +191,7 @@ static void build_wall(void)
 /* ---- the status bar (lock and home) -------------------------------------------------------------------------- */
 static void d_rrect(dc *d, float x, float y, float w, float h, float r, tk_col c);
 static struct { int state, bars, rat; } SB_CELL;      /* the status bar's copy of the modem's (sh_cell) */
+static int SB_WIFI;                                  /* wifi-sbos-next: joined with an address (sh_wifi) */
 static struct { int h, mi, wday, day, mon, pct, temp; } ST = { 21, 5, 2, 10, 11, 87, 41 };
 static struct { int on, h, m; } ALM = { 1, 7, 0 };   /* the host's is the concept's 07:00 */
 static void prep_tree(tk_layer *l);   /* P3g: home's half copies again right after a live rebuild */
@@ -203,11 +205,13 @@ static void status_bar(dc *d, const char *left)
         /* four bars (0..5 from the CP: 5 is four), the RAT before them: only while the modem is on */
         int n = SB_CELL.bars >= 4 ? 4 : SB_CELL.bars;
         for (int i = 0; i < 4; i++) d_rrect(d, 289 + 4.5f * i, 30 - (4.5f + 2.5f * i), 3, 4.5f + 2.5f * i, 1, W(i < n ? 1 : .3f));
-        const char *r = SB_CELL.rat == 7 ? "4G" : SB_CELL.rat == 4 ? "3G" : SB_CELL.rat >= 1 && SB_CELL.rat <= 3 ? "2G" : "";
+        const char *r = SB_CELL.rat == 7 ? "LTE" : SB_CELL.rat == 4 ? "3G" : SB_CELL.rat >= 1 && SB_CELL.rat <= 3 ? "2G" : "";
         if (r[0]) d_text(d, TK_IT600, 12, 286 - tk_text_w(TK_IT600, PT(12), r, 0, 0) / TK_PT, 29.5f, r, 0, 0, INK, 1);
     }
-    /* P2y: no Wi-Fi glyph (Next has no Wi-Fi connection); the battery drawn from the live charge (iOS's glyph:
-     * a translucent body, the fill by percent, red at 20 % or less, green while charging, the nub) */
+    /* wifi-sbos-next: the Wi-Fi glyph while joined with an address (the concept's place); the battery drawn from
+     * the live charge (iOS's glyph: a translucent body, the fill by percent, red at 20 % or less, green while
+     * charging, the nub) */
+    if (SB_WIFI) d_icon(d, "sb-wifi", 310, 18, 1);
     float bx = 334, by = 18.5f, fw = 21.0f * tk_clampf(ST.pct / 100.0f, .04f, 1);
     d_rrect(d, bx, by, 25, 12, 3.6f, W(.35f));
     d_rrect(d, bx + 2, by + 2, fw, 8, 2, ST.pct <= 20 && !SYS_CHARGING() ? tk_hex(0xff453a, 1) : SYS_CHARGING() ? tk_hex(0x34c759, 1) : W(1));
@@ -271,6 +275,7 @@ static void build_lstatus(void)
     status_bar(&d, carrier);
 }
 /* the modem's status (its session's status API): the carrier or "No SIM" / "Emergency calls only" */
+static void cc_status_stale(void);
 void sh_carrier(const char *text)
 {
     if (!tk_strcmp(text, carrier)) return;
@@ -278,6 +283,7 @@ void sh_carrier(const char *text)
     while (text[n] && n < 31) { carrier[n] = text[n]; n++; }
     carrier[n] = 0;
     build_lstatus();
+    cc_status_stale();                           /* P3l: the CC's status bar shows the carrier too */
     relink();
     lock_ver++;
 }
@@ -1087,6 +1093,7 @@ static void set_page(float x)
  * are layers over it. setCC: scrim min(1, p), grid opacity min(1, 1.3 p), translateY((1 - p) x -30) scale(.86 +
  * .14 p) about 85 % 0 of the grid; spring cc 400 / 36; open past .35 or faster than .4 pt/ms. */
 static tk_layer ccl, ccscrim, ccsb, ccg, ccgrid, cclvl[2], ccic[2], cclit;   /* cclit: the torch's lit tile (P3i) */
+static void cc_status_stale(void) { relayer(&ccsb); cc_stale = 1; }
 static struct { int on, built, closing, wifi, cell, bt, air, rot, save; float p, lvl[2]; } CCS = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, { .62f, .4f } };   /* P2y: Wi-Fi and rotation lock off (neither is real) */
 static void cc_levels(void);
 static int cc_bright;           /* the panel's brightness level the slider last sent (1..4; 0: none yet) */
@@ -1261,7 +1268,13 @@ static int cc_tap(float x, float y)
         int i = (x >= 104) + 2 * (y >= 170);
         if (i == 1) return 1;                /* the modem: a hold (G_CCCELL) */
         /* P2y: no switch pretends: Airplane, Wi-Fi and Bluetooth have nothing to switch in Next yet */
-        toast(i == 0 ? "Airplane mode isn't in this version yet" : i == 2 ? "Wi-Fi isn't in this version yet" : "Bluetooth isn't available yet");
+        if (i == 2) {                        /* wifi-sbos-next: Wi-Fi is real */
+            int on = CCS.wifi;
+            if (sh_wifi_power(!on) < 0) toast(on ? "Wi-Fi can't stop now" : "Wi-Fi can't start now");
+            else toast(on ? "Wi-Fi off" : "Wi-Fi on: Settings > Wi-Fi to join");
+            return 1;
+        }
+        toast(i == 0 ? "Airplane mode isn't in this version yet" : "Bluetooth isn't available yet");
         return 1;
     } else if (y >= 264 && y < 334) {
         int c = x < 94 ? 0 : x < 184.66f ? 1 : x < 275.31f ? 2 : 3;
@@ -1317,7 +1330,7 @@ static const appdef APPS[] = {
     { "phone", "Phone", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "messages", "Messages", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "search", "Search", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
-    { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "Not in this version" }, { "Mobile Data", "No SIM" }, { "Battery", "@pct" } } },
+    { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "@wifi" }, { "Cellular", "No SIM" }, { "Battery", "@pct" } } },
                                            { "", 5, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" } } },
                                            { "About", 3, { { "Model", "Galaxy S9 (SM-G960F)" }, { "Software", "@ver" }, { "Memory", "4 GB" } } } } },
 };
@@ -2272,8 +2285,14 @@ void sh_sysinfo(int charging, const char *version)
     while (version && version[n] && n < 39) { SYS.ver[n] = version[n]; n++; }
     if (version) SYS.ver[n] = 0;
 }
+static const char *wf_row_text(void);               /* shell_wifi.inc */
+static void page_wifi(dc *d);
+static void page_cell(dc *d);         /* shell_cell.inc: Settings > Cellular */
+static void cell_tap(float x, float y);
+static void wifi_tap(float x, float y);
 static const char *live_text(const char *s, char *buf)
 {
+    if (!tk_strcmp(s, "@wifi")) return wf_row_text();
     if (s[0] != '@') return s;
     int n = 0;
     if (!tk_strcmp(s, "@pct")) { n = put_dec(buf, ST.pct); buf[n++] = ' '; buf[n++] = '%'; buf[n] = 0; }
@@ -2296,7 +2315,7 @@ static const char *live_text(const char *s, char *buf)
 /* P3i: Settings' row icons (the Control Centre's glyphs, tinted white) */
 typedef struct { const char *row, *glyph; uint32_t col; float w, h; } setico;
 static const setico SETICO[] = {
-    { "Wi-Fi", "cc-wifi", 0x0a84ff, 19, 14 }, { "Mobile Data", "cc-cell", 0x30d158, 18, 16 }, { "Battery", "cc-save", 0x30d158, 20, 12 },
+    { "Wi-Fi", "cc-wifi", 0x0a84ff, 19, 14 }, { "Cellular", "cc-cell", 0x30d158, 18, 16 }, { "Battery", "cc-save", 0x30d158, 20, 12 },
     { "Display & Brightness", "cc-sun", 0x0a84ff, 20, 20 }, { "Sounds & Haptics", "cc-vol", 0xff375f, 20, 20 },
     { "Bluetooth", "cc-bt", 0x0a84ff, 12, 18 }, { "Airplane Mode", "cc-air", 0xff9f0a, 18, 18 }, { "Date & Time", "cc-timer", 0x8e8e93, 19, 19 },
 };
@@ -2359,7 +2378,7 @@ static void own_strip(int a, int i)
     else if (!tk_strcmp(k, "calc")) page_calc(&d);
     else if (!tk_strcmp(k, "light")) page_light(&d);
     else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
-    else if (!tk_strcmp(k, "settings")) page_display(&d);
+    else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else page_display(&d); }
     else if (!tk_strcmp(k, "notes")) page_notes(&d);
     else if (!tk_strcmp(k, "search")) page_search(&d);
     else if (inf) { d_h1(&d, APPS[a].name); d_empty(&d, 330, inf->title, inf->line); }
@@ -2441,10 +2460,11 @@ static void build_app_page(int a)
                 lx = 32 + 29 + 13;
             }
             d_text(&d, TK_IT400, 16, lx, ry + 13 + 16, live_text(S->rows[r].l, lb), 0, 0, INK, 0);
-            int nav = !tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Display & Brightness");
+            int nav = !tk_strcmp(A->k, "settings") && (!tk_strcmp(S->rows[r].l, "Display & Brightness") || !tk_strcmp(S->rows[r].l, "Wi-Fi") ||
+                                                       !tk_strcmp(S->rows[r].l, "Cellular"));
             if (nav) d_icon(&d, "chev", 344, ry + 16.5f, .45f);
             const char *rt = live_text(S->rows[r].r, rb);
-            if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Mobile Data")) rt = md_text();
+            if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Cellular")) rt = md_text();
             if (rt[0]) {
                 float w = tw(TK_IT400, 16, rt, 0, TK_TNUM);
                 d_text(&d, TK_IT400, 16, (nav ? 338 : 358) - w, ry + 13 + 16, rt, 0, TK_TNUM, W(.55f), 0);
@@ -2878,6 +2898,10 @@ static void app_tap(float x, float y)
             lock_ver++;
             build_app_page(AP.a);
         }
+    } else if (is_app("settings") && AS.sub == 2) {
+        wifi_tap(x, y);
+    } else if (is_app("settings") && AS.sub == 3) {
+        cell_tap(x, y);
     } else if (is_app("settings") && AS.sub) {
         if (x < 120 && y >= 40 && y < 86) { AS.sub = 0; build_app_page(AP.a); return; }
         if (y >= 184 && y < 248 && x >= 40 && x < 350) {
@@ -2887,10 +2911,8 @@ static void app_tap(float x, float y)
         }
     } else if (is_app("settings")) {
         if (x >= 16 && x < 374 && y >= 293 && y < 340) { AS.sub = 1; build_app_page(AP.a); return; }
-        if (x >= 16 && x < 374 && y >= 182 && y < 229) {
-            if (cell_running()) { sh_modem(0); toast("Modem stopped"); }
-            else if (sh_modem(1) < 0) toast("The modem can't start now");
-        }
+        if (x >= 16 && x < 374 && y >= 135 && y < 182) { AS.sub = 2; build_app_page(AP.a); return; }   /* Wi-Fi */
+        if (x >= 16 && x < 374 && y >= 182 && y < 229) { AS.sub = 3; build_app_page(AP.a); return; }   /* Cellular */
     } else if (is_app("messages")) {
         if (AS.thread < 0) {
             (void)x; (void)y;                         /* P2y: no conversations (no SIM): nothing to open */
@@ -2906,9 +2928,31 @@ static void build_cc_grid(void);
 static void cc_link(void);
 static sh_cell_t CELL;
 static int cell_running(void) { return CELL.state == SH_CELL_ON || CELL.state == SH_CELL_STARTING || CELL.state == SH_CELL_RESTARTING; }
-/* Settings > Mobile Data: the modem's state in words (the contract's wording) */
+static int data_on(void);         /* shell_cell.inc */
+static char md_buf[48];
+static const char *md_join(const char *a, const char *b)
+{
+    int n = 0;
+    for (const char *p = a; *p && n < 47; p++) md_buf[n++] = *p;
+    for (const char *p = b; *p && n < 47; p++) md_buf[n++] = *p;
+    md_buf[n] = 0;
+    return md_buf;
+}
+/* Settings > Cellular: the modem's state in words (the contract's wording) */
 static const char *md_text(void)
 {
+    switch (CELL.data) {
+    case SH_DATA_STARTING: return "Starting\xe2\x80\xa6";
+    case SH_DATA_SEARCHING: return "Searching\xe2\x80\xa6";
+    case SH_DATA_REGISTERED: return CELL.oper[0] ? md_join(CELL.oper, " \xc2\xb7 connecting") : "Connecting\xe2\x80\xa6";
+    case SH_DATA_UP: return md_join(CELL.oper[0] ? CELL.oper : "On", CELL.rat == 7 ? " \xc2\xb7 LTE" : CELL.rat == 4 ? " \xc2\xb7 3G" :
+                                    CELL.rat ? " \xc2\xb7 2G" : "");
+    case SH_DATA_STOPPING: return "Turning off\xe2\x80\xa6";
+    case SH_DATA_NO_SIM: return "No SIM";
+    case SH_DATA_LOCKED: return "SIM PIN on";
+    case SH_DATA_FAILED: return "Could not connect";
+    default: break;
+    }
     switch (CELL.state) {
     case SH_CELL_STARTING: return "Starting\xe2\x80\xa6";
     case SH_CELL_RESTARTING: return "Restarting\xe2\x80\xa6";
@@ -2922,31 +2966,38 @@ static void build_home_sb(void);
 void sh_cell(const sh_cell_t *c)
 {
     if (c->state == CELL.state && c->sim == CELL.sim && c->emergency_only == CELL.emergency_only && c->rat == CELL.rat &&
-        c->bars == CELL.bars)
+        c->bars == CELL.bars && c->data == CELL.data && !tk_strcmp(c->oper, CELL.oper))
         return;
     CELL = *c;
-    /* the lock's status bar: the network's honest line */
-    const char *cr = CELL.state == SH_CELL_STARTING ? "Starting\xe2\x80\xa6" : CELL.state == SH_CELL_RESTARTING ? "Restarting\xe2\x80\xa6" :
+    /* the lock's status bar: the network's honest line (the operator's name once registered) */
+    const char *cr = (CELL.data == SH_DATA_REGISTERED || CELL.data == SH_DATA_UP) && CELL.oper[0] ? CELL.oper :
+                     CELL.data == SH_DATA_SEARCHING ? "Searching\xe2\x80\xa6" : CELL.data == SH_DATA_LOCKED ? "SIM PIN on" :
+                     CELL.state == SH_CELL_STARTING ? "Starting\xe2\x80\xa6" : CELL.state == SH_CELL_RESTARTING ? "Restarting\xe2\x80\xa6" :
                      CELL.state == SH_CELL_ON && CELL.emergency_only ? "Emergency calls only" : "No SIM";
-    int n2 = 0;
-    while (cr[n2] && n2 < 31) { carrier[n2] = cr[n2]; n2++; }
-    carrier[n2] = 0;
+    sh_carrier(cr);                     /* the lock screen's left (and the Control Centre's): the operator */
     SB_CELL.state = CELL.state == SH_CELL_ON;
     SB_CELL.bars = CELL.bars;
     SB_CELL.rat = CELL.rat;
-    const char *h = CELL.state == SH_CELL_ON && !CELL.emergency_only && CELL.bars <= 0 ? "No SIM \xc2\xb7 searching" :
+    const char *h = CELL.data == SH_DATA_UP ? md_join(CELL.oper[0] ? CELL.oper : "Mobile", " \xc2\xb7 cellular data on") :
+                    data_on() ? "Cellular data \xc2\xb7 connecting" :
+                    CELL.state == SH_CELL_ON && !CELL.emergency_only && CELL.bars <= 0 ? "No SIM \xc2\xb7 searching" :
                     "No SIM \xc2\xb7 emergency calls only";
     int n = 0;
     while (h[n] && n < 47) { cell_hint[n] = h[n]; n++; }
     cell_hint[n] = 0;
     build_lstatus();
     build_home_sb();
-    if (is_app("phone") || is_app("settings")) build_app_page(AP.a);
-    if (CCS.built) { relayer(&ccsb); build_cc_grid(); cc_link(); }
+    if (is_app("phone") || is_app("settings")) build_app_page(AP.a);     /* (it rebuilds the app's status bar too) */
+    else if (AP.on && !AP.closing) build_apsb();     /* P3l: every app's status bar shows the bars */
+    relayer(&ccsb);                                  /* P3l: the CC's status bar again at its next build */
     cc_stale = 1;
+    if (CCS.built) { build_cc_grid(); cc_link(); }
     relink();
     lock_ver++;
 }
+
+#include "shell_wifi.inc"
+#include "shell_cell.inc"
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
@@ -3232,7 +3283,7 @@ void sh_set(const char *what, const char *key, float v)
         toast_place();
     } else if (!tk_strcmp(what, "cell")) {
         /* the modem's state for the host's stills: "on" (emergency-only, GSM, v bars), "starting", "off" */
-        sh_cell_t c = { SH_CELL_OFF, -1, 0, 0, -1 };
+        sh_cell_t c = { SH_CELL_OFF, -1, 0, 0, -1, SH_DATA_OFF, "" };
         if (!tk_strcmp(key, "on")) { c.state = SH_CELL_ON; c.sim = 0x80; c.emergency_only = 1; c.rat = 1; c.bars = (int)v; }
         else if (!tk_strcmp(key, "starting")) c.state = SH_CELL_STARTING;
         sh_cell(&c);
@@ -3515,7 +3566,7 @@ void sh_touch(int phase, float x, float y, float t)
         if (!T.arg) toast("Press and hold");
         break;
     case G_CCCELL:
-        if (!T.arg) toast(cell_running() ? "Hold to stop the modem" : "Hold to start the modem");
+        if (!T.arg) toast(data_on() ? "Hold to turn mobile data off" : "Hold for mobile data");
         break;
     case G_CF:
         if (CF.down) {                         /* let go before the bar was full */
@@ -3702,8 +3753,7 @@ int sh_tick(float dt, float t)
     if (T.kind == G_CCCELL && !T.arg) {
         if (t - T.t0 >= 700) {
             T.arg = 1;
-            if (cell_running()) { sh_modem(0); toast("Modem stopped"); }
-            else if (sh_modem(1) < 0) toast("The modem can't start now");
+            cell_toggle();
         }
         mv = 1;
     }

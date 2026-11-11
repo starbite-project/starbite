@@ -182,10 +182,26 @@ static int has(const char *s, const char *w)
 }
 static int cell_now(void)
 {
-    static sh_cell_t last = { -1, 0, 0, 0, 0 };
+    static sh_cell_t last = { -1, 0, 0, 0, 0, 0, "" };
     struct sbos_phone ph;
     kmodem_status(&ph);
-    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars };
+    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars, 0, "" };
+    struct kcell kc;
+    kmodem_cell(&kc);
+    c.data = kc.state;                      /* KCELL_* = SH_DATA_* */
+    sb_strcpy(c.oper, sizeof(c.oper), kc.oper);
+    if (kc.want || kc.state != KCELL_OFF) {
+        c.state = kc.state == KCELL_STARTING || kc.state == KCELL_STOPPING ? SH_CELL_STARTING :
+                  kc.state == KCELL_SEARCHING || kc.state == KCELL_REGISTERED || kc.state == KCELL_DATA ? SH_CELL_ON :
+                  kc.state == KCELL_OFF ? SH_CELL_OFF : SH_CELL_FAILED;
+        c.bars = kc.bars;
+        c.rat = has(kc.rat, "LTE") ? 7 : has(kc.rat, "UMTS") ? 4 : has(kc.rat, "EDGE") ? 3 : has(kc.rat, "GPRS") ? 2 :
+                has(kc.rat, "GSM") ? 1 : 0;
+        sh_cell(&c);
+        int ch = memcmp(&c, &last, sizeof(c)) != 0;
+        last = c;
+        return ch;
+    }
     if (ph.state == SBOS_MODEM_ON) c.state = SH_CELL_ON;
     else if (ph.state == SBOS_MODEM_FAILED) c.state = SH_CELL_FAILED;
     else if (ph.state == SBOS_MODEM_PARKED) c.state = SH_CELL_GUARD;
@@ -194,13 +210,89 @@ static int cell_now(void)
     c.rat = has(ph.cs, "LTE") ? 7 : has(ph.cs, "UMTS") ? 4 : has(ph.cs, "EDGE") ? 3 : has(ph.cs, "GPRS") ? 2 : has(ph.cs, "GSM") ? 1 : 0;
     sh_cell(&c);
     int changed = c.state != last.state || c.sim != last.sim || c.emergency_only != last.emergency_only ||
-                  c.rat != last.rat || c.bars != last.bars;
+                  c.rat != last.rat || c.bars != last.bars || c.data != last.data;
     last = c;
     return changed;
 }
+/* wifi-sbos-next: Wi-Fi's state for Settings > Wi-Fi, the status bar and the Control Centre: the kernel's status, its
+ * scan list and the last Internet test, pushed to the shell when anything in it changed (names and addresses go to
+ * the screen only, never to the log) */
+static void ip_text(char *b, const uint8_t ip[4])
+{
+    int n = 0;
+    for (int i = 0; i < 4; i++) {
+        unsigned v = ip[i];
+        if (v >= 100) b[n++] = (char)('0' + v / 100);
+        if (v >= 10) b[n++] = (char)('0' + v / 10 % 10);
+        b[n++] = (char)('0' + v % 10);
+        if (i < 3) b[n++] = '.';
+    }
+    b[n] = 0;
+}
+static int wifi_now(void)
+{
+    static sh_wifi_t last;
+    static int pushed;
+    static sh_wifi_t w;
+    struct sbos_wifi s;
+    struct sbos_wifi_net nets[SBOS_WIFI_NETS];
+    struct sbos_wifi_fetch f;
+    memset(&w, 0, sizeof(w));
+    wifi_status(&s);
+    w.state = s.state;
+    w.rssi = s.rssi;
+    w.clock_checked = s.clock_checked;
+    memcpy(w.ssid, s.ssid, s.ssid_len < 32 ? s.ssid_len : 32);
+    sb_strcpy(w.why, sizeof(w.why), s.why);
+    if (s.state == SBOS_WIFI_CONNECTED) ip_text(w.ip, s.ip);
+    int n = wifi_list(nets, SBOS_WIFI_NETS);
+    w.nnets = n < SH_WIFI_NETS ? n : SH_WIFI_NETS;
+    for (int i = 0; i < w.nnets; i++) {
+        memcpy(w.nets[i].ssid, nets[i].ssid, nets[i].ssid_len < 32 ? nets[i].ssid_len : 32);
+        w.nets[i].rssi = nets[i].rssi;
+        w.nets[i].secure = nets[i].secure;
+        w.nets[i].saved = nets[i].saved;
+        w.nets[i].band5 = nets[i].band5;
+    }
+    wifi_fetch_status(&f);
+    w.fetch_state = f.state;
+    w.fetch_ok = f.state == 2 && f.result == 1 && f.status >= 200 && f.status < 400;
+    w.fetch_status = f.status;
+    w.fetch_bytes = f.bytes;
+    w.fetch_ms = f.total_ms;
+    w.fetch_tls_ms = f.tls_ms;
+    sb_strcpy(w.fetch_host, sizeof(w.fetch_host), f.host);
+    if (f.state == 2 && f.result == 1 && !w.fetch_ok)
+        sb_strcpy(w.fetch_why, sizeof(w.fetch_why), "the server answered with an error status");
+    else if (f.state == 2 && f.result == 1)
+        sb_strcpy(w.fetch_why, sizeof(w.fetch_why), f.tls ? "HTTPS through the phone's own TCP and TLS" : "HTTP");
+    else
+        sb_strcpy(w.fetch_why, sizeof(w.fetch_why), f.why);
+    if (pushed && !memcmp(&w, &last, sizeof(w)))
+        return 0;
+    last = w;
+    pushed = 1;
+    sh_wifi(&w);
+    return 1;
+}
+int sh_wifi_power(int on) { return wifi_power(on); }
+int sh_wifi_scan(void) { return wifi_scan(); }
+int sh_wifi_join(const char *ssid, const char *pass)
+{
+    struct sbos_wifi_net nets[SBOS_WIFI_NETS];
+    int n = wifi_list(nets, SBOS_WIFI_NETS);
+    unsigned len = (unsigned)sb_strlen(ssid);
+    for (int i = 0; i < n; i++)
+        if (nets[i].ssid_len == len && !memcmp(nets[i].ssid, ssid, len))
+            return wifi_join(i, pass && pass[0] ? pass : 0);
+    return SBOS_EINVAL;                              /* not in the list any more (a new scan) */
+}
+int sh_wifi_fetch(const char *url) { return wifi_fetch(url); }
+
 /* the modem's Start / Stop from the new UI: the kernel's own path (its hold confirmation, its refusals: never in
  * a self-test image, not while Heat or Linux runs) */
 int sh_modem(int on) { return kmodem_power(on); }
+int sh_cellular(int on) { return kmodem_cellular(on); }
 static void (*cf_done)(int);
 static int next_confirm(const char *t, const char *l1, const char *l2, const char *l3, const char *hold, void (*done)(int))
 {
@@ -224,12 +316,13 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
-    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3j");     /* P2y: the apps' live values */
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3m");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);
         sh_alarm(on, ah, am);
     }
     cell_now();
+    wifi_now();                                      /* wifi-sbos-next */
 }
 
 /* ---- tear-free frames (P2r): two scanout buffers and DECON flips ------------------------------------------
@@ -255,6 +348,8 @@ static uint32_t scan_fno = 1;
 static int flip_on, scan_cur, scan_win;
 static unsigned flips, flip_waits, flip_timeouts, flips_replaced;
 static int scan_next;
+static uint64_t present_us, last_us;   /* P3k: the last flip's request; the last frame's start */
+static unsigned pace_looks;            /* P3k: 1 ms looks for a queued flip's latch */
 static uint32_t drd(uintptr_t a) { uint32_t v = *(volatile uint32_t *)a; __asm__ volatile("dmb oshld" ::: "memory"); return v; }
 static void dwr(uintptr_t a, uint32_t v) { __asm__ volatile("dmb oshst" ::: "memory"); *(volatile uint32_t *)a = v; }
 static int flip_pending(void) { return (drd(DECON + 0x60) & (1U << scan_win)) != 0; }
@@ -355,6 +450,7 @@ static void present(void)
             scan_cur = scan_next;
             buf_fno[scan_cur] = (int)scan_fno++;
             scan_point(scan_pa[scan_cur]);
+            present_us = sb_us();
             flips++;
         } else
             __asm__ volatile("dsb sy" ::: "memory");
@@ -462,7 +558,10 @@ static void stats_log(const char *what)
     ub_dec(&u, tk_heap_peak() >> 20);
     ub_s(&u, "), largest free ");
     ub_dec(&u, tk_heap_largest() >> 20);
-    ub_s(&u, " MiB; shell max ");
+    ub_s(&u, " MiB; latch looks ");
+    ub_dec(&u, pace_looks);
+    pace_looks = 0;
+    ub_s(&u, "; shell max ");
     ub_dec(&u, FS.shmax / 1000);
     ub_s(&u, " ms, over 8 ms: ");
     ub_dec(&u, FS.shover);
@@ -539,22 +638,40 @@ static void shell_time(const char *what, uint64_t t0)
     ub_s(&u, " ms");
     sb_log(u.b);
 }
-static uint64_t tick3;                      /* the next frame's time in thirds of a ms: 16.67 ms apart (the TE's) */
+static uint64_t tick3;                      /* the next frame's time in thirds of a ms (one buffer: a free timer) */
+/* P3k: frames paced by the panel. A frame starts just after the last flip has latched at a TE (looks 1 ms apart
+ * from 14.7 ms after the last start), so each TE gets one new frame: the free 16.67 ms timer drifted against the
+ * TE (P3h: frames replaced while queued, 4-25 a film, and TEs showing an old frame). The animations advance by
+ * whole TE periods (dt a multiple of 16.67 ms), and the touch is read at the frame's start. */
+void next_input_now(void);
 static void frame(void)
 {
-    /* the next frame first (a one-shot at the next 16.67 ms step: P2t, the panel's rate, so with three buffers
-     * a frame is neither replaced while queued nor shown twice, except as the two clocks drift) */
-    {
+    if (flip_on && comp.acquire && K.screen_on && flip_pending() && sb_us() - present_us < 40000) {
+        pace_looks++;
+        kt_set(KT_UI, 20, sb_ms() + 1, 0, 0);
+        return;
+    }
+    uint64_t nus = sb_us();
+    if (flip_on && comp.acquire)
+        kt_set(KT_UI, 20, (nus + 14700) / 1000, 0, 0);
+    else {
+        /* one buffer: the next frame at the next 16.67 ms step (P2t) */
         uint64_t n3 = sb_ms() * 3;
         if (!tick3) tick3 = n3;
         tick3 += 50;
         if (tick3 <= n3) tick3 = n3 + 50;           /* fell behind: from now */
         kt_set(KT_UI, 20, tick3 / 3, 0, 0);
     }
+    next_input_now();                            /* the finger where it is now */
     if (!boosted) boost(1);                      /* a wake: the kernel set the screen-on clock after the hook */
     uint64_t now = sb_ms();
     float dt = last_tick ? (float)(now - last_tick) / 1000.0f : 1.0f / 60;
+    if (flip_on && comp.acquire && last_us) {
+        uint64_t te = (nus - last_us + 8333) / 16667;          /* whole TE periods since the last frame */
+        dt = (float)(te ? te : 1) / 60.0f;
+    }
     last_tick = now;
+    last_us = nus;
     uint64_t st0 = tk_us();
     int mv = sh_tick(dt, (float)now);
     shell_time("tick", st0);
@@ -570,7 +687,7 @@ static void frame(void)
     if (!motion) {
         kt_cancel(KT_UI, 20);
         ticking = 0;
-        last_tick = 0;
+        last_tick = 0; last_us = 0;
         sh_idle();
         if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);   /* the rest of the idle work, a turn at a time */
         clock_again();                                               /* P2z: the Clock's next digit */
@@ -592,8 +709,9 @@ static void start_ticking(void)
     if (ticking) return;
     ticking = 1;
     last_tick = sb_ms();
+    last_us = 0;
     tick3 = 0;
-    kt_set(KT_UI, 20, sb_ms() + 16, 0, 0);
+    kt_set(KT_UI, 20, sb_ms() + 1, 0, 0);       /* P3k: the first frame now (it waits for a queued flip's latch) */
 }
 
 /* ---- sleep and wake (P2r): the Power key's screen off is the shell's fade to black first, the screen on its fade
@@ -614,7 +732,7 @@ static void next_screen(int on)
     if (!on) {
         kt_cancel(KT_UI, 20);
         ticking = 0;
-        last_tick = 0;
+        last_tick = 0; last_us = 0;
         boosted = 0;                                 /* the kernel takes the A55 down with the screen */
         kt_set(KT_UI, 23, sb_ms(), 5000, 0);         /* the band workers off in 5 s */
         if (!sh_sleeping()) {
@@ -635,7 +753,7 @@ static void next_screen(int on)
                                                       * frame takes the top step (frame()) */
     workers_start();
     ticking = 1;
-    last_tick = 0;
+    last_tick = 0; last_us = 0;
     tick3 = 0;
     kt_set(KT_UI, 20, sb_ms() + 16, 0, 0);
 }
@@ -735,6 +853,7 @@ void next_kinit(void)
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
     kui_sleep_hook = next_sleep;
+    input_fast = 1;                              /* P3k: touch read every 16 ms while the screen is on (no 50 ms first touch) */
     if (!tk_pack_open(sbtk_pack_start, (uint32_t)(sbtk_pack_end - sbtk_pack_start))) {
         sb_log("next: the sbtk pack is missing or bad: the regular UI runs");
         return;
@@ -821,6 +940,14 @@ void next_kdraw(void)
             present();
             sh_idle();
         }
+    }
+    /* wifi-sbos-next: Wi-Fi's state ten times a second (a copy of about 2 KB; this runs every loop turn); a change
+     * is drawn at once */
+    static uint64_t wifi_t;
+    if (ready && sb_ms() - wifi_t >= 100 && (wifi_t = sb_ms(), wifi_now()) && !ticking) {
+        tk_comp_frame(&comp, 0, 0);
+        present();
+        sh_idle();
     }
 }
 

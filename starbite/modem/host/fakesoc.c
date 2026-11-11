@@ -30,7 +30,7 @@ void fakesoc_init(struct fakesoc *s, const struct sbm_plan *plan, uint32_t boot_
     }
     s->nreg = plan->n;
     s->ipc_size = SBM_DT_IPC_SIZE;
-    s->ipc = calloc(1, s->ipc_size);
+    s->ipc = calloc(1, (size_t)SBM_DT_IPC_SIZE + SBM_DT_ZMB_SIZE);   /* the IPC region and ZMB right after it */
 }
 
 void fakesoc_free(struct fakesoc *s)
@@ -156,6 +156,7 @@ static void ap_msg(struct fakesoc *s)
             return;
         rfs_ul(s);
         fakecp_step(&s->fcp);           /* FMT requests: answered from the scenario (no SIM) */
+        fakecp_net_step(&s->fcp);       /* the PS rings (the attended data test) */
         return;
     }
     if (s->n_ap_msgs < 32)
@@ -170,7 +171,8 @@ static void ap_msg(struct fakesoc *s)
     } else if (s->link == L_DONE && v == SBM_CMD2INT(SBM_CMD_INIT_END)) {
         /* online: the NOTIs this phone's CP sent under Android, then RFS requests (read, read, write) */
         s->link = L_ONLINE;
-        fakecp_attach(&s->fcp, s->ipc, s->ipc_size, s->sim_present ? FAKE_HOME : FAKE_NOSIM);
+        fakecp_attach(&s->fcp, s->ipc, s->ipc_size, s->sim_present == 2 ? FAKE_SIM : s->sim_present ? FAKE_HOME : FAKE_NOSIM);
+        s->fcp.pin_lock = s->sim_pin;
         s->fcp.nosim_plmn = s->nosim_plmn;
         s->fcp.regist_seq_quirk = s->regist_seq_quirk;
         fakecp_boot_notis(&s->fcp);

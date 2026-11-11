@@ -24,9 +24,59 @@ int sh_modem(int on)
     return 0;
 }
 void sh_confirmed(int ok) { fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled"); }
+/* a pretend network for the previews: on -> searching -> data up on "Operator" LTE, 3 bars */
+int sh_cellular(int on)
+{
+    sh_cell_t c = { on ? 1 : 0, 0, 0, on ? 7 : 0, on ? 3 : -1, on ? SH_DATA_UP : SH_DATA_OFF, "" };
+    if (on) memcpy(c.oper, "Operator", 9);
+    fprintf(stderr, "cellular: %s\n", on ? "on (pretend: data up)" : "off");
+    sh_cell(&c);
+    return 0;
+}
 void sh_brightness(int level) { fprintf(stderr, "brightness: level %d\n", level); }
 void sh_vibrate(void) { fprintf(stderr, "vibrate: the timer ran out\n"); }
 void sh_haptic(void) { }
+/* wifi-sbos-next: a pretend Wi-Fi for the previews (made-up network names; nothing is joined): on lists four
+ * networks, a join connects, the Internet test answers 200 */
+static sh_wifi_t HW;
+static void hw_push(void) { sh_wifi(&HW); }
+int sh_wifi_power(int on)
+{
+    static const char *const N[4] = { "Home Wi-Fi", "Guest", "Upstairs 5G", "Cafe Corner" };
+    static const int R[4] = { -48, -55, -67, -80 }, S[4] = { 1, 0, 1, 1 }, B[4] = { 1, 0, 1, 0 };
+    memset(&HW, 0, sizeof(HW));
+    HW.state = on ? SH_WIFI_UP : SH_WIFI_OFF;
+    if (on) {
+        HW.nnets = 4;
+        for (int i = 0; i < 4; i++) {
+            strcpy(HW.nets[i].ssid, N[i]);
+            HW.nets[i].rssi = R[i], HW.nets[i].secure = S[i], HW.nets[i].band5 = B[i];
+        }
+    }
+    fprintf(stderr, "wifi: %s\n", on ? "on" : "off");
+    hw_push();
+    return 0;
+}
+int sh_wifi_scan(void) { fprintf(stderr, "wifi: scan\n"); hw_push(); return 0; }
+int sh_wifi_join(const char *ssid, const char *pass)
+{
+    fprintf(stderr, "wifi: join (a passphrase of %d characters)\n", pass ? (int)strlen(pass) : 0);
+    HW.state = SH_WIFI_CONNECTED;
+    strncpy(HW.ssid, ssid, 32);
+    strcpy(HW.ip, "192.168.1.23");
+    hw_push();
+    return 0;
+}
+int sh_wifi_fetch(const char *url)
+{
+    fprintf(stderr, "wifi: fetch %s\n", url);
+    HW.fetch_state = 2, HW.fetch_ok = 1, HW.fetch_status = 200, HW.fetch_bytes = 1256, HW.fetch_ms = 520;
+    HW.fetch_tls_ms = 380;
+    strcpy(HW.fetch_host, "example.com");
+    strcpy(HW.fetch_why, "HTTPS through the phone's own TCP and TLS");
+    hw_push();
+    return 0;
+}
 static int screen_off;
 void sh_slept(void) { screen_off = 1; fprintf(stderr, "sleep: the screen would go off now\n"); }
 
