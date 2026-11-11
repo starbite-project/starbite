@@ -381,7 +381,7 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     uint32_t period = b->query_period_ms;
     uint32_t keep = b->keep_running;
 #ifdef SBM_ATTENDED_TX
-    uint32_t attended = b->attended == SBM_ATTENDED_MAGIC ? SBM_ATTENDED_MAGIC : 0;
+    uint32_t attended = SBM_IS_ATTENDED(b->attended) ? b->attended : 0;
 #endif
     sbm_memset(b, 0, sizeof(*b));
 #ifdef SBM_ATTENDED_TX

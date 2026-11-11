@@ -1256,7 +1256,7 @@ static void test_attended_data(struct fakesoc *s, struct sbm_image *im, struct s
         s->sim_present = 2;
         fakesoc_plat(s, &p, tlog);
         memset(mo, 0, sizeof(*mo));
-        mo->attended = SBM_ATTENDED_MAGIC;
+        mo->attended = SBM_ATTENDED_DATA;
         unsigned log0 = nlog;
         CHECKEQ(sbm_modem_start(mo, &p, im), 0);
         s->fcp.act_refuse_short = round;
@@ -1379,6 +1379,8 @@ static void test_attended(struct fakesoc *s, struct sbm_image *im, struct sbm_mo
     unsigned log0 = nlog;
     CHECKEQ(sbm_modem_start(mo, &p, im), 0);
     CHECKEQ(mo->b.attended, SBM_ATTENDED_MAGIC);
+    CHECKEQ(sbm_modem_pdp_define(mo, "internet"), SBM_EPERM);      /* no data without SBM_ATTENDED_DATA */
+    CHECKEQ(sbm_modem_pdp_activate(mo, 1, 0), SBM_EPERM);
     CHECKEQ(sess_run(mo, &p, 3000, 1000, 0), 0);
     sbm_modem_snapshot(mo, &sn);
     CHECKEQ(sn.sim, SBM_SIM_INIT_COMPLETE);

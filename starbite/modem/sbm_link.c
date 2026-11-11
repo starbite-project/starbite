@@ -768,7 +768,7 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
     }
     /* the guards: a SIM that is not absent, any registration. Off only in the attended SIM test. */
 #ifdef SBM_ATTENDED_TX
-    if (b->attended == SBM_ATTENDED_MAGIC) {
+    if (SBM_IS_ATTENDED(b->attended)) {
         data_poll(p, b, sbd);
         if (b->cell.have_sim)
             b->sim_status = b->cell.sim_status;
@@ -870,7 +870,7 @@ static int start_core(struct sbm_modem *m)
     m->b.rfs_serve = 1;
     m->b.keep_running = SBM_KEEP_RUNNING;
 #ifdef SBM_ATTENDED_TX
-    m->b.attended = m->attended == SBM_ATTENDED_MAGIC ? SBM_ATTENDED_MAGIC : 0;
+    m->b.attended = SBM_IS_ATTENDED(m->attended) ? m->attended : 0;
 #endif
     m->ms = 0;
     m->last_rx_ms = NONE;
@@ -945,7 +945,7 @@ int sbm_modem_query(struct sbm_modem *m)
 int sbm_modem_radio(struct sbm_modem *m, int on)
 {
     static const uint8_t normal[2] = { 0x02, 0x02 }, low[2] = { 0x01, 0x00 };
-    if (!m->up || m->b.attended != SBM_ATTENDED_MAGIC)
+    if (!m->up || !SBM_IS_ATTENDED(m->b.attended))
         return SBM_EPERM;
     uint8_t fr[32];
     o_mseq = o_mseq >= SBM_QSEQ_LAST || o_mseq < SBM_QSEQ_FIRST ? (uint8_t)SBM_QSEQ_FIRST : (uint8_t)(o_mseq + 1u);
@@ -995,7 +995,7 @@ int sbm_modem_pdp_define(struct sbm_modem *m, const char *apn)
 {
     uint8_t d[SBM_GPRS_DEFINE_LEN];
     uint32_t l = sbm_strlen(apn);
-    if (!m->up || m->b.attended != SBM_ATTENDED_MAGIC)
+    if (!m->up || m->b.attended != SBM_ATTENDED_DATA)
         return SBM_EPERM;
     if (l == 0 || l > SBM_APN_MAX)
         return SBM_EINVAL;
@@ -1013,7 +1013,7 @@ int sbm_modem_pdp_define(struct sbm_modem *m, const char *apn)
 int sbm_modem_pdp_activate(struct sbm_modem *m, int on, int long_form)
 {
     static uint8_t d[SBM_GPRS_ACT_LONG_LEN];
-    if (!m->up || m->b.attended != SBM_ATTENDED_MAGIC)
+    if (!m->up || m->b.attended != SBM_ATTENDED_DATA)
         return SBM_EPERM;
     sbm_memset(d, 0, sizeof(d));
     d[0] = on ? 1 : 0;
@@ -1028,7 +1028,7 @@ int sbm_modem_pdp_activate(struct sbm_modem *m, int on, int long_form)
 
 int sbm_modem_ip_tx(struct sbm_modem *m, const uint8_t *pkt, uint32_t len)
 {
-    if (!m->up || m->b.attended != SBM_ATTENDED_MAGIC || !m->b.pdp.have_ip)
+    if (!m->up || m->b.attended != SBM_ATTENDED_DATA || !m->b.pdp.have_ip)
         return SBM_EPERM;
     if (!pkt || len < 20 || (pkt[0] >> 4) != 4 || len > 2048)
         return SBM_EINVAL;
@@ -1209,7 +1209,7 @@ int sbm_link_boot(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boo
 #ifdef SBM_ATTENDED_TX
     /* the attended test: the zero-copy DL ring gets its ZMB cells now, as Android's setup_zerocopy_adaptor does at
      * the link's setup (ZMB must follow the IPC region: offsets are from the IPC base) */
-    if (b->attended == SBM_ATTENDED_MAGIC && im->mm.zmb_off == im->mm.ipc_off + im->mm.ipc_size && im->mm.zmb_size) {
+    if (b->attended == SBM_ATTENDED_DATA && im->mm.zmb_off == im->mm.ipc_off + im->mm.ipc_size && im->mm.zmb_size) {
         int z = sbm_sbd_zc_fill(&sbd, SBM_CH_PDP_HI, im->mm.ipc_size, im->mm.zmb_size, p);
         sbm_logf(p, "link: zero-copy DL ring (ch %u): %d ZMB cells of %u bytes handed to the CP", SBM_CH_PDP_HI, z,
                  SBM_ZC_CELL);

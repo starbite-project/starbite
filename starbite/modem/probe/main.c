@@ -695,13 +695,13 @@ static void simtest(const char *key)
     sbm_sb_plat_stage4(&park_plat, im.mm.ipc_off);
     park_armed = 1;
     sb_before_reset = park_hook;
-    mo.attended = SBM_ATTENDED_MAGIC;
+    mo.attended = arg("sim_data", 1) ? SBM_ATTENDED_DATA : SBM_ATTENDED_MAGIC;
     uint64_t t = sb_ms();
     int r = sbm_modem_start(&mo, &park_plat, &im);
     sbm_fmt(s, sizeof(s), "modemsim: start: %s in %u ms (attended %s)", r == 0 ? "online" : sbm_strerror(r),
-            (unsigned)(sb_ms() - t), mo.b.attended == SBM_ATTENDED_MAGIC ? "yes" : "NO");
+            (unsigned)(sb_ms() - t), mo.b.attended == SBM_ATTENDED_DATA ? "yes, with data" : mo.b.attended == SBM_ATTENDED_MAGIC ? "yes" : "NO");
     line(s);
-    if (r != 0 || mo.b.attended != SBM_ATTENDED_MAGIC) {
+    if (r != 0 || !SBM_IS_ATTENDED(mo.b.attended)) {
         fail = r != 0 ? "start" : "attended mode";
         goto out;
     }

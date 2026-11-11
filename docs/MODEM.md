@@ -699,7 +699,9 @@ transmits, so it has its own image, gated twice:
   small raw-IP stack (sbnet is Ethernet-based); that is the next image.
 
 ### 7.9 The attended data test (`modemsim`, part B, 2026-11-11)
-Same image and gates as 7.8. After the 60 s hold, with `sim_data=1` (the default):
+Same image and gates as 7.8, with a second session magic: `SBM_ATTENDED_DATA` ("ATTN", `sim_data=1`, the default)
+also fills the zero-copy ring at link setup and allows the GPRS frames and the IP channel. `SBM_ATTENDED_MAGIC`
+(`sim_data=0`) is part A exactly: the link is laid out as before and no GPRS frame can be built. After the 60 s hold:
 - **GPRS frames** (libsec-ril IPC 4.1, read from the binary; the attended builder checks each byte):
   - `DEFINE_PDP 0x0D01 SET` (149 bytes): `01`, cid 1, `02` IPv4, the APN (1..100 of `[A-Za-z0-9.-]`), zeros.
   - `PDP_CONTEXT 0x0D04 SET` (112 bytes; 248 is the long form, sent only if the short one is refused):

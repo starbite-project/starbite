@@ -886,7 +886,9 @@ void sbm_modem_snapshot(struct sbm_modem *m, struct sbm_modem_snap *s);
  * SBM_EPERM not allowed (state, or the window is used up), else the start's SBM_E*. */
 int sbm_modem_recover(struct sbm_modem *m, uint32_t elapsed_ms);
 int sbm_modem_stop(struct sbm_modem *m);
-#define SBM_ATTENDED_MAGIC 0x41545444u   /* "ATTD" */
+#define SBM_ATTENDED_MAGIC 0x41545444u   /* "ATTD": SIM, radio, registration */
+#define SBM_ATTENDED_DATA  0x4154544Eu   /* "ATTN": the same plus the data test (the zero-copy ring filled, GPRS) */
+#define SBM_IS_ATTENDED(x) ((x) == SBM_ATTENDED_MAGIC || (x) == SBM_ATTENDED_DATA)
 #ifdef SBM_ATTENDED_TX
 /* the attended SIM test: radio normal (on = 1) or low power mode (on = 0; the CP detaches, then RF off). The answer
  * lands in m->b.radio_res / radio_res_seen. SBM_EPERM unless the session is attended. */
