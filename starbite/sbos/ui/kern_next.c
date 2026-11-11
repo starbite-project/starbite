@@ -601,6 +601,10 @@ void next_kinit(void)
         comp.gpu = next_gpu;
         comp.gpu_clean = next_gpu_clean;
         gpu_started = 1;
+        /* 572 MHz, a step of the vendor's table (ACPM sets its own voltage): a full frame in the time budget; the
+         * GPU idles clock-gated between frames */
+        sb_log(hw_dvfs(DVFS_GPU, 572000U) ? "next: the GPU at 572 MHz (the vendor table's step)" :
+                                                  "next: 572 MHz not taken: the GPU stays at the boot clock");
         sb_log("next: the GPU composes the frames (Mali-G72 compute jobs, full resolution; the CPU if it refuses)");
     } else {
         sb_log(flip_on ? "next: the CPU composes the frames (the GPU did not come up)" :
