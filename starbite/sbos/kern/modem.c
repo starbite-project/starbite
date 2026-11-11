@@ -1326,6 +1326,15 @@ void kmodem_call(struct kcall *k)
     k->audio = kc.audio;
     k->muted = kc.muted;
     k->audio_ok = audio_ok();
+    if (!k->audio_ok)                        /* the first part missing, in the order the audio path needs them */
+        sb_strcpy(k->audio_why, sizeof(k->audio_why),
+                  au_abox == -1 ? "No audio: the audio processor did not start" :
+                  au_abox == 0 ? "No audio: the audio path is not ready" :
+                  !au_vss ? "No audio: the modem's voice link did not start" :
+                  au_amp == -1 ? "No audio: the earpiece amplifier did not answer" :
+                  "No audio yet");
+    else if (au_codec == -1)
+        sb_strcpy(k->audio_why, sizeof(k->audio_why), "Microphone not working: they can't hear you");
     const struct sbm_calls *c = &mo.b.calls;
     if (comms_ready() && c->n) {
         const struct sbm_call *x = &c->c[0];
