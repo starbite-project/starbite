@@ -2980,7 +2980,6 @@ void sh_cell(const sh_cell_t *c)
     cell_hint[n] = 0;
     build_lstatus();
     build_home_sb();
-    if (AP.on) build_apsb();            /* P3i: apps have their own status layer (the bars) */
     if (is_app("phone") || is_app("settings")) build_app_page(AP.a);
     else if (AP.on && !AP.closing) build_apsb();     /* P3l: every app's status bar shows the bars */
     relayer(&ccsb);                                  /* P3l: the CC's status bar again at its next build */
