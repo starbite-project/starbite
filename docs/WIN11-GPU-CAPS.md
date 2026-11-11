@@ -252,8 +252,17 @@ FL 11_0 and D3D12 need tessellation, which the G72 doesn't have.
     releases, pinned by sha256; the VS ones match Microsoft's manifest.
   - **ARM64EC needs nothing extra:** our arm64 libraries are ARM64X. libcmt/msvcrt/libucrt carry ARM64EC objects
     (machine 0xA641), and the SDK import libraries carry ARM64EC import thunks.
-- **The ARM64EC build** (clang/lld 20, `~/sbmesa/build-wgl-ec`): in progress in a separate worktree
-  (`~/sbmesa/src-ec`), patches 0140-0149.
+- **The ARM64EC build** (clang/lld 20.1.2 alongside the default 18; `~/sbmesa/tc/ec/` wrappers named `clang-cl`,
+  `lld-link` and `llvm-lib`; `cross-ec.ini`; worktree `~/sbmesa/src-ec`, branch `sb-ec`; `~/sbmesa/build-wgl-ec`):
+  - **builds, verified statically:** x64 PE with CHPE v2 metadata and ARM64EC code ranges, system imports only, the
+    same exports as the ARM64 build. Output in `build/win/gl-ec/` (BUILD.md);
+  - **sb-patches/0140:** clang defines `__x86_64__` for ARM64EC, so Mesa's `detect_arch.h` and `xxhash.h` took
+    the SSE paths; they now exclude ARM64EC;
+  - **a workaround in the lld-link wrapper:** lld 20 can't resolve libcpmt's ARM64EC `/alternatename` for
+    `__sanitizer_annotate_contiguous_container`, so the wrapper links a no-op stub;
+  - **ARM64X** (one `libgallium_wgl.dll` for ARM64 and x64 processes, as a registered ICD needs) links only with
+    two workarounds (`build/win/gl-ec/arm64x-experimental/`). Whether the loader accepts it is unknown;
+  - it is in T44 as `glec\`, and in the GD kit as `gd-gl-on.cmd ec`.
 - **Stage `sbwddm-t44`:** T42 + the KMD hang forensics (WIN11-GPU.md §6.52) + the GL tests on ARM64 and x64.
 - **The attended GD kit `build/win/gl-kit`:**
   - `gd-gl-on.cmd` copies the x64 ICD into the Geometry Dash folder and marks it; `gd-gl-off.cmd` removes exactly

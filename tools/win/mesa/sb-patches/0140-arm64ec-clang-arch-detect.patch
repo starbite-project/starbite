@@ -1,0 +1,35 @@
+diff --git a/src/util/detect_arch.h b/src/util/detect_arch.h
+index e32de8d..89e2463 100644
+--- a/src/util/detect_arch.h
++++ b/src/util/detect_arch.h
+@@ -58,9 +58,12 @@
+ #define DETECT_ARCH_X86 1
+ #endif
+ 
+-#if defined(__x86_64__) /* gcc */ || \
+-    ((defined(_M_X64) || defined(_M_AMD64)) && !defined(_M_ARM64EC)) /* msvc */ || \
+-    defined(__x86_64) /* Sun cc */
++/* sb-patches/0140: clang defines __x86_64__ (and _M_X64) for ARM64EC targets
++ * too, like MSVC defines _M_X64. ARM64EC code is AArch64 code, so it must not
++ * take the x86-64 paths (SSE intrinsics, cpuid, x86 asm). */
++#if ((defined(__x86_64__) /* gcc */ || defined(_M_X64) || defined(_M_AMD64) /* msvc */ || \
++      defined(__x86_64) /* Sun cc */) && \
++     !defined(_M_ARM64EC) && !defined(__arm64ec__))
+ #define DETECT_ARCH_X86_64 1
+ #endif
+ 
+diff --git a/src/util/xxhash.h b/src/util/xxhash.h
+index 78fc2e8..343d872 100644
+--- a/src/util/xxhash.h
++++ b/src/util/xxhash.h
+@@ -4340,7 +4340,9 @@ do { \
+ #else
+ #  if XXH_SIZE_OPT >= 1
+ #    define XXH_PREFETCH(ptr) (void)(ptr)
+-#  elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))  /* _mm_prefetch() not defined outside of x86/x64 */
++/* sb-patches/0140: ARM64EC defines _M_X64 but has no <mmintrin.h> under clang;
++ * it takes the __builtin_prefetch branch (clang) or none (MSVC). */
++#  elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86)) && !defined(_M_ARM64EC)  /* _mm_prefetch() not defined outside of x86/x64 */
+ #    include <mmintrin.h>   /* https://msdn.microsoft.com/fr-fr/library/84szxsww(v=vs.90).aspx */
+ #    define XXH_PREFETCH(ptr)  _mm_prefetch((const char*)(ptr), _MM_HINT_T0)
+ #  elif defined(__GNUC__) && ( (__GNUC__ >= 4) || ( (__GNUC__ == 3) && (__GNUC_MINOR__ >= 1) ) )
