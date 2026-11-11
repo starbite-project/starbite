@@ -126,18 +126,19 @@ stuck() {
     log "STUCK: '$1' did not return in time. Stopped deleting. The mount is suspect: restart TWRP before the next phone job."
     exit 4
 }
-clear_dir() {  # the contents of C:\$1, one file at a time; never the folder itself
-    case "$1" in ""|/*|*..*) log "refused: '$1'"; return ;; esac
-    local d="$W/$1" n=0 f
-    rsh 30 "[ -d \"$d\" ]" >/dev/null || { log "C:/$1: not there"; return; }
+clear_dir() {  # the contents of C:\<arg>, 20 files at a time; never the folder itself
+    local rel="${1:-}"   # flush() below is a function too: its $1 is not this one
+    case "$rel" in ""|/*|*..*) log "refused: '$rel'"; return ;; esac
+    local d="$W/$rel" n=0 f
+    rsh 30 "[ -d \"$d\" ]" >/dev/null || { log "C:/$rel: not there"; return; }
     local list; list=$(mktemp)
-    rsh 60 "cd \"$d\" && find . -mindepth 1 \\( -type f -o -type l \\) 2>/dev/null" > "$list" || stuck "find in C:/$1"
+    rsh 60 "cd \"$d\" && find . -mindepth 1 \\( -type f -o -type l \\) 2>/dev/null" > "$list" || stuck "find in C:/$rel"
     # batches of 20 names per timed rm: one adb round trip per file would take half an hour for a big Temp
     local batch="" nb=0 first=""
     flush() {
         [ -n "$batch" ] || return 0
-        local r; r=$(rsh 45 "cd \"$d\" && timeout -s KILL 30 rm -f --$batch; echo rc=\$?") || stuck "rm in C:/$1 (from ${first#./})"
-        case "$r" in *rc=137*) stuck "rm in C:/$1 (from ${first#./})" ;; *rc=0*) ;; *) log "  some files in C:/$1 could not be deleted (batch from ${first#./}: $r)" ;; esac
+        local r; r=$(rsh 45 "cd \"$d\" && timeout -s KILL 30 rm -f --$batch; echo rc=\$?") || stuck "rm in C:/$rel (from ${first#./})"
+        case "$r" in *rc=137*) stuck "rm in C:/$rel (from ${first#./})" ;; *rc=0*) ;; *) log "  some files in C:/$rel could not be deleted (batch from ${first#./}: $r)" ;; esac
         batch=""; nb=0; first=""
     }
     while IFS= read -r f; do
@@ -149,8 +150,8 @@ clear_dir() {  # the contents of C:\$1, one file at a time; never the folder its
     done < "$list"
     flush
     rm -f "$list"
-    rsh 60 "cd \"$d\" && find . -mindepth 1 -depth -type d -empty -exec rmdir {} \\; 2>/dev/null; true" >/dev/null || stuck "rmdir in C:/$1"
-    log "cleared C:/$1 ($n files)"
+    rsh 60 "cd \"$d\" && find . -mindepth 1 -depth -type d -empty -exec rmdir {} \\; 2>/dev/null; true" >/dev/null || stuck "rmdir in C:/$rel"
+    log "cleared C:/$rel ($n files)"
 }
 for u in "${users[@]}"; do
     case $u in "All Users"|Default|"Default User"|Public|desktop.ini) continue ;; esac
