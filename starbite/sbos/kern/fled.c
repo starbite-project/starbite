@@ -306,10 +306,14 @@ const char *fled_why(void)
 /* the torch's current: 240 mA, Samsung's highest continuous value (torch.c switches the pin) */
 int fled_torch_max(void)
 {
+    static int set;                         /* 1.2-alpha27: SOS's Morse switches the torch every 200 ms: set it once */
+    if (set)
+        return 1;
     if (!fled_init())
         return 0;
     int ok = reg_upd(R_CUR1, 0x0fU, TORCH_MAX);
     sb_log(ok ? "fled: torch current 240 mA (Samsung's highest continuous)" : "fled: the torch current did not read back");
+    set = ok;
     return ok;
 }
 

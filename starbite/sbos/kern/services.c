@@ -5,6 +5,7 @@
 #include "kern.h"
 #include "kinput.h"
 #include "tz.h"
+#include "survival.h"
 
 /* ---- SOS ------------------------------------------------------------------------------------- */
 /* state 0 off, 2 the countdown (3 s, a hold cancels), 1 flashing: white / red at 2 Hz */
@@ -32,8 +33,11 @@ int sos_set(int on)
     } else if (!on && sos_st) {
         sos_st = 0;
         kt_cancel(KT_SOS, 1);
-        if (sos_led_on)
+        kt_cancel(KT_SOS, 2);               /* 1.2-alpha27: the Morse */
+        if (sos_led_on || (surv_sos_opts & SURV_SOS_TORCH))
             torch_set(0);
+        if (surv_sos_opts & SURV_SOS_VIB)
+            vib_off();
         fled_off();
         panel_boost(2, 0);
         sb_log("sos: off");
@@ -43,10 +47,34 @@ int sos_set(int on)
     return 0;
 }
 
+/* 1.2-alpha27 (survival.c): Morse S-O-S on the torch (its normal current) and the vibration motor, one element a
+ * timer; the screen's beacon can follow it */
+static int morse_lit;
+static void morse_step(void)
+{
+    if (sos_st != 1)
+        return;
+    uint64_t now = sb_ms();
+    uint32_t next = 0, at = (uint32_t)(now - sos_phase_t);
+    int lit = surv_morse_at(at, &next);
+    if (surv_sos_opts & SURV_SOS_TORCH)
+        torch_set(lit);
+    uint32_t cycle = at / surv_morse_cycle_ms();   /* the motor: the first 3 cycles, then one a minute (battery) */
+    if (lit && !morse_lit && (surv_sos_opts & SURV_SOS_VIB) && (cycle < 3 || cycle % 9U == 0))
+        (void)vib_pulse(next - at);
+    morse_lit = lit;
+    kt_set(KT_SOS, 2, now, next > at ? next - at : 1, 0);
+    ui_mark_dirty();
+}
+
 void sos_timer(unsigned id)
 {
     if (id == 9) {
         torch_timer(id);
+        return;
+    }
+    if (id == 2) {
+        morse_step();
         return;
     }
     uint64_t now = sb_ms();
@@ -56,10 +84,17 @@ void sos_timer(unsigned id)
         panel_boost(2, 1);                  /* the brightest flashes the panel is rated for */
         sb_log("sos: flashing");
         app_event_send(app_by_id("sos"), EV_APP_SERVICE, 2, sos_st);
+        morse_lit = 0;
+        if (surv_sos_opts & (SURV_SOS_TORCH | SURV_SOS_VIB)) {
+            sb_logx("sos: Morse S-O-S (200 ms unit): torch 1, motor 2: ", surv_sos_opts & 3U);
+            morse_step();
+        }
     }
     if (sos_st == 1) {
         sos_phase = (int)(((now - sos_phase_t) / 250U) & 1U);
-        if (sos_led_on && led_full && fled_flash_ok()) {   /* 1.1-beta2: else the torch strobes, as before */
+        if (surv_sos_opts & SURV_SOS_TORCH) {
+            /* the torch follows the Morse (morse_step) */
+        } else if (sos_led_on && led_full && fled_flash_ok()) {   /* 1.1-beta2: else the torch strobes, as before */
             if (!sos_phase)
                 (void)fled_pulse();         /* 0.6.3: a 1250 mA flash pulse with the white phase, at most 1 a second */
         } else if (sos_led_on) {
@@ -73,7 +108,17 @@ int sos_frame(uint32_t *argb)
 {
     if (!sos_st)
         return 0;
-    *argb = sos_st == 2 ? 0xff1c0606U : sos_phase ? 0xffff1a1aU : 0xffffffffU;
+    unsigned beacon = (surv_sos_opts >> SURV_BEACON_SHIFT) & 3U;    /* 1.2-alpha27 */
+    if (sos_st == 2)
+        *argb = 0xff1c0606U;
+    else if (beacon == 1)
+        *argb = sos_phase ? 0xff000000U : 0xffffffffU;
+    else if (beacon == 2)
+        *argb = sos_phase ? 0xff000000U : 0xffff1a1aU;
+    else if (beacon == 3)
+        *argb = morse_lit ? 0xffffffffU : 0xff000000U;
+    else
+        *argb = sos_phase ? 0xffff1a1aU : 0xffffffffU;
     return 1;
 }
 
@@ -389,9 +434,11 @@ void battery_timer(unsigned id)
             said15 = said5 = 0;
         }
     }
-    if (bat.ok && bat.pct < 2 && torch_on())
+    /* 1.2-alpha27: Last 2 % mode (survival.c) keeps the torch and runs to 1 % or 3.4 V instead */
+    int l2 = bat.ok ? surv_last2_battery(bat.pct, bat.mv, bat.charger) : -1;
+    if (bat.ok && bat.pct < 2 && torch_on() && l2 < 0)
         torch_set(0);
-    if (bat.ok && !bat.charger && ((bat.pct < 3 && !sos_active()) || bat.pct < 2)) {
+    if (bat.ok && !bat.charger && (l2 > 0 || (l2 < 0 && ((bat.pct < 3 && !sos_active()) || bat.pct < 2)))) {
         if (sbos_selftest_enabled) {       /* unattended: never switched off (no one to press Power) */
             sb_log("sbos: battery reserve reached in the self-test image: back to the menu, not off");
             power_restart(1);
@@ -459,8 +506,8 @@ static void a55_low(int low)
                                     "power: A55 asked for 455 MHz, the PLL does not show it (was ", was, " MHz)");
         return;
     }
-    if (!a55_lowered)
-        return;
+    if (!a55_lowered || surv_last2())
+        return;                             /* 1.2-alpha27: Last 2 % keeps the lowest step with the screen on */
     a55_lowered = 0;
     if (heater_running_ui())
         return;                             /* the heater owns the clocks now */
@@ -469,6 +516,14 @@ static void a55_low(int low)
     for (int i = 0; i < 5 && !a55_near(A55_NORMAL); ++i)
         sb_mdelay(1);
     log_mhz("power: A55 back at ", hw_a55_khz(), " MHz with the screen on");
+}
+
+void power_last2_clock(int on)
+{
+    if (on)
+        a55_low(1);
+    else if (K.screen_on)
+        a55_low(0);
 }
 
 void power_heater_took_clocks(void)

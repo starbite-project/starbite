@@ -8,6 +8,7 @@
 #include "sb.h"
 #include "kern.h"
 #include "kapp.h"
+#include "survival.h"
 
 struct kapp apps[APP_MAX];
 int napps;
@@ -632,6 +633,31 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
         return heater_ocp_probe();
     case SET_HEAT_WHITE:
         return arg[1] ? heater_white() : (kui_heat_light(0), 0);
+    case SET_SURV_USB:                  /* 1.2-alpha27: survival.c */
+        if (!arg[1]) {
+            surv_usb_stop("Stop on the screen");
+            return 0;
+        }
+        return surv_usb_start() == 0 ? 0 : SBOS_EAGAIN;
+    case SET_SURV_SOS:
+        surv_sos_opts = (uint32_t)arg[1] & 0x33U;
+        return 0;
+    case SET_SURV_LAT:
+    case SET_SURV_LON: {
+        int32_t v = (int32_t)arg[1], lim = arg[0] == SET_SURV_LAT ? 9000 : 18000;
+        if (v != SURV_NOLOC && (v < -lim || v > lim))
+            return SBOS_EINVAL;
+        if (arg[0] == SET_SURV_LAT)
+            surv_lat_x100 = v;
+        else
+            surv_lon_x100 = v;
+        return 0;
+    }
+    case SET_SURV_LAST2:
+        return surv_last2_set(arg[1] != 0, "the switch in Emergency");
+    case SET_SURV_LAST2_AUTO:
+        surv_last2_auto = arg[1] != 0;
+        return 0;
     case SET_VIBRATE: {                 /* 1.2-alpha7 */
         unsigned ms = (unsigned)(arg[1] & 0xffffU), n = (unsigned)((arg[1] >> 16) & 0xffU);
         if (!ms) {
@@ -1041,6 +1067,27 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_OCP_PROBE: return heater_ocp_state;
         case SET_LINUX: return kui_linux_on ? 1 : guest_available() ? 0 : -1;
         case SET_VIBRATE: return vib_ready() ? 1 : -1;
+        case SET_SURV_USB: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            return u.state == SURV_USB_OFF && u.refused ? -1 : u.state;
+        }
+        case SET_SURV_USB_INFO: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            uint64_t sec = (uint64_t)(u.ms_left + 999) / 1000U, ma = u.est_ma < 0 ? 0xfffU : (uint64_t)(u.est_ma > 4094 ? 4094 : u.est_ma);
+            uint64_t v = u.vbus_hi_mv < 0 ? 0xfU : (uint64_t)(u.vbus_hi_mv / 1000), c = u.bat_c10 <= -1000 ? 0 : (uint64_t)(u.bat_c10 < 0 ? 0 : u.bat_c10 / 10);
+            return (int64_t)((sec & 0xffU) | ma << 8 | (v & 0xfU) << 20 | (c & 0x7fU) << 24);
+        }
+        case SET_SURV_SOS: return surv_sos_opts;
+        case SET_SURV_LAT: return surv_lat_x100;
+        case SET_SURV_LON: return surv_lon_x100;
+        case SET_SURV_SUN: {
+            int r = 0, t = 0, c = surv_sun_today(&r, &t);
+            return c == 0 ? (int64_t)(r | t << 16) : c == 1 ? -1 : c == 2 ? -2 : c == -2 ? -3 : c == -3 ? -4 : -5;
+        }
+        case SET_SURV_LAST2: return surv_last2();
+        case SET_SURV_LAST2_AUTO: return surv_last2_auto;
         case SET_LED_FULL: return led_full ? (fled_flash_ok() ? 1 : 2) : -fled_code();     /* 1.0-rc3: negative = why the chip was refused */
         case SET_SAVED: return settings_persistent();
         case SET_AUTO_OFF_MIN: return (int64_t)auto_off_min;
@@ -1050,7 +1097,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         if (!front)
             return SBOS_EPERM;
         int64_t r = setting_set_k(arg[0], arg[1]);
-        if (r == 0 && arg[0] != SET_GPU_HEAT)
+        if (r == 0 && arg[0] != SET_GPU_HEAT && arg[0] != SET_SURV_USB && arg[0] != SET_SURV_LAST2)
             settings_changed();             /* saved in 3 s where there is a state slot (the GPU never is) */
         return r;
     }

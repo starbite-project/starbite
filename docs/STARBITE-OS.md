@@ -671,6 +671,36 @@ no `SYS_SMS_SEND`; the kernel answers `SBOS_ENOSYS` to them anyway). **Message**
 (need help / safe / hurt, cannot talk) and says "not sent". **Hold for the alarm** starts SOS. When the modem
 work starts (doc 10), dialling goes behind its own hold and confirmation, and is never part of a test.
 
+#### 9.3.1 Survival tools (1.2-alpha27, `kern/survival.c`, `kern/survival.h`)
+
+Emergency's pages, also the kernel API for Starbite OS Next's Emergency mode:
+
+- **USB power out.** The MAX77705's own OTG boost (CHG_CNFG_00 MODE = OTG | BOOST, 0x0A) at its top current limit
+  (CHG_CNFG_02 OTG_ILIM = 1.5 A), after a 1.5 s hold, for at most 10 s, then 30 s of cooldown (60 s after a fault).
+  Refused with an input on the port (CHGIN_OK or VBUSDET), below 5 % or 3.5 V, with the battery within 2 C of the
+  Survival battery limit, with Heat running or in Last 2 %. Watched every 100 ms: the chip's mode read back, VBUS
+  (the USB-C controller's VBADC; once it has shown 4.5-5.5 V in a burst, 3 s below 3.5 V is a short and stops it),
+  the cell (3.3 V), the battery temperature (the Survival limit) and charge (3 %) once a second. The stop writes
+  CNFG_00 and CNFG_02 back as found (retried every 100 ms until they read back; also before any restart). No
+  protection is written: B2SOVRC, CHGPROT, the thermal and short-circuit behaviour and the battery pack stay as
+  they are. The output current is estimated from the battery's extra draw (the chip has no output meter).
+  BYP_DTLS is logged at each change and not yet interpreted (the first hand-held test names its bits).
+- **SOS.** Morse S-O-S at a 200 ms unit (6.8 s a round) on the torch (its normal current; `fled_torch_max` once)
+  and the motor (the first 3 rounds, then one a minute); the beacon: white / red, white, red, or with the Morse.
+- **Sun.** The almanac algorithm (zenith 90.833) for a typed-in location; within a minute of NOAA's calculator
+  for Helsinki (winter and midsummer), Quito and Sydney; polar day and night recognised.
+- **The card.** The Info app's card is "CRD2": nine fields (three people to call and notes; a "CRD1" card is taken
+  over). `surv_card_get` / `surv_card_set` read and write it for the lock screen.
+- **Last 2 %.** Heat, USB power out, Wi-Fi, the modem and Linux off (re-checked every 5 s); the A55 at 455 MHz with
+  the screen on too; the screen at the low level with a 15 s timeout. At 3 % (automatic unless turned off) it is
+  entered instead of switching off; the phone then runs to 1 % or 3.4 V (average). The torch is not switched off
+  at 2 % in this mode.
+- **Compass and level** need the sensor hub inside the BCM4775 GNSS chip (firmware over SPI): not yet.
+
+Self-test variant: `starbite-os-survival.img` (`SBOS_SELFTEST_SURVIVAL`): the sun table, the Morse table, the
+charger read and the refusal with the cable in (or a 2 s no-load burst with nothing plugged in), Last 2 % on and
+off, one SOS round on the torch and the motor; then recovery.
+
 ### 9.1 The flashlight LED (0.2: the GPIO part is built, `kern/torch.c`; not yet run on the phone)
 
 From LineageOS `android_kernel_samsung_exynos9810` (lineage-20, commit 6a9461f; GPL-2.0:

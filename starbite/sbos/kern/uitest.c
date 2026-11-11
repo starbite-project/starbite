@@ -25,6 +25,7 @@
 #include "kern.h"
 #include "kapp.h"
 #include "sbapp.h"
+#include "survival.h"
 #ifdef SB_HOST
 #include <stdlib.h>
 #endif
@@ -234,6 +235,18 @@ void selftest_timer(unsigned id)
             sb_logx(w ? "selftest: GPU ladder H2: the watchdog at 30 s, fed by the loop: seconds " :
                         "selftest: GPU ladder H2: the watchdog could not be set (the loader's stays): ", w);
             phase = 50;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
+#ifdef SBOS_SELFTEST_SURVIVAL
+        {
+            /* 1.2-alpha27: the survival tools (survival.c): the sun, the Morse, USB power out (read only, or a 2 s
+             * no-load burst when nothing is plugged in), Last 2 %, one SOS on the torch and the motor; then recovery */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: survival: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: survival: the watchdog could not be set (the loader's stays): ", w);
+            phase = 100;
             kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
             return;
         }
@@ -501,6 +514,21 @@ void selftest_timer(unsigned id)
         kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
         return;
     case 51:
+        active = 0;
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_SURVIVAL
+    case 100:
+        if (!surv_selftest_step()) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
+            return;
+        }
+        phase = 101;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+        return;
+    case 101:
+        sb_log("selftest: survival: done; a restart into recovery (pmsg)");
         active = 0;
         power_restart_recovery();
         return;

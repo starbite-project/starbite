@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #endif
 #include "kinput.h"
+#include "survival.h"
 
 struct kstate K;
 static uint64_t boot_ms;
@@ -36,6 +37,9 @@ static void dispatch_timer(unsigned owner, unsigned id)
         break;
     case KT_SOS:
         sos_timer(id);
+        break;
+    case KT_SURV:
+        surv_timer(id);                     /* 1.2-alpha27: survival.c */
         break;
     case KT_WIFI:
         wifi_timer(id);
@@ -161,6 +165,7 @@ void sb_main(void)
     power_init();
     heater_init();
     sos_init();
+    surv_init();                            /* 1.2-alpha27 */
     settings_restore();                     /* after power_init: the screen-off time it restores re-arms the timer */
     clock_boot_log();                       /* 1.2-alpha26: the PMIC clock, or the last known time */
     heater_boot_forensics();                /* 1.2-alpha18: the last run's lowest voltage / highest current; a
