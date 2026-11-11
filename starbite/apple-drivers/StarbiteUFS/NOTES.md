@@ -12,8 +12,10 @@ Part 3 row 11, milestone M4). Licence: APSL-2.0, all files new.
 | `hw/sbufs_fence.[ch]` | the fence: property parsing (fail closed), sealing, checks, range-to-LU mapping |
 | `hw/sbufs_proto.[ch]` | CDBs, UTRD/UPIU/PRDT building, the doorbell audit (`sbufs_gate`), response parsing |
 | `hw/sbufs_hc.[ch]` | take-over, wake, LU probe, slots, doorbell/completion state machine, timeouts, multi-block self test |
-| `tools/sbufs-fence.py` | packs the two fence properties from LU 0's GPT (for the board file / loader) |
+| `tools/sbufs-fence.py` | packs the two fence properties from a TWRP dump of LU 0's GPT (host check of the loader) |
 | `test/` | mock Exynos host + host tests (`sh test/run.sh`) |
+| `test/loader/` | the loader side end to end: `shim/starlte/ufs_fence.c` + ufs.c's GPT reader on GPT fixtures (S9 #1's table from the installer's `starbite-oneui` layout, and defective variants) into this driver's parser |
+| (outside) `shim/starlte/ufs_fence.[ch]` | the loader fills the ADT placeholders from the live GPT (GPL-2.0-only like the rest of the loader) |
 
 ## Register and protocol facts
 
@@ -71,10 +73,25 @@ driver follows the phone; the multi-block self test catches a mismatch and falls
   a fatal IS bit (DFES, UTPES, HCFES, SBFES) -> host given up, every request fails (no reset: the link is
   S-Boot's and re-initialising it is not this driver's to do).
 
-## Fence property format (for `tools/board` / the loader)
+## Fence property format, and who writes it
 
-All little endian, on `/arm-io/ufs`. `tools/sbufs-fence.py` writes both from LU 0's GPT and `test/run.sh` feeds its
-output to the C parser.
+All little endian, on `/arm-io/ufs`. **The loader writes them at every boot from the live GPT**
+(`shim/starlte/ufs_fence.c`, decided 2026-11-11): `tools/board/mkadt-board.py` emits both as fixed-size
+placeholders (board key `fence` on the `ufs` block: header with count 0, room for 8 / 48 records, all zero), and
+the loader's hook in `xnu_enter` fills them in place in the ADT copy, the way iBoot fills ADT properties, so the
+ADT is never re-serialised. A payload without the placeholders boots exactly as before (UFS not touched). An
+unfilled placeholder (an older loader) parses as an empty allow-list: nothing exposed. The driver accepts exactly
+`count` records or the full placeholder whose unused records are zero. `tools/sbufs-fence.py` stays as a host
+check (it packs the same thing from a TWRP dump of LU 0's head).
+
+**Allow-list rule (loader):** one range, LU 0's GPT partition `USERDATA` (the Apple slot; evidence in
+`shim/starlte/ufs_fence.c`'s head: installer layouts, docs/ANDROID-ONEUI.md, store.h, commit 30f40f8): all of it
+when the card store is home or the loader is card-only (store.c then never opens the UFS store), else only its
+first 16 GiB with the UFS store area behind it denied as `SBSTORE-UFS`. Flags ROOT, never WRITABLE. Deny-list:
+every other partition by name, `GPT-HEAD` (0 .. first usable - 1), `GPT-TAIL` (last usable + 1 .. backup
+header). Fails closed (empty allow-list) on: no UFS / unreadable GPT, bad signature, no or two USERDATA,
+overlapping partitions, a partition outside the usable range, more entries than gpt_load keeps (48), the UFS DMA
+area overlapping what was loaded for XNU.
 
 `starbite,allowed-ranges` = header + N records of 64 bytes (N <= 8):
 
@@ -113,15 +130,13 @@ reserved bits) and the driver exposes **nothing**.
 
 ## Open questions
 
-1. **Root at M4.** USERDATA now belongs to the iOS 27 full root (commit 30f40f8); iOS 26's root is on the card
-   (StarbiteSD's job). M4b as written mounts whatever HFSX volume is at the start of USERDATA read-only. OK, or
-   should M4b wait for StarbiteSD and M4 stay storage-only (M4a)?
+1. ~~Root at M4~~: decided 2026-11-11, M4b mounts the HFSX volume at the start of USERDATA strictly read-only
+   (no sbufsrw, `mount -r`, fence unchanged).
 2. **4 KiB sectors for HFS.** The IOMedia has 4096-byte blocks (the device's); herolte_ufs exposed 512-byte
    sectors to BSD. HFS+ supports 4Kn devices, but our roots were made on 512-byte images. If the mount fails,
    a 512-byte presentation (8:1, read-modify-write for writes) is the fallback; not implemented.
 3. **Root matching.** IOKitBSDInit has no "IOMedia under this range" matching (INTEGRATION.md proposes one);
    `rd=disk0` works while StarbiteUFS is the only disk.
-4. **Who writes the fence properties**: built once from a TWRP read of LU 0's GPT into the ADT (board tool), or
-   by the loader at each boot from the live GPT? The second follows repartitioning; the first is simpler.
+4. ~~Who writes the fence properties~~: decided 2026-11-11, the loader at every boot (above).
 5. Interrupt routing is untested on this controller in XNU (herolte_ufs was always polled): M4a runs polled,
    M4b with the interrupt.

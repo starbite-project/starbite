@@ -86,7 +86,8 @@ struct sbufs_fence {
 	uint64_t foreign_touched;                       /* commands that reached a doorbell outside the fence: must stay 0 */
 };
 
-/* Parse the two ADT properties. Fail closed: any malformed byte leaves nallow = 0 (nothing exposed).
+/* Parse the two ADT properties: exactly the header's records, or the loader-filled placeholder (capacity for
+ * SBUFS_MAX_RANGES / SBUFS_MAX_DENY records, unused records all zero). Fail closed: any malformed byte leaves nallow = 0 (nothing exposed).
  * deny may be NULL (no deny-list). Returns 0 or SBUFS_E_*; err gets a one-line reason. */
 int sbufs_fence_parse(struct sbufs_fence *f, const void *allow, size_t allow_len, const void *deny,
     size_t deny_len, char *err, size_t errlen);

@@ -45,8 +45,15 @@ header(const uint8_t *p, size_t len, uint32_t magic, uint32_t recsize, uint32_t 
 		return SBUFS_E_INVAL;
 	}
 	*count = sbufs_le32(p + 12);
-	if (*count > max || len != SBUFS_FENCE_HDR_SIZE + (size_t)*count * recsize) {
+	/* exactly count records, or a loader-filled placeholder: whole records up to max, the unused ones zero */
+	if (*count > max || len < SBUFS_FENCE_HDR_SIZE + (size_t)*count * recsize ||
+	    (len - SBUFS_FENCE_HDR_SIZE) % recsize != 0 || len > SBUFS_FENCE_HDR_SIZE + (size_t)max * recsize) {
 		return SBUFS_E_INVAL;
+	}
+	for (size_t i = SBUFS_FENCE_HDR_SIZE + (size_t)*count * recsize; i < len; i++) {
+		if (p[i] != 0) {
+			return SBUFS_E_INVAL;
+		}
 	}
 	return SBUFS_OK;
 }

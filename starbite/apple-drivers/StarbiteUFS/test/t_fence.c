@@ -106,6 +106,22 @@ t_parse(void)
 	sbufs_fence_set_capacity(&F, 0, 1u << 24);
 	CHECK_EQ(sbufs_fence_seal(&F), 1);
 	CHECK(!F.allow[0].usable);
+	/* a loader-filled placeholder: capacity records, the unused ones zero */
+	bad = a; bad.len = 16 + 8 * 64;
+	CHECK_EQ(parse(&bad, NULL), SBUFS_OK);
+	CHECK_EQ(F.nallow, 2);
+	bad.b[16 + 2 * 64 + 7] = 1;                     /* garbage in an unused record */
+	CHECK_EQ(parse(&bad, NULL), SBUFS_E_INVAL);
+	CHECK_EQ(F.nallow, 0);
+	bad = a; bad.len = 16 + 9 * 64;                 /* more room than SBUFS_MAX_RANGES */
+	CHECK_EQ(parse(&bad, NULL), SBUFS_E_INVAL);
+	bad = a; bad.len = 16 + 3 * 64 + 8;             /* not whole records */
+	CHECK_EQ(parse(&bad, NULL), SBUFS_E_INVAL);
+	blob_allow_begin(&bad); bad.len = 16 + 8 * 64;  /* an unfilled placeholder: parses, exposes nothing */
+	CHECK_EQ(parse(&bad, NULL), SBUFS_OK);
+	CHECK_EQ(F.nallow, 0);
+	memset(bad.b, 0, 16);                           /* zero header (no magic): refused */
+	CHECK_EQ(parse(&bad, NULL), SBUFS_E_INVAL);
 	/* nine ranges is one too many */
 	bad = a;
 	for (int i = 0; i < 7; i++) {

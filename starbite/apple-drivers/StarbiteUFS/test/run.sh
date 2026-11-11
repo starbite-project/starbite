@@ -21,3 +21,13 @@ $cc $san "$out"/*.o -o "$out/sbufs-test"
 python3 "$here/../tools/sbufs-fence.py" --selftest-gpt "$out/lu0-head.bin"
 python3 "$here/../tools/sbufs-fence.py" --gpt "$out/lu0-head.bin" --allow USERDATA:root:19200 --out "$out/fence" >/dev/null
 "$out/sbufs-test" --parse "$out/fence/allowed-ranges.bin" "$out/fence/denied-ranges.bin" 15616001
+# the loader side (shim/starlte/ufs_fence.c + ufs.c's GPT reader) end to end into the driver's parser
+L=$here/loader
+S=$here/../../../../shim/starlte
+sed 's/#include "ufs.h"/#include "host_loader.h"/; s/#include "store.h"//' "$S/ufs_fence.c" > "$out/ufs_fence_host.c"
+{ echo '#include "host_loader.h"'; sed -n '/---- GPT on LU0/,$p' "$S/ufs.c"; } > "$out/ufs_gpt_host.c"
+mkdir -p "$out/fx"
+python3 -I -B "$L/mkfixtures.py" "$out/fx"
+$cc -std=c11 -O1 -g -Wall -Wextra -Werror $san -I"$L" -I"$S" -I"$here/../hw" "$L/t_loader.c" "$out/ufs_fence_host.c" \
+    "$out/ufs_gpt_host.c" "$here/../hw/sbufs_fence.c" -o "$out/loader-test"
+"$out/loader-test" "$out/fx"

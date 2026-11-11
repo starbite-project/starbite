@@ -14,10 +14,12 @@ changed, what to expect, the roadblock and the plan; after it, what happened.
 2. In TWRP, read-only, LU 0's GPT head (24 KiB) and the first block of USERDATA:
    `adb shell dd if=/dev/block/sda bs=4096 count=6 > lu0-head.bin`,
    `adb shell dd if=/dev/block/sda25 bs=4096 count=1 | xxd -s 1024 -l 2` (expect `482b` "H+" or `4858` "HX").
-3. `tools/sbufs-fence.py --gpt lu0-head.bin --allow USERDATA:root:19200 --out fence/` (19200 = `ufsrootlen` of
-   the iOS 27 root); check `fence.txt`: one allow line `USERDATA lba 1698432 +4915200 flags 2`, deny lines for
-   GPT-HEAD, GPT-TAIL and every other partition (EFS, CPEFS, PARAM, KEYSTORAGE, PERSISTENT, STEADY, BOTA*, DTB,
-   DTBO, BOOT, RECOVERY, RADIO, ...). The two .bin files go into the ADT's `/arm-io/ufs` (INTEGRATION.md).
+3. The loader fills the ADT's fence placeholders from the live GPT (shim/starlte/ufs_fence.c). Host check of what
+   it will write: `tools/sbufs-fence.py --gpt lu0-head.bin --allow USERDATA:root --out fence/`; `fence.txt` must
+   say `USERDATA lba 1698432 +4915328 flags 2` (all of USERDATA: the card store is home) and deny GPT-HEAD,
+   GPT-TAIL and every other partition. The payload's ADT must come from the new `mkadt-board.py` (placeholders
+   present: `mkadt-board.py --check` passes), and BOOT's loader must be one with `ufs_fence.c`; an old loader
+   leaves the placeholders empty and the driver exposes nothing (`allowed-ranges: empty`).
 4. The catalog test row (hidden): `method = "xnu"`, `wdt = 82`, `wdt_feed = "xnu"` (the loader arms cluster 1's
    watchdog and appends `sbwdt=82`), **not** `no_launch` (a no_launch row gets no watchdog). Store backup
    verified; `store-flash.sh ... && boot-next <key>` chained.
@@ -43,7 +45,7 @@ No `rd=`: XNU waits for a root forever, which is fine; the stop fires once the I
 after the last IOMedia). Expected in pmsg (`/sys/fs/pstore/pmsg-ramoops-0`), in this order (numbers from the
 phone where known, `..` = to be seen):
 ```
-StarbiteUFS: fence: 1 allowed ranges, 16 denied extents; writes off (ADT 0, sbufsrw=0)
+StarbiteUFS: fence: 1 allowed ranges, 29 denied extents; writes off (ADT 0, sbufsrw=0)
 StarbiteUFS: HCI at 0x11120000, vendor HCI at 0x11121100, UFSP mapped (read only)
 StarbiteUFS: DMA area 0x.., 413696 bytes (16 KiB pages: 425984), write-combined
 StarbiteUFS: host: cap 0x1303ff0f ver 0x210 hcs 0x10f hce 0x0 utrlba 0x0:ef002000 dbr 0x0 rsr 0x1 nexus 0x2
@@ -53,16 +55,16 @@ StarbiteUFS: lun 0xd0 op 0x00 failed: ocs 0x7 ... sense 2/04/02 ...      (expect
 StarbiteUFS: device W-LUN: TEST UNIT READY .., START STOP UNIT (ACTIVE) 0
 StarbiteUFS: lun 0: .. blocks of 4096 bytes (.. MiB)
 StarbiteUFS: device: SAMSUNG .. rev ..
-StarbiteUFS: range 0 "USERDATA" lun 0 lba 1698432 +4915200 (19200 MiB) ro root uuid ..: EXPOSED
+StarbiteUFS: range 0 "USERDATA" lun 0 lba 1698432 +4915328 (19200 MiB) ro root uuid 3502F564-BDA2-4073-945B-DB9E35BD3FDD (the installer layout's USERDATA GUID): EXPOSED
 StarbiteUFS: vs_hci was tx 0x.. rx 0x.. reorder 0x.. axidma 0x.., now programmed: single-block 0/0 same
 StarbiteUFS: multi-block commands on: 16 x 4 KiB entries per command (16-byte entries)
 StarbiteUFS: interrupt: off (sbufsirq=0), polled every 250 us
 StarbiteUFS: up: 4 slot(s), 16 block(s) per command, direct DMA, polled
 StarbiteUFS: IOMedia tree (media settled):
 StarbiteUFS: tree| +-o StarbiteUFS  <class StarbiteUFS>
-StarbiteUFS: tree|   +-o StarbiteUFSRange  <class StarbiteUFSRange, range "USERDATA" lun 0 lba 1698432 +4915200>
+StarbiteUFS: tree|   +-o StarbiteUFSRange  <class StarbiteUFSRange, range "USERDATA" lun 0 lba 1698432 +4915328>
 StarbiteUFS: tree|     +-o IOBlockStorageDriver  <class IOBlockStorageDriver>
-StarbiteUFS: tree|       +-o SAMSUNG .. Media  <class IOMedia, Size 20132659200, Whole Yes, Writable No, Content "", UUID -, BSD Name disk0>
+StarbiteUFS: tree|       +-o SAMSUNG .. Media  <class IOMedia, Size 20133183488, Whole Yes, Writable No, Content "", UUID -, BSD Name disk0>
 StarbiteUFS: tree|         +-o IOMediaBSDClient  <class IOMediaBSDClient>
 StarbiteUFS: fence: N requests checked, 0 refused (0 writes), M blocks allowed; doorbell audit refused 0; foreign LBA touched 0
 StarbiteUFS: host: .. commands, .. errors, 0 timeouts, 0 fatal, 0 UIC errors, ..
@@ -71,14 +73,15 @@ STARBITE: sbstop=ufs: stage reached, resetting into TWRP
 (With an inner GPT in the range, `IOGUIDPartitionScheme` and partition IOMedia with `UUID` appear under the whole
 media. The iOS 27 root is HFSX directly in USERDATA: no partitions.)
 
-**M4a pass:** the tree shows exactly one StarbiteUFSRange with a whole IOMedia of 20132659200 bytes,
+**M4a pass:** the tree shows exactly one StarbiteUFSRange with a whole IOMedia of 20133183488 bytes,
 `Writable No`, and the fence line says `refused 0 ... doorbell audit refused 0; foreign LBA touched 0`.
 Allowed fail modes, all still ending in TWRP: `host not ready` / `did not take our request list` (nothing was
 rung), `multi-block self test failed` (falls back to one block per command, still a pass), a timeout.
 
 ## M4b: root through IOMedia, interrupt on
 
-Boot-args: M4a's without `sbufsirq=0` and `sbstop=ufs`, plus the root (read-only: no `rootrw`):
+Boot-args: M4a's without `sbufsirq=0` and `sbstop=ufs`, plus the root, strictly read-only (no `sbufsrw`, no
+`rootrw`, so XNU mounts it `-r`; the fence unchanged):
 ```
 ... rd=disk0 sbufsreport=40 sbstop=ufsroot
 ```

@@ -49,20 +49,17 @@ symbols are not exported).
 ```
 (`Info.plist` carries the same for a later KC; OSBundleRequired Root.)
 
-## 4. ADT: the fence properties on /arm-io/ufs
+## 4. ADT: the fence properties on /arm-io/ufs (done in this session, uncommitted)
 
-The driver refuses to start without `starbite,allowed-ranges`. Format: NOTES.md "Fence property format".
-Producer: `starbite/apple-drivers/StarbiteUFS/tools/sbufs-fence.py --gpt lu0-head.bin --allow USERDATA:root:19200
---out DIR` (LU 0's first 24 KiB read in TWRP with `dd`, read-only), which also denies every other partition, the
-GPT head and the GPT tail. Then in `tools/board/mkadt-board.py`, for the `ufs` block:
-
-```python
-set_prop(n, 'starbite,allowed-ranges', Path(DIR, 'allowed-ranges.bin').read_bytes())
-set_prop(n, 'starbite,denied-ranges', Path(DIR, 'denied-ranges.bin').read_bytes())
-# never at M4: set_prop(n, 'starbite,writes-allowed', u32(1))
-```
-(or the loader writes the same bytes at boot from the live GPT: NOTES.md open question 4). Writes additionally
-need `sbufsrw=1` on the command line and the range's WRITABLE flag.
+The driver refuses to start without a filled `starbite,allowed-ranges`. Format and allow-list rule: NOTES.md.
+- `tools/board/starlte.board`: the `ufs` block gets `fence = { "starbite,allowed-ranges" = 8,
+  "starbite,denied-ranges" = 48 }`; `tools/board/mkadt-board.py` emits them as placeholders (header, count 0,
+  zero records) and `--check` verifies them. The ADTs in `out/` from before this change fail that check until
+  they are regenerated.
+- `shim/starlte/ufs_fence.c/.h` (new) + one hook in `xnu_enter` (`shim/starlte/xnu_boot.c`) + `ufs_fence.c` in
+  `shim/starlte/build.sh`: fills them in the ADT copy at every XNU start from the live GPT.
+- `starbite,writes-allowed` is never emitted (M4 and on: read-only).
+Host test of the loader side: `test/loader/` (run by `test/run.sh`).
 
 ## 5. Coexistence with herolte_ufs.c
 

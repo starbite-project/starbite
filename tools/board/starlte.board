@@ -317,6 +317,10 @@ compatible = ["starbite,ufs", "samsung,exynos-ufs"]
 reg = [0x11120000, 0x200, 0x11121100, 0x200, 0x11110000, 0x8000, 0x11130000, 0x100]
 spi = [0xf2]
 driver = "StarbiteUFS (IOBlockStorageDevice, fenced)"
+# StarbiteUFS's fence: zero-filled placeholders (header SBFR/SBFD, version 1, record size, count 0) that the loader
+# fills in place at every boot from the live GPT (shim/starlte/ufs_fence.c); unfilled = nothing exposed.
+# Format: starbite/apple-drivers/StarbiteUFS/NOTES.md. Values: maximum records.
+fence = { "starbite,allowed-ranges" = 8, "starbite,denied-ranges" = 48 }
 today = "herolte_ufs.c (herolte-ufs node, STARLTE_UFSP_PA)"
 source = "dts ufs@0x11120000"
 [[block]]

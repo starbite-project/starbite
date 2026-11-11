@@ -16,6 +16,7 @@
 #include "menu.h"
 #include "hw.h"
 #include "ufs.h"
+#include "ufs_fence.h"
 #include "mmu.h"
 #include "store.h"
 #include "catalog.h"
@@ -1537,6 +1538,9 @@ xnu_enter(volatile uint64_t *log, const struct payload *p, uintptr_t rd_start, u
     if (ba_pa + PAGE_SIZE > memory_end || ba_pa < adt_pa)
         return fail(log, -5, "NO ROOM FOR BOOT ARGS");
     copy_bytes(adt_pa, rd_start + p->adt_off, p->adt_size);
+    /* StarbiteUFS's fence: fill the ADT's /arm-io/ufs placeholders from the live GPT (ufs_fence.h); an ADT
+     * without them is left alone and UFS is not touched */
+    (void)ufs_fence_xnu(adt_pa, p->adt_size, p->phys_base, ba_pa + PAGE_SIZE);
     zero_bytes(ba_pa, PAGE_SIZE);
     /* The header fields up to CommandLine are the same in both layouts (asserted above). */
     volatile struct boot_args *ba = (volatile struct boot_args *)ba_pa;

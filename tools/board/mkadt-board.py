@@ -63,6 +63,15 @@ def phandles(node, acc):
     return acc
 
 
+# StarbiteUFS fence placeholders (block key "fence"): magic, record size per property; the loader fills them in place
+FENCE = {'starbite,allowed-ranges': (0x52464253, 64), 'starbite,denied-ranges': (0x44464253, 40)}
+
+
+def fence_placeholder(name, records):
+    magic, size = FENCE[name]
+    return u32(magic, 1, size, 0) + bytes(size * records)
+
+
 def ranges(block):
     r = block['reg']
     assert len(r) % 2 == 0 and r, f"{block['name']}: reg needs addr,size pairs"
@@ -133,6 +142,8 @@ def build(base, board, topology):
             props.append((k, u64(*(v if isinstance(v, list) else [v]))))
         for k, v in blk.get('u32', {}).items():
             props.append((k, u32(*(v if isinstance(v, list) else [v]))))
+        for k, v in blk.get('fence', {}).items():
+            props.append((k, fence_placeholder(k, v)))
         if blk['spi']:
             props += [('interrupts', u32(*(s + 32 for s in blk['spi']))),
                       ('interrupt-parent', u32(gic_ph))]
@@ -205,6 +216,12 @@ def check(path, board):
     for blk in board['block'] + board.get('device', []):
         if names.count(blk['name']) != 1:
             bad.append(f"arm-io/{blk['name']}: {names.count(blk['name'])} nodes")
+    for blk in board['block']:
+        node = child(arm_io, blk['name'])
+        for k, v in blk.get('fence', {}).items():
+            got = node.prop(k) if node else None
+            if got is None or len(got) != 16 + FENCE[k][1] * v or struct.unpack_from('<III', got) != (FENCE[k][0], 1, FENCE[k][1]):
+                bad.append(f"arm-io/{blk['name']}: {k} placeholder missing or malformed")
     comp = root.prop('compatible').split(b'\0')
     if comp[-2].decode() != board['board']['name'] or b'AppleARM' in comp:
         bad.append(f'root compatible ends {comp[-2]!r}')
