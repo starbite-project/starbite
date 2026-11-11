@@ -27,6 +27,9 @@
 #  6. Checks the hive is clean, pulls OUT/post/SYSTEM, then sets Unattended=0 (unless --keep-unattended).
 # T32 keys (any mode that installs): --keys 1|off [--sas 0|1]; test cycles also --keys-selftest N (docs/WIN11-GPU.md 6.40).
 # T32c (any mode that installs): --crashdump 0|3 (default 0, always written, with AutoReboot 1); --afbc 0|1 (sbumd AFBC).
+# T37 (test cycles): --reference: the test boot runs sbwddm display-only (FullMode=0), so Windows draws with WARP (Microsoft
+#   Basic Render Driver) and the stage's gputest sweep produces the reference shots (docs/WIN11-GPU.md 6.46). Needs a
+#   T37+ sbwdog (a display-only boot with a gputest gets the full-mode times).
 # --install-default STAGE OUT: the user's attended setup (no boot): full mode by default, the guard clears itself
 # after a boot with content on the panel, sbwdog only feeds. The phone ends in TWRP. Exit: 0 done; 1 usage or precondition (phone untouched or still in TWRP); 2 the phone
 # did not come back (it needs the user); 3 the hive is dirty (run --clean-only first); 4 an install read-back
@@ -47,7 +50,7 @@ esac
 out=${1:?usage: gpu-cycle.sh STAGE OUT [...]}; shift
 tkey=win11-gpu; ckey=win11-auto; keep=0
 full_sec=300
-while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --no-trace) notrace=1; shift;; --scan-flip) scan_flip=$2; shift 2;; --cached-blt) cached_blt=$2; shift 2;; --parallel-blt) par_blt=$2; shift 2;; --blt-no-drain) no_drain=$2; shift 2;; --keys) keys=$2; shift 2;; --crashdump) crashdump=$2; shift 2;; --afbc) afbc=$2; shift 2;; --keys-selftest) keys_selftest=$2; shift 2;; --sas) sas=$2; shift 2;; --full-sec) full_sec=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
+while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --no-trace) notrace=1; shift;; --scan-flip) scan_flip=$2; shift 2;; --cached-blt) cached_blt=$2; shift 2;; --parallel-blt) par_blt=$2; shift 2;; --blt-no-drain) no_drain=$2; shift 2;; --keys) keys=$2; shift 2;; --crashdump) crashdump=$2; shift 2;; --afbc) afbc=$2; shift 2;; --keys-selftest) keys_selftest=$2; shift 2;; --reference) reference=1; shift;; --sas) sas=$2; shift 2;; --full-sec) full_sec=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
 case $full_sec in ''|*[!0-9]*) echo "--full-sec needs seconds"; exit 1;; esac
 # T32: sbkeys (Bixby held 3 s = clean restart; docs/WIN11-GPU.md 6.40). --keys 1 installs STAGE/sbkeys.sys as a
 # service (Start 2) with Enable=1; --keys off sets Enable=0; default: leave whatever is there. --keys-selftest N (test
@@ -207,7 +210,7 @@ install() {
         python3 "$HS" "$tmp/SYSTEM" "$tmp/S0" param sbwddm --root FullGuardBoots=0 >/dev/null
         # unattended cycles: the guard never clears itself (each install resets it); --install-default sets 1
         # T17: Live_ logging rate and hive flushes (1 s / every second in test cycles; the user's install 10 s / 60 s)
-        python3 "$HS" "$tmp/S0" "$tmp/S1" param sbwddm FullMode=1 GuardAutoClear="${guard_auto:-0}" \
+        python3 "$HS" "$tmp/S0" "$tmp/S1" param sbwddm FullMode="$([ "${reference:-0}" = 1 ] && echo 0 || echo 1)" GuardAutoClear="${guard_auto:-0}" \
             LiveSec="${live_sec:-1}" LiveFlushSec="${live_flush:-1}" ScanFlip="${scan_flip:-1}" CachedBltReads="${cached_blt:-1}" ParallelBlt="${par_blt:-1}" BltNoDrain="${no_drain:-1}" >/dev/null
     else cp "$tmp/SYSTEM" "$tmp/S1"; fi
     if python3 tools/woa/hive.py "$tmp/S1" 'ControlSet001\Services\sbwdog' 2>/dev/null | grep -q "Start"; then cp "$tmp/S1" "$tmp/S2"
@@ -270,6 +273,7 @@ install() {
     adb shell "rm -f $W/Windows/Starbite/sbwdog.off" >/dev/null
     umount_w
     [ $rc = 0 ] || { log "install read-back failed: phone left in TWRP"; exit 4; }
+    [ "${reference:-0}" = 1 ] && log "--reference: FullMode=0 (display-only; Windows draws with WARP)"
     log "installed from $(basename "$stage"): sbwdog (Start 0, Unattended=1)$([ "$1" = 1 ] && echo ", sbwddm/sbumd, FullGuardBoots=0")$([ $gpu_armed = 1 ] && echo ", gputest armed")"
 }
 finish() {  # after a clean display-only boot: disarm unless asked not to

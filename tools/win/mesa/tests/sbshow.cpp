@@ -18,6 +18,19 @@
 //   sbshow hit                T36: which window a touch would land in (WindowFromPoint) on a grid over the lower half
 //                             of the screen, where the touch keyboard sits
 //   sbshow key start|esc      T36: press the Windows key (the Start menu) or Escape
+// T37, the sweep (docs/WIN11-GPU.md 6.46):
+//   sbshow shot NAME          the screen through GDI (BitBlt of the desktop DC, what any screenshot tool sees), at
+//                             quarter size, to C:\ProgramData\Starbite\umdlog\shot-NAME.ppm, with a one-line summary
+//   sbshow frame [NAME]       as above; NAME names DWM's dump (dump-dwm-NAME-p<n>.ppm, sb-patches/0130)
+//   sbshow snap NAME          shot NAME, then frame NAME (one surface, both views)
+//   sbshow keys SPEC          a key chord, e.g. win+a, win+n, ctrl+l, shift+f10, alt+f4, enter, esc
+//   sbshow alttab NAME        hold Alt, Tab, then snap NAME while the switcher is up, then release
+//   sbshow type TEXT          type TEXT (Unicode key events)
+//   sbshow click|rclick XP YP a (right) click at XP%/YP% of the screen
+//   sbshow close CLASS        WM_CLOSE to every visible top-level window of CLASS
+//   sbshow dialog SEC         a standard message box for SEC seconds (start it with `start ""`)
+//   sbshow image PATH         write a 1440x1440 test picture (BMP) for Photos and Paint
+//   sbshow disk               free space on C:
 //
 // Exit code 0, or 1 when the action failed (the line says why).
 //
@@ -27,6 +40,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
+#include <ctype.h>
+#include <stdlib.h>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -229,6 +244,212 @@ static void key(WORD vk)
     printf("sbshow: key 0x%02x sent %u\n", vk, SendInput(2, in, sizeof(INPUT)));
 }
 
+/* ---- T37: the sweep ------------------------------------------------------------------------------------ */
+
+static int write_dwmframe(const char *name, const SYSTEMTIME &t)
+{
+    HANDLE h = CreateFileA("C:\\ProgramData\\Starbite\\umdlog\\dwmframe", GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        printf("sbshow: dwmframe not written (%lu)\n", GetLastError());
+        return 1;
+    }
+    char b[96];
+    int n = snprintf(b, sizeof b, "%s %02u:%02u:%02u\r\n", name && *name ? name : "frame", t.wHour, t.wMinute, t.wSecond);
+    DWORD wr;
+    WriteFile(h, b, n, &wr, nullptr);
+    CloseHandle(h);
+    nudge();
+    printf("sbshow: dwmframe rewritten (%s), DWM nudged\n", name && *name ? name : "-");
+    return 0;
+}
+
+static int shot(const char *name)
+{
+    int w = GetSystemMetrics(SM_CXSCREEN), h = GetSystemMetrics(SM_CYSCREEN);
+    HDC sdc = GetDC(nullptr), mdc = CreateCompatibleDC(sdc);
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    void *bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(sdc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp || !bits) {
+        printf("sbshow: shot %s: no bitmap\n", name);
+        return 1;
+    }
+    HGDIOBJ old = SelectObject(mdc, bmp);
+    BOOL ok = BitBlt(mdc, 0, 0, w, h, sdc, 0, 0, SRCCOPY | CAPTUREBLT);
+    GdiFlush();
+    const unsigned char *px = (const unsigned char *)bits;
+    int w4 = w / 4, h4 = h / 4;
+    unsigned long long sum = 0, black = 0, n = 0;
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "C:\\ProgramData\\Starbite\\umdlog\\shot-%s.ppm", name);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fprintf(f, "P6\n%d %d\n255\n", w4, h4);
+        unsigned char *line = (unsigned char *)malloc((size_t)w4 * 3);
+        for (int y = 0; line && y < h4; y++) {
+            for (int x = 0; x < w4; x++) {
+                unsigned r = 0, g = 0, b = 0;
+                for (int dy = 0; dy < 4; dy++)
+                    for (int dx = 0; dx < 4; dx++) {
+                        const unsigned char *p = px + ((size_t)(4 * y + dy) * w + 4 * x + dx) * 4;
+                        b += p[0], g += p[1], r += p[2];
+                    }
+                line[3 * x] = (unsigned char)(r / 16);
+                line[3 * x + 1] = (unsigned char)(g / 16);
+                line[3 * x + 2] = (unsigned char)(b / 16);
+                unsigned l = (r + g + b) / 48;
+                sum += l, n++;
+                black += l < 8;
+            }
+            fwrite(line, 1, (size_t)w4 * 3, f);
+        }
+        free(line);
+        fclose(f);
+    }
+    SelectObject(mdc, old);
+    DeleteObject(bmp);
+    DeleteDC(mdc);
+    ReleaseDC(nullptr, sdc);
+    printf("sbshow: shot %s %dx%d (BitBlt %s): mean %llu, near-black %llu%% -> %s\n", name, w4, h4, ok ? "ok" : "FAILED",
+           n ? sum / n : 0, n ? black * 100 / n : 0, f ? path : "NOT WRITTEN");
+    return ok && f ? 0 : 1;
+}
+
+static WORD vk_of(const char *k)
+{
+    static const struct { const char *n; WORD vk; } t[] = {
+        { "win", VK_LWIN }, { "ctrl", VK_CONTROL }, { "shift", VK_SHIFT }, { "alt", VK_MENU }, { "esc", VK_ESCAPE },
+        { "enter", VK_RETURN }, { "tab", VK_TAB }, { "space", VK_SPACE }, { "del", VK_DELETE }, { "up", VK_UP },
+        { "down", VK_DOWN }, { "left", VK_LEFT }, { "right", VK_RIGHT }, { "f4", VK_F4 }, { "f5", VK_F5 },
+        { "f10", VK_F10 }, { "f11", VK_F11 }, { "home", VK_HOME }, { "end", VK_END },
+    };
+    for (auto &e : t)
+        if (!_stricmp(k, e.n))
+            return e.vk;
+    if (strlen(k) == 1 && isalnum((unsigned char)k[0]))
+        return (WORD)toupper((unsigned char)k[0]);
+    return 0;
+}
+
+static int chord(const char *spec, bool down, bool up)
+{
+    char b[64];
+    WORD vks[6];
+    int n = 0;
+    snprintf(b, sizeof b, "%s", spec);
+    for (char *tok = strtok(b, "+"); tok && n < 6; tok = strtok(nullptr, "+")) {
+        WORD vk = vk_of(tok);
+        if (!vk) {
+            printf("sbshow: unknown key '%s'\n", tok);
+            return 1;
+        }
+        vks[n++] = vk;
+    }
+    INPUT in[12] = {};
+    int m = 0;
+    if (down)
+        for (int i = 0; i < n; i++) {
+            in[m].type = INPUT_KEYBOARD;
+            in[m++].ki.wVk = vks[i];
+        }
+    if (up)
+        for (int i = n - 1; i >= 0; i--) {
+            in[m].type = INPUT_KEYBOARD;
+            in[m].ki.wVk = vks[i];
+            in[m++].ki.dwFlags = KEYEVENTF_KEYUP;
+        }
+    UINT sent = SendInput((UINT)m, in, sizeof(INPUT));
+    printf("sbshow: keys %s%s sent %u/%d\n", spec, down && up ? "" : down ? " (down)" : " (up)", sent, m);
+    return sent == (UINT)m ? 0 : 1;
+}
+
+static void type_text(const char *s)
+{
+    for (; *s; s++) {
+        INPUT in[2] = {};
+        in[0].type = in[1].type = INPUT_KEYBOARD;
+        in[0].ki.wScan = in[1].ki.wScan = (WORD)(unsigned char)*s;
+        in[0].ki.dwFlags = KEYEVENTF_UNICODE;
+        in[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+        SendInput(2, in, sizeof(INPUT));
+        Sleep(15);
+    }
+    printf("sbshow: typed %zu characters\n", strlen(s));
+}
+
+static void click(int xp, int yp, bool right)
+{
+    INPUT in[3] = {};
+    for (auto &i : in)
+        i.type = INPUT_MOUSE;
+    in[0].mi.dx = in[1].mi.dx = in[2].mi.dx = xp * 65535 / 100;
+    in[0].mi.dy = in[1].mi.dy = in[2].mi.dy = yp * 65535 / 100;
+    in[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+    in[1].mi.dwFlags = MOUSEEVENTF_ABSOLUTE | (right ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN);
+    in[2].mi.dwFlags = MOUSEEVENTF_ABSOLUTE | (right ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP);
+    printf("sbshow: %sclick at %d%%,%d%% sent %u\n", right ? "right " : "", xp, yp, SendInput(3, in, sizeof(INPUT)));
+}
+
+static BOOL CALLBACK close_one(HWND w, LPARAM p)
+{
+    char cls[128] = "";
+    GetClassNameA(w, cls, sizeof cls);
+    if (IsWindowVisible(w) && !_stricmp(cls, (const char *)p)) {
+        PostMessageA(w, WM_CLOSE, 0, 0);
+        printf("sbshow: WM_CLOSE to %p\n", (void *)w);
+    }
+    return TRUE;
+}
+
+static int write_image(const char *path)
+{
+    const int W = 1440, H = 1440;
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return 1;
+    BITMAPFILEHEADER fh = {};
+    BITMAPINFOHEADER ih = {};
+    ih.biSize = sizeof ih;
+    ih.biWidth = W;
+    ih.biHeight = -H;
+    ih.biPlanes = 1;
+    ih.biBitCount = 24;
+    fh.bfType = 0x4d42;
+    fh.bfOffBits = sizeof fh + sizeof ih;
+    fh.bfSize = fh.bfOffBits + W * H * 3;
+    fwrite(&fh, sizeof fh, 1, f);
+    fwrite(&ih, sizeof ih, 1, f);
+    unsigned char *row = (unsigned char *)malloc(W * 3);
+    for (int y = 0; row && y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            unsigned char r = (unsigned char)(x * 255 / W), g = (unsigned char)(y * 255 / H), b = (unsigned char)(255 - r);
+            if (((x / 90) + (y / 90)) % 2 && y > H * 3 / 4)
+                r = g = b = 255;              /* a checkerboard band: scaling and filtering show here */
+            if (abs(x - W / 2) < 3 || abs(y - H / 2) < 3)
+                r = g = b = 0;                /* a centre cross */
+            row[3 * x] = b, row[3 * x + 1] = g, row[3 * x + 2] = r;
+        }
+        fwrite(row, 1, W * 3, f);
+    }
+    free(row);
+    fclose(f);
+    printf("sbshow: test picture written to %s\n", path);
+    return 0;
+}
+
+static DWORD WINAPI dialog_close(LPVOID p)
+{
+    Sleep((DWORD)(UINT_PTR)p * 1000);
+    ExitProcess(0);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);   /* physical pixels */
@@ -282,20 +503,50 @@ int main(int argc, char **argv)
         EnumWindows(list_one, 0);
         return 0;
     }
-    if (!strcmp(argv[1], "frame")) {
-        HANDLE h = CreateFileA("C:\\ProgramData\\Starbite\\umdlog\\dwmframe", GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) {
-            printf("sbshow: dwmframe not written (%lu)\n", GetLastError());
-            return 1;
-        }
-        char b[32];
-        int n = snprintf(b, sizeof b, "%02u:%02u:%02u\r\n", t.wHour, t.wMinute, t.wSecond);
-        DWORD wr;
-        WriteFile(h, b, n, &wr, nullptr);
-        CloseHandle(h);
-        nudge();
-        printf("sbshow: dwmframe rewritten, DWM nudged\n");
+    if (!strcmp(argv[1], "frame"))
+        return write_dwmframe(argc >= 3 ? argv[2] : nullptr, t);
+    if (!strcmp(argv[1], "shot") && argc >= 3)
+        return shot(argv[2]);
+    if (!strcmp(argv[1], "snap") && argc >= 3) {
+        int r = shot(argv[2]);
+        return write_dwmframe(argv[2], t) | r;
+    }
+    if (!strcmp(argv[1], "keys") && argc >= 3)
+        return chord(argv[2], true, true);
+    if (!strcmp(argv[1], "alttab") && argc >= 3) {
+        chord("alt", true, false);
+        chord("tab", true, true);
+        Sleep(1500);
+        int r = shot(argv[2]) | write_dwmframe(argv[2], t);
+        Sleep(1500);
+        chord("alt", false, true);
+        return r;
+    }
+    if (!strcmp(argv[1], "type") && argc >= 3) {
+        type_text(argv[2]);
+        return 0;
+    }
+    if ((!strcmp(argv[1], "click") || !strcmp(argv[1], "rclick")) && argc >= 4) {
+        click(atoi(argv[2]), atoi(argv[3]), argv[1][0] == 'r');
+        return 0;
+    }
+    if (!strcmp(argv[1], "close") && argc >= 3) {
+        EnumWindows(close_one, (LPARAM)argv[2]);
+        return 0;
+    }
+    if (!strcmp(argv[1], "image") && argc >= 3)
+        return write_image(argv[2]);
+    if (!strcmp(argv[1], "dialog")) {
+        int sec = argc >= 3 ? atoi(argv[2]) : 10;
+        CreateThread(nullptr, 0, dialog_close, (LPVOID)(UINT_PTR)(sec > 0 ? sec : 10), 0, nullptr);
+        MessageBoxW(nullptr, L"Starbite sweep: a standard Windows message box (closes by itself).",
+                    L"Starbite sweep", MB_OKCANCEL | MB_ICONWARNING | MB_SETFOREGROUND);
+        return 0;
+    }
+    if (!strcmp(argv[1], "disk")) {
+        ULARGE_INTEGER fr, tot;
+        if (GetDiskFreeSpaceExA("C:\\", &fr, &tot, nullptr))
+            printf("sbshow: C: %llu MiB free of %llu MiB\n", fr.QuadPart >> 20, tot.QuadPart >> 20);
         return 0;
     }
     if (!strcmp(argv[1], "transparency") && argc >= 3) {

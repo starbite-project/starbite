@@ -1,0 +1,65 @@
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index 2dc1723..18db6c4 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -162,14 +162,33 @@ sb_sample_present(struct pipe_context *pipe, Resource *res, unsigned alloc, unsi
+    static unsigned dwm_dumps;
+    static ULONGLONG dwm_mtime;
+    static bool dwm_seen;
++   static char dwm_name[40];
+    if (is_dwm < 0)
+       is_dwm = !_stricmp(malikm_exe(), "dwm.exe");
+-   if (is_dwm && dwm_dumps < 8 && !(n % 4)) {
++   /* sb-patches/0130 (T37's sweep): up to 40 dumps, each named after the first word in dwmframe (the surface) */
++   if (is_dwm && dwm_dumps < 40 && !(n % 4)) {
+       WIN32_FILE_ATTRIBUTE_DATA fa;
+       if (GetFileAttributesExA("C:\\ProgramData\\Starbite\\umdlog\\dwmframe", GetFileExInfoStandard, &fa)) {
+          ULONGLONG t = ((ULONGLONG)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+-         if (dwm_seen && t != dwm_mtime)
++         if (dwm_seen && t != dwm_mtime) {
++            FILE *nf = fopen("C:\\ProgramData\\Starbite\\umdlog\\dwmframe", "r");
++            char line[64] = "";
++            unsigned k = 0;
+             force = true;
++            if (nf) {
++               if (!fgets(line, sizeof line, nf))
++                  line[0] = 0;
++               fclose(nf);
++            }
++            for (unsigned i = 0; line[i] && k + 1 < sizeof dwm_name; i++) {
++               char c = line[i];
++               if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_')
++                  dwm_name[k++] = c;
++               else if (k)
++                  break;                  /* the first word only (the old gputest wrote a time) */
++            }
++            dwm_name[k] = 0;
++         }
+          dwm_mtime = t;
+       }
+       dwm_seen = true;
+@@ -262,11 +281,19 @@ sb_sample_present(struct pipe_context *pipe, Resource *res, unsigned alloc, unsi
+          else
+             dumps++;
+          const unsigned w2 = W / 2, h2 = H / 2;
+-         snprintf(path, sizeof path, "C:\\ProgramData\\Starbite\\umdlog\\dump-%s-%lu-p%u-%ux%u.ppm", malikm_exe(),
+-                  GetCurrentProcessId(), n, W, H);
+-         FILE *f = fopen(path, "wb");
+-         snprintf(path + strlen(path) - 4, 5, ".pgm");
+-         FILE *fa = fopen(path, "wb");
++         FILE *f, *fa;
++         if (force && dwm_name[0]) {
++            /* sb-patches/0130: dump-dwm-<surface>-p<n>.ppm, colour only (DWM's frame is opaque) */
++            snprintf(path, sizeof path, "C:\\ProgramData\\Starbite\\umdlog\\dump-dwm-%s-p%u.ppm", dwm_name, n);
++            f = fopen(path, "wb");
++            fa = fopen("NUL", "wb");
++         } else {
++            snprintf(path, sizeof path, "C:\\ProgramData\\Starbite\\umdlog\\dump-%s-%lu-p%u-%ux%u.ppm", malikm_exe(),
++                     GetCurrentProcessId(), n, W, H);
++            f = fopen(path, "wb");
++            snprintf(path + strlen(path) - 4, 5, ".pgm");
++            fa = fopen(path, "wb");
++         }
+          if (f && fa) {
+             fprintf(f, "P6\n%u %u\n255\n", w2, h2);
+             fprintf(fa, "P5\n%u %u\n255\n", w2, h2);

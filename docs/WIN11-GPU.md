@@ -1757,6 +1757,33 @@ Every app failure must be a removed device that the app or DWM recovers from.
 - **Reading:** `tools/win/crash-report.sh DIR` (replays the hive logs).
 - **Stage:** `build/win/stage/sbwddm-t35` (T32c plus sbwdog 178a1750); host tests in `starbite/win/tests/crash_test.c`.
 
+### 6.46 T37: the sweep (finding the bugs nobody reported)
+
+- **Why:** the user's reports (keyboard, Explorer, bluescreens) are only examples ("a lot more I didn't mention").
+  The sweep opens a fixed list of ~27 surfaces one by one and keeps what the screen showed:
+  - the shell: Start, Search, Quick Settings, Notifications, Widgets, Task view, Alt-Tab, Snap layouts;
+  - File Explorer: `C:\`, System32, a context menu;
+  - Settings: six pages;
+  - apps: Task Manager, Notepad, Paint, Photos, Edge with `sweep.html` (text, gradients, backdrop blur, a 3D
+    animation, canvas, WebGL), Store, a message box;
+  - the touch keyboard with and without transparency effects.
+
+  The same list on WARP is the reference. `tools/win/sweep-diff.py` ranks the differences.
+- **Pieces:**
+  - `sbshow`: `snap` = a GDI shot (quarter size) plus a named DWM dump (sb-patches/0130), plus `keys`, `alttab`,
+    `type`, `click`/`rclick`, `close`, `dialog`, `image`, `disk`.
+  - `starbite/win/autotest/sb-sweep.bat` (pushed as a .bat, so it stays out of Startup) and `sweep.html`.
+  - The gputest calls the sweep, dumps the event logs (Application 1000/1001/1002, System 4101/141/117/41/6008) and
+    the WER and LiveKernelReports listings, then restarts the phone.
+  - `gpu-cycle.sh --reference`: FullMode=0 for the test boot, so DWM and the apps run on WARP.
+  - sbwdog gives a display-only boot that runs a gputest the full-mode times. The clean boot after it doesn't
+    qualify: the gputest deleted `armed`, and its log is from the previous boot.
+- **sweep-diff:** per surface, our DWM dump (or our shot) against the reference shot on 12-pixel tiles at quarter
+  size. It reports the share of tiles that differ, black holes (bright in the reference, dark in ours), our GDI
+  shot against our DWM dump (a capture/readback bug when they differ), and the crash events in each surface's
+  time slot. It writes `report.md` and a reference | ours | difference PNG per surface.
+- **Stage:** `build/win/stage/sbwddm-t37`.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

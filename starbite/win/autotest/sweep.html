@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Starbite sweep</title>
+<!-- T37 sweep page (docs/WIN11-GPU.md 6.46): what Edge (Chromium on ANGLE/D3D11) composes on the Mali: text,
+     gradients, rounded corners, shadows, a backdrop blur (the acrylic analogue), a 3D transform animation, a
+     2D canvas and a WebGL triangle. The WebGL line says whether WebGL got a context and which renderer. -->
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; font: 16px "Segoe UI", sans-serif; background: linear-gradient(135deg, #0b3d91, #e0475b 60%, #f6c344); min-height: 100vh; }
+  .card { margin: 16px; padding: 16px; border-radius: 16px; background: rgba(255,255,255,.85); box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+  .glass { margin: 16px; padding: 16px; border-radius: 16px; background: rgba(255,255,255,.25); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); color: #fff; font-weight: 600; }
+  .stage { perspective: 600px; height: 160px; display: flex; justify-content: center; align-items: center; }
+  .cube { width: 100px; height: 100px; background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red); border-radius: 12px; animation: spin 3s linear infinite; }
+  @keyframes spin { from { transform: rotateY(0) rotateX(15deg); } to { transform: rotateY(360deg) rotateX(15deg); } }
+  canvas { display: block; margin: 8px auto; border-radius: 8px; background: #111; }
+  .serif { font-family: Georgia, serif; font-size: 22px; }
+  .mono { font-family: Consolas, monospace; }
+  h1 { margin: 0 0 8px; font-size: 26px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Starbite sweep page</h1>
+    <p>Segoe UI text, <b>bold</b>, <i>italic</i>, <span class="serif">Georgia serif</span>, <span class="mono">Consolas 0123456789</span>.</p>
+    <p id="webgl" class="mono">WebGL: testing...</p>
+  </div>
+  <div class="glass">Backdrop blur over the gradient (Chromium's acrylic analogue)</div>
+  <div class="stage"><div class="cube"></div></div>
+  <canvas id="c2d" width="320" height="140"></canvas>
+  <canvas id="cgl" width="320" height="140"></canvas>
+<script>
+  const c = document.getElementById('c2d').getContext('2d');
+  let t = 0;
+  function draw() {
+    t += 0.03;
+    c.clearRect(0, 0, 320, 140);
+    for (let i = 0; i < 12; i++) {
+      c.fillStyle = `hsl(${(i * 30 + t * 40) % 360} 90% 55%)`;
+      c.beginPath();
+      c.arc(160 + Math.cos(t + i) * 100, 70 + Math.sin(t * 1.3 + i) * 45, 14, 0, Math.PI * 2);
+      c.fill();
+    }
+    c.fillStyle = '#fff'; c.font = '16px Segoe UI'; c.fillText('canvas 2D ' + Math.round(t * 10), 10, 20);
+    requestAnimationFrame(draw);
+  }
+  draw();
+  const out = document.getElementById('webgl');
+  try {
+    const gl = document.getElementById('cgl').getContext('webgl');
+    if (!gl) throw new Error('no context');
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    const r = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+    const vs = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vs, 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }');
+    gl.compileShader(vs);
+    const fs = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fs, 'precision mediump float; void main(){ gl_FragColor = vec4(0.1, 0.9, 0.3, 1.0); }');
+    gl.compileShader(fs);
+    const pr = gl.createProgram();
+    gl.attachShader(pr, vs); gl.attachShader(pr, fs); gl.linkProgram(pr); gl.useProgram(pr);
+    const b = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-0.8, -0.8, 0.8, -0.8, 0, 0.8]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(pr, 'p');
+    gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    gl.clearColor(0.1, 0.1, 0.3, 1); gl.clear(gl.COLOR_BUFFER_BIT); gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const px = new Uint8Array(4);
+    gl.readPixels(160, 70, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    out.textContent = `WebGL: ${r}; centre pixel ${px.join(',')} (expect ~26,230,77,255)`;
+  } catch (e) {
+    out.textContent = 'WebGL: FAILED ' + e.message;
+  }
+</script>
+</body>
+</html>

@@ -196,6 +196,23 @@ static void ParamPut(PCWSTR Name, ULONG Value)
     ZwClose(h);
 }
 
+/* T37: a gputest belongs to this boot: still armed (it deletes the file when it starts at logon), or its log was
+ * written after this boot began. The clean boot after a test sees neither. */
+static BOOLEAN GputestThisBoot(void)
+{
+    UNICODE_STRING us = RTL_CONSTANT_STRING(L"\\??\\C:\\starbite\\auto\\gpu\\gputest.log");
+    OBJECT_ATTRIBUTES oa;
+    FILE_NETWORK_OPEN_INFORMATION fi;
+    LARGE_INTEGER now;
+    if (FileExists(L"\\??\\C:\\starbite\\auto\\gpu\\armed"))
+        return TRUE;
+    InitializeObjectAttributes(&oa, &us, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(ZwQueryFullAttributesFile(&oa, &fi)))
+        return FALSE;
+    KeQuerySystemTimePrecise(&now);
+    return fi.LastWriteTime.QuadPart > now.QuadPart - (LONGLONG)KeQueryInterruptTime();
+}
+
 /* ---- the watchdog ------------------------------------------------------------------------------------- */
 
 static ULONG Rd(volatile UCHAR *B, ULONG Off)
@@ -482,7 +499,7 @@ static VOID FeedThread(PVOID Ctx)
     ULONG period = Param(L"PeriodMs", 5000);
     ULONG unattended = Param(L"Unattended", 0);
     ULONG restartSec = 0, capSec = 0, mode = 2, secs = 0, feeds = 0, rearms = 0, crashAt = 0;
-    BOOLEAN crashChecked = FALSE;
+    BOOLEAN crashChecked = FALSE, longer = FALSE;
     ULONG armSec = (unattended || dead) ? Param(L"ArmSec", 82) : 0;
     BOOLEAN feeding = !dead, restarted = FALSE, decided = FALSE, armed, sampled10 = FALSE, sampled20 = FALSE;
     ULONG64 t0 = KeQueryInterruptTime();
@@ -579,8 +596,12 @@ static VOID FeedThread(PVOID Ctx)
             /* sbwddm has started by now in every boot that has it */
             decided = TRUE;
             mode = WddmMode();
-            restartSec = Param(mode == 1 ? L"FullRestartSec" : L"DisplayRestartSec", mode == 1 ? 300 : 120);
-            capSec = Param(mode == 1 ? L"FullCapSec" : L"DisplayCapSec", mode == 1 ? 360 : 180);
+            /* T37: a display-only boot that runs a gputest (gpu-cycle --reference: the sweep drawn by WARP) gets the
+             * full-mode times; the clean boot after it keeps the short ones */
+            longer = mode != 1 && GputestThisBoot();
+            State(L"GputestDisplayOnly", longer, FALSE);
+            restartSec = Param(mode == 1 || longer ? L"FullRestartSec" : L"DisplayRestartSec", mode == 1 || longer ? 300 : 120);
+            capSec = Param(mode == 1 || longer ? L"FullCapSec" : L"DisplayCapSec", mode == 1 || longer ? 360 : 180);
             State(L"Mode", mode, TRUE);
             State(L"Unattended", unattended, TRUE);
         }
