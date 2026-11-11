@@ -1,0 +1,43 @@
+From 903ad430aae9841ade4e70af78515af4d0121c26 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 11 Nov 2026 16:40:39 +0200
+Subject: [PATCH] patch: 0425-starlte-panic-hook-before-kmem-ranges.patch - the
+ panic hook, watchdog and sbcrash/sbstop setup run first in KMEM (were last),
+ so a kmem_range_init panic (M1b: claims that do not fit) reaches pmsg and
+ TWRP
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/herolte_ufs.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
+index a8004897..a808785f 100644
+--- a/bsd/dev/herolte_ufs.c
++++ b/bsd/dev/herolte_ufs.c
+@@ -1167,7 +1167,12 @@ starlte_wdt_early(bool found)
+ 	    starlte_sbwdt_s, con, dat, hw_ms, cnt, dis, mask, starlte_wdt_period_ms);
+ }
+ 
+-/* Armed as soon as kmem works, so early panics reach TWRP (or the loader) too. */
++/*
++ * Armed as soon as kmem works, so early panics reach TWRP (or the loader) too. 0425: first in KMEM (was last):
++ * kmem_range_init (KMEM, third) panics when the claims do not fit (M1b, 2026-11-11: no vm_compression_limit, so a
++ * 16 x RAM compressor claim on this macOS-target kernel), and that panic reached neither pmsg nor TWRP. Only the
++ * early io_map path is used here (startup_phase < KMEM).
++ */
+ static void
+ starlte_reboot_early(void)
+ {
+@@ -1305,7 +1310,7 @@ starlte_sbstop_now(const char *stage)
+ 	starlte_pmsg_save("STARBITE: sbstop (no panic), console tail:\n", NULL, false);
+ 	starlte_reset(SBH_INFORM3_RECOVERY);
+ }
+-STARTUP(KMEM, STARTUP_RANK_LAST, starlte_reboot_early);
++STARTUP(KMEM, STARTUP_RANK_FIRST, starlte_reboot_early);
+ 
+ static void
+ starlte_wdt_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+-- 
+2.53.0
+
