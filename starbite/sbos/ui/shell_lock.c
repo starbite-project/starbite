@@ -1579,25 +1579,57 @@ static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int da
 }
 /* P3p (P3j-13): a pushed page's nav row, as iOS 26: a 44 pt glass circle at the leading edge with the back chevron
  * (no text), the title inline (17 pt / 600) centred. The circle's glass is baked once (init; 300 KB) and copied. */
-static tk_bmp backbmp;
-static float back_ox, back_oy;
 #define BACK_X MARGIN
 #define BACK_D 44.0f
 #define BACK_HIT(x, y) (IN_NAV(y) && (x) < BACK_X + BACK_D + 12)
-static void back_bake(void)
+#define DONE_HIT(x, y) (IN_NAV(y) && (x) >= CONTENT_R - BACK_D - 12)
+#define COMPOSE_D 48.0f
+#define COMPOSE_Y 718.0f
+#define COMPOSE_HIT(x, y) ((x) >= CONTENT_R - COMPOSE_D - 8 && (y) >= COMPOSE_Y - 6 && (y) < COMPOSE_Y + COMPOSE_D + 4)
+/* iOS 26's bar buttons: glass circles (the back, Notes' Done and compose), each baked once at init (~400 KB each,
+ * a 20 pt margin for the shadow) and copied into a page */
+enum { GC_BACK, GC_DONE, GC_COMPOSE, GC_N };
+static const float GCR[GC_N][3] = { { BACK_X, SAFE_TOP, BACK_D }, { CONTENT_R - BACK_D, SAFE_TOP, BACK_D },
+                                     { CONTENT_R - COMPOSE_D, COMPOSE_Y, COMPOSE_D } };
+static struct { tk_bmp b; float ox, oy; } GCB[GC_N];
+static void gc_bake(int i)
 {
-    if (backbmp.px) return;
-    float mg = 20;
-    back_ox = tk_floorf(PT(BACK_X - mg));
-    back_oy = tk_floorf(PT(SAFE_TOP - mg));
-    if (!tk_bmp_new(&backbmp, (int)PT(BACK_D + 2 * mg) + 2, (int)PT(BACK_D + 2 * mg) + 2)) return;
-    dc d = { &backbmp, 0, back_ox, back_oy };
-    d_lg_flat(&d, BACK_X, SAFE_TOP, BACK_D, BACK_D, BACK_D / 2, 1);
+    if (GCB[i].b.px) return;
+    float mg = 20, x = GCR[i][0], y = GCR[i][1], s = GCR[i][2];
+    GCB[i].ox = tk_floorf(PT(x - mg));
+    GCB[i].oy = tk_floorf(PT(y - mg));
+    if (!tk_bmp_new(&GCB[i].b, (int)PT(s + 2 * mg) + 2, (int)PT(s + 2 * mg) + 2)) return;
+    dc d = { &GCB[i].b, 0, GCB[i].ox, GCB[i].oy };
+    d_lg_flat(&d, x, y, s, s, s / 2, 1);
+}
+static void back_bake(void) { for (int i = 0; i < GC_N; i++) gc_bake(i); }
+static void d_gcircle(dc *d, int i)
+{
+    gc_bake(i);
+    if (GCB[i].b.px) tk_blit(d->b, &GCB[i].b, (int)(GCB[i].ox - d->ox), (int)(GCB[i].oy - d->oy), 1);
+}
+/* a stroked segment with round caps (a glyph's line: the check mark, the compose pencil), sw wide, in pt */
+static void d_seg(dc *d, float x0, float y0, float x1, float y1, float sw, tk_col c)
+{
+    float hw = PT(sw) / 2, ax = PT(x0) - d->ox, ay = PT(y0) - d->oy, bx = PT(x1) - d->ox, by = PT(y1) - d->oy;
+    int X0 = (int)tk_floorf(tk_minf(ax, bx) - hw) - 1, Y0 = (int)tk_floorf(tk_minf(ay, by) - hw) - 1;
+    int X1 = (int)(tk_maxf(ax, bx) + hw) + 2, Y1 = (int)(tk_maxf(ay, by) + hw) + 2;
+    tk_fm m;
+    if (X1 <= X0 || Y1 <= Y0 || !tk_fm_new(&m, X1 - X0, Y1 - Y0)) return;
+    float vx = bx - ax, vy = by - ay, vv = tk_maxf(1e-6f, vx * vx + vy * vy);
+    for (int j = 0; j < m.h; j++)
+        for (int i = 0; i < m.w; i++) {
+            float px = X0 + i + .5f - ax, py = Y0 + j + .5f - ay, t = tk_clampf((px * vx + py * vy) / vv, 0, 1);
+            float dx = px - t * vx, dy = py - t * vy;
+            m.v[j * m.w + i] = tk_clampf(hw - tk_sqrtf(dx * dx + dy * dy) + .5f, 0, 1);
+        }
+    tk_paint p = tk_solid(c);
+    tk_draw_fm(d->b, &m, X0, Y0, &p, 1);
+    tk_fm_free(&m);
 }
 static void d_back(dc *d, tk_col chev)
 {
-    back_bake();
-    if (backbmp.px) tk_blit(d->b, &backbmp, (int)(back_ox - d->ox), (int)(back_oy - d->oy), 1);
+    d_gcircle(d, GC_BACK);
     const tk_bmp *ic = tk_icon("back");
     if (ic) tk_blit_tinted(d->b, ic, (int)tk_floorf(PT(BACK_X + BACK_D / 2 - 7) - tk_icon_pad("back") - d->ox + .5f),
                            (int)tk_floorf(PT(NAV_MID - 10) - tk_icon_pad("back") - d->oy + .5f), chev);
@@ -2226,8 +2258,28 @@ static void page_notes(dc *d)
 {
     if (!NS.view) {
         d_h1(d, "Notes");
-        d_text(d, TK_IT600, 17, CONTENT_R - tw(TK_IT600, 17, "New", 0, 0), NAV_BASE, "New", 0, 0, tk_hex(0xffd60a, 1), 0);
-        if (!NS.n) { d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Notes", "Tap New to write one. Notes are kept until the phone restarts."); return; }
+        /* P3p (audit 13): iOS 26's compose button in the bottom bar (a glass circle, the pencil in Notes' yellow),
+         * the count centred beside it */
+        d_gcircle(d, GC_COMPOSE);
+        {
+            float cx = CONTENT_R - COMPOSE_D / 2, cy = COMPOSE_Y + COMPOSE_D / 2, x0 = cx - 10, y0 = cy - 8, x1 = cx + 7, y1 = cy + 9;
+            tk_col yl = tk_hex(0xffd60a, 1);
+            d_seg(d, x0 + 2, y0, x0 + 8, y0, 2, yl);
+            d_seg(d, x0, y0 + 2, x0, y1 - 2, 2, yl);
+            d_seg(d, x0, y0 + 2, x0 + 2, y0, 2, yl);
+            d_seg(d, x0, y1 - 2, x0 + 2, y1, 2, yl);
+            d_seg(d, x0 + 2, y1, x1 - 2, y1, 2, yl);
+            d_seg(d, x1 - 2, y1, x1, y1 - 2, 2, yl);
+            d_seg(d, x1, y1 - 2, x1, y0 + 9, 2, yl);
+            d_seg(d, x0 + 7, y0 + 10, x1 + 3, y0 - 6, 2.6f, yl);     /* the pencil */
+        }
+        {
+            char cnt[24];
+            int k = put_dec(cnt, NS.n);
+            tk_memcpy(cnt + k, NS.n == 1 ? " Note" : " Notes", NS.n == 1 ? 6 : 7);
+            if (NS.n) d_text_box(d, TK_IT400, 13, 195, COMPOSE_Y + COMPOSE_D / 2 + 4.7f, 200, 1, cnt, 0, 0, W(.6f), 0);
+        }
+        if (!NS.n) { d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Notes", "Tap the pencil to write one. Notes are kept until the phone restarts."); return; }
         d_rrect(d, GROUP_X, CONTENT_TOP, GROUP_W, 56.0f * NS.n - 1, 16, tk_hex(0x151c33, 1));
         for (int i = 0; i < NS.n; i++) {
             char t[136];
@@ -2238,6 +2290,12 @@ static void page_notes(dc *d)
         return;
     }
     d_back(d, tk_hex(0xffd60a, 1));                /* P3p (audit 13): Notes' yellow, on the glass circle */
+    d_gcircle(d, GC_DONE);                         /* and Done: a yellow check mark */
+    {
+        float cx = CONTENT_R - BACK_D / 2, cy = NAV_MID;
+        d_seg(d, cx - 8, cy + .5f, cx - 2.5f, cy + 6, 2.6f, tk_hex(0xffd60a, 1));
+        d_seg(d, cx - 2.5f, cy + 6, cx + 8.5f, cy - 6.5f, 2.6f, tk_hex(0xffd60a, 1));
+    }
     kb_draw(d, NS.shift, NS.num);
 }
 static void build_note(void)
@@ -2277,7 +2335,7 @@ static void build_note(void)
 static void notes_tap(float x, float y)
 {
     if (!NS.view) {
-        if (IN_NAV(y) && x >= 300) {
+        if (COMPOSE_HIT(x, y)) {                      /* P3p: the compose button (was "New" in the nav row) */
             if (NS.n == NNOTES) { toast("Up to eight notes in this version"); return; }
             NOTES[NS.n][0] = 0;
             NS.cur = NS.n++;
@@ -2289,7 +2347,7 @@ static void notes_tap(float x, float y)
         build_app_page(AP.a);
         return;
     }
-    if (BACK_HIT(x, y)) {                             /* back: an empty note is dropped */
+    if (BACK_HIT(x, y) || DONE_HIT(x, y)) {           /* back or Done: an empty note is dropped */
         if (!NOTES[NS.cur][0]) {
             for (int i = NS.cur; i + 1 < NS.n; i++) tk_memcpy(NOTES[i], NOTES[i + 1], NOTELEN);
             NS.n--;
@@ -3647,6 +3705,12 @@ static void app_press(float x, float y)
     if (pushed && BACK_HIT(x, y)) {
         r = g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D };   /* the glass back lights */
         rad = BACK_D / 2; c = W(.16f); ok = 1;
+    } else if (is_app("notes") && NS.view && DONE_HIT(x, y)) {
+        r = g = (tk_rect){ CONTENT_R - BACK_D, SAFE_TOP, BACK_D, BACK_D };
+        rad = BACK_D / 2; c = W(.16f); ok = 1;
+    } else if (is_app("notes") && !NS.view && COMPOSE_HIT(x, y)) {
+        r = g = (tk_rect){ CONTENT_R - COMPOSE_D, COMPOSE_Y, COMPOSE_D, COMPOSE_D };
+        rad = COMPOSE_D / 2; c = W(.16f); ok = 1;
     } else if (is_app("settings") && !AS.sub) {
         const appdef *A = &APPS[AP.a];
         for (int s = 0; s < A->ns && !ok; s++)
