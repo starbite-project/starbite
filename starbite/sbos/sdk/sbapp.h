@@ -284,7 +284,9 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
        SET_SURV_SUN = 37 /* read: sunrise | sunset << 16 in local minutes; -1 the sun stays up, -2 it stays down,
                             -3 no location, -4 no clock */,
        SET_SURV_LAST2 = 38 /* Last 2 % mode: 1 on, 0 off */,
-       SET_SURV_LAST2_AUTO = 39 /* Last 2 % at 3 % instead of switching off: 1 (the default) or 0. Remembered */ };
+       SET_SURV_LAST2_AUTO = 39 /* Last 2 % at 3 % instead of switching off: 1 (the default) or 0. Remembered */,
+       SET_SURV_GNSS = 40 /* 1.2-alpha28: read: the age in minutes of the GPS fix Android left on the card
+                             (/STARBITE/GNSS/LASTFIX.TXT), -1 none, -2 no card; write 1: use it as the location */ };
 
 /* 1.0-rc3: the full-heat battery data for the minutes-left estimates (Heat's confirmation and its live readout).
  * Measured on the phone (rc2, 2026-11-08, Manual flat out, 7 cores + GPU): 2.8 A at 3.67 V (about 10 W; peak 2.86 A),
