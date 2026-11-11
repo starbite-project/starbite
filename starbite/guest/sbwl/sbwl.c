@@ -400,6 +400,10 @@ static void comp_surface(struct wlr_surface *surface, int sx, int sy, void *data
 
 static int view_active(const struct view *v) { return S.active[0] && !strcmp(v->desk, S.active); }
 
+/* the active app's window has been in a published frame (SBG_MSG_WINDOW b = 1 waits for it: the host shows the
+ * window layer only once the surface holds that app's pixels, not the previous app's last frame) */
+static int win_shown;
+static void window_state(void);
 static int publish_window(void)
 {
 	if (!winframe) {
@@ -439,6 +443,10 @@ static int publish_window(void)
 	publish((const uint8_t *)winframe, W * 4, VR);
 	if (!f0 && frames)
 		say("first frame published (%ux%u, viewport %ux%u)", W, H, VW, VR);
+	if (!win_shown) {
+		win_shown = 1;
+		window_state();
+	}
 	return 1;
 }
 
@@ -534,9 +542,18 @@ static void text_focus_send(int on, uint32_t purpose)
 		return;
 	last_on = on;
 	last_purpose = purpose;
+	if (on < 0)
+		return;                            /* text_focus_resend: forgotten, nothing sent */
 	say("text focus %d (purpose %u)", on, purpose);
 	if (v2)
 		g2h_send(SBG_MSG_TEXT_FOCUS, (uint32_t)on, purpose);
+}
+
+/* after ACTIVATE: the current state again, even unchanged (the host resets its keyboard per app) */
+static void text_focus_resend(void)
+{
+	text_focus_send(-1, 0);                    /* forget the last one */
+	text_focus_send(S.ti_on ? 1 : 0, S.ti_on ? S.ti_purpose : 0);
 }
 
 static void ti_off(struct tinput *t)
@@ -1793,6 +1810,9 @@ static void window_state(void)
 	struct view *v;
 	wl_list_for_each(v, &S.views, link)
 		b |= v->mapped && view_active(v);
+	if (!b)
+		win_shown = 0;                     /* its next mapped window counts once it is published */
+	b &= (uint32_t)win_shown;
 	if (a == la && b == lb)
 		return;
 	la = a, lb = b;
@@ -1800,8 +1820,11 @@ static void window_state(void)
 	g2h_send(SBG_MSG_WINDOW, a, b);
 }
 
+static void text_focus_resend(void);
 static void activate(const char *desk)
 {
+	if (strcmp(S.active, desk ? desk : ""))
+		win_shown = 0;                     /* another app: WINDOW b = 1 after its first published frame */
 	snprintf(S.active, sizeof(S.active), "%s", desk ? desk : "");
 	struct view *v;
 	wl_list_for_each(v, &S.views, link)
@@ -1811,6 +1834,7 @@ static void activate(const char *desk)
 	cat_dirty |= 1;
 	cat_publish();                             /* the catalog's "active" before the WINDOW message */
 	window_state();
+	text_focus_resend();                       /* the host learns the new app's text focus at once */
 }
 
 /* ---- starting apps ------------------------------------------------------------------------------------- */

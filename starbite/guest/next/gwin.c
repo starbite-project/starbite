@@ -1,11 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * gwin: Linux apps in Starbite OS Next (docs/STARBITE-LINUX-APPS.md, milestone L2). The kernel's side of the shell's
- * sh_linux_* calls (ui/shell.h): the Terminal app's window is the guest's surface (foot under sbwl, the guest kernel
- * of its own, kern/guest.c's GUEST_WL mode: guest-wl.img / .dtb / -rd.img in the store, 720 x 916 at 2x), copied
- * row by row (damage per row) into the shell's window bitmap; the window's touches and the keyboard's characters go
- * to the guest. Built into the Next images only (sbos/build.sh); INTEGRATION-NEXT.md lists the hooks.
- *   gwin_now()            kern_next.c's next_kdraw, every loop turn: 1 when the window changed (draw a frame)
+ * gwin: Linux apps in Starbite OS Next (docs/STARBITE-LINUX-APPS.md, milestones L2 + L3). The kernel's side of the
+ * shell's sh_linux_* calls (ui/shell.h) on kern/guest.c (GUEST_WL: guest-wl.img / .dtb / -rd.img in the store, the
+ * surface 720 x 1344 at 2x) and sbghost's contract v2 (sbshm.h): the catalog (the home's Linux page) and the App
+ * Store's packages copied out of the shared region under their seqlocks and pushed to the shell when they change;
+ * an app opened by its desktop id (LAUNCH + ACTIVATE once the catalog has it, the viewport after); the active window's
+ * rows copied (damage per row) into the shell's window strips while the guest says that window is in the surface;
+ * touches, typed text (text-input-v3) and keys to the guest. Built into the Next images only (sbos/build.sh).
+ *   gwin_now()            kern_next.c's next_kdraw, every loop turn: 1 when the screen changed (draw a frame)
  *   gwin_selftest_step()  uitest.c's SBOS_SELFTEST_NEXT_LINUX variant, every 100 ms: 0 running, 1 passed, -1 failed
+ * An L2 guest (no catalog: its sbwl starts foot itself) still works for the Terminal: when no catalog has come 2 s
+ * after HELLO, the surface is taken as foot's.
  */
 #include "sb.h"
 #include "kern.h"
@@ -13,23 +17,185 @@
 #include "shell.h"
 #include "../host/sbghost.h"
 
+#define SAME(a, b) ((int)(a) == (int)(b))          /* (two enums: gcc's -Wenum-compare) */
+_Static_assert(SAME(SH_LAPP_RUNNING, SBSHM_APP_RUNNING) && SAME(SH_LAPP_KEYBOARD, SBSHM_APP_KEYBOARD) &&
+               SAME(SH_LAPP_SYSTEM, SBSHM_APP_SYSTEM) && SAME(SH_LAPP_TERMINAL, SBSHM_APP_TERMINAL), "catalog flags");
+_Static_assert(SAME(SH_PKG_INSTALLED, SBSHM_PKG_INSTALLED) && SAME(SH_PKG_NO_SPACE, SBSHM_PKG_NO_SPACE) &&
+               SAME(SH_PKG_FEATURED, SBSHM_PKG_FEATURED) && SAME(SH_PKG_TOO_BIG, SBSHM_PKG_TOO_BIG), "package flags");
+_Static_assert(SAME(SH_PKG_FAILED, SBG_PKG_FAILED) && SAME(SH_PKG_OP_CANCEL, SBG_PKG_OP_CANCEL), "package states");
+_Static_assert(SH_LINUX_ICON == SBSHM_ICON_PX && SH_LPKGS == SBSHM_PKGS_MAX && SH_LAPPS <= SBSHM_APPS_MAX, "sizes");
+_Static_assert(SH_LINUX_W == GUEST_WL_W && SH_LINUX_H == GUEST_WL_H, "the surface");
+
 static int last_state = -1;
 static unsigned frames;                    /* the window's frames (rows copied) since the start */
-static uint32_t *win_px;                   /* the shell's bitmap of the last copy (the self test reads it) */
-static int win_stride;
+static uint32_t *const *win_rows;          /* the shell's window rows at the last copy (the self test reads them) */
+static sh_lcat_t cat;                      /* the platform's copies (kept while Linux is off: the home's icons) */
+static sh_lstore_t store;
+static int cat_have, cat_live, cat_dirty, store_dirty;   /* cat_live: the catalog is this run's */
+static uint32_t cat_layout;                /* the catalog's layout_seq (its ids and order) at the last whole copy */
+static char pend[40];                      /* an open waiting for the catalog */
+static int want = -1;                      /* the catalog index asked into the surface */
+static int win_ok;                         /* the surface has want's window (or an L2 guest's foot) */
+static int legacy;                         /* an L2 guest: no catalog */
+static int vp_rows = SH_LINUX_H, text_on, hold, busy;
+static uint64_t t_running;
+
+static void scopy(char *d, const volatile char *s, unsigned cap)
+{
+    unsigned k = 0;
+    while (k + 1 < cap && s[k]) {
+        d[k] = s[k];
+        k++;
+    }
+    d[k] = 0;
+}
+static int same(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        a++, b++;
+    return *a == *b;
+}
+static int term_id(const char *id) { return same(id, SH_LINUX_TERMINAL) || same(id, "foot"); }
 
 static void push_state(void)
 {
     int s = guest_state();
     if (s == last_state)
         return;
+    if (s == GUEST_RUNNING)
+        t_running = sb_ms();
+    if (last_state == GUEST_RUNNING && s != GUEST_RUNNING) {
+        /* Linux went away: no app runs any more (the icons stay), nothing is in the surface */
+        for (int i = 0; i < cat.n; i++)
+            cat.app[i].flags &= ~(unsigned)(SH_LAPP_RUNNING | SH_LAPP_WINDOW);
+        if (cat_have)
+            sh_linux_catalog(&cat);
+        win_ok = legacy = cat_live = text_on = 0;
+        want = -1;
+    }
     last_state = s;
     sh_linux_state(s, s == GUEST_FAILED ? guest_why() : "");
 }
 
-int sh_linux_open(void)
+/* ---- the guest's tables (seqlocked; copied whole or not at all): 1 copied, 0 not written yet, -1 again later ---- */
+static int read_cat(void)
+{
+    const volatile struct sbshm_cat *c = sbg_cat();
+    uint32_t s = sbshm_seq_begin(&c->seq);
+    if (!s || (s & 1U))
+        return s ? -1 : 0;                 /* being written: later; never written: the last run's copy stays */
+    static sh_lcat_t t;
+    uint32_t n = c->n;
+    t.seq = s;
+    t.n = (int)(n > SH_LAPPS ? SH_LAPPS : n);
+    t.mem_total_kb = c->mem_total_kb;
+    t.mem_avail_kb = c->mem_avail_kb;
+    uint32_t layout = c->layout_seq;       /* LAUNCH carries this one: seq also moves with rss / flags (~2 s) */
+    for (int i = 0; i < t.n; i++) {
+        const volatile struct sbshm_app *a = &c->app[i];
+        scopy(t.app[i].id, a->id, sizeof t.app[i].id);
+        scopy(t.app[i].name, a->name, sizeof t.app[i].name);
+        t.app[i].flags = a->flags;
+        t.app[i].icon = a->icon < SBSHM_ICONS_MAX ? (int)a->icon : -1;
+        t.app[i].pkg = a->pkg < SBSHM_PKGS_MAX ? (int)a->pkg : -1;
+        t.app[i].rss_kb = a->rss_kb;
+    }
+    if (!sbshm_seq_ok(&c->seq, s))
+        return -1;
+    cat = t;
+    cat_layout = layout;
+    cat_have = cat_live = 1;
+    store.mem_total_kb = cat.mem_total_kb;
+    return 1;
+}
+static int read_store(void)
+{
+    const volatile struct sbshm_store *st = sbg_store();
+    uint32_t s = sbshm_seq_begin(&st->seq);
+    if (!s || (s & 1U))
+        return s ? -1 : 0;
+    static sh_lstore_t t;
+    uint32_t n = st->n;
+    t.seq = s;
+    t.n = (int)(n > SH_LPKGS ? SH_LPKGS : n);
+    t.repo_ok = (int)st->repo_ok;
+    t.overlay_total_kb = st->overlay_total_kb;
+    t.overlay_free_kb = st->overlay_free_kb;
+    t.mem_total_kb = cat.mem_total_kb;
+    for (int i = 0; i < t.n; i++) {
+        const volatile struct sbshm_pkg *p = &st->pkg[i];
+        sh_lpkg_t *d = &t.pkg[i];
+        scopy(d->pkg, p->pkg, sizeof d->pkg);
+        scopy(d->name, p->name, sizeof d->name);
+        scopy(d->summary, p->summary, sizeof d->summary);
+        scopy(d->category, p->category, sizeof d->category);
+        scopy(d->err, p->err, sizeof d->err);
+        d->dl_kb = p->dl_kb, d->inst_kb = p->inst_kb, d->ram_mb = p->ram_mb;
+        d->flags = p->flags, d->state = p->state, d->pct = p->pct;
+        d->icon = p->icon < SBSHM_ICONS_MAX ? (int)p->icon : -1;
+    }
+    if (!sbshm_seq_ok(&st->seq, s))
+        return -1;
+    store = t;
+    return 1;
+}
+/* Linux kept up while the App Store is open or a package operation runs (guest.c's idle stop waits: guest_keep) */
+static void busy_update(void)
+{
+    int b = hold;
+    for (int i = 0; i < store.n; i++)
+        b |= store.pkg[i].state == SBG_PKG_QUEUED || store.pkg[i].state == SBG_PKG_INSTALLING ||
+             store.pkg[i].state == SBG_PKG_REMOVING;
+    if (b != busy) {
+        busy = b;
+        guest_keep(b);
+    }
+}
+static int cat_find(const char *id)
+{
+    for (int i = 0; i < cat.n; i++)
+        if (same(cat.app[i].id, id))
+            return i;
+    if (term_id(id))
+        for (int i = 0; i < cat.n; i++)
+            if (term_id(cat.app[i].id))
+                return i;
+    return -1;
+}
+/* the open waiting for the catalog: LAUNCH (started, or raised), ACTIVATE (into the surface), the viewport */
+static void try_launch(void)
+{
+    if (!pend[0] || guest_state() != GUEST_RUNNING)
+        return;
+    int ci = cat_live ? cat_find(pend) : -1;   /* indices of this run's catalog only */
+    if (ci < 0) {
+        /* an L2 guest publishes no catalog; its sbwl shows foot by itself */
+        if (term_id(pend) && !cat_live && sb_ms() - t_running > 2000) {
+            sb_log("gwin: no catalog 2 s after HELLO: an L2 guest, the surface is foot's");
+            legacy = win_ok = 1;
+            pend[0] = 0;
+            guest_full_next();
+        }
+        return;
+    }
+    if (!sbg_launch((uint32_t)ci, cat_layout) || !sbg_activate((uint32_t)ci))
+        return;                            /* the ring full: again next turn */
+    sbg_viewport((uint32_t)vp_rows, SH_LINUX_W);
+    sb_logf("gwin: launch + activate ", pend);
+    want = ci;
+    pend[0] = 0;
+    int has = 0;
+    win_ok = sbg_window(&has) == (uint32_t)ci && has;
+    if (win_ok)
+        guest_full_next();
+}
+
+/* ---- the platform (shell.h) ---- */
+int sh_linux_open(const char *id)
 {
     int s = guest_state();
+    char want_id[40];
+    scopy(want_id, id, sizeof want_id);
     if (s == GUEST_RUNNING || s == GUEST_STARTING) {
         if (guest_mode() != GUEST_WL) {    /* another guest (a self test of the old UI): not this window's */
             sh_linux_state(GUEST_FAILED, "Linux is busy with another guest.");
@@ -47,39 +213,53 @@ int sh_linux_open(void)
             return r;
         }
         frames = 0;
-        sb_log("gwin: Linux started for the Terminal (foot on the M3 cores)");
+        sb_log("gwin: Linux started for an app (the M3 cores)");
+    }
+    scopy(pend, want_id, sizeof pend);
+    want = -1;
+    win_ok = text_on = 0;
+    if (legacy && term_id(pend)) {         /* the L2 guest's foot again */
+        win_ok = 1;
+        pend[0] = 0;
     }
     guest_show(1);                         /* MSG_FOCUS 1; the guest's idle stop cancelled */
     guest_full_next();
     push_state();
+    try_launch();
     return 0;
 }
 
 void sh_linux_hide(void)
 {
-    guest_show(0);                         /* MSG_FOCUS 0; guest.c stops it after 60 s hidden */
-    win_px = 0;
+    if (want >= 0 && guest_state() == GUEST_RUNNING)
+        sbg_activate(SBSHM_NONE);          /* home: no window in the surface; the app keeps running */
+    guest_show(0);                         /* MSG_FOCUS 0; guest.c stops Linux after 60 s hidden and idle */
+    want = -1;
+    win_ok = text_on = 0;
+    pend[0] = 0;
+    win_rows = 0;
 }
 
-int sh_linux_blit(uint32_t *px, int stride_px, int first, int *y0, int *y1)
+int sh_linux_blit(uint32_t *const *rows, int first, int *y0, int *y1)
 {
     *y0 = *y1 = -1;
+    if (!win_ok)
+        return 0;                          /* not the asked app's window yet: the shell keeps "Opening" */
     if (first)
         guest_full_next();
     if (!first && !guest_frame_new())
         return 0;
-    int n = guest_blit(px, (unsigned)stride_px, 0, 0, y0, y1);   /* 2x; alpha forced opaque */
+    int n = guest_blit_rows(rows, y0, y1); /* 2x; alpha forced opaque */
     if (n > 0) {
         frames++;
-        win_px = px;
-        win_stride = stride_px;
+        win_rows = rows;
     }
     return n;
 }
 
 int sh_linux_touch(int phase, int x, int y)
 {
-    if (!guest_shown())
+    if (!guest_shown() || !win_ok)
         return 0;
     uint32_t p = phase == 0 ? SBG_TOUCH_DOWN : phase == 1 ? SBG_TOUCH_MOVE : SBG_TOUCH_UP;
     return sbg_touch(0, p, x, y);
@@ -87,10 +267,69 @@ int sh_linux_touch(int phase, int x, int y)
 
 int sh_linux_char(char c)
 {
+    /* a KEYBOARD app (foot: it binds text-input-v3 too, TEXT_FOCUS with purpose terminal) always gets keys */
+    unsigned fl = want >= 0 && want < cat.n ? cat.app[want].flags : SH_LAPP_KEYBOARD;
+    if (c != '\n' && c != '\b' && text_on && !(fl & SH_LAPP_KEYBOARD) && guest_shown()) {
+        char s[2] = {c, 0};
+        return sbg_text(s);                /* text-input-v3: commit_string into the focused field */
+    }
     return guest_type(c);                  /* the Linux key, with Shift around it ('\n' Return, '\b' BackSpace) */
 }
 
-/* every loop turn (next_kdraw), at most every 16 ms: a state change or a new frame copied into the window */
+int sh_linux_viewport(int rows)
+{
+    vp_rows = rows < 1 ? SH_LINUX_H : rows > SH_LINUX_H ? SH_LINUX_H : rows;
+    if (guest_state() == GUEST_RUNNING && want >= 0)
+        return sbg_viewport((uint32_t)vp_rows, SH_LINUX_W);
+    return 1;                              /* sent with the next ACTIVATE */
+}
+
+int sh_linux_icon(int icon, uint32_t *px)
+{
+    const volatile uint32_t *s = icon >= 0 ? sbg_icon((uint32_t)icon) : 0;
+    if (!s)
+        return 0;
+    /* the catalog's icons under its seq, the store's under the store's: a torn copy is tried again */
+    const volatile uint32_t *seq = (uint32_t)icon < SBSHM_ICONS_CAT ? &sbg_cat()->seq : &sbg_store()->seq;
+    for (int t = 0; t < 3; t++) {
+        uint32_t b = sbshm_seq_begin(seq);
+        if (b & 1U)
+            continue;
+        for (unsigned i = 0; i < SBSHM_ICON_PX * SBSHM_ICON_PX; i++)
+            px[i] = s[i];
+        if (sbshm_seq_ok(seq, b))
+            return 1;
+    }
+    return 0;
+}
+
+int sh_linux_hold(int on)
+{
+    hold = !!on;
+    int r = 0, s = guest_state();
+    if (hold && (s == GUEST_OFF || s == GUEST_FAILED)) {
+        r = guest_start_mode(GUEST_WL);
+        if (r < 0) {
+            last_state = GUEST_FAILED;
+            sh_linux_state(GUEST_FAILED, guest_why());
+        } else {
+            frames = 0;
+            sb_log("gwin: Linux started for the App Store");
+        }
+    }
+    busy_update();
+    push_state();
+    return r;
+}
+
+int sh_linux_pkg(int idx, int op)
+{
+    if (guest_state() != GUEST_RUNNING || idx < 0 || idx >= store.n)
+        return -1;
+    return sbg_pkg((uint32_t)idx, (uint32_t)op, store.seq) ? 0 : -1;
+}
+
+/* every loop turn (next_kdraw), at most every 16 ms: the state, the tables, the window, its frames */
 int gwin_now(void)
 {
     static uint64_t t;
@@ -98,19 +337,63 @@ int gwin_now(void)
     if (now - t < 16)
         return 0;
     t = now;
-    int was = last_state;
+    int was = last_state, changed = 0;
     push_state();
-    int changed = was != last_state;
-    if (guest_frame_new() && sh_linux_frame())
+    changed = was != last_state;
+    if (guest_state() == GUEST_RUNNING) {
+        unsigned ch = sbg_changes();
+        if (ch & SBG_CH_CATALOG)
+            cat_dirty = 1;
+        if (ch & (SBG_CH_STORE | SBG_CH_PKG))
+            store_dirty = 1;
+        int r;
+        if (cat_dirty && (r = read_cat()) >= 0) {
+            cat_dirty = 0;
+            if (r) {
+                sh_linux_catalog(&cat);
+                changed = 1;
+            }
+        }
+        if (store_dirty && (r = read_store()) >= 0) {
+            store_dirty = 0;
+            if (r) {
+                busy_update();
+                sh_linux_store(&store);
+                changed = 1;
+            }
+        }
+        if (ch & SBG_CH_WINDOW) {
+            int has = 0;
+            uint32_t w = sbg_window(&has);
+            int ok = want >= 0 && w == (uint32_t)want && has;
+            if (ok && !win_ok)
+                guest_full_next();         /* the app's window: every row of it */
+            if (!legacy)
+                win_ok = ok;
+        }
+        if (ch & SBG_CH_TEXT) {
+            int on = sbg_text_focus(0);
+            if (on != text_on) {
+                text_on = on;
+                if (guest_shown()) {
+                    sh_linux_textfocus(on);
+                    changed = 1;
+                }
+            }
+        }
+        try_launch();
+    }
+    if (win_ok && guest_frame_new() && sh_linux_frame())
         changed = 1;
     return changed;
 }
 
 /* ---- the unattended check (starbite-next-linuxtest.img: uitest.c -DSBOS_SELFTEST_NEXT_LINUX) -------------------
- * The Terminal opened through the shell (sh_set "app"), Linux started from the store, its first frame in the window;
- * a command typed through the shell's keyboard path (four characters a step); its kmsg marker in the guest's log
- * and text in the window's bitmap; a tap in the window; the Terminal closed, Linux stopped, the M3 cluster off.
- * Never a storage write. The caller restarts into recovery (pmsg) after the result. */
+ * The Terminal opened through the shell (sh_set "app"), Linux started from the store, foot launched from the catalog
+ * (or an L2 guest's foot), its first frame in the window; a command typed through the shell's keyboard path (four
+ * characters a step); its kmsg marker in the guest's log and text in the window's bitmap; a tap in the window; the
+ * Terminal closed, Linux stopped, the M3 cluster off. Never a storage write (no package operation). The caller
+ * restarts into recovery (pmsg) after the result. */
 static int gs_phase, gs_typed;
 static uint64_t gs_t, gs_t0;
 static unsigned gs_frames;
@@ -134,15 +417,15 @@ static int gs_failed(const char *why)
     gs_phase = 99;
     return -1;
 }
-/* rows of the window's bitmap with anything other than its first pixel (the terminal's background) */
+/* rows of the window above the keyboard with anything other than its first pixel (the terminal's background) */
 static unsigned lit_rows(void)
 {
-    if (!win_px)
+    if (!win_rows)
         return 0;
-    uint32_t bg = win_px[0];
+    uint32_t bg = win_rows[0][0];
     unsigned n = 0;
-    for (int y = 0; y < 2 * SH_LINUX_H; y += 4) {
-        const uint32_t *r = win_px + (uintptr_t)y * (unsigned)win_stride;
+    for (int y = 0; y < 2 * SH_LINUX_HKB; y += 4) {
+        const uint32_t *r = win_rows[y];
         for (int x = 0; x < 2 * SH_LINUX_W; x += 2)
             if (r[x] != bg) {
                 n++;
@@ -161,23 +444,28 @@ int gwin_selftest_step(void)
         gs_t0 = now;
         if (!guest_available_mode(GUEST_WL))
             return gs_failed("the Linux apps' files are not in the store (guest-wl.img / .dtb / -rd.img)");
-        sh_set("app", "terminal", 1);      /* as a tap on the icon: app_open -> sh_linux_open */
+        sh_set("app", "terminal", 1);      /* as a tap on the icon: app_open -> sh_linux_open(foot) */
         if (guest_state() != GUEST_STARTING && guest_state() != GUEST_RUNNING)
             return gs_failed(guest_why()[0] ? guest_why() : "the Terminal did not start Linux");
         gs_log("the Terminal opened; Linux starting (guest-wl from the store)", 0, 0);
         gs_t = now;
         gs_phase = 1;
         return 0;
-    case 1:                                /* Linux up and its first frame in the window */
+    case 1:                                /* Linux up, foot launched, its first frame in the window */
         if (st == GUEST_FAILED)
             return gs_failed(guest_why());
-        if (st == GUEST_RUNNING && frames > 0 && win_px) {
+        if (st == GUEST_RUNNING && frames > 0 && win_rows) {
             gs_log("Linux running, the window's first frame after ms ", dt, 1);
+            gs_log(legacy ? "an L2 guest (no catalog): foot by itself" : "foot from the catalog; apps in it: ",
+                   (uint64_t)cat.n, !legacy);
+            if (store.n || store.repo_ok)
+                gs_log("App Store packages in the index: ", (uint64_t)store.n, 1);
             gs_t = now;
             gs_phase = 2;
         } else if (dt > 40000) {
-            return gs_failed(st == GUEST_RUNNING ? "Linux runs but the window got no frame within 40 s" :
-                                                   "Linux did not come up within 40 s");
+            return gs_failed(st != GUEST_RUNNING ? "Linux did not come up within 40 s" :
+                             !win_ok ? "Linux runs but foot's window never came into the surface" :
+                                       "Linux runs but the window got no frame within 40 s");
         }
         return 0;
     case 2:                                /* the shell's prompt first */
@@ -214,8 +502,8 @@ int gwin_selftest_step(void)
             if (lit < 4)
                 return gs_failed("the window shows no text");
             uint32_t sent = sbg_stats()->touches_sent;
-            sh_linux_touch(0, SH_LINUX_W / 2, SH_LINUX_H / 2);
-            sh_linux_touch(2, SH_LINUX_W / 2, SH_LINUX_H / 2);
+            sh_linux_touch(0, SH_LINUX_W / 2, SH_LINUX_HKB / 2);
+            sh_linux_touch(2, SH_LINUX_W / 2, SH_LINUX_HKB / 2);
             gs_log("a tap in the window: touch messages sent ", sbg_stats()->touches_sent - sent, 1);
             if (sbg_stats()->touches_sent - sent < 2)
                 return gs_failed("the tap did not reach the guest's ring");

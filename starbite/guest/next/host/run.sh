@@ -1,9 +1,9 @@
 #!/bin/sh
-# gwin-host (gwin-host.c): L2's kernel glue and its self test with the real Next shell and a fake guest, on the Mac
-# (arm64: the toolkit's NEON paths) or in the Lima VM.
+# gwin-host (gwin-host.c): the L2 + L3 kernel glue (gwin.c), its self test and the L3 paths with the real Next shell
+# and a fake guest (contract v2: a catalog and a store), on the Mac (arm64: the toolkit's NEON paths) or in the Lima VM.
 #   starbite/guest/next/host/run.sh UI_TREE PAK OUT
-# UI_TREE: a tree with the toolkit (starbite/sbos/ui) and starbite/guest/sbos, the L2 patch applied
-# (starbite/guest/next/l2-next.patch); PAK: build/sbtk/sbtk-phone.pak; OUT: where the binary and the still go.
+# UI_TREE: a tree with the toolkit (starbite/sbos/ui) and starbite/guest/sbos, next-linux.patch applied
+# (starbite/guest/next/next-linux.patch); PAK: build/sbtk/sbtk-phone.pak; OUT: where the binary and the stills go.
 # GWIN_PPM (a 720 x 916 P6 PPM, foot's frame from run-term.sh MODE=wayland SURF=720x916) is the guest's frame.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
