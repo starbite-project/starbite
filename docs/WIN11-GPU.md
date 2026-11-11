@@ -1842,6 +1842,11 @@ Every app failure must be a removed device that the app or DWM recovers from.
   - check where the remaining faults at 0x3811000/0x24a64000 come from.
 - **T39c:** T39 without 0133 (sbumd 16b44d96). The Mesa tree keeps 0133 on branch `sb-with-0133`; `main` has its
   revert.
+- **T39c crashed the same way:** dxgmms1+0x41cd4 at 424 s, 4 job timeouts at 324-330 s. So 0133 is not the trigger.
+  Every earlier run (T32c A/B, T33, T33b, T34, T38's 878 s sweep) had 0 timeouts.
+- **Bisect (`build/win/stage/sbwddm-t40a/b/c`):** T38 plus only the zone-0 ledger, plus only the KMD fault rings,
+  plus only sbumd 0132/0134.
+- **Independently:** a GPU hang must not end in a bugcheck. That needs a real DxgkDdiResetFromTimeout (Phase 1).
 
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
