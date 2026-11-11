@@ -509,6 +509,7 @@ void wifi_time_only_end(const char *why);
 void wifi_boot_time_check(void);
 void power_boot_os(const char *key);    /* 1.2-alpha25: the lock screen's OS card (sb_boot_next) */
 int kui_test_os_card(void);
+int gpucomp_selftest_step(void);        /* P4: the GPU compositor's test (gpucomp.c); 1 when done */
 int uibench_setup(void);                /* 1.2-alpha26 P0: the UI compositor's benchmark (uibench.c) */
 void uibench_set(const char *label, unsigned ncores, const unsigned *cores, int worker_only);
 int app_is_test(int a);

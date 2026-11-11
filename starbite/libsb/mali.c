@@ -177,6 +177,8 @@ void sb_gpu_power_off(void)
     gpu_up = 0;
 }
 
+static unsigned map_tables_used;           /* sb_gpu_map's tables handed out since sb_gpu_tables */
+
 /* Page tables (Mali-LPAE: table entries | 3, level-3 leaves | 0x2c1 = valid, read, write, outer
  * shareable, MEMATTR 0) and zeroed data. */
 void sb_gpu_tables(void)
@@ -184,6 +186,7 @@ void sb_gpu_tables(void)
     volatile uint64_t *q = (volatile uint64_t *)SB_GPU_MEM;
     if (!gpu_open)
         return;
+    map_tables_used = 0;                    /* sb_gpu_map's tables start again */
     for (uint64_t i = 0; i < (0x10000U + SB_GPU_DATA_SIZE) / 8U; ++i)
         q[i] = 0;
     volatile uint64_t *l0 = q, *l1 = q + 512, *l2 = q + 1024;
@@ -204,6 +207,34 @@ void sb_gpu_tables(void)
             l3[i] = ((uint64_t)SB_FB + (uint64_t)(t * 512U + i) * 0x1000U) | 0x2c1U;
     }
     __asm__ volatile("dsb sy" : : : "memory");
+}
+
+/* Starbite OS's GPU compositor (gpucomp.c): more of the GPU's address space, below 1 GiB. The level-3 tables come
+ * from the GPU memory block after the data window (SB_GPU_TBL_POOL), handed out as needed (zeroed); call after
+ * sb_gpu_tables and before sb_gpu_up (or sb_gpu_as0 again after). 1 mapped, 0 out of tables or out of range. */
+int sb_gpu_map(uint64_t va, uint64_t pa, uint64_t size)
+{
+    volatile uint64_t *q = (volatile uint64_t *)SB_GPU_MEM;
+    volatile uint64_t *l2 = q + 1024;
+    if (!gpu_open || (va & 0xfffU) || (pa & 0xfffU) || va + size > (1ULL << 30))
+        return 0;
+    for (uint64_t o = 0; o < size; o += 0x1000U) {
+        uint64_t v = va + o;
+        unsigned i2 = (unsigned)((v >> 21) & 0x1ffU);
+        if (!(l2[i2] & 1U)) {
+            if (map_tables_used >= SB_GPU_TBL_N)
+                return 0;
+            uint64_t t = SB_GPU_MEM + SB_GPU_TBL_POOL + (uint64_t)map_tables_used++ * 0x1000U;
+            volatile uint64_t *z = (volatile uint64_t *)t;
+            for (unsigned k = 0; k < 512U; ++k)
+                z[k] = 0;
+            l2[i2] = t | 3U;
+        }
+        volatile uint64_t *l3 = (volatile uint64_t *)(uintptr_t)(l2[i2] & ~0xfffULL);
+        l3[(v >> 12) & 0x1ffU] = (pa + o) | 0x2c1U;
+    }
+    __asm__ volatile("dsb sy" : : : "memory");
+    return 1;
 }
 
 static int as_wait(void)

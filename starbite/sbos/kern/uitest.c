@@ -238,6 +238,17 @@ void selftest_timer(unsigned id)
             return;
         }
 #endif
+#ifdef SBOS_SELFTEST_GPUCOMP
+        {
+            /* P4: the GPU compositor (gpucomp.c): fill, composite, blur, 120 motion frames; then recovery (pmsg) */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: gpucomp: the watchdog at 30 s, fed by the loop and each GPU job: seconds " :
+                        "selftest: gpucomp: the watchdog could not be set (the loader's stays): ", w);
+            phase = 90;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
 #ifdef SBOS_SELFTEST_UIBENCH
         {
             /* 1.2-alpha26 P0: what the CPU can composite for the new UI (uibench.c), then recovery (pmsg) */
@@ -490,6 +501,21 @@ void selftest_timer(unsigned id)
         kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
         return;
     case 51:
+        active = 0;
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_GPUCOMP
+    case 90:
+        if (!gpucomp_selftest_step()) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
+            return;
+        }
+        phase = 91;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+        return;
+    case 91:
+        sb_log("selftest: gpucomp: done; a restart into recovery (pmsg)");
         active = 0;
         power_restart_recovery();
         return;

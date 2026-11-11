@@ -612,6 +612,12 @@ extern void (*sb_before_reset)(void);
 #define SB_GPU_VA 0x02000000ULL             /* GPU VA of SB_GPU_DATA */
 #define SB_GPU_PANEL_VA 0x04000000ULL       /* GPU VA of the scanout SB_FB */
 #define SB_GPU_HOLE_VA 0x10000000ULL        /* never mapped: the deliberate-fault test */
+/* Starbite OS's GPU compositor: sb_gpu_map's level-3 tables (240: 480 MiB) after the data window, then a GPU-only
+ * pool (non-cacheable for the CPU, as the whole block) to the block's end */
+#define SB_GPU_TBL_POOL 0x810000ULL
+#define SB_GPU_TBL_N 240U
+#define SB_GPU_POOL (SB_GPU_MEM + 0x900000ULL)
+#define SB_GPU_POOL_SIZE (SB_GPU_MEM_SIZE - 0x900000ULL)
 /* The CPU's view of a GPU VA (data or panel). */
 #define SB_GPU_CPU(va) ((va) >= SB_GPU_PANEL_VA ? (SB_FB + ((va) - SB_GPU_PANEL_VA)) : (SB_GPU_DATA + ((va) - SB_GPU_VA)))
 
@@ -626,6 +632,7 @@ struct sb_gpu_result {
 int sb_gpu_domain(void);                    /* PMU G3D status [3:0] == 0xf */
 uint32_t sb_gpu_rd(unsigned off);
 int sb_gpu_wr(unsigned off, uint32_t v);    /* 0 (nothing written) without an open session */
+int sb_gpu_map(uint64_t va, uint64_t pa, uint64_t size);   /* more GPU address space (the compositor); 1 mapped */
 /* The session: a complete authorisation for the BUCK6 write of the confirmed GPU power-up. */
 int sb_gpu_open(const struct sb_auth *a);
 int sb_gpu_is_open(void);
