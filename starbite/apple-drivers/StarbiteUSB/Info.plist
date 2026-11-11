@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>org.starbite.driver.StarbiteUSB</string>
+	<key>CFBundleName</key>
+	<string>StarbiteUSB</string>
+	<key>CFBundlePackageType</key>
+	<string>KEXT</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleExecutable</key>
+	<string>StarbiteUSB</string>
+	<key>IOKitPersonalities</key>
+	<dict>
+		<key>StarbiteUSB</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>org.starbite.driver.StarbiteUSB</string>
+			<key>IOClass</key>
+			<string>StarbiteUSB</string>
+			<key>IOProviderClass</key>
+			<string>IOPlatformDevice</string>
+			<key>IONameMatch</key>
+			<array>
+				<string>starbite,dwc3</string>
+			</array>
+		</dict>
+		<key>StarbiteUSBNCM</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>org.starbite.driver.StarbiteUSB</string>
+			<key>IOClass</key>
+			<string>StarbiteUSBNCM</string>
+			<key>IOProviderClass</key>
+			<string>StarbiteUSB</string>
+		</dict>
+	</dict>
+	<key>OSBundleLibraries</key>
+	<dict>
+		<key>com.apple.kpi.bsd</key>
+		<string>8.0.0</string>
+		<key>com.apple.kpi.iokit</key>
+		<string>8.0.0</string>
+		<key>com.apple.kpi.libkern</key>
+		<string>8.0.0</string>
+		<key>com.apple.kpi.mach</key>
+		<string>8.0.0</string>
+		<key>com.apple.iokit.IONetworkingFamily</key>
+		<string>1.5.0</string>
+	</dict>
+</dict>
+</plist>

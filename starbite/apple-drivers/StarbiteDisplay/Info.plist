@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>StarbiteDisplay</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.starbite.driver.StarbiteDisplay</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>StarbiteDisplay</string>
+	<key>CFBundlePackageType</key>
+	<string>KEXT</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1</string>
+	<key>CFBundleVersion</key>
+	<string>0.1</string>
+	<key>IOKitPersonalities</key>
+	<dict>
+		<key>StarbiteDisplay</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>org.starbite.driver.StarbiteDisplay</string>
+			<key>IOClass</key>
+			<string>StarbiteDisplay</string>
+			<key>IOProviderClass</key>
+			<string>IOPlatformDevice</string>
+			<key>IONameMatch</key>
+			<array>
+				<string>starbite,decon</string>
+			</array>
+		</dict>
+		<key>AppleCLCD</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>org.starbite.driver.StarbiteDisplay</string>
+			<key>IOClass</key>
+			<string>AppleCLCD</string>
+			<key>IOProviderClass</key>
+			<string>IOPlatformDevice</string>
+			<key>IONameMatch</key>
+			<array>
+				<string>starbite,display</string>
+				<string>samsung,a5xelte-display</string>
+			</array>
+		</dict>
+	</dict>
+	<key>OSBundleLibraries</key>
+	<dict>
+		<key>com.apple.kpi.bsd</key>
+		<string>24.0</string>
+		<key>com.apple.kpi.iokit</key>
+		<string>24.0</string>
+		<key>com.apple.kpi.libkern</key>
+		<string>24.0</string>
+		<key>com.apple.kpi.mach</key>
+		<string>24.0</string>
+		<key>com.apple.kpi.unsupported</key>
+		<string>24.0</string>
+	</dict>
+</dict>
+</plist>
