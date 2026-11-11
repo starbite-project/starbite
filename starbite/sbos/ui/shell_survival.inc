@@ -12,7 +12,9 @@
  *     2 Hz while on or cooling only);
  *   - Sun: today's sunrise and sunset, daylight left, the typed location;
  *   - Guide: chapters, pages, the text (a "! " line red), Previous / Next;
- *   - Compass / Level: a disabled tile with the kernel's reason.
+ *   - Compass / Level (helper J): the sensor hub on demand: the dial, the level, the steps (started at the page's
+ *     open, kept alive while it shows, stopped at its close);
+ *   - Sun (helper J): Android's last GPS fix, its age, "Use" (fills the location editor's fields).
  * Nothing here starts by itself: SOS and USB power need the user's own hold, every page is drawn at its open (over
  * frames, as the other own pages) and a tap redraws only small layers or asks for the page over the next frames
  * (sv_rebuild: no full page inside a tap's handler). The lock's Emergency list opens the screens over the lock (the
@@ -34,7 +36,7 @@ static tk_col SVC(uint32_t c) { return tk_hex(c, 1); }
 
 /* the layers: the page's live parts (a group appended to the page's strips) and SOS's beacon (over everything but
  * the toast) */
-enum { SVL_A, SVL_B, SVL_SEG, SVL_CTL, SVL_TXT, SVL_RING, SVL_FLD, SVL_N };
+enum { SVL_A, SVL_B, SVL_SEG, SVL_CTL, SVL_TXT, SVL_RING, SVL_FLD, SVL_DIAL, SVL_N };   /* helper J: the compass's dial */
 static tk_layer svgrp, svl[SVL_N], sosl, sosbg, sostx;
 static struct {
     int from_lock;                      /* opened from the lock's Emergency list: it closes back into that card */
@@ -57,6 +59,9 @@ static struct {
     int shift, num;
     int sun_edit, sun_f;                /* the Sun's location editor, its field (0 latitude, 1 longitude) */
     char sun_v[2][12];
+    int fix_asked, fix_have;            /* helper J: Android's last GPS fix (sh_gnss: the card's, cached by the kernel) */
+    float fix_t;
+    sh_gnss_t fix;
 } SV = { .gch = -1, .gpg = -1, .cf = -1 };
 
 static int sv_key(const char *k)
@@ -201,7 +206,6 @@ static const char *sv_ec_sub(int i, char *b)
         return r == 1 ? "The sun stays up today" : r == 2 ? "The sun stays down today" :
                r == -2 ? "Sunrise and sunset: type where you are" : "Sunrise and sunset (the clock isn't set)";
     }
-    if (!tk_strcmp(EC[i].act, "compass")) return sh_sensors_why();
     return "";
 }
 static int sv_ec_hit(float x, float y)
@@ -238,8 +242,16 @@ static int sv_icon_rect(int a, arect *r)
  * (the switch, or the kernel at 3 %: looked at every idle turn, a minute at the latest) */
 static void sv_ec_skip(void) { while (EMG && ec_next < 8 && !EC_LAYER(ec_next)->bmp.px) ec_next++; }   /* a refused layer's cards */
 static int sv_idle_pending(void) { sv_ec_skip(); return (EMG && ec_next < 8) || (SV.lw_stale && !AP.on); }
+static void sun_fix_ask(void);
 static void sv_idle(void)
 {
+    /* helper J: the Sun page's GPS fix asked again a minute later (the page again only if the fix changed) */
+    if (AP.on && !AP.closing && !ap_pending && is_app("sun") && !SV.sun_edit && SV.fix_asked && (now_ms - SV.fix_t > 60000 || now_ms < SV.fix_t)) {
+        sh_gnss_t o = SV.fix;
+        int oh = SV.fix_have;
+        sun_fix_ask();
+        if (oh != SV.fix_have || (oh && (o.utc != SV.fix.utc || o.lat_e6 != SV.fix.lat_e6 || o.lon_e6 != SV.fix.lon_e6))) sv_rebuild();
+    }
     int l2 = sh_last2();
     if (l2 != SV.l2_seen) { SV.l2_seen = l2; if (EMG) SV.lw_stale = 1; }
     sv_ec_skip();
@@ -805,10 +817,66 @@ static void sun_loc_text(char *b)
     n = sv_dec(b, n, lo < 0 ? -lo : lo, 2);
     sv_cat(b, n, lo < 0 ? "\xc2\xb0 W" : "\xc2\xb0 E");
 }
+/* helper J: Android's last GPS fix (sh_gnss: /STARBITE/GNSS/LASTFIX.TXT on the card, cached by the kernel); asked at a
+ * page's build (Sun, Compass) and again from idle time a minute later while Sun shows */
+static void sun_fix_ask(void)
+{
+    sh_gnss_t f;
+    tk_memset(&f, 0, sizeof f);
+    SV.fix_have = sh_gnss(&f) == 1;
+    if (SV.fix_have) SV.fix = f;
+    SV.fix_asked = 1;
+    SV.fix_t = now_ms;
+}
+static int sv_e6_x100(int e6) { return (e6 < 0 ? -1 : 1) * (((e6 < 0 ? -e6 : e6) + 5000) / 10000); }
+/* "60.17° N, 24.94° E" */
+static int sun_fix_place(char *b, int n)
+{
+    int la = sv_e6_x100(SV.fix.lat_e6), lo = sv_e6_x100(SV.fix.lon_e6);
+    n = sv_dec(b, n, la < 0 ? -la : la, 2);
+    n = sv_cat(b, n, la < 0 ? "\xc2\xb0 S, " : "\xc2\xb0 N, ");
+    n = sv_dec(b, n, lo < 0 ? -lo : lo, 2);
+    return sv_cat(b, n, lo < 0 ? "\xc2\xb0 W" : "\xc2\xb0 E");
+}
+/* "25 min old" (from the phone's clock; "age unknown" without one) */
+static int sun_fix_age(char *b, int n)
+{
+    long long now = sh_utc(), s = now - SV.fix.utc;
+    if (!now || s < -120) return sv_cat(b, n, "age unknown");
+    long long m = s / 60;
+    if (m < 1) return sv_cat(b, n, "just now");
+    if (m < 120) { n += put_dec(b + n, (int)m); return sv_cat(b, n, " min old"); }
+    if (m < 48 * 60) { n += put_dec(b + n, (int)(m / 60)); return sv_cat(b, n, " h old"); }
+    n += put_dec(b + n, (int)tk_mini((int)(m / 1440), 99999));
+    return sv_cat(b, n, " days old");
+}
+/* the Compass's line under the heading: its coordinates when there is a fix */
+static void cp_fix_line(char *b, int n)
+{
+    if (!SV.fix_have) return;
+    n = sv_cat(b, n, " \xc2\xb7 ");
+    sun_fix_place(b, n);
+}
+/* the editor's two fields from the fix (Done saves them) */
+static void sun_fill_fix(void)
+{
+    sv_fmt_x100(SV.sun_v[0], sv_e6_x100(SV.fix.lat_e6));
+    sv_fmt_x100(SV.sun_v[1], sv_e6_x100(SV.fix.lon_e6));
+}
+#define SUN_FIX_ROW 62.0f               /* the main page's GPS row */
+#define SUN_FIX_BTN (SUN_ED + 176)      /* the editor's Use GPS Fix button */
 static void page_sun(dc *d)
 {
+    if (!SV.fix_asked) sun_fix_ask();
     if (SV.sun_edit) {
         sv_editbar(d, "Location", SVC(SV_TINT));
+        if (SV.fix_have) {
+            char b[64];
+            int n = sv_cat(b, 0, "Use GPS Fix \xc2\xb7 ");
+            sun_fix_age(b, n);
+            d_rrect(d, GROUP_X, SUN_FIX_BTN, GROUP_W, 44, 22, W(.12f));
+            sv_centre(d, TK_IT600, 16, SUN_FIX_BTN + 12, b, SVC(SV_TINT));
+        }
         d_rrect(d, GROUP_X, SUN_ED, GROUP_W, 93, 16, SVC(SV_GROUP));
         for (int i = 0; i < 2; i++) {
             d_text(d, TK_IT400, 16, ROW_TX, SUN_ED + 47 * i + 29, i ? "Longitude" : "Latitude", 0, 0, i == SV.sun_f ? INK : W(.6f), 0);
@@ -844,13 +912,26 @@ static void page_sun(dc *d)
         sv_text(d, TK_IT600, 17, ROW_TX, SUN_TOP + 28, CONTENT_R - 16 - ROW_TX, 24, m, INK);
     }
     d_text(d, TK_IT400, 13, ROW_TX, SUN_LOC - 10, "LOCATION", .52f, 0, W(.55f), 0);
-    d_rrect(d, GROUP_X, SUN_LOC, GROUP_W, 47, 16, SVC(SV_GROUP));
+    float gh = 47 + (SV.fix_have ? SUN_FIX_ROW : 0);
+    d_rrect(d, GROUP_X, SUN_LOC, GROUP_W, gh, 16, SVC(SV_GROUP));
     sun_loc_text(c);
     d_text(d, TK_IT400, 16, ROW_TX, SUN_LOC + 29, c, 0, 0, INK, 0);
     float w = tw(TK_IT600, 16, "Edit", 0, 0);
     d_text(d, TK_IT600, 16, CONTENT_R - 16 - w, SUN_LOC + 29, "Edit", 0, 0, SVC(SV_TINT), 0);
-    sv_text(d, TK_IT400, 13, ROW_TX, SUN_LOC + 60, CONTENT_R - 16 - ROW_TX, 18, "From the phone's clock and the place you type (no GPS yet); checked against NOAA's "
-            "calculator to a minute. The sun is in the south at midday north of the tropics.", W(.45f));
+    if (SV.fix_have) {                  /* helper J: Android's last fix, its age, Use (fills the editor's fields) */
+        float y = SUN_LOC + 47;
+        SV_RULE(d, y - 1);
+        int n = sv_cat(c, 0, "GPS fix: ");
+        sun_fix_place(c, n);
+        d_text(d, TK_IT400, 16, ROW_TX, bl(TK_IT400, 16, y + 10), c, 0, 0, INK, 0);
+        n = sun_fix_age(c, 0);
+        sv_cat(c, n, " \xc2\xb7 Android's, from the memory card");
+        d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 34), c, 0, 0, W(.5f), 0);
+        w = tw(TK_IT600, 16, "Use", 0, 0);
+        d_text(d, TK_IT600, 16, CONTENT_R - 16 - w, bl(TK_IT600, 16, y + 20), "Use", 0, 0, SVC(SV_TINT), 0);
+    }
+    sv_text(d, TK_IT400, 13, ROW_TX, SUN_LOC + gh + 13, CONTENT_R - 16 - ROW_TX, 18, "From the phone's clock and the place you type or Android's last GPS fix; "
+            "checked against NOAA's calculator to a minute. The sun is in the south at midday north of the tropics.", W(.45f));
 }
 static void sun_fields(void)
 {
@@ -876,11 +957,23 @@ static void sun_tap(float x, float y)
             if (lo != SH_NOLOC) sv_fmt_x100(SV.sun_v[1], lo);
             SV.sun_edit = 1; SV.sun_f = 0; SV.shift = 0; SV.num = 1;
             sv_rebuild();
+        } else if (SV.fix_have && x >= GROUP_X && x < CONTENT_R && y >= SUN_LOC + 47 && y < SUN_LOC + 47 + SUN_FIX_ROW) {
+            sun_fill_fix();                 /* helper J: the editor with the fix's place in its fields: Done saves it */
+            SV.sun_edit = 1; SV.sun_f = 0; SV.shift = 0; SV.num = 1;
+            toast("Filled in from the GPS fix");
+            sv_rebuild();
         }
         return;
     }
     int save = DONE_HIT(x, y);
     if (!save && SV_CANCEL_HIT(x, y)) { SV.sun_edit = 0; sv_rebuild(); return; }
+    if (SV.fix_have && y >= SUN_FIX_BTN && y < SUN_FIX_BTN + 44 && x >= GROUP_X && x < CONTENT_R) {
+        sun_fill_fix();                     /* helper J: Use GPS Fix */
+        sh_haptic();
+        sun_fields();
+        relink();
+        return;
+    }
     if (y >= SUN_ED && y < SUN_ED + 93 && x >= GROUP_X && x < CONTENT_R) { SV.sun_f = y >= SUN_ED + 47; sv_rebuild(); return; }
     int k = save ? 5 : y >= 540 ? sv_kb_tap(x, y, SV.sun_v[SV.sun_f], 9, 1) : 0;
     if (k == 5) {
@@ -1009,16 +1102,429 @@ static void guide_tap(float x, float y)
     sv_rebuild();
 }
 
-/* ---- Compass / Level (the sensor hub's driver is not written yet) ------------------------------------------------- */
+/* ---- Compass / Level (helper J): the sensor hub on demand (kern/survival.c on shub.c) ------------------------------
+ * As iOS's Compass: a dial turning with the heading (a tick every 2 degrees, the 30s' numbers outside, N E S W inside,
+ * north's tick red), the fixed lubber line at the top, the heading big under it ("275° W"); a Level view (flat: two
+ * circles; held upright: the horizon; green when level); the steps since the hub started. The hub starts at the page's
+ * open (~4 s: "Starting..."), is kept alive every 20 s while the page shows and stopped at its close. Its values are
+ * read at 10 Hz only while the page shows (sv_refresh / sv_next_update, no frames for that); frames run only while the
+ * dial eases to a new reading. The dial is one layer drawn again per change, in place: the ticks per px over their ring
+ * only (in 8 bands), the labels rendered once at the open and put upright; the readout, the status and the steps are
+ * small layers drawn in place when their words change. */
+#define CP_CX 195.0f
+#define CP_CY 318.0f
+#define CP_BOX 146.0f                   /* the dial's layer: the centre +- this */
+#define CP_TO 122.0f                    /* the ticks' outer radius */
+#define CP_TI 102.0f                    /* the longest tick's inner end (north's) */
+#define CP_NUM_R 136.0f                 /* the numbers' centres */
+#define CP_LET_R 82.0f                  /* the letters' centres */
+#define CP_SEG_X 95.0f                  /* Compass | Level */
+#define CP_SEG_Y 52.0f
+#define CP_SEG_W 200.0f
+#define CP_RO_X 45.0f                   /* the readout's layer: the heading big, a line under it */
+#define CP_RO_Y 474.0f
+#define CP_RO_W 300.0f
+#define CP_RO_H 86.0f
+#define CP_ST_Y 566.0f                  /* the status line's layer (Starting..., Calibrate..., why) */
+#define CP_ST_H 64.0f
+#define CP_STEPS 650.0f                 /* the steps' group */
+#define CP_SV_W 140.0f                  /* the steps' value layer */
+#define CP_LV_R 70.0f                   /* the level's circles */
+#define CP_LV_K 4.0f                    /* pt per degree of tilt */
+#define CP_HZ_R 128.0f                  /* the horizon's window */
+#define CPL_N 16                        /* the labels: the numbers 0, 30 .. 330, then N E S W */
+static struct {
+    int view;                           /* 0 compass, 1 level */
+    int on, refused;                    /* the hub asked for (stopped at the close); refused (Last 2 %, the self test) */
+    int state;                          /* SH_SENS_* at the last poll */
+    float next, keep;                   /* the next poll; the last start / keep-alive (now_ms) */
+    int hv, acc, tv, sv;                /* heading / tilt / steps valid */
+    float hdg, hshow, hdrawn;           /* degrees: the reading, shown (eased), drawn */
+    float pitch, roll, pshow, rshow, pdrawn, rdrawn;
+    unsigned steps;
+    int drawn_lit, drawn_view;          /* the dial as drawn (-1 never) */
+    char ro[48], ro2[96], st[200], stp[24];
+    int st_warn;
+    tk_bmp lab[CPL_N];
+    float lab_cx[CPL_N], lab_cy[CPL_N]; /* a label's centre in its bitmap, px */
+} CP = { .drawn_view = -1 };
+
+static int cp_visible(void) { return AP.on && !AP.closing && is_app("compass") && !ap_pending && !sh_sleeping(); }
+static float cp_wrap(float d) { while (d > 180) d -= 360; while (d < -180) d += 360; return d; }
+static uint32_t cp_pm(uint32_t rgb, float a)
+{
+    unsigned A = (unsigned)(a * 255 + .5f);
+    return A << 24 | ((rgb >> 16 & 255) * A / 255) << 16 | ((rgb >> 8 & 255) * A / 255) << 8 | (rgb & 255) * A / 255;
+}
+/* a small layer drawn again in place (made once at the open: no new bitmap, no relink per change) */
+static dc cp_clear(tk_layer *l)
+{
+    if (l->bmp.px) tk_memset(l->bmp.px, 0, (size_t)l->bmp.stride * l->bmp.h * 4);
+    dc d = { &l->bmp, 0, l->x, l->y };
+    return d;
+}
+static void cp_labels_free(void)
+{
+    for (int i = 0; i < CPL_N; i++) tk_bmp_free(&CP.lab[i]);
+}
+static void cp_label(int i, const char *s, int f, float size)
+{
+    float w = PT(tw(f, size, s, 0, 0)), a = tk_ascent(f, PT(size)), de = tk_descent(f, PT(size));
+    tk_bmp *b = &CP.lab[i];
+    if (!tk_bmp_new(b, (int)w + 8, (int)(a + de) + 8)) return;
+    tk_paint p = tk_solid(W(1));
+    tk_text(b, f, PT(size), 4, 4 + tk_floorf(a + .5f), s, 0, 0, &p, 0);
+    CP.lab_cx[i] = 4 + w / 2;
+    CP.lab_cy[i] = 4 + tk_floorf(a + .5f) - PT(size) * .36f;     /* the middle of a capital or a digit */
+}
+static void cp_labels(void)
+{
+    cp_labels_free();
+    char b[8];
+    for (int i = 0; i < 12; i++) { put_dec(b, 30 * i); cp_label(i, b, TK_IT400, 14); }
+    static const char *const L[4] = { "N", "E", "S", "W" };
+    for (int i = 0; i < 4; i++) cp_label(12 + i, L[i], TK_IT400, 26);
+}
+
+/* the dial: the ticks' ring per px (each band clears its own rows first) */
+typedef struct { tk_bmp *b; float cx, cy, hdg, dim; } cp_job;
+static void cp_tick_rows(void *ctx, int y0, int y1)
+{
+    const cp_job *J = ctx;
+    tk_bmp *b = J->b;
+    float ro = PT(CP_TO), ri = PT(CP_TI);
+    for (int j = y0; j < y1; j++) {
+        uint32_t *row = b->px + (size_t)j * b->stride;
+        tk_memset(row, 0, (size_t)b->w * 4);
+        float py = j + .5f - J->cy, ay = tk_fabsf(py);
+        if (ay > ro + 1) continue;
+        float xo = tk_sqrtf(tk_maxf(0, (ro + 1) * (ro + 1) - py * py));
+        float xi = ay < ri - 1 ? tk_sqrtf((ri - 1) * (ri - 1) - py * py) : 0;
+        for (int s = 0; s < 2; s++) {
+            int a0 = (int)tk_floorf(s ? J->cx + xi : J->cx - xo), a1 = (int)tk_floorf(s ? J->cx + xo : J->cx - xi) + 1;
+            a0 = tk_maxi(a0, 0);
+            a1 = tk_mini(a1, b->w);
+            for (int i = a0; i < a1; i++) {
+                float px = i + .5f - J->cx, r = tk_sqrtf(px * px + py * py);
+                if (r < ri - 1 || r > ro + 1) continue;
+                float m = (tk_atan2f(px, -py) * 57.2957795f + J->hdg) * .5f, k = tk_floorf(m + .5f);
+                float dist = tk_fabsf(m - k) * 2 * .0174532925f * r;          /* to the nearest tick, px along the ring */
+                int deg = (int)k * 2 % 360;
+                if (deg < 0) deg += 360;
+                float hw, rin, a;
+                if (!deg) { hw = PT(1.5f); rin = ri; a = 1; }
+                else if (deg % 30 == 0) { hw = PT(.9f); rin = PT(CP_TO - 16); a = 1; }
+                else if (deg % 10 == 0) { hw = PT(.6f); rin = PT(CP_TO - 12); a = .7f; }
+                else { hw = PT(.5f); rin = PT(CP_TO - 9); a = .42f; }
+                float c = tk_clampf(hw - dist + .5f, 0, 1) * tk_clampf(r - rin + .5f, 0, 1) * tk_clampf(ro - r + .5f, 0, 1) * a * J->dim;
+                if (c > 0) row[i] = cp_pm(deg ? 0xffffffU : SV_RED, c);
+            }
+        }
+    }
+}
+/* the level: flat, two circles (one fixed, one moved by the tilt); upright, the horizon in a round window */
+typedef struct { tk_bmp *b; float cx, cy, mx, my, ang, dim; int upright, level; } cp_ljob;
+static void cp_level_rows(void *ctx, int y0, int y1)
+{
+    const cp_ljob *J = ctx;
+    tk_bmp *b = J->b;
+    uint32_t col = J->level ? 0x30d158U : 0xffffffU;
+    float R = PT(CP_LV_R), HR = PT(CP_HZ_R), sw = PT(1), rim = PT(1.4f);
+    float sn = tk_sinf(J->ang * .0174532925f), cs = tk_cosf(J->ang * .0174532925f);
+    for (int j = y0; j < y1; j++) {
+        uint32_t *row = b->px + (size_t)j * b->stride;
+        tk_memset(row, 0, (size_t)b->w * 4);
+        float py = j + .5f - J->cy;
+        int x0 = 0, x1 = b->w;
+        if (J->upright) {
+            if (tk_fabsf(py) > HR + 2) continue;
+            float h = tk_sqrtf(tk_maxf(0, (HR + 2) * (HR + 2) - py * py));
+            x0 = tk_maxi(0, (int)(J->cx - h)); x1 = tk_mini(b->w, (int)(J->cx + h) + 1);
+        }
+        for (int i = x0; i < x1; i++) {
+            float px = i + .5f - J->cx, a;
+            if (J->upright) {
+                float r = tk_sqrtf(px * px + py * py), in = tk_clampf(HR - r + .5f, 0, 1);
+                if (in <= 0 && r > HR + 2) continue;
+                float sd = -px * sn + py * cs;                                /* > 0: under the horizon */
+                float below = tk_clampf(sd + .5f, 0, 1) * in, line = tk_clampf(PT(1.2f) - tk_fabsf(sd) + .5f, 0, 1) * in;
+                float ring = tk_clampf(sw - tk_fabsf(r - HR) + .5f, 0, 1);
+                a = 1 - (1 - below * .2f) * (1 - line) * (1 - ring * .35f);
+            } else {
+                float r1 = tk_sqrtf(px * px + py * py), qx = px - J->mx, qy = py - J->my, r2 = tk_sqrtf(qx * qx + qy * qy);
+                float fill = tk_clampf(R - r2 + .5f, 0, 1), ring1 = tk_clampf(sw - tk_fabsf(r1 - R) + .5f, 0, 1);
+                float ring2 = tk_clampf(rim - tk_fabsf(r2 - R) + .5f, 0, 1);
+                if (fill <= 0 && ring1 <= 0 && ring2 <= 0) continue;
+                a = 1 - (1 - fill * .2f) * (1 - ring1 * .45f) * (1 - ring2 * .95f);
+            }
+            if (a > 0) row[i] = cp_pm(col, a * J->dim);
+        }
+    }
+}
+static int cp_lit(void) { return CP.view ? CP.tv : CP.hv; }
+static int cp_upright(void) { return tk_fabsf(CP.pshow) > 50; }
+static int cp_level_now(void)
+{
+    if (!CP.tv) return 0;
+    if (cp_upright()) return tk_fabsf(CP.rshow) < 1;
+    return CP.pshow * CP.pshow + CP.rshow * CP.rshow < 1;
+}
+static void cp_dial(void)
+{
+    tk_layer *l = &svl[SVL_DIAL];
+    if (!l->bmp.px) return;
+    int lit = cp_lit();
+    float dim = lit ? 1 : .3f, cx = PT(CP_CX) - l->x, cy = PT(CP_CY) - l->y;
+    if (!CP.view) {
+        cp_job J = { &l->bmp, cx, cy, lit ? CP.hshow : 0, dim };
+        tk_par_rows(0, l->bmp.h, cp_tick_rows, &J);
+        for (int i = 0; i < CPL_N; i++) {               /* upright, where their degree is now */
+            const tk_bmp *s = &CP.lab[i];
+            if (!s->px) continue;
+            float deg = i < 12 ? 30.0f * i : 90.0f * (i - 12), r = PT(i < 12 ? CP_NUM_R : CP_LET_R);
+            float a = (deg - (lit ? CP.hshow : 0)) * .0174532925f;
+            float x = cx + r * tk_sinf(a) - CP.lab_cx[i], y = cy - r * tk_cosf(a) - CP.lab_cy[i];
+            tk_blit(&l->bmp, s, (int)tk_floorf(x + .5f), (int)tk_floorf(y + .5f), (i < 12 ? .8f : 1) * dim);
+        }
+        dc d = { &l->bmp, 0, l->x, l->y };              /* the lubber line: fixed, at the top */
+        d_rrect(&d, CP_CX - 1.5f, CP_CY - CP_TO - 6, 3, 30, 1.5f, W(lit ? 1 : .4f));
+        CP.hdrawn = CP.hshow;
+    } else {
+        int up = lit && cp_upright();
+        float mx = 0, my = 0;
+        if (lit && !up) {                                 /* the bubble goes to the high side, as a spirit level's */
+            mx = CP.rshow * PT(CP_LV_K); my = -CP.pshow * PT(CP_LV_K);
+            float m = tk_sqrtf(mx * mx + my * my), lim = PT(CP_BOX - CP_LV_R - 4);
+            if (m > lim) { mx *= lim / m; my *= lim / m; }
+        }
+        cp_ljob J = { &l->bmp, cx, cy, mx, my, lit ? CP.rshow : 0, dim, up, cp_level_now() };
+        tk_par_rows(0, l->bmp.h, cp_level_rows, &J);
+        CP.pdrawn = CP.pshow; CP.rdrawn = CP.rshow;
+    }
+    CP.drawn_lit = lit;
+    CP.drawn_view = CP.view;
+    tk_layer_dirty(l);
+}
+static void cp_seg(void)
+{
+    tk_layer *l = &svl[SVL_SEG];
+    dc d = cp_clear(l);
+    if (!l->bmp.px) return;
+    static const char *const S[2] = { "Compass", "Level" };
+    float w = CP_SEG_W / 2 - 2;
+    d_rrect(&d, CP_SEG_X, CP_SEG_Y, CP_SEG_W, 32, 9, W(.1f));
+    d_rrect(&d, CP_SEG_X + 2 + w * CP.view, CP_SEG_Y + 2, w, 28, 7, tk_hex(0x5a3a3c, 1));
+    for (int i = 0; i < 2; i++) {
+        float tx = tw(TK_IT600, 13, S[i], 0, 0);
+        d_text(&d, TK_IT600, 13, CP_SEG_X + 2 + w * i + (w - tx) / 2, bl(TK_IT600, 13, CP_SEG_Y + 7.5f), S[i], 0, 0, i == CP.view ? INK : W(.65f), 0);
+    }
+    tk_layer_dirty(l);
+}
+/* the words: the readout (the heading or the tilt big, a line under it), the status, the steps; 1 if any drawn */
+static int cp_texts(void)
+{
+    char ro[48], ro2[96], st[200], stp[24];
+    int n, warn = 0, lit = cp_lit();
+    ro[0] = ro2[0] = st[0] = 0;
+    if (CP.refused) {
+        sv_cat(ro, 0, "Compass Unavailable");
+        sv_cat(st, 0, sh_last2() ? "Not available in Last 2 %. It comes back when Last 2 % is off." : "The sensors can't start now.");
+        warn = 1;
+    } else if (CP.state == SH_SENS_FAILED) {
+        sv_cat(ro, 0, "Compass Unavailable");
+        n = 0;
+        const char *w = sh_sensors_why();
+        while (w && *w && n < 150) st[n++] = *w++;
+        st[n] = 0;
+        sv_cat(st, n, n ? " Tap here to try again." : "The sensors didn't start. Tap here to try again.");
+        warn = 1;
+    } else if (!lit) {
+        sv_cat(ro, 0, CP.state == SH_SENS_RUNNING ? "Waiting for the Sensors\xe2\x80\xa6" : "Starting\xe2\x80\xa6");
+        sv_cat(st, 0, CP.state == SH_SENS_RUNNING ? "" : "The sensors take about 4 seconds to start.");
+    } else if (!CP.view) {
+        int h = (int)tk_floorf(CP.hshow + .5f) % 360;
+        static const char *const D8[8] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+        n = put_dec(ro, h);
+        n = sv_cat(ro, n, "\xc2\xb0 ");
+        sv_cat(ro, n, D8[(int)((CP.hshow + 22.5f) / 45) & 7]);
+        n = sv_cat(ro2, 0, "Magnetic north");
+        cp_fix_line(ro2, n);
+        if (CP.acc < 2) { sv_cat(st, 0, "Calibrate: move the phone in a figure-8"); warn = 2; }
+    } else {
+        int up = cp_upright(), lv = cp_level_now();
+        float v = up ? tk_fabsf(CP.rshow) : tk_sqrtf(CP.pshow * CP.pshow + CP.rshow * CP.rshow);
+        n = put_dec(ro, lv ? 0 : tk_maxi(1, (int)(v + .5f)));
+        sv_cat(ro, n, "\xc2\xb0");
+        if (lv) sv_cat(ro2, 0, "Level");
+        else if (up) sv_cat(ro2, 0, "Upright: the horizon's tilt");
+        else {
+            n = sv_cat(ro2, 0, "Front ");
+            n += put_dec(ro2 + n, (int)(CP.pshow + (CP.pshow < 0 ? -.5f : .5f)));
+            n = sv_cat(ro2, n, "\xc2\xb0 \xc2\xb7 side ");
+            n += put_dec(ro2 + n, (int)(CP.rshow + (CP.rshow < 0 ? -.5f : .5f)));
+            sv_cat(ro2, n, "\xc2\xb0");
+        }
+    }
+    if (CP.sv) {
+        unsigned v = CP.steps;
+        n = 0;
+        if (v >= 1000) { n += put_dec(stp, (int)(v / 1000)); stp[n++] = ','; n = sv_2(stp, n, (int)(v % 1000 / 10)); stp[n++] = (char)('0' + v % 10); stp[n] = 0; }
+        else put_dec(stp, (int)v);
+    } else sv_cat(stp, 0, "\xe2\x80\x94");
+    int any = 0;
+    if (tk_strcmp(ro, CP.ro) || tk_strcmp(ro2, CP.ro2)) {
+        tk_memcpy(CP.ro, ro, sizeof ro); tk_memcpy(CP.ro2, ro2, sizeof ro2);
+        tk_layer *l = &svl[SVL_TXT];
+        dc d = cp_clear(l);
+        if (l->bmp.px) {
+            int big = lit && !CP.refused && CP.state != SH_SENS_FAILED;
+            float sz = big ? 54 : 24, w = tw(big ? TK_IT400 : TK_IT600, sz, ro, 0, big ? TK_TNUM : 0);
+            d_text(&d, big ? TK_IT400 : TK_IT600, sz, 195 - w / 2, bl(big ? TK_IT400 : TK_IT600, sz, big ? CP_RO_Y + 2 : CP_RO_Y + 18), ro, 0, big ? TK_TNUM : 0,
+                   CP.view && cp_level_now() ? tk_hex(0x30d158, 1) : INK, 0);
+            if (ro2[0]) sv_centre(&d, TK_IT400, 15, CP_RO_Y + 64, ro2, W(.6f));
+            tk_layer_dirty(l);
+        }
+        any = 1;
+    }
+    if (tk_strcmp(st, CP.st) || warn != CP.st_warn) {
+        tk_memcpy(CP.st, st, sizeof st);
+        CP.st_warn = warn;
+        tk_layer *l = &svl[SVL_A];
+        dc d = cp_clear(l);
+        if (l->bmp.px && st[0]) {
+            char ln[4][96];
+            float wm;
+            int k = wrapn(ln, 3, TK_IT400, 15, st, CONTENT_W - 20, &wm);
+            for (int i = 0; i < k; i++) sv_centre(&d, TK_IT400, 15, CP_ST_Y + 4 + 20.0f * i, ln[i], warn == 1 ? SVC(SV_WARN) : warn == 2 ? SVC(SV_TINT) : W(.55f));
+        }
+        tk_layer_dirty(l);
+        any = 1;
+    }
+    if (tk_strcmp(stp, CP.stp)) {
+        tk_memcpy(CP.stp, stp, sizeof stp);
+        tk_layer *l = &svl[SVL_B];
+        dc d = cp_clear(l);
+        if (l->bmp.px) {
+            float w = tw(TK_IT400, 17, stp, 0, TK_TNUM);
+            d_text(&d, TK_IT400, 17, CONTENT_R - 16 - w, CP_STEPS + 13 + 16, stp, 0, TK_TNUM, W(.6f), 0);
+        }
+        tk_layer_dirty(l);
+        any = 1;
+    }
+    if (lit != CP.drawn_lit || CP.view != CP.drawn_view) { cp_dial(); any = 1; }
+    return any;
+}
+static void cp_start(float t)
+{
+    CP.keep = t;
+    CP.refused = sh_sensors_on(1) < 0;
+    CP.on = 1;                                      /* stopped at the close either way (a refused start is a no-op) */
+}
+/* 10 Hz while the page shows: the hub kept alive (every 20 s; again at once if it stopped, every 2 s while refused;
+ * not after a failure: a tap tries again), the readings as targets (a dead band against the hub's jitter) */
+static int cp_poll(float t)
+{
+    CP.next = t + 100;
+    int st = sh_sensors_state();
+    if (CP.refused) { if (t - CP.keep >= 2000 || t < CP.keep) cp_start(t); }
+    else if (st != SH_SENS_FAILED && (st == SH_SENS_OFF || t - CP.keep >= 20000 || t < CP.keep)) cp_start(t);
+    CP.state = sh_sensors_state();
+    int d10 = 0, acc = 0, p10 = 0, r10 = 0;
+    unsigned n = 0;
+    int hv = sh_heading(&d10, &acc), tv = sh_tilt(&p10, &r10), sv = sh_steps(&n);
+    if (hv) {
+        float h = d10 / 10.0f;
+        if (!CP.hv) CP.hdg = CP.hshow = h;
+        else if (tk_fabsf(cp_wrap(h - CP.hdg)) >= .6f) CP.hdg = h;
+        CP.acc = acc;
+    }
+    if (tv) {
+        float p = p10 / 10.0f, r = r10 / 10.0f;
+        if (!CP.tv) { CP.pitch = CP.pshow = p; CP.roll = CP.rshow = r; }
+        if (tk_fabsf(p - CP.pitch) >= .3f) CP.pitch = p;
+        if (tk_fabsf(r - CP.roll) >= .3f) CP.roll = r;
+    }
+    CP.hv = hv; CP.tv = tv; CP.sv = sv;
+    if (sv) CP.steps = n;
+    return cp_texts();
+}
+static int cp_moving(void)
+{
+    if (!cp_visible()) return 0;
+    if (!CP.view) return CP.hv && tk_fabsf(cp_wrap(CP.hdg - CP.hshow)) > .15f;
+    return CP.tv && (tk_fabsf(CP.pitch - CP.pshow) > .15f || tk_fabsf(CP.roll - CP.rshow) > .15f);
+}
+/* a frame: the shown values ease to the readings (as iOS's dial follows); the dial drawn again when it moved */
+static int cp_step(float dt)
+{
+    if (!cp_visible()) return 0;
+    float k = 1 - tk_expf(-dt / .09f);
+    int mv = cp_moving();
+    if (!CP.view && CP.hv) {
+        float d = cp_wrap(CP.hdg - CP.hshow);
+        CP.hshow = tk_fabsf(d) > .15f ? CP.hshow + d * k : CP.hdg;
+        if (CP.hshow < 0) CP.hshow += 360;
+        if (CP.hshow >= 360) CP.hshow -= 360;
+        if (tk_fabsf(cp_wrap(CP.hshow - CP.hdrawn)) >= .1f) cp_dial();
+    } else if (CP.view && CP.tv) {
+        float dp = CP.pitch - CP.pshow, dr = CP.roll - CP.rshow;
+        CP.pshow = tk_fabsf(dp) > .15f ? CP.pshow + dp * k : CP.pitch;
+        CP.rshow = tk_fabsf(dr) > .15f ? CP.rshow + dr * k : CP.roll;
+        if (tk_fabsf(CP.pshow - CP.pdrawn) >= .1f || tk_fabsf(CP.rshow - CP.rdrawn) >= .1f) cp_dial();
+    }
+    cp_texts();
+    return mv;
+}
 static void page_compass(dc *d)
 {
-    d_h1(d, "Compass / Level");
-    sv_ring_d(d, 195, 290, 96, 5, 1, W(.12f), 0);
-    sv_ring_d(d, 195, 290, 60, 2, 1, W(.08f), 0);
-    float w = tw(TK_IT700, 22, "N", 0, 0);
-    d_text(d, TK_IT700, 22, 195 - w / 2, bl(TK_IT700, 22, 200), "N", 0, 0, W(.25f), 0);
-    d_rrect(d, 189, 284, 12, 12, 6, W(.2f));
-    d_empty(d, 396, 540, "Not Available Yet", sh_sensors_why());   /* centred between the rings and the bottom's half */
+    /* the crosshair at the centre (under the dial's layer: its middle is clear) */
+    d_rrect(d, CP_CX - 16, CP_CY - .75f, 32, 1.5f, .75f, W(.4f));
+    d_rrect(d, CP_CX - .75f, CP_CY - 16, 1.5f, 32, .75f, W(.4f));
+    d_rrect(d, GROUP_X, CP_STEPS, GROUP_W, 47, 16, SVC(SV_GROUP));
+    d_text(d, TK_IT400, 17, ROW_TX, CP_STEPS + 13 + 16, "Steps", 0, 0, INK, 0);
+    sv_text(d, TK_IT400, 13, ROW_TX, CP_STEPS + 56, CONTENT_R - 16 - ROW_TX, 18,
+            "Counted since the sensors started. Compass shows magnetic north; the sensors stop when you leave.", W(.45f));
+}
+static void compass_extras(void)
+{
+    cp_labels();
+    dc d = mk(&svl[SVL_DIAL], "sv-dial", CP_CX - CP_BOX, CP_CY - CP_BOX, 2 * CP_BOX, 2 * CP_BOX, 0, 0);
+    (void)d;
+    d = mk(&svl[SVL_SEG], "sv-seg", CP_SEG_X, CP_SEG_Y, CP_SEG_W, 32, 1, 0);
+    d = mk(&svl[SVL_TXT], "sv-cp-ro", CP_RO_X, CP_RO_Y, CP_RO_W, CP_RO_H, 0, 0);
+    d = mk(&svl[SVL_A], "sv-cp-st", GROUP_X, CP_ST_Y, GROUP_W, CP_ST_H, 0, 0);
+    d = mk(&svl[SVL_B], "sv-cp-steps", CONTENT_R - 16 - CP_SV_W, CP_STEPS + 6, CP_SV_W, 34, 0, 0);
+    if (!SV.fix_asked) sun_fix_ask();               /* the coordinates under the heading */
+    CP.ro[0] = CP.ro2[0] = CP.st[0] = CP.stp[0] = 1;  /* (no string is \1: every layer drawn now) */
+    CP.ro[1] = CP.ro2[1] = CP.st[1] = CP.stp[1] = 0;
+    CP.drawn_view = -1;
+    cp_seg();
+    if (!CP.on) cp_start(now_ms);
+    cp_poll(now_ms);
+}
+static void compass_tap(float x, float y)
+{
+    if (y >= CP_SEG_Y - 6 && y < CP_SEG_Y + 38 && x >= CP_SEG_X && x < CP_SEG_X + CP_SEG_W) {
+        int v = x >= CP_SEG_X + CP_SEG_W / 2;
+        if (v == CP.view) return;
+        CP.view = v;
+        CP.hshow = CP.hdg; CP.pshow = CP.pitch; CP.rshow = CP.roll;
+        cp_seg();
+        cp_texts();
+        return;
+    }
+    if (CP.state == SH_SENS_FAILED && !CP.refused && y >= CP_ST_Y - 8 && y < CP_ST_Y + CP_ST_H) {
+        cp_start(now_ms);
+        toast("Starting the sensors again");
+        cp_poll(now_ms);
+    }
+}
+static void compass_close(void)
+{
+    if (CP.on) { sh_sensors_on(0); CP.on = 0; }
+    CP.refused = 0;
+    CP.hv = CP.tv = CP.sv = 0;
+    CP.state = SH_SENS_OFF;
 }
 
 /* ---- the hooks shell_lock.c calls -------------------------------------------------------------------------------- */
@@ -1038,6 +1544,7 @@ static void sv_free(void)
 {
     for (int i = 0; i < SVL_N; i++) { relayer(&svl[i]); svl[i].hidden = 1; }
     sv_ring_free();
+    cp_labels_free();
     SV.hold = 0;
 }
 /* the page's live layers (at its open and after a sv_rebuild): the previous page's go first */
@@ -1048,6 +1555,7 @@ static void sv_extras(const char *k)
     else if (!tk_strcmp(k, "power")) last2_extras();
     else if (!tk_strcmp(k, "usb")) usb_extras();
     else if (!tk_strcmp(k, "sun") && SV.sun_edit) sun_fields();
+    else if (!tk_strcmp(k, "compass")) compass_extras();    /* helper J: starts the sensor hub */
     else if (!tk_strcmp(k, "settings") && AS.sub == 4 && SV.cf >= 0) sv_field(ROW_TX, CE_FLD + 10, CONTENT_R - 16 - ROW_TX, SV.ebuf, 1, INK);
 }
 /* an app opened (app_open): every tool opens on its first view */
@@ -1057,10 +1565,14 @@ static void sv_opened(void)
     SV.cf = -1;
     SV.sun_edit = 0;
     SV.hold = 0;
+    SV.fix_asked = 0;                   /* helper J: the GPS fix asked again at the page's build */
+    if (CP.on) compass_close();         /* (another app straight over the Compass: its hub off) */
+    CP.view = 0;
 }
 /* the app closed (app_finish_close): over the lock, the lock is as it was */
 static void sv_closed(void)
 {
+    if (CP.on) compass_close();         /* helper J: the sensor hub off when the Compass closes */
     sv_free();
     if (SV.from_lock) { SV.from_lock = 0; if (locked) set_lock(lockY); }
 }
@@ -1118,6 +1630,7 @@ static int sv_tap(float x, float y)
     else if (!tk_strcmp(k, "usb")) usb_tap(x, y);
     else if (!tk_strcmp(k, "sun")) sun_tap(x, y);
     else if (!tk_strcmp(k, "guide")) guide_tap(x, y);
+    else if (!tk_strcmp(k, "compass")) compass_tap(x, y);
     return 1;
 }
 /* which hold is under the finger: 1 SOS, 2 USB power (only while it can start) */
@@ -1196,6 +1709,7 @@ static int sv_refresh(float t)
         }
     }
     if (AP.on && !AP.closing && is_app("usb") && SV.usb.state != SH_USB_OFF && t >= SV.usb_next) { usb_poll(t); any = 1; }
+    if (cp_visible() && (t >= CP.next || t < CP.next - 200)) any |= cp_poll(t);   /* helper J: the sensors at 10 Hz */
     return any;
 }
 /* every frame (the end of sh_tick): the hold's ring, a page drawn over frames done, the polls; 1 to keep frames */
@@ -1211,9 +1725,10 @@ static int sv_tick(float dt, float t)
         mv = 1;
     }
     sv_refresh(t);
+    mv |= cp_step(dt);                  /* helper J: the dial eases to the reading */
     return mv;
 }
-static int sv_moving(void) { return SV.hold != 0; }
+static int sv_moving(void) { return SV.hold != 0 || cp_moving(); }
 /* when the platform should come back without frames: SOS's beacon 20 times a second, USB power's state twice */
 static float sv_next_update(float t)
 {
@@ -1225,6 +1740,10 @@ static float sv_next_update(float t)
     }
     if (AP.on && !AP.closing && is_app("usb") && SV.usb.state != SH_USB_OFF) {
         float n = tk_maxf(1, SV.usb_next - t);
+        if (best < 0 || n < best) best = n;
+    }
+    if (cp_visible()) {                 /* helper J: the Compass's next poll (10 Hz) */
+        float n = tk_maxf(1, CP.next - t);
         if (best < 0 || n < best) best = n;
     }
     return best;
@@ -1240,6 +1759,16 @@ static void sv_set(const char *k, float v)
         return;
     }
     if (!tk_strcmp(k, "usbpoll")) { usb_poll(now_ms); return; }
+    /* helper J: sv=cpoll:1 the Compass's sensors read now (after hostms=), the dial where they are; sv=cview:1 Level */
+    if (!tk_strcmp(k, "cpoll") || !tk_strcmp(k, "cview")) {
+        if (!is_app("compass")) return;
+        if (k[1] == 'v') { CP.view = v > 0; cp_seg(); }
+        cp_poll(now_ms);
+        CP.hshow = CP.hdg; CP.pshow = CP.pitch; CP.rshow = CP.roll;
+        cp_dial();
+        cp_texts();
+        return;
+    }
     if (!tk_strcmp(k, "hold")) {
         if (!SR_.n && AP.on && !tk_strcmp(APPS[AP.a].k, "usb")) usb_extras();
         sv_ring_set(v);
