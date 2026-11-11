@@ -18,6 +18,7 @@
 #include "kapp.h"
 #include "survival.h"
 #include "gnssfix.h"
+#include "shub.h"
 
 #define KT_SURV_USB 1U
 #define KT_SURV_TICK 2U                     /* the slow tick (last 2 %'s keeper), 5 s */
@@ -599,7 +600,14 @@ int surv_last2_battery(int pct, int avg_mv, int charger)
 /* ---- sensors ------------------------------------------------------------------------------------------------- */
 const char *surv_sensors_why(void)
 {
-    return "The compass and the level need the sensor hub inside the GNSS chip (BCM4775): its driver is not written yet.";
+    /* 1.2-alpha28: the driver exists (shub.c) but this image does not start the hub: its firmware must come from the
+     * card (it is never in the image); the test images start it */
+    if (shub_state() == SHUB_RUNNING)
+        return "The sensor hub is running.";
+    if (shub_state() == SHUB_FAILED)
+        return shub_why();
+    return "The compass and the level need the sensor hub inside the GNSS chip: its driver is being tested, "
+           "not started in this version yet.";
 }
 
 /* ---- the kernel ---------------------------------------------------------------------------------------------- */
