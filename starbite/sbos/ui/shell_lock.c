@@ -134,6 +134,59 @@ __attribute__((unused)) static void d_ring(dc *d, float cx, float cy, float r, f
 }
 
 static void relayer(tk_layer *l) { tk_layer_dirty(l); tk_bmp_free(&l->bmp); tk_a8_free(&l->glass); }
+/* P3s (the 160 MiB heap): a drawn layer's bitmap and glass mask cut to what they hold, a few px of nothing kept round
+ * it (the bilinear neighbours of a scaled draw stay inside), every cut a whole even number of px (the half copy's
+ * 2 x 2 cells and the 3-slice rows stay where they were); the layer moves by the cut, so it shows exactly what it did.
+ * The bitmap keeps its block, made smaller (tk_shrink: no copy, no hole). Returns the px cut off the top and the
+ * bottom (a 3-slice's lengths shrink by them), or 0 if it was not cut. */
+static int trim_layer(tk_layer *l, int *cut_top, int *cut_bot)
+{
+    tk_bmp *b = &l->bmp;
+    if (cut_top) *cut_top = 0;
+    if (cut_bot) *cut_bot = 0;
+    if (!b->px || b->stride != b->w || (l->glass.v && (l->glass.w != b->w || l->glass.h != b->h))) return 0;
+    int w = b->w, h = b->h, x0 = w, x1 = 0, y0 = h, y1 = 0;
+    for (int j = 0; j < h; j++) {
+        const uint32_t *r = b->px + (size_t)j * w;
+        const uint8_t *g = l->glass.v ? l->glass.v + (size_t)j * w : 0;
+        int a = 0, e = w;
+        while (a < e && !r[a] && !(g && g[a])) a++;
+        if (a == e) continue;
+        while (e > a && !r[e - 1] && !(g && g[e - 1])) e--;
+        if (a < x0) x0 = a;
+        if (e > x1) x1 = e;
+        if (j < y0) y0 = j;
+        y1 = j + 1;
+    }
+    if (x1 <= x0) return 0;                       /* nothing in it: left as it is */
+    /* sideways by whole 16 px (8 half px): the compositor's 8 px blocks fall on the same px, so the same blends
+     * round the same way; 16 px of nothing kept on the right (the row's last few px blend one at a time) */
+    x0 = tk_maxi(0, x0 - 16) & ~15;
+    y0 = tk_maxi(0, y0 - 4) & ~1;
+    x1 = tk_mini(w, x1 + 16);
+    y1 = tk_mini(h, y1 + 4);
+    if ((w - x1) & 1) x1++;                       /* what is cut on the right and at the bottom even too */
+    if ((h - y1) & 1) y1++;
+    int nw = x1 - x0, nh = y1 - y0;
+    if ((size_t)nw * nh * 4 + (64u << 10) > (size_t)w * h * 4) return 0;   /* not worth it */
+    for (int j = 0; j < nh; j++) tk_memcpy(b->px + (size_t)j * nw, b->px + (size_t)(y0 + j) * w + x0, (size_t)nw * 4);
+    b->px = tk_shrink(b->px, (size_t)nw * nh * 4);
+    b->w = b->stride = nw;
+    b->h = nh;
+    if (l->glass.v) {
+        for (int j = 0; j < nh; j++) tk_memcpy(l->glass.v + (size_t)j * nw, l->glass.v + (size_t)(y0 + j) * w + x0, (size_t)nw);
+        l->glass.v = tk_shrink(l->glass.v, (size_t)nw * nh);
+        l->glass.w = nw;
+        l->glass.h = nh;
+    }
+    l->x += (float)x0; l->bx += (float)x0;
+    l->y += (float)y0; l->by += (float)y0;
+    tk_layer_dirty(l);
+    if (cut_top) *cut_top = y0;
+    if (cut_bot) *cut_bot = h - y1;
+    return 1;
+}
+static void trim(tk_layer *l) { trim_layer(l, 0, 0); }
 
 /* ---- state ------------------------------------------------------------------------------------------------- */
 static tk_layer root, home, lockflat, lockg, mark, glyph_c, glyph_o, list, etool, hint, homebar;
@@ -150,6 +203,7 @@ static hold_t Q[2];
 typedef struct {
     tk_layer gh, closed, open, face, head, chev, members, rows[3];   /* gh: the stack's lower cards (P3i) */
     tk_bmp chev0;               /* the chevron unrotated */
+    float fcut;                 /* P3s: px cut off the face's top and bottom (its 3-slice is that much shorter) */
     float y;                    /* top in content pt (scroll 0) */
     float chx;                  /* the chevron's x */
     int isopen;
@@ -309,6 +363,7 @@ static void build_lstatus(void)
     relayer(&lstatus);
     dc d = mk(&lstatus, "lock-status", 0, 0, 390, 48, 2, 0);
     status_bar(&d, carrier);
+    trim(&lstatus);
 }
 /* the modem's status (its session's status API): the carrier or "No SIM" / "Emergency calls only" */
 static void cc_status_stale(void);
@@ -351,6 +406,7 @@ static void build_lclock(void)
     tk_text(d.b, TK_IT700, PT(106), PT(x0) - d.ox, PT(base) - d.oy, hh, PT(-1), 0, &p, 0);
     tk_text(d.b, TK_IT700, PT(106), PT(x0 + wh + gap) - d.ox, PT(base - 9.6f) - d.oy, ":", 0, 0, &p, 0);
     tk_text(d.b, TK_IT700, PT(106), PT(x0 + wh + gap + wc + gap) - d.ox, PT(base) - d.oy, mm, PT(-1), 0, &p, 0);
+    trim(&lclock);
 }
 /* P3p (P3j-17): iOS's accessoryRectangular between the two gauges: no platter or border, left-aligned vibrant
  * text: a glyph and the label (15 / 600, .7), the value 30 pt / 600 tabular, a 13 pt second line */
@@ -377,6 +433,7 @@ static void build_lwidgets(void)
         int k = put_dec(v, ST.temp);
         tk_memcpy(v + k, " \xc2\xb0" "C battery", 13);
         rect_widget(&d, 0, "Heat", "Ready", v);
+        trim(&lwidgets);
         return;
     }
     ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), tk_hex(0x4cd964, 1), num, "BATTERY");
@@ -388,6 +445,7 @@ static void build_lwidgets(void)
                   at[3] = (char)('0' + ALM.m / 10); at[4] = (char)('0' + ALM.m % 10); at[5] = 0; }
     alm_when = !ALM.on ? 0 : ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? 1 : 2;
     rect_widget(&d, "alarm", "Alarm", at, alm_when == 1 ? "Today" : alm_when == 2 ? "Tomorrow" : "No alarm set");
+    trim(&lwidgets);
 }
 
 static void build_marks(void)
@@ -403,6 +461,8 @@ static void build_marks(void)
     d = mk(&hint, "hint", 0, 756, 390, 16, 4, 0);
     w = tw(TK_IT600, 13, "Swipe up to open", 0, 0);
     d_text(&d, TK_IT600, 13, (390 - w) / 2, 756 + 13, "Swipe up to open", 0, 0, W(.75f), 1);
+    trim(&mark);
+    trim(&hint);
     d = mk(&homebar, "homebar", 128, 789, 134, 5, 1, 0);    /* P3i: iOS's 134 x 5, radius 2.5 */
     d_rrect(&d, 128, 789, 134, 5, 2.5f, W(1));
 }
@@ -614,6 +674,7 @@ static void build_card(int g)
         ghost(e.b, e.ox, e.oy, CARD_X + 10, b1 - 68 * .97f, CARD_W - 20, 68 * .97f, 26 * .945f, .8f);
         erase_rrect(e.b, e.ox, e.oy, CARD_X, top, CARD_W, 68, 26);
         k->gh.hidden = 0;
+        trim(&k->gh);
     }
     /* P3i: the card is its face (the glass only, baked here once: a 3-slice drawn 68 pt tall when closed and as
      * tall as the rows when open) and its head (icon and names) over it; opening it bakes nothing (the open
@@ -629,8 +690,19 @@ static void build_card(int g)
     k->face.slice_s0 = PT(38 + FACE_MG);
     k->face.slice_s1 = PT(30 + FACE_MG);
     k->face.slice_h = PT(68 + 2 * FACE_MG);
+    {
+        int ct, cb;
+        k->fcut = 0;
+        if (trim_layer(&k->face, &ct, &cb)) {
+            k->face.slice_s0 -= (float)ct;
+            k->face.slice_s1 -= (float)cb;
+            k->fcut = (float)(ct + cb);
+            k->face.slice_h -= k->fcut;
+        }
+    }
     d = mk(&k->head, "head", CARD_ICON, top + 9, CARD_CHEV - 4 - CARD_ICON, 52, 1, 0);
     head_content(&d, g, top);
+    trim(&k->head);
     tk_layer_init(&k->members, "members");
     tk_layer_init(&k->open, "card");
     tk_layer_add(&k->open, &k->face);
@@ -697,6 +769,7 @@ static void build_etool(void)
     d_glass(&d, x, top, w2, 32, 16, 1, 1);
     d_icon(&d, "lab", x + 14, top + 8.5f, 1);
     d_text(&d, TK_IT600, 13, x + 35, top + 8 + 13, "Lab", 0, 0, INK, 0);
+    trim(&etool);
 }
 
 /* Emergency's list (the concept's renderEmergency): eight cards and Exit Emergency; made on entering, freed on
@@ -742,6 +815,8 @@ static void build_ecards(void)
     d_glass(&d, x, top, w, 32, 16, 1, 1);
     d_text(&d, TK_IT600, 13, x + 14, top + 8 + 13, "Exit Emergency", 0, 0, INK, 0);
     tk_a8_free(&ecard[0].glass);
+    trim(&ecard[0]);
+    trim(&ecard[4]);
     tk_layer_prepare(&ecard[0]);
     tk_layer_prepare(&ecard[4]);
     /* survival-next: cards 4..7 below the fold: their layers now, the cards at the next idle turns */
@@ -804,7 +879,7 @@ static void place_list(void)
         k->chev.y = k->chev.by + dy;
         k->chev.clip_r = (tk_rect){ PT(CARD_X), PT(top), PT(CARD_W), PT(68) };
         float h = 68 + k->memh;
-        k->face.slice_h = PT(h + 2 * FACE_MG);
+        k->face.slice_h = PT(h + 2 * FACE_MG) - k->fcut;
         k->members.clip_r = (tk_rect){ PT(CARD_X), PT(top + 68), PT(CARD_W), PT(k->memh) };
         float p = k->full > 0 ? k->memh / (k->to > k->from ? k->full : tk_maxf(1, k->from)) : 0;
         if (!k->sp.live) p = k->isopen ? 1 : 0;
@@ -939,6 +1014,7 @@ static void build_home_sb(void)
     char hm[8];
     fmt_hm(hm);
     status_bar(&d, hm);
+    trim(&hparts[0]);
 }
 
 /* ---- the home (P1: the concept's first page, drawn once; P2 builds the real one) --------------------------- */
@@ -1001,6 +1077,7 @@ static void build_home_w(void)
     d_text(&d, TK_IT500, 12, WID_X(0) + WID_W / 2 - cw / 2, 224 + 12, "Battery", 0, 0, INK, 1);
     cw = tw(TK_IT500, 12, "Systems", 0, 0);
     d_text(&d, TK_IT500, 12, WID_X(1) + WID_W / 2 - cw / 2, 224 + 12, "Systems", 0, 0, INK, 1);
+    trim(&hparts[1]);
 }
 static void build_home_apps2(void)
 {
@@ -1027,7 +1104,7 @@ static void build_home_apps2(void)
             if (!sv_tile(dd, P2[i], cx - 31, y, 62)) d_icon(dd, n, cx - 31, y, 1);
             d_text_box(dd, TK_IT500, 12, cx, y + 68 + 12, 84, 1, P2N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
         }
-        for (int k = 4; k <= 6; k += 2) hparts[k].x = hparts[k].bx = hparts[k].x + PT(390);
+        for (int k = 4; k <= 6; k += 2) { hparts[k].x = hparts[k].bx = hparts[k].x + PT(390); trim(&hparts[k]); }
     }
 }
 static void build_home(void)
@@ -1086,6 +1163,15 @@ static void build_home(void)
     /* the parts stay separate layers under one group (they do not overlap, so the group's opacity per part is
      * exact); #home has will-change: opacity, a backdrop root in Chrome: its glass shows no wallpaper blur */
     for (int i = 0; i < 5; i++) tk_a8_free(&hparts[i].glass);
+    /* P3s: cut to what they hold (Calendar's tile is redrawn in place later: its spot moves with the cut) */
+    {
+        float ox = hparts[2].x, oy = hparts[2].y;
+        trim(&hparts[2]);
+        if (calic_x >= 0) { calic_x -= (int)(hparts[2].x - ox); calic_y -= (int)(hparts[2].y - oy); }
+    }
+    trim(&hparts[3]);
+    trim(&hsearch[0]);
+    trim(&hsearch[1]);
 }
 
 static float focus_sy;
@@ -1396,6 +1482,7 @@ static void build_cc_grid(void)
     cc_tile(&d, CCX[2], 354.66f, 70, 70, 35, 0); cc_glyph(&d, "cc-wifi2", CCX[2], 354.66f, 22, 22);
     cc_tile(&d, CCX[3], 354.66f, 70, 70, 35, 0); cc_glyph(&d, "cc-camera", CCX[3], 354.66f, 24, 24);
     tk_a8_free(&ccgrid.glass);
+    trim(&ccgrid);
     tk_layer_prepare(&ccgrid);
 }
 static void cc_levels(void)
@@ -1439,6 +1526,7 @@ static void build_cc(void)
     if (!ccsb.bmp.px) {
         dc d = mk(&ccsb, "cc-status", 0, 0, 390, 48, 2, 0);
         status_bar(&d, carrier);
+        trim(&ccsb);
     }
     if (!cclvl[0].bmp.px) {
         for (int i = 0; i < 2; i++) {
@@ -3059,6 +3147,7 @@ static void toast(const char *msg)
     if (AP.on) d_lg_flat(&d, x, 6, w, 34, 17, 1);
     else d_glass(&d, x, 6, w, 34, 17, 1, 1);
     d_text_box(&d, TK_IT600, 13, x + 15, bl(TK_IT600, 13, 6 + 9), w - 30, 0, msg, 0, 0, INK, 0);   /* P3p: one line */
+    trim(&toastl);
     relink();
     toast_from = toast_o;
     toast_to = 0;

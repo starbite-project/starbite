@@ -251,7 +251,7 @@ static void sv_idle(void)
         ec_next++;
         tk_layer_dirty(l);
         l->hidden = 0;
-        if (ec_next == 6 || ec_next == 8) tk_layer_prepare(l);
+        if (ec_next == 6 || ec_next == 8) { trim(l); tk_layer_prepare(l); }   /* P3s: cut to its two cards */
         lock_ver++;
         return;
     }
