@@ -380,7 +380,13 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     int serve = b->rfs_serve, query = b->fmt_query;
     uint32_t period = b->query_period_ms;
     uint32_t keep = b->keep_running;
+#ifdef SBM_ATTENDED_TX
+    uint32_t attended = SBM_IS_ATTENDED(b->attended) ? b->attended : 0;
+#endif
     sbm_memset(b, 0, sizeof(*b));
+#ifdef SBM_ATTENDED_TX
+    b->attended = attended;
+#endif
     b->stop = want;
     b->hold_ms = hold > 600000 ? 600000 : hold;     /* 10 min at most (the soak) */
     b->rfs_serve = serve;
