@@ -638,6 +638,9 @@ def tile_table(art):
         # wallpaper's magenta -> orange
         'ios16': add('ios16', '#0a58d0', '#5ac8fa', 'L:apple'),
         'ios26': add('ios26', '#0b2560', '#3d8cff', 'L:apple'),
+        # iOS 27 (2026-11-11, replaced iOS 16 and 26 in the menu): the release icon below; this tile
+        # (its warm grey-gold) only shows if the icon file is missing
+        'ios27': add('ios27', '#3a3129', '#b8a488', 'L:apple'),
         'mac13': add('mac13', '#6a1d45', '#f7a03a', 'L:apple'),
         'chromeos': add('chromeos', '#ffffff', '#dfe8f7', 'L:chromium', True),
         'engineer': add('engineer', '#06121f', '#1b4a6e', 'X:engineer'),       # Starbite's own
@@ -669,9 +672,9 @@ def tile_table(art):
     }
     # today's catalog (docs/MENU7-PORT.md 4.4)
     real = [
-        ('ios16', logo['ios16']), ('mac13', logo['mac13']), ('chromeos', logo['chromeos']),
+        ('ios27', logo['ios27']), ('mac13', logo['mac13']), ('chromeos', logo['chromeos']),
         ('engineer', logo['engineer']), ('utility', logo['utility']), ('starbite-os', logo['starbite-os']),
-        ('ios26', logo['ios26']), ('win11', logo['win11']), ('android', logo['android']),
+        ('win11', logo['win11']), ('android', logo['android']),
         ('linux-ubuntu', logo['ubuntu']), ('linux', logo['ubuntu']),
         ('linux-ubuntu-gnome', logo['gnome']), ('linux-ubuntu-lomiri', logo['lomiri']),
         ('linux-arch', logo['arch']), ('linux-pmos', logo['pmos']), ('linux-kali', logo['kali']),

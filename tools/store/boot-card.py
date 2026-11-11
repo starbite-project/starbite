@@ -4,7 +4,10 @@ the loader Image replaced and " sbstore=card" appended to the SWEETXNU payload's
 command line). Ramdisk (menu assets), DTBH, header fields, the payload's other bytes and the bundles after it
 stay as they are, and are checked byte for byte afterwards.
 
-  boot-card.py CURRENT_BOOT.img LOADER.Image OUT.img
+  boot-card.py CURRENT_BOOT.img LOADER.Image OUT.img [--ramdisk NEW.sbm]
+
+--ramdisk: the menu assets replaced too (tools/brand/menu7-assets.py's build/brand/menu-v7.sbm); checked to be
+exactly that file, everything else as above.
 
 CURRENT_BOOT.img: BOOT as pulled from the phone just before the flash (it is the rollback image too). Host only.
 """
@@ -39,9 +42,15 @@ def find_payload(kernel):
 
 
 def main():
-    if len(sys.argv) != 4:
+    args = sys.argv[1:]
+    new_rd = None
+    if '--ramdisk' in args:
+        i = args.index('--ramdisk')
+        new_rd = Path(args[i + 1]).read_bytes()
+        del args[i:i + 2]
+    if len(args) != 3:
         sys.exit(__doc__)
-    cur_path, loader_path, out_path = map(Path, sys.argv[1:])
+    cur_path, loader_path, out_path = map(Path, args)
     cur = cur_path.read_bytes()
     h = pb.parse(cur)
     kernel = h['kernel']
@@ -65,7 +74,7 @@ def main():
         sys.exit(f'{loader_path}: this loader does not know sbstore=card (built before the card store?)')
     with tempfile.TemporaryDirectory() as t:
         (Path(t) / 'tail').write_bytes(tail)
-        (Path(t) / 'rd').write_bytes(h['ramdisk'])
+        (Path(t) / 'rd').write_bytes(h['ramdisk'] if new_rd is None else new_rd)
         subprocess.run([sys.executable, str(PACK), 'pack', str(cur_path), str(loader_path), str(out_path),
                         '--append', str(Path(t) / 'tail'), '--ramdisk', str(Path(t) / 'rd')], check=True,
                        stdout=subprocess.DEVNULL)
@@ -76,7 +85,10 @@ def main():
         nonlocal ok
         print(('  ok   ' if c else '  FAIL ') + what)
         ok &= bool(c)
-    chk(o['ramdisk'] == h['ramdisk'], 'ramdisk (menu assets) unchanged')
+    if new_rd is None:
+        chk(o['ramdisk'] == h['ramdisk'], 'ramdisk (menu assets) unchanged')
+    else:
+        chk(o['ramdisk'] == new_rd and new_rd.find(b'SB7ASSET') > 0, 'ramdisk = the new menu assets (SB7ASSET inside)')
     chk(o['dt'] == h['dt'], 'DTBH unchanged')
     chk((o['kernel_addr'], o['ramdisk_addr'], o['tags_addr'], o['os_version'], o['name'], o['cmdline'], o['extra_cmdline']) ==
         (h['kernel_addr'], h['ramdisk_addr'], h['tags_addr'], h['os_version'], h['name'], h['cmdline'], h['extra_cmdline']),

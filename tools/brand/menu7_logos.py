@@ -117,6 +117,9 @@ RELEASE = {
     'ios26': ('release/ios26/ios-ipados-26-256x256_2x.png', DEV_ICONS + 'ios-ipados-26/ios-ipados-26-256x256_2x.png',
               '2799c661d348a612dac1ad197fb43b5f9f2b2ab9e840d521e83102a103f1a9b7',
               "iOS 26 icon (the 26 numeral): Apple Inc. (developer.apple.com); Apple's copyright and trademark", 'bleed'),
+    'ios27': ('release/ios27/ios-27-num-256x256_2x.png', DEV_ICONS + 'ios-27-num/ios-27-num-256x256_2x.png',
+              '7ad3745fa4b3d25cb06552379023e1e5615c84c0d34acac7bb2765939e1e8770',
+              "iOS 27 icon (the 27 numeral): Apple Inc. (developer.apple.com); Apple's copyright and trademark", 'bleed'),
     # the macOS Ventura icon (the round wallpaper disc) from Apple's Mac User Guide for macOS 13
     # (support.apple.com/guide/mac-help/welcome/13.0/mac, its landing art "AppLanding_macOS")
     'mac13': ('release/mac13/macos-ventura-userguide-400.png',
