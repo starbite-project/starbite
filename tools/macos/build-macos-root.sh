@@ -110,10 +110,11 @@ attach() { hdiutil attach -nobrowse -imagekey diskimage-class=CRawDiskImage "$@"
 own_detach() {
     python3 -I - "$OUT" "$1" <<'PY' || { echo "not detaching $1: hdiutil info does not show $OUT mounted there"; return 1; }
 import os, plistlib, subprocess, sys
-img, mnt = os.path.realpath(sys.argv[1]), os.path.realpath(sys.argv[2])
-info = plistlib.loads(subprocess.run(['hdiutil', 'info', '-plist'], capture_output=True, check=True).stdout)
-ok = any(os.path.realpath(i.get('image-path', '')) == img and
-         any(os.path.realpath(e.get('mount-point', '/nonexistent')) == mnt for e in i.get('system-entities', []))
+# text comparison only: realpath() on another image's path on a hung USB volume blocks for ever (2026-11-11)
+img, mnt = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
+info = plistlib.loads(subprocess.run(['hdiutil', 'info', '-plist'], capture_output=True, check=True, timeout=60).stdout)
+ok = any(i.get('image-path', '') == img and
+         any(e.get('mount-point', '/nonexistent') == mnt for e in i.get('system-entities', []))
          for i in info.get('images', []))
 sys.exit(0 if ok else 1)
 PY

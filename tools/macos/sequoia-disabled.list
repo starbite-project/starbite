@@ -1,0 +1,89 @@
+# launchd jobs taken out of the macOS 15.6 (Sequoia, 24G84) root by tools/macos/sequoia-post.sh: configuration only
+# (the entries move from /System/Library/xpc/launchd.plist to launchd-disabled.plist beside it, their plists are renamed
+# *.starbite-off; nothing executable changes). Every label below was checked present in 15.6's launchd.plist (2026-11-11).
+# WindowServer, loginwindow, opendirectoryd, securityd, logd, watchdogd stay IN.
+#
+# A. Likely to block the boot or panic it: each crash-looped on Ventura on the same 12377 macOS-target kernel
+#    (evidence: tools/macos/ventura-smooth.list "crash loops", 2026-11-05; memory ventura-desktop-milestones).
+com.apple.kernelmanagerd        # crash loop on Ventura; 15.6's job has _PanicOnCrash {PanicOnConsecutiveCrash}, so a
+                                # loop = a panic (Ventura first had to strip _PanicOnCrash, then took the job out). This
+                                # root has no /System/Library/{Extensions,KernelCollections} for it to manage.
+                                # Driver plan: kext-management answers (Part 4). NOTE docs/MACOS.md 11.5: if
+                                # IOKitWaitQuiet callers hang without it, put it back with root26-cycle --enable-job.
+com.apple.audio.coreaudiod      # crash loop on Ventura: no audio device. Driver plan: null audio device (Part 3, #26)
+com.apple.chronod               # crash loop on Ventura (widgets timeline daemon)
+# 2026-11-05 04:15 (Ventura): speech-synthesis extensions and pivtoken (CryptoTokenKit) crash-looped, 600+ spawns a boot
+com.apple.corespeechd
+com.apple.sirittsd
+com.apple.speech.speechsynthesisd.arm64
+com.apple.speech.speechsynthesisd.x86_64
+com.apple.speech.synthesisserver
+com.apple.speech.speechdatainstallerd
+com.apple.ctkd
+com.apple.CryptoTokenKit.ahp
+com.apple.CryptoTokenKit.ahp.agent
+# 2026-11-04 night (Ventura, tools/macos/ventura-disabled.list): crash loops / CPU hogs that flood the 16 KiB pmsg log,
+# which is where a failed boot's evidence has to come from
+com.apple.ReportCrash
+com.apple.ReportCrash.Root
+com.apple.SubmitDiagInfo
+com.apple.PerfPowerServices
+com.apple.apsd
+com.apple.cmio.uvcassistantextension
+com.apple.contextstored
+com.apple.coreduetd
+com.apple.coresymbolicationd
+com.apple.metadata.mds
+com.apple.spindump
+com.apple.tailspind
+com.apple.AirPlayXPCHelper
+com.apple.sysextd
+#
+# B. Not boot blockers: load on 1.7-1.8 GiB of RAM and 4 A55 cores (cpus=4), measured on Ventura 2026-11-05
+#    (analyticsd ~90 % of a core all boot, nehelper 55 %; tools/macos/ventura-smooth.list for the rest)
+com.apple.analyticsd
+com.apple.nehelper
+com.apple.mobileassetd
+com.apple.softwareupdated
+com.apple.suhelperd
+com.apple.InstallerProgress
+com.apple.assistantd
+com.apple.siriknowledged
+com.apple.siriactionsd
+com.apple.suggestd
+com.apple.routined
+com.apple.mediaanalysisd
+com.apple.photoanalysisd
+com.apple.knowledge-agent
+com.apple.triald
+com.apple.spotlightknowledged
+com.apple.biomesyncd
+com.apple.parsecd
+com.apple.corespotlightd
+com.apple.ContextStoreAgent
+com.apple.metadata.mds.index
+com.apple.AMPDevicesAgent
+com.apple.photolibraryd
+com.apple.cloudd
+com.apple.itunescloudd
+com.apple.icloud.searchpartyuseragent
+com.apple.icloud.findmydeviced
+com.apple.rapportd
+com.apple.telephonyutilities.callservicesd
+com.apple.imagent
+com.apple.identityservicesd
+com.apple.commerce
+com.apple.storeassetd
+com.apple.sharingd
+com.apple.amp.mediasharingd
+com.apple.Siri.agent
+com.apple.assistant_service
+com.apple.siriinferenced
+com.apple.intelligenceplatformd
+com.apple.proactived
+com.apple.linkd
+com.apple.tipsd
+com.apple.ScreenTimeAgent
+com.apple.accessibility.axassetsd
+com.apple.corespotlightservice
+com.apple.Spotlight

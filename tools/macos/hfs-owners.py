@@ -2,6 +2,7 @@
 """Set owner, group and mode bits inside a raw HFS+/HFSX volume image, offline.
 
   hfs-owners.py IMAGE OWNERS.json [--default UID:GID] [--check]
+  hfs-owners.py IMAGE OUT.json --dump      (read only: write the image's current owners as OWNERS.json)
 
 A Mac user without sudo can create and fill an HFSX image (hdiutil + cp), but every
 file then belongs to that user. macOS cares (launchd refuses LaunchDaemons plists not
@@ -10,7 +11,8 @@ record instead: paths listed in OWNERS.json ({"/path": [uid, gid, mode]}, writte
 ipsw-apfs.py --owners) get exactly those values; every other record (the volume root,
 directories we made, hard-link inodes) gets --default (0:0) and keeps its mode.
 The image must not be attached. Only the catalog B-tree's leaf records change.
---check only reports what differs.
+--check only reports what differs. --dump writes every record's current [uid, gid, mode & 07777] to a new
+OUT.json (it refuses to overwrite), so a later run of this tool with that file changes nothing.
 """
 import argparse, json, struct, sys
 
@@ -23,10 +25,17 @@ def main():
     ap.add_argument('owners')
     ap.add_argument('--default', default='0:0')
     ap.add_argument('--check', action='store_true')
+    ap.add_argument('--dump', action='store_true')
     a = ap.parse_args()
     du, dg = (int(x) for x in a.default.split(':'))
-    owners = json.load(open(a.owners))
-    f = open(a.image, 'rb' if a.check else 'r+b')
+    if a.dump:
+        import os
+        if os.path.exists(a.owners):
+            sys.exit(f'{a.owners} exists: --dump writes a new file only')
+        owners = {}
+    else:
+        owners = json.load(open(a.owners))
+    f = open(a.image, 'rb' if a.check or a.dump else 'r+b')
     f.seek(BLOCK_HDR)
     vh = f.read(512)
     sig = vh[:2]
@@ -78,10 +87,14 @@ def main():
             parts.append(n)
         return '/' + '/'.join(reversed(parts)) if parent == 2 or name else '/'
     changed = 0
+    dump = {}
     for at, rtype, parent, name, cnid in recs:
         p = '/' if cnid == 2 else path_of(parent, name)
         f.seek(at + 32)
         uid, gid, af, of, mode = struct.unpack('>IIBBH', f.read(12))
+        if a.dump:
+            dump[p] = [uid, gid, mode & 0o7777]
+            continue
         if p in owners:
             nu, ng, m = owners[p]
             nmode = (mode & 0o170000) | m
@@ -94,6 +107,11 @@ def main():
             else:
                 f.seek(at + 32)
                 f.write(struct.pack('>IIBBH', nu, ng, af, of, nmode))
+    if a.dump:
+        with open(a.owners, 'x') as out:
+            json.dump(dump, out, indent=0, sort_keys=True)
+        print(f'{a.image}: {len(recs)} records, owners of {len(dump)} paths written to {a.owners}')
+        return
     print(f'{a.image}: {len(recs)} records, {changed} {"would change" if a.check else "changed"}')
 
 
