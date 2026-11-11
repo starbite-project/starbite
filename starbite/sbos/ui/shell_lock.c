@@ -361,6 +361,9 @@ static void nc_clock_stale(void);
 static void nc_cards_gone(void);
 static float nc_next_update(float t);
 static int nc_refresh(float t);
+static int sw_app_alpha(void);
+static void sw_opened(int a);
+static void sw_app_gone(void);
 static void link(tk_layer *parent, tk_layer **kids, int n);
 static void lap_us(const char *what, uint64_t us);
 static char carrier[32] = "No SIM";
@@ -3073,6 +3076,7 @@ static void set_app_rect(arect R)
     appg.clip_radius = PT(R.r);
     float p = (R.w - 62) / (390 - 62);
     appc.alpha = ap_pending ? 0 : tk_clampf(p * 1.6f - .2f, 0, 1);
+    if (sw_app_alpha()) appc.alpha = ap_pending ? 0 : 1;      /* helper D: a card in the switcher shows its page whole */
     apsb.alpha = appc.alpha;
     uint32_t t = APPS[AP.a].tint, b = sv_ground(AP.a);
     float m = tk_clampf(p * 2, 0, 1);
@@ -3124,8 +3128,11 @@ static int app_hit(float x, float y)
     for (int a = 0; a < NAPPS; a++) if (!tk_strcmp(APPS[a].k, k)) return a;
     return -1;
 }
+static int ap_from_on;                     /* helper D: the next open grows from this rect (a switcher card) */
+static arect ap_from;
 static void app_open(int a)
 {
+    sw_opened(a);                              /* helper D: first in the recents */
     AP.a = a;
     AP.on = 1;
     AP.closing = AP.following = 0;
@@ -3146,7 +3153,8 @@ static void app_open(int a)
     } else
         build_app_page(a);
     if (lx_is(APPS[a].k)) lx_open(a);            /* L3: the Linux app (started), or the App Store */
-    AP.icon = icon_rect(a);
+    AP.icon = ap_from_on ? ap_from : icon_rect(a);
+    ap_from_on = 0;
     AP.from = AP.icon;
     AP.to = FULLR;
     tk_spring_start(&sp_app, 0, 1, 0, TK_SPR_OPEN);
@@ -3161,6 +3169,7 @@ static void app_close(float v)
 }
 static void app_finish_close(void)
 {
+    sw_app_gone();                               /* helper D: no window in the switcher */
     lx_close();                                  /* L3: the window's strips, the store's layers */
     ap_pending = 0;
     AP.on = AP.closing = 0;
@@ -3585,8 +3594,8 @@ void sh_cell(const sh_cell_t *c)
 #include "shell_media.inc"
 #include "shell_linux.inc"
 #include "shell_survival.inc"
-#include "shell_switcher.inc"                       /* helper D: the app switcher */
 #include "shell_nc.inc"                             /* helper D: notifications, the Notification Centre, the banner */
+#include "shell_switcher.inc"                       /* helper D: the app switcher */
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
@@ -3660,9 +3669,11 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 }
 static void relink(void)
 {
-    tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &ncl, &focus, &ccl, &bnl, &cfl, &boot, &homebar, &toastl, &slp };
+    tk_layer *r[] = { &star, &star_e, &home, &swg, &lockg, &lockflat, &appg, &apicon, &swcover, &ncl, &focus, &ccl, &bnl, &cfl, &boot, &homebar,
+                      &toastl, &slp };
     nc_link();                                       /* helper D: the Notification Centre (ncl), the banner (bnl) */
-    link(&root, r, 16);
+    sw_link();                                       /* helper D: the switcher's cards (swg), a card's snapshot over its opening window */
+    link(&root, r, 18);
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb, &apphl };
     link(&appg, ag, 13);
     tk_layer *st[NST + 64] = { &appst[0], &appst[1], &appst[2], &appst[3] };
@@ -3826,6 +3837,7 @@ static void back_to_lock(int exit_em)
     if (!EMG) while (cards_pending > 0) { build_card(NG - cards_pending); cards_pending--; }
     if (CF.on) cf_close(0);
     nc_reset();                                    /* helper D: the Notification Centre and the banner gone */
+    sw_reset();                                    /* helper D: the switcher (the recents and their snapshots stay) */
     free_cc_all();                                 /* P3s: the lock keeps none of it */
     relink();
     toast_t = 1; toast_to = toast_from = -90; toast_left = 0; toast_place();
@@ -3871,6 +3883,7 @@ void sh_set(const char *what, const char *key, float v)
         if (v > 0) sh_sleep(0); else sh_wake();
     } else if (lx_set(what, key, v)) {            /* L3: lapp=, store=, storeq= (shell_linux.inc) */
     } else if (nc_set(what, key, v)) {            /* helper D: notify=, banner=, nc=, ncgroup=, ncswipe= (shell_nc.inc) */
+    } else if (sw_set(what, key, v)) {            /* helper D: switcher=, swsnap= (shell_switcher.inc) */
     } else if (!tk_strcmp(what, "app")) {
         if (!key[0] && AP.on) app_finish_close();       /* L2: "app=" closes the open app at once */
         for (int a = 0; a < NAPPS; a++)
@@ -3949,7 +3962,8 @@ void sh_set(const char *what, const char *key, float v)
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
 enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL,
-       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX, G_NC };   /* G_NC: shell_nc.inc's (the Centre, the banner, the lock's pill) */
+       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX, G_NC, G_SW };   /* helper D: G_NC shell_nc.inc's (the Centre, the banner, the
+                                                     * lock's pill), G_SW shell_switcher.inc's (the cards) */
 static struct {
     int kind, arg, arg2, moved;
     float x0, y0, base, t0;
@@ -4163,6 +4177,7 @@ void sh_touch(int phase, float x, float y, float t)
             return;
         }
         if (nc_down(x, y, t)) { T.kind = G_NC; return; }    /* helper D: the banner, the open Notification Centre, the pill */
+        if (sw_down(x, y, t)) { T.kind = G_SW; return; }    /* helper D: the app switcher */
         if (AP.on) {
             /* an open app (survival-next: also over the lock, from Emergency's cards): the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
             if (y < 36 && x < 195 && !AP.closing && !sp_app.live) { nc_pull_begin(x, y, t); T.kind = G_NC; return; }   /* helper D */
@@ -4253,6 +4268,11 @@ void sh_touch(int phase, float x, float y, float t)
         tk_tracker_add(&T.tr, y, t);
         return;
     }
+    if (T.kind == G_SW) {                    /* helper D, shell_switcher.inc */
+        sw_touch(phase, x, y, t);
+        if (phase == 2) T.kind = G_NONE;
+        return;
+    }
     if (T.kind == G_NC) {                    /* helper D, shell_nc.inc */
         if (nc_touch(phase, x, y, t) == 2) {     /* the lock's pill moved: the lock's swipe after all */
             T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0;
@@ -4317,6 +4337,7 @@ void sh_touch(int phase, float x, float y, float t)
             R.y = y - T.y0 / H_PT * R.h;
             AP.travel = d2;
             set_app_rect(R);
+            sw_drag(d2, tk_tracker_v(&T.tr), t);      /* helper D: a pause shows the switcher */
             break;
         }
         case G_CC:
@@ -4466,6 +4487,7 @@ void sh_touch(int phase, float x, float y, float t)
     case G_APP: {
         float v = tk_tracker_v(&T.tr);
         AP.following = 0;
+        if (sw_release(v)) break;              /* helper D: paused (or slow past 30 %): the switcher */
         if (AP.travel < -60 || v < -.35f) app_close(v);
         else { AP.from = AP.R; AP.to = FULLR; tk_spring_start(&sp_app, 0, 1, 0, TK_SPR_OPEN); }
         break;
@@ -4590,7 +4612,7 @@ int sh_tick(float dt, float t)
         set_app_rect(lerpr(AP.from, AP.to, u));
         if (!live) {
             if (AP.closing) app_finish_close();
-            else appg.clip = 0;              /* at rest: the whole panel, no clip (as the concept drops it) */
+            else if (!SW.on) appg.clip = 0;  /* at rest: the whole panel, no clip (as the concept drops it); a card keeps it */
         }
         mv = 1;
     }
@@ -4761,6 +4783,7 @@ int sh_tick(float dt, float t)
     }
     mv |= sv_tick(dt, t);                       /* survival-next: a tool's hold, its polls */
     mv |= nc_tick(dt, t);                       /* helper D: the Notification Centre, the banner */
+    mv |= sw_tick(dt, t);                       /* helper D: the app switcher */
     return mv;
 }
 
@@ -4816,6 +4839,7 @@ void sh_idle(void)
     if (ap_pending) { while (ap_pending) app_build_step(); if (AP.on) set_app_rect(AP.R); }
     if (sh_moving()) return;
     tk_comp_idle(C);
+    sw_idle();                                   /* helper D: the open app's snapshot for the switcher (when it changed) */
     if (!EMG && cards_pending > 0) {
         /* after Emergency: the vendor cards again, one per idle turn (the platform calls again while
          * sh_idle_pending); the half copies below are made in the same turn (P2w: an unlock right after
@@ -4865,6 +4889,6 @@ int sh_moving(void)
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live || med_moving() || lx_moving();
     m |= IP.on && IP.t < 1;
-    m |= nc_moving();                            /* helper D */
+    m |= nc_moving() || sw_moving();             /* helper D */
     return m;
 }
