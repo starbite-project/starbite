@@ -167,6 +167,9 @@ struct tk_layer {
     uint32_t gen;              /* bumped when bmp changes (redraw its area) */
     /* compositor state */
     uint32_t gpu_gen;          /* P4: gen + 1 when the GPU last had this layer's bitmap and mask flushed to it */
+    uint8_t *gpu_occ;          /* P4 v4: per 32 px block of bmp 0 empty / 1 partial / 2 opaque (the GPU's bins skip and cull) */
+    uint32_t gpu_occ_w, gpu_occ_h, gpu_occ_cap, gpu_occ_frame;
+    int gpu_occ_ok, gpu_occ_seen;
     tk_irect last;             /* screen rect drawn last frame */
     uint32_t last_gen;
     float last_key[8];
@@ -179,7 +182,8 @@ void tk_layer_prepare(tk_layer *l);                       /* make its half copy 
 /* P4, the GPU compositor (kernel gpucomp.c): one draw item as the GPU takes it, the layout of the kernel's struct
  * gc_quad (a bitmap or a solid of w x h, isx / isy source px per screen px from (dx0, dy0), alpha, the clip rect with
  * a rounded edge, fades by screen y, a 3-slice, glass: the backdrop bd through the 8-bit mask first) */
-enum { TK_GPU_SOLID = 1, TK_GPU_BILINEAR = 2, TK_GPU_GLASS = 4, TK_GPU_FADE = 8, TK_GPU_SLICE_V = 16, TK_GPU_SLICE_H = 32 };
+enum { TK_GPU_SOLID = 1, TK_GPU_BILINEAR = 2, TK_GPU_GLASS = 4, TK_GPU_FADE = 8, TK_GPU_SLICE_V = 16, TK_GPU_SLICE_H = 32,
+       TK_GPU_OPAQUE = 64 };
 typedef struct {
     const void *src;
     uint32_t stride, w, h, flags, solid;
@@ -190,6 +194,8 @@ typedef struct {
     uint32_t bstride;
     float bk;
     uint32_t bw, bh;
+    const uint8_t *occ;        /* the layer's block map (gpu_occ), or 0 */
+    uint32_t occ_w, occ_h;
 } tk_gpu_item;
 #define TK_GPU_MAX 127
 
@@ -232,7 +238,8 @@ typedef struct {
     void (*gpu_clean)(void *ctx, const void *p, uint64_t n);
     void *gpu_ctx;
     uint32_t gpu_frames, gpu_fallbacks, gpu_ground;
-    int gpu_stale;             /* P4: GPU frames since the CPU last drew everything (its canvases are behind) */
+    int gpu_stale;
+    uint32_t gpu_items;        /* the last GPU frame's quads */             /* P4: GPU frames since the CPU last drew everything (its canvases are behind) */
     uint64_t us_gpu;  /* the last frame's half-canvas catch-up (tk_comp_idle) and half copies made in it */  /* the last frame's wait for the free buffer and its catch-up pass */
 } tk_comp;
 int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocated */

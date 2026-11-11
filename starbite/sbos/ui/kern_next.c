@@ -394,6 +394,20 @@ static void stats_add(void)
             ub_dec(&u, comp.us_gpu);
             ub_s(&u, " us (fallbacks ");
             ub_dec(&u, comp.gpu_fallbacks);
+            /* v4: the quads, the bins' entries (a tile visits entries / 4185 on average), culled under opaque
+             * layers, skipped over empty blocks, the GPU's clock */
+            uint32_t ent = 0, cul = 0, emp = 0;
+            gpucomp_last_stats(&ent, &cul, &emp);
+            ub_s(&u, " q ");
+            ub_dec(&u, comp.gpu_items);
+            ub_s(&u, " ent ");
+            ub_dec(&u, ent);
+            ub_s(&u, " cul ");
+            ub_dec(&u, cul);
+            ub_s(&u, " emp ");
+            ub_dec(&u, emp);
+            ub_s(&u, " GPU MHz ");
+            ub_dec(&u, gpucomp_mhz());
             ub_s(&u, ")");
         }
         sb_log(u.b);
