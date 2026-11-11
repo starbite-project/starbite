@@ -819,27 +819,38 @@ static void build_home_sb(void)
 }
 
 /* ---- the home (P1: the concept's first page, drawn once; P2 builds the real one) --------------------------- */
+/* P3p (P3j-6): the iOS home lattice: four columns centred at 60 / 150 / 240 / 330 (pitch 90: outer margin = gap =
+ * 30 for 60 pt icons; ours are 62), rows 98 apart; the small widgets 158 pt square over the column pairs (26 / 206,
+ * content 16 in), the dock's icons on the same columns */
+#define COL_CX(c) (60.0f + 90.0f * (c))
+#define ICON_PT 62.0f
+#define ROW_PITCH 98.0f
+#define HOME_TOP1 256.0f            /* page 1's grid under the widgets */
+#define HOME_TOP2 60.0f             /* page 2's grid */
+#define WID_X(i) ((i) ? 206.0f : 26.0f)
+#define WID_W 158.0f
+#define DOCK_Y 705.0f
 static const char *const P2K[8] = { "contacts", "files", "light", "battery", "terminal", "browser", "medical", "sos" };
 static const char *const P2E[8] = { "heat", "power", "sos", "medical", "light", "battery", "contacts", "files" };
 static void build_home_w(void)
 {
     relayer(&hparts[1]);
     dc d = mk(&hparts[1], "home-w", 0, 50, 390, 200, 44, 1);
-    d_glass(&d, 24, 60, 158, 158, 24, 0, 1);
-    d_glass(&d, 208, 60, 158, 158, 24, 0, 1);
+    d_glass(&d, WID_X(0), 60, WID_W, WID_W, 24, 0, 1);
+    d_glass(&d, WID_X(1), 60, WID_W, WID_W, 24, 0, 1);
     /* Battery: .lab, .big, three rows */
     if (EMG) {
         /* Emergency: the battery glyph amber (#ffb547) */
         const tk_bmp *ic = tk_icon("home-batt");
-        if (ic) tk_blit_tinted(d.b, ic, (int)tk_floorf(PT(38) - tk_icon_pad("home-batt") - d.ox + .5f),
+        if (ic) tk_blit_tinted(d.b, ic, (int)tk_floorf(PT(WID_X(0) + 16) - tk_icon_pad("home-batt") - d.ox + .5f),
                                (int)tk_floorf(PT(74 + 1.5f) - tk_icon_pad("home-batt") - d.oy + .5f), tk_hex(0xffb547, 1));
     } else
-        d_icon(&d, "home-batt", 38, 74 + 1.5f, 1);
-    d_text(&d, TK_IT700, 11.5f, 56, base_of(TK_IT700, 11.5f, 74, 0), "Galaxy S9", .345f, 0, W(.7f), 0);
+        d_icon(&d, "home-batt", WID_X(0) + 16, 74 + 1.5f, 1);
+    d_text(&d, TK_IT700, 11.5f, WID_X(0) + 34, base_of(TK_IT700, 11.5f, 74, 0), "Galaxy S9", .345f, 0, W(.7f), 0);
     char big[8];
     int bn0 = put_dec(big, ST.pct);
     big[bn0] = '%'; big[bn0 + 1] = 0;
-    d_text(&d, TK_IT700, 38, 38, base_of(TK_IT700, 38, 74 + 14 + 4, 0), big, -.6f, TK_TNUM, INK, 0);
+    d_text(&d, TK_IT700, 38, WID_X(0) + 16, base_of(TK_IT700, 38, 74 + 14 + 4, 0), big, -.6f, TK_TNUM, INK, 0);
     {
         /* P2y: the live charge, temperature and charging (the concept's "Phone" and "Lasts" have no source) */
         static const char *L[2] = { "Temperature", "Charging" };
@@ -851,21 +862,21 @@ static void build_home_w(void)
         for (int i = 0; i < 2; i++) {
             y += 3;
             float b = base_of(TK_IT400, 12.5f, y, 0);
-            d_text(&d, TK_IT400, 12.5f, 38, b, L[i], 0, TK_TNUM, W(.82f), 0);
-            d_text(&d, TK_IT400, 12.5f, 352 - 184 - tw(TK_IT400, 12.5f, R[i], 0, TK_TNUM), b, R[i], 0, TK_TNUM, W(.82f), 0);
+            d_text(&d, TK_IT400, 12.5f, WID_X(0) + 16, b, L[i], 0, TK_TNUM, W(.82f), 0);
+            d_text(&d, TK_IT400, 12.5f, WID_X(0) + WID_W - 16 - tw(TK_IT400, 12.5f, R[i], 0, TK_TNUM), b, R[i], 0, TK_TNUM, W(.82f), 0);
             y += 15;
         }
     }
-    d_icon(&d, "home-star", 222, 74 + 1.5f, 1);
-    d_text(&d, TK_IT700, 11.5f, 240, base_of(TK_IT700, 11.5f, 74, 0), "Recent", .345f, 0, W(.7f), 0);
+    d_icon(&d, "home-star", WID_X(1) + 16, 74 + 1.5f, 1);
+    d_text(&d, TK_IT700, 11.5f, WID_X(1) + 34, base_of(TK_IT700, 11.5f, 74, 0), "Recent", .345f, 0, W(.7f), 0);
     {
         static const char *T4[4] = { "t52-win11", "t52-ios26", "t52-engineer", "t52-ios16" };
-        for (int i = 0; i < 4; i++) d_icon(&d, T4[i], 222 + (i & 1) * 78, 74 + 14 + 9 + (i >> 1) * 60, 1);
+        for (int i = 0; i < 4; i++) d_icon(&d, T4[i], WID_X(1) + 16 + (i & 1) * (WID_W - 32 - 52), 74 + 14 + 9 + (i >> 1) * 60, 1);
     }
     float cw = tw(TK_IT500, 12, "Battery", 0, 0);
-    d_text(&d, TK_IT500, 12, 24 + 79 - cw / 2, 224 + 12, "Battery", 0, 0, INK, 1);
+    d_text(&d, TK_IT500, 12, WID_X(0) + WID_W / 2 - cw / 2, 224 + 12, "Battery", 0, 0, INK, 1);
     cw = tw(TK_IT500, 12, "Systems", 0, 0);
-    d_text(&d, TK_IT500, 12, 208 + 79 - cw / 2, 224 + 12, "Systems", 0, 0, INK, 1);
+    d_text(&d, TK_IT500, 12, WID_X(1) + WID_W / 2 - cw / 2, 224 + 12, "Systems", 0, 0, INK, 1);
 }
 static void build_home_apps2(void)
 {
@@ -878,7 +889,7 @@ static void build_home_apps2(void)
         /* drawn as if on screen, then moved one page to the right (layers never extend past the panel's sides) */
         dc d = mk(&hparts[4], "home-apps2", 0, 55, 390, 220, 4, 0);
         for (int i = 0; i < 8; i++) {
-            float cx = 22 + 86.5f * (i % 4) + 43.25f, y = 62 + 103 * (i / 4);
+            float cx = COL_CX(i % 4), y = HOME_TOP2 + ROW_PITCH * (i / 4);
             char n[40] = "a62-";
             tk_memcpy(n + 4, P2[i], tk_strlen(P2[i]) + 1);
             d_icon(&d, n, cx - 31, y, 1);
@@ -898,7 +909,7 @@ static void build_home(void)
     build_home_w();
     d = mk(&hparts[2], "home-apps", 0, 250, 390, 220, 4, 0);
     for (int i = 0; i < 8; i++) {
-        float cx = 22 + 86.5f * (i % 4) + 43.25f, y = 258 + 103 * (i / 4);
+        float cx = COL_CX(i % 4), y = HOME_TOP1 + ROW_PITCH * (i / 4);
         char n[40] = "a62-";
         tk_memcpy(n + 4, P1[i], tk_strlen(P1[i]) + 1);
         d_icon(&d, n, cx - 31, y, 1);
@@ -926,10 +937,10 @@ static void build_home(void)
     d = mk(&hparts[3], "home-dock", 0, 650, 390, 152, 0, 1);
     d_glass(&d, MARGIN, 688, CONTENT_W, 96, CONCENTRIC(MARGIN), 0, 1);   /* P3p: off the curved edges, concentric */
     for (int i = 0; i < 4; i++) {
-        float x = 22 + 86.5f * i + 12.25f;
+        float x = COL_CX(i) - ICON_PT / 2;
         char n[40] = "a62-";
         tk_memcpy(n + 4, DK[i], tk_strlen(DK[i]) + 1);
-        d_icon(&d, n, x, 705, 1);
+        d_icon(&d, n, x, DOCK_Y, 1);
         if (0) {                                   /* P2y: no badges (no calls or messages to count) */
             const char *bn = i ? "2" : "1";
             float bw = tk_maxf(20, tw(TK_IT700, 12, bn, 0, 0) + 10);
@@ -2280,7 +2291,7 @@ static void build_search(void)
         tk_memcpy(nm + 4, APPS[a].k, tk_strlen(APPS[a].k) + 1);
         if (!tk_icon(nm)) continue;
         SR.hits[SR.nh] = a;
-        float x = 22 + 86.5f * (SR.nh % 4) + 12.25f, y = 148 + 103 * (SR.nh / 4);
+        float x = COL_CX(SR.nh % 4) - ICON_PT / 2, y = 148 + ROW_PITCH * (SR.nh / 4);
         d_icon(&d, nm, x, y, 1);
         float w = tw(TK_IT500, 12, APPS[a].name, 0, 0);
         if (w > 84) w = 84;
@@ -2297,8 +2308,8 @@ static void app_close(float v);
 static void search_tap(float x, float y)
 {
     if (y >= 52 && y < 92 && x >= 306) { app_close(0); return; }     /* Cancel: back into the pill */
-    if (y >= 148 && y < 148 + 206 && y < 540) {
-        int col = (int)((x - 22) / 86.5f), row = (int)((y - 148) / 103), i = row * 4 + col;
+    if (y >= 148 && y < 148 + 2 * ROW_PITCH && y < 540 && x >= 15) {
+        int col = (int)((x - 15) / 90), row = (int)((y - 148) / ROW_PITCH), i = row * 4 + col;
         if (col >= 0 && col < 4 && i < SR.nh) { int a = SR.hits[i]; app_finish_close(); app_open(a); return; }
     }
     char c = 0;
@@ -2609,10 +2620,10 @@ static arect icon_rect(int a)
     const char *const *P2 = EMG ? P2E : P2K;
     static const char *DK[4] = { "phone", "messages", "browser", "settings" };
     const char *k = APPS[a].k;
-    for (int i = 0; i < 4; i++) if (!tk_strcmp(DK[i], k)) return (arect){ 22 + 86.5f * i + 12.25f, 705, 62, 62, 15 };
+    for (int i = 0; i < 4; i++) if (!tk_strcmp(DK[i], k)) return (arect){ COL_CX(i) - ICON_PT / 2, DOCK_Y, ICON_PT, ICON_PT, 15 };
     if (!tk_strcmp(k, "search")) return (arect){ 160, 640, 70, 30, 15 };   /* P3g: the Search pill */
-    for (int i = 0; i < 8; i++) if (!tk_strcmp(P1[i], k)) return (arect){ 22 + 86.5f * (i % 4) + 12.25f + page_x, 258 + 103 * (i / 4), 62, 62, 15 };
-    for (int i = 0; i < 8; i++) if (!tk_strcmp(P2[i], k)) return (arect){ 390 + 22 + 86.5f * (i % 4) + 12.25f + page_x, 62 + 103 * (i / 4), 62, 62, 15 };
+    for (int i = 0; i < 8; i++) if (!tk_strcmp(P1[i], k)) return (arect){ COL_CX(i % 4) - ICON_PT / 2 + page_x, HOME_TOP1 + ROW_PITCH * (i / 4), ICON_PT, ICON_PT, 15 };
+    for (int i = 0; i < 8; i++) if (!tk_strcmp(P2[i], k)) return (arect){ 390 + COL_CX(i % 4) - ICON_PT / 2 + page_x, HOME_TOP2 + ROW_PITCH * (i / 4), ICON_PT, ICON_PT, 15 };
     return (arect){ 164, 370, 62, 62, 15 };
 }
 /* the app under a tap on home (the page's grid or the dock), or -1 */
@@ -2622,13 +2633,13 @@ static int app_hit(float x, float y)
     const char *const *P2 = EMG ? P2E : P2K;
     static const char *DK[4] = { "phone", "messages", "browser", "settings" };
     const char *k = 0;
-    if (y >= 700 && y <= 772) { int i = (int)((x - 22) / 86.5f); if (i >= 0 && i < 4) k = DK[i]; }
+    if (y >= 700 && y <= 772 && x >= 15) { int i = (int)((x - 15) / 90); if (i < 4) k = DK[i]; }
     else if (y >= 636 && y <= 674 && x >= 140 && x <= 250) k = "search";
     else {
         int pg = page_x < -195;
-        float x0 = x - (pg ? 390 + page_x : page_x), top = pg ? 62 : 258;
-        int col = (int)((x0 - 22) / 86.5f), row = (int)((y - top) / 103);
-        if (x0 >= 22 && y >= top && col < 4 && row < 2 && y - top - row * 103 < 83) k = (pg ? P2 : P1)[row * 4 + col];
+        float x0 = x - (pg ? 390 + page_x : page_x), top = pg ? HOME_TOP2 : HOME_TOP1;
+        int col = (int)((x0 - 15) / 90), row = (int)((y - top) / ROW_PITCH);
+        if (x0 >= 15 && y >= top && col < 4 && row < 2 && y - top - row * ROW_PITCH < 83) k = (pg ? P2 : P1)[row * 4 + col];
     }
     if (!k) return -1;
     for (int a = 0; a < NAPPS; a++) if (!tk_strcmp(APPS[a].k, k)) return a;
@@ -3512,7 +3523,7 @@ void sh_touch(int phase, float x, float y, float t)
             /* home: a pull down from the top-left corner brings the lock back (the concept's re-lock) */
             if (y < 56 && x < 195) { T.kind = G_RELOCK; sp_lock.live = 0; tk_tracker_add(&T.tr, y, t); return; }
             /* elsewhere but the dock, Search and the widgets: the pages (direction decided after 8 pt) */
-            int on_w = page_x > -195 && y >= 60 && y <= 218 && ((x >= 24 && x <= 182) || (x >= 208 && x <= 366));
+            int on_w = page_x > -195 && y >= 60 && y <= 60 + WID_W && ((x >= WID_X(0) && x <= WID_X(0) + WID_W) || (x >= WID_X(1) && x <= WID_X(1) + WID_W));
             if (y >= 688 && y < H_PT - 30) { T.kind = G_DOCK; return; }   /* the dock: a tap opens its app */
             if (y >= 636 && y <= 674 && x >= 140 && x <= 250) { T.kind = G_DOCK; return; }   /* P3g: Search */
             if (y >= 56 && y < 688 && !(y >= 640 && y <= 670 && x >= 150 && x <= 240) && !on_w) {
