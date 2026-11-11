@@ -31,6 +31,7 @@
 //   sbshow dialog SEC         a standard message box for SEC seconds (start it with `start ""`)
 //   sbshow image PATH         write a 1440x1440 test picture (BMP) for Photos and Paint
 //   sbshow disk               free space on C:
+//   sbshow diskok MIB         T39: exit 1 below MIB MiB free on C: (the sweep's heavy steps are skipped then)
 //
 // Exit code 0, or 1 when the action failed (the line says why).
 //
@@ -282,8 +283,8 @@ static void mem_line(void)
 
 static int shot(const char *name)
 {
-    if (free_mib() < 300) {
-        printf("sbshow: shot %s SKIPPED: C: has %llu MiB free (< 300)\n", name, free_mib());
+    if (free_mib() < 600) {
+        printf("sbshow: shot %s SKIPPED: C: has %llu MiB free (< 600)\n", name, free_mib());
         return 1;
     }
     int w = GetSystemMetrics(SM_CXSCREEN), h = GetSystemMetrics(SM_CYSCREEN);
@@ -530,7 +531,7 @@ int main(int argc, char **argv)
     if (!strcmp(argv[1], "snap") && argc >= 3) {
         mem_line();
         int r = shot(argv[2]);
-        if (free_mib() < 300)
+        if (free_mib() < 600)
             return 1;                     /* DWM's dump too (sbumd also checks) */
         return write_dwmframe(argv[2], t) | r;
     }
@@ -565,6 +566,12 @@ int main(int argc, char **argv)
         MessageBoxW(nullptr, L"Starbite sweep: a standard Windows message box (closes by itself).",
                     L"Starbite sweep", MB_OKCANCEL | MB_ICONWARNING | MB_SETFOREGROUND);
         return 0;
+    }
+    if (!strcmp(argv[1], "diskok") && argc >= 3) {
+        /* T39: exit 1 when C: has less than N MiB free (the sweep skips its heavy app steps then) */
+        unsigned long long f = free_mib(), need = strtoull(argv[2], nullptr, 10);
+        printf("sbshow: C: %llu MiB free, %s %llu\n", f, f >= need ? "at least" : "BELOW", need);
+        return f >= need ? 0 : 1;
     }
     if (!strcmp(argv[1], "mem")) {
         mem_line();

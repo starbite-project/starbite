@@ -5,6 +5,8 @@ rem for each, sbshow "snap NAME" writes a GDI screenshot (umdlog\shot-NAME.ppm, 
 rem composed frame (umdlog\dump-dwm-NAME-p<n>.ppm, half size; only with our driver: sb-patches/0130). The same
 rem list in a reference boot (gpu-cycle.sh --reference: sbwddm display-only, Windows draws with WARP) gives the
 rem shots tools/win/sweep-diff.py compares against. Ends with the event logs and a restart.
+rem T39: Widgets, Photos, Edge and Store (what filled C: in T38: 482 -> 97 MiB) run only with >= 1.5 GB free;
+rem shots and DWM dumps stop below 600 MiB (sbshow, sb-patches/0134).
 set D=C:\starbite\auto\gpu
 set U=C:\ProgramData\Starbite\umdlog
 set L=%D%\gputest.log
@@ -41,12 +43,15 @@ sbshow.exe snap 04-notifications >> %L% 2>&1
 ping -n 3 127.0.0.1 > nul
 sbshow.exe keys esc >> %L% 2>&1
 ping -n 2 127.0.0.1 > nul
+sbshow.exe diskok 1500 >> %L% 2>&1
+if errorlevel 1 goto skip_widgets
 sbshow.exe keys win+w >> %L% 2>&1
 ping -n 7 127.0.0.1 > nul
 sbshow.exe snap 05-widgets >> %L% 2>&1
 ping -n 3 127.0.0.1 > nul
 sbshow.exe keys esc >> %L% 2>&1
 ping -n 2 127.0.0.1 > nul
+:skip_widgets
 sbshow.exe keys win+tab >> %L% 2>&1
 ping -n 4 127.0.0.1 > nul
 sbshow.exe snap 06-taskview >> %L% 2>&1
@@ -131,6 +136,8 @@ ping -n 7 127.0.0.1 > nul
 sbshow.exe snap 19-paint >> %L% 2>&1
 ping -n 3 127.0.0.1 > nul
 taskkill /f /im mspaint.exe >> %L% 2>&1
+sbshow.exe diskok 1500 >> %L% 2>&1
+if errorlevel 1 goto skip_heavyapps
 start "" ms-photos:viewer?fileName=%D%\sweep.bmp
 ping -n 11 127.0.0.1 > nul
 sbshow.exe list >> %L% 2>&1
@@ -152,6 +159,7 @@ ping -n 3 127.0.0.1 > nul
 sbshow.exe snap 22-store >> %L% 2>&1
 ping -n 3 127.0.0.1 > nul
 taskkill /f /im WinStore.App.exe >> %L% 2>&1
+:skip_heavyapps
 start "" sbshow.exe dialog 12
 ping -n 4 127.0.0.1 > nul
 sbshow.exe snap 23-dialog >> %L% 2>&1

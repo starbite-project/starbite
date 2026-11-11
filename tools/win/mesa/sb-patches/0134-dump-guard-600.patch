@@ -1,0 +1,17 @@
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index a4b1049..eb43480 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -274,10 +274,10 @@ sb_sample_present(struct pipe_context *pipe, Resource *res, unsigned alloc, unsi
+                   !_stricmp(e, "SystemSettings.exe") || !_stricmp(e, "StartMenuExperienceHost.exe") ||
+                   !_stricmp(e, "ShellExperienceHost.exe") || !_stricmp(e, "SearchHost.exe"));
+       }
+-      /* sb-patches/0132 (T39): no dump below 300 MiB free on C: (T38's sweep took the user's disk from 482 to
++      /* sb-patches/0132 (T39): no dump below 600 MiB free on C: (T38's sweep took the user's disk from 482 to
+        * 97 MiB, and DWM's commit ran out), and DWM's named dumps at quarter size (0.8 MB each, was 3.2) */
+       ULARGE_INTEGER dfree, dtot;
+-      bool room = GetDiskFreeSpaceExA("C:\\", &dfree, &dtot, NULL) && (dfree.QuadPart >> 20) >= 300;
++      bool room = GetDiskFreeSpaceExA("C:\\", &dfree, &dtot, NULL) && (dfree.QuadPart >> 20) >= 600;
+       if (!room && ((shell && dumps < 3 && (n == 2 || n == 8 || n == 20)) || force))
+          DebugPrintf("sbumd:   dump skipped: C: has %llu MiB free\n", (unsigned long long)(dfree.QuadPart >> 20));
+       if (room && ((shell && dumps < 3 && (n == 2 || n == 8 || n == 20)) || force)) {
