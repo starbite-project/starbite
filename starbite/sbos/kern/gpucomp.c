@@ -211,6 +211,10 @@ int gpucomp_init(void *heap, uint64_t bytes)
 {
     if (disabled)
         return 0;
+    if (bytes + 0x2000U > VA_RO - VA_HEAP) {    /* the heap's GPU map would run into the read-only region */
+        sb_logx("gpucomp: the UI heap is too large for its GPU window, MiB: ", (uint32_t)(bytes >> 20));
+        return 0;
+    }
     heap_cpu = (uintptr_t)heap;
     heap_size = bytes;
     if (!gc_up()) {
