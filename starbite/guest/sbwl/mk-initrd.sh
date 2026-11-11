@@ -35,7 +35,7 @@ mkdir -p "$R/usr/share/terminfo/f"
 cp /usr/share/terminfo/f/foot* "$R/usr/share/terminfo/f/" 2>/dev/null || true
 echo 'root:x:0:0:root:/root:/bin/sh' > "$R/etc/passwd"
 echo 'root:x:0:' > "$R/etc/group"
-printf '[main]\nfont=DejaVu Sans Mono:size=11\n[csd]\npreferred=none\n' > "$R/etc/foot.ini"
+printf '[main]\nfont=DejaVu Sans Mono:size=20\ndpi-aware=no\n[csd]\npreferred=none\n' > "$R/etc/foot.ini"
 mkdir -p "$R/etc/xdg/foot" && cp "$R/etc/foot.ini" "$R/etc/xdg/foot/foot.ini"
 find "$R" -exec touch -h -d @0 {} +
 (cd "$R" && find . | sort | cpio -o -H newc --quiet --owner=0:0 --reproducible | gzip -9 -n) > "$WORK/out/initrd-wl.cpio.gz"

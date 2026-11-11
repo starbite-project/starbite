@@ -169,8 +169,11 @@ lend the Mali to the guest through a command ring (virtio-gpu style), which is a
 
 ## 8. Starbite OS Next integration (the `gwin` module)
 
-`starbite/guest/next/` (L2) will hold the shell-side code as a drop-in for `starbite/sbos/ui`, like the
-INTEGRATION.md for the classic UI. Hooks in shell_lock.c and kern_next.c (the Next session's files):
+**Built for L2** (`starbite/guest/next/`, INTEGRATION-NEXT.md; a patch on the toolkit's fb9114a): one window,
+the Terminal's. The shell calls the platform through `sh_linux_open / _hide / _blit / _touch / _char`, and the
+platform calls the shell back through `sh_linux_state / _frame` (shell.h). `gwin.c` is the platform side on
+kern/guest.c (a third guest mode, `GUEST_WL`: `guest-wl.img` / `.dtb` / `-rd.img`, surface 720 x 916). Section 12
+has the details. The general form below (window slots, several apps) is L3's:
 
 - `gwin_layer(slot)` returns the `tk_layer` (the bmp sized to the page rect);
 - `gwin_poll()` runs from the kernel's tick and copies the new rows (`tk_layer_dirty`);
@@ -185,7 +188,7 @@ INTEGRATION.md for the classic UI. Hooks in shell_lock.c and kern_next.c (the Ne
 | | What | Proven where |
 |---|---|---|
 | **L1** | sbwl + one Wayland app (foot) in the guest; its window in the shared surface as a layer; touch and keys reach it | **QEMU PASS 2/2** (`run-term.sh MODE=wayland`): foot's window composited exactly, the typed command ran in foot's shell, the tap reached foot as `wl_touch`, cluster off ~650 ms after the stop; phone: P5 staged (section 11) |
-| L2 | the `gwin` drop-in in Starbite OS Next: Terminal opens the foot window as an app page; 1440 px at scale 2; text-input-v3 and the shell's keyboard | QEMU kern harness, then phone |
+| **L2** | the `gwin` drop-in in Starbite OS Next: the Terminal opens foot's window as its page (720 x 916 at 2x between the status bar and the keyboard), touch and the shell's keyboard reach it; popups and subsurfaces composited by sbwl (pixman, the window's surface tree) | **QEMU PASS** (popups; foot at 720x916), **host PASS** (the real Next shell + gwin.c + a fake guest; a film through the real gestures), every Next image builds; phone: `starbite-next-linuxtest` staged (section 12). Not done: 1440 px at scale 2, text-input-v3 (moved to L3) |
 | L3 | window slots (contract v2), the guest catalog, Linux icons on the home, launch / close / switcher | |
 | L4 | sbblk, EROFS base + overlay (Debian trixie arm64 minimal + GTK) | |
 | L5 | network: a packet ring bridged by Starbite's Wi-Fi core (the radio stays Starbite's) | |
@@ -211,3 +214,33 @@ An unattended payload, like P4:
 - stops, and checks that the cluster is off.
 
 Results: see docs/STARBITE-OS-LINUX-M3.md and the request note.
+
+## 12. Milestone L2: the Terminal in Starbite OS Next
+
+**What it is.** Tap Terminal (page 2) and the app opens like any other. Its page is foot's window from y 44 pt to
+540 pt (720 x 916 surface px, pixel-doubled to 1440 x 1832), with Next's keyboard below it. The first time it shows
+"Starting Linux" until the guest's first frame (~1.5 s on QEMU). Taps and drags in the window go to foot as
+`wl_touch`. The keyboard types into it (`guest_type`: the Linux key, Shift around capitals). Closing the app hides the window
+(`MSG_FOCUS 0`), and guest.c stops Linux after 60 s hidden. Opening it again within that time shows the running
+shell at once.
+
+**Guest side (commit 8e5c8d0).** sbwl now composites the window's whole surface tree with pixman, in the order
+`wlr_xdg_surface_for_each_surface` gives: the toplevel, its subsurfaces, its popups, each at its offset from the
+window geometry. Popups are constrained to the window's box (`wlr_xdg_popup_unconstrain_from_box`). The wlroots
+scene renderer is no longer used for the window. `popuptest` (a blue window with a yellow popup at 100,100) passed
+sbsim's check: yellow at the popup, blue beside it.
+
+**Sharpness.** foot at 20 pt DejaVu Sans Mono gives 45 columns x 29 rows in 720 x 916, the 1.2 terminal's width.
+At 11 pt it was ~81 columns, under 1 mm a character on the phone. Pixel doubling keeps the edges hard. Real 1440 px
+(`wl_output.scale = 2`) is still the better answer, for apps that scale.
+
+**Checks.** See starbite/guest/next/INTEGRATION-NEXT.md: QEMU (foot at 720x916: PASS), the host stills (running /
+starting / failed), a film through the real gestures, gwin-host (gwin.c's self test with the real shell: PASSED),
+and the full sbos build with the patch.
+
+**Phone (staged in build/store, request note sbos-linuxapps-l2-request.md):** `starbite-next-linuxtest.img` (Next
+at fb9114a + the L2 patch, `-DSBOS_SELFTEST_NEXT_LINUX`: own 30 s watchdog, 120 s limit, no storage writes, then
+recovery) and the three store files `guest-wl.img` (the guest kernel 44acd54f), `guest-wl.dtb` and `guest-wl-rd.img`
+(sbwl + foot, 9.7 MB). The test opens the Terminal through the shell, waits for foot's frame in the window, types
+`uname -a; echo STARBITE-TERM-OK > /dev/kmsg` through the keyboard's path, checks the marker and text in the window,
+taps the window, closes the Terminal, stops Linux and checks the cluster off.
