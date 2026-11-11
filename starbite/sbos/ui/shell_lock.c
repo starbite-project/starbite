@@ -116,7 +116,7 @@ typedef struct {
 } hold_t;
 static hold_t Q[2];
 typedef struct {
-    tk_layer closed, open, face, head, chev, members, rows[3];
+    tk_layer gh, closed, open, face, head, chev, members, rows[3];   /* gh: the stack's lower cards (P3i) */
     tk_bmp chev0;               /* the chevron unrotated */
     float y;                    /* top in content pt (scroll 0) */
     float chx;                  /* the chevron's x */
@@ -189,6 +189,7 @@ static struct { int state, bars, rat; } SB_CELL;      /* the status bar's copy o
 static struct { int h, mi, wday, day, mon, pct, temp; } ST = { 21, 5, 2, 10, 11, 87, 41 };
 static struct { int on, h, m; } ALM = { 1, 7, 0 };   /* the host's is the concept's 07:00 */
 static void prep_tree(tk_layer *l);   /* P3g: home's half copies again right after a live rebuild */
+static void build_apsb(void);
 static int sys_charging;           /* P2y: sh_sysinfo's (the status bar's battery is green while charging) */
 #define SYS_CHARGING() sys_charging
 static void status_bar(dc *d, const char *left)
@@ -217,8 +218,9 @@ static void ring_widget(dc *d, float x, float p, tk_col col, const char *num, co
     d_ring(d, x + 36, 256, 31, 4.5f, p, col, 1);
     float w = tw(TK_IT700, 17, num, 0, TK_TNUM);
     d_text(d, TK_IT700, 17, x + 36 - w / 2, 220 + 22 + 16, num, 0, TK_TNUM, INK, 0);
-    w = tw(TK_IT700, 9.5f, lbl, .38f, 0);
-    d_text(d, TK_IT700, 9.5f, x + 36 - w / 2, 220 + 50 + 9, lbl, .38f, 0, W(.72f), 0);
+    /* P3i: the label inside the ring's chord at its line (9.5 pt with .38 spacing ran into the ring) */
+    w = tw(TK_IT700, 8, lbl, .2f, 0);
+    d_text(d, TK_IT700, 8, x + 36 - w / 2, 220 + 48 + 8, lbl, .2f, 0, W(.72f), 0);
 }
 /* the live values (sh_status): the host's are the concept's */
 static const char *const WD[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
@@ -319,8 +321,8 @@ static void build_marks(void)
     d = mk(&hint, "hint", 0, 756, 390, 16, 4, 0);
     w = tw(TK_IT600, 13, "Swipe up to open", 0, 0);
     d_text(&d, TK_IT600, 13, (390 - w) / 2, 756 + 13, "Swipe up to open", 0, 0, W(.75f), 1);
-    d = mk(&homebar, "homebar", 127, 788, 136, 5, 1, 0);
-    d_rrect(&d, 127, 788, 136, 5, 3, W(1));
+    d = mk(&homebar, "homebar", 128, 789, 134, 5, 1, 0);    /* P3i: iOS's 134 x 5, radius 2.5 */
+    d_rrect(&d, 128, 789, 134, 5, 2.5f, W(1));
 }
 
 /* ---- the press-and-hold buttons ---------------------------------------------------------------------------- */
@@ -383,18 +385,32 @@ static void hold_ring(hold_t *q, int i, float p)
 #define LIST_TOP 310.0f
 #define LIST_H 374.0f           /* .nwrap: top 310, bottom 118 */
 static int stack(int g) { return G[g].n > 1; }
+/* P3i: a stack's lower cards peek 8 and 15 pt below the top one (iOS's collapsed notification stack), then the
+ * list's 10 pt gap */
+#define PEEK1 8.0f
+#define PEEK2 15.0f
+/* the gap under a card: room for its stack's peek, which closes as the card opens (the lower cards are gone) */
+static float stack_gap(int g);
+#define STACK_GAP(g) stack_gap(g)
+static void ellipsize(char *out, int cap, int f, float size, const char *s, float maxw);
+static float stack_gap(int g)
+{
+    if (!stack(g)) return 10;
+    float q = K[g].full > 0 ? tk_clampf(K[g].memh / K[g].full, 0, 1) : 0;
+    return 10 + PEEK2 * (1 - q);
+}
 static void layout_list(void)
 {
     float y = 10;
     for (int g = 0; g < NG; g++) {
         K[g].y = y;
-        y += 68 + K[g].memh + (stack(g) ? 22 : 10);
+        y += 68 + K[g].memh + STACK_GAP(g);
     }
 }
 static float content_h(void)
 {
     float y = 10;
-    for (int g = 0; g < NG; g++) y += 68 + K[g].memh + (stack(g) ? 22 : 10);
+    for (int g = 0; g < NG; g++) y += 68 + K[g].memh + STACK_GAP(g);
     /* the last margin (22) collapses with the tools' 12; then their 32, margin 4, padding 14 */
     return y + 32 + 4 + 14;
 }
@@ -422,31 +438,55 @@ static void head_content(dc *d, int g, float top)
     if (gr->n > 1) { em[11] = 's'; em[12] = 0; }
     float sb = base_of(TK_IT400, 13.5f, top + 38.55f, 0);
     d_rrect(d, 83, sb - 7, 6, 6, 3, tk_hex(0x4cd964, 1));
-    d_text(d, TK_IT400, 13.5f, 95, sb, names, 0, 0, W(.82f), 0);
-    d_text(d, TK_IT400, 13.5f, 95 + tw(TK_IT400, 13.5f, names, 0, 0), sb, em, 0, 0, W(.48f), 0);
-    /* the grid's 1fr column grows to the nowrap line's width (min-content), pushing the chevron */
-    float col = tk_maxf(249, tk_maxf(tw(TK_IT800, 21, gr->name, -.5f, 0),
-                                     12 + tw(TK_IT400, 13.5f, names, 0, 0) + tw(TK_IT400, 13.5f, em, 0, 0)));
-    K[g].chx = 83 + col + 12;
+    /* P3i: the chevron at one place on every card (iOS: a row's chevron never moves); the names give way with an
+     * ellipsis so the count stays whole */
+    K[g].chx = 344;
+    char fit[160];
+    ellipsize(fit, sizeof fit, TK_IT400, 13.5f, names, K[g].chx - 12 - 95 - tw(TK_IT400, 13.5f, em, 0, 0));
+    int fl = tk_strlen(fit);
+    if (tk_strcmp(fit, names)) {
+        /* whole names and the rest as "+N" (audit 4: "iOS 16, macOS Ventura +1"), never cut mid-word */
+        float mw = K[g].chx - 12 - 95 - tw(TK_IT400, 13.5f, em, 0, 0);
+        int kept = gr->n;
+        for (int c = n - 1; c > 0; c--) {
+            if (names[c] != ',') continue;
+            kept--;
+            tk_memcpy(fit, names, (size_t)c);
+            fit[c] = ' '; fit[c + 1] = '+'; fit[c + 2] = (char)('0' + (gr->n - kept)); fit[c + 3] = 0;
+            if (tw(TK_IT400, 13.5f, fit, 0, 0) + tw(TK_IT400, 13.5f, " ", 0, 0) <= mw) break;
+        }
+        fl = tk_strlen(fit);
+    }
+    if (fl && fit[fl - 1] != ' ' && fl < 158) { fit[fl] = ' '; fit[fl + 1] = 0; }
+    d_text(d, TK_IT400, 13.5f, 95, sb, fit, 0, 0, W(.82f), 0);
+    d_text(d, TK_IT400, 13.5f, 95 + tw(TK_IT400, 13.5f, fit, 0, 0), sb, em, 0, 0, W(.48f), 0);
 }
-static void ghost(tk_bmp *G0, float ox, float oy, float x, float y, float w, float op)
+/* P3i: a lower card of the stack, iOS-style: the whole card's shape (narrower, its radius scaled with it) baked in
+ * its own bitmap and faded as one; what the cards above it cover is taken out afterwards (erase_rrect) */
+static void ghost(tk_bmp *G0, float ox, float oy, float x, float y, float w, float h, float r, float op)
 {
-    /* an .lg ghost: radius 0 0 22 22, its own backdrop the list content under it, then faded as one (worked in
-     * a box around it with room for its shadow) */
-    int X = tk_maxi(0, (int)tk_floorf(PT(x - 56) - ox)), Y = tk_maxi(0, (int)tk_floorf(PT(y - 56) - oy));
-    int W = tk_mini(G0->w - X, (int)PT(w + 112)), H = tk_mini(G0->h - Y, (int)PT(26 + 112));
-    tk_bmp t, g;
-    tk_bmp_new(&t, W, H);
-    tk_bmp_new(&g, W, H);
-    tk_bmp_copy(&g, 0, 0, G0, X, Y, W, H);
-    tk_corner = (tk_r4){ 0, 0, PT(22), PT(22) };
-    tk_use_r4 = 1;
-    tk_glass_local(&t, &g, PT(x) - ox - X, PT(y) - oy - Y, PT(w), PT(26), PT(22));
-    tk_glass_bake(&t, 0, PT(x) - ox - X, PT(y) - oy - Y, PT(w), PT(26), PT(22), 0, 1);
-    tk_use_r4 = 0;
-    tk_blit(G0, &t, X, Y, op);
+    tk_bmp t;
+    if (!tk_bmp_new(&t, G0->w, G0->h)) return;
+    tk_glass_bake(&t, 0, PT(x) - ox, PT(y) - oy, PT(w), PT(h), PT(r), 0, 0);   /* the card above casts the shadow */
+    tk_blit(G0, &t, 0, 0, op);
     tk_bmp_free(&t);
-    tk_bmp_free(&g);
+}
+/* nothing of b inside the rounded box (a card above covers it: none of it may show through that card's glass) */
+static void erase_rrect(tk_bmp *b, float ox, float oy, float x, float y, float w, float h, float r)
+{
+    tk_fm m;
+    if (!tk_fm_new(&m, b->w, b->h)) return;
+    tk_fm_rrect(&m, 0, 0, PT(x) - ox, PT(y) - oy, PT(w), PT(h), PT(r));
+    for (int j = 0; j < b->h; j++)
+        for (int i = 0; i < b->w; i++) {
+            float c = m.v[j * b->w + i];
+            if (c <= 0) continue;
+            uint32_t *p = &b->px[j * b->stride + i], o = *p, res = 0;
+            unsigned k = (unsigned)((1 - c) * 256 + .5f);
+            for (int sh = 0; sh < 32; sh += 8) res |= ((o >> sh & 255) * k >> 8) << sh;
+            *p = res;
+        }
+    tk_fm_free(&m);
 }
 static void build_card(int g)
 {
@@ -454,25 +494,46 @@ static void build_card(int g)
     const grp_t *gr = &G[g];
     float top = LIST_TOP + k->y;            /* rest screen pt at scroll 0 */
     k->full = 60.0f * gr->n;
-    /* closed: the ghosts (painted before every card), the card's own glass over them, its head */
-    dc d = mk(&k->closed, "card", 14, top, 362, 76, 44, 0);
+    /* P3i: the stack's lower cards in their own layer under the card (they slide down and fade as it opens):
+     * the second 10 pt in at each side, the third 20, peeking PEEK1 / PEEK2 below; each covers the one under it
+     * and the top card covers both, so nothing shows through (the user: "they should be under it like peek
+     * below") */
+    tk_layer_init(&k->gh, "stack");
+    k->gh.hidden = 1;
     if (stack(g)) {
-        ghost(d.b, d.ox, d.oy, 33, top + 56, 324, .4f);
-        ghost(d.b, d.ox, d.oy, 23, top + 50, 344, .7f);
+        /* only the band that can show: from where the top card's corners begin to the lowest card's edge */
+        dc e = mk(&k->gh, "stack", 24, top + 68 - 26, 342, 26 + PEEK2, 2, 0);
+        float b1 = top + 68 + PEEK1, b2 = top + 68 + PEEK2;
+        ghost(e.b, e.ox, e.oy, 34, b2 - 68 * .94f, 322, 68 * .94f, 26 * .89f, .55f);
+        erase_rrect(e.b, e.ox, e.oy, 24, b1 - 68 * .97f, 342, 68 * .97f, 26 * .945f);
+        ghost(e.b, e.ox, e.oy, 24, b1 - 68 * .97f, 342, 68 * .97f, 26 * .945f, .8f);
+        erase_rrect(e.b, e.ox, e.oy, 14, top, 362, 68, 26);
+        k->gh.hidden = 0;
     }
-    tk_glass_local(d.b, d.b, PT(14) - d.ox, PT(top) - d.oy, PT(362), PT(68), PT(26));
-    d_glass(&d, 14, top, 362, 68, 26, 0, 1);
+    /* P3i: the card is its face (the glass only, baked here once: a 3-slice drawn 68 pt tall when closed and as
+     * tall as the rows when open) and its head (icon and names) over it; opening it bakes nothing (the open
+     * height's glass at the tap was a 100-400 ms pause on the phone before the card moved) */
+    tk_layer_init(&k->closed, "card");
+    k->closed.hidden = 1;
+    dc d = mk(&k->face, "face", 14, top, 362, 68 + 12, FACE_MG, 0);
+    d_glass(&d, 14, top, 362, 68 + 12, 26, 0, 1);
+    k->face.slice = 1;
+    k->face.slice_s0 = PT(38 + FACE_MG);
+    k->face.slice_s1 = PT(30 + FACE_MG);
+    k->face.slice_h = PT(68 + 2 * FACE_MG);
+    d = mk(&k->head, "head", 25, top + 9, 310, 52, 1, 0);
     head_content(&d, g, top);
-    /* open: made when the card opens, freed when it has closed (build_open / free_open) */
-    tk_layer_init(&k->open, "card-open");
+    tk_layer_init(&k->members, "members");
+    tk_layer_init(&k->open, "card");
+    tk_layer_add(&k->open, &k->face);
+    tk_layer_add(&k->open, &k->head);
+    tk_layer_add(&k->open, &k->members);
     d = mk(&k->chev, "chev", k->chx, top + 27, 14, 14, 0, 0);
     d_icon(&d, "chev", k->chx, top + 27, 1);
     k->chev_t = 1;
     tk_bmp_new(&k->chev0, k->chev.bmp.w, k->chev.bmp.h);
     tk_bmp_copy(&k->chev0, 0, 0, &k->chev.bmp, 0, 0, k->chev.bmp.w, k->chev.bmp.h);
-    tk_layer_init(&k->members, "members");
     k->members.clip = 1;
-    k->open.hidden = 1;
     k->chev.clip = 1;
 }
 /* an opening card's face (at the open height: a 3-slice while it grows), its head and its member rows */
@@ -480,15 +541,9 @@ static void build_open(int g)
 {
     card_t *k = &K[g];
     const grp_t *gr = &G[g];
-    if (k->face.bmp.px) return;
+    if (k->rows[0].bmp.px) return;
     float top = LIST_TOP + k->y;
-    dc d = mk(&k->face, "face", 14, top, 362, 68 + k->full, FACE_MG, 0);
-    d_glass(&d, 14, top, 362, 68 + k->full, 26, 0, 1);
-    k->face.slice = 1;
-    k->face.slice_s0 = PT(40 + FACE_MG);
-    k->face.slice_s1 = PT(30 + FACE_MG);
-    d = mk(&k->head, "head", 14, top, 362, 68, 2, 0);
-    head_content(&d, g, top);
+    dc d;
     k->members.child = 0;
     for (int i = 0; i < gr->n; i++) {
         const sys_t *s = &gr->it[i];
@@ -510,21 +565,15 @@ static void build_open(int g)
         tk_layer_add(&k->members, &k->rows[i]);
     }
     /* their half copies now (at the tap), not in the first frame of the card's spring */
-    tk_layer_prepare(&k->face);
-    tk_layer_prepare(&k->head);
     for (int i = 0; i < gr->n; i++) tk_layer_prepare(&k->rows[i]);
-    k->open.child = 0;
-    tk_layer_add(&k->open, &k->face);
-    tk_layer_add(&k->open, &k->head);
-    tk_layer_add(&k->open, &k->members);
 }
+/* the rows only (the face and head stay: they are the card) */
 static void free_open(int g)
 {
     card_t *k = &K[g];
-    if (!k->face.bmp.px) return;
-    relayer(&k->face);
-    relayer(&k->head);
+    if (!k->rows[0].bmp.px) return;
     for (int i = 0; i < G[g].n; i++) relayer(&k->rows[i]);
+    k->members.child = 0;
 }
 
 static void build_etool(void)
@@ -557,14 +606,16 @@ static void build_ecards(void)
     dc d = mk(&ecard[0], "ecards", 14, LIST_TOP + 10, 362, 78 * 3 + 68, FACE_MG, 0);
     for (int i = 0; i < 4; i++) {
         float top = LIST_TOP + 10 + 78 * i;
-        tk_glass_local(d.b, d.b, PT(14) - d.ox, PT(top) - d.oy, PT(362), PT(68), PT(26));
+        /* P3i: no blur of the layer under each card (only the card above's shadow: ~200 ms for nothing seen) */
         d_glass(&d, 14, top, 362, 68, 26, 0, 1);
         d_icon(&d, EC[i].icon, 25, top + 11, 1);
         /* b: 19 / 800 / -.5, line-height 1.1 (half-leading floored); .sub 13.5, .82 */
         d_text(&d, TK_IT800, 19, 83, top + 12.55f + tk_floorf(tk_ascent(TK_IT800, PT(19)) / TK_PT + .5f), EC[i].t, -.5f, 0, INK, 0);
-        d_text(&d, TK_IT400, 13.5f, 83, top + 37.44f + tk_floorf(tk_ascent(TK_IT400, PT(13.5f)) / TK_PT + .5f), EC[i].s, 0, 0, W(.82f), 0);
-        float col = tk_maxf(249, tk_maxf(tw(TK_IT800, 19, EC[i].t, -.5f, 0), tw(TK_IT400, 13.5f, EC[i].s, 0, 0)));
-        d_icon(&d, "chev", 83 + col + 12, top + 27, 1);
+        /* P3i: the chevron where the systems' is; a long line gives way with an ellipsis (it ran past the card) */
+        char sub[96];
+        ellipsize(sub, sizeof sub, TK_IT400, 13.5f, EC[i].s, 344 - 12 - 83);
+        d_text(&d, TK_IT400, 13.5f, 83, top + 37.44f + tk_floorf(tk_ascent(TK_IT400, PT(13.5f)) / TK_PT + .5f), sub, 0, 0, W(.82f), 0);
+        d_icon(&d, "chev", 344, top + 27, 1);
     }
     float top = LIST_TOP + 10 + 78 * 4 - 10 + 12, w = 14 + tw(TK_IT600, 13, "Exit Emergency", 0, 0) + 14, x = 195 - w / 2;
     d = mk(&ecard[4], "eexit", x, top, w, 32, 44, 1);
@@ -582,6 +633,10 @@ static void free_vendor_cards(void)
     for (int g = 0; g < NG; g++) {
         free_open(g);
         relayer(&K[g].closed);
+        relayer(&K[g].face);
+        relayer(&K[g].head);
+        relayer(&K[g].gh);
+        K[g].gh.hidden = 1;
         relayer(&K[g].chev);
         tk_bmp_free(&K[g].chev0);
     }
@@ -607,10 +662,16 @@ static void place_list(void)
         card_t *k = &K[g];
         float dy = PT(y - k->y);           /* how far the card moved from where it was baked */
         float top = LIST_TOP + y;
-        int anim = k->sp.live || k->isopen || k->memh > 0.01f || k->chev_now != 0;
-        k->closed.hidden = anim;
-        k->open.hidden = !anim;
+        k->closed.hidden = 1;
+        k->open.hidden = 0;
         k->closed.y = k->closed.by + dy;
+        if (k->gh.bmp.px) {
+            /* the lower cards ride the face's bottom edge down and fade as the rows come in */
+            float q = k->full > 0 ? tk_clampf(k->memh / k->full, 0, 1) : 0;
+            k->gh.y = k->gh.by + dy + PT(k->memh);
+            k->gh.alpha = tk_clampf(1 - q * 1.8f, 0, 1);
+            k->gh.hidden = k->gh.alpha <= 0;
+        }
         k->face.y = k->face.by + dy;
         k->head.y = k->head.by + dy;
         k->chev.y = k->chev.by + dy;
@@ -626,12 +687,12 @@ static void place_list(void)
             r->alpha = a;
             r->y = r->by + dy + PT(ty);
         }
-        y += h + (stack(g) ? 22 : 10);
+        y += h + STACK_GAP(g);
     }
     float edy = PT(y - 448);
     etool.y = etool.by + edy;
     for (int g = 0; g < NG; g++) {
-        if (EMG) K[g].closed.hidden = K[g].open.hidden = 1;
+        if (EMG) K[g].closed.hidden = K[g].open.hidden = K[g].gh.hidden = 1;
         K[g].chev.hidden = EMG;
     }
     etool.hidden = EMG;
@@ -973,7 +1034,7 @@ static void set_page(float x)
 {
     cc_stale = 1;
     page_x = x;
-    pages.x = PT(x);
+    pages.x = tk_floorf(PT(x) + .5f);          /* P3i (audit 9): whole px, no resampling of the icons */
     float p = -x / 390;
     float fr = p - tk_floorf(p + .5f);
     int moving = tk_fabsf(fr) > .02f || page_dragging;
@@ -989,7 +1050,7 @@ static void set_page(float x)
  * are one bitmap baked while home is at rest (and again when a tile changes); the slider levels and their glyphs
  * are layers over it. setCC: scrim min(1, p), grid opacity min(1, 1.3 p), translateY((1 - p) x -30) scale(.86 +
  * .14 p) about 85 % 0 of the grid; spring cc 400 / 36; open past .35 or faster than .4 pt/ms. */
-static tk_layer ccl, ccscrim, ccsb, ccg, ccgrid, cclvl[2], ccic[2];
+static tk_layer ccl, ccscrim, ccsb, ccg, ccgrid, cclvl[2], ccic[2], cclit;   /* cclit: the torch's lit tile (P3i) */
 static struct { int on, built, closing, wifi, cell, bt, air, rot, save; float p, lvl[2]; } CCS = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, { .62f, .4f } };   /* P2y: Wi-Fi and rotation lock off (neither is real) */
 static void cc_levels(void);
 static int cc_bright;           /* the panel's brightness level the slider last sent (1..4; 0: none yet) */
@@ -1013,15 +1074,16 @@ static void cc_glyph(dc *d, const char *name, float tx, float ty, float w, float
 {
     d_icon(d, name, tx + (70 - w) / 2, ty + (70 - h) / 2, 1);
 }
-static void cc_label(dc *d, const char *t, float tx, float ty)
+__attribute__((unused)) static void cc_label(dc *d, const char *t, float tx, float ty)
 {
     float w = tw(TK_IT600, 10.5f, t, 0, 0);
     d_text(d, TK_IT600, 10.5f, tx + 35 - w / 2, ty + 74 + 10, t, 0, 0, W(.8f), 0);
 }
 static void cc_link(void)
 {
-    tk_layer *g[] = { &ccgrid, &cclvl[0], &ccic[0], &cclvl[1], &ccic[1] };
-    link(&ccg, g, 5);
+    tk_layer *g[] = { &ccgrid, &cclit, &cclvl[0], &ccic[0], &cclvl[1], &ccic[1] };
+    link(&ccg, g, 6);
+    cclit.hidden = !Q[0].lit || !cclit.bmp.px;
     tk_layer *k[] = { &ccscrim, &ccsb, &ccg };
     link(&ccl, k, 3);
 }
@@ -1043,17 +1105,42 @@ static void build_cc_grid(void)
     cc_tile(&d, 205.31f, 92, 70, 156, 24, 0);
     cc_tile(&d, 295.97f, 92, 70, 156, 24, 0);
     /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Mirror, Camera */
-    int lit = Q[0].lit;
-    cc_tile(&d, CCX[0], 264, 70, 70, 22, lit); cc_glyph(&d, lit ? "cc-light-on" : "cc-light", CCX[0], 264, 16, 24); cc_label(&d, "Flashlight", CCX[0], 264);
-    cc_tile(&d, CCX[1], 264, 70, 70, 22, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], 264, 22, 22); cc_label(&d, "Rotation", CCX[1], 264);
+    /* P3i: the torch's tile baked off; its lit look is a small layer over it, so the tap shows it at once (the
+     * whole grid's rebuild took ~300 ms at the tap) */
+    cc_tile(&d, CCX[0], 264, 70, 70, 22, 0); cc_glyph(&d, "cc-light", CCX[0], 264, 16, 24);
+    {
+        relayer(&cclit);
+        dc e = mk(&cclit, "cc-lit", CCX[0], 264, 70, 70, 1, 0);
+        d_rrect(&e, CCX[0], 264, 70, 70, 22, W(1));
+        cc_glyph(&e, "cc-light-on", CCX[0], 264, 16, 24);
+        tk_layer_prepare(&cclit);
+        cclit.hidden = !Q[0].lit;
+    }
+    cc_tile(&d, CCX[1], 264, 70, 70, 22, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], 264, 22, 22);
     cc_tile(&d, CCX[2], 264, 70, 70, 22, 0);
     if (EMG) d_rrect(&d, CCX[2], 264, 70, 70, 22, tk_hex(0xff5a4e, 1));
-    cc_glyph(&d, "cc-flame", CCX[2], 264, 20, 24); cc_label(&d, "Emergency", CCX[2], 264);
-    cc_tile(&d, CCX[3], 264, 70, 70, 22, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], 264, 24, 14); cc_label(&d, "Saving", CCX[3], 264);
-    cc_tile(&d, CCX[0], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-timer", CCX[0], 350, 22, 22); cc_label(&d, "Timer", CCX[0], 350);
-    cc_tile(&d, CCX[1], 350, 70, 70, 22, 0); cc_glyph(&d, "a30-calc", CCX[1], 350, 30, 30);
-    cc_tile(&d, CCX[2], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-wifi2", CCX[2], 350, 22, 22); cc_label(&d, "Mirror", CCX[2], 350);
-    cc_tile(&d, CCX[3], 350, 70, 70, 22, 0); cc_glyph(&d, "a30-camera", CCX[3], 350, 30, 30);
+    cc_glyph(&d, "cc-flame", CCX[2], 264, 20, 24);
+    cc_tile(&d, CCX[3], 264, 70, 70, 22, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], 264, 24, 14);
+    cc_tile(&d, CCX[0], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-timer", CCX[0], 350, 22, 22);
+    cc_tile(&d, CCX[1], 350, 70, 70, 22, 0);
+    {
+        /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place): a calculator */
+        float gx = CCX[1] + 26, gy = 350 + 22;
+        d_rrect(&d, gx, gy, 18, 26, 4, W(1));
+        d_rrect(&d, gx + 3, gy + 3, 12, 6, 1.5f, tk_hex(0x2a3150, 1));
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++) d_rrect(&d, gx + 3 + 4.5f * c, gy + 12 + 4.5f * r, 3, 3, 1.5f, tk_hex(0x2a3150, 1));
+    }
+    cc_tile(&d, CCX[2], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-wifi2", CCX[2], 350, 22, 22);
+    cc_tile(&d, CCX[3], 350, 70, 70, 22, 0);
+    {
+        /* and a camera */
+        float gx = CCX[3] + 23, gy = 350 + 25;
+        d_rrect(&d, gx + 8, gy - 2.5f, 8, 4, 1.5f, W(1));
+        d_rrect(&d, gx, gy, 24, 18, 4.5f, W(1));
+        d_rrect(&d, gx + 6.5f, gy + 3.5f, 11, 11, 5.5f, tk_hex(0x2a3150, 1));
+        d_rrect(&d, gx + 9, gy + 6, 6, 6, 3, W(1));
+    }
     tk_layer_prepare(&ccgrid);
 }
 static void cc_levels(void)
@@ -1141,7 +1228,11 @@ static int cc_tap(float x, float y)
         return 1;
     } else if (y >= 264 && y < 334) {
         int c = x < 94 ? 0 : x < 184.66f ? 1 : x < 275.31f ? 2 : 3;
-        if (c == 0) { Q[0].lit = !Q[0].lit; Q[0].facelit.hidden = Q[0].iconlit.hidden = !Q[0].lit; Q[0].face.hidden = Q[0].icon.hidden = Q[0].lit; sh_torch(Q[0].lit); lock_ver++; }
+        if (c == 0) {
+            Q[0].lit = !Q[0].lit; Q[0].facelit.hidden = Q[0].iconlit.hidden = !Q[0].lit; Q[0].face.hidden = Q[0].icon.hidden = Q[0].lit; sh_torch(Q[0].lit); lock_ver++;
+            cclit.hidden = !Q[0].lit || !cclit.bmp.px;
+            return 1;
+        }
         else if (c == 1) { toast("The screen doesn't rotate yet"); return 1; }
         else if (c == 3) { toast("Power Saving isn't in this version yet"); return 1; }
         else return 1;                       /* Emergency: a hold (G_CCEM) */
@@ -1363,7 +1454,7 @@ static void phone_tabs(dc *d)
 {
     static const char *const TK[4] = { "fav", "rec", "con", "pad" };
     static const char *const TL[4] = { "Favourites", "Recents", "Contacts", "Keypad" };
-    d_lg_app(d, 16, 718, 358, 62, 31, 1);
+    d_lg_flat(d, 16, 718, 358, 62, 31, 1);   /* P3i: over the flat ground (the backdrop's blur cost ~40 ms a build) */
     for (int i = 0; i < 4; i++) {
         float bx = 16 + 89.5f * i;
         char n[16] = "tab-";
@@ -1431,7 +1522,7 @@ static void page_messages(dc *d)
 {
     if (AS.thread < 0) {
         d_h1(d, "Messages");
-        d_lg_app(d, 16, 117, 358, 44, 22, 1);
+        d_lg_flat(d, 16, 117, 358, 44, 22, 1);   /* P3i: over the flat ground (the backdrop's blur cost ~40 ms a build) */
         d_icon(d, "search15", 30, 131.5f, 1);
         d_text(d, TK_IT400, 17, 53, 128 + 1 + tk_floorf(tk_ascent(TK_IT400, PT(17)) / TK_PT + .5f), "Search", 0, 0, tk_hex(0xa9a9a9, 1), 0);
         d_empty(d, 360, "No Messages", "Text messages need a SIM card. This phone doesn't send or receive any yet.");
@@ -1868,7 +1959,7 @@ static void kb_draw(dc *d, int shift, int num)
     const char *const *R = KR[num];
     for (int r = 0; r < 3; r++) {
         int n = (int)tk_strlen(R[r]);
-        float x0 = r == 2 && !num ? 54 : 3 + (10 - n) * 19.5f;
+        float x0 = r == 2 && !num ? 61.5f : 3 + (10 - n) * 19.5f;
         for (int i = 0; i < n; i++) {
             char k[2] = { R[r][i], 0 };
             if (!num && shift) k[0] = (char)(k[0] - 32);
@@ -1883,7 +1974,7 @@ static void kb_draw(dc *d, int shift, int num)
     d_rrect(d, 345, 658, 42, 46, 6, tk_hex(0x3a3d4a, 1));
     d_icon(d, "back", 359, 670, 1);                              /* delete: the font has no erase glyph */
     kb_key(d, 3, 712, 88, num ? "ABC" : "123", 1);
-    kb_key(d, 97, 712, 196, "space", 0);
+    kb_key(d, 97, 712, 196, "space", 1);           /* P3i: 16 pt like the other function keys */
     kb_key(d, 299, 712, 88, "return", 1);
 }
 static int kb_hit(float x, float y, int shift, int num, char *c)
@@ -1891,7 +1982,7 @@ static int kb_hit(float x, float y, int shift, int num, char *c)
     const char *const *R = KR[num];
     for (int r = 0; r < 3; r++) {
         int n = (int)tk_strlen(R[r]);
-        float x0 = r == 2 && !num ? 54 : 3 + (10 - n) * 19.5f, ky = 550 + 54 * r;
+        float x0 = r == 2 && !num ? 61.5f : 3 + (10 - n) * 19.5f, ky = 550 + 54 * r;
         if (y < ky || y >= ky + 50) continue;
         for (int i = 0; i < n; i++)
             if (x >= x0 + 39 * i - 3 && x < x0 + 39 * i + 36) {
@@ -1899,7 +1990,7 @@ static int kb_hit(float x, float y, int shift, int num, char *c)
                 if (!num && shift && *c >= 'a' && *c <= 'z') *c = (char)(*c - 32);
                 return 1;
             }
-        if (r == 2 && x < 50 && !num) return 2;
+        if (r == 2 && x < 55 && !num) return 2;
         if (r == 2 && x >= 340) return 4;
     }
     if (y >= 712 && y < 760) {
@@ -2022,12 +2113,22 @@ static void page_search(dc *d)
     d_text(d, TK_IT400, 17, 316, bl(TK_IT400, 17, 70), "Cancel", 0, 0, ACCENT(), 0);
     kb_draw(d, SR.shift, SR.num);
 }
+static tk_bmp sfield;              /* P3i: the search field's glass, while Search is open */
 static void build_search(void)
 {
     relayer(&apsrch);
     if (!is_app("search")) { apsrch.hidden = 1; return; }
     dc d = mk(&apsrch, "search-results", 12, 52, 366, 480, 0, 0);
-    d_lg_app(&d, 16, 56, 288, 40, 20, 1);
+    /* P3i: the field's glass (over the flat ground: no blur) baked once per opening and copied at each key */
+    if (!sfield.px || sfield.w != d.b->w) {
+        tk_bmp_free(&sfield);
+        if (tk_bmp_new(&sfield, d.b->w, (int)PT(56 + 40 + 44 - 52))) {
+            dc f = { &sfield, 0, d.ox, d.oy };
+            d_lg_flat(&f, 16, 56, 288, 40, 20, 1);
+        }
+    }
+    if (sfield.px) tk_bmp_copy(d.b, 0, 0, &sfield, 0, 0, sfield.w, sfield.h);
+    else d_lg_flat(&d, 16, 56, 288, 40, 20, 1);
     d_icon(&d, "search15", 30, 68.5f, 1);
     if (SR.q[0]) d_text(&d, TK_IT400, 17, 53, bl(TK_IT400, 17, 65), SR.q, 0, 0, INK, 0);
     else d_text(&d, TK_IT400, 17, 53, bl(TK_IT400, 17, 65), "Search", 0, 0, tk_hex(0xa9a9a9, 1), 0);
@@ -2097,7 +2198,7 @@ void sh_alarm(int on, int h, int m)
 }
 void sh_sysinfo(int charging, const char *version)
 {
-    if (!!charging != sys_charging) { sys_charging = !!charging; build_lstatus(); build_home_sb(); build_home_w(); relink(); lock_ver++; prep_tree(home.child); }
+    if (!!charging != sys_charging) { sys_charging = !!charging; build_lstatus(); build_home_sb(); build_home_w(); if (AP.on) build_apsb(); relink(); lock_ver++; prep_tree(home.child); }
     SYS.charging = charging;
     int n = 0;
     while (version && version[n] && n < 39) { SYS.ver[n] = version[n]; n++; }
@@ -2124,39 +2225,113 @@ static const char *live_text(const char *s, char *buf)
     else return "";
     return buf;
 }
-static void build_app_page(int a)
+/* P3i: Settings' row icons (the Control Centre's glyphs, tinted white) */
+typedef struct { const char *row, *glyph; uint32_t col; float w, h; } setico;
+static const setico SETICO[] = {
+    { "Wi-Fi", "cc-wifi", 0x0a84ff, 19, 14 }, { "Mobile Data", "cc-cell", 0x30d158, 18, 16 }, { "Battery", "cc-save", 0x30d158, 20, 12 },
+    { "Display & Brightness", "cc-sun", 0x0a84ff, 20, 20 }, { "Sounds & Haptics", "cc-vol", 0xff375f, 20, 20 },
+    { "Bluetooth", "cc-bt", 0x0a84ff, 12, 18 }, { "Airplane Mode", "cc-air", 0xff9f0a, 18, 18 }, { "Date & Time", "cc-timer", 0x8e8e93, 19, 19 },
+};
+static const setico *set_icon(const char *app, const char *row)
+{
+    if (tk_strcmp(app, "settings")) return 0;
+    for (unsigned i = 0; i < sizeof SETICO / sizeof SETICO[0]; i++) if (!tk_strcmp(SETICO[i].row, row)) return &SETICO[i];
+    return 0;
+}
+/* P3i: the apps with nothing to show yet get iOS's centred empty state, not a lone grey row */
+typedef struct { const char *k, *title, *line; } infopg;
+static const infopg INFO[] = {
+    { "weather", "No Weather", "Weather needs the internet. This phone isn't online yet." },
+    { "music", "No Music", "There is no music on this phone." },
+    { "files", "No Files", "Files isn't in this version yet." },
+    { "terminal", "Not Here Yet", "The terminal and Linux apps run in Starbite OS." },
+    { "browser", "No Internet", "The browser needs the internet. This phone isn't online yet." },
+    { "medical", "No Medical Card", "Nothing is stored on this phone yet." },
+    { "heat", "Not Here Yet", "Survival Heat runs in Starbite OS." },
+    { "power", "Not Available", "Power Saving isn't in this version yet." },
+};
+static const infopg *info_of(const char *k)
+{
+    for (unsigned i = 0; i < sizeof INFO / sizeof INFO[0]; i++) if (!tk_strcmp(INFO[i].k, k)) return &INFO[i];
+    return 0;
+}
+/* P3i: the status bar over every app (iOS never hides it); rebuilt with the minute and the charger */
+static tk_layer apsb;
+static void build_apsb(void)
+{
+    relayer(&apsb);
+    if (!AP.on) { apsb.hidden = 1; return; }
+    dc d = mk(&apsb, "app-sb", 0, 0, 390, 44, 0, 0);
+    char hm[8];
+    fmt_hm(hm);
+    status_bar(&d, hm);
+    apsb.hidden = 0;
+    apsb.alpha = appc.alpha;
+    tk_layer_prepare(&apsb);
+}
+static int app_own(int a)
 {
     const char *k = APPS[a].k;
-    int own = !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
-              !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
-              !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes") ||
-              !tk_strcmp(k, "search");
+    return !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
+           !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
+           !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes") ||
+           !tk_strcmp(k, "search") || info_of(k);
+}
+static void own_strip(int a, int i)
+{
+    const char *k = APPS[a].k;
+    const infopg *inf = info_of(k);
+    dc d = strip_dc(i, "app-page");
+    if (!d.b->px) return;
+    if (!tk_strcmp(k, "phone")) page_phone(&d);
+    else if (!tk_strcmp(k, "messages")) page_messages(&d);
+    else if (!tk_strcmp(k, "contacts")) page_contacts(&d);
+    else if (!tk_strcmp(k, "photos")) page_photos(&d);
+    else if (!tk_strcmp(k, "clock")) page_clock(&d);
+    else if (!tk_strcmp(k, "calc")) page_calc(&d);
+    else if (!tk_strcmp(k, "light")) page_light(&d);
+    else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
+    else if (!tk_strcmp(k, "settings")) page_display(&d);
+    else if (!tk_strcmp(k, "notes")) page_notes(&d);
+    else if (!tk_strcmp(k, "search")) page_search(&d);
+    else if (inf) { d_h1(&d, APPS[a].name); d_empty(&d, 330, inf->title, inf->line); }
+    else page_camera(&d);
+    tk_layer_prepare(&appst[i]);
+}
+static void own_extras(int a)
+{
+    const char *k = APPS[a].k;
+    build_apnum();
+    if (!tk_strcmp(k, "calc")) build_calc();
+    if (!tk_strcmp(k, "notes")) build_note();
+    if (!tk_strcmp(k, "search")) build_search();
+    if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
+    relink();
+}
+/* P3i: an opening app's own page drawn over its first frames (two strips a frame, then the extras) instead of all
+ * at the tap: the tap's 30-110 ms (Mac) block was a pause before the window moved. Its content is hidden until
+ * the page is whole (the icon covers the window then). */
+static int ap_pending;
+static void app_build_step(void)
+{
+    if (!ap_pending || !AP.on) { ap_pending = 0; return; }
+    int st = ap_pending - 1;
+    if (st < NST / 2) { own_strip(AP.a, 2 * st); own_strip(AP.a, 2 * st + 1); relink(); ap_pending++; return; }
+    own_extras(AP.a);
+    ap_pending = 0;
+}
+static void build_app_page(int a)
+{
+    const infopg *inf = info_of(APPS[a].k);
+    int own = app_own(a);
+    ap_pending = 0;
+    build_apsb();
     if (own) {
-        for (int i = 0; i < NST; i++) {
-            dc d = strip_dc(i, "app-page");
-            if (!d.b->px) continue;
-            if (!tk_strcmp(k, "phone")) page_phone(&d);
-            else if (!tk_strcmp(k, "messages")) page_messages(&d);
-            else if (!tk_strcmp(k, "contacts")) page_contacts(&d);
-            else if (!tk_strcmp(k, "photos")) page_photos(&d);
-            else if (!tk_strcmp(k, "clock")) page_clock(&d);
-            else if (!tk_strcmp(k, "calc")) page_calc(&d);
-            else if (!tk_strcmp(k, "light")) page_light(&d);
-            else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
-            else if (!tk_strcmp(k, "settings")) page_display(&d);
-            else if (!tk_strcmp(k, "notes")) page_notes(&d);
-            else if (!tk_strcmp(k, "search")) page_search(&d);
-            else page_camera(&d);
-            tk_layer_prepare(&appst[i]);
-        }
-        build_apnum();
-        if (!tk_strcmp(k, "calc")) build_calc();
-        if (!tk_strcmp(k, "notes")) build_note();
-        if (!tk_strcmp(k, "search")) build_search();
-        if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
-        relink();
+        for (int i = 0; i < NST; i++) own_strip(a, i);
+        own_extras(a);
         return;
     }
+    (void)inf;
     /* the concept's genericScreen: the large title, captions (or an 18 pt gap), grouped rows */
     const appdef *A = &APPS[a];
     float y = 56 + 8 + 41 + 12;                         /* the title's box and margins */
@@ -2184,14 +2359,29 @@ static void build_app_page(int a)
         for (int r = 0; r < S->n; r++) {
             float ry = y + 47 * r;
             char lb[48], rb[48];
-            d_text(&d, TK_IT400, 16, 32, ry + 13 + 16, live_text(S->rows[r].l, lb), 0, 0, INK, 0);
+            float lx = 32;
+            const setico *si = set_icon(A->k, S->rows[r].l);
+            if (si) {
+                /* P3i: iOS Settings' 29 pt colour square with its white glyph; the label and the rule after it */
+                d_rrect(&d, 32, ry + 9, 29, 29, 7, tk_hex(si->col, 1));
+                const tk_bmp *ic = tk_icon(si->glyph);
+                if (ic) {
+                    float pad = tk_icon_pad(si->glyph);
+                    tk_blit_tinted(d.b, ic, (int)tk_floorf(PT(32 + (29 - si->w) / 2) - pad - d.ox + .5f),
+                                   (int)tk_floorf(PT(ry + 9 + (29 - si->h) / 2) - pad - d.oy + .5f), W(1));
+                }
+                lx = 32 + 29 + 13;
+            }
+            d_text(&d, TK_IT400, 16, lx, ry + 13 + 16, live_text(S->rows[r].l, lb), 0, 0, INK, 0);
+            int nav = !tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Display & Brightness");
+            if (nav) d_icon(&d, "chev", 344, ry + 16.5f, .45f);
             const char *rt = live_text(S->rows[r].r, rb);
             if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Mobile Data")) rt = md_text();
             if (rt[0]) {
                 float w = tw(TK_IT400, 16, rt, 0, TK_TNUM);
-                d_text(&d, TK_IT400, 16, 358 - w, ry + 13 + 16, rt, 0, TK_TNUM, W(.55f), 0);
+                d_text(&d, TK_IT400, 16, (nav ? 338 : 358) - w, ry + 13 + 16, rt, 0, TK_TNUM, W(.55f), 0);
             }
-            if (r + 1 < S->n) d_rrect(&d, 16, ry + 46, 358, .5f, 0, W(.08f));
+            if (r + 1 < S->n) d_rrect(&d, lx, ry + 46, 374 - lx, .5f, 0, W(.08f));
         }
         y += gh;
     }
@@ -2230,7 +2420,8 @@ static void set_app_rect(arect R)
     appg.clip_r = (tk_rect){ PT(R.x), PT(R.y), PT(R.w), PT(R.h) };
     appg.clip_radius = PT(R.r);
     float p = (R.w - 62) / (390 - 62);
-    appc.alpha = tk_clampf(p * 1.6f - .2f, 0, 1);
+    appc.alpha = ap_pending ? 0 : tk_clampf(p * 1.6f - .2f, 0, 1);
+    apsb.alpha = appc.alpha;
     uint32_t t = APPS[AP.a].tint, b = 0x0a0f1f;
     float m = tk_clampf(p * 2, 0, 1);
     uint32_t cr = (uint32_t)((t >> 16 & 255) * (1 - m) + (b >> 16 & 255) * m + .5f), cg = (uint32_t)((t >> 8 & 255) * (1 - m) + (b >> 8 & 255) * m + .5f),
@@ -2284,7 +2475,15 @@ static void app_open(int a)
     AS.thread = -1;
     AS.sub = 0;
     apkey.hidden = 1;
-    build_app_page(a);
+    if (app_own(a)) {
+        /* the page over the first frames (app_build_step); the previous app's strips gone now */
+        for (int i = 0; i < NST; i++) { relayer(&appst[i]); appst[i].hidden = 1; }
+        apnum.hidden = 1;
+        build_apsb();
+        relink();
+        ap_pending = 1;
+    } else
+        build_app_page(a);
     AP.icon = icon_rect(a);
     AP.from = AP.icon;
     AP.to = FULLR;
@@ -2300,6 +2499,7 @@ static void app_close(float v)
 }
 static void app_finish_close(void)
 {
+    ap_pending = 0;
     AP.on = AP.closing = 0;
     appg.hidden = 1;
     apicon.hidden = 1;
@@ -2311,6 +2511,8 @@ static void app_finish_close(void)
     relayer(&apcalc); apcalc.hidden = 1;
     relayer(&apnote); apnote.hidden = 1;
     relayer(&apsrch); apsrch.hidden = 1;
+    tk_bmp_free(&sfield);
+    relayer(&apsb); apsb.hidden = 1;
     SR.q[0] = 0; SR.shift = 0; SR.num = 0;                      /* Search opens empty */
     NS.view = 0;                                                /* Notes opens on its list again */                        /* the Calculator keeps its value (CAL) */
     apnum.hidden = apkey.hidden = 1;
@@ -2332,10 +2534,11 @@ static void toast(const char *msg)
     float w = tw(TK_IT600, 13, msg, 0, 0) + 30, x = 195 - w / 2;
     relayer(&toastl);
     /* in an app its backdrop is the app's ground; elsewhere the wallpaper's glass (the shell's backdrop) */
-    dc d = mk(&toastl, "toast", x, 52, w, 34, 32, !AP.on);
-    if (AP.on) d_lg_app(&d, x, 52, w, 34, 17, 1);
-    else d_glass(&d, x, 52, w, 34, 17, 1, 1);
-    d_text(&d, TK_IT600, 13, x + 15, bl(TK_IT600, 13, 52 + 9), msg, 0, 0, INK, 0);
+    /* P3i (audit 17): in the status bar's band (y 6), never over the lock's date or a page's title */
+    dc d = mk(&toastl, "toast", x, 6, w, 34, 32, !AP.on);
+    if (AP.on) d_lg_flat(&d, x, 6, w, 34, 17, 1);
+    else d_glass(&d, x, 6, w, 34, 17, 1, 1);
+    d_text(&d, TK_IT600, 13, x + 15, bl(TK_IT600, 13, 6 + 9), msg, 0, 0, INK, 0);
     relink();
     toast_from = toast_o;
     toast_to = 0;
@@ -2747,15 +2950,15 @@ static void relink(void)
 {
     tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
     link(&root, r, 14);
-    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch };
-    link(&appg, ag, 10);
+    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb };
+    link(&appg, ag, 11);
     tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     link(&appc, st, NST);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
     link(&lockg, lk, 11);
-    tk_layer *ls[3 * NG + 6];
+    tk_layer *ls[4 * NG + 6];
     int n = 0;
-    for (int g = 0; g < NG; g++) { ls[n++] = &K[g].closed; ls[n++] = &K[g].open; ls[n++] = &K[g].chev; }
+    for (int g = 0; g < NG; g++) { ls[n++] = &K[g].gh; ls[n++] = &K[g].closed; ls[n++] = &K[g].open; ls[n++] = &K[g].chev; }
     ls[n++] = &etool;
     for (int i = 0; i < 5; i++) ls[n++] = &ecard[i];
     link(&list, ls, n);
@@ -2815,7 +3018,7 @@ void sh_init_begin(tk_comp *c)
     tk_layer_init(&list, "list");
     list.clip = 1;
     list.fade_top = PT(18);
-    list.fade_bot = PT(14);
+    list.fade_bot = PT(44);                    /* P3i (audit 16): no sliced lip above the hold buttons */
     tk_layer_init(&lockflat, "lock-flat");
     tk_layer_init(&focus, "focus");
     focus.hidden = 1;
@@ -3010,7 +3213,7 @@ static int hit_head(float x, float y)
     float cy = y - LIST_TOP + scroll;
     for (int g = 0; g < NG; g++) {
         float top = 10, yy = 10;
-        for (int h = 0; h < g; h++) yy += 68 + K[h].memh + (stack(h) ? 22 : 10);
+        for (int h = 0; h < g; h++) yy += 68 + K[h].memh + STACK_GAP(h);
         top = yy;
         if (cy >= top && cy < top + 68 && x >= 14 && x < 376) return g;
     }
@@ -3026,7 +3229,7 @@ static int hit_row(float x, float y, int *gi)
                 float rt = yy + 68 + 60 * i;
                 if (cy >= rt && cy < rt + 56 && cy < yy + 68 + K[g].memh) { *gi = g; return i; }
             }
-        yy += 68 + K[g].memh + (stack(g) ? 22 : 10);
+        yy += 68 + K[g].memh + STACK_GAP(g);
     }
     return -1;
 }
@@ -3162,8 +3365,9 @@ void sh_touch(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, y, t);
             float d2 = tk_minf(0, dy), sc = tk_maxf(.35f, 1 + d2 / (H_PT * .9f));
             arect R = { 0, 0, 390 * sc, H_PT * sc, 52 + (30 - 52) * (1 - sc) };
-            R.x = x - R.w / 2;
-            R.y = (H_PT + d2) - R.h * .92f;
+            /* P3i (audit 8): the point grabbed stays under the finger (no 64 pt jump at the first move) */
+            R.x = x - T.x0 / 390 * R.w;
+            R.y = y - T.y0 / H_PT * R.h;
             AP.travel = d2;
             set_app_rect(R);
             break;
@@ -3171,6 +3375,7 @@ void sh_touch(int phase, float x, float y, float t)
         case G_CC:
             tk_tracker_add(&T.tr, y, t);
             CCS.on = 1;
+            cclit.hidden = !Q[0].lit || !cclit.bmp.px;
             CCS.closing = 0;
             set_cc(tk_minf(1, tk_maxf(0, dy) / 260));
             break;
@@ -3376,6 +3581,7 @@ int sh_tick(float dt, float t)
     int mv = 0;
     now_ms = t;
     clk_update(t);
+    if (ap_pending) { app_build_step(); mv = 1; if (!ap_pending && AP.on) set_app_rect(AP.R); }   /* P3i */
     if (SL.dir) {
         SL.t = tk_minf(1, SL.t + dt / (SL.dir < 0 ? SL_OUT : SL_IN));
         if (SL.t >= 1) {
@@ -3590,6 +3796,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
         /* the layers keep their place in the tree: rebuilt in place */
         build_lclock();
         build_home_sb();
+        if (AP.on && !AP.closing) build_apsb();
         relink();
     }
     if (wchange) {
@@ -3631,13 +3838,13 @@ void sh_idle(void)
     tk_layer_prepare(&star);
     tk_layer_prepare(&homebar);
     for (int g = 0; g < NG; g++) {
-        tk_layer_prepare(&K[g].closed);
+        if (K[g].gh.bmp.px) tk_layer_prepare(&K[g].gh);
         tk_layer_prepare(&K[g].chev);
         if (K[g].face.bmp.px) {
             tk_layer_prepare(&K[g].face);
             tk_layer_prepare(&K[g].head);
-            for (int i = 0; i < G[g].n; i++) tk_layer_prepare(&K[g].rows[i]);
         }
+        for (int i = 0; i < G[g].n; i++) if (K[g].rows[i].bmp.px) tk_layer_prepare(&K[g].rows[i]);
     }
     tk_layer_prepare(&etool);
     for (int i = 0; i < 2; i++) {
