@@ -4,6 +4,14 @@
  * shadow all go into the element's cached layer; only the backdrop (the wallpaper blurred 14 pt, saturated 1.9,
  * brightened 1.06, made once per wallpaper) is sampled per frame, under the element where it is now. */
 #include "sbtk.h"
+#include "../kern/lens.h"
+
+int tk_glass_lens = 1;
+/* the backdrop filter: the concept's blur 14 pt, saturate 1.9, brightness 1.06; v6's lens shows the backdrop
+ * clearer (blur 10 pt, saturate 1.35, brightness 1.03): the glass is the lens, not a coloured frost */
+#define GL_BLUR (tk_glass_lens ? PT(10) : PT(14))
+#define GL_SAT (tk_glass_lens ? 1.35f : 1.9f)
+#define GL_BRIGHT (tk_glass_lens ? 1.03f : 1.06f)
 
 static const tk_col WHITE0 = { 255, 255, 255, 0 };
 
@@ -134,8 +142,8 @@ void tk_glass_backdrop(tk_bmp *dst, const tk_bmp *src)
     tk_bmp q;
     tk_bmp_new(&q, src->w / 2, src->h / 2);
     tk_bmp_down2(&q, src);
-    tk_bmp_blur(&q, PT(14) / 4);
-    tk_bmp_satbright(&q, 1.9f, 1.06f);
+    tk_bmp_blur(&q, GL_BLUR / 4);
+    tk_bmp_satbright(&q, GL_SAT, GL_BRIGHT);
     bilinear_up(dst, &q);
     tk_bmp_free(&q);
 }
@@ -144,6 +152,14 @@ void tk_glass_bake_ref(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float 
 {
     if (shadow)
         tk_box_shadow(b, x, y, w, h, r, 0, PT(10), PT(28), 0, TK_RGBA(0, 0, 0, .26f), 0);
+    if (tk_glass_lens) {
+        /* v6: the lens is the glass; only .lg.dark's tint and the mask */
+        if (dark) {
+            tk_paint pd = tk_solid(TK_RGBA(14, 22, 48, .42f));
+            tk_fill_rrect(b, x, y, w, h, r, &pd, 1);
+        }
+        goto mask_only;
+    }
     /* background: the white vertical gradient over the tint */
     tk_col tint = dark ? TK_RGBA(14, 22, 48, .42f) : TK_RGBA(36, 56, 120, .20f);
     tk_paint pt = tk_solid(tint);
@@ -186,6 +202,7 @@ void tk_glass_bake_ref(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float 
         tk_fm_free(&o);
         tk_fm_free(&in);
     }
+mask_only:
     if (mask && mask->v) {
         int ox = (int)tk_floorf(x) - 1, oy = (int)tk_floorf(y) - 1, W = (int)w + 4, H = (int)h + 4;
         tk_fm m;
@@ -229,8 +246,77 @@ static void put_rows(void *a, int ja, int jb)
     }
 }
 
+/* v6: the lens over glass baked into a layer: t (the filtered backdrop, its px (0, 0) at b's (X, Y)) refracted inside
+ * the rounded box, then lens.h's shading, over b by the shape's coverage. The box is known here: its exact distance
+ * and normal (a thin box's bezel is half its short side) */
+typedef struct { tk_bmp *b; const tk_bmp *t; int X, Y; float x, y, w, h, bz; tk_r4 R; } lput_ctx;
+static float lsd(const lput_ctx *P, float px, float py) { return tk_sd_rrect4(px, py, P->x, P->y, P->w, P->h, &P->R); }
+static void lbil(const tk_bmp *t, float u, float v, float c[4])
+{
+    /* t's px (u, v) (centres at .5), bilinear, clamped to t */
+    u -= .5f; v -= .5f;
+    float uf = tk_floorf(u), vf = tk_floorf(v), tu = u - uf, tv = v - vf;
+    int i0 = (int)uf, j0 = (int)vf;
+    uint32_t p[4];
+    for (int k = 0; k < 4; k++) {
+        int i = tk_mini(tk_maxi(i0 + (k & 1), 0), t->w - 1), j = tk_mini(tk_maxi(j0 + (k >> 1), 0), t->h - 1);
+        p[k] = t->px[(size_t)j * t->stride + i];
+    }
+    for (int c2 = 0; c2 < 4; c2++) {                 /* r g b a (premultiplied) */
+        int sh = c2 == 3 ? 24 : 16 - 8 * c2;
+        float a0 = (float)(p[0] >> sh & 255), a1 = (float)(p[1] >> sh & 255), b0 = (float)(p[2] >> sh & 255), b1 = (float)(p[3] >> sh & 255);
+        float top = a0 + (a1 - a0) * tu, bot = b0 + (b1 - b0) * tu;
+        c[c2] = (top + (bot - top) * tv) * (1.0f / 255);
+    }
+}
+static void lput_rows(void *a, int ja, int jb)
+{
+    lput_ctx *P = a;
+    tk_bmp *b = P->b;
+    const tk_bmp *t = P->t;
+    for (int j = ja; j < jb; j++) {
+        int by = P->Y + j;
+        if (by < 0 || by >= b->h) continue;
+        float py = by + .5f;
+        for (int i = 0; i < t->w; i++) {
+            int bx = P->X + i;
+            if (bx < 0 || bx >= b->w) continue;
+            float px = bx + .5f, sd = lsd(P, px, py), cov = tk_clampf(.5f - sd, 0, 1);
+            if (cov <= 0) continue;
+            float gx = lsd(P, px + .5f, py) - lsd(P, px - .5f, py), gy = lsd(P, px, py + .5f) - lsd(P, px, py - .5f);
+            float d = sd < 0 ? -sd : 0, o = lens_disp(d, P->bz), ox = -gx * o, oy = -gy * o;
+            /* t's coordinates of the screen point (px, py) + offset */
+            float tu = px - P->X, tv = py - P->Y, rgb[4], c[4];
+            lbil(t, tu + ox, tv + oy, rgb);
+            lbil(t, tu + ox * (1 + LENS_D), tv + oy * (1 + LENS_D), c);
+            rgb[0] = tk_minf(c[0], rgb[3]);              /* dispersed, still premultiplied by green's alpha */
+            lbil(t, tu + ox * (1 - LENS_D), tv + oy * (1 - LENS_D), c);
+            rgb[2] = tk_minf(c[2], rgb[3]);
+            {   /* over nothing (the layer's own content transparent) the glass is frosted: a deep blue under it */
+                float ta = .74f * (1 - rgb[3]);
+                rgb[0] += ta * (16.0f / 255); rgb[1] += ta * (26.0f / 255); rgb[2] += ta * (64.0f / 255); rgb[3] += ta;
+            }
+            lens_shade_pm(rgb, ox, oy, d);
+            /* over b by the shape's coverage */
+            uint32_t *dp = &b->px[(size_t)by * b->stride + bx], dv = *dp, res = 0;
+            float ia = 1 - rgb[3] * cov;
+            for (int c2 = 0; c2 < 4; c2++) {
+                int sh = c2 == 3 ? 24 : 16 - 8 * c2;
+                int v = (int)(rgb[c2] * 255 * cov + (float)(dv >> sh & 255) * ia + .5f);
+                res |= (uint32_t)(v > 255 ? 255 : v) << sh;
+            }
+            *dp = res;
+        }
+    }
+}
+
 void tk_glass_local_put(tk_bmp *b, const tk_bmp *t, int X, int Y, float x, float y, float w, float h, float r)
 {
+    if (tk_glass_lens) {
+        lput_ctx P = { b, t, X, Y, x, y, w, h, tk_minf(LENS_B, .5f * tk_minf(w, h)), tk_radii(w, h, r) };
+        tk_par_rows(0, t->h, lput_rows, &P);
+        return;
+    }
     /* t (the filtered backdrop, its px (0, 0) at b's (X, Y)) over b inside the rounded box */
     int W = t->w, H = t->h;
     tk_fm m;
@@ -249,7 +335,7 @@ void tk_glass_local(tk_bmp *b, const tk_bmp *src, float x, float y, float w, flo
     tk_bmp t;
     if (!tk_bmp_new(&t, W, H)) return;
     tk_bmp_copy(&t, 0, 0, src, X, Y, W, H);
-    tk_bmp_blur_sat(&t, PT(14), 1.9f, 1.06f);
+    tk_bmp_blur_sat(&t, GL_BLUR, GL_SAT, GL_BRIGHT);
     tk_glass_local_put(b, &t, X, Y, x, y, w, h, r);
     tk_bmp_free(&t);
 }
@@ -327,7 +413,7 @@ static inline void over_col(float *d, float cr, float cg, float cb, float a)  /*
 typedef struct {
     tk_bmp *b; tk_a8 *mask;
     float x, y, w, h, r, sg, sdy, gg, p1, r15;
-    int X0, X1, shadow;
+    int X0, X1, shadow, lens, dark;
     tk_r4 R, Ri;                            /* the box's radii and the 1 pt ring's inner ones */
     tk_col tint;
     tk_paint pg, q1, q2, pe;
@@ -353,7 +439,10 @@ static void gbake_rows(void *a, int Y0, int Y1)
                 float al = .26f * phi(-ss / sg) * (1 - cov);
                 if (al > 1.0f / 1024) over_col(out, 0, 0, 0, al);
             }
-            if (cov > 0) {
+            if (cov > 0 && G->lens) {
+                /* v6: the lens (the compositor's or tk_glass_local_put's) is the glass; only .lg.dark's tint */
+                if (G->dark) over_col(out, G->tint.r, G->tint.g, G->tint.b, G->tint.a * cov);
+            } else if (cov > 0) {
                 float f[4] = { 0, 0, 0, 0 };
                 over_col(f, G->tint.r, G->tint.g, G->tint.b, G->tint.a);
                 over4(f, grow.r, grow.g, grow.b, grow.a);
@@ -380,6 +469,10 @@ static void gbake_rows(void *a, int Y0, int Y1)
                 }
                 over4(out, f[0] * cov, f[1] * cov, f[2] * cov, f[3] * cov);
             }
+            if (mask && mask->v && i < mask->w && j < mask->h && cov > 0) {
+                int v = (int)(cov * 255 + .5f);
+                if (v > mask->v[j * mask->w + i]) mask->v[j * mask->w + i] = (uint8_t)v;
+            }
             if (out[3] <= 0) continue;
             uint32_t *d = &b->px[j * b->stride + i], o = *d;
             float ia = 1 - out[3], A = out[3] + (o >> 24) / 255.0f * ia;
@@ -388,10 +481,6 @@ static void gbake_rows(void *a, int Y0, int Y1)
             Aq = Aq > 255 ? 255 : Aq;
             R = R > Aq ? Aq : R; Gc = Gc > Aq ? Aq : Gc; B = B > Aq ? Aq : B;
             *d = (uint32_t)Aq << 24 | (uint32_t)R << 16 | (uint32_t)Gc << 8 | (uint32_t)B;
-            if (mask && mask->v && i < mask->w && j < mask->h && cov > 0) {
-                int v = (int)(cov * 255 + .5f);
-                if (v > mask->v[j * mask->w + i]) mask->v[j * mask->w + i] = (uint8_t)v;
-            }
         }
     }
 }
@@ -402,6 +491,7 @@ void tk_glass_bake(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, f
     (void)phi(0);                           /* the table, before any band uses it */
     gbake G;
     G.b = b; G.mask = mask; G.x = x; G.y = y; G.w = w; G.h = h; G.r = r; G.shadow = shadow;
+    G.lens = tk_glass_lens; G.dark = dark;
     G.sg = PT(14); G.sdy = PT(10); G.gg = PT(11); G.p1 = PT(1); G.r15 = PT(1.5f);
     float mg = shadow ? 3 * G.sg + G.sdy + 2 : 2;
     G.X0 = tk_maxi(0, (int)tk_floorf(x - mg)); G.X1 = tk_mini(b->w, (int)(x + w + mg) + 1);
@@ -441,7 +531,7 @@ void tk_glass_from_half(tk_bmp *b, int box, int boy, const tk_bmp *half, float x
     if (!tk_bmp_new(&q, (t.w + 1) / 2, (t.h + 1) / 2)) { tk_bmp_free(&t); return; }
     tk_bmp_down2(&q, &t);
     tk_bmp_free(&t);
-    tk_bmp_blur_sat(&q, PT(14) / 4, 1.9f, 1.06f);
+    tk_bmp_blur_sat(&q, GL_BLUR / 4, GL_SAT, GL_BRIGHT);
     /* q px (i, j) covers panel px [4 i, 4 i + 4) from (2 hx0, 2 hy0) */
     tk_bmp up;
     if (tk_bmp_new(&up, X1 - X0, Y1 - Y0)) {
@@ -450,4 +540,93 @@ void tk_glass_from_half(tk_bmp *b, int box, int boy, const tk_bmp *half, float x
         tk_bmp_free(&up);
     }
     tk_bmp_free(&q);
+}
+
+/* ---- v6: a lens map from a glass mask ----------------------------------------------------------------------- *
+ * The mask may hold any shapes (a flattened group's cards), so the distance and the normal come from the mask: its
+ * box average over (2R + 1)^2 px, R the bezel in mask px. Along a straight edge that average is .5 + d / (2R + 1) for
+ * a px d inside, so d = (s - .5)(2R + 1), and its gradient x (2R + 1) is the unit inward normal; at a corner both are
+ * rounded, and in a shape thinner than the bezel the gradient fades to 0 at its middle (no seam there). Three
+ * passes over the mask, each split over the cores: the rows' sums, the columns' sums, the words. */
+typedef struct { const uint8_t *m; int w, h, R; uint16_t *H; uint32_t *S; uint32_t *out; float k; } lb_ctx;
+static void lb_rows(void *a, int y0, int y1)
+{
+    lb_ctx *L = a;
+    int w = L->w, R = L->R;
+    for (int y = y0; y < y1; y++) {
+        const uint8_t *m = L->m + (size_t)y * w;
+        uint16_t *H = L->H + (size_t)y * w;
+        unsigned s = 0;
+        for (int i = 0; i <= R && i < w; i++) s += m[i];
+        for (int x = 0; x < w; x++) {
+            H[x] = (uint16_t)s;
+            if (x + R + 1 < w) s += m[x + R + 1];
+            if (x - R >= 0) s -= m[x - R];
+        }
+    }
+}
+static void lb_cols(void *a, int c0, int c1)
+{
+    /* columns in blocks of 16 (rows stay in the cache) */
+    lb_ctx *L = a;
+    int w = L->w, h = L->h, R = L->R;
+    for (int xb = c0 * 16; xb < c1 * 16 && xb < w; xb += 16) {
+        int n = tk_mini(16, w - xb);
+        uint32_t s[16] = { 0 };
+        for (int j = 0; j <= R && j < h; j++)
+            for (int q = 0; q < n; q++) s[q] += L->H[(size_t)j * w + xb + q];
+        for (int y = 0; y < h; y++) {
+            uint32_t *S = L->S + (size_t)y * w + xb;
+            const uint16_t *Ha = y + R + 1 < h ? L->H + (size_t)(y + R + 1) * w + xb : 0;
+            const uint16_t *Hb = y - R >= 0 ? L->H + (size_t)(y - R) * w + xb : 0;
+            for (int q = 0; q < n; q++) {
+                S[q] = s[q];
+                if (Ha) s[q] += Ha[q];
+                if (Hb) s[q] -= Hb[q];
+            }
+        }
+    }
+}
+static void lb_out(void *a, int y0, int y1)
+{
+    lb_ctx *L = a;
+    int w = L->w, h = L->h;
+    float n = (float)(2 * L->R + 1), inn = 1.0f / (255.0f * n * n);
+    for (int y = y0; y < y1; y++) {
+        const uint8_t *m = L->m + (size_t)y * w;
+        const uint32_t *S = L->S + (size_t)y * w;
+        const uint32_t *Su = y > 0 ? S - w : S, *Sd = y + 1 < h ? S + w : S;
+        uint32_t *o = L->out + (size_t)y * w;
+        for (int x = 0; x < w; x++) {
+            if (!m[x]) { o[x] = 0; continue; }
+            float s = (float)S[x] * inn;
+            float gx = ((float)S[x + 1 < w ? x + 1 : x] - (float)S[x > 0 ? x - 1 : x]) * .5f * inn * n;
+            float gy = ((float)Sd[x] - (float)Su[x]) * .5f * inn * n;
+            float g2 = gx * gx + gy * gy;
+            if (g2 > 1) { float ig = 1 / tk_sqrtf(g2); gx *= ig; gy *= ig; }
+            float d = (s - .5f) * n * L->k;
+            if (d < 0) d = 0;
+            float dp = lens_disp(d, LENS_B);
+            o[x] = lens_word((float)m[x] * (1.0f / 255), gx * dp, gy * dp, d);
+        }
+    }
+}
+uint32_t *tk_lens_build(const tk_a8 *m, float k)
+{
+    if (!m->v || m->w < 1 || m->h < 1) return 0;
+    lb_ctx L = { m->v, m->w, m->h, (int)(LENS_B / k + .999f), 0, 0, 0, k };
+    size_t np = (size_t)m->w * (size_t)m->h;
+    L.H = tk_alloc(np * 2);
+    L.S = tk_alloc(np * 4);
+    L.out = tk_alloc(np * 4);
+    if (!L.H || !L.S || !L.out) {
+        tk_free(L.H); tk_free(L.S); tk_free(L.out);
+        return 0;
+    }
+    tk_par_rows(0, L.h, lb_rows, &L);
+    tk_par_rows(0, (L.w + 15) / 16, lb_cols, &L);
+    tk_par_rows(0, L.h, lb_out, &L);
+    tk_free(L.H);
+    tk_free(L.S);
+    return L.out;
 }

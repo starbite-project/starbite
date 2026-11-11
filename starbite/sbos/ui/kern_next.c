@@ -704,7 +704,7 @@ void next_kinit(void)
 {
     boot_t0 = sb_ms();
     log_mb("arena free before the UI heap: ", sb_arena_free());
-    heap_init(160ULL << 20);
+    heap_init(192ULL << 20);                /* v6: 160 + Liquid Glass's lens maps (the GPU maps it below VA_RO) */
     log_mb("UI heap: ", heap_size);
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
