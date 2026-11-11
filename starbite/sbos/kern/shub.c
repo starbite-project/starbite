@@ -24,7 +24,6 @@
  * ROM's RPC numbers and the byte order of their arguments (taken from the version answer), MCU_RESP (a silent one
  * is normal), the axes and the magnetometer's scale. */
 #include "sb.h"
-#include "kern.h"
 #include "shub.h"
 #include "shub_proto.h"
 #include "survival.h"
@@ -75,9 +74,27 @@ static const uintptr_t cmu_gate[3] = { CMU + 0x2010UL, CMU + 0x2090UL, CMU + 0x2
 #define P_NSTDBY 2U
 #define LDO37_CTRL 0x6eU
 
+#ifdef SB_HOST
+/* the host test (starbite/tools/shub-sim-test.c): the registers, the bus and the patch come from a simulated phone
+ * and chip; everything above the register and transfer level is the code the phone runs */
+uint32_t shub_sim_rd(uintptr_t a);
+void shub_sim_wr(uintptr_t a, uint32_t v);
+int shub_sim_xfer(const uint8_t *tx, uint8_t *rx, unsigned n);
+extern const uint8_t *shub_sim_patch;
+extern unsigned shub_sim_patch_len;
+#define PATCH_P shub_sim_patch
+#define PATCH_N shub_sim_patch_len
+#else
 extern const uint8_t shub_patch_start[], shub_patch_end[];     /* shub_blob.S: empty unless the build embeds it */
+#define PATCH_P shub_patch_start
+#define PATCH_N ((unsigned)(shub_patch_end - shub_patch_start))
+#endif
 
 /* ---- registers ------------------------------------------------------------------------------------------------ */
+#ifdef SB_HOST
+static uint32_t rd(uintptr_t a) { return shub_sim_rd(a); }
+static void wr(uintptr_t a, uint32_t v) { shub_sim_wr(a, v); }
+#else
 static uint32_t rd(uintptr_t a)
 {
     uint32_t v = *(volatile uint32_t *)a;
@@ -91,6 +108,7 @@ static void wr(uintptr_t a, uint32_t v)
     *(volatile uint32_t *)a = v;
     __asm__ volatile("dsb sy" ::: "memory");
 }
+#endif
 
 static void wr_if(uintptr_t a, uint32_t v)
 {
@@ -165,8 +183,6 @@ static struct {
     uint64_t t;
     int n, round, sync_try, polls, slow, ver_try;
     int resp_seen;
-    uint8_t rdctl;                          /* the read control byte that got an answer (0: not known yet) */
-    uint32_t rb0;
     unsigned dl_off, dl_recs;
     uint64_t dl_t0;
     int ssp_i, ssp_tries;
@@ -191,9 +207,10 @@ static struct {
     uint64_t rel_t, t_read;
     unsigned reln, relpn;
     uint32_t reads, read_bytes, writes, fc_short, spi_err, pe, retx, rpc_other, pkts;
-    int alive;                              /* a read returned something other than all zeros / all ones */
-    uint8_t last_st;
-    uint16_t last_len;
+    int rd_proven;                          /* a read with this control byte returned stream bytes */
+    uint32_t reads_a, reads_b;
+    uint8_t last_st, last_wst;
+    uint16_t last_len, last_wn, last_wacc;
     int dump_left, pkt_log_left, err_log_left, rpc_log_left;
 } L;
 static uint8_t txf[4200], rxf[4200], pktb[SHP_STUFFED_MAX], relb[SHP_STUFFED_MAX], relp[1100];
@@ -245,6 +262,10 @@ static void hexdump(const char *pre, const uint8_t *p, unsigned n, unsigned max)
 /* ---- the SPI controller, polled ------------------------------------------------------------------------------- */
 static void spi_flush(void)
 {
+#ifdef SB_HOST
+    if (PATCH_N != ~0U)
+        return;
+#endif
     uint32_t v = rd(SPI_CH_CFG) & ~(CH_RX | CH_TX);
     wr(SPI_CH_CFG, v);
     wr(SPI_PACKET_CNT, 0);
@@ -262,6 +283,10 @@ static void spi_flush(void)
  * read back, the FIFO flushed (spi-s3c64xx.c's enable_datapath / wait_for_xfer / flush_fifo without DMA) */
 static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 {
+#ifdef SB_HOST
+    if (PATCH_N != ~0U)
+        return shub_sim_xfer(tx, rx, n);
+#endif
     while (n) {
         unsigned c = n > SPI_CHUNK ? SPI_CHUNK : n;
         uint32_t ch = rd(SPI_CH_CFG) & ~(CH_RX | CH_TX);
@@ -498,6 +523,9 @@ static int ssi_write(const uint8_t *d, unsigned m)
             return 0;
         ++L.writes;
         shp_ssi_wparse(rxf, m, &w);
+        L.last_wst = w.status;
+        L.last_wn = (uint16_t)(rxf[1] | rxf[2] << 8);
+        L.last_wacc = (uint16_t)w.accepted;
         if (w.status & SHP_SSI_ST_PE)
             ++L.pe;
         if (w.status != 0xffU || w.n != m)  /* (a dead bus reads all ones: no stream bytes in that) */
@@ -524,14 +552,22 @@ static int ssi_read(void)
     uint8_t st = rxf[0];
     unsigned len = (unsigned)rxf[1] | (unsigned)rxf[2] << 8;
     int dead = (st == 0 && len == 0) || (st == 0xffU && len == 0xffffU);
-    if (!dead)
-        L.alive = 1;
+    uint8_t ctl = L.rdctl;
+    if (ctl == SHP_SSI_READ_A)
+        ++L.reads_a;
+    else
+        ++L.reads_b;
+    /* which read form the chip wants is not known (docs/SENSOR-HUB.md 2.3): 0x50 first; while no read has ever
+     * returned stream bytes, a read that comes back all zeros or all ones makes the next one use the other form.
+     * (A sync answer can arrive inside a write frame, so a good sync does not prove the read form.) */
+    if (dead && !L.rd_proven)
+        L.rdctl = ctl == SHP_SSI_READ_A ? SHP_SSI_READ_B : SHP_SSI_READ_A;
     if (M.verbose && L.dump_left > 0 && (st != L.last_st || len != L.last_len)) {
         struct ub u;
         --L.dump_left;
         ub_init(&u);
         ub_s(&u, "shub: read (control ");
-        ub_hexn(&u, L.rdctl, 2);
+        ub_hexn(&u, ctl, 2);
         ub_s(&u, "): status ");
         ub_hexn(&u, st, 2);
         ub_s(&u, " length ");
@@ -549,7 +585,7 @@ static int ssi_read(void)
     if (len > sizeof(rxf) - 3U)
         len = sizeof(rxf) - 3U;             /* the rest waits for the next read */
     memset(txf, 0, len + 3U);
-    txf[0] = L.rdctl;
+    txf[0] = ctl;
     if (!cs_xfer(txf, rxf, len + 3U))
         return -1;
     unsigned n = (unsigned)rxf[1] | (unsigned)rxf[2] << 8;
@@ -559,6 +595,8 @@ static int ssi_read(void)
         --L.dump_left;
         hexdump("shub: read:", rxf, n + 3U, 64);
     }
+    if (n)
+        L.rd_proven = 1;
     rx_bytes(rxf + 3, n);
     return (int)n;
 }
@@ -980,18 +1018,27 @@ static void log_round(void)
     ub_s(&u, M.slow ? " (slower clock)" : "");
     ub_s(&u, ": 6 sync requests, no answer: reads ");
     ub_dec(&u, L.reads);
-    ub_s(&u, ", last status ");
+    ub_s(&u, " (0x50: ");
+    ub_dec(&u, L.reads_a);
+    ub_s(&u, ", 0x70: ");
+    ub_dec(&u, L.reads_b);
+    ub_c(&u, ')');
+    ub_s(&u, ", last read: status ");
     ub_hexn(&u, L.last_st, 2);
     ub_s(&u, " length ");
     ub_dec(&u, L.last_len);
-    ub_s(&u, ", stream bytes ");
+    ub_s(&u, "; last write: status ");
+    ub_hexn(&u, L.last_wst, 2);
+    ub_s(&u, " chip bytes ");
+    ub_dec(&u, L.last_wn);
+    ub_s(&u, " accepted ");
+    ub_dec(&u, L.last_wacc);
+    ub_s(&u, "; stream bytes ");
     ub_dec(&u, L.read_bytes);
     ub_s(&u, ", garbage ");
     ub_dec(&u, L.rx.garbage);
     ub_s(&u, ", packets refused ");
     ub_dec(&u, L.rx.bad);
-    ub_s(&u, ", read control ");
-    ub_hexn(&u, L.rdctl, 2);
     ub_s(&u, ", MCU_RESP ");
     ub_dec(&u, (uint64_t)pin_get(GPH0, P_RESP));
     ub_s(&u, " HOST_REQ ");
@@ -1162,9 +1209,6 @@ int shub_step(void)
             hexdump("shub: step 3: autobaud (36 x 0x80), MISO meanwhile:", rxf, 36, 16);
         shp_rx_init(&L.rx);
         L.sync_ok = 0;
-        L.rdctl = M.rdctl ? M.rdctl : SHP_SSI_READ_A;
-        L.alive = 0;
-        M.rb0 = L.read_bytes;
         M.sync_try = 0;
         M.polls = 0;
         M.st = ST_SYNC;
@@ -1178,7 +1222,6 @@ int shub_step(void)
             L.tx_rel = (uint8_t)(L.sync.last_rel_rx + 1U);
             L.have_rel = 0;
             L.ack_due = 0;
-            M.rdctl = L.rdctl;
             ub_init(&u);
             ub_s(&u, M.app ? "shub: app sync: answer to request " : "shub: step 3: sync answer to request ");
             ub_dec(&u, L.sync.n);
@@ -1194,7 +1237,7 @@ int shub_step(void)
             ub_hexn(&u, L.sync.next_rel, 2);
             ub_s(&u, " last reliable acked ");
             ub_hexn(&u, L.sync.last_rel_acked, 2);
-            ub_s(&u, "; read control ");
+            ub_s(&u, L.rd_proven ? "; read control " : "; it came inside a write frame: the read control is not proven yet, now ");
             ub_hexn(&u, L.rdctl, 2);
             ub_s(&u, M.slow ? ", slower clock" : "");
             sb_log(u.b);
@@ -1212,10 +1255,6 @@ int shub_step(void)
         }
         if (M.sync_try < 6) {
             uint8_t s[16];
-            /* requests 4..6 of a round read with 0x70 when 0x50 only returned zeros or ones in this round, and in
-             * every second round anyway (0x50: an earlier port and the Tab Active3 notes; 0x70: Samsung's driver as written) */
-            if (M.sync_try == 3 && !M.rdctl && ((!L.alive && L.read_bytes == M.rb0) || (M.round & 1)))
-                L.rdctl = SHP_SSI_READ_B;
             unsigned k = shp_sync_build(s, sizeof(s), (uint8_t)(M.sync_try + 1));
             ++M.sync_try;
             if (!k || !ssi_write(s, k)) {
@@ -1281,7 +1320,7 @@ int shub_step(void)
             M.dl_off = 0;
             M.dl_recs = 0;
             M.dl_t0 = sb_ms();
-            if (shub_patch_end - shub_patch_start != 413864) {
+            if (PATCH_N != 413864U) {
                 fail("the hub's firmware patch is not in this image (starbite/sbos/tools/shub-patch.py; never committed)");
                 return 0;
             }
@@ -1313,7 +1352,7 @@ int shub_step(void)
                 uint32_t addr = 0;
                 const uint8_t *d = 0;
                 unsigned len = 0;
-                int v = shp_patch_next(shub_patch_start, (unsigned)(shub_patch_end - shub_patch_start), &M.dl_off, &addr, &d, &len);
+                int v = shp_patch_next(PATCH_P, PATCH_N, &M.dl_off, &addr, &d, &len);
                 if (v < 0) {
                     fail("the patch blob's records are malformed");
                     return 0;

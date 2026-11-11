@@ -78,6 +78,12 @@ if [ "$native" = 1 ]; then
     gcc -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I"$here/kern" \
         -o "$ob/shub-host-test" "$root/starbite/tools/shub-host-test.c" "$here/kern/shub_proto.c" -lm
     "$ob/shub-host-test" $shub_blob
+    if [ -n "$shub_blob" ]; then
+        # the driver itself (kern/shub.c) against a simulated phone and chip: both self tests, the faults, the restore
+        gcc -O1 -g -Wall -Wextra -Werror -DSB_HOST -fsanitize=address,undefined -fno-sanitize-recover=all -I"$lib" -I"$here/kern" \
+            -o "$ob/shub-sim-test" "$root/starbite/tools/shub-sim-test.c" "$here/kern/shub.c" "$here/kern/shub_proto.c" "$lib/str.c" -lm
+        "$ob/shub-sim-test" "$shub_blob"
+    fi
 fi
 
 CFLAGS="-c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector -fpie -fvisibility=hidden \
