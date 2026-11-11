@@ -78,6 +78,80 @@ int sh_wifi_fetch(const char *url)
     hw_push();
     return 0;
 }
+/* Photos, Files, Music: a folder on this computer stands in for the microSD card, read only. The default is
+ * "card" beside the pack (a made-up card: tools/sbtk-fakecard.py); SBTK_CARD=DIR another folder, SBTK_CARD=none no
+ * card; SBTK_CARD_MS=N makes every call take N ms (a slow card: the progress, the frame times) */
+#include <dirent.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+static char card_root[600];
+static int card_up;
+static void card_init(const char *pak)
+{
+    const char *e = getenv("SBTK_CARD");
+    struct stat st;
+    if (e && !strcmp(e, "none")) return;
+    if (e) snprintf(card_root, sizeof card_root, "%s", e);
+    else {
+        const char *sl = strrchr(pak, '/');
+        snprintf(card_root, sizeof card_root, "%.*s/card", sl ? (int)(sl - pak) : 1, sl ? pak : ".");
+    }
+    if (stat(card_root, &st) || !S_ISDIR(st.st_mode)) card_root[0] = 0;
+}
+static void card_slow(void) { const char *e = getenv("SBTK_CARD_MS"); if (e) usleep((useconds_t)atoi(e) * 1000); }
+int sh_card_status(const char **why)
+{
+    if (why) *why = "";
+    return !card_root[0] ? SH_CARD_NONE : card_up ? SH_CARD_READY : SH_CARD_MOUNTING;
+}
+int sh_card_mount(void) { card_slow(); card_up = 1; return sh_card_status(0); }
+static int card_name_cmp(const struct dirent **a, const struct dirent **b) { return strcmp((*a)->d_name, (*b)->d_name); }
+int sh_card_list(const char *path, sh_dirent_t *out, int max, int first)
+{
+    char p[1200];
+    struct dirent **nl;
+    card_slow();
+    if (!card_up) return -1;
+    snprintf(p, sizeof p, "%s%s", card_root, path);
+    int n = scandir(p, &nl, 0, card_name_cmp), k = 0, at = 0;
+    if (n < 0) return -1;
+    for (int i = 0; i < n; i++) {
+        struct stat st;
+        char f[1600];
+        snprintf(f, sizeof f, "%s/%s", p, nl[i]->d_name);
+        if (strcmp(nl[i]->d_name, ".") && strcmp(nl[i]->d_name, "..") && strlen(nl[i]->d_name) < sizeof out[0].name && !stat(f, &st)) {
+            if (at++ >= first && k < max) {
+                struct tm tm;
+                time_t t = st.st_mtime;
+                localtime_r(&t, &tm);
+                memset(&out[k], 0, sizeof out[k]);
+                strcpy(out[k].name, nl[i]->d_name);
+                out[k].dir = S_ISDIR(st.st_mode);
+                out[k].size = out[k].dir ? 0 : (uint64_t)st.st_size;
+                out[k].date = (uint32_t)(tm.tm_year - 80) << 25 | (uint32_t)(tm.tm_mon + 1) << 21 | (uint32_t)tm.tm_mday << 16 |
+                              (uint32_t)tm.tm_hour << 11 | (uint32_t)tm.tm_min << 5 | (uint32_t)(tm.tm_sec / 2);
+                k++;
+            }
+        }
+        free(nl[i]);
+    }
+    free(nl);
+    return k;
+}
+int sh_card_read(const char *path, uint64_t off, void *dst, uint32_t len)
+{
+    char p[1200];
+    card_slow();
+    if (!card_up) return -1;
+    snprintf(p, sizeof p, "%s%s", card_root, path);
+    FILE *f = fopen(p, "rb");
+    if (!f) return -1;
+    fseek(f, (long)off, SEEK_SET);
+    int n = (int)fread(dst, 1, len, f);
+    fclose(f);
+    return n;
+}
 static int screen_off;
 void sh_slept(void) { screen_off = 1; fprintf(stderr, "sleep: the screen would go off now\n"); }
 
@@ -249,6 +323,8 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         frame++;
         rest_frames = motion ? 0 : rest_frames + 1;
         if (!motion) sh_idle();     /* between frames: on the phone, the time left in the frame */
+        /* the phone's refresh timer (the Clock's digits, the card's work a turn at a time): a frame if it drew */
+        if (!motion && sh_next_update(t) >= 0 && sh_refresh(t)) tk_comp_frame(c, 0, 0);
         if (t > total + 8000) break;
     }
     (void)rest_frames;
@@ -368,6 +444,7 @@ int main(int argc, char **argv)
     uint32_t len;
     uint8_t *pak = readall(argv[1], &len);
     if (!strcmp(argv[2], "bench")) { bench(); return 0; }
+    card_init(argv[1]);
     if (!tk_pack_open(pak, len)) { fprintf(stderr, "bad pack\n"); return 1; }
     static tk_comp c;
     /* the phone's frame buffers are not in its UI heap (the old UI's back buffer, the framebuffer) */
@@ -389,7 +466,7 @@ int main(int argc, char **argv)
     if (!strcmp(argv[2], "still") && argc >= 4) {
         for (int i = 4; i < argc; i++) apply_state(argv[i]);
         tk_comp_frame(&c, 0, 1);
-        fprintf(stderr, "frame: %.2f ms\n", c.last_us / 1000.0);
+        fprintf(stderr, "frame: %.2f ms; heap %.1f MB (peak %.1f MB)\n", c.last_us / 1000.0, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
         write_ppm(argv[3], &c.panel);
         return 0;
     }

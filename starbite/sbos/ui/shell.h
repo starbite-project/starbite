@@ -85,6 +85,27 @@ const char *sh_wifi_why(void);          /* the kernel's reason right now (after 
 int sh_wifi_power(int on);
 int sh_wifi_scan(void);
 int sh_wifi_join(const char *ssid, const char *pass);   /* pass: NULL or "" for open or known networks */
-int sh_wifi_fetch(const char *url);                      /* P3c: the year (the Calendar's month) */      /* the next alarm for the lock's widget (on 0: "No alarm") */
+int sh_wifi_fetch(const char *url);
+/* Photos, Files, Music (shell_media.inc): the microSD card's exFAT partition, read only, from the platform (the
+ * kernel: kern/files.c; the host: a folder standing in for the card). Nothing here writes, and the card's other
+ * partition (the OS store) is never read. The card is slow: the shell calls these from idle turns only, never from a
+ * touch (sh_card_status alone never touches the card).
+ *   sh_card_status  the state now; *why a failure in words ("" if none)
+ *   sh_card_mount   brings the card up (blocks, once: while the state is SH_CARD_MOUNTING); the state after
+ *   sh_card_list    entries [first, first + max) of a folder ("/" the root): how many were stored (fewer than max:
+ *                   the folder's end), < 0 the folder could not be read
+ *   sh_card_read    up to len bytes of a file from off: how many were read (0 past its end), < 0 an error */
+enum { SH_CARD_MOUNTING, SH_CARD_READY, SH_CARD_NONE, SH_CARD_ERROR };
+typedef struct {
+    char name[128];             /* UTF-8 */
+    uint64_t size;
+    int dir;
+    uint32_t date;              /* last modified, exFAT's stamp (0 unknown): year - 1980 << 25 | month << 21 | day << 16 |
+                                 * hour << 11 | minute << 5 | seconds / 2 */
+} sh_dirent_t;
+int sh_card_status(const char **why);
+int sh_card_mount(void);
+int sh_card_list(const char *path, sh_dirent_t *out, int max, int first);
+int sh_card_read(const char *path, uint64_t off, void *dst, uint32_t len);                      /* P3c: the year (the Calendar's month) */      /* the next alarm for the lock's widget (on 0: "No alarm") */
 
 #endif

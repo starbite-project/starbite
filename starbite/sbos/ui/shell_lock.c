@@ -1306,12 +1306,12 @@ static const appdef APPS[] = {
     { "weather", "Weather", 0x1d2440, 1, { { "", 2, { { "Weather needs the internet", "" }, { "Not available yet", "" } } } } },
     { "clock", "Clock", 0x1d2440, 1, { { "Now", 2, { { "@time", "" }, { "@date", "" } } } } },
     { "camera", "Camera", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
-    { "photos", "Photos", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
-    { "music", "Music", 0x1d2440, 1, { { "", 1, { { "No music on this phone", "" } } } } },
+    { "photos", "Photos", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },       /* photos, music, files: shell_media.inc */
+    { "music", "Music", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
     { "notes", "Notes", 0x1d2440, 1, { { "", 1, { { "No notes yet", "" } } } } },
     { "calc", "Calculator", 0x1d2440, 1, { { "", 1, { { "Not in this version yet", "" } } } } },
     { "contacts", "Contacts", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
-    { "files", "Files", 0x1d2440, 1, { { "", 1, { { "Not in this version yet", "" } } } } },
+    { "files", "Files", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
     { "light", "Flashlight", 0x1d2440, 1, { { "", 2, { { "Flashlight", "@torch" }, { "Hold the torch button on the lock screen", "" } } } } },
     { "battery", "Battery", 0x1d2440, 1, { { "Now", 3, { { "Charge", "@pct" }, { "Charging", "@chg" }, { "Battery temperature", "@temp" } } } } },
     { "terminal", "Terminal", 0x1d2440, 1, { { "", 1, { { "Linux apps run in Starbite OS", "" } } } } },
@@ -1629,6 +1629,17 @@ static void page_camera(dc *d)
  * drawn in the strips; the stopwatch's and the timer's digits and the buttons are three small layers, redrawn
  * only when their text changes (the platform asks sh_next_update when to come back) ---- */
 static int is_app(const char *k);
+/* shell_media.inc: Photos, Files and Music (the microSD card, read only) */
+static int med_is(const char *k);
+static void med_build(void);
+static void med_close(void);
+static int med_layers(tk_layer **o);
+static int med_tick(float dt);
+static int med_moving(void);
+static int med_pending(void);
+static int med_work(uint32_t us, int slow);
+static void med_touch(int ph, float x, float y, float t);
+static int med_set(const char *what, const char *key, float v);
 static float toast_left;
 static tk_layer apsw, aptm, apctl;
 static struct { int sw_run, laps, tm_run, sw_ds, tm_s, ctl_ver, ctl_drawn; float sw_t0, sw_acc, lap_at, tm_end; } CLK = { 0, 0, 0, -1, -1, 1, 0, 0, 0, 0, 0 };
@@ -1765,9 +1776,16 @@ int sh_next_update(float t)
         if (nx < 1) nx = 1;
         if (best < 0 || nx < best) best = nx;
     }
+    if (med_pending() && (best < 0 || best > 4)) best = 4;      /* the card's work, a turn at a time */
     return (int)best;
 }
-int sh_refresh(float t) { now_ms = t; return clk_update(t); }
+int sh_refresh(float t)
+{
+    now_ms = t;
+    int ch = clk_update(t);
+    if (med_pending() && !sh_moving()) ch |= med_work(10000, 1);
+    return ch;
+}
 
 /* ---- P2z: the Calculator (iOS's layout: the display right-aligned, the keys in five rows: grey functions, dark
  * digits, orange operators). The keys are the page; the display a small layer redrawn per key ---- */
@@ -2355,12 +2373,13 @@ static int app_own(int a)
     return !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
            !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
            !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes") ||
-           !tk_strcmp(k, "search") || info_of(k);
+           !tk_strcmp(k, "search") || info_of(k) || med_is(k);
 }
 static void own_strip(int a, int i)
 {
     const char *k = APPS[a].k;
     const infopg *inf = info_of(k);
+    if (med_is(k)) { relayer(&appst[i]); return; }      /* shell_media.inc: its own layers (med_build), no strips */
     dc d = strip_dc(i, "app-page");
     if (!d.b->px) return;
     if (!tk_strcmp(k, "phone")) page_phone(&d);
@@ -2382,6 +2401,7 @@ static void own_extras(int a)
 {
     const char *k = APPS[a].k;
     build_apnum();
+    if (med_is(k)) med_build();
     if (!tk_strcmp(k, "calc")) build_calc();
     if (!tk_strcmp(k, "notes")) build_note();
     if (!tk_strcmp(k, "search")) build_search();
@@ -2593,6 +2613,7 @@ static void app_finish_close(void)
     relayer(&apcalc); apcalc.hidden = 1;
     relayer(&apnote); apnote.hidden = 1;
     relayer(&apsrch); apsrch.hidden = 1;
+    med_close();
     tk_bmp_free(&sfield);
     relayer(&apsb); apsb.hidden = 1;
     SR.q[0] = 0; SR.shift = 0; SR.num = 0;                      /* Search opens empty */
@@ -2991,6 +3012,8 @@ void sh_cell(const sh_cell_t *c)
 
 #include "shell_wifi.inc"
 #include "shell_cell.inc"
+#include "shell_media_img.inc"
+#include "shell_media.inc"
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
@@ -3068,8 +3091,8 @@ static void relink(void)
     link(&root, r, 14);
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb };
     link(&appg, ag, 12);
-    tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
-    link(&appc, st, NST);
+    tk_layer *st[NST + 32] = { &appst[0], &appst[1], &appst[2], &appst[3] };
+    link(&appc, st, NST + med_layers(st + NST));
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
     link(&lockg, lk, 11);
     tk_layer *ls[4 * NG + 6];
@@ -3308,6 +3331,7 @@ void sh_set(const char *what, const char *key, float v)
     } else if (!tk_strcmp(what, "hint")) {
         hint_a = v;
         apply_tweens();
+    } else if (what[0] == 'm' && med_set(what, key, v)) {
     } else if (!tk_strcmp(what, "hold")) {
         int i = key && key[0] == 'e';
         Q[i].grp.sx = Q[i].grp.sy = v > 0 ? 1.22f : 1;
@@ -3317,7 +3341,7 @@ void sh_set(const char *what, const char *key, float v)
 }
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
-enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL };
+enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL, G_MEDIA };
 static struct {
     int kind, arg, arg2, moved;
     float x0, y0, base, t0;
@@ -3377,6 +3401,7 @@ void sh_touch(int phase, float x, float y, float t)
         if (!locked && AP.on) {
             /* an open app: the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
             if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
+            else if (!sp_app.live && med_is(APPS[AP.a].k)) { T.kind = G_MEDIA; med_touch(0, x, y, t); }
             else if (!sp_app.live) {
                 /* a tap on the app's page (a key lights while the finger is on it) */
                 T.kind = G_APPTAP;
@@ -3448,6 +3473,11 @@ void sh_touch(int phase, float x, float y, float t)
         else if (y >= LIST_TOP && y <= LIST_TOP + LIST_H) { T.kind = G_LIST; T.base = scroll; sp_scroll.live = 0; scroll_momentum = 0; }
         else { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
         tk_tracker_add(&T.tr, y, t);
+        return;
+    }
+    if (T.kind == G_MEDIA) {                 /* shell_media.inc: its lists, the viewer */
+        med_touch(phase, x, y, t);
+        if (phase == 2) T.kind = G_NONE;
         return;
     }
     if (phase == 1) {
@@ -3738,6 +3768,7 @@ int sh_tick(float dt, float t)
         }
         mv = 1;
     }
+    mv |= med_tick(dt);
     if (em_t < 1) {
         em_t = tk_minf(1, em_t + dt / .7f);
         em_step(tk_bezier(.25f, .1f, .25f, 1, em_t));
@@ -3981,6 +4012,6 @@ int sh_moving(void)
             T.kind == G_APP || sp_app.live || booting || toast_t < 1 || em_t < 1 || T.kind == G_CCEM ||
             T.kind == G_CCCELL || CF.down || CF.a != CF.at || SL.dir;
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
-    m |= sp_focus.live || sp_thumb.live;
+    m |= sp_focus.live || sp_thumb.live || med_moving();
     return m;
 }
