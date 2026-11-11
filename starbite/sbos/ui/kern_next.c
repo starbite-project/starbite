@@ -146,7 +146,6 @@ static int ready, baking, need_full, ticking, boosted;
 static uint64_t last_tick, boot_t0;
 /* the frame statistics of the current gesture (logged per film in the self test, per gesture otherwise) */
 static struct { uint32_t n, nhalf, over16, maxus, nboost, nwait; uint64_t sumus, sumwait; uint32_t hist[64]; uint8_t ms[120]; } FS;
-static int frame_log;                        /* the self test: one line per frame of the films it names */
 
 static void log_mb(const char *what, uint64_t v)
 {
@@ -363,7 +362,7 @@ static void stats_add(void)
     FS.n++;
     FS.nhalf += comp.last_half;
     FS.nboost += boosted;
-    if (frame_log && us > 12000) {               /* only the slow frames (pmsg keeps the last 16 KB) */
+    if (us > 16700) {                             /* P2u: the frames over budget only, in every image (pmsg: 16 KB) */
         struct ub u;
         ub_init(&u);
         ub_s(&u, "next: f ");
@@ -374,7 +373,19 @@ static void stats_add(void)
         ub_dec(&u, comp.us_comp);
         ub_s(&u, " us present ");
         ub_dec(&u, comp.us_present);
-        ub_s(&u, " us");
+        /* P2u: where a slow frame's time went: the half canvas catching up, half copies made in the frame, the
+         * catch-up of an older buffer (inside present), the rects, the A55's clock */
+        ub_s(&u, " (idle ");
+        ub_dec(&u, comp.us_idle);
+        ub_s(&u, " halfs ");
+        ub_dec(&u, comp.us_halfs);
+        ub_s(&u, " catch ");
+        ub_dec(&u, comp.us_catch);
+        ub_s(&u, " rects ");
+        ub_dec(&u, (uint64_t)comp.nd);
+        ub_s(&u, " MHz ");
+        ub_dec(&u, hw_a55_khz() / 1000);
+        ub_s(&u, ")");
         sb_log(u.b);
     }
     FS.sumus += us;
@@ -750,7 +761,6 @@ static void film_start(int film)
     F.down = 0;
     F.s0 = 0;
     F.t0 = sb_ms();
-    frame_log = 1;                               /* every film: its slow frames */          /* the unlock and the focus sheet: every frame's split */
     switch (film) {
     case 0: F.s = S_UNLOCK; F.n = 3; break;
     case 1: F.s = S_GROUP; F.n = 9; break;
@@ -829,7 +839,6 @@ int next_selftest_step(void)
     }
     if (ticking || sh_moving()) return 1;          /* let it settle */
     stats_log(FILM_NAME[F.film]);
-    frame_log = 0;
     if (F.film == 10 && !K.screen_on) {
         sb_log("selftest: FAILED: next: the sleep film ended with the screen off");
         st_failed = 1;
