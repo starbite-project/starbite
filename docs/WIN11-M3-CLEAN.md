@@ -727,3 +727,16 @@ tools/win/build.sh kmdf, test-signed: `build/woa/cores/touchdiag-1/s6touchdiag.s
 Parameters\SbOrigImagePath; restore puts it back) and decodes the Diag* values. Test: A55 then big-core unattended
 (self-test, idle IRQs), then one attended drag on each row. Request: notes folder `win-m3-clean-touchdiag-request.md`.
 hive-localdumps.py now takes EXE names (e.g. GeometryDash.exe); GD pull list: `win-m3-clean-gd-pulls.md`.
+
+## 38. big4i hung at M3 core 0's start; big4j uses Starbite OS's order (M3EARLY=7)
+
+big4i-run1 (attended, 15:07): stuck at "starting firmware"; zone 0 ends with `=M3S core 3 rc 0 ...`, nothing for core 0:
+core 0's start (PMU defaults, FlexPMU steps, CPU_ON 0x100, 200 ms wait) took the SoC down, as woa saw. Windows never
+started, hive clean. Starbite OS starts all four reliably the other way round: FlexPMU words reset, PMU defaults,
+core 0x100 first as the cluster's first core (APM2AP mailbox 0x14100010 bit 24 = 0), a core-on step for every later core.
+v18 (`M3EARLY=7`): the same order at dispatch (core 0 into its parking stub before core 1's CPU_ON, then 2 and 3),
+with a `=M3P` line before each FlexPMU write and each CPU_ON (rings uncached in UEFI). EParkCore factored out of
+EParkSecondaries; levels 5/6 keep their behaviour. The module no longer fits src38's volume without FV_GROW, so there
+is no SOLO image this time; `windows-big4j.uefi` (86bf0192...) = t32s-nocache + this module, FV grown as big3i.
+Built with explicit (UINTN) register addresses (unsigned long is 32-bit in this ABI). Request:
+`win-m3-clean-big4j-request.md`. Not run.
