@@ -390,9 +390,11 @@ static nir_def *lens_px(nir_builder *b, nir_def *q, nir_def *fx, nir_def *fy)
    /* the backdrop at p + o */
    nir_def *v8 = ld4(b, nir_iadd_imm(b, q, 128)), *v9 = ld4(b, nir_iadd_imm(b, q, 144));
    nir_def *g = bil_bd(b, p64(b, v8, 0), ch(b, v8, 2), ch(b, v9, 0), ch(b, v9, 1), ch(b, v8, 3), nir_fadd(b, fx, ox), nir_fadd(b, fy, oy));
-   nir_def *rgb = nir_vec3(b, ch(b, g, 0), ch(b, g, 1), ch(b, g, 2));
+   nir_def *rgb0 = nir_vec3(b, ch(b, g, 0), ch(b, g, 1), ch(b, g, 2));
+   nir_def *Y = nir_fdot3(b, rgb0, nir_imm_vec3(b, .2126f, .7152f, .0722f));
+   /* v10: the saturation (+116: 1.2 over a live backdrop, 1 over the wallpaper's, already saturated) */
+   nir_def *rgb = nir_fsat(b, nir_ffma(b, nir_fsub(b, rgb0, Y), ch(b, v7, 1), Y));
    /* the tone: .82 c + mix(.04, .18, sat((Y - .40) x 10)) */
-   nir_def *Y = nir_fdot3(b, rgb, nir_imm_vec3(b, .2126f, .7152f, .0722f));
    nir_def *lt = nir_fsat(b, nir_fmul_imm(b, nir_fadd_imm(b, Y, -.40), 10.0));
    nir_def *add = nir_fadd_imm(b, nir_fmul_imm(b, lt, .14), .04);
    nir_def *v = nir_ffma(b, rgb, nir_imm_float(b, .82f), add);
@@ -696,6 +698,13 @@ static const struct { unsigned sh, w, h; const char *name; } jobs[] = {
    { SH_UP, 1440, 2960, "up_full" },
    { SH_COMP2, 1440, 2960, "comp2_full" },
    { SH_UP2X, 720, 1480, "up2x_half" },
+   /* v10: comp2 dispatched for half and quarter frames (a big move's, a live backdrop's: the full grid's extra
+    * workgroups each exited, but were still launched); the live backdrop's blur at 1/8 and 1/16 */
+   { SH_COMP2, 720, 1480, "comp2_half" },
+   { SH_COMP2, 360, 740, "comp2_quarter" },
+   { SH_DOWN, 180, 370, "down_eighth" },
+   { SH_DOWN, 90, 185, "down_16th" },
+   { SH_UP, 180, 370, "up_eighth" },
 };
 #define NJOB (sizeof(jobs) / sizeof(jobs[0]))
 
