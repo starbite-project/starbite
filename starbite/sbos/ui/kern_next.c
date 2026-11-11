@@ -238,9 +238,18 @@ static void status_now(void)
 #define DMA_CH0 0x16071000UL                         /* DPU_DMA channel 0 (S-Boot's fetch channel) */
 #define SCAN_B 0xcd200000UL                          /* the second buffer: free RAM after S-Boot's framebuffer, in the
                                                       * non-cacheable window (mmu.c), below 4 GiB (32-bit base) */
-static uint32_t scan_pa[2] = { SB_FB, SCAN_B };
+#define SCAN_C 0xce400000UL                          /* P2t: the third (to 0xcf442800; reserved memory starts at
+                                                      * 0xe1900000) */
+static uint32_t scan_pa[3] = { SB_FB, SCAN_B, SCAN_C };
+/* P2t, three buffers: DECON shows scan_shown, the last flip asked for scan_cur (queued until the next TE); a frame
+ * goes into the third, so it never waits for the display (P2s waited 4-6 ms on average, 61-91 times a film: those
+ * frames missed their TE). A flip asked while one is still queued replaces it (that frame is never shown: frames
+ * come at most 16-17 ms apart, so only when the timer and the TE drift together). */
+static int scan_shown, buf_fno[3] = { 0, -1, -1 };
+static uint32_t scan_fno = 1;
 static int flip_on, scan_cur, scan_win;
-static unsigned flips, flip_waits, flip_timeouts;
+static unsigned flips, flip_waits, flip_timeouts, flips_replaced;
+static int scan_next;
 static uint32_t drd(uintptr_t a) { uint32_t v = *(volatile uint32_t *)a; __asm__ volatile("dmb oshld" ::: "memory"); return v; }
 static void dwr(uintptr_t a, uint32_t v) { __asm__ volatile("dmb oshst" ::: "memory"); *(volatile uint32_t *)a = v; }
 static int flip_pending(void) { return (drd(DECON + 0x60) & (1U << scan_win)) != 0; }
@@ -255,9 +264,9 @@ static void scan_point(uint32_t pa)
 static void (*prev_before_reset)(void), (*prev_crash)(void);
 static void scan_home(void)
 {
-    if (flip_on && scan_cur) scan_point(SB_FB);
+    if (flip_on && (scan_cur || scan_shown)) scan_point(SB_FB);
     flip_on = 0;
-    scan_cur = 0;
+    scan_cur = scan_shown = 0;
 }
 static void home_before_reset(void) { scan_home(); if (prev_before_reset) prev_before_reset(); }
 static void home_crash(void) { scan_home(); if (prev_crash) prev_crash(); }
@@ -274,28 +283,38 @@ static int scan_identify(void)
     if (drd(DMA_CH0 + 0x40) != SB_FB) return -5;
     return 0;
 }
-/* the compositor's acquire: the buffer DECON does not read (the last flip latched first; screen off: no wait) */
-static uint32_t *scan_acquire(void *ctx)
+/* the compositor's acquire: the buffer DECON neither shows nor has queued, the oldest of those (no wait: three
+ * buffers); its age in presented frames. A wait only if the bookkeeping says none is free (never expected). */
+static uint32_t *scan_acquire(void *ctx, int *age)
 {
     (void)ctx;
-    if (flip_on && flip_pending() && K.screen_on) {
+    if (!flip_on) { *age = 0; return (uint32_t *)SB_FB; }
+    if (!flip_pending()) scan_shown = scan_cur;      /* the last flip latched */
+    int b = -1;
+    for (int i = 0; i < 3; i++)
+        if (i != scan_shown && i != scan_cur && (b < 0 || buf_fno[i] < buf_fno[b])) b = i;
+    if (b < 0) {                                     /* shown == queued == the only other: wait for the latch */
         flip_waits++;
         uint64_t t0 = sb_us();
-        while (flip_pending() && sb_us() - t0 < 50000) sb_udelay(20);
-        if (flip_pending()) {
-            /* DECON does not take flips: one buffer again, everything redrawn into it */
+        while (flip_pending() && sb_us() - t0 < 50000 && K.screen_on) sb_udelay(20);
+        if (flip_pending() && K.screen_on) {
             flip_timeouts++;
             sb_log("next: flips: DECON did not latch in 50 ms; one buffer from now on (tearing possible)");
             scan_point(SB_FB);
             flip_on = 0;
-            scan_cur = 0;
+            scan_cur = scan_shown = 0;
             comp.acquire = 0;
             comp.panel.px = (uint32_t *)SB_FB;
             need_full = 1;
+            *age = 0;
             return (uint32_t *)SB_FB;
         }
+        scan_shown = scan_cur;
+        for (int i = 0; i < 3; i++) if (i != scan_shown && (b < 0 || buf_fno[i] < buf_fno[b])) b = i;
     }
-    return (uint32_t *)(uintptr_t)scan_pa[scan_cur ^ 1];
+    *age = buf_fno[b] < 0 ? 0 : (int)(scan_fno - 1 - (uint32_t)buf_fno[b]);
+    scan_next = b;
+    return (uint32_t *)(uintptr_t)scan_pa[b];
 }
 static void scan_init(void)
 {
@@ -318,7 +337,7 @@ static void scan_init(void)
     ub_dec(&u, (uint64_t)scan_win);
     ub_s(&u, ", trigger 0x");
     ub_hexn(&u, drd(DECON + 0x70), 8);
-    ub_s(&u, "); frames go to 0xcc000000 / 0xcd200000 in turn, shown at the panel's next TE");
+    ub_s(&u, "); frames go to 0xcc000000 / 0xcd200000 / 0xce400000, shown at the panel's next TE");
     sb_log(u.b);
 }
 
@@ -327,7 +346,9 @@ static void present(void)
 {
     if (comp.last_px) {
         if (flip_on && comp.acquire) {
-            scan_cur ^= 1;
+            if (flip_pending()) flips_replaced++;    /* the queued frame is never shown */
+            scan_cur = scan_next;
+            buf_fno[scan_cur] = (int)scan_fno++;
             scan_point(scan_pa[scan_cur]);
             flips++;
         } else
@@ -432,7 +453,8 @@ static void stats_log(const char *what)
     ub_dec(&u, FS.sumwait / FS.n / 100 % 10);
     ub_s(&u, " ms; flips ");
     ub_dec(&u, flips);
-    ub_s(&u, flip_on ? " (two buffers)" : " (one buffer)");
+    ub_s(&u, flip_on ? " (three buffers), replaced while queued " : " (one buffer)");
+    if (flip_on) ub_dec(&u, flips_replaced);
     if (flip_timeouts) { ub_s(&u, "; latch timeouts "); ub_dec(&u, flip_timeouts); }
     sb_log(u.b);
 }
@@ -440,8 +462,18 @@ static void stats_log(const char *what)
 /* one frame: the springs and transitions advanced by the real time since the last, composed, presented */
 static int slept_now;                        /* the shell's fade to black ended: the screen off after its frame */
 void sh_slept(void) { slept_now = 1; }
+static uint64_t tick3;                      /* the next frame's time in thirds of a ms: 16.67 ms apart (the TE's) */
 static void frame(void)
 {
+    /* the next frame first (a one-shot at the next 16.67 ms step: P2t, the panel's rate, so with three buffers
+     * a frame is neither replaced while queued nor shown twice, except as the two clocks drift) */
+    {
+        uint64_t n3 = sb_ms() * 3;
+        if (!tick3) tick3 = n3;
+        tick3 += 50;
+        if (tick3 <= n3) tick3 = n3 + 50;           /* fell behind: from now */
+        kt_set(KT_UI, 20, tick3 / 3, 0, 0);
+    }
     if (!boosted) boost(1);                      /* a wake: the kernel set the screen-on clock after the hook */
     uint64_t now = sb_ms();
     float dt = last_tick ? (float)(now - last_tick) / 1000.0f : 1.0f / 60;
@@ -479,7 +511,8 @@ static void start_ticking(void)
     if (ticking) return;
     ticking = 1;
     last_tick = sb_ms();
-    kt_set(KT_UI, 20, sb_ms(), 16, 1);
+    tick3 = 0;
+    kt_set(KT_UI, 20, sb_ms() + 16, 0, 0);
 }
 
 /* ---- sleep and wake (P2r): the Power key's screen off is the shell's fade to black first, the screen on its fade
@@ -520,7 +553,8 @@ static void next_screen(int on)
     workers_start();
     ticking = 1;
     last_tick = 0;
-    kt_set(KT_UI, 20, sb_ms(), 16, 1);
+    tick3 = 0;
+    kt_set(KT_UI, 20, sb_ms() + 16, 0, 0);
 }
 
 /* ---- P4: the GPU compositor (kern/gpucomp.c): the frames on the Mali-G72, full resolution ---------------------- */

@@ -183,6 +183,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
             fprintf(log, " hash %016llx", (unsigned long long)hh);
         }
         fputc('\n', log);
+        if (getenv("SBTK_DUMP") && frame == atoi(getenv("SBTK_DUMP"))) write_ppm(getenv("SBTK_DUMPTO"), &c->panel);
         if (none) ;
         else if (half) {
             tk_bmp_down2(&h, &c->panel);
@@ -284,9 +285,27 @@ static double memwalk(tk_layer *l, int depth)
     return t;
 }
 
-static uint32_t *dbl[2];
-static int dbl_cur;
-static uint32_t *dbl_acquire(void *ctx) { (void)ctx; dbl_cur ^= 1; return dbl[dbl_cur]; }
+/* SBTK_DBL=2: two buffers in turn; 3: three, as the phone (P2t): the display shows `shown`, the last flip `req`
+ * latches unless the frame number says it missed a TE (every 5th, every 7th: a pattern), the free one is the oldest
+ * that is neither */
+static uint32_t *dbl[3];
+static int nbuf, shown, req = 0, bfno[3] = { 0, -1, -1 }, fno_h = 1;
+static uint32_t *dbl_acquire(void *ctx, int *age)
+{
+    (void)ctx;
+    if (nbuf == 2) {
+        int b = req ^ 1;
+        *age = bfno[b] < 0 ? 0 : fno_h - 1 - bfno[b];
+        req = b; bfno[b] = fno_h++;
+        return dbl[b];
+    }
+    if (fno_h % 5 && fno_h % 7) shown = req;          /* the last flip latched (else it is still queued) */
+    int b = -1;
+    for (int i = 0; i < 3; i++) if (i != shown && i != req && (b < 0 || bfno[i] < bfno[b])) b = i;
+    *age = bfno[b] < 0 ? 0 : fno_h - 1 - bfno[b];
+    req = b; bfno[b] = fno_h++;
+    return dbl[b];
+}
 
 int main(int argc, char **argv)
 {
@@ -301,8 +320,10 @@ int main(int argc, char **argv)
                       getenv("SBTK_HEAP_MB") ? calloc((size_t)TK_W * TK_H, 4) : 0)) return 1;
     { extern int getenv_dbg; getenv_dbg = getenv("SBTK_DBG") != 0; }
     if (getenv("SBTK_DBL")) {                  /* the phone's two scanout buffers (P2r): presents alternate */
+        nbuf = atoi(getenv("SBTK_DBL")) == 3 ? 3 : 2;
         dbl[0] = c.panel.px;
         dbl[1] = calloc((size_t)TK_W * TK_H, 4);
+        dbl[2] = calloc((size_t)TK_W * TK_H, 4);
         c.acquire = dbl_acquire;
     }
     if (getenv("SBTK_CORES")) { ncores = atoi(getenv("SBTK_CORES")); if (ncores > 1) { c.par = host_par; tk_par = host_par; } }
