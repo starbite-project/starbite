@@ -224,6 +224,7 @@ const char *sbm_act_name(uint8_t a)
     case SBM_ACT_EDGE: return "EDGE";
     case SBM_ACT_UMTS: return "UMTS";
     case SBM_ACT_LTE: return "LTE";
+    case SBM_ACT_NR: return "5G";
     case 0xFF: return "any";
     default: return "?";
     }

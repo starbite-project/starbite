@@ -595,8 +595,10 @@ static void simtest(const char *key)
     }
     registered = r == 1;
     rat_reg = sn.rat;
-    sbm_fmt(s, sizeof(s), "REG: %s after %u ms: CS %s, PS %s, %s", r == 1 ? "registered" : "NOT registered", reg_ms,
-            sn.cs == 0xFF ? "?" : sbm_reg_name(sn.cs), sn.ps == 0xFF ? "?" : sbm_reg_name(sn.ps), sbm_act_name(sn.rat));
+    sbm_fmt(s, sizeof(s), "REG: %s after %u ms: CS %s, PS %s, %s (act 0x%02x); reject cause CS %u PS %u",
+            r == 1 ? "registered" : "NOT registered", reg_ms, sn.cs == 0xFF ? "?" : sbm_reg_name(sn.cs),
+            sn.ps == 0xFF ? "?" : sbm_reg_name(sn.ps), sbm_act_name(sn.rat), sn.rat, mo.b.cell.cs.reject,
+            mo.b.cell.ps.reject);
     line(s);
     if (r == 1) {
         /* 4. hold: the signal while registered */

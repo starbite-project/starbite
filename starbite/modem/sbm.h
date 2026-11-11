@@ -451,7 +451,8 @@ static inline int sbm_gen_res_ok(const struct sbm_gen_res *r) { return (r->code 
 #define SBM_ACT_GPRS        0x02
 #define SBM_ACT_EDGE        0x03
 #define SBM_ACT_UMTS        0x04
-#define SBM_ACT_LTE         0x07       /* (newer firmwares; confirm on a capture with a SIM) */
+#define SBM_ACT_LTE         0x21       /* libsec-ril's NET_REGIST decode (2026-11-11): 0x21 LTE, 0x24 NR; 7 = unknown */
+#define SBM_ACT_NR          0x24
 
 struct sbm_reg {
     uint8_t act, domain, state, edge, reject;
