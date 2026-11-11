@@ -1629,6 +1629,132 @@ int sh_next_update(float t)
 }
 int sh_refresh(float t) { now_ms = t; return clk_update(t); }
 
+/* ---- P2z: the Calculator (iOS's layout: the display right-aligned, the keys in five rows: grey functions, dark
+ * digits, orange operators). The keys are the page; the display a small layer redrawn per key ---- */
+static tk_layer apcalc;
+static struct { double acc, cur; int op, entering, err, has_dot, ndig, frac; } CAL;
+static const char *const CK[19] = { "AC", "\xc2\xb1", "%", "\xc3\xb7", "7", "8", "9", "\xc3\x97", "4", "5", "6", "\xe2\x88\x92",
+                                    "1", "2", "3", "+", "0", ".", "=" };
+static void calc_key_rect(int i, float *x, float *y, float *w)
+{
+    int r = i < 16 ? i / 4 : 4, c = i < 16 ? i % 4 : i == 16 ? 0 : i == 17 ? 2 : 3;
+    *x = 16 + 92 * c;
+    *y = 318 + 90 * r;
+    *w = i == 16 ? 170 : 78;
+}
+static void page_calc(dc *d)
+{
+    for (int i = 0; i < 19; i++) {
+        float x, y, w;
+        calc_key_rect(i, &x, &y, &w);
+        int fn = i < 3, op = (i % 4 == 3 && i < 16) || i == 18;
+        d_rrect(d, x, y, w, 78, 39, op ? tk_hex(0xff9f0a, 1) : fn ? tk_hex(0xa5a5a5, 1) : tk_hex(0x333333, 1));
+        float tw0 = tw(TK_IT500, 32, CK[i], 0, 0);
+        float tx = i == 16 ? x + 31 : x + (78 - tw0) / 2;
+        d_text(d, TK_IT500, 32, tx, bl(TK_IT500, 32, y + 19), CK[i], 0, 0, fn ? tk_hex(0x000000, 1) : INK, 0);
+    }
+}
+static int calc_fmt(char *b, double v)
+{
+    if (v != v || v > 1e15 || v < -1e15) { tk_memcpy(b, "Error", 6); return 5; }
+    int n = 0;
+    if (v < 0) { b[n++] = '-'; v = -v; }
+    double ip = (double)(long long)v, fp = v - ip;
+    long long I = (long long)ip;
+    char t[24];
+    int k = 0;
+    do { t[k++] = (char)('0' + I % 10); I /= 10; } while (I);
+    int intd = k;
+    while (k) b[n++] = t[--k];
+    int room = 9 - intd;                    /* nine digits in all, as iOS's portrait display */
+    if (room > 0) {
+        long long f = 1;
+        for (int i = 0; i < room; i++) f *= 10;
+        long long F = (long long)(fp * (double)f + .5);
+        if (F >= f) F = f - 1;
+        int m = room;
+        while (m > 0 && F % 10 == 0) { F /= 10; m--; }
+        if (m > 0) {
+            b[n++] = '.';
+            char u[16];
+            for (int i = m - 1; i >= 0; i--) { u[i] = (char)('0' + F % 10); F /= 10; }
+            for (int i = 0; i < m; i++) b[n++] = u[i];
+        }
+    }
+    b[n] = 0;
+    return n;
+}
+static void build_calc(void)
+{
+    relayer(&apcalc);
+    char b[32];
+    if (CAL.err) tk_memcpy(b, "Error", 6);
+    else {
+        int n = calc_fmt(b, CAL.cur);
+        if (CAL.entering && CAL.has_dot && CAL.frac == 0) { b[n++] = '.'; b[n] = 0; }
+        else if (CAL.entering && CAL.has_dot && CAL.frac > 0) {   /* keep the typed trailing zeros */
+            int have = 0;
+            for (int i = 0; b[i]; i++) if (b[i] == '.') { have = (int)tk_strlen(b + i + 1); break; }
+            if (!have) { b[n++] = '.'; }
+            for (; have < CAL.frac && n < 30; have++) b[n++] = '0';
+            b[n] = 0;
+        }
+    }
+    float size = tk_strlen(b) > 7 ? 64 : 84;
+    float w = tw(TK_IT400, size, b, 0, TK_TNUM);
+    dc d = mk(&apcalc, "calc-display", 20, 186, 350, 118, 0, 0);
+    d_text(&d, TK_IT400, size, 362 - w, bl(TK_IT400, size, 300 - size * 1.21f), b, 0, TK_TNUM, INK, 0);
+    apcalc.hidden = 0;
+    relink();
+}
+static double calc_apply(double a, double b, int op, int *err)
+{
+    switch (op) {
+    case 1: if (b == 0) { *err = 1; return 0; } return a / b;
+    case 2: return a * b;
+    case 3: return a - b;
+    case 4: return a + b;
+    default: return b;
+    }
+}
+static void calc_tap(float x, float y)
+{
+    int k = -1;
+    for (int i = 0; i < 19; i++) {
+        float kx, ky, kw;
+        calc_key_rect(i, &kx, &ky, &kw);
+        if (x >= kx && x < kx + kw && y >= ky && y < ky + 78) { k = i; break; }
+    }
+    if (k < 0) return;
+    const char *c = CK[k];
+    if (k == 0) { CAL.acc = CAL.cur = 0; CAL.op = 0; CAL.entering = CAL.err = CAL.has_dot = CAL.ndig = CAL.frac = 0; }
+    else if (CAL.err) return;
+    else if (k == 1) { CAL.cur = -CAL.cur; }
+    else if (k == 2) { CAL.cur /= 100; CAL.entering = 0; }
+    else if (c[0] >= '0' && c[0] <= '9' && !c[1]) {
+        if (!CAL.entering) { CAL.cur = 0; CAL.entering = 1; CAL.has_dot = CAL.ndig = CAL.frac = 0; }
+        if (CAL.ndig >= 9) return;
+        int dg = c[0] - '0';
+        if (CAL.has_dot) {
+            double f = 1;
+            for (int i = 0; i <= CAL.frac; i++) f /= 10;
+            CAL.cur += (CAL.cur < 0 ? -dg : dg) * f;
+            CAL.frac++;
+        } else CAL.cur = CAL.cur * 10 + (CAL.cur < 0 ? -dg : dg);
+        if (CAL.cur != 0 || CAL.has_dot) CAL.ndig++;
+    } else if (k == 17) {
+        if (!CAL.entering) { CAL.cur = 0; CAL.entering = 1; CAL.ndig = CAL.frac = 0; }
+        CAL.has_dot = 1;
+    } else {
+        /* an operator or =: the pending operation first (left to right, as iOS's basic calculator chains) */
+        if (CAL.op && (CAL.entering || k == 18)) CAL.cur = calc_apply(CAL.acc, CAL.cur, CAL.op, &CAL.err);
+        CAL.acc = CAL.cur;
+        CAL.op = k == 18 ? 0 : k == 3 ? 1 : k == 7 ? 2 : k == 11 ? 3 : 4;
+        CAL.entering = 0;
+    }
+    build_calc();
+}
+
 static tk_layer apkey, apnum;
 static void build_apnum(void)
 {
@@ -1683,7 +1809,7 @@ static void build_app_page(int a)
 {
     const char *k = APPS[a].k;
     int own = !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
-              !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock");
+              !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc");
     if (own) {
         for (int i = 0; i < NST; i++) {
             dc d = strip_dc(i, "app-page");
@@ -1693,10 +1819,12 @@ static void build_app_page(int a)
             else if (!tk_strcmp(k, "contacts")) page_contacts(&d);
             else if (!tk_strcmp(k, "photos")) page_photos(&d);
             else if (!tk_strcmp(k, "clock")) page_clock(&d);
+            else if (!tk_strcmp(k, "calc")) page_calc(&d);
             else page_camera(&d);
             tk_layer_prepare(&appst[i]);
         }
         build_apnum();
+        if (!tk_strcmp(k, "calc")) build_calc();
         if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
         relink();
         return;
@@ -1849,6 +1977,7 @@ static void app_finish_close(void)
     relayer(&apnum);
     relayer(&apsw); relayer(&aptm); relayer(&apctl);           /* P2z: the clock's (the timer keeps running) */
     apsw.hidden = aptm.hidden = apctl.hidden = 1;
+    relayer(&apcalc); apcalc.hidden = 1;                        /* the Calculator keeps its value (CAL) */
     apnum.hidden = apkey.hidden = 1;
     home.sx = home.sy = 1;
     home.alpha = 1;
@@ -2123,6 +2252,8 @@ static void app_tap(float x, float y)
                   AS.num[0] ? "No SIM: only emergency calls" : "Enter a number");
     } else if (is_app("clock")) {
         clk_tap(x, y);
+    } else if (is_app("calc")) {
+        calc_tap(x, y);
     } else if (is_app("settings")) {
         if (x >= 16 && x < 374 && y >= 182 && y < 229) {
             if (cell_running()) { sh_modem(0); toast("Modem stopped"); }
@@ -2259,8 +2390,8 @@ static void relink(void)
 {
     tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
     link(&root, r, 14);
-    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl };
-    link(&appg, ag, 7);
+    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl, &apcalc };
+    link(&appg, ag, 8);
     tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     link(&appc, st, NST);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
