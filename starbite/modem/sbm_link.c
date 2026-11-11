@@ -354,6 +354,10 @@ static int put_wait(const struct sbm_plat *p, struct sbm_sbd *sbd, const uint8_t
  * 2ecf7cd counted aseq > 0x40 only, and the u8 seq wrapped through 0x00..0x40 (soak-2: 130 answers uncounted). */
 static uint8_t o_mseq = 0x40;
 static uint32_t o_open[8];
+/* the command each open seq asked for: the phone's CP answers NET_REGIST (CS) with the seq of the NET_REGIST (PS)
+ * query sent right after it (night-1110: both RESPs carry 69 for 68 + 69), so an answer whose seq is not open is
+ * matched to an open query for the same command (the domain is in the body, so the state was right all along) */
+static uint16_t o_qcmd[256];
 #define SBM_QSEQ_FIRST 0x41u
 #define SBM_QSEQ_LAST  0xFEu
 
@@ -387,6 +391,7 @@ static int fmt_queries(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
             return r;
         b->fmt_tx++;
         o_open[mseq >> 5] |= 1u << (mseq & 31);
+        o_qcmd[mseq] = q[i].cmd;
         if (logit)
             sbm_logf(p, "FMT: +%u TX ch235 | %s GET seq %u", ms, sbm_ipc_name(q[i].cmd, nb), mseq);
     }
@@ -466,7 +471,11 @@ static uint8_t o_rbuf[3][8192];
 static struct sbm_reasm o_ra[3];
 static struct sbm_rfs o_rfs;
 static uint8_t o_reply[SBM_RFS_MAX_IO + 64];
-static uint32_t o_logged, o_rfs_logged, o_data_msgs, o_budget;
+static uint32_t o_logged, o_rfs_logged, o_data_msgs;
+/* the flood guard: at most this many frames a minute (the soak sees about 70, the RFS start about 100). It was a total
+ * of 200 + hold / 50 until c9867c3: a session would have stopped itself after about 600 frames (8 minutes). */
+#define ONLINE_FRAMES_PER_MIN 2000u
+static uint32_t o_win_ms, o_win_frames;
 static struct sbm_sbd *o_sbd;
 
 /* reset the IPC link, wait 100 ms, the clock table, INIT_END (Android's order on PHONE_START) */
@@ -489,9 +498,9 @@ static int online_enter(const struct sbm_plat *p, struct sbm_boot *b, struct sbm
         if (!nv)
             return SBM_ENOENT;
         sbm_rfs_init(&o_rfs, nv, nvs);
-        for (unsigned k = 0; k < 3; ++k)
-            bigs[k].active = 0;
     }
+    for (unsigned k = 0; k < 3; ++k)
+        bigs[k].active = 0;
     if (reset_ipc_link(p) < 0) {
         sbm_logf(p, "online: the IPC link reset did not read back");
         return SBM_EIO;
@@ -527,7 +536,8 @@ static int online_enter(const struct sbm_plat *p, struct sbm_boot *b, struct sbm
         o_ra[k].len = 0;
         o_ra[k].active = 0;
     }
-    o_budget = 200 + (b->hold_ms ? b->hold_ms : 20000) / 50;
+    o_win_ms = 0;
+    o_win_frames = 0;
     return 0;
 }
 
@@ -578,10 +588,22 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
                     sbm_cell_update(&b->cell, &m);
                     if (m.type == SBM_IPC_RESP && m.aseq >= SBM_QSEQ_FIRST && m.aseq <= SBM_QSEQ_LAST) {
                         uint32_t bit = 1u << (m.aseq & 31);
-                        if (!(o_open[m.aseq >> 5] & bit)) {
+                        int seq = m.aseq;
+                        if (!(o_open[seq >> 5] & bit)) {
+                            uint16_t want = m.cmd == SBM_GEN_PHONE_RES && m.data_len >= 2
+                                            ? (uint16_t)(m.data[0] << 8 | m.data[1]) : m.cmd;
+                            seq = -1;
+                            for (unsigned k = SBM_QSEQ_FIRST; k <= SBM_QSEQ_LAST && seq < 0; ++k)
+                                if ((o_open[k >> 5] & (1u << (k & 31))) && o_qcmd[k] == want)
+                                    seq = (int)k;
+                            if (seq >= 0)
+                                b->fmt_seq_fixed++;
+                            bit = seq >= 0 ? 1u << (seq & 31) : 0;
+                        }
+                        if (seq < 0) {
                             b->fmt_unmatched++;
                         } else {                           /* an answer to one of our queries */
-                            o_open[m.aseq >> 5] &= ~bit;
+                            o_open[seq >> 5] &= ~bit;
                             if (m.cmd == SBM_GEN_PHONE_RES)
                                 b->fmt_gen_res++;
                             else
@@ -639,7 +661,12 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
             }
         next:
             sbm_sbd_get_done(sbd, (unsigned)id, SBM_DL, p);
-            if (b->fmt_rx + b->rfs_rx + b->bad_rx >= o_budget) {
+            uint32_t frames = b->fmt_rx + b->rfs_rx + b->bad_rx;
+            if (ms - o_win_ms >= 60000) {
+                o_win_ms = ms;
+                o_win_frames = frames;
+            }
+            if (frames - o_win_frames >= ONLINE_FRAMES_PER_MIN) {
                 b->stopped_by = SBM_STOP_FRAMES;
                 g_online_ms = 0xFFFFFFFFu;
                 return 1;
@@ -703,58 +730,206 @@ static int online(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *
     return 0;
 }
 
-/* ---- the session API (Starbite OS): start once, poll from the event loop, stop = park ---------------- */
+/* ---- the session API (Starbite OS): start, poll from the event loop, snapshot, recover, stop = park ----------- */
 
-int sbm_modem_start(struct sbm_modem *m, const struct sbm_plat *p, struct sbm_image *im)
+#define NONE 0xFFFFFFFFu
+static uint32_t s_silent_since = NONE;  /* the first query sent after the CP last said anything (stall detection) */
+
+static unsigned open_queries(void)
 {
-    sbm_memset(m, 0, sizeof(*m));
-    m->p = p;
-    m->im = im;
+    unsigned n = 0;
+    for (unsigned i = 0; i < 8; ++i)
+        for (uint32_t v = o_open[i]; v; v &= v - 1)
+            ++n;
+    return n;
+}
+
+static void went_down(struct sbm_modem *m, uint8_t state, int32_t err)
+{
+    if (m->up || m->b.inited)
+        m->b.parked = sbm_cp_park(m->p) == 0;
+    m->up = 0;
+    m->state = state;
+    m->last_err = err;
+    m->down_ms = m->total_ms;
+}
+
+static int start_core(struct sbm_modem *m)
+{
+    struct sbm_image *im = m->im;
+    if (im->nv_pristine)                     /* EFS's data as read, whatever the CP wrote last time */
+        for (unsigned k = 0; k < im->plan.n; ++k)
+            if (im->plan.l[k].src == SBM_SRC_NV && im->data[k])
+                sbm_memcpy((uint8_t *)(uintptr_t)im->data[k], im->nv_pristine, im->plan.l[k].size);
+    sbm_memset(&m->b, 0, sizeof(m->b));
     m->b.stop = SBM_BOOT_ONLINE;
     m->b.rfs_serve = 1;
     m->b.keep_running = SBM_KEEP_RUNNING;
-    m->b.hold_ms = 0;
-    int r = sbm_boot_run(p, im, &m->b);
+    m->ms = 0;
+    m->last_rx_ms = NONE;
+    m->rx_seen = 0;
+    s_silent_since = NONE;
+    int r = sbm_boot_run(m->p, im, &m->b);
     m->up = r == 0 && m->b.init_end_sent && !m->b.parked;
-    return m->up ? 0 : (r < 0 ? r : SBM_EIO);
+    if (!m->up) {
+        went_down(m, SBM_MS_FAILED, r < 0 ? r : SBM_EIO);   /* sbm_boot_run parked it; parking again is harmless */
+        return m->last_err;
+    }
+    m->state = SBM_MS_ONLINE;
+    m->last_err = 0;
+    return 0;
+}
+
+int sbm_modem_start(struct sbm_modem *m, const struct sbm_plat *p, struct sbm_image *im)
+{
+    if (!m || !p || !im)
+        return SBM_EINVAL;
+    if (m->up)
+        return 0;
+    m->p = p;
+    m->im = im;
+    m->starts++;
+    return start_core(m);
 }
 
 int sbm_modem_poll(struct sbm_modem *m, uint32_t elapsed_ms)
 {
     if (!m->up)
         return SBM_EPERM;
-    m->ms += elapsed_ms ? elapsed_ms : 1;
+    elapsed_ms = elapsed_ms ? elapsed_ms : 1;
+    m->ms += elapsed_ms;
+    m->total_ms += elapsed_ms;
+    uint32_t msgs = m->b.cell.n_msgs;
     int r = online_poll(m->p, &m->b, o_sbd, m->ms);
-    if (r != 0) {                            /* a guard or a crash: park now */
-        sbm_cp_park(m->p);
-        m->up = 0;
-        m->b.parked = 1;
-        return r < 0 ? r : 1;
+    uint32_t rx = m->b.fmt_rx + m->b.rfs_rx + m->b.bad_rx;
+    if (rx != m->rx_seen) {
+        m->rx_seen = rx;
+        m->last_rx_ms = m->ms;
+        s_silent_since = NONE;
     }
-    return 0;
+    if (r != 0) {                            /* a guard, a crash, the flood guard: park now */
+        int crash = m->b.stopped_by == SBM_STOP_CRASH || r < 0;
+        if (crash)
+            m->crashes++;
+        went_down(m, crash ? SBM_MS_CRASHED : SBM_MS_GUARD, crash ? (r < 0 ? r : SBM_EIO) : SBM_EPERM);
+        return m->last_err;
+    }
+    if (s_silent_since != NONE && m->ms - s_silent_since >= SBM_STALL_MS) {
+        sbm_logf(m->p, "session: +%u ms: no word from the CP for %u ms after a query (%u open): stalled, parking",
+                 m->ms, m->ms - s_silent_since, open_queries());
+        m->stalls++;
+        went_down(m, SBM_MS_STALLED, SBM_ETIME);
+        return SBM_ETIME;
+    }
+    return m->b.cell.n_msgs != msgs;
 }
 
 int sbm_modem_query(struct sbm_modem *m)
 {
     if (!m->up)
         return SBM_EPERM;
-    return fmt_queries(m->p, &m->b, o_sbd, m->ms, 0);
+    int r = fmt_queries(m->p, &m->b, o_sbd, m->ms, 0);
+    if (r == 0 && s_silent_since == NONE)
+        s_silent_since = m->ms;
+    return r;
 }
 
 void sbm_modem_status(const struct sbm_modem *m, char *out, size_t cap)
 {
     if (!m->up) {
-        sbm_strlcpy(out, m->b.parked ? "modem off (parked)" : "modem off", cap);
+        sbm_strlcpy(out, m->state == SBM_MS_STALLED ? "modem off (stalled, parked)"
+                         : m->state == SBM_MS_CRASHED ? "modem off (crashed, parked)"
+                         : m->state == SBM_MS_GUARD ? "modem off (a guard parked it)"
+                         : m->state == SBM_MS_FAILED ? "modem off (the start failed, parked)"
+                         : m->b.parked ? "modem off (parked)" : "modem off", cap);
         return;
     }
     sbm_cell_line_masked(&m->b.cell, out, cap);
 }
 
+void sbm_modem_snapshot(struct sbm_modem *m, struct sbm_modem_snap *s)
+{
+    const struct sbm_cell_state *c = &m->b.cell;
+    sbm_memset(s, 0, sizeof(*s));
+    s->state = m->state;
+    s->sim = s->cs = s->ps = s->bars = s->rssi_raw = 0xFF;
+    if (m->up) {
+        if (c->have_sim)
+            s->sim = c->sim_status;
+        if (c->have_cs)
+            s->cs = c->cs.state;
+        if (c->have_ps)
+            s->ps = c->ps.state;
+        s->rat = c->have_cs && c->cs.act ? c->cs.act : c->have_ps ? c->ps.act : 0;
+        if (c->have_bars)
+            s->bars = c->bars;
+        if (c->have_rssi) {
+            s->rssi_raw = c->rssi_raw[0];
+            s->rssi_dbm = (int16_t)-(int16_t)c->rssi_raw[0];
+        }
+        int served = (c->have_cs && (c->cs.state == SBM_REG_HOME || c->cs.state == SBM_REG_ROAMING)) ||
+                     (c->have_ps && (c->ps.state == SBM_REG_HOME || c->ps.state == SBM_REG_ROAMING));
+        s->emergency_only = !served && ((c->have_cs && c->cs.state == SBM_REG_EMERGENCY) ||
+                                         (c->have_ps && c->ps.state == SBM_REG_EMERGENCY));
+        if (c->have_plmn) {
+            s->have_plmn = 1;
+            sbm_memcpy(s->plmn, c->plmn, sizeof(s->plmn));
+        }
+        s->have_cell = (c->have_cs && c->cs.have_loc) || (c->have_ps && c->ps.have_loc);
+        s->queries = m->b.fmt_tx;
+        s->answers = m->b.fmt_resp + m->b.fmt_gen_res;
+        s->open = open_queries();
+    }
+    s->starts = m->starts;
+    s->restarts = m->restarts;
+    s->last_err = m->last_err;
+    sbm_modem_status(m, s->line, sizeof(s->line));
+    /* gen: only what a screen shows (not the clocks, not the counters) */
+    struct sbm_modem_snap *l = &m->last_snap;
+    if (l->state != s->state || l->sim != s->sim || l->cs != s->cs || l->ps != s->ps || l->rat != s->rat ||
+        l->bars != s->bars || l->rssi_raw != s->rssi_raw || l->emergency_only != s->emergency_only ||
+        l->have_plmn != s->have_plmn || sbm_memcmp(l->plmn, s->plmn, sizeof(s->plmn)) || l->have_cell != s->have_cell ||
+        l->last_err != s->last_err || m->gen == 0) {
+        m->gen++;
+        *l = *s;
+    }
+    s->gen = m->gen;
+    s->up_ms = m->up ? m->ms : 0;
+    s->last_rx_ms = m->up && m->last_rx_ms != NONE ? m->ms - m->last_rx_ms : NONE;
+}
+
+int sbm_modem_recover(struct sbm_modem *m, uint32_t elapsed_ms)
+{
+    if (m->up)
+        return 0;
+    if (!m->p || (m->state != SBM_MS_STALLED && m->state != SBM_MS_CRASHED))
+        return SBM_EPERM;
+    m->total_ms += elapsed_ms;
+    if (m->total_ms - m->down_ms < SBM_RECOVER_GAP_MS)
+        return 1;
+    unsigned recent = 0, slot = 0;
+    for (unsigned i = 0; i < SBM_RECOVER_MAX; ++i) {
+        if (m->restart_at[i] && m->total_ms - m->restart_at[i] < SBM_RECOVER_WINDOW_MS)
+            ++recent;
+        if (m->restart_at[i] < m->restart_at[slot])
+            slot = i;
+    }
+    if (recent >= SBM_RECOVER_MAX) {
+        sbm_logf(m->p, "session: %u restarts in the last %u min: staying off", recent, SBM_RECOVER_WINDOW_MS / 60000);
+        return SBM_EPERM;
+    }
+    m->restart_at[slot] = m->total_ms ? m->total_ms : 1;
+    m->restarts++;
+    sbm_logf(m->p, "session: restart %u (after %s)", m->restarts, m->state == SBM_MS_STALLED ? "a stall" : "a crash");
+    return start_core(m);
+}
+
 int sbm_modem_stop(struct sbm_modem *m)
 {
-    int r = m->up || m->b.inited ? sbm_cp_park(m->p) : 0;
+    int r = m->p && (m->up || m->b.inited) ? sbm_cp_park(m->p) : 0;
     m->up = 0;
     m->b.parked = r == 0;
+    m->state = SBM_MS_OFF;
     return r;
 }
 

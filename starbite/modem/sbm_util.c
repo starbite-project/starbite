@@ -18,6 +18,15 @@ void sbm_memset(void *d, int c, size_t n)
         *dp++ = (uint8_t)c;
 }
 
+int sbm_memcmp(const void *a, const void *b, size_t n)
+{
+    const uint8_t *x = a, *y = b;
+    for (; n; --n, ++x, ++y)
+        if (*x != *y)
+            return *x < *y ? -1 : 1;
+    return 0;
+}
+
 size_t sbm_strlcpy(char *d, const char *s, size_t cap)
 {
     size_t i = 0;

@@ -148,13 +148,14 @@ static void answer(struct fakecp *fc, uint8_t ch, const struct sbm_ipc_msg *m)
     }
     case SBM_NET_REGIST: {
         uint8_t dom = m->data_len >= 2 ? m->data[1] : SBM_DOMAIN_CS;
-        regist(fc, ch, m->mseq, SBM_IPC_RESP, dom);
+        regist(fc, ch, fc->regist_seq_quirk && dom == SBM_DOMAIN_CS ? (uint8_t)(m->mseq + 1) : m->mseq, SBM_IPC_RESP,
+               dom);
         break;
     }
     case SBM_NET_SERVING_NETWORK: {
         /* u8, state, u8, plmn[6] ASCII ('#' padding), lac, then zeros to this firmware's 26 bytes */
         uint8_t d[26] = { 0x02, 0x01, 0xff, '#', '#', '#', '#', '#', '#' };
-        if (fc->sc == FAKE_HOME)
+        if (fc->sc == FAKE_HOME || fc->nosim_plmn)
             memcpy(d + 3, "00101#", 6);
         fakecp_send(fc, ch, m->mseq, m->cmd, SBM_IPC_RESP, d, sizeof(d));
         break;

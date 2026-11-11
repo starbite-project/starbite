@@ -13,6 +13,10 @@ void sbm_sb_plat_stage3(struct sbm_plat *p);
 void sbm_sb_plat_stage4(struct sbm_plat *p, uint32_t ipc_off);
 /* RADIO's TOC, map, plan and BOOT/MAIN/VSS, and EFS's /nv_data.bin, read only, into sb_alloc'd RAM. */
 int sbm_sb_load_image(struct sbm_image *im, void (*line)(const char *));
+/* The small footprint (Starbite OS): only nv_data.bin (and its pristine copy) in RAM, BOOT/MAIN/VSS streamed from
+ * RADIO at each start through a SBM_SB_CHUNK buffer; about 2.3 MiB, taken once (later calls reuse it). */
+#define SBM_SB_CHUNK (256u * 1024u)
+int sbm_sb_load_image_stream(struct sbm_image *im, void (*line)(const char *));
 /* SErrors that were already pending before a probe read (not caused by it). */
 unsigned sbm_sb_stale_serrors(void);
 #endif

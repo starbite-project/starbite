@@ -567,6 +567,109 @@ query seqs cycle 0x41..0xFE, each answer is matched to a bitmap of open queries,
 unanswered / stale (a seq reused while still open) / unmatched counts. A host test runs a 590 s soak (649 GETs, three
 wraps) and needs every answer matched.
 
+**modemsess run 1 (2026-11-10, c6573f1, `build/modem/sess-1/pmsg.txt`): passed, came back clean after 166 s, parked.**
+SIM absent at +10 s; not registered, bars 0 at +20 s; CS emergency-only (GSM), bars 4, rssi 0x3d from +30 s to
+the end. 121 queries in 11 rounds, 110 answers: one round's worth is missing. That is not queries in flight at the
+stop: the last round went out at +110 s, the stop came at +120 s. The first round was answered in full (seqs 65-75),
+and the frame log ends after 40 lines, so the log does not say which round lost its answers. A host test of the same
+11 rounds, 10 s apart, gets every answer. The probe now prints the q / a counts before each round, and the end line
+gives unanswered / stale / unmatched / bad, so a re-run shows which round it is.
+
+### 7.7 Session API v2: continuous use, restarts, the small footprint (2026-11-10)
+Goal: "Starbite OS with a working modem" without a SIM and without transmitting. The modem boots reliably, camps
+emergency-only, reports live status a UI can show, and parks cleanly on every exit.
+
+**Bugs found on the way (all host-tested now):**
+- *A session stopped itself after about 8 minutes.* The flood guard was a total frame budget of 200 + hold / 50.
+  A session has hold 0, so the budget was 600 frames, about 8 minutes at the session's ~70 frames a minute. It is now
+  a rate: 2000 frames a minute. A host test runs a 12-minute session.
+- *A second start in the same boot was refused.* After our park, the reset sequencer reads 5 on the phone (soak-1),
+  and the core only accepts sequencer 0. The fake SoC set it back to 0 on a park, so the host tests never saw it.
+  Starbite OS's Stop then Start, and any stall recovery, would have failed. Now the fake matches the phone, and
+  the core restarts the way Android does on the 9810 (modem_ctrl_ss310ap.c ss310ap_reset, link_device_shmem.c
+  cp_init_done):
+  1. wakeup interrupt, 5 ms;
+  2. dump_pc_no_pg on, reset assert;
+  3. PMUCAL's cp_reset_release: CP_CTRL_S |= CP_START, wait for CENTRAL_SEQ_CP_STATUS 0, wait for the GIC bit;
+  4. mailbox software reset (MCUCTLR bit 0, 5 us);
+  5. then the usual security mode 2, copy, mode 0, power on. BOOT_OFF clears dump_pc_no_pg as before.
+
+  This path is only taken for sequencer 5 + central sequencer 0x80 (in reset) + CP_START: a CP parked earlier in
+  this boot. A CP that runs is still never touched. If the release never completes, the restart fails and parks.
+- *sess-1's 11 missing answers* (121 queries, 110 counted): **explained by night-1110** (3c195c2, `build/modem/
+  night-1110-sess/pmsg.txt`). The phone's CP answers NET_REGIST (CS) with the seq of the NET_REGIST (PS) query sent
+  right after it: both RESPs carry 69 for queries 68 and 69, in every round. So one query per round looked
+  unanswered and one answer unmatched (unanswered 11, unmatched 11). The answers did arrive; the domain is in the
+  body, so the status was right all along. Fixed in the next commit: an answer whose seq is not open is matched to
+  an open query for the same command (the "by command" count), and the fake CP now has the quirk.
+
+**The small footprint.** The old loader kept all of RADIO's BOOT + MAIN + VSS in RAM (about 41 MiB) plus NV.
+Starbite OS refused to start below 64 MiB free, which is why the modem and the new UI's ~70 MB couldn't coexist.
+Now:
+- `sbm_sb_load_image_stream` keeps only nv_data.bin (1 MiB) and its pristine copy (1 MiB) in RAM, plus a 256 KiB
+  chunk: 2.25 MiB, taken once from the arena and reused by every start.
+- BOOT/MAIN/VSS are read from RADIO (read only) at each start, twice. The first pass CRC-checks against the TOC; the
+  second copies into the carve-out and must CRC the same (RADIO read differently: refused before EL3), then the
+  read-back from DRAM is checked as before.
+- That costs a second read of about 41 MiB per start. night-1110: a start took **5.6 s** (2304 KiB footprint,
+  42334 KiB streamed; INIT_START itself is about 1 s of it). The CRC-32 was nibble-wise, two lookups per byte,
+  over about 126 MiB (check, copy, read-back). It is now slicing-by-8 (8 KiB of tables built on first use), and
+  the BOOT line gives the check / copy / link times, so the next run shows what is left.
+  night-1111 (d50bb6f): **4.4 s** (check 505 ms, copy 1027 ms, link 1877 ms; the link time is mostly the CP's
+  own boot up to INIT_START and PHONE_START).
+- Same-boot restart (night-1111): the park clears CP_START in CP_CTRL_S (0x8 before, 0x0 after; that is why
+  PMUCAL's reset_release sets it again). d50bb6f wanted CP_START set to call it a restart, so the second start
+  was refused as "a CP that runs". From 4f93087 a restart is: reset sequencer 5 and central sequencer 0x80 (held
+  in reset). Any other started state is still refused.
+  **Proven on the phone (night-1111, 4f93087):** three cycles in one boot; cycles 2 and 3 took the restart path
+  (reset assert, CP_START, central 0x00, mailbox reset; no cp_init) and were online in about 5.3 s (check 616,
+  copy 998, link 1967 ms). Each cycle: 33 queries, 33 answers, unanswered 0, by-command 3, emergency-only GSM,
+  bars 4, -54 dBm, parked. On a restart EL3's mode 2 answers 0x00 (0x0b on the first start); mode 0 still
+  accepts the image. The restart is about 0.9 s slower than a first start outside the timed phases (the 100 ms
+  GIC wait that never shows is part of it; the rest is not yet timed).
+- The core's fixed buffers are in the image's BSS: about 1.8 MiB for the link and RFS (big_rfs 640 KiB, rfs_acc
+  512 KiB, o_reply 512 KiB, big_fmt 128 KiB, rings 24 KiB). The glue's EFS reader adds about 420 KiB.
+- The CP's own memory is the reserved carve-out at 0xF0000000, outside the arena, and unchanged.
+- So the modem's arena need goes from 64 MiB to 2.25 MiB.
+
+**The integration contract (Starbite OS kernel `kern/modem.c`, and the UI on top: the Cellular app, the status bar):**
+
+| When | Call | Notes |
+|---|---|---|
+| once, first start | `sbm_sb_plat(&plat, log)`, `sbm_sb_load_image_stream(&im, log)`, `sbm_sb_plat_stage4(&plat, im.mm.ipc_off)` | 2.25 MiB arena, once. Drop alpha21's 64 MiB `MIN_ARENA` and its own `nv_pristine`: the image carries `im.nv_pristine` and the core restores NV before every start. |
+| user's hold (Start) | `sbm_modem_start(&mo, &plat, &im)` | Blocking: 4.4 s on the phone (night-1111; 5.6 s with the old CRC); call it from a timer after the Starting page is drawn. 0 = online. Otherwise it is parked; the snapshot says FAILED and `last_err` why. `mo` is `static`, zeroed once, **never memset between starts**: it holds the counters and the restart window. |
+| every 2 ms (1-10 ms) | `r = sbm_modem_poll(&mo, elapsed_ms)` | Non-blocking. 0 nothing new; 1 new data from the CP (take a snapshot); < 0 it went down and is parked: `SBM_ETIME` stall, `SBM_EIO` crash, `SBM_EPERM` a guard (a SIM that is not absent, a registration) or the flood guard. |
+| every 10 s while up | `sbm_modem_query(&mo)` | The allow-listed GETs (no SET, no call/SMS/SS). **Required**: stall detection is "a query sent and not one word from the CP for 20 s". Not more often than every 5 s. |
+| on poll = 1, and at the UI's own refresh (1 Hz is plenty) | `sbm_modem_snapshot(&mo, &snap)` | No I/O, a few hundred bytes copied. Redraw only when `snap.gen` changed (it ignores the clocks and counters). |
+| state STALLED or CRASHED | `sbm_modem_recover(&mo, elapsed_ms)` from a 1 s timer | 1 = wait (5 s parked first); 0 = online again (blocking, as a start); `SBM_EPERM` = stays off: 3 restarts in 30 min used up. A GUARD, a FAILED start and a user's Stop never restart by themselves. |
+| Stop, before Heat / Linux, every restart / power-off path | `sbm_modem_stop(&mo)` | Parks. Keep the reset hook (`sb_before_reset` → `sbm_cp_park`) as alpha21 has it. |
+
+Snapshot fields (`struct sbm_modem_snap`, sbm.h) and what the UI says:
+
+| Field | Values | UI |
+|---|---|---|
+| `state` | OFF / ONLINE / STALLED / GUARD / CRASHED / FAILED | Off; On; "Restarting…" (STALLED / CRASHED while recover returns 1); "Stopped: a SIM or a network registration" (GUARD); "Could not start" (FAILED) |
+| `sim` | 0x80 absent, 0x00 ready, 0x03 PIN, …, 0xFF not yet | "No SIM" |
+| `cs`, `ps` | SBM_REG_*: 1 none, 2 home, 3 searching, 4 emergency, 6 roaming; 0xFF not yet | registration per domain |
+| `emergency_only` | 1 = camped, limited service | **"Emergency calls only"** (the honest line; nothing in this build dials) |
+| `rat` | SBM_ACT_*: 1 GSM, 2 GPRS, 3 EDGE, 4 UMTS, 7 LTE; 0 unknown | "2G" / "3G" / "4G" next to the bars |
+| `bars` | 0..5, 0xFF unknown | the signal glyph |
+| `rssi_raw`, `rssi_dbm` | DISP_RSSI_INFO's byte; dBm = −raw (Samsung's IPC habit, **unconfirmed**: 0x3d = −61 dBm with 4 bars fits) | details page only |
+| `have_plmn`, `plmn` | MCC-MNC, e.g. "00101" | **screen only**: never in a log, a file, an app's storage or a screenshot that leaves the phone. No operator-name table in the core; the UI can map MCC-MNC to a name from a public list, or show "Network: MCC MNC" |
+| `have_cell` | the CP sent LAC / cell id | the values are deliberately not kept (location); a "cell info" page shows RAT, bars, dBm and registration only. Keeping LAC/CID for the screen is a separate decision for the user. |
+| `up_ms`, `last_rx_ms` | since the start; since the CP last said anything | details page |
+| `queries`, `answers`, `open`, `starts`, `restarts`, `last_err` | counters | details page; `last_err` → sbm_strerror |
+| `line` | the masked one-line status | safe for logs (pmsg, the kernel log) |
+
+Not available yet, and why:
+- RSRP / RSRQ: the CP camps on GSM without a SIM; LTE signal values need a signal-info GET that is not in the
+  allow-list yet.
+- The network's name string: the CP doesn't send one without a SIM (EONS comes from the SIM; NITZ only after
+  registration).
+
+Rules unchanged: GET-only, no call / SMS / SS frame exists, no transmit without the user and a SIM, the PLMN and
+IMEI never in git or a log, EFS never written (RAM copy, restored from the pristine copy at every start).
+
 ## 8. Later stages (not started)
 
 
