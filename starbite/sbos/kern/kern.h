@@ -521,7 +521,9 @@ int gpucomp_selftest_step(void);        /* P4: the GPU compositor's test (gpucom
  * solid of w x h), scaled (isx / isy: source px per screen px) from the screen point (dx0, dy0), alpha, clipped to a
  * rect with a rounded edge, faded by screen y, 3-sliced, and glass (the backdrop bd through the 8-bit mask) under it */
 #define GPUCOMP_MAX_QUADS 127U
-enum { GC_SOLID = 1, GC_BILINEAR = 2, GC_GLASS = 4, GC_FADE = 8, GC_SLICE_V = 16, GC_SLICE_H = 32 };
+enum { GC_SOLID = 1, GC_BILINEAR = 2, GC_GLASS = 4, GC_FADE = 8, GC_SLICE_V = 16, GC_SLICE_H = 32,
+       GC_OPAQUE = 64 };                /* (CPU only) every px of src is opaque: what is under it is culled */
+#define GC_OCC_PX 32                    /* gc_quad.occ: per 32 x 32 px block of src, 0 empty, 1 partial, 2 opaque */
 struct gc_quad {
     const void *src;
     uint32_t stride, w, h, flags, solid;
@@ -532,8 +534,13 @@ struct gc_quad {
     uint32_t bstride;
     float bk;
     uint32_t bw, bh;
+    const uint8_t *occ;                 /* (CPU only, may be 0) src's block map, occ_w x occ_h: bins skip empty blocks */
+    uint32_t occ_w, occ_h;
 };
 int gpucomp_init(void *heap, uint64_t bytes);
+/* the last compose's bins: entries drawn, entries culled under opaque quads, entries skipped over empty blocks */
+void gpucomp_last_stats(uint32_t *entries, uint32_t *culled, uint32_t *empty);
+unsigned gpucomp_mhz(void);
 int gpucomp_ready(void);
 void *gpucomp_pool(void);
 void gpucomp_add_ro(const void *p, uint64_t bytes);   /* before gpucomp_init: read-only memory layers point into */
