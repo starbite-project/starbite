@@ -203,4 +203,10 @@ const char *sh_guide_chapter(int c, const char **sub, unsigned *argb, int *npage
 const char *sh_guide_page(int c, int p, const char *const **lines);   /* lines NULL-terminated; "! " a warning */
 const char *sh_sensors_why(void);         /* why there is no compass or level yet */
 
+/* Starbite OS Next (helper D, shell_nc.inc): notifications. The platform pushes each new one (the kernel: notif.c's
+ * posts, copied by kern_next.c's bridge outside the frames); the shell keeps the last 20 (RAM only) for the
+ * Notification Centre, the banner and the lock's "N notifications" pill. who: the poster ("clock", "battery", "modem",
+ * "heat", "survival" or an app's name); hm: local hh * 100 + mm (-1 unknown). Titles and lines go to the screen only. */
+void sh_notify(const char *who, const char *title, const char *body, int hm);
+
 #endif

@@ -316,6 +316,23 @@ void sh_confirmed(int ok)
     cf_done = 0;
     if (d) d(ok);
 }
+/* helper D: notifications for the shell (shell_nc.inc): the kernel's posts since the last look (notif_seq), oldest
+ * first; polled from the draw hook, never inside a frame. The kernel's own list keeps its unread count (the classic UI's
+ * dot): Next's shell keeps its own. */
+static int notif_now(void)
+{
+    static unsigned seen;
+    unsigned s = notif_seq();
+    if (s == seen) return 0;
+    int n = (int)(s - seen);
+    if (n > notif_count()) n = notif_count();
+    seen = s;
+    for (int i = n - 1; i >= 0; i--) {
+        const struct notif *q = notif_get(i);
+        if (q) sh_notify(q->who, q->title, q->text, q->hm);
+    }
+    return n > 0;
+}
 static void status_now(void)
 {
     struct sbos_time t;
@@ -863,6 +880,17 @@ void next_kdraw(void)
         present();
         sh_idle();
     }
+    /* helper D: new notifications four times a second (a counter compare); a banner slides in (frames), the lock's
+     * pill is drawn at once */
+    static uint64_t notif_t;
+    if (ready && sb_ms() - notif_t >= 250 && (notif_t = sb_ms(), notif_now()) && !ticking) {
+        if (sh_moving()) start_ticking();
+        else {
+            tk_comp_frame(&comp, 0, 0);
+            present();
+            sh_idle();
+        }
+    }
 }
 
 void next_kevent(const void *evp)
@@ -892,6 +920,7 @@ void next_ktimer(unsigned id)
                 tk_comp_frame(&comp, 0, 0);
                 present();
             }
+            if (sh_moving() && K.screen_on) start_ticking();   /* helper D: a timed move (the banner going away) */
             clock_again();
         }
         return;
@@ -1181,7 +1210,8 @@ static const step S_MSGS[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 
                                { 0, 0, 0, 0, 0, 1000 }, { 1, 195, 204, 0, 0, 80 }, { 0, 0, 0, 0, 0, 800 }, { 1, 50, 63, 0, 0, 80 },
                                { 0, 0, 0, 0, 0, 600 }, { 2, 195, 795, 200, 450, 260 }, { 0, 0, 0, 0, 0, 1200 } };
 static const step S_EMERG[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 318, 720, 0, 0, 950 }, { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 795, 195, 330, 220 },
-                                { 0, 0, 0, 0, 0, 900 }, { 2, 320, 450, 60, 450, 200 }, { 0, 0, 0, 0, 0, 900 }, { 2, 80, 20, 80, 640, 300 },
+                                { 0, 0, 0, 0, 0, 900 }, { 2, 320, 450, 60, 450, 200 }, { 0, 0, 0, 0, 0, 900 },
+                                { 5, 0, 0, 0, 0, 20 }, { 0, 0, 0, 0, 0, 900 }, { 5, 0, 0, 0, 0, 20 },   /* helper D: the Power key relocks */
                                 { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 600, 195, 250, 300 }, { 0, 0, 0, 0, 0, 1200 },
                                 { 1, 195, 624, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };   /* survival-next: the list scrolls to Exit */
 /* P2r: the Power key (kind 5, the kernel's own power_key_short): the fade to black and the screen off, the wake, a

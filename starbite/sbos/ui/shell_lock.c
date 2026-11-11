@@ -355,6 +355,12 @@ static void fmt_hm(char *b) { b[0] = (char)('0' + ST.h / 10); b[1] = (char)('0' 
 
 static tk_layer lstatus, lclock, lwidgets;
 static void relink(void);
+/* helper D (shell_nc.inc, shell_switcher.inc): the hooks this file calls before their definitions */
+static void nc_sb_stale(void);
+static void nc_clock_stale(void);
+static void nc_cards_gone(void);
+static float nc_next_update(float t);
+static int nc_refresh(float t);
 static void link(tk_layer *parent, tk_layer **kids, int n);
 static void lap_us(const char *what, uint64_t us);
 static char carrier[32] = "No SIM";
@@ -364,6 +370,7 @@ static void build_lstatus(void)
     dc d = mk(&lstatus, "lock-status", 0, 0, 390, 48, 2, 0);
     status_bar(&d, carrier);
     trim(&lstatus);
+    nc_sb_stale();                               /* helper D: the Notification Centre's status bar too */
 }
 /* the modem's status (its session's status API): the carrier or "No SIM" / "Emergency calls only" */
 static void cc_status_stale(void);
@@ -407,6 +414,7 @@ static void build_lclock(void)
     tk_text(d.b, TK_IT700, PT(106), PT(x0 + wh + gap) - d.ox, PT(base - 9.6f) - d.oy, ":", 0, 0, &p, 0);
     tk_text(d.b, TK_IT700, PT(106), PT(x0 + wh + gap + wc + gap) - d.ox, PT(base) - d.oy, mm, PT(-1), 0, &p, 0);
     trim(&lclock);
+    nc_clock_stale();                            /* helper D: the Notification Centre shows it (a view: again now) */
 }
 /* P3p (P3j-17): iOS's accessoryRectangular between the two gauges: no platter or border, left-aligned vibrant
  * text: a glyph and the label (15 / 600, .7), the value 30 pt / 600 tabular, a 13 pt second line */
@@ -843,6 +851,7 @@ static void free_vendor_cards(void)
         tk_bmp_free(&K[g].chev0);
     }
     cards_pending = 0;
+    nc_cards_gone();                             /* helper D: no platter may show the freed glass */
 }
 static void build_empill(void)
 {
@@ -2269,6 +2278,8 @@ int sh_next_update(float t)
     if (med_pending() && (best < 0 || best > 4)) best = 4;      /* the card's work, a turn at a time */
     float sv = sv_next_update(t);                       /* survival-next: SOS's beacon, USB power's state */
     if (sv >= 0 && (best < 0 || sv < best)) best = sv;
+    float nb = nc_next_update(t);                       /* helper D: the banner's 4 s */
+    if (nb >= 0 && (best < 0 || nb < best)) best = nb;
     return (int)best;
 }
 int sh_refresh(float t)
@@ -2276,7 +2287,7 @@ int sh_refresh(float t)
     now_ms = t;
     int ch = clk_update(t);
     if (med_pending() && !sh_moving()) ch |= med_work(10000, 1);
-    return sv_refresh(t) | ch;                          /* survival-next: SOS's beacon, USB power's state */
+    return sv_refresh(t) | nc_refresh(t) | ch;         /* survival-next: SOS's beacon, USB power's state; helper D: the banner */
 }
 
 /* ---- P2z: the Calculator (iOS's layout: the display right-aligned, the keys in five rows: grey functions, dark
@@ -3574,6 +3585,8 @@ void sh_cell(const sh_cell_t *c)
 #include "shell_media.inc"
 #include "shell_linux.inc"
 #include "shell_survival.inc"
+#include "shell_switcher.inc"                       /* helper D: the app switcher */
+#include "shell_nc.inc"                             /* helper D: notifications, the Notification Centre, the banner */
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
@@ -3647,15 +3660,16 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 }
 static void relink(void)
 {
-    tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
-    link(&root, r, 14);
+    tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &ncl, &focus, &ccl, &bnl, &cfl, &boot, &homebar, &toastl, &slp };
+    nc_link();                                       /* helper D: the Notification Centre (ncl), the banner (bnl) */
+    link(&root, r, 16);
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb, &apphl };
     link(&appg, ag, 13);
     tk_layer *st[NST + 64] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     int na = NST + med_layers(st + NST);
     link(&appc, st, na + lx_layers(st + na));    /* L3: shell_linux.inc's */
-    tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
-    link(&lockg, lk, 11);
+    tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
+    link(&lockg, lk, 12);
     tk_layer *ls[4 * NG + 2 + NEC];
     int n = 0;
     for (int g = 0; g < NG; g++) { ls[n++] = &K[g].gh; ls[n++] = &K[g].closed; ls[n++] = &K[g].open; ls[n++] = &K[g].chev; }
@@ -3811,6 +3825,7 @@ static void back_to_lock(int exit_em)
     if (exit_em && EMG) set_emergency(0, 1);
     if (!EMG) while (cards_pending > 0) { build_card(NG - cards_pending); cards_pending--; }
     if (CF.on) cf_close(0);
+    nc_reset();                                    /* helper D: the Notification Centre and the banner gone */
     free_cc_all();                                 /* P3s: the lock keeps none of it */
     relink();
     toast_t = 1; toast_to = toast_from = -90; toast_left = 0; toast_place();
@@ -3855,6 +3870,7 @@ void sh_set(const char *what, const char *key, float v)
     } else if (!tk_strcmp(what, "sleep")) {        /* the films: the Power key's fade (v 1) and the wake (v 0) */
         if (v > 0) sh_sleep(0); else sh_wake();
     } else if (lx_set(what, key, v)) {            /* L3: lapp=, store=, storeq= (shell_linux.inc) */
+    } else if (nc_set(what, key, v)) {            /* helper D: notify=, banner=, nc=, ncgroup=, ncswipe= (shell_nc.inc) */
     } else if (!tk_strcmp(what, "app")) {
         if (!key[0] && AP.on) app_finish_close();       /* L2: "app=" closes the open app at once */
         for (int a = 0; a < NAPPS; a++)
@@ -3933,7 +3949,7 @@ void sh_set(const char *what, const char *key, float v)
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
 enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL,
-       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX };
+       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX, G_NC };   /* G_NC: shell_nc.inc's (the Centre, the banner, the lock's pill) */
 static struct {
     int kind, arg, arg2, moved;
     float x0, y0, base, t0;
@@ -4146,8 +4162,10 @@ void sh_touch(int phase, float x, float y, float t)
             else { T.kind = G_FOCUSDRAG; sp_focus.live = 0; focus_closing = 0; tk_tracker_add(&T.tr, y, t); }   /* P3p: drag it down */
             return;
         }
+        if (nc_down(x, y, t)) { T.kind = G_NC; return; }    /* helper D: the banner, the open Notification Centre, the pill */
         if (AP.on) {
             /* an open app (survival-next: also over the lock, from Emergency's cards): the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
+            if (y < 36 && x < 195 && !AP.closing && !sp_app.live) { nc_pull_begin(x, y, t); T.kind = G_NC; return; }   /* helper D */
             if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
             else if (!sp_app.live && med_is(APPS[AP.a].k)) { T.kind = G_MEDIA; med_touch(0, x, y, t); }
             else if (!sp_app.live && !AP.closing && lx_touch(0, x, y)) T.kind = G_LINUX;   /* L3 */
@@ -4180,8 +4198,9 @@ void sh_touch(int phase, float x, float y, float t)
                 tk_tracker_add(&T.tr, y, t);
                 return;
             }
-            /* home: a pull down from the top-left corner brings the lock back (the concept's re-lock) */
-            if (y < 56 && x < 195) { T.kind = G_RELOCK; sp_lock.live = 0; tk_tracker_add(&T.tr, y, t); return; }
+            /* helper D: a pull down from the top-left half: the Notification Centre (iOS; the concept's re-lock was here:
+             * the Power key brings the lock back) */
+            if (y < 56 && x < 195) { nc_pull_begin(x, y, t); T.kind = G_NC; return; }
             /* elsewhere but the dock, Search and the widgets: the pages (direction decided after 8 pt) */
             int on_w = page_x > -195 && y >= 60 && y <= 60 + WID_W && ((x >= WID_X(0) && x <= WID_X(0) + WID_W) || (x >= WID_X(1) && x <= WID_X(1) + WID_W));
             if (y >= 688 && y < H_PT - 30) { T.kind = G_DOCK; icon_press(app_hit(x, y)); return; }   /* the dock: a tap opens its app */
@@ -4232,6 +4251,13 @@ void sh_touch(int phase, float x, float y, float t)
         else if (y >= LIST_TOP && y <= LIST_TOP + LIST_H) { T.kind = G_LIST; T.base = scroll; sp_scroll.live = 0; scroll_momentum = 0; }
         else { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
         tk_tracker_add(&T.tr, y, t);
+        return;
+    }
+    if (T.kind == G_NC) {                    /* helper D, shell_nc.inc */
+        if (nc_touch(phase, x, y, t) == 2) {     /* the lock's pill moved: the lock's swipe after all */
+            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0;
+            tk_tracker_add(&T.tr, y, t);
+        } else if (phase == 2) T.kind = G_NONE;
         return;
     }
     if (T.kind == G_LINUX) {                 /* L3, shell_linux.inc: a Linux window, the App Store's list */
@@ -4734,6 +4760,7 @@ int sh_tick(float dt, float t)
         }
     }
     mv |= sv_tick(dt, t);                       /* survival-next: a tool's hold, its polls */
+    mv |= nc_tick(dt, t);                       /* helper D: the Notification Centre, the banner */
     return mv;
 }
 
@@ -4763,6 +4790,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
         build_lclock();
         build_home_sb();
         if (AP.on && !AP.closing) build_apsb();
+        nc_minute();                             /* helper D: the platters' "5m ago" */
         relink();
     }
     if (wchange) {
@@ -4803,7 +4831,7 @@ void sh_idle(void)
     if (focus_faces_idle(focus_faces_keep())) return;    /* a sheet's glass: one bake a turn (sh_idle_pending) */
     if (locked && lockY == 0 && !focus_on) flatten_lock(1);
     /* home at rest: the Control Centre's snapshot and grid ready before the pull */
-    if (!locked && !CCS.on && !AP.on && (!CCS.built || cc_stale)) { build_cc(); cc_stale = 0; }
+    if (!locked && !CCS.on && !AP.on && !nc_on() && (!CCS.built || cc_stale)) { build_cc(); cc_stale = 0; }
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
     prep_tree(home.child);                       /* home's pages too (their widgets and app grids, P2s) */
@@ -4837,5 +4865,6 @@ int sh_moving(void)
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live || med_moving() || lx_moving();
     m |= IP.on && IP.t < 1;
+    m |= nc_moving();                            /* helper D */
     return m;
 }

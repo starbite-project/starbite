@@ -307,15 +307,15 @@ static void write_ppm(const char *path, const tk_bmp *b)
 
 static void apply_state(const char *st)
 {
-    char what[32] = { 0 }, key[64] = { 0 };
+    char what[32] = { 0 }, key[256] = { 0 };
     float v = 1;
     const char *eq = strchr(st, '=');
     if (!eq) return;
     if (!strncmp(st, "lx=", 3)) { lin_fake_state(st + 3); return; }   /* L3: the pretend Linux's own states */
     memcpy(what, st, (size_t)(eq - st));
     const char *colon = strchr(eq + 1, ':');
-    if (colon) { memcpy(key, eq + 1, (size_t)(colon - eq - 1)); v = (float)atof(colon + 1); }
-    else strcpy(key, eq + 1);
+    if (colon) { memcpy(key, eq + 1, (size_t)(colon - eq - 1 < 255 ? colon - eq - 1 : 255)); v = (float)atof(colon + 1); }
+    else snprintf(key, sizeof key, "%s", eq + 1);   /* helper D: a long notification text fits */
     /* date=WDAY:DAY (P3p): a new day as the phone's clock reports it (the Calendar icon follows) */
     if (!strcmp(what, "date")) { sh_status(21, 6, atoi(key), (int)v, 11, 87, 41); return; }
     if (!strcmp(what, "hostms")) { surv_host_now_ms = (uint64_t)v; return; }   /* survival-next: the simulation's clock */
@@ -323,7 +323,7 @@ static void apply_state(const char *st)
 }
 
 /* ---- the film ------------------------------------------------------------------------------------------- */
-typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
+typedef struct { int kind; float x0, y0, x1, y1, ms, dms; char txt[120]; } step;   /* dms: dragh's drag (then held) */
 static int parse(const char *s, step *st, int max)
 {
     int n = 0;
@@ -340,6 +340,17 @@ static int parse(const char *s, step *st, int max)
         else if (!strcmp(w, "hold")) { p->kind = 3; sscanf(tok, " %*s %f %f %f", &p->x0, &p->y0, &p->ms); }
         else if (!strcmp(w, "state")) { p->kind = 4; }
         else if (!strcmp(w, "power")) { p->kind = 5; p->ms = 20; }      /* the Power key: sleep, or wake if off */
+        else if (!strcmp(w, "notify")) {     /* helper D: "notify WHO|TITLE|BODY": a pretend notification from the platform */
+            p->kind = 6; p->ms = 20;
+            const char *a = strstr(tok, "notify") + 6;
+            while (*a == ' ') a++;
+            snprintf(p->txt, sizeof p->txt, "%s", a);
+        } else if (!strcmp(w, "dragh")) {   /* helper D: "dragh X0 Y0 X1 Y1 MS HOLD": a drag, then the finger held still */
+            float hold = 0;
+            p->kind = 7;
+            sscanf(tok, " %*s %f %f %f %f %f %f", &p->x0, &p->y0, &p->x1, &p->y1, &p->dms, &hold);
+            p->ms = p->dms + hold;
+        }
         n++;
     }
     return n;
@@ -370,9 +381,9 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         for (int sub = 1; sub <= 2; sub++) {
             float te = t + dt * sub / 2;
             while (si < n && te >= s0 + st[si].ms) {
-                if (phase >= 0 && st[si].kind && st[si].kind != 5) {
+                if (phase >= 0 && st[si].kind && st[si].kind != 5 && st[si].kind != 6) {
                     step *p = &st[si];
-                    float x = p->kind == 2 ? p->x1 : p->x0, y = p->kind == 2 ? p->y1 : p->y0;
+                    float x = p->kind == 2 || p->kind == 7 ? p->x1 : p->x0, y = p->kind == 2 || p->kind == 7 ? p->y1 : p->y0;
                     sh_touch(2, x, y, s0 + p->ms);
                 }
                 phase = -1;
@@ -383,6 +394,10 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
             step *p = &st[si];
             if (!p->kind) continue;
             float u = (te - s0) / p->ms;
+            if (p->kind == 6) {
+                if (phase < 0) { fprintf(stderr, "notify at %.0f ms: %s\n", te, p->txt); sh_set("notify", p->txt, 0); phase = 0; }
+                continue;
+            }
             if (p->kind == 5) {
                 if (phase < 0) {
                     fprintf(stderr, "power at %.0f ms: %s\n", te, screen_off || sh_sleeping() ? "wake" : "sleep");
@@ -392,6 +407,11 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
                 continue;
             }
             if (phase < 0) { sh_touch(0, p->x0, p->y0, te); phase = 0; continue; }
+            if (p->kind == 7) {
+                float e = (te - s0) / p->dms;
+                if (e > 1) e = 1;
+                sh_touch(1, p->x0 + (p->x1 - p->x0) * e, p->y0 + (p->y1 - p->y0) * e, te);
+            }
             if (p->kind == 2) {
                 float e = u < 1 ? u : 1;
                 e = 1 - (1 - e) * (1 - e) * .3f - (1 - e) * .7f;     /* a finger: fast start, slight ease */

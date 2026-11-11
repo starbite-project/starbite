@@ -404,6 +404,7 @@ struct notif {
 void notif_post(const char *who, const char *title, const char *text);
 void power_last2_clock(int on);      /* 1.2-alpha27: Last 2 % (survival.c): the A55 at 455 MHz, screen on or off */
 int notif_count(void);
+unsigned notif_seq(void);           /* posts since boot (Starbite OS Next's shell copies the new ones) */
 int notif_unread(void);
 const struct notif *notif_get(int i);
 void notif_seen(void);
