@@ -114,6 +114,7 @@ rm -f "$F/ufsnow.img"
 key=$(sed -n 's/^key = "\(.*\)"/\1/p' build/store/catalog-live.toml 2>/dev/null | head -1)
 bn() {   # $1 card|ufs: where boot-next.sh must have put next=$key
     timeout 120 tools/store/boot-next.sh "$key" 5 > "$F/bn.log" 2>&1 || true
+    python3 -c 'import sys; sys.path.insert(0, "tools/installer/fakes"); import fakephone; fakephone.write_state(sys.argv[1], "recovery")' "$FAKE_ROOT"   # its reboot left TWRP
     if [ "$1" = card ]; then dd if="$D/mmcblk0p2" bs=4096 skip=2 count=1 of="$F/set-now.bin" 2>/dev/null
     else dd if="$ud" bs=4096 skip=4194306 count=1 of="$F/set-now.bin" 2>/dev/null; fi
     $SB settings-show "$F/set-now.bin" | grep -q "next *$key" && pass "boot-next.sh set next=$key in the $1 settings" ||
@@ -139,10 +140,11 @@ tools/store/card-store.sh release --i-mean-it > "$F/r1.log" 2>&1 && fail "releas
 [ "$(sum "$ud" 0 4915328)" = "$ufs_before" ] || fail "USERDATA changed by a refused release"
 printf 'xxxx starmenu7=2 sbstore=card yyyy' | dd of="$(readlink -f "$D/by-name/BOOT")" bs=1 seek=4096 conv=notrunc 2>/dev/null
 (cd "$F" && mkdir -p build/store)
+dd if="$ud" bs=4096 skip=4194304 count=107 of="$F/ufs-before-release.bin" 2>/dev/null
 tools/store/card-store.sh release --i-mean-it > "$F/r2.log" 2>&1 || { cat "$F/r2.log"; fail "release"; }
 [ "$(sum "$ud" 4194304 7)" = "$(dd if=/dev/zero bs=4096 count=7 2>/dev/null | sha256sum | cut -c1-64)" ] && pass "old UFS store head zeroed" || { cat "$F/r2.log"; dd if="$ud" bs=4096 skip=4194304 count=7 2>/dev/null | od -An -tx1 | head -3; fail "not zeroed"; }
-[ "$(sum "$ud" 4194311 100)" = "$(sum "$F/ufs.img" 7 100)" ] && pass "only blocks 0..6 of the old store touched" || fail "more than the head"
+[ "$(sum "$ud" 4194311 100)" = "$(sum "$F/ufs-before-release.bin" 7 100)" ] && pass "only blocks 0..6 of the old store touched" || fail "more than the head"
 saved=$(sed -n 's/^saved to \(.*\) (.*/\1/p' "$F/r2.log")
-cmp -s "$saved" <(dd if="$F/ufs.img" bs=4096 count=7 2>/dev/null) && pass "old head saved to $saved" || fail "saved head"
+cmp -s "$saved" <(dd if="$F/ufs-before-release.bin" bs=4096 count=7 2>/dev/null) && pass "old head saved to $saved" || fail "saved head"
 rm -f "$saved"
 echo "card-store rehearsal: all passed"
