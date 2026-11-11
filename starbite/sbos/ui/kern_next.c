@@ -655,7 +655,8 @@ static int same_item(const tk_gpu_item *a, const tk_gpu_item *b)
            a->radius == b->radius && a->ft0 == b->ft0 && a->ft1 == b->ft1 && a->fb0 == b->fb0 && a->fb1 == b->fb1 &&
            a->len == b->len && a->s0 == b->s0 && a->s1 == b->s1 && a->mask == b->mask && a->mstride == b->mstride &&
            a->bd == b->bd && a->bstride == b->bstride && a->bk == b->bk && a->bw == b->bw && a->bh == b->bh &&
-           a->gen == b->gen;
+           a->gen == b->gen && a->lx == b->lx && a->ly == b->ly && a->lw == b->lw && a->lh == b->lh && a->lb == b->lb &&
+           a->lt == b->lt && a->lc == b->lc && a->lr == b->lr;
 }
 static tk_gpu_item prevq[TK_GPU_MAX], cacheq[TK_GPU_MAX], gx[TK_GPU_MAX];
 static int prev_n, cache_n, stable_p = -1, stable_k;
@@ -729,7 +730,7 @@ void next_kinit(void)
 {
     boot_t0 = sb_ms();
     log_mb("arena free before the UI heap: ", sb_arena_free());
-    heap_init(192ULL << 20);                /* v6: 160 + Liquid Glass's lens maps (the GPU maps it below VA_RO) */
+    heap_init(160ULL << 20);                /* v9: the lens needs no maps (back to 160) */
     log_mb("UI heap: ", heap_size);
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */

@@ -877,7 +877,7 @@ static void build_home(void)
             d_rrect(&d, 195.5f, 650.5f, 6, 6, 3, k == 0 ? W(1) : W(.4f));
             d_rrect(&d, 207.5f, 650.5f, 6, 6, 3, k == 1 ? W(1) : W(.4f));
         }
-        if (!tk_glass_lens) for (int k = 0; k < 3; k++) tk_a8_free(&hsearch[k].glass);   /* v6: the lens needs them */
+        for (int k = 0; k < 3; k++) tk_a8_free(&hsearch[k].glass);   /* v9: the lens needs only the shapes */
         hsearch[1].hidden = hsearch[2].hidden = 1;
     }
     d = mk(&hparts[3], "home-dock", 0, 650, 390, 152, 0, 1);
@@ -896,8 +896,9 @@ static void build_home(void)
     }
     /* the parts stay separate layers under one group (they do not overlap, so the group's opacity per part is
      * exact); #home has will-change: opacity, a backdrop root in Chrome: its glass shows no wallpaper blur. v6:
-     * Liquid Glass refracts the wallpaper under the widgets, the dock and the Search pill (their masks stay) */
-    if (!tk_glass_lens) for (int i = 0; i < 5; i++) tk_a8_free(&hparts[i].glass);
+     * Liquid Glass refracts the wallpaper under the widgets, the dock and the Search pill (from their shapes:
+     * the masks go, as before) */
+    for (int i = 0; i < 5; i++) tk_a8_free(&hparts[i].glass);
 }
 
 static float focus_sy;

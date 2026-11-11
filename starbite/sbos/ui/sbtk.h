@@ -139,10 +139,6 @@ void tk_glass_from_half(tk_bmp *b, int box, int boy, const tk_bmp *half, float x
  * a layer's glass mask and by tk_glass_local_put for glass baked into a layer; the bake then draws only the drop
  * shadow (and .lg.dark's tint). Off: the concept's .lg recipe (the tint, rims and specular radials baked). */
 extern int tk_glass_lens;
-/* a lens map for a layer's glass mask (lens.h's words, the mask's size; k: screen px per mask px), tk_alloc'ed:
- * NULL if out of memory */
-struct tk_layer;
-uint32_t *tk_lens_build(const struct tk_layer *l, float k);   /* v8: from its shapes (exact); the rest of its mask flat */
 /* rotate a small premultiplied bitmap about its centre (bilinear) into dst of the same size: a chevron's turn */
 void tk_bmp_rotate(tk_bmp *dst, const tk_bmp *src, float deg);
 /* CSS cubic-bezier(x1, y1, x2, y2) at t */
@@ -195,7 +191,7 @@ void tk_layer_glass_shape(tk_layer *l, float x, float y, float w, float h, float
  * gc_quad (a bitmap or a solid of w x h, isx / isy source px per screen px from (dx0, dy0), alpha, the clip rect with
  * a rounded edge, fades by screen y, a 3-slice, glass: the backdrop bd through the 8-bit mask first) */
 enum { TK_GPU_SOLID = 1, TK_GPU_BILINEAR = 2, TK_GPU_GLASS = 4, TK_GPU_FADE = 8, TK_GPU_SLICE_V = 16, TK_GPU_SLICE_H = 32,
-       TK_GPU_OPAQUE = 64, TK_GPU_LENS = 256 };   /* LENS (v6): mask is the layer's lens map, mstride in px */
+       TK_GPU_OPAQUE = 64, TK_GPU_LENS = 256 };   /* LENS (v9): a transparent solid over a glass shape: Liquid Glass */
 typedef struct {
     const void *src;
     uint32_t stride, w, h, flags, solid;
@@ -206,6 +202,7 @@ typedef struct {
     uint32_t bstride;
     float bk;
     uint32_t bw, bh;
+    float lx, ly, lw, lh, lb, lt, lc, lr;   /* v9 (LENS): the glass shape (screen px) and its lens (kern/lens.h) */
     const uint8_t *occ;        /* the layer's block map (gpu_occ), or 0 */
     uint32_t occ_w, occ_h;
     uint32_t gen;              /* the content's stamp (the layer's gen, the ground's): what a cache of the frame's
