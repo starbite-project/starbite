@@ -180,10 +180,26 @@ static int has(const char *s, const char *w)
 }
 static int cell_now(void)
 {
-    static sh_cell_t last = { -1, 0, 0, 0, 0 };
+    static sh_cell_t last = { -1, 0, 0, 0, 0, 0, "" };
     struct sbos_phone ph;
     kmodem_status(&ph);
-    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars };
+    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars, 0, "" };
+    struct kcell kc;
+    kmodem_cell(&kc);
+    c.data = kc.state;                      /* KCELL_* = SH_DATA_* */
+    sb_strcpy(c.oper, sizeof(c.oper), kc.oper);
+    if (kc.want || kc.state != KCELL_OFF) {
+        c.state = kc.state == KCELL_STARTING || kc.state == KCELL_STOPPING ? SH_CELL_STARTING :
+                  kc.state == KCELL_SEARCHING || kc.state == KCELL_REGISTERED || kc.state == KCELL_DATA ? SH_CELL_ON :
+                  kc.state == KCELL_OFF ? SH_CELL_OFF : SH_CELL_FAILED;
+        c.bars = kc.bars;
+        c.rat = has(kc.rat, "LTE") ? 7 : has(kc.rat, "UMTS") ? 4 : has(kc.rat, "EDGE") ? 3 : has(kc.rat, "GPRS") ? 2 :
+                has(kc.rat, "GSM") ? 1 : 0;
+        sh_cell(&c);
+        int ch = memcmp(&c, &last, sizeof(c)) != 0;
+        last = c;
+        return ch;
+    }
     if (ph.state == SBOS_MODEM_ON) c.state = SH_CELL_ON;
     else if (ph.state == SBOS_MODEM_FAILED) c.state = SH_CELL_FAILED;
     else if (ph.state == SBOS_MODEM_PARKED) c.state = SH_CELL_GUARD;
@@ -192,7 +208,7 @@ static int cell_now(void)
     c.rat = has(ph.cs, "LTE") ? 7 : has(ph.cs, "UMTS") ? 4 : has(ph.cs, "EDGE") ? 3 : has(ph.cs, "GPRS") ? 2 : has(ph.cs, "GSM") ? 1 : 0;
     sh_cell(&c);
     int changed = c.state != last.state || c.sim != last.sim || c.emergency_only != last.emergency_only ||
-                  c.rat != last.rat || c.bars != last.bars;
+                  c.rat != last.rat || c.bars != last.bars || c.data != last.data;
     last = c;
     return changed;
 }
@@ -274,6 +290,7 @@ int sh_wifi_fetch(const char *url) { return wifi_fetch(url); }
 /* the modem's Start / Stop from the new UI: the kernel's own path (its hold confirmation, its refusals: never in
  * a self-test image, not while Heat or Linux runs) */
 int sh_modem(int on) { return kmodem_power(on); }
+int sh_cellular(int on) { return kmodem_cellular(on); }
 static void (*cf_done)(int);
 static int next_confirm(const char *t, const char *l1, const char *l2, const char *l3, const char *hold, void (*done)(int))
 {

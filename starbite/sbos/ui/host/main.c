@@ -24,6 +24,15 @@ int sh_modem(int on)
     return 0;
 }
 void sh_confirmed(int ok) { fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled"); }
+/* a pretend network for the previews: on -> searching -> data up on "Operator" LTE, 3 bars */
+int sh_cellular(int on)
+{
+    sh_cell_t c = { on ? 1 : 0, 0, 0, on ? 7 : 0, on ? 3 : -1, on ? SH_DATA_UP : SH_DATA_OFF, "" };
+    if (on) memcpy(c.oper, "Operator", 9);
+    fprintf(stderr, "cellular: %s\n", on ? "on (pretend: data up)" : "off");
+    sh_cell(&c);
+    return 0;
+}
 void sh_brightness(int level) { fprintf(stderr, "brightness: level %d\n", level); }
 void sh_vibrate(void) { fprintf(stderr, "vibrate: the timer ran out\n"); }
 void sh_haptic(void) { }

@@ -766,6 +766,35 @@ also fills the zero-copy ring at link setup and allows the GPRS frames and the I
     round also refuses the short activate form (the long-form fallback) and loses the first SYN.
   - The builder surface is pinned (APN charset, no user/password, cid 1 only), and no address reaches the log.
 
+### 7.10 Mobile data in Starbite OS Next (branch claude/sbos-cellular, 2026-11-11)
+After simtest-a2 the user asked for cellular in Next. The transmit path is now in a regular image, gated by the user:
+- **The switch:** Settings > Mobile Data (tap) or the Control Centre's cellular circle (hold 0.7 s) calls
+  `kmodem_cellular(1)`. It is off at every boot (not saved) and refused in self-test images and while Heat or Linux
+  runs. It is the only place the kernel sets `SBM_ATTENDED_DATA`; the Modem app's start stays receive only.
+  - **Build:** starbite/sbos/build.sh compiles the modem core and kern/modem.c with `SBM_ATTENDED_TX`.
+  - **What the core can send** (in every image): no calls, SMS, SS or emergency frames; only the GETs, the radio
+    on/off, the attach APN, auto selection, PS attach and the PDP context, each pinned byte by byte.
+- **kern/modem.c's machine** (100 ms steps):
+  - SIM: absent = "No SIM", PIN on = "SIM PIN on" (no PIN entry yet);
+  - radio normal; the LTE attach APN (`internet`, IPv4v6, the long form if refused);
+  - registration, escalating as in A2 after 60 / 100 / 140 s;
+  - define and activate cid 1 (short, then long), then the IP configuration;
+  - a raw-IP `sbnet` (starbite/wifi/net.c `sbnet_init_raw` + `sbnet_static`) with its own `sbtcp`, ticked every
+    20 ms;
+  - losing the registration or the context brings data down and reconnects; a stall restarts the modem (the v2
+    recovery) and the machine starts over;
+  - off: deactivate, low power (the CP detaches), park.
+- **Routing:** `wifi_fetch` (HTTP and HTTPS on BearSSL) uses Wi-Fi when it is joined, else `kmodem_netif` (mobile
+  data). A fetch over mobile data is polled from the modem's tick.
+- **The screen:** `kmodem_cell` gives state, bars, network type and the operator's name (MCC-MNC table; screen
+  only). The shell shows:
+  - the operator on the lock screen's carrier line;
+  - "Elisa · LTE" (or Searching / Connecting / SIM PIN on / No SIM) in Settings > Mobile Data;
+  - the status bar's bars and network type.
+- **Not yet:** the network's own name (0x080C NITZ), other APNs (a setting), a PIN prompt, IPv6. Storage writes stay
+  held while the modem runs, so settings changed meanwhile aren't saved. The start blocks the UI for about 4.5 s
+  (as the Modem app's start does).
+
 ## 8. Later stages (not started)
 
 

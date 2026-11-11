@@ -112,6 +112,7 @@ for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$
     flags=$CFLAGS
     case "$src" in                          # BearSSL's headers include <string.h>: the shim's, not the C library's
     */kern/wifi.c|*/wifi/http.c|*/wifi/netio.c|*/wifi/tls/*) flags="$flags -I$wifi/tls/shim" ;;
+    */kern/modem.c) flags="$flags -DSBM_ATTENDED_TX" ;;   # mobile data: the user's Cellular switch (docs/MODEM.md 7.10)
     esac
     case " smp.c heatk.c ocp.c " in
     *" $(basename "$src") "*)
@@ -139,7 +140,7 @@ MREN="-Dext4_open=m_ext4_open -Dext4_inode=m_ext4_inode -Dext4_size=m_ext4_size 
 -Dext4_lookup=m_ext4_lookup -Dext4_bmap=m_ext4_bmap -Dext4_list=m_ext4_list"
 for src in "$modem"/sbm_*.c "$modem/sb/sbm_sb.c" "$modem/sb/ext4.c" "$modem/sb/jbd2.c"; do
     obj="$ob/km_$(basename "$src" | tr . _).o"
-    "${CROSS}gcc" $CFLAGS $MREN -I"$modem" "$src" -o "$obj"
+    "${CROSS}gcc" $CFLAGS $MREN -DSBM_ATTENDED_TX -I"$modem" "$src" -o "$obj"
     objs="$objs $obj"
 done
 # the rule of the modem images: no partition write from the modem code (libsb's storage hold is on while it runs)

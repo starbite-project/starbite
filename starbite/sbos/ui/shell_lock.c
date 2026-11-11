@@ -150,6 +150,7 @@ static int booting;
 static float now_ms;
 static int EMG;                 /* Emergency mode (the concept's em-mode) */
 static int cell_running(void);  /* the modem runs (sh_cell) */
+static void cell_toggle(void);  /* the Cellular switch (sh_cellular) */
 static const char *md_text(void);
 
 /* ---- the wallpaper and its glass backdrop ------------------------------------------------------------------ */
@@ -2830,10 +2831,7 @@ static void app_tap(float x, float y)
     } else if (is_app("settings")) {
         if (x >= 16 && x < 374 && y >= 293 && y < 340) { AS.sub = 1; build_app_page(AP.a); return; }
         if (x >= 16 && x < 374 && y >= 135 && y < 182) { AS.sub = 2; build_app_page(AP.a); return; }   /* Wi-Fi */
-        if (x >= 16 && x < 374 && y >= 182 && y < 229) {
-            if (cell_running()) { sh_modem(0); toast("Modem stopped"); }
-            else if (sh_modem(1) < 0) toast("The modem can't start now");
-        }
+        if (x >= 16 && x < 374 && y >= 182 && y < 229) cell_toggle();   /* Mobile Data: the Cellular switch */
     } else if (is_app("messages")) {
         if (AS.thread < 0) {
             (void)x; (void)y;                         /* P2y: no conversations (no SIM): nothing to open */
@@ -2849,9 +2847,43 @@ static void build_cc_grid(void);
 static void cc_link(void);
 static sh_cell_t CELL;
 static int cell_running(void) { return CELL.state == SH_CELL_ON || CELL.state == SH_CELL_STARTING || CELL.state == SH_CELL_RESTARTING; }
+/* the Cellular switch is on (anything from starting to data up) */
+static int data_on(void)
+{
+    return CELL.data == SH_DATA_STARTING || CELL.data == SH_DATA_SEARCHING || CELL.data == SH_DATA_REGISTERED ||
+           CELL.data == SH_DATA_UP;
+}
+static char md_buf[48];
+static const char *md_join(const char *a, const char *b)
+{
+    int n = 0;
+    for (const char *p = a; *p && n < 47; p++) md_buf[n++] = *p;
+    for (const char *p = b; *p && n < 47; p++) md_buf[n++] = *p;
+    md_buf[n] = 0;
+    return md_buf;
+}
+/* the switch, from Settings' Mobile Data row and the Control Centre's circle */
+static void cell_toggle(void)
+{
+    if (data_on() || CELL.data == SH_DATA_STOPPING) { sh_cellular(0); toast("Mobile data off"); }
+    else if (sh_cellular(1) < 0) toast("Mobile data can't start now");
+    else toast("Mobile data on: connecting\xe2\x80\xa6");
+}
 /* Settings > Mobile Data: the modem's state in words (the contract's wording) */
 static const char *md_text(void)
 {
+    switch (CELL.data) {
+    case SH_DATA_STARTING: return "Starting\xe2\x80\xa6";
+    case SH_DATA_SEARCHING: return "Searching\xe2\x80\xa6";
+    case SH_DATA_REGISTERED: return CELL.oper[0] ? md_join(CELL.oper, " \xc2\xb7 connecting") : "Connecting\xe2\x80\xa6";
+    case SH_DATA_UP: return md_join(CELL.oper[0] ? CELL.oper : "On", CELL.rat == 7 ? " \xc2\xb7 LTE" : CELL.rat == 4 ? " \xc2\xb7 3G" :
+                                    CELL.rat ? " \xc2\xb7 2G" : "");
+    case SH_DATA_STOPPING: return "Turning off\xe2\x80\xa6";
+    case SH_DATA_NO_SIM: return "No SIM";
+    case SH_DATA_LOCKED: return "SIM PIN on";
+    case SH_DATA_FAILED: return "Could not connect";
+    default: break;
+    }
     switch (CELL.state) {
     case SH_CELL_STARTING: return "Starting\xe2\x80\xa6";
     case SH_CELL_RESTARTING: return "Restarting\xe2\x80\xa6";
@@ -2865,11 +2897,13 @@ static void build_home_sb(void);
 void sh_cell(const sh_cell_t *c)
 {
     if (c->state == CELL.state && c->sim == CELL.sim && c->emergency_only == CELL.emergency_only && c->rat == CELL.rat &&
-        c->bars == CELL.bars)
+        c->bars == CELL.bars && c->data == CELL.data && !tk_strcmp(c->oper, CELL.oper))
         return;
     CELL = *c;
-    /* the lock's status bar: the network's honest line */
-    const char *cr = CELL.state == SH_CELL_STARTING ? "Starting\xe2\x80\xa6" : CELL.state == SH_CELL_RESTARTING ? "Restarting\xe2\x80\xa6" :
+    /* the lock's status bar: the network's honest line (the operator's name once registered) */
+    const char *cr = (CELL.data == SH_DATA_REGISTERED || CELL.data == SH_DATA_UP) && CELL.oper[0] ? CELL.oper :
+                     CELL.data == SH_DATA_SEARCHING ? "Searching\xe2\x80\xa6" : CELL.data == SH_DATA_LOCKED ? "SIM PIN on" :
+                     CELL.state == SH_CELL_STARTING ? "Starting\xe2\x80\xa6" : CELL.state == SH_CELL_RESTARTING ? "Restarting\xe2\x80\xa6" :
                      CELL.state == SH_CELL_ON && CELL.emergency_only ? "Emergency calls only" : "No SIM";
     int n2 = 0;
     while (cr[n2] && n2 < 31) { carrier[n2] = cr[n2]; n2++; }
@@ -2877,7 +2911,9 @@ void sh_cell(const sh_cell_t *c)
     SB_CELL.state = CELL.state == SH_CELL_ON;
     SB_CELL.bars = CELL.bars;
     SB_CELL.rat = CELL.rat;
-    const char *h = CELL.state == SH_CELL_ON && !CELL.emergency_only && CELL.bars <= 0 ? "No SIM \xc2\xb7 searching" :
+    const char *h = CELL.data == SH_DATA_UP ? md_join(CELL.oper[0] ? CELL.oper : "Mobile", " \xc2\xb7 mobile data on") :
+                    data_on() ? "Mobile data \xc2\xb7 connecting" :
+                    CELL.state == SH_CELL_ON && !CELL.emergency_only && CELL.bars <= 0 ? "No SIM \xc2\xb7 searching" :
                     "No SIM \xc2\xb7 emergency calls only";
     int n = 0;
     while (h[n] && n < 47) { cell_hint[n] = h[n]; n++; }
@@ -3176,7 +3212,7 @@ void sh_set(const char *what, const char *key, float v)
         toast_place();
     } else if (!tk_strcmp(what, "cell")) {
         /* the modem's state for the host's stills: "on" (emergency-only, GSM, v bars), "starting", "off" */
-        sh_cell_t c = { SH_CELL_OFF, -1, 0, 0, -1 };
+        sh_cell_t c = { SH_CELL_OFF, -1, 0, 0, -1, SH_DATA_OFF, "" };
         if (!tk_strcmp(key, "on")) { c.state = SH_CELL_ON; c.sim = 0x80; c.emergency_only = 1; c.rat = 1; c.bars = (int)v; }
         else if (!tk_strcmp(key, "starting")) c.state = SH_CELL_STARTING;
         sh_cell(&c);
@@ -3459,7 +3495,7 @@ void sh_touch(int phase, float x, float y, float t)
         if (!T.arg) toast("Press and hold");
         break;
     case G_CCCELL:
-        if (!T.arg) toast(cell_running() ? "Hold to stop the modem" : "Hold to start the modem");
+        if (!T.arg) toast(data_on() ? "Hold to turn mobile data off" : "Hold for mobile data");
         break;
     case G_CF:
         if (CF.down) {                         /* let go before the bar was full */
@@ -3646,8 +3682,7 @@ int sh_tick(float dt, float t)
     if (T.kind == G_CCCELL && !T.arg) {
         if (t - T.t0 >= 700) {
             T.arg = 1;
-            if (cell_running()) { sh_modem(0); toast("Modem stopped"); }
-            else if (sh_modem(1) < 0) toast("The modem can't start now");
+            cell_toggle();
         }
         mv = 1;
     }

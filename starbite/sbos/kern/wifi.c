@@ -496,6 +496,7 @@ static uint8_t *fx_body;
 /* fx_state (declared above): 0 none, 1 running, 2 finished */
 static int fx_result;
 static char fx_host[64];
+static int fx_cell;                         /* this fetch runs over mobile data (kmodem_netif), not Wi-Fi */
 
 static uint64_t nio_unix(void *ctx)
 {
@@ -530,17 +531,21 @@ int wifi_fetch(const char *url)
 {
     struct sbhttp_net hn;
     uint8_t seed[32];
-    if (st != SBOS_WIFI_CONNECTED)
-        return SBOS_EAGAIN;
+    struct sbnet *fnet = &net;
+    struct sbtcp *ftcp = &tcp;
     if (fx_state == 1)
         return SBOS_EBUSY;
+    /* the interface: Wi-Fi when joined, else mobile data when the user turned it on and it is up */
+    if (st != SBOS_WIFI_CONNECTED && !kmodem_netif(&fnet, &ftcp))
+        return SBOS_EAGAIN;
+    fx_cell = st != SBOS_WIFI_CONNECTED;
     if (!fx) {
         fx = sb_alloc(sizeof(*fx));
         fx_body = sb_alloc(FETCH_BODY);
         if (!fx || !fx_body)
             return SBOS_EAGAIN;
     }
-    nio.net = &net, nio.tcp = &tcp, nio.unix_time = nio_unix, nio.log = net_log, nio.ctx = 0;
+    nio.net = fnet, nio.tcp = ftcp, nio.unix_time = nio_unix, nio.log = net_log, nio.ctx = 0;
     sbnetio_init(&nio, &hn);
     hn.log_host = 0;                        /* where the user goes is theirs: not logged */
     {
@@ -563,7 +568,8 @@ int wifi_fetch(const char *url)
     memset(seed, 0, sizeof(seed));
     if (fx_result != SBHTTP_BUSY)
         fx_state = 2;
-    kt_set(KT_WIFI, 0, sb_ms(), 10, 0);
+    if (!fx_cell)
+        kt_set(KT_WIFI, 0, sb_ms(), 10, 0);
     notify();
     return 0;
 }
@@ -572,7 +578,7 @@ static void fetch_poll(void)
 {
     if (fx_state != 1)
         return;
-    if (st != SBOS_WIFI_CONNECTED) {
+    if (fx_cell ? !kmodem_netif(0, 0) : st != SBOS_WIFI_CONNECTED) {
         sbhttp_abort(fx);
         fx_result = SBHTTP_E_NETWORK;
         fx_state = 2;
@@ -585,6 +591,13 @@ static void fetch_poll(void)
         fx_state = 2;
         notify();
     }
+}
+
+/* kern/modem.c's tick while mobile data is up: a fetch over it is driven from there (Wi-Fi may be off) */
+void wifi_fetch_poll_cell(void)
+{
+    if (fx_cell)
+        fetch_poll();
 }
 
 void wifi_fetch_cancel(void)
@@ -1115,7 +1128,8 @@ void wifi_timer(unsigned id)
         if (st == SBOS_WIFI_DHCP || st == SBOS_WIFI_CONNECTED) {
             sbnet_tick(&net);
             sbtcp_tick(&tcp);
-            fetch_poll();
+            if (!fx_cell)
+                fetch_poll();
             if (st == SBOS_WIFI_DHCP && net.state == SBNET_BOUND) {
                 logn("wifi: an address from DHCP (not logged), lease ", net.lease_s, " s");
                 set_state(SBOS_WIFI_CONNECTED, "");
