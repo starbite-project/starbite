@@ -559,10 +559,16 @@ static void next_screen(int on)
 
 /* ---- P4: the GPU compositor (kern/gpucomp.c): the frames on the Mali-G72, full resolution ---------------------- */
 _Static_assert(sizeof(tk_gpu_item) == sizeof(struct gc_quad), "tk_gpu_item is gpucomp's gc_quad");
+static int gpu_started;
 static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, uint64_t *us)
 {
     (void)ctx;
-    return gpucomp_compose(dst, 0xff000000U, (const struct gc_quad *)it, (unsigned)n, us);
+    int ok = gpucomp_compose(dst, 0xff000000U, (const struct gc_quad *)it, (unsigned)n, us);
+    if (!ok && !gpucomp_ready()) {               /* a fault (gpucomp logged it, the GPU is off): the CPU from now on */
+        comp.gpu = 0;
+        sb_log("next: the GPU stopped: the CPU composes the frames from now on");
+    }
+    return ok;
 }
 static void next_gpu_clean(void *ctx, const void *p, uint64_t n)
 {
@@ -594,6 +600,7 @@ void next_kinit(void)
     if (flip_on && heap_mem && gpucomp_init(heap_mem, heap_size)) {
         comp.gpu = next_gpu;
         comp.gpu_clean = next_gpu_clean;
+        gpu_started = 1;
         sb_log("next: the GPU composes the frames (Mali-G72 compute jobs, full resolution; the CPU if it refuses)");
     } else {
         sb_log(flip_on ? "next: the CPU composes the frames (the GPU did not come up)" :
@@ -818,12 +825,12 @@ static void gpu_vs_cpu(void)
     ub_dec(&u, comp.gpu_fallbacks);
     ub_s(&u, " given back to the CPU");
     sb_log(u.b);
-    if (!comp.gpu) {
+    if (!gpu_started) {
         sb_log("selftest: FAILED: next: gpu: the GPU did not come up (see the gpucomp lines)");
         st_failed = 1;
         return;
     }
-    if (!gpucomp_ready()) {
+    if (!comp.gpu || !gpucomp_ready()) {
         sb_log("selftest: FAILED: next: gpu: the GPU stopped during the films (a fault: see the gpucomp lines)");
         st_failed = 1;
         return;

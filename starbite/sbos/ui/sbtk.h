@@ -232,6 +232,7 @@ typedef struct {
     void (*gpu_clean)(void *ctx, const void *p, uint64_t n);
     void *gpu_ctx;
     uint32_t gpu_frames, gpu_fallbacks, gpu_ground;
+    int gpu_stale;             /* P4: GPU frames since the CPU last drew everything (its canvases are behind) */
     uint64_t us_gpu;  /* the last frame's half-canvas catch-up (tk_comp_idle) and half copies made in it */  /* the last frame's wait for the free buffer and its catch-up pass */
 } tk_comp;
 int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocated */

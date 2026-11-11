@@ -863,13 +863,20 @@ static int gpu_frame(tk_comp *c)
         }
     }
     uint64_t tw = tk_us();
-    uint32_t *dst = c->acquire(c->acq_ctx);
+    int age = 0;                                /* the GPU draws everything: the buffer's age does not matter */
+    uint32_t *dst = c->acquire(c->acq_ctx, &age);
     c->us_wait = tk_us() - tw;
     uint64_t us = 0;
     if (!c->gpu(c->gpu_ctx, dst, gq, n, &us)) return -1;
     c->panel.px = dst;
     c->us_gpu = us;
     c->gpu_frames++;
+    /* P2t's history: this frame changed everything (a CPU frame after it brings its buffer fully up to date) */
+    int sl = (int)(c->fno % TK_HIST);
+    c->hd[sl][0] = (tk_irect){ 0, 0, TK_W, TK_H };
+    c->hn[sl] = 1;
+    c->hh[sl] = 0;
+    c->fno++;
     return TK_W * TK_H;
 }
 
@@ -889,8 +896,10 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     /* damage */
     tk_irect D[TK_MAXD];
     int nd = 0;
-    if (full || was_motion < 0) {
+    /* P4: after GPU frames the CPU's own canvases are stale: its next frame is whole */
+    if (full || was_motion < 0 || (c->gpu_stale && !(c->gpu && c->acquire))) {
         D[nd++] = screen;
+        c->gpu_stale = 0;
     } else {
         static tk_irect acc[TK_MAXITEM * 2 + 2];
         int na = 0;
@@ -944,9 +953,7 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
         int gpx = gpu_frame(c);
         if (gpx > 0) {
             tk_irect all = { 0, 0, TK_W, TK_H };
-            c->pd[0] = all;             /* the other buffer lacks everything (a CPU frame after this redraws it) */
-            c->npd = 1;
-            c->pd_half = 0;
+            c->gpu_stale = 1;           /* the RAM frame and the half canvas did not see this frame */
             c->nd = 1;
             c->dmg[0] = all;
             c->have_moved = 0;
@@ -961,11 +968,9 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
             return gpx;
         }
         c->gpu_fallbacks++;
-        D[0] = screen;                  /* the CPU takes over: everything, both buffers */
+        D[0] = screen;                  /* the CPU takes over: everything (its canvases are stale, every buffer) */
         nd = 1;
-        c->npd = 1;
-        c->pd[0] = screen;
-        c->pd_half = 0;
+        c->gpu_stale = 0;
     }
     /* P2s: a small motion (a toast, a hold ring, a chevron, a key, a toggle) at full resolution, sharp as at rest,
      * while the motion so far has been small (a large one stays at half resolution to its end) */

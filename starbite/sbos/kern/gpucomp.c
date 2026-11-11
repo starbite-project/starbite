@@ -19,6 +19,8 @@
 #define CPU(o) ((volatile uint32_t *)(uintptr_t)(SB_GPU_DATA + (uint64_t)(o)))
 #define SCAN_B 0xcd200000UL                 /* the second scanout buffer (Starbite OS Next's flips) */
 #define VA_SCAN_B 0x06000000ULL
+#define SCAN_C 0xce400000UL                 /* the third (Starbite OS Next P2t: three buffers) */
+#define VA_SCAN_C 0x0a000000ULL
 #define VA_POOL 0x08000000ULL
 #define VA_HEAP 0x20000000ULL               /* the UI's heap (its layer bitmaps), when given (gpucomp_init) */
 static uintptr_t heap_cpu;
@@ -106,10 +108,11 @@ static int gc_up(void)
     }
     sb_gpu_tables();
     if (!sb_gpu_map(VA_SCAN_B, SCAN_B, (uint64_t)SB_FB_W * SB_FB_H * 4U) ||
+        !sb_gpu_map(VA_SCAN_C, SCAN_C, (uint64_t)SB_FB_W * SB_FB_H * 4U) ||
         !sb_gpu_map(VA_POOL, SB_GPU_POOL, SB_GPU_POOL_SIZE) ||
         (heap_cpu && !sb_gpu_map(VA_HEAP, heap_cpu & ~0xfffULL, (heap_size + (heap_cpu & 0xfffU) + 0xfffU) & ~0xfffULL))) {
         sb_gpu_close();
-        fail("the GPU's extra mappings (the second scanout buffer, the pool) did not fit");
+        fail("the GPU's extra mappings (the second and third scanout buffers, the pool, the heap) did not fit");
         return 0;
     }
     cores = sb_gpu_rd(0x100);
@@ -218,6 +221,8 @@ uint64_t gpucomp_va(const void *p)
         return SB_GPU_PANEL_VA + (a - SB_FB);
     if (a >= SCAN_B && a < SCAN_B + (uintptr_t)SB_FB_W * SB_FB_H * 4U)
         return VA_SCAN_B + (a - SCAN_B);
+    if (a >= SCAN_C && a < SCAN_C + (uintptr_t)SB_FB_W * SB_FB_H * 4U)
+        return VA_SCAN_C + (a - SCAN_C);
     if (a >= SB_GPU_POOL && a < SB_GPU_POOL + SB_GPU_POOL_SIZE)
         return VA_POOL + (a - SB_GPU_POOL);
     return 0;
