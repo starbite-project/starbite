@@ -611,6 +611,170 @@ static void data_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_s
 }
 #endif
 
+#ifdef SBM_ATTENDED_TX
+/* ---- calls and SMS (Starbite OS Next's Phone / Messages; docs/MODEM.md 7.11) ----------------------------------
+ * Receive side, from the FMT loop: the CP's call NOTIs ask for a fresh call list; its status NOTI says how a call
+ * ended; its emergency list feeds the builder's refusal list; an incoming SMS is decoded, handed to the caller and
+ * acknowledged at once (received OK). Numbers and text are never logged. */
+static void (*o_sms_cb)(void *ctx, const struct sbm_sms *s);
+static void *o_sms_ctx;
+
+void sbm_modem_sms_rx_cb(void (*cb)(void *ctx, const struct sbm_sms *s), void *ctx)
+{
+    o_sms_cb = cb;
+    o_sms_ctx = ctx;
+}
+
+/* one attended frame out on FMT0, its seq kept open for the answer */
+static int tx_tracked(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, uint16_t cmd, uint8_t type,
+                      const uint8_t *d, uint16_t n, uint8_t *seq_out)
+{
+    static uint8_t fr[SBM_GPRS_ATTACH_LONG_LEN + 16];
+    o_mseq = o_mseq >= SBM_QSEQ_LAST || o_mseq < SBM_QSEQ_FIRST ? (uint8_t)SBM_QSEQ_FIRST : (uint8_t)(o_mseq + 1u);
+    uint8_t mseq = o_mseq;
+    int l = sbm_ipc_frame_attended(fr, sizeof(fr), SBM_CH_FMT0, mseq, cmd, type, d, n);
+    if (l < 0)
+        return l;
+    int r = put_wait_ch(p, sbd, SBM_CH_FMT0, fr, (uint32_t)l);
+    if (r < 0)
+        return r;
+    b->fmt_tx++;
+    o_open[mseq >> 5] |= 1u << (mseq & 31);
+    o_qcmd[mseq] = cmd;
+    if (seq_out)
+        *seq_out = mseq;
+    return 0;
+}
+
+static void calls_list(struct sbm_boot *b, const struct sbm_ipc_msg *m)
+{
+    struct sbm_calls *c = &b->calls;
+    const uint8_t *d = m->data;
+    unsigned n = m->data_len, o = 1, cnt = n ? d[0] : 0;
+    c->list_resps++;
+    c->list_seq = 0;
+    sbm_memset(c->c, 0, sizeof(c->c));
+    c->n = 0;
+    for (unsigned i = 0; i < cnt && o + 8 <= n; ++i) {
+        unsigned L = d[o + 6];
+        if (o + 8 + L > n || d[o + 4] == 7)
+            break;
+        if (c->n < SBM_CALLS_MAX) {
+            struct sbm_call *k = &c->c[c->n++];
+            k->used = 1;
+            k->id = d[o + 2];
+            k->outgoing = d[o + 3] == 1;
+            k->state = d[o + 4];
+            k->mpty = d[o + 5];
+            unsigned q = 0;
+            if ((d[o + 7] & 0x70) == 0x10 && (L == 0 || d[o + 8] != '+'))
+                k->number[q++] = '+';
+            for (unsigned j = 0; j < L && q + 1 < sizeof(k->number); ++j) {
+                char ch = (char)d[o + 8 + j];
+                if ((ch >= '0' && ch <= '9') || ch == '+' || ch == '*' || ch == '#')
+                    k->number[q++] = ch;
+            }
+            k->number[q] = 0;
+        }
+        o += 8 + L;
+    }
+    c->gen++;
+}
+
+static void comms_rx(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, const struct sbm_ipc_msg *m)
+{
+    struct sbm_calls *c = &b->calls;
+    const uint8_t *d = m->data;
+    switch (m->cmd) {
+    case SBM_CALL_INCOMING:
+    case SBM_CALL_WAITING:
+        c->incoming_notis++;
+        c->list_wanted = 1;
+        c->gen++;
+        break;
+    case SBM_CALL_STATUS:
+        c->status_notis++;
+        c->list_wanted = 1;
+        if (m->data_len >= 6 && d[3] == 4) {          /* released: how it ended */
+            c->end_id = d[2];
+            c->end_class = d[4];
+            c->end_cause = d[5];
+            c->end_seen = 1;
+        }
+        c->gen++;
+        break;
+    case SBM_CALL_LIST:
+        if (m->type == SBM_IPC_RESP)
+            calls_list(b, m);
+        else
+            c->list_wanted = 1;                       /* NOTI: the list changed */
+        break;
+    case SBM_CALL_ECC_LIST: {
+        unsigned n = m->data_len, cnt = n > 6 ? d[6] : 0, o = 7;
+        c->n_ecc = 0;
+        for (unsigned i = 0; i < cnt && o + 2 <= n && c->n_ecc < SBM_ECC_MAX; ++i) {
+            unsigned L = d[o + 1];
+            if (o + 2 + L > n)
+                break;
+            unsigned q = 0;
+            for (unsigned j = 0; j < L && q + 1 < sizeof(c->ecc[0]); ++j)
+                if (d[o + 2 + j] >= '0' && d[o + 2 + j] <= '9')
+                    c->ecc[c->n_ecc][q++] = (char)d[o + 2 + j];
+            c->ecc[c->n_ecc][q] = 0;
+            if (q) {
+                c->ecc_p[c->n_ecc] = c->ecc[c->n_ecc];
+                c->n_ecc++;
+            }
+            o += 2 + L;
+        }
+        sbm_ipc_set_ecc(c->ecc_p, c->n_ecc);
+        sbm_logf(p, "comms: the CP's emergency list: %u numbers (refused like the world list)", c->n_ecc);
+        break;
+    }
+    case SBM_SMS_INCOMING: {
+        struct sbm_sms s;
+        uint8_t tpid = m->data_len > 4 ? d[4] : 0;
+        b->sms.rx++;
+        if (sbm_sms_incoming(m, &s) == 0) {
+            if (o_sms_cb)
+                o_sms_cb(o_sms_ctx, &s);
+        } else {
+            b->sms.rx_bad++;
+        }
+        uint8_t ack[5] = { 2, 0x00, 0x00, tpid, 0 };   /* received OK (also for one we could not read: no repeats) */
+        if (tx_tracked(p, b, sbd, SBM_SMS_ACK, SBM_IPC_EXEC, ack, 5, 0) == 0)
+            b->sms.acked++;
+        b->sms.gen++;
+        break;
+    }
+    case SBM_SMS_SEND:
+        if (m->type == SBM_IPC_RESP)
+            for (unsigned i = 0; i < b->sms.parts; ++i)
+                if (b->sms.seq[i] && b->sms.seq[i] == m->aseq) {
+                    b->sms.res[i] = m->data_len >= 3 ? sbm_le16(d + 1) : 0xFFFF;
+                    b->sms.mr[i] = m->data_len >= 4 ? d[3] : 0;
+                    b->sms.done[i] = 1;
+                    b->sms.seq[i] = 0;
+                    if (b->sms.res[i] == 0)
+                        b->sms.sent++;
+                    else
+                        b->sms.failed++;
+                    b->sms.gen++;
+                }
+        break;
+    case SBM_SMS_SMSC:
+        if (m->type == SBM_IPC_RESP && m->data_len >= 2 && d[0] >= 1 && d[0] <= 11 && m->data_len >= 1u + d[0]) {
+            sbm_memcpy(b->sms.smsc, d, 1u + d[0]);
+            b->sms.smsc_len = (uint8_t)(1 + d[0]);
+            b->sms.smsc_seq = 0;
+        }
+        break;
+    default:
+        break;
+    }
+}
+#endif
+
 /* One pass at time ms since INIT_END: the mailbox, the FMT/RFS rings (RFS answered when serving), the guards, the
  * periodic queries. 0 = go on, 1 = stopped by a guard (b->stopped_by), SBM_E* = an error or a crash command. */
 static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sbd *sbd, uint32_t ms)
@@ -657,6 +821,10 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
                 if (sbm_ipc_parse(msg, ml, &m) == 0) {
                     sbm_cell_update(&b->cell, &m);
                     gprs_noti(b, &m);
+#ifdef SBM_ATTENDED_TX
+                    if (b->attended == SBM_ATTENDED_DATA)
+                        comms_rx(p, b, sbd, &m);
+#endif
                     if (m.type == SBM_IPC_RESP && m.aseq >= SBM_QSEQ_FIRST && m.aseq <= SBM_QSEQ_LAST) {
                         uint32_t bit = 1u << (m.aseq & 31);
                         int seq = m.aseq;
@@ -689,6 +857,30 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
                                     }
                                 }
                             }
+                            if (m.cmd == SBM_GEN_PHONE_RES && b->calls.dial_seq && seq == b->calls.dial_seq) {
+                                struct sbm_gen_res gr;
+                                if (sbm_gen_res_decode(&m, &gr) == 0) {
+                                    b->calls.dial_res = gr.code;
+                                    b->calls.dial_seen = 1;
+                                    b->calls.gen++;
+                                }
+                                b->calls.dial_seq = 0;
+                            }
+                            if (m.cmd == SBM_GEN_PHONE_RES && b->calls.list_seq && seq == b->calls.list_seq)
+                                b->calls.list_seq = 0;     /* refused: asked again on the next change */
+                            if (m.cmd == SBM_GEN_PHONE_RES && b->sms.smsc_seq && seq == b->sms.smsc_seq)
+                                b->sms.smsc_seq = 0;
+                            for (unsigned si = 0; m.cmd == SBM_GEN_PHONE_RES && si < b->sms.parts; ++si)
+                                if (b->sms.seq[si] && seq == b->sms.seq[si]) {   /* a send refused before the network */
+                                    struct sbm_gen_res gr;
+                                    b->sms.res[si] = sbm_gen_res_decode(&m, &gr) == 0 ? gr.code : 0xFFFF;
+                                    if (b->sms.res[si] == 0x8000 || b->sms.res[si] == 0x8001)
+                                        continue;          /* accepted: the RESP with the result comes later */
+                                    b->sms.done[si] = 1;
+                                    b->sms.seq[si] = 0;
+                                    b->sms.failed++;
+                                    b->sms.gen++;
+                                }
                             if (m.cmd == SBM_GEN_PHONE_RES && b->ctl_seq && seq == b->ctl_seq) {
                                 struct sbm_gen_res gr;
                                 if (sbm_gen_res_decode(&m, &gr) == 0) {
@@ -784,6 +976,10 @@ static int online_poll(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_
 #ifdef SBM_ATTENDED_TX
     if (SBM_IS_ATTENDED(b->attended)) {
         data_poll(p, b, sbd);
+        if (b->attended == SBM_ATTENDED_DATA && b->calls.list_wanted && !b->calls.list_seq) {
+            b->calls.list_wanted = 0;                 /* the CP said something changed: its list again */
+            tx_tracked(p, b, sbd, SBM_CALL_LIST, SBM_IPC_GET, 0, 0, &b->calls.list_seq);
+        }
         if (b->cell.have_sim)
             b->sim_status = b->cell.sim_status;
         goto guards_done;
@@ -987,7 +1183,7 @@ int sbm_modem_radio(struct sbm_modem *m, int on)
 #ifdef SBM_ATTENDED_TX
 static int send_tracked(struct sbm_modem *m, uint16_t cmd, uint8_t type, const uint8_t *d, uint16_t n, uint8_t *seq_out)
 {
-    static uint8_t fr[SBM_GPRS_ACT_LONG_LEN + 16];
+    static uint8_t fr[SBM_GPRS_ATTACH_LONG_LEN + 16];   /* the largest attended frame (it was ACT_LONG: 264 < 341) */
     o_mseq = o_mseq >= SBM_QSEQ_LAST || o_mseq < SBM_QSEQ_FIRST ? (uint8_t)SBM_QSEQ_FIRST : (uint8_t)(o_mseq + 1u);
     uint8_t mseq = o_mseq;
     int l = sbm_ipc_frame_attended(fr, sizeof(fr), SBM_CH_FMT0, mseq, cmd, type, d, n);
@@ -999,7 +1195,8 @@ static int send_tracked(struct sbm_modem *m, uint16_t cmd, uint8_t type, const u
     m->b.fmt_tx++;
     o_open[mseq >> 5] |= 1u << (mseq & 31);
     o_qcmd[mseq] = cmd;
-    *seq_out = mseq;
+    if (seq_out)
+        *seq_out = mseq;
     if (s_silent_since == NONE)
         s_silent_since = m->ms;
     return 0;
@@ -1043,6 +1240,166 @@ int sbm_modem_ps_attach(struct sbm_modem *m)
 {
     static const uint8_t d[3] = { 1, 0, 0 };
     return ctl_send(m, SBM_GPRS_PS, d, 3, "GPRS_PS SET attach");
+}
+
+/* ---- calls and SMS, the caller's side (the user dialled / wrote and held to confirm: pol.user_confirmed) ---- */
+static int comms_up(const struct sbm_modem *m)
+{
+    return m->up && m->b.attended == SBM_ATTENDED_DATA;
+}
+
+int sbm_modem_call_dial(struct sbm_modem *m, const char *number, const struct sbm_dial_policy *pol)
+{
+    uint8_t d[SBM_CALL_DIAL_LEN];
+    char num[84];
+    unsigned l = 0;
+    if (!comms_up(m))
+        return SBM_EPERM;
+    if (!pol || !number)
+        return SBM_EINVAL;
+    struct sbm_dial_policy p2 = *pol;                /* the CP's own emergency list too */
+    p2.extra_emergency = m->b.calls.ecc_p;
+    p2.n_extra = m->b.calls.n_ecc;
+    int r = sbm_dial_check(&p2, number);
+    if (r < 0)
+        return r;
+    for (const char *c = number; *c && l < 82; ++c)
+        if ((*c >= '0' && *c <= '9') || (*c == '+' && l == 0))
+            num[l++] = *c;
+    num[l] = 0;
+    sbm_memset(d, 0, sizeof(d));
+    d[0] = 0x00;
+    d[1] = 0x01;                                     /* CS voice: never an emergency type (07xx / 0801) */
+    d[2] = 0;                                        /* CLIR: the subscription's default */
+    d[3] = (uint8_t)l;
+    d[4] = num[0] == '+' ? 0x11 : 0x21;
+    sbm_memcpy(d + 5, num, l);
+    m->b.calls.dial_seen = 0;
+    m->b.calls.end_seen = 0;
+    r = send_tracked(m, SBM_CALL_DIAL, SBM_IPC_EXEC, d, sizeof(d), &m->b.calls.dial_seq);
+    sbm_logf(m->p, "comms: +%u TX ch235 | CALL_DIAL EXEC (number not logged) (%s)", m->ms, r == 0 ? "sent" : sbm_strerror(r));
+    return r;
+}
+
+int sbm_modem_call_answer(struct sbm_modem *m)
+{
+    if (!comms_up(m))
+        return SBM_EPERM;
+    int r = send_tracked(m, SBM_CALL_ANSWER, SBM_IPC_EXEC, 0, 0, &m->b.ctl_seq);
+    m->b.ctl_cmd = SBM_CALL_ANSWER;
+    m->b.ctl_seen = 0;
+    sbm_logf(m->p, "comms: +%u TX ch235 | CALL_ANSWER EXEC (%s)", m->ms, r == 0 ? "sent" : sbm_strerror(r));
+    return r;
+}
+
+/* id 0: the call (one call: RELEASE); else release that call id (SS MANAGE_CALL 3) */
+int sbm_modem_call_hangup(struct sbm_modem *m, uint8_t id)
+{
+    if (!comms_up(m))
+        return SBM_EPERM;
+    int r;
+    if (id == 0 || m->b.calls.n <= 1) {
+        r = send_tracked(m, SBM_CALL_RELEASE, SBM_IPC_EXEC, 0, 0, &m->b.ctl_seq);
+        m->b.ctl_cmd = SBM_CALL_RELEASE;
+    } else {
+        uint8_t d[SBM_SS_MANAGE_LEN];
+        sbm_memset(d, 0, sizeof(d));
+        d[0] = 3;
+        d[1] = id;
+        r = send_tracked(m, SBM_SS_MANAGE_CALL, SBM_IPC_SET, d, sizeof(d), &m->b.ctl_seq);
+        m->b.ctl_cmd = SBM_SS_MANAGE_CALL;
+    }
+    m->b.ctl_seen = 0;
+    sbm_logf(m->p, "comms: +%u TX ch235 | call release (%s)", m->ms, r == 0 ? "sent" : sbm_strerror(r));
+    return r;
+}
+
+int sbm_modem_call_dtmf(struct sbm_modem *m, char digit, int on)
+{
+    if (!comms_up(m))
+        return SBM_EPERM;
+    uint8_t d[2] = { (uint8_t)(on ? 1 : 2), (uint8_t)(on ? digit : 0) };
+    return send_tracked(m, SBM_CALL_DTMF, SBM_IPC_SET, d, 2, 0);
+}
+
+/* the CP's side of call audio: path (speaker 1: loudspeaker, else earpiece), volume 0..15, mic mute */
+int sbm_modem_snd(struct sbm_modem *m, int speaker, int volume, int mute)
+{
+    if (!comms_up(m))
+        return SBM_EPERM;
+    uint8_t path[2] = { (uint8_t)(speaker ? 0x06 : 0x01), 0 };
+    uint8_t vol[2] = { (uint8_t)(speaker ? 0x11 : 0x01), (uint8_t)(volume < 0 ? 0 : volume > 15 ? 15 : volume) };
+    uint8_t mu[1] = { (uint8_t)(mute ? 1 : 0) };
+    int r = send_tracked(m, SBM_SND_PATH, SBM_IPC_SET, path, 2, 0);
+    if (r == 0)
+        r = send_tracked(m, SBM_SND_VOLUME, SBM_IPC_SET, vol, 2, 0);
+    if (r == 0)
+        r = send_tracked(m, SBM_SND_MUTE, SBM_IPC_SET, mu, 1, 0);
+    return r;
+}
+
+/* SMS: once registered, "the AP takes SMS" and the SIM's SMSC */
+int sbm_modem_sms_ready(struct sbm_modem *m)
+{
+    if (!comms_up(m))
+        return SBM_EPERM;
+    int r = send_tracked(m, SBM_SMS_READY, SBM_IPC_SET, 0, 0, 0);
+    if (r == 0) {
+        m->b.sms.ready_sent++;
+        r = send_tracked(m, SBM_SMS_SMSC, SBM_IPC_GET, 0, 0, &m->b.sms.smsc_seq);
+    }
+    sbm_logf(m->p, "comms: +%u TX ch235 | SMS_READY SET, SMSC GET (%s)", m->ms, r == 0 ? "sent" : sbm_strerror(r));
+    return r;
+}
+
+/* the text to number in 1..4 parts; their results land in b.sms (done / res / mr). Returns the parts or SBM_E*. */
+int sbm_modem_sms_send(struct sbm_modem *m, const char *number, const char *utf8, const struct sbm_dial_policy *pol,
+                       uint8_t ref)
+{
+    static uint8_t pdu[SBM_SMS_MAX_PARTS][SBM_SMS_PDU_MAX];
+    static uint8_t d[4 + 12 + SBM_SMS_PDU_MAX];
+    uint16_t len[SBM_SMS_MAX_PARTS];
+    if (!comms_up(m))
+        return SBM_EPERM;
+    if (!pol)
+        return SBM_EINVAL;
+    struct sbm_dial_policy p2 = *pol;
+    p2.extra_emergency = m->b.calls.ecc_p;
+    p2.n_extra = m->b.calls.n_ecc;
+    int n = sbm_sms_submit_parts(&p2, number, utf8, ref, pdu, len, SBM_SMS_MAX_PARTS);
+    if (n < 0)
+        return n;
+    struct sbm_smsq *q = &m->b.sms;
+    q->parts = (uint8_t)n;
+    for (int i = 0; i < n; ++i) {
+        q->seq[i] = 0;
+        q->done[i] = 0;
+        q->res[i] = 0;
+        q->mr[i] = 0;
+    }
+    for (int i = 0; i < n; ++i) {
+        uint32_t sca = q->smsc_len ? q->smsc_len : 1, o = 4;
+        d[0] = 2;
+        d[1] = (uint8_t)(i + 1 < n ? 1 : 2);
+        d[2] = 0;
+        d[3] = (uint8_t)(sca + len[i]);
+        if (q->smsc_len)
+            sbm_memcpy(d + o, q->smsc, q->smsc_len);
+        else
+            d[o] = 0;                                /* no SMSC known: the CP's default */
+        o += sca;
+        sbm_memcpy(d + o, pdu[i], len[i]);
+        int r = send_tracked(m, SBM_SMS_SEND, SBM_IPC_EXEC, d, (uint16_t)(o + len[i]), &q->seq[i]);
+        if (r < 0) {
+            for (int j = i; j < n; ++j)
+                q->done[j] = 1, q->res[j] = 0xFFFF;
+            q->failed++;
+            return r;
+        }
+    }
+    sbm_logf(m->p, "comms: +%u TX ch235 | SMS_SEND EXEC x %d (number and text not logged)", m->ms, n);
+    q->gen++;
+    return n;
 }
 
 int sbm_modem_pdp_define(struct sbm_modem *m, const char *apn)
