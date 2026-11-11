@@ -3763,7 +3763,7 @@ static int kb_rect(float x, float y, const char *const *R, int r2x, tk_rect *o)
 /* what lights under a finger on an open app's page */
 static void app_press(float x, float y)
 {
-    tk_rect r, g;
+    tk_rect r = { 0, 0, 0, 0 }, g = r;
     float rad = 0;
     tk_col c = W(.1f);
     int ok = 0;
