@@ -149,6 +149,8 @@ static float boot_a, boot_t;
 static int booting;
 static float now_ms;
 static int EMG;                 /* Emergency mode (the concept's em-mode) */
+static int cell_running(void);  /* the modem runs (sh_cell) */
+static const char *md_text(void);
 
 /* ---- the wallpaper and its glass backdrop ------------------------------------------------------------------ */
 static tk_layer star, star_e;
@@ -1002,7 +1004,7 @@ static void build_cc_grid(void)
     cc_tile(&d, 24, 92, 160.66f, 156, 28, 0);
     static const char *CI[4] = { "cc-air", "cc-cell", "cc-wifi", "cc-bt" };
     static const float CW[4][2] = { { 20, 20 }, { 20, 18 }, { 22, 16 }, { 14, 20 } };
-    int ons[4] = { CCS.air, CCS.cell, CCS.wifi, CCS.bt };
+    int ons[4] = { CCS.air, cell_running(), CCS.wifi, CCS.bt };
     for (int i = 0; i < 4; i++) {
         float cx = i & 1 ? 112.48f : 44.16f, cy = i >> 1 ? 177 : 111;
         d_rrect(&d, cx, cy, 52, 52, 26, ons[i] ? tk_hex(0x6fb3ff, 1) : W(.18f));
@@ -1054,6 +1056,8 @@ static void build_cc(void)
     if (!ccsb.bmp.px) {
         dc d = mk(&ccsb, "cc-status", 0, 0, 390, 48, 2, 0);
         status_bar(&d, carrier);
+    }
+    if (!cclvl[0].bmp.px) {
         for (int i = 0; i < 2; i++) {
             float x = i ? 295.97f : 205.31f;
             dc l = mk(&cclvl[i], "cc-level", x, 92, 70, 156, 0, 0);
@@ -1102,6 +1106,7 @@ static int cc_tap(float x, float y)
     if (x >= 24 && x < 184.66f && y >= 92 && y < 248) {
         int i = (x >= 104) + 2 * (y >= 170);
         int *f[4] = { &CCS.air, &CCS.cell, &CCS.wifi, &CCS.bt };
+        if (i == 1) return 1;                /* the modem: a hold (G_CCCELL) */
         *f[i] = !*f[i];
     } else if (y >= 264 && y < 334) {
         int c = x < 94 ? 0 : x < 184.66f ? 1 : x < 275.31f ? 2 : 3;
@@ -1275,6 +1280,22 @@ static void d_lg_app(dc *d, float x, float y, float w, float h, float r, int dar
     tk_glass_local_put(d->b, &t, X, Y, bx, by, PT(w), PT(h), PT(r));
     tk_bmp_free(&t);
     tk_glass_bake(d->b, 0, bx, by, PT(w), PT(h), PT(r), dark, 1);
+}
+/* the same over the bare ground (nothing drawn under it): the blur of a flat colour is that colour, so no backdrop
+ * buffer is needed (a card over the dimmed screen: its 4.6 MB backdrop refused on a full heap) */
+static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int dark)
+{
+    tk_bmp g;
+    uint32_t c = 0xff0a0f1fu;
+    if (tk_bmp_new(&g, 1, 1)) {
+        g.px[0] = c;
+        tk_bmp_satbright(&g, 1.9f, 1.06f);
+        c = g.px[0];
+        tk_bmp_free(&g);
+    }
+    tk_paint p = tk_solid(TK_RGBA((float)(c >> 16 & 255), (float)(c >> 8 & 255), (float)(c & 255), 1));
+    tk_fill_rrect(d->b, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), &p, 1);
+    tk_glass_bake(d->b, 0, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), dark, 1);
 }
 static void d_h1(dc *d, const char *t) { d_text(d, TK_IT800, 34, 20, bl(TK_IT800, 34, 64), t, -.8f, 0, INK, 0); }
 static tk_col ACCENT(void) { return tk_hex(0x6fb3ff, 1); }
@@ -1512,9 +1533,11 @@ static void build_app_page(int a)
         for (int r = 0; r < S->n; r++) {
             float ry = y + 47 * r;
             d_text(&d, TK_IT400, 16, 32, ry + 13 + 16, S->rows[r].l, 0, 0, INK, 0);
-            if (S->rows[r].r[0]) {
-                float w = tw(TK_IT400, 16, S->rows[r].r, 0, TK_TNUM);
-                d_text(&d, TK_IT400, 16, 358 - w, ry + 13 + 16, S->rows[r].r, 0, TK_TNUM, W(.55f), 0);
+            const char *rt = S->rows[r].r;
+            if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Mobile Data")) rt = md_text();
+            if (rt[0]) {
+                float w = tw(TK_IT400, 16, rt, 0, TK_TNUM);
+                d_text(&d, TK_IT400, 16, 358 - w, ry + 13 + 16, rt, 0, TK_TNUM, W(.55f), 0);
             }
             if (r + 1 < S->n) d_rrect(&d, 16, ry + 46, 358, .5f, 0, W(.08f));
         }
@@ -1635,6 +1658,77 @@ static void toast(const char *msg)
     toast_t = 0;
     toast_left = 2000;
     toast_place();
+}
+
+/* ---- the kernel's hold confirmation (kui_confirm: the modem's Start), in this UI's look: the screen dimmed, a
+ * dark glass card with the kernel's words and its hold bar (1.5 s, as the kernel's own); a tap outside cancels ---- */
+static tk_layer cfl, cfdim, cfcard, cffill, cflabel;
+static struct { int on, down; float t0, p, a, at, hy; } CF;
+static void cf_place(void)
+{
+    cffill.slice_h = PT(56 + (302 - 56) * CF.p);
+    cfl.alpha = CF.a;
+    cfl.hidden = !CF.on && CF.a <= 0;
+}
+void sh_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold)
+{
+    const char *L[3] = { l1, l2, l3 };
+    char ln[3][4][96];
+    int nl[3];
+    float wm, h = 28 + 30 + 12;
+    for (int i = 0; i < 3; i++) {
+        nl[i] = L[i] && L[i][0] ? wrap(ln[i], TK_IT400, 15, L[i], 302, &wm) : 0;
+        h += 21.0f * nl[i] + (nl[i] ? 6 : 0);
+    }
+    h += 18 + 56 + 24;
+    float y = (H_PT - h) / 2;
+    tk_layer_init(&cfl, "confirm");
+    tk_layer_init(&cfdim, "confirm-dim");
+    cfdim.solid = 0x8c000000u;                /* black at .55 (premultiplied) */
+    cfdim.solid_w = TK_W;
+    cfdim.solid_h = TK_H;
+    relayer(&cfcard);
+    dc d = mk(&cfcard, "confirm-card", 24, y, 342, h, 44, 0);
+    d_lg_flat(&d, 24, y, 342, h, 32, 1);
+    d_text(&d, TK_IT800, 22, 44, bl(TK_IT800, 22, y + 28), title, -.4f, 0, INK, 0);
+    float ty = y + 28 + 30 + 12;
+    for (int i = 0; i < 3; i++) {
+        for (int k = 0; k < nl[i]; k++) d_text(&d, TK_IT400, 15, 44, bl(TK_IT400, 15, ty + 21.0f * k), ln[i][k], 0, 0, W(.72f), 0);
+        ty += 21.0f * nl[i] + (nl[i] ? 6 : 0);
+    }
+    CF.hy = ty + 12;
+    d_rrect(&d, 44, CF.hy, 302, 56, 28, W(.12f));
+    relayer(&cffill);
+    dc f = mk(&cffill, "confirm-fill", 44, CF.hy, 56, 56, 1, 0);
+    d_rrect(&f, 44, CF.hy, 56, 56, 28, TK_RGBA(111, 179, 255, .55f));
+    cffill.slice = 2;
+    cffill.slice_s0 = cffill.slice_s1 = PT(28);
+    relayer(&cflabel);
+    float w = tw(TK_IT600, 16, hold, 0, 0);
+    dc l = mk(&cflabel, "confirm-label", 44, CF.hy, 302, 56, 1, 0);
+    d_text(&l, TK_IT600, 16, 44 + (302 - w) / 2, bl(TK_IT600, 16, CF.hy + 18), hold, 0, 0, INK, 0);
+    tk_layer *k[] = { &cfdim, &cfcard, &cffill, &cflabel };
+    link(&cfl, k, 4);
+    relink();
+    CF.on = 1;
+    CF.down = 0;
+    CF.p = 0;
+    CF.a = 0;
+    CF.at = 1;
+    cf_place();
+}
+static void cf_close(int ok)
+{
+    CF.on = 0;
+    CF.down = 0;
+    CF.at = 0;
+    sh_confirmed(ok);
+}
+static void cf_free(void)
+{
+    relayer(&cfcard); relayer(&cffill); relayer(&cflabel);
+    cfl.child = 0;
+    cfl.hidden = 1;
 }
 
 /* ---- Emergency mode (the concept's setEmergency) ---------------------------------------------------------------
@@ -1784,6 +1878,11 @@ static void app_tap(float x, float y)
         if (dx * dx + dy * dy <= 39 * 39)
             toast(!tk_strcmp(AS.num, "112") ? "Calling 112 needs the modem (receive-only today)" :
                   AS.num[0] ? "No SIM: only emergency calls" : "Enter a number");
+    } else if (is_app("settings")) {
+        if (x >= 16 && x < 374 && y >= 182 && y < 229) {
+            if (cell_running()) { sh_modem(0); toast("Modem stopped"); }
+            else if (sh_modem(1) < 0) toast("The modem can't start now");
+        }
     } else if (is_app("messages")) {
         if (AS.thread < 0) {
             if (x >= 16 && x < 374 && y >= 173 && y < 173 + 5 * 63) { AS.thread = (int)((y - 173) / 63); build_app_page(AP.a); }
@@ -1795,7 +1894,22 @@ static void app_tap(float x, float y)
 }
 
 /* ---- the modem's status (docs/MODEM.md 7.7's snapshot): the status bar's bars and RAT, the keypad's line ----- */
+static void build_cc_grid(void);
+static void cc_link(void);
 static sh_cell_t CELL;
+static int cell_running(void) { return CELL.state == SH_CELL_ON || CELL.state == SH_CELL_STARTING || CELL.state == SH_CELL_RESTARTING; }
+/* Settings > Mobile Data: the modem's state in words (the contract's wording) */
+static const char *md_text(void)
+{
+    switch (CELL.state) {
+    case SH_CELL_STARTING: return "Starting\xe2\x80\xa6";
+    case SH_CELL_RESTARTING: return "Restarting\xe2\x80\xa6";
+    case SH_CELL_GUARD: return "Stopped: a SIM or a registration";
+    case SH_CELL_FAILED: return "Could not start";
+    case SH_CELL_ON: return CELL.emergency_only ? "Emergency calls only" : "No SIM";
+    default: return "Off";
+    }
+}
 static void build_home_sb(void);
 void sh_cell(const sh_cell_t *c)
 {
@@ -1803,6 +1917,12 @@ void sh_cell(const sh_cell_t *c)
         c->bars == CELL.bars)
         return;
     CELL = *c;
+    /* the lock's status bar: the network's honest line */
+    const char *cr = CELL.state == SH_CELL_STARTING ? "Starting\xe2\x80\xa6" : CELL.state == SH_CELL_RESTARTING ? "Restarting\xe2\x80\xa6" :
+                     CELL.state == SH_CELL_ON && CELL.emergency_only ? "Emergency calls only" : "No SIM";
+    int n2 = 0;
+    while (cr[n2] && n2 < 31) { carrier[n2] = cr[n2]; n2++; }
+    carrier[n2] = 0;
     SB_CELL.state = CELL.state == SH_CELL_ON;
     SB_CELL.bars = CELL.bars;
     SB_CELL.rat = CELL.rat;
@@ -1813,7 +1933,9 @@ void sh_cell(const sh_cell_t *c)
     cell_hint[n] = 0;
     build_lstatus();
     build_home_sb();
-    if (is_app("phone")) build_app_page(AP.a);
+    if (is_app("phone") || is_app("settings")) build_app_page(AP.a);
+    if (CCS.built) { relayer(&ccsb); build_cc_grid(); cc_link(); }
+    cc_stale = 1;
     relink();
     lock_ver++;
 }
@@ -1890,8 +2012,8 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 }
 static void relink(void)
 {
-    tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &focus, &ccl, &boot, &homebar, &toastl };
-    link(&root, r, 11);
+    tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &focus, &ccl, &cfl, &boot, &homebar, &toastl };
+    link(&root, r, 12);
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum };
     link(&appg, ag, 4);
     tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
@@ -1944,6 +2066,8 @@ void sh_init_begin(tk_comp *c)
     apnum.hidden = 1;
     tk_layer_init(&toastl, "toast");
     toastl.hidden = 1;
+    tk_layer_init(&cfl, "confirm");
+    cfl.hidden = 1;
     tk_layer_init(&lockg, "lock");
     tk_layer_init(&list, "list");
     list.clip = 1;
@@ -2076,6 +2200,12 @@ void sh_set(const char *what, const char *key, float v)
         toast_t = 1;
         toast_to = toast_from = 0;
         toast_place();
+    } else if (!tk_strcmp(what, "cell")) {
+        /* the modem's state for the host's stills: "on" (emergency-only, GSM, v bars), "starting", "off" */
+        sh_cell_t c = { SH_CELL_OFF, -1, 0, 0, -1 };
+        if (!tk_strcmp(key, "on")) { c.state = SH_CELL_ON; c.sim = 0x80; c.emergency_only = 1; c.rat = 1; c.bars = (int)v; }
+        else if (!tk_strcmp(key, "starting")) c.state = SH_CELL_STARTING;
+        sh_cell(&c);
     } else if (!tk_strcmp(what, "tab")) {
         static const char *const TK[4] = { "fav", "rec", "con", "pad" };
         for (int t = 0; t < 4; t++) if (!tk_strcmp(TK[t], key)) { AS.tab = t; build_app_page(AP.a); }
@@ -2113,7 +2243,7 @@ void sh_set(const char *what, const char *key, float v)
 }
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
-enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM };
+enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL };
 static struct {
     int kind, arg, arg2, moved;
     float x0, y0, base, t0;
@@ -2158,6 +2288,12 @@ void sh_touch(int phase, float x, float y, float t)
         T.y0 = y;
         T.t0 = t;
         T.kind = G_NONE;
+        if (CF.on) {
+            /* the confirmation: its hold bar, or outside the card (cancel) */
+            T.kind = G_CF;
+            if (x >= 44 && x < 346 && y >= CF.hy && y < CF.hy + 56) { CF.down = 1; CF.t0 = t; }
+            return;
+        }
         if (focus_on) {
             float sy = focus_sy;
             if (x >= 39 + thumb_x && x <= 91 + thumb_x && y >= sy + 5 && y <= sy + 57) { T.kind = G_THUMB; T.base = thumb_x; sp_thumb.live = 0; }
@@ -2177,6 +2313,8 @@ void sh_touch(int phase, float x, float y, float t)
         if (!locked && CCS.on && !CCS.closing) {
             /* the open Control Centre: a slider, a tile, or outside it (closes it) */
             if (x >= CCX[2] && x < CCX[2] + 70 && y >= 264 && y < 334) { T.kind = G_CCEM; T.arg = 0; return; }
+            /* the cellular circle: a hold starts the modem (then the kernel's confirmation) or stops it */
+            if (x >= 104 && x < 184.66f && y >= 92 && y < 170) { T.kind = G_CCCELL; T.arg = 0; return; }
             for (int i = 0; i < 2; i++) {
                 float sx = i ? 295.97f : 205.31f;
                 if (x >= sx && x < sx + 70 && y >= 92 && y < 248) { T.kind = G_CCSL; T.arg = i; sh_touch(1, x, y, t); return; }
@@ -2339,6 +2477,22 @@ void sh_touch(int phase, float x, float y, float t)
     case G_CCEM:
         if (!T.arg) toast("Press and hold");
         break;
+    case G_CCCELL:
+        if (!T.arg) toast(cell_running() ? "Hold to stop the modem" : "Hold to start the modem");
+        break;
+    case G_CF:
+        if (CF.down) {                         /* let go before the bar was full */
+            CF.down = 0;
+            CF.p = 0;
+            cf_place();
+            toast("Press and hold");
+        } else if (CF.on) {
+            /* outside the card: cancel */
+            float h = 0;
+            (void)h;
+            if (y < cfcard.by / TK_PT + 44 || y > CF.hy + 56 + 24 + 4) cf_close(0);
+        }
+        break;
     case G_DOCK:
         if (!T.moved) { int a = app_hit(x, y); if (a >= 0) app_open(a); }
         break;
@@ -2455,6 +2609,26 @@ int sh_tick(float dt, float t)
     if (em_t < 1) {
         em_t = tk_minf(1, em_t + dt / .7f);
         em_step(tk_bezier(.25f, .1f, .25f, 1, em_t));
+        mv = 1;
+    }
+    if (T.kind == G_CCCELL && !T.arg) {
+        if (t - T.t0 >= 700) {
+            T.arg = 1;
+            if (cell_running()) { sh_modem(0); toast("Modem stopped"); }
+            else if (sh_modem(1) < 0) toast("The modem can't start now");
+        }
+        mv = 1;
+    }
+    if (CF.down) {
+        CF.p = tk_minf(1, (t - CF.t0) / 1500);
+        cf_place();
+        if (CF.p >= 1) cf_close(1);
+        mv = 1;
+    }
+    if (CF.a != CF.at) {
+        CF.a = CF.at > CF.a ? tk_minf(CF.at, CF.a + dt / .2f) : tk_maxf(CF.at, CF.a - dt / .2f);
+        cf_place();
+        if (!CF.on && CF.a <= 0) cf_free();
         mv = 1;
     }
     if (T.kind == G_CCEM && !T.arg) {
@@ -2654,7 +2828,8 @@ int sh_moving(void)
 {
     int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB ||
             T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || T.kind == G_CC || T.kind == G_CCSL || sp_cc.live ||
-            T.kind == G_APP || sp_app.live || booting || toast_t < 1 || em_t < 1 || T.kind == G_CCEM;
+            T.kind == G_APP || sp_app.live || booting || toast_t < 1 || em_t < 1 || T.kind == G_CCEM ||
+            T.kind == G_CCCELL || CF.down || CF.a != CF.at;
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live;
     return m;

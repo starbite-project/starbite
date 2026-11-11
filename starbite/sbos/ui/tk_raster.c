@@ -316,11 +316,18 @@ void tk_draw_fm(tk_bmp *b, const tk_fm *m, int ox, int oy, const tk_paint *p, fl
 }
 void tk_fill_rrect(tk_bmp *b, float x, float y, float w, float h, float r, const tk_paint *p, float alpha)
 {
-    int ox = (int)tk_floorf(x) - 1, oy = (int)tk_floorf(y) - 1;
+    /* in bands of 64 rows (the coverage is per px, so the result is the same): a small buffer for a big card,
+     * and nothing done for the rows outside the bitmap */
+    int ox = (int)tk_floorf(x) - 1, oy = (int)tk_floorf(y) - 1, H = (int)h + 4, BH = H < 64 ? H : 64;
     tk_fm m;
-    if (!tk_fm_new(&m, (int)w + 4, (int)h + 4)) return;
-    tk_fm_rrect(&m, (float)ox, (float)oy, x, y, w, h, r);
-    tk_draw_fm(b, &m, ox, oy, p, alpha);
+    if (!tk_fm_new(&m, (int)w + 4, BH)) return;
+    for (int y0 = 0; y0 < H; y0 += BH) {
+        int by = oy + y0;
+        if (by + BH <= 0 || by >= b->h) continue;
+        if (y0) tk_fm_clear(&m, 0);
+        tk_fm_rrect(&m, (float)ox, (float)by, x, y, w, h, r);
+        tk_draw_fm(b, &m, ox, by, p, alpha);
+    }
     tk_fm_free(&m);
 }
 void tk_fill_rect_raw(tk_bmp *b, int x, int y, int w, int h, uint32_t pm)

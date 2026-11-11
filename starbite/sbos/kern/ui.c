@@ -545,9 +545,14 @@ void kui_lock(void)
     full = dirty = 1;
 }
 
+/* Starbite OS Next draws the confirmation in its own UI (kern_next sets this; 0 in the regular image) */
+int (*kui_confirm_hook)(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
+                        void (*done)(int ok));
 void kui_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
                  void (*done)(int ok))
 {
+    if (kui_confirm_hook && kui_confirm_hook(title, l1, l2, l3, hold, done))
+        return;
     scopy(cf_title, sizeof(cf_title), title);
     scopy(cf_l[0], sizeof(cf_l[0]), l1);
     scopy(cf_l[1], sizeof(cf_l[1]), l2);

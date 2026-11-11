@@ -811,6 +811,8 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
                     found = 1;
                     int same = 1;
                     for (int q = 0; q < 8; q++) if (prev.it[j].key[q] != it->key[q]) same = 0;
+                    tk_irect pr = prev.it[j].r, cr2 = it->r;      /* a 3-slice that only grows sideways */
+                    if (pr.x0 != cr2.x0 || pr.y0 != cr2.y0 || pr.x1 != cr2.x1 || pr.y1 != cr2.y1) same = 0;
                     if (!same || prev.it[j].fade != it->fade || prev.it[j].ft0 != it->ft0) { acc[na++] = prev.it[j].r; acc[na++] = it->r; }
                     break;
                 }

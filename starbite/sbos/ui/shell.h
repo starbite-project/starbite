@@ -29,8 +29,14 @@ void sh_carrier(const char *text);
 /* the modem's status for the UI: the fields of the modem session's snapshot that the shell shows (docs/MODEM.md
  * 7.7, struct sbm_modem_snap): state, SIM status (0x80 absent, -1 not known), emergency-only, RAT (1 GSM .. 7 LTE,
  * 0 unknown), bars 0..5 (-1 unknown). Never the PLMN or a cell id: nothing here is logged. Redraws only on a change. */
-enum { SH_CELL_OFF, SH_CELL_ON, SH_CELL_RESTARTING, SH_CELL_GUARD, SH_CELL_FAILED };
+enum { SH_CELL_OFF, SH_CELL_ON, SH_CELL_RESTARTING, SH_CELL_GUARD, SH_CELL_FAILED, SH_CELL_STARTING };
 typedef struct { int state, sim, emergency_only, rat, bars; } sh_cell_t;
 void sh_cell(const sh_cell_t *c);
+/* the platform's modem power (the kernel: kmodem_power: 1 asks for its hold confirmation, 0 stops); < 0 refused */
+int sh_modem(int on);
+/* a hold confirmation drawn by the shell (the kernel's kui_confirm): the answer goes to the platform's
+ * sh_confirmed(1) on a full hold, sh_confirmed(0) on a tap outside the card */
+void sh_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold);
+void sh_confirmed(int ok);
 
 #endif

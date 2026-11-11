@@ -167,7 +167,8 @@ static void boost(int on)
         sb_log(on ? "next: the A55 did not take 1794 MHz" : "next: the A55 did not go back to 1053 MHz");
 }
 
-/* the modem's status for the status bar and the keypad (no modem is started by Next: it stays Off) */
+/* the modem's status for the status bar, the Control Centre and Settings (kmodem_status: the session API v2's state;
+ * a stall or crash restarting shows STARTING with "Restarting: ..." as its reason) */
 static int has(const char *s, const char *w)
 {
     for (; *s; s++) {
@@ -177,18 +178,40 @@ static int has(const char *s, const char *w)
     }
     return 0;
 }
-static void cell_now(void)
+static int cell_now(void)
 {
+    static sh_cell_t last = { -1, 0, 0, 0, 0 };
     struct sbos_phone ph;
     kmodem_status(&ph);
     sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars };
     if (ph.state == SBOS_MODEM_ON) c.state = SH_CELL_ON;
     else if (ph.state == SBOS_MODEM_FAILED) c.state = SH_CELL_FAILED;
     else if (ph.state == SBOS_MODEM_PARKED) c.state = SH_CELL_GUARD;
-    else if (ph.state == SBOS_MODEM_STARTING) c.state = SH_CELL_RESTARTING;
+    else if (ph.state == SBOS_MODEM_STARTING) c.state = has(ph.why, "Restarting") ? SH_CELL_RESTARTING : SH_CELL_STARTING;
     c.emergency_only = has(ph.cs, "emergency");
     c.rat = has(ph.cs, "LTE") ? 7 : has(ph.cs, "UMTS") ? 4 : has(ph.cs, "EDGE") ? 3 : has(ph.cs, "GPRS") ? 2 : has(ph.cs, "GSM") ? 1 : 0;
     sh_cell(&c);
+    int changed = c.state != last.state || c.sim != last.sim || c.emergency_only != last.emergency_only ||
+                  c.rat != last.rat || c.bars != last.bars;
+    last = c;
+    return changed;
+}
+/* the modem's Start / Stop from the new UI: the kernel's own path (its hold confirmation, its refusals: never in
+ * a self-test image, not while Heat or Linux runs) */
+int sh_modem(int on) { return kmodem_power(on); }
+static void (*cf_done)(int);
+static int next_confirm(const char *t, const char *l1, const char *l2, const char *l3, const char *hold, void (*done)(int))
+{
+    if (!ready) return 0;                        /* the bake: the classic confirmation (never: nothing asks then) */
+    cf_done = done;
+    sh_confirm(t, l1, l2, l3, hold);
+    return 1;
+}
+void sh_confirmed(int ok)
+{
+    void (*d)(int) = cf_done;
+    cf_done = 0;
+    if (d) d(ok);
 }
 static void status_now(void)
 {
@@ -322,6 +345,7 @@ void next_kinit(void)
     log_mb("arena free before the UI heap: ", sb_arena_free());
     heap_init(160ULL << 20);
     log_mb("UI heap: ", heap_size);
+    kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
     if (!tk_pack_open(sbtk_pack_start, (uint32_t)(sbtk_pack_end - sbtk_pack_start))) {
         sb_log("next: the sbtk pack is missing or bad: the regular UI runs");
         return;
@@ -379,6 +403,16 @@ void next_kdraw(void)
         tk_comp_frame(&comp, 0, 1);
         present();
         if (!K.first_frame_ms) K.first_frame_ms = sb_ms();
+    }
+    /* the modem's status twice a second (a copy of a few hundred bytes); a change is drawn at once */
+    static uint64_t cell_t;
+    if (ready && sb_ms() - cell_t >= 500) {
+        cell_t = sb_ms();
+        if (cell_now() && !ticking) {
+            tk_comp_frame(&comp, 0, 0);
+            present();
+            sh_idle();
+        }
     }
 }
 

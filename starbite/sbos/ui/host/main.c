@@ -16,6 +16,14 @@
 
 void sh_torch(int lit) { fprintf(stderr, "torch: %s\n", lit ? "on" : "off"); }
 void sh_boot_os(const char *key) { fprintf(stderr, "slide to start: would restart into %s\n", key); }
+int sh_modem(int on)
+{
+    if (on) sh_confirm("Start the modem?", "Receive only: its status, no calls, SMS or data.",
+                       "A SIM or a network registration parks it.", "The first start is a test: be there.", "Hold to start");
+    else fprintf(stderr, "modem: would stop\n");
+    return 0;
+}
+void sh_confirmed(int ok) { fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled"); }
 
 /* SBTK_CORES=n: the bands over n threads (the phone's four A55), to check that a split frame is bit for bit the
  * serial one and to time it */

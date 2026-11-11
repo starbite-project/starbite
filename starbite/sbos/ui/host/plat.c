@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <execinfo.h>
 
 /* SBTK_HEAP_MB=N: the kernel's heap (tk_heap.c) on one N MiB block, as on the phone (its limit, its fragmentation) */
 #define tk_alloc tkh_alloc
@@ -20,6 +21,7 @@ void tk_heap_oom(uint64_t n, uint64_t u)
 {
     fprintf(stderr, "sbtk: the UI heap is full: %llu bytes asked, %llu MiB in use, largest free %llu MiB\n",
             (unsigned long long)n, (unsigned long long)(u >> 20), (unsigned long long)(tk_heap_largest() >> 20));
+    if (getenv("SBTK_OOM_TRACE")) { void *bt[16]; backtrace_symbols_fd(bt, backtrace(bt, 16), 2); }
 }
 static int kheap = -1;
 static int use_kheap(void)

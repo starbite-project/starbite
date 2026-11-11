@@ -486,6 +486,8 @@ void kui_guest_open(int mode);      /* 1.2: the Linux view (GUEST_APP / GUEST_TE
 extern int kui_linux_on;            /* 1.2: Settings > Linux apps: the home tile (off at every start) */
 void kui_lock(void);
 int kui_awake_on(void);
+extern int (*kui_confirm_hook)(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
+                               void (*done)(int ok));
 void kui_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
                  void (*done)(int ok));
 void kui_power_menu(void);
