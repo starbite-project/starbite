@@ -516,7 +516,7 @@ int gpucomp_selftest_step(void);        /* P4: the GPU compositor's test (gpucom
 #define GPUCOMP_MAX_QUADS 127U
 enum { GC_SOLID = 1, GC_BILINEAR = 2, GC_GLASS = 4, GC_FADE = 8, GC_SLICE_V = 16, GC_SLICE_H = 32,
        GC_OPAQUE = 64,                  /* (CPU only) every px of src is opaque: what is under it is culled */
-       GC_LENS = 256 };                 /* v6, with GC_GLASS: mask is a lens map (lens.h; mstride in px): Liquid Glass */
+       GC_LENS = 256 };                 /* v9: Liquid Glass over the shape lx..lh (lens.h), the backdrop bd: a quad of its own */
 #define GC_OCC_PX 32                    /* gc_quad.occ: per 32 x 32 px block of src, 0 empty, 1 partial, 2 opaque */
 struct gc_quad {
     const void *src;
@@ -528,6 +528,8 @@ struct gc_quad {
     uint32_t bstride;
     float bk;
     uint32_t bw, bh;
+    float lx, ly, lw, lh, lb, lt, lc, lr;   /* v9 (GC_LENS): the glass shape (screen px; radius in radius) and its lens
+                                             * (lens.h lens_par); the quad is a transparent solid, its src unused */
     const uint8_t *occ;                 /* (CPU only, may be 0) src's block map, occ_w x occ_h: bins skip empty blocks */
     uint32_t occ_w, occ_h;
     uint32_t gen;                       /* (CPU only) the caller's content stamp of src / mask / backdrop */

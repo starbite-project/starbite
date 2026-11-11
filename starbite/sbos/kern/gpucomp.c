@@ -359,6 +359,12 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         }
         /* the shader's precomputed record (mesa-compjob.c, COMP2 v5's order: the common fields first) */
         float rad = s->radius >= .01f ? s->radius : 0, hx = (s->cx1 - s->cx0) * .5f, hy = (s->cy1 - s->cy0) * .5f;
+        float ccx = s->cx0 + hx, ccy = s->cy0 + hy;
+        if (s->flags & GC_LENS) {            /* v9: the rounded box is the glass shape, not the clip */
+            rad = s->radius >= .01f ? s->radius : .01f;
+            hx = s->lw * .5f; hy = s->lh * .5f;
+            ccx = s->lx + hx; ccy = s->ly + hy;
+        }
         /* the fade as two ramps: sat((fy - ft) * it) * sat((fb - fy) * ib); a ramp of no height is a step */
         float ft = -1e6f, it = 1, fb = 1e6f, ib = 1;
         if (s->flags & GC_FADE) {
@@ -384,8 +390,8 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         q[14] = s->stride;
         q[15] = s->solid;
         q[16] = fbits(rad);
-        q[17] = fbits(s->cx0 + hx);
-        q[18] = fbits(s->cy0 + hy);
+        q[17] = fbits(ccx);
+        q[18] = fbits(ccy);
         q[19] = fbits(hx - rad);
         q[20] = fbits(hy - rad);
         q[21] = fbits(ft);
@@ -397,14 +403,19 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         q[27] = fbits(s->s0);
         q[28] = fbits(s->s1);
         q[29] = s->mstride;
+        if (s->flags & GC_LENS) {            /* v9: the lens's parameters where a 3-slice keeps its own */
+            q[25] = fbits(s->lb);
+            q[26] = fbits(s->lt);
+            q[27] = fbits(s->lc);
+            q[28] = fbits(s->lr);
+        }
         put64(q + 30, mva);
         put64(q + 32, bva);
         q[34] = s->bstride;
         q[35] = fbits(s->bk);
         q[36] = s->bw;
         q[37] = s->bh;
-        q[38] = fbits(s->bk > 0 ? .5f / s->bk : 1);     /* v7: the lens's scale (the backdrop is the half wallpaper) */
-        q[39] = 0;
+        q[38] = q[39] = 0;
         /* its bins: the clip, within the source's extent on screen (u in [0, w or len), v in [0, h or len)) */
         if (!(s->alpha > 0))
             continue;
@@ -429,7 +440,7 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
          * the backdrop wherever its mask is) skips bins where it is empty; an opaque quad at full alpha without a fade
          * that covers a whole bin (inside its clip less the corner radius) drops everything under it there */
         int solid = (s->flags & GC_SOLID) != 0;
-        if (solid && !(s->solid >> 24))
+        if (solid && !(s->solid >> 24) && !(s->flags & GC_LENS))
             continue;
         int full = s->alpha >= .999f && !(s->flags & GC_FADE);
         int opq = full && (solid ? (s->solid >> 24) == 255U : (s->flags & GC_OPAQUE) != 0);
@@ -521,8 +532,10 @@ static void half_quads(const struct gc_quad *qs, unsigned n)
         h->isx *= 2; h->isy *= 2;
         h->radius *= .5f;
         h->ft0 *= .5f; h->ft1 *= .5f; h->fb0 *= .5f; h->fb1 *= .5f;
-        if (h->flags & GC_GLASS)
+        if (h->flags & (GC_GLASS | GC_LENS))
             h->bk *= 2;
+        h->lx *= .5f; h->ly *= .5f; h->lw *= .5f; h->lh *= .5f;
+        h->lb *= .5f; h->lc *= .5f; h->lr *= 2;
         if (!(h->flags & GC_SOLID))
             h->flags |= GC_BILINEAR;
     }
@@ -717,8 +730,12 @@ static uint32_t cpu_px(unsigned x, unsigned y, uint32_t bg)
         const struct quad *q = &Q[i];
         if (fx < q->cx0 || fx >= q->cx1 || fy < q->cy0 || fy >= q->cy1)
             continue;
-        float cov = 1;
-        if (q->radius >= .01f) {
+        float cov = 1, lsdv = 0, lgx = 0, lgy = 0;
+        if (q->flags & GC_LENS) {            /* v9: the glass shape's coverage and the lens's distance and normal */
+            float r = q->radius >= .01f ? q->radius : .01f;
+            lsdv = lens_sd(fx, fy, q->lx + q->lw * .5f, q->ly + q->lh * .5f, q->lw * .5f - r, q->lh * .5f - r, r, &lgx, &lgy);
+            cov = clampf(.5f - lsdv);
+        } else if (q->radius >= .01f) {
             float hx = (q->cx1 - q->cx0) * .5f, hy = (q->cy1 - q->cy0) * .5f;
             float px = fx - (q->cx0 + hx), py = fy - (q->cy0 + hy);
             px = px < 0 ? -px : px;
@@ -795,18 +812,9 @@ static unsigned check_scene(const volatile uint32_t *fb, uint32_t bg, const char
 #define MASK_CARD (VA_POOL + 0xa50000ULL)                   /* 600 x 300 A8: the card's glass mask (rounded) */
 #define TEX_PILL (VA_POOL + 0xa80000ULL)                    /* 200 x 60: a pill drawn 3-sliced to 500 wide */
 #define TEX_SPARSE (VA_POOL + 0xb00000ULL)                  /* 256 x 256: only its top-left 32 x 32 block shows */
-#define LENS_CARD (VA_POOL + 0xb40000ULL)                   /* 600 x 300 lens map (lens.h): v6's Liquid Glass card */
 static struct gc_quad G[8];
 static unsigned ng;
 
-/* the signed distance to a w x h box with corners of radius r (negative inside) */
-static float sd_rr(float px, float py, float w, float h, float r)
-{
-    float qx = (px < w * .5f ? w * .5f - px : px - w * .5f) - (w * .5f - r);
-    float qy = (py < h * .5f ? h * .5f - py : py - h * .5f) - (h * .5f - r);
-    float mx = qx > 0 ? qx : 0, my = qy > 0 ? qy : 0, mm = qx > qy ? qx : qy;
-    return lens_sqrt(mx * mx + my * my) + (mm < 0 ? mm : 0) - r;
-}
 
 static void make_comp2_scene(void)
 {
@@ -816,19 +824,6 @@ static void make_comp2_scene(void)
             int dx = (int)x < 40 ? 40 - (int)x : (int)x > 559 ? (int)x - 559 : 0;
             int dy = (int)y < 40 ? 40 - (int)y : (int)y > 259 ? (int)y - 259 : 0;
             m[y * 600U + x] = (uint8_t)(dx * dx + dy * dy <= 1600 ? 255 : 0);
-        }
-    /* the lens card's map, as the toolkit makes one for a rounded box: the distance in, the inward offset */
-    uint32_t *lm = POOL_CPU(LENS_CARD);
-    lens_cls lc = lens_class(600 / LENS_PT, 300 / LENS_PT, 40 / LENS_PT);
-    for (unsigned y = 0; y < 300U; ++y)
-        for (unsigned x = 0; x < 600U; ++x) {
-            float px = (float)x + .5f, py = (float)y + .5f, sd = sd_rr(px, py, 600, 300, 40);
-            float gx = sd_rr(px + .5f, py, 600, 300, 40) - sd_rr(px - .5f, py, 600, 300, 40);
-            float gy = sd_rr(px, py + .5f, 600, 300, 40) - sd_rr(px, py - .5f, 600, 300, 40);
-            float gl = lens_sqrt(gx * gx + gy * gy), ox, oy, e;
-            if (gl > 1e-6f) { gx /= gl; gy /= gl; }
-            lens_at(&lc, (sd < 0 ? -sd : 0) / LENS_PT, gx, gy, &ox, &oy, &e);
-            lm[y * 600U + x] = sd < .5f ? lens_word(.5f - sd, ox, oy, e) : 0;
         }
     uint32_t *pl = POOL_CPU(TEX_PILL);
     for (unsigned y = 0; y < 60U; ++y)
@@ -847,9 +842,21 @@ static void make_comp2_scene(void)
     G[ng++] = (struct gc_quad){ pl, 200, 200, 60, GC_SLICE_H, 0, 1, 300, 2300, 1, 1, 300, 2300, 800, 2360, 0, 0, 0, 0, 0,
                                 500, 30, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     G[ng++] = (struct gc_quad){ 0, 0, 200, 100, GC_SOLID, 0xccffffffU, 1, 1000, 2500, 1, 1, 900, 2450, 1250, 2650, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    /* v6: a Liquid Glass card (the lens map over the blurred half buffer), its card at .8 on top */
-    G[ng++] = (struct gc_quad){ cd, 600, 600, 300, GC_GLASS | GC_LENS, 0, .8f, 760, 60, 1, 1, 760, 60, 1360, 360, 0, 0, 0, 0, 0, 0, 0, 0,
-                                POOL_CPU(LENS_CARD), 600, half, 720, .5f, 720, 1480, 0, 0, 0, 0 };
+    /* v9: a Liquid Glass card (its lens over the blurred half buffer, from the shape), the card at .8 on top */
+    {
+        struct gc_quad L = { 0 };
+        lens_par lp = lens_params(600, 300, 40, LENS_PT);
+        L.flags = GC_SOLID | GC_LENS;
+        L.alpha = 1;
+        L.dx0 = 759; L.dy0 = 59; L.isx = L.isy = 1; L.w = 603; L.h = 303;
+        L.cx0 = 760; L.cy0 = 60; L.cx1 = 1360; L.cy1 = 360;
+        L.radius = 40;
+        L.bd = half; L.bstride = 720; L.bk = .5f; L.bw = 720; L.bh = 1480;
+        L.lx = 760; L.ly = 60; L.lw = 600; L.lh = 300;
+        L.lb = lp.lb; L.lt = lp.lt; L.lc = lp.lc; L.lr = lp.lr;
+        G[ng++] = L;
+    }
+    G[ng++] = (struct gc_quad){ cd, 600, 600, 300, GC_BILINEAR, 0, .8f, 760, 60, 1, 1, 760, 60, 1360, 360, 0 };
 }
 
 static float slice_c(float v, float len, float s0, float s1, float srch)
@@ -902,33 +909,29 @@ static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
             u = slice_c(u, q->len, q->s0, q->s1, (float)q->w);
         if (u < 0 || v < 0 || u >= (float)q->w || v >= (float)q->h)
             continue;
+        if ((q->flags & GC_LENS) && al > 0) {
+            /* comp2's lens path: the offset and light from the shape, the backdrop bilinear at p + o, tone, light */
+            lens_par P = { q->lb, q->lt, q->lc, q->lr };
+            float ox, oy, e, rgb[3], t[4][4];
+            lens_eval(&P, lsdv < 0 ? -lsdv : 0, lgx, lgy, &ox, &oy, &e);
+            float uu = (fx + ox) * q->bk - .5f, vv = (fy + oy) * q->bk - .5f, u0 = fl(uu), v0 = fl(vv);
+            float tu = uu - u0, tv = vv - v0;
+            for (int k = 0; k < 4; ++k)
+                fetch_c((const uint32_t *)q->bd, q->bstride, (int)q->bw, (int)q->bh, (int)u0 + (k & 1), (int)v0 + (k >> 1), t[k]);
+            for (int c = 0; c < 3; ++c) {
+                float top = t[0][c] + (t[1][c] - t[0][c]) * tu, bot = t[2][c] + (t[3][c] - t[2][c]) * tu;
+                rgb[c] = top + (bot - top) * tv;
+            }
+            lens_shade(rgb, e);
+            for (int c = 0; c < 3; ++c)
+                acc[c] = acc[c] + (rgb[c] - acc[c]) * al;
+            acc[3] = acc[3] + (1 - acc[3]) * al;
+        }
         if (q->flags & GC_SOLID) {
             unpack_f(q->solid, s);
         } else {
             int iu = (int)u, iv = (int)v;
-            if ((q->flags & (GC_GLASS | GC_LENS)) == (GC_GLASS | GC_LENS)) {
-                uint32_t M = ((const uint32_t *)q->mask)[(unsigned)iv * q->mstride + (unsigned)iu];
-                float cov, ox, oy, e, rgb[3];
-                lens_unword(M, &cov, &ox, &oy, &e);
-                ox *= .5f / q->bk;              /* v7: the lens's scale (1 at full resolution, .5 in a half frame) */
-                oy *= .5f / q->bk;
-                float m = cov * al;
-                if (m > 0) {
-                    /* comp2's lens_px: the backdrop bilinear at p + o, the tone, the light */
-                    float uu = (fx + ox) * q->bk - .5f, vv = (fy + oy) * q->bk - .5f, u0 = fl(uu), v0 = fl(vv);
-                    float tu = uu - u0, tv = vv - v0, t[4][4];
-                    for (int k = 0; k < 4; ++k)
-                        fetch_c((const uint32_t *)q->bd, q->bstride, (int)q->bw, (int)q->bh, (int)u0 + (k & 1), (int)v0 + (k >> 1), t[k]);
-                    for (int c = 0; c < 3; ++c) {
-                        float top = t[0][c] + (t[1][c] - t[0][c]) * tu, bot = t[2][c] + (t[3][c] - t[2][c]) * tu;
-                        rgb[c] = top + (bot - top) * tv;
-                    }
-                    lens_shade(rgb, e);
-                    for (int c = 0; c < 3; ++c)
-                        acc[c] = acc[c] + (rgb[c] - acc[c]) * m;
-                    acc[3] = acc[3] + (1 - acc[3]) * m;
-                }
-            } else if (q->flags & GC_GLASS) {
+            if (q->flags & GC_GLASS) {
                 float m = (float)((const uint8_t *)q->mask)[(unsigned)iv * q->mstride + (unsigned)iu] / 255.0f * al, bc[4];
                 fetch_c((const uint32_t *)q->bd, q->bstride, (int)q->bw, (int)q->bh, (int)((fx - .5f) * q->bk),
                         (int)((fy - .5f) * q->bk), bc);
