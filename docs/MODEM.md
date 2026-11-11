@@ -795,6 +795,13 @@ After simtest-a2 the user asked for cellular in Next. The transmit path is now i
   held while the modem runs, so settings changed meanwhile aren't saved. The start blocks the UI for about 4.5 s
   (as the Modem app's start does).
 
+#### Result: the user's phone, Starbite OS Next P3o (2026-11-11 19:25, installed)
+**Wi-Fi and mobile data both work** on the user's SIM, and the user called it "pretty smooth". The path to it:
+- **P3m:** stuck on "Starting" because the kernel arena was at 54 KiB. The old UI's wallpaper took 17 MB in Next.
+- **P3n:** the modem's 2.25 MiB is reserved at boot, the wallpaper is skipped in Next, and failures give their
+  reasons.
+- **P3o:** the toolkit's next release, now the known-good fallback.
+
 ## 8. Later stages (not started)
 
 
