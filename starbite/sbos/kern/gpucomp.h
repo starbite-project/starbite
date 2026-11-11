@@ -532,11 +532,11 @@ static const uint32_t gpucomp_sh_comp2[1764] = {
     0x0000005bu, 0x80cb185cu, 0x0003fcd3u, 0x00000002u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
     0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
 };
-#define GPUCOMP_O_SH_comp2 0x70000u
+#define GPUCOMP_O_SH_comp2 0x100000u
 #define GPUCOMP_O_RSD_comp2 0xb200u
 /* comp2: 7056 bytes, 64 work registers */
 static const uint32_t gpucomp_rsd_comp2[16] = {
-    0x02070000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x02100000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
     0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000680u, 0x00000000u, 0x00000000u, 0x00000000u,
 };
 static const uint32_t gpucomp_tls[8] = {

@@ -632,7 +632,8 @@ struct sb_gpu_result {
 int sb_gpu_domain(void);                    /* PMU G3D status [3:0] == 0xf */
 uint32_t sb_gpu_rd(unsigned off);
 int sb_gpu_wr(unsigned off, uint32_t v);    /* 0 (nothing written) without an open session */
-int sb_gpu_map(uint64_t va, uint64_t pa, uint64_t size);   /* more GPU address space (the compositor); 1 mapped */
+int sb_gpu_map(uint64_t va, uint64_t pa, uint64_t size);
+int sb_gpu_map_ro(uint64_t va, uint64_t pa, uint64_t size);   /* the same, GPU read-only (bitmaps in the image) */   /* more GPU address space (the compositor); 1 mapped */
 /* The session: a complete authorisation for the BUCK6 write of the confirmed GPU power-up. */
 int sb_gpu_open(const struct sb_auth *a);
 int sb_gpu_is_open(void);

@@ -68,7 +68,8 @@ void disassemble_bifrost(FILE *fp, const void *code, size_t size, bool verbose);
 #define GPU_ID_G72 0x6221u
 #define VA_BASE 0x02000000ull           /* SB_GPU_VA: the data window */
 /* gpucomp's layout in the data window (offsets): shaders 8 KiB each, then the descriptors, then the parameter blocks */
-#define O_SH(i) ((i) == SH_COMP2 ? 0x70000u : 0x1000u + (i) * 0x2000u)  /* 0x1000 .. 0x9000; COMP2 (v3, 4 px a thread) its own 64 KiB */
+#define O_SH(i) ((i) == SH_COMP2 ? 0x100000u : 0x1000u + (i) * 0x2000u)  /* 0x1000 .. 0x9000; COMP2 (v3) its own 64 KiB at 1 MiB,
+                                                                      * clear of the bins (O_BIN .. +BIN_W*BIN_H*BIN_B) */
 #define SH_MAX(i) ((i) == SH_COMP2 ? 0x10000u : 0x2000u)
 #define O_RSD(i) (0xb000u + (i) * 0x80u)
 #define O_TLS 0xb800u
@@ -80,6 +81,7 @@ void disassemble_bifrost(FILE *fp, const void *code, size_t size, bool verbose);
 #define BIN_W 45u
 #define BIN_H 93u
 #define BIN_B 128u
+_Static_assert(O_BIN + BIN_W * BIN_H * BIN_B <= 0x100000u, "the bins run into COMP2's code");
 #define WG 16u
 
 enum { SH_FILL, SH_COMP, SH_DOWN, SH_UP, SH_COMP2, NSH };

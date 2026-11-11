@@ -25,6 +25,9 @@
 #define VA_HEAP 0x20000000ULL               /* the UI's heap (its layer bitmaps), when given (gpucomp_init) */
 static uintptr_t heap_cpu;
 static uint64_t heap_size;
+#define VA_RO 0x30000000ULL                 /* read-only memory the UI's layers point into (the asset pack) */
+static uintptr_t ro_cpu;
+static uint64_t ro_size;
 #define JS 1U                               /* the compute slot, as Panfrost and gpuheat */
 
 static struct sb_auth au;
@@ -110,7 +113,8 @@ static int gc_up(void)
     if (!sb_gpu_map(VA_SCAN_B, SCAN_B, (uint64_t)SB_FB_W * SB_FB_H * 4U) ||
         !sb_gpu_map(VA_SCAN_C, SCAN_C, (uint64_t)SB_FB_W * SB_FB_H * 4U) ||
         !sb_gpu_map(VA_POOL, SB_GPU_POOL, SB_GPU_POOL_SIZE) ||
-        (heap_cpu && !sb_gpu_map(VA_HEAP, heap_cpu & ~0xfffULL, (heap_size + (heap_cpu & 0xfffU) + 0xfffU) & ~0xfffULL))) {
+        (heap_cpu && !sb_gpu_map(VA_HEAP, heap_cpu & ~0xfffULL, (heap_size + (heap_cpu & 0xfffU) + 0xfffU) & ~0xfffULL)) ||
+        (ro_cpu && !sb_gpu_map_ro(VA_RO, ro_cpu & ~0xfffULL, (ro_size + (ro_cpu & 0xfffU) + 0xfffU) & ~0xfffULL))) {
         sb_gpu_close();
         fail("the GPU's extra mappings (the second and third scanout buffers, the pool, the heap) did not fit");
         return 0;
@@ -193,6 +197,15 @@ static uint64_t run(uint64_t job_off, const uint32_t *job, const char *what)
 static int disabled;
 
 /* bring the GPU up for the UI with its heap (the layer bitmaps) visible to the GPU; 1 ready */
+/* before gpucomp_init: read-only memory the layers may point into (the UI's asset pack in the image); written out
+ * of the CPU's caches once */
+void gpucomp_add_ro(const void *p, uint64_t bytes)
+{
+    ro_cpu = (uintptr_t)p;
+    ro_size = bytes;
+    if (p && bytes)
+        sb_dcache_clean_inval(p, bytes);
+}
 int gpucomp_init(void *heap, uint64_t bytes)
 {
     if (disabled)
@@ -222,6 +235,8 @@ uint64_t gpucomp_va(const void *p)
     uintptr_t a = (uintptr_t)p;
     if (heap_cpu && a >= heap_cpu && a < heap_cpu + heap_size)
         return VA_HEAP + (heap_cpu & 0xfffU) + (a - heap_cpu);
+    if (ro_cpu && a >= ro_cpu && a < ro_cpu + ro_size)
+        return VA_RO + (ro_cpu & 0xfffU) + (a - ro_cpu);
     if (a >= SB_FB && a < SB_FB + (uintptr_t)SB_FB_W * SB_FB_H * 4U)
         return SB_GPU_PANEL_VA + (a - SB_FB);
     if (a >= SCAN_B && a < SCAN_B + (uintptr_t)SB_FB_W * SB_FB_H * 4U)
@@ -245,6 +260,11 @@ void gpucomp_clean(const void *p, uint64_t n)
  * the backend stays disabled until a restart: the caller draws on the CPU) */
 /* the bins (32 x 32 px): built here in cached RAM, then each bin's count and indices copied into the window */
 static uint8_t bins[GPUCOMP_BIN_W * GPUCOMP_BIN_H][GPUCOMP_BIN_B] __attribute__((aligned(16)));
+/* the data window's regions must not overlap (v3's first image put COMP2's code inside the bins: it was overwritten
+ * by the first frame's bin upload, an invalid instruction on the phone) */
+_Static_assert(GPUCOMP_O_C2 + 64U + GPUCOMP_MAX_QUADS * GPUCOMP_C2_QB <= GPUCOMP_O_BIN, "comp2's quads run into the bins");
+_Static_assert(GPUCOMP_O_BIN + GPUCOMP_BIN_W * GPUCOMP_BIN_H * GPUCOMP_BIN_B <= GPUCOMP_O_SH_comp2, "the bins run into comp2's code");
+_Static_assert(GPUCOMP_O_SH_comp2 + sizeof gpucomp_sh_comp2 <= SB_GPU_DATA_SIZE, "comp2's code is outside the window");
 static int floor_i(float v)
 {
     int i = (int)v;
@@ -285,8 +305,15 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         volatile uint32_t *q = p + 16 + i * (GPUCOMP_C2_QB / 4U);
         uint64_t sva = s->src ? gpucomp_va(s->src) : 0, mva = s->mask ? gpucomp_va(s->mask) : 0;
         uint64_t bva = s->bd ? gpucomp_va(s->bd) : 0;
-        if ((s->src && !sva) || (s->mask && !mva) || (s->bd && !bva))
+        if ((s->src && !sva) || (s->mask && !mva) || (s->bd && !bva)) {
+            static int told;
+            if (!told) {                    /* once: which address the GPU cannot reach (the caller draws on the CPU) */
+                told = 1;
+                sb_logx("gpucomp: a quad points where the GPU cannot reach (the CPU draws such frames): ",
+                        (uint64_t)(uintptr_t)(s->src && !sva ? s->src : s->mask && !mva ? s->mask : s->bd));
+            }
             return 0;
+        }
         /* the shader's precomputed record (mesa-compjob.c, COMP2 v2) */
         float rad = s->radius >= .01f ? s->radius : 0, hx = (s->cx1 - s->cx0) * .5f, hy = (s->cy1 - s->cy0) * .5f;
         q[0] = fbits(s->cx0);

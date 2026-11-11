@@ -212,7 +212,11 @@ void sb_gpu_tables(void)
 /* Starbite OS's GPU compositor (gpucomp.c): more of the GPU's address space, below 1 GiB. The level-3 tables come
  * from the GPU memory block after the data window (SB_GPU_TBL_POOL), handed out as needed (zeroed); call after
  * sb_gpu_tables and before sb_gpu_up (or sb_gpu_as0 again after). 1 mapped, 0 out of tables or out of range. */
-int sb_gpu_map(uint64_t va, uint64_t pa, uint64_t size)
+static int gpu_map_attr(uint64_t va, uint64_t pa, uint64_t size, uint64_t attr);
+int sb_gpu_map(uint64_t va, uint64_t pa, uint64_t size) { return gpu_map_attr(va, pa, size, 0x2c1U); }
+/* read-only for the GPU (no write bit: a stray GPU write faults instead of landing) */
+int sb_gpu_map_ro(uint64_t va, uint64_t pa, uint64_t size) { return gpu_map_attr(va, pa, size, 0x241U); }
+static int gpu_map_attr(uint64_t va, uint64_t pa, uint64_t size, uint64_t attr)
 {
     volatile uint64_t *q = (volatile uint64_t *)SB_GPU_MEM;
     volatile uint64_t *l2 = q + 1024;
@@ -231,7 +235,7 @@ int sb_gpu_map(uint64_t va, uint64_t pa, uint64_t size)
             l2[i2] = t | 3U;
         }
         volatile uint64_t *l3 = (volatile uint64_t *)(uintptr_t)(l2[i2] & ~0xfffULL);
-        l3[(v >> 12) & 0x1ffU] = (pa + o) | 0x2c1U;
+        l3[(v >> 12) & 0x1ffU] = (pa + o) | attr;
     }
     __asm__ volatile("dsb sy" : : : "memory");
     return 1;
