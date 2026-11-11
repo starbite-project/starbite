@@ -1,0 +1,91 @@
+From 19aed3e2080b24a0d98649ffa9fd2a33d51ca799 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Wed, 11 Nov 2026 04:07:06 +0200
+Subject: [PATCH] patch: 0421-starlte-test-deadman.patch - timed test boots
+ (sweetreboot=S) stop feeding the watchdog at S+60 s and at sbnoui= s (300)
+ without a first frame; no boot progress animation on STARLTE unless -progress
+ (T37 froze on the splash with the watchdog fed)
+
+---
+ bsd/dev/herolte_ufs.c | 32 ++++++++++++++++++++++++++++++++
+ pexpert/arm/pe_init.c |  7 +++++++
+ 2 files changed, 39 insertions(+)
+
+diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
+index 951db04b..8c6cf566 100644
+--- a/bsd/dev/herolte_ufs.c
++++ b/bsd/dev/herolte_ufs.c
+@@ -984,6 +984,7 @@ static uint32_t starlte_sbwdt_s;                /* boot-arg sbwdt (s) */
+ static volatile uint32_t *starlte_wdt_va;       /* cluster 1's watchdog, while fed */
+ static uint32_t starlte_wdt_reload, starlte_wdt_period_ms;
+ static uint64_t starlte_wdt_feeds;
++static uint64_t starlte_deadman_abs, starlte_noui_abs;     /* 0421: the test boots' dead-man */
+ static volatile bool starlte_wdt_stop;          /* a panic began, or sbtesthang: never feed again */
+ static thread_call_t starlte_wdt_call;
+ static uint64_t starlte_test_hang_abs;          /* sbtesthang as an absolute time, 0 = off */
+@@ -1207,6 +1208,27 @@ starlte_wdt_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p
+ 		    starlte_wdt_feeds, starlte_sbwdt_s);
+ 		return;
+ 	}
++	/*
++	 * 0421: a timed test boot (sweetreboot=S) gets a dead-man that needs nothing but this thread call. T37
++	 * (2026-11-11) hung on the splash with the watchdog fed and the sweetreboot thread never resetting (it
++	 * writes its dump files first and can block there): feeding now stops 60 s after S, and at sbnoui= s
++	 * (default 300) if no frame has reached the panel by then. The watchdog then resets within sbwdt= s.
++	 */
++	if (starlte_deadman_abs != 0 && mach_absolute_time() >= starlte_deadman_abs) {
++		starlte_wdt_stop = true;
++		printf("STARBITE HEALTH: dead-man: sweetreboot=%u + 60 s passed without the reset, feeding stopped\n",
++		    starlte_sweetreboot_s);
++		return;
++	}
++	if (starlte_noui_abs != 0 && mach_absolute_time() >= starlte_noui_abs) {
++		extern uint64_t sweet_fb_first_present;
++		if (sweet_fb_first_present == 0) {
++			starlte_wdt_stop = true;
++			printf("STARBITE HEALTH: dead-man: no frame on the panel after sbnoui, feeding stopped\n");
++			return;
++		}
++		starlte_noui_abs = 0;
++	}
+ 	starlte_wdt_feed();
+ 	clock_interval_to_deadline(starlte_wdt_period_ms, (uint32_t)NSEC_PER_MSEC, &deadline);
+ 	(void)thread_call_enter_delayed(starlte_wdt_call, deadline);
+@@ -1247,6 +1269,16 @@ starlte_health_start(void)
+ 		    starlte_sbwdt_s);
+ 		return;
+ 	}
++	if (starlte_sweetreboot_s != 0) {
++		uint32_t noui = 300;
++		PE_parse_boot_argn("sbnoui", &noui, sizeof(noui));
++		clock_interval_to_deadline(starlte_sweetreboot_s + 60, (uint32_t)NSEC_PER_SEC, &starlte_deadman_abs);
++		if (noui != 0) {
++			clock_interval_to_deadline(noui, (uint32_t)NSEC_PER_SEC, &starlte_noui_abs);
++		}
++		printf("STARBITE HEALTH: dead-man: feeding stops at %u s, or at %u s with no frame on the panel (0421)\n",
++		    starlte_sweetreboot_s + 60, noui);
++	}
+ 	starlte_wdt_feed();
+ 	clock_interval_to_deadline(starlte_wdt_period_ms, (uint32_t)NSEC_PER_MSEC, &deadline);
+ 	(void)thread_call_enter_delayed(starlte_wdt_call, deadline);
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index db1c4a02..871aa1d7 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -323,6 +323,13 @@ PE_init_iokit(void)
+ 	if (PE_parse_boot_argn("-noprogressonce", &notused, sizeof(notused))) {
+ 		show_progress = FALSE;
+ 	}
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	/*
++	 * Starbite 0421: no boot progress animation unless -progress. Every STARLTE command line had -noprogress
++	 * until T37 (2026-11-11), the one without it: the boot froze on the loader's splash with the watchdog fed.
++	 */
++	show_progress = PE_parse_boot_argn("-progress", &notused, sizeof(notused)) ? TRUE : FALSE;
++#endif
+ #else
+ 	show_progress = FALSE;
+ 	PE_parse_boot_argn("-progress", &show_progress, sizeof(show_progress));
+-- 
+2.53.0
+
