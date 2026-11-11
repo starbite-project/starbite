@@ -27,6 +27,8 @@
 #ifndef SB_HOST
 #include "../../modem/sbm.h"
 #include "../../modem/sb/sbm_sb.h"
+#include "net.h"                            /* starbite/wifi: sbnet (raw IP for mobile data) and sbtcp */
+#include "tcp.h"
 #else
 #include <stdlib.h>
 #endif
@@ -47,6 +49,10 @@ static struct sbm_modem mo;
 static int loaded, armed;
 static uint64_t t_rec;
 static uint32_t snap_gen;
+static void cell_begin(void);
+static void cell_net_down(const char *w);
+static void cell_stopped(const char *w, int failed);
+static void cset(int s, const char *w);
 #else
 static uint32_t h_msgs, h_queries, h_answers;
 static int h_guard_s = -1;
@@ -175,10 +181,19 @@ static void start_now(void)
     h_msgs = h_queries = h_answers = 0;
 #endif
     t_up = t_poll = sb_ms();
-    sb_log("modem: online, receive only (status GETs every 10 s; a SIM or a registration parks it)");
+#ifndef SB_HOST
+    if (mo.attended == SBM_ATTENDED_DATA)
+        sb_log("modem: online for mobile data (the user's Cellular switch): SIM, radio, attach, data");
+    else
+#endif
+        sb_log("modem: online, receive only (status GETs every 10 s; a SIM or a registration parks it)");
     set_state(SBOS_MODEM_ON, "");
     kt_set(KT_MODEM, 2, sb_ms(), POLL_MS, 1);
     kt_set(KT_MODEM, 3, sb_ms(), 3000, 0);
+#ifndef SB_HOST
+    if (mo.attended == SBM_ATTENDED_DATA)
+        cell_begin();
+#endif
 }
 
 void kmodem_stop(const char *w)
@@ -186,6 +201,7 @@ void kmodem_stop(const char *w)
     if (!kmodem_on())
         return;
 #ifndef SB_HOST
+    cell_stopped(w, 0);
     sbm_modem_stop(&mo);                    /* the session's park (a stalled one: parked already; state OFF, so no
                                              * automatic restart follows a stop) */
     sbm_cp_park(&plat);                     /* safe again (and when it never started) */
@@ -223,6 +239,9 @@ int kmodem_power(int on)
     }
     if (kmodem_on())
         return 0;
+#ifndef SB_HOST
+    mo.attended = 0;                        /* the Modem app's start is receive only */
+#endif
 #ifdef SB_HOST
     if (getenv("SBOS_HOST_SELFTEST") || getenv("SBOS_HOST_SELFTEST_GUEST"))
         return SBOS_EAGAIN;
@@ -291,6 +310,10 @@ static void poll(void)
         sb_log(u.b);
         kt_cancel_owner(KT_MODEM);
         t_rec = sb_ms();
+        if (mo.attended == SBM_ATTENDED_DATA) {
+            cell_net_down(mo.state == SBM_MS_STALLED ? "the modem stopped answering" : "the modem crashed");
+            cset(KCELL_STARTING, "Restarting the modem");
+        }
         set_state(SBOS_MODEM_STARTING, mo.state == SBM_MS_STALLED ? "Restarting: the modem stopped answering"
                                                                   : "Restarting: the modem crashed");
         kt_set(KT_MODEM, 4, sb_ms(), RECOVER_MS, 1);
@@ -332,18 +355,447 @@ static void recover(void)
         ub_s(&u, sbm_strerror(r));
         ub_s(&u, "); parked, stays off");
         sb_log(u.b);
+        cell_stopped("The modem kept failing: stopped", 1);
         stopped(SBOS_MODEM_FAILED, r == SBM_EPERM ? "Stopped: it went down 3 times in 30 min (parked)"
                                                   : "The modem did not come back (parked)");
         notif_post("modem", "Modem stopped", why);
         return;
     }
     sb_log("modem: restarted after a stall / crash (Android's reset path)");
+    if (mo.attended == SBM_ATTENDED_DATA)
+        cell_net_down("the modem restarted");
     snap_gen = 0;
     t_up = t_poll = sb_ms();
     set_state(SBOS_MODEM_ON, "");
     kt_set(KT_MODEM, 2, sb_ms(), POLL_MS, 1);
     kt_set(KT_MODEM, 3, sb_ms(), 3000, 0);
+    if (mo.attended == SBM_ATTENDED_DATA)
+        cell_begin();
 }
+
+/* ---- mobile data (Next): the user's Settings > Cellular switch ---------------------------------------------
+ * The only path on which this kernel transmits. Off by default at every boot; never calls, SMS or SS (the core
+ * cannot build them), never an emergency call. Steps (simtest-a2, 2026-11-11, the user's SIM): the SIM ready,
+ * radio normal, the LTE initial-attach APN (without it the CP camps and never attaches), registration (with
+ * network selection automatic, PS attach and a radio cycle if it takes long), the PDP context (cid 1, IPv4),
+ * then a raw-IP sbnet + sbtcp (starbite/wifi) that wifi_fetch uses when Wi-Fi is not joined. Addresses, the
+ * operator code and its name never reach the log; the name is for the screen. */
+enum { CS_IDLE, CS_SIM, CS_RADIO, CS_ATTACH, CS_REG, CS_CYCLE_OFF, CS_CYCLE_ON, CS_DEFINE, CS_ACT, CS_IP, CS_UP,
+       CS_RETRY, CS_DEACT, CS_DETACH };
+#define CELL_APN "internet"                /* Elisa, DNA, Telia (FI); others: a setting later */
+static int cell_want, cst = KCELL_OFF, cstep = CS_IDLE, c_lf, c_esc, cnet_up, c_check;
+static uint64_t c_t0, c_step_t;
+static char c_why[64];
+static struct sbnet cnet;
+static struct sbtcp ctcp;
+static uint32_t c_rng = 0x9E3779B9u, c_tx, c_rx;
+
+static void cset(int s, const char *w)
+{
+    if (s != cst || (w && !sb_streq(w, c_why))) {
+        cst = s;
+        sb_strcpy(c_why, sizeof(c_why), w ? w : "");
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "cell: ");
+        ub_s(&u, c_why[0] ? c_why : "state");
+        sb_log(u.b);
+        ui_mark_dirty();
+    }
+}
+static void cgo(int step)
+{
+    cstep = step;
+    c_step_t = sb_ms();
+}
+static uint32_t cin(void) { return (uint32_t)(sb_ms() - c_step_t); }
+
+static int c_tx_ip(void *ctx, const uint8_t *pkt, uint32_t len)
+{
+    (void)ctx;
+    int r = sbm_modem_ip_tx(&mo, pkt, len);
+    if (r == 0)
+        c_tx++;
+    return r < 0 ? -1 : 0;
+}
+static void c_rx_ip(void *ctx, const uint8_t *pkt, uint32_t len)
+{
+    (void)ctx;
+    c_rx++;
+    if (cnet_up)
+        sbnet_rx_ip(&cnet, pkt, len);
+}
+static uint64_t c_now(void *ctx) { (void)ctx; return sb_ms(); }
+static uint32_t c_random(void *ctx)
+{
+    (void)ctx;
+    c_rng ^= (uint32_t)sb_ms() * 2654435761u;
+    c_rng ^= c_rng << 13, c_rng ^= c_rng >> 17, c_rng ^= c_rng << 5;
+    return c_rng;
+}
+static void c_tcp_in(void *ctx, const uint8_t from[4], const uint8_t *seg, uint32_t len)
+{
+    (void)ctx;
+    sbtcp_input(&ctcp, from, seg, len);
+}
+static void c_log(void *ctx, const char *l)
+{
+    (void)ctx;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "cell: ");
+    ub_s(&u, l);
+    sb_log(u.b);
+}
+
+static void cell_net_down(const char *w)
+{
+    if (!cnet_up)
+        return;
+    cnet_up = 0;
+    sbtcp_down(&ctcp);
+    sbnet_stop(&cnet);
+    sbm_modem_ip_rx_cb(0, 0);
+    kt_cancel(KT_MODEM, 6);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "cell: mobile data down (");
+    ub_s(&u, w);
+    ub_s(&u, ")");
+    sb_log(u.b);
+}
+
+static void cell_net_up(void)
+{
+    static const uint8_t host32[4] = { 255, 255, 255, 255 };
+    struct sbnet_os os;
+    memset(&os, 0, sizeof(os));
+    os.tx = c_tx_ip, os.now_ms = c_now, os.random = c_random, os.tcp = c_tcp_in, os.log = c_log;
+    sbnet_init_raw(&cnet, &os);
+    sbnet_static(&cnet, mo.b.pdp.ip, host32, mo.b.pdp.gw, mo.b.pdp.dns1);
+    sbtcp_init(&ctcp, &cnet);
+    sbm_modem_ip_rx_cb(c_rx_ip, 0);
+    cnet_up = 1;
+    kt_set(KT_MODEM, 6, sb_ms(), 20, 1);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "cell: mobile data up (address and DNS not logged), MTU ");
+    ub_dec(&u, mo.b.pdp.mtu);
+    sb_log(u.b);
+}
+
+/* the modem stopped (the switch, Heat, Linux, a power path, a failure): mobile data ends with it */
+static void cell_stopped(const char *w, int failed)
+{
+    cell_net_down(w);
+    if (mo.attended != SBM_ATTENDED_DATA)
+        return;
+    cell_want = 0;
+    cgo(CS_IDLE);
+    if (failed)
+        cset(KCELL_FAILED, w);
+    else if (cst != KCELL_NO_SIM && cst != KCELL_SIM_LOCKED && cst != KCELL_FAILED)
+        cset(KCELL_OFF, sb_streq(w, "Cellular off") ? "Off" : w);
+}
+
+static void cell_begin(void)
+{
+    c_lf = c_esc = 0;
+    cset(KCELL_STARTING, "Starting the modem");
+    cgo(CS_SIM);
+    kt_set(KT_MODEM, 5, sb_ms(), 100, 1);
+}
+
+static int c_registered(const struct sbm_modem_snap *sn)
+{
+    return sn->cs == SBM_REG_HOME || sn->cs == SBM_REG_ROAMING || sn->ps == SBM_REG_HOME || sn->ps == SBM_REG_ROAMING;
+}
+
+static void cell_step(void)
+{
+    struct sbm_modem_snap sn;
+    if (!mo.up)
+        return;                             /* down: poll()'s restart (or a stop) decides */
+    sbm_modem_snapshot(&mo, &sn);
+    switch (cstep) {
+    case CS_SIM:
+        if (sn.sim == SBM_SIM_ABSENT && cin() > 8000) {
+            cset(KCELL_NO_SIM, "No SIM card");
+            cell_want = 0;
+            cgo(CS_IDLE);
+            kmodem_stop("No SIM card");
+        } else if (sn.sim == SBM_SIM_LOCK_SC) {
+            cset(KCELL_SIM_LOCKED, mo.b.cell.sim_key == 2 ? "The SIM is PUK-locked" :
+                 "The SIM's PIN is on (PIN entry is not built yet)");
+            cell_want = 0;
+            cgo(CS_IDLE);
+            kmodem_stop("SIM locked");
+        } else if (sn.sim == SBM_SIM_READY || sn.sim == SBM_SIM_INIT_COMPLETE || sn.sim == SBM_SIM_PB_INIT_COMPLETE) {
+            cset(KCELL_SEARCHING, "Turning the radio on");
+            sbm_modem_radio(&mo, 1);
+            cgo(CS_RADIO);
+        } else if (cin() > 60000) {
+            cset(KCELL_FAILED, "The SIM did not answer");
+            cell_want = 0;
+            cgo(CS_IDLE);
+            kmodem_stop("The SIM did not answer");
+        }
+        break;
+    case CS_RADIO:
+        if (mo.b.radio_res_seen || cin() > 5000) {
+            sbm_modem_attach_apn(&mo, CELL_APN, 0x06, c_lf);
+            cgo(CS_ATTACH);
+        }
+        break;
+    case CS_ATTACH:
+        if (mo.b.ctl_seen || cin() > 10000) {
+            if ((!mo.b.ctl_seen || mo.b.ctl_res != 0x8000) && !c_lf) {
+                c_lf = 1;                   /* the long form once */
+                sbm_modem_attach_apn(&mo, CELL_APN, 0x06, 1);
+                cgo(CS_ATTACH);
+                break;
+            }
+            cset(KCELL_SEARCHING, "Searching for the network");
+            c_t0 = sb_ms();
+            c_esc = 0;
+            cgo(CS_REG);
+        }
+        break;
+    case CS_REG:
+        if (c_registered(&sn)) {
+            cset(KCELL_REGISTERED, sn.cs == SBM_REG_ROAMING || sn.ps == SBM_REG_ROAMING ? "Registered (roaming)"
+                                                                                       : "Registered");
+            sbm_modem_pdp_define(&mo, CELL_APN);
+            cgo(CS_DEFINE);
+        } else if (c_esc == 0 && sb_ms() - c_t0 > 60000) {
+            c_esc = 1;
+            sbm_modem_net_auto(&mo);
+        } else if (c_esc == 1 && sb_ms() - c_t0 > 100000) {
+            c_esc = 2;
+            sbm_modem_ps_attach(&mo);
+        } else if (c_esc == 2 && sb_ms() - c_t0 > 140000) {
+            c_esc = 3;
+            sbm_modem_radio(&mo, 0);         /* as airplane mode on / off, then the attach APN again */
+            cgo(CS_CYCLE_OFF);
+        }
+        break;
+    case CS_CYCLE_OFF:
+        if (cin() > 5000) {
+            sbm_modem_radio(&mo, 1);
+            cgo(CS_CYCLE_ON);
+        }
+        break;
+    case CS_CYCLE_ON:
+        if (cin() > 2000) {
+            c_lf = 0;
+            sbm_modem_attach_apn(&mo, CELL_APN, 0x06, 0);
+            cgo(CS_ATTACH);
+        }
+        break;
+    case CS_DEFINE:
+        if (mo.b.pdp.define_seen || cin() > 10000) {
+            if (!mo.b.pdp.define_seen || mo.b.pdp.define_res != 0x8000) {
+                cset(KCELL_REGISTERED, "The network refused the data context: trying again in 30 s");
+                cgo(CS_RETRY);
+                break;
+            }
+            c_lf = 0;
+            sbm_modem_pdp_activate(&mo, 1, 0);
+            cgo(CS_ACT);
+        }
+        break;
+    case CS_ACT:
+        if (mo.b.pdp.act_seen || cin() > 10000) {
+            if ((!mo.b.pdp.act_seen || mo.b.pdp.act_res != 0x8000) && !c_lf) {
+                c_lf = 1;
+                sbm_modem_pdp_activate(&mo, 1, 1);
+                cgo(CS_ACT);
+                break;
+            }
+            cgo(CS_IP);
+        }
+        break;
+    case CS_IP:
+        if (mo.b.pdp.have_ip && mo.b.pdp.have_status && mo.b.pdp.status == 1) {
+            cell_net_up();
+            cset(KCELL_DATA, "Mobile data on");
+            c_check = 0;
+            cgo(CS_UP);
+        } else if ((mo.b.pdp.have_status && mo.b.pdp.status != 1 && mo.b.pdp.status_notis) || cin() > 30000) {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "No data connection (cause ");
+            ub_dec(&u, mo.b.pdp.cause);
+            ub_s(&u, "): trying again in 30 s");
+            cset(KCELL_REGISTERED, u.b);
+            cgo(CS_RETRY);
+        }
+        break;
+    case CS_UP:
+        /* once per session, as Android's connectivity check: one HTTPS GET over mobile data (the fetch path the
+         * browser uses), its result in the log (steps, status, sizes and times; never the address) and a
+         * notification */
+        if (c_check == 0 && cin() > 1500) {
+            c_check = wifi_fetch("https://example.com/") == 0 ? 1 : 3;
+        } else if (c_check == 1) {
+            struct sbos_wifi_fetch f;
+            wifi_fetch_status(&f);
+            if (f.state == 2) {
+                struct ub u;
+                ub_init(&u);
+                ub_s(&u, "cell: HTTPS check over mobile data: ");
+                ub_s(&u, f.result == 1 && f.status == 200 ? "PASS" : "FAIL");
+                ub_s(&u, ", status ");
+                ub_dec(&u, (uint32_t)(f.status < 0 ? 0 : f.status));
+                ub_s(&u, ", TLS ");
+                ub_dec(&u, f.tls_version);
+                ub_s(&u, ", ");
+                ub_dec(&u, f.bytes);
+                ub_s(&u, " bytes; DNS ");
+                ub_dec(&u, f.dns_ms);
+                ub_s(&u, " ms, connect ");
+                ub_dec(&u, f.connect_ms);
+                ub_s(&u, " ms, TLS ");
+                ub_dec(&u, f.tls_ms);
+                ub_s(&u, " ms, total ");
+                ub_dec(&u, f.total_ms);
+                ub_s(&u, " ms (");
+                ub_s(&u, f.why);
+                ub_s(&u, ")");
+                sb_log(u.b);
+                notif_post("modem", "Mobile data", f.result == 1 && f.status == 200 ? "The Internet works over LTE (HTTPS)"
+                                                                                  : "Connected, but the HTTPS check failed");
+                c_check = 2;
+            }
+        }
+        if (!c_registered(&sn) || (mo.b.pdp.have_status && mo.b.pdp.status != 1)) {
+            cell_net_down(c_registered(&sn) ? "the data context ended" : "the registration was lost");
+            mo.b.pdp.have_ip = 0;
+            mo.b.pdp.have_status = 0;
+            cset(KCELL_SEARCHING, "Reconnecting");
+            c_t0 = sb_ms();
+            c_esc = 3;                       /* no escalation on a reconnect: the CP tries by itself */
+            cgo(CS_REG);
+        }
+        break;
+    case CS_RETRY:
+        if (cin() > 30000) {
+            if (c_registered(&sn)) {
+                sbm_modem_pdp_define(&mo, CELL_APN);
+                cgo(CS_DEFINE);
+            } else {
+                c_t0 = sb_ms();
+                cgo(CS_REG);
+            }
+        }
+        break;
+    case CS_DEACT:
+        if (mo.b.pdp.act_seen || cin() > 5000) {
+            sbm_modem_radio(&mo, 0);         /* low power: the CP detaches, then RF off */
+            cgo(CS_DETACH);
+        }
+        break;
+    case CS_DETACH:
+        if ((mo.b.radio_res_seen && !c_registered(&sn)) || cin() > 5000) {
+            cgo(CS_IDLE);
+            kmodem_stop("Cellular off");
+            cset(KCELL_OFF, "Off");
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+int kmodem_cellular(int on)
+{
+    if (!on) {
+        cell_want = 0;
+        if (!kmodem_on() || mo.attended != SBM_ATTENDED_DATA) {
+            cset(KCELL_OFF, "Off");
+            return 0;
+        }
+        cell_net_down("Cellular off");
+        if (mo.up && cstep != CS_IDLE && cstep != CS_SIM) {
+            cset(KCELL_STOPPING, "Turning off: data off, detaching");
+            sbm_modem_pdp_activate(&mo, 0, 0);
+            cgo(CS_DEACT);
+            kt_set(KT_MODEM, 5, sb_ms(), 100, 1);
+        } else {
+            cgo(CS_IDLE);
+            kmodem_stop("Cellular off");
+            cset(KCELL_OFF, "Off");
+        }
+        return 0;
+    }
+    if (cell_want && kmodem_on())
+        return 0;
+    if (sbos_selftest_enabled)
+        return SBOS_EAGAIN;
+    if (heater_running_ui() || guest_busy()) {
+        cset(KCELL_FAILED, "Stop Heat and Linux first");
+        return SBOS_EAGAIN;
+    }
+    if (kmodem_on())
+        kmodem_stop("Cellular on");         /* a receive-only session: restarted for data */
+    cell_want = 1;
+    mo.attended = SBM_ATTENDED_DATA;        /* the user's switch: the only place this kernel sets it */
+    cset(KCELL_STARTING, "Starting the modem");
+    ++starts;
+    sb_storage_hold("the modem runs: no storage writes");
+    set_state(SBOS_MODEM_STARTING, "");
+    kt_set(KT_MODEM, 1, sb_ms(), 50, 0);
+    return 0;
+}
+
+int kmodem_netif(struct sbnet **net, struct sbtcp **tcp)
+{
+    if (!cnet_up || cst != KCELL_DATA)
+        return 0;
+    if (net)
+        *net = &cnet;
+    if (tcp)
+        *tcp = &ctcp;
+    return 1;
+}
+
+void kmodem_cell(struct kcell *c)
+{
+    struct sbm_modem_snap sn;
+    memset(c, 0, sizeof(*c));
+    c->state = cst;
+    c->want = cell_want;
+    c->bars = -1;
+    sb_strcpy(c->why, sizeof(c->why), c_why);
+    c->tx_packets = c_tx;
+    c->rx_packets = c_rx;
+    if (!kmodem_on() || mo.attended != SBM_ATTENDED_DATA || !mo.up)
+        return;
+    sbm_modem_snapshot(&mo, &sn);
+    c->bars = sn.bars == 0xFF ? -1 : sn.bars;
+    c->rssi_dbm = sn.rssi_dbm;
+    c->roaming = sn.cs == SBM_REG_ROAMING || sn.ps == SBM_REG_ROAMING;
+    if (sn.rat)
+        sb_strcpy(c->rat, sizeof(c->rat), sbm_act_name(sn.rat));
+    if (sn.have_plmn && c_registered(&sn)) {
+        const char *n = sbm_operator_name(sn.plmn);
+        if (n)
+            sb_strcpy(c->oper, sizeof(c->oper), n);
+        else {
+            char code[8];
+            unsigned k = 0;
+            for (unsigned i = 0; sn.plmn[i] && k < 7; ++i)
+                if (sn.plmn[i] >= '0' && sn.plmn[i] <= '9')
+                    code[k++] = sn.plmn[i];
+            code[k] = 0;
+            sb_strcpy(c->oper, sizeof(c->oper), code);   /* the screen only */
+        }
+    }
+}
+#else
+int kmodem_cellular(int on) { (void)on; return SBOS_EAGAIN; }
+int kmodem_netif(struct sbnet **net, struct sbtcp **tcp) { (void)net; (void)tcp; return 0; }
+void kmodem_cell(struct kcell *c) { memset(c, 0, sizeof(*c)); c->bars = -1; }
 #endif
 
 void kmodem_timer(unsigned id)
@@ -367,6 +819,16 @@ void kmodem_timer(unsigned id)
     case 4:
         if (st == SBOS_MODEM_STARTING && !mo.up)
             recover();
+        break;
+    case 5:
+        cell_step();
+        break;
+    case 6:
+        if (cnet_up) {
+            sbnet_tick(&cnet);
+            sbtcp_tick(&ctcp);
+            wifi_fetch_poll_cell();
+        }
         break;
 #endif
     default:

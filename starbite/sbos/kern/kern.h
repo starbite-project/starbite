@@ -588,7 +588,44 @@ extern int wifi_autojoin;              /* 1.2-alpha21: join a known network auto
 int wifi_known(struct sbos_wifi_known *out, int max);
 int wifi_forget(int k);
 int wifi_selftest_phase(int *done);
+extern int wifi_selftest_scan_only;          /* Next: the Wi-Fi self test scans only (and runs the TLS self-check) */
+/* Next (wifi-sbos-next): one HTTP(S) GET at a time over the joined network (starbite/wifi/http.h). wifi_fetch:
+ * 0 started, SBOS_EAGAIN not joined (or no memory), SBOS_EBUSY one is running. The status says how it went; the
+ * body (up to 64 KiB) stays until the next fetch. Never logged: the URL, the host, the body. */
+struct sbos_wifi_fetch {
+    int32_t state;                          /* 0 none yet, 1 running, 2 finished */
+    int32_t result;                         /* SBHTTP_DONE (1) or an SBHTTP_E_* (< 0) */
+    int32_t status, tls_err, tls, secs;     /* the HTTP status; BearSSL's error; 1 https; seconds so far */
+    uint32_t tls_version, tls_suite, bytes, kept;
+    uint32_t dns_ms, connect_ms, tls_ms, first_byte_ms, total_ms;
+    char host[64];                          /* for the screen */
+    char why[64];                           /* the result in words */
+};
+int wifi_fetch(const char *url);
+void wifi_fetch_status(struct sbos_wifi_fetch *f);
+const uint8_t *wifi_fetch_body(uint32_t *len);
+void wifi_fetch_cancel(void);
+int wifi_tls_selfcheck(void);               /* 0 passed, else the failed check's number (logged) */
 /* 1.2-alpha21: the modem, receive only (modem.c) */
+/* mobile data (kern/modem.c, Next): the user's Settings > Cellular switch is the only way the radio transmits.
+ * kmodem_cellular(1) starts the modem (SIM, radio on, the LTE attach APN, registration, the PDP context, a raw-IP
+ * interface); 0 deactivates, detaches and parks it. kmodem_netif gives the interface while data is up. */
+enum { KCELL_OFF = 0, KCELL_STARTING, KCELL_NO_SIM, KCELL_SIM_LOCKED, KCELL_SEARCHING, KCELL_REGISTERED,
+       KCELL_DATA, KCELL_STOPPING, KCELL_FAILED };
+struct kcell {
+    int32_t state, want;                    /* KCELL_*; want: the switch */
+    int32_t bars, rssi_dbm, roaming;        /* bars -1 unknown */
+    char rat[8];                            /* "LTE", "UMTS", "GSM", "" */
+    char oper[24];                          /* the operator's name: SCREEN ONLY, never logged */
+    char why[64];                           /* the last failure or step, in words */
+    uint32_t tx_packets, rx_packets;
+};
+int kmodem_cellular(int on);
+void kmodem_cell(struct kcell *c);
+struct sbnet;
+struct sbtcp;
+int kmodem_netif(struct sbnet **net, struct sbtcp **tcp);   /* 1 = up (pointers filled when not NULL) */
+void wifi_fetch_poll_cell(void);
 int kmodem_on(void);
 int kmodem_power(int on);              /* 1: the confirmation (the start only on its hold); 0: stop */
 void kmodem_stop(const char *why);     /* park now (no-op when off) */

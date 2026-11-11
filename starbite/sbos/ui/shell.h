@@ -31,8 +31,13 @@ void sh_carrier(const char *text);
  * 7.7, struct sbm_modem_snap): state, SIM status (0x80 absent, -1 not known), emergency-only, RAT (1 GSM .. 7 LTE,
  * 0 unknown), bars 0..5 (-1 unknown). Never the PLMN or a cell id: nothing here is logged. Redraws only on a change. */
 enum { SH_CELL_OFF, SH_CELL_ON, SH_CELL_RESTARTING, SH_CELL_GUARD, SH_CELL_FAILED, SH_CELL_STARTING };
-typedef struct { int state, sim, emergency_only, rat, bars; } sh_cell_t;
+/* mobile data (Settings > Mobile Data / the Control Centre's cellular circle: the user's switch, off at every boot):
+ * data = SH_DATA_* (the kernel's KCELL_* order), oper the operator's name (screen only) */
+enum { SH_DATA_OFF, SH_DATA_STARTING, SH_DATA_NO_SIM, SH_DATA_LOCKED, SH_DATA_SEARCHING, SH_DATA_REGISTERED,
+       SH_DATA_UP, SH_DATA_STOPPING, SH_DATA_FAILED };
+typedef struct { int state, sim, emergency_only, rat, bars, data; char oper[24]; } sh_cell_t;
 void sh_cell(const sh_cell_t *c);
+int sh_cellular(int on);                /* the switch: 1 on (radio, registration, data), 0 off (detach, park) */
 /* the platform's modem power (the kernel: kmodem_power: 1 asks for its hold confirmation, 0 stops); < 0 refused */
 int sh_modem(int on);
 /* a hold confirmation drawn by the shell (the kernel's kui_confirm): the answer goes to the platform's
@@ -57,6 +62,28 @@ int sh_next_update(float t_ms);
 int sh_refresh(float t_ms);
 void sh_vibrate(void);
 void sh_year(int y);
-void sh_haptic(void);                     /* P3h: a key's light tap (the vibration motor, ~10 ms) */                      /* P3c: the year (the Calendar's month) */      /* the next alarm for the lock's widget (on 0: "No alarm") */
+void sh_haptic(void);                     /* P3h: a key's light tap (the vibration motor, ~10 ms) */
+/* wifi-sbos-next: Wi-Fi for Settings > Wi-Fi, the status bar and the Control Centre. The platform pushes its state
+ * with sh_wifi (only on a change); the shell asks with sh_wifi_power / _scan / _join / _fetch (< 0 refused). The
+ * passphrase goes straight to the kernel's join (kept in RAM until a restart, never stored or logged); names and
+ * addresses are shown, never logged. */
+enum { SH_WIFI_OFF, SH_WIFI_STARTING, SH_WIFI_UP, SH_WIFI_SCANNING, SH_WIFI_JOINING, SH_WIFI_DHCP, SH_WIFI_CONNECTED,
+       SH_WIFI_FAILED };
+#define SH_WIFI_NETS 12
+typedef struct { char ssid[33]; int rssi, secure, saved, band5; } sh_wifi_net_t;
+typedef struct {
+    int state, nnets, rssi, clock_checked;
+    char ssid[33], why[64], ip[16];
+    sh_wifi_net_t nets[SH_WIFI_NETS];
+    /* the last Internet test (sh_wifi_fetch): 0 none, 1 running, 2 finished; its result in words */
+    int fetch_state, fetch_ok, fetch_status;
+    unsigned fetch_bytes, fetch_ms, fetch_tls_ms;
+    char fetch_host[48], fetch_why[64];
+} sh_wifi_t;
+void sh_wifi(const sh_wifi_t *w);
+int sh_wifi_power(int on);
+int sh_wifi_scan(void);
+int sh_wifi_join(const char *ssid, const char *pass);   /* pass: NULL or "" for open or known networks */
+int sh_wifi_fetch(const char *url);                      /* P3c: the year (the Calendar's month) */      /* the next alarm for the lock's widget (on 0: "No alarm") */
 
 #endif

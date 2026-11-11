@@ -180,10 +180,26 @@ static int has(const char *s, const char *w)
 }
 static int cell_now(void)
 {
-    static sh_cell_t last = { -1, 0, 0, 0, 0 };
+    static sh_cell_t last = { -1, 0, 0, 0, 0, 0, "" };
     struct sbos_phone ph;
     kmodem_status(&ph);
-    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars };
+    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars, 0, "" };
+    struct kcell kc;
+    kmodem_cell(&kc);
+    c.data = kc.state;                      /* KCELL_* = SH_DATA_* */
+    sb_strcpy(c.oper, sizeof(c.oper), kc.oper);
+    if (kc.want || kc.state != KCELL_OFF) {
+        c.state = kc.state == KCELL_STARTING || kc.state == KCELL_STOPPING ? SH_CELL_STARTING :
+                  kc.state == KCELL_SEARCHING || kc.state == KCELL_REGISTERED || kc.state == KCELL_DATA ? SH_CELL_ON :
+                  kc.state == KCELL_OFF ? SH_CELL_OFF : SH_CELL_FAILED;
+        c.bars = kc.bars;
+        c.rat = has(kc.rat, "LTE") ? 7 : has(kc.rat, "UMTS") ? 4 : has(kc.rat, "EDGE") ? 3 : has(kc.rat, "GPRS") ? 2 :
+                has(kc.rat, "GSM") ? 1 : 0;
+        sh_cell(&c);
+        int ch = memcmp(&c, &last, sizeof(c)) != 0;
+        last = c;
+        return ch;
+    }
     if (ph.state == SBOS_MODEM_ON) c.state = SH_CELL_ON;
     else if (ph.state == SBOS_MODEM_FAILED) c.state = SH_CELL_FAILED;
     else if (ph.state == SBOS_MODEM_PARKED) c.state = SH_CELL_GUARD;
@@ -192,13 +208,89 @@ static int cell_now(void)
     c.rat = has(ph.cs, "LTE") ? 7 : has(ph.cs, "UMTS") ? 4 : has(ph.cs, "EDGE") ? 3 : has(ph.cs, "GPRS") ? 2 : has(ph.cs, "GSM") ? 1 : 0;
     sh_cell(&c);
     int changed = c.state != last.state || c.sim != last.sim || c.emergency_only != last.emergency_only ||
-                  c.rat != last.rat || c.bars != last.bars;
+                  c.rat != last.rat || c.bars != last.bars || c.data != last.data;
     last = c;
     return changed;
 }
+/* wifi-sbos-next: Wi-Fi's state for Settings > Wi-Fi, the status bar and the Control Centre: the kernel's status, its
+ * scan list and the last Internet test, pushed to the shell when anything in it changed (names and addresses go to
+ * the screen only, never to the log) */
+static void ip_text(char *b, const uint8_t ip[4])
+{
+    int n = 0;
+    for (int i = 0; i < 4; i++) {
+        unsigned v = ip[i];
+        if (v >= 100) b[n++] = (char)('0' + v / 100);
+        if (v >= 10) b[n++] = (char)('0' + v / 10 % 10);
+        b[n++] = (char)('0' + v % 10);
+        if (i < 3) b[n++] = '.';
+    }
+    b[n] = 0;
+}
+static int wifi_now(void)
+{
+    static sh_wifi_t last;
+    static int pushed;
+    static sh_wifi_t w;
+    struct sbos_wifi s;
+    struct sbos_wifi_net nets[SBOS_WIFI_NETS];
+    struct sbos_wifi_fetch f;
+    memset(&w, 0, sizeof(w));
+    wifi_status(&s);
+    w.state = s.state;
+    w.rssi = s.rssi;
+    w.clock_checked = s.clock_checked;
+    memcpy(w.ssid, s.ssid, s.ssid_len < 32 ? s.ssid_len : 32);
+    sb_strcpy(w.why, sizeof(w.why), s.why);
+    if (s.state == SBOS_WIFI_CONNECTED) ip_text(w.ip, s.ip);
+    int n = wifi_list(nets, SBOS_WIFI_NETS);
+    w.nnets = n < SH_WIFI_NETS ? n : SH_WIFI_NETS;
+    for (int i = 0; i < w.nnets; i++) {
+        memcpy(w.nets[i].ssid, nets[i].ssid, nets[i].ssid_len < 32 ? nets[i].ssid_len : 32);
+        w.nets[i].rssi = nets[i].rssi;
+        w.nets[i].secure = nets[i].secure;
+        w.nets[i].saved = nets[i].saved;
+        w.nets[i].band5 = nets[i].band5;
+    }
+    wifi_fetch_status(&f);
+    w.fetch_state = f.state;
+    w.fetch_ok = f.state == 2 && f.result == 1 && f.status >= 200 && f.status < 400;
+    w.fetch_status = f.status;
+    w.fetch_bytes = f.bytes;
+    w.fetch_ms = f.total_ms;
+    w.fetch_tls_ms = f.tls_ms;
+    sb_strcpy(w.fetch_host, sizeof(w.fetch_host), f.host);
+    if (f.state == 2 && f.result == 1 && !w.fetch_ok)
+        sb_strcpy(w.fetch_why, sizeof(w.fetch_why), "the server answered with an error status");
+    else if (f.state == 2 && f.result == 1)
+        sb_strcpy(w.fetch_why, sizeof(w.fetch_why), f.tls ? "HTTPS through the phone's own TCP and TLS" : "HTTP");
+    else
+        sb_strcpy(w.fetch_why, sizeof(w.fetch_why), f.why);
+    if (pushed && !memcmp(&w, &last, sizeof(w)))
+        return 0;
+    last = w;
+    pushed = 1;
+    sh_wifi(&w);
+    return 1;
+}
+int sh_wifi_power(int on) { return wifi_power(on); }
+int sh_wifi_scan(void) { return wifi_scan(); }
+int sh_wifi_join(const char *ssid, const char *pass)
+{
+    struct sbos_wifi_net nets[SBOS_WIFI_NETS];
+    int n = wifi_list(nets, SBOS_WIFI_NETS);
+    unsigned len = (unsigned)sb_strlen(ssid);
+    for (int i = 0; i < n; i++)
+        if (nets[i].ssid_len == len && !memcmp(nets[i].ssid, ssid, len))
+            return wifi_join(i, pass && pass[0] ? pass : 0);
+    return SBOS_EINVAL;                              /* not in the list any more (a new scan) */
+}
+int sh_wifi_fetch(const char *url) { return wifi_fetch(url); }
+
 /* the modem's Start / Stop from the new UI: the kernel's own path (its hold confirmation, its refusals: never in
  * a self-test image, not while Heat or Linux runs) */
 int sh_modem(int on) { return kmodem_power(on); }
+int sh_cellular(int on) { return kmodem_cellular(on); }
 static void (*cf_done)(int);
 static int next_confirm(const char *t, const char *l1, const char *l2, const char *l3, const char *hold, void (*done)(int))
 {
@@ -222,12 +314,13 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
-    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3k");     /* P2y: the apps' live values */
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3l");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);
         sh_alarm(on, ah, am);
     }
     cell_now();
+    wifi_now();                                      /* wifi-sbos-next */
 }
 
 /* ---- tear-free frames (P2r): two scanout buffers and DECON flips ------------------------------------------
@@ -721,6 +814,14 @@ void next_kdraw(void)
             present();
             sh_idle();
         }
+    }
+    /* wifi-sbos-next: Wi-Fi's state ten times a second (a copy of about 2 KB; this runs every loop turn); a change
+     * is drawn at once */
+    static uint64_t wifi_t;
+    if (ready && sb_ms() - wifi_t >= 100 && (wifi_t = sb_ms(), wifi_now()) && !ticking) {
+        tk_comp_frame(&comp, 0, 0);
+        present();
+        sh_idle();
     }
 }
 
