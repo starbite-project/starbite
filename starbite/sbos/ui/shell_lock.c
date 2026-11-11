@@ -116,7 +116,7 @@ typedef struct {
 } hold_t;
 static hold_t Q[2];
 typedef struct {
-    tk_layer closed, open, face, head, chev, members, rows[3];
+    tk_layer gh, closed, open, face, head, chev, members, rows[3];   /* gh: the stack's lower cards (P3i) */
     tk_bmp chev0;               /* the chevron unrotated */
     float y;                    /* top in content pt (scroll 0) */
     float chx;                  /* the chevron's x */
@@ -383,18 +383,32 @@ static void hold_ring(hold_t *q, int i, float p)
 #define LIST_TOP 310.0f
 #define LIST_H 374.0f           /* .nwrap: top 310, bottom 118 */
 static int stack(int g) { return G[g].n > 1; }
+/* P3i: a stack's lower cards peek 8 and 15 pt below the top one (iOS's collapsed notification stack), then the
+ * list's 10 pt gap */
+#define PEEK1 8.0f
+#define PEEK2 15.0f
+/* the gap under a card: room for its stack's peek, which closes as the card opens (the lower cards are gone) */
+static float stack_gap(int g);
+#define STACK_GAP(g) stack_gap(g)
+static void ellipsize(char *out, int cap, int f, float size, const char *s, float maxw);
+static float stack_gap(int g)
+{
+    if (!stack(g)) return 10;
+    float q = K[g].full > 0 ? tk_clampf(K[g].memh / K[g].full, 0, 1) : 0;
+    return 10 + PEEK2 * (1 - q);
+}
 static void layout_list(void)
 {
     float y = 10;
     for (int g = 0; g < NG; g++) {
         K[g].y = y;
-        y += 68 + K[g].memh + (stack(g) ? 22 : 10);
+        y += 68 + K[g].memh + STACK_GAP(g);
     }
 }
 static float content_h(void)
 {
     float y = 10;
-    for (int g = 0; g < NG; g++) y += 68 + K[g].memh + (stack(g) ? 22 : 10);
+    for (int g = 0; g < NG; g++) y += 68 + K[g].memh + STACK_GAP(g);
     /* the last margin (22) collapses with the tools' 12; then their 32, margin 4, padding 14 */
     return y + 32 + 4 + 14;
 }
@@ -422,31 +436,53 @@ static void head_content(dc *d, int g, float top)
     if (gr->n > 1) { em[11] = 's'; em[12] = 0; }
     float sb = base_of(TK_IT400, 13.5f, top + 38.55f, 0);
     d_rrect(d, 83, sb - 7, 6, 6, 3, tk_hex(0x4cd964, 1));
-    d_text(d, TK_IT400, 13.5f, 95, sb, names, 0, 0, W(.82f), 0);
-    d_text(d, TK_IT400, 13.5f, 95 + tw(TK_IT400, 13.5f, names, 0, 0), sb, em, 0, 0, W(.48f), 0);
-    /* the grid's 1fr column grows to the nowrap line's width (min-content), pushing the chevron */
-    float col = tk_maxf(249, tk_maxf(tw(TK_IT800, 21, gr->name, -.5f, 0),
-                                     12 + tw(TK_IT400, 13.5f, names, 0, 0) + tw(TK_IT400, 13.5f, em, 0, 0)));
-    K[g].chx = 83 + col + 12;
+    /* P3i: the chevron at one place on every card (iOS: a row's chevron never moves); the names give way with an
+     * ellipsis so the count stays whole */
+    K[g].chx = 344;
+    char fit[160];
+    ellipsize(fit, sizeof fit, TK_IT400, 13.5f, names, K[g].chx - 12 - 95 - tw(TK_IT400, 13.5f, em, 0, 0));
+    int fl = tk_strlen(fit);
+    if (tk_strcmp(fit, names)) {
+        /* cut at a whole name, not mid-word ("iOS 16, macOS Venturaâ¦") */
+        float mw = K[g].chx - 12 - 95 - tw(TK_IT400, 13.5f, em, 0, 0);
+        for (int c = n - 1; c > 0; c--) {
+            if (names[c] != ',') continue;
+            tk_memcpy(fit, names, (size_t)c);
+            fit[c] = (char)0xe2; fit[c + 1] = (char)0x80; fit[c + 2] = (char)0xa6; fit[c + 3] = 0;
+            if (tw(TK_IT400, 13.5f, fit, 0, 0) + tw(TK_IT400, 13.5f, " ", 0, 0) <= mw) break;
+        }
+        fl = tk_strlen(fit);
+    }
+    if (fl && fit[fl - 1] != ' ' && fl < 158) { fit[fl] = ' '; fit[fl + 1] = 0; }
+    d_text(d, TK_IT400, 13.5f, 95, sb, fit, 0, 0, W(.82f), 0);
+    d_text(d, TK_IT400, 13.5f, 95 + tw(TK_IT400, 13.5f, fit, 0, 0), sb, em, 0, 0, W(.48f), 0);
 }
-static void ghost(tk_bmp *G0, float ox, float oy, float x, float y, float w, float op)
+/* P3i: a lower card of the stack, iOS-style: the whole card's shape (narrower, its radius scaled with it) baked in
+ * its own bitmap and faded as one; what the cards above it cover is taken out afterwards (erase_rrect) */
+static void ghost(tk_bmp *G0, float ox, float oy, float x, float y, float w, float h, float r, float op)
 {
-    /* an .lg ghost: radius 0 0 22 22, its own backdrop the list content under it, then faded as one (worked in
-     * a box around it with room for its shadow) */
-    int X = tk_maxi(0, (int)tk_floorf(PT(x - 56) - ox)), Y = tk_maxi(0, (int)tk_floorf(PT(y - 56) - oy));
-    int W = tk_mini(G0->w - X, (int)PT(w + 112)), H = tk_mini(G0->h - Y, (int)PT(26 + 112));
-    tk_bmp t, g;
-    tk_bmp_new(&t, W, H);
-    tk_bmp_new(&g, W, H);
-    tk_bmp_copy(&g, 0, 0, G0, X, Y, W, H);
-    tk_corner = (tk_r4){ 0, 0, PT(22), PT(22) };
-    tk_use_r4 = 1;
-    tk_glass_local(&t, &g, PT(x) - ox - X, PT(y) - oy - Y, PT(w), PT(26), PT(22));
-    tk_glass_bake(&t, 0, PT(x) - ox - X, PT(y) - oy - Y, PT(w), PT(26), PT(22), 0, 1);
-    tk_use_r4 = 0;
-    tk_blit(G0, &t, X, Y, op);
+    tk_bmp t;
+    if (!tk_bmp_new(&t, G0->w, G0->h)) return;
+    tk_glass_bake(&t, 0, PT(x) - ox, PT(y) - oy, PT(w), PT(h), PT(r), 0, 0);   /* the card above casts the shadow */
+    tk_blit(G0, &t, 0, 0, op);
     tk_bmp_free(&t);
-    tk_bmp_free(&g);
+}
+/* nothing of b inside the rounded box (a card above covers it: none of it may show through that card's glass) */
+static void erase_rrect(tk_bmp *b, float ox, float oy, float x, float y, float w, float h, float r)
+{
+    tk_fm m;
+    if (!tk_fm_new(&m, b->w, b->h)) return;
+    tk_fm_rrect(&m, 0, 0, PT(x) - ox, PT(y) - oy, PT(w), PT(h), PT(r));
+    for (int j = 0; j < b->h; j++)
+        for (int i = 0; i < b->w; i++) {
+            float c = m.v[j * b->w + i];
+            if (c <= 0) continue;
+            uint32_t *p = &b->px[j * b->stride + i], o = *p, res = 0;
+            unsigned k = (unsigned)((1 - c) * 256 + .5f);
+            for (int sh = 0; sh < 32; sh += 8) res |= ((o >> sh & 255) * k >> 8) << sh;
+            *p = res;
+        }
+    tk_fm_free(&m);
 }
 static void build_card(int g)
 {
@@ -454,13 +490,23 @@ static void build_card(int g)
     const grp_t *gr = &G[g];
     float top = LIST_TOP + k->y;            /* rest screen pt at scroll 0 */
     k->full = 60.0f * gr->n;
-    /* closed: the ghosts (painted before every card), the card's own glass over them, its head */
-    dc d = mk(&k->closed, "card", 14, top, 362, 76, 44, 0);
+    /* P3i: the stack's lower cards in their own layer under the card (they slide down and fade as it opens):
+     * the second 10 pt in at each side, the third 20, peeking PEEK1 / PEEK2 below; each covers the one under it
+     * and the top card covers both, so nothing shows through (the user: "they should be under it like peek
+     * below") */
+    tk_layer_init(&k->gh, "stack");
+    k->gh.hidden = 1;
     if (stack(g)) {
-        ghost(d.b, d.ox, d.oy, 33, top + 56, 324, .4f);
-        ghost(d.b, d.ox, d.oy, 23, top + 50, 344, .7f);
+        /* only the band that can show: from where the top card's corners begin to the lowest card's edge */
+        dc e = mk(&k->gh, "stack", 24, top + 68 - 26, 342, 26 + PEEK2, 2, 0);
+        float b1 = top + 68 + PEEK1, b2 = top + 68 + PEEK2;
+        ghost(e.b, e.ox, e.oy, 34, b2 - 68 * .94f, 322, 68 * .94f, 26 * .89f, .55f);
+        erase_rrect(e.b, e.ox, e.oy, 24, b1 - 68 * .97f, 342, 68 * .97f, 26 * .945f);
+        ghost(e.b, e.ox, e.oy, 24, b1 - 68 * .97f, 342, 68 * .97f, 26 * .945f, .8f);
+        erase_rrect(e.b, e.ox, e.oy, 14, top, 362, 68, 26);
+        k->gh.hidden = 0;
     }
-    tk_glass_local(d.b, d.b, PT(14) - d.ox, PT(top) - d.oy, PT(362), PT(68), PT(26));
+    dc d = mk(&k->closed, "card", 14, top, 362, 76, 44, 0);
     d_glass(&d, 14, top, 362, 68, 26, 0, 1);
     head_content(&d, g, top);
     /* open: made when the card opens, freed when it has closed (build_open / free_open) */
@@ -582,6 +628,8 @@ static void free_vendor_cards(void)
     for (int g = 0; g < NG; g++) {
         free_open(g);
         relayer(&K[g].closed);
+        relayer(&K[g].gh);
+        K[g].gh.hidden = 1;
         relayer(&K[g].chev);
         tk_bmp_free(&K[g].chev0);
     }
@@ -611,6 +659,13 @@ static void place_list(void)
         k->closed.hidden = anim;
         k->open.hidden = !anim;
         k->closed.y = k->closed.by + dy;
+        if (k->gh.bmp.px) {
+            /* the lower cards ride the face's bottom edge down and fade as the rows come in */
+            float q = k->full > 0 ? tk_clampf(k->memh / k->full, 0, 1) : 0;
+            k->gh.y = k->gh.by + dy + PT(k->memh);
+            k->gh.alpha = tk_clampf(1 - q * 1.8f, 0, 1);
+            k->gh.hidden = k->gh.alpha <= 0;
+        }
         k->face.y = k->face.by + dy;
         k->head.y = k->head.by + dy;
         k->chev.y = k->chev.by + dy;
@@ -626,12 +681,12 @@ static void place_list(void)
             r->alpha = a;
             r->y = r->by + dy + PT(ty);
         }
-        y += h + (stack(g) ? 22 : 10);
+        y += h + STACK_GAP(g);
     }
     float edy = PT(y - 448);
     etool.y = etool.by + edy;
     for (int g = 0; g < NG; g++) {
-        if (EMG) K[g].closed.hidden = K[g].open.hidden = 1;
+        if (EMG) K[g].closed.hidden = K[g].open.hidden = K[g].gh.hidden = 1;
         K[g].chev.hidden = EMG;
     }
     etool.hidden = EMG;
@@ -2752,9 +2807,9 @@ static void relink(void)
     link(&appc, st, NST);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
     link(&lockg, lk, 11);
-    tk_layer *ls[3 * NG + 6];
+    tk_layer *ls[4 * NG + 6];
     int n = 0;
-    for (int g = 0; g < NG; g++) { ls[n++] = &K[g].closed; ls[n++] = &K[g].open; ls[n++] = &K[g].chev; }
+    for (int g = 0; g < NG; g++) { ls[n++] = &K[g].gh; ls[n++] = &K[g].closed; ls[n++] = &K[g].open; ls[n++] = &K[g].chev; }
     ls[n++] = &etool;
     for (int i = 0; i < 5; i++) ls[n++] = &ecard[i];
     link(&list, ls, n);
@@ -3009,7 +3064,7 @@ static int hit_head(float x, float y)
     float cy = y - LIST_TOP + scroll;
     for (int g = 0; g < NG; g++) {
         float top = 10, yy = 10;
-        for (int h = 0; h < g; h++) yy += 68 + K[h].memh + (stack(h) ? 22 : 10);
+        for (int h = 0; h < g; h++) yy += 68 + K[h].memh + STACK_GAP(h);
         top = yy;
         if (cy >= top && cy < top + 68 && x >= 14 && x < 376) return g;
     }
@@ -3025,7 +3080,7 @@ static int hit_row(float x, float y, int *gi)
                 float rt = yy + 68 + 60 * i;
                 if (cy >= rt && cy < rt + 56 && cy < yy + 68 + K[g].memh) { *gi = g; return i; }
             }
-        yy += 68 + K[g].memh + (stack(g) ? 22 : 10);
+        yy += 68 + K[g].memh + STACK_GAP(g);
     }
     return -1;
 }
@@ -3631,6 +3686,7 @@ void sh_idle(void)
     tk_layer_prepare(&homebar);
     for (int g = 0; g < NG; g++) {
         tk_layer_prepare(&K[g].closed);
+        if (K[g].gh.bmp.px) tk_layer_prepare(&K[g].gh);
         tk_layer_prepare(&K[g].chev);
         if (K[g].face.bmp.px) {
             tk_layer_prepare(&K[g].face);
