@@ -688,4 +688,17 @@ the notes folder `win-m3-clean-sbxta-request.md`. Not yet run on the phone.
 
 T2b (main session, x86t2b-1): XtaCache Start=4 with the A55 cache folder left in place also passes (sbcpu arm64/x64/
 x86/x64fresh exit 0, SysWOW64 cmd, Steam client + steamwebhelper ran 150 s with a window, no Steam crash events).
-The service switch alone is enough: sbxta with SwapCache 0 (default). Two-boot sbxta test pending.
+The service switch alone is enough: sbxta with SwapCache 0 (default).
+
+## 35. sbxta-run1 passed: x86/x64 fixed on the big-core row
+
+Main session, `build/woa/cores/sbxta-run1/` (log `sbxta-run1.log`), sbxta-1 installed with Start 1:
+- A55 boot (win11): State Boots 1, Midr 0x410FD051, Cpu A55, XtaCache Start 2 -> 2, status 0. sbcpu arm64/x64/x86/
+  x64fresh exit 0, SysWOW64 cmd 7, 0 application errors.
+- M3 boot (win11-big): Boots 2, Midr 0x531F0020, Cpu M3, Start 2 -> 4, status 0, Result `sbxta 42056cc: M3 MIDR
+  531F0020, XtaCache Start 2 -> 4 (0x00000000), swap: off`. All four sbcpu exit 0, cmd 7; only the 10 known winsqlite3
+  events.
+
+sbxta stays installed (pre-install SYSTEM backup `backup/*-pre-sbxta`). This is the x86/x64 fix for the big-core row;
+docs/WIN11-M3-X86.md section 5 has the summary. The 4 -> 2 restore on the next A55 boot is checked by the main session
+after its T38 cycles. Still open on the big-core row: the winsqlite3 services (section 25) and the 4th M3.
