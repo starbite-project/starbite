@@ -166,6 +166,90 @@ int sh_card_read(const char *path, uint64_t off, void *dst, uint32_t len)
 static int screen_off;
 void sh_slept(void) { screen_off = 1; fprintf(stderr, "sleep: the screen would go off now\n"); }
 
+/* survival-next: Emergency mode's tools on guide/survival_host.c's simulated state (its clock: surv_host_now_ms, set
+ * every film frame); SOS here: the kernel's 3 s countdown, then the beacon (services.c's colours, 250 ms phases) */
+#include "../../kern/survival.h"
+#include "../../guide/sbguide.h"
+extern uint64_t surv_host_now_ms;
+static int hsos;
+static uint64_t hsos_t0;
+int sh_sos_set(int on)
+{
+    fprintf(stderr, "sos: %s\n", on ? "on (pretend: the countdown, then the beacon)" : "off");
+    if (!!on != hsos) hsos_t0 = surv_host_now_ms;
+    hsos = !!on;
+    return 0;
+}
+int sh_sos_frame(uint32_t *argb)
+{
+    if (!hsos) return 0;
+    uint64_t e = surv_host_now_ms - hsos_t0;
+    if (e < 3000) { *argb = 0xff1c0606U; return 1; }
+    e -= 3000;
+    unsigned b = surv_sos_opts >> SURV_BEACON_SHIFT & 3U;
+    int ph = (int)(e / 250 & 1);
+    *argb = b == 1 ? (ph ? 0xff000000U : 0xffffffffU) : b == 2 ? (ph ? 0xff000000U : 0xffff1a1aU) :
+            b == 3 ? (surv_morse_at((uint32_t)e, 0) ? 0xffffffffU : 0xff000000U) : (ph ? 0xffff1a1aU : 0xffffffffU);
+    return 1;
+}
+int sh_sos_secs(void)
+{
+    uint64_t e = surv_host_now_ms - hsos_t0;
+    return hsos && e < 3000 ? (int)((3000 - e + 999) / 1000) : 0;
+}
+unsigned sh_sos_opts(void) { return surv_sos_opts; }
+void sh_sos_opts_set(unsigned o) { surv_sos_opts = o; fprintf(stderr, "sos: options %#x\n", o); }
+int sh_usb_start(void)
+{
+    int r = surv_usb_start();
+    fprintf(stderr, "usb power: %s\n", r ? "refused" : "on (pretend: 10 s)");
+    return r;
+}
+void sh_usb_stop(void) { fprintf(stderr, "usb power: stop\n"); surv_usb_stop("Stop on the screen"); }
+void sh_usb(sh_usb_t *u)
+{
+    struct surv_usb s;
+    surv_usb_status(&s);
+    u->state = s.state == SURV_USB_ON ? SH_USB_ON : s.state == SURV_USB_COOL ? SH_USB_COOL : SH_USB_OFF;
+    u->ms_left = s.ms_left, u->est_ma = s.est_ma, u->vbus_lo_mv = s.vbus_lo_mv, u->vbus_hi_mv = s.vbus_hi_mv;
+    u->bat_c10 = s.bat_c10, u->limit_c10 = s.limit_c10, u->ilim_ma = s.ilim_ma, u->refused = s.refused, u->why = s.why;
+}
+const char *sh_usb_guide(int i)
+{
+    for (int k = 0; k <= i; k++) if (!surv_usb_guide[k]) return 0;
+    return surv_usb_guide[i];
+}
+int sh_sun(int *rise, int *set) { return surv_sun_today(rise, set); }
+void sh_loc(int *lat, int *lon) { *lat = surv_lat_x100; *lon = surv_lon_x100; }
+void sh_loc_set(int lat, int lon) { surv_lat_x100 = lat, surv_lon_x100 = lon; fprintf(stderr, "sun: location %d %d\n", lat, lon); }
+int sh_card(sh_card_t *c) { struct surv_card k; int r = surv_card_get(&k); memcpy(c, &k, sizeof k); return r; }
+int sh_card_set(const sh_card_t *c) { struct surv_card k; memcpy(&k, c, sizeof k); fprintf(stderr, "card: saved\n"); return surv_card_set(&k); }
+const char *sh_card_label(int i) { return i >= 0 && i < SURV_CARD_NF ? surv_card_label[i] : ""; }
+int sh_last2(void) { return surv_last2(); }
+int sh_last2_set(int on) { fprintf(stderr, "last 2 %%: %s\n", on ? "on" : "off"); return surv_last2_set(on, "the switch in Emergency"); }
+int sh_last2_auto(void) { return surv_last2_auto; }
+void sh_last2_auto_set(int on) { surv_last2_auto = !!on; }
+int sh_guide_n(void) { int n = 0; (void)surv_guide(&n); return n; }
+const char *sh_guide_chapter(int c, const char **sub, unsigned *argb, int *npages)
+{
+    int n = 0;
+    const struct sbg_chapter *ch = surv_guide(&n);
+    if (c < 0 || c >= n) return 0;
+    if (sub) *sub = ch[c].sub;
+    if (argb) *argb = ch[c].argb;
+    if (npages) *npages = ch[c].n;
+    return ch[c].title;
+}
+const char *sh_guide_page(int c, int p, const char *const **lines)
+{
+    int n = 0;
+    const struct sbg_chapter *ch = surv_guide(&n);
+    if (c < 0 || c >= n || p < 0 || p >= ch[c].n) return 0;
+    if (lines) *lines = ch[c].pages[p].lines;
+    return ch[c].pages[p].title;
+}
+const char *sh_sensors_why(void) { return surv_sensors_why(); }
+
 /* SBTK_CORES=n: the bands over n threads (the phone's four A55), to check that a split frame is bit for bit the
  * serial one and to time it */
 #include <pthread.h>
@@ -234,6 +318,7 @@ static void apply_state(const char *st)
     else strcpy(key, eq + 1);
     /* date=WDAY:DAY (P3p): a new day as the phone's clock reports it (the Calendar icon follows) */
     if (!strcmp(what, "date")) { sh_status(21, 6, atoi(key), (int)v, 11, 87, 41); return; }
+    if (!strcmp(what, "hostms")) { surv_host_now_ms = (uint64_t)v; return; }   /* survival-next: the simulation's clock */
     sh_set(what, key, v);
 }
 
@@ -242,7 +327,7 @@ typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
 static int parse(const char *s, step *st, int max)
 {
     int n = 0;
-    char buf[4096];
+    char buf[8192];
     strncpy(buf, s, sizeof buf - 1);
     for (char *tok = strtok(buf, ";"); tok && n < max; tok = strtok(0, ";")) {
         step *p = &st[n];
@@ -261,10 +346,11 @@ static int parse(const char *s, step *st, int max)
 }
 
 static double memwalk(tk_layer *l, int depth);
+void host_memdump(const char *tag);
 static int film(tk_comp *c, const char *out, const char *script, int half)
 {
-    step st[64];
-    int n = parse(script, st, 64);
+    step st[192];               /* survival-next: the survival film is long */
+    int n = parse(script, st, 192);
     float total = 0;
     for (int i = 0; i < n; i++) total += st[i].ms;
     total += 1500;     /* let everything settle */
@@ -314,6 +400,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
             }
         }
         lin_fake_poll(t);                     /* L3: the pretend Linux (gwin_now's part on the phone) */
+        surv_host_now_ms = (uint64_t)t;          /* survival-next: the simulated USB burst, SOS and the clock */
         int mv = sh_tick(dt / 1000, t);
         double shell_ms = (tk_us() - sh0) / 1000.0;
         int motion = mv || sh_moving();
@@ -323,7 +410,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         fprintf(log, " idle %.2f halfs %.2f shell %.2f", c->us_idle / 1000.0, c->us_halfs / 1000.0, shell_ms);
         if (getenv("SBTK_HASH")) {             /* what the display shows now (two buffers: the one just presented) */
             uint64_t hh = 1469598103934665603ULL;
-            for (size_t i = 0; i < (size_t)TK_W * TK_H; i++) hh = (hh ^ c->panel.px[i]) * 1099511628211ULL;
+            for (size_t i = 0; i < (size_t)TK_W * TK_H; i++) hh = (hh ^ (c->panel.px[i] & 0xffffffu)) * 1099511628211ULL;   /* what shows: no alpha */
             fprintf(log, " hash %016llx", (unsigned long long)hh);
         }
         fputc('\n', log);
@@ -337,6 +424,15 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         t += dt;
         frame++;
         rest_frames = motion ? 0 : rest_frames + 1;
+        if (getenv("SBTK_CHECK") && rest_frames == 4) {
+            /* P3s: at rest a while: everything composed again at full resolution, its hash (what the screen should
+             * show, without the damage borders a motion frame's present leaves) */
+            tk_comp_frame(c, 0, 1);
+            uint64_t hh = 1469598103934665603ULL;
+            for (size_t i = 0; i < (size_t)TK_W * TK_H; i++) hh = (hh ^ (c->panel.px[i] & 0xffffffu)) * 1099511628211ULL;
+            fprintf(log, "R %d %.1f hash %016llx\n", frame, t, (unsigned long long)hh);
+            if (getenv("SBTK_DUMPR") && frame == atoi(getenv("SBTK_DUMPR"))) write_ppm(getenv("SBTK_DUMPTO"), &c->panel);
+        }
         if (!motion) sh_idle();     /* between frames: on the phone, the time left in the frame */
         /* the phone's refresh timer (the Clock's digits, the card's work a turn at a time): a frame if it drew */
         if (!motion && sh_next_update(t) >= 0 && sh_refresh(t)) tk_comp_frame(c, 0, 0);
@@ -347,6 +443,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
     if (none) ;
     else if (f != stdout) fclose(f); else fflush(f);
     if (getenv("SBTK_MEM")) fprintf(stderr, "mem: layers %.1f MB\n", memwalk(c->root, 0) / 1e6);
+    host_memdump("film");
     fprintf(stderr, "film: %d frames; heap %.1f MB (peak %.1f MB)\n", frame, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
     return 0;
 }
@@ -425,7 +522,15 @@ static double memwalk(tk_layer *l, int depth)
     for (; l; l = l->next) {
         double b = (double)l->bmp.w * l->bmp.h * 4, h = (double)l->half.w * l->half.h * 4;
         double g = (double)l->glass.w * l->glass.h + (double)l->ghalf.w * l->ghalf.h;
-        if (b + h + g > 2e5) fprintf(stderr, "mem %*s%-14s %6.1f MB (half %.1f, glass %.1f)%s\n", depth * 2, "", l->name, (b + h + g) / 1e6, h / 1e6, g / 1e6, l->hidden ? " hidden" : "");
+        if (b + h + g > 2e5) {
+            int x0 = l->bmp.w, y0 = l->bmp.h, x1 = 0, y1 = 0;
+            for (int j = 0; j < l->bmp.h; j++) for (int i = 0; i < l->bmp.w; i++)
+                if (l->bmp.px[(size_t)j * l->bmp.stride + i] || (l->glass.v && l->glass.v[(size_t)j * l->glass.w + i])) {
+                    if (i < x0) x0 = i; if (i >= x1) x1 = i + 1; if (j < y0) y0 = j; if (j >= y1) y1 = j + 1; }
+            double used = x1 > x0 ? (double)(x1 - x0) * (y1 - y0) * 4 : 0;
+            fprintf(stderr, "mem %*s%-14s %6.1f MB (half %.1f, glass %.1f)%s %dx%d bounds %d,%d..%d,%d trim-> %.1f MB\n", depth * 2, "", l->name, (b + h + g) / 1e6, h / 1e6, g / 1e6, l->hidden ? " hidden" : "",
+                    l->bmp.w, l->bmp.h, x0, y0, x1, y1, used / 1e6);
+        }
         t += b + h + g + memwalk(l->child, depth + 1);
     }
     return t;
@@ -479,11 +584,13 @@ int main(int argc, char **argv)
     sh_init(&c);
     fprintf(stderr, "bake: %.1f ms; heap %.1f MB (peak %.1f MB)\n", (tk_us() - t0) / 1000.0, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
     if (getenv("SBTK_MEM")) fprintf(stderr, "mem: layers %.1f MB\n", memwalk(c.root, 0) / 1e6);
+    host_memdump("bake");
     lin_fake_init();
     if (!strcmp(argv[2], "still") && argc >= 4) {
         for (int i = 4; i < argc; i++) { apply_state(argv[i]); lin_fake_settle(); }
         tk_comp_frame(&c, 0, 1);
         fprintf(stderr, "frame: %.2f ms; heap %.1f MB (peak %.1f MB)\n", c.last_us / 1000.0, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);
+        host_memdump("still");
         write_ppm(argv[3], &c.panel);
         return 0;
     }
@@ -514,15 +621,24 @@ int main(int argc, char **argv)
         /* the phone's self test: every film of FILMS.txt in one run, each from the reset lock screen; the heap after
          * each (with SBTK_HEAP_MB=160: the phone's heap) */
         FILE *ff = fopen(argv[3], "r");
-        char line[2048];
+        char line[8192];
         while (ff && fgets(line, sizeof line, ff)) {
             char *colon = strchr(line, ':');
             if (!colon) continue;
             *colon = 0;
+            extern int host_ooms;
             sh_set("reset", "", 0);
+            if (getenv("SBTK_TICKS")) {          /* P3s: a new minute (and charge, temperature) before each film: rebuilds */
+                static int m;
+                m++;
+                sh_status(21, m % 60, 2, 10, 11, 87 - m % 20, 41 + m % 5);
+            }
+            int oom0 = host_ooms;
+            size_t rest0 = tk_heap_used();
+            tk_heap_peak_reset();
             film(&c, "none", colon + 1, 1);
-            fprintf(stderr, "selftest: %s: heap %zu MiB (peak %zu), largest free %llu MiB\n", line, tk_heap_used() >> 20,
-                    tk_heap_peak() >> 20, (unsigned long long)(tk_heap_largest() >> 20));
+            fprintf(stderr, "selftest: %s: heap %zu MiB (peak %zu, start %zu), largest free %llu MiB, refusals %d\n", line, tk_heap_used() >> 20,
+                    tk_heap_peak() >> 20, rest0 >> 20, (unsigned long long)(tk_heap_largest() >> 20), host_ooms - oom0);
         }
         return 0;
     }

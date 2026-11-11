@@ -95,6 +95,51 @@ void tk_free(void *p)
         if (b->next) b->next->prev = q;
     }
 }
+/* P3s: keep the block's first n bytes and give the rest back (a bitmap cut to what it holds). The kept bytes move
+ * to the end that has a free neighbour, so the part given back joins that block (a big block is carved from the top
+ * of a free one: its head goes back to it) and no new hole is made; the block's (possibly new) address is returned */
+static void move_up(uint64_t *d, const uint64_t *s, size_t n)
+{
+    for (size_t i = n / 8; i-- > 0;) d[i] = s[i];        /* d > s: from the end (the two may overlap) */
+}
+void *tk_shrink(void *p, size_t n)
+{
+    if (!p) return 0;
+    struct blk *b = (struct blk *)p - 1;
+    n = (n + 63) & ~(size_t)63;
+    if (!n) n = 64;
+    if (b->free || b->size < n + sizeof(struct blk) + 4096) return p;
+    uint64_t rest = b->size - n - sizeof(struct blk);
+    h_used -= rest + sizeof(struct blk);
+    if (b->prev && b->prev->free) {
+        struct blk *r = (struct blk *)((uint8_t *)(b + 1) + rest), *q = b->prev;
+        move_up((uint64_t *)(r + 1), p, n);
+        r->size = n;
+        r->free = 0;
+        r->next = b->next;
+        if (r->next) r->next->prev = r;
+        r->prev = q;
+        q->next = r;
+        q->size += sizeof(struct blk) + rest;               /* b's header and its head: q's now */
+        return r + 1;
+    }
+    struct blk *r = (struct blk *)((uint8_t *)(b + 1) + n);
+    r->size = rest;
+    r->free = 1;
+    r->next = b->next;
+    r->prev = b;
+    if (b->next) b->next->prev = r;
+    b->next = r;
+    b->size = n;
+    if (r->next && r->next->free) {
+        struct blk *x = r->next;
+        r->size += sizeof(struct blk) + x->size;
+        r->next = x->next;
+        if (x->next) x->next->prev = r;
+    }
+    return p;
+}
+
 /* the largest free block (how big a bitmap can still be had) */
 uint64_t tk_heap_largest(void)
 {
@@ -104,6 +149,7 @@ uint64_t tk_heap_largest(void)
 }
 size_t tk_heap_used(void) { return h_used; }
 size_t tk_heap_peak(void) { return h_peak; }
+void tk_heap_peak_reset(void) { h_peak = h_used; }
 uint64_t tk_heap_size(void) { return h_size; }
 /* 1 if the list is consistent (the host test) */
 int tk_heap_check(void)
