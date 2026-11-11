@@ -546,6 +546,8 @@ void kui_lock(void)
 }
 
 /* Starbite OS Next draws the confirmation in its own UI (kern_next sets this; 0 in the regular image) */
+void (*kui_screen_hook)(int on);
+int (*kui_sleep_hook)(int key);
 int (*kui_confirm_hook)(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
                         void (*done)(int ok));
 void kui_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
@@ -2530,6 +2532,8 @@ void kui_aod_frame(void)
 
 void kui_screen_changed(int on)
 {
+    if (kui_screen_hook)
+        kui_screen_hook(on);
     if (on) {
         if (screen == SCR_OFF)
             screen = SCR_LOCK;
@@ -2542,6 +2546,8 @@ void kui_screen_changed(int on)
             shown_screen = SCR_OFF;                 /* the wake draws at once (no transition from black) */
             if (em_aod && look_emergency) {
                 kui_aod_frame();                /* 0.6.5: the dim clock (services.c puts the panel in low power) */
+            } else if (kui_screen_hook) {
+                ;                               /* P2r: Next's buffers are its own; it went dark already */
             } else {
                 ui_noclip();
                 ui_fill(0, 0, UI_W, UI_H, 0xff000000U);   /* v0.1: a black screen (OLED: those pixels are off) */

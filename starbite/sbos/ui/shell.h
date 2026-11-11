@@ -38,5 +38,14 @@ int sh_modem(int on);
  * sh_confirmed(1) on a full hold, sh_confirmed(0) on a tap outside the card */
 void sh_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold);
 void sh_confirmed(int ok);
+/* P2r, sleep and wake: the screen off as a fade to black (now: black at once), on as the lock screen from black;
+ * the shell calls sh_slept (the platform) when the fade has ended: the panel off after that frame */
+void sh_sleep(int now);
+void sh_wake(void);
+int sh_sleeping(void);
+void sh_slept(void);
+/* P2r: the Control Centre's brightness slider (the panel's levels 1 dim .. 4 bright), and the level at start */
+void sh_brightness(int level);
+void sh_bright_now(int level);
 
 #endif

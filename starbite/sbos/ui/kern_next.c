@@ -145,7 +145,7 @@ static tk_comp comp;
 static int ready, baking, need_full, ticking, boosted;
 static uint64_t last_tick, boot_t0;
 /* the frame statistics of the current gesture (logged per film in the self test, per gesture otherwise) */
-static struct { uint32_t n, nhalf, over16, maxus, nboost; uint64_t sumus; uint32_t hist[64]; } FS;
+static struct { uint32_t n, nhalf, over16, maxus, nboost, nwait; uint64_t sumus, sumwait; uint32_t hist[64]; uint8_t ms[120]; } FS;
 static int frame_log;                        /* the self test: one line per frame of the films it names */
 
 static void log_mb(const char *what, uint64_t v)
@@ -225,11 +225,111 @@ static void status_now(void)
     cell_now();
 }
 
+/* ---- tear-free frames (P2r): two scanout buffers and DECON flips ------------------------------------------
+ * Before P2r the compositor wrote straight into the buffer DECON was sending to the panel: tearing. Now it writes
+ * into the buffer DECON does not read and points DECON's IDMA channel 0 at it; the panel takes it at the next TE
+ * (the shadow update), the same sequence as s9p-decon on Linux and sbwddm's T24 flips on Windows (3482 flips, no
+ * fallback). S-Boot's pipeline is checked first (the full-screen window, channel 0 scanning 0xcc000000); anything
+ * else, or a flip that does not latch in 50 ms with the screen on, keeps the one buffer (logged). Before a restart,
+ * a power-off or the crash screen, DECON goes back to 0xcc000000 (the next OS and the crash screen expect it). */
+#define DECON 0x16030000UL
+#define DMA_CH0 0x16071000UL                         /* DPU_DMA channel 0 (S-Boot's fetch channel) */
+#define SCAN_B 0xcd200000UL                          /* the second buffer: free RAM after S-Boot's framebuffer, in the
+                                                      * non-cacheable window (mmu.c), below 4 GiB (32-bit base) */
+static uint32_t scan_pa[2] = { SB_FB, SCAN_B };
+static int flip_on, scan_cur, scan_win;
+static unsigned flips, flip_waits, flip_timeouts;
+static uint32_t drd(uintptr_t a) { uint32_t v = *(volatile uint32_t *)a; __asm__ volatile("dmb oshld" ::: "memory"); return v; }
+static void dwr(uintptr_t a, uint32_t v) { __asm__ volatile("dmb oshst" ::: "memory"); *(volatile uint32_t *)a = v; }
+static int flip_pending(void) { return (drd(DECON + 0x60) & (1U << scan_win)) != 0; }
+static void scan_point(uint32_t pa)
+{
+    __asm__ volatile("dsb sy" ::: "memory");        /* the frame's stores reach DRAM first */
+    dwr(DMA_CH0 + 0x40, pa);
+    dwr(DMA_CH0 + 0x44, pa);
+    dwr(DECON + 0x60, 1U << scan_win);              /* the window's shadow update: taken at the next TE */
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+static void (*prev_before_reset)(void), (*prev_crash)(void);
+static void scan_home(void)
+{
+    if (flip_on && scan_cur) scan_point(SB_FB);
+    flip_on = 0;
+    scan_cur = 0;
+}
+static void home_before_reset(void) { scan_home(); if (prev_before_reset) prev_before_reset(); }
+static void home_crash(void) { scan_home(); if (prev_crash) prev_crash(); }
+static int scan_identify(void)
+{
+    uint32_t path0 = drd(DECON + 0x214), end = (SB_FB_H - 1U) << 16 | (SB_FB_W - 1U);
+    scan_win = -1;
+    for (int w = 0; w < 6; w++)
+        if ((path0 & (1U << (4 * w))) && drd(DECON + 0x1008 + 0x30 * w) == 0 && drd(DECON + 0x100c + 0x30 * w) == end)
+            scan_win = w;
+    if (scan_win < 0) return -2;
+    if (drd(DMA_CH0 + 0x800 + 0x40) != SB_FB) return -3;
+    if (drd(DMA_CH0 + 0x18) != (SB_FB_H << 16 | SB_FB_W)) return -4;
+    if (drd(DMA_CH0 + 0x40) != SB_FB) return -5;
+    return 0;
+}
+/* the compositor's acquire: the buffer DECON does not read (the last flip latched first; screen off: no wait) */
+static uint32_t *scan_acquire(void *ctx)
+{
+    (void)ctx;
+    if (flip_on && flip_pending() && K.screen_on) {
+        flip_waits++;
+        uint64_t t0 = sb_us();
+        while (flip_pending() && sb_us() - t0 < 50000) sb_udelay(20);
+        if (flip_pending()) {
+            /* DECON does not take flips: one buffer again, everything redrawn into it */
+            flip_timeouts++;
+            sb_log("next: flips: DECON did not latch in 50 ms; one buffer from now on (tearing possible)");
+            scan_point(SB_FB);
+            flip_on = 0;
+            scan_cur = 0;
+            comp.acquire = 0;
+            comp.panel.px = (uint32_t *)SB_FB;
+            need_full = 1;
+            return (uint32_t *)SB_FB;
+        }
+    }
+    return (uint32_t *)(uintptr_t)scan_pa[scan_cur ^ 1];
+}
+static void scan_init(void)
+{
+    int id = scan_identify();
+    if (id) {
+        sb_logf("next: flips: S-Boot's pipeline not as expected; one buffer (tearing possible): ", id == -2 ? "no full-screen window" :
+                id == -3 ? "channel 0 not scanning 0xcc000000" : id == -4 ? "channel 0's size" : "channel 0's next address");
+        return;
+    }
+    prev_before_reset = sb_before_reset;
+    sb_before_reset = home_before_reset;
+    prev_crash = sb_crash_hook;
+    sb_crash_hook = home_crash;
+    flip_on = 1;
+    scan_cur = 0;
+    comp.acquire = scan_acquire;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: flips: on (window ");
+    ub_dec(&u, (uint64_t)scan_win);
+    ub_s(&u, ", trigger 0x");
+    ub_hexn(&u, drd(DECON + 0x70), 8);
+    ub_s(&u, "); frames go to 0xcc000000 / 0xcd200000 in turn, shown at the panel's next TE");
+    sb_log(u.b);
+}
+
 void next_kdraw(void);
 static void present(void)
 {
     if (comp.last_px) {
-        __asm__ volatile("dsb sy" ::: "memory");
+        if (flip_on && comp.acquire) {
+            scan_cur ^= 1;
+            scan_point(scan_pa[scan_cur]);
+            flips++;
+        } else
+            __asm__ volatile("dsb sy" ::: "memory");
         panel_kick();
     }
 }
@@ -257,6 +357,9 @@ static void stats_add(void)
         sb_log(u.b);
     }
     FS.sumus += us;
+    FS.sumwait += comp.us_wait;
+    if (comp.us_wait > 1000) FS.nwait++;
+    if (FS.n <= sizeof FS.ms) FS.ms[FS.n - 1] = (uint8_t)(us / 1000 > 99 ? 99 : (us + 500) / 1000);
     if (us > FS.maxus) FS.maxus = us;
     if (us > 16700) FS.over16++;
     unsigned b = us / 1000;
@@ -299,11 +402,38 @@ static void stats_log(const char *what)
     ub_dec(&u, tk_heap_largest() >> 20);
     ub_s(&u, " MiB");
     sb_log(u.b);
+    /* every frame's work in ms, in order (P2r: the numbers the main session sends back; 60 a line), then the
+     * waits for the display (the last flip latching at the panel's TE) */
+#ifndef SBOS_SELFTEST_NEXT                         /* the self test's eleven films would fill pmsg's 16 KB */
+    uint32_t nf = FS.n < sizeof FS.ms ? FS.n : (uint32_t)sizeof FS.ms;
+    for (uint32_t i0 = 0; i0 < nf; i0 += 60) {
+        ub_init(&u);
+        ub_s(&u, "next: frame ms: ");
+        for (uint32_t i = i0; i < nf && i < i0 + 60; i++) { if (i > i0) ub_c(&u, ' '); ub_dec(&u, FS.ms[i]); }
+        if (i0 + 60 >= nf && FS.n > nf) ub_s(&u, " ...");
+        sb_log(u.b);
+    }
+#endif
+    ub_init(&u);
+    ub_s(&u, "next: display waits > 1 ms: ");
+    ub_dec(&u, FS.nwait);
+    ub_s(&u, ", mean wait ");
+    ub_dec(&u, FS.sumwait / FS.n / 1000);
+    ub_c(&u, '.');
+    ub_dec(&u, FS.sumwait / FS.n / 100 % 10);
+    ub_s(&u, " ms; flips ");
+    ub_dec(&u, flips);
+    ub_s(&u, flip_on ? " (two buffers)" : " (one buffer)");
+    if (flip_timeouts) { ub_s(&u, "; latch timeouts "); ub_dec(&u, flip_timeouts); }
+    sb_log(u.b);
 }
 
 /* one frame: the springs and transitions advanced by the real time since the last, composed, presented */
+static int slept_now;                        /* the shell's fade to black ended: the screen off after its frame */
+void sh_slept(void) { slept_now = 1; }
 static void frame(void)
 {
+    if (!boosted) boost(1);                      /* a wake: the kernel set the screen-on clock after the hook */
     uint64_t now = sb_ms();
     float dt = last_tick ? (float)(now - last_tick) / 1000.0f : 1.0f / 60;
     last_tick = now;
@@ -312,6 +442,11 @@ static void frame(void)
     tk_comp_frame(&comp, motion, 0);
     present();
     stats_add();
+    if (slept_now) {
+        slept_now = 0;
+        power_screen_set(0);                     /* the black frame is out (its flip at the next TE) */
+        return;
+    }
     if (!motion) {
         kt_cancel(KT_UI, 20);
         ticking = 0;
@@ -338,6 +473,47 @@ static void start_ticking(void)
     kt_set(KT_UI, 20, sb_ms(), 16, 1);
 }
 
+/* ---- sleep and wake (P2r): the Power key's screen off is the shell's fade to black first, the screen on its fade
+ * in from black; the classic UI's black frame never runs (Next's buffers are its own) ---- */
+static int next_sleep(int key)
+{
+    if (!ready) return 0;
+    if (sh_sleeping()) {
+        if (key) sh_wake();                          /* Power again during the fade: back */
+    } else
+        sh_sleep(0);
+    start_ticking();
+    return 1;
+}
+static void next_screen(int on)
+{
+    if (!ready) return;
+    if (!on) {
+        kt_cancel(KT_UI, 20);
+        ticking = 0;
+        last_tick = 0;
+        boosted = 0;                                 /* the kernel takes the A55 down with the screen */
+        kt_set(KT_UI, 23, sb_ms(), 5000, 0);         /* the band workers off in 5 s */
+        if (!sh_sleeping()) {
+            sh_sleep(1);                             /* not through the fade (a timer path): black at once */
+            tk_comp_frame(&comp, 0, 0);
+            present();
+        }
+#ifndef SBOS_SELFTEST_NEXT
+        stats_reset();
+#endif
+        return;
+    }
+    status_now();
+    sh_wake();
+    boosted = 0;                                     /* the kernel sets the screen-on clock after this: the first
+                                                      * frame takes the top step (frame()) */
+    workers_start();
+    ticking = 1;
+    last_tick = 0;
+    kt_set(KT_UI, 20, sb_ms(), 16, 1);
+}
+
 /* ---- the kernel's UI entry points in this image ------------------------------------------------------------- */
 void next_kinit(void)
 {
@@ -346,6 +522,8 @@ void next_kinit(void)
     heap_init(160ULL << 20);
     log_mb("UI heap: ", heap_size);
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
+    kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
+    kui_sleep_hook = next_sleep;
     if (!tk_pack_open(sbtk_pack_start, (uint32_t)(sbtk_pack_end - sbtk_pack_start))) {
         sb_log("next: the sbtk pack is missing or bad: the regular UI runs");
         return;
@@ -354,6 +532,7 @@ void next_kinit(void)
         sb_log("next: no memory for the compositor: the regular UI runs");
         return;
     }
+    scan_init();
 #ifndef SBOS_NEXT_ONECORE
     comp.par = kpar;
     tk_par = kpar;                                   /* the bakes' row loops too */
@@ -379,6 +558,7 @@ static void bake_step(void)
     kt_cancel(KT_UI, 22);
     baking = 0;
     status_now();
+    sh_bright_now(panel_bright_level);
     ready = need_full = 1;
     boost(0);
     kt_set(KT_UI, 23, sb_ms(), 5000, 0);            /* the workers off after 5 s unless a finger comes */
@@ -465,6 +645,16 @@ void sh_boot_os(const char *key)
 #endif
 }
 
+void sh_brightness(int level)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)level;
+    sb_log("next: brightness: would set the panel's level (a dry run: the self test)");
+#else
+    if (!panel_brightness(level)) sb_log("next: brightness: the panel did not take the level");
+#endif
+}
+
 void sh_torch(int lit)
 {
 #ifdef SBOS_SELFTEST_NEXT
@@ -478,7 +668,7 @@ void sh_torch(int lit)
 /* ---- the self test --------------------------------------------------------------------------------------- */
 #ifdef SBOS_SELFTEST_NEXT
 typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
-static const char *const FILM_NAME[10] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency" };
+static const char *const FILM_NAME[11] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "sleep" };
 /* tools/films.txt's scripts (pt, ms) */
 static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 1300 } };
 static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 354, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 195, 354, 0, 0, 80 },
@@ -506,7 +696,14 @@ static const step S_MSGS[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 
 static const step S_EMERG[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 318, 720, 0, 0, 950 }, { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 795, 195, 330, 220 },
                                 { 0, 0, 0, 0, 0, 900 }, { 2, 320, 450, 60, 450, 200 }, { 0, 0, 0, 0, 0, 900 }, { 2, 80, 20, 80, 640, 300 },
                                 { 0, 0, 0, 0, 0, 1200 }, { 1, 195, 650, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };
+/* P2r: the Power key (kind 5, the kernel's own power_key_short): the fade to black and the screen off, the wake, a
+ * fade undone by a second press */
+static const step S_SLEEP[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 158, 290, 0, 0, 80 },
+                                { 0, 0, 0, 0, 0, 1100 }, { 5, 0, 0, 0, 0, 20 }, { 0, 0, 0, 0, 0, 900 }, { 5, 0, 0, 0, 0, 20 },
+                                { 0, 0, 0, 0, 0, 1200 }, { 5, 0, 0, 0, 0, 20 }, { 0, 0, 0, 0, 0, 120 }, { 5, 0, 0, 0, 0, 20 },
+                                { 0, 0, 0, 0, 0, 1000 } };
 static struct { const step *s; int n, i, down; uint64_t t0; float s0; int film; } F;
+int next_selftest_flips_ok(void) { return flip_on && flips > 0 && !flip_timeouts; }
 static int st_started, st_failed, clock_ok;
 int next_selftest_clock_ok(void) { return clock_ok; }
 static uint64_t st_t0;
@@ -530,7 +727,8 @@ static void film_start(int film)
     case 6: F.s = S_APP; F.n = 7; break;
     case 7: F.s = S_PHONE; F.n = 17; break;
     case 8: F.s = S_MSGS; F.n = 11; break;
-    default: F.s = S_EMERG; F.n = 11; break;
+    case 9: F.s = S_EMERG; F.n = 11; break;
+    default: F.s = S_SLEEP; F.n = 13; break;
     }
     /* each film from the plain lock screen */
     sh_set("reset", "", 0);
@@ -562,14 +760,15 @@ int next_selftest_step(void)
             clock_ok = comp.last_px != 0;
             status_now();
         }
-        sb_log("selftest: next: the ten films (unlock, group, focus, holds, pages, cc, app, phone, messages, emergency) with synthetic touches");
+        sb_log("selftest: next: the eleven films (unlock, group, focus, holds, pages, cc, app, phone, messages, emergency, sleep) with synthetic touches; sleep presses the real Power path");
         film_start(0);
         return 1;
     }
     float t = (float)(sb_ms() - F.t0);
     while (F.i < F.n && t >= F.s0 + F.s[F.i].ms) {
         const step *p = &F.s[F.i];
-        if (F.down) {
+        if (F.down && p->kind == 5) F.down = 0;
+        else if (F.down) {
             sh_touch(2, p->kind == 2 ? p->x1 : p->x0, p->kind == 2 ? p->y1 : p->y0, (float)sb_ms());
             F.down = 0;
             start_ticking();
@@ -579,7 +778,13 @@ int next_selftest_step(void)
     }
     if (F.i < F.n) {
         const step *p = &F.s[F.i];
-        if (p->kind) {
+        if (p->kind == 5) {
+            if (!F.down) {
+                F.down = 1;
+                sb_log(K.screen_on ? "next: sleep film: Power (the screen is on)" : "next: sleep film: Power (the screen is off)");
+                power_key_short();
+            }
+        } else if (p->kind) {
             if (!F.down) { sh_touch(0, p->x0, p->y0, (float)sb_ms()); F.down = 1; start_ticking(); }
             else if (p->kind == 2) {
                 float u = (t - F.s0) / p->ms;
@@ -591,7 +796,12 @@ int next_selftest_step(void)
     if (ticking || sh_moving()) return 1;          /* let it settle */
     stats_log(FILM_NAME[F.film]);
     frame_log = 0;
-    if (F.film < 9) { film_start(F.film + 1); return 1; }
+    if (F.film == 10 && !K.screen_on) {
+        sb_log("selftest: FAILED: next: the sleep film ended with the screen off");
+        st_failed = 1;
+        power_screen_set(1);
+    }
+    if (F.film < 10) { film_start(F.film + 1); return 1; }
     {
         /* the present's kernels against uibench's loops, on these buffers and cores (boosted, workers on) */
         static const char *const BN[5] = { "the motion present (2x, rows in pairs)", "the rest copy (tk_memcpy rows)",

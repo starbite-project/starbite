@@ -24,6 +24,9 @@ int sh_modem(int on)
     return 0;
 }
 void sh_confirmed(int ok) { fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled"); }
+void sh_brightness(int level) { fprintf(stderr, "brightness: level %d\n", level); }
+static int screen_off;
+void sh_slept(void) { screen_off = 1; fprintf(stderr, "sleep: the screen would go off now\n"); }
 
 /* SBTK_CORES=n: the bands over n threads (the phone's four A55), to check that a split frame is bit for bit the
  * serial one and to time it */
@@ -110,6 +113,7 @@ static int parse(const char *s, step *st, int max)
         else if (!strcmp(w, "drag")) { p->kind = 2; sscanf(tok, " %*s %f %f %f %f %f", &p->x0, &p->y0, &p->x1, &p->y1, &p->ms); }
         else if (!strcmp(w, "hold")) { p->kind = 3; sscanf(tok, " %*s %f %f %f", &p->x0, &p->y0, &p->ms); }
         else if (!strcmp(w, "state")) { p->kind = 4; }
+        else if (!strcmp(w, "power")) { p->kind = 5; p->ms = 20; }      /* the Power key: sleep, or wake if off */
         n++;
     }
     return n;
@@ -138,7 +142,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         for (int sub = 1; sub <= 2; sub++) {
             float te = t + dt * sub / 2;
             while (si < n && te >= s0 + st[si].ms) {
-                if (phase >= 0 && st[si].kind) {
+                if (phase >= 0 && st[si].kind && st[si].kind != 5) {
                     step *p = &st[si];
                     float x = p->kind == 2 ? p->x1 : p->x0, y = p->kind == 2 ? p->y1 : p->y0;
                     sh_touch(2, x, y, s0 + p->ms);
@@ -151,6 +155,14 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
             step *p = &st[si];
             if (!p->kind) continue;
             float u = (te - s0) / p->ms;
+            if (p->kind == 5) {
+                if (phase < 0) {
+                    fprintf(stderr, "power at %.0f ms: %s\n", te, screen_off || sh_sleeping() ? "wake" : "sleep");
+                    if (screen_off || sh_sleeping()) { screen_off = 0; sh_wake(); } else sh_sleep(0);
+                    phase = 0;
+                }
+                continue;
+            }
             if (phase < 0) { sh_touch(0, p->x0, p->y0, te); phase = 0; continue; }
             if (p->kind == 2) {
                 float e = u < 1 ? u : 1;
@@ -162,8 +174,14 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         int mv = sh_tick(dt / 1000, t);
         int motion = mv || sh_moving();
         tk_comp_frame(c, motion, 0);
-        fprintf(log, "F %d %.1f %s px %d comp %.2f present %.2f total %.2f\n", frame, t, c->last_half ? "half" : "full",
+        fprintf(log, "F %d %.1f %s px %d comp %.2f present %.2f total %.2f", frame, t, c->last_half ? "half" : "full",
                c->last_px, c->us_comp / 1000.0, c->us_present / 1000.0, c->last_us / 1000.0);
+        if (getenv("SBTK_HASH")) {             /* what the display shows now (two buffers: the one just presented) */
+            uint64_t hh = 1469598103934665603ULL;
+            for (size_t i = 0; i < (size_t)TK_W * TK_H; i++) hh = (hh ^ c->panel.px[i]) * 1099511628211ULL;
+            fprintf(log, " hash %016llx", (unsigned long long)hh);
+        }
+        fputc('\n', log);
         if (none) ;
         else if (half) {
             tk_bmp_down2(&h, &c->panel);
@@ -265,6 +283,10 @@ static double memwalk(tk_layer *l, int depth)
     return t;
 }
 
+static uint32_t *dbl[2];
+static int dbl_cur;
+static uint32_t *dbl_acquire(void *ctx) { (void)ctx; dbl_cur ^= 1; return dbl[dbl_cur]; }
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: sbtk-host PAK still|film|bench ...\n"); return 2; }
@@ -276,6 +298,11 @@ int main(int argc, char **argv)
     /* the phone's frame buffers are not in its UI heap (the old UI's back buffer, the framebuffer) */
     if (!tk_comp_init(&c, getenv("SBTK_HEAP_MB") ? calloc((size_t)TK_W * TK_H, 4) : 0,
                       getenv("SBTK_HEAP_MB") ? calloc((size_t)TK_W * TK_H, 4) : 0)) return 1;
+    if (getenv("SBTK_DBL")) {                  /* the phone's two scanout buffers (P2r): presents alternate */
+        dbl[0] = c.panel.px;
+        dbl[1] = calloc((size_t)TK_W * TK_H, 4);
+        c.acquire = dbl_acquire;
+    }
     if (getenv("SBTK_CORES")) { ncores = atoi(getenv("SBTK_CORES")); if (ncores > 1) { c.par = host_par; tk_par = host_par; } }
     uint64_t t0 = tk_us();
     sh_init(&c);

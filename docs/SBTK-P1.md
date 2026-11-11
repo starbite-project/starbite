@@ -167,3 +167,29 @@ first frames at rest). P2h fixed a clock that stayed on its first minute (a re-m
 generation, so the compositor kept the old pixels: `sbtk-host clocktest` and the self test now check it) and added
 the Control Centre (1.54 against the concept) and home's second page (0.93); P2i the app zoom with the generic app
 screen (0.31-0.38; 0.90 half-way).
+
+### P2r: no tearing, sleep and wake, the frame log (2026-11-11)
+- **Two scanout buffers.** Until P2q the compositor wrote into the buffer DECON was sending to the panel, which
+  tore. Now frames alternate between S-Boot's 0xcc000000 and 0xcd200000 (free RAM in the non-cacheable window),
+  and DECON's IDMA channel 0 is pointed at the finished one with the window's shadow update. That is the sequence
+  s9p-decon (Linux) and sbwddm T24 (Windows: 3482 flips, no fallback) use on this phone.
+  - The compositor's `acquire` waits for the last flip to latch at the panel's TE before writing.
+  - The free buffer holds the frame before the last, so a catch-up pass first copies over what the last frame
+    changed (its rects minus this frame's, from the half canvas or the RAM frame, as it was drawn).
+  - `SBTK_DBL=1 SBTK_HASH=1`: every frame of all 13 films is identical to the one-buffer run.
+- **Fallback and safety.**
+  - S-Boot's pipeline is checked first: the full-screen window, and channel 0 on 0xcc000000.
+  - A flip that does not latch within 50 ms with the screen on falls back to one buffer (logged).
+  - `sb_before_reset` and `sb_crash_hook` point DECON home before a restart, a power-off or the crash screen.
+- **Sleep and wake.**
+  - The Power key and the screen-off timer fade to black (0.26 s); the shell goes back to the lock screen while
+    dark; the kernel turns the screen off after that frame (`kui_sleep_hook`).
+  - Waking fades the lock screen in from black, growing from 1.05 (0.42 s). Power during the fade undoes it.
+  - The classic UI's black frame is no longer drawn in Next (`kui_screen_hook`). It wrote into the RAM frame Next
+    composes from, so a wake used to show black where nothing had changed.
+  - The self test's eleventh film presses the real Power path three times.
+- **The frame log.** After each gesture, `next: frame ms:` lines list every frame's work in ms (normal image
+  only; the self test's films would fill pmsg). Then `next: display waits` gives the waits for the latch and
+  the flip count.
+- **Brightness.** The Control Centre's slider sets the panel's four levels (`panel_brightness`, the classic
+  Settings path). The torch tile and the lock screen's button were already the real LED.

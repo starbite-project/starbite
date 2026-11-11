@@ -972,6 +972,16 @@ static void set_page(float x)
  * .14 p) about 85 % 0 of the grid; spring cc 400 / 36; open past .35 or faster than .4 pt/ms. */
 static tk_layer ccl, ccscrim, ccsb, ccg, ccgrid, cclvl[2], ccic[2];
 static struct { int on, built, closing, wifi, cell, bt, air, rot, save; float p, lvl[2]; } CCS = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, { .62f, .4f } };
+static void cc_levels(void);
+static int cc_bright;           /* the panel's brightness level the slider last sent (1..4; 0: none yet) */
+/* the platform's brightness now (1..4; 0: the boot's own): the slider starts there */
+void sh_bright_now(int level)
+{
+    if (level < 1 || level > 4) return;
+    cc_bright = level;
+    CCS.lvl[0] = (level - .5f) / 4;
+    if (CCS.built) cc_levels();
+}
 static tk_spring sp_cc;
 static const float CCX[4] = { 24, 114.66f, 205.31f, 295.97f };
 static void cc_tile(dc *d, float x, float y, float w, float h, float r, int on)
@@ -1660,6 +1670,28 @@ static void toast(const char *msg)
     toast_place();
 }
 
+/* ---- sleep and wake (P2r): the screen off as a fade to black, the screen on as the lock screen growing in from
+ * black (iOS's wake: a little larger to its place); while black the shell goes back to the lock screen. The kernel
+ * turns the panel off once the fade has ended (sh_slept) ---- */
+static tk_layer slp;
+static struct { int dir, black, back; float t; } SL;   /* dir -1 going dark, 1 waking, 0 still; black: dark at rest;
+                                                       * back: a fade out undone (no lock, no growing) */
+#define SL_OUT .26f
+#define SL_IN .42f
+static void sl_place(void)
+{
+    float a = SL.black ? 1 : 0, s = 1;
+    if (SL.dir < 0) a = tk_bezier(.4f, 0, .7f, 1, SL.t);
+    else if (SL.dir > 0) {
+        float e = tk_bezier(.2f, .7f, .2f, 1, SL.t);
+        a = 1 - tk_minf(1, SL.t * 1.6f) * (2 - tk_minf(1, SL.t * 1.6f));     /* the black goes in 60 % of the time */
+        s = SL.back ? 1 : 1.05f - .05f * e;
+    }
+    slp.alpha = a;
+    slp.hidden = a <= 0;
+    lockg.sx = lockg.sy = s;
+}
+
 /* ---- the kernel's hold confirmation (kui_confirm: the modem's Start), in this UI's look: the screen dimmed, a
  * dark glass card with the kernel's words and its hold bar (1.5 s, as the kernel's own); a tap outside cancels ---- */
 static tk_layer cfl, cfdim, cfcard, cffill, cflabel;
@@ -2012,8 +2044,8 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 }
 static void relink(void)
 {
-    tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &focus, &ccl, &cfl, &boot, &homebar, &toastl };
-    link(&root, r, 12);
+    tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
+    link(&root, r, 13);
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum };
     link(&appg, ag, 4);
     tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
@@ -2068,7 +2100,15 @@ void sh_init_begin(tk_comp *c)
     toastl.hidden = 1;
     tk_layer_init(&cfl, "confirm");
     cfl.hidden = 1;
+    tk_layer_init(&slp, "sleep");                  /* black over everything, its opacity the fade */
+    slp.solid = 0xff000000u;
+    slp.solid_w = TK_W;
+    slp.solid_h = TK_H;
+    slp.opaque = 1;
+    slp.hidden = 1;
     tk_layer_init(&lockg, "lock");
+    lockg.ox = PT(195);                            /* the wake grows it about the middle */
+    lockg.oy = PT(401);
     tk_layer_init(&list, "list");
     list.clip = 1;
     list.fade_top = PT(18);
@@ -2139,6 +2179,34 @@ static void apply_tweens(void)
     hint.alpha = hint_a;
 }
 
+/* back to the plain lock screen: the sheet and the boot overlay gone, every card closed, the top (exit_em: and out
+ * of Emergency mode; the Power key's sleep keeps it) */
+static void back_to_lock(int exit_em)
+{
+    focus_on = 0; focus_closing = 0; focus.hidden = 1; sp_focus.live = sp_thumb.live = 0;
+    free_focus();
+    booting = 0; boot.hidden = 1;
+    for (int g = 0; g < NG; g++) if (K[g].isopen) toggle_group(g, 1);
+    scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
+    sp_lock.live = 0;
+    sp_page.live = 0; page_dragging = 0;
+    set_page(0);
+    CCS.on = 0; sp_cc.live = 0; set_cc(0);
+    if (AP.on) { sp_app.live = 0; app_finish_close(); }
+    if (exit_em && EMG) set_emergency(0, 1);
+    if (!EMG) while (cards_pending > 0) { build_card(NG - cards_pending); cards_pending--; }
+    if (CF.on) cf_close(0);
+    relink();
+    toast_t = 1; toast_to = toast_from = -90; toast_left = 0; toast_place();
+    locked = 1;
+    set_lock(0);
+    mark_a = mark_t; glyph_a = glyph_t; hint_a = 0; hint_left = 0;
+    apply_tweens();
+    place_list();
+}
+void sh_sleep(int now);
+void sh_wake(void);
+
 void sh_set(const char *what, const char *key, float v)
 {
     if (!tk_strcmp(what, "unlock")) {
@@ -2167,26 +2235,9 @@ void sh_set(const char *what, const char *key, float v)
                     set_focus(v);
                 }
     } else if (!tk_strcmp(what, "reset")) {
-        /* back to the plain lock screen: the sheet and the boot overlay gone, every card closed, the top */
-        focus_on = 0; focus_closing = 0; focus.hidden = 1; sp_focus.live = sp_thumb.live = 0;
-        free_focus();
-        booting = 0; boot.hidden = 1;
-        for (int g = 0; g < NG; g++) if (K[g].isopen) toggle_group(g, 1);
-        scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
-        sp_lock.live = 0;
-        sp_page.live = 0; page_dragging = 0;
-        set_page(0);
-        CCS.on = 0; sp_cc.live = 0; set_cc(0);
-        if (AP.on) { sp_app.live = 0; app_finish_close(); }
-        if (EMG) set_emergency(0, 1);
-        while (cards_pending > 0) { build_card(NG - cards_pending); cards_pending--; }
-        relink();
-        toast_t = 1; toast_to = toast_from = -90; toast_left = 0; toast_place();
-        locked = 1;
-        set_lock(0);
-        mark_a = mark_t; glyph_a = glyph_t; hint_a = 0; hint_left = 0;
-        apply_tweens();
-        place_list();
+        back_to_lock(1);
+    } else if (!tk_strcmp(what, "sleep")) {        /* the films: the Power key's fade (v 1) and the wake (v 0) */
+        if (v > 0) sh_sleep(0); else sh_wake();
     } else if (!tk_strcmp(what, "app")) {
         for (int a = 0; a < NAPPS; a++)
             if (!tk_strcmp(APPS[a].k, key)) {
@@ -2422,6 +2473,10 @@ void sh_touch(int phase, float x, float y, float t)
         case G_CCSL:
             CCS.lvl[T.arg] = tk_clampf((248 - y) / 156, 0, 1);
             cc_levels();
+            if (T.arg == 0) {                    /* P2r: the brightness slider sets the panel's level (1..4) */
+                int lv = 1 + (int)(CCS.lvl[0] * 3.999f);
+                if (lv != cc_bright) { cc_bright = lv; sh_brightness(lv); }
+            }
             break;
         case G_PAGE: {
             float dx = x - T.x0;
@@ -2571,6 +2626,39 @@ void sh_touch(int phase, float x, float y, float t)
 }
 
 /* ---- time ------------------------------------------------------------------------------------------------- */
+/* the Power key (or the screen-off timer): the fade to black; again during it: back (now: black at once, the
+ * screen already off) */
+void sh_sleep(int now)
+{
+    T.kind = G_NONE;
+    if (now) {
+        if (SL.black && !SL.dir) return;   /* dark already (the fade ended) */
+        SL.dir = 0;
+        SL.black = 1;
+        back_to_lock(0);
+        sl_place();
+        return;
+    }
+    if (SL.dir < 0) return;
+    float a = slp.hidden ? 0 : slp.alpha;
+    SL.dir = -1;
+    SL.t = 0;
+    for (int i = 0; i < 20 && tk_bezier(.4f, 0, .7f, 1, SL.t) < a; i++) SL.t += .05f;   /* from a wake's opacity */
+    sl_place();
+}
+int sh_sleeping(void) { return SL.dir < 0; }
+/* the screen on: the lock screen from black (a fade back from a sleep that had not ended starts where it is) */
+void sh_wake(void)
+{
+    T.kind = G_NONE;
+    float a = slp.hidden ? 0 : slp.alpha;
+    SL.back = SL.dir < 0;                  /* Power again during the fade: back from where it is, as it was */
+    SL.dir = 1;
+    SL.black = 0;
+    SL.t = SL.back ? (1 - tk_sqrtf(tk_clampf(a, 0, 1))) / 1.6f : 0;    /* the wake's opacity curve inverted */
+    sl_place();
+}
+
 static int tween(float *v, float target, float dur_s, float dt)
 {
     if (*v == target) return 0;
@@ -2583,6 +2671,22 @@ int sh_tick(float dt, float t)
 {
     int mv = 0;
     now_ms = t;
+    if (SL.dir) {
+        SL.t = tk_minf(1, SL.t + dt / (SL.dir < 0 ? SL_OUT : SL_IN));
+        if (SL.t >= 1) {
+            if (SL.dir < 0) {
+                SL.black = 1;
+                SL.dir = 0;
+                back_to_lock(0);                 /* in the dark: the lock screen for the wake */
+                sl_place();
+                sh_slept();                      /* the kernel: the panel off after this black frame */
+                return 1;
+            }
+            SL.dir = 0;
+        }
+        sl_place();
+        mv = 1;
+    }
     if (sp_lock.live) {
         int live = tk_spring_step(&sp_lock, dt);
         set_lock(sp_lock.x);
@@ -2829,7 +2933,7 @@ int sh_moving(void)
     int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB ||
             T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || T.kind == G_CC || T.kind == G_CCSL || sp_cc.live ||
             T.kind == G_APP || sp_app.live || booting || toast_t < 1 || em_t < 1 || T.kind == G_CCEM ||
-            T.kind == G_CCCELL || CF.down || CF.a != CF.at;
+            T.kind == G_CCCELL || CF.down || CF.a != CF.at || SL.dir;
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live;
     return m;

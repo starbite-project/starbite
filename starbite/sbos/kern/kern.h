@@ -492,6 +492,11 @@ void kui_confirm(const char *title, const char *l1, const char *l2, const char *
                  void (*done)(int ok));
 void kui_power_menu(void);
 void kui_screen_changed(int on);
+/* P2r (Starbite OS Next): the UI's own screen off / on (no classic black frame) and the Power key's or the screen-off
+ * timer's fade first (1: the UI turns the screen off itself, through power_screen_set, when the fade has ended;
+ * key: the Power key, whose second press during the fade undoes it) */
+extern void (*kui_screen_hook)(int on);
+extern int (*kui_sleep_hook)(int key);
 void kui_sos_changed(void);
 int kui_screen(void);
 void ui_ktimer(unsigned id);

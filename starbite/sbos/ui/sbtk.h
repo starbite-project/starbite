@@ -193,6 +193,14 @@ typedef struct {
     int last_half, last_px;
     uint64_t last_us, us_comp, us_present;
     uint32_t ground_gen;       /* bumped when base_half / bw_half change: the next frame redraws everything */
+    /* P2r, two panel buffers (tear-free flips): acquire (NULL: one buffer) returns the buffer the display does not
+     * read, after the last flip latched; that buffer holds the frame before the last, so the present also brings
+     * over what the last presented frame changed (pd, its panel rects; pd_half: drawn from the half canvas) */
+    uint32_t *(*acquire)(void *ctx);
+    void *acq_ctx;
+    tk_irect pd[16];
+    int npd, pd_half;
+    uint64_t us_wait, us_catch;  /* the last frame's wait for the free buffer and its catch-up pass */
 } tk_comp;
 int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocated */
 /* render a group's children (as if the group were at identity) into a screen-sized transparent bitmap and their

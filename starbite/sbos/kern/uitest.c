@@ -152,6 +152,7 @@ static void logline(const char *what, int a)
 #ifdef SBOS_SELFTEST_NEXT
 void next_selftest_begin(void);
 int next_selftest_step(void), next_selftest_ready(void), next_selftest_failed(void), next_selftest_clock_ok(void);
+int next_selftest_flips_ok(void);
 #endif
 
 void selftest_start(void)
@@ -518,8 +519,9 @@ void selftest_timer(unsigned id)
             return;
         kt_cancel(KT_SELFTEST, 0);
         sb_log(next_selftest_failed() ? "selftest: next: FAILED (see above); a restart into recovery (pmsg)" :
-               next_selftest_clock_ok() ? "selftest: next: PASSED: clock check ok; the bake and the films ran (frame times above); a restart into recovery (pmsg)" :
-               "selftest: next: FAILED: clock check missing; a restart into recovery (pmsg)");
+               !next_selftest_clock_ok() ? "selftest: next: FAILED: clock check missing; a restart into recovery (pmsg)" :
+               next_selftest_flips_ok() ? "selftest: next: PASSED: clock check ok, flips ok (two buffers, no tearing); the bake and the films ran (frame times above); a restart into recovery (pmsg)" :
+               "selftest: next: PASSED: clock check ok, but flips OFF (one buffer: see 'next: flips' above); the bake and the films ran; a restart into recovery (pmsg)");
         active = 0;
         power_restart_recovery();
         return;

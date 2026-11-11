@@ -541,6 +541,8 @@ void power_key_short(void)
             screen(1);
         return;                                     /* SOS and the light keep the screen */
     }
+    if (K.screen_on && kui_sleep_hook && kui_sleep_hook(1))
+        return;                                     /* P2r: Next fades to black first and turns the screen off then */
     screen(!K.screen_on);
     if (K.screen_on)
         kui_lock();
@@ -636,6 +638,8 @@ void power_timer(unsigned id)
         kt_set(KT_POWER, 1, sb_ms(), 5000, 0);
         return;
     }
+    if (kui_sleep_hook && kui_sleep_hook(0))
+        return;                                     /* P2r: Next's fade, then the screen off */
     screen(0);
 }
 
