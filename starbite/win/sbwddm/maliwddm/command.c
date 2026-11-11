@@ -140,6 +140,22 @@ NTSTATUS APIENTRY MwRender(IN_CONST_HANDLE hContext, DXGKARG_RENDER *Arg)
     }
     priv->Count = count;
     priv->Reserved = MW_DMA_MAGIC;
+    {
+        /* T46: which renders listed each allocation (the highest sequence wins), so a GPU fault can tell whether the
+         * running submission listed the allocation it faulted in */
+        LONG seq = InterlockedIncrement(&ctx->Device->Adapter->RenderSeq);
+        priv->RenderSeq = seq;
+        for (UINT i = 0; i < Arg->AllocationListSize; i++) {
+            MW_ALLOCATION *a = (MW_ALLOCATION *)Arg->pAllocationList[i].hDeviceSpecificAllocation;
+            LONG cur = a != NULL ? a->LastListed : seq;
+            while (cur < seq) {
+                LONG seen = InterlockedCompareExchange(&a->LastListed, seq, cur);
+                if (seen == cur)
+                    break;
+                cur = seen;
+            }
+        }
+    }
     /* S9 port (T13i): the runtime reuses DMA private-data buffers. Upstream left a previous present's op in
      * place, so render submissions replayed stale presents (T13h: 853 flips carried out for 92 flip presents,
      * 1,137 blts for 458), through allocation pointers that may since have been freed. */
@@ -1156,6 +1172,189 @@ static void HangCapture(MW_ADAPTER *A, ULONG Slot, const MW_HANG_VIEW *V)
     A->HangCount = n + 1;
 }
 
+/* ---- T46: fault forensics ---- */
+
+/* Add Alloc to, or take it off, the live list, under the interrupt lock (Reap walks the list there). Without a
+ * connected interrupt nothing else can walk it, so the change is then made directly. PASSIVE_LEVEL. */
+typedef struct { MW_ADAPTER *A; MW_ALLOCATION *Alloc; BOOLEAN Add; } MW_SYNC_LIVE;
+
+static BOOLEAN SyncLive(PVOID Context)
+{
+    MW_SYNC_LIVE *l = (MW_SYNC_LIVE *)Context;
+    if (l->Add && !l->Alloc->InLive) {
+        InsertTailList(&l->A->LiveAllocs, &l->Alloc->Live);
+        l->Alloc->InLive = TRUE;
+        l->A->LiveCount++;
+    } else if (!l->Add && l->Alloc->InLive) {
+        RemoveEntryList(&l->Alloc->Live);
+        l->Alloc->InLive = FALSE;
+        l->A->LiveCount--;
+    }
+    return TRUE;
+}
+
+void MwLiveLink(MW_ADAPTER *A, MW_ALLOCATION *Alloc, BOOLEAN Add)
+{
+    MW_SYNC_LIVE l = { A, Alloc, Add };
+    BOOLEAN ret = FALSE;
+    if (A->Dxgk.DxgkCbSynchronizeExecution == NULL ||
+        !NT_SUCCESS(A->Dxgk.DxgkCbSynchronizeExecution(A->Dxgk.DeviceHandle, SyncLive, &l, 0, &ret)))
+        (void)SyncLive(&l);
+}
+
+/* A failed job, into the Faults ring. Interrupt level (Reap): register reads, a walk of the live list (changed only
+ * under this lock, non-paged), the GPU's own page table, plain stores. The job header at JS_HEAD cannot be mapped
+ * here; FaultPend asks MwFaultDescDpc (DISPATCH_LEVEL, before dxgkrnl hears of the dropped fence) to read it. */
+static void FaultRecord(MW_ADAPTER *A, ULONG Slot)
+{
+    MK_GPU *gpu = &A->Gpu;
+    LONG n = A->FaultCount;
+    MW_FAULT *f = &A->Faults[n & 15];
+    ULONG ms = (ULONG)((KeQueryInterruptTime() - A->StartTime) / 10000);
+    ULONG64 va = gpu->MmuIrqStatus != 0 ? gpu->LastFaultAddress : 0;
+    LONG next = A->FreedNext;
+    const MW_ALLOCATION *hit = NULL, *below = NULL, *above = NULL, *head = NULL;
+    ULONG walked = 0;
+
+    f->Seq = 0;
+    KeMemoryBarrier();
+    /* T39: this failure against the newest freed ranges (newest first) */
+    f->Va = va;
+    f->Status = gpu->MmuIrqStatus != 0 ? gpu->LastMmuFault : 0;
+    f->Js = A->LastJsStatus;
+    f->Ms = ms;
+    f->Submits = A->Submits;
+    f->Kind = va ? 1 : 0;                 /* 0 not an MMU fault, 1 not in a recently freed range */
+    f->FreedVa = 0;
+    for (LONG k = 1; va && k <= 256 && k <= next; k++) {
+        LONG i = (next - k) & 255;
+        ULONG64 base = A->Freed[i].Va, end = base + ((ULONG64)A->Freed[i].Pages << PAGE_SHIFT);
+        if (base && va >= (base & ~0xFFFULL) && va < end) {
+            f->Kind = 2;                  /* inside a range freed before */
+            f->FreedVa = base;
+            f->FreedPages = A->Freed[i].Pages;
+            f->Creator[0] = A->Freed[i].Creator[0];
+            f->Creator[1] = A->Freed[i].Creator[1];
+            f->AgoMs = ms - A->Freed[i].Ms;
+            break;
+        }
+    }
+    /* T46: the slot's JS_HEAD (before Reap's reset), and where the fault address and JS_HEAD fall among the live
+     * allocations */
+    f->Slot = Slot;
+    f->Head = MK_RD(gpu, JS_SLOT(Slot) + JS_HEAD_LO) | (ULONG64)MK_RD(gpu, JS_SLOT(Slot) + JS_HEAD_HI) << 32;
+    f->RunSeq = A->Queue[A->QHead].RenderSeq;   /* Reap: still the submission whose chain failed */
+    for (PLIST_ENTRY e = A->LiveAllocs.Flink; e != &A->LiveAllocs && walked < 0x10000; e = e->Flink, walked++) {
+        const MW_ALLOCATION *x = CONTAINING_RECORD(e, MW_ALLOCATION, Live);
+        ULONG64 end = x->GpuVa + ((ULONG64)x->Pages << PAGE_SHIFT);
+        if (x->GpuVa == 0)
+            continue;
+        if (f->Head >= x->GpuVa && f->Head < end)
+            head = x;
+        if (va == 0 || hit != NULL)
+            continue;
+        if (va >= x->GpuVa && va < end)
+            hit = x;
+        else if (x->GpuVa < va && (below == NULL || x->GpuVa > below->GpuVa))
+            below = x;
+        else if (x->GpuVa > va && (above == NULL || x->GpuVa < above->GpuVa))
+            above = x;
+    }
+    f->LiveCount = A->LiveCount;
+    f->Where = va == 0 ? MW_FAULT_NONE : hit != NULL ? MW_FAULT_IN_LIVE : MW_FAULT_IN_NONE;
+    f->PteNow = va != 0 && GpuPfn(gpu, va & ~(ULONG64)(PAGE_SIZE - 1)) != 0;
+    if (hit != NULL) {
+        A->FaultsInLive++;
+        f->LVa = hit->GpuVa;
+        f->LPages = hit->Pages;
+        f->LCreator[0] = hit->Creator[0];
+        f->LCreator[1] = hit->Creator[1];
+        f->LCreatedMs = hit->CreatedMs;
+        f->LMaps = hit->MapCount;
+        f->LUnmaps = hit->UnmapCount;
+        f->LMapMs = hit->LastMapMs;
+        f->LUnmapMs = hit->LastUnmapMs;
+        f->LListed = hit->LastListed;
+        f->LMapped = hit->Mapped;
+    } else if (va != 0) {
+        A->FaultsInNone++;
+        f->BelowVa = below ? below->GpuVa : 0;
+        f->BelowPages = below ? below->Pages : 0;
+        f->AboveVa = above ? above->GpuVa : 0;
+        f->AbovePages = above ? above->Pages : 0;
+    }
+    /* the job header: only from a live, mapped, write-combined allocation the GPU maps at JS_HEAD */
+    f->D0 = f->D4 = f->D5 = 0;
+    if (f->Head & 63) {
+        f->DescState = MW_FDESC_ALIGN;
+    } else {
+        PFN_NUMBER pfn = GpuPfn(gpu, f->Head);
+        if (head == NULL || !head->Mapped || head->FbAliased || head->Coherent || pfn == 0) {
+            f->DescState = MW_FDESC_NOALLOC;
+        } else {
+            f->DescState = MW_FDESC_PENDING;
+            A->FaultPend.Seq = 0;
+            KeMemoryBarrier();
+            A->FaultPend.Head = f->Head;
+            A->FaultPend.Pfn = pfn;
+            KeMemoryBarrier();
+            A->FaultPend.Seq = n + 1;
+        }
+    }
+    KeMemoryBarrier();
+    f->Seq = n + 1;
+    A->FaultCount = n + 1;
+}
+
+/* The DPC routine, DISPATCH_LEVEL, before DxgkCbNotifyDpc: the job header the newest fault record asked for. Reap has
+ * completed the faulted submission's fence, but dxgkrnl processes completions only in DxgkCbNotifyDpc, after this,
+ * so VidMm cannot have released the allocation yet. The page is mapped like the hang view (RAM only, write-combined,
+ * the reserved page, never while PollDpc holds it), and the read is kept only if the GPU still maps that page there
+ * afterwards. Reading through our own mapping of a RAM page cannot fault in any case. */
+void MwFaultDescDpc(MW_ADAPTER *A)
+{
+    LONG seq = A->FaultPend.Seq;
+    ULONG64 head;
+    PFN_NUMBER pfn;
+    MW_FAULT *f;
+    ULONG d0 = 0, d4 = 0, d5 = 0, state = MW_FDESC_NOVIEW;
+    PVOID va;
+
+    if (seq == 0 || seq == A->FaultPendDone)
+        return;
+    KeMemoryBarrier();
+    head = A->FaultPend.Head;
+    pfn = A->FaultPend.Pfn;
+    KeMemoryBarrier();
+    if (A->FaultPend.Seq != seq)
+        return;                           /* rewritten meanwhile: the newer one is read next time */
+    A->FaultPendDone = seq;
+    f = &A->Faults[(seq - 1) & 15];
+    if (A->HangMapVa != NULL && IsRam(A, pfn) && InterlockedCompareExchange(&A->HangViewBusy, 1, 0) == 0) {
+        MmInitializeMdl(&A->HangMdl.Mdl, NULL, PAGE_SIZE);
+        A->HangMdl.Mdl.MdlFlags |= MDL_PAGES_LOCKED;
+        MmGetMdlPfnArray(&A->HangMdl.Mdl)[0] = pfn;
+        va = MmMapLockedPagesWithReservedMapping(A->HangMapVa, MW_TAG, &A->HangMdl.Mdl, MmWriteCombined);
+        if (va != NULL) {
+            const volatile ULONG *w = (const volatile ULONG *)((const UCHAR *)va + (head & (PAGE_SIZE - 1)));
+            d0 = w[0];
+            d4 = w[4];
+            d5 = w[5];
+            KeMemoryBarrier();
+            state = GpuPfn(&A->Gpu, head) == pfn ? MW_FDESC_OK : MW_FDESC_CHANGED;
+            MmUnmapReservedMapping(A->HangMapVa, MW_TAG, &A->HangMdl.Mdl);
+            A->FaultDescReads++;
+        }
+        InterlockedExchange(&A->HangViewBusy, 0);
+    }
+    if (f->Seq != seq)
+        return;                           /* the record was reused */
+    f->D0 = d0;
+    f->D4 = d4;
+    f->D5 = d5;
+    f->DescState = state;
+}
+
 /* Collect the running chain's outcome. TRUE if it finished, either way. T44: View (SyncPoll only, may be NULL) is
  * PollDpc's CPU view of JS_HEAD's page, for the hang record. */
 static BOOLEAN Reap(MW_ADAPTER *A, BOOLEAN CheckTimeout, const MW_HANG_VIEW *View)
@@ -1206,33 +1405,7 @@ static BOOLEAN Reap(MW_ADAPTER *A, BOOLEAN CheckTimeout, const MW_HANG_VIEW *Vie
     }
     A->LastFaultStatus = gpu->LastMmuFault;
     A->LastFaultAddress = gpu->LastFaultAddress;
-    {
-        /* T39: this failure against the newest freed ranges (newest first) */
-        LONG n = A->FaultCount;
-        ULONG ms = (ULONG)((KeQueryInterruptTime() - A->StartTime) / 10000);
-        ULONG64 va = gpu->MmuIrqStatus != 0 ? gpu->LastFaultAddress : 0;
-        LONG next = A->FreedNext;
-        A->Faults[n & 15].Va = va;
-        A->Faults[n & 15].Status = gpu->MmuIrqStatus != 0 ? gpu->LastMmuFault : 0;
-        A->Faults[n & 15].Js = A->LastJsStatus;
-        A->Faults[n & 15].Ms = ms;
-        A->Faults[n & 15].Submits = A->Submits;
-        A->Faults[n & 15].Kind = va ? 1 : 0;      /* 0 not an MMU fault, 1 not in a recently freed range */
-        for (LONG k = 1; va && k <= 256 && k <= next; k++) {
-            LONG i = (next - k) & 255;
-            ULONG64 base = A->Freed[i].Va, end = base + ((ULONG64)A->Freed[i].Pages << PAGE_SHIFT);
-            if (base && va >= (base & ~0xFFFULL) && va < end) {
-                A->Faults[n & 15].Kind = 2;       /* inside a range freed before */
-                A->Faults[n & 15].FreedVa = base;
-                A->Faults[n & 15].FreedPages = A->Freed[i].Pages;
-                A->Faults[n & 15].Creator[0] = A->Freed[i].Creator[0];
-                A->Faults[n & 15].Creator[1] = A->Freed[i].Creator[1];
-                A->Faults[n & 15].AgoMs = ms - A->Freed[i].Ms;
-                break;
-            }
-        }
-        A->FaultCount = n + 1;
-    }
+    FaultRecord(A, slot);                 /* T39, T46 */
     A->Queue[A->QHead].Next = A->Queue[A->QHead].Count;
     gpu->Resets++;
     if (!MkGpuBringup(gpu))
@@ -1450,6 +1623,7 @@ static VOID VsyncDpc(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
 
 void MwCommandInit(MW_ADAPTER *A)
 {
+    InitializeListHead(&A->LiveAllocs);   /* T46 */
     /* T44: AddDevice (PASSIVE_LEVEL): one page of system address space for the hang forensics' view, and which PFNs
      * are RAM (only those are ever mapped there). Either missing: hangs are recorded without the descriptor. */
     if (A->HangMapVa == NULL) {
@@ -1563,6 +1737,7 @@ NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMIT
         sub.Count = priv->Count;
         RtlCopyMemory(sub.Commands, priv->Commands, sub.Count * sizeof(MW_COMMAND));
         RtlCopyMemory(sub.JcAlloc, priv->JcAlloc, sub.Count * sizeof(priv->JcAlloc[0]));   /* T44 */
+        sub.RenderSeq = priv->RenderSeq;  /* T46 */
     }
 
     sync.A = a;

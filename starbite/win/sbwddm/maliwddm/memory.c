@@ -99,6 +99,8 @@ static NTSTATUS NewAllocation(MW_ADAPTER *A, const MW_ALLOCATION_INFO *In, DXGK_
 
     A->Allocations++;
     A->LastAllocVa = alloc->GpuVa;
+    alloc->CreatedMs = (ULONG)((KeQueryInterruptTime() - A->StartTime) / 10000);
+    MwLiveLink(A, alloc, TRUE);           /* T46: findable from a GPU fault */
     Out->hAllocation = alloc;
     Out->Size = alloc->Size;
     Out->Alignment = 0;
@@ -119,6 +121,7 @@ static NTSTATUS NewAllocation(MW_ADAPTER *A, const MW_ALLOCATION_INFO *In, DXGK_
 
 static void FreeAllocation(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
 {
+    MwLiveLink(A, Alloc, FALSE);          /* T46: off the live list before anything goes */
     /* T13g: never leave the refresh pointing at freed memory */
     (void)InterlockedCompareExchangePointer((PVOID volatile *)&A->ShowAlloc, NULL, Alloc);
     (void)InterlockedCompareExchangePointer((PVOID volatile *)&A->ScanAlloc, NULL, Alloc);
@@ -352,6 +355,8 @@ NTSTATUS APIENTRY MwBuildPagingBuffer(IN_CONST_HANDLE hAdapter, DXGKARG_BUILDPAG
             st = MkMmuMapPages(&a->Gpu, alloc->GpuVa, pfn, pages, nx);
         }
         alloc->Mapped = NT_SUCCESS(st);
+        alloc->MapCount++;                  /* T46 */
+        alloc->LastMapMs = (ULONG)((KeQueryInterruptTime() - a->StartTime) / 10000);
         if (alloc->CpuMap && alloc->Mdl)    /* a view of the previous pages */
             MmUnmapLockedPages(alloc->CpuMap, alloc->Mdl);
         alloc->CpuMap = NULL;
@@ -381,6 +386,8 @@ NTSTATUS APIENTRY MwBuildPagingBuffer(IN_CONST_HANDLE hAdapter, DXGKARG_BUILDPAG
         if (alloc->Mapped)
             MkMmuUnmapPages(&a->Gpu, alloc->GpuVa, alloc->Pages);
         alloc->Mapped = FALSE;
+        alloc->UnmapCount++;                /* T46 */
+        alloc->LastUnmapMs = (ULONG)((KeQueryInterruptTime() - a->StartTime) / 10000);
         if (alloc->CpuMap && alloc->Mdl)
             MmUnmapLockedPages(alloc->CpuMap, alloc->Mdl);
         alloc->CpuMap = NULL;

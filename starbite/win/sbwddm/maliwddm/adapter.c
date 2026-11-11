@@ -62,7 +62,7 @@ void MwLogSz(MW_ADAPTER *A, PCWSTR Name, const char *Text)
     HANDLE key, sub;
     UNICODE_STRING name, subName = RTL_CONSTANT_STRING(L"sbwddm");
     OBJECT_ATTRIBUTES oa;
-    static WCHAR w[6144];                 /* the guard thread only (T44: 6144 for Live_HangLog) */
+    static WCHAR w[8192];                 /* the guard thread only (T44/T46: Live_HangLog, Live_FaultLog) */
     ULONG n = 0;
 
     if (A == NULL || A->Pdo == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL)
@@ -83,36 +83,88 @@ void MwLogSz(MW_ADAPTER *A, PCWSTR Name, const char *Text)
     ZwClose(key);
 }
 
-/* T39: the newest 16 failed jobs as text, when there are new ones (guard thread, once a second). */
+static const char *JobTypeName(ULONG T);
+
+/* T39: the newest 16 failed jobs as text, when there are new ones (guard thread, once a second).
+ * T46: for an MMU fault, where its address falls among the live allocations (LIVE: that allocation, its paging state
+ * and whether the running submission listed it; NONE: the nearest live allocations below and above), and the slot's
+ * JS_HEAD with the job type the DPC read there. */
 void MwFaultLog(MW_ADAPTER *A)
 {
-    static char t[2048];
+    static char t[8192];
+    static const char *const why[] = { "unread", "", "no view", "head in no mapped allocation", "page changed",
+                                       "head unaligned" };
     LONG n = A->FaultCount, first = n > 16 ? n - 16 : 0;
     size_t used = 0;
+    MW_FAULT f;
     if (n == A->FaultLogged)
         return;
     A->FaultLogged = n;
     t[0] = 0;
-    for (LONG k = first; k < n && used + 160 < sizeof(t); k++) {
-        const char *cr = (const char *)A->Faults[k & 15].Creator;
+    for (LONG k = first; k < n && used + 520 < sizeof(t); k++) {
+        const MW_FAULT *r = &A->Faults[k & 15];
+        LONG seq = r->Seq;
+        KeMemoryBarrier();
+        RtlCopyMemory(&f, (const void *)r, sizeof(f));
+        KeMemoryBarrier();
+        if (seq != k + 1 || r->Seq != seq) {
+            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, "#%ld overwritten while read; ", k + 1);
+            used = strlen(t);
+            continue;
+        }
+        const char *cr = (const char *)f.Creator;
         char c[9] = { 0 };
         for (int j = 0; j < 8; j++)
             c[j] = cr[j] >= 32 && cr[j] < 127 ? cr[j] : (cr[j] ? '?' : 0);
-        if (A->Faults[k & 15].Kind == 2)
+        if (f.Kind == 2)
             (void)RtlStringCbPrintfA(t + used, sizeof(t) - used,
-                "#%ld %lu.%03lus js 0x%02lx mmu 0x%08lx va 0x%llx IN A FREED RANGE 0x%llx+%lu pages of %s, freed %lu ms before; ",
-                k + 1, A->Faults[k & 15].Ms / 1000, A->Faults[k & 15].Ms % 1000, A->Faults[k & 15].Js,
-                A->Faults[k & 15].Status, A->Faults[k & 15].Va, A->Faults[k & 15].FreedVa, A->Faults[k & 15].FreedPages,
-                c, A->Faults[k & 15].AgoMs);
+                "#%ld %lu.%03lus js 0x%02lx mmu 0x%08lx va 0x%llx IN A FREED RANGE 0x%llx+%lu pages of %s, freed %lu ms before",
+                k + 1, f.Ms / 1000, f.Ms % 1000, f.Js, f.Status, f.Va, f.FreedVa, f.FreedPages, c, f.AgoMs);
         else
-            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, "#%ld %lu.%03lus js 0x%02lx mmu 0x%08lx va 0x%llx %s; ",
-                k + 1, A->Faults[k & 15].Ms / 1000, A->Faults[k & 15].Ms % 1000, A->Faults[k & 15].Js,
-                A->Faults[k & 15].Status, A->Faults[k & 15].Va,
-                A->Faults[k & 15].Kind ? "not in a recently freed range" : "no MMU fault");
+            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, "#%ld %lu.%03lus js 0x%02lx mmu 0x%08lx va 0x%llx %s",
+                k + 1, f.Ms / 1000, f.Ms % 1000, f.Js, f.Status, f.Va,
+                f.Kind ? "not in a recently freed range" : "no MMU fault");
+        used = strlen(t);
+        if (f.Where == MW_FAULT_IN_LIVE) {
+            const char *lc = (const char *)f.LCreator;
+            char l[9] = { 0 };
+            char listed[48];
+            for (int j = 0; j < 8; j++)
+                l[j] = lc[j] >= 32 && lc[j] < 127 ? lc[j] : (lc[j] ? '?' : 0);
+            if (f.LListed == f.RunSeq)
+                (void)RtlStringCbCopyA(listed, sizeof(listed), "listed by the running submission");
+            else if (f.LListed > f.RunSeq)
+                (void)RtlStringCbPrintfA(listed, sizeof(listed), "listed %ld renders later", f.LListed - f.RunSeq);
+            else if (f.LListed == 0)
+                (void)RtlStringCbCopyA(listed, sizeof(listed), "NEVER listed");
+            else
+                (void)RtlStringCbPrintfA(listed, sizeof(listed), "NOT listed (last %ld renders before)",
+                                         f.RunSeq - f.LListed);
+            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used,
+                " | LIVE 0x%llx+%lup %s age %lu ms, mapped %u pte %u, maps %lu (last %ld ms ago) unmaps %lu (last %ld ms ago), %s",
+                f.LVa, f.LPages, l[0] ? l : "?", f.Ms - f.LCreatedMs, f.LMapped, f.PteNow, f.LMaps,
+                f.LMaps ? (LONG)(f.Ms - f.LMapMs) : -1L, f.LUnmaps, f.LUnmaps ? (LONG)(f.Ms - f.LUnmapMs) : -1L, listed);
+        } else if (f.Where == MW_FAULT_IN_NONE) {
+            ULONG64 bend = f.BelowVa + ((ULONG64)f.BelowPages << PAGE_SHIFT);
+            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used,
+                " | NONE of %lu live, pte %u: below 0x%llx+%lup (ends 0x%llx, %lld bytes before va) above 0x%llx+%lup (%lld bytes after va)",
+                f.LiveCount, f.PteNow, f.BelowVa, f.BelowPages, bend, f.BelowVa ? (LONG64)(f.Va - bend) : -1LL,
+                f.AboveVa, f.AbovePages, f.AboveVa ? (LONG64)(f.AboveVa - f.Va) : -1LL);
+        }
+        used = strlen(t);
+        if (f.DescState == MW_FDESC_OK)
+            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, " | slot %lu head 0x%llx job %s idx %lu dep %lu/%lu exc 0x%lx; ",
+                f.Slot, f.Head, JobTypeName((f.D4 >> 1) & 0x7F), f.D4 >> 16, f.D5 & 0xFFFF, f.D5 >> 16, f.D0);
+        else
+            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, " | slot %lu head 0x%llx job ? (%s); ", f.Slot, f.Head,
+                f.DescState < RTL_NUMBER_OF(why) ? why[f.DescState] : "?");
         used = strlen(t);
     }
     MwLogSz(A, L"Live_FaultLog", t);
     MwLog(A, L"Live_FaultCount", (ULONG)n);
+    MwLog(A, L"Live_FaultsInLive", A->FaultsInLive);
+    MwLog(A, L"Live_FaultsInNone", A->FaultsInNone);
+    MwLog(A, L"Live_FaultDescReads", A->FaultDescReads);
 }
 
 /* T44: Mesa's genxml v6.xml "Job Type" (Job Header word 4, bits [7:1]) */
@@ -462,6 +514,7 @@ static BOOLEAN APIENTRY MwInterruptRoutine(IN_CONST_PVOID Context, IN_ULONG Mess
 static VOID APIENTRY MwDpcRoutine(IN_CONST_PVOID Context)
 {
     MW_ADAPTER *a = (MW_ADAPTER *)Context;
+    MwFaultDescDpc(a);                    /* T46: before dxgkrnl processes the dropped fence */
     a->Dxgk.DxgkCbNotifyDpc(a->Dxgk.DeviceHandle);
 }
 

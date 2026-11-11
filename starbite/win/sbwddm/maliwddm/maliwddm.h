@@ -69,6 +69,12 @@ typedef struct _MW_ALLOCATION {
     LONG ScanSlot;              /* T24: the scanout buffer this full-screen primary renders into (-1: none) */
     PVOID CpuMapCached;         /* T26: a cached view for blt-present reads, invalidated line by line before use */
     ULONG Creator[2];           /* T31: the image name (8 chars) of the process that created it */
+    /* T46 (fault forensics): on the adapter's LiveAllocs list from creation to destruction; the list is changed only
+     * under the interrupt lock, so Reap (the ISR or SyncPoll) can walk it. The rest is written racily (diagnostics). */
+    LIST_ENTRY Live;
+    BOOLEAN InLive;
+    volatile LONG LastListed;   /* the highest render sequence (MW_ADAPTER.RenderSeq) whose allocation list had it */
+    ULONG CreatedMs, MapCount, UnmapCount, LastMapMs, LastUnmapMs;   /* BuildPagingBuffer's map/unmap of it */
 } MW_ALLOCATION;
 
 typedef struct _MW_ADAPTER MW_ADAPTER;
@@ -134,6 +140,7 @@ typedef struct _MW_DMA_PRIVATE {
     /* T44: the allocation (from this render's list) each chain starts in. VidMm keeps every listed allocation
      * resident and alive until the submission's fence completes, so the hang forensics may look at them. */
     struct _MW_ALLOCATION *JcAlloc[MW_MAX_COMMANDS];
+    LONG RenderSeq;             /* T46: this render's sequence number (stamped on every allocation it lists) */
 } MW_DMA_PRIVATE;
 
 /* A submission the hardware works through, one job chain at a time. */
@@ -145,7 +152,36 @@ typedef struct _MW_SUBMISSION {
     ULONG Count, Next;          /* commands, and the next one to start */
     MW_COMMAND Commands[MW_MAX_COMMANDS];
     struct _MW_ALLOCATION *JcAlloc[MW_MAX_COMMANDS];   /* T44: see MW_DMA_PRIVATE */
+    LONG RenderSeq;             /* T46: MW_DMA_PRIVATE.RenderSeq */
 } MW_SUBMISSION;
+
+/* T39/T46: one failed job (MMU fault, job status error or timeout), recorded by Reap at interrupt level. */
+#define MW_FAULT_NONE           0   /* Where: not an MMU fault */
+#define MW_FAULT_IN_LIVE        1   /* the fault address is inside a live allocation (L*) */
+#define MW_FAULT_IN_NONE        2   /* inside no live allocation (Below*, Above*: the nearest ones) */
+#define MW_FDESC_PENDING        0   /* DescState: the DPC reads the job header at JS_HEAD */
+#define MW_FDESC_OK             1   /* D0/D4/D5 = Job Header words 0, 4, 5 at JS_HEAD */
+#define MW_FDESC_NOVIEW         2   /* no CPU view (the page in use by the hang view, not RAM, or no reserved page) */
+#define MW_FDESC_NOALLOC        3   /* JS_HEAD in no live, mapped, write-combined allocation, or not mapped by the GPU */
+#define MW_FDESC_CHANGED        4   /* the GPU's page at JS_HEAD changed while it was read */
+#define MW_FDESC_ALIGN          5   /* JS_HEAD not 64-byte aligned */
+typedef struct _MW_FAULT {
+    ULONG64 Va, FreedVa;
+    ULONG Status, Js, Ms, AgoMs, FreedPages, Creator[2], Kind, Submits;
+    /* T46 */
+    volatile LONG Seq;          /* fault number + 1, stored last by Reap */
+    ULONG Slot, Where, DescState, D0, D4, D5;
+    ULONG64 Head;               /* the faulting slot's JS_HEAD */
+    LONG RunSeq;                /* the running submission's render sequence */
+    /* Where == MW_FAULT_IN_LIVE: the allocation and what the KMD knows of its state at the fault */
+    ULONG64 LVa;
+    ULONG LPages, LCreator[2], LCreatedMs, LMaps, LUnmaps, LMapMs, LUnmapMs;
+    LONG LListed;               /* its LastListed */
+    BOOLEAN LMapped, PteNow;    /* resident per BuildPagingBuffer; the GPU page table maps the fault page now */
+    /* Where == MW_FAULT_IN_NONE */
+    ULONG64 BelowVa, AboveVa;
+    ULONG BelowPages, AbovePages, LiveCount;
+} MW_FAULT;
 
 /* T44 (hang forensics): one GPU hang, i.e. a chain past MW_JOB_TIMEOUT_MS or its submission past
  * MW_SUB_TIMEOUT_MS, captured by Reap at the device's interrupt level just before the hard stop. Diagnostics only. */
@@ -349,7 +385,7 @@ struct _MW_ADAPTER {
      * still used it. Read racily from the ISR (diagnostics only). Live_FaultLog (REG_SZ) has the text. */
     struct { ULONG64 Va; ULONG Pages; ULONG Creator[2]; ULONG Ms; } Freed[256];
     volatile LONG FreedNext;
-    struct { ULONG64 Va, FreedVa; ULONG Status, Js, Ms, AgoMs, FreedPages, Creator[2], Kind, Submits; } Faults[16];
+    MW_FAULT Faults[16];
     volatile LONG FaultCount;
     LONG FaultLogged;
     /* T41: GPU hang recovery */
@@ -366,6 +402,14 @@ struct _MW_ADAPTER {
     ULONG HangViews, HangViewFails;
     ULONG RamRuns;                          /* the PFN ranges that are RAM (MmGetPhysicalMemoryRanges at AddDevice) */
     struct { ULONG64 First, End; } RamRun[32];
+    /* T46: fault forensics. Every live allocation (changed under the interrupt lock only), the render sequence, the
+     * fault counts by where the address fell, and the job header read the DPC owes the newest fault record. */
+    LIST_ENTRY LiveAllocs;
+    ULONG LiveCount;
+    volatile LONG RenderSeq;
+    ULONG FaultsInLive, FaultsInNone, FaultDescReads;
+    struct { volatile LONG Seq; ULONG64 Head; PFN_NUMBER Pfn; } FaultPend;
+    LONG FaultPendDone;
 };
 
 /* ---- trace: Seen_<ddi>, Fail_<ddi> in the device's registry key ---- */
@@ -438,6 +482,8 @@ BOOLEAN MwJobInterrupt(MW_ADAPTER *A);    /* from the ISR, at DIRQL */
 void MwCommandInit(MW_ADAPTER *A);
 void MwCommandStop(MW_ADAPTER *A);
 void MwCommandFini(MW_ADAPTER *A);        /* T44: RemoveDevice (PASSIVE_LEVEL) */
+void MwLiveLink(MW_ADAPTER *A, struct _MW_ALLOCATION *Alloc, BOOLEAN Add);   /* T46: PASSIVE_LEVEL */
+void MwFaultDescDpc(MW_ADAPTER *A);       /* T46: from the DPC routine, DISPATCH_LEVEL */
 void MwRefreshScanout(MW_ADAPTER *A);
 void MwShow(MW_ADAPTER *A, struct _MW_ALLOCATION *P, BOOLEAN NewContent);
 ULONG MwFbSamples(MW_ADAPTER *A);

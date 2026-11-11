@@ -1947,6 +1947,30 @@ Every app failure must be a removed device that the app or DWM recovers from.
 - **The plan:** run T44 (with the OpenGL tests, WIN11-GPU-CAPS.md §6). If it passes, install it so the user's own
   sessions record hangs too.
 
+### 6.53 T46: GPU-fault forensics (sbwddm 951c37e4)
+
+- **Why:** T42 showed more GPU MMU faults than T41 (115 vs 90), all level-3 read translation faults from many
+  shader cores at a few VAs, "not in a recently freed range". Two candidates:
+  - VidMm evicted or unmapped an allocation that the GPU still reads through descriptors, because a later submission
+    did not list it (memory load was 86-93%);
+  - a garbage or overrun address.
+- **`memory.c`:** every allocation joins a live list at creation and leaves it before it is freed. That list changes
+  only inside `DxgkCbSynchronizeExecution`. Each allocation also counts its maps and unmaps, with the time of the
+  last one.
+- **`command.c`:** each Render gets a sequence number, stamped on every allocation in its allocation list, and each
+  submission keeps its own.
+- **At a fault** (ISR or poll, under the interrupt lock) the record finds the faulting VA and the slot's `JS_HEAD`
+  among the live allocations:
+  - inside one: its range, creator process, `mapped` and `pte` state, unmap count, and whether the running
+    submission listed it;
+  - in none: the nearest allocations below and above.
+- **The job header** is read afterwards in the DPC through T44's reserved-page view, before dxgkrnl learns of the
+  fence.
+- **`Live_FaultLog` gains these fields;** new counters `Live_FaultsInLive`, `Live_FaultsInNone`,
+  `Live_FaultDescReads`.
+- **Recovery and timeouts are unchanged.**
+- **Stage `sbwddm-t46`:** diagnostic, no install.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
