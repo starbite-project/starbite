@@ -730,12 +730,8 @@ static uint32_t cpu_px(unsigned x, unsigned y, uint32_t bg)
         const struct quad *q = &Q[i];
         if (fx < q->cx0 || fx >= q->cx1 || fy < q->cy0 || fy >= q->cy1)
             continue;
-        float cov = 1, lsdv = 0, lgx = 0, lgy = 0;
-        if (q->flags & GC_LENS) {            /* v9: the glass shape's coverage and the lens's distance and normal */
-            float r = q->radius >= .01f ? q->radius : .01f;
-            lsdv = lens_sd(fx, fy, q->lx + q->lw * .5f, q->ly + q->lh * .5f, q->lw * .5f - r, q->lh * .5f - r, r, &lgx, &lgy);
-            cov = clampf(.5f - lsdv);
-        } else if (q->radius >= .01f) {
+        float cov = 1;
+        if (q->radius >= .01f) {
             float hx = (q->cx1 - q->cx0) * .5f, hy = (q->cy1 - q->cy0) * .5f;
             float px = fx - (q->cx0 + hx), py = fy - (q->cy0 + hy);
             px = px < 0 ? -px : px;
@@ -834,14 +830,14 @@ static void make_comp2_scene(void)
     const uint32_t *bgp = POOL_CPU(TEX_BG), *cd = POOL_CPU(TEX_CARD), *half = POOL_CPU(BUF_HALF);
     /* the wallpaper (bilinear 2x), a glass card (the blurred half buffer through the mask, then the card at .8),
      * a faded card (fades at 1500..1600 and 1900..2000), a 3-sliced pill, a solid inside a rounded clip */
-    G[ng++] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    G[ng++] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     G[ng++] = (struct gc_quad){ cd, 600, 600, 300, GC_GLASS, 0, .8f, 400, 500, 1, 1, 400, 500, 1000, 800, 0, 0, 0, 0, 0, 0, 0, 0,
-                                POOL_CPU(MASK_CARD), 600, half, 720, .5f, 720, 1480, 0, 0, 0, 0 };
+                                POOL_CPU(MASK_CARD), 600, half, 720, .5f, 720, 1480, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     G[ng++] = (struct gc_quad){ cd, 600, 600, 300, GC_FADE | GC_BILINEAR, 0, 1, 100, 1450, .5f, 1, 100, 1450, 1300, 2050, 0,
-                                1500, 1600, 1900, 2000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                                1500, 1600, 1900, 2000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     G[ng++] = (struct gc_quad){ pl, 200, 200, 60, GC_SLICE_H, 0, 1, 300, 2300, 1, 1, 300, 2300, 800, 2360, 0, 0, 0, 0, 0,
-                                500, 30, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    G[ng++] = (struct gc_quad){ 0, 0, 200, 100, GC_SOLID, 0xccffffffU, 1, 1000, 2500, 1, 1, 900, 2450, 1250, 2650, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                                500, 30, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    G[ng++] = (struct gc_quad){ 0, 0, 200, 100, GC_SOLID, 0xccffffffU, 1, 1000, 2500, 1, 1, 900, 2450, 1250, 2650, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     /* v9: a Liquid Glass card (its lens over the blurred half buffer, from the shape), the card at .8 on top */
     {
         struct gc_quad L = { 0 };
@@ -856,7 +852,8 @@ static void make_comp2_scene(void)
         L.lb = lp.lb; L.lt = lp.lt; L.lc = lp.lc; L.lr = lp.lr;
         G[ng++] = L;
     }
-    G[ng++] = (struct gc_quad){ cd, 600, 600, 300, GC_BILINEAR, 0, .8f, 760, 60, 1, 1, 760, 60, 1360, 360, 0 };
+    G[ng++] = (struct gc_quad){ .src = cd, .stride = 600, .w = 600, .h = 300, .flags = GC_BILINEAR, .alpha = .8f, .dx0 = 760,
+                                .dy0 = 60, .isx = 1, .isy = 1, .cx0 = 760, .cy0 = 60, .cx1 = 1360, .cy1 = 360 };
 }
 
 static float slice_c(float v, float len, float s0, float s1, float srch)
@@ -885,8 +882,12 @@ static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
         const struct gc_quad *q = &cq[i];
         if (fx < q->cx0 || fx >= q->cx1 || fy < q->cy0 || fy >= q->cy1)
             continue;
-        float cov = 1;
-        if (q->radius >= .01f) {
+        float cov = 1, lsdv = 0, lgx = 0, lgy = 0;
+        if (q->flags & GC_LENS) {            /* v9: the glass shape's coverage and the lens's distance and normal */
+            float r = q->radius >= .01f ? q->radius : .01f;
+            lsdv = lens_sd(fx, fy, q->lx + q->lw * .5f, q->ly + q->lh * .5f, q->lw * .5f - r, q->lh * .5f - r, r, &lgx, &lgy);
+            cov = clampf(.5f - lsdv);
+        } else if (q->radius >= .01f) {
             float hx = (q->cx1 - q->cx0) * .5f, hy = (q->cy1 - q->cy0) * .5f;
             float px = fx - (q->cx0 + hx), py = fy - (q->cy0 + hy);
             px = px < 0 ? -px : px;
@@ -992,14 +993,14 @@ static void motion_scene(float dy)
 {
     const uint32_t *bgp = POOL_CPU(TEX_BG), *cd = POOL_CPU(TEX_CARD);
     ngm = 0;
-    GM[ngm++] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    GM[ngm++] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     for (unsigned i = 0; i < 16U; ++i) {
         float x = 120.0f + (float)(i % 2) * 40.0f, y = 600.0f + (float)i * 260.0f + dy;
         GM[ngm++] = (struct gc_quad){ cd, 600, 600, 300, GC_BILINEAR, 0, .92f, x, y, .5f, 1, x, y, x + 1200.0f, y + 300.0f, 60,
-                                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     }
     GM[ngm++] = (struct gc_quad){ 0, 0, 400, 18, GC_SOLID, 0xccffffffU, 1, 520, 2880, 1, 1, 520, 2880, 920, 2898, 9,
-                                  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                                  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 }
 
 /* ---- the self test's steps ---------------------------------------------------------------------------------- */
@@ -1205,12 +1206,12 @@ int gpucomp_selftest_step(void)
         __asm__ volatile("dsb sy" ::: "memory");
         static struct gc_quad V[4];
         const uint32_t *bgp = POOL_CPU(TEX_BG), *cd = POOL_CPU(TEX_CARD);
-        V[0] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-        V[1] = (struct gc_quad){ sp, 256, 256, 256, 0, 0, 1, 600, 1600, 1, 1, 600, 1600, 856, 1856, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        V[0] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        V[1] = (struct gc_quad){ sp, 256, 256, 256, 0, 0, 1, 600, 1600, 1, 1, 600, 1600, 856, 1856, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
         V[1].occ = occ;
         V[1].occ_w = V[1].occ_h = 8;
-        V[2] = (struct gc_quad){ cd, 600, 600, 300, 0, 0, .9f, 200, 300, 1, 1, 200, 300, 800, 600, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-        V[3] = (struct gc_quad){ 0, 0, 900, 900, GC_SOLID, 0xff402060U, 1, 100, 100, 1, 1, 100, 100, 1000, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        V[2] = (struct gc_quad){ cd, 600, 600, 300, 0, 0, .9f, 200, 300, 1, 1, 200, 300, 800, 600, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        V[3] = (struct gc_quad){ 0, 0, 900, 900, GC_SOLID, 0xff402060U, 1, 100, 100, 1, 1, 100, 100, 1000, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
         uint64_t us = 0;
         if (!gpucomp_compose((void *)SB_FB, bg, V, 4, &us)) {
             fail("the bins' test did not run");
