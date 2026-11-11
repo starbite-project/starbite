@@ -1755,6 +1755,21 @@ static void calc_tap(float x, float y)
     build_calc();
 }
 
+/* P3b: the Flashlight app: one big switch (iOS's torch control), the same LED as the lock's button and the CC */
+static void page_light(dc *d)
+{
+    d_h1(d, "Flashlight");
+    int on = Q[0].lit;
+    d_rrect(d, 135, 250, 120, 240, 34, on ? tk_hex(0xffffff, 1) : W(.16f));
+    d_rrect(d, 135, on ? 250 : 370, 120, 120, 34, on ? tk_hex(0xffd60a, 1) : W(.32f));
+    const char *t = on ? "On" : "Off";
+    float w = tw(TK_IT600, 20, t, 0, 0);
+    d_text(d, TK_IT600, 20, (390 - w) / 2, bl(TK_IT600, 20, 520), t, 0, 0, INK, 0);
+    const char *h = "Tap to turn the LED on or off";
+    w = tw(TK_IT400, 15, h, 0, 0);
+    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 556), h, 0, 0, W(.5f), 0);
+}
+
 static tk_layer apkey, apnum;
 static void build_apnum(void)
 {
@@ -1809,7 +1824,7 @@ static void build_app_page(int a)
 {
     const char *k = APPS[a].k;
     int own = !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
-              !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc");
+              !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light");
     if (own) {
         for (int i = 0; i < NST; i++) {
             dc d = strip_dc(i, "app-page");
@@ -1820,6 +1835,7 @@ static void build_app_page(int a)
             else if (!tk_strcmp(k, "photos")) page_photos(&d);
             else if (!tk_strcmp(k, "clock")) page_clock(&d);
             else if (!tk_strcmp(k, "calc")) page_calc(&d);
+            else if (!tk_strcmp(k, "light")) page_light(&d);
             else page_camera(&d);
             tk_layer_prepare(&appst[i]);
         }
@@ -2254,6 +2270,15 @@ static void app_tap(float x, float y)
         clk_tap(x, y);
     } else if (is_app("calc")) {
         calc_tap(x, y);
+    } else if (is_app("light")) {
+        if (x >= 135 && x < 255 && y >= 250 && y < 490) {
+            Q[0].lit = !Q[0].lit;
+            Q[0].facelit.hidden = Q[0].iconlit.hidden = !Q[0].lit;
+            Q[0].face.hidden = Q[0].icon.hidden = Q[0].lit;
+            sh_torch(Q[0].lit);
+            lock_ver++;
+            build_app_page(AP.a);
+        }
     } else if (is_app("settings")) {
         if (x >= 16 && x < 374 && y >= 182 && y < 229) {
             if (cell_running()) { sh_modem(0); toast("Modem stopped"); }
