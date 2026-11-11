@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- SPDX-License-Identifier: APSL-2.0 -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>org.starbite.driver.StarbiteBattery</string>
+	<key>CFBundleName</key>
+	<string>StarbiteBattery</string>
+	<key>CFBundlePackageType</key>
+	<string>KEXT</string>
+	<key>CFBundleVersion</key>
+	<string>1.0.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>IOKitPersonalities</key>
+	<dict>
+		<key>StarbiteBattery</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>org.starbite.driver.StarbiteBattery</string>
+			<key>IOClass</key>
+			<string>StarbiteBattery</string>
+			<key>IOProviderClass</key>
+			<string>IOPlatformDevice</string>
+			<key>IONameMatch</key>
+			<string>hsi2c-pmic</string>
+			<key>IOMatchCategory</key>
+			<string>StarbiteBattery</string>
+		</dict>
+	</dict>
+	<key>OSBundleLibraries</key>
+	<dict>
+		<key>com.apple.kpi.iokit</key>
+		<string>8.0</string>
+		<key>com.apple.kpi.libkern</key>
+		<string>8.0</string>
+		<key>com.apple.kpi.mach</key>
+		<string>8.0</string>
+		<key>com.apple.kpi.unsupported</key>
+		<string>8.0</string>
+	</dict>
+	<key>OSBundleRequired</key>
+	<string>Root</string>
+</dict>
+</plist>
