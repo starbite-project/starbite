@@ -914,6 +914,58 @@ void next_kminute(void)
     }
 }
 
+/* Photos, Files, Music (shell_media.inc): the card's exFAT partition through kern/files.c, read only. The self test
+ * never touches the card: there it is "no card". */
+int sh_card_status(const char **why)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    if (why) *why = "";
+    return SH_CARD_NONE;
+#else
+    int s = kfile_state(why);
+    return s > 0 ? SH_CARD_READY : !s ? SH_CARD_MOUNTING : s == -1 ? SH_CARD_NONE : SH_CARD_ERROR;
+#endif
+}
+int sh_card_mount(void)
+{
+#ifndef SBOS_SELFTEST_NEXT
+    hw_wdt_feed();
+    kfile_mount();
+#endif
+    return sh_card_status(0);
+}
+int sh_card_list(const char *path, sh_dirent_t *out, int max, int first)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)path; (void)out; (void)max; (void)first;
+    return -1;
+#else
+    static struct kfile_ent e[32];
+    int k = 0;
+    while (k < max) {
+        int want = max - k < 32 ? max - k : 32, n = kfile_list_at(path, e, want, first + k);
+        if (n < 0) return -1;
+        for (int i = 0; i < n; i++, k++) {
+            tk_memcpy(out[k].name, e[i].name, sizeof out[k].name);
+            out[k].size = e[i].size;
+            out[k].dir = e[i].dir;
+            out[k].date = e[i].mtime;
+        }
+        if (n < want) break;
+    }
+    return k;
+#endif
+}
+int sh_card_read(const char *path, uint64_t off, void *dst, uint32_t len)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)path; (void)off; (void)dst; (void)len;
+    return -1;
+#else
+    return kfile_read_at(path, off, dst, len);
+#endif
+}
+
 /* slide to start (shell_lock.c): the loader's one-shot next boot */
 void sh_boot_os(const char *key)
 {

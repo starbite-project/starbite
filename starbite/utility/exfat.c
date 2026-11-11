@@ -148,7 +148,7 @@ static int name_eq(const char *a, const char *b)
 
 /* the directory's entries into out (at most max); with match, only the entries of that name */
 static int list_impl(struct exfat *fs, const struct exfat_ent *dir, struct exfat_ent *out, int max, int *total,
-                     const char *match)
+                     const char *match, int skip)
 {
     uint32_t first = dir ? dir->first : fs->root;
     int nofat = dir ? dir->nofat : 0;
@@ -177,6 +177,7 @@ static int list_impl(struct exfat *fs, const struct exfat_ent *dir, struct exfat
                     ((uint8_t *)&cur)[k] = 0;
                 need = e[1];
                 cur.dir = (e[4] & 0x10) != 0;
+                cur.mtime = le32(e + 12);              /* LastModifiedTimestamp */
                 got_name = 0;
                 nl = 0;
             } else if (t == 0xc0 && need) {            /* stream extension */
@@ -211,12 +212,14 @@ static int list_impl(struct exfat *fs, const struct exfat_ent *dir, struct exfat
             if (got_name) {
                 got_name = 0;
                 if (!match || name_eq(cur.name, match)) {
-                    if (n < max)
+                    if (n < max && count >= skip)
                         out[n++] = cur;
                     if (match && n >= max)
                         goto end;                      /* found: the rest of the folder is not needed */
                 }
                 ++count;
+                if (!match && !total && n >= max)
+                    goto end;                          /* a page without the count: no need to read on */
             }
         }
         pos += fs->cluster_bytes;
@@ -232,7 +235,12 @@ end:
 
 int exfat_list(struct exfat *fs, const struct exfat_ent *dir, struct exfat_ent *out, int max, int *total)
 {
-    return list_impl(fs, dir, out, max, total, 0);
+    return list_impl(fs, dir, out, max, total, 0, 0);
+}
+
+int exfat_list_from(struct exfat *fs, const struct exfat_ent *dir, struct exfat_ent *out, int max, int skip, int *total)
+{
+    return list_impl(fs, dir, out, max, total, 0, skip);
 }
 
 int exfat_walk(struct exfat *fs, const char *path, struct exfat_ent *out, struct exfat_ent *scratch, int scratch_n)
@@ -251,7 +259,7 @@ int exfat_walk(struct exfat *fs, const char *path, struct exfat_ent *out, struct
         part[k] = 0;
         /* matched while listing: a folder of any size, scratch holds just the hit */
         (void)scratch_n;
-        if (list_impl(fs, dp, scratch, 1, 0, part) < 1)
+        if (list_impl(fs, dp, scratch, 1, 0, part, 0) < 1)
             return -2;
         int hit = 0;
         while (*p == '/')
