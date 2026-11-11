@@ -615,6 +615,12 @@ Now:
   42334 KiB streamed; INIT_START itself is about 1 s of it). The CRC-32 was nibble-wise, two lookups per byte,
   over about 126 MiB (check, copy, read-back). It is now slicing-by-8 (8 KiB of tables built on first use), and
   the BOOT line gives the check / copy / link times, so the next run shows what is left.
+  night-1111 (d50bb6f): **4.4 s** (check 505 ms, copy 1027 ms, link 1877 ms; the link time is mostly the CP's
+  own boot up to INIT_START and PHONE_START).
+- Same-boot restart (night-1111): the park clears CP_START in CP_CTRL_S (0x8 before, 0x0 after; that is why
+  PMUCAL's reset_release sets it again). d50bb6f wanted CP_START set to call it a restart, so the second start
+  was refused as "a CP that runs". From 4f93087 a restart is: reset sequencer 5 and central sequencer 0x80 (held
+  in reset). Any other started state is still refused.
 - The core's fixed buffers are in the image's BSS: about 1.8 MiB for the link and RFS (big_rfs 640 KiB, rfs_acc
   512 KiB, o_reply 512 KiB, big_fmt 128 KiB, rings 24 KiB). The glue's EFS reader adds about 420 KiB.
 - The CP's own memory is the reserved carve-out at 0xF0000000, outside the arena, and unchanged.
@@ -625,7 +631,7 @@ Now:
 | When | Call | Notes |
 |---|---|---|
 | once, first start | `sbm_sb_plat(&plat, log)`, `sbm_sb_load_image_stream(&im, log)`, `sbm_sb_plat_stage4(&plat, im.mm.ipc_off)` | 2.25 MiB arena, once. Drop alpha21's 64 MiB `MIN_ARENA` and its own `nv_pristine`: the image carries `im.nv_pristine` and the core restores NV before every start. |
-| user's hold (Start) | `sbm_modem_start(&mo, &plat, &im)` | Blocking: 5.6 s on the phone with the old CRC (night-1110), less now (to be measured); call it from a timer after the Starting page is drawn. 0 = online. Otherwise it is parked; the snapshot says FAILED and `last_err` why. `mo` is `static`, zeroed once, **never memset between starts**: it holds the counters and the restart window. |
+| user's hold (Start) | `sbm_modem_start(&mo, &plat, &im)` | Blocking: 4.4 s on the phone (night-1111; 5.6 s with the old CRC); call it from a timer after the Starting page is drawn. 0 = online. Otherwise it is parked; the snapshot says FAILED and `last_err` why. `mo` is `static`, zeroed once, **never memset between starts**: it holds the counters and the restart window. |
 | every 2 ms (1-10 ms) | `r = sbm_modem_poll(&mo, elapsed_ms)` | Non-blocking. 0 nothing new; 1 new data from the CP (take a snapshot); < 0 it went down and is parked: `SBM_ETIME` stall, `SBM_EIO` crash, `SBM_EPERM` a guard (a SIM that is not absent, a registration) or the flood guard. |
 | every 10 s while up | `sbm_modem_query(&mo)` | The allow-listed GETs (no SET, no call/SMS/SS). **Required**: stall detection is "a query sent and not one word from the CP for 20 s". Not more often than every 5 s. |
 | on poll = 1, and at the UI's own refresh (1 Hz is plenty) | `sbm_modem_snapshot(&mo, &snap)` | No I/O, a few hundred bytes copied. Redraw only when `snap.gen` changed (it ignores the clocks and counters). |
