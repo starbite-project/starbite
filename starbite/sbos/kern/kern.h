@@ -626,6 +626,7 @@ struct sbnet;
 struct sbtcp;
 int kmodem_netif(struct sbnet **net, struct sbtcp **tcp);   /* 1 = up (pointers filled when not NULL) */
 void wifi_fetch_poll_cell(void);
+void wifi_clock_checked_by(int how);        /* 1 checked, 2 corrected, 3 set (as Wi-Fi's NTP) */
 int kmodem_on(void);
 int kmodem_power(int on);              /* 1: the confirmation (the start only on its hold); 0: stop */
 void kmodem_stop(const char *why);     /* park now (no-op when off) */

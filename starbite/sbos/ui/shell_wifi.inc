@@ -117,7 +117,7 @@ static void wf_list(dc *d)
     wf_lay(&L);
     d_icon(d, "back", 18, 53, 1);
     d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Settings", 0, 0, ACCENT(), 0);
-    d_text(d, TK_IT800, 30, 20, bl(TK_IT800, 30, 96), "Wi-Fi", -.6f, 0, INK, 0);
+    d_text(d, TK_IT700, 30, 20, bl(TK_IT700, 30, 96), "Wi-Fi", 0, 0, INK, 0);
     /* the switch */
     d_rrect(d, 16, L.sw, 358, 47, 16, tk_hex(0x151c33, 1));
     d_text(d, TK_IT400, 16, 32, L.sw + 13 + 16, "Wi-Fi", 0, 0, INK, 0);

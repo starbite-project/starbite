@@ -201,7 +201,7 @@ static void status_bar(dc *d, const char *left)
         /* four bars (0..5 from the CP: 5 is four), the RAT before them: only while the modem is on */
         int n = SB_CELL.bars >= 4 ? 4 : SB_CELL.bars;
         for (int i = 0; i < 4; i++) d_rrect(d, 289 + 4.5f * i, 30 - (4.5f + 2.5f * i), 3, 4.5f + 2.5f * i, 1, W(i < n ? 1 : .3f));
-        const char *r = SB_CELL.rat == 7 ? "4G" : SB_CELL.rat == 4 ? "3G" : SB_CELL.rat >= 1 && SB_CELL.rat <= 3 ? "2G" : "";
+        const char *r = SB_CELL.rat == 7 ? "LTE" : SB_CELL.rat == 4 ? "3G" : SB_CELL.rat >= 1 && SB_CELL.rat <= 3 ? "2G" : "";
         if (r[0]) d_text(d, TK_IT600, 12, 286 - tk_text_w(TK_IT600, PT(12), r, 0, 0) / TK_PT, 29.5f, r, 0, 0, INK, 1);
     }
     /* wifi-sbos-next: the Wi-Fi glyph while joined with an address (the concept's place); the battery drawn from
@@ -1323,7 +1323,7 @@ static const appdef APPS[] = {
     { "phone", "Phone", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "messages", "Messages", 0x16b34a, 1, { { "", 1, { { "", "" } } } } },
     { "search", "Search", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },
-    { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "@wifi" }, { "Mobile Data", "No SIM" }, { "Battery", "@pct" } } },
+    { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "@wifi" }, { "Cellular", "No SIM" }, { "Battery", "@pct" } } },
                                            { "", 5, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" } } },
                                            { "About", 3, { { "Model", "Galaxy S9 (SM-G960F)" }, { "Software", "@ver" }, { "Memory", "4 GB" } } } } },
 };
@@ -2280,6 +2280,8 @@ void sh_sysinfo(int charging, const char *version)
 }
 static const char *wf_row_text(void);               /* shell_wifi.inc */
 static void page_wifi(dc *d);
+static void page_cell(dc *d);         /* shell_cell.inc: Settings > Cellular */
+static void cell_tap(float x, float y);
 static void wifi_tap(float x, float y);
 static const char *live_text(const char *s, char *buf)
 {
@@ -2306,7 +2308,7 @@ static const char *live_text(const char *s, char *buf)
 /* P3i: Settings' row icons (the Control Centre's glyphs, tinted white) */
 typedef struct { const char *row, *glyph; uint32_t col; float w, h; } setico;
 static const setico SETICO[] = {
-    { "Wi-Fi", "cc-wifi", 0x0a84ff, 19, 14 }, { "Mobile Data", "cc-cell", 0x30d158, 18, 16 }, { "Battery", "cc-save", 0x30d158, 20, 12 },
+    { "Wi-Fi", "cc-wifi", 0x0a84ff, 19, 14 }, { "Cellular", "cc-cell", 0x30d158, 18, 16 }, { "Battery", "cc-save", 0x30d158, 20, 12 },
     { "Display & Brightness", "cc-sun", 0x0a84ff, 20, 20 }, { "Sounds & Haptics", "cc-vol", 0xff375f, 20, 20 },
     { "Bluetooth", "cc-bt", 0x0a84ff, 12, 18 }, { "Airplane Mode", "cc-air", 0xff9f0a, 18, 18 }, { "Date & Time", "cc-timer", 0x8e8e93, 19, 19 },
 };
@@ -2369,7 +2371,7 @@ static void own_strip(int a, int i)
     else if (!tk_strcmp(k, "calc")) page_calc(&d);
     else if (!tk_strcmp(k, "light")) page_light(&d);
     else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
-    else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else page_display(&d); }
+    else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else page_display(&d); }
     else if (!tk_strcmp(k, "notes")) page_notes(&d);
     else if (!tk_strcmp(k, "search")) page_search(&d);
     else if (inf) { d_h1(&d, APPS[a].name); d_empty(&d, 330, inf->title, inf->line); }
@@ -2451,10 +2453,11 @@ static void build_app_page(int a)
                 lx = 32 + 29 + 13;
             }
             d_text(&d, TK_IT400, 16, lx, ry + 13 + 16, live_text(S->rows[r].l, lb), 0, 0, INK, 0);
-            int nav = !tk_strcmp(A->k, "settings") && (!tk_strcmp(S->rows[r].l, "Display & Brightness") || !tk_strcmp(S->rows[r].l, "Wi-Fi"));
+            int nav = !tk_strcmp(A->k, "settings") && (!tk_strcmp(S->rows[r].l, "Display & Brightness") || !tk_strcmp(S->rows[r].l, "Wi-Fi") ||
+                                                       !tk_strcmp(S->rows[r].l, "Cellular"));
             if (nav) d_icon(&d, "chev", 344, ry + 16.5f, .45f);
             const char *rt = live_text(S->rows[r].r, rb);
-            if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Mobile Data")) rt = md_text();
+            if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Cellular")) rt = md_text();
             if (rt[0]) {
                 float w = tw(TK_IT400, 16, rt, 0, TK_TNUM);
                 d_text(&d, TK_IT400, 16, (nav ? 338 : 358) - w, ry + 13 + 16, rt, 0, TK_TNUM, W(.55f), 0);
@@ -2890,6 +2893,8 @@ static void app_tap(float x, float y)
         }
     } else if (is_app("settings") && AS.sub == 2) {
         wifi_tap(x, y);
+    } else if (is_app("settings") && AS.sub == 3) {
+        cell_tap(x, y);
     } else if (is_app("settings") && AS.sub) {
         if (x < 120 && y >= 40 && y < 86) { AS.sub = 0; build_app_page(AP.a); return; }
         if (y >= 184 && y < 248 && x >= 40 && x < 350) {
@@ -2900,7 +2905,7 @@ static void app_tap(float x, float y)
     } else if (is_app("settings")) {
         if (x >= 16 && x < 374 && y >= 293 && y < 340) { AS.sub = 1; build_app_page(AP.a); return; }
         if (x >= 16 && x < 374 && y >= 135 && y < 182) { AS.sub = 2; build_app_page(AP.a); return; }   /* Wi-Fi */
-        if (x >= 16 && x < 374 && y >= 182 && y < 229) cell_toggle();   /* Mobile Data: the Cellular switch */
+        if (x >= 16 && x < 374 && y >= 182 && y < 229) { AS.sub = 3; build_app_page(AP.a); return; }   /* Cellular */
     } else if (is_app("messages")) {
         if (AS.thread < 0) {
             (void)x; (void)y;                         /* P2y: no conversations (no SIM): nothing to open */
@@ -2916,12 +2921,7 @@ static void build_cc_grid(void);
 static void cc_link(void);
 static sh_cell_t CELL;
 static int cell_running(void) { return CELL.state == SH_CELL_ON || CELL.state == SH_CELL_STARTING || CELL.state == SH_CELL_RESTARTING; }
-/* the Cellular switch is on (anything from starting to data up) */
-static int data_on(void)
-{
-    return CELL.data == SH_DATA_STARTING || CELL.data == SH_DATA_SEARCHING || CELL.data == SH_DATA_REGISTERED ||
-           CELL.data == SH_DATA_UP;
-}
+static int data_on(void);         /* shell_cell.inc */
 static char md_buf[48];
 static const char *md_join(const char *a, const char *b)
 {
@@ -2931,14 +2931,7 @@ static const char *md_join(const char *a, const char *b)
     md_buf[n] = 0;
     return md_buf;
 }
-/* the switch, from Settings' Mobile Data row and the Control Centre's circle */
-static void cell_toggle(void)
-{
-    if (data_on() || CELL.data == SH_DATA_STOPPING) { sh_cellular(0); toast("Mobile data off"); }
-    else if (sh_cellular(1) < 0) toast("Mobile data can't start now");
-    else toast("Mobile data on: connecting\xe2\x80\xa6");
-}
-/* Settings > Mobile Data: the modem's state in words (the contract's wording) */
+/* Settings > Cellular: the modem's state in words (the contract's wording) */
 static const char *md_text(void)
 {
     switch (CELL.data) {
@@ -2974,14 +2967,12 @@ void sh_cell(const sh_cell_t *c)
                      CELL.data == SH_DATA_SEARCHING ? "Searching\xe2\x80\xa6" : CELL.data == SH_DATA_LOCKED ? "SIM PIN on" :
                      CELL.state == SH_CELL_STARTING ? "Starting\xe2\x80\xa6" : CELL.state == SH_CELL_RESTARTING ? "Restarting\xe2\x80\xa6" :
                      CELL.state == SH_CELL_ON && CELL.emergency_only ? "Emergency calls only" : "No SIM";
-    int n2 = 0;
-    while (cr[n2] && n2 < 31) { carrier[n2] = cr[n2]; n2++; }
-    carrier[n2] = 0;
+    sh_carrier(cr);                     /* the lock screen's left (and the Control Centre's): the operator */
     SB_CELL.state = CELL.state == SH_CELL_ON;
     SB_CELL.bars = CELL.bars;
     SB_CELL.rat = CELL.rat;
-    const char *h = CELL.data == SH_DATA_UP ? md_join(CELL.oper[0] ? CELL.oper : "Mobile", " \xc2\xb7 mobile data on") :
-                    data_on() ? "Mobile data \xc2\xb7 connecting" :
+    const char *h = CELL.data == SH_DATA_UP ? md_join(CELL.oper[0] ? CELL.oper : "Mobile", " \xc2\xb7 cellular data on") :
+                    data_on() ? "Cellular data \xc2\xb7 connecting" :
                     CELL.state == SH_CELL_ON && !CELL.emergency_only && CELL.bars <= 0 ? "No SIM \xc2\xb7 searching" :
                     "No SIM \xc2\xb7 emergency calls only";
     int n = 0;
@@ -2989,17 +2980,17 @@ void sh_cell(const sh_cell_t *c)
     cell_hint[n] = 0;
     build_lstatus();
     build_home_sb();
-    if (is_app("phone") || is_app("settings")) build_app_page(AP.a);
+    if (is_app("phone") || is_app("settings")) build_app_page(AP.a);     /* (it rebuilds the app's status bar too) */
     else if (AP.on && !AP.closing) build_apsb();     /* P3l: every app's status bar shows the bars */
     relayer(&ccsb);                                  /* P3l: the CC's status bar again at its next build */
     cc_stale = 1;
     if (CCS.built) { build_cc_grid(); cc_link(); }
-    cc_stale = 1;
     relink();
     lock_ver++;
 }
 
 #include "shell_wifi.inc"
+#include "shell_cell.inc"
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)

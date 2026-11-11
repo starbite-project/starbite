@@ -73,6 +73,13 @@ static void end(struct sbtcp_sock *s, int state, int err)
 
 /* ---- segments out ------------------------------------------------------------------------------------------------ */
 
+/* the largest segment the link carries: its MTU less the IPv4 and TCP headers, at most SBTCP_MSS */
+static uint32_t link_mss(const struct sbtcp *t)
+{
+    uint32_t m = t->net && t->net->mtu >= 576 ? t->net->mtu - 40u : 536u;
+    return m < SBTCP_MSS ? m : SBTCP_MSS;
+}
+
 static void raw_out(struct sbtcp *t, const uint8_t *rip, uint16_t sport, uint16_t dport, uint32_t seq, uint32_t ack,
                     uint8_t flags, uint16_t win, const uint8_t *data, uint32_t len, int mss_opt)
 {
@@ -85,7 +92,7 @@ static void raw_out(struct sbtcp *t, const uint8_t *rip, uint16_t sport, uint16_
     h[12] = (uint8_t)(hl / 4) << 4, h[13] = flags;
     p16(h + 14, win), p16(h + 16, 0), p16(h + 18, 0);
     if (mss_opt)
-        h[20] = 2, h[21] = 4, p16(h + 22, SBTCP_MSS);
+        h[20] = 2, h[21] = 4, p16(h + 22, (uint16_t)link_mss(t));
     if (len)
         cpy(h + hl, data, len);
     s = sum16(t->net->ip, 4, 0);
@@ -411,7 +418,7 @@ void sbtcp_input(struct sbtcp *t, const uint8_t from[4], const uint8_t *h, uint3
                 cpy(s->rip, from, 4);
                 s->rport = sport, s->lport = dport;
                 s->rcv_nxt = seq + 1;
-                s->mss = (uint16_t)min32(parse_mss(h, hl), SBTCP_MSS);
+                s->mss = (uint16_t)min32(parse_mss(h, hl), link_mss(t));
                 if (s->mss < 64)
                     s->mss = 64;
                 s->snd_wnd = win, s->wl1 = seq, s->wl2 = s->iss;
@@ -446,7 +453,7 @@ void sbtcp_input(struct sbtcp *t, const uint8_t from[4], const uint8_t *h, uint3
             return;
         }
         s->rcv_nxt = seq + 1;
-        s->mss = (uint16_t)min32(parse_mss(h, hl), SBTCP_MSS);
+        s->mss = (uint16_t)min32(parse_mss(h, hl), link_mss(t));
         if (s->mss < 64)
             s->mss = 64;
         s->snd_una = ack;
