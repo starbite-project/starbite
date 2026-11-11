@@ -716,8 +716,11 @@ int wifi_power(int on)
     }
     if (!w) {
         w = sb_alloc(bcmw_size());
-        if (!w)
+        if (!w) {
+            sb_log("wifi: not enough memory for the Wi-Fi core");
+            set_state(SBOS_WIFI_FAILED, "Not enough memory for Wi-Fi");   /* P3n: the shell said "Heat?" */
             return SBOS_EAGAIN;
+        }
         memset(w, 0, bcmw_size());
     }
     w_ready = 0;

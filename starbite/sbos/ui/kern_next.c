@@ -64,7 +64,7 @@ static struct {
     void *arg;
     uint32_t pad[8];
 } JOB __attribute__((aligned(64)));
-static int workers_on;
+static int workers_on, workers_ever;   /* workers_ever: a launch has worked (P3o: the self test checks it) */
 static uint32_t worker_bands[4];
 
 static void take_bands(unsigned core)
@@ -130,6 +130,7 @@ static void workers_start(void)
         }
     }
     workers_on = any;
+    if (any) workers_ever = 1;
 }
 static void workers_stop(void)
 {
@@ -182,14 +183,16 @@ static int has(const char *s, const char *w)
 }
 static int cell_now(void)
 {
-    static sh_cell_t last = { -1, 0, 0, 0, 0, 0, "" };
+    static sh_cell_t last = { -1, 0, 0, 0, 0, 0, "", "" };
     struct sbos_phone ph;
     kmodem_status(&ph);
-    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars, 0, "" };
+    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars, 0, "", "" };
     struct kcell kc;
     kmodem_cell(&kc);
     c.data = kc.state;                      /* KCELL_* = SH_DATA_* */
     sb_strcpy(c.oper, sizeof(c.oper), kc.oper);
+    if (kc.state == KCELL_FAILED)
+        sb_strcpy(c.why, sizeof(c.why), kc.why);
     if (kc.want || kc.state != KCELL_OFF) {
         c.state = kc.state == KCELL_STARTING || kc.state == KCELL_STOPPING ? SH_CELL_STARTING :
                   kc.state == KCELL_SEARCHING || kc.state == KCELL_REGISTERED || kc.state == KCELL_DATA ? SH_CELL_ON :
@@ -276,6 +279,12 @@ static int wifi_now(void)
     return 1;
 }
 int sh_wifi_power(int on) { return wifi_power(on); }
+const char *sh_wifi_why(void)
+{
+    static struct sbos_wifi s;
+    wifi_status(&s);
+    return s.why;
+}
 int sh_wifi_scan(void) { return wifi_scan(); }
 int sh_wifi_join(const char *ssid, const char *pass)
 {
@@ -316,7 +325,7 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
-    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3m");     /* P2y: the apps' live values */
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3o");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);
         sh_alarm(on, ah, am);
@@ -850,6 +859,18 @@ void next_kinit(void)
     log_mb("arena free before the UI heap: ", sb_arena_free());
     heap_init(160ULL << 20);                /* v9: the lens needs no maps (back to 160) */
     log_mb("UI heap: ", heap_size);
+    /* P3o: the band workers' stacks (3 x 64 KiB from libsb's arena, taken at their first start and kept) now,
+     * before the services fill the arena. P3n skipped the old wallpaper, so the boot's Wi-Fi time check got its
+     * buffers and took the rest: every later start failed (-102, no stack) and the frames ran on one core. */
+    workers_start();
+    {
+        struct ub a;
+        ub_init(&a);
+        ub_s(&a, "next: arena free after the UI heap and the workers: ");
+        ub_dec(&a, sb_arena_free() >> 10);
+        ub_s(&a, " KiB");
+        sb_log(a.b);
+    }
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
     kui_sleep_hook = next_sleep;
@@ -916,6 +937,16 @@ static void bake_step(void)
     ub_s(&u, " ms");
     sb_log(u.b);
     log_mb("UI heap in use: ", tk_heap_used());
+    {
+        /* P3n: the kernel's arena left once the services have started (in KiB: P3m was at 54 KiB when Cellular
+         * and Wi-Fi asked for memory), so the next large consumer shows in the log */
+        struct ub a;
+        ub_init(&a);
+        ub_s(&a, "next: arena free when ready: ");
+        ub_dec(&a, sb_arena_free() >> 10);
+        ub_s(&a, " KiB");
+        sb_log(a.b);
+    }
     next_kdraw();
     sh_idle();                                       /* the unlock's cache and the half copies, before a finger */
     log_mb("UI heap with the caches: ", tk_heap_used());
@@ -1245,6 +1276,10 @@ int next_selftest_step(void)
             if (!comp.last_px) st_failed = 1;
             clock_ok = comp.last_px != 0;
             status_now();
+        }
+        if (!workers_ever) {
+            sb_log("selftest: FAILED: next: the band workers never started (cores 1-3: no stack?); every frame on one core");
+            st_failed = 1;
         }
         sb_log("selftest: next: the eleven films (unlock, group, focus, holds, pages, cc, app, phone, messages, emergency, sleep) with synthetic touches; sleep presses the real Power path");
         film_start(0);

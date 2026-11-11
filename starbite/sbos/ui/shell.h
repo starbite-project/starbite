@@ -35,7 +35,7 @@ enum { SH_CELL_OFF, SH_CELL_ON, SH_CELL_RESTARTING, SH_CELL_GUARD, SH_CELL_FAILE
  * data = SH_DATA_* (the kernel's KCELL_* order), oper the operator's name (screen only) */
 enum { SH_DATA_OFF, SH_DATA_STARTING, SH_DATA_NO_SIM, SH_DATA_LOCKED, SH_DATA_SEARCHING, SH_DATA_REGISTERED,
        SH_DATA_UP, SH_DATA_STOPPING, SH_DATA_FAILED };
-typedef struct { int state, sim, emergency_only, rat, bars, data; char oper[24]; } sh_cell_t;
+typedef struct { int state, sim, emergency_only, rat, bars, data; char oper[24]; char why[48]; } sh_cell_t;   /* why: a failure */
 void sh_cell(const sh_cell_t *c);
 int sh_cellular(int on);                /* the switch: 1 on (radio, registration, data), 0 off (detach, park) */
 /* the platform's modem power (the kernel: kmodem_power: 1 asks for its hold confirmation, 0 stops); < 0 refused */
@@ -81,6 +81,7 @@ typedef struct {
     char fetch_host[48], fetch_why[64];
 } sh_wifi_t;
 void sh_wifi(const sh_wifi_t *w);
+const char *sh_wifi_why(void);          /* the kernel's reason right now (after a refused start), "" if none */
 int sh_wifi_power(int on);
 int sh_wifi_scan(void);
 int sh_wifi_join(const char *ssid, const char *pass);   /* pass: NULL or "" for open or known networks */

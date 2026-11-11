@@ -27,7 +27,7 @@ void sh_confirmed(int ok) { fprintf(stderr, "confirm: %s\n", ok ? "held: the mod
 /* a pretend network for the previews: on -> searching -> data up on "Operator" LTE, 3 bars */
 int sh_cellular(int on)
 {
-    sh_cell_t c = { on ? 1 : 0, 0, 0, on ? 7 : 0, on ? 3 : -1, on ? SH_DATA_UP : SH_DATA_OFF, "" };
+    sh_cell_t c = { on ? 1 : 0, 0, 0, on ? 7 : 0, on ? 3 : -1, on ? SH_DATA_UP : SH_DATA_OFF, "", "" };
     if (on) memcpy(c.oper, "Operator", 9);
     fprintf(stderr, "cellular: %s\n", on ? "on (pretend: data up)" : "off");
     sh_cell(&c);
@@ -58,6 +58,7 @@ int sh_wifi_power(int on)
     return 0;
 }
 int sh_wifi_scan(void) { fprintf(stderr, "wifi: scan\n"); hw_push(); return 0; }
+const char *sh_wifi_why(void) { return ""; }
 int sh_wifi_join(const char *ssid, const char *pass)
 {
     fprintf(stderr, "wifi: join (a passphrase of %d characters)\n", pass ? (int)strlen(pass) : 0);
