@@ -41,6 +41,10 @@ uint32_t star_crc32(uintptr_t p, uint64_t n);   /* store.c */
 #define DRAM_LOW 0x80000000UL
 #define PAGE_SIZE 4096UL
 #define BOOT_LINE_LENGTH 608
+/* xnu-11417 / xnu-12377 boot_args: CommandLine[1024] (pexpert/arm64/boot.h); 608 is the 8796 layout. A
+ * version-2 payload (same header, tools/payload-v2.py) says its kernel takes the 1024 layout: the boot-args
+ * the loader builds may then grow to 1023 bytes (the payload's own line still holds 607). */
+#define XNU_LINE_MAX 1024
 #define FAIL_DELAY_S 30U
 
 struct payload_seg {
@@ -71,6 +75,21 @@ struct boot_args {
 _Static_assert(__builtin_offsetof(struct payload, segs) == 0x2a8, "payload layout");
 _Static_assert(__builtin_offsetof(struct boot_args, CommandLine) == 108, "boot_args layout");
 _Static_assert(sizeof(struct boot_args) == 736, "boot_args size");
+/* The same fields with the 1024-byte CommandLine (kBootArgsRevision2, xnu-11417 and later). */
+struct boot_args_1024 {
+    uint16_t Revision, Version;
+    uint64_t virtBase, physBase, memSize, topOfKernelData;
+    struct boot_video Video;
+    uint32_t machineType;
+    uint64_t deviceTreeP;
+    uint32_t deviceTreeLength;
+    char CommandLine[XNU_LINE_MAX];
+    uint64_t bootFlags, memSizeActual;
+};
+_Static_assert(__builtin_offsetof(struct boot_args_1024, CommandLine) == 108, "boot_args 1024 layout");
+_Static_assert(__builtin_offsetof(struct boot_args_1024, bootFlags) == 1136, "boot_args 1024 bootFlags");
+_Static_assert(__builtin_offsetof(struct boot_args_1024, memSizeActual) == 1144, "boot_args 1024 memSizeActual");
+_Static_assert(sizeof(struct boot_args_1024) == 1152, "boot_args 1024 size");
 
 /* 8 bytes at a time when both ends are aligned (the OS areas are non-cacheable: mmu.c). */
 static void zero_bytes(uintptr_t dst, uint64_t size)
@@ -481,7 +500,7 @@ static uintptr_t boot_rd_start, boot_rd_end;  /* what is appended to this Image 
 /* Why payload p (length bytes) cannot boot, or 0. */
 static const char *payload_bad(const struct payload *p, uint64_t length)
 {
-    if (length < sizeof(*p) || !magic_ok(p->magic) || p->version != 1 ||
+    if (length < sizeof(*p) || !magic_ok(p->magic) || (p->version != 1 && p->version != 2) ||
         !p->nsegs || p->nsegs > 32 ||
         __builtin_offsetof(struct payload, segs) + p->nsegs * sizeof(struct payload_seg) > length ||
         p->adt_off > length || p->adt_size > length - p->adt_off)
@@ -1364,7 +1383,7 @@ star_rwd1_arm(void)
 /* Copy XNU's segments, ADT and boot_args into its window; returns the entry PA or 0. */
 static uintptr_t
 xnu_enter(volatile uint64_t *log, const struct payload *p, uintptr_t rd_start, uint64_t length,
-    const char *cmdline)
+    const char *cmdline, unsigned cmdline_cap)
 {
     log[11] = rd_start;
     log[12] = rd_start + length;
@@ -1397,6 +1416,7 @@ xnu_enter(volatile uint64_t *log, const struct payload *p, uintptr_t rd_start, u
         return fail(log, -5, "NO ROOM FOR BOOT ARGS");
     copy_bytes(adt_pa, rd_start + p->adt_off, p->adt_size);
     zero_bytes(ba_pa, PAGE_SIZE);
+    /* The header fields up to CommandLine are the same in both layouts (asserted above). */
     volatile struct boot_args *ba = (volatile struct boot_args *)ba_pa;
     ba->Revision = 2;
     ba->Version = 2;
@@ -1406,9 +1426,23 @@ xnu_enter(volatile uint64_t *log, const struct payload *p, uintptr_t rd_start, u
     ba->topOfKernelData = ba_pa + PAGE_SIZE;
     ba->deviceTreeP = p->virt_base + (adt_pa - p->phys_base);
     ba->deviceTreeLength = (uint32_t)p->adt_size;
-    for (unsigned i = 0; i < BOOT_LINE_LENGTH; ++i)
-        ba->CommandLine[i] = cmdline[i];
-    ba->memSizeActual = p->mem_size;
+    if (p->version >= 2) {
+        /* 1024 layout: before this, bootFlags and memSizeActual landed inside the kernel's CommandLine
+         * (after its NUL) and the kernel read zeros for both (open since 2026-10-28) */
+        volatile struct boot_args_1024 *bl = (volatile struct boot_args_1024 *)ba_pa;
+        unsigned n = cmdline_cap < XNU_LINE_MAX ? cmdline_cap : XNU_LINE_MAX;
+        for (unsigned i = 0; i < n; ++i)
+            bl->CommandLine[i] = cmdline[i];
+        bl->CommandLine[XNU_LINE_MAX - 1] = 0;
+        bl->bootFlags = 0;
+        bl->memSizeActual = p->mem_size;
+    } else {
+        unsigned n = cmdline_cap < BOOT_LINE_LENGTH ? cmdline_cap : BOOT_LINE_LENGTH;
+        for (unsigned i = 0; i < n; ++i)
+            ba->CommandLine[i] = cmdline[i];
+        ba->CommandLine[BOOT_LINE_LENGTH - 1] = 0;
+        ba->memSizeActual = p->mem_size;
+    }
     clean_bytes(adt_pa, ba_pa + PAGE_SIZE);
 
     uintptr_t entry_pa = p->phys_base + (p->entry_va - p->virt_base);
@@ -1433,7 +1467,7 @@ xnu_enter(volatile uint64_t *log, const struct payload *p, uintptr_t rd_start, u
 static uintptr_t
 boot_xnu(volatile uint64_t *log, const struct cat_ent *e, const char *edited)
 {
-    static char cmd[BOOT_LINE_LENGTH];
+    static char cmd[XNU_LINE_MAX];
     struct src s;
     uintptr_t rd_start;
     uint64_t length;
@@ -1460,15 +1494,17 @@ boot_xnu(volatile uint64_t *log, const struct cat_ent *e, const char *edited)
     if (bad)
         return fail(log, -2, bad);
     const char *src = s.kind == SRC_BOOT ? edited : p->cmdline;
-    for (unsigned i = 0; i < BOOT_LINE_LENGTH; ++i)
-        cmd[i] = src[i];
+    /* a version-2 payload's kernel takes 1023 bytes (XNU_LINE_MAX), the rest 607 */
+    unsigned cap = p->version >= 2 ? XNU_LINE_MAX : BOOT_LINE_LENGTH;
+    for (unsigned i = 0; i < XNU_LINE_MAX; ++i)
+        cmd[i] = i < BOOT_LINE_LENGTH ? src[i] : 0;
     cmd[BOOT_LINE_LENGTH - 1] = 0;
-    line_append(cmd, BOOT_LINE_LENGTH, e->cmdline);
+    line_append(cmd, cap, e->cmdline);
     if (launch.xfrag[0])     /* the log level's fragment ("!-v" removes -v) and sbwdt= */
-        (void)sb_line_edit(cmd, BOOT_LINE_LENGTH, launch.xfrag, 1);
-    /* The boot-args hold 607 bytes and sb_line_edit drops what does not fit: a watchdog whose
+        (void)sb_line_edit(cmd, cap, launch.xfrag, 1);
+    /* The boot-args hold cap - 1 bytes and sb_line_edit drops what does not fit: a watchdog whose
      * sbwdt=N did not make it in is not armed (0399's no-sbwdt fallback is only a safety net). */
-    if (launch.wdt && !sb_wdt_args_ok(cmd, BOOT_LINE_LENGTH, SB_WDT_XNU, launch.wdt))
+    if (launch.wdt && !sb_wdt_args_ok(cmd, cap, SB_WDT_XNU, launch.wdt))
         launch.wdt = wdt_dropped(log, e->key, "sbwdt=", launch.wdt);
     {
         struct pline pl;
@@ -1477,7 +1513,7 @@ boot_xnu(volatile uint64_t *log, const struct cat_ent *e, const char *edited)
         pl_s(&pl, " segments");
         star_menu_progress(k++, ns, "Copying kernel", pl.b);
     }
-    uintptr_t entry = xnu_enter(log, p, rd_start, length, cmd);
+    uintptr_t entry = xnu_enter(log, p, rd_start, length, cmd, cap);
     if (entry)
         stage_entry(k, ns, "Handing off to XNU", entry);
     return entry;
@@ -2290,7 +2326,7 @@ static uintptr_t ram_handoff(volatile uint64_t *log, uint64_t code, uintptr_t en
 
 static uintptr_t ram_start(volatile uint64_t *log, const struct star_ram *r, uintptr_t fdt)
 {
-    static char cmd[BOOT_LINE_LENGTH];
+    static char cmd[XNU_LINE_MAX];
     uint64_t span;
     uintptr_t dst;
     boot_why = 0;
@@ -2302,11 +2338,12 @@ static uintptr_t ram_start(volatile uint64_t *log, const struct star_ram *r, uin
             return fail(log, -71, bad);
         if (r->kernel + r->kernel_size > RAM_BASE)
             return fail(log, -71, "PAYLOAD OVER THE XNU WINDOW");
-        for (unsigned i = 0; i < BOOT_LINE_LENGTH; ++i)
-            cmd[i] = p->cmdline[i];
+        unsigned cap = p->version >= 2 ? XNU_LINE_MAX : BOOT_LINE_LENGTH;
+        for (unsigned i = 0; i < XNU_LINE_MAX; ++i)
+            cmd[i] = i < BOOT_LINE_LENGTH ? p->cmdline[i] : 0;
         cmd[BOOT_LINE_LENGTH - 1] = 0;
-        line_append(cmd, BOOT_LINE_LENGTH, r->cmdline);
-        return xnu_enter(log, p, r->kernel, r->kernel_size, cmd);
+        line_append(cmd, cap, r->cmdline);
+        return xnu_enter(log, p, r->kernel, r->kernel_size, cmd, cap);
     }
     if (r->method == M_UEFI) {
         uint64_t size = r->kernel_size;
