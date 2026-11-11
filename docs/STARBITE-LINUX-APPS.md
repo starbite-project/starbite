@@ -189,11 +189,11 @@ has the details. The general form below (window slots, several apps) is L3's:
 |---|---|---|
 | **L1** | sbwl + one Wayland app (foot) in the guest; its window in the shared surface as a layer; touch and keys reach it | **QEMU PASS 2/2** (`run-term.sh MODE=wayland`): foot's window composited exactly, the typed command ran in foot's shell, the tap reached foot as `wl_touch`, cluster off ~650 ms after the stop; phone: P5 staged (section 11) |
 | **L2** | the `gwin` drop-in in Starbite OS Next: the Terminal opens foot's window as its page (720 x 916 at 2x between the status bar and the keyboard), touch and the shell's keyboard reach it; popups and subsurfaces composited by sbwl (pixman, the window's surface tree) | **QEMU PASS** (popups; foot at 720x916), **host PASS** (the real Next shell + gwin.c + a fake guest; a film through the real gestures), every Next image builds; phone: `starbite-next-linuxtest` staged (section 12). Not done: 1440 px at scale 2, text-input-v3 (moved to L3) |
-| L3 | window slots (contract v2), the guest catalog, Linux icons on the home, launch / close / switcher | |
-| L4 | sbblk, EROFS base + overlay (Debian trixie arm64 minimal + GTK) | |
-| L5 | network: a packet ring bridged by Starbite's Wi-Fi core (the radio stays Starbite's) | |
-| L6 | the App Store: signed curated index, apt installs in the overlay, updates | |
-| L7 | Firefox ESR; memory pressure handling; the Mali lent to the guest (research) | |
+| **L3** | contract v2 (sbshm.h: catalog, icon pool, store table, block rings, text input); the guest catalog from .desktop files; Linux icons on home page 3; launch / activate / close; text-input-v3 with Next's keyboard (viewport 916 / 1344) | **done**: sbwl v2 hostsim 73/73 (trixie, wlroots 0.18); next-linux.patch in Next P3r (toolkit 5fc1067); every image links. Not yet: an app switcher (background apps stop after 60 s hidden) |
+| **L4** | sbblk, EROFS base + overlay (Debian trixie arm64 + GTK) | **done on QEMU**: sbblk read / persist / stress / fallback PASS; the full Debian guest (root switch, sbinit, zram, sbwl v2, foot) RESULT PASS. Phone: the three images as contiguous files on the card's exFAT p1 behind a libsb fence grant for overlay.img only (blk/guest-card.patch; card-test 60/60); staged 2026-11-11 |
+| L5 | network: a packet ring bridged by Starbite's Wi-Fi core (the radio stays Starbite's) | not started: installs come from the offline repo on the card |
+| **L6** | the App Store: curated index, apt installs in the overlay | **done (offline)**: repo.erofs (23 entries, 424 .debs), sbpkg (install / remove / cancel, progress), the store UI (search, detail, honest RAM and space); test-sbpkg ALL PASS, also with the guest's 1970 clock. Not yet: signed index, updates |
+| L7 | Firefox ESR; memory pressure handling; the Mali lent to the guest (research) | Firefox ESR installs (800 MB measured peak for one local page; TOO_BIG ~890 MB), zram swap; no GPU |
 
 ## 10. Network (L5, needed by the store)
 
