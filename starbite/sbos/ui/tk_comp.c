@@ -798,46 +798,78 @@ static void run_bands(tk_comp *c, job *J)
  * this frame: too many items, or the GPU refused) */
 static tk_gpu_item gq[TK_GPU_MAX];
 /* v4: the layer's block map (32 px blocks: empty, partial, opaque), as the CPU's row_over skips and copies 8 px
- * blocks; not for small bitmaps, nor for content that changes frame after frame (the scan would cost each frame) */
-static void gpu_occ(tk_comp *c, tk_layer *l)
+ * blocks; not for small bitmaps, nor for content that changes frame after frame. v4.1: block rows in parallel over
+ * the four cores, 2 px per 64-bit read, and the cache clean of those rows in the same pass (the phone's first frame
+ * with a new full-screen layer spent ~30 ms scanning and cleaning on one core) */
+typedef struct { tk_comp *c; tk_layer *l; int map; uint32_t ow; } occ_job;
+static void occ_rows(void *a, int r0, int r1)
 {
+    occ_job *J = a;
+    tk_layer *l = J->l;
+    const uint64_t AM = 0xff000000ff000000ull;
+    for (int by = r0; by < r1; by++) {
+        int y0 = by * 32, y1 = y0 + 32 < l->bmp.h ? y0 + 32 : l->bmp.h;
+        if (J->map) {
+            for (uint32_t bx = 0; bx < J->ow; bx++) {
+                int x0 = (int)bx * 32, x1 = x0 + 32 < l->bmp.w ? x0 + 32 : l->bmp.w;
+                uint64_t any = 0, all = AM;
+                for (int y = y0; y < y1; y++) {
+                    const uint32_t *r = l->bmp.px + (size_t)y * l->bmp.stride;
+                    int x = x0;
+                    if (x & 1) { any |= (uint64_t)r[x] << 32; all &= (uint64_t)r[x] << 32 | 0xff000000u; x++; }
+                    for (; x + 2 <= x1; x += 2) {
+                        uint64_t v;
+                        tk_memcpy(&v, r + x, 8);
+                        any |= v;
+                        all &= v;
+                    }
+                    if (x < x1) { any |= (uint64_t)r[x]; all &= (uint64_t)r[x] | 0xff00000000000000ull; }
+                }
+                any &= AM;
+                all &= AM;
+                J->l->gpu_occ[(uint32_t)by * J->ow + bx] = (uint8_t)(!any ? 0 : all == AM ? 2 : 1);
+            }
+        }
+        if (J->c->gpu_clean && y1 > y0)
+            J->c->gpu_clean(J->c->gpu_ctx, l->bmp.px + (size_t)y0 * l->bmp.stride, (uint64_t)(y1 - y0) * l->bmp.stride * 4u);
+    }
+}
+/* a bitmap's cache clean over the cores, by rows */
+typedef struct { tk_comp *c; const tk_bmp *b; } clean_job;
+static void clean_rows(void *a, int y0, int y1)
+{
+    clean_job *J = a;
+    if (y1 > y0)
+        J->c->gpu_clean(J->c->gpu_ctx, J->b->px + (size_t)y0 * J->b->stride, (uint64_t)(y1 - y0) * J->b->stride * 4u);
+}
+static void gpu_flush_layer(tk_comp *c, tk_layer *l)
+{
+    if (l->gpu_gen == l->gen + 1u || !c->gpu_clean) return;
     uint32_t fr = c->gpu_frames;
     int busy = l->gpu_occ_seen && fr - l->gpu_occ_frame <= 2u;
     l->gpu_occ_frame = fr;
     l->gpu_occ_seen = 1;
     l->gpu_occ_ok = 0;
-    if (busy || !l->bmp.px || l->bmp.w < 64 || l->bmp.h < 64) return;
-    uint32_t ow = (uint32_t)(l->bmp.w + 31) / 32u, oh = (uint32_t)(l->bmp.h + 31) / 32u;
-    if (ow * oh > l->gpu_occ_cap) {
-        tk_free(l->gpu_occ);
-        l->gpu_occ = tk_alloc(ow * oh);
-        l->gpu_occ_cap = l->gpu_occ ? ow * oh : 0;
-        if (!l->gpu_occ) return;
-    }
-    for (uint32_t by = 0; by < oh; by++)
-        for (uint32_t bx = 0; bx < ow; bx++) {
-            int y0 = (int)by * 32, x0 = (int)bx * 32;
-            int y1 = y0 + 32 < l->bmp.h ? y0 + 32 : l->bmp.h, x1 = x0 + 32 < l->bmp.w ? x0 + 32 : l->bmp.w;
-            uint32_t any = 0, all = 0xffu;
-            for (int y = y0; y < y1 && !(any && all != 0xffu); y++) {
-                const uint32_t *r = l->bmp.px + (size_t)y * l->bmp.stride;
-                for (int x = x0; x < x1; x++) {
-                    uint32_t a = r[x] >> 24;
-                    any |= a;
-                    all &= a;
-                }
+    occ_job J = { c, l, 0, 0 };
+    if (l->bmp.px) {
+        uint32_t ow = (uint32_t)(l->bmp.w + 31) / 32u, oh = (uint32_t)(l->bmp.h + 31) / 32u;
+        if (!busy && l->bmp.w >= 64 && l->bmp.h >= 64) {
+            if (ow * oh > l->gpu_occ_cap) {
+                tk_free(l->gpu_occ);
+                l->gpu_occ = tk_alloc(ow * oh);
+                l->gpu_occ_cap = l->gpu_occ ? ow * oh : 0;
             }
-            l->gpu_occ[by * ow + bx] = (uint8_t)(!any ? 0 : all == 0xffu ? 2 : 1);
+            J.map = l->gpu_occ != 0;
         }
-    l->gpu_occ_w = ow;
-    l->gpu_occ_h = oh;
-    l->gpu_occ_ok = 1;
-}
-static void gpu_flush_layer(tk_comp *c, tk_layer *l)
-{
-    if (l->gpu_gen == l->gen + 1u || !c->gpu_clean) return;
-    gpu_occ(c, l);
-    if (l->bmp.px) c->gpu_clean(c->gpu_ctx, l->bmp.px, (uint64_t)l->bmp.stride * 4u * (uint64_t)l->bmp.h);
+        J.ow = ow;
+        if (oh >= 8) tk_par_rows(0, (int)oh, occ_rows, &J);
+        else occ_rows(&J, 0, (int)oh);
+        if (J.map) {
+            l->gpu_occ_w = ow;
+            l->gpu_occ_h = oh;
+            l->gpu_occ_ok = 1;
+        }
+    }
     if (l->glass.v) c->gpu_clean(c->gpu_ctx, l->glass.v, (uint64_t)l->glass.w * (uint64_t)l->glass.h);
     l->gpu_gen = l->gen + 1u;
 }
@@ -845,8 +877,9 @@ static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
 {
     int n = 0;
     if (c->ground_gen + 1u != c->gpu_ground && c->gpu_clean) {
-        c->gpu_clean(c->gpu_ctx, c->base_half.px, (uint64_t)c->base_half.stride * 4u * (uint64_t)c->base_half.h);
-        c->gpu_clean(c->gpu_ctx, c->bw_half.px, (uint64_t)c->bw_half.stride * 4u * (uint64_t)c->bw_half.h);
+        clean_job J1 = { c, &c->base_half }, J2 = { c, &c->bw_half };
+        tk_par_rows(0, c->base_half.h, clean_rows, &J1);
+        tk_par_rows(0, c->bw_half.h, clean_rows, &J2);
         c->gpu_ground = c->ground_gen + 1u;
     }
     /* the ground: the wallpaper from its half-resolution copy, smooth (bilinear 2x), as the CPU's rest frames */
