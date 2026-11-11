@@ -19,7 +19,13 @@
  * reset, clock reload, CMD12 with stop_abort, CMD13 until tran; Linux dw_mci_reset +
  * send_stop_abort) before the retry, so no error leaves the controller inside the CMD18. CLKSEL is
  * changed in its timing fields only (Linux dw_mci_exynos_set_clksel_timing); a CMU gate that did
- * not open stops the bring-up before the controller is read. Nothing here ever writes the card.
+ * not open stops the bring-up before the controller is read.
+ *
+ * Writes (2026-11-11, the card as the home OS store): sd_write4k, CMD24 / CMD25 with auto stop, the
+ * FIFO filled by the CPU while it is not full, then DTO, ACD, the busy line and CMD13 until tran,
+ * every wait bounded (the write path of starbite/libsb/sd.c). They refuse (-9) before touching the
+ * controller unless every block is inside the fence store.c opened: the home card store's settings
+ * block and its crash log entry (17 blocks of 4 KiB). store.c reads every write back.
  */
 #include <stdint.h>
 #include "sd.h"
@@ -55,6 +61,7 @@
 #define C_STOP     (1U << 14)           /* stop_abort_cmd (Linux SDMMC_CMD_STOP) */
 #define C_PRV_WAIT (1U << 13)
 #define C_AUTOSTOP (1U << 12)
+#define C_WRITE    (1U << 10)
 #define C_DATA     (1U << 9)
 #define C_CRC      (1U << 8)
 #define C_LONG     (1U << 7)
@@ -438,6 +445,104 @@ int sd_store_area(uint64_t *first, uint64_t *blocks)
         *first = lba / 8U;
         *blocks = len / 8U;
         return 1;
+    }
+    return 0;
+}
+
+/* ---- writes: only inside the fence (store.c: the home card store's settings and crash log) ---- */
+
+static uint64_t fence_lo[SD_FENCES], fence_n[SD_FENCES];
+
+void sd_fence(unsigned slot, uint64_t lba, uint64_t count)
+{
+    if (slot < SD_FENCES) {
+        fence_lo[slot] = lba;
+        fence_n[slot] = count;
+    }
+}
+
+static int fenced_ok(uint64_t lba, uint64_t count)
+{
+    for (unsigned i = 0; i < SD_FENCES; ++i)
+        if (fence_n[i] && lba >= fence_lo[i] && count <= fence_n[i] && lba - fence_lo[i] <= fence_n[i] - count)
+            return 1;
+    return 0;
+}
+
+/* Up to 256 sectors with one CMD24 / CMD25 (auto stop), the FIFO filled by the CPU. */
+static int write_chunk(uint64_t sector, uint32_t n, uintptr_t src)
+{
+    wr(CTRL, rd(CTRL) | 2U);                   /* FIFO reset */
+    if (wait_reg(CTRL, 2U, 0, 50))
+        return -1;
+    wr(BLKSIZ, 512);
+    wr(BYTCNT, n * 512U);
+    uint32_t arg = (uint32_t)(sd_rep.high_capacity ? sector : sector * 512U);
+    int r = cmd(n > 1 ? 25 : 24, arg, R1 | C_DATA | C_WRITE | (n > 1 ? C_AUTOSTOP : 0));
+    if (r)
+        return r;
+    const volatile uint64_t *in = (const volatile uint64_t *)src;
+    uint64_t want = (uint64_t)n * 64U, put = 0;
+    uint64_t t = deadline(300 + n * 4U);
+    for (;;) {
+        uint32_t s = rd(RINTSTS);
+        while (put < want && !(rd(STATUS) & (1U << 3)))   /* FIFO not full */
+            *(volatile uint64_t *)(SD + DATA) = in[put++];
+        if (s & I_DERR) {
+            sd_rep.last_rintsts = s;
+            return -5;
+        }
+        if ((s & I_DTO) && put >= want)
+            break;
+        if (expired(t)) {
+            sd_rep.last_rintsts = s;
+            return -7;
+        }
+    }
+    if (n > 1 && wait_reg(RINTSTS, I_ACD, I_ACD, 200))
+        return -8;
+    if (wait_reg(STATUS, 1U << 9, 0, 1000))    /* the card programs (busy on DAT0) */
+        return -10;
+    uint64_t t2 = deadline(1000);
+    for (;;) {                                 /* CMD13 until tran: the data is in the card */
+        if (cmd(13, sd_rep.rca << 16, R1) == 0 && ((rd(RESP0) >> 9) & 0xfU) == 4U)
+            return 0;
+        if (expired(t2))
+            return -11;
+        hw_wait_ms(1);
+    }
+}
+
+int sd_write4k(uint64_t lba, uint64_t count, uintptr_t src)
+{
+    if (!count || count > 256U || !fenced_ok(lba, count)) {
+        sd_rep.fenced++;
+        return -9;                             /* outside the fence: nothing touched */
+    }
+    if (!sd_up())
+        return -1;
+    uint64_t sector = lba * 8U;
+    uint32_t left = (uint32_t)(count * 8U);
+    sd_rep.writes++;
+    while (left) {
+        uint32_t n = left > 256U ? 256U : left;
+        int r = -1;
+        for (int a = 0; a < 3 && r; ++a) {
+            r = write_chunk(sector, n, src);
+            if (r) {
+                uint32_t ri = sd_rep.last_rintsts;
+                sd_rep.last_error = r;
+                (void)sd_recover();
+                sd_rep.last_rintsts = ri;
+            }
+        }
+        if (r) {
+            sd_rep.write_errors++;
+            return r;
+        }
+        sector += n;
+        left -= n;
+        src += (uintptr_t)n * 512U;
     }
     return 0;
 }

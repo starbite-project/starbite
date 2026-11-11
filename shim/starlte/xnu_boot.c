@@ -2294,6 +2294,10 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
     boot_sctlr = sctlr;
     star_dump_latches();
     crumbs_print_previous();
+    /* BOOT's command line before any store call (the Bixby path below reads settings): sbstore=card
+     * = USERDATA released to iOS, the card's store is the only one (store.h, docs/STORE-ON-CARD.md) */
+    boot_info();
+    store_cmdline(boot_cmdline);
     /* The boot-next keys the loader itself takes (mailbox cleared at once): rescue, and Starbite
      * Maintenance's maint / maint-prev / maint-rescue (docs/MAINTENANCE.md 4.2 R2). */
     int next = rec_next_take();
@@ -2398,6 +2402,17 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
      * first poll of the first of them (after menu v7's intro, which polls nothing: a host would
      * otherwise wait through it in the middle of enumeration). */
     fbbg_enable();
+    /* Card only and no store on the card (missing, not starting, no SBSTORE2): Starbite Recovery
+     * says why; its BOOT MENU, fastboot, TWRP and Download mode work without a store. */
+    if (store_card_only() && store_home() < 0) {
+        const char *w = store_home_why();
+        pmsg_put("STARBITE: store: ");
+        pmsg_put(w);
+        pmsg_put(" (sbstore=card): Starbite Recovery\n");
+        entry = recovery_loop(log, w);
+        if (entry)
+            return entry;
+    }
     /* Crash and hang detection: the last launch judged, a report saved, the crash screen
      * (crash.c). Then the menu, Starbite Recovery or the same entry once more (settings). */
     {

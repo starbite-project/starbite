@@ -10,6 +10,8 @@
 #   diff <(python3 tools/store/sbstore2.py list OUT.img) <(python3 tools/store/sbstore2.py list NEW.img)
 #   diff <(python3 tools/store/sbstore2.py catalog-keys OUT.img) <(python3 tools/store/sbstore2.py catalog-keys NEW.img)
 # The second must show only added keys (sbstore2.py build also refuses a --catalog that drops one).
+# A card home store whose data sits further into p2 (sbstore2.py --data-at) comes back as the same
+# COMPACT image sbstore2.py builds: blocks 0..6, then the data extent (docs/STORE-ON-CARD.md).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 out=${1:?usage: store-pull.sh OUT.img [ufs|sd]}
@@ -29,7 +31,7 @@ free_kb=$(df -k "$(dirname "$out")" | awk 'NR == 2 { print $4 }')
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 adb exec-out "dd if=$dev bs=4096 skip=$((skip + 1)) count=1 2>/dev/null" > "$tmp/hdr"
-used=$(python3 - "$tmp/hdr" "$cap" "$free_kb" <<'PY'
+hdr=$(python3 - "$tmp/hdr" "$cap" "$free_kb" <<'PY'
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location('sbstore2', 'tools/store/sbstore2.py')
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
@@ -37,16 +39,28 @@ d = open(sys.argv[1], 'rb').read()
 if len(d) < 52:
     sys.exit('short header read')
 n, cap, used, _ = m.check_header(d, 'phone store')
+_, data_at = m.home_ext(d[:4096])
 if cap != int(sys.argv[2]):
     sys.exit(f'header capacity {cap} != {sys.argv[2]} blocks the device gives the store: refusing')
-if used * 4 + 1048576 > int(sys.argv[3]):
-    sys.exit(f'{used * 4 // 1024} MiB to pull, {int(sys.argv[3]) // 1024} MiB free (keeping 1 GiB): refusing')
-print(used)
+blocks = m.file_block(used, data_at)
+if blocks * 4 + 1048576 > int(sys.argv[3]):
+    sys.exit(f'{blocks * 4 // 1024} MiB to pull, {int(sys.argv[3]) // 1024} MiB free (keeping 1 GiB): refusing')
+print(used, data_at)
 PY
 )
-echo "live store: $used blocks ($((used * 4 / 1024)) MiB) on $dev +$skip"
-adb exec-out "dd if=$dev bs=4096 skip=$skip count=$used 2>/dev/null" > "$out"
-[ "$(wc -c < "$out" | tr -d ' ')" = $((used * 4096)) ] || { echo "short read"; exit 1; }
+used=${hdr% *}
+data_at=${hdr#* }
+if [ "$data_at" = 7 ]; then
+    echo "live store: $used blocks ($((used * 4 / 1024)) MiB) on $dev +$skip"
+    adb exec-out "dd if=$dev bs=4096 skip=$skip count=$used 2>/dev/null" > "$out"
+    want=$((used * 4096))
+else
+    echo "live store: blocks 0..6 + data $data_at..$used ($(((used - data_at) * 4 / 1024)) MiB, compact image) on $dev +$skip"
+    { adb exec-out "dd if=$dev bs=4096 skip=$skip count=7 2>/dev/null"
+      adb exec-out "dd if=$dev bs=4096 skip=$((skip + data_at)) count=$((used - data_at)) 2>/dev/null"; } > "$out"
+    want=$(((7 + used - data_at) * 4096))
+fi
+[ "$(wc -c < "$out" | tr -d ' ')" = "$want" ] || { echo "short read"; exit 1; }
 python3 tools/store/sbstore2.py list "$out"          # header, directory and entry CRCs
 python3 tools/store/sbstore2.py catalog tools/store/catalog.toml "$tmp/cat.sbc"
 python3 - "$out" "$tmp/cat.sbc" <<'PY'

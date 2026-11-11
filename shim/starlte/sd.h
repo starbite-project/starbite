@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * The microSD card from the loader (sd.c): read only, for the card's OS store (store.c). */
+ * The microSD card from the loader (sd.c), for the card's OS store (store.c): reads, and writes only
+ * inside the fence store.c opens (the home store's settings block and crash log, nothing else). */
 #pragma once
 #include <stdint.h>
 
@@ -16,6 +17,15 @@ int sd_store_area(uint64_t *first, uint64_t *blocks);
 /* count 4 KiB blocks from 4 KiB block lba of the card to dst: 0 on success. */
 int sd_read4k(uint64_t lba, uint64_t count, uintptr_t dst);
 
+/* The write fence: slot 0..SD_FENCES-1 holds [lba, lba + count) in 4 KiB blocks (count 0 closes
+ * it). Only store.c sets it, to the home card store's settings block and crash log entry. */
+#define SD_FENCES 2U
+void sd_fence(unsigned slot, uint64_t lba, uint64_t count);
+/* count 4 KiB blocks from src to 4 KiB block lba (CMD24/25, then the card's busy and CMD13 until
+ * tran): 0 on success, -9 outside the fence (nothing touched), other < 0 a failed step. The
+ * caller reads the blocks back. */
+int sd_write4k(uint64_t lba, uint64_t count, uintptr_t src);
+
 /* What the last sd_up() found, step by step (EngineerMode shows it). */
 struct sd_report {
     int state;                  /* 0 not tried, 1 ready, -1 failed */
@@ -28,7 +38,8 @@ struct sd_report {
     uint32_t r7, ocr, rca, cid[4];
     int high_capacity;          /* SDHC/SDXC: block addressing */
     uint32_t last_rintsts, last_status;
-    int last_error;             /* the last failed read_chunk (-1..-8), 0 none */
+    int last_error;             /* the last failed read_chunk / write_chunk (-1..-11), 0 none */
+    uint32_t writes, write_errors, fenced;  /* sd_write4k calls: done, failed, refused (-9) */
     int card_state;             /* CMD13 state after the last recovery (4 tran), -1 no answer */
     uint32_t recoveries;        /* sd_recover() runs */
 };

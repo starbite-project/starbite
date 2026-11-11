@@ -4,8 +4,8 @@
 tools/macos/card-range-flash.py (--layout), the installer (tools/installer/sbinst) and its fakes.
 
   sd128  S9 #1's 128 GB card (exactly 249,999,360 sectors), as it is today and never moved:
-         p1 exFAT 8192.., p2 0xDA 182886400..249999359 holding the card store (1 MiB), the iOS 26
-         root, the macOS Ventura root, 961 MiB free and the 64 MiB tail.
+         p1 exFAT 8192.., p2 0xDA 182886400..249999359 holding the card store's header (1 MiB), the iOS 26
+         root, the macOS Ventura root, the card store's data (961 MiB) and the 64 MiB tail.
   sd64   any card of at least 60,000,000,000 bytes (a card sold as 64 GB; 117,187,500 sectors):
          p2 0xDA FIRST at sector 8192 with a fixed size (64 MiB card store, the macOS Ventura root,
          the 64 MiB tail), then p1 exFAT from sector 31727616 to the card's last whole MiB. The
@@ -120,6 +120,11 @@ class Layout:
     def tail(self):
         return self.area('tail')
 
+    @property
+    def store_data(self):
+        """Where a home card store keeps its data when its 1 MiB store area is too small (or None)."""
+        return self.area('storedata')
+
     def roots(self):
         return [a for a in self.areas if a.kind == 'root']
 
@@ -154,7 +159,8 @@ def _sd128():
         areas=(Area('store', 'store', 182886400, 2048, (), 'card OS store (1 MiB: iOS 26 follows)'),
                Area('ios26', 'root', 182888448, 33554432, ('ios26', 'ios26sdt'), 'iOS 26 root, HFSX 16 GiB (parked edge pair)'),
                Area('mac13', 'root', 216442880, 31457280, ('mac13',), 'macOS Ventura root, HFSX 15 GiB'),
-               Area('free', 'free', 247900160, 1968128, (), 'free (961 MiB)'),
+               Area('storedata', 'store', 247900160, 1968128, (), 'card OS store data, 961 MiB (the home store since '
+                    '2026-11-11: sbstore2.py --home --data-at, tools/store/card-store.sh; docs/STORE-ON-CARD.md)'),
                Area('tail', 'tail', 249868288, TAIL_SECTORS, (), 'tail: XNU test range + sdlog ring; last sector SBTIME01 clock')))
 
 

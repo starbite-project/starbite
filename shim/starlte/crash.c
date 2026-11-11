@@ -607,7 +607,7 @@ static void crash_screen(const struct cl_report *r, unsigned level, unsigned tim
 
 static int read_log(struct store_ent *e, struct cl_head *h)
 {
-    if (!store_crashlog(e) || ufs_read_to(e->lba, CL_BYTES / CL_BLOCK, CR_LOG))
+    if (!store_crashlog(e) || store_read(e, 0, CL_BYTES / CL_BLOCK, CR_LOG))
         return -2;
     return cl_head_decode((const uint8_t *)CR_LOG, h);
 }
@@ -727,9 +727,8 @@ void crash_launch(const char *key, const char *name, unsigned method, unsigned w
     struct cl_head h;
     (void)settle(0, 0);           /* a launch still pending from the last boot is judged first */
     cs_load();
-    if (cs.crash_mode == SET_CRASH_OFF || !store_crashlog(&e) || ufs_read(e.lba, 1))
+    if (cs.crash_mode == SET_CRASH_OFF || !store_crashlog(&e) || store_read(&e, 0, 1, LAUNCH_BUF))
         return;
-    copy64(LAUNCH_BUF, UFS_BUF, CL_BLOCK);
     if (cl_head_decode((const uint8_t *)LAUNCH_BUF, &h) != 1)
         cl_head_init(&h);
     ++h.launch_seq;

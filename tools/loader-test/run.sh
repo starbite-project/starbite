@@ -30,4 +30,22 @@ python3 -I -B tools/loader-test/gen_maint.py "$T" $fx/sboot-fdt-scrubbed.dtb
 "$T/host_test" "$T" $fx/sboot-fdt-scrubbed.dtb $fx/un1ca-G960F-dtb "$lineage" "$linux"
 python3 -I -B tools/loader-test/check_dtmerge.py "$T" $fx/sboot-fdt-scrubbed.dtb
 python3 -I -B tools/loader-test/test_sbstore2.py "$T"
+# store.c with the home store on the card (docs/STORE-ON-CARD.md): the real store.c over fake media
+SB="python3 -I -B tools/store/sbstore2.py"
+head -c 300000 /dev/urandom > "$T/k1"
+$SB build "$T/ufs-off.img" linux.image="$T/k1" --medium ufs --catalog tools/store/catalog.toml >/dev/null
+cp "$T/ufs-off.img" "$T/ufs-on.img"
+$SB settings "$T/s-off.bin" --default ufs-def >/dev/null
+$SB settings "$T/s-on.bin" --default ufs-def --sd on >/dev/null
+dd if="$T/s-off.bin" of="$T/ufs-off.img" bs=4096 seek=2 conv=notrunc 2>/dev/null
+dd if="$T/s-on.bin" of="$T/ufs-on.img" bs=4096 seek=2 conv=notrunc 2>/dev/null
+$SB build "$T/card-home.img" linux.image="$T/k1" --capacity 4096 --home --data-at 2048 --catalog tools/store/catalog.toml >/dev/null
+$SB settings "$T/s-card.bin" --default card-def --sd on >/dev/null
+dd if="$T/s-card.bin" of="$T/card-home.img" bs=4096 seek=2 conv=notrunc 2>/dev/null
+$SB build "$T/card-plain.img" --capacity 4096 --catalog tools/store/catalog.toml >/dev/null
+sed 's/#include "ufs.h"/#include "host_ufs.h"/' $S/store.c > "$T/store_host.c"
+$CC -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -I tools/loader-test -I $S -I shim \
+    -fsanitize=address,undefined -fno-sanitize-recover=all \
+    tools/loader-test/store_test.c "$T/store_host.c" $S/sbfmt.c -o "$T/store_test"
+"$T/store_test" "$T"
 echo "loader-test: all passed"

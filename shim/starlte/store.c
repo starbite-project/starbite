@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * The Starbite OS store: see store.h. Read only, except the UFS settings record and the crash log.
+ * The Starbite OS store: see store.h. Read only, except the home store's settings record and crash
+ * log (the UFS store, or the card's once it is home: docs/STORE-ON-CARD.md).
  */
 #include <stdint.h>
 #include "store.h"
@@ -10,10 +11,12 @@
 #define UFS_STORE_OFFSET 4194304ULL            /* USERDATA +16 GiB, in 4 KiB blocks */
 #define V1_BLOCKS        262144ULL             /* the version 1 store: 1 GiB */
 #define SCRATCH          (UFS_BUF + (512U << 10))
+#define READBACK         (SCRATCH + (64U << 10))   /* write read-backs (the directory uses SCRATCH) */
 
 struct medium {
     int state;                 /* 0 not tried, 1 open, -1 none */
     int version;
+    int home;                  /* the header's HOME flag (SBSTHOME extension) */
     uint64_t base, capacity, used, settings;
     unsigned count;
     struct store_ent ent[STORE_MAX];
@@ -48,6 +51,23 @@ static int med_read(unsigned m, uint64_t lba, uint64_t count, uintptr_t dst)
     return sd_read4k(lba, count, dst);
 }
 
+/* One 4 KiB block from src: UFS (settings / crash log only, by the callers below) or the card
+ * (sd.c refuses anything outside the fence store_home opened). */
+static int med_write(unsigned m, uint64_t lba, uintptr_t src)
+{
+    if (m == STORE_UFS)
+        return ufs_write_block(lba, src);
+    return sd_write4k(lba, 1, src);
+}
+
+/* ---- home store state (store.h) -------------------------------------------------------------- */
+#ifdef STORE_CARD_ONLY
+static int card_only = 1;      /* test loaders chained from the store have no BOOT command line */
+#else
+static int card_only;
+#endif
+static int home = -2;          /* -2 not resolved, -3 resolving, -1 none, else the medium */
+
 static void name_copy(char *dst, uintptr_t src, unsigned n)
 {
     unsigned k = 0;
@@ -68,6 +88,9 @@ static int open_v2(struct medium *s, unsigned m, uint64_t limit)
     s->capacity = le(SCRATCH + 16, 8);
     s->used = le(SCRATCH + 24, 8);
     s->settings = le(SCRATCH + 40, 4);
+    s->home = le(SCRATCH + 64, 8) == 0x454d4f4854534253ULL &&                       /* "SBSTHOME" */
+              le(SCRATCH + 72, 4) == 1 && star_crc32(SCRATCH + 64, 24) == (uint32_t)le(SCRATCH + 88, 4) &&
+              (le(SCRATCH + 76, 4) & 1U);
     if (s->capacity > limit || s->used > s->capacity || n > STORE_MAX || !dir_blocks ||
         dir_blocks > STORE_MAX * 64U / 4096U || n * 64U > dir_blocks * 4096U ||
         dir + dir_blocks > s->capacity)
@@ -103,6 +126,7 @@ static int open_v1(struct medium *s, unsigned m)
     s->capacity = V1_BLOCKS;
     s->used = le(SCRATCH + 16, 8);
     s->settings = 0;
+    s->home = 0;
     for (uint32_t i = 0; i < n && i < 63; ++i) {
         uintptr_t p = SCRATCH + 64 + 64U * i;
         struct store_ent *e = &s->ent[s->count];
@@ -126,23 +150,28 @@ int store_open(unsigned m)
 {
     if (m >= STORE_MEDIA)
         return 0;
+    if (home == -2)
+        (void)store_home();            /* which media may be touched at all: decided first */
     struct medium *s = &med[m];
     if (s->state)
         return s->state > 0 ? (int)s->count : 0;
     s->state = -1;
     s->count = 0;
+    s->home = 0;
     uint64_t first, last, limit;
     if (m == STORE_UFS) {
+        /* USERDATA released to iOS (card only), or the card's store is home: the UFS store area
+         * is not read, listed or written again (docs/STORE-ON-CARD.md) */
+        if (card_only || home == (int)STORE_SD)
+            return 0;
         if (!ufs_up() || !gpt_find("USERDATA", &first, &last) || last - first + 1 <= UFS_STORE_OFFSET + 16)
             return 0;
         s->base = first + UFS_STORE_OFFSET;
         limit = last - first + 1 - UFS_STORE_OFFSET;
     } else {
-        /* The card hardware is touched only once allowed (sd.h): by the settings record or by
-         * EngineerMode's microSD page, which then calls store_reset. */
-        struct star_settings st;
-        if (!sd_allowed() && settings_load(&st) && (st.flags & SET_SD_STORE))
-            sd_allow();
+        /* The card hardware is touched only once allowed (sd.h): always in card only mode, else
+         * by the UFS settings record (store_home) or EngineerMode's microSD page, which then
+         * calls store_reset. */
         if (!sd_allowed())
             return 0;
         if (!sd_store_area(&first, &limit))
@@ -298,11 +327,16 @@ uint64_t store_used(unsigned m)
  * Block 2 of the UFS store, the codec and layout in sbfmt.c / sbfmt.h ("SBSETTNG", version 1, CRC32
  * of bytes 16..255). settings_save keeps bytes it does not know (112..255 of the record it read).
  */
-static uint64_t settings_lba(void)
+/* The home store's settings block (and its medium in *m), or 0. */
+static uint64_t settings_lba_on(unsigned *m)
 {
-    struct medium *s = &med[STORE_UFS];
-    if (!opened(STORE_UFS) || s->version != 2 || s->settings != 2)
+    int h = store_home();
+    if (h < 0)
         return 0;
+    struct medium *s = &med[h];
+    if (s->state <= 0 || s->version != 2 || s->settings != 2)
+        return 0;
+    *m = (unsigned)h;
     return s->base + s->settings;
 }
 
@@ -317,18 +351,19 @@ int settings_status(void)
 int settings_load(struct star_settings *st)
 {
     sbset_defaults(st);
-    uint64_t lba = settings_lba();
+    unsigned m = 0;
+    uint64_t lba = settings_lba_on(&m);
     if (!lba) {
         set_status = -2;
         return 0;
     }
-    if (ufs_read(lba, 1)) {
+    if (med_read(m, lba, 1, READBACK)) {
         set_status = -1;
         return 0;
     }
     uint8_t b[SBSET_BYTES];
     for (unsigned i = 0; i < SBSET_BYTES; ++i)
-        b[i] = *(volatile uint8_t *)(UFS_BUF + i);
+        b[i] = *(volatile uint8_t *)(READBACK + i);
     set_status = sbset_check(b);
     if (set_status != 1)
         return 0;
@@ -342,7 +377,8 @@ static uint8_t set_blk[CL_BLOCK];
 
 int settings_save(struct star_settings *st)
 {
-    uint64_t lba = settings_lba();
+    unsigned m = 0;
+    uint64_t lba = settings_lba_on(&m);
     if (!lba)
         return -1;
     ++st->seq;
@@ -360,10 +396,10 @@ int settings_save(struct star_settings *st)
     __asm__("" : "+r"(src));    /* no folded "set_blk - SCRATCH" constant: that is an ABS64 relocation */
     for (unsigned i = 0; i < CL_BLOCK; ++i)
         *(volatile uint8_t *)(b + i) = src[i];
-    if (ufs_write_block(lba, b) || ufs_read(lba, 1))
+    if (med_write(m, lba, b) || med_read(m, lba, 1, READBACK))
         return -2;
     for (unsigned i = 0; i < 256; i += 8)
-        if (*(volatile uint64_t *)(UFS_BUF + i) != *(volatile uint64_t *)(b + i))
+        if (*(volatile uint64_t *)(READBACK + i) != *(volatile uint64_t *)(b + i))
             return -3;
     for (unsigned i = 0; i < SBSET_BYTES; ++i)
         set_tail[i] = set_blk[i];
@@ -375,20 +411,124 @@ int settings_save(struct star_settings *st)
 
 int store_crashlog(struct store_ent *e)
 {
-    return store_find("ufs:crashlog", e) && (e->flags & SF_VOLATILE) && e->size >= CL_BYTES &&
-           e->medium == STORE_UFS;
+    int h = store_home();
+    if (h < 0)
+        return 0;
+    return store_find(h == (int)STORE_SD ? "sd:crashlog" : "ufs:crashlog", e) && (e->flags & SF_VOLATILE) &&
+           e->size >= CL_BYTES && e->medium == (unsigned)h;
 }
 
 int store_crashlog_write(const struct store_ent *e, unsigned index, uintptr_t src)
 {
     struct store_ent chk;
-    if (index >= CL_BYTES / CL_BLOCK || !store_crashlog(&chk) || chk.lba != e->lba)
+    if (index >= CL_BYTES / CL_BLOCK || !store_crashlog(&chk) || chk.lba != e->lba || chk.medium != e->medium)
         return -1;
     uint64_t lba = e->lba + index;
-    if (ufs_write_block(lba, src) || ufs_read(lba, 1))
+    if (med_write(e->medium, lba, src) || med_read(e->medium, lba, 1, READBACK))
         return -2;
     for (unsigned i = 0; i < CL_BLOCK; i += 8)
-        if (*(volatile uint64_t *)(UFS_BUF + i) != *(volatile uint64_t *)(src + i))
+        if (*(volatile uint64_t *)(READBACK + i) != *(volatile uint64_t *)(src + i))
             return -3;
     return 0;
+}
+
+int store_read(const struct store_ent *e, uint64_t index, uint64_t count, uintptr_t dst)
+{
+    uint64_t blocks = (e->size + 4095U) / 4096U;
+    if (!count || index > blocks || count > blocks - index)
+        return -1;
+    return med_read(e->medium, e->lba + index, count, dst) ? -1 : 0;
+}
+
+/* ---- the home store ---------------------------------------------------------------------------- */
+
+void store_cmdline(const char *c)
+{
+    static const char want[] = "sbstore=card";
+    for (unsigned i = 0; c && c[i]; ++i) {
+        if (i && c[i - 1] != ' ')
+            continue;
+        unsigned k = 0;
+        while (want[k] && c[i + k] == want[k])
+            ++k;
+        if (!want[k] && (c[i + k] == 0 || c[i + k] == ' '))
+            card_only = 1;
+    }
+}
+
+int store_card_only(void)
+{
+    return card_only;
+}
+
+int store_marked_home(unsigned m)
+{
+    return opened(m) && med[m].version == 2 && med[m].home;
+}
+
+/* The UFS store's settings flags (raw: the record of the UFS store's block 2), 0 without one. */
+static uint32_t ufs_settings_flags(void)
+{
+    struct medium *s = &med[STORE_UFS];
+    if (s->state <= 0 || s->version != 2 || s->settings != 2 || med_read(STORE_UFS, s->base + 2, 1, READBACK))
+        return 0;
+    uint8_t b[SBSET_BYTES];
+    for (unsigned i = 0; i < SBSET_BYTES; ++i)
+        b[i] = *(volatile uint8_t *)(READBACK + i);
+    if (sbset_check(b) != 1)
+        return 0;
+    struct star_settings st;
+    sbset_decode(b, &st);
+    return st.flags;
+}
+
+int store_home(void)
+{
+    if (home >= -1)
+        return home;
+    if (home == -3)
+        return -1;                     /* asked while resolving (store_open of a medium): none yet */
+    home = -3;
+    int h = -1;
+    if (card_only) {
+        sd_allow();
+        if (store_open(STORE_SD) >= 0 && med[STORE_SD].state > 0 && med[STORE_SD].version == 2)
+            h = (int)STORE_SD;
+    } else {
+        (void)store_open(STORE_UFS);
+        if (!sd_allowed() && (ufs_settings_flags() & SET_SD_STORE))
+            sd_allow();
+        if (sd_allowed() && (store_open(STORE_SD), med[STORE_SD].state > 0) && med[STORE_SD].version == 2 &&
+            med[STORE_SD].home) {
+            h = (int)STORE_SD;
+            med[STORE_UFS].state = -1;     /* the card is home: the UFS store is closed for this boot */
+            med[STORE_UFS].count = 0;
+        } else if (med[STORE_UFS].state > 0) {
+            h = (int)STORE_UFS;
+        }
+    }
+    home = h;
+    if (h == (int)STORE_SD) {
+        /* the only card blocks the loader may write: settings (block 2) and the crash log */
+        struct medium *s = &med[STORE_SD];
+        if (s->settings == 2)
+            sd_fence(0, s->base + 2, 1);
+        for (unsigned i = 0; i < s->count; ++i)
+            if (name_is(s->ent[i].name, "crashlog") && (s->ent[i].flags & SF_VOLATILE) && s->ent[i].size >= CL_BYTES)
+                sd_fence(1, s->ent[i].lba, CL_BYTES / CL_BLOCK);
+    }
+    return home;
+}
+
+const char *store_home_why(void)
+{
+    if (store_home() >= 0)
+        return 0;
+    if (!card_only)
+        return "NO OS STORE";
+    if (!sd_rep.present)
+        return "NO OS STORE: NO MICROSD CARD";
+    if (sd_rep.state < 0)
+        return "NO OS STORE: THE MICROSD CARD DID NOT START";
+    return "NO OS STORE ON THE CARD";
 }

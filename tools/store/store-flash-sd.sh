@@ -28,6 +28,11 @@ print(cap, used)
 PY
 )
 [ "$want_cap" = "$cap" ] || { echo "store capacity $want_cap, partition 2 has $cap blocks: rebuild with --capacity $cap"; exit 1; }
+# A compact image (sbstore2.py --data-at: the card home store) is NOT laid out as on the card: writing it
+# from block 0 would put its data over the iOS 26 root. tools/store/card-store.sh writes those.
+if [ "$(dd if="$img" bs=1 skip=$((4096 + 64)) count=8 2>/dev/null)" = SBSTHOME ]; then
+    echo "$img is a home / compact card store (SBSTHOME): use tools/store/card-store.sh flash"; exit 1
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -40,6 +45,8 @@ if v1 not in (b'SBSTORE1', bytes(8)) and v2 != b'SBSTORE2':
     sys.exit(f'partition 2 holds unknown data ({v1.hex()}): refusing')
 if v2 != b'SBSTORE2' and any(head):
     sys.exit('partition 2 not empty: refusing')
+if v2 == b'SBSTORE2' and head[4096 + 64:4096 + 72] == b'SBSTHOME':
+    sys.exit('partition 2 holds the HOME card store (SBSTHOME): use tools/store/card-store.sh flash: refusing')
 img = bytearray(open(sys.argv[2], 'rb').read())
 if v2 == b'SBSTORE2' and st[:8] == b'SBSETTNG' and zlib.crc32(st[16:256]) == struct.unpack_from('<I', st, 12)[0]:
     img[8192:12288] = st

@@ -20,6 +20,13 @@
       kernel's herolog ring, bsd/dev/herolte_ufs.c). --medium sd refuses a store that reaches the
       last 16384 blocks (64 MiB) of card p2: the XNU microSD root test range
       sdroot=lba:249868288,131072 (bsd/dev/starlte_sd.c, docs/XNU-MICROSD.md section 9).
+      --home marks the store as the loader's home store (header extension "SBSTHOME": its block 2
+      holds the settings record, its "crashlog" entry the crash log; adds the crash log; on the card
+      the UFS store is never touched again: docs/STORE-ON-CARD.md). --data-at BLOCK places the data
+      at that block instead of block 7 (the sd128 card: its 1 MiB store area holds only the header,
+      the data goes to the layout's store data area; --data-at layout picks it). Such an image is
+      COMPACT: the file is blocks 0..6, then the data (store block BLOCK at file block 7). Write it
+      with tools/store/card-store.sh, never store-flash-sd.sh (which refuses it).
   sbstore2.py list IMG
   sbstore2.py header IMG
       The version 2 header: entries, capacity and used blocks; for a card store (capacity 8389120,
@@ -55,7 +62,9 @@ give them to every entry of that method that does not set its own.
 
 Layout, in 4 KiB blocks: 0 "SBSTORE1" view (entries with names < 24 below 1 GiB, for older
 loaders and the iOS overlay installer), 1 "SBSTORE2" header, 2 settings, 3..6 directory (256 x 64
-bytes), data from 7, every entry 4 KiB aligned. CRC32 = zlib.crc32.
+bytes), data from 7 (or --data-at), every entry 4 KiB aligned. CRC32 = zlib.crc32. Header block 1, bytes
+64..91, when --home or --data-at: "SBSTHOME", u32 1, u32 flags (bit 0 home), u64 first data block, u32 CRC32
+of 64..87 (shim/starlte/store.h).
 """
 import argparse
 import struct
@@ -83,6 +92,7 @@ SF_VOLATILE = 1                           # directory flags: written in place by
 CRASHLOG = 'crashlog'
 VOLATILE_KNOWN = (CRASHLOG, 'sbos-state')   # entries written in place by the loader / Starbite OS
 CL_BLOCK, CL_SLOTS = 4096, 15
+HOME_MAGIC, HOME_OFF, HOME_FLAG = b'SBSTHOME', 64, 1   # header block 1, bytes 64..91 (store.h)
 CL_BYTES = CL_BLOCK * (1 + CL_SLOTS)
 WDT_FEEDS = {'none': 0, 'kernel': 1, 'userspace': 2, 'own': 3, 'xnu': 4}
 CE_LINUX_INFORM3, CE_NO_LAUNCH = 1, 2
@@ -223,6 +233,21 @@ def check_header(hdr, img='store'):
     return n, cap, used, dcrc
 
 
+def home_ext(hdr):
+    """(flags, data_block) of a header block's SBSTHOME extension, or (0, DATA_BLOCK) without one."""
+    if bytes(hdr[HOME_OFF:HOME_OFF + 8]) != HOME_MAGIC:
+        return 0, DATA_BLOCK
+    _, ver, flags, dblk, crc = struct.unpack_from('<8sIIQI', hdr, HOME_OFF)
+    if ver != 1 or zlib.crc32(bytes(hdr[HOME_OFF:HOME_OFF + 24])) != crc or dblk < DATA_BLOCK:
+        sys.exit('store header: bad SBSTHOME extension (version, CRC or data block)')
+    return flags, dblk
+
+
+def file_block(blk, data_at):
+    """Where store block blk sits in an image file (compact when data_at > 7)."""
+    return blk if blk < DATA_BLOCK else blk - data_at + DATA_BLOCK
+
+
 def read_store(img, with_flags=False):
     """Entries (name, type, blob) of a store image (v2, else the v1 view), CRC checked except volatile
     entries (the crash log). with_flags: (name, type, blob, flags)."""
@@ -230,16 +255,18 @@ def read_store(img, with_flags=False):
     out = []
     if data[BLOCK:BLOCK + 8] == b'SBSTORE2':
         n, cap, used, dcrc = check_header(data[BLOCK:BLOCK + 52], img)
-        if len(data) < used * BLOCK:
-            sys.exit(f'{img}: {len(data)} bytes, header says {used} blocks')
+        _, data_at = home_ext(data[BLOCK:2 * BLOCK])
+        if len(data) < file_block(used, data_at) * BLOCK:
+            sys.exit(f'{img}: {len(data)} bytes, header says {used} blocks (data from block {data_at})')
         dirb = data[DIR_BLOCK * BLOCK:DIR_BLOCK * BLOCK + 64 * n]
         if zlib.crc32(dirb) != dcrc:
             sys.exit(f'{img}: directory CRC mismatch')
         for i in range(n):
             name, blk, size, crc, typ, fl = struct.unpack_from('<32sQQIHH', dirb, 64 * i)
-            if blk < DATA_BLOCK or blk + (size + BLOCK - 1) // BLOCK > used:
-                sys.exit(f'{img}: entry {name.rstrip(bytes(1))!r} at block {blk} + {size} B is outside [{DATA_BLOCK}, {used})')
-            blob = data[blk * BLOCK:blk * BLOCK + size]
+            if blk < data_at or blk + (size + BLOCK - 1) // BLOCK > used:
+                sys.exit(f'{img}: entry {name.rstrip(bytes(1))!r} at block {blk} + {size} B is outside [{data_at}, {used})')
+            fb = file_block(blk, data_at)
+            blob = data[fb * BLOCK:fb * BLOCK + size]
             out.append((name.rstrip(b'\0').decode(), typ, blob, crc, fl))
     elif data[:8] == b'SBSTORE1':
         _, _, n, _ = struct.unpack_from('<8sIIQ', data, 0)
@@ -321,7 +348,7 @@ def build(a):
         path, _, typ = rest.partition(':')
         items[name] = (TYPES[typ] if typ else guess_type(name), Path(path).read_bytes())
     # the loader's crash log (docs/STARBITE-HEALTH.md): on the UFS store; an imported one keeps its reports
-    if (a.medium == 'ufs' and not a.no_crashlog) or a.crashlog:
+    if (a.medium == 'ufs' and not a.no_crashlog) or a.crashlog or a.home:
         if CRASHLOG not in items or len(items[CRASHLOG][1]) != CL_BYTES:
             if CRASHLOG in items:
                 print(f'{CRASHLOG}: imported entry is {len(items[CRASHLOG][1])} bytes, not {CL_BYTES}: started empty')
@@ -348,7 +375,18 @@ def build(a):
     if len(items) > MAX_ENTRIES:
         sys.exit('too many entries')
     dirb, v1, data = bytearray(DIR_BLOCKS * BLOCK), bytearray(BLOCK), bytearray()
-    blk, nv1 = DATA_BLOCK, 0
+    lay = SD_LAYOUTS.get(a.medium)
+    data_at = DATA_BLOCK
+    if a.data_at is not None:
+        if a.data_at == 'layout':
+            if lay is None or lay.store_data is None:
+                sys.exit(f'--data-at layout: the {a.medium} medium has no store data area')
+            data_at = (lay.store_data.start - lay.p2_start) // cardlayout.BLOCK_SECTORS
+        else:
+            data_at = int(a.data_at, 0)
+        if data_at < DATA_BLOCK or data_at >= a.capacity:
+            sys.exit(f'--data-at {data_at}: outside [{DATA_BLOCK}, capacity {a.capacity})')
+    blk, nv1 = data_at, 0
     rows = []
     for i, (name, (typ, blob)) in enumerate(items.items()):
         if not name or len(name) > 31:
@@ -367,11 +405,18 @@ def build(a):
         sys.exit(f'store needs {blk} blocks > capacity {a.capacity}')
     if a.medium == 'ufs' and blk > a.capacity - HEROLOG_BLOCKS:
         sys.exit(f'store needs {blk} blocks: past {a.capacity - HEROLOG_BLOCKS} it would overlap the USERDATA herolog ring')
-    lay = SD_LAYOUTS.get(a.medium)
     if lay is not None and blk > a.capacity - SD_ROOT_TAIL_BLOCKS:
         sys.exit(f'store needs {blk} blocks: past {a.capacity - SD_ROOT_TAIL_BLOCKS} it would overlap the '
                  f'microSD root test range ({lay.tail.sdroot()})')
-    if a.medium == 'sd64' and blk > lay.store_area_blocks:
+    if data_at != DATA_BLOCK and lay is not None and lay.store_data is not None:
+        lo = (lay.store_data.start - lay.p2_start) // cardlayout.BLOCK_SECTORS
+        hi = lo + lay.store_data.sectors // cardlayout.BLOCK_SECTORS
+        if not lo <= data_at or blk > hi:
+            sys.exit(f'store data {data_at}..{blk} blocks: outside the {lay.name} store data area {lo}..{hi} '
+                     f'({lay.store_data.start}..{lay.store_data.end} on the card)')
+    elif data_at != DATA_BLOCK and lay is not None:
+        sys.exit(f'--data-at: the {lay.name} layout has no store data area')
+    if a.medium == 'sd64' and blk > lay.store_area_blocks and data_at == DATA_BLOCK:
         sys.exit(f'store needs {blk} blocks: past {lay.store_area_blocks} it would overlap the {lay.name} '
                  f'macOS Ventura root ({lay.root("mac13").sdroot()})')
     struct.pack_into('<8sIIQ', v1, 0, b'SBSTORE1', 1, nv1, min(blk, V1_BLOCKS))
@@ -380,11 +425,16 @@ def build(a):
     struct.pack_into('<8sIIQQIIII', hdr, 0, b'SBSTORE2', 2, n, a.capacity, blk, DIR_BLOCK, DIR_BLOCKS,
                      SETTINGS_BLOCK, zlib.crc32(bytes(dirb[:64 * n])))
     struct.pack_into('<I', hdr, 48, zlib.crc32(bytes(hdr[:48])))
+    if a.home or data_at != DATA_BLOCK:
+        struct.pack_into('<8sIIQ', hdr, HOME_OFF, HOME_MAGIC, 1, HOME_FLAG if a.home else 0, data_at)
+        struct.pack_into('<I', hdr, HOME_OFF + 24, zlib.crc32(bytes(hdr[HOME_OFF:HOME_OFF + 24])))
     Path(a.out).write_bytes(bytes(v1) + bytes(hdr) + bytes(BLOCK) + bytes(dirb) + bytes(data))
     names = {v: k for k, v in TYPES.items()}
     for name, typ, b, size, crc in rows:
         print(f'  {name:<24} {names[typ]:<8} block {b:>7} size {size:>10} crc32 {crc:08x}')
-    print(f'{a.out}: {blk} blocks ({blk * BLOCK / 2**20:.1f} MiB) of {a.capacity}, {n} entries ({nv1} in the v1 view)')
+    print(f'{a.out}: {blk} blocks ({blk * BLOCK / 2**20:.1f} MiB) of {a.capacity}, {n} entries ({nv1} in the v1 view)'
+          + (f', data from block {data_at} (compact image: {DATA_BLOCK + blk - data_at} blocks)' if data_at != DATA_BLOCK else '')
+          + (', HOME store' if a.home else ''))
 
 
 def header(a):
@@ -392,14 +442,23 @@ def header(a):
     if data[BLOCK:BLOCK + 8] != b'SBSTORE2':
         sys.exit(f'{a.img}: no version 2 header')
     n, cap, used, _ = check_header(data[BLOCK:BLOCK + 52], a.img)
-    print(f'{a.img}: {n} entries, used {used} of {cap} blocks')
+    flags, data_at = home_ext(data[BLOCK:2 * BLOCK])
+    print(f'{a.img}: {n} entries, used {used} of {cap} blocks'
+          + (f', data {data_at}..{used} (compact image)' if data_at != DATA_BLOCK else '')
+          + (', HOME store (settings + crash log)' if flags & HOME_FLAG else ''))
     lay = next((L for L in SD_LAYOUTS.values() if cap == L.store_blocks), None)
     if lay is not None:
+        if lay.store_data is not None and data_at != DATA_BLOCK:
+            lo = (lay.store_data.start - lay.p2_start) // cardlayout.BLOCK_SECTORS
+            hi = lo + lay.store_data.sectors // cardlayout.BLOCK_SECTORS
+            state = 'inside' if lo <= data_at and used <= hi else 'OUTSIDE'
+            print(f'{lay.name} store data area (p2 blocks {lo}..{hi - 1}): data {state}')
         tail = cap - SD_ROOT_TAIL_BLOCKS
         state = 'clear' if used <= tail else f'OVERLAPPED by {used - tail} blocks'
         print(f'microSD root tail (p2 blocks {tail}..{cap - 1}, {lay.tail.sdroot()}): {state}')
         area = lay.store_area_blocks
-        state = 'clear' if used <= area else f'OVERLAPPED by {used - area} blocks'
+        top = used if data_at == DATA_BLOCK else DATA_BLOCK
+        state = 'clear' if top <= area else f'OVERLAPPED by {top - area} blocks'
         print(f'{lay.name} store area (p2 blocks 0..{area - 1}; the first root follows): {state}')
 
 
@@ -641,6 +700,8 @@ def main():
     b.add_argument('--omit', action='append', default=[], metavar='NAME', help='leave an imported entry out')
     b.add_argument('--crashlog', action='store_true', help='add the crash log entry (automatic with --medium ufs)')
     b.add_argument('--no-crashlog', dest='no_crashlog', action='store_true', help='no crash log entry')
+    b.add_argument('--home', action='store_true', help='the loader\'s home store (settings + crash log here)')
+    b.add_argument('--data-at', dest='data_at', metavar='BLOCK|layout', help='first data block (compact image)')
     b.add_argument('--volatile', action='append', default=[], metavar='NAME=BYTES',
                    help='an entry written in place by an OS (zeros when new; kept on --import), e.g. sbos-state=1048576')
     b.add_argument('files', nargs='*')

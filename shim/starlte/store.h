@@ -3,13 +3,17 @@
  *
  * One store per medium, the same layout on each, in 4 KiB blocks from the store's start:
  *   UFS     USERDATA +16 GiB, up to the end of USERDATA (2.75 GiB: Kiosk's old root is free)
- *   microSD MBR partition 2 (type 0xDA) of the card                       [sd.c, later]
+ *   microSD MBR partition 2 (type 0xDA) of the card (sd.c)
  *
  *   block 0  "SBSTORE1": the version 1 view of the entries that fit it (name < 24, below 1 GiB),
  *            for older loaders and the iOS overlay installer (xnu/src/starlte_overlay.c)
  *   block 1  "SBSTORE2" header: u32 version 2, u32 count, u64 capacity, u64 used (blocks),
  *            u32 dir_block, u32 dir_blocks, u32 settings_block, u32 dir CRC32, u32 CRC32 of 0..47
- *   block 2  settings record "SBSETTNG" (UFS only; the loader writes it, the tools keep it)
+ *            + at bytes 64..91 the home extension (2026-11-11, docs/STORE-ON-CARD.md): "SBSTHOME",
+ *            u32 1, u32 flags (bit 0 HOME: the loader's settings and crash log live in this store),
+ *            u64 the first data block (7 unless the data sits further in, as on the card), u32 CRC32
+ *            of 64..87. Older loaders ignore it (the header CRC covers 0..47 only).
+ *   block 2  settings record "SBSETTNG" (on the home store; the loader writes it, the tools keep it)
  *   block 3  directory: 64-byte entries: char name[32], u64 block, u64 size, u32 CRC32,
  *            u16 type, u16 flags (SF_*), 8 bytes zero
  *   data     4 KiB aligned
@@ -65,10 +69,31 @@ uint64_t store_used(unsigned medium);
 /* Forget what store_open found, so the next call reads the medium again. */
 void store_reset(unsigned medium);
 
+/* ---- the home store (docs/STORE-ON-CARD.md) ---------------------------------------------------
+ * The store whose block 2 holds the settings record and whose "crashlog" entry the loader writes:
+ *   card only (sbstore=card on BOOT's command line, or a build with -DSTORE_CARD_ONLY): USERDATA
+ *     belongs to iOS. The UFS store is never opened (no read, no write); the card is always
+ *     brought up and its version 2 store is home. No card store: no home (the loader says why
+ *     and opens Starbite Recovery).
+ *   otherwise: the UFS store's settings decide whether the card is touched (SET_SD_STORE); a card
+ *     store marked HOME then is home and the UFS store is closed for this boot (never written,
+ *     its entries not listed); else the UFS store is home, as before 2026-11-11.
+ * Resolved once per boot, at the first store call. STORE_UFS, STORE_SD or -1. */
+int store_home(void);
+/* BOOT's command line: "sbstore=card" turns card only on (call before any other store call). */
+void store_cmdline(const char *cmdline);
+int store_card_only(void);
+/* Why there is no home store, for the screen ("NO OS STORE ON THE CARD"), or 0 when there is one. */
+const char *store_home_why(void);
+/* 1 if medium m's version 2 header carries the HOME flag. */
+int store_marked_home(unsigned medium);
+/* Blocks [index, index + count) of entry e to dst (no CRC): 0, -1 read error or outside the entry. */
+int store_read(const struct store_ent *e, uint64_t index, uint64_t count, uintptr_t dst);
+
 /* Directory entry flags (u16 at +54). */
 #define SF_VOLATILE 1U         /* written in place by the loader (the "crashlog"): no CRC check */
 
-/* Settings record (UFS store, block 2; byte layout in sbfmt.h). Keys are catalog keys ("" = none).
+/* Settings record (the home store's block 2; byte layout in sbfmt.h). Keys are catalog keys ("" = none).
  * Every field after next_key reads 0 from records older than 2026-11-06, and 0 is its default.
  *
  * The u32 flags word: ONE definition shared with Engineer OS (starbite/libsb/store.h) and
@@ -114,7 +139,7 @@ int settings_status(void);
 /* Write and read back: 0 on success. Keeps every field it does not know of (bytes 112..255). */
 int settings_save(struct star_settings *s);
 
-/* The crash log (sbfmt.h): the store's "crashlog" entry, 16 blocks, SF_VOLATILE. 1 found. */
+/* The crash log (sbfmt.h): the home store's "crashlog" entry, 16 blocks, SF_VOLATILE. 1 found. */
 int store_crashlog(struct store_ent *e);
 /* One 4 KiB block of the crash log (index 0..15) from src: written and read back, 0 on success.
  * Refuses any block outside that entry. */

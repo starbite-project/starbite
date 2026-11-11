@@ -1003,16 +1003,20 @@ static void check_storage(void)
 
     t0 = p_ticks();
     check_begin(POST_STORE);
-    int cnt = up ? store_open(STORE_UFS) : 0, ver = up ? store_version(STORE_UFS) : 0;
+    /* the home store (store.h): the card's once it is home, else the UFS store */
+    int hm = (up || store_card_only()) ? store_home() : -1;
+    unsigned sm = hm >= 0 ? (unsigned)hm : store_card_only() ? STORE_SD : STORE_UFS;
+    int cnt = hm >= 0 ? store_open(sm) : 0, ver = hm >= 0 ? store_version(sm) : 0;
     pl_init(&l);
-    if (!up) {
+    if (!up && sm == STORE_UFS) {
         check_end(POST_STORE, POST_SKIP, 0, "NO UFS", t0, 0);
     } else if (!ver) {
-        check_end(POST_STORE, POST_FAIL, 0, "NO STORE OR BAD CRC", t0, 0);
+        const char *why = store_card_only() ? store_home_why() : 0;
+        check_end(POST_STORE, POST_FAIL, 0, why ? why : "NO STORE OR BAD CRC", t0, 0);
     } else {
         struct store_ent ce;
         int crash = p_mode == POST_FULL && store_crashlog(&ce);
-        pl_s(&l, "V");
+        pl_s(&l, sm == STORE_SD ? "CARD V" : "V");
         pl_u(&l, (uint64_t)ver);
         pl_s(&l, " ");
         pl_u(&l, (uint64_t)cnt);
@@ -1042,7 +1046,7 @@ static void check_storage(void)
             pl_s(&l, " ENTRIES CRC OK");
         }
         check_end(POST_CATALOG, missing ? POST_WARN : POST_OK, ce, l.b, t0, 1000U);
-    } else if (up && ver && store_find("catalog", &e)) {
+    } else if (ver && store_find("catalog", &e)) {
         check_end(POST_CATALOG, POST_FAIL, ce, "BAD CRC: BUILT-IN", t0, 0);
     } else {
         check_end(POST_CATALOG, POST_WARN, ce, "NONE: BUILT-IN", t0, 0);
@@ -1052,7 +1056,7 @@ static void check_storage(void)
         t0 = p_ticks();
         check_begin(POST_SETTINGS);
         struct star_settings s;
-        int ok = up && ver ? settings_load(&s) : 0;
+        int ok = ver ? settings_load(&s) : 0;
         int st = settings_status();
         if (!ok)
             sbset_defaults(&s);
@@ -1249,10 +1253,9 @@ static void check_microsd(void)
         check_end(POST_MICROSD, POST_OK, present, present ? "CARD PRESENT" : "NO CARD", t0, 2U);
         return;
     }
-    /* the card store's header: only where the loader may touch the card (sd.h) */
-    struct star_settings s;
-    if (!sd_allowed() && settings_load(&s) && (s.flags & SET_SD_STORE))
-        sd_allow();
+    /* the card store's header: only where the loader may touch the card (sd.h); store_home
+     * allows it in card only mode or by the UFS settings record */
+    (void)store_home();
     if (!sd_allowed()) {
         check_end(POST_MICROSD, POST_OK, present, "PRESENT, CARD STORE OFF", t0, 0);
         return;
@@ -1266,6 +1269,8 @@ static void check_microsd(void)
         pl_u(&l, (uint64_t)v);
         pl_s(&l, " ");
         pl_u(&l, (uint64_t)n);
+        if (store_home() == (int)STORE_SD)
+            pl_s(&l, " HOME");
     } else {
         pl_s(&l, "MISSING");
     }
