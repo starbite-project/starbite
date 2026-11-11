@@ -1187,7 +1187,50 @@ static float focus_sy;
 #define SL_X (FOC_X + 20)
 #define SL_W (FOC_W - 40)
 static tk_layer focus, funder, scrim, fgrp, fcard, ffill, flabel, fthumb;
-/* a closed sheet keeps nothing of its own (about 19 MB); the glass faces made once stay */
+/* the sheet's glass (geometry only: the same for every system) and its slider's (two places: 2 or 3 facts): made in
+ * idle time while a card is open on the lock (a row's tap opens the sheet), freed when none is (P3s: 10 MB were
+ * kept from the first sheet on) */
+static tk_layer ffacel, fslide[2];
+static float slider_y(int nf) { return FOC_Y + 102 + 17 * nf + 7 * (nf - 1) + 18; }
+static int focus_nf(const sys_t *s) { return !tk_strcmp(s->k, LAST) ? 3 : 2; }
+static void bake_focus_face(void)
+{
+    if (ffacel.bmp.px) return;
+    dc fd = mk(&ffacel, "fcard-face", FOC_X, FOC_Y, FOC_W, FOC_H, 44, 0);
+    d_glass(&fd, FOC_X, FOC_Y, FOC_W, FOC_H, FOC_R, 0, 1);
+}
+static void bake_slider_face(int nf)
+{
+    tk_layer *sf = &fslide[nf == 3];
+    if (sf->bmp.px) return;
+    float sy = slider_y(nf);
+    dc fd = mk(sf, "slider-face", SL_X, sy, SL_W, 62, 44, 0);
+    d_glass(&fd, SL_X, sy, SL_W, 62, 31, 1, 1);
+}
+static int card_open(void) { int o = 0; for (int g = 0; g < NG; g++) o |= K[g].isopen; return o; }
+static int focus_faces_keep(void) { return locked && !EMG && (card_open() || focus_on); }
+static int focus_faces_missing(void)
+{
+    if (!focus_faces_keep()) return 0;
+    if (!ffacel.bmp.px) return 1;
+    for (int g = 0; g < NG; g++)
+        if (K[g].isopen)
+            for (int i = 0; i < G[g].n; i++) if (!fslide[focus_nf(&G[g].it[i]) == 3].bmp.px) return 1;
+    return 0;
+}
+/* idle time: what the next sheet needs (one glass a turn: 1 if one was made), or nothing kept if no card is open */
+static int focus_faces_idle(int keep)
+{
+    if (!keep) { relayer(&ffacel); relayer(&fslide[0]); relayer(&fslide[1]); return 0; }
+    if (!ffacel.bmp.px) { bake_focus_face(); return 1; }
+    for (int g = 0; g < NG; g++) {
+        if (!K[g].isopen) continue;
+        for (int i = 0; i < G[g].n; i++)
+            if (!fslide[focus_nf(&G[g].it[i]) == 3].bmp.px) { bake_slider_face(focus_nf(&G[g].it[i])); return 1; }
+    }
+    return 0;
+}
+/* a closed sheet keeps nothing of its own (about 19 MB) */
 static void free_focus(void)
 {
     relayer(&scrim); relayer(&funder); relayer(&fcard); relayer(&ffill); relayer(&flabel); relayer(&fthumb);
@@ -1236,14 +1279,11 @@ static void build_focus(const sys_t *s, const grp_t *gr)
             /* straight from the half-resolution scrim (it is already a blur) */
             tk_glass_from_half(d.b, (int)d.ox, (int)d.oy, &scrim.bmp, PT(FOC_X) - d.ox, PT(FOC_Y) - d.oy, PT(FOC_W), PT(FOC_H), PT(FOC_R));
         }
-        /* the card's glass (geometry only: the same for every system) is baked once and kept */
+        /* the card's glass (geometry only: the same for every system), made in idle time while the card was open */
         {
-            static tk_layer face;
-            if (!face.bmp.px) {
-                dc fd = mk(&face, "fcard-face", FOC_X, FOC_Y, FOC_W, FOC_H, 44, 0);
-                d_glass(&fd, FOC_X, FOC_Y, FOC_W, FOC_H, FOC_R, 0, 1);
-            }
-            tk_blit(d.b, &face.bmp, (int)(face.x - d.ox), (int)(face.y - d.oy), 1);
+            tk_layer *face = &ffacel;
+            bake_focus_face();
+            tk_blit(d.b, &face->bmp, (int)(face->x - d.ox), (int)(face->y - d.oy), 1);
         }
         lap_us("focus: the card's backdrop and glass", tk_us() - tb0);
         char tn[40] = "t66-";
@@ -1255,7 +1295,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         int last = !tk_strcmp(s->k, LAST);
         const char *dt[3] = { "Version", last ? "Last used" : "When it shuts down", "When it shuts down" };
         const char *dd[3] = { s->meta, last ? "Today" : "Back to Starbite", "Back to Starbite" };
-        int nf = last ? 3 : 2;
+        int nf = focus_nf(s);
         float dtw = 0;
         for (int i = 0; i < nf; i++) dtw = tk_maxf(dtw, tw(TK_IT400, 14.5f, dt[i], 0, 0));
         for (int i = 0; i < nf; i++) {
@@ -1263,16 +1303,12 @@ static void build_focus(const sys_t *s, const grp_t *gr)
             d_text(&d, TK_IT400, 14.5f, SL_X, b, dt[i], 0, 0, W(.55f), 0);
             d_text_box(&d, TK_IT400, 14.5f, SL_X + dtw + 14, b, SL_W - dtw - 14, 0, dd[i], 0, TK_TNUM, INK, 0);
         }
-        sy = FOC_Y + 102 + 17 * nf + 7 * (nf - 1) + 18;
+        sy = slider_y(nf);
         /* the slider: dark glass whose backdrop is the card under it; its glass kept per position (2 or 3 facts) */
         tk_glass_local(d.b, d.b, PT(SL_X) - d.ox, PT(sy) - d.oy, PT(SL_W), PT(62), PT(31));
         {
-            static tk_layer sface[2];
-            tk_layer *sf = &sface[nf == 3];
-            if (!sf->bmp.px) {
-                dc fd = mk(sf, "slider-face", SL_X, sy, SL_W, 62, 44, 0);
-                d_glass(&fd, SL_X, sy, SL_W, 62, 31, 1, 1);
-            }
+            tk_layer *sf = &fslide[nf == 3];
+            bake_slider_face(nf);
             tk_blit(d.b, &sf->bmp, (int)(sf->x - d.ox), (int)(sf->y - d.oy), 1);
         }
     }
@@ -1362,9 +1398,11 @@ static void under_rows(void *v, int y0, int y1)
 static void flatten_lock(int ground)          /* ground: also when the wallpaper changed (idle; not mid-swipe) */
 {
     if (flat_ver == lock_ver && (!ground || flat_ground == C->ground_gen)) return;
+    tk_a8_new(&flatmask, TK_W / 2, TK_H / 2);    /* P3p: the glass goes into its own ground (P3s: made for this only) */
     tk_flatten(&lockg, &lockflat.bmp, &flatmask, .5f);
     under_ctx U = { &lockflat.bmp, &flatmask };
     tk_par_rows(0, lockflat.bmp.h, under_rows, &U);
+    tk_a8_free(&flatmask);
     /* the star (nothing of the lock's is drawn where it is) */
     tk_layer *s[2] = { &star, &star_e };
     for (int i = 0; i < 2; i++) {
@@ -1555,6 +1593,15 @@ static void free_cc(void)
     relayer(&ccblur1);
     relayer(&ccgrid);
     CCS.built = 0;
+}
+/* P3s: on the lock (it opens only from home) nothing of it is kept; home's idle time builds it again */
+static void free_cc_all(void)
+{
+    if (CCS.on) return;
+    free_cc();
+    if (!ccsb.bmp.px && !cclvl[0].bmp.px && !cclit.bmp.px) return;
+    relayer(&ccsb); relayer(&cclit);
+    for (int i = 0; i < 2; i++) { relayer(&cclvl[i]); relayer(&ccic[i]); }
 }
 static void set_cc(float p)
 {
@@ -3136,6 +3183,7 @@ static void toast_place(void)
     toast_o = toast_from + (toast_to - toast_from) * tk_bezier(.2f, 1.3f, .3f, 1, toast_t);
     toastl.y = toastl.by + PT(toast_o);
     toastl.hidden = toast_t >= 1 && toast_to <= -90;
+    if (toastl.hidden && toastl.bmp.px) relayer(&toastl);       /* P3s: nothing kept once it is gone */
 }
 static void toast(const char *msg)
 {
@@ -3712,7 +3760,6 @@ int sh_init_step(void)
     case 9: {
         /* the flattened lock is only ever seen moving (half-resolution frames): kept at half resolution, drawn 2x */
         tk_bmp_new(&lockflat.bmp, TK_W / 2, TK_H / 2);
-        tk_a8_new(&flatmask, TK_W / 2, TK_H / 2);    /* P3p: the glass goes into its own ground (flatten_lock) */
         lockflat.sx = lockflat.sy = 2;
         lockflat.opaque = 1;
         lockflat.hidden = 1;
@@ -3763,6 +3810,7 @@ static void back_to_lock(int exit_em)
     if (exit_em && EMG) set_emergency(0, 1);
     if (!EMG) while (cards_pending > 0) { build_card(NG - cards_pending); cards_pending--; }
     if (CF.on) cf_close(0);
+    free_cc_all();                                 /* P3s: the lock keeps none of it */
     relink();
     toast_t = 1; toast_to = toast_from = -90; toast_left = 0; toast_place();
     locked = 1;
@@ -4749,6 +4797,9 @@ void sh_idle(void)
         place_list();
     }
     sv_idle();                                   /* survival-next: Emergency's next card, the lock's widgets */
+    /* P3s: what is not shown here and the next gesture does not need goes; what the next one needs is made */
+    if (locked) free_cc_all();                   /* it opens only from home */
+    if (focus_faces_idle(focus_faces_keep())) return;    /* a sheet's glass: one bake a turn (sh_idle_pending) */
     if (locked && lockY == 0 && !focus_on) flatten_lock(1);
     /* home at rest: the Control Centre's snapshot and grid ready before the pull */
     if (!locked && !CCS.on && !AP.on && (!CCS.built || cc_stale)) { build_cc(); cc_stale = 0; }
@@ -4774,7 +4825,7 @@ void sh_idle(void)
     tk_layer_prepare(&mark); tk_layer_prepare(&glyph_c); tk_layer_prepare(&glyph_o); tk_layer_prepare(&hint);
 }
 
-int sh_idle_pending(void) { return (!EMG && cards_pending > 0) || sv_idle_pending(); }
+int sh_idle_pending(void) { return (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing(); }
 
 int sh_moving(void)
 {
