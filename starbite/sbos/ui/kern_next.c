@@ -383,7 +383,7 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
-    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3t");     /* P2y: the apps' live values */
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3u");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);
         sh_alarm(on, ah, am);
@@ -1087,6 +1087,7 @@ static void bake_step(void)
 }
 
 int gwin_now(void);                                  /* L2 + L3: starbite/guest/next/gwin.c */
+static int comms_now(void);                          /* helper I: calls and SMS (below) */
 int next_ready(void) { return ready; }               /* L2: the shell baked (uitest.c's next-linux variant) */
 void next_kdraw(void)
 {
@@ -1095,6 +1096,18 @@ void next_kdraw(void)
     if (ready && gwin_now() && !ticking && K.screen_on) {
         tk_comp_frame(&comp, 0, 0);
         present();
+    }
+    /* helper I: the call's state and the inbox ten times a second (a copy of ~150 bytes and a counter), also with the
+     * screen off (an incoming call wakes it); a change is drawn at once */
+    static uint64_t comms_t;
+    if (ready && sb_ms() - comms_t >= 100 && (comms_t = sb_ms(), comms_now()) && !ticking && K.screen_on) {
+        if (sh_moving()) start_ticking();
+        else {
+            tk_comp_frame(&comp, 0, 0);
+            present();
+            sh_idle();
+            clock_again();                           /* an ended call's screen goes after its 1.5 s */
+        }
     }
     if (!K.screen_on) return;
     if (need_full) {
@@ -1429,6 +1442,132 @@ const char *sh_guide_page(int c, int p, const char *const **lines)
     return ch[c].pages[p].title;
 }
 const char *sh_sensors_why(void) { return surv_sensors_why(); }
+
+/* ---- helper I: calls and SMS (shell_comms.inc) on the modem session's kmodem_call_* / kmodem_sms_* (kern.h defines
+ * KMODEM_CALLS once that commit is in; without it every call refuses, "not in this version"). The shell asks only at
+ * the end of the user's own action (the call button's hold, Answer, Send's tap); the self test's build refuses every
+ * dial, answer, send, key tone, route and mute with a dry-run line (its films never get there: Cellular stays off in
+ * it). Numbers and message text are never logged, here or in the kernel. ---- */
+static void comms_why(char *why, const char *s)
+{
+    if (why) sb_strcpy(why, SH_WHY, s);
+}
+#ifdef SBOS_SELFTEST_NEXT
+#define COMMS_DRY(what, why) do { sb_log("next: comms: " what ": refused (a dry run: the self test)"); \
+                                  comms_why(why, "A dry run: the self test never calls or texts"); return -1; } while (0)
+#else
+#define COMMS_DRY(what, why) do { } while (0)
+#endif
+#ifdef KMODEM_CALLS
+int sh_comms_ok(void) { return 1; }
+/* a refusal: the kernel's own words (kcall.why) when it gave them, else the error's */
+static int call_refused(int r, char *why)
+{
+    struct kcall c;
+    kmodem_call(&c);
+    comms_why(why, c.why[0] ? c.why : r == SBOS_EAGAIN ? "No network: Cellular is off or not registered" :
+                   r == SBOS_EBUSY ? "A call or a message is already going" :
+                   r == SBOS_EPERM ? "This number can't be called from Starbite OS" : "The modem refused");
+    return r;
+}
+int sh_dial(const char *number, char *why)
+{
+    COMMS_DRY("dial", why);
+    sb_log("next: comms: dialling (held on the screen)");
+    int r = kmodem_call_dial(number);
+    return r < 0 ? call_refused(r, why) : 0;
+}
+int sh_answer(char *why)
+{
+    COMMS_DRY("answer", why);
+    sb_log("next: comms: answering (on the screen)");
+    int r = kmodem_call_answer();
+    return r < 0 ? call_refused(r, why) : 0;
+}
+int sh_hangup(void)
+{
+    sb_log("next: comms: hang up (on the screen)");
+    return kmodem_call_hangup();
+}
+int sh_route(int audio, char *why)
+{
+    COMMS_DRY("audio route", why);
+    int r = kmodem_call_route(audio == SH_AUDIO_SPEAKER ? KAUDIO_SPEAKER : KAUDIO_EARPIECE);
+    return r < 0 ? call_refused(r, why) : 0;
+}
+int sh_mute(int on, char *why)
+{
+    COMMS_DRY("mute", why);
+    int r = kmodem_call_mute(on);
+    return r < 0 ? call_refused(r, why) : 0;
+}
+int sh_dtmf(char d)
+{
+    COMMS_DRY("key tone", (char *)0);
+    return kmodem_call_dtmf(d);
+}
+int sh_sms_send(const char *number, const char *utf8, char *why)
+{
+    COMMS_DRY("SMS send", why);
+    sb_log("next: comms: SMS send (tapped on the screen)");
+    int r = kmodem_sms_send(number, utf8);
+    if (r < 0) comms_why(why, r == SBOS_EAGAIN ? "No network: Cellular is off or not registered" :
+                              r == SBOS_EBUSY ? "A message is still being sent: try again soon" :
+                              r == SBOS_EPERM ? "This number can't get texts from Starbite OS" : "The modem refused");
+    return r < 0 ? r : 0;
+}
+int sh_sms_count(void) { return kmodem_sms_count(); }
+int sh_sms_get(int i, sh_sms_t *m)
+{
+    struct ksms k;
+    if (kmodem_sms_get(i, &k) < 0) return -1;
+    m->id = k.id; m->incoming = k.incoming; m->state = k.state; m->utc = k.utc;
+    sb_strcpy(m->number, sizeof(m->number), k.number);
+    sb_strcpy(m->text, sizeof(m->text), k.text);
+    sb_strcpy(m->why, sizeof(m->why), k.why);
+    return 0;
+}
+/* the call's state and the inbox's generation to the shell when they change (from the draw hook: never inside a
+ * frame); 1 if anything was pushed. An incoming call wakes the screen (the kernel notifies as well). */
+static int comms_now(void)
+{
+    static struct kcall last;
+    static int pushed;
+    static uint32_t gen;
+    int ch = 0;
+    struct kcall c;
+    kmodem_call(&c);
+    if (!pushed || memcmp(&c, &last, sizeof(c))) {
+        last = c;
+        pushed = 1;
+        sh_call_t s;
+        memset(&s, 0, sizeof(s));
+        s.state = c.state; s.outgoing = c.outgoing; s.secs = c.secs;          /* KCALL_* = SH_CALL_* */
+        s.audio = c.audio; s.muted = c.muted; s.audio_ok = c.audio_ok;        /* KAUDIO_* = SH_AUDIO_* */
+        sb_strcpy(s.number, sizeof(s.number), c.number);
+        sb_strcpy(s.why, sizeof(s.why), c.why);
+        sh_call(&s);
+        if (c.state == KCALL_INCOMING && !K.screen_on) power_screen_set(1);
+        ch = 1;
+    }
+    uint32_t g = kmodem_sms_gen();
+    if (g != gen) { gen = g; sh_sms_changed(g); ch = 1; }
+    return ch;
+}
+#else
+int sh_comms_ok(void) { return 0; }
+#define COMMS_NONE(why) do { comms_why(why, "Calls and SMS aren't in this version yet"); return -1; } while (0)
+int sh_dial(const char *number, char *why) { (void)number; COMMS_DRY("dial", why); COMMS_NONE(why); }
+int sh_answer(char *why) { COMMS_DRY("answer", why); COMMS_NONE(why); }
+int sh_hangup(void) { return -1; }
+int sh_route(int audio, char *why) { (void)audio; COMMS_DRY("audio route", why); COMMS_NONE(why); }
+int sh_mute(int on, char *why) { (void)on; COMMS_DRY("mute", why); COMMS_NONE(why); }
+int sh_dtmf(char d) { (void)d; COMMS_DRY("key tone", (char *)0); return -1; }
+int sh_sms_send(const char *number, const char *utf8, char *why) { (void)number; (void)utf8; COMMS_DRY("SMS send", why); COMMS_NONE(why); }
+int sh_sms_count(void) { return 0; }
+int sh_sms_get(int i, sh_sms_t *m) { (void)i; (void)m; return -1; }
+static int comms_now(void) { return 0; }
+#endif
 
 /* ---- the self test --------------------------------------------------------------------------------------- */
 #ifdef SBOS_SELFTEST_NEXT

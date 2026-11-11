@@ -396,7 +396,7 @@ static void recover(void)
 enum { CS_IDLE, CS_SIM, CS_RADIO, CS_ATTACH, CS_REG, CS_CYCLE_OFF, CS_CYCLE_ON, CS_DEFINE, CS_ACT, CS_IP, CS_UP,
        CS_RETRY, CS_DEACT, CS_DETACH };
 #define CELL_APN "internet"                /* Elisa, DNA, Telia (FI); others: a setting later */
-static int cell_want, cst = KCELL_OFF, cstep = CS_IDLE, c_lf, c_esc, cnet_up, c_check, c_ntp;
+static int cell_want, cst = KCELL_OFF, cstep = CS_IDLE, c_lf, c_esc, cnet_up, c_check, c_ntp, c_sms_ready;
 static uint64_t c_ntp_t;
 static uint8_t c_ntp_nonce[8], c_ntp_server[4];
 #define C_NTP_PORT 50124
@@ -563,9 +563,13 @@ static void cell_stopped(const char *w, int failed)
         cset(KCELL_OFF, sb_streq(w, "Cellular off") ? "Off" : w);
 }
 
+static void comms_begin(void);
+static void comms_tick(void);
 static void cell_begin(void)
 {
     c_lf = c_esc = 0;
+    c_sms_ready = 0;
+    comms_begin();
     cset(KCELL_STARTING, "Starting the modem");
     cgo(CS_SIM);
     kt_set(KT_MODEM, 5, sb_ms(), 100, 1);
@@ -581,6 +585,7 @@ static void cell_step(void)
     struct sbm_modem_snap sn;
     if (!mo.up)
         return;                             /* down: poll()'s restart (or a stop) decides */
+    comms_tick();
     sbm_modem_snapshot(&mo, &sn);
     switch (cstep) {
     case CS_SIM:
@@ -630,6 +635,10 @@ static void cell_step(void)
         if (c_registered(&sn)) {
             cset(KCELL_REGISTERED, sn.cs == SBM_REG_ROAMING || sn.ps == SBM_REG_ROAMING ? "Registered (roaming)"
                                                                                        : "Registered");
+            if (!c_sms_ready) {
+                c_sms_ready = 1;
+                sbm_modem_sms_ready(&mo);   /* the AP takes SMS (and the SIM's SMSC) */
+            }
             sbm_modem_pdp_define(&mo, CELL_APN);
             cgo(CS_DEFINE);
         } else if (c_esc == 0 && sb_ms() - c_t0 > 60000) {
@@ -878,8 +887,374 @@ void kmodem_cell(struct kcell *c)
         }
     }
 }
+
+/* ---- calls + SMS (Next's Phone / Messages; docs/MODEM.md 7.11) ---------------------------------------------------
+ * Only while Cellular is on and registered (or data up). The user typed the number and held to confirm: the policy's
+ * user_confirmed; the two locks (emergency numbers: the world list + the CP's own; short codes) are checked in the
+ * core twice and here first, for the words. Self-test images refuse all of it (a dry run). Numbers and text stay
+ * in these RAM structures and the screen; the log has steps and counts only. The in-call audio path (ABOX / codec /
+ * amp) is not built yet: audio_ok stays 0 and the UI says so. */
+static struct sbm_dial_policy c_pol = { { 0 }, 0, 0, 0, SBM_DIAL_USER_CONFIRMED };
+static struct {
+    int pending, audio, muted, ended, dtmf_on;
+    uint64_t t_dial, t_active, t_ended;
+    uint32_t gen_seen;
+    int ring_seen;
+    char number[24], why[48];
+} kc;
+static struct ksms kmsg[KSMS_MAX];
+static int nkmsg, ksend = -1;
+static uint32_t kgen, kmsg_id, kinbox_seen;
+static uint8_t ksms_ref;
+static struct sbm_inbox kinbox;
+
+static int comms_ready(void)
+{
+    return kmodem_on() && mo.attended == SBM_ATTENDED_DATA && mo.up &&
+           (cst == KCELL_REGISTERED || cst == KCELL_DATA);
+}
+
+static const char *end_words(uint8_t cls, uint8_t cause)
+{
+    if (cls == 0 || cls == 1)
+        switch (cause) {
+        case 1: return "Number not in use";
+        case 5: return "Call ended";
+        case 6: return "Busy";
+        case 7:
+        case 8: return "No answer";
+        case 9: return "Call declined";
+        case 17: return "Network busy";
+        default: break;
+        }
+    return "Call ended";
+}
+
+/* SCTS (BCD, nibbles swapped: yy mm dd hh mi ss tz) -> Unix time */
+static int64_t scts_utc(const uint8_t t[7])
+{
+    int v[7];
+    for (int i = 0; i < 7; ++i)
+        v[i] = (t[i] & 0x0F) * 10 + ((t[i] >> 4) & (i == 6 ? 0x07 : 0x0F));
+    int y = 2000 + v[0], m = v[1], d = v[2];
+    if (m < 1 || m > 12 || d < 1 || d > 31)
+        return 0;
+    y -= m <= 2;
+    int era = y / 400, yoe = y - era * 400, mp = (m + 9) % 12;
+    int doy = (153 * mp + 2) / 5 + d - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    int64_t days = (int64_t)era * 146097 + doe - 719468;
+    int tz = v[6] * 15 * 60 * ((t[6] & 0x08) ? -1 : 1);
+    return days * 86400 + v[3] * 3600 + v[4] * 60 + v[5] - tz;
+}
+
+static struct ksms *kmsg_new(void)
+{
+    if (nkmsg == KSMS_MAX) {
+        memmove(&kmsg[0], &kmsg[1], (KSMS_MAX - 1) * sizeof(kmsg[0]));
+        nkmsg--;
+        if (ksend >= 0)
+            ksend--;
+    }
+    struct ksms *k = &kmsg[nkmsg++];
+    memset(k, 0, sizeof(*k));
+    k->id = (int32_t)++kmsg_id;
+    kgen++;
+    return k;
+}
+
+static void kinbox_take(void)
+{
+    for (unsigned i = 0; i < kinbox.n; ++i) {
+        const struct sbm_inbox_msg *m = &kinbox.m[i];
+        if (m->id <= kinbox_seen)
+            continue;
+        kinbox_seen = m->id;
+        struct ksms *k = kmsg_new();
+        k->incoming = 1;
+        k->state = 0;
+        k->utc = scts_utc(m->scts);
+        sb_strcpy(k->number, sizeof(k->number), m->from);
+        sb_strcpy(k->text, sizeof(k->text), m->text);
+        sb_log("comms: an SMS received (sender and text not logged)");
+        ui_mark_dirty();
+    }
+}
+
+static void c_sms_rx(void *ctx, const struct sbm_sms *s)
+{
+    (void)ctx;
+    sbm_inbox_add(&kinbox, s, (uint32_t)sb_ms());
+    kinbox_take();
+}
+
+static void comms_begin(void)
+{
+    memset(&kc, 0, sizeof(kc));
+    kc.audio = KAUDIO_EARPIECE;
+    sbm_modem_sms_rx_cb(c_sms_rx, 0);
+}
+
+static void comms_tick(void)
+{
+    struct sbm_calls *c = &mo.b.calls;
+    uint64_t now = sb_ms();
+    sbm_inbox_add(&kinbox, 0, (uint32_t)now);        /* parts given up after 10 min */
+    kinbox_take();
+    if (kc.dtmf_on && ++kc.dtmf_on > 2) {
+        sbm_modem_call_dtmf(&mo, 0, 0);              /* stop the tone after about 200 ms (two ticks) */
+        kc.dtmf_on = 0;
+    }
+    if (c->gen != kc.gen_seen) {
+        kc.gen_seen = c->gen;
+        if (c->n && !c->c[0].outgoing && (c->c[0].state == SBM_CALL_INCOMING_ST || c->c[0].state == SBM_CALL_WAITING_ST)) {
+            if (!kc.ring_seen) {
+                kc.ring_seen = 1;
+                kc.ended = 0;
+                sb_log("comms: an incoming call (number not logged)");
+                power_screen_set(1);                 /* the incoming-call screen, over the lock too */
+            }
+        } else {
+            kc.ring_seen = 0;
+        }
+        if (c->n && c->c[0].state == SBM_CALL_ACTIVE && !kc.t_active)
+            kc.t_active = now;
+        if (c->n)
+            kc.pending = 0;
+        if (c->end_seen && !c->n) {
+            c->end_seen = 0;
+            kc.ended = 1;
+            kc.t_ended = now;
+            kc.t_active = 0;
+            kc.pending = 0;
+            sb_strcpy(kc.why, sizeof(kc.why), end_words(c->end_class, c->end_cause));
+            sb_log("comms: the call ended");
+        }
+        if (c->dial_seen && c->dial_res != 0x8000 && c->dial_res != 0x8001 && kc.pending) {
+            kc.pending = 0;
+            kc.ended = 1;
+            kc.t_ended = now;
+            sb_strcpy(kc.why, sizeof(kc.why), "The call could not be placed");
+        }
+        ui_mark_dirty();
+    }
+    if (kc.pending && now - kc.t_dial > 30000) {
+        kc.pending = 0;                              /* no answer from the CP at all */
+        kc.ended = 1;
+        kc.t_ended = now;
+        sb_strcpy(kc.why, sizeof(kc.why), "The call could not be placed");
+        ui_mark_dirty();
+    }
+    if (kc.ended && now - kc.t_ended > 4000) {
+        kc.ended = 0;
+        ui_mark_dirty();
+    }
+    if (ksend >= 0 && ksend < nkmsg) {               /* the send in flight: all parts answered? */
+        struct sbm_smsq *q = &mo.b.sms;
+        int done = 1, ok = 1;
+        for (unsigned i = 0; i < q->parts; ++i) {
+            done &= q->done[i];
+            ok &= q->done[i] && q->res[i] == 0;
+        }
+        if (done) {
+            kmsg[ksend].state = ok ? 2 : 3;
+            if (!ok)
+                sb_strcpy(kmsg[ksend].why, sizeof(kmsg[ksend].why), "Not sent: the network refused it");
+            sb_log(ok ? "comms: the SMS was sent" : "comms: the SMS was not sent");
+            ksend = -1;
+            kgen++;
+            ui_mark_dirty();
+        }
+    }
+}
+
+static int refuse_words(const char *number, const char **why)
+{
+    if (sbm_is_emergency(number, mo.b.calls.ecc_p, mo.b.calls.n_ecc)) {
+        *why = "Emergency calls are not supported on Starbite OS: use another phone";
+        return SBOS_EPERM;
+    }
+    unsigned digits = 0;
+    for (const char *p = number; *p; ++p)
+        digits += *p >= '0' && *p <= '9';
+    if (digits < SBM_DIAL_MIN_DIGITS) {
+        *why = "Short numbers are not supported";
+        return SBOS_EPERM;
+    }
+    return 0;
+}
+
+int kmodem_call_dial(const char *number)
+{
+    const char *why = 0;
+    if (sbos_selftest_enabled || !number)
+        return SBOS_EAGAIN;                          /* the self test: a dry run */
+    int r = refuse_words(number, &why);
+    if (r < 0) {
+        kc.ended = 1;
+        kc.t_ended = sb_ms();
+        sb_strcpy(kc.why, sizeof(kc.why), why);
+        ui_mark_dirty();
+        return r;
+    }
+    if (!comms_ready())
+        return SBOS_EAGAIN;
+    if (mo.b.calls.n || kc.pending)
+        return SBOS_EBUSY;
+    r = sbm_modem_call_dial(&mo, number, &c_pol);
+    if (r < 0)
+        return r == SBM_EPERM ? SBOS_EPERM : SBOS_EAGAIN;
+    memset(kc.why, 0, sizeof(kc.why));
+    sb_strcpy(kc.number, sizeof(kc.number), number);
+    kc.pending = 1;
+    kc.ended = 0;
+    kc.t_dial = sb_ms();
+    kc.t_active = 0;
+    kc.muted = 0;
+    kc.audio = KAUDIO_EARPIECE;
+    sbm_modem_snd(&mo, 0, 4, 0);                     /* the CP's side of the earpiece path (no AP audio yet) */
+    ui_mark_dirty();
+    return 0;
+}
+
+int kmodem_call_answer(void)
+{
+    if (sbos_selftest_enabled)
+        return SBOS_EAGAIN;
+    if (!comms_ready() || !mo.b.calls.n || mo.b.calls.c[0].outgoing)
+        return SBOS_EAGAIN;
+    kc.audio = KAUDIO_EARPIECE;
+    kc.muted = 0;
+    sbm_modem_snd(&mo, 0, 4, 0);
+    return sbm_modem_call_answer(&mo) < 0 ? SBOS_EAGAIN : 0;
+}
+
+int kmodem_call_hangup(void)
+{
+    if (sbos_selftest_enabled)
+        return SBOS_EAGAIN;
+    if (!comms_ready() || (!mo.b.calls.n && !kc.pending))
+        return SBOS_EAGAIN;
+    return sbm_modem_call_hangup(&mo, 0) < 0 ? SBOS_EAGAIN : 0;
+}
+
+int kmodem_call_route(int audio)
+{
+    if (sbos_selftest_enabled || !comms_ready() || !mo.b.calls.n)
+        return SBOS_EAGAIN;
+    kc.audio = audio == KAUDIO_SPEAKER ? KAUDIO_SPEAKER : KAUDIO_EARPIECE;
+    ui_mark_dirty();
+    return sbm_modem_snd(&mo, kc.audio == KAUDIO_SPEAKER, 4, kc.muted) < 0 ? SBOS_EAGAIN : 0;
+}
+
+int kmodem_call_mute(int on)
+{
+    if (sbos_selftest_enabled || !comms_ready() || !mo.b.calls.n)
+        return SBOS_EAGAIN;
+    kc.muted = !!on;
+    ui_mark_dirty();
+    return sbm_modem_snd(&mo, kc.audio == KAUDIO_SPEAKER, 4, kc.muted) < 0 ? SBOS_EAGAIN : 0;
+}
+
+int kmodem_call_dtmf(char digit)
+{
+    if (sbos_selftest_enabled || !comms_ready() || !mo.b.calls.n || mo.b.calls.c[0].state != SBM_CALL_ACTIVE)
+        return SBOS_EAGAIN;
+    if (!((digit >= '0' && digit <= '9') || digit == '*' || digit == '#'))
+        return SBOS_EINVAL;
+    if (sbm_modem_call_dtmf(&mo, digit, 1) < 0)
+        return SBOS_EAGAIN;
+    kc.dtmf_on = 1;
+    return 0;
+}
+
+void kmodem_call(struct kcall *k)
+{
+    memset(k, 0, sizeof(*k));
+    k->audio = kc.audio;
+    k->muted = kc.muted;
+    k->audio_ok = 0;
+    const struct sbm_calls *c = &mo.b.calls;
+    if (comms_ready() && c->n) {
+        const struct sbm_call *x = &c->c[0];
+        k->outgoing = x->outgoing;
+        sb_strcpy(k->number, sizeof(k->number), x->number[0] ? x->number : kc.number);
+        k->state = x->state == SBM_CALL_ACTIVE ? KCALL_ACTIVE : x->state == SBM_CALL_HELD ? KCALL_HELD :
+                   x->state == SBM_CALL_DIALING ? KCALL_DIALING : x->state == SBM_CALL_ALERTING ? KCALL_ALERTING :
+                   KCALL_INCOMING;
+        if (k->state == KCALL_ACTIVE && kc.t_active)
+            k->secs = (int32_t)((sb_ms() - kc.t_active) / 1000);
+        return;
+    }
+    if (kc.pending) {
+        k->state = KCALL_DIALING;
+        k->outgoing = 1;
+        sb_strcpy(k->number, sizeof(k->number), kc.number);
+        return;
+    }
+    if (kc.ended) {
+        k->state = KCALL_ENDED;
+        sb_strcpy(k->number, sizeof(k->number), kc.number);
+        sb_strcpy(k->why, sizeof(k->why), kc.why);
+    }
+}
+
+int kmodem_sms_send(const char *number, const char *utf8)
+{
+    const char *why = 0;
+    if (sbos_selftest_enabled || !number || !utf8 || !*utf8)
+        return SBOS_EAGAIN;
+    int r = refuse_words(number, &why);
+    struct ksms *k;
+    if (r < 0) {
+        k = kmsg_new();
+        k->state = 3;
+        sb_strcpy(k->number, sizeof(k->number), number);
+        sb_strcpy(k->text, sizeof(k->text), utf8);
+        sb_strcpy(k->why, sizeof(k->why), why);
+        ui_mark_dirty();
+        return r;
+    }
+    if (!comms_ready())
+        return SBOS_EAGAIN;
+    if (ksend >= 0)
+        return SBOS_EBUSY;
+    r = sbm_modem_sms_send(&mo, number, utf8, &c_pol, ++ksms_ref);
+    if (r < 0)
+        return r == SBM_EPERM ? SBOS_EPERM : r == SBM_ERANGE ? SBOS_EINVAL : SBOS_EAGAIN;
+    k = kmsg_new();
+    k->state = 1;
+    struct sbos_time t;
+    k->utc = clock_now(&t) ? t.utc : 0;
+    sb_strcpy(k->number, sizeof(k->number), number);
+    sb_strcpy(k->text, sizeof(k->text), utf8);
+    ksend = nkmsg - 1;
+    ui_mark_dirty();
+    return 0;
+}
+
+int kmodem_sms_count(void) { return nkmsg; }
+int kmodem_sms_get(int i, struct ksms *m)
+{
+    if (i < 0 || i >= nkmsg)
+        return SBOS_EINVAL;
+    *m = kmsg[i];
+    return 0;
+}
+uint32_t kmodem_sms_gen(void) { return kgen; }
 #else
 void kmodem_reserve(void) { }
+int kmodem_call_dial(const char *number) { (void)number; return SBOS_EAGAIN; }
+int kmodem_call_answer(void) { return SBOS_EAGAIN; }
+int kmodem_call_hangup(void) { return SBOS_EAGAIN; }
+int kmodem_call_route(int audio) { (void)audio; return SBOS_EAGAIN; }
+int kmodem_call_mute(int on) { (void)on; return SBOS_EAGAIN; }
+int kmodem_call_dtmf(char digit) { (void)digit; return SBOS_EAGAIN; }
+void kmodem_call(struct kcall *c) { memset(c, 0, sizeof(*c)); }
+int kmodem_sms_send(const char *number, const char *utf8) { (void)number; (void)utf8; return SBOS_EAGAIN; }
+int kmodem_sms_count(void) { return 0; }
+int kmodem_sms_get(int i, struct ksms *m) { (void)i; (void)m; return SBOS_EINVAL; }
+uint32_t kmodem_sms_gen(void) { return 0; }
+
 int kmodem_cellular(int on) { (void)on; return SBOS_EAGAIN; }
 int kmodem_netif(struct sbnet **net, struct sbtcp **tcp) { (void)net; (void)tcp; return 0; }
 void kmodem_cell(struct kcell *c) { memset(c, 0, sizeof(*c)); c->bars = -1; }

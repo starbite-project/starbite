@@ -722,6 +722,7 @@ static int nc_launch(unsigned id)
     int i = nc_find(id);
     if (i < 0) return 0;
     int a = nc_app(NI[i].who);
+    if (a >= 0) cm_nc_launch(NI[i].who, NI[i].title, a);   /* helper I: a message's thread, a missed call's Recents */
     nc_remove(i);
     if (a < 0) return 0;                    /* nothing to open (an unknown poster): read and cleared */
     if (locked) {

@@ -682,6 +682,39 @@ struct kcell {
     uint32_t tx_packets, rx_packets;
 };
 void kmodem_reserve(void);              /* boot, before the UI's heap: the modem's buffers (no I/O) */
+/* calls + SMS (kern/modem.c, Next; the notes' modem-calls-sms-api.md). Only while Cellular is on and registered.
+ * Emergency numbers are refused before any frame is built, always; numbers and text never reach the log. */
+#define KMODEM_CALLS 1
+enum { KCALL_IDLE = 0, KCALL_DIALING, KCALL_ALERTING, KCALL_INCOMING, KCALL_ACTIVE, KCALL_HELD, KCALL_ENDING,
+       KCALL_ENDED };
+enum { KAUDIO_NONE = 0, KAUDIO_EARPIECE, KAUDIO_SPEAKER };
+struct kcall {
+    int32_t state, outgoing;
+    int32_t secs;
+    int32_t audio, muted;
+    int32_t audio_ok;                       /* 0: no in-call audio path yet (ABOX / codec / amp not built) */
+    char number[24];                        /* SCREEN ONLY */
+    char why[48];
+};
+int kmodem_call_dial(const char *number);
+int kmodem_call_answer(void);
+int kmodem_call_hangup(void);
+int kmodem_call_route(int audio);
+int kmodem_call_mute(int on);
+int kmodem_call_dtmf(char digit);
+void kmodem_call(struct kcall *c);
+#define KSMS_MAX 32
+struct ksms {
+    int32_t id, incoming, state;            /* state: 0 received, 1 sending, 2 sent, 3 failed */
+    int64_t utc;
+    char number[24];                        /* SCREEN ONLY */
+    char text[512];
+    char why[48];
+};
+int kmodem_sms_send(const char *number, const char *utf8);
+int kmodem_sms_count(void);
+int kmodem_sms_get(int i, struct ksms *m);
+uint32_t kmodem_sms_gen(void);
 int kmodem_cellular(int on);
 void kmodem_cell(struct kcell *c);
 struct sbnet;

@@ -32,6 +32,14 @@ struct fakecp {
     uint32_t n_gprs, n_define, n_act, n_deact;
     int pdp_up, act_refuse_short;
     int need_attach_apn;            /* FAKE_SIM: no registration until the LTE attach APN came (0x0D14) */
+    /* calls and SMS (attended builds): one call at a time, made-up numbers only */
+    struct { int used, id, outgoing, state, steps; char number[24]; } call;
+    char dialled[24];
+    uint32_t n_dial, n_answer, n_release, n_dtmf, n_snd, n_sms_sent, n_sms_ready, n_smsc, n_list, n_ack, n_ack_bad;
+    uint8_t sms_pdu[4][200];
+    uint16_t sms_len[4];
+    uint8_t tpid, acked_tpid;
+    int sms_fail;                   /* the next send fails (RP cause) */
     uint32_t n_attach_apn, n_net_auto, n_ps_attach;   /* act_refuse_short: the short PDP_CONTEXT form is refused (0x000a) */
     char apn[104];
     uint32_t net_ul, net_dl, net_dl_zc, net_dns, net_syn, net_http, net_bad, net_zc_full;
@@ -49,6 +57,11 @@ int fakecp_step(struct fakecp *fc);
 /* the PS rings: reads the AP's UL packets (ch 10) and answers them as a small network would (DL on ch 10 for DNS,
  * the zero-copy ring ch 11 for TCP) */
 int fakecp_net_step(struct fakecp *fc);
+/* calls / SMS: an incoming call from number; an SMS-DELIVER TPDU delivered (0x0402 with a new tpid); the emergency
+ * list NOTI (0x0216) with these numbers */
+void fakecp_ring(struct fakecp *fc, const char *number);
+void fakecp_sms_deliver(struct fakecp *fc, const uint8_t *tpdu, uint32_t n);
+void fakecp_ecc(struct fakecp *fc, const char *const *numbers, unsigned n);
 /* Queues one IPC message (NOTI or RESP) as a frame on a FMT channel's DL ring. */
 int fakecp_send(struct fakecp *fc, uint8_t ch, uint8_t aseq, uint16_t cmd, uint8_t type, const uint8_t *d, uint16_t n);
 /* Same, split into multi-frame fragments of at most frag payload bytes. */

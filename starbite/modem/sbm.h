@@ -368,6 +368,33 @@ int sbm_sbd_id(const struct sbm_sbd *s, uint16_t ch);   /* ring id of a channel,
 #define SBM_PWR_PHONE_PWR_UP     SBM_CMD(SBM_G_PWR, 0x01)
 #define SBM_PWR_PHONE_STATE      SBM_CMD(SBM_G_PWR, 0x07)
 /* GPRS (libsec-ril IPC 4.1 layouts, read 2026-11-11; docs/MODEM.md 7.9) */
+/* voice calls, SMS and call audio (libsec-ril IPC 4.1, read 2026-11-11; docs/MODEM.md 7.11): attended builds only */
+#define SBM_CALL_DIAL            SBM_CMD(SBM_G_CALL, 0x01)   /* EXEC 99: type 00 01 (CS voice), CLIR, len, TON, number */
+#define SBM_CALL_INCOMING        SBM_CMD(SBM_G_CALL, 0x02)   /* NOTI, no data: ask the list */
+#define SBM_CALL_RELEASE         SBM_CMD(SBM_G_CALL, 0x03)   /* EXEC, no data */
+#define SBM_CALL_ANSWER          SBM_CMD(SBM_G_CALL, 0x04)   /* EXEC, no data */
+#define SBM_CALL_STATUS          SBM_CMD(SBM_G_CALL, 0x05)   /* NOTI: type, id, state, cause class, cause */
+#define SBM_CALL_LIST            SBM_CMD(SBM_G_CALL, 0x06)   /* GET; RESP n x {type, id, dir, state, mpty, L, TON, num} */
+#define SBM_CALL_DTMF            SBM_CMD(SBM_G_CALL, 0x08)   /* SET 01 digit / 02 00 */
+#define SBM_CALL_WAITING         SBM_CMD(SBM_G_CALL, 0x09)   /* NOTI, no data */
+#define SBM_CALL_ECC_LIST        SBM_CMD(SBM_G_CALL, 0x16)   /* NOTI: [6] n, then {category, len, number} */
+#define SBM_SS_MANAGE_CALL       SBM_CMD(SBM_G_SS, 0x07)     /* SET 85: action, id, ... (3 = release that id) */
+#define SBM_SMS_SEND             SBM_CMD(SBM_G_SMS, 0x01)    /* EXEC: 02, more 1 / last 2, domain 00, N, SCA + TPDU */
+#define SBM_SMS_INCOMING         SBM_CMD(SBM_G_SMS, 0x02)    /* NOTI: 02, type, idx(2), tpid, T, SCA + TPDU */
+#define SBM_SMS_ACK              SBM_CMD(SBM_G_SMS, 0x06)    /* EXEC: 02, u16 result, tpid, 00 */
+#define SBM_SMS_READY            SBM_CMD(SBM_G_SMS, 0x07)    /* SET, no data: the AP takes SMS */
+#define SBM_SMS_SMSC             SBM_CMD(SBM_G_SMS, 0x0A)    /* GET; RESP: the SMSC as len, TOA, BCD */
+#define SBM_SND_VOLUME           SBM_CMD(SBM_G_SND, 0x01)    /* SET: type (01 earpiece, 11 speaker), level */
+#define SBM_SND_MUTE             SBM_CMD(SBM_G_SND, 0x02)    /* SET: 1 mic mute, 0 unmute */
+#define SBM_SND_PATH             SBM_CMD(SBM_G_SND, 0x03)    /* SET: 01 earpiece / 06 speaker, extra volume */
+#define SBM_CALL_DIAL_LEN        92
+#define SBM_SMS_PDU_MAX   176               /* SMS-SUBMIT: 1 + 1 + 12 (DA) + 1 + 1 + 1 + 140 (UD) and some room */
+#define SBM_SMS_MAX_PARTS 4
+#define SBM_CALLS_MAX            4
+#define SBM_ECC_MAX              16
+/* call states as the CP's list gives them (RIL_CallState + 1) */
+enum { SBM_CALL_ACTIVE = 1, SBM_CALL_HELD, SBM_CALL_DIALING, SBM_CALL_ALERTING, SBM_CALL_INCOMING_ST, SBM_CALL_WAITING_ST };
+#define SBM_SS_MANAGE_LEN        85
 #define SBM_GPRS_DEFINE_PDP      SBM_CMD(SBM_G_GPRS, 0x01)   /* SET, 149 bytes: 01, cid, type (02 IPv4), APN[101] */
 #define SBM_GPRS_PS              SBM_CMD(SBM_G_GPRS, 0x03)   /* SET 01 00 00 = attach */
 #define SBM_GPRS_PDP_CONTEXT     SBM_CMD(SBM_G_GPRS, 0x04)   /* SET 112 (or 248) bytes: act, cid, flags=0, ...  */
@@ -428,6 +455,8 @@ int sbm_ipc_build(uint8_t *out, uint32_t cap, uint8_t mseq, uint16_t cmd, uint8_
 #ifdef SBM_ATTENDED_TX
 /* the attended SIM test's builder (sbm_ipc.c): the status GETs plus the radio on / off EXECs, nothing else */
 int sbm_ipc_attended_allowed(uint16_t cmd, uint8_t type, const uint8_t *data, uint16_t dlen);
+/* the CP's own emergency numbers (CALL 0x0216), refused by the call / SMS builder on top of the world list */
+void sbm_ipc_set_ecc(const char *const *numbers, unsigned n);
 int sbm_ipc_frame_attended(uint8_t *out, uint32_t cap, uint8_t ch, uint8_t mseq, uint16_t cmd, uint8_t type,
                            const uint8_t *data, uint16_t dlen);
 #endif
@@ -731,6 +760,28 @@ struct sbm_boot {
     /* the attended registration helpers (attach APN, network selection automatic, PS attach): the last one's answer */
     uint8_t ctl_seq, ctl_seen;
     uint16_t ctl_cmd, ctl_res;
+    /* calls (the CP's list, refreshed on its NOTIs) and SMS (Starbite OS Next's Phone / Messages): numbers and text
+     * stay here and in the caller's buffers, never in the log */
+    struct sbm_calls {
+        struct sbm_call { uint8_t used, id, outgoing, state, mpty; char number[24]; } c[SBM_CALLS_MAX];
+        unsigned n;
+        uint8_t list_wanted, list_seq;
+        uint8_t dial_seq, dial_seen;
+        uint16_t dial_res;
+        uint8_t end_id, end_class, end_cause, end_seen;
+        uint32_t gen, incoming_notis, status_notis, list_resps;
+        char ecc[SBM_ECC_MAX][8];
+        const char *ecc_p[SBM_ECC_MAX];
+        unsigned n_ecc;
+    } calls;
+    struct sbm_smsq {
+        uint32_t rx, rx_bad, acked, ack_full, sent, failed, ready_sent;
+        uint8_t seq[SBM_SMS_MAX_PARTS];
+        uint16_t res[SBM_SMS_MAX_PARTS];
+        uint8_t mr[SBM_SMS_MAX_PARTS], done[SBM_SMS_MAX_PARTS], parts;
+        uint32_t gen;
+        uint8_t smsc[12], smsc_len, smsc_seq;     /* the SIM's SMSC (len byte included in smsc_len) */
+    } sms;
     uint32_t noti_logged;              /* attended: unsolicited frames logged after the first ONLINE_LOG_MAX */
     uint32_t fmt_stale;                /* a seq came round again (188 queries later) while its query was still open */
     struct sbm_cell_state cell;        /* what the CP reported (decoded, identity-free) */
@@ -799,7 +850,12 @@ struct sbm_dial_policy {
     unsigned n_allowed;
     const char *const *extra_emergency;          /* SIM ECC / network emergency numbers, if known */
     unsigned n_extra;
+    /* Starbite OS Next's Phone / Messages: the user typed the number and held to call / send. Then any number that
+     * passes the two locks (not an emergency number, at least SBM_DIAL_MIN_DIGITS digits) is allowed; the locks have
+     * no switch. Only SBM_DIAL_USER_CONFIRMED counts. */
+    uint32_t user_confirmed;
 };
+#define SBM_DIAL_USER_CONFIRMED 0x55534552u   /* "USER" */
 int sbm_is_emergency(const char *number, const char *const *extra, unsigned n_extra);   /* 1 = refuse */
 int sbm_dial_check(const struct sbm_dial_policy *pol, const char *number);              /* 0 or SBM_EPERM */
 
@@ -820,6 +876,39 @@ int sbm_sms_incoming(const struct sbm_ipc_msg *m, struct sbm_sms *s);
 /* TP-SUBMIT for number (allow-listed, never an emergency number: sbm_dial_check) and an ASCII text that fits one
  * GSM 7-bit message (160 characters, the common subset). Returns the PDU length or SBM_E*. Nothing sends it yet. */
 int sbm_sms_submit(const struct sbm_dial_policy *pol, const char *number, const char *text, uint8_t *out, uint32_t cap);
+/* the text (UTF-8) as 1..maxparts SMS-SUBMIT PDUs: GSM 7-bit (default + extension table) when it fits, else UCS-2;
+ * several parts carry a concatenation header with ref. Policy first. Returns the number of parts or SBM_E*. */
+int sbm_sms_submit_parts(const struct sbm_dial_policy *pol, const char *number, const char *utf8, uint8_t ref,
+                         uint8_t pdu[][SBM_SMS_PDU_MAX], uint16_t *len, unsigned maxparts);
+
+/* The incoming inbox (RAM only): concatenated parts joined by sender + reference + count; the newest SBM_INBOX_MAX
+ * messages kept; a part missing for SBM_INBOX_PART_MS is given up ("[...]" in its place). */
+#define SBM_INBOX_MAX     32
+#define SBM_INBOX_PEND    4
+#define SBM_INBOX_TEXT    1024
+#define SBM_INBOX_PART_MS (10u * 60u * 1000u)
+struct sbm_inbox_msg {
+    uint32_t id;
+    char from[24];                    /* the user's data: the screen only */
+    uint8_t scts[7];
+    char text[SBM_INBOX_TEXT];
+};
+struct sbm_inbox_pend {
+    int used;
+    uint8_t ref, total, got;
+    uint32_t at;
+    char from[24];
+    uint8_t scts[7];
+    char part[SBM_SMS_MAX_PARTS][SBM_SMS_TEXT_MAX];
+};
+struct sbm_inbox {
+    struct sbm_inbox_msg m[SBM_INBOX_MAX];
+    unsigned n;
+    struct sbm_inbox_pend p[SBM_INBOX_PEND];
+    uint32_t next_id, gen;
+};
+/* one received message (or part); s NULL just ages the pending parts. 1 = a whole message landed in m[] */
+int sbm_inbox_add(struct sbm_inbox *ib, const struct sbm_sms *s, uint32_t now_ms);
 
 /* The session API (Starbite OS): sbm_modem_start loads, checks and starts the CP and brings the link online with the RFS
  * server (about 2 s, blocking); sbm_modem_poll is non-blocking, from the event loop (every few ms): mailbox, rings,
@@ -908,6 +997,17 @@ int sbm_modem_radio(struct sbm_modem *m, int on);
 int sbm_modem_attach_apn(struct sbm_modem *m, const char *apn, uint8_t pdp_type, int long_form);
 int sbm_modem_net_auto(struct sbm_modem *m);
 int sbm_modem_ps_attach(struct sbm_modem *m);
+/* calls and SMS (SBM_ATTENDED_DATA sessions; docs/MODEM.md 7.11): the number passes sbm_dial_check with the CP's
+ * own emergency list added (and the builder checks again). State lands in m->b.calls / m->b.sms. */
+int sbm_modem_call_dial(struct sbm_modem *m, const char *number, const struct sbm_dial_policy *pol);
+int sbm_modem_call_answer(struct sbm_modem *m);
+int sbm_modem_call_hangup(struct sbm_modem *m, uint8_t id);      /* 0: the call */
+int sbm_modem_call_dtmf(struct sbm_modem *m, char digit, int on);
+int sbm_modem_snd(struct sbm_modem *m, int speaker, int volume, int mute);
+int sbm_modem_sms_ready(struct sbm_modem *m);
+int sbm_modem_sms_send(struct sbm_modem *m, const char *number, const char *utf8, const struct sbm_dial_policy *pol,
+                       uint8_t ref);
+void sbm_modem_sms_rx_cb(void (*cb)(void *ctx, const struct sbm_sms *s), void *ctx);
 int sbm_modem_pdp_define(struct sbm_modem *m, const char *apn);
 int sbm_modem_pdp_activate(struct sbm_modem *m, int on, int long_form);
 /* raw IPv4 out on the PDP channel (rmnet0, ch 10), and the receive callback for packets from either PS ring */
@@ -971,6 +1071,8 @@ void sbm_memset(void *d, int c, size_t n);
 int sbm_memcmp(const void *a, const void *b, size_t n);
 uint32_t sbm_strlen(const char *s);
 size_t sbm_strlcpy(char *d, const char *s, size_t cap);
+void *sbm_memmove(void *d, const void *s, size_t n);
+int sbm_strcmp(const char *a, const char *b);
 /* tiny formatter: %s %u %d %x %c %% with width / zero pad, l / ll; returns the full length */
 int sbm_fmt(char *out, size_t cap, const char *fmt, ...);
 /* formats, redacts, then p->log */

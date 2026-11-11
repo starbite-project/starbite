@@ -7,7 +7,9 @@
  *                                               resolution + the 2x present, the first frame at rest full); frames
  *                                               as raw BGRA (720 x 1480 with half), one "F" line per frame on stdout
  *   sbtk-host PAK bench                         uibench's kernels on this host (the A55 calibration)
- * A script: "wait MS", "tap X Y", "drag X0 Y0 X1 Y1 MS", "hold X Y MS" (pt, ms), separated by ';'. */
+ * A script: "wait MS", "tap X Y", "drag X0 Y0 X1 Y1 MS", "hold X Y MS" (pt, ms), separated by ';'; also "power",
+ * "notify WHO|TITLE|BODY", "dragh X0 Y0 X1 Y1 MS HOLD", "state WHAT=KEY:V" (a still's state, now), "ring MS" (the
+ * pretend network's incoming call MS ms later) and "sms TEXT" (a message received now from a made-up number). */
 #include "../sbtk.h"
 #include "../shell.h"
 #include <stdio.h>
@@ -25,8 +27,10 @@ int sh_modem(int on)
 }
 void sh_confirmed(int ok) { fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled"); }
 /* a pretend network for the previews: on -> searching -> data up on "Operator" LTE, 3 bars */
+static int fc_net;                          /* helper I: comms_fake.inc's calls and SMS work while it is on */
 int sh_cellular(int on)
 {
+    fc_net = !!on;
     sh_cell_t c = { on ? 1 : 0, 0, 0, on ? 7 : 0, on ? 3 : -1, on ? SH_DATA_UP : SH_DATA_OFF, "", "" };
     if (on) memcpy(c.oper, "Operator", 9);
     fprintf(stderr, "cellular: %s\n", on ? "on (pretend: data up)" : "off");
@@ -47,6 +51,8 @@ static void lin_fake_poll(float t) { (void)t; }
 static void lin_fake_settle(void) {}
 static void lin_fake_state(const char *st) { (void)st; }
 #endif
+/* helper I: calls and SMS on a pretend network (made-up numbers; nothing logs a number or a text) */
+#include "comms_fake.inc"
 /* wifi-sbos-next: a pretend Wi-Fi for the previews (made-up network names; nothing is joined): on lists four
  * networks, a join connects, the Internet test answers 200 */
 static sh_wifi_t HW;
@@ -330,6 +336,7 @@ static void apply_state(const char *st)
     /* date=WDAY:DAY (P3p): a new day as the phone's clock reports it (the Calendar icon follows) */
     if (!strcmp(what, "date")) { sh_status(21, 6, atoi(key), (int)v, 11, 87, 41); return; }
     if (!strcmp(what, "hostms")) { surv_host_now_ms = (uint64_t)v; return; }   /* survival-next: the simulation's clock */
+    if (!strcmp(what, "comms")) { comms_fake_state(key, v); return; }          /* helper I: comms=incoming, ... */
     if (!strcmp(what, "gnss")) {                 /* helper D: gnss=60.1699,24.9384 (a pretend fix: 8.5 m, 9 satellites) */
         double la = 0, lo = 0;
         if (sscanf(eq + 1, "%lf,%lf", &la, &lo) == 2) {
@@ -359,7 +366,13 @@ static int parse(const char *s, step *st, int max)
         else if (!strcmp(w, "tap")) { p->kind = 1; sscanf(tok, " %*s %f %f", &p->x0, &p->y0); p->ms = 80; }
         else if (!strcmp(w, "drag")) { p->kind = 2; sscanf(tok, " %*s %f %f %f %f %f", &p->x0, &p->y0, &p->x1, &p->y1, &p->ms); }
         else if (!strcmp(w, "hold")) { p->kind = 3; sscanf(tok, " %*s %f %f %f", &p->x0, &p->y0, &p->ms); }
-        else if (!strcmp(w, "state")) { p->kind = 4; }
+        else if (!strcmp(w, "state") || !strcmp(w, "sms")) {   /* helper I: a state now; an SMS received now */
+            p->kind = w[1] == 't' ? 4 : 9;
+            p->ms = 20;
+            const char *a = strstr(tok, w) + strlen(w);
+            while (*a == ' ') a++;
+            snprintf(p->txt, sizeof p->txt, "%s", a);
+        } else if (!strcmp(w, "ring")) { p->kind = 8; p->ms = 20; sscanf(tok, " %*s %f", &p->x0); }   /* helper I */
         else if (!strcmp(w, "power")) { p->kind = 5; p->ms = 20; }      /* the Power key: sleep, or wake if off */
         else if (!strcmp(w, "notify")) {     /* helper D: "notify WHO|TITLE|BODY": a pretend notification from the platform */
             p->kind = 6; p->ms = 20;
@@ -402,7 +415,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         for (int sub = 1; sub <= 2; sub++) {
             float te = t + dt * sub / 2;
             while (si < n && te >= s0 + st[si].ms) {
-                if (phase >= 0 && st[si].kind && st[si].kind != 5 && st[si].kind != 6) {
+                if (phase >= 0 && st[si].kind && st[si].kind != 4 && st[si].kind != 5 && st[si].kind != 6 && st[si].kind < 8) {
                     step *p = &st[si];
                     float x = p->kind == 2 || p->kind == 7 ? p->x1 : p->x0, y = p->kind == 2 || p->kind == 7 ? p->y1 : p->y0;
                     sh_touch(2, x, y, s0 + p->ms);
@@ -417,6 +430,16 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
             float u = (te - s0) / p->ms;
             if (p->kind == 6) {
                 if (phase < 0) { fprintf(stderr, "notify at %.0f ms: %s\n", te, p->txt); sh_set("notify", p->txt, 0); phase = 0; }
+                continue;
+            }
+            if (p->kind == 4 || p->kind == 8 || p->kind == 9) {     /* helper I: a state, a ring, an SMS (once) */
+                if (phase < 0) {
+                    fc_now = te;
+                    if (p->kind == 4) { fprintf(stderr, "state at %.0f ms: %s\n", te, p->txt); apply_state(p->txt); }
+                    else if (p->kind == 8) { fprintf(stderr, "ring at %.0f ms: in %.0f ms\n", te, p->x0); comms_fake_ring(p->x0); }
+                    else { fprintf(stderr, "sms at %.0f ms (the text is not logged)\n", te); comms_fake_sms(p->txt); }
+                    phase = 0;
+                }
                 continue;
             }
             if (p->kind == 5) {
@@ -441,6 +464,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
             }
         }
         lin_fake_poll(t);                     /* L3: the pretend Linux (gwin_now's part on the phone) */
+        comms_fake_poll(t);                   /* helper I: the pretend network (comms_now's part on the phone) */
         surv_host_now_ms = (uint64_t)t;          /* survival-next: the simulated USB burst, SOS and the clock */
         int mv = sh_tick(dt / 1000, t);
         double shell_ms = (tk_us() - sh0) / 1000.0;
