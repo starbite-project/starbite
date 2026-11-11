@@ -809,6 +809,10 @@ static void toggle_group(int g, int instant)
 }
 
 static tk_layer hparts[8], hsearch[3], pages;
+static tk_layer icobg, icofg, lockhl, apphl;   /* P3p: press feedback (below) */
+static void ico_free(void);
+static void hl_off(void);
+static tk_bmp dockbg[4];             /* P3p: the dock's glass under each icon (its press) */
 static void build_home_sb(void)
 {
     relayer(&hparts[0]);
@@ -940,6 +944,13 @@ static void build_home(void)
         float x = COL_CX(i) - ICON_PT / 2;
         char n[40] = "a62-";
         tk_memcpy(n + 4, DK[i], tk_strlen(DK[i]) + 1);
+        {
+            /* P3p (P3j-7): the dock's glass under this icon, kept (210 KB each) for its press (the icon shrinks) */
+            const tk_bmp *ic = tk_icon(n);
+            int X = (int)tk_floorf(PT(x) - tk_icon_pad(n) - d.ox + .5f), Y = (int)tk_floorf(PT(DOCK_Y) - tk_icon_pad(n) - d.oy + .5f);
+            tk_bmp_free(&dockbg[i]);
+            if (ic && tk_bmp_new(&dockbg[i], ic->w, ic->h)) tk_bmp_copy(&dockbg[i], 0, 0, d.b, X, Y, ic->w, ic->h);
+        }
         d_icon(&d, n, x, DOCK_Y, 1);
         if (0) {                                   /* P2y: no badges (no calls or messages to count) */
             const char *bn = i ? "2" : "1";
@@ -3168,17 +3179,18 @@ static void relink(void)
 {
     tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
     link(&root, r, 14);
-    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb };
-    link(&appg, ag, 12);
+    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb, &apphl };
+    link(&appg, ag, 13);
     tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     link(&appc, st, NST);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
     link(&lockg, lk, 11);
-    tk_layer *ls[4 * NG + 6];
+    tk_layer *ls[4 * NG + 7];
     int n = 0;
     for (int g = 0; g < NG; g++) { ls[n++] = &K[g].gh; ls[n++] = &K[g].closed; ls[n++] = &K[g].open; ls[n++] = &K[g].chev; }
     ls[n++] = &etool;
     for (int i = 0; i < 5; i++) ls[n++] = &ecard[i];
+    ls[n++] = &lockhl;
     link(&list, ls, n);
     for (int i = 0; i < 2; i++) {
         tk_layer *q[] = { &Q[i].face, &Q[i].facelit, &Q[i].icon, &Q[i].iconlit, &Q[i].ring };
@@ -3186,8 +3198,8 @@ static void relink(void)
     }
     tk_layer *pg[] = { &hparts[1], &hparts[2], &hparts[4] };
     link(&pages, pg, 3);
-    tk_layer *h[] = { &hparts[0], &pages, &hsearch[0], &hsearch[1], &hsearch[2], &hparts[3] };
-    link(&home, h, 6);
+    tk_layer *h[] = { &hparts[0], &pages, &hsearch[0], &hsearch[1], &hsearch[2], &hparts[3], &icobg, &icofg };
+    link(&home, h, 8);
 }
 
 /* the bake in steps (the kernel runs one per loop turn: the watchdog is fed and the screen fills in as it goes);
@@ -3246,6 +3258,10 @@ void sh_init_begin(tk_comp *c)
     for (int i = 0; i < 5; i++) { tk_layer_init(&ecard[i], "ecard"); ecard[i].hidden = 1; }
     tk_layer_init(&empill, "empill");
     empill.hidden = 1;
+    tk_layer_init(&icobg, "icon-ground"); icobg.hidden = 1;     /* P3p: press feedback */
+    tk_layer_init(&icofg, "icon-pressed"); icofg.hidden = 1;
+    tk_layer_init(&lockhl, "press"); lockhl.hidden = 1;
+    tk_layer_init(&apphl, "press"); apphl.hidden = 1;
     layout_list();
     relink();
     c->root = &root;
@@ -3310,6 +3326,7 @@ static void back_to_lock(int exit_em)
     focus_on = 0; focus_closing = 0; focus.hidden = 1; sp_focus.live = sp_thumb.live = 0;
     free_focus();
     booting = 0; boot.hidden = 1;
+    ico_free(); hl_off();                          /* P3p */
     for (int g = 0; g < NG; g++) if (K[g].isopen) toggle_group(g, 1);
     scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
     sp_lock.live = 0;
@@ -3468,6 +3485,150 @@ static int hit_row(float x, float y, int *gi)
 }
 static float rubber(float over, float dim) { return (1 - 1 / (over * .55f / dim + 1)) * dim; }
 
+/* ---- P3p (P3j-7): press feedback. Nothing is baked in a tap: an icon's press is two small layers (the ground
+ * under it: the wallpaper or the dock's kept glass, and the icon darkened, shrinking to .88 in .1 s and back in .2 s);
+ * a row, card or key is a solid rounded rect with no bitmap (W .10 / lighter on keys), clipped to its group. Both
+ * go on a move and at lift-off. --------------------------------------------------------------------------------- */
+/* icobg, icofg, lockhl, apphl: declared with the home's layers */
+static struct { int on; float s, from, to, t, dur; } IP = { 0, 1, 1, 1, 1, .1f };
+static void ico_free(void)
+{
+    relayer(&icobg); relayer(&icofg);
+    icobg.hidden = icofg.hidden = 1;
+    IP.on = 0; IP.t = 1; IP.s = 1;
+}
+static void icon_press(int a)
+{
+    ico_free();
+    if (a < 0 || !tk_strcmp(APPS[a].k, "search")) return;
+    char nm[24] = "a62-";
+    tk_memcpy(nm + 4, APPS[a].k, tk_strlen(APPS[a].k) + 1);
+    const tk_bmp *ic = tk_icon(nm);
+    if (!ic) return;
+    arect R = icon_rect(a);
+    float pad = tk_icon_pad(nm);
+    int X = (int)tk_floorf(PT(R.x) - pad + .5f), Y = (int)tk_floorf(PT(R.y) - pad + .5f);
+    tk_layer_init(&icobg, "icon-ground");
+    tk_layer_init(&icofg, "icon-pressed");
+    if (!tk_bmp_new(&icobg.bmp, ic->w, ic->h) || !tk_bmp_new(&icofg.bmp, ic->w, ic->h)) { ico_free(); return; }
+    int dk = -1;
+    for (int i = 0; i < 4 && R.y >= DOCK_Y - 1; i++) if (tk_fabsf(R.x - (COL_CX(i) - ICON_PT / 2)) < 1) dk = i;
+    if (dk >= 0 && dockbg[dk].px) tk_bmp_copy(&icobg.bmp, 0, 0, &dockbg[dk], 0, 0, ic->w, ic->h);
+    else tk_bmp_up(&icobg.bmp, &C->base_half, X, Y, 2);            /* the page's icons sit on the wallpaper */
+    tk_blit(&icofg.bmp, ic, 0, 0, 1);
+    tk_blit_tinted(&icofg.bmp, ic, 0, 0, TK_RGBA(0, 0, 0, .3f));   /* iOS: the icon darkens under the finger */
+    icobg.x = icofg.x = (float)X;
+    icobg.y = icofg.y = (float)Y;
+    icofg.ox = PT(R.x + R.w / 2);
+    icofg.oy = PT(R.y + R.h / 2);
+    IP.on = 1; IP.from = 1; IP.to = .88f; IP.t = 0; IP.dur = .1f; IP.s = 1;
+    icofg.sx = icofg.sy = 1;
+    relink();
+}
+static void icon_release(void)
+{
+    if (!IP.on) return;
+    IP.from = IP.s; IP.to = 1; IP.t = 0; IP.dur = .2f;
+}
+static int ico_step(float dt)
+{
+    if (!IP.on || IP.t >= 1) return 0;
+    IP.t = tk_minf(1, IP.t + dt / IP.dur);
+    IP.s = IP.from + (IP.to - IP.from) * tk_bezier(.25f, .1f, .25f, 1, IP.t);
+    icofg.sx = icofg.sy = IP.s;
+    if (IP.t >= 1 && IP.to >= 1) ico_free();
+    return 1;
+}
+/* a solid highlight: r the lit rect, clip the group's (rounded by rad) in pt; l's parent space is the screen's
+ * (lockhl's is the list's content: its y + scroll) */
+static void hl_set(tk_layer *l, tk_rect r, tk_rect clip, float rad, tk_col c)
+{
+    l->solid = tk_premul(c);
+    l->x = PT(r.x); l->y = PT(r.y);
+    l->solid_w = PT(r.w); l->solid_h = PT(r.h);
+    l->clip = 1;
+    l->clip_r = (tk_rect){ PT(clip.x), PT(clip.y), PT(clip.w), PT(clip.h) };
+    l->clip_radius = PT(rad);
+    l->alpha = 1;
+    l->hidden = 0;
+    l->gen++;
+}
+static void hl_off(void) { if (!lockhl.hidden || !apphl.hidden) { lockhl.hidden = apphl.hidden = 1; lockhl.gen++; apphl.gen++; } }
+static void press_cancel(void) { hl_off(); if (IP.on) icon_release(); }
+/* the content top of card g (list pt at scroll 0) */
+static float card_top(int g)
+{
+    float yy = 10;
+    for (int h = 0; h < g; h++) yy += 68 + K[h].memh + STACK_GAP(h);
+    return yy;
+}
+/* a key of the dark keyboard under (x, y) (the three rows R, row 3 from 61.5 when r2x): its rect */
+static int kb_rect(float x, float y, const char *const *R, int r2x, tk_rect *o)
+{
+    for (int r = 0; r < 3; r++) {
+        int n = (int)tk_strlen(R[r]);
+        float x0 = r == 2 && r2x ? 61.5f : 3 + (10 - n) * 19.5f, ky = 550 + 54.0f * r;
+        if (y < ky || y >= ky + 50) continue;
+        for (int i = 0; i < n; i++)
+            if (x >= x0 + 39 * i - 3 && x < x0 + 39 * i + 36) { *o = (tk_rect){ x0 + 39 * i, ky, 33, 46 }; return 1; }
+        if (r == 2 && x < 55) { *o = (tk_rect){ 3, 658, 42, 46 }; return 1; }
+        if (r == 2 && x >= 340) { *o = (tk_rect){ 345, 658, 42, 46 }; return 1; }
+    }
+    if (y >= 712 && y < 760) { *o = x < 94 ? (tk_rect){ 3, 712, 88, 46 } : x < 296 ? (tk_rect){ 97, 712, 196, 46 } : (tk_rect){ 299, 712, 88, 46 }; return 1; }
+    return 0;
+}
+/* what lights under a finger on an open app's page */
+static void app_press(float x, float y)
+{
+    tk_rect r, g;
+    float rad = 0;
+    tk_col c = W(.1f);
+    int ok = 0;
+    if (is_app("settings") && !AS.sub) {
+        const appdef *A = &APPS[AP.a];
+        for (int s = 0; s < A->ns && !ok; s++)
+            for (int i = 0; i < A->sec[s].n && !ok; i++) {
+                const char *l = A->sec[s].rows[i].l;
+                if (tk_strcmp(l, "Wi-Fi") && tk_strcmp(l, "Cellular") && tk_strcmp(l, "Display & Brightness")) continue;
+                float ry = gen_row_y(A, s, i), gy = gen_row_y(A, s, 0);
+                if (x >= GROUP_X && x < CONTENT_R && y >= ry && y < ry + 47) {
+                    r = (tk_rect){ GROUP_X, ry, GROUP_W, 47 };
+                    g = (tk_rect){ GROUP_X, gy, GROUP_W, 47.0f * A->sec[s].n - 1 };
+                    rad = 16; ok = 1;
+                }
+            }
+    } else if (is_app("notes") && !NS.view && NS.n) {
+        if (x >= GROUP_X && x < CONTENT_R && y >= CONTENT_TOP && y < CONTENT_TOP + 56 * NS.n) {
+            int i = (int)((y - CONTENT_TOP) / 56);
+            r = (tk_rect){ GROUP_X, CONTENT_TOP + 56 * i, GROUP_W, 56 };
+            g = (tk_rect){ GROUP_X, CONTENT_TOP, GROUP_W, 56.0f * NS.n - 1 };
+            rad = 16; ok = 1;
+        }
+    } else if (is_app("calc")) {
+        for (int i = 0; i < 19 && !ok; i++) {
+            float kx, ky, kw;
+            calc_key_rect(i, &kx, &ky, &kw);
+            if (x >= kx && x < kx + kw && y >= ky && y < ky + 78) { r = g = (tk_rect){ kx, ky, kw, 78 }; rad = 39; c = W(.3f); ok = 1; }
+        }
+    } else if (is_app("clock")) {
+        float yy = y - CLK_DY;
+        if (yy >= 350 && yy < 428 && ((x >= 36 && x < 114) || (x >= 276 && x < 354))) {
+            r = g = (tk_rect){ x < 195 ? 36.0f : 276.0f, 350 + CLK_DY, 78, 78 }; rad = 39; ok = 1;
+        } else if (yy >= 570 && yy < 614) {
+            if (CLK.tm_run) { if (x >= 125 && x < 265) { r = g = (tk_rect){ 125, 570 + CLK_DY, 140, 44 }; rad = 22; ok = 1; } }
+            else for (int i = 0; i < 3; i++)
+                if (x >= 24 + 125 * i && x < 116 + 125 * i) { r = g = (tk_rect){ 24 + 125.0f * i, 570 + CLK_DY, 92, 44 }; rad = 22; ok = 1; }
+        }
+        c = W(.18f);
+    } else if ((is_app("notes") && NS.view) || is_app("search")) {
+        int num = is_app("notes") ? NS.num : SR.num;
+        if (y >= 548 && kb_rect(x, y, KR[num], !num, &r)) { g = r; rad = 6; c = W(.35f); ok = 1; }
+    } else if (is_app("settings") && AS.sub == 2 && WV.view == 1) {
+        if (y >= 548 && kb_rect(x, y, WK[WV.layer], !WV.layer, &r)) { g = r; rad = 6; c = W(.35f); ok = 1; }
+    }
+    if (ok) hl_set(&apphl, r, g, rad, c);
+}
+
 void sh_touch(int phase, float x, float y, float t)
 {
     now_ms = t;
@@ -3497,6 +3658,7 @@ void sh_touch(int phase, float x, float y, float t)
                 /* a tap on the app's page (a key lights while the finger is on it) */
                 T.kind = G_APPTAP;
                 if (is_app("phone") && AS.tab == 3) key_down(key_hit(x, y));
+                else app_press(x, y);                  /* P3p: rows, keys and buttons light */
             }
             return;
         }
@@ -3524,7 +3686,7 @@ void sh_touch(int phase, float x, float y, float t)
             if (y < 56 && x < 195) { T.kind = G_RELOCK; sp_lock.live = 0; tk_tracker_add(&T.tr, y, t); return; }
             /* elsewhere but the dock, Search and the widgets: the pages (direction decided after 8 pt) */
             int on_w = page_x > -195 && y >= 60 && y <= 60 + WID_W && ((x >= WID_X(0) && x <= WID_X(0) + WID_W) || (x >= WID_X(1) && x <= WID_X(1) + WID_W));
-            if (y >= 688 && y < H_PT - 30) { T.kind = G_DOCK; return; }   /* the dock: a tap opens its app */
+            if (y >= 688 && y < H_PT - 30) { T.kind = G_DOCK; icon_press(app_hit(x, y)); return; }   /* the dock: a tap opens its app */
             if (y >= 636 && y <= 674 && x >= 140 && x <= 250) { T.kind = G_DOCK; return; }   /* P3g: Search */
             if (y >= 56 && y < 688 && !(y >= 640 && y <= 670 && x >= 150 && x <= 240) && !on_w) {
                 T.kind = G_PAGE;
@@ -3532,6 +3694,7 @@ void sh_touch(int phase, float x, float y, float t)
                 page_dir = 0;
                 sp_page.live = 0;
                 tk_tracker_add(&T.tr, x, t);
+                if (!sp_page.live && tk_fabsf(page_x - tk_floorf(page_x / 390 + .5f) * 390) < 1) icon_press(app_hit(x, y));   /* P3p */
             }
             return;
         }
@@ -3555,12 +3718,24 @@ void sh_touch(int phase, float x, float y, float t)
                 if (y >= top && y < top + 68 && x >= CARD_X && x < CARD_X + CARD_W) T.arg = i;
             }
             if (y >= 630 && y < 670 && x >= 120 && x < 270) T.arg = 4;
+            if (T.arg >= 0 && T.arg < 4) {
+                tk_rect c = { CARD_X, LIST_TOP + 10 + 78.0f * T.arg, CARD_W, 68 };
+                hl_set(&lockhl, c, c, 26, W(.1f));
+            }
             tk_tracker_add(&T.tr, y, t);
             return;
         }
         if (y >= H_PT - 30) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
-        else if ((r = hit_row(x, y, &gi)) >= 0) { T.kind = G_TAP_ROW; T.arg = gi; T.arg2 = r; }
-        else if ((r = hit_head(x, y)) >= 0) { T.kind = G_TAP_HEAD; T.arg = r; }
+        else if ((r = hit_row(x, y, &gi)) >= 0) {
+            T.kind = G_TAP_ROW; T.arg = gi; T.arg2 = r;
+            /* P3p: the row lights across its card (clipped to the card's rounded face) */
+            float ct = LIST_TOP + card_top(gi);
+            hl_set(&lockhl, (tk_rect){ CARD_X, ct + 68 + 60.0f * r - 2, CARD_W, 60 }, (tk_rect){ CARD_X, ct, CARD_W, 68 + K[gi].memh }, 26, W(.08f));
+        } else if ((r = hit_head(x, y)) >= 0) {
+            T.kind = G_TAP_HEAD; T.arg = r;
+            tk_rect c = { CARD_X, LIST_TOP + card_top(r), CARD_W, 68 };
+            hl_set(&lockhl, c, c, 26, W(.1f));
+        }
         else if (y >= LIST_TOP && y <= LIST_TOP + LIST_H) { T.kind = G_LIST; T.base = scroll; sp_scroll.live = 0; scroll_momentum = 0; }
         else { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
         tk_tracker_add(&T.tr, y, t);
@@ -3576,8 +3751,13 @@ void sh_touch(int phase, float x, float y, float t)
             break;
         case G_APPTAP:
             if (T.moved && !apkey.hidden) key_down(-1);
+            if (T.moved) hl_off();
+            break;
+        case G_DOCK: case G_ETAP:
+            if (T.moved) press_cancel();
             break;
         case G_TAP_HEAD: case G_TAP_ROW:
+            if (T.moved) hl_off();
             if (T.moved) { T.kind = G_LIST; T.base = scroll; T.y0 = y; sp_scroll.live = 0; }
             tk_tracker_add(&T.tr, y, t);
             break;
@@ -3623,7 +3803,7 @@ void sh_touch(int phase, float x, float y, float t)
         case G_PAGE: {
             float dx = x - T.x0;
             tk_tracker_add(&T.tr, x, t);
-            if (!page_dir && dx * dx + dy * dy > 64) page_dir = tk_fabsf(dx) > tk_fabsf(dy) ? 1 : 2;
+            if (!page_dir && dx * dx + dy * dy > 64) { page_dir = tk_fabsf(dx) > tk_fabsf(dy) ? 1 : 2; press_cancel(); }
             if (page_dir == 1) {
                 page_dragging = 1;
                 float px = T.base + dx;
@@ -3644,6 +3824,8 @@ void sh_touch(int phase, float x, float y, float t)
         return;
     }
     /* up */
+    hl_off();
+    icon_release();                            /* P3p: the pressed icon springs back (under the opening app) */
     switch (T.kind) {
     case G_THUMB:
         if (thumb_x > (SL_W - 62) * .86f) { set_thumb(SL_W - 62); booting = 1; boot_t = -100; }
@@ -3854,6 +4036,7 @@ int sh_tick(float dt, float t)
         }
         mv = 1;
     }
+    mv |= ico_step(dt);                          /* P3p: the pressed icon */
     if (em_t < 1) {
         em_t = tk_minf(1, em_t + dt / .7f);
         em_step(tk_bezier(.25f, .1f, .25f, 1, em_t));
@@ -4098,5 +4281,6 @@ int sh_moving(void)
             T.kind == G_CCCELL || CF.down || CF.a != CF.at || SL.dir;
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live;
+    m |= IP.on && IP.t < 1;
     return m;
 }
