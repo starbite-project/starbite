@@ -240,6 +240,26 @@ FL 11_0 and D3D12 need tessellation, which the G72 doesn't have.
   - then the x64 question: an ARM64EC build needs clang ≥ 19 or MSVC, plus ARM64EC libraries; an x64 build needs
     x64 libraries. Either way, GD is then tested with an app-local opengl32.dll in its folder.
 
+**Later the same day (scale-up):**
+- **The x64 ICD builds** with no source changes beyond 0135/0136:
+  - `~/sbmesa/build-wgl-x64`, with `~/sbmesa/tc/cross-x64.ini` and the wrapper `~/sbmesa/tc/x64/clang-cl` (meson
+    only treats it as clang-cl under that exact name);
+  - `libgallium_wgl.dll` (c2b4225c, AMD64) and `opengl32.dll` (8aca347d): 360 gl/wgl exports, system imports only,
+    Panfrost and the shim inside.
+- **`sbgl64.exe`:** the test as an x64 program.
+- **The kit:**
+  - `tools/win/setup.sh` gained `SBWIN_ARCHES="x64 x86"`: Microsoft's x64/x86 SDK and CRT packages of the same
+    releases, pinned by sha256; the VS ones match Microsoft's manifest.
+  - **ARM64EC needs nothing extra:** our arm64 libraries are ARM64X. libcmt/msvcrt/libucrt carry ARM64EC objects
+    (machine 0xA641), and the SDK import libraries carry ARM64EC import thunks.
+- **The ARM64EC build** (clang/lld 20, `~/sbmesa/build-wgl-ec`): in progress in a separate worktree
+  (`~/sbmesa/src-ec`), patches 0140-0149.
+- **Stage `sbwddm-t44`:** T42 + the KMD hang forensics (WIN11-GPU.md §6.52) + the GL tests on ARM64 and x64.
+- **The attended GD kit `build/win/gl-kit`:**
+  - `gd-gl-on.cmd` copies the x64 ICD into the Geometry Dash folder and marks it; `gd-gl-off.cmd` removes exactly
+    those files;
+  - it refuses to touch an `opengl32.dll` that isn't ours.
+
 ## 7. What the user can do meanwhile
 
 - **Geometry Dash:** no fix to install yet. It needs our OpenGL driver (§5a, steps 1-2).

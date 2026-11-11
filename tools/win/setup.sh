@@ -2,6 +2,10 @@
 # Windows 11 ARM64 build kit on the Mac (docs/PLAN-2026-11-07.md step L0; tools/win/README.md).
 #
 #   tools/win/setup.sh            download, verify (sha256), extract into ${SBWIN:-$HOME/sbwin}; idempotent
+#   SBWIN_ARCHES="x64 x86" tools/win/setup.sh   also the x64 and/or x86 user-mode libraries (SDK um/ucrt + the
+#                                 MSVC CRT): builds of DLLs that load into emulated x64/x86 processes (the OpenGL
+#                                 ICD, docs/WIN11-GPU-CAPS.md 5a). ARM64EC needs nothing extra: the arm64 libraries
+#                                 are ARM64X (they carry ARM64EC objects too).
 #   KEEP_DL=1 tools/win/setup.sh  keep the downloaded archives in $SBWIN/dl (default: deleted after extraction)
 #
 # Everything comes from Microsoft's own servers, pinned by version and sha256 below:
@@ -12,6 +16,8 @@
 #   - VS 17.14.44 release channel (VisualStudio.vsman sha256 963760b0...): MSVC 14.44.35207 CRT headers and the
 #     ARM64 CRT libraries (Desktop.base: libcmt, libvcruntime, libcpmt...; Store.base: msvcrt, vcruntime,
 #     oldnames, delayimp... without its uwp/ and store/ variants)
+#   - the same SDK/VS packages for x64 and x86 (Microsoft.Windows.SDK.CPP.x64/.x86, CRT.x64/x86.Desktop/Store.base
+#     of VS 17.14, MSVC 14.44.17.14: the release the arm64 pins come from), only when SBWIN_ARCHES asks
 # Licence: the user accepted the WDK/SDK/VS licence terms for this on 2026-11-07. Nothing here is committed;
 # $SBWIN lives outside the repository. Only ARM64 libraries are extracted; no Windows .exe is ever run.
 #
@@ -39,6 +45,19 @@ PINS=(
 "vc-crt-arm64-store|https://download.visualstudio.microsoft.com/download/pr/67cf767c-5e71-47c2-a54a-cd5631e28942/57ece91747be72fdd9ed0c39b83225011c8afba6b6f616a23ace54d0522f79e9/Microsoft.VC.$VCV.CRT.ARM64.Store.base.vsix|57ece91747be72fdd9ed0c39b83225011c8afba6b6f616a23ace54d0522f79e9|61763419"
 )
 
+for a in ${SBWIN_ARCHES:-}; do
+    case $a in
+    x64) PINS+=(
+"sdk-cpp-x64|$NUGET/microsoft.windows.sdk.cpp.x64/$SDKV/microsoft.windows.sdk.cpp.x64.$SDKV.nupkg|c29ce7a4641cb37ee32ebb8078cc65cfbabc7025076bcfba869039204b1e960d|52245405"
+"vc-crt-x64|https://download.visualstudio.microsoft.com/download/pr/67cf767c-5e71-47c2-a54a-cd5631e28942/f01f701a7bcd9587a340898c851424f6a52bb913a70c185ff0d5bf0288c5831a/Microsoft.VC.$VCV.CRT.x64.Desktop.base.vsix|f01f701a7bcd9587a340898c851424f6a52bb913a70c185ff0d5bf0288c5831a|50776097"
+"vc-crt-x64-store|https://download.visualstudio.microsoft.com/download/pr/67cf767c-5e71-47c2-a54a-cd5631e28942/9135b03c0df53c7a0aa9bef7230a1c2ff4263a0ee7baa7e419d034f484f6bb56/Microsoft.VC.$VCV.CRT.x64.Store.base.vsix|9135b03c0df53c7a0aa9bef7230a1c2ff4263a0ee7baa7e419d034f484f6bb56|27596908") ;;
+    x86) PINS+=(
+"sdk-cpp-x86|$NUGET/microsoft.windows.sdk.cpp.x86/$SDKV/microsoft.windows.sdk.cpp.x86.$SDKV.nupkg|47bfc24ae5d594b62154acc062e04f7a0e54ff1534a50659f71cb40e878ee9cf|49788719"
+"vc-crt-x86|https://download.visualstudio.microsoft.com/download/pr/67cf767c-5e71-47c2-a54a-cd5631e28942/e4dc8ef4551d621501295d2175c890788368d8f8a218401c7c96405d31cb8e41/Microsoft.VC.$VCV.CRT.x86.Desktop.base.vsix|e4dc8ef4551d621501295d2175c890788368d8f8a218401c7c96405d31cb8e41|87554282"
+"vc-crt-x86-store|https://download.visualstudio.microsoft.com/download/pr/67cf767c-5e71-47c2-a54a-cd5631e28942/d29d5bd117b1b3a4485a9172d57180417adcb47e004d492b47e031d4c2933dd5/Microsoft.VC.$VCV.CRT.x86.Store.base.vsix|d29d5bd117b1b3a4485a9172d57180417adcb47e004d492b47e031d4c2933dd5|27059639") ;;
+    *) echo "SBWIN_ARCHES: unknown $a (x64, x86)"; exit 1 ;;
+    esac
+done
 free_mib() { df -m "$SBWIN" | awk 'NR==2 {print $4}'; }
 
 fetch() {  # name url sha bytes -> $DL/name.zip, verified
@@ -97,6 +116,11 @@ step() {  # name url sha bytes
         lower_dirs "$SBWIN/kit/Lib" ;;
     vc-crt-headers)
         extract vc-crt-headers "$SBWIN/msvc/include" "$(vsix_dir vc-crt-headers include)" ;;
+    sdk-cpp-x64|sdk-cpp-x86)
+        extract "$1" "$SBWIN/kit/Lib/$KITV" c -x 'c/ucrt_enclave/*' ;;
+    vc-crt-x64|vc-crt-x64-store|vc-crt-x86|vc-crt-x86-store)
+        local a=${1#vc-crt-}; a=${a%-store}; local p; p=$(vsix_dir "$1" "lib/$a")
+        extract "$1" "$SBWIN/msvc/lib/$a" "$p" -x '*.pdb' "$p/uwp/*" "$p/store/*" "$p/enclave/*" "$p/onecore/*" ;;
     vc-crt-arm64|vc-crt-arm64-store)
         # the "Store" package is where msvcrt.lib, vcruntime.lib, oldnames.lib, delayimp.lib live;
         # its uwp/ and store/ variants are not needed

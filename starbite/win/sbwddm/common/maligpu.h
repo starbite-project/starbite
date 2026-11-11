@@ -78,6 +78,14 @@
 #define JS_SLOT(n)              (JS_BASE + (n) * 0x80)
 #define JS_HEAD_LO              0x00
 #define JS_HEAD_HI              0x04
+/* T44 (hang forensics): the running job's registers, from Linux drivers/gpu/drm/panfrost/panfrost_regs.h
+ * (JS_TAIL_LO/HI 0x08/0x0c, JS_AFFINITY_LO/HI 0x10/0x14, JS_CONFIG 0x18; GPU_FAULT_ADDRESS_HI 0x44) */
+#define JS_TAIL_LO              0x08
+#define JS_TAIL_HI              0x0C
+#define JS_AFFINITY_LO          0x10
+#define JS_AFFINITY_HI          0x14
+#define JS_CONFIG               0x18
+#define GPU_FAULT_ADDRESS_HI    0x044
 #define JS_COMMAND              0x20
 #define JS_STATUS               0x24
 #define JS_HEAD_NEXT_LO         0x40

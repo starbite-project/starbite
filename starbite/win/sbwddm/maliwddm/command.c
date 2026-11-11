@@ -93,14 +93,15 @@ static void PatchEveryAllocation(UINT Allocations, D3DDDI_PATCHLOCATIONLIST **Ou
     }
 }
 
-static BOOLEAN JcInList(const MW_COMMAND *C, const DXGKARG_RENDER *Arg)
+/* The (non-primary) allocation of the render's list the chain starts in; NULL: none. T44: kept for the hang forensics. */
+static MW_ALLOCATION *JcInList(const MW_COMMAND *C, const DXGKARG_RENDER *Arg)
 {
     for (UINT i = 0; i < Arg->AllocationListSize; i++) {
-        const MW_ALLOCATION *a = (const MW_ALLOCATION *)Arg->pAllocationList[i].hDeviceSpecificAllocation;
+        MW_ALLOCATION *a = (MW_ALLOCATION *)Arg->pAllocationList[i].hDeviceSpecificAllocation;
         if (a && !(a->Flags & MW_ALLOC_PRIMARY) && sbx_head_in(C->Jc, a->GpuVa, a->Size))
-            return TRUE;
+            return a;
     }
-    return FALSE;
+    return NULL;
 }
 
 NTSTATUS APIENTRY MwRender(IN_CONST_HANDLE hContext, DXGKARG_RENDER *Arg)
@@ -121,15 +122,18 @@ NTSTATUS APIENTRY MwRender(IN_CONST_HANDLE hContext, DXGKARG_RENDER *Arg)
     __try {
         for (ULONG i = 0; i < count; i++) {
             MW_COMMAND c = ((const MW_COMMAND *)Arg->pCommand)[i];
+            MW_ALLOCATION *in;
             if (c.Type != MW_CMD_JOB || c.Slot > 1 || c.Jc == 0)
                 return STATUS_INVALID_PARAMETER;
             /* S9 port: the chain must start inside a (non-primary) allocation this render lists, which is also
              * what VidMm makes resident (patched below): never at an address the UMD merely claims. */
-            if (!JcInList(&c, Arg)) {
+            in = JcInList(&c, Arg);
+            if (in == NULL) {
                 ctx->Device->Adapter->JcRejected++;
                 return STATUS_INVALID_PARAMETER;
             }
             priv->Commands[i] = c;
+            priv->JcAlloc[i] = in;            /* T44 */
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return STATUS_INVALID_USER_BUFFER;
@@ -995,8 +999,166 @@ static void Kick(MW_ADAPTER *A)
     }
 }
 
-/* Collect the running chain's outcome. TRUE if it finished, either way. */
-static BOOLEAN Reap(MW_ADAPTER *A, BOOLEAN CheckTimeout)
+/* ---- T44: hang forensics ---- */
+
+/* The page the GPU's own page table (AS0, ours) maps at Va; 0: none. Any IRQL: the tables are the KMD's non-paged
+ * memory and are freed only by MkMmuFree, after the DPCs and the interrupt are gone. */
+static PFN_NUMBER GpuPfn(MK_GPU *Gpu, ULONG64 Va)
+{
+    const volatile ULONG64 *l3;
+    ULONG64 pte;
+
+    if (Va < MK_VA_START || Va >= MK_VA_END)
+        return 0;
+    l3 = *(const volatile ULONG64 *volatile *)&Gpu->L3[(Va >> 30) & 3][(Va >> 21) & 511];
+    if (l3 == NULL)
+        return 0;
+    pte = l3[(Va >> 12) & 511];
+    return pte != 0 ? (PFN_NUMBER)((pte & 0x0000FFFFFFFFF000ULL) >> PAGE_SHIFT) : 0;
+}
+
+static BOOLEAN IsRam(const MW_ADAPTER *A, PFN_NUMBER Pfn)
+{
+    for (ULONG i = 0; i < A->RamRuns; i++)
+        if (Pfn >= A->RamRun[i].First && Pfn < A->RamRun[i].End)
+            return TRUE;
+    return FALSE;
+}
+
+/* PollDpc, DISPATCH_LEVEL, just before SyncPoll: if the running chain is (within 2 ms of being) overdue, a CPU view
+ * of the page JS_HEAD is in, for Reap's hang record. The page is the one the GPU's own page table maps there, mapped
+ * only if it is RAM, write-combined like VidMm's views of our non-coherent segment, through a one-page MDL built here
+ * into the page of system address space reserved at AddDevice (MmMapLockedPagesWithReservedMapping: DISPATCH_LEVEL at
+ * most, no pool, no new PTEs). Nothing is read here: Reap decides under the interrupt lock whether it may be. */
+static BOOLEAN HangViewMake(MW_ADAPTER *A, MW_HANG_VIEW *V)
+{
+    ULONG64 now = KeQueryInterruptTime(), start = A->JobStart, head;
+    ULONG slot = A->RunningSlot;
+    PFN_NUMBER pfn;
+    PVOID va;
+
+    RtlZeroMemory(V, sizeof(*V));
+    if (A->HangMapVa == NULL || !A->Running || !A->GpuUp || A->Gpu.Regs == NULL || slot > 1)
+        return FALSE;
+    if ((now - start) / 10000 + 2 <= MW_JOB_TIMEOUT_MS && (now - A->SubStart) / 10000 + 2 <= MW_SUB_TIMEOUT_MS)
+        return FALSE;                     /* Reap's own test (below), 2 ms early: it runs microseconds after this */
+    if (InterlockedCompareExchange(&A->HangViewBusy, 1, 0) != 0)
+        return FALSE;
+    head = MK_RD(&A->Gpu, JS_SLOT(slot) + JS_HEAD_LO) | (ULONG64)MK_RD(&A->Gpu, JS_SLOT(slot) + JS_HEAD_HI) << 32;
+    pfn = GpuPfn(&A->Gpu, head);
+    if (pfn == 0 || !IsRam(A, pfn)) {
+        A->HangViewFails++;
+        InterlockedExchange(&A->HangViewBusy, 0);
+        return FALSE;
+    }
+    MmInitializeMdl(&A->HangMdl.Mdl, NULL, PAGE_SIZE);
+    A->HangMdl.Mdl.MdlFlags |= MDL_PAGES_LOCKED;
+    MmGetMdlPfnArray(&A->HangMdl.Mdl)[0] = pfn;
+    va = MmMapLockedPagesWithReservedMapping(A->HangMapVa, MW_TAG, &A->HangMdl.Mdl, MmWriteCombined);
+    if (va == NULL) {
+        A->HangViewFails++;
+        InterlockedExchange(&A->HangViewBusy, 0);
+        return FALSE;
+    }
+    V->Va = (const volatile UCHAR *)va;
+    V->Page = head & ~(ULONG64)(PAGE_SIZE - 1);
+    V->Pfn = pfn;
+    V->JobStart = start;
+    A->HangViews++;
+    return TRUE;
+}
+
+/* PollDpc, DISPATCH_LEVEL, right after SyncPoll returned (Reap is done with the view). */
+static void HangViewDrop(MW_ADAPTER *A, MW_HANG_VIEW *V)
+{
+    if (V->Va == NULL)
+        return;
+    MmUnmapReservedMapping(A->HangMapVa, MW_TAG, &A->HangMdl.Mdl);
+    V->Va = NULL;
+    InterlockedExchange(&A->HangViewBusy, 0);
+}
+
+/* The 16 dwords at JS_HEAD, through V, only when all of these hold (interrupt level, so the hung submission cannot
+ * complete meanwhile): JS_HEAD lies in Al, an allocation a chain of the hung submission starts in (VidMm keeps it
+ * resident and alive until its fence, which we have not reported); Al is mapped and neither framebuffer-aliased nor
+ * coherent (V is write-combined); V is of JS_HEAD's page, made for this chain; and the GPU's page table still maps
+ * that very page there. Otherwise nothing is read and the reason is returned. */
+static ULONG HangDesc(MW_ADAPTER *A, MW_HANG *H, const MW_ALLOCATION *Al, const MW_HANG_VIEW *V)
+{
+    ULONG64 page = H->Head & ~(ULONG64)(PAGE_SIZE - 1);
+    ULONG off = (ULONG)(H->Head & (PAGE_SIZE - 1));
+
+    if (Al == NULL)
+        return MW_HANG_DESC_UNKNOWN;
+    if (H->Head & 63)
+        return MW_HANG_DESC_ALIGN;        /* also keeps the 64 bytes inside the page */
+    if (V == NULL || V->Va == NULL)
+        return MW_HANG_DESC_NOVIEW;
+    if (V->JobStart != A->JobStart || V->Page != page || !Al->Mapped || Al->FbAliased || Al->Coherent ||
+        GpuPfn(&A->Gpu, page) != V->Pfn)
+        return MW_HANG_DESC_MISMATCH;
+    for (ULONG i = 0; i < MW_HANG_DESC_DWORDS; i++)
+        H->Desc[i] = ((const volatile ULONG *)(V->Va + off))[i];
+    return MW_HANG_DESC_OK;
+}
+
+/* A hung chain's state, before Reap hard-stops it. Interrupt level, inside SyncPoll (DxgkCbSynchronizeExecution),
+ * like the rest of Reap: register reads and plain stores into the ring; no allocation, no registry (the guard thread
+ * prints the ring at PASSIVE_LEVEL, MwHangLog). */
+static void HangCapture(MW_ADAPTER *A, ULONG Slot, const MW_HANG_VIEW *V)
+{
+    MK_GPU *gpu = &A->Gpu;
+    const MW_SUBMISSION *s = &A->Queue[A->QHead];
+    LONG n = A->HangCount;
+    MW_HANG *h = &A->Hangs[n & (MW_HANGS - 1)];
+    ULONG64 now = KeQueryInterruptTime();
+    ULONG js = JS_SLOT(Slot);
+    const MW_ALLOCATION *al = NULL;
+
+    h->Seq = 0;
+    KeMemoryBarrier();
+    h->Ms = (ULONG)((now - A->StartTime) / 10000);
+    h->ChainMs = (ULONG)((now - A->JobStart) / 10000);
+    h->SubMs = (ULONG)((now - A->SubStart) / 10000);
+    h->Slot = Slot;
+    h->Fence = s->FenceId;
+    h->Cmd = s->Next;                     /* 1-based: Kick has moved Next past the running chain */
+    h->Cmds = s->Count;
+    h->Submits = A->Submits;
+    h->Jc = A->RunningJc;
+    h->Head = MK_RD(gpu, js + JS_HEAD_LO) | (ULONG64)MK_RD(gpu, js + JS_HEAD_HI) << 32;
+    h->Tail = MK_RD(gpu, js + JS_TAIL_LO) | (ULONG64)MK_RD(gpu, js + JS_TAIL_HI) << 32;
+    h->Affinity = MK_RD(gpu, js + JS_AFFINITY_LO) | (ULONG64)MK_RD(gpu, js + JS_AFFINITY_HI) << 32;
+    h->JsStatus = MK_RD(gpu, js + JS_STATUS);
+    h->JsConfig = MK_RD(gpu, js + JS_CONFIG);
+    h->GpuStatus = MK_RD(gpu, GPU_STATUS);
+    h->GpuFaultStatus = MK_RD(gpu, GPU_FAULT_STATUS);
+    h->GpuFaultAddress = MK_RD(gpu, GPU_FAULT_ADDRESS_LO) | (ULONG64)MK_RD(gpu, GPU_FAULT_ADDRESS_HI) << 32;
+    /* every chain runs in AS0 (MkJobStart: JS_CONFIG address space 0) */
+    h->AsFaultStatus = MK_RD(gpu, AS0 + AS_FAULTSTATUS);
+    h->AsFaultAddress = MK_RD(gpu, AS0 + AS_FAULTADDRESS_LO) | (ULONG64)MK_RD(gpu, AS0 + AS_FAULTADDRESS_HI) << 32;
+    h->MmuRawStat = MK_RD(gpu, MMU_INT_RAWSTAT);
+    for (ULONG i = 0; i < s->Count && i < MW_MAX_COMMANDS; i++) {
+        const MW_ALLOCATION *c = s->JcAlloc[i];
+        if (c != NULL && h->Head >= c->GpuVa && h->Head - c->GpuVa < c->Size) {
+            al = c;
+            break;
+        }
+    }
+    h->AllocVa = al ? al->GpuVa : 0;
+    h->AllocPages = al ? al->Pages : 0;
+    h->Creator[0] = al ? al->Creator[0] : 0;
+    h->Creator[1] = al ? al->Creator[1] : 0;
+    RtlZeroMemory(h->Desc, sizeof(h->Desc));
+    h->DescState = HangDesc(A, h, al, V);
+    KeMemoryBarrier();
+    h->Seq = n + 1;
+    A->HangCount = n + 1;
+}
+
+/* Collect the running chain's outcome. TRUE if it finished, either way. T44: View (SyncPoll only, may be NULL) is
+ * PollDpc's CPU view of JS_HEAD's page, for the hang record. */
+static BOOLEAN Reap(MW_ADAPTER *A, BOOLEAN CheckTimeout, const MW_HANG_VIEW *View)
 {
     MK_GPU *gpu = &A->Gpu;
     ULONG slot = A->RunningSlot;
@@ -1013,6 +1175,7 @@ static BOOLEAN Reap(MW_ADAPTER *A, BOOLEAN CheckTimeout)
         failed = FALSE;
     } else if (CheckTimeout && ((KeQueryInterruptTime() - A->JobStart) / 10000 > MW_JOB_TIMEOUT_MS ||
                                 (KeQueryInterruptTime() - A->SubStart) / 10000 > MW_SUB_TIMEOUT_MS)) {
+        HangCapture(A, slot, View);       /* T44: before the hard stop changes anything */
         A->LastJsStatus = MkJobSlotStatus(gpu, slot);
         MkJobHardStop(gpu, slot);
         A->JobsTimedOut++;
@@ -1080,7 +1243,7 @@ static BOOLEAN Reap(MW_ADAPTER *A, BOOLEAN CheckTimeout)
 /* From the ISR, after MkIsr has collected the status. */
 BOOLEAN MwJobInterrupt(MW_ADAPTER *A)
 {
-    if (Reap(A, FALSE))
+    if (Reap(A, FALSE, NULL))
         Kick(A);
     if (A->NeedDpc) {
         A->NeedDpc = FALSE;
@@ -1116,11 +1279,17 @@ static BOOLEAN SyncSubmit(PVOID Context)
     return TRUE;
 }
 
+typedef struct {
+    MW_ADAPTER *A;
+    const MW_HANG_VIEW *View;             /* T44 */
+} MW_SYNC_POLL;
+
 static BOOLEAN SyncPoll(PVOID Context)
 {
-    MW_ADAPTER *a = (MW_ADAPTER *)Context;
+    const MW_SYNC_POLL *p = (const MW_SYNC_POLL *)Context;
+    MW_ADAPTER *a = p->A;
 
-    if (Reap(a, TRUE))
+    if (Reap(a, TRUE, p->View))
         Kick(a);
     if (a->NeedDpc) {
         a->NeedDpc = FALSE;
@@ -1140,6 +1309,9 @@ static BOOLEAN Synchronize(MW_ADAPTER *A, PKSYNCHRONIZE_ROUTINE Routine, PVOID C
 static VOID PollDpc(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
 {
     MW_ADAPTER *a = (MW_ADAPTER *)Context;
+    MW_HANG_VIEW view;
+    MW_SYNC_POLL poll;
+    BOOLEAN busy;
     UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(Arg1);
     UNREFERENCED_PARAMETER(Arg2);
@@ -1148,7 +1320,12 @@ static VOID PollDpc(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
         InterlockedExchange(&a->PollArmed, 0);
         return;
     }
-    if (Synchronize(a, SyncPoll, a)) {
+    /* T44: a timeout due now gets a CPU view of the hung job for Reap's record (mapped here: not allowed at DIRQL) */
+    poll.A = a;
+    poll.View = HangViewMake(a, &view) ? &view : NULL;
+    busy = Synchronize(a, SyncPoll, &poll);
+    HangViewDrop(a, &view);
+    if (busy) {
         MwArmPoll(a);
         return;
     }
@@ -1273,6 +1450,21 @@ static VOID VsyncDpc(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
 
 void MwCommandInit(MW_ADAPTER *A)
 {
+    /* T44: AddDevice (PASSIVE_LEVEL): one page of system address space for the hang forensics' view, and which PFNs
+     * are RAM (only those are ever mapped there). Either missing: hangs are recorded without the descriptor. */
+    if (A->HangMapVa == NULL) {
+        PPHYSICAL_MEMORY_RANGE r = MmGetPhysicalMemoryRanges();
+        A->RamRuns = 0;
+        for (ULONG i = 0; r != NULL && (r[i].BaseAddress.QuadPart != 0 || r[i].NumberOfBytes.QuadPart != 0) &&
+                          A->RamRuns < RTL_NUMBER_OF(A->RamRun); i++) {
+            A->RamRun[A->RamRuns].First = (ULONG64)r[i].BaseAddress.QuadPart >> PAGE_SHIFT;
+            A->RamRun[A->RamRuns].End = (ULONG64)(r[i].BaseAddress.QuadPart + r[i].NumberOfBytes.QuadPart) >> PAGE_SHIFT;
+            A->RamRuns++;
+        }
+        if (r != NULL)
+            ExFreePool(r);
+        A->HangMapVa = MmAllocateMappingAddress(PAGE_SIZE, MW_TAG);
+    }
     A->Stopping = FALSE;
     KeInitializeTimer(&A->PollTimer);
     KeInitializeDpc(&A->PollDpc, PollDpc, A);
@@ -1290,6 +1482,15 @@ void MwCommandStop(MW_ADAPTER *A)
     KeFlushQueuedDpcs();
     InterlockedExchange(&A->PollArmed, 0);
     CopyStopHelpers(A);                   /* T27 */
+}
+
+/* T44: RemoveDevice, after StopDevice (no poll DPC left, so no view is mapped) */
+void MwCommandFini(MW_ADAPTER *A)
+{
+    if (A->HangMapVa != NULL) {
+        MmFreeMappingAddress(A->HangMapVa, MW_TAG);
+        A->HangMapVa = NULL;
+    }
 }
 
 NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMITCOMMAND *Arg)
@@ -1361,6 +1562,7 @@ NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMIT
         priv->Reserved == MW_DMA_MAGIC && priv->Count <= MW_MAX_COMMANDS) {
         sub.Count = priv->Count;
         RtlCopyMemory(sub.Commands, priv->Commands, sub.Count * sizeof(MW_COMMAND));
+        RtlCopyMemory(sub.JcAlloc, priv->JcAlloc, sub.Count * sizeof(priv->JcAlloc[0]));   /* T44 */
     }
 
     sync.A = a;

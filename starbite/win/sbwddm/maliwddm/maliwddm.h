@@ -131,6 +131,9 @@ typedef struct _MW_DMA_PRIVATE {
     ULONG Reserved;
     MW_COMMAND Commands[MW_MAX_COMMANDS];
     MW_PRESENT_OP Present;
+    /* T44: the allocation (from this render's list) each chain starts in. VidMm keeps every listed allocation
+     * resident and alive until the submission's fence completes, so the hang forensics may look at them. */
+    struct _MW_ALLOCATION *JcAlloc[MW_MAX_COMMANDS];
 } MW_DMA_PRIVATE;
 
 /* A submission the hardware works through, one job chain at a time. */
@@ -141,7 +144,42 @@ typedef struct _MW_SUBMISSION {
     BOOLEAN FlipPhysValid;
     ULONG Count, Next;          /* commands, and the next one to start */
     MW_COMMAND Commands[MW_MAX_COMMANDS];
+    struct _MW_ALLOCATION *JcAlloc[MW_MAX_COMMANDS];   /* T44: see MW_DMA_PRIVATE */
 } MW_SUBMISSION;
+
+/* T44 (hang forensics): one GPU hang, i.e. a chain past MW_JOB_TIMEOUT_MS or its submission past
+ * MW_SUB_TIMEOUT_MS, captured by Reap at the device's interrupt level just before the hard stop. Diagnostics only. */
+#define MW_HANGS                8
+#define MW_HANG_DESC_DWORDS     16
+#define MW_HANG_DESC_OK         0   /* Desc[] = the 16 dwords at JS_HEAD */
+#define MW_HANG_DESC_NOVIEW     1   /* no CPU view of JS_HEAD's page was prepared (see MW_HANG_VIEW) */
+#define MW_HANG_DESC_UNKNOWN    2   /* JS_HEAD is in no allocation a chain of this submission starts in */
+#define MW_HANG_DESC_MISMATCH   3   /* the view is of another page, or the GPU's page is not that allocation's */
+#define MW_HANG_DESC_ALIGN      4   /* JS_HEAD not 64-byte aligned (a job header always is) */
+typedef struct _MW_HANG {
+    volatile LONG Seq;          /* record number + 1, stored last; 0 while it is being written */
+    ULONG Ms, ChainMs, SubMs;   /* when (ms since start), and how long the chain and the submission had run */
+    ULONG Slot, Fence, Cmd, Cmds, Submits;
+    ULONG64 Jc, Head, Tail, Affinity;
+    ULONG JsStatus, JsConfig, GpuStatus, GpuFaultStatus;
+    ULONG64 GpuFaultAddress;
+    ULONG AsFaultStatus, MmuRawStat;
+    ULONG64 AsFaultAddress;
+    ULONG DescState, AllocPages;
+    ULONG64 AllocVa;            /* the known allocation JS_HEAD is in (0: none) */
+    ULONG Creator[2];
+    ULONG Desc[MW_HANG_DESC_DWORDS];
+} MW_HANG;
+
+/* T44: a CPU view of JS_HEAD's page, made by PollDpc at DISPATCH_LEVEL (mapping is not allowed at DIRQL) when the
+ * running chain is about to time out, and handed to SyncPoll. Reap reads through it only after checking, under the
+ * interrupt lock, that the page is the one the GPU maps there and belongs to an allocation of the hung submission. */
+typedef struct _MW_HANG_VIEW {
+    const volatile UCHAR *Va;   /* the page's first byte; NULL: no view */
+    ULONG64 Page;               /* its GPU address */
+    PFN_NUMBER Pfn;
+    ULONG64 JobStart;           /* the chain it was made for (MW_ADAPTER.JobStart) */
+} MW_HANG_VIEW;
 
 struct _MW_ADAPTER {
     PDEVICE_OBJECT Pdo;
@@ -317,12 +355,24 @@ struct _MW_ADAPTER {
     /* T41: GPU hang recovery */
     ULONG64 SubStart;                       /* when the head submission's first chain started */
     ULONG TdrEngineResets, TdrAdapterResets, TdrQueriedHung;
+    /* T44: hang forensics. Hangs is written by Reap (interrupt level) and read racily by the guard thread, which
+     * keeps a record only if its Seq did not change while it copied it. Live_HangLog (REG_SZ), Live_HangCount. */
+    MW_HANG Hangs[MW_HANGS];
+    volatile LONG HangCount;
+    LONG HangLogged;
+    PVOID HangMapVa;                        /* one page of system address space reserved at AddDevice; NULL: no dumps */
+    struct { MDL Mdl; PFN_NUMBER Pfn[1]; } HangMdl;   /* the one-page MDL mapped there (PollDpc only) */
+    volatile LONG HangViewBusy;
+    ULONG HangViews, HangViewFails;
+    ULONG RamRuns;                          /* the PFN ranges that are RAM (MmGetPhysicalMemoryRanges at AddDevice) */
+    struct { ULONG64 First, End; } RamRun[32];
 };
 
 /* ---- trace: Seen_<ddi>, Fail_<ddi> in the device's registry key ---- */
 void MwLog(MW_ADAPTER *A, PCWSTR Name, ULONG Value);
 void MwLogSz(MW_ADAPTER *A, PCWSTR Name, const char *Text);   /* T39 */
 void MwFaultLog(MW_ADAPTER *A);                                /* T39: Live_FaultLog when new faults came */
+void MwHangLog(MW_ADAPTER *A);                                 /* T44: Live_HangLog when new hangs came */
 void MwLogFlush(MW_ADAPTER *A);
 void MwCopyStart(MW_ADAPTER *A);  /* T27 */
 void MwScanFallback(MW_ADAPTER *A, MW_ALLOCATION **Owners, ULONG N);
@@ -387,6 +437,7 @@ DXGKDDI_GETSCANLINE MwGetScanLine;
 BOOLEAN MwJobInterrupt(MW_ADAPTER *A);    /* from the ISR, at DIRQL */
 void MwCommandInit(MW_ADAPTER *A);
 void MwCommandStop(MW_ADAPTER *A);
+void MwCommandFini(MW_ADAPTER *A);        /* T44: RemoveDevice (PASSIVE_LEVEL) */
 void MwRefreshScanout(MW_ADAPTER *A);
 void MwShow(MW_ADAPTER *A, struct _MW_ALLOCATION *P, BOOLEAN NewContent);
 ULONG MwFbSamples(MW_ADAPTER *A);

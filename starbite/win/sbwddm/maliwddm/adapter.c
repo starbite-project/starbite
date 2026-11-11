@@ -62,7 +62,7 @@ void MwLogSz(MW_ADAPTER *A, PCWSTR Name, const char *Text)
     HANDLE key, sub;
     UNICODE_STRING name, subName = RTL_CONSTANT_STRING(L"sbwddm");
     OBJECT_ATTRIBUTES oa;
-    static WCHAR w[2048];                 /* the guard thread only */
+    static WCHAR w[6144];                 /* the guard thread only (T44: 6144 for Live_HangLog) */
     ULONG n = 0;
 
     if (A == NULL || A->Pdo == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL)
@@ -113,6 +113,75 @@ void MwFaultLog(MW_ADAPTER *A)
     }
     MwLogSz(A, L"Live_FaultLog", t);
     MwLog(A, L"Live_FaultCount", (ULONG)n);
+}
+
+/* T44: Mesa's genxml v6.xml "Job Type" (Job Header word 4, bits [7:1]) */
+static const char *JobTypeName(ULONG T)
+{
+    static const char *const n[] = { "not-started", "null", "write-value", "cache-flush", "compute", "vertex",
+                                     "geometry", "tiler", "fused", "fragment", "indexed-vertex" };
+    return T < RTL_NUMBER_OF(n) ? n[T] : "type?";
+}
+
+/* T44: the newest MW_HANGS job timeouts (MW_HANG, recorded by Reap before the hard stop), one line each, when there
+ * are new ones (guard thread, PASSIVE_LEVEL, once a second). A record Reap rewrote while it was copied is skipped. */
+void MwHangLog(MW_ADAPTER *A)
+{
+    static char t[6144];
+    static const char *const why[] = { "", "no CPU view of JS_HEAD prepared", "JS_HEAD in no chain-start allocation",
+                                       "view/page mismatch", "JS_HEAD unaligned" };
+    LONG n = A->HangCount, first = n > MW_HANGS ? n - MW_HANGS : 0;
+    size_t used = 0;
+    MW_HANG h;
+
+    if (n == A->HangLogged)
+        return;
+    A->HangLogged = n;
+    t[0] = 0;
+    for (LONG k = first; k < n && used + 640 < sizeof(t); k++) {
+        const MW_HANG *r = &A->Hangs[k & (MW_HANGS - 1)];
+        LONG seq = r->Seq;
+        char c[9] = { 0 };
+        KeMemoryBarrier();
+        RtlCopyMemory(&h, (const void *)r, sizeof(h));
+        KeMemoryBarrier();
+        if (seq != k + 1 || r->Seq != seq) {
+            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, "#%ld overwritten while read\n", k + 1);
+            used = strlen(t);
+            continue;
+        }
+        for (int j = 0; j < 8; j++) {
+            char ch = ((const char *)h.Creator)[j];
+            c[j] = ch >= 32 && ch < 127 ? ch : (ch ? '?' : 0);
+        }
+        (void)RtlStringCbPrintfA(t + used, sizeof(t) - used,
+            "#%ld %lu.%03lus slot %lu fence %lu chain %lu/%lu ran %lu ms (sub %lu ms) jc 0x%llx head 0x%llx tail 0x%llx "
+            "js 0x%02lx cfg 0x%08lx aff 0x%llx gpu 0x%08lx gfault 0x%08lx@0x%llx as0 0x%08lx@0x%llx mmuraw 0x%lx ",
+            k + 1, h.Ms / 1000, h.Ms % 1000, h.Slot, h.Fence, h.Cmd, h.Cmds, h.ChainMs, h.SubMs, h.Jc, h.Head, h.Tail,
+            h.JsStatus, h.JsConfig, h.Affinity, h.GpuStatus, h.GpuFaultStatus, h.GpuFaultAddress, h.AsFaultStatus,
+            h.AsFaultAddress, h.MmuRawStat);
+        used = strlen(t);
+        if (h.AllocVa != 0)
+            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, "in 0x%llx+%lu pages of %s ", h.AllocVa, h.AllocPages,
+                                     c[0] ? c : "?");
+        used = strlen(t);
+        if (h.DescState == MW_HANG_DESC_OK) {
+            const ULONG *d = h.Desc;
+            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used,
+                "job %s idx %lu dep %lu/%lu next 0x%llx exc 0x%lx: %08lx %08lx %08lx %08lx %08lx %08lx %08lx %08lx "
+                "%08lx %08lx %08lx %08lx %08lx %08lx %08lx %08lx\n",
+                JobTypeName((d[4] >> 1) & 0x7F), d[4] >> 16, d[5] & 0xFFFF, d[5] >> 16, d[6] | (ULONG64)d[7] << 32, d[0],
+                d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]);
+        } else {
+            (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, "no descriptor: %s\n",
+                                     h.DescState < RTL_NUMBER_OF(why) ? why[h.DescState] : "?");
+        }
+        used = strlen(t);
+    }
+    MwLogSz(A, L"Live_HangLog", t);
+    MwLog(A, L"Live_HangCount", (ULONG)n);
+    MwLog(A, L"Live_HangViews", A->HangViews);
+    MwLog(A, L"Live_HangViewFails", A->HangViewFails);
 }
 
 /* S9 port (T13c): delete the previous boot's trace subkey, so nothing stale is read as this boot's (T13b's
@@ -338,6 +407,7 @@ static NTSTATUS APIENTRY MwStopDevice(IN_CONST_PVOID Context)
 
 static NTSTATUS APIENTRY MwRemoveDevice(IN_CONST_PVOID Context)
 {
+    MwCommandFini((MW_ADAPTER *)Context);  /* T44 */
     ExFreePoolWithTag(Context, MW_TAG);
     return STATUS_SUCCESS;
 }

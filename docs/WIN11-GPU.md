@@ -1905,6 +1905,33 @@ Every app failure must be a removed device that the app or DWM recovers from.
 - **Geometry Dash:** see docs/WIN11-GPU-CAPS.md §2. In short, it is an x64 OpenGL app (cocos2d-x via glew) and
   Windows has no OpenGL driver for our GPU, so it gets GDI's GL 1.1 and crashes in libcocos2d.dll.
 
+### 6.52 T44: GPU-hang forensics in the KMD (sbwddm 274f0837)
+
+- **The gap:** T41's 45 timeouts left only `js 0x08 ... no MMU fault` in `Live_FaultLog`. That names neither the job
+  type nor the client.
+- **At each timeout** (`Reap(CheckTimeout)`, DIRQL under `SyncPoll`, just before the hard stop) the KMD records:
+  - the slot, `JS_HEAD`/`JS_TAIL`/`JS_STATUS`/`JS_CONFIG`/`JS_AFFINITY`;
+  - `GPU_FAULTSTATUS`/`GPU_FAULT_ADDRESS` and AS0's fault registers (offsets from Linux `panfrost_regs.h`,
+    `common/maligpu.h`);
+  - the first 16 dwords of the job descriptor at `JS_HEAD`.
+- **How the descriptor is read safely:**
+  - memory cannot be mapped at DIRQL, so when a timeout is due the poll DPC (DISPATCH) maps the page the GPU's own
+    page table has at `JS_HEAD` into one page of system address space reserved at AddDevice;
+  - this uses `MmMapLockedPagesWithReservedMapping` and a one-page MDL, write-combined, and only for RAM PFNs
+    (`MmGetPhysicalMemoryRanges`);
+  - the read happens only if `JS_HEAD` is 64-byte aligned and inside an allocation that one of the hung submission's
+    chains starts in (each submission now remembers those). VidMm keeps that allocation alive until we report the
+    fence;
+  - the page is unmapped right after.
+- **The records:** an 8-entry ring next to the Faults ring. The guard thread writes it at PASSIVE as `Live_HangLog`,
+  plus `Live_HangCount`, `Live_HangViews` and `Live_HangViewFails`, with a sequence number so it skips half-written
+  records.
+  - Each line has the job type (word 4 bits [7:1]) and the creator process of the allocation.
+- **Unchanged:** the timeouts (750/1500 ms) and the recovery semantics.
+- **Cost:** the per-submission private data grows by 256 bytes.
+- **The plan:** run T44 (with the OpenGL tests, WIN11-GPU-CAPS.md §6). If it passes, install it so the user's own
+  sessions record hangs too.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
