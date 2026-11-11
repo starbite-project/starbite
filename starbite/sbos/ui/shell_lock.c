@@ -1352,7 +1352,8 @@ __attribute__((unused)) static void d_group(dc *d, float y, int n, int sub) { d_
 
 static const char *const KD[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#" };
 static const char *const KL[12] = { "", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ", "", "+", "" };
-static struct { int tab; char num[16]; int thread; } AS;        /* the phone's tab (0 fav .. 3 pad), the dialled number, the open thread */
+static struct { int tab; char num[16]; int thread, sub; } AS;   /* the phone's tab (0 fav .. 3 pad), the dialled number, the open
+                                                                 * thread; sub: Settings' Display & Brightness page (P3d) */
 static char cell_hint[48] = "No SIM \xc2\xb7 emergency calls only";
 
 static void phone_tabs(dc *d)
@@ -1814,6 +1815,22 @@ static void page_calendar(dc *d)
     d_text(d, TK_IT400, 15, 20, bl(TK_IT400, 15, y + 46), "No events", 0, 0, W(.45f), 0);
 }
 
+/* P3d: Settings > Display & Brightness: iOS's brightness bar (a tap sets the panel's level 1..4) */
+static void page_display(dc *d)
+{
+    d_icon(d, "back", 18, 53, 1);
+    d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Settings", 0, 0, ACCENT(), 0);
+    d_text(d, TK_IT800, 30, 20, bl(TK_IT800, 30, 96), "Display & Brightness", -.6f, 0, INK, 0);
+    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 162), "BRIGHTNESS", .52f, 0, W(.55f), 0);
+    d_rrect(d, 16, 184, 358, 64, 16, tk_hex(0x151c33, 1));
+    int lv = cc_bright ? cc_bright : 3;
+    d_rrect(d, 60, 208, 270, 16, 8, W(.18f));
+    d_rrect(d, 60, 208, 270.0f * lv / 4, 16, 8, W(.95f));
+    d_icon(d, "cc-sun", 26, 202, .6f);
+    d_icon(d, "cc-sun", 340, 200, 1);
+    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 262), "Four steps, as the Control Centre's slider.", 0, 0, W(.45f), 0);
+}
+
 static tk_layer apkey, apnum;
 static void build_apnum(void)
 {
@@ -1869,7 +1886,7 @@ static void build_app_page(int a)
     const char *k = APPS[a].k;
     int own = !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
               !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
-              !tk_strcmp(k, "calendar");
+              !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub);
     if (own) {
         for (int i = 0; i < NST; i++) {
             dc d = strip_dc(i, "app-page");
@@ -1882,6 +1899,7 @@ static void build_app_page(int a)
             else if (!tk_strcmp(k, "calc")) page_calc(&d);
             else if (!tk_strcmp(k, "light")) page_light(&d);
             else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
+            else if (!tk_strcmp(k, "settings")) page_display(&d);
             else page_camera(&d);
             tk_layer_prepare(&appst[i]);
         }
@@ -2014,6 +2032,7 @@ static void app_open(int a)
     AS.tab = 3;
     AS.num[0] = 0;
     AS.thread = -1;
+    AS.sub = 0;
     apkey.hidden = 1;
     build_app_page(a);
     AP.icon = icon_rect(a);
@@ -2325,7 +2344,15 @@ static void app_tap(float x, float y)
             lock_ver++;
             build_app_page(AP.a);
         }
+    } else if (is_app("settings") && AS.sub) {
+        if (x < 120 && y >= 40 && y < 86) { AS.sub = 0; build_app_page(AP.a); return; }
+        if (y >= 184 && y < 248 && x >= 40 && x < 350) {
+            int lv = 1 + (int)tk_clampf((x - 60) / 270 * 4, 0, 3.999f);
+            if (lv != cc_bright) { cc_bright = lv; sh_brightness(lv); CCS.lvl[0] = (lv - .5f) / 4; if (CCS.built) cc_levels(); }
+            build_app_page(AP.a);
+        }
     } else if (is_app("settings")) {
+        if (x >= 16 && x < 374 && y >= 293 && y < 340) { AS.sub = 1; build_app_page(AP.a); return; }
         if (x >= 16 && x < 374 && y >= 182 && y < 229) {
             if (cell_running()) { sh_modem(0); toast("Modem stopped"); }
             else if (sh_modem(1) < 0) toast("The modem can't start now");
