@@ -90,7 +90,7 @@ static void d_rrect(dc *d, float x, float y, float w, float h, float r, tk_col c
     tk_paint p = tk_solid(c);
     tk_fill_rrect(d->b, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), &p, 1);
 }
-static void d_ring(dc *d, float cx, float cy, float r, float sw, float frac, tk_col c, int caps)
+__attribute__((unused)) static void d_ring(dc *d, float cx, float cy, float r, float sw, float frac, tk_col c, int caps)
 {
     /* only the ring's box */
     int bx = (int)tk_floorf(PT(cx - r - sw) - d->ox) - 2, by = (int)tk_floorf(PT(cy - r - sw) - d->oy) - 2;
@@ -215,16 +215,40 @@ static void status_bar(dc *d, const char *left)
 }
 
 /* ---- the lock's static layer: status bar, date, clock, widgets ------------------------------------------------ */
+/* P3j (audit 2): iOS's circular gauge: an open 270 degree arc (7:30 round to 4:30), the value centred on its
+ * digits, the label small in the gap at the bottom (a caption inside the ring overprinted it) */
+static void gauge_arc(dc *d, float cx, float cy, float r, float sw, float sweep, tk_col c)
+{
+    if (sweep <= 0) return;
+    int bx = (int)tk_floorf(PT(cx - r - sw) - d->ox) - 2, by = (int)tk_floorf(PT(cy - r - sw) - d->oy) - 2;
+    int n = (int)PT(2 * (r + sw)) + 5;
+    tk_fm m;
+    if (!tk_fm_new(&m, n, n)) return;
+    tk_fm_arc(&m, d->ox + bx, d->oy + by, PT(cx), PT(cy), PT(r), PT(sw), 3.92699082f, sweep, 1);
+    tk_paint pp = tk_solid(c);
+    tk_draw_fm(d->b, &m, bx, by, &pp, 1);
+    tk_fm_free(&m);
+}
 static void ring_widget(dc *d, float x, float p, tk_col col, const char *num, const char *lbl)
 {
     d_glass(d, x, 220, 72, 72, 36, 1, 1);
-    d_ring(d, x + 36, 256, 31, 4.5f, 1, W(.16f), 0);
-    d_ring(d, x + 36, 256, 31, 4.5f, p, col, 1);
-    float w = tw(TK_IT700, 17, num, 0, TK_TNUM);
-    d_text(d, TK_IT700, 17, x + 36 - w / 2, 220 + 22 + 16, num, 0, TK_TNUM, INK, 0);
-    /* P3i: the label inside the ring's chord at its line (9.5 pt with .38 spacing ran into the ring) */
-    w = tw(TK_IT700, 8, lbl, .2f, 0);
-    d_text(d, TK_IT700, 8, x + 36 - w / 2, 220 + 48 + 8, lbl, .2f, 0, W(.72f), 0);
+    float cx = x + 36, cy = 256;
+    gauge_arc(d, cx, cy, 29, 4.5f, 4.71238898f, W(.16f));
+    gauge_arc(d, cx, cy, 29, 4.5f, 4.71238898f * tk_clampf(p, 0, 1), col);
+    /* the value: 18 pt / 600 on the ring's centre; a trailing degree sign hangs right of the centred digits */
+    char dg[12];
+    int k = 0;
+    while (num[k] && (unsigned char)num[k] < 0x80 && k < 11) { dg[k] = num[k]; k++; }
+    dg[k] = 0;
+    float w = tw(TK_IT600, 18, dg, 0, TK_TNUM);
+    d_text(d, TK_IT600, 18, cx - w / 2, cy + 6.5f, num, 0, TK_TNUM, INK, 0);
+    /* the label, mixed case, 10 pt / 600 in the gap */
+    char lb[16];
+    int n = 0;
+    for (; lbl[n] && n < 15; n++) lb[n] = n && lbl[n] >= 'A' && lbl[n] <= 'Z' ? (char)(lbl[n] + 32) : lbl[n];
+    lb[n] = 0;
+    w = tw(TK_IT600, 10, lb, 0, 0);
+    d_text(d, TK_IT600, 10, cx - w / 2, cy + 29 + 3.5f, lb, 0, 0, W(.75f), 0);
 }
 /* the live values (sh_status): the host's are the concept's */
 static const char *const WD[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
@@ -274,11 +298,17 @@ static void build_lclock(void)
     d_text(&d, TK_IT600, 19, (390 - w) / 2, 78 + 18, date, 0, 0, W(.9f), 1);
     char hm[8];
     fmt_hm(hm);
-    float cw = tw(TK_IT700, 106, hm, -4, TK_TNUM);
+    /* P3j (audit 3): hours, colon and minutes as three runs: proportional figures at -1 pt (the -4 pt tabular
+     * run pushed the colon onto the next digit and set the clock 2.4 pt right), the colon raised to the digits'
+     * middle (Inter's sits at x-height) with even room each side, the whole centred */
+    char hh[3] = { hm[0], hm[1], 0 }, mm[3] = { hm[3], hm[4], 0 };
+    float wh = tw(TK_IT700, 106, hh, -1, 0), wc = tw(TK_IT700, 106, ":", 0, 0), wm = tw(TK_IT700, 106, mm, -1, 0), gap = 2;
+    float x0 = (390 - (wh + gap + wc + gap + wm)) / 2, base = base_of(TK_IT700, 106, 96, 108.12f);
     tk_stop s[2] = { { 0, tk_hex(0xffffff, 1) }, { 1, tk_hex(0xdfe9ff, 1) } };
     tk_paint p = tk_linear(180, -d.ox, PT(96) - d.oy, PT(390), PT(108.12f), 2, s);
-    tk_text(d.b, TK_IT700, PT(106), PT((390 - cw) / 2) - d.ox, PT(base_of(TK_IT700, 106, 96, 108.12f)) - d.oy, hm,
-            PT(-4), TK_TNUM, &p, 0);
+    tk_text(d.b, TK_IT700, PT(106), PT(x0) - d.ox, PT(base) - d.oy, hh, PT(-1), 0, &p, 0);
+    tk_text(d.b, TK_IT700, PT(106), PT(x0 + wh + gap) - d.ox, PT(base - 9.6f) - d.oy, ":", 0, 0, &p, 0);
+    tk_text(d.b, TK_IT700, PT(106), PT(x0 + wh + gap + wc + gap) - d.ox, PT(base) - d.oy, mm, PT(-1), 0, &p, 0);
 }
 static void build_lwidgets(void)
 {
@@ -426,8 +456,8 @@ static void head_content(dc *d, int g, float top)
     char tilename[40] = "t46-";
     tk_memcpy(tilename + 4, gr->key, tk_strlen(gr->key) + 1);
     d_icon(d, tilename, 25, top + 11, 1);
-    float b = base_of(TK_IT800, 21, top + 13.45f, 23.1f);
-    d_text(d, TK_IT800, 21, 83, b, gr->name, -.5f, 0, INK, 0);
+    float b = base_of(TK_IT700, 20, top + 13.45f, 23.1f);
+    d_text(d, TK_IT700, 20, 83, b, gr->name, 0, 0, INK, 0);       /* P3j: Bold, untracked (ExtraBold -0.5 was heavy) */
     char names[160];
     int n = 0;
     for (int i = 0; i < gr->n; i++) {
@@ -614,7 +644,7 @@ static void build_ecards(void)
         d_glass(&d, 14, top, 362, 68, 26, 0, 1);
         d_icon(&d, EC[i].icon, 25, top + 11, 1);
         /* b: 19 / 800 / -.5, line-height 1.1 (half-leading floored); .sub 13.5, .82 */
-        d_text(&d, TK_IT800, 19, 83, top + 12.55f + tk_floorf(tk_ascent(TK_IT800, PT(19)) / TK_PT + .5f), EC[i].t, -.5f, 0, INK, 0);
+        d_text(&d, TK_IT700, 19, 83, top + 12.55f + tk_floorf(tk_ascent(TK_IT700, PT(19)) / TK_PT + .5f), EC[i].t, 0, 0, INK, 0);
         /* P3i: the chevron where the systems' is; a long line gives way with an ellipsis (it ran past the card) */
         char sub[96];
         ellipsize(sub, sizeof sub, TK_IT400, 13.5f, EC[i].s, 344 - 12 - 83);
@@ -766,7 +796,7 @@ static void build_home_w(void)
     char big[8];
     int bn0 = put_dec(big, ST.pct);
     big[bn0] = '%'; big[bn0 + 1] = 0;
-    d_text(&d, TK_IT800, 38, 38, base_of(TK_IT800, 38, 74 + 14 + 4, 0), big, -1.2f, TK_TNUM, INK, 0);
+    d_text(&d, TK_IT700, 38, 38, base_of(TK_IT700, 38, 74 + 14 + 4, 0), big, -.6f, TK_TNUM, INK, 0);
     {
         /* P2y: the live charge, temperature and charging (the concept's "Phone" and "Lasts" have no source) */
         static const char *L[2] = { "Temperature", "Charging" };
@@ -937,7 +967,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         tk_memcpy(tn + 4, s->k, tk_strlen(s->k) + 1);
         d_icon(&d, tn, 34, 216, 1);
         d_text(&d, TK_IT600, 13, 114, 225.16f + 13, gr->name, 0, 0, W(.62f), 0);
-        d_text(&d, TK_IT800, 27, 114, base_of(TK_IT800, 27, 243.16f, 29.7f), s->name, -.6f, 0, INK, 0);
+        d_text(&d, TK_IT700, 27, 114, base_of(TK_IT700, 27, 243.16f, 29.7f), s->name, 0, 0, INK, 0);
         int last = !tk_strcmp(s->k, LAST);
         const char *dt[3] = { "Version", last ? "Last used" : "When it shuts down", "When it shuts down" };
         const char *dd[3] = { s->meta, last ? "Today" : "Back to Starbite", "Back to Starbite" };
@@ -1101,9 +1131,10 @@ static void build_cc_grid(void)
     static const char *CI[4] = { "cc-air", "cc-cell", "cc-wifi", "cc-bt" };
     static const float CW[4][2] = { { 20, 20 }, { 20, 18 }, { 22, 16 }, { 14, 20 } };
     int ons[4] = { CCS.air, cell_running(), CCS.wifi, CCS.bt };
+    static const uint32_t ONC[4] = { 0xff9f0a, 0x30d158, 0x0a84ff, 0x0a84ff };
     for (int i = 0; i < 4; i++) {
         float cx = i & 1 ? 112.48f : 44.16f, cy = i >> 1 ? 177 : 111;
-        d_rrect(&d, cx, cy, 52, 52, 26, ons[i] ? tk_hex(0x6fb3ff, 1) : W(.18f));
+        d_rrect(&d, cx, cy, 52, 52, 26, ons[i] ? tk_hex(ONC[i], 1) : W(.18f));   /* P3j: iOS's function colours */
         d_icon(&d, CI[i], cx + (52 - CW[i][0]) / 2, cy + (52 - CW[i][1]) / 2, 1);
     }
     /* the sliders' glass (their level and glyph are layers above) */
@@ -1112,35 +1143,35 @@ static void build_cc_grid(void)
     /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Mirror, Camera */
     /* P3i: the torch's tile baked off; its lit look is a small layer over it, so the tap shows it at once (the
      * whole grid's rebuild took ~300 ms at the tap) */
-    cc_tile(&d, CCX[0], 264, 70, 70, 22, 0); cc_glyph(&d, "cc-light", CCX[0], 264, 16, 24);
+    cc_tile(&d, CCX[0], 264, 70, 70, 35, 0); cc_glyph(&d, "cc-light", CCX[0], 264, 16, 24);
     {
         relayer(&cclit);
         dc e = mk(&cclit, "cc-lit", CCX[0], 264, 70, 70, 1, 0);
-        d_rrect(&e, CCX[0], 264, 70, 70, 22, W(1));
+        d_rrect(&e, CCX[0], 264, 70, 70, 35, W(1));
         cc_glyph(&e, "cc-light-on", CCX[0], 264, 16, 24);
         tk_layer_prepare(&cclit);
         cclit.hidden = !Q[0].lit;
     }
-    cc_tile(&d, CCX[1], 264, 70, 70, 22, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], 264, 22, 22);
-    cc_tile(&d, CCX[2], 264, 70, 70, 22, 0);
-    if (EMG) d_rrect(&d, CCX[2], 264, 70, 70, 22, tk_hex(0xff5a4e, 1));
+    cc_tile(&d, CCX[1], 264, 70, 70, 35, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], 264, 22, 22);
+    cc_tile(&d, CCX[2], 264, 70, 70, 35, 0);
+    if (EMG) d_rrect(&d, CCX[2], 264, 70, 70, 35, tk_hex(0xff5a4e, 1));
     cc_glyph(&d, "cc-flame", CCX[2], 264, 20, 24);
-    cc_tile(&d, CCX[3], 264, 70, 70, 22, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], 264, 24, 14);
-    cc_tile(&d, CCX[0], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-timer", CCX[0], 350, 22, 22);
-    cc_tile(&d, CCX[1], 350, 70, 70, 22, 0);
+    cc_tile(&d, CCX[3], 264, 70, 70, 35, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], 264, 24, 14);
+    cc_tile(&d, CCX[0], 354.66f, 70, 70, 35, 0); cc_glyph(&d, "cc-timer", CCX[0], 354.66f, 22, 22);
+    cc_tile(&d, CCX[1], 354.66f, 70, 70, 35, 0);
     {
         /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place): a calculator */
-        float gx = CCX[1] + 26, gy = 350 + 22;
+        float gx = CCX[1] + 26, gy = 354.66f + 22;
         d_rrect(&d, gx, gy, 18, 26, 4, W(1));
         d_rrect(&d, gx + 3, gy + 3, 12, 6, 1.5f, tk_hex(0x2a3150, 1));
         for (int r = 0; r < 3; r++)
             for (int c = 0; c < 3; c++) d_rrect(&d, gx + 3 + 4.5f * c, gy + 12 + 4.5f * r, 3, 3, 1.5f, tk_hex(0x2a3150, 1));
     }
-    cc_tile(&d, CCX[2], 350, 70, 70, 22, 0); cc_glyph(&d, "cc-wifi2", CCX[2], 350, 22, 22);
-    cc_tile(&d, CCX[3], 350, 70, 70, 22, 0);
+    cc_tile(&d, CCX[2], 354.66f, 70, 70, 35, 0); cc_glyph(&d, "cc-wifi2", CCX[2], 354.66f, 22, 22);
+    cc_tile(&d, CCX[3], 354.66f, 70, 70, 35, 0);
     {
         /* and a camera */
-        float gx = CCX[3] + 23, gy = 350 + 25;
+        float gx = CCX[3] + 23, gy = 354.66f + 25;
         d_rrect(&d, gx + 8, gy - 2.5f, 8, 4, 1.5f, W(1));
         d_rrect(&d, gx, gy, 24, 18, 4.5f, W(1));
         d_rrect(&d, gx + 6.5f, gy + 3.5f, 11, 11, 5.5f, tk_hex(0x2a3150, 1));
@@ -1241,7 +1272,7 @@ static int cc_tap(float x, float y)
         else if (c == 1) { toast("The screen doesn't rotate yet"); return 1; }
         else if (c == 3) { toast("Power Saving isn't in this version yet"); return 1; }
         else return 1;                       /* Emergency: a hold (G_CCEM) */
-    } else if (y >= 350 && y < 420 && x >= 24 && x < 366) {
+    } else if (y >= 354.66f && y < 424.66f && x >= 24 && x < 366) {
         toast("Not in this version yet");    /* Timer, Calculator, Mirror, Camera: the apps come later */
         return 1;
     } else
@@ -1422,7 +1453,7 @@ static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int da
     tk_fill_rrect(d->b, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), &p, 1);
     tk_glass_bake(d->b, 0, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), dark, 1);
 }
-static void d_h1(dc *d, const char *t) { d_text(d, TK_IT800, 34, 20, bl(TK_IT800, 34, 64), t, -.8f, 0, INK, 0); }
+static void d_h1(dc *d, const char *t) { d_text(d, TK_IT700, 34, 20, bl(TK_IT700, 34, 64), t, 0, 0, INK, 0); }   /* P3j: iOS's Large Title, Bold */
 static tk_col ACCENT(void) { return tk_hex(0x6fb3ff, 1); }
 /* a .row with an avatar: the name, an optional second line, the right-hand text, an optional unread dot */
 __attribute__((unused)) static float d_prow(dc *d, float y, const char *name, int nfw, tk_col nc, const char *sub, const char *right, int dot, int last)
@@ -1758,16 +1789,35 @@ static void page_calc(dc *d)
 }
 static int calc_fmt(char *b, double v)
 {
-    if (v != v || v > 1e15 || v < -1e15) { tk_memcpy(b, "Error", 6); return 5; }
+    if (v != v || v > 1e100 || v < -1e100) { tk_memcpy(b, "Error", 6); return 5; }
     int n = 0;
     if (v < 0) { b[n++] = '-'; v = -v; }
+    if (v >= 1e9 || (v > 0 && v < 1e-8)) {
+        /* P3j (audit 10): iOS's scientific form past nine digits ("9.99999e14"), never a clipped number */
+        int e = 0;
+        while (v >= 10) { v /= 10; e++; }
+        while (v < 1) { v *= 10; e--; }
+        long long M = (long long)(v * 100000 + .5);          /* six significant digits */
+        if (M >= 1000000) { M /= 10; e++; }
+        char t[8];
+        for (int i = 5; i >= 0; i--) { t[i] = (char)('0' + M % 10); M /= 10; }
+        int last = 5;
+        while (last > 0 && t[last] == '0') last--;
+        b[n++] = t[0];
+        if (last > 0) { b[n++] = '.'; for (int i = 1; i <= last; i++) b[n++] = t[i]; }
+        b[n++] = 'e';
+        n += put_dec(b + n, e);
+        b[n] = 0;
+        return n;
+    }
     double ip = (double)(long long)v, fp = v - ip;
     long long I = (long long)ip;
     char t[24];
     int k = 0;
     do { t[k++] = (char)('0' + I % 10); I /= 10; } while (I);
     int intd = k;
-    while (k) b[n++] = t[--k];
+    /* grouped by thousands, as iOS ("1,234,567") */
+    while (k) { b[n++] = t[--k]; if (k && k % 3 == 0) b[n++] = ','; }
     int room = 9 - intd;                    /* nine digits in all, as iOS's portrait display */
     if (room > 0) {
         long long f = 1;
@@ -1802,8 +1852,9 @@ static void build_calc(void)
             b[n] = 0;
         }
     }
-    float size = tk_strlen(b) > 7 ? 64 : 84;
-    float w = tw(TK_IT400, size, b, 0, TK_TNUM);
+    /* P3j (audit 10): the display shrinks to fit (it was 84 or 64 pt and clipped past nine characters) */
+    float size = 86, w = tw(TK_IT400, size, b, 0, TK_TNUM);
+    while (w > 340 && size > 36) { size -= 2; w = tw(TK_IT400, size, b, 0, TK_TNUM); }
     dc d = mk(&apcalc, "calc-display", 20, 186, 350, 118, 0, 0);
     d_text(&d, TK_IT400, size, 362 - w, bl(TK_IT400, size, 300 - size * 1.21f), b, 0, TK_TNUM, INK, 0);
     apcalc.hidden = 0;
@@ -1880,10 +1931,10 @@ void sh_year(int y) { if (y > 2000 && y < 2200) cal_year = y; }
 static void page_calendar(dc *d)
 {
     const char *mo = MO[(ST.mon + 11) % 12];
-    d_text(d, TK_IT800, 34, 20, bl(TK_IT800, 34, 64), mo, -.8f, 0, INK, 0);
+    d_text(d, TK_IT700, 34, 20, bl(TK_IT700, 34, 64), mo, 0, 0, INK, 0);
     char yb[8];
     put_dec(yb, cal_year);
-    d_text(d, TK_IT600, 17, 20 + tw(TK_IT800, 34, mo, -.8f, 0) + 10, bl(TK_IT800, 34, 64) - 0, yb, 0, 0, tk_hex(0xff453a, 1), 0);
+    d_text(d, TK_IT600, 17, 20 + tw(TK_IT700, 34, mo, 0, 0) + 10, bl(TK_IT700, 34, 64) - 0, yb, 0, 0, tk_hex(0xff453a, 1), 0);
     static const char *const H[7] = { "M", "T", "W", "T", "F", "S", "S" };
     for (int c = 0; c < 7; c++) {
         float w = tw(TK_IT600, 13, H[c], 0, 0);
@@ -1922,7 +1973,7 @@ static void page_display(dc *d)
 {
     d_icon(d, "back", 18, 53, 1);
     d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Settings", 0, 0, ACCENT(), 0);
-    d_text(d, TK_IT800, 30, 20, bl(TK_IT800, 30, 96), "Display & Brightness", -.6f, 0, INK, 0);
+    d_text(d, TK_IT700, 30, 20, bl(TK_IT700, 30, 96), "Display & Brightness", 0, 0, INK, 0);
     d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 162), "BRIGHTNESS", .52f, 0, W(.55f), 0);
     d_rrect(d, 16, 184, 358, 64, 16, tk_hex(0x151c33, 1));
     int lv = cc_bright ? cc_bright : 3;
@@ -2180,12 +2231,23 @@ static void search_tap(float x, float y)
     if (relayout) build_app_page(AP.a); else build_search();
 }
 
-static tk_layer apkey, apnum;
+static tk_layer apkey, apnum, apdel;   /* apdel: the keypad's delete (P3j) */
 static void build_apnum(void)
 {
     relayer(&apnum);
-    apnum.hidden = !AS.num[0];
+    relayer(&apdel);
+    apnum.hidden = apdel.hidden = !AS.num[0];
     if (!AS.num[0]) return;
+    {
+        /* P3j (audit 12): iOS's delete beside the call button once a number is typed (a chevron and a cross) */
+        dc e = mk(&apdel, "dial-del", 280, 594, 40, 22, 1, 0);
+        const tk_bmp *ic = tk_icon("back");
+        if (ic) tk_blit_tinted(e.b, ic, (int)tk_floorf(PT(281) - tk_icon_pad("back") - e.ox + .5f),
+                               (int)tk_floorf(PT(595) - tk_icon_pad("back") - e.oy + .5f), W(.85f));
+        d_rrect(&e, 291, 595, 27, 20, 4, W(.85f));
+        float xw = tw(TK_IT600, 16, "\xc3\x97", 0, 0);
+        d_text(&e, TK_IT600, 16, 291 + (27 - xw) / 2, bl(TK_IT600, 16, 596), "\xc3\x97", 0, 0, tk_hex(0x0a0f1f, 1), 0);
+    }
     float w = tw(TK_IT500, 36, AS.num, 1, TK_TNUM);
     dc d = mk(&apnum, "dial", (390 - w) / 2, 86, w, 44, 2, 0);
     d_text(&d, TK_IT500, 36, (390 - w) / 2, bl(TK_IT500, 36, 86), AS.num, 1, TK_TNUM, INK, 0);
@@ -2346,7 +2408,7 @@ static void build_app_page(int a)
     relayer(&appst[0]);
     apnum.hidden = 1;
     dc d = mk(&appst[0], "app-page", 0, 0, 390, h + 4, 0, 0);
-    d_text(&d, TK_IT800, 34, 20, 64 + 33, A->name, -.8f, 0, INK, 0);
+    d_text(&d, TK_IT700, 34, 20, 64 + 33, A->name, 0, 0, INK, 0);
     for (int i = 0; i < A->ns; i++) {
         const asec *S = &A->sec[i];
         if (S->cap[0]) {
@@ -2511,6 +2573,7 @@ static void app_finish_close(void)
     /* the page (a whole screen) is not kept: the next open draws it again */
     for (int i = 0; i < NST; i++) relayer(&appst[i]);
     relayer(&apnum);
+    relayer(&apdel); apdel.hidden = 1;
     relayer(&apsw); relayer(&aptm); relayer(&apctl);           /* P2z: the clock's (the timer keeps running) */
     apsw.hidden = aptm.hidden = apctl.hidden = 1;
     relayer(&apcalc); apcalc.hidden = 1;
@@ -2605,7 +2668,7 @@ void sh_confirm(const char *title, const char *l1, const char *l2, const char *l
     relayer(&cfcard);
     dc d = mk(&cfcard, "confirm-card", 24, y, 342, h, 44, 0);
     d_lg_flat(&d, 24, y, 342, h, 32, 1);
-    d_text(&d, TK_IT800, 22, 44, bl(TK_IT800, 22, y + 28), title, -.4f, 0, INK, 0);
+    d_text(&d, TK_IT700, 22, 44, bl(TK_IT700, 22, y + 28), title, 0, 0, INK, 0);
     float ty = y + 28 + 30 + 12;
     for (int i = 0; i < 3; i++) {
         for (int k = 0; k < nl[i]; k++) d_text(&d, TK_IT400, 15, 44, bl(TK_IT400, 15, ty + 21.0f * k), ln[i][k], 0, 0, W(.72f), 0);
@@ -2790,6 +2853,9 @@ static void app_tap(float x, float y)
             if (n < 15) { AS.num[n] = KD[i][0]; AS.num[n + 1] = 0; build_apnum(); }
             return;
         }
+        float ex = x - 299, ey = y - 605;
+        int n0 = (int)tk_strlen(AS.num);
+        if (n0 && ex * ex + ey * ey <= 30 * 30) { sh_haptic(); AS.num[n0 - 1] = 0; build_apnum(); return; }   /* P3j: delete */
         float dx = x - 195, dy = y - 605;
         if (dx * dx + dy * dy <= 39 * 39)
             toast(!tk_strcmp(AS.num, "112") ? "Calling 112 needs the modem (receive-only today)" :
@@ -2955,8 +3021,8 @@ static void relink(void)
 {
     tk_layer *r[] = { &star, &star_e, &home, &lockg, &lockflat, &appg, &apicon, &focus, &ccl, &cfl, &boot, &homebar, &toastl, &slp };
     link(&root, r, 14);
-    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb };
-    link(&appg, ag, 11);
+    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb };
+    link(&appg, ag, 12);
     tk_layer *st[] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     link(&appc, st, NST);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint };
@@ -3153,6 +3219,7 @@ void sh_set(const char *what, const char *key, float v)
         for (int a = 0; a < NAPPS; a++)
             if (!tk_strcmp(APPS[a].k, key)) {
                 app_open(a);
+                while (ap_pending) app_build_step();      /* a set state is whole at once */
                 sp_app.live = 0;
                 set_app_rect(lerpr(AP.icon, FULLR, v));
                 if (v >= 1) appg.clip = 0;
@@ -3823,6 +3890,8 @@ static void prep_tree(tk_layer *l)
 }
 void sh_idle(void)
 {
+    /* P3j: an app page still being drawn (an open without frames, e.g. the host's stills): finish it now */
+    if (ap_pending) { while (ap_pending) app_build_step(); if (AP.on) set_app_rect(AP.R); }
     if (sh_moving()) return;
     tk_comp_idle(C);
     if (!EMG && cards_pending > 0) {
