@@ -2893,6 +2893,14 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
     if (tchange || wchange) lock_ver++;
 }
 
+/* the half copies of a subtree (hidden ones too: home is drawn the moment the unlock starts) */
+static void prep_tree(tk_layer *l)
+{
+    for (; l; l = l->next) {
+        tk_layer_prepare(l);
+        prep_tree(l->child);
+    }
+}
 void sh_idle(void)
 {
     if (sh_moving()) return;
@@ -2910,7 +2918,9 @@ void sh_idle(void)
     if (!locked && !CCS.on && !AP.on && (!CCS.built || cc_stale)) { build_cc(); cc_stale = 0; }
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
-    for (tk_layer *l = home.child; l; l = l->next) tk_layer_prepare(l);
+    prep_tree(home.child);                       /* home's pages too (their widgets and app grids, P2s) */
+    tk_layer_prepare(&star);
+    tk_layer_prepare(&homebar);
     for (int g = 0; g < NG; g++) {
         tk_layer_prepare(&K[g].closed);
         tk_layer_prepare(&K[g].chev);

@@ -200,7 +200,9 @@ typedef struct {
     void *acq_ctx;
     tk_irect pd[16];
     int npd, pd_half;
-    uint64_t us_wait, us_catch;  /* the last frame's wait for the free buffer and its catch-up pass */
+    uint64_t us_wait, us_catch;
+    uint64_t us_idle, us_halfs;
+    uint32_t sharp_motion;     /* motion frames drawn at full resolution (small: P2s) */  /* the last frame's half-canvas catch-up (tk_comp_idle) and half copies made in it */  /* the last frame's wait for the free buffer and its catch-up pass */
 } tk_comp;
 int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocated */
 /* render a group's children (as if the group were at identity) into a screen-sized transparent bitmap and their

@@ -176,6 +176,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         tk_comp_frame(c, motion, 0);
         fprintf(log, "F %d %.1f %s px %d comp %.2f present %.2f total %.2f", frame, t, c->last_half ? "half" : "full",
                c->last_px, c->us_comp / 1000.0, c->us_present / 1000.0, c->last_us / 1000.0);
+        fprintf(log, " idle %.2f halfs %.2f", c->us_idle / 1000.0, c->us_halfs / 1000.0);
         if (getenv("SBTK_HASH")) {             /* what the display shows now (two buffers: the one just presented) */
             uint64_t hh = 1469598103934665603ULL;
             for (size_t i = 0; i < (size_t)TK_W * TK_H; i++) hh = (hh ^ c->panel.px[i]) * 1099511628211ULL;
@@ -298,6 +299,7 @@ int main(int argc, char **argv)
     /* the phone's frame buffers are not in its UI heap (the old UI's back buffer, the framebuffer) */
     if (!tk_comp_init(&c, getenv("SBTK_HEAP_MB") ? calloc((size_t)TK_W * TK_H, 4) : 0,
                       getenv("SBTK_HEAP_MB") ? calloc((size_t)TK_W * TK_H, 4) : 0)) return 1;
+    { extern int getenv_dbg; getenv_dbg = getenv("SBTK_DBG") != 0; }
     if (getenv("SBTK_DBL")) {                  /* the phone's two scanout buffers (P2r): presents alternate */
         dbl[0] = c.panel.px;
         dbl[1] = calloc((size_t)TK_W * TK_H, 4);

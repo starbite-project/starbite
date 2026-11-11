@@ -16,6 +16,7 @@
 #include <arm_neon.h>
 
 #define TK_MAXD 16
+int getenv_dbg;
 #define TK_MAXITEM 256
 
 void tk_layer_init(tk_layer *l, const char *name)
@@ -793,7 +794,9 @@ static void run_bands(tk_comp *c, job *J)
 
 int tk_comp_frame(tk_comp *c, int motion, int full)
 {
+    uint64_t ti = tk_us();
     if (motion) tk_comp_idle(c);             /* a finger came before the idle time did */
+    c->us_idle = tk_us() - ti;
     static uint32_t ground_seen;
     if (c->ground_gen != ground_seen) { ground_seen = c->ground_gen; full = 1; }
     uint64_t t0 = tk_us();
@@ -854,6 +857,13 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
                     }
         }
     }
+    /* P2s: a small motion (a toast, a hold ring, a chevron, a key, a toggle) at full resolution, sharp as at rest,
+     * while the motion so far has been small (a large one stays at half resolution to its end) */
+    if (motion && was_motion != 1) {
+        long a = 0;
+        for (int q = 0; q < nd; q++) a += (long)(D[q].x1 - D[q].x0) * (D[q].y1 - D[q].y0);
+        if (a <= (long)TK_W * TK_H / 6) { motion = 0; c->sharp_motion++; }
+    }
     if (!motion) { c->have_moved = 0; c->moved = (tk_irect){ 0, 0, 0, 0 }; }
 
     /* motion: the half canvas, its backdrop 1:1; at rest: the RAM frame, the wallpaper and the backdrop from their
@@ -861,10 +871,15 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     tgt T = { &SCR[0], motion ? &c->half : &c->fb, 0, &c->bw_half, motion ? .5f : 1, 0 };
     T.bw_double = !motion;
     /* what is drawn from a half copy gets it made now, on this core (the bands run on several) */
+    uint64_t th = tk_us();
     for (int i = 0; i < cur.n; i++) {
         item *it = &cur.it[i];
-        if (it->l->bmp.px && it->a * T.k < .75f && it->b * T.k < .75f) half_of(it->l);
+        if (it->l->bmp.px && it->a * T.k < .75f && it->b * T.k < .75f) {
+            if (!it->l->half.px && getenv_dbg) tk_log(it->l->name);
+            half_of(it->l);
+        }
     }
+    c->us_halfs = tk_us() - th;
     int px = 0;
     for (int q = 0; q < nd; q++) {
         tk_irect r = D[q];
