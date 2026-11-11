@@ -80,8 +80,7 @@ static dc mk(tk_layer *l, const char *name, float x, float y, float w, float h, 
     float x0 = tk_maxf(PT(x - mg), 0), y0 = PT(y - mg);       /* nothing beyond the panel's sides is ever shown */
     float x1 = tk_minf(PT(x + w + mg), (float)TK_W), y1 = PT(y + h + mg);
     int X = (int)tk_floorf(x0), Y = (int)tk_floorf(y0);
-    tk_bmp_new(&l->bmp, (int)(x1 - X) + 2, (int)(y1 - Y) + 2);
-    if (glass) tk_a8_new(&l->glass, l->bmp.w, l->bmp.h);
+    tk_bmp_new(&l->bmp, (int)(x1 - X) + 2, (int)(y1 - Y) + 2);    if (glass) tk_a8_new(&l->glass, l->bmp.w, l->bmp.h);
     l->x = l->bx = (float)X;
     l->y = l->by = (float)Y;
     dc d = { &l->bmp, glass ? &l->glass : 0, (float)X, (float)Y };
@@ -702,8 +701,10 @@ static void build_etool(void)
 
 /* Emergency's list (the concept's renderEmergency): eight cards and Exit Emergency; made on entering, freed on
  * leaving. survival-next: the four tools after the concept's four (USB Power, Sun, Guide, Compass / Level); the
- * list scrolls; ecard[5] holds cards 4..7, drawn one per idle turn (shell_survival.inc: sv_idle) */
-#define NEC 6                           /* 0 cards 0..3, 4 Exit, 5 cards 4..7 */
+ * list scrolls; ecard[5] and [6] hold cards 4..7, drawn one per idle turn (shell_survival.inc: sv_idle). survival-next (the merge): two
+ * cards a layer below the fold (5 MB each, not one 8 MB layer: the 160 MiB heap's holes refused it in Emergency) */
+#define NEC 7                           /* 0 cards 0..3, 4 Exit, 5 cards 4..5, 6 cards 6..7 */
+#define EC_LAYER(i) (&ecard[5 + ((i) - 4) / 2])   /* the layer of card i (4..7) */
 static tk_layer ecard[NEC], empill;
 static int ec_next = 8;                 /* survival-next: cards 4..7 drawn so far */
 typedef struct { const char *icon, *t, *s, *act; } ecard_t;   /* act: the app it opens (none: a toast) */
@@ -743,9 +744,11 @@ static void build_ecards(void)
     tk_a8_free(&ecard[0].glass);
     tk_layer_prepare(&ecard[0]);
     tk_layer_prepare(&ecard[4]);
-    /* survival-next: cards 4..7 below the fold: their layer now, the cards at the next idle turns */
-    mk(&ecard[5], "ecards2", CARD_X, LIST_TOP + 10 + 78 * 4, CARD_W, 78 * 3 + 68, FACE_MG, 0);
-    ecard[5].hidden = 1;
+    /* survival-next: cards 4..7 below the fold: their layers now, the cards at the next idle turns */
+    for (int k = 0; k < 2; k++) {
+        mk(&ecard[5 + k], k ? "ecards3" : "ecards2", CARD_X, LIST_TOP + 10 + 78 * (4 + 2 * k), CARD_W, 78 + 68, FACE_MG, 0);
+        ecard[5 + k].hidden = 1;
+    }
     ec_next = 4;
 }
 static void free_ecards(void) { for (int i = 0; i < NEC; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } ec_next = 8; }
@@ -821,7 +824,8 @@ static void place_list(void)
     }
     etool.hidden = EMG;
     ecard[0].hidden = ecard[4].hidden = !EMG;
-    ecard[5].hidden = !EMG || ec_next == 4;          /* survival-next: shown from its first card */
+    ecard[5].hidden = !EMG || ec_next <= 4;          /* survival-next: shown from its first card */
+    ecard[6].hidden = !EMG || ec_next <= 6;
     list.y = PT(-scroll);
     list.clip_r = (tk_rect){ 0, PT(LIST_TOP), PT(390), PT(LIST_H) };
     lock_ver++;
@@ -977,16 +981,23 @@ static void build_home_apps2(void)
                                         "Flashlight", "Battery", "Contacts", "Files" };
         const char *const *P2 = EMG ? P2E : P2K, *const *P2N = EMG ? P2EN : P2N_;
         relayer(&hparts[4]);
-        /* drawn as if on screen, then moved one page to the right (layers never extend past the panel's sides) */
-        dc d = mk(&hparts[4], "home-apps2", 0, 55, 390, 220 + (EMG ? ROW_PITCH : 0), 4, 0);
+        relayer(&hparts[5]);
+        /* drawn as if on screen, then moved one page to the right (layers never extend past the panel's sides).
+         * survival-next (the merge): Emergency's third row (the tools) in a layer of its own (one 7 MB layer was refused in the 160 MiB
+         * heap's holes; 5 + 1.5 MB fit) */
+        dc d = mk(&hparts[4], "home-apps2", 0, 55, 390, 220, 4, 0), d3 = { 0 };
+        if (EMG) d3 = mk(&hparts[5], "home-apps2e", 0, HOME_TOP2 + 2 * ROW_PITCH - 5, 390, 96, 4, 0);
+        hparts[5].hidden = !EMG;
         for (int i = 0; i < NP2; i++) {
             float cx = COL_CX(i % 4), y = HOME_TOP2 + ROW_PITCH * (i / 4);
+            dc *dd = i < 8 ? &d : &d3;
+            if (!dd->b || !dd->b->px) continue;
             char n[40] = "a62-";
             tk_memcpy(n + 4, P2[i], tk_strlen(P2[i]) + 1);
-            if (!sv_tile(&d, P2[i], cx - 31, y, 62)) d_icon(&d, n, cx - 31, y, 1);
-            d_text_box(&d, TK_IT500, 12, cx, y + 68 + 12, 84, 1, P2N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
+            if (!sv_tile(dd, P2[i], cx - 31, y, 62)) d_icon(dd, n, cx - 31, y, 1);
+            d_text_box(dd, TK_IT500, 12, cx, y + 68 + 12, 84, 1, P2N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
         }
-        hparts[4].x = hparts[4].bx = hparts[4].x + PT(390);
+        for (int k = 4; k <= 5; k++) hparts[k].x = hparts[k].bx = hparts[k].x + PT(390);
     }
 }
 static void build_home(void)
@@ -3476,8 +3487,8 @@ static void relink(void)
         tk_layer *q[] = { &Q[i].face, &Q[i].facelit, &Q[i].icon, &Q[i].iconlit, &Q[i].ring };
         link(&Q[i].grp, q, 5);
     }
-    tk_layer *pg[] = { &hparts[1], &hparts[2], &hparts[4] };
-    link(&pages, pg, 3);
+    tk_layer *pg[] = { &hparts[1], &hparts[2], &hparts[4], &hparts[5] };   /* survival-next: [5] Emergency's third row */
+    link(&pages, pg, 4);
     tk_layer *h[] = { &hparts[0], &pages, &hsearch[0], &hsearch[1], &hsearch[2], &hparts[3], &icobg, &icofg };
     link(&home, h, 8);
     sv_relink();                                     /* survival-next: the tools' live layers, SOS's beacon */
@@ -3537,6 +3548,8 @@ void sh_init_begin(tk_comp *c)
     boot.hidden = 1;
     for (int i = 0; i < 2; i++) tk_layer_init(&Q[i].grp, i ? "q-em" : "q-light");
     for (int i = 0; i < NEC; i++) { tk_layer_init(&ecard[i], "ecard"); ecard[i].hidden = 1; }
+    tk_layer_init(&hparts[5], "home-apps2e");
+    hparts[5].hidden = 1;
     tk_layer_init(&empill, "empill");
     empill.hidden = 1;
     tk_layer_init(&icobg, "icon-ground"); icobg.hidden = 1;     /* P3p: press feedback */
@@ -3869,9 +3882,10 @@ static void app_press(float x, float y)
     float rad = 0;
     tk_col c = W(.1f);
     int ok = 0;
-    int pushed = (is_app("settings") && AS.sub && !(AS.sub == 2 && WV.view == 1)) || (is_app("messages") && AS.thread >= 0) ||
-                 (is_app("notes") && NS.view);
-    if (pushed && BACK_HIT(x, y)) {
+    int pushed = (is_app("settings") && AS.sub && !(AS.sub == 2 && WV.view == 1) && !(AS.sub == 4 && SV.cf >= 0)) ||
+                 (is_app("messages") && AS.thread >= 0) || (is_app("notes") && NS.view);
+    if (sv_press(x, y, &r, &g, &rad, &c)) ok = 1;                 /* survival-next (E's bands): Emergency's tools, Settings > Medical Card */
+    else if (pushed && BACK_HIT(x, y)) {
         r = g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D };   /* the glass back lights */
         rad = BACK_D / 2; c = W(.16f); ok = 1;
     } else if (is_app("notes") && NS.view && DONE_HIT(x, y)) {

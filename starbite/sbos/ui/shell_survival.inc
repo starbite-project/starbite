@@ -16,9 +16,14 @@
  * Nothing here starts by itself: SOS and USB power need the user's own hold, every page is drawn at its open (over
  * frames, as the other own pages) and a tap redraws only small layers or asks for the page over the next frames
  * (sv_rebuild: no full page inside a tap's handler). The lock's Emergency list opens the screens over the lock (the
- * medical card needs no unlock) and scrolls; its four new cards are drawn one per idle turn. */
+ * medical card needs no unlock) and scrolls; its four new cards are drawn one per idle turn.
+ * survival-next (E's bands): the pages in the shell's iOS bands (shell_lock.c): the large title in its row (d_h1, LARGE_BASE), content from
+ * CONTENT_TOP, groups at GROUP_X / GROUP_W with their text at ROW_TX; the pushed pages (a guide chapter and page,
+ * Settings > Medical Card) with the glass back circle and an inline title (d_back, d_navtitle); the editors' Cancel /
+ * Done in the nav row (NAV_BASE); rows and keys light under the finger (sv_press). */
 
 static void set_lock(float y);
+static int kb_rect(float x, float y, const char *const *R, int r2x, tk_rect *o);   /* (sv_press: a key lights) */
 
 #define SV_GROUND 0x1a0c0eU             /* the tools' ground: the Emergency wallpaper's darkest red */
 #define SV_GROUP 0x2c1719U              /* grouped rows on it */
@@ -230,13 +235,15 @@ static int sv_icon_rect(int a, arect *r)
 }
 /* idle time: the next of the lock's cards 4..7 (one glass card a turn), the lock's widgets after Last 2 % changed
  * (the switch, or the kernel at 3 %: looked at every idle turn, a minute at the latest) */
-static int sv_idle_pending(void) { return (EMG && ec_next < 8 && ecard[5].bmp.px) || (SV.lw_stale && !AP.on); }
+static void sv_ec_skip(void) { while (EMG && ec_next < 8 && !EC_LAYER(ec_next)->bmp.px) ec_next++; }   /* a refused layer's cards */
+static int sv_idle_pending(void) { sv_ec_skip(); return (EMG && ec_next < 8) || (SV.lw_stale && !AP.on); }
 static void sv_idle(void)
 {
     int l2 = sh_last2();
     if (l2 != SV.l2_seen) { SV.l2_seen = l2; if (EMG) SV.lw_stale = 1; }
-    if (EMG && ec_next < 8 && ecard[5].bmp.px) {
-        tk_layer *l = &ecard[5];
+    sv_ec_skip();
+    if (EMG && ec_next < 8) {
+        tk_layer *l = EC_LAYER(ec_next);
         tk_a8_new(&l->glass, l->bmp.w, l->bmp.h);       /* P3q: the card's glass shape recorded, the mask freed at once */
         dc d = { &l->bmp, l->glass.v ? &l->glass : 0, l->x, l->y };
         ec_card(&d, ec_next, LIST_TOP + 10 + 78 * ec_next);
@@ -244,7 +251,7 @@ static void sv_idle(void)
         ec_next++;
         tk_layer_dirty(l);
         l->hidden = 0;
-        if (ec_next == 8) tk_layer_prepare(l);
+        if (ec_next == 6 || ec_next == 8) tk_layer_prepare(l);
         lock_ver++;
         return;
     }
@@ -257,33 +264,36 @@ static void sv_idle(void)
 }
 
 /* ---- the live layers: a switch, the beacon picker, the hold ring ------------------------------------------------ */
+#define SV_SW_X (CONTENT_R - 16 - 51)   /* a row's switch (iOS: 16 pt from the group's right edge) */
+#define SV_RULE(d, y) d_rrect(d, ROW_TX, y, CONTENT_R - ROW_TX, .5f, 0, W(.1f))   /* a rule under a row */
 static void sv_switch(int which, float y, int on)
 {
     tk_layer *l = &svl[which];
     relayer(l);
-    dc d = mk(l, "sv-switch", 307, y + 8, 51, 31, 1, 0);
-    d_rrect(&d, 307, y + 8, 51, 31, 15.5f, on ? tk_hex(0x34c759, 1) : W(.16f));
-    d_rrect(&d, on ? 329 : 309, y + 10, 27, 27, 13.5f, W(1));
+    dc d = mk(l, "sv-switch", SV_SW_X, y + 8, 51, 31, 1, 0);
+    d_rrect(&d, SV_SW_X, y + 8, 51, 31, 15.5f, on ? tk_hex(0x34c759, 1) : W(.16f));
+    d_rrect(&d, on ? SV_SW_X + 22 : SV_SW_X + 2, y + 10, 27, 27, 13.5f, W(1));
 }
 static void sv_switch_row(dc *d, float y, const char *label, int last)
 {
-    d_text(d, TK_IT400, 16, 32, y + 13 + 16, label, 0, 0, INK, 0);
-    if (!last) d_rrect(d, 32, y + 46, 342, .5f, 0, W(.1f));
+    d_text(d, TK_IT400, 16, ROW_TX, y + 13 + 16, label, 0, 0, INK, 0);
+    if (!last) SV_RULE(d, y + 46);
 }
 #define SOS_SEG_Y 610.0f
+#define SOS_SEG_W ((GROUP_W - 4) / 4)   /* a segment */
 static const char *const SOS_BEACON[4] = { "White / red", "White", "Red", "Morse" };
 static void sv_seg(void)
 {
     tk_layer *l = &svl[SVL_SEG];
     relayer(l);
-    dc d = mk(l, "sv-seg", 16, SOS_SEG_Y, 358, 36, 1, 0);
-    d_rrect(&d, 16, SOS_SEG_Y, 358, 36, 10, W(.1f));
+    dc d = mk(l, "sv-seg", GROUP_X, SOS_SEG_Y, GROUP_W, 36, 1, 0);
+    d_rrect(&d, GROUP_X, SOS_SEG_Y, GROUP_W, 36, 10, W(.1f));
     int b = (int)(sh_sos_opts() >> SH_BEACON_SHIFT & 3U);
-    float w = 354.0f / 4;
-    d_rrect(&d, 18 + w * b, SOS_SEG_Y + 2, w, 32, 8, tk_hex(0x5a3a3c, 1));
+    float w = SOS_SEG_W;
+    d_rrect(&d, GROUP_X + 2 + w * b, SOS_SEG_Y + 2, w, 32, 8, tk_hex(0x5a3a3c, 1));
     for (int i = 0; i < 4; i++) {
         float tx = tw(TK_IT600, 13, SOS_BEACON[i], 0, 0);
-        d_text(&d, TK_IT600, 13, 18 + w * i + (w - tx) / 2, bl(TK_IT600, 13, SOS_SEG_Y + 9.5f), SOS_BEACON[i], 0, 0, i == b ? INK : W(.65f), 0);
+        d_text(&d, TK_IT600, 13, GROUP_X + 2 + w * i + (w - tx) / 2, bl(TK_IT600, 13, SOS_SEG_Y + 9.5f), SOS_BEACON[i], 0, 0, i == b ? INK : W(.65f), 0);
     }
 }
 /* the hold's ring around a button: only the ring's pixels are kept (their place, angle, coverage), drawn per frame */
@@ -349,16 +359,22 @@ static void sv_hold_button(dc *d, float cx, float cy, float r, const char *label
     float w = tw(TK_IT700, size, label, 0, 0);
     d_text(d, TK_IT700, size, cx - w / 2, bl(TK_IT700, size, cy - lh(TK_IT700, size) / 2), label, 0, 0, enabled ? W(1) : W(.4f), 0);
 }
-static void sv_back(dc *d, const char *label)
+/* a pushed page's nav row (as shell_lock.c's): the glass back circle, the title inline */
+static void sv_back(dc *d, const char *title)
 {
-    const tk_bmp *ic = tk_icon("back");
-    if (ic) tk_blit_tinted(d->b, ic, (int)tk_floorf(PT(18) - tk_icon_pad("back") - d->ox + .5f),
-                           (int)tk_floorf(PT(53) - tk_icon_pad("back") - d->oy + .5f), SVC(SV_TINT));
-    char e[64];
-    ellipsize(e, sizeof e, TK_IT400, 17, label, 200);
-    d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), e, 0, 0, SVC(SV_TINT), 0);
+    d_back(d, W(1));
+    d_navtitle(d, title);
 }
-static int sv_back_hit(float x, float y) { return x < 160 && y >= 40 && y < 86; }
+static int sv_back_hit(float x, float y) { return BACK_HIT(x, y); }
+/* an editor's nav row: Cancel, the title inline, Done (as Wi-Fi's password page) */
+static void sv_editbar(dc *d, const char *title, tk_col c)
+{
+    d_text(d, TK_IT400, 17, MARGIN, NAV_BASE, "Cancel", 0, 0, c, 0);
+    d_navtitle(d, title);
+    float w = tw(TK_IT600, 17, "Done", 0, 0);
+    d_text(d, TK_IT600, 17, CONTENT_R - w, NAV_BASE, "Done", 0, 0, c, 0);
+}
+#define SV_CANCEL_HIT(x, y) (IN_NAV(y) && (x) < MARGIN + 90)
 
 /* ---- SOS ------------------------------------------------------------------------------------------------------ */
 #define SOS_CX 195.0f
@@ -368,17 +384,17 @@ static int sv_back_hit(float x, float y) { return x < 160 && y >= 40 && y < 86; 
 static void page_sos(dc *d)
 {
     d_h1(d, "Emergency SOS");
-    sv_text(d, TK_IT400, 15, 20, 110, 350, 20,
+    sv_text(d, TK_IT400, 15, MARGIN, CONTENT_TOP, CONTENT_W, 20,
             "Hold the button for a second. After a 3 s countdown the torch and the vibration motor send S-O-S in Morse "
             "and the screen flashes as a beacon. Stop ends it.", W(.7f));
     sv_hold_button(d, SOS_CX, SOS_CY, SOS_R, "SOS", 34, 1);
     sv_centre(d, TK_IT400, 15, SOS_CY + SOS_R + 20, "Hold for 1 s", W(.6f));
-    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, SOS_ROW - 22), "MORSE S-O-S", .52f, 0, W(.55f), 0);
-    d_rrect(d, 16, SOS_ROW, 358, 93, 16, SVC(SV_GROUP));
+    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, SOS_ROW - 22), "MORSE S-O-S", .52f, 0, W(.55f), 0);
+    d_rrect(d, GROUP_X, SOS_ROW, GROUP_W, 93, 16, SVC(SV_GROUP));
     sv_switch_row(d, SOS_ROW, "Torch", 0);
     sv_switch_row(d, SOS_ROW + 47, "Vibration", 1);
-    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, SOS_SEG_Y - 22), "THE SCREEN", .52f, 0, W(.55f), 0);
-    sv_text(d, TK_IT400, 13, 36, SOS_SEG_Y + 50, 320, 18, "Calls to 112 need a SIM and the modem: not in this version.", W(.4f));
+    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, SOS_SEG_Y - 22), "THE SCREEN", .52f, 0, W(.55f), 0);
+    sv_text(d, TK_IT400, 13, ROW_TX, SOS_SEG_Y + 50, CONTENT_R - 16 - ROW_TX, 18, "Calls to 112 need a SIM and the modem: not in this version.", W(.4f));
 }
 static void sos_extras(void)
 {
@@ -443,15 +459,15 @@ static void sv_sos_stop(void)
 static void sos_tap(float x, float y)
 {
     unsigned o = sh_sos_opts();
-    if (x >= 16 && x < 374 && y >= SOS_ROW && y < SOS_ROW + 94) {
+    if (x >= GROUP_X && x < CONTENT_R && y >= SOS_ROW && y < SOS_ROW + 94) {
         o ^= y < SOS_ROW + 47 ? SH_SOS_TORCH : SH_SOS_VIB;
         sh_sos_opts_set(o);
         o = sh_sos_opts();
         sv_switch(SVL_A, SOS_ROW, (o & SH_SOS_TORCH) != 0);
         sv_switch(SVL_B, SOS_ROW + 47, (o & SH_SOS_VIB) != 0);
         relink();
-    } else if (x >= 16 && x < 374 && y >= SOS_SEG_Y && y < SOS_SEG_Y + 36) {
-        int b = (int)((x - 18) / (354.0f / 4));
+    } else if (x >= GROUP_X && x < CONTENT_R && y >= SOS_SEG_Y && y < SOS_SEG_Y + 36) {
+        int b = (int)((x - GROUP_X - 2) / SOS_SEG_W);
         b = b < 0 ? 0 : b > 3 ? 3 : b;
         sh_sos_opts_set((o & ~(3U << SH_BEACON_SHIFT)) | (unsigned)b << SH_BEACON_SHIFT);
         sv_seg();
@@ -460,28 +476,32 @@ static void sos_tap(float x, float y)
 }
 
 /* ---- Medical Card ----------------------------------------------------------------------------------------------- */
+#define MC_NAME CONTENT_TOP                     /* the name's line, under the large title */
+#define MC_TOP (CONTENT_TOP + 46)               /* the fields' group */
+#define MC_VX (GROUP_X + 128)                   /* a field's value */
+#define MC_VW (CONTENT_R - 16 - MC_VX)
 static void page_medical(dc *d)
 {
     d_h1(d, "Medical Card");
     sh_card_t *c = &SV.card;
     if (!sh_card(c)) { d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Medical Card", "Add one in Settings > Medical Card. It shows here without unlocking."); return; }
     char nm[80];
-    ellipsize(nm, sizeof nm, TK_IT700, 26, c->f[0][0] ? c->f[0] : "No name", 350);
-    d_text(d, TK_IT700, 26, 20, bl(TK_IT700, 26, 108), nm, 0, 0, INK, 0);
-    float y = 158, h = 0;
+    ellipsize(nm, sizeof nm, TK_IT700, 26, c->f[0][0] ? c->f[0] : "No name", CONTENT_W);
+    d_text(d, TK_IT700, 26, MARGIN, bl(TK_IT700, 26, MC_NAME), nm, 0, 0, INK, 0);
+    float y = MC_TOP, h = 0;
     for (int i = 1; i < SH_CARD_NF; i++)
-        if (c->f[i][0]) h += 20 + 21.0f * sv_text(0, TK_IT400, 16, 0, 0, 214, 21, c->f[i], INK);
+        if (c->f[i][0]) h += 20 + 21.0f * sv_text(0, TK_IT400, 16, 0, 0, MC_VW, 21, c->f[i], INK);
     if (h > 0) {
-        d_rrect(d, 16, y, 358, h, 16, SVC(SV_GROUP));
+        d_rrect(d, GROUP_X, y, GROUP_W, h, 16, SVC(SV_GROUP));
         for (int i = 1; i < SH_CARD_NF; i++) {
             if (!c->f[i][0]) continue;
-            d_text(d, TK_IT400, 15, 32, bl(TK_IT400, 15, y + 11), sh_card_label(i), 0, 0, i == 2 ? SVC(SV_WARN) : W(.55f), 0);
-            int n = sv_text(d, TK_IT400, 16, 144, y + 10, 214, 21, c->f[i], INK);
+            d_text(d, TK_IT400, 15, ROW_TX, bl(TK_IT400, 15, y + 11), sh_card_label(i), 0, 0, i == 2 ? SVC(SV_WARN) : W(.55f), 0);
+            int n = sv_text(d, TK_IT400, 16, MC_VX, y + 10, MC_VW, 21, c->f[i], INK);
             y += 20 + 21.0f * n;
-            if (y < 158 + h - 1) d_rrect(d, 32, y, 342, .5f, 0, W(.1f));
+            if (y < MC_TOP + h - 1) SV_RULE(d, y);
         }
     }
-    sv_text(d, TK_IT400, 13, 36, y + 14, 320, 18, "Edit it in Settings > Medical Card (the Info app shows the same card).", W(.4f));
+    sv_text(d, TK_IT400, 13, ROW_TX, y + 14, CONTENT_R - 16 - ROW_TX, 18, "Edit it in Settings > Medical Card (the Info app shows the same card).", W(.4f));
 }
 
 /* Settings > Medical Card: the fields, then one field over the keyboard */
@@ -513,37 +533,33 @@ static int sv_kb_tap(float x, float y, char *buf, int cap, int digits_only)
     if (SV.shift && c >= 'A' && c <= 'Z') { SV.shift = 0; return 2; }
     return 1;
 }
-#define CE_TOP 162.0f                   /* the fields' group */
+#define CE_TOP DSP_Y                    /* the fields' group (where Display's, Wi-Fi's and Cellular's start) */
+#define CE_FLD PUSHED_TOP               /* the editor's field */
 static void sv_page_card_edit(dc *d)
 {
     sh_card_t *c = &SV.card;
     if (SV.cf < 0) {
         sh_card(c);
-        d_icon(d, "back", 18, 53, 1);
-        d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Settings", 0, 0, ACCENT(), 0);
-        d_text(d, TK_IT700, 30, 20, bl(TK_IT700, 30, 96), "Medical Card", 0, 0, INK, 0);
-        d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, CE_TOP - 22), "SHOWN IN EMERGENCY WITHOUT UNLOCKING", .52f, 0, W(.55f), 0);
-        d_rrect(d, 16, CE_TOP, 358, 47.0f * SH_CARD_NF - 1, 16, tk_hex(0x151c33, 1));
+        sv_back(d, "Medical Card");
+        d_text(d, TK_IT400, 13, ROW_TX, CE_TOP - 10, "SHOWN IN EMERGENCY WITHOUT UNLOCKING", .52f, 0, W(.55f), 0);
+        d_rrect(d, GROUP_X, CE_TOP, GROUP_W, 47.0f * SH_CARD_NF - 1, 16, tk_hex(0x151c33, 1));
         for (int i = 0; i < SH_CARD_NF; i++) {
             float y = CE_TOP + 47.0f * i;
-            d_text(d, TK_IT400, 16, 32, y + 13 + 16, sh_card_label(i), 0, 0, INK, 0);
+            d_text(d, TK_IT400, 16, ROW_TX, y + 13 + 16, sh_card_label(i), 0, 0, INK, 0);
             char v[80];
             ellipsize(v, sizeof v, TK_IT400, 16, c->f[i][0] ? c->f[i] : "Add", 190);
             float w = tw(TK_IT400, 16, v, 0, 0);
-            d_text(d, TK_IT400, 16, 338 - w, y + 13 + 16, v, 0, 0, c->f[i][0] ? W(.55f) : ACCENT(), 0);
-            d_icon(d, "chev", 344, y + 16.5f, .45f);
-            if (i + 1 < SH_CARD_NF) d_rrect(d, 32, y + 46, 342, .5f, 0, W(.08f));
+            d_text(d, TK_IT400, 16, CONTENT_R - 36 - w, y + 13 + 16, v, 0, 0, c->f[i][0] ? W(.55f) : ACCENT(), 0);
+            d_icon(d, "chev", CONTENT_R - 30, y + 16.5f, .45f);
+            if (i + 1 < SH_CARD_NF) d_rrect(d, ROW_TX, y + 46, CONTENT_R - ROW_TX, .5f, 0, W(.08f));
         }
-        sv_text(d, TK_IT400, 13, 36, CE_TOP + 47.0f * SH_CARD_NF + 10, 320, 18,
+        sv_text(d, TK_IT400, 13, ROW_TX, CE_TOP + 47.0f * SH_CARD_NF + 10, CONTENT_R - 16 - ROW_TX, 18,
                 "Kept on this phone with the settings. Emergency mode shows it on the lock screen; the Info app edits the same card.", W(.4f));
         return;
     }
-    d_text(d, TK_IT400, 17, 20, bl(TK_IT400, 17, 53), "Cancel", 0, 0, ACCENT(), 0);
-    float w = tw(TK_IT600, 17, "Done", 0, 0);
-    d_text(d, TK_IT600, 17, 370 - w, bl(TK_IT600, 17, 53), "Done", 0, 0, ACCENT(), 0);
-    d_text(d, TK_IT700, 30, 20, bl(TK_IT700, 30, 96), sh_card_label(SV.cf), 0, 0, INK, 0);
-    d_rrect(d, 16, 140, 358, 52, 14, tk_hex(0x151c33, 1));
-    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 204), "Up to 64 characters. Return or Done saves it.", 0, 0, W(.45f), 0);
+    sv_editbar(d, sh_card_label(SV.cf), ACCENT());
+    d_rrect(d, GROUP_X, CE_FLD, GROUP_W, 52, 14, tk_hex(0x151c33, 1));
+    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, CE_FLD + 64), "Up to 64 characters. Return or Done saves it.", 0, 0, W(.45f), 0);
     sv_kb(d, SV.shift, SV.num, 1);
 }
 /* the field's text and caret (a key redraws only this) */
@@ -568,7 +584,7 @@ static void card_tap(float x, float y)
 {
     if (SV.cf < 0) {
         if (sv_back_hit(x, y)) { AS.sub = 0; build_app_page(AP.a); return; }   /* (the Settings list is not an own page) */
-        if (x >= 16 && x < 374 && y >= CE_TOP && y < CE_TOP + 47.0f * SH_CARD_NF) {
+        if (x >= GROUP_X && x < CONTENT_R && y >= CE_TOP && y < CE_TOP + 47.0f * SH_CARD_NF) {
             SV.cf = (int)((y - CE_TOP) / 47);
             tk_memcpy(SV.ebuf, SV.card.f[SV.cf], sizeof SV.ebuf);
             SV.shift = !SV.ebuf[0] && SV.cf != 1;
@@ -577,8 +593,8 @@ static void card_tap(float x, float y)
         }
         return;
     }
-    int save = x >= 290 && y >= 40 && y < 86;
-    if (!save && x < 120 && y >= 40 && y < 86) { SV.cf = -1; sv_rebuild(); return; }
+    int save = DONE_HIT(x, y);
+    if (!save && SV_CANCEL_HIT(x, y)) { SV.cf = -1; sv_rebuild(); return; }
     int k = save ? 5 : y >= 540 ? sv_kb_tap(x, y, SV.ebuf, SH_CARD_FL, 0) : 0;
     if (k == 5) {
         tk_memcpy(SV.card.f[SV.cf], SV.ebuf, sizeof SV.ebuf);
@@ -586,21 +602,21 @@ static void card_tap(float x, float y)
         SV.cf = -1;
         sv_rebuild();
     } else if (k == 2) sv_rebuild();
-    else if (k == 1) { sv_field(32, 150, 326, SV.ebuf, 1, INK); relink(); }
+    else if (k == 1) { sv_field(ROW_TX, CE_FLD + 10, CONTENT_R - 16 - ROW_TX, SV.ebuf, 1, INK); relink(); }
 }
 
 /* ---- Last 2 % ----------------------------------------------------------------------------------------------------- */
-#define L2_ROW 258.0f
+#define L2_ROW (CONTENT_TOP + 148)       /* the switches' group, under the two paragraphs */
 static void page_last2(dc *d)
 {
     d_h1(d, "Last 2 %");
-    int n = sv_text(d, TK_IT600, 18, 20, 110, 350, 24, "Everything off except the clock, the torch and SOS. Runs on to 1 %.", INK);
-    sv_text(d, TK_IT400, 15, 20, 118 + 24.0f * n, 350, 20,
+    int n = sv_text(d, TK_IT600, 18, MARGIN, CONTENT_TOP, CONTENT_W, 24, "Everything off except the clock, the torch and SOS. Runs on to 1 %.", INK);
+    sv_text(d, TK_IT400, 15, MARGIN, CONTENT_TOP + 8 + 24.0f * n, CONTENT_W, 20,
             "The slowest processor speed and a dim screen; Wi-Fi, the modem, Survival Heat and USB power stay off.", W(.6f));
-    d_rrect(d, 16, L2_ROW, 358, 93, 16, SVC(SV_GROUP));
+    d_rrect(d, GROUP_X, L2_ROW, GROUP_W, 93, 16, SVC(SV_GROUP));
     sv_switch_row(d, L2_ROW, "Last 2 %", 0);
     sv_switch_row(d, L2_ROW + 47, "Automatically at 3 %", 1);
-    sv_text(d, TK_IT400, 13, 36, L2_ROW + 104, 320, 18, "At 3 % the phone goes into Last 2 % instead of switching off.", W(.45f));
+    sv_text(d, TK_IT400, 13, ROW_TX, L2_ROW + 104, CONTENT_R - 16 - ROW_TX, 18, "At 3 % the phone goes into Last 2 % instead of switching off.", W(.45f));
 }
 static void last2_extras(void)
 {
@@ -609,7 +625,7 @@ static void last2_extras(void)
 }
 static void last2_tap(float x, float y)
 {
-    if (x < 16 || x >= 374 || y < L2_ROW || y >= L2_ROW + 94) return;
+    if (x < GROUP_X || x >= CONTENT_R || y < L2_ROW || y >= L2_ROW + 94) return;
     if (y < L2_ROW + 47) {
         int on = !sh_last2();
         if (sh_last2_set(on) < 0) toast("Last 2 % can't change now");
@@ -623,21 +639,22 @@ static void last2_tap(float x, float y)
 /* ---- USB Power ---------------------------------------------------------------------------------------------------- */
 #define USB_CY 560.0f
 #define USB_R 58.0f
+#define USB_GUIDE CONTENT_TOP           /* the guidance's group (the caption is under the large title, as Photos') */
 static float usb_guide_h(dc *d)
 {
-    float y = 148;
+    float y = USB_GUIDE + 12;
     for (int i = 0; sh_usb_guide(i); i++) {
         const char *g = sh_usb_guide(i);
         int warn = g[0] == 'N' && g[1] == 'e' && g[2] == 'v';       /* "Never ..." */
-        y += 19.0f * sv_text(d, warn ? TK_IT600 : TK_IT400, 14, 32, y, 326, 19, g, warn ? SVC(SV_WARN) : W(.8f)) + 7;
+        y += 19.0f * sv_text(d, warn ? TK_IT600 : TK_IT400, 14, ROW_TX, y, CONTENT_R - 16 - ROW_TX, 19, g, warn ? SVC(SV_WARN) : W(.8f)) + 7;
     }
     return y + 5;
 }
 static void page_usb(dc *d)
 {
     d_h1(d, "USB Power");
-    d_text(d, TK_IT400, 15, 20, bl(TK_IT400, 15, 104), "A fire starter: 5 V out of the USB-C port", 0, 0, W(.6f), 0);
-    d_rrect(d, 16, 136, 358, usb_guide_h(0) - 136, 16, SVC(SV_GROUP));
+    d_text(d, TK_IT400, 13, MARGIN, LARGE_BASE + 20, "A fire starter: 5 V out of the USB-C port", 0, 0, W(.55f), 0);
+    d_rrect(d, GROUP_X, USB_GUIDE + 6, GROUP_W, usb_guide_h(0) - USB_GUIDE - 6, 16, SVC(SV_GROUP));
     usb_guide_h(d);
 }
 static int usb_secs(void) { return SV.usb.ms_left > 0 ? (SV.usb.ms_left + 999) / 1000 : 0; }
@@ -715,9 +732,9 @@ static void usb_text(void)
         int k = 0;
         while (SV.usb.why[k] && n < 94) w[n++] = SV.usb.why[k++];
         w[n] = 0;
-        sv_text(&d, TK_IT400, 14, 32, 668, 326, 19, w, SV.usb.refused ? SVC(SV_WARN) : W(.6f));
+        sv_text(&d, TK_IT400, 14, ROW_TX, 668, CONTENT_R - 16 - ROW_TX, 19, w, SV.usb.refused ? SVC(SV_WARN) : W(.6f));
     } else
-        sv_text(&d, TK_IT400, 14, 32, 668, 326, 19, "Then 30 s to cool down. It stops by itself on a fault, a hot or low battery, or a charger.", W(.45f));
+        sv_text(&d, TK_IT400, 14, ROW_TX, 668, CONTENT_R - 16 - ROW_TX, 19, "Then 30 s to cool down. It stops by itself on a fault, a hot or low battery, or a charger.", W(.45f));
 }
 static void usb_extras(void)
 {
@@ -748,6 +765,9 @@ static void usb_tap(float x, float y)
 }
 
 /* ---- Sun ----------------------------------------------------------------------------------------------------------- */
+#define SUN_TOP CONTENT_TOP             /* today's group */
+#define SUN_LOC (SUN_TOP + 128 + 40)    /* the location's row (its caption above) */
+#define SUN_ED PUSHED_TOP               /* the editor's two rows */
 static int sv_parse_x100(const char *s, int *out)
 {
     int neg = 0, v = 0, frac = -1, any = 0;
@@ -786,17 +806,14 @@ static void sun_loc_text(char *b)
 static void page_sun(dc *d)
 {
     if (SV.sun_edit) {
-        d_text(d, TK_IT400, 17, 20, bl(TK_IT400, 17, 53), "Cancel", 0, 0, SVC(SV_TINT), 0);
-        float w = tw(TK_IT600, 17, "Done", 0, 0);
-        d_text(d, TK_IT600, 17, 370 - w, bl(TK_IT600, 17, 53), "Done", 0, 0, SVC(SV_TINT), 0);
-        d_text(d, TK_IT700, 30, 20, bl(TK_IT700, 30, 96), "Location", 0, 0, INK, 0);
-        d_rrect(d, 16, 140, 358, 93, 16, SVC(SV_GROUP));
+        sv_editbar(d, "Location", SVC(SV_TINT));
+        d_rrect(d, GROUP_X, SUN_ED, GROUP_W, 93, 16, SVC(SV_GROUP));
         for (int i = 0; i < 2; i++) {
-            d_text(d, TK_IT400, 16, 32, 140 + 47 * i + 29, i ? "Longitude" : "Latitude", 0, 0, i == SV.sun_f ? INK : W(.6f), 0);
-            if (i == SV.sun_f) d_rrect(d, 20, 140 + 47 * i + 12, 4, 23, 2, SVC(SV_TINT));
+            d_text(d, TK_IT400, 16, ROW_TX, SUN_ED + 47 * i + 29, i ? "Longitude" : "Latitude", 0, 0, i == SV.sun_f ? INK : W(.6f), 0);
+            if (i == SV.sun_f) d_rrect(d, GROUP_X + 4, SUN_ED + 47 * i + 12, 4, 23, 2, SVC(SV_TINT));
         }
-        d_rrect(d, 32, 186, 342, .5f, 0, W(.1f));
-        sv_text(d, TK_IT400, 13, 36, 246, 320, 18, "Degrees with up to two decimals, south and west negative: Helsinki 60.17 and 24.94, "
+        SV_RULE(d, SUN_ED + 46);
+        sv_text(d, TK_IT400, 13, ROW_TX, SUN_ED + 106, CONTENT_R - 16 - ROW_TX, 18, "Degrees with up to two decimals, south and west negative: Helsinki 60.17 and 24.94, "
                 "Sydney -33.87 and 151.21. Tap a row to type into it.", W(.5f));
         sv_kb(d, 0, 1, 0);
         return;
@@ -804,52 +821,52 @@ static void page_sun(dc *d)
     d_h1(d, "Sun");
     int rise = 0, set = 0, r = sh_sun(&rise, &set);
     char b[64], c[64];
-    d_rrect(d, 16, 112, 358, 128, 16, SVC(SV_GROUP));
+    d_rrect(d, GROUP_X, SUN_TOP, GROUP_W, 128, 16, SVC(SV_GROUP));
     if (r == 0) {
         for (int i = 0; i < 2; i++) {
-            float x = 32 + 179 * i;
-            d_text(d, TK_IT400, 15, x, bl(TK_IT400, 15, 126), i ? "Sunset" : "Sunrise", 0, 0, W(.6f), 0);
+            float x = ROW_TX + GROUP_W / 2 * i;
+            d_text(d, TK_IT400, 15, x, bl(TK_IT400, 15, SUN_TOP + 14), i ? "Sunset" : "Sunrise", 0, 0, W(.6f), 0);
             sv_hm(b, i ? set : rise);
-            d_text(d, TK_IT700, 44, x, bl(TK_IT700, 44, 148), b, 0, TK_TNUM, i ? SVC(0xff9f0a) : SVC(0xffd60a), 0);
+            d_text(d, TK_IT700, 44, x, bl(TK_IT700, 44, SUN_TOP + 36), b, 0, TK_TNUM, i ? SVC(0xff9f0a) : SVC(0xffd60a), 0);
         }
         int now = ST.h * 60 + ST.mi, n;
         if (now < rise) { n = sv_cat(b, 0, "Sunrise in "); sv_dur(b, n, rise - now); }
         else if (now < set) { n = sv_cat(b, 0, "Daylight left: "); sv_dur(b, n, set - now); }
         else { n = sv_cat(b, 0, "The sun has set \xc2\xb7 day length "); sv_dur(b, n, set - rise); }
-        d_text(d, TK_IT600, 16, 32, bl(TK_IT600, 16, 206), b, 0, 0, INK, 0);
+        d_text(d, TK_IT600, 16, ROW_TX, bl(TK_IT600, 16, SUN_TOP + 94), b, 0, 0, INK, 0);
     } else {
         const char *m = r == 1 ? "The sun stays up all day today (polar day)." :
                         r == 2 ? "The sun stays down all day today (polar night)." :
                         r == -2 ? "No location yet: tap Edit and type where you are." :
                         "The phone's clock isn't set, so the times can't be worked out.";
-        sv_text(d, TK_IT600, 17, 32, 140, 326, 24, m, INK);
+        sv_text(d, TK_IT600, 17, ROW_TX, SUN_TOP + 28, CONTENT_R - 16 - ROW_TX, 24, m, INK);
     }
-    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 260), "LOCATION", .52f, 0, W(.55f), 0);
-    d_rrect(d, 16, 280, 358, 47, 16, SVC(SV_GROUP));
+    d_text(d, TK_IT400, 13, ROW_TX, SUN_LOC - 10, "LOCATION", .52f, 0, W(.55f), 0);
+    d_rrect(d, GROUP_X, SUN_LOC, GROUP_W, 47, 16, SVC(SV_GROUP));
     sun_loc_text(c);
-    d_text(d, TK_IT400, 16, 32, 280 + 29, c, 0, 0, INK, 0);
+    d_text(d, TK_IT400, 16, ROW_TX, SUN_LOC + 29, c, 0, 0, INK, 0);
     float w = tw(TK_IT600, 16, "Edit", 0, 0);
-    d_text(d, TK_IT600, 16, 358 - w, 280 + 29, "Edit", 0, 0, SVC(SV_TINT), 0);
-    sv_text(d, TK_IT400, 13, 36, 340, 320, 18, "From the phone's clock and the place you type (no GPS yet); checked against NOAA's "
+    d_text(d, TK_IT600, 16, CONTENT_R - 16 - w, SUN_LOC + 29, "Edit", 0, 0, SVC(SV_TINT), 0);
+    sv_text(d, TK_IT400, 13, ROW_TX, SUN_LOC + 60, CONTENT_R - 16 - ROW_TX, 18, "From the phone's clock and the place you type (no GPS yet); checked against NOAA's "
             "calculator to a minute. The sun is in the south at midday north of the tropics.", W(.45f));
 }
 static void sun_fields(void)
 {
     tk_layer *l = &svl[SVL_FLD];
     relayer(l);
-    dc d = mk(l, "sv-sun", 150, 146, 210, 88, 1, 0);
+    dc d = mk(l, "sv-sun", CONTENT_R - 220, SUN_ED + 6, 210, 88, 1, 0);
     for (int i = 0; i < 2; i++) {
-        float y = 140 + 47 * i;
+        float y = SUN_ED + 47 * i;
         const char *t = SV.sun_v[i];
         float w = tw(TK_IT400, 17, t, 0, TK_TNUM);
-        d_text(&d, TK_IT400, 17, 354 - w, bl(TK_IT400, 17, y + 13), t, 0, TK_TNUM, INK, 0);
-        if (i == SV.sun_f) d_rrect(&d, 356, y + 12, 2, 23, 1, SVC(SV_TINT));
+        d_text(&d, TK_IT400, 17, CONTENT_R - 20 - w, bl(TK_IT400, 17, y + 13), t, 0, TK_TNUM, INK, 0);
+        if (i == SV.sun_f) d_rrect(&d, CONTENT_R - 18, y + 12, 2, 23, 1, SVC(SV_TINT));
     }
 }
 static void sun_tap(float x, float y)
 {
     if (!SV.sun_edit) {
-        if (x >= 260 && y >= 280 && y < 327) {
+        if (x >= CONTENT_R - 120 && y >= SUN_LOC && y < SUN_LOC + 47) {
             int la, lo;
             sh_loc(&la, &lo);
             SV.sun_v[0][0] = SV.sun_v[1][0] = 0;
@@ -860,9 +877,9 @@ static void sun_tap(float x, float y)
         }
         return;
     }
-    int save = x >= 290 && y >= 40 && y < 86;
-    if (!save && x < 120 && y >= 40 && y < 86) { SV.sun_edit = 0; sv_rebuild(); return; }
-    if (y >= 140 && y < 233 && x >= 16 && x < 374) { SV.sun_f = y >= 187; sv_rebuild(); return; }
+    int save = DONE_HIT(x, y);
+    if (!save && SV_CANCEL_HIT(x, y)) { SV.sun_edit = 0; sv_rebuild(); return; }
+    if (y >= SUN_ED && y < SUN_ED + 93 && x >= GROUP_X && x < CONTENT_R) { SV.sun_f = y >= SUN_ED + 47; sv_rebuild(); return; }
     int k = save ? 5 : y >= 540 ? sv_kb_tap(x, y, SV.sun_v[SV.sun_f], 9, 1) : 0;
     if (k == 5) {
         int la, lo;
@@ -878,17 +895,21 @@ static void sun_tap(float x, float y)
 }
 
 /* ---- Guide --------------------------------------------------------------------------------------------------------- */
-#define GD_TEXT_TOP 150.0f
+#define GD_LIST (CONTENT_TOP + 46)      /* the chapters' group, under the two-line note */
+#define GD_PAGES PUSHED_TOP             /* a chapter's pages (a pushed page) */
+#define GD_TITLE PUSHED_TOP             /* a page's title */
+#define GD_TEXT_TOP (PUSHED_TOP + 46)
 #define GD_TEXT_BOT 690.0f
 #define GD_NAV 706.0f
+#define GD_BTN 120.0f                   /* Previous / Next */
 static float guide_body(dc *d, const char *const *ln, float size, float top)
 {
     float lhh = size * 1.38f, y = top;
     for (int i = 0; ln && ln[i]; i++) {
         int warn = ln[i][0] == '!' && ln[i][1] == ' ';
         const char *s = warn ? ln[i] + 2 : ln[i];
-        if (warn && d) d_rrect(d, 16, y + 2, 3, lhh * sv_text(0, TK_IT600, size, 0, 0, 340, lhh, s, INK) - 4, 1.5f, SVC(SV_WARN));
-        y += lhh * sv_text(d, warn ? TK_IT600 : TK_IT400, size, 26, y, 340, lhh, s, warn ? SVC(SV_WARN) : W(.88f)) + size * .7f;
+        if (warn && d) d_rrect(d, MARGIN - 2, y + 2, 3, lhh * sv_text(0, TK_IT600, size, 0, 0, 340, lhh, s, INK) - 4, 1.5f, SVC(SV_WARN));
+        y += lhh * sv_text(d, warn ? TK_IT600 : TK_IT400, size, MARGIN + 6, y, CONTENT_W - 6, lhh, s, warn ? SVC(SV_WARN) : W(.88f)) + size * .7f;
     }
     return y;
 }
@@ -905,58 +926,54 @@ static void page_guide(dc *d)
     int np, n = sh_guide_n();
     if (SV.gch < 0) {
         d_h1(d, "Survival Guide");
-        sv_text(d, TK_IT400, 13, 20, 106, 350, 18, "Offline first aid and survival. Not a substitute for training: call 112 if any network works.", W(.55f));
-        d_rrect(d, 16, 152, 358, 62.0f * n - 1, 16, SVC(SV_GROUP));
+        sv_text(d, TK_IT400, 13, MARGIN, CONTENT_TOP, CONTENT_W, 18, "Offline first aid and survival. Not a substitute for training: call 112 if any network works.", W(.55f));
+        d_rrect(d, GROUP_X, GD_LIST, GROUP_W, 62.0f * n - 1, 16, SVC(SV_GROUP));
         for (int c = 0; c < n; c++) {
-            float y = 152 + 62.0f * c;
+            float y = GD_LIST + 62.0f * c, tx = GROUP_X + 58;
             const char *t = sh_guide_chapter(c, &sub, &argb, &np);
-            d_rrect(d, 30, y + 16, 30, 30, 8, tk_hex(argb & 0xffffff, 1));
+            d_rrect(d, GROUP_X + 14, y + 16, 30, 30, 8, tk_hex(argb & 0xffffff, 1));
             char num[4];
             put_dec(num, c + 1);
             float w = tw(TK_IT700, 15, num, 0, 0);
-            d_text(d, TK_IT700, 15, 45 - w / 2, bl(TK_IT700, 15, y + 22), num, 0, 0, W(1), 0);
-            d_text(d, TK_IT600, 17, 74, bl(TK_IT600, 17, y + 11), t, 0, 0, INK, 0);
-            d_text(d, TK_IT400, 13, 74, bl(TK_IT400, 13, y + 34), sub, 0, 0, W(.55f), 0);
-            d_icon(d, "chev", 344, y + 24, .45f);
-            if (c + 1 < n) d_rrect(d, 74, y + 61, 300, .5f, 0, W(.08f));
+            d_text(d, TK_IT700, 15, GROUP_X + 29 - w / 2, bl(TK_IT700, 15, y + 22), num, 0, 0, W(1), 0);
+            d_text_box(d, TK_IT600, 17, tx, bl(TK_IT600, 17, y + 11), CONTENT_R - 36 - tx, 0, t, 0, 0, INK, 0);
+            d_text_box(d, TK_IT400, 13, tx, bl(TK_IT400, 13, y + 34), CONTENT_R - 36 - tx, 0, sub, 0, 0, W(.55f), 0);
+            d_icon(d, "chev", CONTENT_R - 30, y + 24, .45f);
+            if (c + 1 < n) d_rrect(d, tx, y + 61, CONTENT_R - tx, .5f, 0, W(.08f));
         }
         char b[48];
         int k = put_dec(b, guide_total());
         sv_cat(b, k, " pages, kept on the phone");
-        d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 152 + 62.0f * n + 12), b, 0, 0, W(.4f), 0);
+        d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, GD_LIST + 62.0f * n + 12), b, 0, 0, W(.4f), 0);
         return;
     }
     const char *ct = sh_guide_chapter(SV.gch, &sub, &argb, &np);
     if (SV.gpg < 0) {
-        sv_back(d, "Guide");
-        d_text(d, TK_IT700, 30, 20, bl(TK_IT700, 30, 96), ct, 0, 0, INK, 0);
-        d_rrect(d, 16, 146, 358, 47.0f * np - 1, 16, SVC(SV_GROUP));
+        sv_back(d, ct);
+        d_rrect(d, GROUP_X, GD_PAGES, GROUP_W, 47.0f * np - 1, 16, SVC(SV_GROUP));
         for (int p = 0; p < np; p++) {
-            float y = 146 + 47.0f * p;
-            d_text(d, TK_IT400, 16, 32, y + 29, sh_guide_page(SV.gch, p, 0), 0, 0, INK, 0);
-            d_icon(d, "chev", 344, y + 16.5f, .45f);
-            if (p + 1 < np) d_rrect(d, 32, y + 46, 342, .5f, 0, W(.08f));
+            float y = GD_PAGES + 47.0f * p;
+            d_text_box(d, TK_IT400, 16, ROW_TX, y + 29, CONTENT_R - 36 - ROW_TX, 0, sh_guide_page(SV.gch, p, 0), 0, 0, INK, 0);
+            d_icon(d, "chev", CONTENT_R - 30, y + 16.5f, .45f);
+            if (p + 1 < np) d_rrect(d, ROW_TX, y + 46, CONTENT_R - ROW_TX, .5f, 0, W(.08f));
         }
         return;
     }
     const char *const *ln = 0;
     const char *pt = sh_guide_page(SV.gch, SV.gpg, &ln);
-    sv_back(d, ct);
-    char cap[64];
-    int k = 0;
-    for (const char *s = ct; *s && k < 60; s++) cap[k++] = *s >= 'a' && *s <= 'z' ? (char)(*s - 32) : *s;
-    cap[k] = 0;
-    d_text(d, TK_IT600, 13, 20, bl(TK_IT600, 13, 84), cap, .52f, 0, tk_hex(argb & 0xffffff, 1), 0);
-    d_text(d, TK_IT700, 28, 20, bl(TK_IT700, 28, 102), pt, 0, 0, INK, 0);
+    sv_back(d, ct);                                    /* the chapter inline; the page's title in its colour's bar */
+    d_rrect(d, MARGIN, GD_TITLE + 4, 4, 28, 2, tk_hex(argb & 0xffffff, 1));
+    d_text_box(d, TK_IT700, 28, MARGIN + 14, bl(TK_IT700, 28, GD_TITLE), CONTENT_W - 14, 0, pt, 0, 0, INK, 0);
+    int k;
     float size = 16;
     while (size > 12 && guide_body(0, ln, size, GD_TEXT_TOP) > GD_TEXT_BOT) size -= .5f;
     guide_body(d, ln, size, GD_TEXT_TOP);
     /* Previous / Next (across chapters), where we are */
     int first = SV.gch == 0 && SV.gpg == 0, last = SV.gch == n - 1 && SV.gpg == np - 1;
-    d_rrect(d, 16, GD_NAV, 120, 46, 23, W(first ? .05f : .12f));
-    d_rrect(d, 254, GD_NAV, 120, 46, 23, W(last ? .05f : .12f));
-    d_text(d, TK_IT600, 16, 76 - tw(TK_IT600, 16, "Previous", 0, 0) / 2, bl(TK_IT600, 16, GD_NAV + 13), "Previous", 0, 0, W(first ? .3f : 1), 0);
-    d_text(d, TK_IT600, 16, 314 - tw(TK_IT600, 16, "Next", 0, 0) / 2, bl(TK_IT600, 16, GD_NAV + 13), "Next", 0, 0, W(last ? .3f : 1), 0);
+    d_rrect(d, MARGIN, GD_NAV, GD_BTN, 46, 23, W(first ? .05f : .12f));
+    d_rrect(d, CONTENT_R - GD_BTN, GD_NAV, GD_BTN, 46, 23, W(last ? .05f : .12f));
+    d_text(d, TK_IT600, 16, MARGIN + GD_BTN / 2 - tw(TK_IT600, 16, "Previous", 0, 0) / 2, bl(TK_IT600, 16, GD_NAV + 13), "Previous", 0, 0, W(first ? .3f : 1), 0);
+    d_text(d, TK_IT600, 16, CONTENT_R - GD_BTN / 2 - tw(TK_IT600, 16, "Next", 0, 0) / 2, bl(TK_IT600, 16, GD_NAV + 13), "Next", 0, 0, W(last ? .3f : 1), 0);
     char b[16];
     k = put_dec(b, SV.gpg + 1);
     k = sv_cat(b, k, " of ");
@@ -967,22 +984,22 @@ static void guide_tap(float x, float y)
 {
     int np, n = sh_guide_n();
     if (SV.gch < 0) {
-        if (x >= 16 && x < 374 && y >= 152 && y < 152 + 62.0f * n) { SV.gch = (int)((y - 152) / 62); SV.gpg = -1; sv_rebuild(); }
+        if (x >= GROUP_X && x < CONTENT_R && y >= GD_LIST && y < GD_LIST + 62.0f * n) { SV.gch = (int)((y - GD_LIST) / 62); SV.gpg = -1; sv_rebuild(); }
         return;
     }
     (void)sh_guide_chapter(SV.gch, 0, 0, &np);
     if (SV.gpg < 0) {
         if (sv_back_hit(x, y)) { SV.gch = -1; sv_rebuild(); return; }
-        if (x >= 16 && x < 374 && y >= 146 && y < 146 + 47.0f * np) { SV.gpg = (int)((y - 146) / 47); sv_rebuild(); }
+        if (x >= GROUP_X && x < CONTENT_R && y >= GD_PAGES && y < GD_PAGES + 47.0f * np) { SV.gpg = (int)((y - GD_PAGES) / 47); sv_rebuild(); }
         return;
     }
     if (sv_back_hit(x, y)) { SV.gpg = -1; sv_rebuild(); return; }
     if (y < GD_NAV - 6 || y >= GD_NAV + 52) return;
-    if (x < 150) {
+    if (x < MARGIN + GD_BTN + 10) {
         if (SV.gpg > 0) SV.gpg--;
         else if (SV.gch > 0) { SV.gch--; (void)sh_guide_chapter(SV.gch, 0, 0, &np); SV.gpg = np - 1; }
         else return;
-    } else if (x >= 240) {
+    } else if (x >= CONTENT_R - GD_BTN - 10) {
         if (SV.gpg + 1 < np) SV.gpg++;
         else if (SV.gch + 1 < n) { SV.gch++; SV.gpg = 0; }
         else return;
@@ -999,7 +1016,7 @@ static void page_compass(dc *d)
     float w = tw(TK_IT700, 22, "N", 0, 0);
     d_text(d, TK_IT700, 22, 195 - w / 2, bl(TK_IT700, 22, 200), "N", 0, 0, W(.25f), 0);
     d_rrect(d, 189, 284, 12, 12, 6, W(.2f));
-    d_empty(d, 400, 520, "Not Available Yet", sh_sensors_why());
+    d_empty(d, 396, 540, "Not Available Yet", sh_sensors_why());   /* centred between the rings and the bottom's half */
 }
 
 /* ---- the hooks shell_lock.c calls -------------------------------------------------------------------------------- */
@@ -1029,7 +1046,7 @@ static void sv_extras(const char *k)
     else if (!tk_strcmp(k, "power")) last2_extras();
     else if (!tk_strcmp(k, "usb")) usb_extras();
     else if (!tk_strcmp(k, "sun") && SV.sun_edit) sun_fields();
-    else if (!tk_strcmp(k, "settings") && AS.sub == 4 && SV.cf >= 0) sv_field(32, 150, 326, SV.ebuf, 1, INK);
+    else if (!tk_strcmp(k, "settings") && AS.sub == 4 && SV.cf >= 0) sv_field(ROW_TX, CE_FLD + 10, CONTENT_R - 16 - ROW_TX, SV.ebuf, 1, INK);
 }
 /* an app opened (app_open): every tool opens on its first view */
 static void sv_opened(void)
@@ -1046,12 +1063,50 @@ static void sv_closed(void)
     if (SV.from_lock) { SV.from_lock = 0; if (locked) set_lock(lockY); }
 }
 static void sv_settings_card(void) { AS.sub = 4; SV.cf = -1; sv_rebuild(); }
+/* Settings' Medical Card row, where build_app_page draws it (0: none); *sec its group */
+static float sv_card_row(int *sec)
+{
+    const appdef *A = &APPS[AP.a];
+    for (int s = 0; s < A->ns; s++)
+        for (int i = 0; i < A->sec[s].n; i++)
+            if (!tk_strcmp(A->sec[s].rows[i].l, "Medical Card")) { if (sec) *sec = s; return gen_row_y(A, s, i); }
+    return 0;
+}
+static float sv_card_row_y(void) { return sv_card_row(0); }
+/* survival-next (E's bands): what lights under a finger on a tool's page (app_press): the back, a list's row, a key; 0 none */
+static int sv_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
+{
+    int kb = (is_app("settings") && AS.sub == 4 && SV.cf >= 0) || (is_app("sun") && SV.sun_edit);
+    if (kb) {
+        if (y >= 548 && kb_rect(x, y, KR[SV.num], !SV.num, r)) { *g = *r; *rad = 6; *c = W(.35f); return 1; }
+        return 0;
+    }
+    if (((is_app("settings") && AS.sub == 4) || (is_app("guide") && SV.gch >= 0)) && BACK_HIT(x, y)) {
+        *r = *g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D };
+        *rad = BACK_D / 2; *c = W(.16f);
+        return 1;
+    }
+    float top = 0, rh = 0;
+    int n = 0, np, sec = 0;
+    if (is_app("settings") && AS.sub == 4) { top = CE_TOP; rh = 47; n = SH_CARD_NF; }
+    else if (is_app("settings") && !AS.sub) { top = sv_card_row(&sec); rh = 47; n = top > 0; }
+    else if (is_app("guide") && SV.gch < 0) { top = GD_LIST; rh = 62; n = sh_guide_n(); }
+    else if (is_app("guide") && SV.gpg < 0) { (void)sh_guide_chapter(SV.gch, 0, 0, &np); top = GD_PAGES; rh = 47; n = np; }
+    if (!n || x < GROUP_X || x >= CONTENT_R || y < top || y >= top + rh * n) return 0;
+    int i = (int)((y - top) / rh);
+    *r = (tk_rect){ GROUP_X, top + rh * i, GROUP_W, rh };
+    *g = is_app("settings") && !AS.sub ? (tk_rect){ GROUP_X, gen_row_y(&APPS[AP.a], sec, 0), GROUP_W, 47.0f * APPS[AP.a].sec[sec].n - 1 }
+                                       : (tk_rect){ GROUP_X, top, GROUP_W, rh * n - 1 };
+    *rad = 16; *c = W(.1f);
+    return 1;
+}
 /* a tap on an app's page: 1 if it was a tool's */
 static int sv_tap(float x, float y)
 {
     if (is_app("settings")) {
         if (AS.sub == 4) { card_tap(x, y); return 1; }
-        if (!AS.sub && x >= 16 && x < 374 && y >= 528 && y < 575) { sv_settings_card(); return 1; }   /* the row */
+        float ry = sv_card_row_y();
+        if (!AS.sub && ry > 0 && x >= GROUP_X && x < CONTENT_R && y >= ry && y < ry + 47) { sv_settings_card(); return 1; }   /* the row */
         return 0;
     }
     if (!AP.on || !sv_key(APPS[AP.a].k)) return 0;
