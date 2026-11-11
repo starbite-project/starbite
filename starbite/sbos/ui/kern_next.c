@@ -770,6 +770,103 @@ static void film_start(int film)
     stats_reset();
 }
 
+#ifndef SBOS_NEXT_NOGPU
+/* P4: the GPU's frame against the CPU's, the lock screen at rest: the CPU draws it whole into one buffer, the GPU
+ * into the other, and every 8th pixel of every 8th row is compared (known small differences: the GPU's anti-aliased
+ * rounded corners and its bilinear wallpaper). Fails on a mean error over 8 levels or over 5 % of points far off */
+static void gpu_vs_cpu(void)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: gpu: ");
+    ub_dec(&u, comp.gpu_frames);
+    ub_s(&u, " frames on the GPU, ");
+    ub_dec(&u, comp.gpu_fallbacks);
+    ub_s(&u, " given back to the CPU");
+    sb_log(u.b);
+    if (!comp.gpu) {
+        sb_log("selftest: FAILED: next: gpu: the GPU did not come up (see the gpucomp lines)");
+        st_failed = 1;
+        return;
+    }
+    if (!gpucomp_ready()) {
+        sb_log("selftest: FAILED: next: gpu: the GPU stopped during the films (a fault: see the gpucomp lines)");
+        st_failed = 1;
+        return;
+    }
+    if (!K.screen_on) power_screen_set(1);
+    sh_set("reset", "", 0);
+    int (*g)(void *, uint32_t *, const tk_gpu_item *, int, uint64_t *) = comp.gpu;
+    comp.gpu = 0;
+    tk_comp_frame(&comp, 0, 1);
+    present();
+    uint64_t cpu_us = comp.last_us;
+    int cpu_buf = scan_cur;
+    comp.gpu = g;
+    uint32_t gf = comp.gpu_frames;
+    tk_comp_frame(&comp, 0, 1);
+    present();
+    hw_wdt_feed();
+    if (scan_cur == cpu_buf || !comp.last_px || comp.gpu_frames != gf + 1) {
+        sb_log("selftest: FAILED: next: gpu: the GPU did not draw the comparison frame");
+        st_failed = 1;
+        return;
+    }
+    const volatile uint32_t *A = (const volatile uint32_t *)(uintptr_t)scan_pa[cpu_buf];
+    const volatile uint32_t *B = (const volatile uint32_t *)(uintptr_t)scan_pa[scan_cur];
+    uint64_t sum = 0, n = 0, far = 0;
+    int fx = -1, fy = -1;
+    uint32_t fa = 0, fb = 0;
+    for (int y = 4; y < TK_H; y += 8)
+        for (int x = 4; x < TK_W; x += 8) {
+            uint32_t a = A[(uint32_t)y * TK_W + (uint32_t)x], b = B[(uint32_t)y * TK_W + (uint32_t)x];
+            int m = 0;
+            for (int k = 0; k < 24; k += 8) {
+                int d = (int)(a >> k & 255) - (int)(b >> k & 255);
+                if (d < 0) d = -d;
+                sum += (uint64_t)d;
+                if (d > m) m = d;
+            }
+            n += 3;
+            if (m > 48) {
+                if (!far) { fx = x; fy = y; fa = a; fb = b; }
+                far++;
+            }
+        }
+    uint64_t pts = n / 3, mean100 = sum * 100 / n;
+    int bad = mean100 > 800 || far * 20 > pts;
+    ub_init(&u);
+    ub_s(&u, bad ? "selftest: FAILED: next: gpu: the GPU's lock screen is not the CPU's: mean error " :
+                   "next: gpu: the GPU's lock screen matches the CPU's: mean error ");
+    ub_dec(&u, mean100 / 100);
+    ub_s(&u, ".");
+    ub_dec(&u, mean100 % 100 / 10);
+    ub_s(&u, " levels, far off ");
+    ub_dec(&u, far);
+    ub_s(&u, " of ");
+    ub_dec(&u, pts);
+    ub_s(&u, " points; the whole frame: CPU ");
+    ub_dec(&u, cpu_us);
+    ub_s(&u, " us, GPU ");
+    ub_dec(&u, comp.us_gpu);
+    ub_s(&u, " us");
+    sb_log(u.b);
+    if (far) {
+        ub_init(&u);
+        ub_s(&u, "next: gpu: the first far point x ");
+        ub_dec(&u, (uint64_t)fx);
+        ub_s(&u, " y ");
+        ub_dec(&u, (uint64_t)fy);
+        ub_s(&u, ": CPU 0x");
+        ub_hexn(&u, fa, 8);
+        ub_s(&u, ", GPU 0x");
+        ub_hexn(&u, fb, 8);
+        sb_log(u.b);
+    }
+    if (bad) st_failed = 1;
+}
+#endif
+
 /* every 8 ms (the touch controller's rate is about 120 Hz): the finger's next position; 1 while the film runs */
 int next_selftest_step(void)
 {
@@ -835,6 +932,9 @@ int next_selftest_step(void)
         power_screen_set(1);
     }
     if (F.film < 10) { film_start(F.film + 1); return 1; }
+#ifndef SBOS_NEXT_NOGPU
+    gpu_vs_cpu();
+#endif
     {
         /* the present's kernels against uibench's loops, on these buffers and cores (boosted, workers on) */
         static const char *const BN[5] = { "the motion present (2x, rows in pairs)", "the rest copy (tk_memcpy rows)",
