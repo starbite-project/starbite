@@ -897,38 +897,50 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     uint64_t t1 = tk_us();
     c->us_wait = c->us_catch = 0;
     if (c->acquire && nd) {
-        /* two buffers: the one the display does not read (the platform waits for the last flip to latch) */
-        c->panel.px = c->acquire(c->acq_ctx);
+        /* the buffer the display neither shows nor has queued (the platform's; it may wait) */
+        int age = 1;
+        c->panel.px = c->acquire(c->acq_ctx, &age);
         uint64_t tw = tk_us();
         c->us_wait = tw - t1;
         t1 = tw;
-        /* it holds the frame before the last: what the last frame changed comes over first, minus what this frame
-         * presents anyway (rect differences; past 64 pieces a piece stays whole: drawn twice, still right) */
-        tk_irect E[64];
-        int ne = 0;
-        for (int i = 0; i < c->npd; i++) E[ne++] = c->pd[i];
-        for (int q = 0; q < nd && ne; q++) {
-            tk_irect d = motion ? (tk_irect){ 2 * D[q].x0, 2 * D[q].y0, 2 * D[q].x1, 2 * D[q].y1 } : D[q];
-            tk_irect N[64];
-            int nn = 0;
-            for (int i = 0; i < ne; i++) {
-                tk_irect e = E[i], in = isect(e, d);
-                if (iempty(in)) { if (nn < 64) N[nn++] = e; continue; }
-                tk_irect pc[4];
-                int np = 0;
-                if (e.y0 < in.y0) pc[np++] = (tk_irect){ e.x0, e.y0, e.x1, in.y0 };
-                if (in.y1 < e.y1) pc[np++] = (tk_irect){ e.x0, in.y1, e.x1, e.y1 };
-                if (e.x0 < in.x0) pc[np++] = (tk_irect){ e.x0, in.y0, in.x0, in.y1 };
-                if (in.x1 < e.x1) pc[np++] = (tk_irect){ in.x1, in.y0, e.x1, in.y1 };
-                if (nn + np > 64) { if (nn < 64) N[nn++] = e; continue; }
-                for (int k = 0; k < np; k++) N[nn++] = pc[k];
+        /* it is age frames behind: their rects come over first, oldest first, each from where that frame drew
+         * (the half canvas for a motion frame, else the RAM frame), minus what this frame presents anyway (rect
+         * differences; past 64 pieces a piece stays whole: drawn twice, still right) */
+        int known = age >= 1 && age <= TK_HIST && (uint32_t)age <= c->fno;
+        for (int k = known ? age : 1; k >= 1; k--) {
+            tk_irect E[64];
+            int ne = 0, src_half;
+            if (known) {
+                int sl = (int)((c->fno - (uint32_t)k) % TK_HIST);
+                for (int i = 0; i < c->hn[sl]; i++) E[ne++] = c->hd[sl][i];
+                src_half = c->hh[sl];
+            } else {
+                E[ne++] = screen;                       /* unknown: everything, from what is current */
+                src_half = was_motion == 1;
             }
-            tk_memcpy(E, N, sizeof(tk_irect) * (size_t)nn);
-            ne = nn;
-        }
-        if (ne) {
-            job J2 = { c, &T, E, ne, c->pd_half, 2 };
-            run_bands(c, &J2);
+            for (int q = 0; q < nd && ne; q++) {
+                tk_irect d = motion ? (tk_irect){ 2 * D[q].x0, 2 * D[q].y0, 2 * D[q].x1, 2 * D[q].y1 } : D[q];
+                tk_irect N[64];
+                int nn = 0;
+                for (int i = 0; i < ne; i++) {
+                    tk_irect e = E[i], in = isect(e, d);
+                    if (iempty(in)) { if (nn < 64) N[nn++] = e; continue; }
+                    tk_irect pc[4];
+                    int np = 0;
+                    if (e.y0 < in.y0) pc[np++] = (tk_irect){ e.x0, e.y0, e.x1, in.y0 };
+                    if (in.y1 < e.y1) pc[np++] = (tk_irect){ e.x0, in.y1, e.x1, e.y1 };
+                    if (e.x0 < in.x0) pc[np++] = (tk_irect){ e.x0, in.y0, in.x0, in.y1 };
+                    if (in.x1 < e.x1) pc[np++] = (tk_irect){ in.x1, in.y0, e.x1, in.y1 };
+                    if (nn + np > 64) { if (nn < 64) N[nn++] = e; continue; }
+                    for (int k2 = 0; k2 < np; k2++) N[nn++] = pc[k2];
+                }
+                tk_memcpy(E, N, sizeof(tk_irect) * (size_t)nn);
+                ne = nn;
+            }
+            if (ne) {
+                job J2 = { c, &T, E, ne, src_half, 2 };
+                run_bands(c, &J2);
+            }
         }
         uint64_t tc = tk_us();
         c->us_catch = tc - t1;
@@ -938,11 +950,13 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     run_bands(c, &J);
     uint64_t t2 = tk_us();
     if (c->acquire && nd) {
-        /* what this frame wrote into its buffer: the other buffer lacks exactly that (motion: the 2x margin) */
+        /* what this frame wrote into its buffer: the other buffers lack exactly that (motion: the 2x margin) */
+        int sl = (int)(c->fno % TK_HIST);
         for (int q = 0; q < nd; q++)
-            c->pd[q] = motion ? isect((tk_irect){ 2 * D[q].x0 - 2, 2 * D[q].y0 - 2, 2 * D[q].x1 + 2, 2 * D[q].y1 + 2 }, screen) : D[q];
-        c->npd = nd;
-        c->pd_half = motion;
+            c->hd[sl][q] = motion ? isect((tk_irect){ 2 * D[q].x0 - 2, 2 * D[q].y0 - 2, 2 * D[q].x1 + 2, 2 * D[q].y1 + 2 }, screen) : D[q];
+        c->hn[sl] = nd;
+        c->hh[sl] = motion;
+        c->fno++;
     }
     if (!motion)
         for (int q = 0; q < nd; q++) { pend = have_pend ? iunion(pend, D[q]) : D[q]; have_pend = 1; }

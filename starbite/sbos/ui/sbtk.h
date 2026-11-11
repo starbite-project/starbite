@@ -196,10 +196,15 @@ typedef struct {
     /* P2r, two panel buffers (tear-free flips): acquire (NULL: one buffer) returns the buffer the display does not
      * read, after the last flip latched; that buffer holds the frame before the last, so the present also brings
      * over what the last presented frame changed (pd, its panel rects; pd_half: drawn from the half canvas) */
-    uint32_t *(*acquire)(void *ctx);
+    /* P2t: three buffers. acquire also says how many presented frames the buffer is behind (*age: 1 = it holds
+     * the last frame but one; <= 0 or > TK_HIST: unknown, everything comes over); the compositor keeps the
+     * presented frames' rects (hd) for that */
+    uint32_t *(*acquire)(void *ctx, int *age);
     void *acq_ctx;
-    tk_irect pd[16];
-    int npd, pd_half;
+#define TK_HIST 8
+    tk_irect hd[TK_HIST][16];
+    int hn[TK_HIST], hh[TK_HIST];
+    uint32_t fno;              /* presented frames so far (with acquire) */
     uint64_t us_wait, us_catch;
     uint64_t us_idle, us_halfs;
     uint32_t sharp_motion;     /* motion frames drawn at full resolution (small: P2s) */  /* the last frame's half-canvas catch-up (tk_comp_idle) and half copies made in it */  /* the last frame's wait for the free buffer and its catch-up pass */
