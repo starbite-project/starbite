@@ -257,6 +257,26 @@ const char *sh_guide_page(int c, int p, const char *const **lines)
     return ch[c].pages[p].title;
 }
 const char *sh_sensors_why(void) { return surv_sensors_why(); }
+/* helper J: the Compass page's hub (survival_host.c: 4 s starting, then a slowly turning heading) */
+int sh_sensors_on(int on)
+{
+    static int was;
+    int r = surv_sensors_on(on);
+    if (!!on != was) fprintf(stderr, "sensors: %s\n", on ? (r < 0 ? "refused" : "start (pretend: 4 s)") : "stop");
+    was = on && r >= 0;
+    return r;
+}
+int sh_sensors_state(void) { return surv_sensors_state(); }
+int sh_heading(int *deg_x10, int *accuracy) { return surv_sensors_state() == 2 ? surv_heading(deg_x10, accuracy) : 0; }
+static int host_tilt, host_p10, host_r10;       /* a state's tilt (tilt=P,R) instead of the simulation's */
+int sh_tilt(int *pitch_x10, int *roll_x10)
+{
+    if (surv_sensors_state() != 2) return 0;
+    if (host_tilt) { *pitch_x10 = host_p10; *roll_x10 = host_r10; return 1; }
+    return surv_tilt(pitch_x10, roll_x10);
+}
+int sh_steps(unsigned *n) { uint32_t v = 0; int r = surv_sensors_state() == 2 && surv_steps(&v); *n = v; return r; }
+long long sh_utc(void) { return 1794500000LL + 25 * 60 + (long long)(surv_host_now_ms / 1000); }   /* the pretend fix: 25 min old */
 /* helper D: Maps' last GNSS fix: none unless a state gives one (gnss=LAT,LON in degrees: a pretend fix from Android) */
 static sh_gnss_t host_fix;
 static int host_have_fix;
@@ -336,6 +356,13 @@ static void apply_state(const char *st)
     /* date=WDAY:DAY (P3p): a new day as the phone's clock reports it (the Calendar icon follows) */
     if (!strcmp(what, "date")) { sh_status(21, 6, atoi(key), (int)v, 11, 87, 41); return; }
     if (!strcmp(what, "hostms")) { surv_host_now_ms = (uint64_t)v; return; }   /* survival-next: the simulation's clock */
+    if (!strcmp(what, "last2")) { surv_last2_set(v > 0, "a state"); return; }   /* helper J: last2=:1 (the Compass refused) */
+    if (!strcmp(what, "tilt")) {                 /* helper J: tilt=PITCH,ROLL in degrees (the Level's stills: upright, level) */
+        double p = 0, r = 0;
+        host_tilt = sscanf(eq + 1, "%lf,%lf", &p, &r) == 2;
+        host_p10 = (int)(p * 10); host_r10 = (int)(r * 10);
+        return;
+    }
     if (!strcmp(what, "comms")) { comms_fake_state(key, v); return; }          /* helper I: comms=incoming, ... */
     if (!strcmp(what, "gnss")) {                 /* helper D: gnss=60.1699,24.9384 (a pretend fix: 8.5 m, 9 satellites) */
         double la = 0, lo = 0;

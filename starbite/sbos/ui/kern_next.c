@@ -22,6 +22,7 @@
 #include "shell.h"
 #include "survival.h"
 #include "gnssfix.h"
+#include "shub.h"
 #include "store.h"
 #include "../guide/sbguide.h"
 
@@ -383,7 +384,7 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
-    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3u");     /* P2y: the apps' live values */
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3v");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);
         sh_alarm(on, ah, am);
@@ -1442,6 +1443,41 @@ const char *sh_guide_page(int c, int p, const char *const **lines)
     return ch[c].pages[p].title;
 }
 const char *sh_sensors_why(void) { return surv_sensors_why(); }
+/* helper J: the Compass page's sensor hub (kern/survival.c on shub.c): started at the page's open, kept alive while it
+ * shows (every 20 s), stopped at its close; the values are cached copies (no I/O), read at 10 Hz while the page shows.
+ * The self test's build never starts it (its films never open the page; this is the second line). */
+_Static_assert((int)SH_SENS_OFF == (int)SHUB_OFF && (int)SH_SENS_STARTING == (int)SHUB_STARTING &&
+               (int)SH_SENS_RUNNING == (int)SHUB_RUNNING && (int)SH_SENS_FAILED == (int)SHUB_FAILED, "SH_SENS_* are SHUB_*");
+int sh_sensors_on(int on)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    static int said;
+    if (on && !said) { said = 1; SURV_DRY("the sensor hub"); }
+    return on ? -1 : 0;
+#else
+    static int was;
+    if (on && !was) sb_log("next: survival: the compass page starts the sensor hub");
+    if (!on && was) sb_log("next: survival: the compass page closed: the sensor hub off");
+    int r = surv_sensors_on(on);
+    was = on && r >= 0;
+    return r;
+#endif
+}
+int sh_sensors_state(void) { return surv_sensors_state(); }
+int sh_heading(int *deg_x10, int *accuracy) { return surv_heading(deg_x10, accuracy); }
+int sh_tilt(int *pitch_x10, int *roll_x10) { return surv_tilt(pitch_x10, roll_x10); }
+int sh_steps(unsigned *n)
+{
+    uint32_t v = 0;
+    int r = surv_steps(&v);
+    *n = v;
+    return r;
+}
+long long sh_utc(void)
+{
+    struct sbos_time t;
+    return clock_now(&t) ? (long long)t.utc : 0;
+}
 
 /* ---- helper I: calls and SMS (shell_comms.inc) on the modem session's kmodem_call_* / kmodem_sms_* (kern.h defines
  * KMODEM_CALLS once that commit is in; without it every call refuses, "not in this version"). The shell asks only at
@@ -1546,6 +1582,7 @@ static int comms_now(void)
         s.audio = c.audio; s.muted = c.muted; s.audio_ok = c.audio_ok;        /* KAUDIO_* = SH_AUDIO_* */
         sb_strcpy(s.number, sizeof(s.number), c.number);
         sb_strcpy(s.why, sizeof(s.why), c.why);
+        sb_strcpy(s.audio_why, sizeof(s.audio_why), c.audio_why);
         sh_call(&s);
         if (c.state == KCALL_INCOMING && !K.screen_on) power_screen_set(1);
         ch = 1;

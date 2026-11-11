@@ -93,6 +93,12 @@ int surv_heading(int *deg_x10, int *accuracy);
 int surv_tilt(int *pitch_x10, int *roll_x10);
 int surv_steps(uint32_t *n);
 const char *surv_sensors_why(void);
+/* 1.2-alpha28: the hub on demand. surv_sensors_on(1) starts it (about 4 s: its firmware from the card's
+ * /STARBITE/FW/BCM4775.BIN, then the download) or keeps it running; call it at least every 30 s while the values are
+ * shown: it stops 60 s after the last call, at Last 2 % (refused: -1) and before a restart. 0 stops it now.
+ * surv_sensors_state(): SHUB_OFF / _STARTING / _RUNNING / _FAILED (shub.h). Samples come at 10 Hz. */
+int surv_sensors_on(int on);
+int surv_sensors_state(void);
 
 /* ---- the kernel ---- */
 void surv_init(void);

@@ -476,6 +476,16 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     for (unsigned k = 0; k < im->plan.n; ++k)
         if (!im->data[k])
             b->streamed += im->plan.l[k].size;
+#ifdef SBM_ATTENDED_TX
+    /* calls (docs/MODEM.md 7.12): the VSS magic word at the VSS region + 0x600000 (the DT's magic_offset, past the
+     * VSS image) is cleared before the CP starts, as Android's ABOX driver does: the CP sets it when its side of the
+     * voice path is up, and Calliope's VSS_init_proc waits for it (leftover DRAM there would fake it) */
+    if (b->attended == SBM_ATTENDED_DATA && im->mm.vss_size > SBM_VSS_MAGIC_OFF + 4) {
+        static const uint8_t zero4[4];
+        if (p->carve_write(p->ctx, im->mm.vss_off + SBM_VSS_MAGIC_OFF, zero4, 4))
+            sbm_logf(p, "boot: the VSS magic word cleared (for the call audio path)");
+    }
+#endif
 
     uint64_t t0 = now(p);
     sbm_sec_req(p, SBM_SEC_NORMAL, im->plan.boot_size, im->plan.main_size, &b->sec0);

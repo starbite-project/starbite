@@ -559,8 +559,8 @@ static struct {
     int on, mode, keypad, pre, answering, ending, pend_close, slide, btn, moved;
     float a, at, close_at, thumb, x0, y0, tx0;
     int d_state, d_secs, d_ok, d_audio, d_muted, d_mode, d_keypad;   /* what is drawn */
-    char d_num[24], dtmf[24];
-} CV = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, -1, -1, -1, -1, -1, -1, "", "" };
+    char d_num[24], dtmf[24], d_why[48];
+} CV = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, -1, -1, -1, -1, -1, -1, "", "", "" };
 #define CV_GROUND 0xff141a2cU
 #define CV_NUM_Y 150.0f                     /* the number's top (the avatar over it) */
 #define CV_ROW_Y 470.0f                     /* Speaker, Mute, Keypad */
@@ -639,12 +639,12 @@ static void cv_top(void)
     if (!pad) d_person(&d, 195, CV_NUM_Y - 46, 38);
     d_text_box(&d, TK_IT500, 32, 195, bl(TK_IT500, 32, CV_NUM_Y), CONTENT_W, 1, n, 0, TK_TNUM, INK, 0);
     if (!CALL.audio_ok && CV.mode != CVM_ENDED) {
-        /* the kernel says the call has no audio path yet: plainly */
-        const char *t = "No audio yet";
+        /* the kernel says the call has no audio path: plainly, naming the missing part when it knows (fa4ec7f) */
+        const char *t = CALL.audio_why[0] ? CALL.audio_why : "No audio yet";
         float pw = tw(TK_IT600, 13, t, 0, 0) + 24, py = CV_NUM_Y + (pad ? 74 : 84);
         d_rrect(&d, 195 - pw / 2, py, pw, 26, 13, tk_hex(0xff9f0a, .2f));
         d_text(&d, TK_IT600, 13, 195 - pw / 2 + 12, bl(TK_IT600, 13, py + 6), t, 0, 0, tk_hex(0xffb340, 1), 0);
-        if (!pad) {
+        if (!pad && !CALL.audio_why[0]) {
             char ln[4][96];
             float wm;
             int k = wrapn(ln, 3, TK_IT400, 14, "The call connects, but this phone's earpiece, speaker and microphone don't work in calls yet.", 300, &wm);
@@ -652,7 +652,13 @@ static void cv_top(void)
                 d_text_box(&d, TK_IT400, 14, 195, bl(TK_IT400, 14, py + 38 + 19 * i), CONTENT_W, 1, ln[i], 0, 0, W(.55f), 0);
         }
     }
+    if (CALL.audio_ok && CALL.audio_why[0] && CV.mode != CVM_ENDED) {
+        /* audio works but a part doesn't (the microphone): a small line */
+        float py = CV_NUM_Y + (pad ? 74 : 84);
+        d_text_box(&d, TK_IT400, 14, 195, bl(TK_IT400, 14, py + 4), CONTENT_W, 1, CALL.audio_why, 0, 0, tk_hex(0xffb340, 1), 0);
+    }
     trim(&cvtop);
+    cm_cpy(CV.d_why, sizeof CV.d_why, CALL.audio_why);
     CV.d_ok = CALL.audio_ok;
     CV.d_keypad = CV.keypad;
     cm_cpy(CV.d_num, sizeof CV.d_num, n);
@@ -811,7 +817,7 @@ static void cv_ended(void)
 static void cv_refresh(void)
 {
     const char *n = CV.keypad && CV.mode == CVM_CALL && CV.dtmf[0] ? CV.dtmf : CALL.number[0] ? CALL.number : "Unknown";
-    if (CALL.audio_ok != CV.d_ok || CV.keypad != CV.d_keypad || tk_strcmp(n, CV.d_num)) cv_top();
+    if (CALL.audio_ok != CV.d_ok || CV.keypad != CV.d_keypad || tk_strcmp(n, CV.d_num) || tk_strcmp(CALL.audio_why, CV.d_why)) cv_top();
     if (CALL.state != CV.d_state || CALL.secs != CV.d_secs || CV.mode != CV.d_mode || CV.ending || CV.answering) cv_status();
     if (CV.mode == CVM_CALL && (CALL.audio != CV.d_audio || CALL.muted != CV.d_muted || CV.keypad != CV.d_keypad)) cv_ctl();
     cv_place();

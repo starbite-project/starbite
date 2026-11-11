@@ -204,7 +204,19 @@ void sh_last2_auto_set(int on);           /* "automatically at 3 %", kept with t
 int sh_guide_n(void);                     /* the offline guide (guide/sbguide.h): chapters, pages, lines */
 const char *sh_guide_chapter(int c, const char **sub, unsigned *argb, int *npages);
 const char *sh_guide_page(int c, int p, const char *const **lines);   /* lines NULL-terminated; "! " a warning */
-const char *sh_sensors_why(void);         /* why there is no compass or level yet */
+const char *sh_sensors_why(void);         /* the sensor hub's state in words (why it is not running) */
+/* helper J: the Compass page (the sensor hub in the GNSS chip; about 4 s to start). sh_sensors_on(1) starts it or
+ * keeps it running (at least every 30 s while the values show: it stops 60 s after the last call); 0 stops it now;
+ * < 0 refused (Last 2 %, the self test). The readings are valid (1) only while it runs: the heading in 0.1 degrees
+ * clockwise from magnetic north (accuracy 0..3; below 2: calibrate with a figure 8), pitch / roll in 0.1 degrees
+ * (the top / the right edge above the horizon), the steps since the hub started. */
+enum { SH_SENS_OFF, SH_SENS_STARTING, SH_SENS_RUNNING, SH_SENS_FAILED };
+int sh_sensors_on(int on);
+int sh_sensors_state(void);
+int sh_heading(int *deg_x10, int *accuracy);
+int sh_tilt(int *pitch_x10, int *roll_x10);
+int sh_steps(unsigned *n);
+long long sh_utc(void);                   /* the clock in seconds since 1970 (0 unknown): a GPS fix's age */
 
 /* Starbite OS Next (helper D, shell_nc.inc): notifications. The platform pushes each new one (the kernel: notif.c's
  * posts, copied by kern_next.c's bridge outside the frames); the shell keeps the last 20 (RAM only) for the
@@ -234,6 +246,7 @@ typedef struct {
     int audio, muted, audio_ok;         /* SH_AUDIO_*; audio_ok 0: connected, but no audio path yet */
     char number[24];                    /* "" withheld */
     char why[SH_WHY];                   /* how it ended, in words */
+    char audio_why[SH_WHY];             /* fa4ec7f: audio_ok 0: the missing part; audio_ok 1: a warning (the mic) */
 } sh_call_t;
 #define SH_SMS_MAX 32
 enum { SH_SMS_RECEIVED, SH_SMS_SENDING, SH_SMS_SENT, SH_SMS_FAILED };

@@ -692,9 +692,10 @@ struct kcall {
     int32_t state, outgoing;
     int32_t secs;
     int32_t audio, muted;
-    int32_t audio_ok;                       /* 0: no in-call audio path yet (ABOX / codec / amp not built) */
+    int32_t audio_ok;                       /* 1: the call audio path is up (ABOX + VSS + the amp) */
     char number[24];                        /* SCREEN ONLY */
     char why[48];
+    char audio_why[48];                     /* when audio_ok is 0: which part is missing, in words for the call screen */
 };
 int kmodem_call_dial(const char *number);
 int kmodem_call_answer(void);

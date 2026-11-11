@@ -29,6 +29,10 @@
 #include "../../modem/sb/sbm_sb.h"
 #include "net.h"                            /* starbite/wifi: sbnet (raw IP for mobile data) and sbtcp */
 #include "tcp.h"
+#include "abox.h"                           /* call audio: the ABOX DSP (Calliope + the CP's VSS), the amp, the codec */
+#include "amp.h"
+#include "codec.h"
+#include "sb/bcmw_sb.h"                     /* the VENDOR file reader (Calliope's firmware) */
 #else
 #include <stdlib.h>
 #endif
@@ -52,6 +56,9 @@ static uint32_t snap_gen;
 static void cell_begin(void);
 static void cell_net_down(const char *w);
 static void cell_stopped(const char *w, int failed);
+static void audio_prepare(void);
+static void audio_after_online(void);
+static void audio_stop(void);
 static void cset(int s, const char *w);
 #else
 static uint32_t h_msgs, h_queries, h_answers;
@@ -163,6 +170,8 @@ static void start_now(void)
     }
     armed = 1;                              /* the core puts NV back from its pristine copy before the start */
     sb_before_reset = park_hook;
+    if (mo.attended == SBM_ATTENDED_DATA)
+        audio_prepare();                    /* the call audio path before the CP starts (VSS waits for both) */
     uint64_t t0 = sb_ms();
     int r = sbm_modem_start(&mo, &plat, &im);
     if (r != 0) {
@@ -204,8 +213,10 @@ static void start_now(void)
     kt_set(KT_MODEM, 2, sb_ms(), POLL_MS, 1);
     kt_set(KT_MODEM, 3, sb_ms(), 3000, 0);
 #ifndef SB_HOST
-    if (mo.attended == SBM_ATTENDED_DATA)
+    if (mo.attended == SBM_ATTENDED_DATA) {
+        audio_after_online();
         cell_begin();
+    }
 #endif
 }
 
@@ -215,6 +226,7 @@ void kmodem_stop(const char *w)
         return;
 #ifndef SB_HOST
     cell_stopped(w, 0);
+    audio_stop();
     sbm_modem_stop(&mo);                    /* the session's park (a stalled one: parked already; state OFF, so no
                                              * automatic restart follows a stop) */
     sbm_cp_park(&plat);                     /* safe again (and when it never started) */
@@ -897,7 +909,7 @@ void kmodem_cell(struct kcell *c)
 static struct sbm_dial_policy c_pol = { { 0 }, 0, 0, 0, SBM_DIAL_USER_CONFIRMED };
 static struct {
     int pending, audio, muted, ended, dtmf_on;
-    uint64_t t_dial, t_active, t_ended;
+    uint64_t t_dial, t_active, t_ended, t_buzz;
     uint32_t gen_seen;
     int ring_seen;
     char number[24], why[48];
@@ -907,6 +919,135 @@ static int nkmsg, ksend = -1;
 static uint32_t kgen, kmsg_id, kinbox_seen;
 static uint8_t ksms_ref;
 static struct sbm_inbox kinbox;
+
+/* ---- call audio (docs/MODEM.md 7.12): ABOX (Calliope + the CP's VSS) <-> UAIF1 -> the amp's earpiece / speaker,
+ * the codec's main mic -> UAIF0 -> ABOX. Brought up when Cellular starts (before the CP: VSS waits for both), routed
+ * while a call is active, taken down with the modem. A failure never stops calls or data: audio_ok just stays 0
+ * and the log says which step. The speaker is capped in amp.c (no speaker protection here). */
+static struct abox_hal au_hal;
+static int au_hal_set, au_amp, au_codec, au_abox, au_vss, au_on, au_speaker;
+
+static long au_file(void *ctx, const char *path, void *dst, uint32_t cap)
+{
+    (void)ctx;
+    return bcmw_sb_vendor_read(path, dst, cap);
+}
+
+static void au_log(const char *what, int r, const char *why)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "audio: ");
+    ub_s(&u, what);
+    ub_s(&u, r == 0 ? ": ok" : ": FAILED (");
+    if (r != 0) {
+        ub_s(&u, why ? why : "?");
+        ub_s(&u, ")");
+    }
+    sb_log(u.b);
+}
+
+static void audio_prepare(void)
+{
+    if (!au_hal_set) {
+        abox_hal_libsb(&au_hal, au_file, 0);
+        abox_hal_set(&au_hal);
+        amp_hal_set(audio_hal_libsb());
+        codec_hal_set(audio_hal_libsb());
+        au_hal_set = 1;
+    }
+    int r;
+    if (!au_amp) {
+        r = amp_probe();
+        au_amp = r == 0 ? 1 : -1;
+        au_log("the amp (MAX98512 x 2)", r, amp_why());
+    }
+    if (!au_codec) {
+        r = codec_probe();
+        au_codec = r == 0 ? 1 : -1;
+        au_log("the codec (CS47L93)", r, codec_why());
+    }
+    if (au_abox <= 0) {
+        uint64_t t = sb_ms();
+        r = abox_boot();
+        au_abox = r == 0 ? 1 : -1;
+        au_log("ABOX + Calliope", r, abox_why());
+        if (r == 0) {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "audio: ABOX up in ");
+            ub_dec(&u, (uint32_t)(sb_ms() - t));
+            ub_s(&u, " ms");
+            sb_log(u.b);
+            abox_vss_prepare();             /* the VSS magic word (the core clears it too) */
+            kt_set(KT_MODEM, 7, sb_ms(), 10, 1);   /* abox_poll every 10 ms */
+        }
+    }
+    au_vss = 0;
+}
+
+static void audio_after_online(void)
+{
+    if (au_abox != 1)
+        return;
+    int r = abox_vss_start();
+    au_vss = r == 0;
+    au_log("VSS started (the CP's voice codec on ABOX)", r, abox_why());
+    kt_set(KT_MODEM, 7, sb_ms(), 10, 1);    /* the start cancelled the timers: the poll again */
+}
+
+static void audio_route(int on)
+{
+    if (on == au_on && (!on || au_speaker == (kc.audio == KAUDIO_SPEAKER)))
+        return;
+    if (on) {
+        int sp = kc.audio == KAUDIO_SPEAKER;
+        if (!au_on && au_abox == 1)
+            au_log("ABOX call routes", abox_call(1), abox_why());
+        if (au_amp == 1) {
+            if (sp) {
+                amp_receiver(0, 0);
+                au_log("the speaker (capped)", amp_speaker(1, 3), amp_why());
+            } else {
+                amp_speaker(0, 0);
+                au_log("the earpiece", amp_receiver(1, 3), amp_why());
+            }
+        }
+        if (!au_on && au_codec == 1)
+            au_log("the main mic", codec_mic(1), codec_why());
+        au_speaker = sp;
+        au_on = 1;
+    } else {
+        if (au_amp == 1)
+            amp_off();
+        if (au_codec == 1)
+            codec_mic(0);
+        if (au_abox == 1)
+            abox_call(0);
+        au_on = 0;
+        sb_log("audio: the call's routes off");
+    }
+}
+
+static void audio_stop(void)
+{
+    if (au_on)
+        audio_route(0);
+    kt_cancel(KT_MODEM, 7);
+    if (au_abox == 1) {
+        abox_off();
+        sb_log("audio: ABOX off (with the modem)");
+    }
+    if (au_codec == 1)
+        codec_off();
+    au_abox = au_vss = 0;
+    au_codec = 0;
+}
+
+static int audio_ok(void)
+{
+    return au_abox == 1 && au_vss && au_amp == 1;
+}
 
 static int comms_ready(void)
 {
@@ -976,6 +1117,8 @@ static void kinbox_take(void)
         sb_strcpy(k->number, sizeof(k->number), m->from);
         sb_strcpy(k->text, sizeof(k->text), m->text);
         sb_log("comms: an SMS received (sender and text not logged)");
+        if (vib_ready())
+            vib_pulse(300);                          /* a short buzz for a new message */
         ui_mark_dirty();
     }
 }
@@ -1014,6 +1157,8 @@ static void comms_tick(void)
                 power_screen_set(1);                 /* the incoming-call screen, over the lock too */
             }
         } else {
+            if (kc.ring_seen)
+                vib_off();                           /* answered, declined or gone: stop the ringing buzz */
             kc.ring_seen = 0;
         }
         if (c->n && c->c[0].state == SBM_CALL_ACTIVE && !kc.t_active)
@@ -1037,6 +1182,12 @@ static void comms_tick(void)
         }
         ui_mark_dirty();
     }
+    /* an incoming call rings as a buzz (no ringtone yet: no audio path): 1 s on, 2 s off while it rings */
+    if (kc.ring_seen && now - kc.t_buzz >= 3000) {
+        kc.t_buzz = now;
+        if (vib_ready())
+            vib_pulse(1000);
+    }
     if (kc.pending && now - kc.t_dial > 30000) {
         kc.pending = 0;                              /* no answer from the CP at all */
         kc.ended = 1;
@@ -1048,6 +1199,8 @@ static void comms_tick(void)
         kc.ended = 0;
         ui_mark_dirty();
     }
+    /* the call audio follows the call: on while one is active (the route: earpiece or speaker), off otherwise */
+    audio_route(c->n && c->c[0].state == SBM_CALL_ACTIVE);
     if (ksend >= 0 && ksend < nkmsg) {               /* the send in flight: all parts answered? */
         struct sbm_smsq *q = &mo.b.sms;
         int done = 1, ok = 1;
@@ -1172,7 +1325,16 @@ void kmodem_call(struct kcall *k)
     memset(k, 0, sizeof(*k));
     k->audio = kc.audio;
     k->muted = kc.muted;
-    k->audio_ok = 0;
+    k->audio_ok = audio_ok();
+    if (!k->audio_ok)                        /* the first part missing, in the order the audio path needs them */
+        sb_strcpy(k->audio_why, sizeof(k->audio_why),
+                  au_abox == -1 ? "No audio: the audio processor did not start" :
+                  au_abox == 0 ? "No audio: the audio path is not ready" :
+                  !au_vss ? "No audio: the modem's voice link did not start" :
+                  au_amp == -1 ? "No audio: the earpiece amplifier did not answer" :
+                  "No audio yet");
+    else if (au_codec == -1)
+        sb_strcpy(k->audio_why, sizeof(k->audio_why), "Microphone not working: they can't hear you");
     const struct sbm_calls *c = &mo.b.calls;
     if (comms_ready() && c->n) {
         const struct sbm_call *x = &c->c[0];
@@ -1284,6 +1446,16 @@ void kmodem_timer(unsigned id)
         break;
     case 5:
         cell_step();
+        break;
+    case 7:
+        if (au_abox == 1 && abox_poll() < 0) {
+            au_log("ABOX fell over", -1, abox_why());
+            audio_route(0);
+            abox_off();
+            au_abox = -1;
+            au_vss = 0;
+            kt_cancel(KT_MODEM, 7);
+        }
         break;
     case 6:
         if (cnet_up) {
