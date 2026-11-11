@@ -510,6 +510,14 @@ void sh_vibrate(void)
 #endif
     if (!K.screen_on) power_screen_set(1);           /* P3f: as iOS, the alert wakes the screen (its fade in) */
 }
+/* P3h: a key's light tap (Notes, Search, the Calculator, the keypad): a 10 ms pulse; the motor's own timer
+ * (KT_UI 9, the classic ui_ktimer's vib_timer) ends it. The self test stays still. */
+void sh_haptic(void)
+{
+#ifndef SBOS_SELFTEST_NEXT
+    (void)vib_pulse(10);
+#endif
+}
 static uint64_t tick3;                      /* the next frame's time in thirds of a ms: 16.67 ms apart (the TE's) */
 static void frame(void)
 {

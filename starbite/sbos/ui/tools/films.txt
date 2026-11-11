@@ -16,3 +16,4 @@ calc: wait 300; drag 195 795 195 330 220; wait 900; tap 325 392; wait 1100; tap 
 light: wait 300; drag 195 795 195 330 220; wait 900; drag 320 450 60 450 200; wait 900; tap 238 93; wait 1100; tap 195 370; wait 800
 display: wait 300; drag 195 795 195 330 220; wait 900; tap 325 736; wait 1100; tap 195 316; wait 600; tap 300 216; wait 800
 notes: wait 300; drag 195 795 195 330 220; wait 900; tap 238 392; wait 1100; tap 350 63; wait 600; tap 233 627; wait 200; tap 292 573; wait 200; tap 195 735; wait 200; tap 175 573; wait 200; tap 233 627; wait 200; tap 97 573; wait 200; tap 136 573; wait 200; tap 97 573; wait 200; wait 800; tap 50 63; wait 800
+search: wait 300; drag 195 795 195 330 220; wait 900; tap 195 655; wait 1100; tap 148 689; wait 300; tap 38 627; wait 900; tap 65 179; wait 1300
