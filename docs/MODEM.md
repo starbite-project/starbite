@@ -627,6 +627,10 @@ Now:
   bars 4, -54 dBm, parked. On a restart EL3's mode 2 answers 0x00 (0x0b on the first start); mode 0 still
   accepts the image. The restart is about 0.9 s slower than a first start outside the timed phases (the 100 ms
   GIC wait that never shows is part of it; the rest is not yet timed).
+- **25-minute run (night-1111, 4f93087):** 1500 s, 1639 queries, 1639 answers (149 matched by command, one per
+  round), stalls 0, crashes 0, parked. Emergency-only GSM, bars 4, -56 to -58 dBm throughout the surviving snapshots.
+- **Starbite OS on v2:** kern/modem.c ported on branch claude/sbos-modem-v2 (60cbc74, on the Next UI branch):
+  streamed image, MIN_ARENA 4 MiB, automatic restart after a stall or crash. Not yet run on the phone.
 - The core's fixed buffers are in the image's BSS: about 1.8 MiB for the link and RFS (big_rfs 640 KiB, rfs_acc
   512 KiB, o_reply 512 KiB, big_fmt 128 KiB, rings 24 KiB). The glue's EFS reader adds about 420 KiB.
 - The CP's own memory is the reserved carve-out at 0xF0000000, outside the arena, and unchanged.
