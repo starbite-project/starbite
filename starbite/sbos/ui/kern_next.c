@@ -1021,6 +1021,11 @@ int sh_sos_set(int on)
     return sos_set(on);
 }
 int sh_sos_frame(uint32_t *argb) { return sos_frame(argb); }
+int sh_sos_next(void)
+{
+    uint64_t now = sb_ms(), n = sos_next_ms(now);
+    return !n ? -1 : n > now ? (int)(n - now) : 1;
+}
 int sh_sos_secs(void)
 {
     struct sbos_sos s;
@@ -1063,6 +1068,7 @@ void sh_usb(sh_usb_t *u)
     u->ilim_ma = s.ilim_ma;
     u->refused = s.refused;
     u->why = s.why;
+    u->events = s.events;
 }
 const char *sh_usb_guide(int i)
 {
@@ -1105,6 +1111,7 @@ int sh_card_set(const sh_card_t *c)
 }
 const char *sh_card_label(int i) { return i >= 0 && i < SURV_CARD_NF ? surv_card_label[i] : ""; }
 int sh_last2(void) { return surv_last2(); }
+const char *sh_last2_why(void) { return surv_last2_why(); }
 int sh_last2_set(int on)
 {
 #ifdef SBOS_SELFTEST_NEXT

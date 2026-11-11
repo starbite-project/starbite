@@ -212,7 +212,7 @@ void sh_usb(sh_usb_t *u)
     surv_usb_status(&s);
     u->state = s.state == SURV_USB_ON ? SH_USB_ON : s.state == SURV_USB_COOL ? SH_USB_COOL : SH_USB_OFF;
     u->ms_left = s.ms_left, u->est_ma = s.est_ma, u->vbus_lo_mv = s.vbus_lo_mv, u->vbus_hi_mv = s.vbus_hi_mv;
-    u->bat_c10 = s.bat_c10, u->limit_c10 = s.limit_c10, u->ilim_ma = s.ilim_ma, u->refused = s.refused, u->why = s.why;
+    u->bat_c10 = s.bat_c10, u->limit_c10 = s.limit_c10, u->ilim_ma = s.ilim_ma, u->refused = s.refused, u->why = s.why, u->events = s.events;
 }
 const char *sh_usb_guide(int i)
 {
@@ -226,6 +226,8 @@ int sh_card(sh_card_t *c) { struct surv_card k; int r = surv_card_get(&k); memcp
 int sh_card_set(const sh_card_t *c) { struct surv_card k; memcpy(&k, c, sizeof k); fprintf(stderr, "card: saved\n"); return surv_card_set(&k); }
 const char *sh_card_label(int i) { return i >= 0 && i < SURV_CARD_NF ? surv_card_label[i] : ""; }
 int sh_last2(void) { return surv_last2(); }
+int sh_sos_next(void) { return 50; }      /* the host: the old 20 Hz poll */
+const char *sh_last2_why(void) { return surv_last2_why(); }
 int sh_last2_set(int on) { fprintf(stderr, "last 2 %%: %s\n", on ? "on" : "off"); return surv_last2_set(on, "the switch in Emergency"); }
 int sh_last2_auto(void) { return surv_last2_auto; }
 void sh_last2_auto_set(int on) { surv_last2_auto = !!on; }
