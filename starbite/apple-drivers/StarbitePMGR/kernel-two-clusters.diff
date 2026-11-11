@@ -1,0 +1,44 @@
+diff --git a/osfmk/kern/sched_clutch.c b/osfmk/kern/sched_clutch.c
+--- a/osfmk/kern/sched_clutch.c
++++ b/osfmk/kern/sched_clutch.c
+@@ -5017,10 +5017,18 @@
+  * state update, in sched_edge_stir_the_pot_try_trigger_swap(), only
+  * happens at quantum expiration, which should allow cheaper
+  * operations at other callsites to win the race.
++ */
++#define SESTP_BITS_PER_CORE (2)
++#if OS_ATOMIC_USE_LLSC && (SESTP_BITS_PER_CORE * MAX_CPUS) <= 64
++/*
++ * No ARMv8.1 atomics (STARLTE: the Exynos M3 is ARMv8.0, the kernel is built for armv8-a): the
++ * exclusive-pair loop cannot do 128 bits, but 2 bits x MAX_CPUS fits in 64.
+  */
++typedef uint64_t sched_edge_stp_registry_t;
++#else
+ typedef unsigned __int128 sched_edge_stp_registry_t;
++#endif
+ _Atomic sched_edge_stp_registry_t sched_edge_stir_the_pot_global_registry = 0LL;
+-#define SESTP_BITS_PER_CORE (2)
+ #define SESTP_BIT_POS(cpu_id) ((sched_edge_stp_registry_t)(cpu_id * SESTP_BITS_PER_CORE))
+ #define SESTP_MASK(cpu_id) ((sched_edge_stp_registry_t)bits_mask(SESTP_BITS_PER_CORE) << SESTP_BIT_POS(cpu_id))
+ static_assert((SESTP_BITS_PER_CORE * MAX_CPUS) <= (sizeof(sched_edge_stp_registry_t) * 8),
+@@ -5038,7 +5046,7 @@
+ static_assert(SCHED_EDGE_STP_MAX <= bits_mask(SESTP_BITS_PER_CORE),
+     "Per-core stir-the-pot request state must fit in per-core bits");
+ 
+-#if OS_ATOMIC_USE_LLSC
++#if OS_ATOMIC_USE_LLSC && (SESTP_BITS_PER_CORE * MAX_CPUS) > 64
+ #error "Expecting CAS implementation of os_atomic_rmw_loop()"
+ #endif /* OS_ATOMIC_USE_LLSC */
+ 
+diff --git a/osfmk/arm/cpu_common.c b/osfmk/arm/cpu_common.c
+--- a/osfmk/arm/cpu_common.c
++++ b/osfmk/arm/cpu_common.c
+@@ -693,7 +693,7 @@
+ cpu_exit_wait(int cpu_id)
+ {
+ #if !APPLEVIRTUALPLATFORM /* AVP doesn't provide an equivalent poll-for-powerdown operation */
+-#if USE_APPLEARMSMP
++#if USE_APPLEARMSMP && !defined(ARM64_BOARD_CONFIG_STARLTE) /* STARLTE: no Apple CPU PIO (cpu-impl-reg) */
+ 	if (!ml_is_quiescing()) {
+ 		// For runtime disable (non S2R) the CPU will shut down immediately.
+ 		ml_topology_cpu_t *cpu = &ml_get_topology_info()->cpus[cpu_id];

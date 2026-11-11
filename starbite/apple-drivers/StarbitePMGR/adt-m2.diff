@@ -1,0 +1,95 @@
+diff --git a/tools/board/starlte.board b/tools/board/starlte.board
+--- a/tools/board/starlte.board
++++ b/tools/board/starlte.board
+@@ -34,48 +34,56 @@
+ mpidr = 0x81000000
+ psci = 0x0
+ cluster = 0
++pmu_spi = 0x90                     # dts arm-pmu interrupt-affinity
+ core = "arm,cortex-a55"
+ [[cpu]]
+ logical = 1
+ mpidr = 0x81000100
+ psci = 0x1
+ cluster = 0
++pmu_spi = 0x91                     # dts arm-pmu interrupt-affinity
+ core = "arm,cortex-a55"
+ [[cpu]]
+ logical = 2
+ mpidr = 0x81000200
+ psci = 0x2
+ cluster = 0
++pmu_spi = 0x92                     # dts arm-pmu interrupt-affinity
+ core = "arm,cortex-a55"
+ [[cpu]]
+ logical = 3
+ mpidr = 0x81000300
+ psci = 0x3
+ cluster = 0
++pmu_spi = 0x93                     # dts arm-pmu interrupt-affinity
+ core = "arm,cortex-a55"
+ [[cpu]]
+ logical = 4
+ mpidr = 0x80000100                   # Aff1:Aff0 = 1:0, no MT bit; XNU's reset vector adds bit 16 (reg 0x10100)
+ psci = 0x100
+ cluster = 1
++pmu_spi = 0xa7                     # dts arm-pmu interrupt-affinity
+ core = "samsung,mongoose-m3"
+ [[cpu]]
+ logical = 5
+ mpidr = 0x80000101
+ psci = 0x101
+ cluster = 1
++pmu_spi = 0xa8                     # dts arm-pmu interrupt-affinity
+ core = "samsung,mongoose-m3"
+ [[cpu]]
+ logical = 6
+ mpidr = 0x80000102
+ psci = 0x102
+ cluster = 1
++pmu_spi = 0xa9                     # dts arm-pmu interrupt-affinity
+ core = "samsung,mongoose-m3"
+ [[cpu]]
+ logical = 7
+ mpidr = 0x80000103
+ psci = 0x103
+ cluster = 1
++pmu_spi = 0xaa                     # dts arm-pmu interrupt-affinity
+ core = "samsung,mongoose-m3"
+ 
+ [[cluster]]
+diff --git a/tools/board/mkadt-board.py b/tools/board/mkadt-board.py
+--- a/tools/board/mkadt-board.py
++++ b/tools/board/mkadt-board.py
+@@ -11,7 +11,9 @@
+     (INTIDs), interrupt-parent (the gic's phandle), starbite,driver. The gic node gains ARM,gicv2 and a phandle.
+   - /cpus/cpuN: starbite,mpidr, starbite,psci-target, starbite,cluster, starbite,cluster-kind. With --topology
+     amp (M2 onwards: MAX_CPU_CLUSTERS 2 kernels only) also cluster-id = the board cluster and cluster-type
+-    'E' / 'P'; the default m1 leaves cluster-id/-type 0, which today's kernel (one cluster) needs.
++    'E' / 'P', and interrupts <1 pmu 1> + interrupt-parent (AppleARMSMP's IPI/PMI/IPI triple); the default m1
++    leaves cluster-id/-type 0, which today's kernel (one cluster) needs.
++  - the gic node gains #interrupt-cells = 1 (needed by every interrupt-parent reference).
+   - /psci (method smc, function ids), /chosen boot-uuid + starbite,board + starbite,page-size,
+     /starbite/firmware (sbfw, pram, pmsg, loader-log, framebuffer ranges).
+ --check: the result parses with ref/ios-herolte/tools/adt.py and dumps; every block's register ranges are
+@@ -118,6 +120,9 @@
+     gic_ph = new_phandle(gic)
+     gicb = next(x for x in board['block'] if x['name'] == 'gic')
+     set_prop(gic, 'compatible', cstrs(gicb['compatible']))
++    # IODT maps an interrupt-parent only to a node with #interrupt-cells (IODeviceTreeSupport AddPHandle);
++    # without it IODTMapOneInterrupt gets a NULL parent. One cell: the INTID.
++    set_prop(gic, '#interrupt-cells', u32(1))
+     set_prop(gic, 'starbite,driver', cstr(gicb['driver']))
+     for blk in board['block']:
+         if blk['name'] == 'gic':
+@@ -145,6 +150,10 @@
+         if topology == 'amp':
+             set_prop(n, 'cluster-id', u32(c['cluster']))
+             set_prop(n, 'cluster-type', u32(ord(kinds[c['cluster']])))
++            # AppleARMSMP register_aic_handlers: exactly 3 interrupts = IPI, PMI, deferred IPI, so PE_cpu_signal
++            # goes to StarbiteGICv2::sendIPI. IPI = SGI 1 (INTID 1), PMI = the core's PMU SPI (StarbitePMGR/NOTES.md).
++            set_prop(n, 'interrupts', u32(1, c['pmu_spi'] + 32, 1))
++            set_prop(n, 'interrupt-parent', u32(gic_ph))
+     # psci
+     ps = board['psci']
+     assert child(root, 'psci') is None

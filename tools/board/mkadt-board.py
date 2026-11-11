@@ -77,7 +77,8 @@ def check_board(board):
         bad.append(f'block name {n} twice')
     spans = []
     for b in board['block']:
-        for a, s in ranges(b):
+        rr = ranges(b)
+        for a, s in rr[:b.get('shared_from', len(rr))]:   # shared_from: later ranges point into other blocks
             if a in seen:
                 bad.append(f"{hex(a)} in {seen[a]} and {b['name']}")
             seen[a] = b['name']
@@ -119,6 +120,8 @@ def build(base, board, topology):
     gicb = next(x for x in board['block'] if x['name'] == 'gic')
     set_prop(gic, 'compatible', cstrs(gicb['compatible']))
     set_prop(gic, 'starbite,driver', cstr(gicb['driver']))
+    for k, v in gicb.get('u32', {}).items():
+        set_prop(gic, k, u32(*(v if isinstance(v, list) else [v])))
     for blk in board['block']:
         if blk['name'] == 'gic':
             continue
@@ -134,6 +137,16 @@ def build(base, board, topology):
             props += [('interrupts', u32(*(s + 32 for s in blk['spi']))),
                       ('interrupt-parent', u32(gic_ph))]
         n = mknode(blk['name'], props)
+        new_phandle(n)
+        arm_io.children.append(n)
+    for dev in board.get('device', []):
+        assert child(arm_io, dev['name']) is None, f"arm-io already has {dev['name']}"
+        props = [('compatible', cstrs(dev['compatible'])), ('starbite,driver', cstr(dev['driver']))]
+        for k, v in dev.get('strings', {}).items():
+            props.append((k, cstrs(v)))
+        for k, v in dev.get('u32', {}).items():
+            props.append((k, u32(*(v if isinstance(v, list) else [v]))))
+        n = mknode(dev['name'], props)
         new_phandle(n)
         arm_io.children.append(n)
     # cpus
@@ -189,7 +202,7 @@ def check(path, board):
     bad = check_board(board)
     arm_io = child(root, 'arm-io')
     names = [c.name for c in arm_io.children]
-    for blk in board['block']:
+    for blk in board['block'] + board.get('device', []):
         if names.count(blk['name']) != 1:
             bad.append(f"arm-io/{blk['name']}: {names.count(blk['name'])} nodes")
     comp = root.prop('compatible').split(b'\0')

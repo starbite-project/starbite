@@ -1,0 +1,55 @@
+diff --git a/pexpert/pexpert/arm64/A5XELTE.h b/pexpert/pexpert/arm64/A5XELTE.h
+--- a/pexpert/pexpert/arm64/A5XELTE.h
++++ b/pexpert/pexpert/arm64/A5XELTE.h
+@@ -3,7 +3,9 @@
+ #define _PEXPERT_ARM64_A5XELTE_H
+ 
+ #define NO_MONITOR                    1
++#if !defined(ARM64_BOARD_CONFIG_STARLTE)
+ #define NO_ECORE                      1
++#endif /* the S9's A55 cluster is an E cluster (board_config.h) */
+ 
+ #define A5XELTE                       1
+ /* Reuse donor's SoC-neutral early services until their guards are renamed. */
+@@ -16,8 +18,8 @@
+  * s3cfb.bootloaderfb in the stock cmdline); the shim/starlte probe drew on it. */
+ #define HEROLTE                       1
+ #define STARLTE                       1
+-/* Boot CPU: Cortex-A55 "ananke", MPIDR 0x81000000 (Aff1|Aff0 = 0). Only CPU0
+- * is described until the other cores' MPIDRs are measured. */
++/* Boot CPU: Cortex-A55 "ananke", MPIDR 0x81000000 (Aff1|Aff0 = 0). Logical 0..3 =
++ * the A55 E cluster, 4..7 = the Exynos M3 P cluster (MPIDR 0x8000010n, ADT reg 0x10100+n). */
+ #define SWEET_SMP_MAX_CPUS            8
+ #define A5XELTE_FB_PA                 0xcc000000
+ #define A5XELTE_FB_WIDTH              1440
+diff --git a/pexpert/pexpert/arm64/board_config.h b/pexpert/pexpert/arm64/board_config.h
+--- a/pexpert/pexpert/arm64/board_config.h
++++ b/pexpert/pexpert/arm64/board_config.h
+@@ -318,9 +318,26 @@
+ #ifdef ARM64_BOARD_CONFIG_A5XELTE
+ #include <pexpert/arm64/A5XELTE.h>
+ 
+-#define MAX_L2_CLINE                   6
++#define MAX_L2_CLINE                   6 /* 64-byte lines on the A55 and the Exynos M3 alike */
+ #define MAX_CPUS                       8
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++/*
++ * Galaxy S9 (Exynos 9810), docs/APPLE-S9-DRIVERS.md 2.3: two clusters, cluster 0 = E (4x Cortex-A55),
++ * cluster 1 = P (4x Exynos M3). Without HAS_CLUSTER, ml_parse_cpu_topology() numbers the clusters by the
++ * ADT cluster-type ('E' -> 0, 'P' -> 1; MAX_CPU_CLUSTER_PHY_ID defaults to 1), so the ADT must carry
++ * cluster-type 'E'/'P' (tools/board/mkadt-board.py --topology amp). __ARM_AMP__ turns on the AMP psets
++ * and the Edge scheduler (kern/sched.h).
++ */
++#define MAX_CPU_CLUSTERS               2
++#define __ARM_AMP__                    1
++/*
++ * The CPUs come up through XNU's IOPMGR path (iokit/Kernel/arm/AppleARMSMP.cpp): StarbitePMGR
++ * (PSCI 0.1 CPU_ON, M3 PMU CAL) and StarbiteGICv2 (SPIs, IPIs via GICD_SGIR) replace SweetCPU.
++ */
++#define USE_APPLEARMSMP                1
++#else
+ #define MAX_CPU_CLUSTERS               1
++#endif /* ARM64_BOARD_CONFIG_STARLTE */
+ 
+ #define CORE_NCTRS                     8
+ #endif  /* ARM64_BOARD_CONFIG_A5XELTE */

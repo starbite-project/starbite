@@ -105,6 +105,7 @@ name = "gic"
 compatible = ["ARM,gicv2", "arm,cortex-a15-gic"]
 reg = [0x10101000, 0x1000, 0x10102000, 0x2000]
 spi = []
+u32 = { "#interrupt-cells" = 1 }           # one cell: the INTID (StarbiteGICv2)
 driver = "StarbiteGICv2"
 today = "pexpert pe_fiq.c (0017, 0086, 0114)"
 source = "dts interrupt-controller@10100000"
@@ -257,7 +258,7 @@ source = "drv (dts sysreg-controller@11410000 is the PCIe part)"
 [[block]]
 name = "cmu-peric0"
 compatible = ["starbite,cmu"]
-reg = [0x10400000, 0x1000]
+reg = [0x10400000, 0x4000]                  # USI03 gates at +0x2018..+0x20E0, Q-channel +0x3038 (StarbiteTouch)
 spi = []
 driver = "StarbiteHSI2C"
 today = "starlte_touch.c ST_CMU_PERIC0_PA"
@@ -329,7 +330,9 @@ source = "dts dwmmc2@11500000, drv"
 [[block]]
 name = "decon"
 compatible = ["starbite,decon", "samsung,exynos9-decon"]
-reg = [0x16030000, 0x10000]
+reg = [0x16030000, 0x10000,                 # 0 DECON_F
+       0x16070000, 0x7000,                  # 1 DPU_DMA: IDMA G0 G1 VG0 VG1 VGF0 VGF1 (flip base addresses)
+       0x16020000, 0x7000]                  # 2 DPP: the six channels (scaler)
 spi = [0xb6, 0xb7, 0xbc, 0x1a5]
 driver = "StarbiteDisplay"
 today = "SweetFramebuffer / AppleCLCD (disp0, S-Boot's scan-out)"
@@ -354,14 +357,20 @@ source = "dts mali@17500000, drv"
 name = "usb-drd"
 compatible = ["starbite,dwc3", "samsung,exynos-dwusb"]
 reg = [0x10c00000, 0x10000]
-spi = []
+spi = [0xf4]                                # dts usb@10C00000/dwc3 (StarbiteUSB, sbusb_irq=1)
 driver = "StarbiteUSB"
 today = "none in XNU"
 source = "dts usb@10C00000"
 [[block]]
 name = "usb-phy"
 compatible = ["starbite,usb-phy", "samsung,exynos-usbdrd-phy"]
-reg = [0x11100000, 0x200]
+reg = [0x11100000, 0x200,                   # 0 USBCON
+       0x1406072c, 0x4,                     # 1 PMU: USB 2.0 PHY isolation      (in pmu's page)
+       0x14060704, 0x4,                     # 2 PMU: USB3/DP PHY isolation      (in pmu's page)
+       0x1a242064, 0x4,                     # 3 CMU_TOP gate CLKCMU_FSYS0_USB30DRD (in cmu-fsys1's page)
+       0x1100206c, 0x4,                     # 4 CMU_FSYS0 gate USB30DRD_REF_CLK
+       0x11002008, 0x4]                     # 5 CMU_FSYS0 gate USBDPPHY_REF_SOC_PLL
+shared_from = 1                             # ranges 1.. are single registers inside other blocks (usb_phy.c)
 spi = [0x5f, 0x60]
 driver = "StarbiteUSB"
 today = "none in XNU"
@@ -400,3 +409,17 @@ scale = 2
 [identity.macos]                     # Ventura / Sequoia (tools/macos), open question Q5
 model = "MacBookAir10,1"
 target = "J313AP"
+
+# arm-io children with no registers of their own: they name the blocks they use.
+[[device]]
+name = "touch"
+compatible = ["starbite,s6sy761", "samsung,s6sy761"]
+strings = { "starbite,i2c-bus" = ["hsi2c-touch"], "starbite,bus-deps" = ["cmu-peric0", "sysreg-peric0", "pinctrl-peric0"], "starbite,irq-gpio" = ["pinctrl-alive"] }
+u32 = { "starbite,i2c-address" = 0x48, "starbite,irq-pin" = [0x40, 0, 1], "starbite,panel" = [1440, 2960] }
+driver = "StarbiteTouch"
+[[device]]
+name = "keys"
+compatible = ["starbite,gpio-keys"]
+strings = { "starbite,gpio" = ["pinctrl-alive"] }
+u32 = { "starbite,keys" = [0x60, 4, 0x0c, 0x30, 0x20, 3, 0x0c, 0xe9, 0x20, 4, 0x0c, 0xea, 0x20, 6, 0x0c, 0x40] }
+driver = "StarbiteButtons"

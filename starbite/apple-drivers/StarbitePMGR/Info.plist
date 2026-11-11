@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- SPDX-License-Identifier: APSL-2.0 -->
+<!-- Starbite S9: CPU power manager (PSCI 0.1 CPU_ON, M3 PMU CAL). Built into the kernel for M1-M8 (the same personality goes into
+     iokit/KernelConfigTables.cpp, INTEGRATION.md); the Boot KC build uses this file as is. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleExecutable</key>
+	<string>StarbitePMGR</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.starbite.driver.StarbitePMGR</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>StarbitePMGR</string>
+	<key>CFBundlePackageType</key>
+	<string>KEXT</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>IOKitPersonalities</key>
+	<dict>
+		<key>StarbitePMGR</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>org.starbite.driver.StarbitePMGR</string>
+			<key>IOClass</key>
+			<string>StarbitePMGR</string>
+			<key>IOProviderClass</key>
+			<string>IOPlatformDevice</string>
+			<key>IONameMatch</key>
+			<string>starbite,psci</string>
+			<key>IOProbeScore</key>
+			<integer>10000</integer>
+		</dict>
+	</dict>
+	<key>OSBundleLibraries</key>
+	<dict>
+		<key>com.apple.kpi.iokit</key>
+		<string>19.0</string>
+		<key>com.apple.kpi.libkern</key>
+		<string>19.0</string>
+		<key>com.apple.kpi.mach</key>
+		<string>19.0</string>
+		<key>com.apple.kpi.private</key>
+		<string>19.0</string>
+		<key>com.apple.kpi.unsupported</key>
+		<string>19.0</string>
+	</dict>
+	<key>OSBundleRequired</key>
+	<string>Root</string>
+</dict>
+</plist>

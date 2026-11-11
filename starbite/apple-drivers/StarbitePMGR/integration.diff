@@ -1,0 +1,78 @@
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -45,7 +45,22 @@
+ #endif
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++    /* USE_APPLEARMSMP (board_config.h): AppleARMSMP.cpp registers the CPUs; these two serve it */
+     "   {"
++    "     'IOClass'         = StarbiteGICv2;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'ARM,gicv2';"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
++    "   {"
++    "     'IOClass'         = StarbitePMGR;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'starbite,psci';"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
++#else
++    "   {"
+     "     'IOClass'         = SweetCPU;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+@@ -55,6 +70,7 @@
+ #endif
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
++#endif /* ARM64_BOARD_CONFIG_STARLTE */
+     "   {"
+     "     'IOClass'         = AppleKeyStore;"
+     "     'IOProviderClass' = IOResources;"
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -5,7 +5,8 @@
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+-#if defined(SWEET)
++/* STARLTE runs USE_APPLEARMSMP: StarbitePMGR + StarbiteGICv2 instead (KernelConfigTables.cpp) */
++#if defined(SWEET) && !USE_APPLEARMSMP
+ #include <IOKit/IOCPU.h>
+ #include <IOKit/IOLib.h>
+ #include <libkern/c++/OSData.h>
+@@ -459,4 +460,4 @@
+ {
+ 	return cpuName;
+ }
+-#endif /* SWEET */
++#endif /* SWEET && !USE_APPLEARMSMP */
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -151,13 +151,18 @@
+ 
+ 	/*
+ 	 * No AppleARMIO driver publishes the /arm-io children: do it here so
+-	 * built-in drivers (the display, AppleCLCD) can match them. The GIC is
+-	 * driven by the platform code and gets no nub. The nubs hang off this
+-	 * platform expert: IOPlatformDevice::compareName asks its provider.
++	 * built-in drivers (the display, AppleCLCD) can match them. The nubs
++	 * hang off this platform expert: IOPlatformDevice::compareName asks its
++	 * provider. STARLTE: the GIC gets a nub too (StarbiteGICv2 matches it);
++	 * elsewhere it is driven by the platform code alone.
+ 	 */
+ 	IORegistryEntry *armio = root->childFromPath("arm-io", gIODTPlane);
+ 	if (armio != NULL) {
++#if USE_APPLEARMSMP
++		createNubs(this, IODTFindMatchingEntries(armio, kIODTExclusive, NULL));
++#else
+ 		createNubs(this, IODTFindMatchingEntries(armio, kIODTExclusive, "('gic')"));
++#endif
+ 		armio->release();
+ 	}
+ }
