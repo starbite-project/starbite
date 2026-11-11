@@ -321,8 +321,8 @@ static void build_marks(void)
     d = mk(&hint, "hint", 0, 756, 390, 16, 4, 0);
     w = tw(TK_IT600, 13, "Swipe up to open", 0, 0);
     d_text(&d, TK_IT600, 13, (390 - w) / 2, 756 + 13, "Swipe up to open", 0, 0, W(.75f), 1);
-    d = mk(&homebar, "homebar", 127, 788, 136, 5, 1, 0);
-    d_rrect(&d, 127, 788, 136, 5, 3, W(1));
+    d = mk(&homebar, "homebar", 128, 789, 134, 5, 1, 0);    /* P3i: iOS's 134 x 5, radius 2.5 */
+    d_rrect(&d, 128, 789, 134, 5, 2.5f, W(1));
 }
 
 /* ---- the press-and-hold buttons ---------------------------------------------------------------------------- */
@@ -445,12 +445,14 @@ static void head_content(dc *d, int g, float top)
     ellipsize(fit, sizeof fit, TK_IT400, 13.5f, names, K[g].chx - 12 - 95 - tw(TK_IT400, 13.5f, em, 0, 0));
     int fl = tk_strlen(fit);
     if (tk_strcmp(fit, names)) {
-        /* cut at a whole name, not mid-word ("iOS 16, macOS Venturaâ¦") */
+        /* whole names and the rest as "+N" (audit 4: "iOS 16, macOS Ventura +1"), never cut mid-word */
         float mw = K[g].chx - 12 - 95 - tw(TK_IT400, 13.5f, em, 0, 0);
+        int kept = gr->n;
         for (int c = n - 1; c > 0; c--) {
             if (names[c] != ',') continue;
+            kept--;
             tk_memcpy(fit, names, (size_t)c);
-            fit[c] = (char)0xe2; fit[c + 1] = (char)0x80; fit[c + 2] = (char)0xa6; fit[c + 3] = 0;
+            fit[c] = ' '; fit[c + 1] = '+'; fit[c + 2] = (char)('0' + (gr->n - kept)); fit[c + 3] = 0;
             if (tw(TK_IT400, 13.5f, fit, 0, 0) + tw(TK_IT400, 13.5f, " ", 0, 0) <= mw) break;
         }
         fl = tk_strlen(fit);
@@ -1031,7 +1033,7 @@ static void set_page(float x)
 {
     cc_stale = 1;
     page_x = x;
-    pages.x = PT(x);
+    pages.x = tk_floorf(PT(x) + .5f);          /* P3i (audit 9): whole px, no resampling of the icons */
     float p = -x / 390;
     float fr = p - tk_floorf(p + .5f);
     int moving = tk_fabsf(fr) > .02f || page_dragging;
@@ -1956,7 +1958,7 @@ static void kb_draw(dc *d, int shift, int num)
     const char *const *R = KR[num];
     for (int r = 0; r < 3; r++) {
         int n = (int)tk_strlen(R[r]);
-        float x0 = r == 2 && !num ? 54 : 3 + (10 - n) * 19.5f;
+        float x0 = r == 2 && !num ? 61.5f : 3 + (10 - n) * 19.5f;
         for (int i = 0; i < n; i++) {
             char k[2] = { R[r][i], 0 };
             if (!num && shift) k[0] = (char)(k[0] - 32);
@@ -1971,7 +1973,7 @@ static void kb_draw(dc *d, int shift, int num)
     d_rrect(d, 345, 658, 42, 46, 6, tk_hex(0x3a3d4a, 1));
     d_icon(d, "back", 359, 670, 1);                              /* delete: the font has no erase glyph */
     kb_key(d, 3, 712, 88, num ? "ABC" : "123", 1);
-    kb_key(d, 97, 712, 196, "space", 0);
+    kb_key(d, 97, 712, 196, "space", 1);           /* P3i: 16 pt like the other function keys */
     kb_key(d, 299, 712, 88, "return", 1);
 }
 static int kb_hit(float x, float y, int shift, int num, char *c)
@@ -1979,7 +1981,7 @@ static int kb_hit(float x, float y, int shift, int num, char *c)
     const char *const *R = KR[num];
     for (int r = 0; r < 3; r++) {
         int n = (int)tk_strlen(R[r]);
-        float x0 = r == 2 && !num ? 54 : 3 + (10 - n) * 19.5f, ky = 550 + 54 * r;
+        float x0 = r == 2 && !num ? 61.5f : 3 + (10 - n) * 19.5f, ky = 550 + 54 * r;
         if (y < ky || y >= ky + 50) continue;
         for (int i = 0; i < n; i++)
             if (x >= x0 + 39 * i - 3 && x < x0 + 39 * i + 36) {
@@ -1987,7 +1989,7 @@ static int kb_hit(float x, float y, int shift, int num, char *c)
                 if (!num && shift && *c >= 'a' && *c <= 'z') *c = (char)(*c - 32);
                 return 1;
             }
-        if (r == 2 && x < 50 && !num) return 2;
+        if (r == 2 && x < 55 && !num) return 2;
         if (r == 2 && x >= 340) return 4;
     }
     if (y >= 712 && y < 760) {
@@ -2531,10 +2533,11 @@ static void toast(const char *msg)
     float w = tw(TK_IT600, 13, msg, 0, 0) + 30, x = 195 - w / 2;
     relayer(&toastl);
     /* in an app its backdrop is the app's ground; elsewhere the wallpaper's glass (the shell's backdrop) */
-    dc d = mk(&toastl, "toast", x, 52, w, 34, 32, !AP.on);
-    if (AP.on) d_lg_app(&d, x, 52, w, 34, 17, 1);
-    else d_glass(&d, x, 52, w, 34, 17, 1, 1);
-    d_text(&d, TK_IT600, 13, x + 15, bl(TK_IT600, 13, 52 + 9), msg, 0, 0, INK, 0);
+    /* P3i (audit 17): in the status bar's band (y 6), never over the lock's date or a page's title */
+    dc d = mk(&toastl, "toast", x, 6, w, 34, 32, !AP.on);
+    if (AP.on) d_lg_flat(&d, x, 6, w, 34, 17, 1);
+    else d_glass(&d, x, 6, w, 34, 17, 1, 1);
+    d_text(&d, TK_IT600, 13, x + 15, bl(TK_IT600, 13, 6 + 9), msg, 0, 0, INK, 0);
     relink();
     toast_from = toast_o;
     toast_to = 0;
@@ -3014,7 +3017,7 @@ void sh_init_begin(tk_comp *c)
     tk_layer_init(&list, "list");
     list.clip = 1;
     list.fade_top = PT(18);
-    list.fade_bot = PT(14);
+    list.fade_bot = PT(44);                    /* P3i (audit 16): no sliced lip above the hold buttons */
     tk_layer_init(&lockflat, "lock-flat");
     tk_layer_init(&focus, "focus");
     focus.hidden = 1;
@@ -3361,8 +3364,9 @@ void sh_touch(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, y, t);
             float d2 = tk_minf(0, dy), sc = tk_maxf(.35f, 1 + d2 / (H_PT * .9f));
             arect R = { 0, 0, 390 * sc, H_PT * sc, 52 + (30 - 52) * (1 - sc) };
-            R.x = x - R.w / 2;
-            R.y = (H_PT + d2) - R.h * .92f;
+            /* P3i (audit 8): the point grabbed stays under the finger (no 64 pt jump at the first move) */
+            R.x = x - T.x0 / 390 * R.w;
+            R.y = y - T.y0 / H_PT * R.h;
             AP.travel = d2;
             set_app_rect(R);
             break;
