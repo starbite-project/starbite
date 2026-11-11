@@ -3979,7 +3979,7 @@ void sh_idle(void)
     tk_layer_prepare(&mark); tk_layer_prepare(&glyph_c); tk_layer_prepare(&glyph_o); tk_layer_prepare(&hint);
 }
 
-int sh_idle_pending(void) { return !EMG && cards_pending > 0; }
+int sh_idle_pending(void) { return (!EMG && cards_pending > 0) || tk_comp_idle_pending(C); }
 
 int sh_moving(void)
 {

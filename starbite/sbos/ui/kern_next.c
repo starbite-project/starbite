@@ -162,12 +162,19 @@ static void log_mb(const char *what, uint64_t v)
     sb_log(u.b);
 }
 
+static int gpu_started;
+static uint32_t gpu_clock_steps, gpu_clock_told;
 static void boost(int on)
 {
     if (on == boosted) return;
     boosted = on;
     if (!hw_dvfs(DVFS_A55, on ? 1794000U : 1053000U))
         sb_log(on ? "next: the A55 did not take 1794 MHz" : "next: the A55 did not go back to 1053 MHz");
+    /* P4 v10: the GPU at 572 MHz while frames come, 260 MHz (the vendor table's lowest step) when nothing moves */
+    if (gpu_started && comp.gpu) {
+        if (hw_dvfs(DVFS_GPU, on ? 572000U : 260000U)) gpu_clock_steps++;
+        else if (!gpu_clock_told++) sb_log("next: the GPU clock did not change (it stays where it is)");
+    }
 }
 
 /* the modem's status for the status bar, the Control Centre and Settings (kmodem_status: the session API v2's state;
@@ -769,7 +776,6 @@ static void next_screen(int on)
 
 /* ---- P4: the GPU compositor (kern/gpucomp.c): the frames on the Mali-G72, full resolution ---------------------- */
 _Static_assert(sizeof(tk_gpu_item) == sizeof(struct gc_quad), "tk_gpu_item is gpucomp's gc_quad");
-static int gpu_started;
 /* v5.1, the bottom cache: the frame's bottom items that have not changed for two frames (the wallpaper; the lock
  * screen under the sleep fade; home under Control Centre) composed once into the GPU's pool, and frames draw that
  * (one load a pixel) plus the items above it. A ground that changes every frame (Emergency's cross-fade) is never
@@ -1170,6 +1176,10 @@ static void gpu_vs_cpu(void)
     ub_dec(&u, comp.gpu_fallbacks);
     ub_s(&u, " given back to the CPU; bottom caches made ");
     ub_dec(&u, cache_made);
+    ub_s(&u, "; GPU clock steps (572 / 260 MHz) ");
+    ub_dec(&u, gpu_clock_steps);
+    ub_s(&u, "; layers flushed in idle time ");
+    ub_dec(&u, comp.gpu_idle_flushed);
     sb_log(u.b);
     if (!gpu_started) {
         sb_log("selftest: FAILED: next: gpu: the GPU did not come up (see the gpucomp lines)");

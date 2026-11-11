@@ -776,9 +776,30 @@ static void dband(void *a, int i)
 }
 /* the half canvas follows the rest frames (what changed, 2x2 averaged), so a motion frame only composes what moves
  * and layers that never move never need half copies: in idle time, or before the next motion frame */
+/* v10: idle time on the GPU path: every layer in the tree (hidden ones too: the Control Centre, an app's window
+ * before they show) cleaned out to DRAM and its block map made, at most 5 ms a turn, so the first frame that shows
+ * or moves it does not (ff0d466: first frames of a gesture 31-41 ms of CPU for 5-8 ms of GPU) */
+static void gpu_flush_layer(tk_comp *c, tk_layer *l);
+static int gidle_more;
+static void gidle_tree(tk_comp *c, tk_layer *l, uint64_t t0)
+{
+    for (; l && !gidle_more; l = l->next) {
+        if (tk_us() - t0 > 5000) { gidle_more = 1; return; }
+        if ((l->bmp.px || l->glass.v) && l->gpu_gen != l->gen + 1u) {
+            gpu_flush_layer(c, l);
+            c->gpu_idle_flushed++;
+        }
+        gidle_tree(c, l->child, t0);
+    }
+}
+int tk_comp_idle_pending(tk_comp *c) { return c->gpu && gidle_more; }
 void tk_comp_idle(tk_comp *c)
 {
-    if (c->gpu) return;                         /* P4: the GPU draws whole frames: no half canvas to keep */
+    if (c->gpu) {                               /* P4: the GPU draws whole frames: no half canvas to keep */
+        gidle_more = 0;
+        if (c->gpu_clean) gidle_tree(c, c->root, tk_us());
+        return;
+    }
     if (!have_pend) return;
     have_pend = 0;
     djob J = { c, (tk_irect){ pend.x0 & ~1, pend.y0, pend.x1, pend.y1 } };

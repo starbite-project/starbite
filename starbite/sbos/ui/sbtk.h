@@ -251,6 +251,7 @@ typedef struct {
     uint32_t gpu_frames, gpu_fallbacks, gpu_ground;
     int gpu_half;              /* v7: the frame gpu is asked for is a big move's: half resolution, 2x, all of it */
     uint32_t gpu_halves;       /* such frames so far */
+    uint32_t gpu_idle_flushed; /* v10: layers made ready for the GPU in idle time (not in a moving frame) */
     int gpu_stale;
     uint32_t gpu_items;        /* the last GPU frame's quads */             /* P4: GPU frames since the CPU last drew everything (its canvases are behind) */
     uint64_t us_gpu;  /* the last frame's half-canvas catch-up (tk_comp_idle) and half copies made in it */  /* the last frame's wait for the free buffer and its catch-up pass */
@@ -263,6 +264,7 @@ void tk_flatten_shapes(tk_layer *dst);    /* v8: the last tk_flatten's glass sha
 /* draw a frame: motion = half resolution and 2x present; full = redraw everything; returns the drawn px */
 int tk_comp_frame(tk_comp *c, int motion, int full);
 void tk_comp_prepare(tk_comp *c);
+int tk_comp_idle_pending(tk_comp *c);   /* v10: idle work left (the GPU's layer flushes, a turn at a time) */
 void tk_comp_idle(tk_comp *c);                            /* idle time: the half canvas follows the rest frames */
 uint64_t tk_comp_bench(tk_comp *c, int kind);      /* the present's kernels vs uibench's loops, us */                         /* idle: make the visible layers' half copies */
 
