@@ -83,7 +83,7 @@ fi
 # core (it has no write path); list any immediate of those blocks in the image's code for review
 "${CROSS}nm" "$out/$name.elf" > "$out/$name.map"
 # the attended transmit path exists only in modemsim.img
-if grep -q 'sbm_ipc_frame_attended\|sbm_modem_radio' "$out/$name.map"; then att=1; else att=0; fi
+if grep -q 'sbm_ipc_frame_attended\|sbm_modem_radio\|sbm_modem_ip_tx\|sbm_modem_pdp_' "$out/$name.map"; then att=1; else att=0; fi
 if [ "$name" = modemsim ] && [ "$att" = 0 ]; then echo "modemprobe: modemsim.img lacks the attended path" >&2; exit 1; fi
 if [ "$name" != modemsim ] && [ "$att" = 1 ]; then echo "modemprobe: $name.img has the attended path: refused" >&2; exit 1; fi
 echo "modemprobe: $name: attended transmit path $( [ "$att" = 1 ] && echo present || echo absent)"

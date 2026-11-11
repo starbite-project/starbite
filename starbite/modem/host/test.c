@@ -1187,6 +1187,140 @@ static void stream_image(struct sbm_image *im, uint8_t *chunk, uint32_t chunk_si
 }
 
 #ifdef SBM_ATTENDED_TX
+static struct sbm_net t_net;
+static struct sbm_modem *t_net_mo;
+static int t_net_tx(void *ctx, const uint8_t *pkt, uint32_t len)
+{
+    (void)ctx;
+    return sbm_modem_ip_tx(t_net_mo, pkt, len);
+}
+static void t_net_rx(void *ctx, const uint8_t *pkt, uint32_t len)
+{
+    (void)ctx;
+    sbm_net_rx(&t_net, pkt, len);
+}
+/* poll the session 1 ms at a time with the net client's timers until done() or ms */
+static int net_run(struct sbm_modem *mo, struct sbm_plat *p, unsigned ms, int (*done)(void))
+{
+    static uint32_t clock_ms;
+    for (unsigned t = 0; t < ms; ++t) {
+        int r = sbm_modem_poll(mo, 1);
+        if (r < 0)
+            return r;
+        sbm_net_tick(&t_net, ++clock_ms);
+        if (done && done())
+            return 1;
+        p->udelay(p->ctx, 1000);
+    }
+    return 0;
+}
+static int dns_done(void) { return t_net.dns_state != SBM_NET_WAITING; }
+static int http_done(void) { return t_net.http_state != SBM_NET_WAITING; }
+
+static void test_attended_data(struct fakesoc *s, struct sbm_image *im, struct sbm_modem *mo, uint32_t boot_crc,
+                               uint32_t main_crc)
+{
+    struct sbm_plat p;
+    static uint8_t d[SBM_GPRS_ACT_LONG_LEN];
+    /* the builder: exactly the GPRS shapes the test sends */
+    memset(d, 0, sizeof(d));
+    d[0] = 1; d[1] = 1; d[2] = 2; memcpy(d + 3, "internet", 8);
+    CHECK(sbm_ipc_attended_allowed(SBM_GPRS_DEFINE_PDP, SBM_IPC_SET, d, SBM_GPRS_DEFINE_LEN));
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_DEFINE_PDP, SBM_IPC_SET, d, SBM_GPRS_DEFINE_LEN - 1));
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_DEFINE_PDP, SBM_IPC_GET, d, SBM_GPRS_DEFINE_LEN));
+    d[5] = ' ';
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_DEFINE_PDP, SBM_IPC_SET, d, SBM_GPRS_DEFINE_LEN));   /* not an APN */
+    d[5] = 't'; d[120] = 1;
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_DEFINE_PDP, SBM_IPC_SET, d, SBM_GPRS_DEFINE_LEN));   /* 5G / address junk */
+    memset(d, 0, sizeof(d));
+    d[0] = 1; d[1] = 1;
+    CHECK(sbm_ipc_attended_allowed(SBM_GPRS_PDP_CONTEXT, SBM_IPC_SET, d, SBM_GPRS_ACT_LEN));
+    CHECK(sbm_ipc_attended_allowed(SBM_GPRS_PDP_CONTEXT, SBM_IPC_SET, d, SBM_GPRS_ACT_LONG_LEN));
+    d[6] = 'u';                                                                                      /* a user name */
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_PDP_CONTEXT, SBM_IPC_SET, d, SBM_GPRS_ACT_LEN));
+    d[6] = 0; d[1] = 2;
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_PDP_CONTEXT, SBM_IPC_SET, d, SBM_GPRS_ACT_LEN));        /* cid 2 */
+    static const uint8_t att[3] = { 1, 0, 0 }, det[3] = { 0, 0, 0 };
+    CHECK(sbm_ipc_attended_allowed(SBM_GPRS_PS, SBM_IPC_SET, att, 3));
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_PS, SBM_IPC_SET, det, 3));
+    unsigned other = 0;
+    for (unsigned i = 0; i < 256; ++i)
+        for (unsigned t = 0; t < 8; ++t)
+            if (i != 0x01 && i != 0x03 && i != 0x04)
+                other += sbm_ipc_attended_allowed(SBM_CMD(SBM_G_GPRS, i), (uint8_t)t, d, SBM_GPRS_ACT_LEN);
+    CHECKEQ(other, 0);
+
+    for (int round = 0; round < 2; ++round) {          /* 0: as planned; 1: the short form refused, a lost SYN */
+        boot_image(im, 0);
+        fakesoc_init(s, &im->plan, boot_crc, main_crc);
+        s->sim_present = 2;
+        fakesoc_plat(s, &p, tlog);
+        memset(mo, 0, sizeof(*mo));
+        mo->attended = SBM_ATTENDED_MAGIC;
+        unsigned log0 = nlog;
+        CHECKEQ(sbm_modem_start(mo, &p, im), 0);
+        s->fcp.act_refuse_short = round;
+        s->fcp.net_drop_first_syn = round;
+        CHECKEQ(sbm_modem_ip_tx(mo, d, 40), SBM_EPERM);        /* no PDP yet */
+        CHECKEQ(sbm_modem_radio(mo, 1), 0);
+        CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
+        CHECKEQ(sbm_modem_pdp_define(mo, "internet"), 0);
+        CHECKEQ(sess_run(mo, &p, 200, 0, 0), 0);
+        CHECK(mo->b.pdp.define_seen && mo->b.pdp.define_res == 0x8000);
+        CHECK(!strcmp(s->fcp.apn, "internet"));
+        CHECKEQ(sbm_modem_pdp_activate(mo, 1, 0), 0);
+        CHECKEQ(sess_run(mo, &p, 200, 0, 0), 0);
+        CHECK(mo->b.pdp.act_seen);
+        if (round) {
+            CHECKEQ(mo->b.pdp.act_res, 0x000a);
+            CHECK(!mo->b.pdp.have_ip);
+            CHECKEQ(sbm_modem_pdp_activate(mo, 1, 1), 0);      /* the long form, as the probe falls back */
+            CHECKEQ(sess_run(mo, &p, 200, 0, 0), 0);
+        }
+        CHECKEQ(mo->b.pdp.act_res, 0x8000);
+        CHECK(mo->b.pdp.have_ip && mo->b.pdp.have_status && mo->b.pdp.status == 1);
+        CHECKEQ(mo->b.pdp.mtu, 1500);
+        t_net_mo = mo;
+        sbm_net_init(&t_net, mo->b.pdp.ip, mo->b.pdp.dns1, mo->b.pdp.mtu, t_net_tx, 0, 1234);
+        sbm_modem_ip_rx_cb(t_net_rx, 0);
+        CHECKEQ(sbm_net_dns(&t_net, "connectivitycheck.gstatic.com", 0), 0);
+        CHECKEQ(net_run(mo, &p, 5000, dns_done), 1);
+        CHECKEQ(t_net.dns_state, SBM_NET_DONE);
+        CHECK(t_net.dns_answer[0] == 93 && t_net.dns_answer[3] == 34);
+        CHECKEQ(sbm_net_http_get(&t_net, t_net.dns_answer, "connectivitycheck.gstatic.com", "/generate_204", 0), 0);
+        CHECKEQ(net_run(mo, &p, 15000, http_done), 1);
+        CHECKEQ(t_net.http_state, SBM_NET_DONE);
+        CHECKEQ(t_net.http_code, 204);
+        CHECKEQ(s->fcp.net_http, 1);
+        CHECK(s->fcp.net_dl >= 1 && s->fcp.net_dl_zc >= 3);
+        CHECKEQ(s->fcp.net_zc_full, 0);
+        CHECKEQ(s->fcp.net_bad, 0);
+        CHECK(mo->b.data_rx >= 1 && mo->b.data_rx_zc >= 3 && mo->b.data_rx_bad == 0);
+        CHECKEQ(t_net.rx_bad_csum, 0);
+        if (round)
+            CHECK(s->fcp.net_syn >= 2);
+        net_run(mo, &p, 300, 0);                           /* our FIN's ACK */
+        CHECKEQ(sbm_modem_pdp_activate(mo, 0, round), 0);
+        CHECKEQ(sess_run(mo, &p, 200, 0, 0), 0);
+        CHECK(mo->b.pdp.status == 0 && !s->fcp.pdp_up);
+        CHECKEQ(sbm_modem_radio(mo, 0), 0);
+        CHECKEQ(sess_run(mo, &p, 1000, 0, 0), 0);
+        sbm_modem_ip_rx_cb(0, 0);
+        CHECKEQ(sbm_modem_stop(mo), 0);
+        check_parked(s);
+        CHECKEQ(s->fcp.n_forbidden, 0);
+        CHECKEQ(s->fcp.n_call, 0);
+        unsigned leak = 0;
+        for (unsigned k = log0 > nlog - 256 && nlog > 256 ? log0 : (nlog > 256 ? nlog - 256 : 0); k < nlog; ++k)
+            leak += strstr(loglines[k % 256], "10.11.12") != 0 || strstr(loglines[k % 256], "00101") != 0;
+        CHECKEQ(leak, 0);
+        fakesoc_free(s);
+    }
+    boot_image(im, 0);
+}
+#endif
+
+#ifdef SBM_ATTENDED_TX
 /* the attended SIM test (modemsim.img only): what the builder allows, the guards off only for an attended session,
  * radio normal -> registered, low power -> detached, parked; nothing else on the wire; no PLMN in the log */
 static void test_attended(struct fakesoc *s, struct sbm_image *im, struct sbm_modem *mo, uint32_t boot_crc,
@@ -1294,6 +1428,7 @@ static void test_attended(struct fakesoc *s, struct sbm_image *im, struct sbm_mo
     check_parked(s);
     fakesoc_free(s);
     boot_image(im, 0);
+    test_attended_data(s, im, mo, boot_crc, main_crc);
 }
 #endif
 

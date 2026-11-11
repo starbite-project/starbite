@@ -165,3 +165,11 @@ const char *sbm_strerror(int e)
     default: return "?";
     }
 }
+
+uint32_t sbm_strlen(const char *s)
+{
+    uint32_t n = 0;
+    while (s && s[n])
+        ++n;
+    return n;
+}

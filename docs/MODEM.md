@@ -698,6 +698,39 @@ transmits, so it has its own image, gated twice:
 - **Not in this image:** data (PDP). It needs the GPRS layouts from libsec-ril, the zero-copy downlink pool and a
   small raw-IP stack (sbnet is Ethernet-based); that is the next image.
 
+### 7.9 The attended data test (`modemsim`, part B, 2026-11-11)
+Same image and gates as 7.8. After the 60 s hold, with `sim_data=1` (the default):
+- **GPRS frames** (libsec-ril IPC 4.1, read from the binary; the attended builder checks each byte):
+  - `DEFINE_PDP 0x0D01 SET` (149 bytes): `01`, cid 1, `02` IPv4, the APN (1..100 of `[A-Za-z0-9.-]`), zeros.
+  - `PDP_CONTEXT 0x0D04 SET` (112 bytes; 248 is the long form, sent only if the short one is refused):
+    act 1 / 0, cid 1, zeros: no user, password or auth.
+  - `PS 0x0D03 SET 01 00 00` (attach): allowed but not sent unless needed. The CP attaches by itself on LTE.
+  - From the CP: `IP_CONFIGURATION 0x0D09 NOTI` (cid, u16 flags, IPv4 [3..6], DNS1 [7..10], DNS2 [11..14],
+    gateway [15..18], MTU [152..153] when flag bit 13) and `CALL_STATUS 0x0D10 NOTI` (cid, status 1 = up, cause).
+    Neither payload is printed; the log says "assigned" / "given" only.
+- **Packets** (link_device_memory_sbd.c, One UI's dmesg): raw IPv4, no link header.
+  - Uplink goes on the hi-prio PS ring (ch 10, `size_v = len | 10 << 16`: rmnet0, cid 1), as the kernel does
+    without CONFIG_MODEM_IF_QOS.
+  - Downlink comes on ch 10 (plain buffers) or on the zero-copy ring ch 11. There the AP owns the DL `rp` as the
+    producer of empty cells, and each 8-byte slot holds a u64 offset from the IPC base to a 2560-byte ZMB cell
+    (+64 headroom).
+  - The ZMB pool follows the 5 MiB IPC region. No smapper on this phone: One UI never logs "Smapper is activated".
+  - `sbm_sbd_zc_fill` hands 2047 cells to the CP when the rings are laid out (attended sessions only).
+    `sbm_sbd_zc_get` checks every offset against our own per-slot record, and `zc_done` hands the same cell back
+    at once.
+- **sbm_net.c**: a freestanding IPv4 client.
+  - One DNS A query to the context's DNS server, then one HTTP/1.1 GET over a minimal TCP client: in-order receive,
+    MSS option, retransmission of the SYN, the request and the FIN.
+  - The test fetches `http://connectivitycheck.gstatic.com/generate_204`, Android's own connectivity check, and
+    passes on `204`.
+  - No TLS. The phone's address and the DNS servers are never logged; the resolved public address is.
+- **Host test**:
+  - The fake CP answers the GPRS frames and runs a small network behind the PS rings: DNS on ch 10, TCP on the
+    zero-copy ring.
+  - Both rounds run define -> activate -> IP config -> DNS -> HTTP 204 -> deactivate -> detach -> park. The second
+    round also refuses the short activate form (the long-form fallback) and loses the first SYN.
+  - The builder surface is pinned (APN charset, no user/password, cid 1 only), and no address reaches the log.
+
 ## 8. Later stages (not started)
 
 

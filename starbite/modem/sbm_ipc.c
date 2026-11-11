@@ -97,6 +97,41 @@ static const struct { uint16_t cmd; uint8_t type; uint8_t n; uint8_t d[2]; } att
     { SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, 2, { 0x01, 0x00 } },   /* low power mode: RF off, the CP detaches first */
 };
 
+/* the data test's GPRS frames, as libsec-ril builds them for an IPv4 default context without authentication:
+ *   DEFINE_PDP SET (149): 01, cid 1, type 02 (IPv4), the APN (1..100 of [A-Za-z0-9.-], zero-padded), all else 0
+ *   PDP_CONTEXT SET (112 or 248): act 1 / deactivate 0, cid 1, everything else 0 (no user, password or auth)
+ *   PS SET (3): 01 00 00 (attach) */
+static int gprs_ok(uint16_t cmd, uint8_t type, const uint8_t *d, uint16_t n)
+{
+    if (type != SBM_IPC_SET || !d)
+        return 0;
+    if (cmd == SBM_GPRS_PS)
+        return n == 3 && d[0] == 1 && d[1] == 0 && d[2] == 0;
+    if (cmd == SBM_GPRS_PDP_CONTEXT) {
+        if ((n != SBM_GPRS_ACT_LEN && n != SBM_GPRS_ACT_LONG_LEN) || d[0] > 1 || d[1] != 1)
+            return 0;
+        for (unsigned i = 2; i < n; ++i)
+            if (d[i])
+                return 0;
+        return 1;
+    }
+    if (n != SBM_GPRS_DEFINE_LEN || d[0] != 1 || d[1] != 1 || d[2] != 0x02)
+        return 0;
+    unsigned k = 0;
+    while (k < SBM_APN_MAX && d[3 + k]) {
+        char c = (char)d[3 + k];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-'))
+            return 0;
+        ++k;
+    }
+    if (k == 0)
+        return 0;
+    for (unsigned i = 3 + k; i < n; ++i)
+        if (d[i])
+            return 0;
+    return 1;
+}
+
 int sbm_ipc_attended_allowed(uint16_t cmd, uint8_t type, const uint8_t *data, uint16_t dlen)
 {
     switch (cmd >> 8) {
@@ -112,6 +147,8 @@ int sbm_ipc_attended_allowed(uint16_t cmd, uint8_t type, const uint8_t *data, ui
     }
     if (allowed_idx(cmd, type) >= 0)
         return 1;
+    if (cmd == SBM_GPRS_DEFINE_PDP || cmd == SBM_GPRS_PDP_CONTEXT || cmd == SBM_GPRS_PS)
+        return gprs_ok(cmd, type, data, dlen);
     for (unsigned i = 0; i < sizeof(attended) / sizeof(attended[0]); ++i)
         if (attended[i].cmd == cmd && attended[i].type == type && attended[i].n == dlen && data &&
             sbm_memcmp(attended[i].d, data, dlen) == 0)
@@ -184,6 +221,11 @@ static const struct { uint16_t cmd; const char *name; uint8_t loggable; } names[
     { SBM_MISC_ME_IMSI,        "MISC_ME_IMSI", 0 },
     { SBM_MISC_ME_SN,          "MISC_ME_SN", 0 },            /* IMEI / serial */
     { SBM_MISC_TIME_INFO,      "MISC_TIME_INFO", 0 },      /* NITZ: time zone and the PLMN */
+    { SBM_GPRS_DEFINE_PDP,     "GPRS_DEFINE_PDP", 0 },     /* the APN */
+    { SBM_GPRS_PS,             "GPRS_PS", 1 },
+    { SBM_GPRS_PDP_CONTEXT,    "GPRS_PDP_CONTEXT", 0 },
+    { SBM_GPRS_IP_CONFIG,      "GPRS_IP_CONFIG", 0 },      /* the phone's address and DNS servers */
+    { SBM_GPRS_CALL_STATUS,    "GPRS_CALL_STATUS", 1 },
     { SBM_GEN_PHONE_RES,       "GEN_PHONE_RES", 1 },
 };
 

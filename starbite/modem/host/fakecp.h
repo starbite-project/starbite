@@ -28,6 +28,14 @@ struct fakecp {
     int radio_normal;           /* FAKE_SIM: 1 after EXEC 02 02, 0 after EXEC 01 00 */
     int pin_lock;               /* FAKE_SIM: SEC_PIN_STATUS says LOCK_SC (PIN) */
     uint32_t n_radio_exec;      /* the attended radio EXECs (exact data); not counted in n_forbidden */
+    /* the attended data test: GPRS and a fake network behind the PS rings (DNS answers, an HTTP server on :80) */
+    uint32_t n_gprs, n_define, n_act, n_deact;
+    int pdp_up, act_refuse_short;   /* act_refuse_short: the short PDP_CONTEXT form is refused (0x000a) */
+    char apn[104];
+    uint32_t net_ul, net_dl, net_dl_zc, net_dns, net_syn, net_http, net_bad, net_zc_full;
+    int net_drop_first_syn;         /* lose the first SYN (the client retransmits) */
+    uint32_t tcp_isn, tcp_rcv, tcp_snd;
+    int tcp_state;
     int regist_seq_quirk;       /* as the phone: NET_REGIST (CS) answered with the next query's seq */             /* no SIM but camped (the phone: "PLMN set"): SERVING_NETWORK carries 00101 */
 };
 
@@ -36,6 +44,9 @@ int fakecp_attach(struct fakecp *fc, uint8_t *ipc, uint32_t size, enum fake_scen
 void fakecp_boot_notis(struct fakecp *fc);
 /* Reads every UL frame on the FMT channels and answers it. Returns the number of requests handled. */
 int fakecp_step(struct fakecp *fc);
+/* the PS rings: reads the AP's UL packets (ch 10) and answers them as a small network would (DL on ch 10 for DNS,
+ * the zero-copy ring ch 11 for TCP) */
+int fakecp_net_step(struct fakecp *fc);
 /* Queues one IPC message (NOTI or RESP) as a frame on a FMT channel's DL ring. */
 int fakecp_send(struct fakecp *fc, uint8_t ch, uint8_t aseq, uint16_t cmd, uint8_t type, const uint8_t *d, uint16_t n);
 /* Same, split into multi-frame fragments of at most frag payload bytes. */
