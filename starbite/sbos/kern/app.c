@@ -9,6 +9,7 @@
 #include "kern.h"
 #include "kapp.h"
 #include "survival.h"
+#include "gnssfix.h"
 
 struct kapp apps[APP_MAX];
 int napps;
@@ -658,6 +659,15 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
     case SET_SURV_LAST2_AUTO:
         surv_last2_auto = arg[1] != 0;
         return 0;
+    case SET_SURV_GNSS: {               /* 1.2-alpha28: the card's last fix as the location */
+        struct gnss_fix f;
+        if (!arg[1] || gnss_lastfix(&f, 1) != 1)
+            return SBOS_EAGAIN;
+        surv_lat_x100 = (f.lat_e6 + (f.lat_e6 < 0 ? -5000 : 5000)) / 10000;
+        surv_lon_x100 = (f.lon_e6 + (f.lon_e6 < 0 ? -5000 : 5000)) / 10000;
+        sb_log("survival: the location is now the card's last GPS fix");
+        return 0;
+    }
     case SET_VIBRATE: {                 /* 1.2-alpha7 */
         unsigned ms = (unsigned)(arg[1] & 0xffffU), n = (unsigned)((arg[1] >> 16) & 0xffU);
         if (!ms) {
@@ -1088,6 +1098,16 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         }
         case SET_SURV_LAST2: return surv_last2();
         case SET_SURV_LAST2_AUTO: return surv_last2_auto;
+        case SET_SURV_GNSS: {
+            struct gnss_fix f;
+            struct sbos_time t;
+            int r = gnss_lastfix(&f, 0);
+            if (r < 0) return -2;
+            if (!r) return -1;
+            if (!clock_now(&t) || !t.utc || t.utc < f.utc) return 0;
+            int64_t m = (t.utc - f.utc) / 60;
+            return m > 0x7fffffff ? 0x7fffffff : m;
+        }
         case SET_LED_FULL: return led_full ? (fled_flash_ok() ? 1 : 2) : -fled_code();     /* 1.0-rc3: negative = why the chip was refused */
         case SET_SAVED: return settings_persistent();
         case SET_AUTO_OFF_MIN: return (int64_t)auto_off_min;

@@ -323,6 +323,27 @@ static void draw_solid(const tgt *T, const item *it, tk_irect R)
     }
 }
 
+/* a glass shape (its layer's bitmap px) where the item draws it (screen px, or the flatten's frame): through a
+ * 3-slice's stretch (a lock card's face drawn taller than its bitmap), then the item's transform */
+static float unslice(const tk_layer *l, float v, float srch)
+{
+    float sh = l->slice_h, s0 = l->slice_s0, s1 = l->slice_s1;
+    if (v <= s0) return v;
+    if (v >= srch - s1) return sh - (srch - v);
+    float mid = sh - s0 - s1, smid = srch - s0 - s1;
+    return s0 + (v - s0) * (smid > 0 ? mid / smid : 0);
+}
+static void shape_at(const item *it, const float *g, float *X, float *Y, float *W, float *H, float *r)
+{
+    const tk_layer *l = it->l;
+    float x0 = g[0], y0 = g[1], x1 = g[0] + g[2], y1 = g[1] + g[3];
+    if (l->slice == 1) { y0 = unslice(l, y0, (float)l->bmp.h); y1 = unslice(l, y1, (float)l->bmp.h); }
+    else if (l->slice == 2) { x0 = unslice(l, x0, (float)l->bmp.w); x1 = unslice(l, x1, (float)l->bmp.w); }
+    *X = x0 * it->a + it->tx; *Y = y0 * it->b + it->ty;
+    *W = (x1 - x0) * it->a; *H = (y1 - y0) * it->b;
+    *r = tk_maxf(tk_minf(g[4] * it->a, .5f * tk_minf(*W, *H)), .01f);
+}
+
 /* v9, Liquid Glass on the CPU (the fallback; comp2's lens path and gpucomp's reference do the same): each glass
  * shape of the item, its lens evaluated per target px from the shape (lens.h), over the backdrop (half resolution),
  * in R; drawn before the layer's own pixels */
@@ -335,9 +356,9 @@ static void draw_lens(const tgt *T, const item *it, tk_irect R)
     tk_irect ic = isect(R, irect_of(it->r.x0 * k, it->r.y0 * k, it->r.x1 * k, it->r.y1 * k));
     if (iempty(ic)) return;
     for (int q = 0; q < l->ngsh; q++) {
-        const float *g = l->gsh[q];
-        float X = (g[0] * it->a + it->tx) * k, Y = (g[1] * it->b + it->ty) * k, W = g[2] * it->a * k, H = g[3] * it->b * k;
-        float r = tk_maxf(g[4] * it->a * k, .01f);
+        float X, Y, W, H, r;
+        shape_at(it, l->gsh[q], &X, &Y, &W, &H, &r);
+        X *= k; Y *= k; W *= k; H *= k; r *= k;
         lens_par P = lens_params(W, H, r, TK_PT * k);
         float cx = X + W * .5f, cy = Y + H * .5f, ex = W * .5f - r, ey = H * .5f - r;
         tk_irect d = isect(ic, irect_of(X - 1, Y - 1, X + W + 1, Y + H + 1));
@@ -995,9 +1016,8 @@ static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
         if (lens)                               /* v9: Liquid Glass: a quad per glass shape, under the layer's */
             for (int k = 0; k < l->ngsh; k++) {
                 if (n >= TK_GPU_MAX) return -1;
-                const float *g = l->gsh[k];
-                float X = g[0] * it->a + it->tx, Y = g[1] * it->b + it->ty, W = g[2] * it->a, H = g[3] * it->b;
-                float r = tk_maxf(g[4] * it->a, .01f);
+                float X, Y, W, H, r;
+                shape_at(it, l->gsh[k], &X, &Y, &W, &H, &r);
                 tk_gpu_item *e = &gq[n++];
                 tk_memset(e, 0, sizeof *e);
                 lens_par P = lens_params(W, H, r, TK_PT);
@@ -1358,13 +1378,11 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
     for (int i = 0; i < flist.n; i++) {
         const item *it = &flist.it[i];
         draw_item(&T, it, screen);
-        /* v8: its glass shapes into the flat frame (the item's transform) */
-        if (mask && it->l->glass.v && !(it->l->glass_opaque_only && it->alpha < .999f))
-            for (int q = 0; q < it->l->ngsh && nfsh < 24; q++, nfsh++) {
-                const float *s = it->l->gsh[q];
-                fsh[nfsh][0] = s[0] * it->a + it->tx; fsh[nfsh][1] = s[1] * it->b + it->ty;
-                fsh[nfsh][2] = s[2] * it->a; fsh[nfsh][3] = s[3] * it->b; fsh[nfsh][4] = s[4] * it->a;
-            }
+        /* its glass shapes into the flat frame (the item's transform; a layer whose mask was freed after its bake
+         * keeps its shapes) */
+        if (mask && it->l->ngsh && !(it->l->glass_opaque_only && it->alpha < .999f))
+            for (int q = 0; q < it->l->ngsh && nfsh < 24; q++, nfsh++)
+                shape_at(it, it->l->gsh[q], &fsh[nfsh][0], &fsh[nfsh][1], &fsh[nfsh][2], &fsh[nfsh][3], &fsh[nfsh][4]);
     }
 }
 

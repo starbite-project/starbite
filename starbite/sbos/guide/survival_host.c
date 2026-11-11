@@ -145,3 +145,23 @@ const struct sbg_chapter *surv_guide(int *n)
         *n = SBG_NCH;
     return sbg_chapters;
 }
+
+/* the sensor hub, simulated: the heading turns slowly, a gentle tilt, steps tick up */
+int surv_heading(int *deg_x10, int *accuracy)
+{
+    *deg_x10 = (int)(surv_host_now_ms / 20U % 3600U);
+    *accuracy = 3;
+    return 1;
+}
+int surv_tilt(int *pitch_x10, int *roll_x10)
+{
+    int t = (int)(surv_host_now_ms / 50U % 400U);
+    *pitch_x10 = t < 200 ? t - 100 : 300 - t;
+    *roll_x10 = 35;
+    return 1;
+}
+int surv_steps(uint32_t *n)
+{
+    *n = (uint32_t)(surv_host_now_ms / 600U);
+    return 1;
+}

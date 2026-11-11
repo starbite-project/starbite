@@ -17,6 +17,7 @@
 #include "kern.h"
 #include "kapp.h"
 #include "survival.h"
+#include "gnssfix.h"
 
 #define KT_SURV_USB 1U
 #define KT_SURV_TICK 2U                     /* the slow tick (last 2 %'s keeper), 5 s */
@@ -710,6 +711,16 @@ int surv_selftest_step(void)
         int have = surv_card_get(&cd);
         sb_logx("selftest: survival: the emergency card (1 = one is set; its text is not logged): ", (uint64_t)have);
         sb_log(surv_sensors_why());
+        {
+            static const char s1[] = "LASTFIX v1 utc=1794500000 lat=60.169856 lon=-24.9383795 alt=12.3 acc=8.5 sats=9 src=gps\n";
+            struct gnss_fix gf;
+            st_check("the GPS fix line parses (lat 60169856, lon -24938380 rounded, alt 123 dm, 9 sats)",
+                     gnss_fix_parse(s1, (int)sizeof(s1) - 1, &gf) && gf.lat_e6 == 60169856 && gf.lon_e6 == -24938380 &&
+                         gf.alt_dm == 123 && gf.sats == 9 && gf.utc == 1794500000LL);
+            st_check("a line without lat is refused", !gnss_fix_parse("utc=1794500000 lon=1.0", 22, &gf));
+            int g = gnss_lastfix(&gf, 1);
+            sb_logx("selftest: survival: the card's GPS fix (1 a fix, 0 none, 2^64-1 no card): ", (uint64_t)(int64_t)g);
+        }
         st_t = sb_ms();
         st_phase = 1;
         return 0;

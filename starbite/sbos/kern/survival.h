@@ -80,6 +80,16 @@ struct sbg_chapter;
 const struct sbg_chapter *surv_guide(int *n);      /* the chapters (struct in guide/sbguide.h) */
 
 /* ---- sensors ---- */
+/* The compass, the level and the step counter come from the sensor hub inside the BCM4775 (shub.c, shub.h): valid
+ * only while the hub runs (shub_state() == SHUB_RUNNING and samples younger than 2 s). Each returns 1 when its
+ * values are valid, 0 when not (the reason: surv_sensors_why(), and shub_why() for the hub's own state).
+ * Axes as Android's: heading = where the top edge points, 0.1 degrees clockwise from magnetic north (0..3599),
+ * tilt-compensated from the accelerometer and the magnetometer; accuracy = the hub's magnetometer calibration level
+ * (0 unreliable .. 3 high). Pitch = the top edge above the horizon, roll = the right edge above the horizon, 0.1
+ * degrees, -900..900 (flat, face up or down: 0, 0). Steps: counted since the hub was started. */
+int surv_heading(int *deg_x10, int *accuracy);
+int surv_tilt(int *pitch_x10, int *roll_x10);
+int surv_steps(uint32_t *n);
 const char *surv_sensors_why(void);
 
 /* ---- the kernel ---- */
