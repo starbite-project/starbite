@@ -206,4 +206,16 @@ const char *sh_guide_chapter(int c, const char **sub, unsigned *argb, int *npage
 const char *sh_guide_page(int c, int p, const char *const **lines);   /* lines NULL-terminated; "! " a warning */
 const char *sh_sensors_why(void);         /* why there is no compass or level yet */
 
+/* Starbite OS Next (helper D, shell_nc.inc): notifications. The platform pushes each new one (the kernel: notif.c's
+ * posts, copied by kern_next.c's bridge outside the frames); the shell keeps the last 20 (RAM only) for the
+ * Notification Centre, the banner and the lock's "N notifications" pill. who: the poster ("clock", "battery", "modem",
+ * "heat", "survival" or an app's name); hm: local hh * 100 + mm (-1 unknown). Titles and lines go to the screen only. */
+void sh_notify(const char *who, const char *title, const char *body, int hm);
+/* the boot menu's last choice (the loader's settings record: a catalog key, "" unknown): the Systems widget's first */
+void sh_lastos(const char *key);
+/* the last GNSS fix (Maps; the kernel: kern/gnssfix.c, Android's fix on the card): 1 a fix, 0 none. Called from idle
+ * turns only (it may read the card) */
+typedef struct { int lat_e6, lon_e6, acc_dm, sats; long long utc; char src[12]; } sh_gnss_t;   /* acc_dm, sats: -1 unknown */
+int sh_gnss(sh_gnss_t *f);
+
 #endif

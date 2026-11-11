@@ -399,6 +399,6 @@ void sh_wifi(const sh_wifi_t *w)
         lock_ver++;
     }
     if (CCS.built && WF_ON() != was_on) { relayer(&ccsb); build_cc_grid(); cc_link(); }
-    if (AP.on && is_app("settings")) build_app_page(AP.a);
+    if (AP.on && (is_app("settings") || is_app("maps"))) build_app_page(AP.a);   /* helper D: Maps shows it live */
     relink();
 }

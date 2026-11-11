@@ -21,6 +21,8 @@
 #include "sbtk.h"
 #include "shell.h"
 #include "survival.h"
+#include "gnssfix.h"
+#include "store.h"
 #include "../guide/sbguide.h"
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
@@ -315,6 +317,53 @@ void sh_confirmed(int ok)
     void (*d)(int) = cf_done;
     cf_done = 0;
     if (d) d(ok);
+}
+/* helper D: notifications for the shell (shell_nc.inc): the kernel's posts since the last look (notif_seq), oldest
+ * first; polled from the draw hook, never inside a frame. The kernel's own list keeps its unread count (the classic UI's
+ * dot): Next's shell keeps its own. */
+static int notif_now(void)
+{
+    static unsigned seen;
+    unsigned s = notif_seq();
+    if (s == seen) return 0;
+    int n = (int)(s - seen);
+    if (n > notif_count()) n = notif_count();
+    seen = s;
+    for (int i = n - 1; i >= 0; i--) {
+        const struct notif *q = notif_get(i);
+        if (q) sh_notify(q->who, q->title, q->text, q->hm);
+    }
+    return n > 0;
+}
+/* helper D: the boot menu's last choice (the loader's settings record on UFS) for the Systems widget: read once, at
+ * the first minute (UFS is up by then); the self test reads nothing */
+static void lastos_now(void)
+{
+#ifndef SBOS_SELFTEST_NEXT
+    static int done;
+    if (done || !ready) return;
+    done = 1;
+    struct star_settings st;
+    if (settings_load(&st)) sh_lastos(st.last_key);
+#endif
+}
+/* helper D: Maps' last fix (kern/gnssfix.c: Android's fix on the card, cached 5 minutes); the shell asks from idle */
+int sh_gnss(sh_gnss_t *o)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)o;
+    return 0;                                        /* the self test never touches the card */
+#else
+    struct gnss_fix f;
+    if (gnss_lastfix(&f, 0) != 1) return 0;
+    o->lat_e6 = f.lat_e6;
+    o->lon_e6 = f.lon_e6;
+    o->acc_dm = f.acc_dm;
+    o->sats = f.sats;
+    o->utc = (long long)f.utc;
+    sb_strcpy(o->src, sizeof(o->src), f.src);
+    return 1;
+#endif
 }
 static void status_now(void)
 {
@@ -863,6 +912,17 @@ void next_kdraw(void)
         present();
         sh_idle();
     }
+    /* helper D: new notifications four times a second (a counter compare); a banner slides in (frames), the lock's
+     * pill is drawn at once */
+    static uint64_t notif_t;
+    if (ready && sb_ms() - notif_t >= 250 && (notif_t = sb_ms(), notif_now()) && !ticking) {
+        if (sh_moving()) start_ticking();
+        else {
+            tk_comp_frame(&comp, 0, 0);
+            present();
+            sh_idle();
+        }
+    }
 }
 
 void next_kevent(const void *evp)
@@ -892,6 +952,7 @@ void next_ktimer(unsigned id)
                 tk_comp_frame(&comp, 0, 0);
                 present();
             }
+            if (sh_moving() && K.screen_on) start_ticking();   /* helper D: a timed move (the banner going away) */
             clock_again();
         }
         return;
@@ -916,6 +977,7 @@ void next_kminute(void)
     if (baking) return;
     if (!ready) { ui_kminute(); return; }
     status_now();
+    lastos_now();                                    /* helper D: once */
     if (!ticking) {
         tk_comp_frame(&comp, 0, 0);
         present();
@@ -1188,7 +1250,8 @@ static const step S_MSGS[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 
                                { 0, 0, 0, 0, 0, 1000 }, { 1, 195, 204, 0, 0, 80 }, { 0, 0, 0, 0, 0, 800 }, { 1, 50, 63, 0, 0, 80 },
                                { 0, 0, 0, 0, 0, 600 }, { 2, 195, 795, 200, 450, 260 }, { 0, 0, 0, 0, 0, 1200 } };
 static const step S_EMERG[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 318, 720, 0, 0, 950 }, { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 795, 195, 330, 220 },
-                                { 0, 0, 0, 0, 0, 900 }, { 2, 320, 450, 60, 450, 200 }, { 0, 0, 0, 0, 0, 900 }, { 2, 80, 20, 80, 640, 300 },
+                                { 0, 0, 0, 0, 0, 900 }, { 2, 320, 450, 60, 450, 200 }, { 0, 0, 0, 0, 0, 900 },
+                                { 5, 0, 0, 0, 0, 20 }, { 0, 0, 0, 0, 0, 900 }, { 5, 0, 0, 0, 0, 20 },   /* helper D: the Power key relocks */
                                 { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 600, 195, 250, 300 }, { 0, 0, 0, 0, 0, 1200 },
                                 { 1, 195, 624, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };   /* survival-next: the list scrolls to Exit */
 /* P2r: the Power key (kind 5, the kernel's own power_key_short): the fade to black and the screen off, the wake, a
