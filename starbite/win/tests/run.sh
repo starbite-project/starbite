@@ -15,3 +15,6 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -fsanitize=address,undefined \
 cc -std=c11 -Wall -Wextra -Werror -O1 -fsanitize=address,undefined \
     -o "$out-keys" "$here/keys_test.c" "$here/../sbkeys/sbk_core.c"
 "$out-keys"
+cc -std=c11 -Wall -Wextra -Werror -O1 -fsanitize=address,undefined -DSB_HOST \
+    -o "$out-crash" "$here/crash_test.c" "$here/../sbwdog/sbcl_core.c"
+"$out-crash"

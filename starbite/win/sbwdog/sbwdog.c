@@ -34,8 +34,36 @@
  * HANG (WATCHDOG). WtCon/WtCnt are written (flushed) right after arming and at 10 s and 20 s, to show the counter
  * runs. The kill file is looked for during the first 60 s: T13j checked it in DriverEntry, where a boot-start
  * driver cannot see files yet, and the test boot restarted cleanly instead.
+ *
+ * T35, the crash ledger (sbcl_core.h, docs/WIN11-GPU.md 6.45): every boot, user boots included. The page
+ * 0xFED1E000 survives warm resets; sbwdog marks the boot running, keeps its uptime, writes the stop code and its
+ * parameters (each resolved to module+offset against a snapshot of the loaded modules taken at 20/60/180 s and
+ * every 10 min) from a bugcheck callback, and marks a clean shutdown (IRP_MJ_SHUTDOWN). The next boot reports the
+ * previous one in State: PrevBootText (REG_SZ), PrevBootEnd (0 none, 1 no shutdown/bugcheck, 2 clean, 3 bugcheck),
+ * PrevBugCheck, PrevP1..PrevP4 (QWORD), BootSeq, and History0..History15 (REG_SZ ring, HistoryNext).
+ * Ledger self-test: C:\starbite\auto\gpu\sbwdog.crashtest (a stage's gputest/ puts it there) makes the boot
+ * bugcheck on purpose at Parameters\CrashTestSec (default 150 s): 0xE2 MANUALLY_INITIATED_CRASH ('SBCL', an
+ * address in sbwdog.sys, one in ntoskrnl.exe, 0). Once per file: its last-write time goes to State\CrashTestStamp
+ * (flushed) before the crash, and a file with that stamp is ignored.
  */
 #include <ntddk.h>
+/* T35: the stop code from the kernel's own export (aux_klib.lib's helpers need MSVC's ARM64 GS/intrinsic
+ * runtime, which our clang link lacks), and the module list from SystemModuleInformation. */
+__declspec(dllimport) extern ULONG_PTR KiBugCheckData[5];
+NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(ULONG Class, PVOID Info, ULONG Length, PULONG ReturnLength);
+#define SB_SYSTEM_MODULE_INFORMATION 11
+typedef struct _SB_MODULE {
+    HANDLE Section;
+    PVOID MappedBase, ImageBase;
+    ULONG ImageSize, Flags;
+    USHORT LoadOrderIndex, InitOrderIndex, LoadCount, OffsetToFileName;
+    UCHAR FullPathName[256];
+} SB_MODULE;
+typedef struct _SB_MODULES {
+    ULONG NumberOfModules;
+    SB_MODULE Modules[1];
+} SB_MODULES;
+#include "sbcl_core.h"
 
 #define WDT1_PA 0x10060000ULL
 #define PMU_PA 0x14060000ULL
@@ -61,6 +89,16 @@ static struct {
     BOOLEAN PmuWritable;
     WCHAR SvcBuf[256];
     UNICODE_STRING Svc;
+    /* T35: the crash ledger */
+    volatile ULONG *Cl;                   /* the page, NULL if it could not be mapped */
+    struct sbcl_page Cur, Prev;           /* this boot's record (written through to the page), the previous one */
+    ULONG64 T0;
+    KBUGCHECK_CALLBACK_RECORD BcRec;
+    BOOLEAN BcRegistered;
+    PDEVICE_OBJECT Dev;
+    struct sbcl_mod Mods[2][256];
+    ULONG ModN[2];
+    volatile LONG ModCur;
 } g;
 
 /* ---- registry: this service's key, and one absolute read ---------------------------------------------- */
@@ -206,6 +244,225 @@ static BOOLEAN Arm(ULONG Secs)
     return Armed();
 }
 
+/* ---- T35: the crash ledger ------------------------------------------------------------------------------ */
+
+static void ClWrite(void)
+{
+    const ULONG *w = (const ULONG *)&g.Cur;
+    if (!g.Cl)
+        return;
+    sbcl_seal(&g.Cur);
+    for (ULONG i = 0; i < sizeof(g.Cur) / 4; i++)
+        WRITE_REGISTER_ULONG(&g.Cl[i], w[i]);
+    __dsb(_ARM64_BARRIER_SY);
+}
+
+static ULONG Uptime(void)
+{
+    return (ULONG)((KeQueryInterruptTime() - g.T0) / 10000000ULL);
+}
+
+/* HIGH_LEVEL, other processors frozen: only our own nonpaged data and the page. */
+static VOID BcCallback(PVOID Buffer, ULONG Length)
+{
+    LONG cur = g.ModCur;
+    UNREFERENCED_PARAMETER(Buffer);
+    UNREFERENCED_PARAMETER(Length);
+    g.Cur.state = SBCL_BUGCHECK;
+    g.Cur.bc_uptime_s = Uptime();
+    g.Cur.bc_code = (sbcl_u32)KiBugCheckData[0];
+    g.Cur.p[0] = KiBugCheckData[1];
+    g.Cur.p[1] = KiBugCheckData[2];
+    g.Cur.p[2] = KiBugCheckData[3];
+    g.Cur.p[3] = KiBugCheckData[4];
+    g.Cur.mods = g.ModN[cur];
+    for (unsigned i = 0; i < 4; i++)
+        sbcl_resolve(g.Mods[cur], g.ModN[cur], g.Cur.p[i], g.Cur.where[i]);
+    ClWrite();
+}
+
+/* The ledger self-test (above): TRUE = crash this boot. PASSIVE, once the file system answers. */
+static BOOLEAN CrashTestArmed(void)
+{
+    UNICODE_STRING us = RTL_CONSTANT_STRING(L"\\??\\C:\\starbite\\auto\\gpu\\sbwdog.crashtest");
+    OBJECT_ATTRIBUTES oa;
+    FILE_NETWORK_OPEN_INFORMATION fi;
+    UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG64)];
+    PKEY_VALUE_PARTIAL_INFORMATION v = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+    UNICODE_STRING n = RTL_CONSTANT_STRING(L"CrashTestStamp");
+    ULONG len;
+    HANDLE h;
+    ULONG64 stamp;
+    BOOLEAN go = FALSE;
+    InitializeObjectAttributes(&oa, &us, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(ZwQueryFullAttributesFile(&oa, &fi)))
+        return FALSE;
+    stamp = (ULONG64)fi.LastWriteTime.QuadPart;
+    if (!NT_SUCCESS(OpenSub(L"State", &h)))
+        return FALSE;
+    if (!NT_SUCCESS(ZwQueryValueKey(h, &n, KeyValuePartialInformation, v, sizeof(buf), &len)) ||
+        v->Type != REG_QWORD || *(ULONG64 *)v->Data != stamp) {
+        /* durable before the crash: a file the bugcheck could not delete never fires twice */
+        go = NT_SUCCESS(ZwSetValueKey(h, &n, 0, REG_QWORD, &stamp, sizeof(stamp))) && NT_SUCCESS(ZwFlushKey(h));
+    }
+    ZwClose(h);
+    return go;
+}
+
+static NTSTATUS ShutdownDispatch(PDEVICE_OBJECT Dev, PIRP Irp)
+{
+    UNREFERENCED_PARAMETER(Dev);
+    if (g.Cur.state == SBCL_RUNNING) {
+        g.Cur.state = SBCL_SHUTDOWN;
+        g.Cur.shutdown_uptime_s = Uptime();
+        ClWrite();
+    }
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS PassDispatch(PDEVICE_OBJECT Dev, PIRP Irp)
+{
+    UNREFERENCED_PARAMETER(Dev);
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+/* PASSIVE: the loaded modules into the spare table, then switch to it. */
+static void ClSnapshotModules(void)
+{
+    ULONG size = 0, n, k;
+    SB_MODULES *mi;
+    LONG next = g.ModCur ^ 1;
+    if (!g.Cl)
+        return;
+    (void)ZwQuerySystemInformation(SB_SYSTEM_MODULE_INFORMATION, NULL, 0, &size);
+    if (!size || size > 1024 * 1024)
+        return;
+    size += 4096;                         /* modules may load in between */
+    mi = (SB_MODULES *)ExAllocatePool2(POOL_FLAG_PAGED, size, SBWD_TAG);
+    if (!mi)
+        return;
+    if (NT_SUCCESS(ZwQuerySystemInformation(SB_SYSTEM_MODULE_INFORMATION, mi, size, &size))) {
+        n = mi->NumberOfModules;
+        if (n > RTL_NUMBER_OF(g.Mods[0]))
+            n = RTL_NUMBER_OF(g.Mods[0]);
+        for (ULONG i = 0; i < n; i++) {
+            struct sbcl_mod *m = &g.Mods[next][i];
+            USHORT off = mi->Modules[i].OffsetToFileName < 256 ? mi->Modules[i].OffsetToFileName : 0;
+            const UCHAR *name = mi->Modules[i].FullPathName + off;
+            m->base = (sbcl_u64)(ULONG_PTR)mi->Modules[i].ImageBase;
+            m->size = mi->Modules[i].ImageSize;
+            for (k = 0; k < sizeof(m->name) && off + k < 256 && name[k]; k++)
+                m->name[k] = (char)name[k];
+            for (; k < sizeof(m->name); k++)
+                m->name[k] = 0;
+        }
+        g.ModN[next] = n;
+        __dmb(_ARM64_BARRIER_ISH);       /* the table before the switch (one writer: the feeder) */
+        g.ModCur = next;
+    }
+    ExFreePoolWithTag(mi, SBWD_TAG);
+}
+
+static void StateSz(HANDLE H, PCWSTR Name, const char *A)
+{
+    WCHAR w[512];
+    UNICODE_STRING n;
+    ULONG i;
+    for (i = 0; i < RTL_NUMBER_OF(w) - 1 && A[i]; i++)
+        w[i] = (WCHAR)(UCHAR)A[i];
+    w[i] = 0;
+    RtlInitUnicodeString(&n, Name);
+    (void)ZwSetValueKey(H, &n, 0, REG_SZ, w, (i + 1) * sizeof(WCHAR));
+}
+
+static void StateQword(HANDLE H, PCWSTR Name, ULONG64 V)
+{
+    UNICODE_STRING n;
+    RtlInitUnicodeString(&n, Name);
+    (void)ZwSetValueKey(H, &n, 0, REG_QWORD, &V, sizeof(V));
+}
+
+/* DriverEntry: read what the previous Windows boot left, start this boot's record, report the previous one. */
+static void ClInit(PDRIVER_OBJECT Drv)
+{
+    PHYSICAL_ADDRESS pa;
+    ULONG *w = (ULONG *)&g.Prev;
+    HANDLE h;
+    char text[400];
+    BOOLEAN valid;
+
+    g.T0 = KeQueryInterruptTime();
+    pa.QuadPart = (LONGLONG)SBCL_PA;
+    g.Cl = (volatile ULONG *)MmMapIoSpaceEx(pa, SBCL_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
+    State(L"CrashLedger", g.Cl != NULL, FALSE);
+    if (!g.Cl)
+        return;
+    for (ULONG i = 0; i < sizeof(g.Prev) / 4; i++)
+        w[i] = READ_REGISTER_ULONG(&g.Cl[i]);
+    valid = sbcl_valid(&g.Prev) != 0;
+    RtlZeroMemory(&g.Cur, sizeof(g.Cur));
+    g.Cur.magic = SBCL_MAGIC;
+    g.Cur.version = SBCL_VERSION;
+    g.Cur.boot_seq = (g.Prev.magic == SBCL_MAGIC ? g.Prev.boot_seq : 0) + 1;
+    g.Cur.state = SBCL_RUNNING;
+    ClWrite();
+
+    sbcl_describe(&g.Prev, text, sizeof(text));
+    if (NT_SUCCESS(OpenSub(L"State", &h))) {
+        ULONG next;
+        UNICODE_STRING n;
+        WCHAR hn[16] = L"History";
+        {
+            ULONG v;
+            v = g.Cur.boot_seq;
+            RtlInitUnicodeString(&n, L"BootSeq");
+            (void)ZwSetValueKey(h, &n, 0, REG_DWORD, &v, sizeof(v));
+            v = valid ? g.Prev.state : 0;
+            RtlInitUnicodeString(&n, L"PrevBootEnd");
+            (void)ZwSetValueKey(h, &n, 0, REG_DWORD, &v, sizeof(v));
+            v = valid && g.Prev.state == SBCL_BUGCHECK ? g.Prev.bc_code : 0;
+            RtlInitUnicodeString(&n, L"PrevBugCheck");
+            (void)ZwSetValueKey(h, &n, 0, REG_DWORD, &v, sizeof(v));
+        }
+        StateSz(h, L"PrevBootText", text);
+        StateQword(h, L"PrevP1", valid ? g.Prev.p[0] : 0);
+        StateQword(h, L"PrevP2", valid ? g.Prev.p[1] : 0);
+        StateQword(h, L"PrevP3", valid ? g.Prev.p[2] : 0);
+        StateQword(h, L"PrevP4", valid ? g.Prev.p[3] : 0);
+        if (valid) {
+            /* the ring: History<HistoryNext> = this text, HistoryNext + 1 (mod 16) */
+            next = QueryDword(h, L"HistoryNext", 0) % 16;
+            hn[7] = (WCHAR)(next >= 10 ? L'1' : L'0' + next);
+            hn[8] = next >= 10 ? (WCHAR)(L'0' + next - 10) : 0;
+            hn[9] = 0;
+            StateSz(h, hn, text);
+            next = (next + 1) % 16;
+            RtlInitUnicodeString(&n, L"HistoryNext");
+            (void)ZwSetValueKey(h, &n, 0, REG_DWORD, &next, sizeof(next));
+        }
+        (void)ZwFlushKey(h);
+        ZwClose(h);
+    }
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "sbwdog: previous boot: %s\n", text);
+
+    KeInitializeCallbackRecord(&g.BcRec);
+    g.BcRegistered = KeRegisterBugCheckCallback(&g.BcRec, BcCallback, NULL, 0, (PUCHAR)"sbwdog");
+    State(L"BugCheckCallback", g.BcRegistered, FALSE);
+    if (NT_SUCCESS(IoCreateDevice(Drv, 0, NULL, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE, &g.Dev))) {
+        Drv->MajorFunction[IRP_MJ_CREATE] = PassDispatch;
+        Drv->MajorFunction[IRP_MJ_CLOSE] = PassDispatch;
+        Drv->MajorFunction[IRP_MJ_SHUTDOWN] = ShutdownDispatch;
+        State(L"ShutdownNotify", NT_SUCCESS(IoRegisterShutdownNotification(g.Dev)), FALSE);
+        g.Dev->Flags &= ~DO_DEVICE_INITIALIZING;
+    }
+}
+
 /* ---- threads ------------------------------------------------------------------------------------------ */
 
 static VOID RestartThread(PVOID Ctx)
@@ -224,7 +481,8 @@ static VOID FeedThread(PVOID Ctx)
     BOOLEAN dead = Ctx != NULL;           /* DeadmanTest (registry) */
     ULONG period = Param(L"PeriodMs", 5000);
     ULONG unattended = Param(L"Unattended", 0);
-    ULONG restartSec = 0, capSec = 0, mode = 2, secs = 0, feeds = 0, rearms = 0;
+    ULONG restartSec = 0, capSec = 0, mode = 2, secs = 0, feeds = 0, rearms = 0, crashAt = 0;
+    BOOLEAN crashChecked = FALSE;
     ULONG armSec = (unattended || dead) ? Param(L"ArmSec", 82) : 0;
     BOOLEAN feeding = !dead, restarted = FALSE, decided = FALSE, armed, sampled10 = FALSE, sampled20 = FALSE;
     ULONG64 t0 = KeQueryInterruptTime();
@@ -250,6 +508,28 @@ static VOID FeedThread(PVOID Ctx)
         t.QuadPart = -10000LL * period;
         KeDelayExecutionThread(KernelMode, FALSE, &t);
         elapsed = (ULONG)((KeQueryInterruptTime() - t0) / 10000000ULL);
+        /* T35: the ledger's uptime, and the module snapshot the bugcheck callback resolves against */
+        if (g.Cl && g.Cur.state == SBCL_RUNNING) {
+            g.Cur.uptime_s = Uptime();
+            ClWrite();
+        }
+        if ((elapsed >= 20 && secs < 20) || (elapsed >= 60 && secs < 60) || (elapsed >= 180 && secs < 180) ||
+            (elapsed >= 600 && elapsed / 600 != secs / 600))
+            ClSnapshotModules();
+        if (!crashChecked && elapsed >= 15) {
+            crashChecked = elapsed >= 90;     /* C: may not exist yet at 15 s: look every feed until 90 s */
+            if (g.Cl && CrashTestArmed()) {
+                crashChecked = TRUE;
+                crashAt = Param(L"CrashTestSec", 150);
+                if (crashAt < 30 || crashAt > 3000)
+                    crashAt = 150;
+                State(L"CrashTestAt", crashAt, TRUE);
+            }
+        }
+        if (crashAt && elapsed >= crashAt) {
+            ClSnapshotModules();
+            KeBugCheckEx(0xE2, SBCL_MAGIC, (ULONG_PTR)BcCallback, (ULONG_PTR)&KeBugCheckEx, 0);
+        }
         /* the kill file, once the file system answers (not in DriverEntry: boot-start, too early) */
         if (!dead && elapsed < 60 && FileExists(L"\\SystemRoot\\Starbite\\sbwdog.off")) {
             dead = TRUE;
@@ -337,10 +617,10 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT Drv, PUNICODE_STRING Reg)
     ULONG armSec;
     BOOLEAN dead;
     NTSTATUS st;
-    UNREFERENCED_PARAMETER(Drv);
 
     RtlInitEmptyUnicodeString(&g.Svc, g.SvcBuf, sizeof(g.SvcBuf));
     (void)RtlAppendUnicodeStringToString(&g.Svc, Reg);
+    ClInit(Drv);                          /* T35: before anything that could fail */
     pa.QuadPart = (LONGLONG)WDT1_PA;
     g.Wdt = (volatile UCHAR *)MmMapIoSpaceEx(pa, PAGE_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
     dead = Param(L"DeadmanTest", 0) != 0;

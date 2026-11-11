@@ -1738,6 +1738,25 @@ Every app failure must be a removed device that the app or DWM recovers from.
   toggles the keyboard through `ITipInvocation`, lists the visible windows, and triggers each DWM dump. Run with
   `--full-sec 540` and no keys self-test. Stage `build/win/stage/sbwddm-t33c`.
 
+### 6.45 T35: the crash ledger (sbwdog, the bluescreens' stop codes)
+
+- **Why:** the user reports frequent bluescreens, but no stop code has survived since T32.
+  - Every pmsg ring pulled has only the UFS driver's `=UFSBUGCHECK ARMED=…` line, because each boot rewrites the
+    ring and the phone was back in Windows before TWRP.
+  - The WER folders hold app crashes only, and the UFS driver has no dump mode.
+- **The ledger** (`starbite/win/sbwdog/sbcl_core.[ch]`, in sbwdog, every boot): page 0xFED1E000 of the UEFI Device
+  window (survives warm resets; next to pmsg 0xFED14000 and the guard's arbiter 0xFED1F000).
+  - **Each boot:** running, plus its uptime every 5 s.
+  - **Module snapshots** (ZwQuerySystemInformation 11) at 20/60/180 s and every 10 min.
+  - **A bugcheck callback** writes `KiBugCheckData` (the code and 4 parameters), each parameter resolved to
+    driver+offset. aux_klib.lib was the first try, but it needs MSVC's ARM64 GS and intrinsic runtime.
+  - **IRP_MJ_SHUTDOWN** marks a clean end.
+  - **The next boot** writes `State\PrevBootText` and friends, plus a 16-entry `History` ring.
+- **Self-test:** `C:\starbite\auto\gpu\sbwdog.crashtest` (stage `sbwddm-t35-crashtest`) bugchecks with 0xE2 at
+  150 s, once per file (its time is flushed to `State\CrashTestStamp` first).
+- **Reading:** `tools/win/crash-report.sh DIR` (replays the hive logs).
+- **Stage:** `build/win/stage/sbwddm-t35` (T32c plus sbwdog 178a1750); host tests in `starbite/win/tests/crash_test.c`.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
