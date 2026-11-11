@@ -1484,7 +1484,13 @@ int next_selftest_step(void)
             { uint64_t st0 = tk_us(); sh_touch(2, p->kind == 2 ? p->x1 : p->x0, p->kind == 2 ? p->y1 : p->y0, (float)sb_ms()); shell_time("touch up", st0); }
             F.down = 0;
             start_ticking();
-        }
+        } else if (p->kind == 5) {
+            /* a Power step whose whole time passed in one stall: pressed now, so the next film doesn't start with the
+             * screen off and fail for this one's slow frame */
+            sb_log("next: film: a Power step passed during a stall: pressed late");
+            power_key_short();
+        } else if (p->kind)
+            sb_log("next: film: a touch step passed during a stall: skipped (a slow frame, see the frames line)");
         F.s0 += p->ms;
         F.i++;
     }
