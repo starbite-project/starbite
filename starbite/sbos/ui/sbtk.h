@@ -280,9 +280,9 @@ uint32_t tk_flat_lens(const tk_comp *c, int x, int y, uint32_t fb);    /* v8: th
 int tk_comp_frame(tk_comp *c, int motion, int full);
 void tk_comp_prepare(tk_comp *c);
 int tk_comp_idle_pending(tk_comp *c);
-/* the frame on the panel now, full resolution: the RAM frame, or (P4) the scanout buffer the GPU drew the last frame
- * into (the RAM frame is stale then); for a snapshot of the screen (a scrim) right after tk_comp_frame */
-const tk_bmp *tk_comp_shown(const tk_comp *c);
+/* the frame on the panel now, full resolution, in RAM (P4: after GPU frames the CPU draws it there once, without
+ * presenting: the scanout buffers are uncached for the CPU); for a snapshot of the screen right after tk_comp_frame */
+const tk_bmp *tk_comp_shown(tk_comp *c);
 #define TK_COMP_SHOWN 1                       /* the shell's shown_frame() uses it */   /* v10: idle work left (the GPU's layer flushes, a turn at a time) */
 void tk_comp_idle(tk_comp *c);                            /* idle time: the half canvas follows the rest frames */
 uint64_t tk_comp_bench(tk_comp *c, int kind);      /* the present's kernels vs uibench's loops, us */                         /* idle: make the visible layers' half copies */

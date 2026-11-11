@@ -813,7 +813,6 @@ static void gidle_tree(tk_comp *c, tk_layer *l, uint64_t t0)
         gidle_tree(c, l->child, t0);
     }
 }
-const tk_bmp *tk_comp_shown(const tk_comp *c) { return c->gpu_stale && c->panel.px ? &c->panel : &c->fb; }
 int tk_comp_idle_pending(tk_comp *c) { return c->gpu && gidle_more; }
 void tk_comp_idle(tk_comp *c)
 {
@@ -1134,6 +1133,23 @@ static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
     c->hh[sl] = 0;
     c->fno++;
     return px;
+}
+
+/* the frame on the panel now, in RAM: on the GPU path the RAM frame is stale (the GPU draws into the scanout
+ * buffers, which the CPU reads uncached: ec2936a read 17 MB of one for the CC's scrim, ~600 ms, and a self-test
+ * film's Power press was skipped in that stall), so the CPU draws the last walk's items into it once, whole, at rest
+ * resolution, without presenting (about a CPU frame: 5-6 ms on four cores) */
+static uint32_t ram_fresh;                  /* gpu_frames when the RAM frame was last drawn for tk_comp_shown */
+const tk_bmp *tk_comp_shown(tk_comp *c)
+{
+    if (!c->gpu_stale || ram_fresh == c->gpu_frames + 1u) return &c->fb;
+    tgt T = { &SCR[0], &c->fb, 0, &c->bw_half, 1, 0 };
+    T.bw_double = 1;
+    tk_irect D[1] = { { 0, 0, TK_W, TK_H } };
+    job J = { c, &T, D, 1, 0, 0 };
+    run_bands(c, &J);
+    ram_fresh = c->gpu_frames + 1u;
+    return &c->fb;
 }
 
 int tk_comp_frame(tk_comp *c, int motion, int full)
