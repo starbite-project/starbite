@@ -100,6 +100,12 @@ int sd_allowed(void)
     return allowed;
 }
 
+void sd_forget(void)
+{
+    if (sd_rep.state > 0)           /* not during sd_up's own power cycle (state -1 there) */
+        sd_rep.state = 0;
+}
+
 static uint32_t rd(uintptr_t off)
 {
     uint32_t v = *(volatile uint32_t *)(SD + off);

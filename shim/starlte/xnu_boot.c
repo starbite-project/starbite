@@ -776,8 +776,12 @@ static void stage_entry(unsigned k, unsigned n, const char *title, uintptr_t ent
 static uintptr_t image_load(volatile uint64_t *log, const struct store_ent *e, uintptr_t limit,
     int64_t step, uint64_t *span)
 {
-    if (store_head(e, HEAD_BUF) || *(volatile uint32_t *)(HEAD_BUF + 56) != 0x644d5241U)
+    if (store_head(e, HEAD_BUF))
+        return fail(log, step, "KERNEL HEAD READ FAILED");
+    if (*(volatile uint32_t *)(HEAD_BUF + 56) != 0x644d5241U) {
+        store_read_diag("no ARMd magic at +56", e, e->lba, 1, 0, HEAD_BUF);
         return fail(log, step, "NOT AN ARM64 IMAGE");
+    }
     uint64_t text_offset = *(volatile uint64_t *)(HEAD_BUF + 8);
     uint64_t image_size = *(volatile uint64_t *)(HEAD_BUF + 16);
     if (image_size < e->size)
@@ -1011,15 +1015,17 @@ boot_linux(volatile uint64_t *log, const struct cat_ent *e)
             !fdt_chosen_set_u64(LINUX_DTB, "linux,initrd-end", OS_RD + rd.e.size))
             return fail(log, -49, "LINUX DTB HAS NO INITRD PROPERTIES");
     }
-    uint8_t l31 = 0, l2 = 0;
-    int rails = hw_sd_rails(&l31, &l2);
-    star_fb_text(3, rails > 0 ? "MICROSD POWER ON" : rails == 0 ? "MICROSD POWER REFUSED" : "MICROSD POWER: NO ACPM");
-    log[18] = (uint64_t)l31 << 8 | l2;
     uint64_t span;
     stage_file(k++, ns, "Reading kernel", &img.e);
     uintptr_t dst = image_load(log, &img.e, OS_RD, -44, &span);
     if (!dst)
         return 0;
+    /* the card's power cycle after the last store read (the store may be on the card): Linux
+     * finds the card in idle, the loader's reader has no card in the middle of its reads */
+    uint8_t l31 = 0, l2 = 0;
+    int rails = hw_sd_rails(&l31, &l2);
+    star_fb_text(3, rails > 0 ? "MICROSD POWER ON" : rails == 0 ? "MICROSD POWER REFUSED" : "MICROSD POWER: NO ACPM");
+    log[18] = (uint64_t)l31 << 8 | l2;
     stage_crc(k++, ns, "Verifying kernel CRC32", img.e.crc);
     stage_entry(k, ns, "Handing off to kernel", dst);
     clean_bytes(dst, dst + span);

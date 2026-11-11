@@ -19,6 +19,7 @@
 #include "hw.h"
 #include "catalog.h"
 #include "store.h"
+#include "sd.h"
 #include "ui.h"
 #include "crash.h"
 #include "fbbg.h"
@@ -1717,6 +1718,7 @@ int hw_sd_rails(uint8_t *l31, uint8_t *l2)
     wait_ms(5);
     (void)pmic_read(1, 0x68, l31);
     (void)pmic_read(1, 0x4a, l2);
+    sd_forget();                    /* the card store's reader starts the card again (sd.h) */
     return ok ? 1 : -1;
 }
 

@@ -10,6 +10,9 @@ void sd_allow(void);
 int sd_allowed(void);
 /* Card up (clocks, pins, rails, controller, SD init): 1 ready, 0 failed (sd_rep says where). */
 int sd_up(void);
+/* The card's rails were cycled (hw_sd_rails, before an OS start): the card is back in idle, so the
+ * next read brings it up again (STC1 2026-11-11: every read after Linux's power cycle failed). */
+void sd_forget(void);
 /* count 512-byte sectors from sector to dst: 0 on success. */
 int sd_read(uint64_t sector, uint32_t count, uintptr_t dst);
 /* The card's store partition (MBR entry of type 0xDA) in 4 KiB blocks: 1 found. */

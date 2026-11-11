@@ -87,6 +87,9 @@ int store_card_only(void);
 const char *store_home_why(void);
 /* 1 if medium m's version 2 header carries the HOME flag. */
 int store_marked_home(unsigned medium);
+/* One pmsg line (flushed) about a failed read of e: what, r, blocks, the card's sector and driver
+ * state, the first 16 bytes at dst. store_load / store_head call it on every failure. */
+void store_read_diag(const char *what, const struct store_ent *e, uint64_t lba, uint64_t count, int r, uintptr_t dst);
 /* Blocks [index, index + count) of entry e to dst (no CRC): 0, -1 read error or outside the entry. */
 int store_read(const struct store_ent *e, uint64_t index, uint64_t count, uintptr_t dst);
 

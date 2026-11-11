@@ -23,6 +23,13 @@
 
 uint8_t host_ufs_buf[1U << 20] __attribute__((aligned(4096)));
 struct sd_report sd_rep;
+static unsigned pmsg_lines;
+static char pmsg_last[512];
+void star_pmsg(const char *s)
+{
+    pmsg_lines++;
+    snprintf(pmsg_last, sizeof(pmsg_last), "%s", s);
+}
 
 #define BLK 4096U
 #define UD_FIRST 1000ULL
@@ -72,13 +79,33 @@ int ufs_write_block(uint64_t lba, uintptr_t src)
 /* ---- fake card (sd.h) ---- */
 void sd_allow(void) { allowed = 1; }
 int sd_allowed(void) { return allowed; }
+static int card_idle;            /* power-cycled: the card answers no read until it is brought up again */
+static unsigned card_inits;
 int sd_up(void)
 {
+    if (sd_rep.state)
+        return sd_rep.state > 0;
     if (!allowed)
         return 0;
     sd_rep.present = card_present;
     sd_rep.state = card_present ? 1 : -1;
+    if (card_present) {
+        card_idle = 0;
+        card_inits++;
+    }
     return card_present;
+}
+void sd_forget(void)
+{
+    if (sd_rep.state > 0)
+        sd_rep.state = 0;
+}
+/* hw_sd_rails as before STC2 (no sd_forget) and as now */
+static void power_cycle(int forget)
+{
+    card_idle = 1;
+    if (forget)
+        sd_forget();
 }
 int sd_read(uint64_t sector, uint32_t count, uintptr_t dst) { (void)sector; (void)count; (void)dst; return -1; }
 int sd_store_area(uint64_t *first, uint64_t *blocks)
@@ -106,6 +133,10 @@ int sd_read4k(uint64_t lba, uint64_t count, uintptr_t dst)
     }
     if (!sd_up())
         return -1;
+    if (card_idle) {
+        sd_rep.last_error = -7;
+        return -7;                  /* the card is in idle: no data (read_chunk's timeout) */
+    }
     card_reads++;
     memcpy((void *)dst, card_at(lba, count), count * BLK);
     return 0;
@@ -282,6 +313,29 @@ static void case_card_only_blank(void)
     CHECK(ufs_calls == 0, "no UFS call");
 }
 
+/* STC1 on the phone (2026-11-11): Linux's launch power-cycled the card, then every store read failed */
+static void case_power_cycle(void)
+{
+    load_ufs(D, "ufs-off.img");
+    load_card(D, "card-home.img");
+    store_cmdline("sbstore=card");
+    struct store_ent e;
+    static uint8_t buf[1U << 20] __attribute__((aligned(16)));
+    CHECK(store_home() == (int)STORE_SD && store_find("linux.image", &e), "card home, linux.image found");
+    CHECK(store_load(&e, (uintptr_t)buf, sizeof(buf)) == 0, "loads before the power cycle");
+    power_cycle(0);
+    unsigned l0 = pmsg_lines;
+    CHECK(store_load(&e, (uintptr_t)buf, sizeof(buf)) == -1, "STC1 reproduced: the read after a power cycle the driver missed fails");
+    CHECK(pmsg_lines == l0 + 1 && strstr(pmsg_last, "read failed sd:linux.image r=-7 lba ") &&
+          strstr(pmsg_last, "(card sector ") && strstr(pmsg_last, " first "), "and pmsg says so: %s", pmsg_last);
+    sd_rep.state = 1;
+    power_cycle(1);
+    unsigned i0 = card_inits;
+    CHECK(store_load(&e, (uintptr_t)buf, sizeof(buf)) == 0 && card_inits == i0 + 1,
+          "with sd_forget (hw_sd_rails since STC2): the card comes up again, CRC OK");
+    CHECK(store_head(&e, (uintptr_t)buf) == 0 && *(uint32_t *)(buf) != 0xffffffffU, "and the head reads");
+}
+
 static void case_cmdline(void)
 {
     store_cmdline("xsbstore=card sbstore=cardx sbstore=ufs");
@@ -312,6 +366,7 @@ int main(int argc, char **argv)
         { "card only, home card store", case_card_only_home },
         { "card only, no card", case_card_only_no_card },
         { "card only, blank card", case_card_only_blank },
+        { "power cycle between boot and launch (STC1)", case_power_cycle },
         { "command line", case_cmdline },
     };
     int bad = 0;

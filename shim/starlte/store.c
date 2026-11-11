@@ -280,17 +280,101 @@ int store_last_load(char *name, unsigned cap, uint64_t *size, uint32_t *want, ui
     return last_ld.res;
 }
 
+/* A failed read or CRC to pmsg (flushed by pmsg_put): medium, entry, blocks, the card's sector and
+ * driver state, the first bytes read. STC2: find where card reads go wrong without a screen. */
+void star_pmsg(const char *s);
+static char *dg_s(char *p, const char *s)
+{
+    while (*s)
+        *p++ = *s++;
+    return p;
+}
+static char *dg_x(char *p, uint64_t v, unsigned digits)
+{
+    for (unsigned i = digits; i; --i) {
+        unsigned d = (unsigned)(v >> (4 * (i - 1))) & 15U;
+        *p++ = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+    }
+    return p;
+}
+static char *dg_u(char *p, uint64_t v)
+{
+    char t[21];
+    unsigned n = 0;
+    do {
+        t[n++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    while (n)
+        *p++ = t[--n];
+    return p;
+}
+static char *dg_i(char *p, int v)
+{
+    if (v < 0) {
+        *p++ = '-';
+        return dg_u(p, (uint64_t)(-(int64_t)v));
+    }
+    return dg_u(p, (uint64_t)v);
+}
+void store_read_diag(const char *what, const struct store_ent *e, uint64_t lba, uint64_t count, int r, uintptr_t dst)
+{
+    char b[400];
+    char *p = b;
+    p = dg_s(p, "STARBITE store: ");
+    p = dg_s(p, what);
+    p = dg_s(p, e->medium == STORE_SD ? " sd:" : " ufs:");
+    for (unsigned i = 0; i < 31 && e->name[i]; ++i)
+        *p++ = e->name[i];
+    p = dg_s(p, " r=");
+    p = dg_i(p, r);
+    p = dg_s(p, " lba ");
+    p = dg_u(p, lba);
+    p = dg_s(p, " +");
+    p = dg_u(p, count);
+    p = dg_s(p, " blocks");
+    if (e->medium == STORE_SD) {
+        p = dg_s(p, " (card sector ");
+        p = dg_u(p, lba * 8U);
+        p = dg_s(p, " +");
+        p = dg_u(p, count * 8U);
+        p = dg_s(p, ") sd state ");
+        p = dg_i(p, sd_rep.state);
+        p = dg_s(p, " err ");
+        p = dg_i(p, sd_rep.last_error);
+        p = dg_s(p, " rintsts ");
+        p = dg_x(p, sd_rep.last_rintsts, 8);
+        p = dg_s(p, " status ");
+        p = dg_x(p, sd_rep.last_status, 8);
+        p = dg_s(p, " card ");
+        p = dg_i(p, sd_rep.card_state);
+        p = dg_s(p, " recov ");
+        p = dg_u(p, sd_rep.recoveries);
+        p = dg_s(p, " hc ");
+        p = dg_u(p, (uint64_t)sd_rep.high_capacity);
+    }
+    p = dg_s(p, " first ");
+    for (unsigned i = 0; i < 16; ++i)
+        p = dg_x(p, *(volatile uint8_t *)(dst + i), 2);
+    p = dg_s(p, "\n");
+    *p = 0;
+    star_pmsg(b);
+}
+
 int store_load(const struct store_ent *e, uintptr_t dst, uint64_t cap)
 {
     int r;
     uint32_t got = 0;
     if (e->size > cap) {
         r = -3;
-    } else if (med_read(e->medium, e->lba, (e->size + 4095U) / 4096U, dst)) {
+    } else if ((r = med_read(e->medium, e->lba, (e->size + 4095U) / 4096U, dst)) != 0) {
+        store_read_diag("read failed", e, e->lba, (e->size + 4095U) / 4096U, r, dst);
         r = -1;
     } else {
         got = star_crc32(dst, e->size);
         r = got == e->crc ? 0 : -2;
+        if (r)
+            store_read_diag("CRC mismatch", e, e->lba, (e->size + 4095U) / 4096U, (int)(got & 0x7fffffff), dst);
     }
     unsigned i = 0;
     for (; i + 1 < sizeof(last_ld.name) && i < sizeof(e->name) && e->name[i]; ++i)
@@ -305,7 +389,10 @@ int store_load(const struct store_ent *e, uintptr_t dst, uint64_t cap)
 
 int store_head(const struct store_ent *e, uintptr_t dst)
 {
-    return med_read(e->medium, e->lba, 1, dst) ? -1 : 0;
+    int r = med_read(e->medium, e->lba, 1, dst);
+    if (r)
+        store_read_diag("head read failed", e, e->lba, 1, r, dst);
+    return r ? -1 : 0;
 }
 
 uint64_t store_base(unsigned m)
