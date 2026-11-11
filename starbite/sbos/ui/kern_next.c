@@ -165,6 +165,29 @@ static void boost(int on)
         sb_log(on ? "next: the A55 did not take 1794 MHz" : "next: the A55 did not go back to 1053 MHz");
 }
 
+/* the modem's status for the status bar and the keypad (no modem is started by Next: it stays Off) */
+static int has(const char *s, const char *w)
+{
+    for (; *s; s++) {
+        int k = 0;
+        while (w[k] && s[k] == w[k]) k++;
+        if (!w[k]) return 1;
+    }
+    return 0;
+}
+static void cell_now(void)
+{
+    struct sbos_phone ph;
+    kmodem_status(&ph);
+    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars };
+    if (ph.state == SBOS_MODEM_ON) c.state = SH_CELL_ON;
+    else if (ph.state == SBOS_MODEM_FAILED) c.state = SH_CELL_FAILED;
+    else if (ph.state == SBOS_MODEM_PARKED) c.state = SH_CELL_GUARD;
+    else if (ph.state == SBOS_MODEM_STARTING) c.state = SH_CELL_RESTARTING;
+    c.emergency_only = has(ph.cs, "emergency");
+    c.rat = has(ph.cs, "LTE") ? 7 : has(ph.cs, "UMTS") ? 4 : has(ph.cs, "EDGE") ? 3 : has(ph.cs, "GPRS") ? 2 : has(ph.cs, "GSM") ? 1 : 0;
+    sh_cell(&c);
+}
 static void status_now(void)
 {
     struct sbos_time t;
@@ -174,6 +197,7 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
+    cell_now();
 }
 
 void next_kdraw(void);
@@ -416,7 +440,7 @@ void sh_torch(int lit)
 /* ---- the self test --------------------------------------------------------------------------------------- */
 #ifdef SBOS_SELFTEST_NEXT
 typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
-static const char *const FILM_NAME[7] = { "unlock", "group", "focus", "holds", "pages", "cc", "app" };
+static const char *const FILM_NAME[9] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages" };
 /* tools/films.txt's scripts (pt, ms) */
 static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 1300 } };
 static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 354, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 195, 354, 0, 0, 80 },
@@ -433,6 +457,14 @@ static const step S_CC[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 22
                              { 0, 0, 0, 0, 0, 600 }, { 1, 195, 600, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 } };
 static const step S_APP[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 158, 290, 0, 0, 80 },
                               { 0, 0, 0, 0, 0, 1100 }, { 2, 195, 795, 200, 450, 260 }, { 0, 0, 0, 0, 0, 1200 } };
+static const step S_PHONE[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 65, 736, 0, 0, 80 },
+                                { 0, 0, 0, 0, 0, 1000 }, { 1, 91, 221, 0, 0, 80 }, { 0, 0, 0, 0, 0, 300 }, { 1, 91, 221, 0, 0, 80 },
+                                { 0, 0, 0, 0, 0, 300 }, { 1, 195, 221, 0, 0, 80 }, { 0, 0, 0, 0, 0, 300 }, { 1, 195, 605, 0, 0, 80 },
+                                { 0, 0, 0, 0, 0, 2600 }, { 1, 150, 749, 0, 0, 80 }, { 0, 0, 0, 0, 0, 600 }, { 2, 195, 795, 200, 450, 260 },
+                                { 0, 0, 0, 0, 0, 1200 } };
+static const step S_MSGS[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 152, 736, 0, 0, 80 },
+                               { 0, 0, 0, 0, 0, 1000 }, { 1, 195, 204, 0, 0, 80 }, { 0, 0, 0, 0, 0, 800 }, { 1, 50, 63, 0, 0, 80 },
+                               { 0, 0, 0, 0, 0, 600 }, { 2, 195, 795, 200, 450, 260 }, { 0, 0, 0, 0, 0, 1200 } };
 static struct { const step *s; int n, i, down; uint64_t t0; float s0; int film; } F;
 static int st_started, st_failed, clock_ok;
 int next_selftest_clock_ok(void) { return clock_ok; }
@@ -454,7 +486,9 @@ static void film_start(int film)
     case 3: F.s = S_HOLDS; F.n = 5; break;
     case 4: F.s = S_PAGES; F.n = 7; break;
     case 5: F.s = S_CC; F.n = 11; break;
-    default: F.s = S_APP; F.n = 7; break;
+    case 6: F.s = S_APP; F.n = 7; break;
+    case 7: F.s = S_PHONE; F.n = 17; break;
+    default: F.s = S_MSGS; F.n = 11; break;
     }
     /* each film from the plain lock screen */
     sh_set("reset", "", 0);
@@ -486,7 +520,7 @@ int next_selftest_step(void)
             clock_ok = comp.last_px != 0;
             status_now();
         }
-        sb_log("selftest: next: the seven films (unlock, group, focus, holds, pages, cc, app) with synthetic touches");
+        sb_log("selftest: next: the nine films (unlock, group, focus, holds, pages, cc, app, phone, messages) with synthetic touches");
         film_start(0);
         return 1;
     }
@@ -515,7 +549,7 @@ int next_selftest_step(void)
     if (ticking || sh_moving()) return 1;          /* let it settle */
     stats_log(FILM_NAME[F.film]);
     frame_log = 0;
-    if (F.film < 6) { film_start(F.film + 1); return 1; }
+    if (F.film < 8) { film_start(F.film + 1); return 1; }
     {
         /* the present's kernels against uibench's loops, on these buffers and cores (boosted, workers on) */
         static const char *const BN[5] = { "the motion present (2x, rows in pairs)", "the rest copy (tk_memcpy rows)",

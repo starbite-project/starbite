@@ -26,5 +26,11 @@ void sh_boot_os(const char *key);
 void sh_torch(int lit);
 /* the status bar's left text from the modem's status (default "No SIM") */
 void sh_carrier(const char *text);
+/* the modem's status for the UI: the fields of the modem session's snapshot that the shell shows (docs/MODEM.md
+ * 7.7, struct sbm_modem_snap): state, SIM status (0x80 absent, -1 not known), emergency-only, RAT (1 GSM .. 7 LTE,
+ * 0 unknown), bars 0..5 (-1 unknown). Never the PLMN or a cell id: nothing here is logged. Redraws only on a change. */
+enum { SH_CELL_OFF, SH_CELL_ON, SH_CELL_RESTARTING, SH_CELL_GUARD, SH_CELL_FAILED };
+typedef struct { int state, sim, emergency_only, rat, bars; } sh_cell_t;
+void sh_cell(const sh_cell_t *c);
 
 #endif

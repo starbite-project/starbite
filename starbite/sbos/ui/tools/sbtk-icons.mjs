@@ -50,6 +50,24 @@ try {
   }
   add('cc-flame', q('#ccEm svg'), 20, 24, 'color:#fff');
   add('a30-calc', `sbIcons().apps.calc`, 30, 30);
+  /* the apps' own glyphs (P2l): taken now, while their screen is open (later states replace the app window) */
+  const now = async (name, sel, w, h, style = '') => { const svg = await c.ev(q(sel)); add(name, JSON.stringify(svg), w, h, style); };
+  await c.ev(`sbSet('cc', 0); sbSet('app', ['phone', 1])`);
+  for (const k of ['fav', 'rec', 'con', 'pad']) {
+    await now('tab-' + k, `.tabs [data-tab=${k}] svg`, 22, 22, 'color:rgba(255,255,255,.6)');
+    await now('tab-' + k + '-on', `.tabs [data-tab=${k}] svg`, 22, 22, 'color:#6fb3ff');
+  }
+  await now('call', '#callBtn svg', 30, 30);
+  await c.reload();
+  await c.ev(`sbSet('unlock', 1); sbSet('app', ['messages', 1])`);
+  await now('search15', '#appwin .sfield svg', 15, 15);
+  await c.ev(`document.querySelector('[data-thread="Mum"]').click()`);
+  await now('back', '#back svg', 12, 20, 'color:#6fb3ff');
+  await now('send', '#send svg', 16, 16);
+  /* the page as the lazy entries above expect it (the focus sheet's thumb, the Control Centre) */
+  await c.reload();
+  await c.ev(`sbSet('focus', 'win11'); sbSet('focus', ''); sbSet('unlock', 1); sbSet('cc', 1)`);
+  add('heart', JSON.stringify('<svg viewBox="0 0 20 20"><text x="0" y="16" font-size="16px">\u2764\ufe0f</text></svg>'), 20, 20);
   add('a30-camera', `sbIcons().apps.camera`, 30, 30);
   await c.send('Emulation.setDefaultBackgroundColorOverride', { color: { r: 0, g: 0, b: 0, a: 0 } });
   await c.ev(`(() => { document.documentElement.style.background = 'transparent'; document.body.style.background = 'transparent';

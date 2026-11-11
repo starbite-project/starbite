@@ -172,9 +172,18 @@ static void build_wall(void)
 }
 
 /* ---- the status bar (lock and home) -------------------------------------------------------------------------- */
+static void d_rrect(dc *d, float x, float y, float w, float h, float r, tk_col c);
+static struct { int state, bars, rat; } SB_CELL;      /* the status bar's copy of the modem's (sh_cell) */
 static void status_bar(dc *d, const char *left)
 {
     d_text(d, TK_IT600, 15, 36, 29.5f, left, 0, 0, INK, 1);
+    if (SB_CELL.state == 1 && SB_CELL.bars >= 0) {
+        /* four bars (0..5 from the CP: 5 is four), the RAT before them: only while the modem is on */
+        int n = SB_CELL.bars >= 4 ? 4 : SB_CELL.bars;
+        for (int i = 0; i < 4; i++) d_rrect(d, 289 + 4.5f * i, 30 - (4.5f + 2.5f * i), 3, 4.5f + 2.5f * i, 1, W(i < n ? 1 : .3f));
+        const char *r = SB_CELL.rat == 7 ? "4G" : SB_CELL.rat == 4 ? "3G" : SB_CELL.rat >= 1 && SB_CELL.rat <= 3 ? "2G" : "";
+        if (r[0]) d_text(d, TK_IT600, 12, 286 - tk_text_w(TK_IT600, PT(12), r, 0, 0) / TK_PT, 29.5f, r, 0, 0, INK, 1);
+    }
     d_icon(d, "sb-wifi", 310, 18, 1);
     d_icon(d, "sb-batt", 333, 17.5f, 1);
 }
@@ -947,6 +956,15 @@ static void build_cc(void)
     cc_levels();
     CCS.built = 1;
 }
+/* an open app needs the room (its page is a whole screen): the Control Centre's snapshot and grid go, home's idle
+ * time builds them again */
+static void free_cc(void)
+{
+    if (!CCS.built || CCS.on) return;
+    relayer(&ccscrim);
+    relayer(&ccgrid);
+    CCS.built = 0;
+}
 static void set_cc(float p)
 {
     CCS.p = p;
@@ -1032,14 +1050,313 @@ static arect lerpr(arect a, arect b, float t)
 {
     return (arect){ a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.w + (b.w - a.w) * t, a.h + (b.h - a.h) * t, a.r + (b.r - a.r) * t };
 }
+/* ---- the apps' own screens (P2l), after the concept's SCREENS: Phone (keypad, Recents, Contacts, Favourites),
+ * Messages (the list, a thread), Contacts, Photos, Camera. Places from Chrome's own layout of them
+ * (tools/concept-boxes.mjs): a text's baseline is its line's top plus its rounded ascent. The concept's sample
+ * people and messages are its placeholders until the modem carries SMS. -------------------------------------- */
+static float bl(int f, float size, float top) { return top + tk_floorf(tk_ascent(f, PT(size)) / TK_PT + .5f); }
+static float lh(int f, float size)
+{
+    return tk_floorf(tk_ascent(f, PT(size)) / TK_PT + .5f) + tk_floorf(tk_descent(f, PT(size)) / TK_PT + .5f);
+}
+typedef struct { const char *n; uint32_t c; } person_t;
+static const person_t PEOPLE[6] = { { "Aino Virtanen", 0x5e5ce6 }, { "Mikko Laine", 0xff9f0a }, { "Sara Niemi", 0x30d158 },
+                                    { "Juho K.", 0x64d2ff }, { "Mum", 0xff375f }, { "Ville Ojala", 0xbf5af2 } };
+static uint32_t pcol(const char *n)
+{
+    for (int i = 0; i < 6; i++) if (!tk_strcmp(PEOPLE[i].n, n)) return PEOPLE[i].c;
+    return 0x8e8e93;
+}
+/* the avatar: a circle, the initials (each word's first letter, at most two) centred as a grid centres them */
+static void d_av(dc *d, float x, float y, float s, const char *n, float fs)
+{
+    d_rrect(d, x, y, s, s, s / 2, tk_hex(pcol(n), 1));
+    char in[3];
+    int k = 0;
+    in[k++] = n[0];
+    for (const char *c = n; *c && k < 2; c++) if (*c == ' ' && c[1] && c[1] != ' ') in[k++] = c[1];
+    in[k] = 0;
+    float w = tw(TK_IT700, fs, in, 0, 0);
+    d_text(d, TK_IT700, fs, x + (s - w) / 2, bl(TK_IT700, fs, y + (s - lh(TK_IT700, fs)) / 2), in, 0, 0, W(1), 0);
+}
+/* text-overflow: ellipsis: the longest start that fits with the ellipsis */
+static void ellipsize(char *out, int cap, int f, float size, const char *s, float maxw)
+{
+    int n = 0;
+    while (s[n] && n < cap - 1) { out[n] = s[n]; n++; }
+    out[n] = 0;
+    if (tw(f, size, out, 0, 0) <= maxw) return;
+    while (n > 0) {
+        n--;
+        while (n > 0 && (out[n] & 0xc0) == 0x80) n--;          /* a whole UTF-8 character */
+        out[n] = 0;
+        char t[128];
+        int k = 0;
+        while (out[k] && k < 120) { t[k] = out[k]; k++; }
+        t[k++] = (char)0xe2; t[k++] = (char)0x80; t[k++] = (char)0xa6; t[k] = 0;
+        if (tw(f, size, t, 0, 0) <= maxw) { tk_memcpy(out, t, (size_t)k + 1); return; }
+    }
+}
+/* greedy word wrap into at most 4 lines of maxw; returns the line count, the widest line in *wmax */
+static int wrap(char lines[4][96], int f, float size, const char *s, float maxw, float *wmax)
+{
+    int nl = 0, i = 0;
+    *wmax = 0;
+    while (s[i] && nl < 4) {
+        int st = i, last = -1, k = i;
+        char t[96];
+        for (;;) {
+            int e = k;
+            while (s[e] && s[e] != ' ') e++;
+            int len = e - st;
+            if (len > 95) len = 95;
+            tk_memcpy(t, s + st, (size_t)len);
+            t[len] = 0;
+            if (last >= 0 && tw(f, size, t, 0, 0) > maxw) break;
+            last = e;
+            if (!s[e]) break;
+            k = e + 1;
+        }
+        int len = last - st;
+        if (len > 95) len = 95;
+        tk_memcpy(lines[nl], s + st, (size_t)len);
+        lines[nl][len] = 0;
+        float w = tw(f, size, lines[nl], 0, 0);
+        if (w > *wmax) *wmax = w;
+        nl++;
+        i = last;
+        while (s[i] == ' ') i++;
+    }
+    return nl;
+}
+/* Liquid Glass over the app's own ground (#0a0f1f) and what is drawn so far under it (Chrome's backdrop) */
+static void d_lg_app(dc *d, float x, float y, float w, float h, float r, int dark)
+{
+    float bx = PT(x) - d->ox, by = PT(y) - d->oy;
+    int X = (int)tk_floorf(bx), Y = (int)tk_floorf(by), Wd = (int)(bx + PT(w) + .999f) - X, Hd = (int)(by + PT(h) + .999f) - Y;
+    tk_bmp t;
+    if (!tk_bmp_new(&t, Wd, Hd)) return;
+    tk_fill_rect_raw(&t, 0, 0, Wd, Hd, 0xff0a0f1fu);
+    tk_blit(&t, d->b, -X, -Y, 1);
+    tk_bmp_blur_sat(&t, PT(14), 1.9f, 1.06f);
+    tk_glass_local_put(d->b, &t, X, Y, bx, by, PT(w), PT(h), PT(r));
+    tk_bmp_free(&t);
+    tk_glass_bake(d->b, 0, bx, by, PT(w), PT(h), PT(r), dark, 1);
+}
+static void d_h1(dc *d, const char *t) { d_text(d, TK_IT800, 34, 20, bl(TK_IT800, 34, 64), t, -.8f, 0, INK, 0); }
+static tk_col ACCENT(void) { return tk_hex(0x6fb3ff, 1); }
+/* a .row with an avatar: the name, an optional second line, the right-hand text, an optional unread dot */
+static float d_prow(dc *d, float y, const char *name, int nfw, tk_col nc, const char *sub, const char *right, int dot, int last)
+{
+    float who = sub ? 36 : 34, rh = who + 26;
+    d_av(d, 32, y + 13 + (who - 34) / 2, 34, name, 13);
+    float rw = 0, sw = tw(TK_IT400, 16, " ", 0, TK_TNUM);
+    if (right && right[0]) rw = tw(TK_IT400, 16, right, 0, TK_TNUM) + (dot ? sw + 4 + 9 : 0);
+    float top = sub ? y + 13 : y + 20;
+    d_text(d, nfw, 16, 78, bl(nfw, 16, top), name, 0, 0, nc, 0);
+    if (sub) {
+        char e[96];
+        float avail = 358 - 78 - (rw > 0 ? rw + 10 : 0);
+        ellipsize(e, sizeof e, TK_IT400, 13.5f, sub, tk_minf(230, avail));
+        d_text(d, TK_IT400, 13.5f, 78, bl(TK_IT400, 13.5f, y + 33), e, 0, 0, W(.55f), 0);
+    }
+    if (rw > 0) {
+        float rx = 358 - rw, rb = bl(TK_IT400, 16, y + 13 + (who - 20) / 2);
+        d_text(d, TK_IT400, 16, rx, rb, right, 0, TK_TNUM, W(.55f), 0);
+        if (dot) d_rrect(d, 358 - 9, rb - 9, 9, 9, 4.5f, tk_hex(0x2f7bf6, 1));
+    }
+    if (!last) d_rrect(d, 16, y + rh, 358, 1, 0, W(.08f));
+    return rh + 1;
+}
+static void d_group(dc *d, float y, int n, int sub) { d_rrect(d, 16, y, 358, (sub ? 63.0f : 61.0f) * n - 1, 16, tk_hex(0x151c33, 1)); }
+
+static const char *const KD[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#" };
+static const char *const KL[12] = { "", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ", "", "+", "" };
+static struct { int tab; char num[16]; int thread; } AS;        /* the phone's tab (0 fav .. 3 pad), the dialled number, the open thread */
+static char cell_hint[48] = "No SIM \xc2\xb7 emergency calls only";
+
+static void phone_tabs(dc *d)
+{
+    static const char *const TK[4] = { "fav", "rec", "con", "pad" };
+    static const char *const TL[4] = { "Favourites", "Recents", "Contacts", "Keypad" };
+    d_lg_app(d, 16, 718, 358, 62, 31, 1);
+    for (int i = 0; i < 4; i++) {
+        float bx = 16 + 89.5f * i;
+        char n[16] = "tab-";
+        int k = 4;
+        for (const char *c = TK[i]; *c; c++) n[k++] = *c;
+        if (i == AS.tab) { n[k++] = '-'; n[k++] = 'o'; n[k++] = 'n'; }
+        n[k] = 0;
+        d_icon(d, n, bx + 33.75f, 730.5f, 1);
+        float w = tw(TK_IT600, 10.5f, TL[i], 0, 0);
+        d_text(d, TK_IT600, 10.5f, bx + (89.5f - w) / 2, bl(TK_IT600, 10.5f, 754.5f), TL[i], 0, 0, i == AS.tab ? ACCENT() : W(.6f), 0);
+    }
+}
+static void page_contacts(dc *d)
+{
+    d_h1(d, "Contacts");
+    d_group(d, 117, 6, 0);
+    float y = 117;
+    for (int i = 0; i < 6; i++) y += d_prow(d, y, PEOPLE[i].n, TK_IT600, INK, 0, 0, 0, i == 5);
+}
+static void page_phone(dc *d)
+{
+    if (AS.tab == 3) {
+        float w = tw(TK_IT400, 13, cell_hint, 0, 0);
+        d_text(d, TK_IT400, 13, (390 - w) / 2, bl(TK_IT400, 13, 150), cell_hint, 0, 0, W(.5f), 0);
+        for (int i = 0; i < 12; i++) {
+            float x = 52 + 104.0f * (i % 3), y = 182 + 96.0f * (i / 3);
+            d_rrect(d, x, y, 78, 78, 39, W(.14f));
+            float dw = tw(TK_IT500, 32, KD[i], 0, 0);
+            d_text(d, TK_IT500, 32, x + (78 - dw) / 2, y + 12 + tk_floorf(tk_ascent(TK_IT500, PT(32)) / TK_PT + .5f), KD[i], 0, 0, W(1), 0);
+            if (KL[i][0]) {
+                float lw = tw(TK_IT700, 10, KL[i], 1.4f, 0);
+                d_text(d, TK_IT700, 10, x + (78 - lw) / 2, bl(TK_IT700, 10, y + 50), KL[i], 1.4f, 0, W(.75f), 0);
+            }
+        }
+        d_rrect(d, 156, 566, 78, 78, 39, tk_hex(0x34c759, 1));
+        d_icon(d, "call", 180, 590, 1);
+    } else if (AS.tab == 1) {
+        d_h1(d, "Recents");
+        d_group(d, 117, 3, 1);
+        float y = 117;
+        y += d_prow(d, y, "Mum", TK_IT600, tk_hex(0xff453a, 1), "Missed", "18:12", 0, 0);
+        y += d_prow(d, y, "Aino Virtanen", TK_IT600, W(1), "Outgoing", "Yesterday", 0, 0);
+        d_prow(d, y, "Mikko Laine", TK_IT600, W(1), "Incoming", "Monday", 0, 1);
+    } else if (AS.tab == 2) {
+        page_contacts(d);
+    } else {
+        d_h1(d, "Favourites");
+        d_group(d, 117, 3, 1);
+        float y = 117;
+        for (int i = 0; i < 3; i++) y += d_prow(d, y, PEOPLE[i].n, TK_IT600, INK, "mobile", 0, 0, i == 2);
+    }
+    phone_tabs(d);
+}
+typedef struct { const char *n, *m, *t; int unread; } thread_t;
+static const thread_t THREADS[5] = {
+    { "Aino Virtanen", "Are you bringing the phone tomorrow?", "21:02", 1 }, { "Mum", "Good luck with the exam!", "18:40", 1 },
+    { "Mikko Laine", "That boot menu looks insane", "Yesterday", 0 }, { "Sara Niemi", "Ok see you at 9", "Monday", 0 },
+    { "112 Info", "Emergency number test message", "Sunday", 0 } };
+static void page_messages(dc *d)
+{
+    if (AS.thread < 0) {
+        d_h1(d, "Messages");
+        d_lg_app(d, 16, 117, 358, 44, 22, 1);
+        d_icon(d, "search15", 30, 131.5f, 1);
+        d_text(d, TK_IT400, 17, 53, 128 + 1 + tk_floorf(tk_ascent(TK_IT400, PT(17)) / TK_PT + .5f), "Search", 0, 0, tk_hex(0xa9a9a9, 1), 0);
+        d_group(d, 173, 5, 1);
+        float y = 173;
+        for (int i = 0; i < 5; i++)
+            y += d_prow(d, y, THREADS[i].n, THREADS[i].unread ? TK_IT700 : TK_IT600, INK, THREADS[i].m, THREADS[i].t, THREADS[i].unread, i == 4);
+        return;
+    }
+    const thread_t *th = &THREADS[AS.thread];
+    d_icon(d, "back", 18, 53, 1);
+    d_text(d, TK_IT400, 17, 32, bl(TK_IT400, 17, 53), "Messages", 0, 0, ACCENT(), 0);
+    d_av(d, 169, 60, 52, th->n, 18);
+    float w = tw(TK_IT600, 13, th->n, 0, 0);
+    d_text(d, TK_IT600, 13, (390 - w) / 2, bl(TK_IT600, 13, 116), th->n, 0, 0, INK, 0);
+    w = tw(TK_IT400, 12, "Today 20:55", 0, 0);
+    d_text(d, TK_IT400, 12, (390 - w) / 2, bl(TK_IT400, 12, 142), "Today 20:55", 0, 0, W(.45f), 0);
+    static const char *const AINO[3] = { "Hey! Did the big-core thing work?", "Getting closer, three tests passed tonight",
+                                         "Are you bringing the phone tomorrow?" };
+    static const char *const MUM[2] = { "Good luck with the exam!", "Thanks" };
+    const char *const *msg = AS.thread == 0 ? AINO : AS.thread == 1 ? MUM : 0;
+    int nm = AS.thread == 0 ? 3 : AS.thread == 1 ? 2 : 1;
+    float y = 167;
+    for (int i = 0; i < nm; i++) {
+        const char *s = msg ? msg[i] : "Hi!";
+        int out = i % 2 == 1;
+        char ln[4][96];
+        float wmax;
+        int n = wrap(ln, TK_IT400, 16, s, 267.88f, &wmax);
+        int heart = AS.thread == 1 && i == 1;
+        if (heart) wmax += tw(TK_IT400, 16, " ", 0, 0) + 20;
+        float bw = (n > 1 ? 267.88f : wmax) + 26, bh = 18 + 20.8f * n, bx = out ? 376 - bw : 14;
+        tk_corner = (tk_r4){ PT(20), PT(20), PT(out ? 6 : 20), PT(out ? 20 : 6) };
+        tk_use_r4 = 1;
+        d_rrect(d, bx, y, bw, bh, 20, tk_hex(out ? 0x2f7bf6 : 0x262c3e, 1));
+        tk_use_r4 = 0;
+        for (int k = 0; k < n; k++) d_text(d, TK_IT400, 16, bx + 13, bl(TK_IT400, 16, y + 9 + 20.8f * k), ln[k], 0, 0, INK, 0);
+        if (heart) d_icon(d, "heart", bx + 13 + tw(TK_IT400, 16, "Thanks ", 0, 0), y + 9, 1);
+        y += bh + 5;
+    }
+    d_lg_app(d, 12, 734, 322, 40, 20, 1);
+    d_text(d, TK_IT400, 16, 28, 734 + 10 + tk_floorf(tk_ascent(TK_IT400, PT(16)) / TK_PT + .5f), "Text message", 0, 0, tk_hex(0xa9a9a9, 1), 0);
+    d_rrect(d, 342, 736, 36, 36, 18, tk_hex(0x2f7bf6, 1));
+    d_icon(d, "send", 352, 746, 1);
+}
+static void hsl(float h, float s, float l, float *r, float *g, float *b)
+{
+    float c = (1 - tk_fabsf(2 * l - 1)) * s, hp = h / 60, x = c * (1 - tk_fabsf(tk_fmodf(hp, 2) - 1)), m = l - c / 2;
+    float R = 0, G2 = 0, B = 0;
+    if (hp < 1) { R = c; G2 = x; } else if (hp < 2) { R = x; G2 = c; } else if (hp < 3) { G2 = c; B = x; }
+    else if (hp < 4) { G2 = x; B = c; } else if (hp < 5) { R = x; B = c; } else { R = c; B = x; }
+    *r = (R + m) * 255; *g = (G2 + m) * 255; *b = (B + m) * 255;
+}
+static void page_photos(dc *d)
+{
+    d_h1(d, "Photos");
+    float cw = (390 - 4) / 3.0f;
+    for (int i = 0; i < 15; i++) {
+        float x = (cw + 2) * (i % 3), y = 117 + (cw + 2) * (i / 3), r, g, b;
+        tk_stop st[2];
+        hsl((float)((i * 47) % 360), .6f, .45f, &r, &g, &b);
+        st[0] = (tk_stop){ 0, TK_RGBA(r, g, b, 1) };
+        hsl((float)((i * 47 + 60) % 360), .7f, .3f, &r, &g, &b);
+        st[1] = (tk_stop){ 1, TK_RGBA(r, g, b, 1) };
+        tk_paint p = tk_linear((float)(i * 37), PT(x) - d->ox, PT(y) - d->oy, PT(cw), PT(cw), 2, st);
+        tk_fill_rrect(d->b, PT(x) - d->ox, PT(y) - d->oy, PT(cw), PT(cw), 0, &p, 1);
+    }
+    d_text(d, TK_IT400, 12.5f, 36, bl(TK_IT400, 12.5f, 777.36f), "Screenshots from Starbite OS", 0, 0, W(.5f), 0);
+}
+static void page_camera(dc *d)
+{
+    d_h1(d, "Camera");
+    char ln[4][96];
+    float wm;
+    int n = wrap(ln, TK_IT400, 13.5f, "The camera needs its driver first. It is on the roadmap after the GPU.", 330, &wm);
+    d_rrect(d, 16, 117, 358, 20 + 18.225f * n, 14, TK_RGBA(255, 181, 71, .14f));
+    for (int k = 0; k < n; k++)
+        d_text(d, TK_IT400, 13.5f, 30, bl(TK_IT400, 13.5f, 128 + 18.225f * k), ln[k], 0, 0, tk_hex(0xffd8a0, 1), 0);
+}
+static tk_layer apkey, apnum;
+static void build_apnum(void)
+{
+    relayer(&apnum);
+    apnum.hidden = !AS.num[0];
+    if (!AS.num[0]) return;
+    float w = tw(TK_IT500, 36, AS.num, 1, TK_TNUM);
+    dc d = mk(&apnum, "dial", (390 - w) / 2, 86, w, 44, 2, 0);
+    d_text(&d, TK_IT500, 36, (390 - w) / 2, bl(TK_IT500, 36, 86), AS.num, 1, TK_TNUM, INK, 0);
+    relink();
+}
 static void build_app_page(int a)
 {
+    const char *k = APPS[a].k;
+    int own = !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
+              !tk_strcmp(k, "camera");
+    if (own) {
+        relayer(&appc);
+        dc d = mk(&appc, "app-page", 0, 0, 390, H_PT, 0, 0);
+        if (!tk_strcmp(k, "phone")) page_phone(&d);
+        else if (!tk_strcmp(k, "messages")) page_messages(&d);
+        else if (!tk_strcmp(k, "contacts")) page_contacts(&d);
+        else if (!tk_strcmp(k, "photos")) page_photos(&d);
+        else page_camera(&d);
+        tk_layer_prepare(&appc);
+        build_apnum();
+        relink();
+        return;
+    }
     /* the concept's genericScreen: the large title, captions (or an 18 pt gap), grouped rows */
     const appdef *A = &APPS[a];
     float y = 56 + 8 + 41 + 12;                         /* the title's box and margins */
     float h = y;
     for (int i = 0; i < A->ns; i++) h += (A->sec[i].cap[0] ? 34 : 18) + 47.0f * A->sec[i].n;
     relayer(&appc);
+    apnum.hidden = 1;
     dc d = mk(&appc, "app-page", 0, 0, 390, h + 4, 0, 0);
     d_text(&d, TK_IT800, 34, 20, 64 + 33, A->name, -.8f, 0, INK, 0);
     for (int i = 0; i < A->ns; i++) {
@@ -1068,6 +1385,7 @@ static void build_app_page(int a)
         y += gh;
     }
     tk_layer_prepare(&appc);
+    relink();
 }
 static void set_app_rect(arect R)
 {
@@ -1115,7 +1433,7 @@ static int app_hit(float x, float y)
         int pg = page_x < -195;
         float x0 = x - (pg ? 390 + page_x : page_x), top = pg ? 62 : 258;
         int col = (int)((x0 - 22) / 86.5f), row = (int)((y - top) / 103);
-        if (col >= 0 && col < 4 && row >= 0 && row < 2 && y - top - row * 103 < 83) k = (pg ? P2 : P1)[row * 4 + col];
+        if (x0 >= 22 && y >= top && col < 4 && row < 2 && y - top - row * 103 < 83) k = (pg ? P2 : P1)[row * 4 + col];
     }
     if (!k) return -1;
     for (int a = 0; a < NAPPS; a++) if (!tk_strcmp(APPS[a].k, k)) return a;
@@ -1126,6 +1444,11 @@ static void app_open(int a)
     AP.a = a;
     AP.on = 1;
     AP.closing = AP.following = 0;
+    free_cc();
+    AS.tab = 3;
+    AS.num[0] = 0;
+    AS.thread = -1;
+    apkey.hidden = 1;
     build_app_page(a);
     AP.icon = icon_rect(a);
     AP.from = AP.icon;
@@ -1144,8 +1467,115 @@ static void app_finish_close(void)
 {
     AP.on = AP.closing = 0;
     appg.hidden = 1;
+    /* the page (a whole screen) is not kept: the next open draws it again */
+    relayer(&appc);
+    relayer(&apnum);
+    apnum.hidden = apkey.hidden = 1;
     home.sx = home.sy = 1;
     home.alpha = 1;
+}
+
+/* ---- the toast (the concept's #toast: dark glass, 13 pt / 600, from 90 pt above with an overshoot, 2 s) ------ */
+static tk_layer toastl;
+static float toast_o = -90, toast_from = -90, toast_to = -90, toast_t = 1, toast_left;
+static void toast_place(void)
+{
+    toast_o = toast_from + (toast_to - toast_from) * tk_bezier(.2f, 1.3f, .3f, 1, toast_t);
+    toastl.y = toastl.by + PT(toast_o);
+    toastl.hidden = toast_t >= 1 && toast_to <= -90;
+}
+static void toast(const char *msg)
+{
+    float w = tw(TK_IT600, 13, msg, 0, 0) + 30, x = 195 - w / 2;
+    relayer(&toastl);
+    /* in an app its backdrop is the app's ground; elsewhere the wallpaper's glass (the shell's backdrop) */
+    dc d = mk(&toastl, "toast", x, 52, w, 34, 32, !AP.on);
+    if (AP.on) d_lg_app(&d, x, 52, w, 34, 17, 1);
+    else d_glass(&d, x, 52, w, 34, 17, 1, 1);
+    d_text(&d, TK_IT600, 13, x + 15, bl(TK_IT600, 13, 52 + 9), msg, 0, 0, INK, 0);
+    relink();
+    toast_from = toast_o;
+    toast_to = 0;
+    toast_t = 0;
+    toast_left = 2000;
+    toast_place();
+}
+
+/* ---- taps inside the apps -------------------------------------------------------------------------------- */
+static int key_hit(float x, float y)
+{
+    for (int i = 0; i < 12; i++) {
+        float cx = 52 + 104.0f * (i % 3) + 39, cy = 182 + 96.0f * (i / 3) + 39, dx = x - cx, dy = y - cy;
+        if (dx * dx + dy * dy <= 39 * 39) return i;
+    }
+    return -1;
+}
+static void key_down(int i)
+{
+    /* :active: rgba(255, 255, 255, .34) instead of .14: a white circle at (.34 - .14) / (1 - .14) over it */
+    if (!apkey.bmp.px) {
+        dc d = mk(&apkey, "key-down", 52, 182, 78, 78, 1, 0);
+        d_rrect(&d, 52, 182, 78, 78, 39, W(.2f / .86f));
+        relink();
+    }
+    apkey.hidden = i < 0;
+    if (i >= 0) {
+        apkey.x = apkey.bx + PT(104.0f * (i % 3));
+        apkey.y = apkey.by + PT(96.0f * (i / 3));
+    }
+}
+static int is_app(const char *k) { return AP.on && !tk_strcmp(APPS[AP.a].k, k); }
+static void app_tap(float x, float y)
+{
+    if (is_app("phone")) {
+        if (y >= 718 && y <= 780 && x >= 16 && x < 374) {
+            int t = (int)((x - 16) / 89.5f);
+            if (t != AS.tab) { AS.tab = t; if (t != 3) AS.num[0] = 0; build_app_page(AP.a); }
+            return;
+        }
+        if (AS.tab != 3) return;
+        int i = key_hit(x, y);
+        if (i >= 0) {
+            int n = (int)tk_strlen(AS.num);
+            if (n < 15) { AS.num[n] = KD[i][0]; AS.num[n + 1] = 0; build_apnum(); }
+            return;
+        }
+        float dx = x - 195, dy = y - 605;
+        if (dx * dx + dy * dy <= 39 * 39)
+            toast(!tk_strcmp(AS.num, "112") ? "Calling 112 needs the modem (receive-only today)" :
+                  AS.num[0] ? "No SIM: only emergency calls" : "Enter a number");
+    } else if (is_app("messages")) {
+        if (AS.thread < 0) {
+            if (x >= 16 && x < 374 && y >= 173 && y < 173 + 5 * 63) { AS.thread = (int)((y - 173) / 63); build_app_page(AP.a); }
+        } else if (x < 120 && y >= 40 && y < 86) {
+            AS.thread = -1;
+            build_app_page(AP.a);
+        }
+    }
+}
+
+/* ---- the modem's status (docs/MODEM.md 7.7's snapshot): the status bar's bars and RAT, the keypad's line ----- */
+static sh_cell_t CELL;
+static void build_home_sb(void);
+void sh_cell(const sh_cell_t *c)
+{
+    if (c->state == CELL.state && c->sim == CELL.sim && c->emergency_only == CELL.emergency_only && c->rat == CELL.rat &&
+        c->bars == CELL.bars)
+        return;
+    CELL = *c;
+    SB_CELL.state = CELL.state == SH_CELL_ON;
+    SB_CELL.bars = CELL.bars;
+    SB_CELL.rat = CELL.rat;
+    const char *h = CELL.state == SH_CELL_ON && !CELL.emergency_only && CELL.bars <= 0 ? "No SIM \xc2\xb7 searching" :
+                    "No SIM \xc2\xb7 emergency calls only";
+    int n = 0;
+    while (h[n] && n < 47) { cell_hint[n] = h[n]; n++; }
+    cell_hint[n] = 0;
+    build_lstatus();
+    build_home_sb();
+    if (is_app("phone")) build_app_page(AP.a);
+    relink();
+    lock_ver++;
 }
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
@@ -1220,10 +1650,10 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 }
 static void relink(void)
 {
-    tk_layer *r[] = { &star, &home, &lockg, &lockflat, &appg, &focus, &ccl, &boot, &homebar };
-    link(&root, r, 9);
-    tk_layer *ag[] = { &appbg, &appc };
-    link(&appg, ag, 2);
+    tk_layer *r[] = { &star, &home, &lockg, &lockflat, &appg, &focus, &ccl, &boot, &homebar, &toastl };
+    link(&root, r, 10);
+    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum };
+    link(&appg, ag, 4);
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &list, &Q[0].grp, &Q[1].grp, &hint };
     link(&lockg, lk, 10);
     tk_layer *ls[3 * NG + 1];
@@ -1264,6 +1694,12 @@ void sh_init_begin(tk_comp *c)
     appbg.solid_h = TK_H;
     appbg.opaque = 1;
     tk_layer_init(&appc, "app-page");
+    tk_layer_init(&apkey, "key-down");
+    apkey.hidden = 1;
+    tk_layer_init(&apnum, "dial");
+    apnum.hidden = 1;
+    tk_layer_init(&toastl, "toast");
+    toastl.hidden = 1;
     tk_layer_init(&lockg, "lock");
     tk_layer_init(&list, "list");
     list.clip = 1;
@@ -1370,6 +1806,7 @@ void sh_set(const char *what, const char *key, float v)
         set_page(0);
         CCS.on = 0; sp_cc.live = 0; set_cc(0);
         if (AP.on) { sp_app.live = 0; app_finish_close(); }
+        toast_t = 1; toast_to = toast_from = -90; toast_left = 0; toast_place();
         locked = 1;
         set_lock(0);
         mark_a = mark_t; glyph_a = glyph_t; hint_a = 0; hint_left = 0;
@@ -1383,6 +1820,22 @@ void sh_set(const char *what, const char *key, float v)
                 set_app_rect(lerpr(AP.icon, FULLR, v));
                 if (v >= 1) appg.clip = 0;
             }
+    } else if (!tk_strcmp(what, "tab")) {
+        static const char *const TK[4] = { "fav", "rec", "con", "pad" };
+        for (int t = 0; t < 4; t++) if (!tk_strcmp(TK[t], key)) { AS.tab = t; build_app_page(AP.a); }
+    } else if (!tk_strcmp(what, "dial")) {
+        int n = 0;
+        while (key[n] && n < 15) { AS.num[n] = key[n]; n++; }
+        AS.num[n] = 0;
+        build_apnum();
+    } else if (!tk_strcmp(what, "thread")) {
+        AS.thread = key[0] - '0';
+        build_app_page(AP.a);
+    } else if (!tk_strcmp(what, "toast")) {
+        toast(key);
+        toast_t = 1;
+        toast_to = toast_from = 0;
+        toast_place();
     } else if (!tk_strcmp(what, "cc")) {
         if (!CCS.built || cc_stale) { build_cc(); cc_stale = 0; }
         sp_cc.live = 0;
@@ -1404,7 +1857,7 @@ void sh_set(const char *what, const char *key, float v)
 }
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
-enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP };
+enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK };
 static struct {
     int kind, arg, arg2, moved;
     float x0, y0, base, t0;
@@ -1458,6 +1911,11 @@ void sh_touch(int phase, float x, float y, float t)
         if (!locked && AP.on) {
             /* an open app: the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
             if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
+            else if (!sp_app.live) {
+                /* a tap on the app's page (a key lights while the finger is on it) */
+                T.kind = G_APPTAP;
+                if (is_app("phone") && AS.tab == 3) key_down(key_hit(x, y));
+            }
             return;
         }
         if (!locked && CCS.on && !CCS.closing) {
@@ -1481,6 +1939,7 @@ void sh_touch(int phase, float x, float y, float t)
             if (y < 56 && x < 195) { T.kind = G_RELOCK; sp_lock.live = 0; tk_tracker_add(&T.tr, y, t); return; }
             /* elsewhere but the dock, Search and the widgets: the pages (direction decided after 8 pt) */
             int on_w = page_x > -195 && y >= 60 && y <= 218 && ((x >= 24 && x <= 182) || (x >= 208 && x <= 366));
+            if (y >= 688 && y < H_PT - 30) { T.kind = G_DOCK; return; }   /* the dock: a tap opens its app */
             if (y >= 56 && y < 688 && !(y >= 640 && y <= 670 && x >= 150 && x <= 240) && !on_w) {
                 T.kind = G_PAGE;
                 T.base = page_x;
@@ -1516,6 +1975,9 @@ void sh_touch(int phase, float x, float y, float t)
         case G_THUMB:
             tk_tracker_add(&T.tr, x, t);
             set_thumb(tk_clampf(T.base + x - T.x0, 0, 322 - 62));
+            break;
+        case G_APPTAP:
+            if (T.moved && !apkey.hidden) key_down(-1);
             break;
         case G_TAP_HEAD: case G_TAP_ROW:
             if (T.moved) { T.kind = G_LIST; T.base = scroll; T.y0 = y; sp_scroll.live = 0; }
@@ -1591,15 +2053,23 @@ void sh_touch(int phase, float x, float y, float t)
         hold_t *q = &Q[T.arg];
         q->down = 0;
         q->scale_from = q->grp.sx; q->scale_to = 1; q->scale_t = 0;
+        if (!q->fired) toast("Press and hold");
         hold_ring(q, T.arg, 0);
         break;
     }
+    case G_DOCK:
+        if (!T.moved) { int a = app_hit(x, y); if (a >= 0) app_open(a); }
+        break;
+    case G_APPTAP:
+        if (!apkey.hidden) key_down(-1);
+        if (!T.moved) app_tap(x, y);
+        break;
     case G_TAP_HEAD:
         toggle_group(T.arg, 0);
         break;
     case G_TAP_ROW: {
         const sys_t *s = &G[T.arg].it[T.arg2];
-        if (s->self) break;           /* the concept's toast: "You are in Starbite OS" */
+        if (s->self) { toast("You are in Starbite OS"); break; }
         tk_comp_frame(C, 0, 0);
         uint64_t t0 = tk_us();
         build_focus(s, &G[T.arg]);
@@ -1700,6 +2170,15 @@ int sh_tick(float dt, float t)
         }
         mv = 1;
     }
+    if (toast_t < 1) {
+        toast_t = tk_minf(1, toast_t + dt / .45f);
+        toast_place();
+        mv = 1;
+    }
+    if (toast_left > 0) {
+        toast_left -= dt * 1000;
+        if (toast_left <= 0) { toast_from = toast_o; toast_to = -90; toast_t = 0; }
+    }
     if (sp_cc.live) {
         int live = tk_spring_step(&sp_cc, dt);
         set_cc(tk_maxf(0, sp_cc.x));
@@ -1765,7 +2244,7 @@ int sh_tick(float dt, float t)
             if (p >= 1) {
                 q->fired = 1;
                 q->lit = !q->lit;
-                if (i == 0) sh_torch(q->lit);   /* the LED (the platform; Emergency mode is not in Next yet) */
+                if (i == 0) { sh_torch(q->lit); toast(q->lit ? "Flashlight on" : "Flashlight off"); }
                 q->facelit.hidden = q->iconlit.hidden = !q->lit;
                 q->face.hidden = q->icon.hidden = q->lit;
                 hold_ring(q, i, 0);
@@ -1847,7 +2326,7 @@ void sh_idle(void)
     tk_comp_idle(C);
     if (locked && lockY == 0 && !focus_on) flatten_lock();
     /* home at rest: the Control Centre's snapshot and grid ready before the pull */
-    if (!locked && !CCS.on && (!CCS.built || cc_stale)) { build_cc(); cc_stale = 0; }
+    if (!locked && !CCS.on && !AP.on && (!CCS.built || cc_stale)) { build_cc(); cc_stale = 0; }
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
     for (tk_layer *l = home.child; l; l = l->next) tk_layer_prepare(l);
@@ -1872,7 +2351,7 @@ int sh_moving(void)
 {
     int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB ||
             T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || T.kind == G_CC || T.kind == G_CCSL || sp_cc.live ||
-            T.kind == G_APP || sp_app.live || booting;
+            T.kind == G_APP || sp_app.live || booting || toast_t < 1;
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
     m |= sp_focus.live || sp_thumb.live;
     return m;
