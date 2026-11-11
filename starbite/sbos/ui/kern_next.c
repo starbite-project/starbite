@@ -560,10 +560,35 @@ static void next_screen(int on)
 /* ---- P4: the GPU compositor (kern/gpucomp.c): the frames on the Mali-G72, full resolution ---------------------- */
 _Static_assert(sizeof(tk_gpu_item) == sizeof(struct gc_quad), "tk_gpu_item is gpucomp's gc_quad");
 static int gpu_started;
+/* the wallpaper at full resolution in the GPU's pool, made once per ground (base_half 2x, bilinear, on the GPU):
+ * every frame then reads it 1:1 (one load a pixel instead of a bilinear's four) */
+static uint32_t wall_gen;
+static int wall_ok;
+static tk_gpu_item gx[TK_GPU_MAX];
 static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, uint64_t *us)
 {
     (void)ctx;
-    int ok = gpucomp_compose(dst, 0xff000000U, (const struct gc_quad *)it, (unsigned)n, us);
+    const tk_gpu_item *use = it;
+    uint32_t *wall = (uint32_t *)gpucomp_pool();
+    if (n > 0 && n <= TK_GPU_MAX && it[0].src == comp.base_half.px && gpucomp_pool_bytes() >= (uint64_t)TK_W * TK_H * 4U) {
+        if (!wall_ok || wall_gen != comp.ground_gen) {
+            uint64_t u2 = 0;
+            wall_ok = gpucomp_compose(wall, 0xff000000U, (const struct gc_quad *)it, 1, &u2);
+            wall_gen = comp.ground_gen;
+            if (wall_ok) sb_logx("next: gpu: the wallpaper at full resolution, us: ", u2);
+        }
+        if (wall_ok) {
+            tk_memcpy(gx, it, sizeof(tk_gpu_item) * (size_t)n);
+            gx[0].src = wall;
+            gx[0].stride = TK_W;
+            gx[0].w = TK_W;
+            gx[0].h = TK_H;
+            gx[0].flags = 0;
+            gx[0].isx = gx[0].isy = 1;
+            use = gx;
+        }
+    }
+    int ok = gpucomp_compose(dst, 0xff000000U, (const struct gc_quad *)use, (unsigned)n, us);
     if (!ok && !gpucomp_ready()) {               /* a fault (gpucomp logged it, the GPU is off): the CPU from now on */
         comp.gpu = 0;
         sb_log("next: the GPU stopped: the CPU composes the frames from now on");

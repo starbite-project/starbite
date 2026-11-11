@@ -822,8 +822,10 @@ static int gpu_frame(tk_comp *c)
         tk_gpu_item *q = &gq[n++];
         tk_memset(q, 0, sizeof *q);
         q->alpha = it->alpha;
-        q->dx0 = it->tx;
-        q->dy0 = it->ty;
+        /* at 1:1, whole pixels (one load a pixel, as sharp as at rest; a sub-pixel step of a move is not visible) */
+        int one = tk_fabsf(it->a - 1) <= 1e-4f && tk_fabsf(it->b - 1) <= 1e-4f;
+        q->dx0 = one ? tk_floorf(it->tx + .5f) : it->tx;
+        q->dy0 = one ? tk_floorf(it->ty + .5f) : it->ty;
         q->isx = 1.0f / it->a;
         q->isy = 1.0f / it->b;
         q->cx0 = (float)it->clip.x0; q->cy0 = (float)it->clip.y0;
@@ -845,8 +847,7 @@ static int gpu_frame(tk_comp *c)
         q->stride = (uint32_t)l->bmp.stride;
         q->w = (uint32_t)l->bmp.w;
         q->h = (uint32_t)l->bmp.h;
-        float fx = it->tx - tk_floorf(it->tx), fy = it->ty - tk_floorf(it->ty);
-        if (tk_fabsf(it->a - 1) > 1e-4f || tk_fabsf(it->b - 1) > 1e-4f || fx > 1e-3f || fy > 1e-3f) q->flags |= TK_GPU_BILINEAR;
+        if (!one) q->flags |= TK_GPU_BILINEAR;
         if (l->slice) {
             q->flags |= l->slice == 1 ? TK_GPU_SLICE_V : TK_GPU_SLICE_H;
             q->len = l->slice_h; q->s0 = l->slice_s0; q->s1 = l->slice_s1;
