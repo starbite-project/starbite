@@ -134,6 +134,7 @@ typedef struct _DEVICE_CONTEXT
 
     // SBDIAG (Starbite s6touchdiag): diagnostics only, no change to what reaches Windows.
     WDFTIMER                DiagTimer;
+    volatile BOOLEAN        DiagStopping;
     ULONG                   DiagTicks;
     volatile LONG           DiagSeq;
     LONG                    DiagFlushedSeq;

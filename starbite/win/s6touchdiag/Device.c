@@ -390,6 +390,10 @@ DiagTimerFunc(
 	{
 		DiagFlush(deviceContext);
 	}
+	if (!deviceContext->DiagStopping)          // one-shot, re-armed here (a passive periodic timer may not be allowed)
+	{
+		WdfTimerStart(Timer, WDF_REL_TIMEOUT_IN_MS(1000));
+	}
 }
 
 // D0Entry, interrupt still masked: 200 single-event reads (an empty FIFO answers zeros).
@@ -1399,7 +1403,7 @@ Return Value:
 
 		KeQueryPerformanceCounter(&freq);
 		deviceContext->DiagQpcFreq = freq.QuadPart;
-		WDF_TIMER_CONFIG_INIT_PERIODIC(&diagTimerConfig, DiagTimerFunc, 1000);
+		WDF_TIMER_CONFIG_INIT(&diagTimerConfig, DiagTimerFunc);
 		diagTimerConfig.AutomaticSerialization = FALSE;
 		WDF_OBJECT_ATTRIBUTES_INIT(&deviceAttributes);
 		deviceAttributes.ParentObject = device;
@@ -1937,7 +1941,12 @@ OnD0Entry(
 	RecordStartValue(FxDevice, L"TouchD0Status", STATUS_SUCCESS);
 	if (pDevice->DiagTimer != WDF_NO_HANDLE)
 	{
+		pDevice->DiagStopping = FALSE;
 		WdfTimerStart(pDevice->DiagTimer, WDF_REL_TIMEOUT_IN_MS(1000));
+	}
+	else
+	{
+		RecordStartValue(FxDevice, L"DiagNoTimer", 1);
 	}
 	RecordStartValues(FxDevice, 29, STATUS_SUCCESS);
 
@@ -1972,7 +1981,10 @@ OnD0Exit(
 
 	if (pDevice->DiagTimer != WDF_NO_HANDLE)
 	{
-		WdfTimerStop(pDevice->DiagTimer, TRUE);
+		pDevice->DiagStopping = TRUE;
+		KeMemoryBarrier();
+		WdfTimerStop(pDevice->DiagTimer, TRUE);   // waits for a running callback
+		WdfTimerStop(pDevice->DiagTimer, TRUE);   // and cancels the one it may have re-armed just before DiagStopping
 		DiagFlush(pDevice);
 	}
 	TouchSetInterruptMasked(pDevice, TRUE);
