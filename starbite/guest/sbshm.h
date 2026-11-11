@@ -155,7 +155,8 @@ enum {
     /* host -> guest, v2 */
     SBG_MSG_VIEWPORT = 7,   /* a = the rows of the surface the host shows (the keyboard up: fewer), b = the
                              * width: the guest configures the active window to b x a */
-    SBG_MSG_LAUNCH = 8,     /* a = catalog index, b = the catalog seq it was read at: start the app (or raise it) */
+    SBG_MSG_LAUNCH = 8,     /* a = catalog index, b = the catalog's layout_seq it was read at: start the app (or
+                             * raise it); a stale layout_seq is ignored */
     SBG_MSG_ACTIVATE = 9,   /* a = catalog index whose window goes into the surface; SBSHM_NONE = none (home) */
     SBG_MSG_APP_CLOSE = 10, /* a = catalog index: close its windows (then SIGTERM, SIGKILL after 3 s) */
     SBG_MSG_TEXT = 11,      /* commit text to the focused text-input-v3 field: c bytes (1..8) of UTF-8 in a, b
@@ -327,7 +328,9 @@ struct sbshm_cat {
     uint32_t active;                /* the index whose window is in the surface, or SBSHM_NONE */
     uint32_t mem_total_kb, mem_avail_kb;   /* the guest's /proc/meminfo (MemTotal, MemAvailable) */
     uint32_t swap_total_kb, swap_free_kb;  /* zram */
-    uint32_t pad[9];
+    uint32_t layout_seq;            /* changes only when the apps' ids or order change (seq also moves with rss
+                                     * and flags every ~2 s): SBG_MSG_LAUNCH carries this one */
+    uint32_t pad[8];
     struct sbshm_app app[SBSHM_APPS_MAX];
 };
 

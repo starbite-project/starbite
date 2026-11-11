@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=GTK4 Test
+Comment=hostsim's GTK 4 client: an entry and a button
+Exec=sbwl-gtk4test %U
+Icon=input-keyboard

@@ -1,0 +1,150 @@
+# hostsim's script for sbwl v2 (trixie-chroot.sh test): the catalog, launch, text input, viewport, activate, close,
+# the socket. Apps: foot, galculator (GTK3), gnome-calculator (GTK4), sbwl-gtk3test / sbwl-gtk4test (gtktest.c),
+# test-apps/*.desktop.
+wait_hello 5000
+wait_catalog 8000
+catalog catalog-start.txt
+expect_app foot
+expect_app galculator
+expect_app org.gnome.Calculator
+expect_app org.starbite.GtkTest3
+expect_app org.starbite.GtkTest4
+expect_app sbwl-termtest
+expect_no_app sbwl-hidden
+expect_no_app sbwl-gnomeonly
+expect_icon foot
+expect_icon galculator
+expect_icon org.gnome.Calculator
+expect_icon sbwl-termtest
+icon foot icon-foot.png
+icon galculator icon-galculator.png
+icon org.gnome.Calculator icon-gnome-calculator.png
+icon org.starbite.GtkTest3 icon-gtk3test.png
+icon sbwl-termtest icon-termtest.png
+expect_flag foot keyboard 1 0
+expect_flag foot system 1 0
+expect_flag sbwl-termtest terminal 1 0
+expect_flag sbwl-termtest keyboard 1 0
+expect_flag org.starbite.GtkTest3 system 0 0
+
+# a launch at a stale catalog seq is ignored
+launch_stale foot
+sleep 800
+expect_flag foot running 0 0
+
+# foot
+launch foot
+wait_window foot 1 10000
+wait_frame 5000
+dump foot
+expect_flag foot window 1 3000
+expect_flag foot running 1 3000
+
+# GTK 3: the entry gets the focus from a tap, text-input-v3 enables, words land in it
+launch org.starbite.GtkTest3
+wait_window org.starbite.GtkTest3 1 15000
+wait_frame 5000
+expect_file /tmp/sbwl-gtk3test.txt size:720x1344 5000
+expect_focus 0 2000
+dump gtk3-start
+tap_file /tmp/sbwl-gtk3test.txt entry
+expect_focus 1 3000
+expect_file /tmp/sbwl-gtk3test.txt focus:1 3000
+type Hello sbwl ünï €
+expect_line /tmp/sbwl-gtk3test.txt text:Hello sbwl ünï € 3000
+# BackSpace stays a key
+key 14
+expect_line /tmp/sbwl-gtk3test.txt text:Hello sbwl ünï  3000
+wait_frame 3000
+dump gtk3-typed
+expect_flag org.starbite.GtkTest3 keyboard 0 0
+# the host's keyboard comes up: 916 rows
+viewport 916 720
+expect_file /tmp/sbwl-gtk3test.txt size:720x916 5000
+wait_frame 3000
+dump gtk3-916
+expect_rows_beyond 916
+viewport 1344 720
+expect_file /tmp/sbwl-gtk3test.txt size:720x1344 5000
+# a dialog (a transient toplevel): centered over the main window, on top, the keyboard's
+tap 360 700
+expect_line /tmp/sbwl-gtk3test.txt dialogs:1 3000
+wait_frame 3000
+dump gtk3-dialog
+expect_focus 0 2000
+
+# GTK 4
+launch org.starbite.GtkTest4
+wait_window org.starbite.GtkTest4 1 20000
+wait_frame 5000
+expect_file /tmp/sbwl-gtk4test.txt size:720x1344 5000
+tap_file /tmp/sbwl-gtk4test.txt entry
+expect_focus 1 3000
+type GTK4 sägt hallo
+expect_line /tmp/sbwl-gtk4test.txt text:GTK4 sägt hallo 3000
+wait_frame 3000
+dump gtk4-typed
+viewport 916 720
+expect_file /tmp/sbwl-gtk4test.txt size:720x916 5000
+wait_frame 3000
+dump gtk4-916
+viewport 1344 720
+
+# real apps
+launch org.gnome.Calculator
+wait_window org.gnome.Calculator 1 30000
+wait_frame 5000
+sleep 1500
+dump gnome-calculator
+launch galculator
+wait_window galculator 1 20000
+wait_frame 5000
+sleep 1000
+dump galculator
+
+# Terminal=true: inside foot
+launch sbwl-termtest
+wait_window sbwl-termtest 1 10000
+wait_frame 5000
+sleep 500
+dump termtest
+
+# switching: foot again (its last frame), then home (none)
+activate foot
+wait_window foot 1 3000
+wait_frame 3000
+dump foot-again
+activate none
+wait_msg 68 4294967295 2000
+catalog catalog-running.txt
+
+# closing: xdg close first; an app that ignores SIGTERM is killed at 6 s
+close org.starbite.GtkTest3
+expect_flag org.starbite.GtkTest3 running 0 4000
+close galculator
+expect_flag galculator running 0 7000
+launch sbwl-stubborn
+expect_flag sbwl-stubborn running 1 3000
+close sbwl-stubborn
+sleep 4500
+expect_flag sbwl-stubborn running 1 0
+expect_flag sbwl-stubborn running 0 3000
+
+# /run/sbwl.sock (as sbpkg)
+sock_listen
+pkg 3 1 7
+expect_sock op 3 1 7 2000
+sock store 42
+wait_msg 72 42 2000
+sock pkg 5 2 50
+wait_msg 70 5 2000
+# a new .desktop file: inotify; a removed one: "rescan"
+sh printf '[Desktop Entry]\nType=Application\nName=Added Later\nExec=true\nIcon=help-browser\n' > /usr/local/share/applications/sbwl-added.desktop
+sleep 1500
+expect_app sbwl-added
+sh rm -f /usr/local/share/applications/sbwl-added.desktop
+sock rescan
+sleep 800
+expect_no_app sbwl-added
+catalog catalog-end.txt
+stop 5000
