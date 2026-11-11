@@ -565,7 +565,8 @@ static int gpu_started;
 static uint32_t wall_gen;
 static int wall_ok;
 static tk_gpu_item gx[TK_GPU_MAX];
-static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, uint64_t *us)
+_Static_assert(sizeof(tk_irect) == sizeof(struct gc_rect), "tk_irect is gpucomp's gc_rect");
+static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us)
 {
     (void)ctx;
     const tk_gpu_item *use = it;
@@ -588,7 +589,8 @@ static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, uint
             use = gx;
         }
     }
-    int ok = gpucomp_compose(dst, 0xff000000U, (const struct gc_quad *)use, (unsigned)n, us);
+    int ok = gpucomp_compose_damage(dst, 0xff000000U, (const struct gc_quad *)use, (unsigned)n, (const struct gc_rect *)dmg,
+                                    (unsigned)(ndmg > 0 ? ndmg : 0), us);
     if (!ok && !gpucomp_ready()) {               /* a fault (gpucomp logged it, the GPU is off): the CPU from now on */
         comp.gpu = 0;
         sb_log("next: the GPU stopped: the CPU composes the frames from now on");
@@ -866,7 +868,7 @@ static void gpu_vs_cpu(void)
     }
     if (!K.screen_on) power_screen_set(1);
     sh_set("reset", "", 0);
-    int (*g)(void *, uint32_t *, const tk_gpu_item *, int, uint64_t *) = comp.gpu;
+    __typeof__(comp.gpu) g = comp.gpu;
     comp.gpu = 0;
     tk_comp_frame(&comp, 0, 1);
     present();

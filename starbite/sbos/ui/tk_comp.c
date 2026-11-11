@@ -804,7 +804,7 @@ static void gpu_flush_layer(tk_comp *c, tk_layer *l)
     if (l->glass.v) c->gpu_clean(c->gpu_ctx, l->glass.v, (uint64_t)l->glass.w * (uint64_t)l->glass.h);
     l->gpu_gen = l->gen + 1u;
 }
-static int gpu_frame(tk_comp *c)
+static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
 {
     int n = 0;
     if (c->ground_gen + 1u != c->gpu_ground && c->gpu_clean) {
@@ -864,21 +864,39 @@ static int gpu_frame(tk_comp *c)
         }
     }
     uint64_t tw = tk_us();
-    int age = 0;                                /* the GPU draws everything: the buffer's age does not matter */
+    int age = 0;
     uint32_t *dst = c->acquire(c->acq_ctx, &age);
     c->us_wait = tk_us() - tw;
+    /* v3, damage: the buffer is age frames behind; this frame's rects plus what those frames changed (P2t's
+     * history), else (unknown age, too many rects) everything */
+    static tk_irect gr[64];
+    int ng = 0, px = 0;
+    if (age >= 1 && age <= TK_HIST && (uint32_t)age <= c->fno) {
+        for (int q = 0; q < nd && ng >= 0; q++) gr[ng++] = D[q];
+        for (int k = age; k >= 1 && ng >= 0; k--) {
+            int s2 = (int)((c->fno - (uint32_t)k) % TK_HIST);
+            for (int i = 0; i < c->hn[s2]; i++) {
+                if (ng >= 64) { ng = -1; break; }
+                gr[ng++] = c->hd[s2][i];
+            }
+        }
+    } else
+        ng = -1;
+    if (ng < 0) ng = 0;
+    for (int i = 0; i < ng; i++) px += (gr[i].x1 - gr[i].x0) * (gr[i].y1 - gr[i].y0);
+    if (!ng || px > TK_W * TK_H) px = TK_W * TK_H;
     uint64_t us = 0;
-    if (!c->gpu(c->gpu_ctx, dst, gq, n, &us)) return -1;
+    if (!c->gpu(c->gpu_ctx, dst, gq, n, gr, ng, &us)) return -1;
     c->panel.px = dst;
     c->us_gpu = us;
     c->gpu_frames++;
-    /* P2t's history: this frame changed everything (a CPU frame after it brings its buffer fully up to date) */
+    /* P2t's history: what this frame changed (a later frame into an older buffer redraws it too) */
     int sl = (int)(c->fno % TK_HIST);
-    c->hd[sl][0] = (tk_irect){ 0, 0, TK_W, TK_H };
-    c->hn[sl] = 1;
+    for (int q = 0; q < nd; q++) c->hd[sl][q] = D[q];
+    c->hn[sl] = nd;
     c->hh[sl] = 0;
     c->fno++;
-    return TK_W * TK_H;
+    return px;
 }
 
 int tk_comp_frame(tk_comp *c, int motion, int full)
@@ -951,12 +969,11 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     /* P4: the GPU draws the whole frame (sharp in motion too); if it cannot, the CPU draws this one, everything */
     if (c->gpu && c->acquire && nd) {
         uint64_t tg = tk_us();
-        int gpx = gpu_frame(c);
+        int gpx = gpu_frame(c, D, nd);
         if (gpx > 0) {
-            tk_irect all = { 0, 0, TK_W, TK_H };
             c->gpu_stale = 1;           /* the RAM frame and the half canvas did not see this frame */
-            c->nd = 1;
-            c->dmg[0] = all;
+            c->nd = nd;
+            for (int q = 0; q < nd; q++) c->dmg[q] = D[q];
             c->have_moved = 0;
             prev = cur;
             was_motion = 0;

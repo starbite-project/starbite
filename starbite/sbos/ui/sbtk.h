@@ -228,7 +228,7 @@ typedef struct {
     uint32_t sharp_motion;     /* motion frames drawn at full resolution (small: P2s) */
     /* P4: the GPU compositor (NULL: the CPU draws). gpu composes the whole frame into dst (a scanout buffer from
      * acquire): 1 done, 0 not (the CPU draws this frame); gpu_clean flushes what the CPU wrote before the GPU reads */
-    int (*gpu)(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, uint64_t *us);
+    int (*gpu)(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us);
     void (*gpu_clean)(void *ctx, const void *p, uint64_t n);
     void *gpu_ctx;
     uint32_t gpu_frames, gpu_fallbacks, gpu_ground;
