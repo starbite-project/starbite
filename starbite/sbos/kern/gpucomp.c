@@ -238,6 +238,17 @@ void gpucomp_clean(const void *p, uint64_t n)
 /* compose n quads (gc_quad: the comp2 layout with CPU pointers) over bg into dst (a scanout buffer), full screen.
  * 1 done (*us: the GPU's time); 0 not (unreachable memory, too many quads, or a GPU fault: then the GPU is off and
  * the backend stays disabled until a restart: the caller draws on the CPU) */
+/* the bins (32 x 32 px): built here in cached RAM, then each bin's count and indices copied into the window */
+static uint8_t bins[GPUCOMP_BIN_W * GPUCOMP_BIN_H][GPUCOMP_BIN_B] __attribute__((aligned(16)));
+static int floor_i(float v)
+{
+    int i = (int)v;
+    return (float)i > v ? i - 1 : i;
+}
+static float fmaxf_(float a, float b) { return a > b ? a : b; }
+static float fminf_(float a, float b) { return a < b ? a : b; }
+static int bins_used;                       /* the last frame's bin entries (the log) */
+
 int gpucomp_compose(void *dst, uint32_t bg, const struct gc_quad *qs, unsigned n, uint64_t *us)
 {
     if (!gpucomp_ready() || n > GPUCOMP_MAX_QUADS)
@@ -245,49 +256,107 @@ int gpucomp_compose(void *dst, uint32_t bg, const struct gc_quad *qs, unsigned n
     uint64_t dva = gpucomp_va(dst);
     if (!dva)
         return 0;
-    volatile uint32_t *p = CPU(GPUCOMP_O_PAR_comp2);
+    volatile uint32_t *p = CPU(GPUCOMP_O_C2);
     put64(p, dva);
     p[2] = SB_FB_W;
     p[3] = SB_FB_W;
     p[4] = SB_FB_H;
     p[5] = n;
     p[6] = bg;
+    for (unsigned k = 0; k < GPUCOMP_BIN_W * GPUCOMP_BIN_H; ++k)
+        bins[k][0] = 0;
+    bins_used = 0;
     for (unsigned i = 0; i < n; ++i) {
         const struct gc_quad *s = &qs[i];
-        volatile uint32_t *q = p + 16 + i * 32;
+        volatile uint32_t *q = p + 16 + i * (GPUCOMP_C2_QB / 4U);
         uint64_t sva = s->src ? gpucomp_va(s->src) : 0, mva = s->mask ? gpucomp_va(s->mask) : 0;
         uint64_t bva = s->bd ? gpucomp_va(s->bd) : 0;
         if ((s->src && !sva) || (s->mask && !mva) || (s->bd && !bva))
             return 0;
-        put64(q, sva);
-        q[2] = s->stride;
-        q[3] = s->w;
-        q[4] = s->h;
-        q[5] = s->flags;
-        q[6] = s->solid;
-        q[7] = fbits(s->alpha);
-        q[8] = fbits(s->dx0);
-        q[9] = fbits(s->dy0);
-        q[10] = fbits(s->isx);
-        q[11] = fbits(s->isy);
-        q[12] = fbits(s->cx0);
-        q[13] = fbits(s->cy0);
-        q[14] = fbits(s->cx1);
-        q[15] = fbits(s->cy1);
-        q[16] = fbits(s->radius);
-        q[17] = fbits(s->ft0);
-        q[18] = fbits(s->ft1);
-        q[19] = fbits(s->fb0);
-        q[20] = fbits(s->fb1);
-        q[21] = fbits(s->len);
-        q[22] = fbits(s->s0);
-        q[23] = fbits(s->s1);
-        put64(q + 24, mva);
-        q[26] = s->mstride;
-        put64(q + 27, bva);
-        q[29] = s->bstride;
-        q[30] = fbits(s->bk);
-        q[31] = s->bw | s->bh << 16;
+        /* the shader's precomputed record (mesa-compjob.c, COMP2 v2) */
+        float rad = s->radius >= .01f ? s->radius : 0, hx = (s->cx1 - s->cx0) * .5f, hy = (s->cy1 - s->cy0) * .5f;
+        q[0] = fbits(s->cx0);
+        q[1] = fbits(s->cy0);
+        q[2] = fbits(s->cx1);
+        q[3] = fbits(s->cy1);
+        q[4] = fbits(s->cx0 + hx);
+        q[5] = fbits(s->cy0 + hy);
+        q[6] = fbits(hx - rad);
+        q[7] = fbits(hy - rad);
+        q[8] = fbits(rad);
+        q[9] = s->flags;
+        q[10] = fbits(s->alpha);
+        q[11] = s->solid;
+        q[12] = fbits(s->dx0);
+        q[13] = fbits(s->dy0);
+        q[14] = fbits(s->isx);
+        q[15] = fbits(s->isy);
+        /* the fade as two ramps: sat((fy - ft) * it) * sat((fb - fy) * ib); a ramp of no height is a step */
+        float ft = -1e6f, it = 1, fb = 1e6f, ib = 1;
+        if (s->flags & GC_FADE) {
+            if (s->ft0 < s->ft1) { ft = s->ft0; it = 1.0f / (s->ft1 - s->ft0); }
+            else { ft = s->ft1 - .01f; it = 100; }
+            if (s->fb0 < s->fb1) { fb = s->fb1; ib = 1.0f / (s->fb1 - s->fb0); }
+            else { fb = s->fb0 + .01f; ib = 100; }
+        }
+        q[16] = fbits(ft);
+        q[17] = fbits(it);
+        q[18] = fbits(fb);
+        q[19] = fbits(ib);
+        float mid = s->len - s->s0 - s->s1, srch = (float)((s->flags & GC_SLICE_H) ? s->w : s->h);
+        q[20] = fbits((float)s->w);
+        q[21] = fbits((float)s->h);
+        q[22] = fbits(s->len);
+        q[23] = fbits(mid < 1e-3f ? 0 : (srch - s->s0 - s->s1) / mid);
+        q[24] = fbits(s->s0);
+        q[25] = fbits(s->s1);
+        put64(q + 26, sva);
+        q[28] = s->stride;
+        q[29] = s->w;
+        q[30] = s->h;
+        q[31] = s->mstride;
+        put64(q + 32, mva);
+        put64(q + 34, bva);
+        q[36] = s->bstride;
+        q[37] = fbits(s->bk);
+        q[38] = s->bw;
+        q[39] = s->bh;
+        /* its bins: the clip, within the source's extent on screen (u in [0, w or len), v in [0, h or len)) */
+        if (!(s->alpha > 0))
+            continue;
+        float x0 = s->cx0, y0 = s->cy0, x1 = s->cx1, y1 = s->cy1;
+        if (s->isx > 0) {
+            x0 = fmaxf_(x0, s->dx0);
+            x1 = fminf_(x1, s->dx0 + ((s->flags & GC_SLICE_H) ? s->len : (float)s->w) / s->isx);
+        }
+        if (s->isy > 0) {
+            y0 = fmaxf_(y0, s->dy0);
+            y1 = fminf_(y1, s->dy0 + ((s->flags & GC_SLICE_V) ? s->len : (float)s->h) / s->isy);
+        }
+        if (!(x1 > x0 && y1 > y0))
+            continue;
+        int bx0 = floor_i(x0) / (int)GPUCOMP_BIN_PX, bx1 = floor_i(x1) / (int)GPUCOMP_BIN_PX;
+        int by0 = floor_i(y0) / (int)GPUCOMP_BIN_PX, by1 = floor_i(y1) / (int)GPUCOMP_BIN_PX;
+        bx0 = bx0 < 0 ? 0 : bx0;
+        by0 = by0 < 0 ? 0 : by0;
+        bx1 = bx1 >= (int)GPUCOMP_BIN_W ? (int)GPUCOMP_BIN_W - 1 : bx1;
+        by1 = by1 >= (int)GPUCOMP_BIN_H ? (int)GPUCOMP_BIN_H - 1 : by1;
+        for (int by = by0; by <= by1; ++by)
+            for (int bx = bx0; bx <= bx1; ++bx) {
+                uint8_t *e = bins[(unsigned)by * GPUCOMP_BIN_W + (unsigned)bx];
+                if (e[0] < GPUCOMP_BIN_B - 1U) {
+                    e[1U + e[0]] = (uint8_t)i;
+                    ++e[0];
+                    ++bins_used;
+                }
+            }
+    }
+    volatile uint32_t *bw = CPU(GPUCOMP_O_BIN);
+    for (unsigned k = 0; k < GPUCOMP_BIN_W * GPUCOMP_BIN_H; ++k) {
+        const uint32_t *src = (const uint32_t *)(const void *)bins[k];
+        volatile uint32_t *d = bw + k * (GPUCOMP_BIN_B / 4U);
+        for (unsigned w = 0, nw = (bins[k][0] + 4U) / 4U; w < nw; ++w)
+            d[w] = src[w];
     }
     uint64_t t = run(GPUCOMP_O_JOB_comp2_full, gpucomp_job_comp2_full, "the UI's frame");
     if (!t) {
@@ -580,12 +649,14 @@ static void fetch_c(const uint32_t *t, uint32_t stride, int w, int h, int x, int
 static float clampf(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
 /* comp2's maths on the CPU (gpucomp_compose's quads) */
+static const struct gc_quad *cq;              /* the quads cpu_px2 draws (the comp2 scene, a motion frame) */
+static unsigned ncq;
 static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
 {
     float acc[4], fx = (float)x + .5f, fy = (float)y + .5f;
     unpack_f(bg, acc);
-    for (unsigned i = 0; i < ng; ++i) {
-        const struct gc_quad *q = &G[i];
+    for (unsigned i = 0; i < ncq; ++i) {
+        const struct gc_quad *q = &cq[i];
         if (fx < q->cx0 || fx >= q->cx1 || fy < q->cy0 || fy >= q->cy1)
             continue;
         float cov = 1;
@@ -645,6 +716,24 @@ static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
         o |= u << (c == 3 ? 24 : c == 0 ? 16 : c == 1 ? 8 : 0);
     }
     return o;
+}
+
+/* the motion frames' scene as the UI's quads: the wallpaper, 16 cards (600 x 300 stretched to 1200 wide, bilinear,
+ * 60 px rounded clips, .92) sliding up by dy, the home bar: 18 quads, as an unlock's frame */
+static struct gc_quad GM[20];
+static unsigned ngm;
+static void motion_scene(float dy)
+{
+    const uint32_t *bgp = POOL_CPU(TEX_BG), *cd = POOL_CPU(TEX_CARD);
+    ngm = 0;
+    GM[ngm++] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (unsigned i = 0; i < 16U; ++i) {
+        float x = 120.0f + (float)(i % 2) * 40.0f, y = 600.0f + (float)i * 260.0f + dy;
+        GM[ngm++] = (struct gc_quad){ cd, 600, 600, 300, GC_BILINEAR, 0, .92f, x, y, .5f, 1, x, y, x + 1200.0f, y + 300.0f, 60,
+                                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    }
+    GM[ngm++] = (struct gc_quad){ 0, 0, 400, 18, GC_SOLID, 0xccffffffU, 1, 520, 2880, 1, 1, 520, 2880, 920, 2898, 9,
+                                  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 }
 
 /* ---- the self test's steps ---------------------------------------------------------------------------------- */
@@ -754,6 +843,8 @@ int gpucomp_selftest_step(void)
         /* comp2, the UI's item model: glass through a mask over the blurred half buffer, a fade, a 3-slice, a
          * solid in a rounded clip; checked against the CPU at points on each */
         make_comp2_scene();
+        cq = G;
+        ncq = ng;
         uint64_t us = 0;
         if (!gpucomp_compose((void *)SB_FB, bg, G, ng, &us)) {
             fail("comp2 did not run");
@@ -799,11 +890,54 @@ int gpucomp_selftest_step(void)
          * (VA_SCAN_B: not on screen) and the scanout in turn */
         unsigned frames = 0;
         for (unsigned f = 0; f < 60; ++f) {
-            scene(16, -(float)f * 25.0f);
-            par_comp(f & 1 ? VA_SCAN_B : SB_GPU_PANEL_VA, bg);
-            uint64_t us = run(GPUCOMP_O_JOB_comp_full, gpucomp_job_comp_full, "a motion frame");
-            if (!us)
+            /* P4 v2: the UI's own path (gpucomp_compose: comp2 v2 with the bins), as Starbite OS Next draws */
+            motion_scene(-(float)f * 25.0f);
+            uint64_t us = 0;
+            if (!gpucomp_compose(f & 1 ? (void *)SCAN_B : (void *)SB_FB, bg, GM, ngm, &us) || !us)
                 break;
+            if (f == 0 && st == 4) {
+                /* the first frame against the CPU's twin: corners, overlaps, the bar, plain wallpaper */
+                static const unsigned mp[][2] = { { 125, 605 }, { 700, 700 }, { 700, 880 }, { 1330, 1000 }, { 130, 2000 },
+                                                   { 700, 2889 }, { 20, 20 }, { 1400, 1500 }, { 161, 862 }, { 700, 2700 },
+                                                   { 1355, 1150 }, { 178, 1158 } };
+                cq = GM;
+                ncq = ngm;
+                unsigned bad = 0;
+                for (unsigned i = 0; i < sizeof mp / sizeof mp[0]; ++i) {
+                    uint32_t want = cpu_px2(mp[i][0], mp[i][1], bg), got = fb[mp[i][1] * SB_FB_W + mp[i][0]];
+                    if (!near(want, got, 3)) {
+                        if (bad < 4) {
+                            struct ub u;
+                            ub_init(&u);
+                            ub_s(&u, "gpucomp: motion frame: pixel ");
+                            ub_dec(&u, mp[i][0]);
+                            ub_c(&u, ',');
+                            ub_dec(&u, mp[i][1]);
+                            ub_s(&u, " GPU ");
+                            ub_hex(&u, got, 8);
+                            ub_s(&u, " CPU ");
+                            ub_hex(&u, want, 8);
+                            sb_log(u.b);
+                        }
+                        ++bad;
+                    }
+                }
+                if (bad) {
+                    sb_logx("gpucomp: FAILED: motion frame (binned): points off by more than 3 levels, of 12: ", bad);
+                    ++fails;
+                } else {
+                    struct ub u;
+                    ub_init(&u);
+                    ub_s(&u, "gpucomp: motion frame (binned): 12 points within 3 levels of the CPU's; bin entries ");
+                    ub_dec(&u, (uint64_t)bins_used);
+                    ub_s(&u, " (a 32 x 32 tile visits ");
+                    ub_dec(&u, (uint64_t)bins_used / (GPUCOMP_BIN_W * GPUCOMP_BIN_H));
+                    ub_c(&u, '.');
+                    ub_dec(&u, (uint64_t)bins_used * 10U / (GPUCOMP_BIN_W * GPUCOMP_BIN_H) % 10U);
+                    ub_s(&u, " quads of 18)");
+                    sb_log(u.b);
+                }
+            }
             frame_sum += us;
             if (us > frame_max)
                 frame_max = us;
