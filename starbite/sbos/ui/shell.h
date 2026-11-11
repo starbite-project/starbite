@@ -87,4 +87,46 @@ int sh_wifi_scan(void);
 int sh_wifi_join(const char *ssid, const char *pass);   /* pass: NULL or "" for open or known networks */
 int sh_wifi_fetch(const char *url);                      /* P3c: the year (the Calendar's month) */      /* the next alarm for the lock's widget (on 0: "No alarm") */
 
+/* survival-next: Emergency mode's tools (shell_survival.inc), from the platform: the kernel's survival API
+ * (kern/survival.h, services.c's SOS) on the phone, guide/survival_host.c on the host. Nothing starts by itself:
+ * the shell calls sh_sos_set(1) and sh_usb_start() only at the end of the user's own hold, and the self test's
+ * build refuses both and every setter (kern_next.c, SBOS_SELFTEST_NEXT). */
+#define SH_SOS_TORCH 1U                   /* the torch in Morse */
+#define SH_SOS_VIB 2U                     /* the vibration motor in Morse */
+#define SH_BEACON_SHIFT 4                 /* the screen: 0 white / red, 1 white, 2 red, 3 lit with the Morse */
+int sh_sos_set(int on);                   /* 1: the kernel's SOS (a 3 s countdown, then flashing); 0 stops; < 0 refused */
+int sh_sos_frame(uint32_t *argb);         /* 1 while SOS owns the screen: the beacon's colour now (0xAARRGGBB) */
+int sh_sos_secs(void);                    /* the countdown's seconds left (> 0); 0 while flashing */
+unsigned sh_sos_opts(void);
+void sh_sos_opts_set(unsigned opts);      /* kept with the settings */
+enum { SH_USB_OFF, SH_USB_ON, SH_USB_COOL };
+typedef struct {
+    int state, ms_left, est_ma;           /* est_ma: -1 unknown */
+    int vbus_lo_mv, vbus_hi_mv;           /* -1 unknown */
+    int bat_c10, limit_c10, ilim_ma, refused;
+    const char *why;                      /* refused / the last stop, plain words (NULL none) */
+} sh_usb_t;
+int sh_usb_start(void);                   /* USB power out: one burst after the hold; < 0 refused (why in sh_usb) */
+void sh_usb_stop(void);
+void sh_usb(sh_usb_t *u);                 /* ~2 Hz while ON or COOL only */
+const char *sh_usb_guide(int i);          /* the guidance's line i (NULL past the last) */
+#define SH_NOLOC 0x7fffffff
+int sh_sun(int *rise, int *set);          /* local minutes: 0 both, 1 the sun stays up, 2 stays down, -2 no location, -3 no clock */
+void sh_loc(int *lat_x100, int *lon_x100);   /* 0.01 degrees, N / E positive; SH_NOLOC unset */
+void sh_loc_set(int lat_x100, int lon_x100);
+#define SH_CARD_NF 9
+#define SH_CARD_FL 64
+typedef struct { char f[SH_CARD_NF][SH_CARD_FL + 1]; } sh_card_t;   /* Name, Blood type, ... Notes (sh_card_label) */
+int sh_card(sh_card_t *c);                /* 1 there is a card */
+int sh_card_set(const sh_card_t *c);      /* 1 kept (the Info app's record, saved with the settings) */
+const char *sh_card_label(int i);
+int sh_last2(void);
+int sh_last2_set(int on);                 /* everything off but the clock, the torch and SOS */
+int sh_last2_auto(void);
+void sh_last2_auto_set(int on);           /* "automatically at 3 %", kept with the settings */
+int sh_guide_n(void);                     /* the offline guide (guide/sbguide.h): chapters, pages, lines */
+const char *sh_guide_chapter(int c, const char **sub, unsigned *argb, int *npages);
+const char *sh_guide_page(int c, int p, const char *const **lines);   /* lines NULL-terminated; "! " a warning */
+const char *sh_sensors_why(void);         /* why there is no compass or level yet */
+
 #endif

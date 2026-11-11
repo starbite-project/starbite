@@ -20,6 +20,8 @@
 #include "kinput.h"
 #include "sbtk.h"
 #include "shell.h"
+#include "survival.h"
+#include "../guide/sbguide.h"
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
 void tk_heap_init(void *mem, uint64_t size);
@@ -945,6 +947,152 @@ void sh_torch(int lit)
 #endif
 }
 
+/* ---- survival-next: Emergency mode's tools (shell_survival.inc) on the kernel's survival API (kern/survival.h)
+ * and services.c's SOS. The shell starts SOS and USB power out only at the end of the user's hold; the self test's
+ * build refuses both and changes no setting (its films never reach them; this is the second line). ---- */
+#ifdef SBOS_SELFTEST_NEXT
+#define SURV_DRY(what) do { sb_log("next: survival: " what ": refused (a dry run: the self test)"); } while (0)
+#endif
+int sh_sos_set(int on)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    if (on) { SURV_DRY("SOS"); return -1; }
+#endif
+    sb_log(on ? "next: survival: SOS on (held on the screen)" : "next: survival: SOS stopped on the screen");
+    return sos_set(on);
+}
+int sh_sos_frame(uint32_t *argb) { return sos_frame(argb); }
+int sh_sos_secs(void)
+{
+    struct sbos_sos s;
+    sos_status(&s);
+    return s.state == 2 && s.secs < 0 ? -s.secs : 0;
+}
+unsigned sh_sos_opts(void) { return surv_sos_opts; }
+void sh_sos_opts_set(unsigned o)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)o;
+    SURV_DRY("the SOS options");
+#else
+    surv_sos_opts = o & (SURV_SOS_TORCH | SURV_SOS_VIB | 3U << SURV_BEACON_SHIFT);
+    settings_changed();
+#endif
+}
+int sh_usb_start(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    SURV_DRY("USB power out");
+    return -1;
+#else
+    sb_log("next: survival: USB power out held on the screen");
+    return surv_usb_start();
+#endif
+}
+void sh_usb_stop(void) { surv_usb_stop("Stop on the screen"); }
+void sh_usb(sh_usb_t *u)
+{
+    struct surv_usb s;
+    surv_usb_status(&s);
+    u->state = s.state == SURV_USB_ON ? SH_USB_ON : s.state == SURV_USB_COOL ? SH_USB_COOL : SH_USB_OFF;
+    u->ms_left = s.ms_left;
+    u->est_ma = s.est_ma;
+    u->vbus_lo_mv = s.vbus_lo_mv;
+    u->vbus_hi_mv = s.vbus_hi_mv;
+    u->bat_c10 = s.bat_c10;
+    u->limit_c10 = s.limit_c10;
+    u->ilim_ma = s.ilim_ma;
+    u->refused = s.refused;
+    u->why = s.why;
+}
+const char *sh_usb_guide(int i)
+{
+    for (int k = 0; k <= i; k++) if (!surv_usb_guide[k]) return 0;
+    return surv_usb_guide[i];
+}
+int sh_sun(int *rise, int *set) { return surv_sun_today(rise, set); }
+void sh_loc(int *lat, int *lon) { *lat = surv_lat_x100; *lon = surv_lon_x100; }
+void sh_loc_set(int lat, int lon)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)lat, (void)lon;
+    SURV_DRY("the location");
+#else
+    surv_lat_x100 = lat;
+    surv_lon_x100 = lon;
+    settings_changed();
+#endif
+}
+_Static_assert(sizeof(sh_card_t) == sizeof(struct surv_card) && SH_CARD_NF == SURV_CARD_NF && SH_CARD_FL == SURV_CARD_FL,
+               "sh_card_t is struct surv_card");
+int sh_card(sh_card_t *c)
+{
+    struct surv_card k;
+    int r = surv_card_get(&k);
+    tk_memcpy(c, &k, sizeof(k));
+    return r;
+}
+int sh_card_set(const sh_card_t *c)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)c;
+    SURV_DRY("the emergency card");
+    return 0;
+#else
+    struct surv_card k;
+    tk_memcpy(&k, c, sizeof(k));
+    return surv_card_set(&k);
+#endif
+}
+const char *sh_card_label(int i) { return i >= 0 && i < SURV_CARD_NF ? surv_card_label[i] : ""; }
+int sh_last2(void) { return surv_last2(); }
+int sh_last2_set(int on)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)on;
+    SURV_DRY("Last 2 %");
+    return -1;
+#else
+    return surv_last2_set(on, "the switch in Emergency");
+#endif
+}
+int sh_last2_auto(void) { return surv_last2_auto; }
+void sh_last2_auto_set(int on)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)on;
+    SURV_DRY("Last 2 % at 3 %");
+#else
+    surv_last2_auto = on != 0;
+    settings_changed();
+#endif
+}
+int sh_guide_n(void)
+{
+    int n = 0;
+    (void)surv_guide(&n);
+    return n;
+}
+const char *sh_guide_chapter(int c, const char **sub, unsigned *argb, int *npages)
+{
+    int n = 0;
+    const struct sbg_chapter *ch = surv_guide(&n);
+    if (c < 0 || c >= n) return 0;
+    if (sub) *sub = ch[c].sub;
+    if (argb) *argb = ch[c].argb;
+    if (npages) *npages = ch[c].n;
+    return ch[c].title;
+}
+const char *sh_guide_page(int c, int p, const char *const **lines)
+{
+    int n = 0;
+    const struct sbg_chapter *ch = surv_guide(&n);
+    if (c < 0 || c >= n || p < 0 || p >= ch[c].n) return 0;
+    if (lines) *lines = ch[c].pages[p].lines;
+    return ch[c].pages[p].title;
+}
+const char *sh_sensors_why(void) { return surv_sensors_why(); }
+
 /* ---- the self test --------------------------------------------------------------------------------------- */
 #ifdef SBOS_SELFTEST_NEXT
 typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
@@ -975,7 +1123,8 @@ static const step S_MSGS[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 
                                { 0, 0, 0, 0, 0, 600 }, { 2, 195, 795, 200, 450, 260 }, { 0, 0, 0, 0, 0, 1200 } };
 static const step S_EMERG[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 318, 720, 0, 0, 950 }, { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 795, 195, 330, 220 },
                                 { 0, 0, 0, 0, 0, 900 }, { 2, 320, 450, 60, 450, 200 }, { 0, 0, 0, 0, 0, 900 }, { 2, 80, 20, 80, 640, 300 },
-                                { 0, 0, 0, 0, 0, 1200 }, { 1, 195, 650, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };
+                                { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 600, 195, 250, 300 }, { 0, 0, 0, 0, 0, 1200 },
+                                { 1, 195, 624, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };   /* survival-next: the list scrolls to Exit */
 /* P2r: the Power key (kind 5, the kernel's own power_key_short): the fade to black and the screen off, the wake, a
  * fade undone by a second press */
 static const step S_SLEEP[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 158, 290, 0, 0, 80 },
@@ -1006,7 +1155,7 @@ static void film_start(int film)
     case 6: F.s = S_APP; F.n = 7; break;
     case 7: F.s = S_PHONE; F.n = 17; break;
     case 8: F.s = S_MSGS; F.n = 11; break;
-    case 9: F.s = S_EMERG; F.n = 11; break;
+    case 9: F.s = S_EMERG; F.n = (int)(sizeof S_EMERG / sizeof S_EMERG[0]); break;
     default: F.s = S_SLEEP; F.n = 13; break;
     }
     /* each film from the plain lock screen */
