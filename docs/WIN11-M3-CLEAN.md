@@ -658,3 +658,19 @@ If big3i shows n0 and hi < 0x50, it can replace big3-1794 as the daily image (+1
 makes `windows-big3i.uefi` a visible catalog row "Windows 11 (big cores)" beside the unchanged win11 row. User-facing
 status: side-session-notes `win-m3-clean-user-status.md`. Known limits on that row: x86/x64 emulation (section 28) and
 the winsqlite3 services (section 25). Next: m3all4 (attended), then a big4i variant.
+
+## 33. x86/x64 on the big-core row: host groundwork for T3 and T6 (docs/WIN11-M3-X86.md)
+
+Host only, nothing booted. Details and the pull list: notes folder `win-m3-clean-x86-prep.md`.
+- T3: `tools/woa/win-m3/hive-localdumps.py` (offline SOFTWARE hive: WER LocalDumps for sbcpu-x64.exe / sbcpu-x86.exe,
+  DumpType 2, DumpFolder C:\sbdumps REG_EXPAND_SZ, DumpCount 2; show/set/remove; hive-service.py safety). Rehearsed
+  set and remove on pull-1111's SOFTWARE: remove restores "no LocalDumps key".
+- T3: `tools/woa/win-m3/minidump-m3.py` (exception, the xtajit64 +0x36D6C / xtajit +0x5EF68 thread, x19 record,
+  x25 CONTEXT.Pc at +0x108, [x29+0x14], region = module+RVA / private exec JIT / mapped exec, word class via m3-scan).
+  Checked on a synthetic dump only.
+- XtaCache: no .jc contents on the host (listing only). 11 files (~1.7 MB) to pull: the four SBCPU caches, x64 and
+  x86 KERNEL32/KERNELBASE, x86 NTDLL, SysWOW64 CMD. There is no x64 NTDLL .jc (x64 system DLLs run as ARM64X/EC).
+- T6: prebuilt llvm-mingw 20261104 aarch64 includes arm64ec, so libarm64ecfex.dll builds in the lima VM without an
+  LLVM build. Patches A/B/C: `tools/woa/win-m3/fex/0001-starbite-23h2-m3.patch` (applies to e3b30dd; not compiled);
+  script `tools/woa/win-m3/fex/build-fex-arm64ec.sh`. Not run: the Mac has 4.5 GiB free; the script needs >= 6.
+- Windows Update fails on the big-core row (same winsqlite3 crash); noted in the user status note.

@@ -1,0 +1,104 @@
+diff --git a/FEXCore/Source/Interface/Core/CPUID.cpp b/FEXCore/Source/Interface/Core/CPUID.cpp
+index 26b8de8..21ca913 100644
+--- a/FEXCore/Source/Interface/Core/CPUID.cpp
++++ b/FEXCore/Source/Interface/Core/CPUID.cpp
+@@ -157,7 +157,8 @@ constexpr uint32_t FAMILY_IDENTIFIER = GenerateFamily(CPUFamily {
+ uint64_t GetCycleCounterFrequency() {
+   uint64_t Result {};
+   __asm("mrs %[Res], CNTFRQ_EL0" : [Res] "=r"(Result));
+-  return Result;
++  // Starbite patch B: firmware on the Galaxy S9 (Exynos 9810) leaves CNTFRQ_EL0 = 0; the counter runs at 26 MHz.
++  return Result ? Result : 26'000'000ULL;
+ }
+ 
+ static uint32_t GetCPUID_TPIDRRO() {
+diff --git a/FEXCore/Source/Utils/SpinWaitLock.cpp b/FEXCore/Source/Utils/SpinWaitLock.cpp
+index 3dba2d5..4aba179 100644
+--- a/FEXCore/Source/Utils/SpinWaitLock.cpp
++++ b/FEXCore/Source/Utils/SpinWaitLock.cpp
+@@ -8,7 +8,8 @@ constexpr uint64_t NanosecondsInSecond = 1'000'000'000ULL;
+ static uint64_t GetCycleCounterFrequency() {
+   uint64_t Result {};
+   __asm("mrs %[Res], CNTFRQ_EL0" : [Res] "=r"(Result));
+-  return Result;
++  // Starbite patch B: firmware on the Galaxy S9 (Exynos 9810) leaves CNTFRQ_EL0 = 0; the counter runs at 26 MHz.
++  return Result ? Result : 26'000'000ULL;
+ }
+ 
+ static uint64_t CalculateCyclesPerNanosecond() {
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index 167ae27..ff5f73c 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -270,6 +270,9 @@ void ParseWineSyscallNumbers(HMODULE NtDll) {
+   }
+ }
+ 
++// Starbite patch C: real Windows before 26100 (set in InitSyscalls; never on Wine).
++static bool Pre26100DispatcherLayout = false;
++
+ uint64_t GetNTSyscallNo(HMODULE NtDll, const char* ExportName) {
+   ULONG LoadConfigSize;
+   const _IMAGE_LOAD_CONFIG_DIRECTORY64* NtDllLoadConfig = reinterpret_cast<_IMAGE_LOAD_CONFIG_DIRECTORY64*>(
+@@ -299,6 +302,21 @@ uint64_t GetNTSyscallNo(HMODULE NtDll, const char* ExportName) {
+   const uintptr_t* SyscallImplementationTable = reinterpret_cast<uintptr_t*>(GetProcAddress(NtDll, "__arm64ec_syscall_ffs"));
+   const uint32_t* SyscallImplementationCount = reinterpret_cast<uint32_t*>(GetProcAddress(NtDll, "__arm64ec_syscall_ffs_size"));
+   if (!ARM64ECImplementation || !SyscallImplementationTable || !SyscallImplementationCount) {
++    // Starbite patch A: 22H2/23H2 (22621/22631) ntdll does not export __arm64ec_syscall_ffs. Numbers read from that
++    // ntdll's native stubs (svc #N): NtContinue 0x43, NtAllocateVirtualMemory 0x18, NtProtectVirtualMemory 0x50,
++    // NtRaiseException 0x172.
++    const uint32_t Build = NtCurrentTeb()->Peb->OSBuildNumber & 0xFFFF;
++    if (Build == 22621 || Build == 22631) {
++      static constexpr struct {
++        const char* Name;
++        uint64_t No;
++      } Table23H2[] = {{"NtContinue", 0x43}, {"NtAllocateVirtualMemory", 0x18}, {"NtProtectVirtualMemory", 0x50}, {"NtRaiseException", 0x172}};
++      for (const auto& Entry : Table23H2) {
++        if (!strcmp(Entry.Name, ExportName)) {
++          return Entry.No;
++        }
++      }
++    }
+     return -1;
+   }
+ 
+@@ -327,6 +345,7 @@ bool InitSyscalls() {
+   } else {
+     // NT syscall numbers may change between versions, so we need to find the numbers
+     // for the syscalls we need ahead of time.
++    Pre26100DispatcherLayout = (NtCurrentTeb()->Peb->OSBuildNumber & 0xFFFF) < 26100;
+     WineNtContinueSyscallId = GetNTSyscallNo(NtDll, "NtContinue");
+     WineNtAllocateVirtualMemorySyscallId = GetNTSyscallNo(NtDll, "NtAllocateVirtualMemory");
+     WineNtProtectVirtualMemorySyscallId = GetNTSyscallNo(NtDll, "NtProtectVirtualMemory");
+@@ -371,6 +390,17 @@ struct alignas(16) KiUserExceptionDispatcherStackLayout {
+   uint64_t Redzone[2];
+ };
+ 
++// Starbite patch C: before 26100 KiUserExceptionDispatcher reads the record right after the context (sp+0x390, 23H2
++// ntdll: add x0,sp,#0x390), without the Pad[4] above.
++struct alignas(16) KiUserExceptionDispatcherStackLayoutPre26100 {
++  ARM64_NT_CONTEXT Context;
++  EXCEPTION_RECORD Rec;
++  uint64_t Align;
++  uint64_t Redzone[2];
++};
++static_assert(offsetof(KiUserExceptionDispatcherStackLayoutPre26100, Rec) == 0x390);
++static_assert(offsetof(KiUserExceptionDispatcherStackLayout, Rec) == 0x3B0);
++
+ static bool HandleUnalignedAccess(const ThreadCPUArea CPUArea, ARM64_NT_CONTEXT& Context, bool IsJIT) {
+   auto Thread = CPUArea.ThreadState();
+   FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSIGBUSCount, 1);
+@@ -701,6 +731,13 @@ public:
+     __asm volatile("mrs %[fpsr], fpsr" : [fpsr] "=r"(FPSR));
+ 
+     auto* Thread = GetCPUArea().ThreadState();
++    if (Pre26100DispatcherLayout) {
++      KiUserExceptionDispatcherStackLayoutPre26100 DispatchArgs {
++        .Context = StoreStateToPackedECContext(Thread, static_cast<uint32_t>(FPCR), static_cast<uint32_t>(FPSR)),
++        .Rec = {.ExceptionCode = STATUS_EMULATION_SYSCALL}};
++      DispatchArgs.Context.Pc += 2;
++      JumpSetStack(KiUserExceptionDispatcher, reinterpret_cast<uintptr_t>(&DispatchArgs));
++    }
+     KiUserExceptionDispatcherStackLayout DispatchArgs {
+       .Context = StoreStateToPackedECContext(Thread, static_cast<uint32_t>(FPCR), static_cast<uint32_t>(FPSR)),
+       .Rec = {.ExceptionCode = STATUS_EMULATION_SYSCALL}};
