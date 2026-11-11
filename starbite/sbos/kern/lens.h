@@ -79,6 +79,56 @@ static inline lens_cls lens_class(float w_pt, float h_pt, float r_pt)
     c.dk = mx > 1e-4f ? .2f * c.b / mx : 0;
     return c;
 }
+/* v9: a glass shape's lens in frame px (no per-pixel map: the GPU and the CPU evaluate it per pixel from the shape's
+ * rounded-box distance): lb the bezel (px), lt = T / b, lc the offset scale (px), lr the specular's falloff
+ * (log2(e) / 1.2 pt, per px). A half frame halves lb and lc and doubles lr. */
+typedef struct { float lb, lt, lc, lr; } lens_par;
+static inline lens_par lens_params(float w_px, float h_px, float r_px, float px_per_pt)
+{
+    lens_cls c = lens_class(w_px / px_per_pt, h_px / px_per_pt, r_px / px_per_pt);
+    lens_par p;
+    p.lb = c.b * px_per_pt;
+    p.lt = c.T / c.b;
+    p.lc = c.T * c.dk * px_per_pt;
+    p.lr = 1.44269504f / (1.2f * px_per_pt);
+    return p;
+}
+static inline float lens_exp2_neg(float x)   /* 2^-x, x >= 0 */
+{
+    return lens_exp_neg(x * .69314718f);
+}
+/* s px in from the edge, outward normal (gx, gy) (unit): the offset (frame px) and the light e; the steps comp2's
+ * lens path does */
+static inline void lens_eval(const lens_par *P, float s, float gx, float gy, float *ox, float *oy, float *e)
+{
+    float t = lens_sat(s / P->lb), u = 1 - t, u2 = u * u, q = 1 - u2 * u2;
+    float h = lens_sqrt(lens_sqrt(q)), h3 = h * h * h;
+    float hp = u2 * u / (h3 > 1e-6f ? h3 : 1e-6f);
+    hp = hp < 8 ? hp : 8;
+    float sl = P->lt * hp, inn = 1 / lens_sqrt(1 + sl * sl), nx = sl * inn, nz = inn;
+    const float eta = 1 / 1.5f;
+    float k = 1 - eta * eta * (1 - nz * nz), a = eta * nz - lens_sqrt(k > 0 ? k : 0);
+    float rx = a * nx, rz = -eta + a * nz;
+    float D = (rx < 0 ? -rx : rx) / (-rz > 1e-4f ? -rz : 1e-4f) * h * P->lc;
+    *ox = -gx * D;
+    *oy = -gy * D;
+    float f = gx * LENS_LX + gy * LENS_LY, fp = f > 0 ? f : 0, fn = f < 0 ? -f : 0;
+    float rho = lens_exp2_neg(s * P->lr), w = 1 - nz, w2 = w * w;
+    *e = rho * (.55f * fp * fp * fp + .25f * fn * fn * fn) + .5f * (.04f + .96f * w2 * w2 * w) - .06f * u2 * fn;
+}
+/* a rounded box (centre cx, cy; half size less the radius ex, ey; radius r) at (px, py): the signed distance
+ * (negative inside) and the outward normal, as comp2 computes them */
+static inline float lens_sd(float px, float py, float cx, float cy, float ex, float ey, float r, float *gx, float *gy)
+{
+    float dx = px - cx, dy = py - cy, sx = dx < 0 ? -1.0f : 1.0f, sy = dy < 0 ? -1.0f : 1.0f;
+    float qx = dx * sx - ex, qy = dy * sy - ey, mx = qx > 0 ? qx : 0, my = qy > 0 ? qy : 0, mm = qx > qy ? qx : qy;
+    float l = lens_sqrt(mx * mx + my * my);
+    float nx = l > 0 ? mx : qx >= qy ? 1.0f : 0, ny = l > 0 ? my : qx >= qy ? 0 : 1.0f, il = 1 / lens_sqrt(nx * nx + ny * ny);
+    *gx = sx * nx * il;
+    *gy = sy * ny * il;
+    return l + (mm < 0 ? mm : 0) - r;
+}
+
 /* at s pt in from the edge, outward normal (gx, gy) (unit): the sample offset (panel px) and the light e */
 static inline void lens_at(const lens_cls *c, float s, float gx, float gy, float *ox, float *oy, float *e)
 {
