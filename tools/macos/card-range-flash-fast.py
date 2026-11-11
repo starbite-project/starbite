@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write an HFS+ / HFSX root image into a sector range of the S9's microSD through TWRP, fast.
 
-  card-range-flash-fast.py IMAGE START_SECTOR [--state FILE] [--check-only] [--all] [--verify]
+  card-range-flash-fast.py IMAGE START_SECTOR [--state FILE] [--check-only] [--all] [--verify] [--replace-ios26]
 
 The same checks as card-range-flash.py before anything is written (TWRP, the 128 GB card,
 the range inside p2 past the card store's used end or exactly the 64 MiB test range, never
@@ -40,8 +40,13 @@ def read_sectors(first, count):
     return adb(['exec-out', f'dd if={DEV} bs=512 skip={first} count={count} 2>/dev/null'], True)
 
 
-def check(start, count):
-    """card-range-flash.py's checks, plus the Ventura range. Returns a description."""
+STOREDATA = 247900160                 # p2 block 8126720: the card store's data area (docs/STORE-ON-CARD.md)
+
+
+def check(start, count, replace_ios26=False):
+    """card-range-flash.py's checks, plus the Ventura range. Returns a description.
+    replace_ios26: write exactly the old iOS 26 range (the ios26 row is dropped, 2026-11-11: macOS Sequoia's root
+    goes there); it must lie inside p2, past the store head (p2 blocks 0..6) and below the store's data area."""
     if adb(['get-state']) != 'recovery':
         sys.exit('the phone is not in TWRP')
     sectors = int(adb(['shell', 'cat /sys/block/mmcblk0/size']))
@@ -55,6 +60,12 @@ def check(start, count):
     s, e = start, start + count
     if s < p1[1] + p1[2] and p1[1] < e:
         sys.exit('the range overlaps p1 (the exFAT data partition): refusing')
+    if replace_ios26:
+        if (s, count) != IOS26:
+            sys.exit(f'--replace-ios26 writes exactly {IOS26[0]}+{IOS26[1]}, not {s}+{count}: refusing')
+        if p2[0] != 0xDA or s < p2[1] + 7 * 8 or e > STOREDATA or e > p2[1] + p2[2]:
+            sys.exit('the old iOS 26 range is not inside p2 between the store head and its data area: refusing')
+        return 'the old iOS 26 range (replaced, --replace-ios26)'
     if s < IOS26[0] + IOS26[1] and IOS26[0] < e:
         sys.exit('the range overlaps iOS 26\'s root on the card (182888448+33554432): refusing')
     if (s, count) == TEST_RANGE:
@@ -111,6 +122,8 @@ def main():
     ap.add_argument('start', type=int)
     ap.add_argument('--state')
     ap.add_argument('--check-only', action='store_true')
+    ap.add_argument('--replace-ios26', action='store_true',
+                    help='write exactly the old iOS 26 range 182888448+33554432 (macOS Sequoia root, 2026-11-11)')
     ap.add_argument('--all', action='store_true', help='write every chunk, allocated or not')
     ap.add_argument('--verify', action='store_true', help='read every written chunk back from the card')
     a = ap.parse_args()
@@ -118,7 +131,7 @@ def main():
     count = size // 512
     if size % MIB or a.start % 2048:
         sys.exit('START and the image size must be 1 MiB multiples')
-    where = check(a.start, count)
+    where = check(a.start, count, a.replace_ios26)
     nchunks = (size + CHUNK - 1) // CHUNK
     todo = list(range(nchunks)) if a.all else allocated_chunks(a.image, size)
     how = 'all chunks'
