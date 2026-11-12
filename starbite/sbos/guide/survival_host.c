@@ -21,9 +21,18 @@ const char *const surv_usb_guide[] = {
     0,
 };
 
+static uint64_t fire_hold;
+static int fire_on;
 static void advance(void)
 {
-    if (st == SURV_USB_ON && surv_host_now_ms - t_on >= SURV_USB_BURST_MS) {
+    if (st == SURV_USB_ON && fire_on && (surv_host_now_ms - fire_hold > 1500U || surv_host_now_ms - t_on >= 120000U)) {
+        st = SURV_USB_COOL;
+        t_cool = surv_host_now_ms + 15000U;
+        why = surv_host_now_ms - t_on >= 120000U ? "2 minutes of continuous output" : "released";
+        fire_on = 0;
+        ++events;
+    }
+    if (st == SURV_USB_ON && !fire_on && surv_host_now_ms - t_on >= SURV_USB_BURST_MS) {
         st = SURV_USB_COOL;
         t_cool = surv_host_now_ms + SURV_USB_COOL_MS;
         why = "the 10 s burst is over";
@@ -56,6 +65,7 @@ void surv_usb_stop(const char *w)
     advance();
     if (st != SURV_USB_ON)
         return;
+    fire_on = 0;
     st = SURV_USB_COOL;
     t_cool = surv_host_now_ms + SURV_USB_COOL_MS;
     why = w;
@@ -82,6 +92,12 @@ void surv_usb_status(struct surv_usb *s)
     s->refused = refused;
     s->events = events;
     s->why = why;
+    s->fire = fire_on;
+    s->usb_c10 = 330;
+    s->chg_c10 = 360;
+    s->fire_min_left = st == SURV_USB_ON && fire_on ? 9 : -1;
+    if (st == SURV_USB_ON && fire_on)
+        s->ms_left = (int32_t)(120000U - (surv_host_now_ms - t_on));
 }
 
 uint32_t surv_sos_opts = SURV_SOS_TORCH | SURV_SOS_VIB;
@@ -193,3 +209,44 @@ int surv_sensors_state(void)
         return 0;                           /* SHUB_OFF */
     return surv_host_now_ms - shub_t0 < 4000U ? 1 : 2;   /* SHUB_STARTING, SHUB_RUNNING */
 }
+
+/* 1.2-alpha29: extreme power saving, the estimate, light and sound, simulated */
+static int saver;
+int surv_saver_set(int on, const char *w) { (void)w; saver = on != 0; return 0; }
+int surv_saver(void) { return saver || last2; }
+int surv_estimate(struct surv_est *e)
+{
+    memset(e, 0, sizeof(*e));
+    e->pct = 76;
+    e->usable_mah = 2200;
+    e->ma_on = 310;
+    e->ma_off = 95;
+    e->ma_saver = 60;
+    e->ma_heat = 2800;
+    e->min_on = 2200 * 60 / 310;
+    e->min_off = 2200 * 60 / 95;
+    e->min_saver = 2200 * 60 / 60;
+    e->min_heat = 2200 * 60 / 2800;
+    e->learned_normal = 1;
+    e->learned_saver = 0;
+    return 1;
+}
+void surv_light_boost(int on) { (void)on; }
+int (*surv_tone_hook)(int hz, int on);
+int surv_whistle(int on) { (void)on; return -1; }
+const char *surv_whistle_why(void) { return "The whistle needs the speaker's driver (not in this version yet)."; }
+
+/* 1.2-alpha29: Extreme fire mode, simulated: runs while held (1.5 s), at most 2 min, about 1.2 A, 9 min left */
+int surv_usb_fire_start(void)
+{
+    advance();
+    if (st != SURV_USB_OFF)
+        return -1;
+    st = SURV_USB_ON;
+    t_on = fire_hold = surv_host_now_ms;
+    fire_on = 1;
+    ++bursts;
+    return 0;
+}
+void surv_usb_hold(void) { fire_hold = surv_host_now_ms; }
+int surv_usb_active(void) { return st == SURV_USB_ON; }
