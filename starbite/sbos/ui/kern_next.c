@@ -2994,3 +2994,29 @@ void sh_low_power(int on)
     sb_log(on ? "next: Low Power Mode on" : "next: Low Power Mode off");
 }
 int sh_low_power_on(void) { return perf_low; }
+
+/* ---- Track A, cp7: the screen's orientation for apps that rotate (the user: "landscape where it makes sense") ----
+ * From the sensor hub's accelerometer (surv_tilt: pitch = the long axis against level, roll = the short one). Each call
+ * keeps the accelerometer alive (surv_sensors_on_mask: a keep-alive; the hub switches itself off 60 s after the last
+ * ask, and this never switches it off, so the Compass page is never cut). 10 degrees of hysteresis; flat on a table
+ * (both under 25 degrees) keeps the last answer. The signs are the hub's (Android) convention: to be confirmed on the
+ * phone (a still in each orientation). Orientation Lock (pref display.orientlock, off by default): always portrait. */
+static int ori_last;
+int sh_orientation(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    return SH_ORI_PORTRAIT;
+#else
+    if (sh_pref_int("display.orientlock", 0) == 1) return ori_last = SH_ORI_PORTRAIT;
+    if (surv_sensors_on_mask(SHUB_SENS_ACCEL) < 0) return ori_last;   /* the saver: no hub, as it was */
+    int p = 0, r = 0;
+    if (!surv_tilt(&p, &r)) return ori_last;                          /* starting (about 4 s) or no data yet */
+    int ap = p < 0 ? -p : p, ar = r < 0 ? -r : r;
+    if (ap < 250 && ar < 250) return ori_last;                        /* flat */
+    if (ap > ar + 100) ori_last = p > 0 ? SH_ORI_PORTRAIT : SH_ORI_UPSIDE_DOWN;
+    else if (ar > ap + 100) ori_last = r > 0 ? SH_ORI_TURNED_LEFT : SH_ORI_TURNED_RIGHT;
+    return ori_last;
+#endif
+}
+int sh_orientation_lock(void) { return sh_pref_int("display.orientlock", 0) == 1; }
+void sh_orientation_lock_set(int on) { sh_pref_set_int("display.orientlock", on ? 1 : 0); if (on) ori_last = SH_ORI_PORTRAIT; }
