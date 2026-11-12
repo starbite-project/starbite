@@ -82,7 +82,7 @@ static int same(const char *a, const char *b);
 static sh_fw_t fw_ram;                /* the dry run's settings (after the first dry write) */
 static int fw_ram_on;
 
-int sh_os_get(int i, char key[24], char name[32], int *category, int *method, int *ready, int *is_default)
+int sh_os_get(int i, char *key /* [24] */, char *name /* [32] */, int *category, int *method, int *ready, int *is_default)
 {
     int k = os_index(i);
     const struct cat_ent *c = k >= 0 ? cat_get((unsigned)k) : 0;
