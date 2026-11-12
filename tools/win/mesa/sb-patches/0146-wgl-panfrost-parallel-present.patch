@@ -1,0 +1,535 @@
+diff --git a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
+index f9c7cfc..9249753 100644
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -108,23 +108,245 @@ wgl_panfrost_create(void)
+  *    Panfrost makes every DISPLAY_TARGET/SCANOUT/SHARED resource created without a modifier linear
+  *    (panfrost_resource_create_with_modifier, PAN_BIND_SHARED_MASK). So the READ map below is the BO itself:
+  *    panfrost_ptr_map waits for the frame's writer and returns the pointer, with no detile or staging copy.
+- *  - stw's pixel formats are B8G8R8X8/B8G8R8A8 first, which is GDI's own layout: those go to StretchDIBits straight
+- *    from the mapping (a DIB stride/4 pixels wide, drawn 1:1), so this code touches no pixel at all.
++ *  - stw's pixel formats are B8G8R8X8/B8G8R8A8 first, which is GDI's own layout: those can go to StretchDIBits
++ *    straight from the mapping (a DIB stride/4 pixels wide, drawn 1:1).
+  *  - Other formats (RGBA swaps, A8R8G8B8, 10-bit, FP16) are converted into a buffer kept across frames.
+  *  - A minimized window or an empty clip box still waits for the frame (the map), but copies nothing.
+- * The back buffer is write-combined CPU memory (sbwddm's segment is not cache-coherent), so the one read GDI makes
+- * of it stays the main cost. SB_GL_PRESENT=copy forces the buffered path, for A/B tests. */
++ *
++ * sb-patches/0146: the back buffer is write-combined CPU memory (sbwddm's segment is not cache-coherent), read at
++ * ~87-180 MB/s per thread (docs/WIN11-GPU.md 6.33-6.35): GDI reading a 2220x1080 frame from the mapping alone took
++ * 50-110 ms. SB_GL_PRESENT picks how a frame reaches GDI:
++ *  - parallel (default): frames of at least 512x256 in B,G,R,X or R,G,B,X order are copied into the kept buffer in
++ *    horizontal bands by up to min(4, processors) threads (this one and a pool created once per process, see
++ *    wgl_pan_pool), with 16-byte loads; the mapping is let go as soon as every band is done, then ONE StretchDIBits
++ *    from the cached buffer. Smaller frames go as "direct".
++ *  - direct: 0145's default, GDI reads the mapping (falls back to copying for good if GDI refuses it).
++ *  - copy: 0145's SB_GL_PRESENT=copy, one thread copies into the kept buffer.
++ * Every 10 s one "sbumd: glstats" line goes to stderr (the umdlog): frames, and the average/longest map wait (the
++ * GPU), copy, GDI call (StretchDIBits + GdiFlush) and interval between presents. */
+ #include "wgl_sb_present.h"
+ #include "util/log.h"
+ #include "util/simple_mtx.h"
+ #include "util/u_atomic.h"
++#include <stdio.h>
+ 
+ DEBUG_GET_ONCE_OPTION(sb_gl_present, "SB_GL_PRESENT", NULL)
+ 
++enum wgl_pan_mode { WGL_PAN_PARALLEL, WGL_PAN_DIRECT, WGL_PAN_COPY };
++static const char *const wgl_pan_mode_name[] = { "parallel", "direct", "copy" };
++
+ static simple_mtx_t wgl_pan_present_mtx = SIMPLE_MTX_INITIALIZER;
+ static void *wgl_pan_present_buf;   /* the converted frame, kept: no malloc per frame */
+ static size_t wgl_pan_present_size;
+-static int wgl_pan_direct = -1;     /* -1: not decided, 1: GDI reads the mapping, 0: it doesn't, copy */
++static int wgl_pan_mode = -1;       /* enum wgl_pan_mode; -1: SB_GL_PRESENT not read yet */
++static int wgl_pan_direct_refused;  /* GDI refused a mapped back buffer once: never hand it one again */
++
++static enum wgl_pan_mode
++wgl_panfrost_mode(void)
++{
++   int mode = p_atomic_read(&wgl_pan_mode);
++   if (mode < 0) {
++      const char *env = debug_get_option_sb_gl_present();
++      mode = WGL_PAN_PARALLEL;
++      if (env && strcmp(env, "direct") == 0)
++         mode = WGL_PAN_DIRECT;
++      else if (env && strcmp(env, "copy") == 0)
++         mode = WGL_PAN_COPY;
++      p_atomic_set(&wgl_pan_mode, mode);
++   }
++   return (enum wgl_pan_mode)mode;
++}
++
++/* The copy threads. Created once, on the first frame the parallel present copies, and kept for the life of the
++ * process (never joined: joining in DllMain would deadlock on the loader lock). They run this DLL's code, so the
++ * DLL is pinned first (GET_MODULE_HANDLE_EX_FLAG_PIN): a FreeLibrary cannot unload it from under them. Idle, they
++ * sleep on a condition variable. Bands are handed out under the lock together with the job they belong to, so a
++ * thread that wakes late never mixes one frame's band number with another frame's pointers; the presenting thread
++ * takes bands too and waits until every band handed out is finished before it lets the mapping go. Only one
++ * present uses the pool at a time (wgl_pan_present_mtx). */
++static struct {
++   SRWLOCK lock;
++   CONDITION_VARIABLE work, done;
++   struct sb_present_job job; /* the frame being copied; job.bands == 0 until the first */
++   unsigned next;             /* next band to hand out; >= job.bands: none left */
++   unsigned pending;          /* bands handed out or not, not finished */
++   unsigned threads;          /* copying threads including the presenting one; 1: no pool */
++   bool created;
++} wgl_pan_pool = { SRWLOCK_INIT, CONDITION_VARIABLE_INIT, CONDITION_VARIABLE_INIT };
++
++static DWORD WINAPI
++wgl_pan_pool_main(void *arg)
++{
++   (void)arg;
++   AcquireSRWLockExclusive(&wgl_pan_pool.lock);
++   for (;;) {
++      while (wgl_pan_pool.next >= wgl_pan_pool.job.bands)
++         SleepConditionVariableSRW(&wgl_pan_pool.work, &wgl_pan_pool.lock, INFINITE, 0);
++      unsigned band = wgl_pan_pool.next++;
++      struct sb_present_job job = wgl_pan_pool.job;
++      ReleaseSRWLockExclusive(&wgl_pan_pool.lock);
++
++      sb_present_run_band(&job, band);
++
++      AcquireSRWLockExclusive(&wgl_pan_pool.lock);
++      if (--wgl_pan_pool.pending == 0)
++         WakeConditionVariable(&wgl_pan_pool.done);
++   }
++   return 0;
++}
++
++/* Called with wgl_pan_present_mtx held. */
++static unsigned
++wgl_pan_pool_threads(void)
++{
++   if (wgl_pan_pool.created)
++      return wgl_pan_pool.threads;
++   wgl_pan_pool.created = true;
++   wgl_pan_pool.threads = 1;
++
++   unsigned want = sb_present_thread_count((unsigned)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
++   HMODULE self;
++   if (want < 2 || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
++                                       (LPCWSTR)(void *)wgl_pan_pool_main, &self)) {
++      fprintf(stderr, "sbumd: gl present: no copy threads (%u wanted, pin error %lu); one thread copies\n", want,
++              want < 2 ? 0ul : (unsigned long)GetLastError());
++      return 1;
++   }
++   for (unsigned i = 1; i < want; i++) {
++      HANDLE t = CreateThread(NULL, 64 * 1024, wgl_pan_pool_main, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
++      if (!t)
++         break;
++      CloseHandle(t);
++      wgl_pan_pool.threads++;
++   }
++   fprintf(stderr, "sbumd: gl present: %u copy threads (this one + %u kept), %s loads\n", wgl_pan_pool.threads,
++           wgl_pan_pool.threads - 1, SB_PRESENT_SIMD);
++   return wgl_pan_pool.threads;
++}
++
++/* Runs every band of `job` on the pool and this thread; returns when all are done. wgl_pan_present_mtx held. */
++static void
++wgl_pan_pool_run(const struct sb_present_job *job)
++{
++   AcquireSRWLockExclusive(&wgl_pan_pool.lock);
++   wgl_pan_pool.job = *job;
++   wgl_pan_pool.next = 0;
++   wgl_pan_pool.pending = job->bands;
++   ReleaseSRWLockExclusive(&wgl_pan_pool.lock);
++   WakeAllConditionVariable(&wgl_pan_pool.work);
++
++   AcquireSRWLockExclusive(&wgl_pan_pool.lock);
++   while (wgl_pan_pool.next < wgl_pan_pool.job.bands) {
++      unsigned band = wgl_pan_pool.next++;
++      ReleaseSRWLockExclusive(&wgl_pan_pool.lock);
++      sb_present_run_band(job, band);
++      AcquireSRWLockExclusive(&wgl_pan_pool.lock);
++      wgl_pan_pool.pending--;
++   }
++   while (wgl_pan_pool.pending)
++      SleepConditionVariableSRW(&wgl_pan_pool.done, &wgl_pan_pool.lock, INFINITE, 0);
++   ReleaseSRWLockExclusive(&wgl_pan_pool.lock);
++}
++
++/* Per-10 s timing (QueryPerformanceCounter ticks). */
++struct wgl_pan_stat {
++   int64_t sum, max;
++   unsigned n;
++};
++
++static simple_mtx_t wgl_pan_stats_mtx = SIMPLE_MTX_INITIALIZER;
++static struct {
++   int64_t freq, window_start, last_present;
++   unsigned frames, hidden, by_mode[3];
++   unsigned threads, width, height;
++   struct wgl_pan_stat map, copy, gdi, interval, total;
++} wgl_pan_stats;
++
++static int64_t
++wgl_pan_now(void)
++{
++   LARGE_INTEGER t;
++   QueryPerformanceCounter(&t);
++   return t.QuadPart;
++}
++
++static void
++wgl_pan_stat_add(struct wgl_pan_stat *s, int64_t ticks)
++{
++   s->sum += ticks;
++   if (ticks > s->max)
++      s->max = ticks;
++   s->n++;
++}
++
++static double
++wgl_pan_ms(int64_t ticks)
++{
++   return (double)ticks * 1000.0 / (double)wgl_pan_stats.freq;
++}
++
++static void
++wgl_pan_stat_print(char *out, size_t len, const char *name, const struct wgl_pan_stat *s)
++{
++   snprintf(out, len, "%s avg %.1f / max %.1f ms", name, s->n ? wgl_pan_ms(s->sum) / s->n : 0.0,
++            wgl_pan_ms(s->max));
++}
++
++/* One frame's times (ticks; copy/gdi < 0: that step didn't run). Prints and restarts the window every 10 s. */
++static void
++wgl_pan_stats_frame(int64_t start, int64_t map, int64_t copy, int64_t gdi, int mode, unsigned w, unsigned h,
++                    bool hidden)
++{
++   int64_t end = wgl_pan_now();
++   simple_mtx_lock(&wgl_pan_stats_mtx);
++   if (!wgl_pan_stats.freq) {
++      LARGE_INTEGER f;
++      QueryPerformanceFrequency(&f);
++      wgl_pan_stats.freq = f.QuadPart ? f.QuadPart : 1;
++      wgl_pan_stats.window_start = start;
++   }
++   if (wgl_pan_stats.last_present)
++      wgl_pan_stat_add(&wgl_pan_stats.interval, start - wgl_pan_stats.last_present);
++   wgl_pan_stats.last_present = start;
++   wgl_pan_stats.frames++;
++   wgl_pan_stat_add(&wgl_pan_stats.map, map);
++   wgl_pan_stat_add(&wgl_pan_stats.total, end - start);
++   if (hidden) {
++      wgl_pan_stats.hidden++;
++   } else {
++      wgl_pan_stats.by_mode[mode]++;
++      if (copy >= 0)
++         wgl_pan_stat_add(&wgl_pan_stats.copy, copy);
++      if (gdi >= 0)
++         wgl_pan_stat_add(&wgl_pan_stats.gdi, gdi);
++   }
++   wgl_pan_stats.width = w;
++   wgl_pan_stats.height = h;
++
++   int64_t window = end - wgl_pan_stats.window_start;
++   if (window >= 10 * wgl_pan_stats.freq) {
++      double secs = (double)window / (double)wgl_pan_stats.freq;
++      char m[64], c[64], g[64], i[64], t[64];
++      wgl_pan_stat_print(m, sizeof(m), "map", &wgl_pan_stats.map);
++      wgl_pan_stat_print(c, sizeof(c), "copy", &wgl_pan_stats.copy);
++      wgl_pan_stat_print(g, sizeof(g), "gdi", &wgl_pan_stats.gdi);
++      wgl_pan_stat_print(i, sizeof(i), "interval", &wgl_pan_stats.interval);
++      wgl_pan_stat_print(t, sizeof(t), "present", &wgl_pan_stats.total);
++      fprintf(stderr,
++              "sbumd: glstats %.1f s: %u frames (%.1f fps, %u hidden); %s; %s; %s; %s; %s; mode %s, %u threads, "
++              "%ux%u (frames parallel %u, direct %u, copy %u)\n",
++              secs, wgl_pan_stats.frames, wgl_pan_stats.frames / secs, wgl_pan_stats.hidden, m, c, g, i, t,
++              wgl_pan_mode_name[wgl_panfrost_mode()], wgl_pan_pool.created ? wgl_pan_pool.threads : 1, w, h,
++              wgl_pan_stats.by_mode[WGL_PAN_PARALLEL], wgl_pan_stats.by_mode[WGL_PAN_DIRECT],
++              wgl_pan_stats.by_mode[WGL_PAN_COPY]);
++      int64_t freq = wgl_pan_stats.freq, last = wgl_pan_stats.last_present;
++      memset(&wgl_pan_stats, 0, sizeof(wgl_pan_stats));
++      wgl_pan_stats.freq = freq;
++      wgl_pan_stats.last_present = last;
++      wgl_pan_stats.window_start = end;
++   }
++   simple_mtx_unlock(&wgl_pan_stats_mtx);
++}
+ 
+ static int
+ wgl_panfrost_dib(HDC hDC, const void *bits, unsigned dib_width, unsigned w, unsigned h)
+@@ -139,15 +361,19 @@ wgl_panfrost_dib(HDC hDC, const void *bits, unsigned dib_width, unsigned w, unsi
+    return StretchDIBits(hDC, 0, 0, (int)w, (int)h, 0, 0, (int)w, (int)h, bits, &bmi, DIB_RGB_COLORS, SRCCOPY);
+ }
+ 
+-/* Converts the mapped frame into the kept buffer and shows it; returns StretchDIBits' result (0: nothing shown). */
++/* Copies (converting if needed) the mapped frame into the kept buffer, on `threads` threads (B,G,R,X and R,G,B,X
++ * only; 1: this thread), unmaps it once the copy is done, and shows the buffer. Returns StretchDIBits' result
++ * (0: nothing shown); *copy_t / *gdi_t get the two steps' times. The mapping is always gone on return. */
+ static int
+-wgl_panfrost_present_copy(HDC hDC, enum pipe_format format, enum sb_present_kind kind, const uint8_t *map,
+-                          size_t stride, unsigned w, unsigned h)
++wgl_panfrost_present_copy(struct pipe_context *pipe, struct pipe_transfer *xfer, HDC hDC, enum pipe_format format,
++                          enum sb_present_kind kind, const uint8_t *map, unsigned w, unsigned h, unsigned threads,
++                          int64_t *copy_t, int64_t *gdi_t)
+ {
+-   size_t row = (size_t)w * 4, size = row * h;
++   size_t row = (size_t)w * 4, size = row * h, stride = xfer->stride;
+    int shown = 0;
+ 
+    simple_mtx_lock(&wgl_pan_present_mtx);
++   int64_t t0 = wgl_pan_now();
+    if (size > wgl_pan_present_size) {
+       free(wgl_pan_present_buf);
+       wgl_pan_present_buf = malloc(size);
+@@ -156,22 +382,39 @@ wgl_panfrost_present_copy(HDC hDC, enum pipe_format format, enum sb_present_kind
+    void *buf = wgl_pan_present_buf;
+    bool ok = buf != NULL;
+    if (ok) {
+-      switch (kind) {
+-      case SB_PRESENT_BGRX:
+-         sb_present_copy_rows(buf, row, map, stride, row, h);
+-         break;
+-      case SB_PRESENT_RGBX:
+-         sb_present_rgba_to_bgra_rows(buf, row, map, stride, w, h);
+-         break;
+-      default:
+-         ok = util_format_translate(util_format_is_srgb(format) ? PIPE_FORMAT_B8G8R8X8_SRGB
+-                                                                 : PIPE_FORMAT_B8G8R8X8_UNORM,
+-                                    buf, (unsigned)row, 0, 0, format, map, (unsigned)stride, 0, 0, w, h);
+-         break;
++      if (threads > 1 && kind != SB_PRESENT_CONVERT)
++         threads = wgl_pan_pool_threads();
++      if (threads > 1 && kind != SB_PRESENT_CONVERT) {
++         struct sb_present_job job = {
++            .dst = buf, .dst_stride = row, .src = map, .src_stride = stride,
++            .width = w, .height = h, .bands = sb_present_band_count(h, threads), .kind = kind,
++         };
++         wgl_pan_pool_run(&job); /* every band is done when this returns */
++      } else {
++         switch (kind) {
++         case SB_PRESENT_BGRX:
++            sb_present_copy_rows(buf, row, map, stride, row, h);
++            break;
++         case SB_PRESENT_RGBX:
++            sb_present_rgba_to_bgra_rows(buf, row, map, stride, w, h);
++            break;
++         default:
++            ok = util_format_translate(util_format_is_srgb(format) ? PIPE_FORMAT_B8G8R8X8_SRGB
++                                                                    : PIPE_FORMAT_B8G8R8X8_UNORM,
++                                       buf, (unsigned)row, 0, 0, format, map, (unsigned)stride, 0, 0, w, h);
++            break;
++         }
+       }
+    }
+-   if (ok)
++   /* The copy is finished (or failed): the GPU may have the back buffer again before GDI runs. */
++   pipe_texture_unmap(pipe, xfer);
++   int64_t t1 = wgl_pan_now();
++   *copy_t = t1 - t0;
++   if (ok) {
+       shown = wgl_panfrost_dib(hDC, buf, w, w, h);
++      GdiFlush(); /* GDI has read the buffer before the next frame overwrites it */
++      *gdi_t = wgl_pan_now() - t1;
++   }
+    simple_mtx_unlock(&wgl_pan_present_mtx);
+    return shown;
+ }
+@@ -186,45 +429,57 @@ wgl_panfrost_present(struct pipe_context *pipe, struct pipe_resource *res, HDC h
+    if (!pipe || !hDC || !w || !h || util_format_is_compressed(format) || util_format_is_depth_or_stencil(format))
+       return;
+ 
++   int64_t start = wgl_pan_now();
++
+    /* Nothing would be drawn: a minimized window, or a DC clipped to nothing. */
+    RECT clip;
+    HWND wnd = WindowFromDC(hDC);
+    bool hidden = (wnd && IsIconic(wnd)) || GetClipBox(hDC, &clip) == NULLREGION;
+ 
+    /* Map even when hidden: it waits for the frame, which paces SwapBuffers as before. */
++   int64_t t_map = wgl_pan_now();
+    const uint8_t *map = pipe_texture_map(pipe, res, 0, 0, PIPE_MAP_READ, 0, 0, w, h, &xfer);
++   t_map = wgl_pan_now() - t_map;
+    if (!map)
+       return;
+ 
+-   if (!hidden) {
++   enum wgl_pan_mode mode = wgl_panfrost_mode(), used = mode;
++   int64_t copy_t = -1, gdi_t = -1;
++   if (hidden) {
++      pipe_texture_unmap(pipe, xfer);
++   } else {
+       enum sb_present_kind kind = sb_present_kind(format);
+       unsigned dib_width = sb_present_dib_width(xfer->stride, w);
+-      int direct = p_atomic_read(&wgl_pan_direct);
++      bool parallel = mode == WGL_PAN_PARALLEL && kind != SB_PRESENT_CONVERT && sb_present_parallel_size(w, h);
+ 
+-      if (direct < 0) {
+-         const char *mode = debug_get_option_sb_gl_present();
+-         direct = !(mode && strcmp(mode, "copy") == 0);
+-         p_atomic_set(&wgl_pan_direct, direct);
+-      }
++      if (mode == WGL_PAN_PARALLEL && !parallel)
++         used = WGL_PAN_DIRECT; /* small or converted frames: as 0145 */
+ 
+-      bool tried_direct = false;
+       int shown = 0;
+-      if (kind == SB_PRESENT_BGRX && dib_width && direct) {
++      bool tried_direct = false;
++      if (used == WGL_PAN_DIRECT && kind == SB_PRESENT_BGRX && dib_width && !p_atomic_read(&wgl_pan_direct_refused)) {
+          tried_direct = true;
++         int64_t t0 = wgl_pan_now();
+          shown = wgl_panfrost_dib(hDC, map, dib_width, w, h);
++         GdiFlush(); /* GDI has read the frame before the mapping is let go */
++         gdi_t = wgl_pan_now() - t0;
+       }
+-      if (!shown) {
+-         shown = wgl_panfrost_present_copy(hDC, format, kind, map, xfer->stride, w, h);
++      if (shown) {
++         pipe_texture_unmap(pipe, xfer);
++      } else {
++         if (used == WGL_PAN_DIRECT)
++            used = WGL_PAN_COPY;
++         shown = wgl_panfrost_present_copy(pipe, xfer, hDC, format, kind, map, w, h,
++                                           used == WGL_PAN_PARALLEL ? SB_PRESENT_MAX_THREADS : 1, &copy_t, &gdi_t);
+          /* GDI refused the mapped back buffer but took the copy: copy from now on. */
+          if (tried_direct && shown) {
+-            p_atomic_set(&wgl_pan_direct, 0);
++            p_atomic_set(&wgl_pan_direct_refused, 1);
+             mesa_logw("sb gl present: StretchDIBits failed on the mapped back buffer, copying frames from now on");
+          }
+       }
+-      GdiFlush(); /* GDI has read the frame before the mapping is let go */
+    }
+ 
+-   pipe_texture_unmap(pipe, xfer);
++   wgl_pan_stats_frame(start, t_map, copy_t, gdi_t, used, w, h, hidden);
+ }
+ #endif
+ 
+diff --git a/src/gallium/targets/wgl/wgl_sb_present.h b/src/gallium/targets/wgl/wgl_sb_present.h
+index e401b95..c8c6e3d 100644
+--- a/src/gallium/targets/wgl/wgl_sb_present.h
++++ b/src/gallium/targets/wgl/wgl_sb_present.h
+@@ -5,6 +5,11 @@
+  * GDI's 32-bit BI_RGB DIBs are B, G, R, X in memory, rows DWORD-aligned. A back buffer in that byte order is shown
+  * straight from its mapping: the DIB is stride/4 pixels wide and GDI draws its first width pixels of each row, so a
+  * padded linear stride (Panfrost aligns rows to 64 bytes: 2220 px -> 8896 B) needs no repacking either.
++ *
++ * sb-patches/0146: that mapping is write-combined (uncached) memory, which one A55 reads at only ~87-180 MB/s
++ * (docs/WIN11-GPU.md 6.33-6.35), so GDI reading it is most of a big frame's cost. The parallel present copies it
++ * into a cached buffer in horizontal bands on several threads, with 16-byte loads, and hands GDI that buffer.
++ * The band split and the band copy below are what those threads run (host test: tests/glpresent-bands-test.c).
+  */
+ #ifndef WGL_SB_PRESENT_H
+ #define WGL_SB_PRESENT_H
+@@ -77,4 +82,114 @@ sb_present_rgba_to_bgra_rows(void *dst, size_t dst_stride, const void *src, size
+    }
+ }
+ 
++/* sb-patches/0146: 16-byte loads. NEON first: ARM64EC defines both __ARM_NEON and the x64 macros, and is ARM code.
++ * SB_PRESENT_NO_SIMD (host test) forces the memcpy rows. */
++#if !defined(SB_PRESENT_NO_SIMD) && (defined(__ARM_NEON) || defined(_M_ARM64) || defined(_M_ARM64EC))
++#include <arm_neon.h>
++#define SB_PRESENT_NEON 1
++#define SB_PRESENT_SIMD "neon"
++#elif !defined(SB_PRESENT_NO_SIMD) && (defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2))
++#include <emmintrin.h>
++#define SB_PRESENT_SSE2 1
++#define SB_PRESENT_SIMD "sse2"
++#else
++#define SB_PRESENT_SIMD "memcpy"
++#endif
++
++/* The parallel copy is used from this size up; smaller frames go to GDI straight from the mapping as in 0145. */
++#define SB_PRESENT_PARALLEL_MIN_W 512
++#define SB_PRESENT_PARALLEL_MIN_H 256
++#define SB_PRESENT_MAX_THREADS 4
++#define SB_PRESENT_BAND_MIN_ROWS 16
++
++static inline int
++sb_present_parallel_size(unsigned width, unsigned height)
++{
++   return width >= SB_PRESENT_PARALLEL_MIN_W && height >= SB_PRESENT_PARALLEL_MIN_H;
++}
++
++/* Threads for the copy, the presenting thread included: min(4, processors), at least 1. */
++static inline unsigned
++sb_present_thread_count(unsigned processors)
++{
++   if (processors < 1)
++      return 1;
++   return processors < SB_PRESENT_MAX_THREADS ? processors : SB_PRESENT_MAX_THREADS;
++}
++
++/* Bands per frame: two per thread, so a thread that wakes late takes fewer, but none under 16 rows. */
++static inline unsigned
++sb_present_band_count(unsigned height, unsigned threads)
++{
++   unsigned n = threads * 2, most = height / SB_PRESENT_BAND_MIN_ROWS;
++   if (n > most)
++      n = most;
++   return n ? n : 1;
++}
++
++/* Rows [*y0, *y1) of band i of n: the bands cover 0..height once, in order, sizes differing by at most one row. */
++static inline void
++sb_present_band_rows(unsigned height, unsigned n, unsigned i, unsigned *y0, unsigned *y1)
++{
++   *y0 = (unsigned)((uint64_t)height * i / n);
++   *y1 = (unsigned)((uint64_t)height * (i + 1) / n);
++}
++
++/* One row from uncached memory: every load is 16 bytes (64 per loop: four loads, then four stores), the tail of
++ * a row that isn't a multiple of 16 bytes by memcpy. */
++static inline void
++sb_present_copy_row_wide(uint8_t *d, const uint8_t *s, size_t n)
++{
++#if defined(SB_PRESENT_NEON)
++   for (; n >= 64; n -= 64, s += 64, d += 64) {
++      uint8x16_t a = vld1q_u8(s), b = vld1q_u8(s + 16), c = vld1q_u8(s + 32), e = vld1q_u8(s + 48);
++      vst1q_u8(d, a);
++      vst1q_u8(d + 16, b);
++      vst1q_u8(d + 32, c);
++      vst1q_u8(d + 48, e);
++   }
++   for (; n >= 16; n -= 16, s += 16, d += 16)
++      vst1q_u8(d, vld1q_u8(s));
++#elif defined(SB_PRESENT_SSE2)
++   for (; n >= 64; n -= 64, s += 64, d += 64) {
++      __m128i a = _mm_loadu_si128((const __m128i *)s), b = _mm_loadu_si128((const __m128i *)(s + 16));
++      __m128i c = _mm_loadu_si128((const __m128i *)(s + 32)), e = _mm_loadu_si128((const __m128i *)(s + 48));
++      _mm_storeu_si128((__m128i *)d, a);
++      _mm_storeu_si128((__m128i *)(d + 16), b);
++      _mm_storeu_si128((__m128i *)(d + 32), c);
++      _mm_storeu_si128((__m128i *)(d + 48), e);
++   }
++   for (; n >= 16; n -= 16, s += 16, d += 16)
++      _mm_storeu_si128((__m128i *)d, _mm_loadu_si128((const __m128i *)s));
++#endif
++   if (n)
++      memcpy(d, s, n);
++}
++
++/* One band's work, all of it CPU-only: the presenting thread and the pool's threads run it on disjoint rows. */
++struct sb_present_job {
++   uint8_t *dst;          /* the cached frame, dst_stride bytes per row */
++   size_t dst_stride;
++   const uint8_t *src;    /* the mapped back buffer, src_stride bytes per row */
++   size_t src_stride;
++   unsigned width;        /* pixels (4 bytes each) */
++   unsigned height;
++   unsigned bands;
++   enum sb_present_kind kind; /* SB_PRESENT_BGRX: copy; SB_PRESENT_RGBX: copy, then swap R/B in the cached row */
++};
++
++static inline void
++sb_present_run_band(const struct sb_present_job *job, unsigned band)
++{
++   unsigned y0, y1;
++   size_t row = (size_t)job->width * 4;
++   sb_present_band_rows(job->height, job->bands, band, &y0, &y1);
++   for (unsigned y = y0; y < y1; y++) {
++      uint8_t *d = job->dst + (size_t)y * job->dst_stride;
++      sb_present_copy_row_wide(d, job->src + (size_t)y * job->src_stride, row);
++      if (job->kind == SB_PRESENT_RGBX)
++         sb_present_rgba_to_bgra_rows(d, row, d, row, job->width, 1); /* in place: the row is cached now */
++   }
++}
++
+ #endif
