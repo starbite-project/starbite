@@ -96,6 +96,22 @@ if exist %D%\sbd3d.exe sbd3d.exe %D%\sbd3d.log >> %D%\gputest.log 2>&1
 if exist %D%\sbd3d.exe echo sbd3d arm64 exit %errorlevel% >> %D%\gputest.log
 if exist %D%\sbd3d64.exe sbd3d64.exe %D%\sbd3d.log >> %D%\gputest.log 2>&1
 if exist %D%\sbd3d64.exe echo sbd3d x64 exit %errorlevel% >> %D%\gputest.log
+rem ROT1 (docs/WIN11-GPU.md 6.57): landscape on the full driver. sbrotate.exe sets the orientation with Windows' own
+rem ChangeDisplaySettingsEx; screenshots and fps in each orientation; the run then stays in landscape (GD2 and the
+rem sweep run sideways, as the user wants it). Exit codes: 0 ok, 1 failed (e.g. the driver refused the rotation).
+if exist %D%\sbrotate.exe (
+  sbrotate.exe query >> %D%\gputest.log 2>&1
+  sbrotate.exe landscape-flipped >> %D%\gputest.log 2>&1
+  ping -n 6 127.0.0.1 > nul
+  sbshow.exe snap 30-landscape-flipped >> %D%\gputest.log 2>&1
+  sbrotate.exe landscape >> %D%\gputest.log 2>&1
+  ping -n 6 127.0.0.1 > nul
+  sbrotate.exe query >> %D%\gputest.log 2>&1
+  sbshow.exe snap 31-landscape >> %D%\gputest.log 2>&1
+  sbfps.exe hw 10 sbfps-landscape.log >> %D%\gputest.log 2>&1
+  sbd3d.exe %D%\sbd3d-landscape.log >> %D%\gputest.log 2>&1
+)
+if exist %D%\sbrotate.exe echo sbd3d landscape exit %errorlevel% >> %D%\gputest.log
 rem UMDX (docs/WIN11-GPU-CAPS.md 5c): does Windows load the ARM64X sbumd (one file, an ARM64 view for native
 rem processes and an ARM64EC view for x64 ones) and the ARM64EC one? Load only, from this folder: nothing is
 rem installed, DWM keeps the T44 sbumd.dll, and no DDI entry point is called.
