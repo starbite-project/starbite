@@ -64,6 +64,9 @@ struct snd_ops {
      * its gates open)? then amp_probe() only reads; and the codec's ID if it is out of reset (audio_probe()) */
     int (*amp_bus_ready)(void);
     int (*codec_id_readonly)(void);
+    /* nonzero: play through Calliope (abox_media.c; the HAL's file hook reads its firmware from VENDOR), the bypass
+     * engine only after Calliope failed to boot twice; 0: bypass only (as before). The kernel's snd_init_libsb: 1 */
+    int use_calliope;
 };
 
 int snd_init(const struct snd_ops *ops, const struct abox_hal *hal);    /* 0, or <0 if a required hook is missing */

@@ -4,7 +4,7 @@ set -e
 here=$(cd "$(dirname "$0")" && pwd)
 out=${TMPDIR:-/tmp}/sbos-snd-test.$$
 cc -O1 -g -std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -I"$here/.." \
-    "$here/snd-test.c" "$here/../snd.c" "$here/../abox_pcm.c" -o "$out"
+    "$here/snd-test.c" "$here/../snd.c" "$here/../abox_pcm.c" "$here/../abox_media.c" "$here/../abox.c" -o "$out"
 set +e
 "$out" "$@"
 rc=$?
