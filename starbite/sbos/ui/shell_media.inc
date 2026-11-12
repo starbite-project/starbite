@@ -637,9 +637,7 @@ static void med_header(void)
     relayer(&medht);
     dc d = mk(&medht, "med-head-text", 0, 44, 390, MD_HDR - 44, 0, 0);
     if (!d.b->px) return;
-    char b[96];
     const char *line = "";
-    b[0] = 0;
     if (MD.app == MD_FILES && !md_root()) {
         /* a folder: back to its parent, its name */
         char par[200], nm[200];
