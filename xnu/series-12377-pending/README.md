@@ -28,3 +28,4 @@ tree was restored and relinked to sd432's sha256.
 | 0436-starlte-sd-raw-user-io.patch | raw-device I/O with a user buffer (physio, fsck_hfs on /dev/rsdroot0) through a kernel bounce buffer (copyin/copyout) in the issuing thread; on 0435 | with 0435 |
 | 0437-starlte-deadman-flush.patch | the 0421 dead-man saves the kernel log to the card (sdlog=1) and the console tail to pmsg, then resets into TWRP, instead of only stopping the feed; on 0436 | daily candidate (test boots only: sweetreboot= set) |
 | 0438-sweet-sandbox-sentinel.patch | security.mac.sandbox.sentinel string sysctl from the Sandbox stand-in (libsystem_sandbox _amkrtemp; MDS DbCreate; securityd) | daily candidate |
+| 0439-a5xelte-iokit-trace.patch | the SWEET IOKit trace (sweetiolog=NAMES) on A5XELTE/STARLTE too: matching + counts, path lookups, user-client opens (Metal discovery in WindowServer) | diagnostic; daily OK (off unless named) |
