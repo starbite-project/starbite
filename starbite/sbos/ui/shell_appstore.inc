@@ -228,7 +228,8 @@ static void d_catglyph(dc *d, int k, float x, float y)
     case 0: d_ring(d, cx, cy, 8.5f, 1.8f, 1, w, 0); d_seg(d, cx - 8, cy, cx + 8, cy, 1.6f, w); d_seg(d, cx, cy - 8, cx, cy + 8, 1.6f, w);
             d_ring(d, cx, cy, 4, 1.6f, 1, w, 0); break;                                   /* Internet: a globe */
     case 1: d_rrect(d, cx - 7, cy - 9, 14, 18, 2.5f, w);
-            for (int i = 0; i < 3; i++) d_rrect(d, cx - 4, cy - 4.5f + 4.5f * i, i == 2 ? 5 : 8, 1.8f, .9f, bg); break;   /* Office: a page */
+            for (int i = 0; i < 3; i++) { d_rrect(d, cx - 4, cy - 4.5f + 4.5f * i, i == 2 ? 5 : 8, 1.8f, .9f, bg); }
+            break;                                                                          /* Office: a page */
     case 2: d_rrect(d, cx - 9, cy - 8, 18, 16, 8, w);
             d_rrect(d, cx - 5.5f, cy - 4.5f, 3.5f, 3.5f, 1.75f, bg); d_rrect(d, cx - .5f, cy - 5.5f, 3.5f, 3.5f, 1.75f, bg);
             d_rrect(d, cx + 3.5f, cy - 1.5f, 3.5f, 3.5f, 1.75f, bg); break;            /* Graphics: a palette */
@@ -608,15 +609,26 @@ static float aq_textblock(pctx *c, float y, int f, float size, float lhh, const 
     }
     return y;
 }
-/* a coloured note under the app's head (two lines at most) */
-static float aq_note(pctx *c, float y, const char *t, uint32_t col)
+/* a coloured note under the app's head (two lines at most; aq_note_n: up to four) */
+static float aq_note_n(pctx *c, float y, const char *t, uint32_t col, int maxl)
 {
     char ln[4][96];
     float wm;
-    int n = wrapn(ln, 2, TK_IT500, 13, t, CONTENT_W, &wm);
+    int n = wrapn(ln, maxl, TK_IT500, 13, t, CONTENT_W, &wm);
     for (int k = 0; k < n; k++)
         if (vis(c, y - 4 + 18.0f * k, 22)) d_text(c->d, TK_IT500, 13, MARGIN, bl(TK_IT500, 13, y - 2 + 18.0f * k), ln[k], 0, 0, tk_hex(col, 1), 0);
     return y + 6 + 18.0f * n;
+}
+static float aq_note(pctx *c, float y, const char *t, uint32_t col) { return aq_note_n(c, y, t, col, 2); }
+/* why a release / source build can't come from the memory card now, from the engine's network check (store3 net_why) */
+static const char *aq_net_text(void)
+{
+    switch (LST ? LST->net_why : 0) {
+    case SH_NET_NO_CONNECTION: return "Needs the internet: Linux isn't connected yet. Join Wi-Fi in Settings, then tap GET.";
+    case SH_NET_NO_DNS: return "Needs the internet: Linux is connected but can't look up names. Tap GET to try again.";
+    case SH_NET_NO_ANSWER: return "Needs the internet: Linux is connected but the internet doesn't answer. Tap GET to try again.";
+    default: return "Needs the internet: it isn't on the memory card. Tap GET to try, or choose Debian.";
+    }
 }
 static float pg_app(pctx *c)
 {
@@ -639,8 +651,9 @@ static float pg_app(pctx *c)
         if (busy) {
             /* the live layer: the ring, the phase, Cancel */
         } else {
-            const char *t = net ? "Needs Wi-Fi" : full ? "Not Enough Space" : aq_upd(p) ? "UPDATE" : inst ? "OPEN" : p->state == SH_PKG_FAILED ? "RETRY" : "GET";
-            int dis = net || full;
+            /* (needing the internet doesn't disable GET: the engine looks again at once, the network may just be up) */
+            const char *t = full ? "Not Enough Space" : aq_upd(p) ? "UPDATE" : inst ? "OPEN" : p->state == SH_PKG_FAILED ? "RETRY" : "GET";
+            int dis = full;
             float w = tk_maxf(84, tw(TK_IT700, 15, t, .2f, 0) + 36);
             d_rrect(d, tx, by, w, 32, 16, dis ? W(.1f) : ACCENT());
             d_text_box(d, TK_IT700, 15, tx + w / 2, bl(TK_IT700, 15, by + 7), w - 8, 1, t, .2f, 0, dis ? W(.4f) : W(1), 0);
@@ -662,14 +675,19 @@ static float pg_app(pctx *c)
     const char *note = 0;
     uint32_t ncol = 0xffb340;
     char nb[160];
-    if (net) note = "Needs Wi-Fi: the memory card's mirror doesn't have it.";
+    if (p->state == SH_PKG_FAILED && !busy) {
+        /* the failure first: the engine's short words, then what to do (sbstore.py HINTS) */
+        AQS(nb, "Didn't install: ", p->err[0] ? p->err : "the store stopped with an error.");
+        y = aq_note(c, y, nb, 0xff6961);
+        if (p->hint[0]) y = aq_note_n(c, y, p->hint, 0xebebf5, 4);
+    } else if (net) note = aq_net_text();
     else if (full) {
         char s[24], f[24];
         lx_fmt_kb(s, p->inst_kb);
         lx_fmt_kb(f, LST->overlay_free_kb);
         AQS(nb, "It needs ", s, " on the memory card; ", f, " is free.");
         note = nb; ncol = 0xff6961;
-    } else if (p->state == SH_PKG_FAILED) { AQS(nb, "Didn't install: ", p->err[0] ? p->err : "the store stopped with an error."); note = nb; ncol = 0xff6961; }
+    }
     if (note) y = aq_note(c, y, note, ncol);
     if (p->flags & SH_PKG_TOO_BIG) {
         char s[16], m[16];
@@ -1249,7 +1267,6 @@ static void aq_act(int i, int m)
         else toast("Installed. It has no window of its own");
         return;
     }
-    if ((p->flags & SH_PKG_NEEDS_NET) && (!m || m == (int)p->def_method)) { toast("Needs Wi-Fi: turn it on in Settings"); return; }
     if (p->flags & SH_PKG_NO_SPACE) { toast("Not enough space on the memory card"); return; }
     if (aq_op(i, SH_PKG_OP_INSTALL, m) < 0) return;
     if (p->flags & SH_PKG_TOO_BIG) toast("It needs a lot of memory: it may run slowly");

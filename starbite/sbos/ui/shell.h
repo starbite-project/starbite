@@ -168,12 +168,15 @@ typedef struct {
     unsigned done_kb, total_kb, eta_s, build_min, touch, needs, flags3, rel_size_mb;   /* touch 0 ?, 1 poor, 2 ok, 3 good */
     char ver_inst[24], ver_new[24], ver_rel[24], ver_distro[24], ver_src[24], licence[24], source[48];
     char desc[480];                                       /* the long description (UTF-8, cut at 479 bytes) */
+    char hint[200];                                       /* after a failure: what to do, in plain words ("" none) */
 } sh_lpkg_t;
 typedef struct {
     unsigned seq; int n, repo_ok; unsigned overlay_total_kb, overlay_free_kb, mem_total_kb; sh_lpkg_t pkg[SH_LPKGS];
     int v3;                                               /* 1: the guest wrote store3 (the v3 fields are valid) */
     unsigned net_ok, mirror_ok, checked_at;               /* checked_at: unix time of the last update check (0 never) */
+    unsigned net_why, busy;                               /* SH_NET_*: why net_ok is 0; busy: a job runs or waits */
 } sh_lstore_t;
+enum { SH_NET_OK = 0, SH_NET_NO_CONNECTION = 1, SH_NET_NO_DNS = 2, SH_NET_NO_ANSWER = 3, SH_NET_OFFLINE = 4 };
 
 /* the platform */
 int sh_linux_open(const char *id);       /* start Linux if off, launch the app (once the catalog has it), put its window

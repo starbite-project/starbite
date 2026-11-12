@@ -31,7 +31,8 @@ _Static_assert(SAME(SH_PKG_FAILED, SBG_PKG_FAILED) && SAME(SH_PKG_OP_CANCEL, SBG
 _Static_assert(SH_LINUX_ICON == SBSHM_ICON_PX && SH_LPKGS == SBSHM_PKGS_MAX && SH_LAPPS <= SBSHM_APPS_MAX, "sizes");
 _Static_assert(SH_LINUX_W == GUEST_WL_W && SH_LINUX_H == GUEST_WL_H, "the surface");
 _Static_assert(SAME(SH_PKG_UPDATE, SBSHM_PKG_UPDATE) && SAME(SH_PKG_NEEDS_NET, SBSHM_PKG_NEEDS_NET) && SAME(SH_PKG_OP_CHECK, SBG_PKG_OP_CHECK) &&
-               SAME(SH_M_SOURCE, SBG_PKG_M_SOURCE) && SAME(SH_PKG_BUILDING, SBG_PKG_BUILDING), "Track F: store3");
+               SAME(SH_M_SOURCE, SBG_PKG_M_SOURCE) && SAME(SH_PKG_BUILDING, SBG_PKG_BUILDING) &&
+               SAME(SH_NET_NO_ANSWER, SBSHM_NET_NO_ANSWER) && SAME(SH_NET_OFFLINE, SBSHM_NET_OFFLINE_MODE), "Track F: store3");
 _Static_assert(SAME(SH_LMOD_CTRL, SBSHM_MOD_CTRL) && SAME(SH_LMOD_ALT, SBSHM_MOD_ALT), "key modifiers");
 
 static int last_state = -1;
@@ -157,6 +158,7 @@ static int read_store(void)
     const volatile char *txt = (const volatile char *)((uintptr_t)st - SBSHM_STORE_OFF + SBSHM_STORE_TEXT_OFF);
     t.v3 = s3->magic == SBSHM_STORE3_MAGIC;
     t.net_ok = t.v3 ? s3->net_ok : 0, t.mirror_ok = t.v3 ? s3->mirror_ok : 0, t.checked_at = t.v3 ? s3->checked_at : 0;
+    t.net_why = t.v3 ? s3->net_why : 0, t.busy = t.v3 ? s3->busy : 0;
     for (int i = 0; i < t.n; i++) {
         const volatile struct sbshm_pkg3 *q = &s3->pkg[i];
         sh_lpkg_t *d = &t.pkg[i];
@@ -164,7 +166,7 @@ static int read_store(void)
             d->methods = d->method = d->def_method = d->phase = d->done_kb = d->total_kb = d->eta_s = 0;
             d->build_min = d->touch = d->needs = d->flags3 = d->rel_size_mb = 0;
             d->ver_inst[0] = d->ver_new[0] = d->ver_rel[0] = d->ver_distro[0] = d->ver_src[0] = 0;
-            d->licence[0] = d->source[0] = d->desc[0] = 0;
+            d->licence[0] = d->source[0] = d->desc[0] = d->hint[0] = 0;
             continue;
         }
         d->methods = q->methods, d->method = q->method, d->def_method = q->def_method, d->phase = q->phase;
@@ -185,6 +187,14 @@ static int read_store(void)
             while (k > 0 && (txt[o + k] & 0xc0) == 0x80)
                 k--;
         d->desc[k] = 0;
+        o = q->hint_off, l = q->hint_len, k = 0;    /* the failure's what-to-do sentence, same rules */
+        if (l && o < SBSHM_STORE_TEXT_SIZE && l <= SBSHM_STORE_TEXT_SIZE - o)
+            for (; k < l && k < sizeof d->hint - 1 && txt[o + k]; k++)
+                d->hint[k] = txt[o + k];
+        if (k == sizeof d->hint - 1 && k < l)
+            while (k > 0 && (txt[o + k] & 0xc0) == 0x80)
+                k--;
+        d->hint[k] = 0;
     }
     if (!sbshm_seq_ok(&st->seq, s))
         return -1;
@@ -194,7 +204,7 @@ static int read_store(void)
 /* Linux kept up while the App Store is open or a package operation runs (guest.c's idle stop waits: guest_keep) */
 static void busy_update(void)
 {
-    int b = hold;
+    int b = hold || (store.v3 && store.busy);       /* store3's busy: queued jobs and update checks too */
     for (int i = 0; i < store.n; i++)
         b |= store.pkg[i].state == SBG_PKG_QUEUED || store.pkg[i].state == SBG_PKG_INSTALLING ||
              store.pkg[i].state == SBG_PKG_REMOVING;

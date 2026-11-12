@@ -43,3 +43,4 @@ clock2: wait 300; drag 195 795 195 330 220; wait 900; tap 238 289; wait 1100; ta
 camera: wait 300; drag 195 795 195 330 220; wait 900; tap 152 289; wait 1300; tap 195 718; wait 1500; drag 195 795 200 450 260; wait 1200
 store: wait 300; drag 195 795 195 330 220; wait 900; drag 320 450 60 450 200; wait 900; drag 320 450 60 450 200; wait 900; tap 60 90; wait 1500; tap 159 749; wait 900; tap 195 492; wait 900; tap 150 490; wait 1000; tap 195 396; wait 600; tap 178 190; wait 6000; tap 42 66; wait 900; tap 252 749; wait 1000; drag 195 600 195 250 300; wait 1500; tap 339 749; wait 900; tap 195 168; wait 600; tap 156 627; wait 300; tap 292 573; wait 1200
 store2: wait 300; state storeapp=neovim; wait 600; tap 195 396; wait 500; state storescroll=:3000; wait 800; tap 100 667; wait 1200; tap 195 760; wait 1500
+store3: wait 300; state storeapp=inkscape; wait 900; state storeapp=firefox; wait 900
