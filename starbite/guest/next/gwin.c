@@ -205,7 +205,6 @@ static void busy_update(void)
 }
 /* ---- cp6 (Track B's ask, the user's cp3 notes): a store job in words for the shell, the phone awake while one runs, a
  * notification when one ends ---------------------------------------------------------------------------------------- */
-int sh_hold_awake(const char *who, int on) __attribute__((weak));   /* Track A's keep-awake (no Auto-Lock); weak: older */
 static int job_awake;
 static struct { char pkg[40]; unsigned state, phase; } JP[SH_LPKGS];   /* the last snapshot's busy packages */
 static int jp_n;
@@ -314,8 +313,7 @@ static void jobs_update(void)
         }
     if (any != job_awake) {
         job_awake = any;
-        if (sh_hold_awake)
-            (void)sh_hold_awake("linux-store", any);
+        (void)sh_hold_awake("linux-store", any);   /* Track A (shell.h): no Auto-Lock while a job runs */
     }
 }
 

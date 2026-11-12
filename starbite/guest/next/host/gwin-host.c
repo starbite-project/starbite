@@ -531,6 +531,7 @@ static int fails, nchecks;
 #endif
 int sw_compat_dump(char *out, int cap);            /* sw-ext-compat.patch's view of the recents */
 int nc_compat_count(const char *who);
+int sh_linux_job(char *b, int cap);                /* gwin.c (cp6): the running store job in words */
 /* a tap, a horizontal drag (dx pt over n 16 ms steps, then still), a quick throw up */
 static void tap(float x, float y) { sh_touch(0, x, y, (float)now_ms); sh_touch(2, x, y, (float)now_ms + 60); }
 static void drag(float x, float y, float dx, float dy, int n, int still)
@@ -615,10 +616,21 @@ int main(int argc, char **argv)
     sh_touch(0, 178, 176, (float)now_ms); sh_touch(2, 178, 176, (float)now_ms);   /* GET */
     run(4);
     check(got.pkg == 1 && got.pkg_seq_ok == 1, "GET: SBG_MSG_PKG install with the store's seq");
+    {
+        char jb[96];
+        int jr = sh_linux_job(jb, sizeof jb);
+        printf("[%6llu ms] gwin-host: the job in words: \"%s\"\n", (unsigned long long)now_ms, jb);
+        check(jr == 1 && jb[0] && strstr(jb, "GIMP"), "cp6: the running job in words for the shell (sh_linux_job)");
+    }
     tk_comp_frame(&C, 0, 1);
     write_ppm(argv[2], "gwin-store.ppm", &C.panel);
     run(15);
     check(fstore.pkg[2].flags & SBSHM_PKG_INSTALLED, "the install ran to the end");
+    {
+        char jb[96];
+        check(sh_linux_job(jb, sizeof jb) == 0 && !jb[0] && nc_compat_count("store") == 1,
+              "cp6: no job left, its end in the Centre (store: \"... Is Installed\")");
+    }
     sh_set("store", "foot", 1);
     run(2);
     sh_touch(0, 195, 640, (float)now_ms); sh_touch(2, 195, 640, (float)now_ms);   /* where Remove would be */

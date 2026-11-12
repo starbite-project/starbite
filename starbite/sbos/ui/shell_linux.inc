@@ -879,15 +879,32 @@ static int lx_tap(float x, float y)
 }
 /* sh_touch inside an open app (T.kind G_LINUX while it returns 1 for the down): the window's touches, the App
  * Store's page (a drag scrolls it, a tap is aq_tap: shell_appstore.inc) */
-static struct { int mode; } LT;
+static struct { int mode, lit; float x0, y0; } LT;
+/* cp6 (Track B, the user's "no visual feedback on buttons"): what lights under the finger on the App Store's page
+ * (G_LINUX touches never reach app_press). The rect comes from shell_appstore.inc's aq_press (the *_press hooks'
+ * shape: r the lit rect, g its group's clip, rad, c), when it has one (AQ_HAS_PRESS); off when the finger moves (a
+ * scroll) or lifts */
+static void lx_press(float x, float y)
+{
+    LT.lit = 0;
+    LT.x0 = x, LT.y0 = y;
+#ifdef AQ_HAS_PRESS
+    tk_rect r = { 0, 0, 0, 0 }, g = r;
+    float rad = 0;
+    tk_col c = W(.1f);
+    if (aq_press(x, y, &r, &g, &rad, &c)) { hl_set(&apphl, r, g, rad, c); LT.lit = 1; }
+#endif
+}
+static void lx_unpress(void) { if (LT.lit) { LT.lit = 0; hl_off(); } }
 static int lx_touch(int ph, float x, float y)
 {
     if (ph == 0) {
         LT.mode = 0;
         if (lx_is_lin() && lx_at(x, y)) { LT.mode = 1; lx_win_touch(0, x, y); }
-        else if (is_app("store") && aq_touch(0, x, y)) LT.mode = 2;
+        else if (is_app("store") && aq_touch(0, x, y)) { LT.mode = 2; lx_press(x, y); }
         return LT.mode != 0;
     }
+    if (LT.lit && (ph == 2 || tk_fabsf(x - LT.x0) > 8 || tk_fabsf(y - LT.y0) > 8)) lx_unpress();
     if (LT.mode == 1) lx_win_touch(ph, x, y);
     else if (LT.mode == 2) aq_touch(ph, x, y);
     if (ph == 2) LT.mode = 0;
