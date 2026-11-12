@@ -1212,12 +1212,13 @@ static void cm_kb_focus(void)
     if (CM.focus == 1) kb_focus(KB_DIGITS | KB_PHONE, 0, CM.to);
     else if (CM.focus == 2) kb_focus(KB_AUTOCAP | KB_NL, 0, CM.txt);
 }
-static int cm_can_send(void)
+static int cm_has_text(void)
 {
     int any = 0;
     for (const char *p = CM.txt; *p; p++) any |= *p != ' ' && *p != '\n';
-    return any && (AS.thread == 0 || cm_digits(CM.to) >= 7);
+    return any;
 }
+static int cm_can_send(void) { return cm_has_text() && (AS.thread == 0 || cm_digits(CM.to) >= 7); }
 /* the field's lines (its text wrapped at CMF_TW, 17 pt) */
 static int cm_field_lines(char ln[CM_ML][100], float *wm) { return CM.txt[0] ? cm_wrap(ln, CM.txt, 17, CMF_TW, wm) : 1; }
 static float cm_field_h(void)
@@ -1579,6 +1580,7 @@ static void cm_field_build(void)
         if (CM.focus == 2) d_rrect(&d, CMF_X + 13, fy + 9, 2, 19, 1, ACCENT());
     }
     if (cm_can_send()) d_send(&d, CMF_X + CMF_W - 18, pb - 18, 15, tk_hex(BUB_OUT, 1));
+    else if (cm_has_text()) d_send(&d, CMF_X + CMF_W - 18, pb - 18, 15, W(.2f));   /* cp6: dimmed until the number is whole */
     trim(&cmfld);
     cmfld.hidden = 0;
     if (CM.focus) kb_ride(&cmfld);               /* B3: it rides up with the keyboard */
@@ -1648,7 +1650,7 @@ static void cm_msgs_tap(float x, float y)
     float fy = cm_field_y(), fb = cm_field_bot();
     if (y >= fy - 4 && y < fb + 6) {
         if (x < CMF_X - 4) { toast("Photos and attachments can't be sent by SMS yet"); return; }
-        if (x >= CMF_X + CMF_W - 40 && cm_can_send()) { cm_send(); return; }
+        if (x >= CMF_X + CMF_W - 40 && cm_has_text()) { cm_send(); return; }   /* cp6: a dimmed send says why (cm_send) */
         if (CM.focus != 2) { CM.focus = 2; CM.num = 0; CM.shift = !CM.txt[0]; cm_kb_focus(); cm_thread_relayout(0); }
         return;
     }
@@ -2062,28 +2064,51 @@ static void cm_minute(void)
 static int cm_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
 {
     if (!is_app("phone") && !is_app("messages")) return 0;
+    if (CV.on && CV.at > 0) return 0;                     /* (the call screen lights its own: cv_light) */
     if (LS.on && (cl_kind == CL_CALLS || cl_kind == CL_THREADS) && scv_contains(&LS, x, y)) {
         float top;
         int i = scv_hit(&LS, y, &top);
         if (i < 1 || (cl_kind == CL_CALLS && (CLF[i] & CF_HDR))) return 0;
         float rh = cl_kind == CL_THREADS ? THR_H : REC_H;
         *g = (tk_rect){ 0, LS.top, 390, LS.bot - LS.top };
-        if (cl_kind != CL_THREADS && x >= INFO_X - 22) { *r = (tk_rect){ INFO_X - 16, top + rh / 2 - 16, 32, 32 }; *rad = 16; *c = W(.16f); return 1; }
+        if (cl_kind != CL_THREADS && x >= INFO_X - 22) { *r = (tk_rect){ INFO_X - 16, top + rh / 2 - 16, 32, 32 }; *rad = 16; *c = APR_CIRC; return 1; }
         *r = (tk_rect){ 0, top, 390, rh };
-        *rad = 0; *c = W(.08f);
+        *rad = 0; *c = APR_ROW;
         return 1;
     }
-    if (!is_app("messages")) return 0;
+    if (is_app("phone")) {
+        /* cp6: the tabs; the empty Calls' button; the keypad's "Turn On in Settings" and delete (its keys: key_down) */
+        if (tab_press(x, y, 3, r, g, rad, c)) return 1;
+        if (AS.tab == 1 && !nrc && !nfav && sh_comms_ok() && !cm_cell_on()) {
+            float by = cm_empty_bot(CONTENT_TOP, EMPTY_TAB, "Calls you make and receive show here. Turn on Cellular to call.") + 18;
+            if (y >= by && y < by + 40 && tk_fabsf(x - 195) < CM_BTN_W / 2) {
+                *r = *g = (tk_rect){ 195 - CM_BTN_W / 2, by, CM_BTN_W, 40 }; *rad = 20; *c = APR_CIRC;
+                return 1;
+            }
+        }
+        if (AS.tab != 3) return 0;
+        if (hint_cell && y >= HINT_Y - 4 && y < HINT_Y + 34) { *r = *g = (tk_rect){ MARGIN, HINT_Y, CONTENT_W, 30 }; *rad = 8; *c = APR_DIM; return 1; }
+        float ex = x - 299, ey = y - 605;
+        if (AS.num[0] && ex * ex + ey * ey <= 30 * 30) { *r = *g = (tk_rect){ 299 - 24, 605 - 18, 48, 36 }; *rad = 10; *c = APR_DIM; return 1; }
+        return 0;
+    }
     if (AS.thread < 0) {
-        if (DONE_HIT(x, y)) { *r = *g = (tk_rect){ CONTENT_R - BACK_D, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *c = W(.16f); return 1; }
+        if (DONE_HIT(x, y)) { *r = *g = (tk_rect){ CONTENT_R - BACK_D, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *c = APR_CIRC; return 1; }
+        if (cl_kind != CL_THREADS && sh_comms_ok() && !cm_cell_on()) {          /* cp6: the empty list's Cellular Settings */
+            float by = cm_empty_bot(CONTENT_TOP, EMPTY_BOT, "Turn on Cellular to send and receive text messages.") + 18;
+            if (y >= by && y < by + 40 && tk_fabsf(x - 195) < CM_BTN_W / 2) {
+                *r = *g = (tk_rect){ 195 - CM_BTN_W / 2, by, CM_BTN_W, 40 }; *rad = 20; *c = APR_CIRC;
+                return 1;
+            }
+        }
         return 0;
     }
     float fb = cm_field_bot();
     if (y >= cm_field_y() - 4 && y < fb + 6 && x >= CMF_X + CMF_W - 40 && cm_can_send()) {
-        *r = *g = (tk_rect){ CMF_X + CMF_W - 33, fb - 33, 30, 30 }; *rad = 15; *c = W(.25f);
+        *r = *g = (tk_rect){ CMF_X + CMF_W - 33, fb - 33, 30, 30 }; *rad = 15; *c = APR_CELL;   /* the green disc darkens */
         return 1;
     }
-    if (y >= fb - 40 && y < fb + 6 && x < CMF_X - 4) { *r = *g = (tk_rect){ CMF_PLUS_X, fb - 36, 36, 36 }; *rad = 18; *c = W(.18f); return 1; }
+    if (y >= fb - 40 && y < fb + 6 && x < CMF_X - 4) { *r = *g = (tk_rect){ CMF_PLUS_X, fb - 36, 36, 36 }; *rad = 18; *c = APR_CIRC; return 1; }
     return 0;
 }
 /* the host's stills: "thread" NUMBER (list, new) with v the focus (0 none, 1 To, 2 the message); "compose" TEXT;
