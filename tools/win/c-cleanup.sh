@@ -36,12 +36,21 @@ mkdir -p "$out"
 if pgrep -fl 'gpu-cycle|autotest-cycle|boot-safe|store-flash' | grep -v pgrep >/dev/null; then
     echo "another phone job is running (one at a time):"; pgrep -fl 'gpu-cycle|autotest-cycle|boot-safe|store-flash'; exit 1
 fi
+# TWRP's timeout: toybox takes "timeout -s KILL N", the older busybox "timeout -t N -s KILL" (2026-11-12 04:49: the
+# toybox form made busybox run "30" as the program, so nothing was deleted). Detected once; if neither works, the
+# Mac-side deadline alone guards each step.
+TOFORM=none
+if [ "$(adb shell 'timeout -s KILL 5 true && echo ok' 2>/dev/null | tr -d '\r')" = ok ]; then TOFORM=toybox
+elif [ "$(adb shell 'timeout -t 5 -s KILL true && echo ok' 2>/dev/null | tr -d '\r')" = ok ]; then TOFORM=busybox; fi
+to() {  # to SECONDS -> the prefix that runs a command under TWRP's timeout
+    case $TOFORM in toybox) echo "timeout -s KILL $1" ;; busybox) echo "timeout -t $1 -s KILL" ;; *) echo "" ;; esac
+}
 mounted() {  # $1 = ro|rw: is C: mounted at $W with that mode?
     adb shell "grep ' $W ' /proc/mounts" | tr -d '\r' | awk '{print $4}' | tr ',' '\n' | grep -qx "$1"
 }
 mount_ro() { adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o ro $NTFS $W" >/dev/null; mounted ro || { echo "C: did not mount read-only"; exit 2; }; }
 mount_rw() { adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null; mounted rw || { echo "C: did not mount read-write (dirty NTFS? boot Windows once and shut down cleanly)"; exit 2; }; }
-umount_w() { adb shell "timeout -s KILL 60 sync; timeout -s KILL 30 umount $W 2>/dev/null" >/dev/null 2>&1 || true; }
+umount_w() { adb shell "$(to 60) sync; $(to 30) umount $W 2>/dev/null" >/dev/null 2>&1 || true; }
 trap umount_w EXIT
 free_mb() { adb shell "df -m $W | tail -1" | tr -d '\r' | awk '{print $4}'; }
 kb() { adb shell "du -sk \"$W/$1\" 2>/dev/null | tail -1" | tr -d '\r' | awk '{print $1+0}'; }
@@ -60,12 +69,18 @@ TARGETS=(
 
 mount_ro
 log "SURVEY (read-only). C: free: $(free_mb) MB"
+log "TWRP timeout form: $TOFORM"
 adb shell "df -h $W | tail -1" | tr -d '\r' | tee -a "$out/cleanup.log"
 log "top level of C: (MB):"
 adb shell "cd $W && for d in *; do du -sm \"\$d\" 2>/dev/null; done | sort -rn | head -14" | tr -d '\r' | tee -a "$out/cleanup.log"
 log "Program Files (x86) and Windows, the biggest parts (MB, report only):"
 adb shell "cd '$W/Program Files (x86)' && for d in *; do du -sm \"\$d\" 2>/dev/null; done | sort -rn | head -6" | tr -d '\r' | sed 's/^/  x86: /' | tee -a "$out/cleanup.log"
 adb shell "cd $W/Windows && for d in WinSxS SoftwareDistribution Installer System32 SysWOW64 SyChpe32 Temp LiveKernelReports; do du -sm \"\$d\" 2>/dev/null; done | sort -rn" | tr -d '\r' | sed 's/^/  Windows: /' | tee -a "$out/cleanup.log"
+log "deeper (MB, report only): Steam, Microsoft (Edge/WebView2), ProgramData, the users' AppData\\Local"
+adb shell "cd '$W/Program Files (x86)/Steam' && for d in *; do du -sm \"\$d\" 2>/dev/null; done | sort -rn | head -8" | tr -d '\r' | sed 's/^/  Steam: /' | tee -a "$out/cleanup.log"
+adb shell "cd '$W/Program Files (x86)/Microsoft' && for d in */*; do du -sm \"\$d\" 2>/dev/null; done | sort -rn | head -10" | tr -d '\r' | sed 's/^/  Microsoft: /' | tee -a "$out/cleanup.log"
+adb shell "cd $W/ProgramData && for d in * Microsoft/*; do du -sm \"\$d\" 2>/dev/null; done | sort -rn | head -8" | tr -d '\r' | sed 's/^/  ProgramData: /' | tee -a "$out/cleanup.log"
+adb shell "cd $W/Users && for d in */AppData/Local/* */AppData/Roaming/*; do du -sm \"\$d\" 2>/dev/null; done | sort -rn | head -10" | tr -d '\r' | sed 's/^/  AppData: /' | tee -a "$out/cleanup.log"
 log "users (MB):"
 adb shell "cd $W/Users && for d in *; do du -sm \"\$d\" 2>/dev/null; done | sort -rn | head -8" | tr -d '\r' | tee -a "$out/cleanup.log"
 total=0
@@ -137,7 +152,7 @@ clear_dir() {  # the contents of C:\<arg>, 20 files at a time; never the folder 
     local batch="" nb=0 first=""
     flush() {
         [ -n "$batch" ] || return 0
-        local r; r=$(rsh 45 "cd \"$d\" && timeout -s KILL 30 rm -f --$batch; echo rc=\$?") || stuck "rm in C:/$rel (from ${first#./})"
+        local r; r=$(rsh 45 "cd \"$d\" && $(to 30) rm -f --$batch; echo rc=\$?") || stuck "rm in C:/$rel (from ${first#./})"
         case "$r" in *rc=137*) stuck "rm in C:/$rel (from ${first#./})" ;; *rc=0*) ;; *) log "  some files in C:/$rel could not be deleted (batch from ${first#./}: $r)" ;; esac
         batch=""; nb=0; first=""
     }
@@ -158,8 +173,8 @@ for u in "${users[@]}"; do
     clear_dir "Users/$u/AppData/Local/Temp"
 done
 for t in "${TARGETS[@]}"; do clear_dir "$t"; done
-rsh 45 "timeout -s KILL 30 rm -f $W/Windows/MEMORY.DMP; true" >/dev/null || stuck "rm MEMORY.DMP"
-rsh 45 "cd $W/ProgramData/Starbite/umdlog 2>/dev/null && timeout -s KILL 30 rm -f *.log dump-* shot-* sweep-*; true" >/dev/null || stuck "rm in umdlog"
+rsh 45 "$(to 30) rm -f $W/Windows/MEMORY.DMP; true" >/dev/null || stuck "rm MEMORY.DMP"
+rsh 45 "cd $W/ProgramData/Starbite/umdlog 2>/dev/null && $(to 30) rm -f *.log dump-* shot-* sweep-*; true" >/dev/null || stuck "rm in umdlog"
 log "cleared Windows/MEMORY.DMP and umdlog's logs and dumps (its flag files stay)"
 umount_w; mount_ro
 after=$(free_mb)

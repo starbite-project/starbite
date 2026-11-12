@@ -370,3 +370,46 @@ FL 11_0 and D3D12 need tessellation, which the G72 doesn't have.
 - ARM64 Windows Mesa WGL builds exist (MSYS2 clangarm64):
   https://packages.msys2.org/packages/mingw-w64-clang-aarch64-mesa
 - Panfrost v6 caps: our tree, `src/gallium/drivers/panfrost/pan_screen.c` (Mesa 26.2.6).
+
+## 9. C: space (2026-11-12): what fills the 22 GB, and the fix
+
+**The survey** (`tools/win/c-cleanup.sh`; `build/win/cleanup-20261112-0448`) at 381 MB free:
+
+| Where | Size | Notes |
+|---|---|---|
+| Windows | 13.1 GB | WinSxS 11.3 GB (mostly hard links shared with System32's 4.6 GB), SysWOW64 1.1 GB, SoftwareDistribution 0.09 GB |
+| Program Files (x86) | 4.5 GB | Steam 2.2 GB (Geometry Dash only 0.36 GB), Microsoft 2.2 GB (Edge/WebView2/EdgeUpdate) |
+| Program Files | 1.4 GB | |
+| Users\starbite | 1.3 GB | AppData\Local\Temp 0.46 GB |
+| ProgramData | 0.8 GB | |
+| Recovery | 0.7 GB | WinRE: kept |
+| pagefile / swapfile | 0.3 / 0.02 GB | Windows-managed; it grows into free space |
+
+- **Reserved storage is not active** (`ReserveManager`: `ShippedWithReserves` 0, `PassedPolicy` 0), so turning it off
+  frees nothing. Hibernation is already off, with no hiberfil.sys.
+- **Our own files are small:** C:\starbite 86 MB, umdlog under 1 MB.
+- **The TWRP cleanup freed 0 MB at 04:49** because TWRP's busybox `timeout` wants `-t N -s KILL`. It ran `30` as the
+  program, so nothing was deleted. `c-cleanup.sh` now detects the syntax.
+
+**The fix:**
+
+| Step | Where | Expected | Notes |
+|---|---|---|---|
+| `c-cleanup.sh --delete` (fixed) | TWRP | ~0.53 GB | user Temp 0.46, Update download cache 0.07, our test folder 0.02 |
+| `compact /compactos:always` | Windows, elevated | 1.5-3 GB | Windows' binaries stored compressed; reversible (`/compactos:never`) |
+| `Dism /StartComponentCleanup` | Windows, elevated | 0.3-1.5 GB | superseded components |
+| `Dism /StartComponentCleanup /ResetBase` | Windows, elevated, **only if still < 4.5 GB free** | 0.5-2 GB | **irreversible:** current updates can no longer be uninstalled |
+| Delivery Optimization cache, Temp | Windows, elevated | small | |
+| **Total** | | **~2.8-7 GB** | likely ~4 GB, so C: ~4.4 GB free |
+
+- Some of that space will later hold the larger pagefile, which is the point.
+
+**How it runs:** `starbite/win/autotest/c-clean-win.cmd` runs once at the next logon.
+- `tools/win/c-clean-stage.sh` (TWRP) pushes it and writes the HKLM RunOnce value `StarbiteCleanup` into the
+  SOFTWARE hive. It refuses a dirty hive, reads the edit back independently, and keeps the original on the Mac.
+- The script checks it is elevated (and does nothing otherwise), logs every step with free space to
+  `C:\starbite\cleanup\c-clean-win.log`, writes `done`, and restarts.
+- **The same file works by hand:** right-click > Run as administrator.
+- **Not touched:** apps, Steam, games, user files, the pagefile setting, WinRE.
+- **Left for later, report only:** Edge/WebView2's 2.2 GB (old versions may linger) and Steam's 1.8 GB besides
+  the game. The deeper survey breaks both down.
