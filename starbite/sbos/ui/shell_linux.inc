@@ -422,8 +422,8 @@ static void lx_kb_tap(float x, float y)
     if (!LX.kb || y < 548) return;                /* the window's own touches went to Linux (G_LINUX) */
     char c = 0;
     int k = kb_hit(x, y, LX.shift, LX.num, &c);
-    if (k == 4) { if (!lx_mods_char('\b')) (void)sh_linux_char('\b'); }   /* B3: shift and 123 are the keyboard's own; its haptic on touch down */
-    else if (k == 1 || k == 5) { if (!lx_mods_char(c)) (void)sh_linux_char(c); }   /* v3: Ctrl / Alt latched: keys with the modifiers */
+    if (k == 4) { if (!lx_mods_char('\b')) (void)sh_linux_char('\b'); }   /* B3: shift and 123 are the keyboard's own */
+    else if (k == 1 || k == 5) { if (!lx_mods_char(c)) (void)sh_linux_char(c); }   /* v3: Ctrl / Alt latched */
 }
 /* app_open of the Terminal or a Linux app (lx_pick): which app, its icon, the keyboard and the viewport first */
 static void lx_prepare(int a)
