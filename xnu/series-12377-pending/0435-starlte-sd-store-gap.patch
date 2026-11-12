@@ -1,0 +1,101 @@
+From a61ae771ecbe7b8d0e0abddbfa563b148b4a7f6a Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Thu, 12 Nov 2026 02:21:13 +0200
+Subject: [PATCH] patch: 0435-starlte-sd-store-gap.patch - sdroot= ranges
+ between a home card store's head and its first data block are allowed when
+ the CRC-checked directory has no entry in them (the home extension SBSTHOME,
+ docs/STORE-ON-CARD.md): with the store's data at block 8126720 its used end
+ lies past the Sequoia and Ventura roots, so the used-end rule alone refused
+ them (S1/S2 2026-11-12: "inside p2's store below its used end", IOFindBSDRoot
+ panic); no extension or a range outside the gap: the old rule
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/starlte_sd.c | 64 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 64 insertions(+)
+
+diff --git a/bsd/dev/starlte_sd.c b/bsd/dev/starlte_sd.c
+index ad20ff0c..ca30d472 100644
+--- a/bsd/dev/starlte_sd.c
++++ b/bsd/dev/starlte_sd.c
+@@ -1497,6 +1497,66 @@ find_part(unsigned n, struct sd_part *out, uint8_t *sec)
+  * with no store in it (neither SBSTORE1 at block 0 nor SBSTORE2 at block 1) is allowed. 0 or EPERM
+  * / EIO, reason printed.
+  */
++/*
++ * The card store's gap (2026-11-12, docs/STORE-ON-CARD.md): a home card store keeps its head in blocks 0..6 and its
++ * data from the first data block of the home extension (header bytes 64..91: "SBSTHOME", u32 1, u32 flags, u64 first
++ * data block, u32 CRC32 of 64..87) on, 8126720 on the sd128 card. Its used end then lies past every OS root kept in
++ * between (Ventura, Sequoia), which the used-end rule alone refuses (S1 2026-11-12: "below its used end"). A range
++ * is allowed when it sits wholly in [block 7, first data block), the header's directory lies in blocks 0..6, and the
++ * directory (CRC-checked, as the loader's open_v2) has no entry overlapping it. sec holds header block 1 on entry and
++ * is not used afterwards. Returns 0 (allowed), EPERM / EIO (refused, reason printed) or -1 (no extension: not
++ * applicable).
++ */
++static int
++sd_range_in_store_gap(const char *spec, unsigned idx, const struct sd_part *e, uint64_t s, uint64_t c,
++    const uint8_t *sec)
++{
++	if (memcmp(sec + 64, "SBSTHOME", 8) != 0 || le32(sec + 72) != 1 || crc32(0, sec + 64, 24) != le32(sec + 88)) {
++		return -1;
++	}
++	uint64_t first = le64(sec + 80), cap = le64(sec + 16);
++	uint32_t n = le32(sec + 12), dir = le32(sec + 32), dir_blocks = le32(sec + 36), dcrc = le32(sec + 44);
++	uint64_t gap_s = e->start + 7 * 8, gap_e = e->start + first * 8;
++	if (first <= 7 || first > cap || s < gap_s || s + c > gap_e) {
++		return -1;
++	}
++	if (n > 256 || dir_blocks == 0 || dir_blocks > 4 || n * 64 > dir_blocks * 4096 || dir < 2 ||
++	    dir + dir_blocks > 7) {
++		printf("STARBITE SD: sdroot=%s: p%u store directory out of the head (block %u + %u, %u entries), refused\n",
++		    spec, idx, dir, dir_blocks, n);
++		return EPERM;
++	}
++	uint8_t *d = kalloc_data(dir_blocks * 4096, Z_WAITOK | Z_ZERO);
++	if (d == NULL) {
++		return EIO;
++	}
++	int r = 0;
++	if (sd_read(e->start + (uint64_t)dir * 8, dir_blocks * 8, d)) {
++		printf("STARBITE SD: sdroot=%s: p%u store directory unreadable, refused\n", spec, idx);
++		r = EIO;
++	} else if (crc32(0, d, n * 64) != dcrc) {
++		printf("STARBITE SD: sdroot=%s: p%u store directory CRC bad, refused\n", spec, idx);
++		r = EPERM;
++	} else {
++		for (uint32_t i = 0; i < n && r == 0; i++) {
++			const uint8_t *p = d + 64 * i;
++			uint64_t blk = le64(p + 32), blocks = (le64(p + 40) + 4095) / 4096;
++			uint64_t es = e->start + blk * 8, ee = es + blocks * 8;
++			if (blk > cap || blocks > cap - blk || (es < s + c && s < ee)) {
++				printf("STARBITE SD: sdroot=%s: store entry %.32s (block %llu, %llu blocks) is in the range, "
++				    "refused\n", spec, (const char *)p, blk, blocks);
++				r = EPERM;
++			}
++		}
++	}
++	kfree_data(d, dir_blocks * 4096);
++	if (r == 0) {
++		printf("STARBITE SD: sdroot=%s: inside p%u between the home store's head and its data (block %llu): "
++		    "no store entry there (%u checked)\n", spec, idx, first, n);
++	}
++	return r;
++}
++
+ static int
+ sd_range_vs_store(const char *spec, unsigned idx, const struct sd_part *e, uint64_t s, uint64_t c,
+     uint8_t *sec)
+@@ -1519,6 +1579,10 @@ sd_range_vs_store(const char *spec, unsigned idx, const struct sd_part *e, uint6
+ 		}
+ 		uint64_t used_end = e->start + used * 8;
+ 		if (s < used_end) {
++			int g = sd_range_in_store_gap(spec, idx, e, s, c, sec);
++			if (g >= 0) {
++				return g;
++			}
+ 			printf("STARBITE SD: sdroot=%s: inside p%u's store below its used end (sector %llu, block %llu), "
+ 			    "refused\n", spec, idx, used_end, used);
+ 			return EPERM;
+-- 
+2.53.0
+
