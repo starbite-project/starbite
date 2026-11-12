@@ -2173,6 +2173,27 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   - map (GPU wait) 0.1 ms.
   - **The GPU is not the limit.** The zero-copy present (T52) removes the 52 ms.
 
+### 6.59 T52 read: zero-copy GL draws right but nothing shows; are windowed D3D11 swap chains shown at all? (2026-11-12)
+
+- **Zero-copy (0150/0151) renders correctly and fast:** sbglzc 51.2 fps (GDI) -> 148.9 fps (zero-copy). GD menu
+  ~40 frames/s by the driver's submit counts (T51: 14). GD's swap chain buffers hold the right menu picture (sbumd's
+  present samples). No bugcheck, sbd3d arm64/x64/landscape exit 0.
+- **But the window never reaches the screen:** the GD snaps 28-gd-1..10 (GDI shot and DWM dump) show the desktop and
+  the console, no GD (T51: GD covered the screen). In the 2 s zero-copy run the KMD saw 1 present (GDI run: 118), so
+  DWM composed nothing new.
+- **DWM never opened an app swap chain buffer:** dwm.exe's umdlog has OpenResource only for DComp surfaces (1024x1024,
+  32x32, 576x576, one 2976x1440), none for GD's 2960x1440, sbglzc's 1280x701 or sbfps's 2960x1440 buffers (created
+  shared + DISPLAYABLE_SURFACE, misc 0x20002). App presents reach sbumd as DXGI_DDI_PRESENT_FLAGS 0x1 (Blt, no
+  destination); DWM's own as 0x2 (Flip). The KMD never saw a non-primary flip (Live_EmuFlipsNotPrimary 0), so it is
+  not acting on them. **So sbfps's 600-800 fps (since at least T47) may be frames nobody composes**, and windowed
+  D3D11 games would be invisible too. Not yet shown either way.
+- **ZC1's "2 failed" are only the readback:** glReadPixels needs a CPU map of the opened shared texture, and the shim's
+  mmap of a kind-2 (opened) BO fails ("mmap(..., size=3620864) failed: Invalid argument"). Rendering is unaffected.
+- **Not installed.** T53's GD driver (731600a5) is the GDI build + 0152 threading, without zero-copy: unaffected.
+- **T54 (VIS1, sb-vis.bat):** screenshots while sbfps (flip, blt) and sbglzc (zero-copy flip, zero-copy DISCARD, GDI
+  control) run ~20 s each (`SBGLZC_SECS`). Shows whether any windowed swap chain reaches the screen.
+- **Seen in passing:** msedge.exe (v100) fail-fasts in ucrtbase (0xc0000409) many times a day (gd-app-events).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

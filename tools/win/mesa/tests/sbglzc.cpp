@@ -5,6 +5,7 @@
 //
 //   sbglzc.exe [LOG]            A/B: runs itself twice, SB_GL_PRESENT=gdi then the default (zero-copy), and compares
 //   sbglzc.exe one [LOG]        one run in this process, with the environment as it is
+//   SBGLZC_SECS=N               (T54) a timed run of N seconds instead of 300 frames, for screenshots
 //
 // One run: a 1280x720 window (client area), a double-buffered RGBA8 GL context (no vsync if wglSwapIntervalEXT
 // exists), and a known frame: 8 vertical colour bars, a white 64x64 square moving 8 px a frame (a camera sees motion
@@ -198,7 +199,13 @@ static int run_one(void)
     double slowest = 0;
     int frames = 0;
     ta = t0;
-    for (; frames < FRAMES; frames++) {
+    // T54: SBGLZC_SECS=N runs for N seconds instead of FRAMES frames (screenshots of the window while it runs)
+    char sv[16] = "";
+    double want_secs = GetEnvironmentVariableA("SBGLZC_SECS", sv, sizeof sv) ? atof(sv) : 0.0;
+    if (want_secs > 100.0) want_secs = 100.0;   // under the 120 s watchdog
+    if (want_secs > 0) say("timed run: %.0f s\n", want_secs);
+    for (; want_secs > 0 ? (double)(ta.QuadPart - t0.QuadPart) < want_secs * (double)f.QuadPart : frames < FRAMES;
+         frames++) {
         while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageA(&m); }
         draw(frames);
         if (!SwapBuffers(dc)) { say("FAIL SwapBuffers at frame %d (%lu)\n", frames, GetLastError()); fails++; break; }
@@ -226,7 +233,7 @@ static int run_one(void)
     say("RESULT %s: %d frames in %.2f s = %.1f fps; per frame avg %.2f ms, max %.1f ms; %s; icd %s; d3d11 %s sbumd %s\n",
         mode, frames, secs, secs > 0 ? frames / secs : 0.0, frames ? secs * 1000.0 / frames : 0.0, slowest, kmd, state,
         d3d ? "yes" : "no", umd ? "yes" : "no");
-    if (frames < FRAMES) fails++;
+    if (want_secs <= 0 && frames < FRAMES) fails++;
 
     wglMakeCurrent(NULL, NULL);
     wglDeleteContext(rcx);
