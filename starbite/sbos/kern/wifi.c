@@ -37,6 +37,12 @@
 #include "sb/bcmw_sb.h"
 #endif
 
+/* Track G's guest NAT (kern/guestnet.c on claude/sbos-calls): its two hooks are built when its kern.h is merged in
+ * (KNET_UPLINK_WIFI / SBOS_HAVE_GUESTNET defined); without it this file builds as before */
+#if defined(KNET_UPLINK_WIFI) || defined(SBOS_HAVE_GUESTNET)
+#define WIFI_GUESTNET 1
+#endif
+
 #define TICK_ON_MS 20U                      /* the core's poll while the screen is on */
 #define TICK_OFF_MS 200U                    /* ... and off */
 #define SCAN_MS 8000U
@@ -488,6 +494,12 @@ static void os_rx(void *ctx, unsigned ifidx, const uint8_t *frame, uint32_t len)
     (void)ifidx;
     ent_tick();
     ent_add(frame, len < 64 ? len : 64);
+#ifdef WIFI_GUESTNET
+    /* Track G: the Linux guest's flows (its mapped ports, ICMP errors about them) to its NAT; the rest to sbnet */
+    if (len > 14 && frame[12] == 0x08 && frame[13] == 0x00 && st == SBOS_WIFI_CONNECTED &&
+        guestnet_rx(KNET_UPLINK_WIFI, frame + 14, len - 14))
+        return;
+#endif
     sbnet_rx(&net, frame, len);
 }
 
@@ -567,8 +579,19 @@ static void net_tcp(void *ctx, const uint8_t from[4], const uint8_t *seg, uint32
     sbtcp_input(&tcp, from, seg, len);
 }
 
+static int gn_up;                           /* Track G's NAT has Wi-Fi as an uplink */
+static void gn_uplink(int on)
+{
+#ifdef WIFI_GUESTNET
+    if (on != gn_up)
+        guestnet_uplink(KNET_UPLINK_WIFI, on ? &net : 0);
+#endif
+    gn_up = on;
+}
+
 static void net_down(void)
 {
+    gn_uplink(0);                           /* every way down: off, left, dropped, no address, the chip gone */
     sbnet_stop(&net);
     sbtcp_down(&tcp);
 }
@@ -1332,6 +1355,14 @@ unsigned wifi_caps(void)
     return fw_caps;
 }
 
+/* Track H, for Bluetooth (the drivers track picks the .hcd): the radio module's maker from its OTP, read at the
+ * bring-up's step 7: 1 SEMCO (91 33 / a1 33), 0 another (Murata), -1 not known yet (Wi-Fi not brought up this boot) */
+static int module_kind = -1;
+int wifi_module(void)
+{
+    return module_kind;
+}
+
 /* Track H: leave the joined network (the radio stays on, the list stays) */
 int wifi_leave(void)
 {
@@ -1521,6 +1552,11 @@ void wifi_timer(unsigned id)
             sb_log(u.b);
             set_state(SBOS_WIFI_UP, "");
             caps_read();                    /* Track H: once per boot (WPA3 needs SAE) */
+            {
+                const uint8_t *v = bcmw_info(w)->module_vid;
+                if (v[0] || v[1])
+                    module_kind = (v[0] == 0x91 || v[0] == 0xa1) && v[1] == 0x33;
+            }
             (void)wifi_scan();
         }
     } else {
@@ -1609,6 +1645,7 @@ void wifi_timer(unsigned id)
             if (st == SBOS_WIFI_DHCP && net.state == SBNET_BOUND) {
                 logn("wifi: an address from DHCP (not logged), lease ", net.lease_s, " s");
                 set_state(SBOS_WIFI_CONNECTED, "");
+                gn_uplink(1);                       /* Track G's NAT: Wi-Fi is an uplink (preferred over LTE) */
                 reconnect_n = 0;
                 reconnect_at = 0;
                 pm_set = 0;
@@ -1627,6 +1664,7 @@ void wifi_timer(unsigned id)
             if (st == SBOS_WIFI_CONNECTED && net.state != SBNET_BOUND && net.state != SBNET_RENEWING &&
                 net.state != SBNET_REBINDING) {
                 sb_log("wifi: the address was lost (DHCP); asking again");
+                gn_uplink(0);
                 set_state(SBOS_WIFI_DHCP, "");
                 sbnet_start(&net);
             }
@@ -1676,7 +1714,6 @@ void wifi_timer(unsigned id)
     }
     if (fx_state == 1 && st != SBOS_WIFI_CONNECTED)
         fetch_poll();                       /* the network went: the fetch ends */
-    kgw_tick();                             /* Track H: the Linux guest's gateway follows the uplink */
     if (st == SBOS_WIFI_CONNECTED && K.screen_on && fx_state != 1 && joined >= 0 && joined < nnets &&
         now - rssi_at >= 10000U && w_ready && !w->dead) {
         /* Track H: the joined network's signal now (WLC_GET_RSSI, brcmf_scb_val_le), for the status bar's bars */
