@@ -1302,6 +1302,18 @@ void sh_bt_unpair(void) { }
 int sh_bt_reconnect(void) { return 0; }
 __attribute__((weak)) void sh_hw_key(int usage, int down, uint32_t unicode) { (void)usage; (void)down; (void)unicode; }
 
+/* Track A, cp7: the host has no sound: tones and streams are taken and dropped, the volume kept in RAM */
+static int host_vol = 8;
+int sh_snd_tone(int kind) { (void)kind; return 0; }
+void sh_snd_tone_stop(void) { }
+int sh_snd_volume(void) { return host_vol; }
+void sh_snd_volume_set(int v) { host_vol = v < 0 ? 0 : v > 15 ? 15 : v; }
+int sh_snd_open(void) { return 0; }
+unsigned sh_snd_write(int id, const int16_t *frames, unsigned n) { (void)id; (void)frames; return n; }
+unsigned sh_snd_space(int id) { (void)id; return 4096; }
+void sh_snd_close(int id) { (void)id; }
+const char *sh_snd_why(void) { return "The host has no sound"; }
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: sbtk-host PAK still|film|bench ...\n"); return 2; }
