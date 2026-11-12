@@ -2211,6 +2211,23 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   glstats: `mode async`, `async wait`, `frames ... async N`.
 - **T55** = T53 + the 0153 GD driver; the A/B flag file is now named in sb-gd-ab.txt (`glasync`).
 
+### 6.61 T54 read: no windowed D3D11 swap chain reaches the screen; T56 (VIS2) staged (2026-11-13)
+
+- **Shown:** VIS1's shots 32/33 were taken while sbfps's topmost full-screen window ran its FLIP_SEQUENTIAL and then
+  its DISCARD swap chain (677.9 / 833.6 fps). Both show the wallpaper and the consoles, **not the window**. The GDI
+  control works (sbglzc's GDI run: 430 KMD presents, readback PASS). So the HWND swap chain path is broken for
+  every D3D11 app, flip model and blt model alike, not only for the zero-copy GL present. With 6.59 (DWM never opens
+  an app swap chain buffer; app presents reach sbumd as Blt with no destination; the KMD never sees them), the
+  frames stop between DXGI/dxgkrnl and DWM.
+- **Lost:** shots 34-36 (sbglzc zero-copy flip/discard, GDI). sb-vis.bat called `sbshow.exe` after `pushd glzc`; it
+  now uses `%D%\sbshow.exe`. sbglzc zero-copy timed runs: 291.9 fps (9 KMD presents), DISCARD 312.6 fps (7); GDI
+  50.1 fps (430).
+- **T56 (VIS2, sb-comp.bat, sbcomp.exe):** the same 1200x700 topmost window presented five ways (GDI control, HWND
+  flip, HWND blt, DComp swap chain, DComp surface), 12 s each, a snap each, and an ETW trace (DXGI, DxgKrnl Base +
+  Present, Dwm-Core) per mode as CSV (tracerpt). Explorer's DComp surfaces reach DWM (DWM's OpenResource of
+  1024x1024 atlases), so a DComp route may work where HWND swap chains don't: a way to show GD's zero-copy frames,
+  and a pointer to what the HWND path lacks.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

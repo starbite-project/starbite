@@ -16,9 +16,9 @@ echo VIS1 start %time% >> %L%
 
 start "sbfps-vis" sbfps.exe hw 20 sbfps-vis.log
 ping -n 9 127.0.0.1 > nul
-sbshow.exe snap 32-vis-sbfps-flip >> %L% 2>&1
+%D%\sbshow.exe snap 32-vis-sbfps-flip >> %L% 2>&1
 ping -n 21 127.0.0.1 > nul
-sbshow.exe snap 33-vis-sbfps-blt >> %L% 2>&1
+%D%\sbshow.exe snap 33-vis-sbfps-blt >> %L% 2>&1
 call :waitexit sbfps.exe
 if exist sbfps-vis.log type sbfps-vis.log >> %L%
 
@@ -46,7 +46,7 @@ exit /b 0
 echo VIS1 %1: SB_GL_PRESENT=%SB_GL_PRESENT% SB_GL_ZC_SWAP=%SB_GL_ZC_SWAP% >> %L%
 start "sbglzc-vis" sbglzc64.exe one %D%\glzc-%1.log
 ping -n 9 127.0.0.1 > nul
-sbshow.exe snap %1 >> %L% 2>&1
+%D%\sbshow.exe snap %1 >> %L% 2>&1
 call :waitexit sbglzc64.exe
 if exist %D%\glzc-%1.log type %D%\glzc-%1.log >> %L%
 exit /b 0

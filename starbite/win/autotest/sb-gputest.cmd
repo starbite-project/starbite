@@ -174,6 +174,8 @@ if exist %D%\glzc\sbglzc64.exe echo sbglzc x64 exit %errorlevel% >> %D%\gputest.
 if exist %D%\glzc\sbglzc64.exe popd
 rem VIS1 (T54, sb-vis.bat): do windowed D3D11 swap chains (sbfps, zero-copy sbglzc) reach the screen? Snaps 32-36.
 if exist %D%\sb-vis.bat call %D%\sb-vis.bat
+rem VIS2 (T56, sb-comp.bat): HWND swap chains vs DirectComposition (sbcomp), each with a snap and an ETW present trace.
+if exist %D%\sb-comp.bat call %D%\sb-comp.bat
 rem T44: free the ~110 MB the GL and UMD tests brought before the sweep (C: had 841 MiB in T42 and Explorer's
 rem pagefile growth took 490 of it); their results are in gputest.log and umdlog already.
 for %%F in (gl glx64 glec glx86 glzc) do if exist %D%\%%F rmdir /s /q %D%\%%F
