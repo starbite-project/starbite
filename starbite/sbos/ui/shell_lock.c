@@ -957,6 +957,9 @@ static void toggle_group(int g, int instant)
 static tk_layer hparts[8], hsearch[3], pages;
 /* L3, shell_linux.inc (Linux apps, the App Store): the hooks this file calls */
 static int lx_is(const char *k);
+static int ap_slim(const char *k);                 /* helper B5: shell_apps.inc */
+static void slim_strip(tk_layer *l);
+static tk_layer dkbadge;
 static int lx_icon(const char *k, float *pad, const tk_bmp **ic);
 static void lx_home(void);
 /* L3: the Search pill's page dots, the lit one page pg's (redrawn only when it changes: a 40 x 8 pt layer) */
@@ -2889,6 +2892,7 @@ static void own_strip(int a, int i)
     else if (!tk_strcmp(k, "maps")) page_maps(&d);   /* helper D */
     else if (inf) { d_h1(&d, APPS[a].name); d_empty(&d, CONTENT_TOP, EMPTY_BOT, inf->title, inf->line); }
     else page_camera(&d);
+    if (ap_slim(k)) slim_strip(&appst[i]);          /* helper B5: these pages draw their lists as items */
     tk_layer_prepare(&appst[i]);
 }
 static void own_extras(int a)
@@ -3528,6 +3532,7 @@ void sh_cell(const sh_cell_t *c)
 #include "shell_survival.inc"
 #include "shell_nc.inc"                             /* helper D: notifications, the Notification Centre, the banner */
 #include "shell_switcher.inc"                       /* helper D: the app switcher */
+#include "shell_apps.inc"                           /* helper B5: the lists (SCV), the avatars, the dock's badges */
 #include "shell_comms.inc"                          /* helper I: Phone and Messages, the call screen */
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
@@ -3630,8 +3635,9 @@ static void relink(void)
     tk_layer *pg[] = { &hparts[1], &hparts[2], &hparts[4], &hparts[5], &hparts[6], &hparts[7] };   /* [5] the Linux page (3); [6] page 2's third row;
                                                                                                 * [7] page 1's Clock widget (helper D) */
     link(&pages, pg, 6);
-    tk_layer *h[] = { &hparts[0], &pages, &hsearch[0], &hsearch[1], &hsearch[2], &hparts[3], &icobg, &icofg };
-    link(&home, h, 8);
+    if (!dkbadge.name) { tk_layer_init(&dkbadge, "dock-badges"); dkbadge.hidden = 1; }
+    tk_layer *h[] = { &hparts[0], &pages, &hsearch[0], &hsearch[1], &hsearch[2], &hparts[3], &icobg, &icofg, &dkbadge };   /* B5: badges */
+    link(&home, h, 9);
     sv_relink();                                     /* survival-next: the tools' live layers, SOS's beacon */
 }
 

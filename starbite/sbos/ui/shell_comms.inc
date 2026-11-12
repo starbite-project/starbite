@@ -22,11 +22,15 @@ static void hl_off(void);
 
 /* ---- state ------------------------------------------------------------------------------------------------- */
 static sh_call_t CALL;                     /* the platform's last push */
-#define CM_NREC 20
+#define CM_NREC 50
 enum { RC_OUT, RC_IN, RC_MISSED, RC_DECLINED, RC_NOANSWER };
-typedef struct { char num[24]; int kind, secs, hm; } cm_rec;
+typedef struct { char num[24]; int kind, secs, hm, id; } cm_rec;
 static cm_rec RC[CM_NREC];                 /* Recents: this boot's calls, newest first */
-static int nrc;
+static int nrc, rc_ids, rc_missed;         /* rc_missed: missed calls since Recents was last seen (the dock's badge) */
+#define CM_NFAV 12
+typedef struct { char num[24]; int id; } cm_fav;
+static cm_fav FAV[CM_NFAV];                /* Favourites: numbers starred in Recents (this boot) */
+static int nfav;
 /* the inbox: the platform's (newest last) with what the shell adds: when it was first seen, unread */
 typedef struct { sh_sms_t m; int hm, day, unread; } cm_msg;
 static cm_msg MSG[SH_SMS_MAX];
@@ -43,7 +47,16 @@ static struct {
     int focus, shift, num;                 /* 0 no keyboard, 1 To, 2 the message; the keyboard's shift and 123 */
     int want_sub, want_tab, want_view;     /* what an opening app shows (Settings > Cellular, a notification) */
     char want_thr[24];
+    int to_end;                            /* the thread's next layout scrolls to its newest message */
+    int read_due;                          /* the open thread got a message: the kernel's read mark */
 } CM;
+/* the lists' items (Phone's Calls, Messages' threads and bubbles: LS, shell_apps.inc) */
+enum { CL_NONE, CL_CALLS, CL_THREADS, CL_BUBBLES };
+enum { CF_HDR = 0x100, CF_FAV = 0x200 };            /* a Calls item: a section's header, a favourite (else a call) */
+static int cl_kind;
+static int CLI[SCV_MAXI];                   /* item -> the RC / FAV index, a thread's last message, a bubble's message */
+static uint16_t CLF[SCV_MAXI];               /* a bubble's parts (below) */
+enum { BF_TAIL = 1, BF_TIME = 2, BF_STATUS = 4, BF_INTRO = 8, BF_GROUP = 16, BF_FIRST = 32, BF_LAST = 64 };
 static tk_layer cmhint, cmring, cmfld, cmto;          /* in the app's page: the keypad's line, the hold's ring,
                                                        * the compose field, the To: field */
 
@@ -172,10 +185,10 @@ static void d_compose(dc *d, float cx, float cy, tk_col c)
     d_seg(d, x1, y1 - 2, x1, y0 + 9, 2, c);
     d_seg(d, x0 + 7, y0 + 10, x1 + 3, y0 - 6, 2.6f, c);
 }
-/* a greedy word wrap of a message into at most CM_ML lines of maxw (16 pt); '\n' breaks a line; a word wider than the
+/* a greedy word wrap of a message into at most CM_ML lines of maxw (fs pt); '\n' breaks a line; a word wider than the
  * line breaks by character; text past the last line ends it with an ellipsis */
-#define CM_ML 14
-static int cm_wrap(char ln[CM_ML][100], const char *s, float maxw, float *wmax)
+#define CM_ML 24
+static int cm_wrap(char ln[CM_ML][100], const char *s, float fs, float maxw, float *wmax)
 {
     int nl = 0, i = 0;
     *wmax = 0;
@@ -188,14 +201,14 @@ static int cm_wrap(char ln[CM_ML][100], const char *s, float maxw, float *wmax)
             int len = e - st > 99 ? 99 : e - st;
             tk_memcpy(t, s + st, (size_t)len);
             t[len] = 0;
-            if (tw(TK_IT400, 16, t, 0, 0) > maxw || e - st > 99) {
+            if (tw(TK_IT400, fs, t, 0, 0) > maxw || e - st > 99) {
                 if (!any) {                       /* one word wider than the line: what fits of it */
                     int m = len;
                     while (m > 1) {
                         m--;
                         while (m > 1 && ((unsigned char)t[m] & 0xc0) == 0x80) m--;
                         t[m] = 0;
-                        if (tw(TK_IT400, 16, t, 0, 0) <= maxw) break;
+                        if (tw(TK_IT400, fs, t, 0, 0) <= maxw) break;
                     }
                     end = st + (m > 0 ? m : 1);
                 }
@@ -215,12 +228,12 @@ static int cm_wrap(char ln[CM_ML][100], const char *s, float maxw, float *wmax)
         else while (s[i] == ' ') i++;
         if (nl == CM_ML - 1 && s[i]) {            /* the last line: the rest, cut at its tail */
             char e2[100];
-            ellipsize(e2, sizeof e2, TK_IT400, 16, ln[nl], maxw - tw(TK_IT400, 16, "\xe2\x80\xa6", 0, 0));
+            ellipsize(e2, sizeof e2, TK_IT400, fs, ln[nl], maxw - tw(TK_IT400, fs, "\xe2\x80\xa6", 0, 0));
             int q = (int)tk_strlen(e2);
             if (q < 96 && !(q >= 3 && (unsigned char)e2[q - 3] == 0xe2)) { e2[q] = (char)0xe2; e2[q + 1] = (char)0x80; e2[q + 2] = (char)0xa6; e2[q + 3] = 0; }
             tk_memcpy(ln[nl], e2, tk_strlen(e2) + 1);
         }
-        float w = tw(TK_IT400, 16, ln[nl], 0, 0);
+        float w = tw(TK_IT400, fs, ln[nl], 0, 0);
         if (w > *wmax) *wmax = w;
         nl++;
     }
@@ -365,13 +378,15 @@ static void cm_hold_up(int moved)
 }
 
 /* Recents: a call followed from its first push to its end */
+static void cm_list_build(void);
 static void cm_rec_add(const char *num, int kind, int secs)
 {
     if (nrc == CM_NREC) nrc--;
     for (int k = nrc; k > 0; k--) RC[k] = RC[k - 1];
     cm_cpy(RC[0].num, sizeof RC[0].num, num);
-    RC[0].kind = kind; RC[0].secs = secs; RC[0].hm = cm_now_hm();
+    RC[0].kind = kind; RC[0].secs = secs; RC[0].hm = cm_now_hm(); RC[0].id = ++rc_ids;
     nrc++;
+    if (kind == RC_MISSED && !(is_app("phone") && AS.tab == 1 && !AP.closing)) rc_missed++;
 }
 static void cm_track(const sh_call_t *c)
 {
@@ -387,24 +402,53 @@ static void cm_track(const sh_call_t *c)
     int kind = CM.rec_out ? (CM.rec_conn ? RC_OUT : RC_NOANSWER) : CM.rec_conn ? RC_IN : CM.decl ? RC_DECLINED : RC_MISSED;
     cm_rec_add(CM.rec_num, kind, CM.rec_secs);
     if (kind == RC_MISSED) sh_notify("phone", "Missed Call", CM.rec_num[0] ? CM.rec_num : "Unknown", cm_now_hm());
-    if (is_app("phone") && AS.tab == 1 && !AP.closing) build_app_page(AP.a);
+    if (is_app("phone") && AS.tab == 1 && !AP.closing && !ap_pending) {
+        if (nrc == 1 && !nfav) build_app_page(AP.a); /* the empty state goes */
+        else { cm_list_build(); relink(); }          /* the new row; the others only move */
+    }
+    dk_badges();
+}
+static int cm_badge_calls(void) { return rc_missed; }
+static int cm_fav_has(const char *num)
+{
+    for (int i = 0; i < nfav; i++) if (!tk_strcmp(FAV[i].num, num)) return i;
+    return -1;
+}
+/* Favourites: numbers starred from Recents (this boot only: there are no contacts to keep them with) */
+static void cm_fav_toggle(const char *num)
+{
+    int i = cm_fav_has(num);
+    if (i >= 0) {
+        for (int k = i; k + 1 < nfav; k++) FAV[k] = FAV[k + 1];
+        nfav--;
+        toast("Removed from Favourites");
+    } else if (nfav == CM_NFAV) toast("Up to twelve Favourites in this version");
+    else {
+        cm_cpy(FAV[nfav].num, sizeof FAV[nfav].num, num);
+        FAV[nfav].id = ++rc_ids;
+        nfav++;
+        toast("Added to Favourites");
+    }
 }
 
+#define TAB3_W (GROUP_W / 3)
 static void phone_tabs(dc *d)
 {
-    static const char *const TK[4] = { "fav", "rec", "con", "pad" };
-    static const char *const TL[4] = { "Favourites", "Recents", "Contacts", "Keypad" };
+    static const char *const TK[3] = { "rec", "con", "pad" };
+    static const char *const TL[3] = { "Calls", "Contacts", "Keypad" };
     d_lg_flat(d, GROUP_X, 718, GROUP_W, 62, 31, 1);   /* P3i: over the flat ground (the backdrop's blur cost ~40 ms a build) */
-    for (int i = 0; i < 4; i++) {
-        float bx = GROUP_X + TAB_W * i;
+    for (int i = 0; i < 3; i++) {
+        float bx = GROUP_X + TAB3_W * i;
+        int on = i + 1 == AS.tab;
         char n[16] = "tab-";
         int k = 4;
         for (const char *c = TK[i]; *c; c++) n[k++] = *c;
-        if (i == AS.tab) { n[k++] = '-'; n[k++] = 'o'; n[k++] = 'n'; }
+        if (on) { n[k++] = '-'; n[k++] = 'o'; n[k++] = 'n'; }
         n[k] = 0;
-        d_icon(d, n, bx + (TAB_W - 22) / 2, 730.5f, 1);
-        float w = tw(TK_IT600, 10.5f, TL[i], 0, 0);
-        d_text(d, TK_IT600, 10.5f, bx + (TAB_W - w) / 2, bl(TK_IT600, 10.5f, 754.5f), TL[i], 0, 0, i == AS.tab ? ACCENT() : W(.6f), 0);
+        if (on) d_rrect(d, bx + 4, 722, TAB3_W - 8, 54, 27, W(.14f));   /* iOS 26: the selected tab's pill */
+        d_icon(d, n, bx + (TAB3_W - 22) / 2, 730.5f, 1);
+        float w = tw(TK_IT500, 10.5f, TL[i], 0, 0);
+        d_text(d, TK_IT500, 10.5f, bx + (TAB3_W - w) / 2, bl(TK_IT500, 10.5f, 754.5f), TL[i], 0, 0, on ? ACCENT() : W(.92f), 0);
     }
 }
 /* an empty state's bottom (d_empty's own layout), for a button under it */
@@ -422,8 +466,6 @@ static void cm_cell_button(dc *d, float y)
     d_rrect(d, 195 - CM_BTN_W / 2, y, CM_BTN_W, 40, 20, W(.12f));
     d_text_box(d, TK_IT600, 15, 195, bl(TK_IT600, 15, y + 11), CM_BTN_W - 20, 1, "Cellular Settings", 0, 0, ACCENT(), 0);
 }
-#define REC_H 60.0f
-#define REC_MAX 9
 static const char *cm_rec_word(int k)
 {
     return k == RC_OUT ? "Outgoing" : k == RC_IN ? "Incoming" : k == RC_MISSED ? "Missed" : k == RC_DECLINED ? "Declined" : "No answer";
@@ -446,8 +488,17 @@ static int cm_dur(char *b, int s)
     b[n] = 0;
     return n;
 }
+/* iOS's info button: an accent ring with an i */
+#define INFO_X (CONTENT_R - 11)
+static void d_info(dc *d, float cx, float cy)
+{
+    d_arc(d, cx, cy, 10.2f, 1.6f, 0, 6.2831853f, ACCENT());
+    d_rrect(d, cx - 1.1f, cy - 2.5f, 2.2f, 8, 1.1f, ACCENT());
+    d_rrect(d, cx - 1.3f, cy - 6.8f, 2.6f, 2.6f, 1.3f, ACCENT());
+}
 static void page_phone(dc *d)
 {
+    if (AS.tab == 0) AS.tab = 1;                      /* (Favourites are the Calls list's first section now) */
     if (AS.tab == 3) {
         for (int i = 0; i < 12; i++) {
             float x = 52 + 104.0f * (i % 3), y = 182 + 96.0f * (i / 3);
@@ -462,65 +513,80 @@ static void page_phone(dc *d)
         d_rrect(d, PAD_CX - 39, PAD_CY - 39, 78, 78, 39, tk_hex(0x34c759, 1));
         d_icon(d, "call", PAD_CX - 15, PAD_CY - 15, 1);
     } else if (AS.tab == 1) {
-        d_h1(d, "Recents");
-        if (!nrc) {
+        if (!nrc && !nfav) {                         /* else the list (its title the first item) */
+            d_h1(d, "Calls");
             const char *l = !sh_comms_ok() ? "Calls aren't in this version yet." :
                             cm_cell_on() ? "Calls you make and receive show here until the phone restarts." :
                             "Calls you make and receive show here. Turn on Cellular to call.";
             d_empty(d, CONTENT_TOP, EMPTY_TAB, "No Recent Calls", l);
             if (sh_comms_ok() && !cm_cell_on()) cm_cell_button(d, cm_empty_bot(CONTENT_TOP, EMPTY_TAB, l) + 18);
-        } else {
-            int n = nrc < REC_MAX ? nrc : REC_MAX;
-            d_rrect(d, GROUP_X, CONTENT_TOP, GROUP_W, REC_H * n, 16, tk_hex(0x151c33, 1));
-            for (int i = 0; i < n; i++) {
-                const cm_rec *r = &RC[i];
-                float y = CONTENT_TOP + REC_H * i;
-                char when[8], sub[48];
-                cm_hm(when, r->hm);
-                int k = 0;
-                for (const char *w = cm_rec_word(r->kind); *w; w++) sub[k++] = *w;
-                if ((r->kind == RC_OUT || r->kind == RC_IN) && r->secs > 0) {
-                    const char *dot = " \xc2\xb7 ";
-                    for (; *dot; dot++) sub[k++] = *dot;
-                    k += cm_dur(sub + k, r->secs);
-                }
-                sub[k] = 0;
-                float ww = tw(TK_IT400, 15, when, 0, TK_TNUM);
-                d_text_box(d, TK_IT600, 17, ROW_TX, bl(TK_IT600, 17, y + 10), CONTENT_R - 16 - ww - 12 - ROW_TX, 0, r->num[0] ? r->num : "Unknown",
-                           0, 0, r->kind == RC_MISSED ? tk_hex(0xff453a, 1) : INK, 0);
-                d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 33), sub, 0, TK_TNUM, W(.55f), 0);
-                d_text(d, TK_IT400, 15, CONTENT_R - 16 - ww, bl(TK_IT400, 15, y + 20), when, 0, TK_TNUM, W(.55f), 0);
-                if (i + 1 < n) d_rrect(d, ROW_TX, y + REC_H - .5f, CONTENT_R - ROW_TX, .5f, 0, W(.1f));
-            }
         }
-    } else if (AS.tab == 2) {
+    } else
         page_contacts(d);
-    } else {
-        d_h1(d, "Favourites");
-        d_empty(d, CONTENT_TOP, EMPTY_TAB, "No Favourites", "Favourites come from Contacts, which can't be added on this phone yet.");
-    }
     phone_tabs(d);
+}
+/* the lists' rows (Recents, Favourites): iOS 26's, a monogram, the number, its line, the time and the info button */
+#define REC_H 64.0f
+static void cl_title(dc *d, const char *t) { d_h1(d, t); }
+static void cl_rec_row(dc *d, const cm_rec *r, float y, int last)
+{
+    char when[8], sub[48];
+    cm_hm(when, r->hm);
+    int k = 0;
+    for (const char *w = cm_rec_word(r->kind); *w; w++) sub[k++] = *w;
+    if ((r->kind == RC_OUT || r->kind == RC_IN) && r->secs > 0) {
+        const char *dot = " \xc2\xb7 ";
+        for (; *dot; dot++) sub[k++] = *dot;
+        k += cm_dur(sub + k, r->secs);
+    }
+    sub[k] = 0;
+    float tx = MARGIN + 52, ww = tw(TK_IT400, 15, when, 0, TK_TNUM);
+    d_monogram(d, MARGIN + 20, y + REC_H / 2, 20, r->num);
+    d_text_box(d, TK_IT600, 17, tx, bl(TK_IT600, 17, y + 12), INFO_X - 18 - ww - 10 - tx, 0, r->num[0] ? r->num : "Unknown",
+               0, 0, r->kind == RC_MISSED ? tk_hex(0xff453a, 1) : INK, 0);
+    d_text(d, TK_IT400, 14, tx, bl(TK_IT400, 14, y + 35), sub, 0, TK_TNUM, W(.55f), 0);
+    d_text(d, TK_IT400, 15, INFO_X - 18 - ww, bl(TK_IT400, 15, y + 22), when, 0, TK_TNUM, W(.55f), 0);
+    d_info(d, INFO_X, y + REC_H / 2);
+    if (!last) d_rrect(d, tx, y + REC_H - .5f, 390 - tx, .5f, 0, W(.12f));
+}
+static void cl_fav_row(dc *d, const cm_fav *f, float y, int last)
+{
+    float tx = MARGIN + 52;
+    d_monogram(d, MARGIN + 20, y + REC_H / 2, 20, f->num);
+    d_text_box(d, TK_IT600, 17, tx, bl(TK_IT600, 17, y + 12), INFO_X - 18 - tx, 0, f->num, 0, 0, INK, 0);
+    d_text(d, TK_IT400, 14, tx, bl(TK_IT400, 14, y + 35), "mobile", 0, 0, W(.55f), 0);
+    d_info(d, INFO_X, y + REC_H / 2);
+    if (!last) d_rrect(d, tx, y + REC_H - .5f, 390 - tx, .5f, 0, W(.12f));
 }
 static void cm_phone_tap(float x, float y)
 {
     if (y >= 718 && y <= 780 && x >= GROUP_X && x < GROUP_X + GROUP_W) {
-        int t = tk_mini(3, (int)((x - GROUP_X) / TAB_W));
-        if (t != AS.tab) { AS.tab = t; if (t != 3) AS.num[0] = 0; CM.why[0] = 0; build_app_page(AP.a); }
+        int t = 1 + tk_mini(2, (int)((x - GROUP_X) / TAB3_W));
+        if (t != AS.tab) { AS.tab = t; if (t != 3) AS.num[0] = 0; CM.why[0] = 0; LS.s = 0; build_app_page(AP.a); }
         return;
     }
     if (AS.tab == 1) {
-        if (!nrc) {
+        if (!nrc && !nfav) {
             float by = cm_empty_bot(CONTENT_TOP, EMPTY_TAB, "Calls you make and receive show here. Turn on Cellular to call.") + 18;
             if (sh_comms_ok() && !cm_cell_on() && y >= by && y < by + 40 && tk_fabsf(x - 195) < CM_BTN_W / 2) cm_open_cellular();
             return;
         }
-        int n = nrc < REC_MAX ? nrc : REC_MAX;
-        if (x < GROUP_X || x >= CONTENT_R || y < CONTENT_TOP || y >= CONTENT_TOP + REC_H * n) return;
-        const cm_rec *r = &RC[(int)((y - CONTENT_TOP) / REC_H)];
-        if (!r->num[0]) return;
+        int i = scv_hit(&LS, y, 0);
+        if (i < 1 || (CLF[i] & CF_HDR)) return;
+        int fav = CLF[i] & CF_FAV;
+        const char *num = fav ? FAV[CLI[i]].num : RC[CLI[i]].num;
+        if (!num[0]) return;
+        if (x >= INFO_X - 22) {                        /* the info button: in or out of Favourites */
+            char n[24];
+            cm_cpy(n, sizeof n, num);
+            cm_fav_toggle(n);
+            cm_list_build();
+            relink();
+            return;
+        }
         /* iOS calls at once; here the number goes to the keypad and the hold still dials */
         AS.tab = 3;
-        cm_cpy(AS.num, sizeof AS.num, r->num);
+        cm_cpy(AS.num, sizeof AS.num, num);
         CM.why[0] = 0;
         build_app_page(AP.a);
         return;
@@ -560,7 +626,10 @@ static struct {
     float a, at, close_at, thumb, x0, y0, tx0;
     int d_state, d_secs, d_ok, d_audio, d_muted, d_mode, d_keypad;   /* what is drawn */
     char d_num[24], dtmf[24], d_why[48];
-} CV = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, -1, -1, -1, -1, -1, -1, "", "", "" };
+    int mini, swipe;                        /* the screen away (its green pill in the status bar); a home swipe */
+    float pill_r;                           /* the pill's right edge (pt) */
+} CV = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, -1, -1, -1, -1, -1, -1, "", "", "", 0, 0, 0 };
+static tk_layer cvpill;                     /* the pill (the screen away) */
 #define CV_GROUND 0xff141a2cU
 #define CV_NUM_Y 150.0f                     /* the number's top (the avatar over it) */
 #define CV_ROW_Y 470.0f                     /* Speaker, Mute, Keypad */
@@ -751,6 +820,29 @@ static void cv_place(void)
     cvl.hidden = !CV.on || CV.a <= 0;
     for (int i = 0; i < 5; i++) P[i]->gen++;
 }
+/* the call away from the screen (iOS: the home gesture): a green pill round the status bar's time; its tap brings
+ * the screen back. Its words are the time, as an iPhone's status bar shows them in it. */
+static void cv_pill_build(void)
+{
+    relayer(&cvpill);
+    char hm[8];
+    fmt_hm(hm);
+    float w = tw(TK_IT600, 17, hm, 0, 0), x = MARGIN + 16 - 12;
+    CV.pill_r = x + w + 24;
+    dc d = mk(&cvpill, "call-pill", x, SB_MID - 13, w + 24, 26, 1, 0);
+    d_rrect(&d, x, SB_MID - 13, w + 24, 26, 13, tk_hex(0x30d158, 1));
+    d_text(&d, TK_IT600, 17, MARGIN + 16, SB_BASE, hm, 0, 0, W(1), 0);
+    trim(&cvpill);
+    cvpill.hidden = 0;
+}
+static void cv_mini(int on)
+{
+    CV.mini = on;
+    if (on) cv_pill_build();
+    else { relayer(&cvpill); cvpill.hidden = 1; cvsb.hidden = 0; cv_sb(); }
+    cvhl.hidden = 1;
+    relink();
+}
 static void cv_light(float cx, float cy, float r, tk_col c)
 {
     tk_rect q = { cx - r, cy - r, 2 * r, 2 * r };
@@ -763,6 +855,8 @@ static void cv_free(void)
     cvbg.solid = 0;
     cvhl.hidden = 1;
     CV.on = 0; CV.mode = CVM_NONE; CV.keypad = 0; CV.dtmf[0] = 0; CV.close_at = -1; CV.pend_close = 0;
+    CV.mini = 0;
+    relayer(&cvpill); cvpill.hidden = 1;
     CV.slide = 0; CV.thumb = 0;
     cv_place();
     if (!cm_cell_on()) cv_pre_free();
@@ -773,6 +867,7 @@ static void cv_show(int mode)
     uint64_t t0 = tk_us();
     int was = CV.on;
     if (!was) { CV.keypad = 0; CV.dtmf[0] = 0; CV.answering = CV.ending = 0; CV.thumb = 0; }
+    if (mode == CVM_INCOMING && CV.mini) { CV.mini = 0; relayer(&cvpill); cvpill.hidden = 1; }   /* a new call: its screen */
     CV.on = 1; CV.a = CV.at = 1;              /* at once: a call never waits for a fade */
     CV.pend_close = 0; CV.close_at = -1;
     CV.mode = mode;
@@ -803,7 +898,8 @@ static void cv_hide(void)
 }
 static void cv_ended(void)
 {
-    if (CV.mode == CVM_INCOMING) { cv_hide(); return; }   /* the caller gave up: no screen, a missed call */
+    if (CV.mode == CVM_INCOMING || CV.mini) { cv_hide(); return; }   /* the caller gave up (a missed call), or the
+                                                                       * screen was away: its pill fades, no screen */
     CV.mode = CVM_ENDED;
     CV.keypad = 0; CV.ending = 0;
     cv_top();
@@ -964,18 +1060,34 @@ static void cv_up(void)
 
 /* ---- Messages -------------------------------------------------------------------------------------------------- */
 /* the inbox again from the platform; a new received message posts a notification (unless its thread is open) */
+static void cm_msgs_changed(void);
 static int cm_viewing(const char *num)
 {
     return is_app("messages") && !AP.closing && AS.thread == 0 && !tk_strcmp(CM.thr, num) && !SL.black;
+}
+/* a message's local time from its UTC stamp (the phone's offset now: the local clock against sh_utc); 0 unknown */
+static int cm_local(long long utc, int *hm, int *day)
+{
+    long long now = sh_utc();
+    if (utc <= 0 || now <= 0) return 0;
+    long long loc = (long long)ST.h * 3600 + ST.mi * 60, off = loc - now % 86400;
+    while (off > 14 * 3600) off -= 86400;
+    while (off < -12 * 3600) off += 86400;
+    off = (off + 450) / 900 * 900;                   /* zones are whole quarter hours */
+    long long t = utc + off, tn = now + off;
+    long long dd = (t >= 0 ? t / 86400 : (t - 86399) / 86400) - tn / 86400;
+    int s = (int)(t % 86400 + 86400) % 86400;
+    *hm = s / 3600 * 100 + s / 60 % 60;
+    *day = ST.day + (int)dd;
+    return 1;
 }
 static void cm_sync(void)
 {
     static int oid[SH_SMS_MAX], ohm[SH_SMS_MAX], oday[SH_SMS_MAX], ounr[SH_SMS_MAX];
     int on = nmsg;
     for (int i = 0; i < on; i++) { oid[i] = MSG[i].m.id; ohm[i] = MSG[i].hm; oday[i] = MSG[i].day; ounr[i] = MSG[i].unread; }
-    int n = sh_sms_count(), k = 0, top = msg_maxid;
-    if (n > SH_SMS_MAX) n = SH_SMS_MAX;
-    for (int i = 0; i < n; i++) {
+    int n = sh_sms_count(), k = 0, top = msg_maxid, i0 = n > SH_SMS_MAX ? n - SH_SMS_MAX : 0;
+    for (int i = i0; i < n && k < SH_SMS_MAX; i++) {
         cm_msg *m = &MSG[k];
         if (sh_sms_get(i, &m->m) < 0) continue;
         m->m.number[sizeof m->m.number - 1] = 0;
@@ -985,17 +1097,22 @@ static void cm_sync(void)
         while (j < on && oid[j] != m->m.id) j++;
         if (j < on) { m->hm = ohm[j]; m->day = oday[j]; m->unread = ounr[j]; }
         else {
-            m->hm = cm_now_hm(); m->day = ST.day;
+            if (!cm_local(m->m.utc, &m->hm, &m->day)) { m->hm = cm_now_hm(); m->day = ST.day; }
             m->unread = m->m.incoming && !cm_viewing(m->m.number);
-            if (m->m.incoming && m->m.id > msg_maxid && m->unread) sh_notify("messages", m->m.number, m->m.text, m->hm);
+            /* (the first look at a store kept over a restart posts nothing) */
+            if (m->m.incoming && m->m.id > msg_maxid && m->unread && msg_syncs) sh_notify("messages", m->m.number, m->m.text, m->hm);
         }
+        if (m->m.unread >= 0) m->unread = m->m.unread && !cm_viewing(m->m.number);   /* the kernel's store knows */
         if (m->m.id > top) top = m->m.id;
+        if (m->unread && cm_viewing(m->m.number)) { m->unread = 0; CM.read_due = 1; }
         k++;
     }
     nmsg = k;
     msg_maxid = top;
     msg_syncs++;
-    if (is_app("messages") && !AP.closing && !ap_pending) build_app_page(AP.a);
+    if (CM.read_due) { CM.read_due = 0; sh_sms_read(CM.thr); }   /* a message into the open thread: read */
+    cm_msgs_changed();
+    dk_badges();
 }
 void sh_sms_changed(unsigned gen)
 {
@@ -1005,10 +1122,12 @@ void sh_sms_changed(unsigned gen)
 }
 static void cm_mark_read(const char *num)
 {
-    for (int i = 0; i < nmsg; i++) if (!tk_strcmp(MSG[i].m.number, num)) MSG[i].unread = 0;
+    int any = 0;
+    for (int i = 0; i < nmsg; i++) if (!tk_strcmp(MSG[i].m.number, num)) { any |= MSG[i].unread; MSG[i].unread = 0; }
+    if (any) sh_sms_read(num);                       /* the kernel's store: the thread read (survives a restart) */
+    dk_badges();
 }
 /* the threads, newest first: a message index each (the thread's last) */
-#define CM_THR_MAX 8
 static int cm_threads(int *last, int max)
 {
     int n = 0;
@@ -1025,6 +1144,7 @@ static int cm_unread(const char *num)
     for (int i = 0; i < nmsg; i++) u += MSG[i].unread && !tk_strcmp(MSG[i].m.number, num);
     return u;
 }
+static int cm_badge_msgs(void) { int u = 0; for (int i = 0; i < nmsg; i++) u += MSG[i].unread; return u; }
 static void cm_when(char *b, const cm_msg *m, int with_day)
 {
     char hm[8];
@@ -1038,12 +1158,15 @@ static void cm_when(char *b, const cm_msg *m, int with_day)
     for (const char *p = hm; *p; p++) b[k++] = *p;
     b[k] = 0;
 }
-#define THR_TOP CONTENT_TOP
 #define THR_H 78.0f
-#define CM_FY_KB 492.0f                   /* the compose field over the keyboard */
-#define CM_FY 726.0f                      /* without it */
 #define TO_Y PUSHED_TOP                     /* New Message's To: row */
-static float cm_field_y(void) { return CM.focus ? CM_FY_KB : CM_FY; }
+#define THREAD_TOP 116.0f                   /* a thread's bubbles: under its header (the avatar, the number) */
+#define BUB_M 16.0f                         /* a bubble's edge from the screen's (design-ref §7) */
+#define CF_PLUS_X BUB_M                     /* the + glass circle (36) */
+#define CF_X 60.0f                          /* the compose field: 60 .. 374, 36 tall (§7) */
+#define CF_W (390 - BUB_M - CF_X)
+#define CF_TW (CF_W - 14 - 40)              /* its text's width (the send button inside, at its right) */
+#define CF_LINES 5                          /* the field grows to five lines, then shows the last five */
 static const char *const TOK[3] = { "1234567890", "-/:;()+&@\"", ".,?!'" };   /* the To: field's 123 layer */
 static const char *const *cm_rows(void) { return CM.focus == 1 && CM.num ? TOK : KR[CM.num]; }
 static int cm_can_send(void)
@@ -1052,152 +1175,368 @@ static int cm_can_send(void)
     for (const char *p = CM.txt; *p; p++) any |= *p != ' ' && *p != '\n';
     return any && (AS.thread == 0 || cm_digits(CM.to) >= 7);
 }
-/* the bubbles of the open thread, the newest at the bottom (bot), as many as fit under top */
-static void cm_bubbles(dc *d, float top, float bot)
+/* the field's lines (its text wrapped at CF_TW, 17 pt) */
+static int cm_field_lines(char ln[CM_ML][100], float *wm) { return CM.txt[0] ? cm_wrap(ln, CM.txt, 17, CF_TW, wm) : 1; }
+static float cm_field_h(void)
 {
-    int ix[SH_SMS_MAX], n = 0, lastout = -1;
-    for (int i = 0; i < nmsg; i++) if (!tk_strcmp(MSG[i].m.number, CM.thr)) { ix[n] = i; if (!MSG[i].m.incoming) lastout = n; n++; }
-    if (!n) {
-        d_text_box(d, TK_IT400, 13, 195, bl(TK_IT400, 13, (top + bot) / 2), CONTENT_W, 1, "No messages with this number yet.", 0, 0, W(.45f), 0);
-        return;
-    }
-    static char ln[CM_ML][100];
-    /* each message's lines are counted once a page build (at its first strip), not once a strip */
-    static int cnl[SH_SMS_MAX];
-    static float cwm[SH_SMS_MAX];
-    if (d->oy <= 0) for (int k = 0; k < n; k++) cnl[k] = cm_wrap(ln, MSG[ix[k]].m.text[0] ? MSG[ix[k]].m.text : " ", 267.88f, &cwm[k]);
-    float y = bot;
-    int first = n;
-    for (int k = n - 1; k >= 0; k--) {
-        const cm_msg *m = &MSG[ix[k]];
-        int nl = cnl[k];
-        float hh = 18 + 20.8f * nl;
-        int st = !m->m.incoming && (m->m.state == SH_SMS_SENDING || m->m.state == SH_SMS_FAILED || (k == lastout && m->m.state == SH_SMS_SENT));
-        if (st) hh += 18;
-        if (k < n - 1) hh += MSG[ix[k + 1]].m.incoming == m->m.incoming ? 4 : 12;
-        int gap = k > 0 && (MSG[ix[k - 1]].day != m->day || m->hm / 100 * 60 + m->hm % 100 - (MSG[ix[k - 1]].hm / 100 * 60 + MSG[ix[k - 1]].hm % 100) >= 60);
-        if (gap) hh += 30;
-        if (y - hh - (gap ? 0 : 30) < top) break;
-        y -= hh;
-        first = k;
-    }
-    if (first == n) first = n - 1, y = top + 30;
-    y -= 30;                                  /* the first shown gets its time */
-    for (int k = first; k < n; k++) {
-        const cm_msg *m = &MSG[ix[k]];
-        int gap = k == first || (MSG[ix[k - 1]].day != m->day || m->hm / 100 * 60 + m->hm % 100 - (MSG[ix[k - 1]].hm / 100 * 60 + MSG[ix[k - 1]].hm % 100) >= 60);
-        if (gap) {
-            char w[24];
-            cm_when(w, m, 1);
-            d_text_box(d, TK_IT500, 12, 195, bl(TK_IT500, 12, y + 8), CONTENT_W, 1, w, 0, 0, W(.45f), 0);
-            y += 30;
+    char ln[CM_ML][100];
+    float wm;
+    int n = tk_mini(CF_LINES, cm_field_lines(ln, &wm));
+    return 15 + 21.0f * n;                              /* one line: 36 pt, as iOS's capsule */
+}
+static float cm_field_bot(void) { return CM.focus ? 532 : H_PT - 30 - 8; }   /* 8 over the keyboard or the home band */
+static float cm_field_y(void) { return cm_field_bot() - cm_field_h(); }
+
+/* ---- the lists' items: Recents and Favourites (Phone), the threads and a thread's bubbles (Messages) --------- */
+static uint32_t cm_key(uint32_t a, uint32_t b, uint32_t c)
+{
+    uint32_t h = 2166136261u;
+    h = (h ^ a) * 16777619u; h = (h ^ b) * 16777619u; h = (h ^ c) * 16777619u;
+    return h | 1;                                       /* never 0 (a free slot) */
+}
+static tk_layer cmkb;                       /* the keyboard */
+/* a message's lines, once per message (its text never changes): the line count and the widest line */
+#define CM_BTW 268.0f                       /* a bubble's text width at most: 292 with its padding (§7) */
+static struct { int id, nl; float wm; } CWC[SH_SMS_MAX];
+static int cwc_n;
+static void cm_measure(const cm_msg *m, int *nl, float *wm)
+{
+    for (int i = 0; i < cwc_n; i++) if (CWC[i].id == m->m.id) { *nl = CWC[i].nl; *wm = CWC[i].wm; return; }
+    char ln[CM_ML][100];
+    *nl = cm_wrap(ln, m->m.text[0] ? m->m.text : " ", 17, CM_BTW, wm);
+    int k = cwc_n < SH_SMS_MAX ? cwc_n++ : 0;
+    if (k == 0 && cwc_n == SH_SMS_MAX) { for (int i = 0; i + 1 < SH_SMS_MAX; i++) CWC[i] = CWC[i + 1]; k = SH_SMS_MAX - 1; }
+    CWC[k].id = m->m.id; CWC[k].nl = *nl; CWC[k].wm = *wm;
+}
+static float cm_bubble_h(int nl) { return 14 + 22.0f * nl; }   /* one line: 36 */
+static int cm_gap(const cm_msg *a, const cm_msg *b)
+{
+    return a->day != b->day || b->hm / 100 * 60 + b->hm % 100 - (a->hm / 100 * 60 + a->hm % 100) >= 60;
+}
+/* iMessage's tail (its CSS, in pt): a 16 pt square with the corner away from the bubble rounded 12, less a 10 pt
+ * one rounded 8 beside the bubble: the bottom corner on the sender's side becomes the curl */
+static void d_tail(dc *d, float xe, float yb, int out, tk_col col)
+{
+    float bx = out ? xe - 10.4f : xe - 5.6f, cx = out ? xe : xe - 10;
+    tk_r4 kb = out ? (tk_r4){ 0, 0, 0, PT(12) } : (tk_r4){ 0, 0, PT(12), 0 };
+    tk_r4 kc = out ? (tk_r4){ 0, 0, 0, PT(8) } : (tk_r4){ 0, 0, PT(8), 0 };
+    int X0 = (int)tk_floorf(PT(xe - 12) - d->ox), X1 = (int)(PT(xe + 12) - d->ox) + 2;
+    int Y0 = (int)tk_floorf(PT(yb - 17) - d->oy), Y1 = (int)(PT(yb) - d->oy) + 2;
+    tk_fm m;
+    if (X1 <= X0 || Y1 <= Y0 || !tk_fm_new(&m, X1 - X0, Y1 - Y0)) return;
+    for (int j = 0; j < m.h; j++)
+        for (int i = 0; i < m.w; i++) {
+            float px = X0 + i + .5f + d->ox, py = Y0 + j + .5f + d->oy;
+            float a = tk_clampf(.5f - tk_sd_rrect4(px, py, PT(bx), PT(yb - 16), PT(16), PT(16), &kb), 0, 1);
+            if (a <= 0) continue;
+            float c = tk_clampf(.5f - tk_sd_rrect4(px, py, PT(cx), PT(yb - 16.4f), PT(10), PT(16), &kc), 0, 1);
+            m.v[j * m.w + i] = a * (1 - c);
         }
-        int nl = cnl[k], out = !m->m.incoming;
-        float bw = (nl > 1 ? 267.88f : cwm[k]) + 26, bh = 18 + 20.8f * nl, bx = out ? CONTENT_R - bw : MARGIN;
-        if (y + bh > top && PT(y + bh) >= d->oy && PT(y) <= d->oy + d->b->h) {   /* in this strip: its lines */
-            float wm;
-            cm_wrap(ln, m->m.text[0] ? m->m.text : " ", 267.88f, &wm);
-            tk_corner = (tk_r4){ PT(20), PT(20), PT(out ? 6 : 20), PT(out ? 20 : 6) };
-            tk_use_r4 = 1;
-            d_rrect(d, bx, y, bw, bh, 20, out ? (m->m.state == SH_SMS_FAILED ? tk_hex(0x2f7bf6, .55f) : tk_hex(0x2f7bf6, 1)) : tk_hex(0x262c3e, 1));
-            tk_use_r4 = 0;
-            for (int q = 0; q < nl; q++) d_text(d, TK_IT400, 16, bx + 13, bl(TK_IT400, 16, y + 9 + 20.8f * q), ln[q], 0, 0, INK, 0);
-        }
-        y += bh;
-        const char *st = 0;
-        tk_col sc = W(.45f);
+    tk_paint p = tk_solid(col);
+    tk_draw_fm(d->b, &m, X0, Y0, &p, 1);
+    tk_fm_free(&m);
+}
+#define BUB_OUT 0x30d158                    /* SMS: iOS's green (iMessage would be blue) */
+#define BUB_IN 0x262628                     /* systemGray5 (dark), as iOS's received bubble */
+/* the parts' heights above a bubble (the intro, the time, the gap to the one before) */
+static float cm_bub_above(uint16_t f)
+{
+    return (f & BF_FIRST ? 8 : 0) + (f & BF_INTRO ? 20 : 0) + (f & BF_TIME ? 42 : 0) + (!(f & BF_TIME) && !(f & BF_FIRST) ? (f & BF_GROUP ? 10 : 2) : 0);
+}
+static void cl_bubble(dc *d, int i, float top)
+{
+    const cm_msg *m = &MSG[CLI[i]];
+    uint16_t f = CLF[i];
+    int out = !m->m.incoming, nl;
+    float wm, y = top + (f & BF_FIRST ? 8 : 0);
+    if (f & BF_INTRO) {
+        d_text_box(d, TK_IT500, 12, 195, bl(TK_IT500, 12, y + 2), CONTENT_W, 1, "Text Message \xc2\xb7 SMS", 0, 0, W(.45f), 0);
+        y += 20;
+    }
+    if (f & BF_TIME) {
+        /* iOS: the day in semibold, the time regular, centred */
+        char w[24], hm[8];
+        cm_when(w, m, 1);
+        cm_hm(hm, m->hm);
+        int k = (int)tk_strlen(w) - (int)tk_strlen(hm);
+        char day[20];
+        for (int q = 0; q < k && q < 19; q++) day[q] = w[q];
+        day[k < 19 ? k : 19] = 0;
+        /* 11 / 600 + 11 / 400, secondaryLabel, 16 above and below (§7) */
+        float w1 = tw(TK_IT600, 11, day, 0, 0), w2 = tw(TK_IT400, 11, hm, 0, TK_TNUM), x = 195 - (w1 + w2) / 2;
+        d_text(d, TK_IT600, 11, x, bl(TK_IT600, 11, y + 15), day, 0, 0, W(.6f), 0);
+        d_text(d, TK_IT400, 11, x + w1, bl(TK_IT400, 11, y + 15), hm, 0, TK_TNUM, W(.6f), 0);
+        y += 42;
+    } else if (!(f & BF_FIRST)) y += f & BF_GROUP ? 10 : 2;
+    cm_measure(m, &nl, &wm);
+    int bad = m->m.state == SH_SMS_FAILED || m->m.state == SH_SMS_UNDELIVERED;
+    float bw = (nl > 1 ? CM_BTW : wm) + 24, bh = cm_bubble_h(nl), bx = out ? 390 - BUB_M - bw - (bad ? 30 : 0) : BUB_M;
+    tk_col col = out ? tk_hex(BUB_OUT, bad ? .55f : 1) : tk_hex(BUB_IN, 1);
+    if (bad) {                                        /* iOS's red ! beside a message that didn't go */
+        float cx = 390 - BUB_M - 11, cy = y + bh / 2;
+        d_rrect(d, cx - 11, cy - 11, 22, 22, 11, tk_hex(0xff4245, 1));
+        d_rrect(d, cx - 1.2f, cy - 6.5f, 2.4f, 8, 1.2f, W(1));
+        d_rrect(d, cx - 1.4f, cy + 3.2f, 2.8f, 2.8f, 1.4f, W(1));
+    }
+    d_rrect(d, bx, y, bw, bh, 18, col);
+    if (f & BF_TAIL) d_tail(d, out ? bx + bw : bx, y + bh, out, col);
+    char ln[CM_ML][100];
+    cm_wrap(ln, m->m.text[0] ? m->m.text : " ", 17, CM_BTW, &wm);
+    float l0 = (22 - lh(TK_IT400, 17)) / 2;
+    for (int q = 0; q < nl; q++) d_text(d, TK_IT400, 17, bx + 12, bl(TK_IT400, 17, y + 7 + l0 + 22.0f * q), ln[q], 0, 0, out ? W(1) : INK, 0);
+    y += bh;
+    if (f & BF_STATUS) {
+        const char *st = m->m.state == SH_SMS_DELIVERED ? "Delivered" : "Sent";
+        tk_col sc = W(.6f);
         char fw[80];
-        if (out && m->m.state == SH_SMS_SENDING) st = "Sending\xe2\x80\xa6";
-        else if (out && m->m.state == SH_SMS_FAILED) {
+        if (m->m.state == SH_SMS_SENDING) st = "Sending\xe2\x80\xa6";
+        else if (bad) {
             int q = 0;
             for (const char *p = "Not Delivered"; *p; p++) fw[q++] = *p;
             if (m->m.why[0]) { const char *dt = " \xc2\xb7 "; while (*dt) fw[q++] = *dt++; for (const char *p = m->m.why; *p && q < 78; p++) fw[q++] = *p; }
             fw[q] = 0;
             st = fw; sc = tk_hex(0xff453a, 1);
-        } else if (out && k == lastout && m->m.state == SH_SMS_SENT) st = "Sent";
-        if (st) {
-            d_text_box(d, TK_IT500, 11.5f, CONTENT_R - 4, bl(TK_IT500, 11.5f, y + 3), CONTENT_W, 2, st, 0, 0, sc, 0);
-            y += 18;
         }
-        if (k + 1 < n) y += MSG[ix[k + 1]].m.incoming == m->m.incoming ? 4 : 12;
+        d_text_box(d, TK_IT600, 11, 390 - BUB_M - 4, bl(TK_IT600, 11, y + 4), 390 - 2 * BUB_M, 2, st, 0, 0, sc, 0);
     }
+}
+/* a thread's row: the unread dot, the monogram, the number, the time and chevron, two lines of the last message */
+static void cl_thread_row(dc *d, int i, float y)
+{
+    const cm_msg *m = &MSG[CLI[i]];
+    if (cm_unread(m->m.number)) d_rrect(d, 5, y + 34, 10, 10, 5, tk_hex(0x0a84ff, 1));
+    d_monogram(d, MARGIN + 22, y + 39, 22, m->m.number);
+    char when[24];
+    cm_when(when, m, 0);
+    float ww = tw(TK_IT400, 15, when, 0, TK_TNUM), tx = MARGIN + 56;
+    d_text_box(d, TK_IT600, 17, tx, bl(TK_IT600, 17, y + 12), CONTENT_R - ww - 22 - tx, 0, m->m.number, 0, 0, INK, 0);
+    d_text(d, TK_IT400, 15, CONTENT_R - 14 - ww, bl(TK_IT400, 15, y + 13), when, 0, TK_TNUM, W(.5f), 0);
+    d_icon(d, "chev", CONTENT_R - 8, y + 15, .45f);
+    char ln[4][96], flat[160];
+    int q = 0;
+    if (!m->m.incoming) { const char *p = "You: "; while (*p) flat[q++] = *p++; }
+    for (const char *p = m->m.text; *p && q < 158; p++) flat[q++] = *p == '\n' ? ' ' : *p;
+    flat[q] = 0;
+    float wm;
+    int nl = wrapn(ln, 2, TK_IT400, 15, flat, CONTENT_R - tx, &wm);
+    for (int k = 0; k < nl; k++) d_text(d, TK_IT400, 15, tx, bl(TK_IT400, 15, y + 35 + 19 * k), ln[k], 0, 0, W(.55f), 0);
+    if (!(CLF[i] & BF_LAST)) d_rrect(d, tx, y + THR_H - .5f, 390 - tx, .5f, 0, W(.12f));
+}
+static void cl_draw(dc *d, int i, float top)
+{
+    switch (cl_kind) {
+    case CL_CALLS:
+        if (!i) cl_title(d, "Calls");
+        else if (CLF[i] & CF_HDR) d_text(d, TK_IT600, 15, MARGIN, bl(TK_IT600, 15, top + 12), CLI[i] ? "Recents" : "Favourites", 0, 0, W(.6f), 0);
+        else if (CLF[i] & CF_FAV) cl_fav_row(d, &FAV[CLI[i]], top, CLF[i] & BF_LAST);
+        else cl_rec_row(d, &RC[CLI[i]], top, CLF[i] & BF_LAST);
+        break;
+    case CL_THREADS: if (!i) cl_title(d, "Messages"); else cl_thread_row(d, i, top); break;
+    case CL_BUBBLES: cl_bubble(d, i, top); break;
+    default: break;
+    }
+}
+/* the open page's list (Recents, Favourites, the threads, a thread's bubbles) from the state now: new items drawn,
+ * changed ones redrawn, the rest moved (a page build or a change: never the whole page) */
+static void swp_end(void);
+static void mnu_close(void);
+static void cm_list_build(void)
+{
+    swp_end();
+    mnu_close();
+    int kind = CL_NONE, last[SH_SMS_MAX];
+    int nt = is_app("messages") && AS.thread < 0 ? cm_threads(last, SH_SMS_MAX) : 0;
+    if (is_app("phone") && AS.tab == 1 && (nrc || nfav)) kind = CL_CALLS;
+    else if (nt) kind = CL_THREADS;
+    else if (is_app("messages") && AS.thread == 0) kind = CL_BUBBLES;
+    if (kind == CL_NONE) {                            /* (another app's list is left alone) */
+        if (cl_kind != CL_NONE) { scv_off(&LS); ls_nav_build(0); cl_kind = CL_NONE; }
+        return;
+    }
+    if (kind != cl_kind) { scv_clear(&LS); LS.s = 0; }
+    cl_kind = kind;
+    ls_used = 1;
+    LS.draw = cl_draw;
+    LS.fade_t = 16; LS.fade_b = 16;
+    int n = 0, end = 0;
+    float y = 0;
+    if (kind != CL_BUBBLES) {
+        LS.top = LIST_T0;
+        LS.bot = kind == CL_THREADS ? H_PT : EMPTY_TAB;
+        LS.iy[0] = 0; LS.ih[0] = TITLE_H; LS.ik[0] = cm_key(kind, 0x7171u, 0); CLI[0] = -1; CLF[0] = 0;
+        y = TITLE_H; n = 1;
+        if (kind == CL_CALLS) {
+            /* the favourites (with their header), then the calls (a header too when there are favourites) */
+            for (int sct = 0; sct < 2; sct++) {
+                int cnt = sct ? nrc : nfav;
+                if (!cnt) continue;
+                if (nfav && n < SCV_MAXI) {
+                    CLI[n] = sct; CLF[n] = CF_HDR;
+                    LS.iy[n] = y; LS.ih[n] = 34; LS.ik[n] = cm_key(kind, 0x4800u + (uint32_t)sct, (uint32_t)(sct ? 0 : 1));
+                    y += 34; n++;
+                }
+                for (int i = 0; i < cnt && n < SCV_MAXI; i++, n++) {
+                    int lst = i == cnt - 1;
+                    CLI[n] = i; CLF[n] = (uint16_t)((sct ? 0 : CF_FAV) | (lst ? BF_LAST : 0));
+                    uint32_t id = (uint32_t)(sct ? RC[i].id : FAV[i].id);
+                    LS.iy[n] = y; LS.ih[n] = REC_H; LS.ik[n] = cm_key(kind, id, (uint32_t)(CLF[n] + (sct && cm_fav_has(RC[i].num) >= 0 ? 1024 : 0)));
+                    y += REC_H;
+                }
+                if (!sct) y += 12;
+            }
+        } else
+            for (int i = 0; i < nt && n < SCV_MAXI; i++, n++) {
+                const cm_msg *m = &MSG[last[i]];
+                uint32_t look = (uint32_t)(cm_unread(m->m.number) * 8 + m->m.state * 2 + (i == nt - 1)) ^ (uint32_t)(m->hm * 64 + m->day) << 8;
+                CLI[n] = last[i];
+                CLF[n] = i == nt - 1 ? BF_LAST : 0;
+                LS.iy[n] = y; LS.ih[n] = THR_H; LS.ik[n] = cm_key(kind, (uint32_t)m->m.id, look);
+                y += THR_H;
+            }
+        if (n > 1) LS.ih[n - 1] += 24;                  /* room at the end (over the tab bar / the home bar) */
+        ls_nav_build(kind == CL_CALLS ? "Calls" : "Messages");
+    } else {
+        int ix[SH_SMS_MAX], c = 0, lastout = -1;
+        for (int i = 0; i < nmsg; i++) if (!tk_strcmp(MSG[i].m.number, CM.thr)) { if (!MSG[i].m.incoming) lastout = c; ix[c++] = i; }
+        end = CM.to_end || scv_at_end(&LS);
+        CM.to_end = 0;
+        LS.top = THREAD_TOP;
+        LS.bot = cm_field_y() - 6;
+        LS.fade_t = 14; LS.fade_b = 8;
+        for (int k = 0; k < c && n < SCV_MAXI; k++, n++) {
+            const cm_msg *m = &MSG[ix[k]];
+            uint16_t f = 0;
+            if (!k) f |= BF_FIRST | BF_INTRO | BF_TIME;
+            else if (cm_gap(&MSG[ix[k - 1]], m)) f |= BF_TIME;
+            else if (MSG[ix[k - 1]].m.incoming != m->m.incoming) f |= BF_GROUP;
+            if (k == c - 1 || MSG[ix[k + 1]].m.incoming != m->m.incoming || cm_gap(m, &MSG[ix[k + 1]])) f |= BF_TAIL;
+            if (!m->m.incoming && (m->m.state == SH_SMS_SENDING || m->m.state == SH_SMS_FAILED || m->m.state == SH_SMS_UNDELIVERED ||
+                                   (k == lastout && (m->m.state == SH_SMS_SENT || m->m.state == SH_SMS_DELIVERED)))) f |= BF_STATUS;
+            int nl;
+            float wm;
+            cm_measure(m, &nl, &wm);
+            CLI[n] = ix[k]; CLF[n] = f;
+            LS.iy[n] = y; LS.ih[n] = cm_bub_above(f) + cm_bubble_h(nl) + (f & BF_STATUS ? 18 : 0);
+            LS.ik[n] = cm_key(CL_BUBBLES, (uint32_t)m->m.id, (uint32_t)(m->m.state * 256 + f));
+            y += LS.ih[n];
+        }
+        if (n) LS.ih[n - 1] += 10;
+        ls_nav_build(0);
+    }
+    scv_layout(&LS, n);
+    if (end) scv_to_end(&LS);
+    scv_place(&LS);
+    ls_moved();
+}
+/* the keyboard (a layer of its own: shift and 123 redraw only it) */
+static void cm_kb_build(void)
+{
+    relayer(&cmkb);
+    cmkb.hidden = 1;
+    if (!is_app("messages") || AS.thread < 0 || !CM.focus) return;
+    dc d = mk(&cmkb, "msg-kb", 0, 540, 390, H_PT - 540, 0, 0);
+    if (!d.b->px) return;
+    kb_draw_r(&d, cm_rows(), CM.shift, CM.num);
+    cmkb.hidden = 0;
+}
+static void cm_field_build(void);
+static void cm_to_build(void);
+/* the keyboard came or went, the field grew: everything below the header moves, nothing else is drawn again */
+static void cm_thread_relayout(int to_end)
+{
+    int end = to_end || scv_at_end(&LS);
+    cm_field_build();
+    cm_to_build();
+    cm_kb_build();
+    if (AS.thread == 0 && cl_kind == CL_BUBBLES) {
+        LS.bot = cm_field_y() - 6;
+        scv_layout(&LS, LS.n);
+        if (end) scv_to_end(&LS);
+        scv_place(&LS);
+    }
+    relink();
+}
+/* the inbox changed while Messages is open: the list's items again (a new bubble, a row's dot), not the page */
+static void cm_msgs_changed(void)
+{
+    if (!is_app("messages") || AP.closing || ap_pending) return;
+    if (AS.thread < 0) {
+        int last[SH_SMS_MAX];
+        int nt = cm_threads(last, SH_SMS_MAX);
+        if ((nt > 0) != (cl_kind == CL_THREADS)) { build_app_page(AP.a); return; }   /* the empty state came or went */
+    } else if (AS.thread != 0) return;
+    cm_list_build();
+    relink();
 }
 static void page_messages(dc *d)
 {
     if (AS.thread < 0) {
-        d_h1(d, "Messages");
         d_gcircle(d, GC_DONE);                    /* iOS 26: compose, a glass circle in the nav bar */
         d_compose(d, CONTENT_R - BACK_D / 2 + 1, NAV_MID, ACCENT());
-        int last[CM_THR_MAX], n = cm_threads(last, CM_THR_MAX);
-        if (!n) {
+        int last[SH_SMS_MAX];
+        if (!cm_threads(last, SH_SMS_MAX)) {      /* else the threads are the list (its title the first item) */
+            d_h1(d, "Messages");
             const char *l = !sh_comms_ok() ? "Text messages aren't in this version yet." :
                             cm_cell_on() ? "Texts you send and receive show here until the phone restarts." :
                             "Turn on Cellular to send and receive text messages.";
             d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Messages", l);
             if (sh_comms_ok() && !cm_cell_on()) cm_cell_button(d, cm_empty_bot(CONTENT_TOP, EMPTY_BOT, l) + 18);
-            return;
-        }
-        for (int i = 0; i < n; i++) {
-            const cm_msg *m = &MSG[last[i]];
-            float y = THR_TOP + THR_H * i;
-            if (y + THR_H > EMPTY_BOT) break;
-            if (cm_unread(m->m.number)) d_rrect(d, 24, y + 33, 10, 10, 5, tk_hex(0x0a84ff, 1));
-            d_person(d, 62, y + 39, 22);
-            char when[24];
-            cm_when(when, m, 0);
-            float ww = tw(TK_IT400, 15, when, 0, TK_TNUM), tx = 96;
-            d_text_box(d, TK_IT600, 17, tx, bl(TK_IT600, 17, y + 12), CONTENT_R - ww - 22 - tx, 0, m->m.number, 0, 0, INK, 0);
-            d_text(d, TK_IT400, 15, CONTENT_R - 14 - ww, bl(TK_IT400, 15, y + 13), when, 0, TK_TNUM, W(.5f), 0);
-            d_icon(d, "chev", CONTENT_R - 10, y + 15, .45f);
-            char ln[4][96], flat[160];
-            int q = 0;
-            if (!m->m.incoming) { const char *p = "You: "; while (*p) flat[q++] = *p++; }
-            for (const char *p = m->m.text; *p && q < 158; p++) flat[q++] = *p == '\n' ? ' ' : *p;
-            flat[q] = 0;
-            float wm;
-            int nl = wrapn(ln, 2, TK_IT400, 15, flat, CONTENT_R - tx, &wm);
-            for (int k = 0; k < nl; k++) d_text(d, TK_IT400, 15, tx, bl(TK_IT400, 15, y + 35 + 19 * k), ln[k], 0, 0, W(.55f), 0);
-            if (i + 1 < n) d_rrect(d, tx, y + THR_H - .5f, CONTENT_R - tx, .5f, 0, W(.1f));
         }
         return;
     }
     d_back(d, W(1));
-    d_navtitle(d, AS.thread == 0 ? CM.thr : "New Message");
-    float fy = cm_field_y();
-    if (AS.thread == 0) cm_bubbles(d, PUSHED_TOP - 12, fy - 10);
-    else {
+    if (AS.thread == 0) {
+        /* iOS 26's thread header: the monogram centred over the name */
+        d_monogram(d, 195, SAFE_TOP + 22, 21, CM.thr);
+        d_text_box(d, TK_IT500, 12, 195, bl(TK_IT500, 12, SAFE_TOP + 49), 220, 1, CM.thr, 0, TK_TNUM, W(.92f), 0);
+        int any = 0;
+        for (int i = 0; i < nmsg; i++) any |= !tk_strcmp(MSG[i].m.number, CM.thr);
+        if (!any) d_text_box(d, TK_IT400, 13, 195, bl(TK_IT400, 13, 300), CONTENT_W, 1, "No messages with this number yet.", 0, 0, W(.45f), 0);
+    } else {
+        d_navtitle(d, "New Message");
         d_text(d, TK_IT400, 16, MARGIN + 4, bl(TK_IT400, 16, TO_Y + 13), "To:", 0, 0, W(.5f), 0);
         d_rrect(d, MARGIN, TO_Y + 44, CONTENT_W, .5f, 0, W(.14f));
     }
-    if (CM.focus) kb_draw_r(d, cm_rows(), CM.shift, CM.num);
 }
-/* the compose field (its text, the send button), redrawn per key */
+/* an up arrow in a circle (send) */
+static void d_send(dc *d, float cx, float cy, float r, tk_col bg)
+{
+    d_rrect(d, cx - r, cy - r, 2 * r, 2 * r, r, bg);
+    d_seg(d, cx, cy - r * .5f, cx, cy + r * .5f, 2.2f, W(1));
+    d_seg(d, cx - r * .4f, cy - r * .1f, cx, cy - r * .5f, 2.2f, W(1));
+    d_seg(d, cx + r * .4f, cy - r * .1f, cx, cy - r * .5f, 2.2f, W(1));
+}
+/* the compose field: the + button, the capsule growing with its lines (the last five shown), the caret, send */
 static void cm_field_build(void)
 {
     relayer(&cmfld);
     if (!is_app("messages") || AS.thread < 0) { cmfld.hidden = 1; return; }
-    float fy = cm_field_y(), fw = CONTENT_W - 44;
-    dc d = mk(&cmfld, "msg-field", MARGIN, fy, CONTENT_W, 40, 2, 0);
-    d_rrect(&d, MARGIN, fy, fw, 40, 20, W(.08f));
-    d_rrect(&d, MARGIN + .5f, fy + .5f, fw - 1, 39, 19.5f, TK_RGBA(0, 0, 0, 0));
+    char ln[CM_ML][100];
+    float wm;
+    int nl = cm_field_lines(ln, &wm), first = nl > CF_LINES ? nl - CF_LINES : 0;
+    float fh = cm_field_h(), fy = cm_field_bot() - fh;
+    dc d = mk(&cmfld, "msg-field", CF_PLUS_X, fy, 390 - 2 * CF_PLUS_X, fh, 1, 0);
+    /* the + (attachments: not for SMS here) */
+    float pb = cm_field_bot();
+    d_rrect(&d, CF_PLUS_X, pb - 36, 36, 36, 18, W(.14f));
+    d_rrect(&d, CF_PLUS_X + .5f, pb - 35.5f, 35, 35, 17.5f, TK_RGBA(0, 0, 0, 0));
+    d_seg(&d, CF_PLUS_X + 18, pb - 25, CF_PLUS_X + 18, pb - 11, 2.2f, W(.8f));
+    d_seg(&d, CF_PLUS_X + 11, pb - 18, CF_PLUS_X + 25, pb - 18, 2.2f, W(.8f));
+    d_rrect(&d, CF_X, fy, CF_W, fh, 18, W(.18f));                     /* a glass capsule: its rim, then its face */
+    d_rrect(&d, CF_X + 1, fy + 1, CF_W - 2, fh - 2, 17, tk_hex(0x161b2b, 1));
+    float l0 = (21 - lh(TK_IT400, 17)) / 2;
     if (CM.txt[0]) {
-        /* one line: the end of what is typed (the start cut), the caret after it while the keyboard is up */
-        char flat[480];
-        int q = 0;
-        for (const char *p = CM.txt; *p && q < 478; p++) flat[q++] = *p == '\n' ? ' ' : *p;
-        flat[q] = 0;
-        const char *s = flat;
-        float maxw = fw - 32;
-        while (*s && tw(TK_IT400, 16, s, 0, 0) > maxw) { s++; while (((unsigned char)*s & 0xc0) == 0x80) s++; }
-        d_text(&d, TK_IT400, 16, MARGIN + 16, bl(TK_IT400, 16, fy + 10), s, 0, 0, INK, 0);
-        if (CM.focus == 2) d_rrect(&d, MARGIN + 16 + tw(TK_IT400, 16, s, 0, 0) + 1, fy + 10, 2, 21, 1, ACCENT());
+        float cx = CF_X + 14, cy = fy + 7.5f + 21.0f * (nl - 1 - first);
+        for (int q = first; q < nl; q++) d_text(&d, TK_IT400, 17, CF_X + 14, bl(TK_IT400, 17, fy + 7.5f + l0 + 21.0f * (q - first)), ln[q], 0, 0, INK, 0);
+        int n = (int)tk_strlen(CM.txt);
+        if (n && CM.txt[n - 1] == '\n') cy += 21;      /* a new line typed last: the caret on it */
+        else cx += tw(TK_IT400, 17, ln[nl - 1], 0, 0) + 1;
+        if (CM.focus == 2 && cy + 21 <= fy + fh) d_rrect(&d, cx, cy + 1, 2, 19, 1, ACCENT());
     } else {
-        d_text(&d, TK_IT400, 16, MARGIN + 16, bl(TK_IT400, 16, fy + 10), "Text Message", 0, 0, tk_hex(0xa9a9a9, 1), 0);
-        if (CM.focus == 2) d_rrect(&d, MARGIN + 15, fy + 10, 2, 21, 1, ACCENT());
+        d_text(&d, TK_IT400, 17, CF_X + 14, bl(TK_IT400, 17, fy + 7.5f + l0), "Text Message", 0, 0, W(.3f), 0);
+        if (CM.focus == 2) d_rrect(&d, CF_X + 13, fy + 9, 2, 19, 1, ACCENT());
     }
-    int ok = cm_can_send();
-    d_rrect(&d, CONTENT_R - 38, fy + 1, 38, 38, 19, ok ? tk_hex(0x0a84ff, 1) : W(.16f));
-    d_icon(&d, "send", CONTENT_R - 27, fy + 11, ok ? 1 : .5f);
+    if (cm_can_send()) d_send(&d, CF_X + CF_W - 18, pb - 18, 15, tk_hex(BUB_OUT, 1));
     trim(&cmfld);
     cmfld.hidden = 0;
 }
@@ -1220,20 +1559,27 @@ static void cm_send(void)
     if (!cm_can_send()) { if (AS.thread == 1 && cm_digits(CM.to) < 7) toast("Enter the whole number"); return; }
     if (cm_emergency(num)) { toast("Emergency numbers can't be texted from here"); return; }
     char why[SH_WHY] = "";
-    int s0 = msg_syncs;
-    if (sh_sms_send(num, CM.txt, why) < 0) { toast(why[0] ? why : "The message wasn't sent"); return; }
-    sh_haptic();
-    CM.txt[0] = 0;
     int was_new = AS.thread == 1;
     if (was_new) { cm_cpy(CM.thr, sizeof CM.thr, num); AS.thread = 0; CM.focus = 2; CM.num = 0; }
-    if (msg_syncs == s0 || was_new) { CM.shift = 1; build_app_page(AP.a); }   /* the keyboard capitalises again */
-    else { cm_field_build(); relink(); }         /* a push drew the bubble already: only the field, emptied */
+    CM.to_end = 1;                               /* the push draws the new bubble at the end, in view */
+    if (sh_sms_send(num, CM.txt, why) < 0) {
+        if (was_new) { AS.thread = 1; CM.focus = 1; CM.num = 1; }
+        CM.to_end = 0;
+        toast(why[0] ? why : "The message wasn't sent");
+        return;
+    }
+    sh_haptic();
+    CM.txt[0] = 0;
+    CM.shift = 1;                                /* the keyboard capitalises again */
+    if (was_new) build_app_page(AP.a);
+    else cm_thread_relayout(1);                  /* the field empties (and shrinks); the push drew the bubble */
 }
 static void cm_open_thread(const char *num)
 {
     cm_cpy(CM.thr, sizeof CM.thr, num);
     AS.thread = 0;
     CM.focus = 0;
+    CM.to_end = 1;                               /* opened at its newest message */
     cm_mark_read(num);
 }
 static void cm_msgs_tap(float x, float y)
@@ -1244,33 +1590,31 @@ static void cm_msgs_tap(float x, float y)
             build_app_page(AP.a);
             return;
         }
-        int last[CM_THR_MAX], n = cm_threads(last, CM_THR_MAX);
-        if (!n) {
+        if (cl_kind != CL_THREADS) {
             const char *l = "Turn on Cellular to send and receive text messages.";
             float by = cm_empty_bot(CONTENT_TOP, EMPTY_BOT, l) + 18;
             if (sh_comms_ok() && !cm_cell_on() && y >= by && y < by + 40 && tk_fabsf(x - 195) < CM_BTN_W / 2) cm_open_cellular();
             return;
         }
-        if (y >= THR_TOP && x >= MARGIN && x < CONTENT_R) {
-            int i = (int)((y - THR_TOP) / THR_H);
-            if (i < n && THR_TOP + THR_H * (i + 1) <= EMPTY_BOT) { cm_open_thread(MSG[last[i]].m.number); build_app_page(AP.a); }
-        }
+        int i = scv_hit(&LS, y, 0);
+        if (i >= 1) { cm_open_thread(MSG[CLI[i]].m.number); build_app_page(AP.a); }
         return;
     }
     if (BACK_HIT(x, y)) { AS.thread = -1; CM.focus = 0; build_app_page(AP.a); return; }
-    float fy = cm_field_y();
-    if (y >= fy - 4 && y < fy + 44) {
-        if (x >= CONTENT_R - 44) { cm_send(); return; }
-        if (CM.focus != 2) { CM.focus = 2; CM.num = 0; CM.shift = !CM.txt[0]; build_app_page(AP.a); }
+    float fy = cm_field_y(), fb = cm_field_bot();
+    if (y >= fy - 4 && y < fb + 6) {
+        if (x < CF_X - 4) { toast("Photos and attachments can't be sent by SMS yet"); return; }
+        if (x >= CF_X + CF_W - 40 && cm_can_send()) { cm_send(); return; }
+        if (CM.focus != 2) { CM.focus = 2; CM.num = 0; CM.shift = !CM.txt[0]; cm_thread_relayout(0); }
         return;
     }
     if (AS.thread == 1 && y >= TO_Y && y < TO_Y + 44) {
-        if (CM.focus != 1) { CM.focus = 1; CM.num = 1; CM.shift = 0; build_app_page(AP.a); }
+        if (CM.focus != 1) { CM.focus = 1; CM.num = 1; CM.shift = 0; cm_thread_relayout(0); }
         return;
     }
     if (!CM.focus) return;
     if (y < 540) {                               /* above the keyboard: it goes down */
-        if (y > PUSHED_TOP && y < fy - 4) { CM.focus = 0; build_app_page(AP.a); }
+        if (y > PUSHED_TOP && y < fy - 4) { CM.focus = 0; cm_thread_relayout(0); }
         return;
     }
     char c = 0;
@@ -1281,20 +1625,127 @@ static void cm_msgs_tap(float x, float y)
     else if (CM.focus == 1) {                    /* To: digits and a leading + only */
         int n = (int)tk_strlen(CM.to);
         if (k == 4 && n) CM.to[n - 1] = 0;
-        else if (k == 5) { CM.focus = 2; CM.num = 0; CM.shift = !CM.txt[0]; relayout = 1; }
+        else if (k == 5) { CM.focus = 2; CM.num = 0; CM.shift = !CM.txt[0]; relayout = 2; }
         else if (k == 1 && n < 20 && ((c >= '0' && c <= '9') || (c == '+' && !n))) { CM.to[n] = c; CM.to[n + 1] = 0; }
         else if (k == 1 && c != ' ') toast("Numbers only: there are no contacts yet");
         if (!relayout) { cm_to_build(); cm_field_build(); relink(); }
     } else {
         int n = (int)tk_strlen(CM.txt);
+        float h0 = cm_field_h();
         if (k == 4 && n) { n--; while (n > 0 && ((unsigned char)CM.txt[n] & 0xc0) == 0x80) n--; CM.txt[n] = 0; }
         else if ((k == 1 || k == 5) && n < (int)sizeof CM.txt - 2) {
             if (CM.shift && c >= 'A' && c <= 'Z') { CM.shift = 0; relayout = 1; }
             CM.txt[n] = c; CM.txt[n + 1] = 0;
         }
+        if (cm_field_h() != h0) relayout = 2;     /* the field grew or shrank: the bubbles above it move */
         if (!relayout) { cm_field_build(); relink(); }
     }
-    if (relayout) build_app_page(AP.a);
+    if (relayout == 1) { cm_kb_build(); cm_field_build(); relink(); }
+    else if (relayout == 2) cm_thread_relayout(0);
+}
+
+/* ---- deleting: a thread's swipe (iOS's trailing action), a bubble's long press (a small menu) --------------- */
+static tk_layer cmact, cmactw, cmmenu;
+static struct { int on, open, item; float dx; char num[24]; } SWP;     /* a thread row swiped */
+static struct { int on, id; float x, y, w, h; } MNU;                   /* a bubble's menu */
+#define SWP_OPEN 90.0f
+static tk_layer *cm_slot_of(int i)
+{
+    for (int k = 0; k < SCV_POOL; k++) if (LS.sk[k] && LS.sk[k] == LS.ik[i]) return &LS.L[k];
+    return 0;
+}
+static void swp_place(void)
+{
+    tk_layer *l = SWP.on ? cm_slot_of(SWP.item) : 0;
+    if (!SWP.on || !l) { cmact.hidden = cmactw.hidden = 1; cmact.gen++; cmactw.gen++; return; }
+    float top = LS.top + LS.iy[SWP.item] - LS.s, w = -SWP.dx;
+    l->x = l->bx + tk_floorf(PT(SWP.dx) + .5f);
+    l->gen++;
+    cmact.solid = 0xffff4245u;                       /* iOS's red, the revealed width */
+    cmact.x = PT(390 - w); cmact.y = PT(top);
+    cmact.solid_w = PT(w); cmact.solid_h = PT(THR_H);
+    cmact.hidden = w < 1;
+    cmact.gen++;
+    if (cmactw.bmp.px) {
+        cmactw.x = cmactw.bx - PT(w) / 2 + PT(SWP_OPEN) / 2;
+        cmactw.y = cmactw.by + PT(top);
+        cmactw.hidden = w < 40;
+        cmactw.alpha = tk_clampf((w - 40) / 30, 0, 1);
+        cmactw.gen++;
+    }
+}
+static void swp_begin(int item)
+{
+    SWP.on = 1; SWP.open = 0; SWP.item = item; SWP.dx = 0;
+    cm_cpy(SWP.num, sizeof SWP.num, MSG[CLI[item]].m.number);
+    tk_layer_init(&cmact, "swipe-action");
+    tk_layer *nx = cmactw.next;
+    dc d = mk(&cmactw, "swipe-words", 390 - SWP_OPEN, 0, SWP_OPEN, THR_H, 0, 0);
+    cmactw.next = nx;
+    if (d.b->px) {
+        d_text_box(&d, TK_IT600, 15, 390 - SWP_OPEN / 2, bl(TK_IT600, 15, THR_H / 2 - 9), SWP_OPEN - 8, 1, "Delete", 0, 0, W(1), 0);
+        trim(&cmactw);
+    }
+    hl_off();
+    relink();
+}
+static void swp_end(void)
+{
+    if (!SWP.on) return;
+    SWP.dx = 0;
+    swp_place();
+    SWP.on = SWP.open = 0;
+    relayer(&cmactw); cmactw.hidden = 1;
+    cmact.hidden = 1; cmact.solid = 0;
+    tk_layer *l = cm_slot_of(SWP.item);
+    if (l) { l->x = l->bx; l->gen++; }
+}
+static void swp_delete(void)
+{
+    char why[SH_WHY] = "", num[24];
+    cm_cpy(num, sizeof num, SWP.num);
+    swp_end();
+    sh_haptic();
+    if (sh_sms_delete_thread(num, why) < 0) toast(why[0] ? why : "The conversation couldn't be deleted");
+}
+static void mnu_close(void)
+{
+    if (!MNU.on) return;
+    MNU.on = 0;
+    relayer(&cmmenu);
+    cmmenu.hidden = 1;
+}
+/* a bubble held: the menu under it (over it near the field), Delete in red */
+static void mnu_open(int item)
+{
+    const cm_msg *m = &MSG[CLI[item]];
+    float top = LS.top + LS.iy[item] - LS.s + LS.ih[item];
+    MNU.on = 1; MNU.id = m->m.id;
+    MNU.w = 200; MNU.h = 48;
+    MNU.x = m->m.incoming ? BUB_M : 390 - BUB_M - MNU.w;
+    MNU.y = top + 8 + MNU.h > LS.bot ? LS.top + LS.iy[item] - LS.s - 8 - MNU.h : top + 8;
+    if (MNU.y < LS.top) MNU.y = LS.top + 8;
+    tk_layer *nx = cmmenu.next;
+    dc d = mk(&cmmenu, "bubble-menu", MNU.x, MNU.y, MNU.w, MNU.h, 16, 0);
+    cmmenu.next = nx;
+    if (d.b->px) {
+        /* a dark platter with a soft shadow (no glass bake in a touch) */
+        for (int k = 4; k >= 1; k--) d_rrect(&d, MNU.x - k * 2, MNU.y - k * 2 + 4, MNU.w + k * 4, MNU.h + k * 4, 24 + k * 2, TK_RGBA(0, 0, 0, .07f));
+        d_rrect(&d, MNU.x, MNU.y, MNU.w, MNU.h, 24, tk_hex(0x2c2c2e, 1));
+        d_text(&d, TK_IT400, 17, MNU.x + 20, bl(TK_IT400, 17, MNU.y + 13), "Delete", 0, 0, tk_hex(0xff4245, 1), 0);
+        /* a bin: its lid and body */
+        float gx = MNU.x + MNU.w - 34, gy = MNU.y + 15;
+        d_seg(&d, gx, gy + 2, gx + 14, gy + 2, 1.8f, tk_hex(0xff4245, 1));
+        d_seg(&d, gx + 5, gy, gx + 9, gy, 1.8f, tk_hex(0xff4245, 1));
+        d_seg(&d, gx + 2, gy + 4, gx + 3, gy + 17, 1.8f, tk_hex(0xff4245, 1));
+        d_seg(&d, gx + 12, gy + 4, gx + 11, gy + 17, 1.8f, tk_hex(0xff4245, 1));
+        d_seg(&d, gx + 3, gy + 17, gx + 11, gy + 17, 1.8f, tk_hex(0xff4245, 1));
+        trim(&cmmenu);
+        cmmenu.hidden = 0;
+    }
+    hl_off();
+    sh_haptic();                                     /* iOS: the menu's lift (impact .medium) */
+    relink();
 }
 
 /* ---- the shell's hooks --------------------------------------------------------------------------------------- */
@@ -1304,13 +1755,20 @@ static int cm_app_tap(float x, float y)
     if (is_app("messages")) { cm_msgs_tap(x, y); return 1; }
     return 0;
 }
-/* a page was built (own_extras): the keypad's line, the fields */
+/* a page was built (own_extras, the last of them): the keypad's line, the lists, the fields; the list goes when no
+ * page of this build used it */
 static void cm_extras(const char *k)
 {
     if (tk_strcmp(k, "phone")) { relayer(&cmhint); cmhint.hidden = 1; cm_ring_free(); }
     else cm_hint_build();
+    if (!tk_strcmp(k, "phone") && AS.tab == 1 && rc_missed) { rc_missed = 0; dk_badges(); }   /* iOS: Recents seen */
+    if (!tk_strcmp(k, "phone") || !tk_strcmp(k, "messages")) cm_list_build();
+    else if (cl_kind != CL_NONE) cl_kind = CL_NONE;
     cm_field_build();
     cm_to_build();
+    cm_kb_build();
+    if (!ls_used && LS.on) { scv_off(&LS); ls_nav_build(0); }
+    ls_used = 0;
 }
 static int cm_layers(tk_layer **o)
 {
@@ -1319,17 +1777,26 @@ static int cm_layers(tk_layer **o)
     if (!cmring.name) { tk_layer_init(&cmring, "dial-ring"); cmring.hidden = 1; }
     if (!cmfld.name) { tk_layer_init(&cmfld, "msg-field"); cmfld.hidden = 1; }
     if (!cmto.name) { tk_layer_init(&cmto, "msg-to"); cmto.hidden = 1; }
-    o[n++] = &cmhint; o[n++] = &cmring; o[n++] = &cmfld; o[n++] = &cmto;
+    if (!cmkb.name) { tk_layer_init(&cmkb, "msg-kb"); cmkb.hidden = 1; }
+    n += ls_layers(o + n);                     /* the list and the inline title (shell_apps.inc) */
+    if (!cmact.name) { tk_layer_init(&cmact, "swipe-action"); cmact.hidden = 1; }
+    if (!cmactw.name) { tk_layer_init(&cmactw, "swipe-words"); cmactw.hidden = 1; }
+    if (!cmmenu.name) { tk_layer_init(&cmmenu, "bubble-menu"); cmmenu.hidden = 1; }
+    o[n++] = &cmact; o[n++] = &cmactw;
+    o[n++] = &cmhint; o[n++] = &cmring; o[n++] = &cmfld; o[n++] = &cmto; o[n++] = &cmkb; o[n++] = &cmmenu;
     return n;
 }
 static void cm_link(void)
 {
     if (!cvl.name) { tk_layer_init(&cvl, "call"); cvl.hidden = 1; }
     if (!cvhl.name) { tk_layer_init(&cvhl, "press"); cvhl.hidden = 1; }
-    tk_layer *P[] = { &cvdec, &cvacc, &cvend, &cvtrbg, &cvtrack, &cvthumb, &cvsb, &cvtop, &cvst, &cvctl, &cvhide };
+    tk_layer *P[] = { &cvdec, &cvacc, &cvend, &cvtrbg, &cvtrack, &cvthumb, &cvsb, &cvtop, &cvst, &cvctl, &cvhide, &cvpill };
     for (unsigned i = 0; i < sizeof P / sizeof P[0]; i++) if (!P[i]->name) { tk_layer_init(P[i], "cv"); P[i]->hidden = 1; }
     if (!cvbg.name) { tk_layer_init(&cvbg, "cv-ground"); cvbg.hidden = 1; }
-    if (CV.on) {
+    if (CV.on && CV.mini) {
+        tk_layer *c[] = { &cvpill };
+        link(&cvl, c, 1);
+    } else if (CV.on) {
         cvbg.hidden = 0;
         tk_layer *c[] = { &cvbg, &cvsb, &cvtop, &cvst, &cvctl, &cvhide, &cvend, &cvdec, &cvacc, &cvtrbg, &cvtrack, &cvthumb, &cvhl };
         link(&cvl, c, (int)(sizeof c / sizeof c[0]));
@@ -1346,17 +1813,24 @@ static void cm_opened(int a)
         CM.focus = 0;
         if (CM.want_view && CM.want_thr[0]) cm_open_thread(CM.want_thr);
     }
+    LS.s = 0;
     CM.why[0] = 0;
     CM.want_sub = 0; CM.want_view = 0; CM.want_thr[0] = 0; CM.want_tab = -1;
 }
 static void cm_closed(void)
 {
-    if (CM.own == 2) CM.own = 0;
+    if (CM.own == 2 || CM.own == 3) CM.own = 0;
     CM.hold = 0;
     cm_ring_free();
     relayer(&cmhint); cmhint.hidden = 1;
     relayer(&cmfld); cmfld.hidden = 1;
     relayer(&cmto); cmto.hidden = 1;
+    relayer(&cmkb); cmkb.hidden = 1;
+    swp_end();
+    mnu_close();
+    scv_off(&LS);
+    ls_nav_build(0);
+    cl_kind = CL_NONE;
     CM.focus = 0;
 }
 static void cm_open_cellular(void)
@@ -1383,21 +1857,91 @@ static void cm_nc_launch(const char *who, const char *title, int a)
     if (msgs) cm_cpy(CM.want_thr, sizeof CM.want_thr, title);
     else CM.want_tab = 1;
 }
-/* every touch first: the call screen owns the screen; the call button's hold is followed here */
+/* the list takes a touch: an app at rest with a list under the finger */
+static void app_press(float x, float y);
+static int cm_list_ready(void)
+{
+    return AP.on && !AP.closing && !sp_app.live && !ap_pending && !sw_on() && !nc_on() && !(CV.on && CV.at > 0 && !CV.mini);
+}
+/* every touch first: the call screen owns the screen (or its pill, while it is away); the call button's hold; a
+ * list's drag (a tap on it goes to the app as any tap) */
 static int cm_touch(int ph, float x, float y, float t)
 {
     if (ph == 0) {
         CM.down_t = t;
         CM.own = 0;
-        if (CV.on && CV.at > 0) { CM.own = 1; cv_down(x, y); return 1; }
+        if (CV.on && CV.at > 0 && CV.mini) {
+            if (y < 50 && x < CV.pill_r + 14) { CM.own = 4; CM.hx = x; CM.hy = y; return 1; }
+        } else if (CV.on && CV.at > 0) {
+            CM.own = 1;
+            cv_down(x, y);
+            CV.swipe = y >= H_PT - 34 && CV.mode == CVM_CALL;   /* iOS: the home gesture leaves the call (its pill) */
+            return 1;
+        }
+        if (MNU.on || (SWP.on && SWP.open)) { CM.own = 7; CM.hx = x; CM.hy = y; return 1; }
         float dx = x - PAD_CX, dy = y - PAD_CY;
         if (cm_pad_ready() && dx * dx + dy * dy <= 41 * 41) { CM.own = 2; cm_hold_begin(x, y, t); return 1; }
+        if (cm_list_ready() && scv_contains(&LS, x, y)) {
+            CM.own = 3;
+            CM.hx = x; CM.hy = y;
+            scv_touch(&LS, 0, x, y, t);
+            app_press(x, y);
+            return 1;
+        }
         return 0;
     }
     if (!CM.own) return 0;
+    if (CM.own == 7) {                                /* the tap after an open swipe or menu: its action, or it closes */
+        if (ph != 2) return 1;
+        CM.own = 0;
+        int moved = tk_fabsf(x - CM.hx) > 12 || tk_fabsf(y - CM.hy) > 12;
+        if (MNU.on) {
+            int in = !moved && x >= MNU.x && x < MNU.x + MNU.w && y >= MNU.y && y < MNU.y + MNU.h, id = MNU.id;
+            mnu_close();
+            relink();
+            if (in) {
+                char why[SH_WHY] = "";
+                sh_haptic();
+                if (sh_sms_delete(id, why) < 0) toast(why[0] ? why : "The message couldn't be deleted");
+            }
+            return 1;
+        }
+        float top = LS.top + LS.iy[SWP.item] - LS.s;
+        if (!moved && x >= 390 - SWP_OPEN && y >= top && y < top + THR_H) swp_delete();
+        else swp_end();
+        return 1;
+    }
+    if (CM.own == 6) {                                /* a thread row slid sideways */
+        float d = x - CM.hx;
+        SWP.dx = d < 0 ? (d > -SWP_OPEN * 2.6f ? d : -SWP_OPEN * 2.6f + (d + SWP_OPEN * 2.6f) * .3f) : d * .2f;
+        swp_place();
+        if (ph == 2) {
+            CM.own = 0;
+            if (SWP.dx < -230) swp_delete();                    /* a full swipe: deleted at once (iOS) */
+            else if (SWP.dx < -45) { SWP.open = 1; SWP.dx = -SWP_OPEN; swp_place(); }
+            else swp_end();
+        }
+        return 1;
+    }
+    if (CM.own == 3 && ph == 1 && !LS.moved && cl_kind == CL_THREADS && tk_fabsf(x - CM.hx) > 10 && tk_fabsf(x - CM.hx) > 1.5f * tk_fabsf(y - CM.hy)) {
+        int i = scv_hit(&LS, CM.hy, 0);
+        if (i >= 1) { LS.down = 0; CM.own = 6; swp_begin(i); SWP.dx = x - CM.hx; swp_place(); return 1; }
+    }
+    if (CM.own == 3) {
+        int tap = scv_touch(&LS, ph, x, y, t);
+        if (LS.moved) { hl_off(); ls_moved(); }
+        if (ph == 2) { CM.own = 0; hl_off(); if (tap && AP.on) app_tap(x, y); }
+        return 1;
+    }
+    if (CM.own == 5) { if (ph == 2) CM.own = 0; return 1; }   /* the rest of the swipe that hid the call screen */
     int moved = tk_fabsf(x - (CM.own == 1 ? CV.x0 : CM.hx)) > 12 || tk_fabsf(y - (CM.own == 1 ? CV.y0 : CM.hy)) > 12;
+    if (CM.own == 4) {
+        if (ph == 2) { CM.own = 0; if (!moved && CV.on) cv_mini(0); }
+        return 1;
+    }
     if (CM.own == 1) {
         if (!CV.on) { if (ph == 2) CM.own = 0; return 1; }
+        if (CV.swipe && CV.y0 - y > 60 && CV.mode == CVM_CALL) { cvhl.hidden = 1; cv_mini(1); CM.own = ph == 2 ? 0 : 5; return 1; }
         if (CV.slide) {
             if (moved) CV.moved = 1;
             CV.thumb = tk_clampf(CV.tx0 + x - CV.x0, 0, CV_TH_MAX);
@@ -1432,6 +1976,12 @@ static int cm_tick(float dt, float t)
         else cv_place();
         mv = 1;
     }
+    if (scv_tick(&LS, dt)) { ls_moved(); mv = 1; }
+    if (CM.own == 3 && LS.down && !LS.moved && cl_kind == CL_BUBBLES && !MNU.on && t - CM.down_t >= 450) {
+        int i = scv_hit(&LS, CM.hy, 0);                /* a bubble held: its menu (the lift then does nothing) */
+        if (i >= 0) { LS.down = 0; CM.own = 5; mnu_open(i); }
+        mv = 1;
+    } else if (CM.own == 3 && LS.down && !LS.moved && cl_kind == CL_BUBBLES) mv = 1;
     if (CV.on && !CV.slide && CV.thumb > 0 && CV.mode == CVM_INCOMING && !CV.answering) {
         CV.thumb = CV.thumb < 1 ? 0 : CV.thumb * tk_powf(.001f, dt * 2.5f);
         cv_place();
@@ -1441,7 +1991,8 @@ static int cm_tick(float dt, float t)
 }
 static int cm_moving(void)
 {
-    return CM.hold || (CV.on && CV.a != CV.at) || CV.slide || (CV.on && CV.thumb > 0 && CV.mode == CVM_INCOMING && !CV.answering);
+    return CM.hold || (CV.on && CV.a != CV.at) || CV.slide || (CV.on && CV.thumb > 0 && CV.mode == CVM_INCOMING && !CV.answering) ||
+           scv_moving(&LS);
 }
 /* idle: the call screen's static parts while Cellular is on (gone with it) */
 static void cm_idle(void)
@@ -1462,39 +2013,35 @@ static int cm_refresh(float t)
 }
 static void cm_minute(void)
 {
-    if (CV.on && CV.at > 0) { cv_sb(); cvsb.hidden = 0; relink(); }
+    if (CV.on && CV.at > 0 && CV.mini) { cv_pill_build(); relink(); }
+    else if (CV.on && CV.at > 0) { cv_sb(); cvsb.hidden = 0; relink(); }
 }
 /* press feedback for rows and buttons (app_press) */
 static int cm_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
 {
-    if (is_app("phone") && AS.tab == 1 && nrc) {
-        int n = nrc < REC_MAX ? nrc : REC_MAX;
-        if (x >= GROUP_X && x < CONTENT_R && y >= CONTENT_TOP && y < CONTENT_TOP + REC_H * n) {
-            int i = (int)((y - CONTENT_TOP) / REC_H);
-            *r = (tk_rect){ GROUP_X, CONTENT_TOP + REC_H * i, GROUP_W, REC_H };
-            *g = (tk_rect){ GROUP_X, CONTENT_TOP, GROUP_W, REC_H * n };
-            *rad = 16;
-            return 1;
-        }
-        return 0;
+    if (!is_app("phone") && !is_app("messages")) return 0;
+    if (LS.on && (cl_kind == CL_CALLS || cl_kind == CL_THREADS) && scv_contains(&LS, x, y)) {
+        float top;
+        int i = scv_hit(&LS, y, &top);
+        if (i < 1 || (cl_kind == CL_CALLS && (CLF[i] & CF_HDR))) return 0;
+        float rh = cl_kind == CL_THREADS ? THR_H : REC_H;
+        *g = (tk_rect){ 0, LS.top, 390, LS.bot - LS.top };
+        if (cl_kind != CL_THREADS && x >= INFO_X - 22) { *r = (tk_rect){ INFO_X - 16, top + rh / 2 - 16, 32, 32 }; *rad = 16; *c = W(.16f); return 1; }
+        *r = (tk_rect){ 0, top, 390, rh };
+        *rad = 0; *c = W(.08f);
+        return 1;
     }
     if (!is_app("messages")) return 0;
     if (AS.thread < 0) {
         if (DONE_HIT(x, y)) { *r = *g = (tk_rect){ CONTENT_R - BACK_D, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *c = W(.16f); return 1; }
-        int last[CM_THR_MAX], n = cm_threads(last, CM_THR_MAX);
-        if (y >= THR_TOP && y < THR_TOP + THR_H * n && x >= 0 && x < 390) {
-            int i = (int)((y - THR_TOP) / THR_H);
-            *r = *g = (tk_rect){ 0, THR_TOP + THR_H * i, 390, THR_H };
-            *rad = 0; *c = W(.08f);
-            return 1;
-        }
         return 0;
     }
-    float fy = cm_field_y();
-    if (y >= fy - 4 && y < fy + 44 && x >= CONTENT_R - 44 && cm_can_send()) {
-        *r = *g = (tk_rect){ CONTENT_R - 38, fy + 1, 38, 38 }; *rad = 19; *c = W(.25f);
+    float fb = cm_field_bot();
+    if (y >= cm_field_y() - 4 && y < fb + 6 && x >= CF_X + CF_W - 40 && cm_can_send()) {
+        *r = *g = (tk_rect){ CF_X + CF_W - 33, fb - 33, 30, 30 }; *rad = 15; *c = W(.25f);
         return 1;
     }
+    if (y >= fb - 40 && y < fb + 6 && x < CF_X - 4) { *r = *g = (tk_rect){ CF_PLUS_X, fb - 36, 36, 36 }; *rad = 18; *c = W(.18f); return 1; }
     if (CM.focus && y >= 548 && kb_rect(x, y, cm_rows(), !CM.num, r)) { *g = *r; *rad = 6; *c = W(.35f); return 1; }
     return 0;
 }
@@ -1535,6 +2082,9 @@ static int cm_set(const char *what, const char *key, float v)
         if (cm_pad_ready() && AS.num[0]) { cm_hold_begin(PAD_CX, PAD_CY, now_ms); cm_ring_build(); cm_ring_set(v); CM.hold = 0; }
         return 1;
     }
+    if (!tk_strcmp(what, "lscroll")) { LS.s = v < 0 ? scv_max(&LS) : tk_clampf(v, 0, scv_max(&LS)); scv_place(&LS); ls_moved(); return 1; }
+    if (!tk_strcmp(what, "callmini")) { if (CV.on) cv_mini(v > 0); return 1; }
+    if (!tk_strcmp(what, "fav")) { if (cm_fav_has(key) < 0) cm_fav_toggle(key); if (AP.on) build_app_page(AP.a); return 1; }
     if (!tk_strcmp(what, "slide")) { CV.thumb = CV_TH_MAX * tk_clampf(v, 0, 1); if (CV.on) cv_place(); return 1; }
     return 0;
 }

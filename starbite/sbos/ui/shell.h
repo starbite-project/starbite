@@ -248,10 +248,11 @@ typedef struct {
     char why[SH_WHY];                   /* how it ended, in words */
     char audio_why[SH_WHY];             /* fa4ec7f: audio_ok 0: the missing part; audio_ok 1: a warning (the mic) */
 } sh_call_t;
-#define SH_SMS_MAX 32
-enum { SH_SMS_RECEIVED, SH_SMS_SENDING, SH_SMS_SENT, SH_SMS_FAILED };
+#define SH_SMS_MAX 200                  /* the newest this many (the kernel's store keeps up to 200, across restarts) */
+enum { SH_SMS_RECEIVED, SH_SMS_SENDING, SH_SMS_SENT, SH_SMS_FAILED, SH_SMS_DELIVERED, SH_SMS_UNDELIVERED };
 typedef struct {
-    int id, incoming, state;            /* SH_SMS_* */
+    int id, incoming, state;            /* SH_SMS_* (the kernel's ksms states) */
+    int unread;                         /* the kernel's (its store): 1 / 0; -1 not known (the shell keeps its own) */
     long long utc;
     char number[24];
     char text[512];                     /* UTF-8 */
@@ -271,5 +272,10 @@ int sh_dtmf(char digit);                /* 0-9 * # while connected */
 int sh_sms_send(const char *number, const char *utf8, char *why);
 int sh_sms_count(void);                 /* in RAM, newest last */
 int sh_sms_get(int i, sh_sms_t *m);     /* 0 ok */
+/* the kernel's SMS store (KMODEM_SMS_STORE; without it: read does nothing, the deletes refuse "Not in this version"):
+ * a thread shown is marked read; a message or a whole thread deleted by the user's own tap */
+int sh_sms_read(const char *number);
+int sh_sms_delete(int id, char *why);
+int sh_sms_delete_thread(const char *number, char *why);
 
 #endif

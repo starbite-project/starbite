@@ -507,6 +507,14 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         }
         fputc('\n', log);
         if (getenv("SBTK_DUMP") && frame == atoi(getenv("SBTK_DUMP"))) write_ppm(getenv("SBTK_DUMPTO"), &c->panel);
+        if (getenv("SBTK_DUMPS")) {                   /* B5: "N,M,...": frames N, M ... to SBTK_DUMPTO-N.ppm */
+            for (const char *q = getenv("SBTK_DUMPS"); *q; q++)
+                if ((q == getenv("SBTK_DUMPS") || q[-1] == ',') && atoi(q) == frame) {
+                    char fn[600];
+                    snprintf(fn, sizeof fn, "%s-%d.ppm", getenv("SBTK_DUMPTO"), frame);
+                    write_ppm(fn, &c->panel);
+                }
+        }
         if (none) ;
         else if (half) {
             tk_bmp_down2(&h, &c->panel);

@@ -1349,11 +1349,39 @@ int sh_sms_get(int i, sh_sms_t *m)
     struct ksms k;
     if (kmodem_sms_get(i, &k) < 0) return -1;
     m->id = k.id; m->incoming = k.incoming; m->state = k.state; m->utc = k.utc;
+#ifdef KMODEM_SMS_STORE
+    m->unread = k.unread;                            /* states 4 delivered / 5 not delivered: SH_SMS_* */
+#else
+    m->unread = -1;
+#endif
     sb_strcpy(m->number, sizeof(m->number), k.number);
     sb_strcpy(m->text, sizeof(m->text), k.text);
     sb_strcpy(m->why, sizeof(m->why), k.why);
     return 0;
 }
+/* B5: the store (the modem session's KMODEM_SMS_STORE): read marks, deletes at the user's own tap; refused in the
+ * self test (it never changes what is stored) */
+#ifdef KMODEM_SMS_STORE
+int sh_sms_read(const char *number) { return kmodem_sms_read(number); }
+int sh_sms_delete(int id, char *why)
+{
+    COMMS_DRY("SMS delete", why);
+    int r = kmodem_sms_delete(id);
+    if (r < 0) comms_why(why, "The message couldn't be deleted");
+    return r < 0 ? r : 0;
+}
+int sh_sms_delete_thread(const char *number, char *why)
+{
+    COMMS_DRY("SMS delete", why);
+    int r = kmodem_sms_delete_thread(number);
+    if (r < 0) comms_why(why, "The conversation couldn't be deleted");
+    return r < 0 ? r : 0;
+}
+#else
+int sh_sms_read(const char *number) { (void)number; return 0; }
+int sh_sms_delete(int id, char *why) { (void)id; comms_why(why, "Not in this version"); return -1; }
+int sh_sms_delete_thread(const char *number, char *why) { (void)number; comms_why(why, "Not in this version"); return -1; }
+#endif
 /* the call's state and the inbox's generation to the shell when they change (from the draw hook: never inside a
  * frame); 1 if anything was pushed. An incoming call wakes the screen (the kernel notifies as well). */
 static int comms_now(void)
@@ -1394,6 +1422,9 @@ int sh_dtmf(char d) { (void)d; COMMS_DRY("key tone", (char *)0); return -1; }
 int sh_sms_send(const char *number, const char *utf8, char *why) { (void)number; (void)utf8; COMMS_DRY("SMS send", why); COMMS_NONE(why); }
 int sh_sms_count(void) { return 0; }
 int sh_sms_get(int i, sh_sms_t *m) { (void)i; (void)m; return -1; }
+int sh_sms_read(const char *number) { (void)number; return 0; }
+int sh_sms_delete(int id, char *why) { (void)id; comms_why(why, "Not in this version"); return -1; }
+int sh_sms_delete_thread(const char *number, char *why) { (void)number; comms_why(why, "Not in this version"); return -1; }
 static int comms_now(void) { return 0; }
 #endif
 

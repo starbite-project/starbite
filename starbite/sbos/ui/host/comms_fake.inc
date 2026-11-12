@@ -108,7 +108,7 @@ int sh_sms_send(const char *number, const char *utf8, char *why)
     if (FM.n == SH_SMS_MAX) { memmove(&FM.m[0], &FM.m[1], sizeof FM.m[0] * (SH_SMS_MAX - 1)); memmove(&FM.sent_at[0], &FM.sent_at[1], sizeof(float) * (SH_SMS_MAX - 1)); FM.n--; }
     sh_sms_t *m = &FM.m[FM.n];
     memset(m, 0, sizeof *m);
-    m->id = ++FM.ids; m->incoming = 0; m->state = SH_SMS_SENDING; m->utc = 1794500000LL + (long long)(fc_now / 1000);
+    m->id = ++FM.ids; m->incoming = 0; m->state = SH_SMS_SENDING; m->utc = 1794500000LL + (long long)(fc_now / 1000); m->unread = 0;
     snprintf(m->number, sizeof m->number, "%s", number);
     snprintf(m->text, sizeof m->text, "%s", utf8);
     FM.sent_at[FM.n] = fc_now;
@@ -130,7 +130,7 @@ static void fm_receive(const char *number, const char *text, int quiet)
     if (FM.n == SH_SMS_MAX) { memmove(&FM.m[0], &FM.m[1], sizeof FM.m[0] * (SH_SMS_MAX - 1)); memmove(&FM.sent_at[0], &FM.sent_at[1], sizeof(float) * (SH_SMS_MAX - 1)); FM.n--; }
     sh_sms_t *m = &FM.m[FM.n];
     memset(m, 0, sizeof *m);
-    m->id = ++FM.ids; m->incoming = 1; m->state = SH_SMS_RECEIVED; m->utc = 1794500000LL + (long long)(fc_now / 1000);
+    m->id = ++FM.ids; m->incoming = 1; m->state = SH_SMS_RECEIVED; m->utc = 1794500000LL + (long long)(fc_now / 1000); m->unread = 1;
     snprintf(m->number, sizeof m->number, "%s", number);
     snprintf(m->text, sizeof m->text, "%s", text);
     FM.sent_at[FM.n] = -1;
@@ -146,6 +146,74 @@ static void fm_inbox(void)
     FM.m[FM.n - 1].incoming = 0;
     FM.m[FM.n - 1].state = SH_SMS_SENT;
     fm_receive("+15550100", "I can bring the cable if you need it", 1);
+    fm_bump();
+}
+/* B5: the kernel's store as the previews see it: read marks, deletes; "inbox2" a full one (twelve threads, a long
+ * conversation, some of it from yesterday: the restart case, messages the store kept) */
+int sh_sms_read(const char *number)
+{
+    int ch = 0;
+    for (int i = 0; i < FM.n; i++) if (FM.m[i].unread && !strcmp(FM.m[i].number, number)) { FM.m[i].unread = 0; ch = 1; }
+    if (ch) fm_bump();
+    return 0;
+}
+static void fm_drop(int i)
+{
+    memmove(&FM.m[i], &FM.m[i + 1], sizeof FM.m[0] * (size_t)(FM.n - i - 1));
+    memmove(&FM.sent_at[i], &FM.sent_at[i + 1], sizeof(float) * (size_t)(FM.n - i - 1));
+    FM.n--;
+}
+int sh_sms_delete(int id, char *why)
+{
+    fprintf(stderr, "comms: SMS delete (one message)\n");
+    for (int i = 0; i < FM.n; i++) if (FM.m[i].id == id) { fm_drop(i); fm_bump(); return 0; }
+    fc_why(why, "The message is gone already");
+    return -1;
+}
+int sh_sms_delete_thread(const char *number, char *why)
+{
+    fprintf(stderr, "comms: SMS delete (a conversation)\n");
+    int any = 0;
+    for (int i = FM.n - 1; i >= 0; i--) if (!strcmp(FM.m[i].number, number)) { fm_drop(i); any = 1; }
+    if (!any) { fc_why(why, "The conversation is gone already"); return -1; }
+    fm_bump();
+    return 0;
+}
+static void fm_at(int out, long long ago_s, int unread)
+{
+    sh_sms_t *m = &FM.m[FM.n - 1];
+    m->incoming = !out;
+    if (out) m->state = SH_SMS_DELIVERED;
+    m->utc -= ago_s;
+    m->unread = unread;
+}
+static void fm_inbox2(void)
+{
+    if (FM.n) return;
+    static const char *const T[12][2] = {
+        { "+15550101", "Dinner on Friday? The usual place at seven." },
+        { "+15550102", "Your parcel will arrive tomorrow between 9 and 12." },
+        { "+15550103", "Thanks for the photos, they came out great!" },
+        { "+15550104", "Can you call me when you have a minute?" },
+        { "+15550105", "The meeting moved to Thursday." },
+        { "+15550106", "Code 4471 for the pick-up point." },
+        { "+15550107", "Happy birthday! Hope you have a great day." },
+        { "+15550108", "Did you get the keys back from Mikko?" },
+        { "+15550109", "Running 10 minutes late, sorry." },
+        { "+15550110", "OK, see you there." },
+        { "+15550111", "The bus leaves at 8:15 from the station." },
+        { "+15550112", "Remember to bring the charger." } };
+    for (int i = 11; i >= 0; i--) { fm_receive(T[i][0], T[i][1], 1); fm_at(i % 3 == 1, (long long)(i + 1) * 3600 * 2, i < 3); }
+    /* the long one with +15550100: yesterday's part, then today's */
+    static const struct { int out; const char *t; long long ago; } C[] = {
+        { 0, "Hi! Are we still on for the hike this weekend?", 26 * 3600 }, { 1, "Yes! Saturday morning works for me.", 26 * 3600 - 120 },
+        { 0, "Great. I'll pick you up at 7.", 26 * 3600 - 300 }, { 0, "Bring water and something warm, it'll be cold up there.", 26 * 3600 - 320 },
+        { 1, "Will do. Should I bring the stove too?", 25 * 3600 }, { 0, "Yes please, I'll bring the food.", 25 * 3600 - 60 },
+        { 1, "Perfect", 25 * 3600 - 90 },
+        { 0, "Weather looks good for Saturday, 4 degrees and sunny.", 3 * 3600 }, { 1, "Nice! I checked the trail map too: the north loop is about 14 km with one steep part near the lake, should take us five hours with breaks.", 3 * 3600 - 200 },
+        { 0, "Sounds good to me.", 3 * 3600 - 260 }, { 0, "Are you bringing the phone tomorrow?", 40 * 60 },
+        { 1, "Yes, after lunch", 35 * 60 }, { 0, "I can bring the cable if you need it", 5 * 60 } };
+    for (unsigned i = 0; i < sizeof C / sizeof C[0]; i++) { fm_receive("+15550100", C[i].t, 1); fm_at(C[i].out, C[i].ago, !C[i].out && i == sizeof C / sizeof C[0] - 1); }
     fm_bump();
 }
 static void fc_incoming(void)
@@ -199,6 +267,7 @@ static void comms_fake_state(const char *what, float v)
     if (!strcmp(what, "net")) { sh_cellular(v > 0); return; }
     if (!strcmp(what, "audio")) { fc_audio_ok = v > 0; FC.audio_ok = fc_audio_ok; if (FC.state) fc_push(); return; }
     if (!strcmp(what, "inbox")) { fm_inbox(); return; }
+    if (!strcmp(what, "inbox2")) { fm_inbox2(); return; }
     if (!strcmp(what, "incoming")) { fc_incoming(); return; }
     if (!strcmp(what, "dialing") || !strcmp(what, "alerting") || !strcmp(what, "active") || !strcmp(what, "ended")) {
         memset(&FC, 0, sizeof FC);
