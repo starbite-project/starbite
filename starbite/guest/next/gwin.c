@@ -203,6 +203,122 @@ static void busy_update(void)
         guest_keep(b);
     }
 }
+/* ---- cp6 (Track B's ask, the user's cp3 notes): a store job in words for the shell, the phone awake while one runs, a
+ * notification when one ends ---------------------------------------------------------------------------------------- */
+int sh_hold_awake(const char *who, int on) __attribute__((weak));   /* Track A's keep-awake (no Auto-Lock); weak: older */
+static int job_awake;
+static struct { char pkg[40]; unsigned state, phase; } JP[SH_LPKGS];   /* the last snapshot's busy packages */
+static int jp_n;
+static int job_busy(const sh_lpkg_t *p)
+{
+    return p->state == SH_PKG_QUEUED || p->state == SH_PKG_INSTALLING || p->state == SH_PKG_REMOVING;
+}
+static void jcat(char *b, int cap, int *n, const char *s)
+{
+    while (*s && *n < cap - 1)
+        b[(*n)++] = *s++;
+    b[*n] = 0;
+}
+static void jnum(char *b, int cap, int *n, unsigned v)
+{
+    char d[12];
+    int k = 0;
+    do
+        d[k++] = (char)('0' + v % 10);
+    while ((v /= 10) && k < 11);
+    while (k && *n < cap - 1)
+        b[(*n)++] = d[--k];
+    b[*n] = 0;
+}
+static const char *job_step(const sh_lpkg_t *p)
+{
+    if (p->state == SH_PKG_QUEUED)
+        return "Waiting to install";
+    if (p->state == SH_PKG_REMOVING)
+        return "Removing";
+    return p->phase == SH_PKG_DOWNLOADING ? "Downloading" : p->phase == SH_PKG_BUILDING ? "Building" :
+           p->phase == SH_PKG_VERIFYING ? "Checking" : "Installing";
+}
+/* the running job in words ("Building btop from source, 45 %", "+ 2 more" when several): 1, or 0 (b = "") with none.
+ * For the shell (the App Store's page, the Linux page, the lock): ask each frame it shows it, it is cheap */
+int sh_linux_job(char *b, int cap);
+int sh_linux_job(char *b, int cap)
+{
+    int n = 0, first = -1, more = 0;
+    if (!b || cap < 2)
+        return 0;
+    b[0] = 0;
+    for (int i = 0; i < store.n; i++)
+        if (job_busy(&store.pkg[i])) {
+            if (first < 0)
+                first = i;
+            else
+                more++;
+        }
+    if (first < 0)
+        return 0;
+    const sh_lpkg_t *p = &store.pkg[first];
+    jcat(b, cap, &n, job_step(p));
+    jcat(b, cap, &n, " ");
+    jcat(b, cap, &n, p->name[0] ? p->name : p->pkg);
+    if (p->state != SH_PKG_REMOVING && p->state != SH_PKG_QUEUED && p->method == SH_M_SOURCE && p->phase == SH_PKG_BUILDING)
+        jcat(b, cap, &n, " from source");
+    if (p->state != SH_PKG_QUEUED && p->pct > 0 && p->pct < 100) {
+        jcat(b, cap, &n, ", ");
+        jnum(b, cap, &n, p->pct);
+        jcat(b, cap, &n, " %");
+    }
+    if (more) {
+        jcat(b, cap, &n, " + ");
+        jnum(b, cap, &n, (unsigned)more);
+        jcat(b, cap, &n, " more");
+    }
+    return 1;
+}
+/* after each store snapshot: a package that was busy and is not any more ends with a notification (the Centre and a
+ * banner: "Neovim Is Installed", "btop Couldn't Be Installed" + the guest's reason); the phone stays awake while any
+ * job runs (not merely while the App Store is open) */
+static void jobs_update(void)
+{
+    int any = 0;
+    for (int i = 0; i < store.n; i++) {
+        const sh_lpkg_t *p = &store.pkg[i];
+        any |= job_busy(p);
+        if (job_busy(p))
+            continue;
+        for (int k = 0; k < jp_n; k++) {
+            if (!same(JP[k].pkg, p->pkg))
+                continue;
+            char t[72];
+            int n = 0;
+            const char *nm = p->name[0] ? p->name : p->pkg;
+            jcat(t, sizeof t, &n, nm);
+            if (p->state == SH_PKG_FAILED)
+                jcat(t, sizeof t, &n, JP[k].state == SH_PKG_REMOVING ? " Couldn't Be Removed" : " Couldn't Be Installed");
+            else
+                jcat(t, sizeof t, &n, JP[k].state == SH_PKG_REMOVING ? " Was Removed" :
+                                      (p->flags & SH_PKG_INSTALLED) ? " Is Installed" : " Was Not Installed");
+            const char *body = p->state == SH_PKG_FAILED ? (p->err[0] ? p->err : "See the App Store for details.") :
+                               JP[k].state == SH_PKG_REMOVING ? "" : (p->flags & SH_PKG_INSTALLED) ? "Open it from the Linux page." : "";
+            sh_notify("store", t, body, -1);
+            JP[k].pkg[0] = 0;               /* said once */
+        }
+    }
+    jp_n = 0;
+    for (int i = 0; i < store.n && jp_n < SH_LPKGS; i++)
+        if (job_busy(&store.pkg[i])) {
+            scopy(JP[jp_n].pkg, store.pkg[i].pkg, sizeof JP[jp_n].pkg);
+            JP[jp_n].state = store.pkg[i].state;
+            JP[jp_n].phase = store.pkg[i].phase;
+            jp_n++;
+        }
+    if (any != job_awake) {
+        job_awake = any;
+        if (sh_hold_awake)
+            (void)sh_hold_awake("linux-store", any);
+    }
+}
+
 static int cat_find(const char *id)
 {
     for (int i = 0; i < cat.n; i++)
@@ -540,6 +656,7 @@ int gwin_now(void)
             store_dirty = 0;
             if (r) {
                 busy_update();
+                jobs_update();              /* cp6: a job's end said, the phone kept awake meanwhile */
                 sh_linux_store(&store);
                 changed = 1;
             }
