@@ -16,6 +16,7 @@
 #include "usb.h"
 #include "shub_more.h"
 #include "haptic.h"
+#include "abox_media.h"
 
 /* ---- the list: filled in as each driver is merged ---- */
 #define DRV_LIST_BEGIN const struct drv_probe drv_probes[] = {
@@ -30,6 +31,8 @@ DRV_LIST_BEGIN
     { "bt", drv_bt_probe, drv_bt_abort, DRV_BT_BUDGET_MS },
     { "cam", drv_cam_probe, drv_cam_abort, CAM_PROBE_BUDGET_MS },
     { "usb", drv_usb_probe, drv_usb_abort, DRV_USB_BUDGET_MS },
+    /* media through Calliope (abox_media.c), just before the bypass engine so both run; ABOX off again in between */
+    { "calliope", drv_calliope_probe, drv_calliope_abort, DRV_CALLIOPE_BUDGET_MS },
     /* last, so its dump and sweep lines are in pmsg's tail (run 3 lost them) */
     { "audio", drv_audio_probe, drv_audio_abort, 22000 },
 DRV_LIST_END

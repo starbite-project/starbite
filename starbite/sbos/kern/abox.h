@@ -81,6 +81,30 @@ const char *abox_why(void);
 int abox_state(void);                       /* ABOX_ST_* */
 uint32_t abox_version(void);                /* Calliope's version word from BOOT_DONE ("CRL0" = 0x43524C30), 0 none */
 
+/* ---- media through Calliope (abox_media.c): additive hooks ----------------------------------------------------
+ * abox_map_extra(): one more ABOX window in our SysMMU tables (4 KiB pages through its own L2 table), set BEFORE
+ *   abox_boot() and kept until removed with size 0 (2 slots, found by iova). iova: 1 MiB aligned, not one of the
+ *   windows above (abox_boot() logs and skips a clash); pa: 4 KiB aligned, inside abox_rmem's page-table section
+ *   past its first 64 KiB (0x1510000 .. 0x1600000), so ABOX never sees anything but abox_rmem; size <= 960 KiB.
+ *   0 or ABOX_ECFG (ABOX_ESTATE while Calliope runs: the tables are written at boot).
+ * abox_pcm_msg(): one PCM task message (Samsung's IPC_PCMTASK_MSG: msgtype, channel_id, three param words) on
+ *   IPC_PCMPLAYBACK (capture 0) or IPC_PCMCAPTURE (1); the call path's own channels (playback 4, capture 2) and
+ *   ids >= 8 are refused. 0, ABOX_ESTATE (not READY / CALL, refused id) or ABOX_EIPC.
+ * abox_pcm_pointer(): the last PCM_PLTDAI_POINTER Calliope sent for that channel (an ABOX IOVA, 0 none yet) and,
+ *   in *count, how many it sent since abox_boot(). */
+#define ABOX_IOVA_RDMA(n)    (0x91000000U + 0x100000U * (uint32_t)(n))     /* IOVA_RDMA_BUFFER(n) */
+#define ABOX_PCM_OPEN        11U
+#define ABOX_PCM_CLOSE       12U
+#define ABOX_PCM_HW_PARAMS   14U            /* rate, bit depth, channels */
+#define ABOX_PCM_HW_FREE     15U
+#define ABOX_PCM_PREPARE     16U
+#define ABOX_PCM_TRIGGER     17U            /* 1 start, 0 stop */
+#define ABOX_PCM_POINTER     18U
+#define ABOX_PCM_SET_BUFFER  20U            /* IOVA, period bytes, periods */
+int abox_map_extra(uint32_t iova, uint64_t pa, uint32_t size);
+int abox_pcm_msg(int capture, uint32_t id, uint32_t type, uint32_t a, uint32_t b, uint32_t c);
+uint32_t abox_pcm_pointer(int capture, uint32_t id, uint32_t *count);
+
 #define ABOX_ST_OFF     0
 #define ABOX_ST_BOOTING 1
 #define ABOX_ST_READY   2                   /* Calliope said BOOT_DONE */
