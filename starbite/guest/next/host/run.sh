@@ -66,6 +66,9 @@ $CC -c -O2 -std=gnu11 $W "$T/starbite/sbos/kern/passcode.c" -o "$OUT/o/passcode.
 $CC -c -O2 -std=gnu11 $W "$sb/guide/survival_host.c" -o "$OUT/o/survival_host.o"   # (main.c's survival API)
 $CC -c -O2 -std=gnu11 $W -I"$here/fake" -I"$T/starbite/guest/sbos" -I"$ui" "$here/../gwin.c" -o "$OUT/o/gwin.o"
 zcdef=; [ $zc_ok = 1 ] || zcdef=-DGWIN_NO_ZC; [ $ext_ok = 1 ] || zcdef="$zcdef -DGWIN_NO_EXT -Wno-unused-function"
+# the shell's test views (sw-ext-compat.patch's, or the toolkit's own): a tree without one skips those comparisons
+grep -q "^int sw_compat_dump(" "$ui"/*.inc "$ui"/*.c 2>/dev/null || zcdef="$zcdef -DGWIN_NO_SWC"
+grep -q "^int nc_compat_count(" "$ui"/*.inc "$ui"/*.c 2>/dev/null || zcdef="$zcdef -DGWIN_NO_NCC"
 $CC -c -O2 -std=gnu11 $W $zcdef -I"$here/fake" -I"$T/starbite/guest/sbos" -I"$ui" "$here/gwin-host.c" -o "$OUT/o/gwin-host.o"
 $CC -o "$OUT/gwin-host" "$OUT"/o/*.o
 mkdir -p "${GWIN_STILLS:-$OUT}"

@@ -529,8 +529,21 @@ static int fails, nchecks;
 #else
 #define KBROWS SH_LINUX_HKB                         /* (no key bar without SH_EXT_API) */
 #endif
+/* the shell's test views (sw-ext-compat.patch, or the toolkit's own); a tree without one (run.sh: GWIN_NO_SWC /
+ * GWIN_NO_NCC) skips only the comparisons that need it, and says so */
+#ifdef GWIN_NO_SWC
+static int sw_compat_dump(char *out, int cap) { if (cap > 0) out[0] = 0; return -1; }
+#define SWC_OK(e) 1
+#else
 int sw_compat_dump(char *out, int cap);            /* sw-ext-compat.patch's view of the recents */
+#define SWC_OK(e) (e)
+#endif
+#ifdef GWIN_NO_NCC
+#define NCC_OK(e) 1
+#else
 int nc_compat_count(const char *who);
+#define NCC_OK(e) (e)
+#endif
 int sh_linux_job(char *b, int cap);                /* gwin.c (cp6): the running store job in words */
 /* a tap, a horizontal drag (dx pt over n 16 ms steps, then still), a quick throw up */
 static void tap(float x, float y) { sh_touch(0, x, y, (float)now_ms); sh_touch(2, x, y, (float)now_ms + 60); }
@@ -628,7 +641,7 @@ int main(int argc, char **argv)
     check(fstore.pkg[2].flags & SBSHM_PKG_INSTALLED, "the install ran to the end");
     {
         char jb[96];
-        check(sh_linux_job(jb, sizeof jb) == 0 && !jb[0] && nc_compat_count("store") == 1,
+        check(sh_linux_job(jb, sizeof jb) == 0 && !jb[0] && NCC_OK(nc_compat_count("store") == 1),
               "cp6: no job left, its end in the Centre (store: \"... Is Installed\")");
     }
     sh_set("store", "foot", 1);
@@ -660,7 +673,7 @@ int main(int argc, char **argv)
     run(3);
     sw_compat_dump(dump, sizeof dump);
     printf("gwin-host: the recents: %s\n", dump);
-    check(!strcmp(dump, "S:notes,L:Calculator,L:Text Editor"), "the switcher: Notes, then the Calculator's and the Text Editor's own cards");
+    check(SWC_OK(!strcmp(dump, "S:notes,L:Calculator,L:Text Editor")), "the switcher: Notes, then the Calculator's and the Text Editor's own cards");
     sh_tick(.016f, (float)now_ms);
     tk_comp_frame(&C, 0, 1);
     png_still(stills, "switcher");
@@ -674,7 +687,7 @@ int main(int argc, char **argv)
     run(12);
     check(got.activate == acts + 1 && got.last_act == 1 && win == 1, "a tap on the Text Editor's card: ACTIVATE 1, its window back");
     sw_compat_dump(dump, sizeof dump);
-    check(!strcmp(dump, "L:Text Editor,S:notes,L:Calculator"), "the Text Editor's card first again");
+    check(SWC_OK(!strcmp(dump, "L:Text Editor,S:notes,L:Calculator")), "the Text Editor's card first again");
     /* throw the Calculator's card (third) away */
     sh_set("switcher", "", 1);
     run(3);
@@ -684,7 +697,7 @@ int main(int argc, char **argv)
     sw_compat_dump(dump, sizeof dump);
     printf("gwin-host: the recents: %s\n", dump);
     check(got.close == 1 && got.close_idx == 2, "the Calculator's card thrown away: APP_CLOSE 2");
-    check(!strcmp(dump, "L:Text Editor,S:notes") && apps_n == 1, "its card gone, one Linux card left (guest_apps 1)");
+    check(SWC_OK(!strcmp(dump, "L:Text Editor,S:notes")) && apps_n == 1, "its card gone, one Linux card left (guest_apps 1)");
     sh_set("switcher", "", 0);
     run(3);
     /* the key bar: the Text Editor's field focused (the keyboard up), Ctrl latched, c; an arrow; Alt + right */
@@ -725,7 +738,7 @@ int main(int argc, char **argv)
     run(6);
     fake_notify(0x1a, 1, "Text Editor", "Document saved", "notes.txt was saved to Documents.");
     run(2);
-    check(nc_compat_count("linux:1a") == 1, "the notification in the Centre's store as linux:1a");
+    check(NCC_OK(nc_compat_count("linux:1a") == 1), "the notification in the Centre's store as linux:1a");
     run(4);
     sh_tick(.016f, (float)now_ms);
     tk_comp_frame(&C, 0, 1);
@@ -734,7 +747,7 @@ int main(int argc, char **argv)
     run(2);
     fake_notif_close(0x1b);
     run(2);
-    check(nc_compat_count("linux:1b") == 0, "a withdrawn notification left the Centre");
+    check(NCC_OK(nc_compat_count("linux:1b") == 0), "a withdrawn notification left the Centre");
     fake_notify(0x1c, 0, "", "Build finished", "make: all targets done.");
     run(60);                                                /* (its banner gone by itself) */
     sh_set("nc", "", 1);
@@ -794,6 +807,12 @@ int main(int argc, char **argv)
     run(12);
     check(apps_n <= 0, "Linux stopped: its cards gone (guest_apps 0, or never called without SH_EXT_API)");
     printf("gwin-host: v3 %s (%d checks)\n", fails ? "FAILED" : "PASSED", nchecks - l3);
+#ifdef GWIN_NO_SWC
+    printf("gwin-host: (this UI tree has no sw_compat_dump: the switcher's card order was not compared)\n");
+#endif
+#ifdef GWIN_NO_NCC
+    printf("gwin-host: (this UI tree has no nc_compat_count: the Centre's item counts were not compared)\n");
+#endif
     printf("gwin-host: the UI heap: %.1f MB in use, peak %.1f MB%s\n", tk_heap_used() / 1e6, tk_heap_peak() / 1e6,
            getenv("SBTK_HEAP_MB") ? " (SBTK_HEAP_MB: the phone's heap)" : "");
     printf("gwin-host: %s\n", fails ? "FAILED" : "PASSED");
