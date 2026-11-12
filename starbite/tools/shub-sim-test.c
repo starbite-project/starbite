@@ -118,7 +118,8 @@ static struct {
     int wpend, formation_ok, matrix_ok;
     uint8_t wcmd;
     unsigned wlen;
-    int en[32];
+    int en[64];
+    unsigned per[64], removes;              /* drivers track: shub_enable_type's periods and removals */
     uint64_t t_sample;
     unsigned ticks;
 } chip;
@@ -278,8 +279,14 @@ static void chip_apply(uint8_t cmd, const uint8_t *d, unsigned n)
         chip.formation_ok = n == 3 && d[0] == 4 && d[1] == 4 && d[2] == 5;
     else if (cmd == SSP_CMD_MAG_MATRIX)
         chip.matrix_ok = n == 27 && d[0] == 0xd8 && d[26] == 0xb4;
-    else if (cmd == SSP_CMD_ADD && n == 10 && d[0] < 32 && d[1] == 100 && !d[2] && !d[5])
-        chip.en[d[0]] = 1;
+    else if (cmd == SSP_CMD_ADD && n == 10 && d[0] < 64 && !d[5] && !d[6] && !d[7] && !d[8] && !d[9] &&
+             ((d[0] != 0 && d[0] != 4 && d[0] != 18) || (d[1] == 100 && !d[2]))) {
+        chip.en[d[0]] = 1;                  /* (the three of shub.c's own start at 100 ms; any period for others) */
+        chip.per[d[0]] = (unsigned)d[1] | (unsigned)d[2] << 8 | (unsigned)d[3] << 16 | (unsigned)d[4] << 24;
+    } else if (cmd == SSP_CMD_REMOVE && n == 5 && d[0] < 64) {
+        chip.en[d[0]] = 0;                  /* Samsung's disable_sensor: [type][s32 period] */
+        ++chip.removes;
+    }
     else if (cmd == SSP_CMD_TIMESTAMP && n == 8)
         ++chip.ts_msgs;
     else
@@ -462,6 +469,13 @@ static void chip_tick(void)
         memcpy(f + n, &ts, 8);
         n += 8;
     }
+    if (chip.en[7]) {                       /* drivers track: the proximity, near, adc 900 */
+        static const uint8_t px[] = { 0x37, 0x07, 0x01, 0x84, 0x03 };
+        memcpy(f + n, px, sizeof(px));
+        n += sizeof(px);
+        memcpy(f + n, &ts, 8);
+        n += 8;
+    }
     if (chip.en[18] && chip.ticks % 10 == 0) {
         static const uint8_t st[] = { 0x37, 0x12, 0x02, 0x00, 0x00, 0x00 };
         memcpy(f + n, st, sizeof(st));
@@ -552,6 +566,22 @@ int shub_sim_xfer(const uint8_t *tx, uint8_t *rx, unsigned n)
 
 /* ---- running ---- */
 static uint64_t slice_max;
+/* drivers track: shub_more.c's hooks, as a recorder */
+static struct { unsigned n7, len7, other, polls, adc; int near; } hook;
+static void hook_sample(unsigned type, const uint8_t *d, unsigned n, uint64_t ts)
+{
+    (void)ts;
+    if (type == 7) {
+        ++hook.n7;
+        hook.len7 = n;
+        hook.near = d[0];
+        hook.adc = (unsigned)d[1] | (unsigned)d[2] << 8;
+    } else {
+        ++hook.other;
+    }
+}
+static void hook_poll(void) { ++hook.polls; }
+
 static int run(int (*step)(void), unsigned max_ms)
 {
     uint64_t end = now_us + (uint64_t)max_ms * 1000;
@@ -686,7 +716,29 @@ int main(int argc, char **argv)
     CHECK(surv_tilt(&p, &r) && p > -20 && p < 0 && r > 0 && r < 20, "running: nearly flat (%d %d)", p, r);
     CHECK(surv_steps(&st) && st >= 4 && st <= 8, "running: steps counted (%u)", st);
     CHECK(chip.ts_msgs >= 5, "running: the clock message after every third frame (%u)", chip.ts_msgs);
+    /* drivers track: one more sensor through shub_enable_type, its samples through the hook */
+    shub_set_hooks(hook_sample, hook_poll);
+    CHECK(shub_starts() >= 1, "running: counted as a start (%u)", shub_starts());
+    CHECK(shub_enable_type(7, 200, 1) == 0 && shub_enable_type(9, 200, 1) == -1, "enable: sent; a second waits for the slot");
+    for (int i = 0; i < 50; ++i) {
+        shub_poll();
+        now_us += 20000;
+    }
+    CHECK(chip.en[7] && chip.per[7] == 200 && chip.ssp_bad == 0, "enable: the chip has the proximity at 200 ms (%d %u, bad %u)",
+          chip.en[7], chip.per[7], chip.ssp_bad);
+    CHECK(hook.n7 > 3 && hook.len7 == 3 && hook.near == 1 && hook.adc == 900 && hook.polls >= 50,
+          "hook: proximity samples (%u, %u bytes, near %d adc %u), polls %u", hook.n7, hook.len7, hook.near, hook.adc, hook.polls);
+    CHECK(hook.other == 0, "hook: the accelerometer / magnetometer / steps stay shub.c's (%u)", hook.other);
+    CHECK(shub_enable_type(7, 200, 0) == 0, "disable: sent");
+    for (int i = 0; i < 20; ++i) {
+        shub_poll();
+        now_us += 20000;
+    }
+    CHECK(!chip.en[7] && chip.removes == 1 && chip.ssp_bad == 0, "disable: the chip removed it (%u, bad %u)", chip.removes, chip.ssp_bad);
+    CHECK(surv_heading(&h, &a) && surv_steps(&st), "the compass and the steps still run");
+    shub_set_hooks(0, 0);
     shub_leave();
+    CHECK(shub_enable_type(7, 200, 1) == -1, "enable refused when the hub is not running");
     CHECK(shub_state() == SHUB_OFF && !surv_heading(&h, &a) && !surv_steps(&st), "left: nothing valid any more");
     common("full start");
 
