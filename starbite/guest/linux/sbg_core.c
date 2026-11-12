@@ -161,11 +161,12 @@ static irqreturn_t sbg_db_irq(int irq, void *dev)
 static int sbg_mmap(struct file *f, struct vm_area_struct *vma)
 {
 	unsigned long len = vma->vm_end - vma->vm_start;
+	u64 off = (u64)vma->vm_pgoff << PAGE_SHIFT;	/* a window of the region (sbstore maps the store's part) */
 
-	if (vma->vm_pgoff || len > shm_size)
+	if (off >= shm_size || len > shm_size - off)
 		return -EINVAL;
 	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-	return remap_pfn_range(vma, vma->vm_start, PHYS_PFN(shm_base), len, vma->vm_page_prot);
+	return remap_pfn_range(vma, vma->vm_start, PHYS_PFN(shm_base + off), len, vma->vm_page_prot);
 }
 
 static ssize_t sbg_read(struct file *f, char __user *buf, size_t n, loff_t *off)
