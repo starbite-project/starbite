@@ -307,7 +307,7 @@ static int floor_i(float v)
 static float fmaxf_(float a, float b) { return a > b ? a : b; }
 static float fminf_(float a, float b) { return a < b ? a : b; }
 static int bins_used;                       /* the last frame's bin entries (the log) */
-static uint32_t bins_culled, bins_empty;
+static uint32_t bins_culled, bins_empty, bins_full;   /* bins_full: entries a full bin had no room for */
 void gpucomp_last_stats(uint32_t *entries, uint32_t *culled, uint32_t *empty)
 {
     *entries = (uint32_t)bins_used;
@@ -361,7 +361,7 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
     for (unsigned k = 0; k < GPUCOMP_BIN_W * GPUCOMP_BIN_H; ++k)
         bins[k][0] = 0;
     bins_used = 0;
-    bins_culled = bins_empty = 0;
+    bins_culled = bins_empty = bins_full = 0;
     for (unsigned i = 0; i < n; ++i) {
         const struct gc_quad *s = &qs[i];
         volatile uint32_t *q = p + 16 + i * (GPUCOMP_C2_QB / 4U);
@@ -496,7 +496,8 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
                     e[1U + e[0]] = (uint8_t)i;
                     ++e[0];
                     ++bins_used;
-                }
+                } else
+                    ++bins_full;        /* 1.0: more than 127 quads over one 32 px bin: refused below (the CPU draws it) */
             }
     }
     if (nr) {
@@ -520,6 +521,8 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
             if (!dirty[k])
                 bins[k][0] = 255;
     }
+    if (bins_full)                              /* 1.0: a bin lost quads: refused, not drawn wrong (the caller's CPU) */
+        return 0;
     volatile uint32_t *bw = CPU(GPUCOMP_O_BIN);
     for (unsigned k = 0; k < GPUCOMP_BIN_W * GPUCOMP_BIN_H; ++k) {
         const uint32_t *src = (const uint32_t *)(const void *)bins[k];

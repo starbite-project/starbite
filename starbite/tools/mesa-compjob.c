@@ -76,7 +76,7 @@ void disassemble_bifrost(FILE *fp, const void *code, size_t size, bool verbose);
 #define O_TLS 0xb800u
 #define O_JOB(i) (0xc000u + (i) * 0x100u)
 #define O_PAR(i) (0x10000u + (i) * 0x2000u)  /* FILL, COMP (64 quads of 80 bytes after 64), DOWN, UP; COMP2 last: */
-#define O_C2 0x20000u                        /* COMP2 v2: a 64-byte header + 127 quads of C2_QB bytes */
+#define O_C2 0x20000u                        /* COMP2 v2: a 64-byte header + up to 204 quads of C2_QB bytes (the kernel uses 200) */
 #define C2_QB 160u
 #define O_BIN 0x28000u                       /* COMP2's bins: 32 x 32 px, BIN_W x BIN_H, BIN_B bytes each */
 #define BIN_W 45u
