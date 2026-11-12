@@ -42,6 +42,117 @@ static unsigned r_idx, r_level, r_maxlevel, r_timeouts;
 static int r_started, r_done;
 static uint64_t r_t0;
 
+/* The result of every probe at every level, kept for the summary at the end (pmsg keeps only the run's last few
+ * hundred lines): 'P' pass, 'F' fail, 'T' out of time, '?' no PASS/FAIL line found, 0 not run. */
+#define DRV_MAXP 16
+#define DRV_WHY 72
+static char r_res[DRV_MAXP][3];
+static char r_why[DRV_MAXP][3][DRV_WHY];
+
+static int has(const char *h, const char *n)
+{
+    for (; *h; ++h) {
+        unsigned k = 0;
+        while (n[k] && h[k] == n[k])
+            ++k;
+        if (!n[k])
+            return 1;
+    }
+    return 0;
+}
+
+static const char *after(const char *h, const char *n)
+{
+    for (; *h; ++h) {
+        unsigned k = 0;
+        while (n[k] && h[k] == n[k])
+            ++k;
+        if (!n[k])
+            return h + k;
+    }
+    return 0;
+}
+
+/* the probe's own last line ("drvprobe: <name>: PASS ..." / "FAIL ..."), searched among the newest log lines */
+static void note_result(unsigned idx, unsigned level, int timed_out)
+{
+    if (idx >= DRV_MAXP || level > 2)
+        return;
+    char *w = r_why[idx][level];
+    w[0] = 0;
+    if (timed_out) {
+        r_res[idx][level] = 'T';
+        return;
+    }
+    char pass[40], fail[40];
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "drvprobe: ");
+    ub_s(&u, drv_probes[idx].name);
+    ub_s(&u, ": PASS");
+    unsigned i = 0;
+    for (; u.b[i] && i < sizeof pass - 1; ++i)
+        pass[i] = u.b[i];
+    pass[i] = 0;
+    for (i = 0; pass[i]; ++i)
+        fail[i] = pass[i];
+    fail[i] = 0;
+    if (i >= 4)
+        fail[i - 4] = 'F', fail[i - 3] = 'A', fail[i - 2] = 'I', fail[i - 1] = 'L';
+    r_res[idx][level] = '?';
+    unsigned n = sb_log_count();
+    for (unsigned k = 0; k < 40U && k < n; ++k) {
+        const char *l = sb_log_line(n - 1U - k);
+        if (!l)
+            break;
+        const char *a = after(l, fail);
+        if (a || has(l, pass)) {
+            r_res[idx][level] = a ? 'F' : 'P';
+            if (a) {
+                while (*a == ' ')
+                    ++a;
+                unsigned j = 0;
+                for (; a[j] && j < DRV_WHY - 1U; ++j)
+                    w[j] = a[j];
+                w[j] = 0;
+            }
+            return;
+        }
+    }
+}
+
+static void summary(void)
+{
+    for (unsigned lv = 0; lv <= r_maxlevel; ++lv) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "drvprobe: summary L");
+        ub_dec(&u, lv);
+        ub_s(&u, ":");
+        for (unsigned i = 0; i < drv_nprobes && i < DRV_MAXP; ++i) {
+            ub_s(&u, " ");
+            ub_s(&u, drv_probes[i].name);
+            ub_s(&u, "=");
+            char c[2] = { r_res[i][lv] ? r_res[i][lv] : '-', 0 };
+            ub_s(&u, c);
+        }
+        sb_log(u.b);
+    }
+    for (unsigned lv = 0; lv <= r_maxlevel; ++lv)
+        for (unsigned i = 0; i < drv_nprobes && i < DRV_MAXP; ++i)
+            if (r_res[i][lv] == 'F' || r_res[i][lv] == 'T') {
+                struct ub u;
+                ub_init(&u);
+                ub_s(&u, "drvprobe: summary: ");
+                ub_s(&u, drv_probes[i].name);
+                ub_s(&u, " L");
+                ub_dec(&u, lv);
+                ub_s(&u, r_res[i][lv] == 'T' ? ": out of time" : ": ");
+                ub_s(&u, r_why[i][lv]);
+                sb_log(u.b);
+            }
+}
+
 void drv_run_begin(int attended)
 {
     r_idx = 0;
@@ -50,6 +161,8 @@ void drv_run_begin(int attended)
     r_timeouts = 0;
     r_started = 0;
     r_done = 0;
+    for (unsigned i = 0; i < DRV_MAXP; ++i)
+        r_res[i][0] = r_res[i][1] = r_res[i][2] = 0;
     sb_logx("drvprobe: begin; probes ", drv_nprobes);
     sb_logx("drvprobe: highest level ", r_maxlevel);
 #ifndef DRV_HOST_LIST
@@ -67,6 +180,7 @@ int drv_run_step(unsigned *wait_ms)
     if (r_idx >= drv_nprobes) {
         if (r_level >= r_maxlevel) {
             sb_logx("drvprobe: done; probes that ran out of time: ", r_timeouts);
+            summary();
             r_done = 1;
             return 1;
         }
@@ -87,9 +201,12 @@ int drv_run_step(unsigned *wait_ms)
             p->abort();
         sb_logf("drvprobe: FAIL: out of time (aborted, everything put back): ", p->name);
         ++r_timeouts;
-        fin = 1;
+        note_result(r_idx, r_level, 1);
+        fin = 2;
     }
     if (fin) {
+        if (fin == 1)
+            note_result(r_idx, r_level, 0);
         r_started = 0;
         ++r_idx;
         *wait_ms = 50;
