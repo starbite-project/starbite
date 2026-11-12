@@ -581,6 +581,17 @@ static void stats_add(void)
         ub_dec(&u, hw_a55_khz() / 1000);
         ub_s(&u, ")");
         if (comp.gpu) {                          /* P4: the GPU's own time in it, and the frames it gave back */
+            ub_s(&u, " flush ");                 /* 1.0: layers made ready for the GPU in this frame: n, us, KiB */
+            ub_dec(&u, comp.n_flush);
+            ub_s(&u, "/");
+            ub_dec(&u, comp.us_flush);
+            ub_s(&u, "us/");
+            ub_dec(&u, comp.b_flush >> 10);
+            ub_s(&u, "KiB platform ");
+            ub_dec(&u, comp.us_platform);
+            ub_s(&u, " us (backdrops ");
+            ub_dec(&u, bd_us_frame);
+            ub_s(&u, ")");
             ub_s(&u, " gpu ");
             ub_dec(&u, comp.us_gpu);
             ub_s(&u, " us (fallbacks ");
@@ -965,10 +976,21 @@ static const tk_gpu_item *live_backdrops(const tk_gpu_item *it, int n, const tk_
     return lq;
 }
 
+static int next_gpu_(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us);
+static uint64_t bd_us_frame;               /* 1.0: this frame's live backdrops (the frame log) */
 static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us)
 {
+    uint64_t t = sb_us();
+    int r = next_gpu_(ctx, dst, it, n, dmg, ndmg, us);
+    comp.us_platform = sb_us() - t;
+    return r;
+}
+static int next_gpu_(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us)
+{
     (void)ctx;
+    uint64_t tb = sb_us();
     if (n > 0 && n <= TK_GPU_MAX) it = live_backdrops(it, n, &dmg, &ndmg);
+    bd_us_frame = sb_us() - tb;
     const tk_gpu_item *use = it;
     int un = n;
     uint32_t *cache = (uint32_t *)gpucomp_pool();

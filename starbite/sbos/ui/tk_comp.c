@@ -999,9 +999,18 @@ static void clean_rows(void *a, int y0, int y1)
     if (y1 > y0)
         J->c->gpu_clean(J->c->gpu_ctx, J->b->px + (size_t)y0 * J->b->stride, (uint64_t)(y1 - y0) * J->b->stride * 4u);
 }
+static void gpu_flush_layer_(tk_comp *c, tk_layer *l);
 static void gpu_flush_layer(tk_comp *c, tk_layer *l)
 {
     if (l->gpu_gen == l->gen + 1u || !c->gpu_clean) return;
+    uint64_t t = tk_us();
+    gpu_flush_layer_(c, l);
+    c->us_flush += tk_us() - t;             /* 1.0: where a slow GPU frame's CPU time went (the frame log) */
+    c->n_flush++;
+    c->b_flush += (uint64_t)l->bmp.h * (uint64_t)l->bmp.stride * 4u + (uint64_t)l->glass.w * (uint64_t)l->glass.h;
+}
+static void gpu_flush_layer_(tk_comp *c, tk_layer *l)
+{
     if (l->external) {                          /* 1.0: uncached memory another core writes: nothing to clean or map */
         l->gpu_occ_ok = 0;
         l->gpu_gen = l->gen + 1u;
@@ -1208,8 +1217,12 @@ const tk_bmp *tk_comp_shown(tk_comp *c)
 int tk_comp_frame(tk_comp *c, int motion, int full)
 {
     uint64_t ti = tk_us();
+    c->us_flush = c->b_flush = 0;            /* 1.0: this frame's flushes (idle flushes before it are not counted) */
+    c->n_flush = 0;
     if (motion) tk_comp_idle(c);             /* a finger came before the idle time did */
     c->us_idle = tk_us() - ti;
+    c->us_flush = c->b_flush = 0;
+    c->n_flush = 0;
     static uint32_t ground_seen;
     if (c->ground_gen != ground_seen) { ground_seen = c->ground_gen; full = 1; }
     uint64_t t0 = tk_us();
