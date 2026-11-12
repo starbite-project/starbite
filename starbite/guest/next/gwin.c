@@ -412,7 +412,21 @@ const uint32_t *sh_linux_front(int *stride_px)
     *stride_px = 0;
     if (!px)
         return 0;
-    sbg_surf_reading(idx);                 /* the guest won't render into it until the next front / the hide */
+    /* mark it read FIRST, then check it is still the front: if the guest flipped in between, its next back could be
+     * this very buffer, so take the newer front instead (the guest never renders into the front) */
+    for (int tries = 0; tries < 4; tries++) {
+        sbg_surf_reading(idx);             /* the guest won't render into it until the next front / the hide */
+        int now = 0;
+        unsigned st2 = 0;
+        const volatile uint32_t *p2 = guest_front(&now, &st2);
+        if (!p2)
+            break;
+        if (now == idx)
+            break;
+        idx = now;
+        px = p2;
+        stride = st2;
+    }
     ext_reading = 1;
     frames++;
     *stride_px = (int)stride;
