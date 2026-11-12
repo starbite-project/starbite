@@ -361,6 +361,7 @@ static const struct { uint16_t cmd; const char *name; uint8_t loggable; } names[
     { SBM_NET_REGIST,          "NET_REGIST", 0 },            /* LAC + cell id */
     { SBM_NET_SUBSCRIBER_NUM,  "NET_SUBSCRIBER_NUM", 0 },    /* MSISDN */
     { SBM_NET_MODE_SEL,        "NET_MODE_SEL", 1 },
+    { SBM_NET_IDENTITY,        "NET_IDENTITY", 0 },        /* the network's names (NITZ) + the PLMN */
     { SBM_MISC_ME_VERSION,     "MISC_ME_VERSION", 0 },
     { SBM_MISC_ME_IMSI,        "MISC_ME_IMSI", 0 },
     { SBM_MISC_ME_SN,          "MISC_ME_SN", 0 },            /* IMEI / serial */
