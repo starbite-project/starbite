@@ -452,6 +452,14 @@ int sh_restart_repair(void);              /* asks, then Starbite Recovery opens 
 typedef struct { int active, trying, state[3]; char version[3][32]; } sh_slots_t;
 int sh_slots_get(sh_slots_t *s);          /* 0 ok, < 0 no home store */
 int sh_shell_set(int on);                 /* Starbite OS at power-on: written as the user's choice; 0 ok */
+/* The lock screen's slide-to-start sheet (Track B's Options): the one-shots for an OS card. sh_req_why: 1 it fits,
+ * 0 not with why in plain words ("Only for Linux systems", "No previous kernel in the store", "No settings store",
+ * "Not installed"); sh_req_label: the action's name ("Safe Mode"), "" for an unknown one; sh_boot_os_req: after the
+ * slide (the slide is the confirmation, nothing more asks): arms the one-shot for key and restarts into it (does not
+ * return on success); < 0 refused (the self test: a logged dry run, -1). */
+int sh_req_why(const char *key, int action, char *why, int cap);
+const char *sh_req_label(int action);
+int sh_boot_os_req(const char *key, int action);
 
 /* ---- Track A: drivers for the shell (the kernel: kern_next.c's block of that name on kern/bt.c, cam.c, shub_more.c,
  * bathealth.c, haptic.c; the host: simulated). Nothing here runs until the shell calls it, except the LED policy and
