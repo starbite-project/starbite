@@ -146,7 +146,7 @@ def resolve_all(ids=None, quiet=False):
         a = apps[fid]
         a.setdefault("id", fid)
         r = {}
-        for m in ("release", "source"):
+        for m in ("release", "source", "distro"):
             if m not in sbstore.app_methods(a):
                 continue
             try:

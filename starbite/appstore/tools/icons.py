@@ -33,16 +33,21 @@ def sh(*a, cwd=None):
     return subprocess.run(a, cwd=cwd, capture_output=True, text=True)
 
 
+CACHE = "/var/cache/sbstore-icons"
+
+
 def extract(pkg, d):
-    w = tempfile.mkdtemp(dir=d)
-    if sh("apt-get", "download", "-q", pkg, cwd=w).returncode:
-        return None
-    for deb in glob.glob(w + "/*.deb"):
-        x = os.path.join(d, "x")
-        os.makedirs(x, exist_ok=True)
+    os.makedirs(CACHE, exist_ok=True)
+    have = glob.glob("%s/%s_*.deb" % (CACHE, pkg))
+    if not have:
+        if sh("apt-get", "download", "-q", pkg, cwd=CACHE).returncode:
+            return None
+        have = glob.glob("%s/%s_*.deb" % (CACHE, pkg))
+    x = os.path.join(d, "x")
+    os.makedirs(x, exist_ok=True)
+    for deb in have:
         sh("dpkg-deb", "-x", deb, x)
-        os.unlink(deb)
-    return os.path.join(d, "x")
+    return x
 
 
 def find_icon(root, name):
@@ -72,7 +77,6 @@ def desktop_icon(root):
 
 def render(path, size):
     if path.endswith((".svg", ".svgz")):
-        out = sh("rsvg-convert", "-w", str(size), "-h", str(size), "-a", path)
         r = subprocess.run(["rsvg-convert", "-w", str(size), "-h", str(size), "-a", path], capture_output=True)
         im = Image.open(io.BytesIO(r.stdout)).convert("RGBA")
     else:
@@ -86,15 +90,24 @@ def render(path, size):
     return c
 
 
-def tile(name, cat, size):
+def tile(name, cat, size, term=False):
+    """no icon upstream: a rounded tile in the category's colour with the initial (terminal apps: dark, ">_")"""
     c = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(c)
-    r, g, b = COL.get(cat, (0x8e, 0x8e, 0x93))
+    r, g, b = (0x1c, 0x1c, 0x1e) if term else COL.get(cat, (0x8e, 0x8e, 0x93))
     d.rounded_rectangle((0, 0, size - 1, size - 1), radius=size * 0.225, fill=(r, g, b, 255))
+    face = "DejaVuSansMono-Bold.ttf" if term else "DejaVuSans-Bold.ttf"
     try:
-        f = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(size * 0.5))
+        f = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/" + face, int(size * (0.3 if term else 0.5)))
     except OSError:
         f = ImageFont.load_default()
+    if term:
+        d.text((size * 0.16, size * 0.14), ">_", font=f, fill=(0x30, 0xd1, 0x58, 255))
+        f2 = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(size * 0.17)) \
+            if os.path.exists("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf") else f
+        bb = d.textbbox((0, 0), name, font=f2)
+        d.text(((size - (bb[2] - bb[0])) / 2, size * 0.66), name, font=f2, fill=(255, 255, 255, 255))
+        return c
     t = name[:1].upper()
     bb = d.textbbox((0, 0), t, font=f)
     d.text(((size - bb[2] - bb[0]) / 2, (size - bb[3] - bb[1]) / 2 - bb[1] * 0.0), t, font=f, fill=(255, 255, 255, 255))
@@ -138,8 +151,9 @@ def main(argv):
                     src = find_icon(x, name) or find_icon(x, desktop_icon(x) or name)
                 if src:
                     how = os.path.relpath(src, x)
-            big = render(src, 256) if src else tile(a["name"], a.get("category"), 256)
-            small = render(src, PX) if src else tile(a["name"], a.get("category"), PX)
+            term = bool((a.get("launcher") or {}).get("terminal"))
+            big = render(src, 256) if src else tile(a["name"], a.get("category"), 256, term)
+            small = render(src, PX) if src else tile(a["name"], a.get("category"), PX, term)
         except Exception as e:                            # noqa: BLE001 (a broken icon must not stop the rest)
             big, small, how = tile(a["name"], a.get("category"), 256), tile(a["name"], a.get("category"), PX), "tile (%s)" % e
         big.save(os.path.join(out, a["id"] + ".png"))
