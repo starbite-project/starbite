@@ -290,7 +290,13 @@ static int wifi_now(void)
     sh_wifi(&w);
     return 1;
 }
-int sh_wifi_power(int on) { return wifi_power(on); }
+int sh_wifi_power(int on)
+{
+    /* Track A: the user (or the shell's kept cc.wifi) wants Wi-Fi on while the boot's time check holds it: it stays
+     * on (else the check's end would switch it off under them) */
+    if (on && wifi_time_only()) wifi_time_only_end("the user wants Wi-Fi on: it stays on");
+    return wifi_power(on);
+}
 const char *sh_wifi_why(void)
 {
     static struct sbos_wifi s;
@@ -341,7 +347,7 @@ static int notif_now(void)
     seen = s;
     for (int i = n - 1; i >= 0; i--) {
         const struct notif *q = notif_get(i);
-        if (q) sh_notify(q->who, q->title, q->text, q->hm);
+        if (q) sh_notify_flags(q->who, q->title, q->text, q->hm, q->flags);   /* Track A: notif_post_app's flags */
     }
     return n > 0;
 }
@@ -1066,6 +1072,7 @@ static void bake_step(void)
     baking = 0;
     status_now();
     sh_bright_now(panel_bright_level);
+    sh_restore();                                    /* Track A: what the shell keeps (settings_restore ran before) */
     ready = need_full = 1;
     boost(0);
     kt_set(KT_UI, 23, sb_ms(), 5000, 0);            /* the workers off after 5 s unless a finger comes */
@@ -1282,6 +1289,7 @@ void sh_brightness(int level)
     sb_log("next: brightness: would set the panel's level (a dry run: the self test)");
 #else
     if (!panel_brightness(level)) sb_log("next: brightness: the panel did not take the level");
+    else settings_changed();                         /* Track A: kept (the settings record's level, as the classic UI's) */
 #endif
 }
 
@@ -1294,6 +1302,87 @@ void sh_torch(int lit)
     if (r < 0) sb_log("next: torch: the LED did not answer");
 #endif
 }
+
+/* ---- Track A: prefs and blobs ---- (sbos-core-api.md 1, 2) on kern/prefs.c: the store lives in RAM and goes into
+ * the state slot with the settings (settings_changed: 3 s after the last change, at most one write in 10 s, held
+ * while the modem runs; settings_save_now before a restart or switch-off). The self test's build reads nothing (its
+ * films start from defaults whatever the phone keeps) and writes nothing: a logged dry run, the store untouched. */
+#ifdef SBOS_SELFTEST_NEXT
+static void prefs_dry(void)
+{
+    static int said;
+    if (!said) { said = 1; sb_log("next: prefs: a change would be kept (a dry run: the self test writes nothing)"); }
+}
+#endif
+int sh_pref_get(const char *key, char *val, int cap)
+{
+    if (val && cap > 0) val[0] = 0;
+#ifdef SBOS_SELFTEST_NEXT
+    (void)key;
+    return -1;
+#else
+    return prefs_get(key, val, cap);
+#endif
+}
+int sh_pref_set(const char *key, const char *val)
+{
+    if (!prefs_key_ok(key) || (val && sb_strlen(val) > PREFS_VAL_MAX)) return -1;
+#ifdef SBOS_SELFTEST_NEXT
+    prefs_dry();
+    return 0;
+#else
+    int r = prefs_set(key, val);
+    if (r > 0) settings_changed();
+    if (r < 0) sb_logf("next: prefs: the store is full: not kept: ", key);
+    return r < 0 ? -1 : 0;
+#endif
+}
+int sh_pref_int(const char *key, int def)
+{
+    char b[16];
+    int n = sh_pref_get(key, b, sizeof b), neg = b[0] == '-', v = 0, i = neg;
+    if (n <= neg || n >= (int)sizeof b) return def;
+    for (; b[i]; i++) {
+        if (b[i] < '0' || b[i] > '9' || v > 214748363) return def;
+        v = v * 10 + (b[i] - '0');
+    }
+    return neg ? -v : v;
+}
+void sh_pref_set_int(const char *key, int v)
+{
+    char b[16];
+    int i = 15;
+    unsigned u = v < 0 ? 0U - (unsigned)v : (unsigned)v;
+    b[i] = 0;
+    do { b[--i] = (char)('0' + u % 10); u /= 10; } while (u);
+    if (v < 0) b[--i] = '-';
+    (void)sh_pref_set(key, b + i);
+}
+int sh_blob_put(const char *name, const void *p, unsigned n)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)name; (void)p;
+    if (n > PREFS_BLOB_MAX) return -1;
+    prefs_dry();
+    return 0;
+#else
+    int r = prefs_blob_put(name, p, n);
+    if (r > 0) settings_changed();
+    if (r < 0) sb_logf("next: prefs: a blob was not kept (too big, a bad name or the store full): ", name);
+    return r < 0 ? -1 : 0;
+#endif
+}
+int sh_blob_get(const char *name, void *p, unsigned cap)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)name; (void)p; (void)cap;
+    return -1;
+#else
+    return prefs_blob_get(name, p, cap);
+#endif
+}
+_Static_assert(SH_NOTIF_QUIET == NOTIF_QUIET && SH_NOTIF_URGENT == NOTIF_URGENT, "SH_NOTIF_* are NOTIF_*");
+/* ---- end of Track A: prefs and blobs ---- */
 
 /* ---- survival-next: Emergency mode's tools (shell_survival.inc) on the kernel's survival API (kern/survival.h)
  * and services.c's SOS. The shell starts SOS and USB power out only at the end of the user's hold; the self test's

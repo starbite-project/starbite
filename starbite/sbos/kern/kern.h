@@ -312,6 +312,31 @@ int state_valid(const uint8_t *half, uint64_t *seq);
 int state_find(const uint8_t *half, const char *id, const uint8_t **data);
 /* Of two halves, the valid one with the higher sequence: 0, 1, or -1 neither. */
 int state_pick(const uint8_t *a, const uint8_t *b);
+/* Track A: walk a valid half's records (*at = 0 first): 1 a record (id, data, n), 0 the end. */
+int state_next(const uint8_t *half, uint32_t *at, char id[24], const uint8_t **data, uint32_t *n);
+
+/* ---- prefs and blobs (prefs.c, pure; Track A, sbos-core-api.md 1-2): kept in the state slot with the settings -- */
+#define PREFS_KEY_MAX 31U           /* keys: [a-z0-9._-], 1..31 characters */
+#define PREFS_VAL_MAX 255U          /* values: C strings up to 255 bytes */
+#define PREFS_KEYS 400
+#define PREFS_BYTES (64U << 10)     /* the packed keys and values (17 records at most) */
+#define PREFS_BLOB_NAME 16U         /* blob names: as keys, up to 16 ("blob:<name>#7" fits a record id) */
+#define PREFS_BLOB_MAX (32U << 10)
+#define PREFS_BLOBS 16
+#define PREFS_BLOB_BYTES (160U << 10)
+#define PREFS_MEM (PREFS_BYTES + PREFS_BLOB_BYTES)   /* prefs_init's block */
+void prefs_init(void *mem);         /* PREFS_MEM bytes; until then (or with 0) every call refuses */
+void prefs_reset(void);             /* empty (RAM only) */
+int prefs_key_ok(const char *key);
+int prefs_get(const char *key, char *val, int cap);              /* the value's length, -1 not set */
+int prefs_set(const char *key, const char *val);                 /* 1 changed, 0 the same, -1 refused; val 0 deletes */
+int prefs_blob_put(const char *name, const void *p, uint32_t n);  /* 1 changed, 0 the same, -1 refused; n 0 deletes */
+int prefs_blob_get(const char *name, void *p, uint32_t cap);     /* bytes copied (up to cap), -1 none */
+void prefs_counts(int *keys, uint32_t *bytes, int *blobs, uint32_t *blob_bytes);
+/* the slot: save adds the records (all prefs or none, each blob whole or not at all): 0, -1 something left out;
+ * restore reads a valid half: 0, -1 something was not taken (a newer version, a broken entry) */
+int prefs_save(struct state_buf *b);
+int prefs_restore(const uint8_t *half);
 
 /* ---- the running kernel ------------------------------------------------------------------------ */
 struct kstate {
@@ -401,8 +426,14 @@ int alarm_stop(int snooze);
 struct notif {
     char who[16], title[40], text[72];
     int hm;                         /* local hh * 100 + mm, -1 unknown */
+    unsigned flags;                 /* Track A: NOTIF_* (0 from notif_post) */
 };
 void notif_post(const char *who, const char *title, const char *text);
+/* Track A (sbos-core-api.md 7): a post by an app id ("phone", a Linux app's bridge, ...): who = app. Next's shell
+ * applies notif.dnd and notif.<app>.allow / .banners before it shows a banner */
+#define NOTIF_QUIET 1U              /* the Notification Centre only: never a banner */
+#define NOTIF_URGENT 2U             /* a banner also in Do Not Disturb (an alarm, SOS) */
+void notif_post_app(const char *app, const char *title, const char *text, unsigned flags);
 void power_last2_clock(int on);      /* 1.2-alpha27: Last 2 % (survival.c): the A55 at 455 MHz, screen on or off */
 int notif_count(void);
 unsigned notif_seq(void);           /* posts since boot (Starbite OS Next's shell copies the new ones) */
