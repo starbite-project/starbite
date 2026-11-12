@@ -56,6 +56,9 @@ void sh_bright_now(int level);
 /* P2y: the apps' live values besides sh_status: charging or not, the software's name and version */
 void sh_sysinfo(int charging, const char *version);
 void sh_alarm(int on, int h, int m);
+/* B5: the Clock's alarm list to the kernel (alarm.c's alarm_set: slot i of 4, days a bit per weekday, 0 once); < 0
+ * refused (the self test) */
+int sh_alarm_set(int i, int h, int m, int days, int on);
 /* P2z, the Clock app: when to come back (ms; < 0 nothing pending), the redraw then (1: something changed), and the
  * platform's vibration for a timer that ran out (no sound) */
 int sh_next_update(float t_ms);
@@ -63,6 +66,16 @@ int sh_refresh(float t_ms);
 void sh_vibrate(void);
 void sh_year(int y);
 void sh_haptic(void);                     /* P3h: a key's light tap (the vibration motor, ~10 ms) */
+/* B3: the clipboard of the text fields' edit menu (Copy / Cut / Paste): one UTF-8 text, shared with the Linux apps
+ * (defined in shell_linux.inc: Track E's, offered to Linux). sh_clip_get: "" when empty. */
+void sh_clip_set(const char *utf8);
+const char *sh_clip_get(void);
+/* B4: iOS's feedback generators as motor pulses (docs/design/IOS-REFERENCE.md 17; lengths to tune on the phone) */
+enum { SH_HAP_LIGHT, SH_HAP_MEDIUM, SH_HAP_HEAVY, SH_HAP_SOFT, SH_HAP_RIGID, SH_HAP_SELECT, SH_HAP_SUCCESS, SH_HAP_WARNING,
+       SH_HAP_ERROR };
+void sh_haptic_k(int kind);
+/* B4: the app switcher's external entries (one per running Linux app) are shell-internal since P3x: shell_linux.inc
+ * (Track E's v3, SH_EXT_API) is the provider and calls the switcher's static sw_ext_add / sw_ext_remove */
 /* wifi-sbos-next: Wi-Fi for Settings > Wi-Fi, the status bar and the Control Centre. The platform pushes its state
  * with sh_wifi (only on a change); the shell asks with sh_wifi_power / _scan / _join / _fetch (< 0 refused). The
  * passphrase goes straight to the kernel's join (kept in RAM until a restart, never stored or logged); names and
@@ -200,9 +213,7 @@ const uint32_t *sh_linux_front(int *stride_px);
 void sh_linux_notify(unsigned id, const char *app_id, const char *app, const char *title, const char *body, int hm);
 void sh_linux_notify_close(unsigned id);
 void sh_linux_clip_in(const char *text);
-/* the shell-wide clipboard (text only, RAM; shell_linux.inc): Starbite's text fields copy / paste through these */
-int sh_clip_set(const char *text);       /* 1 kept (and offered to Linux) */
-const char *sh_clip_get(void);           /* "" when empty */
+/* the shell-wide clipboard: sh_clip_set / sh_clip_get above (B3), defined in shell_linux.inc (offered to Linux) */
 /* survival-next: Emergency mode's tools (shell_survival.inc), from the platform: the kernel's survival API
  * (kern/survival.h, services.c's SOS) on the phone, guide/survival_host.c on the host. Nothing starts by itself:
  * the shell calls sh_sos_set(1) and sh_usb_start() only at the end of the user's own hold, and the self test's
@@ -326,10 +337,11 @@ typedef struct {
     char why[SH_WHY];                   /* how it ended, in words */
     char audio_why[SH_WHY];             /* fa4ec7f: audio_ok 0: the missing part; audio_ok 1: a warning (the mic) */
 } sh_call_t;
-#define SH_SMS_MAX 32
-enum { SH_SMS_RECEIVED, SH_SMS_SENDING, SH_SMS_SENT, SH_SMS_FAILED };
+#define SH_SMS_MAX 200                  /* the newest this many (the kernel's store keeps up to 200, across restarts) */
+enum { SH_SMS_RECEIVED, SH_SMS_SENDING, SH_SMS_SENT, SH_SMS_FAILED, SH_SMS_DELIVERED, SH_SMS_UNDELIVERED };
 typedef struct {
-    int id, incoming, state;            /* SH_SMS_* */
+    int id, incoming, state;            /* SH_SMS_* (the kernel's ksms states) */
+    int unread;                         /* the kernel's (its store): 1 / 0; -1 not known (the shell keeps its own) */
     long long utc;
     char number[24];
     char text[512];                     /* UTF-8 */
@@ -349,6 +361,11 @@ int sh_dtmf(char digit);                /* 0-9 * # while connected */
 int sh_sms_send(const char *number, const char *utf8, char *why);
 int sh_sms_count(void);                 /* in RAM, newest last */
 int sh_sms_get(int i, sh_sms_t *m);     /* 0 ok */
+/* the kernel's SMS store (KMODEM_SMS_STORE; without it: read does nothing, the deletes refuse "Not in this version"):
+ * a thread shown is marked read; a message or a whole thread deleted by the user's own tap */
+int sh_sms_read(const char *number);
+int sh_sms_delete(int id, char *why);
+int sh_sms_delete_thread(const char *number, char *why);
 
 /* Track A (sbos-core-api.md 3): the passcode and Auto-Lock, from the platform (the kernel: kern/passcode.c through
  * kern_next.c, kept in the state slot as a salted, iterated SHA-256; the host: the same passcode.c in RAM). Digits go
@@ -408,9 +425,120 @@ typedef struct {
 } sh_fwinfo_t;
 int sh_fw_info(sh_fwinfo_t *i);           /* 1 the loader's table, 0 an older loader */
 
+/* ---- Track A: drivers for the shell (the kernel: kern_next.c's block of that name on kern/bt.c, cam.c, shub_more.c,
+ * bathealth.c, haptic.c; the host: simulated). Nothing here runs until the shell calls it, except the LED policy and
+ * auto-brightness (when display.auto is 1). Calls that would power hardware are logged dry runs in the self-test
+ * build (< 0 / 0 returned, why: "A dry run: the self test"). The kernel drives every running part from its own
+ * timers: no call here blocks the UI for more than ~20 ms (the camera's poll: ~100 ms at most). ---- */
+/* Bluetooth: scanning only (no pairing, no audio). sh_bt_on(1) starts the chip (firmware, patch: ~10 s); state 0 off,
+ * 1 starting, 2 on, -1 failed (sh_bt_why: plain words). sh_bt_scan(1) scans (LE, then classic) again and again while
+ * on, for at most 60 s; sh_bt_scan(0) stops after the scan that runs (they end by themselves, ~11 s). The devices:
+ * strongest first, name ("" when none was heard) and RSSI in dBm; the list stays between scans. < 0: refused. */
+int sh_bt_on(int on);
+int sh_bt_state(void);
+const char *sh_bt_why(void);
+int sh_bt_scan(int on);
+int sh_bt_count(void);
+int sh_bt_get(int i, char *name, int cap, int *rssi);   /* 0 ok, -1 no such device */
+/* the front camera (no flash: use a white screen): a portrait selfie preview w x h (each <= 816, w * h <= 512 K, e.g.
+ * 360 x 480), mirrored; 0 started, < 0 refused (sh_cam_why). The newest frame: 0xFFRRGGBB, w * h, row after row
+ * (stride = w), or 0 while none yet / closed / failed; seq counts up with each new frame. The memory is the camera's
+ * (uncached): copy it within the turn. sh_cam_still asks for a still (816 x 612 rotated: 612 x 816, not mirrored);
+ * sh_cam_still_get gives it once ready (until the next still or close): its pixels and its 24-bit BMP file. */
+int sh_cam_open(int w, int h);
+const uint32_t *sh_cam_frame(int *w, int *h, unsigned *seq);
+int sh_cam_still(void);                               /* 0 asked, < 0 not running / one already pending */
+const uint32_t *sh_cam_still_get(int *w, int *h, const unsigned char **bmp, unsigned *bmp_len);   /* 0 not (yet) */
+const char *sh_cam_why(void);
+void sh_cam_close(void);
+/* the hub's sensors (each call keeps its sensor on for 10 s; the first may take ~5 s while the hub starts): -1 when
+ * not known yet. Light in lux; pressure in hPa x 10 (10132 = 1013.2 hPa); proximity 1 near, 0 far; the gyroscope in
+ * millidegrees a second (Android axes; 1 valid) */
+int sh_light_lux(void);
+int sh_pressure_hpa10(void);
+int sh_proximity_near(void);
+int sh_gyro_mdps(int *x, int *y, int *z);
+/* Auto-Brightness (the pref display.auto, 0 by default): the panel's level (1..4) from the light every 2 s while the
+ * screen is on; a level the user picks stays until the light moves to another level. sh_bright_now tells the shell. */
+void sh_auto_brightness(int on);
+int sh_auto_brightness_on(void);
+/* a call at the ear: 1 while the call screen wants the proximity sensor (a call at the earpiece), 0 after. While
+ * something is near, the panel is dark and touches are dropped; the Power key still works. The kernel ends it by
+ * itself when the call ends. */
+void sh_call_proximity(int on);
+/* Settings > Battery: Maximum Capacity (0..100 %), cycle count, plain words; 1 read, 0 not (words: why) */
+int sh_battery_health(int *max_pct, int *cycles, char *words, int cap);
+/* haptic patterns (kern/haptic.c) at the haptic.level intensity (0 off, 1 light, 2 medium, 3 strong: the default);
+ * RING and ALARM loop until sh_haptic_stop (60 s at most). sh_haptic / sh_haptic_k above are unchanged. */
+enum { SH_VIB_RING, SH_VIB_NOTIFY, SH_VIB_ALARM, SH_VIB_TICK, SH_VIB_SUCCESS, SH_VIB_WARNING, SH_VIB_ERROR };
+void sh_haptic_kind(int kind);
+void sh_haptic_stop(void);
+int sh_haptic_level(void);
+void sh_haptic_level_set(int level);                  /* kept as the pref haptic.level */
+
 #endif
 
 /* Track A, 1.0 (sbos-core-api.md 10): a safe start (the loader's one-shot from Settings > Startup or Starbite
  * Recovery): Wi-Fi isn't restored and nothing is saved until the next start. why: why this start, in words */
 int sh_safe_mode(void);
 int sh_boot_reason(char *why, int cap);
+
+/* Track A, 1.0: Restart and Shut Down (the shell's own slide-to-power-off is the confirmation, as on iOS). Both save
+ * first (the pages' on_save, the settings and prefs). Restart starts this same OS again when the loader said which it
+ * is (its SBFW table: the key of this start), else it goes back to the boot menu. In the self-test build they only log.
+ * < 0: refused (e.g. a heat session still running: the shell says so) */
+int sh_restart(void);
+int sh_power_off(void);
+/* Track A (sbos-core-api.md 8, with Track J's loader half): Software Update. The card's /STARBITE/UPDATE/MANIFEST.TXT
+ * (key=, version=, image=, size=, sha256=, notes=) names an image for this OS's catalog row; it is staged into the
+ * inactive update slot (sbos-slot-a / -b), checked (SHA-256, then the slot's header and CRC32 read back), armed as
+ * the loader's one-shot and started; 10 s after the home screen of that start it becomes the active version, else
+ * the loader rolls back (a notification says either). In the self-test build every write and restart is a dry run.
+ * state: 0 none found (why: a detail), 1 found, 2 staging (pct), 3 ready (staged, restart to install), 4 installed
+ * (this start committed it), -1 failed (why) */
+#ifndef SH_UPDATE_DEFINED
+#define SH_UPDATE_DEFINED
+struct sh_update { char version[32], notes[160]; unsigned size; int state; int pct; char why[80]; };
+int sh_update_check(struct sh_update *u);   /* reads the manifest (may read the card: from a tap or an idle turn); 1 found */
+int sh_update_stage(struct sh_update *u);   /* one chunk a call, so the UI stays live, until state 3 or -1 */
+int sh_update_install(void);                /* arms and restarts (does not return on success); -1 refused */
+#endif
+
+/* Track A: the Camera's photos (the kernel: kern/photos.c on the home store's volatile entry "sbos-photos", 64 MiB:
+ * a ring of the newest 32; the host: RAM, SBTK_PHOTOS=FILE also keeps them in a file). Pixels are 0xFFRRGGBB, row
+ * after row (stride = w). Kept as 24-bit RGB; a picture of more than 697685 pixels (2 MiB - 4 KiB at 3 bytes) is
+ * scaled down to the largest size that fits, the aspect kept: 612 x 816 (the front camera's still) is kept exactly,
+ * 1080 x 1440 as 723 x 964. Sides up to 4096. Crash safe: a save that is cut off leaves the photos that were there
+ * (the oldest one, when the 32 were full, may be gone); a damaged photo is skipped.
+ * sh_photo_save: 0 kept as the newest (with 32 kept, the oldest goes), -1 refused / failed: sh_photo_why says why in
+ * plain words (no photo storage on this phone, storage busy while the modem is on, a safe start, a storage error).
+ * It blocks for the write: ~0.2..0.4 s for a 612 x 816 photo on the card (~30 ms on UFS); call it from the shutter's
+ * tap, not every frame. sh_photo_count: how many (the first call reads the 32 headers: ~30 ms).
+ * sh_photo_get: i 0 = the newest; writes w * h pixels to argb (cap_px at least w * h) and returns w * h; argb 0: only
+ * w, h and utc (s since 1970, 0 unknown) and w * h (the size to allocate); -1: no such photo / too small / a read
+ * error (why). Reads ~1.5 MB (~0.1 s on the card). A damaged photo found here is skipped (the next one is given in
+ * its place) and the count drops by one: ask sh_photo_count again after a get.
+ * sh_photo_delete: 0 deleted (the photos after i move up), -1 (why). In the self-test build saves and deletes are
+ * logged dry runs (0 returned, nothing kept) and nothing is read: count 0. */
+int sh_photo_save(const uint32_t *argb, int w, int h);
+int sh_photo_count(void);
+int sh_photo_get(int i, uint32_t *argb, int cap_px, int *w, int *h, long long *utc);
+int sh_photo_delete(int i);
+const char *sh_photo_why(void);
+
+/* the platform: Power held about a second (the screen is on now): the shell shows its power sheet (slide to power off,
+ * Restart, Cancel). Track B defines it; until then a weak default does nothing */
+void sh_power_held(void);
+
+/* Track A, 1.0: performance and keep-awake.
+ * - sh_perf_mode(1) in Emergency / Survival / Extreme saving (the top clocks drop 0.4 s after motion), 0 in normal
+ *   mode (they hold 1.5 s past the last motion frame, so springs and transitions never drop frames).
+ * - sh_perf_hold(ms): top clocks now for ms (a transition that no touch started: a banner, the wake's scale-in).
+ * - sh_hold_awake(who, on): a long job (an App Store install, a Linux build) keeps the screen on: no Auto-Lock while
+ *   any holder is on; returns the holders now, < 0 refused. Off with the same who. */
+void sh_perf_mode(int conservative);
+void sh_perf_hold(int ms);
+int sh_hold_awake(const char *who, int on);
+/* Track A, 1.0: Low Power Mode (the Control Centre's Power Saving tile): conservative clocks, kept across a restart */
+void sh_low_power(int on);
+int sh_low_power_on(void);

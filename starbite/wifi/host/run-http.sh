@@ -40,5 +40,11 @@ p1=$((20000 + $$ % 20000)); p2=$((p1 + 1))
 python3 "$here/http-serve.py" $p1 & s1=$!
 python3 "$here/http-serve.py" $p2 --tls "$d/srv.pem" "$d/srv.key" & s2=$!
 trap 'kill $s1 $s2 2>/dev/null' EXIT
-sleep 1
+# both servers listening (python starts slowly on a loaded machine: up to 20 s)
+python3 -c 'import socket,sys,time
+for p in sys.argv[1:]:
+    for i in range(200):
+        try:
+            socket.create_connection(("127.0.0.1", int(p)), 0.2).close(); break
+        except OSError: time.sleep(0.1)' $p1 $p2
 "$OUT/http-test" $p1 $p2 "$d/ca.der"

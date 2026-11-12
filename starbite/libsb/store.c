@@ -813,6 +813,13 @@ int store_verify(unsigned m, unsigned i, uint32_t *got)
  * small: nothing granted). */
 int store_volatile_grant(const char *name, uint64_t min_bytes, struct store_ent *e)
 {
+    return store_volatile_grant_part(name, min_bytes, 0, ~0ULL, e);
+}
+
+/* The same checks; the grant for blocks first .. first + count - 1 of the entry only (cut at its end; the fence takes
+ * at most 1024 blocks at a time): Software Update's 64 MiB slots, written a window at a time. */
+int store_volatile_grant_part(const char *name, uint64_t min_bytes, uint64_t first, uint64_t count, struct store_ent *e)
+{
     int h = store_home();
     if (h < 0)
         return 0;
@@ -843,7 +850,11 @@ int store_volatile_grant(const char *name, uint64_t min_bytes, struct store_ent 
             return 0;
         }
     }
-    return sb_volatile_grant(h == (int)STORE_SD ? SB_MED_SD : SB_MED_UFS, e->lba, n, e->name);
+    if (first >= n || !count)
+        return 0;
+    if (count > n - first)
+        count = n - first;
+    return sb_volatile_grant(h == (int)STORE_SD ? SB_MED_SD : SB_MED_UFS, e->lba + first, count, e->name);
 }
 
 /* ---- the home store (store.h) ---------------------------------------------------------------------- */

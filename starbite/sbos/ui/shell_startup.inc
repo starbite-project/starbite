@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: MIT
  * Track J: Settings > Startup (docs/STARBITE-FIRMWARE-LAYER.md 10: Starbite OS as the boot menu), on Track B's hook:
- * included after shell_settings.inc, which calls page_startup (each of the page's four strips) and startup_tap, and
- * startup_tick if it wants (nothing here moves). One pushed page with sub-views, each the Settings rows' look (an
- * inset group, 47 pt rows, chevrons, iOS's switch), the glass back at the top left:
- *   Startup          Operating Systems >, Firmware >, Recovery >; Starbite OS as the boot menu (the switch)
+ * included by shell_lock.c after shell_settings.inc, whose "Startup" row opens it (AS.sub SE_STARTUP_PAGE, the page
+ * strips); shell_lock.c calls page_startup (each strip) and startup_tap; nothing here moves, so no startup_tick. One
+ * pushed page with sub-views on Track B's kit (shell_kit.inc: d_group / d_group_head / d_group_foot / d_row, the
+ * switch kit_d_switch, kit_alert), the glass back circle and the inline title as Settings' other pages:
+ *   Startup          Operating Systems >, Firmware >, Recovery >; Starbite OS as Boot Menu (the switch)
  *   OS list          every catalog OS (hidden ones not), the default marked, one that cannot start greyed
  *   OS detail        Start Once, Make Default, "Start once with" the one-shots that fit its kind (Windows: Advanced
  *                    Startup greyed, plan only)
@@ -11,16 +12,16 @@
  *                    after a crash; each opens a picker (a check on the current one)
  *   Recovery         the last crash reports, this start (why, store, loader), restart to the boot menu / Starbite
  *                    Recovery / Download mode
- * The platform's calls are shell.h's sh_os_*, sh_fw_*, sh_req_*, sh_crash_*, sh_restart_*, sh_fw_info (the kernel:
- * kern/sbfw_os.c; the host: host/startup_fake.inc). Every restart and one-shot asks with the platform's hold
- * confirmation. What the page shows is read once when a view opens (su_load), never per strip. */
+ * The back circle: settings_back() at the root, else one level up. The platform's calls are shell.h's sh_os_*,
+ * sh_fw_*, sh_req_*, sh_crash_*, sh_restart_*, sh_fw_info (the kernel: kern/sbfw_os.c; the host:
+ * host/startup_fake.inc). Every restart and one-shot asks with the platform's hold confirmation. What the page shows
+ * is read once when a view opens (su_load), never per strip. */
 #define SHELL_STARTUP 1
 
 enum { SU_ROOT, SU_OSL, SU_OSD, SU_FW, SU_PICK, SU_REC };
 enum { PK_DEFAULT, PK_TIMEOUT, PK_DEBUG, PK_POST, PK_WDT, PK_CRASH, PK_AFTER };
 #define SU_ROWS 12                          /* OS rows that fit the screen */
 #define SU_CRASHES 3
-#define SU_ROW 47.0f
 typedef struct { char key[24], name[32]; int cat, method, ready, def; } su_os_t;
 static struct {
     int view, os, pick, loaded;
@@ -111,13 +112,15 @@ static void su_date(long long t, char *o)
     for (const char *u = " UTC"; *u; u++) o[n++] = *u;
     o[n] = 0;
 }
-static void su_cat(char *o, const char *a, const char *b)
+/* a then b into o (cap bytes with the 0) */
+static void su_catn(char *o, int cap, const char *a, const char *b)
 {
     int n = 0;
-    while (*a && n < 95) o[n++] = *a++;
-    while (b && *b && n < 95) o[n++] = *b++;
+    while (*a && n < cap - 1) o[n++] = *a++;
+    while (b && *b && n < cap - 1) o[n++] = *b++;
     o[n] = 0;
 }
+static void su_cat(char *o, const char *a, const char *b) { su_catn(o, 96, a, b); }
 /* the loader's kind names (sbfmt.c sb_kind_name) in words */
 static const char *su_kind(const char *k)
 {
@@ -130,95 +133,118 @@ static const char *su_kind(const char *k)
     return k;
 }
 
-/* ---- drawing --------------------------------------------------------------------------------------------------- */
-static float su_cap(dc *d, float y, const char *t)
+/* ---- the list: the kit's d_group / d_row (cards LG_X / LG_W / LG_RAD, LG_ROW rows, LG_GAP between cards) -------------
+ * One layout serves the drawing and the taps: su_lay(d) with d 0 only measures and fills the hit table (SUH), so a tap
+ * finds the row the strips drew. Sections as shell_settings.inc's se_layout: the first card at PUSHED_TOP - 8 (26 more
+ * with a header), LG_GAP between cards (12 more when a header follows a footer). */
+#define SU_Y0 (PUSHED_TOP - 8)
+#define SU_TWO 66.0f                        /* a two-line row (the crash reports), as Settings' rows with a subtitle */
+#define SU_SWX (LG_RE - 16 - KSW_W)          /* the switch, where Settings puts its switches */
+#define SU_MAXHIT 32
+enum { R_NONE, R_OSL, R_FW, R_REC, R_SHELL, R_ONCE, R_MKDEF, R_WINRE, R_RST_MENU, R_RST_REC, R_RST_DL,
+       R_OS0 = 20, R_REQ0 = 40, R_PICK0 = 50, R_OPT0 = 60 };
+static struct { float y, h; int id; } SUH[SU_MAXHIT];
+static struct { float y, rh; int nh, i, n, first, foot; } SUL;
+static void su_begin(void) { SUL.y = SU_Y0; SUL.nh = 0; SUL.first = 1; SUL.foot = 0; SUL.n = SUL.i = 0; }
+/* a card of n rows rh high, under an optional header */
+static void su_sec(dc *d, const char *head, int n, float rh)
 {
-    d_text(d, TK_IT400, 13, ROW_TX, y + 22, t, .52f, 0, W(.55f), 0);
-    return y + 30;
+    if (!SUL.first) SUL.y += LG_GAP + (head && SUL.foot ? 12 : 0);
+    else if (head) SUL.y += 26;
+    SUL.first = 0;
+    SUL.foot = 0;
+    if (d && head) d_group_head(d, SUL.y, head);
+    if (d && n) d_group(d, SUL.y, rh * n);
+    SUL.i = 0;
+    SUL.n = n;
+    SUL.rh = rh;
 }
-static void su_group(dc *d, float y, int n) { d_rrect(d, GROUP_X, y, GROUP_W, SU_ROW * n - 1, 16, tk_hex(0x151c33, 1)); }
-/* a row: label (colour lc), value on the right, a chevron (nav), a rule under it unless last */
-static void su_row(dc *d, float ry, const char *l, tk_col lc, const char *v, int nav, int last)
+/* the next row's top (id: what a tap on it does, R_NONE nothing) */
+static float su_next(int id)
 {
-    float right = nav ? CONTENT_R - 36 : CONTENT_R - 16, room = right - ROW_TX;
-    float lw = tw(TK_IT400, 16, l, 0, 0), vw = v && v[0] ? tw(TK_IT400, 16, v, 0, TK_TNUM) : 0;
-    float lmax = vw > 0 ? tk_maxf(room - vw - 16, room / 2) : room;
-    d_text_box(d, TK_IT400, 16, ROW_TX, ry + 29, lmax, 0, l, 0, 0, lc, 0);
-    if (vw > 0) d_text_box(d, TK_IT400, 16, right, ry + 29, room - tk_minf(lw, lmax) - 16, 2, v, 0, TK_TNUM, W(.55f), 0);
-    if (nav) d_icon(d, "chev", CONTENT_R - 30, ry + 16.5f, .45f);
-    if (!last) d_rrect(d, ROW_TX, ry + 46, CONTENT_R - ROW_TX, .5f, 0, W(.08f));
+    float y = SUL.y;
+    if (id && SUL.nh < SU_MAXHIT) { SUH[SUL.nh].y = y; SUH[SUL.nh].h = SUL.rh; SUH[SUL.nh].id = id; SUL.nh++; }
+    SUL.y += SUL.rh;
+    SUL.i++;
+    return y;
 }
-static void su_switch(dc *d, float ry, int on)
+static void su_row(dc *d, int id, const char *l, tk_col lc, const char *v, int chev)
 {
-    d_rrect(d, CONTENT_R - 67, ry + 8, 51, 31, 15.5f, on ? tk_hex(0x34c759, 1) : W(.16f));
-    d_rrect(d, on ? CONTENT_R - 45 : CONTENT_R - 65, ry + 10, 27, 27, 13.5f, W(1));
+    int last = SUL.i + 1 >= SUL.n;
+    float y = su_next(id);
+    if (d) d_row(d, y, SUL.rh, 0, l, v, chev, last, lc, 0);
 }
-static void su_check(dc *d, float ry)
+/* a row with the kit's switch at the right */
+static void su_switch_row(dc *d, int id, const char *l, int on, int enabled)
 {
-    float x = CONTENT_R - 34, y = ry + 24;
-    d_seg(d, x, y, x + 5, y + 5, 2.2f, ACCENT());
-    d_seg(d, x + 5, y + 5, x + 14, y - 6, 2.2f, ACCENT());
+    int last = SUL.i + 1 >= SUL.n;
+    float y = su_next(id);
+    if (!d) return;
+    d_row(d, y, SUL.rh, 0, l, 0, 0, last, enabled ? INK : C_LABEL3, SU_SWX - 12);
+    kit_d_switch(d, SU_SWX, y + (SUL.rh - KSW_H) / 2, on, enabled);
 }
-/* grey lines under a group, wrapped; returns the y after them */
-static float su_note(dc *d, float y, const char *t)
+/* a picker's row: the check (accent) at the right when it is the current one */
+static void su_check_row(dc *d, int id, const char *l, tk_col lc, const char *v, int on)
 {
-    char ln[4][96];
-    float wm;
-    int n = wrapn(ln, 4, TK_IT400, 13, t, CONTENT_W - 32, &wm);
-    for (int k = 0; k < n; k++) d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 7 + 18.0f * k), ln[k], 0, 0, W(.45f), 0);
-    return y + 7 + 18.0f * n;
+    int last = SUL.i + 1 >= SUL.n;
+    float y = su_next(id);
+    if (!d) return;
+    d_row(d, y, SUL.rh, 0, l, v, 0, last, lc, on ? LG_RE - 16 - 14 - 12 : 0);
+    if (on) {
+        float x = LG_RE - 16 - 14, cy = y + SUL.rh / 2 + 1;
+        d_seg(d, x, cy, x + 5, cy + 5, 2.2f, KIT_BLUE());
+        d_seg(d, x + 5, cy + 5, x + 14, cy - 6, 2.2f, KIT_BLUE());
+    }
+}
+static void su_foot(dc *d, const char *t)
+{
+    SUL.y += d_group_foot(d, SUL.y, t);
+    SUL.foot = 1;
 }
 static void su_head(dc *d, const char *title)
 {
-    d_back(d, W(1));
+    if (!d) return;
+    d_back(d, W(1));                       /* iOS 26's glass back circle and the inline title, as Settings' pages */
     d_navtitle(d, title);
 }
-#define SU_TOP (PUSHED_TOP + 12)
 
 static void su_page_root(dc *d)
 {
     su_head(d, "Startup");
-    float y = SU_TOP + 34;
-    char b[48];
-    su_group(d, y, 3);
+    char b[96];
+    su_sec(d, 0, 3, LG_ROW);
     int n = put_dec(b, SU.nos + SU.more);
     b[n] = 0;
-    su_row(d, y, "Operating Systems", INK, b, 1, 0);
-    su_row(d, y + SU_ROW, "Firmware", INK, "", 1, 0);
+    su_row(d, R_OSL, "Operating Systems", INK, b, 1);
+    su_row(d, R_FW, "Firmware", INK, "", 1);
     if (SU.ncrash > 0) { n = put_dec(b, SU.ncrash); su_cat(b + n, SU.ncrash == 1 ? " crash" : " crashes", 0); }
     else b[0] = 0;
-    su_row(d, y + 2 * SU_ROW, "Recovery", INK, b, 1, 1);
-    y += 3 * SU_ROW + 6;
-    y = su_cap(d, y, "AT POWER-ON");
-    su_group(d, y, 1);
-    su_row(d, y, "Starbite OS as Boot Menu", INK, "", 0, 1);
-    su_switch(d, y, SU.fw.shell);
-    y += SU_ROW;
-    y = su_note(d, y, SU.fw.shell ? "Starbite OS starts first and is the boot menu. Hold Volume Down at power-on for the "
-                                     "loader's own menu; after a crash it comes back by itself."
-                                   : "The loader's menu starts first, then the default OS after its timeout.");
-    if (SU.have_fw < 0) su_note(d, y + 6, "No settings store: the loader keeps its defaults.");
+    su_row(d, R_REC, "Recovery", INK, b, 1);
+    su_sec(d, "At power-on", 1, LG_ROW);
+    su_switch_row(d, R_SHELL, "Starbite OS as Boot Menu", SU.fw.shell, SU.have_fw >= 0);
+    su_foot(d, SU.have_fw < 0 ? "No settings store: the loader keeps its defaults."
+               : SU.fw.shell ? "Starbite OS starts first and is the boot menu. Hold Volume Down at power-on for the "
+                               "loader's own menu; after a crash it comes back by itself."
+                             : "The loader's menu starts first, then the default OS after its timeout.");
 }
 
 static void su_page_osl(dc *d)
 {
     su_head(d, "Operating Systems");
-    float y = SU_TOP + 34;
-    if (!SU.nos) { d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Systems", "The store's catalog lists no OS."); return; }
-    su_group(d, y, SU.nos);
+    if (!SU.nos) { if (d) d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Systems", "The store's catalog lists no OS."); return; }
+    su_sec(d, 0, SU.nos, LG_ROW);
     for (int i = 0; i < SU.nos; i++) {
         const su_os_t *o = &SU.o[i];
-        su_row(d, y + SU_ROW * i, o->name, o->ready ? INK : W(.4f), o->def ? "Default" : o->ready ? "" : "Not Installed", 1,
-               i + 1 == SU.nos);
+        su_row(d, R_OS0 + i, o->name, o->ready ? INK : C_LABEL3, o->def ? "Default" : o->ready ? "" : "Not Installed", 1);
     }
-    y += SU_ROW * SU.nos;
-    char b[96];
+    char b[96], f[192];
+    b[0] = 0;
     if (SU.more > 0) {
         int n = put_dec(b, SU.more);
-        su_cat(b + n, " more in the catalog: the loader's menu lists them all.", 0);
-        y = su_note(d, y, b);
+        su_catn(b + n, (int)sizeof b - n, " more in the catalog: the loader's menu lists them all. ", 0);
     }
-    su_note(d, y, "The default starts by itself after the menu's timeout. Tap a system to start it once.");
+    su_catn(f, (int)sizeof f, b, "The default starts by itself after the menu's timeout. Tap a system to start it once.");
+    su_foot(d, f);
 }
 
 static int su_req_n(const su_os_t *o, int *acts)
@@ -234,21 +260,16 @@ static void su_page_osd(dc *d)
     if (SU.os < 0 || SU.os >= SU.nos) { su_head(d, "System"); return; }
     const su_os_t *o = &SU.o[SU.os];
     su_head(d, o->name);
-    float y = SU_TOP + 34;
-    su_group(d, y, 2);
-    su_row(d, y, "Start Once", o->ready ? ACCENT() : W(.3f), "", 0, 0);
-    su_row(d, y + SU_ROW, o->def ? "Default System" : "Make Default", o->def || !o->ready ? W(.4f) : ACCENT(), "", 0, 1);
-    if (o->def) su_check(d, y + SU_ROW);
-    y += 2 * SU_ROW;
-    if (!o->ready) y = su_note(d, y, "Its files are not in the store, so it cannot start.");
+    su_sec(d, 0, 2, LG_ROW);
+    su_row(d, R_ONCE, "Start Once", o->ready ? KIT_BLUE() : C_LABEL3, "", 0);
+    su_check_row(d, R_MKDEF, o->def ? "Default System" : "Make Default", o->def || !o->ready ? C_LABEL3 : KIT_BLUE(), "", o->def);
+    if (!o->ready) su_foot(d, "Its files are not in the store, so it cannot start.");
     int acts[5], n = su_req_n(o, acts), win = su_is_windows(o);
     if (n || win) {
-        y = su_cap(d, y + 6, "START ONCE WITH");
-        su_group(d, y, n + win);
-        for (int i = 0; i < n; i++) su_row(d, y + SU_ROW * i, SU_REQ[acts[i]].name, o->ready ? ACCENT() : W(.3f), "", 0, i + 1 == n + win);
-        if (win) su_row(d, y + SU_ROW * n, "Advanced Startup", W(.3f), "Plan Only", 0, 1);
-        y += SU_ROW * (n + win);
-        su_note(d, y, "For the next start only: the loader applies it, then clears it.");
+        su_sec(d, "Start once with", n + win, LG_ROW);
+        for (int i = 0; i < n; i++) su_row(d, R_REQ0 + i, SU_REQ[acts[i]].name, o->ready ? KIT_BLUE() : C_LABEL3, "", 0);
+        if (win) su_row(d, R_WINRE, "Advanced Startup", C_LABEL3, "Plan Only", 0);
+        su_foot(d, "For the next start only: the loader applies it, then clears it.");
     }
 }
 
@@ -261,25 +282,18 @@ static void su_page_fw(dc *d)
 {
     su_head(d, "Firmware");
     char b[16];
-    float y = SU_TOP + 34;
-    su_group(d, y, 3);
-    su_row(d, y, "Starbite OS as Boot Menu", INK, "", 0, 0);
-    su_switch(d, y, SU.fw.shell);
-    su_row(d, y + SU_ROW, "Default System", INK, su_os_name(SU.fw.default_key), 1, 0);
-    su_row(d, y + 2 * SU_ROW, "Menu Timeout", INK, su_tmo_text(b), 1, 1);
-    y += 3 * SU_ROW;
-    y = su_cap(d, y + 6, "DIAGNOSTICS");
-    su_group(d, y, 3);
-    su_row(d, y, "Debug Level", INK, SU_DEBUG[SU.fw.debug_level & 3], 1, 0);
-    su_row(d, y + SU_ROW, "POST", INK, SU_POST[SU.fw.post < 3 ? SU.fw.post : 0], 1, 0);
-    su_row(d, y + 2 * SU_ROW, "Watchdog", INK, su_wdt_text(b), 1, 1);
-    y += 3 * SU_ROW;
-    y = su_cap(d, y + 6, "CRASHES");
-    su_group(d, y, 2);
-    su_row(d, y, "Crash Detection", INK, SU_CRASH[SU.fw.crash_mode < 3 ? SU.fw.crash_mode : 0], 1, 0);
-    su_row(d, y + SU_ROW, "After a Crash", INK, SU_AFTER[SU.fw.crash_action < 3 ? SU.fw.crash_action : 0], 1, 1);
-    y += 2 * SU_ROW;
-    su_note(d, y, SU.have_fw < 0 ? "No settings store: nothing can be changed." : "The loader reads these at its next start.");
+    su_sec(d, 0, 3, LG_ROW);
+    su_switch_row(d, R_SHELL, "Starbite OS as Boot Menu", SU.fw.shell, SU.have_fw >= 0);
+    su_row(d, R_PICK0 + PK_DEFAULT, "Default System", INK, su_os_name(SU.fw.default_key), 1);
+    su_row(d, R_PICK0 + PK_TIMEOUT, "Menu Timeout", INK, su_tmo_text(b), 1);
+    su_sec(d, "Diagnostics", 3, LG_ROW);
+    su_row(d, R_PICK0 + PK_DEBUG, "Debug Level", INK, SU_DEBUG[SU.fw.debug_level & 3], 1);
+    su_row(d, R_PICK0 + PK_POST, "POST", INK, SU_POST[SU.fw.post < 3 ? SU.fw.post : 0], 1);
+    su_row(d, R_PICK0 + PK_WDT, "Watchdog", INK, su_wdt_text(b), 1);
+    su_sec(d, "Crashes", 2, LG_ROW);
+    su_row(d, R_PICK0 + PK_CRASH, "Crash Detection", INK, SU_CRASH[SU.fw.crash_mode < 3 ? SU.fw.crash_mode : 0], 1);
+    su_row(d, R_PICK0 + PK_AFTER, "After a Crash", INK, SU_AFTER[SU.fw.crash_action < 3 ? SU.fw.crash_action : 0], 1);
+    su_foot(d, SU.have_fw < 0 ? "No settings store: nothing can be changed." : "The loader reads these at its next start.");
 }
 
 /* the picker's options: count, label i, current */
@@ -320,73 +334,66 @@ static void su_page_pick(dc *d)
     su_head(d, su_pick_title(SU.pick));
     const char *lab[SU_ROWS];
     int cur, n = su_pick_opts(SU.pick, lab, &cur);
-    float y = SU_TOP + 34;
-    su_group(d, y, n);
+    su_sec(d, 0, n, LG_ROW);
     for (int i = 0; i < n; i++) {
         int off = SU.pick == PK_DEFAULT && !SU.o[i].ready;
-        su_row(d, y + SU_ROW * i, lab[i], off ? W(.4f) : INK, off ? "Not Installed" : "", 0, i + 1 == n);
-        if (i == cur) su_check(d, y + SU_ROW * i);
+        su_check_row(d, R_OPT0 + i, lab[i], off ? C_LABEL3 : INK, off ? "Not Installed" : "", i == cur);
     }
-    su_note(d, y + SU_ROW * n, su_pick_note(SU.pick));
+    su_foot(d, su_pick_note(SU.pick));
 }
 
-#define SU_CR_ROW 62.0f
+/* a crash report: the OS and the time on the first line, the kind (red for a crash) and its message on the second */
+static void su_crash_row(dc *d, const sh_crash_t *c)
+{
+    int last = SUL.i + 1 >= SUL.n;
+    float y = su_next(R_NONE), h = SUL.rh;
+    if (!d) return;
+    char when[40];
+    su_date(c->utc, when);
+    float room = LG_RE - 16 - LG_TX, ww = when[0] ? tw(TK_IT400, 15, when, 0, TK_TNUM) : 0;
+    d_text_box(d, TK_IT400, 17, LG_TX, y + 28, room - ww - (ww > 0 ? 12 : 0), 0, c->os, 0, 0, INK, 0);
+    if (ww > 0) d_text_box(d, TK_IT400, 15, LG_RE - 16, y + 28, ww + 2, 2, when, 0, TK_TNUM, KIT_SEC(), 0);
+    const char *kind = su_kind(c->kind);
+    float kw = tk_minf(tw(TK_IT600, 15, kind, 0, 0), room);
+    d_text_box(d, TK_IT600, 15, LG_TX, y + 48, room, 0, kind, 0, 0, c->severity >= 2 ? KIT_RED() : KIT_SEC(), 0);
+    if (c->line[0] && room - kw > 40) {
+        char l2[112];
+        su_cat(l2, "\xc2\xb7 ", c->line);
+        d_text_box(d, TK_IT400, 15, LG_TX + kw + 5, y + 48, room - kw - 5, 0, l2, 0, 0, KIT_SEC(), 0);
+    }
+    if (!last) d_rrect(d, LG_TX, y + h - .5f, LG_RE - LG_TX, .5f, 0, C_SEP);
+}
 static void su_page_rec(dc *d)
 {
     su_head(d, "Recovery");
-    float y = SU_TOP;
-    y = su_cap(d, y, "CRASH REPORTS");
     int nc = SU.ncrash > 0 ? (SU.ncrash < SU_CRASHES ? SU.ncrash : SU_CRASHES) : 0;
     if (!nc) {
-        su_group(d, y, 1);
-        su_row(d, y, SU.ncrash < 0 ? "No crash log on this store" : "No crashes", W(.5f), "", 0, 1);
-        y += SU_ROW;
+        su_sec(d, "Crash reports", 1, LG_ROW);
+        su_row(d, R_NONE, SU.ncrash < 0 ? "No crash log on this store" : "No crashes", KIT_SEC(), "", 0);
     } else {
-        d_rrect(d, GROUP_X, y, GROUP_W, SU_CR_ROW * nc - 1, 16, tk_hex(0x151c33, 1));
-        for (int i = 0; i < nc; i++) {
-            const sh_crash_t *c = &SU.cr[i];
-            float ry = y + SU_CR_ROW * i;
-            char when[40];
-            const char *kind = su_kind(c->kind);
-            su_date(c->utc, when);
-            float ww = when[0] ? tw(TK_IT400, 14, when, 0, TK_TNUM) : 0;
-            d_text_box(d, TK_IT600, 16, ROW_TX, ry + 25, CONTENT_R - 16 - ROW_TX - ww - 10, 0, c->os, 0, 0, INK, 0);
-            if (ww > 0) d_text(d, TK_IT400, 14, CONTENT_R - 16 - ww, ry + 25, when, 0, TK_TNUM, W(.5f), 0);
-            /* the kind (red for a crash), then the message line in grey */
-            float room = CONTENT_R - 16 - ROW_TX, kw = tk_minf(tw(TK_IT600, 13.5f, kind, 0, 0), room);
-            d_text_box(d, TK_IT600, 13.5f, ROW_TX, ry + 46, room, 0, kind, 0, 0, c->severity >= 2 ? tk_hex(0xff6961, 1) : W(.7f), 0);
-            if (c->line[0] && room - kw > 40) {
-                char l2[112];
-                su_cat(l2, "\xc2\xb7 ", c->line);
-                d_text_box(d, TK_IT400, 13.5f, ROW_TX + kw + 5, ry + 46, room - kw - 5, 0, l2, 0, 0, W(.55f), 0);
-            }
-            if (i + 1 < nc) d_rrect(d, ROW_TX, ry + SU_CR_ROW - 1, CONTENT_R - ROW_TX, .5f, 0, W(.08f));
-        }
-        y += SU_CR_ROW * nc;
+        su_sec(d, "Crash reports", nc, SU_TWO);
+        for (int i = 0; i < nc; i++) su_crash_row(d, &SU.cr[i]);
     }
-    y = su_cap(d, y + 6, "THIS START");
-    su_group(d, y, 3);
-    char b[48];
-    su_row(d, y, "Why", INK, SU.inf.why, 0, 0);
+    su_sec(d, "This start", 3, LG_ROW);
+    char b[96];
+    su_row(d, R_NONE, "Why", INK, SU.inf.why, 0);
     su_cat(b, SU.inf.medium == 1 ? "Memory Card" : SU.inf.medium == 0 ? "Phone (UFS)" : "None",
            SU.inf.card_only ? " \xc2\xb7 card only" : 0);
-    su_row(d, y + SU_ROW, "Store", INK, b, 0, 0);
+    su_row(d, R_NONE, "Store", INK, b, 0);
     if (SU.inf.valid) { su_cat(b, "Version ", 0); int n = 8; n += put_dec(b + n, SU.inf.loader_version); b[n] = 0; }
     else su_cat(b, "Older (no table)", 0);
-    su_row(d, y + 2 * SU_ROW, "Loader", INK, b, 0, 1);
-    y += 3 * SU_ROW;
-    y = su_cap(d, y + 6, "RESTART");
-    su_group(d, y, 3);
-    su_row(d, y, "Restart to Boot Menu", ACCENT(), "", 0, 0);
-    su_row(d, y + SU_ROW, "Restart to Starbite Recovery", ACCENT(), "", 0, 0);
-    su_row(d, y + 2 * SU_ROW, "Restart to Download Mode", tk_hex(0xff6961, 1), "", 0, 1);
-    y += 3 * SU_ROW;
-    su_note(d, y, "Each asks first. The boot menu and Recovery are this once; the next start is as before.");
+    su_row(d, R_NONE, "Loader", INK, b, 0);
+    su_sec(d, "Restart", 3, LG_ROW);
+    su_row(d, R_RST_MENU, "Restart to Boot Menu", KIT_BLUE(), "", 0);
+    su_row(d, R_RST_REC, "Restart to Starbite Recovery", KIT_BLUE(), "", 0);
+    su_row(d, R_RST_DL, "Restart to Download Mode", KIT_RED(), "", 0);
+    su_foot(d, "Each asks first. The boot menu and Recovery are this once; the next start is as before.");
 }
 
-static void page_startup(dc *d)
+/* the view's layout: drawn into d, or with d 0 only the hit table */
+static void su_lay(dc *d)
 {
-    if (!SU.loaded) su_load();               /* the first strip of a fresh open reads; the other three draw */
+    su_begin();
     switch (SU.view) {
     case SU_OSL: su_page_osl(d); break;
     case SU_OSD: su_page_osd(d); break;
@@ -396,6 +403,11 @@ static void page_startup(dc *d)
     default: su_page_root(d); break;
     }
 }
+static void page_startup(dc *d)
+{
+    if (!SU.loaded) su_load();               /* the first strip of a fresh open reads; the other three draw */
+    su_lay(d);
+}
 
 /* ---- taps -------------------------------------------------------------------------------------------------------- */
 static void su_go(int view)
@@ -403,12 +415,6 @@ static void su_go(int view)
     SU.view = view;
     su_load();
     build_app_page(AP.a);
-}
-/* the row under y in a group of n rows starting at y0, or -1 */
-static int su_hit(float x, float y, float y0, int n, float rh)
-{
-    if (x < GROUP_X || x >= CONTENT_R || y < y0 || y >= y0 + rh * n) return -1;
-    return (int)((y - y0) / rh);
 }
 static void su_write(void)
 {
@@ -426,64 +432,68 @@ static void su_toggle_shell(void)
     SU.fw.shell = !SU.fw.shell;
     su_write();
 }
+static void su_ok(int i) { (void)i; }
+/* the row id under a tap, R_NONE for none */
+static int su_hit(float x, float y)
+{
+    if (x < LG_X || x >= LG_RE) return R_NONE;
+    su_lay(0);
+    for (int i = 0; i < SUL.nh; i++) if (y >= SUH[i].y && y < SUH[i].y + SUH[i].h) return SUH[i].id;
+    return R_NONE;
+}
 
 static int startup_tap(float x, float y)
 {
+    if (kit_on()) return 0;                  /* an alert of the kit's is up: only its buttons answer */
     if (BACK_HIT(x, y)) {
         switch (SU.view) {
-        case SU_ROOT: SU.loaded = 0; settings_back(); return 1;
+        case SU_ROOT: SU.loaded = 0; SU.os = -1; settings_back(); return 1;
         case SU_OSD: su_go(SU_OSL); return 1;
         case SU_PICK: su_go(SU_FW); return 1;
         default: su_go(SU_ROOT); return 1;
         }
     }
-    float y0 = SU_TOP + 34;
-    int r;
-    switch (SU.view) {
-    case SU_ROOT:
-        r = su_hit(x, y, y0, 3, SU_ROW);
-        if (r >= 0) { su_go(r == 0 ? SU_OSL : r == 1 ? SU_FW : SU_REC); return 1; }
-        if (su_hit(x, y, y0 + 3 * SU_ROW + 6 + 30, 1, SU_ROW) == 0) { su_toggle_shell(); return 1; }
-        return 0;
-    case SU_OSL:
-        r = su_hit(x, y, y0, SU.nos, SU_ROW);
-        if (r >= 0) { SU.os = r; SU.view = SU_OSD; build_app_page(AP.a); return 1; }
-        return 0;
-    case SU_OSD: {
-        if (SU.os < 0 || SU.os >= SU.nos) return 0;
+    if (!SU.loaded) su_load();
+    int id = su_hit(x, y);
+    switch (id) {
+    case R_NONE: return 0;
+    case R_OSL: su_go(SU_OSL); return 1;
+    case R_FW: su_go(SU_FW); return 1;
+    case R_REC: su_go(SU_REC); return 1;
+    case R_SHELL: su_toggle_shell(); return 1;
+    case R_RST_MENU: su_asked(sh_restart_menu(), "Can't restart now"); return 1;
+    case R_RST_REC: su_asked(sh_restart_recovery(), "Can't restart now"); return 1;
+    case R_RST_DL: su_asked(sh_restart_download(), "Can't restart now"); return 1;
+    default: break;
+    }
+    if (id >= R_OS0 && id < R_OS0 + SU.nos) { SU.os = id - R_OS0; SU.view = SU_OSD; build_app_page(AP.a); return 1; }
+    if (id >= R_PICK0 && id <= R_PICK0 + PK_AFTER) { SU.pick = id - R_PICK0; SU.view = SU_PICK; build_app_page(AP.a); return 1; }
+    if (SU.view == SU_OSD && SU.os >= 0 && SU.os < SU.nos) {
         const su_os_t *o = &SU.o[SU.os];
-        r = su_hit(x, y, y0, 2, SU_ROW);
-        if (r == 0) { if (o->ready) su_asked(sh_os_start_once(o->key), "Can't start it now"); return 1; }
-        if (r == 1) {
+        if (id == R_ONCE) { if (o->ready) su_asked(sh_os_start_once(o->key), "Can't start it now"); return 1; }
+        if (id == R_MKDEF) {
             if (!o->ready) { toast("Its files are missing"); return 1; }
             if (!o->def && sh_os_make_default(o->key) < 0) toast("Can't change the default now");
             su_load();
             build_app_page(AP.a);
             return 1;
         }
-        int acts[5], n = su_req_n(o, acts), win = su_is_windows(o);
-        float ry = y0 + 2 * SU_ROW + (o->ready ? 0 : 7 + 18) + 6 + 30;
-        r = su_hit(x, y, ry, n + win, SU_ROW);
-        if (r >= 0 && r < n) { if (o->ready) su_asked(sh_req_start(o->key, SU_REQ[acts[r]].act), "Can't start it now"); return 1; }
-        if (r == n && win) { toast("Advanced Startup is a plan only"); return 1; }
+        if (id == R_WINRE) {
+            static const kit_btn OK[1] = { { "OK", KIT_PREFERRED } };
+            kit_alert("Advanced Startup", "Windows' recovery start is a plan only: the loader can't start it yet.", OK, 1, su_ok);
+            return 1;
+        }
+        int acts[5], n = su_req_n(o, acts);
+        if (id >= R_REQ0 && id < R_REQ0 + n) {
+            if (o->ready) su_asked(sh_req_start(o->key, SU_REQ[acts[id - R_REQ0]].act), "Can't start it now");
+            return 1;
+        }
         return 0;
     }
-    case SU_FW: {
-        r = su_hit(x, y, y0, 3, SU_ROW);
-        if (r == 0) { su_toggle_shell(); return 1; }
-        if (r > 0) { SU.pick = r == 1 ? PK_DEFAULT : PK_TIMEOUT; SU.view = SU_PICK; build_app_page(AP.a); return 1; }
-        float y1 = y0 + 3 * SU_ROW + 6 + 30;
-        r = su_hit(x, y, y1, 3, SU_ROW);
-        if (r >= 0) { SU.pick = PK_DEBUG + r; SU.view = SU_PICK; build_app_page(AP.a); return 1; }
-        r = su_hit(x, y, y1 + 3 * SU_ROW + 6 + 30, 2, SU_ROW);
-        if (r >= 0) { SU.pick = PK_CRASH + r; SU.view = SU_PICK; build_app_page(AP.a); return 1; }
-        return 0;
-    }
-    case SU_PICK: {
+    if (SU.view == SU_PICK && id >= R_OPT0) {
         const char *lab[SU_ROWS];
-        int cur, n = su_pick_opts(SU.pick, lab, &cur);
-        r = su_hit(x, y, y0, n, SU_ROW);
-        if (r < 0) return 0;
+        int cur, n = su_pick_opts(SU.pick, lab, &cur), r = id - R_OPT0;
+        if (r >= n) return 0;
         if (SU.have_fw < 0) { toast("No settings store"); return 1; }
         if (SU.pick == PK_DEFAULT && !SU.o[r].ready) { toast("Its files are missing"); return 1; }
         switch (SU.pick) {
@@ -499,37 +509,5 @@ static int startup_tap(float x, float y)
         su_write();
         return 1;
     }
-    case SU_REC: {
-        int nc = SU.ncrash > 0 ? (SU.ncrash < SU_CRASHES ? SU.ncrash : SU_CRASHES) : 0;
-        float yr = SU_TOP + 30 + (nc ? SU_CR_ROW * nc : SU_ROW) + 6 + 30 + 3 * SU_ROW + 6 + 30;
-        r = su_hit(x, y, yr, 3, SU_ROW);
-        if (r == 0) { su_asked(sh_restart_menu(), "Can't restart now"); return 1; }
-        if (r == 1) { su_asked(sh_restart_recovery(), "Can't restart now"); return 1; }
-        if (r == 2) { su_asked(sh_restart_download(), "Can't restart now"); return 1; }
-        return 0;
-    }
-    }
     return 0;
 }
-
-/* the page on its root with fresh data (optional for Track B's Settings row: a fresh open reads by itself) */
-__attribute__((unused)) static void startup_open(void)
-{
-    SU.view = SU_ROOT;
-    SU.os = -1;
-    su_load();
-}
-__attribute__((unused)) static int startup_tick(float dt) { (void)dt; return 0; }
-
-#ifdef SBTK_STARTUP_PREVIEW
-/* the host's stills (tools/startup-preview.sh): startup=root|os|osd:N|fw|pick:N|rec, opened as a tap would */
-static void startup_set(const char *key, float v)
-{
-    startup_open();
-    SU.view = !tk_strcmp(key, "os") ? SU_OSL : !tk_strcmp(key, "osd") ? SU_OSD : !tk_strcmp(key, "fw") ? SU_FW :
-              !tk_strcmp(key, "pick") ? SU_PICK : !tk_strcmp(key, "rec") ? SU_REC : SU_ROOT;
-    SU.os = (int)v;
-    SU.pick = (int)v;
-    build_app_page(AP.a);
-}
-#endif

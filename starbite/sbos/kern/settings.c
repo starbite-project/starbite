@@ -119,6 +119,7 @@ void settings_restore(void)
         ub_s(&u, r ? " bytes; something was not taken: a broken entry or another version)" : " bytes)");
         sb_log(u.b);
     }
+    wifi_state_get(half[cur_half]);         /* Track H: the remembered Wi-Fi networks */
     const uint8_t *d = 0;
     {
         /* 0.6.3: the last heating session's record: still "running" means the power went while it heated */
@@ -198,6 +199,7 @@ void settings_restore(void)
                 sb_log("settings: the passcode record is not valid: no passcode");
         }
     }
+    kmodem_sms_restore(half[cur_half]);     /* Track G: the messages kept in the slot */
     int n = state_find(half[cur_half], REC, &d);
     struct saved s;
     if (n < (int)sizeof(uint32_t) * 2 + 4 || !d) {
@@ -390,6 +392,8 @@ void settings_timer(unsigned id)
         if (n)
             apps[c].state_n = (uint32_t)n;  /* the classic Clock app's alarms the same as the list */
     }
+    if (wifi_state_put(&b) < 0)             /* Track H: the remembered Wi-Fi networks */
+        sb_log("settings: the Wi-Fi networks did not fit");
     if (heat_rec.magic == 0x31435248U && state_add(&b, "heat", &heat_rec, sizeof(heat_rec)) < 0)
         sb_log("settings: the heat record did not fit");
     if (heat_log.magic == HLOG_MAGIC) {     /* 1.2-alpha6: the heat log in 4 KiB records */
@@ -415,6 +419,7 @@ void settings_timer(unsigned id)
     }
     if (prefs_save(&b) < 0)                 /* Track A: the prefs and blobs (all prefs or none, each blob whole) */
         sb_log("settings: some prefs or blobs did not fit (the slot's half is full)");
+    kmodem_sms_save(&b);                    /* Track G: the messages ("sms.NN", last: they take what is left) */
     uint32_t n = state_finish(&b);
     int w = hw_slot_write(to, half[to], n);
     if (w < 0) {

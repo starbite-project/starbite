@@ -138,3 +138,20 @@ passcode, lifecycle, notifications, time and locale, update, startup. Pages are 
 6. GPU: no 127-quad fallback, GPU scrims, glass V2 styles.
 7. Software Update from the card (with J), safe mode after a crash.
 8. Integration: merge every track into the 1.0 candidate (~23:00), with one test sheet.
+
+## 12. Status after checkpoint 1 (2026-11-12 18:45, trunk b8a2261; candidate 5624bca staged)
+
+| Gap | State |
+|---|---|
+| Persistence (prefs, blobs; notes, NC, recents, call log, brightness, Wi-Fi) | **done** (kern/prefs.c, 75 host checks); on the card via Track J's home store + the card-only fix |
+| Passcode, back-off, Auto-Lock, Emergency without the code | **done** (kern/passcode.c 86 checks, shell_passcode.inc) |
+| Apps kept across switch and lock; on_save hooks | **done** (lifecycle in shell_lock.c, APPHOOK) |
+| Time zones (69, DST), 12 / 24 h, alarms API + Clock's Alarm tab | **done** (kern/tzdb.c 3008 checks, shell_time.inc) |
+| Notifications kept, per-app allow / banners, DND, notif_post_app | **done** (kernel + shell; pages: Track B) |
+| Safe start, restart reason notification | **done** (sh_safe_mode, sh_boot_reason; the loader's table) |
+| Restart / Shut Down | kernel side **done** (sh_restart, sh_power_off, sh_power_held); the sheet: Track B's P3x |
+| Startup: OS chooser, firmware, recovery | **done** by Track J (Settings row: P3x) |
+| GPU: 200 quads, glass V2 / V3, zero-copy Linux window | **done** (V3: LIQUID-GLASS G1 G2 G4 G5 G14 G15) |
+| Software Update | proposed to Track J (stage on the card, the loader applies, -prev rollback) |
+| Files write, encryption, permissions UI, native app install, accessibility pages, language | next |
+| Drivers (sound, haptics, LED, camera, BT, sensors, battery health, USB) | merged, dormant until their phone probe; Track A wires them after it |

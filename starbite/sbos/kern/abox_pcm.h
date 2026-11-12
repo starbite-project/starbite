@@ -55,7 +55,10 @@ struct apcm_cfg {
     uint32_t sbank_bytes;                       /* SPUS / SPUM sample bank given when it reads 0: 512 */
     uint32_t burst;                             /* RDMA0 / WDMA1 CTRL0 BURST_LEN [22:19] set when it reads 0: 8 */
     uint32_t rdma_ctrl0_or;                     /* extra CTRL0 bits for RDMA0 and WDMA1 (format trials): 0 */
+    uint32_t dma_ctrl1, dma_lim;                /* RDMA0 CTRL1, RDMA0/WDMA1 SBANK_LIMIT: APCM_KEEP (as they read) */
+    uint32_t dyn_clk, qdis_or;                  /* DYN_CLOCK_OFF while up (APCM_KEEP), extra QCHANNEL_DISABLE bits: 0 */
 };
+#define APCM_KEEP 0xFFFFFFFFU
 void apcm_cfg_default(struct apcm_cfg *c);
 int apcm_cfg_set(const struct apcm_cfg *c);     /* only while OFF; 0 or ABOX_ECFG */
 
@@ -76,7 +79,19 @@ void apcm_cap_stop(void);
 void apcm_down(void);                   /* everything stopped and put back as found; safe at any point */
 void apcm_forget(void);                 /* Calliope took ABOX under us (a missed snd_suspend_for_call): our state is
                                          * dropped WITHOUT touching the hardware, which is the call driver's now */
-uint32_t apcm_uaif_status(int uaif);    /* UAIFn STATUS (ERROR_OF_MIC bit 1, ERROR_OF_SPK bit 0); 0 when not up */
+uint32_t apcm_uaif_status(int uaif);
+
+/* Diagnostics (docs/drivers/AUDIO.md 8). apcm_dump: read only, ~7 lines "apcm: dump <tag>: ..." of the PMU audio bits,
+ * CMU_AUD (PLL, muxes, dividers, Q-channels), the SysMMU, ABOX's system / route / SPUS / SPUM registers, UAIF0/1
+ * and RDMA0 / WDMA1; nothing if the AUD domain is off.
+ * apcm_trial(i): with playback running (apcm_play_start), RDMA0 restarted with trial configuration i (only RDMA0's
+ * own CTRL0 / CTRL1 / SBANK_LIMIT and, for two trials, DYN_CLOCK_OFF / QCHANNEL_DISABLE; every one put back after):
+ * 1 ran (*moved = bytes RDMA0 advanced in 5 ms, desc = what was tried), 0 no trial i, <0 RDMA0 would not stop.
+ * RDMA only reads (the ring and its zeroes); the amplifiers are off: silent. */
+void apcm_dump(const char *tag);
+int apcm_trial(unsigned i, uint32_t *moved, char *desc, unsigned cap);
+int apcm_trial_adopt(unsigned i);        /* trial i's settings into the config, for the next start; 1 done */
+#define APCM_TRIAL_FIRST_FMT 94U         /* trials from here combine a format value with a single CTRL0 bit */    /* UAIFn STATUS (ERROR_OF_MIC bit 1, ERROR_OF_SPK bit 0); 0 when not up */
 void apcm_sync(void);                   /* after CPU stores into the ring (dsb) */
 
 int apcm_state(void);
@@ -98,11 +113,13 @@ void apcm_look(struct apcm_look *l);
 #define APCM_RDMA(n)            (0x1000U + 0x100U * (n))
 #define APCM_WDMA(n)            (0x2000U + 0x100U * (n))
 #define APCM_DMA_CTRL0          0x00U           /* ENABLE bit 0; BURST_LEN [22:19] (an earlier port, from the S10's source) */
+#define APCM_DMA_CTRL1          0x04U
 #define APCM_DMA_BUF_STR        0x08U
 #define APCM_DMA_BUF_END        0x0CU
 #define APCM_DMA_BUF_OFFSET     0x10U
 #define APCM_DMA_STR_POINT      0x14U
 #define APCM_DMA_VOL_FACTOR     0x18U           /* [23:0] */
+#define APCM_DMA_SBLIM          0x20U           /* SBANK_LIMIT (ABOX > 1.0) */
 #define APCM_DMA_STATUS         0x30U           /* PROGRESS 31, RBUF_OFFSET [28:16] (16-byte units), RBUF_CNT [12:0] */
 #define APCM_SBANK_RDMA0        0x0220U         /* SPUS sample bank of RDMA0 (an earlier port: SIZE [29:20] x 16 bytes) */
 #define APCM_SBANK_NSRC0        0x0328U         /* SPUM sample bank of NSRC0 (an earlier port, the S10's abox_soc.h) */

@@ -178,6 +178,18 @@ void panel_screen(int on)
         trig(0);
 }
 
+/* Track A: a call at the ear (kern_next.c's in-call proximity): the panel dark (display off) while something is near,
+ * with the screen otherwise on; the frames keep going into the panel's RAM, so the display on shows the current one.
+ * 1 done, 0 the command did not go out. */
+int panel_blank(int on)
+{
+    if (display(on ? 0 : 1))
+        return 0;
+    if (!on && SAVE_ON)
+        panel_kick();                           /* the next TE carries a fresh frame */
+    return 1;
+}
+
 /* 3. Brightness (0.3): S-Boot's own AOR dimming, as Engineer OS's Tests > Brightness sends it
  * (build/em-research-brightness.md): F0 5A 5A, B1 hi lo, F7 03, F0 A5 A5, DCS long writes. Never gamma, ELVSS or
  * voltages. Level 0 sends nothing (the boot's own level stays); the panel keeps the value until the next OS

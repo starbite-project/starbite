@@ -5,6 +5,7 @@
  * itself, a low battery. Kept in RAM until a restart. Pure C apart from the clock. */
 #include "sb.h"
 #include "kern.h"
+#include "nledpol.h"
 
 #define NN 8
 
@@ -48,6 +49,7 @@ void notif_post_app(const char *who, const char *title, const char *text, unsign
     ub_s(&u, ": ");
     ub_s(&u, n->title);
     sb_log(u.b);
+    nledpol_notified(n->who, (n->flags & NOTIF_QUIET) != 0);  /* Track A: the LED (nothing unless Next enabled it) */
     ui_mark_dirty();
 }
 

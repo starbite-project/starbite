@@ -40,7 +40,7 @@ echo "== sbguest.ko against $(cat "$KOUT/include/config/kernel.release")"
 cp "$here"/sbshm*.h mod/
 rm -rf mod/linux && mkdir -p mod/linux
 cp "$here"/linux/*.c "$here"/linux/*.h "$here/linux/Makefile" mod/linux/
-make -s -C "$KSRC" O="$KOUT" M="$WORK/mod/linux" modules
+make -s -C "$KSRC" O="$KOUT" M="$WORK/mod/linux" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
 cp mod/linux/sbguest.ko rd/sbguest.ko
 
 echo "== initramfs"

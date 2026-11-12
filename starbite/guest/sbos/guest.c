@@ -70,6 +70,15 @@ static const char *why = "";
 static uint32_t seq_seen = 0, seq_blit = 0;
 static uint32_t blits, blit_ms_max, rows_copied;   /* the view's frames drawn, its slowest copy, rows copied */
 static uint64_t t_hidden, t_screen_off;
+/* Linux busy (cp3 2026-11-12: a build and installs broke when the phone slept): the last time its CPU load
+ * (hdr.guest_load, sbguest.ko) was >= GUEST_BUSY_LOAD % of a core or its block traffic >= GUEST_BUSY_KIB in a 5 s
+ * window. The idle stops wait while it was busy in the last IDLE_STOP_MS; with the screen off at most
+ * GUEST_BUSY_SCREEN_OFF_MS (a job that never ends must not hold the M3 cluster all night) */
+#define GUEST_BUSY_LOAD 10U
+#define GUEST_BUSY_KIB 256U
+#define GUEST_BUSY_SCREEN_OFF_MS (3U * 60U * 60U * 1000U)
+static uint64_t t_busy;
+static int busy_said;
 static int sb_up;
 static int kept;                            /* L3: guest_keep: no idle stop */
 static int apps;                            /* v3: guest_apps: Linux apps with a switcher card */
@@ -117,12 +126,23 @@ static int idle_stop_due(uint64_t now)
     if (kept)
         return 0;
     uint64_t off = apps ? GUEST_APPS_SCREEN_OFF_MS : IDLE_STOP_MS;
+    int busy = t_busy && now - t_busy < IDLE_STOP_MS;
+    if (busy && (screen || !t_screen_off || now - t_screen_off < GUEST_BUSY_SCREEN_OFF_MS)) {
+        if (!busy_said && ((!apps && !shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
+                           (!screen && t_screen_off && now - t_screen_off > off))) {
+            busy_said = 1;                  /* once per busy stretch: the idle stop waits */
+            sb_log("guest: Linux is busy (a job runs): the idle stop waits");
+        }
+        return 0;
+    }
+    busy_said = 0;
     return (!apps && !shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
            (!screen && t_screen_off && now - t_screen_off > off);
 }
 
 #ifndef SB_HOST
 /* ===================================== the guest (phone, QEMU) ===================================== */
+static uint64_t t_busy_win, busy_sectors;    /* the busy sample's window (idle_stop_due) */
 static uint64_t ms(void) { return sb_ms(); }
 static void host_log(const char *l)
 {
@@ -179,6 +199,8 @@ static int m3_prep(void)
 /* ---- contract v3 (Track E): what Starbite serves the Linux apps (sbshm.h "contract v3") ----
  * sbnet: the guest's IP packets go to Track G's NAT, a weak symbol until it is linked in (then NULL: no SVC_NET) */
 void sbos_nat_from_guest(const uint8_t *pkt, unsigned len) __attribute__((weak));
+/* Track G (kern/guestnet.c): after the start, it tells the guest about an uplink that is already up */
+void guestnet_guest_started(void) __attribute__((weak));
 #ifndef GUEST_QEMU                          /* (QEMU's kern-shim has no clock and no card: neither is offered) */
 /* the wall clock: UTC and the user's offset (the clock settings' zone) for the guest's time */
 static uint32_t unix_s(int32_t *tz_min)
@@ -205,6 +227,86 @@ static uint32_t unix_s(int32_t *tz_min)
 #ifndef GUEST_FS_OPS
 #define GUEST_FS_OPS 0
 #endif
+/* sbsnd: Linux's sound through Track I's driver (starbite/sbos/kern/snd.h: one output stream, the main mic), when
+ * the kernel has it. Single-threaded: everything runs from this service's tick, every 5 ms while sound flows. */
+#if defined(__has_include) && !defined(GUEST_QEMU)
+#if __has_include("snd.h")
+#include "snd.h"
+#define GUEST_SND 1
+#endif
+#endif
+#ifdef GUEST_SND
+static const struct sbg_snd snd_cfg = {
+    .caps = SBG_SND_PLAY | SBG_SND_CAPTURE, .block_frames = 240, .latency_frames = 1536,
+};
+#define GUEST_SND_OPS (&snd_cfg)
+static int snd_id = -1, snd_cap, snd_fast;
+static uint64_t snd_cap_t;
+static int16_t snd_buf[2 * 480];
+/* returns 1 while sound flows (the tick must then run every 5 ms) */
+static int guest_snd_tick(void)
+{
+    int play = 0, cap = 0;
+    sbg_snd_active(&play, &cap);
+    if (play && snd_id < 0) {
+        snd_id = snd_open();                /* the amp powers up only now */
+        if (snd_id < 0)
+            snd_id = -1;
+        else
+            sbg_snd_set_latency(1536);
+    } else if (!play && snd_id >= 0) {
+        snd_close(snd_id);
+        snd_id = -1;
+    }
+    if (snd_id >= 0) {
+        unsigned n = snd_space(snd_id);
+        while (n) {
+            unsigned k = n < 480U ? n : 480U;
+            sbg_snd_pull(snd_buf, k);
+            snd_write(snd_id, snd_buf, k);
+            n -= k;
+        }
+    }
+    if (cap && !snd_cap) {
+        snd_cap = snd_cap_open() == 0;
+        snd_cap_t = sb_ms();
+    } else if (!cap && snd_cap) {
+        snd_cap_close();
+        snd_cap = 0;
+    }
+    if (snd_cap) {                          /* the mic's mono to L/R; silence for what it does not have */
+        uint64_t now = sb_ms();
+        unsigned want = (unsigned)(now - snd_cap_t) * 48U;
+        snd_cap_t = now;
+        while (want) {
+            unsigned k = want < 480U ? want : 480U;
+            int16_t *mono = snd_buf + 480;  /* (the upper half: read into it, widen downwards) */
+            unsigned got = snd_cap_read(mono, k);
+            for (unsigned i = 0; i < k; i++) {
+                int16_t v = i < got ? mono[i] : 0;
+                snd_buf[2 * i] = snd_buf[2 * i + 1] = v;
+            }
+            sbg_snd_push(snd_buf, k);
+            want -= k;
+        }
+    }
+    return snd_id >= 0 || snd_cap;
+}
+static void guest_snd_off(void)
+{
+    if (snd_id >= 0)
+        snd_close(snd_id);
+    if (snd_cap)
+        snd_cap_close();
+    snd_id = -1;
+    snd_cap = snd_fast = 0;
+}
+#else
+#define GUEST_SND_OPS 0
+static int guest_snd_tick(void) { return 0; }
+static void guest_snd_off(void) {}
+static int snd_fast;
+#endif
 static const struct sbg_os shim = {
     .ms = ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
     .m3_prep = m3_prep,
@@ -212,6 +314,7 @@ static const struct sbg_os shim = {
     .unix_s = GUEST_UNIX_S,
     .net_rx = sbos_nat_from_guest,          /* NULL until Track G's NAT is linked */
     .fs = GUEST_FS_OPS,
+    .snd = GUEST_SND_OPS,                   /* NULL until Track I's snd.h is in the kernel */
 };
 
 static uint8_t me_if;
@@ -226,12 +329,15 @@ static void cfg_init(void)
         .db_guest = GUEST_DB_GUEST, .db_host = GUEST_DB_HOST,
         .host_lines = {0},                  /* the guest kernel has the shared-distributor patch */
         .repair = 0,
-        .boot_timeout_ms = 30000, .stop_timeout_ms = 5000,
+        /* the desktop: initramfs, the base and the overlay off the card, sbinit, sbwl (cp3 2026-11-12: 30 s was not
+         * enough for a new base's first start) */
+        .boot_timeout_ms = mode == GUEST_WL ? 90000 : 30000, .stop_timeout_ms = 5000,
+        .boot_warn_ms = mode == GUEST_WL ? 30000 : 0,   /* a slow start says so (and the guest's last lines) */
         .v2 = mode == GUEST_WL,             /* L3: the catalog, the store and the icons (sbshm.h contract v2) */
         /* v3 (Linux apps: hdr.version 3): sbghost leaves out what has no sbg_os part (NET without the NAT, P9
          * without guest-fs.h) */
         .services = mode == GUEST_WL ? SBSHM_SVC_CLIP | SBSHM_SVC_NOTIF | SBSHM_SVC_CLOCK | SBSHM_SVC_NET |
-                                           SBSHM_SVC_P9 : 0,
+                                           SBSHM_SVC_P9 | SBSHM_SVC_SND : 0,
     };
     sbg_init(&shim, &cfg, me_if ? me_if : 1);
 }
@@ -300,8 +406,14 @@ int guest_start_mode(int m)
 /* the guest timer's first tick: the store's files into the bounce window, the copy, CPU_ON. 0, or < 0 and why */
 static int load_and_start(void)
 {
+    t_busy = t_busy_win = busy_sectors = 0;
+    busy_said = 0;
     cfg_init();                             /* this mode's surface */
     gcard_offer();                          /* the card's files as block devices, for this start (guest-card.h) */
+#ifdef GUEST_FS_H
+    if (mode == GUEST_WL)
+        (void)gfs_premount();               /* the card's exFAT for ~/Starbite: here, not in a 9P request */
+#endif
     /* the bounce window below 4 GiB: the Image, then the DTB and the initrd, each at a MiB boundary */
     uintptr_t pi = G_BOUNCE, pd = up_mib(pi + ld_i.size), pr = up_mib(pd + ld_d.size);
     if (ld_i.size > G_LINUX_SIZE || ld_d.size > G_LINUX_SIZE || ld_r.size > G_LINUX_SIZE ||
@@ -345,6 +457,8 @@ static int load_and_start(void)
         why = sbg_stats()->why ? sbg_stats()->why : "the guest did not start";
         return -6;
     }
+    if (guestnet_guest_started && (sbg_hdr()->host_services & SBSHM_SVC_NET))
+        guestnet_guest_started();           /* sbg_net_config for an uplink already up (the guest starts at link 0) */
     return 0;
 }
 
@@ -402,6 +516,7 @@ void guest_timer(unsigned id)
             sbg_send(SBG_MSG_FOCUS, 1, 0);
         ui_mark_dirty();
     } else if (s->state == SBG_OFF) {
+        guest_snd_off();
         st = GUEST_OFF;
         shown = 0;
         kt_cancel(KT_GUEST, KT_GUEST_ID_POLL);
@@ -409,6 +524,7 @@ void guest_timer(unsigned id)
         ui_mark_dirty();
         return;
     } else if (s->state == SBG_FAILED) {
+        guest_snd_off();
         st = GUEST_FAILED;
         shown = 0;
         why = s->why ? s->why : "the guest failed";
@@ -421,7 +537,19 @@ void guest_timer(unsigned id)
         volatile struct sbshm_hdr *h = sbg_hdr();
         if (h->surf_seq != seq_seen && shown)
             ui_mark_dirty();
+        int flowing = guest_snd_tick();     /* sound: a 5 ms tick while it flows, the normal one otherwise */
+        if (flowing != snd_fast) {
+            snd_fast = flowing;
+            arm(flowing ? 5 : shown ? 10 : 50);
+        }
         uint64_t now = sb_ms();
+        if (now - t_busy_win >= 5000) {     /* the busy sample: the guest's load, the block traffic of 5 s */
+            uint64_t sec = s->blk_rd_sectors + s->blk_wr_sectors;
+            if (h->guest_load >= GUEST_BUSY_LOAD || (t_busy_win && sec - busy_sectors >= GUEST_BUSY_KIB * 2U))
+                t_busy = now;
+            busy_sectors = sec;
+            t_busy_win = now;
+        }
         if (idle_stop_due(now)) {
             sb_log(apps ? "guest: the screen off for 30 min: stopping (the M3 cluster off)" :
                           "guest: unused for 60 s: stopping (the M3 cluster off)");
@@ -436,7 +564,7 @@ void guest_show(int on)
     t_hidden = on ? 0 : sb_ms();
     if (st == GUEST_RUNNING) {
         sbg_send(SBG_MSG_FOCUS, (uint32_t)shown, 0);
-        arm(shown ? 10 : 50);
+        arm(snd_fast ? 5 : shown ? 10 : 50);
     }
     seq_blit = 0;                           /* the next draw copies the whole surface */
 }

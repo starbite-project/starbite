@@ -1,0 +1,80 @@
+#!/bin/sh
+# sbnet-up: applies Starbite OS's network config to the guest's link sbnet0 (sbguest.ko's sbnet, ../sbshm-net.h) and
+# keeps it applied. The host's config is read-only in /sys/class/net/sbnet0/sbnet/ (guest_ip, prefix, gw_ip, dns_ip,
+# mtu, link, uplink, seq); this script sets the interface up with that MTU, the address (guest_ip/prefix, replacing
+# any other IPv4 address), the default route via gw_ip, and /etc/resolv.conf (nameserver dns_ip; a symlink is written
+# through to its target). Then every 2 s it checks seq (the kernel bumps it, and sends a KOBJ_CHANGE uevent, whenever
+# the host's config changes) and that the address is still there, and applies again when needed.
+# link 0 (no uplink on the phone) changes nothing here: the kernel turns the carrier off, the address and the route
+# stay, so sockets survive until the uplink is back.
+#   sbnet-up [--once] [IFACE]        POSIX sh; iproute2 or busybox ip. Logs one line per apply to /dev/kmsg and stdout.
+IF=sbnet0
+once=0
+for a in "$@"; do
+    case "$a" in
+    --once) once=1 ;;
+    *) IF=$a ;;
+    esac
+done
+S=/sys/class/net/$IF/sbnet
+log() {
+    echo "sbnet-up: $*"
+    echo "sbnet-up: $*" > /dev/kmsg 2>/dev/null
+}
+rd() { cat "$S/$1" 2>/dev/null; }
+
+resolv() {     # resolv DNS: /etc/resolv.conf says "nameserver DNS" (rewritten only when it differs)
+    f=/etc/resolv.conf
+    [ -L "$f" ] && f=$(readlink -f "$f")
+    [ -n "$f" ] || f=/etc/resolv.conf
+    want="nameserver $1"
+    [ "$(grep -v '^#' "$f" 2>/dev/null)" = "$want" ] && return 0
+    mkdir -p "$(dirname "$f")"
+    printf '# sbnet-up: Starbite OS relays DNS at the gateway\n%s\n' "$want" > "$f.sbnet-up.$$" &&
+        mv -f "$f.sbnet-up.$$" "$f"
+}
+
+has_addr() { ip -4 addr show dev "$IF" 2>/dev/null | grep -q "inet $1/$2 "; }
+
+apply() {
+    seq=$(rd seq)
+    ip=$(rd guest_ip)
+    pfx=$(rd prefix)
+    gw=$(rd gw_ip)
+    dns=$(rd dns_ip)
+    mtu=$(rd mtu)
+    link=$(rd link)
+    up=$(rd uplink)
+    case "$ip" in ''|0.0.0.0) return 1 ;; esac
+    [ -n "$pfx" ] && [ "$pfx" != 0 ] || pfx=30
+    ip link set dev "$IF" mtu "$mtu" 2>/dev/null || log "mtu $mtu refused"
+    ip link set dev "$IF" up || return 1
+    if ! has_addr "$ip" "$pfx"; then
+        ip -4 addr flush dev "$IF" 2>/dev/null
+        ip addr add "$ip/$pfx" dev "$IF" || return 1
+    fi
+    ip route replace default via "$gw" dev "$IF" || return 1
+    resolv "$dns" || log "cannot write /etc/resolv.conf"
+    log "seq $seq: $IF $ip/$pfx, default via $gw, nameserver $dns, mtu $mtu, link $link ($up)"
+    applied=$seq
+    a_ip=$ip
+    a_pfx=$pfx
+    return 0
+}
+
+applied=
+a_ip=
+a_pfx=
+waited=0
+while :; do
+    if [ -d "$S" ]; then
+        if [ "$(rd seq)" != "$applied" ] || ! has_addr "$a_ip" "$a_pfx"; then
+            apply || log "could not apply the config (seq $(rd seq)); trying again"
+        fi
+    elif [ $waited = 0 ]; then
+        log "no $S yet (sbguest.ko not loaded, or the host offers no network): waiting"
+        waited=1
+    fi
+    [ $once = 1 ] && exit 0
+    sleep 2
+done

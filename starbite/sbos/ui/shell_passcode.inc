@@ -524,8 +524,10 @@ static int pc_refresh(float t)
     return 1;
 }
 
-/* ---- Settings > Face ID & Passcode (AS.sub 5): the switch's rows and Auto-Lock ----------------------------------- */
+/* ---- Settings > Passcode (AS.sub PC_SUB: shell_lock.c maps it to B2's SE_PASSCODE_PAGE): the rows and Auto-Lock -- */
+#ifndef PC_SUB
 #define PC_SUB 5
+#endif
 #define PC_G1 (PUSHED_TOP + 8)
 #define PC_G2 (PC_G1 + 2 * 47 + 76)
 static const int PC_AL[7] = { 30, 60, 120, 180, 240, 300, 0 };
@@ -538,9 +540,9 @@ static const char *pc_live(const char *s)
 static void pc_page(dc *d)
 {
     d_back(d, W(1));
-    d_navtitle(d, "Face ID & Passcode");
+    d_navtitle(d, "Passcode");                    /* (B2's row: the S9 has no Face ID) */
     int on = sh_pass_on(), n1 = on ? 2 : 1;
-    d_rrect(d, GROUP_X, PC_G1, GROUP_W, 47.0f * n1 - 1, 16, tk_hex(0x151c33, 1));
+    d_rrect(d, GROUP_X, PC_G1, GROUP_W, 47.0f * n1 - 1, 16, C_CARD);
     d_text(d, TK_IT400, 16, ROW_TX, PC_G1 + 29, on ? "Turn Passcode Off" : "Turn Passcode On", 0, 0, ACCENT(), 0);
     if (on) {
         d_rrect(d, ROW_TX, PC_G1 + 46, CONTENT_R - ROW_TX, .5f, 0, W(.08f));
@@ -550,7 +552,7 @@ static void pc_page(dc *d)
     d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, fy), "Emergency mode, SOS, the medical card and the torch", 0, 0, W(.45f), 0);
     d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, fy + 17), "always work without the passcode.", 0, 0, W(.45f), 0);
     d_text(d, TK_IT400, 13, ROW_TX, PC_G2 - 8, "AUTO-LOCK", .52f, 0, W(.55f), 0);
-    d_rrect(d, GROUP_X, PC_G2, GROUP_W, 47.0f * 7 - 1, 16, tk_hex(0x151c33, 1));
+    d_rrect(d, GROUP_X, PC_G2, GROUP_W, 47.0f * 7 - 1, 16, C_CARD);
     int cur = sh_autolock();
     for (int i = 0; i < 7; i++) {
         float ry = PC_G2 + 47.0f * i;
@@ -584,7 +586,7 @@ static int pc_app_tap(float x, float y)
         return 1;
     }
     if (AS.sub != PC_SUB) return 0;
-    if (BACK_HIT(x, y)) { AS.sub = 0; build_app_page(AP.a); return 1; }
+    if (BACK_HIT(x, y)) { settings_back(); return 1; }   /* B2's root, where it was */
     if (x < GROUP_X || x >= CONTENT_R) return 1;
     int on = sh_pass_on();
     if (y >= PC_G1 && y < PC_G1 + 47) { pc_show(on ? PCP_OFF : PCP_SET); return 1; }

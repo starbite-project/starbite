@@ -128,9 +128,10 @@ void kui_redraw_all(void)
     full = dirty = 1;
 }
 
+int kui_hold_awake;                         /* Track A, 1.0: Next's keep-awake holders (sh_hold_awake) */
 int kui_awake_on(void)
 {
-    return app_awake || screen == SCR_LIGHT || screen == SCR_SOS || pressed >= 0;
+    return app_awake || screen == SCR_LIGHT || screen == SCR_SOS || pressed >= 0 || kui_hold_awake > 0;
 }
 
 /* ---- building lists ---------------------------------------------------------------------------- */
@@ -2482,8 +2483,11 @@ void kui_guest_open(int mode)
     guest_view_sync();
 }
 
+int (*kui_power_hook)(void);                /* Track A, 1.0: Next's own power sheet (sh_power_held); 1 = handled */
 void kui_power_menu(void)
 {
+    if (kui_power_hook && kui_power_hook())
+        return;
     if (screen == SCR_POWER || screen == SCR_SOS)
         return;
     cf_return = screen == SCR_LIGHT ? light_return : screen;

@@ -324,6 +324,19 @@ void selftest_timer(unsigned id)
             return;
         }
 #endif
+#ifdef SBOS_SELFTEST_NEXT_CELL
+        {
+            /* Starbite OS Next, Cellular (modem-core, Track G): unattended mobile data (the user's consent 2026-11-11):
+             * Cellular on, data, HTTPS GETs, off, on again, off; no SMS, no calls (modem.c kmodem_selftest_phase);
+             * then recovery (pmsg). The watchdog at 30 s, fed by the loop. */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: next-cell: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: next-cell: the watchdog could not be set (the loader's stays): ", w);
+            phase = 120;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+            return;
+        }
+#endif
 #ifdef SBOS_SELFTEST_NEXT_WIFI
         {
             /* Starbite OS Next, Wi-Fi (wifi-sbos-next): silent: the TLS self-check (no network), the radio on, one
@@ -332,8 +345,9 @@ void selftest_timer(unsigned id)
             unsigned w = hw_wdt_selftest(30);
             sb_logx(w ? "selftest: next-wifi: the watchdog at 30 s, fed by the loop: seconds " :
                         "selftest: next-wifi: the watchdog could not be set (the loader's stays): ", w);
-            sb_log("selftest: next-wifi: the TLS self-check, then on, the bring-up, one scan (no join), off");
-            wifi_selftest_scan_only = 1;
+            sb_log("selftest: next-wifi: Track H h1: the TLS self-check, on, the bring-up, one scan, diagnostics; joins "
+                   "only if the store has the saved network (2.4 GHz, then 5 GHz, HTTPS on each), off");
+            wifi_selftest_scan_only = 2;
             phase = 95;
             break;
         }
@@ -823,6 +837,26 @@ void selftest_timer(unsigned id)
     case 86:
         active = 0;
         drv_run_abort();
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_NEXT_CELL
+    case 120: {
+        int done = 0;
+        int ok = kmodem_selftest_phase(&done);
+        if (!done) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), 500, 0);
+            return;
+        }
+        sb_logx(ok ? "selftest: next-cell: PASSED; a restart into recovery (pmsg) after seconds " :
+                     "selftest: next-cell: FAILED (see above); a restart into recovery (pmsg) after seconds ",
+                (sb_ms() - t0) / 1000U);
+        phase = 121;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
+        return;
+    }
+    case 121:
+        active = 0;
         power_restart_recovery();
         return;
 #endif

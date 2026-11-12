@@ -22,7 +22,19 @@ if [ -z "$dir" ]; then
     done
 fi
 flags="-std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined -I$core"
-src="$core/core.c $core/exynos_pcie.c $core/chip.c $core/fw.c $core/ring.c $core/msgbuf.c $core/link.c $core/wpa.c $here/model.c $here/model_ap.c $here/test.c"
+# WPA3's SAE (sae.c) links BearSSL (tls/bearssl, as vendored: its own warnings are not ours; the phone's config), built
+# once per compiler into $OUT/br-<cc>
+br="$core/tls/bearssl"
+brflags="-std=gnu11 -O1 -g -w -fsanitize=address,undefined -I$br/inc -I$br/src -DBR_USE_URANDOM=0 -DBR_USE_UNIX_TIME=0 -DBR_USE_GETENTROPY=0 -DBR_RDRAND=0 -DBR_LE_UNALIGNED=0 -DBR_BE_UNALIGNED=0"
+brout="$OUT/br-$(basename "$CC")"
+mkdir -p "$brout"
+brobjs=""
+for f in $(cat "$br/FILES"); do
+    o="$brout/$(echo "$f" | tr / _ | sed 's/\.c$/.o/')"
+    [ "$o" -nt "$br/src/$f" ] || $CC $brflags -c "$br/src/$f" -o "$o"
+    brobjs="$brobjs $o"
+done
+src="$core/core.c $core/exynos_pcie.c $core/chip.c $core/fw.c $core/ring.c $core/msgbuf.c $core/link.c $core/wpa.c $core/sae.c $here/model.c $here/model_ap.c $here/sae-test.c $here/test.c"
 extra=""
 if [ -n "${BCMW_LINUX:-}" ] && [ -f "$BCMW_LINUX/firmware.c" ]; then
     # Linux's parser, from firmware.c's start to the end of brcmf_fw_nvram_strip(), on a small shim
@@ -38,8 +50,11 @@ $CC -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -nostdlib -c 
     for f in core exynos_pcie chip fw ring msgbuf link wpa; do
         $CC -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -c -I"$core" "$core/$f.c" -o "$OUT/$f.o"
     done
+# sae.c too, with BearSSL's headers and the kernel's <string.h> shim (starbite/sbos/build.sh builds it so)
+$CC -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -nostdlib -c -I"$core" -I"$br/inc" -I"$core/tls/shim" \
+    "$core/sae.c" -o "$OUT/sae-free.o"
 # shellcheck disable=SC2086
-$CC $flags $extra -o "$OUT/bcmw-test" $src
+$CC $flags -I"$br/inc" $extra -o "$OUT/bcmw-test" $src $brobjs
 $CC $flags -o "$OUT/ext4-test" "$core/ext4.c" "$here/ext4-test.c"
 $CC $flags -o "$OUT/erofs-test" "$core/erofs.c" "$here/erofs-test.c"
 

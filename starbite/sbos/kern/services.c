@@ -7,6 +7,7 @@
 #include "tz.h"
 #include "tzdb.h"
 #include "survival.h"
+#include "nledpol.h"
 
 /* ---- SOS ------------------------------------------------------------------------------------- */
 /* state 0 off, 2 the countdown (3 s, a hold cancels), 1 flashing: white / red at 2 Hz */
@@ -455,6 +456,7 @@ void battery_timer(unsigned id)
         surv_battery_sample(bat.avg_ma, bat.charger, K.screen_on, sb_ms() - K.state_since);
     }
     ui_kminute();
+    nledpol_battery(bat.ok, bat.pct, bat.charger);  /* Track A: the LED's charging / charged / low (Next only) */
     kt_set(KT_BATTERY, 1, sb_ms(), K.screen_on ? 10000 : surv_battery_poll_ms(), 0);
     /* the reserve (docs 4.6): below 3 % off, unless SOS runs (down to 2 %) */
     {

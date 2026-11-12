@@ -199,6 +199,37 @@ int sbm_sms_deliver_decode(const uint8_t *t, uint32_t n, struct sbm_sms *s)
     return 0;
 }
 
+/* SMS-STATUS-REPORT (3GPP 23.040 9.2.2.3): the first octet (TP-MTI 2), TP-MR, TP-RA, TP-SCTS, TP-DT, TP-ST.
+ * Only the reference and the status are kept: the recipient's address is not (it is the user's data). */
+int sbm_sms_status_decode(const uint8_t *t, uint32_t n, uint8_t *mr, uint8_t *st)
+{
+    char ra[24];
+    int alpha;
+    if (n < 2 || (t[0] & 3) != 2)
+        return SBM_EBADF;
+    *mr = t[1];
+    int a = addr(t + 2, n - 2, ra, sizeof(ra), &alpha);
+    if (a < 0 || 2u + (uint32_t)a + 7 + 7 + 1 > n)
+        return SBM_EBADF;
+    *st = t[2 + a + 14];
+    return 0;
+}
+
+/* a status report (IPC 0x0402 with data[1] = 2: libsec-ril's IpcRxIncomingMsg raises Android's status-report event) */
+int sbm_sms_incoming_report(const struct sbm_ipc_msg *m, uint8_t *mr, uint8_t *st)
+{
+    if (m->cmd != SBM_CMD(SBM_G_SMS, 0x02) || m->data_len < 7 || m->data[0] != 2 || m->data[1] != 2)
+        return SBM_EBADF;
+    uint32_t len = m->data[5];
+    if (6u + len > m->data_len || len < 1)
+        return SBM_EBADF;
+    const uint8_t *p = m->data + 6;
+    uint32_t sca = p[0];
+    if (1 + sca > len)
+        return SBM_EBADF;
+    return sbm_sms_status_decode(p + 1 + sca, len - 1 - sca, mr, st);
+}
+
 int sbm_sms_incoming(const struct sbm_ipc_msg *m, struct sbm_sms *s)
 {
     if (m->cmd != SBM_CMD(SBM_G_SMS, 0x02) || m->data_len < 7 || m->data[0] != 2)

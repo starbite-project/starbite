@@ -19,6 +19,11 @@
 #define PASS_SALT 16U
 
 void pass_sha256(const void *p, uint32_t n, uint8_t out[32]);
+/* the same SHA-256 in pieces (update.c: an image a chunk at a time) */
+struct pass_sha { uint32_t h[8]; uint64_t len; uint32_t n; uint8_t buf[64]; };
+void pass_sha_init(struct pass_sha *c);
+void pass_sha_update(struct pass_sha *c, const void *p, uint64_t n);
+void pass_sha_final(struct pass_sha *c, uint8_t out[32]);
 void pass_reset(void);                                                  /* RAM: no passcode, no tries */
 int pass_len(void);                                                     /* 4 or 6; 0 none */
 int pass_fails(void);                                                   /* wrong tries in a row */

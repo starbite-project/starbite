@@ -38,6 +38,7 @@ static uint64_t clk;                    /* virtual microseconds */
 static struct {
     int pd_stuck, smc_fail, ip_bad, cpu_stuck, pll_never, div_busy, mmu_stuck, bufstr_bad, rdma_nostop, rdma_dead,
         half_rate, amp_fail, amp_probe_fail, bus_ready, call_owns, hp_fail;
+    uint32_t need_c0;                   /* the DMAs move only with these CTRL0 bits (the unknown format / update bits) */
 } F;
 static int cpu_on, codec_mic_on;
 static unsigned bad_writes, off_reads, writes;
@@ -100,7 +101,7 @@ static uint32_t ring_bytes(uint64_t base) { return R(base + APCM_DMA_BUF_END) - 
 static void dma_advance(void)
 {
     uint64_t rb = SFRA(APCM_RDMA(0)), wb = SFRA(APCM_WDMA(1));
-    if (rd0.on && aud_on() && !F.rdma_dead) {
+    if (rd0.on && aud_on() && !F.rdma_dead && (R(rb) & F.need_c0) == F.need_c0) {
         uint64_t total = (clk - rd0.t0) * (F.half_rate ? 96U : 192U) / 1000U;
         uint32_t rbs = ring_bytes(rb), str = R(rb + APCM_DMA_BUF_STR);
         for (uint64_t b = rd0.done & ~3ULL; b + 4 <= total; b += 4) {
@@ -111,7 +112,7 @@ static void dma_advance(void)
         }
         rd0.done = total & ~3ULL;
     }
-    if (wd1.on && aud_on()) {
+    if (wd1.on && aud_on() && (R(wb) & F.need_c0) == F.need_c0) {
         uint64_t total = (clk - wd1.t0) * 192U / 1000U;
         uint32_t rbs = ring_bytes(wb), str = R(wb + APCM_DMA_BUF_STR);
         for (uint64_t b = wd1.done & ~3ULL; b + 4 <= total; b += 4) {
@@ -129,6 +130,8 @@ static uint32_t dma_status(struct dmasim *d, uint64_t base)
 {
     if (!d->on || (d == &rd0 && F.rdma_dead))
         return 0;
+    if ((R(base) & F.need_c0) != F.need_c0)
+        return 1U << 31;                /* in progress, never moving: what the phone showed */
     uint32_t rbs = ring_bytes(base), per = R(base + APCM_DMA_BUF_OFFSET);
     uint32_t pos = (uint32_t)(d->done % rbs), ps = pos / per * per;
     return (1U << 31) | ((ps / 16) << 16) | (pos - ps);
@@ -296,7 +299,10 @@ static void reset_fake(int aud_was_on, int cpu_was_on)
 static void init_snd(int with_hp)
 {
     struct snd_ops o;
+    struct apcm_cfg c;
     apcm_forget();                      /* the fake was reset under the engine: start from OFF */
+    apcm_cfg_default(&c);               /* a setting adopted by an earlier probe run is dropped */
+    CHECK(apcm_cfg_set(&c) == 0, "default config");
     memset(&o, 0, sizeof o);
     o.log = o_log, o.now_us = o_now, o.call_owns_abox = o_owns, o.amp_probe = o_amp_probe, o.amp_speaker = o_amp_spk;
     o.amp_receiver = o_amp_rcv, o.amp_off = o_amp_off, o.codec_mic = o_mic, o.codec_off = o_codec_off;
@@ -751,6 +757,30 @@ static void t_probe(void)
     F.pll_never = 1;
     run_probe(1, 200, 0);
     CHECK(log_has("FAIL ABOX did not come up") && aud_is_off(), "level 1 FAIL: PLL, AUD off");
+    /* the phone's case: neither DMA moves until an unknown CTRL0 bit is set: the dump, then the sweep finds it */
+    reset_fake(1, 1);
+    init_snd(0);
+    F.need_c0 = 1U << 4;
+    unsigned before = nlog;
+    CHECK(run_probe(1, 200, 0), "level 1 with a needed CTRL0 bit finishes");
+    CHECK(log_has("dump RDMA0 still: RDMA0 c0"), "the read-only dump of the stalled RDMA0");
+    CHECK(log_has("trial 10 (CTRL0 bit 4): RDMA0 moved"), "the sweep finds CTRL0 bit 4");
+    CHECK(log_has("with CTRL0 bit 4: RDMA0 read 192000 bytes a second"), "and measures 48 kHz with it");
+    CHECK(log_has("FAIL FOUND: RDMA0 runs at 48 kHz only with CTRL0 bit 4; WDMA1 moved with it too"),
+          "level 1 reports the found setting");
+    CHECK(!aud_is_off() && R(SFRA(APCM_RDMA(0))) == 0 && bad_writes == 0 && off_reads == 0,
+          "after the sweep: AUD left on as found, RDMA0 back to its found CTRL0, no stray access");
+    CHECK(nlog - before < 60, "level 1 with the sweep stays short in the log (%u lines)", nlog - before);
+    w = writes;
+    apcm_dump("t");
+    CHECK(writes == w, "apcm_dump writes nothing");
+    /* nothing moves at all: the sweep runs out */
+    reset_fake(0, 0);
+    init_snd(0);
+    F.need_c0 = 1U << 31 | 1U << 30;
+    CHECK(run_probe(1, 400, 0), "level 1 with nothing moving finishes");
+    CHECK(log_has("none moved RDMA0") && log_has("dump WDMA1 still") && log_has("media needs Calliope here") &&
+          aud_is_off(), "the sweep runs out: dumps both, FAIL, AUD off");
     /* abort in the middle */
     reset_fake(0, 0);
     init_snd(0);
@@ -764,7 +794,7 @@ static void t_probe(void)
     /* out of time */
     reset_fake(0, 0);
     init_snd(0);
-    run_probe(1, 200, 3000);
+    run_probe(1, 200, 7000);
     CHECK(log_has("FAIL out of time") && aud_is_off(), "level 1 out of time: FAIL, AUD off");
 
     /* level 2: earpiece, loudspeaker at amp level 0, then the mic */
