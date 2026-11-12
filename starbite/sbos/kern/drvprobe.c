@@ -31,10 +31,10 @@ DRV_LIST_BEGIN
     { "bt", drv_bt_probe, drv_bt_abort, DRV_BT_BUDGET_MS },
     { "cam", drv_cam_probe, drv_cam_abort, CAM_PROBE_BUDGET_MS },
     { "usb", drv_usb_probe, drv_usb_abort, DRV_USB_BUDGET_MS },
-    /* media through Calliope (abox_media.c), just before the bypass engine so both run; ABOX off again in between */
-    { "calliope", drv_calliope_probe, drv_calliope_abort, DRV_CALLIOPE_BUDGET_MS },
-    /* last, so its dump and sweep lines are in pmsg's tail (run 3 lost them) */
     { "audio", drv_audio_probe, drv_audio_abort, 22000 },
+    /* media through Calliope (abox_media.c), LAST so Calliope's boot and stream lines are in pmsg's tail (run 5: the
+     * first Calliope boot on this phone; the bypass "audio" probe before it is known not to move, run 4) */
+    { "calliope", drv_calliope_probe, drv_calliope_abort, DRV_CALLIOPE_BUDGET_MS },
 DRV_LIST_END
 #else
 DRV_HOST_LIST                               /* the host test's fake probes */
