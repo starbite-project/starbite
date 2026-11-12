@@ -38,6 +38,9 @@ startup-pick-default $open tap=195,174 tap=195,174
 startup-pick-timeout $open tap=195,174 tap=195,226
 startup-pick-debug $open tap=195,174 tap=195,313
 startup-recovery $open tap=195,226
+startup-health-linux $open tap=195,122 tap=195,382 tap=195,456
+startup-health-windows $open tap=195,122 tap=195,278 tap=195,508
+startup-health-store $open tap=195,226 tap=195,506
 startup-os-windows-plan $open tap=195,122 tap=195,278 tap=195,313
 startup-switch-off $open tap=195,313
 startup-back $open tap=195,174 tap=50,66

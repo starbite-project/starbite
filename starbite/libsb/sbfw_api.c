@@ -124,6 +124,11 @@ void sb_boot_recovery_next(void)
     sb_boot_next("recovery");
 }
 
+void sb_boot_repair_next(void)
+{
+    sb_boot_next("recovery-repair");
+}
+
 /* ---- one-shot requests (sbfmt.c's names and fits) ------------------------------------------------------------- */
 
 const char *sbfw_req_name(unsigned q)

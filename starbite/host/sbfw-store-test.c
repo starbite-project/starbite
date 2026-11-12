@@ -661,6 +661,9 @@ static void t_api_request(void)
     if (!setjmp(boot_jb))
         sb_boot_recovery_next();
     CHECK(!strcmp(boot_key, "recovery"), "Starbite Recovery: \"recovery\"");
+    if (!setjmp(boot_jb))
+        sb_boot_repair_next();
+    CHECK(!strcmp(boot_key, "recovery-repair"), "Repair and reset: \"recovery-repair\"");
 }
 
 /* sbfw_api.c: the crash reports, from the loader's own encoding */

@@ -4,21 +4,25 @@
  * strips); shell_lock.c calls page_startup (each strip) and startup_tap; nothing here moves, so no startup_tick. One
  * pushed page with sub-views on Track B's kit (shell_kit.inc: d_group / d_group_head / d_group_foot / d_row, the
  * switch kit_d_switch, kit_alert), the glass back circle and the inline title as Settings' other pages:
- *   Startup          Operating Systems >, Firmware >, Recovery >; Starbite OS as Boot Menu (the switch)
+ *   Startup          Operating Systems >, Firmware >, Recovery >; Start Starbite OS at Power-On (the switch; FW4:
+ *                    on by default with the FW4 loader); Software Update (the slots, opens General's page)
  *   OS list          every catalog OS (hidden ones not), the default marked, one that cannot start greyed
- *   OS detail        Start Once, Make Default, "Start once with" the one-shots that fit its kind (Windows: Advanced
- *                    Startup greyed, plan only)
+ *   OS detail        Start Once, Make Default, "Start once with" the one-shots that fit its kind (Drivers Off;
+ *                    Windows: Advanced Startup, plan only); Check Disk (its root's file system, read only)
+ *   Health           a check's result: the file system, where, the problems, the checker's lines
  *   Firmware         the loader's settings: default OS, menu timeout, debug level, POST, watchdog, crash detection,
  *                    after a crash; each opens a picker (a check on the current one)
- *   Recovery         the last crash reports, this start (why, store, loader), restart to the boot menu / Starbite
- *                    Recovery / Download mode
+ *   Recovery         the last crash reports, this start (why, store, loader); Check OS Store, Save Logs to the
+ *                    Card, Repair & Reset (Starbite Recovery's page); restart to the boot menu / Recovery / Download
  * The back circle: settings_back() at the root, else one level up. The platform's calls are shell.h's sh_os_*,
  * sh_fw_*, sh_req_*, sh_crash_*, sh_restart_*, sh_fw_info (the kernel: kern/sbfw_os.c; the host:
  * host/startup_fake.inc). Every restart and one-shot asks with the platform's hold confirmation. What the page shows
- * is read once when a view opens (su_load), never per strip. */
+ * is read once when a view opens (su_load), never per strip. A check (sh_health_os, sh_store_check) runs on the
+ * frame after its tap (startup_tick), so "Checking..." shows first. */
 #define SHELL_STARTUP 1
+#define SHELL_STARTUP_TICK 1
 
-enum { SU_ROOT, SU_OSL, SU_OSD, SU_FW, SU_PICK, SU_REC };
+enum { SU_ROOT, SU_OSL, SU_OSD, SU_FW, SU_PICK, SU_REC, SU_HEALTH };
 enum { PK_DEFAULT, PK_TIMEOUT, PK_DEBUG, PK_POST, PK_WDT, PK_CRASH, PK_AFTER };
 #define SU_ROWS 12                          /* OS rows that fit the screen */
 #define SU_CRASHES 3
@@ -30,7 +34,11 @@ static struct {
     sh_fw_t fw;
     sh_crash_t cr[SU_CRASHES];
     sh_fwinfo_t inf;
+    sh_slots_t sl;
+    int have_sl;
 } SU;
+/* FW4: a health check's state: pend 1 an OS's disk, 2 the OS store (runs at the next startup_tick); back where to */
+static struct { int pend, done, r, back; sh_health_t h; char title[32]; } SJ;
 
 /* ---- the data, read when a view opens ------------------------------------------------------------------------ */
 static void su_load(void)
@@ -50,6 +58,7 @@ static void su_load(void)
     for (int i = 0; i < SU_CRASHES && i < c; i++)
         if (sh_crash_get(i, &SU.cr[i])) { SU.ncrash = i; break; }
     sh_fw_info(&SU.inf);
+    SU.have_sl = sh_slots_get(&SU.sl) >= 0;
 }
 
 /* ---- words ----------------------------------------------------------------------------------------------------- */
@@ -60,9 +69,10 @@ static const char *const SU_AFTER[3] = { "Boot Menu", "Starbite Recovery", "Retr
 static const int SU_TMO[5] = { 0, 3, 5, 10, 30 };
 static const char *const SU_TMO_T[5] = { "Wait", "3 s", "5 s", "10 s", "30 s" };
 static const char *const SU_WDT_T[4] = { "Per Entry", "Off", "30 s", "60 s" };
-static const struct { int act; const char *name; } SU_REQ[5] = {
+#define SU_NREQ 6
+static const struct { int act; const char *name; } SU_REQ[SU_NREQ] = {
     { SH_REQ_VERBOSE, "Verbose" }, { SH_REQ_SAFE, "Safe Mode" }, { SH_REQ_SINGLE, "Single User" },
-    { SH_REQ_PREV, "Previous Kernel" }, { SH_REQ_XNU_SINGLE, "Single User (XNU)" } };
+    { SH_REQ_PREV, "Previous Kernel" }, { SH_REQ_XNU_SINGLE, "Single User (XNU)" }, { SH_REQ_DRIVER_OFF, "Drivers Off" } };
 
 /* the watchdog's picker row (-1: a time the loader's own menu set, not 30 or 60 s) */
 static int su_wdt_i(void)
@@ -142,7 +152,7 @@ static const char *su_kind(const char *k)
 #define SU_SWX (LG_RE - 16 - KSW_W)          /* the switch, where Settings puts its switches */
 #define SU_MAXHIT 32
 enum { R_NONE, R_OSL, R_FW, R_REC, R_SHELL, R_ONCE, R_MKDEF, R_WINRE, R_RST_MENU, R_RST_REC, R_RST_DL,
-       R_OS0 = 20, R_REQ0 = 40, R_PICK0 = 50, R_OPT0 = 60 };
+       R_UPDATE, R_DISK, R_STORE, R_LOGS, R_REPAIR, R_OS0 = 20, R_REQ0 = 40, R_PICK0 = 50, R_OPT0 = 60 };
 static struct { float y, h, gy, gh; int id, sw, dim; } SUH[SU_MAXHIT];   /* cp6: gy / gh its card; sw a switch row; dim no press */
 static struct { float y, rh, gy; int nh, i, n, first, foot; } SUL;
 static void su_begin(void) { SUL.y = SU_Y0; SUL.nh = 0; SUL.first = 1; SUL.foot = 0; SUL.n = SUL.i = 0; }
@@ -217,6 +227,16 @@ static void su_head(dc *d, const char *title)
     d_navtitle(d, title);
 }
 
+/* Software Update's row: which image starts (FW3 slots) */
+static const char *sj_slot_text(char *b)
+{
+    if (!SU.have_sl) return "";
+    const char *ab[3] = { "", "A", "B" };
+    if (SU.sl.trying > 0 && SU.sl.trying < 3) { su_cat(b, "Trying ", ab[SU.sl.trying]); return b; }
+    int a = SU.sl.active;
+    if (a > 0 && a < 3 && SU.sl.state[a] > 0 && SU.sl.version[a][0]) return SU.sl.version[a];
+    return a > 0 && a < 3 ? (su_cat(b, "Slot ", ab[a]), b) : "Built In";
+}
 static void su_page_root(dc *d)
 {
     su_head(d, "Startup");
@@ -230,11 +250,15 @@ static void su_page_root(dc *d)
     else b[0] = 0;
     su_row(d, R_REC, "Recovery", INK, b, 1);
     su_sec(d, "At power-on", 1, LG_ROW);
-    su_switch_row(d, R_SHELL, "Starbite OS as Boot Menu", SU.fw.shell, SU.have_fw >= 0);
+    su_switch_row(d, R_SHELL, "Start Starbite OS", SU.fw.shell, SU.have_fw >= 0);
     su_foot(d, SU.have_fw < 0 ? "No settings store: the loader keeps its defaults."
-               : SU.fw.shell ? "Starbite OS starts first and is the boot menu. Hold Volume Down at power-on for the "
-                               "loader's own menu; after a crash it comes back by itself."
-                             : "The loader's menu starts first, then the default OS after its timeout.");
+               : SU.fw.shell ? "Starbite OS starts when the phone turns on. Hold Volume Down while it starts for "
+                               "the loader's menu; after a crash, that menu shows what happened."
+                             : "The loader's menu starts first, then the default system after its timeout.");
+    su_sec(d, 0, 1, LG_ROW);
+    su_row(d, R_UPDATE, "Software Update", INK, sj_slot_text(b), 1);
+    if (SU.have_sl && SU.sl.trying > 0)
+        su_foot(d, "A new version is on trial: if it does not confirm its start, the previous one comes back by itself.");
 }
 
 static void su_page_osl(dc *d)
@@ -259,7 +283,7 @@ static void su_page_osl(dc *d)
 static int su_req_n(const su_os_t *o, int *acts)
 {
     int n = 0;
-    for (int i = 0; i < 5; i++) if (sh_req_fits(o->key, SU_REQ[i].act)) acts[n++] = i;
+    for (int i = 0; i < SU_NREQ; i++) if (sh_req_fits(o->key, SU_REQ[i].act)) acts[n++] = i;
     return n;
 }
 static int su_is_windows(const su_os_t *o) { return o->method == 4 && o->cat == 1; }
@@ -273,13 +297,16 @@ static void su_page_osd(dc *d)
     su_row(d, R_ONCE, "Start Once", o->ready ? KIT_BLUE() : C_LABEL3, "", 0);
     su_check_row(d, R_MKDEF, o->def ? "Default System" : "Make Default", o->def || !o->ready ? C_LABEL3 : KIT_BLUE(), "", o->def);
     if (!o->ready) su_foot(d, "Its files are not in the store, so it cannot start.");
-    int acts[5], n = su_req_n(o, acts), win = su_is_windows(o);
+    int acts[SU_NREQ], n = su_req_n(o, acts), win = su_is_windows(o);
     if (n || win) {
         su_sec(d, "Start once with", n + win, LG_ROW);
         for (int i = 0; i < n; i++) su_row(d, R_REQ0 + i, SU_REQ[acts[i]].name, o->ready ? KIT_BLUE() : C_LABEL3, "", 0);
         if (win) su_row(d, R_WINRE, "Advanced Startup", C_LABEL3, "Plan Only", 0);
         su_foot(d, "For the next start only: the loader applies it, then clears it.");
     }
+    su_sec(d, "Health", 1, LG_ROW);
+    su_row(d, R_DISK, "Check Disk", KIT_BLUE(), "", 0);
+    su_foot(d, "Reads its disk's file system and reports problems. Nothing is changed.");
 }
 
 static const char *su_pick_title(int p)
@@ -292,7 +319,7 @@ static void su_page_fw(dc *d)
     su_head(d, "Firmware");
     char b[16];
     su_sec(d, 0, 3, LG_ROW);
-    su_switch_row(d, R_SHELL, "Starbite OS as Boot Menu", SU.fw.shell, SU.have_fw >= 0);
+    su_switch_row(d, R_SHELL, "Start Starbite OS at Power-On", SU.fw.shell, SU.have_fw >= 0);
     su_row(d, R_PICK0 + PK_DEFAULT, "Default System", INK, su_os_name(SU.fw.default_key), 1);
     su_row(d, R_PICK0 + PK_TIMEOUT, "Menu Timeout", INK, su_tmo_text(b), 1);
     su_sec(d, "Diagnostics", 3, LG_ROW);
@@ -392,11 +419,72 @@ static void su_page_rec(dc *d)
     if (SU.inf.valid) { su_cat(b, "Version ", 0); int n = 8; n += put_dec(b + n, SU.inf.loader_version); b[n] = 0; }
     else su_cat(b, "Older (no table)", 0);
     su_row(d, R_NONE, "Loader", INK, b, 0);
+    su_sec(d, "Repair", 3, LG_ROW);
+    su_row(d, R_STORE, "Check OS Store", KIT_BLUE(), "", 0);
+    su_row(d, R_LOGS, "Save Logs to the Card", KIT_BLUE(), "", 0);
+    su_row(d, R_REPAIR, "Repair & Reset", INK, "", 1);
+    su_foot(d, "Repair & Reset restarts into Starbite Recovery: check and repair the OS store, restore the boot "
+               "partition, reset a system's data, every step with its plan first.");
     su_sec(d, "Restart", 3, LG_ROW);
     su_row(d, R_RST_MENU, "Restart to Boot Menu", KIT_BLUE(), "", 0);
     su_row(d, R_RST_REC, "Restart to Starbite Recovery", KIT_BLUE(), "", 0);
     su_row(d, R_RST_DL, "Restart to Download Mode", KIT_RED(), "", 0);
     su_foot(d, "Each asks first. The boot menu and Recovery are this once; the next start is as before.");
+}
+
+/* a check's result (SJ): "Checking..." until startup_tick ran it */
+static void su_page_health(dc *d)
+{
+    su_head(d, SJ.title[0] ? SJ.title : "Health");
+    if (SJ.pend) {
+        su_sec(d, 0, 1, LG_ROW);
+        su_row(d, R_NONE, "Checking\xe2\x80\xa6", KIT_SEC(), "", 0);
+        su_foot(d, "Reading the disk. This takes a moment.");
+        return;
+    }
+    if (!SJ.done) return;
+    const sh_health_t *h = &SJ.h;
+    char b[32];
+    if (SJ.r < 0) {
+        su_sec(d, 0, 1, LG_ROW);
+        su_row(d, R_NONE, "Can't Check", KIT_RED(), "", 0);
+        su_foot(d, h->line[0][0] ? h->line[0] : "The disk could not be read.");
+        return;
+    }
+    if (!h->checked && SJ.back == SU_OSD) {
+        su_sec(d, 0, 1, LG_ROW);
+        su_row(d, R_NONE, "Nothing to Check", INK, "", 0);
+        su_foot(d, h->line[0][0] ? h->line[0] : "This system runs from memory: it has no disk of its own.");
+        return;
+    }
+    int fsr = h->fs[0] && h->fs[0] != '-';
+    su_sec(d, 0, fsr ? 3 : 1, LG_ROW);
+    if (h->bad) { int n = put_dec(b, h->bad); b[n] = 0; su_cat(b + n, h->bad == 1 ? " Problem" : " Problems", 0); }
+    su_row(d, R_NONE, h->bad ? "Problems Found" : "No Problems", h->bad ? KIT_RED() : INK, h->bad ? b : "", 0);
+    if (fsr) {
+        su_row(d, R_NONE, "File System", INK, h->fs, 0);
+        su_row(d, R_NONE, "Where", INK, h->where, 0);
+    }
+    int n = 0;
+    while (n < SH_HEALTH_LINES && h->line[n][0]) n++;
+    if (n) {                                 /* one card, each line wrapped (up to 3 lines), problems in red */
+        char ln[4][96];
+        float wm, ch = 24;
+        for (int i = 0; i < n; i++) ch += 20.0f * (float)wrapn(ln, 3, TK_IT400, 15, h->line[i], LG_W - 32, &wm) + 6;
+        su_sec(d, "Details", 1, ch);
+        float y = su_next(R_NONE) + 12;
+        for (int i = 0; d && i < n; i++) {
+            int k = wrapn(ln, 3, TK_IT400, 15, h->line[i], LG_W - 32, &wm);
+            const char *p = h->line[i];
+            int bad = (p[0] == 'P' || p[0] == 'p') && (p[1] == 'R' || p[1] == 'r') && (p[2] == 'O' || p[2] == 'o') &&
+                      (p[3] == 'B' || p[3] == 'b');                       /* "PROBLEM: ..." / "Problems found" */
+            for (int j = 0; j < k; j++)
+                d_text(d, TK_IT400, 15, LG_TX, bl(TK_IT400, 15, y + 20.0f * j), ln[j], 0, 0, bad ? KIT_RED() : KIT_SEC(), 0);
+            y += 20.0f * (float)k + 6;
+        }
+    }
+    su_foot(d, h->bad ? "Nothing was changed. Repair & Reset (Recovery) or the system itself can fix it."
+                      : "Read only: nothing was changed.");
 }
 
 /* the view's layout: drawn into d, or with d 0 only the hit table */
@@ -409,6 +497,7 @@ static void su_lay(dc *d)
     case SU_FW: su_page_fw(d); break;
     case SU_PICK: su_page_pick(d); break;
     case SU_REC: su_page_rec(d); break;
+    case SU_HEALTH: su_page_health(d); break;
     default: su_page_root(d); break;
     }
 }
@@ -442,6 +531,32 @@ static void su_toggle_shell(void)
     su_write();
 }
 static void su_ok(int i) { (void)i; }
+#if __has_include("shell_update.inc")
+static void su_open(void);                   /* Track A's Software Update page (shell_update.inc) */
+#define SJ_HAS_UPDATE 1
+#endif
+/* a check: "Checking..." now, the check itself at the next startup_tick */
+static void sj_check(int what, const char *title, int back)
+{
+    tk_memset(&SJ, 0, sizeof SJ);
+    SJ.pend = what;
+    SJ.back = back;
+    su_cat(SJ.title, title, 0);
+    SU.view = SU_HEALTH;
+    build_app_page(AP.a);
+}
+static int startup_tick(float dt)
+{
+    (void)dt;
+    if (!SJ.pend || SU.view != SU_HEALTH) return 0;
+    int what = SJ.pend;
+    if (what == 1 && SU.os >= 0 && SU.os < SU.nos) SJ.r = sh_health_os(SU.o[SU.os].key, &SJ.h);
+    else SJ.r = sh_store_check(&SJ.h);
+    SJ.pend = 0;
+    SJ.done = 1;
+    build_app_page(AP.a);
+    return 1;
+}
 /* the row id under a tap, R_NONE for none */
 static int su_hit(float x, float y)
 {
@@ -459,6 +574,7 @@ static int startup_tap(float x, float y)
         case SU_ROOT: SU.loaded = 0; SU.os = -1; settings_back(); return 1;
         case SU_OSD: su_go(SU_OSL); return 1;
         case SU_PICK: su_go(SU_FW); return 1;
+        case SU_HEALTH: SJ.pend = 0; su_go(SJ.back); return 1;
         default: su_go(SU_ROOT); return 1;
         }
     }
@@ -473,6 +589,20 @@ static int startup_tap(float x, float y)
     case R_RST_MENU: su_asked(sh_restart_menu(), "Can't restart now"); return 1;
     case R_RST_REC: su_asked(sh_restart_recovery(), "Can't restart now"); return 1;
     case R_RST_DL: su_asked(sh_restart_download(), "Can't restart now"); return 1;
+    case R_UPDATE:
+#ifdef SJ_HAS_UPDATE
+        su_open();
+#else
+        toast("Software Update is in General");
+#endif
+        return 1;
+    case R_STORE: sj_check(2, "OS Store", SU_REC); return 1;
+    case R_LOGS: {
+        int r = sh_logs_save();
+        toast(r == 0 ? "Logs saved to the memory card" : r == -2 ? "No log space on this store" : "Can't save the logs now");
+        return 1;
+    }
+    case R_REPAIR: su_asked(sh_restart_repair(), "Can't restart now"); return 1;
     default: break;
     }
     if (id >= R_OS0 && id < R_OS0 + SU.nos) { SU.os = id - R_OS0; SU.view = SU_OSD; build_app_page(AP.a); return 1; }
@@ -492,12 +622,13 @@ static int startup_tap(float x, float y)
             build_app_page(AP.a);
             return 1;
         }
+        if (id == R_DISK) { sj_check(1, o->name, SU_OSD); return 1; }
         if (id == R_WINRE) {
             static const kit_btn OK[1] = { { "OK", KIT_PREFERRED } };
             kit_alert("Advanced Startup", "Windows' recovery start is a plan only: the loader can't start it yet.", OK, 1, su_ok);
             return 1;
         }
-        int acts[5], n = su_req_n(o, acts);
+        int acts[SU_NREQ], n = su_req_n(o, acts);
         if (id >= R_REQ0 && id < R_REQ0 + n) {
             if (o->ready) su_asked(sh_req_start(o->key, SU_REQ[acts[id - R_REQ0]].act), "Can't start it now");
             else toast("Its files are missing: it can't start");   /* cp6 */
