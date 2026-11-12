@@ -8,7 +8,12 @@
 
 #define UFS 0x11120000UL
 /* DMA memory: libsb's non-cacheable window (mmu.c), the address the loader uses too. */
+#ifdef SB_HOST_FAKE_MEM         /* host tests (starbite/host/sbfw-store-test.c): the test's own buffer */
+extern uint8_t sb_host_dma[];
+#define UFS_DMA ((uintptr_t)sb_host_dma)
+#else
 #define UFS_DMA 0xaf000000UL
+#endif
 #define UFS_BUF (UFS_DMA + 0x4000)
 #define UFS_BUF_SIZE (1U << 20)
 /* Engineer OS v2 I/O buffers in the same non-cacheable window: 0xaf200000 one UFS write staging

@@ -20,6 +20,37 @@ static sw_ent SWR[SW_MAX];
 static int swn, sw_dirty = 1;
 static int sw_keeps(int a) { const char *k = APPS[a].k; return !lx_is(k) && tk_strcmp(k, "search") && tk_strcmp(k, "linux"); }
 static int sw_find(int a) { for (int i = 0; i < swn; i++) if (SWR[i].a == a) return i; return -1; }
+/* Track A: the recents (their apps' keys only; snapshots are made again) kept in the blob "recents": version 1, the
+ * count, then each key with its 0. Restored cards show the app's ground until their first snapshot. */
+static void sw_save(void)
+{
+    char b[2 + SW_MAX * 24];
+    unsigned n = 2;
+    b[0] = 1;
+    b[1] = (char)swn;
+    for (int i = 0; i < swn; i++) {
+        unsigned l = (unsigned)tk_strlen(APPS[SWR[i].a].k);
+        if (l > 22) l = 22;
+        tk_memcpy(b + n, APPS[SWR[i].a].k, l);
+        b[n + l] = 0;
+        n += l + 1;
+    }
+    (void)sh_blob_put("recents", b, n);
+}
+static void sw_restore(void)
+{
+    char b[2 + SW_MAX * 24];
+    int n = sh_blob_get("recents", b, sizeof b - 1);
+    if (n < 2 || b[0] != 1 || swn) return;
+    b[n] = 0;
+    for (int i = 0, at = 2; i < b[1] && at < n && swn < SW_MAX; i++) {
+        const char *k = b + at;
+        at += (int)tk_strlen(k) + 1;
+        for (int a = 0; a < NAPPS; a++)
+            if (!tk_strcmp(APPS[a].k, k) && sw_keeps(a) && sw_find(a) < 0) SWR[swn++] = (sw_ent){ a, { 0, 0, 0, 0 } };
+    }
+    sw_dirty = 1;
+}
 static void sw_remove(int i)
 {
     if (i < 0 || i >= swn) return;
@@ -27,6 +58,7 @@ static void sw_remove(int i)
     for (int k = i; k + 1 < swn; k++) SWR[k] = SWR[k + 1];
     swn--;
     SWR[swn].snap = (tk_bmp){ 0, 0, 0, 0 };
+    sw_save();                                   /* Track A */
 }
 /* the open app's page now, a quarter of the panel each way (idle time; the switcher's cards) */
 static void sw_snap(void)
@@ -55,6 +87,7 @@ static void sw_opened(int a)
     } else e = SWR[i];
     for (int k = i; k > 0; k--) SWR[k] = SWR[k - 1];
     SWR[0] = e;
+    sw_save();                                   /* Track A */
 }
 
 /* ---- the switcher ------------------------------------------------------------------------------------------- */
