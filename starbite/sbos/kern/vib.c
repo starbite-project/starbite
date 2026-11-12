@@ -43,6 +43,12 @@ static uint8_t mcfg_was, main_was;
 static uint32_t tcon_was, gpp3_was, gpg1_was;
 #endif
 static uint64_t pulses;
+/* drivers track (haptic.c, docs/drivers/HAPTICS.md): the strength as the PWM's duty in per mille of the period, 500
+ * (no drive: the MAX77705's PWM input is centred at 50 %) .. 700 (the DT's normal_ratio 70 = duty 34179 ns, the rated
+ * drive; never more), and the pattern player's hook at the end of a pulse or a wait (1) or at vib_off (0) */
+#define DUTY_PM_DT 700U
+static unsigned duty_pm = DUTY_PM_DT;
+static void (*end_hook)(int ended);
 
 #ifndef SB_HOST
 static uint32_t rd(uintptr_t a)
@@ -186,6 +192,8 @@ void vib_off(void)
     pat_gap = 0;
     kt_cancel(KT_UI, 9);
     motor_off();
+    if (end_hook)
+        end_hook(0);
 }
 
 static void motor_off(void)
@@ -219,7 +227,8 @@ int vib_pulse(unsigned ms)
     if (!on) {
 #ifndef SB_HOST
         uint32_t cnt = (uint32_t)((uint64_t)rate_khz * PERIOD_NS / 1000000U);
-        uint32_t duty = (uint32_t)((uint64_t)rate_khz * DUTY_NS / 1000000U);
+        uint32_t duty = duty_pm == DUTY_PM_DT ? (uint32_t)((uint64_t)rate_khz * DUTY_NS / 1000000U)
+                                              : (uint32_t)((uint64_t)cnt * duty_pm / 1000U);
         if (cnt < 4U || duty >= cnt)
             return SBOS_EAGAIN;
         gpp3_was = rd(GPP3_CON);
@@ -288,9 +297,46 @@ void vib_timer(void)
         return;
     }
     motor_off();
+    if (end_hook)
+        end_hook(1);
 }
 
 int vib_on(void)
 {
     return on;
+}
+
+/* ---- drivers track: haptic.c's hooks (kern.h) ----------------------------------------------------------------- */
+/* the strength for the next pulse, and for the running one at its next PWM period; clamped to 500..700 */
+unsigned vib_set_duty(unsigned pm)
+{
+    if (pm < 500U)
+        pm = 500U;
+    if (pm > DUTY_PM_DT)
+        pm = DUTY_PM_DT;
+    duty_pm = pm;
+#ifndef SB_HOST
+    if (on && state > 0) {
+        uint32_t cnt = (uint32_t)((uint64_t)rate_khz * PERIOD_NS / 1000000U);
+        uint32_t duty = pm == DUTY_PM_DT ? (uint32_t)((uint64_t)rate_khz * DUTY_NS / 1000000U)
+                                         : (uint32_t)((uint64_t)cnt * pm / 1000U);
+        if (cnt >= 4U && duty < cnt)
+            wr(TCMPB1, cnt - duty);         /* auto-reload: taken at the next period */
+    }
+#endif
+    return pm;
+}
+
+/* the motor off now and the end hook called after ms (a pattern's gap), on the same KT_UI 9 timer */
+void vib_wait(unsigned ms)
+{
+    pat_left = 0;
+    pat_gap = 0;
+    motor_off();
+    kt_set(KT_UI, 9, sb_ms(), ms ? ms : 1U, 0);
+}
+
+void vib_set_end_hook(void (*fn)(int ended))
+{
+    end_hook = fn;
 }

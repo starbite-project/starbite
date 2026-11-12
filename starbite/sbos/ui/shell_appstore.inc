@@ -229,7 +229,8 @@ static void d_catglyph(dc *d, int k, float x, float y)
     case 0: d_ring(d, cx, cy, 8.5f, 1.8f, 1, w, 0); d_seg(d, cx - 8, cy, cx + 8, cy, 1.6f, w); d_seg(d, cx, cy - 8, cx, cy + 8, 1.6f, w);
             d_ring(d, cx, cy, 4, 1.6f, 1, w, 0); break;                                   /* Internet: a globe */
     case 1: d_rrect(d, cx - 7, cy - 9, 14, 18, 2.5f, w);
-            for (int i = 0; i < 3; i++) d_rrect(d, cx - 4, cy - 4.5f + 4.5f * i, i == 2 ? 5 : 8, 1.8f, .9f, bg); break;   /* Office: a page */
+            for (int i = 0; i < 3; i++) d_rrect(d, cx - 4, cy - 4.5f + 4.5f * i, i == 2 ? 5 : 8, 1.8f, .9f, bg);   /* Office: a page */
+            break;
     case 2: d_rrect(d, cx - 9, cy - 8, 18, 16, 8, w);
             d_rrect(d, cx - 5.5f, cy - 4.5f, 3.5f, 3.5f, 1.75f, bg); d_rrect(d, cx - .5f, cy - 5.5f, 3.5f, 3.5f, 1.75f, bg);
             d_rrect(d, cx + 3.5f, cy - 1.5f, 3.5f, 3.5f, 1.75f, bg); break;            /* Graphics: a palette */

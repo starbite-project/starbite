@@ -20,7 +20,7 @@ int sbos_safe_start(void);           /* Track A, 1.0: this start is a safe start
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
-enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_MODEM, KT_SURV, KT_APP0 = 16 };
+enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_MODEM, KT_SURV, KT_USB /* usb.c */, KT_APP0 = 16 };
 #define KT_MAX 64
 #define KT_RESERVE 24                /* entries apps cannot take: the kernel's tasks always get theirs */
 struct ktimer {
@@ -416,6 +416,10 @@ int vib_buzz(unsigned n, unsigned on_ms, unsigned off_ms);
 void vib_off(void);
 void vib_timer(void);
 int vib_on(void);
+/* drivers track (haptic.c): the strength (PWM duty, per mille, 500..700), a gap, the pattern player's hook */
+unsigned vib_set_duty(unsigned pm);
+void vib_wait(unsigned ms);
+void vib_set_end_hook(void (*fn)(int ended));
 /* 1.2-alpha8: wake-up alarms (alarm.c) */
 int alarm_set(int i, int h, int m, int days, int on);
 int alarm_any(void);

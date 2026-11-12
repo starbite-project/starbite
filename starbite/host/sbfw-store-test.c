@@ -425,6 +425,25 @@ static void t_notable_card_home(void)
     CHECK(settings_save(&st) == 0 && sd_writes == 1 && ufs_writes == 0, "saved on the card, nothing on UFS");
 }
 
+/* 1.0 (Track A): no table, no UFS store (USERDATA given to iOS 27; an older loader), a card store without the HOME
+ * mark: the card is home, UFS isn't touched again, the slot and wifinet are the card's */
+static void t_notable_no_ufs(void)
+{
+    media(0, 0);
+    memset(ufs_store, 0, 3 * 4096);                /* the UFS area holds no store */
+    sb_fw_read();
+    CHECK(!sb_fw.valid, "no table");
+    CHECK(store_home() == (int)STORE_SD, "home: the card (no UFS store)");
+    CHECK(store_card_only(), "card only from now on");
+    struct store_ent e;
+    CHECK(store_find("catalog", &e) && e.medium == STORE_SD, "catalog from the card");
+    CHECK(store_volatile_grant("sbos-state", 1048576, &e) && e.medium == STORE_SD, "slot on the card");
+    auth_store(SB_MED_SD);
+    struct star_settings st;
+    CHECK(settings_load(&st) && !strcmp(st.default_key, "linux-pmos"), "the card's record");
+    CHECK(settings_save(&st) == 0 && sd_writes == 1 && ufs_writes == 0, "saved on the card, nothing on UFS");
+}
+
 /* no table (or a damaged one), no HOME card: exactly as before (UFS) */
 static void t_ufs(int damaged, uint32_t ufs_flags, int card_home)
 {
@@ -737,6 +756,7 @@ int main(int argc, char **argv)
     bad += run("table: card home", t_card_home);
     bad += run("no table: HOME card", t_notable_card_home);
     bad += run("no table: UFS", t_ufs_plain);
+    bad += run("no table: no UFS store", t_notable_no_ufs);
     bad += run("damaged table: UFS", t_ufs_damaged);
     bad += run("no table: UFS + SET_SD_STORE", t_ufs_sd_allowed);
     bad += run("table: base mismatch", t_mismatch);
