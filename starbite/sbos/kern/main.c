@@ -234,12 +234,30 @@ void sb_main(void)
         hw_irq_poll();
         unsigned owner, id;
         uint64_t now = sb_ms(), turn0 = now;
-        for (unsigned n = 0; n < 32 && kt_pop(now, &owner, &id); ++n)
+        /* cp7 (Track B's finding: 490-670 ms turns in most self-test films, not the shell's): the slowest piece of a
+         * turn, named in its log line (a timer's owner / id, input, the apps, the UI's draw) */
+        uint64_t slow_ms = 0, t_p;
+        unsigned slow_owner = 0, slow_id = 0;
+        const char *slow_what = "-";
+#define SLOW_PIECE(what, o, i) do { uint64_t d_ = sb_ms() - t_p; if (d_ > slow_ms) { slow_ms = d_; slow_what = (what); slow_owner = (o); slow_id = (i); } } while (0)
+        for (unsigned n = 0; n < 32 && kt_pop(now, &owner, &id); ++n) {
+            t_p = sb_ms();
             dispatch_timer(owner, id);
+            SLOW_PIECE("timer", owner, id);
+        }
+        t_p = sb_ms();
         handle_input();
+        SLOW_PIECE("input", 0, 0);
+        t_p = sb_ms();
         apps_service();
+        SLOW_PIECE("the apps", 0, 0);
+        t_p = sb_ms();
         handle_input();
+        SLOW_PIECE("input", 0, 0);
+        t_p = sb_ms();
         ui_kdraw();
+        SLOW_PIECE("the UI's draw", 0, 0);
+#undef SLOW_PIECE
         hw_irq_poll();
         /* a loop turn that takes long starves the UI and the watchdog: log it (at most once a second) */
         uint64_t took = sb_ms() - turn0;
@@ -251,7 +269,17 @@ void sb_main(void)
             ub_init(&u);
             ub_s(&u, "sbos: a loop turn took ");
             ub_dec(&u, took);
-            ub_s(&u, " ms");
+            ub_s(&u, " ms (slowest: ");
+            ub_s(&u, slow_what);
+            if (slow_what[0] == 't') {          /* a timer: its owner (KT_*) and id */
+                ub_s(&u, " ");
+                ub_dec(&u, slow_owner);
+                ub_s(&u, "/");
+                ub_dec(&u, slow_id);
+            }
+            ub_s(&u, " ");
+            ub_dec(&u, slow_ms);
+            ub_s(&u, " ms)");
             sb_log(u.b);
         }
         uint64_t next = kt_next();

@@ -678,7 +678,7 @@ static void stats_log(const char *what)
     sb_log(u.b);
     /* every frame's work in ms, in order (P2r: the numbers the main session sends back; 60 a line), then the
      * waits for the display (the last flip latching at the panel's TE) */
-#ifndef SBOS_SELFTEST_NEXT                         /* the self test's eleven films would fill pmsg's 16 KB */
+#ifndef SBOS_SELFTEST_NEXT                         /* the self test's twelve films would fill pmsg's 16 KB */
     uint32_t nf = FS.n < sizeof FS.ms ? FS.n : (uint32_t)sizeof FS.ms;
     for (uint32_t i0 = 0; i0 < nf; i0 += 60) {
         ub_init(&u);
@@ -2056,7 +2056,7 @@ static int comms_now(void) { return 0; }
 /* ---- the self test --------------------------------------------------------------------------------------- */
 #ifdef SBOS_SELFTEST_NEXT
 typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
-static const char *const FILM_NAME[11] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "sleep" };
+static const char *const FILM_NAME[12] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "wheels", "sleep" };
 /* tools/films.txt's scripts (pt, ms) */
 static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 1300 } };
 /* B10: the vendor cards again (B4's list from y 320: Apple 320, Microsoft 413, Google 491, Linux 584, Starbite 677):
@@ -2093,6 +2093,13 @@ static const step S_EMERG[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 319, 727, 0, 0, 950
                                 { 1, 265, 452, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };   /* helper B2: the alert's Exit (films.txt's emergency) */
 /* P2r: the Power key (kind 5, the kernel's own power_key_short): the fade to black and the screen off, the wake, a
  * fade undone by a second press */
+/* cp7 (Track B, films.txt's wheels): the Clock's Add Alarm wheels: the hours dragged up, the minutes down (each a
+ * momentum and a settle at 60 fps), Cancel, home */
+static const step S_WHEELS[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 238, 289, 0, 0, 80 },
+                                 { 0, 0, 0, 0, 0, 1100 }, { 1, 151, 749, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 348, 66, 0, 0, 80 },
+                                 { 0, 0, 0, 0, 0, 900 }, { 2, 162, 290, 162, 200, 220 }, { 0, 0, 0, 0, 0, 1300 },
+                                 { 2, 248, 280, 248, 360, 220 }, { 0, 0, 0, 0, 0, 1300 }, { 1, 58, 66, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 },
+                                 { 2, 195, 795, 200, 450, 260 }, { 0, 0, 0, 0, 0, 1200 } };
 static const step S_SLEEP[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 158, 290, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 1100 }, { 5, 0, 0, 0, 0, 20 }, { 0, 0, 0, 0, 0, 900 }, { 5, 0, 0, 0, 0, 20 },
                                 { 0, 0, 0, 0, 0, 1200 }, { 5, 0, 0, 0, 0, 20 }, { 0, 0, 0, 0, 0, 120 }, { 5, 0, 0, 0, 0, 20 },
@@ -2122,6 +2129,7 @@ static void film_start(int film)
     case 7: F.s = S_PHONE; F.n = 17; break;
     case 8: F.s = S_MSGS; F.n = 11; break;
     case 9: F.s = S_EMERG; F.n = (int)(sizeof S_EMERG / sizeof S_EMERG[0]); break;
+    case 10: F.s = S_WHEELS; F.n = (int)(sizeof S_WHEELS / sizeof S_WHEELS[0]); break;
     default: F.s = S_SLEEP; F.n = 13; break;
     }
     /* each film from the plain lock screen */
@@ -2279,7 +2287,7 @@ int next_selftest_step(void)
             sb_log("selftest: FAILED: next: the band workers never started (cores 1-3: no stack?); every frame on one core");
             st_failed = 1;
         }
-        sb_log("selftest: next: the eleven films (unlock, group, focus, holds, pages, cc, app, phone, messages, emergency, sleep) with synthetic touches; sleep presses the real Power path");
+        sb_log("selftest: next: the twelve films (unlock, group, focus, holds, pages, cc, app, phone, messages, emergency, wheels, sleep) with synthetic touches; sleep presses the real Power path");
         film_start(0);
         return 1;
     }
@@ -2320,12 +2328,12 @@ int next_selftest_step(void)
     }
     if (ticking || sh_moving()) return 1;          /* let it settle */
     stats_log(FILM_NAME[F.film]);
-    if (F.film == 10 && !K.screen_on) {
+    if (F.film == 11 && !K.screen_on) {          /* sleep: the last film (cp7: wheels is 10) */
         sb_log("selftest: FAILED: next: the sleep film ended with the screen off");
         st_failed = 1;
         power_screen_set(1);
     }
-    if (F.film < 10) { film_start(F.film + 1); return 1; }
+    if (F.film < 11) { film_start(F.film + 1); return 1; }
 #ifndef SBOS_NEXT_NOGPU
     gpu_vs_cpu();
 #endif
