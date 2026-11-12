@@ -27,6 +27,39 @@ int tk_bmp_new(tk_bmp *b, int w, int h)
     return b->px != 0;
 }
 void tk_bmp_free(tk_bmp *b) { if (b->px) tk_free(b->px); b->px = 0; b->w = b->h = 0; }
+/* cp7: src turned exactly (no resampling) a quarter clockwise (q 1), a half (2) or a quarter counter-clockwise (3)
+ * into a new dst (q 0: a copy). 0: no memory (dst empty) */
+int tk_bmp_turned(tk_bmp *dst, const tk_bmp *src, int q)
+{
+    q &= 3;
+    int w = src->w, h = src->h;
+    if (!src->px || !tk_bmp_new(dst, q & 1 ? h : w, q & 1 ? w : h)) return 0;
+    for (int y = 0; y < h; y++) {
+        const uint32_t *s = src->px + (size_t)y * src->stride;
+        if (!q) tk_memcpy(dst->px + (size_t)y * dst->stride, s, (size_t)w * 4);
+        else if (q == 2) {
+            uint32_t *d = dst->px + (size_t)(h - 1 - y) * dst->stride + (w - 1);
+            for (int x = 0; x < w; x++) *d-- = s[x];
+        } else if (q == 1) {
+            uint32_t *d = dst->px + (h - 1 - y);                    /* column h-1-y, from the top */
+            for (int x = 0; x < w; x++, d += dst->stride) *d = s[x];
+        } else {
+            uint32_t *d = dst->px + (size_t)(w - 1) * dst->stride + y; /* column y, from the bottom */
+            for (int x = 0; x < w; x++, d -= dst->stride) *d = s[x];
+        }
+    }
+    return 1;
+}
+/* b turned in place (a new bitmap takes its place: both exist for a moment). 0: no memory (b as it was) */
+int tk_bmp_turn(tk_bmp *b, int q)
+{
+    if (!(q & 3) || !b->px) return 1;
+    tk_bmp o;
+    if (!tk_bmp_turned(&o, b, q)) return 0;
+    tk_bmp_free(b);
+    *b = o;
+    return 1;
+}
 int tk_fm_new(tk_fm *m, int w, int h)
 {
     m->v = w > 0 && h > 0 ? tk_alloc((size_t)w * h * 4) : 0;

@@ -7,7 +7,7 @@
  *                                               resolution + the 2x present, the first frame at rest full); frames
  *                                               as raw BGRA (720 x 1480 with half), one "F" line per frame on stdout
  *   sbtk-host PAK bench                         uibench's kernels on this host (the A55 calibration)
- * A script: "wait MS", "tap X Y [MS]", "drag X0 Y0 X1 Y1 MS", "hold X Y MS" (pt, ms), separated by ';'; also "power", "powerhold",
+ * A script: "wait MS", "tap X Y [MS]", "drag X0 Y0 X1 Y1 MS", "hold X Y MS" (pt, ms), "ori N" (cp7: the phone turned, 0..3), separated by ';'; also "power", "powerhold",
  * "notify WHO|TITLE|BODY", "dragh X0 Y0 X1 Y1 MS HOLD", "state WHAT=KEY:V" (a still's state, now), "ring MS" (the
  * pretend network's incoming call MS ms later) and "sms TEXT" (a message received now from a made-up number). */
 #include "../sbtk.h"
@@ -620,6 +620,7 @@ static void apply_state(const char *st)
 
 /* ---- the film ------------------------------------------------------------------------------------------- */
 typedef struct { int kind; float x0, y0, x1, y1, ms, dms; char txt[120]; } step;   /* dms: dragh's drag (then held) */
+static int host_ori_film = -1;          /* cp7: a film's "ori N" (the pretend accelerometer), -1 none */
 static int parse(const char *s, step *st, int max)
 {
     int n = 0;
@@ -648,6 +649,7 @@ static int parse(const char *s, step *st, int max)
         } else if (!strcmp(w, "ring")) { p->kind = 8; p->ms = 20; sscanf(tok, " %*s %f", &p->x0); }   /* helper I */
         else if (!strcmp(w, "power")) { p->kind = 5; p->ms = 20; }      /* the Power key: sleep, or wake if off */
         else if (!strcmp(w, "powerhold")) { p->kind = 10; p->ms = 20; }   /* P3x: the Power key held 1 s: the power sheet */
+        else if (!strcmp(w, "ori")) { p->kind = 11; p->ms = 20; sscanf(tok, " %*s %f", &p->x0); }   /* cp7: the phone turned (0..3) */
         else if (!strcmp(w, "notify")) {     /* helper D: "notify WHO|TITLE|BODY": a pretend notification from the platform */
             p->kind = 6; p->ms = 20;
             const char *a = strstr(tok, "notify") + 6;
@@ -726,6 +728,10 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
                     else { fprintf(stderr, "sms at %.0f ms (the text is not logged)\n", te); comms_fake_sms(p->txt); }
                     phase = 0;
                 }
+                continue;
+            }
+            if (p->kind == 11) {
+                if (phase < 0) { host_ori_film = (int)p->x0 & 3; phase = 0; }
                 continue;
             }
             if (p->kind == 10) {
@@ -1285,9 +1291,9 @@ static int host_low;
 void sh_low_power(int on) { host_low = !!on; }
 int sh_low_power_on(void) { return host_low; }
 
-/* Track A, cp7: SBTK_ORI=0..3 pretends the phone is turned (stills / films of rotated apps) */
+/* Track A, cp7: SBTK_ORI=0..3 pretends the phone is turned (stills / films of rotated apps); a film's "ori N" too */
 static int host_ori_lock;
-int sh_orientation(void) { const char *e = getenv("SBTK_ORI"); return host_ori_lock || !e ? 0 : (atoi(e) & 3); }
+int sh_orientation(void) { const char *e = getenv("SBTK_ORI"); return host_ori_lock ? 0 : host_ori_film >= 0 ? host_ori_film : !e ? 0 : (atoi(e) & 3); }
 int sh_orientation_lock(void) { return host_ori_lock; }
 void sh_orientation_lock_set(int on) { host_ori_lock = !!on; }
 

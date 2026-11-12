@@ -35,6 +35,8 @@ typedef struct { int x0, y0, x1, y1; } tk_irect;               /* half-open */
 
 int tk_bmp_new(tk_bmp *b, int w, int h);                       /* zeroed (transparent); 0 = no memory */
 void tk_bmp_free(tk_bmp *b);
+int tk_bmp_turn(tk_bmp *b, int q);     /* cp7: turned exactly by q quarters clockwise (a new bitmap); 0 no memory */
+int tk_bmp_turned(tk_bmp *dst, const tk_bmp *src, int q);   /* cp7: the same into a new dst (src kept) */
 int tk_fm_new(tk_fm *m, int w, int h);
 void tk_fm_free(tk_fm *m);
 int tk_a8_new(tk_a8 *m, int w, int h);
