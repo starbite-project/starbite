@@ -1,46 +1,35 @@
 /* SPDX-License-Identifier: MIT
- * sbtk Liquid Glass on the CPU (P3p: audit 5, P3j-11, P3j-16). The glass is neutral: no colour of its own, no gloss,
- * no outline. What it shows is its backdrop (blurred, saturated 1.2, toned by the backdrop's own luminance), bent at
- * the rim where the backdrop is a bitmap the bake can sample, with a thin specular on the rim facing the light.
+ * sbtk Liquid Glass on the CPU (P3p: audit 5, P3j-11, P3j-16; glass V3: LIQUID-GLASS.md G1 G2 G4 G5). What it shows
+ * is its backdrop (blurred, saturated 1.2), bent at the rim where the backdrop is a bitmap the bake can sample, with
+ * the iOS 26/27 face, glint and contour of kern/lens.h (the model the GPU's comp2 and the compositor's lens share).
  *
- * ---- The constants (the GPU session's shader matches these; the audit's "Liquid Glass optical spec") ----------
+ * ---- The constants (kern/lens.h has the model; these are the bake's own) --------------------------------------
  * Units pt (1 pt = TK_PT px). m = min(w, h) of the element; s = inward distance to the edge; g = outward normal.
  *   size class   k = smoothstep(44, 300, m)
- *   thickness    T = mix(8, 20, k);   bezel b = min(r, m / 2, mix(12, 22, k))   (at least 1 px)
  *   frost        sigma = mix(3, 10, k) for a backdrop filtered per element (tk_glass_local, tk_glass_from_half);
  *                the wallpaper's shared backdrop (tk_glass_backdrop) keeps one 14 pt blur (it is smooth anyway)
  *   colour       saturate TK_GLASS_SAT = 1.2 (clear: TK_GLASS_SAT_CLEAR = 1.0), brightness TK_GLASS_BRIGHT = 1.0
- *   tone         Lb = luma (Rec. 709 weights on the sRGB values, 0..1) of the backdrop under the element's middle;
- *                dark below .40, light above .50, mixed linearly between (a bake has no frame-to-frame state for
- *                the GPU's hysteresis);
- *                dark  c = mix(c, 0, .18) + .04;   light  c = mix(c, 1, .18)
- *                .lg.dark (the shell's dark = 1, its pills, slider and the bars it draws labels on): mix .25
- *                instead of .18 (not in the spec: the legibility the old dark tint gave those labels)
- *   light        Lt = normalize(-1, -1.4): the direction TOWARD the light (from the top-left); f = dot(g, Lt)
- *                (the spec's f = dot(g, -L) with L = normalize(-1, -1.4) taken literally puts the strong term
- *                bottom-right; its text says top-left, which this follows)
- *   specular     rho = exp(-s / 1.2);  spec = rho (0.55 max(f, 0)^3 + 0.25 max(-f, 0)^3), added in linear light
- *                (peaks ~.5 on the top-left arc's outer pixel, ~.2 bottom-right); the spec's Fresnel term is left out
- *                (all round the rim it reads as the outline the audit removed)
- *   depth        c *= 1 - 0.06 (1 - s/b)^2 max(-f, 0)   (the side away from the light, inside the bezel; the spec's
- *                "c -= 0.06 ..." darkened our dark glass's bezel by up to 40 %: a heavy bevel, so a multiply here)
+ *   face         lens.h's preset (G2): Lb = luma (Rec. 709 weights on the sRGB values, 0..1) of the backdrop under
+ *                the element's middle is its yc (small elements flip light / dark by it; .lg.dark, the shell's
+ *                dark = 1, and large glass are dark); face = E + T lumY(Y) + K (c - Y) taken as an over-layer
+ *                c (1 - a) + add, linearised at Lb (a = 1 - T lumY'(Lb), add = E + T lumY(Lb) - (1 - a) Lb)
+ *   glint        lens.h's (G4): the top and bottom walls, 1.2 pt plus a .21 bleed to 4.8 pt, toward 1.6 white: a
+ *                white over-layer matched at the element's face level vref
+ *   contour      lens.h's (G5): .75 pt just outside, the side walls darkest
  *   shadow       outside the shape only: offset y mix(2, 6, k), sigma mix(6, 16, k), opacity mix(.10, .18, k)
- *   lens         profile h(t) = (1 - (1 - t)^4)^(1/4), t = clamp(s / b, 0, 1), h' clamped to 8;
- *                n = normalize(g (T / b) h'(t), 1); R = refract((0, 0, -1), n, 1 / 1.5);
- *                D = |R.xy| / -R.z * T * h(t), scaled down so its peak is at most 0.2 b (the spec's Dmax: 2.5 pt on
- *                a lock card, 4.3 on the focus card; unscaled it peaks at 0.27-0.39 b just inside the edge); a
- *                256-entry table per element. The backdrop is sampled at q = p - g D (inward: the rim magnifies).
- *                Only where D >= 1/8 px (about the outer 0.7 b) is the lens computed.
+ *   lens         lens.h's (G1): band h = min(20, m / 4), amount A = min(60, m / 2), d = A (1 - sqrt(1 - t^2)),
+ *                t = 1 - s / h, a 257-entry table per element; the backdrop is sampled at q = p - g d (inward: the
+ *                outer band shows a squeezed, mirrored strip of what lies further in).
  * The bake works over a backdrop it cannot see (the compositor moves the target toward the wallpaper's backdrop
- * under a glass mask, or there is none: the lock cards), so the tone, the depth and the specular are an over-layer:
- * exact for the tone and the depth (c' = c (1 - a) + add); the specular's "linear light" is matched at the
- * element's toned backdrop level (vref) and approximate elsewhere (the GPU adds it exactly). Where the bake can see
- * the backdrop (already in the bitmap: the CC tiles, the app bars) Lb is measured there; elsewhere it is the
- * wallpaper backdrop's mean (tk_glass_backdrop sets it).
+ * under a glass mask, or there is none: the lock cards), so the face, glint and contour are over-layers; with a
+ * glass mask the compositor's lens (comp2 on the GPU, draw_lens on the CPU) draws them per frame from the shape and
+ * the bake keeps only the shadow. Where the bake can see the backdrop (already in the bitmap: the CC tiles, the app
+ * bars) Lb is measured there; elsewhere it is the wallpaper backdrop's mean (tk_glass_backdrop sets it).
  * The lens needs the backdrop as a bitmap: tk_glass_local, tk_glass_local_put and tk_glass_from_half (static
  * backdrops: the CC tiles, the focus card and slider, the app bars) bend it; the compositor's glass (lock widgets,
  * dock, search) and the lock cards (no backdrop) do not. tk_glass_lens = 0 turns it off. */
 #include "sbtk.h"
+#include "../kern/lens.h"
 
 int tk_glass_lens = 1;
 
@@ -172,17 +161,14 @@ static inline float luma8(uint32_t p)       /* an opaque pixel's luma, 0..1 */
 {
     return (.2126f * (p >> 16 & 255) + .7152f * (p >> 8 & 255) + .0722f * (p & 255)) / 255;
 }
-static float srgb_lin(float v) { return v <= .04045f ? v / 12.92f : tk_powf((v + .055f) / 1.055f, 2.4f); }
-static float lin_srgb(float l) { return l <= .0031308f ? 12.92f * l : 1.055f * tk_powf(l, 1 / 2.4f) - .055f; }
 
-typedef struct { float k, T, b, frost, sg, sdy, sop; } gsize;   /* px, except k and sop */
+typedef struct { float k, frost, sg, sdy, sop; } gsize;   /* px, except k and sop (glass V3: the lens is lens.h's) */
 static gsize gsize_of(float w, float h, float r)
 {
     gsize z;
+    (void)r;
     float m = tk_minf(w, h) / TK_PT, x = tk_clampf((m - 44) / 256, 0, 1), k = x * x * (3 - 2 * x);
     z.k = k;
-    z.T = PT(8 + 12 * k);
-    z.b = tk_maxf(1, tk_minf(tk_minf(r, tk_minf(w, h) / 2), PT(12 + 10 * k)));
     z.frost = PT(3 + 7 * k);
     z.sg = PT(6 + 10 * k);
     z.sdy = PT(2 + 4 * k);
@@ -212,26 +198,18 @@ static inline float sd_g(float px, float py, float x, float y, float w, float h,
     return m;
 }
 
-/* D(t) in px at 256 steps of t = s / b (the last entry 0: the flat middle) */
+/* glass V3: the lens's offset D(s) in px at 256 steps of s / h across its band h (lens.h lens_offset: the quarter
+ * circle, A at the edge, 0 at the band's inner edge and beyond: the last entry) */
 #define LENS_N 256
-static void lens_table(float *D, const gsize *z)
+static void lens_table(float *D, const float *L)
 {
-    float Tb = z->T / z->b, eta = 1 / 1.5f;
-    for (int i = 0; i < LENS_N; i++) {
-        float t = (i + .5f) / LENS_N, u = 1 - t, u4 = u * u * u * u, h = tk_powf(1 - u4, .25f);
-        float hp = u * u * u * tk_powf(tk_maxf(1 - u4, 1e-6f), -.75f);
-        if (hp > 8) hp = 8;
-        float sl = Tb * hp, nn = tk_sqrtf(1 + sl * sl), nx = sl / nn, nz = 1 / nn;
-        float kk = 1 - eta * eta * (1 - nz * nz), c = eta * nz - tk_sqrtf(tk_maxf(kk, 0));
-        float rx = c * nx, rz = -eta + c * nz;          /* R = eta I + c n, I = (0, 0, -1) */
-        D[i] = rz < -1e-4f ? tk_fabsf(rx) / -rz * z->T * h : 0;
+    float hb = 1 / L[LQ_IH], oy;
+    for (int i = 0; i <= LENS_N; i++) {
+        float ox;
+        lens_offset(L, hb * i / LENS_N, 0, -1, &ox, &oy);
+        D[i] = oy;
     }
     D[LENS_N] = 0;
-    /* the spec's calibration: the peak at most 0.2 b (the profile as is peaks at ~0.27-0.39 b near the edge) */
-    float mx = 0;
-    for (int i = 0; i < LENS_N; i++) mx = tk_maxf(mx, D[i]);
-    if (mx > .2f * z->b)
-        for (int i = 0; i < LENS_N; i++) D[i] *= .2f * z->b / mx;
 }
 
 /* ---- the backdrop: the filtered bitmap drawn into b inside the shape, bent at the rim ------------------------ */
@@ -294,8 +272,9 @@ static inline void put_px(uint32_t *d, uint32_t sp, unsigned c)
 
 static inline float lens_d(const float *D, float t)
 {
-    float f = tk_maxf(t, 0) * LENS_N;
+    float f = tk_clampf(t, 0, 1) * LENS_N;
     int n = (int)f;
+    if (n >= LENS_N) return D[LENS_N];
     return D[n] + (D[n + 1] - D[n]) * (f - n);
 }
 
@@ -359,17 +338,18 @@ static void lens_rows(void *a, int ja, int jb)
 static void lens_put(tk_bmp *b, const tk_bmp *s, float sx0, float sy0, float sk, float x, float y, float w, float h, float r)
 {
     if (!b->px || !s->px) return;
-    gsize z = gsize_of(w, h, r);
-    float D[LENS_N + 1];
-    if (tk_glass_lens) lens_table(D, &z);
+    float D[LENS_N + 1], Lq[LQ_N];
+    lens_make(Lq, w, h, TK_PT, 0, 0, 0, -1);    /* glass V3: the geometry only (band, amount) */
+    float hb = 1 / Lq[LQ_IH];
+    if (tk_glass_lens) lens_table(D, Lq);
     tk_r4 R = tk_radii(w, h, r);
     float rm = tk_maxf(tk_maxf(R.tl, R.tr), tk_maxf(R.br, R.bl));
-    /* the lens's band: as far in as it moves the (blurred) backdrop by an 8th of a px or more (~0.7 b) */
+    /* the lens's band: as far in as it moves the (blurred) backdrop by an 8th of a px or more (nearly h) */
     float band = 0;
     if (tk_glass_lens)
         for (int i = LENS_N - 1; i >= 0; i--)
-            if (D[i] >= 1.0f / 8) { band = (i + 1) * z.b / LENS_N; break; }
-    lens_ctx L = { b, s, sx0, sy0, sk, x, y, w, h, 1 / z.b, R, tk_glass_lens ? D : 0,
+            if (D[i] >= 1.0f / 8) { band = (i + 1) * hb / LENS_N; break; }
+    lens_ctx L = { b, s, sx0, sy0, sk, x, y, w, h, 1 / hb, R, tk_glass_lens ? D : 0,
                    tk_maxi(0, (int)tk_floorf(x) - 1), tk_mini(b->w, (int)(x + w) + 2), band + 1.5f, rm, 0 };
     /* the fast spans' columns, clamped into s (s covers the box, so only the outermost ever clamp) */
     int32_t *cu = s->w >= 2 && L.X1 > L.X0 ? tk_alloc((size_t)(L.X1 - L.X0) * 8) : 0;
@@ -518,29 +498,17 @@ static inline void over_col(float *d, float cr, float cg, float cb, float a)  /*
     over4(d, cr * a, cg * a, cb * a, a);
 }
 
-#define SPEC_N 64                           /* the specular's table: spec in [0, SPEC_MAX] */
-#define SPEC_MAX .8f
 typedef struct {
     tk_bmp *b; tk_a8 *mask;
-    float x, y, w, h, sg, sdy, sop, ib, irho, srho;
+    float x, y, w, h, sg, sdy, sop, srho;
     int X0, X1, shadow, exact;
     tk_r4 R;
-    float Bz, rm;                           /* the middle (mid_span): the tone alone (no rim, no depth) */
-    float tone_c, tone_a;                   /* the tone as an over-layer: premultiplied grey level (0..255), alpha */
-    float vref, vlin;                       /* the toned backdrop level (sRGB 0..1) and its linear value */
-    float SA[SPEC_N + 2];                   /* spec -> the white over-alpha that adds it in linear light at vref */
+    float Bz, rm;                           /* the middle (mid_span): the tone alone (no glint, no contour) */
+    float tone_c, tone_a;                   /* the face as an over-layer: premultiplied grey level (0..255), alpha */
+    float vref;                             /* the face's level at the element's backdrop (sRGB 0..1) */
+    float L[LQ_N];                          /* glass V3: the lens's record (the glint, the contour) */
     int lensed;                             /* P4: the compositor lenses it: only the shadow and the mask */
 } gbake;
-
-static const float LTX = -.58123819f, LTY = -.81373347f;   /* normalize(-1, -1.4): toward the light */
-
-static inline float spec_alpha(const gbake *G, float sp)
-{
-    if (G->exact) return tk_clampf((lin_srgb(tk_minf(1, G->vlin + sp)) - G->vref) / (1 - G->vref), 0, 1);
-    float f = tk_minf(sp, SPEC_MAX) * (SPEC_N / SPEC_MAX);
-    int n = (int)f;
-    return G->SA[n] + (G->SA[n + 1] - G->SA[n]) * (f - n);
-}
 
 static void gbake_rows(void *a, int Y0, int Y1)
 {
@@ -579,19 +547,20 @@ static void gbake_rows(void *a, int Y0, int Y1)
                 float al = G->sop * (G->exact ? erf_cdf(-ss / sg) : phi(-ss / sg)) * (1 - cov);
                 if (al > 1.0f / 1024) over_col(out, 0, 0, 0, al);
             }
+            if (!G->lensed && cov < 1) {
+                /* glass V3 (G5): the contour just outside, darkest on the side walls (lens_contour) */
+                float ct = lens_contour(G->L, sd, gx) * (1 - cov);
+                if (ct > 1.0f / 1024) over_col(out, 0, 0, 0, ct);
+            }
             if (cov > 0 && !G->lensed) {
                 float f[4] = { G->tone_c, G->tone_c, G->tone_c, G->tone_a };
-                float s = tk_maxf(-sd, 0), fl = gx * LTX + gy * LTY;
-                /* the depth: the bezel's side away from the light a little darker (c -= .06 (1 - t)^2 max(-f, 0)) */
-                float t = s * G->ib;
-                if (t < 1 && fl < 0) {
-                    over_col(f, 0, 0, 0, .06f * (1 - t) * (1 - t) * -fl);
-                }
-                /* the rim specular: thin, toward the light strong, away from it weak */
+                float s = tk_maxf(-sd, 0);
+                /* glass V3 (G4): the glint, the top and bottom walls alike (lens_face's), as a white over-layer that
+                 * matches it at the element's face level vref */
                 if (s < G->srho) {
-                    float rho = tk_expf(-s * G->irho), m = fl > 0 ? .55f * fl * fl * fl : -.25f * fl * fl * fl;
-                    float sp = rho * m;
-                    if (sp > 1.0f / 1024) over_col(f, 255, 255, 255, spec_alpha(G, sp));
+                    float sp = s * G->L[LQ_IPT], r1 = tk_clampf(1 - sp / 1.2f, 0, 1), r2 = .21f * tk_clampf(1 - sp / 4.8f, 0, 1);
+                    float gw = G->L[LQ_GL] * (1 - tk_fabsf(gx)) * tk_maxf(r1, r2);
+                    if (gw > 1.0f / 1024) over_col(f, 255, 255, 255, tk_clampf(gw * (1.6f - G->vref) / (1 - G->vref), 0, 1));
                 }
                 over4(out, f[0] * cov, f[1] * cov, f[2] * cov, f[3] * cov);
             }
@@ -644,26 +613,24 @@ static void bake(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, flo
     /* P4 (the GPU row): glass with a mask is drawn by the compositor's lens (comp2 on the GPU, draw_lens on the CPU:
      * the backdrop bent, toned and lit per frame), from the shape d_glass records: the bake keeps only the shadow */
     G.lensed = tk_glass_lens && mask && mask->v;
-    G.sg = z.sg; G.sdy = z.sdy; G.sop = z.sop; G.ib = 1 / z.b;
-    G.irho = 1 / PT(1.2f); G.srho = PT(1.2f) * 6.5f;          /* rho < 1/600 beyond */
+    G.sg = z.sg; G.sdy = z.sdy; G.sop = z.sop;
+    G.srho = PT(4.8f);                                          /* the glint's reach (its bleed) */
     G.R = tk_radii(w, h, r);
     G.rm = tk_maxf(tk_maxf(G.R.tl, G.R.tr), tk_maxf(G.R.br, G.R.bl));
-    G.Bz = tk_maxf(z.b, G.srho) + 1;
-    /* the tone by the backdrop's luma: dark below .40, light above .50 */
-    float lb = backdrop_lb(b, x, y, w, h), lt = tk_clampf((lb - .40f) / .10f, 0, 1);
-    float ta = dark ? .25f : .18f;
+    G.Bz = tk_maxf(G.srho, PT(.75f)) + 1;
+    /* glass V3 (G2): the face, lens.h's preset (a small element flips by Lb; .lg.dark and large glass are dark),
+     * linearised at Lb as an over-layer c (1 - a) + add: the slope T lumY'(Lb), the level E + T lumY(Lb) */
+    float lb = backdrop_lb(b, x, y, w, h);
+    lens_make(G.L, w, h, TK_PT, 0, 0, 0, dark ? -1 : lb);
+    float T = G.L[LQ_TR], lift = G.L[LQ_LIFT], lum = lb + lift * lb * (1 - lb);
+    float slope = tk_clampf(T * (1 + lift * (1 - 2 * lb)), 0, 1), lev = tk_clampf(G.L[LQ_ER] + T * lum, 0, 1);
+    float ta = 1 - slope, add = tk_clampf(lev - slope * lb, 0, ta);
     G.tone_a = ta;
-    G.tone_c = (.04f * (1 - lt) + ta * lt) * 255;
-    G.vref = tk_clampf(lb * (1 - ta) + G.tone_c / 255, .06f, .94f);
-    G.vlin = srgb_lin(G.vref);
-    for (int i = 0; i <= SPEC_N; i++) {
-        float sp = SPEC_MAX * i / SPEC_N;
-        G.SA[i] = tk_clampf((lin_srgb(tk_minf(1, G.vlin + sp)) - G.vref) / (1 - G.vref), 0, 1);
-    }
-    G.SA[SPEC_N + 1] = G.SA[SPEC_N];
-    float mg = shadow ? 3 * G.sg + G.sdy + 2 : 2;
+    G.tone_c = add * 255;
+    G.vref = tk_clampf(lev, .06f, .94f);
+    float mg = shadow ? 3 * G.sg + G.sdy + 2 : LENS_APRON;
     G.X0 = tk_maxi(0, (int)tk_floorf(x - mg)); G.X1 = tk_mini(b->w, (int)(x + w + mg) + 1);
-    int Y0 = tk_maxi(0, (int)tk_floorf(y - (shadow ? 3 * G.sg - G.sdy : 0) - 2)), Y1 = tk_mini(b->h, (int)(y + h + mg) + 1);
+    int Y0 = tk_maxi(0, (int)tk_floorf(y - (shadow ? 3 * G.sg - G.sdy : 0) - LENS_APRON)), Y1 = tk_mini(b->h, (int)(y + h + mg) + 1);
     if (exact) gbake_rows(&G, Y0, Y1);
     else {
         (void)phi(0);                       /* the table, before any band uses it */

@@ -57,6 +57,17 @@ void tk_layer_add(tk_layer *p, tk_layer *c)
     while (t->next) t = t->next;
     t->next = c;
 }
+void tk_layer_external(tk_layer *l, const uint32_t *px, int w, int h, int stride)
+{
+    if (!l->external) tk_layer_dirty(l), tk_bmp_free(&l->bmp);
+    l->gen++;
+    l->external = px != 0;
+    l->bmp.px = (uint32_t *)(uintptr_t)px;
+    l->bmp.w = px ? w : 0;
+    l->bmp.h = px ? h : 0;
+    l->bmp.stride = px ? stride : 0;
+    if (px) l->opaque = 1;
+}
 void tk_layer_dirty(tk_layer *l)
 {
     l->gen++;
@@ -355,9 +366,43 @@ static void shape_at(const item *it, const float *g, float *X, float *Y, float *
     *r = tk_maxf(tk_minf(g[4] * it->a, .5f * tk_minf(*W, *H)), .01f);
 }
 
+/* glass V3: the backdrop's mean luminance under a shape (screen px; bw at half resolution, as the lens samples it):
+ * LIQUID-GLASS.md 2.5's Yc, which picks a small element's light or dark preset and a clear one's dim (lens_make).
+ * Measured on the wallpaper's blurred backdrop: glass over live content (over other glass, over moving apps) takes
+ * the wallpaper's, an approximation until G6 keeps a per element flip state. -1: no backdrop */
+static float lens_yc(const tk_bmp *bw, float X, float Y, float W, float H)
+{
+    if (!bw || !bw->px) return -1;
+    float s = 0;
+    for (int j = 0; j < 4; j++)
+        for (int i = 0; i < 4; i++) {
+            int x = tk_mini(tk_maxi((int)((X + W * (i + .5f) * .25f) * .5f), 0), bw->w - 1);
+            int y = tk_mini(tk_maxi((int)((Y + H * (j + .5f) * .25f) * .5f), 0), bw->h - 1);
+            uint32_t p = bw->px[(size_t)y * bw->stride + x];
+            s += .2126f * (p >> 16 & 255) + .7152f * (p >> 8 & 255) + .0722f * (p & 255);
+        }
+    return s * (1.0f / (16 * 255));
+}
+/* the backdrop (half resolution) bilinear at the screen point (u, v) (px), rgb 0..1 */
+static void lens_bd(const tk_bmp *bw, float u, float v, float rgb[3])
+{
+    float bu = u * .5f - .5f, bv = v * .5f - .5f, uf = tk_floorf(bu), vf = tk_floorf(bv), tu = bu - uf, tv = bv - vf;
+    uint32_t p[4];
+    for (int c = 0; c < 4; c++) {
+        int Xb = tk_mini(tk_maxi((int)uf + (c & 1), 0), bw->w - 1), Yb = tk_mini(tk_maxi((int)vf + (c >> 1), 0), bw->h - 1);
+        p[c] = bw->px[(size_t)Yb * bw->stride + Xb];
+    }
+    for (int c = 0; c < 3; c++) {
+        int sh = 16 - 8 * c;
+        float a0 = (float)(p[0] >> sh & 255), a1 = (float)(p[1] >> sh & 255), b0 = (float)(p[2] >> sh & 255), b1 = (float)(p[3] >> sh & 255);
+        float top = a0 + (a1 - a0) * tu, bot = b0 + (b1 - b0) * tu;
+        rgb[c] = (top + (bot - top) * tv) * (1.0f / 255);
+    }
+}
+
 /* v9, Liquid Glass on the CPU (the fallback; comp2's lens path and gpucomp's reference do the same): each glass
- * shape of the item, its lens evaluated per target px from the shape (lens.h), over the backdrop (half resolution),
- * in R; drawn before the layer's own pixels */
+ * shape of the item, its lens evaluated per target px from the shape (lens.h, glass V3: the offset, the face and
+ * glint, the contour just outside), over the backdrop (half resolution), in R; drawn before the layer's own pixels */
 static void draw_lens(const tgt *T, const item *it, tk_irect R)
 {
     const tk_layer *l = it->l;
@@ -367,49 +412,33 @@ static void draw_lens(const tgt *T, const item *it, tk_irect R)
     tk_irect ic = isect(R, irect_of(it->r.x0 * k, it->r.y0 * k, it->r.x1 * k, it->r.y1 * k));
     if (iempty(ic)) return;
     for (int q = 0; q < l->ngsh; q++) {
-        float X, Y, W, H, r;
+        float X, Y, W, H, r, L[LQ_N];
         shape_at(it, l->gsh[q], &X, &Y, &W, &H, &r);
+        float yc = lens_yc(bw, X, Y, W, H);
         X *= k; Y *= k; W *= k; H *= k; r *= k;
-        lens_par P = lens_params(W, H, r, TK_PT * k);
-        lens_tone TN = lens_tone_of(l->gvar[q], l->gpress[q] * (1.0f / 255));   /* 1.0, glass V2 */
-        uint32_t tint = l->gtint[q];
-        float cx = X + W * .5f, cy = Y + H * .5f, ex = W * .5f - r, ey = H * .5f - r;
-        tk_irect d = isect(ic, irect_of(X - 1, Y - 1, X + W + 1, Y + H + 1));
+        lens_make(L, W, H, TK_PT * k, l->gvar[q], l->gtint[q], l->gpress[q] * (1.0f / 255), yc);
+        float cx = X + W * .5f, cy = Y + H * .5f, ex = W * .5f - r, ey = H * .5f - r, ap = LENS_APRON;
+        tk_irect d = isect(ic, irect_of(X - ap, Y - ap, X + W + ap, Y + H + ap));
         for (int y = d.y0; y < d.y1; y++) {
             float al = it->alpha * fade_at(it, (y + .5f) / k);
             if (al <= 0) continue;
             uint32_t *row = T->t->px + (size_t)y * T->t->stride;
             for (int x = d.x0; x < d.x1; x++) {
-                float gx, gy, ox = 0, oy = 0, e = .02f, rgb[3];
-                float sd = lens_sd(x + .5f, y + .5f, cx, cy, ex, ey, r, &gx, &gy), cov = tk_clampf(.5f - sd, 0, 1);
-                if (cov <= 0) continue;
+                float gx, gy, ox, oy, rgb[3], acc[4];
+                float sd = lens_sd(x + .5f, y + .5f, cx, cy, ex, ey, r, &gx, &gy);
+                if (sd >= L[LQ_WC]) continue;                    /* beyond the contour */
                 float sv = sd < 0 ? -sd : 0;
-                if (sv < P.lb) lens_eval(&P, sv, gx, gy, &ox, &oy, &e);   /* inside the bezel (else flat: o 0, e .02) */
-                /* the backdrop (screen / 2) bilinear at p + o */
-                float bu = (x + .5f + ox) / k * .5f - .5f, bv = (y + .5f + oy) / k * .5f - .5f;
-                float uf = tk_floorf(bu), vf = tk_floorf(bv), tu = bu - uf, tv = bv - vf;
-                uint32_t p[4];
-                for (int c = 0; c < 4; c++) {
-                    int Xb = tk_mini(tk_maxi((int)uf + (c & 1), 0), bw->w - 1), Yb = tk_mini(tk_maxi((int)vf + (c >> 1), 0), bw->h - 1);
-                    p[c] = bw->px[(size_t)Yb * bw->stride + Xb];
-                }
-                for (int c = 0; c < 3; c++) {
-                    int sh = 16 - 8 * c;
-                    float a0 = (float)(p[0] >> sh & 255), a1 = (float)(p[1] >> sh & 255), b0 = (float)(p[2] >> sh & 255), b1 = (float)(p[3] >> sh & 255);
-                    float top = a0 + (a1 - a0) * tu, bot = b0 + (b1 - b0) * tu;
-                    rgb[c] = (top + (bot - top) * tv) * (1.0f / 255);
-                }
-                lens_shade_t(rgb, e, TN);
-                if (tint) lens_tint(rgb, tint);
-                float m = cov * al;
+                lens_offset(L, sv, gx, gy, &ox, &oy);
+                lens_bd(bw, (x + .5f + ox) / k, (y + .5f + oy) / k, rgb);
+                lens_face(L, rgb, sv, gx);
                 uint32_t D = row[x], o = 0;
-                for (int c = 0; c < 3; c++) {
-                    int sh = 16 - 8 * c;
-                    int vv = (int)((float)(D >> sh & 255) + (rgb[c] * 255 - (float)(D >> sh & 255)) * m + .5f);
-                    o |= (uint32_t)(vv < 0 ? 0 : vv > 255 ? 255 : vv) << sh;
+                for (int c = 0; c < 4; c++) acc[c] = (float)(D >> (c < 3 ? 16 - 8 * c : 24) & 255) * (1.0f / 255);
+                lens_blend(acc, rgb, sd, al, lens_contour(L, sd, gx));
+                for (int c = 0; c < 4; c++) {
+                    int vv = (int)(acc[c] * 255 + .5f);
+                    o |= (uint32_t)(vv < 0 ? 0 : vv > 255 ? 255 : vv) << (c < 3 ? 16 - 8 * c : 24);
                 }
-                int av = (int)((float)(D >> 24) + (255 - (float)(D >> 24)) * m + .5f);
-                row[x] = o | (uint32_t)(av > 255 ? 255 : av) << 24;
+                row[x] = o;
             }
         }
     }
@@ -432,7 +461,7 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
     const tk_bmp *src = &l->bmp;
     const tk_a8 *gm = l->glass.v ? &l->glass : 0;
     float res = 1;
-    if (A < .75f && B < .75f) {
+    if (A < .75f && B < .75f && !l->external) {
         src = half_of(l);
         gm = l->ghalf.v ? &l->ghalf : 0;
         res = .5f;
@@ -973,6 +1002,11 @@ static void clean_rows(void *a, int y0, int y1)
 static void gpu_flush_layer(tk_comp *c, tk_layer *l)
 {
     if (l->gpu_gen == l->gen + 1u || !c->gpu_clean) return;
+    if (l->external) {                          /* 1.0: uncached memory another core writes: nothing to clean or map */
+        l->gpu_occ_ok = 0;
+        l->gpu_gen = l->gen + 1u;
+        return;
+    }
     uint32_t fr = c->gpu_frames;
     int busy = l->gpu_occ_seen && fr - l->gpu_occ_frame <= 2u;
     l->gpu_occ_frame = fr;
@@ -1034,14 +1068,16 @@ static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
                 shape_at(it, l->gsh[k], &X, &Y, &W, &H, &r);
                 tk_gpu_item *e = &gq[n++];
                 tk_memset(e, 0, sizeof *e);
-                lens_par P = lens_params(W, H, r, TK_PT);
+                /* glass V3: the quad reaches LENS_APRON px past the shape (the contour), within the item's rect (its
+                 * damage) as draw_lens */
+                const float ap = LENS_APRON;
                 e->flags = TK_GPU_SOLID | TK_GPU_LENS;
                 e->alpha = it->alpha;
-                e->dx0 = tk_floorf(X) - 1; e->dy0 = tk_floorf(Y) - 1;
+                e->dx0 = tk_floorf(X - ap); e->dy0 = tk_floorf(Y - ap);
                 e->isx = e->isy = 1;
-                e->w = (uint32_t)(W + 3.999f); e->h = (uint32_t)(H + 3.999f);
-                e->cx0 = tk_maxf((float)it->clip.x0, X - 1); e->cy0 = tk_maxf((float)it->clip.y0, Y - 1);
-                e->cx1 = tk_minf((float)it->clip.x1, X + W + 1); e->cy1 = tk_minf((float)it->clip.y1, Y + H + 1);
+                e->w = (uint32_t)(W + 2 * ap + 1.999f); e->h = (uint32_t)(H + 2 * ap + 1.999f);
+                e->cx0 = tk_maxf((float)it->r.x0, X - ap); e->cy0 = tk_maxf((float)it->r.y0, Y - ap);
+                e->cx1 = tk_minf((float)it->r.x1, X + W + ap); e->cy1 = tk_minf((float)it->r.y1, Y + H + ap);
                 if (e->cx1 <= e->cx0 || e->cy1 <= e->cy0) { n--; continue; }
                 e->radius = r;
                 if (it->fade) {
@@ -1054,15 +1090,13 @@ static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
                 e->bw = (uint32_t)c->bw_half.w;
                 e->bh = (uint32_t)c->bw_half.h;
                 e->lx = X; e->ly = Y; e->lw = W; e->lh = H;
-                e->lb = P.lb; e->lt = P.lt; e->lc = P.lc; e->lr = P.lr;
-                e->lsat = 1;                    /* the wallpaper's blur is saturated already */
+                e->lsat = 1;                   /* the wallpaper's blur is saturated already */
                 e->live = below > 1 ? (uint32_t)below : 0;   /* v10: what lies under it (more than the ground) */
                 e->gen = c->ground_gen;
-                {                               /* 1.0, glass V2: the shape's tone (variant, press) and tint */
-                    lens_tone T = lens_tone_of(l->gvar[k], l->gpress[k] * (1.0f / 255));
-                    e->lk = T.k; e->la0 = T.a0; e->la1 = T.a1;
-                    e->solid = lens_tint_pm(l->gtint[k]);
-                }
+                /* glass V3: the lens's record from the shape's style (variant, tint, press: the tint is folded into
+                 * the face, the quad's solid stays transparent) and the backdrop under it */
+                lens_make(e->lq, W, H, TK_PT, l->gvar[k], l->gtint[k], l->gpress[k] * (1.0f / 255),
+                          lens_yc(&c->bw_half, X, Y, W, H));
             }
         if (n >= TK_GPU_MAX) return -1;
         tk_gpu_item *q = &gq[n++];
@@ -1295,7 +1329,7 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     uint64_t th = tk_us();
     for (int i = 0; i < cur.n; i++) {
         item *it = &cur.it[i];
-        if (it->l->bmp.px && it->a * T.k < .75f && it->b * T.k < .75f) {
+        if (it->l->bmp.px && !it->l->external && it->a * T.k < .75f && it->b * T.k < .75f) {
             if (!it->l->half.px && getenv_dbg) tk_log(it->l->name);
             half_of(it->l);
         }
@@ -1396,7 +1430,7 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
 static float fsh[24][5], fk = 1;
 static uint32_t ftint[24];
 static uint8_t fvar[24], fpress[24];   /* V2: the flattened shapes' style */
-static lens_par fpar[24];
+static float flq[24][LQ_N];                 /* glass V3: their lens records (lens.h) */
 static int nfsh, fit[24];                   /* fit: the shape's item in flist (its clip, fade and opacity) */
 void tk_flatten_shapes(tk_layer *dst)
 {
@@ -1412,26 +1446,13 @@ uint32_t tk_flat_lens(const tk_comp *c, int x, int y, uint32_t fb)
     for (int q = 0; q < nfsh; q++) {
         float X = fsh[q][0] / fk, Y = fsh[q][1] / fk, W = fsh[q][2] / fk, H = fsh[q][3] / fk, r = fsh[q][4] / fk;
         if (sx < X - 1 || sy < Y - 1 || sx > X + W + 1 || sy > Y + H + 1) continue;
-        float gx, gy, ox = 0, oy = 0, e = .02f, rgb[3];
+        float gx, gy, ox, oy, rgb[3];
         float sd = lens_sd(sx, sy, X + W * .5f, Y + H * .5f, W * .5f - r, H * .5f - r, r, &gx, &gy);
-        if (sd >= .5f) continue;
+        if (sd >= .5f) continue;             /* the caller blends by the mask's coverage (no contour here) */
         float sv = sd < 0 ? -sd : 0;
-        if (sv < fpar[q].lb) lens_eval(&fpar[q], sv, gx, gy, &ox, &oy, &e);
-        float bu = (sx + ox) * .5f - .5f, bv = (sy + oy) * .5f - .5f, uf = tk_floorf(bu), vf = tk_floorf(bv);
-        float tu = bu - uf, tv = bv - vf;
-        uint32_t p[4];
-        for (int k2 = 0; k2 < 4; k2++) {
-            int Xb = tk_mini(tk_maxi((int)uf + (k2 & 1), 0), bw->w - 1), Yb = tk_mini(tk_maxi((int)vf + (k2 >> 1), 0), bw->h - 1);
-            p[k2] = bw->px[(size_t)Yb * bw->stride + Xb];
-        }
-        for (int ch = 0; ch < 3; ch++) {
-            int sh = 16 - 8 * ch;
-            float a0 = (float)(p[0] >> sh & 255), a1 = (float)(p[1] >> sh & 255), b0 = (float)(p[2] >> sh & 255), b1 = (float)(p[3] >> sh & 255);
-            float top = a0 + (a1 - a0) * tu, bot = b0 + (b1 - b0) * tu;
-            rgb[ch] = (top + (bot - top) * tv) * (1.0f / 255);
-        }
-        lens_shade_t(rgb, e, lens_tone_of(fvar[q], fpress[q] * (1.0f / 255)));   /* 1.0, glass V2 */
-        if (ftint[q]) lens_tint(rgb, ftint[q]);
+        lens_offset(flq[q], sv, gx, gy, &ox, &oy);
+        lens_bd(bw, sx + ox, sy + oy, rgb);
+        lens_face(flq[q], rgb, sv, gx);      /* glass V3 (the tint, press and variant in the record) */
         uint32_t o = 0xff000000u;
         for (int ch = 0; ch < 3; ch++) {
             int v = (int)(rgb[ch] * 255 + .5f);
@@ -1464,7 +1485,9 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
                 fit[nfsh] = i;
                 shape_at(it, it->l->gsh[q], &fsh[nfsh][0], &fsh[nfsh][1], &fsh[nfsh][2], &fsh[nfsh][3], &fsh[nfsh][4]);
                 fvar[nfsh] = it->l->gvar[q]; ftint[nfsh] = it->l->gtint[q]; fpress[nfsh] = it->l->gpress[q];
-                fpar[nfsh] = lens_params(fsh[nfsh][2] / k, fsh[nfsh][3] / k, fsh[nfsh][4] / k, TK_PT);   /* screen px */
+                /* screen px; the backdrop's luminance unknown here (dark; the lock's glass is large anyway) */
+                lens_make(flq[nfsh], fsh[nfsh][2] / k, fsh[nfsh][3] / k, TK_PT, fvar[nfsh], ftint[nfsh],
+                          fpress[nfsh] * (1.0f / 255), -1);
             }
     }
     /* the shapes' coverage into the mask too (a layer that freed its mask after the bake drew none) */
@@ -1489,13 +1512,13 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
         }
 }
 
-void tk_layer_prepare(tk_layer *l) { if (l->bmp.px) half_of(l); }
+void tk_layer_prepare(tk_layer *l) { if (l->bmp.px && !l->external) half_of(l); }
 
 static void prep(tk_layer *l)
 {
     for (; l; l = l->next) {
         if (l->hidden) continue;
-        if (l->bmp.px && !l->half.px) half_of(l);
+        if (l->bmp.px && !l->half.px && !l->external) half_of(l);
         prep(l->child);
     }
 }

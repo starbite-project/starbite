@@ -765,3 +765,5 @@ static void lin_fake_state(const char *st)
     else if (!strncmp(st, "type:", 5)) for (const char *c = st + 5; *c; c++) sh_linux_char(*c);
     lin_fake_settle();
 }
+
+int sh_linux_zero_copy(void) { return 0; }   /* 1.0: the host has no GPU: the strips */

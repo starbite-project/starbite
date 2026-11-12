@@ -117,10 +117,10 @@ static void aq_mb1(char *b, unsigned kb)
 static int aq_status(const sh_lpkg_t *p, char *b, int cap, tk_col *c)
 {
     char x[24], y[24];
-    *c = W(.55f);
+    *c = C_LABEL2;
     if (p->state == SH_PKG_QUEUED) { lx_scopy(b, "Waiting\xe2\x80\xa6", cap); return 1; }
     if (p->state == SH_PKG_REMOVING) { lx_scopy(b, "Removing\xe2\x80\xa6", cap); return 1; }
-    if (p->state == SH_PKG_FAILED) { lx_scopy(b, p->err[0] ? p->err : "Didn't install", cap); *c = tk_hex(0xff6961, 1); return 1; }
+    if (p->state == SH_PKG_FAILED) { lx_scopy(b, p->err[0] ? p->err : "Didn't install", cap); *c = C_RED; return 1; }
     if (p->state != SH_PKG_INSTALLING) return 0;
     if (p->phase == SH_PKG_DOWNLOADING && p->total_kb) {
         if (p->total_kb >= 1000000) {
@@ -296,7 +296,7 @@ static float aq_row(pctx *c, float y, int i, const char *sub, int sep, int rollb
         char ln[96];
         tk_col col;
         if (!st_busy(p)) {                       /* (busy: the live layer has the status and the ring) */
-            if (!aq_status(p, ln, sizeof ln, &col)) { lx_scopy(ln, sub ? sub : p->summary, sizeof ln); col = W(.55f); }
+            if (!aq_status(p, ln, sizeof ln, &col)) { lx_scopy(ln, sub ? sub : p->summary, sizeof ln); col = C_LABEL2; }
             d_text_box(d, TK_IT400, 13, tx, bl(TK_IT400, 13, y + 39), tw_, 0, ln, 0, 0, col, 0);
             aq_pill(d, PILL_X, y + 23, p, 0);
         }
@@ -396,7 +396,7 @@ static float pg_today(pctx *c)
         aq_dec(dd, ST.day);
         AQS(t, WD[ST.wday % 7], " ", dd, " ", MO[(ST.mon + 11) % 12]);
         for (char *q = t; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32);
-        d_text(c->d, TK_IT600, 13, MARGIN, LARGE_BASE - 38, t, .3f, 0, W(.55f), 0);
+        d_text(c->d, TK_IT600, 13, MARGIN, LARGE_BASE - 38, t, .3f, 0, C_LABEL2, 0);
     }
     aq_title(c, "Today");
     float y = CONTENT_TOP + 4;
@@ -420,7 +420,7 @@ static float pg_browse(pctx *c)
     int rows[11], n = 0;
     rows[n++] = 10;
     for (int k = 0; k < 10; k++) if (aq_cat_n(AQ_CATS[k])) rows[n++] = k;
-    if (vis(c, y, 52.0f * n)) d_rrect(c->d, GROUP_X, y, GROUP_W, 52.0f * n, 16, tk_hex(0x151c33, 1));
+    if (vis(c, y, 52.0f * n)) d_rrect(c->d, GROUP_X, y, GROUP_W, 52.0f * n, 16, C_CARD);
     for (int r = 0; r < n; r++) {
         float ry = y + 52 * r;
         int k = rows[r];
@@ -518,7 +518,7 @@ static float pg_updates(pctx *c)
         dc *d = c->d;
         char ck[40];
         aq_checked(ck, sizeof ck);
-        d_rrect(d, GROUP_X, y, GROUP_W, 50, 16, tk_hex(0x151c33, 1));
+        d_rrect(d, GROUP_X, y, GROUP_W, 50, 16, C_CARD);
         d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 14), "Check for Updates", 0, 0, ACCENT(), 0);
         d_text_box(d, TK_IT400, 15, CONTENT_R - 16, bl(TK_IT400, 15, y + 16), 150, 2, ck, 0, 0, W(.5f), 0);
     }
@@ -635,7 +635,7 @@ static float pg_app(pctx *c)
         char ln[4][96];
         float wm;
         int n = wrapn(ln, 2, TK_IT400, 14, p->summary[0] ? p->summary : p->category, tw_, &wm);
-        for (int k = 0; k < n; k++) d_text(d, TK_IT400, 14, tx, bl(TK_IT400, 14, y0 + 30 + 18.0f * k), ln[k], 0, 0, W(.55f), 0);
+        for (int k = 0; k < n; k++) d_text(d, TK_IT400, 14, tx, bl(TK_IT400, 14, y0 + 30 + 18.0f * k), ln[k], 0, 0, C_LABEL2, 0);
         float by = y0 + 70;
         if (busy) {
             /* the live layer: the ring, the phase, Cancel */
@@ -730,7 +730,7 @@ static float pg_app(pctx *c)
             d_seg(d, MARGIN + 5, y + 14, MARGIN + 8.5f, y + 17.5f, 1.4f, W(.8f));
             d_seg(d, MARGIN + 8.5f, y + 17.5f, MARGIN + 5, y + 21, 1.4f, W(.8f));
             d_seg(d, MARGIN + 11, y + 22, MARGIN + 16, y + 22, 1.4f, W(.8f));
-            d_text(d, TK_IT400, 13, MARGIN + 32, bl(TK_IT400, 13, y + 10), "Opens in Terminal: it runs with the keyboard up.", 0, 0, W(.6f), 0);
+            d_text(d, TK_IT400, 13, MARGIN + 32, bl(TK_IT400, 13, y + 10), "Opens in Terminal: it runs with the keyboard up.", 0, 0, C_LABEL2, 0);
         }
         y += 34;
     }
@@ -740,7 +740,7 @@ static float pg_app(pctx *c)
     if (nm) {
         y = aq_sec(c, y, "Install Method", 0, 0, 0);
         static const unsigned ORD[3] = { SH_M_RELEASE, SH_M_SOURCE, SH_M_DISTRO };
-        if (vis(c, y, 62.0f * nm)) d_rrect(c->d, GROUP_X, y, GROUP_W, 62.0f * nm, 16, tk_hex(0x151c33, 1));
+        if (vis(c, y, 62.0f * nm)) d_rrect(c->d, GROUP_X, y, GROUP_W, 62.0f * nm, 16, C_CARD);
         int r = 0;
         for (int q = 0; q < 3; q++) {
             unsigned m = ORD[q];
@@ -760,7 +760,7 @@ static float pg_app(pctx *c)
                     AQS(s, "About ", bm, " min on the M3 cores", v[0] ? " \xc2\xb7 " : "", v);
                 } else AQS(s, v[0] ? v : "Debian", " \xc2\xb7 Debian trixie");
                 d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, ry + 11), aq_mname(m), 0, 0, INK, 0);
-                d_text_box(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, ry + 35), GROUP_W - 32 - 34, 0, s, 0, 0, W(.55f), 0);
+                d_text_box(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, ry + 35), GROUP_W - 32 - 34, 0, s, 0, 0, C_LABEL2, 0);
                 if ((unsigned)AQ.pick == m) d_check(d, CONTENT_R - 34, ry + 30, ACCENT());
                 if (r + 1 < nm) d_rrect(d, ROW_TX, ry + 61.5f, CONTENT_R - ROW_TX, .5f, 0, W(.1f));
             }
@@ -772,7 +772,7 @@ static float pg_app(pctx *c)
             char t[64];
             AQS(t, "Reinstall: ", aq_mname(AQ.pick));
             if (vis(c, y, 50)) {
-                d_rrect(c->d, GROUP_X, y, GROUP_W, 50, 16, tk_hex(0x151c33, 1));
+                d_rrect(c->d, GROUP_X, y, GROUP_W, 50, 16, C_CARD);
                 d_text_box(c->d, TK_IT600, 17, 195, bl(TK_IT600, 17, y + 14), GROUP_W - 32, 1, t, 0, 0, ACCENT(), 0);
             }
             if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hit(c, H_REINSTALL, i, 0);
@@ -799,7 +799,7 @@ static float pg_app(pctx *c)
                 aq_cat(s + l, (int)sizeof s - l, parts);
                 n++;
             }
-        if (vis(c, y, 24)) d_text_box(c->d, TK_IT400, 14, MARGIN, bl(TK_IT400, 14, y + 6), CONTENT_W, 0, s, 0, 0, W(.55f), 0);
+        if (vis(c, y, 24)) d_text_box(c->d, TK_IT400, 14, MARGIN, bl(TK_IT400, 14, y + 6), CONTENT_W, 0, s, 0, 0, C_LABEL2, 0);
         y += 28;
     }
     y += 16;
@@ -833,7 +833,7 @@ static float pg_app(pctx *c)
             y += 30;
         } else {
             int rb = (p->flags & SH_PKG_ROLLBACK) != 0, n = 1 + rb;
-            if (vis(c, y, 50.0f * n)) d_rrect(c->d, GROUP_X, y, GROUP_W, 50.0f * n, 16, tk_hex(0x151c33, 1));
+            if (vis(c, y, 50.0f * n)) d_rrect(c->d, GROUP_X, y, GROUP_W, 50.0f * n, 16, C_CARD);
             if (rb) {
                 if (vis(c, y, 50)) {
                     d_text(c->d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 14), "Roll Back to the Previous Version", 0, 0, ACCENT(), 0);
@@ -842,7 +842,7 @@ static float pg_app(pctx *c)
                 if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hit(c, H_ROLLBACK, i, 0);
                 y += 50;
             }
-            if (vis(c, y, 50)) d_text(c->d, AQ.rm_arm ? TK_IT600 : TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 14), AQ.rm_arm ? "Tap Again to Remove" : "Remove App", 0, 0, tk_hex(0xff453a, 1), 0);
+            if (vis(c, y, 50)) d_text(c->d, AQ.rm_arm ? TK_IT600 : TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 14), AQ.rm_arm ? "Tap Again to Remove" : "Remove App", 0, 0, C_RED, 0);
             if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hit(c, H_REMOVE, i, 0);
             y += 50;
         }
@@ -1030,9 +1030,9 @@ static void aq_head(void)
     dc d = mk(&aqh, "store-search", 0, SAFE_TOP, 390, fy + 46 - SAFE_TOP, 0, 0);
     tk_fill_rect_raw(d.b, 0, 0, d.b->w, d.b->h, 0xff0a0f1fu);   /* opaque: the results scroll under it */
     d_h1(&d, "Search");
-    d_rrect(&d, MARGIN, fy, fw, 38, 19, tk_hex(0x767680, .26f));
-    d_ring(&d, MARGIN + 18, fy + 17.5f, 6, 1.8f, 1, W(.55f), 0);
-    d_seg(&d, MARGIN + 22.5f, fy + 22, MARGIN + 26.5f, fy + 26, 2, W(.55f));
+    d_rrect(&d, MARGIN, fy, fw, 38, 19, C_FILL);
+    d_ring(&d, MARGIN + 18, fy + 17.5f, 6, 1.8f, 1, C_LABEL2, 0);
+    d_seg(&d, MARGIN + 22.5f, fy + 22, MARGIN + 26.5f, fy + 26, 2, C_LABEL2);
     float tx = MARGIN + 36;
     if (AQ.q[0]) {
         d_text_box(&d, TK_IT400, 17, tx, bl(TK_IT400, 17, fy + 8), fw - 50, 0, AQ.q, 0, 0, INK, 0);
@@ -1085,7 +1085,7 @@ static void aq_tabs(void)
                 char nb[8];
                 aq_dec(nb, tk_mini(AQ.badge, 99));
                 float bw = tk_maxf(19, tw(TK_IT600, 12, nb, 0, 0) + 10);
-                d_rrect(&d, cx + 6, cy - 16, bw, 19, 9.5f, tk_hex(0xff3b30, 1));
+                d_rrect(&d, cx + 6, cy - 16, bw, 19, 9.5f, C_RED);
                 d_text_box(&d, TK_IT600, 12, cx + 6 + bw / 2, bl(TK_IT600, 12, cy - 13.5f), bw, 1, nb, 0, TK_TNUM, W(1), 0);
             }
         }
