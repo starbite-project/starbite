@@ -53,6 +53,11 @@ python3 "$here/tools/mergeassets.py" "$ob/sbassets.sb7" "$ob/libsb-assets.sb7" "
 
 if [ "$native" = 1 ]; then
     sh "$here/../tools/sbos-host-test.sh"
+    CC=gcc sh "$here/kern/host/passcode-test.sh"          # Track A: the passcode (kern/passcode.c)
+    CC=gcc sh "$here/kern/host/prefs-test.sh"             # Track A: prefs and blobs (kern/prefs.c)
+    gcc -std=gnu11 -O2 -Wall -Wextra -Werror -I "$here/kern" "$here/kern/host/lens-test.c" -lm -o "$ob/lens-test" &&
+        "$ob/lens-test"                                   # Track A: Liquid Glass V3's model (kern/lens.h)
+    CC=gcc sh "$here/kern/host/tzdb-test.sh"     # Track A: the time zones against zoneinfo, the 12-hour text
 fi
 
 # The sensor hub's firmware patch (docs/SENSOR-HUB.md 2.2): never in the repository. Only the staged test image
@@ -135,6 +140,7 @@ objs=""
 v80objs=""
 wifi="$root/starbite/wifi"
 for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$ut/exfat.c" \
+           "$ut/usb_dwc3.c" "$ut/usb_phy.c" "$ut/tb.c" \
            "$wifi/core.c" "$wifi/exynos_pcie.c" "$wifi/chip.c" "$wifi/fw.c" "$wifi/ring.c" "$wifi/msgbuf.c" "$wifi/link.c" \
            "$wifi/wpa.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" \
            "$wifi/tcp.c" "$wifi/netio.c" "$wifi/http.c" "$wifi/tls/ta.c" "$wifi/tls/tls_chains.c" "$wifi/tls/tls_check.c" \
@@ -238,6 +244,11 @@ if [ -n "$PAK" ]; then
     # L2: Next with the Linux self test (the Terminal, foot on the M3 cores, a typed command; then recovery)
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_LINUX "$here/kern/uitest.c" -o "$ob/k_uitest_nlinux.o"
     nlobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_nlinux.o#")
+    # drivers track: every driver probe (read-only, then active-silent), then recovery; and the attended one (level 2)
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_DRV "$here/kern/uitest.c" -o "$ob/k_uitest_ndrv.o"
+    ndobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrv.o#")
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_DRV -DSBOS_SELFTEST_NEXT_DRV_ATTENDED "$here/kern/uitest.c" -o "$ob/k_uitest_ndrva.o"
+    ndaobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrva.o#")
 else
     echo "sbos: no build/sbtk/sbtk-phone.pak: the starbite-next images are not built" >&2
 fi
@@ -349,8 +360,9 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
 "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
 if [ -n "$nobjs" ]; then
-    for v in next next-selftest next-wifitest next-linuxtest; do
-        case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;; *) vo=$nwobjs ;; esac
+    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended; do
+        case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;;
+        next-drvprobe) vo=$ndobjs ;; next-drvattended) vo=$ndaobjs ;; *) vo=$nwobjs ;; esac
         "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
         und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)
         if [ -n "$und" ]; then

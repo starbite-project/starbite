@@ -22,6 +22,7 @@ void next_kinit(void), next_kdraw(void), next_kevent(const void *e), next_ktimer
 #define ui_kminute next_kminute
 #endif
 #include "survival.h"
+#include "usb.h"
 
 struct kstate K;
 static uint64_t boot_ms;
@@ -65,6 +66,11 @@ static void dispatch_timer(unsigned owner, unsigned id)
     case KT_SELFTEST:
         selftest_timer(id);
         break;
+#ifndef SB_HOST
+    case KT_USB:
+        usb_timer(id);                      /* USB device mode: the cable, the DWC3, the console (usb.c) */
+        break;
+#endif
     case KT_HOUSE:
         hw_wdt_feed();
         /* 0.1: started and never touched for 10 minutes (an unattended test boot): back to the menu */
@@ -186,6 +192,9 @@ void sb_main(void)
     heater_init();
     sos_init();
     surv_init();                            /* 1.2-alpha27 */
+#ifndef SB_HOST
+    usb_init();                             /* USB device mode (usb.c): watches the cable when SBOS_USB_AUTO */
+#endif
     settings_restore();                     /* after power_init: the screen-off time it restores re-arms the timer */
     clock_boot_log();                       /* 1.2-alpha26: the PMIC clock, or the last known time */
     heater_boot_forensics();                /* 1.2-alpha18: the last run's lowest voltage / highest current; a

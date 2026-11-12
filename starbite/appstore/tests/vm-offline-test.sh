@@ -19,12 +19,12 @@ run() { R=$M "$CH" run env SBSTORE_OFFLINE=1 SBSTORE_REPO=/nonexistent "$@"; }
 pass=0; fail=0
 ck() { if [ "$1" = 0 ]; then echo "PASS $2"; pass=$((pass + 1)); else echo "FAIL $2"; fail=$((fail + 1)); fi; }
 run apt-get -q update >/dev/null 2>&1
-run sh -c 'apt-cache policy gcc | grep -q "Candidate: [0-9]"'; ck $? "apt sees build-essential in the mirror only"
 for t in ${OFFLINE_TESTS:-neovim:release ripgrep:release yt-dlp:release btop:source}; do
     id=${t%:*}; m=${t#*:}; t0=$(date +%s)
     run /usr/local/sbin/sbstore install "$id" --method "$m" > /tmp/$NAME-$id.log 2>&1
     rc=$?; ck $rc "$id by $m offline in $(( $(date +%s) - t0 )) s: $(tail -1 /tmp/$NAME-$id.log)"
 done
+run sh -c 'apt-cache policy gcc | grep -q "Candidate: [0-9]"'; ck $? "apt sees build-essential (only from the mirror, which sbstore registered)"
 for b in nvim rg yt-dlp btop; do run sh -c "command -v $b >/dev/null" && { run sh -c "$b --version 2>&1 | head -1"; ck $? "$b runs"; }; done
 run sh -c '/usr/local/sbin/sbstore status; cat /etc/apt/sources.list.d/sbstore-mirror.list'
 run /usr/local/sbin/sbstore install firefox --method release > /tmp/$NAME-ff.log 2>&1

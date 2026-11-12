@@ -11,6 +11,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
+os.environ.setdefault("SBSTORE_CATALOG", os.path.abspath(sys.argv[1]))   # keys/ and icons/ beside it
 import sbstore  # noqa: E402
 
 os.environ.setdefault("SBSTORE_REPO", "/nonexistent")
