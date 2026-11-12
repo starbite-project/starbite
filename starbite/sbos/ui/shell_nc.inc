@@ -302,6 +302,7 @@ static void pl_peek(tk_layer *v, float x, float y, float h, float a)
     if (g < 0) {
         /* no lock cards (Emergency): a solid lower card peeking under the solid platter */
         if (v->bmp.px) nc_unview(v);
+        v->sx = v->sy = 1;                  /* (cp6: a press's scale is composed after) */
         v->solid = tk_premul(TK_RGBA(48, 52, 74, .6f));
         v->x = tk_floorf(PT(x + 10) + .5f);
         v->y = tk_floorf(PT(y + h - 16) + .5f);
@@ -340,6 +341,7 @@ typedef struct {
 static nc_slot NSL[NC_SLOTS];
 static tk_layer ncl, ncwall, ncstar, ncdim, nccont, ncsb, ncclk, nchead, nclist, ncempty, ncgh, ncclr, ncclrt, ncpill;
 static tk_layer bnl, bnund, bngl, bntx;
+static tk_layer nchl;                       /* cp6: the press light on the Centre's buttons (the list's content space) */
 static tk_layer bkl, bkund, bkgl, bktx;     /* B4: the banner pushed behind a newer one (the stacked look) */
 enum { NG_NONE, NG_PULL, NG_DRAG, NG_LIST, NG_SCROLL, NG_SWIPE, NG_TAP, NG_BANNER, NG_PILL };
 static struct {
@@ -497,6 +499,12 @@ static void nc_place_list(void)
             s->tx.clip_radius = PT(NC_R);
         } else
             s->tx.hidden = 1;
+        s->tx.sx = s->tx.sy = 1;
+        float ps = press_s(s);                  /* cp6: a platter pressed: .98 about its centre */
+        if (ps != 1) {
+            float cx = PT(NC_X + s->dx + NC_W / 2), cy = PT(s->y + s->hv / 2);
+            lay_scale(&s->pk, ps, cx, cy); lay_scale(&s->gl, ps, cx, cy); lay_scale(&s->tx, ps, cx, cy);
+        }
     }
     if (ncgh.bmp.px) {
         ncgh.y = ncgh.by + tk_floorf(PT(NC.ghy - NC_PY) + .5f);
@@ -813,6 +821,10 @@ static void bn_place(void)
     bnl.y = PT(off);
     bnl.sx = bnl.sy = .92f + .08f * tk_clampf(p, 0, 1.1f);
     bnl.ox = PT(195); bnl.oy = PT(BN_Y);
+    {   /* cp6: the banner pressed (.98 about its centre, in the parent's space) */
+        float ps = press_s(&bnl);
+        if (ps != 1) lay_scale(&bnl, ps, PT(195), bnl.sx * (PT(BN_Y + BN.h / 2) + bnl.y - bnl.oy) + bnl.oy);
+    }
     if (BN.ex) {                                /* growing into its expanded size */
         float h = bn_hcur();
         bn_under(&bnund, h);
@@ -1005,13 +1017,39 @@ static int bn_hit(float x, float y)
     float top = BN_Y + (1 - BN.p) * -(BN.h + BN_Y + 30) + BN.dy;
     return x >= NC_X - 4 && x < NC_X + NC_W + 4 && y >= top - 6 && y < top + bn_hcur() + (BK.on ? 8 : 0) + 6;
 }
+/* cp6: the press under a finger on the open Centre: a platter goes to .98, the header's x / Clear and the group's
+ * pills light (as their release will read them) */
+static void nc_press(float x, float y)
+{
+    float cy = y + NC.scroll;
+    if (NC.xp >= 0 || NC.reveal >= 0) return;            /* (an expanded platter's, a swipe's Clear: as they are) */
+    if (nin && cy >= NC_LT && cy < NC_LT + 40 && x >= CONTENT_R - (NC.clrall ? 70 : 40)) {
+        float w = NC.clrall ? tw(TK_IT600, 13, "Clear", 0, 0) + 24 : 28;
+        tk_rect c = { CONTENT_R - w, NC_LT + 6, w, 28 };
+        hl_set(&nchl, c, c, 14, PRESS_BTN);
+        return;
+    }
+    if (NC.exp[0] && NC.gha > .5f && cy >= NC.ghty && cy < NC.ghty + 34) {
+        for (int i = 0; i < 2; i++)
+            if (x >= NC.clr_x[i] - 4 && x < NC.clr_x[i] + NC.clr_w[i] + 4) {
+                tk_rect c = { NC.clr_x[i], NC.ghy + 2, NC.clr_w[i], 28 };
+                hl_set(&nchl, c, c, 14, PRESS_BTN);
+            }
+        return;
+    }
+    if (NC.sl >= 0) press_key(&NSL[NC.sl], .98f, nc_place_list);
+}
 /* a touch that starts on the banner, on the open Centre or on the lock's pill: 1 if the Centre's (sh_touch: G_NC) */
 static int nc_down(float x, float y, float t)
 {
     tk_tracker_reset(&NC.tr);
     NC.x0 = x; NC.y0 = y; NC.moved = 0;
     NC.t0 = t;
-    if (bn_hit(x, y)) { NC.g = NG_BANNER; BN.drag = 1; sp_bn.live = 0; sp_bndy.live = 0; tk_tracker_add(&NC.tr, y, t); return 1; }
+    if (bn_hit(x, y)) {
+        NC.g = NG_BANNER; BN.drag = 1; sp_bn.live = 0; sp_bndy.live = 0; tk_tracker_add(&NC.tr, y, t);
+        press_key(&bnl, .98f, bn_place);        /* cp6: a card's press */
+        return 1;
+    }
     if (NC.on && !NC.closing) {
         sp_nc.live = 0;
         NC.momentum = 0;
@@ -1020,6 +1058,7 @@ static int nc_down(float x, float y, float t)
         NC.sl = nc_slot_at(x, y);
         if (NC.sl >= 0 && NSL[NC.sl].ex) NC.sl = -1;   /* (the expanded one: its buttons, at the release) */
         NC.g = y >= NC_LT && y < NC_BOT ? NG_LIST : NG_TAP;
+        nc_press(x, y);                         /* cp6: what is under the finger answers it */
         NC.base = NC.scroll;
         sp_ncs.live = 0;
         return 1;
@@ -1063,7 +1102,7 @@ static int nc_touch(int ph, float x, float y, float t)
 {
     float dx = x - NC.x0, dy = y - NC.y0;
     if (ph == 1) {
-        if (tk_fabsf(dx) > 8 || tk_fabsf(dy) > 8) NC.moved = 1;
+        if (!NC.moved && (tk_fabsf(dx) > 8 || tk_fabsf(dy) > 8)) { NC.moved = 1; hl_off(); }   /* cp6: a move lets the press go */
         tk_tracker_add(&NC.tr, NC.g == NG_SWIPE ? x : y, t);
         switch (NC.g) {
         case NG_PILL:
@@ -1129,6 +1168,7 @@ static int nc_touch(int ph, float x, float y, float t)
         return 0;
     }
     if (ph != 2) return 0;
+    hl_off();                                   /* cp6: the press lets go (lit at least 100 ms, then it fades) */
     float v = tk_tracker_v(&NC.tr);
     int g = NC.g;
     NC.g = NG_NONE;
@@ -1369,11 +1409,13 @@ static void nc_link(void)
         link(&ncl, c, 4);
         tk_layer *cc[] = { &ncsb, &ncclk, &nclist, &ncempty };
         link(&nccont, cc, 4);
-        tk_layer *ls[3 * NC_SLOTS + 4];
+        tk_layer *ls[3 * NC_SLOTS + 5];
         int n = 0;
         ls[n++] = &ncclr; ls[n++] = &ncclrt; ls[n++] = &nchead;
         for (int k = 0; k < NC_SLOTS; k++) if (NSL[k].id) { ls[n++] = &NSL[k].pk; ls[n++] = &NSL[k].gl; ls[n++] = &NSL[k].tx; }
         ls[n++] = &ncgh;
+        if (!nchl.name) { tk_layer_init(&nchl, "nc-press"); nchl.hidden = 1; }
+        ls[n++] = &nchl;
         link(&nclist, ls, n);
     } else
         ncl.child = 0;
