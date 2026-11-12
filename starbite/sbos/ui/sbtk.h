@@ -134,6 +134,13 @@ extern int tk_glass_lens;          /* 1: static backdrops are bent at the rim (t
 void tk_wall_draw(tk_bmp *b, int emergency, float k);
 /* the backdrop the glass shows: blur 14 pt, saturate TK_GLASS_SAT of src (both half resolution) */
 void tk_glass_backdrop(tk_bmp *dst, const tk_bmp *src);
+/* B6: the same two in steps (Emergency's switch): the wallpaper's rows [y0, y1); the backdrop's quarter (src down
+ * 2x) blurred (part 0) and saturated in place (part 1: returns its mean luma, -1 none; part -1 both), then dst's rows
+ * up from it; the Lb of glass that cannot see its backdrop set (returns the one before) */
+void tk_wall_draw_rows(tk_bmp *b, int emergency, float k, int y0, int y1);
+float tk_glass_backdrop_q(tk_bmp *q, int part);
+void tk_glass_backdrop_up(tk_bmp *dst, const tk_bmp *q, int y0, int y1);
+float tk_glass_amb_set(float v);
 /* bake one glass element into b at (x, y, w, h) with radius r: the drop shadow (outside), and inside the neutral
  * tone (dark / light by the backdrop's luminance), the depth and the thin rim specular; no tint, gloss or outline.
  * dark = .lg.dark (a denser tone under labels). Its backdrop mask (the shape's coverage) goes into mask (same frame

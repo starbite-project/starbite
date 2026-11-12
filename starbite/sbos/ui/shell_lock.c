@@ -475,32 +475,45 @@ static void rect_widget(dc *d, const char *glyph, const char *label, const char 
     d_text_box(d, TK_IT600, 30, 122, 266 + o, 150, 0, value, 0, TK_TNUM, INK, 0);
     d_text_box(d, TK_IT400, 13, 123, 285 + o, 150, 0, sub, 0, 0, C_LABEL2, 0);
 }
+/* the lock's widgets of a mode (emg) into d: part 0 the left ring, 1 the right one, 2 the middle one, -1 all (B6:
+ * Emergency's switch draws them aside a piece at a time) */
+static void lw_draw(dc *d, int emg, int part)
+{
+    char num[12];
+    put_dec(num, ST.pct);
+    if (emg) {
+        /* Emergency: the battery ring amber, Heat (ready, the phone's temperature), Saving (off) */
+        if (part <= 0) ring_widget(d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), tk_hex(0xffb547, 1), num, "BATTERY");
+        if (part < 0 || part == 1)
+            ring_widget(d, 285, sh_last2() ? 1 : 0, tk_hex(0xff5a4e, 1), sh_last2() ? "On" : "Off", "SAVING");   /* survival-next: Last 2 % */
+        if (part < 0 || part == 2) {
+            char v[40];
+            int k = put_dec(v, ST.temp);
+            tk_memcpy(v + k, " \xc2\xb0" "C battery", 13);
+            rect_widget(d, 0, "Heat", "Ready", v);
+        }
+        return;
+    }
+    if (part <= 0) ring_widget(d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), C_GREEN, num, "BATTERY");
+    if (part < 0 || part == 1) {
+        int n = put_dec(num, ST.temp);
+        num[n] = (char)0xc2; num[n + 1] = (char)0xb0; num[n + 2] = 0;
+        ring_widget(d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), C_ACCENT, num, "TEMP");
+    }
+    if (part < 0 || part == 2) {
+        char at[16] = "Off";                       /* P2y: the kernel's next alarm (sh_alarm), not the concept's */
+        if (ALM.on) { at[0] = (char)('0' + ALM.h / 10); at[1] = (char)('0' + ALM.h % 10); at[2] = ':';
+                      at[3] = (char)('0' + ALM.m / 10); at[4] = (char)('0' + ALM.m % 10); at[5] = 0; }
+        alm_when = !ALM.on ? 0 : ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? 1 : 2;
+        rect_widget(d, "alarm", "Alarm", at, alm_when == 1 ? "Today" : alm_when == 2 ? "Tomorrow" : "No alarm set");
+    }
+}
+static dc lw_mk(tk_layer *l) { return mk(l, "lock-widgets", 0, WROW_Y - 10, 390, 92, 0, 1); }   /* B9: the widgets row */
 static void build_lwidgets(void)
 {
     relayer(&lwidgets);
-    dc d = mk(&lwidgets, "lock-widgets", 0, WROW_Y - 10, 390, 92, 0, 1);
-    char num[12];
-    put_dec(num, ST.pct);
-    if (EMG) {
-        /* Emergency: the battery ring amber, Heat (ready, the phone's temperature), Saving (off) */
-        ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), tk_hex(0xffb547, 1), num, "BATTERY");
-        ring_widget(&d, 285, sh_last2() ? 1 : 0, tk_hex(0xff5a4e, 1), sh_last2() ? "On" : "Off", "SAVING");   /* survival-next: Last 2 % */
-        char v[40];
-        int k = put_dec(v, ST.temp);
-        tk_memcpy(v + k, " \xc2\xb0" "C battery", 13);
-        rect_widget(&d, 0, "Heat", "Ready", v);
-        trim(&lwidgets);
-        return;
-    }
-    ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), C_GREEN, num, "BATTERY");
-    int n = put_dec(num, ST.temp);
-    num[n] = (char)0xc2; num[n + 1] = (char)0xb0; num[n + 2] = 0;
-    ring_widget(&d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), C_ACCENT, num, "TEMP");
-    char at[16] = "Off";                       /* P2y: the kernel's next alarm (sh_alarm), not the concept's */
-    if (ALM.on) { at[0] = (char)('0' + ALM.h / 10); at[1] = (char)('0' + ALM.h % 10); at[2] = ':';
-                  at[3] = (char)('0' + ALM.m / 10); at[4] = (char)('0' + ALM.m % 10); at[5] = 0; }
-    alm_when = !ALM.on ? 0 : ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? 1 : 2;
-    rect_widget(&d, "alarm", "Alarm", at, alm_when == 1 ? "Today" : alm_when == 2 ? "Tomorrow" : "No alarm set");
+    dc d = lw_mk(&lwidgets);
+    lw_draw(&d, EMG, -1);
     trim(&lwidgets);
 }
 
@@ -847,6 +860,7 @@ static int hit_sysrow(float x, float y)
 #define EC_LAYER(i) (&ecard[5 + ((i) - 4) / 2])   /* the layer of card i (4..7) */
 static tk_layer ecard[NEC], empill;
 static int ec_next = 8;                 /* survival-next: cards 4..7 drawn so far */
+static int ec_wait;                     /* B6: Emergency's first cards or Exit not drawn yet (hidden till then) */
 typedef struct { const char *icon, *t, *s, *act; } ecard_t;   /* act: the app it opens (none: a toast) */
 static const ecard_t EC[8] = {
     { "e46-heat", "Survival Heat", "Warms your hands \xc2\xb7 stops at a 65 \xc2\xb0" "C battery", "Survival Heat" },
@@ -870,27 +884,8 @@ static void ec_card(dc *d, int i, float top)
     d_text(d, TK_IT400, 13.5f, CARD_TX, top + 37.44f + tk_floorf(tk_ascent(TK_IT400, PT(13.5f)) / TK_PT + .5f), sub, 0, 0, W(.82f), 0);
     d_icon(d, "chev", CARD_CHEV, top + 27, 1);
 }
-static void build_ecards(void)
-{
-    /* the first four cards in one layer (each card's backdrop is what is drawn before it, as in the list) */
-    dc d = mk(&ecard[0], "ecards", CARD_X, LIST_TOP + 10, CARD_W, 78 * 3 + 68, FACE_MG, 1);   /* P3q: shapes recorded (below) */
-    for (int i = 0; i < 4; i++) ec_card(&d, i, LIST_TOP + 10 + 78 * i);
-    float top = LIST_TOP + 10 + 78 * 8 - 10 + 12, w = 14 + tw(TK_IT600, 13, "Exit Emergency", 0, 0) + 14, x = 195 - w / 2;
-    d = mk(&ecard[4], "eexit", x, top, w, 32, 44, 1);
-    d_glass(&d, x, top, w, 32, 16, 1, 1);
-    d_text(&d, TK_IT600, 13, x + 14, top + 8 + 13, "Exit Emergency", 0, 0, INK, 0);
-    tk_a8_free(&ecard[0].glass);
-    trim(&ecard[0]);
-    trim(&ecard[4]);
-    tk_layer_prepare(&ecard[0]);
-    tk_layer_prepare(&ecard[4]);
-    /* survival-next: cards 4..7 below the fold: their layers now, the cards at the next idle turns */
-    for (int k = 0; k < 2; k++) {
-        mk(&ecard[5 + k], k ? "ecards3" : "ecards2", CARD_X, LIST_TOP + 10 + 78 * (4 + 2 * k), CARD_W, 78 + 68, FACE_MG, 0);
-        ecard[5 + k].hidden = 1;
-    }
-    ec_next = 4;
-}
+/* (the first four cards in one layer, each card's backdrop what is drawn before it, as in the list; then Exit, then
+ * the layers of cards 4..7: B6's ep_card, a piece at a time, below set_emergency) */
 static void free_ecards(void) { for (int i = 0; i < NEC; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } ec_next = 8; }
 static int cards_pending;       /* the platter glass and the Systems tiles still to bake again after Emergency (one per idle turn) */
 static void build_lockpart(int i) { if (i == 0) build_platter(); else build_systiles(); }
@@ -921,7 +916,7 @@ static void build_empill(void)
 /* place every list layer for the current scroll (Emergency's), and the Systems group's and notifications' layers */
 static void place_list(void)
 {
-    ecard[0].hidden = ecard[4].hidden = !EMG;
+    ecard[0].hidden = ecard[4].hidden = !EMG || ec_wait;
     ecard[5].hidden = !EMG || ec_next <= 4;          /* survival-next: shown from its first card */
     ecard[6].hidden = !EMG || ec_next <= 6;
     list.y = PT(-scroll);
@@ -1494,6 +1489,7 @@ static void set_page(float x)
  * by the pull; the close is the fast spring (.32 / 1.0). A long press (450 ms) on the connectivity module or a slider
  * morphs it into its expanded panel (solid layers and one small drawing at the threshold: no glass bake). */
 static tk_layer ccl, ccscrim, ccsb, ccg, ccgrid, cclvl[2], ccic[2], cclit;   /* cclit: the torch's lit tile (P3i) */
+static tk_layer ccem;                   /* B6: Emergency's red tile (Emergency mode switches it: no grid rebuild) */
 static tk_layer ccblur1;            /* P3p (P3j-20): a lighter blur (8 pt, quarter resolution) for the first part of the pull */
 static void cc_status_stale(void) { relayer(&ccsb); cc_stale = 1; }
 static struct { int on, built, closing, wifi, cell, bt, air, rot, save; float p, lvl[2]; } CCS = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, { .62f, .4f } };   /* P2y: Wi-Fi and rotation lock off (neither is real) */
@@ -1638,8 +1634,10 @@ static void cc_link(void)
         int n = 1;
         if (i == 1 || i == 2) { k[1] = &cclvl[i - 1]; k[2] = &ccic[i - 1]; n = 3; }
         if (i == 3) { k[1] = &cclit; n = 2; }
+        if (i == 5) { k[1] = &ccem; n = 2; }       /* B6: Emergency's red tile, its own small layer */
         link(&ccmod[i], k, n);
     }
+    ccem.hidden = !EMG || !ccem.bmp.px;
     cclit.hidden = !Q[0].lit || !cclit.bmp.px;
     tk_layer *xb[] = { &ccxlvl };
     link(&ccxbg, xb, 1);
@@ -1704,8 +1702,17 @@ static void build_cc_grid(void)
     }
     cc_tile(&d, CCX[1], CC_R3, CC_U, CC_U, 34, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], CC_R3, 22, 22);
     cc_tile(&d, CCX[2], CC_R3, CC_U, CC_U, 34, 0);
-    if (EMG) d_rrect(&d, CCX[2], CC_R3, CC_U, CC_U, 34, tk_hex(0xff5a4e, 1));
     cc_glyph(&d, "cc-flame", CCX[2], CC_R3, 20, 24);
+    {
+        /* B6: Emergency's red a small layer over its tile, as the torch's: the switch shows it (the grid's rebuild
+         * was most of a frame); B4's module 5 holds it */
+        relayer(&ccem);
+        dc e = mk(&ccem, "cc-em", CCX[2], CC_R3, CC_U, CC_U, 1, 0);
+        d_rrect(&e, CCX[2], CC_R3, CC_U, CC_U, 34, tk_hex(0xff5a4e, 1));
+        cc_glyph(&e, "cc-flame", CCX[2], CC_R3, 20, 24);
+        tk_layer_prepare(&ccem);
+        ccem.hidden = !EMG;
+    }
     cc_tile(&d, CCX[3], CC_R3, CC_U, CC_U, 34, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], CC_R3, 24, 14);
     cc_tile(&d, CCX[0], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-timer", CCX[0], CC_R4, 22, 22);
     /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place); P3p: baked ones */
@@ -1814,6 +1821,7 @@ static void free_cc(void)
     relayer(&ccscrim);
     relayer(&ccblur1);
     relayer(&ccgrid);
+    relayer(&ccem);
     CCS.built = 0;
 }
 /* P3s: on the lock (it opens only from home) nothing of it is kept; home's idle time builds it again */
@@ -3492,7 +3500,7 @@ static void cf_free(void)
 
 /* ---- Emergency mode (the concept's setEmergency) ---------------------------------------------------------------
  * The wallpaper and its glass backdrop cross-fade (.7 s ease) to the other ground: both move in place toward a
- * target made once (two half-resolution buffers, freed at the end), so every glass element follows the fade. The
+ * target made ahead (two half-resolution buffers, freed at the end), so every glass element follows the fade. The
  * lock's widgets, its list (four cards and Exit Emergency), the pill, the flame, home's battery widget and its second
  * page, the Control Centre's tile change with it. Visual: no Emergency function runs. */
 static tk_bmp em_wall, em_bw;
@@ -3504,14 +3512,15 @@ static void lerp_rows(void *v, int y0, int y1)
     for (int j = y0; j < y1; j++) {
         uint32_t *a = L->a->px + (size_t)j * L->a->stride;
         const uint32_t *t = L->t->px + (size_t)j * L->t->stride;
+        /* B6: two channels at once, the same rounding as x + ((y - x) f + 128) >> 8 per channel (x (256 - f) + y f + 128
+         * is at most 65408: no carry into the next channel) */
+        uint32_t f = (uint32_t)L->f, g = 256 - f;
         for (int i = 0; i < L->a->w; i++) {
-            uint32_t p = a[i], q = t[i], o = 0;
+            uint32_t p = a[i], q = t[i];
             if (p == q) continue;
-            for (int sh = 0; sh < 32; sh += 8) {
-                int x = (int)(p >> sh & 255), y = (int)(q >> sh & 255);
-                o |= (uint32_t)(x + (((y - x) * L->f + 128) >> 8)) << sh;
-            }
-            a[i] = o;
+            uint32_t rb = ((p & 0xff00ffu) * g + (q & 0xff00ffu) * f + 0x800080u) >> 8 & 0xff00ffu;
+            uint32_t ag = ((p >> 8 & 0xff00ffu) * g + (q >> 8 & 0xff00ffu) * f + 0x800080u) & 0xff00ff00u;
+            a[i] = rb | ag;
         }
     }
 }
@@ -3539,36 +3548,282 @@ static void build_home_w(void);
 static void build_home_apps2(void);
 static void build_cc_grid(void);
 static void cc_link(void);
+/* ---- B6: the switch prepared ahead -------------------------------------------------------------------------------
+ * set_emergency made all of it at once: ~600 ms in one frame on the phone (387 on the Mac). Now the Emergency hold's
+ * 700 ms (and the Control Centre tile's) prepare the switch in a slice of each of its frames (EP_SLICE_US): the other
+ * ground (the wallpaper a band at a time, the star in and the quarter blurred, the backdrop's rows up), then,
+ * entering, Emergency's four cards and Exit (hidden), then the lock's widgets for that mode (aside, in ep_lw); a big
+ * piece only as a frame's first. A hold let go frees all of it. The switch itself is cheap: the widgets swapped in,
+ * the prepared ground handed to the cross-fade. What is not ready when it fires (all of it after Exit Emergency's
+ * tap) is made over the next frames, the lock's first (its cards and widgets, then the ground: the fade waits for
+ * it); home's widgets and its second page, never seen from the lock, at the idle turns after the fade (at once if home
+ * is about to show). Never two grounds at a time: nothing is prepared while a fade runs. The Control Centre's
+ * Emergency tile is a layer of its own (ccem): the switch shows or hides it. */
+#define EP_SLICE_US 7000           /* a frame's share of the work, us (no fade runs while there is any of it) */
+#define EP_ROWS 64                 /* a band of the wallpaper or the backdrop, half-res rows (64: over the cores) */
+enum { EP_CARDS = 1, EP_LW = 2, EP_HOMEW = 4, EP_APPS2 = 8 };
+static tk_layer ep_lw;             /* the lock's widgets for the mode prepared, until the switch */
+static struct {
+    int goal;                      /* the mode being prepared (-1 none); goal == EMG: switched, the rest being made */
+    int wy, qd, uy, fail;          /* wallpaper rows; the quarter made 1, blurred 2, toned 3; backdrop rows; no room */
+    tk_bmp wall, bw, q;
+    float amb;                     /* the new ground's Lb for glass that cannot see it (-1: not known) */
+    int cards;                     /* entering: 0..3 cards drawn into ecard[0], 4 Exit, 5 the layers below the fold */
+    int lw;                        /* ep_lw's pieces made (3: all), for the values in lwkey */
+    uint32_t lwkey;
+    int ground;                    /* the ground is the fade's (em_wall / em_bw): 1 handed over this frame, 2 fading */
+    int post;                      /* after the switch: the EP_* still to make */
+    int fresh;                     /* the switch was in this frame (a tap's): no more work in it */
+} EP = { -1, 0, 0, 0, 0, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, -1, 0, 0, 0, 0, 0, 0 };
+static void ep_reset(void)
+{
+    tk_bmp_free(&EP.wall);
+    tk_bmp_free(&EP.bw);
+    tk_bmp_free(&EP.q);
+    relayer(&ep_lw);
+    EP.goal = -1;
+    EP.wy = EP.qd = EP.uy = EP.fail = EP.cards = EP.lw = EP.ground = EP.post = EP.fresh = 0;
+    EP.lwkey = 0;
+    EP.amb = -1;
+}
+static void ep_begin(int on)
+{
+    ep_reset();
+    EP.goal = on;
+}
+/* a hold let go (or the mode set some other way): what was made for it goes */
+static void ep_cancel(void)
+{
+    if (EP.goal == 1 && !EMG && EP.cards) free_ecards();
+    ep_reset();
+}
+static void ep_noroom(void)
+{
+    tk_bmp_free(&EP.wall);
+    tk_bmp_free(&EP.bw);
+    tk_bmp_free(&EP.q);
+    EP.fail = 1;
+    EP.amb = -1;
+}
+static int ep_ground_done(void) { return EP.fail || (EP.qd == 3 && EP.uy >= C->bw_half.h); }
+/* the next piece of the target ground (as tk_wall_draw + tk_glass_backdrop of the wallpaper with the star of that
+ * mode made it); 2: a big one (the blur, the saturation), 1: a band, 0: it is whole, -1: a big one is next */
+static int ep_ground_step(int big_ok)
+{
+    if (ep_ground_done()) return 0;
+    int on = EP.goal;
+    if (EP.wy < C->base_half.h) {
+        if (!EP.wall.px && !tk_bmp_new(&EP.wall, C->base_half.w, C->base_half.h)) { ep_noroom(); return 1; }
+        tk_wall_draw_rows(&EP.wall, on, .5f, EP.wy, EP.wy + EP_ROWS);
+        EP.wy += EP_ROWS;
+        return 1;
+    }
+    if (!EP.qd) {
+        /* the star into the wallpaper (what is under it kept), the quarter from both, the wallpaper as it was */
+        if (!tk_bmp_new(&EP.q, EP.wall.w / 2, EP.wall.h / 2)) { ep_noroom(); return 1; }
+        const tk_bmp *st = tk_icon(on ? "star-e" : "star");
+        tk_bmp sh = { 0, 0, 0, 0 }, keep = { 0, 0, 0, 0 };
+        int sx = (int)(on ? star_e.x : star.x) / 2, sy = (int)star.y / 2;
+        if (st && tk_bmp_new(&sh, (st->w + 1) / 2, (st->h + 1) / 2) && tk_bmp_new(&keep, sh.w, sh.h)) {
+            tk_bmp_down2(&sh, st);
+            tk_bmp_copy(&keep, 0, 0, &EP.wall, sx, sy, sh.w, sh.h);
+            tk_blit(&EP.wall, &sh, sx, sy, 1);
+            tk_bmp_down2(&EP.q, &EP.wall);
+            tk_bmp_copy(&EP.wall, sx, sy, &keep, 0, 0, sh.w, sh.h);
+        } else
+            tk_bmp_down2(&EP.q, &EP.wall);
+        tk_bmp_free(&sh);
+        tk_bmp_free(&keep);
+        EP.qd = 1;
+        return 1;
+    }
+    if (EP.qd < 3) {                       /* the blur, then the saturation and the mean: a frame each */
+        if (!big_ok) return -1;
+        float a = tk_glass_backdrop_q(&EP.q, EP.qd - 1);
+        if (EP.qd++ == 2) EP.amb = a;
+        return 2;
+    }
+    if (!EP.bw.px && !tk_bmp_new(&EP.bw, C->bw_half.w, C->bw_half.h)) { ep_noroom(); return 1; }
+    tk_glass_backdrop_up(&EP.bw, &EP.q, EP.uy, EP.uy + EP_ROWS);
+    EP.uy += EP_ROWS;
+    if (EP.uy >= C->bw_half.h) tk_bmp_free(&EP.q);
+    return 1;
+}
+/* the ground to the fade: from this frame on the wallpaper and backdrop move toward it */
+static void ep_handover(void)
+{
+    tk_bmp_free(&em_wall);
+    tk_bmp_free(&em_bw);
+    em_wall = EP.wall;
+    em_bw = EP.bw;
+    EP.wall = EP.bw = (tk_bmp){ 0, 0, 0, 0 };
+    tk_bmp_free(&EP.q);
+    if (EP.fail) tk_log("sbtk: Emergency: no room for the other wallpaper");
+    else if (EP.amb >= 0) tk_glass_amb_set(EP.amb);
+    em_e = 0;
+    EP.ground = 1;
+}
+/* Emergency's cards a piece at a time (as they were made at once), their glass toned for the new ground */
+static void ep_card(void)
+{
+    int i = EP.cards;
+    float amb0 = EP.amb >= 0 ? tk_glass_amb_set(EP.amb) : -1;
+    if (i < 4) {
+        if (!i) {
+            mk(&ecard[0], "ecards", CARD_X, LIST_TOP + 10, CARD_W, 78 * 3 + 68, FACE_MG, 1);   /* P3q: shapes recorded */
+            ecard[0].hidden = 1;
+            relink();
+        }
+        dc d = { &ecard[0].bmp, &ecard[0].glass, ecard[0].x, ecard[0].y };
+        ec_card(&d, i, LIST_TOP + 10 + 78 * i);
+    } else if (i == 4) {
+        float top = LIST_TOP + 10 + 78 * 8 - 10 + 12, w = 14 + tw(TK_IT600, 13, "Exit Emergency", 0, 0) + 14, x = 195 - w / 2;
+        dc d = mk(&ecard[4], "eexit", x, top, w, 32, 44, 1);
+        ecard[4].hidden = 1;
+        d_glass(&d, x, top, w, 32, 16, 1, 1);
+        d_text(&d, TK_IT600, 13, x + 14, top + 8 + 13, "Exit Emergency", 0, 0, INK, 0);
+        tk_a8_free(&ecard[0].glass);
+        trim(&ecard[0]);
+        trim(&ecard[4]);
+        tk_layer_prepare(&ecard[0]);
+        tk_layer_prepare(&ecard[4]);
+        relink();
+    } else {
+        /* survival-next: cards 4..7 below the fold: their layers now, the cards at the next idle turns (sv_idle) */
+        for (int k = 0; k < 2; k++) {
+            mk(&ecard[5 + k], k ? "ecards3" : "ecards2", CARD_X, LIST_TOP + 10 + 78 * (4 + 2 * k), CARD_W, 78 + 68, FACE_MG, 0);
+            ecard[5 + k].hidden = 1;
+        }
+        ec_next = 4;
+        relink();
+    }
+    if (amb0 >= 0) tk_glass_amb_set(amb0);
+    EP.cards++;
+    if (EP.cards >= 5 && ec_wait) { ec_wait = 0; place_list(); }
+}
+/* what the lock's widgets show (prepared ones are swapped in only if it is still the same) */
+static uint32_t ep_lwkey(void)
+{
+    int am = ALM.h * 60 + ALM.m, when = !ALM.on ? 0 : am > ST.h * 60 + ST.mi ? 1 : 2;
+    return (uint32_t)(ST.pct & 255) | (uint32_t)(ST.temp & 255) << 8 | (uint32_t)(sh_last2() & 1) << 16 |
+           (uint32_t)when << 17 | (uint32_t)(am & 2047) << 19;
+}
+/* the lock's widgets for the mode, aside (the shown ones stay as they are): a ring, the other, the middle one
+ * (EP.lw 3: made) */
+static void ep_lw_step(void)
+{
+    dc d = { &ep_lw.bmp, &ep_lw.glass, ep_lw.x, ep_lw.y };
+    if (!EP.lw) {
+        relayer(&ep_lw);
+        d = lw_mk(&ep_lw);
+        EP.lwkey = ep_lwkey();
+    }
+    lw_draw(&d, EP.goal, EP.lw);
+    if (++EP.lw == 3) {
+        trim(&ep_lw);
+        if (EP.lwkey != ep_lwkey()) EP.lw = 0;     /* the values changed meanwhile: again */
+    }
+}
+/* the made widgets in place of the shown ones (relink after: the tree's links are the shown layer's) */
+static void ep_lw_swap(void)
+{
+    uint32_t g = lwidgets.gen > ep_lw.gen ? lwidgets.gen : ep_lw.gen;
+    relayer(&lwidgets);
+    lwidgets = ep_lw;
+    lwidgets.gen = g + 1;
+    tk_layer_init(&ep_lw, "ep-lw");
+    EP.lw = 0;
+}
+/* before the switch: the ground, then (entering) the cards and Exit, then the widgets; -1: a big piece is next (one a
+ * frame), 0: all done */
+static int ep_pre_step(int big_ok)
+{
+    int r = ep_ground_step(big_ok);
+    if (r) return r;
+    if (EP.goal == 1 && EP.cards < 5) {
+        if (!big_ok) return -1;
+        ep_card();
+        return 2;
+    }
+    if (EP.lw < 3) {
+        if (!big_ok) return -1;
+        ep_lw_step();
+        return 2;
+    }
+    return 0;
+}
+/* after it: the lock's pieces first (one big piece a frame), the ground's rest and its hand-over, home's at idle
+ * (idle) or when it shows; 0 when all done */
+static int ep_post_step(int big_ok, int idle)
+{
+    if (EP.post & (EP_CARDS | EP_LW) && big_ok) {
+        if (EP.post & EP_CARDS) {
+            ep_card();
+            if (EP.cards > 5) EP.post &= ~EP_CARDS;
+        } else {
+            ep_lw_step();
+            if (EP.lw == 3) {
+                EP.post &= ~EP_LW;
+                ep_lw_swap();
+                relink();
+            }
+        }
+        lock_ver++;
+        return 2;
+    }
+    if (!EP.ground) {
+        int r = ep_ground_step(big_ok);
+        if (r) return r;
+        ep_handover();                       /* (the fade from the next frame: this one did the bands) */
+        return 2;
+    }
+    if (EP.post & (EP_CARDS | EP_LW)) return -1;
+    if (!EP.post) { ep_reset(); return 0; }
+    if (!idle || !big_ok) return -1;
+    if (EP.post & EP_HOMEW) { EP.post &= ~EP_HOMEW; build_home_w(); }
+    else { EP.post &= ~EP_APPS2; build_home_apps2(); }
+    relink();
+    return 2;
+}
+/* a slice of the work: small pieces until EP_SLICE_US, a big one only as the slice's first */
+static void ep_work(int idle)
+{
+    uint64_t t0 = tk_us();
+    for (int first = 1; EP.goal >= 0; first = 0) {
+        if (!first && tk_us() - t0 >= EP_SLICE_US) break;
+        int r = EP.goal == EMG ? ep_post_step(first, idle) : ep_pre_step(first);
+        if (r <= 0 || r == 2) break;
+    }
+}
+/* home is about to show (the lock lifting, the Control Centre closed): its pieces now */
+static void ep_home_now(void)
+{
+    if (EP.post & EP_HOMEW) build_home_w();
+    if (EP.post & EP_APPS2) build_home_apps2();
+    EP.post &= ~(EP_HOMEW | EP_APPS2);
+    relink();
+}
+/* all of it now (a set state, the reset): a switch's rest made, a prepared one dropped */
+static void ep_finish(void)
+{
+    if (EP.goal >= 0 && EP.goal != EMG) ep_cancel();
+    while (EP.goal >= 0 && ep_post_step(1, 1) > 0) ;
+}
 static void set_emergency(int on, int instant)
 {
     if (on == EMG) return;
+    if (EP.goal >= 0 && EP.goal != on) ep_cancel();   /* back before the last switch was whole: made again */
+    if (EP.goal < 0) ep_begin(on);                   /* nothing prepared (Exit Emergency's tap): over the next frames */
     EMG = on;
     if (!on) { free_ecards(); cards_pending = LOCK_PARTS; }
-    /* the target ground: the other wallpaper, its backdrop with the star of that mode */
+    /* a fade still running stops where it is: the next one starts from there */
     tk_bmp_free(&em_wall);
     tk_bmp_free(&em_bw);
-    if (tk_bmp_new(&em_wall, C->base_half.w, C->base_half.h) && tk_bmp_new(&em_bw, C->bw_half.w, C->bw_half.h)) {
-        tk_wall_draw(&em_wall, on, .5f);
-        tk_bmp src, sh;
-        if (tk_bmp_new(&src, em_wall.w, em_wall.h)) {
-            tk_bmp_copy(&src, 0, 0, &em_wall, 0, 0, src.w, src.h);
-            const tk_bmp *st = tk_icon(on ? "star-e" : "star");
-            if (st && tk_bmp_new(&sh, (st->w + 1) / 2, (st->h + 1) / 2)) {
-                tk_bmp_down2(&sh, st);
-                tk_blit(&src, &sh, (int)(on ? star_e.x : star.x) / 2, (int)star.y / 2, 1);
-                tk_bmp_free(&sh);
-            }
-            tk_glass_backdrop(&em_bw, &src);
-            tk_bmp_free(&src);
-        }
-    } else {
-        tk_bmp_free(&em_wall);
-        tk_bmp_free(&em_bw);
-        tk_log("sbtk: Emergency: no room for the other wallpaper");
-    }
     em_e = 0;
     em_t = 0;
-    if (instant) { em_t = 1; em_step(1); }
+    EP.ground = 0;
+    EP.post = (on ? EP_CARDS : 0) | EP_HOMEW | EP_APPS2;
+    ec_wait = on && EP.cards < 5;
     /* the lock */
     hold_t *q = &Q[1];
     q->lit = on;
@@ -3578,16 +3833,24 @@ static void set_emergency(int on, int instant)
     scroll = 0;
     sp_scroll.live = 0;
     scroll_momentum = 0;
-    if (on) { free_vendor_cards(); build_ecards(); }
+    if (on) free_vendor_cards();
     empill.hidden = !on;
-    build_lwidgets();
+    if (EP.lw == 3 && EP.lwkey == ep_lwkey()) ep_lw_swap();
+    else { EP.lw = 0; EP.post |= EP_LW; }
+    EP.fresh = !instant;                             /* this frame did the switch: no more work in it */
     mark_t = on || lockY < 0 ? 0 : 1;
-    if (instant) mark_a = mark_t;
-    /* home and the Control Centre */
-    build_home_w();
-    build_home_apps2();
+    /* the Control Centre: its tile now; its scrim (home as it was) made again at home's next idle turn */
+    ccem.hidden = !on || !ccem.bmp.px;
     cc_stale = 1;
-    if (CCS.built) { build_cc_grid(); cc_link(); }
+    if (instant) {
+        ep_finish();
+        em_t = 1;
+        em_step(1);
+        mark_a = mark_t;
+    } else if (ep_ground_done()) {
+        ep_handover();                               /* prepared: the fade starts with the next frame */
+        EP.ground = 2;
+    }
     relink();
     place_list();
     lock_ver++;
@@ -4027,6 +4290,7 @@ static void back_to_lock(int exit_em)
     CCS.on = 0; sp_cc.live = 0; cc_x_reset(); set_cc(0);
     if (AP.on) { sp_app.live = 0; app_finish_close(); }
     if (exit_em && EMG) set_emergency(0, 1);
+    if (exit_em) ep_finish();                      /* B6: a switch's rest at once (a prepared one goes) */
     if (!EMG) while (cards_pending > 0) { build_lockpart(LOCK_PARTS - cards_pending); cards_pending--; }
     if (CF.on) cf_close(0);
     kit_reset();                                   /* helper B2: an alert or a sheet goes, unanswered */
@@ -4827,6 +5091,19 @@ static int tween(float *v, float target, float dur_s, float dt)
     return 1;
 }
 
+/* B6: the Emergency hold (or the Control Centre's tile) is down and not fired yet */
+static int ep_holding(void) { return (Q[1].down && !Q[1].fired) || (T.kind == G_CCEM && !T.arg); }
+/* a frame's slice of the switch's work: prepared while the hold is down (never during a fade: one ground at a time),
+ * freed when it is let go; after the switch the rest (home's at once if it is about to show) */
+static void ep_tick(void)
+{
+    if (EP.goal >= 0 && EP.goal != EMG && !ep_holding()) ep_cancel();
+    if (EP.goal < 0 && ep_holding() && em_t >= 1) ep_begin(!EMG);
+    if (EP.goal < 0) return;
+    if (EP.goal == EMG && EP.post & (EP_HOMEW | EP_APPS2) && (locked ? lockY != 0 : !CCS.on)) ep_home_now();
+    if (!EP.fresh) ep_work(0);                   /* the frame of a tap's switch does the switch only */
+    EP.fresh = 0;
+}
 int sh_tick(float dt, float t)
 {
     int mv = 0;
@@ -4875,9 +5152,14 @@ int sh_tick(float dt, float t)
     mv |= ico_step(dt);                          /* P3p: the pressed icon */
     mv |= med_tick(dt);
     mv |= lx_moving();                           /* L3: the App Store's list under the finger */
+    ep_tick();                                   /* B6: Emergency's switch prepared during the hold, finished after */
     if (em_t < 1) {
-        em_t = tk_minf(1, em_t + dt / .7f);
-        em_step(tk_bezier(.25f, .1f, .25f, 1, em_t));
+        /* B6: the fade waits for its ground, and starts the frame after a hand-over made over frames */
+        if (EP.goal >= 0 && EP.goal == EMG && EP.ground == 1) EP.ground = 2;
+        else if (!(EP.goal >= 0 && EP.goal == EMG && !EP.ground)) {
+            em_t = tk_minf(1, em_t + dt / .7f);
+            em_step(tk_bezier(.25f, .1f, .25f, 1, em_t));
+        }
         mv = 1;
     }
     if (T.kind == G_CCCELL && !T.arg) {
@@ -5106,6 +5388,9 @@ void sh_idle(void)
     /* P3j: an app page still being drawn (an open without frames, e.g. the host's stills): finish it now */
     if (ap_pending) { while (ap_pending) app_build_step(); if (AP.on) set_app_rect(AP.R); }
     if (sh_moving()) return;
+    /* B6: a prepared switch nobody holds any more goes; a switch's rest, a slice a turn (sh_idle_pending) */
+    if (EP.goal >= 0 && EP.goal != EMG && !ep_holding()) ep_cancel();
+    if (EP.goal >= 0 && EP.goal == EMG && !(!EMG && cards_pending > 0)) { ep_work(1); return; }   /* lock's cards first */
     tk_comp_idle(C);
     sw_idle();                                   /* helper D: the open app's snapshot for the switcher (when it changed) */
     mp_idle();                                   /* helper D: Maps' last GPS fix (it may read the card: idle only) */
@@ -5152,7 +5437,7 @@ void sh_idle(void)
     tk_layer_prepare(&mark); tk_layer_prepare(&glyph_c); tk_layer_prepare(&glyph_o); tk_layer_prepare(&hint);
 }
 
-int sh_idle_pending(void) { return (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C); }
+int sh_idle_pending(void) { return (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C); }
 
 int sh_moving(void)
 {
