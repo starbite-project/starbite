@@ -87,7 +87,7 @@ static void su_page(dc *d)
         const char *l = u->state == 4 ? "Updated" : u->state == 0 ? "Starbite OS is up to date" : "Can't check for updates";
         d_text_box(d, TK_IT400, 15, 195, bl(TK_IT400, 15, y + 94), CONTENT_W, 1, l, 0, 0, KIT_SEC(), 0);
         if (u->why[0] && u->state != 4) {
-            char ln[3][96];
+            char ln[4][96];                 /* wrapn takes char[4][96] (gcc: stringop-overflow) */
             float wm;
             int n = wrapn(ln, 2, TK_IT400, 13, u->why, CONTENT_W - 20, &wm);
             for (int k = 0; k < n; k++)
