@@ -62,7 +62,9 @@ static void wall_rows(void *a, int y0, int y1)
         }
 }
 
-void tk_wall_draw(tk_bmp *b, int emergency, float k)
+void tk_wall_draw(tk_bmp *b, int emergency, float k) { tk_wall_draw_rows(b, emergency, k, 0, b->h); }
+/* B6: rows [y0, y1) only (Emergency's switch draws the other wallpaper a band per slice of a frame) */
+void tk_wall_draw_rows(tk_bmp *b, int emergency, float k, int y0, int y1)
 {
     /* .wall: inset -30 pt, so the gradient box is 450 x 862 pt from (-30, -30) */
     float bx = PT(-30), by = PT(-30), bw = PT(450), bh = PT(862);
@@ -87,13 +89,18 @@ void tk_wall_draw(tk_bmp *b, int emergency, float k)
         r3 = tk_solid(TK_RGBA(0, 0, 0, 0));
     }
     wall_ctx W = { b, k, &lin, { &r3, &r2, &r1 } };
-    tk_par_rows(0, b->h, wall_rows, &W);
+    tk_par_rows(tk_maxi(0, y0), tk_mini(b->h, y1), wall_rows, &W);
 }
 
-static void bilinear_up(tk_bmp *dst, const tk_bmp *src)
+/* the backdrop's quarter up to half resolution, rows [ja, jb) (B6: in bands, over the cores) */
+typedef struct { tk_bmp *dst; const tk_bmp *src; } bil_ctx;
+static void bilinear_rows(void *a, int ja, int jb)
 {
+    bil_ctx *B = a;
+    tk_bmp *dst = B->dst;
+    const tk_bmp *src = B->src;
     float sx = (float)src->w / dst->w, sy = (float)src->h / dst->h;
-    for (int j = 0; j < dst->h; j++) {
+    for (int j = ja; j < jb; j++) {
         float fy = (j + .5f) * sy - .5f;
         int y0 = (int)tk_floorf(fy);
         float ty = fy - y0;
@@ -395,15 +402,38 @@ void tk_glass_backdrop(tk_bmp *dst, const tk_bmp *src)
     tk_bmp q;
     tk_bmp_new(&q, src->w / 2, src->h / 2);
     tk_bmp_down2(&q, src);
-    tk_bmp_blur(&q, PT(14) / 4);
-    tk_bmp_satbright(&q, TK_GLASS_SAT, TK_GLASS_BRIGHT);
+    float amb = tk_glass_backdrop_q(&q, -1);
+    if (amb >= 0) glass_amb = amb;
+    tk_glass_backdrop_up(dst, &q, 0, dst->h);
+    tk_bmp_free(&q);
+}
+/* B6: tk_glass_backdrop in steps (Emergency's switch, a slice of a frame at a time): q (src down 2x) blurred (part 0)
+ * and saturated in place, its mean luma returned (part 1; -1: both; -1 returned: none); then dst's rows [y0, y1) up
+ * from it */
+float tk_glass_backdrop_q(tk_bmp *q, int part)
+{
+    if (part <= 0) tk_bmp_blur(q, PT(14) / 4);
+    if (!part) return 0;
+    tk_bmp_satbright(q, TK_GLASS_SAT, TK_GLASS_BRIGHT);
     float sum = 0;
     int n = 0;
-    for (int j = 0; j < q.h; j += 8)
-        for (int i = 0; i < q.w; i += 8) { sum += luma8(q.px[j * q.stride + i]); n++; }
-    if (n) glass_amb = sum / n;
-    bilinear_up(dst, &q);
-    tk_bmp_free(&q);
+    for (int j = 0; j < q->h; j += 8)
+        for (int i = 0; i < q->w; i += 8) { sum += luma8(q->px[j * q->stride + i]); n++; }
+    return n ? sum / n : -1;
+}
+void tk_glass_backdrop_up(tk_bmp *dst, const tk_bmp *q, int y0, int y1)
+{
+    if (!q->px || !dst->px) return;
+    bil_ctx B = { dst, q };
+    tk_par_rows(tk_maxi(0, y0), tk_mini(dst->h, y1), bilinear_rows, &B);
+}
+/* the Lb of glass that cannot see its backdrop, set (Emergency's cards made for the other ground before it shows);
+ * returns the one before */
+float tk_glass_amb_set(float v)
+{
+    float o = glass_amb;
+    glass_amb = v;
+    return o;
 }
 
 void tk_glass_local_put(tk_bmp *b, const tk_bmp *t, int X, int Y, float x, float y, float w, float h, float r)
