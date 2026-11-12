@@ -1486,9 +1486,12 @@ static void page_messages(dc *d)
     }
     d_back(d, W(1));
     if (AS.thread == 0) {
-        /* iOS 26's thread header: the monogram centred over the name */
-        d_monogram(d, 195, SAFE_TOP + 22, 21, CM.thr);
-        d_text_box(d, TK_IT500, 12, 195, bl(TK_IT500, 12, SAFE_TOP + 49), 220, 1, CM.thr, 0, TK_TNUM, W(.92f), 0);
+        /* iOS 26's thread header (§7): the 40 pt monogram centred over the name, 11 / 400 in a glass capsule */
+        d_monogram(d, 195, SAFE_TOP + 20, 20, CM.thr);
+        float nw = tk_minf(220, tw(TK_IT400, 11, CM.thr, 0, TK_TNUM)) + 20;
+        d_rrect(d, 195 - nw / 2, SAFE_TOP + 44, nw, 20, 10, W(.16f));
+        d_rrect(d, 195 - nw / 2 + .5f, SAFE_TOP + 44.5f, nw - 1, 19, 9.5f, tk_hex(0x161b2b, 1));
+        d_text_box(d, TK_IT400, 11, 195, bl(TK_IT400, 11, SAFE_TOP + 48), 220, 1, CM.thr, 0, TK_TNUM, INK, 0);
         int any = 0;
         for (int i = 0; i < nmsg; i++) any |= !tk_strcmp(MSG[i].m.number, CM.thr);
         if (!any) d_text_box(d, TK_IT400, 13, 195, bl(TK_IT400, 13, 300), CONTENT_W, 1, "No messages with this number yet.", 0, 0, W(.45f), 0);

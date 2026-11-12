@@ -2375,7 +2375,7 @@ static void build_note(void)
     float y = PUSHED_TOP;
     int i = 0, n = (int)tk_strlen(t);
     float cx = 20, cy = PUSHED_TOP;
-    int first = 1;
+    int first = 1, cfirst = 1;
     while (i <= n && y < 520) {
         int k = 0, lastsp = -1, start = i, f = first ? TK_IT700 : TK_IT400;
         float fs = first ? 28 : 17;
@@ -2391,13 +2391,14 @@ static void build_note(void)
         line[k] = 0;
         d_text(&d, f, fs, 20, bl(f, fs, y), line, 0, 0, INK, 0);
         cx = 20 + tw(f, fs, line, 0, 0);
-        cy = y + (first ? 6 : 0);
+        cy = y;
+        cfirst = first;
         y += first ? 38 : 24;
         if (i < n && t[i] == '\n') first = 0;
-        if (i < n && t[i] == '\n') { i++; if (i == n) { cx = 20; cy = y; } continue; }
+        if (i < n && t[i] == '\n') { i++; if (i == n) { cx = 20; cy = y; cfirst = 0; } continue; }
         if (i >= n) break;
     }
-    d_rrect(&d, cx + 1, cy + 1, 2, 21, 1, tk_hex(0xffd60a, 1));          /* the caret */
+    d_rrect(&d, cx + 1, cy + 1, 2, cfirst ? 33 : 21, 1, tk_hex(0xffd60a, 1));   /* the caret (the title's taller) */
     apnote.hidden = 0;
     relink();
 }
