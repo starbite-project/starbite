@@ -68,6 +68,8 @@
  * of at most 720 x 1440 x 4 = 4 MiB each from 2 MiB). */
 #define SBSHM_CAT_OFF       0x1000000U          /* struct sbshm_cat: the apps the guest can show (guest writes) */
 #define SBSHM_STORE_OFF     0x1020000U          /* struct sbshm_store: the App Store's packages (guest writes) */
+#define SBSHM_STORE3_OFF    0x1030000U          /* v3: struct sbshm_store3 (Track F, starbite/appstore/sbshm-store3.h):
+                                                 * per-package versions / sources / progress, parallel to store.pkg[] */
 #define SBSHM_ICON_OFF      0x1040000U          /* the icon pool: SBSHM_ICONS_MAX x 160 x 160 ARGB (guest writes) */
 #define SBSHM_BLK_OFF       0x2000000U          /* struct sbshm_blk: devices + request / completion rings */
 #define SBSHM_BLKDATA_OFF   0x2010000U          /* the block data window: SBSHM_BLK_SLOTS x SBSHM_BLK_SLOT bytes */

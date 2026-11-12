@@ -43,6 +43,8 @@ PKGS=(
     libgdk-pixbuf2.0-bin gnome-themes-extra-data
     # the compositor's libraries (sbwl on wlroots 0.18) and the terminal
     libwlroots-0.18 libxkbcommon0 xkb-data foot foot-terminfo
+    # Track F's App Store engine (sbstore, Python) and its release / source methods
+    python3-minimal libpython3-stdlib curl xz-utils zstd unzip
     "${APPS[@]}"
 )
 # dpkg path excludes (also apply to what the store installs later: they stay in /etc/dpkg/dpkg.cfg.d)

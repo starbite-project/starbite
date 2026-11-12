@@ -8,6 +8,11 @@ ch() { chroot "$R" "$@"; }
 # ---- PID 1, the store daemon, the compositor hook ----
 install -m 0755 "$here/sbinit" "$R/sbin/sbinit"
 install -D -m 0755 "$sbpkg" "$R/usr/local/sbin/sbpkg"
+# Track F's App Store engine: starbite/appstore/install-rootfs.sh ROOT installs it (/usr/local/sbin/sbstore + its
+# library); sbinit then runs `sbstore daemon` instead of sbpkg
+if [ -x "$here/../../appstore/install-rootfs.sh" ]; then
+    "$here/../../appstore/install-rootfs.sh" "$R"
+fi
 mkdir -p "$R/usr/local/bin" "$R/etc/starbite" "$R/repo"
 # the SBWL= hook: sbwl's own installer (/usr/bin/sbwl, /etc/sbwl/system-apps), run at the end (it lists the base's
 # .desktop files)
