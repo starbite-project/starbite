@@ -649,6 +649,17 @@ extern int wifi_autojoin;              /* 1.2-alpha21: join a known network auto
 int wifi_known(struct sbos_wifi_known *out, int max);
 int wifi_forget(int k);
 int wifi_selftest_phase(int *done);
+/* Track H: a listed network's security (from its RSN / WPA elements), the firmware's capabilities, leaving */
+enum { KWIFI_SEC_OPEN, KWIFI_SEC_WEP, KWIFI_SEC_WPA1, KWIFI_SEC_WPA2, KWIFI_SEC_WPA23, KWIFI_SEC_WPA3, KWIFI_SEC_ENT,
+       KWIFI_SEC_OWE, KWIFI_SEC_OTHER };
+int wifi_net_sec(int i);                    /* of wifi_list's i-th; -1 none */
+#define KWIFI_CAP_SAE 1U
+#define KWIFI_CAP_SAE_EXT 2U
+#define KWIFI_CAP_MFP 4U
+#define KWIFI_CAP_IDSUP 8U
+#define KWIFI_CAP_WPA3 16U
+unsigned wifi_caps(void);                   /* KWIFI_CAP_* from the firmware's "cap" (0 until the radio was up) */
+int wifi_leave(void);
 extern int wifi_selftest_scan_only;          /* Next: the Wi-Fi self test scans only (and runs the TLS self-check) */
 /* Next (wifi-sbos-next): one HTTP(S) GET at a time over the joined network (starbite/wifi/http.h). wifi_fetch:
  * 0 started, SBOS_EAGAIN not joined (or no memory), SBOS_EBUSY one is running. The status says how it went; the

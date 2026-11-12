@@ -300,8 +300,9 @@ void selftest_timer(unsigned id)
             unsigned w = hw_wdt_selftest(30);
             sb_logx(w ? "selftest: next-wifi: the watchdog at 30 s, fed by the loop: seconds " :
                         "selftest: next-wifi: the watchdog could not be set (the loader's stays): ", w);
-            sb_log("selftest: next-wifi: the TLS self-check, then on, the bring-up, one scan (no join), off");
-            wifi_selftest_scan_only = 1;
+            sb_log("selftest: next-wifi: Track H h1: the TLS self-check, on, the bring-up, one scan, diagnostics; joins "
+                   "only if the store has the saved network (2.4 GHz, then 5 GHz, HTTPS on each), off");
+            wifi_selftest_scan_only = 2;
             phase = 95;
             break;
         }

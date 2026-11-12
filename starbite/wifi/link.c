@@ -228,6 +228,10 @@ static void scan_result(struct bcmw *w, const struct bcmw_event *ev)
          * unless it is 20 dB weaker): T4-WPA2 joined the user's network on 5 GHz but timed out on its 2.4 GHz side
          * (as W2g's 2.4 GHz hotspot did under Windows); Starbite OS's self tests picked 2.4 GHz and timed out */
         int b5 = (le16(d + 72) & 0xc000) == 0xc000, cur5 = (w->join_chanspec & 0xc000) == 0xc000;
+        if ((w->cfg.join_band == 1 && b5) || (w->cfg.join_band == 2 && !b5)) {
+            w->join_unsuitable++;       /* Track H: the band asked for (cfg.join_band) only */
+            return;
+        }
         int better = !w->join_found || (b5 == cur5 ? rssi > w->join_rssi :
                                         b5 ? rssi + 20 > w->join_rssi : rssi > w->join_rssi + 20);
         if (!better)

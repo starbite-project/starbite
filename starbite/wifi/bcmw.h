@@ -88,6 +88,8 @@ struct bcmw_cfg {
     int diag;               /* 1: step 8 verifies the whole download, dumps the RAM's tail and logs the ARM's
                              * state while it waits for the firmware (W1b: the firmware did not start under
                              * Windows) */
+    unsigned join_band;     /* Track H: 0 any (5 GHz preferred), 1 2.4 GHz only, 2 5 GHz only: the join's directed
+                             * scan skips the other band (the 2.4 GHz test; may be changed between joins) */
 };
 
 enum {
