@@ -111,9 +111,12 @@ static void __noreturn sbg_last_cpu_off(u32 state)
 		wfi();
 }
 
+static void sbblk_freeze_overlay(void);
 static int sbg_reboot_notify(struct notifier_block *nb, unsigned long action, void *data)
 {
 	unsigned int cpu, self = raw_smp_processor_id();
+
+	sbblk_freeze_overlay();			/* the card's overlay clean before the cluster goes off */
 
 	/* process context, every CPU still online: take the others down properly (PSCI CPU_OFF each) */
 	for_each_online_cpu(cpu)
@@ -298,6 +301,22 @@ static bool sbblk_ready, sbblk_polled;
 static int sbblk_major;
 
 static void sbblk_reap(struct work_struct *w);
+
+/*
+ * Every power off or restart (sbwl's MSG_STOP, the stop fallback, a reboot from user space) ends with the overlay's
+ * ext4 frozen: written out and its journal clean, as at an unmount (Track F, cp3 2026-11-12: after an unclean stop a
+ * file of apt's came back unreadable). Nothing writes after it: the cluster goes off next.
+ */
+static void sbblk_freeze_overlay(void)
+{
+	struct gendisk *d = sbblk_ready ? sbblk_devs[SBSHM_BLK_OVERLAY].disk : NULL;
+	int r;
+
+	if (!d)
+		return;
+	r = bdev_freeze(d->part0);
+	pr_info("sbguest: the overlay (%s) %s\n", d->disk_name, r ? "could not be frozen" : "written out and frozen");
+}
 static DECLARE_WORK(sbblk_work, sbblk_reap);
 
 static void sbblk_kick(void)
