@@ -70,6 +70,15 @@ static const char *why = "";
 static uint32_t seq_seen = 0, seq_blit = 0;
 static uint32_t blits, blit_ms_max, rows_copied;   /* the view's frames drawn, its slowest copy, rows copied */
 static uint64_t t_hidden, t_screen_off;
+/* Linux busy (cp3 2026-11-12: a build and installs broke when the phone slept): the last time its CPU load
+ * (hdr.guest_load, sbguest.ko) was >= GUEST_BUSY_LOAD % of a core or its block traffic >= GUEST_BUSY_KIB in a 5 s
+ * window. The idle stops wait while it was busy in the last IDLE_STOP_MS; with the screen off at most
+ * GUEST_BUSY_SCREEN_OFF_MS (a job that never ends must not hold the M3 cluster all night) */
+#define GUEST_BUSY_LOAD 10U
+#define GUEST_BUSY_KIB 256U
+#define GUEST_BUSY_SCREEN_OFF_MS (3U * 60U * 60U * 1000U)
+static uint64_t t_busy;
+static int busy_said;
 static int sb_up;
 static int kept;                            /* L3: guest_keep: no idle stop */
 static int apps;                            /* v3: guest_apps: Linux apps with a switcher card */
@@ -117,12 +126,23 @@ static int idle_stop_due(uint64_t now)
     if (kept)
         return 0;
     uint64_t off = apps ? GUEST_APPS_SCREEN_OFF_MS : IDLE_STOP_MS;
+    int busy = t_busy && now - t_busy < IDLE_STOP_MS;
+    if (busy && (screen || !t_screen_off || now - t_screen_off < GUEST_BUSY_SCREEN_OFF_MS)) {
+        if (!busy_said && ((!apps && !shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
+                           (!screen && t_screen_off && now - t_screen_off > off))) {
+            busy_said = 1;                  /* once per busy stretch: the idle stop waits */
+            sb_log("guest: Linux is busy (a job runs): the idle stop waits");
+        }
+        return 0;
+    }
+    busy_said = 0;
     return (!apps && !shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
            (!screen && t_screen_off && now - t_screen_off > off);
 }
 
 #ifndef SB_HOST
 /* ===================================== the guest (phone, QEMU) ===================================== */
+static uint64_t t_busy_win, busy_sectors;    /* the busy sample's window (idle_stop_due) */
 static uint64_t ms(void) { return sb_ms(); }
 static void host_log(const char *l)
 {
@@ -386,6 +406,8 @@ int guest_start_mode(int m)
 /* the guest timer's first tick: the store's files into the bounce window, the copy, CPU_ON. 0, or < 0 and why */
 static int load_and_start(void)
 {
+    t_busy = t_busy_win = busy_sectors = 0;
+    busy_said = 0;
     cfg_init();                             /* this mode's surface */
     gcard_offer();                          /* the card's files as block devices, for this start (guest-card.h) */
 #ifdef GUEST_FS_H
@@ -521,6 +543,13 @@ void guest_timer(unsigned id)
             arm(flowing ? 5 : shown ? 10 : 50);
         }
         uint64_t now = sb_ms();
+        if (now - t_busy_win >= 5000) {     /* the busy sample: the guest's load, the block traffic of 5 s */
+            uint64_t sec = s->blk_rd_sectors + s->blk_wr_sectors;
+            if (h->guest_load >= GUEST_BUSY_LOAD || (t_busy_win && sec - busy_sectors >= GUEST_BUSY_KIB * 2U))
+                t_busy = now;
+            busy_sectors = sec;
+            t_busy_win = now;
+        }
         if (idle_stop_due(now)) {
             sb_log(apps ? "guest: the screen off for 30 min: stopping (the M3 cluster off)" :
                           "guest: unused for 60 s: stopping (the M3 cluster off)");
