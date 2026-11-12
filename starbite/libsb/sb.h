@@ -141,6 +141,8 @@ void *sb_alloc(uint64_t size);
 uint64_t sb_arena_used(void), sb_arena_free(void);
 
 uint32_t sb_crc32(const void *p, uint64_t n);
+/* zlib's crc32(crc, p, n): continues a CRC32 over more bytes (crc 0 to start; sb_crc32 is this with 0) */
+uint32_t sb_crc32_more(uint32_t crc, const void *p, uint64_t n);
 
 /* ---- caches (mmu.c) ------------------------------------------------------------------------- */
 

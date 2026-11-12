@@ -69,6 +69,10 @@ uint64_t store_used(unsigned medium);
  * grant for exactly its blocks (e->medium says which medium: write it with sb_write_volatile(e->medium, ...)).
  * 1 granted. */
 int store_volatile_grant(const char *name, uint64_t min_bytes, struct store_ent *e);
+/* The same entry checks, granting only its blocks first .. first + count - 1 (cut at the entry's end; the fence takes at
+ * most 1024 blocks, 4 MiB, at a time): an entry larger than that written a window at a time (Software Update's
+ * "sbos-slot-a" / "-b"). One grant in the OS: the caller gives the state slot's back (kern/slot.c re-takes it). */
+int store_volatile_grant_part(const char *name, uint64_t min_bytes, uint64_t first, uint64_t count, struct store_ent *e);
 
 /* Forget what store_open found, so the next call reads the medium again. */
 void store_reset(unsigned medium);

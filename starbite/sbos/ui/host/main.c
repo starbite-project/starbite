@@ -361,6 +361,9 @@ int sh_sos_next(void) { return 50; }      /* the host: the old 20 Hz poll */
  * Auto-Lock a number. States: pass=DIGITS sets a passcode, passfail=:N makes N wrong tries now */
 #include "../../kern/passcode.h"
 static int host_autolock = 30;
+/* Track A update: what the host's card holds (hupd=; the fakes are near the end) */
+static int hupd_mode;                       /* 0 none, 1 found, 2 bad, 3 old loader, 4 installed */
+static struct sh_update HU;
 int sh_pass_on(void) { return pass_len() > 0; }
 int sh_pass_len(void) { return pass_len(); }
 int sh_pass_wait(void) { return (int)pass_wait(surv_host_now_ms); }
@@ -567,6 +570,12 @@ static void apply_state(const char *st)
     }
     if (!strcmp(what, "comms")) { comms_fake_state(key, v); return; }          /* helper I: comms=incoming, ... */
     if (!strcmp(what, "pass")) { (void)sh_pass_set("", key); return; }         /* Track A: pass=246810 */
+    if (!strcmp(what, "hupd")) {                 /* Track A update: hupd=none|found|bad|old|installed (the host's card) */
+        static const char *const M[5] = { "none", "found", "bad", "old", "installed" };
+        for (int i = 0; i < 5; i++) if (!strcmp(key, M[i])) hupd_mode = i;
+        memset(&HU, 0, sizeof HU);
+        return;
+    }
     if (!strcmp(what, "passfail")) { for (int i = 0; i < (int)v; i++) (void)sh_pass_check("x"); return; }   /* passfail=:6 */
     if (!strcmp(what, "gnss")) {                 /* helper D: gnss=60.1699,24.9384 (a pretend fix: 8.5 m, 9 satellites) */
         double la = 0, lo = 0;
@@ -863,6 +872,46 @@ int sh_restart(void) { fprintf(stderr, "host: restart\n"); return 0; }
 int sh_power_off(void) { fprintf(stderr, "host: power off\n"); return 0; }
 
 __attribute__((weak)) void sh_power_held(void) { fprintf(stderr, "host: Power held (no power sheet yet)\n"); }
+
+/* Track A: Software Update on the host. hupd=none (up to date) | found | bad (the SHA-256 differs: staging fails) |
+ * old (an older loader) | installed (this start committed it) picks what the card and the loader say; staging moves
+ * 12 % a call (the phone: 1 MiB a call); install only prints. Nothing is read or written. */
+static void hupd_fill(struct sh_update *u) { if (u) *u = HU; }
+int sh_update_check(struct sh_update *u)
+{
+    if (HU.state == 2 || HU.state == 3) { hupd_fill(u); return 1; }
+    memset(&HU, 0, sizeof HU);
+    if (hupd_mode == 3) { HU.state = -1; snprintf(HU.why, sizeof HU.why, "Updates need the new boot loader."); }
+    else if (hupd_mode == 4) { HU.state = 4; snprintf(HU.version, sizeof HU.version, "1.0.1"); }
+    else if (hupd_mode == 1 || hupd_mode == 2) {
+        HU.state = 1;
+        snprintf(HU.version, sizeof HU.version, "1.0.1");
+        snprintf(HU.notes, sizeof HU.notes, "Software Update, faster Wi-Fi joins and the new Startup settings. Fixes for the card and the lock screen.");
+        HU.size = 19293184;
+    } else snprintf(HU.why, sizeof HU.why, "No update on the card.");
+    fprintf(stderr, "update: check: state %d\n", HU.state);
+    hupd_fill(u);
+    return HU.state == 1;
+}
+int sh_update_stage(struct sh_update *u)
+{
+    if (HU.state == 1) { HU.state = 2; HU.pct = 0; }
+    if (HU.state == 2) {
+        HU.pct += 12;
+        if (hupd_mode == 2 && HU.pct >= 90) {
+            HU.state = -1;
+            snprintf(HU.why, sizeof HU.why, "The update file is damaged (its SHA-256 doesn't match). Nothing was installed.");
+        } else if (HU.pct >= 100) { HU.pct = 100; HU.state = 3; }
+    }
+    hupd_fill(u);
+    return HU.state;
+}
+int sh_update_install(void)
+{
+    if (HU.state != 3) return -1;
+    fprintf(stderr, "update: would arm 1.0.1 in the inactive slot and restart (the host stays up)\n");
+    return 0;
+}
 
 int main(int argc, char **argv)
 {
