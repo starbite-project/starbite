@@ -21,6 +21,7 @@
  *   headphones   peak -1 dBFS, no budget (the codec's own level does the rest) */
 #include "snd.h"
 #include "codec_media.h"
+#include "abox_media.h"
 #include <stdarg.h>
 
 #ifdef SBOS_KERNEL
@@ -35,6 +36,7 @@ void *memcpy(void *d, const void *s, size_t n);
 #define RETRY_US 2000000ULL             /* after a failed start, the next try */
 #define LATE_US 15000ULL
 #define STALL_US 250000ULL
+#define CAL_IDLE_OFF_US 30000000ULL     /* Calliope (booted by snd) off after 30 s without media */
 #define AMP_SPK_LEVEL 5                 /* amp.c's top speaker level: still 15 dB under One UI (no DSM) */
 #define AMP_RCV_LEVEL 3                 /* One UI's handset gain, never above */
 #define PF APCM_PERIOD_FRAMES
@@ -109,6 +111,8 @@ static struct snd_ops O;
 static int inited;
 static struct {
     int eng, out_on, cur_out, route, jack, muted, suspended, cap, cap_codec, amp_override, dumped;
+    int ce, cal_own, cal_bad, cal_fails;    /* Calliope engine running, snd booted it, given up on it */
+    uint64_t cal_off_at;
     unsigned vol[4];
     uint32_t fill_idx, zero_idx, last_pos;
     uint64_t last_poll, idle_since, retry_at, moved_at;
@@ -218,7 +222,13 @@ static void why(const char *s)
 }
 
 static uint64_t now(void) { return O.now_us(); }
+/* Calliope has ABOX (abox.c in any running state): the bypass engine (apcm) cannot run */
 static int call_has(void) { return O.call_owns_abox && O.call_owns_abox(); }
+/* the Calliope engine (abox_media.c) when the HAL can read VENDOR (its firmware); else bypass only, as before */
+static int cal_avail;
+/* a call is on: with the Calliope engine only abox_call(1) counts (a booted Calliope is shared), else as before */
+static int in_call(void) { return cal_avail ? abox_state() == ABOX_ST_CALL : call_has(); }
+static uint8_t *eng_buf(void) { return G.ce ? cal_play_buf() : apcm_play_buf(); }
 
 /* ---- set-up -------------------------------------------------------------------------------------------------- */
 int snd_init(const struct snd_ops *ops, const struct abox_hal *hal)
@@ -230,6 +240,15 @@ int snd_init(const struct snd_ops *ops, const struct abox_hal *hal)
     if (apcm_hal_set(hal, ops->call_owns_abox)) {
         inited = 0;
         return SND_EINVAL;
+    }
+    /* the ring's window goes into every later abox_boot() (ours or the modem's), so either can carry media */
+    if (ops->use_calliope && hal->file) {
+        if (!cal_avail)
+            cal_avail = !cal_hal_set(hal) && !cal_map();
+    } else {
+        if (cal_avail)
+            cal_unmap();
+        cal_avail = 0;
     }
     memset(&G, 0, sizeof G);
     memset(st, 0, sizeof st);
@@ -514,7 +533,7 @@ static int need_play(void)
 
 static void mix_period(uint32_t idx)
 {
-    int16_t *dst = (int16_t *)(void *)(apcm_play_buf() + idx * APCM_PERIOD_BYTES);
+    int16_t *dst = (int16_t *)(void *)(eng_buf() + idx * APCM_PERIOD_BYTES);
     int out = G.cur_out;
     memset(acc, 0, sizeof acc);
     for (int s = 0; s < SND_STREAMS; ++s) {
@@ -588,7 +607,7 @@ static void mix_period(uint32_t idx)
 
 static void zero_period(uint32_t idx)
 {
-    memset(apcm_play_buf() + idx * APCM_PERIOD_BYTES, 0, APCM_PERIOD_BYTES);
+    memset(eng_buf() + idx * APCM_PERIOD_BYTES, 0, APCM_PERIOD_BYTES);
 }
 
 /* ---- the engine ---------------------------------------------------------------------------------------------- */
@@ -597,20 +616,82 @@ static void engine_stop(const char *what)
     if (!G.eng)
         return;
     output_off();
-    apcm_play_stop();
-    if (!G.cap)
-        apcm_down();
+    if (G.ce) {
+        cal_play_stop();
+        G.ce = 0;
+        G.cal_off_at = now() + CAL_IDLE_OFF_US;     /* Calliope stays booted a while: the next sound starts fast */
+    } else {
+        apcm_play_stop();
+        if (!G.cap)
+            apcm_down();
+    }
     G.eng = 0;
     G.stats.stops++;
     say("engine: stopped (%s)", what);
     why("Sound is ready (nothing playing)");
 }
 
+/* Calliope off if snd booted it and nothing else uses it */
+static void cal_release(const char *what)
+{
+    if (!G.cal_own)
+        return;
+    G.cal_own = 0;
+    if (abox_state() == ABOX_ST_READY || abox_state() == ABOX_ST_FAILED) {
+        abox_off();
+        say("engine: Calliope off (%s)", what);
+    }
+}
+
+/* RDMA0 through Calliope (abox_media.c), booting Calliope first if nobody runs it; 0 or <0 */
+static int cal_engine_start(int out)
+{
+    int r, st = abox_state();
+    if (st == ABOX_ST_BOOTING)
+        return SND_EBUSY;
+    if (st != ABOX_ST_READY && st != ABOX_ST_CALL) {
+        uint64_t t0 = now();
+        (void)cal_map();                            /* again: a probe may have taken its own window away */
+        r = abox_boot();
+        cal_unmap();
+        if (r) {
+            abox_off();
+            say("engine: Calliope did not boot: %s", abox_why());
+            if (++G.cal_fails >= 2) {
+                G.cal_bad = 1;
+                say("engine: Calliope failed twice: media uses the bypass engine from now on");
+            }
+            return r;
+        }
+        G.cal_own = 1;
+        say("engine: Calliope booted for media in %u ms", UL((now() - t0) / 1000U));
+    }
+    if ((r = cal_play_start(uaif_of(out), APCM_PERIOD_BYTES, APCM_PERIODS))) {
+        say("engine: RDMA0 did not start through Calliope: %s", cal_why());
+        cal_release("the stream did not start");
+        return r;
+    }
+    G.ce = 1;
+    G.cal_fails = 0;
+    return 0;
+}
+
 static int engine_start(void)
 {
     int r, out = resolve();
-    if (G.suspended || call_has()) {
+    if (G.suspended || in_call()) {
         why("Sound is paused: a call has the audio hardware");
+        return SND_EBUSY;
+    }
+    if (cal_avail && !G.cal_bad && apcm_state() == APCM_ST_OFF) {
+        if ((r = cal_engine_start(out))) {
+            why("Sound could not start: the audio processor (Calliope) did not start");
+            return r;
+        }
+        goto started;
+    }
+    if (call_has()) {
+        why("Sound is paused: the audio processor is busy");
         return SND_EBUSY;
     }
     if ((r = apcm_up())) {
@@ -625,6 +706,7 @@ static int engine_start(void)
         why("Sound could not start: the audio DMA did not start");
         return r;
     }
+started:
     G.eng = 1;
     G.cur_out = out;
     G.fill_idx = 1, G.zero_idx = 0;
@@ -648,6 +730,11 @@ static int engine_start(void)
 
 static void engine_route(int out)
 {
+    if (G.ce && uaif_of(out) != uaif_of(G.cur_out)) {
+        engine_stop("the output moves to the other UAIF");   /* the next poll starts it there */
+        G.retry_at = 0;
+        return;
+    }
     output_off();
     if (uaif_of(out) != uaif_of(G.cur_out) && apcm_play_route(uaif_of(out))) {
         engine_stop("the route could not change");
@@ -664,12 +751,12 @@ static void engine_route(int out)
 
 static void engine_fill(uint64_t t)
 {
-    uint32_t stt = 0, pos = apcm_play_pos(&stt);
+    uint32_t stt = 0, pos = G.ce ? cal_play_pos(&stt) : apcm_play_pos(&stt);
     if (pos != APCM_NOPOS && pos != G.last_pos)
         G.moved_at = t, G.last_pos = pos;
     if (t - G.moved_at > STALL_US) {    /* no position, or the same one, for 250 ms: the DMA does not run */
         say("engine: RDMA0 does not move (STATUS %x)", UL(stt));
-        if (!G.dumped++)
+        if (!G.ce && !G.dumped++)
             apcm_dump("engine");        /* once a boot: the registers for the log */
         engine_stop("RDMA0 did not run");
         why("Sound stopped: the audio DMA did not run");
@@ -693,7 +780,10 @@ static void engine_fill(uint64_t t)
         G.fill_idx = (G.fill_idx + 1) % APCM_PERIODS;
         dist++;
     }
-    apcm_sync();
+    if (G.ce)
+        cal_sync();
+    else
+        apcm_sync();
 }
 
 /* ---- capture ------------------------------------------------------------------------------------------------- */
@@ -722,7 +812,8 @@ int snd_cap_open(void)
     if (G.cap)
         return 0;
     if (G.suspended || call_has()) {
-        why("The microphone is busy: a call has the audio hardware");
+        why(in_call() || G.suspended ? "The microphone is busy: a call has the audio hardware"
+                                     : "The microphone is busy: the audio processor plays media");
         return SND_EBUSY;
     }
     if (!O.codec_mic) {
@@ -807,13 +898,38 @@ void snd_cap_close(void)
 }
 
 /* ---- the loop ------------------------------------------------------------------------------------------------ */
-int snd_busy(void) { return inited && !G.suspended && (G.eng || G.cap || need_play()); }
+int snd_busy(void) { return inited && !G.suspended && (G.eng || G.cap || G.cal_own || need_play()); }
 
 void snd_poll(uint64_t t)
 {
     if (!inited)
         return;
-    if ((G.eng || G.cap) && call_has()) {
+    if (G.ce && (in_call() || (abox_state() != ABOX_ST_READY && abox_state() != ABOX_ST_CALL))) {
+        /* a call came without snd_suspend_for_call(), or Calliope stopped under us (the modem's abox_off) */
+        int c = in_call();
+        say(c ? "a call took Calliope while media played (snd_suspend_for_call was not called): stream stopped"
+              : "Calliope stopped while media played: stream dropped");
+        output_off();
+        cal_play_stop();
+        G.eng = G.ce = 0;
+        G.cal_own = 0;                          /* the call's (or nobody's) now */
+        G.retry_at = t + RETRY_US;
+        why(c ? "Sound is paused: a call has the audio hardware" : "Sound stopped: the audio processor stopped");
+        return;
+    }
+    if ((G.ce || G.cal_own) && abox_poll() < 0) {
+        say("Calliope fell over: %s", abox_why());
+        output_off();
+        cal_play_stop();
+        abox_off();
+        G.eng = G.ce = G.cal_own = 0;
+        G.retry_at = t + RETRY_US;
+        why("Sound stopped: the audio processor stopped");
+        return;
+    }
+    if (!G.eng && G.cal_own && t >= G.cal_off_at)
+        cal_release("30 s without media");
+    if (((G.eng && !G.ce) || G.cap) && call_has()) {
         /* a missed snd_suspend_for_call(): ABOX is Calliope's now; nothing of ours is written to it */
         say("a call took ABOX while media sound ran (snd_suspend_for_call was not called): sound state dropped");
         apcm_forget();
@@ -861,6 +977,15 @@ void snd_suspend_for_call(void)
     if (!inited)
         return;
     G.suspended = 1;
+    if (G.ce) {
+        /* Calliope stays booted: the modem's abox_boot() then finds it running and uses it (abox_call) */
+        G.tone = 0;
+        output_off();
+        cal_play_stop();
+        G.eng = G.ce = 0;
+        say("call: media sound stopped; Calliope left running for the call");
+    }
+    G.cal_own = 0;                              /* the modem's now: its audio_stop() turns it off */
     if (G.eng || G.cap || apcm_state() != APCM_ST_OFF) {
         G.tone = 0;
         output_off();
@@ -884,6 +1009,8 @@ void snd_resume_after_call(void)
         return;
     G.suspended = 0;
     G.retry_at = 0;
+    if (cal_avail && abox_state() == ABOX_ST_READY)
+        say("call: Calliope still runs (the modem's while Cellular is on): media plays through it");
     why("Sound is ready (nothing playing)");
     say("call: over, media sound may play again");
 }
@@ -906,6 +1033,8 @@ static const unsigned budget_of[3] = { 2000, 20000, 10000 };   /* level 1: the c
 
 static int pfinish(int ok, const char *line)
 {
+    if (!G.eng)
+        cal_release("the probe is done");       /* a probe leaves Calliope off (snd booted it for the tones) */
     psay("%s %s", ok ? "PASS" : "FAIL", line);
     P.active = 0;
     return 1;
@@ -919,6 +1048,10 @@ void drv_audio_abort(void)
     output_off();
     if (G.cap)
         snd_cap_close();
+    if (G.ce)
+        cal_play_stop();
+    G.ce = 0;
+    cal_release("the probe was aborted");
     apcm_cap_stop();
     apcm_play_stop();
     apcm_down();
@@ -1158,6 +1291,7 @@ static int probe2(void)
             return 0;
         snd_tone_stop();
         engine_stop("the probe's tones are done");
+        cal_release("the mic test uses the bypass engine");   /* capture runs on apcm, not while Calliope runs */
         psay("loudspeaker: 1 s sent; output off");
         if (snd_cap_open()) {
             psay("%s", why_buf);
@@ -1249,12 +1383,20 @@ static int k_amp_bus_ready(void)
 }
 static int k_codec_id(void) { return audio_probe(); }
 
+/* Calliope's firmware from VENDOR (as modem.c reads it): with it the Calliope engine is used (abox_media.c) */
+long bcmw_sb_vendor_read(const char *path, void *dst, uint32_t cap);
+static long k_vendor(void *ctx, const char *path, void *dst, uint32_t cap)
+{
+    (void)ctx;
+    return bcmw_sb_vendor_read(path, dst, cap);
+}
+
 static struct abox_hal k_hal;
 void snd_init_libsb(void)
 {
     if (inited)
         return;
-    abox_hal_libsb(&k_hal, 0, 0);
+    abox_hal_libsb(&k_hal, k_vendor, 0);
     amp_hal_set(audio_hal_libsb());
     codec_hal_set(audio_hal_libsb());
     struct snd_ops o;
@@ -1263,6 +1405,7 @@ void snd_init_libsb(void)
     o.amp_probe = amp_probe, o.amp_speaker = amp_speaker, o.amp_receiver = amp_receiver, o.amp_off = amp_off;
     o.codec_mic = codec_mic, o.codec_off = codec_off;
     o.amp_bus_ready = k_amp_bus_ready, o.codec_id_readonly = k_codec_id;
+    o.use_calliope = 1;                     /* bypass does not move ABOX's DMAs on this phone (AUDIO.md 8, 9) */
     (void)snd_init(&o, &k_hal);
     snd_set_hp(codec_hp);                   /* codec_media.c: headphones on HPOUT2 */
 }
