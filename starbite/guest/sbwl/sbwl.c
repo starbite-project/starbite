@@ -108,6 +108,12 @@ static int sbfd = -1, kfd = -1, sim, v2, v3;
 static uint32_t svc;                       /* v3: hdr.host_services (0 from a v1 / v2 host) */
 static uint32_t W, H, stride;
 static uint32_t VR, VW;                    /* the viewport: the rows and the width the host shows */
+/* cp7 landscape (SBG_MSG_ROTATE): ROT quarter turns clockwise of the content on the panel (0, 1, 3), LROWS the
+ * content rows shown when turned. Apps get the area AW() x AH() (the logical space); the surface stays W x H. */
+static uint32_t ROT, LROWS;
+static int turned(void) { return ROT == 1 || ROT == 3; }
+static uint32_t AW(void) { return turned() ? H : VW; }
+static uint32_t AH(void) { return turned() ? (LROWS && LROWS <= W ? LROWS : W) : VR; }
 
 static void say(const char *fmt, ...)
 {
@@ -376,6 +382,9 @@ static void window_state(void);
 /* ---- compositing the active app -------------------------------------------------------------------------- */
 static uint32_t *winframe;
 static pixman_image_t *winimg;
+static pixman_image_t *comp_dst;           /* where comp_surface draws: winimg, or limg when turned */
+static uint32_t *lframe;                   /* turned: the logical frame, H wide and W tall (stride H) */
+static pixman_image_t *limg;
 static int win_surfaces, win_skipped;
 struct comp_off {
 	int x, y;
@@ -417,7 +426,7 @@ static void comp_surface(struct wlr_surface *surface, int sx, int sy, void *data
 		} else {
 			dw = bw, dh = bh;
 		}
-		pixman_image_composite32(PIXMAN_OP_OVER, si, NULL, winimg, 0, 0, 0, 0, o->x + sx, o->y + sy, dw, dh);
+		pixman_image_composite32(PIXMAN_OP_OVER, si, NULL, comp_dst, 0, 0, 0, 0, o->x + sx, o->y + sy, dw, dh);
 		pixman_image_unref(si);
 		win_surfaces++;
 	} else {
@@ -447,16 +456,25 @@ static int publish_window(void)
 		any |= v->mapped && view_active(v);
 	if (!any)
 		return 0;                          /* nothing to show: the last frame stays */
-	for (size_t i = 0; i < (size_t)W * VR; ++i)
-		winframe[i] = 0xff000000U;
+	int tn = turned();
+	if (tn && !lframe) {
+		lframe = calloc((size_t)W * H, 4);
+		limg = lframe ? pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8, (int)H, (int)W, lframe, (int)H * 4) : NULL;
+		if (!limg)
+			return 0;
+	}
+	comp_dst = tn ? limg : winimg;
+	uint32_t *cpx = tn ? lframe : winframe;
+	for (size_t i = 0; i < (tn ? (size_t)W * H : (size_t)W * VR); ++i)
+		cpx[i] = 0xff000000U;
 	win_surfaces = win_skipped = 0;
 	wl_list_for_each(v, &S.views, link) {  /* oldest first: the most recent ends on top */
 		if (!v->mapped || !view_active(v))
 			continue;
 		if (v->dialog && win_surfaces) {       /* a dialog: what is under it dimmed (it has no frame of its own) */
 			pixman_color_t scrim = {0, 0, 0, 0x6000};
-			pixman_rectangle16_t r = {0, 0, (uint16_t)VW, (uint16_t)VR};
-			pixman_image_fill_rectangles(PIXMAN_OP_OVER, winimg, &scrim, 1, &r);
+			pixman_rectangle16_t r = {0, 0, (uint16_t)AW(), (uint16_t)AH()};
+			pixman_image_fill_rectangles(PIXMAN_OP_OVER, comp_dst, &scrim, 1, &r);
 		}
 		struct wlr_box geo;
 		wlr_xdg_surface_get_geometry(v->top->base, &geo);
@@ -465,12 +483,25 @@ static int publish_window(void)
 	}
 	if (!win_surfaces)
 		return 0;
-	for (size_t i = 0; i < (size_t)W * VR; ++i)
+	uint32_t prows = VR;
+	if (tn) {                                  /* the logical frame (x along the panel's rows) turned into the surface */
+		uint32_t ah = AH();
+		for (uint32_t py = 0; py < H; ++py) {
+			uint32_t *d = winframe + (size_t)py * W;
+			for (uint32_t px = 0; px < W; ++px) {
+				uint32_t lx = ROT == 1 ? py : H - 1 - py, ly = ROT == 1 ? W - 1 - px : px;
+				d[px] = ly < ah ? lframe[(size_t)ly * H + lx] : 0xff000000U;
+			}
+		}
+		prows = H;
+	}
+	for (size_t i = 0; i < (size_t)W * prows; ++i)
 		winframe[i] |= 0xff000000U;            /* opaque: Starbite composites XRGB */
-	last_px = winframe[(size_t)(VR / 8) * W + W / 8];
+	last_px = winframe[(size_t)(prows / 8) * W + W / 8];
 	uint64_t f0 = frames;
-	if (publish((const uint8_t *)winframe, W * 4, VR) < 0)
+	if (publish((const uint8_t *)winframe, W * 4, prows) < 0)
 		return -1;                             /* the host reads the back buffer: again in 2 ms */
+	hdr->guest_rot = ROT;                      /* (after the flip: the host turns its chrome with this frame) */
 	if (!f0 && frames)
 		say("first frame published (%ux%u, viewport %ux%u)", W, H, VW, VR);
 	if (!win_shown) {
@@ -764,11 +795,12 @@ static void view_layout(struct view *v)
 	int dialog = v->top->parent || (cs->min_width && cs->min_width == cs->max_width && cs->min_height &&
 					cs->min_height == cs->max_height);
 	int w, h;
+	int aw = (int)AW(), ah = (int)AH();
 	if (!dialog) {
-		w = (int)VW, h = (int)VR;
+		w = aw, h = ah;
 	} else {
-		w = v->gw > (int)VW ? (int)VW : 0;
-		h = v->gh > (int)VR ? (int)VR : 0;
+		w = v->gw > aw ? aw : 0;
+		h = v->gh > ah ? ah : 0;
 		if (w || h) {
 			w = w ? w : v->gw;
 			h = h ? h : v->gh;
@@ -786,8 +818,8 @@ static void view_layout(struct view *v)
 		wlr_xdg_toplevel_decoration_v1_set_mode(v->deco, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
 	int x = 0, y = 0;
 	if (dialog) {
-		x = ((int)VW - v->gw) / 2;
-		y = ((int)VR - v->gh) / 2;
+		x = (aw - v->gw) / 2;
+		y = (ah - v->gh) / 2;
 		x = x < 0 ? 0 : x;
 		y = y < 0 ? 0 : y;
 	}
@@ -1079,7 +1111,7 @@ static void popup_place(struct wlr_xdg_popup *p)
 	while (x && x->role == WLR_XDG_SURFACE_ROLE_POPUP)
 		x = wlr_xdg_surface_try_from_wlr_surface(x->popup->parent);
 	struct view *v = x && x->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL ? view_of(x->toplevel) : NULL;
-	struct wlr_box box = {0, 0, (int)VW, (int)VR};
+	struct wlr_box box = {0, 0, (int)AW(), (int)AH()};
 	if (v) {
 		struct wlr_box geo;
 		wlr_xdg_surface_get_geometry(v->top->base, &geo);
@@ -1176,6 +1208,11 @@ static int client_has_touch(struct wlr_surface *s)
 
 static void touch(uint32_t phase, int32_t x, int32_t y, uint32_t t)
 {
+	if (ROT == 1 || ROT == 3) {               /* surface pixels to the turned content's (publish_window's inverse) */
+		int32_t px = x, py = y;
+		x = ROT == 1 ? py : (int32_t)H - 1 - py;
+		y = ROT == 1 ? (int32_t)W - 1 - px : px;
+	}
 	double sx = 0, sy = 0;
 	struct wlr_surface *s = surface_at(x, y, &sx, &sy);
 	if (phase == SBG_TOUCH_DOWN) {
@@ -2830,6 +2867,26 @@ static void drain(void)
 		case SBG_MSG_STOP:
 			stop_now();
 			break;
+		case SBG_MSG_ROTATE: {
+			uint32_t q = m.a == 1 || m.a == 3 ? m.a : 0, lr = q ? (m.b && m.b <= W ? m.b : W) : 0;
+			if (q == ROT && lr == LROWS)
+				break;
+			say("rotate %u (content %ux%u)", q, q ? H : VW, q ? lr : VR);
+			if (S.output && (q != 0) != turned()) {  /* the output landscape too: frame callbacks reach the whole */
+				struct wlr_output_state os;      /* logical area, and clients see a landscape wl_output */
+				wlr_output_state_init(&os);
+				wlr_output_state_set_custom_mode(&os, (int32_t)(q ? H : W), (int32_t)(q ? W : H), 60000);
+				if (!wlr_output_commit_state(S.output, &os))
+					say("rotate: the output mode was not taken (frame callbacks only inside %ux%u)", W, H);
+				wlr_output_state_finish(&os);
+			}
+			ROT = q, LROWS = lr;
+			struct view *v;
+			wl_list_for_each(v, &S.views, link)
+				view_layout(v);
+			mark_dirty();
+			break;
+		}
 		case SBG_MSG_VIEWPORT: {
 			uint32_t r = m.a && m.a <= H ? m.a : H, w = m.b && m.b <= W ? m.b : W;
 			if (r == VR && w == VW)
@@ -3179,6 +3236,7 @@ int main(int argc, char **argv)
 			snprintf(S.active, sizeof(S.active), "%s", in->desk);
 	}
 	hdr->guest_state = SBG_GUEST_RUNNING;
+	hdr->guest_caps |= SBSHM_CAP_ROTATE;
 	g2h_send(SBG_MSG_HELLO, hdr->guest_ncpus, 1);
 	say("HELLO: Wayland %s, output %ux%u, contract v%u (services %#x), %s%s, kernel %s", sock, W, H, v3 ? 3 : v2 ? 2 : 1, svc,
 	    S.argv ? "app " : "catalog", S.argv ? S.argv[0] : "", u.release);

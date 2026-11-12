@@ -189,5 +189,6 @@ sock rescan
 sleep 2000
 expect_no_app sbwl-added
 include hostsim-v3.script
+include hostsim-rot.script
 catalog catalog-end.txt
 stop 5000

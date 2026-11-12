@@ -114,6 +114,9 @@ int sbg_load_placed(uint64_t image_size, uint64_t dtb_size, uint64_t initrd_size
  * contract v2. NULL: none (cfg.v2 stays as sbg_init got it). */
 void sbg_set_blk(const struct sbshm_blkdev *blk);
 int sbg_start(void);
+/* More time before the no-HELLO give-up (this start only; the extra capped at SBG_BOOT_EXTRA_MAX). */
+#define SBG_BOOT_EXTRA_MAX 300000U
+void sbg_boot_extend(uint32_t ms);
 /* From the host's tick: the guest's messages and log, state changes, timeouts, the line checks. */
 void sbg_poll(void);
 /* The host received db_host (from its own interrupt loop). */
@@ -146,6 +149,10 @@ int sbg_launch(uint32_t idx, uint32_t cat_seq);
 int sbg_activate(uint32_t idx);                     /* SBSHM_NONE: no window in the surface (home) */
 int sbg_app_close(uint32_t idx);
 int sbg_viewport(uint32_t rows, uint32_t width);
+/* cp7 landscape: SBG_MSG_ROTATE (sbshm.h). 1 sent, 0 not now (not running, the ring full), -1 this guest cannot
+ * turn (no SBSHM_CAP_ROTATE). sbg_rot_shown: the turn of the frame on show (hdr.guest_rot; 0 when not running). */
+int sbg_rotate(uint32_t quarter_turns, uint32_t rows);
+uint32_t sbg_rot_shown(void);
 int sbg_text(const char *utf8);                     /* commit text (split at characters, 8 bytes a message) */
 int sbg_pkg(uint32_t idx, uint32_t op, uint32_t store_seq);
 

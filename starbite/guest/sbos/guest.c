@@ -67,6 +67,11 @@
 
 static int st = GUEST_OFF, shown, screen = 1;
 static const char *why = "";
+/* cp7 #1: what a start is doing, in the user's words ("" = the usual "opens in a few seconds") */
+static const char *stage = "";
+static uint64_t t_go;                       /* this start's CPU_ON (0: not yet) */
+#define GUEST_SLOW_MS 30000U                /* "taking longer than usual" from here (the host waits 90 s) */
+#define GUEST_FSCK_EXTEND_MS 180000U        /* the disk check: the host waits this much longer for HELLO */
 static uint32_t seq_seen = 0, seq_blit = 0;
 static uint32_t blits, blit_ms_max, rows_copied;   /* the view's frames drawn, its slowest copy, rows copied */
 static uint64_t t_hidden, t_screen_off;
@@ -105,6 +110,16 @@ static void arm(uint32_t period)
 
 int guest_state(void) { return st; }
 const char *guest_why(void) { return why; }
+const char *guest_stage(void)
+{
+    if (st != GUEST_STARTING)
+        return "";
+    if (stage[0])
+        return stage;
+    if (t_go && sb_ms() - t_go > GUEST_SLOW_MS)
+        return "Linux is taking longer than usual to start.";
+    return "";
+}
 unsigned guest_db_host(void) { return GUEST_DB_HOST; }
 int guest_shown(void) { return shown && st == GUEST_RUNNING; }
 void guest_keep(int on)
@@ -163,6 +178,22 @@ static void guest_log(const char *l)
     for (const char *s = l; *s && !has_echo; ++s)
         if (sb_prefix(s, "STARBITE-TERM-OK"))
             term_ok = 1;                    /* the typed command ran (its kmsg line, not the command's echo) */
+    for (const char *s = l; *s; ++s)
+        if (sb_prefix(s, "guest-init: desktop: overlay check: ")) {
+            s += 36;                        /* initramfs/init's fsck_overlay: "started", then "e2fsck RC (...)" */
+            if (sb_prefix(s, "started")) {
+                stage = "Checking Linux's disk.";
+                sbg_boot_extend(GUEST_FSCK_EXTEND_MS);   /* a long check is not a hang */
+            } else if (sb_prefix(s, "e2fsck 1") || sb_prefix(s, "e2fsck 2") || sb_prefix(s, "e2fsck 3")) {
+                stage = "Linux repaired its disk after an unexpected stop.";
+            } else if (sb_prefix(s, "e2fsck 0")) {
+                stage = "";
+            } else {
+                stage = "Linux's disk has errors: this start keeps nothing.";
+            }
+            ui_mark_dirty();
+            break;
+        }
     for (unsigned i = 0; i < sizeof(keep) / sizeof(keep[0]); ++i) {
         const char *k = keep[i];
         for (const char *s = l; *s; ++s) {
@@ -408,6 +439,8 @@ static int load_and_start(void)
 {
     t_busy = t_busy_win = busy_sectors = 0;
     busy_said = 0;
+    stage = "";
+    t_go = 0;
     cfg_init();                             /* this mode's surface */
     gcard_offer();                          /* the card's files as block devices, for this start (guest-card.h) */
 #ifdef GUEST_FS_H
@@ -457,6 +490,7 @@ static int load_and_start(void)
         why = sbg_stats()->why ? sbg_stats()->why : "the guest did not start";
         return -6;
     }
+    t_go = sb_ms();
     if (guestnet_guest_started && (sbg_hdr()->host_services & SBSHM_SVC_NET))
         guestnet_guest_started();           /* sbg_net_config for an uplink already up (the guest starts at link 0) */
     return 0;

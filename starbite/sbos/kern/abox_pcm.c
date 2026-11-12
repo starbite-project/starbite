@@ -914,17 +914,26 @@ static int trial_cfg(unsigned i, struct tcfg *t, char *desc, unsigned cap)
         t->set_c1 = 1, t->c1 = 9U << (i - 66);
         fmt_desc(desc, cap, "CTRL1 9<<%u", UL(i - 66));
     } else {
+        /* run 3 (41b7b25): no single setting moved RDMA0. an earlier port's comments say calliope sets FORMAT, BUF_UPDATE and
+         * SBANK_LIMIT (512-byte bank = 4 x 128 bytes) together, so after the format + bit pairs alone, the same pairs
+         * again with SBANK_LIMIT 4 at each byte position (pass 1..4) */
         unsigned j = i - APCM_TRIAL_FIRST_FMT;
-        for (unsigned s = 1; s <= 14; ++s)
-            for (unsigned b = 1; b <= 18; ++b) {
-                if (b >= s && b <= s + 4)
-                    continue;
-                if (j-- == 0) {
-                    t->c0_or = (9U << s) | (1U << b);
-                    fmt_desc(desc, cap, "CTRL0 9<<%u + bit %u", UL(s), UL(b));
-                    return 1;
+        for (unsigned pass = 0; pass <= 4; ++pass)
+            for (unsigned s = 1; s <= 14; ++s)
+                for (unsigned b = 1; b <= 18; ++b) {
+                    if (b >= s && b <= s + 4)
+                        continue;
+                    if (j-- == 0) {
+                        t->c0_or = (9U << s) | (1U << b);
+                        if (pass) {
+                            t->set_lim = 1, t->lim = 4U << (8 * (pass - 1));
+                            fmt_desc(desc, cap, "CTRL0 9<<%u + bit %u, SBANK_LIMIT %x", UL(s), UL(b), UL(t->lim));
+                        } else {
+                            fmt_desc(desc, cap, "CTRL0 9<<%u + bit %u", UL(s), UL(b));
+                        }
+                        return 1;
+                    }
                 }
-            }
         return 0;
     }
     return 1;

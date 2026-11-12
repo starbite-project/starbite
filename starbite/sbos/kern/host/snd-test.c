@@ -794,7 +794,7 @@ static void t_probe(void)
     /* out of time */
     reset_fake(0, 0);
     init_snd(0);
-    run_probe(1, 200, 7000);
+    run_probe(1, 200, 11000);           /* level 1's budget is 20 s: two calls overrun it */
     CHECK(log_has("FAIL out of time") && aud_is_off(), "level 1 out of time: FAIL, AUD off");
 
     /* level 2: earpiece, loudspeaker at amp level 0, then the mic */

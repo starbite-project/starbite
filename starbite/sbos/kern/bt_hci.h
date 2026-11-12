@@ -73,14 +73,16 @@ void bthci_copy(void *dst, const void *src, unsigned n);
 unsigned bthci_cmd(uint8_t *out, unsigned cap, uint16_t op, const uint8_t *p, uint8_t n);
 
 /* ---- H4 in: a byte at a time ---- */
+#define BTHCI_ACL_MAX 1024U                 /* the longest ACL packet taken (the BCM4361 sends <= 1021) */
 struct bthci_rx {
     uint8_t type;                           /* 0: waiting for a type byte */
     uint16_t have, need;
     uint8_t ev[2 + 255];                    /* an event: code, length, parameters */
+    uint8_t acl[4 + BTHCI_ACL_MAX];         /* an ACL packet: handle + flags le16, length le16, data */
     uint32_t junk;                          /* bytes that could not start a packet */
-    uint32_t skipped;                       /* ACL / SCO packets (none expected) */
+    uint32_t skipped;                       /* SCO packets, and ACL packets longer than BTHCI_ACL_MAX */
 };
-enum { BTHCI_RX_MORE = 0, BTHCI_RX_EVENT, BTHCI_RX_SKIPPED, BTHCI_RX_JUNK };
+enum { BTHCI_RX_MORE = 0, BTHCI_RX_EVENT, BTHCI_RX_SKIPPED, BTHCI_RX_JUNK, BTHCI_RX_ACL };
 void bthci_rx_reset(struct bthci_rx *r);
 int bthci_rx_byte(struct bthci_rx *r, uint8_t b);
 
@@ -133,6 +135,8 @@ struct bt_dev {
     uint8_t le, addr_type, has_rssi;
     int8_t rssi;                            /* the strongest heard, dBm */
     uint32_t cod;                           /* class of device (BR/EDR) */
+    uint8_t psrm;                           /* BR/EDR: page scan repetition mode from the inquiry (for paging) */
+    uint16_t clkoff;                        /* BR/EDR: clock offset from the inquiry (bit 15 set: valid) */
     uint16_t hits;
     char name[33];                          /* printable ASCII and UTF-8 bytes; "" if none heard */
 };

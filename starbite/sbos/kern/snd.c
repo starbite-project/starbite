@@ -902,7 +902,7 @@ static struct {
     char found_desc[48];
 } P;
 
-static const unsigned budget_of[3] = { 2000, 12000, 10000 };
+static const unsigned budget_of[3] = { 2000, 20000, 10000 };   /* level 1: the combined RDMA0 sweep, ~1100 trials of ~8 ms */
 
 static int pfinish(int ok, const char *line)
 {

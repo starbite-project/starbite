@@ -9,6 +9,7 @@ static struct sbg_cfg cfg;
 static struct sbg_stats st;
 static uint8_t host_if;
 static uint64_t t_start, t_stop_req, img_pa;
+static uint32_t boot_extra;                        /* this start: sbg_boot_extend's time on top of the timeout */
 static int boot_warned, gave_up;                   /* this start: the slow-start note given; stopped for no HELLO */
 static uint32_t log_pos;
 static int log_seen;
@@ -330,6 +331,24 @@ static int load(const void *image, uint64_t image_size, const void *dtb, uint64_
     return 0;
 }
 
+/* more time before the no-HELLO give-up, for this start only (a guest that said it is busy, e.g. checking its disk
+ * after an unclean stop); the total extra is capped at SBG_BOOT_EXTRA_MAX */
+void sbg_boot_extend(uint32_t ms)
+{
+    if (st.state != SBG_BOOTING)
+        return;
+    uint64_t now = os->ms() - t_start, want = now + ms;
+    if (want > (uint64_t)cfg.boot_timeout_ms + boot_extra)
+        boot_extra = (uint32_t)(want - cfg.boot_timeout_ms);
+    if (boot_extra > SBG_BOOT_EXTRA_MAX)
+        boot_extra = SBG_BOOT_EXTRA_MAX;
+    struct tb tb = {.n = 0};
+    t_s(&tb, "guest: the boot timeout is now ");
+    t_u(&tb, ((uint64_t)cfg.boot_timeout_ms + boot_extra) / 1000U);
+    t_s(&tb, " s (the guest is busy)");
+    say(&tb);
+}
+
 int sbg_start(void)
 {
     if (st.state != SBG_LOADED)
@@ -340,6 +359,7 @@ int sbg_start(void)
     }
     t_start = os->ms();
     boot_warned = gave_up = 0;
+    boot_extra = 0;
     st.boots++;
     int64_t r = os->cpu_on(cfg.first_mpidr, tramp_pa(), cfg.linux_base + SBG_DTB_OFF);
     struct tb t = {.n = 0};
@@ -518,6 +538,16 @@ int sbg_text_focus(uint32_t *purpose)
 int sbg_launch(uint32_t idx, uint32_t cat_seq) { return put(SBG_MSG_LAUNCH, idx, cat_seq, 0, 0); }
 int sbg_activate(uint32_t idx) { return put(SBG_MSG_ACTIVATE, idx, 0, 0, 0); }
 int sbg_app_close(uint32_t idx) { return put(SBG_MSG_APP_CLOSE, idx, 0, 0, 0); }
+int sbg_rotate(uint32_t q, uint32_t rows)
+{
+    if (st.state != SBG_RUNNING)
+        return 0;
+    if (!(HDR->guest_caps & SBSHM_CAP_ROTATE))
+        return -1;
+    return put(SBG_MSG_ROTATE, q, rows, 0, 0);
+}
+uint32_t sbg_rot_shown(void) { return st.state == SBG_RUNNING ? HDR->guest_rot : 0; }
+
 int sbg_viewport(uint32_t rows, uint32_t width) { return put(SBG_MSG_VIEWPORT, rows, width, 0, 0); }
 int sbg_pkg(uint32_t idx, uint32_t op, uint32_t store_seq) { return put_c(SBG_MSG_PKG, idx, op, store_seq, 0, 0); }
 int sbg_text(const char *s)
@@ -762,7 +792,7 @@ void sbg_poll(void)
         say(&tb);
         log_tail();
     }
-    if (st.state == SBG_BOOTING && t - t_start > cfg.boot_timeout_ms) {
+    if (st.state == SBG_BOOTING && t - t_start > (uint64_t)cfg.boot_timeout_ms + boot_extra) {
         log_stream();
         struct tb tb = {.n = 0};
         t_s(&tb, "guest: no HELLO: trampoline breadcrumb ");

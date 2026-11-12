@@ -257,8 +257,12 @@ static void lx_build_state(void)
     } else if (LX.state == SH_LINUX_STARTING) {
         lx_scopy(t, "Starting Linux", 64);
         int k = 0;
-        for (const char *s = nm; *s && k < 40; s++) l[k++] = *s;
-        lx_scopy(l + k, " opens on the big cores in a few seconds.", 96 - k);
+        if (LX.why[0]) {                         /* the start's own words: a disk check, a slow start (cp7 #1) */
+            lx_scopy(l, LX.why, 96);
+        } else {
+            for (const char *s = nm; *s && k < 40; s++) l[k++] = *s;
+            lx_scopy(l + k, " opens on the big cores in a few seconds.", 96 - k);
+        }
     } else {
         tk_memcpy(t, "Opening ", 8);
         char e[40];
