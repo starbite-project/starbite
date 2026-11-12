@@ -1446,12 +1446,11 @@ static void scheduled(void *context);
  // already runs in order); a foreign signal is delivered from the CPU once this command buffer has completed.
  if(!event || ![(id)event isKindOfClass:[NBEvent class]]) {
   static std::atomic<int> told{0};
-  if(told.fetch_add(1)<4)NBLOG(@"native-metal: foreign event %s (%s, value %llu): %s",event?object_getClassName(event):"nil",
-   signal?"signal":"wait",(unsigned long long)value,signal?"signalled on completion":"taken as satisfied");
-  if(signal && event && [(id)event respondsToSelector:@selector(setSignaledValue:)]) {
-   id<MTLSharedEvent> shared=(id<MTLSharedEvent>)event;
-   [self addCompletedHandler:^(id<MTLCommandBuffer> cb){(void)cb;if(shared.signaledValue<value)shared.signaledValue=value;}];
-  }
+  // Not touched at all (S2m: setting the value of Metal's own _MTLSharedEvent, an IOSurfaceSharedEvent our kernel's
+  // IOSurface service only pretends to create, dereferenced NULL and killed WindowServer). The macOS plugin now makes
+  // the device's shared-event constructors return this frontend's events, so foreign ones should be rare.
+  if(told.fetch_add(1)<4)NBLOG(@"native-metal: foreign event %s (%s, value %llu): skipped",event?object_getClassName(event):"nil",
+   signal?"signal":"wait",(unsigned long long)value);
   return;
  }
 #endif

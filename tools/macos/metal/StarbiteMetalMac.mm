@@ -331,6 +331,30 @@ static void fill_device(id dev, mach_port_t port)
 	 * Kept, and answered by the getters Apple's IOAccel devices have; any other one-argument private setter
 	 * (-_setX:) is a no-op through the stub instead of an exception. Other private selectors still raise.
 	 */
+	/*
+	 * Shared events: _MTLDevice's own constructors make an _MTLSharedEvent, an IOSurfaceSharedEvent whose value page
+	 * our kernel's IOSurface service does not provide (S2m 2026-11-12: WindowServer died reading it, far 0). Every
+	 * constructor answers with this device's own events instead. An import (mach port / handle) cannot be honoured
+	 * across processes yet: it gets a fresh local event, logged once.
+	 */
+	class_replaceMethod(c, sel_registerName("newSharedEventWithOptions:"), imp_implementationWithBlock(^id(id me, NSUInteger o) {
+		(void)o;
+		return [(id<MTLDevice>)me newSharedEvent];
+	}), "@24@0:8Q16");
+	class_replaceMethod(c, sel_registerName("newEventWithOptions:"), imp_implementationWithBlock(^id(id me, NSUInteger o) {
+		(void)o;
+		return [(id<MTLDevice>)me newEvent];
+	}), "@24@0:8Q16");
+	class_replaceMethod(c, sel_registerName("newSharedEventWithMachPort:"), imp_implementationWithBlock(^id(id me, mach_port_t p) {
+		(void)p;
+		missing(class_getName(object_getClass(me)), "newSharedEventWithMachPort: (local event)");
+		return [(id<MTLDevice>)me newSharedEvent];
+	}), "@20@0:8I16");
+	class_replaceMethod(c, sel_registerName("newSharedEventWithHandle:"), imp_implementationWithBlock(^id(id me, id h) {
+		(void)h;
+		missing(class_getName(object_getClass(me)), "newSharedEventWithHandle: (local event)");
+		return [(id<MTLDevice>)me newSharedEvent];
+	}), "@24@0:8@16");
 	static const char kAccelServiceKey = 0;
 	class_addMethod(c, sel_registerName("_setAcceleratorService:"), imp_implementationWithBlock(^(id me, id service) {
 		objc_setAssociatedObject(me, &kAccelServiceKey, service, OBJC_ASSOCIATION_RETAIN);
