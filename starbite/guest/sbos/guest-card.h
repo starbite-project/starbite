@@ -5,6 +5,7 @@
  *   /starbite/linux/base.erofs    -> /dev/sbblk0, read-only
  *   /starbite/linux/overlay.img   -> /dev/sbblk1, read-write (ext4 with 4 KiB blocks)
  *   /starbite/linux/repo.erofs    -> /dev/sbblk2, read-only
+ *   /starbite/linux/appstore.erofs -> /dev/sbblk3, read-only (Track F's offline App Store mirror, optional)
  *
  * At each guest start gcard_offer() mounts the card's exFAT volume read-only (starbite/utility/exfat.c), walks
  * to each file and turns it into ONE run of card sectors. A file is offered only when that run is proven:
@@ -47,6 +48,7 @@ static int gcard_io(uint32_t dev, uint32_t op, uint64_t sector, uint32_t count, 
 #define GCARD_BASE GCARD_DIR "base.erofs"
 #define GCARD_OVERLAY GCARD_DIR "overlay.img"
 #define GCARD_REPO GCARD_DIR "repo.erofs"
+#define GCARD_APPSTORE GCARD_DIR "appstore.erofs"
 
 static uint32_t gcard_le32(const uint8_t *p)
 {
@@ -176,8 +178,8 @@ static void gc_say(const char *what, const char *name, const char *why)
  * consistent table (none when the card or the base image is missing). */
 static void gcard_offer(void)
 {
-    static const char *const path[3] = {GCARD_BASE, GCARD_OVERLAY, GCARD_REPO};
-    static const char *const label[3] = {"base", "overlay", "repo"};
+    static const char *const path[SBSHM_BLK_DEVS] = {GCARD_BASE, GCARD_OVERLAY, GCARD_REPO, GCARD_APPSTORE};
+    static const char *const label[SBSHM_BLK_DEVS] = {"base", "overlay", "repo", "appstore"};
     uint64_t p_start = 0, p_len = 0;
     const char *no = 0;
     gc_writable = 0;
@@ -211,13 +213,13 @@ static void gcard_offer(void)
     }
     for (unsigned i = 0; i < 4; ++i)
         gc_cid[i] = sd_rep.cid[i];
-    for (unsigned i = 0; i < 3; ++i) {
+    for (unsigned i = 0; i < SBSHM_BLK_DEVS; ++i) {
         uint64_t s = 0, n = 0;
         hw_wdt_feed();
         no = gcard_extent(&gc_fs, p_start, p_len, path[i], (uint8_t *)gc_sec, &s, &n);
         for (unsigned k = 0; !no && k < i; ++k)
             if (gcard_overlap(s, n, gc_ext[k].sector, gc_ext[k].sectors))
-                no = "it shares sectors with another of the three files";
+                no = "it shares sectors with another of the card files";
         if (!no && i == SBSHM_BLK_OVERLAY) {
 #if GUEST_CARD_WRITE
             no = gcard_overlay_why(s, sbos_selftest_enabled);
