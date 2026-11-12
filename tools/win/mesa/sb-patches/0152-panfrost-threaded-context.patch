@@ -1,0 +1,856 @@
+diff --git a/src/gallium/auxiliary/util/u_threaded_context.c b/src/gallium/auxiliary/util/u_threaded_context.c
+index 3ac1690..89e3a0d 100644
+--- a/src/gallium/auxiliary/util/u_threaded_context.c
++++ b/src/gallium/auxiliary/util/u_threaded_context.c
+@@ -2855,8 +2855,11 @@ tc_buffer_map(struct pipe_context *_pipe,
+ 
+    void *ret = pipe->buffer_map(pipe, tres->latest ? tres->latest : resource,
+                                 level, usage, box, transfer);
+-   threaded_transfer(*transfer)->valid_buffer_range = &tres->valid_buffer_range;
+-   threaded_transfer(*transfer)->cpu_storage_mapped = false;
++   /* Starbite (sb-patches/0152): a failed map (Windows under memory pressure) leaves no transfer */
++   if (*transfer) {
++      threaded_transfer(*transfer)->valid_buffer_range = &tres->valid_buffer_range;
++      threaded_transfer(*transfer)->cpu_storage_mapped = false;
++   }
+ 
+    if (!(usage & TC_TRANSFER_MAP_THREADED_UNSYNC))
+       tc_clear_driver_thread(tc);
+diff --git a/src/gallium/drivers/panfrost/pan_bo.c b/src/gallium/drivers/panfrost/pan_bo.c
+index 9950eba..eb07efe 100644
+--- a/src/gallium/drivers/panfrost/pan_bo.c
++++ b/src/gallium/drivers/panfrost/pan_bo.c
+@@ -326,14 +326,23 @@ panfrost_bo_mmap(struct panfrost_bo *bo)
+    if (bo->ptr.cpu)
+       return 0;
+ 
+-   bo->ptr.cpu =
+-      pan_kmod_bo_mmap(bo->kmod_bo, PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
+-   if (bo->ptr.cpu == MAP_FAILED) {
+-      bo->ptr.cpu = NULL;
+-      return -1;
++   /* Starbite (sb-patches/0152): with u_threaded_context the application thread maps buffers (unsynchronized
++    * maps) while the driver thread may map the same BO: one mapping per BO, never MAP_FAILED in ptr.cpu. */
++   static simple_mtx_t sb_mmap_lock = SIMPLE_MTX_INITIALIZER;
++   int ret = 0;
++
++   simple_mtx_lock(&sb_mmap_lock);
++   if (!bo->ptr.cpu) {
++      void *cpu =
++         pan_kmod_bo_mmap(bo->kmod_bo, PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
++      if (cpu == MAP_FAILED)
++         ret = -1;
++      else
++         bo->ptr.cpu = cpu;
+    }
++   simple_mtx_unlock(&sb_mmap_lock);
+ 
+-   return 0;
++   return ret;
+ }
+ 
+ static void
+diff --git a/src/gallium/drivers/panfrost/pan_bo.h b/src/gallium/drivers/panfrost/pan_bo.h
+index 0372c05..d62894a 100644
+--- a/src/gallium/drivers/panfrost/pan_bo.h
++++ b/src/gallium/drivers/panfrost/pan_bo.h
+@@ -91,6 +91,10 @@ struct panfrost_bo {
+     */
+    uint32_t gpu_access;
+ 
++   /* Starbite (sb-patches/0152): unsubmitted batches holding this BO (panfrost_batch_add_bo_old .. cleanup), read
++    * by the threaded context's is_resource_busy from the application thread. */
++   int32_t sb_batch_users;
++
+    /* Driver-provided human-readable description of the BO for debugging.
+     * Consists of a BO name and optional additional information, like
+     * pixel format or buffer modifiers.
+diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.c b/src/gallium/drivers/panfrost/pan_cmdstream.c
+index 5a58fab..e431449 100644
+--- a/src/gallium/drivers/panfrost/pan_cmdstream.c
++++ b/src/gallium/drivers/panfrost/pan_cmdstream.c
+@@ -83,6 +83,10 @@ struct panfrost_sampler_view {
+    uint64_t texture_size;
+    uint64_t modifier;
+ 
++   /* sb-patches/0152: created in the application thread (u_threaded_context): format legalization and the
++    * descriptor are done by the first bind, in the driver thread */
++   bool sb_deferred;
++
+    /* Pool used to allocate the descriptor. If NULL, defaults to the global
+     * descriptor pool. Can be set for short lived descriptors, useful for
+     * shader images on Valhall.
+@@ -1633,10 +1637,18 @@ panfrost_emit_const_buf(struct panfrost_batch *batch,
+          unsigned ubo_adj = src.ubo - (src.ubo > sysval_ubo ? 1 : 0);
+ 
+          struct pipe_constant_buffer *cb = &buf->cb[ubo_adj];
+-         assert(!cb->buffer && cb->user_buffer &&
+-                "only user buffers use this path");
+ 
+-         mapped_ubo = cb->user_buffer + cb->buffer_offset;
++         if (cb->buffer) {
++            /* sb-patches/0152: u_threaded_context (and prefer_real_buffer_in_constbuf0) hands uniforms over in
++             * an upload buffer the CPU wrote: push them from its mapping */
++            struct panfrost_resource *crsrc = pan_resource(cb->buffer);
++            mapped_ubo = panfrost_bo_mmap(crsrc->bo)
++                            ? NULL
++                            : (const uint8_t *)crsrc->bo->ptr.cpu + cb->buffer_offset;
++         } else {
++            assert(cb->user_buffer && "only user buffers use this path");
++            mapped_ubo = cb->user_buffer ? (const uint8_t *)cb->user_buffer + cb->buffer_offset : NULL;
++         }
+       }
+ 
+       if (!mapped_ubo)
+@@ -2228,6 +2240,9 @@ emit_texbuf_bufs(struct panfrost_context *ctx, mesa_shader_stage shader,
+       assert(view);
+       struct pipe_sampler_view *pview = &view->base;
+ 
++      /* sb-patches/0152: the buffer's BO may have been replaced since the view was built */
++      panfrost_update_sampler_view(view, &ctx->base);
++
+       pan_pack(bufs + i, ATTRIBUTE_BUFFER, cfg) {
+          cfg.type = MALI_ATTRIBUTE_TYPE_1D;
+          cfg.pointer = view->texel_buffer_base_ptr + pview->u.buf.offset;
+@@ -4288,11 +4303,14 @@ panfrost_create_sampler_view(struct pipe_context *pctx,
+                              const struct pipe_sampler_view *template)
+ {
+    struct panfrost_context *ctx = pan_context(pctx);
++   /* sb-patches/0152: under u_threaded_context this runs in the application thread: no context ralloc tree, no
++    * modifier conversion (a blit), no descriptor pool. The first bind does them (panfrost_sb_set_sampler_views). */
+    struct panfrost_sampler_view *so =
+-      rzalloc(pctx, struct panfrost_sampler_view);
++      rzalloc(ctx->sb_tc ? NULL : (void *)pctx, struct panfrost_sampler_view);
+    struct panfrost_resource *ptexture = pan_resource(texture);
+ 
+-   pan_legalize_format(ctx, ptexture, template->format, false, false);
++   if (!ctx->sb_tc)
++      pan_legalize_format(ctx, ptexture, template->format, false, false);
+    pipe_reference(NULL, &texture->reference);
+ 
+    so->base = *template;
+@@ -4300,7 +4318,10 @@ panfrost_create_sampler_view(struct pipe_context *pctx,
+    so->base.reference.count = 1;
+    so->base.context = pctx;
+ 
+-   panfrost_create_sampler_view_bo(so, pctx, texture);
++   if (ctx->sb_tc)
++      so->sb_deferred = true;
++   else
++      panfrost_create_sampler_view_bo(so, pctx, texture);
+ 
+    return (struct pipe_sampler_view *)so;
+ }
+@@ -4564,6 +4585,28 @@ panfrost_sampler_view_destroy(struct pipe_context *pctx,
+    ralloc_free(view);
+ }
+ 
++/* sb-patches/0152: driver thread. Views created under u_threaded_context are legalized and get their descriptor
++ * before anything can use them. */
++static void
++panfrost_sb_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader, unsigned start_slot,
++                              unsigned num_views, unsigned unbind_num_trailing_slots,
++                              struct pipe_sampler_view **views)
++{
++   struct panfrost_context *ctx = pan_context(pctx);
++
++   for (unsigned i = 0; views && i < num_views; i++) {
++      struct panfrost_sampler_view *view = (struct panfrost_sampler_view *)views[i];
++
++      if (view && view->sb_deferred) {
++         pan_legalize_format(ctx, pan_resource(view->base.texture), view->base.format, false, false);
++         view->sb_deferred = false;
++         panfrost_update_sampler_view(view, pctx);
++      }
++   }
++
++   panfrost_set_sampler_views(pctx, shader, start_slot, num_views, unbind_num_trailing_slots, views);
++}
++
+ static void
+ context_populate_vtbl(struct pipe_context *pipe)
+ {
+@@ -4574,6 +4617,7 @@ context_populate_vtbl(struct pipe_context *pipe)
+    pipe->create_rasterizer_state = panfrost_create_rasterizer_state;
+    pipe->create_depth_stencil_alpha_state = panfrost_create_depth_stencil_state;
+    pipe->create_sampler_view = panfrost_create_sampler_view;
++   pipe->set_sampler_views = panfrost_sb_set_sampler_views;   /* sb-patches/0152 */
+    pipe->sampler_view_destroy = panfrost_sampler_view_destroy;
+    pipe->sampler_view_release = u_default_sampler_view_release;
+    pipe->resource_release = u_default_resource_release;
+diff --git a/src/gallium/drivers/panfrost/pan_context.c b/src/gallium/drivers/panfrost/pan_context.c
+index 13fbf4b..a585074 100644
+--- a/src/gallium/drivers/panfrost/pan_context.c
++++ b/src/gallium/drivers/panfrost/pan_context.c
+@@ -384,7 +384,7 @@ panfrost_set_stencil_ref(struct pipe_context *pctx,
+    ctx->dirty |= PAN_DIRTY_ZS;
+ }
+ 
+-static void
++void
+ panfrost_set_sampler_views(struct pipe_context *pctx,
+                            mesa_shader_stage shader, unsigned start_slot,
+                            unsigned num_views,
+@@ -690,7 +690,8 @@ panfrost_create_query(struct pipe_context *pipe, unsigned type, unsigned index)
+ {
+    struct panfrost_context *ctx = pan_context(pipe);
+    struct panfrost_device *dev = pan_device(ctx->base.screen);
+-   struct panfrost_query *q = rzalloc(pipe, struct panfrost_query);
++   /* sb-patches/0152: runs in the application thread under u_threaded_context */
++   struct panfrost_query *q = rzalloc(ctx->sb_tc ? NULL : (void *)pipe, struct panfrost_query);
+ 
+    q->type = type;
+    q->index = index;
+@@ -724,9 +725,16 @@ panfrost_create_query(struct pipe_context *pipe, unsigned type, unsigned index)
+       }
+ 
+       /* Default to 0 if nothing at all drawn. */
+-      uint8_t *zeroes = alloca(size);
+-      memset(zeroes, 0, size);
+-      pipe_buffer_write(pipe, q->rsrc, 0, size, zeroes);
++      if (ctx->sb_tc) {
++         /* sb-patches/0152: no context call from the application thread; the fresh BO is idle */
++         struct panfrost_resource *qrsrc = pan_resource(q->rsrc);
++         if (!panfrost_bo_mmap(qrsrc->bo))
++            memset(qrsrc->bo->ptr.cpu, 0, size);
++      } else {
++         uint8_t *zeroes = alloca(size);
++         memset(zeroes, 0, size);
++         pipe_buffer_write(pipe, q->rsrc, 0, size, zeroes);
++      }
+    }
+ 
+    return (struct pipe_query *)q;
+@@ -961,7 +969,8 @@ panfrost_create_stream_output_target(struct pipe_context *pctx,
+ {
+    struct pipe_stream_output_target *target;
+ 
+-   target = &rzalloc(pctx, struct panfrost_streamout_target)->base;
++   /* sb-patches/0152: runs in the application thread under u_threaded_context */
++   target = &rzalloc(pan_context(pctx)->sb_tc ? NULL : (void *)pctx, struct panfrost_streamout_target)->base;
+ 
+    if (!target)
+       return NULL;
+@@ -1094,6 +1103,68 @@ static const struct debug_named_value panfrost_prio_options[] = {
+    DEBUG_NAMED_VALUE_END
+ };
+ 
++/* Starbite (sb-patches/0152): u_threaded_context for Panfrost, PAN_THREADED=1 (default off).
++ * The GL thread records gallium calls; a driver thread runs Panfrost's state processing and command building.
++ * - Fences: no create_fence callback, so every tc flush is synchronous (tc drains its queue, then panfrost_flush
++ *   runs and creates the fence as before); deferred fences behave as before.
++ * - Buffer renames: panfrost_sb_tc_replace_buffer_storage; Panfrost no longer renames buffers itself under tc.
++ * - Busy checks: panfrost_sb_tc_is_resource_busy (unsubmitted batches per BO + the kernel).
++ * - get_query_result: tc calls it from the application thread once the query was flushed; Panfrost's version
++ *   reads the context's batches, so it syncs first.
++ * - The WGL present maps the back buffer through the wrapped context: tc_texture_map drains the queue first. */
++static bool
++panfrost_sb_tc_get_query_result(struct pipe_context *pipe, struct pipe_query *q, bool wait,
++                                union pipe_query_result *result)
++{
++   struct panfrost_context *ctx = pan_context(threaded_context(pipe)->pipe);
++
++   threaded_context_unwrap_sync(pipe);
++   return ctx->sb_tc_get_query_result(pipe, q, wait, result);
++}
++
++static struct pipe_context *
++panfrost_sb_wrap_threaded(struct panfrost_context *ctx, unsigned flags)
++{
++   struct pipe_context *gallium = &ctx->base;
++   struct panfrost_screen *screen = pan_screen(gallium->screen);
++
++   if (!screen->sb_threaded || !(flags & PIPE_CONTEXT_PREFER_THREADED) ||
++       (flags & PIPE_CONTEXT_COMPUTE_ONLY))
++      return gallium;
++
++   ctx->sb_tc = true; /* before tc can call a create_* from the application thread */
++
++   struct threaded_context *tc = NULL;
++   struct pipe_context *tpipe = threaded_context_create(
++      gallium, &screen->transfer_pool, panfrost_sb_tc_replace_buffer_storage,
++      &(struct threaded_context_options){
++         .is_resource_busy = panfrost_sb_tc_is_resource_busy,
++      },
++      &tc);
++
++   if (!tpipe)
++      return NULL; /* tc destroyed the context */
++
++   if (tpipe == gallium) {
++      ctx->sb_tc = false; /* GALLIUM_THREAD=0 */
++      return gallium;
++   }
++
++   ctx->tc = tc;
++   threaded_context_init_bytes_mapped_limit(tc, 16);
++   tc->bytes_replaced_limit = tc->bytes_mapped_limit / 4;
++
++   ctx->sb_tc_get_query_result = tpipe->get_query_result;
++   tpipe->get_query_result = panfrost_sb_tc_get_query_result;
++
++   static bool logged;
++   if (!logged) {
++      logged = true;
++      fprintf(stderr, "sbumd: panfrost: threaded context on (PAN_THREADED=1)\n");
++   }
++   return tpipe;
++}
++
+ struct pipe_context *
+ panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
+ {
+@@ -1257,7 +1328,7 @@ panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
+    if (ret)
+       goto failed;
+ 
+-   return gallium;
++   return panfrost_sb_wrap_threaded(ctx, flags);   /* sb-patches/0152 */
+ 
+ failed:
+    gallium->destroy(gallium);
+diff --git a/src/gallium/drivers/panfrost/pan_context.h b/src/gallium/drivers/panfrost/pan_context.h
+index 3b2a396..fab54b4 100644
+--- a/src/gallium/drivers/panfrost/pan_context.h
++++ b/src/gallium/drivers/panfrost/pan_context.h
+@@ -86,6 +86,9 @@ struct panfrost_constant_buffer {
+ };
+ 
+ struct panfrost_query {
++   /* sb-patches/0152: u_threaded_context's part, first */
++   struct threaded_query tq;
++
+    /* Passthrough from Gallium */
+    unsigned type;
+    unsigned index;
+@@ -253,6 +256,14 @@ struct panfrost_context {
+    struct panfrost_perfetto_state perfetto;
+ #endif
+    uint32_t submit_count; /* monotonic submit ID for perfetto */
++
++   /* Starbite (sb-patches/0152): this context is wrapped in u_threaded_context (PAN_THREADED=1). Then CSO, sampler
++    * view, query and unsynchronized buffer-map entry points run in the application thread, and the driver defers
++    * whatever touches the context (shader compiles, descriptor pools) to the driver thread. */
++   bool sb_tc;
++   struct threaded_context *tc;
++   bool (*sb_tc_get_query_result)(struct pipe_context *pipe, struct pipe_query *q, bool wait,
++                                  union pipe_query_result *result);
+ };
+ 
+ /* Corresponds to the CSO */
+@@ -452,6 +463,12 @@ struct panfrost_uncompiled_shader {
+ 
+    /* If gl_FragColor was lowered, we need to optimize the stores later */
+    bool fragcolor_lowered;
++
++   /* sb-patches/0152: created in the application thread under u_threaded_context; the XFB program / the compute
++    * program are compiled at the first bind, in the driver thread (ctx->shaders/descs aren't thread-safe). */
++   bool sb_xfb_pending;
++   bool sb_compute_pending;
++   unsigned sb_static_shared_mem;
+ };
+ 
+ /* The binary artefacts of compiling a shader. This differs from
+@@ -567,6 +584,11 @@ panfrost_dirty_state_all(struct panfrost_context *ctx)
+       ctx->dirty_shader[i] = (enum pan_dirty_shader)~0;
+ }
+ 
++/* sb-patches/0152: pan_cmdstream.c wraps it to build deferred sampler views first */
++void panfrost_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader, unsigned start_slot,
++                                unsigned num_views, unsigned unbind_num_trailing_slots,
++                                struct pipe_sampler_view **views);
++
+ static inline void
+ panfrost_clean_state_3d(struct panfrost_context *ctx)
+ {
+diff --git a/src/gallium/drivers/panfrost/pan_job.c b/src/gallium/drivers/panfrost/pan_job.c
+index 47e71ae..77eae0a 100644
+--- a/src/gallium/drivers/panfrost/pan_job.c
++++ b/src/gallium/drivers/panfrost/pan_job.c
+@@ -120,6 +120,7 @@ panfrost_batch_cleanup(struct panfrost_context *ctx,
+          continue;
+ 
+       struct panfrost_bo *bo = pan_lookup_bo(dev, i);
++      p_atomic_dec(&bo->sb_batch_users);   /* sb-patches/0152 */
+       panfrost_bo_unreference(bo);
+    }
+ 
+@@ -326,6 +327,7 @@ panfrost_batch_add_bo_old(struct panfrost_batch *batch, struct panfrost_bo *bo,
+    if (!old_flags) {
+       batch->num_bos++;
+       panfrost_bo_reference(bo);
++      p_atomic_inc(&bo->sb_batch_users);   /* sb-patches/0152 */
+    }
+ 
+    if (old_flags == flags)
+diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
+index 0ec7f97..7c45a51 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -277,6 +277,9 @@ panfrost_resource_destroy(struct pipe_screen *screen, struct pipe_resource *pt)
+    free(rsrc->damage.tile_map.data);
+ 
+    util_range_destroy(&rsrc->valid_buffer_range);
++   if (rsrc->tbase.buffer_id_unique)                 /* sb-patches/0152 */
++      util_idalloc_mt_free(&pan_screen(screen)->buffer_ids, rsrc->tbase.buffer_id_unique);
++   threaded_resource_deinit(pt);
+    rsrc->sb_magic = SB_RSRC_DEAD;          /* sb-patches/0126 */
+    free(rsrc);
+ }
+@@ -385,6 +388,12 @@ panfrost_resource_from_handle(struct pipe_screen *pscreen,
+    util_range_init(&rsc->valid_buffer_range);
+    prsc->screen = pscreen;
+ 
++   /* sb-patches/0152: imported storage can't be renamed by u_threaded_context */
++   threaded_resource_init(prsc, false);
++   rsc->tbase.is_shared = true;
++   if (prsc->target == PIPE_BUFFER)
++      rsc->tbase.buffer_id_unique = util_idalloc_mt_alloc(&pan_screen(pscreen)->buffer_ids);
++
+    uint64_t mod = whandle->modifier == DRM_FORMAT_MOD_INVALID
+                      ? DRM_FORMAT_MOD_LINEAR
+                      : whandle->modifier;
+@@ -500,6 +509,7 @@ panfrost_resource_get_handle(struct pipe_screen *pscreen,
+ 
+    handle->modifier = rsrc->modifier;
+    rsrc->modifier_constant = true;
++   rsrc->tbase.is_shared = true;   /* sb-patches/0152: exported storage can't be renamed */
+ 
+    if (handle->type == WINSYS_HANDLE_TYPE_KMS && dev->ro) {
+       return renderonly_get_handle(scanout, handle);
+@@ -1107,6 +1117,12 @@ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
+ 
+    util_range_init(&so->valid_buffer_range);
+ 
++   /* sb-patches/0152: u_threaded_context state; small buffers may use tc's CPU storage, as freedreno */
++   threaded_resource_init(&so->base, template->target == PIPE_BUFFER && template->width0 < 0x1000);
++   so->tbase.is_shared = !!(template->bind & PAN_BIND_SHARED_MASK);
++   if (template->target == PIPE_BUFFER)
++      so->tbase.buffer_id_unique = util_idalloc_mt_alloc(&pan_screen(screen)->buffer_ids);
++
+    if (template->bind & PAN_BIND_SHARED_MASK) {
+       /* For compatibility with older consumers that may not be
+        * modifiers aware, treat INVALID as LINEAR for shared
+@@ -1619,7 +1635,10 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
+        rsrc->modifier != DRM_FORMAT_MOD_LINEAR)
+       return NULL;
+ 
+-   struct panfrost_transfer *transfer = rzalloc(pctx, struct panfrost_transfer);
++   /* sb-patches/0152: with u_threaded_context this may run in the application thread
++    * (TC_TRANSFER_MAP_THREADED_UNSYNC), so it can't hang off the context's ralloc tree. */
++   struct panfrost_transfer *transfer =
++      rzalloc(ctx->sb_tc ? NULL : (void *)pctx, struct panfrost_transfer);
+    transfer->base.level = level;
+    transfer->base.usage = usage;
+    transfer->base.box = *box;
+@@ -1683,8 +1702,13 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
+                             panfrost_bo_size(bo), NULL);
+    }
+ 
++   /* sb-patches/0152: u_threaded_context does its own inference (TC_TRANSFER_MAP_NO_INFER_UNSYNCHRONIZED), and
++    * with tc this driver range no longer follows a buffer's storage (replace_buffer_storage): never infer then. */
++   bool sb_tc_buffer = ctx->sb_tc && resource->target == PIPE_BUFFER;
++
+    /* Upgrade writes to uninitialized ranges to UNSYNCHRONIZED */
+-   if ((usage & PIPE_MAP_WRITE) && resource->target == PIPE_BUFFER &&
++   if (!(usage & TC_TRANSFER_MAP_NO_INFER_UNSYNCHRONIZED) && !sb_tc_buffer &&
++       (usage & PIPE_MAP_WRITE) && resource->target == PIPE_BUFFER &&
+        !util_ranges_intersect(&rsrc->valid_buffer_range, box->x,
+                               box->x + box->width)) {
+ 
+@@ -1698,10 +1722,15 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
+       usage |= PIPE_MAP_DISCARD_WHOLE_RESOURCE;
+    }
+ 
+-   bool create_new_bo = usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE;
++   /* sb-patches/0152: under u_threaded_context the driver must never replace a buffer's BO itself
++    * (TC_TRANSFER_MAP_NO_INVALIDATE; tc renames through replace_buffer_storage, and maps tc's "latest" storage
++    * from the application thread). Internal maps of buffers (util_resource_copy_region) flush and wait instead. */
++   bool may_rename = !(usage & TC_TRANSFER_MAP_NO_INVALIDATE) && !sb_tc_buffer;
++
++   bool create_new_bo = may_rename && (usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE);
+    bool copy_resource = false;
+ 
+-   if (!(usage & PIPE_MAP_UNSYNCHRONIZED) &&
++   if (may_rename && !(usage & PIPE_MAP_UNSYNCHRONIZED) &&
+        !(resource->flags & PIPE_RESOURCE_FLAG_MAP_PERSISTENT) &&
+        (usage & PIPE_MAP_WRITE) && panfrost_any_batch_reads_rsrc(ctx, rsrc)) {
+       /* When a resource to be modified is already being used by a
+@@ -1840,9 +1869,11 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
+ 
+       if (usage & PIPE_MAP_WRITE) {
+          BITSET_SET(rsrc->valid.data, level);
+-         pan_minmax_cache_invalidate(
+-            rsrc->index_cache, util_format_get_blocksize(rsrc->base.format),
+-            transfer->base.box.x, transfer->base.box.width);
++         /* sb-patches/0152: the cache belongs to the driver thread; the unmap (always run there) invalidates it */
++         if (!(usage & TC_TRANSFER_MAP_THREADED_UNSYNC))
++            pan_minmax_cache_invalidate(
++               rsrc->index_cache, util_format_get_blocksize(rsrc->base.format),
++               transfer->base.box.x, transfer->base.box.width);
+       }
+ 
+       return bo->ptr.cpu + rsrc->plane.layout.slices[level].offset_B +
+@@ -2729,6 +2760,80 @@ sb_resource_copy_region(struct pipe_context *pctx, struct pipe_resource *dst, un
+    util_resource_copy_region(pctx, dst, dst_level, dstx, dsty, dstz, src, src_level, src_box);
+ }
+ 
++/* Starbite (sb-patches/0152): u_threaded_context's buffer invalidation. tc allocated `src` (a fresh buffer, mapped
++ * from the application thread as tc's "latest" storage) and queued this call: `dst` (the resource GL binds) takes
++ * src's BO. Runs in the driver thread, in order with the draws.
++ *  - Batches still using dst's old BO hold their own references to it (panfrost_batch_add_bo_old), so it lives
++ *    until they are done; tracking is per BO handle, so later draws track the new BO.
++ *  - Every descriptor that may hold the old address is re-emitted (all state dirty; sampler views compare
++ *    texture_bo with plane.base and rebuild).
++ *  - dst's writer entry described the old storage; dst's index-bounds cache too, and later writes reach the new
++ *    storage through tc's "latest" resource, whose unmaps invalidate *its* cache: dst stops caching for good. */
++void
++panfrost_sb_tc_replace_buffer_storage(struct pipe_context *pctx, struct pipe_resource *pdst,
++                                      struct pipe_resource *psrc, unsigned num_rebinds,
++                                      uint64_t rebind_mask, uint32_t delete_buffer_id)
++{
++   struct panfrost_context *ctx = pan_context(pctx);
++   struct panfrost_resource *dst = pan_resource(pdst);
++   struct panfrost_resource *src = pan_resource(psrc);
++
++   assert(pdst->target == PIPE_BUFFER && psrc->target == PIPE_BUFFER);
++   assert(!dst->separate_stencil && !dst->shadow_image);
++
++   _mesa_hash_table_remove_key(ctx->writers, dst);
++
++   if (dst->owns_label) {
++      char *old_label = (char *)panfrost_bo_replace_label(dst->bo, "Replaced buffer storage", false);
++      free(old_label);
++   }
++   panfrost_bo_reference(src->bo);
++   panfrost_bo_unreference(dst->bo);
++   dst->bo = src->bo;
++   dst->owns_label = false; /* src keeps the label */
++   dst->plane.base = dst->bo->ptr.gpu;
++   pan_crc_state_set_ptr(&dst->crc_state, &dst->bo->ptr);
++
++   util_range_set_empty(&dst->valid_buffer_range);
++   util_range_add(&dst->base, &dst->valid_buffer_range, 0, dst->base.width0);
++   BITSET_SET(dst->valid.data, 0);
++
++   free(dst->index_cache);
++   dst->index_cache = NULL;
++
++   panfrost_dirty_state_all(ctx);
++
++   if (delete_buffer_id)
++      util_idalloc_mt_free(&pan_screen(pctx->screen)->buffer_ids, delete_buffer_id);
++}
++
++/* sb-patches/0152: tc asks this from the application thread, for buffers no unexecuted tc batch references. Busy
++ * if an unsubmitted batch holds the BO (sb_batch_users, any context), else if the GPU still uses it. Reads only
++ * atomics and the kernel: bo->gpu_access is left to the driver thread. */
++bool
++panfrost_sb_tc_is_resource_busy(struct pipe_screen *pscreen, struct pipe_resource *pres, unsigned usage)
++{
++   struct panfrost_bo *bo = pan_resource(pres)->bo;
++
++   if (!bo)
++      return true;
++   if (p_atomic_read(&bo->sb_batch_users))
++      return true;
++
++   bool wait_readers = usage & PIPE_MAP_WRITE;
++
++   if (!(bo->flags & PAN_BO_SHARED)) {
++      uint32_t access = p_atomic_read(&bo->gpu_access);
++
++      if (!access)
++         return false;
++      if (!wait_readers && !(access & PAN_BO_ACCESS_WRITE))
++         return false;
++   }
++
++   return !pan_kmod_bo_wait(bo->kmod_bo, 0, !wait_readers);
++}
++
+ void
+ panfrost_resource_context_init(struct pipe_context *pctx)
+ {
+diff --git a/src/gallium/drivers/panfrost/pan_resource.h b/src/gallium/drivers/panfrost/pan_resource.h
+index 2d9fb81..f129a2d 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.h
++++ b/src/gallium/drivers/panfrost/pan_resource.h
+@@ -44,7 +44,11 @@ struct pan_afbcp {
+ };
+ 
+ struct panfrost_resource {
+-   struct pipe_resource base;
++   /* Starbite (sb-patches/0152): a threaded_resource for u_threaded_context; "base" is its pipe_resource. */
++   union {
++      struct pipe_resource base;
++      struct threaded_resource tbase;
++   };
+    struct {
+       struct pipe_scissor_state extent;
+       struct {
+@@ -130,7 +134,11 @@ pan_resource_plane_index(const struct panfrost_resource *rsc)
+ }
+ 
+ struct panfrost_transfer {
+-   struct pipe_transfer base;
++   /* sb-patches/0152: a threaded_transfer for u_threaded_context */
++   union {
++      struct pipe_transfer base;
++      struct threaded_transfer tbase;
++   };
+    void *map;
+    struct {
+       struct pipe_resource *rsrc;
+@@ -138,6 +146,13 @@ struct panfrost_transfer {
+    } staging;
+ };
+ 
++/* sb-patches/0152: u_threaded_context callbacks (pan_resource.c) */
++void panfrost_sb_tc_replace_buffer_storage(struct pipe_context *pctx, struct pipe_resource *dst,
++                                           struct pipe_resource *src, unsigned num_rebinds,
++                                           uint64_t rebind_mask, uint32_t delete_buffer_id);
++bool panfrost_sb_tc_is_resource_busy(struct pipe_screen *pscreen, struct pipe_resource *pres,
++                                     unsigned usage);
++
+ static inline struct panfrost_transfer *
+ pan_transfer(struct pipe_transfer *p)
+ {
+diff --git a/src/gallium/drivers/panfrost/pan_screen.c b/src/gallium/drivers/panfrost/pan_screen.c
+index 661f34d..41159e8 100644
+--- a/src/gallium/drivers/panfrost/pan_screen.c
++++ b/src/gallium/drivers/panfrost/pan_screen.c
+@@ -40,6 +40,10 @@
+ 
+ #include "pan_context.h"
+ #include "panfrost_perfetto.h"
++#ifdef _WIN32
++/* sb-patches/0152: only this one call (windows.h's macros clash with Mesa's headers) */
++__declspec(dllimport) unsigned long __stdcall GetFileAttributesA(const char *lpFileName);
++#endif
+ 
+ #define DEFAULT_MAX_AFBC_PACKING_RATIO 90
+ 
+@@ -780,6 +784,10 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
+    caps->max_texel_buffer_elements =
+       pan_get_max_texel_buffer_elements(dev->arch);
+ 
++   /* sb-patches/0152: u_threaded_context uploads user constant buffers anyway; with this st does it itself.
++    * panfrost_emit_const_buf pushes uniforms from a real buffer's mapping too. */
++   caps->prefer_real_buffer_in_constbuf0 = screen->sb_threaded;
++
+    /* Must be at least 64 for correct behaviour */
+    caps->texture_buffer_offset_alignment = 64;
+ 
+@@ -946,6 +954,8 @@ panfrost_destroy_screen(struct pipe_screen *pscreen)
+    panfrost_close_device(dev);
+ 
+    disk_cache_destroy(screen->disk_cache);
++   util_idalloc_mt_fini(&screen->buffer_ids);       /* sb-patches/0152 */
++   slab_destroy_parent(&screen->transfer_pool);
+    ralloc_free(pscreen);
+ }
+ 
+@@ -1016,6 +1026,17 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
+ 
+    struct panfrost_device *dev = pan_device(&screen->base);
+ 
++   /* sb-patches/0152: off by default, so the phone can A/B it */
++   /* sb-patches/0152: PAN_THREADED=1, or the file C:\ProgramData\Starbite\panthreaded (a game started by an already
++    * running Steam never sees a new environment variable) */
++   screen->sb_threaded = debug_get_bool_option("PAN_THREADED", false);
++#ifdef _WIN32
++   if (!screen->sb_threaded && !getenv("PAN_THREADED"))
++      screen->sb_threaded = GetFileAttributesA("C:\\ProgramData\\Starbite\\panthreaded") != 0xFFFFFFFFul;
++#endif
++   util_idalloc_mt_init_tc(&screen->buffer_ids);
++   slab_create_parent(&screen->transfer_pool, sizeof(struct threaded_transfer), 16);
++
+    driParseConfigFiles(config->options, config->options_info,
+                        &(driConfigFileParseParams) { .driverName = "panfrost" });
+ 
+diff --git a/src/gallium/drivers/panfrost/pan_screen.h b/src/gallium/drivers/panfrost/pan_screen.h
+index 88382a1..ce2bfda 100644
+--- a/src/gallium/drivers/panfrost/pan_screen.h
++++ b/src/gallium/drivers/panfrost/pan_screen.h
+@@ -16,6 +16,9 @@
+ #include "util/log.h"
+ #include "util/set.h"
+ #include "util/u_dynarray.h"
++#include "util/u_idalloc.h"
++#include "util/slab.h"
++#include "util/u_threaded_context.h"
+ 
+ #include "pan_device.h"
+ #include "pan_mempool.h"
+@@ -149,6 +152,12 @@ struct panfrost_screen {
+       unsigned initial_chunks;
+       unsigned max_chunks;
+    } csf_tiler_heap;
++
++   /* Starbite (sb-patches/0152): PAN_THREADED=1 wraps GL contexts in u_threaded_context. buffer_ids are tc's
++    * buffer IDs (threaded_resource::buffer_id_unique), transfer_pool the parent of tc's transfer slabs. */
++   bool sb_threaded;
++   struct util_idalloc_mt buffer_ids;
++   struct slab_parent_pool transfer_pool;
+ };
+ 
+ static inline struct panfrost_screen *
+diff --git a/src/gallium/drivers/panfrost/pan_shader.c b/src/gallium/drivers/panfrost/pan_shader.c
+index ffd0c89..36fe68e 100644
+--- a/src/gallium/drivers/panfrost/pan_shader.c
++++ b/src/gallium/drivers/panfrost/pan_shader.c
+@@ -413,11 +413,34 @@ panfrost_new_variant_locked(struct panfrost_context *ctx,
+    return prog;
+ }
+ 
++/* sb-patches/0152: a transform feedback program deferred by create (u_threaded_context), compiled here in the
++ * driver thread before any variant of the shader. */
++static void
++panfrost_sb_compile_pending_xfb(struct panfrost_context *ctx,
++                                struct panfrost_uncompiled_shader *so)
++{
++   if (!so->sb_xfb_pending)
++      return;
++
++   simple_mtx_lock(&so->lock);
++   if (so->sb_xfb_pending) {
++      panfrost_shader_get(ctx->base.screen, &ctx->shaders, &ctx->descs, so,
++                          &ctx->base.debug, so->xfb, 0);
++      ((nir_shader *)so->nir)->info.has_transform_feedback_varyings = false;
++      so->sb_xfb_pending = false;
++   }
++   simple_mtx_unlock(&so->lock);
++}
++
+ static void
+ panfrost_bind_shader_state(struct pipe_context *pctx, void *hwcso,
+                            mesa_shader_stage type)
+ {
+    struct panfrost_context *ctx = pan_context(pctx);
++
++   if (hwcso)
++      panfrost_sb_compile_pending_xfb(ctx, hwcso);   /* sb-patches/0152 */
++
+    ctx->uncompiled[type] = hwcso;
+    ctx->prog[type] = NULL;
+ 
+@@ -621,13 +644,18 @@ panfrost_create_shader_state(struct pipe_context *pctx,
+       so->xfb = calloc(1, sizeof(struct panfrost_compiled_shader));
+       so->xfb->key.vs.is_xfb = true;
+ 
+-      panfrost_shader_get(ctx->base.screen, &ctx->shaders, &ctx->descs, so,
+-                          &ctx->base.debug, so->xfb, 0);
++      if (ctx->sb_tc) {
++         /* sb-patches/0152: application thread; compiled at the first bind */
++         so->sb_xfb_pending = true;
++      } else {
++         panfrost_shader_get(ctx->base.screen, &ctx->shaders, &ctx->descs, so,
++                             &ctx->base.debug, so->xfb, 0);
+ 
+-      /* Since transform feedback is handled via the transform
+-       * feedback program, the original program no longer uses XFB
+-       */
+-      nir->info.has_transform_feedback_varyings = false;
++         /* Since transform feedback is handled via the transform
++          * feedback program, the original program no longer uses XFB
++          */
++         nir->info.has_transform_feedback_varyings = false;
++      }
+    }
+ 
+    /* If we're not using separate shaders, the FS can use VS varying_layout to
+@@ -638,6 +666,11 @@ panfrost_create_shader_state(struct pipe_context *pctx,
+    if (nir->info.stage == MESA_SHADER_FRAGMENT && !nir->info.separate_shader)
+       return so;
+ 
++   /* sb-patches/0152: under u_threaded_context this runs in the application thread, and the compile allocates
++    * from the context's pools: the bind (driver thread) compiles the default variant instead. */
++   if (ctx->sb_tc)
++      return so;
++
+    /* Compile the program. We don't use vertex shader keys, so there will
+     * be no further vertex shader variants. We do have fragment shader
+     * keys, but we can still compile with a default key that will work most
+@@ -675,6 +708,9 @@ panfrost_delete_shader_state(struct pipe_context *pctx, void *so)
+ 
+    simple_mtx_destroy(&cso->lock);
+ 
++   if (cso->sb_compute_pending)                       /* sb-patches/0152: never compiled */
++      ralloc_free((void *)cso->nir);
++
+    ralloc_free(so);
+ }
+ 
+@@ -703,6 +739,11 @@ panfrost_link_shader(struct pipe_context *pctx, void** handles)
+    if (vs)
+       fs->vs_varying_layout = vs->vs_varying_layout;
+ 
++   /* sb-patches/0152: under u_threaded_context link_shader runs in the application thread: the varying layout is
++    * kept and the default variant is compiled at bind time in the driver thread. */
++   if (ctx->sb_tc)
++      return;
++
+    simple_mtx_lock(&fs->lock);
+ 
+    struct panfrost_shader_key key = panfrost_default_shader_key(fs);
+@@ -726,6 +767,13 @@ panfrost_create_compute_state(struct pipe_context *pctx,
+ 
+    assert(cso->ir_type == PIPE_SHADER_IR_NIR && "TGSI kernels unsupported");
+ 
++   if (ctx->sb_tc) {
++      /* sb-patches/0152: application thread; compiled at the first bind (driver thread) */
++      so->sb_compute_pending = true;
++      so->sb_static_shared_mem = cso->static_shared_mem;
++      return so;
++   }
++
+    panfrost_shader_get(pctx->screen, &ctx->shaders, &ctx->descs, so,
+                        &ctx->base.debug, v, cso->static_shared_mem);
+ 
+@@ -738,12 +786,35 @@ panfrost_create_compute_state(struct pipe_context *pctx,
+    return so;
+ }
+ 
++/* sb-patches/0152: the compile panfrost_create_compute_state deferred under u_threaded_context */
++static void
++panfrost_sb_compile_pending_compute(struct panfrost_context *ctx,
++                                    struct panfrost_uncompiled_shader *so)
++{
++   if (!so || !so->sb_compute_pending)
++      return;
++
++   simple_mtx_lock(&so->lock);
++   if (so->sb_compute_pending) {
++      struct panfrost_compiled_shader *v = util_dynarray_begin(&so->variants);
++
++      panfrost_shader_get(ctx->base.screen, &ctx->shaders, &ctx->descs, so,
++                          &ctx->base.debug, v, so->sb_static_shared_mem);
++      ralloc_free((void *)so->nir);
++      so->nir = NULL;
++      so->sb_compute_pending = false;
++   }
++   simple_mtx_unlock(&so->lock);
++}
++
+ static void
+ panfrost_bind_compute_state(struct pipe_context *pipe, void *cso)
+ {
+    struct panfrost_context *ctx = pan_context(pipe);
+    struct panfrost_uncompiled_shader *uncompiled = cso;
+ 
++   panfrost_sb_compile_pending_compute(ctx, uncompiled);
++
+    ctx->uncompiled[MESA_SHADER_COMPUTE] = uncompiled;
+ 
+    ctx->prog[MESA_SHADER_COMPUTE] =
+@@ -756,6 +827,9 @@ panfrost_get_compute_state_info(struct pipe_context *pipe, void *cso,
+ {
+    struct panfrost_device *dev = pan_device(pipe->screen);
+    struct panfrost_uncompiled_shader *uncompiled = cso;
++
++   panfrost_sb_compile_pending_compute(pan_context(pipe), uncompiled); /* sb-patches/0152 */
++
+    struct panfrost_compiled_shader *cs =
+       util_dynarray_begin(&uncompiled->variants);
+ 

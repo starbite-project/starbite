@@ -189,7 +189,15 @@ goto after_sweep
 call %D%\sb-soak.bat
 goto after_sweep
 :gd2
-call %D%\sb-gd.bat
+rem T53: with sb-gd-ab.txt staged, an A/B of the threaded GL driver (sb-patches 0152): run A plain, run B with the flag
+rem file C:\ProgramData\Starbite\panthreaded (the game reads it when it starts), then the flag is removed again
+if not exist %D%\sb-gd-ab.txt call %D%\sb-gd.bat A
+if exist %D%\sb-gd-ab.txt (
+  call %D%\sb-gd.bat A
+  echo on> C:\ProgramData\Starbite\panthreaded
+  call %D%\sb-gd.bat B
+  del C:\ProgramData\Starbite\panthreaded
+)
 :after_sweep
 echo shell surfaces opened %time% >> gputest.log
 echo sb-gputest end %date% %time% >> gputest.log

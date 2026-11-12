@@ -6,11 +6,14 @@ rem every 30 s (alive? working set, commit free, a screenshot), so a crash shows
 rem Our x64 GL driver goes into the game folder as in GD1 (ours only, marked, removed after unless the user's kit had
 rem put it there). The game's driver log (exceptions included) is umdlog\GeometryDash.exe-*.log.
 setlocal EnableDelayedExpansion
+set R=%~1
+if "%R%"=="" set R=A
 set D=C:\starbite\auto\gpu
 set L=%D%\gputest.log
 set G=C:\Program Files (x86)\Steam\steamapps\common\Geometry Dash
 cd /d %D%
-echo GD2 start %date% %time% >> %L%
+echo GD2 [%R%] start %date% %time% >> %L%
+if exist C:\ProgramData\Starbite\panthreaded (echo GD2 [%R%] threaded GL driver flag ON >> %L%) else (echo GD2 [%R%] threaded GL driver flag off >> %L%)
 if not exist "%G%\GeometryDash.exe" (echo GD2: Geometry Dash not installed >> %L% & exit /b 0)
 if not exist %D%\opengl32-gd.dll (echo GD2: no opengl32-gd.dll staged >> %L% & exit /b 0)
 set GDKIT=0
@@ -33,14 +36,14 @@ dir /a /o:d /t:w "C:\Program Files (x86)\Steam\logs" >> %L% 2>&1
 if exist "C:\Program Files (x86)\Steam\logs\content_log.txt" powershell -NoProfile -Command "Get-Content -Tail 15 'C:\Program Files (x86)\Steam\logs\content_log.txt'" >> %L% 2>&1
 goto finish
 :up
-echo GD2 GeometryDash.exe up after !W! s >> %L%
+echo GD2 [%R%] GeometryDash.exe up after !W! s >> %L%
 for /l %%T in (1,1,10) do (
   ping -n 31 127.0.0.1 > nul
   set ALIVE=gone
   for /f "tokens=5" %%m in ('tasklist /fi "imagename eq GeometryDash.exe" /nh ^| find /i "GeometryDash"') do set ALIVE=%%m K
-  echo GD2 t+%%T x30s: !ALIVE! >> %L%
+  echo GD2 [%R%] t+%%T x30s: !ALIVE! >> %L%
   sbshow.exe disk >> %L% 2>&1
-  if not "!ALIVE!"=="gone" sbshow.exe snap 28-gd-%%T >> %L% 2>&1
+  if not "!ALIVE!"=="gone" sbshow.exe snap 28-gd-%R%-%%T >> %L% 2>&1
   if "!ALIVE!"=="gone" goto gone
 )
 echo GD2 still running after 300 s: closing it >> %L%
@@ -53,5 +56,5 @@ ping -n 4 127.0.0.1 > nul
 if "%GDKIT%"=="0" del /f "%G%\opengl32.dll" "%G%\libgallium_wgl.dll" "%G%\opengl32.dll.starbite"
 wevtutil qe Application /q:"*[System[(EventID=1000 or EventID=1001 or EventID=1002 or EventID=1026)]]" /rd:true /c:30 /f:text > C:\ProgramData\Starbite\umdlog\gd-app-events.txt 2>&1
 wevtutil qe System /q:"*[System[(EventID=4101 or EventID=2004 or EventID=2019 or EventID=2020)]]" /rd:true /c:30 /f:text > C:\ProgramData\Starbite\umdlog\gd-sys-events.txt 2>&1
-echo GD2 end %date% %time% >> %L%
+echo GD2 [%R%] end %date% %time% >> %L%
 exit /b 0
