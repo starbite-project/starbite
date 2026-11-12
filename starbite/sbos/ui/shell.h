@@ -187,6 +187,13 @@ int sh_linux_touch(int phase, int x, int y);   /* surface px, phase 0 down / 1 m
 int sh_linux_char(char c);               /* one character typed: committed text for a focused text field, else keys
                                           * (Shift around capitals); '\n' Return and '\b' BackSpace are always keys */
 int sh_linux_viewport(int rows);         /* the rows the shell shows (SH_LINUX_H, or SH_LINUX_HKB with the keyboard) */
+/* cp7 landscape (Track E): q = quarter turns clockwise of the Linux window on the panel (0 portrait, 1 the phone's
+ * top to the left, 3 to the right); rows = the window's rows shown when turned (the landscape keyboard up: fewer;
+ * 0 all SH_LINUX_W). The surface, the blit and sh_linux_touch stay in portrait surface px: the guest turns its
+ * frame and maps touches back. sh_linux_rot_shown: the turn of the frame on show; turn the chrome when it equals q
+ * (a guest that cannot turn stays at 0: keep that app portrait). */
+int sh_linux_rotate(int q, int rows);
+int sh_linux_rot_shown(void);
 int sh_linux_icon(int icon, uint32_t *px);     /* a pool icon into px (SH_LINUX_ICON squared); 0: none */
 int sh_linux_zero_copy(void);              /* 1.0: 1 when the GPU samples the guest's window surface in place: show it with
                                             * tk_layer_external (the front buffer from the header) instead of the strips */

@@ -574,7 +574,16 @@ static int run_guest(unsigned run)
             continue;
         }
         if (mf->flags & F_TERM) {           /* the terminal: type a command, the shell runs it */
+#ifdef SBSIM_TERM_STRESS
+            /* the hard power-off test (cp7 #1): a writer that never stops (files made, rewritten, renamed, no
+             * sync), started before the marker; the test kills QEMU mid-write and cold-starts on the same overlay */
+            static const char cmd[] = "(i=0; while :; do i=$((i+1)); dd if=/dev/urandom of=$HOME/w$((i%24)) bs=64k "
+                                      "count=16 2>/dev/null; cp /etc/services $HOME/s.tmp && mv $HOME/s.tmp "
+                                      "$HOME/s$((i%50)); echo $i > $HOME/n; done) >/dev/null 2>&1 & "
+                                      "echo STARBITE-TERM-OK > /dev/kmsg\n";
+#else
             static const char cmd[] = "echo STARBITE-TERM-OK > /dev/kmsg\n";
+#endif
             if (s->state == SBG_RUNNING && frames >= 1 && tstep == 0 && t_touch && t - t_touch > 2000) {
                 tstep = 1;
                 typed = 0;
@@ -626,7 +635,12 @@ static int run_guest(unsigned run)
                 putu(h->touches_seen);
                 puts_("\n");
                 tstep = 5;
+#ifdef SBSIM_TERM_STRESS
+                puts_("sbsim: stress: the writer runs on; no stop (the test kills QEMU: a hard power-off)\n");
+                tstep = 6;
+#else
                 sbg_stop();
+#endif
             } else if (tstep == 2 && t - t_touch > 20000) {
                 puts_("sbsim: no STARBITE-TERM-OK from the guest's shell in 20 s\n");
                 tstep = 5;

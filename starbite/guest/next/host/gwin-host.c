@@ -55,6 +55,7 @@ void ub_dec(struct ub *u, uint64_t v)
 
 /* ---- the fake guest (kern/guest.c's API as gwin.c uses it) ---- */
 static int st = GUEST_OFF, shown, mode = GUEST_APP, term_ok, busy;
+static uint32_t frot, frot_rows;            /* cp7: the fake guest turns at once (a new guest: 0, as sbghost's load) */
 static uint64_t t_state;
 static uint32_t seq, drawn;
 static char line[128], typed[512];
@@ -98,6 +99,7 @@ int guest_start_mode(int m)
     st = GUEST_STARTING;
     t_state = now_ms;
     term_ok = 0;
+    frot = frot_rows = 0;
     seq = drawn = 0;
     ntyped = nline = 0;
     why = "";
@@ -111,6 +113,8 @@ int guest_start_mode(int m)
 int guest_state(void) { return st; }
 int guest_mode(void) { return mode; }
 const char *guest_why(void) { return why; }
+static const char *gstage = "";            /* cp7 #1: the start's words (guest.c: the disk check, a slow start) */
+const char *guest_stage(void) { return st == GUEST_STARTING ? gstage : ""; }
 int guest_stop(void) { if (st == GUEST_RUNNING || st == GUEST_STARTING) { st = GUEST_STOPPING; t_state = now_ms; } return 0; }
 int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED; }
 int hw_m3_on(void) { return guest_owns_m3(); }
@@ -258,6 +262,14 @@ int sbg_clip_set(const char *mime, const uint8_t *data, unsigned len)
 }
 void sbg_surf_reading(int idx) { got.reading++; got.read_idx = (uint32_t)idx; }
 void sbg_surf_done(void) { got.done++; }
+int sbg_rotate(uint32_t q, uint32_t rows)
+{
+    printf("[%6llu ms] fake guest: ROTATE %u, %u rows\n", (unsigned long long)now_ms, q, rows);
+    if (st != GUEST_RUNNING) return 0;
+    frot = q, frot_rows = rows;
+    return 1;
+}
+uint32_t sbg_rot_shown(void) { return st == GUEST_RUNNING ? frot : 0; }
 int sbg_viewport(uint32_t rows, uint32_t width)
 {
     printf("[%6llu ms] fake guest: VIEWPORT %u x %u\n", (unsigned long long)now_ms, width, rows);
@@ -605,6 +617,12 @@ int main(int argc, char **argv)
     memset(&got, 0, sizeof got);
     sh_set("lapp", "org.gnome.TextEditor", 1);              /* as a tap on its icon (page 3) */
     check(st == GUEST_STARTING, "a Linux app's open started Linux");
+    gstage = "Checking Linux's disk.";                      /* cp7 #1: the guest's init checks the overlay */
+    run(2);
+    tk_comp_frame(&C, 0, 1);
+    write_ppm(argv[2], "gwin-starting-check.ppm", &C.panel);
+    check(st == GUEST_STARTING, "cp7: the start's words shown while starting (gwin-starting-check.ppm)");
+    gstage = "";
     run(30);
     check(got.launch == 1 && got.activate == 1, "LAUNCH (with the catalog's layout_seq) + ACTIVATE of the Text Editor");
     check(got.viewport >= 1 && got.last_vp == SH_LINUX_H, "the viewport 1344 rows (no keyboard)");
@@ -620,6 +638,12 @@ int main(int argc, char **argv)
     check(got.keys == 1, "Return as a key");
     tk_comp_frame(&C, 0, 1);
     write_ppm(argv[2], "gwin-editor.ppm", &C.panel);
+    sh_linux_rotate(1, 0);                                  /* cp7: the phone turned (top to the left) */
+    run(2);
+    check(frot == 1 && frot_rows == SH_LINUX_W && sh_linux_rot_shown() == 1, "cp7: ROTATE 1 sent, the turned frame on show");
+    sh_linux_rotate(0, 0);
+    run(2);
+    check(frot == 0 && sh_linux_rot_shown() == 0, "cp7: ROTATE 0 (portrait again)");
     sh_set("app", "", 0);                                   /* home */
     run(2);
     check(got.activate_none == 1 && !shown, "home: ACTIVATE none, the window hidden (the app keeps running)");

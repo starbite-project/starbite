@@ -148,8 +148,13 @@ struct sbshm_hdr {
     char guest_kver[64];            /* uname -r */
     char title[32];                 /* the app's title for Starbite's frame */
     uint32_t rows_valid;            /* 1: the guest keeps row_seq (SBSHM_ROWS_OFF); 0: copy the whole surface */
-    uint32_t pad1[15];
+    uint32_t guest_caps;            /* SBSHM_CAP_* (was pad1[0]; 0 from an older guest), set before HELLO */
+    uint32_t guest_rot;             /* the quarter turns (SBG_MSG_ROTATE's a) of the frame at surf_seq: the host
+                                     * turns its own chrome when this matches what it asked (was pad1[1]) */
+    uint32_t pad1[13];
 };
+/* hdr.guest_caps */
+#define SBSHM_CAP_ROTATE 1U         /* SBG_MSG_ROTATE: landscape apps (cp7) */
 
 /* ---- damage per row (guestd since 2026-11-09) ----------------------------------------------------------
  * row_seq[y] = the surf_seq of the frame in which surface row y last changed. The guest writes the rows of a
@@ -189,6 +194,12 @@ enum {
                              * SBSHM_NONE = dismissed by the user */
     SBG_MSG_KEYMOD = 16,    /* a = SBSHM_MOD_* held for the next keys / text (Ctrl, Alt, Super from the shell's key
                              * bar); 0 = none. Keys themselves stay SBG_MSG_KEY */
+    SBG_MSG_ROTATE = 17,    /* (hdr.guest_caps & SBSHM_CAP_ROTATE) a = quarter turns clockwise of the content on the
+                             * panel: 0 portrait, 1 (the phone's top to the left), 3 (top to the right); 2 is taken
+                             * as 0. b = with 1 / 3, the content rows shown (the landscape keyboard up: fewer;
+                             * 0 = all surf_w). Apps get surf_h x b; the surface stays surf_w x surf_h (the frame is
+                             * turned into it) and touches stay in surface pixels (the guest turns them back).
+                             * SBG_MSG_VIEWPORT applies to 0 only. */
     /* guest -> host */
     SBG_MSG_HELLO = 64,     /* a = ncpus, b = surface ready */
     SBG_MSG_BYE = 65,       /* user space done; the kernel powers the CPUs off next */

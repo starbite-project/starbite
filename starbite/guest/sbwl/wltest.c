@@ -114,6 +114,9 @@ static void draw(void)
 	uint32_t c = 0x204060U + ((nframes * 3U) & 0xffU) * 0x10000U;
 	for (int i = 0; i < width * height; ++i)
 		b->px[i] = c;
+	for (int y = 0; y < 16 && y < height; ++y)     /* cp7: the top-left corner marked (where the content's origin went) */
+		for (int x = 0; x < 32 && x < width; ++x)
+			b->px[y * width + x] = 0xffffffU;
 	nframes++;
 	if (mode == 1)
 		wl_callback_add_listener(wl_surface_frame(surf), &frame_l, NULL);
@@ -248,12 +251,44 @@ static void kb_repeat(void *d, struct wl_keyboard *k, int32_t r, int32_t de) { (
 static const struct wl_keyboard_listener kb_l = {.keymap = kb_keymap, .enter = kb_enter, .leave = kb_leave, .key = kb_key,
 						  .modifiers = kb_mods, .repeat_info = kb_repeat};
 
+/* the pointer (sbwl's emulation of a tap): "press:X,Y" in surface coordinates (cp7: landscape's mapped taps) */
+static struct wl_pointer *ptr;
+static double ptr_x, ptr_y;
+static void p_enter(void *d, struct wl_pointer *p, uint32_t serial, struct wl_surface *s, wl_fixed_t x, wl_fixed_t y)
+{
+	(void)d, (void)p, (void)serial, (void)s;
+	ptr_x = wl_fixed_to_double(x), ptr_y = wl_fixed_to_double(y);
+}
+static void p_leave(void *d, struct wl_pointer *p, uint32_t serial, struct wl_surface *s) { (void)d, (void)p, (void)serial, (void)s; }
+static void p_motion(void *d, struct wl_pointer *p, uint32_t t, wl_fixed_t x, wl_fixed_t y)
+{
+	(void)d, (void)p, (void)t;
+	ptr_x = wl_fixed_to_double(x), ptr_y = wl_fixed_to_double(y);
+}
+static void p_button(void *d, struct wl_pointer *p, uint32_t serial, uint32_t t, uint32_t b, uint32_t st)
+{
+	(void)d, (void)p, (void)serial, (void)t, (void)b;
+	if (st == WL_POINTER_BUTTON_STATE_PRESSED)
+		record("press:%d,%d", (int)ptr_x, (int)ptr_y);
+}
+static void p_axis(void *d, struct wl_pointer *p, uint32_t t, uint32_t a, wl_fixed_t v) { (void)d, (void)p, (void)t, (void)a, (void)v; }
+static void p_frame(void *d, struct wl_pointer *p) { (void)d, (void)p; }
+static void p_asrc(void *d, struct wl_pointer *p, uint32_t s) { (void)d, (void)p, (void)s; }
+static void p_astop(void *d, struct wl_pointer *p, uint32_t t, uint32_t a) { (void)d, (void)p, (void)t, (void)a; }
+static void p_adisc(void *d, struct wl_pointer *p, uint32_t a, int32_t v) { (void)d, (void)p, (void)a, (void)v; }
+static const struct wl_pointer_listener ptr_l = {.enter = p_enter, .leave = p_leave, .motion = p_motion,
+						 .button = p_button, .axis = p_axis, .frame = p_frame,
+						 .axis_source = p_asrc, .axis_stop = p_astop, .axis_discrete = p_adisc};
 static void seat_caps(void *d, struct wl_seat *s, uint32_t caps)
 {
 	(void)d;
 	if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !kbd) {
 		kbd = wl_seat_get_keyboard(s);
 		wl_keyboard_add_listener(kbd, &kb_l, NULL);
+	}
+	if ((caps & WL_SEAT_CAPABILITY_POINTER) && !ptr) {
+		ptr = wl_seat_get_pointer(s);
+		wl_pointer_add_listener(ptr, &ptr_l, NULL);
 	}
 }
 static void seat_name(void *d, struct wl_seat *s, const char *n) { (void)d, (void)s, (void)n; }
@@ -293,6 +328,8 @@ static const struct xdg_surface_listener xs_l = {.configure = xs_configure};
 static void tl_configure(void *d, struct xdg_toplevel *t, int32_t w, int32_t h, struct wl_array *s)
 {
 	(void)d, (void)t, (void)s;
+	if (w > 0 && h > 0 && (w != width || h != height))
+		record("configure:%dx%d", w, h);
 	if (w > 0 && h > 0)
 		width = w, height = h;
 }

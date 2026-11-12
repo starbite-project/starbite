@@ -68,11 +68,19 @@ static int same(const char *a, const char *b)
 }
 static int term_id(const char *id) { return same(id, SH_LINUX_TERMINAL) || same(id, "foot"); }
 
-static void push_state(void)
+static int push_state(void)                /* 2: only the start's words changed */
 {
     int s = guest_state();
-    if (s == last_state)
-        return;
+    static const char *last_stage;
+    const char *stage = s == GUEST_STARTING ? guest_stage() : "";
+    if (s == last_state && stage == last_stage)
+        return 0;
+    if (s == last_state) {                 /* the start's words changed (cp7 #1: the disk check, a slow start) */
+        last_stage = stage;
+        sh_linux_state(s, stage);
+        return 2;
+    }
+    last_stage = stage;
     if (s == GUEST_RUNNING) {
         t_running = sb_ms();
         const char *c = sh_clip_get();     /* v3: what Starbite copied before Linux ran, for Linux's paste */
@@ -91,7 +99,8 @@ static void push_state(void)
         want = -1;
     }
     last_state = s;
-    sh_linux_state(s, s == GUEST_FAILED ? guest_why() : "");
+    sh_linux_state(s, s == GUEST_FAILED ? guest_why() : stage);
+    return 1;
 }
 
 /* ---- the guest's tables (seqlocked; copied whole or not at all): 1 copied, 0 not written yet, -1 again later ---- */
@@ -469,6 +478,35 @@ int sh_linux_viewport(int rows)
     return 1;                              /* sent with the next ACTIVATE */
 }
 
+/* cp7 landscape: the shell's turn for the Linux window (Track A's sh_orientation, while a Linux app is shown).
+ * Sent once the guest runs (again to each new guest); the shell turns its own chrome when sh_linux_rot_shown()
+ * reaches q (the guest's frame is turned then). A guest without the capability stays portrait (0 forever). */
+static int rot_q, rot_rows, rot_dirty, rot_said;
+int sh_linux_rotate(int q, int rows)
+{
+    q = q == 1 || q == 3 ? q : 0;
+    rows = !q ? 0 : rows < 1 || rows > SH_LINUX_W ? SH_LINUX_W : rows;
+    if (q == rot_q && rows == rot_rows)
+        return 1;
+    rot_q = q, rot_rows = rows, rot_dirty = 1;
+    return 1;
+}
+int sh_linux_rot_shown(void) { return guest_state() == GUEST_RUNNING ? (int)sbg_rot_shown() : 0; }
+static void rot_tick(void)
+{
+    if (!rot_dirty || guest_state() != GUEST_RUNNING || want < 0)
+        return;
+    int r = sbg_rotate((uint32_t)rot_q, (uint32_t)rot_rows);
+    if (r > 0) {
+        rot_dirty = 0;
+        sb_logf("gwin: rotate ", rot_q == 1 ? "1 (the top to the left)" : rot_q == 3 ? "3 (the top to the right)" : "0");
+    } else if (r < 0) {
+        rot_dirty = 0;                     /* an older guest: portrait */
+        if (!rot_said++)
+            sb_log("gwin: this guest cannot turn its window (no SBSHM_CAP_ROTATE): portrait");
+    }
+}
+
 int sh_linux_icon(int icon, uint32_t *px)
 {
     const volatile uint32_t *s = icon >= 0 ? sbg_icon((uint32_t)icon) : 0;
@@ -644,8 +682,11 @@ int gwin_now(void)
         return 0;
     t = now;
     int was = last_state, changed = 0;
-    push_state();
-    changed = was != last_state;
+    int words = push_state() == 2;
+    changed = was != last_state || words;
+    if (was != last_state && last_state != GUEST_RUNNING && rot_q)
+        rot_dirty = 1;                     /* the next guest gets the turn again */
+    rot_tick();
     if (guest_state() == GUEST_RUNNING) {
         unsigned ch = sbg_changes();
         if (ch & SBG_CH_CATALOG)
