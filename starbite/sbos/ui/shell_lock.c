@@ -2828,8 +2828,12 @@ static int kit_on(void);
 static void toast(const char *msg);
 /* the Options sheet: the one-shots that fit this OS (the others dimmed: a tap says why), "Start Normally" once one is
  * chosen, Cancel */
-static const int FO_ACT[3] = { SH_REQ_SAFE, SH_REQ_SINGLE, SH_REQ_PREV };
-static int fo_map[5], fo_n;
+static const int FO_ACT[6] = { SH_REQ_SAFE, SH_REQ_SINGLE, SH_REQ_XNU_SINGLE, SH_REQ_DRIVER_OFF, SH_REQ_PREV, SH_REQ_VERBOSE };
+static int fo_map[8], fo_n;
+/* an option of another family ("Only for Linux systems"): not listed at all (iOS lists what applies; dimmed is for an
+ * option of this system that can't run now: "Not installed", "No previous kernel in the store") */
+static int fo_pre(const char *s, const char *p) { while (*p) if (*s++ != *p++) return 0; return 1; }
+static int fo_other(const char *why) { return fo_pre(why, "Only for") || fo_pre(why, "Not for") || fo_pre(why, "Not available"); }
 static void fo_cb(int i)
 {
     if (i < 0 || i >= fo_n || !focus_sys) return;
@@ -2847,15 +2851,17 @@ static void fo_cb(int i)
 static void fo_open(void)
 {
     if (!focus_sys) return;
-    static kit_btn B[5];
+    static kit_btn B[8];
     fo_n = 0;
-    for (int k = 0; k < 3; k++) {
+    for (int k = 0; k < 6 && fo_n < 4; k++) {
         char why[96];
         int fits = sh_req_why(focus_sys->k, FO_ACT[k], why, (int)sizeof why) == 1;
+        if (!fits && fo_other(why)) continue;
         const char *l = sh_req_label(FO_ACT[k]);
         B[fo_n] = (kit_btn){ l && l[0] ? l : "?", fits ? (focus_req == FO_ACT[k] ? KIT_PREFERRED : KIT_DEFAULT) : KIT_DISABLED };
         fo_map[fo_n++] = FO_ACT[k];
     }
+    if (!fo_n) { toast("No other ways to start this system"); return; }
     if (focus_req) { B[fo_n] = (kit_btn){ "Start Normally", KIT_DEFAULT }; fo_map[fo_n++] = 0; }
     B[fo_n] = (kit_btn){ "Cancel", KIT_CANCEL }; fo_map[fo_n++] = -1;
     kit_actions("Start Once With", B, fo_n, fo_cb);
