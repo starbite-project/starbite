@@ -734,6 +734,7 @@ struct sbtcp;
 int kmodem_netif(struct sbnet **net, struct sbtcp **tcp);   /* 1 = up (pointers filled when not NULL) */
 /* guestnet.c (Track G): the Linux guest's network, NATed onto the active uplink (Wi-Fi first, else mobile data).
  * The uplinks report themselves (n = 0: down) and offer every received IPv4 packet first: 1 = it was the guest's. */
+#define SBOS_HAVE_GUESTNET 1               /* wifi-core's hooks in kern/wifi.c compile in on this */
 enum { KNET_UPLINK_WIFI = 1, KNET_UPLINK_CELL = 2 };   /* = sbshm-net.h's SBSHM_NET_UPLINK_* */
 void guestnet_uplink(int which, struct sbnet *n);
 int guestnet_rx(int which, const uint8_t *ip, uint32_t len);
