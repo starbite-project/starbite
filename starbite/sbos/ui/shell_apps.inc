@@ -986,15 +986,14 @@ static void calc_key_rect(int i, float *x, float *y, float *w)
     *w = 80;
 }
 static int calc_is_op(int i) { return i % 4 == 3; }
-static void calc_key(dc *d, int i, int lit)
+/* key i in the rect (x, y, w, h), its glyph at sc of the portrait's size (cp7: the landscape's capsules) */
+static void calc_key_at(dc *d, int i, int lit, float x, float y, float kw, float kh, float sc)
 {
-    float x, y, w;
-    calc_key_rect(i, &x, &y, &w);
     int fn = i < 3 || i == 16, op = calc_is_op(i);
     tk_col bg = lit ? W(1) : op ? C_ORANGE : fn ? tk_hex(0x5c5c5f, 1) : tk_hex(0x2a2a2c, 1);
     tk_col fg = lit ? C_ORANGE : W(1);
-    d_rrect(d, x, y, 80, 80, 40, bg);
-    float cx = x + 40, cy = y + 40;
+    d_rrect(d, x, y, kw, kh, tk_minf(kw, kh) / 2, bg);
+    float cx = x + kw / 2, cy = y + kh / 2;
     if (i == 0) {                                     /* delete.left: a pentagon with an x */
         d_seg(d, cx - 13, cy, cx - 6, cy - 8, 2, fg); d_seg(d, cx - 13, cy, cx - 6, cy + 8, 2, fg);
         d_seg(d, cx - 6, cy - 8, cx + 12, cy - 8, 2, fg); d_seg(d, cx - 6, cy + 8, cx + 12, cy + 8, 2, fg);
@@ -1002,14 +1001,110 @@ static void calc_key(dc *d, int i, int lit)
         d_seg(d, cx - 1, cy - 4, cx + 7, cy + 4, 2, fg); d_seg(d, cx + 7, cy - 4, cx - 1, cy + 4, 2, fg);
         return;
     }
-    float fs = op ? 40 : fn ? 30 : 36;
+    float fs = (op ? 40 : fn ? 30 : 36) * sc;
     int f = op ? TK_IT500 : TK_IT400;
     float w0 = tw(f, fs, CALK[i], 0, 0);
     d_text(d, f, fs, cx - w0 / 2, bl(f, fs, cy - lh(f, fs) / 2 - (op ? 2 : 0)), CALK[i], 0, 0, fg, 0);
 }
+static void calc_key(dc *d, int i, int lit)
+{
+    float x, y, w;
+    calc_key_rect(i, &x, &y, &w);
+    calc_key_at(d, i, lit, x, y, 80, 80, 1);
+}
+/* ---- cp7 #5: the Calculator turned with the phone (shell_orient.inc). The landscape screen (802 x 390 pt): the
+ * result across the top, the same 20 keys as capsules in 4 rows of 5 (the functions left, the digits, the operators
+ * right; iOS's scientific keys would need the double maths the kernel doesn't have). Each key is drawn upright in a
+ * small bitmap of its own, turned exactly and put into the portrait page; the display the same way. ---- */
+static const int CALL_CELL[20] = { 15, 0, 10, 4, 1, 2, 3, 9, 6, 7, 8, 14, 11, 12, 13, 19, 5, 16, 17, 18 };
+#define CALL_X0 44.0f
+#define CALL_KW 133.2f
+#define CALL_KH 50.0f
+#define CALL_Y0 136.0f
+static void calc_lrect(int i, float *x, float *y)
+{
+    int c = CALL_CELL[i];
+    *x = CALL_X0 + (float)(c % 5) * (CALL_KW + 12);
+    *y = CALL_Y0 + (float)(c / 5) * (CALL_KH + 10);
+}
+/* a landscape rect's bitmap to draw upright in (its own dc, in the landscape's px) */
+static int ori_temp(tk_bmp *b, dc *t, float lx, float ly, float lw, float lh)
+{
+    int X = (int)tk_floorf(PT(lx)) - 1, Y = (int)tk_floorf(PT(ly)) - 1;
+    if (!tk_bmp_new(b, (int)PT(lx + lw) + 2 - X, (int)PT(ly + lh) + 2 - Y)) return 0;
+    *t = (dc){ b, 0, (float)X, (float)Y };
+    return 1;
+}
+/* the temp's bitmap turned for o and where it goes on the portrait panel (px) */
+static int ori_settle(tk_bmp *b, const dc *t, int o, int *px, int *py)
+{
+    int w = b->w, h = b->h, X = (int)t->ox, Y = (int)t->oy;
+    if (!tk_bmp_turn(b, ori_q(o))) return 0;
+    if (o == SH_ORI_TURNED_LEFT) { *px = TK_W - Y - h; *py = X; }
+    else { *px = Y; *py = TK_H - X - w; }
+    return 1;
+}
+/* the portrait panel's rect (pt) of a landscape rect */
+static tk_rect ori_prect(int o, float lx, float ly, float lw, float lh)
+{
+    if (o == SH_ORI_TURNED_LEFT) return (tk_rect){ 390 - ly - lh, lx, lh, lw };
+    return (tk_rect){ ly, H_PT - lx - lw, lh, lw };
+}
+/* key i (lit or not) drawn upright, turned, over d (a page strip or a layer's bitmap) */
+static void calc_lkey(dc *d, int i, int lit)
+{
+    float x, y;
+    calc_lrect(i, &x, &y);
+    tk_rect pr = ori_prect(ori_cur, x, y, CALL_KW, CALL_KH);
+    if (PT(pr.y + pr.h) < d->oy || PT(pr.y) > d->oy + (float)d->b->h) return;   /* not in this strip */
+    tk_bmp b;
+    dc t;
+    int px, py;
+    if (!ori_temp(&b, &t, x, y, CALL_KW, CALL_KH)) return;
+    calc_key_at(&t, i, lit, x, y, CALL_KW, CALL_KH, .78f);
+    if (ori_settle(&b, &t, ori_cur, &px, &py)) tk_blit(d->b, &b, px - (int)d->ox, py - (int)d->oy, 1);
+    tk_bmp_free(&b);
+}
 static void page_calc(dc *d)
 {
-    for (int i = 0; i < 20; i++) calc_key(d, i, 0);
+    for (int i = 0; i < 20; i++) {
+        if (ori_cur) calc_lkey(d, i, 0);
+        else calc_key(d, i, 0);
+    }
+}
+/* the key under a portrait point (pt), -1 none */
+static int calc_hit(float x, float y)
+{
+    if (ori_cur) {
+        ori_map(ori_cur, &x, &y);
+        for (int i = 0; i < 20; i++) {
+            float kx, ky;
+            calc_lrect(i, &kx, &ky);
+            if (x >= kx - 5 && x < kx + CALL_KW + 5 && y >= ky - 4 && y < ky + CALL_KH + 4) return i;
+        }
+        return -1;
+    }
+    for (int i = 0; i < 20; i++) {
+        float kx, ky, kw;
+        calc_key_rect(i, &kx, &ky, &kw);
+        float dx = x - (kx + 40), dy = y - (ky + 40);
+        if (dx * dx + dy * dy <= 44 * 44) return i;
+    }
+    return -1;
+}
+/* key i's rect on the portrait panel (pt) and its corner radius */
+static tk_rect calc_prect(int i, float *rad)
+{
+    if (ori_cur) {
+        float x, y;
+        calc_lrect(i, &x, &y);
+        *rad = CALL_KH / 2;
+        return ori_prect(ori_cur, x, y, CALL_KW, CALL_KH);
+    }
+    float x, y, w;
+    calc_key_rect(i, &x, &y, &w);
+    *rad = 40;
+    return (tk_rect){ x, y, 80, 80 };
 }
 static int calc_fmt(char *b, double v)
 {
@@ -1060,6 +1155,47 @@ static int calc_fmt(char *b, double v)
     return n;
 }
 static const char *calc_opch(int op) { return op == 1 ? "\xc3\xb7" : op == 2 ? "\xc3\x97" : op == 3 ? "\xe2\x88\x92" : op == 4 ? "+" : ""; }
+/* cp7: a layer showing a turned bitmap at its place (px) */
+static void ori_layer_put(tk_layer *l, const char *name, tk_bmp *b, int px, int py)
+{
+    tk_layer *nx = l->next;
+    tk_layer_init(l, name);
+    l->next = nx;
+    l->bmp = *b;
+    l->x = l->bx = (float)px;
+    l->y = l->by = (float)py;
+}
+/* cp7: the landscape display (the expression over the result, right-aligned) and the pending operator's lit key */
+static void calc_ldisplay(const char *b)
+{
+    float size = 64, w = tw(TK_IT400, size, b, 0, TK_TNUM);
+    while (w > 700 && size > 30) { size -= 2; w = tw(TK_IT400, size, b, 0, TK_TNUM); }
+    tk_bmp bm;
+    dc t;
+    int px, py;
+    if (ori_temp(&bm, &t, 24, 4, 754, 126)) {
+        if (cal_expr[0]) {
+            float ew = tw(TK_IT400, 22, cal_expr, 0, TK_TNUM);
+            d_text(&t, TK_IT400, 22, 758 - ew, bl(TK_IT400, 22, 18), cal_expr, 0, TK_TNUM, C_LABEL2, 0);
+        }
+        d_text(&t, TK_IT400, size, 758 - w, bl(TK_IT400, size, 126 - size * 1.21f), b, 0, TK_TNUM, INK, 0);
+        if (ori_settle(&bm, &t, ori_cur, &px, &py)) { ori_layer_put(&apcalc, "calc-display", &bm, px, py); trim(&apcalc); apcalc.hidden = 0; }
+        else tk_bmp_free(&bm);
+    }
+    relayer(&calop);
+    calop.hidden = 1;
+    if (CAL.op && !CAL.entering && !CAL.err) {
+        int k = CAL.op == 1 ? 3 : CAL.op == 2 ? 7 : CAL.op == 3 ? 11 : 15;
+        float x, y;
+        calc_lrect(k, &x, &y);
+        if (ori_temp(&bm, &t, x, y, CALL_KW, CALL_KH)) {
+            calc_key_at(&t, k, 1, x, y, CALL_KW, CALL_KH, .78f);
+            if (ori_settle(&bm, &t, ori_cur, &px, &py)) { ori_layer_put(&calop, "calc-op", &bm, px, py); calop.hidden = 0; }
+            else tk_bmp_free(&bm);
+        }
+    }
+    relink();
+}
 static void build_calc(void)
 {
     relayer(&apcalc);
@@ -1076,6 +1212,7 @@ static void build_calc(void)
             b[n] = 0;
         }
     }
+    if (ori_cur) { calc_ldisplay(b); return; }        /* cp7: turned with the phone */
     float size = 86, w = tw(TK_IT400, size, b, 0, TK_TNUM);
     while (w > 352 && size > 36) { size -= 2; w = tw(TK_IT400, size, b, 0, TK_TNUM); }
     tk_layer *nx = apcalc.next;
@@ -1115,13 +1252,7 @@ static double calc_apply(double a, double b, int op, int *err)
 }
 static void calc_tap(float x, float y)
 {
-    int k = -1;
-    for (int i = 0; i < 20; i++) {
-        float kx, ky, kw;
-        calc_key_rect(i, &kx, &ky, &kw);
-        float dx = x - (kx + 40), dy = y - (ky + 40);
-        if (dx * dx + dy * dy <= 44 * 44) { k = i; break; }
-    }
+    int k = calc_hit(x, y);
     if (k < 0) return;
     sh_haptic();
     const char *c = CALK[k];
@@ -1179,13 +1310,11 @@ static int ap_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
 {
     if (is_app("camera")) return cam_press(x, y, r, g, rad, c);   /* the shutter's disc, the circles */
     if (is_app("calc")) {
-        for (int i = 0; i < 20; i++) {
-            float kx, ky, kw;
-            calc_key_rect(i, &kx, &ky, &kw);
-            float dx = x - (kx + 40), dy = y - (ky + 40);
-            if (dx * dx + dy * dy <= 44 * 44) { *r = *g = (tk_rect){ kx, ky, 80, 80 }; *rad = 40; *c = APR_KEY; return 1; }
-        }
-        return 0;
+        int i = calc_hit(x, y);
+        if (i < 0) return 0;
+        *r = *g = calc_prect(i, rad);                    /* cp7: the landscape's capsule too */
+        *c = APR_KEY;
+        return 1;
     }
     if (is_app("light")) {                                        /* cp6: the Flashlight's switch (a CC tile's press) */
         if (x < 135 || x >= 255 || y < 250 || y >= 490) return 0;

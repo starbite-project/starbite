@@ -1964,7 +1964,7 @@ static void cc_unview(void)
 static void build_cc_grid(void)
 {
     cc_unview();
-    CCS.rot = 1;                                 /* cp6: iOS's Portrait Orientation Lock, always on (the panel doesn't rotate) */
+    CCS.rot = sh_orientation_lock();             /* cp7: iOS's Portrait Orientation Lock, a real switch (off by default) */
     CCS.save = sh_low_power_on();                /* cp6: Track A's Low Power Mode lights its tile */
     relayer(&ccgrid);
     dc d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, 4 * CC_U + 3 * CC_GAP, 44, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
@@ -2483,7 +2483,14 @@ static int cc_tap(float x, float y)
             sh_haptic_k(SH_HAP_LIGHT);       /* B4: a toggle, felt */
             return 1;
         }
-        else if (c == 1) { toast("Portrait Orientation Lock: On"); return 1; }   /* cp6: always on (no rotation) */
+        else if (c == 1) {                   /* cp7: Portrait Orientation Lock (Track A's pref; the apps that turn) */
+            int on = !sh_orientation_lock();
+            sh_orientation_lock_set(on);
+            sh_haptic_k(SH_HAP_LIGHT);
+            toast(on ? "Portrait Orientation Lock: On" : "Portrait Orientation Lock: Off");
+            build_cc_grid(); cc_link();
+            return 1;
+        }
         else if (c == 3) {                   /* Track A, 1.0: Low Power Mode (kernel: the conservative clocks, kept) */
             int on = !sh_low_power_on();
             sh_low_power(on);
@@ -3020,6 +3027,10 @@ static float isl_next_update(float t);              /* B7: shell_island.inc */
 static int isl_refresh(float t);
 static int isl_sync(void);
 /* when the platform should come back for the clock (ms; < 0: nothing pending) */
+static float ori_next_update(void);           /* cp7: shell_orient.inc */
+static int ori_poll(float t);
+static int ori_tick(float dt);
+static int ori_moving(void);
 int sh_next_update(float t)
 {
     int open = AP.on && is_app("clock");
@@ -3045,6 +3056,8 @@ int sh_next_update(float t)
     if (ub >= 0 && (best < 0 || ub < best)) best = ub;
     float sb = se_next_update(t);                       /* Track B: Settings' Bluetooth / Display polls */
     if (sb >= 0 && (best < 0 || sb < best)) best = sb;
+    float ob = ori_next_update();                       /* cp7: the orientation's poll while a screen that turns shows */
+    if (ob >= 0 && (best < 0 || ob < best)) best = ob;
     return (int)best;
 }
 int sh_refresh(float t)
@@ -3055,6 +3068,7 @@ int sh_refresh(float t)
     ch |= sv_refresh(t) | nc_refresh(t) | cm_refresh(t) | pc_refresh(t) | su_refresh(t);   /* survival-next: SOS's beacon, USB power's state; helper D: the banner; Track A: the back-off */
     ch |= isl_refresh(t);                              /* B7: the capsule (SOS, USB power), the pill's hold */
     ch |= se_refresh(t);                               /* Track B: Settings' Bluetooth list, the lux reading */
+    ch |= ori_poll(t);                                 /* cp7: the phone turned (the app's new layout fades in) */
     if (ch && AP.on) sw_dirty = 1;                     /* helper D: the switcher's snapshot is old now */
     return ch;
 }
@@ -4511,6 +4525,7 @@ static int pc_gate_launch(unsigned id);             /* Track A: shell_passcode.i
 #include "shell_passcode.inc"                       /* Track A: the passcode screen, Settings > Passcode, the lock's lifecycle */
 #include "shell_time.inc"                           /* Track A: the alarms API's Clock hooks, Settings > Date & Time's zone list */
 #include "shell_update.inc"                         /* Track A update: Settings > General > Software Update */
+#include "shell_orient.inc"                         /* cp7: the screens that turn with the phone (Photos' viewer, Camera, ...) */
 /* B2's Settings hooks onto Track A's passcode page (AS.sub SE_PASSCODE_PAGE = shell_passcode.inc's PC_SUB) */
 static void page_passcode(dc *d) { pc_page(d); }
 static int passcode_tap(float x, float y) { return pc_app_tap(x, y); }
@@ -4531,6 +4546,7 @@ void sh_restore(void)
 #include "shell_island.inc"                         /* B7: the status capsule, the live pill (toasts) */
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
+static int lk_hint;             /* cp7: the lock's spring is a tap's hint bounce (set_lock moves the live lock) */
 static void set_lock(float y)
 {
     lockY = y;
@@ -4544,7 +4560,17 @@ static void set_lock(float y)
     if (y == 0) {
         lockg.hidden = 0;
         lockflat.hidden = 1;
+        lockg.y = 0;
+    } else if (lk_hint && C && C->gpu && !EMG) {
+        /* cp7: a tap's hint bounce moves the live lock (the GPU row moves layers and their glass for free, as the
+         * wake's scale): the flat copy would be made again on every change in the bounce (a card's press fading, a
+         * stack opening: the lens over the whole lock, ~90 ms a frame on the A55; cp6d's self test) */
+        lockg.hidden = 0;
+        lockflat.hidden = 1;
+        lockg.y = PT(y);
+        home.alpha = 0;
     } else {
+        lockg.y = 0;
         flatten_lock(0);
         lockg.hidden = 1;
         lockflat.hidden = 0;
@@ -4804,7 +4830,7 @@ static void back_to_lock(int exit_em)
     vc_close_all(1);
     lkn_collapse(1);
     scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
-    sp_lock.live = 0;
+    sp_lock.live = 0; lk_hint = 0;
     sp_page.live = 0; page_dragging = 0;
     set_page(0);
     CCS.on = 0; sp_cc.live = 0; cc_x_reset(); set_cc(0);
@@ -4833,7 +4859,7 @@ void sh_wake(void);
 void sh_set(const char *what, const char *key, float v)
 {
     if (!tk_strcmp(what, "unlock")) {
-        sp_lock.live = 0;
+        sp_lock.live = 0; lk_hint = 0;
         set_lock(-H_PT * v);
         locked = v < 1;
         mark_a = mark_t;
@@ -5486,7 +5512,7 @@ void sh_touch(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, y, t);
             return;
         }
-        if (y >= H_PT - 30) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
+        if (y >= H_PT - 30) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0; }
         /* B10: the notifications fanned out are over the list: theirs first (a tap beside them folds them back) */
         else if (lkn_p() > 0 && lkn_down(x, y, t)) { T.kind = G_LKN; return; }
         else if ((r = hit_row(x, y, &gi)) >= 0) {
@@ -5515,7 +5541,7 @@ void sh_touch(int phase, float x, float y, float t)
         }
         else if (in_list(y)) { T.kind = G_LIST; T.base = scroll; sp_scroll.live = 0; scroll_momentum = 0; list_over = scroll < 0 || scroll > max_scroll(); }
         else if (lkn_down(x, y, t)) { T.kind = G_LKN; return; }   /* B9: the notifications (a tap expands / opens) */
-        else { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
+        else { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0; }
         tk_tracker_add(&T.tr, y, t);
         return;
     }
@@ -5526,14 +5552,14 @@ void sh_touch(int phase, float x, float y, float t)
     }
     if (T.kind == G_LKN) {                   /* B9, shell_lknote.inc: 2 hands the touch to the lock's swipe */
         if (lkn_touch(phase, x, y, t) == 2) {
-            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0;
+            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0;
             tk_tracker_add(&T.tr, y, t);
         } else if (phase == 2) T.kind = G_NONE;
         return;
     }
     if (T.kind == G_NC) {                    /* helper D, shell_nc.inc */
         if (nc_touch(phase, x, y, t) == 2) {     /* the lock's pill moved: the lock's swipe after all */
-            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0;
+            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0;
             tk_tracker_add(&T.tr, y, t);
         } else if (phase == 2) T.kind = G_NONE;
         return;
@@ -5813,6 +5839,7 @@ void sh_touch(int phase, float x, float y, float t)
     case G_RELOCK: {
         /* P3p (P3j-10): decided by where the pull would carry it (200 ms), the finger's speed handed to the spring */
         float v = tk_tracker_v(&T.tr);
+        lk_hint = 0;
         if (lockY + v * 200 > -H_PT * .5f) { locked = 1; tk_spring_start(&sp_lock, lockY, 0, v * 1000, TK_SPR_UNLOCK); }
         else tk_spring_start(&sp_lock, lockY, -H_PT, v * 1000, TK_SPR_UNLOCK);
         break;
@@ -5821,6 +5848,7 @@ void sh_touch(int phase, float x, float y, float t)
         if (!T.moved) {
             hint_left = 2200;
             tk_spring_start(&sp_lock, 0, 0, -700, TK_SPR_UNLOCK);
+            lk_hint = 1;
         } else {
             float v = tk_tracker_v(&T.tr), proj = lockY + v * 200;
             /* P3p (P3j-9): unlocked as soon as it is decided: taps in the settle reach home */
@@ -5916,6 +5944,7 @@ int sh_tick(float dt, float t)
     }
     if (sp_lock.live) {
         int live = tk_spring_step(&sp_lock, dt);
+        if (!live) lk_hint = 0;
         set_lock(sp_lock.x);
         if (!live && sp_lock.to <= -H_PT + .01f && !pc_holds()) { locked = 0; lockflat.hidden = 1; home.sx = home.sy = 1; }   /* Track A */
         mv = 1;
@@ -5940,6 +5969,7 @@ int sh_tick(float dt, float t)
     mv |= ico_step(dt);                          /* P3p: the pressed icon */
     mv |= ps_tick(dt);                           /* cp6: a page's push / pop (shell_push.inc) */
     mv |= press_tick(dt);                        /* cp6: the lights let go fade, the press scales move */
+    mv |= ori_poll(t) | ori_tick(dt);            /* cp7: the phone turned: the app's layout, its fade */
     mv |= med_tick(dt);
     mv |= lx_tick(dt);                           /* L3, Track F: the App Store's page (scroll, momentum, builds) */
     ep_tick();                                   /* B6: Emergency's switch prepared during the hold, finished after */
@@ -6277,6 +6307,7 @@ int sh_moving(void)
     m |= IP.on && (IP.t < 1 || IP.rel);
     m |= Q[0].rel_at > 0 || Q[1].rel_at > 0;
     m |= press_moving();                         /* cp6: a light fading, a scale moving */
+    m |= ori_moving();                           /* cp7: a turned app's fade */
     m |= nc_moving() || sw_moving();             /* helper D */
     m |= cm_moving();                            /* helper I */
     m |= kb_moving();                            /* B3: delete held (its repeats need the frames) */

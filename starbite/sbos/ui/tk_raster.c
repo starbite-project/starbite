@@ -27,6 +27,39 @@ int tk_bmp_new(tk_bmp *b, int w, int h)
     return b->px != 0;
 }
 void tk_bmp_free(tk_bmp *b) { if (b->px) tk_free(b->px); b->px = 0; b->w = b->h = 0; }
+/* cp7: src turned exactly (no resampling) a quarter clockwise (q 1), a half (2) or a quarter counter-clockwise (3)
+ * into a new dst (q 0: a copy). 0: no memory (dst empty) */
+int tk_bmp_turned(tk_bmp *dst, const tk_bmp *src, int q)
+{
+    q &= 3;
+    int w = src->w, h = src->h;
+    if (!src->px || !tk_bmp_new(dst, q & 1 ? h : w, q & 1 ? w : h)) return 0;
+    for (int y = 0; y < h; y++) {
+        const uint32_t *s = src->px + (size_t)y * src->stride;
+        if (!q) tk_memcpy(dst->px + (size_t)y * dst->stride, s, (size_t)w * 4);
+        else if (q == 2) {
+            uint32_t *d = dst->px + (size_t)(h - 1 - y) * dst->stride + (w - 1);
+            for (int x = 0; x < w; x++) *d-- = s[x];
+        } else if (q == 1) {
+            uint32_t *d = dst->px + (h - 1 - y);                    /* column h-1-y, from the top */
+            for (int x = 0; x < w; x++, d += dst->stride) *d = s[x];
+        } else {
+            uint32_t *d = dst->px + (size_t)(w - 1) * dst->stride + y; /* column y, from the bottom */
+            for (int x = 0; x < w; x++, d -= dst->stride) *d = s[x];
+        }
+    }
+    return 1;
+}
+/* b turned in place (a new bitmap takes its place: both exist for a moment). 0: no memory (b as it was) */
+int tk_bmp_turn(tk_bmp *b, int q)
+{
+    if (!(q & 3) || !b->px) return 1;
+    tk_bmp o;
+    if (!tk_bmp_turned(&o, b, q)) return 0;
+    tk_bmp_free(b);
+    *b = o;
+    return 1;
+}
 int tk_fm_new(tk_fm *m, int w, int h)
 {
     m->v = w > 0 && h > 0 ? tk_alloc((size_t)w * h * 4) : 0;
@@ -302,15 +335,25 @@ void tk_draw_fm(tk_bmp *b, const tk_fm *m, int ox, int oy, const tk_paint *p, fl
 {
     tk_col sc = tk_paint_at(p, 0, 0);
     int solid = p->kind == TK_P_SOLID;
+    /* cp7: a solid paint's fully covered px is one packed value, over anything when it is opaque (over_px's ia is 0)
+     * and over an empty px (nothing to add); any px over an empty one is its own colour: bit for bit what over_px
+     * gives, without its float blend (a grouped list's card: most of a Settings page's build on the A55) */
+    uint32_t full = solid ? pack(sc.r * alpha, sc.g * alpha, sc.b * alpha, sc.a * alpha) : 0;
+    int full_opaque = solid && sc.a * alpha == 1.0f;
     for (int j = 0; j < m->h; j++) {
         int y = oy + j;
         if (y < 0 || y >= b->h) continue;
+        uint32_t *row = b->px + (size_t)y * b->stride;
+        const float *mv = m->v + (size_t)j * m->w;
         for (int i = 0; i < m->w; i++) {
             int x = ox + i;
-            float c = m->v[j * m->w + i] * alpha;
+            float v = mv[i], c = v * alpha;
             if (x < 0 || x >= b->w || c < 1.0f / 1024) continue;
+            uint32_t *d = &row[x];
+            if (solid && v == 1.0f && (full_opaque || !*d)) { *d = full; continue; }
             tk_col s = solid ? sc : tk_paint_at(p, x + 0.5f, y + 0.5f);
-            over_px(&b->px[y * b->stride + x], s.r * c, s.g * c, s.b * c, s.a * c);
+            if (!*d) { *d = pack(s.r * c, s.g * c, s.b * c, s.a * c); continue; }
+            over_px(d, s.r * c, s.g * c, s.b * c, s.a * c);
         }
     }
 }
