@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Spin Timer
+Comment=wltest redrawing every 16 ms, shown or not (ignores frame callbacks)
+Exec=env SBWL_TEST_APPID=org.starbite.SpinTimer SBWL_TEST_OUT=/tmp/sbwl-spintimer.txt sbwl-wltest timer

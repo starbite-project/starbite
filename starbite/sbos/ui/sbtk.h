@@ -209,6 +209,7 @@ void tk_layer_prepare(tk_layer *l);                       /* make its half copy 
  * sampled by the GPU in place (the platform maps that range: kernel gpucomp_add_ext). Call it each frame the pointer
  * or the pixels change (it bumps gen); px 0 detaches. Detach before freeing the layer (relayer would free bmp). */
 void tk_layer_external(tk_layer *l, const uint32_t *px, int w, int h, int stride);
+#define TK_HAS_LAYER_EXTERNAL 1                 /* (Track E's shell_linux.inc builds its zero-copy path on it) */
 void tk_layer_glass_shape(tk_layer *l, float x, float y, float w, float h, float r);
 /* V2 (Track A's request): each recorded shape carries a variant, a tint and a press; tk_layer_glass_shape takes them
  * from tk_gstyle (set it around a d_glass call; {0, 0, 0} = regular, untinted, at rest) */

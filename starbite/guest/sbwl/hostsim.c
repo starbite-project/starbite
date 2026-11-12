@@ -27,9 +27,31 @@
  *   wait_msg TYPE A T               any guest -> host message of TYPE (A: or * for any)
  *   sh CMD                          a shell command (set-up steps)
  *   sleep T | stop T
+ * Contract v3 (the default; -2: a v2 host): services CLIP | NOTIF | CLOCK, host_surf_reading, the wall clock.
+ *   include FILE                    another script (relative to this one's directory)
+ *   clock +SECONDS TZMIN            host_unix_s = now + SECONDS from here on, host_tz_min = TZMIN
+ *   expect_log T TEXT...            sbwl's log (its stderr, relayed) has TEXT
+ *   keymod MODS                     SBG_MSG_KEYMOD (SBSHM_MOD_*: 1 Ctrl, 2 Alt, 4 Super, 8 Shift)
+ *   clip_set TEXT...                the host's clipboard (h2g slot, text) + SBG_MSG_CLIP
+ *   wait_clip T TEXT...             SBG_MSG_CLIP_SET came and the g2h slot is TEXT (text/plain;charset=utf-8)
+ *   expect_no_msg TYPE T            no guest -> host message TYPE within T
+ *   wait_notify T SUMMARY...        SBG_MSG_NOTIFY of a notification with that summary (copied at once, as the host)
+ *   expect_notif FIELD VALUE...     of the last one waited for: app_name summary body action1..3 urgency timeout,
+ *                                   app NAME (its catalog index), icon NAME (that app's icon)
+ *   wait_notif_close T SUMMARY...   SBG_MSG_NOTIF_CLOSE with that notification's id
+ *   notif_act B|none SUMMARY...     SBG_MSG_NOTIF_ACT for it (B 0 = the tap, 1..3 its buttons; none = dismissed)
+ *   expect_active NAME|none T       the catalog's active app
+ *   reading back|front|none         host_surf_reading = that buffer (the GPU samples it)
+ *   expect_untouched T              for T: no frame published, the buffer being read not written
+ *   expect_opaque                   every pixel of the shown buffer (and the other, once used) has X = 0xff
+ *   cpu T PATTERN... | expect_cpu_below PCT T PATTERN...   CPU of sbwl's processes whose command line has
+ *                                   PATTERN ("sbwl": sbwl itself) over T ms
  */
 #define _GNU_SOURCE
+#ifndef HOSTSIM_NO_PNG
 #include <cairo.h>
+#endif
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -39,6 +61,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -54,6 +77,15 @@ static uint8_t *shm;
 static volatile struct sbshm_hdr *hdr;
 static struct sbshm_ring *h2g, *g2h;
 static volatile struct sbshm_cat *cat;
+static int v3 = 1, logfd = -1, clip_sets;
+static long clock_off;
+static char script_dir[512] = ".";
+static char *logbuf;                       /* sbwl's stderr, all of it */
+static size_t logn, logcap;
+/* notifications as the host copies them (sbghost.c v3_notif_msg) */
+static struct sbshm_notif notes[64];
+static unsigned nnotes;
+static const struct sbshm_notif *cur_note;
 static uint32_t W = 720, H = 1344, VR;
 static pid_t sbwl;
 static int npass, nfail, hello, sock_fd = -1;
@@ -107,6 +139,9 @@ static const char *msg_name(unsigned t)
 	case SBG_MSG_TEXT_FOCUS: return "TEXT_FOCUS";
 	case SBG_MSG_PKG_STATUS: return "PKG_STATUS";
 	case SBG_MSG_STORE: return "STORE";
+	case SBG_MSG_CLIP_SET: return "CLIP_SET";
+	case SBG_MSG_NOTIFY: return "NOTIFY";
+	case SBG_MSG_NOTIF_CLOSE: return "NOTIF_CLOSE";
 	default: return "?";
 	}
 }
@@ -124,10 +159,41 @@ static void pump(void)
 			tf_a = m.a, tf_b = m.b;
 		else if (m.type == SBG_MSG_CATALOG)
 			last_cat_seq = m.a;
+		else if (m.type == SBG_MSG_CLIP_SET)
+			clip_sets++;
+		else if (m.type == SBG_MSG_NOTIFY && m.a < SBSHM_NOTIF_SLOTS) {
+			volatile struct sbshm_notifs *t = (volatile struct sbshm_notifs *)(shm + SBSHM_NOTIF_OFF);
+			struct sbshm_notif *n = &notes[nnotes % 64];
+			for (int tries = 0; tries < 100; ++tries) {
+				uint32_t s0 = sbshm_seq_begin(&t->seq);
+				memcpy(n, (const void *)&t->n[m.a], sizeof(*n));
+				if (sbshm_seq_ok(&t->seq, s0) && n->id == m.b) {
+					nnotes++;
+					break;
+				}
+				usleep(100);
+			}
+		}
 		if (m.type != SBG_MSG_CATALOG || getenv("HOSTSIM_VERBOSE"))
 			note("<- %s a=%u b=%u c=%u%s%.32s", msg_name(m.type), m.a, m.b, m.c, m.type == SBG_MSG_TITLE ? " title " : "",
 			     m.type == SBG_MSG_TITLE ? (const char *)hdr->title : "");
 	}
+	if (logfd >= 0) {                          /* sbwl's log: relayed to stderr, kept for expect_log */
+		char b[8192];
+		ssize_t n;
+		while ((n = read(logfd, b, sizeof(b))) > 0) {
+			(void)!write(2, b, (size_t)n);
+			if (logn + (size_t)n + 1 > logcap) {
+				logcap = (logn + (size_t)n + 1) * 2;
+				logbuf = realloc(logbuf, logcap);
+			}
+			memcpy(logbuf + logn, b, (size_t)n);
+			logn += (size_t)n;
+			logbuf[logn] = 0;
+		}
+	}
+	if (v3)                                    /* the host updates it every tick */
+		hdr->host_unix_s = (uint32_t)(time(NULL) + clock_off);
 	if (sock_fd >= 0) {
 		ssize_t n = read(sock_fd, sock_got + sock_n, sizeof(sock_got) - 1 - sock_n);
 		if (n > 0) {
@@ -231,6 +297,10 @@ static void cat_dump(const char *file)
 
 static void write_png(const char *file, const uint32_t *px, int w, int h, int stride_px, int argb)
 {
+#ifdef HOSTSIM_NO_PNG
+	(void)file, (void)px, (void)w, (void)h, (void)stride_px, (void)argb;
+	return;
+#else
 	cairo_surface_t *s = cairo_image_surface_create(argb ? CAIRO_FORMAT_ARGB32 : CAIRO_FORMAT_RGB24, w, h);
 	uint8_t *d = cairo_image_surface_get_data(s);
 	int ds = cairo_image_surface_get_stride(s);
@@ -239,6 +309,7 @@ static void write_png(const char *file, const uint32_t *px, int w, int h, int st
 	cairo_surface_mark_dirty(s);
 	cairo_surface_write_to_png(s, file);
 	cairo_surface_destroy(s);
+#endif
 }
 
 static const uint32_t *front(void) { return (const uint32_t *)(shm + hdr->surf_off[hdr->surf_front & 1U]); }
@@ -336,6 +407,120 @@ static int sock_connect(void)
 }
 
 static uint32_t frame_mark;
+/* ---- v3 helpers ---- */
+/* the text after the first n words of s */
+static const char *rest(const char *s, int n)
+{
+	for (int i = 0; i < n; ++i) {
+		while (*s == ' ' || *s == '\t')
+			++s;
+		while (*s && *s != ' ' && *s != '\t')
+			++s;
+	}
+	while (*s == ' ' || *s == '\t')
+		++s;
+	return s;
+}
+
+static const struct sbshm_notif *note_find(const char *summary)
+{
+	for (unsigned k = nnotes; k-- > (nnotes > 64 ? nnotes - 64 : 0);)
+		if (!strcmp(notes[k % 64].summary, summary))
+			return &notes[k % 64];
+	return NULL;
+}
+
+static uint64_t buf_sum(unsigned b)
+{
+	const uint32_t *px = (const uint32_t *)(shm + hdr->surf_off[b & 1U]);
+	uint64_t h = 1469598103934665603ULL;
+	for (size_t i = 0; i < (size_t)W * H; ++i)
+		h = (h ^ px[i]) * 1099511628211ULL;
+	return h;
+}
+
+/* CPU ticks (utime + stime) of sbwl ("sbwl") or of the processes under it whose command line has pat; n = how many */
+static unsigned long long cpu_ticks(const char *pat, int *n)
+{
+	unsigned long long sum = 0;
+	*n = 0;
+	DIR *d = opendir("/proc");
+	struct dirent *e;
+	while (d && (e = readdir(d))) {
+		pid_t pid = atoi(e->d_name);
+		if (pid <= 0)
+			continue;
+		int ours = 0;
+		if (!strcmp(pat, "sbwl")) {
+			ours = pid == sbwl;
+		} else {
+			char fn[64], cl[1024];
+			snprintf(fn, sizeof(fn), "/proc/%d/cmdline", pid);
+			int fd = open(fn, O_RDONLY);
+			ssize_t r = fd >= 0 ? read(fd, cl, sizeof(cl) - 1) : -1;
+			if (fd >= 0)
+				close(fd);
+			if (r <= 0)
+				continue;
+			for (ssize_t i = 0; i < r; ++i)
+				if (!cl[i])
+					cl[i] = ' ';
+			cl[r] = 0;
+			if (!strstr(cl, pat))
+				continue;
+			for (pid_t p = pid, k = 0; p > 1 && k < 64 && !ours; ++k) {   /* under sbwl? */
+				char st[512];
+				snprintf(fn, sizeof(fn), "/proc/%d/stat", p);
+				fd = open(fn, O_RDONLY);
+				r = fd >= 0 ? read(fd, st, sizeof(st) - 1) : -1;
+				if (fd >= 0)
+					close(fd);
+				if (r <= 0)
+					break;
+				st[r] = 0;
+				char *q = strrchr(st, ')');
+				int pp = 0;
+				if (!q || sscanf(q + 1, " %*c %d", &pp) != 1)
+					break;
+				ours = pp == sbwl;
+				p = pp;
+			}
+		}
+		if (!ours)
+			continue;
+		char fn[64], st[1024];
+		snprintf(fn, sizeof(fn), "/proc/%d/stat", pid);
+		int fd = open(fn, O_RDONLY);
+		ssize_t r = fd >= 0 ? read(fd, st, sizeof(st) - 1) : -1;
+		if (fd >= 0)
+			close(fd);
+		if (r <= 0)
+			continue;
+		st[r] = 0;
+		char *q = strrchr(st, ')');
+		unsigned long long ut = 0, stt = 0;
+		if (q && sscanf(q + 1, " %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &stt) == 2) {
+			sum += ut + stt;
+			++*n;
+		}
+	}
+	if (d)
+		closedir(d);
+	return sum;
+}
+
+static double cpu_pct(const char *pat, unsigned ms, int *n)
+{
+	unsigned long long a = cpu_ticks(pat, n);
+	wait_ms(ms);
+	unsigned long long b = cpu_ticks(pat, n);
+	return b >= a ? 100.0 * (double)(b - a) / (double)sysconf(_SC_CLK_TCK) / (ms / 1000.0) : 0;
+}
+
+static unsigned reading_idx = SBSHM_NONE, reading_seq;
+static uint64_t reading_sum;
+
+static void run_line(char *l);
 
 static void run_line(char *l)
 {
@@ -503,7 +688,22 @@ static void run_line(char *l)
 				break;
 			wait_ms(20);
 		}
-		result(ok, "%s has the line \"%.*s\"", a1, (int)strlen(text) - 2, text + 1);
+		char seen_l[300] = "";
+		if (!ok) {                             /* what the file has instead: the line with the same "key:" */
+			char b[4096] = "\n";
+			FILE *f = fopen(a1, "r");
+			size_t n = f ? fread(b + 1, 1, sizeof(b) - 2, f) : 0;
+			if (f)
+				fclose(f);
+			b[n + 1] = 0;
+			char k[64];
+			size_t kl = strcspn(text + 1, ":");
+			snprintf(k, sizeof(k), "\n%.*s:", (int)(kl < 60 ? kl : 60), text + 1);
+			char *m = strstr(b, k);
+			if (m)
+				snprintf(seen_l, sizeof(seen_l), " (it has \"%.*s\")", (int)strcspn(m + 1, "\n"), m + 1);
+		}
+		result(ok, "%s has the line \"%.*s\"%s", a1, (int)strlen(text) - 2, text + 1, seen_l);
 	} else if (!strcmp(c, "expect_rows_beyond")) {
 		uint32_t r = (uint32_t)atoi(a1), bad = 0;
 		volatile uint32_t *rows = (volatile uint32_t *)(shm + SBSHM_ROWS_OFF);
@@ -540,6 +740,7 @@ static void run_line(char *l)
 		sock_fd = sock_connect();
 		if (sock_fd >= 0)
 			fcntl(sock_fd, F_SETFL, O_NONBLOCK);
+		wait_ms(100);                          /* sbwl accepts it (its event loop) before the next host message */
 		result(sock_fd >= 0, "connected to sbwl.sock (as sbpkg)");
 	} else if (!strcmp(c, "expect_sock")) {
 		char *t = strrchr(s, ' ');
@@ -581,6 +782,174 @@ static void run_line(char *l)
 		while (sbwl > 0 && ms_now() < end)
 			wait_ms(10);
 		result(sbwl == 0 && hdr->guest_state == SBG_GUEST_OFF, "sbwl stopped (guest_state %u)", hdr->guest_state);
+	} else if (!strcmp(c, "include")) {
+		char p[1024];
+		snprintf(p, sizeof(p), "%s%s%s", a1[0] == '/' ? "" : script_dir, a1[0] == '/' ? "" : "/", a1);
+		FILE *f = fopen(p, "r");
+		if (!f) {
+			result(0, "include %s: %s", p, strerror(errno));
+			return;
+		}
+		char line[1024];
+		while (fgets(line, sizeof(line), f)) {
+			pump();
+			run_line(line);
+		}
+		fclose(f);
+	} else if (!strcmp(c, "clock")) {
+		clock_off = atol(a1);
+		hdr->host_tz_min = atoi(a2);
+		hdr->host_unix_s = (uint32_t)(time(NULL) + clock_off);
+		note("clock: host_unix_s = now %+ld s (%u), host_tz_min %d", clock_off, hdr->host_unix_s, hdr->host_tz_min);
+	} else if (!strcmp(c, "expect_log")) {
+		T = (unsigned)atoi(a1);
+		const char *text = rest(s, 2);
+		uint64_t end = ms_now() + T;
+		while (!(logbuf && strstr(logbuf, text)) && ms_now() < end)
+			wait_ms(20);
+		result(logbuf && strstr(logbuf, text), "sbwl's log has \"%s\"", text);
+	} else if (!strcmp(c, "keymod")) {
+		put(SBG_MSG_KEYMOD, (uint32_t)atoi(a1), 0, 0, 0, 0);
+		note("-> KEYMOD %s", a1);
+	} else if (!strcmp(c, "clip_set")) {
+		const char *text = rest(s, 1), *mime = "text/plain;charset=utf-8";
+		volatile struct sbshm_clip_slot *cs = &((volatile struct sbshm_clip *)(shm + SBSHM_CLIP_OFF))->h2g;
+		uint32_t q = cs->seq | 1U;
+		cs->seq = q;
+		sbshm_dmb();
+		for (unsigned i = 0; i < 40; ++i)
+			cs->mime[i] = i < strlen(mime) ? mime[i] : 0;
+		memcpy((void *)cs->data, text, strlen(text));
+		cs->len = (uint32_t)strlen(text);
+		sbshm_dmb();
+		cs->seq = q + 1;
+		put(SBG_MSG_CLIP, q + 1, 0, 0, 0, 0);
+		note("-> CLIP \"%s\"", text);
+	} else if (!strcmp(c, "wait_clip")) {
+		T = (unsigned)atoi(a1);
+		const char *text = rest(s, 2);
+		volatile struct sbshm_clip_slot *cs = &((volatile struct sbshm_clip *)(shm + SBSHM_CLIP_OFF))->g2h;
+		uint64_t end = ms_now() + T;
+		char got[512] = "", mime[41] = "";
+		int ok = 0;
+		for (;;) {
+			uint32_t q = sbshm_seq_begin(&cs->seq);
+			uint32_t len = cs->len < sizeof(got) - 1 ? cs->len : sizeof(got) - 1;
+			memcpy(got, (const void *)cs->data, len);
+			got[len] = 0;
+			memcpy(mime, (const void *)cs->mime, 40);
+			ok = clip_sets && sbshm_seq_ok(&cs->seq, q) && !strcmp(got, text) && !strcmp(mime, "text/plain;charset=utf-8");
+			if (ok || ms_now() >= end)
+				break;
+			wait_ms(20);
+		}
+		result(ok, "CLIP_SET: the guest's clipboard is \"%s\" (%s; want \"%s\")", got, mime, text);
+	} else if (!strcmp(c, "expect_no_msg")) {
+		unsigned type = (unsigned)atoi(a1), mark = nseen;
+		wait_ms((unsigned)atoi(a2));
+		int bad = 0;
+		for (unsigned k = mark; k < nseen; ++k)
+			bad += seen[k % 256].type == type;
+		result(!bad, "no %s (%u) message in %s ms (%d)", msg_name(type), type, a2, bad);
+	} else if (!strcmp(c, "wait_notify")) {
+		T = (unsigned)atoi(a1);
+		const char *sum = rest(s, 2);
+		uint64_t end = ms_now() + T;
+		while (!note_find(sum) && ms_now() < end)
+			wait_ms(10);
+		cur_note = note_find(sum);
+		result(cur_note != NULL, "NOTIFY \"%s\" (id %u, app %d, icon %d, from \"%s\")", sum, cur_note ? cur_note->id : 0,
+		       cur_note ? (int)cur_note->app : -1, cur_note ? (int)cur_note->icon : -1, cur_note ? cur_note->app_name : "");
+	} else if (!strcmp(c, "expect_notif")) {
+		const char *want = rest(s, 2);
+		char got[300] = "?";
+		int ok = 0;
+		if (cur_note) {
+			const struct sbshm_notif *n = cur_note;
+			if (!strcmp(a1, "app") || !strcmp(a1, "icon")) {
+				int i = app_find(want);
+				uint32_t w = i < 0 ? SBSHM_NONE : !strcmp(a1, "app") ? (uint32_t)i : catc.app[i].icon;
+				uint32_t g = !strcmp(a1, "app") ? n->app : n->icon;
+				snprintf(got, sizeof(got), "%d (want %d)", (int)g, (int)w);
+				ok = i >= 0 && g == w;
+			} else {
+				if (!strcmp(a1, "app_name")) snprintf(got, sizeof(got), "%s", n->app_name);
+				else if (!strcmp(a1, "summary")) snprintf(got, sizeof(got), "%s", n->summary);
+				else if (!strcmp(a1, "body")) snprintf(got, sizeof(got), "%s", n->body);
+				else if (!strncmp(a1, "action", 6) && a1[6] >= '1' && a1[6] <= '3') snprintf(got, sizeof(got), "%s", n->action[a1[6] - '1']);
+				else if (!strcmp(a1, "urgency")) snprintf(got, sizeof(got), "%u", n->urgency);
+				else if (!strcmp(a1, "timeout")) snprintf(got, sizeof(got), "%u", n->timeout_ms);
+				ok = !strcmp(got, want);
+			}
+		}
+		result(ok, "notification \"%s\": %s = \"%s\"", cur_note ? cur_note->summary : "(none)", a1, got);
+	} else if (!strcmp(c, "wait_notif_close")) {
+		T = (unsigned)atoi(a1);
+		const struct sbshm_notif *n = note_find(rest(s, 2));
+		uint64_t end = ms_now() + T;
+		int ok = 0;
+		for (;;) {
+			for (unsigned k = nseen > 256 ? nseen - 256 : 0; n && k < nseen && !ok; ++k)
+				ok = seen[k % 256].type == SBG_MSG_NOTIF_CLOSE && seen[k % 256].a == n->id;
+			if (ok || ms_now() >= end)
+				break;
+			wait_ms(10);
+		}
+		result(ok, "NOTIF_CLOSE \"%s\" (id %u)", rest(s, 2), n ? n->id : 0);
+	} else if (!strcmp(c, "notif_act")) {
+		const struct sbshm_notif *n = note_find(rest(s, 2));
+		uint32_t b = !strcmp(a1, "none") ? SBSHM_NONE : (uint32_t)atoi(a1);
+		if (!n) {
+			result(0, "notif_act: no notification \"%s\"", rest(s, 2));
+			return;
+		}
+		put(SBG_MSG_NOTIF_ACT, n->id, b, 0, 0, 0);
+		note("-> NOTIF_ACT %u %s (\"%s\")", n->id, a1, n->summary);
+	} else if (!strcmp(c, "expect_active")) {
+		int want = !strcmp(a1, "none") ? -1 : app_find(a1);
+		T = (unsigned)atoi(a2);
+		uint64_t end = ms_now() + T;
+		while (!(cat_read() && (int)catc.active == want) && ms_now() < end)
+			wait_ms(20);
+		result((int)catc.active == want, "the active app is %s (index %d, want %d)", a1, (int)catc.active, want);
+	} else if (!strcmp(c, "reading")) {
+		unsigned f = hdr->surf_front & 1U;
+		reading_idx = !strcmp(a1, "back") ? f ^ 1U : !strcmp(a1, "front") ? f : SBSHM_NONE;
+		if (reading_idx != SBSHM_NONE) {
+			reading_seq = hdr->surf_seq;
+			reading_sum = buf_sum(reading_idx);
+			frame_mark = hdr->surf_seq;
+		}
+		sbshm_dmb();
+		hdr->host_surf_reading = reading_idx;
+		note("host_surf_reading = %d (front %u, seq %u)", (int)reading_idx, f, hdr->surf_seq);
+	} else if (!strcmp(c, "expect_untouched")) {
+		wait_ms((unsigned)atoi(a1));
+		int same = reading_idx != SBSHM_NONE && buf_sum(reading_idx) == reading_sum;
+		result(same && hdr->surf_seq == reading_seq, "buffer %d (being read) untouched for %s ms, no frame published (seq %u -> %u)",
+		       (int)reading_idx, a1, reading_seq, hdr->surf_seq);
+	} else if (!strcmp(c, "expect_opaque")) {
+		unsigned f = hdr->surf_front & 1U, bad[2] = {0, 0}, checked = 0;
+		for (unsigned b = 0; b < 2; ++b) {
+			if (b != f && hdr->surf_seq < 2)
+				continue;                      /* not used yet */
+			const uint32_t *px = (const uint32_t *)(shm + hdr->surf_off[b]);
+			for (size_t i = 0; i < (size_t)W * H; ++i)
+				bad[b] += (px[i] >> 24) != 0xffU;
+			checked |= 1U << b;
+		}
+		result(hdr->surf_seq && !bad[0] && !bad[1], "every pixel opaque (X = 0xff): buffers %s%s, %u + %u not (frame %u)",
+		       checked & 1 ? "0 " : "", checked & 2 ? "1" : "", bad[0], bad[1], hdr->surf_seq);
+	} else if (!strcmp(c, "cpu") || !strcmp(c, "expect_cpu_below")) {
+		int below = !strcmp(c, "expect_cpu_below"), n;
+		double lim = below ? atof(a1) : 0;
+		unsigned ms = (unsigned)atoi(below ? a2 : a1);
+		const char *pat = rest(s, below ? 3 : 2);
+		double pct = cpu_pct(pat, ms, &n);
+		if (below)
+			result(n > 0 && pct < lim, "CPU of \"%s\" (%d processes) over %u ms: %.1f %% (< %.1f %%)", pat, n, ms, pct, lim);
+		else
+			note("CPU of \"%s\" (%d processes) over %u ms: %.1f %%", pat, n, ms, pct);
 	} else {
 		note("unknown command: %s", s);
 	}
@@ -590,8 +959,10 @@ int main(int argc, char **argv)
 {
 	const char *script = NULL;
 	int o;
-	while ((o = getopt(argc, argv, "o:s:W:H:")) != -1) {
-		if (o == 'o')
+	while ((o = getopt(argc, argv, "o:s:W:H:2")) != -1) {
+		if (o == '2')
+			v3 = 0;
+		else if (o == 'o')
 			outdir = optarg;
 		else if (o == 's')
 			script = optarg;
@@ -626,7 +997,13 @@ int main(int argc, char **argv)
 	h2g = (struct sbshm_ring *)(shm + SBSHM_H2G_OFF);
 	g2h = (struct sbshm_ring *)(shm + SBSHM_G2H_OFF);
 	cat = (volatile struct sbshm_cat *)(shm + SBSHM_CAT_OFF);
-	hdr->version = SBSHM_VERSION_V2;
+	hdr->version = v3 ? SBSHM_VERSION_V3 : SBSHM_VERSION_V2;
+	if (v3) {                                  /* sbghost.c load(): the desktop services and the clock */
+		hdr->host_services = SBSHM_SVC_CLIP | SBSHM_SVC_NOTIF | SBSHM_SVC_CLOCK;
+		hdr->host_unix_s = (uint32_t)time(NULL);
+		hdr->host_tz_min = 0;
+		hdr->host_surf_reading = SBSHM_NONE;
+	}
 	hdr->hdr_size = sizeof(struct sbshm_hdr);
 	hdr->boot_count = 1;
 	hdr->db_to_guest = hdr->db_to_host = 0;    /* poll */
@@ -643,19 +1020,37 @@ int main(int argc, char **argv)
 	hdr->host_state = SBG_HOST_STARTED;
 	sbshm_dmb();
 	hdr->magic = SBSHM_MAGIC;
-	note("shared region %s (%u MiB), surface %ux%u, contract v2", path, (unsigned)(SHM_SIZE >> 20), W, H);
-
-	sbwl = fork();
-	if (!sbwl) {
-		setenv("SBWL_SHM", path, 1);
-		execv(argv[optind], argv + optind);
-		_exit(127);
+	note("shared region %s (%u MiB), surface %ux%u, contract v%d", path, (unsigned)(SHM_SIZE >> 20), W, H, v3 ? 3 : 2);
+	if (script) {
+		const char *sl = strrchr(script, '/');
+		if (sl)
+			snprintf(script_dir, sizeof(script_dir), "%.*s", (int)(sl - script), script);
 	}
+	int lp[2];
+	if (pipe(lp) == 0) {
+		logfd = lp[0];
+		fcntl(logfd, F_SETFL, O_NONBLOCK);
+		fcntl(logfd, F_SETFD, FD_CLOEXEC);
+	}
+
 	FILE *sf = script ? fopen(script, "r") : stdin;
 	if (!sf) {
 		perror(script);
 		return 1;
 	}
+	sbwl = fork();
+	if (!sbwl) {
+		prctl(PR_SET_PDEATHSIG, SIGTERM);      /* hostsim killed: sbwl too (its stop_now ends the apps) */
+		if (logfd >= 0) {
+			dup2(lp[1], 2);
+			close(lp[1]);
+		}
+		setenv("SBWL_SHM", path, 1);
+		execv(argv[optind], argv + optind);
+		_exit(127);
+	}
+	if (logfd >= 0)
+		close(lp[1]);
 	char line[1024];
 	while (fgets(line, sizeof(line), sf)) {
 		pump();

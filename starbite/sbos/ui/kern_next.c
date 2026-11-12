@@ -869,6 +869,7 @@ static int same_item(const tk_gpu_item *a, const tk_gpu_item *b)
     return same;
 }
 static void boot_notes(void);                    /* Track A, 1.0 (the end of this file) */
+static int next_power_held(void);
 static tk_gpu_item prevq[TK_GPU_MAX], cacheq[TK_GPU_MAX], gx[TK_GPU_MAX];
 static int prev_n, cache_n, stable_p = -1, stable_k;
 static uint32_t wall_made, cache_made;
@@ -1034,6 +1035,7 @@ void next_kinit(void)
         sb_log(a.b);
     }
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
+    kui_power_hook = next_power_held;            /* Track A, 1.0: Power held: the shell's power sheet */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
     kui_sleep_hook = next_sleep;
     kui_save_hook = next_save;                   /* Track A lifecycle: the pages' on_save before a restart / switch-off */
@@ -2319,4 +2321,37 @@ static void boot_notes(void)
              (!tk_strcmp(sb_fw.crash_key, "starbite-os") || !tk_strcmp(sb_fw.crash_key, sb_fw.key)))
         notif_post("Starbite OS", "Restarted After a Problem",
                    "The last start stopped unexpectedly. Details: Settings > Startup > Crash Reports.");
+}
+
+/* ---- Track A, 1.0: Restart and Shut Down from the shell ---- */
+int sh_restart(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: restart: refused (a dry run: the self test)");
+    return -1;
+#else
+    sb_log(sb_fw.valid && sb_fw.key[0] ? "next: restart (this OS again)" : "next: restart (to the boot menu: an older loader)");
+    if (sb_fw.valid && sb_fw.key[0])
+        power_boot_os(sb_fw.key);       /* does not return */
+    power_restart(1);
+    return -1;                          /* back here: refused */
+#endif
+}
+int sh_power_off(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: power off: refused (a dry run: the self test)");
+    return -1;
+#else
+    sb_log("next: power off (the user's slide)");
+    power_off_now();
+    return -1;                          /* back here: refused (power_off_now said why) */
+#endif
+}
+/* Power held: the shell's power sheet (Track B's P3x defines sh_power_held; this weak one is the fallback) */
+__attribute__((weak)) void sh_power_held(void) { sb_log("next: Power held: no power sheet in this shell yet"); }
+static int next_power_held(void)
+{
+    sh_power_held();
+    return 1;
 }

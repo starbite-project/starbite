@@ -28,6 +28,7 @@ void sbnet_init(struct device *dev, bool irq_ok);
 void sbnet_kick(void);
 void sbp9_init(struct device *dev, bool irq_ok);
 void sbp9_kick(void);
+void sbp9_exit(void);			/* the module's exit: unregister the 9p transport */
 void sbsnd_init(struct device *dev, bool irq_ok);
 void sbsnd_kick(void);
 #endif

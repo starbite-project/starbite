@@ -20,7 +20,11 @@
  */
 #ifndef SBSHM_NET_H
 #define SBSHM_NET_H
+#ifdef __KERNEL__
+#include <linux/types.h>
+#else
 #include <stdint.h>
+#endif
 
 #define SBSHM_NET_SLOTS     256U                /* per ring, power of two */
 #define SBSHM_NET_SLOT      2048U               /* bytes per slot: 8-byte head + up to 2040 bytes of packet */

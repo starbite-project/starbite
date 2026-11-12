@@ -258,6 +258,17 @@ void selftest_timer(unsigned id)
             return;
         }
 #endif
+#ifdef SBOS_SELFTEST_POWER
+        {
+            /* 1.2-alpha29: the power bench (survival.c): attended, the cable out; about 8 minutes; then recovery */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: power: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: power: the watchdog could not be set (the loader's stays): ", w);
+            phase = 110;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
 #ifdef SBOS_SELFTEST_SURVIVAL
         {
             /* 1.2-alpha27: the survival tools (survival.c): the sun, the Morse, USB power out (read only, or a 2 s
@@ -616,6 +627,21 @@ void selftest_timer(unsigned id)
         kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
         return;
     case 51:
+        active = 0;
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_POWER
+    case 110:
+        if (!surv_power_selftest_step()) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), 5000, 0);
+            return;
+        }
+        phase = 111;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+        return;
+    case 111:
+        sb_log("selftest: power: a restart into recovery (pmsg: plug the cable back in)");
         active = 0;
         power_restart_recovery();
         return;

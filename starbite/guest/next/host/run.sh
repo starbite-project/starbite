@@ -25,16 +25,32 @@ cp -R "$sb/ui" "$OUT/sbos/ui"
 ln -s "$sb/kern" "$OUT/sbos/kern"                      # (the UI's ../kern and ../guide includes)
 ln -s "$sb/guide" "$OUT/sbos/guide"
 ui="$OUT/sbos/ui"
+zc_ok=1
 if ! grep -q tk_layer_external "$ui/sbtk.h"; then
-    (cd "$OUT/sbos" && sed '/^#/d' "$here/zc-compat.patch" | patch -s -p3)
+    # the stand-in is a context patch: on a toolkit that moved on it may not apply; then the zero-copy checks are
+    # skipped (TK_HAS_LAYER_EXTERNAL stays off), the rest still runs
+    if (cd "$OUT/sbos" && sed '/^#/d' "$here/zc-compat.patch" | patch -s -p3 --dry-run >/dev/null 2>&1); then
+        (cd "$OUT/sbos" && sed '/^#/d' "$here/zc-compat.patch" | patch -s -p3)
+    else
+        zc_ok=0
+        echo "run.sh: zc-compat.patch does not apply to this UI tree: zero-copy checks skipped"
+    fi
 fi
 # the zero-copy path on for the test (sw-ext-compat.patch set it; a tree with the toolkit's real API and no
 # TK_HAS_LAYER_EXTERNAL in sbtk.h yet gets it here)
 ZC=
 grep -q 'define TK_HAS_LAYER_EXTERNAL' "$ui/sbtk.h" || ZC=-DTK_HAS_LAYER_EXTERNAL=1
+ext_ok=1
 if ! grep -q sw_ext_add "$ui/shell_switcher.inc"; then
+  if (cd "$OUT/sbos" && sed '/^#/d' "$here/sw-ext-compat.patch" | patch -s -p1 --dry-run >/dev/null 2>&1); then
     (cd "$OUT/sbos" && sed '/^#/d' "$here/sw-ext-compat.patch" | patch -s -p1)
+    [ $zc_ok = 1 ] || sed -i.bak "/^+*#define TK_HAS_LAYER_EXTERNAL 1/d" "$ui"/*.c "$ui"/*.h "$ui"/*.inc 2>/dev/null
+  else
+    ext_ok=0
+    echo "run.sh: sw-ext-compat.patch does not apply to this UI tree: the cards / key bar / NC checks skipped"
+  fi
 fi
+rm -f "$ui"/*.bak
 find "$ui" -name '*.orig' -delete
 CC=${CC:-cc}
 W="-Wall -Wextra -Werror -Wno-unused-parameter"
@@ -49,7 +65,8 @@ $CC -c -O2 -std=gnu11 $W -I"$T/starbite/utility" "$T/starbite/utility/tz.c" -o "
 $CC -c -O2 -std=gnu11 $W "$T/starbite/sbos/kern/passcode.c" -o "$OUT/o/passcode.o"     # Track A: the host's sh_pass_*
 $CC -c -O2 -std=gnu11 $W "$sb/guide/survival_host.c" -o "$OUT/o/survival_host.o"   # (main.c's survival API)
 $CC -c -O2 -std=gnu11 $W -I"$here/fake" -I"$T/starbite/guest/sbos" -I"$ui" "$here/../gwin.c" -o "$OUT/o/gwin.o"
-$CC -c -O2 -std=gnu11 $W -I"$here/fake" -I"$T/starbite/guest/sbos" -I"$ui" "$here/gwin-host.c" -o "$OUT/o/gwin-host.o"
+zcdef=; [ $zc_ok = 1 ] || zcdef=-DGWIN_NO_ZC; [ $ext_ok = 1 ] || zcdef="$zcdef -DGWIN_NO_EXT -Wno-unused-function"
+$CC -c -O2 -std=gnu11 $W $zcdef -I"$here/fake" -I"$T/starbite/guest/sbos" -I"$ui" "$here/gwin-host.c" -o "$OUT/o/gwin-host.o"
 $CC -o "$OUT/gwin-host" "$OUT"/o/*.o
 mkdir -p "${GWIN_STILLS:-$OUT}"
 "$OUT/gwin-host" "$PAK" "$OUT"

@@ -52,6 +52,16 @@ static void fill(struct saved *s)
     s->panel_off = (uint8_t)(panel_off_on != 0);
     s->sos_led = (uint8_t)(sos_led_on != 0);
     s->bright = (uint8_t)panel_bright_level;
+    {
+        uint32_t so = 0;                    /* 1.2-alpha29: Extreme power saving's values are temporary */
+        int br = 0, po = 0;
+        if (surv_saver_saved(&so, &br, &po)) {
+            if (so)
+                s->screen_off_s = so;
+            s->bright = (uint8_t)br;
+            s->panel_off = (uint8_t)(po != 0);
+        }
+    }
     s->pad[0] = auto_off_min;               /* 0.3.2: was zero padding, so 0 (never) for older records */
     s->pad[1] = 0x100U | (uint32_t)(look_emergency != 0) | (uint32_t)(em_set_auto != 0) << 1;    /* 0.6 */
     s->pad[2] = (uint32_t)(look_is_ready() ? look_style() : look_saved_style) + 1U;

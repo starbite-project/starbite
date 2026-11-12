@@ -149,8 +149,20 @@ static const struct sbg_page sbg_shelter[] = {
         "Clear ground, away from overhanging branches, sheltered from wind. Keep water or soil at hand.",
         "Gather everything first: tinder (dry grass, birch bark, fluff), kindling (pencil thin), fuel (wrist thick).",
         "Light the tinder, add kindling gently, then fuel. Fire needs air: do not smother it.",
-        "This phone: Emergency > USB power out + fine steel wool (0000) across a cable's bare ends lights tinder.",
+        "This phone can light tinder: see the next page (Emergency > USB power out and a pencil lead).",
         "! Never leave a fire alone. Put it out with water and stir until cold to the touch.") },
+    { "Fire from the phone", SBG_L(
+        "The USB-C port gives 5 V at most 1.5 A (the charger chip's own limit). It lights tinder through an element "
+        "that glows: it needs about 5 ohm, so the port keeps its 5 V and puts 5-6 W into a few cm.",
+        "Best: a mechanical-pencil lead, 0.5 mm. Clamp or twist the two bare wires of a cut USB cable 4-6 cm apart on "
+        "it. Too short does nothing (a short); too long only warms: start long, slide closer until it glows red.",
+        "A 0.7 mm lead needs about twice the length (8-12 cm). A wooden pencil's 2 mm core is too thick: it would need "
+        "over half a metre.",
+        "A single copper strand or a gum-wrapper foil is a short for this phone: the chip cuts it to 30 ms pulses "
+        "and it will not glow. (It works on a battery, not on a current-limited USB port.)",
+        "Lay the glowing lead on dry tinder (paper, birch bark, fluff) and blow gently.",
+        "! Hold only insulated parts. Work over stone or soil. Unplug any charger first. Never short the port itself.",
+        "Emergency > USB power out: 10 s bursts; Extreme fire mode runs while you hold it, up to 2 minutes.") },
     { "Heat and sun", SBG_L(
         "Shade first. Cover the head and neck. Rest in the hot hours, travel at dawn and dusk.",
         "Keep clothes on: they slow sweat loss and sunburn.",
@@ -215,7 +227,7 @@ static const struct sbg_chapter sbg_chapters[] = {
     { "Start here", "Priorities, stay or go, the phone", 0xffff453aU, sbg_first, 3 },
     { "First aid", "CPR, bleeding, burns, cold, heat", 0xffff6b6bU, sbg_aid, 12 },
     { "Water", "How much, finding, making it safe", 0xff5ac8faU, sbg_water, 3 },
-    { "Shelter and fire", "Warmth, shelter, fire, heat", 0xffff9f0aU, sbg_shelter, 4 },
+    { "Shelter and fire", "Warmth, shelter, fire, heat", 0xffff9f0aU, sbg_shelter, 5 },
     { "Signalling", "Be seen, ground signs, sound", 0xffffd60aU, sbg_signal, 4 },
     { "Navigation", "Sun, stars, walking out", 0xff30d158U, sbg_nav, 3 },
     { "Food and weather", "What not to eat, storms", 0xffbf5af2U, sbg_food, 2 },

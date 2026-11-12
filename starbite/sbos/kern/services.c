@@ -450,10 +450,12 @@ void battery_timer(unsigned id)
     (void)id;
     bat_read();
     hist_add();
-    if (bat.ok)
+    if (bat.ok) {
         bat_model_feed(&model, K.power_state, bat.avg_ma, sb_ms() - K.state_since);
+        surv_battery_sample(bat.avg_ma, bat.charger, K.screen_on, sb_ms() - K.state_since);
+    }
     ui_kminute();
-    kt_set(KT_BATTERY, 1, sb_ms(), K.screen_on ? 10000 : 60000, 0);
+    kt_set(KT_BATTERY, 1, sb_ms(), K.screen_on ? 10000 : surv_battery_poll_ms(), 0);
     /* the reserve (docs 4.6): below 3 % off, unless SOS runs (down to 2 %) */
     {
         /* 1.2-alpha9: a low battery, once at 15 % and once at 5 % (again after a charge above them) */
@@ -608,8 +610,9 @@ static void screen(int on)
         sb_log("sbos: screen on");
         a55_low(0);
     }
-    kt_set(KT_INPUT, 1, sb_ms(), on ? 16 : 50, 1);    /* off: 50 ms, so a quick Power press is seen */
-    kt_set(KT_BATTERY, 1, sb_ms(), on ? 2000 : 60000, 0);
+    /* off: 50 ms, so a quick Power press is seen (Extreme power saving: 100 ms and the gauge every 5 min) */
+    kt_set(KT_INPUT, 1, sb_ms(), on ? 16 : surv_input_poll_ms(), 1);
+    kt_set(KT_BATTERY, 1, sb_ms(), on ? 2000 : surv_battery_poll_ms(), 0);
     for (int a = 0; a < napps; ++a)
         app_event_send(a, EV_APP_POWER, 0, on);
 }

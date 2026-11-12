@@ -292,7 +292,19 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
        SET_SURV_HEADING = 42 /* read: the heading in 0.1 degrees from magnetic north | the calibration (0..3) << 16;
                                 -1 not valid now */,
        SET_SURV_TILT = 43 /* read: (pitch + 1000) | (roll + 1000) << 16, 0.1 degrees; -1 not valid now */,
-       SET_SURV_STEPS = 44 /* read: steps since the hub started; -1 not running */ };
+       SET_SURV_STEPS = 44 /* read: steps since the hub started; -1 not running */,
+       /* 1.2-alpha29 (Track D) */
+       SET_SURV_SAVER = 45 /* Extreme power saving: 1 on, 0 off (reads 1 while it applies, by hand or Last 2 %) */,
+       SET_SURV_EST = 46 /* read: minutes left to 1 % with the screen off as usual; SET_SURV_EST_ON / _SAVER / _HEAT:
+                            the screen on, Extreme power saving, Survival heat; -1 unknown or charging */,
+       SET_SURV_EST_ON = 47, SET_SURV_EST_SAVER = 48 /* | 1 << 30 when measured on this phone */, SET_SURV_EST_HEAT = 49,
+       SET_SURV_LIGHT = 50 /* write 1: the panel at its top level (the app draws white with ui_light), 0 back */,
+       SET_SURV_WHISTLE = 51 /* write 1 / 0: the whistle tone; reads -1 while there is no speaker driver */,
+       SET_SURV_FIRE = 52 /* Extreme fire mode: write 1 to start (after the app's confirmation and hold), 2 to keep it
+                             running (at least every 1.5 s), 0 to stop. Reads as SET_SURV_USB while a fire session runs,
+                             else 0 */,
+       SET_SURV_FIRE_INFO = 53 /* read: the chip's limit events (10 bits) | its own switch-offs << 10 (6 bits) | the
+                                  minutes left << 16 (0x7fff unknown) */ };
 
 /* 1.0-rc3: the full-heat battery data for the minutes-left estimates (Heat's confirmation and its live readout).
  * Measured on the phone (rc2, 2026-11-08, Manual flat out, 7 cores + GPU): 2.8 A at 3.67 V (about 10 W; peak 2.86 A),

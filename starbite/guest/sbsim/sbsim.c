@@ -432,8 +432,8 @@ static void guest_log(const char *l)
     puts_(l);
     puts_("\n");
     if (mf->flags & F_BLKTEST) {            /* the block tests' verdict lines (blk/test-sbinit) */
-        blktest_done |= has(l, "SBBLK-TEST-DONE");
-        blktest_fail |= has(l, "sbblk-test: FAIL");
+        blktest_done |= has(l, "SBBLK-TEST-DONE") | has(l, "V3-TEST-DONE");     /* (v3: the services' tests) */
+        blktest_fail |= has(l, "sbblk-test: FAIL") | (has(l, "v3-test: ") && has(l, ": FAIL"));
     }
     for (const char *p = l; *p; ++p) {      /* the terminal scenario's typed command, run by the guest's shell */
         const char *w = "STARBITE-TERM-OK";
