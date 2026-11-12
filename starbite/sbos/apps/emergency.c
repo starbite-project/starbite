@@ -78,7 +78,8 @@ static void show_usb(void)
             if (ml != 0x7fff)
                 line("Battery for about ", ml, " min of this", 0xffffffffU);
             if (trips)
-                line("The chip limited the current ", trips, " times (a short: use a longer element)", ORANGE);
+                line("The chip limited the current ", trips, " times: if it keeps counting, the element needs to be "
+                     "longer or thinner", ORANGE);
         }
         ui_button(2, "Stop", 0, UI_RED);
     } else {
@@ -92,9 +93,10 @@ static void show_usb(void)
             ui_hold(14, "Hold for continuous power (Stop ends it, 2 min at most)", 1500, UI_RED);
     }
     ui_textline("5 V from the USB-C port, at most 1.5 A (the charger chip's own limit, never more).", 0xffffffffU);
-    ui_textline("Best: a pencil lead with each bare wire wrapped 3-4 tight turns round it (touching only sparks). "
-                "0.5 mm: start 4 cm apart, then closer; stop closing in when the chip starts limiting the current.",
-                0xffffffffU);
+    ui_textline("Best: nichrome wire (~15 cm coiled) or a 0.3 mm pencil lead (~2 cm), each bare wire wrapped 3-4 "
+                "tight turns round it. 0.5 mm lead: start 6 cm apart.", 0xffffffffU);
+    ui_textline("If the chip limits the current every second, the element conducts too well: make it longer or "
+                "thinner (it then gets power only 1/10 of the time).", 0xffffffffU);
     ui_textline("A copper strand or foil is a short: the chip cuts it to 30 ms pulses, it will not glow. Sparks can "
                 "still light char cloth or cotton fluff held at the contact.", 0xffffffffU);
     ui_textline("Never short the phone's port directly. Unplug any charger first. Hold only insulated parts, over "

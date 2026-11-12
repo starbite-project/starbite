@@ -156,10 +156,11 @@ static const struct sbg_page sbg_shelter[] = {
         "bare wires glows when it takes about 1.5 A: around 3.5 ohm, up to about 7.5 W in a few cm.",
         "Contacts matter most: wrap each bare wire 3-4 tight turns around the lead (or a metal paper clip pinched on "
         "it). Wires only touching spark and waste the heat at the contact instead of in the lead.",
-        "Length: the shortest gap that does not make the phone show 'the chip limited the current'. 0.3 mm lead: "
-        "about 1-2 cm. 0.5 mm: start at 4 cm, then 3, then 2.5. 0.7 mm: start at 6 cm.",
-        "Hold the lead in the air (not lying on stone: that cools it). Scrape the middle thinner with a knife for a "
-        "hot spot. Softer leads (2B) conduct better than HB: they need a longer gap.",
+        "Length: if the phone counts 'the chip limited the current' every second, the element conducts too well: "
+        "make it LONGER or thinner. 0.3 mm lead: 2.5 cm, then 2, then 1.5. 0.5 mm: 6 cm, then 5, then 4.",
+        "Best of all: nichrome wire from an old toaster or hair dryer, about 15 cm coiled. Or a few fibres of fine "
+        "steel wool stretched between the wires (never a thick wad). A 0.7 mm lead is too thick to glow well.",
+        "Hold it in the air (not lying on stone: that cools it). Softer leads (2B) conduct better than HB: longer.",
         "No glow but sparks? Use the sparks: hold char cloth, cotton fluff or shredded tissue right at the spark.",
         "A copper strand or foil is a short for this phone: the chip cuts it to pulses and it will not glow.",
         "! Hold only insulated parts. Work over stone or soil. Unplug any charger first. Never short the port itself.",
