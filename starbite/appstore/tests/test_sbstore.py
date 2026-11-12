@@ -31,6 +31,7 @@ class Files:
     def __init__(self):
         self.d = {}            # path -> bytes or callable
         self.flaky = {}        # path -> cut after N bytes, once
+        self.slow = set()      # paths sent slowly (cancel tests)
         self.hits = []         # (path, range header)
 
 
@@ -68,6 +69,15 @@ class H(http.server.BaseHTTPRequestHandler):
         part = body[start:]
         self.send_header("Content-Length", str(len(part)))
         self.end_headers()
+        if path in FILES.slow:                       # trickle: 64 KiB every 0.2 s
+            for k in range(0, len(part), 65536):
+                try:
+                    self.wfile.write(part[k:k + 65536])
+                    self.wfile.flush()
+                except OSError:
+                    return
+                time.sleep(0.2)
+            return
         cut = FILES.flaky.pop(path, None)
         if cut is not None:
             self.wfile.write(part[:cut])
@@ -658,6 +668,29 @@ class DaemonTest(unittest.TestCase):
         self.c.sendall(b"op 0 2 %d\n" % seq)
         self.line(lambda l: l == "rescan", t=30)
         self.assertFalse(os.path.lexists(self.e.path("/usr/local/bin/hello")))
+
+    def test_cancel(self):
+        body = publish_hello("1.0")
+        big = body + os.urandom(3 << 20)                  # a slow 3 MB download (the tar reader ignores the tail)
+        name = "/dl/hello-1.0-linux-aarch64.tar.gz"
+        FILES.d[name] = big
+        FILES.slow.add(name)
+        rel = FILES.d["/gh/repos/o/hello/releases/latest"]
+        rel["assets"][0].update(size=len(big), digest="sha256:" + sha(big))
+        seq = int(self.line(lambda l: l.startswith("store ")).split()[1])
+        self.c.sendall(b"op 0 %d %d\n" % (1 | (2 << 8), seq))
+        self.line(lambda l: l.startswith("pkg 0 2"), t=30)                # downloading
+        time.sleep(1)
+        self.c.sendall(b"op 0 3 %d\n" % seq)
+        self.line(lambda l: l.startswith("pkg 0 0 0"), t=15)
+        time.sleep(1)
+        hdr, pk, h3, p3, text = self.table()
+        self.assertEqual(pk[0][9], sbstore.PKG_IDLE)
+        FILES.slow.discard(name)
+        self.assertFalse(os.path.exists(self.e.path("/opt/sbstore/hello")))
+        self.assertFalse(os.path.lexists(self.e.path("/usr/local/bin/hello")))
+        part = [f for f in os.listdir(self.e.path("/var/lib/sbstore/dl/hello")) if f.endswith(".part")]
+        self.assertTrue(part, "the partial download is kept for a resume")
 
     def test_failure_reported(self):
         publish_hello("1.0")

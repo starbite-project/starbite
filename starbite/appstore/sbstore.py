@@ -1938,6 +1938,11 @@ class Daemon:
                 if px:
                     icons.append((i, px))
         t = self.tables()
+        blob = repr(t).encode()
+        if not icons and blob == getattr(self, "_last", None):
+            self.dirty = False
+            return
+        self._last = blob
         seq = self.shm.publish(t[0], t[1], t[2], t[3], t[4], icons)
         if not self.icons_done:
             self.icons_done = True
@@ -1967,6 +1972,7 @@ class Daemon:
             self.sock = s
             log("connected to %s" % C.sock)
             self.dirty = True
+            self._last = None                       # tell the new sbwl the seq, changed or not
         except OSError:
             pass
 
@@ -2008,6 +2014,7 @@ class Daemon:
         if op == OP_CANCEL:
             self.queue = [q for q in self.queue if q[0] != idx]
             if self.job and self.job["idx"] == idx:
+                self.job["cancelled"] = True
                 try:
                     os.killpg(self.job["p"].pid, signal.SIGTERM)
                 except OSError:
@@ -2072,6 +2079,8 @@ class Daemon:
             if rc == 0:
                 self.live[idx] = {"state": PKG_IDLE, "pct": 100}
                 self.send("rescan")
+            elif j.get("cancelled"):
+                self.live[idx] = {"state": PKG_IDLE, "pct": 0}       # cancelled: back to GET, no error
             else:
                 self.live[idx] = {"state": PKG_FAILED, "pct": 0, "err": j["err"] or "failed"}
             self.send("pkg %d %d %d" % (idx, self.live[idx]["state"], self.live[idx]["pct"]))
@@ -2177,6 +2186,9 @@ def main(argv):
         return 0
     cat = load_catalog()
     prog = Progress(json_out=a.json)
+    stop = {"now": False}
+    signal.signal(signal.SIGTERM, lambda *x: stop.update(now=True))     # the daemon's cancel: stop apt / make too
+    cancel = lambda: stop["now"]  # noqa: E731
     try:
         if a.cmd == "list":
             for r in _status(cat):
@@ -2219,16 +2231,16 @@ def main(argv):
                     out[m] = {"error": e.detail}
             print(json.dumps(out, indent=1))
         elif a.cmd == "install":
-            op_install(cat, a.id, a.method or a.method_pos, prog)
+            op_install(cat, a.id, a.method or a.method_pos, prog, cancel)
         elif a.cmd == "update":
             if a.all or not a.id:
                 ups = op_check(cat, NOPROG, ids=None)
                 for aid, old, new in ups:
-                    op_update(cat, aid, prog)
+                    op_update(cat, aid, prog, cancel)
                 if not ups:
                     prog.event(ev="done", msg="everything is up to date")
             else:
-                op_update(cat, a.id, prog)
+                op_update(cat, a.id, prog, cancel)
         elif a.cmd == "rollback":
             op_rollback(cat, a.id, prog)
         elif a.cmd == "remove":
