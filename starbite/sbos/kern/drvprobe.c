@@ -7,12 +7,16 @@
  * fake probes. */
 #include "sb.h"
 #include "drvprobe.h"
+#include "nled.h"
+#include "bathealth.h"
 
 /* ---- the list: filled in as each driver is merged ---- */
 #define DRV_LIST_BEGIN const struct drv_probe drv_probes[] = {
 #define DRV_LIST_END { 0, 0, 0, 0 } };
 #ifndef DRV_HOST_LIST
 DRV_LIST_BEGIN
+    { "bathealth", drv_bathealth_probe, drv_bathealth_abort, 2000 },
+    { "nled", drv_nled_probe, drv_nled_abort, 12000 },
 DRV_LIST_END
 #else
 DRV_HOST_LIST                               /* the host test's fake probes */
