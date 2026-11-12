@@ -14,6 +14,8 @@
 #include "bt.h"
 #include "cam.h"
 #include "usb.h"
+#include "shub_more.h"
+#include "haptic.h"
 
 /* ---- the list: filled in as each driver is merged ---- */
 #define DRV_LIST_BEGIN const struct drv_probe drv_probes[] = {
@@ -24,6 +26,8 @@ DRV_LIST_BEGIN
     { "codec", drv_codec_probe, drv_codec_abort, 14000 },
     { "audio", drv_audio_probe, drv_audio_abort, 10000 },
     { "nled", drv_nled_probe, drv_nled_abort, 12000 },
+    { "sens", drv_sens_probe, drv_sens_abort, DRV_SENS_BUDGET_L1 },
+    { "haptic", drv_haptic_probe, drv_haptic_abort, DRV_HAPTIC_BUDGET_L2 },
     { "bt", drv_bt_probe, drv_bt_abort, DRV_BT_BUDGET_MS },
     { "cam", drv_cam_probe, drv_cam_abort, CAM_PROBE_BUDGET_MS },
     { "usb", drv_usb_probe, drv_usb_abort, DRV_USB_BUDGET_MS },   /* last: the link to the Mac comes back after */
