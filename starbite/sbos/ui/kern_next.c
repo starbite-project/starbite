@@ -787,8 +787,9 @@ static void frame(void)
         if (tick3 <= n3) tick3 = n3 + 50;           /* fell behind: from now */
         kt_set(KT_UI, 20, tick3 / 3, 0, 0);
     }
+    uint64_t fb0 = sb_us(), fb_boost = 0, fb_tick = 0, fb_comp = 0, fb_pres = 0, fb_idle = 0;   /* cp7: a slow frame's parts */
     next_input_now();                            /* the finger where it is now */
-    if (!boosted) boost(1);                      /* a wake: the kernel set the screen-on clock after the hook */
+    if (!boosted) { uint64_t b0 = sb_us(); boost(1); fb_boost = sb_us() - b0; }   /* a wake: the kernel set the screen-on clock after the hook */
     uint64_t now = sb_ms();
     float dt = last_tick ? (float)(now - last_tick) / 1000.0f : 1.0f / 60;
     if (flip_on && comp.acquire && last_us) {
@@ -800,9 +801,14 @@ static void frame(void)
     uint64_t st0 = tk_us();
     int mv = sh_tick(dt, (float)now);
     shell_time("tick", st0);
+    fb_tick = tk_us() - st0;
     int motion = mv || sh_moving();
+    uint64_t c0 = sb_us();
     tk_comp_frame(&comp, motion, 0);
+    fb_comp = sb_us() - c0;
+    c0 = sb_us();
     present();
+    fb_pres = sb_us() - c0;
     stats_add();
     if (slept_now) {
         slept_now = 0;
@@ -817,6 +823,7 @@ static void frame(void)
             uint64_t si0 = tk_us();
             sh_idle();
             shell_time("idle (after a gesture)", si0);
+            fb_idle = tk_us() - si0;
         }
         if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);   /* the rest of the idle work, a turn at a time */
         clock_again();                                               /* P2z: the Clock's next digit */
@@ -827,14 +834,46 @@ static void frame(void)
         stats_reset();
 #endif
     }
+    uint64_t fall = sb_us() - fb0;
+    if (fall > 100000) {                         /* cp7: a frame over 100 ms: which part (7b: 580-680 ms frames) */
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: a slow frame ");
+        ub_dec(&u, fall / 1000);
+        ub_s(&u, " ms: boost ");
+        ub_dec(&u, fb_boost / 1000);
+        ub_s(&u, ", shell tick ");
+        ub_dec(&u, fb_tick / 1000);
+        ub_s(&u, ", compose ");
+        ub_dec(&u, fb_comp / 1000);
+        ub_s(&u, ", present ");
+        ub_dec(&u, fb_pres / 1000);
+        ub_s(&u, ", idle ");
+        ub_dec(&u, fb_idle / 1000);
+        ub_s(&u, " ms");
+        sb_log(u.b);
+    }
 }
 
 static void start_ticking(void)
 {
     kt_cancel(KT_UI, 21);
     kt_cancel(KT_UI, 23);
+    uint64_t sb0 = sb_us();
     boost(1);
+    uint64_t sb1 = sb_us();
     workers_start();
+    uint64_t sb2 = sb_us();
+    if (sb2 - sb0 > 50000) {                     /* cp7: a slow start of motion: the clocks (ACPM) or the band workers (PSCI) */
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: a slow motion start: boost ");
+        ub_dec(&u, (sb1 - sb0) / 1000);
+        ub_s(&u, " ms, band workers ");
+        ub_dec(&u, (sb2 - sb1) / 1000);
+        ub_s(&u, " ms");
+        sb_log(u.b);
+    }
     if (ticking) return;
     ticking = 1;
     last_tick = sb_ms();
