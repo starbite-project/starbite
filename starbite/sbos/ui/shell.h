@@ -454,7 +454,9 @@ int sh_slots_get(sh_slots_t *s);          /* 0 ok, < 0 no home store */
 int sh_shell_set(int on);                 /* Starbite OS at power-on: written as the user's choice; 0 ok */
 /* The lock screen's slide-to-start sheet (Track B's Options): the one-shots for an OS card. sh_req_why: 1 it fits,
  * 0 not with why in plain words ("Only for Linux systems", "No previous kernel in the store", "No settings store",
- * "Not installed"); sh_req_label: the action's name ("Safe Mode"), "" for an unknown one; sh_boot_os_req: after the
+ * "Not installed"). The words are a contract (Track B's sheet, 43800bc9): an option of another family of systems
+ * starts "Only for ", "Not for " or "Not available" (the sheet hides it); one of this family that can't run now
+ * starts any other way (dimmed, the reason toasted); sh_req_label: the action's name ("Safe Mode"), "" for an unknown one; sh_boot_os_req: after the
  * slide (the slide is the confirmation, nothing more asks): arms the one-shot for key and restarts into it (does not
  * return on success); < 0 refused (the self test: a logged dry run, -1). */
 int sh_req_why(const char *key, int action, char *why, int cap);
