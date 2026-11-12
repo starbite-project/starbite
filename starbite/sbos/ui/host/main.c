@@ -162,6 +162,7 @@ void sh_haptic(void) { }
 static char host_clip[4096];
 __attribute__((weak)) void sh_clip_set(const char *s) { snprintf(host_clip, sizeof host_clip, "%s", s ? s : ""); }
 __attribute__((weak)) const char *sh_clip_get(void) { return host_clip; }
+void sh_haptic_k(int kind) { (void)kind; }
 /* L2 + L3: Linux apps and the App Store (the kernel's platform is starbite/guest/next/gwin.c): host/linux_fake.inc,
  * a pretend Linux with a catalog and a store. SBTK_NO_LINUX_FAKE: none (starbite/guest/next/host/gwin-host.c links
  * gwin.c itself and drives the shell) */

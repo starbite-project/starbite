@@ -105,8 +105,13 @@ static int nc_pref(const char *who, const char *what)
 }
 
 /* ---- drawing a platter's words ------------------------------------------------------------------------------- */
-#define NC_W CARD_W
-#define NC_TXW (NC_W - 64 - 16)            /* the words' column */
+/* B4: docs/design/IOS-REFERENCE.md 5 (v1.1, measured): x 14.5, w 361, r 23, 8 apart; 24.6 + 18 pt a line; the icon 38
+ * at 13.7, centred; the words from 65; the time 18.3 in from the right on the title's baseline */
+#define NC_X 14.5f
+#define NC_W 361.0f
+#define NC_R 23.0f
+#define NC_TXW (NC_W - 65 - 18.3f)         /* the words' column */
+#define NC_ACT 46.0f                       /* B4: an expanded platter's actions row (Open / Clear) */
 /* a premultiplied icon at f x its size, its top-left at (X, Y) px of dst (2 x 2 bilinear taps a px: a 62 pt tile
  * down to 38 or 26 pt stays smooth) */
 static void nc_blit_scaled(tk_bmp *dst, const tk_bmp *src, float X, float Y, float f)
@@ -169,26 +174,42 @@ static void nc_when(char *b, int hm)
     b[0] = (char)('0' + hm / 1000 % 10); b[1] = (char)('0' + hm / 100 % 10); b[2] = ':';
     b[3] = (char)('0' + hm / 10 % 10); b[4] = (char)('0' + hm % 10); b[5] = 0;
 }
-static int nc_lines(const nc_item *n, char ln[4][96])
+static int nc_lines_n(const nc_item *n, char ln[4][96], int max)
 {
     float wm;
-    return n->body[0] ? wrapn(ln, 2, TK_IT400, 15, n->body, NC_TXW, &wm) : 0;
+    return n->body[0] ? wrapn(ln, max, TK_IT400, 15, n->body, NC_TXW, &wm) : 0;
 }
-static float nc_hh(int nl) { return nl >= 2 ? 86 : 68; }   /* the lock card's glass is 68 pt at the least (its 3-slice) */
+static int nc_lines(const nc_item *n, char ln[4][96]) { return nc_lines_n(n, ln, 2); }
+/* B4: 24.6 + 18 a line (the title and the body's), 60.6 at the least (the icon and its insets) */
+static float nc_hh(int nl) { return tk_maxf(60.6f, 24.6f + 18.0f * (1 + nl)); }
 /* iOS 26's platter: the app's icon (38 pt), the title (15 / 600) with the time (13, secondary) on its right, up to
- * two lines of text (15 / 400) */
-static void nc_draw_item(dc *d, const nc_item *n, float x, float top, float h, int nl, char ln[4][96])
+ * two lines of text (15 / 400) at 18 pt; act: an expanded one's Open / Clear capsules along its bottom (B4) */
+static void nc_draw_item_x(dc *d, const nc_item *n, float x, float top, float h, int nl, char ln[4][96], int act)
 {
     int a = nc_app(n->who);
-    nc_icon(d, a, nc_name(n->who), x + 14, top + (h - 38) / 2, 38);
-    float tx = x + 64, right = x + NC_W - 16;
+    float hb = h - (act ? NC_ACT : 0);          /* the words' part */
+    nc_icon(d, a, nc_name(n->who), x + 13.7f, act ? top + 13.7f : top + (hb - 38) / 2, 38);
+    float tx = x + 65, right = x + NC_W - 18.3f;
     char when[16];
     nc_when(when, n->hm);
-    float ww = when[0] ? tw(TK_IT400, 13, when, 0, 0) : 0, t0 = top + (h - (20 + 19.0f * nl)) / 2, b1 = bl(TK_IT600, 15, t0);
+    /* the first line's cap top 15 below the platter's top (centred when the platter is taller than its words) */
+    float cap = tk_ascent(TK_IT600, PT(15)) / TK_PT * .78f, used = 24.6f + 18.0f * (1 + nl);
+    float b1 = top + 15 + cap + (act ? 0 : tk_maxf(0, (hb - used) / 2));
+    float ww = when[0] ? tw(TK_IT400, 13, when, 0, 0) : 0;
     d_text_box(d, TK_IT600, 15, tx, b1, right - tx - (ww ? ww + 8 : 0), 0, n->title[0] ? n->title : nc_name(n->who), 0, 0, INK, 0);
     if (ww) d_text(d, TK_IT400, 13, right - ww, b1, when, 0, 0, C_LABEL2, 0);
-    for (int k = 0; k < nl; k++) d_text(d, TK_IT400, 15, tx, bl(TK_IT400, 15, t0 + 20 + 19.0f * k), ln[k], 0, 0, W(.85f), 0);
+    for (int k = 0; k < nl; k++) d_text(d, TK_IT400, 15, tx, b1 + 18.0f * (k + 1), ln[k], 0, 0, W(.92f), 0);
+    if (act) {
+        float bw = (NC_W - 2 * 13.7f - 8) / 2, by = top + h - NC_ACT + 2;
+        static const char *const L[2] = { "Open", "Clear" };
+        for (int i = 0; i < 2; i++) {
+            float bx = x + 13.7f + i * (bw + 8);
+            d_rrect(d, bx, by, bw, 34, 17, W(.16f));
+            d_text_box(d, TK_IT600, 15, bx + bw / 2, bl(TK_IT600, 15, by + 8), bw - 16, 1, L[i], 0, 0, i ? C_RED : INK, 0);
+        }
+    }
 }
+static void nc_draw_item(dc *d, const nc_item *n, float x, float top, float h, int nl, char ln[4][96]) { nc_draw_item_x(d, n, x, top, h, nl, ln, 0); }
 
 /* ---- platters: views of the lock cards' glass ------------------------------------------------------------------
  * A view shares the card's bitmap and half copy (both made at boot, freed only when Emergency frees the cards:
@@ -223,9 +244,13 @@ static void pl_glass(tk_layer *v, float x, float y, float h, float a)
     if (g >= 0) {
         if (v->bmp.px != K[g].face.bmp.px) nc_view(v, &K[g].face);
         float top = LIST_TOP + K[g].y;          /* where the card was baked */
-        v->x = tk_floorf(PT(x - CARD_X) + K[g].face.bx + .5f);
-        v->y = tk_floorf(PT(y - top) + K[g].face.by + .5f);
-        v->slice_h = PT(h + 2 * FACE_MG) - K[g].fcut;
+        v->x = PT(x - CARD_X) + K[g].face.bx;
+        v->y = PT(y - top) + K[g].face.by;
+        /* B4: the lock card's glass stretched to the platter's width; under its 3-slice's 68 pt it is scaled down */
+        v->slice_h = PT(tk_maxf(68, h) + 2 * FACE_MG) - K[g].fcut;
+        v->sx = NC_W / CARD_W;
+        v->sy = h < 68 ? h / 68 : 1;
+        v->ox = PT(x); v->oy = PT(y);
         v->clip = 0;
     } else {
         if (v->bmp.px) nc_unview(v);
@@ -236,7 +261,8 @@ static void pl_glass(tk_layer *v, float x, float y, float h, float a)
         v->solid_h = PT(h);
         v->clip = 1;
         v->clip_r = (tk_rect){ v->x, v->y, PT(NC_W), PT(h) };
-        v->clip_radius = PT(26);
+        v->clip_radius = PT(NC_R);
+        v->sx = v->sy = 1;
     }
     v->alpha = a;
     v->hidden = a <= .004f;
@@ -264,7 +290,8 @@ static void pl_peek(tk_layer *v, float x, float y, float h, float a)
     v->clip = 0;
     if (v->bmp.px != K[g].gh.bmp.px) nc_view(v, &K[g].gh);
     float top = LIST_TOP + K[g].y;
-    v->x = tk_floorf(PT(x - CARD_X) + K[g].gh.bx + .5f);
+    v->sx = NC_W / CARD_W; v->sy = 1; v->ox = PT(x); v->oy = 0;
+    v->x = PT(x - CARD_X) + K[g].gh.bx;
     v->y = tk_floorf(PT(y + h - 68 - top) + K[g].gh.by + .5f);
     v->alpha = a;
     v->hidden = 0;
@@ -279,23 +306,26 @@ static void pl_peek(tk_layer *v, float x, float y, float h, float a)
 typedef struct {
     unsigned id;                            /* 0: free */
     tk_layer gl, tx, pk;                    /* the glass (a view), the words, the stack's peeks (a view) */
-    float y, ty, a, ta, pa, tpa, dx, tdx, h, yb;   /* now and the targets (list pt at scroll 0) */
-    int nl, ref, dying, built;
+    float y, ty, a, ta, pa, tpa, dx, tdx, h, yb, hv;   /* now and the targets (list pt at scroll 0); hv: the drawn height */
+    int nl, ref, dying, built, ex;          /* ex: expanded by a long press (B4) */
+    tk_spring sdx;                          /* B4: a let-go swipe's way back (or on), with the finger's speed */
 } nc_slot;
 static nc_slot NSL[NC_SLOTS];
 static tk_layer ncl, ncwall, ncstar, ncdim, nccont, ncsb, ncclk, nchead, nclist, ncempty, ncgh, ncclr, ncclrt, ncpill;
 static tk_layer bnl, bnund, bngl, bntx;
+static tk_layer bkl, bkund, bkgl, bktx;     /* B4: the banner pushed behind a newer one (the stacked look) */
 enum { NG_NONE, NG_PULL, NG_DRAG, NG_LIST, NG_SCROLL, NG_SWIPE, NG_TAP, NG_BANNER, NG_PILL };
 static struct {
-    int on, built, closing, anim, g, moved, sl, clrall, reveal, momentum, instant;
-    float p, scroll, sv, x0, y0, base, ghy, ghty, gha, ghta;
+    int on, built, closing, anim, g, moved, sl, clrall, reveal, momentum, instant, xp, swc;   /* xp: the expanded slot (B4) */
+    float p, scroll, sv, x0, y0, base, ghy, ghty, gha, ghta, t0, xd;
     char exp[16];                           /* the fanned-out group's poster ("" none) */
     float clr_x[2], clr_w[2];               /* the fanned-out group's pills: Show less, Clear (pt, in its header) */
     tk_tracker tr;
-} NC = { .reveal = -1 };
+} NC = { .reveal = -1, .xp = -1 };
 static tk_spring sp_nc, sp_ncs;
-static struct { int on, closing, drag; unsigned id; float p, h, dy, until; } BN;
-static tk_spring sp_bn;
+static struct { int on, closing, drag, ex; unsigned id; float p, h, dy, until, h0, ge; } BN;   /* ex: expanded (B4) */
+static struct { int on; unsigned id; float h, s; tk_spring sp; } BK;                                /* B4: the one behind */
+static tk_spring sp_bn, sp_bndy, sp_bnge;
 static int nc_on(void) { return NC.on; }
 
 static float nc_content_h;
@@ -327,6 +357,9 @@ static nc_slot *nc_slot_new(unsigned id, float y)
         s->nl = nc_lines(&NI[i], ln);
         s->h = nc_hh(s->nl);
         s->y = s->ty = y;
+        s->hv = s->h;
+        s->ex = 0;
+        s->sdx.live = 0;
         s->a = s->ta = 0;
         s->pa = s->tpa = 0;
         s->dx = s->tdx = 0;
@@ -343,8 +376,10 @@ static void nc_slot_build(nc_slot *s)
     char ln[4][96];
     int nl = nc_lines(&NI[i], ln);
     relayer(&s->tx);
-    dc d = mk(&s->tx, "nc-item", CARD_X, s->ty, NC_W, s->h, 2, 0);
-    nc_draw_item(&d, &NI[i], CARD_X, s->ty, s->h, nl, ln);
+    int ex = s->ex;
+    if (ex) nl = nc_lines_n(&NI[i], ln, 4);
+    dc d = mk(&s->tx, "nc-item", NC_X, s->ty, NC_W, s->h, 2, 0);
+    nc_draw_item_x(&d, &NI[i], NC_X, s->ty, s->h, nl, ln, ex);
     trim(&s->tx);
     tk_layer_prepare(&s->tx);
     s->yb = s->ty;
@@ -421,13 +456,18 @@ static void nc_place_list(void)
     for (int k = 0; k < NC_SLOTS; k++) {
         nc_slot *s = &NSL[k];
         if (!s->id) continue;
-        pl_peek(&s->pk, CARD_X + s->dx, s->y, s->h, s->pa * s->a);
-        pl_glass(&s->gl, CARD_X + s->dx, s->y, s->h, s->built ? s->a : 0);
+        /* B4: while one is expanded the others step back (dimmed) */
+        float a = s->a * (NC.xp >= 0 && &NSL[NC.xp] != s ? 1 - .7f * NC.xd : 1);
+        pl_peek(&s->pk, NC_X + s->dx, s->y, s->hv, s->pa * a);
+        pl_glass(&s->gl, NC_X + s->dx, s->y, s->hv, s->built ? a : 0);
         if (s->built && s->tx.bmp.px) {
             s->tx.x = s->tx.bx + tk_floorf(PT(s->dx) + .5f);
             s->tx.y = s->tx.by + tk_floorf(PT(s->y - s->yb) + .5f);
-            s->tx.alpha = s->a;
-            s->tx.hidden = s->a <= .004f;
+            s->tx.alpha = a;
+            s->tx.hidden = a <= .004f;
+            s->tx.clip = 1;                     /* (an expanding one's words show as its platter grows) */
+            s->tx.clip_r = (tk_rect){ PT(NC_X + s->dx), PT(s->y), PT(NC_W), PT(s->hv) };
+            s->tx.clip_radius = PT(NC_R);
         } else
             s->tx.hidden = 1;
     }
@@ -439,11 +479,11 @@ static void nc_place_list(void)
     /* the Clear button under the platter a short swipe moved */
     nc_slot *r = NC.reveal >= 0 ? &NSL[NC.reveal] : 0;
     if (r && r->id && r->dx < -2) {
-        float w = 76, x = CARD_X + NC_W - w, a = tk_clampf(-r->dx / 92, 0, 1);
+        float w = 76, x = NC_X + NC_W - w, a = tk_clampf(-r->dx / 92, 0, 1);
         ncclr.solid = tk_premul(W(.2f));
         ncclr.x = tk_floorf(PT(x) + .5f); ncclr.y = tk_floorf(PT(r->y) + .5f);
         ncclr.solid_w = PT(w); ncclr.solid_h = PT(r->h);
-        ncclr.clip = 1; ncclr.clip_r = (tk_rect){ ncclr.x, ncclr.y, PT(w), PT(r->h) }; ncclr.clip_radius = PT(22);
+        ncclr.clip = 1; ncclr.clip_r = (tk_rect){ ncclr.x, ncclr.y, PT(w), PT(r->h) }; ncclr.clip_radius = PT(NC_R);
         ncclr.alpha = a; ncclr.hidden = 0;
         if (ncclrt.bmp.px) { ncclrt.y = ncclrt.by + tk_floorf(PT(r->y + r->h / 2 - 10) + .5f); ncclrt.alpha = a; ncclrt.hidden = 0; }
     } else { ncclr.hidden = 1; ncclrt.hidden = 1; }
@@ -548,8 +588,8 @@ static void nc_build(void)
     }
     {
         float w = tw(TK_IT600, 15, "Clear", 0, 0);
-        dc d = mk(&ncclrt, "nc-clear-word", CARD_X + NC_W - 38 - w / 2, 0, w, 20, 2, 0);
-        d_text(&d, TK_IT600, 15, CARD_X + NC_W - 38 - w / 2, 15, "Clear", 0, 0, INK, 0);
+        dc d = mk(&ncclrt, "nc-clear-word", NC_X + NC_W - 38 - w / 2, 0, w, 20, 2, 0);
+        d_text(&d, TK_IT600, 15, NC_X + NC_W - 38 - w / 2, 15, "Clear", 0, 0, INK, 0);
         trim(&ncclrt);
         ncclrt.hidden = 1;
     }
@@ -613,6 +653,7 @@ static void nc_close(float v)
 }
 static void nc_gone(void)
 {
+    NC.xp = -1; NC.xd = 0;
     NC.on = NC.closing = 0;
     NC.p = 0;
     sp_nc.live = 0;
@@ -622,6 +663,7 @@ static void nc_gone(void)
 /* ---- the store's changes -------------------------------------------------------------------------------------- */
 static void bn_show(const nc_item *n);
 static void bn_hide(float v);
+static void bk_free(void);
 static void nc_remove(int i)
 {
     if (i < 0 || i >= nin) return;
@@ -632,6 +674,7 @@ static void nc_remove(int i)
     nc_slot *s = nc_slot_of(id);
     if (s && !s->dying) s->ta = 0;
     if (BN.on && BN.id == id && !BN.closing) bn_hide(0);
+    if (BK.on && BK.id == id) { bk_free(); relink(); }
     if (NC.built) { nc_head_build(); nc_layout(); relink(); }
 }
 static void nc_clear_group(const char *who, int fly)
@@ -709,47 +752,123 @@ static int nc_pill_hit(float x, float y)
     return !ncpill.hidden && nc_unread > 0 && y >= PILL_Y - 8 && y < PILL_Y + 36 && tk_fabsf(x - 195) < pill_w / 2 + 8;
 }
 
-/* ---- the banner ------------------------------------------------------------------------------------------------- */
-#define BN_Y 8.0f
+/* ---- the banner -------------------------------------------------------------------------------------------------
+ * B4 (IOS-REFERENCE 5): at y 10, in on the banner spring (.45 / .80) sliding and growing from .92; 5 s on screen. A
+ * newer one pushes the shown one behind it (the stacked look: .94 and peeking 8 pt below, its words gone); both go
+ * up together. A long press expands it (four lines and Open / Clear; it then stays until swiped away); a let-go drag
+ * goes back on a spring with the finger's speed, a flick up (projected 200 ms) dismisses it. */
+#define BN_Y 10.0f
+static float bn_hcur(void) { return BN.ex ? BN.h0 + (BN.h - BN.h0) * tk_clampf(BN.ge, 0, 1.05f) : BN.h; }
+static void bn_under(tk_layer *u, float h)
+{
+    u->solid = tk_premul(TK_RGBA(16, 20, 36, .93f));    /* a dark ground under the glass: legible over any page */
+    u->x = PT(NC_X); u->y = PT(BN_Y);
+    u->solid_w = PT(NC_W); u->solid_h = PT(h);
+    u->clip = 1; u->clip_r = (tk_rect){ u->x, u->y, PT(NC_W), PT(h) }; u->clip_radius = PT(NC_R);
+}
 static void bn_place(void)
 {
     bnl.hidden = !BN.on;
-    float off = (1 - BN.p) * -(BN.h + BN_Y + 30) + BN.dy;
-    bnl.y = tk_floorf(PT(off) + .5f);
+    float p = BN.p, off = (1 - p) * -(BN.h + BN_Y + 30) + BN.dy;
+    bnl.y = PT(off);
+    bnl.sx = bnl.sy = .92f + .08f * tk_clampf(p, 0, 1.1f);
+    bnl.ox = PT(195); bnl.oy = PT(BN_Y);
+    if (BN.ex) {                                /* growing into its expanded size */
+        float h = bn_hcur();
+        bn_under(&bnund, h);
+        pl_glass(&bngl, NC_X, BN_Y, h, 1);
+        bntx.clip = 1;
+        bntx.clip_r = (tk_rect){ PT(NC_X), PT(BN_Y), PT(NC_W), PT(h) };
+        bntx.clip_radius = PT(NC_R);
+    }
+    if (BK.on) {
+        float k = tk_clampf(BK.s, 0, 1.1f), sc = 1 - .06f * k, top = BN_Y + (BN.h + 8 - BK.h * sc) * k;
+        bkl.sx = bkl.sy = sc;
+        bkl.ox = PT(195); bkl.oy = PT(BN_Y);
+        bkl.y = PT(top - BN_Y) / sc;
+        bkl.hidden = 0;
+        bktx.alpha = tk_clampf(1 - k * 1.5f, 0, 1);
+        bktx.hidden = bktx.alpha <= .004f;
+        bkgl.alpha = 1 - .3f * tk_minf(1, k);
+        bkund.alpha = 1 - .25f * tk_minf(1, k);
+    } else bkl.hidden = 1;
+}
+static void bk_free(void)
+{
+    BK.on = 0;
+    BK.sp.live = 0;
+    relayer(&bktx);
+    nc_unview(&bkgl);
+    bkl.hidden = 1;
 }
 static void bn_show(const nc_item *n)
 {
     char ln[4][96];
     int nl = nc_lines(n, ln);
     float h = nc_hh(nl);
+    if (BN.on && !BN.closing && BN.p > .3f && !BN.ex) {
+        /* the shown one goes behind (its words' bitmap moves with it), the new one comes down over it */
+        tk_layer t = bntx;
+        tk_layer_init(&bntx, "banner-words");
+        relayer(&bktx);
+        bktx = t;
+        bktx.next = bktx.child = 0;
+        BK.on = 1; BK.h = BN.h; BK.id = BN.id; BK.s = 0;
+        tk_layer_init(&bkl, "banner-back");
+        tk_layer_init(&bkund, "banner-back-under");
+        bn_under(&bkund, BK.h);
+        if (!bkgl.name) tk_layer_init(&bkgl, "banner-back-glass");
+        pl_glass(&bkgl, NC_X, BN_Y, BK.h, 1);
+        tk_spring_start(&BK.sp, 0, 1, 0, TK_SPR_BANNER);
+        BN.p = 0;
+    } else if (BK.on) bk_free();
     relayer(&bntx);
     tk_layer_init(&bnl, "banner");
-    dc d = mk(&bntx, "banner-words", CARD_X, BN_Y, NC_W, h, 2, 0);
-    nc_draw_item(&d, n, CARD_X, BN_Y, h, nl, ln);
+    dc d = mk(&bntx, "banner-words", NC_X, BN_Y, NC_W, h, 2, 0);
+    nc_draw_item(&d, n, NC_X, BN_Y, h, nl, ln);
     trim(&bntx);
     tk_layer_prepare(&bntx);                /* it moves at once: its half copy now, not in the first frame */
-    tk_layer_init(&bnund, "banner-under");  /* a dark ground under the glass: legible over any page */
-    bnund.solid = tk_premul(TK_RGBA(16, 20, 36, .93f));
-    bnund.x = PT(CARD_X); bnund.y = PT(BN_Y);
-    bnund.solid_w = PT(NC_W); bnund.solid_h = PT(h);
-    bnund.clip = 1; bnund.clip_r = (tk_rect){ bnund.x, bnund.y, PT(NC_W), PT(h) }; bnund.clip_radius = PT(26);
+    tk_layer_init(&bnund, "banner-under");
+    bn_under(&bnund, h);
     if (!bngl.name) tk_layer_init(&bngl, "banner-glass");
-    pl_glass(&bngl, CARD_X, BN_Y, h, 1);
+    pl_glass(&bngl, NC_X, BN_Y, h, 1);
     if (!BN.on) BN.p = 0;
-    BN.on = 1; BN.closing = 0; BN.drag = 0; BN.dy = 0;
+    BN.on = 1; BN.closing = 0; BN.drag = 0; BN.dy = 0; BN.ex = 0;
+    sp_bndy.live = sp_bnge.live = 0;
     BN.h = h; BN.id = n->id;
     BN.until = -1;                          /* set at its first frame (the platform's clock) */
-    tk_spring_start(&sp_bn, BN.p, 1, 0, TK_SPR_SHEET);
+    tk_spring_start(&sp_bn, BN.p, 1, 0, TK_SPR_BANNER);
+    relink();
+    bn_place();
+}
+/* B4: the long press: four lines and Open / Clear, grown on the pop spring (no glass bake: the words only) */
+static void bn_expand(void)
+{
+    int i = nc_find(BN.id);
+    if (i < 0 || BN.ex) return;
+    char ln[4][96];
+    int nl = nc_lines_n(&NI[i], ln, 4);
+    float h = nc_hh(nl) + NC_ACT;
+    relayer(&bntx);
+    dc d = mk(&bntx, "banner-words", NC_X, BN_Y, NC_W, h, 2, 0);
+    nc_draw_item_x(&d, &NI[i], NC_X, BN_Y, h, nl, ln, 1);
+    trim(&bntx);
+    tk_layer_prepare(&bntx);
+    BN.h0 = BN.h; BN.h = h; BN.ex = 1; BN.ge = 0;
+    tk_spring_start(&sp_bnge, 0, 1, 0, TK_SPR_POP);
+    if (BK.on) bk_free();
+    sh_haptic_k(SH_HAP_MEDIUM);
     relink();
     bn_place();
 }
 static void bn_free(void)
 {
-    BN.on = BN.closing = BN.drag = 0;
+    BN.on = BN.closing = BN.drag = BN.ex = 0;
     BN.p = 0;
-    sp_bn.live = 0;
+    sp_bn.live = sp_bndy.live = sp_bnge.live = 0;
     relayer(&bntx);
     nc_unview(&bngl);
+    bk_free();
     bnl.hidden = 1;
     relink();
 }
@@ -764,7 +883,9 @@ static void nc_cards_gone(void)
 {
     for (int k = 0; k < NC_SLOTS; k++) { nc_unview(&NSL[k].gl); nc_unview(&NSL[k].pk); NSL[k].pk.hidden = 1; }
     nc_unview(&bngl);
-    if (BN.on) pl_glass(&bngl, CARD_X, BN_Y, BN.h, 1);
+    nc_unview(&bkgl);
+    if (BN.on) pl_glass(&bngl, NC_X, BN_Y, bn_hcur(), 1);
+    if (BK.on) pl_glass(&bkgl, NC_X, BN_Y, BK.h, 1);
     if (NC.on) nc_place_list();
 }
 
@@ -791,6 +912,33 @@ static int nc_launch(unsigned id)
     return 1;
 }
 
+/* ---- B4: a long press expands a platter (four lines, Open / Clear); the others step back ---------------------------- */
+static void nc_expand(int k)
+{
+    nc_slot *s = &NSL[k];
+    int i = s->id ? nc_find(s->id) : -1;
+    if (i < 0 || s->dying) return;
+    char ln[4][96];
+    int nl = nc_lines_n(&NI[i], ln, 4);
+    s->ex = 1;
+    s->h = nc_hh(nl) + NC_ACT;
+    NC.xp = k;
+    nc_slot_build(s);
+    nc_layout();
+    sh_haptic_k(SH_HAP_MEDIUM);
+}
+static void nc_collapse(void)
+{
+    if (NC.xp < 0) return;
+    nc_slot *s = &NSL[NC.xp];
+    NC.xp = -1;
+    if (!s->id) return;
+    s->ex = 0;
+    s->h = nc_hh(s->nl);
+    nc_slot_build(s);
+    nc_layout();
+}
+
 /* ---- touches ------------------------------------------------------------------------------------------------------- */
 static int nc_slot_at(float x, float y)
 {
@@ -799,7 +947,7 @@ static int nc_slot_at(float x, float y)
     for (int k = 0; k < NC_SLOTS; k++) {
         nc_slot *s = &NSL[k];
         if (!s->id || s->dying || s->ta < .5f) continue;
-        if (cy >= s->ty && cy < s->ty + s->h && x >= CARD_X && x < CARD_X + NC_W) return k;
+        if (cy >= s->ty && cy < s->ty + s->h && x >= NC_X && x < NC_X + NC_W) return k;
     }
     return -1;
 }
@@ -807,20 +955,22 @@ static int bn_hit(float x, float y)
 {
     if (!BN.on || BN.closing || BN.p < .3f) return 0;
     float top = BN_Y + (1 - BN.p) * -(BN.h + BN_Y + 30) + BN.dy;
-    return x >= CARD_X - 4 && x < CARD_X + NC_W + 4 && y >= top - 6 && y < top + BN.h + 6;
+    return x >= NC_X - 4 && x < NC_X + NC_W + 4 && y >= top - 6 && y < top + bn_hcur() + (BK.on ? 8 : 0) + 6;
 }
 /* a touch that starts on the banner, on the open Centre or on the lock's pill: 1 if the Centre's (sh_touch: G_NC) */
 static int nc_down(float x, float y, float t)
 {
     tk_tracker_reset(&NC.tr);
     NC.x0 = x; NC.y0 = y; NC.moved = 0;
-    if (bn_hit(x, y)) { NC.g = NG_BANNER; BN.drag = 1; sp_bn.live = 0; tk_tracker_add(&NC.tr, y, t); return 1; }
+    NC.t0 = t;
+    if (bn_hit(x, y)) { NC.g = NG_BANNER; BN.drag = 1; sp_bn.live = 0; sp_bndy.live = 0; tk_tracker_add(&NC.tr, y, t); return 1; }
     if (NC.on && !NC.closing) {
         sp_nc.live = 0;
         NC.momentum = 0;
         tk_tracker_add(&NC.tr, y, t);
         if (y >= H_PT - 34) { NC.g = NG_DRAG; return 1; }
         NC.sl = nc_slot_at(x, y);
+        if (NC.sl >= 0 && NSL[NC.sl].ex) NC.sl = -1;   /* (the expanded one: its buttons, at the release) */
         NC.g = y >= NC_LT && y < NC_BOT ? NG_LIST : NG_TAP;
         NC.base = NC.scroll;
         sp_ncs.live = 0;
@@ -871,6 +1021,7 @@ static int nc_touch(int ph, float x, float y, float t)
                 if (NC.reveal >= 0 && NC.reveal != NC.sl) NSL[NC.reveal].tdx = 0;
                 NC.reveal = NC.sl;
                 NC.base = NSL[NC.sl].dx;
+                NC.swc = NC.base < -44;
                 tk_tracker_reset(&NC.tr);
                 tk_tracker_add(&NC.tr, x, t);
             } else if (nc_scrollable()) NC.g = NG_SCROLL;
@@ -889,6 +1040,8 @@ static int nc_touch(int ph, float x, float y, float t)
             nc_slot *s = &NSL[NC.sl];
             float d = NC.base + dx;
             s->dx = s->tdx = d < 0 ? d : rubber(d, 120) * .5f;
+            s->sdx.live = 0;
+            if ((s->dx < -44) != NC.swc) { NC.swc = s->dx < -44; sh_haptic_k(SH_HAP_SELECT); }   /* B4: the Clear threshold */
             nc_place_list();
             break;
         }
@@ -941,7 +1094,7 @@ static int nc_touch(int ph, float x, float y, float t)
     case NG_SWIPE: {
         nc_slot *s = &NSL[NC.sl];
         if (!s->id) break;
-        if (s->dx < -NC_W * .5f || (v < -.6f && s->dx < -30)) {
+        if (s->dx + v * 200 < -NC_W * .5f || (v < -.6f && s->dx < -30)) {
             /* cleared: it flies off; a stack goes as a whole */
             int i = nc_find(s->id);
             int whole = i >= 0 && tk_strcmp(NC.exp, NI[i].who) && s->tpa > .5f;
@@ -949,24 +1102,46 @@ static int nc_touch(int ph, float x, float y, float t)
             NC.reveal = -1;
             if (whole) nc_clear_group(NI[i].who, 1);
             else nc_remove(i);
-        } else if (s->dx < -44) s->tdx = -92;                    /* the Clear button stays */
+        } else if (s->dx + v * 120 < -44) s->tdx = -92;          /* the Clear button stays */
         else { s->tdx = 0; NC.reveal = -1; }
+        if (!s->dying) tk_spring_start(&s->sdx, s->dx, s->tdx, v * 1000, TK_SPR_CARD);   /* B4: on with the finger's speed */
         NC.anim = 1;
         break;
     }
     case NG_BANNER:
         BN.drag = 0;
-        if (!NC.moved) { unsigned id = BN.id; bn_hide(0); (void)nc_launch(id); }
-        else if (BN.dy < -24 || v < -.3f) bn_hide(v * 1000 / (BN.h + 40));
-        else BN.until = now_ms + 2500;       /* put back (nc_tick eases it up): a little longer on screen */
+        if (!NC.moved) {
+            unsigned id = BN.id;
+            if (BN.ex) {                         /* B4: the expanded one's Open / Clear */
+                float top = BN_Y + BN.dy, by = top + BN.h - NC_ACT + 2, bw = (NC_W - 2 * 13.7f - 8) / 2;
+                if (y >= by - 4 && y < by + 38 && x >= NC_X + 13.7f + bw + 4) { int i = nc_find(id); bn_hide(0); nc_remove(i); break; }
+            }
+            bn_hide(0);
+            (void)nc_launch(id);
+        } else if (BN.dy + v * 200 < -30 || v < -.3f) bn_hide(v * 1000 / (BN.h + 40));   /* B4: where the flick would carry it */
+        else {
+            tk_spring_start(&sp_bndy, BN.dy, 0, v * 1000, TK_SPR_CARD);                  /* back with the finger's speed */
+            BN.until = now_ms + 2500;        /* a little longer on screen */
+        }
         break;
     case NG_LIST: case NG_TAP: {
         if (NC.moved) break;
         float cy = y + NC.scroll;
+        if (NC.xp >= 0) {
+            /* B4: an expanded platter: its Open / Clear, else a tap anywhere folds it back */
+            nc_slot *e = &NSL[NC.xp];
+            int i = e->id ? nc_find(e->id) : -1;
+            float by = e->ty + e->h - NC_ACT + 2, bw = (NC_W - 2 * 13.7f - 8) / 2;
+            if (i >= 0 && cy >= by - 4 && cy < by + 38 && x >= NC_X && x < NC_X + NC_W) {
+                if (x < NC_X + 13.7f + bw + 4) { NC.xp = -1; if (nc_launch(e->id)) nc_close(0); }
+                else { e->dying = 1; e->tdx = -440; NC.xp = -1; nc_remove(i); }
+            } else nc_collapse();
+            break;
+        }
         /* a short swipe's Clear button, else the swipe put back */
         if (NC.reveal >= 0) {
             nc_slot *r = &NSL[NC.reveal];
-            if (r->id && cy >= r->ty && cy < r->ty + r->h && x >= CARD_X + NC_W - 80) {
+            if (r->id && cy >= r->ty && cy < r->ty + r->h && x >= NC_X + NC_W - 80) {
                 int i = nc_find(r->id);
                 int whole = i >= 0 && tk_strcmp(NC.exp, NI[i].who) && r->tpa > .5f;
                 r->dying = 1; r->tdx = -440;
@@ -1056,13 +1231,17 @@ static int nc_tick(float dt, float t)
         /* the platters ease to their places (critically damped look, ~.25 s) */
         float k = 1 - tk_expf(-dt * 15);
         int any = 0;
+        if (NC.g == NG_LIST && !NC.moved && NC.sl >= 0 && NC.xp < 0 && t - NC.t0 >= 500) { nc_expand(NC.sl); NC.g = NG_NONE; any = 1; }
+        any |= nc_ease(&NC.xd, NC.xp >= 0 ? 1 : 0, k, .01f);
         for (int i = 0; i < NC_SLOTS; i++) {
             nc_slot *s = &NSL[i];
             if (!s->id) continue;
             any |= nc_ease(&s->y, s->ty, k, .2f);
+            any |= nc_ease(&s->hv, s->h, k, .2f);
+            if (s->sdx.live) { tk_spring_step(&s->sdx, dt); s->dx = s->sdx.x; any = 1; }
             any |= nc_ease(&s->a, s->ta, k * 1.2f, .01f);
             any |= nc_ease(&s->pa, s->tpa, k * 1.2f, .01f);
-            if (!(NC.g == NG_SWIPE && NC.sl == i)) any |= nc_ease(&s->dx, s->tdx, s->dying ? 1 - tk_expf(-dt * 9) : k, .2f);
+            if (!(NC.g == NG_SWIPE && NC.sl == i) && !s->sdx.live) any |= nc_ease(&s->dx, s->tdx, s->dying ? 1 - tk_expf(-dt * 9) : k, .2f);
             if ((s->dying && s->dx < -400) || (!s->dying && s->ta <= 0 && s->a <= .01f)) nc_slot_free(s);
         }
         any |= nc_ease(&NC.ghy, NC.ghty, k, .2f);
@@ -1074,32 +1253,36 @@ static int nc_tick(float dt, float t)
         nc_place();
     }
     if (BN.on) {
-        if (BN.until < 0) BN.until = t + 4000;
-        if (!BN.drag && BN.dy != 0) { mv |= nc_ease(&BN.dy, 0, 1 - tk_expf(-dt * 15), .2f); bn_place(); }
+        if (BN.until < 0) BN.until = t + 5000;   /* B4 (IOS-REFERENCE 5): about 5 s */
+        if (NC.g == NG_BANNER && !NC.moved && !BN.ex && t - NC.t0 >= 500) { BN.drag = 0; bn_expand(); NC.g = NG_NONE; }
+        if (sp_bndy.live) { tk_spring_step(&sp_bndy, dt); BN.dy = sp_bndy.x; bn_place(); mv = 1; }
+        if (sp_bnge.live) { tk_spring_step(&sp_bnge, dt); BN.ge = sp_bnge.x; bn_place(); mv = 1; }
+        if (BK.sp.live) { tk_spring_step(&BK.sp, dt); BK.s = BK.sp.x; bn_place(); mv = 1; }
         if (sp_bn.live) {
             int live = tk_spring_step(&sp_bn, dt);
             BN.p = tk_maxf(0, sp_bn.x);
             if (!live && BN.closing) bn_free();
             else bn_place();
             mv = 1;
-        } else if (!BN.drag && !BN.closing && t >= BN.until) { bn_hide(0); mv = 1; }
+        } else if (!BN.drag && !BN.closing && !BN.ex && t >= BN.until) { bn_hide(0); mv = 1; }
     }
     return mv;
 }
 static int nc_moving(void)
 {
-    return sp_nc.live || sp_ncs.live || NC.momentum || (NC.on && NC.anim) || sp_bn.live || (BN.on && !BN.drag && BN.dy != 0) ||
+    return sp_nc.live || sp_ncs.live || NC.momentum || (NC.on && NC.anim) || sp_bn.live || sp_bndy.live || sp_bnge.live || BK.sp.live ||
+           (NC.g == NG_LIST && !NC.moved && NC.sl >= 0 && NC.xp < 0) ||
            NC.g == NG_PULL || NC.g == NG_DRAG || NC.g == NG_SCROLL || NC.g == NG_SWIPE || NC.g == NG_BANNER;
 }
 /* the banner's rest: when to come back (ms, < 0 nothing) and the timed slide away */
 static float nc_next_update(float t)
 {
-    if (!BN.on || BN.closing || BN.drag || sp_bn.live || BN.until < 0) return -1;
+    if (!BN.on || BN.closing || BN.drag || BN.ex || sp_bn.live || BN.until < 0) return -1;
     return tk_maxf(1, BN.until - t);
 }
 static int nc_refresh(float t)
 {
-    if (BN.on && !BN.closing && !BN.drag && !sp_bn.live && BN.until >= 0 && t >= BN.until) { bn_hide(0); return 1; }
+    if (BN.on && !BN.closing && !BN.drag && !BN.ex && !sp_bn.live && BN.until >= 0 && t >= BN.until) { bn_hide(0); return 1; }
     return 0;
 }
 /* the minute: the times on the platters ("5m ago") */
@@ -1135,8 +1318,13 @@ static void nc_link(void)
         link(&nclist, ls, n);
     } else
         ncl.child = 0;
-    if (BN.on) { tk_layer *b[] = { &bnund, &bngl, &bntx }; link(&bnl, b, 3); }
-    else bnl.child = 0;
+    if (BN.on) {
+        if (!bkl.name) { tk_layer_init(&bkl, "banner-back"); bkl.hidden = 1; }
+        tk_layer *b[] = { &bkl, &bnund, &bngl, &bntx };
+        link(&bnl, b, 4);
+        if (BK.on) { tk_layer *k[] = { &bkund, &bkgl, &bktx }; link(&bkl, k, 3); }
+        else bkl.child = 0;
+    } else bnl.child = 0;
 }
 
 /* the host's stills and films: "notify" WHO|TITLE|BODY (v: hhmm, else now), "nc" p, "ncgroup" WHO (fanned out) */
@@ -1155,7 +1343,7 @@ static int nc_set(const char *what, const char *key, float v)
         return 1;
     }
     if (!tk_strcmp(what, "banner")) {       /* the newest as a banner, p v (at rest) */
-        if (nin) { bn_show(&NI[0]); sp_bn.live = 0; BN.p = v; BN.until = now_ms + 4000; bn_place(); }
+        if (nin) { bn_show(&NI[0]); sp_bn.live = 0; BN.p = v; BN.until = now_ms + 5000; bn_place(); }
         return 1;
     }
     if (!tk_strcmp(what, "nc")) {
