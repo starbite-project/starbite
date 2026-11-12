@@ -178,6 +178,24 @@ void fakecp_sms_deliver(struct fakecp *fc, const uint8_t *tpdu, uint32_t n)
     fakecp_send(fc, SBM_CH_FMT0, 0, SBM_SMS_INCOMING, SBM_IPC_NOTI, d, (uint16_t)(6 + sizeof(sca) + n));
 }
 
+/* a delivery report (0x0402 with data[1] = 2) for the reference mr with TP-ST st */
+void fakecp_sms_report(struct fakecp *fc, uint8_t mr, uint8_t st)
+{
+    static const uint8_t t[] = { 0x06, 0x00, 0x0C, 0x91, 0x53, 0x48, 0x40, 0x89, 0x67, 0x45,
+                                 0x52, 0x11, 0x21, 0x01, 0x02, 0x03, 0x00, 0x52, 0x11, 0x21, 0x01, 0x02, 0x04, 0x00, 0x00 };
+    uint8_t tp[sizeof(t)];
+    memcpy(tp, t, sizeof(t));
+    tp[1] = mr;
+    tp[sizeof(t) - 1] = st;
+    uint8_t d[64];
+    fc->tpid++;
+    d[0] = 2, d[1] = 2, d[2] = 0, d[3] = 0, d[4] = fc->tpid;
+    d[5] = (uint8_t)(1 + sizeof(tp));
+    d[6] = 0;                               /* no SMSC */
+    memcpy(d + 7, tp, sizeof(tp));
+    fakecp_send(fc, SBM_CH_FMT0, 0, SBM_SMS_INCOMING, SBM_IPC_NOTI, d, (uint16_t)(7 + sizeof(tp)));
+}
+
 void fakecp_ecc(struct fakecp *fc, const char *const *numbers, unsigned n)
 {
     uint8_t d[96] = { 0 };

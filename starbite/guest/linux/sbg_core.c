@@ -25,6 +25,7 @@
 #include <linux/cpu.h>
 #include <linux/fs.h>
 #include <linux/interrupt.h>
+#include <linux/kernel_stat.h>
 #include <linux/io.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
@@ -40,10 +41,11 @@
 #include <uapi/linux/psci.h>
 
 #include "../sbshm.h"
+#include "sbg_core.h"
 
-static phys_addr_t shm_base;
-static u64 shm_size;
-static struct sbshm_hdr *hdr;           /* write-combine vmap of the header page */
+phys_addr_t shm_base;
+u64 shm_size;
+struct sbshm_hdr *hdr;           /* write-combine vmap of the header page */
 static void __iomem *gicd;
 static bool use_hvc;
 static u32 fn_cpu_off = PSCI_0_2_FN_CPU_OFF;
@@ -61,7 +63,7 @@ static void sbg_psci_cpu_off(void)
 		arm_smccc_smc(fn_cpu_off, 0, 0, 0, 0, 0, 0, 0, &res);
 }
 
-static void sbg_ring_host(void)
+void sbg_ring_host(void)
 {
 	u32 id = READ_ONCE(hdr->db_to_host);
 
@@ -79,7 +81,7 @@ static void sbg_flexpmu_last(void)
 {
 	u64 mpidr = read_cpuid_mpidr();
 	unsigned int lvl = (mpidr & MPIDR_MT_BITMASK) ? 1 : 0;
-	unsigned int phy = (MPIDR_AFFINITY_LEVEL(mpidr, 1 + lvl) << 2) | MPIDR_AFFINITY_LEVEL(mpidr, lvl);
+	unsigned int phy = (MPIDR_AFFINITY_LEVEL(mpidr, (1 + lvl)) << 2) | MPIDR_AFFINITY_LEVEL(mpidr, lvl);
 	u32 b = phy >= 4 ? BIT(phy - 4) : BIT(phy + 4);
 
 	if (!fp_pmu || !fp_intr || !fp_mbox || phy > 7)
@@ -109,9 +111,12 @@ static void __noreturn sbg_last_cpu_off(u32 state)
 		wfi();
 }
 
+static void sbblk_freeze_overlay(void);
 static int sbg_reboot_notify(struct notifier_block *nb, unsigned long action, void *data)
 {
 	unsigned int cpu, self = raw_smp_processor_id();
+
+	sbblk_freeze_overlay();			/* the card's overlay clean before the cluster goes off */
 
 	/* process context, every CPU still online: take the others down properly (PSCI CPU_OFF each) */
 	for_each_online_cpu(cpu)
@@ -143,6 +148,50 @@ static struct notifier_block sbg_restart_nb = {
 	.priority = 255,
 };
 
+/*
+ * A stop the host asked for (hdr.host_state STOPPING, MSG_STOP) that user space does not carry out (no sbwl / guestd
+ * yet, or one that hangs: cp3 2026-11-12, a start stuck before sbwl): 10 s after the doorbell that brought it, the
+ * kernel powers off by itself (orderly_poweroff(true): with no /sbin/poweroff in the base, an emergency sync and
+ * kernel_power_off, so sbg_power_off takes the M3 cluster down). The host then sees the cluster off and may start
+ * the guest again without a reset.
+ */
+/* hdr.guest_load every 5 s: the CPU time of all guest CPUs (user, nice, system, irq, softirq) in % of one core */
+#define SBG_LOAD_PERIOD_S 5
+static u64 sbg_load_last;
+static struct timer_list sbg_load_timer;
+static u64 sbg_busy_ns(void)
+{
+	u64 t = 0;
+	unsigned int cpu;
+
+	for_each_online_cpu(cpu) {
+		const u64 *c = kcpustat_cpu(cpu).cpustat;
+
+		t += c[CPUTIME_USER] + c[CPUTIME_NICE] + c[CPUTIME_SYSTEM] + c[CPUTIME_IRQ] + c[CPUTIME_SOFTIRQ];
+	}
+	return t;
+}
+static void sbg_load_tick(struct timer_list *t)
+{
+	u64 now = sbg_busy_ns(), d = now - sbg_load_last;
+
+	sbg_load_last = now;
+	WRITE_ONCE(hdr->guest_load, (u32)min_t(u64, div_u64(d, SBG_LOAD_PERIOD_S * 10000000ULL), 400));
+	mod_timer(&sbg_load_timer, jiffies + SBG_LOAD_PERIOD_S * HZ);
+}
+
+#define SBG_STOP_GRACE_S 10
+static void sbg_stop_fallback(struct work_struct *w)
+{
+	if (READ_ONCE(hdr->host_state) != SBG_HOST_STOPPING)
+		return;
+	pr_warn("sbguest: the host asked to stop %d s ago and user space has not powered off: powering off now\n",
+		SBG_STOP_GRACE_S);
+	orderly_poweroff(true);
+}
+static DECLARE_DELAYED_WORK(sbg_stop_work, sbg_stop_fallback);
+static atomic_t sbg_stop_armed = ATOMIC_INIT(0);
+
 /* ---- /dev/sbshm ------------------------------------------------------------------------------------ */
 static void sbblk_kick(void);
 
@@ -151,17 +200,23 @@ static irqreturn_t sbg_db_irq(int irq, void *dev)
 	atomic_inc(&db_count);
 	wake_up_interruptible(&db_wait);
 	sbblk_kick();				/* the doorbell is shared: completions may be waiting */
+	sbnet_kick();				/* v3: each service checks its own rings */
+	sbp9_kick();
+	sbsnd_kick();
+	if (READ_ONCE(hdr->host_state) == SBG_HOST_STOPPING && !atomic_xchg(&sbg_stop_armed, 1))
+		schedule_delayed_work(&sbg_stop_work, SBG_STOP_GRACE_S * HZ);
 	return IRQ_HANDLED;
 }
 
 static int sbg_mmap(struct file *f, struct vm_area_struct *vma)
 {
 	unsigned long len = vma->vm_end - vma->vm_start;
+	u64 off = (u64)vma->vm_pgoff << PAGE_SHIFT;	/* a window of the region (sbstore maps the store's part) */
 
-	if (vma->vm_pgoff || len > shm_size)
+	if (off >= shm_size || len > shm_size - off)
 		return -EINVAL;
 	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-	return remap_pfn_range(vma, vma->vm_start, PHYS_PFN(shm_base), len, vma->vm_page_prot);
+	return remap_pfn_range(vma, vma->vm_start, PHYS_PFN(shm_base + off), len, vma->vm_page_prot);
 }
 
 static ssize_t sbg_read(struct file *f, char __user *buf, size_t n, loff_t *off)
@@ -246,6 +301,22 @@ static bool sbblk_ready, sbblk_polled;
 static int sbblk_major;
 
 static void sbblk_reap(struct work_struct *w);
+
+/*
+ * Every power off or restart (sbwl's MSG_STOP, the stop fallback, a reboot from user space) ends with the overlay's
+ * ext4 frozen: written out and its journal clean, as at an unmount (Track F, cp3 2026-11-12: after an unclean stop a
+ * file of apt's came back unreadable). Nothing writes after it: the cluster goes off next.
+ */
+static void sbblk_freeze_overlay(void)
+{
+	struct gendisk *d = sbblk_ready ? sbblk_devs[SBSHM_BLK_OVERLAY].disk : NULL;
+	int r;
+
+	if (!d)
+		return;
+	r = bdev_freeze(d->part0);
+	pr_info("sbguest: the overlay (%s) %s\n", d->disk_name, r ? "could not be frozen" : "written out and frozen");
+}
 static DECLARE_WORK(sbblk_work, sbblk_reap);
 
 static void sbblk_kick(void)
@@ -418,7 +489,7 @@ static const struct block_device_operations sbblk_fops = {
 };
 
 /* a write-combine mapping of part of the shared region (RAM reserved without no-map: ioremap refuses it) */
-static void *sbg_vmap_wc(u64 off, size_t len)
+void *sbg_vmap_wc(u64 off, size_t len)
 {
 	unsigned int i, n = PAGE_ALIGN(len) >> PAGE_SHIFT;
 	struct page **pages = kvmalloc_array(n, sizeof(*pages), GFP_KERNEL);
@@ -599,6 +670,13 @@ static int sbg_probe(struct platform_device *pdev)
 		 &shm_base, shm_size, use_hvc ? "hvc" : "smc", irq, hdr->guest_cpuif,
 		 fp_mbox ? ", FlexPMU cluster off" : "");
 	sbblk_init(&pdev->dev, irq_ok);		/* contract v2; the module works without it */
+	/* contract v3: each runs only when the host says it serves it (hdr.host_services) */
+	sbnet_init(&pdev->dev, irq_ok);
+	sbp9_init(&pdev->dev, irq_ok);
+	sbsnd_init(&pdev->dev, irq_ok);
+	sbg_load_last = sbg_busy_ns();
+	timer_setup(&sbg_load_timer, sbg_load_tick, 0);
+	mod_timer(&sbg_load_timer, jiffies + SBG_LOAD_PERIOD_S * HZ);
 	return 0;
 }
 
@@ -616,7 +694,21 @@ static struct platform_driver sbg_driver = {
 		.suppress_bind_attrs = true,	/* no unbind: the handlers stay registered */
 	},
 };
-module_platform_driver(sbg_driver);
+static int __init sbg_init(void)
+{
+	return platform_driver_register(&sbg_driver);
+}
+module_init(sbg_init);
 
-MODULE_DESCRIPTION("Starbite OS guest: shared region, doorbells, power off without SYSTEM_OFF, sbblk");
+static void __exit sbg_exit(void)
+{
+	if (sbg_load_timer.function)
+		timer_shutdown_sync(&sbg_load_timer);
+	cancel_delayed_work_sync(&sbg_stop_work);
+	sbp9_exit();				/* the 9p transport is registered with 9pnet: take it back */
+	platform_driver_unregister(&sbg_driver);
+}
+module_exit(sbg_exit);
+
+MODULE_DESCRIPTION("Starbite OS guest: shared region, doorbells, power off without SYSTEM_OFF, sbblk, sbnet, sbp9, sbsnd");
 MODULE_LICENSE("GPL");

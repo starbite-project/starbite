@@ -1,0 +1,319 @@
+# Test-only (gwin-host): a stand-in for the toolkit's (Track B) coming API: the switcher's external entries
+# (kind / subid, sw_ext_add / sw_ext_remove, the provider calls), the keyboard's accessory bar (kb_accessory /
+# kb_accessory_tap), the Centre's "linux:<id>" items (nc_withdraw, lx_open_id, lx_nc_*), SH_EXT_API and
+# TK_HAS_LAYER_EXTERNAL switched on. run.sh applies it to its scratch copy of the UI only; never the real build.
+diff -ru a/ui/shell_lock.c b/ui/shell_lock.c
+--- a/ui/shell_lock.c	2026-11-12 15:49:12
++++ b/ui/shell_lock.c	2026-11-12 15:49:55
+@@ -14,6 +14,10 @@
+  *     drawn here as the concept's first home page without its behaviour (a placeholder: home is P2).
+  * Layers are drawn once (bake) and then only moved, faded and clipped by the compositor. */
+ #include "shell.h"
++/* gwin-host compat (test only): the toolkit's external cards / key bar / withdraw (SH_EXT_API) and Track A's
++ * zero-copy layer (TK_HAS_LAYER_EXTERNAL) as their tips will have them */
++#define SH_EXT_API 1
++#define TK_HAS_LAYER_EXTERNAL 1
+ 
+ #define H_PT TK_HPT
+ static tk_comp *C;
+@@ -992,6 +996,7 @@
+ static int lx_touch(int ph, float x, float y);
+ static int lx_moving(void);
+ static int lx_layers(tk_layer **o);
++static int kbacc_layers(tk_layer **o);           /* compat (shell_switcher.inc) */
+ static int lx_set(const char *what, const char *key, float v);
+ /* P3p: an app's 62 pt icon. Calendar shows today, as on iOS: the blank a62-calendar-bg with the weekday (red,
+  * semibold, .14 of the tile) over the date (regular, .45), composed once a day (one 62 pt bitmap, ~210 KB) and
+@@ -3624,7 +3629,8 @@
+     link(&appg, ag, 13);
+     tk_layer *st[NST + 64] = { &appst[0], &appst[1], &appst[2], &appst[3] };
+     int na = NST + med_layers(st + NST);
+-    na += lx_layers(st + na);                        /* L3: shell_linux.inc's */
++    na += lx_layers(st + na);
++    na += kbacc_layers(st + na);                     /* compat: the key bar */                        /* L3: shell_linux.inc's */
+     link(&appc, st, na + cm_layers(st + na));    /* helper I: the keypad's line and ring, Messages' fields */
+     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
+     link(&lockg, lk, 12);
+diff -ru a/ui/shell_nc.inc b/ui/shell_nc.inc
+--- a/ui/shell_nc.inc	2026-11-12 15:49:12
++++ b/ui/shell_nc.inc	2026-11-12 15:50:13
+@@ -44,6 +44,8 @@
+ typedef struct { const char *who, *app, *name; } nc_src;
+ static const nc_src NCSRC[] = { { "clock", "clock", "Clock" }, { "battery", "battery", "Battery" }, { "modem", "settings", "Cellular" },
+                                 { "heat", "heat", "Survival Heat" }, { "survival", "usb", "USB Power" }, { "wifi", "settings", "Wi-Fi" } };
++/* compat: Linux's items ("linux:<id>", shell_linux.inc) */
++static int nc_is_lx(const char *who) { return who[0] == 'l' && who[1] == 'i' && who[2] == 'n' && who[3] == 'u' && who[4] == 'x' && who[5] == ':'; }
+ static int nc_app(const char *who)
+ {
+     const char *k = who;
+@@ -53,11 +55,14 @@
+ }
+ static const char *nc_name(const char *who)
+ {
++    if (nc_is_lx(who)) return lx_nc_name(who);        /* compat */
+     for (unsigned i = 0; i < sizeof NCSRC / sizeof NCSRC[0]; i++) if (!tk_strcmp(NCSRC[i].who, who)) return NCSRC[i].name;
+     int a = nc_app(who);
+     return a >= 0 ? APPS[a].name : who;
+ }
+ static int nc_find(unsigned id) { for (int i = 0; i < nin; i++) if (NI[i].id == id) return i; return -1; }
++static int nc_quiet;                               /* a removal that is not the user's dismissal */
++int nc_compat_count(const char *who) { int n = 0; for (int i = 0; i < nin; i++) n += !tk_strcmp(NI[i].who, who); return n; }
+ 
+ /* ---- drawing a platter's words ------------------------------------------------------------------------------- */
+ #define NC_W CARD_W
+@@ -135,7 +140,9 @@
+ static void nc_draw_item(dc *d, const nc_item *n, float x, float top, float h, int nl, char ln[4][96])
+ {
+     int a = nc_app(n->who);
+-    nc_icon(d, a, nc_name(n->who), x + 14, top + (h - 38) / 2, 38);
++    const tk_bmp *lxi = nc_is_lx(n->who) ? lx_nc_icon(n->who) : 0;   /* compat: a Linux app's icon */
++    if (lxi) nc_blit_scaled(d->b, lxi, PT(x + 14) - d->ox, PT(top + (h - 38) / 2) - d->oy, 38.0f / 62);
++    else nc_icon(d, a, nc_name(n->who), x + 14, top + (h - 38) / 2, 38);
+     float tx = x + 64, right = x + NC_W - 16;
+     char when[16];
+     nc_when(when, n->hm);
+@@ -580,6 +587,7 @@
+ static void nc_remove(int i)
+ {
+     if (i < 0 || i >= nin) return;
++    if (!nc_quiet && nc_is_lx(NI[i].who)) lx_nc_dismissed(NI[i].who);   /* compat: swiped away / cleared */
+     unsigned id = NI[i].id;
+     for (int k = i; k + 1 < nin; k++) NI[k] = NI[k + 1];
+     nin--;
+@@ -601,6 +609,11 @@
+     if (!tk_strcmp(NC.exp, w)) { NC.exp[0] = 0; nc_ghead_build(); }
+     if (NC.built) nc_layout();
+ }
++static void nc_withdraw(const char *who)
++{
++    for (int i = nin - 1; i >= 0; i--)
++        if (!tk_strcmp(NI[i].who, who)) { nc_quiet = 1; nc_remove(i); nc_quiet = 0; }
++}
+ void sh_notify(const char *who, const char *title, const char *body, int hm)
+ {
+     if (nin == NC_MAX) {
+@@ -722,9 +735,13 @@
+     int i = nc_find(id);
+     if (i < 0) return 0;
+     int a = nc_app(NI[i].who);
++    char lxw[16] = "";
++    if (nc_is_lx(NI[i].who)) nc_cpy(lxw, sizeof lxw, NI[i].who);   /* compat: a Linux notification */
+     if (a >= 0) cm_nc_launch(NI[i].who, NI[i].title, a);   /* helper I: a message's thread, a missed call's Recents */
++    nc_quiet = 1;
+     nc_remove(i);
+-    if (a < 0) return 0;                    /* nothing to open (an unknown poster): read and cleared */
++    nc_quiet = 0;
++    if (a < 0 && !lxw[0]) return 0;         /* nothing to open (an unknown poster): read and cleared */
+     if (locked) {
+         /* from the lock's Centre: the lock goes away behind it (no passcode here), the app opens over home */
+         sp_lock.live = 0;
+@@ -733,6 +750,7 @@
+         lockflat.hidden = 1;
+         home.sx = home.sy = 1;
+     }
++    if (lxw[0]) return lx_open_id(lxw);     /* compat: NOTIF_ACT 0 and the Linux app */
+     if (AP.on && AP.a == a && !AP.closing) return 1;
+     if (AP.on) { sp_app.live = 0; app_finish_close(); }
+     app_open(a);
+@@ -929,6 +947,7 @@
+             if (!NC.clrall) { NC.clrall = 1; nc_head_build(); relink(); }
+             else {
+                 for (int k = 0; k < NC_SLOTS; k++) if (NSL[k].id) NSL[k].ta = 0;
++                for (int k = 0; k < nin; k++) if (nc_is_lx(NI[k].who)) lx_nc_dismissed(NI[k].who);   /* compat */
+                 nin = 0;
+                 NC.clrall = 0;
+                 NC.exp[0] = 0;
+diff -ru a/ui/shell_switcher.inc b/ui/shell_switcher.inc
+--- a/ui/shell_switcher.inc	2026-11-12 15:49:12
++++ b/ui/shell_switcher.inc	2026-11-12 15:55:56
+@@ -15,11 +15,12 @@
+ #define SW_MAX 4
+ #define SNAP_W (TK_W / 4)
+ #define SNAP_H (TK_H / 4)
+-typedef struct { int a; tk_bmp snap; } sw_ent;
++typedef struct { int a; tk_bmp snap; int kind, subid; } sw_ent;   /* compat: kind 1 = external (subid; snap unused) */
+ static sw_ent SWR[SW_MAX];
+ static int swn, sw_dirty = 1;
+ static int sw_keeps(int a) { const char *k = APPS[a].k; return !lx_is(k) && tk_strcmp(k, "search") && tk_strcmp(k, "linux"); }
+-static int sw_find(int a) { for (int i = 0; i < swn; i++) if (SWR[i].a == a) return i; return -1; }
++static int sw_find(int a) { for (int i = 0; i < swn; i++) if (SWR[i].a == a && !SWR[i].kind) return i; return -1; }
++static int sw_find_ext(int s) { for (int i = 0; i < swn; i++) if (SWR[i].kind && SWR[i].subid == s) return i; return -1; }
+ static void sw_remove(int i)
+ {
+     if (i < 0 || i >= swn) return;
+@@ -48,7 +49,7 @@
+     sw_dirty = 1;
+     if (!sw_keeps(a)) return;
+     int i = sw_find(a);
+-    sw_ent e = { a, { 0, 0, 0, 0 } };
++    sw_ent e = { a, { 0, 0, 0, 0 }, 0, 0 };
+     if (i < 0) {
+         if (swn == SW_MAX) sw_remove(SW_MAX - 1);
+         i = swn++;
+@@ -56,7 +57,6 @@
+     for (int k = i; k > 0; k--) SWR[k] = SWR[k - 1];
+     SWR[0] = e;
+ }
+-
+ /* ---- the switcher ------------------------------------------------------------------------------------------- */
+ #define SW_S .6f
+ #define SW_CW (390 * SW_S)
+@@ -79,6 +79,28 @@
+     float dy = i == SW.thrown ? SW.dy : 0;
+     return (arect){ (390 - SW_CW) / 2 - i * SW_PITCH + SW.scroll, SW_CY + dy, SW_CW, SW_CH, SW_R };
+ }
++static void sw_labels(void);
++/* compat: the external entries (shell_linux.inc's running Linux apps) */
++static void sw_ext_add(int subid)
++{
++    int i = sw_find_ext(subid);
++    sw_ent e = { -1, { 0, 0, 0, 0 }, 1, subid };
++    if (i < 0) {
++        if (swn == SW_MAX) sw_remove(SW_MAX - 1);
++        i = swn++;
++    } else e = SWR[i];
++    for (int k = i; k > 0; k--) SWR[k] = SWR[k - 1];
++    SWR[0] = e;
++    sw_dirty = 1;
++}
++static void sw_ext_remove(int subid)
++{
++    int i = sw_find_ext(subid);
++    if (i < 0) return;
++    sw_remove(i);
++    if (SW.on) { sw_labels(); relink(); }
++}
++
+ /* the cards' names: the app's icon (26 pt) and name over each card, drawn once when the switcher opens */
+ static void sw_labels(void)
+ {
+@@ -87,7 +109,15 @@
+     for (int i = 0; i < swn; i++) {
+         int a = SWR[i].a;
+         dc d = mk(&swlab[i], "sw-label", x, SW_CY - 36, SW_CW, 30, 2, 0);
+-        float pad;
++        float pad = 0;
++        if (SWR[i].kind) {                                   /* compat: an external card's icon and title */
++            const tk_bmp *e = sw_ext_icon(SWR[i].subid);
++            if (e) nc_blit_scaled(d.b, e, PT(x) - d.ox, PT(SW_CY - 34) - d.oy, 26.0f / 62);
++            d_text_box(&d, TK_IT600, 15, x + 34, bl(TK_IT600, 15, SW_CY - 32), SW_CW - 34, 0, sw_ext_title(SWR[i].subid), 0, 0, INK, 1);
++            trim(&swlab[i]);
++            tk_layer_prepare(&swlab[i]);
++            continue;
++        }
+         const tk_bmp *ic = app_icon(APPS[a].k, &pad);
+         if (!sv_tile(&d, APPS[a].k, x, SW_CY - 34, 26) && ic)
+             nc_blit_scaled(d.b, ic, PT(x) - pad * 26 / 62 - d.ox, PT(SW_CY - 34) - pad * 26 / 62 - d.oy, 26.0f / 62);
+@@ -99,6 +129,12 @@
+ static void sw_card_view(int i)
+ {
+     tk_layer *l = &swcard[i];
++    if (SWR[i].kind) {                                       /* compat: the provider's snapshot (a view), else a plain card */
++        tk_bmp b;
++        if (sw_ext_snapshot(SWR[i].subid, &b)) { if (l->bmp.px != b.px) { l->bmp = b; l->solid = 0; l->gen++; } }
++        else if (!l->solid) { l->bmp = (tk_bmp){ 0, 0, 0, 0 }; l->solid = 0xff1d2440u; l->solid_w = TK_W; l->solid_h = TK_H; l->gen++; }
++        return;
++    }
+     if (SWR[i].snap.px) {
+         if (l->bmp.px != SWR[i].snap.px) { l->bmp = SWR[i].snap; l->solid = 0; l->gen++; }
+     } else if (!l->solid) {
+@@ -163,7 +199,7 @@
+     SW.on = 1; SW.closing = 0;
+     SW.scroll = 0; sp_sws.live = 0;
+     SW.thrown = -1; SW.dy = 0;
+-    SW.live = AP.on && !AP.closing && swn && SWR[0].a == AP.a;
++    SW.live = AP.on && !AP.closing && swn && (SWR[0].kind ? lx_sw_current() == SWR[0].subid : SWR[0].a == AP.a);   /* compat */
+     relink();
+     tk_spring_start(&sp_sw, SW.p, 1, 0, TK_SPR_CC);
+ }
+@@ -187,7 +223,7 @@
+ /* ---- from an app: the home bar's swipe (shell_lock.c's G_APP) ---------------------------------------------- */
+ static void sw_drag(float travel, float v, float t)
+ {
+-    if (locked || !AP.on || !sw_keeps(AP.a)) return;
++    if (locked || !AP.on || (!sw_keeps(AP.a) && lx_sw_current() < 0)) return;   /* compat: a Linux app's card */
+     SW.dragging = 1;
+     if (travel < -40 && tk_fabsf(v) < .3f) { if (SW.slow_t0 <= 0) SW.slow_t0 = t; }
+     else {
+@@ -241,7 +277,8 @@
+         }
+         ap_from_on = 1;
+         ap_from = R;
+-        app_open(a);                              /* (it moves the app first in the recents) */
++        if (SWR[i].kind) sw_ext_open(SWR[i].subid);   /* compat: the provider opens it (it moves it first) */
++        else app_open(a);                         /* (it moves the app first in the recents) */
+     }
+     SW.opening = 1;
+     SW.live = 1;
+@@ -259,6 +296,7 @@
+     SW.dy = 0;
+     if (i < 0 || i >= swn) return;
+     if (i == 0 && SW.live && AP.on) { sp_app.live = 0; app_finish_close(); SW.live = 0; }
++    if (SWR[i].kind) sw_ext_close(SWR[i].subid);  /* compat: the provider closes the app */
+     sw_remove(i);
+     for (int k = 0; k < SW_MAX; k++) { swcard[k].bmp = (tk_bmp){ 0, 0, 0, 0 }; swcard[k].solid = 0; }
+     sw_labels();
+@@ -419,4 +457,63 @@
+         return 1;
+     }
+     return 0;
++}
++
++/* ==== compat (gwin-host only): the toolkit's keyboard accessory bar, kb_accessory / kb_accessory_tap, as a stand-in:
++ * the keys over the keyboard (540 - KB_ACC_H .. 540) in the keyboard's function-key colours; a latched key (its label
++ * in capitals) lit as shift is */
++static tk_layer kbacc;
++static const char *const *KA;
++static int KAn;
++static void (*KAt)(int);
++static int kbacc_layers(tk_layer **o) { if (!kbacc.name) { tk_layer_init(&kbacc, "kb-accessory"); kbacc.hidden = 1; } o[0] = &kbacc; return 1; }
++static void kb_accessory(const char *const *keys, int n, void (*tap)(int i))
++{
++    KA = keys; KAn = keys && tap ? n : 0; KAt = tap;
++    relayer(&kbacc);
++    kbacc.hidden = 1;
++    if (!KAn) return;
++    float y0 = 540 - KB_ACC_H, w = (390 - 6 - 6.0f * (KAn - 1)) / KAn;
++    dc d = mk(&kbacc, "kb-accessory", 0, y0, 390, KB_ACC_H, 0, 0);
++    d_rrect(&d, 0, y0, 390, KB_ACC_H, 0, tk_hex(0x1e2030, 1));
++    for (int i = 0; i < KAn; i++) {
++        int lit = KA[i][0] >= 'A' && KA[i][0] <= 'Z' && KA[i][1] >= 'A' && KA[i][1] <= 'Z';
++        float x = 3 + (w + 6) * i, tw0 = tw(TK_IT600, 15, KA[i], 0, 0);
++        d_rrect(&d, x, y0 + 5, w, KB_ACC_H - 8, 6, lit ? W(.9f) : tk_hex(0x3a3d4a, 1));
++        int up = !tk_strcmp(KA[i], "\xe2\x86\x91"), dn = !tk_strcmp(KA[i], "\xe2\x86\x93");
++        if (up || dn) {                                  /* the pack's fonts have no up / down arrows: drawn */
++            float cx = x + w / 2, cy = y0 + 5 + (KB_ACC_H - 8) / 2, s = dn ? -1 : 1;
++            d_seg(&d, cx, cy - 6 * s, cx, cy + 6 * s, 1.6f, INK);
++            d_seg(&d, cx, cy - 6 * s, cx - 4.5f, cy - 1.5f * s, 1.6f, INK);
++            d_seg(&d, cx, cy - 6 * s, cx + 4.5f, cy - 1.5f * s, 1.6f, INK);
++            continue;
++        }
++        d_text(&d, TK_IT600, 15, x + (w - tw0) / 2, bl(TK_IT600, 15, y0 + 5 + (KB_ACC_H - 8 - 18) / 2), KA[i], 0, 0, lit ? tk_hex(0x1e2030, 1) : INK, 0);
++    }
++    kbacc.hidden = 0;
++}
++static int kb_accessory_tap(float x, float y)
++{
++    if (!KAn || y < 540 - KB_ACC_H || y >= 540) return 0;
++    int i = (int)((x - 3) / ((390 - 6) / (float)KAn));
++    if (i < 0 || i >= KAn) return 1;
++    sh_haptic();
++    KAt(i);
++    return 1;
++}
++/* the harness's view of the recents: "S:<key>" or "L:<title>" per card, newest first, ',' between */
++int sw_compat_dump(char *out, int cap)
++{
++    int n = 0;
++    out[0] = 0;
++    for (int i = 0; i < swn; i++) {
++        const char *t = SWR[i].kind ? sw_ext_title(SWR[i].subid) : APPS[SWR[i].a].k;
++        if (n + 4 + (int)tk_strlen(t) >= cap) break;
++        if (i) out[n++] = ',';
++        out[n++] = SWR[i].kind ? 'L' : 'S';
++        out[n++] = ':';
++        for (; *t; t++) out[n++] = *t;
++        out[n] = 0;
++    }
++    return swn;
+ }

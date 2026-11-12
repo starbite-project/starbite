@@ -15,6 +15,7 @@
 #include "kapp.h"
 #include "sbapp.h"
 #include "survival.h"
+#include "tzdb.h"
 
 #define REC "sbos.settings"
 #define SAVE_DELAY_MS 3000U
@@ -24,7 +25,8 @@ struct saved {
     uint32_t screen_off_s;
     uint8_t panel_save, panel_off, sos_led, bright;
     uint32_t pad[4];
-    uint32_t ext[4];                        /* 1.2-alpha18: [0] the B2SOVRC note (0x100 | CHG_CNFG_05 as found) */
+    uint32_t ext[4];                        /* 1.2-alpha18: [0] the B2SOVRC note (0x100 | CHG_CNFG_05 as found);
+                                             * Track A: [3] bit 31 set, bit 30 12-hour, bits 0..29 the zone's id */
 };
 
 static uint8_t *half[2];
@@ -50,12 +52,23 @@ static void fill(struct saved *s)
     s->panel_off = (uint8_t)(panel_off_on != 0);
     s->sos_led = (uint8_t)(sos_led_on != 0);
     s->bright = (uint8_t)panel_bright_level;
+    {
+        uint32_t so = 0;                    /* 1.2-alpha29: Extreme power saving's values are temporary */
+        int br = 0, po = 0;
+        if (surv_saver_saved(&so, &br, &po)) {
+            if (so)
+                s->screen_off_s = so;
+            s->bright = (uint8_t)br;
+            s->panel_off = (uint8_t)(po != 0);
+        }
+    }
     s->pad[0] = auto_off_min;               /* 0.3.2: was zero padding, so 0 (never) for older records */
     s->pad[1] = 0x100U | (uint32_t)(look_emergency != 0) | (uint32_t)(em_set_auto != 0) << 1;    /* 0.6 */
     s->pad[2] = (uint32_t)(look_is_ready() ? look_style() : look_saved_style) + 1U;
     s->ext[0] = (uint32_t)heat_b2s_note;     /* 1.2-alpha18 */
     s->ext[1] = 0x10000U | (uint32_t)(heat_guard_mv & 0xffff);   /* 1.2-alpha24: the brownout guard's floor */
     s->ext[2] = clock_saved_value();         /* 1.2-alpha26: the last known time (UTC; 0 none) */
+    s->ext[3] = 0x80000000U | (uint32_t)(clock_24h == 0) << 30 | tzdb_id(clock_zone());   /* Track A: older: 0 */
     s->pad[3] = 0x10000U | (uint32_t)(heat_surv_stop_c10 & 0xffff) |  /* 1.2-alpha16: Survival's SoC limit (or none) */
                 (uint32_t)(heat_unlimited != 0) << 17 |               /* 1.2-alpha24: Unlimited */
                 (uint32_t)(heat_guard_on == 0) << 18 |                /* and the brownout guard OFF (0: on) */
@@ -106,6 +119,7 @@ void settings_restore(void)
         ub_s(&u, r ? " bytes; something was not taken: a broken entry or another version)" : " bytes)");
         sb_log(u.b);
     }
+    wifi_state_get(half[cur_half]);         /* Track H: the remembered Wi-Fi networks */
     const uint8_t *d = 0;
     {
         /* 0.6.3: the last heating session's record: still "running" means the power went while it heated */
@@ -169,7 +183,23 @@ void settings_restore(void)
         const uint8_t *q = 0;               /* 1.2-alpha27: the survival tools' options (SOS, Last 2 %, the location) */
         if (state_find(half[cur_half], "sbos.surv", &q) == 16 && q)
             surv_unpack(q);
+        q = 0;                              /* Track A: Next's alarm list and labels */
+        if (state_find(half[cur_half], "sbos.alarm", &q) == ALARM_REC_SIZE && q)
+            alarm_unpack(q);
     }
+    {
+        /* Track A: the passcode's record (salt, hash, wrong tries, the lock-out left; never the digits) */
+        const uint8_t *q = 0;
+        int pn = state_find(half[cur_half], PASS_REC, &q);
+        if (pn > 0 && q) {
+            struct sbos_time t;
+            if (pass_load(q, pn, sb_ms(), clock_now(&t) ? (int64_t)t.utc : 0))
+                sb_log(pass_len() ? "settings: the passcode restored" : "settings: the passcode's tries restored");
+            else
+                sb_log("settings: the passcode record is not valid: no passcode");
+        }
+    }
+    kmodem_sms_restore(half[cur_half]);     /* Track G: the messages kept in the slot */
     int n = state_find(half[cur_half], REC, &d);
     struct saved s;
     if (n < (int)sizeof(uint32_t) * 2 + 4 || !d) {
@@ -187,7 +217,7 @@ void settings_restore(void)
         sb_log("settings: a settings record of another version: defaults, and it is not overwritten");
         return;
     }
-    if (s.screen_off_s >= 10 && s.screen_off_s <= 600) {
+    if ((s.screen_off_s >= 10 && s.screen_off_s <= 600) || s.screen_off_s == 0) {    /* Track A: 0 = Auto-Lock Never */
         K.screen_off_s = s.screen_off_s;
         power_input();                      /* the screen-off timer with the restored time */
     }
@@ -213,6 +243,13 @@ void settings_restore(void)
         look_saved_style = (int)s.pad[2] - 1;   /* main makes it once, after this */
     if (s.ext[2] > 1577836800U)
         clock_restore_saved(s.ext[2]);      /* 1.2-alpha26: the last known time */
+    if (s.ext[3] & 0x80000000U) {           /* Track A: the time zone and 12 / 24-hour (older records: Helsinki, 24) */
+        int z = tzdb_by_id(s.ext[3] & 0x3fffffffU);
+        if (z >= 0)
+            clock_zone_set(z);
+        clock_24h = !(s.ext[3] >> 30 & 1U);
+        sb_logf("settings: the time zone restored: ", tzdb[clock_zone()].name);
+    }
     if ((s.ext[1] & 0xffff0000U) == 0x10000U) {     /* 1.2-alpha24 */
         int g = (int)(s.ext[1] & 0xffffU);
         if (g == 3200 || g == 3350 || g == 3500)
@@ -291,11 +328,25 @@ void settings_changed_soon(uint32_t ms)
     kt_set(KT_STATE, 0, now, (uint32_t)(at - now), 0);
 }
 
+/* Track A, 1.0: a safe start (the loader's one-shot SBFW_REQ_SAFE = 2, Settings > Startup or Starbite Recovery):
+ * the settings and the shell's data are read as usual but nothing is written until the next start */
+int sbos_safe_start(void)
+{
+    return sb_fw.valid && sb_fw.req_action == 2U;
+}
 void settings_timer(unsigned id)
 {
     (void)id;
     if (!slot_ok)
         return;
+    if (sbos_safe_start()) {
+        static int said;
+        if (!said) {
+            said = 1;
+            sb_log("settings: a safe start: nothing is saved until the next start");
+        }
+        return;
+    }
     if (sb_storage_held()) {                /* 1.2-alpha21: the modem runs (no block writes): try again in 5 s */
         static uint64_t said;
         if (!said || sb_ms() - said > 60000U) {
@@ -325,6 +376,24 @@ void settings_timer(unsigned id)
         if (state_add(&b, "sbos.surv", sv, 16) < 0)
             sb_log("settings: the survival options did not fit");
     }
+    {
+        uint8_t pr[PASS_REC_LEN];           /* Track A: the passcode (only when one is set or tries are counted) */
+        struct sbos_time t;
+        int pn = pass_pack(pr, sb_ms(), clock_now(&t) ? (int64_t)t.utc : 0);
+        if (pn > 0 && state_add(&b, PASS_REC, pr, (uint32_t)pn) < 0)
+            sb_log("settings: the passcode record did not fit");
+        memset(pr, 0, sizeof(pr));
+    }
+    {
+        uint8_t ar[ALARM_REC_SIZE];         /* Track A: Next's alarm list (once it is the kernel's) */
+        if (alarm_pack(ar) && state_add(&b, "sbos.alarm", ar, ALARM_REC_SIZE) < 0)
+            sb_log("settings: the alarm list did not fit");
+        int c = app_by_id("clock"), n = c >= 0 ? alarm_app_state(apps[c].state) : 0;
+        if (n)
+            apps[c].state_n = (uint32_t)n;  /* the classic Clock app's alarms the same as the list */
+    }
+    if (wifi_state_put(&b) < 0)             /* Track H: the remembered Wi-Fi networks */
+        sb_log("settings: the Wi-Fi networks did not fit");
     if (heat_rec.magic == 0x31435248U && state_add(&b, "heat", &heat_rec, sizeof(heat_rec)) < 0)
         sb_log("settings: the heat record did not fit");
     if (heat_log.magic == HLOG_MAGIC) {     /* 1.2-alpha6: the heat log in 4 KiB records */
@@ -350,6 +419,7 @@ void settings_timer(unsigned id)
     }
     if (prefs_save(&b) < 0)                 /* Track A: the prefs and blobs (all prefs or none, each blob whole) */
         sb_log("settings: some prefs or blobs did not fit (the slot's half is full)");
+    kmodem_sms_save(&b);                    /* Track G: the messages ("sms.NN", last: they take what is left) */
     uint32_t n = state_finish(&b);
     int w = hw_slot_write(to, half[to], n);
     if (w < 0) {
@@ -379,6 +449,13 @@ void settings_timer(unsigned id)
 
 void settings_app_restore(int a)
 {
+    if (a >= 0 && a < napps && sb_streq(apps[a].id, "clock")) {
+        int n = alarm_app_state(apps[a].state);    /* Track A: the kernel's list (restored first) wins */
+        if (n) {
+            apps[a].state_n = (uint32_t)n;
+            return;
+        }
+    }
     if (!slot_ok || cur_half < 0 || a < 0 || a >= napps)
         return;
     char id[24] = "app:";

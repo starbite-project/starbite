@@ -4,6 +4,19 @@
 # sbguest.mode= app (default: guestd's demo), term, wayland (sbwl), desktop (the root on sbblk, then /sbin/sbinit).
 # The full OS's guest (a distro root, a compositor bridge) replaces this; the contract stays sbshm.h.
 /bin/busybox --install -s /bin
+# the overlay (ext4 on /dev/sbblk1) checked before it is mounted (Track F, cp3 2026-11-12: after an unclean stop a
+# file of apt's came back unreadable): -p replays the journal and fixes what is safe (quick when clean); what -p
+# leaves (exit >= 4) -y fixes. 0 usable, 1 not (the caller falls back to a tmpfs upper layer)
+fsck_overlay() {
+    /sbin/e2fsck -p /dev/sbblk1 > /tmp/e2fsck.log 2>&1
+    rc=$?
+    if [ $rc -ge 4 ]; then
+        /sbin/e2fsck -y /dev/sbblk1 >> /tmp/e2fsck.log 2>&1
+        rc=$?
+    fi
+    say "desktop: overlay check: e2fsck $rc ($(tail -n 1 /tmp/e2fsck.log | cut -c1-120))"
+    [ $rc -lt 4 ]
+}
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
@@ -19,6 +32,19 @@ for a in $(cat /proc/cmdline); do
     sbguest.mode=*) mode=${a#sbguest.mode=} ;;
     esac
 done
+if [ "$mode" = desktop ]; then
+    # No base image offered (the card files not placed yet, or the host has no block devices): with sbwl in this
+    # initramfs, run the built-in terminal (the L2 wayland mode) instead of powering off
+    i=0
+    while [ ! -b /dev/sbblk0 ] && [ $i -lt 100 ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+    if [ ! -b /dev/sbblk0 ] && [ -x /sbwl ]; then
+        echo "guest-init: desktop: no base image (/dev/sbblk0): the built-in terminal instead" > /dev/kmsg
+        mode=wayland
+    fi
+fi
 if [ "$mode" = desktop ]; then
     # The desktop guest (docs/STARBITE-LINUX-APPS.md L4): the root is on the host's block devices (sbguest.ko's
     # sbblk, starbite/guest/blk/README.md): /dev/sbblk0 the base image (EROFS, read-only), /dev/sbblk1 the overlay
@@ -45,6 +71,9 @@ if [ "$mode" = desktop ]; then
     if [ ! -b /dev/sbblk1 ]; then
         say "desktop: WARNING: no overlay device (/dev/sbblk1): tmpfs upper layer, nothing will persist"
         upper=tmpfs
+    elif [ -x /sbin/e2fsck ] && ! fsck_overlay; then
+        say "desktop: WARNING: /dev/sbblk1 has errors e2fsck could not fix: tmpfs upper layer, nothing will persist"
+        upper=tmpfs
     elif ! mount -t ext4 -o noatime /dev/sbblk1 /sbroot/rw; then
         say "desktop: WARNING: /dev/sbblk1 does not mount as ext4: tmpfs upper layer, nothing will persist"
         upper=tmpfs
@@ -56,6 +85,10 @@ if [ "$mode" = desktop ]; then
     if [ -b /dev/sbblk2 ]; then
         mkdir -p /newroot/repo
         mount -t erofs -o ro /dev/sbblk2 /newroot/repo || say "desktop: WARNING: /dev/sbblk2 (the repo) does not mount"
+    fi
+    if [ -b /dev/sbblk3 ]; then             # Track F's offline App Store mirror (appstore.erofs), optional
+        mkdir -p /newroot/srv/appstore
+        mount -t erofs -o ro /dev/sbblk3 /newroot/srv/appstore || say "desktop: WARNING: /dev/sbblk3 (the App Store mirror) does not mount"
     fi
     mkdir -p /newroot/dev /newroot/proc /newroot/sys /newroot/.sbroot/base /newroot/.sbroot/rw
     mount -o move /sbroot/base /newroot/.sbroot/base

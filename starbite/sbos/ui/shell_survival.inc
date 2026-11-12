@@ -70,7 +70,7 @@ static int sv_key(const char *k)
            !tk_strcmp(k, "sun") || !tk_strcmp(k, "guide") || !tk_strcmp(k, "compass");
 }
 static int sv_own(const char *k) { return sv_key(k); }
-static uint32_t sv_ground(int a) { return sv_key(APPS[a].k) ? SV_GROUND : 0x0a0f1fU; }
+static uint32_t sv_ground(int a) { return sv_key(APPS[a].k) ? SV_GROUND : sbc_rgb(SBC_GROUND); }
 static int sv_app(const char *k)
 {
     for (int a = 0; a < NAPPS; a++) if (!tk_strcmp(APPS[a].k, k)) return a;
@@ -216,9 +216,14 @@ static int sv_ec_hit(float x, float y)
     if (cy >= SV_EC_EXIT - LIST_TOP - 6 && cy < SV_EC_EXIT - LIST_TOP + 38 && x >= 110 && x < 280) return 8;
     return -1;
 }
+static void sv_exit_answer(int i) { if (i == 1 && EMG) set_emergency(0, 0); }
 static void sv_ec_tap(int i)
 {
-    if (i == 8) { set_emergency(0, 0); return; }
+    if (i == 8) {                       /* helper B2: Exit Emergency asks first (iOS's alert) */
+        static const kit_btn B[2] = { { "Cancel", KIT_CANCEL }, { "Exit", KIT_DESTRUCTIVE } };
+        kit_alert("Exit Emergency Mode?", "The lock screen and home go back to normal. SOS stops if it is on.", B, 2, sv_exit_answer);
+        return;
+    }
     if (i < 0 || i >= 8) return;
     int a = sv_app(EC[i].act);
     if (a < 0) {                        /* Survival Heat: as it was (it runs in the classic Starbite OS) */
@@ -517,34 +522,22 @@ static void page_medical(dc *d)
     sv_text(d, TK_IT400, 13, ROW_TX, y + 14, CONTENT_R - 16 - ROW_TX, 18, "Edit it in Settings > Medical Card (the Info app shows the same card).", W(.4f));
 }
 
-/* Settings > Medical Card: the fields, then one field over the keyboard */
+/* Settings > Medical Card: the fields, then one field over the keyboard (B3: the shell keyboard, shell_kb.inc;
+ * a phone number's + is on its 123 layer, KB_PHONE) */
 static void sv_kb(dc *d, int shift, int num, int plus)
 {
+    (void)plus;
     kb_draw(d, shift, num);
-    if (num && plus) kb_key(d, 3, 658, 42, "+", 0);         /* a phone number's + (the 123 layer has none) */
 }
-/* a key: 1 the text changed, 2 the keyboard changed, 5 return; 0 nothing */
+/* a key: 1 the text changed, 5 return; 0 nothing (shift and 123 are the keyboard's own) */
 static int sv_kb_tap(float x, float y, char *buf, int cap, int digits_only)
 {
-    int n = (int)tk_strlen(buf);
-    if (SV.num && !digits_only && y >= 658 && y < 704 && x < 50) {
-        sh_haptic();
-        if (n < cap) { buf[n] = '+'; buf[n + 1] = 0; }
-        return 1;
-    }
-    char c = 0;
-    int k = kb_hit(x, y, SV.shift, SV.num, &c);
-    if (!k) return 0;
-    sh_haptic();
-    if (k == 2) { SV.shift = !SV.shift; return 2; }
-    if (k == 3) { if (digits_only) return 0; SV.num = !SV.num; return 2; }
-    if (k == 4) { if (n) buf[n - 1] = 0; return 1; }
-    if (k == 5) return 5;
-    if (digits_only && !((c >= '0' && c <= '9') || c == '-' || c == '.')) return 0;
-    if (n >= cap) return 0;
-    buf[n] = c; buf[n + 1] = 0;
-    if (SV.shift && c >= 'A' && c <= 'Z') { SV.shift = 0; return 2; }
-    return 1;
+    (void)x; (void)y;
+    const char *s;
+    int ev = kb_take(&s);
+    if (ev == KBE_RET) return 5;
+    if (digits_only && ev == KBE_TEXT && !((s[0] >= '0' && s[0] <= '9') || s[0] == '-' || s[0] == '.')) return 0;
+    return kb_edit(buf, cap) ? 1 : 0;
 }
 #define CE_TOP DSP_Y                    /* the fields' group (where Display's, Wi-Fi's and Cellular's start) */
 #define CE_FLD PUSHED_TOP               /* the editor's field */
@@ -555,7 +548,7 @@ static void sv_page_card_edit(dc *d)
         sh_card(c);
         sv_back(d, "Medical Card");
         d_text(d, TK_IT400, 13, ROW_TX, CE_TOP - 10, "SHOWN IN EMERGENCY WITHOUT UNLOCKING", .52f, 0, W(.55f), 0);
-        d_rrect(d, GROUP_X, CE_TOP, GROUP_W, 47.0f * SH_CARD_NF - 1, 16, tk_hex(0x151c33, 1));
+        d_rrect(d, GROUP_X, CE_TOP, GROUP_W, 47.0f * SH_CARD_NF - 1, 16, C_CARD);
         for (int i = 0; i < SH_CARD_NF; i++) {
             float y = CE_TOP + 47.0f * i;
             d_text(d, TK_IT400, 16, ROW_TX, y + 13 + 16, sh_card_label(i), 0, 0, INK, 0);
@@ -571,7 +564,7 @@ static void sv_page_card_edit(dc *d)
         return;
     }
     sv_editbar(d, sh_card_label(SV.cf), ACCENT());
-    d_rrect(d, GROUP_X, CE_FLD, GROUP_W, 52, 14, tk_hex(0x151c33, 1));
+    d_rrect(d, GROUP_X, CE_FLD, GROUP_W, 52, 14, C_CARD);
     d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, CE_FLD + 64), "Up to 64 characters. Return or Done saves it.", 0, 0, W(.45f), 0);
     sv_kb(d, SV.shift, SV.num, 1);
 }
@@ -596,12 +589,13 @@ static void sv_field(float x, float y, float w, const char *t, int caret, tk_col
 static void card_tap(float x, float y)
 {
     if (SV.cf < 0) {
-        if (sv_back_hit(x, y)) { AS.sub = 0; build_app_page(AP.a); return; }   /* (the Settings list is not an own page) */
+        if (sv_back_hit(x, y)) { AS.sub = se_back_from_card(); build_app_page(AP.a); return; }   /* helper B2: back to Emergency */
         if (x >= GROUP_X && x < CONTENT_R && y >= CE_TOP && y < CE_TOP + 47.0f * SH_CARD_NF) {
             SV.cf = (int)((y - CE_TOP) / 47);
             tk_memcpy(SV.ebuf, SV.card.f[SV.cf], sizeof SV.ebuf);
             SV.shift = !SV.ebuf[0] && SV.cf != 1;
             SV.num = SV.cf >= 5 && SV.cf <= 7;               /* Call, Call 2, Call 3: a number first */
+            kb_focus((SV.cf != 1 ? KB_AUTOCAP : 0) | (SV.num ? KB_DIGITS | KB_PHONE : 0), "done", SV.ebuf);   /* B3 */
             sv_rebuild();
         }
         return;
@@ -956,10 +950,12 @@ static void sun_tap(float x, float y)
             if (la != SH_NOLOC) sv_fmt_x100(SV.sun_v[0], la);
             if (lo != SH_NOLOC) sv_fmt_x100(SV.sun_v[1], lo);
             SV.sun_edit = 1; SV.sun_f = 0; SV.shift = 0; SV.num = 1;
+            kb_focus(KB_DIGITS | KB_ASCII, "done", "");    /* B3 */
             sv_rebuild();
         } else if (SV.fix_have && x >= GROUP_X && x < CONTENT_R && y >= SUN_LOC + 47 && y < SUN_LOC + 47 + SUN_FIX_ROW) {
             sun_fill_fix();                 /* helper J: the editor with the fix's place in its fields: Done saves it */
             SV.sun_edit = 1; SV.sun_f = 0; SV.shift = 0; SV.num = 1;
+            kb_focus(KB_DIGITS | KB_ASCII, "done", "");    /* B3 */
             toast("Filled in from the GPS fix");
             sv_rebuild();
         }

@@ -1,0 +1,32 @@
+id = "gcompris-qt"
+name = "GCompris"
+summary = "Educational games for children aged 2 to 10"
+description = """GCompris has more than 180 activities for young children: reading, counting, clocks, geography, science, puzzles and games. Designed for touch screens."""
+category = "Education"
+licence = "AGPL-3.0-only"
+homepage = "https://gcompris.net"
+icon = "gcompris-qt"
+ram_mb = 250
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["education", "kids", "learning", "games"]
+
+[launcher]
+exec = "gcompris-qt"
+terminal = false
+keyboard = false
+env = { QT_QPA_PLATFORM = "wayland" }
+
+[distro]
+apt = ["gcompris-qt", "qt6-wayland"]
+
+[runtime]
+needs = ["audio"]
+note = "Qt Quick drawn by Mesa's software renderer: smooth enough for the activities, slow animations in a few. Voices download on first use."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 30
+build_mb = 2500

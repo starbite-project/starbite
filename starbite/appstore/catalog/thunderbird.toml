@@ -1,0 +1,25 @@
+id = "thunderbird"
+name = "Thunderbird"
+summary = "Email, calendar and contacts from Mozilla"
+description = """Mozilla Thunderbird: mail (IMAP/POP/SMTP), calendars, contacts, RSS and chat in one app. Installed from Debian (the ESR line); Mozilla does not publish an aarch64 Linux build."""
+category = "Internet"
+licence = "MPL-2.0"
+homepage = "https://www.thunderbird.net"
+icon = "thunderbird"
+ram_mb = 500
+featured = false
+default = "distro"
+touch = "ok"
+keywords = ["mail", "email", "calendar", "imap", "mozilla"]
+
+[launcher]
+exec = "thunderbird"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["thunderbird"]
+
+[runtime]
+needs = ["network"]
+note = "Desktop layout; usable with touch but dense. Geary is lighter and adapts to narrow screens."

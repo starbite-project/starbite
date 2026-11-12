@@ -1,0 +1,47 @@
+id = "lazygit"
+name = "lazygit"
+summary = "A simple terminal UI for Git"
+description = """lazygit shows a repository's status, branches, commits and stashes in panels and lets you stage lines, commit, rebase and push with single keys or taps."""
+category = "Development"
+licence = "MIT"
+homepage = "https://github.com/jesseduffield/lazygit"
+icon = "utilities-terminal"
+ram_mb = 40
+featured = false
+default = "release"
+touch = "ok"
+keywords = ["git", "tui", "terminal", "cli", "version control"]
+
+[launcher]
+exec = "lazygit"
+terminal = true
+keyboard = true
+
+[release]
+provider = "github"
+repo = "jesseduffield/lazygit"
+asset = "lazygit_*_linux_arm64.tar.gz"
+prerelease = false
+version_from = "regex:^v(.+)$"
+format = "tar"
+strip = 0
+bin = ["lazygit"]
+size_mb = 20
+
+[release.verify]
+github_digest = true
+sha256_asset = "checksums.txt"
+
+[distro]
+apt = ["lazygit"]
+
+[runtime]
+apt = ["git"]
+needs = ["keyboard"]
+note = "Start it inside a repository (cd first) or pick a recent one. No source method: lazygit 0.66 needs Go 1.26, trixie has 1.24."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 6
+build_mb = 900

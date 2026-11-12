@@ -6,7 +6,9 @@
 #   ... trixie-chroot.sh build        sbwl, popuptest, hostsim, the GTK test apps into $OUT (default $WORK/out)
 #   ... trixie-chroot.sh test         build, then hostsim's script (hostsim.script) with sbwl: PASS / FAIL lines
 #   ... trixie-chroot.sh run CMD...   any command inside (proc, dev, /dev/shm, /run, the repo and $WORK bound)
-# WORK: /mnt/build/sbguest2/sbwl. The chroot: $WORK/trixie (~1.3 GB).
+# WORK: /mnt/build/sbguest2/sbwl. The chroot: $WORK/trixie (~1.3 GB). Contract v3's checks (hostsim-v3.script) also
+# want libnotify-bin (notify-send) and libglib2.0-bin in it: trixie-chroot.sh run apt-get install -y libnotify-bin
+# (make installs them).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 WORK=${WORK:-/mnt/build/sbguest2/sbwl}
@@ -18,15 +20,34 @@ mounts() {
     for d in proc sys dev dev/pts dev/shm run tmp "$REPO" "$WORK/out"; do
         [ -d "$R/${d#/}" ] || sudo mkdir -p "$R/${d#/}"
     done
+    # slave / private: the VM's /dev is a shared mount, so without this a devpts / shm mounted (or unmounted) in here
+    # would propagate to the VM's own /dev/pts and /dev/shm and to every other chroot bound from /dev (2026-11-12: foot
+    # "failed to open PTY" in here, and devpts stacked on the VM's /dev/pts). The VM's own mounts are never touched.
     mountpoint -q "$R/proc" || sudo mount -t proc proc "$R/proc"
     mountpoint -q "$R/sys" || sudo mount --rbind /sys "$R/sys"
+    sudo mount --make-rslave "$R/sys"
     mountpoint -q "$R/dev" || sudo mount --bind /dev "$R/dev"
+    sudo mount --make-rslave "$R/dev"
     mountpoint -q "$R/dev/pts" || sudo mount -t devpts devpts "$R/dev/pts" -o newinstance,ptmxmode=0666
+    # its own pty instance: /dev/ptmx must be that instance's (the bound /dev's ptmx is the VM's)
+    mountpoint -q "$R/dev/ptmx" || sudo mount --bind "$R/dev/pts/ptmx" "$R/dev/ptmx"
     mountpoint -q "$R/dev/shm" || sudo mount -t tmpfs shm "$R/dev/shm" -o mode=1777
     mountpoint -q "$R/run" || sudo mount -t tmpfs run "$R/run" -o mode=755
     mountpoint -q "$R/tmp" || sudo mount -t tmpfs tmp "$R/tmp" -o mode=1777
     mountpoint -q "$R$REPO" || sudo mount --bind "$REPO" "$R$REPO"
     mountpoint -q "$R$WORK/out" || sudo mount --bind "$WORK/out" "$R$WORK/out"
+    for d in run tmp "$REPO" "$WORK/out"; do sudo mount --make-private "$R/${d#/}"; done
+}
+
+# everything mounts() put up, in reverse (the processes inside first); the EXIT trap of build / test / run
+umounts() {
+    chroot_kill
+    for d in "$WORK/out" "$REPO" tmp run dev/shm dev/ptmx dev/pts dev sys proc; do
+        m="$R/${d#/}"
+        if mountpoint -q "$m" 2>/dev/null; then
+            sudo umount -R "$m" 2>/dev/null || sudo umount -R -l "$m"
+        fi
+    done
 }
 
 # the processes running inside this chroot (only those: the VM runs other agents' work)
@@ -41,22 +62,25 @@ case "${1:-}" in
 make)
     mkdir -p "$WORK/out"
     [ -d "$R/usr" ] || sudo mmdebstrap --variant=apt --aptopt='Apt::Install-Recommends "false"' \
-        --include=build-essential,pkg-config,libwlroots-0.18-dev,wayland-protocols,libwayland-dev,libxkbcommon-dev,libpixman-1-dev,libcairo2-dev,librsvg2-dev,librsvg2-common,libgtk-3-dev,libgtk-4-dev,foot,galculator,gnome-calculator,hicolor-icon-theme,adwaita-icon-theme,fonts-dejavu-core,dbus-daemon,dbus,xkb-data,passwd,procps,python3-minimal,strace,file \
+        --include=build-essential,pkg-config,libwlroots-0.18-dev,wayland-protocols,libwayland-dev,libxkbcommon-dev,libpixman-1-dev,libcairo2-dev,librsvg2-dev,librsvg2-common,libgtk-3-dev,libgtk-4-dev,foot,galculator,gnome-calculator,hicolor-icon-theme,adwaita-icon-theme,fonts-dejavu-core,dbus-daemon,dbus,xkb-data,passwd,procps,python3-minimal,strace,file,libnotify-bin,libglib2.0-bin,util-linux \
         trixie "$R" http://deb.debian.org/debian > "$WORK/mmdebstrap.log" 2>&1
     sudo chroot "$R" sh -c 'getent passwd user >/dev/null || useradd -m -u 1000 -s /bin/bash user'
     echo "trixie-chroot: $R ($(sudo du -sh "$R" | cut -f1))"
     ;;
 build)
     mkdir -p "$OUT"
+    trap umounts EXIT
     mounts
     sudo chroot "$R" "$here/build.sh" "$OUT"
     ;;
 test)
     mkdir -p "$OUT"
+    trap umounts EXIT
     mounts
     sudo chroot "$R" "$here/build.sh" "$OUT"
     # the test apps' .desktop files (the GTK test programs, a Terminal=true app, an app that ignores SIGTERM)
-    sudo install -m 755 "$OUT/sbwl-gtk3test" "$OUT/sbwl-gtk4test" "$R/usr/local/bin/"
+    sudo install -m 755 "$OUT/sbwl-gtk3test" "$OUT/sbwl-gtk4test" "$OUT/sbwl-wltest" "$OUT/sbwl-notifytest" "$OUT/sbnotify" \
+        "$R/usr/local/bin/"
     sudo mkdir -p "$R/usr/local/share/applications"
     sudo cp "$here"/test-apps/*.desktop "$R/usr/local/share/applications/"
     "$here/install-rootfs.sh" "$R" "$OUT/sbwl"          # /usr/bin/sbwl, /etc/sbwl/system-apps (SYSTEM)
@@ -70,6 +94,7 @@ test)
     ;;
 run)
     shift
+    trap umounts EXIT
     mounts
     sudo chroot "$R" "$@"
     ;;

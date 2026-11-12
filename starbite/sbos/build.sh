@@ -53,6 +53,46 @@ python3 "$here/tools/mergeassets.py" "$ob/sbassets.sb7" "$ob/libsb-assets.sb7" "
 
 if [ "$native" = 1 ]; then
     sh "$here/../tools/sbos-host-test.sh"
+    CC=gcc sh "$here/kern/host/passcode-test.sh"          # Track A: the passcode (kern/passcode.c)
+    CC=gcc sh "$here/kern/host/prefs-test.sh"             # Track A: prefs and blobs (kern/prefs.c)
+    CC=gcc sh "$here/kern/host/update-test.sh"            # Track A: Software Update (kern/update.c on libsb's slots)
+    CC=gcc sh "$here/kern/host/sbfw-health-test.sh"       # Track J FW4: Settings > Startup's checks (kern/sbfw_health.c)
+    CC=gcc sh "$here/kern/host/photos-test.sh"            # Track A: the Camera's photo store (kern/photos.c)
+    CC=gcc sh "$here/kern/host/nledpol-test.sh"           # Track A: the notification LED's policy (kern/nledpol.c)
+    gcc -std=gnu11 -O2 -Wall -Wextra -Werror -I "$here/kern" "$here/kern/host/lens-test.c" -lm -o "$ob/lens-test" &&
+        "$ob/lens-test"                                   # Track A: Liquid Glass V3's model (kern/lens.h)
+    CC=gcc sh "$here/kern/host/tzdb-test.sh"     # Track A: the time zones against zoneinfo, the 12-hour text
+fi
+
+# The sensor hub's firmware patch (docs/SENSOR-HUB.md 2.2): never in the repository. Only the staged test image
+# starbite-os-shub.img embeds it, from a file outside the checkout (starbite/sbos/tools/shub-patch.py makes it from
+# a Samsung kernel tree); without the file that image is skipped.
+SHUB_PATCH=${SHUB_PATCH:-"$HOME/sbos-shub-blob/bcm4775-star-q.bin"}
+shub_sha=b1a3e138ab808f2be247ad195d71d6aef2f2d3ecc7bd3e13e141b1443da408d0
+shub_blob=""
+if [ -f "$SHUB_PATCH" ]; then
+    case "$(cd "$(dirname "$SHUB_PATCH")" && pwd)/" in
+    "$root"/*)
+        echo "sbos: $SHUB_PATCH is inside the checkout: the patch blob stays outside it" >&2
+        exit 1 ;;
+    esac
+    if [ "$(sha256sum "$SHUB_PATCH" | cut -d' ' -f1)" != "$shub_sha" ]; then
+        echo "sbos: $SHUB_PATCH is not the known sensor hub patch (sha256)" >&2
+        exit 1
+    fi
+    shub_blob=$SHUB_PATCH
+fi
+if [ "$native" = 1 ]; then
+    # the hub's wire formats against the GPL sample frames (and the blob's records when it is there)
+    gcc -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I"$here/kern" \
+        -o "$ob/shub-host-test" "$root/starbite/tools/shub-host-test.c" "$here/kern/shub_proto.c" -lm
+    "$ob/shub-host-test" $shub_blob
+    if [ -n "$shub_blob" ]; then
+        # the driver itself (kern/shub.c) against a simulated phone and chip: both self tests, the faults, the restore
+        gcc -O1 -g -Wall -Wextra -Werror -DSB_HOST -fsanitize=address,undefined -fno-sanitize-recover=all -I"$lib" -I"$here/kern" \
+            -o "$ob/shub-sim-test" "$root/starbite/tools/shub-sim-test.c" "$here/kern/shub.c" "$here/kern/shub_proto.c" "$lib/str.c" -lm
+        "$ob/shub-sim-test" "$shub_blob"
+    fi
 fi
 
 # The sensor hub's firmware patch (docs/SENSOR-HUB.md 2.2): never in the repository. Only the staged test image
@@ -137,13 +177,14 @@ wifi="$root/starbite/wifi"
 for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$ut/exfat.c" \
            "$ut/usb_dwc3.c" "$ut/usb_phy.c" "$ut/tb.c" \
            "$wifi/core.c" "$wifi/exynos_pcie.c" "$wifi/chip.c" "$wifi/fw.c" "$wifi/ring.c" "$wifi/msgbuf.c" "$wifi/link.c" \
-           "$wifi/wpa.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" \
+           "$wifi/wpa.c" "$wifi/sae.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" \
            "$wifi/tcp.c" "$wifi/netio.c" "$wifi/http.c" "$wifi/tls/ta.c" "$wifi/tls/tls_chains.c" "$wifi/tls/tls_check.c" \
-           "$root/starbite/guest/sbos/guest.c" "$root/starbite/guest/host/sbghost.c"; do
+           "$root/starbite/guest/sbos/guest.c" "$root/starbite/guest/host/sbghost.c" \
+           "$root/shim/starlte/sbfwfs.c"; do      # Track J FW4: the loader's read-only checkers (kern/sbfw_health.c)
     obj="$ob/k_$(basename "$src" | tr . _).o"
     flags=$CFLAGS
     case "$src" in                          # BearSSL's headers include <string.h>: the shim's, not the C library's
-    */kern/wifi.c|*/wifi/http.c|*/wifi/netio.c|*/wifi/tls/*) flags="$flags -I$wifi/tls/shim" ;;
+    */kern/wifi.c|*/wifi/http.c|*/wifi/netio.c|*/wifi/sae.c|*/wifi/tls/*) flags="$flags -I$wifi/tls/shim" ;;
     */kern/modem.c) flags="$flags -DSBM_ATTENDED_TX" ;;   # mobile data: the user's Cellular switch (docs/MODEM.md 7.10)
     esac
     case " smp.c heatk.c ocp.c " in
@@ -175,6 +216,9 @@ for src in "$modem"/sbm_*.c "$modem/sb/sbm_sb.c" "$modem/sb/ext4.c" "$modem/sb/j
     "${CROSS}gcc" $CFLAGS $MREN -DSBM_ATTENDED_TX -I"$modem" "$src" -o "$obj"
     objs="$objs $obj"
 done
+# Track G: the Linux guest's NAT (kern/guestnet.c)
+"${CROSS}gcc" $CFLAGS "$modem/nat/sbnat.c" -o "$ob/km_sbnat_c.o"
+objs="$objs $ob/km_sbnat_c.o"
 # the rule of the modem images: no partition write from the modem code (libsb's storage hold is on while it runs)
 bad=""
 for o in "$ob"/km_*.o "$ob/k_modem_c.o"; do
@@ -201,6 +245,8 @@ vibobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_vib.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_GPUCOMP "$here/kern/uitest.c" -o "$ob/k_uitest_gpc.o"
 gpcobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_gpc.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_SURVIVAL "$here/kern/uitest.c" -o "$ob/k_uitest_surv.o"
+"${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_POWER "$here/kern/uitest.c" -o "$ob/k_uitest_pwr.o"
+pwrobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_pwr.o#")
 survobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_surv.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_UIBENCH "$here/kern/uitest.c" -o "$ob/k_uitest_uib.o"
 uibobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_uib.o#")
@@ -244,6 +290,9 @@ if [ -n "$PAK" ]; then
     ndobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrv.o#")
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_DRV -DSBOS_SELFTEST_NEXT_DRV_ATTENDED "$here/kern/uitest.c" -o "$ob/k_uitest_ndrva.o"
     ndaobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrva.o#")
+    # Track G: Next with the unattended Cellular self test (mobile data on, HTTPS GETs, off, on again; no SMS, no calls)
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_CELL "$here/kern/uitest.c" -o "$ob/k_uitest_ncell.o"
+    ncobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ncell.o#")
 else
     echo "sbos: no build/sbtk/sbtk-phone.pak: the starbite-next images are not built" >&2
 fi
@@ -329,6 +378,11 @@ relocs_only_relative "$out/starbite-os-gpucomp.elf"
 "${CROSS}objcopy" -O binary "$out/starbite-os-gpucomp.elf" "$out/starbite-os-gpucomp.bin"
 "${CROSS}nm" "$out/starbite-os-gpucomp.elf" | sort > "$out/starbite-os-gpucomp.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpucomp.bin" "$out/starbite-os-gpucomp.img" "$out/starbite-os-gpucomp.map"
+"${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $pwrobjs -o "$out/starbite-os-powerbench.elf"
+relocs_only_relative "$out/starbite-os-powerbench.elf"
+"${CROSS}objcopy" -O binary "$out/starbite-os-powerbench.elf" "$out/starbite-os-powerbench.bin"
+"${CROSS}nm" "$out/starbite-os-powerbench.elf" | sort > "$out/starbite-os-powerbench.map"
+python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-powerbench.bin" "$out/starbite-os-powerbench.img" "$out/starbite-os-powerbench.map"
 "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $survobjs -o "$out/starbite-os-survival.elf"
 relocs_only_relative "$out/starbite-os-survival.elf"
 "${CROSS}objcopy" -O binary "$out/starbite-os-survival.elf" "$out/starbite-os-survival.bin"
@@ -355,9 +409,9 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
 "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
 if [ -n "$nobjs" ]; then
-    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended; do
+    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended next-celltest; do
         case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;;
-        next-drvprobe) vo=$ndobjs ;; next-drvattended) vo=$ndaobjs ;; *) vo=$nwobjs ;; esac
+        next-drvprobe) vo=$ndobjs ;; next-drvattended) vo=$ndaobjs ;; next-celltest) vo=$ncobjs ;; *) vo=$nwobjs ;; esac
         "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
         und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)
         if [ -n "$und" ]; then
@@ -407,7 +461,7 @@ if ! "${CROSS}nm" "$out/starbite-os.elf" | grep -q ' sbos_selftest_enabled$'; th
     exit 1
 fi
 
-leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" "$out/starbite-os-heatprobe.img" "$out/starbite-os-vibtest.img" "$out/starbite-os-uibench.img" "$out/starbite-os-survival.img" "$out/starbite-os-gputest.img" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpucomp.img" "$out/starbite-os-shubprobe.img" $shubimg | head -3 || true)
+leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" "$out/starbite-os-heatprobe.img" "$out/starbite-os-vibtest.img" "$out/starbite-os-uibench.img" "$out/starbite-os-gpucomp.img" "$out/starbite-os-survival.img" "$out/starbite-os-powerbench.img" "$out/starbite-os-gputest.img" "$out/starbite-os-gpualu.img" "$out/starbite-os-shubprobe.img" $shubimg | head -3 || true)
 if [ -n "$leak" ]; then
     echo "sbos: the image contains build-host paths:" >&2
     echo "$leak" >&2
@@ -429,6 +483,10 @@ sha256sum "$out/starbite-os-guesttest.img" | sed "s#  .*#  starbite-os-guesttest
 echo "sbos: $(cat "$out/starbite-os-guesttest.img.sha256") (Linux self-test variant)"
 sha256sum "$out/starbite-os-heatprobe.img" | sed "s#  .*#  starbite-os-heatprobe.img#" > "$out/starbite-os-heatprobe.img.sha256"
 echo "sbos: $(cat "$out/starbite-os-heatprobe.img.sha256") (heat probe H1 variant)"
+sha256sum "$out/starbite-os-powerbench.img" | sed "s#  .*#  starbite-os-powerbench.img#" > "$out/starbite-os-powerbench.img.sha256"
+echo "sbos: $(cat "$out/starbite-os-powerbench.img.sha256") (power bench: attended, the cable out)"
+sha256sum "$out/starbite-os-survival.img" | sed "s#  .*#  starbite-os-survival.img#" > "$out/starbite-os-survival.img.sha256"
+echo "sbos: $(cat "$out/starbite-os-survival.img.sha256") (survival tools self test)"
 sha256sum "$out/starbite-os-gpucomp.img" | sed "s#  .*#  starbite-os-gpucomp.img#" > "$out/starbite-os-gpucomp.img.sha256"
 echo "sbos: $(cat "$out/starbite-os-gpucomp.img.sha256") (GPU compositor test P4)"
 sha256sum "$out/starbite-os-survival.img" | sed "s#  .*#  starbite-os-survival.img#" > "$out/starbite-os-survival.img.sha256"

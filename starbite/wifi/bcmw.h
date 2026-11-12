@@ -88,6 +88,11 @@ struct bcmw_cfg {
     int diag;               /* 1: step 8 verifies the whole download, dumps the RAM's tail and logs the ARM's
                              * state while it waits for the firmware (W1b: the firmware did not start under
                              * Windows) */
+    unsigned join_band;     /* Track H: 0 any (5 GHz preferred), 1 2.4 GHz only, 2 5 GHz only: the join's directed
+                             * scan skips the other band (the 2.4 GHz test; may be changed between joins) */
+    int wpa2_mfp;           /* 1: management frame protection "capable" (mfp 1, our RSN element's MFPC) on a WPA2
+                             * network whose access point offers it, and its IGTK installed; 0 (default): WPA2 as
+                             * before (mfp not touched). WPA3 (SAE) always asks for it (mfp 2, MFPC + MFPR). */
 };
 
 enum {
@@ -125,6 +130,9 @@ struct bcmw_event {
 #define BCMW_E_LINK             16
 #define BCMW_E_IF               54
 #define BCMW_E_ESCAN_RESULT     69
+#define BCMW_E_EXT_AUTH_REQ     187 /* external SAE (brcmfmac cyw/core.c): the firmware asks the host to authenticate */
+#define BCMW_E_EXT_AUTH_FRAME_RX 188 /* an Authentication frame for the host's SAE */
+#define BCMW_E_MGMT_FRAME_TXSTATUS 189 /* a "mgmt_frame" was sent (status 0: acknowledged) */
 
 #define BCMW_OK          0
 #define BCMW_E_NODEV    -1  /* nothing answers / not there */
@@ -181,12 +189,29 @@ int bcmw_tx(struct bcmw *w, const uint8_t *frame, uint32_t len);
 int bcmw_join(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char *pass, unsigned timeout_ms);
 /* The same in two parts, for a caller that must not block (Starbite OS): _start scans for the name, makes the PMK and
  * sends SET_SSID (a few seconds at most); _poll does one round of the handshake: BCMW_OK joined, BCMW_E_PENDING not
- * yet (call again), any other BCMW_E_* failed (the join is left). The passphrase is not kept after _start. */
+ * yet (call again), any other BCMW_E_* failed (the join is left). The passphrase is not kept after _start, except
+ * when the firmware and build can do WPA3: then until the access point is chosen (SAE needs the password with the AP's
+ * address), wiped by the first _poll that associates or fails. WPA3 (SAE) is used when the AP offers it and
+ * bcmw_caps() has BCMW_CAP_WPA3; a transition network falls back to WPA2-PSK if SAE fails for another reason than
+ * the password. */
 #define BCMW_E_PENDING  -9
 int bcmw_join_start(struct bcmw *w, const uint8_t *ssid, unsigned ssid_len, const char *pass, unsigned timeout_ms);
 int bcmw_join_poll(struct bcmw *w);
 int bcmw_leave(struct bcmw *w);
 int bcmw_link_up(const struct bcmw *w);
+
+/* What the firmware can do, from its "cap" iovar (read again at each call; the whole string is logged once, its
+ * words are not identifying) and the "mfp" iovar: */
+#define BCMW_CAP_SAE_EXT    0x01    /* "sae_ext": SAE by the host through EXT_AUTH events and "mgmt_frame" */
+#define BCMW_CAP_SAE        0x02    /* "sae": SAE inside the firmware (with its own supplicant: idsup) */
+#define BCMW_CAP_MFP        0x04    /* management frame protection (802.11w): "mfp" in cap or the iovar answers */
+#define BCMW_CAP_IDSUP      0x08    /* the firmware's own supplicant */
+#define BCMW_CAP_HOST_SAE   0x10    /* this build has the host's SAE (bcmw_sae_enable was called; sae.c) */
+#define BCMW_CAP_WPA3       0x20    /* a WPA3-only network can be joined: HOST_SAE + SAE_EXT, or SAE + IDSUP */
+unsigned bcmw_caps(struct bcmw *w);
+/* SAE (WPA3-Personal) by the host: sae.c's, linked with BearSSL; without this call WPA3-only networks are refused
+ * and transition networks joined with WPA2-PSK. After bcmw_init. Declared in sae.h too. */
+void bcmw_sae_enable(struct bcmw *w);
 
 /* ---- the pieces, for an OS with its own supplicant and connection manager (Windows' WiFiCx) ------ */
 
@@ -211,6 +236,15 @@ int bcmw_set_mac(struct bcmw *w, const uint8_t mac[6]);
 unsigned bcmw_chanspec_channel(uint16_t chanspec);
 /* 1 if ev is an escan result carrying a BSS (status 8), into *b; *sync = the scan's sync id */
 int bcmw_bss_parse(const struct bcmw_event *ev, struct bcmw_bss *b, uint16_t *sync);
+/* What an access point's elements say of its security, for the UI (WPA3: SAE, AKM 8; WPA2: PSK, AKM 2 or 6, with
+ * CCMP; OTHER: enterprise (802.1X), WEP, WPA of the first kind, TKIP only, OWE, an RSN element that does not parse) */
+#define BCMW_SEC_OPEN       0
+#define BCMW_SEC_WPA2       1
+#define BCMW_SEC_WPA2_WPA3  2       /* a transition network: both PSK and SAE */
+#define BCMW_SEC_WPA3       3
+#define BCMW_SEC_OTHER      4
+unsigned bcmw_bss_security(const struct bcmw_bss *b);
+const char *bcmw_security_name(unsigned sec);     /* "open", "WPA2", "WPA2/WPA3", "WPA3", "other" */
 /* 1 if ev ends the escan with this sync id (status other than 8) */
 int bcmw_scan_ended(const struct bcmw_event *ev, uint16_t sync);
 /* start an escan (all channels; a name or none); results and its end come as events */

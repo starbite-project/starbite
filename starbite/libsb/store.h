@@ -69,6 +69,10 @@ uint64_t store_used(unsigned medium);
  * grant for exactly its blocks (e->medium says which medium: write it with sb_write_volatile(e->medium, ...)).
  * 1 granted. */
 int store_volatile_grant(const char *name, uint64_t min_bytes, struct store_ent *e);
+/* The same entry checks, granting only its blocks first .. first + count - 1 (cut at the entry's end; the fence takes at
+ * most 1024 blocks, 4 MiB, at a time): an entry larger than that written a window at a time (Software Update's
+ * "sbos-slot-a" / "-b"). One grant in the OS: the caller gives the state slot's back (kern/slot.c re-takes it). */
+int store_volatile_grant_part(const char *name, uint64_t min_bytes, uint64_t first, uint64_t count, struct store_ent *e);
 
 /* Forget what store_open found, so the next call reads the medium again. */
 void store_reset(unsigned medium);
@@ -111,6 +115,7 @@ int settings_save(struct star_settings *s);
  * loader's codec byte for byte (shim/starlte/sbfmt.h) ---- */
 #define SBSET_BYTES         256U  /* the record's bytes under its CRC (16..255) */
 #define SBFW_FLAG_SHELL     1U    /* fw_flags: start the shell entry instead of drawing the menu */
+#define SBFW_FLAG_SHELL_SET 8U    /* fw_flags: SBFW_FLAG_SHELL is the user's choice (else the loader build's default) */
 #define SBFW_FLAG_CON_NEVER 2U
 #define SBFW_FLAG_CON_ALWAYS 4U
 #define SBFW_REQ_NONE       0U
@@ -122,7 +127,8 @@ int settings_save(struct star_settings *s);
 #define SBFW_REQ_WINRE      6U
 #define SBFW_REQ_DRIVER_OFF 7U
 #define SBFW_REQ_NO_SHELL   8U
-#define SBFW_REQ_MAX        8U
+#define SBFW_REQ_UPDATE     9U    /* try update slot slot_try once (docs/STARBITE-FIRMWARE-LAYER.md 10.5) */
+#define SBFW_REQ_MAX        9U
 #define SBFW_ST_NONE        0U    /* req_state */
 #define SBFW_ST_ARMED       1U    /* the OS asked (written by the OS) */
 #define SBFW_ST_APPLIED     2U    /* its start had it */
@@ -134,6 +140,7 @@ struct sbfw_rec {
     uint16_t req_seq;
     char req_key[24], shell_key[24];
     uint8_t undo[64];
+    uint8_t slot_active, slot_try, slot_tries;   /* bytes 232..234: the A/B update slots (section 10.5) */
 };
 /* bytes 112..255 of a settings block: all zero when they do not start with "FW" version 1 */
 void sbfw_rec_decode(const uint8_t *blk, struct sbfw_rec *r);
@@ -145,6 +152,15 @@ int settings_fw_load(struct sbfw_rec *r);
 /* s's fields plus r as the SBFW part (the loader's crash / watchdog bytes 104..111 kept), written and read back:
  * 0, or < 0 / SB_W_* as settings_save (the same authorisation). */
 int settings_fw_save(struct star_settings *s, const struct sbfw_rec *r);
+/* The loader's crash / watchdog bytes 104..111 of the home record (shim/starlte/store.h: 104 crash_mode, 105
+ * crash_detail, 106 crash_action, 107 crash_timeout, 108 wdt_mode, 109 0, 110 u16 wdt_s), zeros without a record:
+ * 1 if a valid record was read. */
+int settings_ldr_load(uint8_t ldr[8]);
+/* settings_fw_save with those 8 bytes replaced too (sbfw_api.c's sbfw_settings_write): 0, or < 0 / SB_W_*. */
+int settings_all_save(struct star_settings *s, const struct sbfw_rec *r, const uint8_t ldr[8]);
+/* Block k of entry e read (no CRC check: for volatile entries such as "crashlog") into dst (plain RAM, 4096 bytes):
+ * 0, -1 read error, -3 past the entry. */
+int store_read_block(const struct store_ent *e, uint64_t k, void *dst);
 
 /* ---- writer (Engineer OS v2): append only, every block through the write fence, read back ---- */
 struct store_writer {

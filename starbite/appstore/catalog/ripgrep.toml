@@ -1,0 +1,49 @@
+id = "ripgrep"
+name = "ripgrep"
+summary = "Search file contents very fast (rg)"
+description = """ripgrep (rg) searches folders for a pattern, respecting .gitignore and skipping binary files. Much faster than grep on large trees."""
+category = "Utilities"
+licence = "Unlicense OR MIT"
+homepage = "https://github.com/BurntSushi/ripgrep"
+icon = "utilities-terminal"
+ram_mb = 20
+featured = false
+default = "release"
+touch = "poor"
+keywords = ["cli", "search", "grep", "terminal"]
+
+[launcher]
+exec = "bash -c \"rg --version; echo 'Usage: rg PATTERN [PATH]'; exec bash -i\""
+terminal = true
+keyboard = true
+
+[release]
+provider = "github"
+repo = "BurntSushi/ripgrep"
+asset = "ripgrep-*-aarch64-unknown-linux-gnu.tar.gz"
+prerelease = false
+version_from = "tag"
+format = "tar"
+strip = 1
+bin = ["rg"]
+size_mb = 6
+
+[release.verify]
+github_digest = true
+sha256_asset = "{asset}.sha256"
+
+[source]
+tarball = "https://github.com/BurntSushi/ripgrep/archive/refs/tags/{tag}.tar.gz"
+ref = "release"
+system = "cargo"
+build_deps = ["cargo", "rustc"]
+bin = ["bin/rg"]
+build_min = 10
+build_mb = 1200
+
+[distro]
+apt = ["ripgrep"]
+
+[runtime]
+needs = ["keyboard", "files"]
+note = "ripgrep 15.2 needs Rust 1.85; trixie's rustc is 1.85.1, so the source build works with Debian's toolchain."

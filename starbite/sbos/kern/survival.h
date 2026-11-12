@@ -36,12 +36,25 @@ struct surv_usb {
     uint32_t bursts;            /* since the start */
     int32_t refused;            /* 1: the last start was refused (why) */
     uint32_t events;            /* bumped at every refusal and stop: a new `why` (why is always a string literal) */
+    int32_t fire;               /* 1.2-alpha29: this session is Extreme fire mode */
+    uint32_t trips, resets;     /* the chip's current-limit events; the times it switched OTG off by itself */
+    int32_t paused;             /* fire mode resting (the duty cap, or after the chip switched off) */
+    int32_t usb_c10, chg_c10;   /* the USB connector's and the charger's thermistors, 0.1 C (-1000 unread) */
+    int32_t fire_min_left;      /* fire mode: minutes of output left at the measured draw (-1 not yet) */
     uint8_t byp_dtls, chg_dtls; /* the chip's own status nibbles (logged) */
     const char *why;            /* refused / last stop, plain words */
 };
 /* after the UI's hold-to-arm: start one burst. 0 started, < 0 refused (why in the status) */
 int surv_usb_start(void);
 void surv_usb_stop(const char *why);
+/* 1.2-alpha29, Extreme fire mode: continuous output while held, after the UI's stronger confirmation. The chip's own
+ * 1.5 A limit and protections stay; it runs while surv_usb_hold() comes at least every 1.5 s (the finger), at most
+ * 2 min (then 15 s to cool); everything else off and the screen dim; floors at 1 % and a 3.2 V sag; the 65 C battery,
+ * 70 C USB connector and 75 C charger stops; 2 s on / 2 s off within 5 C of a stop; if the chip switches the output
+ * off by itself it rests 2 s and tries again, 3 times at most. Never during a self test. */
+int surv_usb_fire_start(void);
+void surv_usb_hold(void);
+int surv_usb_active(void);                         /* 1 while the output is on (or being put back) */
 void surv_usb_status(struct surv_usb *s);
 extern const char *const surv_usb_guide[];   /* the on-screen guidance, NULL-terminated */
 
@@ -69,6 +82,31 @@ struct surv_card { char f[SURV_CARD_NF][SURV_CARD_FL + 1]; };
 extern const char *const surv_card_label[SURV_CARD_NF];
 int surv_card_get(struct surv_card *c);            /* 1 a card, 0 none */
 int surv_card_set(const struct surv_card *c);      /* 1 kept (saved with the settings) */
+
+/* ---- extreme power saving (1.2-alpha29) ---- */
+/* Everything off but the clock, the torch and SOS; the A55 at 455 MHz; the screen low and off after 15 s with the
+ * panel off; fewer wake-ups. Last 2 % includes it. surv_saver(): 1 while it applies (by hand or by Last 2 %) */
+int surv_saver_set(int on, const char *why);
+int surv_saver(void);
+int surv_saver_saved(uint32_t *screen_off_s, int *bright, int *panel_off);   /* settings.c: the user's own values */
+uint32_t surv_input_poll_ms(void);                 /* services.c: the screen-off key poll */
+uint32_t surv_battery_poll_ms(void);               /* services.c: the screen-off gauge read */
+void surv_battery_sample(int avg_ma, int charger, int screen_on, uint64_t in_state_ms);
+
+/* the battery estimate: minutes left to 1 % at each use; ma_saver is measured once learned_saver */
+struct surv_est {
+    int32_t pct, charging, usable_mah;
+    int32_t ma_on, ma_off, ma_saver, ma_heat;
+    int32_t min_on, min_off, min_saver, min_heat;
+    int32_t learned_normal, learned_saver;
+};
+int surv_estimate(struct surv_est *e);             /* 1 filled, 0 the battery is not read */
+
+/* ---- light and sound ---- */
+void surv_light_boost(int on);                     /* the panel at its top level (the UI draws the white) */
+extern int (*surv_tone_hook)(int hz, int on);      /* Track I's speaker: set it when the driver lands */
+int surv_whistle(int on);                          /* -1: no speaker yet (surv_whistle_why) */
+const char *surv_whistle_why(void);
 
 /* ---- last 2 % ---- */
 extern int surv_last2_auto;     /* enter it at 3 % instead of switching off (1, the default) */
@@ -98,6 +136,7 @@ const char *surv_sensors_why(void);
  * shown: it stops 60 s after the last call, at Last 2 % (refused: -1) and before a restart. 0 stops it now.
  * surv_sensors_state(): SHUB_OFF / _STARTING / _RUNNING / _FAILED (shub.h). Samples come at 10 Hz. */
 int surv_sensors_on(int on);
+int surv_sensors_on_mask(unsigned mask);           /* only the SHUB_SENS_* asked for (shub.h); else as surv_sensors_on */
 int surv_sensors_state(void);
 
 /* ---- the kernel ---- */
@@ -106,4 +145,5 @@ void surv_timer(unsigned id);
 void surv_pack(uint8_t out[16]);                   /* settings: the saved options */
 void surv_unpack(const uint8_t in[16]);
 int surv_selftest_step(void);                      /* uitest.c's survival variant: 1 done */
+int surv_power_selftest_step(void);                /* uitest.c's power bench variant (attended: the cable out) */
 #endif

@@ -1,0 +1,30 @@
+id = "lollypop"
+name = "Lollypop"
+summary = "A music player for your library"
+description = """Lollypop plays your music collection sorted by artist, album and genre, with cover art, playlists and party mode. Its layout adapts to a phone-sized screen."""
+category = "Media"
+licence = "GPL-3.0-or-later"
+homepage = "https://wiki.gnome.org/Apps/Lollypop"
+icon = "org.gnome.Lollypop"
+ram_mb = 150
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["music", "audio", "player", "mp3", "flac"]
+
+[launcher]
+exec = "lollypop"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["lollypop"]
+
+[runtime]
+needs = ["audio", "files"]
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 3
+build_mb = 500

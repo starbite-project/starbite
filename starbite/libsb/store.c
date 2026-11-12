@@ -141,10 +141,12 @@ static int open_v1(struct medium *s, unsigned m)
 
 /* ---- home store state (store.h) ------------------------------------------------------------------- */
 static int home = -2;          /* -2 not resolved, -3 resolving, -1 none, else the medium */
+static int probed_card_only;   /* 1.0 (Track A): an older loader without a table, on a card-only phone (sbstore=card, or
+                                * no UFS store at all): the card's store is home and UFS is not touched again */
 
 int store_card_only(void)
 {
-    return sb_fw.valid && (sb_fw.flags & SBFW_TF_CARD_ONLY);
+    return (sb_fw.valid && (sb_fw.flags & SBFW_TF_CARD_ONLY)) || probed_card_only;
 }
 
 int store_open(unsigned m)
@@ -612,8 +614,9 @@ int store_append(unsigned m, const char *name, unsigned type, const void *src, u
 }
 
 /* The settings record (the home store's block 2): one block, as the loader's settings_save, read back.
- * fw: a new SBFW part (bytes 112..255), or 0 to keep the current one. */
-static int settings_write(struct star_settings *st, const struct sbfw_rec *fw)
+ * fw: a new SBFW part (bytes 112..255), or 0 to keep the current one; ldr: new loader bytes 104..111 (the crash /
+ * watchdog settings, docs/STARBITE-HEALTH.md), or 0 to keep them. */
+static int settings_write(struct star_settings *st, const struct sbfw_rec *fw, const uint8_t *ldr)
 {
     unsigned m = 0;
     uint64_t lba = settings_lba(&m);
@@ -628,6 +631,9 @@ static int settings_write(struct star_settings *st, const struct sbfw_rec *fw)
     if (settings_read(m, lba))
         for (unsigned i = 104; i < 256; ++i)
             *(volatile uint8_t *)(b + i) = *(volatile uint8_t *)(UFS_BUF + i);
+    if (ldr)
+        for (unsigned i = 0; i < 8; ++i)
+            *(volatile uint8_t *)(b + 104 + i) = ldr[i];
     if (fw)
         sbfw_rec_encode((uint8_t *)b, fw);
     st->seq++;
@@ -650,12 +656,42 @@ static int settings_write(struct star_settings *st, const struct sbfw_rec *fw)
 
 int settings_save(struct star_settings *st)
 {
-    return settings_write(st, 0);
+    return settings_write(st, 0, 0);
 }
 
 int settings_fw_save(struct star_settings *st, const struct sbfw_rec *r)
 {
-    return settings_write(st, r);
+    return settings_write(st, r, 0);
+}
+
+int settings_all_save(struct star_settings *st, const struct sbfw_rec *r, const uint8_t ldr[8])
+{
+    return settings_write(st, r, ldr);
+}
+
+int settings_ldr_load(uint8_t ldr[8])
+{
+    unsigned m = 0;
+    uint64_t lba = settings_lba(&m);
+    int ok = lba && settings_read(m, lba);
+    for (unsigned i = 0; i < 8; ++i)
+        ldr[i] = ok ? *(volatile uint8_t *)(UFS_BUF + 104 + i) : 0;
+    return ok;
+}
+
+/* Block k of entry e (no CRC: a volatile entry's blocks change under its directory CRC) into dst (plain RAM), via
+ * the store's DMA scratch. */
+int store_read_block(const struct store_ent *e, uint64_t k, void *dst)
+{
+    if (k >= (e->size + 4095U) / 4096U)
+        return -3;
+    uintptr_t b = SB_STORE_IO + 0x60000;
+    if (med_read(e->medium, e->lba + k, 1, b))
+        return -1;
+    uint8_t *d = (uint8_t *)dst;
+    for (unsigned i = 0; i < 4096; ++i)
+        d[i] = *(volatile uint8_t *)(b + i);
+    return 0;
 }
 
 int settings_fw_load(struct sbfw_rec *r)
@@ -777,6 +813,13 @@ int store_verify(unsigned m, unsigned i, uint32_t *got)
  * small: nothing granted). */
 int store_volatile_grant(const char *name, uint64_t min_bytes, struct store_ent *e)
 {
+    return store_volatile_grant_part(name, min_bytes, 0, ~0ULL, e);
+}
+
+/* The same checks; the grant for blocks first .. first + count - 1 of the entry only (cut at its end; the fence takes
+ * at most 1024 blocks at a time): Software Update's 64 MiB slots, written a window at a time. */
+int store_volatile_grant_part(const char *name, uint64_t min_bytes, uint64_t first, uint64_t count, struct store_ent *e)
+{
     int h = store_home();
     if (h < 0)
         return 0;
@@ -807,7 +850,11 @@ int store_volatile_grant(const char *name, uint64_t min_bytes, struct store_ent 
             return 0;
         }
     }
-    return sb_volatile_grant(h == (int)STORE_SD ? SB_MED_SD : SB_MED_UFS, e->lba, n, e->name);
+    if (first >= n || !count)
+        return 0;
+    if (count > n - first)
+        count = n - first;
+    return sb_volatile_grant(h == (int)STORE_SD ? SB_MED_SD : SB_MED_UFS, e->lba + first, count, e->name);
 }
 
 /* ---- the home store (store.h) ---------------------------------------------------------------------- */
@@ -871,13 +918,31 @@ int store_home(void)
     } else {
         /* an older loader: the card when its store says HOME (and the card may be touched), else UFS */
         why = "no table: probed";
-        (void)store_open(STORE_UFS);
-        if (!sd_allowed() && (ufs_settings_flags() & SET_SD_STORE))
+        /* 1.0 (Track A; wifi-core's card-only finding): S-Boot's sbstore=card says USERDATA is not ours (the UFS
+         * store area is not read at all); a UFS area without a store says the same. Then the card's version 2
+         * store is home whether or not it carries the HOME mark (a card made before SBSTHOME) */
+        int card_arg = 0;
+#ifndef SB_HOST_FAKE_MEM
+        {
+            char v[8];
+            card_arg = sb_bootarg("sbstore", v, sizeof v) && v[0] == 'c' && v[1] == 'a' && v[2] == 'r' && v[3] == 'd' && !v[4];
+        }
+#endif
+        if (card_arg)
+            probed_card_only = 1;
+        else
+            (void)store_open(STORE_UFS);
+        int no_ufs = card_arg || med[STORE_UFS].state <= 0;
+        if (!sd_allowed() && (no_ufs || (ufs_settings_flags() & SET_SD_STORE)))
             sd_allow();
         if (sd_allowed() && (store_open(STORE_SD), med[STORE_SD].state > 0) && med[STORE_SD].version == 2 &&
-            med[STORE_SD].home)
+            (med[STORE_SD].home || no_ufs)) {
             h = (int)STORE_SD;
-        else if (med[STORE_UFS].state > 0)
+            if (no_ufs) {
+                probed_card_only = 1;
+                why = card_arg ? "no table: sbstore=card" : "no table: no UFS store, the card's";
+            }
+        } else if (med[STORE_UFS].state > 0)
             h = (int)STORE_UFS;
     }
     if (h == (int)STORE_SD) {

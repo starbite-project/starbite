@@ -1,0 +1,131 @@
+# contract v3 (Track E), included by hostsim.script (trixie) and hostsim-u17.script (the Ubuntu VM): the clock, the key
+# bar's modifiers, the clipboard both ways, the zero-copy surface (opaque pixels, host_surf_reading), background apps,
+# notifications. Apps: test-apps/org.starbite.{WlTest,SpinFrame,SpinTimer,NotifyTest}.desktop (wltest.c, notifytest.c).
+
+# the wall clock and the time zone: hostsim's host is a day ahead, UTC+2 (the clock itself is the machine's: only logged)
+clock +100000 120
+expect_log 4000 TZ=<+02>-2 for the apps
+expect_log 4000 would set it
+
+# a plain Wayland client: Ctrl from the key bar on a key, the copy reaches the host
+sh rm -f /tmp/sbwl-wltest.txt
+launch org.starbite.WlTest
+wait_window org.starbite.WlTest 1 10000
+wait_frame 5000
+expect_opaque
+keymod 1
+key 46
+keymod 0
+expect_line /tmp/sbwl-wltest.txt key:46 mods:4 3000
+wait_clip 3000 wltest copy ✓
+# the host's clipboard: Ctrl + "v" as text (with Ctrl held the text becomes a key), the app pastes it; no echo back
+clip_set from the host ✓ 2
+expect_log 2000 clipboard <- host: 19 bytes of text
+keymod 1
+type v
+keymod 0
+expect_line /tmp/sbwl-wltest.txt key:47 mods:4 3000
+expect_line /tmp/sbwl-wltest.txt pasted:from the host ✓ 2 3000
+expect_no_msg 73 1000
+# Shift and Alt from the key bar; Esc, Tab, the arrows, Home / End / PgUp / PgDn as keys
+keymod 8
+key 30
+keymod 2
+key 32
+keymod 0
+expect_line /tmp/sbwl-wltest.txt key:30 mods:1 3000
+expect_line /tmp/sbwl-wltest.txt key:32 mods:8 3000
+key 1
+key 15
+key 103
+key 108
+key 105
+key 106
+key 102
+key 107
+key 104
+key 109
+expect_line /tmp/sbwl-wltest.txt key:1 mods:0 3000
+expect_line /tmp/sbwl-wltest.txt key:15 mods:0 3000
+expect_line /tmp/sbwl-wltest.txt key:103 mods:0 3000
+expect_line /tmp/sbwl-wltest.txt key:108 mods:0 3000
+expect_line /tmp/sbwl-wltest.txt key:105 mods:0 3000
+expect_line /tmp/sbwl-wltest.txt key:106 mods:0 3000
+expect_line /tmp/sbwl-wltest.txt key:102 mods:0 3000
+expect_line /tmp/sbwl-wltest.txt key:107 mods:0 3000
+expect_line /tmp/sbwl-wltest.txt key:104 mods:0 3000
+expect_line /tmp/sbwl-wltest.txt key:109 mods:0 3000
+
+# zero-copy: while the host's GPU reads the back buffer nothing is written to it, the frame waits (2 ms retries)
+reading back
+viewport 916 720
+expect_untouched 800
+reading none
+wait_frame 3000
+expect_opaque
+viewport 1344 720
+wait_frame 3000
+expect_opaque
+
+# background apps: no frame callbacks (a frame-paced app stops drawing), their commits do not make sbwl composite
+cpu 3000 sbwl
+launch org.starbite.SpinFrame
+wait_window org.starbite.SpinFrame 1 10000
+wait_frame 3000
+cpu 2000 wltest frame
+cpu 2000 sbwl
+activate org.starbite.WlTest
+wait_window org.starbite.WlTest 1 3000
+sleep 500
+expect_cpu_below 1.5 3000 wltest frame
+expect_cpu_below 5 3000 sbwl
+# an app drawing on its own 16 ms timer, in the background (SBWL_HIDDEN_COMMITS=1: sbwl as before, for comparing)
+launch org.starbite.SpinTimer
+wait_window org.starbite.SpinTimer 1 10000
+wait_frame 3000
+activate org.starbite.WlTest
+wait_window org.starbite.WlTest 1 3000
+sleep 500
+cpu 3000 sbwl
+cpu 3000 wltest timer
+close org.starbite.SpinFrame
+close org.starbite.SpinTimer
+
+# notifications: notifytest (an app_name the catalog does not know: found by its process)
+sh rm -f /tmp/sbwl-notifytest.txt
+launch org.starbite.NotifyTest
+wait_notify 10000 Hello from Linux
+expect_notif app_name notifytest-sender
+expect_notif summary Hello from Linux
+expect_notif body Bold & plain <3
+expect_notif action1 Reply
+expect_notif action2 Later
+expect_notif action3
+expect_notif urgency 2
+expect_notif timeout 0
+expect_notif app org.starbite.NotifyTest
+expect_notif icon org.starbite.NotifyTest
+expect_line /tmp/sbwl-notifytest.txt tz:<+02>-2 3000
+expect_line /tmp/sbwl-notifytest.txt tzoff:7200 1000
+expect_line /tmp/sbwl-notifytest.txt caps:body,body-markup,actions,persistence 1000
+expect_line /tmp/sbwl-notifytest.txt server:Starbite 1000
+wait_notify 3000 Withdrawn
+wait_notif_close 3000 Withdrawn
+expect_line /tmp/sbwl-notifytest.txt closed:2:3 3000
+wait_notify 3000 Tap me
+wait_notify 3000 Swipe me
+# a button: ActionInvoked with its key, then closed (2)
+notif_act 1 Hello from Linux
+expect_line /tmp/sbwl-notifytest.txt action:1:reply 3000
+expect_line /tmp/sbwl-notifytest.txt closed:1:2 3000
+# the tap: ActionInvoked "default", and sbwl raises the app
+activate none
+expect_active none 2000
+notif_act 0 Tap me
+expect_line /tmp/sbwl-notifytest.txt action:3:default 3000
+expect_active org.starbite.NotifyTest 3000
+# swiped away: NotificationClosed (2)
+notif_act none Swipe me
+expect_line /tmp/sbwl-notifytest.txt closed:4:2 3000
+close org.starbite.NotifyTest
+close org.starbite.WlTest

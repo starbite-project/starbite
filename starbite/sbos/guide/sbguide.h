@@ -149,8 +149,22 @@ static const struct sbg_page sbg_shelter[] = {
         "Clear ground, away from overhanging branches, sheltered from wind. Keep water or soil at hand.",
         "Gather everything first: tinder (dry grass, birch bark, fluff), kindling (pencil thin), fuel (wrist thick).",
         "Light the tinder, add kindling gently, then fuel. Fire needs air: do not smother it.",
-        "This phone: Emergency > USB power out + fine steel wool (0000) across a cable's bare ends lights tinder.",
+        "This phone can light tinder: see the next page (Emergency > USB power out and a pencil lead).",
         "! Never leave a fire alone. Put it out with water and stir until cold to the touch.") },
+    { "Fire from the phone", SBG_L(
+        "The USB-C port gives 5 V at most 1.5 A (the charger chip's own limit). A pencil lead across a cut cable's two "
+        "bare wires glows when it takes about 1.5 A: around 3.5 ohm, up to about 7.5 W in a few cm.",
+        "Contacts matter most: wrap each bare wire 3-4 tight turns around the lead (or a metal paper clip pinched on "
+        "it). Wires only touching spark and waste the heat at the contact instead of in the lead.",
+        "Length: if the phone counts 'the chip limited the current' every second, the element conducts too well: "
+        "make it LONGER or thinner. 0.3 mm lead: 2.5 cm, then 2, then 1.5. 0.5 mm: 6 cm, then 5, then 4.",
+        "Best of all: nichrome wire from an old toaster or hair dryer, about 15 cm coiled. Or a few fibres of fine "
+        "steel wool stretched between the wires (never a thick wad). A 0.7 mm lead is too thick to glow well.",
+        "Hold it in the air (not lying on stone: that cools it). Softer leads (2B) conduct better than HB: longer.",
+        "No glow but sparks? Use the sparks: hold char cloth, cotton fluff or shredded tissue right at the spark.",
+        "A copper strand or foil is a short for this phone: the chip cuts it to pulses and it will not glow.",
+        "! Hold only insulated parts. Work over stone or soil. Unplug any charger first. Never short the port itself.",
+        "Emergency > USB power out: 10 s bursts; Extreme fire mode runs while you hold it, up to 2 minutes.") },
     { "Heat and sun", SBG_L(
         "Shade first. Cover the head and neck. Rest in the hot hours, travel at dawn and dusk.",
         "Keep clothes on: they slow sweat loss and sunburn.",
@@ -215,7 +229,7 @@ static const struct sbg_chapter sbg_chapters[] = {
     { "Start here", "Priorities, stay or go, the phone", 0xffff453aU, sbg_first, 3 },
     { "First aid", "CPR, bleeding, burns, cold, heat", 0xffff6b6bU, sbg_aid, 12 },
     { "Water", "How much, finding, making it safe", 0xff5ac8faU, sbg_water, 3 },
-    { "Shelter and fire", "Warmth, shelter, fire, heat", 0xffff9f0aU, sbg_shelter, 4 },
+    { "Shelter and fire", "Warmth, shelter, fire, heat", 0xffff9f0aU, sbg_shelter, 5 },
     { "Signalling", "Be seen, ground signs, sound", 0xffffd60aU, sbg_signal, 4 },
     { "Navigation", "Sun, stars, walking out", 0xff30d158U, sbg_nav, 3 },
     { "Food and weather", "What not to eat, storms", 0xffbf5af2U, sbg_food, 2 },

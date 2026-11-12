@@ -1,0 +1,232 @@
+{
+ "apps": {
+  "aisleriot": {
+   "distro": "1:3.22.35-1",
+   "source": "1:3.22.35-1"
+  },
+  "bat": {
+   "asset": "bat-v0.26.1-aarch64-unknown-linux-gnu.tar.gz",
+   "asset_mb": 3.2,
+   "distro": "0.25.0-2+b2",
+   "release": "0.26.1",
+   "source": "0.25.0-2+b2"
+  },
+  "btop": {
+   "asset": "btop-aarch64-unknown-linux-musl.tar.gz",
+   "asset_mb": 0.9,
+   "distro": "1.3.2-0.1",
+   "release": "1.4.8",
+   "source": "1.4.8"
+  },
+  "calibre": {
+   "asset": "calibre-9.18.0-arm64.txz",
+   "asset_mb": 216.6,
+   "distro": "8.5.0+ds-1+deb13u3",
+   "release": "9.18.0",
+   "source": "8.5.0+ds-1+deb13u3"
+  },
+  "celluloid": {
+   "distro": "0.28-2",
+   "source": "0.28-2"
+  },
+  "drawing": {
+   "distro": "1.0.2-1",
+   "source": "1.0.2-1"
+  },
+  "fd": {
+   "asset": "fd-v10.5.2-aarch64-unknown-linux-gnu.tar.gz",
+   "asset_mb": 1.5,
+   "distro": "10.2.0-1+b5",
+   "release": "10.5.2",
+   "source": "10.2.0-1+b5"
+  },
+  "firefox": {
+   "asset": "firefox-160.0.tar.xz",
+   "asset_mb": 0.0,
+   "distro": "153.7.0esr-1~deb13u1",
+   "release": "160.0"
+  },
+  "foliate": {
+   "distro": "4.~really3.3.0-1",
+   "source": "4.~really3.3.0-1"
+  },
+  "foot": {
+   "distro": "1.21.0-2",
+   "source": "1.21.0-2"
+  },
+  "fzf": {
+   "asset": "fzf-0.75.0-linux_arm64.tar.gz",
+   "asset_mb": 2.0,
+   "distro": "0.60.3-1+b2",
+   "release": "0.75.0",
+   "source": "0.75.0"
+  },
+  "gcompris-qt": {
+   "distro": "25.0.12-1",
+   "source": "25.0.12-1"
+  },
+  "geary": {
+   "distro": "46.0-7",
+   "source": "46.0-7"
+  },
+  "gimp": {
+   "asset": "GIMP-3.2.8-aarch64.AppImage",
+   "asset_mb": 0.0,
+   "distro": "3.0.4-3+deb13u11",
+   "release": "3.2.8",
+   "source": "3.0.4-3+deb13u11"
+  },
+  "gnome-calculator": {
+   "distro": "1:48.1-2+b1",
+   "source": "1:48.1-2+b1"
+  },
+  "gnome-chess": {
+   "distro": "1:48.0-1+b1",
+   "source": "1:48.0-1+b1"
+  },
+  "gnome-maps": {
+   "distro": "48.7-0+deb13u1",
+   "source": "48.7-0+deb13u1"
+  },
+  "gnome-mines": {
+   "distro": "1:48.1-2+b1",
+   "source": "1:48.1-2+b1"
+  },
+  "gnome-sudoku": {
+   "distro": "1:48.1-1",
+   "source": "1:48.1-1"
+  },
+  "gnome-text-editor": {
+   "distro": "48.3-3",
+   "source": "48.3-3"
+  },
+  "helix": {
+   "asset": "helix-25.07.1-aarch64-linux.tar.xz",
+   "asset_mb": 14.9,
+   "distro": "25.01.1-4",
+   "release": "25.07.1",
+   "source": "25.01.1-4"
+  },
+  "inkscape": {
+   "distro": "1.4-6",
+   "source": "1.4-6"
+  },
+  "kdenlive": {
+   "distro": "24.12.3-2+deb13u1"
+  },
+  "keepassxc": {
+   "asset": "KeePassXC-2.8.0-aarch64.AppImage",
+   "asset_mb": 48.9,
+   "distro": "2.7.10+dfsg1-1",
+   "release": "2.8.0",
+   "source": "2.7.10+dfsg1-1"
+  },
+  "lazygit": {
+   "asset": "lazygit_0.66.3_linux_arm64.tar.gz",
+   "asset_mb": 6.3,
+   "distro": "0.50.0+ds1-1+b2",
+   "release": "0.66.3",
+   "source": "0.50.0+ds1-1+b2"
+  },
+  "libreoffice": {
+   "asset": "LibreOffice_26.8.3_Linux_aarch64_deb.tar.gz",
+   "asset_mb": 0.0,
+   "distro": "4:25.2.3-2+deb13u9",
+   "release": "26.8.3"
+  },
+  "lollypop": {
+   "distro": "1.4.41-1",
+   "source": "1.4.41-1"
+  },
+  "loupe": {
+   "distro": "48.1-3",
+   "source": "48.1-3"
+  },
+  "micro": {
+   "asset": "micro-2.0.15-linux-arm64.tar.gz",
+   "asset_mb": 4.5,
+   "distro": "2.0.14-1+b6",
+   "release": "2.0.15",
+   "source": "2.0.15"
+  },
+  "mpv": {
+   "distro": "0.40.0-3+deb13u1",
+   "source": "0.40.0-3+deb13u1"
+  },
+  "nautilus": {
+   "distro": "48.3-2",
+   "source": "48.3-2"
+  },
+  "neovim": {
+   "asset": "nvim-linux-arm64.tar.gz",
+   "asset_mb": 10.8,
+   "distro": "0.10.4-8",
+   "release": "0.12.6",
+   "source": "0.12.6"
+  },
+  "openttd": {
+   "distro": "14.1-1+b2",
+   "source": "14.1-1+b2"
+  },
+  "papers": {
+   "distro": "48.3-1",
+   "source": "48.3-1"
+  },
+  "qalculate-gtk": {
+   "distro": "5.5.1-1",
+   "source": "5.5.1-1"
+  },
+  "ripgrep": {
+   "asset": "ripgrep-15.2.0-aarch64-unknown-linux-gnu.tar.gz",
+   "asset_mb": 1.8,
+   "distro": "14.1.1-1+b4",
+   "release": "15.2.0",
+   "source": "15.2.0"
+  },
+  "stellarium": {
+   "distro": "24.3-1",
+   "source": "24.3-1"
+  },
+  "supertux": {
+   "distro": "0.6.3-3",
+   "source": "0.6.3-3"
+  },
+  "syncthing": {
+   "asset": "syncthing-linux-arm64-v2.1.7.tar.gz",
+   "asset_mb": 12.3,
+   "distro": "1.29.5~ds1-2",
+   "release": "2.1.7"
+  },
+  "thunderbird": {
+   "distro": "1:153.7.0esr-1~deb13u1"
+  },
+  "transmission": {
+   "distro": "4.1.0~beta2+dfsg-3+deb13u2",
+   "source": "4.1.4"
+  },
+  "vlc": {
+   "distro": "3.0.24-0+deb13u1",
+   "source": "3.0.24-0+deb13u1"
+  },
+  "vscodium": {
+   "asset": "VSCodium-linux-arm64-1.143.17232.tar.gz",
+   "asset_mb": 201.2,
+   "release": "1.143.17232"
+  },
+  "xournalpp": {
+   "asset": "xournalpp-1.3.8-aarch64.AppImage",
+   "asset_mb": 37.1,
+   "distro": "1.2.6-1",
+   "release": "1.3.8",
+   "source": "1.2.6-1"
+  },
+  "yt-dlp": {
+   "asset": "yt-dlp_linux_aarch64",
+   "asset_mb": 38.9,
+   "distro": "2025.04.30-1",
+   "release": "2026.10.26",
+   "source": "2025.04.30-1"
+  }
+ },
+ "checked": "2026-11-12 14:11 UTC"
+}

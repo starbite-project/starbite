@@ -134,6 +134,13 @@ extern int tk_glass_lens;          /* 1: static backdrops are bent at the rim (t
 void tk_wall_draw(tk_bmp *b, int emergency, float k);
 /* the backdrop the glass shows: blur 14 pt, saturate TK_GLASS_SAT of src (both half resolution) */
 void tk_glass_backdrop(tk_bmp *dst, const tk_bmp *src);
+/* B6: the same two in steps (Emergency's switch): the wallpaper's rows [y0, y1); the backdrop's quarter (src down
+ * 2x) blurred (part 0) and saturated in place (part 1: returns its mean luma, -1 none; part -1 both), then dst's rows
+ * up from it; the Lb of glass that cannot see its backdrop set (returns the one before) */
+void tk_wall_draw_rows(tk_bmp *b, int emergency, float k, int y0, int y1);
+float tk_glass_backdrop_q(tk_bmp *q, int part);
+void tk_glass_backdrop_up(tk_bmp *dst, const tk_bmp *q, int y0, int y1);
+float tk_glass_amb_set(float v);
 /* bake one glass element into b at (x, y, w, h) with radius r: the drop shadow (outside), and inside the neutral
  * tone (dark / light by the backdrop's luminance), the depth and the thin rim specular; no tint, gloss or outline.
  * dark = .lg.dark (a denser tone under labels). Its backdrop mask (the shape's coverage) goes into mask (same frame
@@ -202,6 +209,7 @@ void tk_layer_prepare(tk_layer *l);                       /* make its half copy 
  * sampled by the GPU in place (the platform maps that range: kernel gpucomp_add_ext). Call it each frame the pointer
  * or the pixels change (it bumps gen); px 0 detaches. Detach before freeing the layer (relayer would free bmp). */
 void tk_layer_external(tk_layer *l, const uint32_t *px, int w, int h, int stride);
+#define TK_HAS_LAYER_EXTERNAL 1                 /* (Track E's shell_linux.inc builds its zero-copy path on it) */
 void tk_layer_glass_shape(tk_layer *l, float x, float y, float w, float h, float r);
 /* V2 (Track A's request): each recorded shape carries a variant, a tint and a press; tk_layer_glass_shape takes them
  * from tk_gstyle (set it around a d_glass call; {0, 0, 0} = regular, untinted, at rest) */
@@ -281,7 +289,11 @@ typedef struct {
     uint32_t gpu_halves;       /* such frames so far */
     uint32_t gpu_idle_flushed; /* v10: layers made ready for the GPU in idle time (not in a moving frame) */
     int gpu_stale;
-    uint32_t gpu_items;        /* the last GPU frame's quads */             /* P4: GPU frames since the CPU last drew everything (its canvases are behind) */
+    uint32_t gpu_items;        /* the last GPU frame's quads */
+    uint64_t us_flush, b_flush;    /* 1.0 (Track A): the last frame's layer flushes for the GPU (cache clean + block
+                                    * map of layers new or changed since the GPU last had them): time and bytes */
+    uint32_t n_flush;
+    uint64_t us_platform;      /* 1.0: the platform's own time in the last GPU frame (live backdrops, the compose's wait) */             /* P4: GPU frames since the CPU last drew everything (its canvases are behind) */
     uint64_t us_gpu;  /* the last frame's half-canvas catch-up (tk_comp_idle) and half copies made in it */  /* the last frame's wait for the free buffer and its catch-up pass */
 } tk_comp;
 int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocated */
@@ -304,12 +316,13 @@ void tk_comp_idle(tk_comp *c);                            /* idle time: the half
 uint64_t tk_comp_bench(tk_comp *c, int kind);      /* the present's kernels vs uibench's loops, us */                         /* idle: make the visible layers' half copies */
 
 /* ---- motion: springs, the velocity tracker, gestures (tk_motion.c) ------------------------------------------ */
-enum { TK_SPR_UNLOCK, TK_SPR_OPEN, TK_SPR_CLOSE, TK_SPR_SHEET, TK_SPR_ROWS, TK_SPR_CC, TK_NSPR };
+enum { TK_SPR_UNLOCK, TK_SPR_OPEN, TK_SPR_CLOSE, TK_SPR_SHEET, TK_SPR_ROWS, TK_SPR_CC, TK_SPR_PRESS, TK_SPR_POP, TK_SPR_MORPH, TK_SPR_FAST,
+       TK_SPR_BANNER, TK_SPR_FAN, TK_SPR_CARD, TK_SPR_GROW, TK_NSPR };
 typedef struct {
     float x, v, to, eps, k, c;
     int live;
 } tk_spring;
-/* the concept's spring(): mass 1, eps = max(1e-3, |to - from| x 0.002), velocity in units per s */
+/* the concept's spring(): mass 1, eps = max(1e-4, |to - from| x 0.0005), velocity in units per s (B4: iOS's constants) */
 void tk_spring_start(tk_spring *s, float from, float to, float v0, int kind);
 /* one rAF tick: dt in s (capped at 0.05), 4 semi-implicit Euler substeps; returns 1 while live, 0 when it rested
  * this tick (x is then exactly to) */

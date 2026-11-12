@@ -32,7 +32,19 @@ struct sbg_os {
      * checked the device (PRESENT, a write only when not RO) and the range. 0, or a negative Linux errno (SBG_E*).
      * Called from sbg_poll: it should take about a millisecond (see cfg.blk_per_poll / blk_poll_ms). */
     int (*blk_io)(uint32_t dev, uint32_t op, uint64_t sector, uint32_t count, void *buf);
+    /* ---- contract v3 (all optional) ---- */
+    /* the wall clock: seconds since 1970 UTC (0 = unknown), *tz_min = the user's UTC offset in minutes */
+    uint32_t (*unix_s)(int32_t *tz_min);
+    /* sbnet (sbshm-net.h): one IP packet the guest sent (called from sbg_poll; pkt is a private copy). The host's NAT
+     * (Track G) answers with sbg_net_send(). */
+    void (*net_rx)(const uint8_t *pkt, unsigned len);
+    /* sbp9 (host/sbg_p9.h): Starbite's files for the guest's 9P2000.L server; NULL = none */
+    const struct sbg_fs *fs;
+    /* sbsnd (host/sbg_snd.h): the speaker / mic for the guest's PCM streams; NULL = none */
+    const struct sbg_snd *snd;
 };
+struct sbg_fs;
+struct sbg_snd;
 /* the Linux errno values sbblk's completions use */
 enum { SBG_EIO = 5, SBG_ENODEV = 19, SBG_EINVAL = 22, SBG_ENOSPC = 28, SBG_EROFS = 30 };
 
@@ -54,7 +66,17 @@ struct sbg_cfg {
     /* sbblk's work per sbg_poll, so the host's tick stays short: at most blk_per_poll requests (0: 8, that is
      * 512 KiB), and no new request once blk_poll_ms have passed in this poll (0: 4 ms; at least one is served) */
     uint32_t blk_per_poll, blk_poll_ms;
+    /* contract v3: the SBSHM_SVC_* the host offers (hdr.version 3 when non-zero; needs v2). A service whose sbg_os
+     * part is missing is left out (NET needs net_rx, P9 fs, SND snd, CLOCK unix_s). */
+    uint32_t services;
+    /* a slow start (cp3 2026-11-12): boot_warn_ms (0: none) after CPU_ON without HELLO, the guest log's last lines go
+     * to the log once and the wait goes on; a HELLO up to boot_timeout_ms is a normal start. At boot_timeout_ms the
+     * host sends MSG_STOP (the guest's sbguest.ko powers off by itself 10 s after a stop request that user space did
+     * not carry out) and waits up to SBG_GIVEUP_STOP_MS for the cluster to be off: then FAILED with the cluster off
+     * (the next start is allowed), otherwise FAILED with it on, as before */
+    uint32_t boot_warn_ms;
 };
+#define SBG_GIVEUP_STOP_MS 20000U
 #define SBG_BLK_PER_POLL 8U
 #define SBG_BLK_POLL_MS  4U
 
@@ -127,4 +149,25 @@ int sbg_viewport(uint32_t rows, uint32_t width);
 int sbg_text(const char *utf8);                     /* commit text (split at characters, 8 bytes a message) */
 int sbg_pkg(uint32_t idx, uint32_t op, uint32_t store_seq);
 
+/* ---- contract v3 (sbshm.h "contract v3"; Track E) -------------------------------------------------------------- */
+enum { SBG_CH_CLIP = 32, SBG_CH_NOTIF = 64 };      /* more sbg_changes() bits */
+/* the guest's clipboard (a Wayland app copied): its mime and up to cap bytes; the length (0: empty / too big) */
+unsigned sbg_clip_get(char mime[40], uint8_t *buf, unsigned cap);
+/* offer Starbite's clipboard to the guest's apps (text: "text/plain;charset=utf-8"); 1 sent, 0 not */
+int sbg_clip_set(const char *mime, const uint8_t *data, unsigned len);
+/* the next notification event: 1 = *n posted (or replaced: same id), 2 = the app withdrew id *n->id, 0 = none */
+int sbg_notif_next(struct sbshm_notif *n);
+int sbg_notif_act(uint32_t id, uint32_t action);    /* 0 = the tap, 1..3 its buttons, SBSHM_NONE = dismissed */
+int sbg_keymod(uint32_t mods);                      /* SBSHM_MOD_* held for the next keys (the shell's key bar) */
+/* zero-copy display (Track A's gpucomp samples the front buffer in place): around each GPU compose that reads the
+ * guest surface: sbg_surf_reading(idx) before (the buffer index it samples), sbg_surf_done() after the GPU finished
+ * reading it. The guest never renders into a buffer being read. */
+void sbg_surf_reading(int idx);
+void sbg_surf_done(void);
+/* sbnet: queue one IP packet to the guest (1 ok, 0 dropped: no link or the ring is full) and the link config */
+int sbg_net_send(const uint8_t *pkt, unsigned len);
+void sbg_net_config(int link, int uplink, const uint8_t guest_ip[4], const uint8_t gw_ip[4], const uint8_t dns_ip[4],
+                    unsigned prefix);
+
+#include "sbg_snd.h"                                /* sbsnd: the mixer's pull / push API (Track I) */
 #endif

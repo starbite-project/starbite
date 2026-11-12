@@ -1,0 +1,44 @@
+#!/bin/sh
+# sbp9-mount: Starbite OS's files at /home/user/Starbite (sbp9: 9P2000.L over the shared region; sbguest.ko's
+# 9p transport "sbshm", starbite/guest/sbshm-p9.h). For sbinit (after sbguest.ko is loaded, before the session):
+#   sbp9-mount            mount (DIR = $SBP9_DIR or /home/user/Starbite)
+#   sbp9-mount -u         unmount
+# /sys/module/sbguest/parameters/p9 says what the host serves: "off" (or no file: an older module / host) = nothing
+# to mount, "ro" = Starbite's files are read-only (mounted -o ro), "rw" = read-write (cache=mmap, so apps can map
+# files writable). One mount at a time (the host serves one 9P session). Messages go to the kernel log.
+# Exit: 0 mounted (or already), 1 the host offers no files, 2 the mount failed. POSIX sh (dash / busybox).
+DIR=${SBP9_DIR:-/home/user/Starbite}
+P=/sys/module/sbguest/parameters/p9
+log() { echo "sbp9-mount: $*" > /dev/kmsg 2>/dev/null || echo "sbp9-mount: $*" >&2; }
+mounted() { awk -v d="$DIR" '$2 == d { f = 1 } END { exit !f }' /proc/mounts; }   # (busybox has no mountpoint)
+
+if [ "${1:-}" = -u ]; then
+    if mounted; then
+        umount "$DIR" || umount -l "$DIR"
+        log "unmounted $DIR"
+    fi
+    exit 0
+fi
+
+state=off
+[ -r "$P" ] && state=$(cat "$P")
+case "$state" in
+ro) opts=ro,cache=none ;;
+rw) opts=rw,cache=mmap ;;
+*)
+    log "the host offers no files (p9 = $state)"
+    exit 1
+    ;;
+esac
+if mounted; then
+    exit 0
+fi
+mkdir -p "$DIR" 2>/dev/null
+# the mount point belongs to the desktop user when there is one (the files show as theirs: the host says uid 1000)
+id user >/dev/null 2>&1 && chown user:user "$DIR" 2>/dev/null
+if mount -t 9p -o "trans=sbshm,version=9p2000.L,msize=131072,noatime,$opts${SBP9_OPTS:+,$SBP9_OPTS}" starbite "$DIR"; then
+    log "Starbite's files on $DIR ($state)"
+    exit 0
+fi
+log "the mount of $DIR failed"
+exit 2

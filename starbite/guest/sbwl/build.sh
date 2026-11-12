@@ -5,7 +5,9 @@
 #     limactl shell starbite -- /Users/dev/project-starbite/starbite/guest/sbwl/build.sh [OUT]
 #   - Debian trixie arm64 (wlroots 0.18: libwlroots-0.18-dev, libcairo2-dev, librsvg2-dev): the desktop root,
 #     built inside the trixie chroot (trixie-chroot.sh build).
-# Also builds popuptest (the L2 popup check's client) and hostsim (the user-space host stand-in, needs cairo).
+# Also builds popuptest (the L2 popup check's client), hostsim (the user-space host stand-in; PNG dumps with cairo),
+# wltest (a plain Wayland client: keys, clipboard, spinning), and with GIO (libglib2.0-dev) sbnotify
+# (../notify/sbnotify.c: org.freedesktop.Notifications -> sbwl, contract v3) and notifytest (its hostsim client).
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 OUT=${1:-/mnt/build/sbguest/sbwl}
@@ -29,12 +31,23 @@ wayland-scanner client-header "$P/stable/xdg-shell/xdg-shell.xml" "$OUT/xdg-shel
 wayland-scanner private-code "$P/stable/xdg-shell/xdg-shell.xml" "$OUT/xdg-shell-protocol.c"
 gcc -O2 -Wall -Wextra -I"$OUT" "$here/popuptest.c" "$OUT/xdg-shell-protocol.c" -o "$OUT/popuptest" \
     $(pkg-config --cflags --libs wayland-client)
-extra=""
+gcc -O2 -Wall -Wextra -I"$OUT" "$here/wltest.c" "$OUT/xdg-shell-protocol.c" -o "$OUT/sbwl-wltest" \
+    $(pkg-config --cflags --libs wayland-client)
+extra=", $OUT/sbwl-wltest"
+if pkg-config --exists gio-2.0 gio-unix-2.0; then
+    # shellcheck disable=SC2046
+    gcc -O2 -Wall -Wextra "$here/../notify/sbnotify.c" -o "$OUT/sbnotify" $(pkg-config --cflags --libs gio-2.0 gio-unix-2.0)
+    # shellcheck disable=SC2046
+    gcc -O2 -Wall -Wextra "$here/notifytest.c" -o "$OUT/sbwl-notifytest" $(pkg-config --cflags --libs gio-2.0)
+    extra="$extra, $OUT/sbnotify, $OUT/sbwl-notifytest"
+fi
 if pkg-config --exists cairo; then
     # shellcheck disable=SC2046
     gcc -O2 -Wall -Wextra -Wno-format-truncation "$here/hostsim.c" -o "$OUT/hostsim" $(pkg-config --cflags --libs cairo)
-    extra=", $OUT/hostsim"
+else
+    gcc -O2 -Wall -Wextra -Wno-format-truncation -DHOSTSIM_NO_PNG "$here/hostsim.c" -o "$OUT/hostsim"
 fi
+extra="$extra, $OUT/hostsim"
 for g in gtk+-3.0:gtk3 gtk4:gtk4; do                 # hostsim's GTK test apps, where GTK is there
     if pkg-config --exists "${g%%:*}"; then
         # shellcheck disable=SC2046

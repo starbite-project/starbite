@@ -17,6 +17,13 @@ static int st;                              /* 0 not tried, 1 granted, -1 none *
 static struct store_ent ent;
 static unsigned med;                        /* SB_MED_UFS or SB_MED_SD: the medium the grant is on */
 static uint8_t *back;                       /* read-back buffer */
+static int lent;                            /* Software Update (update.c) took the fence's one grant: take it back first */
+
+/* update.c: the fence's grant is another entry's now (a window of an update slot) */
+void hw_slot_lend(void)
+{
+    lent = 1;
+}
 
 static int find(void)
 {
@@ -61,6 +68,14 @@ int hw_slot_write(int half, const uint8_t *src, uint32_t n)
     if (st <= 0 || half < 0 || half > 1 || !n || n > STATE_HALF)
         return 0;
     uint64_t blocks = (n + 4095U) / 4096U, lba = ent.lba + (uint64_t)half * HALF_BLOCKS;
+    if (lent) {
+        struct store_ent e;
+        if (!store_volatile_grant(SLOT_NAME, 2U * STATE_HALF, &e) || e.lba != ent.lba) {
+            sb_log("slot: the state entry's grant did not come back after the update's writes");
+            return 0;
+        }
+        lent = 0;
+    }
     int r = sb_write_volatile(med, lba, blocks, src);
     if (r == SB_W_DRYRUN)
         return -1;                          /* logged by the fence; nothing written */

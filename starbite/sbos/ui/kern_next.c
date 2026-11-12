@@ -25,6 +25,21 @@
 #include "shub.h"
 #include "store.h"
 #include "../guide/sbguide.h"
+#include "tzdb.h"                       /* Track A: time zones (kern/tzdb.c) */
+#include "bt.h"                         /* Track A: drivers for the shell (the end of this file) */
+#include "cam.h"
+#include "shub_more.h"
+#include "bathealth.h"
+#include "haptic.h"
+#include "nledpol.h"
+static void drv_timer(unsigned id);             /* Track A: drivers for the shell (the end of this file) */
+static void drv_screen(int on);
+static void drv_after_bake(void);
+static int drv_touch_dark(void);
+#define KT_DRV_BT 30                            /* KT_UI ids: Bluetooth's steps, the camera's poll, Auto-Brightness, */
+#define KT_DRV_CAM 31                           /* the in-call proximity */
+#define KT_DRV_AUTO 32
+#define KT_DRV_PROX 33
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
 void tk_heap_init(void *mem, uint64_t size);
@@ -151,6 +166,7 @@ extern const uint8_t sbtk_pack_start[], sbtk_pack_end[];
 /* ---- state ------------------------------------------------------------------------------------------------- */
 static tk_comp comp;
 static int ready, baking, need_full, ticking, boosted;
+static uint64_t bd_us_frame;                /* (the frame log reads it before its definition below: a tentative one here) */
 static uint64_t last_tick, boot_t0;
 /* the frame statistics of the current gesture (logged per film in the self test, per gesture otherwise) */
 static struct { uint32_t n, nhalf, over16, maxus, nboost, nwait; uint64_t sumus, sumwait; uint32_t hist[64]; uint8_t ms[120];
@@ -169,12 +185,21 @@ static void log_mb(const char *what, uint64_t v)
 
 static int gpu_started;
 static uint32_t gpu_clock_steps, gpu_clock_told;
+/* Track A, 1.0 (the user: "normal Starbite should have animations and be fast, unlike Emergency mode"): the top
+ * clocks hold 1.5 s past the last motion frame in normal mode, 0.4 s (as before) when the shell says it is in a
+ * conservative mode (Emergency, Survival, Extreme saving: sh_perf_mode) */
+static int perf_conservative, perf_low;     /* perf_low: the user's Low Power Mode (pref power.low) */
+static uint32_t perf_tail_ms(void) { return perf_conservative || perf_low ? 400U : 1500U; }
 static void boost(int on)
 {
+    /* Track D: Extreme power saving and Last 2 % (surv_saver(), set by the Emergency switch, the 3 % trigger or a
+     * remembered setting, with or without the shell) keep the A55 at its 455 MHz step: no boost, and the clock-down
+     * goes to 455 MHz, not 1053 MHz (it would undo services.c's power_last2_clock) */
+    if (on && surv_saver()) on = 0;
     if (on == boosted) return;
     boosted = on;
-    if (!hw_dvfs(DVFS_A55, on ? 1794000U : 1053000U))
-        sb_log(on ? "next: the A55 did not take 1794 MHz" : "next: the A55 did not go back to 1053 MHz");
+    if (!hw_dvfs(DVFS_A55, on ? 1794000U : surv_saver() ? 455000U : 1053000U))
+        sb_log(on ? "next: the A55 did not take 1794 MHz" : "next: the A55 did not go back down (ACPM)");
     /* P4 v10: the GPU at 572 MHz while frames come, 260 MHz (the vendor table's lowest step) when nothing moves */
     if (gpu_started && comp.gpu) {
         if (hw_dvfs(DVFS_GPU, on ? 572000U : 260000U)) gpu_clock_steps++;
@@ -295,7 +320,7 @@ int sh_wifi_power(int on)
     /* Track A: the user (or the shell's kept cc.wifi) wants Wi-Fi on while the boot's time check holds it: it stays
      * on (else the check's end would switch it off under them) */
     if (on && wifi_time_only()) wifi_time_only_end("the user wants Wi-Fi on: it stays on");
-    return wifi_power(on);
+    return wifi_user_power(on);                                  /* Track H: the switch is remembered */
 }
 const char *sh_wifi_why(void)
 {
@@ -390,7 +415,7 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
-    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3v");     /* P2y: the apps' live values */
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P4a");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);
         sh_alarm(on, ah, am);
@@ -566,6 +591,17 @@ static void stats_add(void)
         ub_dec(&u, hw_a55_khz() / 1000);
         ub_s(&u, ")");
         if (comp.gpu) {                          /* P4: the GPU's own time in it, and the frames it gave back */
+            ub_s(&u, " flush ");                 /* 1.0: layers made ready for the GPU in this frame: n, us, KiB */
+            ub_dec(&u, comp.n_flush);
+            ub_s(&u, "/");
+            ub_dec(&u, comp.us_flush);
+            ub_s(&u, "us/");
+            ub_dec(&u, comp.b_flush >> 10);
+            ub_s(&u, "KiB platform ");
+            ub_dec(&u, comp.us_platform);
+            ub_s(&u, " us (backdrops ");
+            ub_dec(&u, bd_us_frame);
+            ub_s(&u, ")");
             ub_s(&u, " gpu ");
             ub_dec(&u, comp.us_gpu);
             ub_s(&u, " us (fallbacks ");
@@ -695,6 +731,21 @@ void sh_haptic(void)
     (void)vib_pulse(10);
 #endif
 }
+/* (B3's clipboard: sh_clip_set / sh_clip_get are Track E's, in shell_linux.inc) */
+/* B4: the feedback kinds (impact light / medium / heavy / soft / rigid, selection) as pulse lengths (the motor's PWM
+ * duty is fixed: a length stands for the strength); success / warning / error as short patterns (vib_buzz) */
+void sh_haptic_k(int kind)
+{
+#ifndef SBOS_SELFTEST_NEXT
+    static const unsigned MS[6] = { 8, 12, 18, 9, 6, 4 };
+    if (kind == SH_HAP_SUCCESS) (void)vib_buzz(2, 12, 60);
+    else if (kind == SH_HAP_WARNING) (void)vib_buzz(2, 12, 80);
+    else if (kind == SH_HAP_ERROR) (void)vib_buzz(3, 10, 50);
+    else (void)vib_pulse(MS[kind >= 0 && kind < 6 ? kind : 0]);
+#else
+    (void)kind;
+#endif
+}
 /* P3i: the shell's time outside the compositor (a tap that builds a page runs before the next frame: the pause
  * the user sees is this, not the frame's own time); logged when over 8 ms, counted per gesture */
 static void shell_time(const char *what, uint64_t t0)
@@ -765,7 +816,7 @@ static void frame(void)
         sh_idle();
         if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);   /* the rest of the idle work, a turn at a time */
         clock_again();                                               /* P2z: the Clock's next digit */
-        kt_set(KT_UI, 21, sb_ms(), 400, 0);         /* back to the screen-on clock unless something moves again */
+        kt_set(KT_UI, 21, sb_ms(), perf_tail_ms(), 0);   /* back to the screen-on clock unless something moves again (1.0: 1.5 s in normal mode) */
         kt_set(KT_UI, 23, sb_ms(), 5000, 0);        /* and the band workers off after 5 s */
 #ifndef SBOS_SELFTEST_NEXT
         stats_log("gesture");
@@ -803,6 +854,7 @@ static int next_sleep(int key)
 static void next_screen(int on)
 {
     if (!ready) return;
+    drv_screen(on);                                  /* Track A: the LED's seen events, Auto-Brightness, proximity */
     if (!on) {
         kt_cancel(KT_UI, 20);
         ticking = 0;
@@ -852,6 +904,8 @@ static int same_item(const tk_gpu_item *a, const tk_gpu_item *b)
         same = a->lq[k] == b->lq[k];
     return same;
 }
+static void boot_notes(void);                    /* Track A, 1.0 (the end of this file) */
+static int next_power_held(void);
 static tk_gpu_item prevq[TK_GPU_MAX], cacheq[TK_GPU_MAX], gx[TK_GPU_MAX];
 static int prev_n, cache_n, stable_p = -1, stable_k;
 static uint32_t wall_made, cache_made;
@@ -932,10 +986,21 @@ static const tk_gpu_item *live_backdrops(const tk_gpu_item *it, int n, const tk_
     return lq;
 }
 
+static int next_gpu_(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us);
+static uint64_t bd_us_frame;               /* 1.0: this frame's live backdrops (the frame log) */
 static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us)
 {
+    uint64_t t = sb_us();
+    int r = next_gpu_(ctx, dst, it, n, dmg, ndmg, us);
+    comp.us_platform = sb_us() - t;
+    return r;
+}
+static int next_gpu_(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us)
+{
     (void)ctx;
+    uint64_t tb = sb_us();
     if (n > 0 && n <= TK_GPU_MAX) it = live_backdrops(it, n, &dmg, &ndmg);
+    bd_us_frame = sb_us() - tb;
     const tk_gpu_item *use = it;
     int un = n;
     uint32_t *cache = (uint32_t *)gpucomp_pool();
@@ -997,6 +1062,7 @@ static void next_gpu_clean(void *ctx, const void *p, uint64_t n)
 }
 
 /* ---- the kernel's UI entry points in this image ------------------------------------------------------------- */
+static void next_save(void);                         /* Track A lifecycle (below) */
 void next_kinit(void)
 {
     boot_t0 = sb_ms();
@@ -1016,8 +1082,10 @@ void next_kinit(void)
         sb_log(a.b);
     }
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
+    kui_power_hook = next_power_held;            /* Track A, 1.0: Power held: the shell's power sheet */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
     kui_sleep_hook = next_sleep;
+    kui_save_hook = next_save;                   /* Track A lifecycle: the pages' on_save before a restart / switch-off */
     input_fast = 1;                              /* P3k: touch read every 16 ms while the screen is on (no 50 ms first touch) */
     if (!tk_pack_open(sbtk_pack_start, (uint32_t)(sbtk_pack_end - sbtk_pack_start))) {
         sb_log("next: the sbtk pack is missing or bad: the regular UI runs");
@@ -1075,6 +1143,9 @@ static void bake_step(void)
     status_now();
     sh_bright_now(panel_bright_level);
     sh_restore();                                    /* Track A: what the shell keeps (settings_restore ran before) */
+    boot_notes();                                    /* Track A, 1.0: a safe start, or the last start's crash */
+    perf_low = sh_pref_int("power.low", 0) == 1;     /* Track A, 1.0: Low Power Mode kept */
+    drv_after_bake();                                /* Track A: the haptic level, Auto-Brightness, the LED policy */
     ready = need_full = 1;
     boost(0);
     kt_set(KT_UI, 23, sb_ms(), 5000, 0);            /* the workers off after 5 s unless a finger comes */
@@ -1168,6 +1239,12 @@ void next_kevent(const void *evp)
     const struct kin *e = evp;
     int ph = e->type == KIN_PRESS ? 0 : e->type == KIN_MOVE ? 1 : e->type == KIN_RELEASE ? 2 : -1;
     if (ph < 0) return;
+    static int dark_gesture;                         /* Track A: a touch that began with the panel dark at the ear */
+    if (ph == 0) dark_gesture = drv_touch_dark();
+    if (dark_gesture) {
+        if (ph == 2) dark_gesture = 0;
+        return;                                      /* the cheek: dropped, press to release */
+    }
     uint64_t st0 = tk_us();
     sh_touch(ph, e->x / TK_PT, e->y / TK_PT, (float)sb_ms());
     shell_time(ph == 0 ? "touch down" : ph == 1 ? "touch move" : "touch up", st0);
@@ -1205,6 +1282,8 @@ void next_ktimer(unsigned id)
         if (!ticking && !sh_moving()) workers_stop();
         return;
     }
+    if (ready && id == 26) { (void)kupdate_after_start(); return; }   /* Track A update: 10 s after the home screen */
+    if (id >= KT_DRV_BT && id <= KT_DRV_PROX) { drv_timer(id); return; }   /* Track A: drivers for the shell */
     ui_ktimer(id);
 }
 
@@ -1303,6 +1382,132 @@ void sh_torch(int lit)
     int r = torch_set(lit);
     if (r < 0) sb_log("next: torch: the LED did not answer");
 #endif
+}
+
+/* ---- Track A: passcode ----
+ * shell.h's sh_pass_* and sh_autolock* (sbos-core-api.md 3) on kern/passcode.c: the salted, iterated SHA-256 and the
+ * back-off, kept in the state slot's "sbos.pass" record (settings.c; written about 1 s after a change, so a wrong try
+ * is on the storage before anyone can restart around it). The digits go into passcode.c and nowhere else: nothing
+ * here logs them. The self test (SBOS_SELFTEST_NEXT) runs without the passcode (its films swipe to home and write
+ * nothing): sh_pass_on is 0 there and every setter is a logged dry run. */
+#ifndef SBOS_SELFTEST_NEXT
+static int64_t pass_utc(void)
+{
+    struct sbos_time t;
+    return clock_now(&t) ? (int64_t)t.utc : 0;
+}
+/* a new passcode's salt: the counter's jitter over memory walks (the arrival of the user's taps already makes the
+ * start unpredictable), the clocks, hashed; uniqueness is what a salt needs */
+static void pass_salt(uint8_t salt[PASS_SALT])
+{
+    static volatile uint8_t walk[4096];
+    static uint32_t made;
+    uint8_t pool[256 + 32], h[32];
+    for (unsigned i = 0; i < 256; i++) {
+        uint64_t a = sb_ticks();
+        for (unsigned k = 0; k < 24; k++) walk[(i * 131u + k * 523u) & 4095u] += (uint8_t)(a >> (k & 7));
+        pool[i] = (uint8_t)(sb_ticks() - a) ^ (uint8_t)a;
+    }
+    uint64_t t = sb_ticks(), ms = sb_ms();
+    int64_t u = pass_utc();
+    made++;
+    tk_memcpy(pool + 256, &t, 8);
+    tk_memcpy(pool + 264, &ms, 8);
+    tk_memcpy(pool + 272, &u, 8);
+    tk_memcpy(pool + 280, &made, 4);
+    tk_memset(pool + 284, 0, 4);
+    pass_sha256(pool, sizeof pool, h);
+    tk_memcpy(salt, h, PASS_SALT);
+    tk_memset(h, 0, sizeof h);
+}
+#endif
+int sh_pass_on(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    return 0;
+#else
+    return pass_len() > 0;
+#endif
+}
+int sh_pass_len(void) { return pass_len(); }
+int sh_pass_wait(void) { return (int)pass_wait(sb_ms()); }
+int sh_pass_fails(void) { return pass_fails(); }
+int sh_pass_check(const char *digits)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)digits;
+    sb_log("next: passcode: a check (a dry run: the self test has none)");
+    return 1;
+#else
+    int f0 = pass_fails();
+    uint64_t t0 = sb_ms();
+    int r = pass_check(digits, t0, pass_utc());
+    if (r == 1) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: passcode: right (the hash took ");
+        ub_dec(&u, sb_ms() - t0);
+        ub_s(&u, " ms)");
+        sb_log(u.b);
+    } else if (r == 0) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: passcode: wrong; tries in a row ");
+        ub_dec(&u, (uint64_t)pass_fails());
+        if (pass_wait(sb_ms())) { ub_s(&u, ", the next in "); ub_dec(&u, pass_wait(sb_ms())); ub_s(&u, " s"); }
+        sb_log(u.b);
+    }
+    if (pass_fails() != f0) settings_changed_soon(1000);     /* the tries on the storage within ~1 s */
+    return r;
+#endif
+}
+int sh_pass_set(const char *old, const char *nw)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)old; (void)nw;
+    sb_log("next: passcode: would be set / changed / removed (a dry run: the self test)");
+    return -1;
+#else
+    uint8_t salt[PASS_SALT];
+    int had = pass_len(), f0 = pass_fails();
+    pass_salt(salt);
+    int r = pass_set(old, nw, salt, sb_ms(), pass_utc());
+    tk_memset(salt, 0, sizeof salt);
+    if (!r) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, !pass_len() ? "next: passcode: removed" : had ? "next: passcode: changed (" : "next: passcode: set (");
+        if (pass_len()) { ub_dec(&u, (uint64_t)pass_len()); ub_s(&u, " digits)"); }
+        sb_log(u.b);
+    } else
+        sb_log("next: passcode: not changed (the old code was wrong, a wait runs, or the new one is not 4 or 6 digits)");
+    if (!r || pass_fails() != f0) settings_changed_soon(1000);
+    if (!settings_persistent()) sb_log("next: passcode: no state slot: it lasts until a restart");
+    return r;
+#endif
+}
+/* Auto-Lock: the kernel's screen-off time (services.c; kept in the settings record); 0 = Never */
+int sh_autolock(void) { return (int)K.screen_off_s; }
+void sh_autolock_set(int s)
+{
+    if (s != 0 && (s < 10 || s > 600)) return;
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: Auto-Lock: would change (a dry run: the self test)");
+#else
+    K.screen_off_s = (uint32_t)s;
+    power_input();                                   /* the timer from now (none for Never) */
+    settings_changed();
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: Auto-Lock: ");
+    if (s) { ub_dec(&u, (uint64_t)s); ub_s(&u, " s"); } else ub_s(&u, "Never");
+    sb_log(u.b);
+#endif
+}
+/* Track A lifecycle: the kernel's pre-restart / switch-off path (services.c's kui_save_hook): every page's on_save */
+static void next_save(void)
+{
+    if (ready) sh_save_all();
 }
 
 /* ---- Track A: prefs and blobs ---- (sbos-core-api.md 1, 2) on kern/prefs.c: the store lives in RAM and goes into
@@ -1574,6 +1779,90 @@ long long sh_utc(void)
     return clock_now(&t) ? (long long)t.utc : 0;
 }
 
+/* ---- Track A: time and alarms ---- */
+/* The zone and 12 / 24-hour (sbos-core-api.md 4): the kernel's clock_now applies the zone to every local time it
+ * hands out (sh_status, the alarms' minute, notifications, Sun); sh_utc stays UTC. Both are kept with the settings
+ * (settings.c ext[3]). The alarms (5): kern/alarm.c's four, the list and labels in its record "sbos.alarm"; ringing
+ * stays the kernel's, and the lock's next alarm goes out through sh_alarm. The self test writes nothing: the zone and
+ * 12 / 24-hour change in RAM only, and alarms are refused (they would buzz). */
+static void ta_keep(const char *what)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_logf("next: the self test keeps this in RAM only (no settings write): ", what);
+#else
+    (void)what;
+    settings_changed();
+#endif
+}
+int sh_tz_count(void) { return tzdb_n; }
+const char *sh_tz_name(int i, const char **city)
+{
+    if (i < 0 || i >= tzdb_n) { if (city) *city = ""; return ""; }
+    if (city) *city = tzdb[i].city;
+    return tzdb[i].name;
+}
+int sh_tz_offset_min(int i)
+{
+    struct sbos_time t;
+    if (i < 0 || i >= tzdb_n) return 0;
+    return clock_now(&t) && t.utc ? tzdb_offset(i, t.utc) : tzdb[i].off_min;
+}
+int sh_tz(void) { return clock_zone(); }
+void sh_tz_set(int i)
+{
+    if (i < 0 || i >= tzdb_n || i == clock_zone()) return;
+    clock_zone_set(i);
+    sb_logf("next: time zone ", tzdb[i].name);
+    ta_keep("the time zone");
+    if (ready) status_now();                         /* the local time, date and alarm's day again */
+}
+int sh_clock24(void) { return clock_24h; }
+void sh_clock24_set(int on)
+{
+    if (!!on == clock_24h) return;
+    clock_24h = !!on;
+    sb_log(on ? "next: 24-hour time" : "next: 12-hour time");
+    ta_keep("12 / 24-hour time");
+}
+int sh_alarm_count(void) { return alarm_count(); }
+int sh_alarm_get(int i, int *hm, int *days, int *on, char *label, int cap)
+{
+    return alarm_get(i, hm, days, on, label, cap) ? -1 : 0;
+}
+#ifndef SBOS_SELFTEST_NEXT
+static void ta_alarm_push(void)
+{
+    int h = 0, m = 0, on = alarm_first(&h, &m);
+    sh_alarm(on, h, m);
+}
+#endif
+int sh_alarm_put(int i, int hm, int days, int on, const char *label)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i; (void)hm; (void)days; (void)on; (void)label;
+    sb_log("next: the self test sets no alarm (dry run)");
+    return -1;
+#else
+    if (alarm_put(i, hm, days, on, label)) return -1;
+    settings_changed();
+    ta_alarm_push();
+    return 0;
+#endif
+}
+int sh_alarm_del(int i)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i;
+    sb_log("next: the self test deletes no alarm (dry run)");
+    return -1;
+#else
+    if (alarm_del(i)) return -1;
+    settings_changed();
+    ta_alarm_push();
+    return 0;
+#endif
+}
+
 /* ---- helper I: calls and SMS (shell_comms.inc) on the modem session's kmodem_call_* / kmodem_sms_* (kern.h defines
  * KMODEM_CALLS once that commit is in; without it every call refuses, "not in this version"). The shell asks only at
  * the end of the user's own action (the call button's hold, Answer, Send's tap); the self test's build refuses every
@@ -1615,9 +1904,13 @@ int sh_answer(char *why)
     int r = kmodem_call_answer();
     return r < 0 ? call_refused(r, why) : 0;
 }
+static int call_declined;                            /* Track A: the LED: a declined call is not a missed one */
 int sh_hangup(void)
 {
     sb_log("next: comms: hang up (on the screen)");
+    struct kcall c;
+    kmodem_call(&c);
+    if (c.state == KCALL_INCOMING) call_declined = 1;
     return kmodem_call_hangup();
 }
 int sh_route(int audio, char *why)
@@ -1653,11 +1946,54 @@ int sh_sms_get(int i, sh_sms_t *m)
     struct ksms k;
     if (kmodem_sms_get(i, &k) < 0) return -1;
     m->id = k.id; m->incoming = k.incoming; m->state = k.state; m->utc = k.utc;
+#ifdef KMODEM_SMS_STORE
+    m->unread = k.unread;                            /* states 4 delivered / 5 not delivered: SH_SMS_* */
+#else
+    m->unread = -1;
+#endif
     sb_strcpy(m->number, sizeof(m->number), k.number);
     sb_strcpy(m->text, sizeof(m->text), k.text);
     sb_strcpy(m->why, sizeof(m->why), k.why);
     return 0;
 }
+/* B5: the Clock's alarms (kern/alarm.c): set by the user's own Save or switch; the self test never sets one */
+int sh_alarm_set(int i, int h, int m, int days, int on)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i; (void)h; (void)m; (void)days; (void)on;
+    return -1;
+#else
+    return alarm_set(i, h, m, days, on);
+#endif
+}
+/* B5: the store (the modem session's KMODEM_SMS_STORE): read marks, deletes at the user's own tap; refused in the
+ * self test (it never changes what is stored) */
+#ifdef KMODEM_SMS_STORE
+_Static_assert((int)KSMS_RECEIVED == (int)SH_SMS_RECEIVED && (int)KSMS_SENDING == (int)SH_SMS_SENDING &&
+               (int)KSMS_SENT == (int)SH_SMS_SENT && (int)KSMS_FAILED == (int)SH_SMS_FAILED &&
+               (int)KSMS_DELIVERED == (int)SH_SMS_DELIVERED && (int)KSMS_NOT_DELIVERED == (int)SH_SMS_UNDELIVERED,
+               "P3x: shell.h's SH_SMS_* are kern.h's KSMS_* (Track G 1c2e473)");
+_Static_assert(KSMS_MAX == SH_SMS_MAX, "P3x: the shell lists what the kernel's store keeps");
+int sh_sms_read(const char *number) { return kmodem_sms_read(number); }
+int sh_sms_delete(int id, char *why)
+{
+    COMMS_DRY("SMS delete", why);
+    int r = kmodem_sms_delete(id);
+    if (r < 0) comms_why(why, "The message couldn't be deleted");
+    return r < 0 ? r : 0;
+}
+int sh_sms_delete_thread(const char *number, char *why)
+{
+    COMMS_DRY("SMS delete", why);
+    int r = kmodem_sms_delete_thread(number);
+    if (r < 0) comms_why(why, "The conversation couldn't be deleted");
+    return r < 0 ? r : 0;
+}
+#else
+int sh_sms_read(const char *number) { (void)number; return 0; }
+int sh_sms_delete(int id, char *why) { (void)id; comms_why(why, "Not in this version"); return -1; }
+int sh_sms_delete_thread(const char *number, char *why) { (void)number; comms_why(why, "Not in this version"); return -1; }
+#endif
 /* the call's state and the inbox's generation to the shell when they change (from the draw hook: never inside a
  * frame); 1 if anything was pushed. An incoming call wakes the screen (the kernel notifies as well). */
 static int comms_now(void)
@@ -1669,6 +2005,10 @@ static int comms_now(void)
     struct kcall c;
     kmodem_call(&c);
     if (!pushed || memcmp(&c, &last, sizeof(c))) {
+        if (pushed && last.state == KCALL_INCOMING && c.state != KCALL_INCOMING && c.state != KCALL_ACTIVE &&
+            c.state != KCALL_HELD && !call_declined)
+            nledpol_event(NLEDPOL_MISSED);           /* Track A: the LED: it rang and was not answered */
+        if (c.state == KCALL_INCOMING && last.state != KCALL_INCOMING) call_declined = 0;
         last = c;
         pushed = 1;
         sh_call_t s;
@@ -1683,7 +2023,16 @@ static int comms_now(void)
         ch = 1;
     }
     uint32_t g = kmodem_sms_gen();
-    if (g != gen) { gen = g; sh_sms_changed(g); ch = 1; }
+    static int unread = -1;                          /* Track A: the LED: a new unread message (the first look, at */
+    if (g != gen || unread < 0) {                    /* the home screen: the restored store, only counts) */
+        if (g != gen) { gen = g; sh_sms_changed(g); ch = 1; }
+        static struct ksms m;
+        int n = 0;
+        for (int i = 0; i < kmodem_sms_count(); i++)
+            if (kmodem_sms_get(i, &m) >= 0 && m.incoming && m.unread) n++;
+        if (unread >= 0 && n > unread) nledpol_event(NLEDPOL_MESSAGE);
+        unread = n;
+    }
     return ch;
 }
 #else
@@ -1698,6 +2047,9 @@ int sh_dtmf(char d) { (void)d; COMMS_DRY("key tone", (char *)0); return -1; }
 int sh_sms_send(const char *number, const char *utf8, char *why) { (void)number; (void)utf8; COMMS_DRY("SMS send", why); COMMS_NONE(why); }
 int sh_sms_count(void) { return 0; }
 int sh_sms_get(int i, sh_sms_t *m) { (void)i; (void)m; return -1; }
+int sh_sms_read(const char *number) { (void)number; return 0; }
+int sh_sms_delete(int id, char *why) { (void)id; comms_why(why, "Not in this version"); return -1; }
+int sh_sms_delete_thread(const char *number, char *why) { (void)number; comms_why(why, "Not in this version"); return -1; }
 static int comms_now(void) { return 0; }
 #endif
 
@@ -1707,12 +2059,16 @@ typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
 static const char *const FILM_NAME[11] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "sleep" };
 /* tools/films.txt's scripts (pt, ms) */
 static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 1300 } };
-static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 354, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 195, 354, 0, 0, 80 },
+/* B10: the vendor cards again (B4's list from y 320: Apple 320, Microsoft 413, Google 491, Linux 584, Starbite 677):
+ * Apple opens (its head 36 lower, "Show less" above it at x >= 285), "Show less" folds it, the list scrolls to its
+ * end, Starbite opens (and scrolls into view), its first row (Starbite OS, "You are in Starbite OS"). The focus film:
+ * Microsoft opens, its Windows 11 row (525..593) opens the focus sheet, the slide starts it */
+static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 354, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 330, 334, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 900 }, { 2, 200, 650, 200, 380, 250 }, { 0, 0, 0, 0, 0, 1200 }, { 1, 195, 578, 0, 0, 80 },
-                                { 0, 0, 0, 0, 0, 1800 } };
-static const step S_FOCUS[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 444, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 195, 506, 0, 0, 80 },
+                                { 0, 0, 0, 0, 0, 1800 }, { 1, 195, 464, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };
+static const step S_FOCUS[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 444, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 195, 559, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 1000 }, { 2, 65, 743, 345, 743, 550 }, { 0, 0, 0, 0, 0, 2600 } };
-static const step S_HOLDS[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 72, 720, 0, 0, 650 }, { 0, 0, 0, 0, 0, 700 }, { 3, 318, 720, 0, 0, 950 },
+static const step S_HOLDS[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 71, 727, 0, 0, 650 }, { 0, 0, 0, 0, 0, 700 }, { 3, 319, 727, 0, 0, 950 },
                                 { 0, 0, 0, 0, 0, 900 } };
 static const step S_PAGES[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 },
                                 { 2, 320, 450, 60, 450, 200 }, { 0, 0, 0, 0, 0, 900 }, { 2, 60, 450, 330, 460, 220 }, { 0, 0, 0, 0, 0, 1200 } };
@@ -1729,11 +2085,12 @@ static const step S_PHONE[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330,
 static const step S_MSGS[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 152, 736, 0, 0, 80 },
                                { 0, 0, 0, 0, 0, 1000 }, { 1, 195, 204, 0, 0, 80 }, { 0, 0, 0, 0, 0, 800 }, { 1, 50, 63, 0, 0, 80 },
                                { 0, 0, 0, 0, 0, 600 }, { 2, 195, 795, 200, 450, 260 }, { 0, 0, 0, 0, 0, 1200 } };
-static const step S_EMERG[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 318, 720, 0, 0, 950 }, { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 795, 195, 330, 220 },
+static const step S_EMERG[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 319, 727, 0, 0, 950 }, { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 795, 195, 330, 220 },
                                 { 0, 0, 0, 0, 0, 900 }, { 2, 320, 450, 60, 450, 200 }, { 0, 0, 0, 0, 0, 900 },
                                 { 5, 0, 0, 0, 0, 20 }, { 0, 0, 0, 0, 0, 900 }, { 5, 0, 0, 0, 0, 20 },   /* helper D: the Power key relocks */
                                 { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 600, 195, 250, 300 }, { 0, 0, 0, 0, 0, 1200 },
-                                { 1, 195, 624, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };   /* survival-next: the list scrolls to Exit */
+                                { 1, 195, 624, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 },        /* survival-next: the list scrolls to Exit */
+                                { 1, 265, 452, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };   /* helper B2: the alert's Exit (films.txt's emergency) */
 /* P2r: the Power key (kind 5, the kernel's own power_key_short): the fade to black and the screen off, the wake, a
  * fade undone by a second press */
 static const step S_SLEEP[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 158, 290, 0, 0, 80 },
@@ -1756,7 +2113,7 @@ static void film_start(int film)
     F.t0 = sb_ms();
     switch (film) {
     case 0: F.s = S_UNLOCK; F.n = 3; break;
-    case 1: F.s = S_GROUP; F.n = 9; break;
+    case 1: F.s = S_GROUP; F.n = (int)(sizeof S_GROUP / sizeof S_GROUP[0]); break;
     case 2: F.s = S_FOCUS; F.n = 7; break;
     case 3: F.s = S_HOLDS; F.n = 5; break;
     case 4: F.s = S_PAGES; F.n = 7; break;
@@ -2019,3 +2376,621 @@ int sh_linux_zero_copy(void)
     return 0;
 #endif
 }
+
+/* ---- Track A, 1.0: the safe start and why this start happened (the loader's SBFW table, Track J) ---- */
+int sh_safe_mode(void) { return sbos_safe_start(); }
+int sh_boot_reason(char *why, int cap)
+{
+    static const char *const W[6] = { "Started from the boot menu", "Started as the default", "Started once",
+                                       "Started as the boot menu", "Started again after a problem", "Started from USB" };
+    const char *w = !sb_fw.valid ? "Started (an older loader)" : sb_fw.boot_reason < 6U ? W[sb_fw.boot_reason] : "Started";
+    if (why && cap > 0) sb_strcpy(why, (unsigned)cap, w);
+    return sb_fw.valid ? (int)sb_fw.boot_reason : -1;
+}
+/* once at the end of the bake: say so when this is a safe start, or when the last start of Starbite OS crashed */
+static void boot_notes(void)
+{
+    kt_set(KT_UI, 26, sb_ms(), 10000, 0);           /* Track A update: the commit (or the rollback's notice) in 10 s */
+    if (sbos_safe_start())
+        notif_post("Starbite OS", "Safe Start",
+                   "Started without restoring Wi-Fi. Nothing is saved until you restart.");
+    else if (sb_fw.valid && sb_fw.crash_sev >= 2U && sb_fw.crash_key[0] &&
+             (!tk_strcmp(sb_fw.crash_key, "starbite-os") || !tk_strcmp(sb_fw.crash_key, sb_fw.key)))
+        notif_post("Starbite OS", "Restarted After a Problem",
+                   "The last start stopped unexpectedly. Details: Settings > Startup > Crash Reports.");
+}
+
+/* ---- Track A, 1.0: Restart and Shut Down from the shell ---- */
+int sh_restart(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: restart: refused (a dry run: the self test)");
+    return -1;
+#else
+    sb_log(sb_fw.valid && sb_fw.key[0] ? "next: restart (this OS again)" : "next: restart (to the boot menu: an older loader)");
+    if (sb_fw.valid && sb_fw.key[0])
+        power_boot_os(sb_fw.key);       /* does not return */
+    power_restart(1);
+    return -1;                          /* back here: refused */
+#endif
+}
+int sh_power_off(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: power off: refused (a dry run: the self test)");
+    return -1;
+#else
+    sb_log("next: power off (the user's slide)");
+    power_off_now();
+    return -1;                          /* back here: refused (power_off_now said why) */
+#endif
+}
+/* Power held: the shell's power sheet (Track B's P3x defines sh_power_held; this weak one is the fallback) */
+__attribute__((weak)) void sh_power_held(void) { sb_log("next: Power held: no power sheet in this shell yet"); }
+static int next_power_held(void)
+{
+    if (!ready) return 0;                        /* the bake: the classic menu (never drawn: nothing to do) */
+    sh_power_held();
+    start_ticking();                             /* P3x: the sheet fades in (the screen may have just woken) */
+    return 1;
+}
+
+/* ---- Track A: Software Update ---- (sbos-core-api.md 8) shell.h's sh_update_* on kern/update.c, which does the work on
+ * Track J's libsb half (sbfw_api.h: the slots, the one-shot, the commit). Staging goes a 1 MiB chunk per call (read from
+ * the card, hashed, written into the inactive slot through a window grant) through a buffer taken from the UI heap for
+ * the staging only. The commit is 10 s after the home screen (boot_notes arms KT_UI 26): a start that crashes or hangs
+ * before it never commits, and the loader rolls back. In the self-test build update.c reads no card and every write,
+ * the arming and the restart are logged dry runs (sbos_selftest_enabled). */
+#define UPD_CHUNK (1U << 20)
+static struct kupdate kup;
+static uint8_t *upd_buf;
+static void upd_out(struct sh_update *u)
+{
+    if (!u) return;
+    tk_memset(u, 0, sizeof *u);
+    sb_strcpy(u->version, sizeof u->version, kup.version);
+    sb_strcpy(u->notes, sizeof u->notes, kup.notes);
+    sb_strcpy(u->why, sizeof u->why, kup.why);
+    u->size = kup.size > 0xffffffffULL ? 0xffffffffU : (unsigned)kup.size;
+    u->state = kup.state;
+    u->pct = kup.pct;
+}
+int sh_update_check(struct sh_update *u)
+{
+    hw_wdt_feed();
+    int r = kupdate_check(&kup);
+    upd_out(u);
+    return r == 1;
+}
+int sh_update_stage(struct sh_update *u)
+{
+    if ((kup.state == KUP_FOUND || kup.state == KUP_STAGING) && !upd_buf) {
+        upd_buf = tk_alloc(UPD_CHUNK);
+        if (!upd_buf) sb_log("next: update: no 1 MiB in the UI heap for the copy");
+    }
+    hw_wdt_feed();
+    kupdate_stage(&kup, upd_buf, upd_buf ? UPD_CHUNK : 0);
+    if (kup.state != KUP_STAGING && upd_buf) {
+        tk_free(upd_buf);
+        upd_buf = 0;
+    }
+    upd_out(u);
+    return kup.state;
+}
+int sh_update_install(void)
+{
+    char why[80];
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: update: would arm the staged update and restart (a dry run: the self test)");
+#endif
+    int r = kupdate_install(why, sizeof why);
+    if (r < 0) sb_logf("next: update: not installed: ", why);
+    return r < 0 ? -1 : 0;
+}
+/* ---- end of Track A: Software Update ---- */
+
+/* ---- Track A: drivers for the shell ---- shell.h's sh_bt_*, sh_cam_*, the sensors, Auto-Brightness, the in-call
+ * proximity, battery health and the haptic patterns on the drivers track's kernel drivers (docs/drivers/), plus
+ * the notification LED's policy (kern/nledpol.c). Nothing here runs until the shell calls it, except, after the bake:
+ * the haptic level from the pref haptic.level (RAM only), Auto-Brightness when the pref display.auto is 1 (0 by
+ * default) and the LED policy; none of those three in any self-test image. Each running part has its own KT_UI timer
+ * (ids 30..33: Bluetooth's steps at bt_wait_ms, the camera's poll every 10 ms while open, Auto-Brightness every 2 s
+ * while the screen is on, the proximity every 200 ms in a call), so the UI loop never waits on hardware. In the
+ * self-test build (SBOS_SELFTEST_NEXT) every call that would power hardware is refused with a logged dry run.
+ * Not wired: sound (snd_*) and USB (their probes have not passed), Bluetooth pairing. */
+#ifdef SBOS_SELFTEST_NEXT
+static void drv_dry(const char *what)
+{
+    static const char *said[16];                     /* each kind once: the sensors are asked every frame */
+    for (int i = 0; i < 16; i++) {
+        if (said[i] == what) return;
+        if (!said[i]) { said[i] = what; break; }
+    }
+    sb_logf("next: drivers: refused (a dry run: the self test): ", what);
+}
+#define DRV_DRY(what, ret) do { drv_dry(what); return ret; } while (0)
+#define DRV_DRYV(what) do { drv_dry(what); return; } while (0)
+#define DRV_DRY_WHY "A dry run: the self test"
+#else
+#define DRV_DRY(what, ret) do { } while (0)
+#define DRV_DRYV(what) do { } while (0)
+#endif
+
+/* -- Bluetooth: scanning only. bt_set_module(wifi_module()) once Wi-Fi has read its module (wifi-track-h's
+ * kern/wifi.c; until that is in the trunk this weak one says "unknown" and bt.c keeps its default, SEMCO: S9 #1's) */
+int wifi_module(void);
+__attribute__((weak)) int wifi_module(void) { return -1; }
+#define BT_SCAN_LE_MS 6000U
+#define BT_SCAN_INQ_MS 5000U
+#define BT_SCAN_FOR_MS 60000U                        /* sh_bt_scan(1) repeats scans for at most this long */
+#define BT_SCAN_REST_MS 2000U
+static struct {
+    int scan, scanning;                              /* the shell wants scans; one of ours runs */
+    uint64_t until, next_at;
+    unsigned nsnap;                                  /* the last whole scan's list, shown while the next one fills */
+    struct { char name[33]; int rssi; } snap[BT_MAX_DEV];
+} BTS;
+static void bt_arm(unsigned ms) { kt_set(KT_UI, KT_DRV_BT, sb_ms(), ms ? ms : 1, 0); }
+static void bt_snapshot(void)
+{
+    unsigned n = bt_ndev();
+    if (n > BT_MAX_DEV) n = BT_MAX_DEV;
+    BTS.nsnap = 0;
+    for (unsigned i = 0; i < n; i++) {
+        const struct bt_dev *d = bt_dev_at(i);
+        if (!d) break;
+        sb_strcpy(BTS.snap[BTS.nsnap].name, sizeof BTS.snap[0].name, d->name);
+        BTS.snap[BTS.nsnap].rssi = d->has_rssi ? d->rssi : -127;
+        BTS.nsnap++;
+    }
+}
+static void bt_tick(void)
+{
+    if (!bt_step()) { bt_arm(bt_wait_ms()); return; }   /* starting or scanning: again when it asks */
+    int s = bt_state();
+    if (BTS.scanning) {
+        BTS.scanning = 0;
+        bt_snapshot();
+        BTS.next_at = sb_ms() + BT_SCAN_REST_MS;
+    }
+    if (s != BT_READY) { BTS.scan = 0; return; }      /* off or failed (sh_bt_why) */
+    if (!BTS.scan) return;
+    uint64_t now = sb_ms();
+    if (now >= BTS.until) { BTS.scan = 0; sb_log("next: bluetooth: scanning stopped (60 s)"); return; }
+    if (now < BTS.next_at) { bt_arm((unsigned)(BTS.next_at - now)); return; }
+    if (bt_scan(BT_SCAN_LE_MS, BT_SCAN_INQ_MS) < 0) { BTS.scan = 0; return; }
+    BTS.scanning = 1;
+    bt_arm(1);
+}
+int sh_bt_on(int on)
+{
+    if (!on) {
+        kt_cancel(KT_UI, KT_DRV_BT);
+        tk_memset(&BTS, 0, sizeof BTS);
+        if (bt_state() != BT_OFF) bt_off();          /* pins and registers back as found */
+        return 0;
+    }
+    DRV_DRY("Bluetooth on", -1);
+    static struct bt_hal h;
+    static int hal;
+    if (!hal) { bt_hal_libsb(&h); bt_hal_set(&h); hal = 1; }
+    int m = wifi_module();
+    if (m >= 0) bt_set_module(m);
+    if (bt_on() < 0) return -1;
+    sb_log("next: bluetooth: on (the shell)");
+    bt_arm(1);
+    return 0;
+}
+int sh_bt_state(void)
+{
+    int s = bt_state();
+    return s == BT_STARTING ? 1 : s == BT_READY || s == BT_SCANNING ? 2 : s == BT_FAILED ? -1 : 0;
+}
+const char *sh_bt_why(void) { return bt_why(); }
+int sh_bt_scan(int on)
+{
+    if (!on) { BTS.scan = 0; return 0; }             /* the scan that runs ends by itself */
+    DRV_DRY("Bluetooth scan", -1);
+    int s = bt_state();
+    if (s != BT_STARTING && s != BT_READY && s != BT_SCANNING) return -1;
+    BTS.until = sb_ms() + BT_SCAN_FOR_MS;
+    if (!BTS.scan) BTS.next_at = 0;
+    BTS.scan = 1;
+    if (s == BT_READY) bt_arm(1);                    /* else: the start's (or the scan's) own end goes on */
+    return 0;
+}
+static int bt_live(void) { return bt_state() == BT_SCANNING && bt_ndev() >= BTS.nsnap; }
+int sh_bt_count(void)
+{
+    if (bt_state() == BT_OFF) return 0;
+    return bt_live() ? (int)bt_ndev() : (int)BTS.nsnap;
+}
+int sh_bt_get(int i, char *name, int cap, int *rssi)
+{
+    if (i < 0 || i >= sh_bt_count()) return -1;
+    const char *n;
+    int r;
+    if (bt_live()) {
+        const struct bt_dev *d = bt_dev_at((unsigned)i);
+        if (!d) return -1;
+        n = d->name;
+        r = d->has_rssi ? d->rssi : -127;
+    } else {
+        n = BTS.snap[i].name;
+        r = BTS.snap[i].rssi;
+    }
+    if (name && cap > 0) sb_strcpy(name, (unsigned)cap, n);
+    if (rssi) *rssi = r;
+    return 0;
+}
+
+/* -- the front camera: cam_poll every 10 ms while it runs (each poll at most ~100 ms) */
+static int cam_running;
+static void cam_tick(void)
+{
+    int r = cam_poll();
+    if (r > 0) { kt_set(KT_UI, KT_DRV_CAM, sb_ms(), 10, 0); return; }
+    cam_running = 0;
+    if (r < 0) sb_logf("next: camera: stopped: ", cam_why());
+}
+int sh_cam_open(int w, int h)
+{
+    DRV_DRY("the front camera", -1);
+    if (w < 8 || h < 8) return CAM_EARG;
+    struct cam_req q = { CAM_FRONT, (unsigned)w, (unsigned)h, CAM_PORTRAIT_SELFIE, 1, 0, 0 };
+    int r = cam_open(&q);
+    if (r < 0) { sb_logf("next: camera: not opened: ", cam_why()); return r; }
+    cam_running = 1;
+    kt_set(KT_UI, KT_DRV_CAM, sb_ms(), 1, 0);
+    return 0;
+}
+const uint32_t *sh_cam_frame(int *w, int *h, unsigned *seq)
+{
+    struct cam_pic p;
+    if (!cam_running || !cam_frame(&p) || p.stride != p.w) return 0;
+    if (w) *w = (int)p.w;
+    if (h) *h = (int)p.h;
+    if (seq) *seq = p.seq;
+    return p.px;
+}
+int sh_cam_still(void)
+{
+    DRV_DRY("a still", -1);
+    return cam_running && cam_still() == 0 ? 0 : -1;
+}
+const uint32_t *sh_cam_still_get(int *w, int *h, const unsigned char **bmp, unsigned *bmp_len)
+{
+    struct cam_shot s;
+    if (!cam_running || !cam_still_get(&s) || s.stride != s.w) return 0;
+    if (w) *w = (int)s.w;
+    if (h) *h = (int)s.h;
+    if (bmp) *bmp = s.bmp;
+    if (bmp_len) *bmp_len = s.bmp_len;
+    return s.px;
+}
+const char *sh_cam_why(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    return DRV_DRY_WHY;
+#else
+    return cam_why();
+#endif
+}
+void sh_cam_close(void)
+{
+    kt_cancel(KT_UI, KT_DRV_CAM);
+    if (cam_running || cam_state() != CAM_ST_OFF) cam_close();   /* synchronous: everything off, as found */
+    cam_running = 0;
+}
+
+/* -- the hub's sensors (each getter keeps its sensor on for 10 s; the hub starts through survival.c) */
+int sh_light_lux(void)
+{
+    DRV_DRY("the light sensor", -1);
+    uint32_t lux;
+    return sens_lux(&lux) ? (int)(lux > 1000000U ? 1000000U : lux) : -1;
+}
+int sh_pressure_hpa10(void)
+{
+    DRV_DRY("the barometer", -1);
+    int32_t p, t;
+    return sens_pressure_hpa(&p, &t) ? (int)((p + 5) / 10) : -1;
+}
+int sh_proximity_near(void)
+{
+    DRV_DRY("the proximity sensor", -1);
+    return sens_prox_near();
+}
+int sh_gyro_mdps(int *x, int *y, int *z)
+{
+    DRV_DRY("the gyroscope", 0);
+    int32_t g[3];
+    if (!sens_gyro_mdps(g)) return 0;
+    if (x) *x = g[0];
+    if (y) *y = g[1];
+    if (z) *z = g[2];
+    return 1;
+}
+
+/* -- Auto-Brightness: sens_auto_brightness (0..255, a log curve of the lux) to the panel's four levels; a new level
+ * only after it was the same two looks in a row, and only when the light moved to another level (the user's own pick
+ * stays until then) */
+static int ab_on, ab_last = -1, ab_cand = -1;
+static int ab_level(int v) { return v < 28 ? 1 : v < 75 ? 2 : v < 150 ? 3 : 4; }   /* ~4, ~50, ~500 lux */
+static void ab_tick(void)
+{
+    if (!ab_on || !K.screen_on) return;              /* the screen's on arms it again */
+    kt_set(KT_UI, KT_DRV_AUTO, sb_ms(), 2000, 0);
+    int v = sens_auto_brightness();
+    if (v < 0) return;
+    int l = ab_level(v);
+    if (l != ab_cand) { ab_cand = l; return; }
+    if (l == ab_last) return;
+    ab_last = l;
+    if (l == panel_bright_level) return;
+    if (panel_brightness(l)) {
+        sh_bright_now(l);
+        sb_logx("next: Auto-Brightness: the panel's level ", (uint64_t)l);
+    }
+}
+static void ab_set(int on)
+{
+    ab_on = !!on;
+    ab_last = ab_cand = -1;
+    if (ab_on && K.screen_on) kt_set(KT_UI, KT_DRV_AUTO, sb_ms(), 1, 0);
+    if (!ab_on) {
+        kt_cancel(KT_UI, KT_DRV_AUTO);
+        sens_release(SENS_LIGHT);
+    }
+}
+void sh_auto_brightness(int on)
+{
+    DRV_DRYV("Auto-Brightness");
+    sh_pref_set_int("display.auto", !!on);
+    ab_set(on);
+}
+int sh_auto_brightness_on(void) { return ab_on; }
+
+/* -- a call at the ear: sens_incall + the panel dark while near (panel_blank: the display off, the screen on); the
+ * touches of that time dropped (next_kevent). Ends by itself with the call (kmodem_call, every 200 ms), or after 10 s
+ * when no call came. The Power key works as always: its screen on lights the panel again. */
+static int px_on, px_dark, px_call;
+static uint64_t px_t0;
+static void px_dark_set(int dark)
+{
+    if (dark == px_dark || !K.screen_on) return;    /* screen off: the screen's on lights it (drv_screen) */
+    if (panel_blank(dark)) px_dark = dark;
+    else sb_log(dark ? "next: proximity: the panel did not go dark" : "next: proximity: the panel did not light");
+}
+static void px_set(int on)
+{
+    on = !!on;
+    if (on == px_on) return;
+    px_on = on;
+    px_call = 0;
+    px_t0 = sb_ms();
+    sens_incall(on);
+    if (on) { kt_set(KT_UI, KT_DRV_PROX, sb_ms(), 200, 0); return; }
+    kt_cancel(KT_UI, KT_DRV_PROX);
+    px_dark_set(0);
+}
+static void px_tick(void)
+{
+    if (!px_on) return;
+    struct kcall c;
+    kmodem_call(&c);
+    if (c.state >= KCALL_DIALING && c.state <= KCALL_HELD) px_call = 1;
+    else if (px_call) { sb_log("next: proximity: the call ended: off"); px_set(0); return; }
+    else if (sb_ms() - px_t0 > 10000) { sb_log("next: proximity: no call came: off"); px_set(0); return; }
+    kt_set(KT_UI, KT_DRV_PROX, sb_ms(), 200, 0);
+    px_dark_set(sens_incall_screen_off());
+}
+void sh_call_proximity(int on)
+{
+    if (on) DRV_DRYV("the in-call proximity");
+    px_set(on);
+}
+static int drv_touch_dark(void) { return px_dark && K.screen_on; }
+
+/* -- battery health (read only: five gauge words, ~2 ms) */
+int sh_battery_health(int *max_pct, int *cycles, char *words, int cap)
+{
+    struct bathealth b;
+    int r = bathealth_read(&b) == 1;
+    if (max_pct) *max_pct = r ? b.shown_pct : -1;
+    if (cycles) *cycles = r ? (int)b.cycles : -1;
+    if (words && cap > 0) sb_strcpy(words, (unsigned)cap, r ? (b.words ? b.words : "") : bathealth_why());
+    return r;
+}
+
+/* -- haptic patterns at the kept intensity */
+_Static_assert((int)SH_VIB_RING == (int)HAPTIC_RING && (int)SH_VIB_NOTIFY == (int)HAPTIC_NOTIFY &&
+               (int)SH_VIB_ALARM == (int)HAPTIC_ALARM && (int)SH_VIB_TICK == (int)HAPTIC_TICK &&
+               (int)SH_VIB_SUCCESS == (int)HAPTIC_SUCCESS && (int)SH_VIB_WARNING == (int)HAPTIC_WARNING &&
+               (int)SH_VIB_ERROR == (int)HAPTIC_ERROR, "SH_VIB_* are HAPTIC_*");
+void sh_haptic_kind(int kind)
+{
+    DRV_DRYV("a haptic pattern");
+    int r = haptic_play(kind);
+    if (r < 0 && r != SBOS_EBUSY) sb_logf("next: haptic: not played: ", haptic_why());   /* busy: a ring / alarm plays */
+}
+void sh_haptic_stop(void) { haptic_stop(); }
+int sh_haptic_level(void) { return haptic_intensity(); }
+void sh_haptic_level_set(int level)
+{
+    level = level < 0 ? 0 : level > 3 ? 3 : level;
+    DRV_DRYV("the haptic level");
+    haptic_set_intensity(level);
+    sh_pref_set_int("haptic.level", level);
+}
+
+/* -- the kernel's side */
+static void drv_timer(unsigned id)
+{
+    if (id == KT_DRV_BT) bt_tick();
+    else if (id == KT_DRV_CAM) cam_tick();
+    else if (id == KT_DRV_AUTO) ab_tick();
+    else if (id == KT_DRV_PROX) px_tick();
+}
+static void drv_screen(int on)
+{
+    if (!on) { kt_cancel(KT_UI, KT_DRV_AUTO); return; }
+    if (px_dark) {                                   /* the Power key during a call: lit, the proximity decides again */
+        if (!panel_blank(0)) sb_log("next: proximity: the panel did not light");
+        px_dark = 0;
+    }
+    nledpol_screen(1);                               /* the missed call / message seen on the lock screen */
+    if (ab_on) kt_set(KT_UI, KT_DRV_AUTO, sb_ms(), 300, 0);
+}
+static void drv_after_bake(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: drivers: the haptic level, Auto-Brightness and the LED policy would start (a dry run: the self test)");
+#else
+    if (sbos_selftest_enabled) {
+        sb_log("next: drivers: a self-test image: no haptic level, Auto-Brightness or LED policy");
+        return;
+    }
+    haptic_set_intensity(sh_pref_int("haptic.level", 3));
+    if (sh_pref_int("display.auto", 0) == 1) ab_set(1);
+    struct sbos_battery b;
+    battery_get(&b);
+    nledpol_battery(b.ok, b.pct, b.charger);
+    /* the notification LED's driver (nled.c) has not passed its phone probe yet: the policy runs only when the pref
+     * led.notify is 1 (Settings or the probe's request turns it on); the default leaves the LED as today */
+    if (sh_pref_int("led.notify", 0) == 1)
+        nledpol_enable(1);
+#endif
+}
+/* ---- end of Track A: drivers for the shell ---- */
+
+/* ---- Track A: photos ---- shell.h's sh_photo_* on kern/photos.c: the home store's volatile entry "sbos-photos" (64
+ * MiB, a ring of 32 slots; the fence's one grant lent from the state slot for each write). A save or a get takes a
+ * 2 MiB work buffer from the UI heap for that call only (the pixels as stored) and gives it back. A save blocks the UI
+ * for the write (~0.2..0.4 s for 612 x 816 on the card): it is the shutter's tap, once. Nothing waits: while storage
+ * is held (the modem runs) or in a safe start, saves and deletes are refused with a why. In the self-test build (its
+ * films start from nothing, whatever the phone keeps) nothing is read and saves / deletes are logged dry runs. */
+static const char *ph_why;
+#ifdef SBOS_SELFTEST_NEXT
+static void ph_dry(const char *what)
+{
+    sb_logf("next: photos: a dry run (the self test writes nothing): ", what);
+    ph_why = "A dry run: the self test.";
+}
+#endif
+int sh_photo_save(const uint32_t *argb, int w, int h)
+{
+    ph_why = 0;
+#ifdef SBOS_SELFTEST_NEXT
+    (void)argb; (void)w; (void)h;
+    ph_dry("save");
+    return 0;
+#else
+    uint8_t *b = tk_alloc(KPHOTO_WORK);
+    if (!b) {
+        ph_why = "No memory to save the photo.";
+        sb_log("next: photos: no 2 MiB in the UI heap for the save");
+        return -1;
+    }
+    hw_wdt_feed();
+    int r = kphotos_save(argb, w, h, (int64_t)sh_utc(), b, KPHOTO_WORK);
+    tk_free(b);
+    return r;
+#endif
+}
+int sh_photo_count(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    return 0;
+#else
+    return kphotos_count();
+#endif
+}
+int sh_photo_get(int i, uint32_t *argb, int cap_px, int *w, int *h, long long *utc)
+{
+    ph_why = 0;
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i; (void)argb; (void)cap_px; (void)w; (void)h; (void)utc;
+    ph_why = "No such photo.";
+    return -1;
+#else
+    int64_t u = 0;
+    uint8_t *b = 0;
+    if (argb) {
+        b = tk_alloc(KPHOTO_WORK);
+        if (!b) {
+            ph_why = "No memory to show the photo.";
+            sb_log("next: photos: no 2 MiB in the UI heap for the read");
+            return -1;
+        }
+        hw_wdt_feed();
+    }
+    int r = kphotos_get(i, argb, cap_px, w, h, &u, b, b ? KPHOTO_WORK : 0);
+    if (b) tk_free(b);
+    if (utc) *utc = (long long)u;
+    return r;
+#endif
+}
+int sh_photo_delete(int i)
+{
+    ph_why = 0;
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i;
+    ph_dry("delete");
+    return 0;
+#else
+    return kphotos_delete(i);
+#endif
+}
+const char *sh_photo_why(void) { return ph_why ? ph_why : kphotos_why(); }
+/* ---- end of Track A: photos ---- */
+
+/* ---- Track A, 1.0: performance mode and keep-awake holders (Track B's ask, cp6) ---- */
+void sh_perf_mode(int conservative)
+{
+    if (perf_conservative == !!conservative) return;
+    perf_conservative = !!conservative;
+    sb_log(conservative ? "next: perf: conservative (Emergency / Survival / saving)" : "next: perf: normal (fast, animated)");
+}
+void sh_perf_hold(int ms)
+{
+    if (!ready || ms <= 0 || !K.screen_on) return;
+    boost(1);
+    kt_set(KT_UI, 21, sb_ms(), (uint32_t)(ms > 10000 ? 10000 : ms), 0);   /* the same clock-down check as a gesture's end */
+}
+#define HOLD_MAX 8
+static char hold_who[HOLD_MAX][24];
+int sh_hold_awake(const char *who, int on)
+{
+    if (!who || !*who) return -1;
+    int i, free_i = -1;
+    for (i = 0; i < HOLD_MAX; i++) {
+        if (hold_who[i][0] && !tk_strcmp(hold_who[i], who)) break;
+        if (!hold_who[i][0] && free_i < 0) free_i = i;
+    }
+    if (on) {
+        if (i == HOLD_MAX) {
+            if (free_i < 0) return -1;
+            sb_strcpy(hold_who[free_i], sizeof hold_who[free_i], who);
+            sb_logf("next: keep awake: on for ", who);
+        }
+    } else if (i < HOLD_MAX) {
+        hold_who[i][0] = 0;
+        sb_logf("next: keep awake: off for ", who);
+    }
+    int n = 0;
+    for (i = 0; i < HOLD_MAX; i++) n += hold_who[i][0] != 0;
+    kui_hold_awake = n;                     /* the kernel's screen-off timer waits while any holder is on */
+    return n;
+}
+
+
+/* ---- Track A, 1.0: Low Power Mode (the Control Centre's tile; pref power.low): the conservative clock tail, kept
+ * across a restart. Emergency / Survival set their own (sh_perf_mode); either one makes it conservative ---- */
+void sh_low_power(int on)
+{
+    perf_low = !!on;
+    sh_pref_set_int("power.low", perf_low);
+    sb_log(on ? "next: Low Power Mode on" : "next: Low Power Mode off");
+}
+int sh_low_power_on(void) { return perf_low; }

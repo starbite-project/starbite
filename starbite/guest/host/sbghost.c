@@ -9,6 +9,7 @@ static struct sbg_cfg cfg;
 static struct sbg_stats st;
 static uint8_t host_if;
 static uint64_t t_start, t_stop_req, img_pa;
+static int boot_warned, gave_up;                   /* this start: the slow-start note given; stopped for no HELLO */
 static uint32_t log_pos;
 static int log_seen;
 static char line[160];
@@ -25,6 +26,19 @@ static int blk_ring_bad;
 #define HDR ((volatile struct sbshm_hdr *)SHM(SBSHM_HDR_OFF))
 #define H2G ((struct sbshm_ring *)SHM(SBSHM_H2G_OFF))
 #define G2H ((struct sbshm_ring *)SHM(SBSHM_G2H_OFF))
+#include "sbghost_int.h"
+static void v3_reset(void);
+static void v3_notif_msg(const struct sbshm_msg *m);
+const struct sbg_os *sbg_os_(void) { return os; }
+const struct sbg_cfg *sbg_cfg_(void) { return &cfg; }
+uintptr_t sbg_shm(uint32_t off) { return SHM(off); }
+uint32_t sbg_services(void) { return HDR->version >= SBSHM_VERSION_V3 ? HDR->host_services : 0; }
+void sbg_ring_guest(void)
+{
+    sbshm_dmb();
+    if (cfg.db_guest)
+        *(volatile uint32_t *)((uintptr_t)cfg.gicd + 0x200 + 4 * (cfg.db_guest / 32)) = 1U << (cfg.db_guest % 32);
+}
 
 static uint64_t tramp_pa(void) { return cfg.tramp_pa ? cfg.tramp_pa : cfg.shm_base + SBSHM_TRAMP_OFF; }
 static uint64_t crumb(void) { return *(volatile uint64_t *)(uintptr_t)(tramp_pa() + 4 * SBG_TRAMP_CRUMB); }
@@ -245,6 +259,20 @@ static int load(const void *image, uint64_t image_size, const void *dtb, uint64_
     }
     blk_tail = blk_head = 0;
     blk_ring_bad = 0;
+    uint32_t svc = 0;
+    if (cfg.v2 && cfg.services) {                   /* contract v3: what is offered, with its sbg_os part */
+        svc = cfg.services & (SBSHM_SVC_CLIP | SBSHM_SVC_NOTIF);
+        if (os->net_rx)
+            svc |= cfg.services & SBSHM_SVC_NET;
+        if (os->fs)
+            svc |= cfg.services & SBSHM_SVC_P9;
+        if (os->snd)
+            svc |= cfg.services & SBSHM_SVC_SND;
+        if (os->unix_s)
+            svc |= cfg.services & SBSHM_SVC_CLOCK;
+        zero_words(SHM(SBSHM_NET_OFF), SBSHM_V3_FREE_OFF - SBSHM_NET_OFF);
+        v3_reset();
+    }
     img_pa = cfg.linux_base + text_off;
     if (!placed) {
         copy_words((uintptr_t)img_pa, image, image_size);
@@ -254,7 +282,19 @@ static int load(const void *image, uint64_t image_size, const void *dtb, uint64_
     }
     volatile struct sbshm_hdr *h = HDR;
     h->magic = SBSHM_MAGIC;
-    h->version = cfg.v2 ? SBSHM_VERSION_V2 : SBSHM_VERSION;
+    h->version = svc ? SBSHM_VERSION_V3 : cfg.v2 ? SBSHM_VERSION_V2 : SBSHM_VERSION;
+    h->host_services = svc;
+    h->host_surf_reading = SBSHM_NONE;
+    if (svc & SBSHM_SVC_CLOCK) {
+        int32_t tz = 0;
+        h->host_unix_s = os->unix_s(&tz);
+        h->host_tz_min = tz;
+    }
+    if (svc) {                                      /* each service lays out its region before CPU_ON */
+        sbg_net_load();
+        sbg_p9_load();
+        sbg_snd_load();
+    }
     h->hdr_size = sizeof(struct sbshm_hdr);
     h->boot_count = st.boots;
     h->gicd_base = cfg.gicd;
@@ -299,6 +339,7 @@ int sbg_start(void)
         return -2;
     }
     t_start = os->ms();
+    boot_warned = gave_up = 0;
     st.boots++;
     int64_t r = os->cpu_on(cfg.first_mpidr, tramp_pa(), cfg.linux_base + SBG_DTB_OFF);
     struct tb t = {.n = 0};
@@ -352,6 +393,46 @@ static void log_stream(void)
     }
 }
 
+/* no HELLO: the guest log's last lines, unfiltered, through os->log ("guest: tail| ..."; the phone's pmsg holds
+ * 16 KB and its guest_log keeps only some lines, so a stalled start otherwise says nothing about where it stopped) */
+#define SBG_TAIL_LINES 24U
+static void log_tail(void)
+{
+    volatile struct sbshm_prz *z = (volatile struct sbshm_prz *)SHM(SBSHM_OOPS_OFF);
+    if (z->sig != SBSHM_PRZ_SIG)
+        return;
+    uint32_t cap = SBSHM_OOPS_SIZE - 12U, start = z->start, size = z->size;
+    if (start >= cap)
+        return;
+    if (size > cap)
+        size = cap;
+    uint32_t pos = start, back = 0, lines = 0;
+    while (back < size && back < 4096U) {           /* back from the end: SBG_TAIL_LINES newlines, at most 4 KB */
+        uint32_t p = (pos + cap - 1) % cap;
+        if (z->data[p] == '\n' && back && ++lines > SBG_TAIL_LINES)
+            break;
+        pos = p;
+        ++back;
+    }
+    struct tb tb = {.n = 0};
+    t_s(&tb, "guest: tail| ");
+    for (; pos != start; pos = (pos + 1) % cap) {
+        char c = (char)z->data[pos];
+        if (c == '\n' || tb.n >= sizeof(tb.b) - 2) {
+            tb.b[tb.n] = 0;
+            if (tb.n > 13)
+                say(&tb);
+            tb.n = 0;
+            t_s(&tb, "guest: tail| ");
+        } else if (c >= 32 && c < 127) {
+            tb.b[tb.n++] = c;
+        }
+    }
+    tb.b[tb.n] = 0;
+    if (tb.n > 13)
+        say(&tb);
+}
+
 static int put_c(uint16_t type, uint32_t a, uint32_t b, uint32_t c, int32_t x, int32_t y)
 {
     if (st.state != SBG_RUNNING && !(type == SBG_MSG_STOP && st.state == SBG_BOOTING))
@@ -401,7 +482,8 @@ int sbg_stop(void)
     t_stop_req = os->ms();
     st.t_stop = t_stop_req - t_start;
     struct tb t = {.n = 0};
-    t_s(&t, was_booting ? "guest: MSG_STOP (still booting: it reads it after HELLO)" : "guest: MSG_STOP");
+    t_s(&t, gave_up ? "guest: MSG_STOP (no HELLO: sbguest.ko powers the guest off 10 s after it if user space does not)"
+            : was_booting ? "guest: MSG_STOP (still booting: it reads it after HELLO)" : "guest: MSG_STOP");
     say(&t);
     return 0;
 }
@@ -604,9 +686,20 @@ void sbg_poll(void)
     uint64_t t = os->ms();
     volatile struct sbshm_hdr *h = HDR;
     h->host_time_ms = t;
+    uint32_t svc = sbg_services();
+    if (svc & SBSHM_SVC_CLOCK) {
+        int32_t tz = 0;
+        h->host_unix_s = os->unix_s(&tz);
+        h->host_tz_min = tz;
+    }
     lines_check();
     log_stream();
     blk_serve();
+    if (svc) {
+        sbg_net_poll();
+        sbg_p9_poll();
+        sbg_snd_poll();
+    }
     struct sbshm_msg m;
     while (sbshm_get(G2H, &m)) {
         st.msgs_in++;
@@ -617,7 +710,8 @@ void sbg_poll(void)
             if (st.state == SBG_BOOTING)
                 st.state = SBG_RUNNING;
             struct tb tb = {.n = 0};
-            t_s(&tb, "guest: HELLO after ");
+            t_s(&tb, gave_up ? "guest: HELLO too late (already stopping) after " :
+                     boot_warned ? "guest: HELLO (a slow start) after " : "guest: HELLO after ");
             t_u(&tb, st.t_hello);
             t_s(&tb, " ms, ");
             t_u(&tb, m.a);
@@ -648,7 +742,25 @@ void sbg_poll(void)
             v2_text = m.a != 0;
             v2_purpose = m.b;
             v2_changes |= SBG_CH_TEXT;
+        } else if (m.type == SBG_MSG_CLIP_SET) {
+            v2_changes |= SBG_CH_CLIP;
+        } else if (m.type == SBG_MSG_NOTIFY || m.type == SBG_MSG_NOTIF_CLOSE) {
+            v3_notif_msg(&m);
+            v2_changes |= SBG_CH_NOTIF;
         }
+    }
+    if (st.state == SBG_BOOTING && cfg.boot_warn_ms && !boot_warned && t - t_start > cfg.boot_warn_ms &&
+        cfg.boot_warn_ms < cfg.boot_timeout_ms) {
+        boot_warned = 1;
+        log_stream();
+        struct tb tb = {.n = 0};
+        t_s(&tb, "guest: no HELLO yet after ");
+        t_u(&tb, (t - t_start) / 1000U);
+        t_s(&tb, " s: still waiting (up to ");
+        t_u(&tb, cfg.boot_timeout_ms / 1000U);
+        t_s(&tb, " s); the guest's last lines:");
+        say(&tb);
+        log_tail();
     }
     if (st.state == SBG_BOOTING && t - t_start > cfg.boot_timeout_ms) {
         log_stream();
@@ -660,7 +772,9 @@ void sbg_poll(void)
         t_s(&tb, ", ramoops ");
         t_s(&tb, ((volatile struct sbshm_prz *)SHM(SBSHM_OOPS_OFF))->sig == SBSHM_PRZ_SIG ? "up" : "never set up");
         say(&tb);
-        fail("no HELLO before the boot timeout (the M3 cluster stays on until the next reset)");
+        log_tail();
+        gave_up = 1;                                /* stop it: the cluster off, so the next start needs no reset */
+        sbg_stop();
         return;
     }
     if (st.state == SBG_STOPPING) {
@@ -676,9 +790,125 @@ void sbg_poll(void)
             t_u(&tb, st.t_off);
             t_s(&tb, " ms after MSG_STOP");
             say(&tb);
-        } else if (t - t_stop_req > cfg.stop_timeout_ms) {
+            if (gave_up)                            /* a failed start, but nothing left running: may start again */
+                fail("no HELLO before the boot timeout; stopped, the M3 cluster is off (it can be started again)");
+        } else if (t - t_stop_req > (gave_up && cfg.stop_timeout_ms < SBG_GIVEUP_STOP_MS ? SBG_GIVEUP_STOP_MS
+                                                                                       : cfg.stop_timeout_ms)) {
             log_stream();
-            fail(gs == SBG_GUEST_PANIC ? "the guest panicked while stopping" : "the cluster did not power off");
+            fail(gave_up ? "no HELLO before the boot timeout, and it did not power off when stopped (the M3 cluster "
+                           "stays on until the next reset)"
+                 : gs == SBG_GUEST_PANIC ? "the guest panicked while stopping" : "the cluster did not power off");
         }
     }
 }
+
+/* ---- contract v3: clipboard, notifications, key modifiers (the kernel services are in sbg_net.c, sbg_p9.c,
+ * sbg_snd.c) ----------------------------------------------------------------------------------------------------- */
+#define NQ 16U                                      /* notification events copied at once (the slot may be reused) */
+static struct { int kind; struct sbshm_notif n; } nq[NQ];
+static unsigned nq_head, nq_tail;
+static void v3_reset(void) { nq_head = nq_tail = 0; }
+
+static void copy_from(void *d, uintptr_t s, unsigned n)
+{
+    uint32_t *dw = d;
+    for (unsigned i = 0; i < n / 4; ++i)
+        dw[i] = rd32(s + 4 * i);
+}
+
+static void v3_notif_msg(const struct sbshm_msg *m)
+{
+    if (nq_head - nq_tail >= NQ)
+        nq_tail++;                                  /* drop the oldest event */
+    unsigned i = nq_head % NQ;
+    if (m->type == SBG_MSG_NOTIF_CLOSE) {
+        nq[i].kind = 2;
+        nq[i].n.id = m->a;
+        nq_head++;
+        return;
+    }
+    if (m->a >= SBSHM_NOTIF_SLOTS)
+        return;
+    volatile struct sbshm_notifs *t = (volatile struct sbshm_notifs *)SHM(SBSHM_NOTIF_OFF);
+    for (int tries = 0; tries < 4; ++tries) {
+        uint32_t s0 = sbshm_seq_begin(&t->seq);
+        copy_from(&nq[i].n, (uintptr_t)&t->n[m->a], sizeof(struct sbshm_notif));
+        if (sbshm_seq_ok(&t->seq, s0) && nq[i].n.id == m->b) {
+            nq[i].n.app_name[31] = nq[i].n.summary[95] = nq[i].n.body[255] = 0;
+            for (unsigned k = 0; k < SBSHM_NOTIF_ACTIONS; ++k)
+                nq[i].n.action[k][23] = 0;
+            nq[i].kind = 1;
+            nq_head++;
+            return;
+        }
+    }
+}
+
+int sbg_notif_next(struct sbshm_notif *n)
+{
+    if (nq_tail == nq_head)
+        return 0;
+    unsigned i = nq_tail++ % NQ;
+    *n = nq[i].n;
+    return nq[i].kind;
+}
+
+int sbg_notif_act(uint32_t id, uint32_t action) { return put(SBG_MSG_NOTIF_ACT, id, action, 0, 0); }
+int sbg_keymod(uint32_t mods) { return put(SBG_MSG_KEYMOD, mods, 0, 0, 0); }
+void sbg_surf_reading(int idx)
+{
+    HDR->host_surf_reading = idx == 0 || idx == 1 ? (uint32_t)idx : SBSHM_NONE;
+    sbshm_dmb();                                    /* published before the GPU starts reading */
+}
+void sbg_surf_done(void)
+{
+    sbshm_dmb();
+    HDR->host_surf_reading = SBSHM_NONE;
+}
+
+unsigned sbg_clip_get(char mime[40], uint8_t *buf, unsigned cap)
+{
+    volatile struct sbshm_clip_slot *c = &((volatile struct sbshm_clip *)SHM(SBSHM_CLIP_OFF))->g2h;
+    for (int tries = 0; tries < 4; ++tries) {
+        uint32_t s0 = sbshm_seq_begin(&c->seq);
+        unsigned len = c->len;
+        if (len > SBSHM_CLIP_MAX)
+            len = 0;
+        for (unsigned i = 0; i < 40; ++i)
+            mime[i] = c->mime[i];
+        mime[39] = 0;
+        unsigned n = len <= cap ? len : 0;          /* too big for the caller: nothing (no half texts) */
+        for (unsigned i = 0; i < n; ++i)
+            buf[i] = c->data[i];
+        if (sbshm_seq_ok(&c->seq, s0))
+            return n;
+    }
+    return 0;
+}
+
+int sbg_clip_set(const char *mime, const uint8_t *data, unsigned len)
+{
+    if (!(sbg_services() & SBSHM_SVC_CLIP) || len > SBSHM_CLIP_MAX)
+        return 0;
+    volatile struct sbshm_clip_slot *c = &((volatile struct sbshm_clip *)SHM(SBSHM_CLIP_OFF))->h2g;
+    uint32_t s = c->seq | 1U;
+    c->seq = s;                                     /* odd: writing */
+    sbshm_dmb();
+    unsigned i = 0;
+    for (; i < 39 && mime[i]; ++i)
+        c->mime[i] = mime[i];
+    for (; i < 40; ++i)
+        c->mime[i] = 0;
+    for (i = 0; i < len; ++i)
+        c->data[i] = data[i];
+    c->len = len;
+    sbshm_dmb();
+    c->seq = s + 1;
+    return put(SBG_MSG_CLIP, s + 1, 0, 0, 0);
+}
+
+/* The v3 service servers live in files of their own but build inside this unit, so every build that compiles
+ * sbghost.c (Starbite OS's build.sh, sbsim, the probes, host tests) gets them without a change. */
+#include "sbg_net.c"
+#include "sbg_p9.c"
+#include "sbg_snd.c"

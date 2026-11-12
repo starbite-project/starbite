@@ -1,0 +1,201 @@
+#!/bin/sh
+# /sbin/sbinit: PID 1 of the guest's Debian root (docs/STARBITE-LINUX-APPS.md L4), started by the initramfs's
+# switch_root after it has put together the root: base.erofs (sbblk dev 0, read-only) under an overlay whose upper
+# is the ext4 image on sbblk dev 1. It
+#   - mounts the kernel file systems (proc, sys, dev, devpts, /dev/shm, /run),
+#   - turns on zram swap (lz4, ~50 % of RAM),
+#   - mounts the App Store's repository (sbblk dev 2, EROFS label sb-repo) on /repo if the initramfs did not,
+#   - prepares the desktop user's home on a fresh overlay,
+#   - starts sbpkg (the App Store daemon, root: it runs apt) in the background, restarted if it exits,
+#   - runs sbwl (/usr/bin/sbwl from sbwl/install-rootfs.sh, else /usr/local/bin/sbwl) as root in a restart loop.
+#     sbwl itself makes the user's session: /run/user/1000, the Wayland socket there, a D-Bus session bus, and starts
+#     the apps as "user" (uid 1000). Without sbwl, sbinit idles and reaps.
+# Kernel command line knobs: sbinit.epoch=SECONDS (the wall clock, UTC), sbinit.repo=/dev/DEV (the repo device), sbinit.zram=0 (no swap), sbinit.nopkg (no
+# sbpkg), sbinit.nosbwl (no compositor: a shell-less idle system for tests). sbwl's own arguments:
+# /etc/starbite/sbwl.args (one line), if present.
+# Logs go to the kernel log (/dev/kmsg), which reaches Starbite through the ramoops zone.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games    # games live in /usr/games
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+umask 022
+
+log() { echo "sbinit: $*" > /dev/kmsg 2>/dev/null || echo "sbinit: $*"; }
+mnt_t() { t=$1 dev=$2 dir=$3; shift 3; mkdir -p "$dir"; mountpoint -q "$dir" || mount -t "$t" "$@" "$dev" "$dir"; }
+
+# ---- kernel file systems (the initramfs may have moved some of them here already) ----
+mnt_t proc proc /proc
+mnt_t sysfs sys /sys
+mnt_t devtmpfs dev /dev
+mnt_t devpts devpts /dev/pts -o gid=5,mode=0620,ptmxmode=0666
+mnt_t tmpfs shm /dev/shm -o mode=1777,nosuid,nodev
+mnt_t tmpfs run /run -o mode=0755,nosuid,nodev,size=32m
+[ -e /dev/fd ] || ln -s /proc/self/fd /dev/fd
+# the self tests' marker comes from the user's shell (echo ... > /dev/kmsg in foot, which runs as "user"); the
+# guest's kernel log is the guest's own, so letting users write to it is harmless
+chmod 0622 /dev/kmsg
+mkdir -p /run/lock /tmp /var/tmp && chmod 1777 /tmp /var/tmp
+rm -rf /tmp/* /tmp/.[!.]* 2>/dev/null       # /tmp is on the overlay (no RAM for a tmpfs): start clean
+hostname starbite 2>/dev/null
+ip link set lo up 2>/dev/null
+log "$(uname -r), $(grep -c ^processor /proc/cpuinfo) CPUs, $(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo) MB"
+
+# ---- the boot recorder: the kernel log on the overlay (on the card) every 5 s for the first minute, so a start that
+# never reaches Starbite (no HELLO: the host's pmsg holds 16 KB) can be read afterwards from overlay.img. The last
+# start's log is kept as .1. Small writes (the log is ~100 KB) ----
+mkdir -p /var/log
+[ -f /var/log/starbite-boot.log ] && mv -f /var/log/starbite-boot.log /var/log/starbite-boot.log.1 2>/dev/null
+(
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        sleep 5
+        { echo "starbite-boot: +$((i * 5)) s, $(date -u '+%F %T') UTC"; dmesg; } > /var/log/starbite-boot.log.new 2>&1 &&
+            mv -f /var/log/starbite-boot.log.new /var/log/starbite-boot.log
+        sync
+    done
+) </dev/null >/dev/null 2>&1 &
+
+# ---- options from the kernel command line ----
+REPO_DEV= ZRAM=1 PKG=1 WL=1 EPOCH=
+for a in $(cat /proc/cmdline); do
+    case "$a" in
+    sbinit.epoch=*) EPOCH=${a#sbinit.epoch=} ;;
+    sbinit.repo=*) REPO_DEV=${a#sbinit.repo=} ;;
+    sbinit.zram=0) ZRAM=0 ;;
+    sbinit.nopkg) PKG=0 ;;
+    sbinit.nosbwl) WL=0 ;;
+    esac
+done
+
+# ---- the clock: the guest has no RTC and no network time. hdr.host_time_ms is Starbite's uptime, not a date, so
+# the host passes the wall clock as sbinit.epoch=SECONDS (UTC) on the kernel command line; without it, at least not
+# 1970: the base image's build date (TLS, apt and file times want a plausible date) ----
+if [ -n "$EPOCH" ] && date -u -s "@$EPOCH" >/dev/null 2>&1; then
+    log "clock set from the host: $(date -u '+%F %T') UTC"
+elif [ "$(date -u +%Y)" -lt 2025 ] && [ -s /usr/share/starbite/base-date ]; then
+    date -u -s "$(cat /usr/share/starbite/base-date)" >/dev/null 2>&1 &&
+        log "no wall clock from the host: set to the base's build date $(date -u +%F)"
+fi
+
+# ---- the guest's kernel module (normally loaded by the initramfs) ----
+if [ ! -e /dev/sbshm ]; then
+    ko=$(find /lib/modules/"$(uname -r)" -name 'sbguest.ko*' 2>/dev/null | head -1)
+    [ -n "$ko" ] && insmod "$ko" && log "sbguest.ko loaded"
+fi
+
+# ---- zram swap: lz4, half the RAM (in the background: sbwl's HELLO does not wait for it) ----
+zram_on() {
+    if [ "$ZRAM" = 1 ] && ! grep -q zram0 /proc/swaps; then
+        [ -e /sys/block/zram0 ] || modprobe zram num_devices=1 2>/dev/null
+        if [ -e /sys/block/zram0 ]; then
+            kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+            echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null
+            echo $((kb / 2))K > /sys/block/zram0/disksize &&
+                mkswap /dev/zram0 >/dev/null && swapon -p 100 /dev/zram0 &&
+                log "zram swap $((kb / 2048)) MB ($(sed 's/.*\[\(.*\)\].*/\1/' /sys/block/zram0/comp_algorithm))"
+            echo 100 > /proc/sys/vm/swappiness            # compressed RAM is cheap to swap to
+            echo 0 > /proc/sys/vm/page-cluster            # zram: no readahead
+        else
+            log "no zram"
+        fi
+    fi
+}
+[ "$ZRAM" = 1 ] && zram_on &
+
+# ---- first boot on a fresh overlay: machine id, the user's home ----
+[ -s /etc/machine-id ] || dbus-uuidgen > /etc/machine-id 2>/dev/null
+if id user >/dev/null 2>&1; then
+    U_HOME=$(getent passwd user | cut -d: -f6)
+    if [ ! -d "$U_HOME/.config" ]; then
+        mkdir -p "$U_HOME" && cp -a /etc/skel/. "$U_HOME/" 2>/dev/null
+        chown -R user:user "$U_HOME"
+    fi
+fi
+
+# the apps' environment (sbwl passes it on): software rendering, small memory. GTK 4's cairo renderer (no GL), no
+# accessibility bus, Firefox on Wayland, LibreOffice's GTK 3 plugin
+export GSK_RENDERER=cairo GDK_BACKEND=wayland NO_AT_BRIDGE=1 GTK_A11Y=none MOZ_ENABLE_WAYLAND=1
+export LIBGL_ALWAYS_SOFTWARE=1 GTK_USE_PORTAL=0 SAL_USE_VCLPLUGIN=gtk3 XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=Starbite HOME=/root
+
+# ---- the services after sbwl (Track E, cp3 2026-11-12: everything before sbwl delays its HELLO, and Starbite gives
+# a desktop start 30 s, first start of a new base included): the App Store's repository, the dpkg status merge, the
+# network link, Starbite's files and the App Store daemon wait for sbwl's socket (at most 60 s), then run here ----
+services() {
+    i=0
+    while [ ! -S /run/sbwl.sock ] && [ "$i" -lt 120 ]; do
+        sleep 0.5
+        i=$((i + 1))
+    done
+    log "services: after sbwl's socket ($((i / 2)) s)"
+    # ---- the App Store's repository (read-only EROFS) ----
+    mkdir -p /repo
+    if ! mountpoint -q /repo; then
+        [ -n "$REPO_DEV" ] || REPO_DEV=$(findfs LABEL=sb-repo 2>/dev/null)
+        if [ -n "$REPO_DEV" ] && mount -t erofs -o ro "$REPO_DEV" /repo; then
+            log "repo $REPO_DEV on /repo"
+        else
+            log "no repo device (the store shows nothing to install)"
+        fi
+    fi
+
+    # ---- a new base image under an old overlay: dpkg's status = the new base's + what the App Store installed (the
+    # overlay's copy-up would hide the new base's packages); once per base, keyed by the base's status checksum ----
+    L=/.sbroot/base/var/lib/dpkg/status
+    U=/.sbroot/rw/upper/var/lib/dpkg/status
+    if [ -f "$L" ]; then
+        id=$(cksum < "$L")
+        mkdir -p /var/lib/starbite
+        if [ "$id" != "$(cat /var/lib/starbite/base-status.id 2>/dev/null)" ]; then
+            if [ -f "$U" ] && [ -x /usr/share/starbite/dpkg-merge.py ]; then
+                python3 -I /usr/share/starbite/dpkg-merge.py "$L" /var/lib/dpkg/status /var/lib/dpkg/status 2>&1 |
+                    while read -r l; do log "$l"; done
+            fi
+            echo "$id" > /var/lib/starbite/base-status.id
+        fi
+    fi
+
+    # ---- contract v3 (Track E): the network link and Starbite's files, when the host serves them ----
+    # sbnet0 (sbguest.ko's sbnet): the host's address / route / DNS applied, and re-applied when the uplink changes
+    if [ -d /sys/class/net/sbnet0 ] && [ -x /usr/local/sbin/sbnet-up ]; then
+        /usr/local/sbin/sbnet-up </dev/null >/dev/null 2>&1 &
+    fi
+    # Starbite's files at /home/user/Starbite (9P over the shared region; read-only while Starbite can't write the card)
+    if [ -x /usr/local/sbin/sbp9-mount ]; then
+        # bounded: a host that never answers must not hold the services (9p waits are killable)
+        SBP9_DIR=/home/user/Starbite timeout -s KILL 20 /usr/local/sbin/sbp9-mount ||
+            { rc=$?; [ "$rc" -ge 124 ] && log "sbp9-mount: no answer from the host in 20 s (stopped, $rc)"; }
+    fi
+
+    # ---- sbpkg: the App Store daemon (root: it runs apt in the overlay), restarted if it exits ----
+    # Track F's engine when the base has it (same socket lines, same store table), else sbpkg
+    STORED=/usr/local/sbin/sbpkg
+    [ -x /usr/local/sbin/sbstore ] && STORED="/usr/local/sbin/sbstore daemon"
+    if [ "$PKG" = 1 ] && [ -x "${STORED%% *}" ]; then
+        (
+            while true; do
+                $STORED </dev/null >/dev/null 2>/dev/kmsg
+                log "${STORED##*/} exited ($?); starting it again in 2 s"
+                sleep 2
+            done
+        ) &
+    fi
+    log "services: up"
+    wait
+}
+services </dev/null &
+
+# ---- sbwl: the compositor (root; it owns the shm rings and /run/sbwl.sock, starts the apps as "user") ----
+# HOOK: mk-base.sh SBWL=/path/to/sbwl runs sbwl/install-rootfs.sh (-> /usr/bin/sbwl, /etc/sbwl/system-apps).
+trap '[ -x /usr/local/sbin/sbp9-mount ] && /usr/local/sbin/sbp9-mount -u; sync' TERM
+SBWL_BIN=/usr/bin/sbwl
+[ -x "$SBWL_BIN" ] || SBWL_BIN=/usr/local/bin/sbwl
+args=$(cat /etc/starbite/sbwl.args 2>/dev/null)
+while true; do
+    if [ "$WL" = 1 ] && [ -x "$SBWL_BIN" ]; then
+        log "starting $SBWL_BIN"
+        # shellcheck disable=SC2086
+        (cd / && "$SBWL_BIN" $args </dev/null >/dev/null 2>&1)
+        log "sbwl exited ($?); starting it again"
+        sleep 1
+    else
+        sleep 30        # no compositor: stay up (and reap orphans: dash's wait takes any child)
+    fi
+done

@@ -7,7 +7,7 @@
  *                                               resolution + the 2x present, the first frame at rest full); frames
  *                                               as raw BGRA (720 x 1480 with half), one "F" line per frame on stdout
  *   sbtk-host PAK bench                         uibench's kernels on this host (the A55 calibration)
- * A script: "wait MS", "tap X Y", "drag X0 Y0 X1 Y1 MS", "hold X Y MS" (pt, ms), separated by ';'; also "power",
+ * A script: "wait MS", "tap X Y [MS]", "drag X0 Y0 X1 Y1 MS", "hold X Y MS" (pt, ms), separated by ';'; also "power", "powerhold",
  * "notify WHO|TITLE|BODY", "dragh X0 Y0 X1 Y1 MS HOLD", "state WHAT=KEY:V" (a still's state, now), "ring MS" (the
  * pretend network's incoming call MS ms later) and "sms TEXT" (a message received now from a made-up number). */
 #include "../sbtk.h"
@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 void sh_torch(int lit) { fprintf(stderr, "torch: %s\n", lit ? "on" : "off"); }
 void sh_boot_os(const char *key) { fprintf(stderr, "slide to start: would restart into %s\n", key); }
@@ -25,7 +26,13 @@ int sh_modem(int on)
     else fprintf(stderr, "modem: would stop\n");
     return 0;
 }
-void sh_confirmed(int ok) { fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled"); }
+/* Track J: Settings > Startup's pretend platform (the restarts' confirmations come back through sh_confirmed) */
+#include "startup_fake.inc"
+void sh_confirmed(int ok)
+{
+    if (startup_fake_confirmed(ok)) return;
+    fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled");
+}
 /* a pretend network for the previews: on -> searching -> data up on "Operator" LTE, 3 bars */
 static int fc_net;                          /* helper I: comms_fake.inc's calls and SMS work while it is on */
 int sh_cellular(int on)
@@ -158,6 +165,10 @@ int sh_blob_get(const char *name, void *p, unsigned cap)
 }
 void sh_vibrate(void) { fprintf(stderr, "vibrate: the timer ran out\n"); }
 void sh_haptic(void) { }
+/* (B3's clipboard: sh_clip_set / sh_clip_get are Track E's, in shell_linux.inc, linked here with shell_lock.c) */
+void sh_haptic_k(int kind) { (void)kind; }
+/* B5: the Clock's alarms (the kernel's alarm.c on the phone) */
+int sh_alarm_set(int i, int h, int m, int days, int on) { fprintf(stderr, "alarm %d: %02d:%02d %s (days %x)\n", i, h, m, on ? "on" : "off", (unsigned)days); return 0; }
 /* L2 + L3: Linux apps and the App Store (the kernel's platform is starbite/guest/next/gwin.c): host/linux_fake.inc,
  * a pretend Linux with a catalog and a store. SBTK_NO_LINUX_FAKE: none (starbite/guest/next/host/gwin-host.c links
  * gwin.c itself and drives the shell) */
@@ -351,6 +362,34 @@ int sh_card_set(const sh_card_t *c) { struct surv_card k; memcpy(&k, c, sizeof k
 const char *sh_card_label(int i) { return i >= 0 && i < SURV_CARD_NF ? surv_card_label[i] : ""; }
 int sh_last2(void) { return surv_last2(); }
 int sh_sos_next(void) { return 50; }      /* the host: the old 20 Hz poll */
+/* Track A: the passcode on kern/passcode.c itself (in RAM, on the film's clock: surv_host_now_ms; no wall clock),
+ * Auto-Lock a number. States: pass=DIGITS sets a passcode, passfail=:N makes N wrong tries now */
+#include "../../kern/passcode.h"
+static int host_autolock = 30;
+/* Track A update: what the host's card holds (hupd=; the fakes are near the end) */
+static int hupd_mode;                       /* 0 none, 1 found, 2 bad, 3 old loader, 4 installed */
+static struct sh_update HU;
+int sh_pass_on(void) { return pass_len() > 0; }
+int sh_pass_len(void) { return pass_len(); }
+int sh_pass_wait(void) { return (int)pass_wait(surv_host_now_ms); }
+int sh_pass_fails(void) { return pass_fails(); }
+int sh_pass_check(const char *d)
+{
+    int r = pass_check(d, surv_host_now_ms, 0);
+    fprintf(stderr, "passcode: %s (wrong tries in a row %d, wait %u s)\n", r == 1 ? "right" : r == 0 ? "wrong" : "refused: a wait runs",
+            pass_fails(), pass_wait(surv_host_now_ms));
+    return r;
+}
+int sh_pass_set(const char *old, const char *nw)
+{
+    uint8_t salt[PASS_SALT];
+    for (unsigned i = 0; i < PASS_SALT; i++) salt[i] = (uint8_t)rand();
+    int r = pass_set(old, nw, salt, surv_host_now_ms, 0);
+    fprintf(stderr, "passcode: %s\n", r ? "not changed" : pass_len() ? "set" : "removed");
+    return r;
+}
+int sh_autolock(void) { return host_autolock; }
+void sh_autolock_set(int s) { host_autolock = s; fprintf(stderr, "auto-lock: %d s (0 never)\n", s); }
 const char *sh_last2_why(void) { return surv_last2_why(); }
 int sh_last2_set(int on) { fprintf(stderr, "last 2 %%: %s\n", on ? "on" : "off"); return surv_last2_set(on, "the switch in Emergency"); }
 int sh_last2_auto(void) { return surv_last2_auto; }
@@ -395,6 +434,59 @@ int sh_tilt(int *pitch_x10, int *roll_x10)
 }
 int sh_steps(unsigned *n) { uint32_t v = 0; int r = surv_sensors_state() == 2 && surv_steps(&v); *n = v; return r; }
 long long sh_utc(void) { return 1794500000LL + 25 * 60 + (long long)(surv_host_now_ms / 1000); }   /* the pretend fix: 25 min old */
+/* Track A: the time zones on kern/tzdb.c itself (linked in), 12 / 24-hour and four alarms in RAM (two made up). The
+ * host's sh_status stays the concept's 21:05 whatever the zone */
+#include "tzdb.h"
+static int host_tz = -1, host_24 = 1;
+int sh_tz_count(void) { return tzdb_n; }
+const char *sh_tz_name(int i, const char **city)
+{
+    if (i < 0 || i >= tzdb_n) { if (city) *city = ""; return ""; }
+    if (city) *city = tzdb[i].city;
+    return tzdb[i].name;
+}
+int sh_tz_offset_min(int i) { return i >= 0 && i < tzdb_n ? tzdb_offset(i, sh_utc()) : 0; }
+int sh_tz(void) { return host_tz >= 0 ? host_tz : tzdb_home(); }
+void sh_tz_set(int i) { if (i >= 0 && i < tzdb_n) { host_tz = i; fprintf(stderr, "time zone: %s\n", tzdb[i].name); } }
+int sh_clock24(void) { return host_24; }
+void sh_clock24_set(int on) { host_24 = !!on; fprintf(stderr, "clock: %s\n", on ? "24-hour" : "12-hour"); }
+static struct { int hm, days, on; char label[20]; } HA[4] = { { 700, 0x3e, 1, "Alarm" }, { 830, 0x41, 0, "Gym" } };
+static int nha = 2;
+static void host_alarm_push(void)
+{
+    int best = -1;
+    for (int i = 0; i < nha; i++) if (HA[i].on && (best < 0 || HA[i].hm < HA[best].hm)) best = i;
+    sh_alarm(best >= 0, best >= 0 ? HA[best].hm / 100 : 0, best >= 0 ? HA[best].hm % 100 : 0);
+}
+int sh_alarm_count(void) { return nha; }
+int sh_alarm_get(int i, int *hm, int *days, int *on, char *label, int cap)
+{
+    if (i < 0 || i >= nha) return -1;
+    if (hm) *hm = HA[i].hm;
+    if (days) *days = HA[i].days;
+    if (on) *on = HA[i].on;
+    if (label && cap > 0) snprintf(label, (size_t)cap, "%s", HA[i].label);
+    return 0;
+}
+int sh_alarm_put(int i, int hm, int days, int on, const char *label)
+{
+    if (i < 0 || i > nha || i >= 4 || hm < 0 || hm / 100 > 23 || hm % 100 > 59 || days < 0 || days > 0x7f) return -1;
+    if (i == nha) nha++;
+    HA[i].hm = hm; HA[i].days = days; HA[i].on = !!on;
+    snprintf(HA[i].label, sizeof HA[i].label, "%s", label ? label : "");
+    fprintf(stderr, "alarm %d: %02d:%02d days 0x%02x %s\n", i, hm / 100, hm % 100, days, on ? "on" : "off");
+    host_alarm_push();
+    return 0;
+}
+int sh_alarm_del(int i)
+{
+    if (i < 0 || i >= nha) return -1;
+    for (int k = i; k + 1 < nha; k++) HA[k] = HA[k + 1];
+    nha--;
+    fprintf(stderr, "alarm %d: deleted\n", i);
+    host_alarm_push();
+    return 0;
+}
 /* helper D: Maps' last GNSS fix: none unless a state gives one (gnss=LAT,LON in degrees: a pretend fix from Android) */
 static sh_gnss_t host_fix;
 static int host_have_fix;
@@ -481,7 +573,38 @@ static void apply_state(const char *st)
         host_p10 = (int)(p * 10); host_r10 = (int)(r * 10);
         return;
     }
+    if (!strcmp(what, "tap")) {                  /* Track J: tap=X,Y (pt): a tap through the gestures, then settled */
+        static float tt = 1000;                  /* the stills' own clock, ms */
+        float x = 0, y = 0;
+        if (sscanf(eq + 1, "%f,%f", &x, &y) != 2) return;
+        sh_touch(0, x, y, tt);
+        sh_tick(1 / 60.0f, tt += 1000 / 60.0f);
+        sh_touch(2, x, y, tt += 64);
+        for (int i = 0; i < 600 && (i < 30 || sh_moving()); i++) sh_tick(1 / 60.0f, tt += 1000 / 60.0f);
+        return;
+    }
+    if (!strcmp(what, "wifistate")) {            /* cp6: wifistate=:N (SH_WIFI_*: 1 starting, 3 scanning, 4 joining) */
+        HW.state = (int)v;
+        hw_push();
+        return;
+    }
+    if (!strcmp(what, "down")) {                 /* cp6: down=X,Y (pt): a finger put down and held there (the press's still) */
+        static float td = 500000;
+        float x = 0, y = 0;
+        if (sscanf(eq + 1, "%f,%f", &x, &y) != 2) return;
+        sh_touch(0, x, y, td);
+        for (int i = 0; i < 6; i++) sh_tick(1 / 60.0f, td += 1000 / 60.0f);
+        return;
+    }
     if (!strcmp(what, "comms")) { comms_fake_state(key, v); return; }          /* helper I: comms=incoming, ... */
+    if (!strcmp(what, "pass")) { (void)sh_pass_set("", key); return; }         /* Track A: pass=246810 */
+    if (!strcmp(what, "hupd")) {                 /* Track A update: hupd=none|found|bad|old|installed (the host's card) */
+        static const char *const M[5] = { "none", "found", "bad", "old", "installed" };
+        for (int i = 0; i < 5; i++) if (!strcmp(key, M[i])) hupd_mode = i;
+        memset(&HU, 0, sizeof HU);
+        return;
+    }
+    if (!strcmp(what, "passfail")) { for (int i = 0; i < (int)v; i++) (void)sh_pass_check("x"); return; }   /* passfail=:6 */
     if (!strcmp(what, "gnss")) {                 /* helper D: gnss=60.1699,24.9384 (a pretend fix: 8.5 m, 9 satellites) */
         double la = 0, lo = 0;
         if (sscanf(eq + 1, "%lf,%lf", &la, &lo) == 2) {
@@ -508,7 +631,12 @@ static int parse(const char *s, step *st, int max)
         char w[16];
         if (sscanf(tok, " %15s", w) != 1) continue;
         if (!strcmp(w, "wait")) { p->kind = 0; sscanf(tok, " %*s %f", &p->ms); }
-        else if (!strcmp(w, "tap")) { p->kind = 1; sscanf(tok, " %*s %f %f", &p->x0, &p->y0); p->ms = 80; }
+        else if (!strcmp(w, "tap")) {        /* cp6: "tap X Y [MS]": MS the finger's time down (80); under the touch events' step
+                                              * (8.3 ms: "tap X Y 1") the down and the up come in the same event, before one frame */
+            float m = 0;
+            p->kind = 1;
+            p->ms = sscanf(tok, " %*s %f %f %f", &p->x0, &p->y0, &m) == 3 && m >= 1 ? m : 80;
+        }
         else if (!strcmp(w, "drag")) { p->kind = 2; sscanf(tok, " %*s %f %f %f %f %f", &p->x0, &p->y0, &p->x1, &p->y1, &p->ms); }
         else if (!strcmp(w, "hold")) { p->kind = 3; sscanf(tok, " %*s %f %f %f", &p->x0, &p->y0, &p->ms); }
         else if (!strcmp(w, "state") || !strcmp(w, "sms")) {   /* helper I: a state now; an SMS received now */
@@ -519,6 +647,7 @@ static int parse(const char *s, step *st, int max)
             snprintf(p->txt, sizeof p->txt, "%s", a);
         } else if (!strcmp(w, "ring")) { p->kind = 8; p->ms = 20; sscanf(tok, " %*s %f", &p->x0); }   /* helper I */
         else if (!strcmp(w, "power")) { p->kind = 5; p->ms = 20; }      /* the Power key: sleep, or wake if off */
+        else if (!strcmp(w, "powerhold")) { p->kind = 10; p->ms = 20; }   /* P3x: the Power key held 1 s: the power sheet */
         else if (!strcmp(w, "notify")) {     /* helper D: "notify WHO|TITLE|BODY": a pretend notification from the platform */
             p->kind = 6; p->ms = 20;
             const char *a = strstr(tok, "notify") + 6;
@@ -537,6 +666,13 @@ static int parse(const char *s, step *st, int max)
 
 static double memwalk(tk_layer *l, int depth);
 void host_memdump(const char *tag);
+/* the calling thread's CPU time, ms (SBTK_CPU: the shell's work in a frame, without a loaded Mac's waits) */
+static double cpu_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
 static int film(tk_comp *c, const char *out, const char *script, int half)
 {
     step st[192];               /* survival-next: the survival film is long */
@@ -557,9 +693,14 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
     while (t < total || sh_moving()) {
         /* the finger: events at 120 Hz between frames (the touch controller's rate) */
         uint64_t sh0 = tk_us();          /* P3i: the shell's own time in the frame (touch handling + tick) */
+        double cpu0 = cpu_ms();
         for (int sub = 1; sub <= 2; sub++) {
             float te = t + dt * sub / 2;
             while (si < n && te >= s0 + st[si].ms) {
+                if (phase == -1 && st[si].kind == 1) {   /* cp6: a tap shorter than the touch events' step: down and up now */
+                    sh_touch(0, st[si].x0, st[si].y0, te);
+                    sh_touch(2, st[si].x0, st[si].y0, te);
+                }
                 if (phase >= 0 && st[si].kind && st[si].kind != 4 && st[si].kind != 5 && st[si].kind != 6 && st[si].kind < 8) {
                     step *p = &st[si];
                     float x = p->kind == 2 || p->kind == 7 ? p->x1 : p->x0, y = p->kind == 2 || p->kind == 7 ? p->y1 : p->y0;
@@ -587,12 +728,21 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
                 }
                 continue;
             }
+            if (p->kind == 10) {
+                if (phase < 0) { fprintf(stderr, "power held at %.0f ms\n", te); sh_power_held(); phase = 0; }
+                continue;
+            }
             if (p->kind == 5) {
                 if (phase < 0) {
                     fprintf(stderr, "power at %.0f ms: %s\n", te, screen_off || sh_sleeping() ? "wake" : "sleep");
                     if (screen_off || sh_sleeping()) { screen_off = 0; sh_wake(); } else sh_sleep(0);
                     phase = 0;
                 }
+                continue;
+            }
+            if (phase < 0 && p->kind == 1 && p->ms < dt / 2) {   /* cp6: the quick tap's down and up in this one event */
+                if (phase == -1) { sh_touch(0, p->x0, p->y0, te); sh_touch(2, p->x0, p->y0, te); }
+                phase = -2;
                 continue;
             }
             if (phase < 0) { sh_touch(0, p->x0, p->y0, te); phase = 0; continue; }
@@ -612,12 +762,13 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         comms_fake_poll(t);                   /* helper I: the pretend network (comms_now's part on the phone) */
         surv_host_now_ms = (uint64_t)t;          /* survival-next: the simulated USB burst, SOS and the clock */
         int mv = sh_tick(dt / 1000, t);
-        double shell_ms = (tk_us() - sh0) / 1000.0;
+        double shell_ms = (tk_us() - sh0) / 1000.0, shell_cpu = cpu_ms() - cpu0;
         int motion = mv || sh_moving();
         tk_comp_frame(c, motion, 0);
         fprintf(log, "F %d %.1f %s px %d comp %.2f present %.2f total %.2f", frame, t, c->last_half ? "half" : "full",
                c->last_px, c->us_comp / 1000.0, c->us_present / 1000.0, c->last_us / 1000.0);
         fprintf(log, " idle %.2f halfs %.2f shell %.2f", c->us_idle / 1000.0, c->us_halfs / 1000.0, shell_ms);
+        if (getenv("SBTK_CPU")) fprintf(log, " cpu %.2f", shell_cpu);   /* the shell's CPU time in the frame */
         if (getenv("SBTK_HASH")) {             /* what the display shows now (two buffers: the one just presented) */
             uint64_t hh = 1469598103934665603ULL;
             for (size_t i = 0; i < (size_t)TK_W * TK_H; i++) hh = (hh ^ (c->panel.px[i] & 0xffffffu)) * 1099511628211ULL;   /* what shows: no alpha */
@@ -625,6 +776,14 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         }
         fputc('\n', log);
         if (getenv("SBTK_DUMP") && frame == atoi(getenv("SBTK_DUMP"))) write_ppm(getenv("SBTK_DUMPTO"), &c->panel);
+        if (getenv("SBTK_DUMPS")) {                   /* B5: "N,M,...": frames N, M ... to SBTK_DUMPTO-N.ppm */
+            for (const char *q = getenv("SBTK_DUMPS"); *q; q++)
+                if ((q == getenv("SBTK_DUMPS") || q[-1] == ',') && atoi(q) == frame) {
+                    char fn[600];
+                    snprintf(fn, sizeof fn, "%s-%d.ppm", getenv("SBTK_DUMPTO"), frame);
+                    write_ppm(fn, &c->panel);
+                }
+        }
         if (none) ;
         else if (half) {
             tk_bmp_down2(&h, &c->panel);
@@ -767,6 +926,364 @@ static uint32_t *dbl_acquire(void *ctx, int *age)
     req = b; bfno[b] = fno_h++;
     return dbl[b];
 }
+
+/* Track A, 1.0: the host is never a safe start (SBTK_SAFE=1 pretends one) */
+int sh_safe_mode(void) { const char *e = getenv("SBTK_SAFE"); return e && *e == '1'; }
+int sh_boot_reason(char *why, int cap) { if (why && cap > 0) snprintf(why, (size_t)cap, "Started on the host"); return -1; }
+
+/* Track A, 1.0: the host logs a restart / power off and stays up */
+int sh_restart(void) { fprintf(stderr, "host: restart\n"); return 0; }
+int sh_power_off(void) { fprintf(stderr, "host: power off\n"); return 0; }
+
+__attribute__((weak)) void sh_power_held(void) { fprintf(stderr, "host: Power held (no power sheet yet)\n"); }
+
+/* Track A: Software Update on the host. hupd=none (up to date) | found | bad (the SHA-256 differs: staging fails) |
+ * old (an older loader) | installed (this start committed it) picks what the card and the loader say; staging moves
+ * 12 % a call (the phone: 1 MiB a call); install only prints. Nothing is read or written. */
+static void hupd_fill(struct sh_update *u) { if (u) *u = HU; }
+int sh_update_check(struct sh_update *u)
+{
+    if (HU.state == 2 || HU.state == 3) { hupd_fill(u); return 1; }
+    memset(&HU, 0, sizeof HU);
+    if (hupd_mode == 3) { HU.state = -1; snprintf(HU.why, sizeof HU.why, "Updates need the new boot loader."); }
+    else if (hupd_mode == 4) { HU.state = 4; snprintf(HU.version, sizeof HU.version, "1.0.1"); }
+    else if (hupd_mode == 1 || hupd_mode == 2) {
+        HU.state = 1;
+        snprintf(HU.version, sizeof HU.version, "1.0.1");
+        snprintf(HU.notes, sizeof HU.notes, "Software Update, faster Wi-Fi joins and the new Startup settings. Fixes for the card and the lock screen.");
+        HU.size = 19293184;
+    } else snprintf(HU.why, sizeof HU.why, "No update on the card.");
+    fprintf(stderr, "update: check: state %d\n", HU.state);
+    hupd_fill(u);
+    return HU.state == 1;
+}
+int sh_update_stage(struct sh_update *u)
+{
+    if (HU.state == 1) { HU.state = 2; HU.pct = 0; }
+    if (HU.state == 2) {
+        HU.pct += 12;
+        if (hupd_mode == 2 && HU.pct >= 90) {
+            HU.state = -1;
+            snprintf(HU.why, sizeof HU.why, "The update file is damaged (its SHA-256 doesn't match). Nothing was installed.");
+        } else if (HU.pct >= 100) { HU.pct = 100; HU.state = 3; }
+    }
+    hupd_fill(u);
+    return HU.state;
+}
+int sh_update_install(void)
+{
+    if (HU.state != 3) return -1;
+    fprintf(stderr, "update: would arm 1.0.1 in the inactive slot and restart (the host stays up)\n");
+    return 0;
+}
+
+/* Track A: drivers for the shell, simulated (the phone: kern_next.c's block on kern/bt.c, cam.c, shub_more.c,
+ * bathealth.c, haptic.c). Time is the film's clock (surv_host_now_ms) plus 50 ms a call, so a still's polls move on
+ * too. SBTK_BT=fail: Bluetooth's start fails; SBTK_CAM=fail: the camera does not answer; SBTK_PROX=1: something near.
+ * Nothing touches hardware; every change prints a line. */
+static uint64_t hd_now(void) { static uint64_t calls; return surv_host_now_ms + 50 * ++calls; }
+static int hd_env(const char *k, const char *v) { const char *e = getenv(k); return e && !strcmp(e, v); }
+/* Bluetooth: 1.5 s to start, then scans of 11 s (one device more every 0.4 s), repeated while asked, 60 s at most */
+static struct { int on, failed, scan; uint64_t t0, scan_t0, until; } HBT;
+static const struct { const char *name; int rssi; } hbt_dev[] = {
+    { "AirPods Pro", -48 }, { "JBL Flip 5", -61 }, { "Galaxy Buds2", -66 }, { "Mi Smart Band 6", -72 }, { "", -80 },
+    { "LE-Bose QC35 II", -84 },
+};
+#define HBT_N (int)(sizeof hbt_dev / sizeof hbt_dev[0])
+int sh_bt_on(int on)
+{
+    fprintf(stderr, "bluetooth: %s\n", on ? "on" : "off");
+    memset(&HBT, 0, sizeof HBT);
+    if (!on) return 0;
+    HBT.on = 1;
+    HBT.t0 = hd_now();
+    HBT.failed = hd_env("SBTK_BT", "fail");
+    return 0;
+}
+int sh_bt_state(void)
+{
+    if (!HBT.on) return 0;
+    if (hd_now() - HBT.t0 < 1500) return 1;
+    return HBT.failed ? -1 : 2;
+}
+const char *sh_bt_why(void)
+{
+    int s = sh_bt_state();
+    return s == 1 ? "Bluetooth is starting" : s == 2 ? "Bluetooth is on" :
+           s < 0 ? "The Bluetooth firmware is missing (VENDOR firmware/BCM4361B0_semco.hcd)" : "Bluetooth is off";
+}
+int sh_bt_scan(int on)
+{
+    if (!on) { HBT.scan = 0; return 0; }
+    if (sh_bt_state() < 1) return -1;
+    if (!HBT.scan) HBT.scan_t0 = hd_now();
+    HBT.scan = 1;
+    HBT.until = hd_now() + 60000;
+    fprintf(stderr, "bluetooth: scan\n");
+    return 0;
+}
+int sh_bt_count(void)
+{
+    if (sh_bt_state() != 2 || !HBT.scan_t0) return 0;
+    uint64_t now = hd_now();
+    if (HBT.scan && now >= HBT.until) HBT.scan = 0;
+    int n = (int)((now - HBT.scan_t0) / 400);
+    return n > HBT_N ? HBT_N : n;
+}
+int sh_bt_get(int i, char *name, int cap, int *rssi)
+{
+    if (i < 0 || i >= sh_bt_count()) return -1;
+    if (name && cap > 0) snprintf(name, (size_t)cap, "%s", hbt_dev[i].name);
+    if (rssi) *rssi = hbt_dev[i].rssi + (int)(hd_now() / 1000 % 3) - 1;
+    return 0;
+}
+/* the front camera: a moving test picture at 30 fps; a still 0.3 s after it is asked */
+static struct { int on, w, h, still; unsigned seq; uint64_t t0, still_t; uint32_t *px, *spx; uint8_t *bmp; unsigned bmp_len; } HCAM;
+static void hcam_draw(uint32_t *px, int w, int h, unsigned seq)
+{
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            unsigned r = (unsigned)(x * 255 / w), g = (unsigned)(y * 255 / h), b = (seq * 4 + (unsigned)(x + y) / 4) & 255;
+            int bar = ((unsigned)y + seq * 6) % (unsigned)h < (unsigned)h / 12;
+            px[y * w + x] = 0xFF000000u | (bar ? 0xF0F0F0u : r << 16 | g << 8 | b);
+        }
+}
+int sh_cam_open(int w, int h)
+{
+    if (HCAM.on) return -1;
+    if (w < 8 || h < 8 || w > 816 || h > 816 || w * h * 4 > 2 * 1024 * 1024) return -2;
+    fprintf(stderr, "camera: open %d x %d\n", w, h);
+    if (hd_env("SBTK_CAM", "fail")) return -5;
+    free(HCAM.px);
+    HCAM.px = malloc((size_t)w * (size_t)h * 4);
+    if (!HCAM.px) return -8;
+    HCAM.on = 1; HCAM.w = w; HCAM.h = h; HCAM.seq = 0; HCAM.still = 0;
+    HCAM.t0 = hd_now();
+    return 0;
+}
+const uint32_t *sh_cam_frame(int *w, int *h, unsigned *seq)
+{
+    if (!HCAM.on) return 0;
+    uint64_t e = hd_now() - HCAM.t0;
+    if (e < 600) return 0;                                         /* the sensor's start */
+    unsigned s = (unsigned)((e - 600) / 33) + 1;
+    if (s != HCAM.seq) { HCAM.seq = s; hcam_draw(HCAM.px, HCAM.w, HCAM.h, s); }
+    if (w) *w = HCAM.w;
+    if (h) *h = HCAM.h;
+    if (seq) *seq = HCAM.seq;
+    return HCAM.px;
+}
+int sh_cam_still(void)
+{
+    if (!HCAM.on || HCAM.still == 1) return -1;
+    HCAM.still = 1;
+    HCAM.still_t = hd_now() + 300;
+    fprintf(stderr, "camera: a still\n");
+    return 0;
+}
+const uint32_t *sh_cam_still_get(int *w, int *h, const unsigned char **bmp, unsigned *bmp_len)
+{
+    enum { SW = 612, SH = 816 };
+    if (!HCAM.on || !HCAM.still || (HCAM.still == 1 && hd_now() < HCAM.still_t)) return 0;
+    if (HCAM.still == 1) {
+        if (!HCAM.spx) HCAM.spx = malloc((size_t)SW * SH * 4);
+        HCAM.bmp_len = 54 + SW * 3 * SH;                           /* 612 x 3 = 1836: rows need no padding */
+        if (!HCAM.bmp) HCAM.bmp = malloc(HCAM.bmp_len);
+        if (!HCAM.spx || !HCAM.bmp) return 0;
+        hcam_draw(HCAM.spx, SW, SH, HCAM.seq);
+        uint8_t *b = HCAM.bmp;
+        memset(b, 0, 54);
+        b[0] = 'B'; b[1] = 'M';
+        uint32_t v[] = { HCAM.bmp_len, 0, 54, 40, SW, SH };
+        for (int k = 0; k < 6; k++) memcpy(b + 2 + 4 * k, &v[k], 4);
+        b[26] = 1; b[28] = 24;
+        for (int y = 0; y < SH; y++)
+            for (int x = 0; x < SW; x++) {
+                uint32_t p = HCAM.spx[(SH - 1 - y) * SW + x];
+                uint8_t *d = b + 54 + (y * SW + x) * 3;
+                d[0] = (uint8_t)p; d[1] = (uint8_t)(p >> 8); d[2] = (uint8_t)(p >> 16);
+            }
+        HCAM.still = 2;
+    }
+    if (w) *w = SW;
+    if (h) *h = SH;
+    if (bmp) *bmp = HCAM.bmp;
+    if (bmp_len) *bmp_len = HCAM.bmp_len;
+    return HCAM.spx;
+}
+const char *sh_cam_why(void)
+{
+    if (hd_env("SBTK_CAM", "fail")) return "The front camera does not answer";
+    return HCAM.on ? (hd_now() - HCAM.t0 < 600 ? "Starting the front camera" : "Front camera on") : "Camera off";
+}
+void sh_cam_close(void)
+{
+    if (HCAM.on) fprintf(stderr, "camera: close\n");
+    HCAM.on = 0;
+    HCAM.still = 0;
+}
+/* the sensors: an office (about 320 lux, 1013.2 hPa), the phone on a desk */
+int sh_light_lux(void) { return 320 + (int)(hd_now() / 700 % 9) - 4; }
+int sh_pressure_hpa10(void) { return 10132 + (int)(hd_now() / 5000 % 3) - 1; }
+int sh_proximity_near(void) { return hd_env("SBTK_PROX", "1"); }
+int sh_gyro_mdps(int *x, int *y, int *z)
+{
+    int j = (int)(hd_now() / 100 % 7) - 3;
+    if (x) *x = 140 + j * 10;
+    if (y) *y = -70 - j * 5;
+    if (z) *z = 35;
+    return 1;
+}
+void sh_auto_brightness(int on) { sh_pref_set_int("display.auto", !!on); fprintf(stderr, "Auto-Brightness: %s\n", on ? "on" : "off"); }
+int sh_auto_brightness_on(void) { return sh_pref_int("display.auto", 0) == 1; }
+void sh_call_proximity(int on) { fprintf(stderr, "call proximity: %s\n", on ? "on" : "off"); }
+int sh_battery_health(int *max_pct, int *cycles, char *words, int cap)
+{
+    if (max_pct) *max_pct = 91;
+    if (cycles) *cycles = 212;
+    if (words && cap > 0) snprintf(words, (size_t)cap, "Your battery is in good health.");
+    return 1;
+}
+static const char *const hvib[] = { "ring", "notify", "alarm", "tick", "success", "warning", "error" };
+void sh_haptic_kind(int kind)
+{
+    if (kind >= 0 && kind < (int)(sizeof hvib / sizeof hvib[0])) fprintf(stderr, "haptic: %s\n", hvib[kind]);
+}
+void sh_haptic_stop(void) { fprintf(stderr, "haptic: stop\n"); }
+int sh_haptic_level(void) { return sh_pref_int("haptic.level", 3); }
+void sh_haptic_level_set(int level)
+{
+    level = level < 0 ? 0 : level > 3 ? 3 : level;
+    sh_pref_set_int("haptic.level", level);
+    fprintf(stderr, "haptic: level %d\n", level);
+}
+
+/* Track A: photos (the kernel's kern/photos.c) in RAM, with its limits: the newest 32; a picture of more than 697685
+ * pixels kept at the kernel's smaller size (the kernel averages a box, this picks the nearest pixel). SBTK_PHOTOS=FILE
+ * also keeps them in a file (read at the first call, written at every change), so a run after another shows what a
+ * restart keeps; SBTK_PHOTOS=none: a phone without photo storage; SBTK_PHOTOS_HELD=1: storage busy (the modem on) */
+#define HPH_MAX 32
+#define HPH_MAX_PX 697685ULL
+static struct { int w, h; long long utc; unsigned long long seq; uint32_t *px; } HPH[HPH_MAX];   /* the newest last */
+static int hphn, hph_loaded;
+static unsigned long long hph_seq;
+static const char *hph_why = "";
+static int hph_none(void) { return hd_env("SBTK_PHOTOS", "none"); }
+static void hph_fit(int w, int h, int *sw, int *sh)
+{
+    if ((unsigned long long)w * (unsigned long long)h <= HPH_MAX_PX) { *sw = w; *sh = h; return; }
+    unsigned long long lo = 1, hi = (unsigned long long)w;
+    while (lo < hi) {
+        unsigned long long mid = (lo + hi + 1) / 2, dh = ((unsigned long long)h * mid + (unsigned long long)w / 2) / (unsigned long long)w;
+        if (mid * (dh ? dh : 1) <= HPH_MAX_PX) lo = mid; else hi = mid - 1;
+    }
+    unsigned long long dh = ((unsigned long long)h * lo + (unsigned long long)w / 2) / (unsigned long long)w;
+    *sw = (int)lo;
+    *sh = dh ? (int)dh : 1;
+}
+static void hph_write(void)
+{
+    const char *f = getenv("SBTK_PHOTOS");
+    FILE *o = f && !hph_none() ? fopen(f, "wb") : 0;
+    if (!o) return;
+    fputs("SBTKPHOTOS1\n", o);
+    for (int i = 0; i < hphn; i++) {
+        fprintf(o, "%d %d %lld %llu\n", HPH[i].w, HPH[i].h, HPH[i].utc, HPH[i].seq);
+        fwrite(HPH[i].px, 4, (size_t)HPH[i].w * (size_t)HPH[i].h, o);
+    }
+    fclose(o);
+}
+static void hph_load(void)
+{
+    if (hph_loaded) return;
+    hph_loaded = 1;
+    const char *f = getenv("SBTK_PHOTOS");
+    FILE *in = f && !hph_none() ? fopen(f, "rb") : 0;
+    char line[16];
+    if (!in) return;
+    if (!fgets(line, sizeof line, in) || strcmp(line, "SBTKPHOTOS1\n")) { fclose(in); return; }
+    int w, h;
+    long long utc;
+    unsigned long long seq;
+    while (hphn < HPH_MAX && fscanf(in, "%d %d %lld %llu", &w, &h, &utc, &seq) == 4 && fgetc(in) == '\n') {
+        if (w < 1 || h < 1 || (unsigned long long)w * (unsigned long long)h > HPH_MAX_PX) break;
+        uint32_t *px = malloc((size_t)w * (size_t)h * 4);
+        if (!px || fread(px, 4, (size_t)w * (size_t)h, in) != (size_t)w * (size_t)h) { free(px); break; }
+        HPH[hphn].w = w; HPH[hphn].h = h; HPH[hphn].utc = utc; HPH[hphn].seq = seq; HPH[hphn].px = px;
+        if (seq > hph_seq) hph_seq = seq;
+        hphn++;
+    }
+    fclose(in);
+    fprintf(stderr, "photos: %d from %s\n", hphn, f);
+}
+static int hph_refused(void)
+{
+    hph_load();
+    if (hph_none()) { hph_why = "This phone has no photo storage (the store entry sbos-photos)."; return 1; }
+    if (hd_env("SBTK_PHOTOS_HELD", "1")) { hph_why = "Storage is busy while the modem is on. Try again later."; return 1; }
+    return 0;
+}
+int sh_photo_save(const uint32_t *argb, int w, int h)
+{
+    hph_why = "";
+    if (!argb || w < 1 || h < 1 || w > 4096 || h > 4096) { hph_why = "This picture can't be saved (its size)."; return -1; }
+    if (hph_refused()) return -1;
+    int sw, sh;
+    hph_fit(w, h, &sw, &sh);
+    uint32_t *px = malloc((size_t)sw * (size_t)sh * 4);
+    if (!px) { hph_why = "No memory to save the photo."; return -1; }
+    for (int y = 0; y < sh; y++)
+        for (int x = 0; x < sw; x++)
+            px[y * sw + x] = 0xff000000u | argb[(size_t)(y * h / sh) * (size_t)w + (size_t)(x * w / sw)];
+    if (hphn == HPH_MAX) {                      /* the oldest goes */
+        free(HPH[0].px);
+        memmove(HPH, HPH + 1, sizeof HPH[0] * (HPH_MAX - 1));
+        hphn--;
+    }
+    HPH[hphn].w = sw; HPH[hphn].h = sh; HPH[hphn].utc = (long long)time(0); HPH[hphn].seq = ++hph_seq; HPH[hphn].px = px;
+    hphn++;
+    hph_write();
+    fprintf(stderr, "photos: saved %dx%d (%d kept)\n", sw, sh, hphn);
+    return 0;
+}
+int sh_photo_count(void) { hph_load(); return hph_none() ? 0 : hphn; }
+int sh_photo_get(int i, uint32_t *argb, int cap_px, int *w, int *h, long long *utc)
+{
+    hph_why = "";
+    hph_load();
+    if (hph_none() || i < 0 || i >= hphn) { hph_why = "No such photo."; return -1; }
+    int k = hphn - 1 - i, px = HPH[k].w * HPH[k].h;
+    if (w) *w = HPH[k].w;
+    if (h) *h = HPH[k].h;
+    if (utc) *utc = HPH[k].utc;
+    if (!argb) return px;
+    if (cap_px < px) { hph_why = "The photo is larger than the space for it."; return -1; }
+    memcpy(argb, HPH[k].px, (size_t)px * 4);
+    return px;
+}
+int sh_photo_delete(int i)
+{
+    hph_why = "";
+    if (hph_refused()) return -1;
+    if (i < 0 || i >= hphn) { hph_why = "No such photo."; return -1; }
+    int k = hphn - 1 - i;
+    free(HPH[k].px);
+    memmove(HPH + k, HPH + k + 1, sizeof HPH[0] * (size_t)(hphn - 1 - k));
+    hphn--;
+    hph_write();
+    fprintf(stderr, "photos: deleted (%d kept)\n", hphn);
+    return 0;
+}
+const char *sh_photo_why(void) { return hph_why; }
+
+/* Track A, 1.0: the host has no clocks to raise; keep-awake holders are counted and logged */
+void sh_perf_mode(int conservative) { (void)conservative; }
+void sh_perf_hold(int ms) { (void)ms; }
+int sh_hold_awake(const char *who, int on) { static int n; n += on ? 1 : (n > 0 ? -1 : 0); fprintf(stderr, "host: keep awake %s %s (%d)\n", who ? who : "?", on ? "on" : "off", n); return n; }
+
+static int host_low;
+void sh_low_power(int on) { host_low = !!on; }
+int sh_low_power_on(void) { return host_low; }
 
 int main(int argc, char **argv)
 {
