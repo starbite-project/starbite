@@ -1439,6 +1439,22 @@ static void scheduled(void *context);
 - (void)addCompletedHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_completedHandlers addObject:[block copy]];}}
 - (void)enqueue {}
 - (void)event:(id<MTLEvent>)event value:(uint64_t)value signal:(bool)signal {
+#if !TARGET_OS_IPHONE
+ // Starbite (macOS Sequoia, S2l 2026-11-12): WindowServer's CoreAnimation encodes waits and signals on shared events this
+ // device did not make (the display's / another process's, or nil from an unimplemented import), and "foreign event"
+ // refused every one of its command buffers: no frame was ever drawn. A foreign wait is taken as satisfied (our queue
+ // already runs in order); a foreign signal is delivered from the CPU once this command buffer has completed.
+ if(!event || ![(id)event isKindOfClass:[NBEvent class]]) {
+  static std::atomic<int> told{0};
+  if(told.fetch_add(1)<4)NBLOG(@"native-metal: foreign event %s (%s, value %llu): %s",event?object_getClassName(event):"nil",
+   signal?"signal":"wait",(unsigned long long)value,signal?"signalled on completion":"taken as satisfied");
+  if(signal && event && [(id)event respondsToSelector:@selector(setSignaledValue:)]) {
+   id<MTLSharedEvent> shared=(id<MTLSharedEvent>)event;
+   [self addCompletedHandler:^(id<MTLCommandBuffer> cb){(void)cb;if(shared.signaledValue<value)shared.signaledValue=value;}];
+  }
+  return;
+ }
+#endif
  if(![(id)event isKindOfClass:[NBEvent class]]){[self refuse:@"foreign event"];return;}
  if(self.committed){[self refuse:@"event encoded after commit"];return;}
  [_resourceOwners addObject:event];

@@ -271,6 +271,15 @@ static id open_device(mach_port_t port)
 	}
 	if (!device)
 		snprintf(sbmtl_error, sizeof(sbmtl_error), "device refused: %s", nmb_last_error());
+	{
+		/* load addresses, so "SMP" samples (sweetsample=) of these images can be symbolicated */
+		Dl_info vk = { 0 };
+		void *h = dlopen(driver, RTLD_NOLOAD | RTLD_LAZY);	/* already loaded by the bridge (RTLD_LOCAL): no new load */
+		void *gipa = h ? dlsym(h, "vkGetInstanceProcAddr") : NULL;
+		if (gipa)
+			dladdr(gipa, &vk);
+		sm2_log("images: StarbiteMetal %p, libvulkan_panfrost %p", me.dli_fbase, vk.dli_fbase);
+	}
 	sm2_log("device %s in %.0f ms (driver %s, cache %s, registry id %#llx)%s%s",
 		device ? [[device name] UTF8String] : "refused", (CFAbsoluteTimeGetCurrent() - t0) * 1000, driver, cache,
 		(unsigned long long)registryID, device ? "" : ": ", device ? "" : nmb_last_error());
