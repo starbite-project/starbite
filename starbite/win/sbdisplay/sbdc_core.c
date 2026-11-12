@@ -389,6 +389,60 @@ void sbdc_blit_xf_c(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsign
     }
 }
 
+struct sbdc_rect sbdc_xf_panel_rect(const struct sbdc_xf *x, struct sbdc_rect r)
+{
+    struct sbdc_rect o = { 0, 0, 0, 0 };
+    unsigned sw, sh, W = x->lw, H = x->lh, lx0, lx1, ly0, ly1, X1, Y1;
+    sbdc_xf_src_size(x, &sw, &sh);
+    if (r.l < 0)
+        r.l = 0;
+    if (r.t < 0)
+        r.t = 0;
+    if (r.r > (int)sw)
+        r.r = (int)sw;
+    if (r.b > (int)sh)
+        r.b = (int)sh;
+    if (r.r <= r.l || r.b <= r.t || !x->den)
+        return o;
+    switch (x->rot) {                     /* as sbdc_blit_xf_c */
+    case SBDC_ROT_90:  lx0 = (unsigned)r.t; lx1 = (unsigned)r.b; ly0 = H - (unsigned)r.r; ly1 = H - (unsigned)r.l; break;
+    case SBDC_ROT_180: lx0 = W - (unsigned)r.r; lx1 = W - (unsigned)r.l; ly0 = H - (unsigned)r.b; ly1 = H - (unsigned)r.t; break;
+    case SBDC_ROT_270: lx0 = W - (unsigned)r.b; lx1 = W - (unsigned)r.t; ly0 = (unsigned)r.l; ly1 = (unsigned)r.r; break;
+    default:           lx0 = (unsigned)r.l; lx1 = (unsigned)r.r; ly0 = (unsigned)r.t; ly1 = (unsigned)r.b; break;
+    }
+    X1 = up(lx1, x);
+    Y1 = up(ly1, x);
+    o.l = (int)up(lx0, x);
+    o.t = (int)up(ly0, x);
+    o.r = (int)(X1 > x->pw ? x->pw : X1);
+    o.b = (int)(Y1 > x->ph ? x->ph : Y1);
+    if (o.r < o.l)
+        o.r = o.l;
+    if (o.b < o.t)
+        o.b = o.t;
+    return o;
+}
+
+unsigned sbdc_xf_lines(const struct sbdc_xf *x, struct sbdc_rect r)
+{
+    int n = (x->rot == SBDC_ROT_90 || x->rot == SBDC_ROT_270) ? r.r - r.l : r.b - r.t;
+    return n > 0 ? (unsigned)n : 0U;
+}
+
+struct sbdc_rect sbdc_xf_band(const struct sbdc_xf *x, struct sbdc_rect r, unsigned first, unsigned n)
+{
+    if (x->rot == SBDC_ROT_90 || x->rot == SBDC_ROT_270) {
+        long long a = (long long)r.l + first, b = a + n;
+        r.l = a < r.r ? (int)a : r.r;
+        r.r = b < r.r ? (int)b : r.r;
+    } else {
+        long long a = (long long)r.t + first, b = a + n;
+        r.t = a < r.b ? (int)a : r.b;
+        r.b = b < r.b ? (int)b : r.b;
+    }
+    return r;
+}
+
 /* ---- fast paths (T10): NEON on ARM64, bit-identical to the _c versions above (host-tested) ------------ */
 
 #if defined(__aarch64__) || defined(_M_ARM64)
@@ -571,6 +625,23 @@ void sbdc_blit_xf(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned
                     d[X] = *(const sbdc_u32 *)(base + (long long)((X * x->den) >> x->shift) * step);
             }
         }
+    }
+}
+
+void sbdc_xf_blit_lines(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch,
+                        const struct sbdc_rect *R, const unsigned *start, unsigned nr, unsigned first, unsigned n,
+                        const struct sbdc_xf *x)
+{
+    unsigned end = first + n;
+    for (unsigned i = 0; i < nr && first < end; ++i) {
+        unsigned a, b;
+        if (first >= start[i + 1])
+            continue;
+        a = first > start[i] ? first - start[i] : 0U;
+        b = (end < start[i + 1] ? end : start[i + 1]) - start[i];
+        if (b > a)
+            sbdc_blit_xf(dst, dst_pitch, src, src_pitch, sbdc_xf_band(x, R[i], a, b - a), x);
+        first = start[i + 1];
     }
 }
 

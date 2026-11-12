@@ -177,6 +177,14 @@ NTSTATUS MwDisplayStart(MW_ADAPTER *A)
     PHYSICAL_ADDRESS pa;
     NTSTATUS st;
 
+    /* 6.57: rotation (Settings > Display orientation), the KMDOD way: the path offers 90/180/270, source modes stay
+     * in the panel's orientation, blt presents with Flags.Rotate are rotated in the CPU copy. 0 = identity only. */
+    A->RotAllowed = S9GetDword(L"Parameters", L"Rotation", 1) != 0;
+    A->RotateFlips = S9GetDword(L"Parameters", L"RotateFlips", 0);
+    InterlockedExchange(&A->Rot, SBDC_ROT_0);
+    InterlockedExchange(&A->ShowRot, 0);
+    MwLog(A, L"RotAllowed", A->RotAllowed);
+    MwLog(A, L"RotateFlips", A->RotateFlips);
     st = A->Dxgk.DxgkCbAcquirePostDisplayOwnership(A->Dxgk.DeviceHandle, &A->Fb);
     MwLog(A, L"AcquirePostDisplay", (ULONG)st);
     if (!NT_SUCCESS(st) || A->Fb.Width == 0 || BytesPerPixel(A->Fb.ColorFormat) == 0)
@@ -291,6 +299,8 @@ NTSTATUS APIENTRY MwQueryChildStatus(IN_CONST_PVOID MiniportDeviceContext, INOUT
         ChildStatus->HotPlug.Connected = TRUE;
         return STATUS_SUCCESS;
     case StatusRotation:
+        /* 6.57: the angle of the display itself (a monitor with an orientation sensor, MonitorOrientationAwareness);
+         * ours reports MOA_NONE and never turns, so 0 also when the desktop is rotated (the path carries that) */
         ChildStatus->Rotation.Angle = 0;
         return STATUS_SUCCESS;
     default:
@@ -310,7 +320,36 @@ NTSTATUS APIENTRY MwQueryDeviceDescriptor(IN_CONST_PVOID MiniportDeviceContext, 
 }
 
 
-/* ---- VidPN: one source, one target, one mode, identity everything ---- */
+/* ---- VidPN: one source, one target, one mode, identity scaling; rotation as sbdisplay (6.57) ---- */
+
+/* 6.57: a path's rotation as SBDC_ROT_* (identity when Windows leaves it open); 0 = not one we do (the OFFSET values,
+ * or 90/180/270 with Parameters\Rotation = 0) */
+static ULONG PathRot(MW_ADAPTER *Dev, D3DKMDT_VIDPN_PRESENT_PATH_ROTATION R)
+{
+    if (R == D3DKMDT_VPPR_UNINITIALIZED || R == D3DKMDT_VPPR_UNPINNED || R == D3DKMDT_VPPR_NOTSPECIFIED ||
+        R == D3DKMDT_VPPR_IDENTITY)
+        return SBDC_ROT_0;
+    if (Dev->RotAllowed && (R == D3DKMDT_VPPR_ROTATE90 || R == D3DKMDT_VPPR_ROTATE180 || R == D3DKMDT_VPPR_ROTATE270))
+        return (ULONG)R;                  /* SBDC_ROT_* are these values */
+    return 0;
+}
+
+/* 6.57: the rotation of the VidPN's first path (ours has one), SBDC_ROT_0 when there is none */
+static ULONG VidPnRot(MW_ADAPTER *Dev, const DXGK_VIDPN_INTERFACE *VidPn, D3DKMDT_HVIDPN H, ULONG *Asked)
+{
+    D3DKMDT_HVIDPNTOPOLOGY topo;
+    const DXGK_VIDPNTOPOLOGY_INTERFACE *topoIf;
+    const D3DKMDT_VIDPN_PRESENT_PATH *path = NULL;
+    ULONG rot = SBDC_ROT_0;
+    *Asked = 0;
+    if (NT_SUCCESS(VidPn->pfnGetTopology(H, &topo, &topoIf)) &&
+        NT_SUCCESS(topoIf->pfnAcquireFirstPathInfo(topo, &path)) && path != NULL) {
+        *Asked = (ULONG)path->ContentTransformation.Rotation;
+        rot = PathRot(Dev, path->ContentTransformation.Rotation);
+        topoIf->pfnReleasePathInfo(topo, path);
+    }
+    return rot;
+}
 
 NTSTATUS APIENTRY MwIsSupportedVidPn(IN_CONST_HANDLE hAdapter, DXGKARG_ISSUPPORTEDVIDPN *Arg)
 {
@@ -343,6 +382,12 @@ NTSTATUS APIENTRY MwIsSupportedVidPn(IN_CONST_HANDLE hAdapter, DXGKARG_ISSUPPORT
             setIf->pfnReleaseModeInfo(set, pinned);
     }
     vidpn->pfnReleaseSourceModeSet(Arg->hDesiredVidPn, set);
+    if (Arg->IsVidPnSupported && dev->RotAllowed) {
+        /* 6.57: and a rotation we do (Parameters\Rotation = 0 keeps the old check, which never looked) */
+        ULONG asked;
+        if (VidPnRot(dev, vidpn, Arg->hDesiredVidPn, &asked) == 0)
+            Arg->IsVidPnSupported = FALSE;
+    }
     return STATUS_SUCCESS;
 }
 
@@ -469,7 +514,8 @@ NTSTATUS APIENTRY MwEnumVidPnCofuncModality(IN_CONST_HANDLE hAdapter,
                 MwLog(dev, L"Fail_AddTargetMode", (ULONG)r);
         }
 
-        /* Identity scaling and rotation, and nothing else. */
+        /* Identity scaling; identity rotation, and with Parameters\Rotation also 90/180/270 (6.57: done in the
+         * blt presents' CPU copy, KMDOD's rule; DWM renders its flips pre-rotated), Offset0 as sbdisplay. */
         if (NT_SUCCESS(r) && !xfPivot &&
             (path->ContentTransformation.Scaling == D3DKMDT_VPPS_UNPINNED ||
              path->ContentTransformation.Rotation == D3DKMDT_VPPR_UNPINNED)) {
@@ -483,6 +529,14 @@ NTSTATUS APIENTRY MwEnumVidPnCofuncModality(IN_CONST_HANDLE hAdapter,
                 RtlZeroMemory(&upd.ContentTransformation.RotationSupport,
                               sizeof(upd.ContentTransformation.RotationSupport));
                 upd.ContentTransformation.RotationSupport.Identity = 1;
+                if (dev->RotAllowed) {
+                    upd.ContentTransformation.RotationSupport.Rotate90 = 1;
+                    upd.ContentTransformation.RotationSupport.Rotate180 = 1;
+                    upd.ContentTransformation.RotationSupport.Rotate270 = 1;
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM1_3_PATH_INDEPENDENT_ROTATION)
+                    upd.ContentTransformation.RotationSupport.Offset0 = 1;
+#endif
+                }
             }
             r = topoIf->pfnUpdatePathSupportInfo(topo, &upd);
         }
@@ -535,6 +589,15 @@ NTSTATUS APIENTRY MwCommitVidPn(IN_CONST_HANDLE hAdapter, const DXGKARG_COMMITVI
         setIf->pfnReleaseModeInfo(set, pinned);
         st = ours ? STATUS_SUCCESS : STATUS_GRAPHICS_INVALID_VIDPN;
         dev->PathActive = ours;
+        if (ours && dev->RotAllowed) {
+            /* 6.57: the path's rotation. One we never offered (an OFFSET value) is logged and shown unrotated rather
+             * than refused: a refused commit in full mode can leave the boot without a desktop. */
+            ULONG asked, rot = VidPnRot(dev, vidpn, Arg->hFunctionalVidPn, &asked);
+            dev->RotPathAsked = asked;
+            MwLog(dev, L"CommitRotationAsked", asked);
+            InterlockedExchange(&dev->Rot, (LONG)(rot ? rot : SBDC_ROT_0));
+            MwLog(dev, L"Rotation", (ULONG)dev->Rot);
+        }
     } else if (NT_SUCCESS(st)) {
         /* Nothing pinned: the source is being turned off. AcquirePinnedModeInfo
          * says so with an informational status (0x401E0307), which is not
@@ -549,11 +612,23 @@ NTSTATUS APIENTRY MwCommitVidPn(IN_CONST_HANDLE hAdapter, const DXGKARG_COMMITVI
     return st;
 }
 
+/* 6.57: orientation changes arrive here without a new mode (SupportSmoothRotation), as in sbdisplay */
 NTSTATUS APIENTRY MwUpdateActiveVidPnPresentPath(IN_CONST_HANDLE hAdapter,
                                                  const DXGKARG_UPDATEACTIVEVIDPNPRESENTPATH *Arg)
 {
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(Arg);
+    MW_ADAPTER *dev = (MW_ADAPTER *)hAdapter;
+    ULONG rot;
+    if (!dev->RotAllowed)
+        return STATUS_SUCCESS;            /* Parameters\Rotation = 0: as before */
+    dev->RotPathAsked = (ULONG)Arg->VidPnPresentPathInfo.ContentTransformation.Rotation;
+    MwLog(dev, L"PathRotationAsked", dev->RotPathAsked);
+    rot = PathRot(dev, Arg->VidPnPresentPathInfo.ContentTransformation.Rotation);
+    if (!rot)
+        return STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED;
+    if ((LONG)rot != dev->Rot) {
+        InterlockedExchange(&dev->Rot, (LONG)rot);
+        MwLog(dev, L"Rotation", rot);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -585,8 +660,9 @@ NTSTATUS APIENTRY MwRecommendMonitorModes(IN_CONST_HANDLE hAdapter,
 NTSTATUS APIENTRY MwQueryVidPnHWCapability(IN_CONST_HANDLE hAdapter,
                                            DXGKARG_QUERYVIDPNHWCAPABILITY *Arg)
 {
-    UNREFERENCED_PARAMETER(hAdapter);
+    MW_ADAPTER *dev = (MW_ADAPTER *)hAdapter;
     RtlZeroMemory(&Arg->VidPnHWCaps, sizeof(Arg->VidPnHWCaps));
+    Arg->VidPnHWCaps.DriverRotation = dev->RotAllowed ? 1 : 0;   /* 6.57: rotated by the driver, in software */
     return STATUS_SUCCESS;
 }
 

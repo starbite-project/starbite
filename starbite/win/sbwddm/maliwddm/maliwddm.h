@@ -119,6 +119,10 @@ typedef struct _MW_PRESENT_OP {
      * interrupt must report once the flip is done, for dxgkrnl to count the flip as completed */
     PHYSICAL_ADDRESS SrcPhys;
     BOOLEAN SrcPhysValid;
+    /* 6.57: the rotation the copy applies (SBDC_ROT_90..270; anything else = none). Blts: the path's rotation when
+     * DXGKARG_PRESENT.Flags.Rotate was set (the source then holds the image in the desktop's orientation and the
+     * rectangles are in its coordinates). Flips: the path's rotation only under Parameters\RotateFlips = 1. */
+    ULONG Rot;
 } MW_PRESENT_OP;
 
 /* T27: one blt copy, split into chunks of MW_COPY_CHUNK_ROWS rows over the rectangles taken together. The rectangles
@@ -132,6 +136,11 @@ typedef struct _MW_COPY_JOB {
     LONG RowStart[MW_MAX_RECTS + 1];
     LONG Chunks;
     BOOLEAN Neon;               /* T31: rows copied by CopyRowNeon */
+    /* 6.57: a rotated blt: chunks are MW_COPY_CHUNK_ROWS presented lines of XR (sbdc_xf_blit_lines), not rows of R */
+    BOOLEAN Rotated;
+    struct sbdc_xf Xf;
+    struct sbdc_rect XR[MW_MAX_RECTS];
+    unsigned XStart[MW_MAX_RECTS + 1];
     volatile LONG Next, Done;
 } MW_COPY_JOB;
 
@@ -421,7 +430,17 @@ struct _MW_ADAPTER {
     ULONG ScratchMaps, ScratchPtes;
     struct { volatile LONG Seq; ULONG64 Head; PFN_NUMBER Pfn; } FaultPend;
     LONG FaultPendDone;
+    /* 6.57: display rotation (Settings > Display orientation). Parameters\Rotation (default 1; 0 = identity only, as
+     * before) offers 90/180/270 on the path; source modes stay in the panel's orientation. Rot = the path's rotation
+     * (SBDC_ROT_*, from CommitVidPn / UpdateActiveVidPnPresentPath). Blt presents with Flags.Rotate are rotated in the
+     * CPU copy; flips are shown as they are (DWM renders them pre-rotated), unless Parameters\RotateFlips = 1:
+     * then flips while rotated go through the emulated scanout, which copies them rotated where they fit (ShowRot). */
+    ULONG RotAllowed, RotateFlips;
+    volatile LONG Rot, ShowRot;
+    ULONG RotatedBlts, RotatedFlips, RotBltWide, FlipRotateFlag, RotPathAsked, RotFlipCpu, RotFlipNoFit, RotFlipAliased;
+    ULONG64 RotBlt100ns;
 };
+#define MW_ROTATED(r) ((ULONG)(r) == SBDC_ROT_90 || (ULONG)(r) == SBDC_ROT_180 || (ULONG)(r) == SBDC_ROT_270)
 
 /* ---- trace: Seen_<ddi>, Fail_<ddi> in the device's registry key ---- */
 void MwLog(MW_ADAPTER *A, PCWSTR Name, ULONG Value);

@@ -585,6 +585,109 @@ static void test_display(void)
         free(d2);
     }
 
+    /* 6.57 (sbwddm full mode, rotated blt presents): the panel rectangle a presented rectangle writes, and copies cut
+     * into line bands / chunks (as the split copy over CPUs does them) against the whole copy, at the real sizes
+     * (1440 x 2960 panel, mode = panel, presented 2960 x 1440 at 90/270) and at the scaled T9 modes */
+    {
+        static const unsigned sc[3][2] = { { 1, 0 }, { 3, 2 }, { 1, 1 } };
+        unsigned pitch_px = 2980, seed = 777, badr = 0, badb = 0, badc = 0, runs = 0;
+        uint32_t *bs = malloc((size_t)pitch_px * 2960 * 4), *d1 = malloc(1440 * 2960 * 4), *d2 = malloc(1440 * 2960 * 4);
+        for (unsigned i = 0; i < pitch_px * 2960; ++i)
+            bs[i] = (i * 2654435761u) | 1u;    /* never 0, the cleared panel */
+        for (int m = 0; m < 3; ++m)
+            for (unsigned rot = 1; rot <= 4; ++rot) {
+                struct sbdc_xf xf = { (1440 * sc[m][0]) >> sc[m][1], (2960 * sc[m][0]) >> sc[m][1], 1440, 2960, rot,
+                                      sc[m][0], sc[m][1], NULL };
+                unsigned sw, sh;
+                sbdc_xf_src_size(&xf, &sw, &sh);
+                for (int k = 0; k < (m == 0 ? 40 : 12); ++k) {
+                    struct sbdc_rect R[5], pr;
+                    unsigned start[6], nr = 1 + (unsigned)(k % 5), total;
+                    for (unsigned i = 0; i < nr; ++i) {
+                        unsigned a, b, c, e;
+                        seed = seed * 1103515245u + 12345u; a = (seed >> 8) % sw;
+                        seed = seed * 1103515245u + 12345u; b = (seed >> 8) % sw;
+                        seed = seed * 1103515245u + 12345u; c = (seed >> 8) % sh;
+                        seed = seed * 1103515245u + 12345u; e = (seed >> 8) % sh;
+                        R[i] = (struct sbdc_rect){ (int)(a < b ? a : b), (int)(c < e ? c : e), (int)(a < b ? b : a) + 1,
+                                                   (int)(c < e ? e : c) + 1 };
+                        if (k == 0 && i == 0)
+                            R[i] = (struct sbdc_rect){ 0, 0, (int)sw, (int)sh };   /* the whole frame */
+                    }
+                    /* (a) the panel rectangle = the bounding box of what one rectangle writes, and all of it written */
+                    memset(d1, 0, 1440 * 2960 * 4);
+                    sbdc_blit_xf((uint8_t *)d1, 1440 * 4, (const uint8_t *)bs, pitch_px * 4, R[0], &xf);
+                    pr = sbdc_xf_panel_rect(&xf, R[0]);
+                    {
+                        int l = 1440, t = 2960, r = 0, b = 0;
+                        unsigned long long n = 0;
+                        for (int y = 0; y < 2960; ++y)
+                            for (int x = 0; x < 1440; ++x)
+                                if (d1[y * 1440 + x]) {
+                                    n++;
+                                    if (x < l) l = x;
+                                    if (y < t) t = y;
+                                    if (x + 1 > r) r = x + 1;
+                                    if (y + 1 > b) b = y + 1;
+                                }
+                        if (l != pr.l || t != pr.t || r != pr.r || b != pr.b ||
+                            n != (unsigned long long)(pr.r - pr.l) * (unsigned long long)(pr.b - pr.t)) {
+                            if (badr++ < 3)
+                                printf("  panel rect: mode %d rot %u got %d,%d-%d,%d want %d,%d-%d,%d\n", m, rot, pr.l,
+                                       pr.t, pr.r, pr.b, l, t, r, b);
+                        }
+                    }
+                    /* (b) one rectangle in 16-line bands, last band first: the same pixels, and each band whole panel
+                     * rows of the rectangle's panel columns (so CPUs copying different bands never share a row) */
+                    memset(d2, 0, 1440 * 2960 * 4);
+                    total = sbdc_xf_lines(&xf, R[0]);
+                    {
+                        int rows = 0, ok = 1;
+                        for (int f = (int)((total + 15) / 16) - 1; f >= 0; --f) {
+                            struct sbdc_rect band = sbdc_xf_band(&xf, R[0], (unsigned)f * 16, 16), bp;
+                            sbdc_blit_xf((uint8_t *)d2, 1440 * 4, (const uint8_t *)bs, pitch_px * 4, band, &xf);
+                            bp = sbdc_xf_panel_rect(&xf, band);
+                            if (bp.b > bp.t && (bp.l != pr.l || bp.r != pr.r))
+                                ok = 0;
+                            rows += bp.b - bp.t;
+                        }
+                        if (!ok || rows != pr.b - pr.t || memcmp(d1, d2, 1440 * 2960 * 4)) {
+                            if (badb++ < 3)
+                                printf("  bands: mode %d rot %u rect %d,%d-%d,%d\n", m, rot, R[0].l, R[0].t, R[0].r, R[0].b);
+                        }
+                    }
+                    /* (c) several rectangles as one split job (sbdc_xf_blit_lines, chunks of 16 lines in a scrambled
+                     * order) against each rectangle copied whole */
+                    memset(d1, 0, 1440 * 2960 * 4);
+                    memset(d2, 0, 1440 * 2960 * 4);
+                    start[0] = 0;
+                    for (unsigned i = 0; i < nr; ++i) {
+                        sbdc_blit_xf((uint8_t *)d1, 1440 * 4, (const uint8_t *)bs, pitch_px * 4, R[i], &xf);
+                        start[i + 1] = start[i] + sbdc_xf_lines(&xf, R[i]);
+                    }
+                    {
+                        unsigned chunks = (start[nr] + 15) / 16;
+                        for (unsigned j = 0; j < chunks; ++j) {
+                            unsigned c = (j * 7919u) % chunks;   /* every chunk once (7919 is prime) unless chunks % 7919 == 0 */
+                            if (chunks % 7919u == 0)
+                                c = j;
+                            sbdc_xf_blit_lines((uint8_t *)d2, 1440 * 4, (const uint8_t *)bs, pitch_px * 4, R, start, nr,
+                                               c * 16, 16, &xf);
+                        }
+                    }
+                    runs++;
+                    if (memcmp(d1, d2, 1440 * 2960 * 4) && badc++ < 3)
+                        printf("  chunks: mode %d rot %u nr %u\n", m, rot, nr);
+                }
+            }
+        CHECK(!badr, "rotated panel rectangles exact: %u/%u", runs - badr, runs);
+        CHECK(!badb, "rotated copies in line bands identical to whole: %u/%u", runs - badb, runs);
+        CHECK(!badc, "rotated split jobs (chunks of 16 lines, any order) identical to whole: %u/%u", runs - badc, runs);
+        free(bs);
+        free(d1);
+        free(d2);
+    }
+
     /* brightness */
     CHECK(sbdc_level_to_aor(100) == 0x000c, "100 -> 0x000c");
     CHECK(sbdc_level_to_aor(64) == 0x0440, "64 -> S-Boot normal");

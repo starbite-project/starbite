@@ -2049,6 +2049,114 @@ Every app failure must be a removed device that the app or DWM recovers from.
 - **Stage `sbwddm-t49`** (sbumd e01fa73f = 0137, 0138, 0141, 0149 on sb-int; 0139 reverted). T49b = the same stage
   with the noidvs flag.
 
+### 6.57 Full-mode rotation (landscape) (built 2026-11-12, not yet on the phone)
+
+Settings > Display > Display orientation in full mode. Until now sbwddm's path offered identity only. Our scanout
+(DECON's IDMA channel 0) cannot rotate, so rotation must come from Windows or from the driver's CPU copies.
+
+**The WDDM rules (Microsoft's documentation):**
+- **The primary keeps the panel's orientation.** "The Microsoft DirectX graphics kernel subsystem uses non-rotated
+  surface dimensions to create the shared primary surface." The rotation reaches the driver as the path's
+  `ContentTransformation.Rotation` in `DxgkDdiCommitVidPn` and `DxgkDdiUpdateActiveVidPnPresentPath`. Angles are
+  counter-clockwise. Support is reported per path through `pfnUpdatePathSupportInfo` in
+  `DxgkDdiEnumVidPnCofuncModality`.
+  ([Supporting Rotation in a Display Miniport Driver](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/supporting-rotation-in-a-display-miniport-driver),
+  [D3DKMDT_VIDPN_PRESENT_PATH_ROTATION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dkmdt/ne-d3dkmdt-_d3dkmdt_vidpn_present_path_rotation))
+- **The driver rotates only presents with `Flags.Rotate`.** The flag means "rotate the presentation data to match the
+  current orientation of the screen during the presentation bit-block transfer". Without it the driver must not rotate,
+  "even if the driver determines that the current orientation of the screen is rotated from the presentation data".
+  `Rotate` is a blt flag; nothing in DXGKARG_PRESENT or DXGKARG_SETVIDPNSOURCEADDRESS asks for a rotated flip.
+  ([DXGK_PRESENTFLAGS](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dkmddi/ns-d3dkmddi-_dxgk_presentflags))
+- **DWM pre-rotates.** The clone-mode table says that when the target is rotated and `Rotate` is not set, "the
+  rotation-aware client has already properly oriented the content of the source". For a portrait-first device, "the
+  Desktop Window Manager (DWM) rotates its content in advance to match the proper orientation". DWM's flips (and its
+  own present blts from its back buffer) therefore arrive already turned into the panel-oriented primary, and the
+  scanout needs nothing. Geometry agrees: at 90/270 an unrotated 2960 × 1440 desktop cannot be held in a 1440 × 2960
+  primary. (Same page, "Clone-mode behavior" and "Clone-mode requirements starting with Windows 8.1 Update".)
+- **Clients that are not rotation-aware are DXGI's job.** A full-screen DXGI swap chain without
+  `DXGI_SWAP_CHAIN_FLAG_NONPREROTATED` gets "automatic image rotation"
+  ([DXGI_SWAP_CHAIN_FLAG](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/ne-dxgi-dxgi_swap_chain_flag)).
+  The runtime carries it out in the UMD's `pfnBlt` (`DXGI_DDI_ARG_BLT.Rotate`,
+  [DXGI_DDI_ARG_BLT](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/dxgiddi/ns-dxgiddi-dxgi_ddi_arg_blt))
+  or in a kernel present blt with `Rotate`. **sbumd's `_Blt` (sb-patches/0107) logs a non-identity `Rotate` and
+  draws unrotated.** Fullscreen-exclusive D3D games in landscape are the case to watch: the umdlog line
+  `sbumd: Blt ... rotate N`.
+- **Rectangles of a `Rotate` blt:** the documentation does not say which orientation `DstRect`/`pDstSubRects` use. We
+  follow the KMDOD sample, as sbdisplay does (§7.5b): the source is the desktop-oriented image and the rectangles are
+  desktop coordinates. `Live_RotBltWide` counts rotated blts whose rectangle reaches past the panel's width, which only
+  desktop coordinates can do at 90/270.
+- **`SupportSmoothRotation`** (already set): orientation changes come through
+  `DxgkDdiUpdateActiveVidPnPresentPath` without a new VidPN
+  ([DXGK_DRIVERCAPS](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dkmddi/ns-d3dkmddi-_dxgk_drivercaps)).
+  **`StatusRotation`** is the angle of the display itself, for monitors with an orientation sensor
+  ([DXGK_CHILD_STATUS](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/dispmprt/ns-dispmprt-_dxgk_child_status)).
+  Ours is `D3DKMDT_MOA_NONE`, so it stays 0.
+
+**Implemented** (`sbwddm/maliwddm/display.c`, `command.c`; `Parameters\Rotation` = 0 gives exactly the old behaviour):
+- **VidPN:**
+  - `EnumVidPnCofuncModality` offers Identity, Rotate90, Rotate180 and Rotate270, plus Offset0 (as sbdisplay).
+  - `IsSupportedVidPn` also checks the path's rotation.
+  - `CommitVidPn` and `UpdateActiveVidPnPresentPath` record it in `Rot`. A rotation we never offered (an OFFSET value)
+    is refused by UpdateActive but only logged at commit, because a refused commit can leave a full-mode boot without
+    a desktop.
+  - `QueryVidPnHWCapability` reports `DriverRotation`.
+  - Source, target and monitor modes stay 1440 × 2960.
+- **Blt presents with `Flags.Rotate`:**
+  - `DxgkDdiPresent` records the path's rotation in the op.
+  - `CopyBltRot` copies through sbdisplay's `sbdc_blit_xf`: the same KMDOD maps, the tiled 90/270 path, and the
+    scalar 180 path. It writes into the destination primary's pages and into the scanned buffer.
+  - Big copies are split over the CPUs as in T27 (ParallelBlt, not when one CPU won the A/B). A chunk is 16 desktop
+    lines, which become whole panel rows (`sbdc_xf_blit_lines`), so CPUs never share a row.
+  - A rotated blt's full-screen source is never shown whole by the refresh (T13s), because it is not the panel's
+    frame.
+  - Fills with `Rotate` have their rectangle turned.
+- **Flips:** shown as they are (DECON flips, T24/T25 unchanged). They are counted while rotated, and any flip that
+  carries `Rotate` is counted too.
+- **New code in `sbdc_core` (host-tested):**
+  - `sbdc_xf_panel_rect` gives the exact panel rectangle a copy writes.
+  - `sbdc_xf_lines` and `sbdc_xf_band` cut a rectangle into bands.
+  - `sbdc_xf_blit_lines` copies one chunk of a split job.
+- **`tests/run.sh`, three new checks:**
+  - the panel rectangle equals the bounding box of the written pixels, and all of it is written;
+  - a rectangle copied in 16-line bands, last band first, is identical to the whole copy, and each band is whole
+    panel rows;
+  - jobs of 1-5 rectangles copied in scrambled chunk order are identical to the rectangles copied whole.
+  - Each runs 256 cases over the 4 rotations × 3 scales at real sizes. A one-line mutation of the 270 map fails two
+    of them.
+
+**Switches** (sbwddm's service key, `Parameters`):
+- `Rotation` (default 1): offer 90/180/270. 0 = identity only, as before.
+- `RotateFlips` (default 0), for an A/B on the phone if a landscape desktop comes out turned:
+  - 1 = flips made while the path is rotated go through the emulated scanout (MwRefreshScanout), which copies them
+    rotated when the flipped primary has the desktop's size. At 180 that is any full-screen primary; at 90/270 only a
+    landscape-shaped one.
+  - Panel-shaped primaries at 90/270 are copied as they are (`Live_RotFlipNoFit`).
+  - Primaries the GPU drew straight into a scanout buffer (T13z/T24) cannot be turned in place, so they are still
+    flipped (`Live_RotFlipAliased`). The switch therefore only does anything with `PrimaryInFb` = 0.
+
+**State:**
+- `Live_Rotation`: 1 identity, 2 = 90, 3 = 180, 4 = 270.
+- `Live_RotatedBlts`, `Live_RotBltMs`, `Live_RotBltWide`: rotated blts and fills, their CPU time, and the coordinate
+  check above.
+- `Live_RotatedFlips`, `Live_FlipRotateFlag`: flips while rotated, and flips carrying `Rotate`.
+- `Live_RotPathAsked`: the last rotation Windows asked for.
+- `Live_RotFlipCpu`, `Live_RotFlipNoFit`, `Live_RotFlipAliased`: the RotateFlips flips.
+- Once per start: `RotAllowed`, `RotateFlips`. At each change: `CommitRotationAsked`, `PathRotationAsked`, `Rotation`.
+
+**What to check on the phone** (Settings > Display orientation > Landscape, or tools/win `sbrotate`):
+- The desktop is right side up and fills the panel. Taskbar text reads left to right with the panel held landscape.
+- If "landscape" and "landscape (flipped)" come out swapped, the KMDOD direction is the suspect, as in §7.5b.
+- `Live_Rotation` = 2 or 4. `Live_RotatedFlips` climbs. `Live_FlipRotateFlag` stays 0.
+- `Live_RotatedBlts` and `Live_RotBltMs` stay small. If they grow, someone presents unrotated content with `Rotate`
+  (CDD/GDI); `Live_RotBltWide` then tells which coordinates the rectangles were in.
+- **Touch lines up.** Windows turns digitizer coordinates with the display's orientation. Our target reports as an HDMI
+  output, not an integrated panel, so if touch stays in portrait the digitizer-to-display mapping (Tablet PC
+  Settings) is the thing to look at, not the driver.
+- **fps stays as in portrait:** `Live_RatePresentCpuMs`, sbdrag, sbfps. DWM's pre-rotated frames cost the GPU the same,
+  and the CPU copies only `Rotate` blts.
+- No `sbumd: Blt ... rotate` lines in the umdlog for DWM. They would mean DXGI expects the UMD to rotate.
+- The bugcheck screen stays in portrait, because `SystemDisplayWrite` writes in the panel's orientation.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

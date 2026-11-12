@@ -179,6 +179,15 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         { L"Live_TdrQueriedHung", a->TdrQueriedHung },
         /* KMD-scratch: evictions that pointed PTEs at the read-only scratch page, and the PTEs written */
         { L"Live_ScratchMaps", a->ScratchMaps }, { L"Live_ScratchPtes", a->ScratchPtes },
+        /* 6.57: rotation: the path's (1 identity, 2 = 90, 3 = 180, 4 = 270), blts/fills copied rotated and their CPU
+         * time, flips while rotated, rotated blts whose rectangles reach past the panel's width (= desktop
+         * coordinates), flips with Rotate set, the last rotation asked for, RotateFlips' flips (rotated by the
+         * refresh, not fitting, drawn in the scanned buffer) */
+        { L"Live_Rotation", (ULONG)a->Rot }, { L"Live_RotatedBlts", a->RotatedBlts },
+        { L"Live_RotBltMs", (ULONG)(a->RotBlt100ns / 10000) }, { L"Live_RotatedFlips", a->RotatedFlips },
+        { L"Live_RotBltWide", a->RotBltWide }, { L"Live_FlipRotateFlag", a->FlipRotateFlag },
+        { L"Live_RotPathAsked", a->RotPathAsked }, { L"Live_RotFlipCpu", a->RotFlipCpu },
+        { L"Live_RotFlipNoFit", a->RotFlipNoFit }, { L"Live_RotFlipAliased", a->RotFlipAliased },
     };
     static_assert(sizeof(c) / sizeof(c[0]) < SBW_LIVE_MAX, "Live_ table too long");
     for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]); i++)

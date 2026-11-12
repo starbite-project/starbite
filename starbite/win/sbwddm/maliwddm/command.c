@@ -221,8 +221,18 @@ NTSTATUS APIENTRY MwPresent(IN_CONST_HANDLE hContext, DXGKARG_PRESENT *Arg)
          * SetVidPnSourceAddress, so the panel kept showing the primary of DWM's SetDisplayMode while its frames
          * went to the other two. The flip is carried out when it reaches the queue (DoPresent). */
         MW_PRESENT_OP *op = &priv->Present;
+        LONG rot = a->Rot;
         op->Kind = MW_PRESENT_FLIP;
         op->Src = (MW_ALLOCATION *)Arg->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].hDeviceSpecificAllocation;
+        /* 6.57: DWM is rotation-aware and renders its flips pre-rotated into the panel-oriented primaries, so a flip
+         * is shown as it is. Counted while rotated, and whether dxgkrnl ever sets Rotate on one (it is a blt flag). */
+        if (MW_ROTATED(rot)) {
+            a->RotatedFlips++;
+            if (a->RotateFlips)
+                op->Rot = (ULONG)rot;     /* Parameters\RotateFlips = 1: through the emulated scanout, rotated */
+        }
+        if (Arg->Flags.Rotate)
+            a->FlipRotateFlag++;
         /* T26: the source's address as of now (VidMm calls Patch only when an allocation moved: T25 saw 94 of 3,599) */
         if (Arg->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].SegmentId != 0) {
             op->SrcPhys = Arg->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].PhysicalAddress;
@@ -240,6 +250,13 @@ NTSTATUS APIENTRY MwPresent(IN_CONST_HANDLE hContext, DXGKARG_PRESENT *Arg)
         MW_PRESENT_OP *op = &priv->Present;
         op->Kind = Arg->Flags.ColorFill ? MW_PRESENT_FILL : MW_PRESENT_BLT;
         op->Color = Arg->Color;
+        {
+            /* 6.57: the driver rotates a present blt only when Flags.Rotate is set ("Supporting Rotation in a Display
+             * Miniport Driver"), into the path's current rotation */
+            LONG rot = a->Rot;
+            if (Arg->Flags.Rotate && MW_ROTATED(rot))
+                op->Rot = (ULONG)rot;
+        }
         /* A present's allocation list has fixed slots; an unused one has
          * no allocation. */
         op->Src = (MW_ALLOCATION *)Arg->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].hDeviceSpecificAllocation;
@@ -467,6 +484,11 @@ static __forceinline void CopyRow(BOOLEAN Neon, UCHAR *D, const UCHAR *S, SIZE_T
 static void CopyChunk(const MW_COPY_JOB *J, LONG K)
 {
     LONG row = K * MW_COPY_CHUNK_ROWS, end = row + MW_COPY_CHUNK_ROWS;
+    if (J->Rotated) {                     /* 6.57: MW_COPY_CHUNK_ROWS presented lines = as many whole panel rows */
+        sbdc_xf_blit_lines(J->Dst, (unsigned)J->DstPitch, J->Src, (unsigned)J->SrcPitch, J->XR, J->XStart, J->NRects,
+                           (unsigned)row, MW_COPY_CHUNK_ROWS, &J->Xf);
+        return;
+    }
     for (ULONG i = 0; i < J->NRects && row < end; i++) {
         if (row >= J->RowStart[i + 1])
             continue;
@@ -568,6 +590,32 @@ static void CopyStopHelpers(MW_ADAPTER *A)
     A->CopyHelpersUp = 0;
 }
 
+/* T27: run a job set up while Next was MW_COPY_IDLE (and CopyBusy taken): the helpers and this thread take its chunks;
+ * returns when every chunk is done, with CopyBusy released. 6.57: shared by plain and rotated blts. */
+static void CopyRunSplit(MW_ADAPTER *A, MW_COPY_JOB *J)
+{
+    J->Done = 0;
+    KeMemoryBarrier();
+    InterlockedExchange(&J->Next, 0);
+    for (ULONG i = 0; i < MW_COPY_HELPERS; i++)
+        if (A->CopyThreadObj[i])
+            KeSetEvent(&A->CopyGo[i], IO_NO_INCREMENT, FALSE);
+    CopyTakeChunks(A, J, FALSE);
+    {
+        ULONG64 w0 = KeQueryInterruptTime();
+        BOOLEAN counted = FALSE;
+        while (J->Done < J->Chunks) {  /* only chunks a running CPU took (at DISPATCH_LEVEL) */
+            YieldProcessor();
+            if (!counted && KeQueryInterruptTime() - w0 > 500000ULL) {
+                A->CopyWaitLong++;
+                counted = TRUE;
+            }
+        }
+    }
+    InterlockedExchange(&J->Next, MW_COPY_IDLE);
+    InterlockedExchange(&A->CopyBusy, 0);
+}
+
 /* T27: a blt's rectangles into one destination, as CopyRects, timed; split over the CPUs when it is big (>= 64k
  * pixels) and splitting is on (ParallelBlt 2) or being measured or chosen (ParallelBlt 1: copies alternate between
  * one CPU and split until each has 32, then the faster per pixel stays). */
@@ -633,26 +681,8 @@ static ULONG64 CopyBlt(MW_ADAPTER *A, const MW_PRESENT_OP *Op, PUCHAR Dst, LONG 
         J->RowStart[nr] = rows;
         J->Chunks = (rows + MW_COPY_CHUNK_ROWS - 1) / MW_COPY_CHUNK_ROWS;
         J->Neon = neon;
-        J->Done = 0;
-        KeMemoryBarrier();
-        InterlockedExchange(&J->Next, 0);
-        for (ULONG i = 0; i < MW_COPY_HELPERS; i++)
-            if (A->CopyThreadObj[i])
-                KeSetEvent(&A->CopyGo[i], IO_NO_INCREMENT, FALSE);
-        CopyTakeChunks(A, J, FALSE);
-        {
-            ULONG64 w0 = KeQueryInterruptTime();
-            BOOLEAN counted = FALSE;
-            while (J->Done < J->Chunks) {  /* only chunks a running CPU took (at DISPATCH_LEVEL) */
-                YieldProcessor();
-                if (!counted && KeQueryInterruptTime() - w0 > 500000ULL) {
-                    A->CopyWaitLong++;
-                    counted = TRUE;
-                }
-            }
-        }
-        InterlockedExchange(&J->Next, MW_COPY_IDLE);
-        InterlockedExchange(&A->CopyBusy, 0);
+        J->Rotated = FALSE;
+        CopyRunSplit(A, J);
     } else {
         for (ULONG i = 0; i < nr; i++)
             for (LONG y = r[i].top; y < r[i].bottom; y++)
@@ -689,8 +719,111 @@ static ULONG64 CopyBlt(MW_ADAPTER *A, const MW_PRESENT_OP *Op, PUCHAR Dst, LONG 
     return px;
 }
 
+/* 6.57: a blt with Flags.Rotate while the path is rotated. Microsoft's rule (DXGK_PRESENTFLAGS.Rotate, "Supporting
+ * Rotation in a Display Miniport Driver") and the KMDOD sample's semantics, as sbdisplay: the source holds the image
+ * in the desktop's orientation (90/270: panel height x width), the rectangles are desktop coordinates, the
+ * destination is in the panel's orientation (the shared primary keeps the unrotated mode size). sbdc_blit_xf maps
+ * desktop (x, y) -> panel (host-tested with sbdisplay's KMDOD maps); the source pixel is (x + dx, y + dy) as in a
+ * plain blt. Big copies are split over the CPUs like T27's (ParallelBlt; not when one CPU won its A/B) in bands of 16
+ * desktop lines, each a run of whole panel rows. Returns the pixels; *Last = the last rectangle's panel rectangle. */
+static ULONG64 CopyBltRot(MW_ADAPTER *A, const MW_PRESENT_OP *Op, PUCHAR Dst, LONG DstW, LONG DstH, LONG DstPitch,
+                          const UCHAR *Src, LONG SrcW, LONG SrcH, LONG SrcPitch, RECT *Last)
+{
+    MW_COPY_JOB *J = &A->CopyJob;
+    struct sbdc_xf xf;
+    struct sbdc_rect r[MW_MAX_RECTS];
+    unsigned sw, sh, start[MW_MAX_RECTS + 1];
+    LONG dx = Op->SrcRect.left - Op->DstRect.left, dy = Op->SrcRect.top - Op->DstRect.top, cl, ct, cr, cb;
+    ULONG n = Op->NumRects ? Op->NumRects : 1, nr = 0;
+    ULONG64 px = 0, t0 = KeQueryInterruptTime(), dt;
+    BOOLEAN wide = FALSE, split = FALSE;
+    const UCHAR *src0;
+
+    if (Dst == NULL || Src == NULL || DstW <= 0 || DstH <= 0 || SrcW <= 0 || SrcH <= 0 || !MW_ROTATED(Op->Rot))
+        return 0;
+    xf.lw = A->Fb.Width;
+    xf.lh = A->Fb.Height;
+    xf.pw = (ULONG)DstW < A->Fb.Width ? (ULONG)DstW : A->Fb.Width;
+    xf.ph = (ULONG)DstH < A->Fb.Height ? (ULONG)DstH : A->Fb.Height;
+    xf.rot = Op->Rot;
+    xf.den = 1;
+    xf.shift = 0;
+    xf.scratch = NULL;                    /* the tiled path: no per-CPU scratch rows needed */
+    sbdc_xf_src_size(&xf, &sw, &sh);
+    /* desktop rectangles that stay inside both the presented image and (moved by dx, dy) the source */
+    cl = dx < 0 ? -dx : 0;
+    ct = dy < 0 ? -dy : 0;
+    cr = SrcW - dx < (LONG)sw ? SrcW - dx : (LONG)sw;
+    cb = SrcH - dy < (LONG)sh ? SrcH - dy : (LONG)sh;
+    src0 = Src + (LONG_PTR)dy * SrcPitch + (LONG_PTR)dx * 4;   /* desktop (x, y) reads src0 (x, y) */
+    start[0] = 0;
+    for (ULONG i = 0; i < n && i < MW_MAX_RECTS; i++) {
+        RECT q = Op->NumRects ? Op->Rects[i] : Op->DstRect;
+        struct sbdc_rect s, pr;
+        if (q.right > (LONG)A->Fb.Width)
+            wide = TRUE;                  /* only desktop coordinates reach past the panel's width (90/270) */
+        s.l = q.left > cl ? q.left : cl;
+        s.t = q.top > ct ? q.top : ct;
+        s.r = q.right < cr ? q.right : cr;
+        s.b = q.bottom < cb ? q.bottom : cb;
+        if (s.r <= s.l || s.b <= s.t)
+            continue;
+        pr = sbdc_xf_panel_rect(&xf, s);
+        if (pr.r <= pr.l || pr.b <= pr.t)
+            continue;
+        r[nr] = s;
+        start[nr + 1] = start[nr] + sbdc_xf_lines(&xf, s);
+        nr++;
+        px += (ULONG64)(pr.r - pr.l) * (ULONG64)(pr.b - pr.t);
+        if (Last) {
+            Last->left = pr.l;
+            Last->top = pr.t;
+            Last->right = pr.r;
+            Last->bottom = pr.b;
+        }
+    }
+    if (wide)
+        A->RotBltWide++;
+    if (nr == 0)
+        return 0;
+    if (px >= 65536 && A->CopyHelpersUp && A->ParallelBlt != 0 && A->ParDecided != 1) {
+        if (InterlockedCompareExchange(&A->CopyBusy, 1, 0) == 0)
+            split = TRUE;
+        else
+            A->CopyBusySerial++;          /* another present is copying with the helpers */
+    }
+    if (split) {
+        InterlockedExchange(&J->Next, MW_COPY_IDLE);  /* stragglers of the last job take nothing while this is set up */
+        J->Dst = Dst;
+        J->Src = src0;
+        J->DstPitch = DstPitch;
+        J->SrcPitch = SrcPitch;
+        J->Dx = 0;
+        J->Dy = 0;
+        J->NRects = nr;
+        J->Xf = xf;
+        for (ULONG i = 0; i < nr; i++) {
+            J->XR[i] = r[i];
+            J->XStart[i] = start[i];
+        }
+        J->XStart[nr] = start[nr];
+        J->Chunks = (LONG)((start[nr] + MW_COPY_CHUNK_ROWS - 1) / MW_COPY_CHUNK_ROWS);
+        J->Neon = FALSE;
+        J->Rotated = TRUE;
+        CopyRunSplit(A, J);
+    } else {
+        for (ULONG i = 0; i < nr; i++)
+            sbdc_blit_xf(Dst, (unsigned)DstPitch, src0, (unsigned)SrcPitch, r[i], &xf);
+    }
+    dt = KeQueryInterruptTime() - t0;
+    A->RotBlt100ns += dt;
+    A->BltCopy100ns += dt;
+    A->BltPx += px;
+    return px;
+}
+
 /* Copy (or fill) a present's rectangles into one destination. Returns the pixels written. */
-static ULONG64 CopyRects(const MW_PRESENT_OP *Op, PUCHAR Dst, LONG DstW, LONG DstH, LONG DstPitch,
+static ULONG64 CopyRects(MW_ADAPTER *A, const MW_PRESENT_OP *Op, PUCHAR Dst, LONG DstW, LONG DstH, LONG DstPitch,
                          const UCHAR *Src, LONG SrcW, LONG SrcH, LONG SrcPitch, RECT *Last)
 {
     ULONG n = Op->NumRects ? Op->NumRects : 1;
@@ -699,6 +832,16 @@ static ULONG64 CopyRects(const MW_PRESENT_OP *Op, PUCHAR Dst, LONG DstW, LONG Ds
     for (ULONG i = 0; i < n; i++) {
         RECT r = Op->NumRects ? Op->Rects[i] : Op->DstRect;
         LONG dx = Op->SrcRect.left - Op->DstRect.left, dy = Op->SrcRect.top - Op->DstRect.top;
+
+        if (Op->Kind == MW_PRESENT_FILL && MW_ROTATED(Op->Rot)) {
+            /* 6.57: a fill with Flags.Rotate: its desktop rectangle turned into the panel's */
+            struct sbdc_xf xf = { A->Fb.Width, A->Fb.Height, A->Fb.Width, A->Fb.Height, Op->Rot, 1, 0, NULL };
+            struct sbdc_rect s = { r.left, r.top, r.right, r.bottom }, pr = sbdc_xf_panel_rect(&xf, s);
+            r.left = pr.l;
+            r.top = pr.t;
+            r.right = pr.r;
+            r.bottom = pr.b;
+        }
 
         ClipRect(&r, DstW, DstH);
         if (Op->Kind == MW_PRESENT_BLT) {
@@ -761,8 +904,15 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
                                        (LONG)(Op->Src->Width ? Op->Src->Width : 1),
                                        (LONG)(Op->Src->Height ? Op->Src->Height : 1)))
                 A->FlipsIgnoredBlack++;
-            else
+            else {
+                if (MW_ROTATED(Op->Rot)) {        /* 6.57: Parameters\RotateFlips = 1 */
+                    A->RotFlipCpu++;
+                    if (Op->Src->FbAliased)
+                        A->RotFlipAliased++;      /* drawn where the panel scans: the refresh cannot turn it */
+                }
+                InterlockedExchange(&A->ShowRot, (LONG)Op->Rot);
                 MwShow(A, Op->Src, TRUE); /* the guard thread copies it to the panel */
+            }
         }
         return;
     }
@@ -833,10 +983,12 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         dstW = (LONG)Op->Dst->Width;
         dstH = (LONG)Op->Dst->Height;
         dstPitch = (LONG)(Op->Dst->Pitch ? Op->Dst->Pitch : Op->Dst->Width * 4);
-        if (Op->Kind == MW_PRESENT_BLT)
+        if (Op->Kind == MW_PRESENT_BLT && MW_ROTATED(Op->Rot))
+            (void)CopyBltRot(A, Op, dst, dstW, dstH, dstPitch, src, srcW, srcH, srcPitch, &nr);   /* 6.57 */
+        else if (Op->Kind == MW_PRESENT_BLT)
             (void)CopyBlt(A, Op, dst, dstW, dstH, dstPitch, src, srcW, srcH, srcPitch, &nr);   /* T27 */
         else
-            (void)CopyRects(Op, dst, dstW, dstH, dstPitch, src, srcW, srcH, srcPitch, &nr);
+            (void)CopyRects(A, Op, dst, dstW, dstH, dstPitch, src, srcW, srcH, srcPitch, &nr);
         if (!toFb && Op->Kind == MW_PRESENT_BLT && src != NULL) {
             /* T13t: an app's frame into a surface DWM samples: did pixels go in, and are they there after? */
 #define SB_TAG(x) ((x)->Width << 16 | ((x)->Height & 0x3FFF) | (((x)->Flags & MW_ALLOC_PRIMARY) ? 0x8000u : 0))
@@ -870,8 +1022,9 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
          * full-screen back buffer, which holds the whole composed frame. A display engine would scan the primary
          * those rectangles accumulate in; ours never got the rest of the frame. So the panel shows the blt's
          * source, whole, when it is full-screen; otherwise the destination primary as before. */
+        InterlockedExchange(&A->ShowRot, 0);   /* 6.57: what a blt shows is already in the panel's orientation */
         if (Op->Kind == MW_PRESENT_BLT && Op->Src != NULL && Op->Src->Width == A->Fb.Width &&
-            Op->Src->Height == A->Fb.Height) {
+            Op->Src->Height == A->Fb.Height && !MW_ROTATED(Op->Rot)) {   /* 6.57: a rotated source is not the frame */
             A->ShowFromBltSrc++;
             /* T13y: NewContent FALSE: the whole source is copied to the panel only when it becomes the shown
              * allocation (or by the slow safety refresh). Every later frame's changes are the blt's own dirty
@@ -889,11 +1042,14 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         } else {
             MwShow(A, Op->Dst, FALSE);    /* the blt itself drew into the framebuffer */
         }
-        if (Op->Kind == MW_PRESENT_BLT)
+        if (Op->Kind == MW_PRESENT_BLT && MW_ROTATED(Op->Rot))
+            px = CopyBltRot(A, Op, A->FbVa, (LONG)A->Fb.Width, (LONG)A->Fb.Height, (LONG)A->Fb.Pitch, src, srcW,
+                            srcH, srcPitch, &last);   /* 6.57 */
+        else if (Op->Kind == MW_PRESENT_BLT)
             px = CopyBlt(A, Op, A->FbVa, (LONG)A->Fb.Width, (LONG)A->Fb.Height, (LONG)A->Fb.Pitch, src, srcW, srcH,
                          srcPitch, &last);
         else
-            px = CopyRects(Op, A->FbVa, (LONG)A->Fb.Width, (LONG)A->Fb.Height, (LONG)A->Fb.Pitch, src, srcW, srcH,
+            px = CopyRects(A, Op, A->FbVa, (LONG)A->Fb.Width, (LONG)A->Fb.Height, (LONG)A->Fb.Pitch, src, srcW, srcH,
                            srcPitch, &last);
         A->FbPixels += px;
         if (px) {
@@ -908,6 +1064,8 @@ static void DoPresent(MW_ADAPTER *A, const MW_PRESENT_OP *Op)
         A->PresentBlts++;
     else
         A->PresentFills++;
+    if (MW_ROTATED(Op->Rot))
+        A->RotatedBlts++;                 /* 6.57: blts and fills carried out rotated */
     if (Op->Kind == MW_PRESENT_BLT && toFb && src != NULL) {
         RECT r = Op->SrcRect;
         ClipRect(&r, srcW, srcH);
@@ -1603,8 +1761,25 @@ void MwRefreshScanout(MW_ADAPTER *A)
         return;
     }
     t0 = KeQueryInterruptTime();
+    {
+        /* 6.57 (Parameters\RotateFlips = 1): a flip made current while rotated is turned on the way, when it has the
+         * desktop's size (90/270: panel height x width; 180: any full-screen primary). A panel-shaped primary at
+         * 90/270 cannot be the unrotated desktop; it is copied as it is and counted. */
+        LONG rot = A->ShowRot;
+        if (MW_ROTATED(rot)) {
+            struct sbdc_xf xf = { A->Fb.Width, A->Fb.Height, A->Fb.Width, A->Fb.Height, (unsigned)rot, 1, 0, NULL };
+            unsigned sw, sh;
+            sbdc_xf_src_size(&xf, &sw, &sh);
+            if (p->Width == sw && p->Height == sh && pitch >= sw * 4) {
+                sbdc_blit_xf(A->FbVa, A->Fb.Pitch, src, pitch, (struct sbdc_rect){ 0, 0, (int)sw, (int)sh }, &xf);
+                goto copied;
+            }
+            A->RotFlipNoFit++;
+        }
+    }
     for (ULONG y = 0; y < h; y++)
         RtlCopyMemory(A->FbVa + (SIZE_T)y * A->Fb.Pitch, src + (SIZE_T)y * pitch, (SIZE_T)w * 4);
+copied:
     t0 = (KeQueryInterruptTime() - t0) / 10;
     A->RefreshUsLast = (ULONG)t0;
     if (t0 > A->RefreshUsMax)
@@ -1705,6 +1880,12 @@ NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMIT
         /* T24: a real flip, done when the queue reaches this submission (Kick), i.e. once the frame is drawn */
         sub.FlipSlot1 = (ULONG)priv->Present.Src->ScanSlot + 1;
         a->EmuFlips++;
+        /* 6.57: under RotateFlips the GPU drew this one into a scanout buffer itself: no CPU pass can turn it in place,
+         * so it is flipped as it is (never left unshown) and counted */
+        if (MW_ROTATED(priv->Present.Rot)) {
+            a->RotFlipCpu++;
+            a->RotFlipAliased++;
+        }
     } else if (!Arg->Flags.Paging && priv != NULL && Arg->DmaBufferPrivateDataSize >= sizeof(*priv) &&
         priv->Reserved == MW_DMA_MAGIC && priv->Present.Kind != MW_PRESENT_NONE) {
         /* S9 port (T13d): the source may still be being drawn by a job submitted before this present (one

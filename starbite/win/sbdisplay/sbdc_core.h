@@ -185,6 +185,24 @@ void sbdc_xf_src_size(const struct sbdc_xf *x, unsigned *w, unsigned *h);
 void sbdc_blit_xf(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
                   const struct sbdc_xf *x);
 
+/* sbwddm full mode (docs/WIN11-GPU.md 6.57): the panel rectangle that sbdc_blit_xf writes for presented rectangle r
+ * (clipped as it clips; empty = l >= r or t >= b). */
+struct sbdc_rect sbdc_xf_panel_rect(const struct sbdc_xf *x, struct sbdc_rect r);
+
+/* sbwddm full mode: a presented rectangle cut into bands for copies split over CPUs. Each band is a run of presented
+ * lines that becomes a run of whole panel rows: columns at 90/270 (panel row = presented column), rows at 0/180.
+ * sbdc_xf_lines: how many lines r has along that axis; sbdc_xf_band: lines [first, first + n) of r (clipped to r).
+ * The bands of one rectangle write disjoint panel pixels, so they may be copied in any order or at once. */
+unsigned sbdc_xf_lines(const struct sbdc_xf *x, struct sbdc_rect r);
+struct sbdc_rect sbdc_xf_band(const struct sbdc_xf *x, struct sbdc_rect r, unsigned first, unsigned n);
+
+/* sbwddm full mode: lines [first, first + n) of rectangles R[0..nr) taken one after another (start[i] = the lines
+ * before R[i], start[nr] = all of them; sbdc_xf_lines each), copied through sbdc_blit_xf. One chunk of a split copy:
+ * the chunks of one set of rectangles together copy exactly what sbdc_blit_xf of each rectangle copies. */
+void sbdc_xf_blit_lines(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch,
+                        const struct sbdc_rect *R, const unsigned *start, unsigned nr, unsigned first, unsigned n,
+                        const struct sbdc_xf *x);
+
 /* The present's copy: identity 1x/2x through sbdc_blit (rows limited to the panel), everything else through
  * sbdc_blit_xf. _c: the same dispatch onto the plain-C versions (what T7/T9 ran; benchmark baseline). */
 void sbdc_present_blit(sbdc_u8 *dst, unsigned dst_pitch, const sbdc_u8 *src, unsigned src_pitch, struct sbdc_rect r,
