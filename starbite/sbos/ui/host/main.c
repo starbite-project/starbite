@@ -1131,6 +1131,124 @@ void sh_haptic_level_set(int level)
     fprintf(stderr, "haptic: level %d\n", level);
 }
 
+/* Track A: photos (the kernel's kern/photos.c) in RAM, with its limits: the newest 32; a picture of more than 697685
+ * pixels kept at the kernel's smaller size (the kernel averages a box, this picks the nearest pixel). SBTK_PHOTOS=FILE
+ * also keeps them in a file (read at the first call, written at every change), so a run after another shows what a
+ * restart keeps; SBTK_PHOTOS=none: a phone without photo storage; SBTK_PHOTOS_HELD=1: storage busy (the modem on) */
+#define HPH_MAX 32
+#define HPH_MAX_PX 697685ULL
+static struct { int w, h; long long utc; unsigned long long seq; uint32_t *px; } HPH[HPH_MAX];   /* the newest last */
+static int hphn, hph_loaded;
+static unsigned long long hph_seq;
+static const char *hph_why = "";
+static int hph_none(void) { return hd_env("SBTK_PHOTOS", "none"); }
+static void hph_fit(int w, int h, int *sw, int *sh)
+{
+    if ((unsigned long long)w * (unsigned long long)h <= HPH_MAX_PX) { *sw = w; *sh = h; return; }
+    unsigned long long lo = 1, hi = (unsigned long long)w;
+    while (lo < hi) {
+        unsigned long long mid = (lo + hi + 1) / 2, dh = ((unsigned long long)h * mid + (unsigned long long)w / 2) / (unsigned long long)w;
+        if (mid * (dh ? dh : 1) <= HPH_MAX_PX) lo = mid; else hi = mid - 1;
+    }
+    unsigned long long dh = ((unsigned long long)h * lo + (unsigned long long)w / 2) / (unsigned long long)w;
+    *sw = (int)lo;
+    *sh = dh ? (int)dh : 1;
+}
+static void hph_write(void)
+{
+    const char *f = getenv("SBTK_PHOTOS");
+    FILE *o = f && !hph_none() ? fopen(f, "wb") : 0;
+    if (!o) return;
+    fputs("SBTKPHOTOS1\n", o);
+    for (int i = 0; i < hphn; i++) {
+        fprintf(o, "%d %d %lld %llu\n", HPH[i].w, HPH[i].h, HPH[i].utc, HPH[i].seq);
+        fwrite(HPH[i].px, 4, (size_t)HPH[i].w * (size_t)HPH[i].h, o);
+    }
+    fclose(o);
+}
+static void hph_load(void)
+{
+    if (hph_loaded) return;
+    hph_loaded = 1;
+    const char *f = getenv("SBTK_PHOTOS");
+    FILE *in = f && !hph_none() ? fopen(f, "rb") : 0;
+    char line[16];
+    if (!in) return;
+    if (!fgets(line, sizeof line, in) || strcmp(line, "SBTKPHOTOS1\n")) { fclose(in); return; }
+    int w, h;
+    long long utc;
+    unsigned long long seq;
+    while (hphn < HPH_MAX && fscanf(in, "%d %d %lld %llu", &w, &h, &utc, &seq) == 4 && fgetc(in) == '\n') {
+        if (w < 1 || h < 1 || (unsigned long long)w * (unsigned long long)h > HPH_MAX_PX) break;
+        uint32_t *px = malloc((size_t)w * (size_t)h * 4);
+        if (!px || fread(px, 4, (size_t)w * (size_t)h, in) != (size_t)w * (size_t)h) { free(px); break; }
+        HPH[hphn].w = w; HPH[hphn].h = h; HPH[hphn].utc = utc; HPH[hphn].seq = seq; HPH[hphn].px = px;
+        if (seq > hph_seq) hph_seq = seq;
+        hphn++;
+    }
+    fclose(in);
+    fprintf(stderr, "photos: %d from %s\n", hphn, f);
+}
+static int hph_refused(void)
+{
+    hph_load();
+    if (hph_none()) { hph_why = "This phone has no photo storage (the store entry sbos-photos)."; return 1; }
+    if (hd_env("SBTK_PHOTOS_HELD", "1")) { hph_why = "Storage is busy while the modem is on. Try again later."; return 1; }
+    return 0;
+}
+int sh_photo_save(const uint32_t *argb, int w, int h)
+{
+    hph_why = "";
+    if (!argb || w < 1 || h < 1 || w > 4096 || h > 4096) { hph_why = "This picture can't be saved (its size)."; return -1; }
+    if (hph_refused()) return -1;
+    int sw, sh;
+    hph_fit(w, h, &sw, &sh);
+    uint32_t *px = malloc((size_t)sw * (size_t)sh * 4);
+    if (!px) { hph_why = "No memory to save the photo."; return -1; }
+    for (int y = 0; y < sh; y++)
+        for (int x = 0; x < sw; x++)
+            px[y * sw + x] = 0xff000000u | argb[(size_t)(y * h / sh) * (size_t)w + (size_t)(x * w / sw)];
+    if (hphn == HPH_MAX) {                      /* the oldest goes */
+        free(HPH[0].px);
+        memmove(HPH, HPH + 1, sizeof HPH[0] * (HPH_MAX - 1));
+        hphn--;
+    }
+    HPH[hphn].w = sw; HPH[hphn].h = sh; HPH[hphn].utc = (long long)time(0); HPH[hphn].seq = ++hph_seq; HPH[hphn].px = px;
+    hphn++;
+    hph_write();
+    fprintf(stderr, "photos: saved %dx%d (%d kept)\n", sw, sh, hphn);
+    return 0;
+}
+int sh_photo_count(void) { hph_load(); return hph_none() ? 0 : hphn; }
+int sh_photo_get(int i, uint32_t *argb, int cap_px, int *w, int *h, long long *utc)
+{
+    hph_why = "";
+    hph_load();
+    if (hph_none() || i < 0 || i >= hphn) { hph_why = "No such photo."; return -1; }
+    int k = hphn - 1 - i, px = HPH[k].w * HPH[k].h;
+    if (w) *w = HPH[k].w;
+    if (h) *h = HPH[k].h;
+    if (utc) *utc = HPH[k].utc;
+    if (!argb) return px;
+    if (cap_px < px) { hph_why = "The photo is larger than the space for it."; return -1; }
+    memcpy(argb, HPH[k].px, (size_t)px * 4);
+    return px;
+}
+int sh_photo_delete(int i)
+{
+    hph_why = "";
+    if (hph_refused()) return -1;
+    if (i < 0 || i >= hphn) { hph_why = "No such photo."; return -1; }
+    int k = hphn - 1 - i;
+    free(HPH[k].px);
+    memmove(HPH + k, HPH + k + 1, sizeof HPH[0] * (size_t)(hphn - 1 - k));
+    hphn--;
+    hph_write();
+    fprintf(stderr, "photos: deleted (%d kept)\n", hphn);
+    return 0;
+}
+const char *sh_photo_why(void) { return hph_why; }
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: sbtk-host PAK still|film|bench ...\n"); return 2; }

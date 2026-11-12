@@ -2828,3 +2828,84 @@ static void drv_after_bake(void)
 #endif
 }
 /* ---- end of Track A: drivers for the shell ---- */
+
+/* ---- Track A: photos ---- shell.h's sh_photo_* on kern/photos.c: the home store's volatile entry "sbos-photos" (64
+ * MiB, a ring of 32 slots; the fence's one grant lent from the state slot for each write). A save or a get takes a
+ * 2 MiB work buffer from the UI heap for that call only (the pixels as stored) and gives it back. A save blocks the UI
+ * for the write (~0.2..0.4 s for 612 x 816 on the card): it is the shutter's tap, once. Nothing waits: while storage
+ * is held (the modem runs) or in a safe start, saves and deletes are refused with a why. In the self-test build (its
+ * films start from nothing, whatever the phone keeps) nothing is read and saves / deletes are logged dry runs. */
+static const char *ph_why;
+#ifdef SBOS_SELFTEST_NEXT
+static void ph_dry(const char *what)
+{
+    sb_logf("next: photos: a dry run (the self test writes nothing): ", what);
+    ph_why = "A dry run: the self test.";
+}
+#endif
+int sh_photo_save(const uint32_t *argb, int w, int h)
+{
+    ph_why = 0;
+#ifdef SBOS_SELFTEST_NEXT
+    (void)argb; (void)w; (void)h;
+    ph_dry("save");
+    return 0;
+#else
+    uint8_t *b = tk_alloc(KPHOTO_WORK);
+    if (!b) {
+        ph_why = "No memory to save the photo.";
+        sb_log("next: photos: no 2 MiB in the UI heap for the save");
+        return -1;
+    }
+    hw_wdt_feed();
+    int r = kphotos_save(argb, w, h, (int64_t)sh_utc(), b, KPHOTO_WORK);
+    tk_free(b);
+    return r;
+#endif
+}
+int sh_photo_count(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    return 0;
+#else
+    return kphotos_count();
+#endif
+}
+int sh_photo_get(int i, uint32_t *argb, int cap_px, int *w, int *h, long long *utc)
+{
+    ph_why = 0;
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i; (void)argb; (void)cap_px; (void)w; (void)h; (void)utc;
+    ph_why = "No such photo.";
+    return -1;
+#else
+    int64_t u = 0;
+    uint8_t *b = 0;
+    if (argb) {
+        b = tk_alloc(KPHOTO_WORK);
+        if (!b) {
+            ph_why = "No memory to show the photo.";
+            sb_log("next: photos: no 2 MiB in the UI heap for the read");
+            return -1;
+        }
+        hw_wdt_feed();
+    }
+    int r = kphotos_get(i, argb, cap_px, w, h, &u, b, b ? KPHOTO_WORK : 0);
+    if (b) tk_free(b);
+    if (utc) *utc = (long long)u;
+    return r;
+#endif
+}
+int sh_photo_delete(int i)
+{
+    ph_why = 0;
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i;
+    ph_dry("delete");
+    return 0;
+#else
+    return kphotos_delete(i);
+#endif
+}
+const char *sh_photo_why(void) { return ph_why ? ph_why : kphotos_why(); }
+/* ---- end of Track A: photos ---- */

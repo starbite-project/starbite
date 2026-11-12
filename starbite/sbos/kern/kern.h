@@ -698,6 +698,22 @@ int kupdate_after_start(void);      /* 10 s after the home screen: 1 committed, 
 int kupdate_committed(void);        /* 1 this start committed an update */
 void kupdate_dry(int on);           /* the host test: every write a dry run (the self test always is) */
 void kupdate_reset(void);           /* forget what was found or staged (the host test's next phone) */
+/* Track A: the Camera's photo store (photos.c): the home store's volatile entry "sbos-photos" (64 MiB), a ring of 32
+ * self-describing 2 MiB slots, 24-bit RGB; larger pictures scaled down to KPHOTO_MAX_PX. work: KPHOTO_WORK bytes */
+#define KPHOTO_SLOTS 32
+#define KPHOTO_SLOT_BYTES (2U << 20)
+#define KPHOTO_MAX_PX ((KPHOTO_SLOT_BYTES - 4096U) / 3U)         /* 697685: 612 x 816 kept, 1080 x 1440 -> 723 x 964 */
+#define KPHOTO_MAX_SIDE 4096
+#define KPHOTO_WORK (KPHOTO_SLOT_BYTES - 4096U)
+int kphotos_save(const uint32_t *argb, int w, int h, int64_t utc, uint8_t *work, uint32_t cap);   /* 0, -1 (why) */
+int kphotos_count(void);
+/* i 0 = the newest: pixels written (argb 0: the count only, w / h / utc filled), -1 (why) */
+int kphotos_get(int i, uint32_t *argb, int cap_px, int *w, int *h, int64_t *utc, uint8_t *work, uint32_t cap);
+int kphotos_delete(int i);          /* 0, -1 (why) */
+const char *kphotos_why(void);
+void kphotos_fit(int w, int h, int *sw, int *sh);   /* the size a w x h picture is kept at */
+void kphotos_dry(int on);           /* the host test: every write a dry run (the self test always is) */
+void kphotos_reset(void);           /* forget the headers read (the host test's restart) */
 /* settings that last across a restart (settings.c) */
 void settings_restore(void);
 void settings_changed(void);
