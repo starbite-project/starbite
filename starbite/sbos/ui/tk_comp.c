@@ -57,6 +57,17 @@ void tk_layer_add(tk_layer *p, tk_layer *c)
     while (t->next) t = t->next;
     t->next = c;
 }
+void tk_layer_external(tk_layer *l, const uint32_t *px, int w, int h, int stride)
+{
+    if (!l->external) tk_layer_dirty(l), tk_bmp_free(&l->bmp);
+    l->gen++;
+    l->external = px != 0;
+    l->bmp.px = (uint32_t *)(uintptr_t)px;
+    l->bmp.w = px ? w : 0;
+    l->bmp.h = px ? h : 0;
+    l->bmp.stride = px ? stride : 0;
+    if (px) l->opaque = 1;
+}
 void tk_layer_dirty(tk_layer *l)
 {
     l->gen++;
@@ -432,7 +443,7 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
     const tk_bmp *src = &l->bmp;
     const tk_a8 *gm = l->glass.v ? &l->glass : 0;
     float res = 1;
-    if (A < .75f && B < .75f) {
+    if (A < .75f && B < .75f && !l->external) {
         src = half_of(l);
         gm = l->ghalf.v ? &l->ghalf : 0;
         res = .5f;
@@ -973,6 +984,11 @@ static void clean_rows(void *a, int y0, int y1)
 static void gpu_flush_layer(tk_comp *c, tk_layer *l)
 {
     if (l->gpu_gen == l->gen + 1u || !c->gpu_clean) return;
+    if (l->external) {                          /* 1.0: uncached memory another core writes: nothing to clean or map */
+        l->gpu_occ_ok = 0;
+        l->gpu_gen = l->gen + 1u;
+        return;
+    }
     uint32_t fr = c->gpu_frames;
     int busy = l->gpu_occ_seen && fr - l->gpu_occ_frame <= 2u;
     l->gpu_occ_frame = fr;
@@ -1295,7 +1311,7 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     uint64_t th = tk_us();
     for (int i = 0; i < cur.n; i++) {
         item *it = &cur.it[i];
-        if (it->l->bmp.px && it->a * T.k < .75f && it->b * T.k < .75f) {
+        if (it->l->bmp.px && !it->l->external && it->a * T.k < .75f && it->b * T.k < .75f) {
             if (!it->l->half.px && getenv_dbg) tk_log(it->l->name);
             half_of(it->l);
         }
@@ -1489,13 +1505,13 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
         }
 }
 
-void tk_layer_prepare(tk_layer *l) { if (l->bmp.px) half_of(l); }
+void tk_layer_prepare(tk_layer *l) { if (l->bmp.px && !l->external) half_of(l); }
 
 static void prep(tk_layer *l)
 {
     for (; l; l = l->next) {
         if (l->hidden) continue;
-        if (l->bmp.px && !l->half.px) half_of(l);
+        if (l->bmp.px && !l->half.px && !l->external) half_of(l);
         prep(l->child);
     }
 }

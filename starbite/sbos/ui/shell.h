@@ -152,6 +152,8 @@ int sh_linux_char(char c);               /* one character typed: committed text 
                                           * (Shift around capitals); '\n' Return and '\b' BackSpace are always keys */
 int sh_linux_viewport(int rows);         /* the rows the shell shows (SH_LINUX_H, or SH_LINUX_HKB with the keyboard) */
 int sh_linux_icon(int icon, uint32_t *px);     /* a pool icon into px (SH_LINUX_ICON squared); 0: none */
+int sh_linux_zero_copy(void);              /* 1.0: 1 when the GPU samples the guest's window surface in place: show it with
+                                            * tk_layer_external (the front buffer from the header) instead of the strips */
 int sh_linux_hold(int on);               /* 1: the App Store is open: Linux started if off and not stopped while idle */
 int sh_linux_pkg(int pkg, int op);       /* install / remove / cancel a store package; < 0 refused */
 /* the shell, called by the platform */
