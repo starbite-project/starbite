@@ -504,6 +504,28 @@ int sh_update_stage(struct sh_update *u);   /* one chunk a call, so the UI stays
 int sh_update_install(void);                /* arms and restarts (does not return on success); -1 refused */
 #endif
 
+/* Track A: the Camera's photos (the kernel: kern/photos.c on the home store's volatile entry "sbos-photos", 64 MiB:
+ * a ring of the newest 32; the host: RAM, SBTK_PHOTOS=FILE also keeps them in a file). Pixels are 0xFFRRGGBB, row
+ * after row (stride = w). Kept as 24-bit RGB; a picture of more than 697685 pixels (2 MiB - 4 KiB at 3 bytes) is
+ * scaled down to the largest size that fits, the aspect kept: 612 x 816 (the front camera's still) is kept exactly,
+ * 1080 x 1440 as 723 x 964. Sides up to 4096. Crash safe: a save that is cut off leaves the photos that were there
+ * (the oldest one, when the 32 were full, may be gone); a damaged photo is skipped.
+ * sh_photo_save: 0 kept as the newest (with 32 kept, the oldest goes), -1 refused / failed: sh_photo_why says why in
+ * plain words (no photo storage on this phone, storage busy while the modem is on, a safe start, a storage error).
+ * It blocks for the write: ~0.2..0.4 s for a 612 x 816 photo on the card (~30 ms on UFS); call it from the shutter's
+ * tap, not every frame. sh_photo_count: how many (the first call reads the 32 headers: ~30 ms).
+ * sh_photo_get: i 0 = the newest; writes w * h pixels to argb (cap_px at least w * h) and returns w * h; argb 0: only
+ * w, h and utc (s since 1970, 0 unknown) and w * h (the size to allocate); -1: no such photo / too small / a read
+ * error (why). Reads ~1.5 MB (~0.1 s on the card). A damaged photo found here is skipped (the next one is given in
+ * its place) and the count drops by one: ask sh_photo_count again after a get.
+ * sh_photo_delete: 0 deleted (the photos after i move up), -1 (why). In the self-test build saves and deletes are
+ * logged dry runs (0 returned, nothing kept) and nothing is read: count 0. */
+int sh_photo_save(const uint32_t *argb, int w, int h);
+int sh_photo_count(void);
+int sh_photo_get(int i, uint32_t *argb, int cap_px, int *w, int *h, long long *utc);
+int sh_photo_delete(int i);
+const char *sh_photo_why(void);
+
 /* the platform: Power held about a second (the screen is on now): the shell shows its power sheet (slide to power off,
  * Restart, Cancel). Track B defines it; until then a weak default does nothing */
 void sh_power_held(void);
