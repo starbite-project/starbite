@@ -69,7 +69,14 @@ struct sbg_cfg {
     /* contract v3: the SBSHM_SVC_* the host offers (hdr.version 3 when non-zero; needs v2). A service whose sbg_os
      * part is missing is left out (NET needs net_rx, P9 fs, SND snd, CLOCK unix_s). */
     uint32_t services;
+    /* a slow start (cp3 2026-11-12): boot_warn_ms (0: none) after CPU_ON without HELLO, the guest log's last lines go
+     * to the log once and the wait goes on; a HELLO up to boot_timeout_ms is a normal start. At boot_timeout_ms the
+     * host sends MSG_STOP (the guest's sbguest.ko powers off by itself 10 s after a stop request that user space did
+     * not carry out) and waits up to SBG_GIVEUP_STOP_MS for the cluster to be off: then FAILED with the cluster off
+     * (the next start is allowed), otherwise FAILED with it on, as before */
+    uint32_t boot_warn_ms;
 };
+#define SBG_GIVEUP_STOP_MS 20000U
 #define SBG_BLK_PER_POLL 8U
 #define SBG_BLK_POLL_MS  4U
 

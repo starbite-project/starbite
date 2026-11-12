@@ -447,8 +447,11 @@ static int sp9_statfs(void *ctx, struct sbg_fs_statfs *s)
     return 0;
 }
 
+#ifndef SIM_P9_WRITABLE
+#define SIM_P9_WRITABLE 1               /* -DSIM_P9_WRITABLE=0: read-only, as the phone's guest-fs.h */
+#endif
 static const struct sbg_fs sp9_fs = {
-    .ctx = 0, .writable = 1, .uid = 1000, .gid = 1000, .name = "sbsim tree",
+    .ctx = 0, .writable = SIM_P9_WRITABLE, .uid = 1000, .gid = 1000, .name = "sbsim tree",
     .stat = sp9_stat, .list = sp9_list, .read = sp9_read, .statfs = sp9_statfs,
     .write = sp9_write, .create = sp9_create, .mkdir = sp9_mkdir, .remove = sp9_remove, .rename = sp9_rename,
     .truncate = sp9_truncate, .set_mtime = sp9_set_mtime, .sync = 0,

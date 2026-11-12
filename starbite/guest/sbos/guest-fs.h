@@ -9,10 +9,10 @@
  * Semantics:
  *   - paths come from the server canonical ("/", "/DCIM/x.jpg"): files.c's own format (exfat_walk is ASCII
  *     case-insensitive; names are UTF-8 with '?' for what exfat.c cannot spell: such a name lists but never walks);
- *   - kfile_list_at / kfile_read_at answer SBOS_EAGAIN until the card is mounted. The first stat of the root (the
- *     guest's Tattach, at its mount) calls kfile_mount() when kfile_state() says "not tried": that brings the card
- *     up and blocks (normally short: gcard_offer() brought the card up for the guest's block devices already); a
- *     card that failed is retried by kfile_state's own 30 s rule. No card: every call answers EIO;
+ *   - kfile_list_at / kfile_read_at answer SBOS_EAGAIN until the card is mounted. guest.c mounts it at the load,
+ *     before CPU_ON (gfs_premount: it blocks while the exFAT volume is read); a 9P request never mounts (cp3
+ *     2026-11-12: the guest's mount hung at its first request on the phone, the start ran past its 30 s). No card:
+ *     every call answers EIO;
  *   - stat: a missing name costs one walk (kfile_read_at / kfile_list_at with length 0 say file / folder / none);
  *     a present one is found in its parent's listing (sizes and dates live there), which also fills a small cache
  *     (GFS_CACHE entries, by a 64-bit hash of the path) so `ls -l` after a listing does not list again. The card is
@@ -117,7 +117,7 @@ static int gfs_same(const char *a, const char *b)       /* ASCII case-insensitiv
 static int gfs_stat(void *ctx, const char *path, struct sbg_fs_attr *a)
 {
     (void)ctx;
-    int r = gfs_ready(path[0] == '/' && !path[1]);
+    int r = gfs_ready(0);              /* guest.c mounts the card at the load (never from a 9P request) */
     if (r < 0)
         return r;
     if (path[0] == '/' && !path[1]) {
@@ -223,6 +223,14 @@ static int gfs_read(void *ctx, const char *path, uint64_t off, void *dst, uint32
         done += (uint32_t)n;
     }
     return (int)done;
+}
+
+/* guest.c, at the load (blocking is expected there): the card's exFAT volume read once, so the server's calls only
+ * read files. Returns kfile_state(): 1 mounted. */
+static int gfs_premount(void)
+{
+    int s = kfile_state(0);
+    return s == 0 ? kfile_mount() : s;
 }
 
 static const struct sbg_fs gfs_card = {

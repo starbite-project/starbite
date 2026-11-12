@@ -144,6 +144,25 @@ static struct notifier_block sbg_restart_nb = {
 	.priority = 255,
 };
 
+/*
+ * A stop the host asked for (hdr.host_state STOPPING, MSG_STOP) that user space does not carry out (no sbwl / guestd
+ * yet, or one that hangs: cp3 2026-11-12, a start stuck before sbwl): 10 s after the doorbell that brought it, the
+ * kernel powers off by itself (orderly_poweroff(true): with no /sbin/poweroff in the base, an emergency sync and
+ * kernel_power_off, so sbg_power_off takes the M3 cluster down). The host then sees the cluster off and may start
+ * the guest again without a reset.
+ */
+#define SBG_STOP_GRACE_S 10
+static void sbg_stop_fallback(struct work_struct *w)
+{
+	if (READ_ONCE(hdr->host_state) != SBG_HOST_STOPPING)
+		return;
+	pr_warn("sbguest: the host asked to stop %d s ago and user space has not powered off: powering off now\n",
+		SBG_STOP_GRACE_S);
+	orderly_poweroff(true);
+}
+static DECLARE_DELAYED_WORK(sbg_stop_work, sbg_stop_fallback);
+static atomic_t sbg_stop_armed = ATOMIC_INIT(0);
+
 /* ---- /dev/sbshm ------------------------------------------------------------------------------------ */
 static void sbblk_kick(void);
 
@@ -155,6 +174,8 @@ static irqreturn_t sbg_db_irq(int irq, void *dev)
 	sbnet_kick();				/* v3: each service checks its own rings */
 	sbp9_kick();
 	sbsnd_kick();
+	if (READ_ONCE(hdr->host_state) == SBG_HOST_STOPPING && !atomic_xchg(&sbg_stop_armed, 1))
+		schedule_delayed_work(&sbg_stop_work, SBG_STOP_GRACE_S * HZ);
 	return IRQ_HANDLED;
 }
 

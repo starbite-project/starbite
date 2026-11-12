@@ -18,6 +18,7 @@
 #   DB_GUEST / DB_HOST   the doorbell INTIDs (132 / 133); DB_GUEST=0 DB_HOST=0: no doorbells, both sides poll
 #   INITRD    an initramfs to use instead of the one built here (run-qemu.sh BUILD_ONLY=1)
 #   LOG       out/qemu-desktop.log
+#   SBSIM_CFLAGS  more flags for sbsim (with INITRD), e.g. -DSIM_P9_WRITABLE=0 (the read-only tree, as the phone)
 # run-term.sh (MODE=term | wayland) is unchanged; this script is the block-device mode only.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -47,7 +48,7 @@ if [ -n "${INITRD:-}" ]; then
     gcc -O2 -g0 -ffreestanding -nostdlib -nostartfiles -fno-pic -fno-pie -no-pie -static -mgeneral-regs-only \
         -mstrict-align -fno-stack-protector -fno-builtin -Wall -Wextra -Wno-unused-const-variable \
         -T "$here/sbsim/link.ld" "$here/sbsim/start.S" "$here/sbsim/sbsim.c" "$here/host/sbghost.c" -DM3STUB_HVC \
-        "$here/probe/m3stub.S" -o "$WORK/sbsim/sbsim.elf"
+        "$here/probe/m3stub.S" ${SBSIM_CFLAGS:-} -o "$WORK/sbsim/sbsim.elf"
     RD=$INITRD
 else
     BUILD_ONLY=1 WORK="$WORK" KOUT="$KOUT" "$here/run-qemu.sh" desktop > "$WORK/out/run-desktop-build.log" 2>&1 ||
