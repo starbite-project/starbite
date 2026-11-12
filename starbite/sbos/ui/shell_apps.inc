@@ -1102,46 +1102,13 @@ static void calc_tap(float x, float y)
     build_calc();
 }
 
-/* ---- the Camera: no driver yet (Track I has none for the S9's sensors): iOS's screen, honest about it --------- */
-static void page_camera(dc *d)
-{
-    d_rrect(d, 0, 0, 390, H_PT, 0, tk_hex(0x000000, 1));
-    /* the top row: flash and Live as glass circles, dimmed */
-    for (int k = 0; k < 2; k++) {
-        float cx = k ? CONTENT_R - 18 : MARGIN + 18, cy = SAFE_TOP + 22;
-        d_rrect(d, cx - 18, cy - 18, 36, 36, 18, W(.12f));
-        if (!k) { d_seg(d, cx + 2, cy - 9, cx - 4, cy + 1, 2, W(.45f)); d_seg(d, cx - 4, cy + 1, cx + 4, cy - 1, 2, W(.45f)); d_seg(d, cx + 4, cy - 1, cx - 2, cy + 9, 2, W(.45f)); }
-        else { d_ring(d, cx, cy, 8, 1.6f, 1, W(.45f), 0); d_ring(d, cx, cy, 3.5f, 1.6f, 1, W(.45f), 0); }
-    }
-    /* the viewfinder (4:3) */
-    d_rrect(d, 0, 112, 390, 520, 0, tk_hex(0x121417, 1));
-    d_text_box(d, TK_IT600, 17, 195, bl(TK_IT600, 17, 344), CONTENT_W, 1, "Camera driver not ready yet", 0, 0, W(.85f), 0);
-    char ln[4][96];
-    float wm;
-    int n = wrapn(ln, 3, TK_IT400, 14, "The Galaxy S9's camera sensors need a Starbite OS driver before photos can be taken.", 300, &wm);
-    for (int k = 0; k < n; k++) d_text_box(d, TK_IT400, 14, 195, bl(TK_IT400, 14, 372 + 19 * k), CONTENT_W, 1, ln[k], 0, 0, C_LABEL2, 0);
-    /* the modes: Video and Photo (iOS 26 shows these two), Photo in yellow */
-    float wv = tw(TK_IT600, 14, "VIDEO", .6f, 0), wp = tw(TK_IT600, 14, "PHOTO", .6f, 0);
-    d_text(d, TK_IT600, 14, 195 - wp / 2 - 26 - wv, bl(TK_IT600, 14, 652), "VIDEO", .6f, 0, C_LABEL2, 0);
-    d_text(d, TK_IT600, 14, 195 - wp / 2, bl(TK_IT600, 14, 652), "PHOTO", .6f, 0, tk_hex(0xffd600, 1), 0);
-    /* the shutter (a white ring with its disc, dimmed: it can't take a photo), the thumbnail, the flip circle */
-    d_ring(d, 195, 718, 37, 4, 1, W(.45f), 0);
-    d_rrect(d, 195 - 31, 718 - 31, 62, 62, 31, W(.35f));
-    d_rrect(d, 48 - 22, 718 - 22, 44, 44, 10, W(.1f));
-    d_rrect(d, 342 - 22, 718 - 22, 44, 44, 22, W(.12f));
-    d_ring(d, 342, 718, 9, 1.8f, .75f, W(.45f), 1);
-    d_seg(d, 342 + 9, 718 - 6, 342 + 9, 718 + 1, 1.8f, W(.45f));
-}
-static void camera_tap(float x, float y)
-{
-    float dx = x - 195, dy = y - 718;
-    if (dx * dx + dy * dy <= 44 * 44) { sh_haptic(); toast("The camera needs its driver first"); }
-    else if (y >= 696 && y < 740 && (x < 80 || x > 310)) toast("Nothing to show: no photos can be taken yet");
-}
+/* ---- the Camera: shell_camera.inc (on Track A's front-camera driver) ---------------------------------------- */
+static int cam_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c);
 
 /* ---- the shell's hooks for these apps (app_press, own_extras, cm_layers / cm_touch / cm_tick / cm_closed) ----- */
 static int ap_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
 {
+    if (is_app("camera")) return cam_press(x, y, r, g, rad, c);   /* the shutter's disc, the circles */
     if (is_app("calc")) {
         for (int i = 0; i < 20; i++) {
             float kx, ky, kw;
