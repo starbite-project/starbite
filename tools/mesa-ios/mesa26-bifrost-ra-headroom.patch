@@ -1,0 +1,23 @@
+--- a/src/panfrost/compiler/bifrost/bi_ra.c	2026-11-12 21:15:52
++++ b/src/panfrost/compiler/bifrost/bi_ra.c	2026-11-12 21:16:00
+@@ -1253,6 +1253,11 @@
+          bi_print_shader(ctx, stderr);
+       }
+       unsigned register_demand = bi_calc_register_demand(ctx);
++      /* Starbite (S2o 2026-11-12: one macOS WindowServer shader kept the RA loop below busy for 6+ minutes on a
++       * Mali-G72's A55 host): when the estimate is over the register file, SSA-spill down to 48 instead of 64, so the
++       * estimate's slack leaves room and the spill-and-retry loop (a full interference graph per round) rarely runs. */
++      if (register_demand > regs_to_use && regs_to_use == BI_MAX_REGS && !ctx->inputs->is_blend)
++         regs_to_use = BI_MAX_REGS - 16;
+       if (register_demand > regs_to_use) {
+          /* spill registers if we can */
+          if (ctx->inputs->is_blend)
+@@ -1303,7 +1308,7 @@
+          /* Starbite: a huge shader (macOS WindowServer's, on a Mali-G72) took minutes here,
+           * one spill per round and the whole interference graph rebuilt each time. After 4
+           * rounds, spill up to 2, 4, ... 32 nodes a round (best first, each distinct). */
+-         unsigned per_round = iter_count <= 4 ? 1 : MIN2(32, 1u << MIN2((iter_count - 4) / 2 + 1, 5));
++         unsigned per_round = iter_count <= 1 ? 4 : 32;   /* Starbite: big batches from round 2 (was 1 for 4 rounds) */
+          BITSET_WORD *taken = BITSET_CALLOC(l->node_count);
+          unsigned spilled = 0;
+ 
