@@ -141,7 +141,7 @@ static void nc_draw_item(dc *d, const nc_item *n, float x, float top, float h, i
     nc_when(when, n->hm);
     float ww = when[0] ? tw(TK_IT400, 13, when, 0, 0) : 0, t0 = top + (h - (20 + 19.0f * nl)) / 2, b1 = bl(TK_IT600, 15, t0);
     d_text_box(d, TK_IT600, 15, tx, b1, right - tx - (ww ? ww + 8 : 0), 0, n->title[0] ? n->title : nc_name(n->who), 0, 0, INK, 0);
-    if (ww) d_text(d, TK_IT400, 13, right - ww, b1, when, 0, 0, W(.55f), 0);
+    if (ww) d_text(d, TK_IT400, 13, right - ww, b1, when, 0, 0, C_LABEL2, 0);
     for (int k = 0; k < nl; k++) d_text(d, TK_IT400, 15, tx, bl(TK_IT400, 15, t0 + 20 + 19.0f * k), ln[k], 0, 0, W(.85f), 0);
 }
 
@@ -498,7 +498,7 @@ static void nc_build(void)
     nc_head_build();
     {
         dc d = mk(&ncempty, "nc-empty", 0, 492, 390, 24, 2, 0);
-        d_text_box(&d, TK_IT400, 15, 195, 492 + 17, CONTENT_W, 1, "No Older Notifications", 0, 0, W(.55f), 1);
+        d_text_box(&d, TK_IT400, 15, 195, 492 + 17, CONTENT_W, 1, "No Older Notifications", 0, 0, C_LABEL2, 1);
         trim(&ncempty);
     }
     {
@@ -1185,9 +1185,9 @@ static void build_wclock(void)
     d_seg(&d, cx, cy, cx + 31 * tk_sinf(ha), cy - 31 * tk_cosf(ha), 5, ink);
     d_seg(&d, cx, cy, cx + 52 * tk_sinf(ma), cy - 52 * tk_cosf(ma), 3.4f, ink);
     d_rrect(&d, cx - 4.5f, cy - 4.5f, 9, 9, 4.5f, ink);
-    d_rrect(&d, cx - 2, cy - 2, 4, 4, 2, tk_hex(0xff9500, 1));
-    float cw = tw(TK_IT500, 12, "Clock", 0, 0);
-    d_text(&d, TK_IT500, 12, cx - cw / 2, y + s + 18, "Clock", 0, 0, INK, 1);
+    d_rrect(&d, cx - 2, cy - 2, 4, 4, 2, C_ORANGE);
+    float cw = tw(TK_IT400, 12, "Clock", 0, 0);
+    d_text(&d, TK_IT400, 12, cx - cw / 2, y + s + 18, "Clock", 0, 0, INK, 1);
     trim(l);
     tk_layer_prepare(l);
     l->hidden = 0;
@@ -1259,7 +1259,7 @@ static const char *mp_cell(char *b)
 static void page_maps(dc *d)
 {
     /* the glyph: Maps' blue disc, the location arrow */
-    d_rrect(d, 195 - 44, 136, 88, 88, 44, tk_hex(0x0a84ff, 1));
+    d_rrect(d, 195 - 44, 136, 88, 88, 44, C_ACCENT);
     const tk_bmp *lc = tk_icon("loc");
     if (lc) { float f = 40.0f / 24, pad = tk_icon_pad("loc") * f; nc_blit_scaled(d->b, lc, PT(195 - 20 - 1.5f) - pad - d->ox, PT(180 - 20 + 1.5f) - pad - d->oy, f); }
     char ln[4][96];
@@ -1268,11 +1268,11 @@ static void page_maps(dc *d)
     for (int k = 0; k < n; k++) d_text_box(d, TK_IT700, 22, 195, bl(TK_IT700, 22, 248 + 28.0f * k), CONTENT_W, 1, ln[k], 0, 0, W(.95f), 0);
     float y = 248 + 28.0f * n + 10;
     n = wrapn(ln, 3, TK_IT400, 15, "There are no maps stored on this phone. Maps can show one when the phone is online and knows where it is.", 310, &wm);
-    for (int k = 0; k < n; k++) d_text_box(d, TK_IT400, 15, 195, bl(TK_IT400, 15, y + 20.0f * k), CONTENT_W, 1, ln[k], 0, 0, W(.55f), 0);
+    for (int k = 0; k < n; k++) d_text_box(d, TK_IT400, 15, 195, bl(TK_IT400, 15, y + 20.0f * k), CONTENT_W, 1, ln[k], 0, 0, C_LABEL2, 0);
     /* what it needs, live */
     float gy = 430;
-    d_text(d, TK_IT400, 13, ROW_TX, gy - 8, "STATUS", .52f, 0, W(.55f), 0);
-    d_rrect(d, GROUP_X, gy, GROUP_W, 47 * 3 - 1, 16, tk_hex(0x151c33, 1));
+    d_text(d, TK_IT400, 13, ROW_TX, gy - 8, "STATUS", .52f, 0, C_LABEL2, 0);
+    d_rrect(d, GROUP_X, gy, GROUP_W, 47 * 3 - 1, 16, C_CARD);
     char cb[32], lb[48];
     const char *L[3] = { "Wi-Fi", "Cellular Data", "Location" }, *G3[3] = { "cc-wifi", "cc-cell", "loc" };
     const uint32_t col[3] = { 0x0a84ff, 0x30d158, 0x0a84ff };
@@ -1296,8 +1296,8 @@ static void page_maps(dc *d)
         }
         float lx = ROW_TX + 29 + 13;
         d_text_box(d, TK_IT400, 16, lx, ry + 13 + 16, 140, 0, L[r], 0, 0, INK, 0);
-        d_text_box(d, TK_IT400, 16, CONTENT_R - 16, ry + 13 + 16, CONTENT_R - 16 - lx - 130, 2, R[r], 0, TK_TNUM, W(.55f), 0);
-        if (r < 2) d_rrect(d, lx, ry + 46, CONTENT_R - lx, .5f, 0, W(.08f));
+        d_text_box(d, TK_IT400, 16, CONTENT_R - 16, ry + 13 + 16, CONTENT_R - 16 - lx - 130, 2, R[r], 0, TK_TNUM, C_LABEL2, 0);
+        if (r < 2) d_rrect(d, lx, ry + 46, CONTENT_R - lx, .5f, 0, C_SEP);
     }
     /* the fix's details, or why there is none */
     char ft[160];
@@ -1329,7 +1329,7 @@ static void page_maps(dc *d)
         ft[k] = 0;
     }
     n = wrapn(ln, 3, TK_IT400, 13, ft, CONTENT_W - 32, &wm);
-    for (int i = 0; i < n; i++) d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, gy + 47 * 3 + 8 + 17.0f * i), ln[i], 0, 0, W(.45f), 0);
+    for (int i = 0; i < n; i++) d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, gy + 47 * 3 + 8 + 17.0f * i), ln[i], 0, 0, C_LABEL2, 0);
 }
 /* the host's stills: "lastos" KEY (sh_lastos), "mapsfix" (Maps asks for the fix now) */
 static int hx_set(const char *what, const char *key, float v)
