@@ -1,0 +1,34 @@
+From: starbite <starbite@local>
+Date: Fri, 13 Nov 2026 01:00:00 +0200
+Subject: [PATCH] patch: 0441-sweet-sample-children.patch - sweetsample also samples
+ the children of a named process, each introduced by "SMP <name>[pid] is a child of
+ <parent>[ppid]" (S2v 2026-11-13: loginwindow sat in wait4 on a child no log could name)
+
+Diagnostic; applies on 0440 (seq-12377 line). Kernel seq1l = seq1k + this.
+---
+
+--- a/bsd/dev/sweet_sample.c	2026-11-13 00:49:17
++++ b/bsd/dev/sweet_sample.c	2026-11-13 00:49:17
+@@ -52,7 +52,21 @@
+ {
+ 	char name[32];
+ 	proc_name(proc_pid(p), name, sizeof(name));
+-	if (sweet_sample_wanted(name)) {
++	/* 0441: the children of a named process too (S2v 2026-11-13: loginwindow sat in wait4 on a child the logs
++	 * could not name), each introduced by a "child of" line */
++	bool child = false;
++	if (!sweet_sample_wanted(name)) {
++		char parent[32] = "";
++		int ppid = proc_ppid(p);
++		if (ppid > 1) {
++			proc_name(ppid, parent, sizeof(parent));
++		}
++		if (parent[0] && sweet_sample_wanted(parent)) {
++			child = true;
++			printf("SMP %s[%d] is a child of %s[%d]\n", name, proc_pid(p), parent, ppid);
++		}
++	}
++	if (child || sweet_sample_wanted(name)) {
+ 		task_t task = proc_task(p);
+ 		if (task != TASK_NULL) {
+ 			sweet_sample_task(name, proc_pid(p), task);
