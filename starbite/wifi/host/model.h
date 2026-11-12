@@ -39,7 +39,22 @@ struct model {
     int echo_sync;                      /* Starbite OS's preview: undirected scans answered with their own sync id, and
                                          * DHCP, ARP and ping answered also on the WPA2 network */
     unsigned dhcp_offers, dhcp_acks;
+    /* WPA3 (model_ap.c): the access point's security, and what the firmware's "cap" lists */
+    int ap_sec;                         /* 0 WPA2-PSK (as before), 1 WPA3-only (SAE, PMF required), 2 transition
+                                         * (PSK + SAE, PMF capable), 3 WPA3 with hash-to-element only (RSNXE, the
+                                         * membership selector 123), 4 WPA2-PSK with PMF capable */
+    int cap_sae_ext, cap_sae, cap_mfp;  /* "cap" lists sae_ext / sae / mfp (the "mfp" iovar answers with any) */
+    int sae_token;                      /* the AP asks once for an anti-clogging token (status 76) */
+    int no_ext_auth;                    /* the firmware never sends EXT_AUTH_REQ (a broken sae_ext) */
+    int sae_mute;                       /* the AP does not answer SAE commits (counted only) */
+    unsigned sae_commits, sae_confirms, sae_tokens_sent, sae_ok, sae_fail, sae_h2e_seen, sae_confirm_bad;
+    unsigned mgmt_frames, events_ext, mfp_set, fw_sae_ok, akm_joined, igtk_rxiv_ok;
 };
+
+struct bcmw_sae_ops;
+extern const struct bcmw_sae_ops *model_sae;   /* the AP's SAE (sae.c's, set by host/test.c); NULL: none */
+void model_event_addr(uint32_t type, uint32_t status, uint16_t flags, uint32_t reason, const uint8_t *addr,
+                      const uint8_t *data, uint32_t dlen);
 extern struct model M;
 
 void model_reset(void);
@@ -62,4 +77,8 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
 void model_ap_after(uint32_t cmd);
 
 void model_ap_real_defaults(void);
+
+/* host/test.c's check, for host/sae-test.c (test_sae) */
+void test_check(int ok, const char *what);
+void test_sae(void);
 #endif

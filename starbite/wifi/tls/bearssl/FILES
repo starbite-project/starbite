@@ -28,6 +28,7 @@ int/i31_add.c
 int/i31_bitlen.c
 int/i31_decmod.c
 int/i31_decode.c
+int/i31_decred.c
 int/i31_encode.c
 int/i31_fmont.c
 int/i31_iszero.c

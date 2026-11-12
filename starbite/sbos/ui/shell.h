@@ -539,3 +539,6 @@ void sh_power_held(void);
 void sh_perf_mode(int conservative);
 void sh_perf_hold(int ms);
 int sh_hold_awake(const char *who, int on);
+/* Track A, 1.0: Low Power Mode (the Control Centre's Power Saving tile): conservative clocks, kept across a restart */
+void sh_low_power(int on);
+int sh_low_power_on(void);

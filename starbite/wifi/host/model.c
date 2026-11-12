@@ -497,6 +497,12 @@ static int take_ctl(int event, uint32_t *pktid, uint8_t **buf, uint16_t *len)
 
 void model_event(uint32_t type, uint32_t status, uint16_t flags, uint32_t reason, const uint8_t *data, uint32_t dlen)
 {
+    model_event_addr(type, status, flags, reason, 0, data, dlen);
+}
+
+void model_event_addr(uint32_t type, uint32_t status, uint16_t flags, uint32_t reason, const uint8_t *addr,
+                      const uint8_t *data, uint32_t dlen)
+{
     uint32_t pktid;
     uint8_t *b, it[24] = { MSGBUF_TYPE_WL_EVENT };
     uint16_t blen;
@@ -520,8 +526,11 @@ void model_event(uint32_t type, uint32_t status, uint16_t flags, uint32_t reason
     put16be(b + 26, flags);
     put32be(b + 36, reason);
     put32be(b + 44, dlen);
+    if (addr)
+        memcpy(b + 48, addr, 6);
     memcpy(b + 54, "wlan0", 5);
-    memcpy(b + 72, data, dlen);
+    if (dlen)
+        memcpy(b + 72, data, dlen);
     put32le(it + 4, pktid);
     put16le(it + 12, (uint16_t)n);
     d2h_put(RING_D2H_CONTROL, it, sizeof(it));
@@ -602,6 +611,8 @@ static void answer(const uint8_t *req, uint16_t trans, uint32_t cmd, const uint8
         } else if (!strcmp(name, "event_msgs")) {
             if (cmd == BCMW_C_SET_VAR)
                 memcpy(M.event_mask, data, 16);
+            else
+                memcpy(out, M.event_mask, 16);
             rlen = cmd == BCMW_C_GET_VAR ? 16 : 0;
         } else if (cmd == BCMW_C_GET_VAR && !strcmp(name, "scan_ver") && M.scan_v2) {
             out[0] = 2, rlen = 4;
