@@ -179,6 +179,8 @@ static int m3_prep(void)
 /* ---- contract v3 (Track E): what Starbite serves the Linux apps (sbshm.h "contract v3") ----
  * sbnet: the guest's IP packets go to Track G's NAT, a weak symbol until it is linked in (then NULL: no SVC_NET) */
 void sbos_nat_from_guest(const uint8_t *pkt, unsigned len) __attribute__((weak));
+/* Track G (kern/guestnet.c): after the start, it tells the guest about an uplink that is already up */
+void guestnet_guest_started(void) __attribute__((weak));
 #ifndef GUEST_QEMU                          /* (QEMU's kern-shim has no clock and no card: neither is offered) */
 /* the wall clock: UTC and the user's offset (the clock settings' zone) for the guest's time */
 static uint32_t unix_s(int32_t *tz_min)
@@ -345,6 +347,8 @@ static int load_and_start(void)
         why = sbg_stats()->why ? sbg_stats()->why : "the guest did not start";
         return -6;
     }
+    if (guestnet_guest_started && (sbg_hdr()->host_services & SBSHM_SVC_NET))
+        guestnet_guest_started();           /* sbg_net_config for an uplink already up (the guest starts at link 0) */
     return 0;
 }
 
