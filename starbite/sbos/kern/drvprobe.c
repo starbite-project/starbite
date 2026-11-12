@@ -13,6 +13,7 @@
 #include "codec_media.h"
 #include "bt.h"
 #include "cam.h"
+#include "usb.h"
 
 /* ---- the list: filled in as each driver is merged ---- */
 #define DRV_LIST_BEGIN const struct drv_probe drv_probes[] = {
@@ -25,6 +26,7 @@ DRV_LIST_BEGIN
     { "nled", drv_nled_probe, drv_nled_abort, 12000 },
     { "bt", drv_bt_probe, drv_bt_abort, DRV_BT_BUDGET_MS },
     { "cam", drv_cam_probe, drv_cam_abort, CAM_PROBE_BUDGET_MS },
+    { "usb", drv_usb_probe, drv_usb_abort, DRV_USB_BUDGET_MS },   /* last: the link to the Mac comes back after */
 DRV_LIST_END
 #else
 DRV_HOST_LIST                               /* the host test's fake probes */
