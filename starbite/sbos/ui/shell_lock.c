@@ -3479,7 +3479,7 @@ static void build_app_page(int a)
 }
 /* P2x: the app's icon over the window while it is small (iOS: the icon grows into the app and the app shrinks back
  * into its icon, so a closing window never ends as an empty tile); a view into the pack, never freed */
-static tk_layer apicon;
+static tk_layer apicon, apdim;               /* apdim: B4, the dim under an opening / closing window */
 static void place_apicon(arect R, float p)
 {
     float pad;
@@ -3517,9 +3517,14 @@ static void set_app_rect(arect R)
     appbg.solid = 0xff000000u | cr << 16 | cg << 8 | cb;
     appbg.gen++;
     if (!locked) {                       /* survival-next: an app over the lock (Emergency's cards): home stays away */
-        home.sx = home.sy = 1 + .05f * p;
+        home.sx = home.sy = 1 + .08f * p;   /* B4: iOS's zoom behind an opening app (and back on the close) */
         home.alpha = 1 - .4f * tk_clampf(p, 0, 1);
     }
+    /* B4: the wallpaper (and home) dim under the window as it grows; nothing to draw once it covers the screen */
+    apdim.solid = tk_premul(TK_RGBA(0, 0, 0, 1));
+    apdim.solid_w = TK_W; apdim.solid_h = TK_H;
+    apdim.alpha = .3f * tk_clampf(p, 0, 1);
+    apdim.hidden = !AP.on || sw_app_alpha() || apdim.alpha <= .004f || (R.w >= 389.5f && R.y <= .5f && R.x > -.5f && R.x < .5f);
     appg.hidden = !AP.on;
     place_apicon(R, p);
 }
@@ -3611,6 +3616,7 @@ static void app_finish_close(void)
     AP.on = AP.closing = 0;
     appg.hidden = 1;
     apicon.hidden = 1;
+    apdim.hidden = 1;
     /* the page (a whole screen) is not kept: the next open draws it again */
     for (int i = 0; i < NST; i++) relayer(&appst[i]);
     relayer(&apnum);
@@ -4089,12 +4095,13 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 }
 static void relink(void)
 {
-    tk_layer *r[] = { &star, &star_e, &home, &swg, &lockg, &lockflat, &appg, &apicon, &swcover, &ncl, &focus, &ccl, &bnl, &cfl, &cvl, &boot,
+    if (!apdim.name) { tk_layer_init(&apdim, "app-dim"); apdim.hidden = 1; }
+    tk_layer *r[] = { &star, &star_e, &home, &swg, &lockg, &lockflat, &apdim, &appg, &apicon, &swcover, &ncl, &focus, &ccl, &bnl, &cfl, &cvl, &boot,
                       &homebar, &toastl, &slp };
     nc_link();                                       /* helper D: the Notification Centre (ncl), the banner (bnl) */
     sw_link();                                       /* helper D: the switcher's cards (swg), a card's snapshot over its opening window */
     cm_link();                                       /* helper I: the call screen (cvl) */
-    link(&root, r, 19);
+    link(&root, r, 20);
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb, &apphl };
     link(&appg, ag, 13);
     tk_layer *st[NST + 64] = { &appst[0], &appst[1], &appst[2], &appst[3] };
@@ -4424,6 +4431,7 @@ static int hit_row(float x, float y, int *gi)
     return -1;
 }
 static float rubber(float over, float dim) { return (1 - 1 / (over * .55f / dim + 1)) * dim; }
+static int list_over;                       /* B4: the lock list's drag is past an end (its haptic once) */
 
 /* ---- P3p (P3j-7): press feedback. Nothing is baked in a tap: an icon's press is two small layers (the ground
  * under it: the wallpaper or the dock's kept glass, and the icon darkened, shrinking to .88 in .1 s and back in .2 s);
@@ -4600,7 +4608,7 @@ void sh_touch(int phase, float x, float y, float t)
         }
         if (focus_on) {
             float sy = focus_sy;
-            if (x >= SL_X + 5 + thumb_x && x <= SL_X + 57 + thumb_x && y >= sy + 5 && y <= sy + 57) { T.kind = G_THUMB; T.base = thumb_x; sp_thumb.live = 0; }
+            if (x >= SL_X + 5 + thumb_x && x <= SL_X + 57 + thumb_x && y >= sy + 5 && y <= sy + 57) { T.kind = G_THUMB; T.base = thumb_x; T.arg2 = 0; sp_thumb.live = 0; }
             else if (y < FOC_Y || y > FOC_Y + FOC_H) T.kind = G_SCRIM;
             else { T.kind = G_FOCUSDRAG; sp_focus.live = 0; focus_closing = 0; tk_tracker_add(&T.tr, y, t); }   /* P3p: drag it down */
             return;
@@ -4716,7 +4724,7 @@ void sh_touch(int phase, float x, float y, float t)
             tk_rect c = { CARD_X, LIST_TOP + card_top(r), CARD_W, 68 };
             hl_set(&lockhl, c, c, 26, W(.1f));
         }
-        else if (y >= LIST_TOP && y <= LIST_TOP + LIST_H) { T.kind = G_LIST; T.base = scroll; sp_scroll.live = 0; scroll_momentum = 0; }
+        else if (y >= LIST_TOP && y <= LIST_TOP + LIST_H) { T.kind = G_LIST; T.base = scroll; sp_scroll.live = 0; scroll_momentum = 0; list_over = scroll < 0 || scroll > max_scroll(); }
         else { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
         tk_tracker_add(&T.tr, y, t);
         return;
@@ -4750,6 +4758,10 @@ void sh_touch(int phase, float x, float y, float t)
         case G_THUMB:
             tk_tracker_add(&T.tr, x, t);
             set_thumb(tk_clampf(T.base + x - T.x0, 0, SL_W - 62));
+            {   /* B4: the slide's start threshold, felt once each way it is crossed */
+                int past = thumb_x > (SL_W - 62) * .86f;
+                if (past != T.arg2) { T.arg2 = past; if (past) sh_haptic_k(SH_HAP_LIGHT); }
+            }
             break;
         case G_FOCUSDRAG:
             /* P3p (P3j-19): the sheet follows the finger down, rubber-bands up */
@@ -4774,6 +4786,11 @@ void sh_touch(int phase, float x, float y, float t)
             if (s < 0) s = -rubber(-s, LIST_H);
             else if (s > m) s = m + rubber(s - m, LIST_H);
             scroll = s;
+            {   /* B4: a soft tick where the list's end is reached (its rubber band begins) */
+                int over = s < 0 || s > m;
+                if (over && !list_over) sh_haptic_k(SH_HAP_SOFT);
+                list_over = over;
+            }
             place_list();
             break;
         }
@@ -5096,13 +5113,14 @@ int sh_tick(float dt, float t)
         if (t - T.t0 >= 700) {
             T.arg = 1;
             cell_toggle();
+            sh_haptic_k(SH_HAP_MEDIUM);              /* B4: the hold's threshold, felt */
         }
         mv = 1;
     }
     if (CF.down) {
         CF.p = tk_minf(1, (t - CF.t0) / 1500);
         cf_place();
-        if (CF.p >= 1) cf_close(1);
+        if (CF.p >= 1) { sh_haptic_k(SH_HAP_MEDIUM); cf_close(1); }   /* B4: the hold bar's end, felt */
         mv = 1;
     }
     if (CF.a != CF.at) {
@@ -5112,7 +5130,7 @@ int sh_tick(float dt, float t)
         mv = 1;
     }
     if (T.kind == G_CCEM && !T.arg) {
-        if (t - T.t0 >= 700) { T.arg = 1; set_emergency(!EMG, 0); }
+        if (t - T.t0 >= 700) { T.arg = 1; sh_haptic_k(SH_HAP_MEDIUM); set_emergency(!EMG, 0); }
         mv = 1;
     }
     if (toast_t < 1) {
@@ -5209,7 +5227,7 @@ int sh_tick(float dt, float t)
             hold_ring(q, i, p);
             if (p >= 1) {
                 q->fired = 1;
-                sh_haptic();                     /* P3p (P3j-17): the threshold, felt (no ring) */
+                sh_haptic_k(SH_HAP_MEDIUM);      /* P3p (P3j-17): the threshold, felt (no ring); B4: a long press's commit */
                 if (i == 0) {
                     q->lit = !q->lit;
                     sh_torch(q->lit);
