@@ -1245,20 +1245,23 @@ void sh_linux_store(const sh_lstore_t *s)
         aq_want[0] = 0;
     }
 }
-/* cp6 (Track B, Track A's list of dead ends): the home's Browser and Weather keys. "browser": the installed Linux
- * browser opens; none: the App Store on Firefox's page (GET). "weather": the catalog has no weather app yet: 0, the
- * shell's own page stays. 1 = handled. Never blocks: opening the store only asks for Linux (gwin starts it). */
-static int st_route_app(const char *key)   /* 1 handled (a Linux browser opened); 2 open the App Store instead (shell_lock.c app_open) */
+/* cp6 / cp7 (Track B, Track A's list of dead ends): the home's Browser and Weather keys. The installed Linux app opens
+ * (1); none: 2, the App Store opens on its page (GET). "browser": Firefox (or firefox-esr / chromium / epiphany-browser
+ * when installed); "weather": GNOME Weather (needs the network for forecasts). Never blocks: opening the store only
+ * asks for Linux (gwin starts it). */
+static int st_route_app(const char *key)   /* 1 handled (a Linux app opened); 2 open the App Store instead (shell_lock.c app_open) */
 {
-    static const char *const BROWSERS[] = { "firefox", "firefox-esr", "chromium", "epiphany-browser" };
-    if (tk_strcmp(key, "browser")) return 0;
-    for (unsigned k = 0; k < sizeof BROWSERS / sizeof BROWSERS[0]; k++) {
-        int i = st_find(BROWSERS[k]);
+    static const char *const BROWSERS[] = { "firefox", "firefox-esr", "chromium", "epiphany-browser", 0 };
+    static const char *const WEATHER[] = { "gnome-weather", 0 };
+    const char *const *ids = !tk_strcmp(key, "browser") ? BROWSERS : !tk_strcmp(key, "weather") ? WEATHER : 0;
+    if (!ids) return 0;
+    for (int k = 0; ids[k]; k++) {
+        int i = st_find(ids[k]);
         if (i >= 0 && aq_inst(&LST->pkg[i]) && st_app(i) >= 0) { lx_open_app(st_app(i)); return 1; }
     }
     /* Track B, cp6: the caller opens the App Store as any app opens (its zoom, its page over frames); the page is
-     * Firefox's from the open's build (st_build), or once the store's table arrives (sh_linux_store) */
-    lx_scopy(aq_want, "firefox", sizeof aq_want);
+     * the app's from the open's build (st_build), or once the store's table arrives (sh_linux_store) */
+    lx_scopy(aq_want, ids[0], sizeof aq_want);
     return 2;
 }
 /* an app's page pushed (the method preselected: the installed one, else the store's default) */

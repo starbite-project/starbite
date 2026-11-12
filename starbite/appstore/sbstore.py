@@ -60,7 +60,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 METHODS = ("distro", "release", "source")          # method numbers 1, 2, 3 (SBG_PKG_M_*)
 M_NUM = {"distro": 1, "release": 2, "source": 3}
 M_NAME = {v: k for k, v in M_NUM.items()}
@@ -181,6 +181,50 @@ HINTS = {
     "apt lists broken": ("Linux's package list is damaged",
                          "The store tried to repair it and couldn't. Restart Linux (close all Linux apps), then try "
                          "again. Details: /var/log/sbstore/{id}.log."),
+    "install incomplete": ("Install didn't complete",
+                           "The download didn't contain the program the store expected, so nothing was installed. "
+                           "Choose another install method (Debian usually works)."),
+    "unpack failed": ("Couldn't unpack the download",
+                      "The downloaded file couldn't be opened. Tap GET to download it again, or choose another method."),
+    "bad recipe": ("The store's recipe is wrong",
+                   "This install method isn't set up correctly in the store. Choose another install method."),
+    "build deps failed": ("Couldn't get the build tools",
+                          "The tools needed to compile it didn't install. Check Wi-Fi and tap GET again, or choose "
+                          "Latest Release or Debian."),
+    "cancelled": ("Cancelled", "Nothing was changed. Tap GET to start again."),
+    "no aarch64 release": ("No phone build of this release",
+                           "The project didn't publish a build for this phone's processor this time. Choose From "
+                           "Source or Debian."),
+    "no checksum upstream": ("Couldn't check the download",
+                             "The project published no checksum for this file, so the store didn't install it. "
+                             "Choose another install method."),
+    "no signature upstream": ("Couldn't check the download",
+                              "The project's signature for this file is missing, so the store didn't install it. "
+                              "Choose another install method."),
+    "bad signature": ("Download failed its check",
+                      "The file's signature didn't match the project's key, so it was not installed. Choose another "
+                      "install method."),
+    "unexpected signer": ("Download failed its check",
+                          "The file was signed by a key the store doesn't trust for this app, so it was not installed."),
+    "signing key missing": ("Couldn't check the download",
+                            "The store is missing this project's signing key. Choose another install method."),
+    "no signature tool": ("Couldn't check the download",
+                          "Linux lacks the tool that checks signatures (sqv / gpgv). Choose Debian instead."),
+    "no version upstream": ("Newest version not found",
+                            "The project's site didn't say which version is newest. Try again later, or choose Debian."),
+    "no older version": ("Nothing to roll back to",
+                         "Only one version is installed, so there is nothing older to go back to."),
+    "no rollback": ("Nothing to roll back to",
+                    "Only one version is installed, so there is nothing older to go back to."),
+    "no such app": ("Not in the store", "This app isn't in the store's catalog any more."),
+    "took too long": ("Took too long",
+                      "It ran much longer than expected and was stopped. Tap GET to try again, or choose Latest "
+                      "Release or Debian."),
+    "tool missing": ("A Linux tool is missing",
+                     "A program the store needs isn't in Linux. Choose Debian instead; details in "
+                     "/var/log/sbstore/{id}.log."),
+    "update failed": ("Update failed",
+                      "The update stopped with an error; the installed version still works. Tap UPDATE to try again."),
     "interrupted": ("Stopped part-way",
                     "The install was interrupted (Linux stopped or the phone restarted). Tap GET again."),
 }
@@ -1176,6 +1220,11 @@ def _apt_get_install(missing, app_id, prog, cancel):
     return rc, out
 
 
+def apt_clean(app_id=None):
+    """apt's downloaded .debs (/var/cache/apt/archives): installed already, only taking the overlay's space"""
+    run(C.apt + ["-q", "clean"], logto=_logp(app_id), timeout=120)
+
+
 def apt_install(pkgs, app_id, prog=NOPROG, cancel=None, auto=False):
     """install Debian packages; returns those that were not installed before"""
     pkgs = [p for p in pkgs if p]
@@ -1217,6 +1266,7 @@ def apt_install(pkgs, app_id, prog=NOPROG, cancel=None, auto=False):
         raise StoreError("install failed", "apt-get install exited %d: %s" % (rc, out[-300:]))
     if auto:
         run(C.apt_mark + ["auto"] + missing, logto=_logp(app_id))
+    apt_clean(app_id)
     after = dpkg_installed()
     return [p for p in missing if p.split("=")[0] in after]
 
@@ -1682,6 +1732,18 @@ def build_progress(prog, build_min):
     return cb
 
 
+def build_deps_drop(pkgs, aid):
+    """what a build brought (its build deps and all they pulled in) removed again, never a base package; then apt's
+    downloaded .debs"""
+    if pkgs:
+        try:
+            gone = apt_remove(pkgs, aid, guard=True)
+            log("build deps removed: %d packages" % len(gone), aid)
+        except StoreError as e:
+            log("build deps kept: %s" % e.detail, aid)
+    apt_clean(aid)
+
+
 def build_source(app, rel, prefix, prog, cancel=None):
     S = app["source"]
     aid = app["id"]
@@ -1705,26 +1767,38 @@ def build_source(app, rel, prefix, prog, cancel=None):
         src_sha = None
     else:
         raise StoreError("bad recipe", "%s: [source] has no tarball or git" % aid)
-    # build deps
+    # build deps: everything they bring (their own dependencies too) is what the build leaves to remove
     prog.stage("build deps", 15, 30)
     deps = list(S.get("build_deps") or [])
-    added = apt_install(deps, aid, prog, cancel, auto=True)
+    before = set(dpkg_installed())
+    try:
+        apt_install(deps, aid, prog, cancel, auto=True)
+    except BaseException:
+        shutil.rmtree(bdir, ignore_errors=True)
+        build_deps_drop(sorted(set(dpkg_installed()) - before), aid)
+        raise
+    added = sorted(set(dpkg_installed()) - before)
     # build
     prog.stage("building", 30, 95)
     system = S.get("system", "script")
     steps = list(BUILD_STEPS.get(system, [])) + list(S.get("steps") or [])
     if not steps:
         raise StoreError("bad recipe", "%s: nothing to build (system %s)" % (aid, system))
+    # every cache inside the build tree, removed with it (the phone's overlay is 2 GiB: cp7's VM run lost ~300 MB to
+    # ~/.cache/go-build and the module cache)
     envx = {"PREFIX": prefix, "JOBS": str(C.jobs), "OPTIONS": " ".join(shlex.quote(o) for o in S.get("options", [])),
-            "VERSION": rel["version"], "CARGO_HOME": os.path.join(C.state_dir, "cargo"),
-            "GOPATH": os.path.join(C.state_dir, "go"), "GOFLAGS": "-modcacherw",
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin") + ":" + os.path.join(C.state_dir, "cargo", "bin")}
+            "VERSION": rel["version"], "CARGO_HOME": os.path.join(bdir, "cargo"),
+            "GOPATH": os.path.join(bdir, "go"), "GOFLAGS": "-modcacherw", "GOCACHE": os.path.join(bdir, "gocache"),
+            "HOME": os.path.join(bdir, "home"), "XDG_CACHE_HOME": os.path.join(bdir, "cache"),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin") + ":" + os.path.join(bdir, "cargo", "bin")}
+    os.makedirs(envx["HOME"], exist_ok=True)
     envx.update(S.get("env") or {})
     script = "set -e\n" + "\n".join(steps) + "\n"
     rc, out = run(["sh", "-c", script], logto=_logp(aid), cwd=srcd, envx=envx, cancel=cancel,
                   line_cb=build_progress(prog, S.get("build_min")))
     shutil.rmtree(bdir, ignore_errors=True)
-    if rc:
+    if rc and not C.keep_build_deps:
+        build_deps_drop(added, aid)
         raise StoreError("build failed", "build exited %d (log: /var/log/sbstore/%s.log): %s" % (rc, aid, out[-300:]))
     return added, src_sha
 
@@ -1870,10 +1944,7 @@ def _install_locked(app, st, aid, method, cur, prog, cancel, update):
                 if C.keep_build_deps:
                     refs_add(st, badded, aid)
                 else:
-                    try:
-                        apt_remove([p for p in badded if p not in st["apt_refs"]], aid, guard=True)
-                    except StoreError as e:
-                        log("build deps kept: %s" % e.detail, aid)
+                    build_deps_drop([p for p in badded if p not in st["apt_refs"]], aid)
                 with open(os.path.join(vdir, ".sbstore.json"), "w") as f:
                     json.dump({"id": aid, "version": rel["version"], "method": method, "source_sha256": src_sha,
                                "built": int(time.time())}, f)
