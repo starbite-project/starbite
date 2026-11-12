@@ -66,22 +66,24 @@ static const tk_bmp *shown_frame(void) { return &C->fb; }
 #define PUSHED_TOP (SAFE_TOP + NAVBAR_H + 16)
 #define IN_NAV(y) ((y) >= SAFE_TOP - 4 && (y) < SAFE_TOP + NAVBAR_H)
 /* B9: the lock screen as iOS 26 lays it out (IOS-REFERENCE 9.1 / 5 / 9.3, measured on the WWDC25 hero): the widgets
- * row at y 214 (72 tall); the Systems widget group under it (a glass tile per vendor, 72 tall, the row as wide as a
- * platter); the open vendor's systems as a platter under the tiles; the notifications bottom-anchored on y 677
- * (20.5 above the buttons); the torch / Emergency buttons 50 pt glass circles centred at x 71 / 319, y 727 */
+ * row at y 214 (72 tall); the notifications bottom-anchored on y 677 (20.5 above the buttons); the torch / Emergency
+ * buttons 50 pt glass circles centred at x 71 / 319, y 727. B10 (the user, 2026-11-12: "it used to be notification
+ * style"): the vendor cards are back under the widgets (the list from LIST_TOP), as notification platters */
 #define WROW_Y 214.0f
 #define PL_X 14.5f
 #define PL_W 361.0f
 #define PL_R 23.0f
-#define SYS_Y 300.0f
-#define SYS_H 72.0f
-#define TILE_GAP 9.0f
-#define TILE_W ((PL_W - 4 * TILE_GAP) / 5)
-#define TILE_X(g) (PL_X + (TILE_W + TILE_GAP) * (g))
-#define TILE_R 22.0f
-#define SYC_Y (SYS_Y + SYS_H + 12)                   /* the open vendor's card */
-#define LKN_TOP SYC_Y                                /* the notifications' area */
+#define LKN_TOP 310.0f                               /* the notifications' area fanned out (the list's top: LIST_TOP) */
 #define LKN_BOT 677.0f
+/* B10: a vendor card is an iOS platter (PL_X / PL_W / PL_R, the notifications' glass): its icon, name, systems and
+ * chevron where B4's cards had them (11 / 69 / 81 in, the chevron 32 from the right) */
+#define VC_X PL_X
+#define VC_W PL_W
+#define VC_R PL_R
+#define VC_ICON (VC_X + 11)
+#define VC_TX (VC_X + 69)
+#define VC_SX (VC_X + 81)
+#define VC_CHEV (VC_X + VC_W - 32)
 
 /* ---- the catalog as the concept groups it (P2: from the store's catalog, as the boot menu) ----------------- */
 typedef struct { const char *k, *name, *meta, *tag; int self; } sys_t;
@@ -231,7 +233,7 @@ static int trim_layer(tk_layer *l, int *cut_top, int *cut_bot)
 static void trim(tk_layer *l) { trim_layer(l, 0, 0); }
 
 /* ---- state ------------------------------------------------------------------------------------------------- */
-static tk_layer root, home, lockflat, lockg, mark, glyph_c, glyph_o, list, hint, homebar;
+static tk_layer root, home, lockflat, lockg, mark, glyph_c, glyph_o, list, etool, hint, homebar;
 static tk_layer boot, bootc, bootbar;
 typedef struct {
     tk_layer face, facelit, icon, iconlit, ring, grp;
@@ -244,14 +246,30 @@ typedef struct {
 } hold_t;
 static hold_t Q[2];
 /* B9: the lock's one platter glass (iOS 26's notification platter: x 14.5, w 361, r 23) and the stack's lower cards
- * under it, baked once into K[0] (K[1..] stay empty): the open system card, the lock's notifications and the
- * Notification Centre's platters (views, shell_nc.inc) all draw it as a 3-slice at any height */
+ * under it, baked once into K[0] (K[1..] stay empty): the vendor cards (B10), their members' platters, the lock's
+ * notifications and the Notification Centre's platters (views, shell_nc.inc) all draw it as a 3-slice at any height */
 typedef struct {
     tk_layer gh, face;          /* gh: the stack's lower cards (P3i) */
     float fcut;                 /* P3s: px cut off the face's top and bottom (its 3-slice is that much shorter) */
     float y;                    /* where it was baked: LIST_TOP + y (pt) */
 } card_t;
 static card_t K[NG];
+/* B10: the lock's vendor cards (B4 / P3i's, back over B9's tiles). The glass is K[0]'s (face and gh are views of it:
+ * nothing of a card's glass is baked per card); a card's own pixels are its head (icon, name, systems), its chevron
+ * and, while it is open, its member rows and "Show less" */
+typedef struct {
+    tk_layer gh, face, head, chev, members, rows[3];   /* gh: the stack's lower cards (a view of K[0].gh) */
+    tk_layer mpl[3], sl;        /* B4 (P3j-8): each member's own platter (a view of the face), the "Show less" pill */
+    tk_bmp chev0;               /* the chevron unrotated */
+    float y;                    /* top in content pt (scroll 0, every card closed): where its head was drawn */
+    float chx;                  /* the chevron's x */
+    int isopen;
+    float memh, full;           /* members' height now and open */
+    tk_spring sp;
+    float from, to;             /* the spring's ends (rows' p) */
+    float chev_t, chev_from, chev_to, chev_now;   /* the chevron's .35 s transition */
+} vcard_t;
+static vcard_t V[NG];
 
 static float lockY;             /* pt, 0 = locked in place */
 static int locked = 1;
@@ -422,7 +440,7 @@ static int sw_dirty;                          /* (shell_switcher.inc's: the open
 static void nc_blit_scaled(tk_bmp *dst, const tk_bmp *src, float X, float Y, float f);
 static void link(tk_layer *parent, tk_layer **kids, int n);
 static void lap_us(const char *what, uint64_t us);
-static char carrier[32] = "No SIM";
+static char carrier[32] = "";            /* P3z: nothing while Cellular is off (the SIM is unknown then; "No SIM" only when the modem says so) */
 static void build_lstatus(void)
 {
     relayer(&lstatus);
@@ -614,20 +632,68 @@ static uint32_t sv_ground(int a);
 static float sv_next_update(float t);
 static int sv_refresh(float t);
 
-/* ---- the Systems widget group (B9: the user's decision 2026-11-12; it was the lock's list of vendor cards) -------
- * The boot menu's role as an iOS lock-screen widget group under the clock: a glass tile per vendor (its icon, its
- * name, how many systems it has); a tap opens that vendor's systems as a platter under the tiles (another tile
- * switches it, the same tile closes it); a system's tap opens the focus sheet and its slide-to-start, as before.
- * Emergency keeps its own list of eight cards (LIST_TOP / LIST_H, the list layer). */
-#define FACE_MG 44.0f            /* the margin around a platter's face (its shadow) */
+/* ---- the Systems list ------------------------------------------------------------------------------------------
+ * B10 (the user, 2026-11-12, over B9's Systems tiles): the vendors as notification cards under the widgets, B4's
+ * stacks: a card's members peek under it; a tap fans them out as their own platters ("Show less" above), a member's
+ * tap opens the focus sheet and its slide-to-start. The list scrolls; it ends above the lock's notifications (their
+ * stack, shell_lknote.inc), and runs down to the buttons while a card is open (the notifications fade out of its
+ * way) or when there are none. Emergency keeps its own list of eight cards (the same list layer). */
+#define FACE_MG 44.0f            /* the margin around a card's face (its shadow) */
 #define LIST_TOP 310.0f
-#define LIST_H 374.0f           /* Emergency's list: top 310, bottom 118 */
-/* P3i: a stack's lower cards peek 8 and 15 pt below the top one (iOS's collapsed notification stack) */
+#define LIST_H 374.0f           /* .nwrap: top 310, bottom 118 */
+static int stack(int g) { return G[g].n > 1; }
+/* P3i: a stack's lower cards peek 8 and 15 pt below the top one (iOS's collapsed notification stack), then the
+ * list's 10 pt gap */
 #define PEEK1 8.0f
 #define PEEK2 15.0f
-#define SROW_H 60.0f             /* a system's row in the open vendor's platter (6 pt above and below the rows) */
+/* the gap under a card: room for its stack's peek, which closes as the card opens (the lower cards are gone) */
+static float stack_gap(int g);
+#define STACK_GAP(g) stack_gap(g)
 static void ellipsize(char *out, int cap, int f, float size, const char *s, float maxw);
-static float max_scroll(void) { return EMG ? sv_ec_max_scroll() : 0; }
+static float stack_gap(int g)
+{
+    if (!stack(g)) return 10;
+    float q = V[g].full > 0 ? tk_clampf(V[g].memh / V[g].full, 0, 1) : 0;
+    return 10 + PEEK2 * (1 - q);
+}
+static void layout_list(void)
+{
+    float y = 10;
+    for (int g = 0; g < NG; g++) {
+        V[g].y = y;
+        y += 68 + V[g].memh + STACK_GAP(g);
+    }
+}
+/* B4 (P3j-8): an open stack's members are their own 68 pt platters 8 apart (76 a member), under a 36 pt band with
+ * "Show less" above the head card; q the stack's share of its fan (0 closed .. 1 open) */
+#define MEM_P 76.0f
+#define SL_BAND 36.0f
+static float card_top(int g);
+static float bl(int f, float size, float top);
+static float stack_q(int g) { return V[g].full > 0 ? tk_clampf(V[g].memh / V[g].full, 0, 1) : 0; }
+static float card_h(int g) { return SL_BAND * stack_q(g) + 68 + V[g].memh + STACK_GAP(g); }
+static float content_h(void)
+{
+    float y = 10;
+    for (int g = 0; g < NG; g++) y += card_h(g);
+    /* the last margin (22) collapses with the tools' 12; then their 32, margin 4, padding 14 */
+    return y + 32 + 4 + 14;
+}
+/* B10: the most any card is open (0 all closed .. 1): the lock's notifications fade out of an opening card's way */
+static float vc_open_q(void) { float q = 0; for (int g = 0; g < NG; g++) q = tk_maxf(q, stack_q(g)); return q; }
+static int vc_any_open(void) { for (int g = 0; g < NG; g++) if (V[g].isopen) return 1; return 0; }
+/* the list's bottom (screen pt): above the notifications' stack while it shows, else (or while a card is open) above
+ * the buttons, as B4's list */
+static float lkn_stack_top(void);       /* shell_lknote.inc: the stack's top (0: no notifications) */
+static float list_bot(void)
+{
+    float lb = LIST_TOP + LIST_H, st = EMG ? 0 : lkn_stack_top();
+    if (st <= 0) return lb;
+    float a = tk_clampf(1 - vc_open_q() * 3, 0, 1);       /* (the notifications' fade: lkn_place) */
+    return lb + (tk_minf(lb, st - 10) - lb) * a;
+}
+static float list_h(void) { return list_bot() - LIST_TOP; }
+static float max_scroll(void) { return EMG ? sv_ec_max_scroll() : tk_maxf(0, content_h() - list_h()); }
 
 /* P3i: a lower card of the stack, iOS-style: the whole card's shape (narrower, its radius scaled with it) baked in
  * its own bitmap and faded as one; what the cards above it cover is taken out afterwards (erase_rrect) */
@@ -701,169 +767,163 @@ static void platter_at(tk_layer *f, float y, float h)
     f->slice_h = PT(tk_maxf(48, h) + 2 * FACE_MG) - k->fcut;
 }
 
-static tk_layer sysg, systile, syssel, syshl, sysmem, sysrow[3];
-/* the open vendor: g (-1 none; it stays set while its platter closes), its rows' height now (h) and open (full) */
-static struct { int g, open; float h, full, from, to; tk_spring sp; } SY = { .g = -1 };
+/* ---- the vendor cards (B10: B4 / P3i's, on B9's platter glass) ------------------------------------------------- */
+static void nc_view(tk_layer *v, tk_layer *m);             /* shell_nc.inc: a view shares the glass's bitmaps */
+static void nc_unview(tk_layer *v);
+static void nc_view_shapes(tk_layer *v, const tk_layer *m);
 static void lkn_place(void);              /* the lock's notifications (shell_lknote.inc) */
 static void lkn_collapse(int instant);
-static void build_systiles(void)
-{
-    relayer(&systile);
-    dc d = mk(&systile, "systems", PL_X, SYS_Y, PL_W, SYS_H, 10, 1);
-    for (int g = 0; g < NG; g++) {
-        float x = TILE_X(g), y = SYS_Y;
-        d_glass(&d, x, y, TILE_W, SYS_H, TILE_R, 1, 1);
-        char tn[40] = "t38-";
-        tk_memcpy(tn + 4, G[g].key, tk_strlen(G[g].key) + 1);
-        float ix = x + (TILE_W - 38) / 2;
-        d_icon(&d, tn, ix, y + 9, 1);
-        /* the name: 11 / 600 (the HIG's smallest widget text), a little smaller only if it would not fit */
-        float fs = 11;
-        while (fs > 9.5f && tw(TK_IT600, fs, G[g].name, 0, 0) > TILE_W - 8) fs -= .5f;
-        float nw = tw(TK_IT600, fs, G[g].name, 0, 0);
-        d_text(&d, TK_IT600, fs, x + (TILE_W - nw) / 2, y + 62, G[g].name, 0, 0, W(.92f), 0);
-        /* how many systems: a small badge on the icon's top-right corner, iOS's systemGray */
-        char c[4] = { (char)('0' + G[g].n), 0 };
-        float bw = 17, bx = ix + 38 - bw / 2 - 1, by = y + 9 - bw / 2 + 1;
-        d_rrect(&d, bx - 1.5f, by - 1.5f, bw + 3, bw + 3, bw / 2 + 1.5f, tk_hex(0x2a2f45, 1));
-        d_rrect(&d, bx, by, bw, bw, bw / 2, tk_hex(0x636366, 1));
-        float cw = tw(TK_IT700, 11, c, 0, TK_TNUM);
-        d_text(&d, TK_IT700, 11, bx + (bw - cw) / 2, by + bw / 2 + 11 * INTER_CAP / 2, c, 0, TK_TNUM, W(1), 0);
-    }
-    tk_a8_free(&systile.glass);
-    trim(&systile);
-}
-/* the open vendor's rows (text and icons: no glass), made at the tap and freed when its platter has closed */
-static void build_sysrows(int g)
+static float lkn_p(void);                 /* how far they are fanned out (0..1): the list gives way */
+
+static void head_content(dc *d, int g, float top)
 {
     const grp_t *gr = &G[g];
-    for (int i = 0; i < 3; i++) relayer(&sysrow[i]);
-    sysmem.child = 0;
+    char tilename[40] = "t46-";
+    tk_memcpy(tilename + 4, gr->key, tk_strlen(gr->key) + 1);
+    d_icon(d, tilename, VC_ICON, top + 11, 1);
+    float b = base_of(TK_IT700, 20, top + 13.45f, 23.1f);
+    d_text(d, TK_IT700, 20, VC_TX, b, gr->name, 0, 0, INK, 0);         /* P3j: Bold, untracked (ExtraBold -0.5 was heavy) */
+    char names[160];
+    int n = 0;
     for (int i = 0; i < gr->n; i++) {
-        const sys_t *s = &gr->it[i];
-        float ry = SYC_Y + 6 + SROW_H * i;
-        dc d = mk(&sysrow[i], "row", PL_X + 6, ry - 2, PL_W - 12, SROW_H - 2, 1, 0);
-        if (i) d_rrect(&d, PL_X + 66, ry - 1, PL_W - 66 - 16, .5f, 0, W(.14f));
-        char tn[40] = "t38-";
-        tk_memcpy(tn + 4, s->k, tk_strlen(s->k) + 1);
-        d_icon(&d, tn, PL_X + 15, ry + 10, 1);
-        d_text(&d, TK_IT600, 17, PL_X + 66, ry + 27, s->name, 0, 0, INK, 0);
-        const char *tag = s->self ? "RUNNING" : !tk_strcmp(s->k, LAST) ? "LAST USED" : s->tag;
-        d_text_box(&d, TK_IT400, 13, PL_X + 66, ry + 45, PL_W - 66 - (tag ? 96 : 16), 0, s->meta, 0, 0, W(.65f), 0);
-        if (tag) {
-            float w = tw(TK_IT700, 10.5f, tag, .42f, 0) + 14;
-            float tx = PL_X + PL_W - 16 - w, ty = ry + 19.5f;
-            d_rrect(&d, tx, ty, w, 19, 9.5f, s->self ? sbca(SBC_GREEN, .18f) : sbca(SBC_ACCENT, .18f));
-            d_text(&d, TK_IT700, 10.5f, tx + 7, ty + 3 + 10, tag, .42f, 0, s->self ? tk_hex(0xc9f7d3, 1) : tk_hex(0xcfe4ff, 1), 0);
+        const char *s = gr->it[i].name;
+        if (i) { names[n++] = ','; names[n++] = ' '; }
+        while (*s) names[n++] = *s++;
+    }
+    names[n++] = ' ';
+    names[n] = 0;
+    char em[40] = "\xc2\xb7 0 System";
+    em[3] = (char)('0' + gr->n);
+    if (gr->n > 1) { em[11] = 's'; em[12] = 0; }
+    float sb = base_of(TK_IT400, 13.5f, top + 38.55f, 0);
+    d_rrect(d, VC_TX, sb - 7, 6, 6, 3, C_GREEN);
+    /* P3i: the chevron at one place on every card (iOS: a row's chevron never moves); the names give way with an
+     * ellipsis so the count stays whole */
+    V[g].chx = VC_CHEV;
+    char fit[160];
+    float mw = V[g].chx - 12 - VC_SX - tw(TK_IT400, 13.5f, em, 0, 0);
+    ellipsize(fit, sizeof fit, TK_IT400, 13.5f, names, mw);
+    int fl = tk_strlen(fit);
+    if (tk_strcmp(fit, names)) {
+        /* whole names and the rest as "+N" (audit 4: "iOS 16, macOS Ventura +1"), never cut mid-word */
+        int kept = gr->n;
+        for (int c = n - 1; c > 0; c--) {
+            if (names[c] != ',') continue;
+            kept--;
+            tk_memcpy(fit, names, (size_t)c);
+            fit[c] = ' '; fit[c + 1] = '+'; fit[c + 2] = (char)('0' + (gr->n - kept)); fit[c + 3] = 0;
+            if (tw(TK_IT400, 13.5f, fit, 0, 0) + tw(TK_IT400, 13.5f, " ", 0, 0) <= mw) break;
         }
-        trim(&sysrow[i]);
-        tk_layer_add(&sysmem, &sysrow[i]);
+        fl = tk_strlen(fit);
     }
-    /* their half copies now (at the tap), not in the first frame of the platter's spring */
-    for (int i = 0; i < gr->n; i++) tk_layer_prepare(&sysrow[i]);
+    if (fl && fit[fl - 1] != ' ' && fl < 158) { fit[fl] = ' '; fit[fl + 1] = 0; }
+    d_text(d, TK_IT400, 13.5f, VC_SX, sb, fit, 0, 0, W(.82f), 0);
+    d_text(d, TK_IT400, 13.5f, VC_SX + tw(TK_IT400, 13.5f, fit, 0, 0), sb, em, 0, 0, W(.48f), 0);
 }
-static void free_sysrows(void)
+/* a card's own pixels, made at boot (and again after Emergency): its head (icon and names) and its chevron. Its glass
+ * is K[0]'s (views placed by place_list): nothing is baked here, nor at the tap that opens it (P3i) */
+static void build_vcard(int g)
 {
-    for (int i = 0; i < 3; i++) relayer(&sysrow[i]);
-    sysmem.child = 0;
+    vcard_t *k = &V[g];
+    float top = LIST_TOP + k->y;            /* rest screen pt at scroll 0 */
+    k->full = MEM_P * G[g].n;
+    dc d = mk(&k->head, "head", VC_ICON, top + 9, VC_CHEV - 4 - VC_ICON, 52, 1, 0);
+    head_content(&d, g, top);
+    trim(&k->head);
+    d = mk(&k->chev, "chev", k->chx, top + 27, 14, 14, 0, 0);
+    d_icon(&d, "chev", k->chx, top + 27, 1);
+    k->chev_t = 1;
+    tk_bmp_free(&k->chev0);
+    tk_bmp_new(&k->chev0, k->chev.bmp.w, k->chev.bmp.h);
+    tk_bmp_copy(&k->chev0, 0, 0, &k->chev.bmp, 0, 0, k->chev.bmp.w, k->chev.bmp.h);
+    k->members.clip = 0;
+    k->chev.clip = 1;
 }
-static void place_sys(void)
+/* a view of the platter glass (K[0].face) as a platter h tall at y (content pt at scroll 0; 0 if there is no glass) */
+static int vc_glass(tk_layer *v, float y, float h)
 {
-    int on = !EMG && systile.bmp.px;
-    sysg.hidden = !on;
-    systile.hidden = !on;
-    /* the open vendor's tile lit (a solid, clipped to the tile: nothing baked) */
-    int lit = on && SY.open && SY.g >= 0;
-    if (lit) {
-        float x = TILE_X(SY.g);
-        syssel.solid = tk_premul(W(.16f));
-        syssel.x = PT(x); syssel.y = PT(SYS_Y);
-        syssel.solid_w = PT(TILE_W); syssel.solid_h = PT(SYS_H);
-        syssel.clip = 1;
-        syssel.clip_r = (tk_rect){ PT(x), PT(SYS_Y), PT(TILE_W), PT(SYS_H) };
-        syssel.clip_radius = PT(TILE_R);
-    }
-    syssel.hidden = !lit;
-    syssel.gen++;
-    /* the platter: 6 pt above and below the rows, growing with them (under 48 pt: fading in at 48) */
     tk_layer *f = &K[0].face;
-    float hh = SY.h + 12;
-    int show = on && SY.g >= 0 && SY.h > .5f && f->bmp.px;
-    if (show) {
-        platter_at(f, SYC_Y, hh);
-        f->alpha = tk_clampf(hh / 48, 0, 1);
-    }
-    f->hidden = !show;
-    sysmem.hidden = !show;
-    sysmem.clip = 1;
-    sysmem.clip_r = (tk_rect){ PT(PL_X), PT(SYC_Y), PT(PL_W), PT(tk_maxf(0, hh)) };
-    if (show) {
-        float p = SY.full > 0 ? SY.h / (SY.to > SY.from ? SY.full : tk_maxf(1, SY.from)) : 0;
-        if (!SY.sp.live) p = SY.open ? 1 : 0;
-        for (int i = 0; i < G[SY.g].n; i++) {
-            tk_layer *r = &sysrow[i];
-            if (!r->bmp.px) continue;
-            r->alpha = tk_clampf(p * 1.4f - i * .15f, 0, 1);
-            r->y = r->by + PT((1 - tk_minf(1, p)) * -14 * (i + 1));
-        }
-    }
-    lkn_place();
-    lock_ver++;
-}
-/* a vendor's tile: its platter opens (or switches to it, or closes if it is the open one) */
-static void sys_toggle(int g, int instant)
-{
-    if (g < 0 || g >= NG) return;
-    float from = SY.h;
-    if (SY.open && SY.g == g) {
-        SY.open = 0;
-        SY.from = from; SY.to = 0;
-    } else {
-        if (SY.g != g || !sysrow[0].bmp.px) build_sysrows(g);
-        SY.g = g;
-        SY.open = 1;
-        SY.full = SROW_H * G[g].n;
-        SY.from = from; SY.to = SY.full;
-        lkn_collapse(instant);                     /* the notifications step aside */
-    }
-    if (instant) { SY.h = SY.to; SY.sp.live = 0; }
-    else tk_spring_start(&SY.sp, from, SY.to, 0, TK_SPR_ROWS);
-    if (!SY.open && instant) { free_sysrows(); SY.g = -1; }
-    relink();
-    place_sys();
-}
-static void sys_close(int instant)
-{
-    if (SY.open) sys_toggle(SY.g, instant);
-    else if (instant && SY.g >= 0) { SY.sp.live = 0; SY.h = 0; free_sysrows(); SY.g = -1; relink(); place_sys(); }
-}
-/* the platter's spring; its rows freed once it has closed */
-static int sys_tick(float dt)
-{
-    if (!SY.sp.live) return 0;
-    int live = tk_spring_step(&SY.sp, dt);
-    SY.h = tk_maxf(0, SY.sp.x);
-    if (!live && !SY.open) { SY.h = 0; free_sysrows(); SY.g = -1; relink(); }
-    place_sys();
+    if (!f->bmp.px) { if (v->bmp.px) nc_unview(v); v->hidden = 1; return 0; }
+    if (v->bmp.px != f->bmp.px) { nc_view(v, f); nc_view_shapes(v, f); }
+    platter_at(v, y, h);
+    v->hidden = 0;
     return 1;
 }
-/* a tile under (x, y), or -1 */
-static int hit_tile(float x, float y)
+/* an opening card's member rows and its "Show less" (words and icons only: the members' platters are views of the
+ * glass), at the tap; freed when it has closed */
+static void build_open(int g)
 {
-    if (EMG || !systile.bmp.px || y < SYS_Y || y >= SYS_Y + SYS_H || x < PL_X) return -1;
-    int g = (int)((x - PL_X) / (TILE_W + TILE_GAP));
-    if (g < 0 || g >= NG || x > TILE_X(g) + TILE_W) return -1;
-    return g;
-}
-/* a row of the open vendor's platter under (x, y), or -1 */
-static int hit_sysrow(float x, float y)
-{
-    if (EMG || !SY.open || SY.g < 0 || x < PL_X + 6 || x > PL_X + PL_W - 6) return -1;
-    for (int i = 0; i < G[SY.g].n; i++) {
-        float rt = SYC_Y + 6 + SROW_H * i;
-        if (y >= rt && y < rt + SROW_H && y < SYC_Y + 6 + SY.h) return i;
+    vcard_t *k = &V[g];
+    const grp_t *gr = &G[g];
+    if (k->rows[0].bmp.px) return;
+    float top = LIST_TOP + k->y;
+    dc d;
+    k->members.child = 0;
+    for (int i = 0; i < gr->n; i++) {
+        const sys_t *s = &gr->it[i];
+        float ry = top + 68 + 8 + MEM_P * i + 7;   /* B4: in its own platter (centred in its 68 pt) */
+        d = mk(&k->rows[i], "row", VC_X + 6, ry - 2, VC_W - 12, 58, 1, 0);
+        char tn[40] = "t38-";
+        tk_memcpy(tn + 4, s->k, tk_strlen(s->k) + 1);
+        d_icon(&d, tn, VC_X + 21, ry + 9, 1);
+        d_text(&d, TK_IT700, 16.5f, VC_X + 71, ry + 9.5f + 16, s->name, -.2f, 0, INK, 0);
+        const char *tag = s->self ? "RUNNING" : !tk_strcmp(s->k, LAST) ? "LAST USED" : s->tag;
+        float tgw = tag ? tw(TK_IT700, 10.5f, tag, .42f, 0) + 14 : 0;
+        d_text_box(&d, TK_IT400, 13, VC_X + 71, ry + 30.5f + 13, VC_W - 71 - 20 - (tag ? tgw + 8 : 0), 0, s->meta, 0, 0, W(.72f), 0);
+        if (tag) {
+            float tx = VC_X + VC_W - 20 - tgw, ty = ry + 18.5f;
+            d_rrect(&d, tx, ty, tgw, 19, 9.5f, s->self ? sbca(SBC_GREEN, .18f) : sbca(SBC_ACCENT, .18f));
+            d_text(&d, TK_IT700, 10.5f, tx + 7, ty + 3 + 10, tag, .42f, 0, s->self ? tk_hex(0xc9f7d3, 1) : tk_hex(0xcfe4ff, 1), 0);
+        }
+        trim(&k->rows[i]);
+        tk_layer_add(&k->members, &k->rows[i]);
     }
-    return -1;
+    /* their half copies now (at the tap), not in the first frame of the card's spring */
+    for (int i = 0; i < gr->n; i++) tk_layer_prepare(&k->rows[i]);
+    /* "Show less" (13 / 600 in a 28 pt capsule) right-aligned above the card */
+    {
+        float w = tw(TK_IT600, 13, "Show less", 0, 0) + 24, x = VC_X + VC_W - w, y = top - SL_BAND + 4;
+        d = mk(&k->sl, "show-less", x, y, w, 28, 1, 0);
+        d_rrect(&d, x, y, w, 28, 14, W(.18f));
+        d_text(&d, TK_IT600, 13, x + 12, bl(TK_IT600, 13, y + 6), "Show less", 0, 0, INK, 0);
+        trim(&k->sl);
+        tk_layer_prepare(&k->sl);
+        k->sl.hidden = 1;
+    }
+    relink();                                 /* (the new layers' places in the list) */
+}
+/* the rows and the pill only (the head and the glass's views stay: they are the card) */
+static void free_open(int g)
+{
+    vcard_t *k = &V[g];
+    if (!k->rows[0].bmp.px) return;
+    for (int i = 0; i < G[g].n; i++) relayer(&k->rows[i]);
+    k->members.child = 0;
+    for (int i = 0; i < 3; i++) { if (k->mpl[i].bmp.px) nc_unview(&k->mpl[i]); k->mpl[i].hidden = 1; }
+    relayer(&k->sl); k->sl.hidden = 1;
+}
+/* a card's glass views (Emergency frees the glass: none may point at it) */
+static void vc_unview(int g)
+{
+    vcard_t *k = &V[g];
+    tk_layer *v[5] = { &k->face, &k->gh, &k->mpl[0], &k->mpl[1], &k->mpl[2] };
+    for (int i = 0; i < 5; i++) { if (v[i]->bmp.px) nc_unview(v[i]); v[i]->hidden = 1; }
+}
+
+static void build_etool(void)
+{
+    float top = LIST_TOP + 448;
+    dc d = mk(&etool, "etool", 90, top, 210, 32, 44, 0);
+    float w1 = 14 + 15 + 6 + tw(TK_IT600, 13, "Recovery", 0, 0) + 14, w2 = 14 + 15 + 6 + tw(TK_IT600, 13, "Lab", 0, 0) + 14;
+    float x = (390 - (w1 + 10 + w2)) / 2;
+    d_glass(&d, x, top, w1, 32, 16, 1, 1);
+    d_icon(&d, "recovery", x + 14, top + 8.5f, 1);
+    d_text(&d, TK_IT600, 13, x + 35, top + 8 + 13, "Recovery", 0, 0, INK, 0);
+    x += w1 + 10;
+    d_glass(&d, x, top, w2, 32, 16, 1, 1);
+    d_icon(&d, "lab", x + 14, top + 8.5f, 1);
+    d_text(&d, TK_IT600, 13, x + 35, top + 8 + 13, "Lab", 0, 0, INK, 0);
+    trim(&etool);
 }
 
 /* Emergency's list (the concept's renderEmergency): eight cards and Exit Emergency; made on entering, freed on
@@ -901,17 +961,33 @@ static void ec_card(dc *d, int i, float top)
 /* (the first four cards in one layer, each card's backdrop what is drawn before it, as in the list; then Exit, then
  * the layers of cards 4..7: B6's ep_card, a piece at a time, below set_emergency) */
 static void free_ecards(void) { for (int i = 0; i < NEC; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } ec_next = 8; }
-static int cards_pending;       /* the platter glass and the Systems tiles still to bake again after Emergency (one per idle turn) */
-static void build_lockpart(int i) { if (i == 0) build_platter(); else build_systiles(); }
-#define LOCK_PARTS 2
+static int cards_pending;       /* the platter glass, the vendor cards and the tools still to make again after Emergency (one per idle turn) */
+static void build_lockpart(int i) { if (i == 0) build_platter(); else if (i <= NG) build_vcard(i - 1); else build_etool(); }
+#define LOCK_PARTS (NG + 2)
 static void lkn_free(void);
+static void toggle_group(int g, int instant);
+/* every open card closed (instant: at once, its rows freed) */
+static void vc_close_all(int instant)
+{
+    for (int g = 0; g < NG; g++) {
+        if (V[g].isopen) toggle_group(g, instant);
+        if (instant && !V[g].isopen) { V[g].sp.live = 0; V[g].memh = 0; free_open(g); }
+    }
+}
 static void free_vendor_cards(void)
 {
-    sys_close(1);
+    vc_close_all(1);
     lkn_free();                                  /* B9: the lock's notifications (views of the platter glass) */
+    for (int g = 0; g < NG; g++) {
+        free_open(g);
+        vc_unview(g);
+        relayer(&V[g].head); V[g].head.hidden = 1;
+        relayer(&V[g].chev); V[g].chev.hidden = 1;
+        tk_bmp_free(&V[g].chev0);
+    }
+    relayer(&etool); etool.hidden = 1;
     relayer(&K[0].face); K[0].face.hidden = 1;
     relayer(&K[0].gh); K[0].gh.hidden = 1;
-    relayer(&systile);
     cards_pending = 0;
     nc_cards_gone();                             /* helper D: no platter may show the freed glass */
 }
@@ -927,15 +1003,148 @@ static void build_empill(void)
     empill.hidden = 1;
 }
 
-/* place every list layer for the current scroll (Emergency's), and the Systems group's and notifications' layers */
+/* place every list layer for the current scroll, heights and row animations (and the notifications, which make
+ * room for an open card) */
 static void place_list(void)
 {
+    float y = 10;
+    int on = !EMG && K[0].face.bmp.px;
+    for (int g = 0; g < NG; g++) {
+        vcard_t *k = &V[g];
+        float q = stack_q(g), band = SL_BAND * q;
+        float dy = PT(y + band - k->y);    /* how far the card moved from where its head was drawn */
+        float top = LIST_TOP + y + band;
+        int has = on && k->head.bmp.px;
+        if (has && vc_glass(&k->face, top, 68)) k->face.alpha = 1;
+        else k->face.hidden = 1;
+        /* the stack's lower cards (K[0].gh, baked under a 68 pt card at LIST_TOP + K[0].y): B4: the baked peeks hand
+         * over to the members' own platters as they come out */
+        tk_layer *gh = &k->gh;
+        float ga = tk_clampf(1 - q * 5, 0, 1);
+        if (has && stack(g) && K[0].gh.bmp.px && ga > 0) {
+            if (gh->bmp.px != K[0].gh.bmp.px) nc_view(gh, &K[0].gh);
+            gh->x = K[0].gh.bx;
+            gh->y = tk_floorf(PT(top - (LIST_TOP + K[0].y)) + K[0].gh.by + .5f);
+            gh->alpha = ga;
+            gh->hidden = 0;
+        } else
+            gh->hidden = 1;
+        /* B4 (P3j-8): each member springs from its peek (scale .97 / .94, 8 / 15 pt below) to its own slot, staggered
+         * (a member's share starts .12 of the fan after the one above), its words in over the last 65 % */
+        for (int i = 0; i < 3; i++) {
+            tk_layer *v = &k->mpl[i], *r = &k->rows[i];
+            if (i >= G[g].n || !r->bmp.px || !has) { v->hidden = 1; continue; }
+            float qi = tk_clampf((q - .12f * i) / (1 - .12f * i), 0, 1);
+            float sc0 = i ? .94f : .97f, pk = i ? PEEK2 : PEEK1;
+            float top0 = top + 68 + pk - 68 * sc0, top1 = top + 68 + 8 + MEM_P * i;
+            float sc = sc0 + (1 - sc0) * qi, pt = top0 + (top1 - top0) * qi;
+            if (k->sp.live && k->memh > k->full) pt = top1 + (k->memh - k->full) * (i + 1) / G[g].n;   /* (the spring's overshoot) */
+            float va = tk_clampf((qi - .06f) * 3, 0, 1);
+            if (va > .004f && vc_glass(v, pt, 68)) {
+                v->sx = v->sy = sc;
+                v->ox = PT(195); v->oy = PT(pt);
+                v->alpha = va;
+            } else
+                v->hidden = 1;
+            float rb = LIST_TOP + k->y + 68 + 8 + MEM_P * i;   /* where its words were drawn */
+            r->y = r->by + PT(pt - rb);
+            r->sx = r->sy = sc;
+            r->ox = PT(195); r->oy = PT(pt);
+            r->alpha = tk_clampf((qi - .35f) / .65f, 0, 1);
+            r->hidden = 0;
+        }
+        if (k->sl.bmp.px) {
+            k->sl.y = k->sl.by + dy;
+            k->sl.alpha = tk_clampf((q - .4f) / .6f, 0, 1);
+            k->sl.hidden = !has || k->sl.alpha <= .004f;
+        }
+        k->head.y = k->head.by + dy;
+        k->head.hidden = !has;
+        k->chev.y = k->chev.by + dy;
+        k->chev.clip_r = (tk_rect){ PT(VC_X), PT(top), PT(VC_W), PT(68) };
+        k->chev.hidden = !has;
+        k->members.hidden = !has;
+        y += card_h(g);
+    }
+    float edy = PT(y - 448);
+    etool.y = etool.by + edy;
+    etool.hidden = EMG || !etool.bmp.px;
     ecard[0].hidden = ecard[4].hidden = !EMG || ec_wait;
     ecard[5].hidden = !EMG || ec_next <= 4;          /* survival-next: shown from its first card */
     ecard[6].hidden = !EMG || ec_next <= 6;
     list.y = PT(-scroll);
-    list.clip_r = (tk_rect){ 0, PT(LIST_TOP), PT(390), PT(LIST_H) };
-    place_sys();
+    float lh = EMG ? LIST_H : list_h();
+    list.clip_r = (tk_rect){ 0, PT(LIST_TOP), PT(390), PT(lh) };
+    /* B10: the notifications fanned out over the list: it gives way (and takes no touches, sh_touch) */
+    list.alpha = EMG ? 1 : 1 - tk_clampf(lkn_p() * 1.6f, 0, 1);
+    list.hidden = list.alpha <= .004f;
+    lkn_place();
+    lock_ver++;
+}
+
+/* the chevron's .35 s cubic-bezier(.3, 1.4, .4, 1) turn */
+static void chev_draw(vcard_t *k, float deg)
+{
+    if (!k->chev.bmp.px || !k->chev0.px) return;
+    tk_bmp_rotate(&k->chev.bmp, &k->chev0, deg);
+    tk_layer_dirty(&k->chev);
+}
+
+static void toggle_group(int g, int instant)
+{
+    vcard_t *k = &V[g];
+    k->isopen = !k->isopen;
+    if (k->isopen) { build_open(g); lkn_collapse(instant); }   /* B10: the notifications fold back out of its way */
+    float from = k->memh, to = k->isopen ? k->full : 0;
+    k->from = from;
+    k->to = to;
+    k->chev_from = k->chev_now;
+    k->chev_to = k->isopen ? 90 : 0;
+    k->chev_t = 0;
+    if (instant) {
+        k->memh = to;
+        k->sp.live = 0;
+        k->chev_now = k->chev_to;
+        k->chev_t = 1;
+        chev_draw(k, k->chev_now);
+    } else
+        tk_spring_start(&k->sp, from, to, 0, TK_SPR_FAN);   /* B4: IOS-REFERENCE 5's fan (.40 / .85) */
+    place_list();
+}
+/* the content top of card g (list pt at scroll 0) */
+static float card_top(int g)
+{
+    float yy = 10;
+    for (int h = 0; h < g; h++) yy += card_h(h);
+    return yy + SL_BAND * stack_q(g);
+}
+/* B10: a touch on the list (not past its bottom, nor while the notifications are fanned out over it) */
+static int in_list(float y) { return !EMG && lkn_p() <= 0 && y >= LIST_TOP && y <= list_bot(); }
+static int hit_head(float x, float y)
+{
+    if (!in_list(y) || !V[0].head.bmp.px) return -1;
+    float cy = y - LIST_TOP + scroll;
+    for (int g = 0; g < NG; g++) {
+        float top = card_top(g);
+        if (cy >= top && cy < top + 68 && x >= VC_X && x < VC_X + VC_W) return g;
+        /* B4: an open stack's "Show less" folds it too */
+        if (V[g].sl.bmp.px && stack_q(g) > .5f && cy >= top - SL_BAND && cy < top && x >= VC_X + VC_W - 110 && x < VC_X + VC_W) return g;
+    }
+    return -1;
+}
+static int hit_row(float x, float y, int *gi)
+{
+    if (!in_list(y) || x < VC_X + 6 || x > VC_X + VC_W - 6) return -1;
+    float cy = y - LIST_TOP + scroll;
+    for (int g = 0; g < NG; g++) {
+        float yy = card_top(g);
+        if (V[g].memh > 1)
+            for (int i = 0; i < G[g].n; i++) {
+                float rt = yy + 68 + 8 + MEM_P * i;          /* B4: its own platter */
+                if (cy >= rt && cy < rt + 68 && cy < yy + 68 + V[g].memh) { *gi = g; return i; }
+            }
+    }
+    return -1;
 }
 
 static tk_layer hparts[8], hsearch[3], pages;
@@ -1268,14 +1477,15 @@ static void bake_slider_face(int nf)
     dc fd = mk(sf, "slider-face", SL_X, sy, SL_W, 62, 44, 0);
     d_glass(&fd, SL_X, sy, SL_W, 62, 31, 1, 1);
 }
-static int card_open(void) { return SY.open && SY.g >= 0; }
+static int card_open(void) { return vc_any_open(); }
 static int focus_faces_keep(void) { return locked && !EMG && (card_open() || focus_on); }
 static int focus_faces_missing(void)
 {
     if (!focus_faces_keep()) return 0;
     if (!ffacel.bmp.px) return 1;
-    if (card_open())
-        for (int i = 0; i < G[SY.g].n; i++) if (!fslide[focus_nf(&G[SY.g].it[i]) == 3].bmp.px) return 1;
+    for (int g = 0; g < NG; g++)
+        if (V[g].isopen)
+            for (int i = 0; i < G[g].n; i++) if (!fslide[focus_nf(&G[g].it[i]) == 3].bmp.px) return 1;
     return 0;
 }
 /* idle time: what the next sheet needs (one glass a turn: 1 if one was made), or nothing kept if no card is open */
@@ -1283,9 +1493,11 @@ static int focus_faces_idle(int keep)
 {
     if (!keep) { relayer(&ffacel); relayer(&fslide[0]); relayer(&fslide[1]); return 0; }
     if (!ffacel.bmp.px) { bake_focus_face(); return 1; }
-    if (card_open())
-        for (int i = 0; i < G[SY.g].n; i++)
-            if (!fslide[focus_nf(&G[SY.g].it[i]) == 3].bmp.px) { bake_slider_face(focus_nf(&G[SY.g].it[i])); return 1; }
+    for (int g = 0; g < NG; g++) {
+        if (!V[g].isopen) continue;
+        for (int i = 0; i < G[g].n; i++)
+            if (!fslide[focus_nf(&G[g].it[i]) == 3].bmp.px) { bake_slider_face(focus_nf(&G[g].it[i])); return 1; }
+    }
     return 0;
 }
 /* a closed sheet keeps nothing of its own (about 19 MB) */
@@ -1771,9 +1983,19 @@ static void build_cc(void)
         tk_bmp_blur(&q, PT(26) / 4);
         tk_bmp_satbright(&q, 1.3f, 1);
         tk_bmp_tint(&q, TK_RGBA(0, 0, 0, .25f));
-        tk_bmp_up(&ccscrim.bmp, &q, 0, 0, 2);
-        tk_bmp_free(&q);
-        ccscrim.sx = ccscrim.sy = 2;
+        if (C && C->gpu) {
+            /* P3z: the GPU row keeps the 26 pt blur at quarter resolution, drawn 4x (its filtering is smooth on a blur
+             * this wide): 1 MB to flush to the GPU at the first open instead of the 4.2 MB half copy (cp3: compose
+             * 112 ms against the GPU's 9 on the CC's first open). The half copy is the CPU row's glass source
+             * (tk_glass_from_half in cc_tile), which the GPU row doesn't use (its tiles are the lens) */
+            tk_bmp_free(&ccscrim.bmp);
+            ccscrim.bmp = q;
+            ccscrim.sx = ccscrim.sy = 4;
+        } else {
+            tk_bmp_up(&ccscrim.bmp, &q, 0, 0, 2);
+            tk_bmp_free(&q);
+            ccscrim.sx = ccscrim.sy = 2;
+        }
         ccscrim.opaque = 1;
     }
     if (!ccsb.bmp.px) {
@@ -2527,7 +2749,7 @@ static const char *const KD[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9",
 static const char *const KL[12] = { "", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ", "", "+", "" };
 static struct { int tab; char num[24]; int thread, sub; } AS;   /* the phone's tab (0 fav .. 3 pad), the dialled number, the open
                                                                  * thread; sub: Settings' Display & Brightness page (P3d) */
-static char cell_hint[48] = "No SIM \xc2\xb7 emergency calls only";
+static char cell_hint[48] = "Cellular off";
 
 /* P2y: an honest empty state (iOS's ContentUnavailableView): a title and up to three lines, centred, grey. P3p
  * (P3j-18): centred in its area (between the header and the bottom or a bar), not at a fixed top */
@@ -3900,7 +4122,7 @@ static void set_emergency(int on, int instant)
     q->lit = on;
     q->facelit.hidden = q->iconlit.hidden = !on;
     q->face.hidden = q->icon.hidden = on;
-    sys_close(1);
+    vc_close_all(1);
     scroll = 0;
     sp_scroll.live = 0;
     scroll_momentum = 0;
@@ -4028,7 +4250,7 @@ static const char *md_text(void)
     case SH_CELL_RESTARTING: return "Restarting\xe2\x80\xa6";
     case SH_CELL_GUARD: return "Stopped: a SIM or a registration";
     case SH_CELL_FAILED: return "Could not start";
-    case SH_CELL_ON: return CELL.emergency_only ? "Emergency calls only" : "No SIM";
+    case SH_CELL_ON: return CELL.emergency_only ? "Emergency calls only" : "No Service";
     default: return "Off";
     }
 }
@@ -4043,15 +4265,18 @@ void sh_cell(const sh_cell_t *c)
     const char *cr = (CELL.data == SH_DATA_REGISTERED || CELL.data == SH_DATA_UP) && CELL.oper[0] ? CELL.oper :
                      CELL.data == SH_DATA_SEARCHING ? "Searching\xe2\x80\xa6" : CELL.data == SH_DATA_LOCKED ? "SIM PIN on" :
                      CELL.state == SH_CELL_STARTING ? "Starting\xe2\x80\xa6" : CELL.state == SH_CELL_RESTARTING ? "Restarting\xe2\x80\xa6" :
-                     CELL.state == SH_CELL_ON && CELL.emergency_only ? "Emergency calls only" : "No SIM";
+                     CELL.data == SH_DATA_NO_SIM ? "No SIM" :
+                     CELL.state == SH_CELL_ON && CELL.emergency_only ? "Emergency calls only" :
+                     CELL.state == SH_CELL_ON ? "No Service" : "";   /* P3z: Cellular off: nothing (the user saw "No SIM" with a SIM in) */
     sh_carrier(cr);                     /* the lock screen's left (and the Control Centre's): the operator */
     SB_CELL.state = CELL.state == SH_CELL_ON;
     SB_CELL.bars = CELL.bars;
     SB_CELL.rat = CELL.rat;
     const char *h = CELL.data == SH_DATA_UP ? md_join(CELL.oper[0] ? CELL.oper : "Mobile", " \xc2\xb7 cellular data on") :
                     data_on() ? "Cellular data \xc2\xb7 connecting" :
-                    CELL.state == SH_CELL_ON && !CELL.emergency_only && CELL.bars <= 0 ? "No SIM \xc2\xb7 searching" :
-                    "No SIM \xc2\xb7 emergency calls only";
+                    CELL.data == SH_DATA_NO_SIM ? "No SIM \xc2\xb7 emergency calls only" :
+                    CELL.state == SH_CELL_ON && !CELL.emergency_only && CELL.bars <= 0 ? "Searching\xe2\x80\xa6" :
+                    CELL.state == SH_CELL_ON ? "Emergency calls only" : "Cellular off";
     int n = 0;
     while (h[n] && n < 47) { cell_hint[n] = h[n]; n++; }
     cell_hint[n] = 0;
@@ -4205,16 +4430,25 @@ static void relink(void)
     na += se_layers(st + na);                        /* helper B2: Settings' page (scrolled, clipped) and its nav row */
     na += cam_layers(st + na);                       /* the Camera's preview, shutter, thumbnail, flash (shell_camera.inc) */
     link(&appc, st, na + cm_layers(st + na));    /* helper I: the keypad's line and ring, Messages' fields */
-    /* B9: the notifications' stack is the lock's (lkng); the Centre's "N Notifications" pill only in Emergency */
-    tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &sysg, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
-    link(&lockg, lk, EMG ? 14 : 13);
-    tk_layer *sg[] = { &systile, &syssel, &K[0].face, &sysmem, &syshl };
-    link(&sysg, sg, 5);
-    sysmem.child = 0;
-    for (int i = 0; i < 3; i++) if (sysrow[i].bmp.px) tk_layer_add(&sysmem, &sysrow[i]);
+    /* B9: the notifications' stack is the lock's (lkng, over the list: fanned out it takes the list's room); the
+     * Centre's "N Notifications" pill only in Emergency */
+    tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
+    link(&lockg, lk, EMG ? 13 : 12);
     lkn_link();
-    tk_layer *ls[2 + NEC];
+    /* B10: the vendor cards in the list as B4 had them: the lower cards, the members' platters and words under the
+     * head card, "Show less" above it, the chevron on top */
+    tk_layer *ls[10 * NG + 2 + NEC];
     int n = 0;
+    for (int g = 0; g < NG; g++) {
+        vcard_t *k = &V[g];
+        ls[n++] = &k->gh;
+        for (int i = 2; i >= 0; i--) ls[n++] = &k->mpl[i];
+        k->members.child = 0;
+        for (int i = 0; i < G[g].n; i++) if (k->rows[i].bmp.px) tk_layer_add(&k->members, &k->rows[i]);
+        ls[n++] = &k->members; ls[n++] = &k->sl;
+        ls[n++] = &k->face; ls[n++] = &k->head; ls[n++] = &k->chev;
+    }
+    ls[n++] = &etool;
     for (int i = 0; i < NEC; i++) ls[n++] = &ecard[i];
     ls[n++] = &lockhl;
     link(&list, ls, n);
@@ -4295,11 +4529,18 @@ void sh_init_begin(tk_comp *c)
     tk_layer_init(&kbg, "keyboard"); kbg.hidden = 1;        /* B3 */
     tk_layer_init(&emp, "edit-menu"); emp.hidden = 1;
     tk_layer_init(&emsel, "edit-selection"); emsel.hidden = 1;
-    tk_layer_init(&sysg, "systems-group");
-    tk_layer_init(&sysmem, "systems-rows");
-    tk_layer_init(&syssel, "systems-lit"); syssel.hidden = 1;
-    tk_layer_init(&syshl, "press"); syshl.hidden = 1;
     for (int g = 0; g < NG; g++) { tk_layer_init(&K[g].face, "face"); K[g].face.hidden = 1; tk_layer_init(&K[g].gh, "stack"); K[g].gh.hidden = 1; }
+    /* B10: the vendor cards (their glass: views of K[0], placed by place_list) */
+    for (int g = 0; g < NG; g++) {
+        vcard_t *k = &V[g];
+        tk_layer *l[] = { &k->gh, &k->face, &k->head, &k->chev, &k->members, &k->rows[0], &k->rows[1], &k->rows[2],
+                          &k->mpl[0], &k->mpl[1], &k->mpl[2], &k->sl };
+        static const char *const nm[] = { "stack", "card", "head", "chev", "members", "row", "row", "row", "member", "member", "member", "show-less" };
+        for (int i = 0; i < 12; i++) { tk_layer_init(l[i], nm[i]); l[i]->hidden = i != 4; }
+        k->chev_t = 1;
+    }
+    tk_layer_init(&etool, "etool"); etool.hidden = 1;
+    layout_list();
     lkn_init();
     relink();
     c->root = &root;
@@ -4319,9 +4560,8 @@ int sh_init_step(void)
         lap("bake: lock status, clock, widgets");
         break;
     case 2: build_platter(); lap("bake: the platter glass"); break;
-    case 3: build_systiles(); lap("bake: the Systems tiles"); break;
-    case 4: case 5: case 6: break;
-    case 7: build_hold(0); build_hold(1); build_empill(); lap("bake: holds"); break;
+    case 3: case 4: case 5: case 6: build_vcard(init_step - 4); lap("bake: a card's words"); break;   /* B10 */
+    case 7: build_vcard(4); build_etool(); build_hold(0); build_hold(1); build_empill(); lap("bake: tools and holds"); break;
     case 8: build_home(); back_bake(); lap("bake: home"); break;
     case 9: {
         /* the flattened lock is only ever seen moving (half-resolution frames): kept at half resolution, drawn 2x */
@@ -4369,7 +4609,7 @@ static void back_to_lock(int exit_em)
     booting = 0; boot.hidden = 1;
     if (boot.solid) { relayer(&bootc); relayer(&bootbar); boot.solid = 0; boot.child = 0; }   /* P3s: made again for the next */
     ico_free(); hl_off();                          /* P3p */
-    sys_close(1);
+    vc_close_all(1);
     lkn_collapse(1);
     scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
     sp_lock.live = 0;
@@ -4408,10 +4648,10 @@ void sh_set(const char *what, const char *key, float v)
         glyph_a = glyph_t;
         apply_tweens();
     } else if (!tk_strcmp(what, "group")) {
-        int want = -1;
-        for (int g = 0; g < NG; g++) if (key && !tk_strcmp(G[g].key, key)) want = g;
-        if (want >= 0) { if (!SY.open || SY.g != want) sys_toggle(want, 1); }
-        else sys_close(1);
+        for (int g = 0; g < NG; g++) {
+            int want = key && !tk_strcmp(G[g].key, key);
+            if (V[g].isopen != want) toggle_group(g, 1);
+        }
     } else if (!tk_strcmp(what, "scroll")) {
         scroll = v;
         place_list();
@@ -4611,7 +4851,7 @@ static void hl_set(tk_layer *l, tk_rect r, tk_rect clip, float rad, tk_col c)
 }
 static void hl_off(void)
 {
-    if (!lockhl.hidden || !apphl.hidden || !syshl.hidden) { lockhl.hidden = apphl.hidden = syshl.hidden = 1; lockhl.gen++; apphl.gen++; syshl.gen++; lock_ver++; }
+    if (!lockhl.hidden || !apphl.hidden) { lockhl.hidden = apphl.hidden = 1; lockhl.gen++; apphl.gen++; lock_ver++; }
 }
 static void press_cancel(void) { hl_off(); if (IP.on) icon_release(); }
 
@@ -4827,20 +5067,24 @@ void sh_touch(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, y, t);
             return;
         }
-        (void)gi;
         if (y >= H_PT - 30) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
-        else if ((r = hit_sysrow(x, y)) >= 0) {
-            T.kind = G_TAP_ROW; T.arg = SY.g; T.arg2 = r;
-            /* P3p: the row lights across its platter (clipped to the platter's rounded face) */
-            hl_set(&syshl, (tk_rect){ PL_X, SYC_Y + 6 + SROW_H * r - 6 * (r == 0), PL_W, SROW_H + 6 * (r == 0) + 6 * (r == G[SY.g].n - 1) },
-                   (tk_rect){ PL_X, SYC_Y, PL_W, SY.h + 12 }, PL_R, W(.08f));
+        /* B10: the notifications fanned out are over the list: theirs first (a tap beside them folds them back) */
+        else if (lkn_p() > 0 && lkn_down(x, y, t)) { T.kind = G_LKN; return; }
+        else if ((r = hit_row(x, y, &gi)) >= 0) {
+            T.kind = G_TAP_ROW; T.arg = gi; T.arg2 = r;
+            /* P3p: the row lights across its card (clipped to the card's rounded face) */
+            float ct = LIST_TOP + card_top(gi);
+            tk_rect pr = { VC_X, ct + 68 + 8 + MEM_P * r, VC_W, 68 };   /* B4: the member's own platter */
+            hl_set(&lockhl, pr, pr, VC_R, W(.08f));
             lock_ver++;
-        } else if ((r = hit_tile(x, y)) >= 0) {
+        } else if ((r = hit_head(x, y)) >= 0) {
             T.kind = G_TAP_HEAD; T.arg = r;
-            tk_rect c = { TILE_X(r), SYS_Y, TILE_W, SYS_H };
-            hl_set(&syshl, c, c, TILE_R, W(.12f));
+            tk_rect c = { VC_X, LIST_TOP + card_top(r), VC_W, 68 };
+            hl_set(&lockhl, c, c, VC_R, W(.1f));
             lock_ver++;
-        } else if (lkn_down(x, y, t)) { T.kind = G_LKN; return; }   /* B9: the notifications (a tap expands / opens) */
+        }
+        else if (in_list(y)) { T.kind = G_LIST; T.base = scroll; sp_scroll.live = 0; scroll_momentum = 0; list_over = scroll < 0 || scroll > max_scroll(); }
+        else if (lkn_down(x, y, t)) { T.kind = G_LKN; return; }   /* B9: the notifications (a tap expands / opens) */
         else { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
         tk_tracker_add(&T.tr, y, t);
         return;
@@ -4910,9 +5154,8 @@ void sh_touch(int phase, float x, float y, float t)
             break;
         case G_TAP_HEAD: case G_TAP_ROW: case G_ETAP:
             if (T.moved) hl_off();
-            /* a drag: Emergency's list scrolls; on the Systems group it is the lock's swipe (B9: nothing else scrolls) */
-            if (T.moved && T.kind == G_ETAP) { T.kind = G_LIST; T.base = scroll; T.y0 = y; sp_scroll.live = 0; }
-            else if (T.moved) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
+            /* a drag: the list scrolls (Emergency's, or the vendor cards': B10, as B4's) */
+            if (T.moved) { T.kind = G_LIST; T.base = scroll; T.y0 = y; sp_scroll.live = 0; }
             tk_tracker_add(&T.tr, y, t);
             break;
         case G_LIST: {
@@ -5059,7 +5302,7 @@ void sh_touch(int phase, float x, float y, float t)
         if (!T.moved) app_tap(x, y);
         break;
     case G_TAP_HEAD:
-        sys_toggle(T.arg, 0);
+        toggle_group(T.arg, 0);
         break;
     case G_TAP_ROW: {
         const sys_t *s = &G[T.arg].it[T.arg2];
@@ -5319,8 +5562,32 @@ int sh_tick(float dt, float t)
     if (hint_left > 0) { hint_left -= dt * 1000; mv |= tween(&hint_a, 1, .3f, dt); }
     else mv |= tween(&hint_a, 0, .3f, dt);
     apply_tweens();
-    mv |= sys_tick(dt);                          /* B9: the open vendor's platter */
+    for (int g = 0; g < NG; g++) {               /* B10: B4's vendor cards (their fan and chevron) */
+        vcard_t *k = &V[g];
+        if (k->sp.live) {
+            int live = tk_spring_step(&k->sp, dt);
+            k->memh = tk_maxf(0, k->sp.x);
+            if (!live && k->isopen) {
+                /* the concept: when open, scroll the card into view (rows spring) */
+                float ct = card_top(g), top = ct - SL_BAND - 8, m = max_scroll();
+                if (ct + 68 + k->full > scroll + list_h()) tk_spring_start(&sp_scroll, scroll, tk_minf(top, m), 0, TK_SPR_ROWS);
+            }
+            mv = 1;
+            place_list();
+        }
+        if (!k->isopen && !k->sp.live && k->chev_t >= 1 && k->memh <= 0 && k->rows[0].bmp.px) { free_open(g); relink(); place_list(); }
+        if (k->chev_t < 1) {
+            k->chev_t = tk_minf(1, k->chev_t + dt / .3f);      /* B4 (P3j-8): iOS's ease, no overshoot */
+            k->chev_now = k->chev_from + (k->chev_to - k->chev_from) * tk_bezier(.25f, .1f, .25f, 1, k->chev_t);
+            chev_draw(k, k->chev_now);
+            mv = 1;
+            if (k->chev_t >= 1) place_list();
+        }
+    }
     mv |= lkn_tick(dt, t);                       /* B9: the lock's notifications */
+    /* B10: the list's room shrank (a notification came, a card closed): back inside its end */
+    if (!EMG && locked && !sp_scroll.live && !scroll_momentum && T.kind != G_LIST && scroll > max_scroll() + .5f)
+        tk_spring_start(&sp_scroll, scroll, max_scroll(), 0, TK_SPR_ROWS);
     if (sp_scroll.live) {
         tk_spring_step(&sp_scroll, dt);
         scroll = sp_scroll.x;
@@ -5532,8 +5799,12 @@ void sh_idle(void)
     tk_layer_prepare(&homebar);
     if (K[0].gh.bmp.px) tk_layer_prepare(&K[0].gh);
     if (K[0].face.bmp.px) tk_layer_prepare(&K[0].face);
-    if (systile.bmp.px) tk_layer_prepare(&systile);
-    for (int i = 0; i < 3; i++) if (sysrow[i].bmp.px) tk_layer_prepare(&sysrow[i]);
+    for (int g = 0; g < NG; g++) {               /* B10: the vendor cards' own pixels (their glass: the views share K[0]'s) */
+        if (V[g].head.bmp.px) tk_layer_prepare(&V[g].head);
+        if (V[g].chev.bmp.px) tk_layer_prepare(&V[g].chev);
+        for (int i = 0; i < G[g].n; i++) if (V[g].rows[i].bmp.px) tk_layer_prepare(&V[g].rows[i]);
+    }
+    if (etool.bmp.px) tk_layer_prepare(&etool);
     for (int i = 0; i < 2; i++) {
         tk_layer_prepare(&Q[i].face); tk_layer_prepare(&Q[i].facelit);
         tk_layer_prepare(&Q[i].icon); tk_layer_prepare(&Q[i].iconlit);
@@ -5550,7 +5821,8 @@ int sh_moving(void)
             T.kind == G_APP || sp_app.live || booting || isl_moving() || em_t < 1 || T.kind == G_CCEM ||
             T.kind == G_CCCELL || CF.down || CF.a != CF.at || pw_moving() || SL.dir || T.kind == G_CCDRAG || T.kind == G_FOCUSDRAG || sv_moving() ||
             T.kind == G_CCX || (T.kind == G_CCTAP && CCS.on) || cc_moving();
-    m |= SY.sp.live || lkn_moving();             /* B9 */
+    for (int g = 0; g < NG; g++) m |= V[g].sp.live || V[g].chev_t < 1;   /* B10 */
+    m |= lkn_moving();                           /* B9 */
     m |= sp_focus.live || sp_thumb.live || med_moving() || lx_moving();
     m |= IP.on && IP.t < 1;
     m |= nc_moving() || sw_moving();             /* helper D */

@@ -166,6 +166,7 @@ extern const uint8_t sbtk_pack_start[], sbtk_pack_end[];
 /* ---- state ------------------------------------------------------------------------------------------------- */
 static tk_comp comp;
 static int ready, baking, need_full, ticking, boosted;
+static uint64_t bd_us_frame;                /* (the frame log reads it before its definition below: a tentative one here) */
 static uint64_t last_tick, boot_t0;
 /* the frame statistics of the current gesture (logged per film in the self test, per gesture otherwise) */
 static struct { uint32_t n, nhalf, over16, maxus, nboost, nwait; uint64_t sumus, sumwait; uint32_t hist[64]; uint8_t ms[120];
@@ -405,7 +406,7 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
-    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3y");     /* P2y: the apps' live values */
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3z");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);
         sh_alarm(on, ah, am);
@@ -2048,12 +2049,14 @@ typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
 static const char *const FILM_NAME[11] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "sleep" };
 /* tools/films.txt's scripts (pt, ms) */
 static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 1300 } };
-/* B9: the Systems tiles (centres x 47 + 74 g, y 336): Apple opens and closes, Linux opens, Starbite takes its place,
- * its first row (Starbite OS, "You are in Starbite OS"); Microsoft's Windows 11 row (y 420) opens the focus sheet */
-static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 47, 336, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 47, 336, 0, 0, 80 },
-                                { 0, 0, 0, 0, 0, 900 }, { 1, 269, 336, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 343, 336, 0, 0, 80 },
-                                { 0, 0, 0, 0, 0, 1200 }, { 1, 195, 420, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1800 } };
-static const step S_FOCUS[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 121, 336, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 195, 420, 0, 0, 80 },
+/* B10: the vendor cards again (B4's list from y 320: Apple 320, Microsoft 413, Google 491, Linux 584, Starbite 677):
+ * Apple opens (its head 36 lower, "Show less" above it at x >= 285), "Show less" folds it, the list scrolls to its
+ * end, Starbite opens (and scrolls into view), its first row (Starbite OS, "You are in Starbite OS"). The focus film:
+ * Microsoft opens, its Windows 11 row (525..593) opens the focus sheet, the slide starts it */
+static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 354, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 330, 334, 0, 0, 80 },
+                                { 0, 0, 0, 0, 0, 900 }, { 2, 200, 650, 200, 380, 250 }, { 0, 0, 0, 0, 0, 1200 }, { 1, 195, 578, 0, 0, 80 },
+                                { 0, 0, 0, 0, 0, 1800 }, { 1, 195, 464, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };
+static const step S_FOCUS[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 444, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 195, 559, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 1000 }, { 2, 65, 743, 345, 743, 550 }, { 0, 0, 0, 0, 0, 2600 } };
 static const step S_HOLDS[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 71, 727, 0, 0, 650 }, { 0, 0, 0, 0, 0, 700 }, { 3, 319, 727, 0, 0, 950 },
                                 { 0, 0, 0, 0, 0, 900 } };
