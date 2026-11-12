@@ -37,7 +37,6 @@ signature = "{asset}.sig"
 apt = ["keepassxc-minimal"]
 
 [runtime]
-apt = ["libfuse2t64"]
 needs = ["files"]
 note = "Upstream added an aarch64 AppImage in 2.8 (Qt 6); Debian has 2.7.10 (keepassxc-minimal, no browser integration)."
 

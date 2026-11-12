@@ -1335,6 +1335,7 @@ def op_install(cat, aid, method=None, prog=NOPROG, cancel=None, update=False):
                 sha, how = expected_sha(rel, asset, spec.get("verify", {}), rel["version"])
                 prog.stage("runtime", 2, 10)
                 added += apt_install((app.get("runtime") or {}).get("apt", []), aid, prog, cancel, auto=True)
+                added += _recommends(app, st, prog, cancel)
                 refs_add(st, added, aid)
                 prog.stage("downloading", 10, 80)
                 dl = os.path.join(C.state_dir, "dl", aid, asset["name"])
@@ -1366,6 +1367,7 @@ def op_install(cat, aid, method=None, prog=NOPROG, cancel=None, update=False):
                 need_space(int(S.get("build_mb", 600)) + int(S.get("size_mb", 100)), "building %s" % aid)
                 prog.stage("runtime", 0, 2)
                 added += apt_install((app.get("runtime") or {}).get("apt", []), aid, prog, cancel, auto=True)
+                added += _recommends(app, st, prog, cancel)
                 refs_add(st, added, aid)
                 if os.path.isdir(vdir):
                     shutil.rmtree(vdir)
@@ -1421,12 +1423,30 @@ def op_install(cat, aid, method=None, prog=NOPROG, cancel=None, update=False):
                "prev": prev if prev_dir and prev_dir != ver else None, "prev_dir": prev_dir if prev_dir != ver else None}
         if debn:
             rec["packages"] = debn
+        miss = st.pop("_missing", {}).get(aid)
+        if miss:
+            rec["missing"] = miss
         st["apps"][aid] = rec
         st["prefs"][aid] = method
         save_state(st)
         log("%s %s %s by %s: done (%s)" % ("updated" if cur else "installed", aid, rel["version"], method, verified))
         prog.event(ev="done", msg="%s %s installed (%s; %s)" % (app["name"], rel["version"], method, verified))
         return rec
+
+
+def _recommends(app, st, prog, cancel):
+    """runtime.recommends: best effort (an offline phone may not have them); what is missing is noted"""
+    rec = (app.get("runtime") or {}).get("recommends") or []
+    if not rec:
+        return []
+    try:
+        return apt_install(rec, app["id"], prog, cancel, auto=True)
+    except StoreError as e:
+        if isinstance(e, NeedsNet) or "not available" in e.short:
+            st.setdefault("_missing", {})[app["id"]] = rec
+            log("recommended %s not installed (%s): the app works without them" % (" ".join(rec), e.detail), app["id"])
+            return []
+        raise
 
 
 def _install_debs(app, path, st, prog, cancel):

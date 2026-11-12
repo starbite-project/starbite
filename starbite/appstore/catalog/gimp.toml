@@ -36,7 +36,6 @@ sha256_line = "GIMP-{version}-aarch64.AppImage"
 apt = ["gimp"]
 
 [runtime]
-apt = ["libfuse2t64"]
 needs = ["files"]
 note = "Desktop-style tool panels made for a mouse; fine for crops and quick edits with touch. Large images use a lot of the 1.5 GiB."
 

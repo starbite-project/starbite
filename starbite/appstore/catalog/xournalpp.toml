@@ -35,7 +35,6 @@ github_digest = true
 apt = ["xournalpp"]
 
 [runtime]
-apt = ["libfuse2t64"]
 needs = ["files"]
 note = "Upstream also ships Ubuntu .debs for aarch64; the AppImage is used because it does not depend on Ubuntu library versions. Debian has 1.2.x."
 

@@ -36,7 +36,7 @@ sha256_asset = "SHA2-256SUMS"
 apt = ["yt-dlp"]
 
 [runtime]
-apt = ["ffmpeg"]
+recommends = ["ffmpeg"]
 needs = ["network", "files"]
 note = "ffmpeg is needed to merge the best video and audio streams. Debian's package (2025.04) is too old for YouTube most of the time."
 

@@ -110,7 +110,8 @@ apt = ["mpv"]                 # the first is the main one
 
 ```toml
 [runtime]
-apt = ["libgtk-3-0t64"]       # Debian runtime libraries for release / source installs
+apt = ["libgtk-3-0t64"]       # Debian runtime libraries for release / source installs (required)
+recommends = ["ffmpeg"]       # best effort: installed when apt can get them (offline: noted, the install goes on)
 needs = ["network", "audio"]  # network | audio | gpu | camera | files | keyboard (shown on the app page)
 note = "Plays local files; streaming needs Wi-Fi."
 ```
