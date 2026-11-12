@@ -290,7 +290,7 @@ static int wifi_now(void)
     sh_wifi(&w);
     return 1;
 }
-int sh_wifi_power(int on) { return wifi_power(on); }
+int sh_wifi_power(int on) { return wifi_user_power(on); }   /* Track H: the switch is remembered */
 const char *sh_wifi_why(void)
 {
     static struct sbos_wifi s;
