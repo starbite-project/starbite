@@ -80,7 +80,7 @@ static void sbg_flexpmu_last(void)
 {
 	u64 mpidr = read_cpuid_mpidr();
 	unsigned int lvl = (mpidr & MPIDR_MT_BITMASK) ? 1 : 0;
-	unsigned int phy = (MPIDR_AFFINITY_LEVEL(mpidr, 1 + lvl) << 2) | MPIDR_AFFINITY_LEVEL(mpidr, lvl);
+	unsigned int phy = (MPIDR_AFFINITY_LEVEL(mpidr, (1 + lvl)) << 2) | MPIDR_AFFINITY_LEVEL(mpidr, lvl);
 	u32 b = phy >= 4 ? BIT(phy - 4) : BIT(phy + 4);
 
 	if (!fp_pmu || !fp_intr || !fp_mbox || phy > 7)
@@ -161,11 +161,12 @@ static irqreturn_t sbg_db_irq(int irq, void *dev)
 static int sbg_mmap(struct file *f, struct vm_area_struct *vma)
 {
 	unsigned long len = vma->vm_end - vma->vm_start;
+	u64 off = (u64)vma->vm_pgoff << PAGE_SHIFT;	/* a window of the region (sbstore maps the store's part) */
 
-	if (vma->vm_pgoff || len > shm_size)
+	if (off >= shm_size || len > shm_size - off)
 		return -EINVAL;
 	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-	return remap_pfn_range(vma, vma->vm_start, PHYS_PFN(shm_base), len, vma->vm_page_prot);
+	return remap_pfn_range(vma, vma->vm_start, PHYS_PFN(shm_base + off), len, vma->vm_page_prot);
 }
 
 static ssize_t sbg_read(struct file *f, char __user *buf, size_t n, loff_t *off)
@@ -624,7 +625,18 @@ static struct platform_driver sbg_driver = {
 		.suppress_bind_attrs = true,	/* no unbind: the handlers stay registered */
 	},
 };
-module_platform_driver(sbg_driver);
+static int __init sbg_init(void)
+{
+	return platform_driver_register(&sbg_driver);
+}
+module_init(sbg_init);
+
+static void __exit sbg_exit(void)
+{
+	sbp9_exit();				/* the 9p transport is registered with 9pnet: take it back */
+	platform_driver_unregister(&sbg_driver);
+}
+module_exit(sbg_exit);
 
 MODULE_DESCRIPTION("Starbite OS guest: shared region, doorbells, power off without SYSTEM_OFF, sbblk, sbnet, sbp9, sbsnd");
 MODULE_LICENSE("GPL");

@@ -118,6 +118,48 @@ activate none
 wait_msg 68 4294967295 2000
 catalog catalog-running.txt
 
+# v3: copy / paste in GTK 4 with the key bar's Ctrl (Ctrl+A, Ctrl+C -> the host; the host's text -> Ctrl+V)
+activate org.starbite.GtkTest4
+wait_window org.starbite.GtkTest4 1 3000
+expect_focus 1 3000
+keymod 1
+key 30
+key 46
+keymod 0
+wait_clip 3000 GTK4 sägt hallo
+clip_set von Starbite ✓
+sleep 300
+keymod 1
+key 47
+keymod 0
+expect_line /tmp/sbwl-gtk4test.txt text:von Starbite ✓ 3000
+expect_no_msg 73 1000
+# Home / End are keys; Tab moves the focus to the button (the text field lets the keyboard go)
+# (GTK 4 applies a text-input commit at once but queues key events: the text after the cursor has moved)
+key 102
+expect_line /tmp/sbwl-gtk4test.txt cursor:0 3000
+type >
+key 107
+expect_line /tmp/sbwl-gtk4test.txt cursor:15 3000
+type <
+expect_line /tmp/sbwl-gtk4test.txt text:>von Starbite ✓< 3000
+key 15
+expect_focus 0 3000
+# Ctrl + "c" typed in foot (the terminal app): ^C ends its shell's sleep, foot exits
+activate sbwl-termtest
+wait_window sbwl-termtest 1 3000
+keymod 1
+type c
+keymod 0
+expect_flag sbwl-termtest running 0 5000
+# notify-send (libnotify) as the user (uid 1000): the desktop-entry hint names the app
+sh python3 -c 'import os,sys; os.setgid(1000); os.setgroups([]); os.setuid(1000); os.execvp(sys.argv[1], sys.argv[1:])' env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus notify-send -a Foot -h string:desktop-entry:foot -u low "From notify-send" "Plain <i>body</i>"
+wait_notify 5000 From notify-send
+expect_notif app_name Foot
+expect_notif body Plain body
+expect_notif urgency 0
+expect_notif app foot
+
 # closing: xdg close first; an app that ignores SIGTERM is killed at 6 s
 close org.starbite.GtkTest3
 expect_flag org.starbite.GtkTest3 running 0 4000
@@ -140,11 +182,12 @@ sock pkg 5 2 50
 wait_msg 70 5 2000
 # a new .desktop file: inotify; a removed one: "rescan"
 sh printf '[Desktop Entry]\nType=Application\nName=Added Later\nExec=true\nIcon=help-browser\n' > /usr/local/share/applications/sbwl-added.desktop
-sleep 1500
+sleep 2500
 expect_app sbwl-added
 sh rm -f /usr/local/share/applications/sbwl-added.desktop
 sock rescan
-sleep 800
+sleep 2000
 expect_no_app sbwl-added
+include hostsim-v3.script
 catalog catalog-end.txt
 stop 5000

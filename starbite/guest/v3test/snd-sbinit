@@ -1,0 +1,15 @@
+#!/bin/sh
+# /sbin/sbinit of sbsnd's test base image (snd-run.sh): runs /bin/snd-test (its verdict line "v3-test: snd: PASS|FAIL"
+# goes to the kernel log), shows the card, then V3-TEST-DONE (and SBBLK-TEST-DONE: sbsim's BLKTEST flag ends the run
+# on it) and powers off through sbguest.ko.
+export PATH=/bin:/sbin
+mount -t tmpfs tmpfs /tmp
+say() { echo "sbinit: $*" > /dev/kmsg; }
+say "cards: $(head -1 /proc/asound/cards 2>/dev/null | tr -s ' ' | cut -c1-60); /dev/snd: $(ls /dev/snd 2>/dev/null | tr '\n' ' ')"
+/bin/snd-test > /tmp/snd-test.out 2>&1 || say "snd-test exited $?"
+sleep 1
+echo V3-TEST-DONE > /dev/kmsg
+echo SBBLK-TEST-DONE > /dev/kmsg
+sync
+poweroff -f
+sleep 60

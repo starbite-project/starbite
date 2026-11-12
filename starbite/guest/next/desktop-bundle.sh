@@ -22,7 +22,7 @@ mkdir -p "$OUT" "$WORK/out"
 WORK="$WORK" KOUT="$KOUT" "$here/../sbwl/mk-initrd.sh" > "$OUT/build.log" 2>&1 || { tail -20 "$OUT/build.log"; exit 1; }
 rd="$WORK/out/initrd-wl.cpio.gz"
 python3 "$here/../mk-guest-dts.py" --profile s9 --rd-size "$(stat -c %s "$rd")" --db-guest 511 \
-    --bootargs-extra "sbguest.mode=desktop" "$OUT/guest-wl.dts" >/dev/null
+    --bootargs-extra "sbguest.mode=desktop snd_dummy.enable=0" "$OUT/guest-wl.dts" >/dev/null
 dtc -q -I dts -O dtb -o "$OUT/guest-wl.dtb" "$OUT/guest-wl.dts"
 cp "$IMAGE" "$OUT/guest-wl.img"
 cp "$rd" "$OUT/guest-wl-rd.img"

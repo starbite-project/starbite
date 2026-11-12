@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=WlTest
+Comment=hostsim's plain Wayland client (wltest.c): keys, modifiers, the clipboard
+Exec=sbwl-wltest idle
+Icon=input-keyboard

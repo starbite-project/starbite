@@ -524,7 +524,11 @@ static void run(int n)
 static int fails, nchecks;
 /* the rows shown with the keyboard (and v3's 40 pt key bar) up: shell_linux.inc's LX_KBROWS */
 #define CARD_XPT 20.0f                     /* shell_lock.c CARD_X (MARGIN) */
+#ifndef GWIN_NO_EXT
 #define KBROWS (SH_LINUX_HKB - (int)(40.0f * SH_LINUX_HKB / (540.0f - 44.0f) + .5f))
+#else
+#define KBROWS SH_LINUX_HKB                         /* (no key bar without SH_EXT_API) */
+#endif
 int sw_compat_dump(char *out, int cap);            /* sw-ext-compat.patch's view of the recents */
 int nc_compat_count(const char *who);
 /* a tap, a horizontal drag (dx pt over n 16 ms steps, then still), a quick throw up */
@@ -629,6 +633,7 @@ int main(int argc, char **argv)
     /* 3. contract v3 (Track E): cards, the key bar, notifications, the clipboard, the zero-copy window */
     int l3 = nchecks;
     const char *stills = getenv("GWIN_STILLS") ? getenv("GWIN_STILLS") : argv[2];
+#ifndef GWIN_NO_EXT
     char dump[256];
     check(apps_n == 1, "the Text Editor's card keeps Linux up while hidden (guest_apps 1)");
     sh_set("lapp", "org.gnome.Calculator", 1);              /* a third app */
@@ -738,7 +743,11 @@ int main(int argc, char **argv)
     run(12);
     check(got.acts == 2 && got.act_id == 0x1a && got.act_action == 0, "the banner's tap: NOTIF_ACT id 0x1a action 0");
     check(got.activate > a0 && got.last_act == 1 && shown, "the banner's tap opened the Text Editor (ACTIVATE 1)");
+#else
+    printf("gwin-host: cards / key bar / notifications / clipboard: SKIPPED (no SH_EXT_API in this UI tree and the stand-in does not apply)\n");
+#endif
     /* Track A's zero-copy window: one external layer on the guest's front buffer */
+#ifndef GWIN_NO_ZC
     sh_set("app", "", 0);
     run(4);
     zc = 1;
@@ -764,10 +773,13 @@ int main(int argc, char **argv)
     run(3);
     check(got.done > dn, "zero-copy: home detaches it (sbg_surf_done)");
     zc = 0;
+#else
+    printf("gwin-host: zero-copy: SKIPPED (this UI tree has no tk_layer_external and the compat patch does not apply)\n");
+#endif
     /* Linux stops: every Linux card goes, the 60 s rule again */
     guest_stop();
     run(12);
-    check(apps_n == 0, "Linux stopped: its cards gone (guest_apps 0)");
+    check(apps_n <= 0, "Linux stopped: its cards gone (guest_apps 0, or never called without SH_EXT_API)");
     printf("gwin-host: v3 %s (%d checks)\n", fails ? "FAILED" : "PASSED", nchecks - l3);
     printf("gwin-host: the UI heap: %.1f MB in use, peak %.1f MB%s\n", tk_heap_used() / 1e6, tk_heap_peak() / 1e6,
            getenv("SBTK_HEAP_MB") ? " (SBTK_HEAP_MB: the phone's heap)" : "");

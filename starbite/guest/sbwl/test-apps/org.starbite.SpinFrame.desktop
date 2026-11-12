@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Spin Frame
+Comment=wltest redrawing at every frame callback (as toolkits do): nothing in the background
+Exec=env SBWL_TEST_APPID=org.starbite.SpinFrame SBWL_TEST_OUT=/tmp/sbwl-spinframe.txt sbwl-wltest frame

@@ -109,6 +109,16 @@ export GSK_RENDERER=cairo GDK_BACKEND=wayland NO_AT_BRIDGE=1 GTK_A11Y=none MOZ_E
 export LIBGL_ALWAYS_SOFTWARE=1 GTK_USE_PORTAL=0 SAL_USE_VCLPLUGIN=gtk3 XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=Starbite HOME=/root
 
+# ---- contract v3 (Track E): the network link and Starbite's files, when the host serves them ----
+# sbnet0 (sbguest.ko's sbnet): the host's address / route / DNS applied, and re-applied when the uplink changes
+if [ -d /sys/class/net/sbnet0 ] && [ -x /usr/local/sbin/sbnet-up ]; then
+    /usr/local/sbin/sbnet-up </dev/null >/dev/null 2>&1 &
+fi
+# Starbite's files at /home/user/Starbite (9P over the shared region; read-only while Starbite can't write the card)
+if [ -x /usr/local/sbin/sbp9-mount ]; then
+    SBP9_DIR=/home/user/Starbite /usr/local/sbin/sbp9-mount || true
+fi
+
 # ---- sbpkg: the App Store daemon (root: it runs apt in the overlay), restarted if it exits ----
 # Track F's engine when the base has it (same socket lines, same store table), else sbpkg
 STORED=/usr/local/sbin/sbpkg
@@ -125,7 +135,7 @@ fi
 
 # ---- sbwl: the compositor (root; it owns the shm rings and /run/sbwl.sock, starts the apps as "user") ----
 # HOOK: mk-base.sh SBWL=/path/to/sbwl runs sbwl/install-rootfs.sh (-> /usr/bin/sbwl, /etc/sbwl/system-apps).
-trap 'sync' TERM
+trap '[ -x /usr/local/sbin/sbp9-mount ] && /usr/local/sbin/sbp9-mount -u; sync' TERM
 SBWL_BIN=/usr/bin/sbwl
 [ -x "$SBWL_BIN" ] || SBWL_BIN=/usr/local/bin/sbwl
 args=$(cat /etc/starbite/sbwl.args 2>/dev/null)
