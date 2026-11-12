@@ -2470,6 +2470,8 @@ static int kit_on(void);
 static int se_owns(void);
 static void se_build(void);
 static void se_close(void);
+static int se_refresh(float t);                     /* Track B: Settings' driver polls (Bluetooth, the lux reading) */
+static float se_next_update(float t);
 static int se_layers(tk_layer **o);
 static int se_autocap(void);
 static int se_timer_vib(void);
@@ -2643,6 +2645,8 @@ int sh_next_update(float t)
     if (pb >= 0 && (best < 0 || pb < best)) best = pb;
     float ub = su_next_update(t);                       /* Track A update: the staging's chunks */
     if (ub >= 0 && (best < 0 || ub < best)) best = ub;
+    float sb = se_next_update(t);                       /* Track B: Settings' Bluetooth / Display polls */
+    if (sb >= 0 && (best < 0 || sb < best)) best = sb;
     return (int)best;
 }
 int sh_refresh(float t)
@@ -2652,6 +2656,7 @@ int sh_refresh(float t)
     if (med_pending() && !sh_moving()) ch |= med_work(10000, 1);
     ch |= sv_refresh(t) | nc_refresh(t) | cm_refresh(t) | pc_refresh(t) | su_refresh(t);   /* survival-next: SOS's beacon, USB power's state; helper D: the banner; Track A: the back-off */
     ch |= isl_refresh(t);                              /* B7: the capsule (SOS, USB power), the pill's hold */
+    ch |= se_refresh(t);                               /* Track B: Settings' Bluetooth list, the lux reading */
     if (ch && AP.on) sw_dirty = 1;                     /* helper D: the switcher's snapshot is old now */
     return ch;
 }
