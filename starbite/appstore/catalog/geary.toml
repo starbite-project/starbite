@@ -1,0 +1,31 @@
+id = "geary"
+name = "Geary"
+summary = "A light, simple email client for GNOME"
+description = """Geary reads and sends mail over IMAP and SMTP with a conversation view and fast search. Its layout adapts to narrow screens, so it suits the phone better than Thunderbird."""
+category = "Internet"
+licence = "LGPL-2.1-or-later"
+homepage = "https://gitlab.gnome.org/GNOME/geary"
+icon = "org.gnome.Geary"
+ram_mb = 250
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["mail", "email", "imap", "gnome"]
+
+[launcher]
+exec = "geary"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["geary"]
+
+[runtime]
+needs = ["network"]
+note = "Accounts are stored with GNOME Online Accounts or Geary's own settings; passwords go to the Secret Service keyring."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 25
+build_mb = 1500

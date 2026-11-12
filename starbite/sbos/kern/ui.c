@@ -548,6 +548,7 @@ void kui_lock(void)
 /* Starbite OS Next draws the confirmation in its own UI (kern_next sets this; 0 in the regular image) */
 void (*kui_screen_hook)(int on);
 int (*kui_sleep_hook)(int key);
+void (*kui_save_hook)(void);              /* Track A lifecycle: Next's sh_save_all (kern_next.c) */
 int (*kui_confirm_hook)(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
                         void (*done)(int ok));
 void kui_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,

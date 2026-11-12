@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "sbapp.h"
+#include "passcode.h"                /* Track A: the passcode (pure: passcode.c) */
+int sbos_safe_start(void);           /* Track A, 1.0: this start is a safe start (settings.c): nothing saved */
 
 #define SBOS_VERSION "1.2-alpha26"
 /* 1.2-alpha26: alpha25's lock screen (OS cards, swipe up, the Emergency hold, Heat only in Emergency) is off: the user
@@ -18,7 +20,7 @@
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
-enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_MODEM, KT_SURV, KT_APP0 = 16 };
+enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_MODEM, KT_SURV, KT_USB /* usb.c */, KT_APP0 = 16 };
 #define KT_MAX 64
 #define KT_RESERVE 24                /* entries apps cannot take: the kernel's tasks always get theirs */
 struct ktimer {
@@ -414,6 +416,10 @@ int vib_buzz(unsigned n, unsigned on_ms, unsigned off_ms);
 void vib_off(void);
 void vib_timer(void);
 int vib_on(void);
+/* drivers track (haptic.c): the strength (PWM duty, per mille, 500..700), a gap, the pattern player's hook */
+unsigned vib_set_duty(unsigned pm);
+void vib_wait(unsigned ms);
+void vib_set_end_hook(void (*fn)(int ended));
 /* 1.2-alpha8: wake-up alarms (alarm.c) */
 int alarm_set(int i, int h, int m, int days, int on);
 int alarm_any(void);
@@ -422,6 +428,19 @@ int alarm_ringing(void);
 void alarm_minute(const struct sbos_time *t);
 void alarm_timer(void);
 int alarm_stop(int snooze);
+/* Track A (2026-11-12): Next's Alarm tab (the list of up to four, labels), kept in the record "sbos.alarm" */
+#define ALARM_REC_SIZE (4 + 4 * 28)
+int alarm_count(void);
+int alarm_get(int i, int *hm, int *days, int *on, char *label, int cap);
+int alarm_put(int i, int hm, int days, int on, const char *label);   /* i == alarm_count(): add */
+int alarm_del(int i);
+int alarm_pack(uint8_t out[ALARM_REC_SIZE]);        /* 1: the list is the kernel's (save it) */
+void alarm_unpack(const uint8_t in[ALARM_REC_SIZE]);
+int alarm_app_state(uint8_t out[20]);               /* the classic Clock app's state as the list (0: none yet) */
+/* Track A: the time zone in use (tzdb.c's index) and 12 / 24-hour; services.c, saved by settings.c */
+int clock_zone(void);
+void clock_zone_set(int i);
+extern int clock_24h;
 /* 1.2-alpha9: notifications (notif.c) */
 struct notif {
     char who[16], title[40], text[72];
@@ -541,6 +560,8 @@ void kui_screen_changed(int on);
  * key: the Power key, whose second press during the fade undoes it) */
 extern void (*kui_screen_hook)(int on);
 extern int (*kui_sleep_hook)(int key);
+/* Track A lifecycle: the UI's save before a restart or a switch-off (Next: every app's on_save, sh_save_all); 0 none */
+extern void (*kui_save_hook)(void);
 void kui_sos_changed(void);
 int kui_screen(void);
 void ui_ktimer(unsigned id);

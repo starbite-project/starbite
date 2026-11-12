@@ -9,9 +9,10 @@
  *     Haptics, Notifications (per app), Battery (the level, the history since the phone started, Last 2 %), Privacy,
  *     Emergency (Medical Card, Emergency mode), Linux Apps.
  * Wi-Fi (shell_wifi.inc), Cellular (shell_cell.inc) and the Medical Card's editor (shell_survival.inc) keep their own
- * pages (AS.sub 2, 3, 4: the page strips). Passcode and Startup are Track A's (shell_passcode.inc /
- * shell_startup.inc): their rows open SH_PASSCODE_PAGE() / SH_STARTUP_PAGE() when a part defines them, else they
- * say "Coming Soon".
+ * pages (AS.sub 2, 3, 4: the page strips). Passcode is Track A's (shell_passcode.inc), Startup Track J's
+ * (shell_startup.inc): their rows open SE_PASSCODE_PAGE / SE_STARTUP_PAGE in the strips. Date & Time is here on
+ * Track A's time API (sh_clock24, sh_tz); its Time Zone row opens Track A's zone list (shell_time.inc, SE_TZ_PAGE),
+ * whose back comes here again. Display's Auto-Lock is Track A's sh_autolock.
  *
  * The pages here are not the four strips: one layer of the page's own height (cut to its groups' width, ~20 MB for
  * the root with its half copy made at idle), scrolled under a fixed nav row (the back circle, the inline title) with
@@ -28,8 +29,9 @@ enum { SE_ROOT = 0, SE_DISPLAY = 1, SE_WIFI = 2, SE_CELL = 3, SE_CARD = 4,
        SE_NOTIF_APP, SE_BATTERY, SE_PRIVACY, SE_EMERGENCY, SE_LINUX, SE_SEARCH, SE_NPAGES };
 /* actions (row ids from 100; a row id < 100 pushes that page) */
 enum { A_NONE = 100, A_CARD, A_PASSCODE, A_STARTUP, A_STORE, A_LAST2, A_HEALTH, A_TEXTSIZE, A_RESET, A_EMG, A_BRIGHT,
-       A_RANGE, A_TERMINAL,
-       T_FIRST = 200, T_SYSHAP = T_FIRST, T_KBHAP, T_AUTOCAP, T_TIMERVIB, T_LAST2AUTO, T_NALLOW, T_NBANNER, T_CALLVIB, T_SMSVIB };
+       A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK,
+       T_FIRST = 200, T_SYSHAP = T_FIRST, T_KBHAP, T_AUTOCAP, T_TIMERVIB, T_LAST2AUTO, T_NALLOW, T_NBANNER, T_CALLVIB, T_SMSVIB,
+       T_CLOCK24 };
 
 /* ---- the shell's own settings: Track A's prefs (kept across restarts; every one defaults to on) ------------------ */
 enum { SK_SYSHAP, SK_KBHAP, SK_AUTOCAP, SK_TIMERVIB, SK_NALLOW, SK_NBANNER = SK_NALLOW + 8, SK_N = SK_NBANNER + 8 };
@@ -156,6 +158,11 @@ static se_row *nav(int id, int ico, const char *l, const char *v) { se_row *r = 
 static se_row *val(const char *l, const char *v) { return row(SR_VAL, A_NONE, l, v); }
 static se_row *tog(int id, const char *l, int on) { se_row *r = row(SR_TOG, id, l, 0); r->on = on; return r; }
 
+static const char *se_autolock_text(int s)
+{
+    return s <= 0 ? "Never" : s < 60 ? "30 Seconds" : s < 120 ? "1 Minute" : s < 180 ? "2 Minutes" : s < 240 ? "3 Minutes" :
+           s < 300 ? "4 Minutes" : "5 Minutes";
+}
 static const char *se_title(int p)
 {
     switch (p) {
@@ -252,16 +259,21 @@ static void se_rows(int p)
         foot("Starbite OS updates come from the boot menu: hold Volume Up while the phone starts, then choose "
              "Starbite OS > Update. Nothing is downloaded here.");
         break;
-    case SE_DATETIME: {
-        char t[8];
-        fmt_hm(t);
+    case SE_DATETIME: {                          /* Track A's time: 12 / 24-hour, the zone (sbos-core-api.md 4) */
+        char t[12];
+        const char *city = "";
+        fmt_time(t, ST.h, ST.mi, 1);
+        (void)sh_tz_name(sh_tz(), &city);
+        sec(0);
+        tog(T_CLOCK24, "24-Hour Time", sh_clock24());
+        sec(0);
+        { se_row *r = tog(A_NONE, "Set Automatically", 1); r->dis = 1; }
+        nav(A_TZ, 0, "Time Zone", se_str(city, 0));
+        foot("The time comes from the network; daylight saving time follows the zone's own rules.");
         sec(0);
         val("Time", se_str(t, 0));
         val("Date", se_str(live_text("@date", b), 0));
         val("Year", se_num(cal_year, 0));
-        val("24-Hour Time", "On");
-        row(SR_TOG, A_NONE, "Set Automatically", 0)->dis = 1;
-        foot("The clock is the phone's own. Setting it, time zones and 12-hour time aren't in this version.");
         break;
     }
     case SE_KEYBOARD:
@@ -293,8 +305,8 @@ static void se_rows(int p)
         sec(0);
         nav(A_TEXTSIZE, 0, "Text Size", "Default");
         val("Appearance", "Dark");
-        val("Auto-Lock", "The phone's timer");
-        foot("Auto-Lock follows the phone's own screen timer; choosing its time isn't in this version.");
+        nav(A_AUTOLOCK, 0, "Auto-Lock", se_autolock_text(sh_autolock()));
+        foot("The screen turns off and the phone locks after this long without a touch.");
         break;
     }
     case SE_WALL:
@@ -401,7 +413,7 @@ static void se_rows(int p)
             { "App Store", A_STORE, SEI_STORE, 0 }, { "About", SE_ABOUT, 0, "General" }, { "Software Update", SE_UPDATE, 0, "General" },
             { "Date & Time", SE_DATETIME, 0, "General" }, { "Keyboard", SE_KEYBOARD, 0, "General" },
             { "Language & Region", SE_LANG, 0, "General" }, { "Reset", SE_RESET, 0, "General" }, { "Brightness", SE_DISPLAY, 0, "Display" },
-            { "Auto-Lock", SE_DISPLAY, 0, "Display" }, { "Text Size", SE_DISPLAY, 0, "Display" }, { "Haptics", SE_SOUNDS, 0, "Sounds" },
+            { "Auto-Lock", SE_DISPLAY, 0, "Display" }, { "Time Zone", SE_DATETIME, 0, "General" }, { "Text Size", SE_DISPLAY, 0, "Display" }, { "Haptics", SE_SOUNDS, 0, "Sounds" },
             { "Vibration", SE_SOUNDS, 0, "Sounds" }, { "Medical Card", A_CARD, SEI_HEART, "Emergency" },
             { "Last 2 %", SE_BATTERY, 0, "Battery" }, { "Battery Health", SE_BATTERY, 0, "Battery" } };
         sec(0);
@@ -647,7 +659,7 @@ static void se_redraw_sec(int i)
 static int se_owns(void)
 {
     return is_app("settings") && AS.sub != SE_WIFI && AS.sub != SE_CELL && AS.sub != SE_CARD && AS.sub != SE_STARTUP_PAGE &&
-           AS.sub != SE_PASSCODE_PAGE;
+           AS.sub != SE_PASSCODE_PAGE && AS.sub != SE_TZ_PAGE;
 }
 /* a strip page's back (Startup, Passcode): the Settings root, where it was */
 void settings_back(void)
@@ -820,6 +832,14 @@ static void se_open_app(const char *k)
         }
 }
 static void se_ok(int i) { (void)i; }
+/* Display > Auto-Lock: Track A's sh_autolock (seconds, 0 never), chosen in an action sheet (the kit's six rows) */
+static const int SE_AL[5] = { 30, 60, 120, 300, 0 };
+static void se_autolock_cb(int i)
+{
+    if (i < 0 || i > 4) return;
+    sh_autolock_set(SE_AL[i]);
+    if (is_app("settings") && se_owns()) build_app_page(AP.a);
+}
 __attribute__((unused)) static void se_soon(const char *what)
 {
     static const kit_btn OK[1] = { { "OK", KIT_PREFERRED } };
@@ -893,6 +913,19 @@ static void se_act(se_row *r)
         se_soon("Startup");
 #endif
         break;
+    case A_TZ:                                   /* Track A's zone list, in the strips; its back: Date & Time */
+        SE.save[SE.page] = SE.scroll;
+        SE.popping = 1;
+        AS.sub = SE_TZ_PAGE;
+        ta_tz_open();
+        build_app_page(AP.a);
+        break;
+    case A_AUTOLOCK: {
+        static const kit_btn B[6] = { { "30 Seconds", KIT_DEFAULT }, { "1 Minute", KIT_DEFAULT }, { "2 Minutes", KIT_DEFAULT },
+                                      { "5 Minutes", KIT_DEFAULT }, { "Never", KIT_DEFAULT }, { "Cancel", KIT_CANCEL } };
+        kit_actions("Auto-Lock", B, 6, se_autolock_cb);
+        break;
+    }
     case A_STORE: se_open_app("store"); break;
     case A_TERMINAL: se_open_app("terminal"); break;
     case A_LAST2: se_open_app("power"); break;
@@ -925,6 +958,7 @@ static void se_toggle(int ri)
     case T_LAST2AUTO: sh_last2_auto_set(on); on = sh_last2_auto(); break;
     case T_NALLOW: se_put(SK_NALLOW + SE.napp, on); break;
     case T_NBANNER: se_put(SK_NBANNER + SE.napp, on); break;
+    case T_CLOCK24: sh_clock24_set(on); ta_restyle(); break;   /* Track A: every time on screen again */
     case A_EMG:
         if (!on) {
             static const kit_btn B[2] = { { "Cancel", KIT_CANCEL }, { "Exit", KIT_DESTRUCTIVE } };
@@ -935,7 +969,7 @@ static void se_toggle(int ri)
         break;
     default: return;
     }
-    if (r->id == T_NALLOW) { build_app_page(AP.a); return; }     /* Banners greys out with it */
+    if (r->id == T_NALLOW || r->id == T_CLOCK24) { build_app_page(AP.a); return; }   /* Banners greys out with it; the Time row */
     r->on = on;
     for (int s = 0; s < SE.ns; s++) if (ri >= SE.s[s].first && ri < SE.s[s].first + SE.s[s].n) se_redraw_sec(s);
     if (se_get(SK_SYSHAP)) sh_haptic();

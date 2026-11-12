@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT
  * sbtk-host: a pretend Linux for the stills and films (L3, docs/STARBITE-LINUX-APPS.md; the kernel's platform is
- * starbite/guest/next/gwin.c). A catalog of six apps and a store of fourteen packages in every state, icons drawn
+ * starbite/guest/next/gwin.c). A store of 31 packages from the App Store's catalog (starbite/appstore/catalog: real
+ * names, summaries, descriptions, licences) with the v3 fields (Track F: methods, versions, phases) in every state, the
+ * catalog of the installed ones, icons drawn
  * here, app windows drawn with the pack's fonts (foot: SBTK_LINUX = a 720 x 916 P6 PPM, its real frame from QEMU).
  * Every platform call is logged ("linux: ..."). Time is the film's (lin_fake_poll); a still settles first.
  *   SBTK_LINUX unset or a PPM: Linux ran earlier in this boot (running, the catalog and the store known)
@@ -11,7 +13,9 @@ static sh_lcat_t FCAT;
 static sh_lstore_t FST;
 static struct {
     int state, shown, hold, want, win, vp, focus, settling, nstart, pends;
-    float now, t_state, win_t, op_t[SH_LPKGS];
+    float now, t_state, win_t, op_t[SH_LPKGS], op_t0[SH_LPKGS];
+    unsigned op_m[SH_LPKGS], op_k[SH_LPKGS];     /* Track F: the running op's method and kind (SH_PKG_OP_*) */
+    char prev[SH_LPKGS][24];                     /* the version a rollback goes back to */
     char pend[40];
     unsigned seq, drawn;
     char text[SH_LAPPS][160];
@@ -63,7 +67,7 @@ static void ic_text(uint32_t *px, float size, float cx, float base, const char *
     tk_paint p = tk_solid(tk_hex(rgb, 1));
     tk_text(&b, font, size, cx - tk_text_w(font, size, s, 0, 0) / 2, base, s, 0, 0, &p, 0);
 }
-enum { K_FOOT, K_EDIT, K_CALC, K_FILES, K_HTOP, K_MINES, K_FOX, K_GIMP, K_CHROM, K_WRITER, K_INK, K_VLC, K_TUX, K_GEANY };
+enum { K_FOOT, K_EDIT, K_CALC, K_FILES, K_HTOP, K_MINES, K_FOX, K_GIMP, K_CHROM, K_WRITER, K_INK, K_VLC, K_TUX, K_GEANY, K_LETTER };
 static void draw_icon(int k, uint32_t *px)
 {
     memset(px, 0, 160 * 160 * 4);
@@ -151,22 +155,136 @@ static void draw_icon(int k, uint32_t *px)
 }
 
 /* ---- the catalog and the store ---- */
-typedef struct { const char *pkg, *name, *summary, *cat, *err; unsigned dl, inst, ram, flags, state, pct; int kind; const char *app; } fpkg;
+typedef struct {
+    const char *pkg, *name, *summary, *cat, *err; unsigned dl, inst, ram, flags, state, pct; int kind; const char *app;
+    unsigned methods, method, def, phase, done, total, eta, build_min, touch, needs, flags3, rel_mb, col; const char *txt;
+    const char *vi, *vn, *vr, *vd, *vs, *lic, *src, *desc;
+} fpkg;
 static const fpkg FP[] = {
-    { "firefox-esr", "Firefox ESR", "Mozilla's web browser, the extended support release. Software rendering on the big cores.", "Internet", "", 72000, 262000, 520, SH_PKG_FEATURED, 0, 0, K_FOX, "firefox-esr" },
-    { "gnome-text-editor", "Text Editor", "A simple editor for notes, lists and code.", "Utilities", "", 2100, 7800, 90, SH_PKG_INSTALLED | SH_PKG_FEATURED, 0, 0, K_EDIT, "org.gnome.TextEditor" },
-    { "gimp", "GIMP", "The GNU Image Manipulation Program: photos, painting, layers.", "Graphics", "", 58000, 236000, 300, SH_PKG_FEATURED, SH_PKG_INSTALLING, 40, K_GIMP, "gimp" },
-    { "chromium", "Chromium", "The open-source browser behind Chrome.", "Internet", "", 98000, 352000, 900, SH_PKG_TOO_BIG, 0, 0, K_CHROM, "chromium" },
-    { "libreoffice-writer", "LibreOffice Writer", "Word processing with the LibreOffice suite: documents, letters, books.", "Office", "", 160000, 1400000, 330, SH_PKG_NO_SPACE, 0, 0, K_WRITER, "libreoffice-writer" },
-    { "inkscape", "Inkscape", "Vector graphics: drawings, logos, diagrams.", "Graphics", "Download stopped: no network", 41000, 168000, 220, 0, SH_PKG_FAILED, 0, K_INK, "org.inkscape.Inkscape" },
-    { "vlc", "VLC", "Plays most video and audio files.", "Utilities", "", 24000, 96000, 140, 0, SH_PKG_QUEUED, 0, K_VLC, "vlc" },
-    { "gnome-calculator", "Calculator", "Basic, advanced and financial calculations.", "Utilities", "", 1600, 6200, 60, SH_PKG_INSTALLED, 0, 0, K_CALC, "org.gnome.Calculator" },
-    { "nautilus", "Files", "Browse the files in Linux's home folder.", "Utilities", "", 4300, 16500, 110, SH_PKG_INSTALLED, 0, 0, K_FILES, "org.gnome.Nautilus" },
-    { "htop", "htop", "What runs in Linux and how much memory it takes, in a terminal.", "Development", "", 180, 420, 8, SH_PKG_INSTALLED, 0, 0, K_HTOP, "htop" },
-    { "gnome-mines", "Mines", "Clear the minefield without stepping on a mine.", "Games", "", 900, 3100, 45, SH_PKG_INSTALLED, SH_PKG_REMOVING, 60, K_MINES, "org.gnome.Mines" },
-    { "foot", "Foot", "The terminal: a fast Wayland terminal emulator.", "Development", "", 350, 1100, 20, SH_PKG_INSTALLED | SH_PKG_SYSTEM, 0, 0, K_FOOT, SH_LINUX_TERMINAL },
-    { "supertux", "SuperTux", "A classic 2D jump-and-run with Tux.", "Games", "", 61000, 98000, 120, 0, 0, 0, K_TUX, "supertux2" },
-    { "geany", "Geany", "A small, fast code editor with build and run.", "Development", "", 3800, 13900, 70, 0, 0, 0, K_GEANY, "geany" },
+    { "firefox", "Firefox", "Mozilla's web browser", "Internet", "", 120000, 300000, 800, SH_PKG_FEATURED, 0, 0, K_FOX, "firefox-esr",
+      6, 0, 2, 0, 0, 0, 0, 0, 2, 3, 0, 300, 0x000000, "",
+      "", "", "146.0.1", "140.6.0esr", "", "MPL-2.0", "archive.mozilla.org",
+      "The Firefox web browser. The release method installs Mozilla's own aarch64 build (latest Firefox); the Debian method installs Firefox ESR. Runs natively on Wayland; with no GPU, pages, WebGL and video are drawn in software." },
+    { "neovim", "Neovim", "Hyperextensible Vim-based text editor", "Development", "", 16000, 40000, 30, SH_PKG_INSTALLED|SH_PKG_UPDATE|SH_PKG_ROLLBACK|SH_PKG_FEATURED, 0, 0, K_LETTER, "nvim",
+      14, 2, 2, 0, 0, 0, 0, 20, 1, 32, 8, 40, 0x57a143, "Nv",
+      "0.11.5", "0.12.6", "0.12.6", "0.10.4", "0.12.6", "Apache-2.0 AND Vim", "github.com/neovim/neovim",
+      "Neovim is a modern Vim: modal editing, Lua plugins, built-in LSP client and Tree-sitter highlighting. Runs in the terminal." },
+    { "gimp", "GIMP", "The GNU Image Manipulation Program", "Graphics", "", 92000, 230000, 350, SH_PKG_FEATURED, SH_PKG_INSTALLING, 40, K_GIMP, "gimp",
+      14, 0, 2, SH_PKG_DOWNLOADING, 94200, 235500, 0, 60, 1, 16, 0, 230, 0x000000, "",
+      "", "", "3.2.0", "3.0.4", "3.2.0", "GPL-3.0-or-later", "download.gimp.org",
+      "GIMP is a full raster image editor: layers, masks, filters, colour tools, painting and photo retouching. The release method installs GIMP's official aarch64 AppImage (3.2 series); Debian has 3.0." },
+    { "helix", "Helix", "A post-modern modal text editor", "Development", "", 32000, 80000, 40, 0, SH_PKG_INSTALLING, 35, K_LETTER, "helix",
+      14, 0, 2, SH_PKG_BUILDING, 0, 0, 480, 25, 1, 32, 8, 80, 0x7c5cc4, "Hx",
+      "", "", "25.07.1", "25.01", "25.07.1", "MPL-2.0", "github.com/helix-editor/helix",
+      "Helix is a modal editor with multiple selections, built-in Tree-sitter highlighting and language-server support, working out of the box with no plugins. Runs in the terminal as hx." },
+    { "xournalpp", "Xournal++", "Handwritten notes and PDF annotation", "Office", "", 16000, 40000, 120, SH_PKG_FEATURED, SH_PKG_INSTALLING, 92, K_LETTER, "com.github.xournalpp.xournalpp",
+      14, 0, 2, SH_PKG_VERIFYING, 0, 0, 0, 20, 3, 16, 0, 40, 0x3d7fd6, "X+",
+      "", "", "1.2.8", "1.2.6", "1.2.8", "GPL-2.0-or-later", "github.com/xournalpp/xournalpp",
+      "Xournal++ is a notebook for handwriting, sketching and annotating PDFs, with pen, highlighter, shapes, text and LaTeX. Works with a finger or a stylus." },
+    { "inkscape", "Inkscape", "Vector graphics editor (SVG)", "Graphics", "checksum mismatch", 8000, 20000, 400, 0, SH_PKG_FAILED, 0, K_INK, "org.inkscape.Inkscape",
+      10, 0, 1, 0, 0, 0, 0, 70, 1, 16, 0, 0, 0x000000, "",
+      "", "", "", "1.4", "1.4.2", "GPL-3.0-or-later", "Debian (inkscape)",
+      "Inkscape draws and edits vector graphics: shapes, paths, text, gradients and clones, saved as standard SVG and exported to PNG or PDF." },
+    { "vscodium", "VSCodium", "VS Code without Microsoft's telemetry", "Development", "", 220000, 550000, 600, SH_PKG_NEEDS_NET, 0, 0, K_LETTER, "codium",
+      4, 0, 2, 0, 0, 0, 0, 0, 1, 48, 0, 550, 0x2f80c8, "Vs",
+      "", "", "1.106.3", "", "", "MIT", "github.com/VSCodium/vscodium",
+      "VSCodium is the open-source build of Visual Studio Code: editor, terminal, Git, debugging and extensions from Open VSX. An Electron app, so it is the heaviest editor here." },
+    { "libreoffice", "LibreOffice", "Office suite: Writer, Calc and Impress", "Office", "", 260000, 1400000, 350, SH_PKG_NO_SPACE|SH_PKG_FEATURED, 0, 0, K_WRITER, "libreoffice-writer",
+      6, 0, 1, 0, 0, 0, 0, 0, 1, 16, 0, 650, 0x000000, "",
+      "", "", "25.8.3", "25.2.3", "", "MPL-2.0", "download.documentfoundation.org",
+      "LibreOffice Writer (documents), Calc (spreadsheets) and Impress (presentations), with the GTK 3 front end so it runs natively on Wayland. Opens and saves Microsoft Office and OpenDocument files." },
+    { "kdenlive", "Kdenlive", "Video editor with a multi-track timeline", "Media", "", 8000, 20000, 700, SH_PKG_TOO_BIG, 0, 0, K_LETTER, "org.kde.kdenlive",
+      2, 0, 1, 0, 0, 0, 0, 0, 1, 18, 0, 0, 0x2c3e50, "Kd",
+      "", "", "", "25.04.2", "", "GPL-3.0-or-later", "Debian (kdenlive)",
+      "Kdenlive is a non-linear video editor: multi-track timeline, titles, transitions, effects and rendering to common formats. Heavy for this phone: fine for short 720p clips, slow beyond that." },
+    { "lazygit", "lazygit", "A simple terminal UI for Git", "Development", "", 8000, 20000, 40, SH_PKG_INSTALLED, 0, 0, K_LETTER, "lazygit",
+      14, 3, 2, 0, 0, 0, 0, 6, 2, 32, 8, 20, 0xe05d44, "lg",
+      "0.56.0", "0.56.0", "0.56.0", "0.50.0", "0.56.0", "MIT", "github.com/jesseduffield/lazygit",
+      "lazygit shows a repository's status, branches, commits and stashes in panels and lets you stage lines, commit, rebase and push with single keys or taps." },
+    { "btop", "btop", "A resource monitor for CPU, memory, disks and network", "System", "", 1200, 3000, 10, SH_PKG_INSTALLED|SH_PKG_UPDATE, 0, 0, K_HTOP, "btop",
+      14, 2, 2, 0, 0, 0, 0, 6, 3, 0, 8, 3, 0x000000, "",
+      "1.4.4", "1.4.5", "1.4.5", "1.4.0", "1.4.5", "Apache-2.0", "github.com/aristocratos/btop",
+      "btop shows CPU per core, memory, disks, network and processes in a colourful terminal dashboard. Tap to sort, select and signal processes." },
+    { "yt-dlp", "yt-dlp", "Download video and audio from YouTube and 1000+ sites", "Media", "", 16000, 40000, 60, SH_PKG_INSTALLED|SH_PKG_UPDATE|SH_PKG_ROLLBACK, 0, 0, K_LETTER, "yt-dlp",
+      14, 2, 2, 0, 0, 0, 0, 3, 2, 17, 8, 40, 0xd8262c, "yt",
+      "2025.10.22", "2025.11.12", "2025.11.12", "2025.09.26", "2025.11.12", "Unlicense", "github.com/yt-dlp/yt-dlp",
+      "yt-dlp is a command-line downloader for video and audio from YouTube and many other sites, with format selection and subtitles. Sites change often, so the upstream release (updated every few weeks) is the default." },
+    { "gnome-text-editor", "Text Editor", "A simple text editor", "Utilities", "", 8000, 20000, 90, SH_PKG_INSTALLED, 0, 0, K_EDIT, "org.gnome.TextEditor",
+      10, 1, 1, 0, 0, 0, 0, 5, 3, 48, 0, 0, 0x000000, "",
+      "48.3", "48.3", "", "48.3", "49.1", "GPL-3.0-or-later", "Debian (gnome-text-editor)",
+      "GNOME Text Editor edits plain text and code with tabs, syntax highlighting, search and replace, and autosave of unsaved drafts." },
+    { "gnome-calculator", "Calculator", "Basic, scientific and financial calculator", "Utilities", "", 8000, 20000, 70, SH_PKG_INSTALLED, 0, 0, K_CALC, "org.gnome.Calculator",
+      10, 1, 1, 0, 0, 0, 0, 8, 3, 0, 0, 0, 0x000000, "",
+      "48.1", "48.1", "", "48.1", "49.0", "GPL-3.0-or-later", "Debian (gnome-calculator)",
+      "GNOME Calculator does everyday sums, scientific and programming calculations, and unit and currency conversion." },
+    { "nautilus", "Files", "Browse and manage your files (Nautilus)", "Utilities", "", 8000, 20000, 150, SH_PKG_INSTALLED|SH_PKG_FEATURED, 0, 0, K_FILES, "org.gnome.Nautilus",
+      10, 1, 1, 0, 0, 0, 0, 15, 3, 16, 0, 0, 0x000000, "",
+      "48.3", "48.3", "", "48.3", "49.1", "GPL-3.0-or-later", "Debian (nautilus)",
+      "GNOME Files (Nautilus) browses folders, copies, moves, renames and searches files, with previews and an adaptive layout for narrow screens." },
+    { "foot", "foot", "A fast, lightweight Wayland terminal", "System", "", 8000, 20000, 20, SH_PKG_INSTALLED|SH_PKG_SYSTEM, 0, 0, K_FOOT, "org.codeberg.dnkl.foot",
+      10, 1, 1, 0, 0, 0, 0, 4, 2, 32, 0, 0, 0x000000, "",
+      "1.21.0", "1.21.0", "", "1.21.0", "1.24.0", "MIT", "Debian (foot)",
+      "foot is a small, fast terminal emulator made for Wayland. It is the terminal the store opens command-line apps in." },
+    { "gnome-mines", "Mines", "Clear hidden mines from a minefield", "Games", "", 8000, 20000, 60, SH_PKG_INSTALLED, SH_PKG_REMOVING, 60, K_MINES, "org.gnome.Mines",
+      10, 1, 1, 0, 0, 0, 0, 4, 3, 0, 0, 0, 0x000000, "",
+      "48.1", "48.1", "", "48.1", "48.1", "GPL-3.0-or-later", "Debian (gnome-mines)",
+      "GNOME Mines is the classic minesweeper puzzle in small, medium and large boards. Tap to reveal, long-press to flag." },
+    { "supertux", "SuperTux", "Classic 2D jump'n'run with Tux the penguin", "Games", "", 8000, 20000, 150, 0, 0, 0, K_TUX, "supertux2",
+      10, 0, 1, 0, 0, 0, 0, 30, 1, 34, 0, 0, 0x000000, "",
+      "", "", "", "0.6.3", "0.6.3", "GPL-3.0-or-later", "Debian (supertux)",
+      "SuperTux is a side-scrolling platformer in the style of the classic console games: run, jump and collect coins across icy worlds. Plays with the arrow keys and space." },
+    { "vlc", "VLC", "The VLC media player", "Media", "", 8000, 20000, 200, 0, SH_PKG_QUEUED, 0, K_VLC, "vlc",
+      10, 0, 1, 0, 0, 0, 0, 50, 2, 18, 0, 0, 0x000000, "",
+      "", "", "", "3.0.21", "3.0.21", "GPL-2.0-or-later", "Debian (vlc)",
+      "VLC plays most video and audio formats, discs and network streams, with playlists, subtitles and equalizer. Uses the Qt interface on Wayland." },
+    { "openttd", "OpenTTD", "Build a transport empire (Transport Tycoon)", "Games", "", 8000, 20000, 200, SH_PKG_FEATURED, 0, 0, K_LETTER, "openttd",
+      10, 0, 1, 0, 0, 0, 0, 25, 2, 2, 0, 0, 0x2e6b2f, "TT",
+      "", "", "", "14.1", "15.0", "GPL-2.0-only", "Debian (openttd)",
+      "OpenTTD is an open remake of Transport Tycoon Deluxe: build railways, roads, ports and airports and grow a transport company. Comes with the free OpenGFX graphics, OpenSFX sounds and OpenMSX music." },
+    { "gnome-maps", "Maps", "Find places and get directions", "Utilities", "", 8000, 20000, 250, SH_PKG_FEATURED, 0, 0, K_LETTER, "org.gnome.Maps",
+      10, 0, 1, 0, 0, 0, 0, 5, 3, 1, 0, 0, 0x4a90d9, "Mp",
+      "", "", "", "48.4", "49.1", "GPL-2.0-or-later", "Debian (gnome-maps)",
+      "GNOME Maps shows OpenStreetMap maps, searches places and gives walking, cycling, driving and public-transport routes." },
+    { "celluloid", "Celluloid", "A simple video player built on mpv", "Media", "", 8000, 20000, 150, SH_PKG_FEATURED, 0, 0, K_LETTER, "io.github.celluloid_player.Celluloid",
+      10, 0, 1, 0, 0, 0, 0, 5, 3, 18, 0, 0, 0x4d4d9e, "Ce",
+      "", "", "", "0.27", "0.29", "GPL-3.0-or-later", "Debian (celluloid)",
+      "Celluloid is a GTK front end for mpv with big, touch-friendly controls, playlists and drag-and-drop. Same playback engine as mpv, friendlier interface." },
+    { "ripgrep", "ripgrep", "Search file contents very fast (rg)", "Utilities", "", 2400, 6000, 20, 0, 0, 0, K_LETTER, "rg",
+      14, 0, 2, 0, 0, 0, 0, 10, 1, 48, 8, 6, 0x5b5b5b, "rg",
+      "", "", "15.1.0", "14.1.1", "15.1.0", "Unlicense OR MIT", "github.com/BurntSushi/ripgrep",
+      "ripgrep (rg) searches folders for a pattern, respecting .gitignore and skipping binary files. Much faster than grep on large trees." },
+    { "thunderbird", "Thunderbird", "Email, calendar and contacts from Mozilla", "Internet", "", 8000, 20000, 500, 0, 0, 0, K_LETTER, "thunderbird",
+      2, 0, 1, 0, 0, 0, 0, 0, 2, 1, 0, 0, 0x1f6fd1, "Tb",
+      "", "", "", "140.5.0esr", "", "MPL-2.0", "Debian (thunderbird)",
+      "Mozilla Thunderbird: mail (IMAP/POP/SMTP), calendars, contacts, RSS and chat in one app. Installed from Debian (the ESR line); Mozilla does not publish an aarch64 Linux build." },
+    { "gnome-chess", "Chess", "Play chess against the computer or a friend", "Games", "", 8000, 20000, 90, 0, 0, 0, K_LETTER, "org.gnome.Chess",
+      10, 0, 1, 0, 0, 0, 0, 5, 3, 0, 0, 0, 0x8a6a3c, "Ch",
+      "", "", "", "48.0", "49.0", "GPL-3.0-or-later", "Debian (gnome-chess)",
+      "GNOME Chess is a simple chess board: play against a chess engine at several levels or another person on the same phone, with move hints and history." },
+    { "syncthing", "Syncthing", "Continuous peer-to-peer file sync between your devices", "Internet", "", 12000, 30000, 80, 0, 0, 0, K_LETTER, "syncthing",
+      6, 0, 2, 0, 0, 0, 0, 0, 2, 17, 8, 30, 0x0891d1, "St",
+      "", "", "2.0.11", "1.29.5", "", "MPL-2.0", "github.com/syncthing/syncthing",
+      "Syncthing keeps folders in sync between this phone and your other computers, directly and encrypted, with no cloud in the middle. It runs as a service with a web interface in the browser." },
+    { "stellarium", "Stellarium", "A planetarium: the night sky in real time", "Education", "", 8000, 20000, 400, 0, 0, 0, K_LETTER, "org.stellarium.Stellarium",
+      10, 0, 1, 0, 0, 0, 0, 45, 2, 4, 0, 0, 0x1b2a4a, "St",
+      "", "", "", "25.2", "25.3", "GPL-2.0-or-later", "Debian (stellarium)",
+      "Stellarium shows a realistic sky with stars, planets, constellations and deep-sky objects for any place and time." },
+    { "gcompris-qt", "GCompris", "Educational games for children aged 2 to 10", "Education", "", 8000, 20000, 250, 0, 0, 0, K_LETTER, "org.kde.gcompris",
+      10, 0, 1, 0, 0, 0, 0, 30, 3, 2, 0, 0, 0xf0a030, "Gc",
+      "", "", "", "25.0", "25.1", "AGPL-3.0-only", "Debian (gcompris-qt)",
+      "GCompris has more than 180 activities for young children: reading, counting, clocks, geography, science, puzzles and games. Designed for touch screens." },
+    { "qalculate-gtk", "Qalculate!", "A powerful calculator with units and symbols", "Science", "", 8000, 20000, 70, 0, 0, 0, K_LETTER, "qalculate-gtk",
+      10, 0, 1, 0, 0, 0, 0, 8, 2, 0, 0, 0, 0x3a6ea5, "Q!",
+      "", "", "", "5.5.1", "5.8.2", "GPL-2.0-or-later", "Debian (qalculate-gtk)",
+      "Qalculate! understands plain expressions with units, currencies, constants, functions, symbolic algebra and plotting. Results update as you type." },
+    { "calibre", "calibre", "E-book library manager, converter and viewer", "Office", "", 260000, 650000, 350, 0, 0, 0, K_LETTER, "calibre-gui",
+      14, 0, 1, 0, 0, 0, 0, 25, 1, 16, 0, 650, 0x7a3e1d, "Ca",
+      "", "", "8.15.0", "8.5.0", "8.15.0", "GPL-3.0-only", "github.com/kovidgoyal/calibre",
+      "calibre organises an e-book library, converts between formats, edits EPUBs, fetches news and has its own viewer. The release method installs the upstream arm64 bundle (newest version, but large)." },
+    { "aisleriot", "AisleRiot Solitaire", "More than 80 solitaire card games", "Games", "", 8000, 20000, 80, 0, 0, 0, K_LETTER, "sol",
+      10, 0, 1, 0, 0, 0, 0, 10, 3, 0, 0, 0, 0x2f7d3a, "Ai",
+      "", "", "", "3.22.35", "3.22.35", "GPL-3.0-or-later", "Debian (aisleriot)",
+      "AisleRiot plays Klondike, Spider, FreeCell and over 80 other solitaire card games. Drag cards with a finger or tap to move them." },
 };
 #define NFP ((int)(sizeof FP / sizeof FP[0]))
 static void fake_push_store(void)
@@ -174,6 +292,7 @@ static void fake_push_store(void)
     FST.seq += 2;
     sh_linux_store(&FST);
 }
+static int fp_find(const char *pkg) { for (int i = 0; i < NFP; i++) if (!strcmp(FP[i].pkg, pkg)) return i; return -1; }
 static void fake_catalog_rebuild(void)
 {
     /* the installed packages' apps, in the store's order (foot first: the Terminal) */
@@ -182,15 +301,15 @@ static void fake_catalog_rebuild(void)
     FCAT.seq = old.seq + 2;
     FCAT.mem_total_kb = 1490000;
     FCAT.mem_avail_kb = 1180000;
-    static const int order[] = { 11, 1, 7, 8, 9, 10, 0, 2, 3, 4, 5, 6, 12, 13 };
-    for (int o = 0; o < NFP; o++) {
-        int i = order[o];
-        if (!(FST.pkg[i].flags & SH_PKG_INSTALLED)) continue;
+    int foot = fp_find("foot");
+    for (int o = -1; o < NFP; o++) {
+        int i = o < 0 ? foot : o;
+        if (i < 0 || (o >= 0 && i == foot) || !(FST.pkg[i].flags & SH_PKG_INSTALLED)) continue;
         sh_lapp_t *a = &FCAT.app[FCAT.n];
         snprintf(a->id, sizeof a->id, "%s", FP[i].app);
-        snprintf(a->name, sizeof a->name, "%s", i == 11 ? "Foot" : FP[i].name);
-        a->flags = i == 11 || i == 9 ? SH_LAPP_KEYBOARD : 0;
-        if (i == 9) a->flags |= SH_LAPP_TERMINAL;
+        snprintf(a->name, sizeof a->name, "%s", i == foot ? "Foot" : FP[i].name);
+        a->flags = i == foot || (FP[i].flags3 & SH_PKG3_TERMINAL) ? SH_LAPP_KEYBOARD : 0;
+        if (FP[i].flags3 & SH_PKG3_TERMINAL) a->flags |= SH_LAPP_TERMINAL;
         if (FP[i].flags & SH_PKG_SYSTEM) a->flags |= SH_LAPP_SYSTEM;
         a->icon = FCAT.n;                       /* the catalog's pool icons 0..63 */
         a->pkg = i;
@@ -199,10 +318,11 @@ static void fake_catalog_rebuild(void)
         FCAT.n++;
     }
 }
-static int fake_kind_of_icon(int icon)
+/* the store's package of a pool icon (64 + i), or of a catalog icon; -1 none */
+static int fake_pkg_of_icon(int icon)
 {
-    if (icon >= 64 && icon < 64 + NFP) return FP[icon - 64].kind;
-    if (icon >= 0 && icon < FCAT.n) return FP[FCAT.app[icon].pkg].kind;
+    if (icon >= 64 && icon < 64 + NFP) return icon - 64;
+    if (icon >= 0 && icon < FCAT.n) return FCAT.app[icon].pkg;
     return -1;
 }
 static void fake_publish(void)
@@ -213,16 +333,33 @@ static void fake_publish(void)
         FST.overlay_total_kb = 3900000;
         FST.overlay_free_kb = 1100000;
         FST.mem_total_kb = 1490000;
+        FST.v3 = 1;                              /* Track F: store3 */
+        FST.net_ok = 0;                          /* no network in the previews: the memory card's mirror */
+        FST.mirror_ok = 1;
+        FST.checked_at = 0;
         for (int i = 0; i < NFP; i++) {
             sh_lpkg_t *p = &FST.pkg[i];
-            snprintf(p->pkg, sizeof p->pkg, "%s", FP[i].pkg);
-            snprintf(p->name, sizeof p->name, "%s", FP[i].name);
-            snprintf(p->summary, sizeof p->summary, "%s", FP[i].summary);
-            snprintf(p->category, sizeof p->category, "%s", FP[i].cat);
-            snprintf(p->err, sizeof p->err, "%s", FP[i].err);
-            p->dl_kb = FP[i].dl; p->inst_kb = FP[i].inst; p->ram_mb = FP[i].ram;
-            p->flags = FP[i].flags; p->state = FP[i].state; p->pct = FP[i].pct;
+            const fpkg *f = &FP[i];
+            snprintf(p->pkg, sizeof p->pkg, "%s", f->pkg);
+            snprintf(p->name, sizeof p->name, "%s", f->name);
+            snprintf(p->summary, sizeof p->summary, "%s", f->summary);
+            snprintf(p->category, sizeof p->category, "%s", f->cat);
+            snprintf(p->err, sizeof p->err, "%s", f->err);
+            p->dl_kb = f->dl; p->inst_kb = f->inst; p->ram_mb = f->ram;
+            p->flags = f->flags; p->state = f->state; p->pct = f->pct;
             p->icon = 64 + i;
+            p->methods = f->methods; p->method = f->method; p->def_method = f->method ? f->method : f->phase == SH_PKG_BUILDING ? SH_M_SOURCE : f->def;   /* a build: the user picked source */ p->phase = f->phase;
+            p->done_kb = f->done; p->total_kb = f->total; p->eta_s = f->eta; p->build_min = f->build_min;
+            p->touch = f->touch; p->needs = f->needs; p->flags3 = f->flags3; p->rel_size_mb = f->rel_mb;
+            snprintf(p->ver_inst, sizeof p->ver_inst, "%s", f->vi);
+            snprintf(p->ver_new, sizeof p->ver_new, "%s", f->vn[0] ? f->vn : f->def == SH_M_RELEASE ? f->vr : f->def == SH_M_SOURCE ? f->vs : f->vd);
+            snprintf(p->ver_rel, sizeof p->ver_rel, "%s", f->vr);
+            snprintf(p->ver_distro, sizeof p->ver_distro, "%s", f->vd);
+            snprintf(p->ver_src, sizeof p->ver_src, "%s", f->vs);
+            snprintf(p->licence, sizeof p->licence, "%s", f->lic);
+            snprintf(p->source, sizeof p->source, "%s", f->src);
+            snprintf(p->desc, sizeof p->desc, "%s", f->desc);
+            if (f->flags & SH_PKG_ROLLBACK) snprintf(LF.prev[i], sizeof LF.prev[i], "%s", !strcmp(f->pkg, "neovim") ? "0.11.4" : "2025.09.26");
         }
     }
     fake_catalog_rebuild();
@@ -449,9 +586,15 @@ int sh_linux_viewport(int rows)
 }
 int sh_linux_icon(int icon, uint32_t *px)
 {
-    int k = fake_kind_of_icon(icon);
-    if (k < 0) return 0;
-    draw_icon(k, px);
+    int i = fake_pkg_of_icon(icon);
+    if (i < 0) return 0;
+    if (FP[i].kind != K_LETTER) { draw_icon(FP[i].kind, px); return 1; }
+    /* Track F: the catalog's other apps: a colour tile with two letters (the real icons come from the guest) */
+    memset(px, 0, 160 * 160 * 4);
+    ic_rrect(px, 10, 10, 140, 140, 30, pm(FP[i].col, 1));
+    ic_rrect(px, 10, 80, 140, 70, 30, pm(0x000000, .14f));
+    ic_rrect(px, 10, 10, 140, 90, 30, pm(FP[i].col, 1));
+    ic_text(px, 64, 80, 104, FP[i].txt, 0xffffff, TK_IT800);
     return 1;
 }
 int sh_linux_hold(int on)
@@ -460,15 +603,40 @@ int sh_linux_hold(int on)
     LF.hold = on;
     return on ? fake_start() : 0;
 }
-int sh_linux_pkg(int i, int op)
+/* Track F: the op word (op | method << 8; method 0: the entry's def_method); i SH_PKG_ALL: CHECK every installed app */
+int sh_linux_pkg(int i, int opw)
 {
-    if (LF.state != SH_LINUX_RUNNING || i < 0 || i >= FST.n) return -1;
+    int op = opw & 255;
+    unsigned m = (unsigned)opw >> 8 & 255;
+    static const char *const ON[7] = { "?", "install", "remove", "cancel", "update", "rollback", "check" };
+    static const char *const MN[4] = { "default", "distro", "release", "source" };
+    if (LF.state != SH_LINUX_RUNNING || op < 1 || op > 6 || m > 3) return -1;
+    if (i == SH_PKG_ALL && op == SH_PKG_OP_CHECK) {
+        fprintf(stderr, "linux: pkg check (every installed app)\n");
+        FST.checked_at = 1762981200u;            /* 2025-11-12 21:00 UTC (the previews' day) */
+        int lg = fp_find("lazygit");             /* the check finds one more update */
+        if (lg >= 0 && (FST.pkg[lg].flags & SH_PKG_INSTALLED) && !(FST.pkg[lg].flags & SH_PKG_UPDATE)) {
+            FST.pkg[lg].flags |= SH_PKG_UPDATE;
+            snprintf(FST.pkg[lg].ver_new, sizeof FST.pkg[lg].ver_new, "%s", "0.57.0");
+            snprintf(FST.pkg[lg].ver_src, sizeof FST.pkg[lg].ver_src, "%s", "0.57.0");
+            snprintf(FST.pkg[lg].ver_rel, sizeof FST.pkg[lg].ver_rel, "%s", "0.57.0");
+        }
+        fake_push_store();
+        return 0;
+    }
+    if (i < 0 || i >= FST.n) return -1;
     sh_lpkg_t *p = &FST.pkg[i];
-    fprintf(stderr, "linux: pkg %s %s\n", op == SH_PKG_OP_INSTALL ? "install" : op == SH_PKG_OP_REMOVE ? "remove" : "cancel", p->pkg);
-    if (op == SH_PKG_OP_INSTALL) { p->state = SH_PKG_QUEUED; p->pct = 0; p->err[0] = 0; }
-    else if (op == SH_PKG_OP_REMOVE) { p->state = SH_PKG_REMOVING; p->pct = 0; }
-    else { p->state = SH_PKG_IDLE; p->pct = 0; }
-    LF.op_t[i] = LF.now;
+    if (!m) m = op == SH_PKG_OP_UPDATE || op == SH_PKG_OP_ROLLBACK ? p->method : p->def_method;
+    fprintf(stderr, "linux: pkg %s %s (%s)\n", ON[op], p->pkg, MN[m & 3]);
+    if (op == SH_PKG_OP_CHECK) { fake_push_store(); return 0; }
+    if (op == SH_PKG_OP_CANCEL) { p->state = SH_PKG_IDLE; p->phase = 0; p->pct = 0; LF.op_t[i] = 0; fake_push_store(); return 0; }
+    if (op != SH_PKG_OP_REMOVE && m && !(p->methods & 1u << m) && p->methods) return -1;   /* not offered */
+    if (op == SH_PKG_OP_REMOVE) { p->state = SH_PKG_REMOVING; p->phase = SH_PKG_REMOVING; }
+    else { p->state = SH_PKG_QUEUED; p->phase = SH_PKG_QUEUED; if (op == SH_PKG_OP_INSTALL) p->def_method = m; }
+    p->pct = 0; p->done_kb = 0; p->eta_s = 0; p->err[0] = 0;
+    LF.op_k[i] = (unsigned)op;
+    LF.op_m[i] = m;
+    LF.op_t[i] = LF.op_t0[i] = LF.now > 0 ? LF.now : 1;
     fake_push_store();
     return 0;
 }
@@ -528,22 +696,55 @@ static void lin_fake_poll(float t)
     int changed = 0, cat = 0;
     for (int i = 0; i < FST.n; i++) {
         sh_lpkg_t *p = &FST.pkg[i];
-        if (!LF.op_t[i]) continue;
-        if (p->state == SH_PKG_QUEUED && t - LF.op_t[i] >= 400) { p->state = SH_PKG_INSTALLING; p->pct = 0; LF.op_t[i] = t; changed = 1; }
-        else if ((p->state == SH_PKG_INSTALLING || p->state == SH_PKG_REMOVING) && t - LF.op_t[i] >= 70) {
-            p->pct += p->state == SH_PKG_INSTALLING ? 3 : 5;
-            LF.op_t[i] = t;
-            changed = 1;
+        if (!LF.op_t[i] || t - LF.op_t[i] < 70) continue;
+        LF.op_t[i] = t;
+        changed = 1;
+        unsigned m = LF.op_m[i], k = LF.op_k[i];
+        float e = t - LF.op_t0[i];               /* ms since the op started */
+        if (p->state == SH_PKG_REMOVING) {
+            p->pct = (unsigned)(e / 12 > 100 ? 100 : e / 12);
             if (p->pct >= 100) {
-                p->pct = 100;
-                if (p->state == SH_PKG_INSTALLING) { p->flags |= SH_PKG_INSTALLED; FST.overlay_free_kb -= p->inst_kb; }
-                else { p->flags &= ~(unsigned)SH_PKG_INSTALLED; FST.overlay_free_kb += p->inst_kb; }
-                fprintf(stderr, "linux: pkg %s %s\n", p->pkg, p->state == SH_PKG_INSTALLING ? "installed" : "removed");
-                p->state = SH_PKG_IDLE;
-                p->pct = 0;
-                LF.op_t[i] = 0;
-                cat = 1;
+                p->flags &= ~(unsigned)(SH_PKG_INSTALLED | SH_PKG_UPDATE | SH_PKG_ROLLBACK);
+                FST.overlay_free_kb += p->inst_kb;
+                p->method = 0; p->ver_inst[0] = 0;
+                fprintf(stderr, "linux: pkg %s removed\n", p->pkg);
+                p->state = p->phase = SH_PKG_IDLE; p->pct = 0; LF.op_t[i] = 0; cat = 1;
             }
+            continue;
+        }
+        /* the queue (400 ms), then by method: a release / distro download (2 s), verify (500 ms); a source build
+         * (a short source download, then 3.5 s for build_min, the ETA counting down); install (600 ms) */
+        float dl = m == SH_M_SOURCE ? 600 : 2000, vf = m == SH_M_SOURCE ? 0 : 500, bd = m == SH_M_SOURCE ? 3500 : 0, in = 600;
+        if (k == SH_PKG_OP_ROLLBACK) dl = vf = bd = 0;
+        float a = e - 400;
+        unsigned tot = m == SH_M_SOURCE ? 9000 : p->dl_kb ? p->dl_kb : 20000;
+        if (a < 0) { p->state = SH_PKG_QUEUED; p->phase = SH_PKG_QUEUED; continue; }
+        p->state = SH_PKG_INSTALLING;
+        if (a < dl) { p->phase = SH_PKG_DOWNLOADING; p->total_kb = tot; p->done_kb = (unsigned)(tot * (a / dl)); p->pct = (unsigned)(100 * a / dl); }
+        else if (a < dl + vf) { p->phase = SH_PKG_VERIFYING; p->done_kb = p->total_kb; p->pct = 100; }
+        else if (a < dl + vf + bd) {
+            float f = (a - dl - vf) / bd;
+            p->phase = SH_PKG_BUILDING; p->pct = (unsigned)(100 * f);
+            p->eta_s = (unsigned)((1 - f) * (p->build_min ? p->build_min : 10) * 60);
+        } else if (a < dl + vf + bd + in) { p->phase = SH_PKG_INSTALLING; p->pct = (unsigned)(100 * (a - dl - vf - bd) / in); p->eta_s = 0; }
+        else {
+            const char *v = m == SH_M_RELEASE ? p->ver_rel : m == SH_M_SOURCE ? p->ver_src : p->ver_distro;
+            if (k == SH_PKG_OP_ROLLBACK) {
+                char cur[24];
+                snprintf(cur, sizeof cur, "%s", p->ver_inst);
+                snprintf(p->ver_inst, sizeof p->ver_inst, "%s", LF.prev[i][0] ? LF.prev[i] : p->ver_inst);
+                snprintf(p->ver_new, sizeof p->ver_new, "%s", cur);
+                p->flags = (p->flags & ~(unsigned)SH_PKG_ROLLBACK) | SH_PKG_UPDATE;
+            } else {
+                if (k == SH_PKG_OP_UPDATE || (p->flags & SH_PKG_INSTALLED)) { snprintf(LF.prev[i], sizeof LF.prev[i], "%s", p->ver_inst); if (p->ver_inst[0]) p->flags |= SH_PKG_ROLLBACK; }
+                if (!(p->flags & SH_PKG_INSTALLED)) FST.overlay_free_kb -= p->inst_kb;
+                snprintf(p->ver_inst, sizeof p->ver_inst, "%s", v[0] ? v : p->ver_new);
+                snprintf(p->ver_new, sizeof p->ver_new, "%s", p->ver_inst);
+                p->flags = (p->flags | SH_PKG_INSTALLED) & ~(unsigned)SH_PKG_UPDATE;
+                p->method = m;
+            }
+            fprintf(stderr, "linux: pkg %s %s %s\n", p->pkg, k == SH_PKG_OP_ROLLBACK ? "rolled back to" : "installed", p->ver_inst);
+            p->state = p->phase = SH_PKG_IDLE; p->pct = 0; p->done_kb = p->total_kb = p->eta_s = 0; LF.op_t[i] = 0; cat = 1;
         }
     }
     if (cat) { fake_catalog_rebuild(); sh_linux_catalog(&FCAT); }

@@ -1,0 +1,33 @@
+id = "vlc"
+name = "VLC"
+summary = "The VLC media player"
+description = """VLC plays most video and audio formats, discs and network streams, with playlists, subtitles and equalizer. Uses the Qt interface on Wayland."""
+category = "Media"
+licence = "GPL-2.0-or-later"
+homepage = "https://www.videolan.org/vlc/"
+icon = "vlc"
+icon_pkg = "vlc-data"
+ram_mb = 200
+featured = false
+default = "distro"
+touch = "ok"
+keywords = ["video", "audio", "player", "media", "stream"]
+
+[launcher]
+exec = "vlc"
+terminal = false
+keyboard = false
+env = { QT_QPA_PLATFORM = "wayland" }
+
+[distro]
+apt = ["vlc", "qtwayland5"]
+
+[runtime]
+needs = ["audio", "files"]
+note = "VideoLAN publishes no Linux binaries. VLC 3 cannot embed video in its main window on Wayland, so video opens in its own window."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 50
+build_mb = 3500

@@ -26,7 +26,13 @@ int sh_modem(int on)
     else fprintf(stderr, "modem: would stop\n");
     return 0;
 }
-void sh_confirmed(int ok) { fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled"); }
+/* Track J: Settings > Startup's pretend platform (the restarts' confirmations come back through sh_confirmed) */
+#include "startup_fake.inc"
+void sh_confirmed(int ok)
+{
+    if (startup_fake_confirmed(ok)) return;
+    fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled");
+}
 /* a pretend network for the previews: on -> searching -> data up on "Operator" LTE, 3 bars */
 static int fc_net;                          /* helper I: comms_fake.inc's calls and SMS work while it is on */
 int sh_cellular(int on)
@@ -159,10 +165,7 @@ int sh_blob_get(const char *name, void *p, unsigned cap)
 }
 void sh_vibrate(void) { fprintf(stderr, "vibrate: the timer ran out\n"); }
 void sh_haptic(void) { }
-/* B3: the edit menu's clipboard (weak: a platform with its own, e.g. the Linux session's gwin, replaces it) */
-static char host_clip[4096];
-__attribute__((weak)) void sh_clip_set(const char *s) { snprintf(host_clip, sizeof host_clip, "%s", s ? s : ""); }
-__attribute__((weak)) const char *sh_clip_get(void) { return host_clip; }
+/* (B3's clipboard: sh_clip_set / sh_clip_get are Track E's, in shell_linux.inc, linked here with shell_lock.c) */
 void sh_haptic_k(int kind) { (void)kind; }
 /* B5: the Clock's alarms (the kernel's alarm.c on the phone) */
 int sh_alarm_set(int i, int h, int m, int days, int on) { fprintf(stderr, "alarm %d: %02d:%02d %s (days %x)\n", i, h, m, on ? "on" : "off", (unsigned)days); return 0; }
@@ -359,6 +362,31 @@ int sh_card_set(const sh_card_t *c) { struct surv_card k; memcpy(&k, c, sizeof k
 const char *sh_card_label(int i) { return i >= 0 && i < SURV_CARD_NF ? surv_card_label[i] : ""; }
 int sh_last2(void) { return surv_last2(); }
 int sh_sos_next(void) { return 50; }      /* the host: the old 20 Hz poll */
+/* Track A: the passcode on kern/passcode.c itself (in RAM, on the film's clock: surv_host_now_ms; no wall clock),
+ * Auto-Lock a number. States: pass=DIGITS sets a passcode, passfail=:N makes N wrong tries now */
+#include "../../kern/passcode.h"
+static int host_autolock = 30;
+int sh_pass_on(void) { return pass_len() > 0; }
+int sh_pass_len(void) { return pass_len(); }
+int sh_pass_wait(void) { return (int)pass_wait(surv_host_now_ms); }
+int sh_pass_fails(void) { return pass_fails(); }
+int sh_pass_check(const char *d)
+{
+    int r = pass_check(d, surv_host_now_ms, 0);
+    fprintf(stderr, "passcode: %s (wrong tries in a row %d, wait %u s)\n", r == 1 ? "right" : r == 0 ? "wrong" : "refused: a wait runs",
+            pass_fails(), pass_wait(surv_host_now_ms));
+    return r;
+}
+int sh_pass_set(const char *old, const char *nw)
+{
+    uint8_t salt[PASS_SALT];
+    for (unsigned i = 0; i < PASS_SALT; i++) salt[i] = (uint8_t)rand();
+    int r = pass_set(old, nw, salt, surv_host_now_ms, 0);
+    fprintf(stderr, "passcode: %s\n", r ? "not changed" : pass_len() ? "set" : "removed");
+    return r;
+}
+int sh_autolock(void) { return host_autolock; }
+void sh_autolock_set(int s) { host_autolock = s; fprintf(stderr, "auto-lock: %d s (0 never)\n", s); }
 const char *sh_last2_why(void) { return surv_last2_why(); }
 int sh_last2_set(int on) { fprintf(stderr, "last 2 %%: %s\n", on ? "on" : "off"); return surv_last2_set(on, "the switch in Emergency"); }
 int sh_last2_auto(void) { return surv_last2_auto; }
@@ -403,6 +431,59 @@ int sh_tilt(int *pitch_x10, int *roll_x10)
 }
 int sh_steps(unsigned *n) { uint32_t v = 0; int r = surv_sensors_state() == 2 && surv_steps(&v); *n = v; return r; }
 long long sh_utc(void) { return 1794500000LL + 25 * 60 + (long long)(surv_host_now_ms / 1000); }   /* the pretend fix: 25 min old */
+/* Track A: the time zones on kern/tzdb.c itself (linked in), 12 / 24-hour and four alarms in RAM (two made up). The
+ * host's sh_status stays the concept's 21:05 whatever the zone */
+#include "tzdb.h"
+static int host_tz = -1, host_24 = 1;
+int sh_tz_count(void) { return tzdb_n; }
+const char *sh_tz_name(int i, const char **city)
+{
+    if (i < 0 || i >= tzdb_n) { if (city) *city = ""; return ""; }
+    if (city) *city = tzdb[i].city;
+    return tzdb[i].name;
+}
+int sh_tz_offset_min(int i) { return i >= 0 && i < tzdb_n ? tzdb_offset(i, sh_utc()) : 0; }
+int sh_tz(void) { return host_tz >= 0 ? host_tz : tzdb_home(); }
+void sh_tz_set(int i) { if (i >= 0 && i < tzdb_n) { host_tz = i; fprintf(stderr, "time zone: %s\n", tzdb[i].name); } }
+int sh_clock24(void) { return host_24; }
+void sh_clock24_set(int on) { host_24 = !!on; fprintf(stderr, "clock: %s\n", on ? "24-hour" : "12-hour"); }
+static struct { int hm, days, on; char label[20]; } HA[4] = { { 700, 0x3e, 1, "Alarm" }, { 830, 0x41, 0, "Gym" } };
+static int nha = 2;
+static void host_alarm_push(void)
+{
+    int best = -1;
+    for (int i = 0; i < nha; i++) if (HA[i].on && (best < 0 || HA[i].hm < HA[best].hm)) best = i;
+    sh_alarm(best >= 0, best >= 0 ? HA[best].hm / 100 : 0, best >= 0 ? HA[best].hm % 100 : 0);
+}
+int sh_alarm_count(void) { return nha; }
+int sh_alarm_get(int i, int *hm, int *days, int *on, char *label, int cap)
+{
+    if (i < 0 || i >= nha) return -1;
+    if (hm) *hm = HA[i].hm;
+    if (days) *days = HA[i].days;
+    if (on) *on = HA[i].on;
+    if (label && cap > 0) snprintf(label, (size_t)cap, "%s", HA[i].label);
+    return 0;
+}
+int sh_alarm_put(int i, int hm, int days, int on, const char *label)
+{
+    if (i < 0 || i > nha || i >= 4 || hm < 0 || hm / 100 > 23 || hm % 100 > 59 || days < 0 || days > 0x7f) return -1;
+    if (i == nha) nha++;
+    HA[i].hm = hm; HA[i].days = days; HA[i].on = !!on;
+    snprintf(HA[i].label, sizeof HA[i].label, "%s", label ? label : "");
+    fprintf(stderr, "alarm %d: %02d:%02d days 0x%02x %s\n", i, hm / 100, hm % 100, days, on ? "on" : "off");
+    host_alarm_push();
+    return 0;
+}
+int sh_alarm_del(int i)
+{
+    if (i < 0 || i >= nha) return -1;
+    for (int k = i; k + 1 < nha; k++) HA[k] = HA[k + 1];
+    nha--;
+    fprintf(stderr, "alarm %d: deleted\n", i);
+    host_alarm_push();
+    return 0;
+}
 /* helper D: Maps' last GNSS fix: none unless a state gives one (gnss=LAT,LON in degrees: a pretend fix from Android) */
 static sh_gnss_t host_fix;
 static int host_have_fix;
@@ -490,6 +571,8 @@ static void apply_state(const char *st)
         return;
     }
     if (!strcmp(what, "comms")) { comms_fake_state(key, v); return; }          /* helper I: comms=incoming, ... */
+    if (!strcmp(what, "pass")) { (void)sh_pass_set("", key); return; }         /* Track A: pass=246810 */
+    if (!strcmp(what, "passfail")) { for (int i = 0; i < (int)v; i++) (void)sh_pass_check("x"); return; }   /* passfail=:6 */
     if (!strcmp(what, "gnss")) {                 /* helper D: gnss=60.1699,24.9384 (a pretend fix: 8.5 m, 9 satellites) */
         double la = 0, lo = 0;
         if (sscanf(eq + 1, "%lf,%lf", &la, &lo) == 2) {
@@ -792,6 +875,10 @@ static uint32_t *dbl_acquire(void *ctx, int *age)
     req = b; bfno[b] = fno_h++;
     return dbl[b];
 }
+
+/* Track A, 1.0: the host is never a safe start (SBTK_SAFE=1 pretends one) */
+int sh_safe_mode(void) { const char *e = getenv("SBTK_SAFE"); return e && *e == '1'; }
+int sh_boot_reason(char *why, int cap) { if (why && cap > 0) snprintf(why, (size_t)cap, "Started on the host"); return -1; }
 
 int main(int argc, char **argv)
 {

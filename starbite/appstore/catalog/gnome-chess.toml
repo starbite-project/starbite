@@ -1,0 +1,27 @@
+id = "gnome-chess"
+name = "Chess"
+summary = "Play chess against the computer or a friend"
+description = """GNOME Chess is a simple chess board: play against a chess engine at several levels or another person on the same phone, with move hints and history."""
+category = "Games"
+licence = "GPL-3.0-or-later"
+homepage = "https://apps.gnome.org/Chess/"
+icon = "org.gnome.Chess"
+ram_mb = 90
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["game", "chess", "board"]
+
+[launcher]
+exec = "gnome-chess"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["gnome-chess", "gnuchess"]
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 5
+build_mb = 700

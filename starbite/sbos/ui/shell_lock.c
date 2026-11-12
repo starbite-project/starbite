@@ -390,8 +390,11 @@ static const char *const MO[12] = { "January", "February", "March", "April", "Ma
                                     "September", "October", "November", "December" };
 static int put_dec(char *b, int v) { int n = 0; char t[12]; int k = 0; if (v < 0) { b[n++] = '-'; v = -v; }
     do { t[k++] = (char)('0' + v % 10); v /= 10; } while (v); while (k) b[n++] = t[--k]; b[n] = 0; return n; }
-static void fmt_hm(char *b) { b[0] = (char)('0' + ST.h / 10); b[1] = (char)('0' + ST.h % 10); b[2] = ':';
-    b[3] = (char)('0' + ST.mi / 10); b[4] = (char)('0' + ST.mi % 10); b[5] = 0; }
+/* Track A: 12 / 24-hour (sh_clock24). fmt_hm: the status bar's and the lock's "9:41" (no AM / PM, as iOS); fmt_time
+ * with ampm: lists' "9:41 AM" (b: 9 bytes) */
+#include "sh_timefmt.h"
+static int fmt_time(char *b, int h, int m, int ampm) { return sh_fmt_time(b, h, m, sh_clock24(), ampm); }
+static void fmt_hm(char *b) { fmt_time(b, ST.h, ST.mi, 0); }
 
 static tk_layer lstatus, lclock, lwidgets;
 static void relink(void);
@@ -400,6 +403,8 @@ static void nc_sb_stale(void);
 static void nc_clock_stale(void);
 static void nc_cards_gone(void);
 static float nc_next_update(float t);
+static float pc_next_update(float t);                /* Track A: shell_passcode.inc */
+static int pc_refresh(float t);
 static int nc_refresh(float t);
 static int sw_app_alpha(void);
 static void sw_opened(int a);
@@ -451,7 +456,8 @@ static void build_lclock(void)
     /* P3j (audit 3): hours, colon and minutes as three runs: proportional figures at -1 pt (the -4 pt tabular
      * run pushed the colon onto the next digit and set the clock 2.4 pt right), the colon raised to the digits'
      * middle (Inter's sits at x-height) with even room each side, the whole centred */
-    char hh[3] = { hm[0], hm[1], 0 }, mm[3] = { hm[3], hm[4], 0 };
+    int hn = hm[1] == ':' ? 1 : 2;               /* Track A: "9:41" in 12-hour time */
+    char hh[3] = { hm[0], hn == 2 ? hm[1] : 0, 0 }, mm[3] = { hm[hn + 1], hm[hn + 2], 0 };
     const float cs = 116, ctop = 108;
     float wh = tw(TK_IT600, cs, hh, -1, 0), wc = tw(TK_IT600, cs, ":", 0, 0), wm = tw(TK_IT600, cs, mm, -1, 0), gap = 2;
     float x0 = (390 - (wh + gap + wc + gap + wm)) / 2, base = ctop + cs * INTER_CAP;
@@ -502,8 +508,7 @@ static void lw_draw(dc *d, int emg, int part)
     }
     if (part < 0 || part == 2) {
         char at[16] = "Off";                       /* P2y: the kernel's next alarm (sh_alarm), not the concept's */
-        if (ALM.on) { at[0] = (char)('0' + ALM.h / 10); at[1] = (char)('0' + ALM.h % 10); at[2] = ':';
-                      at[3] = (char)('0' + ALM.m / 10); at[4] = (char)('0' + ALM.m % 10); at[5] = 0; }
+        if (ALM.on) fmt_time(at, ALM.h, ALM.m, 1);    /* Track A: "7:00 AM" in 12-hour time */
         alm_when = !ALM.on ? 0 : ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? 1 : 2;
         rect_widget(d, "alarm", "Alarm", at, alm_when == 1 ? "Today" : alm_when == 2 ? "Tomorrow" : "No alarm set");
     }
@@ -952,6 +957,7 @@ static void lx_close(void);
 static int lx_tap(float x, float y);
 static int lx_touch(int ph, float x, float y);
 static int lx_moving(void);
+static int lx_tick(float dt);                   /* Track F: the App Store's scroll and page builds over frames */
 static int lx_layers(tk_layer **o);
 static int lx_set(const char *what, const char *key, float v);
 /* P3p: an app's 62 pt icon. Calendar shows today, as on iOS: the blank a62-calendar-bg with the weekday (red,
@@ -2186,6 +2192,18 @@ static const appdef APPS[] = {
     { "settings", "Settings", 0x55555a, 1, { { "", 1, { { "", "" } } } } },     /* helper B2: shell_settings.inc */
 };
 #define NAPPS ((int)(sizeof APPS / sizeof APPS[0]))
+/* Track A lifecycle (sbos-core-api.md 6): the apps' optional callbacks, beside APPS by key (an app without a row has
+ * none): on_show the page shown (cold: a first open, or after the switcher threw it away), on_hide it left the screen
+ * (closed, another app, the lock), on_save before a restart or a switch-off (sh_save_all: keep data with sh_blob_put) */
+typedef struct { const char *k; void (*on_show)(int cold); void (*on_hide)(void); void (*on_save)(void); } apphook;
+static const apphook APPHOOK[] = {
+    { 0, 0, 0, 0 },                                   /* (the pages add theirs here) */
+};
+static const apphook *ap_hook(int a)
+{
+    for (int i = 0; APPHOOK[i].k; i++) if (!tk_strcmp(APPHOOK[i].k, APPS[a].k)) return &APPHOOK[i];
+    return 0;
+}
 static tk_layer appg, appbg, appc, appst[4];      /* the page: a group of four strips (no 17 MB block) */
 #define NST 4
 /* strip i of the page: exact panel rows, so the strips meet without overlap */
@@ -2454,11 +2472,13 @@ void settings_back(void);                        /* a pushed Settings page's bac
  * SHELL_STARTUP_TICK) and Settings > Passcode (Track A's shell_passcode.inc: SHELL_PASSCODE, page_passcode /
  * passcode_tap, passcode_tick with SHELL_PASSCODE_TICK): their pages are drawn in the page strips (AS.sub
  * SE_STARTUP_PAGE / SE_PASSCODE_PAGE); without the file the row says "Coming soon" */
-enum { SE_STARTUP_PAGE = 30, SE_PASSCODE_PAGE = 31 };
+enum { SE_STARTUP_PAGE = 30, SE_PASSCODE_PAGE = 31, SE_TZ_PAGE = 32 };   /* (P3x: Track A's zone list, from Date & Time) */
+#define PC_SUB SE_PASSCODE_PAGE                    /* shell_passcode.inc's sub-page is B2's Passcode row's */
 #if __has_include("shell_startup.inc")
 #define SH_HAS_STARTUP 1
 static void page_startup(dc *d);
 static int startup_tap(float x, float y);
+static void startup_set(const char *key, float v);
 #endif
 #if __has_include("shell_passcode.inc")
 #define SH_HAS_PASSCODE 1
@@ -2560,6 +2580,16 @@ static float toast_left;
 static tk_layer apsw, aptm, apctl;
 static struct { int sw_run, laps, tm_run, sw_ds, tm_s, ctl_ver, ctl_drawn; float sw_t0, sw_acc, lap_at, tm_end; } CLK = { 0, 0, 0, -1, -1, 1, 0, 0, 0, 0, 0 };
 #define CLK_DY 27.0f              /* P3p: the page under the iOS header band */
+/* Track A time (shell_time.inc): Settings > Date & Time's zone list (Date & Time itself is shell_settings.inc's, the
+ * Clock's Alarms tab shell_apps.inc's) */
+static int ta_page(dc *d);
+static int ta_tap(float x, float y);
+static int ta_touch(int ph, float x, float y, float t);
+static int ta_set(const char *what, const char *key, float v);
+static void ta_restyle(void);
+static void ta_tz_open(void);
+#define TA_SUB_DT SE_DATETIME     /* AS.sub: B2's Settings > Date & Time; TA_SUB_TZ Track A's zone list (a strip page) */
+#define TA_SUB_TZ SE_TZ_PAGE
 static float clk_sw_ms(float t) { return CLK.sw_acc + (CLK.sw_run ? t - CLK.sw_t0 : 0); }
 static int fmt_ms(char *b, float ms, int tenths)
 {
@@ -2600,6 +2630,8 @@ int sh_next_update(float t)
     if (cb >= 0 && (best < 0 || cb < best)) best = cb;
     float ib = isl_next_update(t);                      /* B7: the pill's hold, USB power's capsule */
     if (ib >= 0 && (best < 0 || ib < best)) best = ib;
+    float pb = pc_next_update(t);                       /* Track A: the back-off's minutes */
+    if (pb >= 0 && (best < 0 || pb < best)) best = pb;
     return (int)best;
 }
 int sh_refresh(float t)
@@ -2607,7 +2639,7 @@ int sh_refresh(float t)
     now_ms = t;
     int ch = clk_update(t);
     if (med_pending() && !sh_moving()) ch |= med_work(10000, 1);
-    ch |= sv_refresh(t) | nc_refresh(t) | cm_refresh(t);               /* survival-next: SOS's beacon, USB power's state; helper D: the banner */
+    ch |= sv_refresh(t) | nc_refresh(t) | cm_refresh(t) | pc_refresh(t);   /* survival-next: SOS's beacon, USB power's state; helper D: the banner; Track A: the back-off */
     ch |= isl_refresh(t);                              /* B7: the capsule (SOS, USB power), the pill's hold */
     if (ch && AP.on) sw_dirty = 1;                     /* helper D: the switcher's snapshot is old now */
     return ch;
@@ -2992,8 +3024,12 @@ static void page_wifi(dc *d);
 static void page_cell(dc *d);         /* shell_cell.inc: Settings > Cellular */
 static void cell_tap(float x, float y);
 static void wifi_tap(float x, float y);
+static const char *pc_live(const char *s);            /* Track A: shell_passcode.inc */
+static void pc_page(dc *d);
+static int pc_app_tap(float x, float y);
 static const char *live_text(const char *s, char *buf)
 {
+    { const char *pl = pc_live(s); if (pl) return pl; }   /* Track A: @pass */
     if (!tk_strcmp(s, "@wifi")) return wf_row_text();
     if (s[0] != '@') return s;
     int n = 0;
@@ -3005,6 +3041,7 @@ static const char *live_text(const char *s, char *buf)
         if (!cc_bright) return "Default";
         tk_memcpy(buf, "Level ", 6); n = 6 + put_dec(buf + 6, cc_bright); tk_memcpy(buf + n, " of 4", 6);
     } else if (!tk_strcmp(s, "@time")) fmt_hm(buf);
+    else if (!tk_strcmp(s, "@tz")) { const char *c = ""; sh_tz_name(sh_tz(), &c); return c; }   /* Track A */
     else if (!tk_strcmp(s, "@date")) {
         const char *w = WD[ST.wday % 7], *m = MO[(ST.mon + 11) % 12];
         n = (int)tk_strlen(w); tk_memcpy(buf, w, (size_t)n); buf[n++] = ' ';
@@ -3021,6 +3058,7 @@ static const setico SETICO[] = {
     { "Display & Brightness", "cc-sun", 0x0a84ff, 20, 20 }, { "Sounds & Haptics", "cc-vol", 0xff375f, 20, 20 },
     { "Bluetooth", "cc-bt", 0x0a84ff, 12, 18 }, { "Airplane Mode", "cc-air", 0xff9f0a, 18, 18 }, { "Date & Time", "cc-timer", 0x8e8e93, 19, 19 },
     { "Medical Card", "heart", 0xff3b30, 18, 18 },      /* survival-next */
+    { "Face ID & Passcode", "lock-c", 0x30d158, 15, 20 },   /* Track A */
 };
 static const setico *set_icon(const char *app, const char *row)
 {
@@ -3095,6 +3133,7 @@ static void own_strip(int a, int i)
 #ifdef SH_HAS_PASSCODE
         else if (AS.sub == SE_PASSCODE_PAGE) page_passcode(&d);  /* Track A's */
 #endif
+        else if (AS.sub == SE_TZ_PAGE) (void)ta_page(&d);        /* Track A's zone list (Date & Time is shell_settings.inc's) */
     }
     else if (!tk_strcmp(k, "notes")) page_notes(&d);
     else if (!tk_strcmp(k, "search")) page_search(&d);
@@ -3202,7 +3241,9 @@ static void build_app_page(int a)
                 lx = ROW_TX + 29 + 13;
             }
             int nav = !tk_strcmp(A->k, "settings") && (!tk_strcmp(S->rows[r].l, "Display & Brightness") || !tk_strcmp(S->rows[r].l, "Wi-Fi") ||
-                                                       !tk_strcmp(S->rows[r].l, "Cellular") || !tk_strcmp(S->rows[r].l, "Medical Card"));
+                                                       !tk_strcmp(S->rows[r].l, "Cellular") || !tk_strcmp(S->rows[r].l, "Medical Card") ||
+                                                       !tk_strcmp(S->rows[r].l, "Face ID & Passcode") ||
+                                                       !tk_strcmp(S->rows[r].l, "Date & Time"));   /* Track A */
             if (nav) d_icon(&d, "chev", CONTENT_R - 30, ry + 16.5f, .45f);
             const char *rt = live_text(S->rows[r].r, rb);
             if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Cellular")) rt = md_text();
@@ -3312,17 +3353,24 @@ static int app_hit(float x, float y)
 }
 static int ap_from_on;                     /* helper D: the next open grows from this rect (a switcher card) */
 static arect ap_from;
+static unsigned char ap_warm[NAPPS];       /* Track A lifecycle: opened before and not thrown away: its state kept */
+static int sw_keeps(int a);
+static int sw_find(int a);
 static void app_open(int a)
 {
+    int cold = !ap_warm[a] || (sw_keeps(a) && sw_find(a) < 0);   /* Track A lifecycle: first, or out of the recents */
+    ap_warm[a] = 1;
     sw_opened(a);                              /* helper D: first in the recents */
     AP.a = a;
     AP.on = 1;
     AP.closing = AP.following = 0;
     free_cc();
-    AS.tab = 3;
-    AS.num[0] = 0;
-    AS.thread = -1;
-    AS.sub = 0;
+    if (cold) {                                /* Track A lifecycle: a warm open keeps the tab, number, thread, sub-page */
+        if (!tk_strcmp(APPS[a].k, "phone")) { AS.tab = 3; AS.num[0] = 0; }
+        if (!tk_strcmp(APPS[a].k, "messages")) AS.thread = -1;
+        if (!tk_strcmp(APPS[a].k, "settings")) AS.sub = 0;
+        if (!tk_strcmp(APPS[a].k, "notes")) NS.view = 0;
+    }
     cm_opened(a);                              /* helper I: Settings > Cellular, a notification's thread */
     sv_opened();
     if (!tk_strcmp(APPS[a].k, "search")) kb_focus(0, "search", "");   /* B3: Search's field has the focus */
@@ -3343,6 +3391,7 @@ static void app_open(int a)
     AP.to = FULLR;
     tk_spring_start(&sp_app, 0, 1, 0, TK_SPR_OPEN);
     set_app_rect(AP.icon);
+    { const apphook *h = ap_hook(a); if (h && h->on_show) h->on_show(cold); }   /* Track A lifecycle */
 }
 static void sw_commit(void);
 static void app_close(float v)
@@ -3355,6 +3404,7 @@ static void app_close(float v)
 }
 static void app_finish_close(void)
 {
+    if (AP.on) { const apphook *h = ap_hook(AP.a); if (h && h->on_hide) h->on_hide(); }   /* Track A lifecycle */
     sw_app_gone();                               /* helper D: no window in the switcher */
     lx_close();                                  /* L3: the window's strips, the store's layers */
     ap_pending = 0;
@@ -3378,8 +3428,8 @@ static void app_finish_close(void)
     med_close();
     tk_bmp_free(&sfield);
     relayer(&apsb); apsb.hidden = 1;
-    SR.q[0] = 0; SR.shift = 0; SR.num = 0;                      /* Search opens empty */
-    NS.view = 0;                                                /* Notes opens on its list again */                        /* the Calculator keeps its value (CAL) */
+    SR.shift = 0; SR.num = 0;                                   /* Track A lifecycle: Search keeps its words */
+    /* Track A lifecycle: Notes reopens where it was (the list or the note) */                        /* the Calculator keeps its value (CAL) */
     apnum.hidden = apkey.hidden = 1;
     home.sx = home.sy = 1;
     home.alpha = 1;
@@ -3909,6 +3959,8 @@ static void app_tap(float x, float y)
         wifi_tap(x, y);
     } else if (is_app("settings") && AS.sub == 3) {
         cell_tap(x, y);
+    } else if (is_app("settings") && AS.sub == SE_TZ_PAGE) {
+        (void)ta_tap(x, y);                       /* Track A: the zone list (its back: shell_settings.inc's Date & Time) */
     }
 #ifdef SH_HAS_STARTUP
     else if (is_app("settings") && AS.sub == SE_STARTUP_PAGE) (void)startup_tap(x, y);      /* Track J's page */
@@ -3994,6 +4046,7 @@ void sh_cell(const sh_cell_t *c)
 }
 
 #include "shell_kit.inc"                             /* helper B2: alerts, action sheets, sheets, switches, sliders, lists */
+static int pc_gate_launch(unsigned id);             /* Track A: shell_passcode.inc (shell_nc.inc asks it) */
 #include "shell_wifi.inc"
 #include "shell_cell.inc"
 #include "shell_media_img.inc"
@@ -4009,9 +4062,11 @@ void sh_cell(const sh_cell_t *c)
 #ifdef SH_HAS_STARTUP
 #include "shell_startup.inc"                        /* Track J: Settings > Startup */
 #endif
-#ifdef SH_HAS_PASSCODE
-#include "shell_passcode.inc"                       /* Track A: Settings > Passcode */
-#endif
+#include "shell_passcode.inc"                       /* Track A: the passcode screen, Settings > Passcode, the lock's lifecycle */
+#include "shell_time.inc"                           /* Track A: the alarms API's Clock hooks, Settings > Date & Time's zone list */
+/* B2's Settings hooks onto Track A's passcode page (AS.sub SE_PASSCODE_PAGE = shell_passcode.inc's PC_SUB) */
+static void page_passcode(dc *d) { pc_page(d); }
+static int passcode_tap(float x, float y) { return pc_app_tap(x, y); }
 
 /* ---- Track A: what the shell keeps across restarts (the platform's prefs and blobs), taken back once the store is
  * ready. Cellular data is never kept (off at every boot by design); Wi-Fi comes back on when the user left it on. -- */
@@ -4024,7 +4079,7 @@ void sh_restore(void)
     nc_restore();
     cm_rec_restore();
     sw_restore();
-    if (sh_pref_int("cc.wifi", 0) == 1) (void)sh_wifi_power(1);   /* a refusal leaves it off; the choice stays */
+    if (sh_pref_int("cc.wifi", 0) == 1 && !sh_safe_mode()) (void)sh_wifi_power(1);   /* a refusal leaves it off; the choice stays; not in a safe start (Track A) */
 }
 #include "shell_island.inc"                         /* B7: the status capsule, the live pill (toasts) */
 
@@ -4108,6 +4163,7 @@ static void relink(void)
     cm_link();                                       /* helper I: the call screen (cvl) */
     kit_link();                                      /* helper B2: an alert, an action sheet, a sheet (kitl) */
     link(&root, r, 21);
+    pc_link();                                       /* Track A: the passcode screen (under the call screen) */
     isl_link();                                      /* B7: the capsule, the pill and its words */
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &emsel, &kbg, &emp, &apsb, &apphl };
     link(&appg, ag, 16);                             /* B3: emsel the edit menu's selection, emp its pill */
@@ -4288,6 +4344,7 @@ static void back_to_lock(int exit_em)
     sp_page.live = 0; page_dragging = 0;
     set_page(0);
     CCS.on = 0; sp_cc.live = 0; cc_x_reset(); set_cc(0);
+    pc_lock_note(exit_em);                         /* Track A lifecycle: the open app comes back after the unlock */
     if (AP.on) { sp_app.live = 0; app_finish_close(); }
     if (exit_em && EMG) set_emergency(0, 1);
     if (exit_em) ep_finish();                      /* B6: a switch's rest at once (a prepared one goes) */
@@ -4341,12 +4398,14 @@ void sh_set(const char *what, const char *key, float v)
         back_to_lock(1);
     } else if (!tk_strcmp(what, "sleep")) {        /* the films: the Power key's fade (v 1) and the wake (v 0) */
         if (v > 0) sh_sleep(0); else sh_wake();
-    } else if (lx_set(what, key, v)) {            /* L3: lapp=, store=, storeq= (shell_linux.inc) */
+    } else if (lx_set(what, key, v)) {            /* L3: lapp=; Track F: store=, storecat=, storeq=, storeapp=, ... */
     } else if (lkn_set(what, key, v)) {           /* B9: lkn= (the lock's notifications fanned out) */
     } else if (nc_set(what, key, v)) {            /* helper D: notify=, banner=, nc=, ncgroup=, ncswipe= (shell_nc.inc) */
         if (LK.sig != lkn_sig()) lkn_sync(0);     /* B9: the lock's stack at once (a still has no idle turn) */
     } else if (sw_set(what, key, v)) {            /* helper D: switcher=, swsnap= (shell_switcher.inc) */
     } else if (cm_set(what, key, v)) {            /* helper I: thread=, compose=, to=, dial=, recent=, callpad=, ... */
+    } else if (pc_set(what, key, v)) {            /* Track A: passcode=unlock:N, wrong:P, set, off */
+    } else if (ta_set(what, key, v)) {            /* Track A: clock24=, tz=, sub=datetime / tz, clocktab=, alarmedit= */
     } else if (!tk_strcmp(what, "app")) {
         if (!key[0] && AP.on) app_finish_close();       /* L2: "app=" closes the open app at once */
         for (int a = 0; a < NAPPS; a++)
@@ -4371,6 +4430,11 @@ void sh_set(const char *what, const char *key, float v)
     } else if (!tk_strcmp(what, "tab")) {
         static const char *const TK[4] = { "fav", "rec", "con", "pad" };
         for (int t = 0; t < 4; t++) if (!tk_strcmp(TK[t], key)) { AS.tab = t; build_app_page(AP.a); }
+#ifdef SH_HAS_STARTUP
+    } else if (!tk_strcmp(what, "startup")) {     /* Track J's stills: startup=VIEW:N (Settings open first) */
+        AS.sub = SE_STARTUP_PAGE;
+        if (AP.on) startup_set(key, v);
+#endif
     } else if (!tk_strcmp(what, "sub")) {
         /* the stills: a Settings page (display, wifi, cell, general, about, ...: se_sub_key; nothing is switched on) */
         AS.sub = se_sub_key(key);
@@ -4532,6 +4596,7 @@ static void app_press(float x, float y)
     if (sv_press(x, y, &r, &g, &rad, &c)) ok = 1;                 /* survival-next (E's bands): Emergency's tools, Settings > Medical Card */
     else if (cm_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* helper I: Recents, Messages */
     else if (ap_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* helper B5: the Calculator's keys, the Clock's buttons */
+    else if (pc_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* Track A: Settings > Passcode */
     else if (pushed && BACK_HIT(x, y)) {
         r = g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D };   /* the glass back lights */
         rad = BACK_D / 2; c = W(.16f); ok = 1;
@@ -4599,7 +4664,9 @@ void sh_touch(int phase, float x, float y, float t)
     { int r = isl_touch(phase, x, y, t); if (r) { if (r == 1) T.kind = G_NONE; return; } }   /* B7: the capsule, the call's minimise */
     if (cm_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* helper I: the call screen, the call button's hold */
     if (sv_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* survival-next: SOS's beacon, a tool's hold */
+    if (pc_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* Track A: the passcode screen (over the kit's modals) */
     if (kit_touch(phase, x, y, t)) { if (T.kind == G_SET) se_touch(2, -1, -1, t); T.kind = G_NONE; hl_off(); return; }   /* helper B2: modal */
+    if (ta_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* Track A: the zone list's scroll */
     if (phase == 0) {
         tk_tracker_reset(&T.tr);
         T.moved = 0;
@@ -5041,7 +5108,10 @@ void sh_touch(int phase, float x, float y, float t)
         } else {
             float v = tk_tracker_v(&T.tr), proj = lockY + v * 200;
             /* P3p (P3j-9): unlocked as soon as it is decided: taps in the settle reach home */
-            if (proj < -H_PT * .38f && locked) { tk_spring_start(&sp_lock, lockY, -H_PT, v * 1000, TK_SPR_UNLOCK); locked = 0; }
+            if (proj < -H_PT * .38f && locked) {
+                tk_spring_start(&sp_lock, lockY, -H_PT, v * 1000, TK_SPR_UNLOCK);
+                if (!pc_unlock_begin()) locked = 0;   /* Track A: the passcode first; else the kept app comes back */
+            }
             else tk_spring_start(&sp_lock, lockY, 0, v * 1000, TK_SPR_UNLOCK);
         }
         break;
@@ -5129,7 +5199,7 @@ int sh_tick(float dt, float t)
     if (sp_lock.live) {
         int live = tk_spring_step(&sp_lock, dt);
         set_lock(sp_lock.x);
-        if (!live && sp_lock.to <= -H_PT + .01f) { locked = 0; lockflat.hidden = 1; home.sx = home.sy = 1; }
+        if (!live && sp_lock.to <= -H_PT + .01f && !pc_holds()) { locked = 0; lockflat.hidden = 1; home.sx = home.sy = 1; }   /* Track A */
         mv = 1;
     }
     if (T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB || T.kind == G_RELOCK || T.kind == G_PAGE) mv = 1;
@@ -5151,7 +5221,7 @@ int sh_tick(float dt, float t)
     }
     mv |= ico_step(dt);                          /* P3p: the pressed icon */
     mv |= med_tick(dt);
-    mv |= lx_moving();                           /* L3: the App Store's list under the finger */
+    mv |= lx_tick(dt);                           /* L3, Track F: the App Store's page (scroll, momentum, builds) */
     ep_tick();                                   /* B6: Emergency's switch prepared during the hold, finished after */
     if (em_t < 1) {
         /* B6: the fade waits for its ground, and starts the frame after a hand-over made over frames */
@@ -5325,9 +5395,7 @@ int sh_tick(float dt, float t)
 #ifdef SHELL_STARTUP_TICK
     if (is_app("settings") && AS.sub == SE_STARTUP_PAGE) mv |= startup_tick(dt);
 #endif
-#ifdef SHELL_PASSCODE_TICK
-    if (is_app("settings") && AS.sub == SE_PASSCODE_PAGE) mv |= passcode_tick(dt);
-#endif
+    mv |= pc_tick(dt, t);                       /* Track A: the passcode screen */
     if (mv && AP.on) sw_dirty = 1;             /* helper D: the page moved or changed: a new snapshot at the next rest */
     return mv;
 }
@@ -5454,5 +5522,6 @@ int sh_moving(void)
     m |= kb_moving();                            /* B3: delete held (its repeats need the frames) */
     if (T.kind == G_APPTAP && !T.moved) { emt e; m |= em_target(T.x0, T.y0, &e); }   /* B3: a press on a text field: the long press's frames */
     m |= kit_moving() || se_moving();            /* helper B2 */
+    m |= pc_moving();                            /* Track A */
     return m;
 }

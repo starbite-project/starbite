@@ -1,0 +1,30 @@
+id = "papers"
+name = "Papers"
+summary = "Read PDF and other documents"
+description = """Papers is GNOME's document viewer for PDF, DjVu, TIFF and comic books, with search, annotations and forms. Its adaptive layout and pinch zoom work well on a touch screen."""
+category = "Office"
+licence = "GPL-2.0-or-later"
+homepage = "https://apps.gnome.org/Papers/"
+icon = "org.gnome.Papers"
+ram_mb = 120
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["pdf", "document", "viewer", "reader"]
+
+[launcher]
+exec = "papers"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["papers"]
+
+[runtime]
+needs = ["files"]
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 15
+build_mb = 1500

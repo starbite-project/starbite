@@ -143,3 +143,126 @@ this run's catalog. The last catalog is kept while Linux is off, so the icons st
 - The catalog is not stored: after a phone restart, page 3 shows only the App Store until Linux has run once.
 - Search (the home's pill) does not list Linux apps. Page 3 holds 19 apps; a fourth page is not built.
 - The keyboard still has no Ctrl / Tab / Esc / arrows or `| > ~ <` (the toolkit's keyboard), as in L2.
+
+## v3 hooks: Linux apps as first-class apps (Track E, 2026-11-12, "apps work fully")
+
+Contract v3 (`sbshm.h` "contract v3", `sbghost.h` v3) in Next. Each running Linux app is its own switcher card. A key
+bar sits over the keyboard. Linux notifications go to the Notification Centre. The clipboard works both ways. Track A's
+zero-copy window is supported. The logic is in Track E's files (`shell_linux.inc`, `gwin.c`, `guest.c/h`). The shell's
+files get **one hook only**: `next-linux-v3-hooks.patch` is `git diff HEAD` of the toolkit's / OS core's files. It
+touches `shell.h` alone (the declarations below). Everything else targets the toolkit's coming API (Track B), which
+is off until it defines `SH_EXT_API`.
+
+### The hook: `starbite/sbos/ui/shell.h` (after `sh_linux_textfocus`)
+| Declaration | Side | What |
+|---|---|---|
+| `SH_LMOD_CTRL`, `SH_LMOD_ALT` | both | the key bar's modifiers (= `SBSHM_MOD_*`; gwin.c `_Static_assert`s it) |
+| `sh_linux_close(id)` | platform | a card swiped away: `SBG_MSG_APP_CLOSE` with the app's index in this run's catalog |
+| `sh_linux_key(code, mods)` | platform | KEYMOD mods, the Linux key down + up, KEYMOD 0 (Esc 1, Tab 15, arrows 103/105/106/108) |
+| `sh_linux_char_mods(c, mods)` | platform | a typed character as keys with Ctrl / Alt held (Ctrl+C is a key, never committed text) |
+| `sh_linux_cards(n)` | platform | how many Linux apps have a card: gwin.c -> `guest_apps(n)` |
+| `sh_linux_notif_act(id, action)` | platform | `SBG_MSG_NOTIF_ACT`: 0 the tap, -1 dismissed (`SBSHM_NONE`) |
+| `sh_linux_clip(text)` | platform | Starbite's clipboard offered to Linux (`sbg_clip_set`, text/plain;charset=utf-8) |
+| `sh_linux_front(&stride)` | platform | the zero-copy path: the guest's front buffer, marked with `sbg_surf_reading` |
+| `sh_linux_notify(...)`, `sh_linux_notify_close(id)` | shell | a Linux notification posted / withdrawn (gwin.c's `v3_poll` on `SBG_CH_NOTIF`) |
+| `sh_linux_clip_in(text)` | shell | a Linux copy (`SBG_CH_CLIP`) into the shell's clipboard (not offered back) |
+| `sh_clip_set(text)`, `sh_clip_get()` | shell | **the shell-wide clipboard** (UTF-8 text, 8 KiB, RAM): Starbite's text fields call these |
+
+The platform's v3 calls also have **weak no-op definitions in shell_linux.inc**. So a platform without them still
+links: the host preview's `host/linux_fake.inc`. gwin.c's strong ones win in every Next image. Nothing in
+`shell_switcher.inc`, `shell_lock.c`, `shell_nc.inc` or `kern_next.c` changes.
+
+### What the toolkit (Track B) provides; shell_linux.inc calls it when `SH_EXT_API` is defined
+Define `SH_EXT_API` in the commit that lands these (in `shell.h`, or in `shell_lock.c` before
+`#include "shell_linux.inc"`). shell_linux.inc forward-declares them as **static**, in this file's form:
+```c
+static void sw_ext_add(int subid);     /* add a kind-1 card, or move it first if it is there (called at every open) */
+static void sw_ext_remove(int subid);  /* drop it (the app quit by itself, Linux stopped); no-op if unknown */
+static void kb_accessory(const char *const *keys, int n, void (*tap)(int i));   /* (0, 0, 0) clears; keys stay valid */
+static int kb_accessory_tap(float x, float y);   /* a tap on the bar: 1 taken (tap(i) called); called from lx_kb_tap */
+static void nc_withdraw(const char *who);        /* remove the Centre's items of who, WITHOUT the dismiss callback */
+#define KB_ACC_H 40.0f                 /* optional: the bar's height in pt (default 40), from 540 - KB_ACC_H to 540 */
+```
+The window's rows with the keyboard up shrink by the bar: `LX_KBROWS` = 842 surface rows (44 .. 500 pt). The
+viewport, the window's clip and its touch area follow that. A tap in the bar is not the window's (`lx_at`): it goes
+through `app_tap` -> `lx_tap` -> `lx_kb_tap` -> `kb_accessory_tap`. If the toolkit routes bar taps itself first,
+`kb_accessory_tap` can return 0.
+
+### What shell_linux.inc provides to the toolkit (all `static`, after the `lx_*` helpers, before the hooks section)
+```c
+/* the switcher's provider, for kind-1 entries; subid = a slot of shell_linux.inc's card table (keyed by the desktop
+ * id: stable across catalog re-layouts; up to 8 cards, a 9th closes the oldest card's app) */
+static const char *sw_ext_title(int subid);           /* the app's name ("Terminal" for foot); "" unknown */
+static const tk_bmp *sw_ext_icon(int subid);          /* ICON_PT (62 pt) premultiplied, pad 0 (as app_icon's); NULL none */
+static int sw_ext_snapshot(int subid, tk_bmp *out);   /* 1: *out = a VIEW (TK_W/4 x TK_H/4, owned by shell_linux.inc,
+                                                       * never freed by the caller, valid until sw_ext_close/remove); 0: none */
+static void sw_ext_open(int subid);                   /* lx_pick + app_open (closes an open app first; the open Linux app: nothing) */
+static void sw_ext_close(int subid);                  /* thrown away: APP_CLOSE; the switcher drops its own entry */
+static int lx_sw_current(void);                       /* the open Linux app's subid (the live first card), -1 none */
+/* the Notification Centre, for items whose who is "linux:<id>" (id: the guest's notification id in lowercase hex,
+ * at most 8 digits, so who <= 14 characters). Each argument may be the whole who or the part after "linux:". */
+static int lx_open_id(const char *id);                /* a tap: NOTIF_ACT(id, 0) and the app opened; 1 opened */
+static void lx_nc_dismissed(const char *id);          /* a swipe away / Clear / clear all: NOTIF_ACT(id, none) */
+static const char *lx_nc_name(const char *id);        /* the app's name ("Linux" unknown) */
+static const tk_bmp *lx_nc_icon(const char *id);      /* the app's icon (ICON_PT, pad 0), NULL none */
+```
+The Centre should: call `lx_open_id` instead of `app_open` for a `linux:` item, after its lock handling. Call
+`lx_nc_dismissed` when the user removes one (not when it is launched or withdrawn). Show `lx_nc_name` / `lx_nc_icon`
+for it (`nc_name`, `nc_draw_item`). The switcher should: show kind-1 cards with `sw_ext_title` / `sw_ext_icon` /
+`sw_ext_snapshot`. Open them with `sw_ext_open` in place of `app_open`. Call `sw_ext_close` when one is thrown away.
+Treat the first card as live when `lx_sw_current() == subid`. Let the home bar's slow swipe work from a Linux app
+(`lx_sw_current() >= 0`). An entry that falls off the end (SW_MAX) is only hidden: its app keeps running.
+`host/sw-ext-compat.patch` is exactly this, as a test-only stand-in. Use it as the reference.
+
+The key bar's labels: `Esc Tab Ctrl Alt ← ↑ ↓ →`. A latched modifier is passed as `CTRL` / `ALT` (capitals). The
+stand-in lights a capitalised label as the keyboard lights shift. **Font**: the pack's subset (tools/sbtk-fonts.py)
+has ← → (0x2190 / 0x2192) but not ↑ ↓. Add 0x2191 and 0x2193 to `CHARS`, or draw the arrow keys as icons. The
+stand-in draws ↑ ↓ with `d_seg`.
+
+### Track A (OS core): the zero-copy window (16925a8)
+shell_linux.inc uses `sh_linux_zero_copy()` and `tk_layer_external()` under `#ifdef TK_HAS_LAYER_EXTERNAL`. Define it
+in sbtk.h with the commit that has `tk_layer_external`. How it switches:
+- **At each build of the window** (`lx_build_win`: an open, the keyboard up or down), `LX.zc = sh_linux_zero_copy()`.
+  - 1: the strips are freed. One layer, `apext`, sits at (0, 81) scaled 2x. Every new frame (`gwin_now` ->
+    `sh_linux_frame`) hands it the front buffer: `sh_linux_front` -> `guest_front()` (guest.c: the header's
+    `surf_off[front]`) + `sbg_surf_reading(front)`, then `tk_layer_external(&apext, px, 720, rows, stride)`. Rows is
+    1344, or 842 with the keyboard.
+  - 0: L3's strips exactly as before.
+  - A GPU that goes away mid-show switches at the next build.
+- Detached (`tk_layer_external(&apext, 0, ...)`) **before any relayer**: in `lx_close`, and when Linux leaves RUNNING.
+  `sh_linux_hide` (and the strips' blit) then call `sbg_surf_done()`. The compose is synchronous, so the mark stays
+  on the shown buffer until the next front replaces it. No call after `tk_comp_frame` is needed.
+- A card's snapshot reads the external buffer one pixel in four (it is uncached), only when the app closes.
+
+### guest.c / guest.h (Track E's; for master too)
+- `cfg.services = CLIP | NOTIF | CLOCK | NET | P9` for GUEST_WL. sbghost drops what has no `sbg_os` part.
+  - `unix_s` comes from `clock_now` (UTC, the clock settings' `off_min`).
+  - `net_rx = sbos_nat_from_guest`: a weak declaration. It stays NULL (no SVC_NET) until Track G's NAT defines
+    `void sbos_nat_from_guest(const uint8_t *pkt, unsigned len)`.
+  - `fs = GUEST_FS_OPS` from `guest-fs.h` when it is there (`__has_include`: it is now, read-only on the card).
+  - GUEST_QEMU (kern-shim) offers neither the clock nor the files.
+- `guest_apps(n)`: with Linux cards, the "hidden 60 s" stop is off. The screen-off stop waits 30 min
+  (`GUEST_APPS_SCREEN_OFF_MS`), not 60 s. When the last card goes, the 60 s count starts again. `guest_keep` (the
+  App Store, a package) still blocks both.
+- `guest_front(&idx, &stride)`: the zero-copy front buffer (the host fake: none).
+
+### Checked
+- `host/run.sh . build/sbtk/sbtk-phone.pak OUT` with `GWIN_STILLS=build/trackE-stills` passes. It runs the self test,
+  the 13 L3 checks and **20 v3 checks**, through the real shell with sw-ext-compat.patch and zc-compat.patch:
+  - two Linux cards and a Starbite card (`S:notes,L:Calculator,L:Text Editor`);
+  - a card's tap re-opens its app (ACTIVATE 1); a thrown card sends APP_CLOSE 2;
+  - the key bar sends `KEYMOD 1;TYPE c;KEYMOD 0;KEY 105 1;KEY 105 0;KEYMOD 2;KEY 106 1;KEY 106 0;KEYMOD 0;KEY 1 1;KEY 1 0;`;
+  - the clipboard works both ways;
+  - notifications: `linux:1a` is in the Centre, a withdrawal leaves, a Clear sends NOTIF_ACT none, the banner's tap
+    sends NOTIF_ACT 0 and opens the app;
+  - zero-copy samples the guest's buffer in place, and home sends `sbg_surf_done`;
+  - Linux's stop drops the cards (guest_apps 0).
+- With `SBTK_HEAP_MB=160` the UI heap peaks at 143.5 MB. `GWIN_L2=1` passes. `GWIN_STORE=none` fails with the
+  store's reason.
+- Stills: `build/trackE-stills/trackE-{switcher,switcher-scrolled,keybar,keybar-ctrl-latched,banner,nc-list,zerocopy}.png`.
+
+### Still open
+- Notifications are not grouped per app (one `who` per notification, so that the tap can act on that one). Actions
+  1..3 (buttons) are not shown.
+- An app that quits while shown keeps its last frame (as in L3). Its card goes when the catalog's flags clear.
+- The Terminal (foot) is a Linux card too (its page-2 icon, title "Terminal").
