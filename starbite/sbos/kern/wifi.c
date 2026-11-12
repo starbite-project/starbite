@@ -1875,7 +1875,7 @@ void wifi_timer(unsigned id)
  * example.com; then the same on 5 GHz, with a power-save check (interrupt counts idle with PM 0 and PM 2, the router's
  * pings under PM 2). Every step has its own time limit; the whole run at most 240 s. */
 #define H1_URL "https://example.com/"
-static int h1, h1_band, h1_btc_tried, h1_ok24, h1_ok5, h1_fails;
+static int h1, h1_band, h1_btc_tried, h1_ok24, h1_ok5, h1_fails, h1_web[3];   /* h1_web[band]: 1 HTTPS worked */
 static uint64_t h1_t, h1_t0;
 static uint32_t h1_btc_was = 0xffffffffu, h1_irq0, h1_pings;
 static int h1_btc_set;
@@ -2073,8 +2073,10 @@ static int h1_step(int *done)
             wifi_fetch_status(&f);
             struct ub u;
             ub_init(&u);
-            ub_s(&u, f.result == 0 ? "HTTPS WORKS: status " : "HTTPS FAILED: ");
-            if (f.result == 0) {
+            int works = f.result == SBHTTP_DONE && f.status >= 200 && f.status < 400;   /* h1c: was "== 0" */
+            h1_web[h1_band] = works;
+            ub_s(&u, works ? "HTTPS WORKS: status " : "HTTPS FAILED: ");
+            if (f.result == SBHTTP_DONE) {
                 ub_dec(&u, (uint64_t)f.status);
                 ub_s(&u, ", bytes ");
                 ub_dec(&u, f.bytes);
@@ -2169,10 +2171,12 @@ static int h1_step(int *done)
         struct ub u;
         ub_init(&u);
         ub_s(&u, "selftest: wifi: h1: summary: 2.4 GHz ");
-        ub_s(&u, !sv_ok || !sv_heard24 ? "not tried" : h1_ok24 ? "JOINED" : "did not join");
+        ub_s(&u, !sv_ok || !sv_heard24 ? "not tried" : h1_ok24 ? (h1_web[1] ? "JOINED, HTTPS works" : "JOINED, HTTPS failed")
+                                                               : "did not join");
         ub_s(&u, h1_btc_tried ? " (also tried with btc_mode 0)" : "");
         ub_s(&u, ", 5 GHz ");
-        ub_s(&u, !sv_ok || !sv_heard5 ? "not tried" : h1_ok5 ? "JOINED" : "did not join");
+        ub_s(&u, !sv_ok || !sv_heard5 ? "not tried" : h1_ok5 ? (h1_web[2] ? "JOINED, HTTPS works" : "JOINED, HTTPS failed")
+                                                             : "did not join");
         sb_log(u.b);
     }
     if (sv_ok && !h1_ok24 && sv_heard24) {
