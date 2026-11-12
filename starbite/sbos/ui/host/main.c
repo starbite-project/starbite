@@ -40,6 +40,8 @@ int sh_cellular(int on)
 void sh_brightness(int level) { fprintf(stderr, "brightness: level %d\n", level); }
 void sh_vibrate(void) { fprintf(stderr, "vibrate: the timer ran out\n"); }
 void sh_haptic(void) { }
+/* B5: the Clock's alarms (the kernel's alarm.c on the phone) */
+int sh_alarm_set(int i, int h, int m, int days, int on) { fprintf(stderr, "alarm %d: %02d:%02d %s (days %x)\n", i, h, m, on ? "on" : "off", (unsigned)days); return 0; }
 /* L2 + L3: Linux apps and the App Store (the kernel's platform is starbite/guest/next/gwin.c): host/linux_fake.inc,
  * a pretend Linux with a catalog and a store. SBTK_NO_LINUX_FAKE: none (starbite/guest/next/host/gwin-host.c links
  * gwin.c itself and drives the shell) */

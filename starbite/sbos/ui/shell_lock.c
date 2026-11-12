@@ -2069,11 +2069,8 @@ static void page_photos(dc *d)
     d_h1(d, "Photos");
     d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Photos", "The camera doesn't work on this phone yet, so there is nothing here.");
 }
-static void page_camera(dc *d)
-{
-    d_h1(d, "Camera");
-    d_empty(d, CONTENT_TOP, EMPTY_BOT, "Camera Not Available", "The Galaxy S9's camera needs its driver first.");
-}
+static void page_camera(dc *d);                  /* helper B5: shell_apps.inc (no driver yet: iOS's screen) */
+static void camera_tap(float x, float y);
 /* ---- P2z: the Clock app: the live time, a stopwatch, a timer that vibrates (no sound). The page's static part is
  * drawn in the strips; the stopwatch's and the timer's digits and the buttons are three small layers, redrawn
  * only when their text changes (the platform asks sh_next_update when to come back) ---- */
@@ -2105,117 +2102,11 @@ static int fmt_ms(char *b, float ms, int tenths)
     b[n] = 0;
     return n;
 }
-static void page_clock(dc *d)
-{
-    d_h1(d, "Clock");
-    char hm[8], dt[48];
-    fmt_hm(hm);
-    float w = tw(TK_IT600, 64, hm, 0, TK_TNUM);
-    d_text(d, TK_IT600, 64, (390 - w) / 2, bl(TK_IT600, 64, 112 + CLK_DY), hm, 0, TK_TNUM, INK, 0);
-    const char *wd = WD[ST.wday % 7], *mo = MO[(ST.mon + 11) % 12];
-    int n = (int)tk_strlen(wd);
-    tk_memcpy(dt, wd, (size_t)n); dt[n++] = ' ';
-    n += put_dec(dt + n, ST.day); dt[n++] = ' ';
-    tk_memcpy(dt + n, mo, tk_strlen(mo) + 1);
-    w = tw(TK_IT400, 15, dt, 0, 0);
-    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 192 + CLK_DY), dt, 0, 0, W(.55f), 0);
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 236 + CLK_DY), "STOPWATCH", .52f, 0, W(.55f), 0);
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 462 + CLK_DY), "TIMER", .52f, 0, W(.55f), 0);
-}
-static void clk_digits(tk_layer *l, float y, const char *txt, const char *sub)
-{
-    relayer(l);
-    dc d = mk(l, "clock-digits", 20, y, 350, 84, 0, 0);
-    float w = tw(TK_IT400, 54, txt, 0, TK_TNUM);
-    d_text(&d, TK_IT400, 54, (390 - w) / 2, bl(TK_IT400, 54, y), txt, 0, TK_TNUM, INK, 0);
-    if (sub && sub[0]) {
-        w = tw(TK_IT400, 14, sub, 0, TK_TNUM);
-        d_text(&d, TK_IT400, 14, (390 - w) / 2, bl(TK_IT400, 14, y + 66), sub, 0, TK_TNUM, W(.55f), 0);
-    }
-    l->hidden = 0;
-}
-static void clk_button(dc *d, float x, float y, float wd, float h, const char *t, tk_col bg, tk_col fg)
-{
-    d_rrect(d, x, y, wd, h, h / 2, bg);
-    float w = tw(TK_IT600, 16, t, 0, 0);
-    d_text(d, TK_IT600, 16, x + (wd - w) / 2, bl(TK_IT600, 16, y + h / 2 - 10), t, 0, 0, fg, 0);
-}
-static void clk_controls(void)
-{
-    relayer(&apctl);
-    dc d = mk(&apctl, "clock-buttons", 20, 344 + CLK_DY, 350, 270, 0, 0);
-    float sw = clk_sw_ms(now_ms);
-    clk_button(&d, 36, 350 + CLK_DY, 78, 78, CLK.sw_run ? "Lap" : "Reset", W(CLK.sw_run || sw > 0 ? .16f : .07f), W(CLK.sw_run || sw > 0 ? 1 : .4f));
-    clk_button(&d, 276, 350 + CLK_DY, 78, 78, CLK.sw_run ? "Stop" : "Start", CLK.sw_run ? TK_RGBA(255, 69, 58, .28f) : TK_RGBA(48, 209, 88, .28f),
-               CLK.sw_run ? tk_hex(0xff6961, 1) : tk_hex(0x4cd964, 1));
-    if (CLK.tm_run) clk_button(&d, 125, 570 + CLK_DY, 140, 44, "Cancel", TK_RGBA(255, 159, 10, .25f), tk_hex(0xffb340, 1));
-    else {
-        static const char *const P[3] = { "1 min", "5 min", "10 min" };
-        for (int i = 0; i < 3; i++) clk_button(&d, 24 + 125 * i, 570 + CLK_DY, 92, 44, P[i], W(.14f), INK);
-    }
-    apctl.hidden = 0;
-    CLK.ctl_drawn = CLK.ctl_ver;
-}
-/* the digits and the buttons as of t (ms); 1 if anything was redrawn. A timer that ran out vibrates (sh_vibrate). */
-static int clk_update(float t)
-{
-    int any = 0;
-    if (CLK.tm_run && t >= CLK.tm_end) {
-        CLK.tm_run = 0;
-        CLK.ctl_ver++;
-        sh_vibrate();                       /* the platform also wakes the screen (P3f) */
-        toast("Timer done");
-        toast_left = 6000;                  /* an alert stays longer than a toast */
-        any = 1;
-    }
-    if (!is_app("clock") || !AP.on) return any;
-    float sw = clk_sw_ms(t);
-    int ds = (int)(sw / 100);
-    if (ds != CLK.sw_ds || !apsw.bmp.px) {
-        CLK.sw_ds = ds;
-        char b[16], l[32] = "";
-        fmt_ms(b, sw, 1);
-        if (CLK.laps) { tk_memcpy(l, "Lap ", 4); int n = 4 + put_dec(l + 4, CLK.laps); l[n++] = ' '; l[n++] = ' '; fmt_ms(l + n, CLK.lap_at, 1); }
-        clk_digits(&apsw, 254 + CLK_DY, b, l);
-        any = 1;
-    }
-    int ts = CLK.tm_run ? (int)((CLK.tm_end - t + 999) / 1000) : 0;
-    if (ts != CLK.tm_s || !aptm.bmp.px) {
-        CLK.tm_s = ts;
-        char b[16];
-        fmt_ms(b, ts * 1000.0f, 0);
-        clk_digits(&aptm, 478 + CLK_DY, CLK.tm_run ? b : "00:00", CLK.tm_run ? "" : "Choose a time");
-        any = 1;
-    }
-    if (CLK.ctl_drawn != CLK.ctl_ver || !apctl.bmp.px) { clk_controls(); any = 1; }
-    if (any) relink();
-    return any;
-}
-static void clk_tap(float x, float y)
-{
-    float t = now_ms;
-    y -= CLK_DY;
-    if (y >= 350 && y < 428) {
-        if (x >= 276 && x < 354) {                       /* Start / Stop */
-            if (CLK.sw_run) { CLK.sw_acc += t - CLK.sw_t0; CLK.sw_run = 0; }
-            else { CLK.sw_t0 = t; CLK.sw_run = 1; }
-            CLK.ctl_ver++;
-        } else if (x >= 36 && x < 114) {                 /* Lap / Reset */
-            if (CLK.sw_run) { CLK.laps++; CLK.lap_at = clk_sw_ms(t); CLK.sw_ds = -1; }
-            else { CLK.sw_acc = 0; CLK.laps = 0; CLK.sw_ds = -1; CLK.ctl_ver++; }
-        }
-    } else if (y >= 570 && y < 614) {
-        if (CLK.tm_run) { if (x >= 125 && x < 265) { CLK.tm_run = 0; CLK.ctl_ver++; } }
-        else for (int i = 0; i < 3; i++)
-            if (x >= 24 + 125 * i && x < 116 + 125 * i) {
-                static const int M[3] = { 1, 5, 10 };
-                CLK.tm_end = t + M[i] * 60000.0f;
-                CLK.tm_run = 1;
-                CLK.ctl_ver++;
-            }
-    }
-    clk_update(t);
-}
+/* helper B5: the Clock's tabs (World Clock, Alarms, Stopwatch, Timers) are in shell_apps.inc */
+static void page_clock(dc *d);
+static int clk_update(float t);
+static void clk_tap(float x, float y);
+static void ck_extras_of(const char *k);
 /* when the platform should come back for the clock (ms; < 0: nothing pending) */
 int sh_next_update(float t)
 {
@@ -2250,148 +2141,10 @@ int sh_refresh(float t)
  * digits, orange operators). The keys are the page; the display a small layer redrawn per key ---- */
 static tk_layer apcalc;
 static struct { double acc, cur; int op, entering, err, has_dot, ndig, frac; } CAL;
-static const char *const CK[19] = { "AC", "\xc2\xb1", "%", "\xc3\xb7", "7", "8", "9", "\xc3\x97", "4", "5", "6", "\xe2\x88\x92",
-                                    "1", "2", "3", "+", "0", ".", "=" };
-static void calc_key_rect(int i, float *x, float *y, float *w)
-{
-    int r = i < 16 ? i / 4 : 4, c = i < 16 ? i % 4 : i == 16 ? 0 : i == 17 ? 2 : 3;
-    *x = 16 + 92 * c;
-    *y = 318 + 90 * r;
-    *w = i == 16 ? 170 : 78;
-}
-static void page_calc(dc *d)
-{
-    for (int i = 0; i < 19; i++) {
-        float x, y, w;
-        calc_key_rect(i, &x, &y, &w);
-        int fn = i < 3, op = (i % 4 == 3 && i < 16) || i == 18;
-        d_rrect(d, x, y, w, 78, 39, op ? tk_hex(0xff9f0a, 1) : fn ? tk_hex(0xa5a5a5, 1) : tk_hex(0x333333, 1));
-        float tw0 = tw(TK_IT500, 32, CK[i], 0, 0);
-        float tx = i == 16 ? x + 31 : x + (78 - tw0) / 2;
-        d_text(d, TK_IT500, 32, tx, bl(TK_IT500, 32, y + 19), CK[i], 0, 0, fn ? tk_hex(0x000000, 1) : INK, 0);
-    }
-}
-static int calc_fmt(char *b, double v)
-{
-    if (v != v || v > 1e100 || v < -1e100) { tk_memcpy(b, "Error", 6); return 5; }
-    int n = 0;
-    if (v < 0) { b[n++] = '-'; v = -v; }
-    if (v >= 1e9 || (v > 0 && v < 1e-8)) {
-        /* P3j (audit 10): iOS's scientific form past nine digits ("9.99999e14"), never a clipped number */
-        int e = 0;
-        while (v >= 10) { v /= 10; e++; }
-        while (v < 1) { v *= 10; e--; }
-        long long M = (long long)(v * 100000 + .5);          /* six significant digits */
-        if (M >= 1000000) { M /= 10; e++; }
-        char t[8];
-        for (int i = 5; i >= 0; i--) { t[i] = (char)('0' + M % 10); M /= 10; }
-        int last = 5;
-        while (last > 0 && t[last] == '0') last--;
-        b[n++] = t[0];
-        if (last > 0) { b[n++] = '.'; for (int i = 1; i <= last; i++) b[n++] = t[i]; }
-        b[n++] = 'e';
-        n += put_dec(b + n, e);
-        b[n] = 0;
-        return n;
-    }
-    double ip = (double)(long long)v, fp = v - ip;
-    long long I = (long long)ip;
-    char t[24];
-    int k = 0;
-    do { t[k++] = (char)('0' + I % 10); I /= 10; } while (I);
-    int intd = k;
-    /* grouped by thousands, as iOS ("1,234,567") */
-    while (k) { b[n++] = t[--k]; if (k && k % 3 == 0) b[n++] = ','; }
-    int room = 9 - intd;                    /* nine digits in all, as iOS's portrait display */
-    if (room > 0) {
-        long long f = 1;
-        for (int i = 0; i < room; i++) f *= 10;
-        long long F = (long long)(fp * (double)f + .5);
-        if (F >= f) F = f - 1;
-        int m = room;
-        while (m > 0 && F % 10 == 0) { F /= 10; m--; }
-        if (m > 0) {
-            b[n++] = '.';
-            char u[16];
-            for (int i = m - 1; i >= 0; i--) { u[i] = (char)('0' + F % 10); F /= 10; }
-            for (int i = 0; i < m; i++) b[n++] = u[i];
-        }
-    }
-    b[n] = 0;
-    return n;
-}
-static void build_calc(void)
-{
-    relayer(&apcalc);
-    char b[32];
-    if (CAL.err) tk_memcpy(b, "Error", 6);
-    else {
-        int n = calc_fmt(b, CAL.cur);
-        if (CAL.entering && CAL.has_dot && CAL.frac == 0) { b[n++] = '.'; b[n] = 0; }
-        else if (CAL.entering && CAL.has_dot && CAL.frac > 0) {   /* keep the typed trailing zeros */
-            int have = 0;
-            for (int i = 0; b[i]; i++) if (b[i] == '.') { have = (int)tk_strlen(b + i + 1); break; }
-            if (!have) { b[n++] = '.'; }
-            for (; have < CAL.frac && n < 30; have++) b[n++] = '0';
-            b[n] = 0;
-        }
-    }
-    /* P3j (audit 10): the display shrinks to fit (it was 84 or 64 pt and clipped past nine characters) */
-    float size = 86, w = tw(TK_IT400, size, b, 0, TK_TNUM);
-    while (w > 340 && size > 36) { size -= 2; w = tw(TK_IT400, size, b, 0, TK_TNUM); }
-    dc d = mk(&apcalc, "calc-display", 20, 186, 350, 118, 0, 0);
-    d_text(&d, TK_IT400, size, 362 - w, bl(TK_IT400, size, 300 - size * 1.21f), b, 0, TK_TNUM, INK, 0);
-    apcalc.hidden = 0;
-    relink();
-}
-static double calc_apply(double a, double b, int op, int *err)
-{
-    switch (op) {
-    case 1: if (b == 0) { *err = 1; return 0; } return a / b;
-    case 2: return a * b;
-    case 3: return a - b;
-    case 4: return a + b;
-    default: return b;
-    }
-}
-static void calc_tap(float x, float y)
-{
-    int k = -1;
-    for (int i = 0; i < 19; i++) {
-        float kx, ky, kw;
-        calc_key_rect(i, &kx, &ky, &kw);
-        if (x >= kx && x < kx + kw && y >= ky && y < ky + 78) { k = i; break; }
-    }
-    if (k < 0) return;
-    sh_haptic();
-    const char *c = CK[k];
-    if (k == 0) { CAL.acc = CAL.cur = 0; CAL.op = 0; CAL.entering = CAL.err = CAL.has_dot = CAL.ndig = CAL.frac = 0; }
-    else if (CAL.err) return;
-    else if (k == 1) { CAL.cur = -CAL.cur; }
-    else if (k == 2) { CAL.cur /= 100; CAL.entering = 0; }
-    else if (c[0] >= '0' && c[0] <= '9' && !c[1]) {
-        if (!CAL.entering) { CAL.cur = 0; CAL.entering = 1; CAL.has_dot = CAL.ndig = CAL.frac = 0; }
-        if (CAL.ndig >= 9) return;
-        int dg = c[0] - '0';
-        if (CAL.has_dot) {
-            double f = 1;
-            for (int i = 0; i <= CAL.frac; i++) f /= 10;
-            CAL.cur += (CAL.cur < 0 ? -dg : dg) * f;
-            CAL.frac++;
-        } else CAL.cur = CAL.cur * 10 + (CAL.cur < 0 ? -dg : dg);
-        if (CAL.cur != 0 || CAL.has_dot) CAL.ndig++;
-    } else if (k == 17) {
-        if (!CAL.entering) { CAL.cur = 0; CAL.entering = 1; CAL.ndig = CAL.frac = 0; }
-        CAL.has_dot = 1;
-    } else {
-        /* an operator or =: the pending operation first (left to right, as iOS's basic calculator chains) */
-        if (CAL.op && (CAL.entering || k == 18)) CAL.cur = calc_apply(CAL.acc, CAL.cur, CAL.op, &CAL.err);
-        CAL.acc = CAL.cur;
-        CAL.op = k == 18 ? 0 : k == 3 ? 1 : k == 7 ? 2 : k == 11 ? 3 : 4;
-        CAL.entering = 0;
-    }
-    build_calc();
-}
+/* helper B5: the iOS 26 layout, the keys and the display are in shell_apps.inc */
+static void page_calc(dc *d);
+static void build_calc(void);
+static void calc_tap(float x, float y);
 
 /* P3b: the Flashlight app: one big switch (iOS's torch control), the same LED as the lock's button and the CC */
 static void page_light(dc *d)
@@ -2483,6 +2236,8 @@ static void page_display(dc *d)
 #define NNOTES 8
 #define NOTELEN 600
 static char NOTES[NNOTES][NOTELEN];
+static int NOTE_HM[NNOTES];                   /* B5: when each was last written (hh * 100 + mm), its row's second line */
+#define NOTE_RH 64.0f                         /* B5 (P3j-18): a row: the title, then the time and the text after it */
 static struct { int n, view, cur, shift, num; } NS;
 static tk_layer apnote;
 static void build_app_page(int a);
@@ -2579,12 +2334,24 @@ static void page_notes(dc *d)
             if (NS.n) d_text_box(d, TK_IT400, 13, 195, COMPOSE_Y + COMPOSE_D / 2 + 4.7f, 200, 1, cnt, 0, 0, W(.6f), 0);
         }
         if (!NS.n) { d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Notes", "Tap the pencil to write one. Notes are kept until the phone restarts."); return; }
-        d_rrect(d, GROUP_X, CONTENT_TOP, GROUP_W, 56.0f * NS.n - 1, 16, tk_hex(0x151c33, 1));
+        d_rrect(d, GROUP_X, CONTENT_TOP, GROUP_W, NOTE_RH * NS.n, 16, tk_hex(0x151c33, 1));
         for (int i = 0; i < NS.n; i++) {
-            char t[136];
-            note_title(NOTES[NS.n - 1 - i], t);
-            d_text_box(d, TK_IT600, 17, ROW_TX, bl(TK_IT600, 17, CONTENT_TOP + 56 * i + 17), CONTENT_W - 32, 0, t, 0, 0, INK, 0);
-            if (i + 1 < NS.n) d_rrect(d, ROW_TX, CONTENT_TOP + 56 * i + 55, CONTENT_R - ROW_TX, .5f, 0, W(.1f));
+            char t[136], sub[160];
+            int k = NS.n - 1 - i, hm = NOTE_HM[k];
+            const char *s2 = NOTES[k];
+            note_title(s2, t);
+            while (*s2 && *s2 != '\n') s2++;              /* the second line: the time, then the text after the title */
+            while (*s2 == '\n' || *s2 == ' ') s2++;
+            int q = 0;
+            sub[q++] = (char)('0' + hm / 1000 % 10); sub[q++] = (char)('0' + hm / 100 % 10); sub[q++] = ':';
+            sub[q++] = (char)('0' + hm / 10 % 10); sub[q++] = (char)('0' + hm % 10); sub[q++] = ' '; sub[q++] = ' ';
+            if (!*s2) for (const char *c = "No additional text"; *c; c++) sub[q++] = *c;
+            for (; *s2 && q < 150; s2++) sub[q++] = *s2 == '\n' ? ' ' : *s2;
+            sub[q] = 0;
+            float top = CONTENT_TOP + NOTE_RH * i;
+            d_text_box(d, TK_IT600, 17, ROW_TX, bl(TK_IT600, 17, top + 11), CONTENT_W - 32, 0, t, 0, 0, INK, 0);
+            d_text_box(d, TK_IT400, 15, ROW_TX, bl(TK_IT400, 15, top + 35), CONTENT_W - 32, 0, sub, 0, 0, W(.55f), 0);
+            if (i + 1 < NS.n) d_rrect(d, ROW_TX, top + NOTE_RH - .5f, CONTENT_R - ROW_TX, .5f, 0, W(.1f));
         }
         return;
     }
@@ -2608,11 +2375,13 @@ static void build_note(void)
     float y = PUSHED_TOP;
     int i = 0, n = (int)tk_strlen(t);
     float cx = 20, cy = PUSHED_TOP;
+    int first = 1;
     while (i <= n && y < 520) {
-        int k = 0, lastsp = -1, start = i;
+        int k = 0, lastsp = -1, start = i, f = first ? TK_IT700 : TK_IT400;
+        float fs = first ? 28 : 17;
         while (i < n && t[i] != '\n') {
             line[k] = t[i]; line[k + 1] = 0;
-            if (tw(TK_IT400, 17, line, 0, 0) > 350) {
+            if (tw(f, fs, line, 0, 0) > 350) {
                 if (lastsp > 0) { i = start + lastsp + 1; k = lastsp; }
                 break;
             }
@@ -2620,10 +2389,11 @@ static void build_note(void)
             k++; i++;
         }
         line[k] = 0;
-        d_text(&d, TK_IT400, 17, 20, bl(TK_IT400, 17, y), line, 0, 0, INK, 0);
-        cx = 20 + tw(TK_IT400, 17, line, 0, 0);
-        cy = y;
-        y += 24;
+        d_text(&d, f, fs, 20, bl(f, fs, y), line, 0, 0, INK, 0);
+        cx = 20 + tw(f, fs, line, 0, 0);
+        cy = y + (first ? 6 : 0);
+        y += first ? 38 : 24;
+        if (i < n && t[i] == '\n') first = 0;
         if (i < n && t[i] == '\n') { i++; if (i == n) { cx = 20; cy = y; } continue; }
         if (i >= n) break;
     }
@@ -2637,10 +2407,11 @@ static void notes_tap(float x, float y)
         if (COMPOSE_HIT(x, y)) {                      /* P3p: the compose button (was "New" in the nav row) */
             if (NS.n == NNOTES) { toast("Up to eight notes in this version"); return; }
             NOTES[NS.n][0] = 0;
+            NOTE_HM[NS.n] = ST.h * 100 + ST.mi;
             NS.cur = NS.n++;
             NS.view = 1; NS.shift = 1; NS.num = 0;
-        } else if (y >= CONTENT_TOP && y < CONTENT_TOP + 56 * NS.n && x >= GROUP_X && x < GROUP_X + GROUP_W) {
-            NS.cur = NS.n - 1 - (int)((y - CONTENT_TOP) / 56);
+        } else if (y >= CONTENT_TOP && y < CONTENT_TOP + NOTE_RH * NS.n && x >= GROUP_X && x < GROUP_X + GROUP_W) {
+            NS.cur = NS.n - 1 - (int)((y - CONTENT_TOP) / NOTE_RH);
             NS.view = 1; NS.shift = 0; NS.num = 0;
         } else return;
         build_app_page(AP.a);
@@ -2665,6 +2436,7 @@ static void notes_tap(float x, float y)
     else if (k == 3) { NS.num = !NS.num; relayout = 1; }
     else if (k == 4 && len) t[len - 1] = 0;
     else if ((k == 1 || k == 5) && len < NOTELEN - 1) {
+        NOTE_HM[NS.cur] = ST.h * 100 + ST.mi;
         if (NS.shift && c >= 'A' && c <= 'Z') { NS.shift = 0; relayout = 1; }
         t[len] = c; t[len + 1] = 0;
     }
@@ -2900,11 +2672,10 @@ static void own_extras(int a)
     const char *k = APPS[a].k;
     build_apnum();
     if (med_is(k)) med_build();
-    if (!tk_strcmp(k, "calc")) build_calc();
     if (!tk_strcmp(k, "notes")) build_note();
     if (!tk_strcmp(k, "search")) build_search();
     if (lx_is(k)) lx_build();
-    if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
+    ck_extras_of(k);                                 /* helper B5: the Clock's and the Calculator's layers */
     sv_extras(k);                                    /* survival-next: the tools' live layers */
     cm_extras(k);                                    /* helper I */
     relink();
@@ -2933,6 +2704,8 @@ static float gen_row_y(const appdef *A, int s, int r)
     }
     return y;
 }
+
+static int ap_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c);
 static void build_app_page(int a)
 {
     const infopg *inf = info_of(APPS[a].k);
@@ -3417,6 +3190,8 @@ static void app_tap(float x, float y)
         clk_tap(x, y);
     } else if (is_app("calc")) {
         calc_tap(x, y);
+    } else if (is_app("camera")) {
+        camera_tap(x, y);
     } else if (is_app("notes")) {
         notes_tap(x, y);
     } else if (is_app("search")) {
@@ -4035,6 +3810,7 @@ static void app_press(float x, float y)
                  (is_app("messages") && AS.thread >= 0) || (is_app("notes") && NS.view);
     if (sv_press(x, y, &r, &g, &rad, &c)) ok = 1;                 /* survival-next (E's bands): Emergency's tools, Settings > Medical Card */
     else if (cm_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* helper I: Recents, Messages */
+    else if (ap_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* helper B5: the Calculator's keys, the Clock's buttons */
     else if (pushed && BACK_HIT(x, y)) {
         r = g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D };   /* the glass back lights */
         rad = BACK_D / 2; c = W(.16f); ok = 1;
@@ -4058,28 +3834,12 @@ static void app_press(float x, float y)
                 }
             }
     } else if (is_app("notes") && !NS.view && NS.n) {
-        if (x >= GROUP_X && x < CONTENT_R && y >= CONTENT_TOP && y < CONTENT_TOP + 56 * NS.n) {
-            int i = (int)((y - CONTENT_TOP) / 56);
-            r = (tk_rect){ GROUP_X, CONTENT_TOP + 56 * i, GROUP_W, 56 };
-            g = (tk_rect){ GROUP_X, CONTENT_TOP, GROUP_W, 56.0f * NS.n - 1 };
+        if (x >= GROUP_X && x < CONTENT_R && y >= CONTENT_TOP && y < CONTENT_TOP + NOTE_RH * NS.n) {
+            int i = (int)((y - CONTENT_TOP) / NOTE_RH);
+            r = (tk_rect){ GROUP_X, CONTENT_TOP + NOTE_RH * i, GROUP_W, NOTE_RH };
+            g = (tk_rect){ GROUP_X, CONTENT_TOP, GROUP_W, NOTE_RH * NS.n };
             rad = 16; ok = 1;
         }
-    } else if (is_app("calc")) {
-        for (int i = 0; i < 19 && !ok; i++) {
-            float kx, ky, kw;
-            calc_key_rect(i, &kx, &ky, &kw);
-            if (x >= kx && x < kx + kw && y >= ky && y < ky + 78) { r = g = (tk_rect){ kx, ky, kw, 78 }; rad = 39; c = W(.3f); ok = 1; }
-        }
-    } else if (is_app("clock")) {
-        float yy = y - CLK_DY;
-        if (yy >= 350 && yy < 428 && ((x >= 36 && x < 114) || (x >= 276 && x < 354))) {
-            r = g = (tk_rect){ x < 195 ? 36.0f : 276.0f, 350 + CLK_DY, 78, 78 }; rad = 39; ok = 1;
-        } else if (yy >= 570 && yy < 614) {
-            if (CLK.tm_run) { if (x >= 125 && x < 265) { r = g = (tk_rect){ 125, 570 + CLK_DY, 140, 44 }; rad = 22; ok = 1; } }
-            else for (int i = 0; i < 3; i++)
-                if (x >= 24 + 125 * i && x < 116 + 125 * i) { r = g = (tk_rect){ 24 + 125.0f * i, 570 + CLK_DY, 92, 44 }; rad = 22; ok = 1; }
-        }
-        c = W(.18f);
     } else if ((is_app("notes") && NS.view) || is_app("search")) {
         int num = is_app("notes") ? NS.num : SR.num;
         if (y >= 548 && kb_rect(x, y, KR[num], !num, &r)) { g = r; rad = 6; c = W(.35f); ok = 1; }

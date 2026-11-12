@@ -1359,6 +1359,16 @@ int sh_sms_get(int i, sh_sms_t *m)
     sb_strcpy(m->why, sizeof(m->why), k.why);
     return 0;
 }
+/* B5: the Clock's alarms (kern/alarm.c): set by the user's own Save or switch; the self test never sets one */
+int sh_alarm_set(int i, int h, int m, int days, int on)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i; (void)h; (void)m; (void)days; (void)on;
+    return -1;
+#else
+    return alarm_set(i, h, m, days, on);
+#endif
+}
 /* B5: the store (the modem session's KMODEM_SMS_STORE): read marks, deletes at the user's own tap; refused in the
  * self test (it never changes what is stored) */
 #ifdef KMODEM_SMS_STORE

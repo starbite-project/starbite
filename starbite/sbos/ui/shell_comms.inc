@@ -1779,6 +1779,7 @@ static int cm_layers(tk_layer **o)
     if (!cmto.name) { tk_layer_init(&cmto, "msg-to"); cmto.hidden = 1; }
     if (!cmkb.name) { tk_layer_init(&cmkb, "msg-kb"); cmkb.hidden = 1; }
     n += ls_layers(o + n);                     /* the list and the inline title (shell_apps.inc) */
+    n += ck_layers(o + n);                     /* the Clock's wheels, the Calculator's lit operator */
     if (!cmact.name) { tk_layer_init(&cmact, "swipe-action"); cmact.hidden = 1; }
     if (!cmactw.name) { tk_layer_init(&cmactw, "swipe-words"); cmactw.hidden = 1; }
     if (!cmmenu.name) { tk_layer_init(&cmmenu, "bubble-menu"); cmmenu.hidden = 1; }
@@ -1828,6 +1829,7 @@ static void cm_closed(void)
     relayer(&cmkb); cmkb.hidden = 1;
     swp_end();
     mnu_close();
+    ck_closed();
     scv_off(&LS);
     ls_nav_build(0);
     cl_kind = CL_NONE;
@@ -1879,6 +1881,7 @@ static int cm_touch(int ph, float x, float y, float t)
             return 1;
         }
         if (MNU.on || (SWP.on && SWP.open)) { CM.own = 7; CM.hx = x; CM.hy = y; return 1; }
+        if (!(CV.on && CV.at > 0 && !CV.mini) && ck_touch(0, x, y, t)) { CM.own = 8; return 1; }   /* a Clock wheel */
         float dx = x - PAD_CX, dy = y - PAD_CY;
         if (cm_pad_ready() && dx * dx + dy * dy <= 41 * 41) { CM.own = 2; cm_hold_begin(x, y, t); return 1; }
         if (cm_list_ready() && scv_contains(&LS, x, y)) {
@@ -1891,6 +1894,7 @@ static int cm_touch(int ph, float x, float y, float t)
         return 0;
     }
     if (!CM.own) return 0;
+    if (CM.own == 8) { ck_touch(ph, x, y, t); if (ph == 2) CM.own = 0; return 1; }
     if (CM.own == 7) {                                /* the tap after an open swipe or menu: its action, or it closes */
         if (ph != 2) return 1;
         CM.own = 0;
@@ -1977,6 +1981,7 @@ static int cm_tick(float dt, float t)
         mv = 1;
     }
     if (scv_tick(&LS, dt)) { ls_moved(); mv = 1; }
+    mv |= ck_tick(dt);
     if (CM.own == 3 && LS.down && !LS.moved && cl_kind == CL_BUBBLES && !MNU.on && t - CM.down_t >= 450) {
         int i = scv_hit(&LS, CM.hy, 0);                /* a bubble held: its menu (the lift then does nothing) */
         if (i >= 0) { LS.down = 0; CM.own = 5; mnu_open(i); }
@@ -1992,7 +1997,7 @@ static int cm_tick(float dt, float t)
 static int cm_moving(void)
 {
     return CM.hold || (CV.on && CV.a != CV.at) || CV.slide || (CV.on && CV.thumb > 0 && CV.mode == CVM_INCOMING && !CV.answering) ||
-           scv_moving(&LS);
+           scv_moving(&LS) || ck_moving();
 }
 /* idle: the call screen's static parts while Cellular is on (gone with it) */
 static void cm_idle(void)
@@ -2050,6 +2055,7 @@ static int cm_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
  * "callhold" v (the call button's ring at v); "slide" v (the answer slider's thumb at v) */
 static int cm_set(const char *what, const char *key, float v)
 {
+    if (ck_set(what, key, v)) return 1;               /* B5: the Clock's stills */
     if (!tk_strcmp(what, "thread")) {
         if (!key[0] || !tk_strcmp(key, "list")) AS.thread = -1;
         else if (!tk_strcmp(key, "new")) { AS.thread = 1; CM.to[0] = 0; }

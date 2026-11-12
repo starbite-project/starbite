@@ -56,6 +56,9 @@ void sh_bright_now(int level);
 /* P2y: the apps' live values besides sh_status: charging or not, the software's name and version */
 void sh_sysinfo(int charging, const char *version);
 void sh_alarm(int on, int h, int m);
+/* B5: the Clock's alarm list to the kernel (alarm.c's alarm_set: slot i of 4, days a bit per weekday, 0 once); < 0
+ * refused (the self test) */
+int sh_alarm_set(int i, int h, int m, int days, int on);
 /* P2z, the Clock app: when to come back (ms; < 0 nothing pending), the redraw then (1: something changed), and the
  * platform's vibration for a timer that ran out (no sound) */
 int sh_next_update(float t_ms);
