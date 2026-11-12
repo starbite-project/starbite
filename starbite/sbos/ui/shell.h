@@ -602,3 +602,20 @@ enum { SH_ORI_PORTRAIT = 0, SH_ORI_TURNED_LEFT = 1, SH_ORI_UPSIDE_DOWN = 2, SH_O
 int sh_orientation(void);
 int sh_orientation_lock(void);
 void sh_orientation_lock_set(int on);
+
+/* Track A, cp7: a Bluetooth keyboard (one, classic, boot protocol; the drivers track's bt_pair.c). Settings >
+ * Bluetooth: sh_bt_pair(i) on a scan row (bt_is_keyboard ones), then show sh_bt_pair_state():
+ * SH_BTP_CODE: "Type <sh_bt_pair_code()> on the keyboard, then press Enter"; CONNECTED: the keyboard works;
+ * FAILED: sh_bt_pair_why(). Its key is kept (blob bt.key) and it comes back when Bluetooth is on. Typed keys arrive in
+ * sh_hw_key (HID usage, 1 down / 0 up, the character: US layout, '\n' Enter, 0x08 Backspace; 0 for none); the
+ * shell defines it (a weak default drops them). No key repeat from the kernel (the UI repeats). */
+enum { SH_BTP_IDLE = 0, SH_BTP_CONNECTING, SH_BTP_CODE, SH_BTP_SECURING, SH_BTP_CONNECTED, SH_BTP_WAITING, SH_BTP_FAILED };
+int sh_bt_pair(int i);
+int sh_bt_pair_state(void);
+const char *sh_bt_pair_code(void);
+const char *sh_bt_pair_why(void);
+int sh_bt_kbd_paired(void);
+int sh_bt_kbd_connected(void);
+void sh_bt_unpair(void);
+int sh_bt_reconnect(void);
+void sh_hw_key(int usage, int down, uint32_t unicode);

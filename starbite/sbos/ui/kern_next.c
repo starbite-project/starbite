@@ -2590,7 +2590,7 @@ int sh_bt_on(int on)
     if (m >= 0) bt_set_module(m);
     if (bt_on() < 0) return -1;
     sb_log("next: bluetooth: on (the shell)");
-    bt_arm(1);
+    bt_arm(1);                                       /* (a paired keyboard: page scan goes on when the chip is up) */
     return 0;
 }
 int sh_bt_state(void)
@@ -2854,8 +2854,10 @@ static void drv_screen(int on)
     nledpol_screen(1);                               /* the missed call / message seen on the lock screen */
     if (ab_on) kt_set(KT_UI, KT_DRV_AUTO, sb_ms(), 300, 0);
 }
+static void bt_kbd_init(void);                       /* Track A, cp7: the keyboard's key store (below) */
 static void drv_after_bake(void)
 {
+    bt_kbd_init();
 #ifdef SBOS_SELFTEST_NEXT
     sb_log("next: drivers: the haptic level, Auto-Brightness and the LED policy would start (a dry run: the self test)");
 #else
@@ -3032,3 +3034,53 @@ int sh_orientation(void)
 }
 int sh_orientation_lock(void) { return sh_pref_int("display.orientlock", 0) == 1; }
 void sh_orientation_lock_set(int on) { sh_pref_set_int("display.orientlock", on ? 1 : 0); if (on) ori_last = SH_ORI_PORTRAIT; }
+
+/* ---- Track A, cp7: the Bluetooth keyboard (the drivers track's bt_pair.c / bt_hid.c) for the shell ----
+ * One paired keyboard. Its link key lives in the blob "bt.key" (6 bytes address + 16 bytes key; never logged): the
+ * chip asks for it through bt_set_link_key_store. Keys typed on it go to the shell's sh_hw_key (a weak default drops
+ * them until the UI handles them). */
+static int bt_key_get(const uint8_t addr[6], uint8_t key[16])
+{
+    uint8_t b[22];
+    if (sh_blob_get("bt.key", b, sizeof b) != 22) return 0;
+    for (int i = 0; i < 6; i++) if (b[i] != addr[i]) return 0;
+    tk_memcpy(key, b + 6, 16);
+    tk_memset(b, 0, sizeof b);
+    return 1;
+}
+static void bt_key_put(const uint8_t addr[6], const uint8_t *key16)
+{
+    if (!key16) { (void)sh_blob_put("bt.key", 0, 0); return; }
+    uint8_t b[22];
+    tk_memcpy(b, addr, 6);
+    tk_memcpy(b + 6, key16, 16);
+    (void)sh_blob_put("bt.key", b, sizeof b);
+    tk_memset(b, 0, sizeof b);
+}
+__attribute__((weak)) void sh_hw_key(int usage, int down, uint32_t unicode) { (void)usage; (void)down; (void)unicode; }
+static void bt_key_cb(int usage, int down, uint32_t unicode) { sh_hw_key(usage, down, unicode); }
+static void bt_kbd_init(void)
+{
+    bt_set_link_key_store(bt_key_get, bt_key_put);
+    bt_hid_set_key_cb(bt_key_cb);
+    uint8_t b[22];
+    if (sh_blob_get("bt.key", b, sizeof b) == 22) bt_set_paired(b);   /* only that keyboard may come back */
+    tk_memset(b, 0, sizeof b);
+}
+int sh_bt_pair(int i)
+{
+    DRV_DRY("Bluetooth pairing", -1);
+    int r = bt_pair(i);
+    if (r >= 0) bt_arm(1);
+    return r;
+}
+_Static_assert((int)SH_BTP_CODE == (int)BT_PAIR_CODE && (int)SH_BTP_CONNECTED == (int)BT_PAIR_CONNECTED &&
+               (int)SH_BTP_FAILED == (int)BT_PAIR_FAILED,
+               "shell.h's SH_BTP_* are bt.h's BT_PAIR_*");
+int sh_bt_pair_state(void) { return bt_pair_state(); }
+const char *sh_bt_pair_code(void) { return bt_pair_code(); }
+const char *sh_bt_pair_why(void) { return bt_pair_why(); }
+int sh_bt_kbd_paired(void) { uint8_t a[6]; return bt_paired(a); }
+int sh_bt_kbd_connected(void) { return bt_hid_connected(); }
+void sh_bt_unpair(void) { bt_unpair(); bt_arm(1); }
+int sh_bt_reconnect(void) { int r = bt_hid_reconnect(); if (r >= 0) bt_arm(1); return r; }
