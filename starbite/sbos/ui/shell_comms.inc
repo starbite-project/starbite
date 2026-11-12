@@ -827,9 +827,23 @@ static void cv_ctl(void)
     cvctl.hidden = 0;
     CV.d_audio = CALL.audio; CV.d_muted = CALL.muted; CV.d_keypad = CV.keypad;
 }
+/* Track B: the proximity sensor while the call is at the ear (sbos-core-api.md 11): on while the call screen shows a
+ * call that isn't ringing or ending and the audio isn't on the speaker; off when the speaker goes on or the screen
+ * goes (the kernel ends it by itself with the call). The kernel darkens the panel: no UI here. Only changes reach
+ * the kernel. */
+static int cv_prox_on;
+static void cv_prox_sync(void)
+{
+    int want = CV.on && CV.at > 0 && CV.mode == CVM_CALL && cm_live(CALL.state) && CALL.state != SH_CALL_INCOMING &&
+               CALL.state != SH_CALL_ENDING && !CV.ending && CALL.audio != SH_AUDIO_SPEAKER;
+    if (want == cv_prox_on) return;
+    cv_prox_on = want;
+    sh_call_proximity(want);
+}
 /* where everything is for the mode (and the lock: the slider) */
 static void cv_place(void)
 {
+    cv_prox_sync();
     int inc = CV.mode == CVM_INCOMING, slider = inc && locked;
     tk_layer *P[5] = { &cvdec, &cvacc, &cvend, &cvtrack, &cvthumb };
     for (int i = 0; i < 5; i++) { P[i]->x = P[i]->bx; P[i]->y = P[i]->by; }
@@ -908,6 +922,7 @@ static void cv_hide(void)
     CV.at = 0;                                /* a .25 s fade (cm_tick), then everything goes */
     CV.close_at = -1; CV.pend_close = 0;
     cvhl.hidden = 1;
+    cv_prox_sync();                           /* Track B: the panel lights again at once */
 }
 static void cv_ended(void)
 {
