@@ -2954,6 +2954,14 @@ static int app_own(int a)
            !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes") ||
            !tk_strcmp(k, "search") || info_of(k) || med_is(k) || lx_is(k) || sv_own(k) || !tk_strcmp(k, "maps");
 }
+#ifdef SBTK_STARTUP_PREVIEW
+/* Track J's temporary preview hook (host only: tools/startup-preview.sh), until Track B's shell_settings.inc includes
+ * shell_startup.inc and wires it: Settings' sub-page 9 is Startup */
+static void page_startup(dc *d);
+static int startup_tap(float x, float y);
+static void startup_set(const char *key, float v);
+static void settings_back(void) { AS.sub = 0; build_app_page(AP.a); }
+#endif
 static void own_strip(int a, int i)
 {
     const char *k = APPS[a].k;
@@ -2970,6 +2978,9 @@ static void own_strip(int a, int i)
     else if (!tk_strcmp(k, "calc")) page_calc(&d);
     else if (!tk_strcmp(k, "light")) page_light(&d);
     else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
+#ifdef SBTK_STARTUP_PREVIEW
+    else if (!tk_strcmp(k, "settings") && AS.sub == 9) page_startup(&d);
+#endif
     else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else if (AS.sub == 4) sv_page_card_edit(&d); else if (AS.sub == 5) pc_page(&d); /* Track A */
                                           else if (ta_page(&d)) ; else page_display(&d); }   /* Track A: Date & Time */
     else if (!tk_strcmp(k, "notes")) page_notes(&d);
@@ -3528,6 +3539,10 @@ static void app_tap(float x, float y)
             lock_ver++;
             build_app_page(AP.a);
         }
+#ifdef SBTK_STARTUP_PREVIEW
+    } else if (is_app("settings") && AS.sub == 9) {
+        startup_tap(x, y);
+#endif
     } else if (is_app("settings") && AS.sub == 2) {
         wifi_tap(x, y);
     } else if (is_app("settings") && AS.sub == 3) {
@@ -3650,6 +3665,9 @@ void sh_restore(void)
     sw_restore();
     if (sh_pref_int("cc.wifi", 0) == 1) (void)sh_wifi_power(1);   /* a refusal leaves it off; the choice stays */
 }
+#ifdef SBTK_STARTUP_PREVIEW
+#include "shell_startup.inc"                        /* Track J's preview hook (Track B includes it after shell_settings.inc) */
+#endif
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
@@ -3973,6 +3991,11 @@ void sh_set(const char *what, const char *key, float v)
     } else if (!tk_strcmp(what, "tab")) {
         static const char *const TK[4] = { "fav", "rec", "con", "pad" };
         for (int t = 0; t < 4; t++) if (!tk_strcmp(TK[t], key)) { AS.tab = t; build_app_page(AP.a); }
+#ifdef SBTK_STARTUP_PREVIEW
+    } else if (!tk_strcmp(what, "startup")) {     /* Track J's preview: startup=VIEW:N (Settings open first) */
+        AS.sub = 9;
+        if (AP.on) startup_set(key, v);
+#endif
     } else if (!tk_strcmp(what, "sub")) {
         /* the stills: a Settings page (display, wifi, cell; nothing is switched on) */
         AS.sub = !tk_strcmp(key, "display") ? 1 : !tk_strcmp(key, "wifi") ? 2 : !tk_strcmp(key, "cell") ? 3 : 0;

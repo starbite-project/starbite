@@ -10,6 +10,10 @@
  *     never read or written; the card is also home without a table when its header says HOME; without a table
  *     (or with a damaged one) and no HOME card everything is as before (UFS).
  * Every scenario runs in its own process (fork), so libsb's statics start fresh each time.
+ * Since the Startup pages (2026-11-12) also libsb's REAL sbfw_api.c on the same media: the settings struct round trip
+ * (every other byte of the record kept), one-shot requests (written, refused, the mailbox key), the boot menu /
+ * Recovery keys and the crash reports from fixtures/sbfw/sbfw-crashlog.bin (made by the loader's own encoder:
+ * sbfw-crashlog-gen.c); the catalog and sb_boot_next are fakes here.
  *   sbfw-store-test FIXTURE_DIR
  */
 #include <stdio.h>
@@ -17,8 +21,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <setjmp.h>
 #include "sb.h"
 #include "store.h"
+#include "catalog.h"
+#include "sbfw_api.h"
 #include "ufs.h"
 #include "sd.h"
 
@@ -233,6 +240,46 @@ static void auth_store(unsigned medium)
     CHECK(sb_gate_open(&a), "a store authorisation opens");
 }
 
+/* ---- fakes for sbfw_api.c: a small catalog, the mailbox (sb_boot_next comes back here) ------------------------ */
+static struct cat_ent fcat[5];
+static unsigned fcat_n;
+static void fcat_add(const char *key, const char *name, unsigned method)
+{
+    struct cat_ent *c = &fcat[fcat_n++];
+    memset(c, 0, sizeof(*c));
+    strcpy(c->key, key);
+    strcpy(c->name, name);
+    c->method = (uint8_t)method;
+}
+static void fcat_init(void)
+{
+    if (fcat_n)
+        return;
+    fcat_add("starbite-os", "Starbite OS", M_BARE);
+    fcat_add("linux-mainline", "Linux", M_LINUX);
+    fcat_add("ios26", "iOS 26", M_XNU);
+    fcat_add("win11", "Windows 11", M_UEFI);
+    fcat_add("android", "One UI 8", M_ANDROID);
+}
+unsigned cat_count(void) { fcat_init(); return fcat_n; }
+const struct cat_ent *cat_get(unsigned i) { return i < cat_count() ? &fcat[i] : 0; }
+int cat_find(const char *key)
+{
+    for (unsigned i = 0; i < cat_count(); ++i)
+        if (!strcmp(fcat[i].key, key))
+            return (int)i;
+    return -1;
+}
+static jmp_buf boot_jb;
+static char boot_key[24];
+void sb_boot_next(const char *key)
+{
+    snprintf(boot_key, sizeof(boot_key), "%s", key);
+    longjmp(boot_jb, 1);
+}
+
+static uint8_t fx_crashlog[3 * 4096];
+
 /* ---- scenarios ------------------------------------------------------------------------------------------ */
 
 static void t_fixtures(void)
@@ -441,6 +488,191 @@ static void t_table_ufs(void)
     CHECK(store_volatile_grant("sbos-state", 1048576, &e) && e.medium == STORE_UFS, "slot on UFS");
 }
 
+/* sbfw_api.c: the settings struct on the card (card only); every byte it does not own stays */
+static void t_api_settings(void)
+{
+    media(1, SET_SD_STORE);
+    table(STORE_SD, C_FIRST, SBFW_TF_CARD_ONLY | SBFW_TF_SHELL, 0);
+    sb_fw_read();
+    uint8_t *b2 = card + 2 * 4096;
+    b2[104] = 1; b2[105] = 2; b2[106] = 2; b2[107] = 6; b2[108] = 2; b2[109] = 0; b2[110] = 60; b2[111] = 0;
+    p32(b2 + 24, 1U << SET_LOG_SHIFT | 1U << SET_POST_SHIFT | SET_SD_STORE | 0x1000U);   /* + a bit nobody knows */
+    p32(b2 + 20, 7);
+    p32(b2 + 12, sb_crc32(b2 + 16, 240));
+    struct sbfw_settings s;
+    CHECK(sbfw_settings_read(&s) == 1, "read");
+    CHECK(!strcmp(s.default_key, "linux-pmos") && s.timeout_s == 7 && s.debug_level == 1 && s.post == 1, "key, timeout, levels");
+    CHECK(s.crash_mode == 1 && s.crash_detail == 2 && s.crash_action == 2 && s.wdt_mode == 2 && s.wdt_s == 60,
+          "the loader's crash / watchdog bytes");
+    CHECK(s.shell == 1 && !strcmp(s.shell_key, "starbite-next"), "shell mode, shell key");
+    uint8_t before[4096];
+    memcpy(before, b2, 4096);
+
+    CHECK(sbfw_settings_write(&s) == SB_W_AUTH && sd_writes == 0, "no authorisation: nothing written");
+    auth_store(SB_MED_SD);
+    struct sbfw_settings w = s;
+    w.debug_level = 4;
+    CHECK(sbfw_settings_write(&w) == SBFW_E_INVAL, "debug level 4 refused");
+    w = s; w.post = 3;
+    CHECK(sbfw_settings_write(&w) == SBFW_E_INVAL, "POST 3 refused");
+    w = s; w.wdt_mode = SBFW_WDT_FIXED; w.wdt_s = 9;
+    CHECK(sbfw_settings_write(&w) == SBFW_E_INVAL, "watchdog 9 s refused");
+    w = s; w.crash_action = 3;
+    CHECK(sbfw_settings_write(&w) == SBFW_E_INVAL && sd_writes == 0, "crash action 3 refused, nothing written");
+
+    w = s;
+    strcpy(w.default_key, "macos-sequoia");
+    w.timeout_s = 12;
+    w.debug_level = SBFW_DEBUG_HIGHEST;
+    w.post = SBFW_POST_OFF;
+    w.wdt_mode = SBFW_WDT_FIXED;
+    w.wdt_s = 30;
+    w.crash_mode = SBFW_CRASH_ON;
+    w.crash_action = SBFW_AFTER_RECOVERY;
+    w.crash_detail = 3;
+    w.shell = 0;
+    strcpy(w.shell_key, "starbite-os");
+    CHECK(sbfw_settings_write(&w) == 0 && sd_writes == 1, "written on the card");
+    struct sbfw_settings r;
+    CHECK(sbfw_settings_read(&r) == 1 && !strcmp(r.default_key, w.default_key) && r.timeout_s == w.timeout_s &&
+          r.debug_level == w.debug_level && r.post == w.post && r.wdt_mode == w.wdt_mode && r.wdt_s == w.wdt_s &&
+          r.crash_mode == w.crash_mode && r.crash_action == w.crash_action && r.crash_detail == w.crash_detail &&
+          r.shell == w.shell && !strcmp(r.shell_key, w.shell_key), "read back as written");
+    CHECK(g32(b2 + 16) == g32(before + 16) + 1 && g32(b2 + 12) == sb_crc32(b2 + 16, 240), "seq + 1, CRC");
+    CHECK(g32(b2 + 24) == (3U << SET_LOG_SHIFT | 2U << SET_POST_SHIFT | SET_SD_STORE | 0x1000U), "flags: levels, the rest kept");
+    CHECK(b2[104] == 0 && b2[105] == 3 && b2[106] == 1 && b2[107] == 6 && b2[108] == 2 && b2[110] == 30 && b2[111] == 0,
+          "bytes 104..111 (crash_timeout kept)");
+    CHECK(b2[115] == 0 && !strcmp((const char *)b2 + 144, "starbite-os"), "fw_flags, shell_key");
+    CHECK(!memcmp(b2 + 56, before + 56, 48), "last_key, next_key kept");
+    CHECK(!memcmp(b2 + 112, before + 112, 3) && !memcmp(b2 + 116, before + 116, 28) && !memcmp(b2 + 168, before + 168, 88),
+          "\"FW\" v1, the request fields, the undo record and the reserved bytes kept");
+    CHECK(!memcmp(b2 + 256, before + 256, 4096 - 256), "past the record: kept");
+    w.wdt_mode = SBFW_WDT_ENTRY;
+    CHECK(sbfw_settings_write(&w) == 0 && b2[108] == 0 && b2[110] == 0, "per entry: wdt_s cleared");
+    sb_gate_close();
+}
+
+/* sbfw_api.c: no home store: nothing to read or write */
+static void t_api_nohome(void)
+{
+    media(1, SET_SD_STORE);
+    table(STORE_SD, C_FIRST + 8, SBFW_TF_CARD_ONLY, 0);
+    sb_fw_read();
+    struct sbfw_settings s;
+    CHECK(sbfw_settings_read(&s) == 0 && !s.default_key[0] && !s.shell, "defaults");
+    auth_store(SB_MED_SD);
+    CHECK(sbfw_settings_write(&s) == SBFW_E_NOHOME, "no home: refused");
+    CHECK(sbfw_request_arm("linux-mainline", SBFW_REQ_SINGLE) == SBFW_E_NOHOME, "no request");
+    CHECK(sbfw_crash_count() == SBFW_E_NOLOG, "no crash log");
+    CHECK(sd_writes == 0 && ufs_writes == 0, "nothing written");
+}
+
+/* sbfw_api.c: one-shot requests and the mailbox keys */
+static void t_api_request(void)
+{
+    media(1, SET_SD_STORE);
+    table(STORE_SD, C_FIRST, SBFW_TF_CARD_ONLY, 0);
+    sb_fw_read();
+    uint8_t *b2 = card + 2 * 4096;
+    unsigned a = 9, st = 9;
+    char k[24];
+    CHECK(sbfw_request_status(&a, &st, k) == 513 && a == 3 && st == SBFW_ST_ARMED && !strcmp(k, "linux-pmos"), "the fixture's request");
+    /* the loader's table of what fits (sbfmt.c sbfw_req_fits) */
+    static const char want[9][6] = { { 0, 0, 0, 0, 0, 0 }, { 0, 1, 1, 1, 1, 1 }, { 0, 0, 0, 0, 0, 1 }, { 0, 0, 1, 0, 0, 0 },
+                                     { 0, 0, 1, 0, 0, 0 }, { 0, 1, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 1, 0 },
+                                     { 0, 0, 0, 0, 0, 0 } };
+    int fits_ok = 1;
+    for (unsigned q = 0; q < 9; ++q)
+        for (unsigned m = 0; m < 6; ++m)
+            fits_ok &= sbfw_req_fits(q, m) == want[q][m];
+    CHECK(fits_ok && !sbfw_req_fits(9, 2), "sbfw_req_fits: the loader's table");
+    CHECK(!strcmp(sbfw_req_name(SBFW_REQ_XNU_SINGLE), "xnu-single") && !sbfw_req_name(0) && !sbfw_req_name(9), "names");
+
+    auth_store(SB_MED_SD);
+    CHECK(sbfw_request_arm("win11", SBFW_REQ_WINRE) == SBFW_E_INVAL, "WinRE: plan only");
+    CHECK(sbfw_request_arm("starbite-os", SBFW_REQ_NO_SHELL) == SBFW_E_INVAL, "no-shell: not a start's request");
+    CHECK(sbfw_request_arm("ios26", 0) == SBFW_E_INVAL && sbfw_request_arm("ios26", 9) == SBFW_E_INVAL, "unknown actions");
+    CHECK(sbfw_request_arm("linux-mainline", SBFW_REQ_XNU_SINGLE) == SBFW_E_NOFIT, "XNU single user on Linux: no");
+    CHECK(sbfw_request_arm("android", SBFW_REQ_SAFE) == SBFW_E_NOFIT, "safe mode on Android: no");
+    CHECK(sbfw_request_arm("nothing", SBFW_REQ_VERBOSE) == SBFW_E_NOFIT, "an unknown key");
+    CHECK(sd_writes == 0, "refusals write nothing");
+
+    uint8_t before[4096];
+    memcpy(before, b2, 4096);
+    CHECK(sbfw_request_arm("linux-mainline", SBFW_REQ_PREV) == 0 && sd_writes == 1, "armed: previous kernel");
+    CHECK(b2[116] == SBFW_REQ_PREV && b2[117] == SBFW_ST_ARMED && (b2[118] | b2[119] << 8) == 514 &&
+          !strcmp((const char *)b2 + 120, "linux-mainline"), "req_action, req_state, req_seq + 1, req_key");
+    CHECK(b2[115] == before[115] && !memcmp(b2 + 144, before + 144, 112) && !memcmp(b2 + 20, before + 20, 92),
+          "the rest of the record kept");
+    CHECK(sbfw_request_status(&a, &st, k) == 514 && a == SBFW_REQ_PREV && st == SBFW_ST_ARMED, "status");
+
+    boot_key[0] = 0;
+    if (!setjmp(boot_jb))
+        sbfw_request("ios26", SBFW_REQ_XNU_SINGLE);
+    CHECK(!strcmp(boot_key, "ios26") && b2[116] == SBFW_REQ_XNU_SINGLE && (b2[118] | b2[119] << 8) == 515 && sd_writes == 2,
+          "sbfw_request: written, then the mailbox key");
+    boot_key[0] = 0;
+    int r = 0;
+    if (!setjmp(boot_jb))
+        r = sbfw_request("ios26", SBFW_REQ_SINGLE);
+    CHECK(r == SBFW_E_NOFIT && !boot_key[0] && sd_writes == 2, "refused: no restart");
+
+    /* an applied write action with its undo still pending: refused */
+    struct star_settings ss;
+    struct sbfw_rec fr;
+    settings_load(&ss);
+    settings_fw_load(&fr);
+    fr.req_state = SBFW_ST_APPLIED;
+    fr.undo[0] = 3;
+    settings_fw_save(&ss, &fr);
+    CHECK(sbfw_request_arm("linux-mainline", SBFW_REQ_SINGLE) == SBFW_E_BUSY, "an undo pending: busy");
+    fr.undo[0] = 0;
+    settings_fw_save(&ss, &fr);
+    CHECK(sbfw_request_arm("linux-mainline", SBFW_REQ_SINGLE) == 0, "a command-line request applied: a new one is fine");
+    sb_gate_close();
+
+    if (!setjmp(boot_jb))
+        sb_boot_menu_next();
+    CHECK(!strcmp(boot_key, "menu"), "the boot menu once: \"menu\"");
+    if (!setjmp(boot_jb))
+        sb_boot_recovery_next();
+    CHECK(!strcmp(boot_key, "recovery"), "Starbite Recovery: \"recovery\"");
+}
+
+/* sbfw_api.c: the crash reports, from the loader's own encoding */
+static void t_api_crash(void)
+{
+    media(1, SET_SD_STORE);
+    table(STORE_SD, C_FIRST, SBFW_TF_CARD_ONLY, 0);
+    sb_fw_read();
+    uint8_t *cl = card + (C_DATA + 1) * 4096;
+    memset(cl, 0, 16 * 4096);
+    CHECK(sbfw_crash_count() == SBFW_E_NOLOG, "an empty crash log: none");
+    memcpy(cl, fx_crashlog, sizeof(fx_crashlog));
+    CHECK(sbfw_crash_count() == 2, "two reports");
+    struct sbfw_crash c;
+    CHECK(sbfw_crash_get(0, &c) == 0, "the newest");
+    CHECK(!strcmp(c.key, "linux-pmos") && !strcmp(c.os, "postmarketOS") && !strcmp(c.kind, "KERNEL PANIC") &&
+          c.kind_id == 3 && c.severity == 2 && c.method == 2 && c.seq == 2, "a Linux panic");
+    CHECK(c.epoch == 1794470123ULL && !strcmp(c.line, "panic: Attempted to kill init! exitcode=0x0000000b"), "event time, reason");
+    CHECK(sbfw_crash_get(1, &c) == 0 && !strcmp(c.key, "ios26") && !strcmp(c.kind, "HANG (OS TIMER)") && c.seq == 1, "the older");
+    CHECK(c.epoch == 1794400100ULL && !strcmp(c.line, "STARBITE: sweetreboot timer (no panic)"),
+          "detected time, the first text line after \"[...]\": %s", c.line);
+    CHECK(sbfw_crash_get(2, &c) == SBFW_E_INVAL && !c.key[0], "no third");
+    /* the ring wrapped: 17 reports, next slot 1 -> 15 there, the newest in slot 0 */
+    p32(cl + 24, 1);
+    p32(cl + 28, 17);
+    p32(cl + 12, sb_crc32(cl + 16, 1024 - 16));
+    CHECK(sbfw_crash_count() == 15, "15 at most");
+    CHECK(sbfw_crash_get(0, &c) == 0 && !strcmp(c.key, "ios26"), "slot 0 is the newest now");
+    CHECK(sbfw_crash_get(1, &c) == -6, "slot 14: no report there");
+    cl[4096 + 300] ^= 1;
+    CHECK(sbfw_crash_get(0, &c) == -6, "a damaged report");
+    cl[500] ^= 1;
+    CHECK(sbfw_crash_count() == SBFW_E_NOLOG, "a damaged head: no crash log");
+    CHECK(sd_writes == 0 && ufs_reads == 0, "read only, UFS untouched");
+}
+
 static int run(const char *name, void (*f)(void))
 {
     fflush(stdout);
@@ -485,6 +717,20 @@ int main(int argc, char **argv)
     verbose = argc > 2;
     load(argv[1], "sbfw-table.bin", fx_table);
     load(argv[1], "sbfw-settings.bin", fx_settings);
+    for (int i = 0; i < 3; ++i) {
+        char nm[64];
+        static uint8_t blk[4096];
+        snprintf(nm, sizeof(nm), "sbfw-crashlog.bin");
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/%s", argv[1], nm);
+        FILE *f = fopen(path, "rb");
+        if (!f || fseek(f, 4096L * i, SEEK_SET) || fread(blk, 1, 4096, f) != 4096) {
+            printf("cannot read %s\n", path);
+            return 2;
+        }
+        fclose(f);
+        memcpy(fx_crashlog + 4096 * i, blk, 4096);
+    }
     int bad = 0;
     bad += run("fixtures", t_fixtures);
     bad += run("table: card only", t_card_only);
@@ -495,6 +741,10 @@ int main(int argc, char **argv)
     bad += run("no table: UFS + SET_SD_STORE", t_ufs_sd_allowed);
     bad += run("table: base mismatch", t_mismatch);
     bad += run("table: UFS", t_table_ufs);
+    bad += run("api: settings", t_api_settings);
+    bad += run("api: no home", t_api_nohome);
+    bad += run("api: requests", t_api_request);
+    bad += run("api: crash reports", t_api_crash);
     printf("sbfw-store-test: %d scenario(s) failed\n", bad);
     return bad ? 1 : 0;
 }

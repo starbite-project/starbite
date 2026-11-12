@@ -145,6 +145,15 @@ int settings_fw_load(struct sbfw_rec *r);
 /* s's fields plus r as the SBFW part (the loader's crash / watchdog bytes 104..111 kept), written and read back:
  * 0, or < 0 / SB_W_* as settings_save (the same authorisation). */
 int settings_fw_save(struct star_settings *s, const struct sbfw_rec *r);
+/* The loader's crash / watchdog bytes 104..111 of the home record (shim/starlte/store.h: 104 crash_mode, 105
+ * crash_detail, 106 crash_action, 107 crash_timeout, 108 wdt_mode, 109 0, 110 u16 wdt_s), zeros without a record:
+ * 1 if a valid record was read. */
+int settings_ldr_load(uint8_t ldr[8]);
+/* settings_fw_save with those 8 bytes replaced too (sbfw_api.c's sbfw_settings_write): 0, or < 0 / SB_W_*. */
+int settings_all_save(struct star_settings *s, const struct sbfw_rec *r, const uint8_t ldr[8]);
+/* Block k of entry e read (no CRC check: for volatile entries such as "crashlog") into dst (plain RAM, 4096 bytes):
+ * 0, -1 read error, -3 past the entry. */
+int store_read_block(const struct store_ent *e, uint64_t k, void *dst);
 
 /* ---- writer (Engineer OS v2): append only, every block through the write fence, read back ---- */
 struct store_writer {
