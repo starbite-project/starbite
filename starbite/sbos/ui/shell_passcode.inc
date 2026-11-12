@@ -26,6 +26,7 @@ static struct {
 } PC = { .resume = -1, .sh = -1, .key = -1 };
 static tk_layer pcl, pcbg, pchead, pcdots, pckeys, pcbot, pchl;
 static tk_bmp pckey;                /* one key's glass circle, baked once a show, copied ten times */
+static float pc_hl_left;            /* cp6: the lit key's least time left (s) */
 
 #define PC_KY 318.0f                /* the keypad's first row (its circles' tops) */
 #define PC_KP 94.0f                 /* the rows' pitch */
@@ -420,14 +421,15 @@ static int pc_touch(int phase, float x, float y, float t)
             pchl.y = pchl.by + PT(pc_ky(PC.key) - pc_ky(1));
             pchl.hidden = 0;
             pc_digit(PC.key);                        /* iOS: the digit at the touch, the light while held */
+            pc_hl_left = .12f;                       /* cp6: a quick tap still shows its light (0.12 s at least) */
         }
         return 1;
     }
     if (phase == 1) {
-        if (PC.key >= 0 && pc_key_at(x, y) != PC.key) pchl.hidden = 1;
+        if (PC.key >= 0 && pc_key_at(x, y) != PC.key) { pchl.hidden = 1; pc_hl_left = 0; }
         return 1;
     }
-    pchl.hidden = 1;
+    if (pc_hl_left <= 0) pchl.hidden = 1;          /* cp6: else pc_tick turns it off when its time is up */
     int was = PC.key;
     PC.key = -1;
     if (was >= 0) return 1;
@@ -463,6 +465,11 @@ static int pc_tick(float dt, float t)
 {
     (void)t;
     int mv = 0;
+    if (pc_hl_left > 0) {                          /* cp6: a key's light, its least time */
+        pc_hl_left -= dt;
+        if (pc_hl_left <= 0) { pc_hl_left = 0; if (PC.key < 0) pchl.hidden = 1; }
+        mv = 1;
+    }
     if (PC.a != PC.at) {
         PC.a = PC.at > PC.a ? tk_minf(PC.at, PC.a + dt / .22f) : tk_maxf(PC.at, PC.a - dt / .22f);
         pcl.alpha = PC.a;
@@ -498,7 +505,7 @@ static int pc_tick(float dt, float t)
     }
     return mv | PC.reorder;
 }
-static int pc_moving(void) { return PC.a != PC.at || PC.sh >= 0 || PC.ev > 0 || PC.reorder; }
+static int pc_moving(void) { return PC.a != PC.at || PC.sh >= 0 || PC.ev > 0 || PC.reorder || pc_hl_left > 0; }
 /* the back-off's words change by the minute: the platform comes back then (sh_next_update / sh_refresh) */
 static float pc_next_update(float t)
 {
@@ -528,8 +535,13 @@ static int pc_refresh(float t)
 #ifndef PC_SUB
 #define PC_SUB 5
 #endif
-#define PC_G1 (PUSHED_TOP + 8)
-#define PC_G2 (PC_G1 + 2 * 47 + 76)
+/* cp6 (Track B): on the kit's cards as Settings' other pages (shell_kit.inc: 52 pt rows, r 26, sentence-case header,
+ * the footers' words), the rows lighting #3A3A3C under the finger */
+#define PC_G1 (PUSHED_TOP - 8)
+#define PC_FOOT1 "Emergency mode, SOS, the Medical Card and the torch always work without the passcode."
+#define PC_FOOT2 "The screen turns off and the phone locks after this long without a touch."
+static int pc_n1(void) { return sh_pass_on() ? 2 : 1; }
+static float pc_g2(void) { return PC_G1 + LG_ROW * pc_n1() + d_group_foot(0, 0, PC_FOOT1) + LG_GAP + 12; }
 static const int PC_AL[7] = { 30, 60, 120, 180, 240, 300, 0 };
 static const char *const PC_ALN[7] = { "30 Seconds", "1 Minute", "2 Minutes", "3 Minutes", "4 Minutes", "5 Minutes", "Never" };
 static const char *pc_live(const char *s)
@@ -541,30 +553,25 @@ static void pc_page(dc *d)
 {
     d_back(d, W(1));
     d_navtitle(d, "Passcode");                    /* (B2's row: the S9 has no Face ID) */
-    int on = sh_pass_on(), n1 = on ? 2 : 1;
-    d_rrect(d, GROUP_X, PC_G1, GROUP_W, 47.0f * n1 - 1, 16, C_CARD);
-    d_text(d, TK_IT400, 16, ROW_TX, PC_G1 + 29, on ? "Turn Passcode Off" : "Turn Passcode On", 0, 0, ACCENT(), 0);
-    if (on) {
-        d_rrect(d, ROW_TX, PC_G1 + 46, CONTENT_R - ROW_TX, .5f, 0, W(.08f));
-        d_text(d, TK_IT400, 16, ROW_TX, PC_G1 + 47 + 29, "Change Passcode", 0, 0, ACCENT(), 0);
-    }
-    float fy = PC_G1 + 47.0f * n1 + 8;
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, fy), "Emergency mode, SOS, the medical card and the torch", 0, 0, W(.45f), 0);
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, fy + 17), "always work without the passcode.", 0, 0, W(.45f), 0);
-    d_text(d, TK_IT400, 13, ROW_TX, PC_G2 - 8, "AUTO-LOCK", .52f, 0, W(.55f), 0);
-    d_rrect(d, GROUP_X, PC_G2, GROUP_W, 47.0f * 7 - 1, 16, C_CARD);
+    int on = sh_pass_on(), n1 = pc_n1();
+    d_group(d, PC_G1, LG_ROW * n1);
+    d_row(d, PC_G1, LG_ROW, 0, on ? "Turn Passcode Off" : "Turn Passcode On", 0, 0, n1 == 1, KIT_BLUE(), 0);
+    if (on) d_row(d, PC_G1 + LG_ROW, LG_ROW, 0, "Change Passcode", 0, 0, 1, KIT_BLUE(), 0);
+    d_group_foot(d, PC_G1 + LG_ROW * n1, PC_FOOT1);
+    float g2 = pc_g2();
+    d_group_head(d, g2, "Auto-Lock");
+    d_group(d, g2, LG_ROW * 7);
     int cur = sh_autolock();
     for (int i = 0; i < 7; i++) {
-        float ry = PC_G2 + 47.0f * i;
-        d_text(d, TK_IT400, 16, ROW_TX, ry + 29, PC_ALN[i], 0, 0, INK, 0);
+        float ry = g2 + LG_ROW * i;
+        d_row(d, ry, LG_ROW, 0, PC_ALN[i], 0, 0, i == 6, INK, 0);
         if (PC_AL[i] == cur) {                      /* iOS's check mark */
-            d_seg(d, CONTENT_R - 30, ry + 24, CONTENT_R - 25, ry + 29, 2.2f, ACCENT());
-            d_seg(d, CONTENT_R - 25, ry + 29, CONTENT_R - 16, ry + 17, 2.2f, ACCENT());
+            float x = LG_RE - 16 - 14, cy = ry + LG_ROW / 2 + 1;
+            d_seg(d, x, cy, x + 5, cy + 5, 2.2f, KIT_BLUE());
+            d_seg(d, x + 5, cy + 5, x + 14, cy - 6, 2.2f, KIT_BLUE());
         }
-        if (i < 6) d_rrect(d, ROW_TX, ry + 46, CONTENT_R - ROW_TX, .5f, 0, W(.08f));
     }
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, PC_G2 + 47 * 7 + 8), "The screen turns off and the phone locks after this", 0, 0, W(.45f), 0);
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, PC_G2 + 47 * 7 + 25), "long without a touch.", 0, 0, W(.45f), 0);
+    d_group_foot(d, g2 + LG_ROW * 7, PC_FOOT2);
 }
 static float pc_row_main(void)
 {
@@ -587,12 +594,15 @@ static int pc_app_tap(float x, float y)
     }
     if (AS.sub != PC_SUB) return 0;
     if (BACK_HIT(x, y)) { settings_back(); return 1; }   /* B2's root, where it was */
-    if (x < GROUP_X || x >= CONTENT_R) return 1;
+    if (x < LG_X || x >= LG_RE) return 1;
     int on = sh_pass_on();
-    if (y >= PC_G1 && y < PC_G1 + 47) { pc_show(on ? PCP_OFF : PCP_SET); return 1; }
-    if (on && y >= PC_G1 + 47 && y < PC_G1 + 94) { pc_show(PCP_CHANGE); return 1; }
-    if (y >= PC_G2 && y < PC_G2 + 47 * 7) {
-        sh_autolock_set(PC_AL[(int)((y - PC_G2) / 47)]);
+    float g2 = pc_g2();
+    if (y >= PC_G1 && y < PC_G1 + LG_ROW) { pc_show(on ? PCP_OFF : PCP_SET); return 1; }
+    if (on && y >= PC_G1 + LG_ROW && y < PC_G1 + 2 * LG_ROW) { pc_show(PCP_CHANGE); return 1; }
+    if (y >= g2 && y < g2 + LG_ROW * 7) {
+        int i = (int)((y - g2) / LG_ROW);
+        if (PC_AL[i] != sh_autolock()) sh_haptic_k(SH_HAP_SELECT);   /* cp6: a picker's choice */
+        sh_autolock_set(PC_AL[i]);
         build_app_page(AP.a);
     }
     return 1;
@@ -607,9 +617,13 @@ static int pc_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
         float ry = pc_row_main();
         if (ry >= 0 && y >= ry && y < ry + 47) { top = ry; gy = ry; gh = 47; }   /* (its group's clip: the row alone) */
     } else if (AS.sub == PC_SUB) {
-        int n1 = sh_pass_on() ? 2 : 1;
-        if (y >= PC_G1 && y < PC_G1 + 47 * n1) { top = PC_G1 + 47 * (int)((y - PC_G1) / 47); gy = PC_G1; gh = 47.0f * n1 - 1; }
-        else if (y >= PC_G2 && y < PC_G2 + 47 * 7) { top = PC_G2 + 47 * (int)((y - PC_G2) / 47); gy = PC_G2; gh = 47 * 7 - 1; }
+        /* cp6: the kit's rows, #3A3A3C in their card (shell_wifi.inc's sep_row) */
+        int n1 = pc_n1();
+        float g2 = pc_g2();
+        if (x < LG_X || x >= LG_RE) return 0;
+        if (y >= PC_G1 && y < PC_G1 + LG_ROW * n1) return sep_row(r, g, rad, c, PC_G1 + LG_ROW * (int)((y - PC_G1) / LG_ROW), LG_ROW, PC_G1, LG_ROW * n1);
+        if (y >= g2 && y < g2 + LG_ROW * 7) return sep_row(r, g, rad, c, g2 + LG_ROW * (int)((y - g2) / LG_ROW), LG_ROW, g2, LG_ROW * 7);
+        return 0;
     }
     if (top < 0) return 0;
     *r = (tk_rect){ GROUP_X, top, GROUP_W, 47 };
