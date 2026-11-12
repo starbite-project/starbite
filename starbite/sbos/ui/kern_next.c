@@ -290,7 +290,13 @@ static int wifi_now(void)
     sh_wifi(&w);
     return 1;
 }
-int sh_wifi_power(int on) { return wifi_power(on); }
+int sh_wifi_power(int on)
+{
+    /* Track A: the user (or the shell's kept cc.wifi) wants Wi-Fi on while the boot's time check holds it: it stays
+     * on (else the check's end would switch it off under them) */
+    if (on && wifi_time_only()) wifi_time_only_end("the user wants Wi-Fi on: it stays on");
+    return wifi_power(on);
+}
 const char *sh_wifi_why(void)
 {
     static struct sbos_wifi s;
@@ -341,7 +347,7 @@ static int notif_now(void)
     seen = s;
     for (int i = n - 1; i >= 0; i--) {
         const struct notif *q = notif_get(i);
-        if (q) sh_notify(q->who, q->title, q->text, q->hm);
+        if (q) sh_notify_flags(q->who, q->title, q->text, q->hm, q->flags);   /* Track A: notif_post_app's flags */
     }
     return n > 0;
 }
@@ -834,14 +840,17 @@ _Static_assert(sizeof(tk_gpu_item) == sizeof(struct gc_quad), "tk_gpu_item is gp
  * cached: its frames read base_half bilinearly as they come. */
 static int same_item(const tk_gpu_item *a, const tk_gpu_item *b)
 {
-    return a->src == b->src && a->stride == b->stride && a->w == b->w && a->h == b->h && a->flags == b->flags &&
+    int same = a->src == b->src && a->stride == b->stride && a->w == b->w && a->h == b->h && a->flags == b->flags &&
            a->solid == b->solid && a->alpha == b->alpha && a->dx0 == b->dx0 && a->dy0 == b->dy0 && a->isx == b->isx &&
            a->isy == b->isy && a->cx0 == b->cx0 && a->cy0 == b->cy0 && a->cx1 == b->cx1 && a->cy1 == b->cy1 &&
            a->radius == b->radius && a->ft0 == b->ft0 && a->ft1 == b->ft1 && a->fb0 == b->fb0 && a->fb1 == b->fb1 &&
            a->len == b->len && a->s0 == b->s0 && a->s1 == b->s1 && a->mask == b->mask && a->mstride == b->mstride &&
            a->bd == b->bd && a->bstride == b->bstride && a->bk == b->bk && a->bw == b->bw && a->bh == b->bh &&
-           a->gen == b->gen && a->lx == b->lx && a->ly == b->ly && a->lw == b->lw && a->lh == b->lh && a->lb == b->lb &&
-           a->lt == b->lt && a->lc == b->lc && a->lr == b->lr && a->lsat == b->lsat && a->live == b->live;
+           a->gen == b->gen && a->lx == b->lx && a->ly == b->ly && a->lw == b->lw && a->lh == b->lh &&
+           a->lsat == b->lsat && a->live == b->live;
+    for (unsigned k = 0; same && k < sizeof a->lq / sizeof a->lq[0]; k++)   /* glass V3: the lens's record */
+        same = a->lq[k] == b->lq[k];
+    return same;
 }
 static tk_gpu_item prevq[TK_GPU_MAX], cacheq[TK_GPU_MAX], gx[TK_GPU_MAX];
 static int prev_n, cache_n, stable_p = -1, stable_k;
@@ -1024,6 +1033,9 @@ void next_kinit(void)
 #ifndef SBOS_NEXT_NOGPU
     /* P4: with two buffers (tear-free flips) and the GPU up (normal clocks, gpuheat's checks), the GPU composes */
     gpucomp_add_ro(sbtk_pack_start, (uint64_t)(sbtk_pack_end - sbtk_pack_start));  /* icons point into the pack */
+    /* 1.0 (Track E): the Linux guest's two window surfaces (guest/sbos/guest.h GUEST_WL: SBG_S9_SHM_BASE + 0x200000,
+     * 8 MiB covers both), sampled by the GPU in place through tk_layer_external; Normal non-cacheable on both sides */
+    gpucomp_add_ext((const void *)(uintptr_t)0x8e0200000ULL, 0x800000ULL);
     if (flip_on && heap_mem && gpucomp_init(heap_mem, heap_size)) {
         comp.gpu = next_gpu;
         comp.gpu_clean = next_gpu_clean;
@@ -1064,6 +1076,7 @@ static void bake_step(void)
     baking = 0;
     status_now();
     sh_bright_now(panel_bright_level);
+    sh_restore();                                    /* Track A: what the shell keeps (settings_restore ran before) */
     ready = need_full = 1;
     boost(0);
     kt_set(KT_UI, 23, sb_ms(), 5000, 0);            /* the workers off after 5 s unless a finger comes */
@@ -1280,6 +1293,7 @@ void sh_brightness(int level)
     sb_log("next: brightness: would set the panel's level (a dry run: the self test)");
 #else
     if (!panel_brightness(level)) sb_log("next: brightness: the panel did not take the level");
+    else settings_changed();                         /* Track A: kept (the settings record's level, as the classic UI's) */
 #endif
 }
 
@@ -1418,6 +1432,87 @@ static void next_save(void)
 {
     if (ready) sh_save_all();
 }
+
+/* ---- Track A: prefs and blobs ---- (sbos-core-api.md 1, 2) on kern/prefs.c: the store lives in RAM and goes into
+ * the state slot with the settings (settings_changed: 3 s after the last change, at most one write in 10 s, held
+ * while the modem runs; settings_save_now before a restart or switch-off). The self test's build reads nothing (its
+ * films start from defaults whatever the phone keeps) and writes nothing: a logged dry run, the store untouched. */
+#ifdef SBOS_SELFTEST_NEXT
+static void prefs_dry(void)
+{
+    static int said;
+    if (!said) { said = 1; sb_log("next: prefs: a change would be kept (a dry run: the self test writes nothing)"); }
+}
+#endif
+int sh_pref_get(const char *key, char *val, int cap)
+{
+    if (val && cap > 0) val[0] = 0;
+#ifdef SBOS_SELFTEST_NEXT
+    (void)key;
+    return -1;
+#else
+    return prefs_get(key, val, cap);
+#endif
+}
+int sh_pref_set(const char *key, const char *val)
+{
+    if (!prefs_key_ok(key) || (val && sb_strlen(val) > PREFS_VAL_MAX)) return -1;
+#ifdef SBOS_SELFTEST_NEXT
+    prefs_dry();
+    return 0;
+#else
+    int r = prefs_set(key, val);
+    if (r > 0) settings_changed();
+    if (r < 0) sb_logf("next: prefs: the store is full: not kept: ", key);
+    return r < 0 ? -1 : 0;
+#endif
+}
+int sh_pref_int(const char *key, int def)
+{
+    char b[16];
+    int n = sh_pref_get(key, b, sizeof b), neg = b[0] == '-', v = 0, i = neg;
+    if (n <= neg || n >= (int)sizeof b) return def;
+    for (; b[i]; i++) {
+        if (b[i] < '0' || b[i] > '9' || v > 214748363) return def;
+        v = v * 10 + (b[i] - '0');
+    }
+    return neg ? -v : v;
+}
+void sh_pref_set_int(const char *key, int v)
+{
+    char b[16];
+    int i = 15;
+    unsigned u = v < 0 ? 0U - (unsigned)v : (unsigned)v;
+    b[i] = 0;
+    do { b[--i] = (char)('0' + u % 10); u /= 10; } while (u);
+    if (v < 0) b[--i] = '-';
+    (void)sh_pref_set(key, b + i);
+}
+int sh_blob_put(const char *name, const void *p, unsigned n)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)name; (void)p;
+    if (n > PREFS_BLOB_MAX) return -1;
+    prefs_dry();
+    return 0;
+#else
+    int r = prefs_blob_put(name, p, n);
+    if (r > 0) settings_changed();
+    if (r < 0) sb_logf("next: prefs: a blob was not kept (too big, a bad name or the store full): ", name);
+    return r < 0 ? -1 : 0;
+#endif
+}
+int sh_blob_get(const char *name, void *p, unsigned cap)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)name; (void)p; (void)cap;
+    return -1;
+#else
+    return prefs_blob_get(name, p, cap);
+#endif
+}
+_Static_assert(SH_NOTIF_QUIET == NOTIF_QUIET && SH_NOTIF_URGENT == NOTIF_URGENT, "SH_NOTIF_* are NOTIF_*");
+/* ---- end of Track A: prefs and blobs ---- */
 
 /* ---- survival-next: Emergency mode's tools (shell_survival.inc) on the kernel's survival API (kern/survival.h)
  * and services.c's SOS. The shell starts SOS and USB power out only at the end of the user's hold; the self test's
@@ -2042,3 +2137,13 @@ void next_selftest_begin(void)
 }
 int next_selftest_ready(void) { return ready || baking; }
 #endif
+
+/* ---- Track A, 1.0: the Linux window sampled in place by the GPU (Track E's zero-copy path) ---- */
+int sh_linux_zero_copy(void)
+{
+#ifndef SBOS_NEXT_NOGPU
+    return comp.gpu != 0 && gpucomp_ext_ok();
+#else
+    return 0;
+#endif
+}

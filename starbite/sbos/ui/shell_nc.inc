@@ -2,7 +2,8 @@
  * Starbite OS Next (helper D): notifications, as iOS 26 shows them. Included by shell_lock.c after the other parts (it
  * uses the shell's drawing helpers, layers and app state).
  *   - the store: the last NC_MAX notifications from the platform (sh_notify: the kernel's notif.c posts, copied by
- *     kern_next.c's bridge outside the frames; the host's films post pretend ones), newest first, RAM only;
+ *     kern_next.c's bridge outside the frames; the host's films post pretend ones), newest first; Track A: kept
+ *     across restarts (the blob "nc"), and the prefs notif.dnd / notif.<app>.allow / .banners applied at a post;
  *   - the Notification Centre: pulled down from the top-left half of the status bar (home or an app), or opened from
  *     the lock's "N notifications" pill. Lock-screen style: the wallpaper, the lock's clock and date, then the list:
  *     platters grouped by app, a group stacked with the lock cards' peeks (a tap fans it out with "Show less" and
@@ -58,6 +59,50 @@ static const char *nc_name(const char *who)
     return a >= 0 ? APPS[a].name : who;
 }
 static int nc_find(unsigned id) { for (int i = 0; i < nin; i++) if (NI[i].id == id) return i; return -1; }
+/* Track A: the list kept across restarts in the blob "nc": version 1, the count, then each item's who, title, body
+ * (fixed fields) and hm (2 bytes, -1 unknown). Restored ones count as read: no pill, no banner. */
+#define NC_REC (16 + 40 + 72 + 2)
+static void nc_save(void)
+{
+    static uint8_t b[2 + NC_MAX * NC_REC];
+    b[0] = 1;
+    b[1] = (uint8_t)nin;
+    for (int i = 0; i < nin; i++) {
+        uint8_t *p = b + 2 + i * NC_REC;
+        tk_memcpy(p, NI[i].who, 16); tk_memcpy(p + 16, NI[i].title, 40); tk_memcpy(p + 56, NI[i].body, 72);
+        p[128] = (uint8_t)NI[i].hm; p[129] = (uint8_t)((unsigned)NI[i].hm >> 8);
+    }
+    (void)sh_blob_put("nc", b, 2 + (unsigned)nin * NC_REC);
+}
+static void nc_restore(void)
+{
+    static uint8_t b[2 + NC_MAX * NC_REC];
+    int n = sh_blob_get("nc", b, sizeof b);
+    if (n < 2 || b[0] != 1 || b[1] > NC_MAX || n < 2 + b[1] * NC_REC) return;
+    nin = b[1];
+    for (int i = 0; i < nin; i++) {
+        const uint8_t *p = b + 2 + i * NC_REC;
+        tk_memcpy(NI[i].who, p, 16); tk_memcpy(NI[i].title, p + 16, 40); tk_memcpy(NI[i].body, p + 56, 72);
+        NI[i].who[15] = NI[i].title[39] = NI[i].body[71] = 0;
+        NI[i].hm = (int16_t)(p[128] | p[129] << 8);
+        NI[i].id = ++nc_ids;
+    }
+}
+/* Track A: notif.<app>.allow / notif.<app>.banners (default 1) by the app the poster opens (else the poster), and
+ * notif.dnd; a poster's name outside the keys' characters is never a key: allowed */
+static int nc_pref(const char *who, const char *what)
+{
+    int a = nc_app(who);
+    const char *k = a >= 0 ? APPS[a].k : who;
+    char key[40];
+    int n = 0;
+    for (const char *p = "notif."; *p; p++) key[n++] = *p;
+    for (; *k && n < 24; k++) key[n++] = *k;
+    key[n++] = '.';
+    for (; *what && n < 38; what++) key[n++] = *what;
+    key[n] = 0;
+    return sh_pref_int(key, 1);
+}
 
 /* ---- drawing a platter's words ------------------------------------------------------------------------------- */
 #define NC_W CARD_W
@@ -583,6 +628,7 @@ static void nc_remove(int i)
     unsigned id = NI[i].id;
     for (int k = i; k + 1 < nin; k++) NI[k] = NI[k + 1];
     nin--;
+    nc_save();                              /* Track A: the kept list follows */
     nc_slot *s = nc_slot_of(id);
     if (s && !s->dying) s->ta = 0;
     if (BN.on && BN.id == id && !BN.closing) bn_hide(0);
@@ -601,8 +647,10 @@ static void nc_clear_group(const char *who, int fly)
     if (!tk_strcmp(NC.exp, w)) { NC.exp[0] = 0; nc_ghead_build(); }
     if (NC.built) nc_layout();
 }
-void sh_notify(const char *who, const char *title, const char *body, int hm)
+void sh_notify(const char *who, const char *title, const char *body, int hm) { sh_notify_flags(who, title, body, hm, 0); }
+void sh_notify_flags(const char *who, const char *title, const char *body, int hm, unsigned flags)
 {
+    if (!nc_pref(who && who[0] ? who : "system", "allow")) return;   /* Track A: this app's notifications are off */
     if (nin == NC_MAX) {
         nc_slot *s = nc_slot_of(NI[NC_MAX - 1].id);
         if (s) s->ta = 0;
@@ -616,6 +664,7 @@ void sh_notify(const char *who, const char *title, const char *body, int hm)
     n->hm = hm;
     n->id = ++nc_ids ? nc_ids : ++nc_ids;
     nin++;
+    nc_save();                              /* Track A */
     if (NC.on && !NC.closing) {             /* the Centre is open: it is read now */
         nc_head_build();
         nc_layout();
@@ -626,7 +675,10 @@ void sh_notify(const char *who, const char *title, const char *body, int hm)
     nc_pill_build();
     if (NC.built) { nc_head_build(); nc_layout(); }
     /* a banner on home and in apps (not on the lock, in the dark, over a sheet, or in the switcher) */
-    if (!locked && !SL.black && !SL.dir && !focus_on && !CF.on && !sw_on()) bn_show(n);
+    /* Track A: not for a quiet post, with this app's banners off, or in Do Not Disturb (an urgent one still shows) */
+    int bn_ok = !(flags & SH_NOTIF_QUIET) && nc_pref(n->who, "banners") &&
+                (!sh_pref_int("notif.dnd", 0) || (flags & SH_NOTIF_URGENT));
+    if (bn_ok && !locked && !SL.black && !SL.dir && !focus_on && !CF.on && !sw_on()) bn_show(n);
 }
 
 /* ---- the lock's pill ------------------------------------------------------------------------------------------- */
@@ -931,6 +983,7 @@ static int nc_touch(int ph, float x, float y, float t)
             else {
                 for (int k = 0; k < NC_SLOTS; k++) if (NSL[k].id) NSL[k].ta = 0;
                 nin = 0;
+                nc_save();                          /* Track A */
                 NC.clrall = 0;
                 NC.exp[0] = 0;
                 nc_ghead_build();

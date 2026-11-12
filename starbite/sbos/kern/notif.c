@@ -22,6 +22,12 @@ static void cpy(char *d, unsigned cap, const char *s)
 
 void notif_post(const char *who, const char *title, const char *text)
 {
+    notif_post_app(who, title, text, 0);
+}
+
+/* Track A: the same list; the flags go to Next's shell (the classic UI shows every post alike) */
+void notif_post_app(const char *who, const char *title, const char *text, unsigned flags)
+{
     for (int i = (nn < NN ? nn : NN - 1); i > 0; --i)
         nl[i] = nl[i - 1];
     struct notif *n = &nl[0];
@@ -30,6 +36,7 @@ void notif_post(const char *who, const char *title, const char *text)
     cpy(n->text, sizeof(n->text), text);
     struct sbos_time t;
     n->hm = clock_now(&t) ? t.h * 100 + t.mi : -1;
+    n->flags = flags & (NOTIF_QUIET | NOTIF_URGENT);
     if (nn < NN)
         ++nn;
     ++unread;
