@@ -832,6 +832,32 @@ static int cpu_stop(void)
 }
 
 /* everything back off, whatever was reached; logs one line */
+/* the AUD domain off: the TZPC save SMC (exynos_pd_tz_save), then aud_off; 1 = it reads off */
+static int pd_power_off(int64_t *smc)
+{
+    *smc = H.smc(H.ctx, ABOX_SMC_PD, 0, ABOX_DTZPC, 0);
+    m32(ABOX_PMU + ABOX_PMU_AUD_CONF, 0xFU, 0);
+    return wait32(ABOX_PMU + ABOX_PMU_AUD_STAT, 0xFU, 0, 10000, 10, 0);
+}
+
+/* the AUD domain on: aud_on, then the DTZPC restore SMC (exynos_pd_tz_restore). 0, or ABOX_EPOWER with l saying why */
+static int pd_power_on(uint32_t *took, struct lb *l)
+{
+    m32(ABOX_PMU + ABOX_PMU_AUD_CONF, 0xFU, 0xFU);
+    if (!wait32(ABOX_PMU + ABOX_PMU_AUD_STAT, 0xFU, 0xFU, 10000, 10, took)) {
+        lb_s(l, "abox: power: the AUD domain did not come on in 10 ms");
+        return ABOX_EPOWER;
+    }
+    int64_t smc = H.smc(H.ctx, ABOX_SMC_PD, 1, ABOX_DTZPC, 0);
+    if (smc) {
+        lb_s(l, "abox: power: the DTZPC restore SMC failed (");
+        lb_x(l, (uint64_t)smc);
+        lb_s(l, ")");
+        return ABOX_EPOWER;
+    }
+    return 0;
+}
+
 static void teardown(void)
 {
     struct lb l;
@@ -853,9 +879,7 @@ static void teardown(void)
             (void)H.dvfs_aud(H.ctx, 0);
         if (H.dvfs_int && S.int_khz)
             (void)H.dvfs_int(H.ctx, 0);
-        smc = H.smc(H.ctx, ABOX_SMC_PD, 0, ABOX_DTZPC, 0);     /* exynos_pd_tz_save() */
-        m32(ABOX_PMU + ABOX_PMU_AUD_CONF, 0xFU, 0);             /* aud_off */
-        pd_ok = wait32(ABOX_PMU + ABOX_PMU_AUD_STAT, 0xFU, 0, 10000, 10, 0);
+        pd_ok = pd_power_off(&smc);
     }
     lb_init(&l);
     lb_s(&l, "abox: stopped: CPU ");
@@ -1132,18 +1156,8 @@ int abox_boot(void)
         S.pd_touched = 1;
     } else {
         S.pd_touched = 1;
-        m32(ABOX_PMU + ABOX_PMU_AUD_CONF, 0xFU, 0xFU);
-        if (!wait32(ABOX_PMU + ABOX_PMU_AUD_STAT, 0xFU, 0xFU, 10000, 10, &took)) {
-            lb_s(&l, "abox: 2/13 power: the AUD domain did not come on in 10 ms");
+        if (pd_power_on(&took, &l))
             return fail(ABOX_EPOWER, &l);
-        }
-        int64_t smc = H.smc(H.ctx, ABOX_SMC_PD, 1, ABOX_DTZPC, 0);
-        if (smc) {
-            lb_s(&l, "abox: 2/13 power: the DTZPC restore SMC failed (");
-            lb_x(&l, (uint64_t)smc);
-            lb_s(&l, ")");
-            return fail(ABOX_EPOWER, &l);
-        }
         lb_s(&l, "abox: 2/13 power: AUD domain on in ");
         lb_u(&l, took);
         lb_s(&l, " us, DTZPC restored (SMC 0x82000410 answered 0)");
@@ -1644,6 +1658,43 @@ void abox_off(void)
     S.state = ABOX_ST_OFF;
     S.err = 0;
     set_why("ABOX off");
+}
+
+/* ---- the AUD domain alone (media sound, kern/snd.c: ABOX in bypass) --------------------------------------------------
+ * One place owns the power + DTZPC sequence. Refused while ABOX itself is booting or running (abox_boot / abox_off own
+ * the domain then). abox_pd_on when it is already on: 0, nothing done. */
+int abox_pd_on(void)
+{
+    struct lb l;
+    uint32_t took = 0;
+    if (!have_hal || (S.state != ABOX_ST_OFF && S.state != ABOX_ST_FAILED))
+        return ABOX_ESTATE;
+    if (pd_is_on())
+        return 0;
+    lb_init(&l);
+    int r = pd_power_on(&took, &l);
+    if (r) {
+        sayw(&l);
+        return r;
+    }
+    lb_s(&l, "abox: the AUD domain on (for media) in ");
+    lb_u(&l, took);
+    lb_s(&l, " us, DTZPC restored");
+    sayl(&l);
+    return 0;
+}
+
+void abox_pd_off(void)
+{
+    struct lb l;
+    int64_t smc = 0;
+    if (!have_hal || (S.state != ABOX_ST_OFF && S.state != ABOX_ST_FAILED) || !pd_is_on())
+        return;
+    int ok = pd_power_off(&smc);
+    lb_init(&l);
+    lb_s(&l, ok ? "abox: the AUD domain off (media), TZPC save SMC " : "abox: the AUD domain STILL ON (media), TZPC save SMC ");
+    lb_u(&l, (uint64_t)(smc < 0 ? -smc : smc));
+    sayl(&l);
 }
 
 /* ---- libsb glue ------------------------------------------------------------------------------------------------------ */

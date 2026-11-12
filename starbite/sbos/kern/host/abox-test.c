@@ -599,6 +599,26 @@ static void test_sboot_left_on(void)
     abox_off();
 }
 
+static void test_pd_export(void)
+{
+    reset();
+    install(0);
+    CHECK(abox_pd_on() == 0, "pd_on: %s", abox_why());
+    CHECK((F.nsmc == 1 && F.smc[0].a1 == 1 && F.smc[0].a2 == 0x17C10204), "pd_on: one restore SMC after aud_on");
+    CHECK(abox_pd_on() == 0 && F.nsmc == 1, "pd_on again: nothing done");
+    abox_pd_off();
+    CHECK(F.nsmc == 2 && F.smc[1].a1 == 0 && F.smc[1].a2 == 0x17C10204, "pd_off: the TZPC save SMC");
+    abox_pd_off();
+    CHECK(F.nsmc == 2, "pd_off again: nothing done");
+    /* while ABOX runs, the domain belongs to abox_boot / abox_off */
+    CHECK(abox_boot() == 0, "pd export: boot %s", abox_why());
+    CHECK(abox_pd_on() == ABOX_ESTATE, "pd_on refused while ABOX runs");
+    unsigned ns = F.nsmc;
+    abox_pd_off();
+    CHECK(F.nsmc == ns, "pd_off ignored while ABOX runs");
+    abox_off();
+}
+
 static void test_ipc_dead(void)
 {
     reset();
@@ -656,6 +676,7 @@ int main(int argc, char **argv)
     test_pll();
     test_faults();
     test_sboot_left_on();
+    test_pd_export();
     test_ipc_dead();
     test_dvfs_hook();
     printf("abox host test: %d checks, %d failed\n", checks, fails);

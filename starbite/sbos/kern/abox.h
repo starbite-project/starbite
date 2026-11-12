@@ -77,6 +77,10 @@ int abox_vss_start(void);
 int abox_call(int on);
 int abox_poll(void);
 void abox_off(void);
+/* the AUD power domain alone, for media sound while ABOX is off (aud_on + the DTZPC restore SMC / the TZPC save SMC +
+ * aud_off: the same sequence as abox_boot / abox_off). ABOX_ESTATE while ABOX boots or runs. */
+int abox_pd_on(void);
+void abox_pd_off(void);
 const char *abox_why(void);
 int abox_state(void);                       /* ABOX_ST_* */
 uint32_t abox_version(void);                /* Calliope's version word from BOOT_DONE ("CRL0" = 0x43524C30), 0 none */
