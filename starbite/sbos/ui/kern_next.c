@@ -30,6 +30,7 @@
 void tk_heap_init(void *mem, uint64_t size);
 uint64_t tk_heap_size(void);
 static uint64_t heap_size;
+static void *heap_mem;
 static void heap_init(uint64_t want)
 {
     uint64_t avail = sb_arena_free();
@@ -40,6 +41,7 @@ static void heap_init(uint64_t want)
     if (!m) { sb_log("next: no arena for the UI heap"); return; }
     tk_heap_init(m, want);
     heap_size = want;
+    heap_mem = m;
 }
 static unsigned heap_full;          /* refusals: in the self test a failure (a part of the screen stayed empty) */
 void tk_heap_oom(uint64_t n, uint64_t used)
@@ -165,12 +167,19 @@ static void log_mb(const char *what, uint64_t v)
     sb_log(u.b);
 }
 
+static int gpu_started;
+static uint32_t gpu_clock_steps, gpu_clock_told;
 static void boost(int on)
 {
     if (on == boosted) return;
     boosted = on;
     if (!hw_dvfs(DVFS_A55, on ? 1794000U : 1053000U))
         sb_log(on ? "next: the A55 did not take 1794 MHz" : "next: the A55 did not go back to 1053 MHz");
+    /* P4 v10: the GPU at 572 MHz while frames come, 260 MHz (the vendor table's lowest step) when nothing moves */
+    if (gpu_started && comp.gpu) {
+        if (hw_dvfs(DVFS_GPU, on ? 572000U : 260000U)) gpu_clock_steps++;
+        else if (!gpu_clock_told++) sb_log("next: the GPU clock did not change (it stays where it is)");
+    }
 }
 
 /* the modem's status for the status bar, the Control Centre and Settings (kmodem_status: the session API v2's state;
@@ -536,6 +545,7 @@ static void stats_add(void)
         ub_dec(&u, comp.us_comp);
         ub_s(&u, " us present ");
         ub_dec(&u, comp.us_present);
+        ub_s(&u, " us");
         /* P2u: where a slow frame's time went: the half canvas catching up, half copies made in the frame, the
          * catch-up of an older buffer (inside present), the rects, the A55's clock */
         ub_s(&u, " (idle ");
@@ -549,6 +559,27 @@ static void stats_add(void)
         ub_s(&u, " MHz ");
         ub_dec(&u, hw_a55_khz() / 1000);
         ub_s(&u, ")");
+        if (comp.gpu) {                          /* P4: the GPU's own time in it, and the frames it gave back */
+            ub_s(&u, " gpu ");
+            ub_dec(&u, comp.us_gpu);
+            ub_s(&u, " us (fallbacks ");
+            ub_dec(&u, comp.gpu_fallbacks);
+            /* v4: the quads, the bins' entries (a tile visits entries / 4185 on average), culled under opaque
+             * layers, skipped over empty blocks, the GPU's clock */
+            uint32_t ent = 0, cul = 0, emp = 0;
+            gpucomp_last_stats(&ent, &cul, &emp);
+            ub_s(&u, " q ");
+            ub_dec(&u, comp.gpu_items);
+            ub_s(&u, " ent ");
+            ub_dec(&u, ent);
+            ub_s(&u, " cul ");
+            ub_dec(&u, cul);
+            ub_s(&u, " emp ");
+            ub_dec(&u, emp);
+            ub_s(&u, " GPU MHz ");
+            ub_dec(&u, gpucomp_mhz());
+            ub_s(&u, ")");
+        }
         sb_log(u.b);
     }
     FS.sumus += us;
@@ -795,12 +826,173 @@ static void next_screen(int on)
     kt_set(KT_UI, 20, sb_ms() + 16, 0, 0);
 }
 
+/* ---- P4: the GPU compositor (kern/gpucomp.c): the frames on the Mali-G72, full resolution ---------------------- */
+_Static_assert(sizeof(tk_gpu_item) == sizeof(struct gc_quad), "tk_gpu_item is gpucomp's gc_quad");
+/* v5.1, the bottom cache: the frame's bottom items that have not changed for two frames (the wallpaper; the lock
+ * screen under the sleep fade; home under Control Centre) composed once into the GPU's pool, and frames draw that
+ * (one load a pixel) plus the items above it. A ground that changes every frame (Emergency's cross-fade) is never
+ * cached: its frames read base_half bilinearly as they come. */
+static int same_item(const tk_gpu_item *a, const tk_gpu_item *b)
+{
+    return a->src == b->src && a->stride == b->stride && a->w == b->w && a->h == b->h && a->flags == b->flags &&
+           a->solid == b->solid && a->alpha == b->alpha && a->dx0 == b->dx0 && a->dy0 == b->dy0 && a->isx == b->isx &&
+           a->isy == b->isy && a->cx0 == b->cx0 && a->cy0 == b->cy0 && a->cx1 == b->cx1 && a->cy1 == b->cy1 &&
+           a->radius == b->radius && a->ft0 == b->ft0 && a->ft1 == b->ft1 && a->fb0 == b->fb0 && a->fb1 == b->fb1 &&
+           a->len == b->len && a->s0 == b->s0 && a->s1 == b->s1 && a->mask == b->mask && a->mstride == b->mstride &&
+           a->bd == b->bd && a->bstride == b->bstride && a->bk == b->bk && a->bw == b->bw && a->bh == b->bh &&
+           a->gen == b->gen && a->lx == b->lx && a->ly == b->ly && a->lw == b->lw && a->lh == b->lh && a->lb == b->lb &&
+           a->lt == b->lt && a->lc == b->lc && a->lr == b->lr && a->lsat == b->lsat && a->live == b->live;
+}
+static tk_gpu_item prevq[TK_GPU_MAX], cacheq[TK_GPU_MAX], gx[TK_GPU_MAX];
+static int prev_n, cache_n, stable_p = -1, stable_k;
+static uint32_t wall_made, cache_made;
+_Static_assert(sizeof(tk_irect) == sizeof(struct gc_rect), "tk_irect is gpucomp's gc_rect");
+/* v10, live glass backdrops: a lens quad with `live` gets the blur of the frame's first `live` items (glass over
+ * moving content, glass over glass). Up to GPUCOMP_LEVELS distinct prefixes a frame (more: the last level's); a
+ * level is made again only when its items (or a lower level) changed, and then the glass over it is redrawn in the
+ * next three frames (every buffer) */
+static tk_gpu_item lq[TK_GPU_MAX], lvq[GPUCOMP_LEVELS][TK_GPU_MAX];
+static int lvn[GPUCOMP_LEVELS], lv_ok[GPUCOMP_LEVELS], lv_redraw;
+static uint32_t lv_made, lv_us_max;
+static tk_irect ldmg[96];
+static const tk_gpu_item *live_backdrops(const tk_gpu_item *it, int n, const tk_irect **dmg, int *ndmg)
+{
+    int lv[GPUCOMP_LEVELS], nl = 0, any = 0;
+    for (int i = 0; i < n; i++)
+        if ((it[i].flags & TK_GPU_LENS) && it[i].live > 1 && it[i].live <= (uint32_t)n) {
+            any = 1;
+            if (!nl || (lv[nl - 1] != (int)it[i].live && nl < GPUCOMP_LEVELS)) lv[nl++] = (int)it[i].live;
+        }
+    if (!any) return it;
+    tk_memcpy(lq, it, sizeof(tk_gpu_item) * (size_t)n);
+    int remade = 0, budget = comp.gpu_half ? 1 : GPUCOMP_LEVELS;   /* a big move's frame: one level a frame */
+    for (int L = 0; L < nl; L++) {
+        int p = lv[L];
+        int same = lv_ok[L] && lvn[L] == p && !remade;
+        for (int k = 0; same && k < p; k++) same = same_item(&lq[k], &lvq[L][k]);
+        if (!same && !budget && lv_ok[L]) same = 1;     /* over budget: last frame's (it is made next frame) */
+        if (!same) budget--;
+        const void *bd = 0;
+        uint32_t bs = 0, bw = 0, bh = 0;
+        float bk = 0;
+        if (!same) {
+            uint64_t u = 0;
+            /* the level's backdrop pointers (stable) even when it fails: then this frame's glass shows the wallpaper */
+            if (!gpucomp_backdrop((unsigned)L, 0xff000000U, (const struct gc_quad *)lq, (unsigned)p, &bd, &bs, &bw, &bh, &bk, &u)) {
+                lv_ok[L] = 0;
+                return lq;
+            }
+            tk_memcpy(lvq[L], lq, sizeof(tk_gpu_item) * (size_t)p);
+            lvn[L] = p;
+            lv_ok[L] = 1;
+            remade = 1;
+            lv_made++;
+            if (u > lv_us_max) lv_us_max = (uint32_t)u;
+        }
+        /* the level's result: where gpucomp keeps it (the same every frame) */
+        static const void *lbd[GPUCOMP_LEVELS];
+        static uint32_t lbs[GPUCOMP_LEVELS], lbw[GPUCOMP_LEVELS], lbh[GPUCOMP_LEVELS];
+        static float lbk[GPUCOMP_LEVELS];
+        if (!same) { lbd[L] = bd; lbs[L] = bs; lbw[L] = bw; lbh[L] = bh; lbk[L] = bk; }
+        /* its glass: the quads whose prefix is this level's (the last level takes the deeper ones too) */
+        for (int i = p; i < n; i++) {
+            tk_gpu_item *q = &lq[i];
+            if (!(q->flags & TK_GPU_LENS) || q->live <= 1) continue;
+            int mine = (int)q->live == p || (L == nl - 1 && (int)q->live > p);
+            if (!mine) continue;
+            q->bd = lbd[L];
+            q->bstride = lbs[L];
+            q->bk = lbk[L];
+            q->bw = lbw[L];
+            q->bh = lbh[L];
+            q->lsat = 1.2f;                     /* the audit's regular glass */
+        }
+    }
+    if (remade) lv_redraw = 3;
+    if (lv_redraw > 0 && *ndmg > 0) {
+        /* the glass over a level that changed: in this frame's damage (and the next two, for the other buffers) */
+        int m = 0;
+        for (int i = 0; i < *ndmg && m < 96; i++) ldmg[m++] = (*dmg)[i];
+        for (int i = 0; i < n && m < 96; i++)
+            if ((lq[i].flags & TK_GPU_LENS) && lq[i].live > 1)
+                ldmg[m++] = (tk_irect){ (int)lq[i].cx0, (int)lq[i].cy0, (int)lq[i].cx1 + 1, (int)lq[i].cy1 + 1 };
+        *dmg = ldmg;
+        *ndmg = m;
+    }
+    if (lv_redraw > 0) lv_redraw--;
+    return lq;
+}
+
+static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us)
+{
+    (void)ctx;
+    if (n > 0 && n <= TK_GPU_MAX) it = live_backdrops(it, n, &dmg, &ndmg);
+    const tk_gpu_item *use = it;
+    int un = n;
+    uint32_t *cache = (uint32_t *)gpucomp_pool();
+    if (n > 0 && n <= TK_GPU_MAX && gpucomp_pool_bytes() >= (uint64_t)TK_W * TK_H * 4U && it[0].src == comp.base_half.px) {
+        /* the prefix unchanged since the last frame, and how long it has been that length */
+        int p = 0;
+        while (p < n && p < prev_n && same_item(&it[p], &prevq[p])) p++;
+        tk_memcpy(prevq, it, sizeof(tk_gpu_item) * (size_t)n);
+        prev_n = n;
+        if (p == stable_p) { if (stable_k < 2) stable_k++; }
+        else { stable_p = p; stable_k = 0; }
+        int valid = cache_n > 0 && cache_n <= n;
+        for (int i = 0; valid && i < cache_n; i++) valid = same_item(&it[i], &cacheq[i]);
+        /* a longer still prefix than the cache holds, still for two frames: the cache again (all of it, at most
+         * n - 1 items: the top one is usually what moves) */
+        int want = p < n ? p : n - 1;
+        if (stable_k >= 2 && want >= 1 && (!valid || want > cache_n)) {
+            uint64_t u2 = 0;
+            if (gpucomp_compose(cache, 0xff000000U, (const struct gc_quad *)it, (unsigned)want, &u2)) {
+                tk_memcpy(cacheq, it, sizeof(tk_gpu_item) * (size_t)want);
+                cache_n = want;
+                valid = 1;
+                cache_made++;
+                if (want == 1 && !wall_made++) sb_logx("next: gpu: the wallpaper at full resolution (the first), us: ", u2);
+            } else
+                cache_n = 0, valid = 0;
+        }
+        if (valid) {
+            /* the cache as one opaque 1:1 quad, then the items above it */
+            tk_memset(&gx[0], 0, sizeof gx[0]);
+            gx[0].src = cache;
+            gx[0].stride = TK_W;
+            gx[0].w = TK_W;
+            gx[0].h = TK_H;
+            gx[0].flags = TK_GPU_OPAQUE;
+            gx[0].alpha = 1;
+            gx[0].isx = gx[0].isy = 1;
+            gx[0].cx1 = TK_W;
+            gx[0].cy1 = TK_H;
+            tk_memcpy(&gx[1], &it[cache_n], sizeof(tk_gpu_item) * (size_t)(n - cache_n));
+            use = gx;
+            un = n - cache_n + 1;
+        }
+    }
+    /* v7: a big move's frame at half resolution, 2x into dst (all of it) */
+    int ok = comp.gpu_half ? gpucomp_compose_half(dst, 0xff000000U, (const struct gc_quad *)use, (unsigned)un, us)
+                           : gpucomp_compose_damage(dst, 0xff000000U, (const struct gc_quad *)use, (unsigned)un,
+                                                    (const struct gc_rect *)dmg, (unsigned)(ndmg > 0 ? ndmg : 0), us);
+    if (!ok && !gpucomp_ready()) {               /* a fault (gpucomp logged it, the GPU is off): the CPU from now on */
+        comp.gpu = 0;
+        sb_log("next: the GPU stopped: the CPU composes the frames from now on");
+    }
+    return ok;
+}
+static void next_gpu_clean(void *ctx, const void *p, uint64_t n)
+{
+    (void)ctx;
+    gpucomp_clean(p, n);
+}
+
 /* ---- the kernel's UI entry points in this image ------------------------------------------------------------- */
 void next_kinit(void)
 {
     boot_t0 = sb_ms();
     log_mb("arena free before the UI heap: ", sb_arena_free());
-    heap_init(160ULL << 20);
+    heap_init(160ULL << 20);                /* v9: the lens needs no maps (back to 160) */
     log_mb("UI heap: ", heap_size);
     /* P3o: the band workers' stacks (3 x 64 KiB from libsb's arena, taken at their first start and kept) now,
      * before the services fill the arena. P3n skipped the old wallpaper, so the boot's Wi-Fi time check got its
@@ -827,6 +1019,23 @@ void next_kinit(void)
         return;
     }
     scan_init();
+#ifndef SBOS_NEXT_NOGPU
+    /* P4: with two buffers (tear-free flips) and the GPU up (normal clocks, gpuheat's checks), the GPU composes */
+    gpucomp_add_ro(sbtk_pack_start, (uint64_t)(sbtk_pack_end - sbtk_pack_start));  /* icons point into the pack */
+    if (flip_on && heap_mem && gpucomp_init(heap_mem, heap_size)) {
+        comp.gpu = next_gpu;
+        comp.gpu_clean = next_gpu_clean;
+        gpu_started = 1;
+        /* 572 MHz, a step of the vendor's table (ACPM sets its own voltage): a full frame in the time budget; the
+         * GPU idles clock-gated between frames */
+        sb_log(hw_dvfs(DVFS_GPU, 572000U) ? "next: the GPU at 572 MHz (the vendor table's step)" :
+                                                  "next: 572 MHz not taken: the GPU stays at the boot clock");
+        sb_log("next: the GPU composes the frames (Mali-G72 compute jobs, full resolution; the CPU if it refuses)");
+    } else {
+        sb_log(flip_on ? "next: the CPU composes the frames (the GPU did not come up)" :
+                         "next: the CPU composes the frames (one buffer: no GPU frames without flips)");
+    }
+#endif
 #ifndef SBOS_NEXT_ONECORE
     comp.par = kpar;
     tk_par = kpar;                                   /* the bakes' row loops too */
@@ -1482,6 +1691,115 @@ static void film_start(int film)
     stats_reset();
 }
 
+#ifndef SBOS_NEXT_NOGPU
+/* P4: the GPU's frame against the CPU's, the lock screen at rest: the CPU draws it whole into one buffer, the GPU
+ * into the other, and every 8th pixel of every 8th row is compared (known small differences: the GPU's anti-aliased
+ * rounded corners and its bilinear wallpaper). Fails on a mean error over 8 levels or over 5 % of points far off */
+static void gpu_vs_cpu(void)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: gpu: ");
+    ub_dec(&u, comp.gpu_frames);
+    ub_s(&u, " frames on the GPU (");
+    ub_dec(&u, comp.gpu_halves);
+    ub_s(&u, " at half resolution), ");
+    ub_dec(&u, comp.gpu_fallbacks);
+    ub_s(&u, " given back to the CPU; bottom caches made ");
+    ub_dec(&u, cache_made);
+    ub_s(&u, "; GPU clock steps (572 / 260 MHz) ");
+    ub_dec(&u, gpu_clock_steps);
+    ub_s(&u, "; layers flushed in idle time ");
+    ub_dec(&u, comp.gpu_idle_flushed);
+    ub_s(&u, "; live glass backdrops made ");
+    ub_dec(&u, lv_made);
+    ub_s(&u, " (max us ");
+    ub_dec(&u, lv_us_max);
+    ub_c(&u, ')');
+    sb_log(u.b);
+    if (!gpu_started) {
+        sb_log("selftest: FAILED: next: gpu: the GPU did not come up (see the gpucomp lines)");
+        st_failed = 1;
+        return;
+    }
+    if (!comp.gpu || !gpucomp_ready()) {
+        sb_log("selftest: FAILED: next: gpu: the GPU stopped during the films (a fault: see the gpucomp lines)");
+        st_failed = 1;
+        return;
+    }
+    if (!K.screen_on) power_screen_set(1);
+    sh_set("reset", "", 0);
+    __typeof__(comp.gpu) g = comp.gpu;
+    comp.gpu = 0;
+    tk_comp_frame(&comp, 0, 1);
+    present();
+    uint64_t cpu_us = comp.last_us;
+    int cpu_buf = scan_cur;
+    comp.gpu = g;
+    uint32_t gf = comp.gpu_frames;
+    tk_comp_frame(&comp, 0, 1);
+    present();
+    hw_wdt_feed();
+    if (scan_cur == cpu_buf || !comp.last_px || comp.gpu_frames != gf + 1) {
+        sb_log("selftest: FAILED: next: gpu: the GPU did not draw the comparison frame");
+        st_failed = 1;
+        return;
+    }
+    const volatile uint32_t *A = (const volatile uint32_t *)(uintptr_t)scan_pa[cpu_buf];
+    const volatile uint32_t *B = (const volatile uint32_t *)(uintptr_t)scan_pa[scan_cur];
+    uint64_t sum = 0, n = 0, far = 0;
+    int fx = -1, fy = -1;
+    uint32_t fa = 0, fb = 0;
+    for (int y = 4; y < TK_H; y += 8)
+        for (int x = 4; x < TK_W; x += 8) {
+            uint32_t a = A[(uint32_t)y * TK_W + (uint32_t)x], b = B[(uint32_t)y * TK_W + (uint32_t)x];
+            int m = 0;
+            for (int k = 0; k < 24; k += 8) {
+                int d = (int)(a >> k & 255) - (int)(b >> k & 255);
+                if (d < 0) d = -d;
+                sum += (uint64_t)d;
+                if (d > m) m = d;
+            }
+            n += 3;
+            if (m > 48) {
+                if (!far) { fx = x; fy = y; fa = a; fb = b; }
+                far++;
+            }
+        }
+    uint64_t pts = n / 3, mean100 = sum * 100 / n;
+    int bad = mean100 > 800 || far * 20 > pts;
+    ub_init(&u);
+    ub_s(&u, bad ? "selftest: FAILED: next: gpu: the GPU's lock screen is not the CPU's: mean error " :
+                   "next: gpu: the GPU's lock screen matches the CPU's: mean error ");
+    ub_dec(&u, mean100 / 100);
+    ub_s(&u, ".");
+    ub_dec(&u, mean100 % 100 / 10);
+    ub_s(&u, " levels, far off ");
+    ub_dec(&u, far);
+    ub_s(&u, " of ");
+    ub_dec(&u, pts);
+    ub_s(&u, " points; the whole frame: CPU ");
+    ub_dec(&u, cpu_us);
+    ub_s(&u, " us, GPU ");
+    ub_dec(&u, comp.us_gpu);
+    ub_s(&u, " us");
+    sb_log(u.b);
+    if (far) {
+        ub_init(&u);
+        ub_s(&u, "next: gpu: the first far point x ");
+        ub_dec(&u, (uint64_t)fx);
+        ub_s(&u, " y ");
+        ub_dec(&u, (uint64_t)fy);
+        ub_s(&u, ": CPU 0x");
+        ub_hexn(&u, fa, 8);
+        ub_s(&u, ", GPU 0x");
+        ub_hexn(&u, fb, 8);
+        sb_log(u.b);
+    }
+    if (bad) st_failed = 1;
+}
+#endif
+
 /* every 8 ms (the touch controller's rate is about 120 Hz): the finger's next position; 1 while the film runs */
 int next_selftest_step(void)
 {
@@ -1556,6 +1874,9 @@ int next_selftest_step(void)
         power_screen_set(1);
     }
     if (F.film < 10) { film_start(F.film + 1); return 1; }
+#ifndef SBOS_NEXT_NOGPU
+    gpu_vs_cpu();
+#endif
     {
         /* the present's kernels against uibench's loops, on these buffers and cores (boosted, workers on) */
         static const char *const BN[5] = { "the motion present (2x, rows in pairs)", "the rest copy (tk_memcpy rows)",

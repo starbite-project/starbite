@@ -671,6 +671,7 @@ int main(int argc, char **argv)
         c.acquire = dbl_acquire;
     }
     if (getenv("SBTK_CORES")) { ncores = atoi(getenv("SBTK_CORES")); if (ncores > 1) { c.par = host_par; tk_par = host_par; } }
+    if (getenv("SBTK_NOLENS")) tk_glass_lens = 0;       /* v6: the concept's baked glass (to compare) */
     uint64_t t0 = tk_us();
     sh_init(&c);
     fprintf(stderr, "bake: %.1f ms; heap %.1f MB (peak %.1f MB)\n", (tk_us() - t0) / 1000.0, tk_heap_used() / 1e6, tk_heap_peak() / 1e6);

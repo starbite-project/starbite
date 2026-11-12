@@ -146,6 +146,8 @@ void tk_glass_local(tk_bmp *dst, const tk_bmp *src, float x, float y, float w, f
 void tk_glass_local_put(tk_bmp *b, const tk_bmp *t, int X, int Y, float x, float y, float w, float h, float r);
 /* tk_glass_local over a backdrop held at half resolution (b's origin at the panel point (box, boy)) */
 void tk_glass_from_half(tk_bmp *b, int box, int boy, const tk_bmp *half, float x, float y, float w, float h, float r);
+/* P4 (the GPU row): glass with a mask (d_glass, which records its shape) is the compositor's lens (../kern/lens.h:
+ * comp2 on the GPU over a live backdrop, draw_lens on the CPU over the wallpaper's): its bake keeps only the shadow */
 /* rotate a small premultiplied bitmap about its centre (bilinear) into dst of the same size: a chevron's turn */
 void tk_bmp_rotate(tk_bmp *dst, const tk_bmp *src, float deg);
 /* CSS cubic-bezier(x1, y1, x2, y2) at t */
@@ -178,6 +180,12 @@ struct tk_layer {
     tk_layer *child, *next;
     uint32_t gen;              /* bumped when bmp changes (redraw its area) */
     /* compositor state */
+    float gsh[24][5];          /* v8: the glass shapes in its mask (x, y, w, h, r in bitmap px): the lens's geometry */
+    int ngsh;
+    uint32_t gpu_gen;          /* P4: gen + 1 when the GPU last had this layer's bitmap and mask flushed to it */
+    uint8_t *gpu_occ;          /* P4 v4: per 32 px block of bmp 0 empty / 1 partial / 2 opaque (the GPU's bins skip and cull) */
+    uint32_t gpu_occ_w, gpu_occ_h, gpu_occ_cap, gpu_occ_frame;
+    int gpu_occ_ok, gpu_occ_seen;
     tk_irect last;             /* screen rect drawn last frame */
     uint32_t last_gen;
     float last_key[8];
@@ -186,6 +194,33 @@ void tk_layer_init(tk_layer *l, const char *name);
 void tk_layer_add(tk_layer *parent, tk_layer *child);     /* appended on top */
 void tk_layer_dirty(tk_layer *l);                         /* its bitmap changed */
 void tk_layer_prepare(tk_layer *l);                       /* make its half copy now (idle time), not on first motion */
+void tk_layer_glass_shape(tk_layer *l, float x, float y, float w, float h, float r);   /* v8: a rounded box of its mask */
+
+/* P4, the GPU compositor (kernel gpucomp.c): one draw item as the GPU takes it, the layout of the kernel's struct
+ * gc_quad (a bitmap or a solid of w x h, isx / isy source px per screen px from (dx0, dy0), alpha, the clip rect with
+ * a rounded edge, fades by screen y, a 3-slice, glass: the backdrop bd through the 8-bit mask first) */
+enum { TK_GPU_SOLID = 1, TK_GPU_BILINEAR = 2, TK_GPU_GLASS = 4, TK_GPU_FADE = 8, TK_GPU_SLICE_V = 16, TK_GPU_SLICE_H = 32,
+       TK_GPU_OPAQUE = 64, TK_GPU_LENS = 256 };   /* LENS (v9): a transparent solid over a glass shape: Liquid Glass */
+typedef struct {
+    const void *src;
+    uint32_t stride, w, h, flags, solid;
+    float alpha, dx0, dy0, isx, isy, cx0, cy0, cx1, cy1, radius, ft0, ft1, fb0, fb1, len, s0, s1;
+    const void *mask;
+    uint32_t mstride;
+    const void *bd;
+    uint32_t bstride;
+    float bk;
+    uint32_t bw, bh;
+    float lx, ly, lw, lh, lb, lt, lc, lr;   /* v9 (LENS): the glass shape (screen px) and its lens (kern/lens.h) */
+    float lsat;                /* v10 (LENS): the backdrop's saturation (0 = 1) */
+    uint32_t live;             /* v10 (LENS): the backdrop is the frame's first `live` items, blurred (the platform's
+                                * gpu makes it; 0, or a platform without it: bd, the blurred wallpaper) */
+    const uint8_t *occ;        /* the layer's block map (gpu_occ), or 0 */
+    uint32_t occ_w, occ_h;
+    uint32_t gen;              /* the content's stamp (the layer's gen, the ground's): what a cache of the frame's
+                                * unchanged bottom items compares */
+} tk_gpu_item;
+#define TK_GPU_MAX 127
 
 typedef struct {
     tk_bmp fb;                 /* the full-resolution frame in RAM (blends read it) */
@@ -219,15 +254,36 @@ typedef struct {
     uint32_t fno;              /* presented frames so far (with acquire) */
     uint64_t us_wait, us_catch;
     uint64_t us_idle, us_halfs;
-    uint32_t sharp_motion;     /* motion frames drawn at full resolution (small: P2s) */  /* the last frame's half-canvas catch-up (tk_comp_idle) and half copies made in it */  /* the last frame's wait for the free buffer and its catch-up pass */
+    uint32_t sharp_motion;     /* motion frames drawn at full resolution (small: P2s) */
+    /* P4: the GPU compositor (NULL: the CPU draws). gpu composes the whole frame into dst (a scanout buffer from
+     * acquire): 1 done, 0 not (the CPU draws this frame); gpu_clean flushes what the CPU wrote before the GPU reads */
+    int (*gpu)(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us);
+    void (*gpu_clean)(void *ctx, const void *p, uint64_t n);
+    void *gpu_ctx;
+    uint32_t gpu_frames, gpu_fallbacks, gpu_ground;
+    int gpu_half;              /* v7: the frame gpu is asked for is a big move's: half resolution, 2x, all of it */
+    uint32_t gpu_halves;       /* such frames so far */
+    uint32_t gpu_idle_flushed; /* v10: layers made ready for the GPU in idle time (not in a moving frame) */
+    int gpu_stale;
+    uint32_t gpu_items;        /* the last GPU frame's quads */             /* P4: GPU frames since the CPU last drew everything (its canvases are behind) */
+    uint64_t us_gpu;  /* the last frame's half-canvas catch-up (tk_comp_idle) and half copies made in it */  /* the last frame's wait for the free buffer and its catch-up pass */
 } tk_comp;
 int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocated */
 /* render a group's children (as if the group were at identity) into a screen-sized transparent bitmap and their
  * glass masks into mask: one cached layer for a group that moves or fades as one (CALayer's shouldRasterize) */
 void tk_flatten(tk_layer *group, tk_bmp *out, tk_a8 *mask, float scale);   /* scale .5: a half-resolution cache */
+void tk_flatten_shapes(tk_layer *dst);
+/* P4: the lens's glass at px (x, y) of the last tk_flatten's frame (its glass shapes, the wallpaper's backdrop
+ * c->bw_half bent, toned and lit as the compositor's lens): opaque; fb where no shape is */
+uint32_t tk_flat_lens(const tk_comp *c, int x, int y, uint32_t fb);    /* v8: the last tk_flatten's glass shapes (its mask's frame) into dst */
 /* draw a frame: motion = half resolution and 2x present; full = redraw everything; returns the drawn px */
 int tk_comp_frame(tk_comp *c, int motion, int full);
 void tk_comp_prepare(tk_comp *c);
+int tk_comp_idle_pending(tk_comp *c);
+/* the frame on the panel now, full resolution, in RAM (P4: after GPU frames the CPU draws it there once, without
+ * presenting: the scanout buffers are uncached for the CPU); for a snapshot of the screen right after tk_comp_frame */
+const tk_bmp *tk_comp_shown(tk_comp *c);
+#define TK_COMP_SHOWN 1                       /* the shell's shown_frame() uses it */   /* v10: idle work left (the GPU's layer flushes, a turn at a time) */
 void tk_comp_idle(tk_comp *c);                            /* idle time: the half canvas follows the rest frames */
 uint64_t tk_comp_bench(tk_comp *c, int kind);      /* the present's kernels vs uibench's loops, us */                         /* idle: make the visible layers' half copies */
 

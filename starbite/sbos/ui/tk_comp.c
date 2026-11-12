@@ -13,6 +13,7 @@
  * The kernel's version splits the rects' rows over the four A55 (menu7's glass_smp pattern); the host runs one
  * thread, so its times are one core's. */
 #include "sbtk.h"
+#include "../kern/lens.h"
 #include <arm_neon.h>
 
 #define TK_MAXD 16
@@ -28,6 +29,14 @@ void tk_layer_init(tk_layer *l, const char *name)
     l->name = name;
     l->sx = l->sy = 1;
     l->alpha = 1;
+}
+void tk_layer_glass_shape(tk_layer *l, float x, float y, float w, float h, float r)
+{
+    for (int i = 0; i < l->ngsh; i++)       /* the same box baked again (a redraw without tk_layer_init) */
+        if (l->gsh[i][0] == x && l->gsh[i][1] == y && l->gsh[i][2] == w && l->gsh[i][3] == h && l->gsh[i][4] == r) return;
+    if (l->ngsh >= 24) return;
+    float *g = l->gsh[l->ngsh++];
+    g[0] = x; g[1] = y; g[2] = w; g[3] = h; g[4] = r;
 }
 void tk_layer_add(tk_layer *p, tk_layer *c)
 {
@@ -314,6 +323,88 @@ static void draw_solid(const tgt *T, const item *it, tk_irect R)
     }
 }
 
+/* a glass shape (its layer's bitmap px) where the item draws it (screen px, or the flatten's frame): through a
+ * 3-slice's stretch (a lock card's face drawn taller than its bitmap), then the item's transform */
+static float unslice(const tk_layer *l, float v, float srch)
+{
+    float sh = l->slice_h, s0 = l->slice_s0, s1 = l->slice_s1;
+    if (v <= s0) return v;
+    if (v >= srch - s1) return sh - (srch - v);
+    float mid = sh - s0 - s1, smid = srch - s0 - s1;
+    return s0 + (v - s0) * (smid > 0 ? mid / smid : 0);
+}
+static void shape_at(const item *it, const float *g, float *X, float *Y, float *W, float *H, float *r)
+{
+    const tk_layer *l = it->l;
+    float x0 = g[0], y0 = g[1], x1 = g[0] + g[2], y1 = g[1] + g[3];
+    if (l->slice == 1) { y0 = unslice(l, y0, (float)l->bmp.h); y1 = unslice(l, y1, (float)l->bmp.h); }
+    else if (l->slice == 2) { x0 = unslice(l, x0, (float)l->bmp.w); x1 = unslice(l, x1, (float)l->bmp.w); }
+    *X = x0 * it->a + it->tx; *Y = y0 * it->b + it->ty;
+    *W = (x1 - x0) * it->a; *H = (y1 - y0) * it->b;
+    *r = tk_maxf(tk_minf(g[4] * it->a, .5f * tk_minf(*W, *H)), .01f);
+}
+
+/* v9, Liquid Glass on the CPU (the fallback; comp2's lens path and gpucomp's reference do the same): each glass
+ * shape of the item, its lens evaluated per target px from the shape (lens.h), over the backdrop (half resolution),
+ * in R; drawn before the layer's own pixels */
+static void draw_lens(const tgt *T, const item *it, tk_irect R)
+{
+    const tk_layer *l = it->l;
+    const tk_bmp *bw = T->bw;
+    if (!bw || !bw->px) return;
+    float k = T->k;
+    tk_irect ic = isect(R, irect_of(it->r.x0 * k, it->r.y0 * k, it->r.x1 * k, it->r.y1 * k));
+    if (iempty(ic)) return;
+    for (int q = 0; q < l->ngsh; q++) {
+        float X, Y, W, H, r;
+        shape_at(it, l->gsh[q], &X, &Y, &W, &H, &r);
+        X *= k; Y *= k; W *= k; H *= k; r *= k;
+        lens_par P = lens_params(W, H, r, TK_PT * k);
+        float cx = X + W * .5f, cy = Y + H * .5f, ex = W * .5f - r, ey = H * .5f - r;
+        tk_irect d = isect(ic, irect_of(X - 1, Y - 1, X + W + 1, Y + H + 1));
+        for (int y = d.y0; y < d.y1; y++) {
+            float al = it->alpha * fade_at(it, (y + .5f) / k);
+            if (al <= 0) continue;
+            uint32_t *row = T->t->px + (size_t)y * T->t->stride;
+            for (int x = d.x0; x < d.x1; x++) {
+                float gx, gy, ox = 0, oy = 0, e = .02f, rgb[3];
+                float sd = lens_sd(x + .5f, y + .5f, cx, cy, ex, ey, r, &gx, &gy), cov = tk_clampf(.5f - sd, 0, 1);
+                if (cov <= 0) continue;
+                float sv = sd < 0 ? -sd : 0;
+                if (sv < P.lb) lens_eval(&P, sv, gx, gy, &ox, &oy, &e);   /* inside the bezel (else flat: o 0, e .02) */
+                /* the backdrop (screen / 2) bilinear at p + o */
+                float bu = (x + .5f + ox) / k * .5f - .5f, bv = (y + .5f + oy) / k * .5f - .5f;
+                float uf = tk_floorf(bu), vf = tk_floorf(bv), tu = bu - uf, tv = bv - vf;
+                uint32_t p[4];
+                for (int c = 0; c < 4; c++) {
+                    int Xb = tk_mini(tk_maxi((int)uf + (c & 1), 0), bw->w - 1), Yb = tk_mini(tk_maxi((int)vf + (c >> 1), 0), bw->h - 1);
+                    p[c] = bw->px[(size_t)Yb * bw->stride + Xb];
+                }
+                for (int c = 0; c < 3; c++) {
+                    int sh = 16 - 8 * c;
+                    float a0 = (float)(p[0] >> sh & 255), a1 = (float)(p[1] >> sh & 255), b0 = (float)(p[2] >> sh & 255), b1 = (float)(p[3] >> sh & 255);
+                    float top = a0 + (a1 - a0) * tu, bot = b0 + (b1 - b0) * tu;
+                    rgb[c] = (top + (bot - top) * tv) * (1.0f / 255);
+                }
+                lens_shade(rgb, e);
+                float m = cov * al;
+                uint32_t D = row[x], o = 0;
+                for (int c = 0; c < 3; c++) {
+                    int sh = 16 - 8 * c;
+                    int vv = (int)((float)(D >> sh & 255) + (rgb[c] * 255 - (float)(D >> sh & 255)) * m + .5f);
+                    o |= (uint32_t)(vv < 0 ? 0 : vv > 255 ? 255 : vv) << sh;
+                }
+                int av = (int)((float)(D >> 24) + (255 - (float)(D >> 24)) * m + .5f);
+                row[x] = o | (uint32_t)(av > 255 ? 255 : av) << 24;
+            }
+        }
+    }
+}
+static int lens_on(const tk_layer *l, const item *it)
+{
+    return tk_glass_lens && l->ngsh && !(l->glass_opaque_only && it->alpha < .999f);
+}
+
 static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
 {
     tk_layer *l = it->l;
@@ -334,7 +425,9 @@ static void draw_item(const tgt *T, const item *it, tk_irect R /* target px */)
         /* half px i covers full px 2i, 2i + 1: target px per source px doubles */
         A = it->a * k / res; B = it->b * k / res;
     }
-    int glass = gm && (T->collect || T->bw) && !(l->glass_opaque_only && it->alpha < .999f);
+    int lens = lens_on(l, it) && !T->collect && T->bw;
+    if (lens) draw_lens(T, it, R);           /* v9: the lens under the layer's pixels */
+    int glass = gm && (T->collect || (T->bw && !lens)) && !(l->glass_opaque_only && it->alpha < .999f);
     tk_irect d = isect(R, irect_of(it->r.x0 * k, it->r.y0 * k, it->r.x1 * k, it->r.y1 * k));
     if (iempty(d)) return;
     float ia = 1.0f / A, ib = 1.0f / B;
@@ -704,8 +797,30 @@ static void dband(void *a, int i)
 }
 /* the half canvas follows the rest frames (what changed, 2x2 averaged), so a motion frame only composes what moves
  * and layers that never move never need half copies: in idle time, or before the next motion frame */
+/* v10: idle time on the GPU path: every layer in the tree (hidden ones too: the Control Centre, an app's window
+ * before they show) cleaned out to DRAM and its block map made, at most 5 ms a turn, so the first frame that shows
+ * or moves it does not (ff0d466: first frames of a gesture 31-41 ms of CPU for 5-8 ms of GPU) */
+static void gpu_flush_layer(tk_comp *c, tk_layer *l);
+static int gidle_more;
+static void gidle_tree(tk_comp *c, tk_layer *l, uint64_t t0)
+{
+    for (; l && !gidle_more; l = l->next) {
+        if (tk_us() - t0 > 5000) { gidle_more = 1; return; }
+        if ((l->bmp.px || l->glass.v) && l->gpu_gen != l->gen + 1u) {
+            gpu_flush_layer(c, l);
+            c->gpu_idle_flushed++;
+        }
+        gidle_tree(c, l->child, t0);
+    }
+}
+int tk_comp_idle_pending(tk_comp *c) { return c->gpu && gidle_more; }
 void tk_comp_idle(tk_comp *c)
 {
+    if (c->gpu) {                               /* P4: the GPU draws whole frames: no half canvas to keep */
+        gidle_more = 0;
+        if (c->gpu_clean) gidle_tree(c, c->root, tk_us());
+        return;
+    }
     if (!have_pend) return;
     have_pend = 0;
     djob J = { c, (tk_irect){ pend.x0 & ~1, pend.y0, pend.x1, pend.y1 } };
@@ -792,6 +907,251 @@ static void run_bands(tk_comp *c, job *J)
     else for (int i = 0; i < TK_NBAND; i++) band(J, i);
 }
 
+/* P4: the frame on the GPU (c->gpu): the wallpaper and every item as quads, the whole screen into the free scanout
+ * buffer at full resolution (no half canvas, no catch-up: each GPU frame is whole). The px drawn, or -1 (the CPU draws
+ * this frame: too many items, or the GPU refused) */
+static tk_gpu_item gq[TK_GPU_MAX];
+/* v4: the layer's block map (32 px blocks: empty, partial, opaque), as the CPU's row_over skips and copies 8 px
+ * blocks; not for small bitmaps, nor for content that changes frame after frame. v4.1: block rows in parallel over
+ * the four cores, 2 px per 64-bit read, and the cache clean of those rows in the same pass (the phone's first frame
+ * with a new full-screen layer spent ~30 ms scanning and cleaning on one core) */
+typedef struct { tk_comp *c; tk_layer *l; int map; uint32_t ow; } occ_job;
+typedef uint64_t __attribute__((aligned(4), may_alias)) u64a;
+static void occ_rows(void *a, int r0, int r1)
+{
+    occ_job *J = a;
+    tk_layer *l = J->l;
+    const uint64_t AM = 0xff000000ff000000ull;
+    for (int by = r0; by < r1; by++) {
+        int y0 = by * 32, y1 = y0 + 32 < l->bmp.h ? y0 + 32 : l->bmp.h;
+        if (J->map) {
+            for (uint32_t bx = 0; bx < J->ow; bx++) {
+                int x0 = (int)bx * 32, x1 = x0 + 32 < l->bmp.w ? x0 + 32 : l->bmp.w;
+                uint64_t any = 0, all = AM;
+                for (int y = y0; y < y1; y++) {
+                    const uint32_t *r = l->bmp.px + (size_t)y * l->bmp.stride;
+                    int x = x0;
+                    if (x & 1) { any |= (uint64_t)r[x] << 32; all &= (uint64_t)r[x] << 32 | 0xff000000u; x++; }
+                    for (; x + 2 <= x1; x += 2) {
+                        uint64_t v = *(const u64a *)(r + x);        /* one load (tk_memcpy was a call per 2 px) */
+                        any |= v;
+                        all &= v;
+                    }
+                    if (x < x1) { any |= (uint64_t)r[x]; all &= (uint64_t)r[x] | 0xff00000000000000ull; }
+                }
+                any &= AM;
+                all &= AM;
+                J->l->gpu_occ[(uint32_t)by * J->ow + bx] = (uint8_t)(!any ? 0 : all == AM ? 2 : 1);
+            }
+        }
+        if (J->c->gpu_clean && y1 > y0)
+            J->c->gpu_clean(J->c->gpu_ctx, l->bmp.px + (size_t)y0 * l->bmp.stride, (uint64_t)(y1 - y0) * l->bmp.stride * 4u);
+    }
+}
+/* a bitmap's cache clean over the cores, by rows */
+typedef struct { tk_comp *c; const tk_bmp *b; } clean_job;
+static void clean_rows(void *a, int y0, int y1)
+{
+    clean_job *J = a;
+    if (y1 > y0)
+        J->c->gpu_clean(J->c->gpu_ctx, J->b->px + (size_t)y0 * J->b->stride, (uint64_t)(y1 - y0) * J->b->stride * 4u);
+}
+static void gpu_flush_layer(tk_comp *c, tk_layer *l)
+{
+    if (l->gpu_gen == l->gen + 1u || !c->gpu_clean) return;
+    uint32_t fr = c->gpu_frames;
+    int busy = l->gpu_occ_seen && fr - l->gpu_occ_frame <= 2u;
+    l->gpu_occ_frame = fr;
+    l->gpu_occ_seen = 1;
+    l->gpu_occ_ok = 0;
+    occ_job J = { c, l, 0, 0 };
+    if (l->bmp.px) {
+        uint32_t ow = (uint32_t)(l->bmp.w + 31) / 32u, oh = (uint32_t)(l->bmp.h + 31) / 32u;
+        if (!busy && l->bmp.w >= 64 && l->bmp.h >= 64) {
+            if (ow * oh > l->gpu_occ_cap) {
+                tk_free(l->gpu_occ);
+                l->gpu_occ = tk_alloc(ow * oh);
+                l->gpu_occ_cap = l->gpu_occ ? ow * oh : 0;
+            }
+            J.map = l->gpu_occ != 0;
+        }
+        J.ow = ow;
+        if (oh >= 8) tk_par_rows(0, (int)oh, occ_rows, &J);
+        else occ_rows(&J, 0, (int)oh);
+        if (J.map) {
+            l->gpu_occ_w = ow;
+            l->gpu_occ_h = oh;
+            l->gpu_occ_ok = 1;
+        }
+    }
+    if (l->glass.v) c->gpu_clean(c->gpu_ctx, l->glass.v, (uint64_t)l->glass.w * (uint64_t)l->glass.h);
+    l->gpu_gen = l->gen + 1u;
+}
+static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
+{
+    int n = 0;
+    if (c->ground_gen + 1u != c->gpu_ground && c->gpu_clean) {
+        clean_job J1 = { c, &c->base_half }, J2 = { c, &c->bw_half };
+        tk_par_rows(0, c->base_half.h, clean_rows, &J1);
+        tk_par_rows(0, c->bw_half.h, clean_rows, &J2);
+        c->gpu_ground = c->ground_gen + 1u;
+    }
+    /* the ground: the wallpaper from its half-resolution copy, smooth (bilinear 2x), as the CPU's rest frames */
+    tk_memset(&gq[n], 0, sizeof gq[n]);
+    gq[n].src = c->base_half.px;
+    gq[n].stride = (uint32_t)c->base_half.stride;
+    gq[n].w = (uint32_t)c->base_half.w;
+    gq[n].h = (uint32_t)c->base_half.h;
+    gq[n].flags = TK_GPU_BILINEAR;
+    gq[n].alpha = 1;
+    gq[n].isx = gq[n].isy = .5f;
+    gq[n].cx1 = TK_W;
+    gq[n].cy1 = TK_H;
+    gq[n].gen = c->ground_gen;
+    n++;
+    for (int i = 0; i < cur.n; i++) {
+        const item *it = &cur.it[i];
+        tk_layer *l = it->l;
+        int lens = !l->solid && c->bw_half.px && lens_on(l, it), below = n;
+        if (lens)                               /* v9: Liquid Glass: a quad per glass shape, under the layer's */
+            for (int k = 0; k < l->ngsh; k++) {
+                if (n >= TK_GPU_MAX) return -1;
+                float X, Y, W, H, r;
+                shape_at(it, l->gsh[k], &X, &Y, &W, &H, &r);
+                tk_gpu_item *e = &gq[n++];
+                tk_memset(e, 0, sizeof *e);
+                lens_par P = lens_params(W, H, r, TK_PT);
+                e->flags = TK_GPU_SOLID | TK_GPU_LENS;
+                e->alpha = it->alpha;
+                e->dx0 = tk_floorf(X) - 1; e->dy0 = tk_floorf(Y) - 1;
+                e->isx = e->isy = 1;
+                e->w = (uint32_t)(W + 3.999f); e->h = (uint32_t)(H + 3.999f);
+                e->cx0 = tk_maxf((float)it->clip.x0, X - 1); e->cy0 = tk_maxf((float)it->clip.y0, Y - 1);
+                e->cx1 = tk_minf((float)it->clip.x1, X + W + 1); e->cy1 = tk_minf((float)it->clip.y1, Y + H + 1);
+                if (e->cx1 <= e->cx0 || e->cy1 <= e->cy0) { n--; continue; }
+                e->radius = r;
+                if (it->fade) {
+                    e->flags |= TK_GPU_FADE;
+                    e->ft0 = it->ft0; e->ft1 = it->ft1; e->fb0 = it->fb0; e->fb1 = it->fb1;
+                }
+                e->bd = c->bw_half.px;
+                e->bstride = (uint32_t)c->bw_half.stride;
+                e->bk = .5f;
+                e->bw = (uint32_t)c->bw_half.w;
+                e->bh = (uint32_t)c->bw_half.h;
+                e->lx = X; e->ly = Y; e->lw = W; e->lh = H;
+                e->lb = P.lb; e->lt = P.lt; e->lc = P.lc; e->lr = P.lr;
+                e->lsat = 1;                    /* the wallpaper's blur is saturated already */
+                e->live = below > 1 ? (uint32_t)below : 0;   /* v10: what lies under it (more than the ground) */
+                e->gen = c->ground_gen;
+            }
+        if (n >= TK_GPU_MAX) return -1;
+        tk_gpu_item *q = &gq[n++];
+        tk_memset(q, 0, sizeof *q);
+        q->alpha = it->alpha;
+        /* at 1:1, whole pixels (one load a pixel, as sharp as at rest; a sub-pixel step of a move is not visible) */
+        int one = tk_fabsf(it->a - 1) <= 1e-4f && tk_fabsf(it->b - 1) <= 1e-4f;
+        q->dx0 = one ? tk_floorf(it->tx + .5f) : it->tx;
+        q->dy0 = one ? tk_floorf(it->ty + .5f) : it->ty;
+        q->isx = 1.0f / it->a;
+        q->isy = 1.0f / it->b;
+        q->cx0 = (float)it->clip.x0; q->cy0 = (float)it->clip.y0;
+        q->cx1 = (float)it->clip.x1; q->cy1 = (float)it->clip.y1;
+        q->radius = it->crad > 0 ? it->crad : 0;
+        if (it->fade) {
+            q->flags |= TK_GPU_FADE;
+            q->ft0 = it->ft0; q->ft1 = it->ft1; q->fb0 = it->fb0; q->fb1 = it->fb1;
+        }
+        if (l->solid) {
+            q->flags |= TK_GPU_SOLID;
+            q->solid = l->solid;
+            q->w = (uint32_t)(l->solid_w + .5f);
+            q->h = (uint32_t)(l->solid_h + .5f);
+            continue;
+        }
+        gpu_flush_layer(c, l);
+        q->gen = l->gen;
+        if (l->gpu_occ_ok) {
+            q->occ = l->gpu_occ;
+            q->occ_w = l->gpu_occ_w;
+            q->occ_h = l->gpu_occ_h;
+        }
+        if (l->opaque) q->flags |= TK_GPU_OPAQUE;
+        q->src = l->bmp.px;
+        q->stride = (uint32_t)l->bmp.stride;
+        q->w = (uint32_t)l->bmp.w;
+        q->h = (uint32_t)l->bmp.h;
+        if (!one) q->flags |= TK_GPU_BILINEAR;
+        if (l->slice) {
+            q->flags |= l->slice == 1 ? TK_GPU_SLICE_V : TK_GPU_SLICE_H;
+            q->len = l->slice_h; q->s0 = l->slice_s0; q->s1 = l->slice_s1;
+        }
+        if (!lens && l->glass.v && c->bw_half.px && !(l->glass_opaque_only && it->alpha < .999f)) {
+            q->flags |= TK_GPU_GLASS;
+            q->gen += c->ground_gen << 20;      /* the backdrop is the ground's */
+            q->mask = l->glass.v;
+            q->mstride = (uint32_t)l->glass.w;
+            q->bd = c->bw_half.px;
+            q->bstride = (uint32_t)c->bw_half.stride;
+            q->bk = .5f;
+            q->bw = (uint32_t)c->bw_half.w;
+            q->bh = (uint32_t)c->bw_half.h;
+        }
+    }
+    uint64_t tw = tk_us();
+    int age = 0;
+    uint32_t *dst = c->acquire(c->acq_ctx, &age);
+    c->us_wait = tk_us() - tw;
+    /* v3, damage: the buffer is age frames behind; this frame's rects plus what those frames changed (P2t's
+     * history), else (unknown age, too many rects) everything */
+    static tk_irect gr[64];
+    int ng = 0, px = 0;
+    if (age >= 1 && age <= TK_HIST && (uint32_t)age <= c->fno) {
+        for (int q = 0; q < nd && ng >= 0; q++) gr[ng++] = D[q];
+        for (int k = age; k >= 1 && ng >= 0; k--) {
+            int s2 = (int)((c->fno - (uint32_t)k) % TK_HIST);
+            for (int i = 0; i < c->hn[s2]; i++) {
+                if (ng >= 64) { ng = -1; break; }
+                gr[ng++] = c->hd[s2][i];
+            }
+        }
+    } else
+        ng = -1;
+    if (ng < 0) ng = 0;
+    for (int i = 0; i < ng; i++) px += (gr[i].x1 - gr[i].x0) * (gr[i].y1 - gr[i].y0);
+    if (!ng || px > TK_W * TK_H) px = TK_W * TK_H;
+    uint64_t us = 0;
+    if (!c->gpu(c->gpu_ctx, dst, gq, n, gr, ng, &us)) return -1;
+    c->panel.px = dst;
+    c->us_gpu = us;
+    c->gpu_items = (uint32_t)n;
+    c->gpu_frames++;
+    /* P2t's history: what this frame changed (a later frame into an older buffer redraws it too) */
+    int sl = (int)(c->fno % TK_HIST);
+    for (int q = 0; q < nd; q++) c->hd[sl][q] = D[q];
+    c->hn[sl] = nd;
+    c->hh[sl] = 0;
+    c->fno++;
+    return px;
+}
+
+/* the frame on the panel now, in RAM: on the GPU path the RAM frame is stale (the GPU draws into the scanout
+ * buffers, which the CPU reads uncached: ec2936a read 17 MB of one for the CC's scrim, ~600 ms, and a self-test
+ * film's Power press was skipped in that stall), so the CPU draws the last walk's items into it once, whole, at rest
+ * resolution, without presenting (about a CPU frame: 5-6 ms on four cores) */
+static uint32_t ram_fresh;                  /* gpu_frames when the RAM frame was last drawn for tk_comp_shown */
+const tk_bmp *tk_comp_shown(tk_comp *c)
+{
+    if (!c->gpu_stale || ram_fresh == c->gpu_frames + 1u) return &c->fb;
+    tgt T = { &SCR[0], &c->fb, 0, &c->bw_half, 1, 0 };
+    T.bw_double = 1;
+    tk_irect D[1] = { { 0, 0, TK_W, TK_H } };
+    job J = { c, &T, D, 1, 0, 0 };
+    run_bands(c, &J);
+    ram_fresh = c->gpu_frames + 1u;
+    return &c->fb;
+}
+
 int tk_comp_frame(tk_comp *c, int motion, int full)
 {
     uint64_t ti = tk_us();
@@ -808,8 +1168,10 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     /* damage */
     tk_irect D[TK_MAXD];
     int nd = 0;
-    if (full || was_motion < 0) {
+    /* P4: after GPU frames the CPU's own canvases are stale: its next frame is whole */
+    if (full || was_motion < 0 || (c->gpu_stale && !(c->gpu && c->acquire))) {
         D[nd++] = screen;
+        c->gpu_stale = 0;
     } else {
         static tk_irect acc[TK_MAXITEM * 2 + 2];
         int na = 0;
@@ -856,6 +1218,46 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
                         break;
                     }
         }
+    }
+    /* P4: the GPU draws the whole frame (sharp in motion too); if it cannot, the CPU draws this one, everything */
+    /* v7: a big motion (more than a sixth of the screen changing) is drawn at half resolution by the GPU to its end
+     * (as the CPU's half canvas); a half frame covers everything, and the first frame at rest after one redraws
+     * everything sharp */
+    static int gpu_big, gpu_last_half;
+    if (!motion) gpu_big = 0;
+    if (c->gpu && c->acquire && (nd || (!motion && gpu_last_half))) {
+        uint64_t tg = tk_us();
+        int half = 0;
+        if (motion) {
+            long a = 0;
+            for (int q = 0; q < nd; q++) a += (long)(D[q].x1 - D[q].x0) * (D[q].y1 - D[q].y0);
+            if (gpu_big || a > (long)TK_W * TK_H / 6) gpu_big = half = 1;
+        }
+        if (half || gpu_last_half) { D[0] = screen; nd = 1; }
+        c->gpu_half = half;
+        int gpx = gpu_frame(c, D, nd);
+        c->gpu_half = 0;
+        if (gpx > 0) {
+            gpu_last_half = half;
+            if (half) c->gpu_halves++;
+            c->gpu_stale = 1;           /* the RAM frame and the half canvas did not see this frame */
+            c->nd = nd;
+            for (int q = 0; q < nd; q++) c->dmg[q] = D[q];
+            c->have_moved = 0;
+            prev = cur;
+            was_motion = 0;
+            c->last_half = 0;
+            c->last_px = gpx;
+            c->us_catch = 0;
+            c->us_comp = tk_us() - tg - c->us_wait;
+            c->us_present = 0;
+            c->last_us = tk_us() - t0 - c->us_wait;
+            return gpx;
+        }
+        c->gpu_fallbacks++;
+        D[0] = screen;                  /* the CPU takes over: everything (its canvases are stale, every buffer) */
+        nd = 1;
+        c->gpu_stale = 0;
     }
     /* P2s: a small motion (a toast, a hold ring, a chevron, a key, a toggle) at full resolution, sharp as at rest,
      * while the motion so far has been small (a large one stays at half resolution to its end) */
@@ -972,6 +1374,50 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
     return c->last_px;
 }
 
+static float fsh[24][5], fk = 1;
+static lens_par fpar[24];
+static int nfsh, fit[24];                   /* fit: the shape's item in flist (its clip, fade and opacity) */
+void tk_flatten_shapes(tk_layer *dst)
+{
+    dst->ngsh = 0;
+    for (int i = 0; i < nfsh; i++) tk_layer_glass_shape(dst, fsh[i][0], fsh[i][1], fsh[i][2], fsh[i][3], fsh[i][4]);
+}
+uint32_t tk_flat_lens(const tk_comp *c, int x, int y, uint32_t fb)
+{
+    const tk_bmp *bw = &c->bw_half;
+    if (!tk_glass_lens || !bw->px) return fb;
+    float sx = (x + .5f) / fk, sy = (y + .5f) / fk;             /* screen px */
+    for (int q = 0; q < nfsh; q++) {
+        float X = fsh[q][0] / fk, Y = fsh[q][1] / fk, W = fsh[q][2] / fk, H = fsh[q][3] / fk, r = fsh[q][4] / fk;
+        if (sx < X - 1 || sy < Y - 1 || sx > X + W + 1 || sy > Y + H + 1) continue;
+        float gx, gy, ox = 0, oy = 0, e = .02f, rgb[3];
+        float sd = lens_sd(sx, sy, X + W * .5f, Y + H * .5f, W * .5f - r, H * .5f - r, r, &gx, &gy);
+        if (sd >= .5f) continue;
+        float sv = sd < 0 ? -sd : 0;
+        if (sv < fpar[q].lb) lens_eval(&fpar[q], sv, gx, gy, &ox, &oy, &e);
+        float bu = (sx + ox) * .5f - .5f, bv = (sy + oy) * .5f - .5f, uf = tk_floorf(bu), vf = tk_floorf(bv);
+        float tu = bu - uf, tv = bv - vf;
+        uint32_t p[4];
+        for (int k2 = 0; k2 < 4; k2++) {
+            int Xb = tk_mini(tk_maxi((int)uf + (k2 & 1), 0), bw->w - 1), Yb = tk_mini(tk_maxi((int)vf + (k2 >> 1), 0), bw->h - 1);
+            p[k2] = bw->px[(size_t)Yb * bw->stride + Xb];
+        }
+        for (int ch = 0; ch < 3; ch++) {
+            int sh = 16 - 8 * ch;
+            float a0 = (float)(p[0] >> sh & 255), a1 = (float)(p[1] >> sh & 255), b0 = (float)(p[2] >> sh & 255), b1 = (float)(p[3] >> sh & 255);
+            float top = a0 + (a1 - a0) * tu, bot = b0 + (b1 - b0) * tu;
+            rgb[ch] = (top + (bot - top) * tv) * (1.0f / 255);
+        }
+        lens_shade(rgb, e);
+        uint32_t o = 0xff000000u;
+        for (int ch = 0; ch < 3; ch++) {
+            int v = (int)(rgb[ch] * 255 + .5f);
+            o |= (uint32_t)(v < 0 ? 0 : v > 255 ? 255 : v) << (16 - 8 * ch);
+        }
+        return o;
+    }
+    return fb;
+}
 void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
 {
     flist.n = 0;
@@ -982,7 +1428,41 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
     tk_memset(out->px, 0, (size_t)out->stride * out->h * 4);
     if (mask && mask->v) tk_memset(mask->v, 0, (size_t)mask->w * mask->h);
     tgt T = { &SCR[0], out, mask && mask->v ? mask : 0, 0, 1, 0 };
-    for (int i = 0; i < flist.n; i++) draw_item(&T, &flist.it[i], screen);
+    nfsh = 0;
+    fk = k;
+    for (int i = 0; i < flist.n; i++) {
+        const item *it = &flist.it[i];
+        draw_item(&T, it, screen);
+        /* its glass shapes into the flat frame (the item's transform; a layer whose mask was freed after its bake
+         * keeps its shapes) */
+        if (mask && it->l->ngsh && !(it->l->glass_opaque_only && it->alpha < .999f))
+            for (int q = 0; q < it->l->ngsh && nfsh < 24; q++, nfsh++)
+            {
+                fit[nfsh] = i;
+                shape_at(it, it->l->gsh[q], &fsh[nfsh][0], &fsh[nfsh][1], &fsh[nfsh][2], &fsh[nfsh][3], &fsh[nfsh][4]);
+                fpar[nfsh] = lens_params(fsh[nfsh][2] / k, fsh[nfsh][3] / k, fsh[nfsh][4] / k, TK_PT);   /* screen px */
+            }
+    }
+    /* the shapes' coverage into the mask too (a layer that freed its mask after the bake drew none) */
+    if (mask && mask->v)
+        for (int q = 0; q < nfsh; q++) {
+            float x = fsh[q][0], y = fsh[q][1], w = fsh[q][2], h = fsh[q][3];
+            tk_r4 R = tk_radii(w, h, fsh[q][4]);
+            int X0 = tk_maxi(0, (int)tk_floorf(x) - 1), X1 = tk_mini(mask->w, (int)(x + w) + 2);
+            int Y0 = tk_maxi(0, (int)tk_floorf(y) - 1), Y1 = tk_mini(mask->h, (int)(y + h) + 2);
+            const item *it = &flist.it[fit[q]];
+            X0 = tk_maxi(X0, it->clip.x0); X1 = tk_mini(X1, it->clip.x1);
+            Y0 = tk_maxi(Y0, it->clip.y0); Y1 = tk_mini(Y1, it->clip.y1);
+            for (int j = Y0; j < Y1; j++) {
+                float al = it->alpha * fade_at(it, j + .5f);
+                if (al <= 0) continue;
+                for (int i = X0; i < X1; i++) {
+                    float cov = al * tk_clampf(.5f - tk_sd_rrect4(i + .5f, j + .5f, x, y, w, h, &R), 0, 1);
+                    uint8_t v = (uint8_t)(cov * 255 + .5f), *m = &mask->v[(size_t)j * mask->w + i];
+                    if (v > *m) *m = v;
+                }
+            }
+        }
 }
 
 void tk_layer_prepare(tk_layer *l) { if (l->bmp.px) half_of(l); }

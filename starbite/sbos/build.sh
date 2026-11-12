@@ -197,6 +197,8 @@ gstobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_guest.o#")
 prbobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_probe.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_VIB "$here/kern/uitest.c" -o "$ob/k_uitest_vib.o"
 vibobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_vib.o#")
+"${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_GPUCOMP "$here/kern/uitest.c" -o "$ob/k_uitest_gpc.o"
+gpcobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_gpc.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_SURVIVAL "$here/kern/uitest.c" -o "$ob/k_uitest_surv.o"
 survobjs=$(echo "$objs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_surv.o#")
 "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_UIBENCH "$here/kern/uitest.c" -o "$ob/k_uitest_uib.o"
@@ -316,6 +318,11 @@ relocs_only_relative "$out/starbite-os-heatprobe.elf"
 "${CROSS}objcopy" -O binary "$out/starbite-os-heatprobe.elf" "$out/starbite-os-heatprobe.bin"
 "${CROSS}nm" "$out/starbite-os-heatprobe.elf" | sort > "$out/starbite-os-heatprobe.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-heatprobe.bin" "$out/starbite-os-heatprobe.img" "$out/starbite-os-heatprobe.map"
+"${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $gpcobjs -o "$out/starbite-os-gpucomp.elf"
+relocs_only_relative "$out/starbite-os-gpucomp.elf"
+"${CROSS}objcopy" -O binary "$out/starbite-os-gpucomp.elf" "$out/starbite-os-gpucomp.bin"
+"${CROSS}nm" "$out/starbite-os-gpucomp.elf" | sort > "$out/starbite-os-gpucomp.map"
+python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpucomp.bin" "$out/starbite-os-gpucomp.img" "$out/starbite-os-gpucomp.map"
 "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $survobjs -o "$out/starbite-os-survival.elf"
 relocs_only_relative "$out/starbite-os-survival.elf"
 "${CROSS}objcopy" -O binary "$out/starbite-os-survival.elf" "$out/starbite-os-survival.bin"
@@ -393,7 +400,7 @@ if ! "${CROSS}nm" "$out/starbite-os.elf" | grep -q ' sbos_selftest_enabled$'; th
     exit 1
 fi
 
-leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" "$out/starbite-os-heatprobe.img" "$out/starbite-os-vibtest.img" "$out/starbite-os-uibench.img" "$out/starbite-os-survival.img" "$out/starbite-os-gputest.img" "$out/starbite-os-gpualu.img" "$out/starbite-os-shubprobe.img" $shubimg | head -3 || true)
+leak=$(LC_ALL=C grep -a -o -E '/(Users|home|private|tmp)/[ -~]{0,40}' "$out/starbite-os.img" "$out/starbite-os-selftest.img" "$out/starbite-os-ledprobe.img" "$out/starbite-os-guesttest.img" "$out/starbite-os-heatprobe.img" "$out/starbite-os-vibtest.img" "$out/starbite-os-uibench.img" "$out/starbite-os-survival.img" "$out/starbite-os-gputest.img" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpucomp.img" "$out/starbite-os-shubprobe.img" $shubimg | head -3 || true)
 if [ -n "$leak" ]; then
     echo "sbos: the image contains build-host paths:" >&2
     echo "$leak" >&2
@@ -415,6 +422,8 @@ sha256sum "$out/starbite-os-guesttest.img" | sed "s#  .*#  starbite-os-guesttest
 echo "sbos: $(cat "$out/starbite-os-guesttest.img.sha256") (Linux self-test variant)"
 sha256sum "$out/starbite-os-heatprobe.img" | sed "s#  .*#  starbite-os-heatprobe.img#" > "$out/starbite-os-heatprobe.img.sha256"
 echo "sbos: $(cat "$out/starbite-os-heatprobe.img.sha256") (heat probe H1 variant)"
+sha256sum "$out/starbite-os-gpucomp.img" | sed "s#  .*#  starbite-os-gpucomp.img#" > "$out/starbite-os-gpucomp.img.sha256"
+echo "sbos: $(cat "$out/starbite-os-gpucomp.img.sha256") (GPU compositor test P4)"
 sha256sum "$out/starbite-os-survival.img" | sed "s#  .*#  starbite-os-survival.img#" > "$out/starbite-os-survival.img.sha256"
 echo "sbos: $(cat "$out/starbite-os-survival.img.sha256") (survival tools self test)"
 sha256sum "$out/starbite-os-uibench.img" | sed "s#  .*#  starbite-os-uibench.img#" > "$out/starbite-os-uibench.img.sha256"

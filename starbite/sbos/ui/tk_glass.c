@@ -529,6 +529,7 @@ typedef struct {
     float tone_c, tone_a;                   /* the tone as an over-layer: premultiplied grey level (0..255), alpha */
     float vref, vlin;                       /* the toned backdrop level (sRGB 0..1) and its linear value */
     float SA[SPEC_N + 2];                   /* spec -> the white over-alpha that adds it in linear light at vref */
+    int lensed;                             /* P4: the compositor lenses it: only the shadow and the mask */
 } gbake;
 
 static const float LTX = -.58123819f, LTY = -.81373347f;   /* normalize(-1, -1.4): toward the light */
@@ -556,7 +557,7 @@ static void gbake_rows(void *a, int Y0, int Y1)
         for (int i = G->X0; i < G->X1; i++) {
             if (i == m0) {
                 uint32_t *d = b->px + (size_t)j * b->stride;
-                for (; i < m1; i++) {
+                for (; i < m1 && !G->lensed; i++) {
                     uint32_t o = d[i];
                     unsigned A = tA + ((o >> 24) * tia >> 8), R = tc + ((o >> 16 & 255) * tia >> 8);
                     unsigned Gc = tc + ((o >> 8 & 255) * tia >> 8), Bc = tc + ((o & 255) * tia >> 8);
@@ -565,6 +566,7 @@ static void gbake_rows(void *a, int Y0, int Y1)
                 }
                 if (mask && mask->v && j < mask->h)
                     for (int q = m0; q < m1 && q < mask->w; q++) mask->v[j * mask->w + q] = 255;
+                i = m1;
                 if (i >= G->X1) break;
             }
             float px = i + .5f, gx, gy;
@@ -577,7 +579,7 @@ static void gbake_rows(void *a, int Y0, int Y1)
                 float al = G->sop * (G->exact ? erf_cdf(-ss / sg) : phi(-ss / sg)) * (1 - cov);
                 if (al > 1.0f / 1024) over_col(out, 0, 0, 0, al);
             }
-            if (cov > 0) {
+            if (cov > 0 && !G->lensed) {
                 float f[4] = { G->tone_c, G->tone_c, G->tone_c, G->tone_a };
                 float s = tk_maxf(-sd, 0), fl = gx * LTX + gy * LTY;
                 /* the depth: the bezel's side away from the light a little darker (c -= .06 (1 - t)^2 max(-f, 0)) */
@@ -593,7 +595,13 @@ static void gbake_rows(void *a, int Y0, int Y1)
                 }
                 over4(out, f[0] * cov, f[1] * cov, f[2] * cov, f[3] * cov);
             }
-            if (out[3] <= 0) continue;
+            if (out[3] <= 0) {
+                if (G->lensed && mask && mask->v && i < mask->w && j < mask->h && cov > 0) {   /* the mask still */
+                    int v = (int)(cov * 255 + .5f);
+                    if (v > mask->v[j * mask->w + i]) mask->v[j * mask->w + i] = (uint8_t)v;
+                }
+                continue;
+            }
             uint32_t *d = &b->px[j * b->stride + i], o = *d;
             float ia = 1 - out[3], A = out[3] + (o >> 24) / 255.0f * ia;
             int R = (int)(out[0] + (o >> 16 & 255) * ia + .5f), Gc = (int)(out[1] + (o >> 8 & 255) * ia + .5f), B = (int)(out[2] + (o & 255) * ia + .5f);
@@ -633,6 +641,9 @@ static void bake(tk_bmp *b, tk_a8 *mask, float x, float y, float w, float h, flo
     gbake G;
     gsize z = gsize_of(w, h, r);
     G.b = b; G.mask = mask; G.x = x; G.y = y; G.w = w; G.h = h; G.shadow = shadow; G.exact = exact;
+    /* P4 (the GPU row): glass with a mask is drawn by the compositor's lens (comp2 on the GPU, draw_lens on the CPU:
+     * the backdrop bent, toned and lit per frame), from the shape d_glass records: the bake keeps only the shadow */
+    G.lensed = tk_glass_lens && mask && mask->v;
     G.sg = z.sg; G.sdy = z.sdy; G.sop = z.sop; G.ib = 1 / z.b;
     G.irho = 1 / PT(1.2f); G.srho = PT(1.2f) * 6.5f;          /* rho < 1/600 beyond */
     G.R = tk_radii(w, h, r);

@@ -119,6 +119,9 @@ static void d_glass(dc *d, float x, float y, float w, float h, float r, int dark
 {
     /* the bake works in the bitmap's px: shift the rect */
     tk_glass_bake(d->b, d->m, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), dark, shadow);
+    /* P4: the compositor's lens: the shape on the layer (a mask is always a layer's glass, mk) */
+    if (d->m) tk_layer_glass_shape((tk_layer *)(void *)((char *)d->m - __builtin_offsetof(tk_layer, glass)),
+                                   PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r));
 }
 static void d_rrect(dc *d, float x, float y, float w, float h, float r, tk_col c)
 {
@@ -165,6 +168,12 @@ static int trim_layer(tk_layer *l, int *cut_top, int *cut_bot)
         if (j < y0) y0 = j;
         y1 = j + 1;
     }
+    /* P4 (the GPU row): its glass shapes stay inside (a shape's middle may hold nothing once its mask is freed) */
+    for (int q = 0; q < l->ngsh; q++) {
+        const float *g = l->gsh[q];
+        x0 = tk_mini(x0, tk_maxi(0, (int)tk_floorf(g[0]) - 1)); x1 = tk_maxi(x1, tk_mini(w, (int)(g[0] + g[2]) + 2));
+        y0 = tk_mini(y0, tk_maxi(0, (int)tk_floorf(g[1]) - 1)); y1 = tk_maxi(y1, tk_mini(h, (int)(g[1] + g[3]) + 2));
+    }
     if (x1 <= x0) return 0;                       /* nothing in it: left as it is */
     /* sideways by whole 16 px (8 half px): the compositor's 8 px blocks fall on the same px, so the same blends
      * round the same way; 16 px of nothing kept on the right (the row's last few px blend one at a time) */
@@ -189,6 +198,7 @@ static int trim_layer(tk_layer *l, int *cut_top, int *cut_bot)
     l->x += (float)x0; l->bx += (float)x0;
     l->y += (float)y0; l->by += (float)y0;
     tk_layer_dirty(l);
+    for (int q = 0; q < l->ngsh; q++) { l->gsh[q][0] -= (float)x0; l->gsh[q][1] -= (float)y0; }   /* P4: with the cut */
     if (cut_top) *cut_top = y0;
     if (cut_bot) *cut_bot = h - y1;
     return 1;
@@ -1201,7 +1211,9 @@ static void build_home(void)
         }
     }
     /* the parts stay separate layers under one group (they do not overlap, so the group's opacity per part is
-     * exact); #home has will-change: opacity, a backdrop root in Chrome: its glass shows no wallpaper blur */
+     * exact); #home has will-change: opacity, a backdrop root in Chrome: its glass shows no wallpaper blur. v6:
+     * Liquid Glass refracts the wallpaper under the widgets, the dock and the Search pill (from their shapes:
+     * the masks go, as before) */
     for (int i = 0; i < 5; i++) tk_a8_free(&hparts[i].glass);
     /* P3s: cut to what they hold (Calendar's tile is redrawn in place later: its spot moves with the cut) */
     {
@@ -1429,7 +1441,7 @@ static void under_rows(void *v, int y0, int y1)
             uint32_t s = o[i], a = s >> 24;
             if (a == 255) continue;
             uint32_t b = bs[i], w = m ? m[i] : 0, r = 0;
-            if (w) { uint32_t q = bw[i], t = 0; for (int sh = 0; sh < 32; sh += 8) t |= (((b >> sh & 255) * (255 - w) + (q >> sh & 255) * w + 127) / 255) << sh; b = t; }
+            if (w) { uint32_t q = tk_flat_lens(C, i, j, bw[i]), t = 0;   /* P4: the lens's glass (else the backdrop) */ for (int sh = 0; sh < 32; sh += 8) t |= (((b >> sh & 255) * (255 - w) + (q >> sh & 255) * w + 127) / 255) << sh; b = t; }
             for (int sh = 0; sh < 32; sh += 8) r |= ((s >> sh & 255) + ((b >> sh & 255) * (255 - a) + 127) / 255) << sh;
             o[i] = r | 0xff000000u;
         }
@@ -4817,7 +4829,7 @@ void sh_idle(void)
     tk_layer_prepare(&mark); tk_layer_prepare(&glyph_c); tk_layer_prepare(&glyph_o); tk_layer_prepare(&hint);
 }
 
-int sh_idle_pending(void) { return (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing(); }
+int sh_idle_pending(void) { return (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C); }
 
 int sh_moving(void)
 {
