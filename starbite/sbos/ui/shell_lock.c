@@ -14,6 +14,7 @@
  *     drawn here as the concept's first home page without its behaviour (a placeholder: home is P2).
  * Layers are drawn once (bake) and then only moved, faded and clipped by the compositor. */
 #include "shell.h"
+#include "sbtk_colors.h"                            /* GAP-LIST #1: the system palette (iOS 26 dark) */
 
 #define H_PT TK_HPT
 static tk_comp *C;
