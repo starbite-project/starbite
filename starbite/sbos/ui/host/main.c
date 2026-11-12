@@ -26,7 +26,13 @@ int sh_modem(int on)
     else fprintf(stderr, "modem: would stop\n");
     return 0;
 }
-void sh_confirmed(int ok) { fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled"); }
+/* Track J: Settings > Startup's pretend platform (the restarts' confirmations come back through sh_confirmed) */
+#include "startup_fake.inc"
+void sh_confirmed(int ok)
+{
+    if (startup_fake_confirmed(ok)) return;
+    fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled");
+}
 /* a pretend network for the previews: on -> searching -> data up on "Operator" LTE, 3 bars */
 static int fc_net;                          /* helper I: comms_fake.inc's calls and SMS work while it is on */
 int sh_cellular(int on)
@@ -487,6 +493,16 @@ static void apply_state(const char *st)
         double p = 0, r = 0;
         host_tilt = sscanf(eq + 1, "%lf,%lf", &p, &r) == 2;
         host_p10 = (int)(p * 10); host_r10 = (int)(r * 10);
+        return;
+    }
+    if (!strcmp(what, "tap")) {                  /* Track J: tap=X,Y (pt): a tap through the gestures, then settled */
+        static float tt = 1000;                  /* the stills' own clock, ms */
+        float x = 0, y = 0;
+        if (sscanf(eq + 1, "%f,%f", &x, &y) != 2) return;
+        sh_touch(0, x, y, tt);
+        sh_tick(1 / 60.0f, tt += 1000 / 60.0f);
+        sh_touch(2, x, y, tt += 64);
+        for (int i = 0; i < 600 && (i < 30 || sh_moving()); i++) sh_tick(1 / 60.0f, tt += 1000 / 60.0f);
         return;
     }
     if (!strcmp(what, "comms")) { comms_fake_state(key, v); return; }          /* helper I: comms=incoming, ... */

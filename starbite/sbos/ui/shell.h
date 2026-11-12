@@ -315,4 +315,45 @@ int sh_sms_read(const char *number);
 int sh_sms_delete(int id, char *why);
 int sh_sms_delete_thread(const char *number, char *why);
 
+/* Track J (shell_startup.inc, Settings > Startup): Starbite OS as the boot menu, on the firmware layer
+ * (docs/STARBITE-FIRMWARE-LAYER.md 10; the kernel: kern/sbfw_os.c on libsb/sbfw_api.h; the host: host/startup_fake.inc).
+ * The catalog's OS rows, the loader's settings (the home store's record), one-shot requests, the crash reports and
+ * the restarts. sh_os_start_once, sh_req_start and sh_restart_* only ask: the platform's hold confirmation (the
+ * kernel's kui_confirm, drawn by sh_confirm) restarts on a full hold. In the self-test build every write and restart
+ * is a dry run that logs a line. < 0: refused. */
+#define SH_OS_ALL 1                       /* sh_os_count: hidden catalog rows too */
+int sh_os_count(int flags);               /* the rows sh_os_get(0 .. n - 1) gives (flags as last passed here) */
+/* key (24 bytes), name (32); category: catalog.h CAT_* (0 Apple, 1 Microsoft, 2 Android, 3 Linux, 4 Starbite, 5 other,
+ * 6 lab); method: M_* (1 XNU, 2 Linux, 3 Android, 4 UEFI, 5 bare); ready: its files are there; is_default */
+int sh_os_get(int i, char *key, char *name, int *category, int *method, int *ready, int *is_default);
+int sh_os_start_once(const char *key);
+int sh_os_make_default(const char *key);
+/* the loader's settings: debug_level 0 off .. 3 highest; post 0 full, 1 quick, 2 off; wdt_mode 0 per entry, 1 off,
+ * 2 wdt_s (10..82) for every entry; crash_mode 0 on, 1 save only, 2 off; crash_action 0 boot menu, 1 Starbite
+ * Recovery, 2 retry once; crash_detail 0..3; shell 1: Starbite OS (shell_key, "" = starbite-os) instead of the menu */
+typedef struct {
+    char default_key[24];
+    int timeout_s, debug_level, post, wdt_mode, wdt_s, crash_mode, crash_action, crash_detail, shell;
+    char shell_key[24];
+} sh_fw_t;
+int sh_fw_get(sh_fw_t *f);                /* 1 the record, 0 its defaults (none yet), < 0 no home store */
+int sh_fw_set(const sh_fw_t *f);          /* written and read back: 0 */
+/* one-shots for an OS's next start (the loader's SBFW_REQ_*); WINRE is plan only (never fits) */
+enum { SH_REQ_VERBOSE = 1, SH_REQ_SAFE = 2, SH_REQ_SINGLE = 3, SH_REQ_PREV = 4, SH_REQ_XNU_SINGLE = 5, SH_REQ_WINRE = 6 };
+int sh_req_fits(const char *key, int action);
+int sh_req_start(const char *key, int action);
+/* the crash reports (the home store's crash log), i = 0 the newest; severity 0 info, 1 warning, 2 crash; utc 0 unknown */
+typedef struct { char key[24], os[32], kind[24], line[96]; int severity; long long utc; } sh_crash_t;
+int sh_crash_count(void);                 /* < 0: no crash log on the home store */
+int sh_crash_get(int i, sh_crash_t *c);   /* 0 ok */
+int sh_restart_menu(void);
+int sh_restart_recovery(void);
+int sh_restart_download(void);
+/* the loader's table for this start: medium 0 UFS, 1 the card, -1 none; why: why this start, in words */
+typedef struct {
+    int valid, loader_version, medium, card_only, shell_mode, req_action, post_fails, post_warns, crash_sev;
+    char why[40], crash_key[24], crash_kind[24];
+} sh_fwinfo_t;
+int sh_fw_info(sh_fwinfo_t *i);           /* 1 the loader's table, 0 an older loader */
+
 #endif
