@@ -878,6 +878,7 @@ static void bn_show(const nc_item *n)
     BN.h = h; BN.id = n->id;
     BN.until = -1;                          /* set at its first frame (the platform's clock) */
     tk_spring_start(&sp_bn, BN.p, 1, 0, TK_SPR_BANNER);
+    if (!EMG && !sh_last2()) sh_perf_hold(700);   /* cp6: no touch started it: the top clocks for its spring */
     relink();
     bn_place();
 }
@@ -917,6 +918,7 @@ static void bn_hide(float v)
     if (!BN.on) return;
     BN.closing = 1;
     tk_spring_start(&sp_bn, BN.p, 0, v, TK_SPR_SHEET);
+    if (!EMG && !sh_last2()) sh_perf_hold(600);   /* cp6: (its timeout's close too) */
 }
 /* Emergency freed the lock cards: the platters become solid ones (no view may point at freed glass) */
 static void nc_cards_gone(void)
