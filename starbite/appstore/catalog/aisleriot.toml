@@ -1,0 +1,27 @@
+id = "aisleriot"
+name = "AisleRiot Solitaire"
+summary = "More than 80 solitaire card games"
+description = """AisleRiot plays Klondike, Spider, FreeCell and over 80 other solitaire card games. Drag cards with a finger or tap to move them."""
+category = "Games"
+licence = "GPL-3.0-or-later"
+homepage = "https://gitlab.gnome.org/GNOME/aisleriot"
+icon = "gnome-aisleriot"
+ram_mb = 80
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["game", "cards", "solitaire", "klondike", "freecell"]
+
+[launcher]
+exec = "sol"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["aisleriot"]
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 10
+build_mb = 900

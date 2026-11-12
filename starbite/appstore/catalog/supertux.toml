@@ -1,0 +1,31 @@
+id = "supertux"
+name = "SuperTux"
+summary = "Classic 2D jump'n'run with Tux the penguin"
+description = """SuperTux is a side-scrolling platformer in the style of the classic console games: run, jump and collect coins across icy worlds. Plays with the arrow keys and space."""
+category = "Games"
+licence = "GPL-3.0-or-later"
+homepage = "https://www.supertux.org"
+icon = "supertux2"
+ram_mb = 150
+featured = false
+default = "distro"
+touch = "poor"
+keywords = ["game", "platformer", "tux", "arcade"]
+
+[launcher]
+exec = "supertux2 --renderer sdl"
+terminal = false
+keyboard = true
+
+[distro]
+apt = ["supertux"]
+
+[runtime]
+needs = ["audio", "keyboard"]
+note = "Uses the SDL software renderer (no GPU). Needs keys: play with the on-screen keyboard or a Bluetooth keyboard/controller. Upstream's Linux release is an x86_64 AppImage only."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 30
+build_mb = 1800

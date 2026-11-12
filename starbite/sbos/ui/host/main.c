@@ -854,6 +854,10 @@ static uint32_t *dbl_acquire(void *ctx, int *age)
     return dbl[b];
 }
 
+/* Track A, 1.0: the host is never a safe start (SBTK_SAFE=1 pretends one) */
+int sh_safe_mode(void) { const char *e = getenv("SBTK_SAFE"); return e && *e == '1'; }
+int sh_boot_reason(char *why, int cap) { if (why && cap > 0) snprintf(why, (size_t)cap, "Started on the host"); return -1; }
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: sbtk-host PAK still|film|bench ...\n"); return 2; }

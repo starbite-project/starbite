@@ -1,0 +1,27 @@
+id = "gnome-sudoku"
+name = "Sudoku"
+summary = "Number puzzles at four difficulty levels"
+description = """GNOME Sudoku generates puzzles from easy to very hard, with notes, hints and undo. Big cells and a number picker make it comfortable with a finger."""
+category = "Games"
+licence = "GPL-3.0-or-later"
+homepage = "https://apps.gnome.org/Sudoku/"
+icon = "org.gnome.Sudoku"
+ram_mb = 60
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["game", "puzzle", "sudoku", "numbers"]
+
+[launcher]
+exec = "gnome-sudoku"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["gnome-sudoku"]
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 5
+build_mb = 700

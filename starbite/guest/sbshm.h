@@ -68,14 +68,22 @@
  * of at most 720 x 1440 x 4 = 4 MiB each from 2 MiB). */
 #define SBSHM_CAT_OFF       0x1000000U          /* struct sbshm_cat: the apps the guest can show (guest writes) */
 #define SBSHM_STORE_OFF     0x1020000U          /* struct sbshm_store: the App Store's packages (guest writes) */
+#define SBSHM_STORE3_OFF    0x1030000U          /* v3: struct sbshm_store3 (Track F, starbite/appstore/sbshm-store3.h):
+                                                 * per-package versions / sources / progress, parallel to store.pkg[] */
 #define SBSHM_ICON_OFF      0x1040000U          /* the icon pool: SBSHM_ICONS_MAX x 160 x 160 ARGB (guest writes) */
 #define SBSHM_BLK_OFF       0x2000000U          /* struct sbshm_blk: devices + request / completion rings */
 #define SBSHM_BLKDATA_OFF   0x2010000U          /* the block data window: SBSHM_BLK_SLOTS x SBSHM_BLK_SLOT bytes */
-#define SBSHM_NET_OFF       0x2800000U          /* (L5, reserved: the packet rings) */
+#define SBSHM_NET_OFF       0x2800000U          /* v3: sbnet, the IP packet rings (sbshm-net.h), 2 MiB */
+#define SBSHM_P9_OFF        0x2A00000U          /* v3: sbp9, the shared files' 9P2000.L channel (sbshm-p9.h), 2 MiB */
+#define SBSHM_SND_OFF       0x2C00000U          /* v3: sbsnd, PCM playback / capture (sbshm-snd.h), 1 MiB */
+#define SBSHM_CLIP_OFF      0x2D00000U          /* v3: struct sbshm_clip, the clipboard both ways, 256 KiB */
+#define SBSHM_NOTIF_OFF     0x2D40000U          /* v3: struct sbshm_notifs, notifications (guest writes), 64 KiB */
+#define SBSHM_V3_FREE_OFF   0x2D50000U          /* .. 0x4000000: free (reserved for zero-copy app buffers) */
 
 #define SBSHM_MAGIC         0x31764d4853425353ULL   /* "SSBSHMv1" */
 #define SBSHM_VERSION       1U
 #define SBSHM_VERSION_V2    2U                  /* hdr.version = 2: the host serves the v2 regions (blk devices) */
+#define SBSHM_VERSION_V3    3U                  /* hdr.version = 3: v2 + hdr.host_services says which v3 services */
 
 /* host_state (Starbite) */
 enum {
@@ -113,7 +121,17 @@ struct sbshm_hdr {
     uint32_t surf_nbuf;             /* 2 */
     uint32_t surf_off[2];           /* from SHM_BASE */
     uint32_t oops_off, oops_size;   /* the guest's ramoops console zone */
-    uint32_t pad0[5];
+    /* v3 (were pad0[0..2]: zero from a v1/v2 host) */
+    uint32_t host_unix_s;           /* wall clock, seconds since 1970 UTC, updated every tick; 0 = unknown */
+    int32_t host_tz_min;            /* the user's UTC offset in minutes (local = UTC + this) */
+    uint32_t host_services;         /* SBSHM_SVC_*: which v3 services the host serves in this boot */
+    uint32_t host_surf_reading;     /* v3: the surface buffer (0 / 1) the host's GPU samples right now, SBSHM_NONE =
+                                     * none: the guest never renders into that buffer (it waits, or skips the frame).
+                                     * Zero-copy display: the GPU reads the front buffer in place (no CPU copy), so
+                                     * pixels must be opaque (X byte = 0xff) and written through a non-cacheable
+                                     * mapping (/dev/sbshm is write-combine = Normal non-cacheable). Honour it only
+                                     * when hdr.version >= 3 (a v2 host leaves 0 here). */
+    uint32_t pad0[1];
     /* ---- written by the guest ---- */
     uint32_t guest_state;
     uint32_t guest_heartbeat;       /* guestd, every frame / 100 ms */
@@ -163,6 +181,12 @@ enum {
                              * (little-endian, a first); a character never splits across two messages */
     SBG_MSG_PKG = 12,       /* a = store index, b = SBG_PKG_OP_*, c = the store seq it was read at */
     SBG_MSG_BLK_DONE = 13,  /* (reserved: sbblk uses the doorbells alone, see "sbblk") */
+    /* host -> guest, v3 */
+    SBG_MSG_CLIP = 14,      /* the host's clipboard changed: a = clip.h2g.seq (sbwl offers it to Wayland apps) */
+    SBG_MSG_NOTIF_ACT = 15, /* a = notification id, b = action index (0 = the default action, the tap) or
+                             * SBSHM_NONE = dismissed by the user */
+    SBG_MSG_KEYMOD = 16,    /* a = SBSHM_MOD_* held for the next keys / text (Ctrl, Alt, Super from the shell's key
+                             * bar); 0 = none. Keys themselves stay SBG_MSG_KEY */
     /* guest -> host */
     SBG_MSG_HELLO = 64,     /* a = ncpus, b = surface ready */
     SBG_MSG_BYE = 65,       /* user space done; the kernel powers the CPUs off next */
@@ -175,6 +199,10 @@ enum {
     SBG_MSG_PKG_STATUS = 70,/* a = store index, b = SBG_PKG_*, c = percent: also in the store entry */
     SBG_MSG_BLK = 71,       /* (reserved: sbblk uses the doorbells alone) */
     SBG_MSG_STORE = 72,     /* the store index changed: a = its new seq */
+    /* guest -> host, v3 */
+    SBG_MSG_CLIP_SET = 73,  /* a Wayland app copied: a = clip.g2h.seq */
+    SBG_MSG_NOTIFY = 74,    /* a = notification slot, b = its id: post (or replace, same id) */
+    SBG_MSG_NOTIF_CLOSE = 75,/* a = id: the app withdrew it */
 };
 #define SBSHM_NONE 0xffffffffU
 /* v2, who uses the rings in the guest: the rings are single-producer single-consumer, so ONE guest process owns
@@ -418,6 +446,61 @@ struct sbshm_blk {
     struct sbshm_blkreq req[SBSHM_BLK_RING];
     struct sbshm_blkreq done[SBSHM_BLK_RING];
 };                                  /* 4 KiB + 0.5 KiB: fits before SBSHM_BLKDATA_OFF */
+
+/* ==== contract v3 (Track E, 2026-11-12: "apps work fully") ===========================================
+ * hdr.version = 3 and hdr.host_services name what the host serves; the guest uses a service only when its bit is
+ * set (a v2 host leaves host_services 0). Kernel services (net, 9p, snd) use the doorbells alone, like sbblk; the
+ * desktop ones (clip, notif) go through sbwl and the message rings. */
+enum {
+    SBSHM_SVC_NET = 1U << 0,        /* sbnet (sbshm-net.h): the IP rings at SBSHM_NET_OFF */
+    SBSHM_SVC_P9 = 1U << 1,         /* sbp9 (sbshm-p9.h): Starbite's files at /home/user/Starbite */
+    SBSHM_SVC_SND = 1U << 2,        /* sbsnd (sbshm-snd.h): speaker / mic */
+    SBSHM_SVC_CLIP = 1U << 3,       /* struct sbshm_clip */
+    SBSHM_SVC_NOTIF = 1U << 4,      /* struct sbshm_notifs */
+    SBSHM_SVC_CLOCK = 1U << 5,      /* hdr.host_unix_s is real */
+};
+enum { SBSHM_MOD_CTRL = 1U << 0, SBSHM_MOD_ALT = 1U << 1, SBSHM_MOD_SUPER = 1U << 2, SBSHM_MOD_SHIFT = 1U << 3 };
+
+/* ---- v3: the clipboard. Two seqlocked slots, one writer each: g2h (sbwl, when a Wayland app sets the selection;
+ * then SBG_MSG_CLIP_SET) and h2g (the host, when Starbite copies; then SBG_MSG_CLIP). Text is UTF-8 without a NUL;
+ * images are PNG. Larger content is not offered (len 0, mime names what it was). */
+#define SBSHM_CLIP_MAX      (0x20000U - 64U)
+struct sbshm_clip_slot {
+    volatile uint32_t seq;
+    uint32_t len;                   /* bytes in data */
+    char mime[40];                  /* "text/plain;charset=utf-8" or "image/png" */
+    uint32_t pad[4];
+    uint8_t data[SBSHM_CLIP_MAX];
+};                                  /* 128 KiB */
+struct sbshm_clip {
+    struct sbshm_clip_slot g2h;     /* guest writes */
+    struct sbshm_clip_slot h2g;     /* host writes */
+};
+
+/* ---- v3: notifications (org.freedesktop.Notifications in the guest -> Starbite's Notification Centre).
+ * sbwl writes slot (id % SBSHM_NOTIF_SLOTS) under the table's seqlock, then SBG_MSG_NOTIFY (a = slot, b = id). The
+ * host copies it at once (a slot may be reused by a later id). A tap: SBG_MSG_NOTIF_ACT (b = 0, the default action;
+ * the guest also raises the app); a swipe away: b = SBSHM_NONE. */
+#define SBSHM_NOTIF_SLOTS   32U
+#define SBSHM_NOTIF_ACTIONS 3U
+enum { SBSHM_NOTIF_LOW = 0, SBSHM_NOTIF_NORMAL = 1, SBSHM_NOTIF_CRITICAL = 2 };
+struct sbshm_notif {
+    uint32_t id;                    /* the guest's notification id (never 0) */
+    uint32_t app;                   /* catalog index of the app that sent it, or SBSHM_NONE */
+    uint32_t urgency;               /* SBSHM_NOTIF_* */
+    uint32_t timeout_ms;            /* 0 = until dismissed */
+    char app_name[32];              /* NUL-terminated UTF-8 */
+    char summary[96];
+    char body[256];                 /* plain text (markup stripped) */
+    char action[SBSHM_NOTIF_ACTIONS][24];  /* button labels for actions 1..3 ("" = none); action 0 = the tap */
+    uint32_t icon;                  /* icon pool index (the app's), or SBSHM_NONE */
+    uint32_t pad[9];
+};                                  /* 512 bytes */
+struct sbshm_notifs {
+    volatile uint32_t seq;
+    uint32_t pad[15];
+    struct sbshm_notif n[SBSHM_NOTIF_SLOTS];
+};
 
 /* ---- pstore/ramoops console zone (fs/pstore/ram_core.c, ECC off) ----------------------------------- */
 #define SBSHM_PRZ_SIG 0x43474244U   /* "DBGC" */

@@ -1,0 +1,51 @@
+id = "micro"
+name = "micro"
+summary = "A modern, intuitive terminal text editor"
+description = """micro is a terminal editor with familiar keys (Ctrl-S, Ctrl-C, Ctrl-V), mouse and touch selection, syntax highlighting and plugins. The easiest terminal editor to start with."""
+category = "Development"
+licence = "MIT"
+homepage = "https://micro-editor.github.io"
+icon = "micro"
+ram_mb = 20
+featured = false
+default = "release"
+touch = "ok"
+keywords = ["editor", "text", "terminal", "cli"]
+
+[launcher]
+exec = "micro"
+terminal = true
+keyboard = true
+
+[release]
+provider = "github"
+repo = "micro-editor/micro"
+asset = "micro-*-linux-arm64.tar.gz"
+prerelease = false
+version_from = "regex:^v(.+)$"
+format = "tar"
+strip = 1
+bin = ["micro"]
+size_mb = 12
+
+[release.verify]
+github_digest = true
+sha256_asset = "{asset}.sha"
+
+# git (not a tarball) so the Makefile can read the version from the tag
+[source]
+git = "https://github.com/micro-editor/micro"
+ref = "release"
+system = "script"
+build_deps = ["golang-go", "git", "make", "ca-certificates"]
+steps = ["make build", "install -Dm755 micro \"$PREFIX/bin/micro\""]
+bin = ["bin/micro"]
+build_min = 4
+build_mb = 500
+
+[distro]
+apt = ["micro"]
+
+[runtime]
+needs = ["keyboard"]
+note = "Source build fetches Go modules from the network."

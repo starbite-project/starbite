@@ -1,0 +1,49 @@
+id = "keepassxc"
+name = "KeePassXC"
+summary = "An offline password manager"
+description = """KeePassXC keeps your passwords in an encrypted KeePass database file that you control, with a password generator, TOTP codes and SSH agent support. Compatible with KeePass apps on other devices."""
+category = "Utilities"
+licence = "GPL-2.0-only OR GPL-3.0-only"
+homepage = "https://keepassxc.org"
+icon = "keepassxc"
+ram_mb = 150
+featured = false
+default = "release"
+touch = "ok"
+keywords = ["password", "security", "keepass", "totp"]
+
+[launcher]
+exec = "keepassxc"
+terminal = false
+keyboard = false
+
+# format appimage/binary: the downloaded file is installed and linked as bin[0]
+[release]
+provider = "github"
+repo = "keepassxreboot/keepassxc"
+asset = "KeePassXC-{version}-aarch64.AppImage"
+prerelease = false
+version_from = "tag"
+format = "appimage"
+bin = ["keepassxc"]
+size_mb = 50
+
+[release.verify]
+github_digest = true
+sha256_asset = "{asset}.DIGEST"
+signature = "{asset}.sig"
+key = "keys/keepassxc.asc"
+fingerprint = ["BF5A669F2272CF4324C1FDA8CFB4C2166397D0D2", "C1E4CBA3AD78D3AFD894F9E0B7A66F03B59076A8"]
+
+[distro]
+apt = ["keepassxc-minimal"]
+
+[runtime]
+needs = ["files"]
+note = "Upstream added an aarch64 AppImage in 2.8 (Qt 6); Debian has 2.7.10 (keepassxc-minimal, no browser integration)."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 25
+build_mb = 1500

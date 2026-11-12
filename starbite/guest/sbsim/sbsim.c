@@ -38,7 +38,7 @@
 #define PSCI_SYSTEM_OFF    0x84000008UL
 #define PSCI_VERSION       0x84000000UL
 
-enum { F_REPAIR = 1, F_STRICT = 2, F_STUB = 4, F_TERM = 8, F_POPUP = 32, F_BLKTEST = 64 };
+enum { F_REPAIR = 1, F_STRICT = 2, F_STUB = 4, F_TERM = 8, F_POPUP = 32, F_BLKTEST = 64, F_V3 = 128 };
 
 struct manifest {
     uint64_t magic;                     /* "SBSTORE1" */
@@ -458,9 +458,12 @@ static int cluster_off(void)
 static const struct sbg_os shim = {
     .ms = now_ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
 };
+/* contract v3 (F_V3): the services' stand-ins live in sim_v3.c (sim_net.c, sim_p9.c, sim_snd.c) */
+#include "sim_v3.c"
 static const struct sbg_os shim_blk = {     /* with block devices in the manifest */
     .ms = now_ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
     .blk_io = blk_io,
+    .unix_s = sim_unix_s, .net_rx = sim_net_rx, .fs = SIM_FS, .snd = SIM_SND,
 };
 static void blk_report(unsigned run)
 {
@@ -517,6 +520,8 @@ static int run_guest(unsigned run)
         uint64_t t = now_ms();
         own_check(t);
         sbg_poll();
+        if (mf->flags & F_V3)
+            sim_v3_tick(t);
         s = sbg_stats();
         if (s->state == SBG_FAILED)
             return -1;
@@ -806,6 +811,7 @@ void sbsim_main(void)
         .boot_timeout_ms = (mf->boot_timeout_s ? mf->boot_timeout_s : 300) * 1000U,
         .stop_timeout_ms = 60000,
         .v2 = blk_n ? 1U : 0U,                  /* contract v2 only with block devices: the rest stays v1 */
+        .services = (blk_n && (mf->flags & F_V3)) ? 0xffffffffU : 0U,   /* v3: every service sim_v3.c stands in for */
     };
     for (unsigned i = 0; i < SBSHM_BLK_DEVS; ++i)
         cfg.blk[i] = blkdevs[i];

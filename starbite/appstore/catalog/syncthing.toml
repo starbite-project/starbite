@@ -1,0 +1,40 @@
+id = "syncthing"
+name = "Syncthing"
+summary = "Continuous peer-to-peer file sync between your devices"
+description = """Syncthing keeps folders in sync between this phone and your other computers, directly and encrypted, with no cloud in the middle. It runs as a service with a web interface in the browser."""
+category = "Internet"
+licence = "MPL-2.0"
+homepage = "https://syncthing.net"
+icon = "syncthing"
+ram_mb = 80
+featured = false
+default = "release"
+touch = "ok"
+keywords = ["sync", "backup", "files", "p2p"]
+
+[launcher]
+exec = "syncthing serve"
+terminal = true
+keyboard = false
+
+[release]
+provider = "github"
+repo = "syncthing/syncthing"
+asset = "syncthing-linux-arm64-v*.tar.gz"
+prerelease = false
+version_from = "regex:^v(.+)$"
+format = "tar"
+strip = 1
+bin = ["syncthing"]
+size_mb = 30
+
+[release.verify]
+github_digest = true
+sha256_asset = "sha256sum.txt.asc"
+
+[distro]
+apt = ["syncthing"]
+
+[runtime]
+needs = ["network", "files"]
+note = "Opens its web UI at http://127.0.0.1:8384 in the browser; syncing runs while the terminal window stays open. sha256sum.txt.asc is a PGP clear-signed sums file. Debian has the older 1.x line."

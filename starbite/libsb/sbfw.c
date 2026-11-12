@@ -144,7 +144,11 @@ static uint8_t fw_page[SBFW_TABLE_SIZE] __attribute__((aligned(8)));
 
 int sb_fw_read(void)
 {
-    const volatile uint64_t *src = (const volatile uint64_t *)SB_SBFW_TABLE;
+    uintptr_t a = SB_SBFW_TABLE;
+    /* an opaque address: without it GCC 13 -O2 shares one induction variable between src and fw_page and keeps
+     * "fw_page - 0x91ffe000" as a relocated constant, an addend outside the image (check-image.py refuses it) */
+    __asm__("" : "+r"(a));
+    const volatile uint64_t *src = (const volatile uint64_t *)a;
     uint64_t *dst = (uint64_t *)fw_page;
     for (unsigned i = 0; i < SBFW_TABLE_SIZE / 8U; ++i)
         dst[i] = src[i];

@@ -1,0 +1,26 @@
+id = "kdenlive"
+name = "Kdenlive"
+summary = "Video editor with a multi-track timeline"
+description = """Kdenlive is a non-linear video editor: multi-track timeline, titles, transitions, effects and rendering to common formats. Heavy for this phone: fine for short 720p clips, slow beyond that."""
+category = "Media"
+licence = "GPL-3.0-or-later"
+homepage = "https://kdenlive.org"
+icon = "kdenlive"
+ram_mb = 700
+featured = false
+default = "distro"
+touch = "poor"
+keywords = ["video", "editor", "timeline", "kde"]
+
+[launcher]
+exec = "kdenlive"
+terminal = false
+keyboard = false
+env = { QT_QPA_PLATFORM = "wayland" }
+
+[distro]
+apt = ["kdenlive", "qt6-wayland"]
+
+[runtime]
+needs = ["audio", "files"]
+note = "Needs about 700 MB with a small project, more for HD; close other apps first. No GPU: previews and renders use the CPU only. Upstream's AppImage is x86_64 only."

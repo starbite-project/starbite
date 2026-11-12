@@ -375,7 +375,7 @@ static void med_row_files(dc *d, int r)
         n = md_cat(b, n, sizeof b, MD.more ? " shown (the folder has more)" : "");
         md_cat(b, n, sizeof b, " \xc2\xb7 Read only");
         float w = tw(TK_IT400, 13, b, 0, TK_TNUM);
-        d_text(d, TK_IT400, 13, (390 - w) / 2, bl(TK_IT400, 13, cy + 16), b, 0, TK_TNUM, W(.45f), 0);
+        d_text(d, TK_IT400, 13, (390 - w) / 2, bl(TK_IT400, 13, cy + 16), b, 0, TK_TNUM, C_LABEL2, 0);
         return;
     }
     if (r > MD.nent) return;
@@ -388,9 +388,9 @@ static void med_row_files(dc *d, int r)
     if (e->dir) n = md_cat(b, 0, sizeof b, "Folder");
     else { md_size(sz, e->size); n = md_cat(b, 0, sizeof b, sz); }
     if (dt[0]) { n = md_cat(b, n, sizeof b, " \xc2\xb7 "); md_cat(b, n, sizeof b, dt); }
-    d_text(d, TK_IT400, 13, 72, bl(TK_IT400, 13, cy + 34), b, 0, TK_TNUM, W(.55f), 0);
+    d_text(d, TK_IT400, 13, 72, bl(TK_IT400, 13, cy + 34), b, 0, TK_TNUM, C_LABEL2, 0);
     if (e->dir) d_icon(d, "chev", 356, cy + 23.5f, .45f);
-    d_rrect(d, 72, cy + 60.6f, 318, .5f, 0, W(.1f));
+    d_rrect(d, 72, cy + 60.6f, 318, .5f, 0, C_SEP);
 }
 static void med_row_music(dc *d, int r)
 {
@@ -400,12 +400,12 @@ static void med_row_music(dc *d, int r)
         int n = md_count(b, ML.ntr, "song", "songs");
         md_cat(b, n, sizeof b, " \xc2\xb7 Playback isn't available yet");
         float w = tw(TK_IT400, 13, b, 0, TK_TNUM);
-        d_text(d, TK_IT400, 13, (390 - w) / 2, bl(TK_IT400, 13, cy + 16), b, 0, TK_TNUM, W(.45f), 0);
+        d_text(d, TK_IT400, 13, (390 - w) / 2, bl(TK_IT400, 13, cy + 16), b, 0, TK_TNUM, C_LABEL2, 0);
         return;
     }
     if (r > ML.ntr) return;
     const ml_track *t = &ML.tr[r];
-    d_rrect(d, 20, cy + 8, 45, 45, 7, tk_hex(0x232c48, 1));
+    d_rrect(d, 20, cy + 8, 45, 45, 7, sbc(SBC_GRAY5));
     d_note(d, 31, cy + 18, 23, tk_hex(0xff375f, 1));
     ellipsize(b, sizeof b, TK_IT400, 17, t->title[0] ? t->title : t->it.name, 286);
     d_text(d, TK_IT400, 17, 78, bl(TK_IT400, 17, cy + 10), b, 0, 0, INK, 0);
@@ -421,8 +421,8 @@ static void med_row_music(dc *d, int r)
     md_cat(b, n, sizeof b, sz);
     char e[160];
     ellipsize(e, sizeof e, TK_IT400, 14, b, 286);
-    d_text(d, TK_IT400, 14, 78, bl(TK_IT400, 14, cy + 34), e, 0, TK_TNUM, W(.55f), 0);
-    d_rrect(d, 78, cy + 60.6f, 312, .5f, 0, W(.1f));
+    d_text(d, TK_IT400, 14, 78, bl(TK_IT400, 14, cy + 34), e, 0, TK_TNUM, C_LABEL2, 0);
+    d_rrect(d, 78, cy + 60.6f, 312, .5f, 0, C_SEP);
 }
 static void med_tile_draw(int s, int i)
 {
@@ -435,12 +435,12 @@ static void med_tile_draw(int s, int i)
         tk_bmp_free(&l->bmp);
         if (!tk_bmp_new(&l->bmp, w, h)) return;
     }
-    tk_fill_rect_raw(&l->bmp, 0, 0, w, h, 0xff0a0f1fu);
+    tk_fill_rect_raw(&l->bmp, 0, 0, w, h, sbc_argb(SBC_GROUND));
     l->opaque = 1;
     if (MD.app == MD_PHOTOS) {
         for (int c = 0; c < 3; c++) {
             MD.tcell[s][c] = 0;
-            if (i * 3 + c < ML.nph) tk_fill_rect_raw(&l->bmp, c * (MD_CELL + 3), 0, MD_CELL, MD_CELL, 0xff161d33u);
+            if (i * 3 + c < ML.nph) tk_fill_rect_raw(&l->bmp, c * (MD_CELL + 3), 0, MD_CELL, MD_CELL, sbc_argb(SBC_GRAY6));
         }
         MD.pend = 1;
         return;
@@ -519,7 +519,7 @@ static void med_header(void)
         d_h1(&d, "Library");
         line = "Playback isn't available yet";
     }
-    d_text(&d, TK_IT400, 13, MARGIN, LARGE_BASE + 20, line, 0, TK_TNUM, W(.55f), 0);
+    d_text(&d, TK_IT400, 13, MARGIN, LARGE_BASE + 20, line, 0, TK_TNUM, C_LABEL2, 0);
 }
 /* what to say instead of a list (0: the list is shown) */
 static int med_words(const char **title, const char **line)
@@ -798,7 +798,7 @@ static void vw_show(int idx)
     if (!MD.vsingle) { n = put_dec(b, idx + 1); n = md_cat(b, n, sizeof b, " of "); n += put_dec(b + n, ML.nph); if (dt[0]) n = md_cat(b, n, sizeof b, " \xc2\xb7 "); }
     md_cat(b, n, sizeof b, dt);
     w = tw(TK_IT400, 11.5f, b, 0, TK_TNUM);
-    d_text(&d, TK_IT400, 11.5f, 195 - w / 2, bl(TK_IT400, 11.5f, 70), b, 0, TK_TNUM, W(.6f), 0);
+    d_text(&d, TK_IT400, 11.5f, 195 - w / 2, bl(TK_IT400, 11.5f, 70), b, 0, TK_TNUM, C_LABEL2, 0);
     dj_begin(2, path, size, TK_W / 2, TK_H / 2);
     relink();
     vw_place();
@@ -864,7 +864,7 @@ static void np_build(void)
     char b[160];
     if (MD.pstage == 1) {
         tk_layer_init(&medpbg, "med-pbg");
-        medpbg.solid = 0xff0a0f1fu;
+        medpbg.solid = sbc_argb(SBC_GROUND);
         medpbg.solid_w = TK_W;
         medpbg.solid_h = TK_H;
         medpbg.opaque = 1;
@@ -879,7 +879,7 @@ static void np_build(void)
         int s = (int)PT(135);
         if (tk_bmp_new(&medpart.bmp, s, s)) {
             dc a = { &medpart.bmp, 0, 0, 0 };
-            d_rrect(&a, 0, 0, 135, 135, 9, tk_hex(0x232c48, 1));
+            d_rrect(&a, 0, 0, 135, 135, 9, sbc(SBC_GRAY5));
             d_note(&a, 36, 34, 62, tk_hex(0xff375f, 1));
             medpart.sx = medpart.sy = 2;
             medpart.x = PT(60) / 2;
@@ -892,12 +892,12 @@ static void np_build(void)
         ellipsize(b, sizeof b, TK_IT700, 22, t->title[0] ? t->title : t->it.name, 326);
         d_text(&d, TK_IT700, 22, 32, bl(TK_IT700, 22, 404), b, 0, 0, INK, 0);
         ellipsize(b, sizeof b, TK_IT400, 17, t->artist[0] ? t->artist : "Unknown artist", 326);
-        d_text(&d, TK_IT400, 17, 32, bl(TK_IT400, 17, 434), b, 0, 0, W(.6f), 0);
+        d_text(&d, TK_IT400, 17, 32, bl(TK_IT400, 17, 434), b, 0, 0, C_LABEL2, 0);
         /* the scrubber at its start, the times unknown; the transport, dimmed: nothing here can be pressed */
         d_rrect(&d, 32, 482, 326, 6, 3, W(.14f));
-        d_text(&d, TK_IT400, 12, 32, bl(TK_IT400, 12, 496), "0:00", 0, TK_TNUM, W(.35f), 0);
+        d_text(&d, TK_IT400, 12, 32, bl(TK_IT400, 12, 496), "0:00", 0, TK_TNUM, C_LABEL3, 0);
         float w = tw(TK_IT400, 12, "--:--", 0, TK_TNUM);
-        d_text(&d, TK_IT400, 12, 358 - w, bl(TK_IT400, 12, 496), "--:--", 0, TK_TNUM, W(.35f), 0);
+        d_text(&d, TK_IT400, 12, 358 - w, bl(TK_IT400, 12, 496), "--:--", 0, TK_TNUM, C_LABEL3, 0);
         tk_col dim = W(.22f);
         d_tri(&d, 178, 548, 178, 592, 216, 570, dim);                      /* play */
         d_tri(&d, 112, 570, 134, 556, 134, 584, dim);                      /* previous */
@@ -908,7 +908,7 @@ static void np_build(void)
         d_text(&d, TK_IT600, 15, 195 - w / 2, bl(TK_IT600, 15, 632), "Playback isn't available yet", 0, 0, W(.7f), 0);
         const char *l2 = "Starbite OS has no sound output so far.";
         w = tw(TK_IT400, 13, l2, 0, 0);
-        d_text(&d, TK_IT400, 13, 195 - w / 2, bl(TK_IT400, 13, 656), l2, 0, 0, W(.45f), 0);
+        d_text(&d, TK_IT400, 13, 195 - w / 2, bl(TK_IT400, 13, 656), l2, 0, 0, C_LABEL2, 0);
         MD.pstage = 3;
     }
     relink();
@@ -952,9 +952,9 @@ static void thumb_done(int ok)
             }
         } else {
             /* a picture that cannot be shown: a plain frame (the viewer says why) */
-            tk_fill_rect_raw(b, x, 0, MD_CELL, MD_CELL, 0xff10162au);
-            tk_fill_rect_raw(b, x + 89, 94, 60, 50, 0xff39415cu);
-            tk_fill_rect_raw(b, x + 92, 97, 54, 44, 0xff10162au);
+            tk_fill_rect_raw(b, x, 0, MD_CELL, MD_CELL, sbc_argb(SBC_GRAY6));
+            tk_fill_rect_raw(b, x + 89, 94, 60, 50, sbc_argb(SBC_GRAY4));
+            tk_fill_rect_raw(b, x + 92, 97, 54, 44, sbc_argb(SBC_GRAY6));
         }
         MD.tcell[s][c] = ok ? 1 : 2;
         tk_layer_dirty(&medt[s]);
@@ -1038,7 +1038,7 @@ static void med_build(void)
         MD.nt = MD_NT;
         for (int s = 0; s < MD_NT; s++) { tk_layer_init(&medt[s], "med-tile"); medt[s].hidden = 1; }
         tk_layer_init(&medh, "med-head");
-        medh.solid = 0xff0a0f1fu;
+        medh.solid = sbc_argb(SBC_GROUND);
         medh.solid_w = TK_W;
         medh.solid_h = (float)MD.hdr_px;
         medh.opaque = 1;
