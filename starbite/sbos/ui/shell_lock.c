@@ -4108,6 +4108,7 @@ static void set_emergency(int on, int instant)
     if (EP.goal >= 0 && EP.goal != on) ep_cancel();   /* back before the last switch was whole: made again */
     if (EP.goal < 0) ep_begin(on);                   /* nothing prepared (Exit Emergency's tap): over the next frames */
     EMG = on;
+    sh_perf_mode(on);                                /* cp6 (Track A): Emergency's clocks drop 0.4 s after motion; normal mode holds 1.5 s */
     if (!on) { free_ecards(); cards_pending = LOCK_PARTS; }
     /* a fade still running stops where it is: the next one starts from there */
     tk_bmp_free(&em_wall);
