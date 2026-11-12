@@ -22,7 +22,8 @@ SEQ" in; "store SEQ", "pkg IDX STATE PCT", "rescan" out), the same struct sbshm_
 Environment (tests and the host use these; the guest needs none):
   SBSTORE_ROOT (/)            every path below is under it
   SBSTORE_CATALOG             catalog.json, or a directory of *.toml (default <root>/usr/share/starbite/appstore/catalog.json)
-  SBSTORE_MIRROR (/repo/appstore/mirror:/usr/share/starbite/appstore/mirror)   the offline mirror (tools/mirror.py),
+  SBSTORE_MIRROR (/srv/appstore:/repo/appstore/mirror:/usr/share/starbite/appstore/mirror)   the offline mirror
+                              (tools/mirror.py; on the phone the card file appstore.erofs at /srv/appstore),
                               used when the network is down; its debs/ is an apt source (build deps offline)
   SBSTORE_REPO (/repo)        the offline Debian repo of the old store (its store/index.tsv entries join the catalog)
   SBSTORE_OFFLINE=1           never use the network
@@ -86,7 +87,7 @@ class Cfg:
         self.apps = rp("/usr/local/share/applications")
         self.icons = rp("/usr/local/share/icons/hicolor")
         # the offline mirror (tools/mirror.py): the first of these that exists
-        self.mirrors = [m for m in env("SBSTORE_MIRROR", "/repo/appstore/mirror:" +
+        self.mirrors = [m for m in env("SBSTORE_MIRROR", rp("/srv/appstore") + ":/repo/appstore/mirror:" +
                                        rp("/usr/share/starbite/appstore/mirror")).split(":") if m]
         self.mirror = next((m for m in self.mirrors if os.path.isdir(m)), self.mirrors[0])
         self.repo = env("SBSTORE_REPO", "/repo")
@@ -846,6 +847,27 @@ def ensure_net_sources():
         return False
 
 
+def ensure_mirror_source():
+    """the offline mirror's debs/ (build-essential, git ...) as a file: apt source while it is there"""
+    lst = rp("/etc/apt/sources.list.d/sbstore-mirror.list")
+    d = os.path.join(C.mirror, "debs")
+    want = "deb [trusted=yes] file:%s ./\n" % d if os.path.exists(os.path.join(d, "Packages")) else ""
+    try:
+        have = open(lst).read() if os.path.exists(lst) else ""
+        if want == have:
+            return False
+        if want:
+            os.makedirs(os.path.dirname(lst), exist_ok=True)
+            with open(lst, "w") as f:
+                f.write(want)
+        else:
+            os.unlink(lst)
+        log("offline mirror apt source %s" % ("added: " + d if want else "removed (the mirror is gone)"))
+        return True
+    except OSError:
+        return False
+
+
 def apt_update(app_id=None):
     ensure_net_sources()
     if net_up():
@@ -1286,7 +1308,7 @@ def write_launcher(app, vdir, method):
              "Comment=" + desktop_escape(app.get("summary", "")), "Exec=" + exec_, "Icon=" + icon_field,
              "Terminal=" + ("true" if L.get("terminal") else "false"),
              "Categories=%s;" % app.get("category", "Utility"),
-             "X-Starbite-Store=%s" % aid, "X-Starbite-Method=%s" % method]
+             "X-Starbite-Pkg=%s" % aid, "X-Starbite-Store=%s" % aid, "X-Starbite-Method=%s" % method]
     if L.get("keyboard"):
         lines.append("X-Starbite-Keyboard=true")
     os.makedirs(C.apps, exist_ok=True)
@@ -2330,6 +2352,8 @@ class Daemon:
         log("daemon: %d apps (%s), mirror %s, network %s" % (len(self.order), C.catalog, C.mirror,
                                                             "up" if net_up() else "down"))
         self.aptup = None
+        ensure_mirror_source()
+        ensure_net_sources()
         if env("SBSTORE_NO_APT_UPDATE") != "1":         # in the background: file: sources (repo, mirror debs)
             try:                                        # work offline; jobs wait for it, the table does not
                 self.aptup = subprocess.Popen(C.apt + ["-q", "update"], stdin=subprocess.DEVNULL,

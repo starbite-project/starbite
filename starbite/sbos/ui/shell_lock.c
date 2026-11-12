@@ -991,6 +991,7 @@ static void lx_close(void);
 static int lx_tap(float x, float y);
 static int lx_touch(int ph, float x, float y);
 static int lx_moving(void);
+static int lx_tick(float dt);                   /* Track F: the App Store's scroll and page builds over frames */
 static int lx_layers(tk_layer **o);
 static int lx_set(const char *what, const char *key, float v);
 /* P3p: an app's 62 pt icon. Calendar shows today, as on iOS: the blank a62-calendar-bg with the weekday (red,
@@ -3830,7 +3831,7 @@ void sh_set(const char *what, const char *key, float v)
         back_to_lock(1);
     } else if (!tk_strcmp(what, "sleep")) {        /* the films: the Power key's fade (v 1) and the wake (v 0) */
         if (v > 0) sh_sleep(0); else sh_wake();
-    } else if (lx_set(what, key, v)) {            /* L3: lapp=, store=, storeq= (shell_linux.inc) */
+    } else if (lx_set(what, key, v)) {            /* L3: lapp=; Track F: store=, storecat=, storeq=, storeapp=, ... */
     } else if (nc_set(what, key, v)) {            /* helper D: notify=, banner=, nc=, ncgroup=, ncswipe= (shell_nc.inc) */
     } else if (sw_set(what, key, v)) {            /* helper D: switcher=, swsnap= (shell_switcher.inc) */
     } else if (cm_set(what, key, v)) {            /* helper I: thread=, compose=, to=, dial=, recent=, callpad=, ... */
@@ -4563,7 +4564,7 @@ int sh_tick(float dt, float t)
     }
     mv |= ico_step(dt);                          /* P3p: the pressed icon */
     mv |= med_tick(dt);
-    mv |= lx_moving();                           /* L3: the App Store's list under the finger */
+    mv |= lx_tick(dt);                           /* L3, Track F: the App Store's page (scroll, momentum, builds) */
     if (em_t < 1) {
         em_t = tk_minf(1, em_t + dt / .7f);
         em_step(tk_bezier(.25f, .1f, .25f, 1, em_t));

@@ -15,8 +15,11 @@ PKGS=passwd,mount,util-linux,procps,kmod,iproute2,ca-certificates,less,nano,dbus
 
 mounts() {
     for d in proc dev dev/pts dev/shm run tmp "$REPO"; do sudo mkdir -p "$R/${d#/}"; done
+    sudo mount --make-rprivate "$R" 2>/dev/null || true
     mountpoint -q "$R/proc" || sudo mount -t proc proc "$R/proc"
-    mountpoint -q "$R/dev" || sudo mount --bind /dev "$R/dev"
+    # /dev is a SHARED mount in the VM: the chroot's copy is made a slave first, so the devpts / shm mounted on it
+    # below never propagate back onto the VM's own /dev/pts and /dev/shm (or into other sessions' chroots)
+    mountpoint -q "$R/dev" || { sudo mount --bind /dev "$R/dev" && sudo mount --make-rslave "$R/dev"; }
     mountpoint -q "$R/dev/pts" || sudo mount -t devpts devpts "$R/dev/pts" -o newinstance,ptmxmode=0666
     mountpoint -q "$R/dev/shm" || sudo mount -t tmpfs shm "$R/dev/shm" -o mode=1777
     mountpoint -q "$R/run" || sudo mount -t tmpfs run "$R/run" -o mode=755

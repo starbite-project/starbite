@@ -58,7 +58,11 @@ static const char *why = "";
 
 /* contract v2 in plain memory */
 static struct sbshm_cat fcat;
-static struct sbshm_store fstore;
+/* Track F: store3: the fake store is the whole store region (store, descriptions, store3 up to the icon pool), so
+ * gwin.c's store3 read beside it stays inside (zero: no store3 magic = a v2 guest) */
+static union { uint8_t region[SBSHM_ICON_OFF - SBSHM_STORE_OFF]; struct sbshm_store s; } fstore_region
+    __attribute__((aligned(64)));
+#define fstore (fstore_region.s)
 static uint32_t icons[4][SBSHM_ICON_PX * SBSHM_ICON_PX];
 static unsigned changes;
 static uint32_t win = SBSHM_NONE, act = SBSHM_NONE, vp = 0, focus;

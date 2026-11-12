@@ -131,13 +131,33 @@ typedef struct { unsigned seq; int n; unsigned mem_total_kb, mem_avail_kb; sh_la
 enum { SH_PKG_IDLE, SH_PKG_QUEUED, SH_PKG_INSTALLING, SH_PKG_REMOVING, SH_PKG_FAILED };
 enum { SH_PKG_INSTALLED = 1, SH_PKG_SYSTEM = 2, SH_PKG_TOO_BIG = 4, SH_PKG_NO_SPACE = 8, SH_PKG_FEATURED = 16 };
 enum { SH_PKG_OP_INSTALL = 1, SH_PKG_OP_REMOVE = 2, SH_PKG_OP_CANCEL = 3 };
+/* Track F, the App Store v3 (starbite/appstore/sbshm-store3.h; FORMAT.md): install methods, phases, updates. The op
+ * word sh_linux_pkg takes is op | method << 8 (method 0: the entry's def_method); CHECK with SH_PKG_ALL checks every
+ * installed app. state stays SH_PKG_INSTALLING during the DOWNLOADING / BUILDING / VERIFYING phases. */
+enum { SH_PKG_UPDATE = 32, SH_PKG_ROLLBACK = 64, SH_PKG_NEEDS_NET = 128 };          /* more flags */
+enum { SH_PKG_OP_UPDATE = 4, SH_PKG_OP_ROLLBACK = 5, SH_PKG_OP_CHECK = 6 };
+enum { SH_M_DEFAULT = 0, SH_M_DISTRO = 1, SH_M_RELEASE = 2, SH_M_SOURCE = 3 };     /* methods: bit 1 << SH_M_* */
+enum { SH_PKG_DOWNLOADING = 5, SH_PKG_BUILDING = 6, SH_PKG_VERIFYING = 7 };       /* phases (besides the states) */
+enum { SH_NEED_NETWORK = 1, SH_NEED_AUDIO = 2, SH_NEED_GPU = 4, SH_NEED_CAMERA = 8, SH_NEED_FILES = 16, SH_NEED_KEYBOARD = 32 };
+enum { SH_PKG3_VERIFIED = 1, SH_PKG3_MIRROR = 4, SH_PKG3_TERMINAL = 8 };            /* flags3 */
+#define SH_PKG_OPWORD(op, m) ((int)((unsigned)(op) | (unsigned)(m) << 8))
+#define SH_PKG_ALL (-1)                                   /* sh_linux_pkg's index for CHECK: every installed app */
 #define SH_LPKGS 160
 typedef struct {
     char pkg[40], name[32], summary[96], category[16], err[32];
     unsigned dl_kb, inst_kb, ram_mb, flags, state, pct;
     int icon;                                             /* -1 none */
+    /* v3 (all 0 / "" when the guest has no store3) */
+    unsigned methods, method, def_method, phase;          /* methods offered (bits), installed with, preselected, phase */
+    unsigned done_kb, total_kb, eta_s, build_min, touch, needs, flags3, rel_size_mb;   /* touch 0 ?, 1 poor, 2 ok, 3 good */
+    char ver_inst[24], ver_new[24], ver_rel[24], ver_distro[24], ver_src[24], licence[24], source[48];
+    char desc[480];                                       /* the long description (UTF-8, cut at 479 bytes) */
 } sh_lpkg_t;
-typedef struct { unsigned seq; int n, repo_ok; unsigned overlay_total_kb, overlay_free_kb, mem_total_kb; sh_lpkg_t pkg[SH_LPKGS]; } sh_lstore_t;
+typedef struct {
+    unsigned seq; int n, repo_ok; unsigned overlay_total_kb, overlay_free_kb, mem_total_kb; sh_lpkg_t pkg[SH_LPKGS];
+    int v3;                                               /* 1: the guest wrote store3 (the v3 fields are valid) */
+    unsigned net_ok, mirror_ok, checked_at;               /* checked_at: unix time of the last update check (0 never) */
+} sh_lstore_t;
 
 /* the platform */
 int sh_linux_open(const char *id);       /* start Linux if off, launch the app (once the catalog has it), put its window
@@ -153,7 +173,8 @@ int sh_linux_char(char c);               /* one character typed: committed text 
 int sh_linux_viewport(int rows);         /* the rows the shell shows (SH_LINUX_H, or SH_LINUX_HKB with the keyboard) */
 int sh_linux_icon(int icon, uint32_t *px);     /* a pool icon into px (SH_LINUX_ICON squared); 0: none */
 int sh_linux_hold(int on);               /* 1: the App Store is open: Linux started if off and not stopped while idle */
-int sh_linux_pkg(int pkg, int op);       /* install / remove / cancel a store package; < 0 refused */
+int sh_linux_pkg(int pkg, int op);       /* install / remove / cancel / update / ... a store package (op: the op word,
+                                          * SH_PKG_OPWORD; pkg SH_PKG_ALL for CHECK); < 0 refused */
 /* the shell, called by the platform */
 void sh_linux_state(int state, const char *why);   /* the guest's state changed (why: the reason when FAILED) */
 int sh_linux_frame(void);                /* the active window has new rows; 1 when the window took them (draw) */
