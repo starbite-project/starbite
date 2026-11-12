@@ -1598,6 +1598,7 @@ void wifi_timer(unsigned id)
     }
     if (fx_state == 1 && st != SBOS_WIFI_CONNECTED)
         fetch_poll();                       /* the network went: the fetch ends */
+    kgw_tick();                             /* Track H: the Linux guest's gateway follows the uplink */
     int busy = st == SBOS_WIFI_STARTING || st == SBOS_WIFI_SCANNING || st == SBOS_WIFI_JOINING || st == SBOS_WIFI_DHCP ||
                join_pending || join_active || dhcp_go || fx_state == 1;
     uint32_t every = st == SBOS_WIFI_STARTING ? 10U : K.screen_on ? TICK_ON_MS : TICK_OFF_MS;

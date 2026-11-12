@@ -684,6 +684,16 @@ void wifi_state_get(const uint8_t *half);
 struct sbnet;
 struct sbtcp;
 int wifi_uplink(struct sbnet **n, struct sbtcp **t);   /* 1 Wi-Fi, 2 mobile data, 0 none (Wi-Fi preferred) */
+/* Track H: the Linux guest's network (netgw.c on starbite/wifi/gw.c; docs: starbite/wifi/GW.md). The guest's virtual
+ * NIC (Track E) starts it with its frame sink, hands every frame the guest sends to kgw_guest_rx and calls kgw_tick
+ * from its poll (every 100-500 ms; Wi-Fi's tick calls it too). No checksum offload, TSO or GSO on the guest's NIC. */
+int kgw_start(int (*to_guest)(void *ctx, const uint8_t *frame, uint32_t len), void *ctx);
+void kgw_stop(void);
+int kgw_on(void);
+void kgw_guest_rx(const uint8_t *frame, uint32_t len);
+void kgw_tick(void);
+void kgw_uplink_gone(void);
+unsigned kgw_conns(void);
 extern int wifi_selftest_scan_only;          /* Next: the Wi-Fi self test scans only (and runs the TLS self-check) */
 /* Next (wifi-sbos-next): one HTTP(S) GET at a time over the joined network (starbite/wifi/http.h). wifi_fetch:
  * 0 started, SBOS_EAGAIN not joined (or no memory), SBOS_EBUSY one is running. The status says how it went; the

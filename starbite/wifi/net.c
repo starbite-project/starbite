@@ -134,11 +134,11 @@ static void next_hop(struct sbnet *n, const uint8_t *dst, uint8_t *hop)
     cpy(hop, local || zero4(n->gateway) ? dst : n->gateway, 4);
 }
 
+static int ip_route(struct sbnet *n, const uint8_t *dst, uint8_t *f, uint32_t total, int broadcast, int guest);
 /* an IPv4 packet out: f has room for the Ethernet header in front; payload len bytes at f + 34 */
 static int ip_send(struct sbnet *n, const uint8_t *dst, uint8_t proto, uint8_t *f, uint32_t plen, int broadcast)
 {
-    uint8_t *ip = f + 14, hop[4];
-    const uint8_t *mac;
+    uint8_t *ip = f + 14;
     uint32_t total = 20 + plen;
     if (total > 1500 || total > n->mtu)
         return -1;
@@ -151,6 +151,16 @@ static int ip_send(struct sbnet *n, const uint8_t *dst, uint8_t proto, uint8_t *
     cpy(ip + 12, broadcast && n->state < SBNET_BOUND ? any_ip : n->ip, 4);
     cpy(ip + 16, dst, 4);
     p16(ip + 10, fold(sum16(ip, 20, 0)));
+    return ip_route(n, dst, f, total, broadcast, 0);
+}
+
+/* a complete IPv4 packet (total bytes at f + 14) to its next hop: on Ethernet the destination itself on our subnet,
+ * else the gateway, through the ARP cache (or held for ARP); in raw IP as it is. guest: a packet of the gateway's
+ * NAT (sbnet_ip_out), which never takes the place of one of our own held for ARP */
+static int ip_route(struct sbnet *n, const uint8_t *dst, uint8_t *f, uint32_t total, int broadcast, int guest)
+{
+    uint8_t hop[4];
+    const uint8_t *mac;
     if (broadcast || eq(dst, bcast_ip, 4) || n->raw_ip) {
         eth_send(n, bcast_mac, ETH_IP, f, 14 + total);
         return 0;
@@ -162,8 +172,9 @@ static int ip_send(struct sbnet *n, const uint8_t *dst, uint8_t proto, uint8_t *
         return 0;
     }
     /* held until the next hop answers (one packet; a newer one replaces it) */
-    if (14 + total > SBNET_HELD_MAX)
+    if (14 + total > SBNET_HELD_MAX || (guest && n->held_len && !n->held_guest))
         return -1;
+    n->held_guest = guest;
     cpy(f + 6, n->mac, 6);                      /* the header but its destination, filled when the hop answers */
     p16(f + 12, ETH_IP);
     cpy(n->held, f, 14 + total);
@@ -517,6 +528,9 @@ static void ip_rx(struct sbnet *n, const uint8_t *ip, uint32_t len)
             return;
         }
     }
+    /* the gateway's NAT (gw.c) first: it takes what belongs to the guest's connections */
+    if (n->ip_hook && n->state >= SBNET_BOUND && eq(ip + 16, n->ip, 4) && n->ip_hook(n->hook_ctx, n, ip, total))
+        return;
     if (ip[9] == IP_ICMP) {
         icmp_rx(n, ip, ihl, ip + ihl, total - ihl);
         return;
@@ -563,6 +577,23 @@ int sbnet_ip_send(struct sbnet *n, const uint8_t dst[4], uint8_t proto, uint8_t 
     if (n->state < SBNET_BOUND || zero4(dst) || eq(dst, bcast_ip, 4) || 20 + plen > n->mtu)
         return -1;
     return ip_send(n, dst, proto, f, plen, 0);
+}
+
+int sbnet_ip_out(struct sbnet *n, uint8_t *f, uint32_t total)
+{
+    const uint8_t *ip = f + 14;
+    if (n->state < SBNET_BOUND || total < 20 || total > n->mtu || total > 1500 || (ip[0] >> 4) != 4 ||
+        zero4(ip + 16) || ip[16] >= 224 || eq(ip + 16, n->ip, 4))
+        return -1;
+    if (!n->raw_ip) {                           /* the subnet's own broadcast is not routed either */
+        int directed = 1;
+        for (unsigned i = 0; i < 4; i++)
+            if ((ip[16 + i] | n->mask[i]) != 255)
+                directed = 0;
+        if (directed)
+            return -1;
+    }
+    return ip_route(n, ip + 16, f, total, 0, 1);
 }
 
 void sbnet_static(struct sbnet *n, const uint8_t ip[4], const uint8_t mask[4], const uint8_t gateway[4],

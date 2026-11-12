@@ -65,6 +65,11 @@ struct sbnet {
     int raw_ip;                         /* a point-to-point link (mobile data): bare IPv4, no Ethernet / ARP / DHCP */
     uint16_t mtu;                       /* the largest IPv4 packet sent (1500; raw IP: the PDP's, else 1400); sbtcp's
                                          * MSS follows it (mtu - 40) */
+    /* the guest gateway's hook (gw.h; set by sbgw_set_uplink, cleared by sbnet_init): every valid IPv4 packet
+     * addressed to our address while bound, before sbnet's own ICMP/UDP/TCP; 1 = it took the packet */
+    int (*ip_hook)(void *hook_ctx, struct sbnet *n, const uint8_t *ip, uint32_t len);
+    void *hook_ctx;
+    int held_guest;                     /* the held packet is the NAT's (sbnet_ip_out): ours may replace it */
 };
 
 void sbnet_init(struct sbnet *n, const struct sbnet_os *os, const uint8_t mac[6]);
@@ -86,6 +91,11 @@ int sbnet_dns_query(struct sbnet *n, const char *name);
 /* an IPv4 packet to dst (not broadcast) while bound: f has 34 bytes of room in front of the payload's plen bytes
  * (at f + 34; at most 1480); 0 sent or held for ARP, -1 not */
 int sbnet_ip_send(struct sbnet *n, const uint8_t dst[4], uint8_t proto, uint8_t *f, uint32_t plen);
+/* a complete IPv4 packet built elsewhere (the gateway's NAT, gw.c): total bytes at f + 14 (f has 14 bytes of room in
+ * front for the Ethernet header, and at least 60 bytes in all: short frames are padded in place), its header final (source our address, checksum set); routed like sbnet's own
+ * (on Ethernet to the destination on our subnet or the gateway, through ARP; raw IP as it is); 0 sent or held
+ * for ARP, -1 not (not bound, above mtu, broadcast, multicast or our own address) */
+int sbnet_ip_out(struct sbnet *n, uint8_t *f, uint32_t total);
 /* a fixed address instead of DHCP (tests, a network without DHCP): bound at once, no lease to renew */
 void sbnet_static(struct sbnet *n, const uint8_t ip[4], const uint8_t mask[4], const uint8_t gateway[4],
                   const uint8_t dns[4]);
