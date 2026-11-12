@@ -625,7 +625,10 @@ def settings(a):
             a.slot_try is not None:
         f = sbfw_decode(st['tail'])
         if a.shell is not None:
-            f['flags'] = ((f['flags'] | 1) if a.shell == 'on' else (f['flags'] & ~1)) | 8   # SHELL_SET: the user's choice
+            if a.shell == 'default':   # no choice: the loader build's default applies (FW4: on)
+                f['flags'] &= ~9
+            else:
+                f['flags'] = ((f['flags'] | 1) if a.shell == 'on' else (f['flags'] & ~1)) | 8   # SHELL_SET: the user's choice
         if a.shell_key is not None:
             f['shell_key'] = a.shell_key
         if a.req is not None:
@@ -853,7 +856,8 @@ def main():
     s.add_argument('--crash-detail', dest='crash_detail', type=int, choices=range(1, 4))
     s.add_argument('--crash-action', dest='crash_action', choices=list(CRASH_ACTIONS))
     s.add_argument('--crash-timeout', dest='crash_timeout', type=int, help='seconds, 10..600 (stored in tens)')
-    s.add_argument('--shell', choices=['on', 'off'], help='Starbite OS (the shell key) instead of the boot menu')
+    s.add_argument('--shell', choices=['on', 'off', 'default'],
+                   help='Starbite OS (the shell key) at power-on instead of the boot menu; default: the loader build decides')
     s.add_argument('--shell-key', dest='shell_key', help='the shell\'s catalog key ("" = starbite-next-gpu, else starbite-next, else starbite-os)')
     s.add_argument('--req', choices=list(SBFW_REQS), help='a one-shot for --req-key\'s next start (armed)')
     s.add_argument('--req-key', dest='req_key')
