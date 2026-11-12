@@ -575,7 +575,8 @@ def settings_text(st):
 
 def sbfw_text(f):
     req = next((k for k, v in SBFW_REQS.items() if v == f['req']), f"? ({f['req']})")
-    return (f"\nStarbite OS as the boot menu {'on' if f['flags'] & 1 else 'off'} (shell {f['shell_key'] or 'starbite-os'}), "
+    return (f"\nStarbite OS at power-on {('on' if f['flags'] & 1 else 'off') if f['flags'] & 8 else 'the loader build default'} "
+            f"(shell {f['shell_key'] or 'starbite-next-gpu, else starbite-next, else starbite-os'}), "
             f"one-shot {req} for {f['req_key'] or '-'}: {SBFW_STATES.get(f['state'], f['state'])} (#{f['seq']}); "
             f"update slots: active {'-AB'[f['slot_active']] if f['slot_active'] < 3 else f['slot_active']}, "
             f"trying {'-AB'[f['slot_try']] if f['slot_try'] < 3 else f['slot_try']}")
@@ -624,7 +625,7 @@ def settings(a):
             a.slot_try is not None:
         f = sbfw_decode(st['tail'])
         if a.shell is not None:
-            f['flags'] = (f['flags'] | 1) if a.shell == 'on' else (f['flags'] & ~1)
+            f['flags'] = ((f['flags'] | 1) if a.shell == 'on' else (f['flags'] & ~1)) | 8   # SHELL_SET: the user's choice
         if a.shell_key is not None:
             f['shell_key'] = a.shell_key
         if a.req is not None:
@@ -853,7 +854,7 @@ def main():
     s.add_argument('--crash-action', dest='crash_action', choices=list(CRASH_ACTIONS))
     s.add_argument('--crash-timeout', dest='crash_timeout', type=int, help='seconds, 10..600 (stored in tens)')
     s.add_argument('--shell', choices=['on', 'off'], help='Starbite OS (the shell key) instead of the boot menu')
-    s.add_argument('--shell-key', dest='shell_key', help='the shell\'s catalog key ("" = starbite-os)')
+    s.add_argument('--shell-key', dest='shell_key', help='the shell\'s catalog key ("" = starbite-next-gpu, else starbite-next, else starbite-os)')
     s.add_argument('--req', choices=list(SBFW_REQS), help='a one-shot for --req-key\'s next start (armed)')
     s.add_argument('--req-key', dest='req_key')
     s.add_argument('--slot-active', dest='slot_active', type=int, choices=range(3), help='0 the normal file, 1 A, 2 B')

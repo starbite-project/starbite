@@ -31,6 +31,8 @@ void sbfw_boot_start(void);
 /* The catalog index of the shell to start instead of the menu, or -1 (shell mode off, skip asked,
  * a crash to show, a boot-next pending, no such ready entry). why: the reason when -1 (for pmsg). */
 int sbfw_shell_pick(int skip, const char **why);
+/* fw_flags as they apply (SBFW_FLAG_SHELL: the user's choice once set, else the build's SBFW_SHELL_DEFAULT) */
+unsigned sbfw_shell_flags(void);
 /* The one-shot request for this start of e (SBFW_REQ_*, 0 none): read only. */
 unsigned sbfw_req_for(const struct cat_ent *e);
 /* Apply request req to the copy e that will start (command line edits; *xfrag for XNU, cap bytes).

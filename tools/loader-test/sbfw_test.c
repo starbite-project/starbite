@@ -150,6 +150,11 @@ int main(int argc, char **argv)
     CHECK(sbfw_shell_decide(S, 0, 0, 0, 0, 0, 3, 0) == SBFW_SH_NOT_READY, "shell not ready");
     CHECK(sbfw_shell_decide(S, 1, SBFW_ST_SEEN, SBFW_REQ_NO_SHELL, 1, 1, -1, 0) == SBFW_SH_SKIP, "skip comes first");
     CHECK(!strcmp(sbfw_shell_why(SBFW_SH_CRASH), "the last start crashed: the menu shows it"), "reason text");
+    /* FW4: the shell's default comes from the build until the user sets it (SBFW_FLAG_SHELL_SET) */
+    CHECK(sbfw_shell_eff(0, 1) == S && sbfw_shell_eff(0, 0) == 0, "unset: the build default");
+    CHECK(sbfw_shell_eff(SBFW_FLAG_SHELL_SET, 1) == SBFW_FLAG_SHELL_SET, "set off wins over default on");
+    CHECK(sbfw_shell_eff(S | SBFW_FLAG_SHELL_SET, 0) == (S | SBFW_FLAG_SHELL_SET), "set on wins over default off");
+    CHECK(sbfw_shell_eff(S | SBFW_FLAG_CON_NEVER, 0) == SBFW_FLAG_CON_NEVER, "an old unset SHELL bit follows the default");
 
     /* the update slots (section 10.5): record fields, the start-of-boot ageing with rollback, the header */
     {

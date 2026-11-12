@@ -423,6 +423,12 @@ unsigned cl_excerpt(char *dst, unsigned cap, const char *src, unsigned len, uint
 #define SBFW_FLAG_SHELL     1U   /* start the shell entry instead of drawing the menu */
 #define SBFW_FLAG_CON_NEVER 2U
 #define SBFW_FLAG_CON_ALWAYS 4U
+#define SBFW_FLAG_SHELL_SET 8U   /* SBFW_FLAG_SHELL is the user's choice; without it the build's default (FW4) */
+#ifndef SBFW_SHELL_DEFAULT
+#define SBFW_SHELL_DEFAULT 0     /* -DSBFW_SHELL_DEFAULT=1: Starbite OS at power-on unless switched off */
+#endif
+/* fw_flags with SBFW_FLAG_SHELL as it applies: the user's choice once set, else the build's default */
+unsigned sbfw_shell_eff(unsigned fl, int dflt);
 #define SBFW_REQ_NONE       0U
 #define SBFW_REQ_VERBOSE    1U
 #define SBFW_REQ_SAFE       2U

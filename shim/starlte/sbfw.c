@@ -728,17 +728,55 @@ static int req_live(void)
 #define FW_NEXT_MAILBOX 0xFED17FE0UL
 #define FW_NEXT2_MAGIC  0x21325458454e4253ULL
 
+/* the shell entry: the record's shell key, else the first Starbite OS row the catalog has (FW4: today's phone
+ * calls the 1.0 line starbite-next-gpu; the classic one is starbite-os) */
+static int shell_row(void)
+{
+    if (fw_rec.shell_key[0])
+        return cat_find(fw_rec.shell_key);
+    int i = cat_find("starbite-next-gpu");
+    if (i < 0)
+        i = cat_find("starbite-next");
+    if (i < 0)
+        i = cat_find("starbite-os");
+    return i;
+}
+
+/* the last chance for the plain menu: Volume Down held (or pressed) during this window; POST's own skip only
+ * works while POST runs (and not at all with POST off) */
+#ifndef SBFW_SHELL_GRACE_MS
+#define SBFW_SHELL_GRACE_MS 700U
+#endif
+static int shell_grace(void)
+{
+    for (unsigned t = 0; t < SBFW_SHELL_GRACE_MS; t += 20U) {
+        if (hw_keys() & K_DOWN)
+            return 1;
+        hw_wait_ms(20);
+    }
+    return 0;
+}
+
+unsigned sbfw_shell_flags(void)
+{
+    if (!fw_have)
+        fw_load();
+    return sbfw_shell_eff(fw_rec.fw_flags, SBFW_SHELL_DEFAULT);
+}
+
 int sbfw_shell_pick(int skip, const char **why)
 {
     if (!fw_have)
         fw_load();
-    const char *key = fw_rec.shell_key[0] ? fw_rec.shell_key : "starbite-os";
-    int i = (fw_rec.fw_flags & SBFW_FLAG_SHELL) ? cat_find(key) : -1;
+    unsigned fl = sbfw_shell_eff(fw_rec.fw_flags, SBFW_SHELL_DEFAULT);
+    int i = (fl & SBFW_FLAG_SHELL) ? shell_row() : -1;
     const char *nr = 0;
     int ready = i >= 0 && star_entry_ready((unsigned)i, &nr);
     int next = *(volatile uint64_t *)FW_NEXT_MAILBOX == FW_NEXT2_MAGIC || fw_set.next_key[0];
-    unsigned d = sbfw_shell_decide(fw_rec.fw_flags, skip, fw_rec.req_state, fw_rec.req_action, crash_hold_autoboot(),
+    unsigned d = sbfw_shell_decide(fl, skip, fw_rec.req_state, fw_rec.req_action, crash_hold_autoboot(),
                                    next, i, ready);
+    if (d == SBFW_SH_START && shell_grace())
+        d = SBFW_SH_SKIP;
     *why = d == SBFW_SH_NOT_READY && nr ? nr : sbfw_shell_why(d);
     if (d == SBFW_SH_NO_SHELL) {
         fw_rec.req_state = SBFW_ST_DONE;
@@ -862,7 +900,7 @@ static void build_table(uint8_t *page, const char *key, unsigned req, unsigned w
         in.post_warns = pr->warns;
     }
     in.settings_status = (uint32_t)settings_status();
-    in.flags = (store_card_only() ? SBFW_TF_CARD_ONLY : 0U) | ((fw_rec.fw_flags & SBFW_FLAG_SHELL) ? SBFW_TF_SHELL : 0U);
+    in.flags = (store_card_only() ? SBFW_TF_CARD_ONLY : 0U) | ((sbfw_shell_eff(fw_rec.fw_flags, SBFW_SHELL_DEFAULT) & SBFW_FLAG_SHELL) ? SBFW_TF_SHELL : 0U);
     unsigned n = sb_ring_text((const uint8_t *)PMSG_ZONE, PMSG_ZONE_BYTES, (char *)tbl_lines, sizeof(tbl_lines) - 1);
     sbfw_table_build(page, &in, (const char *)tbl_lines, n);
 }

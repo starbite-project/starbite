@@ -273,6 +273,7 @@ int rec_next_take(void)
     int r = mb_key_is("rescue") ? REC_NEXT_RESCUE : mb_key_is("maint") ? REC_NEXT_MAINT
           : mb_key_is("maint-prev") ? REC_NEXT_MAINT_PREV : mb_key_is("maint-rescue") ? REC_NEXT_MAINT_RESCUE
           : mb_key_is("menu") ? REC_NEXT_MENU : mb_key_is("recovery") ? REC_NEXT_RECOVERY
+          : mb_key_is("recovery-repair") ? REC_NEXT_REPAIR
           : REC_NEXT_NONE;
     if (r != REC_NEXT_NONE)
         mb_clear();          /* before the start: a system that crashes is not started again */
@@ -601,7 +602,7 @@ static void sr_value(struct line *l, unsigned r, const struct star_settings *s)
         ln_s(l, " S");
         break;
     case SR_SHELL:
-        ln_s(l, (sr_fw.fw_flags & SBFW_FLAG_SHELL) ? "ON" : "OFF (BOOT MENU)");
+        ln_s(l, (sbfw_shell_eff(sr_fw.fw_flags, SBFW_SHELL_DEFAULT) & SBFW_FLAG_SHELL) ? "ON" : "OFF (BOOT MENU)");
         break;
     case SR_WDT:
         if (s->wdt_mode == SET_WDT_OFF) {
@@ -641,7 +642,8 @@ static void sr_next(unsigned r, struct star_settings *s)
                                      : s->crash_timeout == 60 ? 3 : 0);
         break;
     case SR_SHELL:
-        sr_fw.fw_flags ^= SBFW_FLAG_SHELL;
+        sr_fw.fw_flags = (uint8_t)(((sbfw_shell_eff(sr_fw.fw_flags, SBFW_SHELL_DEFAULT) ^ SBFW_FLAG_SHELL) &
+                                     SBFW_FLAG_SHELL) | (sr_fw.fw_flags & ~SBFW_FLAG_SHELL) | SBFW_FLAG_SHELL_SET);
         break;
     case SR_WDT:       /* per entry, off, 30, 60, 82 s */
         if (s->wdt_mode == SET_WDT_CATALOG) {
@@ -877,6 +879,12 @@ static void leave(void)
         star_fb_fill(C_BLACK);
 }
 
+static int open_repair;
+void rec_open_repair(void)
+{
+    open_repair = 1;
+}
+
 int recovery_main(const char *why, int *pick)
 {
     unsigned base = rec_row_base();
@@ -889,6 +897,13 @@ int recovery_main(const char *why, int *pick)
     unsigned sel = 0;
     draw_menu(sel, why);
     fbbg_enable();                      /* the Mac can drive this menu over USB too */
+    if (open_repair) {                  /* "recovery-repair": Settings > Startup > Recovery's Repair & Reset */
+        open_repair = 0;
+        star_pmsg("STARBITE: recovery: REPAIR AND RESET, asked for by the OS\n");
+        sel = IT_REPAIR;
+        repair_page();
+        draw_menu(sel, 0);
+    }
     for (;;) {
         unsigned k = r_key_wait();
         unsigned old = sel;

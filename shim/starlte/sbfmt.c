@@ -1742,6 +1742,13 @@ unsigned sbfw_age(unsigned st)
          : st == SBFW_ST_APPLIED ? SBFW_ST_DONE : st;
 }
 
+unsigned sbfw_shell_eff(unsigned fl, int dflt)
+{
+    if (fl & SBFW_FLAG_SHELL_SET)
+        return fl;
+    return dflt ? (fl | SBFW_FLAG_SHELL) : (fl & ~SBFW_FLAG_SHELL);
+}
+
 unsigned sbfw_shell_decide(unsigned fl, int skip, unsigned rs, unsigned ra, int crash_hold, int next_pending,
                            int idx, int ready)
 {

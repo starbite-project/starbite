@@ -2338,6 +2338,10 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
     int rescue = next == REC_NEXT_RESCUE;
     uintptr_t entry;
     int shell_skip = next == REC_NEXT_MENU;
+    if (next == REC_NEXT_REPAIR) {
+        rec_open_repair();
+        next = REC_NEXT_RECOVERY;
+    }
     if (next == REC_NEXT_RECOVERY && !rec) {
         pmsg_put("STARBITE: boot-next \"recovery\": Starbite Recovery\n");
         entry = recovery_loop(log, "ASKED FOR BY THE OS");

@@ -201,10 +201,12 @@ The settings record (the HOME store's block 2, card p2 after the store move) get
 
 ```
 112 "FW" (u16 0x5746)   114 u8 version 1   115 u8 fw_flags (bit 0 SHELL: start the shell instead of the menu;
-                                                             bit 1 console never, bit 2 console always)
+                                                             bit 1 console never, bit 2 console always;
+                                                             bit 3 SHELL_SET: bit 0 is the user's choice, FW4)
 116 u8 req_action (SBFW_REQ_*)  117 u8 req_state (0 none, 1 armed, 2 applied, 3 undone, 4 refused)  118 u16 req_seq
 120 char req_key[24]   the catalog key the one-shot is for
-144 char shell_key[24] the shell's catalog key ("" = "starbite-os")
+144 char shell_key[24] the shell's catalog key ("" = starbite-next-gpu, else starbite-next, else starbite-os: the
+                       first one the catalog has, FW4)
 168 u8 undo[64]        a write action's undo record (6.1): u8 part_id, u8 len/4, u16 offset, u32 lba, u32 crc_old,
                        u32 crc_new, the old bytes (<= 48)
 232 u8 slot_active, slot_try, slot_tries   the update slots (10.5)
@@ -219,6 +221,14 @@ and then **starts the shell entry instead of drawing the menu**. The plain menu 
 * the shell's own last start **crashed or hung** (crash.c judges it): the crash screen, then the plain menu, and the
   shell is not started again until the next clean start.
 * the shell row is missing or does not load: the plain menu, with the reason.
+
+**Starbite OS at power-on by default (FW4, 2026-11-12).** Whether shell mode is on comes from the record only once
+the user chose (SHELL_SET, bit 3: the loader's STARTUP SETTINGS row, `card-store.sh settings --shell on|off`, Starbite
+OS's Settings > Startup switch: each sets SHELL_SET with SHELL). Until then the loader build's default applies:
+`-DSBFW_SHELL_DEFAULT=1` builds start Starbite OS at power-on, older and default builds show the menu. The table's
+flags bit 1 reports what applied, so Starbite OS's switch shows the truth either way.
+Right before the shell starts the loader still polls **Volume Down for 700 ms** (SBFW_SHELL_GRACE_MS): POST's own
+skip only works while POST runs, and not at all with POST off. Pressed there: the plain menu, "plain menu asked".
 
 ### 10.2 The loader to the OS: the SBFW table (0x91FFE000)
 
@@ -248,6 +258,7 @@ last start did, and what to show on its recovery page.
 | start an OS, come back after | "SBNEXT2R" KEY\0RET (existing, docs/MAINTENANCE.md R7) | starts KEY, arms RET for its reset |
 | the plain menu once | `sb_boot_next("menu")` | **new**: menu, shell skipped this boot |
 | Starbite Recovery | `sb_boot_next("recovery")` | **new**: Starbite Recovery |
+| Starbite Recovery's REPAIR AND RESET | `sb_boot_next("recovery-repair")` | **FW4**: Recovery, opened on that page (an older loader: no such key, the menu) |
 | Rescue / Maintenance / loader fastboot | `sb_boot_next("rescue" / "maint" / "fastboot")` | existing |
 | change a setting (default OS, timeout, debug level, POST, watchdog, crash action, shell on/off) | read the record, change, write block 2 of the HOME store, read back (libsb `settings_save`, the codec in sbfmt) | reads it at its next start |
 | a one-shot for an OS (safe mode, single user, previous kernel, verbose once, Advanced Startup) | write `req_action/req_key`, `req_state = 1 armed`, `req_seq + 1` into the record, then `sb_boot_next(KEY)` | applies it to that start only, `req_state = 2`; at its next start runs the undo (writes) or just clears it (command-line requests), `req_state = 3` |

@@ -717,7 +717,8 @@ static const char oem_help[] =
 static int loader_key(const char *k)
 {
     return fb_streq(k, "fastboot") || fb_streq(k, "rescue") || fb_streq(k, "maint") || fb_streq(k, "maint-prev") ||
-           fb_streq(k, "maint-rescue") || fb_streq(k, "menu") || fb_streq(k, "recovery");
+           fb_streq(k, "maint-rescue") || fb_streq(k, "menu") || fb_streq(k, "recovery") ||
+           fb_streq(k, "recovery-repair");
 }
 
 static void oem(const char *a)
