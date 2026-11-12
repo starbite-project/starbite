@@ -436,6 +436,12 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         q[36] = s->bw;
         q[37] = s->bh;
         q[38] = q[39] = 0;
+        if (s->flags & GC_LENS) {            /* 1.0 (glass V2): the tone at +152 / +156 / +120 (the mask's word: unused) */
+            lens_tone T = s->lk > 0 ? (lens_tone){ s->lk, s->la0, s->la1 } : lens_tone_of(0, 0);
+            q[38] = fbits(T.k);
+            q[39] = fbits(T.a0);
+            q[30] = fbits(T.a1);
+        }
         /* its bins: the clip, within the source's extent on screen (u in [0, w or len), v in [0, h or len)) */
         if (!(s->alpha > 0))
             continue;
@@ -881,7 +887,7 @@ static unsigned check_scene(const volatile uint32_t *fb, uint32_t bg, const char
 #define MASK_CARD (VA_POOL + 0xa50000ULL)                   /* 600 x 300 A8: the card's glass mask (rounded) */
 #define TEX_PILL (VA_POOL + 0xa80000ULL)                    /* 200 x 60: a pill drawn 3-sliced to 500 wide */
 #define TEX_SPARSE (VA_POOL + 0xb00000ULL)                  /* 256 x 256: only its top-left 32 x 32 block shows */
-static struct gc_quad G[8];
+static struct gc_quad G[10];
 static unsigned ng;
 
 
@@ -923,6 +929,17 @@ static void make_comp2_scene(void)
         L.bd = half; L.bstride = 720; L.bk = .5f; L.bw = 720; L.bh = 1480;
         L.lx = 760; L.ly = 60; L.lw = 600; L.lh = 300;
         L.lb = lp.lb; L.lt = lp.lt; L.lc = lp.lc; L.lr = lp.lr;
+        G[ng++] = L;
+        /* 1.0, glass V2: a clear, pressed, green-tinted lens (the tone at +152 / +156 / +120, the tint as its solid) */
+        lens_par lq = lens_params(400, 200, 60, LENS_PT);
+        lens_tone T = lens_tone_of(1, .5f);
+        L.dx0 = 999; L.dy0 = 899; L.w = 403; L.h = 203;
+        L.cx0 = 1000; L.cy0 = 900; L.cx1 = 1400; L.cy1 = 1100;
+        L.radius = 60;
+        L.lx = 1000; L.ly = 900; L.lw = 400; L.lh = 200;
+        L.lb = lq.lb; L.lt = lq.lt; L.lc = lq.lc; L.lr = lq.lr;
+        L.lk = T.k; L.la0 = T.a0; L.la1 = T.a1;
+        L.solid = lens_tint_pm(0x6634c759U);
         G[ng++] = L;
     }
     G[ng++] = (struct gc_quad){ .src = cd, .stride = 600, .w = 600, .h = 300, .flags = GC_BILINEAR, .alpha = .8f, .dx0 = 760,
@@ -997,7 +1014,7 @@ static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
                 rgb[c] = top + (bot - top) * tv;
             }
             lens_saturate(rgb, q->lsat > 0 ? q->lsat : 1);
-            lens_shade(rgb, e);
+            lens_shade_t(rgb, e, q->lk > 0 ? (lens_tone){ q->lk, q->la0, q->la1 } : lens_tone_of(0, 0));
             for (int c = 0; c < 3; ++c)
                 acc[c] = acc[c] + (rgb[c] - acc[c]) * al;
             acc[3] = acc[3] + (1 - acc[3]) * al;
@@ -1198,7 +1215,7 @@ int gpucomp_selftest_step(void)
                                            { 700, 1800 }, { 310, 2330 }, { 550, 2330 }, { 790, 2330 }, { 1100, 2550 },
                                            { 905, 2455 }, { 1240, 2640 }, { 20, 20 }, { 999, 799 },
                                            { 761, 210 }, { 1000, 61 }, { 1000, 358 }, { 775, 75 }, { 1060, 210 },
-                                           { 790, 210 } };
+                                           { 790, 210 }, { 1200, 1000 }, { 1004, 1000 }, { 1200, 903 }, { 1385, 1090 } };
         unsigned bad = 0;
         for (unsigned i = 0; i < sizeof pt / sizeof pt[0]; ++i) {
             uint32_t want = cpu_px2(pt[i][0], pt[i][1], bg), got = fb[pt[i][1] * SB_FB_W + pt[i][0]];
@@ -1220,10 +1237,10 @@ int gpucomp_selftest_step(void)
             }
         }
         if (bad) {
-            sb_logx("gpucomp: FAILED: comp2: points off by more than 3 levels, of 20: ", bad);
+            sb_logx("gpucomp: FAILED: comp2: points off by more than 3 levels, of 24: ", bad);
             ++fails;
         } else {
-            sb_log("gpucomp: comp2: 20 points within 3 levels of the CPU's (glass, Liquid Glass, fade, 3-slice, solid)");
+            sb_log("gpucomp: comp2: 24 points within 3 levels of the CPU's (glass, Liquid Glass regular and V2 clear / tint / press, fade, 3-slice, solid)");
         }
         /* v7: the same scene as a big move's half frame (composed at half resolution, then UP2X into the panel) */
         uint64_t uh = 0;

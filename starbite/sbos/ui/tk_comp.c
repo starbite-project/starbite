@@ -371,6 +371,8 @@ static void draw_lens(const tgt *T, const item *it, tk_irect R)
         shape_at(it, l->gsh[q], &X, &Y, &W, &H, &r);
         X *= k; Y *= k; W *= k; H *= k; r *= k;
         lens_par P = lens_params(W, H, r, TK_PT * k);
+        lens_tone TN = lens_tone_of(l->gvar[q], l->gpress[q] * (1.0f / 255));   /* 1.0, glass V2 */
+        uint32_t tint = l->gtint[q];
         float cx = X + W * .5f, cy = Y + H * .5f, ex = W * .5f - r, ey = H * .5f - r;
         tk_irect d = isect(ic, irect_of(X - 1, Y - 1, X + W + 1, Y + H + 1));
         for (int y = d.y0; y < d.y1; y++) {
@@ -397,7 +399,8 @@ static void draw_lens(const tgt *T, const item *it, tk_irect R)
                     float top = a0 + (a1 - a0) * tu, bot = b0 + (b1 - b0) * tu;
                     rgb[c] = (top + (bot - top) * tv) * (1.0f / 255);
                 }
-                lens_shade(rgb, e);
+                lens_shade_t(rgb, e, TN);
+                if (tint) lens_tint(rgb, tint);
                 float m = cov * al;
                 uint32_t D = row[x], o = 0;
                 for (int c = 0; c < 3; c++) {
@@ -1055,6 +1058,11 @@ static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
                 e->lsat = 1;                    /* the wallpaper's blur is saturated already */
                 e->live = below > 1 ? (uint32_t)below : 0;   /* v10: what lies under it (more than the ground) */
                 e->gen = c->ground_gen;
+                {                               /* 1.0, glass V2: the shape's tone (variant, press) and tint */
+                    lens_tone T = lens_tone_of(l->gvar[k], l->gpress[k] * (1.0f / 255));
+                    e->lk = T.k; e->la0 = T.a0; e->la1 = T.a1;
+                    e->solid = lens_tint_pm(l->gtint[k]);
+                }
             }
         if (n >= TK_GPU_MAX) return -1;
         tk_gpu_item *q = &gq[n++];
@@ -1422,7 +1430,8 @@ uint32_t tk_flat_lens(const tk_comp *c, int x, int y, uint32_t fb)
             float top = a0 + (a1 - a0) * tu, bot = b0 + (b1 - b0) * tu;
             rgb[ch] = (top + (bot - top) * tv) * (1.0f / 255);
         }
-        lens_shade(rgb, e);
+        lens_shade_t(rgb, e, lens_tone_of(fvar[q], fpress[q] * (1.0f / 255)));   /* 1.0, glass V2 */
+        if (ftint[q]) lens_tint(rgb, ftint[q]);
         uint32_t o = 0xff000000u;
         for (int ch = 0; ch < 3; ch++) {
             int v = (int)(rgb[ch] * 255 + .5f);
