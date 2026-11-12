@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include "sbapp.h"
 #include "passcode.h"                /* Track A: the passcode (pure: passcode.c) */
+int sbos_safe_start(void);           /* Track A, 1.0: this start is a safe start (settings.c): nothing saved */
 
 #define SBOS_VERSION "1.2-alpha26"
 /* 1.2-alpha26: alpha25's lock screen (OS cards, swipe up, the Emergency hold, Heat only in Emergency) is off: the user

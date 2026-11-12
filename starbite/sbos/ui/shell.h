@@ -409,3 +409,8 @@ typedef struct {
 int sh_fw_info(sh_fwinfo_t *i);           /* 1 the loader's table, 0 an older loader */
 
 #endif
+
+/* Track A, 1.0 (sbos-core-api.md 10): a safe start (the loader's one-shot from Settings > Startup or Starbite
+ * Recovery): Wi-Fi isn't restored and nothing is saved until the next start. why: why this start, in words */
+int sh_safe_mode(void);
+int sh_boot_reason(char *why, int cap);

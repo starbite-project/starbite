@@ -853,6 +853,7 @@ static int same_item(const tk_gpu_item *a, const tk_gpu_item *b)
         same = a->lq[k] == b->lq[k];
     return same;
 }
+static void boot_notes(void);                    /* Track A, 1.0 (the end of this file) */
 static tk_gpu_item prevq[TK_GPU_MAX], cacheq[TK_GPU_MAX], gx[TK_GPU_MAX];
 static int prev_n, cache_n, stable_p = -1, stable_k;
 static uint32_t wall_made, cache_made;
@@ -1078,6 +1079,7 @@ static void bake_step(void)
     status_now();
     sh_bright_now(panel_bright_level);
     sh_restore();                                    /* Track A: what the shell keeps (settings_restore ran before) */
+    boot_notes();                                    /* Track A, 1.0: a safe start, or the last start's crash */
     ready = need_full = 1;
     boost(0);
     kt_set(KT_UI, 23, sb_ms(), 5000, 0);            /* the workers off after 5 s unless a finger comes */
@@ -2231,4 +2233,26 @@ int sh_linux_zero_copy(void)
 #else
     return 0;
 #endif
+}
+
+/* ---- Track A, 1.0: the safe start and why this start happened (the loader's SBFW table, Track J) ---- */
+int sh_safe_mode(void) { return sbos_safe_start(); }
+int sh_boot_reason(char *why, int cap)
+{
+    static const char *const W[6] = { "Started from the boot menu", "Started as the default", "Started once",
+                                       "Started as the boot menu", "Started again after a problem", "Started from USB" };
+    const char *w = !sb_fw.valid ? "Started (an older loader)" : sb_fw.boot_reason < 6U ? W[sb_fw.boot_reason] : "Started";
+    if (why && cap > 0) sb_strcpy(why, (unsigned)cap, w);
+    return sb_fw.valid ? (int)sb_fw.boot_reason : -1;
+}
+/* once at the end of the bake: say so when this is a safe start, or when the last start of Starbite OS crashed */
+static void boot_notes(void)
+{
+    if (sbos_safe_start())
+        notif_post("Starbite OS", "Safe Start",
+                   "Started without restoring Wi-Fi. Nothing is saved until you restart.");
+    else if (sb_fw.valid && sb_fw.crash_sev >= 2U && sb_fw.crash_key[0] &&
+             (!tk_strcmp(sb_fw.crash_key, "starbite-os") || !tk_strcmp(sb_fw.crash_key, sb_fw.key)))
+        notif_post("Starbite OS", "Restarted After a Problem",
+                   "The last start stopped unexpectedly. Details: Settings > Startup > Crash Reports.");
 }

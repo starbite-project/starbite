@@ -316,11 +316,25 @@ void settings_changed_soon(uint32_t ms)
     kt_set(KT_STATE, 0, now, (uint32_t)(at - now), 0);
 }
 
+/* Track A, 1.0: a safe start (the loader's one-shot SBFW_REQ_SAFE = 2, Settings > Startup or Starbite Recovery):
+ * the settings and the shell's data are read as usual but nothing is written until the next start */
+int sbos_safe_start(void)
+{
+    return sb_fw.valid && sb_fw.req_action == 2U;
+}
 void settings_timer(unsigned id)
 {
     (void)id;
     if (!slot_ok)
         return;
+    if (sbos_safe_start()) {
+        static int said;
+        if (!said) {
+            said = 1;
+            sb_log("settings: a safe start: nothing is saved until the next start");
+        }
+        return;
+    }
     if (sb_storage_held()) {                /* 1.2-alpha21: the modem runs (no block writes): try again in 5 s */
         static uint64_t said;
         if (!said || sb_ms() - said > 60000U) {

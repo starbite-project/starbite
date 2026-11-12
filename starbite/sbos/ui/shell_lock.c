@@ -3698,7 +3698,7 @@ void sh_restore(void)
     nc_restore();
     cm_rec_restore();
     sw_restore();
-    if (sh_pref_int("cc.wifi", 0) == 1) (void)sh_wifi_power(1);   /* a refusal leaves it off; the choice stays */
+    if (sh_pref_int("cc.wifi", 0) == 1 && !sh_safe_mode()) (void)sh_wifi_power(1);   /* a refusal leaves it off; the choice stays; not in a safe start (Track A) */
 }
 #ifdef SBTK_STARTUP_PREVIEW
 #include "shell_startup.inc"                        /* Track J's preview hook (Track B includes it after shell_settings.inc) */
