@@ -597,7 +597,33 @@ static void ent_tick(void)
     ent_add(&t, sizeof(t));
 }
 
+static void ent_seed_io(uint8_t out[32], int ask_radio);
 static void ent_seed(uint8_t out[32])
+{
+    ent_seed_io(out, 1);
+}
+
+/* Track H: the core's randomness (the handshake's nonces, SAE's secrets): the pool, never the radio's iovar here (the
+ * core may ask from inside its own command path); n bytes as SHA-256(seed, counter) blocks */
+static int os_random(void *ctx, uint8_t *out, uint32_t n)
+{
+    (void)ctx;
+    uint8_t seed[32], blk[32];
+    ent_seed_io(seed, 0);
+    for (uint32_t ctr = 0, o = 0; o < n; ++ctr, o += 32) {
+        br_sha256_context c;
+        br_sha256_init(&c);
+        br_sha256_update(&c, seed, 32);
+        br_sha256_update(&c, &ctr, sizeof(ctr));
+        br_sha256_out(&c, blk);
+        memcpy(out + o, blk, n - o < 32 ? n - o : 32);
+    }
+    memset(seed, 0, sizeof(seed));
+    memset(blk, 0, sizeof(blk));
+    return 0;
+}
+
+static void ent_seed_io(uint8_t out[32], int ask_radio)
 {
     static volatile uint8_t walk[8192];
     uint8_t jit[256];
@@ -610,7 +636,7 @@ static void ent_seed(uint8_t out[32])
         if ((i & 255) == 255)
             ent_add(jit, sizeof(jit));
     }
-    if (w_ready && w && !w->dead) {
+    if (ask_radio && w_ready && w && !w->dead) {
         uint8_t fr[32];
         int fe = 0;
         memset(fr, 0, sizeof(fr));
@@ -917,6 +943,7 @@ int wifi_power(int on)
     bcmw_sb_os(&os, os_log, os_event);
 #endif
     os.rx = os_rx;
+    os.random = os_random;                  /* Track H: the pool (nonces, SAE) */
     dma_first = os.dma_alloc;
     os.dma_alloc = dma_reuse;
     memset(&cfg, 0, sizeof(cfg));
@@ -932,6 +959,7 @@ int wifi_power(int on)
         return SBOS_EAGAIN;
     }
     w_ready = 1;
+    bcmw_sae_enable(w);                     /* Track H: WPA3 (SAE) by the host when the firmware asks (cap sae_ext) */
     dhcp_go = 0;
     join_pending = join_active = 0;
     load_saved();

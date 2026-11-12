@@ -6,7 +6,8 @@ pin as xnu/series-*/0020-stage-bearssl.sh). MIT licence (LICENSE.txt). Unmodifie
 Only what a client built with br_ssl_client_init_full() links is kept, plus aead/gcm.c (the offline
 self-check's AES-GCM known answer): the files listed in FILES (found
 from a GNU ld map of an aarch64 link of http.c + tls/ta.c against all of BearSSL), all of inc/, and
-src/inner.h and src/config.h. FILES.test: what only the host test adds (x509_decoder.c: the test CA
+src/inner.h and src/config.h. For WPA3's SAE (starbite/wifi/sae.c: br_ec_all_m31's P-256, br_i31, SHA-256,
+HMAC) one file more: int/i31_decred.c (br_i31_decode_reduce). FILES.test: what only the host test adds (x509_decoder.c: the test CA
 made into a trust anchor at run time). To refresh: fetch the commit into build/bearssl-src, link again, copy.
 
 Built with: -DBR_USE_URANDOM=0 -DBR_USE_UNIX_TIME=0 -DBR_USE_GETENTROPY=0 -DBR_RDRAND=0 (no OS

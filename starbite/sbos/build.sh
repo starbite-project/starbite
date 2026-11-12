@@ -136,13 +136,13 @@ v80objs=""
 wifi="$root/starbite/wifi"
 for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$ut/exfat.c" \
            "$wifi/core.c" "$wifi/exynos_pcie.c" "$wifi/chip.c" "$wifi/fw.c" "$wifi/ring.c" "$wifi/msgbuf.c" "$wifi/link.c" \
-           "$wifi/wpa.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" \
+           "$wifi/wpa.c" "$wifi/sae.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" \
            "$wifi/tcp.c" "$wifi/netio.c" "$wifi/http.c" "$wifi/gw.c" "$wifi/tls/ta.c" "$wifi/tls/tls_chains.c" "$wifi/tls/tls_check.c" \
            "$root/starbite/guest/sbos/guest.c" "$root/starbite/guest/host/sbghost.c"; do
     obj="$ob/k_$(basename "$src" | tr . _).o"
     flags=$CFLAGS
     case "$src" in                          # BearSSL's headers include <string.h>: the shim's, not the C library's
-    */kern/wifi.c|*/wifi/http.c|*/wifi/netio.c|*/wifi/tls/*) flags="$flags -I$wifi/tls/shim" ;;
+    */kern/wifi.c|*/wifi/http.c|*/wifi/netio.c|*/wifi/sae.c|*/wifi/tls/*) flags="$flags -I$wifi/tls/shim" ;;
     */kern/modem.c) flags="$flags -DSBM_ATTENDED_TX" ;;   # mobile data: the user's Cellular switch (docs/MODEM.md 7.10)
     esac
     case " smp.c heatk.c ocp.c " in
