@@ -185,6 +185,11 @@ static void log_mb(const char *what, uint64_t v)
 
 static int gpu_started;
 static uint32_t gpu_clock_steps, gpu_clock_told;
+/* Track A, 1.0 (the user: "normal Starbite should have animations and be fast, unlike Emergency mode"): the top
+ * clocks hold 1.5 s past the last motion frame in normal mode, 0.4 s (as before) when the shell says it is in a
+ * conservative mode (Emergency, Survival, Extreme saving: sh_perf_mode) */
+static int perf_conservative;
+static uint32_t perf_tail_ms(void) { return perf_conservative ? 400U : 1500U; }
 static void boost(int on)
 {
     if (on == boosted) return;
@@ -807,7 +812,7 @@ static void frame(void)
         sh_idle();
         if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);   /* the rest of the idle work, a turn at a time */
         clock_again();                                               /* P2z: the Clock's next digit */
-        kt_set(KT_UI, 21, sb_ms(), 400, 0);         /* back to the screen-on clock unless something moves again */
+        kt_set(KT_UI, 21, sb_ms(), perf_tail_ms(), 0);   /* back to the screen-on clock unless something moves again (1.0: 1.5 s in normal mode) */
         kt_set(KT_UI, 23, sb_ms(), 5000, 0);        /* and the band workers off after 5 s */
 #ifndef SBOS_SELFTEST_NEXT
         stats_log("gesture");
@@ -2934,3 +2939,42 @@ int sh_photo_delete(int i)
 }
 const char *sh_photo_why(void) { return ph_why ? ph_why : kphotos_why(); }
 /* ---- end of Track A: photos ---- */
+
+/* ---- Track A, 1.0: performance mode and keep-awake holders (Track B's ask, cp6) ---- */
+void sh_perf_mode(int conservative)
+{
+    if (perf_conservative == !!conservative) return;
+    perf_conservative = !!conservative;
+    sb_log(conservative ? "next: perf: conservative (Emergency / Survival / saving)" : "next: perf: normal (fast, animated)");
+}
+void sh_perf_hold(int ms)
+{
+    if (!ready || ms <= 0 || !K.screen_on) return;
+    boost(1);
+    kt_set(KT_UI, 21, sb_ms(), (uint32_t)(ms > 10000 ? 10000 : ms), 0);   /* the same clock-down check as a gesture's end */
+}
+#define HOLD_MAX 8
+static char hold_who[HOLD_MAX][24];
+int sh_hold_awake(const char *who, int on)
+{
+    if (!who || !*who) return -1;
+    int i, free_i = -1;
+    for (i = 0; i < HOLD_MAX; i++) {
+        if (hold_who[i][0] && !tk_strcmp(hold_who[i], who)) break;
+        if (!hold_who[i][0] && free_i < 0) free_i = i;
+    }
+    if (on) {
+        if (i == HOLD_MAX) {
+            if (free_i < 0) return -1;
+            sb_strcpy(hold_who[free_i], sizeof hold_who[free_i], who);
+            sb_logf("next: keep awake: on for ", who);
+        }
+    } else if (i < HOLD_MAX) {
+        hold_who[i][0] = 0;
+        sb_logf("next: keep awake: off for ", who);
+    }
+    int n = 0;
+    for (i = 0; i < HOLD_MAX; i++) n += hold_who[i][0] != 0;
+    kui_hold_awake = n;                     /* the kernel's screen-off timer waits while any holder is on */
+    return n;
+}

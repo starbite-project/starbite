@@ -128,9 +128,10 @@ void kui_redraw_all(void)
     full = dirty = 1;
 }
 
+int kui_hold_awake;                         /* Track A, 1.0: Next's keep-awake holders (sh_hold_awake) */
 int kui_awake_on(void)
 {
-    return app_awake || screen == SCR_LIGHT || screen == SCR_SOS || pressed >= 0;
+    return app_awake || screen == SCR_LIGHT || screen == SCR_SOS || pressed >= 0 || kui_hold_awake > 0;
 }
 
 /* ---- building lists ---------------------------------------------------------------------------- */

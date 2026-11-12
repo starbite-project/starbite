@@ -1249,6 +1249,11 @@ int sh_photo_delete(int i)
 }
 const char *sh_photo_why(void) { return hph_why; }
 
+/* Track A, 1.0: the host has no clocks to raise; keep-awake holders are counted and logged */
+void sh_perf_mode(int conservative) { (void)conservative; }
+void sh_perf_hold(int ms) { (void)ms; }
+int sh_hold_awake(const char *who, int on) { static int n; n += on ? 1 : (n > 0 ? -1 : 0); fprintf(stderr, "host: keep awake %s %s (%d)\n", who ? who : "?", on ? "on" : "off", n); return n; }
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: sbtk-host PAK still|film|bench ...\n"); return 2; }

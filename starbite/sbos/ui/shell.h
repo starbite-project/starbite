@@ -529,3 +529,13 @@ const char *sh_photo_why(void);
 /* the platform: Power held about a second (the screen is on now): the shell shows its power sheet (slide to power off,
  * Restart, Cancel). Track B defines it; until then a weak default does nothing */
 void sh_power_held(void);
+
+/* Track A, 1.0: performance and keep-awake.
+ * - sh_perf_mode(1) in Emergency / Survival / Extreme saving (the top clocks drop 0.4 s after motion), 0 in normal
+ *   mode (they hold 1.5 s past the last motion frame, so springs and transitions never drop frames).
+ * - sh_perf_hold(ms): top clocks now for ms (a transition that no touch started: a banner, the wake's scale-in).
+ * - sh_hold_awake(who, on): a long job (an App Store install, a Linux build) keeps the screen on: no Auto-Lock while
+ *   any holder is on; returns the holders now, < 0 refused. Off with the same who. */
+void sh_perf_mode(int conservative);
+void sh_perf_hold(int ms);
+int sh_hold_awake(const char *who, int on);
