@@ -12,6 +12,7 @@ install -D -m 0755 "$sbpkg" "$R/usr/local/sbin/sbpkg"
 install -D -m 0755 "$here/sbnet-up" "$R/usr/local/sbin/sbnet-up"
 install -D -m 0755 "$here/sbp9-mount" "$R/usr/local/sbin/sbp9-mount"
 install -D -m 0644 "$here/asound.conf" "$R/etc/asound.conf"
+install -D -m 0755 "$here/dpkg-merge.py" "$R/usr/share/starbite/dpkg-merge.py"   # a new base under an old overlay
 # Track F's App Store engine: starbite/appstore/install-rootfs.sh ROOT installs it (/usr/local/sbin/sbstore + its
 # library); sbinit then runs `sbstore daemon` instead of sbpkg
 if [ -x "$here/../../appstore/install-rootfs.sh" ]; then

@@ -72,6 +72,7 @@ if [ "${REFRESH:-0}" = 1 ] && [ -x "$ROOT/sbin/sbinit" ]; then
     sudo install -m 0755 "$here/sbnet-up" "$ROOT/usr/local/sbin/sbnet-up"       # contract v3 (Track E)
     sudo install -m 0755 "$here/sbp9-mount" "$ROOT/usr/local/sbin/sbp9-mount"
     sudo install -m 0644 "$here/asound.conf" "$ROOT/etc/asound.conf"
+    sudo install -m 0755 "$here/dpkg-merge.py" "$ROOT/usr/share/starbite/dpkg-merge.py"
     [ ! -x "$here/../../appstore/install-rootfs.sh" ] || sudo "$here/../../appstore/install-rootfs.sh" "$ROOT"   # Track F
     [ -z "$SBWL" ] || sudo "$here/../sbwl/install-rootfs.sh" "$ROOT" "$SBWL" >/dev/null
     echo "mk-base: refreshed sbinit, sbpkg${SBWL:+, sbwl} in the kept tree"
