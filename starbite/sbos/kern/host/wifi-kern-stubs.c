@@ -173,3 +173,7 @@ int64_t clock_set_net(int64_t utc, int *was_set)
 }
 
 /* store.h: only the phone's load_saved reads the store (SB_HOST takes SBOS_HOST_WIFINET) */
+
+/* Track A (the trunk has Track G's guestnet.c, so wifi.c's NAT hooks compile in): the test's stand-ins, no guest */
+void guestnet_uplink(int which, struct sbnet *n) { (void)which; (void)n; }
+int guestnet_rx(int which, const uint8_t *ip, uint32_t len) { (void)which; (void)ip; (void)len; return 0; }
