@@ -1186,8 +1186,8 @@ static void build_wclock(void)
     d_seg(&d, cx, cy, cx + 52 * tk_sinf(ma), cy - 52 * tk_cosf(ma), 3.4f, ink);
     d_rrect(&d, cx - 4.5f, cy - 4.5f, 9, 9, 4.5f, ink);
     d_rrect(&d, cx - 2, cy - 2, 4, 4, 2, C_ORANGE);
-    float cw = tw(TK_IT500, 12, "Clock", 0, 0);
-    d_text(&d, TK_IT500, 12, cx - cw / 2, y + s + 18, "Clock", 0, 0, INK, 1);
+    float cw = tw(TK_IT400, 12, "Clock", 0, 0);
+    d_text(&d, TK_IT400, 12, cx - cw / 2, y + s + 18, "Clock", 0, 0, INK, 1);
     trim(l);
     tk_layer_prepare(l);
     l->hidden = 0;

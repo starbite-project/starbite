@@ -152,7 +152,7 @@ static void lx_build_page3(void)
         LH.iy[i] = (int)tk_floorf(PT(y) - d.oy + .5f);
         if (ic->px) tk_blit(d.b, ic, LH.ix[i], LH.iy[i], 1);
         tk_bmp_free(&t);
-        d_text_box(&d, TK_IT500, 12, cx, y + 68 + 12, 84, 1, i ? LCAT.app[LH.cat[i - 1]].name : "App Store", 0, 0, INK, 1);
+        d_text_box(&d, TK_IT400, 12, cx, y + 68 + 12, 84, 1, i ? LCAT.app[LH.cat[i - 1]].name : "App Store", 0, 0, INK, 1);
     }
     hparts[5].x = hparts[5].bx = hparts[5].x + PT(780);   /* drawn as if on screen, then two pages right */
     /* P3s: cut to what it holds; the icons' places (copied out for a press or an open) move with the cut */

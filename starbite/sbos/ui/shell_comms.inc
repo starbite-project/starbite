@@ -27,6 +27,7 @@ enum { RC_OUT, RC_IN, RC_MISSED, RC_DECLINED, RC_NOANSWER };
 typedef struct { char num[24]; int kind, secs, hm; } cm_rec;
 static cm_rec RC[CM_NREC];                 /* Recents: this boot's calls, newest first */
 static int nrc;
+static int cm_missed_new;                  /* B8: missed calls not yet seen in Recents (home's Phone badge) */
 /* the inbox: the platform's (newest last) with what the shell adds: when it was first seen, unread */
 typedef struct { sh_sms_t m; int hm, day, unread; } cm_msg;
 static cm_msg MSG[SH_SMS_MAX];
@@ -386,7 +387,7 @@ static void cm_track(const sh_call_t *c)
     CM.rec_on = 0;
     int kind = CM.rec_out ? (CM.rec_conn ? RC_OUT : RC_NOANSWER) : CM.rec_conn ? RC_IN : CM.decl ? RC_DECLINED : RC_MISSED;
     cm_rec_add(CM.rec_num, kind, CM.rec_secs);
-    if (kind == RC_MISSED) sh_notify("phone", "Missed Call", CM.rec_num[0] ? CM.rec_num : "Unknown", cm_now_hm());
+    if (kind == RC_MISSED) { sh_notify("phone", "Missed Call", CM.rec_num[0] ? CM.rec_num : "Unknown", cm_now_hm()); cm_missed_new++; }
     if (is_app("phone") && AS.tab == 1 && !AP.closing) build_app_page(AP.a);
 }
 
@@ -463,6 +464,7 @@ static void page_phone(dc *d)
         d_icon(d, "call", PAD_CX - 15, PAD_CY - 15, 1);
     } else if (AS.tab == 1) {
         d_h1(d, "Recents");
+        cm_missed_new = 0;                  /* B8: Recents shown: the missed calls are seen */
         if (!nrc) {
             const char *l = !sh_comms_ok() ? "Calls aren't in this version yet." :
                             cm_cell_on() ? "Calls you make and receive show here until the phone restarts." :
@@ -1023,6 +1025,15 @@ static int cm_unread(const char *num)
 {
     int u = 0;
     for (int i = 0; i < nmsg; i++) u += MSG[i].unread && !tk_strcmp(MSG[i].m.number, num);
+    return u;
+}
+/* B8 (GAP #21): home's badge counts: Phone's missed calls not yet seen, Messages' unread; 0 for every other app */
+static int cm_badge(const char *k)
+{
+    int u = 0;
+    if (!tk_strcmp(k, "phone")) return cm_missed_new;
+    if (tk_strcmp(k, "messages")) return 0;
+    for (int i = 0; i < nmsg; i++) u += MSG[i].unread;
     return u;
 }
 static void cm_when(char *b, const cm_msg *m, int with_day)
