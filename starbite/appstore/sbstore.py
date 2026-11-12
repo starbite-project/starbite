@@ -174,6 +174,10 @@ HINTS = {
                             "Try again in a few minutes, or choose another install method."),
     "no such method": ("Can't install that way",
                        "This app doesn't offer that install method. Choose another one."),
+    "not installed": ("Not installed",
+                      "It isn't installed by the store, so there was nothing to remove."),
+    "internal error": ("The store hit a bug",
+                       "Tap GET to try again. If it happens again, the details are in /var/log/sbstore/jobs.log."),
     "interrupted": ("Stopped part-way",
                     "The install was interrupted (Linux stopped or the phone restarted). Tap GET again."),
 }
@@ -464,6 +468,7 @@ def net_probe():
 
 def net_up(force=False):
     if C.offline:
+        _net.update(t=time.monotonic(), up=False, why="offline mode")
         return False
     if not force and time.monotonic() - _net["t"] < 30 and _net["t"]:
         return _net["up"]
@@ -2078,6 +2083,11 @@ def op_remove(cat, aid, prog=NOPROG):
     with Lock():
         st = load_state()
         name = (cat.get(aid) or {}).get("name", aid)
+        dpk = ((cat.get(aid) or {}).get("distro") or {}).get("apt") or []
+        if not st["apps"].get(aid) and not any(p in dpkg_installed() for p in dpk):
+            log("remove %s: not installed, nothing to do" % aid)
+            prog.event(ev="done", msg="%s is not installed" % name)
+            return
         _remove_locked(cat, st, aid, prog)
         log("removed %s" % aid)
         prog.event(ev="done", msg="%s removed" % name)
