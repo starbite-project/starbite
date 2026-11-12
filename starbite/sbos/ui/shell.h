@@ -161,6 +161,25 @@ void sh_linux_catalog(const sh_lcat_t *c);         /* the catalog changed (also 
 void sh_linux_store(const sh_lstore_t *s);         /* the packages changed (progress too); the platform's copy,
                                                     * kept by the shell: valid until the next call */
 void sh_linux_textfocus(int on);         /* the active app's text field wants the keyboard (1) or not (0) */
+/* Track E hook (contract v3, "apps work fully"; starbite/guest/next/INTEGRATION-NEXT.md "v3 hooks"). The platform
+ * (gwin.c; shell_linux.inc has weak no-op stand-ins for platforms without it, e.g. the host preview): */
+enum { SH_LMOD_CTRL = 1, SH_LMOD_ALT = 2 };       /* as sbshm.h's SBSHM_MOD_* */
+int sh_linux_close(const char *id);      /* a Linux app's card swiped away: SBG_MSG_APP_CLOSE for its catalog index */
+int sh_linux_key(int code, unsigned mods);         /* a Linux key code (down, up) with SH_LMOD_* held around it */
+int sh_linux_char_mods(char c, unsigned mods);     /* a typed character as keys with SH_LMOD_* held (Ctrl+C) */
+void sh_linux_cards(int n);              /* Linux apps with a switcher card: n > 0 keeps Linux up while hidden */
+int sh_linux_notif_act(unsigned id, int action);   /* a Linux notification tapped (0) or dismissed (-1) */
+int sh_linux_clip(const char *text);     /* offer Starbite's clipboard (UTF-8 text) to Linux's apps */
+/* Track A's zero-copy window: the guest's front buffer (720 px wide, *stride_px), marked as being read (the guest
+ * won't render into it) until the next front or sh_linux_hide; NULL: no window of the app's yet */
+const uint32_t *sh_linux_front(int *stride_px);
+/* the shell, called by the platform: a Linux notification (who "linux:<id in hex>"), its withdrawal, a Linux copy */
+void sh_linux_notify(unsigned id, const char *app_id, const char *app, const char *title, const char *body, int hm);
+void sh_linux_notify_close(unsigned id);
+void sh_linux_clip_in(const char *text);
+/* the shell-wide clipboard (text only, RAM; shell_linux.inc): Starbite's text fields copy / paste through these */
+int sh_clip_set(const char *text);       /* 1 kept (and offered to Linux) */
+const char *sh_clip_get(void);           /* "" when empty */
 /* survival-next: Emergency mode's tools (shell_survival.inc), from the platform: the kernel's survival API
  * (kern/survival.h, services.c's SOS) on the phone, guide/survival_host.c on the host. Nothing starts by itself:
  * the shell calls sh_sos_set(1) and sh_usb_start() only at the end of the user's own hold, and the self test's
