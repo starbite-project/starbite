@@ -533,7 +533,7 @@ int gpucomp_selftest_step(void);        /* P4: the GPU compositor's test (gpucom
 /* P4: the GPU compositor's backend for the UI (gpucomp.c). A quad is one of the toolkit's draw items: a bitmap (or a
  * solid of w x h), scaled (isx / isy: source px per screen px) from the screen point (dx0, dy0), alpha, clipped to a
  * rect with a rounded edge, faded by screen y, 3-sliced, and glass (the backdrop bd through the 8-bit mask) under it */
-#define GPUCOMP_MAX_QUADS 127U
+#define GPUCOMP_MAX_QUADS 200U              /* 1.0: was 127; comp2's quad area holds 204 (bins keep byte indices <= 254) */
 enum { GC_SOLID = 1, GC_BILINEAR = 2, GC_GLASS = 4, GC_FADE = 8, GC_SLICE_V = 16, GC_SLICE_H = 32,
        GC_OPAQUE = 64,                  /* (CPU only) every px of src is opaque: what is under it is culled */
        GC_LENS = 256 };                 /* v9: Liquid Glass over the shape lx..lh (lens.h), the backdrop bd: a quad of its own */
@@ -556,6 +556,7 @@ struct gc_quad {
     const uint8_t *occ;                 /* (CPU only, may be 0) src's block map, occ_w x occ_h: bins skip empty blocks */
     uint32_t occ_w, occ_h;
     uint32_t gen;                       /* (CPU only) the caller's content stamp of src / mask / backdrop */
+    float lk, la0, la1;                 /* 1.0 (GC_LENS, glass V2): the tone (lens.h lens_tone); lk 0 = regular */
 };
 int gpucomp_init(void *heap, uint64_t bytes);
 /* the last compose's bins: entries drawn, entries culled under opaque quads, entries skipped over empty blocks */
