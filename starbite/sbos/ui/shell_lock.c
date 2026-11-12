@@ -3627,8 +3627,14 @@ static arect ap_from;
 static unsigned char ap_warm[NAPPS];       /* Track A lifecycle: opened before and not thrown away: its state kept */
 static int sw_keeps(int a);
 static int sw_find(int a);
+static int st_route_app(const char *key);    /* Track F (shell_appstore.inc): the Browser key's routing */
 static void app_open(int a)
 {
+    {   /* cp6: the dock's Browser opens the installed Linux browser (1), else the App Store on Firefox's page (2) */
+        int r = st_route_app(APPS[a].k);
+        if (r == 1) return;
+        if (r == 2) for (int s = 0; s < NAPPS; s++) if (!tk_strcmp(APPS[s].k, "store")) { a = s; break; }
+    }
     int cold = !ap_warm[a] || (sw_keeps(a) && sw_find(a) < 0);   /* Track A lifecycle: first, or out of the recents */
     ap_warm[a] = 1;
     sw_opened(a);                              /* helper D: first in the recents */

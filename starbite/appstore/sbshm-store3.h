@@ -38,6 +38,10 @@ enum { SBSHM_NEED_NETWORK = 1, SBSHM_NEED_AUDIO = 2, SBSHM_NEED_GPU = 4, SBSHM_N
 /* sbshm_pkg3.flags3 */
 enum { SBSHM_PKG3_VERIFIED = 1, SBSHM_PKG3_MIRROR = 4, SBSHM_PKG3_TERMINAL = 8 };
 
+/* sbshm_store3.net_why */
+enum { SBSHM_NET_OK = 0, SBSHM_NET_NO_CONNECTION = 1, SBSHM_NET_NO_DNS = 2, SBSHM_NET_NO_ANSWER = 3,
+       SBSHM_NET_OFFLINE_MODE = 4, SBSHM_NET_UNKNOWN = 5 };
+
 struct sbshm_pkg3 {                 /* index = the store index */
     uint32_t methods;               /* bit (1 << SBG_PKG_M_*) for each method the app offers */
     uint32_t method;                /* installed with (0: not installed by the store) */
@@ -50,9 +54,9 @@ struct sbshm_pkg3 {                 /* index = the store index */
     uint32_t needs;                 /* SBSHM_NEED_* */
     uint32_t flags3;                /* SBSHM_PKG3_* */
     uint32_t desc_off, desc_len;    /* the long description in the text area */
-    uint32_t rel_dl_kb;             /* (reserved) */
+    uint32_t hint_off;              /* after a failure: one plain sentence on what to do, in the text area */
     uint32_t rel_size_mb;           /* installed size of the release */
-    uint32_t pad;
+    uint32_t hint_len;              /* (0: no hint; was pad) */
     char ver_inst[24];              /* installed version ("" = not installed) */
     char ver_new[24];               /* newest known for the installed (or preselected) method */
     char ver_release[24], ver_distro[24], ver_source[24];   /* newest known per method ("" = unknown) */
@@ -67,7 +71,9 @@ struct sbshm_store3 {
     uint32_t mirror_ok;             /* the offline mirror is there */
     uint32_t checked_at;            /* unix time of the last update check (0: never; the guest's clock may be 1970) */
     uint32_t text_used;
-    uint32_t pad[9];
+    uint32_t net_why;               /* SBSHM_NET_*: why net_ok is 0 (was pad[0]) */
+    uint32_t busy;                  /* 1 while a job runs or waits (incl. update checks): keep Linux up (was pad[1]) */
+    uint32_t pad[7];
     struct sbshm_pkg3 pkg[SBSHM_PKGS_MAX];
 };
 _Static_assert(sizeof(struct sbshm_pkg3) == 256, "sbshm_pkg3");
