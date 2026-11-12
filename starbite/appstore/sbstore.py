@@ -34,6 +34,7 @@ Environment (tests and the host use these; the guest needs none):
   SBSTORE_BASE_LIST (/usr/share/starbite/base-packages.txt): packages a removal must never take
   SBSTORE_KEEP_BUILD_DEPS=1   keep the build dependencies after a source build
 """
+import errno
 import fcntl
 import fnmatch
 import hashlib
@@ -1956,9 +1957,19 @@ class Shm:
         size = os.fstat(self.fd).st_size
         if size and size < SBSHM_BLK_OFF:              # a test file: make it big enough
             os.ftruncate(self.fd, SBSHM_BLK_OFF)
-        self.base = SBSHM_STORE_OFF
-        self.m = mmap.mmap(self.fd, SBSHM_BLK_OFF - SBSHM_STORE_OFF, offset=SBSHM_STORE_OFF)
-        self.seq = struct.unpack_from("<I", self.m, 0)[0] & ~1
+        # the store region only (an offset map); a /dev/sbshm that refuses offsets (sbguest.ko before Track E's
+        # offset support: EINVAL) is mapped from 0 to the block rings instead, as sbpkg does
+        try:
+            if env("SBSTORE_SHM_NO_OFFSET") == "1":
+                raise OSError(errno.EINVAL, "offset maps disabled (test)")
+            self.m = mmap.mmap(self.fd, SBSHM_BLK_OFF - SBSHM_STORE_OFF, offset=SBSHM_STORE_OFF)
+            self.base = SBSHM_STORE_OFF
+        except OSError as e:
+            log("offset map of %s refused (%s): mapping it from 0" % (path, e))
+            self.m = mmap.mmap(self.fd, SBSHM_BLK_OFF, offset=0)
+            self.base = 0
+        self.seq_off = SBSHM_STORE_OFF - self.base
+        self.seq = struct.unpack_from("<I", self.m, self.seq_off)[0] & ~1
 
     def _w(self, off, data):
         """8-byte word stores into the write-combined region (like sbpkg's wcopy)"""
@@ -1974,7 +1985,7 @@ class Shm:
     def publish(self, store_hdr, pkgs, hdr3, pkgs3, text, icons):
         """the store seqlock: odd, the tables (and icons), even. Returns the new seq."""
         self.seq |= 1
-        struct.pack_into("<I", self.m, 0, self.seq)
+        struct.pack_into("<I", self.m, self.seq_off, self.seq)
         for i, px in icons:
             self._w(SBSHM_ICON_OFF + (SBSHM_ICONS_CAT + i) * SBSHM_ICON_BYTES, px)
         body = struct.pack(STORE_HDR_FMT, 0, *store_hdr)[4:] + b"".join(pkgs)
@@ -1982,7 +1993,7 @@ class Shm:
         self._w(SBSHM_STORE_TEXT_OFF, text[:SBSHM_STORE_TEXT_SIZE].ljust(SBSHM_STORE_TEXT_SIZE, b"\0")[:SBSHM_STORE_TEXT_SIZE])
         self._w(SBSHM_STORE3_OFF, struct.pack(STORE3_HDR_FMT, *hdr3) + b"".join(pkgs3))
         self.seq += 1
-        struct.pack_into("<I", self.m, 0, self.seq)
+        struct.pack_into("<I", self.m, self.seq_off, self.seq)
         return self.seq
 
 

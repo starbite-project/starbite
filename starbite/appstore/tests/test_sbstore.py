@@ -598,6 +598,50 @@ class Distro(unittest.TestCase):
         self.assertIn("basepkg", self.e.apt()["installed"])
 
 
+class DaemonNoOffset(unittest.TestCase):
+    """a /dev/sbshm that refuses offset maps (the old sbguest.ko): the table still lands at the store's offset"""
+
+    def test_table_without_offset_maps(self):
+        FILES.d.clear()
+        publish_hello("1.0")
+        e = Env()
+        try:
+            shm = os.path.join(e.d, "shm")
+            with open(shm, "wb") as f:
+                f.truncate(sbstore.SBSHM_BLK_OFF)
+            sockp = os.path.join(e.d, "s.sock")
+            srv = socket.socket(socket.AF_UNIX)
+            srv.bind(sockp)
+            srv.listen(1)
+            p = subprocess.Popen([sys.executable, SBSTORE, "daemon"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                 env=dict(e.env, SBSTORE_SHM=shm, SBSTORE_SOCK=sockp, SBSTORE_SHM_NO_OFFSET="1",
+                                          SBSTORE_RUN=os.path.join(e.d, "run")))
+            srv.settimeout(10)
+            c, _ = srv.accept()
+            c.settimeout(20)
+            buf = b""
+            while b"store " not in buf:
+                buf += c.recv(4096)
+            p.terminate()
+            err = p.communicate(timeout=5)[1].decode()
+            c.close()
+            srv.close()
+            self.assertIn("mapping it from 0", err)
+            with open(shm, "rb") as f:
+                f.seek(sbstore.SBSHM_STORE_OFF)
+                hdr = struct.unpack("<16I", f.read(64))
+                name = f.read(40).rstrip(b"\0")
+                f.seek(sbstore.SBSHM_STORE3_OFF)
+                magic = struct.unpack("<I", f.read(4))[0]
+                f.seek(0)
+                zero = f.read(4096)
+            self.assertEqual((hdr[1], name, magic), (1, b"hello", sbstore.STORE3_MAGIC))
+            self.assertEqual(hdr[0] % 2, 0)
+            self.assertEqual(zero, b"\0" * 4096)          # nothing written outside the store's regions
+        finally:
+            e.close()
+
+
 class DaemonTest(unittest.TestCase):
     """the daemon against a fake sbwl (a unix socket server) and a plain file as the shared region"""
 
