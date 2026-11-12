@@ -2138,6 +2138,8 @@ static void film_start(int film)
     next_kdraw();
     for (int i = 0; i < 8 && sh_idle_pending(); i++) { hw_wdt_feed(); sh_idle(); }   /* as the idle time would */
     sh_idle();
+    F.t0 = sb_ms();   /* cp7: the film's clock after its reset and idle work (~0.5 s): its first steps no longer pass
+                       * "during a stall" (the unlock swipe of the phone film was skipped so, Track B's finding) */
     {   /* P2w: a marker for the camera (the main session times its shots from the films' starts) */
         struct ub u;
         ub_init(&u);
