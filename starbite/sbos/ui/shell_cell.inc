@@ -79,3 +79,18 @@ static void cell_tap(float x, float y)
     if (BACK_HIT(x, y)) { settings_back(); return; }
     if (y >= CL_SW && y < CL_SW + LG_ROW && x >= LG_X && x < LG_RE) cell_toggle();
 }
+/* cp6: the switch's track darkens under the finger (shell_settings.inc's se_strip_press asks) */
+static int cell_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
+{
+    if (y < CL_SW || y >= CL_SW + LG_ROW || x < LG_X || x >= LG_RE) return 0;
+    return sep_switch(r, g, rad, c, LG_RE - 16 - KSW_W, CL_SW + (LG_ROW - KSW_H) / 2);
+}
+/* cp6: a spinner beside the switch while the modem starts, searches, connects or stops (the strip spinner) */
+static int cell_spin_at(float *cx, float *cy)
+{
+    if (CELL.data != SH_DATA_STARTING && CELL.data != SH_DATA_SEARCHING && CELL.data != SH_DATA_REGISTERED &&
+        CELL.data != SH_DATA_STOPPING) return 0;
+    *cx = LG_RE - 16 - KSW_W - 22;
+    *cy = CL_SW + LG_ROW / 2;
+    return 1;
+}

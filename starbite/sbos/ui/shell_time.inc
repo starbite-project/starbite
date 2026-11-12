@@ -165,6 +165,27 @@ static int ta_tap(float x, float y)
     }
     return 1;
 }
+/* cp6: what lights under the finger (the press protocol's colours, shell_wifi.inc): the region tab under it (not the
+ * current one; shell_settings.inc's se_strip_press asks), a zone's row in its card (ta_touch's own) */
+static int ta_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
+{
+    float sw = GROUP_W / TZG_N_SH;
+    if (AS.sub != TA_SUB_TZ || x < GROUP_X || x >= CONTENT_R || y < TA_ZSEG_Y - 4 || y >= TA_ZSEG_Y + 36) return 0;
+    int k = (int)((x - GROUP_X) / sw);
+    if (k < 0 || k >= TZG_N_SH || k == TA.tzg) return 0;
+    *r = *g = (tk_rect){ GROUP_X + 2 + k * sw, TA_ZSEG_Y + 2, sw - 4, 28 };
+    *rad = 14;
+    *c = SEP_SEG;
+    return 1;
+}
+static void ta_light(float x, float y)
+{
+    if (x < GROUP_X || x >= CONTENT_R) return;
+    int ix[96], n = ta_zones(TA.tzg, ix, 96), shown = n - TA.tztop < TA_ZN ? n - TA.tztop : TA_ZN, r = (int)((y - TA_ZTOP) / TA_ZROW);
+    if (y < TA_ZTOP || r >= shown) return;
+    tk_rect rr = { GROUP_X, TA_ZTOP + TA_ZROW * r, GROUP_W, TA_ZROW }, g = { GROUP_X, TA_ZTOP, GROUP_W, TA_ZROW * shown - 1 };
+    hl_set(&apphl, rr, g, 16, SEP_ROW);
+}
 /* the zone list's vertical swipe: the rows move by the finger's travel at the lift (a page rebuild per swipe, not
  * per frame); a touch that did not move is a tap */
 static int ta_touch(int ph, float x, float y, float t)
@@ -173,11 +194,13 @@ static int ta_touch(int ph, float x, float y, float t)
     if (ph == 0) {
         TA.own = AP.on && !AP.closing && !sp_app.live && is_app("settings") && AS.sub == TA_SUB_TZ && y >= TA_ZTOP && y < H_PT - 30;
         TA.x0 = x; TA.y0 = y; TA.moved = 0;
+        if (TA.own) ta_light(x, y);                  /* cp6: the row or the region under the finger */
         return TA.own;
     }
     if (!TA.own) return 0;
-    if (tk_fabsf(y - TA.y0) > 10 || tk_fabsf(x - TA.x0) > 10) TA.moved = 1;
+    if (!TA.moved && (tk_fabsf(y - TA.y0) > 10 || tk_fabsf(x - TA.x0) > 10)) { TA.moved = 1; hl_off(); }
     if (ph == 2) {
+        hl_off();
         TA.own = 0;
         if (!TA.moved) ta_tap(x, y);
         else {

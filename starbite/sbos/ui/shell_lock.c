@@ -5193,6 +5193,7 @@ static void app_press(float x, float y)
     else if (med_press(x, y, &r, &g, &rad, &c)) ok = 1;            /* cp6: Photos' cells, Files' and Music's rows, the viewer */
     else if (pc_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* Track A: Settings > Passcode */
     else if (su_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* Track A update */
+    else if (se_strip_press(x, y, &r, &g, &rad, &c)) ok = 1;       /* cp6: Settings' strip pages (Wi-Fi, Cellular, Startup) */
     else if (pushed && BACK_HIT(x, y)) {
         r = g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D };   /* the glass back lights */
         rad = BACK_D / 2; c = PRESS_BTN; ok = 1;

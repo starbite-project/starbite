@@ -583,6 +583,19 @@ static void apply_state(const char *st)
         for (int i = 0; i < 600 && (i < 30 || sh_moving()); i++) sh_tick(1 / 60.0f, tt += 1000 / 60.0f);
         return;
     }
+    if (!strcmp(what, "wifistate")) {            /* cp6: wifistate=:N (SH_WIFI_*: 1 starting, 3 scanning, 4 joining) */
+        HW.state = (int)v;
+        hw_push();
+        return;
+    }
+    if (!strcmp(what, "down")) {                 /* cp6: down=X,Y (pt): a finger put down and held there (the press's still) */
+        static float td = 500000;
+        float x = 0, y = 0;
+        if (sscanf(eq + 1, "%f,%f", &x, &y) != 2) return;
+        sh_touch(0, x, y, td);
+        for (int i = 0; i < 6; i++) sh_tick(1 / 60.0f, td += 1000 / 60.0f);
+        return;
+    }
     if (!strcmp(what, "comms")) { comms_fake_state(key, v); return; }          /* helper I: comms=incoming, ... */
     if (!strcmp(what, "pass")) { (void)sh_pass_set("", key); return; }         /* Track A: pass=246810 */
     if (!strcmp(what, "hupd")) {                 /* Track A update: hupd=none|found|bad|old|installed (the host's card) */
