@@ -108,7 +108,7 @@ static struct stream st[SND_STREAMS];
 static struct snd_ops O;
 static int inited;
 static struct {
-    int eng, out_on, cur_out, route, jack, muted, suspended, cap, cap_codec, amp_override;
+    int eng, out_on, cur_out, route, jack, muted, suspended, cap, cap_codec, amp_override, dumped;
     unsigned vol[4];
     uint32_t fill_idx, zero_idx, last_pos;
     uint64_t last_poll, idle_since, retry_at, moved_at;
@@ -175,6 +175,17 @@ static void vfmt(char *b, unsigned cap, const char *pre, const char *fmt, va_lis
     b[n] = 0;
 }
 #define UL(x) ((unsigned long)(x))
+
+/* a + b + c into d (no libc) */
+static void snprintf_like(char *d, unsigned cap, const char *a, const char *b, const char *c)
+{
+    unsigned n = 0;
+    const char *parts[3] = { a, b, c };
+    for (unsigned k = 0; k < 3; ++k)
+        for (const char *p = parts[k]; p && *p && n + 1 < cap; ++p)
+            d[n++] = *p;
+    d[n] = 0;
+}
 #define SL(x) ((long)(x))
 
 static void say(const char *fmt, ...)
@@ -658,6 +669,8 @@ static void engine_fill(uint64_t t)
         G.moved_at = t, G.last_pos = pos;
     if (t - G.moved_at > STALL_US) {    /* no position, or the same one, for 250 ms: the DMA does not run */
         say("engine: RDMA0 does not move (STATUS %x)", UL(stt));
+        if (!G.dumped++)
+            apcm_dump("engine");        /* once a boot: the registers for the log */
         engine_stop("RDMA0 did not run");
         why("Sound stopped: the audio DMA did not run");
         G.retry_at = t + RETRY_US;
@@ -884,9 +897,12 @@ static struct {
     uint64_t sq;
     uint32_t n;
     int saved_route, saved_vol[4];
+    unsigned trial, found, trials_run;
+    uint32_t found_moved, rate2;
+    char found_desc[48];
 } P;
 
-static const unsigned budget_of[3] = { 2000, 4000, 10000 };
+static const unsigned budget_of[3] = { 2000, 12000, 10000 };
 
 static int pfinish(int ok, const char *line)
 {
@@ -965,8 +981,8 @@ static int probe1(void)
             return pfinish(0, "media sound is in use: not run (nothing touched)");
         apcm_look(&l);
         P.aud_was_on = l.aud_on;
-        psay("level 1: AUD domain, PLL_AUD, bypass engine; RDMA0 silence -> UAIF1 for 1 s (amplifiers OFF), then "
-             "WDMA1 <- UAIF0 for 0.5 s (codec mic off: a moving pointer, near-zero data); all back as found");
+        psay("level 1: RDMA0 zeroes -> UAIF1 1 s (amps off), WDMA1 <- UAIF0 0.5 s (codec off); a stall: dump + RDMA0 "
+             "trials; all back as found");
         if (apcm_up()) {
             psay("ABOX did not come up: %s", apcm_why());
             return pfinish(0, "ABOX did not come up in bypass (see the apcm lines): everything put back");
@@ -984,9 +1000,56 @@ static int probe1(void)
             return 0;
         P.rate = (uint32_t)((uint64_t)P.moved * 1000000ULL / (t - P.ts));
         P.uaif1_st = apcm_uaif_status(APCM_UAIF1);
-        apcm_play_stop();
         psay("RDMA0 read %u bytes a second (192000 = 48 kHz 16-bit stereo); UAIF1 STATUS %x%s", UL(P.rate),
              UL(P.uaif1_st), (P.uaif1_st & 1U) ? " (ERROR_OF_SPK)" : "");
+        if (!P.moved) {
+            /* the read-only dump, then RDMA0-only trials (silent: the amps are off, RDMA only reads its ring) */
+            apcm_dump("RDMA0 still");
+            P.step = 10, P.trial = 0;
+            return 0;
+        }
+        goto to_capture;
+    case 10: {
+        char d[48];
+        for (unsigned k = 0; k < 8; ++k) {
+            uint32_t mv = 0;
+            int r = apcm_trial(P.trial, &mv, d, sizeof d);
+            if (r < 0) {
+                apcm_down();
+                return pfinish(0, "RDMA0 did not stop during the trials: everything put back");
+            }
+            if (r == 0) {
+                psay("trials: %u configurations, none moved RDMA0 (see AUDIO.md 8)", UL(P.trials_run));
+                goto to_capture;
+            }
+            P.trials_run++;
+            if (mv >= 64U) {
+                P.found = P.trial + 1, P.found_moved = mv;
+                memcpy(P.found_desc, d, sizeof d);
+                psay("trial %u (%s): RDMA0 moved %u bytes in 5 ms: adopted; measuring 0.5 s", UL(P.trial), d, UL(mv));
+                (void)apcm_trial_adopt(P.trial);
+                apcm_play_stop();
+                apcm_down();
+                if (apcm_up() || apcm_play_start(APCM_UAIF1)) {
+                    apcm_down();
+                    return pfinish(0, "ABOX did not come up again with the found setting");
+                }
+                P.last = 0, P.moved = 0, P.ts = now(), P.step = 11;
+                return 0;
+            }
+            P.trial++;
+        }
+        return 0;
+    }
+    case 11:
+        P.moved += moved_since(&P.last, apcm_play_pos(0));
+        if (t - P.ts < 500000ULL)
+            return 0;
+        P.rate2 = (uint32_t)((uint64_t)P.moved * 1000000ULL / (t - P.ts));
+        psay("with %s: RDMA0 read %u bytes a second", P.found_desc, UL(P.rate2));
+        /* fall through */
+    to_capture:
+        apcm_play_stop();
         if (apcm_state() != APCM_ST_UP || apcm_cap_start()) {
             apcm_down();
             return pfinish(0, "WDMA1 did not start (see the apcm lines): everything put back");
@@ -1006,6 +1069,8 @@ static int probe1(void)
             P.peak = a > P.peak ? a : P.peak;
         }
         uint32_t ust = apcm_uaif_status(APCM_UAIF0);
+        if (!P.cap_moved)
+            apcm_dump("WDMA1 still");
         apcm_cap_stop();
         apcm_down();
         struct apcm_look l;
@@ -1015,8 +1080,15 @@ static int probe1(void)
         int play_ok = P.rate >= 182400U && P.rate <= 201600U, cap_ok = P.cap_rate >= 182400U && P.cap_rate <= 201600U;
         if (l.aud_on != P.aud_was_on)
             return pfinish(0, "the AUD domain is not back as found");
+        if (P.found) {
+            char line[160];
+            int ok2 = P.rate2 >= 182400U && P.rate2 <= 201600U;
+            snprintf_like(line, sizeof line, ok2 ? "FOUND: RDMA0 runs at 48 kHz only with " : "FOUND: RDMA0 moves (wrong rate) only with ",
+                          P.found_desc, P.cap_moved ? "; WDMA1 moved with it too" : "; WDMA1 still did not move");
+            return pfinish(0, line);
+        }
         if (!P.moved)
-            return pfinish(0, "RDMA0 did not move: no playback this way without the firmware (AUDIO.md, risks)");
+            return pfinish(0, "RDMA0 did not move, nor with any trial setting (dump above): media needs Calliope here");
         if (!play_ok)
             return pfinish(0, "RDMA0 moved at the wrong rate: its CTRL0 format bits are needed (AUDIO.md, risks)");
         if (!P.cap_moved)

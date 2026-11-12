@@ -134,6 +134,6 @@ int snd_attach_shring(int id, struct snd_shring *r);   /* the stream reads from 
 /* ---- the driver probe (drvprobe.h) ---------------------------------------------------------------------------- */
 int drv_audio_probe(int level, unsigned *wait_ms);
 void drv_audio_abort(void);
-#define DRV_AUDIO_BUDGET_MS 10000U      /* level 0: 2 s, level 1: 4 s, level 2: 10 s (each level enforces its own) */
+#define DRV_AUDIO_BUDGET_MS 12000U      /* level 0: 2 s, level 1: 12 s (with the trials), level 2: 10 s */
 
 #endif
