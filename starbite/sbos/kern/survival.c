@@ -30,6 +30,8 @@
 #define R_DTLS2 0xb5U
 #define R_CNFG00 0xb7U
 #define R_CNFG02 0xb9U
+#define R_CNFG06 0xbdU                      /* bits 3:2 CHGPROT: 0b11 unlocks writes to CNFG_01..03 (OTG_ILIM is in 02);
+                                             * bits 1:0 WDTCLR (written 00 here: no watchdog effect) */
 #define MODE_OTG 0x0aU
 
 /* ---- small float maths (no libm in the kernel): enough for the sun, ~1e-9 ---------------------------------- */
@@ -177,6 +179,8 @@ static struct {
     int state;
     uint64_t t_on, t_cool;                  /* the burst's start; the cooldown's end */
     uint8_t cnfg00, cnfg02;                 /* as found: written back at the stop */
+    uint8_t cnfg06;                         /* 1.2-alpha29: CHGPROT as found (fire-1: OTG_ILIM stayed 900 mA locked) */
+    int prot_written;                       /* CHGPROT unlocked by us: put back at the stop */
     int written;                            /* CNFG_00 holds OTG: it must go back on every path */
     int base_ma, have_base;
     int ma, mv, est_ma, vlo, vhi, bat_c10, ilim_ma;
@@ -263,6 +267,46 @@ static int therm_c10(unsigned ch)
 #define FIRE_REARM_MS 2000U                 /* the chip dropped OTG by itself: rest, then once more (3 at most) */
 #define FIRE_DUTY_ON_MS 2000U               /* warm: 2 s on, 2 s off */
 
+/* 1.2-alpha29: OTG_ILIM (CNFG_02) only takes a write with CHGPROT unlocked (CNFG_06 bits 3:2 = 0b11; Samsung's
+ * driver unlocks it at init and keeps it so; docs/USB-FIRE-RESEARCH.md 2). A write guard, not a protection: the
+ * chip's current limit, short handling and thermal shutdown stay as they are. 1 unlocked (or already) */
+static int chgprot_unlock(void)
+{
+    uint8_t c6 = 0;
+    if (!chg_rd(R_CNFG06, &c6))
+        return 0;
+    if (((c6 >> 2) & 3U) == 3U)
+        return 1;
+    U.cnfg06 = c6;
+    sb_auth_init(&au, SB_SP_MAX, 0, (uint64_t)CHG << 8 | R_CNFG06, 1, SB_TIER1, 0, "survival: USB power out (CHGPROT)");
+    sb_auth_step(&au, SB_STEP_WARN);
+    sb_auth_step(&au, SB_STEP_HELD);
+    int ok = sb_gate_open(&au) && sb_max_write(CHG, R_CNFG06, (uint8_t)((c6 & ~0x0fU) | 0x0cU), SB_TIER1);
+    sb_gate_close();
+    uint8_t back = 0;
+    ok = ok && chg_rd(R_CNFG06, &back) && ((back >> 2) & 3U) == 3U;
+    U.prot_written = ok;
+    sb_log(ok ? "survival: usb out: CHGPROT unlocked for OTG_ILIM (put back at the stop)" :
+                "survival: usb out: CHGPROT did not unlock: OTG_ILIM stays as the chip has it");
+    return ok;
+}
+
+static void chgprot_back(void)
+{
+    if (!U.prot_written)
+        return;
+    uint8_t c6 = 0;
+    if (!chg_rd(R_CNFG06, &c6))
+        return;
+    sb_auth_init(&au, SB_SP_MAX, 0, (uint64_t)CHG << 8 | R_CNFG06, 1, SB_TIER1, 0, "survival: USB power out (CHGPROT)");
+    sb_auth_step(&au, SB_STEP_WARN);
+    sb_auth_step(&au, SB_STEP_HELD);
+    int ok = sb_gate_open(&au) && sb_max_write(CHG, R_CNFG06, (uint8_t)((c6 & ~0x0fU) | (U.cnfg06 & 0x0cU)), SB_TIER1);
+    sb_gate_close();
+    if (ok)
+        U.prot_written = 0;
+}
+
 static void usb_back(void)
 {
     if (!U.written)
@@ -270,9 +314,10 @@ static void usb_back(void)
     int a = chg_wr(R_CNFG00, U.cnfg00);
     int b = chg_wr(R_CNFG02, U.cnfg02);
     if (a && b) {
+        chgprot_back();                     /* after CNFG_02: the guard as it was */
         U.written = 0;
         U.back_fail = 0;
-        sb_log("survival: usb out: the charger is back as it was (mode and current limit)");
+        sb_log("survival: usb out: the charger is back as it was (mode, current limit, CHGPROT)");
     } else if (!U.back_fail++) {
         sb_log("survival: usb out: the charger did NOT take its old mode back: retried every 100 ms");
     }
@@ -282,6 +327,7 @@ static void before_reset(void)
 {
     if (U.written)
         usb_back();
+    chgprot_back();
     shub_leave();                           /* 1.2-alpha28: the hub in standby, its pins and clocks as found */
     if (prev_before_reset)
         prev_before_reset();
@@ -384,6 +430,7 @@ static int usb_start(int fire)
     U.base_ma = n ? sum / n : 0;
     /* the chip's own top current limit, then the boost on */
     U.written = 1;                          /* from here every path writes both back */
+    (void)chgprot_unlock();
     if (!chg_wr(R_CNFG02, (uint8_t)((U.cnfg02 & 0x3fU) | 0xc0U)))
         sb_log("survival: usb out: OTG_ILIM 1.5 A did not read back (write-protected?): the chip's limit as it is");
     uint8_t c2 = 0;

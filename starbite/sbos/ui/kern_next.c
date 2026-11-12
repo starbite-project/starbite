@@ -192,10 +192,14 @@ static int perf_conservative, perf_low;     /* perf_low: the user's Low Power Mo
 static uint32_t perf_tail_ms(void) { return perf_conservative || perf_low ? 400U : 1500U; }
 static void boost(int on)
 {
+    /* Track D: Extreme power saving and Last 2 % (surv_saver(), set by the Emergency switch, the 3 % trigger or a
+     * remembered setting, with or without the shell) keep the A55 at its 455 MHz step: no boost, and the clock-down
+     * goes to 455 MHz, not 1053 MHz (it would undo services.c's power_last2_clock) */
+    if (on && surv_saver()) on = 0;
     if (on == boosted) return;
     boosted = on;
-    if (!hw_dvfs(DVFS_A55, on ? 1794000U : 1053000U))
-        sb_log(on ? "next: the A55 did not take 1794 MHz" : "next: the A55 did not go back to 1053 MHz");
+    if (!hw_dvfs(DVFS_A55, on ? 1794000U : surv_saver() ? 455000U : 1053000U))
+        sb_log(on ? "next: the A55 did not take 1794 MHz" : "next: the A55 did not go back down (ACPM)");
     /* P4 v10: the GPU at 572 MHz while frames come, 260 MHz (the vendor table's lowest step) when nothing moves */
     if (gpu_started && comp.gpu) {
         if (hw_dvfs(DVFS_GPU, on ? 572000U : 260000U)) gpu_clock_steps++;

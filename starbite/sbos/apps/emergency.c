@@ -66,13 +66,20 @@ static void show_usb(void)
             line("Port voltage: up to about ", v, " V", 0xffffffffU);
         if (c)
             line("Battery ", c, " \xc2\xb0" "C", 0xffffffffU);
+        {
+            int il = setting_get(SET_SURV_USB_ILIM);
+            if (il > 0)
+                line("The chip's current limit: ", il, il >= 1500 ? " mA (its top step)" : " mA (not the top step)",
+                     il >= 1500 ? 0xffffffffU : ORANGE);
+        }
         if (fire) {
             int fi = setting_get(SET_SURV_FIRE_INFO);
             int trips = fi & 0x3ff, ml = (fi >> 16) & 0x7fff;
             if (ml != 0x7fff)
                 line("Battery for about ", ml, " min of this", 0xffffffffU);
             if (trips)
-                line("The chip limited the current ", trips, " times (a short: use a longer element)", ORANGE);
+                line("The chip limited the current ", trips, " times: if it keeps counting, the element needs to be "
+                     "longer or thinner", ORANGE);
         }
         ui_button(2, "Stop", 0, UI_RED);
     } else {
@@ -86,9 +93,12 @@ static void show_usb(void)
             ui_hold(14, "Hold for continuous power (Stop ends it, 2 min at most)", 1500, UI_RED);
     }
     ui_textline("5 V from the USB-C port, at most 1.5 A (the charger chip's own limit, never more).", 0xffffffffU);
-    ui_textline("Best element: 4-6 cm of 0.5 mm pencil lead between the wires (about 5 ohm): it glows and lights "
-                "paper. A copper strand or foil is a short: the chip cuts it to 30 ms pulses, it will not glow.",
-                0xffffffffU);
+    ui_textline("Best: nichrome wire (~15 cm coiled) or a 0.3 mm pencil lead (~2 cm), each bare wire wrapped 3-4 "
+                "tight turns round it. 0.5 mm lead: start 6 cm apart.", 0xffffffffU);
+    ui_textline("If the chip limits the current every second, the element conducts too well: make it longer or "
+                "thinner (it then gets power only 1/10 of the time).", 0xffffffffU);
+    ui_textline("A copper strand or foil is a short: the chip cuts it to 30 ms pulses, it will not glow. Sparks can "
+                "still light char cloth or cotton fluff held at the contact.", 0xffffffffU);
     ui_textline("Never short the phone's port directly. Unplug any charger first. Hold only insulated parts, over "
                 "stone or soil, paper ready.", ORANGE);
     ui_textline("It stops by itself on any fault, a hot battery, connector or charger, or a low battery.", GREY);
