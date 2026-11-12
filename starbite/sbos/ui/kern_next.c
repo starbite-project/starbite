@@ -166,6 +166,7 @@ extern const uint8_t sbtk_pack_start[], sbtk_pack_end[];
 /* ---- state ------------------------------------------------------------------------------------------------- */
 static tk_comp comp;
 static int ready, baking, need_full, ticking, boosted;
+static uint64_t bd_us_frame;                /* (the frame log reads it before its definition below: a tentative one here) */
 static uint64_t last_tick, boot_t0;
 /* the frame statistics of the current gesture (logged per film in the self test, per gesture otherwise) */
 static struct { uint32_t n, nhalf, over16, maxus, nboost, nwait; uint64_t sumus, sumwait; uint32_t hist[64]; uint8_t ms[120];
