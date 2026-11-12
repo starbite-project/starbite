@@ -203,6 +203,7 @@ typedef struct {
     tk_bmp ringbuf;
     float *ang, *cov;           /* the ring's per-pixel angle and radial coverage */
     float scale_from, scale_to, scale_t;
+    tk_spring ss;               /* B4: the scale on the press spring (response .30, damping .6), velocity kept on a retarget */
     int down, fired, lit;
     float t0, prog, ms;
 } hold_t;
@@ -3156,11 +3157,19 @@ static void app_finish_close(void)
 /* ---- the toast (the concept's #toast: dark glass, 13 pt / 600, from 90 pt above with an overshoot, 2 s) ------ */
 static tk_layer toastl;
 static float toast_o = -90, toast_from = -90, toast_to = -90, toast_t = 1, toast_left;
+static tk_spring sp_toast;
+/* B4 (audit 17): it pops from the status bar's centre (scale .8 -> 1, a short drop, the fade) on the toast spring
+ * (response .35, damping .75) and shrinks back the same way; toast_o is 0 shown, -90 gone (the states' values) */
 static void toast_place(void)
 {
-    toast_o = toast_from + (toast_to - toast_from) * tk_bezier(.2f, 1.3f, .3f, 1, toast_t);
-    toastl.y = toastl.by + PT(toast_o);
-    toastl.hidden = toast_t >= 1 && toast_to <= -90;
+    if (toast_t >= 1) { toast_o = toast_to; sp_toast.live = 0; }
+    float p = tk_clampf(1 + toast_o / 90, 0, 1.15f);
+    toastl.sx = toastl.sy = .8f + .2f * p;
+    toastl.ox = PT(195);
+    toastl.oy = PT(23);
+    toastl.y = toastl.by + PT((1 - tk_minf(1, p)) * -12);
+    toastl.alpha = tk_clampf(p * 1.6f, 0, 1);
+    toastl.hidden = (toast_t >= 1 && toast_to <= -90) || toastl.alpha <= .004f;
     if (toastl.hidden && toastl.bmp.px) relayer(&toastl);       /* P3s: nothing kept once it is gone */
 }
 static void toast(const char *msg)
@@ -3212,7 +3221,7 @@ static struct { int on, down; float t0, p, a, at, hy; } CF;
 static void cf_place(void)
 {
     cffill.slice_h = PT(56 + (302 - 56) * CF.p);
-    cfl.alpha = CF.a;
+    cfl.alpha = tk_bezier(.25f, .1f, .25f, 1, CF.a);     /* B4: eased, not linear */
     cfl.hidden = !CF.on && CF.a <= 0;
 }
 void sh_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold)
@@ -3747,10 +3756,12 @@ int sh_init(tk_comp *c)
 
 static void apply_tweens(void)
 {
-    mark.alpha = mark_a;
-    glyph_c.alpha = glyph_open ? 0 : glyph_a;
-    glyph_o.alpha = glyph_open ? glyph_a : 0;
-    hint.alpha = hint_a;
+    /* B4 (audit "Easing on fades"): the linear tweens through iOS's ease */
+    mark.alpha = tk_bezier(.25f, .1f, .25f, 1, mark_a);
+    float g = tk_bezier(.25f, .1f, .25f, 1, glyph_a);
+    glyph_c.alpha = glyph_open ? 0 : g;
+    glyph_o.alpha = glyph_open ? g : 0;
+    hint.alpha = tk_bezier(.25f, .1f, .25f, 1, hint_a);
 }
 
 /* back to the plain lock screen: the sheet and the boot overlay gone, every card closed, the top (exit_em: and out
@@ -4581,7 +4592,10 @@ int sh_tick(float dt, float t)
         mv = 1;
     }
     if (toast_t < 1) {
-        toast_t = tk_minf(1, toast_t + dt / .45f);
+        if (!sp_toast.live || sp_toast.to != toast_to)
+            tk_spring_start(&sp_toast, toast_o, toast_to, sp_toast.live ? sp_toast.v : 0, TK_SPR_POP);
+        if (!tk_spring_step(&sp_toast, dt)) toast_t = 1;
+        toast_o = sp_toast.x;
         toast_place();
         mv = 1;
     }
@@ -4616,8 +4630,8 @@ int sh_tick(float dt, float t)
         }
         if (!k->isopen && !k->sp.live && k->chev_t >= 1 && k->memh <= 0 && k->face.bmp.px) free_open(g);
         if (k->chev_t < 1) {
-            k->chev_t = tk_minf(1, k->chev_t + dt / .35f);
-            k->chev_now = k->chev_from + (k->chev_to - k->chev_from) * tk_bezier(.3f, 1.4f, .4f, 1, k->chev_t);
+            k->chev_t = tk_minf(1, k->chev_t + dt / .3f);      /* B4 (P3j-8): iOS's ease, no overshoot */
+            k->chev_now = k->chev_from + (k->chev_to - k->chev_from) * tk_bezier(.25f, .1f, .25f, 1, k->chev_t);
             chev_draw(k, k->chev_now);
             mv = 1;
             if (k->chev_t >= 1) place_list();
@@ -4644,8 +4658,10 @@ int sh_tick(float dt, float t)
     for (int i = 0; i < 2; i++) {
         hold_t *q = &Q[i];
         if (q->scale_t < 1) {
-            q->scale_t = tk_minf(1, q->scale_t + dt / .25f);
-            q->grp.sx = q->grp.sy = q->scale_from + (q->scale_to - q->scale_from) * tk_bezier(.3f, 1.5f, .4f, 1, q->scale_t);
+            if (q->scale_t <= 0) tk_spring_start(&q->ss, q->grp.sx, q->scale_to, q->ss.live ? q->ss.v : 0, TK_SPR_PRESS);
+            q->scale_t = .5f;
+            if (!tk_spring_step(&q->ss, dt)) q->scale_t = 1;
+            q->grp.sx = q->grp.sy = q->ss.x;
             mv = 1;
         }
         if (q->down && !q->fired) {

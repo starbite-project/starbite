@@ -232,12 +232,12 @@ void tk_comp_idle(tk_comp *c);                            /* idle time: the half
 uint64_t tk_comp_bench(tk_comp *c, int kind);      /* the present's kernels vs uibench's loops, us */                         /* idle: make the visible layers' half copies */
 
 /* ---- motion: springs, the velocity tracker, gestures (tk_motion.c) ------------------------------------------ */
-enum { TK_SPR_UNLOCK, TK_SPR_OPEN, TK_SPR_CLOSE, TK_SPR_SHEET, TK_SPR_ROWS, TK_SPR_CC, TK_NSPR };
+enum { TK_SPR_UNLOCK, TK_SPR_OPEN, TK_SPR_CLOSE, TK_SPR_SHEET, TK_SPR_ROWS, TK_SPR_CC, TK_SPR_PRESS, TK_SPR_POP, TK_NSPR };
 typedef struct {
     float x, v, to, eps, k, c;
     int live;
 } tk_spring;
-/* the concept's spring(): mass 1, eps = max(1e-3, |to - from| x 0.002), velocity in units per s */
+/* the concept's spring(): mass 1, eps = max(1e-4, |to - from| x 0.0005), velocity in units per s (B4: iOS's constants) */
 void tk_spring_start(tk_spring *s, float from, float to, float v0, int kind);
 /* one rAF tick: dt in s (capped at 0.05), 4 semi-implicit Euler substeps; returns 1 while live, 0 when it rested
  * this tick (x is then exactly to) */

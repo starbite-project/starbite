@@ -1,12 +1,20 @@
 /* SPDX-License-Identifier: MIT
- * sbtk motion: the concept's springs and velocity tracker, line for line (index.html: SPR, spring(), tracker()).
- * Mass 1; semi-implicit Euler in 4 substeps per tick; dt capped at 0.05 s; at rest when |x - to| < eps and
- * |v| < 20 eps, eps = max(1e-3, |to - from| x 0.002). Velocities in units per second. */
+ * sbtk motion: the concept's springs and velocity tracker (index.html: SPR, spring(), tracker()).
+ * Mass 1; semi-implicit Euler in 4 substeps per tick; dt capped at 0.05 s. Velocities in units per second.
+ * B4 (the iOS retune, audit "Later"): the constants are iOS's (response, damping ratio) pairs, k = (2 pi / response)^2,
+ * c = 4 pi zeta / response (WWDC23 10158). At rest when |x - to| < eps and |v| < 20 eps, eps = max(1e-4, |to - from| x
+ * 0.0005): the last frame moves well under a px (0.002 snapped 1.6 pt at the end of an unlock). */
 #include "sbtk.h"
 
 static const float SPR[TK_NSPR][2] = {
-    [TK_SPR_UNLOCK] = { 320, 32 }, [TK_SPR_OPEN] = { 380, 34 }, [TK_SPR_CLOSE] = { 360, 30 },
-    [TK_SPR_SHEET] = { 420, 36 }, [TK_SPR_ROWS] = { 300, 30 }, [TK_SPR_CC] = { 400, 36 },
+    [TK_SPR_UNLOCK] = { 246.7f, 31.4f },   /* response .40, zeta 1.0 (was 320 / 32) */
+    [TK_SPR_OPEN] = { 195.0f, 27.9f },     /* .45, 1.0: an app grows from its icon (was 380 / 34) */
+    [TK_SPR_CLOSE] = { 195.0f, 23.7f },    /* .45, .85: back into the icon with a trace of settle (was 360 / 30) */
+    [TK_SPR_SHEET] = { 195.0f, 27.9f },    /* .45, 1.0: sheets (was 420 / 36) */
+    [TK_SPR_ROWS] = { 300, 30 },           /* .363, .866: rows and pages (kept) */
+    [TK_SPR_CC] = { 246.7f, 31.4f },       /* .40, 1.0 (was 400 / 36) */
+    [TK_SPR_PRESS] = { 438.6f, 25.1f },    /* .30, .6: a pressed control's gel (the glass spec's press) */
+    [TK_SPR_POP] = { 322.3f, 26.9f },      /* .35, .75: a toast, a banner, a module that expands */
 };
 
 void tk_spring_start(tk_spring *s, float from, float to, float v0, int kind)
@@ -16,7 +24,7 @@ void tk_spring_start(tk_spring *s, float from, float to, float v0, int kind)
     s->to = to;
     s->k = SPR[kind][0];
     s->c = SPR[kind][1];
-    s->eps = tk_maxf(1e-3f, tk_fabsf(to - from) * 0.002f);
+    s->eps = tk_maxf(1e-4f, tk_fabsf(to - from) * 0.0005f);
     s->live = 1;
 }
 
