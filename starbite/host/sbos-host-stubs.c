@@ -212,6 +212,22 @@ void hw_heat_stop_all(void) { (void)sb_smp_stop(0); }
 unsigned hw_heat_running(void) { return sb_smp_running(); }
 int64_t hw_core_psci(unsigned w) { (void)w; return 0xffffffffLL; }   /* as the phone: not supported, in w0 */
 
+/* ---- 1.2-alpha28: the sensor hub (kern/shub.c drives the BCM4775's hub over SPI; the host has none): it never
+ * starts, so Survival's compass, level and step counter have no values ---- */
+#include "shub.h"
+#include "survival.h"
+static int host_shub = SHUB_OFF;
+void shub_begin(int probe_only) { (void)probe_only; host_shub = SHUB_STARTING; }
+int shub_step(void) { host_shub = SHUB_FAILED; return 1; }
+unsigned shub_wait_ms(void) { return 100; }
+int shub_state(void) { return host_shub; }
+const char *shub_why(void) { return "The host preview has no sensor hub."; }
+void shub_poll(void) {}
+void shub_leave(void) { host_shub = SHUB_OFF; }
+int surv_heading(int *deg_x10, int *accuracy) { (void)deg_x10; (void)accuracy; return 0; }
+int surv_tilt(int *pitch_x10, int *roll_x10) { (void)pitch_x10; (void)roll_x10; return 0; }
+int surv_steps(uint32_t *n) { (void)n; return 0; }
+
 /* ---- the apps linked in (sbos-preview.sh renames each app's symbols) ---- */
 #define APP(n)                                                                                                 \
     extern const struct sbapp_header n##_header;                                                               \

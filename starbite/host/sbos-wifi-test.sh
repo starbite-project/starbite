@@ -6,11 +6,11 @@
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/starbite/out/sboshost"
-OPEN="w:300 g:1150,2310,0,700 w:400 t:1057,1738 w:600"       # the lock screen's Open, then the Wi-Fi tile
+OPEN="w:300 g:1150,2310,0,700 w:400 t:1057,1542 w:600"       # the lock screen's Open, then the Wi-Fi tile (7 rows since Guide)
 ON="t:720,625 w:3000"                                           # the toggle, the bring-up and the scan
 JOIN="t:720,905 w:9000"                                         # the first network
 fails=0
-run() { limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 ${NET:+"SBOS_HOST_WIFINET=$NET"} "$out/sbos-host" "$out" /dev/null "$@" s:wifi-test q 2>&1; }
+run() { limactl shell --workdir "$root" starbite flock /var/tmp/sbvm-heavy.lock env SBOS_HOST_DUMPLOG=1 ${NET:+"SBOS_HOST_WIFINET=$NET"} "$out/sbos-host" "$out" /dev/null "$@" s:wifi-test q 2>&1; }
 want() { if echo "$1" | grep -q -- "$2"; then echo "ok: $3"; else echo "FAIL: $3 ($2)"; fails=$((fails + 1)); fi; }
 nowant() { if echo "$1" | grep -q -- "$2"; then echo "FAIL: $3 ($2)"; fails=$((fails + 1)); else echo "ok: $3"; fi; }
 NET=
@@ -43,7 +43,7 @@ want "$d" "joining it automatically" "auto: the saved network joined without a t
 want "$d" "THE NETWORK IS JOINED" "auto: the WPA2 handshake"
 want "$d" "wifi: an address from DHCP" "auto: DHCP"
 nowant "$d" "correct horse\|test-ap" "auto: no name or passphrase logged"
-KNOWN="t:720,1184 w:500"; AUTO="t:720,624 w:400"; DONE="h:b:900 w:300 t:1057,1738 w:600"   # Back: home, Wi-Fi again
+KNOWN="t:720,1184 w:500"; AUTO="t:720,624 w:400"; DONE="h:b:900 w:300 t:1057,1542 w:600"   # Back: home, Wi-Fi again
 e=$(run $OPEN $KNOWN $AUTO $DONE $ON w:9000)
 want "$e" "settings: Wi-Fi never joins by itself" "auto off: the switch"
 nowant "$e" "joining it automatically" "auto off: no join by itself"
