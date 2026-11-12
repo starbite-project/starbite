@@ -2048,12 +2048,14 @@ typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
 static const char *const FILM_NAME[11] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "sleep" };
 /* tools/films.txt's scripts (pt, ms) */
 static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 1300 } };
-/* B9: the Systems tiles (centres x 47 + 74 g, y 336): Apple opens and closes, Linux opens, Starbite takes its place,
- * its first row (Starbite OS, "You are in Starbite OS"); Microsoft's Windows 11 row (y 420) opens the focus sheet */
-static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 47, 336, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 47, 336, 0, 0, 80 },
-                                { 0, 0, 0, 0, 0, 900 }, { 1, 269, 336, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 343, 336, 0, 0, 80 },
-                                { 0, 0, 0, 0, 0, 1200 }, { 1, 195, 420, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1800 } };
-static const step S_FOCUS[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 121, 336, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 195, 420, 0, 0, 80 },
+/* B10: the vendor cards again (B4's list from y 320: Apple 320, Microsoft 413, Google 491, Linux 584, Starbite 677):
+ * Apple opens (its head 36 lower, "Show less" above it at x >= 285), "Show less" folds it, the list scrolls to its
+ * end, Starbite opens (and scrolls into view), its first row (Starbite OS, "You are in Starbite OS"). The focus film:
+ * Microsoft opens, its Windows 11 row (525..593) opens the focus sheet, the slide starts it */
+static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 354, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 330, 334, 0, 0, 80 },
+                                { 0, 0, 0, 0, 0, 900 }, { 2, 200, 650, 200, 380, 250 }, { 0, 0, 0, 0, 0, 1200 }, { 1, 195, 578, 0, 0, 80 },
+                                { 0, 0, 0, 0, 0, 1800 }, { 1, 195, 464, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };
+static const step S_FOCUS[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 444, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 195, 559, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 1000 }, { 2, 65, 743, 345, 743, 550 }, { 0, 0, 0, 0, 0, 2600 } };
 static const step S_HOLDS[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 71, 727, 0, 0, 650 }, { 0, 0, 0, 0, 0, 700 }, { 3, 319, 727, 0, 0, 950 },
                                 { 0, 0, 0, 0, 0, 900 } };
