@@ -32,6 +32,9 @@
 #ifdef SB_HOST
 #include <stdlib.h>
 #endif
+#ifdef SBOS_SELFTEST_NEXT_DRV
+#include "drvprobe.h"
+#endif
 
 #ifdef SBOS_SELFTEST_ON
 const int sbos_selftest_enabled = 1;
@@ -289,6 +292,24 @@ void selftest_timer(unsigned id)
                         "selftest: next-linux: the watchdog could not be set (the loader's stays): ", w);
             phase = 97;
             kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
+#ifdef SBOS_SELFTEST_NEXT_DRV
+        {
+            /* Drivers track (docs/STARBITE-OS-DRIVERS.md, kern/drvprobe.c): every driver probe at level 0 (read-only),
+             * then level 1 (active, silent, put back), and in the attended image level 2; then recovery (pmsg). The
+             * watchdog at 60 s, fed by the loop; each probe has its own budget; the whole run at most 600 s. */
+            unsigned w = hw_wdt_selftest(60);
+            sb_logx(w ? "selftest: drivers: the watchdog at 60 s, fed by the loop: seconds " :
+                        "selftest: drivers: the watchdog could not be set (the loader's stays): ", w);
+#ifdef SBOS_SELFTEST_NEXT_DRV_ATTENDED
+            drv_run_begin(1);
+#else
+            drv_run_begin(0);
+#endif
+            phase = 85;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
             return;
         }
 #endif
@@ -752,6 +773,30 @@ void selftest_timer(unsigned id)
     }
     case 94:
         active = 0;
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_NEXT_DRV
+    case 85: {
+        unsigned w = 0;
+        int done = drv_run_step(&w);
+        if (!done && sb_ms() - t0 > 600000U) {
+            drv_run_abort();
+            sb_log("selftest: drivers: FAILED: not done within 600 s (the running probe put back)");
+            done = 1;
+        }
+        if (!done) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), w ? w : 1, 0);
+            return;
+        }
+        sb_logx("selftest: drivers: finished; a restart into recovery (pmsg) after seconds ", (sb_ms() - t0) / 1000U);
+        phase = 86;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
+        return;
+    }
+    case 86:
+        active = 0;
+        drv_run_abort();
         power_restart_recovery();
         return;
 #endif

@@ -41,4 +41,9 @@ struct drv_probe {
 extern const struct drv_probe drv_probes[];
 extern const unsigned drv_nprobes;
 
+/* The runner (drvprobe.c): level 0 for every probe, then level 1, then (attended) level 2. */
+void drv_run_begin(int attended);
+int drv_run_step(unsigned *wait_ms);        /* 0: again after *wait_ms; 1: all done */
+void drv_run_abort(void);
+
 #endif

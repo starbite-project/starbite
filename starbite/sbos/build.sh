@@ -238,6 +238,11 @@ if [ -n "$PAK" ]; then
     # L2: Next with the Linux self test (the Terminal, foot on the M3 cores, a typed command; then recovery)
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_LINUX "$here/kern/uitest.c" -o "$ob/k_uitest_nlinux.o"
     nlobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_nlinux.o#")
+    # drivers track: every driver probe (read-only, then active-silent), then recovery; and the attended one (level 2)
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_DRV "$here/kern/uitest.c" -o "$ob/k_uitest_ndrv.o"
+    ndobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrv.o#")
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_DRV -DSBOS_SELFTEST_NEXT_DRV_ATTENDED "$here/kern/uitest.c" -o "$ob/k_uitest_ndrva.o"
+    ndaobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrva.o#")
 else
     echo "sbos: no build/sbtk/sbtk-phone.pak: the starbite-next images are not built" >&2
 fi
@@ -349,8 +354,9 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
 "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
 if [ -n "$nobjs" ]; then
-    for v in next next-selftest next-wifitest next-linuxtest; do
-        case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;; *) vo=$nwobjs ;; esac
+    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended; do
+        case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;;
+        next-drvprobe) vo=$ndobjs ;; next-drvattended) vo=$ndaobjs ;; *) vo=$nwobjs ;; esac
         "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
         und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)
         if [ -n "$und" ]; then
