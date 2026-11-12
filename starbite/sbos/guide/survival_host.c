@@ -250,3 +250,5 @@ int surv_usb_fire_start(void)
 }
 void surv_usb_hold(void) { fire_hold = surv_host_now_ms; }
 int surv_usb_active(void) { return st == SURV_USB_ON; }
+
+int surv_sensors_on_mask(unsigned mask) { (void)mask; return surv_sensors_on(1); }

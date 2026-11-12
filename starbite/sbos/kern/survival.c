@@ -942,28 +942,46 @@ int surv_last2_battery(int pct, int avg_mv, int charger)
 #define SHUB_IDLE_MS 60000U
 static uint64_t shub_last_use;
 static int shub_on;
+static unsigned shub_mask;                  /* the SHUB_SENS_* the running hub was started with */
+
+/* 1.2-alpha29 (the drivers track's ask): the hub with only the SHUB_SENS_* sensors asked for (0: none, e.g. the call
+ * screen, which adds proximity itself). A caller wanting a sensor the running hub lacks restarts it with both sets
+ * (about 4 s); everything else as surv_sensors_on */
+int surv_sensors_on_mask(unsigned mask)
+{
+    if (saver_applied)
+        return -1;
+    shub_last_use = sb_ms();
+    mask &= SHUB_SENS_ALL;
+    if (shub_on && shub_state() != SHUB_FAILED) {
+        if ((shub_mask | mask) == shub_mask)
+            return 0;
+        shub_leave();                       /* a sensor more: start again with both sets */
+        shub_mask |= mask;
+    } else {
+        shub_mask = mask;
+    }
+    shub_on = 1;
+    shub_begin_ex(0, shub_mask);
+    sb_log(shub_mask == SHUB_SENS_ALL ? "survival: the sensor hub starting (compass, level, steps)" :
+                                        "survival: the sensor hub starting (only some sensors)");
+    kt_set(KT_SURV, KT_SURV_SHUB, sb_ms(), 20, 0);
+    return 0;
+}
 
 int surv_sensors_on(int on)
 {
     if (!on) {
         if (shub_on) {
             shub_on = 0;
+            shub_mask = 0;
             kt_cancel(KT_SURV, KT_SURV_SHUB);
             shub_leave();
             sb_log("survival: the sensor hub off");
         }
         return 0;
     }
-    if (saver_applied)
-        return -1;
-    shub_last_use = sb_ms();
-    if (shub_on && shub_state() != SHUB_FAILED)
-        return 0;
-    shub_on = 1;
-    shub_begin(0);
-    sb_log("survival: the sensor hub starting (compass, level, steps)");
-    kt_set(KT_SURV, KT_SURV_SHUB, sb_ms(), 20, 0);
-    return 0;
+    return surv_sensors_on_mask(SHUB_SENS_ALL);
 }
 
 int surv_sensors_state(void)

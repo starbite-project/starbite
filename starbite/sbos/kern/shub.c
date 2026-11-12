@@ -233,6 +233,7 @@ static struct {
     unsigned dl_off, dl_recs;
     uint64_t dl_t0;
     int ssp_i, ssp_tries;
+    unsigned mask;                          /* drivers track: SHUB_SENS_* started at bring-up */
     int pass;                               /* the probe: the ASIC id was read */
 } M;
 
@@ -280,6 +281,12 @@ static struct {
     uint64_t t_a, t_m;
     uint32_t na, nm, ns, steps, other;
 } D;
+
+static struct {                             /* drivers track: shub_more.c's hooks (shub_set_hooks) */
+    shub_sample_fn sample;
+    void (*poll)(void);
+    unsigned starts;                        /* how many times the hub reached "running" */
+} X;
 
 static void fail(const char *why)
 {
@@ -442,6 +449,8 @@ static void sample(const struct shp_rec *r)
         ++D.ns;
     } else {
         ++D.other;
+        if (X.sample)
+            X.sample(r->sensor, r->raw, r->raw_len, r->ts);
     }
 }
 
@@ -1079,6 +1088,13 @@ void shub_leave(void)
 /* ---- the bring-up --------------------------------------------------------------------------------------------- */
 void shub_begin(int probe_only)
 {
+    shub_begin_ex(probe_only, SHUB_SENS_ALL);
+}
+
+/* drivers track: the same bring-up with only the SHUB_SENS_* sensors in mask added at the end (0: none, e.g. a call
+ * that needs only proximity, which shub_more.c adds with shub_enable_type) */
+void shub_begin_ex(int probe_only, unsigned mask)
+{
     if (F.clocks || F.pins || F.nstdby)
         shub_leave();                       /* (a second start: the first one's registers back first) */
     memset(&M, 0, sizeof(M));
@@ -1089,6 +1105,7 @@ void shub_begin(int probe_only)
     shp_rx_init(&L.rx);
     shp_ssp_rx_init(&SR);
     M.probe = probe_only;
+    M.mask = mask & SHUB_SENS_ALL;
     M.verbose = probe_only;
     M.st = ST_LOOK;
     M.state = SHUB_STARTING;
@@ -1529,11 +1546,15 @@ int shub_step(void)
         return 0;
     case ST_SSP:
         if (!C.busy) {
+            while (M.ssp_i >= 5 && M.ssp_i < SSP_STEPS && !(M.mask & (1U << (M.ssp_i - 5))))
+                ++M.ssp_i;                  /* drivers track: a sensor left out of shub_begin_ex's mask */
             if (M.ssp_i >= SSP_STEPS) {
                 M.state = SHUB_RUNNING;
                 M.why = "running";
                 M.st = ST_RUN;
-                sb_log("shub: running: accelerometer, magnetometer and step counter on (100 ms)");
+                ++X.starts;                 /* drivers track: shub_more.c turns its sensors on again */
+                sb_log(M.mask == SHUB_SENS_ALL ? "shub: running: accelerometer, magnetometer and step counter on (100 ms)" :
+                       "shub: running, with only some of accelerometer / magnetometer / steps (shub_begin_ex's mask)");
                 return 1;
             }
             if (!ssp_begin(M.ssp_i)) {
@@ -1580,6 +1601,55 @@ void shub_poll(void)
     if (sb_ms() - L.t_read > 200U)
         (void)ssi_read();                   /* (should HOST_REQ not work as read: never deaf for long) */
     link_service();
+    if (C.busy && (C.done || sb_ms() - C.t > 1000U)) {     /* drivers track: shub_enable_type's request ended */
+        if (!C.done)
+            sb_logx("shub: SSP: no echo in 1 s for the enable / disable of sensor ", C.data[0]);
+        C.busy = 0;
+    }
+    if (X.poll)
+        X.poll();
+}
+
+/* ---- drivers track: more sensors (shub.h; shub_more.c) -------------------------------------------------------- */
+void shub_set_hooks(shub_sample_fn sample, void (*poll)(void))
+{
+    X.sample = sample;
+    X.poll = poll;
+}
+
+unsigned shub_starts(void)
+{
+    return X.starts;
+}
+
+int shub_enable_type(unsigned type, unsigned period_ms, int on)
+{
+    uint8_t h[SSP_HDR], w[32];
+    if (M.state != SHUB_RUNNING || M.st != ST_RUN || C.busy || type > 63U || period_ms > 100000U)
+        return -1;
+    if (on) {
+        C.cmd = SSP_CMD_ADD;
+        shp_ssp_enable(C.data, (uint8_t)type, (int32_t)period_ms, 0, 0);
+        C.dlen = 10;
+    } else {
+        C.cmd = SSP_CMD_REMOVE;             /* Samsung's disable_sensor: [type][s32 the period it ran at] */
+        C.data[0] = (uint8_t)type;
+        for (int b = 0; b < 4; ++b)
+            C.data[1 + b] = (uint8_t)(period_ms >> (8 * b));
+        C.dlen = 5;
+    }
+    C.busy = 1;
+    C.done = C.go = 0;
+    C.type = SSP_WRITE;
+    C.rlen = 0;
+    C.t = sb_ms();
+    shp_ssp_hdr(h, C.cmd, (uint16_t)C.dlen, SSP_WRITE, 0);
+    unsigned k = shp_ssp_wrap(w, sizeof(w), h, SSP_HDR);
+    if (!k || !plain_send(w, k)) {
+        C.busy = 0;
+        return -1;
+    }
+    return 0;
 }
 
 /* ---- the kernel API (survival.h, "sensors") ------------------------------------------------------------------- */

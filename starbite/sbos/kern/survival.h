@@ -136,6 +136,7 @@ const char *surv_sensors_why(void);
  * shown: it stops 60 s after the last call, at Last 2 % (refused: -1) and before a restart. 0 stops it now.
  * surv_sensors_state(): SHUB_OFF / _STARTING / _RUNNING / _FAILED (shub.h). Samples come at 10 Hz. */
 int surv_sensors_on(int on);
+int surv_sensors_on_mask(unsigned mask);           /* only the SHUB_SENS_* asked for (shub.h); else as surv_sensors_on */
 int surv_sensors_state(void);
 
 /* ---- the kernel ---- */
