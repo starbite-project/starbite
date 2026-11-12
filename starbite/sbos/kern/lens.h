@@ -168,15 +168,43 @@ static inline void lens_saturate(float rgb[3], float k)
     float Y = .2126f * rgb[0] + .7152f * rgb[1] + .0722f * rgb[2];
     for (int c = 0; c < 3; ++c) rgb[c] = lens_sat(Y + (rgb[c] - Y) * k);
 }
+/* 1.0 (glass V2): the tone as parameters: c = k c + a0 + a1 sat((Y - .40) x 10). Regular glass is .82 / .04 / .14
+ * (the audit's spec); iOS 26's clear glass is less frosted (.90 / .02 / .08); a press adds a glow to a0. A tint is
+ * not here: it is a colour layer over the glass (the lens quad's solid, premultiplied). The shader reads k, a0, a1
+ * from the quad (comp2, flag 256: +152, +156, +120). */
+typedef struct { float k, a0, a1; } lens_tone;
+static inline lens_tone lens_tone_of(int variant, float press)
+{
+    lens_tone t = variant ? (lens_tone){ .90f, .02f, .08f } : (lens_tone){ .82f, .04f, .14f };
+    t.a0 += .10f * lens_sat(press);
+    return t;
+}
+static inline void lens_shade_t(float rgb[3], float e, lens_tone t)
+{
+    float Y = .2126f * rgb[0] + .7152f * rgb[1] + .0722f * rgb[2];
+    float add = t.a0 + t.a1 * lens_sat((Y - .40f) * 10);
+    for (int c = 0; c < 3; ++c) {
+        float v = rgb[c] * t.k + add;
+        rgb[c] = e > 0 ? v + (1 - v) * e : v * (1 + e);
+    }
+}
 /* rgb: the refracted backdrop, 0..1; shaded in place (the shader does exactly these steps: comp2, flag 256) */
 static inline void lens_shade(float rgb[3], float e)
 {
-    float Y = .2126f * rgb[0] + .7152f * rgb[1] + .0722f * rgb[2];
-    float add = lens_mix(.04f, .18f, lens_sat((Y - .40f) * 10));
-    for (int c = 0; c < 3; ++c) {
-        float v = rgb[c] * .82f + add;
-        rgb[c] = e > 0 ? v + (1 - v) * e : v * (1 + e);
-    }
+    lens_shade_t(rgb, e, lens_tone_of(0, 0));
+}
+/* the tint (ARGB, straight alpha) as a colour layer over shaded glass */
+static inline void lens_tint(float rgb[3], uint32_t argb)
+{
+    float a = (float)(argb >> 24) * (1.0f / 255);
+    for (int c = 0; c < 3; ++c) rgb[c] += ((float)(argb >> (16 - 8 * c) & 255) * (1.0f / 255) - rgb[c]) * a;
+}
+/* the premultiplied solid the GPU draws for a tint */
+static inline uint32_t lens_tint_pm(uint32_t argb)
+{
+    uint32_t a = argb >> 24, o = a << 24;
+    for (int c = 0; c < 3; ++c) o |= ((argb >> (16 - 8 * c) & 255) * a + 127) / 255 << (16 - 8 * c);
+    return o;
 }
 /* the same over a premultiplied backdrop with alpha (glass baked into a layer over its own content, which may be
  * transparent): the tone as a black layer of .18 and a white one of add, the light as a white or black layer; for
