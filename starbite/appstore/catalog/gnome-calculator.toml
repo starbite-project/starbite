@@ -1,0 +1,30 @@
+id = "gnome-calculator"
+name = "Calculator"
+summary = "Basic, scientific and financial calculator"
+description = """GNOME Calculator does everyday sums, scientific and programming calculations, and unit and currency conversion."""
+category = "Utilities"
+licence = "GPL-3.0-or-later"
+homepage = "https://apps.gnome.org/Calculator/"
+icon = "org.gnome.Calculator"
+ram_mb = 70
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["calculator", "math", "units", "currency"]
+
+[launcher]
+exec = "gnome-calculator"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["gnome-calculator"]
+
+[runtime]
+note = "Currency rates need the network."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 8
+build_mb = 900

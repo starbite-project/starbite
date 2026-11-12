@@ -1,0 +1,39 @@
+id = "transmission"
+name = "Transmission"
+summary = "A fast, simple BitTorrent client"
+description = """Transmission downloads and seeds torrents with a small GTK interface. Debian ships 4.1.0 beta 2; the source method builds the latest stable release (GTK 4 client only)."""
+category = "Internet"
+licence = "GPL-2.0-only OR GPL-3.0-only"
+homepage = "https://transmissionbt.com"
+icon = "transmission"
+ram_mb = 90
+featured = false
+default = "distro"
+touch = "ok"
+keywords = ["torrent", "bittorrent", "download", "p2p"]
+
+[launcher]
+exec = "transmission-gtk"
+terminal = false
+keyboard = false
+
+# the release tarball (not GitHub's archive) carries the bundled third-party submodules
+[source]
+tarball = "https://github.com/transmission/transmission/releases/download/{tag}/transmission-{tag}.tar.xz"
+ref = "release"
+repo = "transmission/transmission"
+provider = "github"
+system = "cmake"
+build_deps = ["build-essential", "cmake", "ninja-build", "pkgconf", "gettext", "libcurl4-openssl-dev", "libssl-dev", "libevent-dev", "libgtkmm-4.0-dev", "libglibmm-2.68-dev", "libdeflate-dev", "libpsl-dev", "libminiupnpc-dev", "libnatpmp-dev", "libsystemd-dev", "libfmt-dev", "libfast-float-dev", "libutfcpp-dev", "rapidjson-dev", "zlib1g-dev"]
+options = ["-DCMAKE_BUILD_TYPE=Release", "-DENABLE_GTK=ON", "-DUSE_GTK_VERSION=4", "-DENABLE_QT=OFF", "-DENABLE_DAEMON=OFF", "-DENABLE_CLI=OFF", "-DENABLE_TESTS=OFF", "-DINSTALL_DOC=OFF"]
+bin = ["bin/transmission-gtk"]
+build_min = 25
+build_mb = 900
+
+[distro]
+apt = ["transmission-gtk"]
+
+[runtime]
+apt = ["libgtkmm-4.0-0", "libglibmm-2.68-1t64", "libcurl4t64", "libevent-2.1-7t64", "libdeflate0", "libpsl5t64", "libminiupnpc18", "libnatpmp1t64"]
+needs = ["network", "files"]
+note = "Upstream publishes no Linux binaries. Source build is about 25 minutes on the four cores."

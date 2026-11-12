@@ -14,6 +14,7 @@
  *     drawn here as the concept's first home page without its behaviour (a placeholder: home is P2).
  * Layers are drawn once (bake) and then only moved, faded and clipped by the compositor. */
 #include "shell.h"
+#include "sbtk_colors.h"                            /* GAP-LIST #1: the system palette (iOS 26 dark) */
 
 #define H_PT TK_HPT
 static tk_comp *C;
@@ -321,7 +322,7 @@ static void status_bar(dc *d, const char *left)
      * less, green while charging, the nub) */
     float fw = 21.0f * tk_clampf(ST.pct / 100.0f, .04f, 1);
     d_rrect(d, bx, by, 25, 12, 3.6f, W(.35f));
-    d_rrect(d, bx + 2, by + 2, fw, 8, 2, ST.pct <= 20 && !SYS_CHARGING() ? tk_hex(0xff453a, 1) : SYS_CHARGING() ? tk_hex(0x34c759, 1) : W(1));
+    d_rrect(d, bx + 2, by + 2, fw, 8, 2, ST.pct <= 20 && !SYS_CHARGING() ? C_RED : SYS_CHARGING() ? C_GREEN : W(1));
     d_rrect(d, bx + 26, by + 4, 1.6f, 4, .8f, W(.4f));
 }
 
@@ -453,7 +454,7 @@ static void rect_widget(dc *d, const char *glyph, const char *label, const char 
     if (glyph) { d_icon(d, glyph, x, 225, 1); x += 15; }
     d_text_box(d, TK_IT600, 15, x, 235, 275 - x, 0, label, 0, 0, W(.7f), 0);
     d_text_box(d, TK_IT600, 30, 122, 266, 150, 0, value, 0, TK_TNUM, INK, 0);
-    d_text_box(d, TK_IT400, 13, 123, 285, 150, 0, sub, 0, 0, W(.6f), 0);
+    d_text_box(d, TK_IT400, 13, 123, 285, 150, 0, sub, 0, 0, C_LABEL2, 0);
 }
 static void build_lwidgets(void)
 {
@@ -472,10 +473,10 @@ static void build_lwidgets(void)
         trim(&lwidgets);
         return;
     }
-    ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), tk_hex(0x4cd964, 1), num, "BATTERY");
+    ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), C_GREEN, num, "BATTERY");
     int n = put_dec(num, ST.temp);
     num[n] = (char)0xc2; num[n + 1] = (char)0xb0; num[n + 2] = 0;
-    ring_widget(&d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), tk_hex(0x6fb3ff, 1), num, "TEMP");
+    ring_widget(&d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), C_ACCENT, num, "TEMP");
     char at[16] = "Off";                       /* P2y: the kernel's next alarm (sh_alarm), not the concept's */
     if (ALM.on) fmt_time(at, ALM.h, ALM.m, 1);    /* Track A: "7:00 AM" in 12-hour time */
     alm_when = !ALM.on ? 0 : ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? 1 : 2;
@@ -637,7 +638,7 @@ static void head_content(dc *d, int g, float top)
     em[3] = (char)('0' + gr->n);
     if (gr->n > 1) { em[11] = 's'; em[12] = 0; }
     float sb = base_of(TK_IT400, 13.5f, top + 38.55f, 0);
-    d_rrect(d, CARD_TX, sb - 7, 6, 6, 3, tk_hex(0x4cd964, 1));
+    d_rrect(d, CARD_TX, sb - 7, 6, 6, 3, C_GREEN);
     /* P3i: the chevron at one place on every card (iOS: a row's chevron never moves); the names give way with an
      * ellipsis so the count stays whole */
     K[g].chx = CARD_CHEV;
@@ -774,7 +775,7 @@ static void build_open(int g)
         if (tag) {
             float w = tw(TK_IT700, 10.5f, tag, .42f, 0) + 14;
             float tx = CARD_X + CARD_W - 20 - w, ty = ry + 18.5f;
-            d_rrect(&d, tx, ty, w, 19, 9.5f, s->self ? TK_RGBA(76, 217, 100, .18f) : TK_RGBA(111, 179, 255, .18f));
+            d_rrect(&d, tx, ty, w, 19, 9.5f, s->self ? sbca(SBC_GREEN, .18f) : sbca(SBC_ACCENT, .18f));
             d_text(&d, TK_IT700, 10.5f, tx + 7, ty + 3 + 10, tag, .42f, 0, s->self ? tk_hex(0xc9f7d3, 1) : tk_hex(0xcfe4ff, 1), 0);
         }
         tk_layer_add(&k->members, &k->rows[i]);
@@ -982,8 +983,8 @@ static void home_dots(int pg)
     lit = pg;
     int hid = hsearch[2].hidden;
     relayer(&hsearch[2]);
-    dc d = mk(&hsearch[2], "search-dots", 189.5f, 650.5f, 30, 6, 1, 0);
-    for (int j = 0; j < 3; j++) d_rrect(&d, 189.5f + 12 * j, 650.5f, 6, 6, 3, pg == j ? W(1) : W(.4f));
+    dc d = mk(&hsearch[2], "search-dots", 189.5f, 644, 30, 6, 1, 0);   /* B8: centred in the 24 pt pill at y 647 */
+    for (int j = 0; j < 3; j++) d_rrect(&d, 189.5f + 12 * j, 644, 6, 6, 3, pg == j ? W(1) : W(.4f));
     hsearch[2].hidden = hid;
     relink();
 }
@@ -996,6 +997,7 @@ static void lx_close(void);
 static int lx_tap(float x, float y);
 static int lx_touch(int ph, float x, float y);
 static int lx_moving(void);
+static int lx_tick(float dt);                   /* Track F: the App Store's scroll and page builds over frames */
 static int lx_layers(tk_layer **o);
 static int lx_set(const char *what, const char *key, float v);
 /* P3p: an app's 62 pt icon. Calendar shows today, as on iOS: the blank a62-calendar-bg with the weekday (red,
@@ -1062,7 +1064,17 @@ static void build_home_sb(void)
 #define HOME_TOP2 60.0f             /* page 2's grid */
 #define WID_X(i) ((i) ? 206.0f : 26.0f)
 #define WID_W 158.0f
-#define DOCK_Y 705.0f
+/* B8 (IOS-REFERENCE §9.2, measured): the dock's glass x 11..379, top 702, 88 tall (radius concentric, clamped to
+ * 24); its icons 12 below its top. The Search pill 78 x 24 centred on y 647 (the page dots in the same pill) */
+#define DOCK_X 11.0f
+#define DOCK_TOP 702.0f
+#define DOCK_H 88.0f
+#define DOCK_Y (DOCK_TOP + 12)
+#define SRCH_W 78.0f
+#define SRCH_H 24.0f
+#define SRCH_X (195 - SRCH_W / 2)
+#define SRCH_Y (647 - SRCH_H / 2)
+#define SRCH_HIT(x, y) ((y) >= SRCH_Y - 6 && (y) <= SRCH_Y + SRCH_H + 6 && (x) >= SRCH_X - 10 && (x) <= SRCH_X + SRCH_W + 10)
 static const char *const P2K[9] = { "contacts", "files", "light", "battery", "terminal", "browser", "medical", "sos", "maps" };   /* helper D: Maps in the free third row */
 static const char *const P2E[12] = { "heat", "power", "sos", "medical", "usb", "sun", "guide", "compass", "light", "battery", "contacts", "files" };
 #define NP2 (EMG ? 12 : 9)                  /* survival-next: Emergency's page 2 has a third row (the tools); helper D: Maps */
@@ -1126,10 +1138,10 @@ static void build_home_w(void)
         for (int i = 0; i < 4 && n < 4; i++) if (!LAST || tk_strcmp(T4[i], LAST)) rk[n++] = T4[i];
         for (int i = 0; i < 4; i++) d_systile(&d, rk[i], WID_X(1) + 16 + (i & 1) * (WID_W - 32 - 52), 74 + 14 + 9 + (i >> 1) * 60);
     }
-    float cw = tw(TK_IT500, 12, "Battery", 0, 0);
-    d_text(&d, TK_IT500, 12, WID_X(0) + WID_W / 2 - cw / 2, 224 + 12, "Battery", 0, 0, INK, 1);
-    cw = tw(TK_IT500, 12, "Systems", 0, 0);
-    d_text(&d, TK_IT500, 12, WID_X(1) + WID_W / 2 - cw / 2, 224 + 12, "Systems", 0, 0, INK, 1);
+    float cw = tw(TK_IT400, 12, "Battery", 0, 0);
+    d_text(&d, TK_IT400, 12, WID_X(0) + WID_W / 2 - cw / 2, 224 + 12, "Battery", 0, 0, INK, 1);
+    cw = tw(TK_IT400, 12, "Systems", 0, 0);
+    d_text(&d, TK_IT400, 12, WID_X(1) + WID_W / 2 - cw / 2, 224 + 12, "Systems", 0, 0, INK, 1);
     trim(&hparts[1]);
 }
 static void build_home_apps2(void)
@@ -1155,10 +1167,37 @@ static void build_home_apps2(void)
             char n[40] = "a62-";
             tk_memcpy(n + 4, P2[i], tk_strlen(P2[i]) + 1);
             if (!sv_tile(dd, P2[i], cx - 31, y, 62)) d_icon(dd, n, cx - 31, y, 1);
-            d_text_box(dd, TK_IT500, 12, cx, y + 68 + 12, 84, 1, P2N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
+            d_text_box(dd, TK_IT400, 12, cx, y + 68 + 12, 84, 1, P2N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
         }
         for (int k = 4; k <= 6; k += 2) { hparts[k].x = hparts[k].bx = hparts[k].x + PT(390); trim(&hparts[k]); }
     }
+}
+/* B8 (GAP-LIST #21): the dock's badges, iOS's: a red (#FF4245) 18 pt circle (wider for more digits) with the count
+ * 12 / 600, its top-right corner 5 pt out from the icon's. Only where a count exists: shell_comms.inc's cm_badge()
+ * (Phone: missed calls not yet seen in Recents; Messages: unread). Their own small layer over the dock, redrawn only
+ * when a count changes (from home's build and sh_idle: text and two discs, no glass), freed when there are none */
+static tk_layer hbadge;
+static int cm_badge(const char *k);
+static void home_badges(int force)
+{
+    static const char *const BK[2] = { "phone", "messages" };          /* the dock's columns 0 and 1 */
+    static int shown[2] = { -1, -1 };
+    int n[2] = { cm_badge(BK[0]), cm_badge(BK[1]) };
+    if (!force && n[0] == shown[0] && n[1] == shown[1]) return;
+    shown[0] = n[0]; shown[1] = n[1];
+    relayer(&hbadge);
+    if (!n[0] && !n[1]) { tk_layer_init(&hbadge, "home-badges"); hbadge.hidden = 1; relink(); return; }
+    dc d = mk(&hbadge, "home-badges", COL_CX(0) - ICON_PT / 2, DOCK_Y - 5, COL_CX(1) - COL_CX(0) + ICON_PT + 40, 18, 1, 0);
+    for (int i = 0; i < 2; i++) {
+        if (!n[i]) continue;
+        char b[8];
+        b[put_dec(b, tk_mini(n[i], 999))] = 0;
+        float w = tw(TK_IT600, 12, b, 0, TK_TNUM), bw = tk_maxf(18, w + 11), r = COL_CX(i) + ICON_PT / 2 + 5;
+        d_rrect(&d, r - bw, DOCK_Y - 5, bw, 18, 9, C_RED);
+        d_text(&d, TK_IT600, 12, r - bw / 2 - w / 2, base_of(TK_IT600, 12, DOCK_Y - 5, 18), b, 0, TK_TNUM, W(1), 0);
+    }
+    trim(&hbadge);
+    relink();
 }
 static void build_wclock(void);
 static void build_home(void)
@@ -1173,29 +1212,30 @@ static void build_home(void)
     for (int i = 0; i < 8; i++) {
         float cx = COL_CX(i % 4), y = HOME_TOP1 + ROW_PITCH * (i / 4);
         d_appicon(&d, P1[i], cx - 31, y);
-        d_text_box(&d, TK_IT500, 12, cx, y + 68 + 12, 84, 1, P1N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
+        d_text_box(&d, TK_IT400, 12, cx, y + 68 + 12, 84, 1, P1N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
     }
     build_home_apps2();
     build_wclock();                             /* helper D: page 1's Clock widget */
     lx_home();                                  /* L3: page 3, the Linux apps */
     /* the Search pill, four ways: the word (at rest on a page), the page dots (moving, one of three pages lit) */
     {
-        float sw = 15 + 13 + 6 + tw(TK_IT600, 13, "Search", 0, 0) + 15, sx = 195 - sw / 2;
-        d = mk(&hsearch[0], "search", sx, 640, sw, 30, 44, 1);
-        d_glass(&d, sx, 640, sw, 30, 15, 1, 1);
-        d_icon(&d, "search", sx + 15, 640 + 8.5f, 1);
-        d_text(&d, TK_IT600, 13, sx + 34, 640 + 7 + 13, "Search", 0, 0, INK, 1);
+        /* B8 (§9.2): one 78 x 24 capsule, the glyph and the word centred in it */
+        float cw = 13 + 5 + tw(TK_IT600, 13, "Search", 0, 0), cx0 = 195 - cw / 2;
+        d = mk(&hsearch[0], "search", SRCH_X, SRCH_Y, SRCH_W, SRCH_H, 44, 1);
+        d_glass(&d, SRCH_X, SRCH_Y, SRCH_W, SRCH_H, SRCH_H / 2, 1, 1);
+        d_icon(&d, "search", cx0, 647 - 6.5f, 1);
+        d_text(&d, TK_IT600, 13, cx0 + 18, base_of(TK_IT600, 13, SRCH_Y, SRCH_H), "Search", 0, 0, INK, 1);
         /* L3: one pill for the dots and a small layer of the three dots over it (home_dots: the lit one follows the
          * page), not a pill per page */
-        d = mk(&hsearch[1], "search-pill", 155.5f, 640, 79, 27, 44, 1);
-        d_glass(&d, 155.5f, 640, 79, 27, 13.5f, 1, 1);
-        d_icon(&d, "search", 155.5f + 15, 640 + 7, 1);
+        d = mk(&hsearch[1], "search-pill", SRCH_X, SRCH_Y, SRCH_W, SRCH_H, 44, 1);
+        d_glass(&d, SRCH_X, SRCH_Y, SRCH_W, SRCH_H, SRCH_H / 2, 1, 1);
+        d_icon(&d, "search", SRCH_X + 14.5f, 647 - 6.5f, 1);
         for (int k = 0; k < 2; k++) tk_a8_free(&hsearch[k].glass);
         home_dots(0);
         hsearch[1].hidden = hsearch[2].hidden = 1;
     }
     d = mk(&hparts[3], "home-dock", 0, 650, 390, 152, 0, 1);
-    d_glass(&d, MARGIN, 688, CONTENT_W, 96, CONCENTRIC(MARGIN), 0, 1);   /* P3p: off the curved edges, concentric */
+    d_glass(&d, DOCK_X, DOCK_TOP, 390 - 2 * DOCK_X, DOCK_H, CONCENTRIC(DOCK_X), 0, 1);   /* B8 (§9.2): iOS's inset 11, concentric */
     for (int i = 0; i < 4; i++) {
         float x = COL_CX(i) - ICON_PT / 2;
         char n[40] = "a62-";
@@ -1208,13 +1248,8 @@ static void build_home(void)
             if (ic && tk_bmp_new(&dockbg[i], ic->w, ic->h)) tk_bmp_copy(&dockbg[i], 0, 0, d.b, X, Y, ic->w, ic->h);
         }
         d_icon(&d, n, x, DOCK_Y, 1);
-        if (0) {                                   /* P2y: no badges (no calls or messages to count) */
-            const char *bn = i ? "2" : "1";
-            float bw = tk_maxf(20, tw(TK_IT700, 12, bn, 0, 0) + 10);
-            d_rrect(&d, x + 60 - bw, 699, bw, 20, 10, tk_hex(0xff3b30, 1));
-            d_text(&d, TK_IT700, 12, x + 60 - bw / 2 - tw(TK_IT700, 12, bn, 0, 0) / 2, base_of(TK_IT700, 12, 699, 20), bn, 0, 0, INK, 0);
-        }
     }
+    home_badges(1);                              /* B8 (GAP #21): Phone's missed calls, Messages' unread */
     /* the parts stay separate layers under one group (they do not overlap, so the group's opacity per part is
      * exact); #home has will-change: opacity, a backdrop root in Chrome: its glass shows no wallpaper blur. v6:
      * Liquid Glass refracts the wallpaper under the widgets, the dock and the Search pill (from their shapes:
@@ -1357,7 +1392,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         for (int i = 0; i < nf; i++) dtw = tk_maxf(dtw, tw(TK_IT400, 14.5f, dt[i], 0, 0));
         for (int i = 0; i < nf; i++) {
             float b = FOC_Y + 102 + 24 * i + 14;
-            d_text(&d, TK_IT400, 14.5f, SL_X, b, dt[i], 0, 0, W(.55f), 0);
+            d_text(&d, TK_IT400, 14.5f, SL_X, b, dt[i], 0, 0, C_LABEL2, 0);
             d_text_box(&d, TK_IT400, 14.5f, SL_X + dtw + 14, b, SL_W - dtw - 14, 0, dd[i], 0, TK_TNUM, INK, 0);
         }
         sy = slider_y(nf);
@@ -1372,7 +1407,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     relayer(&ffill);
     focus_sy = sy;
     dc f = mk(&ffill, "fill", SL_X, sy, 62, 62, 1, 0);
-    d_rrect(&f, SL_X, sy, 62, 62, 31, TK_RGBA(111, 179, 255, .28f));
+    d_rrect(&f, SL_X, sy, 62, 62, 31, sbca(SBC_ACCENT, .28f));
     ffill.slice = 2;
     ffill.slice_s0 = PT(32);
     ffill.slice_s1 = PT(32);
@@ -1937,7 +1972,7 @@ __attribute__((unused)) static void d_lg_app(dc *d, float x, float y, float w, f
     int X = (int)tk_floorf(bx), Y = (int)tk_floorf(by), Wd = (int)(bx + PT(w) + .999f) - X, Hd = (int)(by + PT(h) + .999f) - Y;
     tk_bmp t;
     if (!tk_bmp_new(&t, Wd, Hd)) return;
-    tk_fill_rect_raw(&t, 0, 0, Wd, Hd, 0xff0a0f1fu);
+    tk_fill_rect_raw(&t, 0, 0, Wd, Hd, sbc_argb(SBC_GROUND));
     tk_blit(&t, d->b, -X, -Y, 1);
     tk_bmp_blur_sat(&t, PT(14), TK_GLASS_SAT, TK_GLASS_BRIGHT);
     tk_glass_local_put(d->b, &t, X, Y, bx, by, PT(w), PT(h), PT(r));
@@ -1949,7 +1984,7 @@ __attribute__((unused)) static void d_lg_app(dc *d, float x, float y, float w, f
 static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int dark)
 {
     tk_bmp g;
-    uint32_t c = 0xff0a0f1fu;
+    uint32_t c = sbc_argb(SBC_GROUND);
     if (tk_bmp_new(&g, 1, 1)) {
         g.px[0] = c;
         tk_bmp_satbright(&g, TK_GLASS_SAT, TK_GLASS_BRIGHT);
@@ -2022,7 +2057,7 @@ static void d_navtitle(dc *d, const char *t)
     d_text_box(d, TK_IT600, 17, 195, NAV_BASE, 390 - 2 * (BACK_X + BACK_D + 10), 1, t, 0, 0, INK, 0);
 }
 static void d_h1(dc *d, const char *t) { d_text_box(d, TK_IT700, 34, MARGIN, LARGE_BASE, CONTENT_W, 0, t, 0, 0, INK, 0); }   /* P3j: iOS's Large Title, Bold; P3p: in its row */
-static tk_col ACCENT(void) { return tk_hex(0x6fb3ff, 1); }
+static tk_col ACCENT(void) { return C_ACCENT; }
 /* a .row with an avatar: the name, an optional second line, the right-hand text, an optional unread dot */
 __attribute__((unused)) static float d_prow(dc *d, float y, const char *name, int nfw, tk_col nc, const char *sub, const char *right, int dot, int last)
 {
@@ -2036,17 +2071,17 @@ __attribute__((unused)) static float d_prow(dc *d, float y, const char *name, in
         char e[96];
         float avail = 358 - 78 - (rw > 0 ? rw + 10 : 0);
         ellipsize(e, sizeof e, TK_IT400, 13.5f, sub, tk_minf(230, avail));
-        d_text(d, TK_IT400, 13.5f, 78, bl(TK_IT400, 13.5f, y + 33), e, 0, 0, W(.55f), 0);
+        d_text(d, TK_IT400, 13.5f, 78, bl(TK_IT400, 13.5f, y + 33), e, 0, 0, C_LABEL2, 0);
     }
     if (rw > 0) {
         float rx = 358 - rw, rb = bl(TK_IT400, 16, y + 13 + (who - 20) / 2);
-        d_text(d, TK_IT400, 16, rx, rb, right, 0, TK_TNUM, W(.55f), 0);
-        if (dot) d_rrect(d, 358 - 9, rb - 9, 9, 9, 4.5f, tk_hex(0x2f7bf6, 1));
+        d_text(d, TK_IT400, 16, rx, rb, right, 0, TK_TNUM, C_LABEL2, 0);
+        if (dot) d_rrect(d, 358 - 9, rb - 9, 9, 9, 4.5f, C_ACCENT);
     }
-    if (!last) d_rrect(d, GROUP_X, y + rh, GROUP_W, 1, 0, W(.08f));
+    if (!last) d_rrect(d, GROUP_X, y + rh, GROUP_W, 1, 0, C_SEP);
     return rh + 1;
 }
-__attribute__((unused)) static void d_group(dc *d, float y, int n, int sub) { d_rrect(d, GROUP_X, y, GROUP_W, (sub ? 63.0f : 61.0f) * n - 1, 16, tk_hex(0x151c33, 1)); }
+__attribute__((unused)) static void d_group(dc *d, float y, int n, int sub) { d_rrect(d, GROUP_X, y, GROUP_W, (sub ? 63.0f : 61.0f) * n - 1, 16, C_CARD); }
 
 static const char *const KD[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#" };
 static const char *const KL[12] = { "", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ", "", "+", "" };
@@ -2067,7 +2102,7 @@ static void d_empty(dc *d, float area_top, float area_bot, const char *title, co
     d_text_box(d, TK_IT700, 22, 195, bl(TK_IT700, 22, top), CONTENT_W, 1, title, 0, 0, W(.9f), 0);
     for (int k = 0; k < n && k < 3; k++) {
         float lw = tw(TK_IT400, 15, ln[k], 0, 0);
-        d_text(d, TK_IT400, 15, (390 - lw) / 2, bl(TK_IT400, 15, top + 36 + 20 * k), ln[k], 0, 0, W(.5f), 0);
+        d_text(d, TK_IT400, 15, (390 - lw) / 2, bl(TK_IT400, 15, top + 36 + 20 * k), ln[k], 0, 0, C_LABEL2, 0);
     }
 }
 static void page_contacts(dc *d)
@@ -2158,9 +2193,9 @@ static void page_clock(dc *d)
     n += put_dec(dt + n, ST.day); dt[n++] = ' ';
     tk_memcpy(dt + n, mo, tk_strlen(mo) + 1);
     w = tw(TK_IT400, 15, dt, 0, 0);
-    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 192 + CLK_DY), dt, 0, 0, W(.55f), 0);
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 236 + CLK_DY), "STOPWATCH", .52f, 0, W(.55f), 0);
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 462 + CLK_DY), "TIMER", .52f, 0, W(.55f), 0);
+    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 192 + CLK_DY), dt, 0, 0, C_LABEL2, 0);
+    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 236 + CLK_DY), "STOPWATCH", .52f, 0, C_LABEL2, 0);
+    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 462 + CLK_DY), "TIMER", .52f, 0, C_LABEL2, 0);
 }
 static void clk_digits(tk_layer *l, float y, const char *txt, const char *sub)
 {
@@ -2170,7 +2205,7 @@ static void clk_digits(tk_layer *l, float y, const char *txt, const char *sub)
     d_text(&d, TK_IT400, 54, (390 - w) / 2, bl(TK_IT400, 54, y), txt, 0, TK_TNUM, INK, 0);
     if (sub && sub[0]) {
         w = tw(TK_IT400, 14, sub, 0, TK_TNUM);
-        d_text(&d, TK_IT400, 14, (390 - w) / 2, bl(TK_IT400, 14, y + 66), sub, 0, TK_TNUM, W(.55f), 0);
+        d_text(&d, TK_IT400, 14, (390 - w) / 2, bl(TK_IT400, 14, y + 66), sub, 0, TK_TNUM, C_LABEL2, 0);
     }
     l->hidden = 0;
 }
@@ -2312,7 +2347,7 @@ static void page_calc(dc *d)
         float x, y, w;
         calc_key_rect(i, &x, &y, &w);
         int fn = i < 3, op = (i % 4 == 3 && i < 16) || i == 18;
-        d_rrect(d, x, y, w, 78, 39, op ? tk_hex(0xff9f0a, 1) : fn ? tk_hex(0xa5a5a5, 1) : tk_hex(0x333333, 1));
+        d_rrect(d, x, y, w, 78, 39, op ? C_ORANGE : fn ? tk_hex(0xa5a5a5, 1) : tk_hex(0x333333, 1));
         float tw0 = tw(TK_IT500, 32, CK[i], 0, 0);
         float tx = i == 16 ? x + 31 : x + (78 - tw0) / 2;
         d_text(d, TK_IT500, 32, tx, bl(TK_IT500, 32, y + 19), CK[i], 0, 0, fn ? tk_hex(0x000000, 1) : INK, 0);
@@ -2446,13 +2481,13 @@ static void page_light(dc *d)
     d_h1(d, "Flashlight");
     int on = Q[0].lit;
     d_rrect(d, 135, 250, 120, 240, 34, on ? tk_hex(0xffffff, 1) : W(.16f));
-    d_rrect(d, 135, on ? 250 : 370, 120, 120, 34, on ? tk_hex(0xffd60a, 1) : W(.32f));
+    d_rrect(d, 135, on ? 250 : 370, 120, 120, 34, on ? C_YELLOW : W(.32f));
     const char *t = on ? "On" : "Off";
     float w = tw(TK_IT600, 20, t, 0, 0);
     d_text(d, TK_IT600, 20, (390 - w) / 2, bl(TK_IT600, 20, 520), t, 0, 0, INK, 0);
     const char *h = "Tap to turn the LED on or off";
     w = tw(TK_IT400, 15, h, 0, 0);
-    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 556), h, 0, 0, W(.5f), 0);
+    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 556), h, 0, 0, C_LABEL2, 0);
 }
 
 /* P3c: the Calendar: this month's grid (Monday first, as iOS in Finland), today in a red circle, from the phone's
@@ -2466,13 +2501,13 @@ static void page_calendar(dc *d)
     d_text(d, TK_IT700, 34, MARGIN, LARGE_BASE, mo, 0, 0, INK, 0);
     char yb[8];
     put_dec(yb, cal_year);
-    d_text(d, TK_IT600, 17, MARGIN + tw(TK_IT700, 34, mo, 0, 0) + 10, LARGE_BASE, yb, 0, 0, tk_hex(0xff453a, 1), 0);
+    d_text(d, TK_IT600, 17, MARGIN + tw(TK_IT700, 34, mo, 0, 0) + 10, LARGE_BASE, yb, 0, 0, C_RED, 0);
     static const char *const H[7] = { "M", "T", "W", "T", "F", "S", "S" };
     for (int c = 0; c < 7; c++) {
         float w = tw(TK_IT600, 13, H[c], 0, 0);
         d_text(d, TK_IT600, 13, 20 + 50 * c + (50 - w) / 2, bl(TK_IT600, 13, 122 + CAL_DY), H[c], 0, 0, W(c >= 5 ? .4f : .6f), 0);
     }
-    d_rrect(d, MARGIN, 146 + CAL_DY, CONTENT_W, .5f, 0, W(.15f));
+    d_rrect(d, MARGIN, 146 + CAL_DY, CONTENT_W, .5f, 0, C_SEP);
     static const int DIM[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
     int m = (ST.mon + 11) % 12, nd = DIM[m];
     if (m == 1 && ((cal_year % 4 == 0 && cal_year % 100 != 0) || cal_year % 400 == 0)) nd = 29;
@@ -2484,12 +2519,12 @@ static void page_calendar(dc *d)
         char b[4];
         put_dec(b, day);
         int today = day == ST.day;
-        if (today) d_rrect(d, cx - 19, cy - 19, 38, 38, 19, tk_hex(0xff453a, 1));
+        if (today) d_rrect(d, cx - 19, cy - 19, 38, 38, 19, C_RED);
         float w = tw(today ? TK_IT700 : TK_IT400, 20, b, 0, TK_TNUM);
-        d_text(d, today ? TK_IT700 : TK_IT400, 20, cx - w / 2, bl(TK_IT400, 20, cy - 13), b, 0, TK_TNUM, today || c < 5 ? INK : W(.5f), 0);
+        d_text(d, today ? TK_IT700 : TK_IT400, 20, cx - w / 2, bl(TK_IT400, 20, cy - 13), b, 0, TK_TNUM, today || c < 5 ? INK : C_LABEL2, 0);
     }
     float y = 160 + CAL_DY + 56 * 6 + 10;
-    d_rrect(d, MARGIN, y, CONTENT_W, .5f, 0, W(.15f));
+    d_rrect(d, MARGIN, y, CONTENT_W, .5f, 0, C_SEP);
     char dt[48];
     const char *wd = WD[ST.wday % 7];
     int n = (int)tk_strlen(wd);
@@ -2497,7 +2532,7 @@ static void page_calendar(dc *d)
     n += put_dec(dt + n, ST.day); dt[n++] = ' ';
     tk_memcpy(dt + n, mo, tk_strlen(mo) + 1);
     d_text(d, TK_IT600, 15, 20, bl(TK_IT600, 15, y + 18), dt, 0, 0, W(.85f), 0);
-    d_text(d, TK_IT400, 15, 20, bl(TK_IT400, 15, y + 46), "No events", 0, 0, W(.45f), 0);
+    d_text(d, TK_IT400, 15, 20, bl(TK_IT400, 15, y + 46), "No events", 0, 0, C_LABEL2, 0);
 }
 
 /* P3d: Settings > Display & Brightness: iOS's brightness bar (a tap sets the panel's level 1..4) */
@@ -2510,8 +2545,8 @@ static void page_display(dc *d)
      * and the bright sun, the group where the other Settings pages start theirs */
     d_back(d, W(1));
     d_navtitle(d, "Display & Brightness");
-    d_text(d, TK_IT400, 13, ROW_TX, DSP_Y - 10, "BRIGHTNESS", .52f, 0, W(.55f), 0);
-    d_rrect(d, GROUP_X, DSP_Y, GROUP_W, 64, 16, tk_hex(0x151c33, 1));
+    d_text(d, TK_IT400, 13, ROW_TX, DSP_Y - 10, "BRIGHTNESS", .52f, 0, C_LABEL2, 0);
+    d_rrect(d, GROUP_X, DSP_Y, GROUP_W, 64, 16, C_CARD);
     int lv = cc_bright ? cc_bright : 3;
     float kx = DSP_TX + DSP_TW * lv / 4, cy = DSP_Y + 32;
     d_rrect(d, DSP_TX, cy - 3, DSP_TW, 6, 3, W(.18f));
@@ -2521,7 +2556,7 @@ static void page_display(dc *d)
     d_rrect(d, kx - 14, cy - 14, 28, 28, 14, W(1));
     d_icon(d, "cc-sun", GROUP_X + 10, cy - 11, .5f);
     d_icon(d, "cc-sun", DSP_TX + DSP_TW + 8, cy - 11, 1);
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, DSP_Y + 64 + 8), "Four steps, as the Control Centre's slider.", 0, 0, W(.45f), 0);
+    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, DSP_Y + 64 + 8), "Four steps, as the Control Centre's slider.", 0, 0, C_LABEL2, 0);
 }
 
 /* ---- P3e: Notes with an iOS keyboard. The list (each note's first line), New, and the editor: the text with a
@@ -2640,7 +2675,7 @@ static void page_notes(dc *d)
         d_gcircle(d, GC_COMPOSE);
         {
             float cx = CONTENT_R - COMPOSE_D / 2, cy = COMPOSE_Y + COMPOSE_D / 2, x0 = cx - 10, y0 = cy - 8, x1 = cx + 7, y1 = cy + 9;
-            tk_col yl = tk_hex(0xffd60a, 1);
+            tk_col yl = C_YELLOW;
             d_seg(d, x0 + 2, y0, x0 + 8, y0, 2, yl);
             d_seg(d, x0, y0 + 2, x0, y1 - 2, 2, yl);
             d_seg(d, x0, y0 + 2, x0 + 2, y0, 2, yl);
@@ -2654,24 +2689,24 @@ static void page_notes(dc *d)
             char cnt[24];
             int k = put_dec(cnt, NS.n);
             tk_memcpy(cnt + k, NS.n == 1 ? " Note" : " Notes", NS.n == 1 ? 6 : 7);
-            if (NS.n) d_text_box(d, TK_IT400, 13, 195, COMPOSE_Y + COMPOSE_D / 2 + 4.7f, 200, 1, cnt, 0, 0, W(.6f), 0);
+            if (NS.n) d_text_box(d, TK_IT400, 13, 195, COMPOSE_Y + COMPOSE_D / 2 + 4.7f, 200, 1, cnt, 0, 0, C_LABEL2, 0);
         }
-        if (!NS.n) { d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Notes", "Tap the pencil to write one."); return; }
-        d_rrect(d, GROUP_X, CONTENT_TOP, GROUP_W, 56.0f * NS.n - 1, 16, tk_hex(0x151c33, 1));
+        if (!NS.n) { d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Notes", "Tap the pencil to write one."); return; }   /* trunk: notes persist now */
+        d_rrect(d, GROUP_X, CONTENT_TOP, GROUP_W, 56.0f * NS.n - 1, 16, C_CARD);
         for (int i = 0; i < NS.n; i++) {
             char t[136];
             note_title(NOTES[NS.n - 1 - i], t);
             d_text_box(d, TK_IT600, 17, ROW_TX, bl(TK_IT600, 17, CONTENT_TOP + 56 * i + 17), CONTENT_W - 32, 0, t, 0, 0, INK, 0);
-            if (i + 1 < NS.n) d_rrect(d, ROW_TX, CONTENT_TOP + 56 * i + 55, CONTENT_R - ROW_TX, .5f, 0, W(.1f));
+            if (i + 1 < NS.n) d_rrect(d, ROW_TX, CONTENT_TOP + 56 * i + 55, CONTENT_R - ROW_TX, .5f, 0, C_SEP);
         }
         return;
     }
-    d_back(d, tk_hex(0xffd60a, 1));                /* P3p (audit 13): Notes' yellow, on the glass circle */
+    d_back(d, C_YELLOW);                /* P3p (audit 13): Notes' yellow, on the glass circle */
     d_gcircle(d, GC_DONE);                         /* and Done: a yellow check mark */
     {
         float cx = CONTENT_R - BACK_D / 2, cy = NAV_MID;
-        d_seg(d, cx - 8, cy + .5f, cx - 2.5f, cy + 6, 2.6f, tk_hex(0xffd60a, 1));
-        d_seg(d, cx - 2.5f, cy + 6, cx + 8.5f, cy - 6.5f, 2.6f, tk_hex(0xffd60a, 1));
+        d_seg(d, cx - 8, cy + .5f, cx - 2.5f, cy + 6, 2.6f, C_YELLOW);
+        d_seg(d, cx - 2.5f, cy + 6, cx + 8.5f, cy - 6.5f, 2.6f, C_YELLOW);
     }
     kb_draw(d, NS.shift, NS.num);
 }
@@ -2705,7 +2740,7 @@ static void build_note(void)
         if (i < n && t[i] == '\n') { i++; if (i == n) { cx = 20; cy = y; } continue; }
         if (i >= n) break;
     }
-    d_rrect(&d, cx + 1, cy + 1, 2, 21, 1, tk_hex(0xffd60a, 1));          /* the caret */
+    d_rrect(&d, cx + 1, cy + 1, 2, 21, 1, C_YELLOW);          /* the caret */
     apnote.hidden = 0;
     relink();
 }
@@ -2788,7 +2823,7 @@ static void build_search(void)
     else d_lg_flat(&d, 16, 56, 288, 40, 20, 1);
     d_icon(&d, "search15", 30, 68.5f, 1);
     if (SR.q[0]) d_text(&d, TK_IT400, 17, 53, bl(TK_IT400, 17, 65), SR.q, 0, 0, INK, 0);
-    else d_text(&d, TK_IT400, 17, 53, bl(TK_IT400, 17, 65), "Search", 0, 0, tk_hex(0xa9a9a9, 1), 0);
+    else d_text(&d, TK_IT400, 17, 53, bl(TK_IT400, 17, 65), "Search", 0, 0, C_LABEL2, 0);
     if (SR.q[0]) d_rrect(&d, 53 + tw(TK_IT400, 17, SR.q, 0, 0) + 1, 66, 2, 21, 1, ACCENT());
     SR.nh = 0;
     for (int a = 0; a < NAPPS && SR.nh < 8; a++) {
@@ -2801,7 +2836,7 @@ static void build_search(void)
         d_text_box(&d, TK_IT500, 12, x + 31, bl(TK_IT500, 12, y + 67), 84, 1, APPS[a].name, 0, 0, INK, 0);
         SR.nh++;
     }
-    d_text(&d, TK_IT600, 13, 24, bl(TK_IT600, 13, 116), SR.nh ? (SR.q[0] ? "APPLICATIONS" : "SUGGESTIONS") : "NO RESULTS", .4f, 0, W(.55f), 0);
+    d_text(&d, TK_IT600, 13, 24, bl(TK_IT600, 13, 116), SR.nh ? (SR.q[0] ? "APPLICATIONS" : "SUGGESTIONS") : "NO RESULTS", .4f, 0, C_LABEL2, 0);
     apsrch.hidden = 0;
     relink();
 }
@@ -2844,7 +2879,7 @@ static void build_apnum(void)
                                (int)tk_floorf(PT(595) - tk_icon_pad("back") - e.oy + .5f), W(.85f));
         d_rrect(&e, 291, 595, 27, 20, 4, W(.85f));
         float xw = tw(TK_IT600, 16, "\xc3\x97", 0, 0);
-        d_text(&e, TK_IT600, 16, 291 + (27 - xw) / 2, bl(TK_IT600, 16, 596), "\xc3\x97", 0, 0, tk_hex(0x0a0f1f, 1), 0);
+        d_text(&e, TK_IT600, 16, 291 + (27 - xw) / 2, bl(TK_IT600, 16, 596), "\xc3\x97", 0, 0, C_GROUND, 0);
     }
     float w = tw(TK_IT500, 36, AS.num, 1, TK_TNUM);
     dc d = mk(&apnum, "dial", (390 - w) / 2, 86, w, 44, 2, 0);
@@ -3060,12 +3095,12 @@ static void build_app_page(int a)
             int k = 0;
             for (const char *c = S->cap; *c && k < 63; c++) up[k++] = *c >= 'a' && *c <= 'z' ? (char)(*c - 32) : *c;
             up[k] = 0;
-            d_text(&d, TK_IT400, 13, ROW_TX, y + (i ? 18 : 16) + 13, up, .52f, 0, W(.55f), 0);
+            d_text(&d, TK_IT400, 13, ROW_TX, y + (i ? 18 : 16) + 13, up, .52f, 0, C_LABEL2, 0);
             y += (i ? 18 : 16) + 16 + 6;
         } else
             y += 18;
         float gh = 47.0f * S->n - 1;
-        d_rrect(&d, GROUP_X, y, GROUP_W, gh, 16, tk_hex(0x151c33, 1));
+        d_rrect(&d, GROUP_X, y, GROUP_W, gh, 16, C_CARD);
         for (int r = 0; r < S->n; r++) {
             float ry = y + 47 * r;
             char lb[48], rb[48];
@@ -3095,8 +3130,8 @@ static void build_app_page(int a)
             float lw = tw(TK_IT400, 16, lt, 0, 0), vw = rt[0] ? tw(TK_IT400, 16, rt, 0, TK_TNUM) : 0;
             float lmax = rt[0] ? tk_maxf(room - vw - 16, room / 2) : room;
             d_text_box(&d, TK_IT400, 16, lx, ry + 13 + 16, lmax, 0, lt, 0, 0, INK, 0);
-            if (rt[0]) d_text_box(&d, TK_IT400, 16, right, ry + 13 + 16, room - tk_minf(lw, lmax) - 16, 2, rt, 0, TK_TNUM, W(.55f), 0);
-            if (r + 1 < S->n) d_rrect(&d, lx, ry + 46, CONTENT_R - lx, .5f, 0, W(.08f));
+            if (rt[0]) d_text_box(&d, TK_IT400, 16, right, ry + 13 + 16, room - tk_minf(lw, lmax) - 16, 2, rt, 0, TK_TNUM, C_LABEL2, 0);
+            if (r + 1 < S->n) d_rrect(&d, lx, ry + 46, CONTENT_R - lx, .5f, 0, C_SEP);
         }
         y += gh;
     }
@@ -3160,7 +3195,7 @@ static arect icon_rect(int a)
     static const char *DK[4] = { "phone", "messages", "browser", "settings" };
     const char *k = APPS[a].k;
     for (int i = 0; i < 4; i++) if (!tk_strcmp(DK[i], k)) return (arect){ COL_CX(i) - ICON_PT / 2, DOCK_Y, ICON_PT, ICON_PT, 15 };
-    if (!tk_strcmp(k, "search")) return (arect){ 160, 640, 70, 30, 15 };   /* P3g: the Search pill */
+    if (!tk_strcmp(k, "search")) return (arect){ SRCH_X, SRCH_Y, SRCH_W, SRCH_H, SRCH_H / 2 };   /* P3g: the Search pill (B8: §9.2) */
     { arect r; if (lx_icon_rect(k, &r)) return r; }                       /* L3: page 3 */
     for (int i = 0; i < 8; i++) if (!tk_strcmp(P1[i], k)) return (arect){ COL_CX(i % 4) - ICON_PT / 2 + page_x, HOME_TOP1 + ROW_PITCH * (i / 4), ICON_PT, ICON_PT, 15 };
     for (int i = 0; i < NP2; i++) if (!tk_strcmp(P2[i], k)) return (arect){ 390 + COL_CX(i % 4) - ICON_PT / 2 + page_x, HOME_TOP2 + ROW_PITCH * (i / 4), ICON_PT, ICON_PT, 15 };
@@ -3173,8 +3208,8 @@ static int app_hit(float x, float y)
     const char *const *P2 = EMG ? P2E : P2K;
     static const char *DK[4] = { "phone", "messages", "browser", "settings" };
     const char *k = 0;
-    if (y >= 700 && y <= 772 && x >= 15) { int i = (int)((x - 15) / 90); if (i < 4) k = DK[i]; }
-    else if (y >= 636 && y <= 674 && x >= 140 && x <= 250) k = "search";
+    if (y >= DOCK_TOP && y <= DOCK_TOP + DOCK_H && x >= 15) { int i = (int)((x - 15) / 90); if (i < 4) k = DK[i]; }
+    else if (SRCH_HIT(x, y)) k = "search";
     else {
         int pg = tk_mini(2, tk_maxi(0, (int)tk_floorf(-page_x / 390 + .5f)));
         float x0 = x - (390 * pg + page_x), top = pg ? HOME_TOP2 : HOME_TOP1;
@@ -3357,7 +3392,7 @@ void sh_confirm(const char *title, const char *l1, const char *l2, const char *l
     d_rrect(&d, 44, CF.hy, 302, 56, 28, W(.12f));
     relayer(&cffill);
     dc f = mk(&cffill, "confirm-fill", 44, CF.hy, 56, 56, 1, 0);
-    d_rrect(&f, 44, CF.hy, 56, 56, 28, TK_RGBA(111, 179, 255, .55f));
+    d_rrect(&f, 44, CF.hy, 56, 56, 28, sbca(SBC_ACCENT, .55f));
     cffill.slice = 2;
     cffill.slice_s0 = cffill.slice_s1 = PT(28);
     relayer(&cflabel);
@@ -3770,8 +3805,8 @@ static void relink(void)
     tk_layer *pg[] = { &hparts[1], &hparts[2], &hparts[4], &hparts[5], &hparts[6], &hparts[7] };   /* [5] the Linux page (3); [6] page 2's third row;
                                                                                                 * [7] page 1's Clock widget (helper D) */
     link(&pages, pg, 6);
-    tk_layer *h[] = { &hparts[0], &pages, &hsearch[0], &hsearch[1], &hsearch[2], &hparts[3], &icobg, &icofg };
-    link(&home, h, 8);
+    tk_layer *h[] = { &hparts[0], &pages, &hsearch[0], &hsearch[1], &hsearch[2], &hparts[3], &icobg, &icofg, &hbadge };
+    link(&home, h, 9);
     sv_relink();                                     /* survival-next: the tools' live layers, SOS's beacon */
 }
 
@@ -3793,7 +3828,7 @@ void sh_init_begin(tk_comp *c)
     tk_layer_init(&appg, "app");
     appg.hidden = 1;
     tk_layer_init(&appbg, "app-ground");
-    appbg.solid = 0xff0a0f1fu;
+    appbg.solid = sbc_argb(SBC_GROUND);
     appbg.solid_w = TK_W;
     appbg.solid_h = TK_H;
     appbg.opaque = 1;
@@ -3831,6 +3866,7 @@ void sh_init_begin(tk_comp *c)
     for (int i = 0; i < NEC; i++) { tk_layer_init(&ecard[i], "ecard"); ecard[i].hidden = 1; }
     tk_layer_init(&hparts[6], "home-apps2e");
     hparts[6].hidden = 1;
+    tk_layer_init(&hbadge, "home-badges"); hbadge.hidden = 1;     /* B8: the dock's badges (home_badges) */
     tk_layer_init(&empill, "empill");
     empill.hidden = 1;
     tk_layer_init(&icobg, "icon-ground"); icobg.hidden = 1;     /* P3p: press feedback */
@@ -3959,7 +3995,7 @@ void sh_set(const char *what, const char *key, float v)
         back_to_lock(1);
     } else if (!tk_strcmp(what, "sleep")) {        /* the films: the Power key's fade (v 1) and the wake (v 0) */
         if (v > 0) sh_sleep(0); else sh_wake();
-    } else if (lx_set(what, key, v)) {            /* L3: lapp=, store=, storeq= (shell_linux.inc) */
+    } else if (lx_set(what, key, v)) {            /* L3: lapp=; Track F: store=, storecat=, storeq=, storeapp=, ... */
     } else if (nc_set(what, key, v)) {            /* helper D: notify=, banner=, nc=, ncgroup=, ncswipe= (shell_nc.inc) */
     } else if (sw_set(what, key, v)) {            /* helper D: switcher=, swsnap= (shell_switcher.inc) */
     } else if (cm_set(what, key, v)) {            /* helper I: thread=, compose=, to=, dial=, recent=, callpad=, ... */
@@ -4078,7 +4114,7 @@ static int hit_row(float x, float y, int *gi)
 static float rubber(float over, float dim) { return (1 - 1 / (over * .55f / dim + 1)) * dim; }
 
 /* ---- P3p (P3j-7): press feedback. Nothing is baked in a tap: an icon's press is two small layers (the ground
- * under it: the wallpaper or the dock's kept glass, and the icon darkened, shrinking to .88 in .1 s and back in .2 s);
+ * under it: the wallpaper or the dock's kept glass, and the icon dimmed (.2 black) and shrinking to .96 in .1 s and back in .2 s; B8, GAP #21: iOS dims slightly, hardly shrinks);
  * a row, card or key is a solid rounded rect with no bitmap (W .10 / lighter on keys), clipped to its group. Both
  * go on a move and at lift-off. --------------------------------------------------------------------------------- */
 /* icobg, icofg, lockhl, apphl: declared with the home's layers */
@@ -4106,12 +4142,12 @@ static void icon_press(int a)
     if (dk >= 0 && dockbg[dk].px) tk_bmp_copy(&icobg.bmp, 0, 0, &dockbg[dk], 0, 0, ic->w, ic->h);
     else tk_bmp_up(&icobg.bmp, &C->base_half, X, Y, 2);            /* the page's icons sit on the wallpaper */
     tk_blit(&icofg.bmp, ic, 0, 0, 1);
-    tk_blit_tinted(&icofg.bmp, ic, 0, 0, TK_RGBA(0, 0, 0, .3f));   /* iOS: the icon darkens under the finger */
+    tk_blit_tinted(&icofg.bmp, ic, 0, 0, TK_RGBA(0, 0, 0, .2f));   /* iOS: the icon darkens under the finger */
     icobg.x = icofg.x = (float)X;
     icobg.y = icofg.y = (float)Y;
     icofg.ox = PT(R.x + R.w / 2);
     icofg.oy = PT(R.y + R.h / 2);
-    IP.on = 1; IP.from = 1; IP.to = .88f; IP.t = 0; IP.dur = .1f; IP.s = 1;
+    IP.on = 1; IP.from = 1; IP.to = .96f; IP.t = 0; IP.dur = .1f; IP.s = 1;
     icofg.sx = icofg.sy = 1;
     relink();
 }
@@ -4302,9 +4338,9 @@ void sh_touch(int phase, float x, float y, float t)
             if (y < 56 && x < 195) { nc_pull_begin(x, y, t); T.kind = G_NC; return; }
             /* elsewhere but the dock, Search and the widgets: the pages (direction decided after 8 pt) */
             int on_w = page_x > -195 && y >= 60 && y <= 60 + WID_W && ((x >= WID_X(0) && x <= WID_X(0) + WID_W) || (x >= WID_X(1) && x <= WID_X(1) + WID_W));
-            if (y >= 688 && y < H_PT - 30) { T.kind = G_DOCK; icon_press(app_hit(x, y)); return; }   /* the dock: a tap opens its app */
-            if (y >= 636 && y <= 674 && x >= 140 && x <= 250) { T.kind = G_DOCK; return; }   /* P3g: Search */
-            if (y >= 56 && y < 688 && !(y >= 640 && y <= 670 && x >= 150 && x <= 240) && !on_w) {
+            if (y >= DOCK_TOP && y < H_PT - 30) { T.kind = G_DOCK; icon_press(app_hit(x, y)); return; }   /* the dock: a tap opens its app */
+            if (SRCH_HIT(x, y)) { T.kind = G_DOCK; return; }   /* P3g: Search */
+            if (y >= 56 && y < DOCK_TOP && !SRCH_HIT(x, y) && !on_w) {
                 T.kind = G_PAGE;
                 T.base = page_x;
                 page_dir = 0;
@@ -4457,8 +4493,8 @@ void sh_touch(int phase, float x, float y, float t)
             if (page_dir == 1) {
                 page_dragging = 1;
                 float px = T.base + dx;
-                if (px > 0) px *= .3f;
-                if (px < -780) px = -780 + (px + 780) * .3f;   /* L3: three pages */
+                if (px > 0) px = rubber(px, 390);                 /* B8 (GAP #21): iOS's rubber band, not a flat .3 */
+                if (px < -780) px = -780 - rubber(-780 - px, 390);   /* L3: three pages */
                 set_page(px);
             }
             break;
@@ -4706,7 +4742,7 @@ int sh_tick(float dt, float t)
     }
     mv |= ico_step(dt);                          /* P3p: the pressed icon */
     mv |= med_tick(dt);
-    mv |= lx_moving();                           /* L3: the App Store's list under the finger */
+    mv |= lx_tick(dt);                           /* L3, Track F: the App Store's page (scroll, momentum, builds) */
     if (em_t < 1) {
         em_t = tk_minf(1, em_t + dt / .7f);
         em_step(tk_bezier(.25f, .1f, .25f, 1, em_t));
@@ -4935,6 +4971,7 @@ void sh_idle(void)
     sw_idle();                                   /* helper D: the open app's snapshot for the switcher (when it changed) */
     mp_idle();                                   /* helper D: Maps' last GPS fix (it may read the card: idle only) */
     cm_idle();                                   /* helper I: the call screen's static parts while Cellular is on */
+    home_badges(0);                              /* B8: the dock's badges, when a count changed */
     if (!EMG && cards_pending > 0) {
         /* after Emergency: the vendor cards again, one per idle turn (the platform calls again while
          * sh_idle_pending); the half copies below are made in the same turn (P2w: an unlock right after

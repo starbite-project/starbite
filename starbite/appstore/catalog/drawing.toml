@@ -1,0 +1,30 @@
+id = "drawing"
+name = "Drawing"
+summary = "A simple paint app for quick sketches"
+description = """Drawing is a basic paint program: pencil, shapes, text, selection, crop, scale and filters. Its simple, adaptive interface works well with a finger."""
+category = "Graphics"
+licence = "GPL-3.0-or-later"
+homepage = "https://maoschanz.github.io/drawing/"
+icon = "com.github.maoschanz.drawing"
+ram_mb = 120
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["paint", "draw", "sketch", "image"]
+
+[launcher]
+exec = "drawing"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["drawing"]
+
+[runtime]
+needs = ["files"]
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 2
+build_mb = 400

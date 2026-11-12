@@ -28,6 +28,7 @@ enum { RC_OUT, RC_IN, RC_MISSED, RC_DECLINED, RC_NOANSWER };
 typedef struct { char num[24]; int kind, secs, hm; } cm_rec;
 static cm_rec RC[CM_NREC];                 /* Recents: the calls, newest first (Track A: kept, the blob "calls") */
 static int nrc;
+static int cm_missed_new;                  /* B8: missed calls not yet seen in Recents (home's Phone badge) */
 /* the inbox: the platform's (newest last) with what the shell adds: when it was first seen, unread */
 typedef struct { sh_sms_t m; int hm, day, unread; } cm_msg;
 static cm_msg MSG[SH_SMS_MAX];
@@ -247,7 +248,7 @@ static void cm_hint_build(void)
         /* "Cellular is off · Turn On in Settings", the second part in the accent (it opens Settings > Cellular) */
         const char *a = "Cellular is off \xc2\xb7 ", *b = "Turn On in Settings";
         float wa = tw(TK_IT400, 14, a, 0, 0), wb = tw(TK_IT600, 14, b, 0, 0), x = 195 - (wa + wb) / 2;
-        d_text(&d, TK_IT400, 14, x, bl(TK_IT400, 14, HINT_Y + 9), a, 0, 0, W(.55f), 0);
+        d_text(&d, TK_IT400, 14, x, bl(TK_IT400, 14, HINT_Y + 9), a, 0, 0, C_LABEL2, 0);
         d_text(&d, TK_IT600, 14, x + wa, bl(TK_IT400, 14, HINT_Y + 9), b, 0, 0, ACCENT(), 0);
     } else {
         char ln[4][96];
@@ -255,7 +256,7 @@ static void cm_hint_build(void)
         int n = wrapn(ln, 2, TK_IT400, 13, s, CONTENT_W - 20, &wm);
         for (int k = 0; k < n; k++)
             d_text_box(&d, TK_IT400, 13, 195, bl(TK_IT400, 13, HINT_Y + (n == 1 ? 9 : 2) + 17 * k), CONTENT_W, 1, ln[k], 0, 0,
-                       red ? tk_hex(0xff6961, 1) : W(.5f), 0);
+                       red ? C_RED : C_LABEL2, 0);
     }
     trim(&cmhint);
     cmhint.hidden = 0;
@@ -416,7 +417,7 @@ static void cm_track(const sh_call_t *c)
     CM.rec_on = 0;
     int kind = CM.rec_out ? (CM.rec_conn ? RC_OUT : RC_NOANSWER) : CM.rec_conn ? RC_IN : CM.decl ? RC_DECLINED : RC_MISSED;
     cm_rec_add(CM.rec_num, kind, CM.rec_secs);
-    if (kind == RC_MISSED) sh_notify("phone", "Missed Call", CM.rec_num[0] ? CM.rec_num : "Unknown", cm_now_hm());
+    if (kind == RC_MISSED) { sh_notify("phone", "Missed Call", CM.rec_num[0] ? CM.rec_num : "Unknown", cm_now_hm()); cm_missed_new++; }
     if (is_app("phone") && AS.tab == 1 && !AP.closing) build_app_page(AP.a);
 }
 
@@ -434,7 +435,7 @@ static void phone_tabs(dc *d)
         n[k] = 0;
         d_icon(d, n, bx + (TAB_W - 22) / 2, 730.5f, 1);
         float w = tw(TK_IT600, 10.5f, TL[i], 0, 0);
-        d_text(d, TK_IT600, 10.5f, bx + (TAB_W - w) / 2, bl(TK_IT600, 10.5f, 754.5f), TL[i], 0, 0, i == AS.tab ? ACCENT() : W(.6f), 0);
+        d_text(d, TK_IT600, 10.5f, bx + (TAB_W - w) / 2, bl(TK_IT600, 10.5f, 754.5f), TL[i], 0, 0, i == AS.tab ? ACCENT() : C_LABEL2, 0);
     }
 }
 /* an empty state's bottom (d_empty's own layout), for a button under it */
@@ -489,10 +490,11 @@ static void page_phone(dc *d)
                 d_text(d, TK_IT700, 10, x + (78 - lw) / 2, bl(TK_IT700, 10, y + 50), KL[i], 1.4f, 0, W(.75f), 0);
             }
         }
-        d_rrect(d, PAD_CX - 39, PAD_CY - 39, 78, 78, 39, tk_hex(0x34c759, 1));
+        d_rrect(d, PAD_CX - 39, PAD_CY - 39, 78, 78, 39, C_GREEN);
         d_icon(d, "call", PAD_CX - 15, PAD_CY - 15, 1);
     } else if (AS.tab == 1) {
         d_h1(d, "Recents");
+        cm_missed_new = 0;                  /* B8: Recents shown: the missed calls are seen */
         if (!nrc) {
             const char *l = !sh_comms_ok() ? "Calls aren't in this version yet." :
                             cm_cell_on() ? "Calls you make and receive show here until the phone restarts." :
@@ -501,7 +503,7 @@ static void page_phone(dc *d)
             if (sh_comms_ok() && !cm_cell_on()) cm_cell_button(d, cm_empty_bot(CONTENT_TOP, EMPTY_TAB, l) + 18);
         } else {
             int n = nrc < REC_MAX ? nrc : REC_MAX;
-            d_rrect(d, GROUP_X, CONTENT_TOP, GROUP_W, REC_H * n, 16, tk_hex(0x151c33, 1));
+            d_rrect(d, GROUP_X, CONTENT_TOP, GROUP_W, REC_H * n, 16, C_CARD);
             for (int i = 0; i < n; i++) {
                 const cm_rec *r = &RC[i];
                 float y = CONTENT_TOP + REC_H * i;
@@ -517,10 +519,10 @@ static void page_phone(dc *d)
                 sub[k] = 0;
                 float ww = tw(TK_IT400, 15, when, 0, TK_TNUM);
                 d_text_box(d, TK_IT600, 17, ROW_TX, bl(TK_IT600, 17, y + 10), CONTENT_R - 16 - ww - 12 - ROW_TX, 0, r->num[0] ? r->num : "Unknown",
-                           0, 0, r->kind == RC_MISSED ? tk_hex(0xff453a, 1) : INK, 0);
-                d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 33), sub, 0, TK_TNUM, W(.55f), 0);
-                d_text(d, TK_IT400, 15, CONTENT_R - 16 - ww, bl(TK_IT400, 15, y + 20), when, 0, TK_TNUM, W(.55f), 0);
-                if (i + 1 < n) d_rrect(d, ROW_TX, y + REC_H - .5f, CONTENT_R - ROW_TX, .5f, 0, W(.1f));
+                           0, 0, r->kind == RC_MISSED ? C_RED : INK, 0);
+                d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 33), sub, 0, TK_TNUM, C_LABEL2, 0);
+                d_text(d, TK_IT400, 15, CONTENT_R - 16 - ww, bl(TK_IT400, 15, y + 20), when, 0, TK_TNUM, C_LABEL2, 0);
+                if (i + 1 < n) d_rrect(d, ROW_TX, y + REC_H - .5f, CONTENT_R - ROW_TX, .5f, 0, C_SEP);
             }
         }
     } else if (AS.tab == 2) {
@@ -612,15 +614,15 @@ static void cv_pre(void)
     if (CV.pre) return;
     uint64_t t0 = tk_us();
     dc d = mk(&cvdec, "cv-decline", 91 - 50, CV_END_Y, 100, 106, 2, 0);
-    cv_round(&d, 91, CV_END_Y + 39, tk_hex(0xff3b30, 1));
+    cv_round(&d, 91, CV_END_Y + 39, C_RED);
     d_handset(&d, 91, CV_END_Y + 39, 1, W(1));
     d_text_box(&d, TK_IT500, 13, 91, bl(TK_IT500, 13, CV_END_Y + 86), 96, 1, "Decline", 0, 0, W(.9f), 0);
     d = mk(&cvacc, "cv-accept", 299 - 50, CV_END_Y, 100, 106, 2, 0);
-    cv_round(&d, 299, CV_END_Y + 39, tk_hex(0x34c759, 1));
+    cv_round(&d, 299, CV_END_Y + 39, C_GREEN);
     d_handset(&d, 299, CV_END_Y + 39, 0, W(1));
     d_text_box(&d, TK_IT500, 13, 299, bl(TK_IT500, 13, CV_END_Y + 86), 96, 1, "Accept", 0, 0, W(.9f), 0);
     d = mk(&cvend, "cv-end", 195 - 39, CV_END_Y, 78, 78, 2, 0);
-    cv_round(&d, 195, CV_END_Y + 39, tk_hex(0xff3b30, 1));
+    cv_round(&d, 195, CV_END_Y + 39, C_RED);
     d_handset(&d, 195, CV_END_Y + 39, 1, W(1));
     /* the track: a solid rounded layer (no bitmap), its words a small one */
     tk_layer_init(&cvtrbg, "cv-track");
@@ -635,7 +637,7 @@ static void cv_pre(void)
     d_text_box(&d, TK_IT400, 19, CV_TR_X + CV_TH_D + 10 + (CV_TR_W - CV_TH_D - 10) / 2, bl(TK_IT400, 19, CV_TR_Y + 24), CV_TR_W - CV_TH_D - 30, 1,
                "slide to answer", 0, 0, W(.75f), 0);
     d = mk(&cvthumb, "cv-thumb", CV_TR_X + 5, CV_TR_Y + 5, CV_TH_D, CV_TH_D, 2, 0);
-    d_rrect(&d, CV_TR_X + 5, CV_TR_Y + 5, CV_TH_D, CV_TH_D, CV_TH_D / 2, tk_hex(0x34c759, 1));
+    d_rrect(&d, CV_TR_X + 5, CV_TR_Y + 5, CV_TH_D, CV_TH_D, CV_TH_D / 2, C_GREEN);
     d_handset(&d, CV_TR_X + 5 + CV_TH_D / 2, CV_TR_Y + 5 + CV_TH_D / 2, 0, W(1));
     tk_layer *P[5] = { &cvdec, &cvacc, &cvend, &cvtrack, &cvthumb };
     for (int i = 0; i < 5; i++) { trim(P[i]); P[i]->hidden = 1; }
@@ -672,20 +674,20 @@ static void cv_top(void)
         /* the kernel says the call has no audio path: plainly, naming the missing part when it knows (fa4ec7f) */
         const char *t = CALL.audio_why[0] ? CALL.audio_why : "No audio yet";
         float pw = tw(TK_IT600, 13, t, 0, 0) + 24, py = CV_NUM_Y + (pad ? 74 : 84);
-        d_rrect(&d, 195 - pw / 2, py, pw, 26, 13, tk_hex(0xff9f0a, .2f));
-        d_text(&d, TK_IT600, 13, 195 - pw / 2 + 12, bl(TK_IT600, 13, py + 6), t, 0, 0, tk_hex(0xffb340, 1), 0);
+        d_rrect(&d, 195 - pw / 2, py, pw, 26, 13, sbca(SBC_ORANGE, .2f));
+        d_text(&d, TK_IT600, 13, 195 - pw / 2 + 12, bl(TK_IT600, 13, py + 6), t, 0, 0, C_ORANGE, 0);
         if (!pad && !CALL.audio_why[0]) {
             char ln[4][96];
             float wm;
             int k = wrapn(ln, 3, TK_IT400, 14, "The call connects, but this phone's earpiece, speaker and microphone don't work in calls yet.", 300, &wm);
             for (int i = 0; i < k; i++)
-                d_text_box(&d, TK_IT400, 14, 195, bl(TK_IT400, 14, py + 38 + 19 * i), CONTENT_W, 1, ln[i], 0, 0, W(.55f), 0);
+                d_text_box(&d, TK_IT400, 14, 195, bl(TK_IT400, 14, py + 38 + 19 * i), CONTENT_W, 1, ln[i], 0, 0, C_LABEL2, 0);
         }
     }
     if (CALL.audio_ok && CALL.audio_why[0] && CV.mode != CVM_ENDED) {
         /* audio works but a part doesn't (the microphone): a small line */
         float py = CV_NUM_Y + (pad ? 74 : 84);
-        d_text_box(&d, TK_IT400, 14, 195, bl(TK_IT400, 14, py + 4), CONTENT_W, 1, CALL.audio_why, 0, 0, tk_hex(0xffb340, 1), 0);
+        d_text_box(&d, TK_IT400, 14, 195, bl(TK_IT400, 14, py + 4), CONTENT_W, 1, CALL.audio_why, 0, 0, C_ORANGE, 0);
     }
     trim(&cvtop);
     cm_cpy(CV.d_why, sizeof CV.d_why, CALL.audio_why);
@@ -1055,6 +1057,15 @@ static int cm_unread(const char *num)
     for (int i = 0; i < nmsg; i++) u += MSG[i].unread && !tk_strcmp(MSG[i].m.number, num);
     return u;
 }
+/* B8 (GAP #21): home's badge counts: Phone's missed calls not yet seen, Messages' unread; 0 for every other app */
+static int cm_badge(const char *k)
+{
+    int u = 0;
+    if (!tk_strcmp(k, "phone")) return cm_missed_new;
+    if (tk_strcmp(k, "messages")) return 0;
+    for (int i = 0; i < nmsg; i++) u += MSG[i].unread;
+    return u;
+}
 static void cm_when(char *b, const cm_msg *m, int with_day)
 {
     char hm[12];                                 /* Track A: room for "12:05 AM" */
@@ -1088,7 +1099,7 @@ static void cm_bubbles(dc *d, float top, float bot)
     int ix[SH_SMS_MAX], n = 0, lastout = -1;
     for (int i = 0; i < nmsg; i++) if (!tk_strcmp(MSG[i].m.number, CM.thr)) { ix[n] = i; if (!MSG[i].m.incoming) lastout = n; n++; }
     if (!n) {
-        d_text_box(d, TK_IT400, 13, 195, bl(TK_IT400, 13, (top + bot) / 2), CONTENT_W, 1, "No messages with this number yet.", 0, 0, W(.45f), 0);
+        d_text_box(d, TK_IT400, 13, 195, bl(TK_IT400, 13, (top + bot) / 2), CONTENT_W, 1, "No messages with this number yet.", 0, 0, C_LABEL2, 0);
         return;
     }
     static char ln[CM_ML][100];
@@ -1119,7 +1130,7 @@ static void cm_bubbles(dc *d, float top, float bot)
         if (gap) {
             char w[24];
             cm_when(w, m, 1);
-            d_text_box(d, TK_IT500, 12, 195, bl(TK_IT500, 12, y + 8), CONTENT_W, 1, w, 0, 0, W(.45f), 0);
+            d_text_box(d, TK_IT500, 12, 195, bl(TK_IT500, 12, y + 8), CONTENT_W, 1, w, 0, 0, C_LABEL2, 0);
             y += 30;
         }
         int nl = cnl[k], out = !m->m.incoming;
@@ -1129,7 +1140,7 @@ static void cm_bubbles(dc *d, float top, float bot)
             cm_wrap(ln, m->m.text[0] ? m->m.text : " ", 267.88f, &wm);
             tk_corner = (tk_r4){ PT(20), PT(20), PT(out ? 6 : 20), PT(out ? 20 : 6) };
             tk_use_r4 = 1;
-            d_rrect(d, bx, y, bw, bh, 20, out ? (m->m.state == SH_SMS_FAILED ? tk_hex(0x2f7bf6, .55f) : tk_hex(0x2f7bf6, 1)) : tk_hex(0x262c3e, 1));
+            d_rrect(d, bx, y, bw, bh, 20, out ? (m->m.state == SH_SMS_FAILED ? sbca(SBC_ACCENT, .55f) : C_ACCENT) : sbc(SBC_GRAY5));
             tk_use_r4 = 0;
             for (int q = 0; q < nl; q++) d_text(d, TK_IT400, 16, bx + 13, bl(TK_IT400, 16, y + 9 + 20.8f * q), ln[q], 0, 0, INK, 0);
         }
@@ -1143,7 +1154,7 @@ static void cm_bubbles(dc *d, float top, float bot)
             for (const char *p = "Not Delivered"; *p; p++) fw[q++] = *p;
             if (m->m.why[0]) { const char *dt = " \xc2\xb7 "; while (*dt) fw[q++] = *dt++; for (const char *p = m->m.why; *p && q < 78; p++) fw[q++] = *p; }
             fw[q] = 0;
-            st = fw; sc = tk_hex(0xff453a, 1);
+            st = fw; sc = C_RED;
         } else if (out && k == lastout && m->m.state == SH_SMS_SENT) st = "Sent";
         if (st) {
             d_text_box(d, TK_IT500, 11.5f, CONTENT_R - 4, bl(TK_IT500, 11.5f, y + 3), CONTENT_W, 2, st, 0, 0, sc, 0);
@@ -1171,13 +1182,13 @@ static void page_messages(dc *d)
             const cm_msg *m = &MSG[last[i]];
             float y = THR_TOP + THR_H * i;
             if (y + THR_H > EMPTY_BOT) break;
-            if (cm_unread(m->m.number)) d_rrect(d, 24, y + 33, 10, 10, 5, tk_hex(0x0a84ff, 1));
+            if (cm_unread(m->m.number)) d_rrect(d, 24, y + 33, 10, 10, 5, C_ACCENT);
             d_person(d, 62, y + 39, 22);
             char when[24];
             cm_when(when, m, 0);
             float ww = tw(TK_IT400, 15, when, 0, TK_TNUM), tx = 96;
             d_text_box(d, TK_IT600, 17, tx, bl(TK_IT600, 17, y + 12), CONTENT_R - ww - 22 - tx, 0, m->m.number, 0, 0, INK, 0);
-            d_text(d, TK_IT400, 15, CONTENT_R - 14 - ww, bl(TK_IT400, 15, y + 13), when, 0, TK_TNUM, W(.5f), 0);
+            d_text(d, TK_IT400, 15, CONTENT_R - 14 - ww, bl(TK_IT400, 15, y + 13), when, 0, TK_TNUM, C_LABEL2, 0);
             d_icon(d, "chev", CONTENT_R - 10, y + 15, .45f);
             char ln[4][96], flat[160];
             int q = 0;
@@ -1186,8 +1197,8 @@ static void page_messages(dc *d)
             flat[q] = 0;
             float wm;
             int nl = wrapn(ln, 2, TK_IT400, 15, flat, CONTENT_R - tx, &wm);
-            for (int k = 0; k < nl; k++) d_text(d, TK_IT400, 15, tx, bl(TK_IT400, 15, y + 35 + 19 * k), ln[k], 0, 0, W(.55f), 0);
-            if (i + 1 < n) d_rrect(d, tx, y + THR_H - .5f, CONTENT_R - tx, .5f, 0, W(.1f));
+            for (int k = 0; k < nl; k++) d_text(d, TK_IT400, 15, tx, bl(TK_IT400, 15, y + 35 + 19 * k), ln[k], 0, 0, C_LABEL2, 0);
+            if (i + 1 < n) d_rrect(d, tx, y + THR_H - .5f, CONTENT_R - tx, .5f, 0, C_SEP);
         }
         return;
     }
@@ -1196,8 +1207,8 @@ static void page_messages(dc *d)
     float fy = cm_field_y();
     if (AS.thread == 0) cm_bubbles(d, PUSHED_TOP - 12, fy - 10);
     else {
-        d_text(d, TK_IT400, 16, MARGIN + 4, bl(TK_IT400, 16, TO_Y + 13), "To:", 0, 0, W(.5f), 0);
-        d_rrect(d, MARGIN, TO_Y + 44, CONTENT_W, .5f, 0, W(.14f));
+        d_text(d, TK_IT400, 16, MARGIN + 4, bl(TK_IT400, 16, TO_Y + 13), "To:", 0, 0, C_LABEL2, 0);
+        d_rrect(d, MARGIN, TO_Y + 44, CONTENT_W, .5f, 0, C_SEP);
     }
     if (CM.focus) kb_draw_r(d, cm_rows(), CM.shift, CM.num);
 }
@@ -1222,11 +1233,11 @@ static void cm_field_build(void)
         d_text(&d, TK_IT400, 16, MARGIN + 16, bl(TK_IT400, 16, fy + 10), s, 0, 0, INK, 0);
         if (CM.focus == 2) d_rrect(&d, MARGIN + 16 + tw(TK_IT400, 16, s, 0, 0) + 1, fy + 10, 2, 21, 1, ACCENT());
     } else {
-        d_text(&d, TK_IT400, 16, MARGIN + 16, bl(TK_IT400, 16, fy + 10), "Text Message", 0, 0, tk_hex(0xa9a9a9, 1), 0);
+        d_text(&d, TK_IT400, 16, MARGIN + 16, bl(TK_IT400, 16, fy + 10), "Text Message", 0, 0, C_LABEL2, 0);
         if (CM.focus == 2) d_rrect(&d, MARGIN + 15, fy + 10, 2, 21, 1, ACCENT());
     }
     int ok = cm_can_send();
-    d_rrect(&d, CONTENT_R - 38, fy + 1, 38, 38, 19, ok ? tk_hex(0x0a84ff, 1) : W(.16f));
+    d_rrect(&d, CONTENT_R - 38, fy + 1, 38, 38, 19, ok ? C_ACCENT : W(.16f));
     d_icon(&d, "send", CONTENT_R - 27, fy + 11, ok ? 1 : .5f);
     trim(&cmfld);
     cmfld.hidden = 0;
@@ -1240,7 +1251,7 @@ static void cm_to_build(void)
     if (CM.to[0]) d_text_box(&d, TK_IT400, 16, x, bl(TK_IT400, 16, TO_Y + 13), CONTENT_W - 50, 0, CM.to, 0, TK_TNUM, INK, 0);
     if (CM.focus == 1) d_rrect(&d, x + (CM.to[0] ? tw(TK_IT400, 16, CM.to, 0, TK_TNUM) + 1 : 0), TO_Y + 12, 2, 21, 1, ACCENT());
     if (CM.to[0] && cm_emergency(CM.to))
-        d_text_box(&d, TK_IT400, 12, x, bl(TK_IT400, 12, TO_Y + 31), CONTENT_W - 50, 0, "Emergency numbers can't be texted from Starbite OS", 0, 0, tk_hex(0xff6961, 1), 0);
+        d_text_box(&d, TK_IT400, 12, x, bl(TK_IT400, 12, TO_Y + 31), CONTENT_W - 50, 0, "Emergency numbers can't be texted from Starbite OS", 0, 0, C_RED, 0);
     trim(&cmto);
     cmto.hidden = 0;
 }

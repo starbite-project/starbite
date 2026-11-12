@@ -1,0 +1,45 @@
+id = "fd"
+name = "fd"
+summary = "A simple, fast alternative to find"
+description = """fd finds files and folders by name with sensible defaults: smart case, .gitignore aware, coloured output and parallel search."""
+category = "Utilities"
+licence = "MIT OR Apache-2.0"
+homepage = "https://github.com/sharkdp/fd"
+icon = "utilities-terminal"
+ram_mb = 15
+featured = false
+default = "release"
+touch = "poor"
+keywords = ["cli", "find", "files", "search", "terminal"]
+
+[launcher]
+exec = "bash -c \"(fd --version || fdfind --version) 2>/dev/null; echo 'Usage: fd PATTERN [PATH]   (Debian names it fdfind)'; exec bash -i\""
+terminal = true
+keyboard = true
+
+[release]
+provider = "github"
+repo = "sharkdp/fd"
+asset = "fd-v*-aarch64-unknown-linux-gnu.tar.gz"
+prerelease = false
+version_from = "regex:^v(.+)$"
+format = "tar"
+strip = 1
+bin = ["fd"]
+size_mb = 4
+
+[release.verify]
+github_digest = true
+
+[distro]
+apt = ["fd-find"]
+
+[runtime]
+needs = ["keyboard", "files"]
+note = "Debian installs the command as fdfind. No source method: fd 10.5 needs Rust 1.90, trixie has 1.85."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 8
+build_mb = 1000

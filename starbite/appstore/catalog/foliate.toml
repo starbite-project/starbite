@@ -1,0 +1,31 @@
+id = "foliate"
+name = "Foliate"
+summary = "Read e-books in style"
+description = """Foliate is a clean e-book reader for EPUB, MOBI, AZW3, FB2 and CBZ, with paged or scrolled layout, themes, bookmarks, notes and a dictionary lookup. Swipes turn pages."""
+category = "Office"
+licence = "GPL-3.0-or-later"
+homepage = "https://johnfactotum.github.io/foliate/"
+icon = "com.github.johnfactotum.Foliate"
+ram_mb = 200
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["ebook", "epub", "reader", "books"]
+
+[launcher]
+exec = "foliate"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["foliate"]
+
+[runtime]
+needs = ["files"]
+note = "Debian trixie has the same version as upstream's latest release (3.3.0); upstream's only binary is an arch-all .deb, so no separate release method."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 3
+build_mb = 500

@@ -1,0 +1,30 @@
+id = "loupe"
+name = "Image Viewer"
+summary = "View photos and images (Loupe)"
+description = """Loupe is GNOME's image viewer: swipe between pictures, pinch to zoom, rotate, and see image details. Supports JPEG, PNG, WebP, HEIC, AVIF, SVG and more."""
+category = "Graphics"
+licence = "GPL-3.0-or-later"
+homepage = "https://apps.gnome.org/Loupe/"
+icon = "org.gnome.Loupe"
+ram_mb = 100
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["image", "photo", "viewer", "gallery"]
+
+[launcher]
+exec = "loupe"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["loupe"]
+
+[runtime]
+needs = ["files"]
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 20
+build_mb = 1600

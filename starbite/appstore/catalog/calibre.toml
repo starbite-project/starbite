@@ -1,0 +1,46 @@
+id = "calibre"
+name = "calibre"
+summary = "E-book library manager, converter and viewer"
+description = """calibre organises an e-book library, converts between formats, edits EPUBs, fetches news and has its own viewer. The release method installs the upstream arm64 bundle (newest version, but large)."""
+category = "Office"
+licence = "GPL-3.0-only"
+homepage = "https://calibre-ebook.com"
+icon = "calibre-gui"
+ram_mb = 350
+featured = false
+default = "distro"
+touch = "poor"
+keywords = ["ebook", "library", "epub", "convert", "kindle"]
+
+[launcher]
+exec = "calibre"
+terminal = false
+keyboard = false
+
+[release]
+provider = "github"
+repo = "kovidgoyal/calibre"
+asset = "calibre-*-arm64.txz"
+prerelease = false
+version_from = "regex:^v(.+)$"
+format = "tar"
+strip = 0
+bin = ["calibre", "ebook-viewer", "ebook-convert", "ebook-edit"]
+size_mb = 650
+
+[release.verify]
+github_digest = true
+
+[distro]
+apt = ["calibre"]
+
+[runtime]
+apt = ["libegl1", "libopengl0", "libxkbcommon0", "libfontconfig1", "libnss3", "libxcb-cursor0"]
+needs = ["files"]
+note = "The upstream bundle is a 216 MB download (about 650 MB installed), so Debian's smaller package is the default. Desktop-style UI."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 25
+build_mb = 2500
