@@ -125,7 +125,13 @@ struct sbshm_hdr {
     uint32_t host_unix_s;           /* wall clock, seconds since 1970 UTC, updated every tick; 0 = unknown */
     int32_t host_tz_min;            /* the user's UTC offset in minutes (local = UTC + this) */
     uint32_t host_services;         /* SBSHM_SVC_*: which v3 services the host serves in this boot */
-    uint32_t pad0[2];
+    uint32_t host_surf_reading;     /* v3: the surface buffer (0 / 1) the host's GPU samples right now, SBSHM_NONE =
+                                     * none: the guest never renders into that buffer (it waits, or skips the frame).
+                                     * Zero-copy display: the GPU reads the front buffer in place (no CPU copy), so
+                                     * pixels must be opaque (X byte = 0xff) and written through a non-cacheable
+                                     * mapping (/dev/sbshm is write-combine = Normal non-cacheable). Honour it only
+                                     * when hdr.version >= 3 (a v2 host leaves 0 here). */
+    uint32_t pad0[1];
     /* ---- written by the guest ---- */
     uint32_t guest_state;
     uint32_t guest_heartbeat;       /* guestd, every frame / 100 ms */

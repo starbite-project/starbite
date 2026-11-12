@@ -152,6 +152,11 @@ int sbg_clip_set(const char *mime, const uint8_t *data, unsigned len);
 int sbg_notif_next(struct sbshm_notif *n);
 int sbg_notif_act(uint32_t id, uint32_t action);    /* 0 = the tap, 1..3 its buttons, SBSHM_NONE = dismissed */
 int sbg_keymod(uint32_t mods);                      /* SBSHM_MOD_* held for the next keys (the shell's key bar) */
+/* zero-copy display (Track A's gpucomp samples the front buffer in place): around each GPU compose that reads the
+ * guest surface: sbg_surf_reading(idx) before (the buffer index it samples), sbg_surf_done() after the GPU finished
+ * reading it. The guest never renders into a buffer being read. */
+void sbg_surf_reading(int idx);
+void sbg_surf_done(void);
 /* sbnet: queue one IP packet to the guest (1 ok, 0 dropped: no link or the ring is full) and the link config */
 int sbg_net_send(const uint8_t *pkt, unsigned len);
 void sbg_net_config(int link, int uplink, const uint8_t guest_ip[4], const uint8_t gw_ip[4], const uint8_t dns_ip[4],

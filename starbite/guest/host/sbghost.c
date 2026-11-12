@@ -283,6 +283,7 @@ static int load(const void *image, uint64_t image_size, const void *dtb, uint64_
     h->magic = SBSHM_MAGIC;
     h->version = svc ? SBSHM_VERSION_V3 : cfg.v2 ? SBSHM_VERSION_V2 : SBSHM_VERSION;
     h->host_services = svc;
+    h->host_surf_reading = SBSHM_NONE;
     if (svc & SBSHM_SVC_CLOCK) {
         int32_t tz = 0;
         h->host_unix_s = os->unix_s(&tz);
@@ -790,6 +791,16 @@ int sbg_notif_next(struct sbshm_notif *n)
 
 int sbg_notif_act(uint32_t id, uint32_t action) { return put(SBG_MSG_NOTIF_ACT, id, action, 0, 0); }
 int sbg_keymod(uint32_t mods) { return put(SBG_MSG_KEYMOD, mods, 0, 0, 0); }
+void sbg_surf_reading(int idx)
+{
+    HDR->host_surf_reading = idx == 0 || idx == 1 ? (uint32_t)idx : SBSHM_NONE;
+    sbshm_dmb();                                    /* published before the GPU starts reading */
+}
+void sbg_surf_done(void)
+{
+    sbshm_dmb();
+    HDR->host_surf_reading = SBSHM_NONE;
+}
 
 unsigned sbg_clip_get(char mime[40], uint8_t *buf, unsigned cap)
 {
