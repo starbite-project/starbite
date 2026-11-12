@@ -191,14 +191,17 @@ goto after_sweep
 call %D%\sb-soak.bat
 goto after_sweep
 :gd2
-rem T53: with sb-gd-ab.txt staged, an A/B of the threaded GL driver (sb-patches 0152): run A plain, run B with the flag
-rem file C:\ProgramData\Starbite\panthreaded (the game reads it when it starts), then the flag is removed again
+rem T53: with sb-gd-ab.txt staged, an A/B: run A plain, run B with a flag file C:\ProgramData\Starbite\FLAG (the game
+rem reads it when it starts), then the flag is removed again. FLAG = the first word of sb-gd-ab.txt (T55: glasync, the
+rem async present, sb-patches 0153); empty: panthreaded (T53, sb-patches 0152).
+set ABF=panthreaded
+if exist %D%\sb-gd-ab.txt for /f "usebackq tokens=1" %%a in ("%D%\sb-gd-ab.txt") do set ABF=%%a
 if not exist %D%\sb-gd-ab.txt call %D%\sb-gd.bat A
 if exist %D%\sb-gd-ab.txt (
   call %D%\sb-gd.bat A
-  echo on> C:\ProgramData\Starbite\panthreaded
+  echo on> C:\ProgramData\Starbite\%ABF%
   call %D%\sb-gd.bat B
-  del C:\ProgramData\Starbite\panthreaded
+  del C:\ProgramData\Starbite\%ABF%
 )
 :after_sweep
 echo shell surfaces opened %time% >> gputest.log

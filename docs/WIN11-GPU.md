@@ -2194,6 +2194,23 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   control) run ~20 s each (`SBGLZC_SECS`). Shows whether any windowed swap chain reaches the screen.
 - **Seen in passing:** msedge.exe (v100) fail-fasts in ucrtbase (0xc0000409) many times a day (gd-app-events).
 
+### 6.60 T53 read (threaded driver: no gain) and T55 staged: the async present (sb-patches 0153) (2026-11-13)
+
+- **T53 A/B, GD menu, glstats steady lines:** A (plain) 13.9-14.5 fps, interval ~70 ms, copy ~47 ms, gdi ~5 ms;
+  B (0152 threaded) 15.7-16.5 fps, interval ~61 ms, copy ~37 ms, gdi ~5 ms. The non-present part is ~19 ms in both:
+  threading removed none of it. B's small gain is all in the copy, which varies run to run (T51: 38-50 ms). B used
+  +230 MB working set (~700 vs ~465 MB) with memory load 87-91 %. **Not adopted.**
+- **Why threading can't help here:** the present maps the frame (waits for everything recorded) and copies it on
+  the game's thread, so the driver thread's work can't overlap anything.
+- **0153 async present:** the copy and GDI of frame N go to one kept helper thread (with the copy pool) while the
+  game draws frame N+1: frame time max(copy + GDI, game) instead of the sum. stw presents the back buffer and then
+  exchanges it (`stw_st_swap_framebuffer_locked`), so the presented texture is not drawn into during the next frame;
+  the job references it, the next present waits for the job first (one in flight). Only when the READ map is the BO
+  itself (`panfrost_sb_bo_cpu_range`, a 13-line helper in pan_resource.c); the map is let go at once. GDI through
+  the helper's own GetDC/ReleaseDC. Off unless `C:\ProgramData\Starbite\glasync` or `SB_GL_ASYNC=1`.
+  glstats: `mode async`, `async wait`, `frames ... async N`.
+- **T55** = T53 + the 0153 GD driver; the A/B flag file is now named in sb-gd-ab.txt (`glasync`).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

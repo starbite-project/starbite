@@ -1,0 +1,339 @@
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -2853,3 +2853,18 @@
+    pctx->clear_render_target = panfrost_clear_render_target;
+    pctx->clear_depth_stencil = panfrost_clear_depth_stencil;
+ }
++
++/* Starbite (sb-patches/0153, docs/WIN11-GPU.md 6.60): the CPU range of a resource's BO. wgl's async present checks
++ * that a READ map of a window's back buffer points into it (the BO itself, linear: no staging copy), so the pointer
++ * stays valid after the unmap while the resource is referenced. */
++bool panfrost_sb_bo_cpu_range(struct pipe_resource *p, const uint8_t **base, size_t *size);
++bool
++panfrost_sb_bo_cpu_range(struct pipe_resource *p, const uint8_t **base, size_t *size)
++{
++   struct panfrost_resource *rsc = p ? pan_resource(p) : NULL;
++   if (!rsc || !rsc->bo || !rsc->bo->ptr.cpu)
++      return false;
++   *base = (const uint8_t *)rsc->bo->ptr.cpu;
++   *size = panfrost_bo_size(rsc->bo);
++   return true;
++}
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -132,8 +132,8 @@
+ 
+ DEBUG_GET_ONCE_OPTION(sb_gl_present, "SB_GL_PRESENT", NULL)
+ 
+-enum wgl_pan_mode { WGL_PAN_PARALLEL, WGL_PAN_DIRECT, WGL_PAN_COPY };
+-static const char *const wgl_pan_mode_name[] = { "parallel", "direct", "copy" };
++enum wgl_pan_mode { WGL_PAN_PARALLEL, WGL_PAN_DIRECT, WGL_PAN_COPY, WGL_PAN_ASYNC };
++static const char *const wgl_pan_mode_name[] = { "parallel", "direct", "copy", "async" };
+ 
+ static simple_mtx_t wgl_pan_present_mtx = SIMPLE_MTX_INITIALIZER;
+ static void *wgl_pan_present_buf;   /* the converted frame, kept: no malloc per frame */
+@@ -257,9 +257,9 @@
+ static simple_mtx_t wgl_pan_stats_mtx = SIMPLE_MTX_INITIALIZER;
+ static struct {
+    int64_t freq, window_start, last_present;
+-   unsigned frames, hidden, by_mode[3];
++   unsigned frames, hidden, by_mode[4];
+    unsigned threads, width, height;
+-   struct wgl_pan_stat map, copy, gdi, interval, total;
++   struct wgl_pan_stat map, copy, gdi, interval, total, wait; /* wait: 0153, for the frame before's async job */
+ } wgl_pan_stats;
+ 
+ static int64_t
+@@ -295,7 +295,7 @@
+ /* One frame's times (ticks; copy/gdi < 0: that step didn't run). Prints and restarts the window every 10 s. */
+ static void
+ wgl_pan_stats_frame(int64_t start, int64_t map, int64_t copy, int64_t gdi, int mode, unsigned w, unsigned h,
+-                    bool hidden)
++                    bool hidden, int64_t wait)
+ {
+    int64_t end = wgl_pan_now();
+    simple_mtx_lock(&wgl_pan_stats_mtx);
+@@ -310,6 +310,8 @@
+    wgl_pan_stats.last_present = start;
+    wgl_pan_stats.frames++;
+    wgl_pan_stat_add(&wgl_pan_stats.map, map);
++   if (wait >= 0)
++      wgl_pan_stat_add(&wgl_pan_stats.wait, wait);
+    wgl_pan_stat_add(&wgl_pan_stats.total, end - start);
+    if (hidden) {
+       wgl_pan_stats.hidden++;
+@@ -326,19 +328,24 @@
+    int64_t window = end - wgl_pan_stats.window_start;
+    if (window >= 10 * wgl_pan_stats.freq) {
+       double secs = (double)window / (double)wgl_pan_stats.freq;
+-      char m[64], c[64], g[64], i[64], t[64];
++      char m[64], c[64], g[64], i[64], t[64], wt[64] = "";
+       wgl_pan_stat_print(m, sizeof(m), "map", &wgl_pan_stats.map);
+       wgl_pan_stat_print(c, sizeof(c), "copy", &wgl_pan_stats.copy);
+       wgl_pan_stat_print(g, sizeof(g), "gdi", &wgl_pan_stats.gdi);
+       wgl_pan_stat_print(i, sizeof(i), "interval", &wgl_pan_stats.interval);
+       wgl_pan_stat_print(t, sizeof(t), "present", &wgl_pan_stats.total);
++      if (wgl_pan_stats.wait.n) {
++         wt[0] = ';';
++         wt[1] = ' ';
++         wgl_pan_stat_print(wt + 2, sizeof(wt) - 2, "async wait", &wgl_pan_stats.wait);
++      }
+       fprintf(stderr,
+-              "sbumd: glstats %.1f s: %u frames (%.1f fps, %u hidden); %s; %s; %s; %s; %s; mode %s, %u threads, "
+-              "%ux%u (frames parallel %u, direct %u, copy %u)\n",
+-              secs, wgl_pan_stats.frames, wgl_pan_stats.frames / secs, wgl_pan_stats.hidden, m, c, g, i, t,
++              "sbumd: glstats %.1f s: %u frames (%.1f fps, %u hidden); %s; %s; %s; %s; %s%s; mode %s, %u threads, "
++              "%ux%u (frames parallel %u, direct %u, copy %u, async %u)\n",
++              secs, wgl_pan_stats.frames, wgl_pan_stats.frames / secs, wgl_pan_stats.hidden, m, c, g, i, t, wt,
+               wgl_pan_mode_name[wgl_panfrost_mode()], wgl_pan_pool.created ? wgl_pan_pool.threads : 1, w, h,
+               wgl_pan_stats.by_mode[WGL_PAN_PARALLEL], wgl_pan_stats.by_mode[WGL_PAN_DIRECT],
+-              wgl_pan_stats.by_mode[WGL_PAN_COPY]);
++              wgl_pan_stats.by_mode[WGL_PAN_COPY], wgl_pan_stats.by_mode[WGL_PAN_ASYNC]);
+       int64_t freq = wgl_pan_stats.freq, last = wgl_pan_stats.last_present;
+       memset(&wgl_pan_stats, 0, sizeof(wgl_pan_stats));
+       wgl_pan_stats.freq = freq;
+@@ -419,6 +426,220 @@
+    return shown;
+ }
+ 
++/* sb-patches/0153 (docs/WIN11-GPU.md 6.60): the async present. T51/T53 measured Geometry Dash's menu on the A55s at
++ * ~70 ms a frame: ~47 ms copying the frame out of write-combined memory, ~5 ms GDI, ~19 ms the game and the GL
++ * driver, one after the other on the game's thread. Here the copy and the GDI call of frame N run on one kept thread
++ * (with the copy pool) while the game draws frame N+1, so a frame costs max(copy + GDI, game) instead of the sum.
++ *  - Safe to read after SwapBuffers returns: stw presents the back buffer, then exchanges it with the front
++ *    (stw_st_swap_framebuffer_locked), so the next frame draws into the other texture. The job holds a reference
++ *    on the presented resource; the next present waits for the job (one frame in flight) before it hands out
++ *    another, and drops the reference on the game's thread.
++ *  - Only for a READ map that is the BO itself (linear: panfrost_sb_bo_cpu_range); the map is let go at once and
++ *    the BO's CPU mapping stays while the resource lives. Anything else (staging, no window) presents as before.
++ *  - GDI on the helper thread through its own GetDC(window)/ReleaseDC.
++ *  - Off unless SB_GL_ASYNC=1 or the file C:\ProgramData\Starbite\glasync exists (SB_GL_ASYNC=0 forces it off).
++ * glstats then says mode async; "copy"/"gdi" are the helper's, "async wait" is the game's wait for the frame
++ * before's job, and "present" is the game's whole time in SwapBuffers. */
++bool panfrost_sb_bo_cpu_range(struct pipe_resource *p, const uint8_t **base, size_t *size);
++
++static int wgl_pan_async_on = -1;
++
++static bool
++wgl_panfrost_async_enabled(void)
++{
++   int on = p_atomic_read(&wgl_pan_async_on);
++   if (on < 0) {
++      const char *env = getenv("SB_GL_ASYNC");
++      on = env ? env[0] == '1'
++               : GetFileAttributesA("C:\\ProgramData\\Starbite\\glasync") != INVALID_FILE_ATTRIBUTES;
++      p_atomic_set(&wgl_pan_async_on, on);
++      fprintf(stderr, "sbumd: gl present: async %s (%s)\n", on ? "on" : "off",
++              env ? "SB_GL_ASYNC" : "C:\\ProgramData\\Starbite\\glasync");
++   }
++   return on;
++}
++
++static struct {
++   SRWLOCK lock;
++   CONDITION_VARIABLE go, done;
++   bool created, failed, busy;   /* busy: a job handed to the helper and not finished */
++   struct pipe_resource *res;    /* the presented frame, referenced until the next join (game's thread) */
++   const uint8_t *map;
++   size_t stride;
++   unsigned w, h;
++   enum pipe_format format;
++   enum sb_present_kind kind;
++   HWND wnd;
++   int64_t copy_t, gdi_t;        /* the last finished job's (-1: none) */
++} wgl_pan_async = { SRWLOCK_INIT, CONDITION_VARIABLE_INIT, CONDITION_VARIABLE_INIT };
++
++/* The helper's job: copy into the kept buffer (the pool too), then GDI. Fields are stable while busy. */
++static void
++wgl_pan_async_run(void)
++{
++   unsigned w = wgl_pan_async.w, h = wgl_pan_async.h;
++   size_t row = (size_t)w * 4, size = row * h;
++   int64_t copy_t = -1, gdi_t = -1;
++
++   simple_mtx_lock(&wgl_pan_present_mtx);
++   int64_t t0 = wgl_pan_now();
++   if (size > wgl_pan_present_size) {
++      free(wgl_pan_present_buf);
++      wgl_pan_present_buf = malloc(size);
++      wgl_pan_present_size = wgl_pan_present_buf ? size : 0;
++   }
++   void *buf = wgl_pan_present_buf;
++   bool ok = buf != NULL;
++   if (ok) {
++      unsigned threads = wgl_pan_async.kind != SB_PRESENT_CONVERT ? wgl_pan_pool_threads() : 1;
++      if (threads > 1) {
++         struct sb_present_job job = {
++            .dst = buf, .dst_stride = row, .src = wgl_pan_async.map, .src_stride = wgl_pan_async.stride,
++            .width = w, .height = h, .bands = sb_present_band_count(h, threads), .kind = wgl_pan_async.kind,
++         };
++         wgl_pan_pool_run(&job);
++      } else if (wgl_pan_async.kind == SB_PRESENT_BGRX) {
++         sb_present_copy_rows(buf, row, wgl_pan_async.map, wgl_pan_async.stride, row, h);
++      } else if (wgl_pan_async.kind == SB_PRESENT_RGBX) {
++         sb_present_rgba_to_bgra_rows(buf, row, wgl_pan_async.map, wgl_pan_async.stride, w, h);
++      } else {
++         enum pipe_format f = wgl_pan_async.format;
++         ok = util_format_translate(util_format_is_srgb(f) ? PIPE_FORMAT_B8G8R8X8_SRGB : PIPE_FORMAT_B8G8R8X8_UNORM,
++                                    buf, (unsigned)row, 0, 0, f, wgl_pan_async.map, (unsigned)wgl_pan_async.stride,
++                                    0, 0, w, h);
++      }
++   }
++   int64_t t1 = wgl_pan_now();
++   copy_t = t1 - t0;
++   if (ok) {
++      HDC dc = GetDC(wgl_pan_async.wnd);
++      if (dc) {
++         wgl_panfrost_dib(dc, buf, w, w, h);
++         GdiFlush(); /* GDI has read the buffer before the next job overwrites it */
++         ReleaseDC(wgl_pan_async.wnd, dc);
++      }
++      gdi_t = wgl_pan_now() - t1;
++   }
++   simple_mtx_unlock(&wgl_pan_present_mtx);
++   wgl_pan_async.copy_t = copy_t;
++   wgl_pan_async.gdi_t = gdi_t;
++}
++
++static DWORD WINAPI
++wgl_pan_async_main(void *arg)
++{
++   (void)arg;
++   AcquireSRWLockExclusive(&wgl_pan_async.lock);
++   for (;;) {
++      while (!wgl_pan_async.busy)
++         SleepConditionVariableSRW(&wgl_pan_async.go, &wgl_pan_async.lock, INFINITE, 0);
++      ReleaseSRWLockExclusive(&wgl_pan_async.lock);
++      wgl_pan_async_run();
++      AcquireSRWLockExclusive(&wgl_pan_async.lock);
++      wgl_pan_async.busy = false;
++      WakeAllConditionVariable(&wgl_pan_async.done);
++   }
++   return 0;
++}
++
++/* The helper thread, created once and kept (pinned like the copy pool: never joined, never unloaded under it). */
++static bool
++wgl_pan_async_thread(void)
++{
++   if (wgl_pan_async.created || wgl_pan_async.failed)
++      return wgl_pan_async.created;
++   HMODULE self;
++   HANDLE t = NULL;
++   if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
++                          (LPCWSTR)(void *)wgl_pan_async_main, &self))
++      t = CreateThread(NULL, 64 * 1024, wgl_pan_async_main, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
++   if (!t) {
++      wgl_pan_async.failed = true;
++      fprintf(stderr, "sbumd: gl present: no async thread (error %lu): presents as before\n",
++              (unsigned long)GetLastError());
++      return false;
++   }
++   CloseHandle(t);
++   wgl_pan_async.created = true;
++   return true;
++}
++
++/* Game's thread: waits for the job before (if any), drops its resource; returns the wait, and its times. */
++static int64_t
++wgl_pan_async_join(int64_t *copy_t, int64_t *gdi_t)
++{
++   int64_t t0 = wgl_pan_now();
++   AcquireSRWLockExclusive(&wgl_pan_async.lock);
++   while (wgl_pan_async.busy)
++      SleepConditionVariableSRW(&wgl_pan_async.done, &wgl_pan_async.lock, INFINITE, 0);
++   struct pipe_resource *res = wgl_pan_async.res;
++   wgl_pan_async.res = NULL;
++   *copy_t = res ? wgl_pan_async.copy_t : -1;
++   *gdi_t = res ? wgl_pan_async.gdi_t : -1;
++   ReleaseSRWLockExclusive(&wgl_pan_async.lock);
++   pipe_resource_reference(&res, NULL);
++   return wgl_pan_now() - t0;
++}
++
++/* The async present of one frame; false: not possible here, present as before (nothing done, map untouched). */
++static bool
++wgl_panfrost_present_async(struct pipe_context *pipe, struct pipe_resource *res, HDC hDC, int64_t start)
++{
++   enum pipe_format format = res->format;
++   unsigned w = res->width0, h = res->height0;
++   HWND wnd = WindowFromDC(hDC);
++   if (!wnd || !wgl_pan_async_thread())
++      return false;
++
++   int64_t copy_t, gdi_t;
++   int64_t wait = wgl_pan_async_join(&copy_t, &gdi_t);
++
++   RECT clip;
++   bool hidden = IsIconic(wnd) || GetClipBox(hDC, &clip) == NULLREGION;
++   struct pipe_transfer *xfer;
++   int64_t t_map = wgl_pan_now();
++   const uint8_t *map = pipe_texture_map(pipe, res, 0, 0, PIPE_MAP_READ, 0, 0, w, h, &xfer);
++   t_map = wgl_pan_now() - t_map;
++   if (!map)
++      return true; /* as the sync path: nothing shown */
++   size_t stride = xfer->stride;
++   const uint8_t *base;
++   size_t size;
++   enum sb_present_kind kind = sb_present_kind(format);
++   bool direct = panfrost_sb_bo_cpu_range(res, &base, &size) && map >= base &&
++                 (size_t)(map - base) + stride * (h - 1) + (size_t)w * 4 <= size;
++   pipe_texture_unmap(pipe, xfer);
++   if (hidden || !direct || kind == SB_PRESENT_CONVERT) {
++      static int said;
++      if (!hidden && !said) {
++         said = 1;
++         fprintf(stderr, "sbumd: gl present: async not possible for this frame (%s); synchronous present\n",
++                 !direct ? "the map is not the BO itself" : "format conversion");
++      }
++      if (!hidden)
++         return false; /* the sync path maps again and counts this frame */
++      wgl_pan_stats_frame(start, t_map, copy_t, gdi_t, WGL_PAN_ASYNC, w, h, true, wait);
++      return true;
++   }
++
++   AcquireSRWLockExclusive(&wgl_pan_async.lock);
++   pipe_resource_reference(&wgl_pan_async.res, res);
++   wgl_pan_async.map = map;
++   wgl_pan_async.stride = stride;
++   wgl_pan_async.w = w;
++   wgl_pan_async.h = h;
++   wgl_pan_async.format = format;
++   wgl_pan_async.kind = kind;
++   wgl_pan_async.wnd = wnd;
++   wgl_pan_async.busy = true;
++   ReleaseSRWLockExclusive(&wgl_pan_async.lock);
++   WakeConditionVariable(&wgl_pan_async.go);
++
++   /* copy/gdi: the frame before's job (this one's are counted at the next present) */
++   wgl_pan_stats_frame(start, t_map, copy_t, gdi_t, WGL_PAN_ASYNC, w, h, false, wait);
++   return true;
++}
++
+ static void
+ wgl_panfrost_present(struct pipe_context *pipe, struct pipe_resource *res, HDC hDC)
+ {
+@@ -431,6 +652,14 @@
+ 
+    int64_t start = wgl_pan_now();
+ 
++   /* sb-patches/0153 */
++   if (wgl_panfrost_async_enabled() && wgl_panfrost_present_async(pipe, res, hDC, start))
++      return;
++   if (wgl_panfrost_async_enabled()) {
++      int64_t c, g;
++      (void)wgl_pan_async_join(&c, &g); /* one frame in flight at most, also across the sync fallback */
++   }
++
+    /* Nothing would be drawn: a minimized window, or a DC clipped to nothing. */
+    RECT clip;
+    HWND wnd = WindowFromDC(hDC);
+@@ -479,7 +708,7 @@
+       }
+    }
+ 
+-   wgl_pan_stats_frame(start, t_map, copy_t, gdi_t, used, w, h, hidden);
++   wgl_pan_stats_frame(start, t_map, copy_t, gdi_t, used, w, h, hidden, -1);
+ }
+ #endif
+ 

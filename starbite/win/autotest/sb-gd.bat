@@ -14,6 +14,7 @@ set G=C:\Program Files (x86)\Steam\steamapps\common\Geometry Dash
 cd /d %D%
 echo GD2 [%R%] start %date% %time% >> %L%
 if exist C:\ProgramData\Starbite\panthreaded (echo GD2 [%R%] threaded GL driver flag ON >> %L%) else (echo GD2 [%R%] threaded GL driver flag off >> %L%)
+if exist C:\ProgramData\Starbite\glasync (echo GD2 [%R%] async present flag ON >> %L%) else (echo GD2 [%R%] async present flag off >> %L%)
 if not exist "%G%\GeometryDash.exe" (echo GD2: Geometry Dash not installed >> %L% & exit /b 0)
 if not exist %D%\opengl32-gd.dll (echo GD2: no opengl32-gd.dll staged >> %L% & exit /b 0)
 set GDKIT=0
