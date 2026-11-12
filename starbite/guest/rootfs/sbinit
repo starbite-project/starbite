@@ -135,7 +135,7 @@ fi
 
 # ---- sbwl: the compositor (root; it owns the shm rings and /run/sbwl.sock, starts the apps as "user") ----
 # HOOK: mk-base.sh SBWL=/path/to/sbwl runs sbwl/install-rootfs.sh (-> /usr/bin/sbwl, /etc/sbwl/system-apps).
-trap 'sync' TERM
+trap '[ -x /usr/local/sbin/sbp9-mount ] && /usr/local/sbin/sbp9-mount -u; sync' TERM
 SBWL_BIN=/usr/bin/sbwl
 [ -x "$SBWL_BIN" ] || SBWL_BIN=/usr/local/bin/sbwl
 args=$(cat /etc/starbite/sbwl.args 2>/dev/null)

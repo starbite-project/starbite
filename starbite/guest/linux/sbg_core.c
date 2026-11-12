@@ -624,7 +624,18 @@ static struct platform_driver sbg_driver = {
 		.suppress_bind_attrs = true,	/* no unbind: the handlers stay registered */
 	},
 };
-module_platform_driver(sbg_driver);
+static int __init sbg_init(void)
+{
+	return platform_driver_register(&sbg_driver);
+}
+module_init(sbg_init);
+
+static void __exit sbg_exit(void)
+{
+	sbp9_exit();				/* the 9p transport is registered with 9pnet: take it back */
+	platform_driver_unregister(&sbg_driver);
+}
+module_exit(sbg_exit);
 
 MODULE_DESCRIPTION("Starbite OS guest: shared region, doorbells, power off without SYSTEM_OFF, sbblk, sbnet, sbp9, sbsnd");
 MODULE_LICENSE("GPL");
