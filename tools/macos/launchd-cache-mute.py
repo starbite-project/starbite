@@ -8,6 +8,10 @@ UserAccountUpdater never exited and loginwindow never launched Dock, Finder or S
 
   tools/macos/launchd-cache-mute.py IN OUT --label com.apple.remindd [--label com.apple.bluetoothd ...]
 
+IN may also be one job's own plist (binary or XML, e.g. /System/Library/LaunchAgents/com.apple.remindd.plist): S2x
+2026-11-13 showed launchd takes these jobs from their own plists, not from the cache (the cache edit changed their
+labels, launchd still ran them under the old ones).
+
 A binary plist stores each distinct string once, so the edit renames every use of a service name in the whole cache.
 The result is parsed again and compared with the original: if any value changes outside the named jobs, nothing is
 written. Prints both sha256s and every renamed name.
@@ -73,44 +77,61 @@ def main():
     data = bytearray(open(a.inp, 'rb').read())
     old = plistlib.loads(bytes(data))
     jobs = {}
-    for section, entries in old.items():
-        if isinstance(entries, dict):
-            for key, job in entries.items():
-                if isinstance(job, dict) and job.get('Label') in a.label:
-                    jobs[(section, key)] = job
+    single = isinstance(old, dict) and 'Label' in old
+    if single:
+        if old['Label'] in a.label:
+            jobs[()] = old
+    else:
+        for section, entries in old.items():
+            if isinstance(entries, dict):
+                for key, job in entries.items():
+                    if isinstance(job, dict) and job.get('Label') in a.label:
+                        jobs[(section, key)] = job
     found = {j['Label'] for j in jobs.values()}
-    if found != set(a.label):
+    if single and not found:
+        sys.exit(f'this plist is {old["Label"]}, not one of {" ".join(a.label)}')
+    if not single and found != set(a.label):
         sys.exit(f'not in this cache: {" ".join(sorted(set(a.label) - found))}')
     names = {s for j in jobs.values() for s in (j.get('MachServices') or {})}
     if not names:
         sys.exit('the named jobs have no MachServices')
-    offs, _, _ = objects(data)
     renamed = {}
-    for o in offs:
-        s = ascii_string(data, o)
-        if not s:
-            continue
-        p, n = s
-        text = data[p:p + n].decode('ascii', 'replace')
-        if text in names:
-            last = ord('Z') if data[p + n - 1] == ord('X') else ord('X')
-            data[p + n - 1] = last
-            renamed[text] = data[p:p + n].decode()
+    if data[:8] == b'bplist00':
+        offs, _, _ = objects(data)
+        for o in offs:
+            s = ascii_string(data, o)
+            if not s:
+                continue
+            p, n = s
+            text = data[p:p + n].decode('ascii', 'replace')
+            if text in names:
+                last = ord('Z') if data[p + n - 1] == ord('X') else ord('X')
+                data[p + n - 1] = last
+                renamed[text] = data[p:p + n].decode()
+    else:
+        # XML: every element text equal to a service name (<key>...</key>, and the Label's <string>), same length
+        for t in sorted(names, key=len, reverse=True):
+            new_t = t[:-1] + ('Z' if t.endswith('X') else 'X')
+            for tag in (b'key', b'string'):
+                pat = b'<' + tag + b'>' + t.encode() + b'</' + tag + b'>'
+                if pat in data:
+                    data[:] = data.replace(pat, b'<' + tag + b'>' + new_t.encode() + b'</' + tag + b'>')
+                    renamed[t] = new_t
     if set(renamed) != names:
         sys.exit(f'service names not stored as ASCII strings: {" ".join(sorted(names - set(renamed)))}')
     new = plistlib.loads(bytes(data))
     changes = []
     diff(old, new, (), changes)
-    inside = [c for c in changes if len(c) >= 2 and (c[0], c[1]) in jobs]
+    inside = changes if single else [c for c in changes if len(c) >= 2 and (c[0], c[1]) in jobs]
     outside = [c for c in changes if c not in inside]
-    for (section, key), job in jobs.items():
-        ms = new[section][key].get('MachServices') or {}
+    for where, job in jobs.items():
+        ms = (new if where == () else new[where[0]][where[1]]).get('MachServices') or {}
         if len(ms) != len(job['MachServices']) or set(ms) & names:
             sys.exit(f'{job["Label"]}: renamed services collide')
     if outside:
         sys.exit('values outside the named jobs would change too, refusing:\n  ' + '\n  '.join(map(str, outside[:20])))
     open(a.out, 'wb').write(data)
-    print(f'{len(jobs)} job(s): ' + ', '.join(f'{j["Label"]} ({k[1]})' for k, j in jobs.items()))
+    print(f'{len(jobs)} job(s): ' + ', '.join(f'{j["Label"]} ({k[1] if k else "own plist"})' for k, j in jobs.items()))
     for t in sorted(renamed):
         print(f'  {t} -> {renamed[t]}')
     print(f'{len(changes)} value(s) changed, all inside those jobs; size {len(data)} (unchanged)')
