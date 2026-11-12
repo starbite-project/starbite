@@ -110,11 +110,14 @@ export LIBGL_ALWAYS_SOFTWARE=1 GTK_USE_PORTAL=0 SAL_USE_VCLPLUGIN=gtk3 XDG_SESSI
 export XDG_CURRENT_DESKTOP=Starbite HOME=/root
 
 # ---- sbpkg: the App Store daemon (root: it runs apt in the overlay), restarted if it exits ----
-if [ "$PKG" = 1 ] && [ -x /usr/local/sbin/sbpkg ]; then
+# Track F's engine when the base has it (same socket lines, same store table), else sbpkg
+STORED=/usr/local/sbin/sbpkg
+[ -x /usr/local/sbin/sbstore ] && STORED="/usr/local/sbin/sbstore daemon"
+if [ "$PKG" = 1 ] && [ -x "${STORED%% *}" ]; then
     (
         while true; do
-            /usr/local/sbin/sbpkg </dev/null >/dev/null 2>/dev/kmsg
-            log "sbpkg exited ($?); starting it again in 2 s"
+            $STORED </dev/null >/dev/null 2>/dev/kmsg
+            log "${STORED##*/} exited ($?); starting it again in 2 s"
             sleep 2
         done
     ) &
