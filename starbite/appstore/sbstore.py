@@ -60,7 +60,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-VERSION = "1.1"
+VERSION = "1.1.1"
 METHODS = ("distro", "release", "source")          # method numbers 1, 2, 3 (SBG_PKG_M_*)
 M_NUM = {"distro": 1, "release": 2, "source": 3}
 M_NAME = {v: k for k, v in M_NUM.items()}
@@ -178,6 +178,9 @@ HINTS = {
                       "It isn't installed by the store, so there was nothing to remove."),
     "internal error": ("The store hit a bug",
                        "Tap GET to try again. If it happens again, the details are in /var/log/sbstore/jobs.log."),
+    "apt lists broken": ("Linux's package list is damaged",
+                         "The store tried to repair it and couldn't. Restart Linux (close all Linux apps), then try "
+                         "again. Details: /var/log/sbstore/{id}.log."),
     "interrupted": ("Stopped part-way",
                     "The install was interrupted (Linux stopped or the phone restarted). Tap GET again."),
 }
@@ -1005,11 +1008,98 @@ def ensure_mirror_source():
         return False
 
 
+APT_LISTS_BROKEN = re.compile(r"Splitting of clearsigned file|could not be parsed or opened|"
+                              r"Encountered a section with no Package|Problem with MergeList|"
+                              r"The package lists or status file could not be parsed")
+
+
+def lists_repair(app_id=None):
+    """apt's saved indexes after an unclean stop (cp3: the overlay's ext4 'recovery complete', then
+    lists/_repo_._Release was damaged and every apt command failed with 'Splitting of clearsigned file ... failed'):
+    an empty file, NUL bytes, or a clearsigned file without its end is removed; apt rebuilds it on the next update
+    (the file: sources at once, offline). Returns how many were removed."""
+    d = rp("/var/lib/apt/lists")
+    bad = []
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return 0
+    for n in names:
+        p = os.path.join(d, n)
+        if n == "lock" or not os.path.isfile(p):
+            continue
+        try:
+            with open(p, "rb") as f:
+                head = f.read(1 << 16)
+                if n.endswith(("Release", "InRelease")) and head.startswith(b"-----BEGIN PGP SIGNED MESSAGE"):
+                    whole = head + f.read()
+                    ok = b"-----END PGP SIGNATURE-----" in whole and b"\0" not in whole
+                else:
+                    ok = bool(head) and b"\0" not in head
+                    if ok and len(head) == 1 << 16:          # big indexes: the tail as well (a cut write ends in NULs)
+                        f.seek(-4096, 2)
+                        ok = b"\0" not in f.read()
+        except OSError:
+            ok = False
+        if not ok:
+            bad.append(n)
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+    if bad:
+        log("removed %d damaged apt list file(s) (an unclean stop?): %s" % (len(bad), " ".join(sorted(bad)[:6])), app_id)
+    return len(bad)
+
+
+def lists_fresh(app_id=None):
+    """apt's saved indexes started afresh: the folder moved aside whole (a damaged entry that can't even be deleted, as
+    after an ext4 recovery, doesn't stop a rename of its folder), a new empty one; apt update fills it (offline: file:)"""
+    d = rp("/var/lib/apt/lists")
+    aside = "%s.broken-%d" % (d, int(time.time()))
+    try:
+        os.rename(d, aside)
+        log("apt's saved indexes moved aside to %s; starting them afresh" % aside, app_id)
+        shutil.rmtree(aside, ignore_errors=True)
+    except OSError as e:
+        log("moving apt's saved indexes aside: %s" % e, app_id)
+        shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(os.path.join(d, "partial"), exist_ok=True)
+
+
+def status_repair(app_id=None):
+    """dpkg's status damaged by an unclean stop (NUL bytes): dpkg's own previous copy (status-old) back, the damaged one
+    kept as status.broken. Returns True when restored."""
+    st, old = rp("/var/lib/dpkg/status"), rp("/var/lib/dpkg/status-old")
+    try:
+        with open(st, "rb") as f:
+            cur = f.read()
+    except OSError:
+        return False
+    if cur and b"\0" not in cur:
+        return False
+    try:
+        with open(old, "rb") as f:
+            prev = f.read()
+    except OSError:
+        log("dpkg's status is damaged and there is no status-old to restore", app_id)
+        return False
+    if not prev or b"\0" in prev:
+        log("dpkg's status is damaged and status-old is too", app_id)
+        return False
+    shutil.copyfile(st, st + ".broken")
+    with open(st + ".tmp", "wb") as f:
+        f.write(prev)
+    os.replace(st + ".tmp", st)
+    log("dpkg's status was damaged (an unclean stop?): restored from status-old; the damaged copy is status.broken", app_id)
+    return True
+
+
 def repair(app_id=None, at_start=False):
     """put back what an interrupted job left (Linux stopped, the phone restarted, the screen slept and the guest was
     stopped mid-dpkg): dpkg's half-configured packages, then apt's broken dependencies; at the daemon's start also the
     leftover build trees and unpacked-but-not-switched versions. Returns True when something was repaired."""
-    did = False
+    did = bool(status_repair(app_id)) | bool(lists_repair(app_id))
     upd = rp("/var/lib/dpkg/updates")
     try:
         pending = [f for f in os.listdir(upd) if f.isdigit()]
@@ -1100,7 +1190,14 @@ def apt_install(pkgs, app_id, prog=NOPROG, cancel=None, auto=False):
     if ensure_mirror_source():                           # the mirror's debs (build deps offline) just appeared
         run(C.apt + ["-q", "update"], logto=_logp(app_id), timeout=600, cancel=cancel)
     rc, out = _apt_get_install(missing, app_id, prog, cancel)
-    if rc and ("Unable to locate package" in out or "has no installation candidate" in out) and net_up():
+    if rc and APT_LISTS_BROKEN.search(out) and not (cancel and cancel()):
+        log("apt can't read its saved indexes: repairing them and updating", app_id)
+        status_repair(app_id)
+        lists_repair(app_id)
+        lists_fresh(app_id)                             # (a file the checks pass, or one the filesystem won't delete)
+        run(C.apt + ["-q"] + APT_NET_OPTS + ["update"], logto=_logp(app_id), timeout=900, cancel=cancel)
+        rc, out = _apt_get_install(missing, app_id, prog, cancel)
+    if rc and ("Unable to locate package" or "has no installation candidate" in out) and net_up():
         ensure_net_sources()
         run(C.apt + ["-q", "update"], logto=_logp(app_id), timeout=900)
         rc, out = _apt_get_install(missing, app_id, prog, cancel)
@@ -1109,6 +1206,8 @@ def apt_install(pkgs, app_id, prog=NOPROG, cancel=None, auto=False):
             raise NeedsNet("package not available", "apt: %s" % out.strip().splitlines()[-1][:200])
         if "No space left" in out:
             raise StoreError("not enough space", "apt: no space left")
+        if APT_LISTS_BROKEN.search(out):
+            raise StoreError("apt lists broken", "apt: %s" % out[-300:])
         if "unmet dependencies" in out or "Unable to satisfy dependencies" in out or "held broken packages" in out:
             if net_up(force=True):
                 raise StoreError("install failed", "apt: unmet dependencies: %s" % out[-300:])
@@ -2541,6 +2640,14 @@ class Daemon:
                 return                                  # apt's lists first (a slow network: not for ever)
             log("apt-get update: %s" % ("ok" if rc == 0 else "still running, jobs go ahead" if rc is None else
                                         "rc %d (offline sources still read)" % rc))
+            if rc and not self.net["up"] and not getattr(self, "lists_redone", False):
+                # offline only file: sources are read: a failure means apt's own indexes (cp3); afresh, once
+                self.lists_redone = True
+                lists_repair()
+                lists_fresh()
+                rc2 = subprocess.call(C.apt + ["-q", "update"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL)
+                log("apt-get update after starting its indexes afresh: %s" % ("ok" if rc2 == 0 else "rc %d" % rc2))
             self.aptup = None                           # (a slow one carries on detached; apt's lock serialises)
         idx, op, method = self.queue.pop(0)
         me = [sys.executable, os.path.abspath(__file__)]

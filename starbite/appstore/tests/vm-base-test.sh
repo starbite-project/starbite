@@ -40,6 +40,9 @@ fi
 sudo mkdir -p "$M/tmp/appstore/tests"; sudo cp "$here/../sbstore.py" "$M/tmp/appstore/sbstore.py"
 sudo cp "$here/vm-daemon-test.py" "$M/tmp/appstore/tests/vm-daemon-test.py"
 [ "${SBSTORE_NEW:-0}" = 1 ] && sudo install -m 755 "$here/../sbstore.py" "$M/usr/local/sbin/sbstore"   # this tree's engine
+if [ "${CORRUPT_LISTS:-0}" = 1 ]; then    # cp3: an unclean stop left apt's saved index of /repo damaged
+    sudo chroot "$M" sh -c 'apt-get -q update >/dev/null 2>&1; f=/var/lib/apt/lists/_repo_._Release; n=$(stat -c %s "$f"); { printf "%s\n" "-----BEGIN PGP SIGNED MESSAGE-----" "Hash: SHA512" ""; cat "$f"; } | head -c "$n" > "$f.x" && mv "$f.x" "$f" && touch -r /repo/Release "$f"; ls -la "$f"; apt-get -q update 2>&1 | tail -2; apt-get -s install nautilus 2>&1 | tail -2'
+fi
 echo "base $(sha256sum "$BASE" | cut -c1-16), repo $(sha256sum "$REPOIMG" | cut -c1-16), overlay fresh 2G (the phone's size)"
 sudo chroot "$M" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C.UTF-8 \
     SBSTORE_OFFLINE=1 SBSTORE_BIN=/usr/local/sbin/sbstore SBSTORE_MIRROR=$MIRROR \

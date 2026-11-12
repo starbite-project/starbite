@@ -40,6 +40,13 @@ def closure(pkgs):
         todo += db["available"].get(p, {}).get("depends", [])
     return out
 
+once = os.environ.get("FAKEAPT_LISTS_BROKEN_ONCE")   # cp3: apt can't read its saved index until the lists are redone
+if once and tool == "apt-get" and "install" in args and os.path.exists(once):
+    lists = os.path.dirname(once)
+    if os.path.exists(os.path.join(lists, "_repo_._Packages")):   # (the lists still the old ones: still broken)
+        print("E: Splitting of clearsigned file /var/lib/apt/lists/_repo_._Release failed as it doesn't contain all expected parts")
+        print("E: The package lists or status file could not be parsed or opened.")
+        save(); sys.exit(100)
 if tool == "apt-get":
     verb, pk = (words[0] if words else ""), words[1:]
     if verb == "update":

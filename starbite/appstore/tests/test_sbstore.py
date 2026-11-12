@@ -877,6 +877,51 @@ class CardEngine(unittest.TestCase):
 
 
 class Repair(unittest.TestCase):
+    def test_lists_apt_cant_read_are_started_afresh(self):
+        e = Env()
+        try:
+            lists = e.path("/var/lib/apt/lists")
+            os.makedirs(lists)
+            for n in ("_repo_._Release", "_repo_._Packages"):          # they pass the checks; apt still fails
+                with open(os.path.join(lists, n), "w") as f:
+                    f.write("Origin: x\n")
+            e.run("install", "hello", "--method", "distro",
+                  FAKEAPT_LISTS_BROKEN_ONCE=os.path.join(lists, "_repo_._Release"))
+            self.assertEqual(os.listdir(lists), ["partial"])
+            self.assertIn("2.10-3", e.state()["apps"]["hello"]["version"])
+            self.assertIn("starting them afresh", open(e.path("/var/log/sbstore/hello.log")).read())
+        finally:
+            e.close()
+
+    def test_damaged_apt_lists_and_status_after_an_unclean_stop(self):
+        """cp3: the overlay's ext4 recovered after a hard stop; lists/_repo_._Release was damaged and every apt
+        command failed ('Splitting of clearsigned file ... failed')"""
+        e = Env()
+        try:
+            lists = e.path("/var/lib/apt/lists")
+            os.makedirs(lists)
+            with open(os.path.join(lists, "_repo_._Release"), "wb") as f:
+                f.write(b"\0" * 2048)
+            with open(os.path.join(lists, "_repo_._InRelease"), "wb") as f:
+                f.write(b"-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA512\n\nOrigin: x\n")   # cut short
+            with open(os.path.join(lists, "_repo_._Packages"), "wb") as f:
+                f.write(b"Package: hello-deb\nVersion: 2.10-3\n\n")
+            dk = e.path("/var/lib/dpkg")
+            os.makedirs(dk)
+            with open(os.path.join(dk, "status"), "wb") as f:
+                f.write(b"Package: basepkg\n" + b"\0" * 512)
+            with open(os.path.join(dk, "status-old"), "wb") as f:
+                f.write(b"Package: basepkg\nStatus: install ok installed\n\n")
+            e.run("install", "hello", "--method", "distro")
+            self.assertEqual(sorted(os.listdir(lists)), ["_repo_._Packages"])
+            self.assertEqual(open(os.path.join(dk, "status"), "rb").read(),
+                             b"Package: basepkg\nStatus: install ok installed\n\n")
+            self.assertTrue(os.path.exists(os.path.join(dk, "status.broken")))
+            lg = open(e.path("/var/log/sbstore/hello.log")).read()
+            self.assertIn("removed 2 damaged apt list file(s)", lg)
+        finally:
+            e.close()
+
     def test_interrupted_dpkg_is_repaired_before_the_next_install(self):
         e = Env()
         try:
