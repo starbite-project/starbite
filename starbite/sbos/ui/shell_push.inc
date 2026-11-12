@@ -221,8 +221,9 @@ static void ps_lap(uint64_t us)
     b[n++] = ' '; b[n++] = 'u'; b[n++] = 's'; b[n] = 0;
     tk_log(b);
 }
-/* the picture of the screen now (the page about to go), half resolution, the status band painted as the ground */
-static int ps_snap(void)
+/* the picture of the screen now (the page about to go), half resolution, the status band painted as the ground
+ * (clear: see-through, for a modal page going down: no dark bar on its top edge) */
+static int ps_snap(int clear)
 {
     uint64_t t0 = tk_us();
     if (!pshot.bmp.px) {
@@ -232,14 +233,14 @@ static int ps_snap(void)
     }
     if (!C->gpu && C->last_half) tk_comp_frame(C, 0, 0);     /* the CPU's RAM frame after a moving one: whole first */
     tk_bmp_down2(&pshot.bmp, shown_frame());
-    tk_fill_rect_raw(&pshot.bmp, 0, 0, pshot.bmp.w, (int)(PT(SAFE_TOP) / 2), appbg.solid);   /* (the status bar stays) */
+    tk_fill_rect_raw(&pshot.bmp, 0, 0, pshot.bmp.w, (int)(PT(SAFE_TOP) / 2), clear ? 0 : appbg.solid);   /* (the status bar stays) */
     if (KB.shown && !kbg.hidden) {                     /* the keyboard stays too (it goes down on its own) */
         int y0 = tk_maxi(0, (int)(PT(kb_top()) / 2) - 2);
         if (y0 < pshot.bmp.h) tk_fill_rect_raw(&pshot.bmp, 0, y0, pshot.bmp.w, pshot.bmp.h - y0, appbg.solid);
     }
     pshot.sx = pshot.sy = 2;
     pshot.ox = pshot.oy = 0;
-    pshot.opaque = 1;
+    pshot.opaque = !clear;
     pshot.alpha = 1;
     tk_layer_dirty(&pshot);
     ps_lap(tk_us() - t0);
@@ -276,7 +277,7 @@ static void ps_will_build(void)
     if (PS.silent) return;
     if (PS.mode != PSM_NONE || PS.edge == 2) { PS.edge = 0; ps_rest(); }
     if (ps_quiet() || !ps_ready()) { ps_free(); return; }
-    if (!ps_snap()) { ps_free(); return; }
+    if (!ps_snap(dir == -2)) { ps_free(); return; }
     PS.kept = dir == 1;                        /* a pushed page keeps its parent's picture (the edge swipe) */
     PS.p = 0;
     if (dir == 1) ps_begin(PSM_PUSH, 1, 0);
@@ -413,7 +414,7 @@ static int ps_touch(int phase, float x, float y, float t)
     }
     /* no parent's picture: the page's picture as it is now, the back now, the picture finishing the slide over it */
     float p0 = w / 390;
-    if (!ps_snap()) { ps_rest(); ps_do_back(t); return 1; }
+    if (!ps_snap(0)) { ps_rest(); ps_do_back(t); return 1; }
     ps_do_back(t);
     PS.p = p0;
     ps_begin(PSM_POP, 0, p0);
