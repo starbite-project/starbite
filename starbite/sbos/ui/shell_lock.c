@@ -3445,8 +3445,11 @@ static float gen_row_y(const appdef *A, int s, int r)
 }
 
 static int ap_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c);
+static void ps_will_build(void);                        /* cp6: shell_push.inc (iOS's push / pop) */
+static void ps_link(tk_layer **ag, int n);
 static void build_app_page(int a)
 {
+    ps_will_build();                                    /* cp6: a page change slides (the screen's picture first) */
     const infopg *inf = info_of(APPS[a].k);
     int own = app_own(a);
     ap_pending = 0;
@@ -3722,8 +3725,9 @@ static void sl_place(void)
     else if (SL.dir > 0) {
         float e = tk_bezier(.2f, .7f, .2f, 1, SL.t);
         a = 1 - tk_minf(1, SL.t * 1.6f) * (2 - tk_minf(1, SL.t * 1.6f));     /* the black goes in 60 % of the time */
-        (void)e;
-        s = 1;      /* P2v: no growing (the phone: a scaled lock is 15 ms a frame; at 1:1 its half copies draw fast) */
+        /* P2v cut the growing (the phone's CPU: a scaled lock is 15 ms a frame); cp6: back on the GPU row in normal mode
+         * (it scales layers for free), from 1.05 as the concept; the CPU row and Emergency / Last 2 % stay at 1:1 */
+        s = SL.back || !C || !C->gpu || EMG || sh_last2() ? 1 : 1.05f - .05f * e;
     }
     slp.alpha = a;
     slp.hidden = a <= 0;
@@ -4448,7 +4452,7 @@ static void relink(void)
     pc_link();                                       /* Track A: the passcode screen (under the call screen) */
     isl_link();                                      /* B7: the capsule, the pill and its words */
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &emsel, &kbg, &emp, &apsb, &apphl };
-    link(&appg, ag, 16);                             /* B3: emsel the edit menu's selection, emp its pill */
+    ps_link(ag, 16);                                 /* B3: emsel, emp the edit menu's; cp6: the content in pushg (the slide) */
     kb_link();                                       /* B3: the keyboard's panel, keys, lit key and balloon */
     tk_layer *st[NST + 64] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     int na = NST + med_layers(st + NST);
@@ -4957,6 +4961,7 @@ static int notes_hold(float t)
     return 1;
 }
 
+#include "shell_push.inc"                           /* cp6: iOS's push / pop between an app's pages, the edge swipe */
 void sh_touch(int phase, float x, float y, float t)
 {
     now_ms = t;
@@ -4967,6 +4972,7 @@ void sh_touch(int phase, float x, float y, float t)
     if (pc_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* Track A: the passcode screen (over the kit's modals) */
     if (kit_touch(phase, x, y, t)) { if (T.kind == G_SET) se_touch(2, -1, -1, t); T.kind = G_NONE; hl_off(); return; }   /* helper B2: modal */
     if (ta_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* Track A: the zone list's scroll */
+    if (ps_touch(phase, x, y, t)) return;                         /* cp6: the left-edge swipe back (shell_push.inc) */
     if (phase == 0) {
         tk_tracker_reset(&T.tr);
         T.moved = 0;
@@ -5456,6 +5462,7 @@ void sh_wake(void)
     SL.dir = 1;
     SL.black = 0;
     SL.t = SL.back ? (1 - tk_sqrtf(tk_clampf(a, 0, 1))) / 1.6f : 0;    /* the wake's opacity curve inverted */
+    if (!EMG && !sh_last2()) sh_perf_hold(700);   /* cp6: no touch started it: the top clocks for the scale-in */
     sl_place();
 }
 
@@ -5526,6 +5533,7 @@ int sh_tick(float dt, float t)
         mv = 1;
     }
     mv |= ico_step(dt);                          /* P3p: the pressed icon */
+    mv |= ps_tick(dt);                           /* cp6: a page's push / pop (shell_push.inc) */
     mv |= med_tick(dt);
     mv |= lx_tick(dt);                           /* L3, Track F: the App Store's page (scroll, momentum, builds) */
     ep_tick();                                   /* B6: Emergency's switch prepared during the hold, finished after */
@@ -5860,5 +5868,6 @@ int sh_moving(void)
     if (T.kind == G_APPTAP && !T.moved) { emt e; m |= em_target(T.x0, T.y0, &e); }   /* B3: a press on a text field: the long press's frames */
     m |= kit_moving() || se_moving();            /* helper B2 */
     m |= pc_moving();                            /* Track A */
+    m |= ps_moving();                            /* cp6 */
     return m;
 }
