@@ -2821,7 +2821,10 @@ static void drv_after_bake(void)
     struct sbos_battery b;
     battery_get(&b);
     nledpol_battery(b.ok, b.pct, b.charger);
-    nledpol_enable(1);
+    /* the notification LED's driver (nled.c) has not passed its phone probe yet: the policy runs only when the pref
+     * led.notify is 1 (Settings or the probe's request turns it on); the default leaves the LED as today */
+    if (sh_pref_int("led.notify", 0) == 1)
+        nledpol_enable(1);
 #endif
 }
 /* ---- end of Track A: drivers for the shell ---- */
