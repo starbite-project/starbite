@@ -658,6 +658,20 @@ void sh_haptic(void)
     (void)vib_pulse(10);
 #endif
 }
+/* B4: the feedback kinds (impact light / medium / heavy / soft / rigid, selection) as pulse lengths (the motor's PWM
+ * duty is fixed: a length stands for the strength); success / warning / error as short patterns (vib_buzz) */
+void sh_haptic_k(int kind)
+{
+#ifndef SBOS_SELFTEST_NEXT
+    static const unsigned MS[6] = { 8, 12, 18, 9, 6, 4 };
+    if (kind == SH_HAP_SUCCESS) (void)vib_buzz(2, 12, 60);
+    else if (kind == SH_HAP_WARNING) (void)vib_buzz(2, 12, 80);
+    else if (kind == SH_HAP_ERROR) (void)vib_buzz(3, 10, 50);
+    else (void)vib_pulse(MS[kind >= 0 && kind < 6 ? kind : 0]);
+#else
+    (void)kind;
+#endif
+}
 /* P3i: the shell's time outside the compositor (a tap that builds a page runs before the next frame: the pause
  * the user sees is this, not the frame's own time); logged when over 8 ms, counted per gesture */
 static void shell_time(const char *what, uint64_t t0)

@@ -14,7 +14,14 @@ static const float SPR[TK_NSPR][2] = {
     [TK_SPR_ROWS] = { 300, 30 },           /* .363, .866: rows and pages (kept) */
     [TK_SPR_CC] = { 246.7f, 31.4f },       /* .40, 1.0 (was 400 / 36) */
     [TK_SPR_PRESS] = { 438.6f, 25.1f },    /* .30, .6: a pressed control's gel (the glass spec's press) */
-    [TK_SPR_POP] = { 322.3f, 26.9f },      /* .35, .75: a toast, a banner, a module that expands */
+    [TK_SPR_POP] = { 322.3f, 26.9f },      /* .35, .75: a toast */
+    /* docs/design/IOS-REFERENCE.md (v1) 1, 2, 5, 16 */
+    [TK_SPR_MORPH] = { 246.7f, 25.1f },    /* .40, .80: the Control Centre's modules, a module's expand morph */
+    [TK_SPR_FAST] = { 385.5f, 39.3f },     /* .32, 1.0: the Control Centre's close */
+    [TK_SPR_BANNER] = { 195.0f, 22.3f },   /* .45, .80: a banner in (a slight overshoot) */
+    [TK_SPR_FAN] = { 246.7f, 26.7f },      /* .40, .85: a stack fans out / folds */
+    [TK_SPR_CARD] = { 322.3f, 30.5f },     /* .35, .85: switcher cards close a gap, the home bar's app-to-app slide */
+    [TK_SPR_GROW] = { 246.7f, 28.3f },     /* .40, .90: a switcher card grows back to the screen */
 };
 
 void tk_spring_start(tk_spring *s, float from, float to, float v0, int kind)

@@ -63,6 +63,15 @@ int sh_refresh(float t_ms);
 void sh_vibrate(void);
 void sh_year(int y);
 void sh_haptic(void);                     /* P3h: a key's light tap (the vibration motor, ~10 ms) */
+/* B4: iOS's feedback generators as motor pulses (docs/design/IOS-REFERENCE.md 17; lengths to tune on the phone) */
+enum { SH_HAP_LIGHT, SH_HAP_MEDIUM, SH_HAP_HEAVY, SH_HAP_SOFT, SH_HAP_RIGID, SH_HAP_SELECT, SH_HAP_SUCCESS, SH_HAP_WARNING,
+       SH_HAP_ERROR };
+void sh_haptic_k(int kind);
+/* B4: the app switcher's external entries (one per running Linux app): the provider (built with SW_EXT_PROVIDER)
+ * adds and removes them and defines sw_ext_title / sw_ext_icon / sw_ext_snapshot / sw_ext_open / sw_ext_close
+ * (shell_switcher.inc); without a provider nothing is added */
+void sw_ext_add(int subid);
+void sw_ext_remove(int subid);
 /* wifi-sbos-next: Wi-Fi for Settings > Wi-Fi, the status bar and the Control Centre. The platform pushes its state
  * with sh_wifi (only on a change); the shell asks with sh_wifi_power / _scan / _join / _fetch (< 0 refused). The
  * passphrase goes straight to the kernel's join (kept in RAM until a restart, never stored or logged); names and

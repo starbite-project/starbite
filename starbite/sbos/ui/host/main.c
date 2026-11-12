@@ -40,6 +40,7 @@ int sh_cellular(int on)
 void sh_brightness(int level) { fprintf(stderr, "brightness: level %d\n", level); }
 void sh_vibrate(void) { fprintf(stderr, "vibrate: the timer ran out\n"); }
 void sh_haptic(void) { }
+void sh_haptic_k(int kind) { (void)kind; }
 /* L2 + L3: Linux apps and the App Store (the kernel's platform is starbite/guest/next/gwin.c): host/linux_fake.inc,
  * a pretend Linux with a catalog and a store. SBTK_NO_LINUX_FAKE: none (starbite/guest/next/host/gwin-host.c links
  * gwin.c itself and drives the shell) */

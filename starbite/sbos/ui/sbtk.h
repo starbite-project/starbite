@@ -232,7 +232,8 @@ void tk_comp_idle(tk_comp *c);                            /* idle time: the half
 uint64_t tk_comp_bench(tk_comp *c, int kind);      /* the present's kernels vs uibench's loops, us */                         /* idle: make the visible layers' half copies */
 
 /* ---- motion: springs, the velocity tracker, gestures (tk_motion.c) ------------------------------------------ */
-enum { TK_SPR_UNLOCK, TK_SPR_OPEN, TK_SPR_CLOSE, TK_SPR_SHEET, TK_SPR_ROWS, TK_SPR_CC, TK_SPR_PRESS, TK_SPR_POP, TK_NSPR };
+enum { TK_SPR_UNLOCK, TK_SPR_OPEN, TK_SPR_CLOSE, TK_SPR_SHEET, TK_SPR_ROWS, TK_SPR_CC, TK_SPR_PRESS, TK_SPR_POP, TK_SPR_MORPH, TK_SPR_FAST,
+       TK_SPR_BANNER, TK_SPR_FAN, TK_SPR_CARD, TK_SPR_GROW, TK_NSPR };
 typedef struct {
     float x, v, to, eps, k, c;
     int live;
