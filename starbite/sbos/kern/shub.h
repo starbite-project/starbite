@@ -23,6 +23,18 @@ void shub_poll(void);
 /* The chip into standby and every register this driver changed back as it was found. Safe at any point. */
 void shub_leave(void);
 
+/* drivers track (shub_more.c, docs/drivers/SENSORS.md): more of the hub's sensors on a running hub.
+ * shub_enable_type: one SSP request for Samsung's sensor number type (sensor_list.h): on, "add sensor" 0xA1
+ * [type][s32 period_ms][s32 0][0]; off, "remove sensor" 0xA2 [type][s32 period_ms]. 0 sent; -1 not now (the hub is
+ * not running, or the previous request still waits for its echo: try again after the next shub_poll). */
+int shub_enable_type(unsigned type, unsigned period_ms, int on);
+/* sample: every sample of a sensor other than the accelerometer, magnetometer and step counter, as the hub sent it
+ * (d: the sample bytes, n their count, ts the hub's nanoseconds); poll: called at the end of every shub_poll. NULL:
+ * none. */
+typedef void (*shub_sample_fn)(unsigned type, const uint8_t *d, unsigned n, uint64_t ts);
+void shub_set_hooks(shub_sample_fn sample, void (*poll)(void));
+unsigned shub_starts(void);          /* how many times the hub reached "running" (a new start = sensors off again) */
+
 /* uitest.c's variants: one step a call, 1 when done (each restores every register before it ends) */
 int shub_probe_selftest_step(void);  /* starbite-os-shubprobe.img */
 int shub_selftest_step(void);        /* starbite-os-shub.img */

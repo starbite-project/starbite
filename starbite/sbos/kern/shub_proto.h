@@ -146,6 +146,8 @@ struct shp_rec {
     uint8_t accuracy, overflow;     /* magnetometer */
     uint32_t steps;                 /* step counter: steps since the last report */
     uint64_t ts;
+    const uint8_t *raw;             /* a sensor record: its sample bytes (inside the frame), as sent */
+    uint8_t raw_len;
 };
 /* the next record of a data frame from *off: 1, 0 the end, -1 a type or sensor of unknown length (drop the rest) */
 int shp_frame_next(const uint8_t *f, unsigned n, unsigned *off, struct shp_rec *r);

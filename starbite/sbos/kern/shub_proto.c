@@ -494,6 +494,19 @@ static unsigned sample_len(unsigned sensor)
     case 13: return 1;                      /* step detector */
     case 14: return 1;                      /* significant motion */
     case 18: return 4;                      /* step counter */
+    /* drivers track (shub_more.c): the rest of what starlte's firmware sends, from the same functions with starlte's
+     * defconfig (CONFIG_SENSORS_SSP_TMD4906, _LIGHT_REPORT_LUX without _LIGHT_MAX_GAIN_2BYTE, _IRDATA_FOR_CAMERA) */
+    case 2: return 13;                      /* magnetometer uncalibrated: 6 x s16, overflow */
+    case 7: return 3;                       /* proximity: u8 near, u16 adc */
+    case 9: return 18;                      /* light: u32 lux, s32 cct, u16 r g b w, u8 a_time, u8 a_gain */
+    case 10: return 2;                      /* proximity raw */
+    case 15: return 24;                     /* gyroscope uncalibrated */
+    case 24: return 12;                     /* light IR */
+    case 25: return 12;                     /* interrupt gyroscope */
+    case 29: return 3;                      /* proximity alert */
+    case 30: return 2;                      /* light flicker */
+    case 31: return 18;                     /* light CCT */
+    case 35: return 3;                      /* proximity pocket */
     default: return 0;
     }
 }
@@ -516,6 +529,8 @@ int shp_frame_next(const uint8_t *f, unsigned n, unsigned *off, struct shp_rec *
         if (!sl || n - o < sl + 8U)
             return -1;
         r->kind = SSP_REC_SENSOR;
+        r->raw = f + o;
+        r->raw_len = (uint8_t)sl;
         r->x = r->y = r->z = 0;
         r->accuracy = r->overflow = 0;
         r->steps = 0;
