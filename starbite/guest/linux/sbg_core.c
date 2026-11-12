@@ -80,7 +80,7 @@ static void sbg_flexpmu_last(void)
 {
 	u64 mpidr = read_cpuid_mpidr();
 	unsigned int lvl = (mpidr & MPIDR_MT_BITMASK) ? 1 : 0;
-	unsigned int phy = (MPIDR_AFFINITY_LEVEL(mpidr, 1 + lvl) << 2) | MPIDR_AFFINITY_LEVEL(mpidr, lvl);
+	unsigned int phy = (MPIDR_AFFINITY_LEVEL(mpidr, (1 + lvl)) << 2) | MPIDR_AFFINITY_LEVEL(mpidr, lvl);
 	u32 b = phy >= 4 ? BIT(phy - 4) : BIT(phy + 4);
 
 	if (!fp_pmu || !fp_intr || !fp_mbox || phy > 7)

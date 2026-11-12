@@ -1,0 +1,147 @@
+#!/bin/sh
+# /sbin/sbinit of sbnet's test base image (v3test/net-run.sh builds it): the stand-in for the desktop root's init.
+# Starts /sbin/sbnet-up (the real root's config applier) and checks sbnet0 against sbsim's NAT stand-in
+# (sbsim/sim_net.c): the config from sysfs applied, ping (gateway and a far address through the default route, MTU-
+# size packets), a UDP echo round trip, DNS (by hand and through /etc/resolv.conf), a UDP flood both ways (MiB/s), a
+# link flap (carrier off and on again, the uplink switched, the config re-applied). One "v3-test: net: PASS|FAIL
+# <what>: ..." line per check to the kernel log (the host reads it: ramoops), then a summary line, V3-TEST-DONE (and
+# SBBLK-TEST-DONE, which sbsim's BLKTEST flag waits for), then a power-off through sbguest.ko.
+# Kernel command line: sbnet.mb=MiB for the flood (20), sbnet.flap=0 skips the flap.
+export PATH=/bin:/sbin
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+mkdir -p /etc
+mb=20
+flap=1
+for a in $(cat /proc/cmdline); do
+    case "$a" in
+    sbnet.mb=*) mb=${a#sbnet.mb=} ;;
+    sbnet.flap=*) flap=${a#sbnet.flap=} ;;
+    esac
+done
+fails=0
+passes=0
+say() { echo "v3-test: net: $*" > /dev/kmsg; }
+P() { echo "v3-test: net: PASS $*" > /dev/kmsg; passes=$((passes + 1)); }
+F() { echo "v3-test: net: FAIL $*" > /dev/kmsg; fails=$((fails + 1)); }
+ms() { t=$(cut -d' ' -f1 /proc/uptime); echo "${t%.*}${t#*.}0" | sed 's/^0*\([0-9]\)/\1/'; }
+finish() {
+    if [ $fails = 0 ] && [ $passes -gt 0 ]; then
+        echo "v3-test: net: PASS all $passes checks" > /dev/kmsg
+    else
+        echo "v3-test: net: FAIL $fails of $((passes + fails)) checks failed" > /dev/kmsg
+    fi
+    S=/sys/class/net/sbnet0
+    [ -d $S ] && say "counters: $(awk '/sbnet0:/ { print "rx " $2 " bytes " $3 " packets " $5 " dropped, tx " $10 " bytes " $11 " packets " $13 " dropped" }' /proc/net/dev), host drops $(cat $S/sbnet/host_drops), tx ring full $(cat $S/sbnet/tx_full) times, ring broken $(cat $S/sbnet/ring_broken)"
+    dmesg | grep -i 'sbnet' | tail -12 | while read -r l; do say "dmesg: $l"; done
+    echo V3-TEST-DONE > /dev/kmsg
+    echo SBBLK-TEST-DONE > /dev/kmsg
+    sync
+    poweroff -f
+    sleep 60
+}
+( sleep 900; echo "v3-test: net: FAIL timeout: the tests did not end in 900 s" > /dev/kmsg
+  echo V3-TEST-DONE > /dev/kmsg; echo SBBLK-TEST-DONE > /dev/kmsg; sleep 5; poweroff -f ) &
+
+S=/sys/class/net/sbnet0/sbnet
+i=0
+while [ ! -d $S ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+if [ ! -d $S ]; then
+    F "device: no /sys/class/net/sbnet0/sbnet (sbguest.ko without sbnet, or the host offers no net service)"
+    finish
+fi
+say "sysfs: link $(cat $S/link) uplink $(cat $S/uplink) ip $(cat $S/guest_ip)/$(cat $S/prefix) gw $(cat $S/gw_ip) dns $(cat $S/dns_ip) mtu $(cat $S/mtu) seq $(cat $S/seq)"
+
+# ---- 1 config: sbnet-up applies the host's config ----
+t0=$(ms)
+/sbin/sbnet-up > /tmp/sbnet-up.log 2>&1 &
+ok=0
+i=0
+while [ $i -lt 200 ]; do
+    ip=$(cat $S/guest_ip)
+    if [ "$(cat /sys/class/net/sbnet0/carrier 2>/dev/null)" = 1 ] &&
+        ip -4 addr show dev sbnet0 | grep -q "inet $ip/$(cat $S/prefix)" &&
+        ip route show | grep -q "^default via $(cat $S/gw_ip) dev sbnet0" &&
+        grep -q "^nameserver $(cat $S/dns_ip)" /etc/resolv.conf 2>/dev/null; then
+        ok=1
+        break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+done
+t1=$(ms)
+if [ $ok = 1 ] && [ "$(cat /sys/class/net/sbnet0/mtu)" = "$(cat $S/mtu)" ]; then
+    P "config: sbnet0 $(cat $S/guest_ip)/$(cat $S/prefix), default via $(cat $S/gw_ip), mtu $(cat /sys/class/net/sbnet0/mtu), nameserver $(cat $S/dns_ip), uplink $(cat $S/uplink): applied by sbnet-up in $((t1 - t0)) ms"
+else
+    F "config: not applied in 20 s: carrier $(cat /sys/class/net/sbnet0/carrier 2>/dev/null), addr '$(ip -4 addr show dev sbnet0 | grep inet)', route '$(ip route show | head -2 | tr '\n' ';')', resolv '$(cat /etc/resolv.conf 2>/dev/null | tr '\n' ';')', sbnet-up '$(tail -2 /tmp/sbnet-up.log | tr '\n' ';')'"
+fi
+
+# ---- 2 ping ----
+rtt() { sed -n 's#.*min/avg/max = \([0-9./]*\) ms.*#\1#p'; }
+got() { sed -n 's#.* \([0-9]*\) packets received.*#\1#p'; }
+ping -c 5 -W 3 10.77.0.1 > /tmp/p1 2>&1
+ping -c 3 -W 3 -s 1372 1.1.1.1 > /tmp/p2 2>&1
+r1=$(got < /tmp/p1)
+r2=$(got < /tmp/p2)
+if [ "$r1" = 5 ] && [ "$r2" = 3 ]; then
+    P "ping: 10.77.0.1 5/5, rtt min/avg/max $(rtt < /tmp/p1) ms; 1.1.1.1 through the default route, 1400-byte packets 3/3, rtt $(rtt < /tmp/p2) ms"
+else
+    F "ping: 10.77.0.1 ${r1:-0}/5 ($(tail -1 /tmp/p1)), 1.1.1.1 ${r2:-0}/3 ($(tail -1 /tmp/p2))"
+fi
+
+# ---- 3 UDP echo ----
+out=$(net-test echo 10.77.0.1 7 50 512)
+case "$out" in ok*) P "udp echo: ${out#ok }" ;; *) F "udp echo: $out" ;; esac
+
+# ---- 4 DNS ----
+d1=$(net-test dns starbite.test 10.77.0.1 10.77.0.1)
+nslookup example.com > /tmp/ns 2>&1
+d2=$(sed -n '/^Name:/,$ s/^Address[^:]*: *\([0-9.]*\).*/\1/p' /tmp/ns | head -1)
+case "$d1" in
+ok*)
+    if [ "$d2" = 10.77.0.1 ]; then
+        P "dns: ${d1#ok }; nslookup example.com through /etc/resolv.conf -> $d2"
+    else
+        F "dns: by hand ok, but nslookup through /etc/resolv.conf: $(tr '\n' ';' < /tmp/ns)"
+    fi
+    ;;
+*) F "dns: $d1" ;;
+esac
+
+# ---- 5 throughput ----
+out=$(net-test flood 9.9.9.9 7 "$mb")
+case "$out" in ok*) P "throughput: ${out#ok }" ;; *) F "throughput: $out" ;; esac
+
+# ---- 6 link flap: link 0 for 4 s, then link 1 on the other uplink ----
+if [ "$flap" != 0 ]; then
+    seq0=$(cat $S/seq)
+    up0=$(cat $S/uplink)
+    t0=$(ms)
+    net-test send 10.77.0.1 5 "flap 4000" > /dev/null
+    i=0
+    while [ "$(cat /sys/class/net/sbnet0/carrier)" != 0 ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+    t_down=$(( $(ms) - t0 ))
+    c_down=$(cat /sys/class/net/sbnet0/carrier)
+    l_down=$(cat $S/link)
+    ping -c 1 -W 1 10.77.0.1 > /tmp/p3 2>&1
+    p_down=$(got < /tmp/p3)
+    addr_kept=no
+    ip -4 addr show dev sbnet0 | grep -q "inet $(cat $S/guest_ip)/" && addr_kept=yes
+    i=0
+    while [ "$(cat /sys/class/net/sbnet0/carrier)" != 1 ] && [ $i -lt 150 ]; do sleep 0.1; i=$((i + 1)); done
+    t_up=$(( $(ms) - t0 ))
+    i=0
+    while ! grep -q "seq $(cat $S/seq):" /tmp/sbnet-up.log && [ $i -lt 60 ]; do sleep 0.1; i=$((i + 1)); done
+    reapplied=no
+    grep -q "seq $(cat $S/seq):" /tmp/sbnet-up.log && reapplied=yes
+    ping -c 3 -W 3 10.77.0.1 > /tmp/p4 2>&1
+    p_up=$(got < /tmp/p4)
+    if [ "$c_down" = 0 ] && [ "$l_down" = 0 ] && [ "${p_down:-0}" = 0 ] && [ $addr_kept = yes ] &&
+        [ "$(cat /sys/class/net/sbnet0/carrier)" = 1 ] && [ "$(cat $S/uplink)" != "$up0" ] && [ $reapplied = yes ] &&
+        [ "$p_up" = 3 ] && [ "$(cat $S/seq)" != "$seq0" ]; then
+        P "link flap: carrier off ${t_down} ms after the request (link 0: ping 0/1, the address kept), on again after ${t_up} ms with uplink $up0 -> $(cat $S/uplink), seq $seq0 -> $(cat $S/seq) re-applied by sbnet-up, ping 3/3"
+    else
+        F "link flap: down: carrier $c_down link $l_down ping ${p_down:-0}/1 address kept $addr_kept; up: carrier $(cat /sys/class/net/sbnet0/carrier) uplink $up0 -> $(cat $S/uplink) seq $seq0 -> $(cat $S/seq) re-applied $reapplied ping ${p_up:-0}/3"
+    fi
+fi
+finish
