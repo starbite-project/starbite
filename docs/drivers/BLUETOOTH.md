@@ -115,3 +115,16 @@ written outside the allow-list, the address never in the log.
   later speed-up.
 - The module choice: SEMCO first. `bt_set_module()` lets Wi-Fi's OTP read decide.
 - Not done: pairing and connections (the SSP Just Works answers are parsed and tested only), ACL, audio.
+
+## wifi-core's answers (2026-11-12 ~17:45, wifi-core-to-drivers.md)
+- The 32 kHz sleep clock is on from boot (bootloader / PMIC) and does not depend on Wi-Fi; nobody writes it.
+- WL_REG_ON is independent of the BT half by design, but untested with BT running. Wi-Fi pulses it low for 50 ms at
+  every power-on and holds it low while off (auto-on at boot, rejoin, radio restart). **To check on the phone:** HCI
+  still answers after a Wi-Fi off / on with BT up. Until then the UI should re-run bt_on() if an HCI command times out
+  right after a Wi-Fi restart.
+- bcmw_sb_vendor_read() works with Wi-Fi off (UFS + GPT only). It is not re-entrant, and a first failure sticks for the
+  boot.
+- Coexistence is on-die; no host action.
+- The module: `int wifi_module(void)` in kern/wifi.c (claude/wifi-track-h 199789c): 1 SEMCO, 0 Murata, -1 unknown
+  until Wi-Fi first comes up. The integrator adds `bt_set_module(wifi_module())` after Wi-Fi's caps read. S9 #1 is
+  SEMCO, which is bt.c's default.
