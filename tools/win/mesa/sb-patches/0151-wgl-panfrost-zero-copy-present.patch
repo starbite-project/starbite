@@ -1,0 +1,757 @@
+diff --git a/src/gallium/targets/wgl/meson.build b/src/gallium/targets/wgl/meson.build
+index 3a6b045..d86a54f 100644
+--- a/src/gallium/targets/wgl/meson.build
++++ b/src/gallium/targets/wgl/meson.build
+@@ -6,9 +6,11 @@ gallium_wgl_link_args = []
+ # sb-patches/0136: Panfrost (the Mali through sbwddm)
+ wgl_panfrost_args = []
+ wgl_panfrost_deps = []
++wgl_panfrost_files = []
+ if with_gallium_panfrost
+   wgl_panfrost_args = ['-DGALLIUM_PANFROST']
+   wgl_panfrost_deps = [driver_panfrost, idep_xmlconfig]
++  wgl_panfrost_files = ['wgl_sb_zc.cpp', 'wgl_sb_pipe.c']   # sb-patches/0151: the zero-copy present
+ endif
+ 
+ wgl_def = custom_target(
+@@ -21,8 +23,9 @@ wgl_def = custom_target(
+ gallium_wgl_name = get_option('gallium-wgl-dll-name')
+ libgallium_wgl = shared_library(
+   gallium_wgl_name,
+-  ['wgl.c'],
++  ['wgl.c', wgl_panfrost_files],
+   c_args : wgl_panfrost_args,
++  cpp_args : wgl_panfrost_args,
+   vs_module_defs : wgl_def,
+   include_directories : [
+     inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux, inc_wgl, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers,
+diff --git a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
+index f9c7cfc..a8c8134 100644
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -226,6 +226,23 @@ wgl_panfrost_present(struct pipe_context *pipe, struct pipe_resource *res, HDC h
+ 
+    pipe_texture_unmap(pipe, xfer);
+ }
++
++/* sb-patches/0151: the zero-copy present (wgl_sb_zc.cpp, build/win/gl-zerocopy/DESIGN.md). Its fallbacks show a
++ * frame through the GDI present above, with the calling thread's GL context. */
++#include "wgl_sb_zc.h"
++struct pipe_context *wgl_sb_current_pipe(void);   /* wgl_sb_pipe.c */
++
++void
++wgl_sb_gdi_present(struct pipe_resource *res, HWND hwnd)
++{
++   struct pipe_context *pipe = wgl_sb_current_pipe();
++   HDC dc;
++
++   if (!res || !pipe || !hwnd || !(dc = GetDC(hwnd)))
++      return;
++   wgl_panfrost_present(pipe, res, dc);
++   ReleaseDC(hwnd, dc);
++}
+ #endif
+ 
+ #ifdef GALLIUM_LLVMPIPE
+@@ -414,6 +431,11 @@ wgl_create_framebuffer(struct pipe_screen *screen,
+ #ifdef GALLIUM_D3D12
+    if (use_d3d12)
+       return d3d12_wgl_create_framebuffer(screen, hWnd, iPixelFormat);
++#endif
++#ifdef GALLIUM_PANFROST
++   /* sb-patches/0151: NULL (the GDI present) unless the whole zero-copy path could be set up */
++   if (use_panfrost)
++      return wgl_sb_zc_create_framebuffer(screen, hWnd, iPixelFormat);
+ #endif
+    return NULL;
+ }
+diff --git a/src/gallium/targets/wgl/wgl_sb_pipe.c b/src/gallium/targets/wgl/wgl_sb_pipe.c
+new file mode 100644
+index 0000000..7d841ca
+--- /dev/null
++++ b/src/gallium/targets/wgl/wgl_sb_pipe.c
+@@ -0,0 +1,16 @@
++/* Starbite (sb-patches/0151): the calling thread's GL pipe context, for the zero-copy present's GDI fallbacks.
++ * Its own file: state_tracker/st_context.h must come before <windows.h> (main/dd.h), which wgl.c includes first. */
++#include "state_tracker/st_context.h"
++
++#include <windows.h>
++
++#include "stw_context.h"
++
++struct pipe_context *wgl_sb_current_pipe(void);
++
++struct pipe_context *
++wgl_sb_current_pipe(void)
++{
++   struct stw_context *ctx = stw_current_context();
++   return ctx && ctx->st ? ctx->st->pipe : NULL;
++}
+diff --git a/src/gallium/targets/wgl/wgl_sb_zc.cpp b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+new file mode 100644
+index 0000000..ce03053
+--- /dev/null
++++ b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+@@ -0,0 +1,630 @@
++/*
++ * Starbite (sb-patches/0151, build/win/gl-zerocopy/DESIGN.md): the Panfrost GL ICD presents without the CPU touching
++ * pixels.
++ *
++ * GL renders into two D3D11 textures (D3D11_RESOURCE_MISC_SHARED) made by a D3D11 device of this process on our
++ * adapter (sbumd: an ARM64 process loads it natively, an x64 one through the ARM64X file's EC view). The shim opens
++ * each texture's allocation on its own D3DKMT device (malikm_kmt_open_shared) and Panfrost imports it as a linear BO,
++ * so the texture IS the GL back buffer, as the swap chain buffers are for Mesa's d3d12 WGL path
++ * (d3d12_wgl_framebuffer.cpp, the model for this file). Each SwapBuffers:
++ *   1. GL has flushed (stw's end of frame); wait until the D3DKMT context has done it (malikm_kmt_frame_wait);
++ *   2. D3D11 CopyResource(swap chain buffer, texture): a Panfrost blit in sbumd (sb-patches/0105), on the GPU;
++ *   3. a 1-pixel copy of the texture into a staging texture: mapping it later says the D3D side has read it;
++ *   4. IDXGISwapChain::Present: a flip-model present, which DWM composes like any D3D app's;
++ *   5. the other texture becomes the back buffer; before GL draws into it, the staging pixel of the frame before
++ *      is mapped (sbumd waits for that submission), so GL never overwrites a texture the copy has not read.
++ *      (A D3D11 event query would not wait: Panfrost has no PIPE_QUERY_GPU_FINISHED.)
++ * Any failure while the framebuffer is created returns NULL: stw then uses the GDI present (wgl.c, 0145), as before.
++ * A resize that cannot make its textures switches the window to plain Panfrost buffers presented through GDI.
++ *
++ * Environment: SB_GL_PRESENT=gdi|copy (the GDI paths; default: this one), SB_GL_ZC_SWAP=flip|flipdiscard|discard
++ * (default flip = FLIP_SEQUENTIAL, 2 buffers), SB_GL_ZC_LOG=1 (setup steps and a timing line every 300 frames).
++ * The process environment variable SB_GL_ZC_STATE says what this file did (for tests): "zc", "off", "fail:<step>",
++ * "gdi-after-resize", "gdi-after-present-failures".
++ */
++#include <windows.h>
++#include <d3d11.h>
++#include <dxgi1_2.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "pipe/p_screen.h"
++#include "pipe/p_context.h"
++#include "pipe/p_state.h"
++#include "util/u_inlines.h"
++#include "util/format/u_format.h"
++#include "frontend/api.h"
++#include "frontend/winsys_handle.h"
++#include "drm-uapi/drm_fourcc.h"
++
++#include "stw_pixelformat.h"
++#include "stw_winsys.h"
++
++#include "wgl_sb_zc.h"
++
++/* MW_ALLOCATION_INFO (starbite/win/sbwddm/maliwddm/maliwddm_abi.h): the allocation's private data, as sbumd wrote it */
++struct sbzc_alloc_info {
++   uint32_t Version, Flags;
++   uint64_t Size;
++   uint32_t Width, Height, Pitch, Format;
++};
++static_assert(sizeof(struct sbzc_alloc_info) == 32 && offsetof(struct sbzc_alloc_info, Width) == 16 &&
++              offsetof(struct sbzc_alloc_info, Format) == 28, "MW_ALLOCATION_INFO layout");
++
++extern "C" {
++int malikm_kmt_adapter_luid(LUID *luid);
++int malikm_kmt_open_shared(unsigned share, struct sbzc_alloc_info *info, unsigned *res);
++void malikm_kmt_close_shared(unsigned res);
++int malikm_kmt_frame_wait(unsigned ms);
++}
++
++static bool zc_log;
++#define ZLOG(...) do { if (zc_log) { fprintf(stderr, "sb gl zc: " __VA_ARGS__); fflush(stderr); } } while (0)
++#define ZERR(...) do { fprintf(stderr, "sb gl zc: " __VA_ARGS__); fflush(stderr); } while (0)
++
++static void
++zc_state(const char *s)
++{
++   SetEnvironmentVariableA("SB_GL_ZC_STATE", s);
++}
++
++/* ---- the process's D3D11 device on our adapter (one for every window) ---- */
++
++static SRWLOCK g_lock = SRWLOCK_INIT;
++static int g_state;                 /* 0: not tried, 1: ready, -1: failed (never retried) */
++static ID3D11Device *g_dev;
++static ID3D11DeviceContext *g_ctx;
++static IDXGIFactory2 *g_fac;
++
++static bool
++g_init_locked(void)
++{
++   if (g_state)
++      return g_state > 0;
++   g_state = -1;
++
++   LUID luid;
++   if (malikm_kmt_adapter_luid(&luid)) {
++      ZERR("no D3DKMT adapter in the shim\n");
++      zc_state("fail:luid");
++      return false;
++   }
++   HMODULE dxgi = LoadLibraryA("dxgi.dll"), d3d11 = LoadLibraryA("d3d11.dll");
++   typedef HRESULT (WINAPI *PFN_CF1)(REFIID, void **);
++   PFN_CF1 create_factory = dxgi ? (PFN_CF1)(void *)GetProcAddress(dxgi, "CreateDXGIFactory1") : NULL;
++   PFN_D3D11_CREATE_DEVICE create_device =
++      d3d11 ? (PFN_D3D11_CREATE_DEVICE)(void *)GetProcAddress(d3d11, "D3D11CreateDevice") : NULL;
++   if (!create_factory || !create_device) {
++      ZERR("dxgi.dll/d3d11.dll not usable\n");
++      zc_state("fail:d3d11.dll");
++      return false;
++   }
++   IDXGIFactory1 *f1 = NULL;
++   if (FAILED(create_factory(__uuidof(IDXGIFactory1), (void **)&f1)) || !f1) {
++      zc_state("fail:factory");
++      return false;
++   }
++   IDXGIAdapter1 *ad = NULL, *a = NULL;
++   for (UINT i = 0; f1->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; i++) {
++      DXGI_ADAPTER_DESC1 d;
++      if (SUCCEEDED(a->GetDesc1(&d)) && d.AdapterLuid.LowPart == luid.LowPart &&
++          d.AdapterLuid.HighPart == luid.HighPart) {
++         ZLOG("adapter %u \"%ls\" vendor 0x%x matches the D3DKMT LUID\n", i, d.Description, d.VendorId);
++         ad = a;
++         break;
++      }
++      a->Release();
++   }
++   f1->Release();
++   if (!ad) {
++      ZERR("no DXGI adapter with the shim's LUID %08lx:%08lx\n", (unsigned long)luid.HighPart, luid.LowPart);
++      zc_state("fail:adapter");
++      return false;
++   }
++   if (FAILED(ad->GetParent(__uuidof(IDXGIFactory2), (void **)&g_fac)) || !g_fac) {
++      ad->Release();
++      zc_state("fail:factory2");
++      return false;
++   }
++   /* sbumd has the D3D10.0 DDI only */
++   static const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_10_0};
++   D3D_FEATURE_LEVEL got = (D3D_FEATURE_LEVEL)0;
++   HRESULT hr = create_device(ad, D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, want, 1, D3D11_SDK_VERSION, &g_dev, &got, &g_ctx);
++   ad->Release();
++   if (FAILED(hr) || !g_dev || !g_ctx) {
++      ZERR("D3D11CreateDevice on our adapter failed: 0x%08lx\n", (unsigned long)hr);
++      if (g_fac)
++         g_fac->Release();
++      g_fac = NULL;
++      zc_state("fail:device");
++      return false;
++   }
++   ZLOG("D3D11 device, feature level 0x%x; sbumd.dll %s\n", (unsigned)got,
++        GetModuleHandleA("sbumd.dll") ? "loaded" : "NOT loaded");
++   g_state = 1;
++   return true;
++}
++
++/* ---- the framebuffer ---- */
++
++struct sbzc_fb {
++   struct stw_winsys_framebuffer base;
++   struct pipe_screen *screen;
++   HWND hwnd;
++   enum pipe_format pformat;
++   DXGI_FORMAT dfmt;
++   DXGI_SWAP_EFFECT effect;
++   UINT nbuf;
++   IDXGISwapChain1 *sc;
++   unsigned w, h;               /* of the textures (and the swap chain) */
++   ID3D11Texture2D *tex[2];     /* GL's back/front buffers */
++   ID3D11Texture2D *stg[2];     /* 1x1 staging: "the D3D side has read tex[i]" */
++   bool stg_pending[2];
++   unsigned kres[2];            /* tex[i] opened on the shim's D3DKMT device */
++   struct pipe_resource *res[2];
++   unsigned cur;                /* res[cur] is the back buffer */
++   bool gdi;                    /* after a failed resize: own buffers, GDI present */
++   bool gdi_present;            /* after repeated Present failures: these buffers, GDI present, no swap chain */
++   unsigned fails_in_row;
++   struct pipe_resource templ;
++   /* stats (SB_GL_ZC_LOG) */
++   LARGE_INTEGER freq;
++   unsigned frames, fails;
++   double t_wait, t_copy, t_present, t_war, t_max;
++};
++
++static struct sbzc_fb *
++sbzc(struct stw_winsys_framebuffer *fb)
++{
++   return (struct sbzc_fb *)fb;
++}
++
++static double
++ms_since(const struct sbzc_fb *fb, LARGE_INTEGER t0, LARGE_INTEGER *now)
++{
++   QueryPerformanceCounter(now);
++   return (double)(now->QuadPart - t0.QuadPart) * 1000.0 / (double)fb->freq.QuadPart;
++}
++
++/* The D3D side has finished reading tex[i] (copy issued at an earlier present). g_lock held. */
++static void
++war_wait_locked(struct sbzc_fb *fb, unsigned i)
++{
++   if (!fb->stg_pending[i] || !fb->stg[i])
++      return;
++   D3D11_MAPPED_SUBRESOURCE m;
++   if (SUCCEEDED(g_ctx->Map(fb->stg[i], 0, D3D11_MAP_READ, 0, &m)))
++      g_ctx->Unmap(fb->stg[i], 0);
++   fb->stg_pending[i] = false;
++}
++
++static void
++free_buffers_locked(struct sbzc_fb *fb)
++{
++   for (unsigned i = 0; i < 2; i++) {
++      war_wait_locked(fb, i);
++      pipe_resource_reference(&fb->res[i], NULL);
++      if (fb->kres[i])
++         malikm_kmt_close_shared(fb->kres[i]);   /* now, or when stw lets go of the BO */
++      fb->kres[i] = 0;
++      if (fb->tex[i])
++         fb->tex[i]->Release();
++      if (fb->stg[i])
++         fb->stg[i]->Release();
++      fb->tex[i] = fb->stg[i] = NULL;
++   }
++   fb->w = fb->h = 0;
++}
++
++/* Two shared textures of w x h, opened on the D3DKMT device and imported into Panfrost. g_lock held. */
++static const char *
++make_buffers_locked(struct sbzc_fb *fb, unsigned w, unsigned h)
++{
++   for (unsigned i = 0; i < 2; i++) {
++      D3D11_TEXTURE2D_DESC td = {};
++      td.Width = w;
++      td.Height = h;
++      td.MipLevels = 1;
++      td.ArraySize = 1;
++      td.Format = fb->dfmt;
++      td.SampleDesc.Count = 1;
++      td.Usage = D3D11_USAGE_DEFAULT;
++      td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
++      td.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
++      HRESULT hr = g_dev->CreateTexture2D(&td, NULL, &fb->tex[i]);
++      if (FAILED(hr) || !fb->tex[i]) {
++         ZERR("CreateTexture2D(shared %ux%u) failed: 0x%08lx\n", w, h, (unsigned long)hr);
++         return "texture";
++      }
++      D3D11_TEXTURE2D_DESC sd = td;
++      sd.Width = sd.Height = 1;
++      sd.Usage = D3D11_USAGE_STAGING;
++      sd.BindFlags = 0;
++      sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++      sd.MiscFlags = 0;
++      if (FAILED(g_dev->CreateTexture2D(&sd, NULL, &fb->stg[i])) || !fb->stg[i])
++         return "staging";
++
++      IDXGIResource *dr = NULL;
++      HANDLE share = NULL;
++      if (FAILED(fb->tex[i]->QueryInterface(__uuidof(IDXGIResource), (void **)&dr)) || !dr)
++         return "dxgiresource";
++      hr = dr->GetSharedHandle(&share);
++      dr->Release();
++      if (FAILED(hr) || !share) {
++         ZERR("GetSharedHandle failed: 0x%08lx\n", (unsigned long)hr);
++         return "sharedhandle";
++      }
++
++      struct sbzc_alloc_info info = {};
++      int fd = malikm_kmt_open_shared((unsigned)(uintptr_t)share, &info, &fb->kres[i]);
++      if (fd < 0)
++         return "kmt-open";
++      if (info.Width != w || info.Height != h || info.Pitch < w * 4) {
++         ZERR("shared texture %u: allocation says %ux%u pitch %u, want %ux%u\n", i, info.Width, info.Height,
++              info.Pitch, w, h);
++         return "layout";
++      }
++
++      struct pipe_resource templ = {};
++      templ.target = PIPE_TEXTURE_2D;
++      templ.format = fb->pformat;
++      templ.width0 = w;
++      templ.height0 = h;
++      templ.depth0 = 1;
++      templ.array_size = 1;
++      templ.nr_samples = templ.nr_storage_samples = 1;
++      templ.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SHARED |
++                   PIPE_BIND_LINEAR;
++      templ.usage = PIPE_USAGE_DEFAULT;
++      struct winsys_handle wh;
++      memset(&wh, 0, sizeof(wh));
++      wh.type = WINSYS_HANDLE_TYPE_FD;
++      wh.handle = (HANDLE)(intptr_t)fd;
++      wh.stride = info.Pitch;
++      wh.offset = 0;
++      wh.modifier = DRM_FORMAT_MOD_LINEAR;
++      fb->res[i] = fb->screen->resource_from_handle(fb->screen, &templ, &wh, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
++      if (!fb->res[i])
++         return "import";
++      ZLOG("buffer %u: %ux%u pitch %u fmt %u, KMT share 0x%x, opened resource 0x%x\n", i, w, h, info.Pitch,
++           info.Format, (unsigned)(uintptr_t)share, fb->kres[i]);
++   }
++   fb->w = w;
++   fb->h = h;
++   fb->cur = 0;
++   return NULL;
++}
++
++static const char *
++make_swapchain_locked(struct sbzc_fb *fb, unsigned w, unsigned h)
++{
++   DXGI_SWAP_CHAIN_DESC1 d = {};
++   d.Width = w;
++   d.Height = h;
++   d.Format = fb->dfmt;
++   d.SampleDesc.Count = 1;
++   d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
++   d.BufferCount = fb->nbuf;
++   d.Scaling = DXGI_SCALING_STRETCH;
++   d.SwapEffect = fb->effect;
++   d.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
++   HRESULT hr = g_fac->CreateSwapChainForHwnd(g_dev, fb->hwnd, &d, NULL, NULL, &fb->sc);
++   if (FAILED(hr) || !fb->sc) {
++      ZERR("CreateSwapChainForHwnd(%ux%u, effect %d, %u buffers) failed: 0x%08lx\n", w, h, (int)fb->effect,
++           fb->nbuf, (unsigned long)hr);
++      return "swapchain";
++   }
++   /* the game's window is the game's: no Alt+Enter or other window changes by DXGI */
++   g_fac->MakeWindowAssociation(fb->hwnd, DXGI_MWA_NO_WINDOW_CHANGES | DXGI_MWA_NO_ALT_ENTER);
++   return NULL;
++}
++
++/* The window goes back to GDI: a flip-model swap chain would hide what GDI draws. g_lock held. */
++static void
++drop_swapchain_locked(struct sbzc_fb *fb)
++{
++   if (!fb->sc)
++      return;
++   fb->sc->Release();
++   fb->sc = NULL;
++   /* DXGI destroys a swap chain lazily: let it go now (GDI, or another swap chain for this window, comes next) */
++   g_ctx->ClearState();
++   g_ctx->Flush();
++}
++
++/* After a resize that could not make shared textures: plain Panfrost buffers, presented by GDI (wgl.c). */
++static void
++make_gdi_buffers(struct sbzc_fb *fb)
++{
++   struct pipe_resource t = fb->templ;
++   t.bind = PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET;
++   t.nr_samples = t.nr_storage_samples = 1;
++   for (unsigned i = 0; i < 2; i++) {
++      pipe_resource_reference(&fb->res[i], NULL);
++      fb->res[i] = fb->screen->resource_create(fb->screen, &t);
++   }
++   fb->w = t.width0;
++   fb->h = t.height0;
++   fb->cur = 0;
++}
++
++static void
++gl_idle(struct pipe_context *ctx)
++{
++   if (ctx) {
++      struct pipe_fence_handle *fence = NULL;
++      ctx->flush(ctx, &fence, PIPE_FLUSH_HINT_FINISH);
++      if (fence) {
++         ctx->screen->fence_finish(ctx->screen, ctx, fence, OS_TIMEOUT_INFINITE);
++         ctx->screen->fence_reference(ctx->screen, &fence, NULL);
++      }
++   }
++   (void)malikm_kmt_frame_wait(5000);
++}
++
++static void
++sbzc_destroy(struct stw_winsys_framebuffer *pfb, struct pipe_context *ctx)
++{
++   struct sbzc_fb *fb = sbzc(pfb);
++   gl_idle(ctx);
++   AcquireSRWLockExclusive(&g_lock);
++   if (fb->gdi) {
++      for (unsigned i = 0; i < 2; i++)
++         pipe_resource_reference(&fb->res[i], NULL);
++   } else {
++      free_buffers_locked(fb);
++   }
++   drop_swapchain_locked(fb);
++   ReleaseSRWLockExclusive(&g_lock);
++   if (zc_log && fb->frames)
++      ZLOG("window %p closed after %u frames, %u present failures\n", (void *)fb->hwnd, fb->frames, fb->fails);
++   free(fb);
++}
++
++static void
++sbzc_resize(struct stw_winsys_framebuffer *pfb, struct pipe_context *ctx, struct pipe_resource *templ)
++{
++   struct sbzc_fb *fb = sbzc(pfb);
++   unsigned w = templ->width0 ? templ->width0 : 1, h = templ->height0 ? templ->height0 : 1;
++
++   fb->templ = *templ;
++   fb->templ.width0 = w;
++   fb->templ.height0 = h;
++   if (fb->gdi) {
++      make_gdi_buffers(fb);
++      return;
++   }
++   if (fb->w == w && fb->h == h && fb->res[0] && fb->res[1] && templ->format == fb->pformat)
++      return;                      /* the first validate after create: the buffers are already this size */
++
++   ZLOG("resize %ux%u -> %ux%u\n", fb->w, fb->h, w, h);
++   if (fb->gdi_present || !fb->sc) {
++      /* no swap chain any more (Present failures): plain buffers and GDI from here on */
++      gl_idle(ctx);
++      AcquireSRWLockExclusive(&g_lock);
++      free_buffers_locked(fb);
++      ReleaseSRWLockExclusive(&g_lock);
++      fb->gdi = true;
++      make_gdi_buffers(fb);
++      return;
++   }
++   gl_idle(ctx);
++   AcquireSRWLockExclusive(&g_lock);
++   free_buffers_locked(fb);
++   const char *fail = NULL;
++   HRESULT hr = fb->sc->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
++   if (FAILED(hr)) {
++      ZERR("ResizeBuffers(%ux%u) failed: 0x%08lx\n", w, h, (unsigned long)hr);
++      fail = "resizebuffers";
++   }
++   if (!fail)
++      fail = make_buffers_locked(fb, w, h);
++   if (fail) {
++      free_buffers_locked(fb);
++      drop_swapchain_locked(fb);
++      fb->gdi = true;
++      ZERR("resize to %ux%u failed at %s: this window presents through GDI from now on\n", w, h, fail);
++      zc_state("gdi-after-resize");
++   }
++   ReleaseSRWLockExclusive(&g_lock);
++   if (fb->gdi)
++      make_gdi_buffers(fb);
++}
++
++static struct pipe_resource *
++sbzc_get_resource(struct stw_winsys_framebuffer *pfb, enum st_attachment_type statt)
++{
++   struct sbzc_fb *fb = sbzc(pfb);
++   unsigned i = statt == ST_ATTACHMENT_FRONT_LEFT ? !fb->cur : fb->cur;
++   if (statt != ST_ATTACHMENT_FRONT_LEFT && statt != ST_ATTACHMENT_BACK_LEFT)
++      return NULL;
++   if (!fb->res[i])
++      return NULL;
++   pipe_reference(NULL, &fb->res[i]->reference);
++   return fb->res[i];
++}
++
++static bool
++sbzc_present(struct stw_winsys_framebuffer *pfb, int interval)
++{
++   struct sbzc_fb *fb = sbzc(pfb);
++   LARGE_INTEGER t0, t1, t2, t3, t4;
++   unsigned back = fb->cur;
++   bool shown = false;
++
++   QueryPerformanceCounter(&t0);
++   /* 1. GL's frame (flushed by stw before this call) is done */
++   if (malikm_kmt_frame_wait(5000))
++      ZERR("the GL frame did not finish in 5 s\n");
++   double wait = ms_since(fb, t0, &t1);
++
++   if (!fb->gdi && !fb->gdi_present && fb->sc && fb->tex[back]) {
++      AcquireSRWLockExclusive(&g_lock);
++      ID3D11Texture2D *bb = NULL;
++      HRESULT hr = fb->sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void **)&bb);
++      if (SUCCEEDED(hr) && bb) {
++         /* 2. the frame into the swap chain's buffer, on the GPU */
++         g_ctx->CopyResource(bb, fb->tex[back]);
++         bb->Release();
++         /* 3. the mark that says this copy has read tex[back] */
++         D3D11_BOX px = {0, 0, 0, 1, 1, 1};
++         g_ctx->CopySubresourceRegion(fb->stg[back], 0, 0, 0, 0, fb->tex[back], 0, &px);
++         fb->stg_pending[back] = true;
++         QueryPerformanceCounter(&t2);
++         /* 4. present */
++         hr = fb->sc->Present(interval < 0 ? 0 : interval > 4 ? 4 : (UINT)interval, 0);
++      } else {
++         QueryPerformanceCounter(&t2);
++      }
++      QueryPerformanceCounter(&t3);
++      /* 5. the next back buffer: the D3D copy of the frame before must have read it */
++      war_wait_locked(fb, !back);
++      ReleaseSRWLockExclusive(&g_lock);
++      shown = SUCCEEDED(hr);
++      if (!shown) {
++         fb->fails++;
++         if (fb->fails <= 8 || !(fb->fails & (fb->fails - 1)))
++            ZERR("present %u failed: 0x%08lx (%u failures); this frame goes through GDI\n", fb->frames,
++                 (unsigned long)hr, fb->fails);
++         if (++fb->fails_in_row >= 3) {
++            /* the swap chain is not coming back: GDI from these buffers, and nothing over GDI's output */
++            AcquireSRWLockExclusive(&g_lock);
++            drop_swapchain_locked(fb);
++            ReleaseSRWLockExclusive(&g_lock);
++            fb->gdi_present = true;
++            ZERR("3 presents failed in a row: this window presents through GDI from now on\n");
++            zc_state("gdi-after-present-failures");
++         }
++      } else {
++         fb->fails_in_row = 0;
++      }
++   } else {
++      t2 = t3 = t1;
++   }
++   if (!shown)
++      wgl_sb_gdi_present(fb->res[back], fb->hwnd);
++   fb->cur = !back;
++   double total = ms_since(fb, t0, &t4);
++
++   fb->frames++;
++   fb->t_wait += wait;
++   fb->t_copy += (double)(t2.QuadPart - t1.QuadPart) * 1000.0 / (double)fb->freq.QuadPart;
++   fb->t_present += (double)(t3.QuadPart - t2.QuadPart) * 1000.0 / (double)fb->freq.QuadPart;
++   fb->t_war += (double)(t4.QuadPart - t3.QuadPart) * 1000.0 / (double)fb->freq.QuadPart;
++   if (total > fb->t_max)
++      fb->t_max = total;
++   if (zc_log && fb->frames % 300 == 0) {
++      ZLOG("300 frames (%ux%u%s): per frame GL wait %.2f ms, copy+mark %.2f, Present %.2f, WAR wait %.2f; "
++           "slowest %.1f ms; present failures %u\n", fb->w, fb->h, fb->gdi ? ", GDI" : "", fb->t_wait / 300,
++           fb->t_copy / 300, fb->t_present / 300, fb->t_war / 300, fb->t_max, fb->fails);
++      fb->t_wait = fb->t_copy = fb->t_present = fb->t_war = fb->t_max = 0;
++   }
++   return true;
++}
++
++static bool
++color_format(enum pipe_format f, DXGI_FORMAT *d)
++{
++   switch (f) {
++   case PIPE_FORMAT_B8G8R8A8_UNORM:
++   case PIPE_FORMAT_B8G8R8X8_UNORM:
++      *d = DXGI_FORMAT_B8G8R8A8_UNORM;
++      return true;
++   case PIPE_FORMAT_R8G8B8A8_UNORM:
++   case PIPE_FORMAT_R8G8B8X8_UNORM:
++      *d = DXGI_FORMAT_R8G8B8A8_UNORM;
++      return true;
++   default:
++      return false;
++   }
++}
++
++struct stw_winsys_framebuffer *
++wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFormat)
++{
++   static int mode = -1;   /* 1: zero-copy, 0: GDI */
++   if (mode < 0) {
++      const char *p = getenv("SB_GL_PRESENT");
++      const char *l = getenv("SB_GL_ZC_LOG");
++      zc_log = l && *l && *l != '0';
++      mode = !(p && (!strcmp(p, "gdi") || !strcmp(p, "copy")));
++      if (!mode)
++         zc_state("off");
++      ZLOG("SB_GL_PRESENT=%s: %s\n", p ? p : "(unset)", mode ? "zero-copy" : "GDI");
++   }
++   if (!mode || !hWnd || !screen)
++      return NULL;
++   /* a pbuffer's hidden window (stw_ext_pbuffer.c) is never presented: stw's own buffers */
++   char cls[16] = "";
++   if (GetClassNameA(hWnd, cls, sizeof(cls)) && !strcmp(cls, "wglpbuffer"))
++      return NULL;
++
++   const struct stw_pixelformat_info *pfi = stw_pixelformat_get_info(iPixelFormat);
++   DXGI_FORMAT dfmt;
++   if (!pfi || (pfi->pfd.dwFlags & PFD_SUPPORT_GDI) || !(pfi->pfd.dwFlags & PFD_DOUBLEBUFFER) ||
++       !color_format(pfi->stvis.color_format, &dfmt)) {
++      ZLOG("pixel format %d (flags 0x%lx, colour %s): GDI present\n", iPixelFormat, pfi ? pfi->pfd.dwFlags : 0,
++           pfi ? util_format_name(pfi->stvis.color_format) : "?");
++      return NULL;
++   }
++
++   struct sbzc_fb *fb = (struct sbzc_fb *)calloc(1, sizeof(*fb));
++   if (!fb)
++      return NULL;
++   fb->screen = screen;
++   fb->hwnd = hWnd;
++   fb->pformat = pfi->stvis.color_format;
++   fb->dfmt = dfmt;
++   QueryPerformanceFrequency(&fb->freq);
++   const char *se = getenv("SB_GL_ZC_SWAP");
++   if (se && !strcmp(se, "discard")) {
++      fb->effect = DXGI_SWAP_EFFECT_DISCARD;
++      fb->nbuf = 1;
++   } else if (se && !strcmp(se, "flipdiscard")) {
++      fb->effect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
++      fb->nbuf = 2;
++   } else {
++      fb->effect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
++      fb->nbuf = 2;
++   }
++   RECT rc = {0, 0, 0, 0};
++   GetClientRect(hWnd, &rc);
++   unsigned w = rc.right > rc.left ? (unsigned)(rc.right - rc.left) : 1;
++   unsigned h = rc.bottom > rc.top ? (unsigned)(rc.bottom - rc.top) : 1;
++
++   /* Everything the present needs is made now: any failure is the GDI path, as before this patch. */
++   const char *fail = NULL;
++   AcquireSRWLockExclusive(&g_lock);
++   if (!g_init_locked())
++      fail = "d3d11";
++   if (!fail)
++      fail = make_swapchain_locked(fb, w, h);
++   if (!fail)
++      fail = make_buffers_locked(fb, w, h);
++   if (fail) {
++      free_buffers_locked(fb);
++      drop_swapchain_locked(fb);
++   }
++   ReleaseSRWLockExclusive(&g_lock);
++   if (fail) {
++      char s[48];
++      snprintf(s, sizeof(s), "fail:%s", fail);
++      if (strcmp(fail, "d3d11"))     /* g_init_locked set its own */
++         zc_state(s);
++      ZERR("window %p: zero-copy present not available (%s): GDI present\n", (void *)hWnd, fail);
++      free(fb);
++      return NULL;
++   }
++
++   fb->base.destroy = sbzc_destroy;
++   fb->base.resize = sbzc_resize;
++   fb->base.present = sbzc_present;
++   fb->base.get_resource = sbzc_get_resource;
++   zc_state("zc");
++   ZLOG("window %p: zero-copy present, %ux%u %s, swap effect %d\n", (void *)hWnd, w, h,
++        util_format_name(fb->pformat), (int)fb->effect);
++   return &fb->base;
++}
+diff --git a/src/gallium/targets/wgl/wgl_sb_zc.h b/src/gallium/targets/wgl/wgl_sb_zc.h
+new file mode 100644
+index 0000000..8646cd4
+--- /dev/null
++++ b/src/gallium/targets/wgl/wgl_sb_zc.h
+@@ -0,0 +1,26 @@
++/* Starbite (sb-patches/0151): the Panfrost GL ICD's zero-copy present (wgl_sb_zc.cpp). */
++#ifndef WGL_SB_ZC_H
++#define WGL_SB_ZC_H
++
++#include <windows.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct pipe_screen;
++struct pipe_resource;
++struct stw_winsys_framebuffer;
++
++/* A framebuffer whose back buffers are D3D11 shared textures presented by a DXGI swap chain; NULL (= the GDI
++ * present) when SB_GL_PRESENT=gdi|copy, for unsuitable pixel formats, or when any step of making it fails. */
++struct stw_winsys_framebuffer *wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFormat);
++
++/* wgl.c: show a Panfrost resource in the window through GDI (0145's present), with the current GL context. */
++void wgl_sb_gdi_present(struct pipe_resource *res, HWND hwnd);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif

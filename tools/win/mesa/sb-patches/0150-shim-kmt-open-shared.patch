@@ -1,0 +1,236 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index d6476a4..7d5f2a8 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -796,6 +796,8 @@ typedef NTSTATUS (APIENTRY *KMT_FN)(void *);
+ static struct {
+    KMT_FN CreateDevice, DestroyDevice, CreateContext, CreateAllocation, DestroyAllocation,
+           Lock, Unlock, Render, Escape, EnumAdapters2, WaitForIdle;
++   /* sb-patches/0150 (the GL ICD's zero-copy present): optional, wddm_init does not need them */
++   KMT_FN QueryResourceInfo, OpenResource, SignalSynchronizationObject2;
+ } kmt;
+ 
+ struct wbo {
+@@ -811,6 +813,10 @@ struct wbo {
+    uint64_t used;       /* T15: the last submission that named it; WAIT_BO waits for that one */
+    int listed_once;     /* T25: in an allocation list at least once (made resident) */
+    uint32_t list_idx;   /* T30: its index in the allocation list of the submission being built */
++   /* sb-patches/0150: kind 2 opened on the D3DKMT device by malikm_kmt_open_shared: the opened resource, and
++    * whether malikm_kmt_close_shared came while this BO was still open (then GEM_CLOSE closes the resource) */
++   D3DKMT_HANDLE kres;
++   int kres_close;
+ };
+ 
+ /* Allocations whose BO is closed but which a job submitted earlier may still use. Linux's panfrost keeps a
+@@ -886,6 +892,7 @@ struct sbdev {
+ #define SB_REQ_MERGE_NEXT (1u << 31)
+ 
+ static D3DKMT_HANDLE wadapter;
++static LUID wluid;                         /* sb-patches/0150: wadapter's LUID, for DXGI */
+ static MW_ESCAPE_GPU_INFO_DATA wgpu;
+ static int wddm = -1;
+ static SRWLOCK wddm_lock = SRWLOCK_INIT;   /* wddm_init and the fd table */
+@@ -1040,6 +1047,7 @@ wddm_init(void)
+ #define R(n) kmt.n = kmt_resolve(#n)
+    R(CreateDevice); R(DestroyDevice); R(CreateContext); R(CreateAllocation); R(DestroyAllocation);
+    R(Lock); R(Unlock); R(Render); R(Escape); R(EnumAdapters2); R(WaitForIdle);
++   R(QueryResourceInfo); R(OpenResource); R(SignalSynchronizationObject2);   /* sb-patches/0150, optional */
+ #undef R
+    if (!kmt.CreateDevice || !kmt.CreateContext || !kmt.CreateAllocation || !kmt.DestroyAllocation ||
+        !kmt.Lock || !kmt.Unlock || !kmt.Render || !kmt.Escape || !kmt.EnumAdapters2 || !kmt.WaitForIdle)
+@@ -1055,9 +1063,10 @@ wddm_init(void)
+       MW_ESCAPE_GPU_INFO_DATA g = {0};
+       g.Code = MW_ESCAPE_GPU_INFO;
+       wadapter = info[i].hAdapter;
+-      if (kmt_escape(0, &g, sizeof(g)) >= 0 && g.Count != 0 && g.Valid != 0)
++      if (kmt_escape(0, &g, sizeof(g)) >= 0 && g.Count != 0 && g.Valid != 0) {
+          wgpu = g;
+-      else
++         wluid = info[i].AdapterLuid;
++      } else
+          wadapter = 0;
+    }
+    if (!wadapter)
+@@ -1991,6 +2000,14 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+       if (bo->cpu)
+          w_unlock(d, bo->h);
+       if (bo->kind == 2) {               /* opened: the runtime's */
++         if (bo->kres && bo->kres_close) {
++            /* sb-patches/0150: malikm_kmt_close_shared came first; the resource goes with its last BO */
++            D3DKMT_DESTROYALLOCATION da = {0};
++            wddm_idle(d);
++            da.hDevice = d->kdevice;
++            da.hResource = bo->kres;
++            kmt.DestroyAllocation(&da);
++         }
+          memset(bo, 0, sizeof(*bo));
+          return 0;
+       }
+@@ -2352,6 +2369,167 @@ malikm_set_display_mode(unsigned hPrimaryAllocation)
+    return hr >= 0 ? 0 : -1;
+ }
+ 
++/* ---- sb-patches/0150: shared D3D resources on the D3DKMT device (the GL ICD's zero-copy present) ----
++ * The GL ICD renders into D3D11 textures its own D3D device created with D3D11_RESOURCE_MISC_SHARED (sbumd backs
++ * those with a resource allocation carrying our MW_ALLOCATION_INFO: sb-patches/0103). This process's D3DKMT device
++ * (the shim's own: no runtime) opens the KMT global handle the same way d3d10umd's OpenResource imports one through
++ * the runtime: the allocation's private data says size and layout, MW_ESCAPE_ALLOC_INFO its GPU address (one GPU
++ * address space for every device), and the BO is registered as opened (kind 2: never destroyed by GEM_CLOSE). */
++
++/* The D3DKMT adapter's LUID (the DXGI adapter to make the D3D device on). 0 when there is no D3DKMT device. */
++int
++malikm_kmt_adapter_luid(LUID *luid)
++{
++   if (!sb_kdev || !wddm_on())
++      return -1;
++   *luid = wluid;
++   return 0;
++}
++
++/* Open the shared resource behind KMT global handle Share on the D3DKMT device; its BO's PRIME "fd" (>= 0), or -1.
++ * Info gets the allocation's MW_ALLOCATION_INFO (as the creating UMD wrote it); *Res the opened resource, for
++ * malikm_kmt_close_shared. The thread's current device becomes the D3DKMT device (pan_kmod's import asks it). */
++int
++malikm_kmt_open_shared(unsigned share, MW_ALLOCATION_INFO *info, unsigned *res)
++{
++   struct sbdev *d = sb_kdev;
++   D3DKMT_QUERYRESOURCEINFO q = {0};
++   D3DKMT_OPENRESOURCE o = {0};
++   D3DDDI_OPENALLOCATIONINFO oi = {0};
++   MW_ESCAPE_ALLOC_INFO_DATA where = {0};
++   void *rt = NULL, *rpd = NULL, *tot = NULL;
++   uint32_t h = 0;
++   int fd = -1, step = 0;
++   NTSTATUS st = 0;
++
++   if (!d || d->on || !wddm_on() || !kmt.QueryResourceInfo || !kmt.OpenResource || !share)
++      goto out;
++   step = 1;
++   q.hDevice = d->kdevice;
++   q.hGlobalShare = share;
++   if ((st = kmt.QueryResourceInfo(&q)) < 0 || q.NumAllocations != 1 || !q.TotalPrivateDriverDataSize)
++      goto out;
++   step = 2;
++   rt = calloc(1, q.PrivateRuntimeDataSize + 16);
++   rpd = calloc(1, q.ResourcePrivateDriverDataSize + 16);
++   tot = calloc(1, q.TotalPrivateDriverDataSize + 16);
++   if (!rt || !rpd || !tot)
++      goto out;
++   step = 3;
++   o.hDevice = d->kdevice;
++   o.hGlobalShare = share;
++   o.NumAllocations = 1;
++   o.pOpenAllocationInfo = &oi;
++   o.pPrivateRuntimeData = rt;
++   o.PrivateRuntimeDataSize = q.PrivateRuntimeDataSize;
++   o.pResourcePrivateDriverData = rpd;
++   o.ResourcePrivateDriverDataSize = q.ResourcePrivateDriverDataSize;
++   o.pTotalPrivateDriverDataBuffer = tot;
++   o.TotalPrivateDriverDataBufferSize = q.TotalPrivateDriverDataSize;
++   if ((st = kmt.OpenResource(&o)) < 0)
++      goto out;
++   step = 4;
++   if (!oi.hAllocation || !oi.pPrivateDriverData || oi.PrivateDriverDataSize < sizeof(MW_ALLOCATION_INFO))
++      goto close;
++   memcpy(info, oi.pPrivateDriverData, sizeof(*info));
++   step = 5;
++   where.Code = MW_ESCAPE_ALLOC_INFO;
++   where.hAllocation = oi.hAllocation;
++   if ((st = kmt_escape(d->kdevice, &where, sizeof(where))) < 0 || where.GpuVa == 0)
++      goto close;
++   step = 6;
++   AcquireSRWLockExclusive(&d->lock);
++   h = wddm_bo_slot(d);
++   if (h)
++      d->bo[h - 1] = (struct wbo){oi.hAllocation, where.Size ? where.Size : info->Size, where.GpuVa, NULL, 0, 2,
++                                  NULL, 0, 0, 0, o.hResource, 0};
++   ReleaseSRWLockExclusive(&d->lock);
++   if (!h)
++      goto close;
++   fd = (int)(SB_PRIME_TAG | h);
++   *res = o.hResource;
++   sb_cur = d;
++   step = 7;
++   goto out;
++close:
++   {
++      D3DKMT_DESTROYALLOCATION da = {0};
++      da.hDevice = d->kdevice;
++      da.hResource = o.hResource;
++      kmt.DestroyAllocation(&da);
++   }
++out:
++   if (trace_on() || sb_log_active || getenv("SB_GL_ZC_LOG"))
++      fprintf(stderr, "malikm-wddm: opened shared 0x%x: %s (step %d, 0x%08lx): allocation 0x%x %ux%u pitch %u fmt %u "
++              "size %llu va 0x%llx, bo %u\n", share, fd >= 0 ? "ok" : "FAILED", step, (unsigned long)st,
++              (unsigned)oi.hAllocation, fd >= 0 ? (unsigned)info->Width : 0, fd >= 0 ? (unsigned)info->Height : 0,
++              fd >= 0 ? (unsigned)info->Pitch : 0, fd >= 0 ? (unsigned)info->Format : 0,
++              (unsigned long long)where.Size, (unsigned long long)where.GpuVa, h);
++   free(rt);
++   free(rpd);
++   free(tot);
++   return fd;
++}
++
++/* Close a resource malikm_kmt_open_shared opened: now if its BO is closed already, else at that BO's GEM_CLOSE. */
++void
++malikm_kmt_close_shared(unsigned res)
++{
++   struct sbdev *d = sb_kdev;
++   int now = 1;
++   if (!d || !res)
++      return;
++   AcquireSRWLockExclusive(&d->lock);
++   for (uint32_t i = 0; i < d->bo_cap; i++)
++      if (d->bo[i].h && d->bo[i].kind == 2 && d->bo[i].kres == res) {
++         d->bo[i].kres_close = 1;
++         now = 0;
++      }
++   if (now) {
++      D3DKMT_DESTROYALLOCATION da = {0};
++      wddm_idle(d);
++      da.hDevice = d->kdevice;
++      da.hResource = res;
++      kmt.DestroyAllocation(&da);
++   }
++   ReleaseSRWLockExclusive(&d->lock);
++}
++
++/* Everything the D3DKMT context was given so far is done (the GL frame just flushed). A CPU event the scheduler
++ * signals when the context gets there (EnqueueCpuEvent, as the runtime path's sb_enqueue_event), else
++ * D3DKMTWaitForIdle. 0 when done. */
++int
++malikm_kmt_frame_wait(unsigned ms)
++{
++   static HANDLE ev;
++   struct sbdev *d = sb_kdev;
++   int ret = -1;
++   if (!d || d->on)
++      return -1;
++   AcquireSRWLockExclusive(&d->lock);
++   if (d->pend)
++      (void)sb_flush_pend(d);           /* T30: a held-back chain goes first */
++   if (!ev)
++      ev = CreateEventW(NULL, TRUE, FALSE, NULL);
++   if (ev && kmt.SignalSynchronizationObject2) {
++      D3DKMT_SIGNALSYNCHRONIZATIONOBJECT2 sig = {0};
++      sig.hContext = d->kcontext;
++      sig.Flags.EnqueueCpuEvent = 1;
++      sig.CpuEventHandle = ev;
++      ResetEvent(ev);
++      if (kmt.SignalSynchronizationObject2(&sig) >= 0)
++         ret = WaitForSingleObject(ev, ms) == WAIT_OBJECT_0 ? 0 : -1;
++   }
++   if (ret)
++      ret = wddm_poll_idle(d, ms);
++   if (ret == 0) {
++      d->done = d->seq;
++      wdead_reap(d);
++   }
++   ReleaseSRWLockExclusive(&d->lock);
++   return ret;
++}
++
+ /* ---- MALIKM_FAKE ----
+  * The driver, emulated in this process on the same marshalled buffers, for
+  * CI runners with no Mali: buffers are ordinary memory, the GET_PARAM values
