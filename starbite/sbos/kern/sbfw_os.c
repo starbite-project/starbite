@@ -493,7 +493,7 @@ static const char *why_text(unsigned w)
     case SBFW_WHY_MENU:     return "Picked in the boot menu";
     case SBFW_WHY_AUTO:     return "The default, started by itself";
     case SBFW_WHY_NEXT:     return "Started once (boot next)";
-    case SBFW_WHY_SHELL:    return "Starbite OS as the boot menu";
+    case SBFW_WHY_SHELL:    return "Starbite OS at power-on";
     case SBFW_WHY_RETRY:    return "The retry after a crash";
     case SBFW_WHY_FASTBOOT: return "fastboot boot";
     default:                return "Unknown";

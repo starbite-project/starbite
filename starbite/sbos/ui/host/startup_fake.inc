@@ -148,7 +148,7 @@ int sh_fw_info(sh_fwinfo_t *f)
     f->medium = 1;
     f->card_only = 1;
     f->shell_mode = 1;
-    snprintf(f->why, sizeof f->why, "Starbite OS as the boot menu");
+    snprintf(f->why, sizeof f->why, "Starbite OS at power-on");
     snprintf(f->crash_key, sizeof f->crash_key, "linux-pmos");
     snprintf(f->crash_kind, sizeof f->crash_kind, "KERNEL PANIC");
     f->crash_sev = 2;
