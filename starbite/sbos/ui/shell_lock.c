@@ -210,6 +210,7 @@ typedef struct {
 static hold_t Q[2];
 typedef struct {
     tk_layer gh, closed, open, face, head, chev, members, rows[3];   /* gh: the stack's lower cards (P3i) */
+    tk_layer mpl[3], sl;        /* B4 (P3j-8): each member's own platter (a view of the face), the "Show less" pill */
     tk_bmp chev0;               /* the chevron unrotated */
     float fcut;                 /* P3s: px cut off the face's top and bottom (its 3-slice is that much shorter) */
     float y;                    /* top in content pt (scroll 0) */
@@ -593,10 +594,18 @@ static void layout_list(void)
         y += 68 + K[g].memh + STACK_GAP(g);
     }
 }
+/* B4 (P3j-8): an open stack's members are their own 68 pt platters 8 apart (76 a member), under a 36 pt band with
+ * "Show less" above the head card; q the stack's share of its fan (0 closed .. 1 open) */
+#define MEM_P 76.0f
+#define SL_BAND 36.0f
+static float card_top(int g);
+static float bl(int f, float size, float top);
+static float stack_q(int g) { return K[g].full > 0 ? tk_clampf(K[g].memh / K[g].full, 0, 1) : 0; }
+static float card_h(int g) { return SL_BAND * stack_q(g) + 68 + K[g].memh + STACK_GAP(g); }
 static float content_h(void)
 {
     float y = 10;
-    for (int g = 0; g < NG; g++) y += 68 + K[g].memh + STACK_GAP(g);
+    for (int g = 0; g < NG; g++) y += card_h(g);
     /* the last margin (22) collapses with the tools' 12; then their 32, margin 4, padding 14 */
     return y + 32 + 4 + 14;
 }
@@ -679,7 +688,7 @@ static void build_card(int g)
     card_t *k = &K[g];
     const grp_t *gr = &G[g];
     float top = LIST_TOP + k->y;            /* rest screen pt at scroll 0 */
-    k->full = 60.0f * gr->n;
+    k->full = MEM_P * gr->n;
     /* P3i: the stack's lower cards in their own layer under the card (they slide down and fade as it opens):
      * the second 10 pt in at each side, the third 20, peeking PEEK1 / PEEK2 below; each covers the one under it
      * and the top card covers both, so nothing shows through (the user: "they should be under it like peek
@@ -728,7 +737,7 @@ static void build_card(int g)
     tk_layer_init(&k->open, "card");
     tk_layer_add(&k->open, &k->face);
     tk_layer_add(&k->open, &k->head);
-    tk_layer_add(&k->open, &k->members);
+    /* B4: the members' group is under the head (the list links it): they come out from under the card */
     d = mk(&k->chev, "chev", k->chx, top + 27, 14, 14, 0, 0);
     d_icon(&d, "chev", k->chx, top + 27, 1);
     k->chev_t = 1;
@@ -748,9 +757,8 @@ static void build_open(int g)
     k->members.child = 0;
     for (int i = 0; i < gr->n; i++) {
         const sys_t *s = &gr->it[i];
-        float ry = top + 68 + 60 * i;
+        float ry = top + 68 + 8 + MEM_P * i + 7;   /* B4: in its own platter (centred in its 68 pt) */
         d = mk(&k->rows[i], "row", CARD_X + 6, ry - 2, CARD_W - 12, 58, 1, 0);
-        if (i) d_rrect(&d, CARD_X + 68, ry - 2, CARD_W - 84, .5f, 0, W(.14f));
         char tn[40] = "t38-";
         tk_memcpy(tn + 4, s->k, tk_strlen(s->k) + 1);
         d_icon(&d, tn, CARD_X + 21, ry + 9, 1);
@@ -767,6 +775,28 @@ static void build_open(int g)
     }
     /* their half copies now (at the tap), not in the first frame of the card's spring */
     for (int i = 0; i < gr->n; i++) tk_layer_prepare(&k->rows[i]);
+    /* B4: the members' platters: views of the card's face (made at boot: nothing baked here) */
+    tk_layer_prepare(&k->face);
+    for (int i = 0; i < 3; i++) {
+        tk_layer *v = &k->mpl[i];
+        tk_layer_init(v, "member");
+        v->hidden = 1;
+        if (i >= gr->n || !k->face.bmp.px) continue;
+        v->bmp = k->face.bmp; v->half = k->face.half; v->hspan = k->face.hspan;
+        v->slice = k->face.slice; v->slice_s0 = k->face.slice_s0; v->slice_s1 = k->face.slice_s1;
+        v->slice_h = PT(68 + 2 * FACE_MG) - k->fcut;
+        v->x = k->face.bx;
+    }
+    /* "Show less" (13 / 600 in a 28 pt capsule) right-aligned above the card */
+    {
+        float w = tw(TK_IT600, 13, "Show less", 0, 0) + 24, x = CARD_X + CARD_W - w, y = top - SL_BAND + 4;
+        d = mk(&k->sl, "show-less", x, y, w, 28, 1, 0);
+        d_rrect(&d, x, y, w, 28, 14, W(.18f));
+        d_text(&d, TK_IT600, 13, x + 12, bl(TK_IT600, 13, y + 6), "Show less", 0, 0, INK, 0);
+        tk_layer_prepare(&k->sl);
+        k->sl.hidden = 1;
+    }
+    relink();                                 /* (the new layers' places in the list) */
 }
 /* the rows only (the face and head stay: they are the card) */
 static void free_open(int g)
@@ -775,6 +805,12 @@ static void free_open(int g)
     if (!k->rows[0].bmp.px) return;
     for (int i = 0; i < G[g].n; i++) relayer(&k->rows[i]);
     k->members.child = 0;
+    for (int i = 0; i < 3; i++) {             /* B4: views of the face: never freed here */
+        tk_layer *v = &k->mpl[i];
+        v->bmp = (tk_bmp){ 0, 0, 0, 0 }; v->half = (tk_bmp){ 0, 0, 0, 0 }; v->hspan = 0; v->slice = 0;
+        v->hidden = 1; v->gen++;
+    }
+    relayer(&k->sl); k->sl.hidden = 1;
 }
 
 static void build_etool(void)
@@ -882,39 +918,60 @@ static void place_list(void)
     float y = 10;
     for (int g = 0; g < NG; g++) {
         card_t *k = &K[g];
-        float dy = PT(y - k->y);           /* how far the card moved from where it was baked */
-        float top = LIST_TOP + y;
+        float q = stack_q(g), band = SL_BAND * q;
+        float dy = PT(y + band - k->y);    /* how far the card moved from where it was baked */
+        float top = LIST_TOP + y + band;
         k->closed.hidden = 1;
         k->open.hidden = 0;
         k->closed.y = k->closed.by + dy;
         if (k->gh.bmp.px) {
-            /* the lower cards ride the face's bottom edge down and fade as the rows come in */
-            float q = k->full > 0 ? tk_clampf(k->memh / k->full, 0, 1) : 0;
-            k->gh.y = k->gh.by + dy + PT(k->memh);
-            k->gh.alpha = tk_clampf(1 - q * 1.8f, 0, 1);
+            /* B4: the baked peeks hand over to the members' own platters as they come out */
+            k->gh.y = k->gh.by + dy;
+            k->gh.alpha = tk_clampf(1 - q * 5, 0, 1);
             k->gh.hidden = k->gh.alpha <= 0;
+        }
+        /* B4 (P3j-8): each member springs from its peek (scale .97 / .94, 8 / 15 pt below) to its own slot, staggered
+         * (a member's share starts .12 of the fan after the one above), its words in over the last 65 % */
+        for (int i = 0; i < 3; i++) {
+            tk_layer *v = &k->mpl[i], *r = &k->rows[i];
+            if (i >= G[g].n || !r->bmp.px) { v->hidden = 1; continue; }
+            float qi = tk_clampf((q - .12f * i) / (1 - .12f * i), 0, 1);
+            float sc0 = i ? .94f : .97f, pk = i ? PEEK2 : PEEK1;
+            float top0 = top + 68 + pk - 68 * sc0, top1 = top + 68 + 8 + MEM_P * i;
+            float sc = sc0 + (1 - sc0) * qi, pt = top0 + (top1 - top0) * qi;
+            if (k->sp.live && k->memh > k->full) pt = top1 + (k->memh - k->full) * (i + 1) / G[g].n;   /* (the spring's overshoot) */
+            if (v->bmp.px) {
+                v->y = k->face.by + PT(pt - (LIST_TOP + k->y));
+                v->sx = v->sy = sc;
+                v->ox = PT(195); v->oy = PT(pt);
+                v->alpha = tk_clampf((qi - .06f) * 3, 0, 1);
+                v->hidden = v->alpha <= .004f;
+            }
+            float rb = LIST_TOP + k->y + 68 + 8 + MEM_P * i;   /* where its words were drawn */
+            r->y = r->by + PT(pt - rb);
+            r->sx = r->sy = sc;
+            r->ox = PT(195); r->oy = PT(pt);
+            r->alpha = tk_clampf((qi - .35f) / .65f, 0, 1);
+        }
+        if (k->sl.bmp.px) {
+            k->sl.y = k->sl.by + dy;
+            k->sl.alpha = tk_clampf((q - .4f) / .6f, 0, 1);
+            k->sl.hidden = k->sl.alpha <= .004f;
         }
         k->face.y = k->face.by + dy;
         k->head.y = k->head.by + dy;
         k->chev.y = k->chev.by + dy;
         k->chev.clip_r = (tk_rect){ PT(CARD_X), PT(top), PT(CARD_W), PT(68) };
-        float h = 68 + k->memh;
-        k->face.slice_h = PT(h + 2 * FACE_MG) - k->fcut;
-        k->members.clip_r = (tk_rect){ PT(CARD_X), PT(top + 68), PT(CARD_W), PT(k->memh) };
-        float p = k->full > 0 ? k->memh / (k->to > k->from ? k->full : tk_maxf(1, k->from)) : 0;
-        if (!k->sp.live) p = k->isopen ? 1 : 0;
-        for (int i = 0; i < G[g].n; i++) {
-            float a = tk_clampf(p * 1.4f - i * .15f, 0, 1), ty = (1 - tk_minf(1, p)) * -14 * (i + 1);
-            tk_layer *r = &K[g].rows[i];
-            r->alpha = a;
-            r->y = r->by + dy + PT(ty);
-        }
-        y += h + STACK_GAP(g);
+        k->face.slice_h = PT(68 + 2 * FACE_MG) - k->fcut;   /* B4: the head card stays a card */
+        k->members.clip = 0;
+        y += card_h(g);
     }
     float edy = PT(y - 448);
     etool.y = etool.by + edy;
     for (int g = 0; g < NG; g++) {
-        if (EMG) K[g].closed.hidden = K[g].open.hidden = K[g].gh.hidden = 1;
+        if (EMG) K[g].closed.hidden = K[g].open.hidden = K[g].gh.hidden = K[g].sl.hidden = 1;
+        if (EMG) for (int i = 0; i < 3; i++) K[g].mpl[i].hidden = K[g].rows[i].hidden = 1;
+        else for (int i = 0; i < G[g].n; i++) K[g].rows[i].hidden = 0;
         K[g].chev.hidden = EMG;
     }
     etool.hidden = EMG;
@@ -951,7 +1008,7 @@ static void toggle_group(int g, int instant)
         k->chev_t = 1;
         chev_draw(k, k->chev_now);
     } else
-        tk_spring_start(&k->sp, from, to, 0, TK_SPR_ROWS);
+        tk_spring_start(&k->sp, from, to, 0, TK_SPR_FAN);   /* B4: IOS-REFERENCE 5's fan (.40 / .85) */
     place_list();
 }
 
@@ -4046,9 +4103,14 @@ static void relink(void)
     link(&appc, st, na + cm_layers(st + na));    /* helper I: the keypad's line and ring, Messages' fields */
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
     link(&lockg, lk, 12);
-    tk_layer *ls[4 * NG + 2 + NEC];
+    tk_layer *ls[9 * NG + 2 + NEC];
     int n = 0;
-    for (int g = 0; g < NG; g++) { ls[n++] = &K[g].gh; ls[n++] = &K[g].closed; ls[n++] = &K[g].open; ls[n++] = &K[g].chev; }
+    for (int g = 0; g < NG; g++) {
+        ls[n++] = &K[g].gh;
+        for (int i = 2; i >= 0; i--) ls[n++] = &K[g].mpl[i];   /* B4: the members' platters and words under the head */
+        ls[n++] = &K[g].members; ls[n++] = &K[g].sl;
+        ls[n++] = &K[g].closed; ls[n++] = &K[g].open; ls[n++] = &K[g].chev;
+    }
     ls[n++] = &etool;
     for (int i = 0; i < NEC; i++) ls[n++] = &ecard[i];
     ls[n++] = &lockhl;
@@ -4340,24 +4402,24 @@ static int hit_head(float x, float y)
     if (y < LIST_TOP || y > LIST_TOP + LIST_H) return -1;
     float cy = y - LIST_TOP + scroll;
     for (int g = 0; g < NG; g++) {
-        float top = 10, yy = 10;
-        for (int h = 0; h < g; h++) yy += 68 + K[h].memh + STACK_GAP(h);
-        top = yy;
+        float top = card_top(g);
         if (cy >= top && cy < top + 68 && x >= CARD_X && x < CARD_X + CARD_W) return g;
+        /* B4: an open stack's "Show less" folds it too */
+        if (K[g].sl.bmp.px && stack_q(g) > .5f && cy >= top - SL_BAND && cy < top && x >= CARD_X + CARD_W - 110 && x < CARD_X + CARD_W) return g;
     }
     return -1;
 }
 static int hit_row(float x, float y, int *gi)
 {
     if (y < LIST_TOP || y > LIST_TOP + LIST_H || x < CARD_X + 6 || x > CARD_X + CARD_W - 6) return -1;
-    float cy = y - LIST_TOP + scroll, yy = 10;
+    float cy = y - LIST_TOP + scroll;
     for (int g = 0; g < NG; g++) {
+        float yy = card_top(g);
         if (K[g].memh > 1)
             for (int i = 0; i < G[g].n; i++) {
-                float rt = yy + 68 + 60 * i;
-                if (cy >= rt && cy < rt + 56 && cy < yy + 68 + K[g].memh) { *gi = g; return i; }
+                float rt = yy + 68 + 8 + MEM_P * i;          /* B4: its own platter */
+                if (cy >= rt && cy < rt + 68 && cy < yy + 68 + K[g].memh) { *gi = g; return i; }
             }
-        yy += 68 + K[g].memh + STACK_GAP(g);
     }
     return -1;
 }
@@ -4435,8 +4497,8 @@ static void press_cancel(void) { hl_off(); if (IP.on) icon_release(); }
 static float card_top(int g)
 {
     float yy = 10;
-    for (int h = 0; h < g; h++) yy += 68 + K[h].memh + STACK_GAP(h);
-    return yy;
+    for (int h = 0; h < g; h++) yy += card_h(h);
+    return yy + SL_BAND * stack_q(g);
 }
 /* a key of the dark keyboard under (x, y) (the three rows R, row 3 from 61.5 when r2x): its rect */
 static int kb_rect(float x, float y, const char *const *R, int r2x, tk_rect *o)
@@ -4647,7 +4709,8 @@ void sh_touch(int phase, float x, float y, float t)
             T.kind = G_TAP_ROW; T.arg = gi; T.arg2 = r;
             /* P3p: the row lights across its card (clipped to the card's rounded face) */
             float ct = LIST_TOP + card_top(gi);
-            hl_set(&lockhl, (tk_rect){ CARD_X, ct + 68 + 60.0f * r - 2, CARD_W, 60 }, (tk_rect){ CARD_X, ct, CARD_W, 68 + K[gi].memh }, 26, W(.08f));
+            tk_rect pr = { CARD_X, ct + 68 + 8 + MEM_P * r, CARD_W, 68 };   /* B4: the member's own platter */
+            hl_set(&lockhl, pr, pr, 26, W(.08f));
         } else if ((r = hit_head(x, y)) >= 0) {
             T.kind = G_TAP_HEAD; T.arg = r;
             tk_rect c = { CARD_X, LIST_TOP + card_top(r), CARD_W, 68 };
@@ -5099,8 +5162,8 @@ int sh_tick(float dt, float t)
             k->memh = tk_maxf(0, k->sp.x);
             if (!live && k->isopen) {
                 /* the concept: when open, scroll the card into view (rows spring) */
-                float top = k->y - 8, m = max_scroll();
-                if (k->y + 68 + k->full > scroll + LIST_H) tk_spring_start(&sp_scroll, scroll, tk_minf(top, m), 0, TK_SPR_ROWS);
+                float ct = card_top(g), top = ct - SL_BAND - 8, m = max_scroll();
+                if (ct + 68 + k->full > scroll + LIST_H) tk_spring_start(&sp_scroll, scroll, tk_minf(top, m), 0, TK_SPR_ROWS);
             }
             mv = 1;
             place_list();
