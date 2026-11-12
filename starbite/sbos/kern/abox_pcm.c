@@ -808,37 +808,56 @@ void apcm_down(void)
 }
 
 /* ---- diagnostics ------------------------------------------------------------------------------------------------- */
+/* Every diagnostic read goes through a fault-safe probe on the phone: probe run 2 (b670664) took a synchronous data
+ * abort reading CMU_AUD 0x17C0300C and the phone hung until the loader's watchdog. A read that faults shows 0xBADBAD0
+ * and is counted; nothing else changes. */
+static unsigned dfaults;
+static uint32_t dr(uint64_t pa)
+{
+#ifdef SBOS_KERNEL
+    uint32_t v;
+    if (!sb_probe32(pa, &v)) {
+        ++dfaults;
+        return 0xBADBAD0U;
+    }
+    return v;
+#else
+    return r32(pa);
+#endif
+}
+
 void apcm_dump(const char *tag)
 {
     if (!have_hal)
         return;
-    uint32_t a = r32(PMU(ABOX_PMU_AUD_STAT));
+    dfaults = 0;
+    uint32_t a = dr(PMU(ABOX_PMU_AUD_STAT));
     if ((a & 0xFU) != 0xFU) {
         say("dump %s: AUD domain off (%x): nothing else read", tag, UL(a));
         return;
     }
-#define RS(o) UL(r32(SFR(o)))
-#define RC(o) UL(r32(CMU(o)))
+#define RS(o) UL(dr(SFR(o)))
+#define RC(o) UL(dr(CMU(o)))
     say("dump %s: PMU AUD %x CPU %x/%x PADRET %x GPIOM %x | SYSPOWER %x/%x CFG0 %x REMAP %x/%x DYNCLK %x QCHDIS %x",
-        tag, UL(a), UL(r32(PMU(ABOX_PMU_CPU_STAT))), UL(r32(PMU(ABOX_PMU_CPU_OPT))), UL(r32(PMU(ABOX_PMU_PAD_RET))),
-        UL(r32(PMU(ABOX_PMU_GPIO_MODE))), RS(APCM_SFR_SYSPOWER), RS(SFR_SYSPOWER_ST), RS(SFR_SYS_CONFIG0),
+        tag, UL(a), UL(dr(PMU(ABOX_PMU_CPU_STAT))), UL(dr(PMU(ABOX_PMU_CPU_OPT))), UL(dr(PMU(ABOX_PMU_PAD_RET))),
+        UL(dr(PMU(ABOX_PMU_GPIO_MODE))), RS(APCM_SFR_SYSPOWER), RS(SFR_SYSPOWER_ST), RS(SFR_SYS_CONFIG0),
         RS(SFR_REMAP_MASK), RS(SFR_REMAP_ADDR), RS(SFR_DYN_CLK), RS(APCM_SFR_QCH_DIS));
     say("dump %s: CMU PLL %x/%x LOCK %x MUX cpu %x u0 %x u1 %x DIV audif %x bus %x busp %x cpuaclk %x pll %x u0 %x u1 %x",
         tag, RC(CMU_PLL_CON0), RC(CMU_PLL_CON3), RC(CMU_PLL_LOCKTIME), RC(CMU_MUX_CPU), RC(CMU_MUX_UAIF0),
         RC(CMU_MUX_UAIF1), RC(CMU_DIV_AUDIF), RC(CMU_DIV_BUS), RC(CMU_DIV_BUSP), RC(CMU_DIV_CPU_ACLK), RC(CMU_DIV_PLL),
         RC(CMU_DIV_UAIF0), RC(CMU_DIV_UAIF1));
-    say("dump %s: CMU QCH 3000.. %x %x %x %x %x %x %x %x | 3020.. %x %x %x %x | 3060 %x | MMU %x %x %x int %x fa %x",
-        tag, RC(0x3000), RC(0x3004), RC(0x3008), RC(0x300C), RC(0x3010), RC(0x3014), RC(0x3018), RC(0x301C), RC(0x3020),
-        RC(0x3024), RC(0x3028), RC(0x302C), RC(0x3060), UL(r32(ABOX_SYSMMU + MMU_CTRL)), UL(r32(ABOX_SYSMMU + MMU_CFG)),
-        UL(r32(ABOX_SYSMMU + MMU_STATUS)), UL(r32(ABOX_SYSMMU + MMU_INT_STATUS)), UL(r32(ABOX_SYSMMU + MMU_FAULT_ADDR)));
+    /* only the Q-channel words a source names (cmucal: BCLK0 0x3028, BCLK1 0x302C, SysMMU 0x3060) */
+    say("dump %s: CMU QCH bclk0 %x bclk1 %x sysmmu %x | MMU %x %x %x int %x fa %x",
+        tag, RC(CMU_QCH_BCLK0), RC(CMU_QCH_BCLK1), RC(CMU_QCH_SYSMMU), UL(dr(ABOX_SYSMMU + MMU_CTRL)), UL(dr(ABOX_SYSMMU + MMU_CFG)),
+        UL(dr(ABOX_SYSMMU + MMU_STATUS)), UL(dr(ABOX_SYSMMU + MMU_INT_STATUS)), UL(dr(ABOX_SYSMMU + MMU_FAULT_ADDR)));
     say("dump %s: ROUTE %x %x %x SPUS %x %x %x %x SBANK r0 %x mixp %x SPUM %x %x %x %x nsrc0 %x", tag,
         RS(SFR_ROUTE_CTRL0), RS(SFR_ROUTE_CTRL1), RS(SFR_ROUTE_CTRL2), RS(SFR_SPUS_CTRL0), RS(SFR_SPUS_CTRL1),
         RS(SFR_SPUS_CTRL2), RS(SFR_SPUS_CTRL3), RS(APCM_SBANK_RDMA0), RS(SFR_SBANK_MIXP), RS(SFR_SPUM_CTRL0),
         RS(SFR_SPUM_CTRL1), RS(0x308), RS(SFR_SPUM_CTRL3), RS(APCM_SBANK_NSRC0));
     say("dump %s: UAIF0 %x %x st %x | UAIF1 %x %x st %x | GPB0 %x %x GPB1 %x %x", tag, RS(SFR_UAIF_CTRL0(0)),
         RS(SFR_UAIF_CTRL1(0)), RS(SFR_UAIF_STATUS(0)), RS(SFR_UAIF_CTRL0(1)), RS(SFR_UAIF_CTRL1(1)),
-        RS(SFR_UAIF_STATUS(1)), UL(r32(ABOX_GPIO + GPB0_CON)), UL(r32(ABOX_GPIO + GPB0_PUD)),
-        UL(r32(ABOX_GPIO + GPB1_CON)), UL(r32(ABOX_GPIO + GPB1_PUD)));
+        RS(SFR_UAIF_STATUS(1)), UL(dr(ABOX_GPIO + GPB0_CON)), UL(dr(ABOX_GPIO + GPB0_PUD)),
+        UL(dr(ABOX_GPIO + GPB1_CON)), UL(dr(ABOX_GPIO + GPB1_PUD)));
     for (unsigned d = 0; d < 2; ++d) {
         uint32_t b = d ? APCM_WDMA(1) : APCM_RDMA(0);
         say("dump %s: %s c0 %x c1 %x str %x end %x off %x pt %x vol %x chg %x lim %x 24 %x 28 %x 2c %x st %x", tag,
@@ -847,6 +866,8 @@ void apcm_dump(const char *tag)
     }
 #undef RS
 #undef RC
+    if (dfaults)
+        say("dump %s: %u reads faulted (shown as badbad0; survived)", tag, UL(dfaults));
 }
 
 static void fmt_desc(char *d, unsigned cap, const char *fmt, ...)
