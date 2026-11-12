@@ -266,7 +266,9 @@ static float capsule_w(const char *t, int bold) { return tw(bold ? TK_IT600 : TK
 
 /* ---- the Clock (iOS 26: World Clock, Alarms, Stopwatch, Timers in a glass tab bar) --------------------------- *
  * The stopwatch's and the timer's times are CLK's (shell_lock.c: sh_next_update comes back for them); the alarms are
- * the kernel's four (alarm.c, sh_alarm_set: kept by the shell while it runs, the lock's widget from the earliest).
+ * the platform's four through Track A's API (sbos-core-api.md 5: sh_alarm_count / get / put / del: kept across
+ * restarts, with their days and label; the lock's widget comes back through sh_alarm). CK.al is a copy read again
+ * after each change (ck_load).
  * The page's static parts are in the strips; the digits, the buttons, the ring and the wheels are layers of their
  * own, redrawn only when their text changes; the lists (cities, alarms, laps) are LS's items. */
 #define CK_ORANGE 0xff9230                   /* the Clock's tint (iOS's orange, dark) */
@@ -275,9 +277,10 @@ static float capsule_w(const char *t, int bold) { return tw(bold ? TK_IT600 : TK
 static tk_layer ckwheel;
 static struct {
     int tab;                                 /* 0 World Clock, 1 Alarms, 2 Stopwatch, 3 Timers */
-    int nal, seeded;
-    struct { int h, m, on; } al[CK_NAL];
+    int nal;
+    struct { int h, m, on, days; char label[20]; } al[CK_NAL];
     int edit;                                /* the alarm editor: -1 shut, 0..3 an alarm, CK_NAL a new one */
+    int edays;                               /* the editor's Repeat (bit 0 Sunday .. bit 6) */
     int wv[3], ev[2];                        /* the wheels: the timer's h, m, s; the alarm editor's h, m */
     float woff[3];                           /* a wheel's drag (pt; + down) */
     int wcol, wdown;
@@ -291,28 +294,29 @@ static struct {
     int drawn_lap_ds;
 } CK = { .tab = 3, .edit = -1 };
 #define CKWV (CK.edit >= 0 ? CK.ev : CK.wv)          /* the wheels shown now */
-static void ck_seed(void)
+static void ta_days_text(char *b, int days);       /* Track A: shell_time.inc ("Every day", "Weekdays", "Mon Wed") */
+/* the platform's alarms into CK.al (Track A's list, in its own order) */
+static void ck_load(void)
 {
-    if (CK.seeded) return;
-    CK.seeded = 1;
-    if (ALM.on && !CK.nal) { CK.al[0].h = ALM.h; CK.al[0].m = ALM.m; CK.al[0].on = 1; CK.nal = 1; }
-}
-/* the kernel's list from the shell's (refused in the self test: then only the screen changes) */
-static void ck_alarms_push(void)
-{
-    int fh = 0, fm = 0, any = 0;
-    for (int i = 1; i < CK.nal; i++)                 /* by time of day, as iOS lists them */
-        for (int k = i; k > 0 && CK.al[k - 1].h * 60 + CK.al[k - 1].m > CK.al[k].h * 60 + CK.al[k].m; k--) {
-            int h = CK.al[k].h, m = CK.al[k].m, on = CK.al[k].on;
-            CK.al[k] = CK.al[k - 1];
-            CK.al[k - 1].h = h; CK.al[k - 1].m = m; CK.al[k - 1].on = on;
-        }
-    for (int i = 0; i < CK_NAL; i++) {
-        int on = i < CK.nal && CK.al[i].on;
-        sh_alarm_set(i, i < CK.nal ? CK.al[i].h : 0, i < CK.nal ? CK.al[i].m : 0, 0, on);
-        if (on && (!any || CK.al[i].h * 60 + CK.al[i].m < fh * 60 + fm)) { fh = CK.al[i].h; fm = CK.al[i].m; any = 1; }
+    int n = sh_alarm_count();
+    CK.nal = 0;
+    for (int i = 0; i < n && CK.nal < CK_NAL; i++) {
+        int hm = 0, days = 0, on = 0;
+        char lab[20] = "";
+        if (sh_alarm_get(i, &hm, &days, &on, lab, sizeof lab) < 0) break;
+        CK.al[CK.nal].h = hm / 100 % 24; CK.al[CK.nal].m = hm % 100 % 60; CK.al[CK.nal].on = on; CK.al[CK.nal].days = days;
+        tk_memcpy(CK.al[CK.nal].label, lab, sizeof lab);
+        CK.al[CK.nal].label[sizeof lab - 1] = 0;
+        CK.nal++;
     }
-    sh_alarm(any, fh, fm);                   /* the lock's widget (the kernel says the same at its next status) */
+}
+/* one alarm written (i == CK.nal adds); refused (full, the self test): a toast, the list as the platform has it */
+static int ck_put(int i, int h, int m, int days, int on, const char *label)
+{
+    int r = sh_alarm_put(i, h * 100 + m, days, on, label && label[0] ? label : "Alarm");
+    if (r < 0) toast("The alarm can't be set now");
+    ck_load();
+    return r;
 }
 static void ck_hm(char *b, int h, int m)
 {
@@ -408,11 +412,17 @@ static void ck_city_row(dc *d, int i, float y)
 }
 static void ck_alarm_row(dc *d, int i, float y)
 {
-    char hm[8];
-    ck_hm(hm, CK.al[i].h, CK.al[i].m);
+    char hm[12], sub[64];
+    fmt_time(hm, CK.al[i].h, CK.al[i].m, 0);         /* Track A: 12 / 24-hour; AM / PM smaller after the digits (iOS) */
     tk_col c = W(CK.al[i].on ? 1 : .5f);
     d_text(d, TK_IT400, 52, MARGIN, bl(TK_IT400, 52, y + 12), hm, 0, TK_TNUM, c, 0);
-    d_text(d, TK_IT400, 15, MARGIN, bl(TK_IT400, 15, y + 70), "Alarm", 0, 0, c, 0);
+    if (!sh_clock24())
+        d_text(d, TK_IT400, 30, MARGIN + tw(TK_IT400, 52, hm, 0, TK_TNUM) + 4, bl(TK_IT400, 52, y + 12), CK.al[i].h < 12 ? "AM" : "PM", 0, 0, c, 0);
+    int k = 0;
+    for (const char *p = CK.al[i].label[0] ? CK.al[i].label : "Alarm"; *p && k < 30;) sub[k++] = *p++;
+    sub[k] = 0;
+    if (CK.al[i].days) { sub[k++] = ','; sub[k++] = ' '; ta_days_text(sub + k, CK.al[i].days); }
+    d_text_box(d, TK_IT400, 15, MARGIN, bl(TK_IT400, 15, y + 70), CONTENT_R - 76 - MARGIN, 0, sub, 0, 0, c, 0);
     d_toggle(d, CONTENT_R - 64, y + 34, CK.al[i].on);
     if (i < CK.nal - 1) d_rrect(d, MARGIN, y + 95.5f, 390 - MARGIN, .5f, 0, C_SEP);
 }
@@ -478,7 +488,7 @@ static void ck_list_build(void)
         y = TITLE_H; n = 1;
         int cnt = kind == CKL_CITIES ? 5 : CK.nal;
         for (int i = 0; i < cnt; i++, n++) {
-            uint32_t look = kind == CKL_CITIES ? (uint32_t)(ST.h * 60 + ST.mi) : (uint32_t)(CK.al[i].h * 1000 + CK.al[i].m * 10 + CK.al[i].on + (i == CK.nal - 1 ? 5 : 0));
+            uint32_t look = kind == CKL_CITIES ? (uint32_t)(ST.h * 60 + ST.mi) : (uint32_t)(CK.al[i].h * 1000 + CK.al[i].m * 10 + CK.al[i].on + (i == CK.nal - 1 ? 5 : 0) + (CK.al[i].days << 17) + (sh_clock24() << 25));
             LS.iy[n] = y; LS.ih[n] = 96; LS.ik[n] = ck_key((uint32_t)kind, (uint32_t)i, look);
             y += 96;
         }
@@ -511,6 +521,15 @@ static void ck_glyph(dc *d, int k, float cx, float cy, tk_col c)
         d_seg(d, cx, cy, cx - 5, cy - 5, 1.8f, c);
         d_rrect(d, cx - 1.6f, cy - 1.6f, 3.2f, 3.2f, 1.6f, c);
     }
+}
+/* cp6: a tab bar's tab under the finger (n tabs on the bar at 718: the Clock's, the Phone's): its glyph and label dim */
+static int tab_press(float x, float y, int n, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
+{
+    if (y < 718 || y > 780 || x < GROUP_X || x >= GROUP_X + GROUP_W) return 0;
+    float w = GROUP_W / n;
+    int k = tk_mini(n - 1, (int)((x - GROUP_X) / w));
+    *r = *g = (tk_rect){ GROUP_X + w * k + 4, 722, w - 8, 54 }; *rad = 27; *c = APR_DIM;
+    return 1;
 }
 static void ck_tabs(dc *d)
 {
@@ -545,60 +564,117 @@ static int wheel_cols(void) { return CK.edit >= 0 ? 2 : 3; }
 static float wheel_cx(int c) { return CK.edit >= 0 ? (c ? 228 : 162) : 78 + 117.0f * c; }
 static int wheel_mod(int c) { return (CK.edit >= 0 ? c == 0 : c == 0) ? 24 : 60; }
 static int ck_wheel_on(void) { return is_app("clock") && (CK.edit >= 0 || (CK.tab == 3 && !CLK.tm_run && !CK.tm_paused)); }
-/* the wheels: the values round the selection band, fading and shrinking away from it */
+/* the wheels (P3z: the phone measured 60 ms a frame while one moved, ~1 fps: every touch and every settling turn
+ * redrew one 390-pt-wide bitmap with ~35 numbers at continuously changing sizes, so no glyph was ever cached, and the
+ * GPU took a new 4-5 MB texture each frame). Now: the group ckwheel clips to the 5 rows and fades its top and bottom
+ * 1.6 rows (the compositor's clip fades, as the scrolling lists); under it the band (the selection, the units, the
+ * ":") drawn once, and a small layer per column with 9 values at one size, moved by whole px while it turns and
+ * redrawn only when it passes a value (about 1 MB, a few ms, every 36 pt) */
+static tk_layer ckwband, ckcol[3];
+static int ckcol_sh[3], ckcol_base[3];
+static float ck_col_x(int c) { return CK.edit >= 0 ? (c ? 204.0f : 116.0f) : wheel_cx(c) - 56; }
+#define CK_COL_W 70.0f
+static void ck_col_draw(int c, int sh)
+{
+    float cy = wheel_cy(), x0 = ck_col_x(c);
+    int mod = wheel_mod(c), base = CKWV[c];
+    tk_layer *nx = ckcol[c].next;                  /* mk re-inits the layer: keep its place among the group's children */
+    relayer(&ckcol[c]);
+    dc d = mk(&ckcol[c], "clock-col", x0, cy - 4.5f * CK_WP, CK_COL_W, 9 * CK_WP, 0, 0);
+    ckcol[c].next = nx;
+    ckcol_sh[c] = sh;
+    ckcol_base[c] = base;
+    if (!d.b->px) return;
+    for (int k = -4; k <= 4; k++) {
+        int v = ((base - sh + k) % mod + mod) % mod;
+        char b[4];
+        b[0] = (char)('0' + v / 10); b[1] = (char)('0' + v % 10); b[2] = 0;
+        if (CK.edit < 0 && v < 10) { b[0] = (char)('0' + v); b[1] = 0; }
+        float y = cy + k * CK_WP, w = tw(TK_IT400, 23, b, 0, TK_TNUM);
+        float x = CK.edit >= 0 ? (c ? 208 : 182 - w) : wheel_cx(c) + 8 - w;
+        d_text(&d, TK_IT400, 23, x, bl(TK_IT400, 23, y - lh(TK_IT400, 23) / 2), b, 0, TK_TNUM, W(1), 0);
+    }
+}
+/* a column where its offset puts it: redrawn only past a value (or when its value changed), else moved */
+static void ck_col_place(int c)
+{
+    float off = CK.woff[c];
+    int sh = (int)tk_floorf(off / CK_WP + .5f);
+    if (!ckcol[c].bmp.px || sh != ckcol_sh[c] || CKWV[c] != ckcol_base[c]) ck_col_draw(c, sh);
+    ckcol[c].x = ckcol[c].bx;
+    ckcol[c].y = ckcol[c].by + tk_floorf(PT(off - sh * CK_WP) + .5f);
+    ckcol[c].hidden = !ckcol[c].bmp.px;
+}
+static void ck_wheel_place(void)
+{
+    if (ckwheel.hidden) return;
+    for (int c = 0; c < wheel_cols(); c++) ck_col_place(c);
+}
+static void ck_wheel_free(void)
+{
+    relayer(&ckwband);
+    for (int c = 0; c < 3; c++) { relayer(&ckcol[c]); ckcol[c].hidden = 1; }
+    ckwheel.child = 0;
+    ckwheel.hidden = 1;
+}
 static void ck_wheel_build(void)
 {
-    relayer(&ckwheel);
-    ckwheel.hidden = 1;
+    ck_wheel_free();
     if (!ck_wheel_on()) return;
     float cy = wheel_cy(), top = cy - 2.5f * CK_WP;
-    tk_layer *nx = ckwheel.next;
-    dc d = mk(&ckwheel, "clock-wheels", 0, top, 390, 5 * CK_WP, 0, 0);
-    ckwheel.next = nx;
-    if (!d.b->px) return;
-    d_rrect(&d, MARGIN - 4, cy - CK_WP / 2, CONTENT_W + 8, CK_WP, 10, W(.12f));
-    int nc = wheel_cols();
-    for (int c = 0; c < nc; c++) {
-        int mod = wheel_mod(c), base = CKWV[c];
-        float off = CK.woff[c];
-        int sh = (int)tk_floorf(off / CK_WP + .5f);
-        float fr = off - sh * CK_WP;
-        for (int k = -3; k <= 3; k++) {
-            int v = ((base - sh + k) % mod + mod) % mod;
-            float y = cy + k * CK_WP + fr, dist = tk_fabsf(y - cy) / (2.5f * CK_WP);
-            if (dist >= 1) continue;
-            char b[4];
-            b[0] = (char)('0' + v / 10); b[1] = (char)('0' + v % 10); b[2] = 0;
-            if (CK.edit < 0 && v < 10) { b[0] = (char)('0' + v); b[1] = 0; }
-            float fs = 23 - 4 * dist, w = tw(TK_IT400, fs, b, 0, TK_TNUM);
-            float x = CK.edit >= 0 ? (c ? 208 : 182 - w) : wheel_cx(c) + 8 - w;
-            d_text(&d, TK_IT400, fs, x, bl(TK_IT400, fs, y - lh(TK_IT400, fs) / 2), b, 0, TK_TNUM, W(1 - .7f * dist), 0);
-        }
+    dc d = mk(&ckwband, "clock-band", MARGIN - 4, cy - CK_WP / 2, CONTENT_W + 8, CK_WP, 1, 0);
+    if (d.b->px) {
+        d_rrect(&d, MARGIN - 4, cy - CK_WP / 2, CONTENT_W + 8, CK_WP, 10, W(.12f));
         if (CK.edit < 0) {
             static const char *const U[3] = { "hours", "min", "sec" };
-            d_text(&d, TK_IT600, 17, wheel_cx(c) + 16, bl(TK_IT600, 17, cy - lh(TK_IT600, 17) / 2), U[c], 0, 0, INK, 0);
-        }
+            for (int c = 0; c < 3; c++)
+                d_text(&d, TK_IT600, 17, wheel_cx(c) + 16, bl(TK_IT600, 17, cy - lh(TK_IT600, 17) / 2), U[c], 0, 0, INK, 0);
+        } else
+            d_text_box(&d, TK_IT400, 23, 195, bl(TK_IT400, 23, cy - lh(TK_IT400, 23) / 2), 20, 1, ":", 0, 0, INK, 0);
     }
-    if (CK.edit >= 0) d_text_box(&d, TK_IT400, 23, 195, bl(TK_IT400, 23, cy - lh(TK_IT400, 23) / 2), 20, 1, ":", 0, 0, INK, 0);
-    trim(&ckwheel);
+    int nc = wheel_cols();
+    tk_layer *k[4] = { &ckwband, &ckcol[0], &ckcol[1], &ckcol[2] };
+    for (int c = 0; c < 3; c++) { tk_layer_init(&ckcol[c], "clock-col"); ckcol[c].hidden = 1; }
+    link(&ckwheel, k, 1 + nc);
+    ckwheel.clip = 1;
+    ckwheel.clip_r = (tk_rect){ 0, PT(top), TK_W, PT(5 * CK_WP) };
+    ckwheel.fade_top = ckwheel.fade_bot = PT(1.6f * CK_WP);
     ckwheel.hidden = 0;
+    for (int c = 0; c < nc; c++) ck_col_place(c);
+}
+#define CK_ED_G 420.0f                       /* the alarm editor: Repeat / Label, then Delete */
+#define CK_ED_DEL 560.0f
+static void ck_repeat_cb(int i)
+{
+    static const int D[4] = { 0, 0x7f, 0x3e, 0x41 };   /* Never, Every Day, Weekdays, Weekends */
+    if (i < 0 || i > 3 || CK.edit < 0) return;
+    CK.edays = D[i];
+    build_app_page(AP.a);
 }
 static void page_clock(dc *d)
 {
-    ck_seed();
+    ck_load();
     if (CK.edit >= 0) {
         /* Add / Edit Alarm (a sheet in iOS; here a page): Cancel, the title, Save; the wheels; Delete */
         d_capsule_btn(d, MARGIN, SAFE_TOP, "Cancel", tk_hex(CK_ORANGE, 1), 0);
         float sw = capsule_w("Save", 1);
         d_capsule_btn(d, CONTENT_R - sw, SAFE_TOP, "Save", tk_hex(CK_ORANGE, 1), 1);
         d_navtitle(d, CK.edit < CK_NAL ? "Edit Alarm" : "Add Alarm");
-        d_rrect(d, GROUP_X, 420, GROUP_W, 47, 16, C_CARD);
-        d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, 433), "Label", 0, 0, INK, 0);
-        d_text_box(d, TK_IT400, 17, CONTENT_R - 16, bl(TK_IT400, 17, 433), 150, 2, "Alarm", 0, 0, C_LABEL2, 0);
-        d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 476), "It vibrates (no sound yet) and wakes the screen.", 0, 0, C_LABEL2, 0);
-        if (CK.edit < CK_NAL) {
-            d_rrect(d, GROUP_X, 520, GROUP_W, 47, 16, C_CARD);
-            d_text_box(d, TK_IT400, 17, 195, bl(TK_IT400, 17, 533), CONTENT_W, 1, "Delete Alarm", 0, 0, C_RED, 0);
+        /* Repeat (Track A's days) and Label, iOS's group; Repeat opens an action sheet */
+        char dt[64];
+        ta_days_text(dt, CK.edays);
+        d_rrect(d, GROUP_X, CK_ED_G, GROUP_W, 94, 16, C_CARD);
+        d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, CK_ED_G + 13), "Repeat", 0, 0, INK, 0);
+        d_icon(d, "chev", CONTENT_R - 30, CK_ED_G + 16.5f, .45f);
+        d_text_box(d, TK_IT400, 17, CONTENT_R - 36, bl(TK_IT400, 17, CK_ED_G + 13), 180, 2, dt, 0, 0, C_LABEL2, 0);
+        d_rrect(d, ROW_TX, CK_ED_G + 46.5f, CONTENT_R - ROW_TX, .5f, 0, C_SEP);
+        d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, CK_ED_G + 47 + 13), "Label", 0, 0, INK, 0);
+        const char *lab = CK.edit < CK.nal && CK.al[CK.edit].label[0] ? CK.al[CK.edit].label : "Alarm";
+        d_text_box(d, TK_IT400, 17, CONTENT_R - 16, bl(TK_IT400, 17, CK_ED_G + 47 + 13), 150, 2, lab, 0, 0, C_LABEL2, 0);
+        d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, CK_ED_G + 94 + 9), "It vibrates (no sound yet) and wakes the screen.", 0, 0, C_LABEL2, 0);
+        if (CK.edit < CK.nal) {
+            d_rrect(d, GROUP_X, CK_ED_DEL, GROUP_W, 47, 16, C_CARD);
+            d_text_box(d, TK_IT400, 17, 195, bl(TK_IT400, 17, CK_ED_DEL + 13), CONTENT_W, 1, "Delete Alarm", 0, 0, C_RED, 0);
         }
         return;
     }
@@ -627,6 +703,13 @@ static void clk_digits(tk_layer *l, float y, float size, const char *txt)
     trim(l);
     l->hidden = 0;
 }
+/* cp6: the stopwatch's / timer's button k (0 left, 1 right) is dimmed (drawn so, no press; its tap says why) */
+static int ck_btn_dim(int k)
+{
+    if (CK.tab == 2) return !k && !CLK.sw_run && clk_sw_ms(now_ms) <= 0;
+    if (CK.tab == 3) return !CLK.tm_run && !CK.tm_paused && (!k || !(CK.wv[0] || CK.wv[1] || CK.wv[2]));
+    return 0;
+}
 static void clk_controls(void)
 {
     relayer(&apctl);
@@ -635,13 +718,12 @@ static void clk_controls(void)
     apctl.next = nx;
     if (CK.tab == 2) {
         float sw = clk_sw_ms(now_ms);
-        ck_button(&d, CKB_L, CKB_Y, CLK.sw_run || sw <= 0 ? "Lap" : "Reset", 0, !CLK.sw_run && sw <= 0);
+        ck_button(&d, CKB_L, CKB_Y, CLK.sw_run || sw <= 0 ? "Lap" : "Reset", 0, ck_btn_dim(0));
         ck_button(&d, CKB_R, CKB_Y, CLK.sw_run ? "Stop" : "Start", CLK.sw_run ? 0xff4245 : 0x30d158, 0);
     } else if (CK.tab == 3) {
-        int set = CK.wv[0] || CK.wv[1] || CK.wv[2];
-        ck_button(&d, CKB_L, CKB_Y, "Cancel", 0, !CLK.tm_run && !CK.tm_paused);
+        ck_button(&d, CKB_L, CKB_Y, "Cancel", 0, ck_btn_dim(0));
         if (CLK.tm_run) ck_button(&d, CKB_R, CKB_Y, "Pause", CK_ORANGE, 0);
-        else ck_button(&d, CKB_R, CKB_Y, CK.tm_paused ? "Resume" : "Start", 0x30d158, !CK.tm_paused && !set);
+        else ck_button(&d, CKB_R, CKB_Y, CK.tm_paused ? "Resume" : "Start", 0x30d158, ck_btn_dim(1));
     }
     trim(&apctl);
     apctl.hidden = 0;
@@ -726,18 +808,26 @@ static void clk_tap(float x, float y)
         if (IN_NAV(y) && x < MARGIN + capsule_w("Cancel", 0) + 6) { CK.edit = -1; build_app_page(AP.a); return; }
         if (IN_NAV(y) && x > CONTENT_R - capsule_w("Save", 1) - 6) {
             int i = CK.edit;
-            if (i == CK_NAL) { if (CK.nal == CK_NAL) { toast("Up to four alarms"); return; } i = CK.nal++; }
-            CK.al[i].h = CK.ev[0]; CK.al[i].m = CK.ev[1]; CK.al[i].on = 1;
+            if (i >= CK.nal) { if (CK.nal == CK_NAL) { toast("Up to four alarms"); return; } i = CK.nal; }
+            (void)ck_put(i, CK.ev[0], CK.ev[1], CK.edays, 1, i < CK.nal ? CK.al[i].label : "Alarm");
             CK.edit = -1;
-            ck_alarms_push();
             build_app_page(AP.a);
             return;
         }
-        if (CK.edit < CK_NAL && y >= 520 && y < 567 && x >= GROUP_X && x < CONTENT_R) {
-            for (int k = CK.edit; k + 1 < CK.nal; k++) CK.al[k] = CK.al[k + 1];
-            CK.nal--;
+        if (y >= CK_ED_G && y < CK_ED_G + 47 && x >= GROUP_X && x < CONTENT_R) {      /* Repeat */
+            static const kit_btn B[5] = { { "Never", KIT_DEFAULT }, { "Every Day", KIT_DEFAULT }, { "Weekdays", KIT_DEFAULT },
+                                          { "Weekends", KIT_DEFAULT }, { "Cancel", KIT_CANCEL } };
+            kit_actions("Repeat", B, 5, ck_repeat_cb);
+            return;
+        }
+        if (y >= CK_ED_G + 47 && y < CK_ED_G + 94 && x >= GROUP_X && x < CONTENT_R) {   /* cp6: Label (no typing here yet) */
+            toast("Alarm labels can't be changed yet");
+            return;
+        }
+        if (CK.edit < CK.nal && y >= CK_ED_DEL && y < CK_ED_DEL + 47 && x >= GROUP_X && x < CONTENT_R) {
+            if (sh_alarm_del(CK.edit) < 0) toast("The alarm can't be deleted now");
+            ck_load();
             CK.edit = -1;
-            ck_alarms_push();
             build_app_page(AP.a);
         }
         return;
@@ -747,10 +837,14 @@ static void clk_tap(float x, float y)
         if (k != CK.tab) { sh_haptic(); CK.tab = k; LS.s = 0; build_app_page(AP.a); }
         return;
     }
+    if (CK.tab == 0) {                                  /* cp6: a city's row answers (its press lit) */
+        if (ckl_kind == CKL_CITIES && scv_hit(&LS, y, 0) >= 1) toast("The world clock's cities can't be changed yet");
+        return;
+    }
     if (CK.tab == 1) {
         if (DONE_HIT(x, y)) {
             if (CK.nal == CK_NAL) { toast("Up to four alarms"); return; }
-            CK.edit = CK_NAL; CK.ev[0] = (ST.h + 1) % 24; CK.ev[1] = 0; CK.woff[0] = CK.woff[1] = 0;
+            CK.edit = CK_NAL; CK.ev[0] = (ST.h + 1) % 24; CK.ev[1] = 0; CK.edays = 0; CK.woff[0] = CK.woff[1] = 0;
             build_app_page(AP.a);
             return;
         }
@@ -758,12 +852,11 @@ static void clk_tap(float x, float y)
         if (ckl_kind != CKL_ALARMS || i < 0 || i >= CK.nal) return;
         if (x >= CONTENT_R - 76) {                      /* the toggle */
             sh_haptic();
-            CK.al[i].on = !CK.al[i].on;
-            ck_alarms_push();
+            (void)ck_put(i, CK.al[i].h, CK.al[i].m, CK.al[i].days, !CK.al[i].on, CK.al[i].label);
             ck_list_build();
             relink();
         } else {
-            CK.edit = i; CK.ev[0] = CK.al[i].h; CK.ev[1] = CK.al[i].m; CK.woff[0] = CK.woff[1] = 0;
+            CK.edit = i; CK.ev[0] = CK.al[i].h; CK.ev[1] = CK.al[i].m; CK.edays = CK.al[i].days; CK.woff[0] = CK.woff[1] = 0;
             build_app_page(AP.a);
         }
         return;
@@ -786,7 +879,7 @@ static void clk_tap(float x, float y)
                 if (CK.nlap < 100) CK.lap[CK.nlap++] = sw - acc;
                 CLK.laps = CK.nlap; CLK.lap_at = sw;
             } else if (sw > 0) { CLK.sw_acc = 0; CLK.laps = 0; CK.nlap = 0; CLK.sw_ds = -1; }
-            else return;
+            else { toast("Start the stopwatch to time laps"); return; }   /* cp6: the dimmed Lap says why */
             sh_haptic();
             CLK.ctl_ver++;
             CLK.sw_ds = -1;
@@ -798,12 +891,19 @@ static void clk_tap(float x, float y)
         return;
     }
     if (CK.tab == 3) {
+        if (!CLK.tm_run && !CK.tm_paused && y >= 540 && y < 592 && x >= GROUP_X && x < CONTENT_R) {   /* cp6: When Timer Ends */
+            toast("A timer vibrates when it ends: there is no sound yet");
+            return;
+        }
         if (dl <= 42 * 42 && (CLK.tm_run || CK.tm_paused)) {          /* Cancel */
             sh_haptic();
             CLK.tm_run = 0; CK.tm_paused = 0;
             CLK.ctl_ver++;
             build_app_page(AP.a);
+        } else if (dl <= 42 * 42) {
+            toast("No timer is running");                 /* cp6: the dimmed Cancel says why */
         } else if (dr <= 42 * 42) {
+            if (ck_btn_dim(1)) { toast("Choose a time on the wheels first"); return; }   /* cp6: the dimmed Start */
             sh_haptic();
             if (CLK.tm_run) { CK.tm_left = tk_maxf(0, CLK.tm_end - t); CLK.tm_run = 0; CK.tm_paused = 1; CLK.ctl_ver++; clk_update(t); }
             else if (CK.tm_paused) { CLK.tm_end = t + CK.tm_left; CLK.tm_run = 1; CK.tm_paused = 0; CLK.ctl_ver++; clk_update(t); }
@@ -833,8 +933,7 @@ static int ck_touch(int ph, float x, float y, float t)
         CK.wdown = 0;
         CK.wvel[c] = tk_tracker_v(&CK.wtr) * 1000;      /* pt / s */
     }
-    ck_wheel_build();
-    relink();
+    ck_wheel_place();                              /* P3z: moved, redrawn only past a value */
     return 1;
 }
 /* the wheels' settling: their speed decays, then they snap to the nearest value (a selection tick each value) */
@@ -863,7 +962,7 @@ static int ck_tick(float dt)
         }
         mv = 1;
     }
-    if (mv && ck_wheel_on()) { ck_wheel_build(); relink(); }
+    if (mv && ck_wheel_on()) ck_wheel_place();
     return mv;
 }
 static int ck_moving(void)
@@ -1072,70 +1171,81 @@ static void calc_tap(float x, float y)
     build_calc();
 }
 
-/* ---- the Camera: no driver yet (Track I has none for the S9's sensors): iOS's screen, honest about it --------- */
-static void page_camera(dc *d)
-{
-    d_rrect(d, 0, 0, 390, H_PT, 0, tk_hex(0x000000, 1));
-    /* the top row: flash and Live as glass circles, dimmed */
-    for (int k = 0; k < 2; k++) {
-        float cx = k ? CONTENT_R - 18 : MARGIN + 18, cy = SAFE_TOP + 22;
-        d_rrect(d, cx - 18, cy - 18, 36, 36, 18, W(.12f));
-        if (!k) { d_seg(d, cx + 2, cy - 9, cx - 4, cy + 1, 2, W(.45f)); d_seg(d, cx - 4, cy + 1, cx + 4, cy - 1, 2, W(.45f)); d_seg(d, cx + 4, cy - 1, cx - 2, cy + 9, 2, W(.45f)); }
-        else { d_ring(d, cx, cy, 8, 1.6f, 1, W(.45f), 0); d_ring(d, cx, cy, 3.5f, 1.6f, 1, W(.45f), 0); }
-    }
-    /* the viewfinder (4:3) */
-    d_rrect(d, 0, 112, 390, 520, 0, tk_hex(0x121417, 1));
-    d_text_box(d, TK_IT600, 17, 195, bl(TK_IT600, 17, 344), CONTENT_W, 1, "Camera driver not ready yet", 0, 0, W(.85f), 0);
-    char ln[4][96];
-    float wm;
-    int n = wrapn(ln, 3, TK_IT400, 14, "The Galaxy S9's camera sensors need a Starbite OS driver before photos can be taken.", 300, &wm);
-    for (int k = 0; k < n; k++) d_text_box(d, TK_IT400, 14, 195, bl(TK_IT400, 14, 372 + 19 * k), CONTENT_W, 1, ln[k], 0, 0, C_LABEL2, 0);
-    /* the modes: Video and Photo (iOS 26 shows these two), Photo in yellow */
-    float wv = tw(TK_IT600, 14, "VIDEO", .6f, 0), wp = tw(TK_IT600, 14, "PHOTO", .6f, 0);
-    d_text(d, TK_IT600, 14, 195 - wp / 2 - 26 - wv, bl(TK_IT600, 14, 652), "VIDEO", .6f, 0, C_LABEL2, 0);
-    d_text(d, TK_IT600, 14, 195 - wp / 2, bl(TK_IT600, 14, 652), "PHOTO", .6f, 0, tk_hex(0xffd600, 1), 0);
-    /* the shutter (a white ring with its disc, dimmed: it can't take a photo), the thumbnail, the flip circle */
-    d_ring(d, 195, 718, 37, 4, 1, W(.45f), 0);
-    d_rrect(d, 195 - 31, 718 - 31, 62, 62, 31, W(.35f));
-    d_rrect(d, 48 - 22, 718 - 22, 44, 44, 10, W(.1f));
-    d_rrect(d, 342 - 22, 718 - 22, 44, 44, 22, W(.12f));
-    d_ring(d, 342, 718, 9, 1.8f, .75f, W(.45f), 1);
-    d_seg(d, 342 + 9, 718 - 6, 342 + 9, 718 + 1, 1.8f, W(.45f));
-}
-static void camera_tap(float x, float y)
-{
-    float dx = x - 195, dy = y - 718;
-    if (dx * dx + dy * dy <= 44 * 44) { sh_haptic(); toast("The camera needs its driver first"); }
-    else if (y >= 696 && y < 740 && (x < 80 || x > 310)) toast("Nothing to show: no photos can be taken yet");
-}
+/* ---- the Camera: shell_camera.inc (on Track A's front-camera driver) ---------------------------------------- */
+static int cam_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c);
 
 /* ---- the shell's hooks for these apps (app_press, own_extras, cm_layers / cm_touch / cm_tick / cm_closed) ----- */
 static int ap_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
 {
+    if (is_app("camera")) return cam_press(x, y, r, g, rad, c);   /* the shutter's disc, the circles */
     if (is_app("calc")) {
         for (int i = 0; i < 20; i++) {
             float kx, ky, kw;
             calc_key_rect(i, &kx, &ky, &kw);
             float dx = x - (kx + 40), dy = y - (ky + 40);
-            if (dx * dx + dy * dy <= 44 * 44) { *r = *g = (tk_rect){ kx, ky, 80, 80 }; *rad = 40; *c = W(.3f); return 1; }
+            if (dx * dx + dy * dy <= 44 * 44) { *r = *g = (tk_rect){ kx, ky, 80, 80 }; *rad = 40; *c = APR_KEY; return 1; }
         }
         return 0;
     }
+    if (is_app("light")) {                                        /* cp6: the Flashlight's switch (a CC tile's press) */
+        if (x < 135 || x >= 255 || y < 250 || y >= 490) return 0;
+        *r = *g = (tk_rect){ 135, 250, 120, 240 }; *rad = 34; *c = Q[0].lit ? APR_CELL : APR_CIRC;
+        return 1;
+    }
+    if (is_app("notes") && !NS.view && NS.n) {                     /* cp6: a note's row on its card (systemGray4) */
+        if (x < GROUP_X || x >= CONTENT_R || y < CONTENT_TOP || y >= CONTENT_TOP + NOTE_RH * NS.n) return 0;
+        int i = (int)((y - CONTENT_TOP) / NOTE_RH);
+        *r = (tk_rect){ GROUP_X, CONTENT_TOP + NOTE_RH * i, GROUP_W, NOTE_RH };
+        *g = (tk_rect){ GROUP_X, CONTENT_TOP, GROUP_W, NOTE_RH * NS.n };
+        *rad = 16; *c = APR_CARD;
+        return 1;
+    }
     if (!is_app("clock")) return 0;
-    *c = W(.18f);
-    if (CK.edit >= 0) return 0;
+    *c = W(.22f);
+    if (CK.edit >= 0) {
+        /* cp6: the alarm editor: Cancel, Save (glass capsules), Repeat / Label (a card's rows), Delete Alarm */
+        if (IN_NAV(y)) {
+            float cw = capsule_w("Cancel", 0), sw = capsule_w("Save", 1);
+            if (x < MARGIN + cw + 6) *r = (tk_rect){ MARGIN, SAFE_TOP, cw, 44 };
+            else if (x > CONTENT_R - sw - 6) *r = (tk_rect){ CONTENT_R - sw, SAFE_TOP, sw, 44 };
+            else return 0;
+            *g = *r; *rad = 22; *c = APR_CIRC;
+            return 1;
+        }
+        if (x < GROUP_X || x >= CONTENT_R) return 0;
+        if (y >= CK_ED_G && y < CK_ED_G + 94) {
+            *r = (tk_rect){ GROUP_X, y < CK_ED_G + 47 ? CK_ED_G : CK_ED_G + 47, GROUP_W, 47 };
+            *g = (tk_rect){ GROUP_X, CK_ED_G, GROUP_W, 94 };
+            *rad = 16; *c = APR_CARD;
+            return 1;
+        }
+        if (CK.edit < CK.nal && y >= CK_ED_DEL && y < CK_ED_DEL + 47) {
+            *r = *g = (tk_rect){ GROUP_X, CK_ED_DEL, GROUP_W, 47 }; *rad = 16; *c = APR_CARD;
+            return 1;
+        }
+        return 0;
+    }
+    if (tab_press(x, y, 4, r, g, rad, c)) return 1;
     if (CK.tab >= 2) {
         float cx[2] = { CKB_L, CKB_R };
         for (int k = 0; k < 2; k++) {
             float dx = x - cx[k], dy = y - CKB_Y;
-            if (dx * dx + dy * dy <= 42 * 42) { *r = *g = (tk_rect){ cx[k] - 40, CKB_Y - 40, 80, 80 }; *rad = 40; return 1; }
+            if (dx * dx + dy * dy <= 42 * 42) {
+                if (ck_btn_dim(k)) return 0;                   /* dimmed: no press (its tap says why) */
+                *r = *g = (tk_rect){ cx[k] - 36, CKB_Y - 36, 72, 72 }; *rad = 36;
+                return 1;
+            }
         }
     }
-    if (CK.tab == 1 && DONE_HIT(x, y)) { *r = *g = (tk_rect){ CONTENT_R - BACK_D, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *c = W(.16f); return 1; }
-    if (ckl_kind == CKL_ALARMS && scv_contains(&LS, x, y) && x < CONTENT_R - 76) {
+    if (CK.tab == 1 && DONE_HIT(x, y)) { *r = *g = (tk_rect){ CONTENT_R - BACK_D, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *c = APR_CIRC; return 1; }
+    if (CK.tab == 3 && !CLK.tm_run && !CK.tm_paused && y >= 540 && y < 592 && x >= GROUP_X && x < CONTENT_R) {
+        *r = *g = (tk_rect){ GROUP_X, 540, GROUP_W, 52 }; *rad = 16; *c = APR_CARD;    /* When Timer Ends */
+        return 1;
+    }
+    if ((ckl_kind == CKL_ALARMS || ckl_kind == CKL_CITIES) && scv_contains(&LS, x, y) && (ckl_kind == CKL_CITIES || x < CONTENT_R - 76)) {
         float top;
         int i = scv_hit(&LS, y, &top);
-        if (i >= 1) { *r = (tk_rect){ 0, top, 390, 96 }; *g = (tk_rect){ 0, LS.top, 390, LS.bot - LS.top }; *rad = 0; *c = W(.08f); return 1; }
+        if (i >= 1) { *r = (tk_rect){ 0, top, 390, 96 }; *g = (tk_rect){ 0, LS.top, 390, LS.bot - LS.top }; *rad = 0; *c = APR_ROW; return 1; }
     }
     return 0;
 }
@@ -1143,7 +1253,7 @@ static void ck_extras_of(const char *k)
 {
     if (!tk_strcmp(k, "clock")) ck_extras();
     else if (!tk_strcmp(k, "calc")) build_calc();
-    else { relayer(&ckwheel); ckwheel.hidden = 1; relayer(&calop); calop.hidden = 1; }
+    else { ck_wheel_free(); relayer(&calop); calop.hidden = 1; }
 }
 static int ck_layers(tk_layer **o)
 {
@@ -1154,7 +1264,7 @@ static int ck_layers(tk_layer **o)
 }
 static void ck_closed(void)
 {
-    relayer(&ckwheel); ckwheel.hidden = 1;
+    ck_wheel_free();
     relayer(&calop); calop.hidden = 1;
     CK.edit = -1; CK.wdown = 0;
     for (int c = 0; c < 3; c++) { CK.woff[c] = 0; CK.wvel[c] = 0; }
@@ -1165,16 +1275,16 @@ static int ck_set(const char *what, const char *key, float v)
 {
     if (!tk_strcmp(what, "cktab")) { CK.tab = (int)v; CK.edit = -1; if (AP.on) build_app_page(AP.a); return 1; }
     if (!tk_strcmp(what, "ckedit")) {
+        ck_load();
         CK.edit = (int)v;
-        if (CK.edit < CK.nal) { CK.ev[0] = CK.al[CK.edit].h; CK.ev[1] = CK.al[CK.edit].m; } else { CK.edit = CK_NAL; CK.ev[0] = 8; CK.ev[1] = 30; }
+        if (CK.edit < CK.nal) { CK.ev[0] = CK.al[CK.edit].h; CK.ev[1] = CK.al[CK.edit].m; CK.edays = CK.al[CK.edit].days; }
+        else { CK.edit = CK_NAL; CK.ev[0] = 8; CK.ev[1] = 30; CK.edays = 0x3e; }
         if (AP.on) build_app_page(AP.a);
         return 1;
     }
-    if (!tk_strcmp(what, "ckalarm") && CK.nal < CK_NAL && key[0] && key[1] && key[2] && key[3]) {   /* key HHMM */
-        ck_seed();
-        CK.al[CK.nal].h = (key[0] - '0') * 10 + key[1] - '0'; CK.al[CK.nal].m = (key[2] - '0') * 10 + key[3] - '0'; CK.al[CK.nal].on = v > 0;
-        CK.nal++;
-        ck_alarms_push();
+    if (!tk_strcmp(what, "ckalarm") && key[0] && key[1] && key[2] && key[3]) {   /* key HHMM (Track A's list: once) */
+        ck_load();
+        if (CK.nal < CK_NAL) (void)ck_put(CK.nal, (key[0] - '0') * 10 + key[1] - '0', (key[2] - '0') * 10 + key[3] - '0', 0, v > 0, "Alarm");
         if (AP.on) build_app_page(AP.a);
         return 1;
     }

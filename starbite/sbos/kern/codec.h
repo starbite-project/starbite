@@ -41,3 +41,19 @@ const char *codec_why(void);         /* the last failure, or the state */
 int codec_read(uint32_t reg, uint16_t *v);
 /* The first attended check: probe (ID, revision, BOOT_DONE), a few status registers read, then back in reset. */
 int codec_selftest(void);
+
+/* ---- for codec_media.c only (the jack, the headphones, media capture; codec_media.h is the API): additive ----
+ * Calls win: codec_probe, codec_mic(1), codec_off and codec_hal_set first call the yield hook (reset = 1 when the
+ * codec is about to be reset), so media lets go of the outputs, AIF1 and the clocks before the call path takes them. */
+void codec_set_yield(void (*fn)(int reset));
+const struct audio_hal *codec_hal(void);   /* the HAL set with codec_hal_set, or NULL */
+unsigned codec_gen(void);            /* 0: not probed (in reset); else a count that changes on every new power-up */
+int codec_call_active(void);         /* 1 while codec_mic(1) holds the codec */
+int codec_up(unsigned *gen);         /* probed + the after-boot setup (nothing if done); 0 or <0 (then in reset) */
+/* The media clocks: on = CLKOUT0, SYSCLK from FLL1 (locked), AIF1's format, SYSCLK_ENA; off = the reverse, CLKOUT0
+ * back as found. AUD_EBUSY (on) / nothing (off) while the call path holds the codec; <0 leaves them off. */
+int codec_clocks(int on);
+int codec_write(uint32_t reg, uint16_t v);  /* one register, only once probed; the caller keeps its own register list */
+/* Level-0 read: only once probed, or when the codec is out of reset and the bus was set up earlier in this boot;
+ * nothing is set up or written to get there (AUD_ENOSYS otherwise). */
+int codec_peek(uint32_t reg, uint16_t *v);

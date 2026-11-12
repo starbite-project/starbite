@@ -30,11 +30,20 @@
 #include "http.h"
 #include "tls/tls_check.h"
 #include "store.h"
+#ifndef SB_HOST
+#include "sd.h"
+#endif
 #ifdef SB_HOST
 #include <stdlib.h>
 #include "host/model.h"
 #else
 #include "sb/bcmw_sb.h"
+#endif
+
+/* Track G's guest NAT (kern/guestnet.c on claude/sbos-calls): its two hooks are built when its kern.h is merged in
+ * (KNET_UPLINK_WIFI / SBOS_HAVE_GUESTNET defined); without it this file builds as before */
+#if defined(KNET_UPLINK_WIFI) || defined(SBOS_HAVE_GUESTNET)
+#define WIFI_GUESTNET 1
 #endif
 
 #define TICK_ON_MS 20U                      /* the core's poll while the screen is on */
@@ -62,24 +71,40 @@ static int ntp_st, clock_checked;
 static int32_t clock_off;
 static uint64_t ntp_t;
 static uint8_t ntp_nonce[8], ntp_server[4];
-/* the saved network (0.4.2): the store entry "wifinet", two lines (name, WPA2 passphrase or empty), made on the
+/* the saved network (0.4.2): the store entry "wifinet" (Track H: UFS's store first, then the card's: the OS store
+ * moved to the card on 2026-11-11; h1 looked on UFS only and missed it), two lines (name, WPA2 passphrase or empty), made on the
  * Mac from the user's input for the Wi-Fi tests; read only, never logged, never shown (the passphrase) */
 static uint8_t sv_ssid[33];
 static unsigned sv_len;
 static char sv_pass[65];
 static int sv_ok, join_pending, join_active;   /* 0.6.1: join_active: the handshake runs, one round per tick */
 static uint64_t join_t0;
-/* 0.5: networks joined with a typed passphrase this session (RAM only: gone at a restart; never logged) */
-#define REMEMBER 4
-static struct { uint8_t ssid[33]; unsigned len; char pass[65]; } rem[REMEMBER];
+/* 0.5: networks joined with a typed passphrase (never logged). Track H: up to 8, most recently joined first, kept
+ * across a restart in the state slot (record "wifi.known", saved with the settings: wifi_state_put / _get); each
+ * with its own automatic join and whether it is hidden (joined by its name). The passphrases are stored as typed:
+ * the slot is the phone's own storage, not encrypted (as a hotspot list on a phone without a secure element). */
+#define REMEMBER 8
+static struct { uint8_t ssid[33]; unsigned len; char pass[65]; uint8_t hidden, noauto, sec; } rem[REMEMBER];
 static unsigned nrem;
+static int user_on;                         /* Track H: the user's Wi-Fi switch, saved (on at the next start) */
+static int surv_off, surv_was_on;           /* Track H: Survival mode holds Wi-Fi off (wifi_survival) */
+static int pm_set;                          /* Track H: power save (PM 2) set after the join */
+static int join_hidden;                     /* Track H: the pending join is by name (the network may be hidden) */
+/* Track H: back by itself after a drop (2 s, 5 s, 15 s, 30 s, then every 60 s), and a background scan for a
+ * remembered network while on and not joined (every 60 s with the screen on, 5 min off) */
+static uint64_t reconnect_at, bg_scan_at, rssi_at;
+static unsigned revive_n;                   /* Track H: the chip stopped answering: powered up again (twice a boot) */
+static unsigned reconnect_n;
+static void reconnect_later(void);
+static int time_only;                       /* (1.2-alpha26, below) the boot's time check */
 static char jp_pass[65];                    /* the passphrase of the pending join */
 
+static void logn(const char *a, uint64_t n, const char *b);
 static const char *known_pass(const uint8_t *ssid, unsigned len)
 {
     for (unsigned i = 0; i < nrem; ++i)
         if (rem[i].len == len && !memcmp(rem[i].ssid, ssid, len))
-            return rem[i].pass;
+            return rem[i].pass;         /* "" for an open network that was joined */
     if (sv_ok && sv_len == len && !memcmp(sv_ssid, ssid, len))
         return sv_pass;
     return 0;
@@ -87,6 +112,7 @@ static const char *known_pass(const uint8_t *ssid, unsigned len)
 
 /* 1.2-alpha21: join a known network the scan heard, once per power-on (Wi-Fi > Known networks; on by default) */
 int wifi_autojoin = 1;
+int wifi_pm = 2;                            /* Track H: power save once joined (PM 2); 0 never */
 static int auto_pending, auto_done;
 static int wifi_in_selftest(void)
 {
@@ -97,20 +123,91 @@ static int wifi_in_selftest(void)
     return sbos_selftest_enabled;           /* the self test's Wi-Fi step joins by itself */
 }
 
-static void remember(const uint8_t *ssid, unsigned len, const char *pass)
+static void remember(const uint8_t *ssid, unsigned len, const char *pass, int hidden, int sec)
 {
     unsigned i = 0;
     while (i < nrem && !(rem[i].len == len && !memcmp(rem[i].ssid, ssid, len)))
         ++i;
+    uint8_t noauto = i < nrem ? rem[i].noauto : 0;
     if (i == nrem) {
         if (nrem < REMEMBER)
             ++nrem;
-        else
-            i = REMEMBER - 1;               /* full: the last one goes */
+        i = nrem - 1;                       /* full: the least recently joined goes */
     }
-    memcpy(rem[i].ssid, ssid, len);
-    rem[i].len = len;
-    sb_strcpy(rem[i].pass, sizeof(rem[i].pass), pass);
+    for (; i > 0; --i)                      /* to the front: most recently joined first */
+        rem[i] = rem[i - 1];
+    memset(&rem[0], 0, sizeof(rem[0]));
+    memcpy(rem[0].ssid, ssid, len);
+    rem[0].len = len;
+    sb_strcpy(rem[0].pass, sizeof(rem[0].pass), pass ? pass : "");
+    rem[0].hidden = (uint8_t)(hidden != 0);
+    rem[0].noauto = noauto;
+    rem[0].sec = (uint8_t)(sec < 0 ? KWIFI_SEC_OTHER : sec);
+    settings_changed();                     /* saved within seconds (the state slot) */
+}
+
+static int rem_find(const uint8_t *ssid, unsigned len)
+{
+    for (unsigned i = 0; i < nrem; ++i)
+        if (rem[i].len == len && !memcmp(rem[i].ssid, ssid, len))
+            return (int)i;
+    return -1;
+}
+
+/* ---- Track H: the record "wifi.known" in the state slot -------------------------------------------------------
+ * 'W' 'K' 'N' '2', flags (bit 0 the user's switch on), count, then per network: name length, name (32), passphrase
+ * length, passphrase (64), bit 0 hidden, bit 1 no automatic join, security (KWIFI_SEC_*). 8 x 100 + 8 bytes. */
+#define KREC_ENT 100U
+int wifi_state_put(struct state_buf *b)
+{
+    static uint8_t r[8 + REMEMBER * KREC_ENT];
+    memset(r, 0, sizeof(r));
+    memcpy(r, "WKN2", 4);
+    r[4] = (uint8_t)(user_on != 0);
+    r[5] = (uint8_t)nrem;
+    for (unsigned i = 0; i < nrem; ++i) {
+        uint8_t *e = r + 8 + i * KREC_ENT;
+        unsigned pl = sb_strlen(rem[i].pass);
+        e[0] = (uint8_t)rem[i].len;
+        memcpy(e + 1, rem[i].ssid, rem[i].len);
+        e[33] = (uint8_t)pl;
+        memcpy(e + 34, rem[i].pass, pl);
+        e[98] = (uint8_t)(rem[i].hidden | rem[i].noauto << 1);
+        e[99] = rem[i].sec;
+    }
+    int k = state_add(b, "wifi.known", r, 8 + nrem * KREC_ENT);
+    memset(r, 0, sizeof(r));
+    return k;
+}
+
+void wifi_state_get(const uint8_t *half)
+{
+    const uint8_t *d = 0;
+    int n = state_find(half, "wifi.known", &d);
+    if (n < 8 || !d || memcmp(d, "WKN2", 4))
+        return;
+    unsigned c = d[5];
+    if (c > REMEMBER || (unsigned)n < 8 + c * KREC_ENT)
+        return;
+    nrem = 0;
+    for (unsigned i = 0; i < c; ++i) {
+        const uint8_t *e = d + 8 + i * KREC_ENT;
+        unsigned sl = e[0], pl = e[33];
+        if (!sl || sl > 32 || pl > 64 || (pl && pl < 8))
+            continue;                       /* not usable: skipped (never logged) */
+        memset(&rem[nrem], 0, sizeof(rem[nrem]));
+        memcpy(rem[nrem].ssid, e + 1, sl);
+        rem[nrem].len = sl;
+        memcpy(rem[nrem].pass, e + 34, pl);
+        rem[nrem].pass[pl] = 0;
+        rem[nrem].hidden = e[98] & 1U;
+        rem[nrem].noauto = (e[98] >> 1) & 1U;
+        rem[nrem].sec = e[99];
+        ++nrem;
+    }
+    user_on = d[4] & 1;
+    logn("wifi: remembered networks restored: ", nrem, user_on ? " (names not logged); Wi-Fi was on" :
+                                                                " (names not logged); Wi-Fi was off");
 }
 static int w_ready;
 /* 0.5: the chip's INTx (SPI 253 = INTID 285); polling stays as the fallback and relaxes once interrupts arrive */
@@ -217,7 +314,9 @@ static void load_saved(void)
     buf[len] = 0;
 #else
     struct store_ent e;
-    if (!store_find("ufs:wifinet", &e) || !e.size || e.size >= sizeof(buf) || store_load(&e, (uintptr_t)buf, sizeof(buf)))
+    /* the home store's (libsb finds the card's on a card-only boot, Track A 85e64db), else any store's (Track H h1b) */
+    int found = store_find("home:wifinet", &e) || store_find("wifinet", &e);
+    if (!found || !e.size || e.size >= sizeof(buf) || store_load(&e, (uintptr_t)buf, sizeof(buf)))
         return;
     buf[e.size] = 0;
 #endif
@@ -236,17 +335,71 @@ static void load_saved(void)
                    "wifi: the saved network entry is not usable (name, or a passphrase of 8..64 characters)");
 }
 
+/* ---- Track H: what a heard network asks for (its RSN / WPA elements), the saved network's bands ------------- */
+static int8_t nsec[SBOS_WIFI_NETS];         /* KWIFI_SEC_* of nets[i] (kept in step with nets[]) */
+static int sv_heard24, sv_heard5, sv_rssi24, sv_rssi5;
+
+static int bss_sec(const struct bcmw_bss *b)
+{
+    const uint8_t *p = b->ie, *end = b->ie ? b->ie + b->ie_len : 0;
+    int rsn = 0, wpa1 = 0, ent = 0, psk = 0, sae = 0, owe = 0;
+    while (p && p + 2 <= end && p + 2 + p[1] <= end) {
+        const uint8_t *d = p + 2;
+        unsigned n = p[1];
+        if (p[0] == 48 && n >= 8) {         /* RSN: version, group, pairwise list, AKM list */
+            rsn = 1;
+            unsigned o = 6, pc = d[o] | (unsigned)d[o + 1] << 8;
+            o += 2 + 4 * pc;
+            if (o + 2 <= n) {
+                unsigned ac = d[o] | (unsigned)d[o + 1] << 8;
+                o += 2;
+                for (unsigned k = 0; k < ac && o + 4 <= n; ++k, o += 4) {
+                    if (d[o] != 0x00 || d[o + 1] != 0x0f || d[o + 2] != 0xac)
+                        continue;
+                    unsigned a = d[o + 3];
+                    if (a == 1 || a == 3 || a == 5 || a == 11 || a == 12 || a == 13)
+                        ent = 1;
+                    else if (a == 2 || a == 4 || a == 6)
+                        psk = 1;
+                    else if (a == 8 || a == 9 || a == 24 || a == 25)
+                        sae = 1;
+                    else if (a == 18)
+                        owe = 1;
+                }
+            }
+        } else if (p[0] == 221 && n >= 4 && d[0] == 0x00 && d[1] == 0x50 && d[2] == 0xf2 && d[3] == 1) {
+            wpa1 = 1;
+        }
+        p += 2 + n;
+    }
+    if (rsn)
+        return sae && psk ? KWIFI_SEC_WPA23 : sae ? KWIFI_SEC_WPA3 : psk ? KWIFI_SEC_WPA2 : ent ? KWIFI_SEC_ENT :
+               owe ? KWIFI_SEC_OWE : KWIFI_SEC_OTHER;
+    if (wpa1)
+        return KWIFI_SEC_WPA1;
+    return (b->capability & 0x0010) ? KWIFI_SEC_WEP : KWIFI_SEC_OPEN;
+}
+
 static void add_bss(const struct bcmw_bss *b)
 {
     if (!b->ssid_len)
         return;                             /* hidden networks are not listed */
+    if (sv_ok && b->ssid_len == sv_len && !memcmp(b->ssid, sv_ssid, sv_len)) {
+        if (b->band5 && (!sv_heard5 || b->rssi > sv_rssi5))
+            sv_heard5 = 1, sv_rssi5 = b->rssi;
+        if (!b->band5 && (!sv_heard24 || b->rssi > sv_rssi24))
+            sv_heard24 = 1, sv_rssi24 = b->rssi;
+    }
     int secure = (b->capability & 0x0010) != 0;
+    int sec = bss_sec(b);
     for (int i = 0; i < nnets; ++i)
         if (nets[i].ssid_len == b->ssid_len && !memcmp(nets[i].ssid, b->ssid, b->ssid_len)) {
             if (b->rssi > nets[i].rssi) {   /* the strongest access point of a name */
                 nets[i].rssi = b->rssi;
                 memcpy(nets[i].bssid, b->bssid, 6);
                 nets[i].channel = (int32_t)b->channel;
+                nets[i].band5 = (int32_t)b->band5;
+                nsec[i] = (int8_t)sec;
             }
             return;
         }
@@ -271,6 +424,7 @@ static void add_bss(const struct bcmw_bss *b)
     n->saved = secure && known_pass(b->ssid, b->ssid_len) != 0;
     n->channel = (int32_t)b->channel;
     n->band5 = (int32_t)b->band5;
+    nsec[at] = (int8_t)sec;
 }
 
 static void sort_nets(void)
@@ -280,7 +434,87 @@ static void sort_nets(void)
             struct sbos_wifi_net t = nets[j];
             nets[j] = nets[j - 1];
             nets[j - 1] = t;
+            int8_t q = nsec[j];
+            nsec[j] = nsec[j - 1];
+            nsec[j - 1] = q;
         }
+}
+
+/* Track H (h1 on the phone heard 2-4 names where the core's own wifitest hears 35-42 access points): what each
+ * scan really got, counts only: results, distinct access points and channels per band, hidden ones, results of
+ * another scan or that did not parse, how it ended and when */
+#define SC_AP 96
+static struct {
+    unsigned res, other, unparsed, hidden, extra, nap, ap5, ch24, ch5;
+    uint32_t ch24m;
+    uint64_t ch5m, t0;
+    uint8_t ap[SC_AP][6];
+} sc;
+
+static void sc_reset(void)
+{
+    memset(&sc, 0, sizeof(sc));
+    sc.t0 = sb_ms();
+}
+
+static void sc_add(const struct bcmw_event *ev, const struct bcmw_bss *b)
+{
+    ++sc.res;
+    if (ev->datalen >= 12) {
+        unsigned cnt = (unsigned)ev->data[10] | (unsigned)ev->data[11] << 8;
+        if (cnt > 1)
+            sc.extra += cnt - 1;            /* bss_infos after the first in one event (not parsed) */
+    }
+    if (!b->ssid_len)
+        ++sc.hidden;
+    if (b->band5) {
+        unsigned k = b->channel >= 32 && b->channel < 288 ? (b->channel - 32) / 4 : 63;
+        if (!(sc.ch5m >> k & 1))
+            sc.ch5m |= 1ULL << k, ++sc.ch5;
+    } else if (b->channel >= 1 && b->channel <= 14 && !(sc.ch24m >> b->channel & 1)) {
+        sc.ch24m |= 1U << b->channel, ++sc.ch24;
+    }
+    for (unsigned i = 0; i < sc.nap && i < SC_AP; ++i)
+        if (!memcmp(sc.ap[i], b->bssid, 6))
+            return;
+    if (sc.nap < SC_AP)
+        memcpy(sc.ap[sc.nap], b->bssid, 6);   /* RAM only, never logged */
+    ++sc.nap;
+    sc.ap5 += b->band5 != 0;
+}
+
+static void sc_log(const char *how, unsigned status)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "wifi: scan: ");
+    ub_dec(&u, sc.res);
+    ub_s(&u, " results, ");
+    ub_dec(&u, sc.nap);
+    ub_s(&u, " access points (");
+    ub_dec(&u, sc.nap - sc.ap5);
+    ub_s(&u, " on 2.4 GHz over ");
+    ub_dec(&u, sc.ch24);
+    ub_s(&u, " channels, ");
+    ub_dec(&u, sc.ap5);
+    ub_s(&u, " on 5 GHz over ");
+    ub_dec(&u, sc.ch5);
+    ub_s(&u, " channels), hidden ");
+    ub_dec(&u, sc.hidden);
+    ub_s(&u, ", another scan's ");
+    ub_dec(&u, sc.other);
+    ub_s(&u, ", unparsed ");
+    ub_dec(&u, sc.unparsed);
+    ub_s(&u, ", extra in one event ");
+    ub_dec(&u, sc.extra);
+    ub_s(&u, "; ");
+    ub_s(&u, how);
+    ub_s(&u, " status ");
+    ub_dec(&u, status);
+    ub_s(&u, " after ");
+    ub_dec(&u, sb_ms() - sc.t0);
+    ub_s(&u, " ms");
+    sb_log(u.b);
 }
 
 static void os_event(void *ctx, const struct bcmw_event *ev)
@@ -292,11 +526,17 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
     ent_add(ev, sizeof(*ev));
     if (ev->type == BCMW_E_ESCAN_RESULT) {
         if (bcmw_bss_parse(ev, &b, &s)) {
+            if (st == SBOS_WIFI_SCANNING && s != sync)
+                ++sc.other;
             if (st != SBOS_WIFI_SCANNING || s != sync)
                 return;                     /* a late result or another scan's: the list stays as shown */
             ++scan_heard;
+            sc_add(ev, &b);
             add_bss(&b);
+        } else if (st == SBOS_WIFI_SCANNING && ev->status == 8) {
+            ++sc.unparsed;                  /* a result that did not parse */
         } else if (st == SBOS_WIFI_SCANNING && bcmw_scan_ended(ev, sync)) {
+            sc_log("ended by the firmware,", (unsigned)ev->status);
             sort_nets();
             logn("wifi: the scan heard ", (uint64_t)nnets, " networks (names not logged)");
             set_state(SBOS_WIFI_UP, "");
@@ -326,12 +566,14 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
             net_down();
             set_state(SBOS_WIFI_UP, "The network dropped the phone");
             joined = -1;
+            reconnect_later();
         }
     } else if (ev->type == BCMW_E_DEAUTH || ev->type == BCMW_E_DEAUTH_IND || ev->type == BCMW_E_DISASSOC_IND) {
         sb_log("wifi: left by the access point");
         net_down();
         set_state(SBOS_WIFI_UP, "The network dropped the phone");
         joined = -1;
+        reconnect_later();
     }
 }
 
@@ -341,6 +583,12 @@ static void os_rx(void *ctx, unsigned ifidx, const uint8_t *frame, uint32_t len)
     (void)ifidx;
     ent_tick();
     ent_add(frame, len < 64 ? len : 64);
+#ifdef WIFI_GUESTNET
+    /* Track G: the Linux guest's flows (its mapped ports, ICMP errors about them) to its NAT; the rest to sbnet */
+    if (len > 14 && frame[12] == 0x08 && frame[13] == 0x00 && st == SBOS_WIFI_CONNECTED &&
+        guestnet_rx(KNET_UPLINK_WIFI, frame + 14, len - 14))
+        return;
+#endif
     sbnet_rx(&net, frame, len);
 }
 
@@ -420,8 +668,19 @@ static void net_tcp(void *ctx, const uint8_t from[4], const uint8_t *seg, uint32
     sbtcp_input(&tcp, from, seg, len);
 }
 
+static int gn_up;                           /* Track G's NAT has Wi-Fi as an uplink */
+static void gn_uplink(int on)
+{
+#ifdef WIFI_GUESTNET
+    if (on != gn_up)
+        guestnet_uplink(KNET_UPLINK_WIFI, on ? &net : 0);
+#endif
+    gn_up = on;
+}
+
 static void net_down(void)
 {
+    gn_uplink(0);                           /* every way down: off, left, dropped, no address, the chip gone */
     sbnet_stop(&net);
     sbtcp_down(&tcp);
 }
@@ -451,7 +710,33 @@ static void ent_tick(void)
     ent_add(&t, sizeof(t));
 }
 
+static void ent_seed_io(uint8_t out[32], int ask_radio);
 static void ent_seed(uint8_t out[32])
+{
+    ent_seed_io(out, 1);
+}
+
+/* Track H: the core's randomness (the handshake's nonces, SAE's secrets): the pool, never the radio's iovar here (the
+ * core may ask from inside its own command path); n bytes as SHA-256(seed, counter) blocks */
+static int os_random(void *ctx, uint8_t *out, uint32_t n)
+{
+    (void)ctx;
+    uint8_t seed[32], blk[32];
+    ent_seed_io(seed, 0);
+    for (uint32_t ctr = 0, o = 0; o < n; ++ctr, o += 32) {
+        br_sha256_context c;
+        br_sha256_init(&c);
+        br_sha256_update(&c, seed, 32);
+        br_sha256_update(&c, &ctr, sizeof(ctr));
+        br_sha256_out(&c, blk);
+        memcpy(out + o, blk, n - o < 32 ? n - o : 32);
+    }
+    memset(seed, 0, sizeof(seed));
+    memset(blk, 0, sizeof(blk));
+    return 0;
+}
+
+static void ent_seed_io(uint8_t out[32], int ask_radio)
 {
     static volatile uint8_t walk[8192];
     uint8_t jit[256];
@@ -464,7 +749,7 @@ static void ent_seed(uint8_t out[32])
         if ((i & 255) == 255)
             ent_add(jit, sizeof(jit));
     }
-    if (w_ready && w && !w->dead) {
+    if (ask_radio && w_ready && w && !w->dead) {
         uint8_t fr[32];
         int fe = 0;
         memset(fr, 0, sizeof(fr));
@@ -534,6 +819,20 @@ int wifi_tls_selfcheck(void)
     return sbtls_selfcheck(tls_log, 0, ms_now);
 }
 
+/* Track H: the uplink every user of the network shares (the fetch, the Linux guest's gateway): Wi-Fi when joined with
+ * an address, else mobile data when the user turned it on and it is up. 1 Wi-Fi, 2 mobile data, 0 none. */
+int wifi_uplink(struct sbnet **n, struct sbtcp **t)
+{
+    if (st == SBOS_WIFI_CONNECTED) {
+        if (n)
+            *n = &net;
+        if (t)
+            *t = &tcp;
+        return 1;
+    }
+    return kmodem_netif(n, t) ? 2 : 0;
+}
+
 int wifi_fetch(const char *url)
 {
     struct sbhttp_net hn;
@@ -543,9 +842,10 @@ int wifi_fetch(const char *url)
     if (fx_state == 1)
         return SBOS_EBUSY;
     /* the interface: Wi-Fi when joined, else mobile data when the user turned it on and it is up */
-    if (st != SBOS_WIFI_CONNECTED && !kmodem_netif(&fnet, &ftcp))
+    int up = wifi_uplink(&fnet, &ftcp);
+    if (!up)
         return SBOS_EAGAIN;
-    fx_cell = st != SBOS_WIFI_CONNECTED;
+    fx_cell = up == 2;
     if (!fx) {
         fx = sb_alloc(sizeof(*fx));
         fx_body = sb_alloc(FETCH_BODY);
@@ -661,10 +961,11 @@ static int host_file(void *ctx, const char *name, const uint8_t **data, uint32_t
         fw[0x6c] = 0;
         memcpy(fw + sizeof(fw) - 200, banner, sizeof(banner));
         memcpy(clm, "BLOB", 4);
-        M.fw_rstvec = (uint32_t)fw[0] | (uint32_t)fw[1] << 8 | (uint32_t)fw[2] << 16 | (uint32_t)fw[3] << 24;
-        M.fw_image = fw;
-        M.fw_image_len = sizeof(fw);
     }
+    /* every time: model_reset (each power-on) clears them, and the model checks the image it boots against them */
+    M.fw_rstvec = (uint32_t)fw[0] | (uint32_t)fw[1] << 8 | (uint32_t)fw[2] << 16 | (uint32_t)fw[3] << 24;
+    M.fw_image = fw;
+    M.fw_image_len = sizeof(fw);
     if (sb_prefix(name, "bcmdhd_sta.bin"))
         return *data = fw, *len = sizeof(fw), 0;
     if (sb_prefix(name, "nvram.txt"))
@@ -681,6 +982,15 @@ static void say(const char *s)
     sb_log(s);
 }
 #endif
+
+static void reconnect_later(void)
+{
+    static const uint32_t backoff[] = { 2000U, 5000U, 15000U, 30000U, 60000U };
+    if (!wifi_autojoin || wifi_in_selftest() || time_only)
+        return;
+    reconnect_at = sb_ms() + backoff[reconnect_n < 4 ? reconnect_n : 4];
+    ++reconnect_n;
+}
 
 int wifi_power(int on)
 {
@@ -699,7 +1009,7 @@ int wifi_power(int on)
         kt_cancel(KT_WIFI, 0);
         dhcp_go = 0;
         scan_retry = 0;
-        join_pending = join_active = 0;
+        join_pending = join_active = join_hidden = 0;
         auto_pending = 0;
         memset(jp_pass, 0, sizeof(jp_pass));
         joined = -1;
@@ -726,6 +1036,8 @@ int wifi_power(int on)
     w_ready = 0;
     scan_retry = 0;
     auto_pending = auto_done = 0;           /* 1.2-alpha21: one automatic join per power-on */
+    reconnect_at = bg_scan_at = 0;
+    reconnect_n = 0;
     irq_n = irq_missed = 0;
     irq_trusted = irq_kicked = 0;
     dk_next = dk_new = dk_reused = 0;      /* the DMA blocks of the first power-on, again in order */
@@ -733,6 +1045,11 @@ int wifi_power(int on)
     model_reset();
     M.open_ap = !getenv("SBOS_HOST_WIFINET") && !getenv("SBOS_HOST_WPA2");   /* else the model's WPA2 "test-ap" */
     M.echo_sync = 1;
+    {
+        const uint8_t *fd;
+        uint32_t fl;
+        (void)host_file(0, "bcmdhd_sta.bin", &fd, &fl);    /* the model's M.fw_* again (the core may not ask) */
+    }
     memset(&os, 0, sizeof(os));
     os.rd32 = model_rd32, os.wr32 = model_wr32, os.rd16 = model_rd16, os.wr16 = model_wr16;
     os.udelay = model_udelay, os.now_us = model_now, os.dma_alloc = model_dma_alloc;
@@ -745,6 +1062,7 @@ int wifi_power(int on)
     bcmw_sb_os(&os, os_log, os_event);
 #endif
     os.rx = os_rx;
+    os.random = os_random;                  /* Track H: the pool (nonces, SAE) */
     dma_first = os.dma_alloc;
     os.dma_alloc = dma_reuse;
     memset(&cfg, 0, sizeof(cfg));
@@ -760,8 +1078,9 @@ int wifi_power(int on)
         return SBOS_EAGAIN;
     }
     w_ready = 1;
+    bcmw_sae_enable(w);                     /* Track H: WPA3 (SAE) by the host when the firmware asks (cap sae_ext) */
     dhcp_go = 0;
-    join_pending = join_active = 0;
+    join_pending = join_active = join_hidden = 0;
     load_saved();
     step = 0;
     nnets = 0;
@@ -781,6 +1100,8 @@ int wifi_scan(void)
     int was = st;
     nnets = st == SBOS_WIFI_CONNECTED ? nnets : 0;
     scan_heard = 0;
+    sv_heard24 = sv_heard5 = 0;
+    sc_reset();
     if (was == SBOS_WIFI_UP)
         set_state(SBOS_WIFI_SCANNING, "");  /* first: the scan's events can arrive while the command waits */
     kt_set(KT_WIFI, 0, sb_ms(), 10, 0);    /* the tick soon: the scan's events */
@@ -810,6 +1131,8 @@ int wifi_join(int i, const char *pass)
         return SBOS_EAGAIN;
     kt_set(KT_WIFI, 0, sb_ms(), 10, 0);    /* the tick soon (a relaxed poll may be pending) */
     scan_retry = 0;
+    auto_pending = 0;                       /* a join asked for: the last scan's automatic one is moot (it would fire
+                                             * as soon as Wi-Fi is UP again: after a leave, at once) */
     if (nets[i].secure) {
         const char *k = pass && pass[0] ? pass : known_pass(nets[i].ssid, nets[i].ssid_len);
         unsigned n = k ? sb_strlen(k) : 0;
@@ -819,7 +1142,7 @@ int wifi_join(int i, const char *pass)
             return SBOS_EINVAL;
         sb_strcpy(jp_pass, sizeof(jp_pass), k);
     }
-    if (nets[i].secure) {
+    if (nets[i].secure || join_hidden) {
         /* 0.6.1: bcmw_join_start (the directed scan, the PMK, SET_SSID: a few seconds at most) on the next tick, then
          * one handshake round per tick (bcmw_join_poll): the screen keeps working (0.6 blocked up to 15 s) */
         const struct bcmw_info *in = bcmw_info(w);
@@ -911,10 +1234,147 @@ int wifi_forget(int k)
                 rem[j] = rem[j + 1];
             --nrem;
             memset(&rem[nrem], 0, sizeof(rem[nrem]));
-            sb_log("wifi: a network joined since the start was forgotten (name not logged)");
+            sb_log("wifi: a remembered network was forgotten (name not logged)");
+            settings_changed();
             return 0;
         }
     return SBOS_EINVAL;
+}
+
+/* Track H: the remembered networks for Settings > Wi-Fi (the saved "wifinet" first, then most recent first); the
+ * index k is the same as wifi_forget's and wifi_known_auto's */
+int wifi_known2(struct kwifi_known *out, int max)
+{
+    struct sbos_wifi_known kn[1 + REMEMBER];
+    int n = wifi_known(kn, 1 + REMEMBER);
+    if (n > max)
+        n = max;
+    for (int k = 0; k < n; ++k) {
+        memset(&out[k], 0, sizeof(out[k]));
+        memcpy(out[k].ssid, kn[k].ssid, kn[k].ssid_len);
+        out[k].ssid_len = kn[k].ssid_len;
+        out[k].saved = kn[k].saved;
+        out[k].heard = kn[k].heard;
+        out[k].autojoin = 1;
+        out[k].sec = -1;
+        int r = rem_find(kn[k].ssid, kn[k].ssid_len);
+        if (r >= 0) {
+            out[k].hidden = rem[r].hidden;
+            out[k].autojoin = !rem[r].noauto;
+            out[k].sec = rem[r].sec;
+        }
+        out[k].joined = joined >= 0 && joined < nnets && nets[joined].ssid_len == kn[k].ssid_len &&
+                        !memcmp(nets[joined].ssid, kn[k].ssid, kn[k].ssid_len) && st == SBOS_WIFI_CONNECTED;
+    }
+    return n;
+}
+
+int wifi_known_auto(int k, int on)
+{
+    struct sbos_wifi_known kn[1 + REMEMBER];
+    int n = wifi_known(kn, 1 + REMEMBER);
+    if (k < 0 || k >= n)
+        return SBOS_EINVAL;
+    int r = rem_find(kn[k].ssid, kn[k].ssid_len);
+    if (r < 0)
+        return SBOS_EPERM;                  /* the saved one (from the computer): always automatic */
+    rem[r].noauto = (uint8_t)(on == 0);
+    settings_changed();
+    return 0;
+}
+
+/* Track H: join by name (Settings > Wi-Fi > Other...: a hidden network, or one not in the list yet). pass: "" for
+ * open. The core's directed scan asks for the name, so a hidden access point answers. */
+int wifi_join_name(const uint8_t *ssid, unsigned len, const char *pass)
+{
+    if (st != SBOS_WIFI_UP || !len || len > 32)
+        return SBOS_EAGAIN;
+    unsigned pl = pass ? sb_strlen(pass) : 0;
+    if (pl && (pl < 8 || pl > 64))
+        return SBOS_EINVAL;
+    for (int i = 0; i < nnets; ++i)
+        if (nets[i].ssid_len == len && !memcmp(nets[i].ssid, ssid, len))
+            return wifi_join(i, pass);
+    int at = nnets < SBOS_WIFI_NETS ? nnets++ : SBOS_WIFI_NETS - 1;
+    memset(&nets[at], 0, sizeof(nets[at]));
+    memcpy(nets[at].ssid, ssid, len);
+    nets[at].ssid_len = (uint8_t)len;
+    nets[at].rssi = -100;
+    nets[at].secure = pl != 0;
+    nsec[at] = (int8_t)(pl ? KWIFI_SEC_WPA2 : KWIFI_SEC_OPEN);
+    join_hidden = 1;
+    sb_log("wifi: joining a network by its name (hidden or not heard; name not logged)");
+    int r = wifi_join(at, pl ? pass : "");
+    if (r)
+        join_hidden = 0;
+    return r;
+}
+
+/* Track H: the details of the joined network for Settings > Wi-Fi > (i) */
+void wifi_details(struct kwifi_details *d)
+{
+    memset(d, 0, sizeof(*d));
+    d->state = st;
+    if (joined < 0 || joined >= nnets)
+        return;
+    memcpy(d->ssid, nets[joined].ssid, nets[joined].ssid_len);
+    d->ssid_len = nets[joined].ssid_len;
+    d->rssi = nets[joined].rssi;
+    d->channel = nets[joined].channel;
+    d->band5 = nets[joined].band5;
+    d->sec = nsec[joined];
+    d->power_save = pm_set;
+    if (st == SBOS_WIFI_CONNECTED) {
+        memcpy(d->ip, net.ip, 4);
+        memcpy(d->mask, net.mask, 4);
+        memcpy(d->gateway, net.gateway, 4);
+        memcpy(d->dns, net.dns, 4);
+        d->lease_s = net.lease_s;
+        d->ping_ms = net.ping_replies ? (int32_t)net.ping_rtt_ms : -1;
+    }
+}
+
+/* Track H: the user's switch (Settings, the Control Centre): remembered for the next start */
+int wifi_user_power(int on)
+{
+    if (user_on != (on != 0)) {
+        user_on = on != 0;
+        settings_changed();
+    }
+    if (on)
+        surv_was_on = 0;
+    return wifi_power(on);
+}
+
+int wifi_user_on(void)
+{
+    return user_on;
+}
+
+/* Track H: Survival mode holds Wi-Fi off (wifi-for-survival.md). On: off now, nothing automatic until it ends (the
+ * user may still turn it on by hand); off: back on if it was on when Survival started or the user's switch says so */
+void wifi_survival(int on)
+{
+    if (on) {
+        if (surv_off)
+            return;
+        surv_off = 1;
+        surv_was_on = wifi_on() && !time_only;  /* on only for the boot's time check: not the user's */
+        wifi_time_only_end("Survival mode");
+        if (wifi_on()) {
+            sb_log("wifi: Survival mode: off (power save)");
+            (void)wifi_power(0);
+        }
+        return;
+    }
+    if (!surv_off)
+        return;
+    surv_off = 0;
+    if ((surv_was_on || user_on) && !wifi_on()) {
+        sb_log("wifi: Survival mode ended: on again");
+        (void)wifi_power(1);
+    }
+    surv_was_on = 0;
 }
 
 int wifi_list(struct sbos_wifi_net *out, int max)
@@ -923,6 +1383,104 @@ int wifi_list(struct sbos_wifi_net *out, int max)
     for (int i = 0; i < n; ++i)
         out[i] = nets[i];
     return n;
+}
+
+/* Track H: the security of the i-th listed network (KWIFI_SEC_*), -1 none */
+int wifi_net_sec(int i)
+{
+    return i >= 0 && i < nnets ? nsec[i] : -1;
+}
+
+/* Track H: what the firmware says it can do ("cap": capability words, nothing identifying), logged once per boot
+ * and kept as KWIFI_CAP_* bits for the UI (WPA3 needs SAE) */
+static unsigned fw_caps;
+static int fw_caps_read;
+
+static int cap_has(const char *cap, const char *word)
+{
+    unsigned n = sb_strlen(word);
+    for (unsigned i = 0; cap[i]; ++i)
+        if ((i == 0 || cap[i - 1] == ' ') && !memcmp(cap + i, word, n) && (cap[i + n] == ' ' || !cap[i + n] ||
+                                                                          cap[i + n] == '\n'))
+            return 1;
+    return 0;
+}
+
+static void caps_read(void)
+{
+    static char cap[512];
+    int fe = 0;
+    if (fw_caps_read || !w_ready)
+        return;
+    fw_caps_read = 1;
+    memset(cap, 0, sizeof(cap));
+    hw_wdt_feed();
+    if (bcmw_iovar_get(w, "cap", cap, sizeof(cap) - 1, &fe) != BCMW_OK) {
+        sb_logx("wifi: the firmware's capability list (cap) did not answer: ", (uint64_t)(uint32_t)fe);
+        return;
+    }
+    for (unsigned i = 0; cap[i]; ++i)
+        if (cap[i] == '\n' || cap[i] == '\r')
+            cap[i] = ' ';
+    fw_caps = (cap_has(cap, "sae") ? KWIFI_CAP_SAE : 0) | (cap_has(cap, "sae_ext") ? KWIFI_CAP_SAE_EXT : 0) |
+              (cap_has(cap, "mfp") ? KWIFI_CAP_MFP : 0) | (cap_has(cap, "idsup") ? KWIFI_CAP_IDSUP : 0) |
+              (cap_has(cap, "wpa3") ? KWIFI_CAP_WPA3 : 0);
+    /* the words in lines of at most ~200 characters, cut at a space */
+    unsigned n = sb_strlen(cap), at = 0, part = 0;
+    while (at < n) {
+        unsigned e = at + 200 < n ? at + 200 : n;
+        if (e < n)
+            while (e > at + 1 && cap[e] != ' ')
+                --e;
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, part ? "wifi: firmware cap (more): " : "wifi: firmware cap: ");
+        char c = cap[e];
+        cap[e] = 0;
+        ub_s(&u, cap + at);
+        cap[e] = c;
+        sb_log(u.b);
+        at = e;
+        while (at < n && cap[at] == ' ')
+            ++at;
+        ++part;
+    }
+    sb_logx("wifi: firmware capability bits (1 sae, 2 sae_ext, 4 mfp, 8 idsup, 16 wpa3): ", fw_caps);
+}
+
+unsigned wifi_caps(void)
+{
+    return fw_caps;
+}
+
+/* Track H, for Bluetooth (the drivers track picks the .hcd): the radio module's maker from its OTP, read at the
+ * bring-up's step 7: 1 SEMCO (91 33 / a1 33), 0 another (Murata), -1 not known yet (Wi-Fi not brought up this boot) */
+static int module_kind = -1;
+int wifi_module(void)
+{
+    return module_kind;
+}
+
+/* Track H: leave the joined network (the radio stays on, the list stays) */
+int wifi_leave(void)
+{
+    if (st != SBOS_WIFI_JOINING && st != SBOS_WIFI_DHCP && st != SBOS_WIFI_CONNECTED)
+        return SBOS_EAGAIN;
+    wifi_fetch_cancel();
+    join_pending = join_active = join_hidden = 0;
+    memset(jp_pass, 0, sizeof(jp_pass));
+    dhcp_go = 0;
+    if (w_ready && !w->dead) {
+        hw_wdt_feed();
+        (void)bcmw_leave(w);
+    }
+    net_down();
+    joined = -1;
+    reconnect_at = 0;
+    bg_scan_at = sb_ms() + 600000U;         /* asked to leave: no automatic join for 10 min */
+    sb_log("wifi: left the network (asked)");
+    set_state(SBOS_WIFI_UP, "");
+    return 0;
 }
 
 /* the status bar: 0 off, 1 on (not joined), 2 joined with an address */
@@ -994,14 +1552,22 @@ void wifi_time_only_end(const char *why)
 void wifi_boot_time_check(void)
 {
     struct sbos_time t;
-    if (sbos_selftest_enabled || wifi_in_selftest() || !wifi_autojoin || (clock_now(&t) && !t.approx))
+    if (sbos_selftest_enabled || wifi_in_selftest() || surv_off)
+        return;
+    if (user_on) {
+        /* Track H: Wi-Fi was on at the last start: on again (a remembered network joins by itself) */
+        sb_log("wifi: on at start (the user's switch was on)");
+        (void)wifi_power(1);
+        return;
+    }
+    if (!wifi_autojoin || (clock_now(&t) && !t.approx))
         return;
     load_saved();
-    if (!sv_ok)
+    if (!sv_ok && !nrem)
         return;
     time_only = 1;
     time_only_t = sb_ms();
-    sb_log("wifi: no clock at boot: on once for the time (the saved network), then off");
+    sb_log("wifi: no clock at boot: on once for the time (a known network), then off");
     if (wifi_power(1))
         wifi_time_only_end("Wi-Fi did not come on");
 }
@@ -1012,6 +1578,15 @@ void wifi_timer(unsigned id)
     if (st == SBOS_WIFI_OFF)
         return;
     uint64_t now = sb_ms();
+    if (st == SBOS_WIFI_FAILED) {
+        /* Track H: only here when the chip stopped answering and a restart of the radio was asked for (below) */
+        if (user_on && !surv_off && !wifi_in_selftest() && revive_n < 2) {
+            ++revive_n;
+            logn("wifi: the radio is started again after it stopped answering, time ", revive_n, "");
+            (void)wifi_power(1);
+        }
+        return;
+    }
     if (time_only && (ntp_st == 3 || ntp_st == -1 || now - time_only_t > 90000U)) {
         wifi_time_only_end(ntp_st == 3 ? "the clock is set; Wi-Fi off again" : "no time came; Wi-Fi off again");
         wifi_power(0);
@@ -1021,13 +1596,38 @@ void wifi_timer(unsigned id)
     if (M.now < now * 1000U)
         M.now = now * 1000U;                /* the model's clock follows the host's (a polled join's timeout) */
 #endif
+    if (st == SBOS_WIFI_UP && !time_only && !wifi_in_selftest() && wifi_autojoin && !join_pending && !join_active) {
+        /* Track H: after a drop, and now and then while not joined: a scan, then the automatic join of a known one */
+        int due = (reconnect_at && now >= reconnect_at) || (!reconnect_at && bg_scan_at && now >= bg_scan_at);
+        if (due && (nrem || sv_ok)) {
+            int again = reconnect_at != 0;
+            if (again)
+                logn("wifi: trying to get back on a known network, attempt ", reconnect_n, "");
+            reconnect_at = 0;
+            bg_scan_at = now + (K.screen_on ? 60000U : 300000U);
+            auto_done = 0;
+            (void)wifi_scan();
+            if (again && reconnect_n < 5)
+                reconnect_later();          /* the next try (5, 15, 30, 60 s) unless this one gets back on */
+        } else if (!bg_scan_at) {
+            bg_scan_at = now + (K.screen_on ? 60000U : 300000U);
+        }
+    }
     if (auto_pending && st == SBOS_WIFI_UP) {   /* 1.2-alpha21: from the tick, not inside the chip's event */
         auto_pending = 0;
         auto_done = 1;
         for (int i = 0; i < nnets; ++i)     /* strongest first (sort_nets) */
-            if (known_pass(nets[i].ssid, nets[i].ssid_len)) {
+            if (known_pass(nets[i].ssid, nets[i].ssid_len) &&
+                !(rem_find(nets[i].ssid, nets[i].ssid_len) >= 0 && rem[rem_find(nets[i].ssid, nets[i].ssid_len)].noauto)) {
                 sb_log("wifi: a known network was heard: joining it automatically (name not logged)");
                 (void)wifi_join(i, 0);
+                break;
+            }
+        for (unsigned k = 0; st == SBOS_WIFI_UP && k < nrem; ++k)
+            if (rem[k].hidden && !rem[k].noauto) {
+                /* a remembered hidden network is never in the list (no name heard): asked for by its name */
+                sb_log("wifi: joining a remembered hidden network automatically (name not logged)");
+                (void)wifi_join_name(rem[k].ssid, rem[k].len, rem[k].pass);
                 break;
             }
     }
@@ -1059,6 +1659,12 @@ void wifi_timer(unsigned id)
             ub_s(&u, " reused");
             sb_log(u.b);
             set_state(SBOS_WIFI_UP, "");
+            caps_read();                    /* Track H: once per boot (WPA3 needs SAE) */
+            {
+                const uint8_t *v = bcmw_info(w)->module_vid;
+                if (v[0] || v[1])
+                    module_kind = (v[0] == 0x91 || v[0] == 0xa1) && v[1] == 0x33;
+            }
             (void)wifi_scan();
         }
     } else {
@@ -1080,6 +1686,9 @@ void wifi_timer(unsigned id)
             joined = -1;
             kt_cancel(KT_WIFI, 0);
             set_state(SBOS_WIFI_FAILED, "The radio stopped answering (logged)");
+            net_down();
+            if (user_on && !surv_off && !wifi_in_selftest() && revive_n < 2)
+                kt_set(KT_WIFI, 0, sb_ms(), 5000, 0);   /* Track H: once more in 5 s (wifi_timer, FAILED) */
             return;
         }
         if (scan_retry && st == SBOS_WIFI_UP && now >= scan_retry_at)
@@ -1105,7 +1714,8 @@ void wifi_timer(unsigned id)
             uint64_t t0 = join_t0;
             join_active = 0;
             if (r == BCMW_OK && joined >= 0)
-                remember(nets[joined].ssid, nets[joined].ssid_len, jp_pass);
+                remember(nets[joined].ssid, nets[joined].ssid_len, jp_pass, join_hidden, nsec[joined]);
+            join_hidden = 0;
             memset(jp_pass, 0, sizeof(jp_pass));
             if (r != BCMW_OK) {
                 logn("wifi: the network did not take the phone after ", sb_ms() - t0, " ms");
@@ -1124,6 +1734,7 @@ void wifi_timer(unsigned id)
             sbnet_start(&net);
         }
         if (st == SBOS_WIFI_SCANNING && now - t_state > SCAN_MS) {
+            sc_log("TIMED OUT (no end event),", 0);
             sort_nets();
             logn("wifi: the scan timed out with ", (uint64_t)nnets, " networks");
             set_state(SBOS_WIFI_UP, "");
@@ -1143,6 +1754,12 @@ void wifi_timer(unsigned id)
             if (st == SBOS_WIFI_DHCP && net.state == SBNET_BOUND) {
                 logn("wifi: an address from DHCP (not logged), lease ", net.lease_s, " s");
                 set_state(SBOS_WIFI_CONNECTED, "");
+                gn_uplink(1);                       /* Track G's NAT: Wi-Fi is an uplink (preferred over LTE) */
+                reconnect_n = 0;
+                reconnect_at = 0;
+                pm_set = 0;
+                if (joined >= 0 && !nets[joined].secure && rem_find(nets[joined].ssid, nets[joined].ssid_len) < 0)
+                    remember(nets[joined].ssid, nets[joined].ssid_len, "", 0, nsec[joined]);   /* Track H: open too */
                 pinged = 0;
                 ntp_st = 0;
                 clock_checked = 0;
@@ -1156,6 +1773,7 @@ void wifi_timer(unsigned id)
             if (st == SBOS_WIFI_CONNECTED && net.state != SBNET_BOUND && net.state != SBNET_RENEWING &&
                 net.state != SBNET_REBINDING) {
                 sb_log("wifi: the address was lost (DHCP); asking again");
+                gn_uplink(0);
                 set_state(SBOS_WIFI_DHCP, "");
                 sbnet_start(&net);
             }
@@ -1171,6 +1789,16 @@ void wifi_timer(unsigned id)
             if (st == SBOS_WIFI_CONNECTED && ntp_st == 0 && (pinged == 2 || (pinged == 1 && now - t_state > 3500))) {
                 ntp_st = sbnet_dns_query(&net, "pool.ntp.org") == 0 ? 1 : -1;
                 ntp_t = now;
+            }
+            if (st == SBOS_WIFI_CONNECTED && !pm_set && wifi_pm && (ntp_st == 3 || ntp_st == -1) &&
+                fx_state != 1 && w_ready && !w->dead) {
+                /* Track H: power save once joined and the clock checked: PM 2 (fast power save: the radio sleeps
+                 * between beacons, wakes for traffic; Android's default when the screen is off) */
+                uint32_t two = 2;
+                int fe = 0;
+                hw_wdt_feed();
+                pm_set = bcmw_ioctl(w, 0, BCMW_C_SET_PM, &two, 4, 1, &fe) == BCMW_OK ? 1 : -1;
+                sb_log(pm_set > 0 ? "wifi: power save on (PM 2)" : "wifi: power save refused (PM 2): stays off");
             }
             if (ntp_st == 1 && net.dns_state == SBNET_DNS_DONE) {
                 uint8_t q[48];
@@ -1195,6 +1823,24 @@ void wifi_timer(unsigned id)
     }
     if (fx_state == 1 && st != SBOS_WIFI_CONNECTED)
         fetch_poll();                       /* the network went: the fetch ends */
+    if (st == SBOS_WIFI_CONNECTED && K.screen_on && fx_state != 1 && joined >= 0 && joined < nnets &&
+        now - rssi_at >= 10000U && w_ready && !w->dead) {
+        /* Track H: the joined network's signal now (WLC_GET_RSSI, brcmf_scb_val_le), for the status bar's bars */
+        uint8_t sv[12];
+        int fe = 0;
+        rssi_at = now;
+        memset(sv, 0, sizeof(sv));
+        hw_wdt_feed();
+        if (bcmw_ioctl(w, 0, 127, sv, sizeof(sv), 0, &fe) == BCMW_OK) {
+            int32_t v = (int32_t)((uint32_t)sv[0] | (uint32_t)sv[1] << 8 | (uint32_t)sv[2] << 16 | (uint32_t)sv[3] << 24);
+            if (v < 0 && v > -120) {
+                int was = nets[joined].rssi;
+                nets[joined].rssi = v;
+                if ((was > -60) != (v > -60) || (was > -70) != (v > -70))
+                    notify();               /* the bars changed */
+            }
+        }
+    }
     int busy = st == SBOS_WIFI_STARTING || st == SBOS_WIFI_SCANNING || st == SBOS_WIFI_JOINING || st == SBOS_WIFI_DHCP ||
                join_pending || join_active || dhcp_go || fx_state == 1;
     uint32_t every = st == SBOS_WIFI_STARTING ? 10U : K.screen_on ? TICK_ON_MS : TICK_OFF_MS;
@@ -1204,6 +1850,328 @@ void wifi_timer(unsigned id)
         every = 5U;                         /* a fetch: TCP's segments and TLS's records without waiting */
     if (st != SBOS_WIFI_OFF && st != SBOS_WIFI_FAILED && !kt_pending(KT_WIFI, 0))
         kt_set(KT_WIFI, 0, sb_ms(), every, 0);
+}
+
+/* ---- Track H's h1 self test (wifi_selftest_scan_only == 2): diagnostics, then the saved network on each band ---
+ * After the scan: the firmware's capabilities (cap, logged at bring-up), the settings that matter for joining and
+ * power (read only), what the heard networks ask for (counts by security and band: no names). Then, only when the
+ * store's saved network ("wifinet") was heard: a join forced to 2.4 GHz (never seen to work: docs/WIFI-BCM4361.md
+ * T4-WPA2 run b; once more with Bluetooth coexistence off if it fails), its address, the clock, one HTTPS GET of
+ * example.com; then the same on 5 GHz, with a power-save check (interrupt counts idle with PM 0 and PM 2, the router's
+ * pings under PM 2). Every step has its own time limit; the whole run at most 240 s. */
+#define H1_URL "https://example.com/"
+static int h1, h1_band, h1_btc_tried, h1_ok24, h1_ok5, h1_fails, h1_web[3];   /* h1_web[band]: 1 HTTPS worked */
+static uint64_t h1_t, h1_t0;
+static uint32_t h1_btc_was = 0xffffffffu, h1_irq0, h1_pings;
+static int h1_btc_set;
+
+static void h1_iovar(const char *name)
+{
+    uint32_t v = 0;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "selftest: wifi: h1: ");
+    ub_s(&u, name);
+    hw_wdt_feed();
+    if (bcmw_iovar_get_u32(w, name, &v) == BCMW_OK) {
+        ub_s(&u, " = ");
+        ub_dec(&u, v);
+    } else {
+        ub_s(&u, ": not supported");
+    }
+    sb_log(u.b);
+}
+
+static void h1_diag(void)
+{
+    static const char *const sn[] = { "open", "WEP", "WPA", "WPA2", "WPA2/WPA3", "WPA3", "enterprise", "OWE", "other" };
+    unsigned cnt[9], b5 = 0;
+    struct ub u;
+    memset(cnt, 0, sizeof(cnt));
+    for (int i = 0; i < nnets; ++i) {
+        if (nsec[i] >= 0 && nsec[i] < 9)
+            ++cnt[(int)nsec[i]];
+        b5 += nets[i].band5 != 0;
+    }
+    ub_init(&u);
+    ub_s(&u, "selftest: wifi: h1: heard by security:");
+    for (int k = 0; k < 9; ++k)
+        if (cnt[k]) {
+            ub_c(&u, ' ');
+            ub_s(&u, sn[k]);
+            ub_c(&u, ' ');
+            ub_dec(&u, cnt[k]);
+        }
+    ub_s(&u, "; strongest side on 5 GHz: ");
+    ub_dec(&u, b5);
+    ub_s(&u, " of ");
+    ub_dec(&u, (uint64_t)nnets);
+    sb_log(u.b);
+    sb_logx("selftest: wifi: h1: firmware capability bits (1 sae, 2 sae_ext, 4 mfp, 8 idsup, 16 wpa3): ", fw_caps);
+    {
+        uint32_t pm = 0xffffffffu;
+        int fe = 0;
+        hw_wdt_feed();
+        if (bcmw_ioctl(w, 0, BCMW_C_GET_PM, &pm, 4, 0, &fe) == BCMW_OK)
+            logn("selftest: wifi: h1: PM (power save mode) = ", pm, "");
+    }
+    static const char *const iv[] = { "mfp", "btc_mode", "bcn_li_dtim", "assoc_listen", "pm2_sleep_ret", "roam_off",
+                                      "wme", "nmode", "vhtmode", "mimo_bw_cap", "bw_cap", "sup_wpa", "wpa_auth" };
+    for (unsigned k = 0; k < sizeof(iv) / sizeof(iv[0]); ++k)
+        h1_iovar(iv[k]);
+    if (!sv_ok) {
+        sb_log("selftest: wifi: h1: no saved network on the phone: diagnostics only (no join)");
+        return;
+    }
+    ub_init(&u);
+    ub_s(&u, "selftest: wifi: h1: the saved network (name not logged): 2.4 GHz ");
+    if (sv_heard24) {
+        ub_sdec(&u, sv_rssi24);
+        ub_s(&u, " dBm");
+    } else {
+        ub_s(&u, "not heard");
+    }
+    ub_s(&u, ", 5 GHz ");
+    if (sv_heard5) {
+        ub_sdec(&u, sv_rssi5);
+        ub_s(&u, " dBm");
+    } else {
+        ub_s(&u, "not heard");
+    }
+    for (int i = 0; i < nnets; ++i)
+        if (nets[i].ssid_len == sv_len && !memcmp(nets[i].ssid, sv_ssid, sv_len) && nsec[i] >= 0 && nsec[i] < 9) {
+            ub_s(&u, ", security ");
+            ub_s(&u, sn[(int)nsec[i]]);
+        }
+    sb_log(u.b);
+}
+
+static int h1_saved_index(void)
+{
+    for (int i = 0; i < nnets; ++i)
+        if (nets[i].ssid_len == sv_len && !memcmp(nets[i].ssid, sv_ssid, sv_len))
+            return i;
+    return -1;
+}
+
+static void h1_say(const char *what)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "selftest: wifi: h1: ");
+    ub_s(&u, h1_band == 1 ? "2.4 GHz: " : "5 GHz: ");
+    ub_s(&u, what);
+    ub_s(&u, " (");
+    ub_dec(&u, sb_ms() - h1_t);
+    ub_s(&u, " ms)");
+    sb_log(u.b);
+}
+
+static void h1_btc_restore(void)
+{
+    if (h1_btc_set && h1_btc_was != 0xffffffffu && w_ready && !w->dead) {
+        hw_wdt_feed();
+        (void)bcmw_iovar_set_u32(w, "btc_mode", h1_btc_was);
+        logn("selftest: wifi: h1: btc_mode back to ", h1_btc_was, "");
+    }
+    h1_btc_set = 0;
+}
+
+/* stages: 1 start a join on h1_band, 2 joining (to CONNECTED and the clock), 3 the fetch, 4 PM 0 idle window,
+ * 5 PM 2 idle window, 6 pings under PM 2, 7 leave, settle, next band; 9 done */
+static int h1_step(int *done)
+{
+    uint64_t now = sb_ms();
+    if (now - h1_t0 > 240000U) {
+        sb_log("selftest: wifi: h1: the whole run passed 240 s: stopping");
+        ++h1_fails;
+        h1 = 9;
+    }
+    switch (h1) {
+    case 1: {
+        int i = h1_saved_index();
+        if (i < 0 || (h1_band == 1 && !sv_heard24) || (h1_band == 2 && !sv_heard5)) {
+            h1_say("the saved network was not heard on this band: skipped");
+            h1 = 7;
+            h1_t = now;
+            break;
+        }
+        w->cfg.join_band = (unsigned)h1_band;
+        h1_t = now;
+        if (wifi_join(i, 0)) {
+            h1_say("the join was refused");
+            h1 = 7;
+            break;
+        }
+        h1_say("joining (the band forced)");
+        h1 = 2;
+        break;
+    }
+    case 2:
+        if (st == SBOS_WIFI_CONNECTED && (ntp_st == 3 || ntp_st == -1)) {
+            h1_say(pinged == 2 ? "JOINED: an address, the router answers" : "JOINED: an address (no ping answer yet)");
+            h1_say(ntp_st == 3 ? "the clock checked over the network" : "no time server answer");
+            if (h1_band == 1)
+                h1_ok24 = 1;
+            else
+                h1_ok5 = 1;
+            h1_t = now;
+            if (wifi_fetch(H1_URL)) {
+                h1_say("the HTTPS GET did not start");
+                h1 = h1_band == 2 ? 4 : 7;
+            } else {
+                h1 = 3;
+            }
+        } else if (st == SBOS_WIFI_UP || st == SBOS_WIFI_FAILED || st == SBOS_WIFI_OFF || now - h1_t > 40000U) {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "did NOT join: ");
+            ub_s(&u, why[0] ? why : st == SBOS_WIFI_DHCP ? "no address in 40 s" : "no result in 40 s");
+            h1_say(u.b);
+            if (st != SBOS_WIFI_UP && st != SBOS_WIFI_FAILED && st != SBOS_WIFI_OFF)
+                (void)wifi_leave();
+            if (h1_band == 1 && !h1_btc_tried && st == SBOS_WIFI_UP) {
+                /* once more with Bluetooth coexistence off (Bluetooth is not powered here; a runtime setting, gone
+                 * at the radio's next reset) */
+                h1_btc_tried = 1;
+                hw_wdt_feed();
+                if (bcmw_iovar_get_u32(w, "btc_mode", &h1_btc_was) != BCMW_OK)
+                    h1_btc_was = 0xffffffffu;
+                hw_wdt_feed();
+                if (bcmw_iovar_set_u32(w, "btc_mode", 0) == BCMW_OK) {
+                    h1_btc_set = 1;
+                    logn("selftest: wifi: h1: 2.4 GHz again with btc_mode 0 (it was ", h1_btc_was, ")");
+                    h1 = 1;
+                    break;
+                }
+                sb_log("selftest: wifi: h1: btc_mode 0 refused: no second 2.4 GHz try");
+            }
+            h1 = 7;
+            h1_t = now;
+        }
+        break;
+    case 3:
+        if (fx_state == 2 || now - h1_t > 30000U) {
+            struct sbos_wifi_fetch f;
+            if (fx_state != 2)
+                wifi_fetch_cancel();
+            wifi_fetch_status(&f);
+            struct ub u;
+            ub_init(&u);
+            int works = f.result == SBHTTP_DONE && f.status >= 200 && f.status < 400;   /* h1c: was "== 0" */
+            h1_web[h1_band] = works;
+            ub_s(&u, works ? "HTTPS WORKS: status " : "HTTPS FAILED: ");
+            if (f.result == SBHTTP_DONE) {
+                ub_dec(&u, (uint64_t)f.status);
+                ub_s(&u, ", bytes ");
+                ub_dec(&u, f.bytes);
+                ub_s(&u, ", TLS ms ");
+                ub_dec(&u, f.tls_ms);
+                ub_s(&u, ", total ms ");
+                ub_dec(&u, f.total_ms);
+            } else {
+                ub_s(&u, f.why);
+                if (f.tls_err) {
+                    ub_s(&u, " (TLS error ");
+                    ub_dec(&u, (uint64_t)f.tls_err);
+                    ub_s(&u, ")");
+                }
+            }
+            h1_say(u.b);
+            h1_t = now;
+            h1_irq0 = irq_n;
+            h1 = h1_band == 2 ? 4 : 7;
+        }
+        break;
+    case 4:                                 /* 5 GHz: 5 s idle with PM 0 (the join's setting) */
+        if (now - h1_t >= 5000U) {
+            logn("selftest: wifi: h1: power: radio interrupts in 5 s idle with PM 0: ", irq_n - h1_irq0, "");
+            uint32_t two = 2;
+            int fe = 0;
+            hw_wdt_feed();
+            if (bcmw_ioctl(w, 0, BCMW_C_SET_PM, &two, 4, 1, &fe) != BCMW_OK) {
+                sb_logx("selftest: wifi: h1: power: PM 2 refused, error ", (uint64_t)(uint32_t)fe);
+                h1 = 7;
+            } else {
+                h1 = 5;
+            }
+            h1_t = now;
+            h1_irq0 = irq_n;
+        }
+        break;
+    case 5:
+        if (now - h1_t >= 5000U) {
+            logn("selftest: wifi: h1: power: radio interrupts in 5 s idle with PM 2: ", irq_n - h1_irq0, "");
+            h1_t = now;
+            h1_pings = net.ping_replies;
+            (void)sbnet_ping(&net, net.gateway);
+            h1 = 6;
+        }
+        break;
+    case 6: {
+        unsigned sent = (unsigned)((now - h1_t) / 1000U);
+        static unsigned last_sent;
+        if (sent != last_sent && sent < 5 && st == SBOS_WIFI_CONNECTED) {
+            last_sent = sent;
+            (void)sbnet_ping(&net, net.gateway);
+        }
+        if (now - h1_t >= 6000U) {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "selftest: wifi: h1: power: under PM 2 the router answered ");
+            ub_dec(&u, net.ping_replies - h1_pings);
+            ub_s(&u, " of 5 pings, the last in ");
+            ub_dec(&u, net.ping_rtt_ms);
+            ub_s(&u, " ms");
+            sb_log(u.b);
+            last_sent = 0;
+            h1 = 7;
+            h1_t = now;
+        }
+        break;
+    }
+    case 7:
+        if (st == SBOS_WIFI_JOINING || st == SBOS_WIFI_DHCP || st == SBOS_WIFI_CONNECTED)
+            (void)wifi_leave();
+        if (h1_band == 1)
+            h1_btc_restore();
+        if (now - h1_t < 1500U)
+            break;                          /* the firmware settles after the leave */
+        if (h1_band == 1) {
+            h1_band = 2;
+            h1 = 1;
+        } else {
+            h1 = 9;
+        }
+        break;
+    default:
+        break;
+    }
+    if (h1 != 9)
+        return 1;
+    h1_btc_restore();
+    if (w_ready)
+        w->cfg.join_band = 0;
+    {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "selftest: wifi: h1: summary: 2.4 GHz ");
+        ub_s(&u, !sv_ok || !sv_heard24 ? "not tried" : h1_ok24 ? (h1_web[1] ? "JOINED, HTTPS works" : "JOINED, HTTPS failed")
+                                                               : "did not join");
+        ub_s(&u, h1_btc_tried ? " (also tried with btc_mode 0)" : "");
+        ub_s(&u, ", 5 GHz ");
+        ub_s(&u, !sv_ok || !sv_heard5 ? "not tried" : h1_ok5 ? (h1_web[2] ? "JOINED, HTTPS works" : "JOINED, HTTPS failed")
+                                                             : "did not join");
+        sb_log(u.b);
+    }
+    if (sv_ok && !h1_ok24 && sv_heard24) {
+        sb_log("selftest: WARNING: wifi: h1: 2.4 GHz did not join (the open point; the log above says how far)");
+        ++selftest_warnings;
+    }
+    int ok = nnets > 0 && !h1_fails && (!sv_ok || !sv_heard5 || h1_ok5);
+    wifi_power(0);
+    *done = 1;
+    return ok;
 }
 
 /* the self test: on, the bring-up, one scan; 0.6.1: then, if the saved network ("wifinet") was heard, a join with
@@ -1216,6 +2184,8 @@ int wifi_selftest_phase(int *done)
     static int seen_dhcp;                   /* 1.2-alpha25: the join and its handshake done, the address asked for */
     static uint64_t jt0;
     *done = 0;
+    if (h1)
+        return h1_step(done);
     if (jstate == 1) {
         if (st == SBOS_WIFI_DHCP)
             seen_dhcp = 1;
@@ -1278,13 +2248,46 @@ int wifi_selftest_phase(int *done)
         return 0;
     }
     if (st == SBOS_WIFI_UP && !scan_retry) {
-        logn("selftest: wifi: up and scanned in ", sb_ms() - t_on, " ms");
-        logn("selftest: wifi: networks heard: ", (uint64_t)nnets, " (names not logged)");
-        logn("selftest: wifi: interrupts during the bring-up and scan: ", irq_n,
-             irq_storms ? " (a STORM: off, polling)" : irq_on ? " (on)" : " (polling)");
-        if (irq_missed)
-            logn("selftest: wifi: work found without an interrupt, times: ", irq_missed, "");
+        static int up_logged;               /* once: h1 comes back here while it waits for its second scan */
+        if (!up_logged++) {
+            logn("selftest: wifi: up and scanned in ", sb_ms() - t_on, " ms");
+            logn("selftest: wifi: networks heard: ", (uint64_t)nnets, " (names not logged)");
+            logn("selftest: wifi: interrupts during the bring-up and scan: ", irq_n,
+                 irq_storms ? " (a STORM: off, polling)" : irq_on ? " (on)" : " (polling)");
+            if (irq_missed)
+                logn("selftest: wifi: work found without an interrupt, times: ", irq_missed, "");
+        }
         int heard = -1;
+        if (wifi_selftest_scan_only == 2) {
+            /* h1b: a second scan 2 s after the first (the first one starts while the bring-up's own may still run) */
+            static int rescan;
+            static uint64_t rescan_t;
+            if (rescan == 0) {
+                rescan = 1;
+                rescan_t = sb_ms();
+                sb_log("selftest: wifi: h1: a second scan in 2 s (does the first one miss access points?)");
+                return 1;
+            }
+            if (rescan == 1) {
+                if (sb_ms() - rescan_t < 2000U)
+                    return 1;
+                rescan = 2;
+                if (wifi_scan() == 0)
+                    return 1;               /* back here when it has ended (state UP again) */
+            }
+            logn("selftest: wifi: h1: networks (names) after the second scan: ", (uint64_t)nnets, "");
+            h1_diag();
+            h1_t0 = h1_t = sb_ms();
+            if (!sv_ok || (!sv_heard24 && !sv_heard5)) {
+                if (sv_ok)
+                    sb_log("selftest: wifi: h1: the saved network was not heard: no join");
+                h1 = 9;
+            } else {
+                h1_band = sv_heard24 ? 1 : 2;
+                h1 = 1;
+            }
+            return h1_step(done);
+        }
         if (wifi_selftest_scan_only) {
             int secure = 0;
             for (int i = 0; i < nnets; ++i)
@@ -1292,9 +2295,10 @@ int wifi_selftest_phase(int *done)
             logn("selftest: wifi: secured networks among them: ", (uint64_t)secure, "");
             sb_log(nnets ? "selftest: wifi: passed: scan only (no join in this test)" :
                            "selftest: wifi: FAILED: the scan heard nothing");
+            int ok = nnets > 0;             /* before wifi_power(0), which empties the list */
             wifi_power(0);
             *done = 1;
-            return nnets > 0;
+            return ok;
         }
         for (int i = 0; sv_ok && jstate == 0 && i < nnets; ++i)
             if (nets[i].ssid_len == sv_len && !memcmp(nets[i].ssid, sv_ssid, sv_len))

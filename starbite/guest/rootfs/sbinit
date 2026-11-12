@@ -38,6 +38,20 @@ hostname starbite 2>/dev/null
 ip link set lo up 2>/dev/null
 log "$(uname -r), $(grep -c ^processor /proc/cpuinfo) CPUs, $(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo) MB"
 
+# ---- the boot recorder: the kernel log on the overlay (on the card) every 5 s for the first minute, so a start that
+# never reaches Starbite (no HELLO: the host's pmsg holds 16 KB) can be read afterwards from overlay.img. The last
+# start's log is kept as .1. Small writes (the log is ~100 KB) ----
+mkdir -p /var/log
+[ -f /var/log/starbite-boot.log ] && mv -f /var/log/starbite-boot.log /var/log/starbite-boot.log.1 2>/dev/null
+(
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        sleep 5
+        { echo "starbite-boot: +$((i * 5)) s, $(date -u '+%F %T') UTC"; dmesg; } > /var/log/starbite-boot.log.new 2>&1 &&
+            mv -f /var/log/starbite-boot.log.new /var/log/starbite-boot.log
+        sync
+    done
+) </dev/null >/dev/null 2>&1 &
+
 # ---- options from the kernel command line ----
 REPO_DEV= ZRAM=1 PKG=1 WL=1 EPOCH=
 for a in $(cat /proc/cmdline); do
@@ -66,32 +80,24 @@ if [ ! -e /dev/sbshm ]; then
     [ -n "$ko" ] && insmod "$ko" && log "sbguest.ko loaded"
 fi
 
-# ---- zram swap: lz4, half the RAM ----
-if [ "$ZRAM" = 1 ] && ! grep -q zram0 /proc/swaps; then
-    [ -e /sys/block/zram0 ] || modprobe zram num_devices=1 2>/dev/null
-    if [ -e /sys/block/zram0 ]; then
-        kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
-        echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null
-        echo $((kb / 2))K > /sys/block/zram0/disksize &&
-            mkswap /dev/zram0 >/dev/null && swapon -p 100 /dev/zram0 &&
-            log "zram swap $((kb / 2048)) MB ($(sed 's/.*\[\(.*\)\].*/\1/' /sys/block/zram0/comp_algorithm))"
-        echo 100 > /proc/sys/vm/swappiness            # compressed RAM is cheap to swap to
-        echo 0 > /proc/sys/vm/page-cluster            # zram: no readahead
-    else
-        log "no zram"
+# ---- zram swap: lz4, half the RAM (in the background: sbwl's HELLO does not wait for it) ----
+zram_on() {
+    if [ "$ZRAM" = 1 ] && ! grep -q zram0 /proc/swaps; then
+        [ -e /sys/block/zram0 ] || modprobe zram num_devices=1 2>/dev/null
+        if [ -e /sys/block/zram0 ]; then
+            kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+            echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null
+            echo $((kb / 2))K > /sys/block/zram0/disksize &&
+                mkswap /dev/zram0 >/dev/null && swapon -p 100 /dev/zram0 &&
+                log "zram swap $((kb / 2048)) MB ($(sed 's/.*\[\(.*\)\].*/\1/' /sys/block/zram0/comp_algorithm))"
+            echo 100 > /proc/sys/vm/swappiness            # compressed RAM is cheap to swap to
+            echo 0 > /proc/sys/vm/page-cluster            # zram: no readahead
+        else
+            log "no zram"
+        fi
     fi
-fi
-
-# ---- the App Store's repository (read-only EROFS) ----
-mkdir -p /repo
-if ! mountpoint -q /repo; then
-    [ -n "$REPO_DEV" ] || REPO_DEV=$(findfs LABEL=sb-repo 2>/dev/null)
-    if [ -n "$REPO_DEV" ] && mount -t erofs -o ro "$REPO_DEV" /repo; then
-        log "repo $REPO_DEV on /repo"
-    else
-        log "no repo device (the store shows nothing to install)"
-    fi
-fi
+}
+[ "$ZRAM" = 1 ] && zram_on &
 
 # ---- first boot on a fresh overlay: machine id, the user's home ----
 [ -s /etc/machine-id ] || dbus-uuidgen > /etc/machine-id 2>/dev/null
@@ -109,23 +115,76 @@ export GSK_RENDERER=cairo GDK_BACKEND=wayland NO_AT_BRIDGE=1 GTK_A11Y=none MOZ_E
 export LIBGL_ALWAYS_SOFTWARE=1 GTK_USE_PORTAL=0 SAL_USE_VCLPLUGIN=gtk3 XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=Starbite HOME=/root
 
-# ---- sbpkg: the App Store daemon (root: it runs apt in the overlay), restarted if it exits ----
-# Track F's engine when the base has it (same socket lines, same store table), else sbpkg
-STORED=/usr/local/sbin/sbpkg
-[ -x /usr/local/sbin/sbstore ] && STORED="/usr/local/sbin/sbstore daemon"
-if [ "$PKG" = 1 ] && [ -x "${STORED%% *}" ]; then
-    (
-        while true; do
-            $STORED </dev/null >/dev/null 2>/dev/kmsg
-            log "${STORED##*/} exited ($?); starting it again in 2 s"
-            sleep 2
-        done
-    ) &
-fi
+# ---- the services after sbwl (Track E, cp3 2026-11-12: everything before sbwl delays its HELLO, and Starbite gives
+# a desktop start 30 s, first start of a new base included): the App Store's repository, the dpkg status merge, the
+# network link, Starbite's files and the App Store daemon wait for sbwl's socket (at most 60 s), then run here ----
+services() {
+    i=0
+    while [ ! -S /run/sbwl.sock ] && [ "$i" -lt 120 ]; do
+        sleep 0.5
+        i=$((i + 1))
+    done
+    log "services: after sbwl's socket ($((i / 2)) s)"
+    # ---- the App Store's repository (read-only EROFS) ----
+    mkdir -p /repo
+    if ! mountpoint -q /repo; then
+        [ -n "$REPO_DEV" ] || REPO_DEV=$(findfs LABEL=sb-repo 2>/dev/null)
+        if [ -n "$REPO_DEV" ] && mount -t erofs -o ro "$REPO_DEV" /repo; then
+            log "repo $REPO_DEV on /repo"
+        else
+            log "no repo device (the store shows nothing to install)"
+        fi
+    fi
+
+    # ---- a new base image under an old overlay: dpkg's status = the new base's + what the App Store installed (the
+    # overlay's copy-up would hide the new base's packages); once per base, keyed by the base's status checksum ----
+    L=/.sbroot/base/var/lib/dpkg/status
+    U=/.sbroot/rw/upper/var/lib/dpkg/status
+    if [ -f "$L" ]; then
+        id=$(cksum < "$L")
+        mkdir -p /var/lib/starbite
+        if [ "$id" != "$(cat /var/lib/starbite/base-status.id 2>/dev/null)" ]; then
+            if [ -f "$U" ] && [ -x /usr/share/starbite/dpkg-merge.py ]; then
+                python3 -I /usr/share/starbite/dpkg-merge.py "$L" /var/lib/dpkg/status /var/lib/dpkg/status 2>&1 |
+                    while read -r l; do log "$l"; done
+            fi
+            echo "$id" > /var/lib/starbite/base-status.id
+        fi
+    fi
+
+    # ---- contract v3 (Track E): the network link and Starbite's files, when the host serves them ----
+    # sbnet0 (sbguest.ko's sbnet): the host's address / route / DNS applied, and re-applied when the uplink changes
+    if [ -d /sys/class/net/sbnet0 ] && [ -x /usr/local/sbin/sbnet-up ]; then
+        /usr/local/sbin/sbnet-up </dev/null >/dev/null 2>&1 &
+    fi
+    # Starbite's files at /home/user/Starbite (9P over the shared region; read-only while Starbite can't write the card)
+    if [ -x /usr/local/sbin/sbp9-mount ]; then
+        # bounded: a host that never answers must not hold the services (9p waits are killable)
+        SBP9_DIR=/home/user/Starbite timeout -s KILL 20 /usr/local/sbin/sbp9-mount ||
+            { rc=$?; [ "$rc" -ge 124 ] && log "sbp9-mount: no answer from the host in 20 s (stopped, $rc)"; }
+    fi
+
+    # ---- sbpkg: the App Store daemon (root: it runs apt in the overlay), restarted if it exits ----
+    # Track F's engine when the base has it (same socket lines, same store table), else sbpkg
+    STORED=/usr/local/sbin/sbpkg
+    [ -x /usr/local/sbin/sbstore ] && STORED="/usr/local/sbin/sbstore daemon"
+    if [ "$PKG" = 1 ] && [ -x "${STORED%% *}" ]; then
+        (
+            while true; do
+                $STORED </dev/null >/dev/null 2>/dev/kmsg
+                log "${STORED##*/} exited ($?); starting it again in 2 s"
+                sleep 2
+            done
+        ) &
+    fi
+    log "services: up"
+    wait
+}
+services </dev/null &
 
 # ---- sbwl: the compositor (root; it owns the shm rings and /run/sbwl.sock, starts the apps as "user") ----
 # HOOK: mk-base.sh SBWL=/path/to/sbwl runs sbwl/install-rootfs.sh (-> /usr/bin/sbwl, /etc/sbwl/system-apps).
-trap 'sync' TERM
+trap '[ -x /usr/local/sbin/sbp9-mount ] && /usr/local/sbin/sbp9-mount -u; sync' TERM
 SBWL_BIN=/usr/bin/sbwl
 [ -x "$SBWL_BIN" ] || SBWL_BIN=/usr/local/bin/sbwl
 args=$(cat /etc/starbite/sbwl.args 2>/dev/null)

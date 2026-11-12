@@ -734,8 +734,20 @@ static void comms_rx(const struct sbm_plat *p, struct sbm_boot *b, struct sbm_sb
     case SBM_SMS_INCOMING: {
         struct sbm_sms s;
         uint8_t tpid = m->data_len > 4 ? d[4] : 0;
+        uint8_t rmr, rst;
         b->sms.rx++;
-        if (sbm_sms_incoming(m, &s) == 0) {
+        if (m->data_len > 1 && d[1] == 2) {             /* a delivery report (TP-SRR asked for it) */
+            if (sbm_sms_incoming_report(m, &rmr, &rst) == 0) {
+                unsigned k = b->sms.rep_gen % SBM_SMS_REP_MAX;
+                b->sms.rep_mr[k] = rmr;
+                b->sms.rep_st[k] = rst;
+                b->sms.rep_gen++;
+                b->sms.reports++;
+                sbm_logf(p, "comms: a delivery report: status 0x%02x", rst);
+            } else {
+                b->sms.rx_bad++;
+            }
+        } else if (sbm_sms_incoming(m, &s) == 0) {
             if (o_sms_cb)
                 o_sms_cb(o_sms_ctx, &s);
         } else {
@@ -1389,6 +1401,8 @@ int sbm_modem_sms_send(struct sbm_modem *m, const char *number, const char *utf8
             d[o] = 0;                                /* no SMSC known: the CP's default */
         o += sca;
         sbm_memcpy(d + o, pdu[i], len[i]);
+        if (q->want_report)
+            d[o] |= 0x20;                            /* TP-SRR: the network reports the delivery (0x0402, data[1] 2) */
         int r = send_tracked(m, SBM_SMS_SEND, SBM_IPC_EXEC, d, (uint16_t)(o + len[i]), &q->seq[i]);
         if (r < 0) {
             for (int j = i; j < n; ++j)

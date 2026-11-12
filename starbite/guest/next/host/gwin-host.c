@@ -524,9 +524,14 @@ static void run(int n)
 static int fails, nchecks;
 /* the rows shown with the keyboard (and v3's 40 pt key bar) up: shell_linux.inc's LX_KBROWS */
 #define CARD_XPT 20.0f                     /* shell_lock.c CARD_X (MARGIN) */
+#ifndef GWIN_NO_EXT
 #define KBROWS (SH_LINUX_HKB - (int)(40.0f * SH_LINUX_HKB / (540.0f - 44.0f) + .5f))
+#else
+#define KBROWS SH_LINUX_HKB                         /* (no key bar without SH_EXT_API) */
+#endif
 int sw_compat_dump(char *out, int cap);            /* sw-ext-compat.patch's view of the recents */
 int nc_compat_count(const char *who);
+int sh_linux_job(char *b, int cap);                /* gwin.c (cp6): the running store job in words */
 /* a tap, a horizontal drag (dx pt over n 16 ms steps, then still), a quick throw up */
 static void tap(float x, float y) { sh_touch(0, x, y, (float)now_ms); sh_touch(2, x, y, (float)now_ms + 60); }
 static void drag(float x, float y, float dx, float dy, int n, int still)
@@ -592,7 +597,7 @@ int main(int argc, char **argv)
     check(got.viewport >= 1 && got.last_vp == SH_LINUX_H, "the viewport 1344 rows (no keyboard)");
     check(win == 1 && has_win && draws > 0, "its window in the surface and drawn");
     sh_touch(0, 195, 300, (float)now_ms); sh_touch(2, 195, 300, (float)now_ms);   /* a tap in its text area */
-    run(3);
+    run(30);                                                 /* (B3: the keyboard takes keys once its slide rests; run() steps springs 50 ms) */
     check(got.last_vp == KBROWS, "the field focused: the keyboard up, the viewport above the keyboard and its key bar");
     sh_touch(0, 195, 735, (float)now_ms); sh_touch(2, 195, 735, (float)now_ms);   /* the keyboard's space */
     sh_touch(0, 156, 627, (float)now_ms); sh_touch(2, 156, 627, (float)now_ms);   /* 'f' */
@@ -611,10 +616,21 @@ int main(int argc, char **argv)
     sh_touch(0, 178, 176, (float)now_ms); sh_touch(2, 178, 176, (float)now_ms);   /* GET */
     run(4);
     check(got.pkg == 1 && got.pkg_seq_ok == 1, "GET: SBG_MSG_PKG install with the store's seq");
+    {
+        char jb[96];
+        int jr = sh_linux_job(jb, sizeof jb);
+        printf("[%6llu ms] gwin-host: the job in words: \"%s\"\n", (unsigned long long)now_ms, jb);
+        check(jr == 1 && jb[0] && strstr(jb, "GIMP"), "cp6: the running job in words for the shell (sh_linux_job)");
+    }
     tk_comp_frame(&C, 0, 1);
     write_ppm(argv[2], "gwin-store.ppm", &C.panel);
     run(15);
     check(fstore.pkg[2].flags & SBSHM_PKG_INSTALLED, "the install ran to the end");
+    {
+        char jb[96];
+        check(sh_linux_job(jb, sizeof jb) == 0 && !jb[0] && nc_compat_count("store") == 1,
+              "cp6: no job left, its end in the Centre (store: \"... Is Installed\")");
+    }
     sh_set("store", "foot", 1);
     run(2);
     sh_touch(0, 195, 640, (float)now_ms); sh_touch(2, 195, 640, (float)now_ms);   /* where Remove would be */
@@ -629,6 +645,7 @@ int main(int argc, char **argv)
     /* 3. contract v3 (Track E): cards, the key bar, notifications, the clipboard, the zero-copy window */
     int l3 = nchecks;
     const char *stills = getenv("GWIN_STILLS") ? getenv("GWIN_STILLS") : argv[2];
+#ifndef GWIN_NO_EXT
     char dump[256];
     check(apps_n == 1, "the Text Editor's card keeps Linux up while hidden (guest_apps 1)");
     sh_set("lapp", "org.gnome.Calculator", 1);              /* a third app */
@@ -675,6 +692,7 @@ int main(int argc, char **argv)
     run(8);
     if (!focus) { tap(195, 300); run(3); }
     check(got.last_vp == KBROWS, "the keyboard up: the viewport above the key bar");
+    run(25);                                                /* (P3x, B3's keyboard: its keys and bar once its slide rests) */
     evon = 1;
     ev[0] = 0;
     tap(121.9f, 520);                                       /* Ctrl */
@@ -738,7 +756,11 @@ int main(int argc, char **argv)
     run(12);
     check(got.acts == 2 && got.act_id == 0x1a && got.act_action == 0, "the banner's tap: NOTIF_ACT id 0x1a action 0");
     check(got.activate > a0 && got.last_act == 1 && shown, "the banner's tap opened the Text Editor (ACTIVATE 1)");
+#else
+    printf("gwin-host: cards / key bar / notifications / clipboard: SKIPPED (no SH_EXT_API in this UI tree and the stand-in does not apply)\n");
+#endif
     /* Track A's zero-copy window: one external layer on the guest's front buffer */
+#ifndef GWIN_NO_ZC
     sh_set("app", "", 0);
     run(4);
     zc = 1;
@@ -764,10 +786,13 @@ int main(int argc, char **argv)
     run(3);
     check(got.done > dn, "zero-copy: home detaches it (sbg_surf_done)");
     zc = 0;
+#else
+    printf("gwin-host: zero-copy: SKIPPED (this UI tree has no tk_layer_external and the compat patch does not apply)\n");
+#endif
     /* Linux stops: every Linux card goes, the 60 s rule again */
     guest_stop();
     run(12);
-    check(apps_n == 0, "Linux stopped: its cards gone (guest_apps 0)");
+    check(apps_n <= 0, "Linux stopped: its cards gone (guest_apps 0, or never called without SH_EXT_API)");
     printf("gwin-host: v3 %s (%d checks)\n", fails ? "FAILED" : "PASSED", nchecks - l3);
     printf("gwin-host: the UI heap: %.1f MB in use, peak %.1f MB%s\n", tk_heap_used() / 1e6, tk_heap_peak() / 1e6,
            getenv("SBTK_HEAP_MB") ? " (SBTK_HEAP_MB: the phone's heap)" : "");

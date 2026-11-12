@@ -15,6 +15,52 @@ lib="$root/starbite/libsb"
 k="$root/starbite/sbos/kern"
 sdk="$root/starbite/sbos/sdk"
 apps="$root/starbite/sbos/apps"
+wifi="$root/starbite/wifi"
+brs="$wifi/tls/bearssl"
+# the compile and the link (in the VM, under the shared heavy lock: 4 jobs at most). The kernel's Wi-Fi fetches over
+# HTTPS: sbtcp, netio, sbhttp, the TLS checks and BearSSL (its unmodified sources, built once, with the C library's
+# <string.h>: the shim is for the phone's freestanding build)
+build() {
+    CF="-O1 -g -DSB_HOST -DSB_HOST_UTILITY -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I$lib -I$k -I$sdk -I$root/starbite/utility -I$root/starbite/engineer -I$wifi -I$brs/inc -I$root/starbite/guest/sbos"
+    BRF="-O1 -g -w -I$brs/inc -I$brs/src -DBR_USE_URANDOM=0 -DBR_USE_UNIX_TIME=0 -DBR_USE_GETENTROPY=0 -DBR_RDRAND=0"
+    pids=""; fails=0
+    drain() { for p in $pids; do wait "$p" || fails=$((fails + 1)); done; pids=""; }
+    job() { "$@" & pids="$pids $!"; set -- $pids; [ $# -lt 4 ] || drain; }
+    objs=""
+    for a in emergency light heat sos info clock battery settings wifi modem calc notes files guide; do
+        job gcc $CF -c -Dapp_event=${a}_app_event -Dsbapp_header=${a}_header -o "$out/app_$a.o" "$apps/$a.c"
+        objs="$objs $out/app_$a.o"
+    done
+    for src in "$root/starbite/host/host.c" "$root/starbite/host/sbos-host-stubs.c" "$root/starbite/host/sbos-host-eng.c" \
+        "$lib/str.c" "$lib/log.c" "$lib/sbui.c" "$lib/sbui_input.c" "$lib/sbui_page.c" "$lib/sbui_w.c" "$lib/sb7.c" \
+        "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" \
+        "$lib/dvfs_levels.c" "$lib/sbfw.c" "$lib/assets.S" \
+        "$k/main.c" "$k/timer.c" "$k/appfmt.c" "$k/state.c" "$k/batmodel.c" "$k/heatctl.c" "$k/heater.c" "$k/heatk.c" \
+        "$k/services.c" "$k/input.c" "$k/ui.c" "$k/app.c" "$k/torch.c" "$k/vib.c" "$k/alarm.c" "$k/notif.c" "$k/modem.c" \
+        "$k/panel.c" "$k/gpuheat.c" "$k/uitest.c" "$k/settings.c" "$k/slot.c" "$k/wifi.c" "$k/look.c" "$k/fled.c" \
+        "$k/audio.c" "$k/survival.c" "$k/guide.c" "$k/gnssfix.c" "$k/tzdb.c" "$k/prefs.c" "$k/passcode.c" \
+        "$root/starbite/guest/sbos/guest.c" \
+        "$wifi/core.c" "$wifi/exynos_pcie.c" "$wifi/chip.c" "$wifi/fw.c" "$wifi/ring.c" "$wifi/msgbuf.c" "$wifi/link.c" \
+        "$wifi/wpa.c" "$wifi/net.c" "$wifi/tcp.c" "$wifi/netio.c" "$wifi/http.c" "$wifi/tls/ta.c" "$wifi/tls/tls_chains.c" \
+        "$wifi/tls/tls_check.c" "$wifi/host/model.c" "$wifi/host/model_ap.c" "$root/starbite/utility/tz.c"; do
+        o="$out/k_$(echo "${src#"$root"/starbite/}" | tr /. __).o"
+        job gcc $CF -DSBOS_KERNEL "-DSB_ASSETS=\"$out/sbassets.sb7\"" -c -o "$o" "$src"
+        objs="$objs $o"
+    done
+    mkdir -p "$out/br"
+    for f in $(cat "$brs/FILES"); do
+        o="$out/br/$(echo "$f" | tr / _ | sed 's/\.c$/.o/')"
+        [ "$o" -nt "$brs/src/$f" ] || job gcc $BRF -c -o "$o" "$brs/src/$f"
+        objs="$objs $o"
+    done
+    drain
+    [ "$fails" -eq 0 ] || { echo "sbos-preview: $fails compile(s) failed" >&2; exit 1; }
+    gcc -o "$out/sbos-host" $objs -lm -lpthread
+}
+if [ "${1:-}" = --build ]; then                     # the VM's half (below: limactl ... flock ... --build)
+    build
+    exit 0
+fi
 SB7=""; EXTRA=""
 for c in "$root/build/brand" "$root/../../../build/brand"; do
     [ -z "$SB7" ] && [ -f "$c/menu7.sb7" ] && SB7="$c/menu7.sb7"
@@ -24,28 +70,15 @@ done
 V="limactl shell --workdir $root starbite"
 $V python3 starbite/tools/mkassets.py "$SB7" "$out/libsb-assets.sb7" >/dev/null
 $V python3 starbite/sbos/tools/mergeassets.py "$out/sbassets.sb7" "$out/libsb-assets.sb7" "$EXTRA" >/dev/null
-CF="-O1 -g -DSB_HOST -DSB_HOST_UTILITY -Wall -Wextra -Werror -Wno-unused-parameter -fno-strict-aliasing -I$lib -I$k -I$sdk -I$root/starbite/utility -I$root/starbite/engineer -I$root/starbite/wifi -I$root/starbite/guest/sbos"
-aobjs=""
-for a in emergency light heat sos info clock battery settings wifi modem calc notes files guide; do
-    $V gcc $CF -c -Dapp_event=${a}_app_event -Dsbapp_header=${a}_header -o "$out/app_$a.o" "$apps/$a.c"
-    aobjs="$aobjs $out/app_$a.o"
-done
-$V gcc $CF -DSBOS_KERNEL "-DSB_ASSETS=\"$out/sbassets.sb7\"" -o "$out/sbos-host" \
-    "$root/starbite/host/host.c" "$root/starbite/host/sbos-host-stubs.c" "$root/starbite/host/sbos-host-eng.c" \
-    "$lib/str.c" "$lib/log.c" "$lib/sbui.c" "$lib/sbui_input.c" "$lib/sbui_page.c" "$lib/sbui_w.c" "$lib/sb7.c" \
-    "$lib/fdt.c" "$lib/catalog.c" "$lib/fence.c" "$lib/tmu.c" "$lib/adc.c" "$lib/mali.c" "$lib/mali_desc.c" \
-    "$lib/dvfs_levels.c" "$lib/assets.S" \
-    "$k/main.c" "$k/timer.c" "$k/appfmt.c" "$k/state.c" "$k/batmodel.c" "$k/heatctl.c" "$k/heater.c" "$k/heatk.c" \
-    "$k/services.c" "$k/input.c" "$k/ui.c" "$k/app.c" "$k/torch.c" "$k/vib.c" "$k/alarm.c" "$k/notif.c" "$k/modem.c" "$k/panel.c" "$k/gpuheat.c" "$k/uitest.c" "$k/settings.c" "$k/slot.c" "$k/wifi.c" "$k/look.c" "$k/fled.c" "$k/audio.c" "$k/survival.c" "$k/guide.c" "$k/gnssfix.c" "$root/starbite/guest/sbos/guest.c" \
-    "$root/starbite/wifi/core.c" "$root/starbite/wifi/exynos_pcie.c" "$root/starbite/wifi/chip.c" "$root/starbite/wifi/fw.c" \
-    "$root/starbite/wifi/ring.c" "$root/starbite/wifi/msgbuf.c" "$root/starbite/wifi/link.c" "$root/starbite/wifi/wpa.c" \
-    "$root/starbite/wifi/net.c" "$root/starbite/wifi/host/model.c" "$root/starbite/wifi/host/model_ap.c" "$root/starbite/utility/tz.c" $aobjs -lm -lpthread
+$V flock /var/tmp/sbvm-heavy.lock sh "$root/starbite/host/sbos-preview.sh" --build
+# SBOS_BUILD_ONLY=1: the host binary only (sbos-settings-test.sh, sbos-wifi-test.sh), no scenes
+[ -z "${SBOS_BUILD_ONLY:-}" ] || { echo "built $out/sbos-host"; exit 0; }
 
 scene() {
     name=$1
     shift
     if [ -n "${SCENES:-}" ] && ! echo " $SCENES " | grep -q " $name "; then return 0; fi
-    $V env ${SBOS_DBG:+SBOS_DBG=1} SBOS_HOST_FILES=$root/starbite/sbos/examples ${SCENE_ENV:-X=1} "$out/sbos-host" "$out" /dev/null "$@" "s:$name" q | grep -E "shot|FAIL|CRASH|dbg|host: (power|reboot|boot)" || true
+    $V flock /var/tmp/sbvm-heavy.lock env ${SBOS_DBG:+SBOS_DBG=1} SBOS_HOST_FILES=$root/starbite/sbos/examples ${SCENE_ENV:-X=1} "$out/sbos-host" "$out" /dev/null "$@" "s:$name" q | grep -E "shot|FAIL|CRASH|dbg|host: (power|reboot|boot)" || true
     "$py" -c "from PIL import Image; Image.open('$out/$name.ppm').save('$png/$name.png')"
 }
 OPEN="g:1150,2310,0,700 w:400"                      # hold Open on the lock screen

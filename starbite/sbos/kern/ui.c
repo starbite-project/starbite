@@ -128,9 +128,10 @@ void kui_redraw_all(void)
     full = dirty = 1;
 }
 
+int kui_hold_awake;                         /* Track A, 1.0: Next's keep-awake holders (sh_hold_awake) */
 int kui_awake_on(void)
 {
-    return app_awake || screen == SCR_LIGHT || screen == SCR_SOS || pressed >= 0;
+    return app_awake || screen == SCR_LIGHT || screen == SCR_SOS || pressed >= 0 || kui_hold_awake > 0;
 }
 
 /* ---- building lists ---------------------------------------------------------------------------- */
@@ -548,6 +549,7 @@ void kui_lock(void)
 /* Starbite OS Next draws the confirmation in its own UI (kern_next sets this; 0 in the regular image) */
 void (*kui_screen_hook)(int on);
 int (*kui_sleep_hook)(int key);
+void (*kui_save_hook)(void);              /* Track A lifecycle: Next's sh_save_all (kern_next.c) */
 int (*kui_confirm_hook)(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
                         void (*done)(int ok));
 void kui_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
@@ -2481,8 +2483,11 @@ void kui_guest_open(int mode)
     guest_view_sync();
 }
 
+int (*kui_power_hook)(void);                /* Track A, 1.0: Next's own power sheet (sh_power_held); 1 = handled */
 void kui_power_menu(void)
 {
+    if (kui_power_hook && kui_power_hook())
+        return;
     if (screen == SCR_POWER || screen == SCR_SOS)
         return;
     cf_return = screen == SCR_LIGHT ? light_return : screen;

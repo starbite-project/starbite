@@ -5,6 +5,7 @@
 #define BCMW_PRIV_H
 #include "bcmw.h"
 #include "wpa.h"
+#include "sae.h"
 
 /* ---- the log: a line builder without a C library ---------------------------------------------- */
 
@@ -314,6 +315,37 @@ struct bcmw {
     uint8_t eapol_out[14 + BCMW_WPA_REPLY_MOST];    /* a handshake answer waiting to go (sent outside the completions) */
     unsigned eapol_out_len;
     int eapol_out_kind;
+    /* WPA3 and management frame protection (link.c; the arithmetic in sae.c) */
+    const struct bcmw_sae_ops *sae_ops;     /* bcmw_sae_enable(); NULL: no SAE in this build */
+    uint32_t cap_sum;                       /* the "cap" string last logged (a checksum: logged again if it changes) */
+    unsigned caps;                          /* BCMW_CAP_* (bcmw_caps) */
+    unsigned join_akm;                      /* the AKM chosen: 0 open, 2 PSK, 6 PSK-SHA256, 8 SAE */
+    int join_fwsae;                         /* SAE inside the firmware ("sae" + idsup) */
+    int join_h2e;                           /* SAE by hash-to-element (the AP requires it) */
+    int join_mfp;                           /* 0 none, 1 capable, 2 required: what "mfp" was set to */
+    unsigned join_wpa3_refused;             /* WPA3-only access points of the name that this firmware cannot join */
+    unsigned join_group_mgmt;               /* the AP's group management cipher (0: default BIP-CMAC-128) */
+    uint16_t join_ap_caps;                  /* the AP's RSN capabilities */
+    uint32_t join_ap_akms;                  /* the AKMs it offers (bit n: 00-0F-AC:n) */
+    int join_no_sae;                        /* SAE failed on a transition network: WPA2-PSK instead */
+    int sae_wrong;                          /* SAE failed on the AP's confirm: the password (no PSK fallback) */
+    uint8_t join_psk[32];                   /* the PSK's PMK, kept for that fallback until the join ends */
+    uint8_t join_ap_rsn[64], join_ap_rsnxe[16];     /* the chosen AP's RSN element and RSNXE (message 3's check) */
+    unsigned join_ap_rsn_len, join_ap_rsnxe_len;
+    uint8_t join_ie[BCMW_RSN_OURS + 3];     /* our RSN element (and RSNXE with H2E) for "wpaie" and message 2 */
+    unsigned join_ie_len;
+    char join_pass[68];                     /* the password, kept from _start to the choice of the AP (SAE needs it
+                                             * with the AP's address), wiped then */
+    unsigned join_pass_len;
+    struct bcmw_sae sae;
+    int sae_phase;                          /* 0 none, 1 waiting for EXT_AUTH_REQ, 2 exchanging, 3 done */
+    int sae_req;                            /* EXT_AUTH_REQ seen: our commit to send (outside the completions) */
+    uint8_t sae_rx[4][BCMW_SAE_FRAME_MOST]; /* received Authentication frames' bodies, processed by bcmw_join_poll */
+    unsigned sae_rx_len[4], sae_rx_n;
+    uint8_t sae_last[BCMW_SAE_FRAME_MOST];  /* the last frame we sent (sent again after 1 s without an answer) */
+    unsigned sae_last_len, sae_tries;
+    uint64_t sae_t;
+    uint32_t sae_packet, sae_acked, sae_noack;
     int in_process;                 /* mb_process is running: it does not run again inside itself */
     uint8_t nvram_bin[BCMW_NVRAM_MAX + 32];
 };

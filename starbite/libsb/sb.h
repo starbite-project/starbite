@@ -53,6 +53,49 @@ struct sb_boot {
 };
 extern struct sb_boot sb_boot;
 
+/* The loader's SBFW table (docs/STARBITE-FIRMWARE-LAYER.md 10.2): a 4 KiB page below the image, written right
+ * before the jump by loaders from 2026-11-12 on. sb_start copies it into sb_fw first thing (sbfw.c); older
+ * loaders write none: sb_fw.valid = 0 and everything behaves as before. */
+#ifdef SB_HOST_FAKE_MEM                 /* host tests (starbite/host/sbfw-store-test.c): the test's own page */
+extern uint8_t sb_host_fw_page[];
+#define SB_SBFW_TABLE ((uintptr_t)sb_host_fw_page)
+#else
+#define SB_SBFW_TABLE 0x91ffe000UL
+#endif
+#define SBFW_TABLE_SIZE 4096U
+#define SBFW_WHY_MENU     0U            /* boot_reason */
+#define SBFW_WHY_AUTO     1U
+#define SBFW_WHY_NEXT     2U
+#define SBFW_WHY_SHELL    3U
+#define SBFW_WHY_RETRY    4U
+#define SBFW_WHY_FASTBOOT 5U
+#define SBFW_TF_CARD_ONLY 1U            /* flags: USERDATA released, the UFS store is never opened */
+#define SBFW_TF_SHELL     2U            /* flags: shell mode on */
+#define SBFW_MED_NONE     0xffffffffU   /* store_medium: the loader had no home store */
+#define SBFW_LINES        24U
+#define SBFW_LINE         120U
+struct sb_fw {
+    int valid;                          /* 1: a valid table (magic, version 1, CRC) was copied */
+    uint32_t debug_level, req_action;
+    char key[24];                       /* the catalog key of this start */
+    uint32_t console_y0, console_y1;
+    uint64_t fb_base;
+    uint32_t stride, fb_fmt, loader_version, boot_reason;
+    uint32_t store_medium, store_flags; /* STORE_UFS / STORE_SD or SBFW_MED_NONE; bit 0 HOME */
+    uint64_t store_base, store_capacity;/* 4 KiB blocks of that medium */
+    uint32_t crash_kind, crash_sev;
+    char crash_key[24];
+    uint32_t post_fails, post_warns, settings_status, flags;   /* flags: SBFW_TF_* */
+    char lines[SBFW_LINES][SBFW_LINE];  /* the loader console's last lines, oldest first, NUL padded */
+};
+extern struct sb_fw sb_fw;
+/* 1 if page holds a valid table (magic "SBFWTBL1", version 1, CRC32 of bytes 16..4095 at 12). */
+int sbfw_table_check(const uint8_t *page);
+/* Decode a table page into f (valid = sbfw_table_check; all zero otherwise). 1 valid. */
+int sbfw_table_decode(const uint8_t *page, struct sb_fw *f);
+/* sb_start: copy the table at SB_SBFW_TABLE into sb_fw (and log what it says). 1 valid. */
+int sb_fw_read(void);
+
 /* The application's entry, called once libsb is up (never returns). */
 void sb_main(void);
 
@@ -98,6 +141,8 @@ void *sb_alloc(uint64_t size);
 uint64_t sb_arena_used(void), sb_arena_free(void);
 
 uint32_t sb_crc32(const void *p, uint64_t n);
+/* zlib's crc32(crc, p, n): continues a CRC32 over more bytes (crc 0 to start; sb_crc32 is this with 0) */
+uint32_t sb_crc32_more(uint32_t crc, const void *p, uint64_t n);
 
 /* ---- caches (mmu.c) ------------------------------------------------------------------------- */
 
@@ -405,10 +450,12 @@ int sb_write_store(unsigned medium, uint64_t lba, uint64_t n, const void *src);
 void sb_fence_store(unsigned medium, uint64_t base, uint64_t used, uint64_t capacity);
 /* A standing write permission for one volatile store entry (an OS's own state, written in place without a
  * confirmation each time: the entry itself, made on the Mac with the volatile flag, is the consent). store.c's
- * store_volatile_grant sets it after checking the entry; only UFS, only inside the live store's data area,
- * at most 1024 blocks. One at a time; 0 count clears it. 1 granted. */
+ * store_volatile_grant sets it after checking the entry; on the home store's medium (UFS, or the card's store
+ * once it is home: docs/STORE-ON-CARD.md), only inside that live store's data area, at most 1024 blocks. One at
+ * a time; 0 count clears it. 1 granted. */
 int sb_volatile_grant(unsigned medium, uint64_t first, uint64_t count, const char *name);
-/* A write inside the granted range: FUA, then a cache flush. 0, SB_W_DRYRUN, SB_W_RANGE, SB_W_AUTH or SB_W_IO. */
+/* A write inside the granted range: UFS FUA, then a cache flush; the card: written (the driver returns once the
+ * card has programmed it), then read back and compared. 0, SB_W_DRYRUN, SB_W_RANGE, SB_W_AUTH or SB_W_IO. */
 int sb_write_volatile(unsigned medium, uint64_t lba, uint64_t n, const void *src);
 /* A second standing write permission, separate from the volatile entry's: ONE FILE's extent on the microSD
  * card (Linux apps: /starbite/linux/overlay.img, the guest's overlay; starbite/guest/sbos/guest-card.h resolves
@@ -435,7 +482,8 @@ int sb_never_part(const char *name);
 int sb_blk_read(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, void *dst);
 /* Only from sb_write (the drivers check sb_fence_active). */
 int sb_blk_write(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src);
-/* The same with forced unit access and a cache flush after (UFS; only from sb_write_volatile). */
+/* The same with forced unit access and a cache flush after (UFS), or for the card a write and a read-back
+ * compare (the card has no FUA; sd.c returns once the card programmed the blocks). Only from sb_write_volatile. */
 int sb_blk_write_sync(unsigned medium, unsigned lu, uint64_t lba, uint64_t n, const void *src);
 
 /* ---- secondary cores as workers (smp.c, crt0.S sb_worker_entry) -------------------------------

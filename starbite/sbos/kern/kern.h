@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "sbapp.h"
+#include "passcode.h"                /* Track A: the passcode (pure: passcode.c) */
+int sbos_safe_start(void);           /* Track A, 1.0: this start is a safe start (settings.c): nothing saved */
 
 #define SBOS_VERSION "1.2-alpha26"
 /* 1.2-alpha26: alpha25's lock screen (OS cards, swipe up, the Emergency hold, Heat only in Emergency) is off: the user
@@ -18,7 +20,7 @@
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
-enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_MODEM, KT_SURV, KT_APP0 = 16 };
+enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_MODEM, KT_SURV, KT_USB /* usb.c */, KT_APP0 = 16 };
 #define KT_MAX 64
 #define KT_RESERVE 24                /* entries apps cannot take: the kernel's tasks always get theirs */
 struct ktimer {
@@ -399,6 +401,7 @@ void panel_kick(void);
 void panel_idle(void);
 void panel_save_set(int on);
 void panel_screen(int on);
+int panel_blank(int on);           /* Track A: the in-call proximity: display off / on, the screen kept; 1 done */
 unsigned panel_dcs_failures(void);
 extern int panel_bright_level;
 int panel_brightness(int level);    /* the user's level: 0 untouched, 1..4 low..high: 1 done */
@@ -414,6 +417,10 @@ int vib_buzz(unsigned n, unsigned on_ms, unsigned off_ms);
 void vib_off(void);
 void vib_timer(void);
 int vib_on(void);
+/* drivers track (haptic.c): the strength (PWM duty, per mille, 500..700), a gap, the pattern player's hook */
+unsigned vib_set_duty(unsigned pm);
+void vib_wait(unsigned ms);
+void vib_set_end_hook(void (*fn)(int ended));
 /* 1.2-alpha8: wake-up alarms (alarm.c) */
 int alarm_set(int i, int h, int m, int days, int on);
 int alarm_any(void);
@@ -422,6 +429,19 @@ int alarm_ringing(void);
 void alarm_minute(const struct sbos_time *t);
 void alarm_timer(void);
 int alarm_stop(int snooze);
+/* Track A (2026-11-12): Next's Alarm tab (the list of up to four, labels), kept in the record "sbos.alarm" */
+#define ALARM_REC_SIZE (4 + 4 * 28)
+int alarm_count(void);
+int alarm_get(int i, int *hm, int *days, int *on, char *label, int cap);
+int alarm_put(int i, int hm, int days, int on, const char *label);   /* i == alarm_count(): add */
+int alarm_del(int i);
+int alarm_pack(uint8_t out[ALARM_REC_SIZE]);        /* 1: the list is the kernel's (save it) */
+void alarm_unpack(const uint8_t in[ALARM_REC_SIZE]);
+int alarm_app_state(uint8_t out[20]);               /* the classic Clock app's state as the list (0: none yet) */
+/* Track A: the time zone in use (tzdb.c's index) and 12 / 24-hour; services.c, saved by settings.c */
+int clock_zone(void);
+void clock_zone_set(int i);
+extern int clock_24h;
 /* 1.2-alpha9: notifications (notif.c) */
 struct notif {
     char who[16], title[40], text[72];
@@ -530,17 +550,21 @@ void kui_guest_open(int mode);      /* 1.2: the Linux view (GUEST_APP / GUEST_TE
 extern int kui_linux_on;            /* 1.2: Settings > Linux apps: the home tile (off at every start) */
 void kui_lock(void);
 int kui_awake_on(void);
+extern int kui_hold_awake;              /* Track A, 1.0: long jobs keeping the screen on (Next: sh_hold_awake) */
 extern int (*kui_confirm_hook)(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
                                void (*done)(int ok));
 void kui_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
                  void (*done)(int ok));
 void kui_power_menu(void);
+extern int (*kui_power_hook)(void);     /* Track A, 1.0: a UI with its own power sheet (Next); 1 = handled */
 void kui_screen_changed(int on);
 /* P2r (Starbite OS Next): the UI's own screen off / on (no classic black frame) and the Power key's or the screen-off
  * timer's fade first (1: the UI turns the screen off itself, through power_screen_set, when the fade has ended;
  * key: the Power key, whose second press during the fade undoes it) */
 extern void (*kui_screen_hook)(int on);
 extern int (*kui_sleep_hook)(int key);
+/* Track A lifecycle: the UI's save before a restart or a switch-off (Next: every app's on_save, sh_save_all); 0 none */
+extern void (*kui_save_hook)(void);
 void kui_sos_changed(void);
 int kui_screen(void);
 void ui_ktimer(unsigned id);
@@ -655,6 +679,42 @@ int64_t hw_core_psci(unsigned w);   /* PSCI AFFINITY_INFO's raw answer for worke
  * 0 failed, -1 a dry run (nothing written) */
 int hw_slot_read(uint8_t *h0, uint8_t *h1);
 int hw_slot_write(int half, const uint8_t *src, uint32_t n);
+void hw_slot_lend(void);            /* Track A update: the fence's one volatile grant was taken (slot.c takes it back) */
+/* Track A: Software Update (update.c; docs/STARBITE-FIRMWARE-LAYER.md 10.5): the card's /STARBITE/UPDATE/MANIFEST.TXT,
+ * staged into the inactive update slot a chunk per call, armed for the loader, committed 10 s into the next start */
+enum { KUP_FAILED = -1, KUP_NONE = 0, KUP_FOUND, KUP_STAGING, KUP_READY, KUP_INSTALLED };
+struct kupdate {
+    char key[24], version[32], image[64], notes[160];
+    uint64_t size;
+    uint8_t sha[32];
+    int state, pct;                 /* KUP_*; staging 0..100 */
+    char why[80];                   /* KUP_FAILED: why; otherwise a detail ("No microSD card.") */
+};
+int kupdate_parse(const char *txt, int n, struct kupdate *u);   /* 0: every field there and well formed */
+unsigned kupdate_target(unsigned slot_active);                  /* the slot to stage into: 1 A, 2 B */
+int kupdate_check(struct kupdate *u);                           /* 1 an update for this row found */
+int kupdate_stage(struct kupdate *u, uint8_t *buf, uint32_t cap);   /* one chunk (cap <= 4 MiB): the new state */
+int kupdate_install(char *why, unsigned cap);                   /* arms and restarts; back here: refused (-1) */
+int kupdate_after_start(void);      /* 10 s after the home screen: 1 committed, 2 a rollback told, 0 nothing, -1 */
+int kupdate_committed(void);        /* 1 this start committed an update */
+void kupdate_dry(int on);           /* the host test: every write a dry run (the self test always is) */
+void kupdate_reset(void);           /* forget what was found or staged (the host test's next phone) */
+/* Track A: the Camera's photo store (photos.c): the home store's volatile entry "sbos-photos" (64 MiB), a ring of 32
+ * self-describing 2 MiB slots, 24-bit RGB; larger pictures scaled down to KPHOTO_MAX_PX. work: KPHOTO_WORK bytes */
+#define KPHOTO_SLOTS 32
+#define KPHOTO_SLOT_BYTES (2U << 20)
+#define KPHOTO_MAX_PX ((KPHOTO_SLOT_BYTES - 4096U) / 3U)         /* 697685: 612 x 816 kept, 1080 x 1440 -> 723 x 964 */
+#define KPHOTO_MAX_SIDE 4096
+#define KPHOTO_WORK (KPHOTO_SLOT_BYTES - 4096U)
+int kphotos_save(const uint32_t *argb, int w, int h, int64_t utc, uint8_t *work, uint32_t cap);   /* 0, -1 (why) */
+int kphotos_count(void);
+/* i 0 = the newest: pixels written (argb 0: the count only, w / h / utc filled), -1 (why) */
+int kphotos_get(int i, uint32_t *argb, int cap_px, int *w, int *h, int64_t *utc, uint8_t *work, uint32_t cap);
+int kphotos_delete(int i);          /* 0, -1 (why) */
+const char *kphotos_why(void);
+void kphotos_fit(int w, int h, int *sw, int *sh);   /* the size a w x h picture is kept at */
+void kphotos_dry(int on);           /* the host test: every write a dry run (the self test always is) */
+void kphotos_reset(void);           /* forget the headers read (the host test's restart) */
 /* settings that last across a restart (settings.c) */
 void settings_restore(void);
 void settings_changed(void);
@@ -683,6 +743,42 @@ extern int wifi_autojoin;              /* 1.2-alpha21: join a known network auto
 int wifi_known(struct sbos_wifi_known *out, int max);
 int wifi_forget(int k);
 int wifi_selftest_phase(int *done);
+/* Track H: a listed network's security (from its RSN / WPA elements), the firmware's capabilities, leaving */
+enum { KWIFI_SEC_OPEN, KWIFI_SEC_WEP, KWIFI_SEC_WPA1, KWIFI_SEC_WPA2, KWIFI_SEC_WPA23, KWIFI_SEC_WPA3, KWIFI_SEC_ENT,
+       KWIFI_SEC_OWE, KWIFI_SEC_OTHER };
+int wifi_net_sec(int i);                    /* of wifi_list's i-th; -1 none */
+#define KWIFI_CAP_SAE 1U
+#define KWIFI_CAP_SAE_EXT 2U
+#define KWIFI_CAP_MFP 4U
+#define KWIFI_CAP_IDSUP 8U
+#define KWIFI_CAP_WPA3 16U
+unsigned wifi_caps(void);                   /* KWIFI_CAP_* from the firmware's "cap" (0 until the radio was up) */
+int wifi_leave(void);
+/* Track H: remembered networks (kept in the state slot), joining by name, details, the user's switch, Survival */
+struct kwifi_known {
+    uint8_t ssid[33], ssid_len;
+    int32_t saved, heard, hidden, autojoin, sec, joined;   /* sec: KWIFI_SEC_*, -1 not known */
+};
+int wifi_known2(struct kwifi_known *out, int max);  /* the saved one first, then most recently joined first */
+int wifi_known_auto(int k, int on);                 /* a remembered network's automatic join */
+int wifi_join_name(const uint8_t *ssid, unsigned len, const char *pass);   /* Other...: hidden; pass "" open */
+struct kwifi_details {
+    int32_t state, rssi, channel, band5, sec, power_save, ping_ms;
+    uint32_t lease_s;
+    uint8_t ssid[33], ssid_len, ip[4], mask[4], gateway[4], dns[4];
+};
+void wifi_details(struct kwifi_details *d);
+int wifi_user_power(int on);                /* the user's switch: as wifi_power, and remembered for the next start */
+int wifi_user_on(void);
+void wifi_survival(int on);                 /* Survival mode: Wi-Fi off and nothing automatic until it ends */
+extern int wifi_pm;                         /* power save once joined: 2 (default) PM_FAST, 0 off */
+struct state_buf;
+int wifi_state_put(struct state_buf *b);    /* settings.c: the record "wifi.known" */
+void wifi_state_get(const uint8_t *half);
+struct sbnet;
+struct sbtcp;
+int wifi_uplink(struct sbnet **n, struct sbtcp **t);   /* 1 Wi-Fi, 2 mobile data, 0 none (Wi-Fi preferred) */
+int wifi_module(void);                      /* the radio module: 1 SEMCO, 0 Murata, -1 not known (for Bluetooth) */
 extern int wifi_selftest_scan_only;          /* Next: the Wi-Fi self test scans only (and runs the TLS self-check) */
 /* Next (wifi-sbos-next): one HTTP(S) GET at a time over the joined network (starbite/wifi/http.h). wifi_fetch:
  * 0 started, SBOS_EAGAIN not joined (or no memory), SBOS_EBUSY one is running. The status says how it went; the
@@ -738,23 +834,41 @@ int kmodem_call_route(int audio);
 int kmodem_call_mute(int on);
 int kmodem_call_dtmf(char digit);
 void kmodem_call(struct kcall *c);
-#define KSMS_MAX 32
+#define KMODEM_SMS_STORE 1                 /* Track G: the store, unread, delete, delivery reports (kmodem_sms_read ...) */
+#define KSMS_MAX 200                        /* kept in RAM and in the state slot ("sms.NN"); the oldest go first */
+enum { KSMS_RECEIVED = 0, KSMS_SENDING, KSMS_SENT, KSMS_FAILED, KSMS_DELIVERED, KSMS_NOT_DELIVERED };
 struct ksms {
-    int32_t id, incoming, state;            /* state: 0 received, 1 sending, 2 sent, 3 failed */
+    int32_t id, incoming, state;            /* state: KSMS_* (sent = no delivery report yet) */
     int64_t utc;
     char number[24];                        /* SCREEN ONLY */
     char text[512];
     char why[48];
+    int32_t unread;                         /* an incoming message not yet shown (kmodem_sms_read) */
+    uint8_t mr[4], parts, rep;              /* kernel only: each part's reference, the parts delivered (bits) */
 };
 int kmodem_sms_send(const char *number, const char *utf8);
-int kmodem_sms_count(void);
+int kmodem_sms_count(void);                 /* oldest first, newest last */
 int kmodem_sms_get(int i, struct ksms *m);
 uint32_t kmodem_sms_gen(void);
+int kmodem_sms_read(const char *number);    /* that thread's incoming marked read; the number of messages changed */
+int kmodem_sms_delete(int32_t id);          /* 0, SBOS_EINVAL no such message, SBOS_EBUSY it is being sent */
+int kmodem_sms_delete_thread(const char *number);   /* the number of messages deleted (never one being sent) */
+struct state_buf;
+void kmodem_sms_save(struct state_buf *b);  /* settings.c's save: the messages as "sms.NN" records */
+void kmodem_sms_restore(const uint8_t *half);   /* settings.c's restore: the newest valid half */
 int kmodem_cellular(int on);
+int kmodem_selftest_phase(int *done);  /* next-celltest (unattended data): every 500 ms; *done at the end, 0 = failed */
 void kmodem_cell(struct kcell *c);
 struct sbnet;
 struct sbtcp;
 int kmodem_netif(struct sbnet **net, struct sbtcp **tcp);   /* 1 = up (pointers filled when not NULL) */
+/* guestnet.c (Track G): the Linux guest's network, NATed onto the active uplink (Wi-Fi first, else mobile data).
+ * The uplinks report themselves (n = 0: down) and offer every received IPv4 packet first: 1 = it was the guest's. */
+#define SBOS_HAVE_GUESTNET 1               /* wifi-core's hooks in kern/wifi.c compile in on this */
+enum { KNET_UPLINK_WIFI = 1, KNET_UPLINK_CELL = 2 };   /* = sbshm-net.h's SBSHM_NET_UPLINK_* */
+void guestnet_uplink(int which, struct sbnet *n);
+int guestnet_rx(int which, const uint8_t *ip, uint32_t len);
+void guestnet_guest_started(void);         /* the guest's service, once sbghost runs: the uplink that is up */
 void wifi_fetch_poll_cell(void);
 void wifi_clock_checked_by(int how);        /* 1 checked, 2 corrected, 3 set (as Wi-Fi's NTP) */
 int kmodem_on(void);

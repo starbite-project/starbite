@@ -32,6 +32,9 @@
 #ifdef SB_HOST
 #include <stdlib.h>
 #endif
+#ifdef SBOS_SELFTEST_NEXT_DRV
+#include "drvprobe.h"
+#endif
 
 #ifdef SBOS_SELFTEST_ON
 const int sbos_selftest_enabled = 1;
@@ -255,6 +258,17 @@ void selftest_timer(unsigned id)
             return;
         }
 #endif
+#ifdef SBOS_SELFTEST_POWER
+        {
+            /* 1.2-alpha29: the power bench (survival.c): attended, the cable out; about 8 minutes; then recovery */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: power: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: power: the watchdog could not be set (the loader's stays): ", w);
+            phase = 110;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
 #ifdef SBOS_SELFTEST_SURVIVAL
         {
             /* 1.2-alpha27: the survival tools (survival.c): the sun, the Morse, USB power out (read only, or a 2 s
@@ -292,6 +306,37 @@ void selftest_timer(unsigned id)
             return;
         }
 #endif
+#ifdef SBOS_SELFTEST_NEXT_DRV
+        {
+            /* Drivers track (docs/STARBITE-OS-DRIVERS.md, kern/drvprobe.c): every driver probe at level 0 (read-only),
+             * then level 1 (active, silent, put back), and in the attended image level 2; then recovery (pmsg). The
+             * watchdog at 60 s, fed by the loop; each probe has its own budget; the whole run at most 600 s. */
+            unsigned w = hw_wdt_selftest(60);
+            sb_logx(w ? "selftest: drivers: the watchdog at 60 s, fed by the loop: seconds " :
+                        "selftest: drivers: the watchdog could not be set (the loader's stays): ", w);
+#ifdef SBOS_SELFTEST_NEXT_DRV_ATTENDED
+            drv_run_begin(1);
+#else
+            drv_run_begin(0);
+#endif
+            phase = 85;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+            return;
+        }
+#endif
+#ifdef SBOS_SELFTEST_NEXT_CELL
+        {
+            /* Starbite OS Next, Cellular (modem-core, Track G): unattended mobile data (the user's consent 2026-11-11):
+             * Cellular on, data, HTTPS GETs, off, on again, off; no SMS, no calls (modem.c kmodem_selftest_phase);
+             * then recovery (pmsg). The watchdog at 30 s, fed by the loop. */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: next-cell: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: next-cell: the watchdog could not be set (the loader's stays): ", w);
+            phase = 120;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+            return;
+        }
+#endif
 #ifdef SBOS_SELFTEST_NEXT_WIFI
         {
             /* Starbite OS Next, Wi-Fi (wifi-sbos-next): silent: the TLS self-check (no network), the radio on, one
@@ -300,8 +345,9 @@ void selftest_timer(unsigned id)
             unsigned w = hw_wdt_selftest(30);
             sb_logx(w ? "selftest: next-wifi: the watchdog at 30 s, fed by the loop: seconds " :
                         "selftest: next-wifi: the watchdog could not be set (the loader's stays): ", w);
-            sb_log("selftest: next-wifi: the TLS self-check, then on, the bring-up, one scan (no join), off");
-            wifi_selftest_scan_only = 1;
+            sb_log("selftest: next-wifi: Track H h1: the TLS self-check, on, the bring-up, one scan, diagnostics; joins "
+                   "only if the store has the saved network (2.4 GHz, then 5 GHz, HTTPS on each), off");
+            wifi_selftest_scan_only = 2;
             phase = 95;
             break;
         }
@@ -586,6 +632,21 @@ void selftest_timer(unsigned id)
         power_restart_recovery();
         return;
 #endif
+#ifdef SBOS_SELFTEST_POWER
+    case 110:
+        if (!surv_power_selftest_step()) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), 5000, 0);
+            return;
+        }
+        phase = 111;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+        return;
+    case 111:
+        sb_log("selftest: power: a restart into recovery (pmsg: plug the cable back in)");
+        active = 0;
+        power_restart_recovery();
+        return;
+#endif
 #ifdef SBOS_SELFTEST_SURVIVAL
     case 100:
         if (!surv_selftest_step()) {
@@ -751,6 +812,50 @@ void selftest_timer(unsigned id)
         return;
     }
     case 94:
+        active = 0;
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_NEXT_DRV
+    case 85: {
+        unsigned w = 0;
+        int done = drv_run_step(&w);
+        if (!done && sb_ms() - t0 > 600000U) {
+            drv_run_abort();
+            sb_log("selftest: drivers: FAILED: not done within 600 s (the running probe put back)");
+            done = 1;
+        }
+        if (!done) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), w ? w : 1, 0);
+            return;
+        }
+        sb_logx("selftest: drivers: finished; a restart into recovery (pmsg) after seconds ", (sb_ms() - t0) / 1000U);
+        phase = 86;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
+        return;
+    }
+    case 86:
+        active = 0;
+        drv_run_abort();
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_NEXT_CELL
+    case 120: {
+        int done = 0;
+        int ok = kmodem_selftest_phase(&done);
+        if (!done) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), 500, 0);
+            return;
+        }
+        sb_logx(ok ? "selftest: next-cell: PASSED; a restart into recovery (pmsg) after seconds " :
+                     "selftest: next-cell: FAILED (see above); a restart into recovery (pmsg) after seconds ",
+                (sb_ms() - t0) / 1000U);
+        phase = 121;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
+        return;
+    }
+    case 121:
         active = 0;
         power_restart_recovery();
         return;

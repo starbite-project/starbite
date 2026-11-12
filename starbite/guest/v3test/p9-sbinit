@@ -1,0 +1,183 @@
+#!/bin/sh
+# /sbin/sbinit of sbp9's test root (v3test/p9-run.sh): Starbite's files over 9P (sbshm-p9.h) against sbsim's
+# read-write tree (sbsim/sim_p9.c). It mounts the share with rootfs/sbp9-mount (/home/user/Starbite), lists it,
+# checks every file's md5 against /p9.md5 (v3test/p9-expect.py), times the 3 MiB read, runs parallel readers and
+# writers, writes / creates / appends / renames / truncates / removes in the writable tree, holds 40 files open at
+# once, unmounts and mounts again. One line to the kernel log at the end:
+#   "v3-test: p9: PASS <numbers>" or "v3-test: p9: FAIL <what>", then "V3-TEST-DONE"
+# (and SBBLK-TEST-DONE / "sbblk-test: FAIL" for sbsim's F_BLKTEST end-of-run detection), then it powers off.
+export PATH=/bin:/sbin:/usr/sbin
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+M=/home/user/Starbite
+say() { echo "p9-test: $*" > /dev/kmsg; }
+: > /tmp/fail
+bad() { echo "$*" >> /tmp/fail; say "FAIL: $*"; }
+ms() { t=$(cut -d' ' -f1 /proc/uptime); echo "${t%.*}${t#*.}0" | sed 's/^0*\([0-9]\)/\1/'; }
+drop() { sync; echo 3 > /proc/sys/vm/drop_caches; }
+md5() { md5sum < "$1" | cut -d' ' -f1; }
+finish() {
+    if [ -s /tmp/fail ]; then
+        echo "v3-test: p9: FAIL $(wc -l < /tmp/fail) checks: $(head -3 /tmp/fail | tr '\n' ';')" > /dev/kmsg
+        echo "sbblk-test: FAIL v3 p9" > /dev/kmsg
+    else
+        echo "v3-test: p9: PASS $*" > /dev/kmsg
+    fi
+    echo V3-TEST-DONE > /dev/kmsg
+    echo SBBLK-TEST-DONE > /dev/kmsg
+    sync
+    poweroff -f
+    sleep 60
+}
+# what every task waits in (no sysrq in the guest kernel): the hang's culprit for the log
+tasks() {
+    say "sbp9 ring: $(cat /sys/module/sbguest/parameters/p9_ring 2>/dev/null)"
+    for d in /proc/[0-9]*; do
+        st=$(cut -d' ' -f3 $d/stat 2>/dev/null)
+        c=$(cat $d/comm 2>/dev/null)
+        [ "$st" = S ] && case "$c" in sleep|sh|ash|kworker*|k*d|*/[0-9]*|rcu*|kthreadd|pool_*|kdevtmpfs|oom_reaper) continue ;; esac
+        [ "$st" = I ] && continue
+        echo "p9-test: task ${d#/proc/} $c $st wchan=$(cat $d/wchan 2>/dev/null) $(tr '\n' '<' < $d/stack 2>/dev/null | cut -c1-300)" > /dev/kmsg
+    done
+}
+step() { say "step: $*"; }
+( sleep ${P9_TEST_TIMEOUT:-240}; bad "no end after ${P9_TEST_TIMEOUT:-240} s (a hang: see the task lines)"; tasks; sleep 2; tasks; finish "" ) &
+watchdog=$!
+
+# ---- the service, the mount ----
+state=$(cat /sys/module/sbguest/parameters/p9 2>/dev/null)
+say "sbguest p9 = '$state'; $(dmesg | grep -m1 'sbp9:' | sed 's/.*sbp9: /sbp9: /')"
+[ "$state" = rw ] || bad "the module says p9 = '$state', not rw (sbsim's tree is writable)"
+sbp9-mount
+rc=$?
+opts=$(awk -v d=$M '$2 == d { print $3 " " $4 }' /proc/mounts)
+[ $rc = 0 ] && [ -n "$opts" ] || bad "sbp9-mount exits $rc, mount: '$opts'"
+case "$opts" in 9p*trans=sbshm*) ;; *) bad "the mount is '$opts', not 9p over sbshm" ;; esac
+say "mounted: $opts"
+sbp9-mount || bad "a second sbp9-mount (already mounted) exits $?"
+mkdir -p /tmp/m2
+mount -t 9p -o trans=sbshm,version=9p2000.L starbite /tmp/m2 2>/dev/null && { bad "a second 9p mount succeeded"; umount /tmp/m2; }
+
+step "listing"
+# ---- listing, attributes, contents ----
+n=$(ls -A $M | wc -l)
+[ "$n" = 6 ] || bad "the root lists $n entries, not 6: $(ls -A $M | tr '\n' ' ')"
+n=$(ls $M/Pictures | wc -l)
+[ "$n" = 24 ] || bad "Pictures lists $n entries, not 24"
+[ "$(ls -a $M/Music | tr '\n' ' ')" = ". .. " ] || bad "the empty Music lists '$(ls -a $M/Music | tr '\n' ' ')'"
+a=$(stat -c '%s %u %g %a %F' $M/big.bin)
+[ "$a" = "3145728 1000 1000 644 regular file" ] || bad "big.bin's stat: $a"
+a=$(stat -c '%u %a %F' $M/Documents)
+[ "$a" = "1000 755 directory" ] || bad "Documents' stat: $a"
+long=$(ls $M/Long)
+[ ${#long} = 255 ] || bad "the long name is ${#long} bytes"
+[ -e $M/nothere ] && bad "a missing name exists"
+cat $M/Documents/sub/deep.bin/x 2>/dev/null && bad "a path through a file reads"
+drop
+nf=$(wc -l < /p9.md5)
+bad_md5=$(cd $M && md5sum -c /p9.md5 2>&1 | grep -vc ': OK$')
+[ "$bad_md5" = 0 ] || bad "$bad_md5 of $nf files differ from p9.md5: $(cd $M && md5sum -c /p9.md5 2>&1 | grep -v ': OK$' | head -2 | tr '\n' ' ')"
+df $M > /tmp/df 2>&1 || bad "df: $(tail -1 /tmp/df)"
+
+step "read timing"
+# ---- the 3 MiB read: cold (caches dropped) three times, the best and the first ----
+best=0 first=0
+for i in 1 2 3; do
+    drop
+    t0=$(ms)
+    dd if=$M/big.bin of=/dev/null bs=1M 2>/tmp/dd.err || bad "dd of big.bin: $(tail -1 /tmp/dd.err)"
+    t1=$(ms)
+    r=$((t1 - t0))
+    [ $r -gt 0 ] || r=1
+    [ $first = 0 ] && first=$r
+    { [ $best = 0 ] || [ $r -lt $best ]; } && best=$r
+done
+kbs=$((3072 * 1000 / best))
+say "3 MiB read: first $first ms, best $best ms = $kbs KiB/s"
+
+step "writes"
+# ---- writes in the writable tree ----
+W=$M/Music
+dd if=/dev/urandom of=/tmp/src bs=1k count=300 2>/dev/null
+cp /tmp/src $W/w.bin || bad "cp to the share"
+drop
+cmp -s /tmp/src $W/w.bin || bad "a 300 KiB file written and read back differs"
+step "append"
+echo appended >> $W/w.bin
+[ "$(stat -c %s $W/w.bin)" = $((300 * 1024 + 9)) ] || bad "append: size $(stat -c %s $W/w.bin)"
+[ "$(tail -c 9 $W/w.bin)" = appended ] || bad "append: the tail is '$(tail -c 9 $W/w.bin)'"
+step "mkdir + renames"
+mkdir $W/dir || bad "mkdir"
+mv $W/w.bin $W/dir/ || bad "mv into a directory"
+mv $W/dir $W/dir2 || bad "rename a directory"
+[ -f $W/dir2/w.bin ] && [ ! -e $W/dir ] && [ ! -e $W/w.bin ] || bad "after the renames: $(ls -R $W | tr '\n' ' ')"
+head -c $((300 * 1024)) $W/dir2/w.bin | cmp -s /tmp/src - || bad "the renamed file's contents"
+step "truncate"
+truncate -s 1000 $W/dir2/w.bin && [ "$(stat -c %s $W/dir2/w.bin)" = 1000 ] || bad "truncate to 1000"
+head -c 1000 /tmp/src | cmp -s - $W/dir2/w.bin || bad "the truncated file's contents"
+: > $W/dir2/w.bin && [ "$(stat -c %s $W/dir2/w.bin)" = 0 ] || bad "truncate to 0 by O_TRUNC"
+step "mv over a file"
+echo one > $W/a && echo two > $W/b && mv $W/a $W/b && [ "$(cat $W/b)" = one ] && [ ! -e $W/a ] || bad "mv over a file"
+step "long names"
+L255=$(printf '%0255d' 0)
+touch "$W/$L255" && [ -f "$W/$L255" ] || bad "create a 255-byte name"
+touch "$W/${L255}x" 2>/dev/null && bad "a 256-byte name was created"
+rm "$W/$L255"
+step "removes"
+rmdir $W/dir2 2>/dev/null && bad "rmdir of a full directory succeeded"
+rm -r $W/dir2 $W/b || bad "rm -r"
+[ "$(ls -A $W | wc -l)" = 0 ] || bad "Music is not empty again: $(ls -A $W | tr '\n' ' ')"
+step "in-place write"
+printf J | dd of=$M/hello.txt conv=notrunc 2>/dev/null
+[ "$(cat $M/hello.txt)" = "Jello from Starbite OS (sbsim)" ] || bad "an in-place write of hello.txt: '$(cat $M/hello.txt)'"
+printf H | dd of=$M/hello.txt conv=notrunc 2>/dev/null
+mkdir $W/x/y 2>/dev/null && bad "mkdir under a missing directory"
+ln -s hello.txt $M/link 2>/dev/null && bad "a symlink was made"
+
+step "parallel"
+# ---- parallel: 4 readers of big.bin + 2 writers (several slots in flight) ----
+want=$(grep ' ./big.bin$' /p9.md5 | cut -d' ' -f1)
+drop
+t0=$(ms)
+pids=""        # (a bare `wait` would wait for the watchdog too)
+for r in 1 2 3 4; do (md5 $M/big.bin > /tmp/par.r$r) & pids="$pids $!"; done
+for w in 1 2; do (dd if=/dev/urandom of=/tmp/par.src$w bs=64k count=$((8 * w)) 2>/dev/null; cp /tmp/par.src$w $W/par$w &&
+    cmp -s /tmp/par.src$w $W/par$w && echo ok > /tmp/par.w$w) & pids="$pids $!"; done
+wait $pids
+t1=$(ms)
+for r in 1 2 3 4; do [ "$(cat /tmp/par.r$r)" = "$want" ] || bad "parallel reader $r: $(cat /tmp/par.r$r)"; done
+for w in 1 2; do [ -f /tmp/par.w$w ] || bad "parallel writer $w"; done
+rm -f $W/par1 $W/par2
+par=$((t1 - t0))
+
+step "open files"
+# ---- 40 files open at once (40 fids, plus their dentries') ----
+i=0 pids=""
+for f in $M/Pictures/* $M/Documents/report.bin $M/hello.txt $M/big.bin $M/Long/*; do
+    sleep 4 < "$f" &
+    pids="$pids $!"
+    i=$((i + 1))
+done
+for k in $(seq 1 11); do sleep 4 < $M/Documents/sub/deep.bin & pids="$pids $!"; done
+i=$((i + 11))
+sleep 1
+drop
+bad_md5=$(cd $M && md5sum -c /p9.md5 2>&1 | grep -vc ': OK$')
+[ "$bad_md5" = 0 ] || bad "with $i files held open, $bad_md5 files differ"
+wait $pids
+
+step "remount"
+# ---- unmount, mount again ----
+sbp9-mount -u
+awk -v d=$M '$2 == d { exit 1 }' /proc/mounts || bad "still mounted after sbp9-mount -u"
+sbp9-mount || bad "the mount after an unmount"
+[ "$(cat $M/hello.txt)" = "Hello from Starbite OS (sbsim)" ] || bad "hello.txt after the remount"
+lines=$(dmesg | grep -e 'sbp9: ' -e '9pnet' | grep -v -e 'sbp9: "' -e msize -e Installing -e 'already mounted' |
+    head -2 | tr '\n' ' ')
+[ -z "$lines" ] || bad "kernel log: $lines"
+sbp9-mount -u
+kill $watchdog 2>/dev/null
+say "details: mount $M rw (9p, trans=sbshm, msize 131072, cache=mmap); $nf files md5 ok incl. a 255-byte name"
+say "details: 4 readers + 2 writers in parallel $par ms; write/append/mkdir/rename/truncate/unlink/rmdir ok; $i open at once"
+# (sbghost cuts kernel-log lines at 160 characters: the verdict stays short)
+finish "$nf files md5 ok, 3 MiB cold read $best ms = $kbs KiB/s, parallel/writes/$i open/remount ok"

@@ -7,6 +7,7 @@
  * CONTROL registers' THERM_TRIP_EN (bit 12) cleared at the start, read back, and put back exactly at every end. */
 #include "sb.h"
 #include "kern.h"
+#include "survival.h"
 #ifdef SB_HOST
 #include <stdlib.h>
 #endif
@@ -1921,6 +1922,12 @@ int heater_request(int level, int minutes)
     if (level > 0 && wifi_time_only()) {    /* 1.2-alpha26: the boot's time check never blocks heat */
         wifi_time_only_end("heat asked");
         wifi_power(0);
+    }
+    if (surv_usb_active() && !heater_running_ui()) {  /* 1.2-alpha29: together over 5 A from the battery */
+        sb_strcpy(ctl.why, sizeof(ctl.why), "Stop USB power out first (not both at once)");
+        ctl.state = HEAT_ST_REFUSED;
+        sb_log("heater: refused: USB power out is on");
+        return SBOS_EAGAIN;
     }
     if (wifi_on() && !heater_running_ui()) {
         sb_strcpy(ctl.why, sizeof(ctl.why), "Turn Wi-Fi off first (0.4: not both at once)");

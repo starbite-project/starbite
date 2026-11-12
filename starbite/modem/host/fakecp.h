@@ -61,6 +61,7 @@ int fakecp_net_step(struct fakecp *fc);
  * list NOTI (0x0216) with these numbers */
 void fakecp_ring(struct fakecp *fc, const char *number);
 void fakecp_sms_deliver(struct fakecp *fc, const uint8_t *tpdu, uint32_t n);
+void fakecp_sms_report(struct fakecp *fc, uint8_t mr, uint8_t st);
 void fakecp_ecc(struct fakecp *fc, const char *const *numbers, unsigned n);
 /* Queues one IPC message (NOTI or RESP) as a frame on a FMT channel's DL ring. */
 int fakecp_send(struct fakecp *fc, uint8_t ch, uint8_t aseq, uint16_t cmd, uint8_t type, const uint8_t *d, uint16_t n);

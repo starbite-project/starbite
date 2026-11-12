@@ -67,18 +67,15 @@ void sh_vibrate(void);
 void sh_year(int y);
 void sh_haptic(void);                     /* P3h: a key's light tap (the vibration motor, ~10 ms) */
 /* B3: the clipboard of the text fields' edit menu (Copy / Cut / Paste): one UTF-8 text, shared with the Linux apps
- * (the Linux session's platform side; kern_next.c has a weak RAM copy until then). sh_clip_get: "" when empty. */
+ * (defined in shell_linux.inc: Track E's, offered to Linux). sh_clip_get: "" when empty. */
 void sh_clip_set(const char *utf8);
 const char *sh_clip_get(void);
 /* B4: iOS's feedback generators as motor pulses (docs/design/IOS-REFERENCE.md 17; lengths to tune on the phone) */
 enum { SH_HAP_LIGHT, SH_HAP_MEDIUM, SH_HAP_HEAVY, SH_HAP_SOFT, SH_HAP_RIGID, SH_HAP_SELECT, SH_HAP_SUCCESS, SH_HAP_WARNING,
        SH_HAP_ERROR };
 void sh_haptic_k(int kind);
-/* B4: the app switcher's external entries (one per running Linux app): the provider (built with SW_EXT_PROVIDER)
- * adds and removes them and defines sw_ext_title / sw_ext_icon / sw_ext_snapshot / sw_ext_open / sw_ext_close
- * (shell_switcher.inc); without a provider nothing is added */
-void sw_ext_add(int subid);
-void sw_ext_remove(int subid);
+/* B4: the app switcher's external entries (one per running Linux app) are shell-internal since P3x: shell_linux.inc
+ * (Track E's v3, SH_EXT_API) is the provider and calls the switcher's static sw_ext_add / sw_ext_remove */
 /* wifi-sbos-next: Wi-Fi for Settings > Wi-Fi, the status bar and the Control Centre. The platform pushes its state
  * with sh_wifi (only on a change); the shell asks with sh_wifi_power / _scan / _join / _fetch (< 0 refused). The
  * passphrase goes straight to the kernel's join (kept in RAM until a restart, never stored or logged); names and
@@ -276,6 +273,23 @@ int sh_heading(int *deg_x10, int *accuracy);
 int sh_tilt(int *pitch_x10, int *roll_x10);
 int sh_steps(unsigned *n);
 long long sh_utc(void);                   /* the clock in seconds since 1970 (0 unknown): a GPS fix's age */
+/* Track A (sbos-core-api.md 4, 5): time zone, 12 / 24-hour, alarms. The platform applies the zone to every local
+ * time it pushes (sh_status, sh_alarm, the lock's times, notifications' hm); sh_utc stays UTC. Zones are indexed
+ * 0 .. sh_tz_count() - 1 (about 70; in regions, west to east). Kept across restarts. */
+int sh_tz_count(void);
+const char *sh_tz_name(int i, const char **city);   /* "Europe/Helsinki", city "Helsinki" */
+int sh_tz_offset_min(int i);                        /* the offset now, DST included */
+int sh_tz(void);
+void sh_tz_set(int i);                              /* the zone in use (index): the platform pushes sh_status again */
+int sh_clock24(void);
+void sh_clock24_set(int on);                        /* the shell redraws its times itself */
+/* the Clock app's alarms (up to 4): hm = hh * 100 + mm (local); days bit 0 Sunday .. bit 6 Saturday (0 once); label
+ * up to 19 bytes. put with i == sh_alarm_count() adds; 0 ok, -1 refused (full, bad values, the self test). Ringing and
+ * snooze stay the platform's; the lock's next alarm still comes through sh_alarm */
+int sh_alarm_count(void);
+int sh_alarm_get(int i, int *hm, int *days, int *on, char *label, int cap);
+int sh_alarm_put(int i, int hm, int days, int on, const char *label);
+int sh_alarm_del(int i);
 
 /* Starbite OS Next (helper D, shell_nc.inc): notifications. The platform pushes each new one (the kernel: notif.c's
  * posts, copied by kern_next.c's bridge outside the frames); the shell keeps the last 20 (RAM only) for the
@@ -356,4 +370,182 @@ int sh_sms_read(const char *number);
 int sh_sms_delete(int id, char *why);
 int sh_sms_delete_thread(const char *number, char *why);
 
+/* Track A (sbos-core-api.md 3): the passcode and Auto-Lock, from the platform (the kernel: kern/passcode.c through
+ * kern_next.c, kept in the state slot as a salted, iterated SHA-256; the host: the same passcode.c in RAM). Digits go
+ * in and never come out; nothing logs them. Back-off: the 6th wrong try in a row waits 1 min, the 7th 5, the 8th 15,
+ * the 9th and later 1 h (kept across a restart). Never behind the passcode: Emergency mode, SOS, the medical card,
+ * the torch. The shell's page: shell_passcode.inc. */
+int sh_pass_on(void);                         /* 1 when a passcode is set */
+int sh_pass_len(void);                        /* 4 or 6 (digits), 0 when none */
+int sh_pass_check(const char *digits);        /* 1 right; 0 wrong; -N locked out for N more seconds */
+int sh_pass_set(const char *old, const char *nw);   /* set (old "" when none) / change / remove (nw ""): 0 or -1 */
+int sh_pass_wait(void);                       /* seconds until the next try is allowed (0 = now) */
+int sh_pass_fails(void);                      /* wrong tries in a row */
+int sh_autolock(void);                        /* the screen-off time, s; 0 = never */
+void sh_autolock_set(int seconds);
+/* Track A lifecycle (sbos-core-api.md 6): the platform calls this right before a restart or a switch-off: every app
+ * in the shell's table with an on_save runs it (pages keep their data with sh_blob_put) */
+void sh_save_all(void);
+
+/* Track J (shell_startup.inc, Settings > Startup): Starbite OS as the boot menu, on the firmware layer
+ * (docs/STARBITE-FIRMWARE-LAYER.md 10; the kernel: kern/sbfw_os.c on libsb/sbfw_api.h; the host: host/startup_fake.inc).
+ * The catalog's OS rows, the loader's settings (the home store's record), one-shot requests, the crash reports and
+ * the restarts. sh_os_start_once, sh_req_start and sh_restart_* only ask: the platform's hold confirmation (the
+ * kernel's kui_confirm, drawn by sh_confirm) restarts on a full hold. In the self-test build every write and restart
+ * is a dry run that logs a line. < 0: refused. */
+#define SH_OS_ALL 1                       /* sh_os_count: hidden catalog rows too */
+int sh_os_count(int flags);               /* the rows sh_os_get(0 .. n - 1) gives (flags as last passed here) */
+/* key (24 bytes), name (32); category: catalog.h CAT_* (0 Apple, 1 Microsoft, 2 Android, 3 Linux, 4 Starbite, 5 other,
+ * 6 lab); method: M_* (1 XNU, 2 Linux, 3 Android, 4 UEFI, 5 bare); ready: its files are there; is_default */
+int sh_os_get(int i, char *key, char *name, int *category, int *method, int *ready, int *is_default);
+int sh_os_start_once(const char *key);
+int sh_os_make_default(const char *key);
+/* the loader's settings: debug_level 0 off .. 3 highest; post 0 full, 1 quick, 2 off; wdt_mode 0 per entry, 1 off,
+ * 2 wdt_s (10..82) for every entry; crash_mode 0 on, 1 save only, 2 off; crash_action 0 boot menu, 1 Starbite
+ * Recovery, 2 retry once; crash_detail 0..3; shell 1: Starbite OS (shell_key, "" = starbite-os) instead of the menu */
+typedef struct {
+    char default_key[24];
+    int timeout_s, debug_level, post, wdt_mode, wdt_s, crash_mode, crash_action, crash_detail, shell;
+    char shell_key[24];
+} sh_fw_t;
+int sh_fw_get(sh_fw_t *f);                /* 1 the record, 0 its defaults (none yet), < 0 no home store */
+int sh_fw_set(const sh_fw_t *f);          /* written and read back: 0 */
+/* one-shots for an OS's next start (the loader's SBFW_REQ_*); WINRE is plan only (never fits) */
+enum { SH_REQ_VERBOSE = 1, SH_REQ_SAFE = 2, SH_REQ_SINGLE = 3, SH_REQ_PREV = 4, SH_REQ_XNU_SINGLE = 5, SH_REQ_WINRE = 6 };
+int sh_req_fits(const char *key, int action);
+int sh_req_start(const char *key, int action);
+/* the crash reports (the home store's crash log), i = 0 the newest; severity 0 info, 1 warning, 2 crash; utc 0 unknown */
+typedef struct { char key[24], os[32], kind[24], line[96]; int severity; long long utc; } sh_crash_t;
+int sh_crash_count(void);                 /* < 0: no crash log on the home store */
+int sh_crash_get(int i, sh_crash_t *c);   /* 0 ok */
+int sh_restart_menu(void);
+int sh_restart_recovery(void);
+int sh_restart_download(void);
+/* the loader's table for this start: medium 0 UFS, 1 the card, -1 none; why: why this start, in words */
+typedef struct {
+    int valid, loader_version, medium, card_only, shell_mode, req_action, post_fails, post_warns, crash_sev;
+    char why[40], crash_key[24], crash_kind[24];
+} sh_fwinfo_t;
+int sh_fw_info(sh_fwinfo_t *i);           /* 1 the loader's table, 0 an older loader */
+
+/* ---- Track A: drivers for the shell (the kernel: kern_next.c's block of that name on kern/bt.c, cam.c, shub_more.c,
+ * bathealth.c, haptic.c; the host: simulated). Nothing here runs until the shell calls it, except the LED policy and
+ * auto-brightness (when display.auto is 1). Calls that would power hardware are logged dry runs in the self-test
+ * build (< 0 / 0 returned, why: "A dry run: the self test"). The kernel drives every running part from its own
+ * timers: no call here blocks the UI for more than ~20 ms (the camera's poll: ~100 ms at most). ---- */
+/* Bluetooth: scanning only (no pairing, no audio). sh_bt_on(1) starts the chip (firmware, patch: ~10 s); state 0 off,
+ * 1 starting, 2 on, -1 failed (sh_bt_why: plain words). sh_bt_scan(1) scans (LE, then classic) again and again while
+ * on, for at most 60 s; sh_bt_scan(0) stops after the scan that runs (they end by themselves, ~11 s). The devices:
+ * strongest first, name ("" when none was heard) and RSSI in dBm; the list stays between scans. < 0: refused. */
+int sh_bt_on(int on);
+int sh_bt_state(void);
+const char *sh_bt_why(void);
+int sh_bt_scan(int on);
+int sh_bt_count(void);
+int sh_bt_get(int i, char *name, int cap, int *rssi);   /* 0 ok, -1 no such device */
+/* the front camera (no flash: use a white screen): a portrait selfie preview w x h (each <= 816, w * h <= 512 K, e.g.
+ * 360 x 480), mirrored; 0 started, < 0 refused (sh_cam_why). The newest frame: 0xFFRRGGBB, w * h, row after row
+ * (stride = w), or 0 while none yet / closed / failed; seq counts up with each new frame. The memory is the camera's
+ * (uncached): copy it within the turn. sh_cam_still asks for a still (816 x 612 rotated: 612 x 816, not mirrored);
+ * sh_cam_still_get gives it once ready (until the next still or close): its pixels and its 24-bit BMP file. */
+int sh_cam_open(int w, int h);
+const uint32_t *sh_cam_frame(int *w, int *h, unsigned *seq);
+int sh_cam_still(void);                               /* 0 asked, < 0 not running / one already pending */
+const uint32_t *sh_cam_still_get(int *w, int *h, const unsigned char **bmp, unsigned *bmp_len);   /* 0 not (yet) */
+const char *sh_cam_why(void);
+void sh_cam_close(void);
+/* the hub's sensors (each call keeps its sensor on for 10 s; the first may take ~5 s while the hub starts): -1 when
+ * not known yet. Light in lux; pressure in hPa x 10 (10132 = 1013.2 hPa); proximity 1 near, 0 far; the gyroscope in
+ * millidegrees a second (Android axes; 1 valid) */
+int sh_light_lux(void);
+int sh_pressure_hpa10(void);
+int sh_proximity_near(void);
+int sh_gyro_mdps(int *x, int *y, int *z);
+/* Auto-Brightness (the pref display.auto, 0 by default): the panel's level (1..4) from the light every 2 s while the
+ * screen is on; a level the user picks stays until the light moves to another level. sh_bright_now tells the shell. */
+void sh_auto_brightness(int on);
+int sh_auto_brightness_on(void);
+/* a call at the ear: 1 while the call screen wants the proximity sensor (a call at the earpiece), 0 after. While
+ * something is near, the panel is dark and touches are dropped; the Power key still works. The kernel ends it by
+ * itself when the call ends. */
+void sh_call_proximity(int on);
+/* Settings > Battery: Maximum Capacity (0..100 %), cycle count, plain words; 1 read, 0 not (words: why) */
+int sh_battery_health(int *max_pct, int *cycles, char *words, int cap);
+/* haptic patterns (kern/haptic.c) at the haptic.level intensity (0 off, 1 light, 2 medium, 3 strong: the default);
+ * RING and ALARM loop until sh_haptic_stop (60 s at most). sh_haptic / sh_haptic_k above are unchanged. */
+enum { SH_VIB_RING, SH_VIB_NOTIFY, SH_VIB_ALARM, SH_VIB_TICK, SH_VIB_SUCCESS, SH_VIB_WARNING, SH_VIB_ERROR };
+void sh_haptic_kind(int kind);
+void sh_haptic_stop(void);
+int sh_haptic_level(void);
+void sh_haptic_level_set(int level);                  /* kept as the pref haptic.level */
+
 #endif
+
+/* Track A, 1.0 (sbos-core-api.md 10): a safe start (the loader's one-shot from Settings > Startup or Starbite
+ * Recovery): Wi-Fi isn't restored and nothing is saved until the next start. why: why this start, in words */
+int sh_safe_mode(void);
+int sh_boot_reason(char *why, int cap);
+
+/* Track A, 1.0: Restart and Shut Down (the shell's own slide-to-power-off is the confirmation, as on iOS). Both save
+ * first (the pages' on_save, the settings and prefs). Restart starts this same OS again when the loader said which it
+ * is (its SBFW table: the key of this start), else it goes back to the boot menu. In the self-test build they only log.
+ * < 0: refused (e.g. a heat session still running: the shell says so) */
+int sh_restart(void);
+int sh_power_off(void);
+/* Track A (sbos-core-api.md 8, with Track J's loader half): Software Update. The card's /STARBITE/UPDATE/MANIFEST.TXT
+ * (key=, version=, image=, size=, sha256=, notes=) names an image for this OS's catalog row; it is staged into the
+ * inactive update slot (sbos-slot-a / -b), checked (SHA-256, then the slot's header and CRC32 read back), armed as
+ * the loader's one-shot and started; 10 s after the home screen of that start it becomes the active version, else
+ * the loader rolls back (a notification says either). In the self-test build every write and restart is a dry run.
+ * state: 0 none found (why: a detail), 1 found, 2 staging (pct), 3 ready (staged, restart to install), 4 installed
+ * (this start committed it), -1 failed (why) */
+#ifndef SH_UPDATE_DEFINED
+#define SH_UPDATE_DEFINED
+struct sh_update { char version[32], notes[160]; unsigned size; int state; int pct; char why[80]; };
+int sh_update_check(struct sh_update *u);   /* reads the manifest (may read the card: from a tap or an idle turn); 1 found */
+int sh_update_stage(struct sh_update *u);   /* one chunk a call, so the UI stays live, until state 3 or -1 */
+int sh_update_install(void);                /* arms and restarts (does not return on success); -1 refused */
+#endif
+
+/* Track A: the Camera's photos (the kernel: kern/photos.c on the home store's volatile entry "sbos-photos", 64 MiB:
+ * a ring of the newest 32; the host: RAM, SBTK_PHOTOS=FILE also keeps them in a file). Pixels are 0xFFRRGGBB, row
+ * after row (stride = w). Kept as 24-bit RGB; a picture of more than 697685 pixels (2 MiB - 4 KiB at 3 bytes) is
+ * scaled down to the largest size that fits, the aspect kept: 612 x 816 (the front camera's still) is kept exactly,
+ * 1080 x 1440 as 723 x 964. Sides up to 4096. Crash safe: a save that is cut off leaves the photos that were there
+ * (the oldest one, when the 32 were full, may be gone); a damaged photo is skipped.
+ * sh_photo_save: 0 kept as the newest (with 32 kept, the oldest goes), -1 refused / failed: sh_photo_why says why in
+ * plain words (no photo storage on this phone, storage busy while the modem is on, a safe start, a storage error).
+ * It blocks for the write: ~0.2..0.4 s for a 612 x 816 photo on the card (~30 ms on UFS); call it from the shutter's
+ * tap, not every frame. sh_photo_count: how many (the first call reads the 32 headers: ~30 ms).
+ * sh_photo_get: i 0 = the newest; writes w * h pixels to argb (cap_px at least w * h) and returns w * h; argb 0: only
+ * w, h and utc (s since 1970, 0 unknown) and w * h (the size to allocate); -1: no such photo / too small / a read
+ * error (why). Reads ~1.5 MB (~0.1 s on the card). A damaged photo found here is skipped (the next one is given in
+ * its place) and the count drops by one: ask sh_photo_count again after a get.
+ * sh_photo_delete: 0 deleted (the photos after i move up), -1 (why). In the self-test build saves and deletes are
+ * logged dry runs (0 returned, nothing kept) and nothing is read: count 0. */
+int sh_photo_save(const uint32_t *argb, int w, int h);
+int sh_photo_count(void);
+int sh_photo_get(int i, uint32_t *argb, int cap_px, int *w, int *h, long long *utc);
+int sh_photo_delete(int i);
+const char *sh_photo_why(void);
+
+/* the platform: Power held about a second (the screen is on now): the shell shows its power sheet (slide to power off,
+ * Restart, Cancel). Track B defines it; until then a weak default does nothing */
+void sh_power_held(void);
+
+/* Track A, 1.0: performance and keep-awake.
+ * - sh_perf_mode(1) in Emergency / Survival / Extreme saving (the top clocks drop 0.4 s after motion), 0 in normal
+ *   mode (they hold 1.5 s past the last motion frame, so springs and transitions never drop frames).
+ * - sh_perf_hold(ms): top clocks now for ms (a transition that no touch started: a banner, the wake's scale-in).
+ * - sh_hold_awake(who, on): a long job (an App Store install, a Linux build) keeps the screen on: no Auto-Lock while
+ *   any holder is on; returns the holders now, < 0 refused. Off with the same who. */
+void sh_perf_mode(int conservative);
+void sh_perf_hold(int ms);
+int sh_hold_awake(const char *who, int on);
+/* Track A, 1.0: Low Power Mode (the Control Centre's Power Saving tile): conservative clocks, kept across a restart */
+void sh_low_power(int on);
+int sh_low_power_on(void);
+
+/* Track E, cp6 (gwin.c): the running App Store / Linux job in words ("Building btop from source, 45 %", "Downloading
+ * Firefox, 12 %", "+ 2 more"); 1 with a job, 0 none (buf ""). Cheap: the shell polls it about once a second */
+int sh_linux_job(char *buf, int cap);

@@ -1,17 +1,19 @@
 /* SPDX-License-Identifier: MIT
  * Starbite OS Next (B9): the lock screen's notifications, as iOS 26 shows them (the user's decision 2026-11-12: the
- * notifications above the buttons, the Systems widget group under the clock). Included by shell_lock.c after
- * shell_nc.inc, whose store it reads (NI / nin / nc_unread, nc_app / nc_name / nc_icon / nc_when, nc_launch, nc_view):
+ * notifications above the buttons; B10: the vendor cards back under the clock, their list ending above this stack).
+ * Included by shell_lock.c after shell_nc.inc, whose store it reads (NI / nin / nc_unread, nc_app / nc_name / nc_icon /
+ * nc_when, nc_launch, nc_view):
  *   - bottom-anchored on y 677 (20.5 pt above the buttons); the unread ones (the Centre marks them read), newest in
  *     front, at most LKN_MAX;
  *   - collapsed: iOS's stack: the newest platter with the lower cards peeking 8 and 15 pt below it (one peek for two);
  *     a new one slides up into the front; a tap on a single notification opens it (nc_launch: the app over home),
  *     on a stack fans it out;
  *   - expanded: the platters 8 pt apart, newest at the bottom, the older ones above it, a "Show less" capsule on top;
- *     the list scrolls (rubber at the ends) when it is taller than the room under the Systems tiles; a tap opens a
- *     notification, "Show less" or a tap beside the platters folds it back;
- *   - the open vendor's platter (place_sys) and the expanded list take turns: one opening closes the other, and the
- *     stack fades out of the platter's way while it grows;
+ *     they take the vendor list's room (from LKN_TOP = LIST_TOP: the list fades out under them, place_list) and scroll
+ *     (rubber at the ends) when taller than it; a tap opens a notification, "Show less" or a tap beside the platters
+ *     folds it back;
+ *   - B10: an open vendor card (toggle_group) and the expanded list take turns: one opening closes the other, and the
+ *     stack fades out of the card's way while it opens (the vendor list then runs down to the buttons, list_bot);
  *   - iOS 26 platters (IOS-REFERENCE 5, measured): x 14.5, w 361, r 23; 24.6 + 18 pt a line; the icon 38 at 13.7 in,
  *     vertically centred; the words from 65; title 15 / 600, the time 13 at 18.3 from the right on its baseline, body
  *     15 / 400 on 18 pt lines (two at most here).
@@ -62,7 +64,7 @@ static void lkn_draw(lkn_slot *s, const nc_item *n)
     float h = s->h, top = LKN_BOT - h;
     relayer(&s->tx);
     dc d = mk(&s->tx, "lkn-item", PL_X, top, PL_W, h, 2, 0);
-    nc_icon(&d, a, nc_name(n->who), PL_X + 13.7f, top + (h - 38) / 2, 38);
+    nc_icon_who(&d, n->who, a, nc_name(n->who), PL_X + 13.7f, top + (h - 38) / 2, 38);   /* Track E: a Linux app's icon */
     char when[16];
     nc_when(when, n->hm);
     float ww = when[0] ? tw(TK_IT400, 13, when, 0, 0) : 0;
@@ -123,6 +125,9 @@ static float lkn_top_e(int i)
     return y + LK.off;
 }
 static float lkn_less_e(void) { return lkn_top_e(LK.n - 1) - 8 - LKN_LESS_H; }
+/* B10, for the vendor list (shell_lock.c): the collapsed stack's top (0: none shown), how far it is fanned out */
+static float lkn_stack_top(void) { return LK.n > 0 && !EMG && K[0].face.bmp.px ? lkn_front_c() : 0; }
+static float lkn_p(void) { return LK.n > 0 && !EMG ? LK.p : 0; }
 static float lkn_max_off(void) { return LK.n ? tk_maxf(0, LKN_TOP - (lkn_less_e() - LK.off)) : 0; }
 static float lkn_y(int i)
 {
@@ -152,9 +157,8 @@ static void lkn_place(void)
     int on = !EMG && LK.n > 0 && K[0].face.bmp.px;
     lkng.hidden = !on;
     if (!on) { lock_ver++; return; }
-    /* out of the open vendor's way: it fades as the vendor's platter reaches it */
-    float cf = lkn_front_c();
-    LK.sa = SY.g >= 0 ? tk_clampf((cf - 4 - (SYC_Y + SY.h + 12)) / 16, 0, 1) : 1;
+    /* B10: out of an opening vendor card's way (its members run down to the buttons: list_bot fades the same way) */
+    LK.sa = tk_clampf(1 - vc_open_q() * 3, 0, 1);
     float p = LK.p, sa = LK.sa;
     for (int i = 0; i < LKN_MAX; i++) {
         lkn_slot *s = &LKS[i];
@@ -186,7 +190,7 @@ static void lkn_place(void)
         lknless.alpha = a;
         lknless.hidden = a <= .004f || LK.n < 2;
     }
-    /* the list's room: under the Systems tiles; faded at its top when it is pulled under them */
+    /* the list's room: the vendor list's (B10: it gives way); faded at its top when it is pulled under the widgets */
     lkng.clip = 1;
     lkng.clip_r = (tk_rect){ 0, PT(LKN_TOP - 6), (float)TK_W, PT(LKN_BOT + 44 - (LKN_TOP - 6)) };
     lkng.fade_top = p > 0 && lkn_max_off() > 0 ? PT(16) : 0;
@@ -219,7 +223,7 @@ static void lkn_sync(int animate)
     else if (!animate) LK.in = 1;
     if (n && !lknless.bmp.px && glass) lkn_less_build();
     relink();
-    lkn_place();
+    place_list();                                 /* B10: the list ends above the stack */
 }
 static void lkn_free(void)
 {
@@ -233,7 +237,7 @@ static void lkn_free(void)
 static void lkn_expand(void)
 {
     if (LK.n < 2) return;
-    sys_close(0);                                /* the vendor's platter makes room */
+    vc_close_all(0);                             /* B10: an open vendor card folds back */
     LK.exp = 1;
     LK.off = 0; LK.spo.live = 0;
     tk_spring_start(&LK.sp, LK.p, 1, 0, TK_SPR_SHEET);
@@ -242,7 +246,7 @@ static void lkn_collapse(int instant)
 {
     if (!LK.exp && LK.p <= 0) return;
     LK.exp = 0;
-    if (instant) { LK.p = 0; LK.off = 0; LK.sp.live = LK.spo.live = 0; for (int i = 1; i < LKN_MAX; i++) if (LKS[i].built) { relayer(&LKS[i].tx); LKS[i].tx.hidden = 1; LKS[i].built = 0; } lkn_place(); return; }
+    if (instant) { LK.p = 0; LK.off = 0; LK.sp.live = LK.spo.live = 0; for (int i = 1; i < LKN_MAX; i++) if (LKS[i].built) { relayer(&LKS[i].tx); LKS[i].tx.hidden = 1; LKS[i].built = 0; } place_list(); return; }
     tk_spring_start(&LK.sp, LK.p, 0, 0, TK_SPR_SHEET);
     if (LK.off != 0) tk_spring_start(&LK.spo, LK.off, 0, 0, TK_SPR_SHEET);
 }
@@ -273,7 +277,7 @@ static int lkn_tick(float dt, float t)
     if (LK.in < 1) { LK.in = tk_minf(1, LK.in + dt / .45f); mv = 1; }
     if ((LK.exp || LK.p > 0) && lkn_build_some(2)) mv = 1;
     if (LK.g == LG_SCROLL) mv = 1;
-    if (mv) lkn_place();
+    if (mv) place_list();                        /* B10: (the list gives way to the stack fanned out) */
     return mv;
 }
 static int lkn_moving(void)
@@ -374,12 +378,12 @@ static int lkn_set(const char *what, const char *key, float v)
     (void)key;
     if (tk_strcmp(what, "lkn")) return 0;
     if (LK.sig != lkn_sig()) lkn_sync(0);
-    if (v > 0 && LK.n >= 2) { sys_close(1); LK.exp = 1; }
+    if (v > 0 && LK.n >= 2) { vc_close_all(1); LK.exp = 1; }
     else LK.exp = 0;
     LK.sp.live = LK.spo.live = 0;
     LK.p = LK.exp ? v : 0;
     LK.off = 0;
     lkn_build_some(LKN_MAX);
-    lkn_place();
+    place_list();
     return 1;
 }

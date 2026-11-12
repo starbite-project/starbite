@@ -17,6 +17,11 @@
  * Contract v2 (hdr.version 2): the catalog (the .desktop files: struct sbshm_cat + the icon pool), launch / activate
  * / close by catalog index, the viewport, text-input-v3, and /run/sbwl.sock for sbpkg (sbshm.h). An app named on
  * the command line is still started at once (and kept running) in v2.
+ * Contract v3 (hdr.version 3, each part only when hdr.host_services has its bit): the clipboard both ways (CLIP), the
+ * notifications of org.freedesktop.Notifications through sbnotify (../notify/sbnotify.c, NOTIF), the wall clock and
+ * TZ for the apps (CLOCK); always in v3: the key bar's modifiers (KEYMOD), host_surf_reading (zero-copy display: the
+ * buffer the host's GPU samples is never written) and opaque pixels. Background apps get no frame callbacks and
+ * their commits do not make sbwl composite.
  *
  * SBWL_SHM=/path: map that file instead of /dev/sbshm (hostsim.c, the user-space stand-in for the host; no doorbells,
  * the log on stderr, MSG_STOP exits instead of powering off).
@@ -58,6 +63,8 @@
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
+#include <wlr/types/wlr_primary_selection.h>
+#include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_server_decoration.h>
@@ -97,7 +104,8 @@ static volatile struct sbshm_hdr *hdr;
 static uint8_t *shm;
 static uint64_t shm_size;
 static struct sbshm_ring *h2g, *g2h;
-static int sbfd = -1, kfd = -1, sim, v2;
+static int sbfd = -1, kfd = -1, sim, v2, v3;
+static uint32_t svc;                       /* v3: hdr.host_services (0 from a v1 / v2 host) */
 static uint32_t W, H, stride;
 static uint32_t VR, VW;                    /* the viewport: the rows and the width the host shows */
 
@@ -172,6 +180,8 @@ static int map_shm(void)
 	VR = H;
 	VW = W;
 	v2 = hdr->version >= SBSHM_VERSION_V2 && shm_size >= SBSHM_ICON_OFF + (uint64_t)SBSHM_ICONS_CAT * SBSHM_ICON_BYTES;
+	v3 = v2 && hdr->version >= SBSHM_VERSION_V3 && shm_size >= SBSHM_V3_FREE_OFF;
+	svc = v3 ? hdr->host_services : 0;
 	return 0;
 }
 
@@ -192,26 +202,44 @@ static void g2h_send3(uint16_t type, uint32_t a, uint32_t b, uint32_t c)
 static void g2h_send(uint16_t type, uint32_t a, uint32_t b) { g2h_send3(type, a, b, 0); }
 static int h2g_get(struct sbshm_msg *m) { return sbshm_get(h2g, m); }
 
-/* the frame into the back buffer, only the changed rows of the viewport (guestd's publish, sbshm.h) */
-static uint32_t *shadow[2];
+/* the frame into the back buffer, only the changed rows of the viewport (guestd's publish, sbshm.h).
+ * Zero-copy display (v3): the host's GPU samples the front buffer in place, so every pixel is opaque (X = 0xff: the
+ * frames are ORed opaque, and each buffer is filled opaque black before its first use), and sbwl never writes the
+ * buffer hdr.host_surf_reading names: that frame is deferred (-1), retried 2 ms later from the event loop. */
+static uint32_t *shadow[2];                /* what each shared buffer holds (once buf_ready) */
+static int buf_ready[2];
 static uint64_t frames, rows_out;
-static unsigned nframe, nbuilt, nbuf;
+static unsigned nframe, nbuilt, nbuf, defers;
 static uint32_t last_px;
-static void publish(const uint8_t *src, uint32_t src_stride, uint32_t nrows)
+static int publish(const uint8_t *src, uint32_t src_stride, uint32_t nrows)
 {
 	volatile uint32_t *rows = (volatile uint32_t *)(shm + SBSHM_ROWS_OFF);
 	size_t rb = (size_t)W * 4;
 	if (!shadow[0]) {
-		shadow[0] = calloc((size_t)W * H, 4);
-		shadow[1] = calloc((size_t)W * H, 4);
+		shadow[0] = malloc((size_t)W * H * 4);
+		shadow[1] = malloc((size_t)W * H * 4);
 		if (!shadow[0] || !shadow[1])
-			return;
+			return 0;
+		for (size_t i = 0; i < (size_t)W * H; ++i)
+			shadow[0][i] = shadow[1][i] = 0xff000000U;
 		hdr->rows_valid = H <= SBSHM_ROWS_MAX;
 	}
 	if (nrows > H)
 		nrows = H;
 	uint32_t front = hdr->surf_front & 1U, back = front ^ 1U, seq = hdr->surf_seq + 1U, n = 0;
+	if (v3) {
+		sbshm_dmb();
+		if (hdr->host_surf_reading == back) {
+			++defers;
+			return -1;
+		}
+	}
 	uint8_t *dst = shm + hdr->surf_off[back];
+	if (!buf_ready[back]) {                    /* its first use: opaque black, as its shadow says */
+		for (uint32_t y = 0; y < H; ++y)
+			memcpy(dst + (size_t)y * stride, shadow[back] + (size_t)y * W, rb);
+		buf_ready[back] = 1;
+	}
 	for (uint32_t y = 0; y < nrows; ++y) {
 		const uint8_t *s = src + (size_t)y * src_stride;
 		int changed = !hdr->surf_seq || memcmp(s, shadow[front] + (size_t)y * W, rb);
@@ -232,7 +260,7 @@ static void publish(const uint8_t *src, uint32_t src_stride, uint32_t nrows)
 			memcpy(shadow[back] + (size_t)y * W, shadow[front] + (size_t)y * W, rb);
 		}
 	if (!n)
-		return;
+		return 0;
 	sbshm_dmb();
 	hdr->surf_front = back;
 	hdr->damage_x = 0;
@@ -243,6 +271,7 @@ static void publish(const uint8_t *src, uint32_t src_stride, uint32_t nrows)
 	hdr->surf_seq = seq;
 	frames++;
 	rows_out += n;
+	return 1;
 }
 
 /* ---- state ----------------------------------------------------------------------------------------------- */
@@ -298,7 +327,7 @@ static struct {
 	struct wlr_text_input_manager_v3 *tim;
 	struct wlr_xdg_decoration_manager_v1 *xdeco;
 	struct wl_listener new_output, output_frame, new_toplevel, new_popup, new_xdg_surface, kbd_key, kbd_mods,
-		new_text_input, new_deco, new_surface;
+		new_text_input, new_deco, new_surface, req_sel, req_psel, set_sel;
 	struct wl_list views, insts, tinputs;
 	char **argv;                           /* the legacy app (v1, or named on the command line) */
 	int stopping, touch_down, ptr_down, dirty;
@@ -440,7 +469,8 @@ static int publish_window(void)
 		winframe[i] |= 0xff000000U;            /* opaque: Starbite composites XRGB */
 	last_px = winframe[(size_t)(VR / 8) * W + W / 8];
 	uint64_t f0 = frames;
-	publish((const uint8_t *)winframe, W * 4, VR);
+	if (publish((const uint8_t *)winframe, W * 4, VR) < 0)
+		return -1;                             /* the host reads the back buffer: again in 2 ms */
 	if (!f0 && frames)
 		say("first frame published (%ux%u, viewport %ux%u)", W, H, VW, VR);
 	if (!win_shown) {
@@ -450,24 +480,48 @@ static int publish_window(void)
 	return 1;
 }
 
+/* a frame deferred by host_surf_reading: tried again from a 2 ms timer (the loop never blocks on the host) */
+static struct wl_event_source *defer_src;
+static int defer_cb(void *data)
+{
+	(void)data;
+	if (S.dirty && S.output)
+		wlr_output_schedule_frame(S.output);
+	return 0;
+}
+static void defer_frame(void)
+{
+	S.dirty = 1;
+	if (!defer_src)
+		defer_src = wl_event_loop_add_timer(S.loop, defer_cb, NULL);
+	if (defer_src)
+		wl_event_source_timer_update(defer_src, 2);
+}
+
 static void output_frame(struct wl_listener *l, void *data)
 {
 	(void)l, (void)data;
 	struct wlr_output_state st;
 	wlr_output_state_init(&st);
-	bool built = wlr_scene_output_build_state(S.scene_output, &st, NULL);
+	/* the output is committed (the scene rendered) only on frames with something new: a commit with a buffer makes the
+	 * headless backend send the next frame event a refresh later, which paces an animating app at 60 Hz, and without
+	 * one the frames stop until the next mark_dirty (idle: no frame events at all; was ~20 renders / s) */
+	bool busy = S.dirty || nframe < 3;
+	bool built = busy && wlr_scene_output_build_state(S.scene_output, &st, NULL);
 	nbuilt += built;
 	nbuf += built && (st.committed & WLR_OUTPUT_STATE_BUFFER) && st.buffer;
 	if (++nframe <= 3)
 		say("frame event %u: built %d, buffer %d", nframe, built, (st.committed & WLR_OUTPUT_STATE_BUFFER) && st.buffer);
 	if (S.dirty) {
 		S.dirty = 0;
-		publish_window();
+		if (publish_window() < 0)
+			defer_frame();
 	}
 	if (!v2 && !frames && winimg) {            /* v1: a black frame until the app's first (as L1/L2's sbwl did) */
 		for (size_t i = 0; i < (size_t)W * VR; ++i)
 			winframe[i] = 0xff000000U;
-		publish((const uint8_t *)winframe, W * 4, VR);
+		if (publish((const uint8_t *)winframe, W * 4, VR) < 0)
+			defer_frame();
 	}
 	if (built)
 		wlr_output_commit_state(S.output, &st);
@@ -507,11 +561,42 @@ static void new_output(struct wl_listener *l, void *data)
 	wlr_output_schedule_frame(out);
 }
 
-/* every commit of any surface: the next frame composites again (only the active app gets frame callbacks) */
+/* every commit of a shown surface: the next frame composites again. Background apps (the host's switcher keeps them
+ * alive) cost ~nothing: their scene nodes are disabled, so wlr_scene sends them no frame callbacks (a client that
+ * paces itself on wl_surface.frame, as GTK, Qt, foot and SDL do, stops drawing), and a commit of theirs (a client
+ * drawing on its own timer) no longer makes sbwl composite and compare the active app's frame again.
+ * SBWL_HIDDEN_COMMITS=1: the old behaviour (every commit composites), for measuring. */
 struct surf_track {
 	struct wl_listener commit, destroy;
+	struct wlr_surface *s;
 };
-static void surf_commit(struct wl_listener *l, void *data) { (void)l, (void)data; mark_dirty(); }
+static unsigned long hidden_commits;
+static struct view *view_of(struct wlr_xdg_toplevel *t);
+static int surface_hidden(struct wlr_surface *s)
+{
+	static int keep = -1;
+	if (keep < 0)
+		keep = getenv("SBWL_HIDDEN_COMMITS") != NULL;
+	if (keep)
+		return 0;
+	struct wlr_xdg_surface *x = wlr_xdg_surface_try_from_wlr_surface(wlr_surface_get_root_surface(s));
+	for (int i = 0; x && x->role == WLR_XDG_SURFACE_ROLE_POPUP && i < 16; ++i)
+		x = x->popup->parent ? wlr_xdg_surface_try_from_wlr_surface(wlr_surface_get_root_surface(x->popup->parent)) : NULL;
+	if (!x || x->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL || !x->toplevel)
+		return 0;
+	struct view *v = view_of(x->toplevel);
+	return v && !view_active(v);
+}
+static void surf_commit(struct wl_listener *l, void *data)
+{
+	(void)data;
+	struct surf_track *t = wl_container_of(l, t, commit);
+	if (surface_hidden(t->s)) {
+		++hidden_commits;
+		return;
+	}
+	mark_dirty();
+}
 static void surf_destroy(struct wl_listener *l, void *data)
 {
 	(void)data;
@@ -527,6 +612,7 @@ static void new_surface(struct wl_listener *l, void *data)
 	struct surf_track *t = calloc(1, sizeof(*t));
 	if (!t)
 		return;
+	t->s = s;
 	t->commit.notify = surf_commit;
 	wl_signal_add(&s->events.commit, &t->commit);
 	t->destroy.notify = surf_destroy;
@@ -1146,6 +1232,282 @@ static void key(uint32_t code, int down, uint32_t t)
 	wlr_keyboard_notify_key(&S.kbd, &e);
 }
 
+/* ---- v3: the key bar's modifiers (SBG_MSG_KEYMOD) ----------------------------------------------------------------
+ * The host's state: a = the SBSHM_MOD_* held from now on, until the next KEYMOD (a latched one-shot modifier is the
+ * host's: KEYMOD m, the key, KEYMOD 0). sbwl presses / releases real modifier keys on the virtual keyboard, so the
+ * xkb state and every client's wl_keyboard.modifiers agree (foot, GTK, Qt read them there). The right-hand keys,
+ * so a host's own KEY_LEFTSHIFT around a capital letter does not release the bar's Shift. */
+static uint32_t keymods;
+static const struct { uint32_t bit, code; } modkeys[] = {
+	{SBSHM_MOD_CTRL, KEY_RIGHTCTRL}, {SBSHM_MOD_ALT, KEY_LEFTALT}, {SBSHM_MOD_SUPER, KEY_LEFTMETA}, {SBSHM_MOD_SHIFT, KEY_RIGHTSHIFT},
+};
+static void keymod_set(uint32_t m, uint32_t t)
+{
+	for (unsigned i = 0; i < sizeof(modkeys) / sizeof(modkeys[0]); ++i)
+		if ((m ^ keymods) & modkeys[i].bit)
+			key(modkeys[i].code, !!(m & modkeys[i].bit), t);
+	if (m != keymods)
+		say("key modifiers %s%s%s%s", m & SBSHM_MOD_CTRL ? "Ctrl " : "", m & SBSHM_MOD_ALT ? "Alt " : "",
+		    m & SBSHM_MOD_SUPER ? "Super " : "", m & SBSHM_MOD_SHIFT ? "Shift " : m ? "" : "none");
+	keymods = m;
+}
+
+/* SBG_MSG_TEXT as key presses (US layout): with Ctrl / Alt / Super held (a text-input commit carries no modifiers:
+ * Ctrl+C must be a key), or when no text-input-v3 field is enabled (terminals, plain clients). 0: not all ASCII */
+static int text_as_keys(const char *s, uint32_t t)
+{
+	int sh;
+	for (const char *p = s; *p; ++p)
+		if ((uint8_t)*p >= 0x80 || !sbshm_ascii_key(*p, &sh))
+			return 0;
+	for (const char *p = s; *p; ++p) {
+		uint32_t code = sbshm_ascii_key(*p, &sh);
+		int shift = sh && !(keymods & SBSHM_MOD_SHIFT);
+		if (shift)
+			key(SBSHM_KEY_LEFTSHIFT, 1, t);
+		key(code, 1, t);
+		key(code, 0, t);
+		if (shift)
+			key(SBSHM_KEY_LEFTSHIFT, 0, t);
+	}
+	return 1;
+}
+
+/* ---- v3: the clipboard both ways (struct sbshm_clip) ------------------------------------------------------------
+ * A Wayland app sets the selection: sbwl reads it through a pipe from the app (event-loop fd, never blocking; 3 s at
+ * most), text as UTF-8 ("text/plain;charset=utf-8", or UTF8_STRING / text/plain / TEXT / STRING), else image/png,
+ * at most SBSHM_CLIP_MAX bytes (bigger: len 0, the mime says what it was), into the g2h slot, then SBG_MSG_CLIP_SET.
+ * SBG_MSG_CLIP: sbwl becomes the selection's owner with the host's bytes (text under the usual text names); that
+ * selection is never sent back to the host. The primary selection works between the guest's apps only. */
+static volatile struct sbshm_clip *clip;           /* set when the host serves SBSHM_SVC_CLIP */
+static struct wlr_data_source *host_src;           /* the selection sbwl made from the host's clipboard */
+static struct {
+	int fd, png, over;
+	struct wl_event_source *src;
+	uint8_t *buf;
+	size_t n;
+	uint64_t t0;
+} crd = {.fd = -1};
+static const char *const text_mimes[] = {"text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "TEXT", "STRING", NULL};
+
+static void clip_read_end(int ok)
+{
+	if (crd.src)
+		wl_event_source_remove(crd.src);
+	if (crd.fd >= 0)
+		close(crd.fd);
+	crd.src = NULL;
+	crd.fd = -1;
+	if (ok && clip) {
+		volatile struct sbshm_clip_slot *c = &clip->g2h;
+		const char *mime = crd.png ? "image/png" : "text/plain;charset=utf-8";
+		uint32_t len = crd.over ? 0 : (uint32_t)crd.n, s = c->seq | 1U;
+		c->seq = s;                            /* odd: being written */
+		sbshm_dmb();
+		for (unsigned i = 0; i < sizeof(c->mime); ++i)
+			c->mime[i] = i < strlen(mime) ? mime[i] : 0;
+		if (len)
+			memcpy((void *)c->data, crd.buf, len);
+		c->len = len;
+		sbshm_dmb();
+		c->seq = s + 1U;
+		g2h_send(SBG_MSG_CLIP_SET, s + 1U, 0);
+		say("clipboard -> host: %u bytes of %s%s", len, mime, crd.over ? " (too big: offered as empty)" : "");
+	}
+	free(crd.buf);
+	crd.buf = NULL;
+	crd.n = 0;
+}
+
+static int clip_readable(int fd, uint32_t mask, void *data)
+{
+	(void)mask, (void)data;
+	char scratch[4096];
+	for (;;) {
+		ssize_t r = crd.n <= SBSHM_CLIP_MAX ? read(fd, crd.buf + crd.n, SBSHM_CLIP_MAX + 1 - crd.n)
+						     : read(fd, scratch, sizeof(scratch));
+		if (r > 0) {
+			if (crd.n <= SBSHM_CLIP_MAX)
+				crd.n += (size_t)r;
+			crd.over |= crd.n > SBSHM_CLIP_MAX;
+			continue;
+		}
+		if (r < 0 && errno == EINTR)
+			continue;
+		if (r < 0 && errno == EAGAIN)
+			return 0;
+		clip_read_end(r == 0);                 /* EOF: the whole selection; an error: dropped */
+		return 0;
+	}
+}
+
+static void seat_set_selection(struct wl_listener *l, void *data)
+{
+	(void)l, (void)data;
+	struct wlr_data_source *src = S.seat->selection_source;
+	if (!clip || !src || src == host_src)
+		return;
+	if (crd.fd >= 0)
+		clip_read_end(0);                      /* a newer selection replaces the one being read */
+	const char *mime = NULL;
+	char **m;
+	for (int k = 0; text_mimes[k] && !mime; ++k)
+		wl_array_for_each(m, &src->mime_types)
+			if (!strcmp(*m, text_mimes[k])) {
+				mime = *m;
+				break;
+			}
+	int png = 0;
+	if (!mime)
+		wl_array_for_each(m, &src->mime_types)
+			if (!strcmp(*m, "image/png")) {
+				mime = *m, png = 1;
+				break;
+			}
+	if (!mime) {
+		say("clipboard: the app offers no text or PNG: not passed on");
+		return;
+	}
+	int p[2];
+	crd.buf = malloc(SBSHM_CLIP_MAX + 1);
+	if (!crd.buf || pipe2(p, O_CLOEXEC) < 0) {
+		free(crd.buf);
+		crd.buf = NULL;
+		return;
+	}
+	fcntl(p[0], F_SETFL, O_NONBLOCK);
+	crd.fd = p[0], crd.png = png, crd.n = 0, crd.over = 0, crd.t0 = ms_now();
+	crd.src = wl_event_loop_add_fd(S.loop, p[0], WL_EVENT_READABLE, clip_readable, NULL);
+	wlr_data_source_send(src, mime, p[1]);     /* sends the fd to the app, closes ours */
+}
+
+/* the host's clipboard as a data source sbwl owns */
+struct hsrc {
+	struct wlr_data_source base;
+	uint8_t *data;
+	size_t len;
+};
+struct hwrite {
+	int fd;
+	struct wl_event_source *src;
+	uint8_t *data;
+	size_t len, off;
+};
+static int hw_writable(int fd, uint32_t mask, void *d)
+{
+	(void)mask;
+	struct hwrite *w = d;
+	while (w->off < w->len) {
+		ssize_t r = write(fd, w->data + w->off, w->len - w->off);
+		if (r > 0) {
+			w->off += (size_t)r;
+			continue;
+		}
+		if (r < 0 && errno == EINTR)
+			continue;
+		if (r < 0 && errno == EAGAIN)
+			return 0;
+		break;                                 /* EPIPE: the app stopped reading */
+	}
+	wl_event_source_remove(w->src);
+	close(fd);
+	free(w->data);
+	free(w);
+	return 0;
+}
+static void hsrc_send(struct wlr_data_source *s, const char *mime, int32_t fd)
+{
+	(void)mime;
+	struct hsrc *h = wl_container_of(s, h, base);
+	struct hwrite *w = calloc(1, sizeof(*w));
+	if (w)
+		w->data = malloc(h->len ? h->len : 1);
+	if (!w || !w->data) {
+		if (w)
+			free(w);
+		close(fd);
+		return;
+	}
+	memcpy(w->data, h->data, h->len);
+	w->len = h->len, w->fd = fd;
+	fcntl(fd, F_SETFL, O_NONBLOCK);
+	w->src = wl_event_loop_add_fd(S.loop, fd, WL_EVENT_WRITABLE, hw_writable, w);
+	if (!w->src) {
+		close(fd);
+		free(w->data);
+		free(w);
+	}
+}
+static void hsrc_destroy(struct wlr_data_source *s)
+{
+	struct hsrc *h = wl_container_of(s, h, base);
+	if (host_src == s)
+		host_src = NULL;
+	free(h->data);
+	free(h);
+}
+static const struct wlr_data_source_impl hsrc_impl = {.send = hsrc_send, .destroy = hsrc_destroy};
+
+static void clip_from_host(void)
+{
+	if (!clip)
+		return;
+	volatile struct sbshm_clip_slot *c = &clip->h2g;
+	uint8_t *b = malloc(SBSHM_CLIP_MAX);
+	char mime[40];
+	uint32_t len = 0;
+	int ok = 0;
+	for (int tries = 0; b && tries < 50 && !ok; ++tries) {
+		uint32_t s0 = sbshm_seq_begin(&c->seq);
+		if (s0 & 1U) {
+			usleep(200);
+			continue;
+		}
+		len = c->len;
+		if (len > SBSHM_CLIP_MAX)
+			len = 0;
+		for (unsigned i = 0; i < sizeof(mime); ++i)
+			mime[i] = c->mime[i];
+		mime[sizeof(mime) - 1] = 0;
+		memcpy(b, (const void *)c->data, len);
+		ok = sbshm_seq_ok(&c->seq, s0);
+	}
+	if (!ok || !len) {
+		say("clipboard <- host: %s", !ok ? "no stable copy of the slot" : "empty (or too big)");
+		free(b);
+		return;
+	}
+	struct hsrc *h = calloc(1, sizeof(*h));
+	if (!h) {
+		free(b);
+		return;
+	}
+	wlr_data_source_init(&h->base, &hsrc_impl);
+	h->data = b, h->len = len;
+	int text = !mime[0] || !strncmp(mime, "text/plain", 10);
+	for (int k = 0; text ? text_mimes[k] != NULL : k < 1; ++k) {
+		char **p = wl_array_add(&h->base.mime_types, sizeof(*p));
+		if (p)
+			*p = strdup(text ? text_mimes[k] : mime);
+	}
+	host_src = &h->base;
+	wlr_seat_set_selection(S.seat, &h->base, wl_display_next_serial(S.display));
+	say("clipboard <- host: %u bytes of %s", len, text ? "text" : mime);
+}
+
+static void req_set_selection(struct wl_listener *l, void *data)
+{
+	(void)l;
+	struct wlr_seat_request_set_selection_event *e = data;
+	wlr_seat_set_selection(S.seat, e->source, e->serial);
+}
+static void req_set_primary(struct wl_listener *l, void *data)
+{
+	(void)l;
+	struct wlr_seat_request_set_primary_selection_event *e = data;
+	wlr_seat_set_primary_selection(S.seat, e->source, e->serial);
+}
+
 /* ---- the .desktop files ----------------------------------------------------------------------------------- */
 static const char *user_home(void) { return S.have_user ? S.user.pw_dir : (getenv("HOME") ? getenv("HOME") : "/root"); }
 
@@ -1573,22 +1935,48 @@ static int icon_render(const struct app *a, const char *file, uint32_t *px)
 static void icons_prepare(void)
 {
 #ifndef SBWL_NO_ICONS
-	for (int i = 0; i < napps && i < (int)SBSHM_ICONS_CAT; ++i) {
-		char file[512] = "", key[300];
-		icon_find(apps[i].icon, file, sizeof(file));
-		snprintf(key, sizeof(key), "%s|%s", file[0] ? file : "tile", file[0] ? "" : apps[i].id);
-		if (icon_px[i] && !strcmp(key, icon_key[i]))
+	/* the rendered icons by key: an app that moved to another index (one was added before it) takes its pixels along
+	 * instead of being rendered again. Pass 1 matches the keys, pass 2 renders the rest into the buffers left over. */
+	static uint32_t *old_px[SBSHM_ICONS_CAT];
+	static char old_key[SBSHM_ICONS_CAT][300], file[SBSHM_ICONS_CAT][512], key[SBSHM_ICONS_CAT][300];
+	memcpy(old_px, icon_px, sizeof(old_px));
+	memcpy(old_key, icon_key, sizeof(old_key));
+	memset(icon_px, 0, sizeof(icon_px));
+	int n = napps < (int)SBSHM_ICONS_CAT ? napps : (int)SBSHM_ICONS_CAT;
+	for (int i = 0; i < n; ++i) {
+		file[i][0] = 0;
+		icon_find(apps[i].icon, file[i], sizeof(file[i]));
+		snprintf(key[i], sizeof(key[i]), "%s|%s", file[i][0] ? file[i] : "tile", file[i][0] ? "" : apps[i].id);
+		for (int j = 0; j < (int)SBSHM_ICONS_CAT; ++j)
+			if (old_px[j] && !strcmp(key[i], old_key[j])) {
+				icon_px[i] = old_px[j];
+				old_px[j] = NULL;
+				snprintf(icon_key[i], sizeof(icon_key[i]), "%s", key[i]);
+				icon_new[i] |= j != i;     /* the pool slot gets it at the next publish */
+				break;
+			}
+	}
+	for (int i = 0; i < n; ++i) {
+		if (icon_px[i])
 			continue;
+		for (int j = 0; j < (int)SBSHM_ICONS_CAT && !icon_px[i]; ++j)
+			if (old_px[j]) {                   /* a buffer nobody wants any more */
+				icon_px[i] = old_px[j];
+				old_px[j] = NULL;
+			}
 		if (!icon_px[i])
 			icon_px[i] = malloc(SBSHM_ICON_BYTES);
 		if (!icon_px[i])
 			continue;
-		int ok = icon_render(&apps[i], file, icon_px[i]);
-		snprintf(icon_key[i], sizeof(icon_key[i]), "%s", key);
+		int ok = icon_render(&apps[i], file[i], icon_px[i]);
+		snprintf(icon_key[i], sizeof(icon_key[i]), "%s", key[i]);
 		icon_new[i] = 1;
 		if (!ok)
-			say("icon of %s: %s", apps[i].id, file[0] ? "unreadable, a letter tile" : "none in the theme, a letter tile");
+			say("icon of %s: %s", apps[i].id, file[i][0] ? "unreadable, a letter tile" : "none in the theme, a letter tile");
 	}
+	for (int j = 0; j < (int)SBSHM_ICONS_CAT; ++j)
+		free(old_px[j]);                       /* icons of apps that are gone */
+	memset(old_px, 0, sizeof(old_px));
 #endif
 }
 
@@ -1838,8 +2226,13 @@ static void activate(const char *desk)
 }
 
 /* ---- starting apps ------------------------------------------------------------------------------------- */
+static char tzenv[32];                     /* v3: TZ for the apps, POSIX form of hdr.host_tz_min ("" = none) */
+static int spawn_fd = -1;                  /* spawn(): passed to the child as fd 3 (sbnotify's line to sbwl) */
+static pid_t notify_pid;                   /* sbnotify */
 static void child_env(int as_user)
 {
+	if (tzenv[0])
+		setenv("TZ", tzenv, 1);
 	setenv("XDG_SESSION_TYPE", "wayland", 1);
 	setenv("XDG_CURRENT_DESKTOP", DESK_ID, 1);
 	setenv("GDK_BACKEND", "wayland", 1);
@@ -1890,6 +2283,13 @@ static pid_t spawn(char *const argv[], int as_user)
 	int nul = open("/dev/null", O_RDONLY);
 	if (nul >= 0)
 		dup2(nul, 0);
+	if (spawn_fd >= 0) {                       /* dup2 clears close-on-exec; fd 3 itself: by hand */
+		if (spawn_fd == 3)
+			fcntl(3, F_SETFD, 0);
+		else
+			dup2(spawn_fd, 3);
+		setenv("SBNOTIFY_FD", "3", 1);
+	}
 	child_env(as_user);
 	if (as_user) {
 		if (initgroups(S.user.pw_name, S.user.pw_gid) || setgid(S.user.pw_gid) || setuid(S.user.pw_uid))
@@ -1899,6 +2299,33 @@ static pid_t spawn(char *const argv[], int as_user)
 	}
 	execvp(argv[0], argv);
 	_exit(127);
+}
+
+static void notify_start(void);
+static void user_session(void);
+/* the apps' session: the user's (below), or, sbwl not root (hostsim as a user) with the host's notifications and no
+ * bus in sbwl's environment, a private session bus in $XDG_RUNTIME_DIR; then sbnotify (v3, SBSHM_SVC_NOTIF) */
+static void session_start(void)
+{
+	static int done;
+	if (done)
+		return;
+	done = 1;
+	if (S.have_user) {
+		user_session();
+	} else if ((svc & SBSHM_SVC_NOTIF) && !getenv("DBUS_SESSION_BUS_ADDRESS") && access("/usr/bin/dbus-daemon", X_OK) == 0) {
+		char path[200], addr[220];
+		snprintf(path, sizeof(path), "%s/sbwl-bus", getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "/run");
+		unlink(path);
+		snprintf(addr, sizeof(addr), "--address=unix:path=%s", path);
+		char *av[] = {"dbus-daemon", "--session", "--nofork", "--nopidfile", addr, NULL};
+		S.dbus = spawn(av, 0);
+		for (int i = 0; i < 100 && access(path, F_OK); ++i)
+			usleep(10000);
+		setenv("DBUS_SESSION_BUS_ADDRESS", addr + 10, 1);
+		say("session bus (private): pid %d, %s", S.dbus, access(path, F_OK) ? "no socket" : "up");
+	}
+	notify_start();
 }
 
 /* the user's runtime dir, the Wayland socket in it, its session bus */
@@ -1938,8 +2365,7 @@ static struct inst *inst_find(const char *desk)
 static struct inst *start_argv(const char *desk, char *const argv[], int legacy)
 {
 	int as_user = S.have_user;
-	if (as_user)
-		user_session();
+	session_start();
 	struct inst *in = calloc(1, sizeof(*in));
 	if (!in)
 		return NULL;
@@ -2026,6 +2452,8 @@ static void procs_tick(void)
 			}
 		if (p == S.dbus)
 			S.dbus = 0;
+		if (p == notify_pid)
+			notify_pid = 0;
 	}
 	uint64_t now = ms_now();
 	struct inst *in, *tmp;
@@ -2066,26 +2494,157 @@ static void procs_tick(void)
 	}
 }
 
-/* ---- /run/sbwl.sock: sbpkg and friends (one text line per message, sbshm.h) ------------------------------- */
+/* ---- /run/sbwl.sock: sbpkg and friends (one text line per message, sbshm.h) -------------------------------
+ * v3, sbnotify (org.freedesktop.Notifications on the session bus; sbwl starts it as the user with its end of a
+ * socketpair as fd 3, the same lines as the socket):
+ *   sbnotify -> sbwl  "notify ID PID URGENCY TIMEOUT_MS<TAB>APP_NAME<TAB>DESKTOP_ENTRY<TAB>SUMMARY<TAB>BODY<TAB>A1<TAB>A2<TAB>A3"
+ *                     (fields with \\, \t, \n escaped; BODY plain text; A1..A3 the button labels),
+ *                     "notify-close ID" (the app withdrew it, or it expired), "notify-ready" (the bus name is ours)
+ *   sbwl -> sbnotify  "notif-act ID B" (SBG_MSG_NOTIF_ACT: B 0 = the tap, 1..3 a button, 4294967295 = dismissed) */
 #define SOCK_CLIENTS 8
 static struct sclient {
-	int fd;
+	int fd, notify, spawned;
 	struct wl_event_source *src;
-	char buf[512];
+	char buf[4096];
 	size_t n;
 } scl[SOCK_CLIENTS];
 
-static void sock_line(char *l)
+/* ---- v3: notifications (struct sbshm_notifs) ------------------------------------------------------------------ */
+static volatile struct sbshm_notifs *notifs;       /* set when the host serves SBSHM_SVC_NOTIF */
+static struct {
+	uint32_t id;
+	char desk[128];                                /* the app it came from ("" = unknown) */
+} nmap[SBSHM_NOTIF_SLOTS];
+static uint64_t notify_restart_at;
+static unsigned notify_starts;
+
+static void unesc(char *s)
+{
+	char *d = s;
+	for (; *s; ++s) {
+		if (*s == '\\' && s[1]) {
+			++s;
+			*d++ = *s == 'n' ? '\n' : *s == 't' ? '\t' : *s;
+		} else {
+			*d++ = *s;
+		}
+	}
+	*d = 0;
+}
+
+/* src into a fixed field: cut at a character boundary, NUL-terminated */
+static void field_cpy(char *dst, size_t cap, const char *src)
+{
+	size_t l = src ? strlen(src) : 0;
+	if (l > cap - 1) {
+		l = cap - 1;
+		while (l && ((uint8_t)src[l] & 0xc0) == 0x80)
+			--l;
+	}
+	memset(dst, 0, cap);
+	if (l)
+		memcpy(dst, src, l);
+}
+
+/* the app that sent it: the desktop-entry hint; the sender's process (one sbwl started, or a window's client, or
+ * their children); the app_name against the catalog's names and ids */
+static int notif_app(pid_t pid, const char *desk, const char *name)
+{
+	if (desk && *desk) {
+		int i = app_index(desk);
+		if (i >= 0)
+			return i;
+		for (int j = 0; j < napps; ++j)
+			if (id_match(desk, &apps[j]))
+				return j;
+	}
+	struct inst *in = pid > 1 ? inst_of_pid(pid) : NULL;
+	if (in && app_index(in->desk) >= 0)
+		return app_index(in->desk);
+	for (pid_t p = pid; p > 1;) {
+		struct view *v;
+		wl_list_for_each(v, &S.views, link)
+			if (v->pid == p && v->desk[0] && app_index(v->desk) >= 0)
+				return app_index(v->desk);
+		p = ppid_of(p);
+	}
+	if (name && *name)
+		for (int j = 0; j < napps; ++j)
+			if (!strcasecmp(name, apps[j].name) || id_match(name, &apps[j]))
+				return j;
+	return -1;
+}
+
+static void notify_line(char *l)
+{
+	unsigned id, urg, tmo;
+	int pid;
+	char *f[7] = {0}, *t = strchr(l, '\t');
+	if (!t || sscanf(l, "%u %d %u %u", &id, &pid, &urg, &tmo) != 4 || !id) {
+		say("sbnotify: a bad notify line");
+		return;
+	}
+	for (int i = 0; i < 7 && t; ++i) {
+		*t++ = 0;
+		f[i] = t;
+		t = strchr(t, '\t');
+	}
+	for (int i = 0; i < 7; ++i)
+		if (f[i])
+			unesc(f[i]);
+	int ai = notif_app(pid, f[1], f[0]);
+	uint32_t slot = id % SBSHM_NOTIF_SLOTS;
+	struct sbshm_notif n;
+	memset(&n, 0, sizeof(n));
+	n.id = id;
+	n.app = ai >= 0 ? (uint32_t)ai : SBSHM_NONE;
+	n.urgency = urg > SBSHM_NOTIF_CRITICAL ? SBSHM_NOTIF_CRITICAL : urg;
+	n.timeout_ms = tmo;
+	field_cpy(n.app_name, sizeof(n.app_name), f[0] && *f[0] ? f[0] : ai >= 0 ? apps[ai].name : "");
+	field_cpy(n.summary, sizeof(n.summary), f[2]);
+	field_cpy(n.body, sizeof(n.body), f[3]);
+	for (unsigned k = 0; k < SBSHM_NOTIF_ACTIONS; ++k)
+		field_cpy(n.action[k], sizeof(n.action[k]), f[4 + k]);
+	n.icon = ai >= 0 && ai < (int)SBSHM_ICONS_CAT && icon_px[ai] ? (uint32_t)ai : SBSHM_NONE;
+	uint32_t s = notifs->seq | 1U;
+	notifs->seq = s;                           /* odd: being written */
+	sbshm_dmb();
+	volatile uint32_t *d = (volatile uint32_t *)&notifs->n[slot];
+	const uint32_t *w = (const uint32_t *)&n;
+	for (unsigned i = 0; i < sizeof(n) / 4; ++i)
+		d[i] = w[i];
+	sbshm_dmb();
+	notifs->seq = s + 1U;
+	nmap[slot].id = id;
+	snprintf(nmap[slot].desk, sizeof(nmap[slot].desk), "%s", ai >= 0 ? apps[ai].id : "");
+	g2h_send(SBG_MSG_NOTIFY, slot, id);
+	say("notification %u (slot %u) from %s (pid %d -> app %d): \"%s\"", id, slot, n.app_name, pid, ai, n.summary);
+}
+
+static void sock_line(struct sclient *cl, char *l)
 {
 	unsigned a, b, c;
-	if (sscanf(l, "store %u", &a) == 1) {
+	if (!strncmp(l, "notify ", 7)) {
+		cl->notify = 1;
+		if (notifs)
+			notify_line(l + 7);
+	} else if (sscanf(l, "notify-close %u", &a) == 1) {
+		cl->notify = 1;
+		if (notifs) {
+			g2h_send(SBG_MSG_NOTIF_CLOSE, a, 0);
+			say("notification %u withdrawn", a);
+		}
+	} else if (!strcmp(l, "notify-ready")) {
+		cl->notify = 1;
+		say("sbnotify: org.freedesktop.Notifications is up");
+	} else if (sscanf(l, "store %u", &a) == 1) {
 		g2h_send(SBG_MSG_STORE, a, 0);
 	} else if (sscanf(l, "pkg %u %u %u", &a, &b, &c) == 3) {
 		g2h_send3(SBG_MSG_PKG_STATUS, a, b, c);
 	} else if (!strncmp(l, "rescan", 6)) {
 		rescan_at = ms_now();
 	} else {
-		say("sbwl.sock: unknown line \"%s\"", l);
+		say("sbwl.sock: unknown line \"%.80s\"", l);
 	}
 }
 
@@ -2097,6 +2656,12 @@ static int sock_read(int fd, uint32_t mask, void *data)
 		wl_event_source_remove(c->src);
 		close(fd);
 		c->fd = -1;
+		if (c->spawned) {                      /* sbnotify ended: again in 3 s (5 times at most) */
+			c->spawned = 0;
+			say("sbnotify: its line closed");
+			notify_restart_at = ms_now() + 3000;
+		}
+		c->notify = 0;
 		return 0;
 	}
 	c->n += (size_t)n;
@@ -2104,7 +2669,7 @@ static int sock_read(int fd, uint32_t mask, void *data)
 	char *s = c->buf, *e;
 	while ((e = strchr(s, '\n'))) {
 		*e = 0;
-		sock_line(s);
+		sock_line(c, s);
 		s = e + 1;
 	}
 	c->n = strlen(s);
@@ -2124,6 +2689,7 @@ static int sock_accept(int fd, uint32_t mask, void *data)
 		if (scl[i].fd < 0) {
 			scl[i].fd = c;
 			scl[i].n = 0;
+			scl[i].notify = scl[i].spawned = 0;
 			scl[i].src = wl_event_loop_add_fd(S.loop, c, WL_EVENT_READABLE, sock_read, &scl[i]);
 			return 0;
 		}
@@ -2134,11 +2700,58 @@ static int sock_accept(int fd, uint32_t mask, void *data)
 static void sock_broadcast(const char *line)
 {
 	int sent = 0;
-	for (int i = 0; i < SOCK_CLIENTS; ++i)
-		if (scl[i].fd >= 0 && write(scl[i].fd, line, strlen(line)) > 0)
+	for (int i = 0; i < SOCK_CLIENTS; ++i)              /* sbpkg's lines: not to sbnotify */
+		if (scl[i].fd >= 0 && !scl[i].notify && write(scl[i].fd, line, strlen(line)) > 0)
 			++sent;
 	if (!sent)
 		say("sbwl.sock: nobody to tell \"%.*s\"", (int)strcspn(line, "\n"), line);
+}
+
+/* a line to sbnotify (the clients that sent notify lines) */
+static void notify_send(const char *line)
+{
+	int sent = 0;
+	for (int i = 0; i < SOCK_CLIENTS; ++i)
+		if (scl[i].fd >= 0 && scl[i].notify && write(scl[i].fd, line, strlen(line)) > 0)
+			++sent;
+	if (!sent)
+		say("sbnotify: nobody to tell \"%.*s\"", (int)strcspn(line, "\n"), line);
+}
+
+/* sbnotify: as the user (the session bus is the user's), its line to sbwl a socketpair (/run/sbwl.sock is root's) */
+static void notify_start(void)
+{
+	if (!(svc & SBSHM_SVC_NOTIF) || notify_pid > 0 || notify_starts >= 6)
+		return;
+	int i = 0;
+	while (i < SOCK_CLIENTS && scl[i].fd >= 0)
+		++i;
+	int sv[2];
+	if (i == SOCK_CLIENTS || socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0)
+		return;
+	static char path[600];
+	snprintf(path, sizeof(path), "sbnotify");
+	if (getenv("SBNOTIFY")) {
+		snprintf(path, sizeof(path), "%s", getenv("SBNOTIFY"));
+	} else if (!in_path("sbnotify")) {         /* next to sbwl (a build directory) */
+		char exe[512];
+		ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+		char *sl = n > 0 ? (exe[n] = 0, strrchr(exe, '/')) : NULL;
+		if (sl)
+			snprintf(path, sizeof(path), "%.*s/sbnotify", (int)(sl - exe), exe);
+	}
+	char *av[] = {path, NULL};
+	spawn_fd = sv[1];
+	notify_pid = spawn(av, S.have_user);
+	spawn_fd = -1;
+	close(sv[1]);
+	fcntl(sv[0], F_SETFL, O_NONBLOCK);
+	scl[i].fd = sv[0];
+	scl[i].n = 0;
+	scl[i].notify = scl[i].spawned = 1;
+	scl[i].src = wl_event_loop_add_fd(S.loop, sv[0], WL_EVENT_READABLE, sock_read, &scl[i]);
+	notify_starts++;
+	say("started %s: pid %d", path, notify_pid);
 }
 
 static void sock_start(void)
@@ -2187,6 +2800,8 @@ static void stop_now(void)
 		kill(-in->pid, SIGKILL);
 		kill(in->pid, SIGKILL);
 	}
+	if (notify_pid > 0)
+		kill(notify_pid, SIGTERM);
 	if (S.dbus > 0)
 		kill(S.dbus, SIGTERM);
 	sync();
@@ -2254,7 +2869,28 @@ static void drain(void)
 			uint32_t n = m.c > 8 ? 8 : m.c;
 			for (uint32_t i = 0; i < n; ++i)
 				s[i] = (char)((i < 4 ? m.a >> (8 * i) : m.b >> (8 * (i - 4))) & 0xff);
+			/* with Ctrl / Alt / Super held, or no text field enabled: as keys (ASCII) */
+			if (((keymods & (SBSHM_MOD_CTRL | SBSHM_MOD_ALT | SBSHM_MOD_SUPER)) || !S.ti_on) && text_as_keys(s, m.t_ms))
+				break;
 			text_commit(s);
+			break;
+		}
+		case SBG_MSG_KEYMOD:
+			keymod_set(m.a, m.t_ms);
+			break;
+		case SBG_MSG_CLIP:
+			clip_from_host();
+			break;
+		case SBG_MSG_NOTIF_ACT: {
+			char l[64];
+			snprintf(l, sizeof(l), "notif-act %u %u\n", m.a, m.b);
+			notify_send(l);
+			uint32_t slot = m.a % SBSHM_NOTIF_SLOTS;
+			int ai = nmap[slot].id == m.a && nmap[slot].desk[0] ? app_index(nmap[slot].desk) : -1;
+			say("notification %u: %s%s%s", m.a, m.b == 0 ? "tapped" : m.b == SBSHM_NONE ? "dismissed" : "a button",
+			    m.b == 0 && ai >= 0 ? ", raising " : "", m.b == 0 && ai >= 0 ? apps[ai].id : "");
+			if (m.b == 0 && ai >= 0)
+				launch(ai);                    /* raised (started again if it has ended) */
 			break;
 		}
 		case SBG_MSG_PKG: {
@@ -2269,6 +2905,57 @@ static void drain(void)
 	}
 }
 
+/* ---- v3: the wall clock (SBSHM_SVC_CLOCK) ---------------------------------------------------------------------
+ * sbwl (root) sets the guest's clock from hdr.host_unix_s at start and whenever they differ by more than 2 s (checked
+ * every 3 s); the apps' local time: TZ in POSIX form from hdr.host_tz_min (POSIX counts west: UTC+2 = "<+02>-2"), for
+ * the apps started from then on. Under hostsim (SBWL_SHM) or SBWL_NO_SETTIME the clock is not set, only logged. */
+static void tz_posix(int32_t m, char *o, size_t n)
+{
+	int a = m < 0 ? -m : m;
+	char sg = m < 0 ? '-' : '+', west = m < 0 ? '+' : '-';
+	if (!m)
+		snprintf(o, n, "UTC0");
+	else if (a % 60)
+		snprintf(o, n, "<%c%02d%02d>%c%d:%02d", sg, a / 60, a % 60, west, a / 60, a % 60);
+	else
+		snprintf(o, n, "<%c%02d>%c%d", sg, a / 60, west, a / 60);
+}
+
+static void clock_tick(uint64_t now)
+{
+	static uint64_t t_clk;
+	static int logged, tz_known;
+	static int32_t tz_last;
+	if (!(svc & SBSHM_SVC_CLOCK) || (t_clk && now - t_clk < 3000))
+		return;
+	t_clk = now;
+	uint32_t hs = hdr->host_unix_s;
+	int32_t tz = hdr->host_tz_min;
+	if (!tz_known || tz != tz_last) {
+		tz_known = 1, tz_last = tz;
+		tz_posix(tz, tzenv, sizeof(tzenv));
+		say("time zone: UTC%+d min, TZ=%s for the apps started from now", tz, tzenv);
+	}
+	if (!hs)
+		return;
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	long long d = (long long)hs - (long long)ts.tv_sec;
+	if (d >= -2 && d <= 2)
+		return;
+	if (sim || getenv("SBWL_NO_SETTIME")) {
+		if (!logged++)
+			say("clock: host %u, guest %lld (%+lld s): would set it (not under hostsim: that is the machine's clock)", hs,
+			    (long long)ts.tv_sec, d);
+		return;
+	}
+	struct timespec ns = {.tv_sec = (time_t)hs, .tv_nsec = 500000000};    /* host_unix_s is whole seconds */
+	if (clock_settime(CLOCK_REALTIME, &ns) == 0)
+		say("clock: set to %u from the host (was %+lld s off)", hs, -d);
+	else if (!logged++)
+		say("clock: cannot set it: %s", strerror(errno));
+}
+
 static uint64_t t0;
 static struct wl_event_source *tick_src;
 static int tick(void *data)
@@ -2281,10 +2968,20 @@ static int tick(void *data)
 	static uint64_t t_stat, t_cat;
 	if (now - t_stat >= 10000) {
 		t_stat = now;
-		say("stats: frame events %u, built %u, with a buffer %u, published %llu, rows %llu, px %08x, apps %d, ring drops %u",
-		    nframe, nbuilt, nbuf, (unsigned long long)frames, (unsigned long long)rows_out, last_px, napps, g2h_dropped);
+		say("stats: frame events %u, built %u, with a buffer %u, published %llu, rows %llu, px %08x, apps %d, ring drops %u, "
+		    "deferred %u, background commits %lu", nframe, nbuilt, nbuf, (unsigned long long)frames, (unsigned long long)rows_out,
+		    last_px, napps, g2h_dropped, defers, hidden_commits);
 	}
 	procs_tick();
+	clock_tick(now);
+	if (crd.fd >= 0 && now - crd.t0 > 3000) {
+		say("clipboard: the app did not send its selection within 3 s");
+		clip_read_end(0);
+	}
+	if (notify_restart_at && now >= notify_restart_at && !notify_pid) {
+		notify_restart_at = 0;
+		notify_start();
+	}
 	if (v2) {
 		if (rescan_at && now >= rescan_at) {
 			rescan_at = 0;
@@ -2299,6 +2996,14 @@ static int tick(void *data)
 		}
 	}
 	wl_event_source_timer_update(tick_src, 10);
+	return 0;
+}
+
+/* hostsim (SBWL_SHM) ended or was killed: as MSG_STOP (the apps, the session bus, sbnotify end too) */
+static int sim_sigterm(int sig, void *data)
+{
+	(void)sig, (void)data;
+	stop_now();
 	return 0;
 }
 
@@ -2382,6 +3087,7 @@ int main(int argc, char **argv)
 	wl_signal_add(&comp->events.new_surface, &S.new_surface);
 	wlr_subcompositor_create(S.display);
 	wlr_data_device_manager_create(S.display);
+	wlr_primary_selection_v1_device_manager_create(S.display);
 	S.scene = wlr_scene_create();
 
 	S.new_output.notify = new_output;
@@ -2422,6 +3128,16 @@ int main(int argc, char **argv)
 	S.kbd_mods.notify = kbd_mods;
 	wl_signal_add(&S.kbd.events.modifiers, &S.kbd_mods);
 	wlr_seat_set_keyboard(S.seat, &S.kbd);
+	S.req_sel.notify = req_set_selection;
+	wl_signal_add(&S.seat->events.request_set_selection, &S.req_sel);
+	S.req_psel.notify = req_set_primary;
+	wl_signal_add(&S.seat->events.request_set_primary_selection, &S.req_psel);
+	S.set_sel.notify = seat_set_selection;
+	wl_signal_add(&S.seat->events.set_selection, &S.set_sel);
+	if (svc & SBSHM_SVC_CLIP)
+		clip = (volatile struct sbshm_clip *)(shm + SBSHM_CLIP_OFF);
+	if (svc & SBSHM_SVC_NOTIF)
+		notifs = (volatile struct sbshm_notifs *)(shm + SBSHM_NOTIF_OFF);
 
 	const char *sock = wl_display_add_socket_auto(S.display);
 	if (!sock || !wlr_backend_start(S.backend)) {
@@ -2439,6 +3155,8 @@ int main(int argc, char **argv)
 	wl_event_source_timer_update(tick_src, 10);
 	if (!sim)
 		wl_event_loop_add_fd(S.loop, sbfd, WL_EVENT_READABLE, doorbell, NULL);
+	else
+		wl_event_loop_add_signal(S.loop, SIGTERM, sim_sigterm, NULL);
 
 	struct utsname u;
 	uname(&u);
@@ -2453,6 +3171,7 @@ int main(int argc, char **argv)
 		scan_apps();
 		cat_publish();
 	}
+	clock_tick(ms_now());                      /* the clock and TZ before the first app */
 	if (S.argv) {
 		const char *b = strrchr(S.argv[0], '/');
 		struct inst *in = start_argv(b ? b + 1 : S.argv[0], S.argv, 1);
@@ -2461,8 +3180,10 @@ int main(int argc, char **argv)
 	}
 	hdr->guest_state = SBG_GUEST_RUNNING;
 	g2h_send(SBG_MSG_HELLO, hdr->guest_ncpus, 1);
-	say("HELLO: Wayland %s, output %ux%u, contract v%u, %s%s, kernel %s", sock, W, H, v2 ? 2 : 1,
+	say("HELLO: Wayland %s, output %ux%u, contract v%u (services %#x), %s%s, kernel %s", sock, W, H, v3 ? 3 : v2 ? 2 : 1, svc,
 	    S.argv ? "app " : "catalog", S.argv ? S.argv[0] : "", u.release);
+	if (svc & SBSHM_SVC_NOTIF)
+		session_start();                       /* the session bus and sbnotify now, before the host's first launch */
 	wl_display_run(S.display);
 	return 0;
 }

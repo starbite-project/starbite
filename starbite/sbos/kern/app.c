@@ -663,6 +663,23 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
     case SET_SURV_LAST2_AUTO:
         surv_last2_auto = arg[1] != 0;
         return 0;
+    case SET_SURV_FIRE:                 /* 1.2-alpha29 */
+        if (arg[1] == 2) {
+            surv_usb_hold();
+            return 0;
+        }
+        if (!arg[1]) {
+            surv_usb_stop("Stop on the screen");
+            return 0;
+        }
+        return surv_usb_fire_start() == 0 ? 0 : SBOS_EAGAIN;
+    case SET_SURV_SAVER:                /* 1.2-alpha29 */
+        return surv_saver_set(arg[1] != 0, "the switch in Emergency");
+    case SET_SURV_LIGHT:
+        surv_light_boost(arg[1] != 0);
+        return 0;
+    case SET_SURV_WHISTLE:
+        return surv_whistle(arg[1] != 0) < 0 ? SBOS_EAGAIN : 0;
     case SET_SURV_SENSORS:              /* 1.2-alpha28: the sensor hub on demand */
         return surv_sensors_on(arg[1] != 0) < 0 ? SBOS_EAGAIN : 0;
     case SET_SURV_GNSS: {               /* 1.2-alpha28: the card's last fix as the location */
@@ -1105,6 +1122,31 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_SURV_LAST2: return surv_last2();
         case SET_SURV_LAST2_AUTO: return surv_last2_auto;
         case SET_SURV_SENSORS: return surv_sensors_state();
+        case SET_SURV_SAVER: return surv_saver();
+        case SET_SURV_FIRE: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            return u.fire ? u.state : 0;
+        }
+        case SET_SURV_FIRE_INFO: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            uint64_t ml = u.fire_min_left < 0 ? 0x7fffU : (uint64_t)(u.fire_min_left > 0x7ffe ? 0x7ffe : u.fire_min_left);
+            return (int64_t)((u.trips > 1023U ? 1023U : u.trips) | (u.resets > 63U ? 63U : u.resets) << 10 | ml << 16);
+        }
+        case SET_SURV_EST:
+        case SET_SURV_EST_ON:
+        case SET_SURV_EST_SAVER:
+        case SET_SURV_EST_HEAT: {
+            struct surv_est e;
+            if (!surv_estimate(&e) || e.charging) return -1;
+            if (arg[0] == SET_SURV_EST_ON) return e.min_on;
+            if (arg[0] == SET_SURV_EST_HEAT) return e.min_heat;
+            if (arg[0] == SET_SURV_EST_SAVER) return (int64_t)e.min_saver | (int64_t)(e.learned_saver ? 1 << 30 : 0);
+            return e.min_off;
+        }
+        case SET_SURV_LIGHT: return 0;
+        case SET_SURV_WHISTLE: return surv_whistle_why() ? -1 : 0;
         case SET_SURV_HEADING: {
             int h = 0, a = 0;
             return surv_heading(&h, &a) ? (int64_t)(h | (a & 3) << 16) : -1;
@@ -1137,7 +1179,8 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
             return SBOS_EPERM;
         int64_t r = setting_set_k(arg[0], arg[1]);
         if (r == 0 && arg[0] != SET_GPU_HEAT && arg[0] != SET_SURV_USB && arg[0] != SET_SURV_LAST2 &&
-            arg[0] != SET_SURV_SENSORS)
+            arg[0] != SET_SURV_SENSORS && arg[0] != SET_SURV_LIGHT && arg[0] != SET_SURV_WHISTLE &&
+            arg[0] != SET_SURV_FIRE)
             settings_changed();             /* saved in 3 s where there is a state slot (the GPU never is) */
         return r;
     }

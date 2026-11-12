@@ -209,6 +209,7 @@ void tk_layer_prepare(tk_layer *l);                       /* make its half copy 
  * sampled by the GPU in place (the platform maps that range: kernel gpucomp_add_ext). Call it each frame the pointer
  * or the pixels change (it bumps gen); px 0 detaches. Detach before freeing the layer (relayer would free bmp). */
 void tk_layer_external(tk_layer *l, const uint32_t *px, int w, int h, int stride);
+#define TK_HAS_LAYER_EXTERNAL 1                 /* (Track E's shell_linux.inc builds its zero-copy path on it) */
 void tk_layer_glass_shape(tk_layer *l, float x, float y, float w, float h, float r);
 /* V2 (Track A's request): each recorded shape carries a variant, a tint and a press; tk_layer_glass_shape takes them
  * from tk_gstyle (set it around a d_glass call; {0, 0, 0} = regular, untinted, at rest) */
@@ -288,7 +289,11 @@ typedef struct {
     uint32_t gpu_halves;       /* such frames so far */
     uint32_t gpu_idle_flushed; /* v10: layers made ready for the GPU in idle time (not in a moving frame) */
     int gpu_stale;
-    uint32_t gpu_items;        /* the last GPU frame's quads */             /* P4: GPU frames since the CPU last drew everything (its canvases are behind) */
+    uint32_t gpu_items;        /* the last GPU frame's quads */
+    uint64_t us_flush, b_flush;    /* 1.0 (Track A): the last frame's layer flushes for the GPU (cache clean + block
+                                    * map of layers new or changed since the GPU last had them): time and bytes */
+    uint32_t n_flush;
+    uint64_t us_platform;      /* 1.0: the platform's own time in the last GPU frame (live backdrops, the compose's wait) */             /* P4: GPU frames since the CPU last drew everything (its canvases are behind) */
     uint64_t us_gpu;  /* the last frame's half-canvas catch-up (tk_comp_idle) and half copies made in it */  /* the last frame's wait for the free buffer and its catch-up pass */
 } tk_comp;
 int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocated */

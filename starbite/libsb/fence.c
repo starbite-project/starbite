@@ -486,8 +486,10 @@ int sb_write_store(unsigned medium, uint64_t lba, uint64_t n, const void *src)
  * (sbstore2.py build --volatile NAME=BYTES) with the directory's volatile flag, like the loader's crash
  * log, which the loader writes in place the same way. store.c grants exactly that entry's blocks after
  * checking the flag; the grant must lie in the live store's data area (never its header, settings
- * block or directory: blocks 0..6), UFS only, at most 4 MiB. Every write is logged, honours the dry
- * run, uses forced unit access and ends with SYNCHRONIZE CACHE. A reboot clears the grant. */
+ * block or directory: blocks 0..6), on the home store's medium (UFS, or the card once its store is home:
+ * docs/STORE-ON-CARD.md), at most 4 MiB. Every write is logged, honours the dry run, and on UFS uses
+ * forced unit access and ends with SYNCHRONIZE CACHE; on the card (no FUA) the driver returns once the
+ * card has programmed the blocks and blkio.c reads them back. A reboot clears the grant. */
 static struct {
     int on;
     unsigned medium;
@@ -509,7 +511,7 @@ int sb_volatile_grant(unsigned medium, uint64_t first, uint64_t count, const cha
     vg.on = 0;
     if (!count)
         return 0;
-    if (medium != SB_MED_UFS || count > 1024 || !live[medium].used || first < live[medium].base + 7 ||
+    if (medium > SB_MED_SD || count > 1024 || !live[medium].used || first < live[medium].base + 7 ||
         first + count < first || first + count > live[medium].base + live[medium].used) {
         log_write("refused a standing grant for", medium, 0, first, count, &d, "outside the store's data area");
         return 0;
@@ -541,7 +543,8 @@ int sb_write_volatile(unsigned medium, uint64_t lba, uint64_t n, const void *src
     fence_active = 1;
     int r = sb_blk_write_sync(medium, 0, lba, n, src);
     fence_active = 0;
-    log_write(r ? "FAILED" : "wrote", medium, 0, lba, n, &d, r ? "I/O error" : "FUA + cache flush");
+    log_write(r ? "FAILED" : "wrote", medium, 0, lba, n, &d,
+              r ? "I/O error" : medium == SB_MED_SD ? "programmed + read back" : "FUA + cache flush");
     return r ? SB_W_IO : 0;
 }
 

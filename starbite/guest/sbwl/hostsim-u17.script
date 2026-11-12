@@ -1,0 +1,8 @@
+# hostsim's script for sbwl in the Lima VM's Ubuntu 24.04 (wlroots 0.17, no GTK, no cairo): run-u17.sh. The v3 checks
+# with the plain clients only (hostsim-v3.script), after the start-up ones.
+wait_hello 5000
+wait_catalog 8000
+expect_app org.starbite.WlTest
+expect_app org.starbite.NotifyTest
+include hostsim-v3.script
+stop 5000

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Notify Test
+Comment=hostsim's notification client (notifytest.c): org.freedesktop.Notifications through sbnotify
+Exec=sbwl-notifytest
+Icon=dialog-information

@@ -691,14 +691,17 @@ __attribute__((unused)) static void kb_accessory(const char *const *keys, int n,
     KA.n = n;
     KA.tap = tap;
     for (int i = 0; i < n; i++) {
-        int k = 0;
-        while (keys[i][k] && k < 7) { KA.lab[i][k] = keys[i][k]; k++; }
+        int k = 0, caps = 1;
+        while (keys[i][k] && k < 7) { KA.lab[i][k] = keys[i][k]; caps &= keys[i][k] >= 'A' && keys[i][k] <= 'Z'; k++; }
         KA.lab[i][k] = 0;
-        KA.lit[i] = 0;
+        /* Track E v3: a latched modifier comes as its label in capitals ("CTRL"): lit as shift is, shown as "Ctrl" */
+        KA.lit[i] = (uint8_t)(caps && k >= 2);
+        if (KA.lit[i]) for (int j = 1; j < k; j++) KA.lab[i][j] = (char)(KA.lab[i][j] | 32);
     }
     KA.dirty = 1;
     if (!n) { relayer(&kbacc); kbacc.hidden = 1; KA.dirty = 0; }
     if (KB.shown) kb_panel();
+    if (KA.dirty && KB.shown && !sp_kb.live) ka_build();   /* P3x: a latch's change shows now (a 390 x 32 strip), not at idle */
 }
 /* a key of the row shown held (Ctrl or Alt latched): drawn again now (a small layer) */
 __attribute__((unused)) static void kb_accessory_lit(int i, int on)
@@ -706,6 +709,17 @@ __attribute__((unused)) static void kb_accessory_lit(int i, int on)
     if (i < 0 || i >= KA.n || KA.lit[i] == !!on) return;
     KA.lit[i] = (uint8_t)!!on;
     if (KB.shown && kbacc.bmp.px) ka_build(); else KA.dirty = 1;
+}
+/* Track E v3: a tap on the bar that came through the page's app_tap (lx_kb_tap), not the keyboard's own touch (G_KB
+ * sends its keys to tap(i) itself and never to app_tap): the key under it, as G_KB would; 1 taken (the window under
+ * the bar must not have it) */
+static int ka_at(float x, float y);
+__attribute__((unused)) static int kb_accessory_tap(float x, float y)
+{
+    if (!KA.n || !KB.shown || y < KB_TOP - KB_STRIP || y >= KB_TOP) return 0;
+    int i = ka_at(x, y);
+    if (i >= 0 && KA.tap) { kb_feel(); KA.tap(i); }
+    return 1;
 }
 static int ka_at(float x, float y)
 {

@@ -7,6 +7,7 @@
  *   entry:<x> <y> <w> <h> the entry in window coordinates (hostsim taps its middle)
  *   focus:<0|1>           the entry has the keyboard focus
  *   dialogs:<n>           dialogs opened (the button opens one: a transient 400 x 200 toplevel)
+ *   cursor:<n>            the entry's cursor position (characters)
  * The button has the focus at the start, so the entry gets it (and text-input-v3 enables) only from a tap.
  */
 #include <gtk/gtk.h>
@@ -64,8 +65,8 @@ static int poll_state(gpointer data)
 	const char *t = gtk_entry_get_text(GTK_ENTRY(entry));
 	int f = gtk_widget_has_focus(entry);
 #endif
-	snprintf(s, sizeof(s), "text:%s\nsize:%dx%d\nentry:%d %d %d %d\nfocus:%d\ndialogs:%d\n", t, w, h, ex, ey, ew, eh, f,
-		 dialogs);
+	snprintf(s, sizeof(s), "text:%s\nsize:%dx%d\nentry:%d %d %d %d\nfocus:%d\ndialogs:%d\ncursor:%d\n", t, w, h, ex, ey, ew, eh, f,
+		 dialogs, gtk_editable_get_position(GTK_EDITABLE(entry)));
 	if (strcmp(s, last)) {
 		snprintf(last, sizeof(last), "%s", s);
 		const char *o = g_getenv("SBWL_TEST_OUT");

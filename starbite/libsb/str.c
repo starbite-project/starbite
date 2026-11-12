@@ -224,10 +224,10 @@ void ub_size(struct ub *u, uint64_t bytes)
 /* ---- CRC32 (IEEE, reflected, zlib.crc32) -------------------------------------------------------- */
 
 #if defined(__ARM_FEATURE_CRC32) || !defined(SB_HOST)
-__attribute__((target("+crc"))) uint32_t sb_crc32(const void *p, uint64_t n)
+__attribute__((target("+crc"))) uint32_t sb_crc32_more(uint32_t crc, const void *p, uint64_t n)
 {
     const uint8_t *b = p;
-    uint32_t c = 0xffffffffU;
+    uint32_t c = ~crc;
     uint64_t i = 0;
     for (; i < n && ((uintptr_t)(b + i) & 7); ++i)
         __asm__("crc32b %w0, %w0, %w1" : "+r"(c) : "r"((uint32_t)b[i]));
@@ -238,10 +238,10 @@ __attribute__((target("+crc"))) uint32_t sb_crc32(const void *p, uint64_t n)
     return ~c;
 }
 #else
-uint32_t sb_crc32(const void *p, uint64_t n)
+uint32_t sb_crc32_more(uint32_t crc, const void *p, uint64_t n)
 {
     const uint8_t *b = p;
-    uint32_t c = 0xffffffffU;
+    uint32_t c = ~crc;
     while (n--) {
         c ^= *b++;
         for (int k = 0; k < 8; k++)
@@ -250,3 +250,8 @@ uint32_t sb_crc32(const void *p, uint64_t n)
     return ~c;
 }
 #endif
+/* zlib's crc32(0, p, n); chained: sb_crc32_more(sb_crc32(a, n), b, m) == sb_crc32 of a then b */
+uint32_t sb_crc32(const void *p, uint64_t n)
+{
+    return sb_crc32_more(0, p, n);
+}

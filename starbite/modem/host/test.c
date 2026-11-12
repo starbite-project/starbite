@@ -1449,6 +1449,29 @@ static void test_attended_comms(struct fakesoc *s, struct sbm_image *im, struct 
     CHECKEQ(s->fcp.n_ack, 1);
     CHECKEQ(s->fcp.n_ack_bad, 0);
     CHECKEQ(mo->b.sms.acked, 1);
+    /* a delivery report: TP-SRR set on the wire, the report decoded by its reference, acknowledged */
+    mo->b.sms.want_report = 1;
+    CHECKEQ(sbm_modem_sms_send(mo, "+358401234567", "report me", &pol, 5), 1);
+    CHECKEQ(sess_run(mo, &p, 200, 50, 0), 0);
+    CHECK(mo->b.sms.done[0] && mo->b.sms.res[0] == 0);
+    CHECKEQ(s->fcp.sms_pdu[3][0] & 0x23, 0x21);
+    fakecp_sms_report(&s->fcp, mo->b.sms.mr[0], 0x00);
+    CHECKEQ(sess_run(mo, &p, 100, 50, 0), 0);  /* the fake checks each ack against its newest tpid */
+    fakecp_sms_report(&s->fcp, 0x99, 0x41);
+    CHECKEQ(sess_run(mo, &p, 200, 50, 0), 0);
+    CHECKEQ(mo->b.sms.rep_gen, 2);
+    CHECKEQ(mo->b.sms.rep_mr[0], mo->b.sms.mr[0]);
+    CHECKEQ(mo->b.sms.rep_st[0], 0x00);
+    CHECKEQ(mo->b.sms.rep_mr[1], 0x99);
+    CHECKEQ(mo->b.sms.rep_st[1], 0x41);
+    CHECKEQ(mo->b.sms.acked, 3);
+    CHECKEQ(t_inbox.n, 1);                  /* a report is not a message */
+    CHECKEQ(s->fcp.n_ack_bad, 0);
+    {
+        uint8_t mr = 0, st = 0;
+        static const uint8_t bad[] = { 0x00, 0x05 };
+        CHECKEQ(sbm_sms_status_decode(bad, sizeof(bad), &mr, &st), SBM_EBADF);
+    }
     sbm_modem_sms_rx_cb(0, 0);
 
     CHECKEQ(s->fcp.n_forbidden, 0);
@@ -1690,6 +1713,79 @@ static void test_sms_parts(void)
     }
     CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", lng, 1, pdu, len, 2), SBM_ERANGE);   /* 3 parts > 2 */
     CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", "\xff\xfe", 1, pdu, len, 4), SBM_EINVAL);
+}
+
+static void test_store(void)
+{
+    static uint8_t rec[SBM_STORE_REC];
+    struct sbm_store_rec r;
+    struct sbm_store_msg m, o;
+    sbm_store_begin(&r, rec, sizeof(rec));
+    memset(&m, 0, sizeof(m));
+    m.id = 7, m.utc = -5, m.incoming = 1, m.state = 0, m.unread = 1;
+    strcpy(m.number, "+358400000001");
+    strcpy(m.text, "Moi \xc3\xa4\xc3\xb6\xc3\xa5 \xe2\x82\xac");
+    CHECKEQ(sbm_store_add(&r, &m), 1);
+    m.id = 8, m.utc = 1762963200LL * 1000LL, m.incoming = 0, m.state = 4, m.unread = 0;
+    strcpy(m.number, "");
+    memset(m.text, 'x', sizeof(m.text) - 1);
+    m.text[sizeof(m.text) - 1] = 0;
+    CHECKEQ(sbm_store_add(&r, &m), 1);
+    CHECKEQ(r.count, 2);
+    uint32_t off = 0;
+    unsigned idx = 0;
+    CHECKEQ(sbm_store_next(rec, r.len, &off, &idx, &o), 1);
+    CHECKEQ(o.id, 7); CHECKEQ(o.utc, -5); CHECKEQ(o.incoming, 1); CHECKEQ(o.unread, 1);
+    CHECK(!strcmp(o.number, "+358400000001"));
+    CHECK(!strcmp(o.text, "Moi \xc3\xa4\xc3\xb6\xc3\xa5 \xe2\x82\xac"));
+    CHECKEQ(sbm_store_next(rec, r.len, &off, &idx, &o), 1);
+    CHECKEQ(o.id, 8); CHECKEQ(o.utc, 1762963200LL * 1000LL); CHECKEQ(o.state, 4);
+    CHECKEQ(strlen(o.number), 0); CHECKEQ(strlen(o.text), SBM_STORE_TEXT - 1);
+    CHECKEQ(sbm_store_next(rec, r.len, &off, &idx, &o), 0);
+    /* full: as many maximal messages as fit, then 0 */
+    unsigned fit = 0;
+    sbm_store_begin(&r, rec, sizeof(rec));
+    while (sbm_store_add(&r, &m))
+        ++fit;
+    CHECKEQ(fit, (SBM_STORE_REC - 8) / (SBM_STORE_MSG_HDR + SBM_STORE_TEXT - 1));
+    CHECK(r.len <= SBM_STORE_REC);
+    /* a long UTF-8 text is cut on a character boundary */
+    sbm_store_begin(&r, rec, sizeof(rec));
+    for (unsigned i = 0; i + 2 < sizeof(m.text); i += 2)
+        m.text[i] = (char)0xc3, m.text[i + 1] = (char)0xa4;
+    m.text[sizeof(m.text) - 2] = (char)0xc3;
+    m.text[sizeof(m.text) - 1] = 0;
+    strcat(m.text, "");
+    {
+        char big[600];
+        memset(big, 0, sizeof(big));
+        for (unsigned i = 0; i < 300; ++i)
+            big[2 * i] = (char)0xc3, big[2 * i + 1] = (char)0xa4;
+        memcpy(m.text, big, sizeof(m.text) - 1);
+        m.text[sizeof(m.text) - 1] = 0;
+    }
+    CHECKEQ(sbm_store_add(&r, &m), 1);
+    off = 0;
+    CHECKEQ(sbm_store_next(rec, r.len, &off, &idx, &o), 1);
+    CHECKEQ(strlen(o.text) % 2, 0);
+    CHECK(((uint8_t)o.text[strlen(o.text) - 1] & 0xC0) == 0x80);
+    /* damage: a bad magic, a length past the end, a truncated record: never more than what checks */
+    sbm_store_begin(&r, rec, sizeof(rec));
+    m.id = 1;
+    strcpy(m.text, "a");
+    CHECKEQ(sbm_store_add(&r, &m), 1);
+    m.id = 2;
+    CHECKEQ(sbm_store_add(&r, &m), 1);
+    off = 0;
+    CHECKEQ(sbm_store_next(rec, r.len - 1, &off, &idx, &o), 1);
+    CHECKEQ(sbm_store_next(rec, r.len - 1, &off, &idx, &o), 0);
+    rec[8 + 16] = 0xff;                     /* the first text length: past the end */
+    off = 0;
+    CHECKEQ(sbm_store_next(rec, r.len, &off, &idx, &o), 0);
+    rec[0] = 'X';
+    off = 0;
+    CHECKEQ(sbm_store_next(rec, r.len, &off, &idx, &o), 0);
+    CHECKEQ(sbm_store_next(0, 0, &off, &idx, &o), 0);
 }
 
 static void test_inbox(void)
@@ -2544,6 +2640,7 @@ int main(int argc, char **argv)
     test_policy_sms();
     test_sms_parts();
     test_inbox();
+    test_store();
     printf("sbm host test: %u checks, %u failed%s\n", checks, fails, radio ? " (with this phone's RADIO image)" : "");
     return fails ? 1 : 0;
 }
