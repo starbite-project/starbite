@@ -159,7 +159,7 @@ static void lkn_place(void)
     for (int i = 0; i < LKN_MAX; i++) {
         lkn_slot *s = &LS[i];
         if (!s->id) continue;
-        float y = lkn_y(i), a = (i ? tk_clampf(p * 1.6f - .12f * i, 0, 1) : LK.in) * sa;
+        float y = lkn_y(i), a = (i ? tk_clampf(p * 2.2f - .6f - .1f * i, 0, 1) : LK.in) * sa;   /* the others once apart */
         lkn_glass(&s->gl, y, s->h, a);
         if (s->built && s->tx.bmp.px) {
             s->tx.y = s->tx.by + tk_floorf(PT(y - s->yb) + .5f);
