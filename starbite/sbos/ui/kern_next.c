@@ -316,7 +316,7 @@ int sh_wifi_power(int on)
     /* Track A: the user (or the shell's kept cc.wifi) wants Wi-Fi on while the boot's time check holds it: it stays
      * on (else the check's end would switch it off under them) */
     if (on && wifi_time_only()) wifi_time_only_end("the user wants Wi-Fi on: it stays on");
-    return wifi_power(on);
+    return wifi_user_power(on);                                  /* Track H: the switch is remembered */
 }
 const char *sh_wifi_why(void)
 {
