@@ -16,6 +16,12 @@
 #include "shell.h"
 #include "sbtk_colors.h"                            /* GAP-LIST #1: the system palette (iOS 26 dark) */
 
+/* helper B2: Settings > Sounds & Haptics (shell_settings.inc): System Haptics gates every light tap, Keyboard Feedback
+ * the keys' (kb_hit_r marks a key's tap in kb_key_tap; the sh_haptic() after it reads and clears it) */
+static int kb_key_tap;
+static int se_haptic_ok(int key);
+#define sh_haptic() do { int kk_ = kb_key_tap; kb_key_tap = 0; if (se_haptic_ok(kk_)) sh_haptic(); } while (0)
+
 #define H_PT TK_HPT
 static tk_comp *C;
 /* the frame on the panel now, for screen snapshots (scrims, blurs): the GPU row draws into the scanout buffer, so its
@@ -2271,10 +2277,7 @@ static const appdef APPS[] = {
     { "linux", "Linux", 0x1d2440, 1, { { "", 1, { { "", "" } } } } },      /* L3: the open Linux app (shell_linux.inc) */
     { "store", "App Store", 0x0a6fe8, 1, { { "", 1, { { "", "" } } } } },
     { "maps", "Maps", 0xe3decd, 1, { { "", 1, { { "", "" } } } } },           /* helper D: shell_nc.inc's page_maps */
-    { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "@wifi" }, { "Cellular", "No SIM" }, { "Battery", "@pct" } } },
-                                           { "", 6, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" },
-                                                      { "Medical Card", "" } } },
-                                           { "About", 3, { { "Model", "Galaxy S9 (SM-G960F)" }, { "Software", "@ver" }, { "Memory", "4 GB" } } } } },
+    { "settings", "Settings", 0x55555a, 1, { { "", 1, { { "", "" } } } } },     /* helper B2: shell_settings.inc */
 };
 #define NAPPS ((int)(sizeof APPS / sizeof APPS[0]))
 static tk_layer appg, appbg, appc, appst[4];      /* the page: a group of four strips (no 17 MB block) */
@@ -2520,6 +2523,42 @@ static void d_navtitle(dc *d, const char *t)
 }
 static void d_h1(dc *d, const char *t) { d_text_box(d, TK_IT700, 34, MARGIN, LARGE_BASE, CONTENT_W, 0, t, 0, 0, INK, 0); }   /* P3j: iOS's Large Title, Bold; P3p: in its row */
 static tk_col ACCENT(void) { return C_ACCENT; }
+/* ---- helper B2: the component kit (shell_kit.inc) and Settings (shell_settings.inc), declared for the parts before
+ * them ---- */
+enum { KIT_DEFAULT, KIT_CANCEL, KIT_DESTRUCTIVE, KIT_PREFERRED };
+typedef struct { const char *label; int style; } kit_btn;
+typedef void (*kit_cb)(int i);
+static int kit_alert(const char *title, const char *msg, const kit_btn *b, int n, kit_cb cb);
+static int kit_actions(const char *title, const kit_btn *b, int n, kit_cb cb);
+static int kit_sheet(const char *title, float content_h, void (*draw)(dc *d, float x, float y, float w), void (*tap)(float x, float y),
+                     void (*done)(void));
+static int kit_on(void);
+static int se_owns(void);
+static void se_build(void);
+static void se_close(void);
+static int se_layers(tk_layer **o);
+static int se_autocap(void);
+static int se_timer_vib(void);
+static int se_back_from_card(void);
+static void press_cancel(void);
+static void hl_set(tk_layer *l, tk_rect r, tk_rect clip, float rad, tk_col c);
+static float rubber(float over, float dim);
+void settings_back(void);                        /* a pushed Settings page's back: the Settings root */
+/* Settings > Startup (Track J's shell_startup.inc: SHELL_STARTUP, page_startup / startup_tap, startup_tick with
+ * SHELL_STARTUP_TICK) and Settings > Passcode (Track A's shell_passcode.inc: SHELL_PASSCODE, page_passcode /
+ * passcode_tap, passcode_tick with SHELL_PASSCODE_TICK): their pages are drawn in the page strips (AS.sub
+ * SE_STARTUP_PAGE / SE_PASSCODE_PAGE); without the file the row says "Coming soon" */
+enum { SE_STARTUP_PAGE = 30, SE_PASSCODE_PAGE = 31 };
+#if __has_include("shell_startup.inc")
+#define SH_HAS_STARTUP 1
+static void page_startup(dc *d);
+static int startup_tap(float x, float y);
+#endif
+#if __has_include("shell_passcode.inc")
+#define SH_HAS_PASSCODE 1
+static void page_passcode(dc *d);
+static int passcode_tap(float x, float y);
+#endif
 /* a .row with an avatar: the name, an optional second line, the right-hand text, an optional unread dot */
 __attribute__((unused)) static float d_prow(dc *d, float y, const char *name, int nfw, tk_col nc, const char *sub, const char *right, int dot, int last)
 {
@@ -2543,7 +2582,6 @@ __attribute__((unused)) static float d_prow(dc *d, float y, const char *name, in
     if (!last) d_rrect(d, GROUP_X, y + rh, GROUP_W, 1, 0, C_SEP);
     return rh + 1;
 }
-__attribute__((unused)) static void d_group(dc *d, float y, int n, int sub) { d_rrect(d, GROUP_X, y, GROUP_W, (sub ? 63.0f : 61.0f) * n - 1, 16, C_CARD); }
 
 static const char *const KD[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#" };
 static const char *const KL[12] = { "", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ", "", "+", "" };
@@ -2689,7 +2727,7 @@ static int clk_update(float t)
     if (CLK.tm_run && t >= CLK.tm_end) {
         CLK.tm_run = 0;
         CLK.ctl_ver++;
-        sh_vibrate();                       /* the platform also wakes the screen (P3f) */
+        if (se_timer_vib()) sh_vibrate();   /* the platform also wakes the screen (P3f); helper B2: Sounds & Haptics > Clock Timer */
         toast("Timer done");
         toast_left = 6000;                  /* an alert stays longer than a toast */
         any = 1;
@@ -2979,29 +3017,9 @@ static void page_calendar(dc *d)
     d_text(d, TK_IT400, 15, 20, bl(TK_IT400, 15, y + 46), "No events", 0, 0, C_LABEL2, 0);
 }
 
-/* P3d: Settings > Display & Brightness: iOS's brightness bar (a tap sets the panel's level 1..4) */
-#define DSP_Y 150.0f                         /* P3p: its group (where Wi-Fi's and Cellular's start) */
-#define DSP_TX (GROUP_X + 42)                /* the track */
-#define DSP_TW (GROUP_W - 84)
-static void page_display(dc *d)
-{
-    /* P3p (P3j-13): the inline title and the glass back; iOS's slider (a 6 pt track, a 28 pt knob) between the dim
-     * and the bright sun, the group where the other Settings pages start theirs */
-    d_back(d, W(1));
-    d_navtitle(d, "Display & Brightness");
-    d_text(d, TK_IT400, 13, ROW_TX, DSP_Y - 10, "BRIGHTNESS", .52f, 0, C_LABEL2, 0);
-    d_rrect(d, GROUP_X, DSP_Y, GROUP_W, 64, 16, C_CARD);
-    int lv = cc_bright ? cc_bright : 3;
-    float kx = DSP_TX + DSP_TW * lv / 4, cy = DSP_Y + 32;
-    d_rrect(d, DSP_TX, cy - 3, DSP_TW, 6, 3, W(.18f));
-    d_rrect(d, DSP_TX, cy - 3, kx - DSP_TX, 6, 3, W(.95f));
-    kx = tk_clampf(kx, DSP_TX + 14, DSP_TX + DSP_TW - 14);
-    tk_box_shadow(d->b, PT(kx - 14) - d->ox, PT(cy - 14) - d->oy, PT(28), PT(28), PT(14), 0, PT(2), PT(8), 0, TK_RGBA(0, 0, 0, .3f), 0);
-    d_rrect(d, kx - 14, cy - 14, 28, 28, 14, W(1));
-    d_icon(d, "cc-sun", GROUP_X + 10, cy - 11, .5f);
-    d_icon(d, "cc-sun", DSP_TX + DSP_TW + 8, cy - 11, 1);
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, DSP_Y + 64 + 8), "Four steps, as the Control Centre's slider.", 0, 0, C_LABEL2, 0);
-}
+/* the strip-drawn Settings pages' first group (Wi-Fi's, Cellular's, the Medical Card's; Display & Brightness moved to
+ * shell_settings.inc) */
+#define DSP_Y 150.0f
 
 /* ---- P3e: Notes with an iOS keyboard. The list (each note's first line), New, and the editor: the text with a
  * caret over a dark keyboard (letters, shift, 123, space, return, delete). Track A: kept across restarts (the blob
@@ -3143,7 +3161,7 @@ static void notes_tap(float x, float y)
             if (NS.n == NNOTES) { toast("Up to eight notes in this version"); return; }
             NOTES[NS.n][0] = 0;
             NS.cur = NS.n++;
-            NS.view = 1; NS.shift = 1; NS.num = 0;
+            NS.view = 1; NS.shift = se_autocap(); NS.num = 0;   /* helper B2: Keyboard > Auto-Capitalization */
         } else if (y >= CONTENT_TOP && y < CONTENT_TOP + 56 * NS.n && x >= GROUP_X && x < GROUP_X + GROUP_W) {
             NS.cur = NS.n - 1 - (int)((y - CONTENT_TOP) / 56);
             NS.view = 1; NS.shift = 0; NS.num = 0;
@@ -3357,7 +3375,7 @@ static int app_own(int a)
     const char *k = APPS[a].k;
     return !tk_strcmp(k, "phone") || !tk_strcmp(k, "messages") || !tk_strcmp(k, "contacts") || !tk_strcmp(k, "photos") ||
            !tk_strcmp(k, "camera") || !tk_strcmp(k, "clock") || !tk_strcmp(k, "calc") || !tk_strcmp(k, "light") ||
-           !tk_strcmp(k, "calendar") || (!tk_strcmp(k, "settings") && AS.sub) || !tk_strcmp(k, "notes") ||
+           !tk_strcmp(k, "calendar") || !tk_strcmp(k, "settings") || !tk_strcmp(k, "notes") ||
            !tk_strcmp(k, "search") || info_of(k) || med_is(k) || lx_is(k) || sv_own(k) || !tk_strcmp(k, "maps");
 }
 static void own_strip(int a, int i)
@@ -3367,6 +3385,8 @@ static void own_strip(int a, int i)
     if (i == 0) KB.want = 0;                            /* B3: the page says again whether the keyboard is up */
     if (med_is(k)) { relayer(&appst[i]); return; }      /* shell_media.inc: its own layers (med_build), no strips */
     if (lx_is(k) && !lx_strips(k)) { relayer(&appst[i]); appst[i].hidden = 1; return; }   /* shell_linux.inc: the same */
+    if (!tk_strcmp(k, "settings") && se_owns()) { relayer(&appst[i]); appst[i].hidden = 1; return; }   /* helper B2: its own layers */
+    if (!tk_strcmp(k, "settings") && i == 0) se_build();   /* helper B2: a strip page next: Settings' own page goes first (the heap) */
     dc d = strip_dc(i, "app-page");
     if (!d.b->px) return;
     if (!tk_strcmp(k, "phone")) page_phone(&d);
@@ -3377,7 +3397,17 @@ static void own_strip(int a, int i)
     else if (!tk_strcmp(k, "calc")) page_calc(&d);
     else if (!tk_strcmp(k, "light")) page_light(&d);
     else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
-    else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else if (AS.sub == 4) sv_page_card_edit(&d); else page_display(&d); }
+    else if (!tk_strcmp(k, "settings")) {
+        if (AS.sub == 2) page_wifi(&d);
+        else if (AS.sub == 3) page_cell(&d);
+        else if (AS.sub == 4) sv_page_card_edit(&d);
+#ifdef SH_HAS_STARTUP
+        else if (AS.sub == SE_STARTUP_PAGE) page_startup(&d);    /* Track J's */
+#endif
+#ifdef SH_HAS_PASSCODE
+        else if (AS.sub == SE_PASSCODE_PAGE) page_passcode(&d);  /* Track A's */
+#endif
+    }
     else if (!tk_strcmp(k, "notes")) page_notes(&d);
     else if (!tk_strcmp(k, "search")) page_search(&d);
     else if (lx_is(k)) lx_page(&d);
@@ -3393,6 +3423,7 @@ static void own_extras(int a)
     const char *k = APPS[a].k;
     build_apnum();
     if (med_is(k)) med_build();
+    if (!tk_strcmp(k, "settings")) se_build();       /* helper B2: Settings' own pages (none for the strips' pages) */
     if (!tk_strcmp(k, "calc")) build_calc();
     if (!tk_strcmp(k, "notes")) build_note();
     if (!tk_strcmp(k, "search")) build_search();
@@ -3654,6 +3685,7 @@ static void app_finish_close(void)
     cm_closed();                                 /* helper I */
     kb_close();                                  /* B3 */
     em_close(0);
+    se_close();                                  /* helper B2: Settings' page layers */
     med_close();
     tk_bmp_free(&sfield);
     relayer(&apsb); apsb.hidden = 1;
@@ -3725,53 +3757,68 @@ static void sl_place(void)
     lockg.sx = lockg.sy = s;
 }
 
-/* ---- the kernel's hold confirmation (kui_confirm: the modem's Start), in this UI's look: the screen dimmed, a
- * dark glass card with the kernel's words and its hold bar (1.5 s, as the kernel's own); a tap outside cancels ---- */
+/* ---- the kernel's hold confirmation (kui_confirm: the modem's Start). Helper B2: on the kit's alert (IOS-REFERENCE
+ * 3.1): the screen dimmed (.5), a 300 pt glass card (r 36, the lens: no bake) with the kernel's words left-aligned,
+ * its hold as the primary capsule filling blue (1.5 s, as the kernel's own), Cancel under it; a tap on Cancel or
+ * outside the card cancels ---- */
+#define CF_X ((390 - 300) / 2.0f)
+#define CF_BX (CF_X + 14)
+#define CF_BW 272.0f
 static tk_layer cfl, cfdim, cfcard, cffill, cflabel;
-static struct { int on, down; float t0, p, a, at, hy; } CF;
+static struct { int on, down; float t0, p, a, at, hy, cy, top, bot; } CF;
+static void kit_shape(tk_layer *l, float x, float y, float w, float h, float r);
 static void cf_place(void)
 {
-    cffill.slice_h = PT(56 + (302 - 56) * CF.p);
+    cffill.slice_h = PT(48 + (CF_BW - 48) * CF.p);
     cfl.alpha = tk_bezier(.25f, .1f, .25f, 1, CF.a);     /* B4: eased, not linear */
     cfl.hidden = !CF.on && CF.a <= 0;
 }
 void sh_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold)
 {
     const char *L[3] = { l1, l2, l3 };
-    char ln[3][4][96];
+    char tl[4][96], ln[3][4][96];
     int nl[3];
-    float wm, h = 28 + 30 + 12;
+    float wm;
+    int nt = title && title[0] ? wrapn(tl, 2, TK_IT600, 17, title, 252, &wm) : 0;
+    float yb = 37 + 22.0f * (nt ? nt - 1 : 0);
+    int first = 1;        /* the last baseline so far, from the card's top */
+    float mb[3] = { 0, 0, 0 };
     for (int i = 0; i < 3; i++) {
-        nl[i] = L[i] && L[i][0] ? wrap(ln[i], TK_IT400, 15, L[i], 302, &wm) : 0;
-        h += 21.0f * nl[i] + (nl[i] ? 6 : 0);
+        nl[i] = L[i] && L[i][0] ? wrap(ln[i], TK_IT400, 15, L[i], 252, &wm) : 0;
+        if (!nl[i]) continue;
+        mb[i] = yb + (first ? (nt ? 32 : 0) : 26);                 /* a paragraph: 6 more than a line */
+        yb = mb[i] + 20.0f * (nl[i] - 1);
+        first = 0;
     }
-    h += 18 + 56 + 24;
-    float y = (H_PT - h) / 2;
+    float h = yb + 28 + 48 + 8 + 48 + 14, y = tk_floorf((H_PT - h) / 2);
     tk_layer_init(&cfl, "confirm");
     tk_layer_init(&cfdim, "confirm-dim");
-    cfdim.solid = 0x8c000000u;                /* black at .55 (premultiplied) */
+    cfdim.solid = 0x80000000u;                /* black at .5 (premultiplied) */
     cfdim.solid_w = TK_W;
     cfdim.solid_h = TK_H;
     relayer(&cfcard);
-    dc d = mk(&cfcard, "confirm-card", 24, y, 342, h, 44, 0);
-    d_lg_flat(&d, 24, y, 342, h, 32, 1);
-    d_text(&d, TK_IT700, 22, 44, bl(TK_IT700, 22, y + 28), title, 0, 0, INK, 0);
-    float ty = y + 28 + 30 + 12;
-    for (int i = 0; i < 3; i++) {
-        for (int k = 0; k < nl[i]; k++) d_text(&d, TK_IT400, 15, 44, bl(TK_IT400, 15, ty + 21.0f * k), ln[i][k], 0, 0, W(.72f), 0);
-        ty += 21.0f * nl[i] + (nl[i] ? 6 : 0);
-    }
-    CF.hy = ty + 12;
-    d_rrect(&d, 44, CF.hy, 302, 56, 28, W(.12f));
+    dc d = mk(&cfcard, "confirm-card", CF_X, y, 300, h, 2, 0);
+    if (tk_glass_lens) kit_shape(&cfcard, PT(CF_X) - d.ox, PT(y) - d.oy, PT(300), PT(h), PT(36));
+    else d_lg_flat(&d, CF_X, y, 300, h, 36, 1);
+    d_rrect(&d, CF_X, y, 300, h, 36, tk_hex(0x1e1e20, .78f));
+    for (int k = 0; k < nt; k++) d_text(&d, TK_IT600, 17, CF_X + 24, y + 37 + 22.0f * k, tl[k], 0, 0, INK, 0);
+    for (int i = 0; i < 3; i++)
+        for (int k = 0; k < nl[i]; k++) d_text(&d, TK_IT400, 15, CF_X + 24, y + mb[i] + 20.0f * k, ln[i][k], 0, 0, TK_RGBA(235, 235, 245, .6f), 0);
+    CF.top = y;
+    CF.bot = y + h;
+    CF.hy = y + yb + 28;
+    CF.cy = CF.hy + 48 + 8;
+    d_rrect(&d, CF_BX, CF.hy, CF_BW, 48, 24, sbca(SBC_ACCENT, .3f));          /* the hold: the primary capsule's track */
+    d_rrect(&d, CF_BX, CF.cy, CF_BW, 48, 24, tk_hex(0x363639, 1));            /* Cancel */
+    d_text_box(&d, TK_IT600, 17, 195, bl(TK_IT600, 17, CF.cy + (48 - lh(TK_IT600, 17)) / 2), CF_BW - 20, 1, "Cancel", 0, 0, INK, 0);
     relayer(&cffill);
-    dc f = mk(&cffill, "confirm-fill", 44, CF.hy, 56, 56, 1, 0);
-    d_rrect(&f, 44, CF.hy, 56, 56, 28, sbca(SBC_ACCENT, .55f));
+    dc f = mk(&cffill, "confirm-fill", CF_BX, CF.hy, 48, 48, 1, 0);
+    d_rrect(&f, CF_BX, CF.hy, 48, 48, 24, C_ACCENT);
     cffill.slice = 2;
-    cffill.slice_s0 = cffill.slice_s1 = PT(28);
+    cffill.slice_s0 = cffill.slice_s1 = PT(24);
     relayer(&cflabel);
-    float w = tw(TK_IT600, 16, hold, 0, 0);
-    dc l = mk(&cflabel, "confirm-label", 44, CF.hy, 302, 56, 1, 0);
-    d_text(&l, TK_IT600, 16, 44 + (302 - w) / 2, bl(TK_IT600, 16, CF.hy + 18), hold, 0, 0, INK, 0);
+    dc l = mk(&cflabel, "confirm-label", CF_BX, CF.hy, CF_BW, 48, 1, 0);
+    d_text_box(&l, TK_IT600, 17, 195, bl(TK_IT600, 17, CF.hy + (48 - lh(TK_IT600, 17)) / 2), CF_BW - 20, 1, hold, 0, 0, INK, 0);
     tk_layer *k[] = { &cfdim, &cfcard, &cffill, &cflabel };
     link(&cfl, k, 4);
     relink();
@@ -3950,21 +3997,14 @@ static void app_tap(float x, float y)
         wifi_tap(x, y);
     } else if (is_app("settings") && AS.sub == 3) {
         cell_tap(x, y);
-    } else if (is_app("settings") && AS.sub) {
-        if (BACK_HIT(x, y)) { AS.sub = 0; build_app_page(AP.a); return; }
-        if (y >= DSP_Y && y < DSP_Y + 64 && x >= GROUP_X && x < CONTENT_R) {
-            int lv = 1 + (int)tk_clampf((x - DSP_TX) / DSP_TW * 4, 0, 3.999f);
-            if (lv != cc_bright) { cc_bright = lv; sh_brightness(lv); CCS.lvl[0] = (lv - .5f) / 4; if (CCS.built) cc_levels(); }
-            build_app_page(AP.a);
-        }
-    } else if (is_app("settings")) {
-        /* P3p: the rows where build_app_page draws them (Wi-Fi, Cellular; Display & Brightness) */
-        float yw = gen_row_y(&APPS[AP.a], 0, 0), yd = gen_row_y(&APPS[AP.a], 1, 0);
-        if (x >= GROUP_X && x < CONTENT_R && y >= yd && y < yd + 47) { AS.sub = 1; build_app_page(AP.a); return; }
-        if (x >= GROUP_X && x < CONTENT_R && y >= yw && y < yw + 47) { AS.sub = 2; build_app_page(AP.a); return; }   /* Wi-Fi */
-        if (x >= GROUP_X && x < CONTENT_R && y >= yw + 47 && y < yw + 94) { AS.sub = 3; build_app_page(AP.a); return; }   /* Cellular */
-
     }
+#ifdef SH_HAS_STARTUP
+    else if (is_app("settings") && AS.sub == SE_STARTUP_PAGE) (void)startup_tap(x, y);      /* Track J's page */
+#endif
+#ifdef SH_HAS_PASSCODE
+    else if (is_app("settings") && AS.sub == SE_PASSCODE_PAGE) (void)passcode_tap(x, y);    /* Track A's page */
+#endif
+    /* helper B2: the other Settings pages are shell_settings.inc's (their own gesture, G_SET) */
 }
 
 /* ---- the modem's status (docs/MODEM.md 7.7's snapshot): the status bar's bars and RAT, the keypad's line ----- */
@@ -4040,6 +4080,7 @@ void sh_cell(const sh_cell_t *c)
     lock_ver++;
 }
 
+#include "shell_kit.inc"                             /* helper B2: alerts, action sheets, sheets, switches, sliders, lists */
 #include "shell_wifi.inc"
 #include "shell_cell.inc"
 #include "shell_media_img.inc"
@@ -4049,6 +4090,13 @@ void sh_cell(const sh_cell_t *c)
 #include "shell_nc.inc"                             /* helper D: notifications, the Notification Centre, the banner */
 #include "shell_switcher.inc"                       /* helper D: the app switcher */
 #include "shell_comms.inc"                          /* helper I: Phone and Messages, the call screen */
+#include "shell_settings.inc"                       /* helper B2: Settings */
+#ifdef SH_HAS_STARTUP
+#include "shell_startup.inc"                        /* Track J: Settings > Startup */
+#endif
+#ifdef SH_HAS_PASSCODE
+#include "shell_passcode.inc"                       /* Track A: Settings > Passcode */
+#endif
 
 /* ---- Track A: what the shell keeps across restarts (the platform's prefs and blobs), taken back once the store is
  * ready. Cellular data is never kept (off at every boot by design); Wi-Fi comes back on when the user left it on. -- */
@@ -4137,18 +4185,20 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 static void relink(void)
 {
     if (!apdim.name) { tk_layer_init(&apdim, "app-dim"); apdim.hidden = 1; }
-    tk_layer *r[] = { &star, &star_e, &home, &swg, &lockg, &lockflat, &apdim, &appg, &apicon, &swcover, &ncl, &focus, &ccl, &bnl, &cfl, &cvl, &boot,
-                      &homebar, &toastl, &slp };
+    tk_layer *r[] = { &star, &star_e, &home, &swg, &lockg, &lockflat, &apdim, &appg, &apicon, &swcover, &ncl, &focus, &ccl, &bnl, &cfl, &kitl, &cvl,
+                      &boot, &homebar, &toastl, &slp };
     nc_link();                                       /* helper D: the Notification Centre (ncl), the banner (bnl) */
     sw_link();                                       /* helper D: the switcher's cards (swg), a card's snapshot over its opening window */
     cm_link();                                       /* helper I: the call screen (cvl) */
-    link(&root, r, 20);
+    kit_link();                                      /* helper B2: an alert, an action sheet, a sheet (kitl) */
+    link(&root, r, 21);
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &emsel, &kbg, &emp, &apsb, &apphl };
     link(&appg, ag, 16);                             /* B3: emsel the edit menu's selection, emp its pill */
     kb_link();                                       /* B3: the keyboard's panel, keys, lit key and balloon */
     tk_layer *st[NST + 64] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     int na = NST + med_layers(st + NST);
     na += lx_layers(st + na);                        /* L3: shell_linux.inc's */
+    na += se_layers(st + na);                        /* helper B2: Settings' page (scrolled, clipped) and its nav row */
     link(&appc, st, na + cm_layers(st + na));    /* helper I: the keypad's line and ring, Messages' fields */
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
     link(&lockg, lk, 12);
@@ -4319,6 +4369,7 @@ static void back_to_lock(int exit_em)
     if (exit_em && EMG) set_emergency(0, 1);
     if (!EMG) while (cards_pending > 0) { build_card(NG - cards_pending); cards_pending--; }
     if (CF.on) cf_close(0);
+    kit_reset();                                   /* helper B2: an alert or a sheet goes, unanswered */
     nc_reset();                                    /* helper D: the Notification Centre and the banner gone */
     sw_reset();                                    /* helper D: the switcher (the recents and their snapshots stay) */
     free_cc_all();                                 /* P3s: the lock keeps none of it */
@@ -4396,9 +4447,12 @@ void sh_set(const char *what, const char *key, float v)
         static const char *const TK[4] = { "fav", "rec", "con", "pad" };
         for (int t = 0; t < 4; t++) if (!tk_strcmp(TK[t], key)) { AS.tab = t; build_app_page(AP.a); }
     } else if (!tk_strcmp(what, "sub")) {
-        /* the stills: a Settings page (display, wifi, cell; nothing is switched on) */
-        AS.sub = !tk_strcmp(key, "display") ? 1 : !tk_strcmp(key, "wifi") ? 2 : !tk_strcmp(key, "cell") ? 3 : 0;
+        /* the stills: a Settings page (display, wifi, cell, general, about, ...: se_sub_key; nothing is switched on) */
+        AS.sub = se_sub_key(key);
         if (AP.on) build_app_page(AP.a);
+    } else if (!tk_strcmp(what, "kit")) {
+        kit_set(key, v);                             /* helper B2: kit=alert / alert3 / actions / sheet / sheetl */
+    } else if (se_set(what, key, v)) {                /* helper B2: sescroll=, sehist= */
     } else if (!tk_strcmp(what, "note")) {
         /* the stills: a note with this text open in the editor (v 0), or back to the list (v 1) */
         if (key[0] && NS.n < NNOTES) {
@@ -4458,7 +4512,7 @@ static int em_target(float x, float y, emt *o)
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
 enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL,
-       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX, G_NC, G_SW, G_KB, G_CCX };   /* B3: G_KB the keyboard's (shell_kb.inc); B4: G_CCX the Control Centre's expanded module */   /* helper D: G_NC shell_nc.inc's (the Centre, the banner, the
+       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX, G_NC, G_SW, G_KB, G_CCX, G_SET };   /* B3: G_KB the keyboard's (shell_kb.inc); B4: G_CCX the Control Centre's expanded module; helper B2: G_SET Settings' own pages */   /* helper D: G_NC shell_nc.inc's (the Centre, the banner, the
                                                      * lock's pill), G_SW shell_switcher.inc's (the cards) */
 static struct {
     int kind, arg, arg2, moved;
@@ -4590,19 +4644,6 @@ static void app_press(float x, float y)
     } else if (is_app("notes") && !NS.view && COMPOSE_HIT(x, y)) {
         r = g = (tk_rect){ CONTENT_R - COMPOSE_D, COMPOSE_Y, COMPOSE_D, COMPOSE_D };
         rad = COMPOSE_D / 2; c = W(.16f); ok = 1;
-    } else if (is_app("settings") && !AS.sub) {
-        const appdef *A = &APPS[AP.a];
-        for (int s = 0; s < A->ns && !ok; s++)
-            for (int i = 0; i < A->sec[s].n && !ok; i++) {
-                const char *l = A->sec[s].rows[i].l;
-                if (tk_strcmp(l, "Wi-Fi") && tk_strcmp(l, "Cellular") && tk_strcmp(l, "Display & Brightness")) continue;
-                float ry = gen_row_y(A, s, i), gy = gen_row_y(A, s, 0);
-                if (x >= GROUP_X && x < CONTENT_R && y >= ry && y < ry + 47) {
-                    r = (tk_rect){ GROUP_X, ry, GROUP_W, 47 };
-                    g = (tk_rect){ GROUP_X, gy, GROUP_W, 47.0f * A->sec[s].n - 1 };
-                    rad = 16; ok = 1;
-                }
-            }
     } else if (is_app("notes") && !NS.view && NS.n) {
         if (x >= GROUP_X && x < CONTENT_R && y >= CONTENT_TOP && y < CONTENT_TOP + 56 * NS.n) {
             int i = (int)((y - CONTENT_TOP) / 56);
@@ -4635,11 +4676,47 @@ static void app_press(float x, float y)
     if (ok) hl_set(&apphl, r, g, rad, c);
 }
 
+/* helper B2: a note held for half a second asks iOS's alert (Delete Note? Cancel / Delete) */
+static int note_del = -1;
+static void notes_delete(int i)
+{
+    int k = note_del;
+    note_del = -1;
+    if (i != 1 || k < 0 || k >= NS.n) return;
+    for (; k + 1 < NS.n; k++) tk_memcpy(NOTES[k], NOTES[k + 1], NOTELEN);
+    NS.n--;
+    if (is_app("notes")) build_app_page(AP.a);
+}
+static int notes_hold(float t)
+{
+    if (T.kind != G_APPTAP || T.moved || !is_app("notes") || NS.view || kit_on() || AP.closing) return 0;
+    float x = T.x0, y = T.y0;
+    if (y < CONTENT_TOP || y >= CONTENT_TOP + 56 * NS.n || x < GROUP_X || x >= GROUP_X + GROUP_W) return 0;
+    if (t - T.t0 < 500) return 1;                  /* frames on while it is held: the tick fires at 0.5 s */
+    note_del = NS.n - 1 - (int)((y - CONTENT_TOP) / 56);
+    T.kind = G_NONE;
+    hl_off();
+    sh_haptic();                                   /* iOS: a medium tap at a long press */
+    static char msg[200];
+    char nt[136];
+    note_title(NOTES[note_del], nt);
+    int n = 0;
+    const char *a = "\xe2\x80\x9c", *b = "\xe2\x80\x9d will be deleted.";
+    for (const char *p = a; *p && n < 190; p++) msg[n++] = *p;
+    for (int k = 0; nt[k] && k < 40 && n < 190; k++) msg[n++] = nt[k];
+    for (const char *p = b; *p && n < 199; p++) msg[n++] = *p;
+    msg[n] = 0;
+    static const kit_btn B[2] = { { "Cancel", KIT_CANCEL }, { "Delete", KIT_DESTRUCTIVE } };
+    kit_alert("Delete Note?", msg, B, 2, notes_delete);
+    return 1;
+}
+
 void sh_touch(int phase, float x, float y, float t)
 {
     now_ms = t;
     if (cm_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* helper I: the call screen, the call button's hold */
     if (sv_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* survival-next: SOS's beacon, a tool's hold */
+    if (kit_touch(phase, x, y, t)) { if (T.kind == G_SET) se_touch(2, -1, -1, t); T.kind = G_NONE; hl_off(); return; }   /* helper B2: modal */
     if (phase == 0) {
         tk_tracker_reset(&T.tr);
         T.moved = 0;
@@ -4650,7 +4727,7 @@ void sh_touch(int phase, float x, float y, float t)
         if (CF.on) {
             /* the confirmation: its hold bar, or outside the card (cancel) */
             T.kind = G_CF;
-            if (x >= 44 && x < 346 && y >= CF.hy && y < CF.hy + 56) { CF.down = 1; CF.t0 = t; }
+            if (x >= CF_BX && x < CF_BX + CF_BW && y >= CF.hy && y < CF.hy + 48) { CF.down = 1; CF.t0 = t; }
             return;
         }
         if (focus_on) {
@@ -4670,6 +4747,7 @@ void sh_touch(int phase, float x, float y, float t)
             if (!AP.closing && !sp_app.live && kb_owns(x, y)) { T.kind = G_KB; kb_touch(0, x, y, t); return; }   /* B3 */
             if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; T.arg2 = 0; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
             else if (!sp_app.live && med_is(APPS[AP.a].k)) { T.kind = G_MEDIA; med_touch(0, x, y, t); }
+            else if (!sp_app.live && !AP.closing && se_owns() && SE.built) { T.kind = G_SET; se_touch(0, x, y, t); }   /* helper B2 */
             else if (!sp_app.live && !AP.closing && lx_touch(0, x, y)) T.kind = G_LINUX;   /* L3 */
             else if (!sp_app.live) {
                 /* a tap on the app's page (a key lights while the finger is on it) */
@@ -4803,6 +4881,11 @@ void sh_touch(int phase, float x, float y, float t)
     if (T.kind == G_MEDIA) {                 /* shell_media.inc: its lists, the viewer */
         med_touch(phase, x, y, t);
         if (phase == 2) T.kind = G_NONE;
+        return;
+    }
+    if (T.kind == G_SET) {                   /* helper B2, shell_settings.inc: a row, a switch, the slider, the scroll */
+        if (phase == 2) T.kind = G_NONE;     /* (first: a tap may open another app, whose touches start anew) */
+        se_touch(phase, x, y, t);
         return;
     }
     if (phase == 1) {
@@ -4967,7 +5050,7 @@ void sh_touch(int phase, float x, float y, float t)
             /* outside the card: cancel */
             float h = 0;
             (void)h;
-            if (y < cfcard.by / TK_PT + 44 || y > CF.hy + 56 + 24 + 4) cf_close(0);
+            if (y < CF.top || y > CF.bot || x < CF_X || x > CF_X + 300 || (y >= CF.cy && y < CF.cy + 48)) cf_close(0);   /* outside, or Cancel */
         }
         break;
     case G_DOCK:
@@ -5351,7 +5434,16 @@ int sh_tick(float dt, float t)
         emt e;
         if (em_target(T.x0, T.y0, &e)) { hl_off(); T.kind = G_NONE; em_open(&e, T.x0, T.y0); mv = 1; }
     }
-    if (mv && AP.on) sw_dirty = 1;              /* helper D: the page moved or changed: a new snapshot at the next rest */
+    mv |= kit_tick(dt);                         /* helper B2: an alert, a sheet, a switch's thumb */
+    mv |= se_tick(dt);                          /* helper B2: Settings' scroll */
+    mv |= notes_hold(t);                        /* helper B2: a held note: Delete? */
+#ifdef SHELL_STARTUP_TICK
+    if (is_app("settings") && AS.sub == SE_STARTUP_PAGE) mv |= startup_tick(dt);
+#endif
+#ifdef SHELL_PASSCODE_TICK
+    if (is_app("settings") && AS.sub == SE_PASSCODE_PAGE) mv |= passcode_tick(dt);
+#endif
+    if (mv && AP.on) sw_dirty = 1;             /* helper D: the page moved or changed: a new snapshot at the next rest */
     return mv;
 }
 
@@ -5373,6 +5465,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
     int tchange = h != ST.h || mi != ST.mi || wday != ST.wday || day != ST.day || mon != ST.mon;
     int wchange = pct != ST.pct || temp != ST.temp;
     ST.h = h; ST.mi = mi; ST.wday = wday; ST.day = day; ST.mon = mon; ST.pct = pct; ST.temp = temp;
+    se_batt_sample(h, mi, pct);                   /* helper B2: Settings > Battery's history since the start (RAM) */
     if (tchange && AP.on && (is_app("clock") || is_app("calendar")) && !AP.closing) build_app_page(AP.a);   /* the time, today */
     if (tchange && ALM.on && alm_when != (ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? 1 : 2)) wchange = 1;   /* P3p: Today / Tomorrow */
     if (tchange) {
@@ -5414,6 +5507,7 @@ void sh_idle(void)
     cm_idle();                                   /* helper I: the call screen's static parts while Cellular is on */
     home_badges(0);                              /* B8: the dock's badges, when a count changed */
     kb_idle();                                   /* B3: the keyboard's accessory row (a Linux window's keys) */
+    se_idle();                                   /* helper B2: Settings' page's half copy */
     if (!EMG && cards_pending > 0) {
         /* after Emergency: the vendor cards again, one per idle turn (the platform calls again while
          * sh_idle_pending); the half copies below are made in the same turn (P2w: an unlock right after
@@ -5474,5 +5568,6 @@ int sh_moving(void)
     m |= cm_moving();                            /* helper I */
     m |= kb_moving();                            /* B3: delete held (its repeats need the frames) */
     if (T.kind == G_APPTAP && !T.moved) { emt e; m |= em_target(T.x0, T.y0, &e); }   /* B3: a press on a text field: the long press's frames */
+    m |= kit_moving() || se_moving();            /* helper B2 */
     return m;
 }

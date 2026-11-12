@@ -216,9 +216,14 @@ static int sv_ec_hit(float x, float y)
     if (cy >= SV_EC_EXIT - LIST_TOP - 6 && cy < SV_EC_EXIT - LIST_TOP + 38 && x >= 110 && x < 280) return 8;
     return -1;
 }
+static void sv_exit_answer(int i) { if (i == 1 && EMG) set_emergency(0, 0); }
 static void sv_ec_tap(int i)
 {
-    if (i == 8) { set_emergency(0, 0); return; }
+    if (i == 8) {                       /* helper B2: Exit Emergency asks first (iOS's alert) */
+        static const kit_btn B[2] = { { "Cancel", KIT_CANCEL }, { "Exit", KIT_DESTRUCTIVE } };
+        kit_alert("Exit Emergency Mode?", "The lock screen and home go back to normal. SOS stops if it is on.", B, 2, sv_exit_answer);
+        return;
+    }
     if (i < 0 || i >= 8) return;
     int a = sv_app(EC[i].act);
     if (a < 0) {                        /* Survival Heat: as it was (it runs in the classic Starbite OS) */
@@ -584,7 +589,7 @@ static void sv_field(float x, float y, float w, const char *t, int caret, tk_col
 static void card_tap(float x, float y)
 {
     if (SV.cf < 0) {
-        if (sv_back_hit(x, y)) { AS.sub = 0; build_app_page(AP.a); return; }   /* (the Settings list is not an own page) */
+        if (sv_back_hit(x, y)) { AS.sub = se_back_from_card(); build_app_page(AP.a); return; }   /* helper B2: back to Emergency */
         if (x >= GROUP_X && x < CONTENT_R && y >= CE_TOP && y < CE_TOP + 47.0f * SH_CARD_NF) {
             SV.cf = (int)((y - CE_TOP) / 47);
             tk_memcpy(SV.ebuf, SV.card.f[SV.cf], sizeof SV.ebuf);

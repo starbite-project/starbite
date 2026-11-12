@@ -136,7 +136,9 @@ static int kb_at(float x, float y)
 
 /* the haptic tap of a key (Settings' keyboard feedback once it has a switch for it: wire it here) */
 static int kb_haptics(void) { return 1; }
-static void kb_feel(void) { if (kb_haptics()) sh_haptic(); }
+/* helper B2's Settings: a key's tap follows Sounds & Haptics > Keyboard Feedback (kb_key_tap: shell_lock.c's
+ * sh_haptic wrapper reads it) */
+static void kb_feel(void) { if (kb_haptics()) { kb_key_tap = 1; sh_haptic(); } }
 
 /* ---- drawing ---------------------------------------------------------------------------------------------- */
 static void kb_glyph(dc *d, const char *name, float x, float y, tk_col c)
@@ -378,7 +380,7 @@ static void kb_close(void) { KB.want = 0; kb_set(0); kb_free(); KB.focused = 0; 
 static void kb_ctx(const char *t);
 static void kb_focus(int flags, const char *ret, const char *text)
 {
-    KB.flags = flags;
+    KB.flags = se_autocap() ? flags : flags & ~KB_AUTOCAP;   /* helper B2: General > Keyboard > Auto-Capitalization */
     int n = 0;
     while (ret && ret[n] && n < 11) { KB.ret[n] = ret[n]; n++; }
     KB.ret[n] = 0;

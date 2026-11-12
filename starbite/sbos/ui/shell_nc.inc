@@ -90,17 +90,21 @@ static void nc_restore(void)
 }
 /* Track A: notif.<app>.allow / notif.<app>.banners (default 1) by the app the poster opens (else the poster), and
  * notif.dnd; a poster's name outside the keys' characters is never a key: allowed */
-static int nc_pref(const char *who, const char *what)
+static void nc_pref_key(const char *who, const char *what, char key[40])
 {
     int a = nc_app(who);
     const char *k = a >= 0 ? APPS[a].k : who;
-    char key[40];
     int n = 0;
     for (const char *p = "notif."; *p; p++) key[n++] = *p;
     for (; *k && n < 24; k++) key[n++] = *k;
     key[n++] = '.';
     for (; *what && n < 38; what++) key[n++] = *what;
     key[n] = 0;
+}
+static int nc_pref(const char *who, const char *what)
+{
+    char key[40];
+    nc_pref_key(who, what, key);
     return sh_pref_int(key, 1);
 }
 
@@ -693,7 +697,9 @@ static void nc_clear_group(const char *who, int fly)
 void sh_notify(const char *who, const char *title, const char *body, int hm) { sh_notify_flags(who, title, body, hm, 0); }
 void sh_notify_flags(const char *who, const char *title, const char *body, int hm, unsigned flags)
 {
-    if (!nc_pref(who && who[0] ? who : "system", "allow")) return;   /* Track A: this app's notifications are off */
+    /* Track A: this app's notifications are off (Settings > Notifications > (app) > Allow Notifications, B2: the same
+     * notif.<app>.allow pref) */
+    if (!nc_pref(who && who[0] ? who : "system", "allow")) return;
     if (nin == NC_MAX) {
         nc_slot *s = nc_slot_of(NI[NC_MAX - 1].id);
         if (s) s->ta = 0;
@@ -718,10 +724,11 @@ void sh_notify_flags(const char *who, const char *title, const char *body, int h
     nc_pill_build();
     if (NC.built) { nc_head_build(); nc_layout(); }
     /* a banner on home and in apps (not on the lock, in the dark, over a sheet, or in the switcher) */
-    /* Track A: not for a quiet post, with this app's banners off, or in Do Not Disturb (an urgent one still shows) */
+    /* Track A: not for a quiet post, with this app's banners off, or in Do Not Disturb (an urgent one still shows);
+     * B2: nor over an alert or sheet */
     int bn_ok = !(flags & SH_NOTIF_QUIET) && nc_pref(n->who, "banners") &&
                 (!sh_pref_int("notif.dnd", 0) || (flags & SH_NOTIF_URGENT));
-    if (bn_ok && !locked && !SL.black && !SL.dir && !focus_on && !CF.on && !sw_on()) bn_show(n);
+    if (bn_ok && !locked && !SL.black && !SL.dir && !focus_on && !CF.on && !sw_on() && !kit_on()) bn_show(n);
 }
 
 /* ---- the lock's pill ------------------------------------------------------------------------------------------- */
@@ -993,6 +1000,22 @@ static void nc_pull_begin(float x, float y, float t)
     if (BN.on) bn_hide(0);
     nc_place();
 }
+/* helper B2: the clear-all alert's answer (1 Clear) */
+static void nc_clear_answer(int i)
+{
+    NC.clrall = 0;
+    if (i == 1 && nin) {
+        for (int k = 0; k < NC_SLOTS; k++) if (NSL[k].id) NSL[k].ta = 0;
+        nin = 0;
+        nc_save();                                  /* Track A */
+        NC.exp[0] = 0;
+        nc_ghead_build();
+        NC.anim = 1;
+    }
+    nc_head_build();
+    nc_layout();
+    relink();
+}
 /* the Centre's touches after the first: 2 hands the touch back to the lock's swipe (from the pill) */
 static int nc_touch(int ph, float x, float y, float t)
 {
@@ -1155,15 +1178,9 @@ static int nc_touch(int ph, float x, float y, float t)
         if (nin && cy >= NC_LT && cy < NC_LT + 40 && x >= CONTENT_R - (NC.clrall ? 70 : 40)) {
             if (!NC.clrall) { NC.clrall = 1; nc_head_build(); relink(); }
             else {
-                for (int k = 0; k < NC_SLOTS; k++) if (NSL[k].id) NSL[k].ta = 0;
-                nin = 0;
-                nc_save();                          /* Track A */
-                NC.clrall = 0;
-                NC.exp[0] = 0;
-                nc_ghead_build();
-                nc_head_build();
-                nc_layout();
-                relink();
+                /* helper B2: Clear asks first (iOS's alert) */
+                static const kit_btn B[2] = { { "Cancel", KIT_CANCEL }, { "Clear", KIT_DESTRUCTIVE } };
+                kit_alert("Clear All Notifications?", "Every notification in the Notification Centre goes.", B, 2, nc_clear_answer);
             }
             break;
         }
