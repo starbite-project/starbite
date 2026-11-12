@@ -2157,6 +2157,22 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - No `sbumd: Blt ... rotate` lines in the umdlog for DWM. They would mean DXGI expects the UMD to rotate.
 - The bugcheck screen stays in portrait, because `SystemDisplayWrite` writes in the panel's orientation.
 
+### 6.58 T49-T51 read: faults/hangs fixed, landscape, Geometry Dash's frame time (2026-11-12)
+
+- **T49 (installed 21:13):**
+  - faults 82 -> 6, `JobsTimedOut` 18 -> 0 with the scratch page (`Live_ScratchMaps` 12,322), so DWM's "IDVS hangs"
+    were stalls on evicted memory;
+  - the 6 left are js 0x51 (INSTR_INVALID_ENC): shader code read from a scratch-mapped page;
+  - sbfps flip 641 / blt 825 (T47: 593 / 829).
+- **T50:** GeometryDash.exe never started (no ICD log, no WER). Steam did not launch it. sb-gd.bat now logs Steam.
+- **T51 (installed 22:24): landscape.** sbrotate 270 -> 90 at 2960x1440 @ 60 Hz; sbd3d native, x64 and landscape all
+  exit 0. `Live_RotatedFlips` 8,311 with `FlipRotateFlag` 0, so DWM pre-rotates as documented. `RotatedBlts` 270 (266 ms).
+- **Geometry Dash's frame (T51, A55 normal entry, landscape 2960x1440, 0146 x64):** a steady 14 fps.
+  - Per frame, interval 71 ms = present 52 (copy out of write-combined memory 48 with 4 threads, GDI 5) + about
+    19 ms of game and driver CPU.
+  - map (GPU wait) 0.1 ms.
+  - **The GPU is not the limit.** The zero-copy present (T52) removes the 52 ms.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
