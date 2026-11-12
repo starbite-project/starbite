@@ -660,6 +660,30 @@ int wifi_net_sec(int i);                    /* of wifi_list's i-th; -1 none */
 #define KWIFI_CAP_WPA3 16U
 unsigned wifi_caps(void);                   /* KWIFI_CAP_* from the firmware's "cap" (0 until the radio was up) */
 int wifi_leave(void);
+/* Track H: remembered networks (kept in the state slot), joining by name, details, the user's switch, Survival */
+struct kwifi_known {
+    uint8_t ssid[33], ssid_len;
+    int32_t saved, heard, hidden, autojoin, sec, joined;   /* sec: KWIFI_SEC_*, -1 not known */
+};
+int wifi_known2(struct kwifi_known *out, int max);  /* the saved one first, then most recently joined first */
+int wifi_known_auto(int k, int on);                 /* a remembered network's automatic join */
+int wifi_join_name(const uint8_t *ssid, unsigned len, const char *pass);   /* Other...: hidden; pass "" open */
+struct kwifi_details {
+    int32_t state, rssi, channel, band5, sec, power_save, ping_ms;
+    uint32_t lease_s;
+    uint8_t ssid[33], ssid_len, ip[4], mask[4], gateway[4], dns[4];
+};
+void wifi_details(struct kwifi_details *d);
+int wifi_user_power(int on);                /* the user's switch: as wifi_power, and remembered for the next start */
+int wifi_user_on(void);
+void wifi_survival(int on);                 /* Survival mode: Wi-Fi off and nothing automatic until it ends */
+extern int wifi_pm;                         /* power save once joined: 2 (default) PM_FAST, 0 off */
+struct state_buf;
+int wifi_state_put(struct state_buf *b);    /* settings.c: the record "wifi.known" */
+void wifi_state_get(const uint8_t *half);
+struct sbnet;
+struct sbtcp;
+int wifi_uplink(struct sbnet **n, struct sbtcp **t);   /* 1 Wi-Fi, 2 mobile data, 0 none (Wi-Fi preferred) */
 extern int wifi_selftest_scan_only;          /* Next: the Wi-Fi self test scans only (and runs the TLS self-check) */
 /* Next (wifi-sbos-next): one HTTP(S) GET at a time over the joined network (starbite/wifi/http.h). wifi_fetch:
  * 0 started, SBOS_EAGAIN not joined (or no memory), SBOS_EBUSY one is running. The status says how it went; the

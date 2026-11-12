@@ -89,6 +89,7 @@ void settings_restore(void)
         return;
     }
     (void)state_valid(half[cur_half], &seq);
+    wifi_state_get(half[cur_half]);         /* Track H: the remembered Wi-Fi networks */
     const uint8_t *d = 0;
     {
         /* 0.6.3: the last heating session's record: still "running" means the power went while it heated */
@@ -308,6 +309,8 @@ void settings_timer(unsigned id)
         if (state_add(&b, "sbos.surv", sv, 16) < 0)
             sb_log("settings: the survival options did not fit");
     }
+    if (wifi_state_put(&b) < 0)             /* Track H: the remembered Wi-Fi networks */
+        sb_log("settings: the Wi-Fi networks did not fit");
     if (heat_rec.magic == 0x31435248U && state_add(&b, "heat", &heat_rec, sizeof(heat_rec)) < 0)
         sb_log("settings: the heat record did not fit");
     if (heat_log.magic == HLOG_MAGIC) {     /* 1.2-alpha6: the heat log in 4 KiB records */
