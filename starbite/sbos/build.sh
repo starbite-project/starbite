@@ -53,6 +53,7 @@ python3 "$here/tools/mergeassets.py" "$ob/sbassets.sb7" "$ob/libsb-assets.sb7" "
 
 if [ "$native" = 1 ]; then
     sh "$here/../tools/sbos-host-test.sh"
+    CC=gcc sh "$here/kern/host/tzdb-test.sh"     # Track A: the time zones against zoneinfo, the 12-hour text
 fi
 
 # The sensor hub's firmware patch (docs/SENSOR-HUB.md 2.2): never in the repository. Only the staged test image

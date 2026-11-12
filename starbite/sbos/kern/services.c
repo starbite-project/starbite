@@ -5,6 +5,7 @@
 #include "kern.h"
 #include "kinput.h"
 #include "tz.h"
+#include "tzdb.h"
 #include "survival.h"
 
 /* ---- SOS ------------------------------------------------------------------------------------- */
@@ -279,6 +280,22 @@ int64_t clock_set_net(int64_t utc, int *was_set)
     return d;
 }
 
+/* Track A (2026-11-12): the zone in use (tzdb.c; -1 the home zone, Helsinki) and 12 / 24-hour (the shell's
+ * formatting), both kept with the settings (settings.c ext[3]) */
+static int zone_cur = -1;
+int clock_24h = 1;
+
+int clock_zone(void)
+{
+    return zone_cur >= 0 && zone_cur < tzdb_n ? zone_cur : tzdb_home();
+}
+
+void clock_zone_set(int i)
+{
+    if (i >= 0 && i < tzdb_n)
+        zone_cur = i;
+}
+
 int clock_now(struct sbos_time *t)
 {
     uint64_t now = sb_ms();
@@ -310,7 +327,8 @@ int clock_now(struct sbos_time *t)
     t->approx = rtc_state == 3;
     int64_t utc = rtc_t + (int64_t)((now - rtc_ms) / 1000U) + clock_adj;
     struct tz_time l;
-    tz_local(&tz_zones[0], utc, &l);
+    int z = clock_zone();                   /* Track A: the user's zone (was utility/tz.c's tz_zones[0]) */
+    tzdb_local(z, utc, &l);
     t->utc = utc;
     t->y = l.y;
     t->mo = l.mo;
@@ -320,9 +338,9 @@ int clock_now(struct sbos_time *t)
     t->s = l.s;
     t->wday = l.wday;
     t->dst = l.dst;
-    t->off_min = tz_zones[0].off_min + (l.dst ? 60 : 0);
+    t->off_min = tzdb[z].off_min + (l.dst ? 60 : 0);
     sb_strcpy(t->abbr, sizeof(t->abbr), l.abbr);
-    sb_strcpy(t->zone, sizeof(t->zone), tz_zones[0].city);
+    sb_strcpy(t->zone, sizeof(t->zone), tzdb[z].city);
     return 1;
 }
 

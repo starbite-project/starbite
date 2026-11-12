@@ -367,8 +367,11 @@ static const char *const MO[12] = { "January", "February", "March", "April", "Ma
                                     "September", "October", "November", "December" };
 static int put_dec(char *b, int v) { int n = 0; char t[12]; int k = 0; if (v < 0) { b[n++] = '-'; v = -v; }
     do { t[k++] = (char)('0' + v % 10); v /= 10; } while (v); while (k) b[n++] = t[--k]; b[n] = 0; return n; }
-static void fmt_hm(char *b) { b[0] = (char)('0' + ST.h / 10); b[1] = (char)('0' + ST.h % 10); b[2] = ':';
-    b[3] = (char)('0' + ST.mi / 10); b[4] = (char)('0' + ST.mi % 10); b[5] = 0; }
+/* Track A: 12 / 24-hour (sh_clock24). fmt_hm: the status bar's and the lock's "9:41" (no AM / PM, as iOS); fmt_time
+ * with ampm: lists' "9:41 AM" (b: 9 bytes) */
+#include "sh_timefmt.h"
+static int fmt_time(char *b, int h, int m, int ampm) { return sh_fmt_time(b, h, m, sh_clock24(), ampm); }
+static void fmt_hm(char *b) { fmt_time(b, ST.h, ST.mi, 0); }
 
 static tk_layer lstatus, lclock, lwidgets;
 static void relink(void);
@@ -427,7 +430,8 @@ static void build_lclock(void)
     /* P3j (audit 3): hours, colon and minutes as three runs: proportional figures at -1 pt (the -4 pt tabular
      * run pushed the colon onto the next digit and set the clock 2.4 pt right), the colon raised to the digits'
      * middle (Inter's sits at x-height) with even room each side, the whole centred */
-    char hh[3] = { hm[0], hm[1], 0 }, mm[3] = { hm[3], hm[4], 0 };
+    int hn = hm[1] == ':' ? 1 : 2;               /* Track A: "9:41" in 12-hour time */
+    char hh[3] = { hm[0], hn == 2 ? hm[1] : 0, 0 }, mm[3] = { hm[hn + 1], hm[hn + 2], 0 };
     float wh = tw(TK_IT700, 106, hh, -1, 0), wc = tw(TK_IT700, 106, ":", 0, 0), wm = tw(TK_IT700, 106, mm, -1, 0), gap = 2;
     float x0 = (390 - (wh + gap + wc + gap + wm)) / 2, base = base_of(TK_IT700, 106, 96, 108.12f);
     tk_stop s[2] = { { 0, tk_hex(0xffffff, 1) }, { 1, tk_hex(0xdfe9ff, 1) } };
@@ -471,8 +475,7 @@ static void build_lwidgets(void)
     num[n] = (char)0xc2; num[n + 1] = (char)0xb0; num[n + 2] = 0;
     ring_widget(&d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), tk_hex(0x6fb3ff, 1), num, "TEMP");
     char at[16] = "Off";                       /* P2y: the kernel's next alarm (sh_alarm), not the concept's */
-    if (ALM.on) { at[0] = (char)('0' + ALM.h / 10); at[1] = (char)('0' + ALM.h % 10); at[2] = ':';
-                  at[3] = (char)('0' + ALM.m / 10); at[4] = (char)('0' + ALM.m % 10); at[5] = 0; }
+    if (ALM.on) fmt_time(at, ALM.h, ALM.m, 1);    /* Track A: "7:00 AM" in 12-hour time */
     alm_when = !ALM.on ? 0 : ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? 1 : 2;
     rect_widget(&d, "alarm", "Alarm", at, alm_when == 1 ? "Today" : alm_when == 2 ? "Tomorrow" : "No alarm set");
     trim(&lwidgets);
@@ -1755,7 +1758,7 @@ static const appdef APPS[] = {
     { "store", "App Store", 0x0a6fe8, 1, { { "", 1, { { "", "" } } } } },
     { "maps", "Maps", 0xe3decd, 1, { { "", 1, { { "", "" } } } } },           /* helper D: shell_nc.inc's page_maps */
     { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "@wifi" }, { "Cellular", "No SIM" }, { "Battery", "@pct" } } },
-                                           { "", 6, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" },
+                                           { "", 6, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "@tz" },
                                                       { "Medical Card", "" } } },
                                            { "About", 3, { { "Model", "Galaxy S9 (SM-G960F)" }, { "Software", "@ver" }, { "Memory", "4 GB" } } } } },
 };
@@ -2102,6 +2105,16 @@ static float toast_left;
 static tk_layer apsw, aptm, apctl;
 static struct { int sw_run, laps, tm_run, sw_ds, tm_s, ctl_ver, ctl_drawn; float sw_t0, sw_acc, lap_at, tm_end; } CLK = { 0, 0, 0, -1, -1, 1, 0, 0, 0, 0, 0 };
 #define CLK_DY 27.0f              /* P3p: the page under the iOS header band */
+/* Track A alarms (shell_time.inc): the Clock app's Alarm tab; Settings > Date & Time and its zone list */
+static int ta_clock_page(dc *d);
+static int ta_clock_tap(float x, float y);
+static int ta_alarm_tab(void);
+static int ta_page(dc *d);
+static int ta_tap(float x, float y);
+static int ta_touch(int ph, float x, float y, float t);
+static int ta_set(const char *what, const char *key, float v);
+#define TA_SUB_DT 5               /* AS.sub: Settings > Date & Time; TA_SUB_TZ its zone list */
+#define TA_SUB_TZ 6
 static float clk_sw_ms(float t) { return CLK.sw_acc + (CLK.sw_run ? t - CLK.sw_t0 : 0); }
 static int fmt_ms(char *b, float ms, int tenths)
 {
@@ -2116,6 +2129,7 @@ static int fmt_ms(char *b, float ms, int tenths)
 }
 static void page_clock(dc *d)
 {
+    if (ta_clock_page(d)) return;                /* Track A alarms: the Alarm tab */
     d_h1(d, "Clock");
     char hm[8], dt[48];
     fmt_hm(hm);
@@ -2178,6 +2192,10 @@ static int clk_update(float t)
         any = 1;
     }
     if (!is_app("clock") || !AP.on) return any;
+    if (ta_alarm_tab()) {                        /* Track A alarms: no stopwatch or timer layers there */
+        if (!apsw.hidden || !aptm.hidden || !apctl.hidden) { apsw.hidden = aptm.hidden = apctl.hidden = 1; any = 1; relink(); }
+        return any;
+    }
     float sw = clk_sw_ms(t);
     int ds = (int)(sw / 100);
     if (ds != CLK.sw_ds || !apsw.bmp.px) {
@@ -2202,6 +2220,7 @@ static int clk_update(float t)
 }
 static void clk_tap(float x, float y)
 {
+    if (ta_clock_tap(x, y)) return;              /* Track A alarms: the tabs, the Alarm tab */
     float t = now_ms;
     y -= CLK_DY;
     if (y >= 350 && y < 428) {
@@ -2816,6 +2835,7 @@ static const char *live_text(const char *s, char *buf)
         if (!cc_bright) return "Default";
         tk_memcpy(buf, "Level ", 6); n = 6 + put_dec(buf + 6, cc_bright); tk_memcpy(buf + n, " of 4", 6);
     } else if (!tk_strcmp(s, "@time")) fmt_hm(buf);
+    else if (!tk_strcmp(s, "@tz")) { const char *c = ""; sh_tz_name(sh_tz(), &c); return c; }   /* Track A */
     else if (!tk_strcmp(s, "@date")) {
         const char *w = WD[ST.wday % 7], *m = MO[(ST.mon + 11) % 12];
         n = (int)tk_strlen(w); tk_memcpy(buf, w, (size_t)n); buf[n++] = ' ';
@@ -2893,7 +2913,8 @@ static void own_strip(int a, int i)
     else if (!tk_strcmp(k, "calc")) page_calc(&d);
     else if (!tk_strcmp(k, "light")) page_light(&d);
     else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
-    else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else if (AS.sub == 4) sv_page_card_edit(&d); else page_display(&d); }
+    else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else if (AS.sub == 4) sv_page_card_edit(&d);
+                                          else if (ta_page(&d)) ; else page_display(&d); }   /* Track A: Date & Time */
     else if (!tk_strcmp(k, "notes")) page_notes(&d);
     else if (!tk_strcmp(k, "search")) page_search(&d);
     else if (lx_is(k)) lx_page(&d);
@@ -2994,7 +3015,8 @@ static void build_app_page(int a)
                 lx = ROW_TX + 29 + 13;
             }
             int nav = !tk_strcmp(A->k, "settings") && (!tk_strcmp(S->rows[r].l, "Display & Brightness") || !tk_strcmp(S->rows[r].l, "Wi-Fi") ||
-                                                       !tk_strcmp(S->rows[r].l, "Cellular") || !tk_strcmp(S->rows[r].l, "Medical Card"));
+                                                       !tk_strcmp(S->rows[r].l, "Cellular") || !tk_strcmp(S->rows[r].l, "Medical Card") ||
+                                                       !tk_strcmp(S->rows[r].l, "Date & Time"));   /* Track A */
             if (nav) d_icon(&d, "chev", CONTENT_R - 30, ry + 16.5f, .45f);
             const char *rt = live_text(S->rows[r].r, rb);
             if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Cellular")) rt = md_text();
@@ -3442,6 +3464,7 @@ static void app_tap(float x, float y)
         wifi_tap(x, y);
     } else if (is_app("settings") && AS.sub == 3) {
         cell_tap(x, y);
+    } else if (is_app("settings") && ta_tap(x, y)) {      /* Track A: Date & Time, the zone list */
     } else if (is_app("settings") && AS.sub) {
         if (BACK_HIT(x, y)) { AS.sub = 0; build_app_page(AP.a); return; }
         if (y >= DSP_Y && y < DSP_Y + 64 && x >= GROUP_X && x < CONTENT_R) {
@@ -3455,6 +3478,7 @@ static void app_tap(float x, float y)
         if (x >= GROUP_X && x < CONTENT_R && y >= yd && y < yd + 47) { AS.sub = 1; build_app_page(AP.a); return; }
         if (x >= GROUP_X && x < CONTENT_R && y >= yw && y < yw + 47) { AS.sub = 2; build_app_page(AP.a); return; }   /* Wi-Fi */
         if (x >= GROUP_X && x < CONTENT_R && y >= yw + 47 && y < yw + 94) { AS.sub = 3; build_app_page(AP.a); return; }   /* Cellular */
+        if (x >= GROUP_X && x < CONTENT_R && y >= yd + 4 * 47 && y < yd + 5 * 47) { AS.sub = TA_SUB_DT; build_app_page(AP.a); return; }   /* Track A */
 
     }
 }
@@ -3541,6 +3565,7 @@ void sh_cell(const sh_cell_t *c)
 #include "shell_nc.inc"                             /* helper D: notifications, the Notification Centre, the banner */
 #include "shell_switcher.inc"                       /* helper D: the app switcher */
 #include "shell_comms.inc"                          /* helper I: Phone and Messages, the call screen */
+#include "shell_time.inc"                           /* Track A: the Alarm tab, Settings > Date & Time */
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
@@ -3834,6 +3859,7 @@ void sh_set(const char *what, const char *key, float v)
     } else if (nc_set(what, key, v)) {            /* helper D: notify=, banner=, nc=, ncgroup=, ncswipe= (shell_nc.inc) */
     } else if (sw_set(what, key, v)) {            /* helper D: switcher=, swsnap= (shell_switcher.inc) */
     } else if (cm_set(what, key, v)) {            /* helper I: thread=, compose=, to=, dial=, recent=, callpad=, ... */
+    } else if (ta_set(what, key, v)) {            /* Track A: clock24=, tz=, sub=datetime / tz, clocktab=, alarmedit= */
     } else if (!tk_strcmp(what, "app")) {
         if (!key[0] && AP.on) app_finish_close();       /* L2: "app=" closes the open app at once */
         for (int a = 0; a < NAPPS; a++)
@@ -4055,7 +4081,7 @@ static void app_press(float x, float y)
         for (int s = 0; s < A->ns && !ok; s++)
             for (int i = 0; i < A->sec[s].n && !ok; i++) {
                 const char *l = A->sec[s].rows[i].l;
-                if (tk_strcmp(l, "Wi-Fi") && tk_strcmp(l, "Cellular") && tk_strcmp(l, "Display & Brightness")) continue;
+                if (tk_strcmp(l, "Wi-Fi") && tk_strcmp(l, "Cellular") && tk_strcmp(l, "Display & Brightness") && tk_strcmp(l, "Date & Time")) continue;
                 float ry = gen_row_y(A, s, i), gy = gen_row_y(A, s, 0);
                 if (x >= GROUP_X && x < CONTENT_R && y >= ry && y < ry + 47) {
                     r = (tk_rect){ GROUP_X, ry, GROUP_W, 47 };
@@ -4100,6 +4126,7 @@ void sh_touch(int phase, float x, float y, float t)
     now_ms = t;
     if (cm_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* helper I: the call screen, the call button's hold */
     if (sv_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* survival-next: SOS's beacon, a tool's hold */
+    if (ta_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* Track A: the zone list's scroll */
     if (phase == 0) {
         tk_tracker_reset(&T.tr);
         T.moved = 0;

@@ -397,6 +397,19 @@ int alarm_ringing(void);
 void alarm_minute(const struct sbos_time *t);
 void alarm_timer(void);
 int alarm_stop(int snooze);
+/* Track A (2026-11-12): Next's Alarm tab (the list of up to four, labels), kept in the record "sbos.alarm" */
+#define ALARM_REC_SIZE (4 + 4 * 28)
+int alarm_count(void);
+int alarm_get(int i, int *hm, int *days, int *on, char *label, int cap);
+int alarm_put(int i, int hm, int days, int on, const char *label);   /* i == alarm_count(): add */
+int alarm_del(int i);
+int alarm_pack(uint8_t out[ALARM_REC_SIZE]);        /* 1: the list is the kernel's (save it) */
+void alarm_unpack(const uint8_t in[ALARM_REC_SIZE]);
+int alarm_app_state(uint8_t out[20]);               /* the classic Clock app's state as the list (0: none yet) */
+/* Track A: the time zone in use (tzdb.c's index) and 12 / 24-hour; services.c, saved by settings.c */
+int clock_zone(void);
+void clock_zone_set(int i);
+extern int clock_24h;
 /* 1.2-alpha9: notifications (notif.c) */
 struct notif {
     char who[16], title[40], text[72];
