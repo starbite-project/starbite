@@ -89,3 +89,6 @@ com.apple.corespotlightservice
 com.apple.Spotlight
 com.apple.security.cryptexd     # S1f 2026-11-12: abort every ~10 s, "unexpected failure: open: /System/Volumes/Preboot: ENOENT". The OS cryptex lives on the root (/System/Cryptexes/OS) and Preboot must not exist (CarbonCore registers it as a second volume of the root's device, S1d); no cryptex to manage
 com.apple.mobileactivationd     # S1g 2026-11-12: os_crash in main every ~10 s after "dealwith_activation" fails (Apple Silicon activation needs the SEP); S2h option, run S2g first
+com.apple.findmy.findmylocateagent   # S2k/S2l 2026-11-12: ~100 % of a core, ~1M A64E traps/s, for minutes; Find My has no use here
+com.apple.iomfb_bics_daemon          # crash loop (S1g onwards): Apple panel/brightness daemon for AppleDCP displays, not our framebuffer
+com.apple.wifip2pd                   # crash loop (S2k): no Wi-Fi hardware path on macOS yet
