@@ -422,7 +422,7 @@ static int sw_dirty;                          /* (shell_switcher.inc's: the open
 static void nc_blit_scaled(tk_bmp *dst, const tk_bmp *src, float X, float Y, float f);
 static void link(tk_layer *parent, tk_layer **kids, int n);
 static void lap_us(const char *what, uint64_t us);
-static char carrier[32] = "No SIM";
+static char carrier[32] = "";            /* P3z: nothing while Cellular is off (the SIM is unknown then; "No SIM" only when the modem says so) */
 static void build_lstatus(void)
 {
     relayer(&lstatus);
@@ -2527,7 +2527,7 @@ static const char *const KD[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9",
 static const char *const KL[12] = { "", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ", "", "+", "" };
 static struct { int tab; char num[24]; int thread, sub; } AS;   /* the phone's tab (0 fav .. 3 pad), the dialled number, the open
                                                                  * thread; sub: Settings' Display & Brightness page (P3d) */
-static char cell_hint[48] = "No SIM \xc2\xb7 emergency calls only";
+static char cell_hint[48] = "Cellular off";
 
 /* P2y: an honest empty state (iOS's ContentUnavailableView): a title and up to three lines, centred, grey. P3p
  * (P3j-18): centred in its area (between the header and the bottom or a bar), not at a fixed top */
@@ -4028,7 +4028,7 @@ static const char *md_text(void)
     case SH_CELL_RESTARTING: return "Restarting\xe2\x80\xa6";
     case SH_CELL_GUARD: return "Stopped: a SIM or a registration";
     case SH_CELL_FAILED: return "Could not start";
-    case SH_CELL_ON: return CELL.emergency_only ? "Emergency calls only" : "No SIM";
+    case SH_CELL_ON: return CELL.emergency_only ? "Emergency calls only" : "No Service";
     default: return "Off";
     }
 }
@@ -4043,15 +4043,18 @@ void sh_cell(const sh_cell_t *c)
     const char *cr = (CELL.data == SH_DATA_REGISTERED || CELL.data == SH_DATA_UP) && CELL.oper[0] ? CELL.oper :
                      CELL.data == SH_DATA_SEARCHING ? "Searching\xe2\x80\xa6" : CELL.data == SH_DATA_LOCKED ? "SIM PIN on" :
                      CELL.state == SH_CELL_STARTING ? "Starting\xe2\x80\xa6" : CELL.state == SH_CELL_RESTARTING ? "Restarting\xe2\x80\xa6" :
-                     CELL.state == SH_CELL_ON && CELL.emergency_only ? "Emergency calls only" : "No SIM";
+                     CELL.data == SH_DATA_NO_SIM ? "No SIM" :
+                     CELL.state == SH_CELL_ON && CELL.emergency_only ? "Emergency calls only" :
+                     CELL.state == SH_CELL_ON ? "No Service" : "";   /* P3z: Cellular off: nothing (the user saw "No SIM" with a SIM in) */
     sh_carrier(cr);                     /* the lock screen's left (and the Control Centre's): the operator */
     SB_CELL.state = CELL.state == SH_CELL_ON;
     SB_CELL.bars = CELL.bars;
     SB_CELL.rat = CELL.rat;
     const char *h = CELL.data == SH_DATA_UP ? md_join(CELL.oper[0] ? CELL.oper : "Mobile", " \xc2\xb7 cellular data on") :
                     data_on() ? "Cellular data \xc2\xb7 connecting" :
-                    CELL.state == SH_CELL_ON && !CELL.emergency_only && CELL.bars <= 0 ? "No SIM \xc2\xb7 searching" :
-                    "No SIM \xc2\xb7 emergency calls only";
+                    CELL.data == SH_DATA_NO_SIM ? "No SIM \xc2\xb7 emergency calls only" :
+                    CELL.state == SH_CELL_ON && !CELL.emergency_only && CELL.bars <= 0 ? "Searching\xe2\x80\xa6" :
+                    CELL.state == SH_CELL_ON ? "Emergency calls only" : "Cellular off";
     int n = 0;
     while (h[n] && n < 47) { cell_hint[n] = h[n]; n++; }
     cell_hint[n] = 0;

@@ -555,43 +555,83 @@ static int wheel_cols(void) { return CK.edit >= 0 ? 2 : 3; }
 static float wheel_cx(int c) { return CK.edit >= 0 ? (c ? 228 : 162) : 78 + 117.0f * c; }
 static int wheel_mod(int c) { return (CK.edit >= 0 ? c == 0 : c == 0) ? 24 : 60; }
 static int ck_wheel_on(void) { return is_app("clock") && (CK.edit >= 0 || (CK.tab == 3 && !CLK.tm_run && !CK.tm_paused)); }
-/* the wheels: the values round the selection band, fading and shrinking away from it */
+/* the wheels (P3z: the phone measured 60 ms a frame while one moved, ~1 fps: every touch and every settling turn
+ * redrew one 390-pt-wide bitmap with ~35 numbers at continuously changing sizes, so no glyph was ever cached, and the
+ * GPU took a new 4-5 MB texture each frame). Now: the group ckwheel clips to the 5 rows and fades its top and bottom
+ * 1.6 rows (the compositor's clip fades, as the scrolling lists); under it the band (the selection, the units, the
+ * ":") drawn once, and a small layer per column with 9 values at one size, moved by whole px while it turns and
+ * redrawn only when it passes a value (about 1 MB, a few ms, every 36 pt) */
+static tk_layer ckwband, ckcol[3];
+static int ckcol_sh[3], ckcol_base[3];
+static float ck_col_x(int c) { return CK.edit >= 0 ? (c ? 204.0f : 116.0f) : wheel_cx(c) - 56; }
+#define CK_COL_W 70.0f
+static void ck_col_draw(int c, int sh)
+{
+    float cy = wheel_cy(), x0 = ck_col_x(c);
+    int mod = wheel_mod(c), base = CKWV[c];
+    tk_layer *nx = ckcol[c].next;                  /* mk re-inits the layer: keep its place among the group's children */
+    relayer(&ckcol[c]);
+    dc d = mk(&ckcol[c], "clock-col", x0, cy - 4.5f * CK_WP, CK_COL_W, 9 * CK_WP, 0, 0);
+    ckcol[c].next = nx;
+    ckcol_sh[c] = sh;
+    ckcol_base[c] = base;
+    if (!d.b->px) return;
+    for (int k = -4; k <= 4; k++) {
+        int v = ((base - sh + k) % mod + mod) % mod;
+        char b[4];
+        b[0] = (char)('0' + v / 10); b[1] = (char)('0' + v % 10); b[2] = 0;
+        if (CK.edit < 0 && v < 10) { b[0] = (char)('0' + v); b[1] = 0; }
+        float y = cy + k * CK_WP, w = tw(TK_IT400, 23, b, 0, TK_TNUM);
+        float x = CK.edit >= 0 ? (c ? 208 : 182 - w) : wheel_cx(c) + 8 - w;
+        d_text(&d, TK_IT400, 23, x, bl(TK_IT400, 23, y - lh(TK_IT400, 23) / 2), b, 0, TK_TNUM, W(1), 0);
+    }
+}
+/* a column where its offset puts it: redrawn only past a value (or when its value changed), else moved */
+static void ck_col_place(int c)
+{
+    float off = CK.woff[c];
+    int sh = (int)tk_floorf(off / CK_WP + .5f);
+    if (!ckcol[c].bmp.px || sh != ckcol_sh[c] || CKWV[c] != ckcol_base[c]) ck_col_draw(c, sh);
+    ckcol[c].x = ckcol[c].bx;
+    ckcol[c].y = ckcol[c].by + tk_floorf(PT(off - sh * CK_WP) + .5f);
+    ckcol[c].hidden = !ckcol[c].bmp.px;
+}
+static void ck_wheel_place(void)
+{
+    if (ckwheel.hidden) return;
+    for (int c = 0; c < wheel_cols(); c++) ck_col_place(c);
+}
+static void ck_wheel_free(void)
+{
+    relayer(&ckwband);
+    for (int c = 0; c < 3; c++) { relayer(&ckcol[c]); ckcol[c].hidden = 1; }
+    ckwheel.child = 0;
+    ckwheel.hidden = 1;
+}
 static void ck_wheel_build(void)
 {
-    relayer(&ckwheel);
-    ckwheel.hidden = 1;
+    ck_wheel_free();
     if (!ck_wheel_on()) return;
     float cy = wheel_cy(), top = cy - 2.5f * CK_WP;
-    tk_layer *nx = ckwheel.next;
-    dc d = mk(&ckwheel, "clock-wheels", 0, top, 390, 5 * CK_WP, 0, 0);
-    ckwheel.next = nx;
-    if (!d.b->px) return;
-    d_rrect(&d, MARGIN - 4, cy - CK_WP / 2, CONTENT_W + 8, CK_WP, 10, W(.12f));
-    int nc = wheel_cols();
-    for (int c = 0; c < nc; c++) {
-        int mod = wheel_mod(c), base = CKWV[c];
-        float off = CK.woff[c];
-        int sh = (int)tk_floorf(off / CK_WP + .5f);
-        float fr = off - sh * CK_WP;
-        for (int k = -3; k <= 3; k++) {
-            int v = ((base - sh + k) % mod + mod) % mod;
-            float y = cy + k * CK_WP + fr, dist = tk_fabsf(y - cy) / (2.5f * CK_WP);
-            if (dist >= 1) continue;
-            char b[4];
-            b[0] = (char)('0' + v / 10); b[1] = (char)('0' + v % 10); b[2] = 0;
-            if (CK.edit < 0 && v < 10) { b[0] = (char)('0' + v); b[1] = 0; }
-            float fs = 23 - 4 * dist, w = tw(TK_IT400, fs, b, 0, TK_TNUM);
-            float x = CK.edit >= 0 ? (c ? 208 : 182 - w) : wheel_cx(c) + 8 - w;
-            d_text(&d, TK_IT400, fs, x, bl(TK_IT400, fs, y - lh(TK_IT400, fs) / 2), b, 0, TK_TNUM, W(1 - .7f * dist), 0);
-        }
+    dc d = mk(&ckwband, "clock-band", MARGIN - 4, cy - CK_WP / 2, CONTENT_W + 8, CK_WP, 1, 0);
+    if (d.b->px) {
+        d_rrect(&d, MARGIN - 4, cy - CK_WP / 2, CONTENT_W + 8, CK_WP, 10, W(.12f));
         if (CK.edit < 0) {
             static const char *const U[3] = { "hours", "min", "sec" };
-            d_text(&d, TK_IT600, 17, wheel_cx(c) + 16, bl(TK_IT600, 17, cy - lh(TK_IT600, 17) / 2), U[c], 0, 0, INK, 0);
-        }
+            for (int c = 0; c < 3; c++)
+                d_text(&d, TK_IT600, 17, wheel_cx(c) + 16, bl(TK_IT600, 17, cy - lh(TK_IT600, 17) / 2), U[c], 0, 0, INK, 0);
+        } else
+            d_text_box(&d, TK_IT400, 23, 195, bl(TK_IT400, 23, cy - lh(TK_IT400, 23) / 2), 20, 1, ":", 0, 0, INK, 0);
     }
-    if (CK.edit >= 0) d_text_box(&d, TK_IT400, 23, 195, bl(TK_IT400, 23, cy - lh(TK_IT400, 23) / 2), 20, 1, ":", 0, 0, INK, 0);
-    trim(&ckwheel);
+    int nc = wheel_cols();
+    tk_layer *k[4] = { &ckwband, &ckcol[0], &ckcol[1], &ckcol[2] };
+    for (int c = 0; c < 3; c++) { tk_layer_init(&ckcol[c], "clock-col"); ckcol[c].hidden = 1; }
+    link(&ckwheel, k, 1 + nc);
+    ckwheel.clip = 1;
+    ckwheel.clip_r = (tk_rect){ 0, PT(top), TK_W, PT(5 * CK_WP) };
+    ckwheel.fade_top = ckwheel.fade_bot = PT(1.6f * CK_WP);
     ckwheel.hidden = 0;
+    for (int c = 0; c < nc; c++) ck_col_place(c);
 }
 #define CK_ED_G 420.0f                       /* the alarm editor: Repeat / Label, then Delete */
 #define CK_ED_DEL 560.0f
@@ -863,8 +903,7 @@ static int ck_touch(int ph, float x, float y, float t)
         CK.wdown = 0;
         CK.wvel[c] = tk_tracker_v(&CK.wtr) * 1000;      /* pt / s */
     }
-    ck_wheel_build();
-    relink();
+    ck_wheel_place();                              /* P3z: moved, redrawn only past a value */
     return 1;
 }
 /* the wheels' settling: their speed decays, then they snap to the nearest value (a selection tick each value) */
@@ -893,7 +932,7 @@ static int ck_tick(float dt)
         }
         mv = 1;
     }
-    if (mv && ck_wheel_on()) { ck_wheel_build(); relink(); }
+    if (mv && ck_wheel_on()) ck_wheel_place();
     return mv;
 }
 static int ck_moving(void)
@@ -1140,7 +1179,7 @@ static void ck_extras_of(const char *k)
 {
     if (!tk_strcmp(k, "clock")) ck_extras();
     else if (!tk_strcmp(k, "calc")) build_calc();
-    else { relayer(&ckwheel); ckwheel.hidden = 1; relayer(&calop); calop.hidden = 1; }
+    else { ck_wheel_free(); relayer(&calop); calop.hidden = 1; }
 }
 static int ck_layers(tk_layer **o)
 {
@@ -1151,7 +1190,7 @@ static int ck_layers(tk_layer **o)
 }
 static void ck_closed(void)
 {
-    relayer(&ckwheel); ckwheel.hidden = 1;
+    ck_wheel_free();
     relayer(&calop); calop.hidden = 1;
     CK.edit = -1; CK.wdown = 0;
     for (int c = 0; c < 3; c++) { CK.woff[c] = 0; CK.wvel[c] = 0; }
