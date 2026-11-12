@@ -92,3 +92,9 @@ com.apple.mobileactivationd     # S1g 2026-11-12: os_crash in main every ~10 s a
 com.apple.findmy.findmylocateagent   # S2k/S2l 2026-11-12: ~100 % of a core, ~1M A64E traps/s, for minutes; Find My has no use here
 com.apple.iomfb_bics_daemon          # crash loop (S1g onwards): Apple panel/brightness daemon for AppleDCP displays, not our framebuffer
 com.apple.wifip2pd                   # crash loop (S2k): no Wi-Fi hardware path on macOS yet
+# 2026-11-13 (S2w): registered without their programs (the root's size cap left /usr/libexec/remindd and
+# /usr/sbin/bluetoothd out): a synchronous XPC to them never returns. ReminderKit's (UserAccountUpdater's
+# CalendarMigration plugin) kept loginwindow from ever launching Dock/Finder/SystemUIServer; MobileBluetooth's attach
+# stuck a WindowServer worker. Put them back when the binaries are on the root (remindd) / a Bluetooth driver exists.
+com.apple.remindd
+com.apple.bluetoothd
