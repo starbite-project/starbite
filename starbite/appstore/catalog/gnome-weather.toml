@@ -1,0 +1,31 @@
+id = "gnome-weather"
+name = "Weather"
+summary = "The forecast for your places: today, hourly and ten days"
+description = """GNOME Weather shows the conditions and forecast for the places you add: now, hour by hour and for the next days, with sunrise and sunset. Search a town to add it. Forecasts come from MET Norway over the internet."""
+category = "Utilities"
+licence = "GPL-2.0-or-later"
+homepage = "https://apps.gnome.org/Weather/"
+icon = "org.gnome.Weather"
+ram_mb = 120
+featured = true
+default = "distro"
+touch = "good"
+keywords = ["weather", "forecast", "temperature", "rain", "sun", "climate"]
+
+[launcher]
+exec = "gnome-weather"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["gnome-weather"]
+
+[runtime]
+needs = ["network"]
+note = "Forecasts need the network. Add a town by name (no automatic location in the guest yet)."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 4
+build_mb = 500

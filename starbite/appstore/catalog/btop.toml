@@ -17,7 +17,7 @@ exec = "btop"
 terminal = true
 keyboard = false
 
-# static musl build; archive paths start with ./btop/ ('.' counts as a component, hence strip 2)
+# static musl build; archive paths start with ./btop/ (sbstore drops "." parts, so strip 1)
 [release]
 provider = "github"
 repo = "aristocratos/btop"
@@ -25,7 +25,7 @@ asset = "btop-aarch64-unknown-linux-musl.tar.gz"
 prerelease = false
 version_from = "regex:^v(.+)$"
 format = "tar"
-strip = 2
+strip = 1
 bin = ["bin/btop"]
 size_mb = 3
 

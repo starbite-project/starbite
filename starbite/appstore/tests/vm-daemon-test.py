@@ -87,7 +87,8 @@ for job in jobs:
     i = names.index(aid)
     t0 = time.time()
     c.sendall(b"op %d %d %d\n" % (i, 1 | (sbstore.M_NUM[m] << 8), seq))
-    l, seen = lines(lambda l: l.startswith("pkg %d 0 100" % i) or l.startswith("pkg %d 4" % i), 1800)
+    l, seen = lines(lambda l: l.startswith("pkg %d 0 100" % i) or l.startswith("pkg %d 4" % i),
+                    int(os.environ.get("JOB_TIMEOUT", "1800")))
     phases = sorted({s.split()[2] for s in seen if s.startswith("pkg %d " % i)})
     time.sleep(1)
     hdr, pk, h3, p3 = table()
@@ -96,6 +97,19 @@ for job in jobs:
         aid, m, time.time() - t0, phases, bool(pk[i][8] & 1), p3[i][16].rstrip(b"\0").decode(),
         pk[i][4].rstrip(b"\0").decode()))
     say("rescan" in seen, "%s: rescan sent" % aid)
+    if ok and m in ("release", "source"):              # the program itself runs (apps work, not only install)
+        import json as _j
+        cat = _j.load(open(sys.argv[1])) if sys.argv[1].endswith(".json") else {}
+        apps = cat.get("apps", []) if isinstance(cat, dict) else []
+        if isinstance(apps, dict):
+            apps = list(apps.values())
+        app = next((a for a in apps if a.get("id") == aid), {})
+        bins = (app.get(m) or {}).get("bin") or (app.get("release") or {}).get("bin") or []
+        if bins:
+            b = "/usr/local/bin/" + os.path.basename(bins[0])
+            r = subprocess.run([b, "--version"], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+            first = (r.stdout or r.stderr).strip().splitlines()[:1]
+            say(r.returncode == 0 and bool(first), "%s runs: %s --version -> %s" % (aid, b, first[0][:60] if first else r.returncode))
     c.sendall(b"op %d 2 %d\n" % (i, seq))
     l, seen = lines(lambda l: l.startswith("pkg %d 0 100" % i) or l.startswith("pkg %d 4" % i), 600)
     time.sleep(1)
