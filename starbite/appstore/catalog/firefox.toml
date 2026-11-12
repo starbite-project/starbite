@@ -29,6 +29,9 @@ bin = ["firefox"]
 size_mb = 300
 
 [release.verify]
+sums_signature = "https://archive.mozilla.org/pub/firefox/releases/{version}/SHA256SUMS.asc"
+key = "keys/mozilla.asc"
+fingerprint = "14F26682D0916CDD81E37B6D61B7B526D98F0353"
 sha256sums_url = "https://archive.mozilla.org/pub/firefox/releases/{version}/SHA256SUMS"
 sha256_line = "linux-aarch64/en-US/firefox-{version}.tar.xz"
 

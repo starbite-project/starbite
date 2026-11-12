@@ -74,8 +74,10 @@ sha256_asset = "{asset}.sha256sum"   # an asset with "<hex>  <name>" lines or on
 sha256sums_url = "https://.../SHA256SUMS"   # a sums file at a URL ({version} expands); the line for our file
 sha256_line = "linux-aarch64/en-US/firefox-{version}.tar.xz"   # which line of the sums file (default: the asset's name)
 github_digest = true          # GitHub's own asset "digest" (sha256) from the API (2025+)
-signature = "{asset}.asc"     # recorded and fetched; checked with gpgv when `key` is set and gpgv exists
-key = "keys/<id>.asc"
+signature = "{asset}.asc"     # a detached OpenPGP signature of the download: an asset glob or a URL template
+sums_signature = "https://.../SHA256SUMS.asc"   # or: the signature of the sums file (checked before its line is used)
+key = "keys/<signer>.asc"      # the pinned public key (starbite/appstore/keys/, see its README)
+fingerprint = "14F2...0353"   # the expected signer (or a list: primary + signing subkey); checked with sqv or gpgv
 ```
 
 ## `[source]`: compile it

@@ -79,6 +79,11 @@ def check_app(fid, a):
         if n not in NEEDS:
             e.append("%s: runtime.needs %r unknown" % (fid, n))
     R = a.get("release")
+    V = (R or {}).get("verify") or {}
+    if (V.get("signature") or V.get("sums_signature")) and not (V.get("key") and V.get("fingerprint")):
+        e.append("%s: a signature needs key + fingerprint" % fid)
+    if V.get("key") and not os.path.exists(os.path.join(TOP, V["key"])):
+        e.append("%s: key %s not in starbite/appstore" % (fid, V["key"]))
     if R is not None:
         if R.get("provider", "github") not in PROVIDERS:
             e.append("%s: release.provider %r" % (fid, R.get("provider")))
@@ -193,6 +198,8 @@ def cmd_build(out, do_resolve):
         json.dump({"version": 1, "built": time.strftime("%Y-%m-%d", time.gmtime()),
                    "checked": known.get("checked"), "apps": lst}, f, indent=1, sort_keys=True)
     cmd_icons(os.path.join(out, "icons"))
+    if os.path.isdir(os.path.join(TOP, "keys")):
+        shutil.copytree(os.path.join(TOP, "keys"), os.path.join(out, "keys"), dirs_exist_ok=True)
     print("wrote %s/catalog.json (%d apps)" % (out, len(lst)))
     return 0
 

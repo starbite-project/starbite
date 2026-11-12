@@ -1066,6 +1066,82 @@ def sums_lookup(text, name):
     return None
 
 
+def catalog_dir():
+    """where keys/ and icons/ are: beside catalog.json, or (a TOML directory, the source tree) beside catalog/"""
+    return os.path.dirname(C.catalog.rstrip("/"))
+
+
+def _dearmor(text):
+    """an ASCII-armoured OpenPGP block -> its binary packets (for gpgv's --keyring)"""
+    import base64
+    body, on = [], False
+    for l in text.splitlines():
+        if l.startswith("-----BEGIN PGP"):
+            on, body = True, []
+            continue
+        if l.startswith("-----END PGP"):
+            break
+        if on and l.strip() and ":" not in l and not l.startswith("="):
+            body.append(l.strip())
+    return base64.b64decode("".join(body))
+
+
+def verify_signature(sig, data, ver_spec):
+    """an OpenPGP detached signature over data with the recipe's pinned key (sqv, else gpgv); returns the signer"""
+    key = os.path.join(catalog_dir(), ver_spec["key"])
+    if not os.path.exists(key):
+        raise StoreError("signing key missing", "%s is not in the catalog" % ver_spec["key"])
+    want = [f.upper().replace(" ", "") for f in ([ver_spec["fingerprint"]] if isinstance(ver_spec.get("fingerprint"), str)
+                                                else ver_spec.get("fingerprint") or [])]
+    if shutil.which("sqv"):
+        r = subprocess.run(["sqv", "--keyring", key, sig, data], capture_output=True, text=True)
+        got = r.stdout.upper()
+        ok = r.returncode == 0
+        err = r.stderr.strip()[-200:]
+    elif shutil.which("gpgv"):
+        kr = sig + ".keyring"
+        with open(key) as f, open(kr, "wb") as o:
+            o.write(_dearmor(f.read()))
+        r = subprocess.run(["gpgv", "--status-fd", "1", "--keyring", kr, sig, data], capture_output=True, text=True)
+        os.unlink(kr)
+        got = " ".join(l for l in r.stdout.splitlines() if "VALIDSIG" in l).upper()
+        ok = r.returncode == 0 and bool(got)
+        err = r.stderr.strip()[-200:]
+    else:
+        raise StoreError("no signature tool", "neither sqv nor gpgv is installed")
+    if not ok:
+        raise StoreError("bad signature", "%s: %s" % (os.path.basename(data), err))
+    if want and not any(f in got for f in want):
+        raise StoreError("unexpected signer", "%s signed by %s, expected %s" % (os.path.basename(data), got.strip()[:80],
+                                                                               " or ".join(want)))
+    return (want[0] if want else got.split()[0] if got.split() else "?")[-16:]
+
+
+def _sig_url(rel, ver_spec_sig, asset, version):
+    """a signature named by an asset glob ("{asset}.sig") or a URL template"""
+    pat = _fmt(ver_spec_sig, asset=asset["name"], version=version, url=asset.get("url", ""))
+    if "://" in pat:
+        return pat
+    hits = [a for a in rel["assets"] if fnmatch.fnmatchcase(a["name"], pat)]
+    if not hits:
+        raise StoreError("no signature upstream", "signature %s missing" % pat)
+    return hits[0]["url"]
+
+
+def check_file_signature(rel, asset, ver_spec, version, path):
+    """[release.verify] signature + key: the downloaded file's detached signature. "" when the recipe has none
+    (or the install comes from the offline mirror: the mirror checked it when it was made)"""
+    if not ver_spec.get("signature") or not ver_spec.get("key") or rel.get("from") == "mirror":
+        return ""
+    sig = path + ".sig.tmp"
+    with open(sig, "wb") as f:
+        f.write(http_bytes(_sig_url(rel, ver_spec["signature"], asset, version), limit=1 << 20))
+    try:
+        return " + OpenPGP signature (%s)" % verify_signature(sig, path, ver_spec)
+    finally:
+        os.unlink(sig)
+
+
 def expected_sha(rel, asset, ver_spec, version):
     """(sha256 or None, how): from the API's digest, a checksum asset, or a sums URL"""
     if asset.get("sha256") and ver_spec.get("github_digest", True):
@@ -1084,12 +1160,24 @@ def expected_sha(rel, asset, ver_spec, version):
         url = _fmt(ver_spec["sha256sums_url"], version=version)
         if rel.get("from") == "mirror" and rel.get("sums_file"):
             url = "file://" + os.path.join(C.mirror, rel["id"], rel["sums_file"])
-        txt = http_bytes(url, limit=8 << 20).decode("utf-8", "replace")
+        raw = http_bytes(url, limit=8 << 20)
+        signed = ""
+        if ver_spec.get("sums_signature") and ver_spec.get("key") and rel.get("from") != "mirror":
+            d = tempfile.mkdtemp(prefix="sums.", dir=os.path.join(C.state_dir) if os.path.isdir(C.state_dir) else None)
+            try:
+                with open(os.path.join(d, "sums"), "wb") as f:
+                    f.write(raw)
+                with open(os.path.join(d, "sums.asc"), "wb") as f:
+                    f.write(http_bytes(_fmt(ver_spec["sums_signature"], version=version), limit=1 << 20))
+                signed = ", signed by %s" % verify_signature(os.path.join(d, "sums.asc"), os.path.join(d, "sums"), ver_spec)
+            finally:
+                shutil.rmtree(d, ignore_errors=True)
+        txt = raw.decode("utf-8", "replace")
         line = _fmt(ver_spec.get("sha256_line", asset["name"]), version=version, asset=asset["name"])
         h = sums_lookup(txt, line)
         if not h:
             raise StoreError("no checksum upstream", "%s has no line for %s" % (url, line))
-        return h, "sha256 (" + os.path.basename(urllib.parse.urlparse(url).path) + ")"
+        return h, "sha256 (" + os.path.basename(urllib.parse.urlparse(url).path) + signed + ")"
     if rel.get("from") == "mirror" and asset.get("sha256"):
         return asset["sha256"], "sha256 (mirror)"
     return None, "unverified (upstream gives no checksum; TLS only)"
@@ -1183,8 +1271,7 @@ def write_launcher(app, vdir, method):
     if vdir and os.path.isdir(vdir):
         icon_file = _find_icon(vdir, icon_name)
     if not icon_file:
-        cat_icon = os.path.join(os.path.dirname(C.catalog) if not os.path.isdir(C.catalog) else C.catalog,
-                                "icons", aid + ".png")
+        cat_icon = os.path.join(catalog_dir(), "icons", aid + ".png")
         if os.path.exists(cat_icon):
             icon_file = cat_icon
     icon_field = icon_name
@@ -1413,6 +1500,7 @@ def _install_locked(app, st, aid, method, cur, prog, cancel, update):
                 dl = os.path.join(C.state_dir, "dl", aid, asset["name"])
                 got = download(asset["url"], dl, size=asset.get("size") or 0, sha256=sha, prog=prog, cancel=cancel)
                 prog.stage("verifying", 80, 83)
+                how += check_file_signature(rel, asset, spec.get("verify", {}), rel["version"], dl)
                 prog.report(1.0, msg=how)
                 prog.stage("installing", 83, 98)
                 fmt = spec.get("format", "tar")
@@ -1906,7 +1994,7 @@ class Daemon:
         self.layout_seq = 0
         self.dirty = True
         self.last_check = 0.0
-        self.catdir = C.catalog if os.path.isdir(C.catalog) else os.path.dirname(C.catalog)
+        self.catdir = catalog_dir()
 
     def _order(self):
         feat = sorted((a for a in self.cat.values() if a.get("featured")), key=lambda a: a["name"].lower())

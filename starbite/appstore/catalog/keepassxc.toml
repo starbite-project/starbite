@@ -32,6 +32,8 @@ size_mb = 50
 github_digest = true
 sha256_asset = "{asset}.DIGEST"
 signature = "{asset}.sig"
+key = "keys/keepassxc.asc"
+fingerprint = ["BF5A669F2272CF4324C1FDA8CFB4C2166397D0D2", "C1E4CBA3AD78D3AFD894F9E0B7A66F03B59076A8"]
 
 [distro]
 apt = ["keepassxc-minimal"]

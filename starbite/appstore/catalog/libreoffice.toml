@@ -35,5 +35,8 @@ exec = "sh -c 'exec \"$(ls -1 /usr/bin/libreoffice[0-9]* | tail -1)\"'"
 size_mb = 650
 
 [release.verify]
+signature = "https://download.documentfoundation.org/libreoffice/stable/{version}/deb/aarch64/LibreOffice_{version}_Linux_aarch64_deb.tar.gz.asc"
+key = "keys/libreoffice.asc"
+fingerprint = "C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3"
 sha256sums_url = "https://download.documentfoundation.org/libreoffice/stable/{version}/deb/aarch64/LibreOffice_{version}_Linux_aarch64_deb.tar.gz.sha256"
 sha256_line = "LibreOffice_{version}_Linux_aarch64_deb.tar.gz"
