@@ -253,12 +253,6 @@ static void se_rows(int p)
         val("Processor", "Exynos 9810");
         foot("Starbite OS runs from the memory card. The serial number and the modem's numbers are not shown.");
         break;
-    case SE_UPDATE:
-        sec(0);
-        val("Starbite OS", SYS.ver);
-        foot("Starbite OS updates come from the boot menu: hold Volume Up while the phone starts, then choose "
-             "Starbite OS > Update. Nothing is downloaded here.");
-        break;
     case SE_DATETIME: {                          /* Track A's time: 12 / 24-hour, the zone (sbos-core-api.md 4) */
         char t[12];
         const char *city = "";
@@ -1155,7 +1149,7 @@ static int se_moving(void) { return SE.built && (SE.sp.live || SE.momentum || (S
 static int se_sub_key(const char *k)
 {
     static const struct { const char *k; int p; } M[] = { { "display", SE_DISPLAY }, { "wifi", SE_WIFI }, { "cell", SE_CELL },
-        { "general", SE_GENERAL }, { "about", SE_ABOUT }, { "update", SE_UPDATE }, { "datetime", SE_DATETIME },
+        { "general", SE_GENERAL }, { "about", SE_ABOUT }, { "update", SU_SUB }, { "datetime", SE_DATETIME },
         { "keyboard", SE_KEYBOARD }, { "lang", SE_LANG }, { "reset", SE_RESET }, { "wallpaper", SE_WALL }, { "sounds", SE_SOUNDS },
         { "notif", SE_NOTIF }, { "notifapp", SE_NOTIF_APP }, { "battery", SE_BATTERY }, { "privacy", SE_PRIVACY },
         { "emergency", SE_EMERGENCY }, { "linux", SE_LINUX }, { "search", SE_SEARCH } };
