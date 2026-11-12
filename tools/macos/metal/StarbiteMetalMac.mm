@@ -316,9 +316,30 @@ static void fill_device(id dev, mach_port_t port)
 	class_addMethod(c, sel_registerName("peerCount"), imp_implementationWithBlock(^uint32_t(id me) { (void)me; return 1; }), "I16@0:8");
 	static id stub;
 	stub = [SBMTLZeroStub new];
+	/*
+	 * Sequoia's Metal hands a plugin device its service object with -_setAcceleratorService: (S2j 2026-11-12:
+	 * "MISSING NativeBridgeMetalDevice -_setAcceleratorService:", then doesNotRecognizeSelector aborted WindowServer).
+	 * Kept, and answered by the getters Apple's IOAccel devices have; any other one-argument private setter
+	 * (-_setX:) is a no-op through the stub instead of an exception. Other private selectors still raise.
+	 */
+	static const char kAccelServiceKey = 0;
+	class_addMethod(c, sel_registerName("_setAcceleratorService:"), imp_implementationWithBlock(^(id me, id service) {
+		objc_setAssociatedObject(me, &kAccelServiceKey, service, OBJC_ASSOCIATION_RETAIN);
+		sm2_log("device: _setAcceleratorService: %s", service ? class_getName(object_getClass(service)) : "nil");
+	}), "v24@0:8@16");
+	static const char *const getters[] = { "acceleratorService", "_acceleratorService" };
+	for (const char *getter : getters)
+		class_addMethod(c, sel_registerName(getter), imp_implementationWithBlock(^id(id me) {
+			return objc_getAssociatedObject(me, &kAccelServiceKey);
+		}), "@16@0:8");
 	class_addMethod(c, @selector(forwardingTargetForSelector:), imp_implementationWithBlock(^id(id me, SEL s) {
 		(void)me;
 		const char *n = sel_getName(s);
+		size_t len = strlen(n);
+		if (!strncmp(n, "_set", 4) && len > 5 && n[len - 1] == ':' && strchr(n, ':') == n + len - 1) {
+			missing(class_getName(object_getClass(me)), n);	/* logged once, answered as a no-op */
+			return stub;
+		}
 		if (n[0] == '_' || !strncmp(n, "retain", 6) || !strncmp(n, "release", 7) || !strcmp(n, "dealloc"))
 			return nil;
 		return stub;
