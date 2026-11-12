@@ -434,6 +434,35 @@ the radio switch (airplane mode). WPA2 is host-tested end to end on Windows' pat
 outside the core through os->rx/bcmw_tx, keys through bcmw_set_key, a group-key renewal) against the model AP;
 not yet on a real WPA2 network (needs the user's hotspot).
 
+### Starbite OS Next, Track H (2026-11-12): h1 / h1b / h1c on the phone (`claude/wifi-track-h`)
+
+The self tests are silent images (Next's `next-wifitest` variant). Logs, not in git: `build/starbite-os/wifi-h1*.log`.
+
+- **The firmware's capabilities** (13.50.37, `cap`): `ap sta wme 802.11d 802.11h ... mfp ... wnm bsstrans
+  scanmac ... fbtoverds fbt_adpt ...`.
+  - **No `sae`, no `sae_ext`, no `idsup`.** WPA3 (SAE) cannot be done on this firmware: not inside it, and not by
+    the host either, since there is no external-auth path to carry the frames.
+  - **What we built anyway:** the host's SAE (starbite/wifi/sae.c: IEEE J.10 vectors, interop with hostap) stays
+    for a firmware that has `sae_ext`.
+  - **What joins today:** mixed WPA2/WPA3 networks join as WPA2. WPA3-only networks are refused with a log line.
+- **Radio settings as found:** `mfp` 1, `btc_mode` 1, `roam_off` 1 (the firmware does not roam by itself),
+  `PM` 0 before a join, `pm2_sleep_ret` 200, `assoc_listen` 10, `bcn_li_dtim` 0. There is no "rand" iovar, so TLS's
+  randomness is the timing pool only.
+- **Scan:** 22-26 results per scan, 13-14 distinct access points (7-8 on 2.4 GHz, 6 on 5 GHz), 3-5 hidden. The
+  firmware ends the scan after ~2.25 s. Only 2 names are in range at the test desk; an iPhone there sees the same.
+- **h1c: 2.4 GHz WPA2 JOINED at the first try** (a join forced to 2.4 GHz, `btc_mode` untouched). Then 5 GHz
+  joined, 4942 ms from the start, 2291 ms after SET_SSID.
+  - **On each band:** DHCP, the router's ping, NTP, and an HTTPS GET of example.com: status 200, TLS 1.2,
+    ECDHE-RSA-CHACHA20-POLY1305 (0xcca9), handshake ~115 ms, the certificate accepted.
+  - **This closes open point 9** (the 2.4 GHz timeout of T4-WPA2 run b). The join sequence of 24a0adf, never tried
+    on 2.4 GHz before, joins there too.
+- **Power save (PM 2, set once joined):** radio interrupts in 5 s idle: 3 with PM 0, 2 with PM 2. Under PM 2 the
+  router answered 5 of 5 pings, the last in 9 ms.
+- **Not a radio point, found on the way:** on a card-only boot (`sbstore=card`), libsb's store never opens the
+  card's store (it waits for the UFS settings' `SET_SD_STORE`). kern/wifi.c allows the card itself to read the
+  `wifinet` entry (2023b8e). The settings' state slot is UFS-only too, so nothing persists across a restart on such
+  a boot yet.
+
 ## 10. Review
 
 An independent review (2026-11-07) read the code against brcmfmac, bcmdhd, Samsung's PCIe driver, the mainline
