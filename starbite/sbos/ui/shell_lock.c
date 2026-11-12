@@ -1501,6 +1501,13 @@ static float focus_sy;
 #define SL_X (FOC_X + 20)
 #define SL_W (FOC_W - 40)
 static tk_layer focus, funder, scrim, fgrp, fcard, ffill, flabel, fthumb;
+/* cp6 (Track J's one-shots): the sheet's Options circle (top right) opens an action sheet of the OS's one-shot starts
+ * (Safe Mode, Single User, Previous Kernel: sh_req_why says which fit and why not); the slide then starts it that way
+ * (sh_boot_os_req: the slide is the confirmation). focus_req 0: a normal start */
+#define FO_CX (FOC_X + FOC_W - 20 - 18)
+#define FO_CY (FOC_Y + 38)
+static int focus_req, fo_down;
+static tk_layer fohl;                            /* the Options circle's press light (in the sheet's group) */
 /* the sheet's glass (geometry only: the same for every system) and its slider's (two places: 2 or 3 facts): made in
  * idle time while a card is open on the lock (a row's tap opens the sheet), freed when none is (P3s: 10 MB were
  * kept from the first sheet on) */
@@ -1551,8 +1558,10 @@ static void free_focus(void)
     focus.child = 0;
 }
 static void free_cc_all(void);
+static void focus_label(const sys_t *s, float sy);
 static void build_focus(const sys_t *s, const grp_t *gr)
 {
+    focus_req = 0;                           /* cp6: every sheet opens on a normal start */
     free_cc_all();                           /* B4: the lock's Control Centre makes room for the sheet */
     /* the scrim: what is on the panel now, blurred 22 pt, saturated 1.3, under rgba(4, 8, 26, .28) */
     tk_comp_frame(C, 0, 0);                  /* the frame in RAM is current (only what changed is drawn) */
@@ -1606,6 +1615,8 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         tk_memcpy(tn + 4, s->k, tk_strlen(s->k) + 1);
         d_rrect(&d, 195 - 18, FOC_Y + 5, 36, 5, 2.5f, W(.3f));     /* P3p: the sheet's grabber */
         d_icon(&d, tn, SL_X, FOC_Y + 20, 1);
+        d_rrect(&d, FO_CX - 18, FO_CY - 18, 36, 36, 18, W(.14f));   /* cp6: Options (the one-shot starts) */
+        for (int k = -1; k <= 1; k++) d_rrect(&d, FO_CX + 7.0f * k - 2, FO_CY - 2, 4, 4, 2, W(.9f));
         d_text(&d, TK_IT600, 13, FOC_X + 100, FOC_Y + 29.16f + 13, gr->name, 0, 0, W(.62f), 0);
         d_text(&d, TK_IT700, 27, FOC_X + 100, base_of(TK_IT700, 27, FOC_Y + 47.16f, 29.7f), s->name, 0, 0, INK, 0);
         int last = !tk_strcmp(s->k, LAST);
@@ -1635,17 +1646,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     ffill.slice = 2;
     ffill.slice_s0 = PT(32);
     ffill.slice_s1 = PT(32);
-    relayer(&flabel);
-    dc l = mk(&flabel, "label", SL_X, sy, SL_W, 62, 1, 0);
-    {
-        char lbl[96] = "slide to start ";
-        tk_memcpy(lbl + 15, s->name, tk_strlen(s->name) + 1);
-        float w = tw(TK_IT600, 16.5f, lbl, 0, 0);
-        /* background: 90 deg .4 -> 1 @45 % -> .4 @60 % over 200 % of the box, position 0 (the shine at rest) */
-        tk_stop st[3] = { { 0, W(.4f) }, { .45f, W(1) }, { .6f, W(.4f) } };
-        tk_paint p = tk_linear(90, PT(SL_X) - l.ox, PT(sy) - l.oy, PT(2 * SL_W), PT(62), 3, st);
-        tk_text(l.b, TK_IT600, PT(16.5f), PT(SL_X + 44 + (SL_W - 44 - w) / 2) - l.ox, PT(base_of(TK_IT600, 16.5f, sy + 21, 0)) - l.oy, lbl, 0, 0, &p, 0);
-    }
+    focus_label(s, sy);
     relayer(&fthumb);
     dc t = mk(&fthumb, "thumb", SL_X + 5, sy + 5, 52, 52, 20, 0);
     tk_box_shadow(t.b, PT(SL_X + 5) - t.ox, PT(sy + 5) - t.oy, PT(52), PT(52), PT(26), 0, PT(2), PT(12), 0, TK_RGBA(0, 0, 0, .35f), 0);
@@ -1658,6 +1659,8 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     tk_layer_add(&fgrp, &ffill);
     tk_layer_add(&fgrp, &flabel);
     tk_layer_add(&fgrp, &fthumb);
+    if (!hl_lit(&fohl)) { tk_layer_init(&fohl, "fo-press"); fohl.hidden = 1; }
+    tk_layer_add(&fgrp, &fohl);                  /* cp6: the Options circle's press */
     focus.child = 0;
     if (funder.bmp.px) tk_layer_add(&focus, &funder);
     tk_layer_add(&focus, &scrim);
@@ -1668,6 +1671,26 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     tk_layer_prepare(&ffill);
     tk_layer_prepare(&flabel);
     tk_layer_prepare(&fthumb);
+}
+/* the slider's words: "slide to start NAME", or with a one-shot chosen "slide to start in Safe Mode" (cp6) */
+static void focus_label(const sys_t *s, float sy)
+{
+    tk_layer *nx = flabel.next;                  /* (mk re-inits the layer: its place among fgrp's children kept) */
+    relayer(&flabel);
+    dc l = mk(&flabel, "label", SL_X, sy, SL_W, 62, 1, 0);
+    flabel.next = nx;
+    char lbl[96] = "slide to start ";
+    int k = 15;
+    const char *rest = s->name;
+    if (focus_req) { tk_memcpy(lbl + k, "in ", 3); k += 3; rest = sh_req_label(focus_req); }
+    int n = 0;
+    while (rest && rest[n] && k < 95) lbl[k++] = rest[n++];
+    lbl[k] = 0;
+    float w = tw(TK_IT600, 16.5f, lbl, 0, 0);
+    /* background: 90 deg .4 -> 1 @45 % -> .4 @60 % over 200 % of the box, position 0 (the shine at rest) */
+    tk_stop st[3] = { { 0, W(.4f) }, { .45f, W(1) }, { .6f, W(.4f) } };
+    tk_paint p = tk_linear(90, PT(SL_X) - l.ox, PT(sy) - l.oy, PT(2 * SL_W), PT(62), 3, st);
+    tk_text(l.b, TK_IT600, PT(16.5f), PT(SL_X + 44 + (SL_W - 44 - w) / 2) - l.ox, PT(base_of(TK_IT600, 16.5f, sy + 21, 0)) - l.oy, lbl, 0, 0, &p, 0);
 }
 static void set_thumb(float x)
 {
@@ -2794,7 +2817,7 @@ static void d_h1(dc *d, const char *t) { d_text_box(d, TK_IT700, 34, MARGIN, LAR
 static tk_col ACCENT(void) { return C_ACCENT; }
 /* ---- helper B2: the component kit (shell_kit.inc) and Settings (shell_settings.inc), declared for the parts before
  * them ---- */
-enum { KIT_DEFAULT, KIT_CANCEL, KIT_DESTRUCTIVE, KIT_PREFERRED };
+enum { KIT_DEFAULT, KIT_CANCEL, KIT_DESTRUCTIVE, KIT_PREFERRED, KIT_DISABLED };   /* cp6: KIT_DISABLED dimmed words (the callback says why) */
 typedef struct { const char *label; int style; } kit_btn;
 typedef void (*kit_cb)(int i);
 static int kit_alert(const char *title, const char *msg, const kit_btn *b, int n, kit_cb cb);
@@ -2802,6 +2825,41 @@ static int kit_actions(const char *title, const kit_btn *b, int n, kit_cb cb);
 static int kit_sheet(const char *title, float content_h, void (*draw)(dc *d, float x, float y, float w), void (*tap)(float x, float y),
                      void (*done)(void));
 static int kit_on(void);
+static void toast(const char *msg);
+/* the Options sheet: the one-shots that fit this OS (the others dimmed: a tap says why), "Start Normally" once one is
+ * chosen, Cancel */
+static const int FO_ACT[3] = { SH_REQ_SAFE, SH_REQ_SINGLE, SH_REQ_PREV };
+static int fo_map[5], fo_n;
+static void fo_cb(int i)
+{
+    if (i < 0 || i >= fo_n || !focus_sys) return;
+    int act = fo_map[i];
+    if (act < 0) return;                         /* Cancel */
+    if (act > 0) {
+        char why[96];
+        if (sh_req_why(focus_sys->k, act, why, (int)sizeof why) != 1) { toast(why[0] ? why : "Not for this system"); return; }
+    }
+    focus_req = act;
+    focus_label(focus_sys, focus_sy);
+    tk_layer_prepare(&flabel);
+    sh_haptic_k(SH_HAP_SELECT);
+}
+static void fo_open(void)
+{
+    if (!focus_sys) return;
+    static kit_btn B[5];
+    fo_n = 0;
+    for (int k = 0; k < 3; k++) {
+        char why[96];
+        int fits = sh_req_why(focus_sys->k, FO_ACT[k], why, (int)sizeof why) == 1;
+        const char *l = sh_req_label(FO_ACT[k]);
+        B[fo_n] = (kit_btn){ l && l[0] ? l : "?", fits ? (focus_req == FO_ACT[k] ? KIT_PREFERRED : KIT_DEFAULT) : KIT_DISABLED };
+        fo_map[fo_n++] = FO_ACT[k];
+    }
+    if (focus_req) { B[fo_n] = (kit_btn){ "Start Normally", KIT_DEFAULT }; fo_map[fo_n++] = 0; }
+    B[fo_n] = (kit_btn){ "Cancel", KIT_CANCEL }; fo_map[fo_n++] = -1;
+    kit_actions("Start Once With", B, fo_n, fo_cb);
+}
 static int se_owns(void);
 static void se_build(void);
 static void se_close(void);
@@ -5284,7 +5342,12 @@ void sh_touch(int phase, float x, float y, float t)
             float sy = focus_sy;
             if (x >= SL_X + 5 + thumb_x && x <= SL_X + 57 + thumb_x && y >= sy + 5 && y <= sy + 57) { T.kind = G_THUMB; T.base = thumb_x; T.arg2 = 0; sp_thumb.live = 0; }
             else if (y < FOC_Y || y > FOC_Y + FOC_H) T.kind = G_SCRIM;
-            else { T.kind = G_FOCUSDRAG; sp_focus.live = 0; focus_closing = 0; tk_tracker_add(&T.tr, y, t); }   /* P3p: drag it down */
+            else {
+                float dx = x - FO_CX, dy = y - FO_CY;
+                fo_down = dx * dx + dy * dy <= 26 * 26;   /* cp6: the Options circle (a tap; a drag still moves the sheet) */
+                if (fo_down) hl_set(&fohl, (tk_rect){ FO_CX - 18, FO_CY - 18, 36, 36 }, (tk_rect){ FO_CX - 18, FO_CY - 18, 36, 36 }, 18, PRESS_BTN);
+                T.kind = G_FOCUSDRAG; sp_focus.live = 0; focus_closing = 0; tk_tracker_add(&T.tr, y, t);   /* P3p: drag it down */
+            }
             return;
         }
         if (AP.on && em_down(x, y)) { T.kind = G_NONE; return; }   /* B3: the edit menu's item (or it closes) */
@@ -5617,6 +5680,13 @@ void sh_touch(int phase, float x, float y, float t)
         else tk_spring_start(&sp_thumb, thumb_x, 0, 0, TK_SPR_SHEET);
         break;
     case G_FOCUSDRAG: {
+        if (fo_down && !T.moved) {                 /* cp6: the Options circle tapped */
+            fo_down = 0;
+            tk_spring_start(&sp_focus, focus_p, 1, 0, TK_SPR_SHEET);
+            fo_open();
+            break;
+        }
+        fo_down = 0;
         /* P3p (P3j-19): dismissed where a flick would carry it below .6; the finger's speed goes to the spring */
         float vp = -tk_tracker_v(&T.tr) * 1000 / 300;
         if (focus_p + vp * .2f < .6f) { focus_closing = 1; tk_spring_start(&sp_focus, focus_p, 0, vp, TK_SPR_SHEET); }
@@ -6048,7 +6118,10 @@ int sh_tick(float dt, float t)
             mv = 1;
             if (boot_t > 2400) {
                 booting = 0;
-                sh_boot_os(focus_sys->k);       /* the loader's one-shot next boot (the kernel's driver) */
+                if (focus_req) {                /* cp6: Track J's one-shot (Safe Mode ...): the slide was the confirmation */
+                    if (sh_boot_os_req(focus_sys->k, focus_req) < 0) toast("This start isn't possible now");
+                } else
+                    sh_boot_os(focus_sys->k);   /* the loader's one-shot next boot (the kernel's driver) */
             }
         }
     }

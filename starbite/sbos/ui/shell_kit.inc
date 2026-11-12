@@ -176,7 +176,7 @@ static void kit_button(dc *d, int i, float x, float y, float w, float h, int ale
     int st = KT.b[i].style;
     tk_col bg = st == KIT_PREFERRED ? KIT_BLUE() : tk_hex(alert ? 0x363639 : 0x2c2c2e, 1);
     d_rrect(d, x, y, w, h, h / 2, bg);
-    tk_col fg = st == KIT_DESTRUCTIVE ? KIT_RED() : INK;
+    tk_col fg = st == KIT_DESTRUCTIVE ? KIT_RED() : st == KIT_DISABLED ? W(.3f) : INK;   /* cp6: dimmed */
     int f = alert || st == KIT_PREFERRED ? TK_IT600 : TK_IT400;
     d_text_box(d, f, 17, x + w / 2, bl(f, 17, y + (h - lh(f, 17)) / 2), w - 20, 1, KT.lab[i], 0, 0, fg, 0);
     KT.br[i] = (tk_rect){ x, y, w, h };
