@@ -188,6 +188,7 @@ void settings_restore(void)
                 sb_log("settings: the passcode record is not valid: no passcode");
         }
     }
+    kmodem_sms_restore(half[cur_half]);     /* Track G: the messages kept in the slot */
     int n = state_find(half[cur_half], REC, &d);
     struct saved s;
     if (n < (int)sizeof(uint32_t) * 2 + 4 || !d) {
@@ -405,6 +406,7 @@ void settings_timer(unsigned id)
     }
     if (prefs_save(&b) < 0)                 /* Track A: the prefs and blobs (all prefs or none, each blob whole) */
         sb_log("settings: some prefs or blobs did not fit (the slot's half is full)");
+    kmodem_sms_save(&b);                    /* Track G: the messages ("sms.NN", last: they take what is left) */
     uint32_t n = state_finish(&b);
     int w = hw_slot_write(to, half[to], n);
     if (w < 0) {

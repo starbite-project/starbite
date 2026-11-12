@@ -180,6 +180,9 @@ for src in "$modem"/sbm_*.c "$modem/sb/sbm_sb.c" "$modem/sb/ext4.c" "$modem/sb/j
     "${CROSS}gcc" $CFLAGS $MREN -DSBM_ATTENDED_TX -I"$modem" "$src" -o "$obj"
     objs="$objs $obj"
 done
+# Track G: the Linux guest's NAT (kern/guestnet.c)
+"${CROSS}gcc" $CFLAGS "$modem/nat/sbnat.c" -o "$ob/km_sbnat_c.o"
+objs="$objs $ob/km_sbnat_c.o"
 # the rule of the modem images: no partition write from the modem code (libsb's storage hold is on while it runs)
 bad=""
 for o in "$ob"/km_*.o "$ob/k_modem_c.o"; do
@@ -249,6 +252,9 @@ if [ -n "$PAK" ]; then
     ndobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrv.o#")
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_DRV -DSBOS_SELFTEST_NEXT_DRV_ATTENDED "$here/kern/uitest.c" -o "$ob/k_uitest_ndrva.o"
     ndaobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrva.o#")
+    # Track G: Next with the unattended Cellular self test (mobile data on, HTTPS GETs, off, on again; no SMS, no calls)
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_CELL "$here/kern/uitest.c" -o "$ob/k_uitest_ncell.o"
+    ncobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ncell.o#")
 else
     echo "sbos: no build/sbtk/sbtk-phone.pak: the starbite-next images are not built" >&2
 fi
@@ -360,9 +366,9 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
 "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
 if [ -n "$nobjs" ]; then
-    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended; do
+    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended next-celltest; do
         case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;;
-        next-drvprobe) vo=$ndobjs ;; next-drvattended) vo=$ndaobjs ;; *) vo=$nwobjs ;; esac
+        next-drvprobe) vo=$ndobjs ;; next-drvattended) vo=$ndaobjs ;; next-celltest) vo=$ncobjs ;; *) vo=$nwobjs ;; esac
         "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
         und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)
         if [ -n "$und" ]; then

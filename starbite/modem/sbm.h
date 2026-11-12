@@ -775,6 +775,7 @@ struct sbm_boot {
         const char *ecc_p[SBM_ECC_MAX];
         unsigned n_ecc;
     } calls;
+#define SBM_SMS_REP_MAX 8                  /* delivery reports kept (a ring) */
     struct sbm_smsq {
         uint32_t rx, rx_bad, acked, ack_full, sent, failed, ready_sent;
         uint8_t seq[SBM_SMS_MAX_PARTS];
@@ -782,6 +783,9 @@ struct sbm_boot {
         uint8_t mr[SBM_SMS_MAX_PARTS], done[SBM_SMS_MAX_PARTS], parts;
         uint32_t gen;
         uint8_t smsc[12], smsc_len, smsc_seq;     /* the SIM's SMSC (len byte included in smsc_len) */
+        uint8_t want_report;                      /* the caller's choice: TP-SRR on every part sent */
+        uint8_t rep_mr[SBM_SMS_REP_MAX], rep_st[SBM_SMS_REP_MAX];
+        uint32_t reports, rep_gen;                /* rep_gen: +1 per report; the newest SBM_SMS_REP_MAX kept, ring */
     } sms;
     uint32_t noti_logged;              /* attended: unsolicited frames logged after the first ONLINE_LOG_MAX */
     uint32_t fmt_stale;                /* a seq came round again (188 queries later) while its query was still open */
@@ -874,6 +878,10 @@ struct sbm_sms {
 };
 int sbm_sms_deliver_decode(const uint8_t *tpdu, uint32_t n, struct sbm_sms *s);
 int sbm_sms_incoming(const struct sbm_ipc_msg *m, struct sbm_sms *s);
+/* delivery reports: the reference (TP-MR, as the send's RESP gave it) and TP-ST (0x00..0x1F delivered, 0x20..0x3F
+ * still trying, 0x40.. failed); 0 or SBM_EBADF */
+int sbm_sms_status_decode(const uint8_t *tpdu, uint32_t n, uint8_t *mr, uint8_t *st);
+int sbm_sms_incoming_report(const struct sbm_ipc_msg *m, uint8_t *mr, uint8_t *st);
 /* TP-SUBMIT for number (allow-listed, never an emergency number: sbm_dial_check) and an ASCII text that fits one
  * GSM 7-bit message (160 characters, the common subset). Returns the PDU length or SBM_E*. Nothing sends it yet. */
 int sbm_sms_submit(const struct sbm_dial_policy *pol, const char *number, const char *text, uint8_t *out, uint32_t cap);
@@ -910,6 +918,30 @@ struct sbm_inbox {
 };
 /* one received message (or part); s NULL just ages the pending parts. 1 = a whole message landed in m[] */
 int sbm_inbox_add(struct sbm_inbox *ib, const struct sbm_sms *s, uint32_t now_ms);
+
+/* The SMS store's record format (sbm_store.c): the kernel's messages packed into records of at most SBM_STORE_REC
+ * bytes (Starbite OS's state slot keeps them); a damaged record yields the messages before the damage. */
+#define SBM_STORE_REC     4096
+#define SBM_STORE_NUM     24
+#define SBM_STORE_TEXT    512
+#define SBM_STORE_MSG_HDR 18
+struct sbm_store_msg {
+    uint32_t id;
+    int64_t utc;
+    uint8_t incoming, state, unread;
+    char number[SBM_STORE_NUM];       /* the user's data: never logged */
+    char text[SBM_STORE_TEXT];
+};
+struct sbm_store_rec {
+    uint8_t *b;
+    uint32_t cap, len;
+    unsigned count;
+};
+uint32_t sbm_store_msg_size(const struct sbm_store_msg *m);
+void sbm_store_begin(struct sbm_store_rec *r, uint8_t *buf, uint32_t cap);
+int sbm_store_add(struct sbm_store_rec *r, const struct sbm_store_msg *m);       /* 1 added, 0 full */
+/* the record's messages one by one: *off = 0 to start; 1 = m filled, 0 = the end (or damage) */
+int sbm_store_next(const uint8_t *rec, uint32_t n, uint32_t *off, unsigned *idx, struct sbm_store_msg *m);
 
 /* The session API (Starbite OS): sbm_modem_start loads, checks and starts the CP and brings the link online with the RFS
  * server (about 2 s, blocking); sbm_modem_poll is non-blocking, from the event loop (every few ms): mailbox, rings,

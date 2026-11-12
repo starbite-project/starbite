@@ -409,6 +409,8 @@ enum { CS_IDLE, CS_SIM, CS_RADIO, CS_ATTACH, CS_REG, CS_CYCLE_OFF, CS_CYCLE_ON, 
        CS_RETRY, CS_DEACT, CS_DETACH };
 #define CELL_APN "internet"                /* Elisa, DNA, Telia (FI); others: a setting later */
 static int cell_want, cst = KCELL_OFF, cstep = CS_IDLE, c_lf, c_esc, cnet_up, c_check, c_ntp, c_sms_ready;
+static int cell_selftest;                  /* next-celltest: the unattended data self test (kmodem_selftest_phase) */
+static int c_check_ok;                     /* the session's HTTPS check passed */
 static uint64_t c_ntp_t;
 static uint8_t c_ntp_nonce[8], c_ntp_server[4];
 #define C_NTP_PORT 50124
@@ -450,7 +452,7 @@ static void c_rx_ip(void *ctx, const uint8_t *pkt, uint32_t len)
 {
     (void)ctx;
     c_rx++;
-    if (cnet_up)
+    if (cnet_up && !guestnet_rx(KNET_UPLINK_CELL, pkt, len))   /* the Linux guest's flows first (its NAT) */
         sbnet_rx_ip(&cnet, pkt, len);
 }
 static uint64_t c_now(void *ctx) { (void)ctx; return sb_ms(); }
@@ -527,6 +529,7 @@ static void cell_net_down(const char *w)
     if (!cnet_up)
         return;
     cnet_up = 0;
+    guestnet_uplink(KNET_UPLINK_CELL, 0);
     sbtcp_down(&ctcp);
     sbnet_stop(&cnet);
     sbm_modem_ip_rx_cb(0, 0);
@@ -553,6 +556,7 @@ static void cell_net_up(void)
     sbtcp_init(&ctcp, &cnet);
     sbm_modem_ip_rx_cb(c_rx_ip, 0);
     cnet_up = 1;
+    guestnet_uplink(KNET_UPLINK_CELL, &cnet);   /* the Linux guest may use mobile data (Wi-Fi first) */
     kt_set(KT_MODEM, 6, sb_ms(), 20, 1);
     struct ub u;
     ub_init(&u);
@@ -647,7 +651,7 @@ static void cell_step(void)
         if (c_registered(&sn)) {
             cset(KCELL_REGISTERED, sn.cs == SBM_REG_ROAMING || sn.ps == SBM_REG_ROAMING ? "Registered (roaming)"
                                                                                        : "Registered");
-            if (!c_sms_ready) {
+            if (!c_sms_ready && !cell_selftest) {   /* unattended: no SMS reaches the AP (nothing to acknowledge) */
                 c_sms_ready = 1;
                 sbm_modem_sms_ready(&mo);   /* the AP takes SMS (and the SIM's SMSC) */
             }
@@ -706,6 +710,7 @@ static void cell_step(void)
             cell_net_up();
             cset(KCELL_DATA, "Mobile data on");
             c_check = 0;
+            c_check_ok = 0;
             c_ntp = 0;
             cgo(CS_UP);
         } else if ((mo.b.pdp.have_status && mo.b.pdp.status != 1 && mo.b.pdp.status_notis) || cin() > 30000) {
@@ -752,6 +757,7 @@ static void cell_step(void)
                 ub_s(&u, f.why);
                 ub_s(&u, ")");
                 sb_log(u.b);
+                c_check_ok = f.result == 1 && f.status == 200;
                 notif_post("modem", "Mobile data", f.result == 1 && f.status == 200 ? "The Internet works over LTE (HTTPS)"
                                                                                   : "Connected, but the HTTPS check failed");
                 c_check = 2;
@@ -837,7 +843,7 @@ int kmodem_cellular(int on)
     }
     if (cell_want && kmodem_on())
         return 0;
-    if (sbos_selftest_enabled)
+    if (sbos_selftest_enabled && !cell_selftest)
         return SBOS_EAGAIN;
     if (heater_running_ui() || guest_busy()) {
         cset(KCELL_FAILED, "Stop Heat and Linux first");
@@ -849,7 +855,10 @@ int kmodem_cellular(int on)
     mo.attended = SBM_ATTENDED_DATA;        /* the user's switch: the only place this kernel sets it */
     cset(KCELL_STARTING, "Starting the modem");
     ++starts;
-    sb_storage_hold("the modem runs: no storage writes");
+    /* Track G (2026-11-12): no storage hold for the user's Cellular: Starbite OS saves settings and messages while
+     * the modem runs (its own state slot, the card). The modem code still has no block-write path (build.sh checks
+     * the objects), RADIO / EFS stay read once, the CP's NV writes stay in RAM, and the fence still refuses EFS,
+     * CPEFS, PARAM and the rest without the user's typed confirmation. */
     set_state(SBOS_MODEM_STARTING, "");
     kt_set(KT_MODEM, 1, sb_ms(), 50, 0);
     return 0;
@@ -1116,6 +1125,8 @@ static void kinbox_take(void)
         k->utc = scts_utc(m->scts);
         sb_strcpy(k->number, sizeof(k->number), m->from);
         sb_strcpy(k->text, sizeof(k->text), m->text);
+        k->unread = 1;
+        settings_changed();                          /* the store keeps it (the state slot, within 10 s) */
         sb_log("comms: an SMS received (sender and text not logged)");
         if (vib_ready())
             vib_pulse(300);                          /* a short buzz for a new message */
@@ -1130,10 +1141,52 @@ static void c_sms_rx(void *ctx, const struct sbm_sms *s)
     kinbox_take();
 }
 
+/* delivery reports (sbm_link.c's ring): each to the newest sent message with that reference; all its parts
+ * delivered: Delivered; a permanent failure (TP-ST 0x40..): Not delivered. 0x20..0x3F: the network still tries. */
+static uint32_t rep_seen;
+static void sms_reports(void)
+{
+    const struct sbm_smsq *q = &mo.b.sms;
+    if (q->rep_gen - rep_seen > SBM_SMS_REP_MAX)
+        rep_seen = q->rep_gen - SBM_SMS_REP_MAX;
+    for (; rep_seen != q->rep_gen; ++rep_seen) {
+        uint8_t mr = q->rep_mr[rep_seen % SBM_SMS_REP_MAX], stv = q->rep_st[rep_seen % SBM_SMS_REP_MAX];
+        if (stv >= 0x20 && stv < 0x40)
+            continue;
+        for (int i = nkmsg - 1; i >= 0; --i) {
+            struct ksms *k = &kmsg[i];
+            if (k->incoming || k->state != KSMS_SENT || !k->parts)
+                continue;
+            int part = -1;
+            for (unsigned j = 0; j < k->parts && j < 4; ++j)
+                if (k->mr[j] == mr && !(k->rep & (1u << j)))
+                    part = (int)j;
+            if (part < 0)
+                continue;
+            if (stv < 0x20) {
+                k->rep |= (uint8_t)(1u << part);
+                if (k->rep == (uint8_t)((1u << k->parts) - 1u))
+                    k->state = KSMS_DELIVERED;
+            } else {
+                k->state = KSMS_NOT_DELIVERED;
+                sb_strcpy(k->why, sizeof(k->why), "Not delivered: the network gave up");
+            }
+            sb_log(k->state == KSMS_DELIVERED ? "comms: the SMS was delivered" :
+                   k->state == KSMS_NOT_DELIVERED ? "comms: the SMS was not delivered" :
+                   "comms: a part of the SMS was delivered");
+            kgen++;
+            settings_changed();
+            ui_mark_dirty();
+            break;
+        }
+    }
+}
+
 static void comms_begin(void)
 {
     memset(&kc, 0, sizeof(kc));
     kc.audio = KAUDIO_EARPIECE;
+    rep_seen = 0;
     sbm_modem_sms_rx_cb(c_sms_rx, 0);
 }
 
@@ -1201,6 +1254,7 @@ static void comms_tick(void)
     }
     /* the call audio follows the call: on while one is active (the route: earpiece or speaker), off otherwise */
     audio_route(c->n && c->c[0].state == SBM_CALL_ACTIVE);
+    sms_reports();
     if (ksend >= 0 && ksend < nkmsg) {               /* the send in flight: all parts answered? */
         struct sbm_smsq *q = &mo.b.sms;
         int done = 1, ok = 1;
@@ -1209,6 +1263,12 @@ static void comms_tick(void)
             ok &= q->done[i] && q->res[i] == 0;
         }
         if (done) {
+            struct ksms *k = &kmsg[ksend];
+            k->parts = q->parts;
+            for (unsigned i = 0; i < q->parts && i < 4; ++i)
+                k->mr[i] = q->mr[i];
+            k->rep = 0;
+            settings_changed();
             kmsg[ksend].state = ok ? 2 : 3;
             if (!ok)
                 sb_strcpy(kmsg[ksend].why, sizeof(kmsg[ksend].why), "Not sent: the network refused it");
@@ -1218,6 +1278,198 @@ static void comms_tick(void)
             ui_mark_dirty();
         }
     }
+}
+
+/* ---- next-celltest: the unattended mobile-data self test (uitest.c SBOS_SELFTEST_NEXT_CELL, every 500 ms) --------
+ * The user's consent (2026-11-11): unattended mobile data is OK; calls and SMS stay attended. So this test turns
+ * Cellular on itself (the same path as the switch), never sends SMS_READY (no SMS reaches the AP, nothing is
+ * acknowledged), and dial / answer / hang-up / send stay refused (the self-test image). An incoming call only shows
+ * the screen and buzzes; nobody answers it.
+ * Steps: data up (and the audio stages 1-2: amp, codec, ABOX + Calliope, VSS: no call, no sound); the session's
+ * HTTPS check; SOAK_N more HTTPS GETs SOAK_MS apart; Cellular off (deactivate, detach, park); Cellular on again in
+ * the same boot; its HTTPS check; off. At most 10 min. Addresses, the operator and identities are never logged. */
+#define SOAK_N 5
+#define SOAK_MS 30000U
+static int st_ph, st_round, st_fails, st_pass, st_restarted;
+static uint64_t st_t0, st_tp, st_all;
+static uint32_t st_min = 0xffffffffu, st_max, st_sum, st_n;
+
+static void st_line(const char *a, uint64_t ms)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "selftest: cell: ");
+    ub_s(&u, a);
+    ub_dec(&u, (uint32_t)ms);
+    ub_s(&u, " ms");
+    sb_log(u.b);
+}
+
+static const char *au_words(int v) { return v == 1 ? "ok" : v == -1 ? "FAILED" : "not run"; }
+
+int kmodem_selftest_phase(int *done)
+{
+    uint64_t now = sb_ms();
+    *done = 0;
+    if (!st_all)
+        st_all = now;
+    if (st_ph < 9 && now - st_all > 600000U) {
+        sb_log("selftest: cell: FAILED: not done in 10 min; Cellular off");
+        ++st_fails;
+        kmodem_cellular(0);
+        st_ph = 8;
+        st_tp = now;
+    }
+    switch (st_ph) {
+    case 0:
+        cell_selftest = 1;
+        sb_log("selftest: cell: Cellular on (unattended data; no SMS, no calls)");
+        st_t0 = now;
+        if (kmodem_cellular(1) != 0) {
+            sb_logf("selftest: cell: FAILED: Cellular did not start: ", c_why[0] ? c_why : "?");
+            ++st_fails;
+            st_ph = 9;
+            break;
+        }
+        st_ph = 1;
+        break;
+    case 1:                                 /* data up */
+        if (cst == KCELL_DATA) {
+            st_line(st_restarted ? "data up again (the restart in one boot) in " : "data up in ", now - st_t0);
+            st_tp = now;
+            st_ph = 2;
+        } else if (cst == KCELL_FAILED || cst == KCELL_NO_SIM || cst == KCELL_SIM_LOCKED || now - st_t0 > 240000U) {
+            sb_logf("selftest: cell: FAILED: no data: ", c_why[0] ? c_why : "not in 240 s");
+            ++st_fails;
+            kmodem_cellular(0);
+            st_ph = 8;
+            st_tp = now;
+        }
+        break;
+    case 2:                                 /* the session's own HTTPS check (cell_step logs its line) */
+        if (c_check == 2 || c_check == 3 || now - st_tp > 90000U) {
+            if (c_check_ok)
+                ++st_pass;
+            else
+                ++st_fails;
+            sb_log(c_check_ok ? "selftest: cell: the session's HTTPS check: PASS"
+                              : "selftest: cell: the session's HTTPS check: FAILED");
+            if (!st_restarted) {
+                struct ub u;
+                ub_init(&u);
+                ub_s(&u, "selftest: cell: audio stages (no call, no sound): amp ");
+                ub_s(&u, au_words(au_amp));
+                ub_s(&u, ", codec ");
+                ub_s(&u, au_words(au_codec));
+                ub_s(&u, ", ABOX + Calliope ");
+                ub_s(&u, au_words(au_abox));
+                ub_s(&u, ", VSS ");
+                ub_s(&u, au_vss ? "started" : "not started");
+                sb_log(u.b);
+            }
+            st_round = 0;
+            st_tp = now;
+            st_ph = st_restarted ? 7 : 3;
+        }
+        break;
+    case 3:                                 /* the soak: one GET every SOAK_MS */
+        if (cst != KCELL_DATA) {
+            sb_logf("selftest: cell: data dropped during the soak: ", c_why[0] ? c_why : "?");
+            ++st_fails;
+            st_ph = 7;
+            break;
+        }
+        if (now - st_tp >= SOAK_MS) {
+            st_tp = now;
+            if (wifi_fetch("https://example.com/") == 0)
+                st_ph = 4;
+            else {
+                sb_log("selftest: cell: soak GET refused (the fetch path is busy)");
+                ++st_fails;
+                if (++st_round >= SOAK_N)
+                    st_ph = 7;
+            }
+        }
+        break;
+    case 4: {
+        struct sbos_wifi_fetch f;
+        wifi_fetch_status(&f);
+        if (f.state != 2 && now - st_tp < 60000U)
+            break;
+        int ok = f.state == 2 && f.result == 1 && f.status == 200;
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "selftest: cell: soak ");
+        ub_dec(&u, (uint32_t)st_round + 1U);
+        ub_s(&u, "/");
+        ub_dec(&u, (uint32_t)SOAK_N);
+        ub_s(&u, ok ? ": PASS, total " : ": FAILED, total ");
+        ub_dec(&u, f.total_ms);
+        ub_s(&u, " ms (DNS ");
+        ub_dec(&u, f.dns_ms);
+        ub_s(&u, ", connect ");
+        ub_dec(&u, f.connect_ms);
+        ub_s(&u, ", TLS ");
+        ub_dec(&u, f.tls_ms);
+        ub_s(&u, "); ");
+        ub_s(&u, f.why);
+        sb_log(u.b);
+        if (ok) {
+            ++st_pass;
+            st_n++;
+            st_sum += f.total_ms;
+            if (f.total_ms < st_min)
+                st_min = f.total_ms;
+            if (f.total_ms > st_max)
+                st_max = f.total_ms;
+        } else
+            ++st_fails;
+        st_ph = ++st_round >= SOAK_N ? 7 : 3;
+        break;
+    }
+    case 7:                                 /* Cellular off: deactivate, detach, park */
+        sb_log("selftest: cell: Cellular off");
+        kmodem_cellular(0);
+        st_tp = now;
+        st_ph = 8;
+        break;
+    case 8:
+        if (cst == KCELL_OFF || cst == KCELL_FAILED || now - st_tp > 30000U) {
+            if (cst == KCELL_OFF && !kmodem_on())
+                st_line("off and parked in ", now - st_tp);
+            else {
+                sb_log("selftest: cell: FAILED: not off and parked in 30 s; parking");
+                kmodem_stop("self test");
+                ++st_fails;
+            }
+            if (!st_restarted && !st_fails && now - st_all < 480000U) {
+                st_restarted = 1;
+                st_ph = 0;                  /* on again in the same boot */
+            } else
+                st_ph = 9;
+        }
+        break;
+    default: {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, st_fails ? "selftest: cell: FAILED: " : "selftest: cell: PASS: ");
+        ub_dec(&u, (uint32_t)st_pass);
+        ub_s(&u, " HTTPS GETs passed, ");
+        ub_dec(&u, (uint32_t)st_fails);
+        ub_s(&u, " failures; soak total ms min ");
+        ub_dec(&u, st_n ? st_min : 0);
+        ub_s(&u, " avg ");
+        ub_dec(&u, st_n ? st_sum / st_n : 0);
+        ub_s(&u, " max ");
+        ub_dec(&u, st_max);
+        ub_s(&u, st_restarted ? "; restarted once in this boot" : "; no restart");
+        sb_log(u.b);
+        cell_selftest = 0;
+        *done = 1;
+        return st_fails == 0;
+    }
+    }
+    return 1;
 }
 
 static int refuse_words(const char *number, const char **why)
@@ -1380,6 +1632,7 @@ int kmodem_sms_send(const char *number, const char *utf8)
         return SBOS_EAGAIN;
     if (ksend >= 0)
         return SBOS_EBUSY;
+    mo.b.sms.want_report = 1;                        /* "Delivered" (TP-SRR): the network's report, 0x0402 type 2 */
     r = sbm_modem_sms_send(&mo, number, utf8, &c_pol, ++ksms_ref);
     if (r < 0)
         return r == SBM_EPERM ? SBOS_EPERM : r == SBM_ERANGE ? SBOS_EINVAL : SBOS_EAGAIN;
@@ -1403,6 +1656,165 @@ int kmodem_sms_get(int i, struct ksms *m)
     return 0;
 }
 uint32_t kmodem_sms_gen(void) { return kgen; }
+
+int kmodem_sms_read(const char *number)
+{
+    int n = 0;
+    for (int i = 0; number && i < nkmsg; ++i)
+        if (kmsg[i].incoming && kmsg[i].unread && sb_streq(kmsg[i].number, number)) {
+            kmsg[i].unread = 0;
+            ++n;
+        }
+    if (n) {
+        kgen++;
+        settings_changed();
+    }
+    return n;
+}
+
+static void sms_remove(int i)
+{
+    memmove(&kmsg[i], &kmsg[i + 1], (size_t)(nkmsg - i - 1) * sizeof(kmsg[0]));
+    nkmsg--;
+    if (ksend > i)
+        ksend--;
+}
+
+int kmodem_sms_delete(int32_t id)
+{
+    for (int i = 0; i < nkmsg; ++i)
+        if (kmsg[i].id == id) {
+            if (i == ksend)
+                return SBOS_EBUSY;
+            sms_remove(i);
+            kgen++;
+            settings_changed();
+            ui_mark_dirty();
+            return 0;
+        }
+    return SBOS_EINVAL;
+}
+
+int kmodem_sms_delete_thread(const char *number)
+{
+    int n = 0;
+    for (int i = nkmsg - 1; number && i >= 0; --i)
+        if (i != ksend && sb_streq(kmsg[i].number, number)) {
+            sms_remove(i);
+            ++n;
+        }
+    if (n) {
+        kgen++;
+        settings_changed();
+        ui_mark_dirty();
+    }
+    return n;
+}
+
+/* The store (the state slot, written by settings.c with the rest of it): "sms.00" .. "sms.31", each at most
+ * STATE_REC_MAX bytes in sbm_store.c's format, oldest first. When they do not all fit, the oldest are left out.
+ * Only counts are logged, never a number or a text. */
+#define SMS_RECS 32
+static uint8_t sms_rec[STATE_REC_MAX];
+
+static void sms_to_store(const struct ksms *k, struct sbm_store_msg *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->id = (uint32_t)k->id;
+    m->utc = k->utc;
+    m->incoming = (uint8_t)(k->incoming != 0);
+    m->state = (uint8_t)k->state;
+    m->unread = (uint8_t)(k->unread != 0);
+    sb_strcpy(m->number, sizeof(m->number), k->number);
+    sb_strcpy(m->text, sizeof(m->text), k->text);
+}
+
+void kmodem_sms_save(struct state_buf *b)
+{
+    static struct sbm_store_msg m;
+    uint32_t room = SMS_RECS * (STATE_REC_MAX - 8U) * 7U / 8U, need = 0;   /* 1/8 slack for record ends */
+    int first = nkmsg;
+    while (first > 0) {
+        sms_to_store(&kmsg[first - 1], &m);
+        uint32_t z = sbm_store_msg_size(&m);
+        if (need + z > room)
+            break;
+        need += z;
+        --first;
+    }
+    char id[8] = "sms.00";
+    struct sbm_store_rec r;
+    unsigned k = 0;
+    int saved = 0;
+    sbm_store_begin(&r, sms_rec, sizeof(sms_rec));
+    for (int i = first; i <= nkmsg; ++i) {
+        if (i < nkmsg) {
+            sms_to_store(&kmsg[i], &m);
+            if (sbm_store_add(&r, &m)) {
+                ++saved;
+                continue;
+            }
+        }
+        if (!r.count)
+            break;
+        id[4] = (char)('0' + k / 10), id[5] = (char)('0' + k % 10);
+        if (state_add(b, id, sms_rec, r.len) < 0) {
+            saved -= (int)r.count;
+            break;
+        }
+        if (++k >= SMS_RECS || i == nkmsg)
+            break;
+        sbm_store_begin(&r, sms_rec, sizeof(sms_rec));
+        --i;                                         /* this message again, into the new record */
+    }
+    if (saved < nkmsg || nkmsg) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "sms: ");
+        ub_dec(&u, (uint32_t)(saved < 0 ? 0 : saved));
+        ub_s(&u, " of ");
+        ub_dec(&u, (uint32_t)nkmsg);
+        ub_s(&u, " messages saved in ");
+        ub_dec(&u, k);
+        ub_s(&u, " records");
+        sb_log(u.b);
+    }
+}
+
+void kmodem_sms_restore(const uint8_t *half)
+{
+    static struct sbm_store_msg m;
+    char id[8] = "sms.00";
+    int got = 0;
+    for (unsigned k = 0; half && k < SMS_RECS; ++k) {
+        id[4] = (char)('0' + k / 10), id[5] = (char)('0' + k % 10);
+        const uint8_t *d = 0;
+        int n = state_find(half, id, &d);
+        if (n <= 0 || !d)
+            break;
+        uint32_t off = 0;
+        unsigned idx = 0;
+        while (sbm_store_next(d, (uint32_t)n, &off, &idx, &m)) {
+            struct ksms *x = kmsg_new();
+            x->id = (int32_t)m.id;
+            if (m.id > kmsg_id)
+                kmsg_id = m.id;
+            x->utc = m.utc;
+            x->incoming = m.incoming;
+            x->state = m.state <= KSMS_NOT_DELIVERED ? m.state : KSMS_SENT;
+            x->unread = m.unread;
+            sb_strcpy(x->number, sizeof(x->number), m.number);
+            sb_strcpy(x->text, sizeof(x->text), m.text);
+            if (!x->incoming && x->state == KSMS_SENDING) {
+                x->state = KSMS_FAILED;              /* the restart came before the network's answer */
+                sb_strcpy(x->why, sizeof(x->why), "Not sent: Starbite OS restarted");
+            }
+            ++got;
+        }
+    }
+    if (got)
+        sb_logx("sms: messages restored from the state slot: ", (uint64_t)got);
+}
 #else
 void kmodem_reserve(void) { }
 int kmodem_call_dial(const char *number) { (void)number; return SBOS_EAGAIN; }
@@ -1416,10 +1828,16 @@ int kmodem_sms_send(const char *number, const char *utf8) { (void)number; (void)
 int kmodem_sms_count(void) { return 0; }
 int kmodem_sms_get(int i, struct ksms *m) { (void)i; (void)m; return SBOS_EINVAL; }
 uint32_t kmodem_sms_gen(void) { return 0; }
+int kmodem_sms_read(const char *number) { (void)number; return 0; }
+int kmodem_sms_delete(int32_t id) { (void)id; return SBOS_EINVAL; }
+int kmodem_sms_delete_thread(const char *number) { (void)number; return 0; }
+void kmodem_sms_save(struct state_buf *b) { (void)b; }
+void kmodem_sms_restore(const uint8_t *half) { (void)half; }
 
 int kmodem_cellular(int on) { (void)on; return SBOS_EAGAIN; }
 int kmodem_netif(struct sbnet **net, struct sbtcp **tcp) { (void)net; (void)tcp; return 0; }
 void kmodem_cell(struct kcell *c) { memset(c, 0, sizeof(*c)); c->bars = -1; }
+int kmodem_selftest_phase(int *done) { *done = 1; return 1; }
 #endif
 
 void kmodem_timer(unsigned id)
