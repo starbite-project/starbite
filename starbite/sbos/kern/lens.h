@@ -1,31 +1,59 @@
 /* SPDX-License-Identifier: MIT
- * Starbite Liquid Glass, the lens (P4 v8: the iOS audit's optical spec, starbite-ios-audit.md "For the GPU session").
- * One model for every glass element, in three places that must agree: the GPU's comp2 shader (tools/mesa-compjob.c
- * builds lens_tone + the light in NIR), gpucomp.c's CPU reference, and the toolkit (the CPU fallback's compositor
- * and the glass baked into a layer, tk_glass.c).
+ * Starbite Liquid Glass, the lens (glass V3: iOS 26/27, docs/design/LIQUID-GLASS.md section 2 and the rows G1, G2, G4,
+ * G5, G14, G15 of its section 6.2). One model for every glass element, in four places that must agree: the GPU's comp2
+ * shader (tools/mesa-compjob.c lens_px builds these steps in NIR), gpucomp.c's CPU reference (cpu_px2, the phone's
+ * self test: GPU within 3 levels of it), the toolkit's CPU compositor (tk_comp.c draw_lens, tk_flat_lens) and the
+ * glass baked into a layer (tk_glass.c: the lens over bitmap backdrops, the face as an over-layer).
  *
- * Geometry, per element (a rounded box; units pt, 1 pt = 3.692 px on the S9), done on the CPU once per element:
- *   - size class k = smoothstep(44, 300, m), m = min(w, h): thickness T = mix(8, 20, k), bezel
- *     b = min(r, m / 2, mix(12, 22, k));
- *   - profile (convex squircle) h(t) = (1 - (1 - t)^4)^(1/4), t = s / b (s: the distance in from the edge), its
- *     slope clamped to 8; the normal n = normalize(g T / b h'(t), 1) (g: the outward normal in the plane);
- *   - refraction (Snell, n = 1.5): the ray straight down bends inward; the backdrop shows at q = p - g D,
- *     D = |R.xy| / -R.z T h(t), normalised so its peak is 0.2 b (the spec's calibration target): the rim magnifies;
- *   - light (from the top-left, Lt = normalize(-1, -1.4)), f = dot(g, Lt): a thin specular
- *     exp(-s / 1.2) (.55 max(f, 0)^3 + .25 max(-f, 0)^3), Fresnel .5 (.04 + .96 (1 - n.z)^5) inside the bezel,
- *     less a depth shade .06 (1 - t)^2 max(-f, 0) on the side away from the light. No stroke, gloss or tint.
- * The lens map (one 32-bit word per px of the layer's glass mask): [0..7] coverage, [8..15] o.x and [16..23] o.y
- * (the sample offset q - p in panel px, signed, 1/4 px), [24..31] the light e (signed, / 127: > 0 white added,
- * < 0 darkened).
- * Per pixel (GPU, CPU fallback): the backdrop at p + o (bilinear), the tone by its luminance Y (dark below .40,
- * light above .50, blended between: c = .82 c + mix(.04, .18, light)), then the light e. */
+ * Per element, on the CPU once (lens_make; units pt, 1 pt = LENS_PT px on the S9; short = min(w, h)):
+ *   G1  band h = min(20, .25 short), amount A = min(60, .5 short) x LENS_GAIN. Inside the band the backdrop is
+ *       sampled inward at q = p - d n (n the outward normal), d = A (1 - sqrt(1 - t^2)), t = 1 - s / h (s the
+ *       distance in from the edge): a quarter circle, C1 with the flat face, d = A at the silhouette. Where A > h
+ *       the outer part of the band shows a squeezed, mirrored strip of what lies further in: the "liquid" rim.
+ *   G2  the face: Y = luma(bg), lumY = Y + lift Y (1 - Y), face = E + T lumY + K (bg - Y) (clamped), K plus
+ *       .4 sat((chroma - .15) / .65) for already-colourful pixels. Presets at the slider s (LENS_S, default .2):
+ *       light E (253, 252, 253) x mix(.403, .726, s), T mix(.599, .274, s), lift mix(.216, .270, s),
+ *       K mix(1.169, .755, s); dark E 32 / 255, T and lift by size (<= 63 pt: mix(.600, .298, s) and 0; >= 150 pt:
+ *       mix(.4525, .2086, s) and 1.2; linear between), K mix(1.005, .786, s); clear E white x .126, T .954, lift 0,
+ *       K 1.057. Which preset (section 2.5): regular elements with short <= 70 pt flip by the backdrop's mean
+ *       luminance under them (yc: dark below .35, light above .55, blended between: no state, so no hysteresis
+ *       yet: G6); larger ones and s >= .75 use the system appearance (dark). The caller measures yc on the CPU per
+ *       element (the toolkit: the wallpaper's blurred backdrop under the shape; < 0 unknown: dark).
+ *   G14 clear (variant 1): the clear preset, never flips; over a bright backdrop (yc .45 .. .55 and up) a black
+ *       layer of .35 over the element (folded into E, T, K).
+ *   G15 a tint (ARGB, straight alpha a): tone = mix(.55 tint, mix(tint, white, .35), lumY), face = mix(face, tone,
+ *       .8 a). The tone is linear in lumY, so the tint folds into E and T per channel (the shader has no tint step).
+ *   press (section 5.1, the part a shader can do): a flat white glow of .08 x press over the face, the glint x 1.5.
+ *   G4  the glint (iOS 27): a fixed vertical light, the top and bottom walls alike: lobe = 1 - |n.x|, a 1.2 pt
+ *       inward ramp plus a .21 bleed to 4.8 pt; the face is recoloured toward 1.6 white + 2.85 (face - luma(face))
+ *       by .252 x .6 x lobe x ramp (glass over colour glints in that colour). No Fresnel term all round (it read as
+ *       an outline), no dispersion (G18).
+ *   G5  the contour (iOS 27's defined border): 0.75 pt just outside the silhouette, the backdrop darkened by
+ *       peak (1 - dir lobe): light .43 / .77, dark .88 / 1, clear .36 / .77: the side walls, not where the glint
+ *       is. The lens quad reaches 4 px past the shape for it.
+ * Everything per element lands in a float[LQ_N] (gc_quad.lq; gpucomp.c packs it into the 160-byte lens quad: the
+ * geometry as f32, the rest as fp16 pairs in words a lens quad does not use; mesa-compjob.c's comment has the
+ * layout); a half frame scales the geometry's px (lens_scale). Per pixel (GPU and CPU alike): lens_sd (the rounded
+ * box's distance and normal), lens_offset, the backdrop bilinear at p + o, lens_face, lens_contour, lens_blend over
+ * what is under it. comp2 works the face, glint and contour in fp16 (within a level of these f32 steps). */
 #ifndef SB_LENS_H
 #define SB_LENS_H
 #include <stdint.h>
 
 #define LENS_PT 3.6923077f        /* px per pt */
-#define LENS_LX -.58123819f       /* toward the light: normalize(-1, -1.4) */
-#define LENS_LY -.81373347f
+#ifndef LENS_GAIN
+#define LENS_GAIN 1.0f            /* G1: the refraction amount's scale (ramp it .33 -> 1 while checking on the phone) */
+#endif
+#ifndef LENS_S
+#define LENS_S .2f                /* section 2.2: the Liquid Glass slider s, clear 0 .. tinted 1 (G17 makes it a setting) */
+#endif
+
+/* the per-element record: band 1 / h (px), amount A (px), 1 / (px per pt), glint strength, chroma gain K, lift,
+ * the contour's outer edge (px, + .5 for its antialiasing), its peak and peak x dir, K's chromatic boost, E (rgb),
+ * T (rgb) */
+enum { LQ_IH, LQ_A, LQ_IPT, LQ_GL, LQ_K, LQ_LIFT, LQ_WC, LQ_CA, LQ_CB, LQ_KB, LQ_ER, LQ_EG, LQ_EB, LQ_TR, LQ_TG, LQ_TB,
+       LQ_N };
+#define LENS_APRON 4.0f           /* px the lens quad reaches past the shape (the contour: .75 pt + .5 = 3.3 px) */
 
 static inline float lens_sqrt(float x)
 {
@@ -39,83 +67,82 @@ static inline float lens_sqrt(float x)
 }
 static inline float lens_sat(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 static inline float lens_mix(float a, float b, float t) { return a + (b - a) * t; }
-static inline float lens_exp_neg(float x)    /* e^-x for x >= 0 (within 1 % where it matters) */
-{
-    float y = 1 + x * (1.0f / 32);
-    y *= y; y *= y; y *= y; y *= y; y *= y;
-    return 1 / y;
-}
+static inline float lens_abs(float v) { return v < 0 ? -v : v; }
+static inline float lens_luma(const float c[3]) { return .2126f * c[0] + .7152f * c[1] + .0722f * c[2]; }
 
-/* an element's lens class (from its size and corner radius, pt) */
-typedef struct { float T, b, dk; } lens_cls;
-/* the profile at t: the offset (pt, before the class's normalisation) and n.z */
-static inline float lens_d_raw(float t, float T, float b, float *nz)
+/* a face preset (section 2.4): E (grey) x E.a, T, lift, K, the contour's peak and dir */
+typedef struct { float E, T, lift, K, cp, cd; } lens_preset;
+static inline lens_preset lens_preset_of(int which /* 0 light, 1 dark, 2 clear */, float short_pt, float s)
 {
-    float u = 1 - t, u4 = u * u * u * u, q = 1 - u4;
-    float h = q > 0 ? lens_sqrt(lens_sqrt(q)) : 0;
-    float hp = q > 0 ? u * u * u / (h * h * h) : 8;
-    hp = hp > 8 ? 8 : hp;
-    float sl = T / b * hp, inn = 1 / lens_sqrt(1 + sl * sl), nx = sl * inn, z = inn;
-    const float eta = 1 / 1.5f;
-    float k = 1 - eta * eta * (1 - z * z), a = eta * z - lens_sqrt(k > 0 ? k : 0);
-    float rx = a * nx, rz = -eta + a * z;
-    if (nz) *nz = z;
-    return (rx < 0 ? -rx : rx) / (rz < -1e-4f ? -rz : 1e-4f) * T * h;
-}
-static inline lens_cls lens_class(float w_pt, float h_pt, float r_pt)
-{
-    float m = w_pt < h_pt ? w_pt : h_pt, x = lens_sat((m - 44) / (300 - 44)), k = x * x * (3 - 2 * x);
-    lens_cls c;
-    c.T = lens_mix(8, 20, k);
-    c.b = lens_mix(12, 22, k);
-    if (r_pt < c.b) c.b = r_pt;
-    if (m * .5f < c.b) c.b = m * .5f;
-    if (c.b < 1) c.b = 1;
-    float mx = 0;
-    for (int i = 1; i <= 64; ++i) {
-        float d = lens_d_raw((float)i / 64, c.T, c.b, 0);
-        if (d > mx) mx = d;
+    lens_preset p;
+    if (which == 2) {
+        p = (lens_preset){ .126f, .954f, 0, 1.057f, .36f, .77f };
+    } else if (which == 0) {
+        p = (lens_preset){ (252.667f / 255) * lens_mix(.403f, .726f, s), lens_mix(.599f, .274f, s),
+                           lens_mix(.216f, .270f, s), lens_mix(1.169f, .755f, s), .43f, .77f };
+    } else {
+        float z = lens_sat((short_pt - 63) * (1.0f / (150 - 63)));      /* dark: larger glass is more opaque */
+        p = (lens_preset){ 32.0f / 255, lens_mix(lens_mix(.600f, .298f, s), lens_mix(.4525f, .2086f, s), z),
+                           lens_mix(0, 1.2f, z), lens_mix(1.005f, .786f, s), .88f, 1.0f };
     }
-    c.dk = mx > 1e-4f ? .2f * c.b / mx : 0;
-    return c;
-}
-/* v9: a glass shape's lens in frame px (no per-pixel map: the GPU and the CPU evaluate it per pixel from the shape's
- * rounded-box distance): lb the bezel (px), lt = T / b, lc the offset scale (px), lr the specular's falloff
- * (log2(e) / 1.2 pt, per px). A half frame halves lb and lc and doubles lr. */
-typedef struct { float lb, lt, lc, lr; } lens_par;
-static inline lens_par lens_params(float w_px, float h_px, float r_px, float px_per_pt)
-{
-    lens_cls c = lens_class(w_px / px_per_pt, h_px / px_per_pt, r_px / px_per_pt);
-    lens_par p;
-    p.lb = c.b * px_per_pt;
-    p.lt = c.T / c.b;
-    p.lc = c.T * c.dk * px_per_pt;
-    p.lr = 1.44269504f / (1.2f * px_per_pt);
     return p;
 }
-static inline float lens_exp2_neg(float x)   /* 2^-x, x >= 0 */
+
+/* an element's record: its shape (px), px per pt (a half frame: half of LENS_PT), its variant (0 regular, 1 clear),
+ * tint (ARGB, straight alpha; 0 none), press (0..1) and yc (the backdrop's mean luminance under it, < 0 unknown) */
+static inline void lens_make(float L[LQ_N], float w_px, float h_px, float px_per_pt, int variant, uint32_t tint,
+                             float press, float yc)
 {
-    return lens_exp_neg(x * .69314718f);
+    float sh = (w_px < h_px ? w_px : h_px) / px_per_pt, s = LENS_S;
+    float hb = (sh * .25f < 20 ? sh * .25f : 20) * px_per_pt, A = (sh * .5f < 60 ? sh * .5f : 60) * px_per_pt;
+    L[LQ_IH] = 1 / (hb > 1 ? hb : 1);
+    L[LQ_A] = A * LENS_GAIN;
+    L[LQ_IPT] = 1 / px_per_pt;
+    L[LQ_WC] = .75f * px_per_pt + .5f;
+    /* the preset: clear; or regular, small ones flipping light / dark by yc (section 2.5), the rest dark */
+    lens_preset P;
+    float dim = 0;
+    if (variant == 1) {
+        P = lens_preset_of(2, sh, s);
+        dim = .35f * lens_sat((yc - .45f) * 10);                    /* G14: the black .35 over bright content */
+    } else {
+        float wl = sh <= 70 && s < .75f && yc >= 0 ? lens_sat((yc - .35f) * 5) : 0;
+        lens_preset D = lens_preset_of(1, sh, s), Lt = lens_preset_of(0, sh, s);
+        P = (lens_preset){ lens_mix(D.E, Lt.E, wl), lens_mix(D.T, Lt.T, wl), lens_mix(D.lift, Lt.lift, wl),
+                           lens_mix(D.K, Lt.K, wl), lens_mix(D.cp, Lt.cp, wl), lens_mix(D.cd, Lt.cd, wl) };
+    }
+    float E[3] = { P.E, P.E, P.E }, T[3] = { P.T, P.T, P.T }, K = P.K, KB = .4f;
+    /* G15: the tint folded into E and T: (1 - w) face + w (.55 c + (.1 c + .35) lumY), w = .8 a */
+    float w = .8f * (float)(tint >> 24) * (1.0f / 255);
+    for (int c = 0; c < 3; ++c) {
+        float tc = (float)(tint >> (16 - 8 * c) & 255) * (1.0f / 255);
+        E[c] = (1 - w) * E[c] + w * .55f * tc;
+        T[c] = (1 - w) * T[c] + w * (.1f * tc + .35f);
+    }
+    /* the press's flat glow (white .08 x press), then the clear variant's dim (black), as layers over the face */
+    float g = .08f * lens_sat(press), keep = (1 - w) * (1 - g) * (1 - dim);
+    for (int c = 0; c < 3; ++c) {
+        E[c] = (E[c] * (1 - g) + g) * (1 - dim);
+        T[c] *= (1 - g) * (1 - dim);
+        L[LQ_ER + c] = E[c];
+        L[LQ_TR + c] = T[c];
+    }
+    L[LQ_K] = K * keep;
+    L[LQ_KB] = KB * keep;
+    L[LQ_LIFT] = P.lift;
+    L[LQ_GL] = .252f * .6f * (1 + .5f * lens_sat(press));
+    L[LQ_CA] = P.cp;
+    L[LQ_CB] = P.cp * P.cd;
 }
-/* s px in from the edge, outward normal (gx, gy) (unit): the offset (frame px) and the light e; the steps comp2's
- * lens path does */
-static inline void lens_eval(const lens_par *P, float s, float gx, float gy, float *ox, float *oy, float *e)
+/* the record for a frame k times the size (a big move's half frame: k = .5) */
+static inline void lens_scale(float L[LQ_N], float k)
 {
-    float t = lens_sat(s / P->lb), u = 1 - t, u2 = u * u, q = 1 - u2 * u2;
-    float h = lens_sqrt(lens_sqrt(q)), h3 = h * h * h;
-    float hp = u2 * u / (h3 > 1e-6f ? h3 : 1e-6f);
-    hp = hp < 8 ? hp : 8;
-    float sl = P->lt * hp, inn = 1 / lens_sqrt(1 + sl * sl), nx = sl * inn, nz = inn;
-    const float eta = 1 / 1.5f;
-    float k = 1 - eta * eta * (1 - nz * nz), a = eta * nz - lens_sqrt(k > 0 ? k : 0);
-    float rx = a * nx, rz = -eta + a * nz;
-    float D = (rx < 0 ? -rx : rx) / (-rz > 1e-4f ? -rz : 1e-4f) * h * P->lc;
-    *ox = -gx * D;
-    *oy = -gy * D;
-    float f = gx * LENS_LX + gy * LENS_LY, fp = f > 0 ? f : 0, fn = f < 0 ? -f : 0;
-    float rho = lens_exp2_neg(s * P->lr), w = 1 - nz, w2 = w * w;
-    *e = rho * (.55f * fp * fp * fp + .25f * fn * fn * fn) + .5f * (.04f + .96f * w2 * w2 * w) - .06f * u2 * fn;
+    L[LQ_IH] /= k;
+    L[LQ_A] *= k;
+    L[LQ_IPT] /= k;
+    L[LQ_WC] = (L[LQ_WC] - .5f) * k + .5f;
 }
+
 /* a rounded box (centre cx, cy; half size less the radius ex, ey; radius r) at (px, py): the signed distance
  * (negative inside) and the outward normal, as comp2 computes them */
 static inline float lens_sd(float px, float py, float cx, float cy, float ex, float ey, float r, float *gx, float *gy)
@@ -129,99 +156,49 @@ static inline float lens_sd(float px, float py, float cx, float cy, float ex, fl
     return l + (mm < 0 ? mm : 0) - r;
 }
 
-/* at s pt in from the edge, outward normal (gx, gy) (unit): the sample offset (panel px) and the light e */
-static inline void lens_at(const lens_cls *c, float s, float gx, float gy, float *ox, float *oy, float *e)
+/* G1: the sample offset (px) at s px in from the edge (0 on and outside it), outward normal (gx, gy) */
+static inline void lens_offset(const float *L, float s, float gx, float gy, float *ox, float *oy)
 {
-    float t = lens_sat(s / c->b), nz;
-    float D = lens_d_raw(t, c->T, c->b, &nz) * c->dk * LENS_PT;
-    *ox = -gx * D;
-    *oy = -gy * D;
-    float f = gx * LENS_LX + gy * LENS_LY, fp = f > 0 ? f : 0, fn = f < 0 ? -f : 0;
-    float rho = lens_exp_neg(s * (1.0f / 1.2f)), u = 1 - nz, u5 = u * u * u * u * u;
-    float spec = rho * (.55f * fp * fp * fp + .25f * fn * fn * fn) + .5f * (.04f + .96f * u5);
-    float depth = .06f * (1 - t) * (1 - t) * fn;
-    *e = spec - depth;
+    float t = lens_sat(1 - s * L[LQ_IH]);
+    float d = L[LQ_A] * (1 - lens_sqrt(1 - t * t));
+    *ox = -gx * d;
+    *oy = -gy * d;
 }
 
-static inline uint32_t lens_word(float cov, float ox, float oy, float e)
+/* G2 + G4: rgb, the backdrop at p + o (0..1), becomes the face with its glint; s px in from the edge, gx the outward
+ * normal's x */
+static inline void lens_face(const float *L, float rgb[3], float s, float gx)
 {
-    int c = (int)(lens_sat(cov) * 255 + .5f);
-    int x = (int)(ox * 4 + (ox < 0 ? -.5f : .5f)), y = (int)(oy * 4 + (oy < 0 ? -.5f : .5f));
-    int q = (int)(e * 127 + (e < 0 ? -.5f : .5f));
-    x = x < -127 ? -127 : x > 127 ? 127 : x;
-    y = y < -127 ? -127 : y > 127 ? 127 : y;
-    q = q < -127 ? -127 : q > 127 ? 127 : q;
-    return (uint32_t)c | (uint32_t)(uint8_t)(int8_t)x << 8 | (uint32_t)(uint8_t)(int8_t)y << 16 |
-           (uint32_t)(uint8_t)(int8_t)q << 24;
-}
-static inline void lens_unword(uint32_t m, float *cov, float *ox, float *oy, float *e)
-{
-    *cov = (float)(m & 255u) * (1.0f / 255);
-    *ox = (float)(int8_t)(uint8_t)(m >> 8) * .25f;
-    *oy = (float)(int8_t)(uint8_t)(m >> 16) * .25f;
-    *e = (float)(int8_t)(uint8_t)(m >> 24) * (1.0f / 127);
+    float Y = lens_luma(rgb), lum = Y + L[LQ_LIFT] * Y * (1 - Y);
+    float mx = rgb[0] > rgb[1] ? rgb[0] : rgb[1], mn = rgb[0] < rgb[1] ? rgb[0] : rgb[1];
+    mx = mx > rgb[2] ? mx : rgb[2];
+    mn = mn < rgb[2] ? mn : rgb[2];
+    float K = L[LQ_K] + L[LQ_KB] * lens_sat((mx - mn - .15f) * (1 / .65f)), f[3];
+    for (int c = 0; c < 3; ++c)
+        f[c] = lens_sat(L[LQ_ER + c] + L[LQ_TR + c] * lum + K * (rgb[c] - Y));
+    float Lf = lens_luma(f), sp = s * L[LQ_IPT];
+    float r1 = lens_sat(1 - sp * (1 / 1.2f)), r2 = .21f * lens_sat(1 - sp * (1 / 4.8f));
+    float gw = L[LQ_GL] * (1 - lens_abs(gx)) * (r1 > r2 ? r1 : r2);
+    for (int c = 0; c < 3; ++c)
+        rgb[c] = lens_sat(f[c] + gw * (1.6f + 2.85f * (f[c] - Lf) - f[c]));
 }
 
-/* v10: the backdrop's saturation (about its luminance, clamped), before lens_shade */
-static inline void lens_saturate(float rgb[3], float k)
+/* G5: the contour's darkening at the signed distance sd (px; it only shows outside: lens_blend) */
+static inline float lens_contour(const float *L, float sd, float gx)
 {
-    float Y = .2126f * rgb[0] + .7152f * rgb[1] + .0722f * rgb[2];
-    for (int c = 0; c < 3; ++c) rgb[c] = lens_sat(Y + (rgb[c] - Y) * k);
+    return (L[LQ_CA] - L[LQ_CB] * (1 - lens_abs(gx))) * lens_sat(L[LQ_WC] - sd);
 }
-/* 1.0 (glass V2): the tone as parameters: c = k c + a0 + a1 sat((Y - .40) x 10). Regular glass is .82 / .04 / .14
- * (the audit's spec); iOS 26's clear glass is less frosted (.90 / .02 / .08); a press adds a glow to a0. A tint is
- * not here: it is a colour layer over the glass (the lens quad's solid, premultiplied). The shader reads k, a0, a1
- * from the quad (comp2, flag 256: +152, +156, +120). */
-typedef struct { float k, a0, a1; } lens_tone;
-static inline lens_tone lens_tone_of(int variant, float press)
+
+/* the glass over what is under it (acc, premultiplied rgba): the contour (ct) as a black layer outside the shape,
+ * then the face (rgb) by its coverage; al the quad's alpha (and fade) */
+static inline void lens_blend(float acc[4], const float rgb[3], float sd, float al, float ct)
 {
-    lens_tone t = variant ? (lens_tone){ .90f, .02f, .08f } : (lens_tone){ .82f, .04f, .14f };
-    t.a0 += .10f * lens_sat(press);
-    return t;
-}
-static inline void lens_shade_t(float rgb[3], float e, lens_tone t)
-{
-    float Y = .2126f * rgb[0] + .7152f * rgb[1] + .0722f * rgb[2];
-    float add = t.a0 + t.a1 * lens_sat((Y - .40f) * 10);
+    float cov = lens_sat(.5f - sd), x = al * ct * (1 - cov), m = al * cov;
     for (int c = 0; c < 3; ++c) {
-        float v = rgb[c] * t.k + add;
-        rgb[c] = e > 0 ? v + (1 - v) * e : v * (1 + e);
+        float d = acc[c] * (1 - x);
+        acc[c] = d + (rgb[c] - d) * m;
     }
-}
-/* rgb: the refracted backdrop, 0..1; shaded in place (the shader does exactly these steps: comp2, flag 256) */
-static inline void lens_shade(float rgb[3], float e)
-{
-    lens_shade_t(rgb, e, lens_tone_of(0, 0));
-}
-/* the tint (ARGB, straight alpha) as a colour layer over shaded glass */
-static inline void lens_tint(float rgb[3], uint32_t argb)
-{
-    float a = (float)(argb >> 24) * (1.0f / 255);
-    for (int c = 0; c < 3; ++c) rgb[c] += ((float)(argb >> (16 - 8 * c) & 255) * (1.0f / 255) - rgb[c]) * a;
-}
-/* the premultiplied solid the GPU draws for a tint */
-static inline uint32_t lens_tint_pm(uint32_t argb)
-{
-    uint32_t a = argb >> 24, o = a << 24;
-    for (int c = 0; c < 3; ++c) o |= ((argb >> (16 - 8 * c) & 255) * a + 127) / 255 << (16 - 8 * c);
-    return o;
-}
-/* the same over a premultiplied backdrop with alpha (glass baked into a layer over its own content, which may be
- * transparent): the tone as a black layer of .18 and a white one of add, the light as a white or black layer; for
- * c[3] = 1 it is lens_shade */
-static inline void lens_shade_pm(float c[4], float e)
-{
-    float A = c[3] > 1e-4f ? c[3] : 1e-4f;
-    float Y = (.2126f * c[0] + .7152f * c[1] + .0722f * c[2]) / A * c[3];
-    float add = lens_mix(.04f, .18f, lens_sat((Y - .40f) * 10));
-    for (int q = 0; q < 3; ++q) c[q] = c[q] * .82f + add;
-    c[3] = c[3] * .82f + .18f;                 /* black .18 then white add: alpha 1 - .82 (1 - a) */
-    if (e > 0) {
-        for (int q = 0; q < 3; ++q) c[q] = c[q] * (1 - e) + e;
-        c[3] = c[3] * (1 - e) + e;
-    } else {
-        for (int q = 0; q < 3; ++q) c[q] *= 1 + e;
-        c[3] = c[3] * (1 + e) - e;
-    }
+    float a = acc[3] * (1 - x) + x;
+    acc[3] = a + (1 - a) * m;
 }
 #endif
