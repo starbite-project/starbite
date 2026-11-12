@@ -72,6 +72,9 @@ void sbfw_rec_decode(const uint8_t *b, struct sbfw_rec *r)
     sget(r->shell_key, b + 144, 24);
     for (unsigned i = 0; i < 64; ++i)
         r->undo[i] = b[168 + i];
+    r->slot_active = b[232];
+    r->slot_try = b[233];
+    r->slot_tries = b[234];
 }
 
 void sbfw_rec_encode(uint8_t *b, const struct sbfw_rec *r)
@@ -88,6 +91,9 @@ void sbfw_rec_encode(uint8_t *b, const struct sbfw_rec *r)
     sput(b + 144, r->shell_key, 24);
     for (unsigned i = 0; i < 64; ++i)
         b[168 + i] = r->undo[i];
+    b[232] = r->slot_active;
+    b[233] = r->slot_try;
+    b[234] = r->slot_tries;
 }
 
 void sbset_crc_fix(uint8_t *b)

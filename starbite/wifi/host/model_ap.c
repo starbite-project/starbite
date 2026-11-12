@@ -6,6 +6,16 @@
  * it plays the authenticator of the four-way handshake: message 1, checks message 2's MIC and RSN element,
  * message 3 with the GTK wrapped (its own AES-128 encryption and RFC 3394 key wrap, checked against the RFC's
  * example), checks message 4, and then the keys the host installs must be its TK and GTK.
+ *
+ * WPA3 (M.ap_sec): the RSN element offers SAE (only, or with PSK: a transition network; hash-to-element only with an
+ * RSNXE and the membership selector), "cap" lists sae_ext / sae / mfp as asked. External SAE as brcmfmac's cyw
+ * firmware does it: on SET_SSID with wpa_auth 0x40000, auth 3, mfp 2 and the events 187.. on (event_msgs_ext) it sends
+ * EXT_AUTH_REQ; the station's frames come by "mgmt_frame" (answered by MGMT_FRAME_TXSTATUS), the AP's go back as
+ * EXT_AUTH_FRAME_RX (16 bytes of brcmf_rx_mgmt_data, the 802.11 header, the body); the AP's own SAE is sae.c's
+ * (model_sae, set by the test: the preview of Starbite OS links no SAE); "auth_status" with the PMKID it made lets
+ * it associate, and the four-way handshake is AKM 8's (KDF-SHA256, AES-CMAC, key descriptor version 0, the PMKID
+ * KDE in message 1, the beacon's RSN element, the GTK and an IGTK in message 3). In-firmware SAE: "sae_password"
+ * checked, then PSK_SUP keyed.
  */
 #include <stdlib.h>
 #include <stdint.h>
@@ -13,7 +23,12 @@
 #include <string.h>
 #include "../bcmw_priv.h"
 #include "../wpa.h"
+#include "../sae.h"
 #include "model.h"
+
+const struct bcmw_sae_ops *model_sae;
+static const uint8_t igtk[16] = { 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f };
+static const uint8_t igtk_ipn[6] = { 0x07, 0x06, 0x05, 0x04, 0x03, 0x02 };
 
 static const uint8_t ap_bssid[6] = { 0x02, 0x11, 0x22, 0x33, 0x44, 0x5a };
 static const char ap_ssid[] = "test-ap";
@@ -24,7 +39,55 @@ static struct {
     uint8_t pmk[32], anonce[32], snonce[32], sta[6], ptk[48], wpaie[64], gtk2[16];
     unsigned wpaie_len, wsec, wpa_auth, sup_wpa, step, pm;
     int joined;
+    /* WPA3 */
+    unsigned auth, mfp, akm;            /* SET_AUTH, "mfp", the AKM of the association (2 or 8) */
+    int ext_events, sae_wait, sae_accepted, token_sent, fw_sae, sae_failed;
+    uint8_t sae_pw[130];
+    struct bcmw_sae sae;
+    uint8_t beacon_rsn[32], token[32];
+    unsigned beacon_rsn_len;
+    struct { uint32_t type, status; uint8_t data[600]; unsigned len; } ev[4];   /* events after the ioctl's answer */
+    unsigned nev;
+    int message1_due;
 } A;
+
+static uint64_t ap_rng = 0x2545f4914f6cdd1dull;
+static int ap_random(void *ctx, uint8_t *out, uint32_t n)
+{
+    (void)ctx;
+    for (uint32_t i = 0; i < n; i++) {
+        ap_rng ^= ap_rng << 13, ap_rng ^= ap_rng >> 7, ap_rng ^= ap_rng << 17;
+        out[i] = (uint8_t)(ap_rng >> 32);
+    }
+    return 0;
+}
+
+static void ap_event(uint32_t type, uint32_t status, const uint8_t *data, unsigned len)
+{
+    if (A.nev == 4 || len > sizeof(A.ev[0].data)) {
+        M.ap_errors |= 0x10000;
+        return;
+    }
+    A.ev[A.nev].type = type, A.ev[A.nev].status = status, A.ev[A.nev].len = len;
+    if (len)
+        memcpy(A.ev[A.nev].data, data, len);
+    A.nev++;
+}
+
+/* an Authentication frame from the AP to the station, as EXT_AUTH_FRAME_RX carries it */
+static void ap_auth_frame(const uint8_t *body, unsigned len)
+{
+    uint8_t d[16 + 24 + 400];
+    memset(d, 0, 40);
+    d[1] = 1;                           /* brcmf_rx_mgmt_data: version 1, big-endian */
+    d[2] = 0xd0, d[3] = 0x24;           /* chanspec */
+    d[16] = 0xb0;                       /* frame control: Authentication */
+    memcpy(d + 16 + 4, A.sta, 6);
+    memcpy(d + 16 + 10, ap_bssid, 6);
+    memcpy(d + 16 + 16, ap_bssid, 6);
+    memcpy(d + 40, body, len);
+    ap_event(BCMW_E_EXT_AUTH_FRAME_RX, 0, d, 40 + len);
+}
 
 /* ---- AES-128 encryption and the key wrap (the authenticator's side; FIPS 197, RFC 3394) -------- */
 
@@ -142,6 +205,10 @@ static void mic(const uint8_t *msg, unsigned len, uint8_t out[16])
     uint8_t z[16] = { 0 }, d[20];
     const uint8_t *p[3] = { msg, z, msg + 81 + 16 };
     const unsigned l[3] = { 81, 16, len - 81 - 16 };
+    if (A.akm == 8) {
+        bcmw_aes_cmac(A.ptk, p, l, 3, out);
+        return;
+    }
     bcmw_hmac_sha1(A.ptk, 16, p, l, 3, d);
     memcpy(out, d, 16);
 }
@@ -167,34 +234,52 @@ static unsigned key_msg(uint8_t *m, unsigned info, uint8_t replay, const uint8_t
     m[16] = replay;
     memcpy(m + 17, A.anonce, 32);
     m[97] = (uint8_t)(dlen >> 8), m[98] = (uint8_t)dlen;
-    memcpy(m + 99, data, dlen);
+    if (dlen)
+        memcpy(m + 99, data, dlen);
     return len;
 }
 
 static void message1(void)
 {
-    uint8_t m[128];
+    uint8_t m[160], kde[22] = { 0xdd, 20, 0x00, 0x0f, 0xac, 4 };
     for (unsigned i = 0; i < 32; i++)
         A.anonce[i] = (uint8_t)(0xa0 + i);
-    send_eapol(m, key_msg(m, 0x008a, 1, 0, 0));
+    if (A.akm == 8) {                   /* version 0, the PMKID KDE */
+        memcpy(kde + 6, A.sae.pmkid, 16);
+        send_eapol(m, key_msg(m, 0x0088, 1, kde, sizeof(kde)));
+    } else {
+        send_eapol(m, key_msg(m, 0x008a, 1, 0, 0));
+    }
     A.step = 1;
 }
 
 static void message3(void)
 {
-    uint8_t plain[64], wrapped[72], m[256];
+    uint8_t plain[128], wrapped[136], m[256];
     unsigned n = 0, len;
-    memcpy(plain, A.wpaie, A.wpaie_len);
-    n = A.wpaie_len;
+    if (A.akm == 8) {                   /* the beacon's RSN element (and RSNXE) */
+        memcpy(plain, A.beacon_rsn, A.beacon_rsn_len);
+        n = A.beacon_rsn_len;
+    } else {
+        memcpy(plain, A.wpaie, A.wpaie_len);
+        n = A.wpaie_len;
+    }
     plain[n++] = 0xdd, plain[n++] = 22, plain[n++] = 0x00, plain[n++] = 0x0f, plain[n++] = 0xac, plain[n++] = 1;
     plain[n++] = 1, plain[n++] = 0;     /* key index 1 */
     memcpy(plain + n, gtk, 16);
     n += 16;
+    if (A.mfp) {                        /* the IGTK KDE: key id 4, IPN, the key */
+        plain[n++] = 0xdd, plain[n++] = 28, plain[n++] = 0x00, plain[n++] = 0x0f, plain[n++] = 0xac, plain[n++] = 9;
+        plain[n++] = 4, plain[n++] = 0;
+        memcpy(plain + n, igtk_ipn, 6);
+        memcpy(plain + n + 6, igtk, 16);
+        n += 22;
+    }
     plain[n++] = 0xdd;                  /* padding to a multiple of 8 */
     while (n % 8)
         plain[n++] = 0;
     wrap(A.ptk + 16, plain, n, wrapped);
-    len = key_msg(m, 0x13ca, 2, wrapped, n + 8);
+    len = key_msg(m, A.akm == 8 ? 0x13c8 : 0x13ca, 2, wrapped, n + 8);
     mic(m, len, m + 81);
     send_eapol(m, len);
     A.step = 3;
@@ -211,7 +296,7 @@ void model_ap_rekey(void)
     memcpy(plain + n, gtk2, 16);
     n += 16;
     wrap(A.ptk + 16, plain, n, wrapped);
-    len = key_msg(m, 0x1382, 3, wrapped, n + 8);
+    len = key_msg(m, A.akm == 8 ? 0x1380 : 0x1382, 3, wrapped, n + 8);
     mic(m, len, m + 81);
     /* the same frame from a stranger first: must be ignored */
     memcpy(f, A.sta, 6);
@@ -396,7 +481,10 @@ void model_ap_tx(const uint8_t *f, unsigned len)
         af = memcmp(A.anonce, A.snonce, 32) < 0;
         memcpy(data + 12, af ? A.anonce : A.snonce, 32);
         memcpy(data + 44, af ? A.snonce : A.anonce, 32);
-        bcmw_prf(A.pmk, 32, "Pairwise key expansion", data, 76, A.ptk, 48);
+        if (A.akm == 8)
+            bcmw_kdf_sha256(A.pmk, 32, "Pairwise key expansion", data, 76, A.ptk, 48);
+        else
+            bcmw_prf(A.pmk, 32, "Pairwise key expansion", data, 76, A.ptk, 48);
         mic(m, mlen, want);
         if (memcmp(want, m + 81, 16)) {
             M.ap_errors |= 1;           /* message 2's MIC */
@@ -444,11 +532,49 @@ void model_ap_real_defaults(void)
     A.pm = 2;
 }
 
-/* a directed escan's result: one BSS of this name with an RSN element (WPA2-PSK, CCMP) */
+/* the AP's RSN element (and RSNXE) for its security (M.ap_sec) */
+static unsigned beacon_rsn(uint8_t *out)
+{
+    static const uint8_t psk[22] = { 48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2, 0, 0 };
+    static const uint8_t sae[22] = { 48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 8, 0xc0, 0 };
+    static const uint8_t both[26] = { 48, 24, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 2, 0, 0x00, 0x0f, 0xac, 2,
+                                      0x00, 0x0f, 0xac, 8, 0x80, 0 };
+    switch (M.ap_sec) {
+    case 1:
+        memcpy(out, sae, 22);
+        return 22;
+    case 2:
+        memcpy(out, both, 26);
+        return 26;
+    case 3:
+        memcpy(out, sae, 22);
+        out[22] = 244, out[23] = 1, out[24] = 0x20;     /* RSNXE: SAE hash-to-element */
+        return 25;
+    case 4:                             /* WPA2-PSK with management frame protection capable */
+        memcpy(out, psk, 22);
+        out[20] = 0x80;
+        return 22;
+    default:
+        memcpy(out, psk, 22);
+        return 22;
+    }
+}
+
+/* a directed escan's result: one BSS of this name with an RSN element (WPA2-PSK, CCMP; or WPA3: M.ap_sec) */
 unsigned model_ap_scan_result(uint8_t *r, unsigned cap, uint16_t sync)
 {
-    static const uint8_t rsn[22] = { 48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2, 0, 0 };
-    unsigned blen = 128 + 9 + sizeof(rsn), total = 12 + blen;
+    uint8_t rsn[32], ies[64];
+    unsigned rl = beacon_rsn(rsn), il = 0, blen, total;
+    ies[il++] = 0, ies[il++] = 7;       /* the SSID element */
+    memcpy(ies + il, ap_ssid, 7);
+    il += 7;
+    if (M.ap_sec == 3)                  /* supported rates: 6 Mb/s basic, the membership selector 123 (H2E only) */
+        ies[il++] = 1, ies[il++] = 2, ies[il++] = 0x8c, ies[il++] = 0x80 | 123;
+    if (!M.open_ap) {
+        memcpy(ies + il, rsn, rl);
+        il += rl;
+    }
+    blen = 128 + il, total = 12 + blen;
     if (total > cap)
         return 0;
     memset(r, 0, total);
@@ -466,12 +592,69 @@ unsigned model_ap_scan_result(uint8_t *r, unsigned cap, uint16_t sync)
     put16(b + 72, 0xd024);              /* a 5 GHz chanspec */
     put16(b + 78, (uint16_t)-48);
     put16(b + 116, 128);
-    put32(b + 120, 9 + (M.open_ap ? 0 : sizeof(rsn)));
-    b[128] = 0, b[129] = 7;             /* the SSID element */
-    memcpy(b + 130, ap_ssid, 7);
-    if (!M.open_ap)
-        memcpy(b + 137, rsn, sizeof(rsn));
+    put32(b + 120, il);
+    memcpy(b + 128, ies, il);
     return total;
+}
+
+/* the station's Authentication frame (by "mgmt_frame"), the AP's SAE side */
+static void ap_sae(const uint8_t *f, unsigned len)
+{
+    uint8_t out[400], pt[64];
+    unsigned n;
+    int h2e;
+    if (!model_sae || len < 6 || le16(f) != 3)
+        return;
+    if (le16(f + 2) == 1) {
+        M.sae_commits++;
+        if (M.sae_mute)
+            return;
+        h2e = le16(f + 4) == BCMW_SAE_ST_H2E;
+        M.sae_h2e_seen += (unsigned)h2e;
+        if (M.ap_sec == 3 && !h2e) {
+            M.ap_errors |= 0x20000;     /* hash-to-element only: a hunting-and-pecking commit */
+            return;
+        }
+        if (M.sae_token && !A.token_sent) {
+            /* status 76: the group, the token (in its container with H2E) */
+            n = 0;
+            out[n++] = 3, out[n++] = 0, out[n++] = 1, out[n++] = 0, out[n++] = 76, out[n++] = 0, out[n++] = 19, out[n++] = 0;
+            if (h2e)
+                out[n++] = 255, out[n++] = 33, out[n++] = 93;
+            for (unsigned i = 0; i < 32; i++)
+                A.token[i] = (uint8_t)(0x30 + i);
+            memcpy(out + n, A.token, 32);
+            n += 32;
+            A.token_sent = 1;
+            M.sae_tokens_sent++;
+            ap_auth_frame(out, n);
+            return;
+        }
+        if (A.token_sent && (h2e ? len < 35 || memcmp(f + len - 32, A.token, 32) || f[len - 35] != 255
+                                 : len != 8 + 32 + 96 || memcmp(f + 8, A.token, 32)))
+            M.ap_errors |= 0x40000;     /* the token is not where it belongs */
+        A.sae.random = ap_random;
+        if (h2e)
+            model_sae->pt((const uint8_t *)ap_ssid, 7, (const uint8_t *)ap_pass, (unsigned)strlen(ap_pass), NULL, 0, pt);
+        if (model_sae->prepare(&A.sae, ap_bssid, A.sta, (const uint8_t *)ap_pass, (unsigned)strlen(ap_pass),
+                               h2e ? pt : NULL) != 0 ||
+            model_sae->peer_commit(&A.sae, f, len) != 0) {
+            M.ap_errors |= 0x80000;     /* the station's commit */
+            return;
+        }
+        n = model_sae->commit_frame(&A.sae, out, sizeof(out));
+        ap_auth_frame(out, n);
+        n = model_sae->confirm_frame(&A.sae, out, sizeof(out));
+        ap_auth_frame(out, n);
+        return;
+    }
+    if (le16(f + 2) == 2) {
+        M.sae_confirms++;
+        if (model_sae->peer_confirm(&A.sae, f, len) == 0)
+            A.sae_accepted = 1;
+        else
+            M.sae_confirm_bad++;
+    }
 }
 
 /* 1 if the ioctl is the access point's to answer */
@@ -479,10 +662,20 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
                    uint16_t *status)
 {
     if (cmd == BCMW_C_GET_VAR && !strcmp(name, "cap")) {
-        const char *c = M.fwsup || M.real_defaults ? "ap sta wme 802.11d 802.11h rm cqa cac dualband ampdu idsup sup_wpa" :
-                                  "ap sta wme 802.11d 802.11h rm cqa cac dualband ampdu";
+        char c[200];
+        snprintf(c, sizeof(c), "%s%s%s%s", M.fwsup || M.real_defaults ?
+                 "ap sta wme 802.11d 802.11h rm cqa cac dualband ampdu idsup sup_wpa" :
+                 "ap sta wme 802.11d 802.11h rm cqa cac dualband ampdu", M.cap_sae ? " sae" : "",
+                 M.cap_sae_ext ? " sae_ext" : "", M.cap_mfp ? " mfp" : "");
         memcpy(out, c, strlen(c) + 1);
         *rlen = (uint16_t)(strlen(c) + 1);
+        return 1;
+    }
+    if (cmd == BCMW_C_GET_VAR && !strcmp(name, "mfp")) {
+        if (!M.cap_mfp)
+            return *status = (uint16_t)-23, 1;
+        out[0] = (uint8_t)A.mfp, out[1] = out[2] = out[3] = 0;
+        *rlen = 4;
         return 1;
     }
     if (cmd == BCMW_C_SET_VAR) {
@@ -501,8 +694,82 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
             memcpy(A.wpaie, data, A.wpaie_len);
             return 1;
         }
+        if (!strcmp(name, "mfp")) {
+            if (!M.cap_mfp && !M.cap_sae_ext)
+                return *status = (uint16_t)-23, 1;
+            M.mfp_set++;
+            return A.mfp = v, 1;
+        }
+        if (!strcmp(name, "event_msgs_ext")) {
+            /* brcmf_eventmsgs_ext: version 1, SET_MASK (3), the length, the mask */
+            M.events_ext++;
+            if (dlen >= 4 + 24 && data[0] == 1 && data[1] == 3 && data[2] >= 24 && (data[4 + 187 / 8] & 0x38) == 0x38 &&
+                (data[4 + 69 / 8] & (1u << (69 % 8))))
+                A.ext_events = 1;       /* 187..189 on, and the escan event kept */
+            return M.cap_sae_ext ? 1 : (*status = (uint16_t)-23, 1);
+        }
+        if (!strcmp(name, "sae_password")) {
+            if (!M.cap_sae || dlen < 2 + 128)
+                return *status = (uint16_t)-23, 1;
+            memcpy(A.sae_pw, data, sizeof(A.sae_pw));
+            return 1;
+        }
+        if (!strcmp(name, "mgmt_frame")) {
+            /* brcmf_mf_params_le: version, dwell, len, frame control, channel, da, bssid, packet id, the body */
+            unsigned n = dlen >= 30 ? le16(data + 8) : 0;
+            if (!M.cap_sae_ext)
+                return *status = (uint16_t)-23, 1;
+            M.mgmt_frames++;
+            if (dlen < 30 || n + 30 > dlen || le16(data + 10) != 0x00b0 || le16(data + 12) != 36 ||
+                memcmp(data + 14, ap_bssid, 6) || memcmp(data + 20, ap_bssid, 6)) {
+                M.ap_errors |= 0x100000;
+                return 1;
+            }
+            ap_event(BCMW_E_MGMT_FRAME_TXSTATUS, 0, data + 26, 4);
+            ap_sae(data + 30, n);
+            return 1;
+        }
+        if (!strcmp(name, "auth_status")) {
+            /* brcmf_auth_req_status_le: flags, the peer, the name's length and the name, the PMKID */
+            if (!M.cap_sae_ext)
+                return *status = (uint16_t)-23, 1;
+            if (dlen < 60 || memcmp(data + 2, ap_bssid, 6) || le32(data + 8) != strlen(ap_ssid) ||
+                memcmp(data + 12, ap_ssid, strlen(ap_ssid))) {
+                M.ap_errors |= 0x200000;
+                return 1;
+            }
+            if (le16(data) == 4) {
+                if (!A.sae_accepted || memcmp(data + 44, A.sae.pmkid, 16)) {
+                    M.ap_errors |= 0x400000;    /* success said without our confirm verified, or another PMKID */
+                    return 1;
+                }
+                M.sae_ok++;
+                memcpy(A.pmk, A.sae.pmk, 32);
+                A.akm = 8;
+                ap_event(BCMW_E_SET_SSID, 0, 0, 0);
+                ap_event(BCMW_E_LINK, 0, 0, 0);     /* (flags 1: model_ap_after) */
+                A.message1_due = 1;
+            } else {
+                M.sae_fail++;
+                A.sae_failed = 1;
+                ap_event(BCMW_E_SET_SSID, 1, 0, 0);
+            }
+            return 1;
+        }
         if (!strcmp(name, "wsec_key")) {
             uint32_t idx = (uint32_t)data[0], len = (uint32_t)data[4];
+            if (dlen >= 164 && (idx == 4 || idx == 5)) {
+                /* the IGTK: BIP (bcmdhd's algorithm 12), its IPN as the receive counter (hi: 5..2, lo: 1..0) */
+                if (idx == 4 && len == 16 && !memcmp(data + 8, igtk, 16) && le32(data + 112) == 12)
+                    M.keys_ok |= 8;
+                else
+                    M.ap_errors |= 0x800000;
+                if (le32(data + 140) == ((uint32_t)igtk_ipn[5] << 24 | (uint32_t)igtk_ipn[4] << 16 |
+                                         (uint32_t)igtk_ipn[3] << 8 | igtk_ipn[2]) &&
+                    le16(data + 144) == (igtk_ipn[1] << 8 | igtk_ipn[0]))
+                    M.igtk_rxiv_ok = 1;
+                return 1;
+            }
             if (dlen < 164 || le32(data + 112) != 4)
                 M.ap_errors |= 8;
             /* brcmf_cfg80211_add_key: the pairwise key (with the peer's address) flags 0, the group key primary (2) */
@@ -519,8 +786,10 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
         }
         return 0;
     }
-    if (cmd == BCMW_C_SET_INFRA || cmd == BCMW_C_SET_AUTH)
+    if (cmd == BCMW_C_SET_INFRA)
         return 1;
+    if (cmd == BCMW_C_SET_AUTH)
+        return A.auth = dlen >= 4 ? data[0] : 0, 1;
     if (cmd == BCMW_C_GET_PM) {
         out[0] = (uint8_t)A.pm, out[1] = out[2] = out[3] = 0;
         *rlen = 4;
@@ -547,8 +816,17 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
         if (dlen < 42 || le32(data) != strlen(ap_ssid) || memcmp(data + 4, ap_ssid, strlen(ap_ssid)) ||
             memcmp(data + 36, ap_bssid, 6))
             *status = (uint16_t)-1;
-        else if (M.open_ap ? (A.wsec != 0 || A.wpa_auth != 0) :
-                             (A.wsec != 4 || A.wpa_auth != 0x80 || (!M.real_defaults && A.sup_wpa != (M.fwsup ? 1u : 0u))))
+        else if (A.wpa_auth == 0x40000) {
+            /* WPA3: SAE, auth 3, mfp required; the firmware's own SAE (sup_wpa 1, the password) or the host's */
+            if (!M.ap_sec || A.wsec != 4 || A.auth != 3 || A.mfp != 2 || (A.sup_wpa ? !M.cap_sae || A.wpaie_len : !M.cap_sae_ext))
+                M.ap_errors |= 64;
+            else {
+                A.joined = 2;
+                A.fw_sae = A.sup_wpa == 1;
+            }
+        } else if (M.open_ap ? (A.wsec != 0 || A.wpa_auth != 0) :
+                             (A.wsec != 4 || A.wpa_auth != 0x80 || M.ap_sec == 1 || M.ap_sec == 3 || A.auth != 0 ||
+                              (!M.real_defaults && A.sup_wpa != (M.fwsup ? 1u : 0u))))
             M.ap_errors |= 64;          /* the security settings */
         else
             A.joined = 1;
@@ -561,10 +839,58 @@ int model_ap_ioctl(uint32_t cmd, const char *name, const uint8_t *data, uint32_t
 void model_ap_after(uint32_t cmd)
 {
     uint8_t sta[6] = { 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 };
+    if (cmd == BCMW_C_SET_VAR && A.nev) {
+        /* the events an iovar made (mgmt_frame's status and the AP's frames, auth_status's association) */
+        for (unsigned i = 0; i < A.nev; i++) {
+            if (A.ev[i].type == BCMW_E_EXT_AUTH_FRAME_RX)
+                model_event_addr(A.ev[i].type, 0, 0, 0, ap_bssid, A.ev[i].data, A.ev[i].len);
+            else if (A.ev[i].type != BCMW_E_MGMT_FRAME_TXSTATUS || A.ext_events)
+                model_event(A.ev[i].type, A.ev[i].status, A.ev[i].type == BCMW_E_LINK ? 1 : 0, 0, A.ev[i].data,
+                            A.ev[i].len);
+        }
+        A.nev = 0;
+        if (A.message1_due) {
+            A.message1_due = 0;
+            M.akm_joined = 8;
+            message1();
+        }
+        return;
+    }
     if (cmd != BCMW_C_SET_SSID || !A.joined)
         return;
-    A.joined = 0;
     memcpy(A.sta, M.mac_set[0] | M.mac_set[1] ? M.mac_set : sta, 6);
+    A.beacon_rsn_len = beacon_rsn(A.beacon_rsn);
+    if (A.joined == 2) {
+        A.joined = 0;
+        if (A.fw_sae) {
+            /* the firmware's own SAE and handshake: the password it was given */
+            int ok = le16(A.sae_pw) == strlen(ap_pass) && !memcmp(A.sae_pw + 2, ap_pass, strlen(ap_pass));
+            if (ok) {
+                M.fw_sae_ok = 1;
+                M.akm_joined = 8;
+                model_event(BCMW_E_SET_SSID, 0, 0, 0, 0, 0);
+                model_event(BCMW_E_LINK, 0, 1, 0, 0, 0);
+                model_event(46, 6, 0, 0, 0, 0);
+            } else {
+                model_event(BCMW_E_SET_SSID, 1, 0, 0, 0, 0);
+            }
+            return;
+        }
+        /* the host's SAE: the firmware asks for it (brcmf_auth_req_status_le), if the events are on */
+        if (A.ext_events && !M.no_ext_auth) {
+            uint8_t r[60];
+            memset(r, 0, sizeof(r));
+            r[0] = 1;                   /* BRCMF_EXTAUTH_START */
+            memcpy(r + 2, ap_bssid, 6);
+            r[8] = (uint8_t)strlen(ap_ssid);
+            memcpy(r + 12, ap_ssid, strlen(ap_ssid));
+            model_event(BCMW_E_EXT_AUTH_REQ, 0, 0, 0, r, sizeof(r));
+        }
+        return;
+    }
+    A.joined = 0;
+    A.akm = 2;
+    M.akm_joined = 2;
     model_event(BCMW_E_SET_SSID, 0, 0, 0, 0, 0);
     model_event(BCMW_E_LINK, 0, 1, 0, 0, 0);
     if (M.open_ap)

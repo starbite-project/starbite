@@ -55,6 +55,9 @@ if [ "$native" = 1 ]; then
     sh "$here/../tools/sbos-host-test.sh"
     CC=gcc sh "$here/kern/host/passcode-test.sh"          # Track A: the passcode (kern/passcode.c)
     CC=gcc sh "$here/kern/host/prefs-test.sh"             # Track A: prefs and blobs (kern/prefs.c)
+    CC=gcc sh "$here/kern/host/update-test.sh"            # Track A: Software Update (kern/update.c on libsb's slots)
+    CC=gcc sh "$here/kern/host/photos-test.sh"            # Track A: the Camera's photo store (kern/photos.c)
+    CC=gcc sh "$here/kern/host/nledpol-test.sh"           # Track A: the notification LED's policy (kern/nledpol.c)
     gcc -std=gnu11 -O2 -Wall -Wextra -Werror -I "$here/kern" "$here/kern/host/lens-test.c" -lm -o "$ob/lens-test" &&
         "$ob/lens-test"                                   # Track A: Liquid Glass V3's model (kern/lens.h)
     CC=gcc sh "$here/kern/host/tzdb-test.sh"     # Track A: the time zones against zoneinfo, the 12-hour text
@@ -173,13 +176,13 @@ wifi="$root/starbite/wifi"
 for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$ut/exfat.c" \
            "$ut/usb_dwc3.c" "$ut/usb_phy.c" "$ut/tb.c" \
            "$wifi/core.c" "$wifi/exynos_pcie.c" "$wifi/chip.c" "$wifi/fw.c" "$wifi/ring.c" "$wifi/msgbuf.c" "$wifi/link.c" \
-           "$wifi/wpa.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" \
+           "$wifi/wpa.c" "$wifi/sae.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" \
            "$wifi/tcp.c" "$wifi/netio.c" "$wifi/http.c" "$wifi/tls/ta.c" "$wifi/tls/tls_chains.c" "$wifi/tls/tls_check.c" \
            "$root/starbite/guest/sbos/guest.c" "$root/starbite/guest/host/sbghost.c"; do
     obj="$ob/k_$(basename "$src" | tr . _).o"
     flags=$CFLAGS
     case "$src" in                          # BearSSL's headers include <string.h>: the shim's, not the C library's
-    */kern/wifi.c|*/wifi/http.c|*/wifi/netio.c|*/wifi/tls/*) flags="$flags -I$wifi/tls/shim" ;;
+    */kern/wifi.c|*/wifi/http.c|*/wifi/netio.c|*/wifi/sae.c|*/wifi/tls/*) flags="$flags -I$wifi/tls/shim" ;;
     */kern/modem.c) flags="$flags -DSBM_ATTENDED_TX" ;;   # mobile data: the user's Cellular switch (docs/MODEM.md 7.10)
     esac
     case " smp.c heatk.c ocp.c " in

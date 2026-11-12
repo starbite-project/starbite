@@ -366,6 +366,9 @@ int sh_sos_next(void) { return 50; }      /* the host: the old 20 Hz poll */
  * Auto-Lock a number. States: pass=DIGITS sets a passcode, passfail=:N makes N wrong tries now */
 #include "../../kern/passcode.h"
 static int host_autolock = 30;
+/* Track A update: what the host's card holds (hupd=; the fakes are near the end) */
+static int hupd_mode;                       /* 0 none, 1 found, 2 bad, 3 old loader, 4 installed */
+static struct sh_update HU;
 int sh_pass_on(void) { return pass_len() > 0; }
 int sh_pass_len(void) { return pass_len(); }
 int sh_pass_wait(void) { return (int)pass_wait(surv_host_now_ms); }
@@ -582,6 +585,12 @@ static void apply_state(const char *st)
     }
     if (!strcmp(what, "comms")) { comms_fake_state(key, v); return; }          /* helper I: comms=incoming, ... */
     if (!strcmp(what, "pass")) { (void)sh_pass_set("", key); return; }         /* Track A: pass=246810 */
+    if (!strcmp(what, "hupd")) {                 /* Track A update: hupd=none|found|bad|old|installed (the host's card) */
+        static const char *const M[5] = { "none", "found", "bad", "old", "installed" };
+        for (int i = 0; i < 5; i++) if (!strcmp(key, M[i])) hupd_mode = i;
+        memset(&HU, 0, sizeof HU);
+        return;
+    }
     if (!strcmp(what, "passfail")) { for (int i = 0; i < (int)v; i++) (void)sh_pass_check("x"); return; }   /* passfail=:6 */
     if (!strcmp(what, "gnss")) {                 /* helper D: gnss=60.1699,24.9384 (a pretend fix: 8.5 m, 9 satellites) */
         double la = 0, lo = 0;
@@ -900,6 +909,354 @@ int sh_restart(void) { fprintf(stderr, "host: restart\n"); return 0; }
 int sh_power_off(void) { fprintf(stderr, "host: power off\n"); return 0; }
 
 __attribute__((weak)) void sh_power_held(void) { fprintf(stderr, "host: Power held (no power sheet yet)\n"); }
+
+/* Track A: Software Update on the host. hupd=none (up to date) | found | bad (the SHA-256 differs: staging fails) |
+ * old (an older loader) | installed (this start committed it) picks what the card and the loader say; staging moves
+ * 12 % a call (the phone: 1 MiB a call); install only prints. Nothing is read or written. */
+static void hupd_fill(struct sh_update *u) { if (u) *u = HU; }
+int sh_update_check(struct sh_update *u)
+{
+    if (HU.state == 2 || HU.state == 3) { hupd_fill(u); return 1; }
+    memset(&HU, 0, sizeof HU);
+    if (hupd_mode == 3) { HU.state = -1; snprintf(HU.why, sizeof HU.why, "Updates need the new boot loader."); }
+    else if (hupd_mode == 4) { HU.state = 4; snprintf(HU.version, sizeof HU.version, "1.0.1"); }
+    else if (hupd_mode == 1 || hupd_mode == 2) {
+        HU.state = 1;
+        snprintf(HU.version, sizeof HU.version, "1.0.1");
+        snprintf(HU.notes, sizeof HU.notes, "Software Update, faster Wi-Fi joins and the new Startup settings. Fixes for the card and the lock screen.");
+        HU.size = 19293184;
+    } else snprintf(HU.why, sizeof HU.why, "No update on the card.");
+    fprintf(stderr, "update: check: state %d\n", HU.state);
+    hupd_fill(u);
+    return HU.state == 1;
+}
+int sh_update_stage(struct sh_update *u)
+{
+    if (HU.state == 1) { HU.state = 2; HU.pct = 0; }
+    if (HU.state == 2) {
+        HU.pct += 12;
+        if (hupd_mode == 2 && HU.pct >= 90) {
+            HU.state = -1;
+            snprintf(HU.why, sizeof HU.why, "The update file is damaged (its SHA-256 doesn't match). Nothing was installed.");
+        } else if (HU.pct >= 100) { HU.pct = 100; HU.state = 3; }
+    }
+    hupd_fill(u);
+    return HU.state;
+}
+int sh_update_install(void)
+{
+    if (HU.state != 3) return -1;
+    fprintf(stderr, "update: would arm 1.0.1 in the inactive slot and restart (the host stays up)\n");
+    return 0;
+}
+
+/* Track A: drivers for the shell, simulated (the phone: kern_next.c's block on kern/bt.c, cam.c, shub_more.c,
+ * bathealth.c, haptic.c). Time is the film's clock (surv_host_now_ms) plus 50 ms a call, so a still's polls move on
+ * too. SBTK_BT=fail: Bluetooth's start fails; SBTK_CAM=fail: the camera does not answer; SBTK_PROX=1: something near.
+ * Nothing touches hardware; every change prints a line. */
+static uint64_t hd_now(void) { static uint64_t calls; return surv_host_now_ms + 50 * ++calls; }
+static int hd_env(const char *k, const char *v) { const char *e = getenv(k); return e && !strcmp(e, v); }
+/* Bluetooth: 1.5 s to start, then scans of 11 s (one device more every 0.4 s), repeated while asked, 60 s at most */
+static struct { int on, failed, scan; uint64_t t0, scan_t0, until; } HBT;
+static const struct { const char *name; int rssi; } hbt_dev[] = {
+    { "AirPods Pro", -48 }, { "JBL Flip 5", -61 }, { "Galaxy Buds2", -66 }, { "Mi Smart Band 6", -72 }, { "", -80 },
+    { "LE-Bose QC35 II", -84 },
+};
+#define HBT_N (int)(sizeof hbt_dev / sizeof hbt_dev[0])
+int sh_bt_on(int on)
+{
+    fprintf(stderr, "bluetooth: %s\n", on ? "on" : "off");
+    memset(&HBT, 0, sizeof HBT);
+    if (!on) return 0;
+    HBT.on = 1;
+    HBT.t0 = hd_now();
+    HBT.failed = hd_env("SBTK_BT", "fail");
+    return 0;
+}
+int sh_bt_state(void)
+{
+    if (!HBT.on) return 0;
+    if (hd_now() - HBT.t0 < 1500) return 1;
+    return HBT.failed ? -1 : 2;
+}
+const char *sh_bt_why(void)
+{
+    int s = sh_bt_state();
+    return s == 1 ? "Bluetooth is starting" : s == 2 ? "Bluetooth is on" :
+           s < 0 ? "The Bluetooth firmware is missing (VENDOR firmware/BCM4361B0_semco.hcd)" : "Bluetooth is off";
+}
+int sh_bt_scan(int on)
+{
+    if (!on) { HBT.scan = 0; return 0; }
+    if (sh_bt_state() < 1) return -1;
+    if (!HBT.scan) HBT.scan_t0 = hd_now();
+    HBT.scan = 1;
+    HBT.until = hd_now() + 60000;
+    fprintf(stderr, "bluetooth: scan\n");
+    return 0;
+}
+int sh_bt_count(void)
+{
+    if (sh_bt_state() != 2 || !HBT.scan_t0) return 0;
+    uint64_t now = hd_now();
+    if (HBT.scan && now >= HBT.until) HBT.scan = 0;
+    int n = (int)((now - HBT.scan_t0) / 400);
+    return n > HBT_N ? HBT_N : n;
+}
+int sh_bt_get(int i, char *name, int cap, int *rssi)
+{
+    if (i < 0 || i >= sh_bt_count()) return -1;
+    if (name && cap > 0) snprintf(name, (size_t)cap, "%s", hbt_dev[i].name);
+    if (rssi) *rssi = hbt_dev[i].rssi + (int)(hd_now() / 1000 % 3) - 1;
+    return 0;
+}
+/* the front camera: a moving test picture at 30 fps; a still 0.3 s after it is asked */
+static struct { int on, w, h, still; unsigned seq; uint64_t t0, still_t; uint32_t *px, *spx; uint8_t *bmp; unsigned bmp_len; } HCAM;
+static void hcam_draw(uint32_t *px, int w, int h, unsigned seq)
+{
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            unsigned r = (unsigned)(x * 255 / w), g = (unsigned)(y * 255 / h), b = (seq * 4 + (unsigned)(x + y) / 4) & 255;
+            int bar = ((unsigned)y + seq * 6) % (unsigned)h < (unsigned)h / 12;
+            px[y * w + x] = 0xFF000000u | (bar ? 0xF0F0F0u : r << 16 | g << 8 | b);
+        }
+}
+int sh_cam_open(int w, int h)
+{
+    if (HCAM.on) return -1;
+    if (w < 8 || h < 8 || w > 816 || h > 816 || w * h * 4 > 2 * 1024 * 1024) return -2;
+    fprintf(stderr, "camera: open %d x %d\n", w, h);
+    if (hd_env("SBTK_CAM", "fail")) return -5;
+    free(HCAM.px);
+    HCAM.px = malloc((size_t)w * (size_t)h * 4);
+    if (!HCAM.px) return -8;
+    HCAM.on = 1; HCAM.w = w; HCAM.h = h; HCAM.seq = 0; HCAM.still = 0;
+    HCAM.t0 = hd_now();
+    return 0;
+}
+const uint32_t *sh_cam_frame(int *w, int *h, unsigned *seq)
+{
+    if (!HCAM.on) return 0;
+    uint64_t e = hd_now() - HCAM.t0;
+    if (e < 600) return 0;                                         /* the sensor's start */
+    unsigned s = (unsigned)((e - 600) / 33) + 1;
+    if (s != HCAM.seq) { HCAM.seq = s; hcam_draw(HCAM.px, HCAM.w, HCAM.h, s); }
+    if (w) *w = HCAM.w;
+    if (h) *h = HCAM.h;
+    if (seq) *seq = HCAM.seq;
+    return HCAM.px;
+}
+int sh_cam_still(void)
+{
+    if (!HCAM.on || HCAM.still == 1) return -1;
+    HCAM.still = 1;
+    HCAM.still_t = hd_now() + 300;
+    fprintf(stderr, "camera: a still\n");
+    return 0;
+}
+const uint32_t *sh_cam_still_get(int *w, int *h, const unsigned char **bmp, unsigned *bmp_len)
+{
+    enum { SW = 612, SH = 816 };
+    if (!HCAM.on || !HCAM.still || (HCAM.still == 1 && hd_now() < HCAM.still_t)) return 0;
+    if (HCAM.still == 1) {
+        if (!HCAM.spx) HCAM.spx = malloc((size_t)SW * SH * 4);
+        HCAM.bmp_len = 54 + SW * 3 * SH;                           /* 612 x 3 = 1836: rows need no padding */
+        if (!HCAM.bmp) HCAM.bmp = malloc(HCAM.bmp_len);
+        if (!HCAM.spx || !HCAM.bmp) return 0;
+        hcam_draw(HCAM.spx, SW, SH, HCAM.seq);
+        uint8_t *b = HCAM.bmp;
+        memset(b, 0, 54);
+        b[0] = 'B'; b[1] = 'M';
+        uint32_t v[] = { HCAM.bmp_len, 0, 54, 40, SW, SH };
+        for (int k = 0; k < 6; k++) memcpy(b + 2 + 4 * k, &v[k], 4);
+        b[26] = 1; b[28] = 24;
+        for (int y = 0; y < SH; y++)
+            for (int x = 0; x < SW; x++) {
+                uint32_t p = HCAM.spx[(SH - 1 - y) * SW + x];
+                uint8_t *d = b + 54 + (y * SW + x) * 3;
+                d[0] = (uint8_t)p; d[1] = (uint8_t)(p >> 8); d[2] = (uint8_t)(p >> 16);
+            }
+        HCAM.still = 2;
+    }
+    if (w) *w = SW;
+    if (h) *h = SH;
+    if (bmp) *bmp = HCAM.bmp;
+    if (bmp_len) *bmp_len = HCAM.bmp_len;
+    return HCAM.spx;
+}
+const char *sh_cam_why(void)
+{
+    if (hd_env("SBTK_CAM", "fail")) return "The front camera does not answer";
+    return HCAM.on ? (hd_now() - HCAM.t0 < 600 ? "Starting the front camera" : "Front camera on") : "Camera off";
+}
+void sh_cam_close(void)
+{
+    if (HCAM.on) fprintf(stderr, "camera: close\n");
+    HCAM.on = 0;
+    HCAM.still = 0;
+}
+/* the sensors: an office (about 320 lux, 1013.2 hPa), the phone on a desk */
+int sh_light_lux(void) { return 320 + (int)(hd_now() / 700 % 9) - 4; }
+int sh_pressure_hpa10(void) { return 10132 + (int)(hd_now() / 5000 % 3) - 1; }
+int sh_proximity_near(void) { return hd_env("SBTK_PROX", "1"); }
+int sh_gyro_mdps(int *x, int *y, int *z)
+{
+    int j = (int)(hd_now() / 100 % 7) - 3;
+    if (x) *x = 140 + j * 10;
+    if (y) *y = -70 - j * 5;
+    if (z) *z = 35;
+    return 1;
+}
+void sh_auto_brightness(int on) { sh_pref_set_int("display.auto", !!on); fprintf(stderr, "Auto-Brightness: %s\n", on ? "on" : "off"); }
+int sh_auto_brightness_on(void) { return sh_pref_int("display.auto", 0) == 1; }
+void sh_call_proximity(int on) { fprintf(stderr, "call proximity: %s\n", on ? "on" : "off"); }
+int sh_battery_health(int *max_pct, int *cycles, char *words, int cap)
+{
+    if (max_pct) *max_pct = 91;
+    if (cycles) *cycles = 212;
+    if (words && cap > 0) snprintf(words, (size_t)cap, "Your battery is in good health.");
+    return 1;
+}
+static const char *const hvib[] = { "ring", "notify", "alarm", "tick", "success", "warning", "error" };
+void sh_haptic_kind(int kind)
+{
+    if (kind >= 0 && kind < (int)(sizeof hvib / sizeof hvib[0])) fprintf(stderr, "haptic: %s\n", hvib[kind]);
+}
+void sh_haptic_stop(void) { fprintf(stderr, "haptic: stop\n"); }
+int sh_haptic_level(void) { return sh_pref_int("haptic.level", 3); }
+void sh_haptic_level_set(int level)
+{
+    level = level < 0 ? 0 : level > 3 ? 3 : level;
+    sh_pref_set_int("haptic.level", level);
+    fprintf(stderr, "haptic: level %d\n", level);
+}
+
+/* Track A: photos (the kernel's kern/photos.c) in RAM, with its limits: the newest 32; a picture of more than 697685
+ * pixels kept at the kernel's smaller size (the kernel averages a box, this picks the nearest pixel). SBTK_PHOTOS=FILE
+ * also keeps them in a file (read at the first call, written at every change), so a run after another shows what a
+ * restart keeps; SBTK_PHOTOS=none: a phone without photo storage; SBTK_PHOTOS_HELD=1: storage busy (the modem on) */
+#define HPH_MAX 32
+#define HPH_MAX_PX 697685ULL
+static struct { int w, h; long long utc; unsigned long long seq; uint32_t *px; } HPH[HPH_MAX];   /* the newest last */
+static int hphn, hph_loaded;
+static unsigned long long hph_seq;
+static const char *hph_why = "";
+static int hph_none(void) { return hd_env("SBTK_PHOTOS", "none"); }
+static void hph_fit(int w, int h, int *sw, int *sh)
+{
+    if ((unsigned long long)w * (unsigned long long)h <= HPH_MAX_PX) { *sw = w; *sh = h; return; }
+    unsigned long long lo = 1, hi = (unsigned long long)w;
+    while (lo < hi) {
+        unsigned long long mid = (lo + hi + 1) / 2, dh = ((unsigned long long)h * mid + (unsigned long long)w / 2) / (unsigned long long)w;
+        if (mid * (dh ? dh : 1) <= HPH_MAX_PX) lo = mid; else hi = mid - 1;
+    }
+    unsigned long long dh = ((unsigned long long)h * lo + (unsigned long long)w / 2) / (unsigned long long)w;
+    *sw = (int)lo;
+    *sh = dh ? (int)dh : 1;
+}
+static void hph_write(void)
+{
+    const char *f = getenv("SBTK_PHOTOS");
+    FILE *o = f && !hph_none() ? fopen(f, "wb") : 0;
+    if (!o) return;
+    fputs("SBTKPHOTOS1\n", o);
+    for (int i = 0; i < hphn; i++) {
+        fprintf(o, "%d %d %lld %llu\n", HPH[i].w, HPH[i].h, HPH[i].utc, HPH[i].seq);
+        fwrite(HPH[i].px, 4, (size_t)HPH[i].w * (size_t)HPH[i].h, o);
+    }
+    fclose(o);
+}
+static void hph_load(void)
+{
+    if (hph_loaded) return;
+    hph_loaded = 1;
+    const char *f = getenv("SBTK_PHOTOS");
+    FILE *in = f && !hph_none() ? fopen(f, "rb") : 0;
+    char line[16];
+    if (!in) return;
+    if (!fgets(line, sizeof line, in) || strcmp(line, "SBTKPHOTOS1\n")) { fclose(in); return; }
+    int w, h;
+    long long utc;
+    unsigned long long seq;
+    while (hphn < HPH_MAX && fscanf(in, "%d %d %lld %llu", &w, &h, &utc, &seq) == 4 && fgetc(in) == '\n') {
+        if (w < 1 || h < 1 || (unsigned long long)w * (unsigned long long)h > HPH_MAX_PX) break;
+        uint32_t *px = malloc((size_t)w * (size_t)h * 4);
+        if (!px || fread(px, 4, (size_t)w * (size_t)h, in) != (size_t)w * (size_t)h) { free(px); break; }
+        HPH[hphn].w = w; HPH[hphn].h = h; HPH[hphn].utc = utc; HPH[hphn].seq = seq; HPH[hphn].px = px;
+        if (seq > hph_seq) hph_seq = seq;
+        hphn++;
+    }
+    fclose(in);
+    fprintf(stderr, "photos: %d from %s\n", hphn, f);
+}
+static int hph_refused(void)
+{
+    hph_load();
+    if (hph_none()) { hph_why = "This phone has no photo storage (the store entry sbos-photos)."; return 1; }
+    if (hd_env("SBTK_PHOTOS_HELD", "1")) { hph_why = "Storage is busy while the modem is on. Try again later."; return 1; }
+    return 0;
+}
+int sh_photo_save(const uint32_t *argb, int w, int h)
+{
+    hph_why = "";
+    if (!argb || w < 1 || h < 1 || w > 4096 || h > 4096) { hph_why = "This picture can't be saved (its size)."; return -1; }
+    if (hph_refused()) return -1;
+    int sw, sh;
+    hph_fit(w, h, &sw, &sh);
+    uint32_t *px = malloc((size_t)sw * (size_t)sh * 4);
+    if (!px) { hph_why = "No memory to save the photo."; return -1; }
+    for (int y = 0; y < sh; y++)
+        for (int x = 0; x < sw; x++)
+            px[y * sw + x] = 0xff000000u | argb[(size_t)(y * h / sh) * (size_t)w + (size_t)(x * w / sw)];
+    if (hphn == HPH_MAX) {                      /* the oldest goes */
+        free(HPH[0].px);
+        memmove(HPH, HPH + 1, sizeof HPH[0] * (HPH_MAX - 1));
+        hphn--;
+    }
+    HPH[hphn].w = sw; HPH[hphn].h = sh; HPH[hphn].utc = (long long)time(0); HPH[hphn].seq = ++hph_seq; HPH[hphn].px = px;
+    hphn++;
+    hph_write();
+    fprintf(stderr, "photos: saved %dx%d (%d kept)\n", sw, sh, hphn);
+    return 0;
+}
+int sh_photo_count(void) { hph_load(); return hph_none() ? 0 : hphn; }
+int sh_photo_get(int i, uint32_t *argb, int cap_px, int *w, int *h, long long *utc)
+{
+    hph_why = "";
+    hph_load();
+    if (hph_none() || i < 0 || i >= hphn) { hph_why = "No such photo."; return -1; }
+    int k = hphn - 1 - i, px = HPH[k].w * HPH[k].h;
+    if (w) *w = HPH[k].w;
+    if (h) *h = HPH[k].h;
+    if (utc) *utc = HPH[k].utc;
+    if (!argb) return px;
+    if (cap_px < px) { hph_why = "The photo is larger than the space for it."; return -1; }
+    memcpy(argb, HPH[k].px, (size_t)px * 4);
+    return px;
+}
+int sh_photo_delete(int i)
+{
+    hph_why = "";
+    if (hph_refused()) return -1;
+    if (i < 0 || i >= hphn) { hph_why = "No such photo."; return -1; }
+    int k = hphn - 1 - i;
+    free(HPH[k].px);
+    memmove(HPH + k, HPH + k + 1, sizeof HPH[0] * (size_t)(hphn - 1 - k));
+    hphn--;
+    hph_write();
+    fprintf(stderr, "photos: deleted (%d kept)\n", hphn);
+    return 0;
+}
+const char *sh_photo_why(void) { return hph_why; }
+
+/* Track A, 1.0: the host has no clocks to raise; keep-awake holders are counted and logged */
+void sh_perf_mode(int conservative) { (void)conservative; }
+void sh_perf_hold(int ms) { (void)ms; }
+int sh_hold_awake(const char *who, int on) { static int n; n += on ? 1 : (n > 0 ? -1 : 0); fprintf(stderr, "host: keep awake %s %s (%d)\n", who ? who : "?", on ? "on" : "off", n); return n; }
+
+static int host_low;
+void sh_low_power(int on) { host_low = !!on; }
+int sh_low_power_on(void) { return host_low; }
 
 int main(int argc, char **argv)
 {

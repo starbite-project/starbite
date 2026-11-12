@@ -582,6 +582,11 @@ static void test_os_supplicant(struct bcmw *w)
     os_sup = 0;
 }
 
+void test_check(int ok, const char *what)
+{
+    CHECK(ok, "%s", what);
+}
+
 static void synth_files(void)
 {
     static uint8_t fw[64 * 1024];
@@ -766,6 +771,207 @@ static void run_bringup(int dma_idx)
         printf("%s", log_all);
 }
 
+/* ---- WPA3 on the model (model_ap.c's SAE access point) ----------------------------------------------------------- */
+
+static uint64_t os_rng = 0x1234567887654321ull;
+static int os_random(void *ctx, uint8_t *out, uint32_t n)
+{
+    (void)ctx;
+    for (uint32_t i = 0; i < n; i++) {
+        os_rng ^= os_rng << 13, os_rng ^= os_rng >> 7, os_rng ^= os_rng << 17;
+        out[i] = (uint8_t)(os_rng >> 40);
+    }
+    return 0;
+}
+
+static void wpa3_fresh(int ap_sec)
+{
+    model_ap_reset();
+    M.ap_sec = ap_sec;
+    M.handshake_done = 0, M.keys_ok = 0, M.ap_errors = 0, M.igtk_rxiv_ok = 0, M.akm_joined = 0;
+    M.sae_commits = M.sae_confirms = M.sae_tokens_sent = M.sae_ok = M.sae_fail = M.sae_h2e_seen = M.sae_confirm_bad = 0;
+    M.mgmt_frames = M.events_ext = M.mfp_set = M.fw_sae_ok = 0;
+    log_all[0] = 0;
+}
+
+static void wpa3_join_ok(struct bcmw *w, const char *what, unsigned h2e, const char *line)
+{
+    int jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "correct horse", 0);
+    CHECK(jr == BCMW_OK && bcmw_link_up(w), "%s: joined (%d)", what, jr);
+    CHECK(M.akm_joined == 8 && M.sae_ok == 1 && M.sae_h2e_seen == h2e && M.sae_confirm_bad == 0,
+          "%s: SAE (AKM %u, ok %u, H2E commits %u, bad confirms %u)", what, M.akm_joined, M.sae_ok, M.sae_h2e_seen,
+          M.sae_confirm_bad);
+    CHECK(M.handshake_done && (M.keys_ok & 0xb) == 0xb && M.igtk_rxiv_ok, "%s: the AKM 8 handshake (%d), TK + GTK + IGTK "
+          "installed (%x), the IGTK's IPN (%u)", what, M.handshake_done, M.keys_ok, M.igtk_rxiv_ok);
+    CHECK(M.ap_errors == 0 && M.fw_errors == 0, "%s: AP faults %x, firmware faults %x", what, M.ap_errors, M.fw_errors);
+    CHECK(M.mfp_set >= 1 && M.events_ext >= 1, "%s: mfp (%u) and the extended events (%u) set", what, M.mfp_set, M.events_ext);
+    CHECK(strstr(log_all, line) != 0, "%s: the log says '%s'", what, line);
+    CHECK(!strstr(log_all, "correct horse") && !strstr(log_all, "test-ap") && !strstr(log_all, "33:44:5a") &&
+          !strstr(log_all, "33:44:55"), "%s: the password, the name or an address in the log", what);
+    CHECK(bcmw_leave(w) == BCMW_OK, "%s: left", what);
+}
+
+static void run_wpa3(void)
+{
+    static uint8_t mem[1 << 18] __attribute__((aligned(16)));
+    struct bcmw *w = (struct bcmw *)mem;
+    struct bcmw_os os = { 0 };
+    struct bcmw_cfg cfg = { 0 };
+    unsigned c;
+    uint64_t t0;
+    int jr;
+
+    model_reset();
+    M.offer_dma_idx = 1;
+    M.scan_v2 = 1;
+    M.fw_rstvec = le32(F.fw);
+    M.fw_image = F.fw;
+    M.fw_image_len = F.fwlen;
+    log_all[0] = 0;
+    os.rd32 = model_rd32, os.wr32 = model_wr32, os.rd16 = model_rd16, os.wr16 = model_wr16;
+    os.udelay = model_udelay, os.now_us = model_now, os.dma_alloc = model_dma_alloc;
+    os.file = os_file, os.log = os_log, os.event = os_event, os.rx = os_rx, os.random = os_random;
+    cfg.stop_after = BCMW_STEP_ALL;
+    cfg.any_files = synthetic;
+    memcpy(cfg.mac, "\x02\x11\x22\x33\x44\x55", 6);
+    CHECK(bcmw_init(w, &os, &cfg) == BCMW_OK, "wpa3: init");
+    CHECK(!(bcmw_caps(w) & BCMW_CAP_HOST_SAE), "wpa3: no host SAE before bcmw_sae_enable");
+    bcmw_sae_enable(w);
+    model_sae = bcmw_sae_get_ops();
+    CHECK(bcmw_bringup(w, 0) == BCMW_STEP_ALL, "wpa3: the bring-up");
+
+    /* what the firmware can do */
+    M.cap_sae_ext = 1, M.cap_mfp = 1;
+    c = bcmw_caps(w);
+    CHECK(c == (BCMW_CAP_SAE_EXT | BCMW_CAP_MFP | BCMW_CAP_HOST_SAE | BCMW_CAP_WPA3), "wpa3: caps %x", c);
+    CHECK(strstr(log_all, "link: the firmware's cap: ap sta wme") && strstr(log_all, " sae_ext mfp"), "wpa3: the cap string logged");
+    log_all[0] = 0;
+    bcmw_caps(w);
+    CHECK(!strstr(log_all, "cap: "), "wpa3: the cap string logged once");
+
+    /* WPA3-only (hunting-and-pecking), hash-to-element only, an anti-clogging token, a transition network */
+    wpa3_fresh(1);
+    wpa3_join_ok(w, "wpa3: WPA3-only", 0, "WPA3-SAE, the host's SAE (sae_ext; hunting-and-pecking), PMF required");
+    CHECK(M.sae_commits == 1 && M.sae_confirms == 1 && M.mgmt_frames == 2, "wpa3: one commit, one confirm (%u, %u, %u)",
+          M.sae_commits, M.sae_confirms, M.mgmt_frames);
+    wpa3_fresh(3);
+    wpa3_join_ok(w, "wpa3: hash-to-element only", 1, "WPA3-SAE, the host's SAE (sae_ext; hash-to-element)");
+    wpa3_fresh(1);
+    M.sae_token = 1;
+    wpa3_join_ok(w, "wpa3: an anti-clogging token", 0, "anti-clogging token: the commit again");
+    CHECK(M.sae_tokens_sent == 1 && M.sae_commits == 2, "wpa3: the token asked once, the commit again (%u, %u)",
+          M.sae_tokens_sent, M.sae_commits);
+    M.sae_token = 0;
+    wpa3_fresh(2);
+    wpa3_join_ok(w, "wpa3: a transition network", 0, "THE NETWORK IS JOINED");
+
+    /* a WPA2 network as before: no mfp, no SAE */
+    wpa3_fresh(0);
+    jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "correct horse", 0);
+    CHECK(jr == BCMW_OK && M.akm_joined == 2 && M.handshake_done && M.keys_ok == 3 && M.ap_errors == 0 && M.mfp_set == 0 &&
+          M.mgmt_frames == 0 && !strstr(log_all, "security: "), "wpa3: a WPA2 network as before (%d, AKM %u, keys %x, "
+          "faults %x, mfp %u)", jr, M.akm_joined, M.keys_ok, M.ap_errors, M.mfp_set);
+    bcmw_leave(w);
+
+    /* WPA2 with PMF capable: untouched by default; with cfg.wpa2_mfp mfp 1, MFPC in our element, the IGTK installed */
+    wpa3_fresh(4);
+    jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "correct horse", 0);
+    CHECK(jr == BCMW_OK && M.akm_joined == 2 && M.keys_ok == 3 && M.mfp_set == 0 && M.ap_errors == 0,
+          "wpa3: WPA2 with PMF offered, cfg.wpa2_mfp 0: as before (%d, keys %x, mfp %u)", jr, M.keys_ok, M.mfp_set);
+    bcmw_leave(w);
+    w->cfg.wpa2_mfp = 1;
+    wpa3_fresh(4);
+    jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "correct horse", 0);
+    CHECK(jr == BCMW_OK && M.akm_joined == 2 && M.keys_ok == 0xb && M.mfp_set == 1 && M.ap_errors == 0 &&
+          strstr(log_all, "WPA2-PSK, PMF capable"), "wpa3: WPA2 with cfg.wpa2_mfp: PMF capable, the IGTK (%d, keys %x, mfp %u)",
+          jr, M.keys_ok, M.mfp_set);
+    bcmw_leave(w);
+    w->cfg.wpa2_mfp = 0;
+
+    /* a wrong password: SAE fails at the AP's confirm, the firmware is told, no WPA2 fallback, no hang */
+    for (int sec = 1; sec <= 2; sec++) {
+        wpa3_fresh(sec);
+        t0 = M.now;
+        jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "wrong horse!", 0);
+        CHECK(jr != BCMW_OK && !bcmw_link_up(w) && M.sae_fail == 1 && M.sae_ok == 0 && M.akm_joined == 0,
+              "wpa3: a wrong password (%s) fails (%d, fail %u)", sec == 1 ? "WPA3-only" : "transition", jr, M.sae_fail);
+        CHECK(M.now - t0 < 3000000, "wpa3: ... quickly (%llu ms)", (unsigned long long)((M.now - t0) / 1000));
+        CHECK(strstr(log_all, "confirm does not verify (a wrong password gives this)") &&
+              !strstr(log_all, "WPA2-PSK with the same access point instead") && !strstr(log_all, "wrong horse"),
+              "wpa3: a wrong password: its log, no fallback");
+    }
+
+    /* an AP that does not answer: the commit 3 times again, then the end (no hang) */
+    wpa3_fresh(1);
+    M.sae_mute = 1;
+    t0 = M.now;
+    jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "correct horse", 0);
+    CHECK(jr != BCMW_OK && M.sae_commits == 4 && M.sae_fail == 1 && M.now - t0 < 7000000 &&
+          strstr(log_all, "no answer from the access point to our SAE frames") && strstr(log_all, "3 acknowledged, 0 not"),
+          "wpa3: a silent AP: 3 retransmissions, then failed (%d, commits %u, %llu ms)", jr, M.sae_commits,
+          (unsigned long long)((M.now - t0) / 1000));
+    M.sae_mute = 0;
+
+    /* a transition network whose firmware never asks for SAE: WPA2-PSK with the same AP */
+    wpa3_fresh(2);
+    M.no_ext_auth = 1;
+    jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "correct horse", 0);
+    CHECK(jr == BCMW_OK && M.akm_joined == 2 && M.handshake_done && M.keys_ok == 3 &&
+          strstr(log_all, "no EXT_AUTH_REQ") && strstr(log_all, "WPA2-PSK with the same access point instead"),
+          "wpa3: a transition network falls back to WPA2-PSK when SAE does not start (%d, AKM %u)", jr, M.akm_joined);
+    M.no_ext_auth = 0;
+    bcmw_leave(w);
+
+    /* a firmware without sae_ext: WPA3-only refused cleanly, a transition network joined with WPA2 */
+    M.cap_sae_ext = 0;
+    wpa3_fresh(1);
+    t0 = M.now;
+    jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "correct horse", 0);
+    CHECK(jr == BCMW_E_NODEV && M.mgmt_frames == 0 && M.ap_errors == 0 && M.now - t0 < 10000000 &&
+          strstr(log_all, "a WPA3-only network: this firmware cannot do SAE (cap: no sae_ext, no sae, no idsup"),
+          "wpa3: a firmware without sae_ext refuses a WPA3-only network (%d)", jr);
+    wpa3_fresh(2);
+    jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "correct horse", 0);
+    CHECK(jr == BCMW_OK && M.akm_joined == 2 && M.keys_ok == 3 && strstr(log_all, "a transition network: WPA2 instead of SAE"),
+          "wpa3: a transition network without sae_ext: WPA2 (%d, AKM %u)", jr, M.akm_joined);
+    bcmw_leave(w);
+
+    /* the firmware's own SAE ("sae" and idsup, no sae_ext) */
+    M.cap_sae = 1, M.fwsup = 1;
+    wpa3_fresh(1);
+    jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "correct horse", 0);
+    CHECK(jr == BCMW_OK && M.fw_sae_ok && M.akm_joined == 8 && M.ap_errors == 0 && M.mgmt_frames == 0 &&
+          strstr(log_all, "the firmware's SAE and handshake"), "wpa3: the firmware's own SAE (%d, faults %x)", jr, M.ap_errors);
+    bcmw_leave(w);
+    M.cap_sae = 0, M.fwsup = 0;
+
+    /* a build without the host's SAE */
+    M.cap_sae_ext = 1;
+    w->sae_ops = 0;
+    wpa3_fresh(1);
+    jr = bcmw_join(w, (const uint8_t *)"test-ap", 7, "correct horse", 0);
+    CHECK(jr == BCMW_E_NODEV && strstr(log_all, "no host SAE in this build"), "wpa3: no SAE built in: refused (%d)", jr);
+    bcmw_sae_enable(w);
+
+    /* what the UI is told of each kind of network */
+    for (int sec = 0; sec <= 3; sec++) {
+        static const unsigned want[4] = { BCMW_SEC_WPA2, BCMW_SEC_WPA3, BCMW_SEC_WPA2_WPA3, BCMW_SEC_WPA3 };
+        uint8_t r[400];
+        struct bcmw_event ev;
+        struct bcmw_bss b;
+        memset(&ev, 0, sizeof(ev));
+        M.ap_sec = sec;
+        ev.type = BCMW_E_ESCAN_RESULT, ev.status = 8, ev.data = r;
+        ev.datalen = model_ap_scan_result(r, sizeof(r), 1);
+        CHECK(bcmw_bss_parse(&ev, &b, 0) && bcmw_bss_security(&b) == want[sec], "wpa3: the security of AP kind %d: %s", sec,
+              bcmw_security_name(bcmw_bss_security(&b)));
+    }
+    M.ap_sec = 0;
+    bcmw_quiesce(w);
+    if (verbose == 0 && fails)
+        printf("%s", log_all);
+}
+
 static void run_stops(void)
 {
     static uint8_t mem[1 << 18] __attribute__((aligned(16)));
@@ -809,6 +1015,7 @@ int main(int argc, char **argv)
     test_tables();
     test_ring();
     test_allow();
+    test_sae();
     if (fwdir) {
         F.fw = slurp(fwdir, "bcmdhd_sta.bin_b2", &F.fwlen);
         F.nv = slurp(fwdir, "nvram.txt_r02a_b2", &F.nvlen);
@@ -818,6 +1025,7 @@ int main(int argc, char **argv)
         synth_files();
     run_bringup(0);
     run_bringup(1);
+    run_wpa3();
     run_stops();
     printf("%s: %d checks, %d failed\n", fails ? "FAIL" : "ok", checks, fails);
     return fails != 0;

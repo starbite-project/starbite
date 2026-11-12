@@ -36,6 +36,9 @@ void *memset(void *d, int c, size_t n);
 #define CMU_DIV_AUDIF      0x1800U
 #define CMU_DIV_BUS        0x1804U
 #define CMU_DIV_BUSP       0x1808U
+#define CMU_MUX_CPU        0x1000U
+#define CMU_DIV_CPU_ACLK   0x180CU
+#define CMU_DIV_PLL        0x1820U
 #define CMU_DIV_UAIF0      0x1824U
 #define CMU_DIV_UAIF1      0x1828U
 #define CMU_QCH_DUMMY      0x3000U
@@ -56,6 +59,16 @@ void *memset(void *d, int c, size_t n);
 
 #define SYSREG_MISC_CON    0x032CU
 #define SFR_IP_INDEX       0x0000U
+#define SFR_SYSPOWER_ST    0x0014U
+#define SFR_SYS_CONFIG0    0x0020U          /* reset 0x4444 */
+#define SFR_REMAP_MASK     0x0024U
+#define SFR_REMAP_ADDR     0x0028U
+#define SFR_DYN_CLK        0x0030U          /* DYN_CLOCK_OFF, reset 0x7FFFFFFF */
+#define SFR_ROUTE_CTRL2    0x0048U
+#define SFR_SPUS_CTRL2     0x0208U
+#define SFR_SPUS_CTRL3     0x020CU
+#define SFR_SBANK_MIXP     0x0260U
+#define SFR_SPUM_CTRL1     0x0304U
 #define SFR_ROUTE_CTRL0    0x0040U          /* UAIFn SPK [4n+3:4n]: 2 = SIFS1 (uaif_spkx_texts) */
 #define SFR_ROUTE_CTRL1    0x0044U          /* NSRCn [4n+3:4n]: 8 = UAIF0 (nsrcx_texts) */
 #define SFR_SPUS_CTRL0     0x0200U          /* chain 0 [3:0]: IN bit 3 (0 RDMA), OUT [2:1] (0 SIFS1), ASRC bit 0 */
@@ -83,6 +96,10 @@ void *memset(void *d, int c, size_t n);
 
 #define MMU_CTRL           0x000U
 #define MMU_TRANSLATE      (1U << 2)
+#define MMU_CFG            0x004U
+#define MMU_STATUS         0x008U
+#define MMU_INT_STATUS     0x060U
+#define MMU_FAULT_ADDR     0x070U
 #define MMU_BLOCK          (1U << 1)
 
 #define GPB0_CON  0x00U
@@ -98,7 +115,7 @@ void *memset(void *d, int c, size_t n);
 static struct abox_hal H;
 static int have_hal;
 static int (*owns_fn)(void);
-static struct apcm_cfg C = { 0xFB200000ULL, 0x2800000ULL, 512U, 8U, 0U };
+static struct apcm_cfg C = { 0xFB200000ULL, 0x2800000ULL, 512U, 8U, 0U, APCM_KEEP, APCM_KEEP, APCM_KEEP, 0U };
 
 /* what was found, to put back; and what was done, to undo */
 static struct {
@@ -107,7 +124,7 @@ static struct {
     unsigned qch_set;
     uint8_t *rm;
     uint32_t mmu_was, gpb0_con, gpb0_pud, gpb1_con, gpb1_pud, sysp_was, qdis_was, route0, route1, spus0, spus1, spum0,
-             uaif0[2], uaif1[2], sb_rdma0, sb_nsrc0, misc_was;
+             uaif0[2], uaif1[2], sb_rdma0, sb_nsrc0, misc_was, dyn_was, rd_c0, rd_c1, rd_lim, wd_c0, wd_lim;
 } S;
 static char why_buf[160] = "off";
 static const uint32_t qch_regs[4] = { CMU_QCH_DUMMY, CMU_QCH_SYSMMU, CMU_QCH_BCLK0, CMU_QCH_BCLK1 };
@@ -152,7 +169,7 @@ static void vfmt(char *b, unsigned cap, const char *fmt, va_list ap)
 /* every argument of %u / %x is passed as unsigned long */
 static void say(const char *fmt, ...)
 {
-    char b[200];
+    char b[240];
     va_list ap;
     va_start(ap, fmt);
     vfmt(b, sizeof b, fmt, ap);
@@ -233,6 +250,7 @@ void apcm_cfg_default(struct apcm_cfg *c)
 {
     c->rmem_base = 0xFB200000ULL, c->rmem_size = 0x2800000ULL;
     c->sbank_bytes = 512U, c->burst = 8U, c->rdma_ctrl0_or = 0;
+    c->dma_ctrl1 = c->dma_lim = c->dyn_clk = APCM_KEEP, c->qdis_or = 0;
 }
 
 int apcm_cfg_set(const struct apcm_cfg *c)
@@ -382,6 +400,12 @@ static void undo(void)
                     if (S.qch_set & (1U << i))
                         m32(CMU(qch_regs[i]), QCH_CLOCK_REQ, 0);
                 w32(ABOX_SYSREG + SYSREG_MISC_CON, S.misc_was);
+                w32(SFR(SFR_DYN_CLK), S.dyn_was);
+                w32(SFR(APCM_RDMA(0) + APCM_DMA_CTRL0), S.rd_c0 & ~DMA_ENABLE);
+                w32(SFR(APCM_RDMA(0) + APCM_DMA_CTRL1), S.rd_c1);
+                w32(SFR(APCM_RDMA(0) + APCM_DMA_SBLIM), S.rd_lim);
+                w32(SFR(APCM_WDMA(1) + APCM_DMA_CTRL0), S.wd_c0 & ~DMA_ENABLE);
+                w32(SFR(APCM_WDMA(1) + APCM_DMA_SBLIM), S.wd_lim);
             }
             if (S.powered) {
                 m32(PMU(ABOX_PMU_GPIO_MODE), 1U, 1U);               /* abox_pad_retention(true) */
@@ -440,15 +464,18 @@ int apcm_up(void)
             sayw("up: the AUD power domain did not come on in 10 ms");
             return fail(ABOX_EPOWER);
         }
-        int64_t smc = H.smc(H.ctx, ABOX_SMC_PD, 1, ABOX_DTZPC, 0);
-        if (smc) {
-            sayw("up: the DTZPC restore SMC answered %x, not 0", UL(smc));
-            return fail(ABOX_EPOWER);
-        }
-        say("up: 1/6 AUD domain on in %u us, DTZPC restored", UL(took));
-    } else {
-        say("up: 1/6 AUD domain already on (left on by the boot): it stays on at the end");
     }
+    /* the DTZPC restore, also when the boot left the domain on (an earlier port makes it every time; a refusal only counts
+     * when we switched the domain on ourselves) */
+    int64_t smc = H.smc(H.ctx, ABOX_SMC_PD, 1, ABOX_DTZPC, 0);
+    if (smc && S.powered) {
+        sayw("up: the DTZPC restore SMC answered %x, not 0", UL(smc));
+        return fail(ABOX_EPOWER);
+    }
+    if (S.powered)
+        say("up: 1/6 AUD domain on in %u us, DTZPC restored", UL(took));
+    else
+        say("up: 1/6 AUD domain already on (the boot's; stays on at the end), DTZPC restore SMC answered %x", UL(smc));
     uint32_t ip = r32(SFR(SFR_IP_INDEX));
     if (ip != 0x41424F58U && ip != 0x584F4241U) {
         sayw("up: ABOX's IP_INDEX reads %x, not \"ABOX\": the block does not answer", UL(ip));
@@ -475,7 +502,14 @@ int apcm_up(void)
     S.uaif1[0] = r32(SFR(SFR_UAIF_CTRL0(1))), S.uaif1[1] = r32(SFR(SFR_UAIF_CTRL1(1)));
     S.sb_rdma0 = r32(SFR(APCM_SBANK_RDMA0)), S.sb_nsrc0 = r32(SFR(APCM_SBANK_NSRC0));
     S.misc_was = r32(ABOX_SYSREG + SYSREG_MISC_CON);
+    S.dyn_was = r32(SFR(SFR_DYN_CLK));
+    S.rd_c0 = r32(SFR(APCM_RDMA(0) + APCM_DMA_CTRL0)), S.rd_c1 = r32(SFR(APCM_RDMA(0) + APCM_DMA_CTRL1));
+    S.rd_lim = r32(SFR(APCM_RDMA(0) + APCM_DMA_SBLIM));
+    S.wd_c0 = r32(SFR(APCM_WDMA(1) + APCM_DMA_CTRL0)), S.wd_lim = r32(SFR(APCM_WDMA(1) + APCM_DMA_SBLIM));
     S.saved = 1;
+    say("up: found RDMA0 CTRL0 %x CTRL1 %x LIM %x, WDMA1 CTRL0 %x, UAIF1 CTRL0 %x, DYN_CLOCK_OFF %x, QCH_DIS %x, "
+        "SYSPOWER %x/%x", UL(S.rd_c0), UL(S.rd_c1), UL(S.rd_lim), UL(S.wd_c0), UL(S.uaif1[0]), UL(S.dyn_was),
+        UL(S.qdis_was), UL(S.sysp_was), UL(r32(SFR(SFR_SYSPOWER_ST))));
     if ((r32(SFR(APCM_RDMA(0) + APCM_DMA_CTRL0)) | r32(SFR(APCM_WDMA(1) + APCM_DMA_CTRL0))) & DMA_ENABLE) {
         S.play = S.cap = 1;                 /* someone's DMA runs: stopped by undo() */
         sayw("up: RDMA0 or WDMA1 was already running (not ours): stopped again, nothing else changed");
@@ -542,7 +576,10 @@ int apcm_up(void)
     m32(PMU(ABOX_PMU_GPIO_MODE), 1U, 1U);
     /* 7, 8: the bus kept up, the UAIF formats */
     m32(SFR(APCM_SFR_SYSPOWER), 1U, 1U);
-    m32(SFR(APCM_SFR_QCH_DIS), QCH_DIS_ACLK | QCH_DIS_BCLK0 | QCH_DIS_BCLK1, QCH_DIS_ACLK | QCH_DIS_BCLK0 | QCH_DIS_BCLK1);
+    m32(SFR(APCM_SFR_QCH_DIS), QCH_DIS_ACLK | QCH_DIS_BCLK0 | QCH_DIS_BCLK1 | C.qdis_or,
+        QCH_DIS_ACLK | QCH_DIS_BCLK0 | QCH_DIS_BCLK1 | C.qdis_or);
+    if (C.dyn_clk != APCM_KEEP)
+        w32(SFR(SFR_DYN_CLK), C.dyn_clk);
     for (unsigned n = 0; n < 2; ++n) {
         m32(SFR(SFR_UAIF_CTRL0(n)), UAIF_SPK_EN | UAIF_MIC_EN, 0);
         w32(SFR(SFR_UAIF_CTRL1(n)), (r32(SFR(SFR_UAIF_CTRL1(n))) & ~0x1FFFFFFFU) | UAIF_CTRL1_VAL);
@@ -587,6 +624,10 @@ static int dma_program(uint64_t base, uint32_t pa, uint32_t bytes)
     if (!(c & DMA_BURST) && C.burst)
         c |= C.burst << 19;
     w32(base + APCM_DMA_CTRL0, c | C.rdma_ctrl0_or);
+    if (C.dma_ctrl1 != APCM_KEEP && base == SFR(APCM_RDMA(0)))
+        w32(base + APCM_DMA_CTRL1, C.dma_ctrl1);
+    if (C.dma_lim != APCM_KEEP)
+        w32(base + APCM_DMA_SBLIM, C.dma_lim);
     return r32(base + APCM_DMA_BUF_STR) == pa && r32(base + APCM_DMA_BUF_END) == pa + bytes;
 }
 
@@ -764,4 +805,160 @@ void apcm_down(void)
     S.state = APCM_ST_OFF;
     S.err = 0;
     sayw("off");
+}
+
+/* ---- diagnostics ------------------------------------------------------------------------------------------------- */
+void apcm_dump(const char *tag)
+{
+    if (!have_hal)
+        return;
+    uint32_t a = r32(PMU(ABOX_PMU_AUD_STAT));
+    if ((a & 0xFU) != 0xFU) {
+        say("dump %s: AUD domain off (%x): nothing else read", tag, UL(a));
+        return;
+    }
+#define RS(o) UL(r32(SFR(o)))
+#define RC(o) UL(r32(CMU(o)))
+    say("dump %s: PMU AUD %x CPU %x/%x PADRET %x GPIOM %x | SYSPOWER %x/%x CFG0 %x REMAP %x/%x DYNCLK %x QCHDIS %x",
+        tag, UL(a), UL(r32(PMU(ABOX_PMU_CPU_STAT))), UL(r32(PMU(ABOX_PMU_CPU_OPT))), UL(r32(PMU(ABOX_PMU_PAD_RET))),
+        UL(r32(PMU(ABOX_PMU_GPIO_MODE))), RS(APCM_SFR_SYSPOWER), RS(SFR_SYSPOWER_ST), RS(SFR_SYS_CONFIG0),
+        RS(SFR_REMAP_MASK), RS(SFR_REMAP_ADDR), RS(SFR_DYN_CLK), RS(APCM_SFR_QCH_DIS));
+    say("dump %s: CMU PLL %x/%x LOCK %x MUX cpu %x u0 %x u1 %x DIV audif %x bus %x busp %x cpuaclk %x pll %x u0 %x u1 %x",
+        tag, RC(CMU_PLL_CON0), RC(CMU_PLL_CON3), RC(CMU_PLL_LOCKTIME), RC(CMU_MUX_CPU), RC(CMU_MUX_UAIF0),
+        RC(CMU_MUX_UAIF1), RC(CMU_DIV_AUDIF), RC(CMU_DIV_BUS), RC(CMU_DIV_BUSP), RC(CMU_DIV_CPU_ACLK), RC(CMU_DIV_PLL),
+        RC(CMU_DIV_UAIF0), RC(CMU_DIV_UAIF1));
+    say("dump %s: CMU QCH 3000.. %x %x %x %x %x %x %x %x | 3020.. %x %x %x %x | 3060 %x | MMU %x %x %x int %x fa %x",
+        tag, RC(0x3000), RC(0x3004), RC(0x3008), RC(0x300C), RC(0x3010), RC(0x3014), RC(0x3018), RC(0x301C), RC(0x3020),
+        RC(0x3024), RC(0x3028), RC(0x302C), RC(0x3060), UL(r32(ABOX_SYSMMU + MMU_CTRL)), UL(r32(ABOX_SYSMMU + MMU_CFG)),
+        UL(r32(ABOX_SYSMMU + MMU_STATUS)), UL(r32(ABOX_SYSMMU + MMU_INT_STATUS)), UL(r32(ABOX_SYSMMU + MMU_FAULT_ADDR)));
+    say("dump %s: ROUTE %x %x %x SPUS %x %x %x %x SBANK r0 %x mixp %x SPUM %x %x %x %x nsrc0 %x", tag,
+        RS(SFR_ROUTE_CTRL0), RS(SFR_ROUTE_CTRL1), RS(SFR_ROUTE_CTRL2), RS(SFR_SPUS_CTRL0), RS(SFR_SPUS_CTRL1),
+        RS(SFR_SPUS_CTRL2), RS(SFR_SPUS_CTRL3), RS(APCM_SBANK_RDMA0), RS(SFR_SBANK_MIXP), RS(SFR_SPUM_CTRL0),
+        RS(SFR_SPUM_CTRL1), RS(0x308), RS(SFR_SPUM_CTRL3), RS(APCM_SBANK_NSRC0));
+    say("dump %s: UAIF0 %x %x st %x | UAIF1 %x %x st %x | GPB0 %x %x GPB1 %x %x", tag, RS(SFR_UAIF_CTRL0(0)),
+        RS(SFR_UAIF_CTRL1(0)), RS(SFR_UAIF_STATUS(0)), RS(SFR_UAIF_CTRL0(1)), RS(SFR_UAIF_CTRL1(1)),
+        RS(SFR_UAIF_STATUS(1)), UL(r32(ABOX_GPIO + GPB0_CON)), UL(r32(ABOX_GPIO + GPB0_PUD)),
+        UL(r32(ABOX_GPIO + GPB1_CON)), UL(r32(ABOX_GPIO + GPB1_PUD)));
+    for (unsigned d = 0; d < 2; ++d) {
+        uint32_t b = d ? APCM_WDMA(1) : APCM_RDMA(0);
+        say("dump %s: %s c0 %x c1 %x str %x end %x off %x pt %x vol %x chg %x lim %x 24 %x 28 %x 2c %x st %x", tag,
+            d ? "WDMA1" : "RDMA0", RS(b), RS(b + 4), RS(b + 8), RS(b + 0xC), RS(b + 0x10), RS(b + 0x14), RS(b + 0x18),
+            RS(b + 0x1C), RS(b + 0x20), RS(b + 0x24), RS(b + 0x28), RS(b + 0x2C), RS(b + 0x30));
+    }
+#undef RS
+#undef RC
+}
+
+static void fmt_desc(char *d, unsigned cap, const char *fmt, ...)
+{
+    char b[96];
+    va_list ap;
+    va_start(ap, fmt);
+    vfmt(b, sizeof b, fmt, ap);
+    va_end(ap);
+    unsigned i = 0;
+    for (const char *s = b + 6; *s && i + 1 < cap; ++s)
+        d[i++] = *s;
+    if (cap)
+        d[i] = 0;
+}
+
+/* trial i -> what to change; 0: no such trial */
+struct tcfg {
+    uint32_t c0_or, c1, lim, dyn, qdis;
+    int set_c1, set_lim, set_dyn, set_qdis;
+};
+static int trial_cfg(unsigned i, struct tcfg *t, char *desc, unsigned cap)
+{
+    memset(t, 0, sizeof(*t));
+    if (i == 0) {
+        fmt_desc(desc, cap, "baseline again");
+    } else if (i == 1) {
+        t->set_dyn = 1, t->dyn = 0;
+        fmt_desc(desc, cap, "DYN_CLOCK_OFF 0");
+    } else if (i == 2) {
+        t->set_qdis = 1, t->qdis = 0xFFFFFFFFU;
+        fmt_desc(desc, cap, "QCHANNEL_DISABLE all");
+    } else if (i <= 6) {
+        t->set_lim = 1, t->lim = 4U << (8 * (i - 3));
+        fmt_desc(desc, cap, "SBANK_LIMIT %x", UL(t->lim));
+    } else if (i <= 33) {
+        unsigned k = i - 7, bit = k < 18 ? k + 1 : k - 18 + 23;
+        t->c0_or = 1U << bit;
+        fmt_desc(desc, cap, "CTRL0 bit %u", UL(bit));
+    } else if (i <= 65) {
+        t->set_c1 = 1, t->c1 = 1U << (i - 34);
+        fmt_desc(desc, cap, "CTRL1 bit %u", UL(i - 34));
+    } else if (i < APCM_TRIAL_FIRST_FMT) {
+        t->set_c1 = 1, t->c1 = 9U << (i - 66);
+        fmt_desc(desc, cap, "CTRL1 9<<%u", UL(i - 66));
+    } else {
+        unsigned j = i - APCM_TRIAL_FIRST_FMT;
+        for (unsigned s = 1; s <= 14; ++s)
+            for (unsigned b = 1; b <= 18; ++b) {
+                if (b >= s && b <= s + 4)
+                    continue;
+                if (j-- == 0) {
+                    t->c0_or = (9U << s) | (1U << b);
+                    fmt_desc(desc, cap, "CTRL0 9<<%u + bit %u", UL(s), UL(b));
+                    return 1;
+                }
+            }
+        return 0;
+    }
+    return 1;
+}
+
+int apcm_trial(unsigned i, uint32_t *moved, char *desc, unsigned cap)
+{
+    struct tcfg t;
+    uint64_t rdma = SFR(APCM_RDMA(0));
+    *moved = 0;
+    if (!S.play || S.state != APCM_ST_UP)
+        return 0;
+    if (!trial_cfg(i, &t, desc, cap))
+        return 0;
+    if (!dma_stop(rdma, "RDMA0"))
+        return -1;
+    uint32_t qd = r32(SFR(APCM_SFR_QCH_DIS));
+    (void)dma_program(rdma, (uint32_t)(C.rmem_base + APCM_RM_PLAY), APCM_RING_BYTES);
+    if (t.c0_or)
+        m32(rdma + APCM_DMA_CTRL0, t.c0_or, t.c0_or);
+    if (t.set_c1)
+        w32(rdma + APCM_DMA_CTRL1, t.c1);
+    if (t.set_lim)
+        w32(rdma + APCM_DMA_SBLIM, t.lim);
+    if (t.set_dyn)
+        w32(SFR(SFR_DYN_CLK), t.dyn);
+    if (t.set_qdis)
+        w32(SFR(APCM_SFR_QCH_DIS), t.qdis);
+    m32(rdma + APCM_DMA_CTRL0, DMA_ENABLE, DMA_ENABLE);
+    H.delay_us(H.ctx, 3000);
+    uint32_t p1 = pos_of(r32(rdma + APCM_DMA_STATUS)) % APCM_RING_BYTES;
+    H.delay_us(H.ctx, 5000);
+    uint32_t p2 = pos_of(r32(rdma + APCM_DMA_STATUS)) % APCM_RING_BYTES;
+    *moved = (p2 + APCM_RING_BYTES - p1) % APCM_RING_BYTES;
+    int ok = dma_stop(rdma, "RDMA0");
+    /* what the trial changed, back as it was while playing */
+    w32(rdma + APCM_DMA_CTRL0, r32(rdma + APCM_DMA_CTRL0) & ~(t.c0_or | DMA_ENABLE));
+    w32(rdma + APCM_DMA_CTRL1, S.rd_c1);
+    w32(rdma + APCM_DMA_SBLIM, S.rd_lim);
+    w32(SFR(SFR_DYN_CLK), S.dyn_was);
+    w32(SFR(APCM_SFR_QCH_DIS), qd);
+    return ok ? 1 : -1;
+}
+
+int apcm_trial_adopt(unsigned i)
+{
+    struct tcfg t;
+    char d[48];
+    if (!trial_cfg(i, &t, d, sizeof d))
+        return 0;
+    C.rdma_ctrl0_or = t.c0_or;
+    C.dma_ctrl1 = t.set_c1 ? t.c1 : APCM_KEEP;
+    C.dma_lim = t.set_lim ? t.lim : APCM_KEEP;
+    C.dyn_clk = t.set_dyn ? t.dyn : APCM_KEEP;
+    C.qdis_or = t.set_qdis ? t.qdis : 0;
+    say("config: trial %u (%s) adopted for RDMA0 and WDMA1", UL(i), d);
+    return 1;
 }

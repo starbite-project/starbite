@@ -632,8 +632,16 @@ int bt_on(void)
     rx.junk = rx.skipped = 0;
     bthci_devs_clear(&devs);
     nsorted = 0;
+    struct bt_info keep = inf;              /* a cached firmware (fw_loaded) keeps its name and record count */
     for (unsigned i = 0; i < sizeof(inf); i++)
         ((uint8_t *)&inf)[i] = 0;
+    if (fw_loaded) {
+        for (unsigned i = 0; i < sizeof(inf.fw); i++)
+            inf.fw[i] = keep.fw[i];
+        for (unsigned i = 0; i < sizeof(inf.fw_name); i++)
+            inf.fw_name[i] = keep.fw_name[i];
+        inf.fw_records = keep.fw_records;
+    }
     inf.baud = 115200;
     wake = 0;
     go(P_FW);

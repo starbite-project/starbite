@@ -1,13 +1,19 @@
 /* SPDX-License-Identifier: MIT
  * Settings for Starbite OS Next (helper B2, Track B), included by shell_lock.c after the other parts (it uses the
  * shell's helpers, the kit and every part's state). iOS 26's structure:
- *   - the root: the large title, the Starbite profile card (Galaxy S9, Starbite OS), then Wi-Fi / Cellular / Battery;
+ *   - the root: the large title, the Starbite profile card (Galaxy S9, Starbite OS), then Wi-Fi / Bluetooth / Cellular /
+ *     Battery;
  *     General / Display & Brightness / Wallpaper / Sounds & Haptics / Notifications; Passcode / Emergency / Privacy /
  *     Startup; Linux Apps / App Store;
  *   - pushed pages with the glass back circle and an inline title: General (About, Software Update, Date & Time,
  *     Keyboard, Language & Region, Reset), Display & Brightness (the live brightness slider), Wallpaper, Sounds &
  *     Haptics, Notifications (per app), Battery (the level, the history since the phone started, Last 2 %), Privacy,
- *     Emergency (Medical Card, Emergency mode), Linux Apps.
+ *     Emergency (Medical Card, Emergency mode), Linux Apps;
+ *   - on Track A's drivers (sbos-core-api.md 11): Bluetooth (the switch, a scan while the page is open, Other Devices;
+ *     scanning only), Battery > Battery Health (Maximum Capacity, Cycle Count), Display's Auto-Brightness (with the
+ *     light sensor's reading), Sounds & Haptics' Haptic Strength (the motor's level, a sample on each choice).
+ *     Bluetooth and Display poll their drivers on the platform's refresh turns (se_refresh): a page is built again only
+ *     when what it shows changed, at most ~3 times a second; the lux reading redraws its footer only.
  * Wi-Fi (shell_wifi.inc), Cellular (shell_cell.inc) and the Medical Card's editor (shell_survival.inc) keep their own
  * pages (AS.sub 2, 3, 4: the page strips). Passcode is Track A's (shell_passcode.inc), Startup Track J's
  * (shell_startup.inc): their rows open SE_PASSCODE_PAGE / SE_STARTUP_PAGE in the strips. Date & Time is here on
@@ -26,12 +32,12 @@
 
 enum { SE_ROOT = 0, SE_DISPLAY = 1, SE_WIFI = 2, SE_CELL = 3, SE_CARD = 4,
        SE_GENERAL = 10, SE_ABOUT, SE_UPDATE, SE_DATETIME, SE_KEYBOARD, SE_LANG, SE_RESET, SE_WALL, SE_SOUNDS, SE_NOTIF,
-       SE_NOTIF_APP, SE_BATTERY, SE_PRIVACY, SE_EMERGENCY, SE_LINUX, SE_SEARCH, SE_NPAGES };
+       SE_NOTIF_APP, SE_BATTERY, SE_PRIVACY, SE_EMERGENCY, SE_LINUX, SE_SEARCH, SE_BT, SE_HEALTH, SE_NPAGES };
 /* actions (row ids from 100; a row id < 100 pushes that page) */
-enum { A_NONE = 100, A_CARD, A_PASSCODE, A_STARTUP, A_STORE, A_LAST2, A_HEALTH, A_TEXTSIZE, A_RESET, A_EMG, A_BRIGHT,
-       A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK,
+enum { A_NONE = 100, A_CARD, A_PASSCODE, A_STARTUP, A_STORE, A_LAST2, A_TEXTSIZE, A_RESET, A_EMG, A_BRIGHT,
+       A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK, A_UPDATE, A_BTDEV, A_HAPLVL,
        T_FIRST = 200, T_SYSHAP = T_FIRST, T_KBHAP, T_AUTOCAP, T_TIMERVIB, T_LAST2AUTO, T_NALLOW, T_NBANNER, T_CALLVIB, T_SMSVIB,
-       T_CLOCK24 };
+       T_CLOCK24, T_BT, T_AUTOBRIGHT };
 
 /* ---- the shell's own settings: Track A's prefs (kept across restarts; every one defaults to on) ------------------ */
 enum { SK_SYSHAP, SK_KBHAP, SK_AUTOCAP, SK_TIMERVIB, SK_NALLOW, SK_NBANNER = SK_NALLOW + 8, SK_N = SK_NBANNER + 8 };
@@ -83,12 +89,13 @@ static void se_batt_sample(int h, int mi, int pct)
 /* ---- the page's rows ------------------------------------------------------------------------------------------- */
 enum { SR_NAV, SR_VAL, SR_TOG, SR_ACT, SR_SLIDER, SR_SEG, SR_PROFILE, SR_BIG, SR_GRAPH, SR_WALL };
 enum { SEI_NONE, SEI_WIFI, SEI_CELL, SEI_BATT, SEI_GENERAL, SEI_DISPLAY, SEI_WALL, SEI_SOUNDS, SEI_NOTIF, SEI_PASS,
-       SEI_SOS, SEI_PRIV, SEI_START, SEI_LINUX, SEI_STORE, SEI_HEART };
+       SEI_SOS, SEI_PRIV, SEI_START, SEI_LINUX, SEI_STORE, SEI_HEART, SEI_BT };
 typedef struct {
     int kind, id, on, dis, ico, red;
     const char *l, *v;
     float y, h;                                   /* content pt at scroll 0 */
     const char *sub;                              /* a second line (the row is 66 tall) */
+    int segn;                                     /* SR_SEG: its segments (0: two) */
 } se_row;
 typedef struct { int first, n; const char *head, *foot; float y, h, fy; int fl; } se_sec;
 #define SE_MAXR 32
@@ -130,6 +137,14 @@ static const char *se_str(const char *a, const char *b)
     SE.pn = n;
     return o;
 }
+/* a + b as a sentence: a full stop after the kernel's words when they have none */
+static const char *se_sentence(const char *a, const char *b)
+{
+    char *o = (char *)se_str(a, b);
+    int n = (int)tk_strlen(o);
+    if (n && o[n - 1] != '.' && SE.pn < (int)sizeof SE.pool - 1) { o[n] = '.'; o[n + 1] = 0; SE.pn++; }
+    return o;
+}
 static const char *se_num(int v, const char *unit)
 {
     char b[16];
@@ -150,7 +165,7 @@ static se_row *row(int kind, int id, const char *l, const char *v)
 {
     if (SE.nr >= SE_MAXR || !SE.ns) return &SE.r[SE_MAXR - 1];
     se_row *r = &SE.r[SE.nr++];
-    *r = (se_row){ kind, id, 0, 0, SEI_NONE, 0, l, v ? v : "", 0, 0, 0 };
+    *r = (se_row){ kind, id, 0, 0, SEI_NONE, 0, l, v ? v : "", 0, 0, 0, 0 };
     SE.s[SE.ns - 1].n++;
     return r;
 }
@@ -183,6 +198,8 @@ static const char *se_title(int p)
     case SE_EMERGENCY: return "Emergency";
     case SE_LINUX: return "Linux Apps";
     case SE_SEARCH: return "Search";
+    case SE_BT: return "Bluetooth";
+    case SE_HEALTH: return "Battery Health";
     default: return "Settings";
     }
 }
@@ -191,6 +208,7 @@ static int se_parent(int p)
     if (p >= SE_ABOUT && p <= SE_RESET) return SE_GENERAL;
     if (p == SE_NOTIF_APP) return SE_NOTIF;
     if (p == SE_CARD) return SE_EMERGENCY;
+    if (p == SE_HEALTH) return SE_BATTERY;
     return SE_ROOT;
 }
 static const char *se_card_words(void)
@@ -200,6 +218,46 @@ static const char *se_card_words(void)
     return s == SH_CARD_READY ? "microSD card ready" : s == SH_CARD_NONE ? "No card" : s == SH_CARD_MOUNTING ? "Not checked yet" :
            why && why[0] ? why : "The card has an error";
 }
+
+/* ---- Track A's drivers (sbos-core-api.md 11) ----------------------------------------------------------------------- */
+/* Bluetooth: what the page showed when it was built (the poll compares), the scan this page asked for, the spinner */
+static tk_layer sespin;
+static struct {
+    int st, cnt, scan, spin, spin_k, lux_h, bright;
+    float scan_t, build_t, spin_t, poll_t, spin_cx, spin_cy;
+} SEB = { 0, 0, 0, 0, 0, 0, 0, -1, -1e9f, 0, 0, 0, 0 };
+#define SE_BT_HEAD "Other Devices"
+#define SE_BT_MAXD 12                             /* named devices listed (the rest: a count in the footer) */
+static int se_awake(void) { return !locked && !SL.black; }
+static const char *se_bt_row_text(void)
+{
+    int st = sh_bt_state();
+    return st == 2 ? "On" : st == 1 ? "Turning On\xe2\x80\xa6" : st < 0 ? "Not Available" : "Off";
+}
+/* the lux reading in Display's footer (a buffer of its own: the footer is redrawn alone when it changes) */
+static char se_lux_foot[200];
+static int se_lux_shown = -2;
+static int se_lux_round(int lux) { return lux < 0 ? -1 : lux < 100 ? lux : (lux + 5) / 10 * 10; }   /* tens above 100 lux */
+static void se_lux_text(int lux)
+{
+    char b[16];
+    int n = 0;
+    const char *a = "Four steps of the panel's own levels, as in the Control Centre. Auto-Brightness picks the step from the "
+                    "light around the phone every 2 seconds while the screen is on. ";
+    while (*a && n < (int)sizeof se_lux_foot - 1) se_lux_foot[n++] = *a++;
+    se_lux_shown = se_lux_round(lux);
+    if (lux < 0) a = "The light sensor isn't available yet.";
+    else {
+        put_dec(b, se_lux_shown);
+        const char *c = "Ambient light: ";
+        while (*c && n < (int)sizeof se_lux_foot - 1) se_lux_foot[n++] = *c++;
+        for (c = b; *c && n < (int)sizeof se_lux_foot - 1; c++) se_lux_foot[n++] = *c;
+        a = " lux.";
+    }
+    while (*a && n < (int)sizeof se_lux_foot - 1) se_lux_foot[n++] = *a++;
+    se_lux_foot[n] = 0;
+}
+static const char *const SE_HAP[4] = { "Off", "Light", "Medium", "Strong" };   /* haptic.level 0..3 (shell.h) */
 
 /* each page's rows */
 static void se_rows(int p)
@@ -213,6 +271,7 @@ static void se_rows(int p)
         row(SR_PROFILE, SE_ABOUT, "Galaxy S9", "Starbite OS");
         sec(0);
         nav(SE_WIFI, SEI_WIFI, "Wi-Fi", wf_row_text());
+        nav(SE_BT, SEI_BT, "Bluetooth", se_bt_row_text());   /* Track B: iOS's order (Wi-Fi, Bluetooth, Cellular) */
         nav(SE_CELL, SEI_CELL, "Cellular", md_text());
         nav(SE_BATTERY, SEI_BATT, "Battery", se_num(ST.pct, " %"));
         sec(0);
@@ -233,7 +292,7 @@ static void se_rows(int p)
     case SE_GENERAL:
         sec(0);
         nav(SE_ABOUT, 0, "About", 0);
-        nav(SE_UPDATE, 0, "Software Update", 0);
+        nav(A_UPDATE, 0, "Software Update", 0);   /* Track A update: its own page (shell_update.inc) */
         sec(0);
         nav(SE_DATETIME, 0, "Date & Time", 0);
         nav(SE_KEYBOARD, 0, "Keyboard", 0);
@@ -252,12 +311,6 @@ static void se_rows(int p)
         val("Storage", se_card_words());
         val("Processor", "Exynos 9810");
         foot("Starbite OS runs from the memory card. The serial number and the modem's numbers are not shown.");
-        break;
-    case SE_UPDATE:
-        sec(0);
-        val("Starbite OS", SYS.ver);
-        foot("Starbite OS updates come from the boot menu: hold Volume Up while the phone starts, then choose "
-             "Starbite OS > Update. Nothing is downloaded here.");
         break;
     case SE_DATETIME: {                          /* Track A's time: 12 / 24-hour, the zone (sbos-core-api.md 4) */
         char t[12];
@@ -301,7 +354,11 @@ static void se_rows(int p)
     case SE_DISPLAY: {
         sec("Brightness");
         row(SR_SLIDER, A_BRIGHT, 0, 0);
-        foot("Four steps of the panel's own levels, the same as the Control Centre's slider.");
+        tog(T_AUTOBRIGHT, "Auto-Brightness", sh_auto_brightness_on());   /* (iOS: Accessibility > Display & Text Size) */
+        se_lux_text(sh_light_lux());
+        foot(se_lux_foot);
+        SEB.lux_h = (int)d_group_foot(0, 0, se_lux_foot);
+        SEB.bright = cc_bright;
         sec(0);
         nav(A_TEXTSIZE, 0, "Text Size", "Default");
         val("Appearance", "Dark");
@@ -321,6 +378,15 @@ static void se_rows(int p)
         tog(T_KBHAP, "Keyboard Feedback", se_get(SK_KBHAP));
         tog(T_TIMERVIB, "Clock Timer", se_get(SK_TIMERVIB));
         foot("System Haptics: the taps at holds and keys. Clock Timer: the buzz when a timer ends.");
+        sec("Haptic Strength");
+        {
+            se_row *r = row(SR_SEG, A_HAPLVL, 0, 0);
+            r->on = sh_haptic_level();
+            r->segn = 4;
+            r->v = (const char *)SE_HAP;
+        }
+        foot("How hard the motor buzzes for calls, alarms and notifications; each choice plays a sample. Off: no "
+             "buzz for them at all. The light taps of System Haptics stay as they are.");
         sec("Vibrate");
         { se_row *r = tog(T_CALLVIB, "Calls", 1); r->dis = 1; }
         { se_row *r = tog(T_SMSVIB, "Messages", 1); r->dis = 1; }
@@ -351,7 +417,11 @@ static void se_rows(int p)
         row(SR_BIG, A_NONE, se_num(ST.pct, " %"), SYS.charging ? "Charging" : "On battery");
         sec(0);
         val("Battery Temperature", se_str(live_text("@temp", b), 0));
-        nav(A_HEALTH, 0, "Battery Health", "Not measured");
+        {
+            int mx = 0, cy = 0;
+            char w[160];
+            nav(SE_HEALTH, 0, "Battery Health", sh_battery_health(&mx, &cy, w, sizeof w) ? se_num(mx, " %") : "Not Available");
+        }
         sec(BH.range ? "Since the phone started" : "Last hour");
         {
             static const char *const RG[2] = { "1 Hour", "24 Hours" };
@@ -402,20 +472,72 @@ static void se_rows(int p)
         foot("Linux apps run on the phone's big cores in their own window. Install them from the App Store.");
         break;
     }
+    case SE_BT: {
+        /* Track A's Bluetooth: scanning only. The switch is on while starting (1) and on (2); a failure (-1) shows off
+         * with the kernel's words. Other Devices: the named ones strongest first, as the list stood at this build */
+        int st = sh_bt_state();
+        SEB.st = st;
+        SEB.cnt = 0;
+        sec(0);
+        tog(T_BT, "Bluetooth", st == 1 || st == 2);
+        if (st == 1) foot("Turning On\xe2\x80\xa6 The Bluetooth chip loads its firmware, about 10 seconds.");
+        else if (st < 0) {
+            const char *why = sh_bt_why();
+            foot(se_sentence("Bluetooth didn't start. ", why && why[0] ? why : "The chip didn't answer."));
+        } else foot("Starbite OS can look for Bluetooth devices nearby. Pairing, audio and file transfer aren't in this "
+                    "version yet.");
+        if (st != 2) break;
+        sec(SE_BT_HEAD);
+        int n = sh_bt_count(), named = 0, unnamed = 0;
+        SEB.cnt = n;
+        for (int i = 0; i < n && i < 64; i++) {
+            char nm[48];
+            int rssi = 0;
+            if (sh_bt_get(i, nm, sizeof nm, &rssi) < 0) continue;
+            if (!nm[0] || named >= SE_BT_MAXD) { unnamed++; continue; }   /* iOS lists named devices: the rest counted */
+            row(SR_VAL, A_BTDEV, se_str(nm, 0), 0);
+            named++;
+        }
+        if (!n) foot("Looking for devices nearby\xe2\x80\xa6 The scan runs while this page is open.");
+        else if (unnamed) {
+            char b[12];
+            put_dec(b, unnamed);
+            foot(se_str(b, unnamed == 1 ? " more device without a name. Scanning only: pairing and audio aren't available yet." :
+                                          " more devices without a name. Scanning only: pairing and audio aren't available yet."));
+        } else foot("Scanning only: pairing and audio aren't available yet.");
+        break;
+    }
+    case SE_HEALTH: {
+        /* Track A's battery health: the fuel gauge's capacity estimate and cycle count, or the kernel's words why not */
+        int mx = 0, cy = 0;
+        char w[160] = "";
+        int ok = sh_battery_health(&mx, &cy, w, sizeof w);
+        sec(0);
+        val("Maximum Capacity", ok ? se_num(mx, " %") : "Not Available");
+        foot("This is a measure of battery capacity relative to when it was new. Lower capacity may result in fewer hours "
+             "of usage between charges.");
+        sec(0);
+        val("Cycle Count", ok && cy >= 0 ? se_num(cy, 0) : "Not Available");
+        if (ok) foot(se_sentence(w[0] ? w : "Read from the battery's charge chip.", 0));
+        else foot(se_sentence("Starbite OS can't read the battery's wear: ", w[0] ? w : "the charge chip didn't answer."));
+        break;
+    }
     case SE_SEARCH: {
         /* the pages and settings whose names hold what is typed (all of them while it is empty: the first seven) */
         static const struct { const char *t; int id, ico; const char *where; } IX[] = {
-            { "Wi-Fi", SE_WIFI, SEI_WIFI, 0 }, { "Cellular", SE_CELL, SEI_CELL, 0 }, { "Battery", SE_BATTERY, SEI_BATT, 0 },
+            { "Wi-Fi", SE_WIFI, SEI_WIFI, 0 }, { "Bluetooth", SE_BT, SEI_BT, 0 }, { "Cellular", SE_CELL, SEI_CELL, 0 },
+            { "Battery", SE_BATTERY, SEI_BATT, 0 },
             { "General", SE_GENERAL, SEI_GENERAL, 0 }, { "Display & Brightness", SE_DISPLAY, SEI_DISPLAY, 0 },
             { "Wallpaper", SE_WALL, SEI_WALL, 0 }, { "Sounds & Haptics", SE_SOUNDS, SEI_SOUNDS, 0 },
             { "Notifications", SE_NOTIF, SEI_NOTIF, 0 }, { "Passcode", A_PASSCODE, SEI_PASS, 0 }, { "Emergency", SE_EMERGENCY, SEI_SOS, 0 },
             { "Privacy", SE_PRIVACY, SEI_PRIV, 0 }, { "Startup", A_STARTUP, SEI_START, 0 }, { "Linux Apps", SE_LINUX, SEI_LINUX, 0 },
-            { "App Store", A_STORE, SEI_STORE, 0 }, { "About", SE_ABOUT, 0, "General" }, { "Software Update", SE_UPDATE, 0, "General" },
+            { "App Store", A_STORE, SEI_STORE, 0 }, { "About", SE_ABOUT, 0, "General" }, { "Software Update", A_UPDATE, 0, "General" },
             { "Date & Time", SE_DATETIME, 0, "General" }, { "Keyboard", SE_KEYBOARD, 0, "General" },
             { "Language & Region", SE_LANG, 0, "General" }, { "Reset", SE_RESET, 0, "General" }, { "Brightness", SE_DISPLAY, 0, "Display" },
             { "Auto-Lock", SE_DISPLAY, 0, "Display" }, { "Time Zone", SE_DATETIME, 0, "General" }, { "Text Size", SE_DISPLAY, 0, "Display" }, { "Haptics", SE_SOUNDS, 0, "Sounds" },
             { "Vibration", SE_SOUNDS, 0, "Sounds" }, { "Medical Card", A_CARD, SEI_HEART, "Emergency" },
-            { "Last 2 %", SE_BATTERY, 0, "Battery" }, { "Battery Health", SE_BATTERY, 0, "Battery" } };
+            { "Last 2 %", SE_BATTERY, 0, "Battery" }, { "Battery Health", SE_HEALTH, 0, "Battery" },
+            { "Auto-Brightness", SE_DISPLAY, 0, "Display" }, { "Haptic Strength", SE_SOUNDS, 0, "Sounds" } };
         sec(0);
         int n = 0;
         for (unsigned i = 0; i < sizeof IX / sizeof IX[0] && n < 7; i++)
@@ -488,13 +610,14 @@ static void se_glyph(dc *d, const char *name, float cx, float cy)
 static void se_tile(dc *d, float ry, float rh, int ico)
 {
     static const uint32_t COL[] = { 0, 0x0a84ff, 0x30d158, 0x30d158, 0x8e8e93, 0x0a84ff, 0x32ade6, 0xff375f, 0xff3b30, 0xff3b30,
-                                    0xff3b30, 0x0a84ff, 0x636366, 0x2c2c2e, 0x0a84ff, 0xff3b30 };
-    if (ico <= SEI_NONE || ico > SEI_HEART) return;
+                                    0xff3b30, 0x0a84ff, 0x636366, 0x2c2c2e, 0x0a84ff, 0xff3b30, 0x0a84ff };
+    if (ico <= SEI_NONE || ico > SEI_BT) return;
     d_icon_tile(d, ry, rh, COL[ico]);
     float x = LG_X + 16 + .5f, y = ry + (rh - LG_ICON) / 2 + .5f;   /* the glyphs below are placed in a 29 pt box */
     float cx = LG_X + 16 + LG_ICON / 2, cy = ry + rh / 2;
     switch (ico) {
     case SEI_WIFI: se_glyph(d, "cc-wifi", cx, cy); break;
+    case SEI_BT: se_glyph(d, "cc-bt", cx, cy); break;          /* the Control Centre's glyph (no new icon) */
     case SEI_CELL: se_glyph(d, "cc-cell", cx, cy); break;
     case SEI_BATT: se_glyph(d, "cc-save", cx, cy); break;
     case SEI_DISPLAY: se_glyph(d, "cc-sun", cx, cy); break;
@@ -608,7 +731,7 @@ static void se_draw_row(dc *d, const se_row *r, int last)
         d_icon(d, "cc-sun", LG_RE - 16 - 22, y + 19, 1);
         return;
     case SR_SEG:
-        kit_d_segment(d, LG_TX, y + 10, LG_RE - 16 - LG_TX, (const char *const *)(const void *)r->v, 2, r->on);
+        kit_d_segment(d, LG_TX, y + 10, LG_RE - 16 - LG_TX, (const char *const *)(const void *)r->v, r->segn ? r->segn : 2, r->on);
         return;
     case SR_GRAPH: se_graph(d, r); return;
     case SR_WALL: se_wall(d, r); return;
@@ -654,12 +777,90 @@ static void se_redraw_sec(int i)
         tk_layer_dirty(l);
     }
 }
+/* one footer again (Display's lux reading): its lines cleared and drawn over in each chunk it crosses */
+static void se_redraw_foot(int i, float h)
+{
+    se_sec *s = &SE.s[i];
+    for (int k = 0; k < SE_NCH; k++) {
+        tk_layer *l = &sepg[k];
+        if (!l->bmp.px) continue;
+        dc d = { &l->bmp, 0, l->bx, l->by };
+        int y0 = tk_maxi(0, (int)tk_floorf(PT(s->fy) - d.oy)), y1 = tk_mini(l->bmp.h, (int)(PT(s->fy + h + 6) - d.oy) + 1);
+        int x0 = tk_maxi(0, (int)tk_floorf(PT(LG_X) - d.ox)), x1 = tk_mini(l->bmp.w, (int)(PT(LG_RE) - d.ox) + 1);
+        if (y1 <= y0 || x1 <= x0) continue;
+        tk_fill_rect_raw(&l->bmp, x0, y0, x1 - x0, y1 - y0, 0);
+        d_group_foot(&d, s->fy, s->foot);
+        tk_layer_dirty(l);
+    }
+}
+/* the lux reading changed: its footer alone (the page again if its lines changed) */
+static void se_build(void);
+static void se_lux_redraw(int lux)
+{
+    se_lux_text(lux);
+    if ((int)d_group_foot(0, 0, se_lux_foot) != SEB.lux_h) { se_build(); return; }
+    for (int i = 0; i < SE.ns; i++) if (SE.s[i].foot == se_lux_foot) se_redraw_foot(i, (float)SEB.lux_h);
+}
+/* iOS's activity indicator (8 spokes, the bright one going round clockwise) in a 22 pt layer of the scroll group:
+ * beside the switch while Bluetooth starts, beside Other Devices' header while it scans */
+static void se_spin_draw(void)
+{
+    if (!sespin.bmp.px) return;
+    dc d = { &sespin.bmp, 0, sespin.bx, sespin.by };
+    tk_fill_rect_raw(&sespin.bmp, 0, 0, sespin.bmp.w, sespin.bmp.h, 0);
+    float cx = SEB.spin_cx, cy = SEB.spin_cy;
+    for (int i = 0; i < 8; i++) {
+        float a = .7853982f * i, sn = tk_sinf(a), co = tk_cosf(a);
+        int age = (SEB.spin_k - i + 8) & 7;
+        d_seg(&d, cx + sn * 4.4f, cy - co * 4.4f, cx + sn * 8.4f, cy - co * 8.4f, 2.4f, TK_RGBA(235, 235, 245, .9f - .09f * age));
+    }
+    tk_layer_dirty(&sespin);
+}
+static int se_spin_want(void) { return SE.page == SE_BT && se_awake() && (SEB.st == 1 || (SEB.st == 2 && SEB.scan)); }
+static int se_spin_where(float *cx, float *cy)
+{
+    for (int i = 0; i < SE.nr; i++)
+        if (SEB.st == 1 && SE.r[i].id == T_BT) { *cx = SE_SWX - 22; *cy = SE.r[i].y + SE.r[i].h / 2; return 1; }
+    for (int i = 0; i < SE.ns; i++)
+        if (SEB.st == 2 && SE.s[i].head && !tk_strcmp(SE.s[i].head, SE_BT_HEAD)) {
+            *cx = LG_TX + tw(TK_IT600, 15, SE_BT_HEAD, 0, 0) + 8 + 10;
+            *cy = SE.s[i].y - 18;
+            return 1;
+        }
+    return 0;
+}
+/* the spinner where the page wants it (the caller relinks) */
+static void se_spin_set(int want)
+{
+    float cx = 0, cy = 0;
+    if (want) want = se_spin_where(&cx, &cy);
+    if (!want) { relayer(&sespin); sespin.hidden = 1; SEB.spin = 0; return; }
+    if (!sespin.bmp.px || cx != SEB.spin_cx || cy != SEB.spin_cy) {
+        relayer(&sespin);
+        SEB.spin_cx = cx;
+        SEB.spin_cy = cy;
+        (void)mk(&sespin, "settings-spin", cx - 11, cy - 11, 22, 22, 0, 0);
+    }
+    sespin.hidden = !sespin.bmp.px;
+    SEB.spin = 1;
+    se_spin_draw();
+}
+/* the Bluetooth page left (another page, the app closed): its scan stops (Bluetooth itself stays as it is, iOS) */
+static void se_bt_leave(void)
+{
+    if (SEB.scan) sh_bt_scan(0);
+    SEB.scan = 0;
+    SEB.scan_t = -1;
+    relayer(&sespin);
+    sespin.hidden = 1;
+    SEB.spin = 0;
+}
 
 /* ---- the layers ------------------------------------------------------------------------------------------------- */
 static int se_owns(void)
 {
     return is_app("settings") && AS.sub != SE_WIFI && AS.sub != SE_CELL && AS.sub != SE_CARD && AS.sub != SE_STARTUP_PAGE &&
-           AS.sub != SE_PASSCODE_PAGE && AS.sub != SE_TZ_PAGE;
+           AS.sub != SE_PASSCODE_PAGE && AS.sub != SE_TZ_PAGE && AS.sub != SU_SUB;   /* (SU_SUB: Track A update) */
 }
 /* a strip page's back (Startup, Passcode): the Settings root, where it was */
 void settings_back(void)
@@ -729,6 +930,7 @@ static void se_free(void)
     seclip.hidden = 1;
     kit_slider_end();
     relayer(&ksw); ksw.hidden = 1;
+    se_bt_leave();
     SE.built = 0;
 }
 static void se_build(void)
@@ -738,6 +940,8 @@ static void se_build(void)
         tk_layer_init(&sescr, "settings-scroll");
         for (int k = 0; k < SE_NCH; k++) { tk_layer_init(&sepg[k], "settings-page"); sepg[k].hidden = 1; }
         tk_layer_init(&senav, "settings-nav");
+        tk_layer_init(&sespin, "settings-spin");
+        sespin.hidden = 1;
     }
     if (!se_owns()) { se_free(); return; }
     int p = AS.sub;
@@ -752,6 +956,8 @@ static void se_build(void)
     }
     SE.page = p;
     SE.bld_page = p;
+    if (p != SE_BT) se_bt_leave();
+    else SEB.build_t = now_ms;
     if (p == SE_DISPLAY && !SE.slider) SE.bright = ((cc_bright ? cc_bright : 3) - .5f) / 4;
     se_rows(p);
     SE.content_h = se_layout() + (p == SE_ROOT ? 56 : 0);      /* the root's last card clears the search capsule */
@@ -788,16 +994,17 @@ static void se_build(void)
     seclip.fade_top = PT(18);
     seclip.hidden = 0;
     SE.built = 1;
+    se_spin_set(se_spin_want());
     se_place();
     relink();
 }
 static int se_layers(tk_layer **o)
 {
     if (!seclip.name) return 0;
-    tk_layer *s[SE_NCH + 3];
+    tk_layer *s[SE_NCH + 4];
     for (int k = 0; k < SE_NCH; k++) s[k] = &sepg[k];
-    s[SE_NCH] = &ksw; s[SE_NCH + 1] = &kslf; s[SE_NCH + 2] = &kslk;
-    link(&sescr, s, SE_NCH + 3);
+    s[SE_NCH] = &ksw; s[SE_NCH + 1] = &kslf; s[SE_NCH + 2] = &kslk; s[SE_NCH + 3] = &sespin;
+    link(&sescr, s, SE_NCH + 4);
     tk_layer *c[] = { &sescr };
     link(&seclip, c, 1);
     o[0] = &seclip;
@@ -895,6 +1102,10 @@ static void se_act(se_row *r)
     }
     switch (id) {
     case A_CARD: SE.save[SE.page] = SE.scroll; SE.popping = 1; sv_settings_card(); break;   /* (its back: Emergency, where it was) */
+    case A_UPDATE:                               /* Track A update: Software Update's page, in the strips */
+        SE.save[SE.page] = SE.scroll;
+        su_open();
+        break;
     case A_PASSCODE:
 #ifdef SH_HAS_PASSCODE
         SE.save[SE.page] = SE.scroll;
@@ -929,10 +1140,7 @@ static void se_act(se_row *r)
     case A_STORE: se_open_app("store"); break;
     case A_TERMINAL: se_open_app("terminal"); break;
     case A_LAST2: se_open_app("power"); break;
-    case A_HEALTH:
-        se_sheet("Battery Health", "Starbite OS doesn't read the battery's wear yet: the charge chip's capacity estimate needs its "
-                                   "driver.\nThe level and the temperature on this page are live.");
-        break;
+    case A_BTDEV: toast("Pairing isn't available yet"); break;   /* Track A's Bluetooth scans only */
     case A_TEXTSIZE:
         se_sheet("Text Size", "Text has one size in this version: iOS's Body is 17 pt.\nLarger text needs every page "
                               "laid out again; it is planned.");
@@ -959,6 +1167,16 @@ static void se_toggle(int ri)
     case T_NALLOW: se_put(SK_NALLOW + SE.napp, on); break;
     case T_NBANNER: se_put(SK_NBANNER + SE.napp, on); break;
     case T_CLOCK24: sh_clock24_set(on); ta_restyle(); break;   /* Track A: every time on screen again */
+    case T_BT:
+        if (sh_bt_on(on) < 0) {
+            const char *w = sh_bt_why();
+            toast(w && w[0] ? w : on ? "Bluetooth can't start now" : "Bluetooth can't stop now");
+            return;
+        }
+        if (!on) { SEB.scan = 0; SEB.scan_t = -1; }
+        SEB.build_t = now_ms;                    /* the page again after the switch's slide (se_refresh) */
+        break;
+    case T_AUTOBRIGHT: sh_auto_brightness(on); on = sh_auto_brightness_on(); break;
     case A_EMG:
         if (!on) {
             static const kit_btn B[2] = { { "Cancel", KIT_CANCEL }, { "Exit", KIT_DESTRUCTIVE } };
@@ -987,7 +1205,8 @@ static int se_row_at(float x, float y)
 }
 static int se_row_live(const se_row *r)
 {
-    return r->kind == SR_NAV || r->kind == SR_ACT || r->kind == SR_PROFILE || (r->kind == SR_TOG && !r->dis);
+    return r->kind == SR_NAV || r->kind == SR_ACT || r->kind == SR_PROFILE || (r->kind == SR_TOG && !r->dis) ||
+           (r->kind == SR_VAL && r->id == A_BTDEV);
 }
 static void se_light(int i)
 {
@@ -1122,6 +1341,17 @@ static void se_touch(int ph, float x, float y, float t)
     else if (r->kind == SR_SEG && r->id == A_RANGE) {
         int k = kit_segment_hit(x, LG_TX, LG_RE - 16 - LG_TX, 2);
         if (k >= 0 && k != BH.range) { BH.range = k; build_app_page(AP.a); }
+    } else if (r->kind == SR_SEG && r->id == A_HAPLVL) {
+        /* Haptic Strength: the level kept (haptic.level), its group redrawn, a sample at the new level */
+        int k = kit_segment_hit(x, LG_TX, LG_RE - 16 - LG_TX, 4);
+        if (k < 0) return;
+        if (k != r->on) {
+            sh_haptic_level_set(k);
+            r->on = sh_haptic_level();
+            for (int s = 0; s < SE.ns; s++) if (i >= SE.s[s].first && i < SE.s[s].first + SE.s[s].n) se_redraw_sec(s);
+            relink();
+        }
+        if (k > 0) sh_haptic_kind(SH_VIB_NOTIFY);
     } else if (se_row_live(r) && pressed == i) se_act(r);
 }
 static int se_tick(float dt)
@@ -1147,20 +1377,74 @@ static int se_tick(float dt)
     return mv | (SE.down && (SE.moved || SE.slider));
 }
 static int se_moving(void) { return SE.built && (SE.sp.live || SE.momentum || (SE.down && (SE.moved || SE.slider))); }
+/* the platform's refresh turns (sh_refresh / sh_next_update): Bluetooth's state, scan and list, the spinner's step;
+ * Display's lux reading and the level Auto-Brightness set. Nothing here blocks; a page is built again only when what
+ * it shows changed (at most every 0.3 s), never under a finger. */
+static int se_refresh(float t)
+{
+    if (!SE.built || !se_owns() || AP.closing) return 0;
+    int ch = 0;
+    if (SE.page == SE_BT) {
+        int st = sh_bt_state(), aw = se_awake();
+        if (st == 2 && aw) {
+            if (SEB.scan_t < 0 || t - SEB.scan_t > (SEB.scan ? 50000 : 5000)) {   /* a scan lasts 60 s: asked again */
+                SEB.scan = sh_bt_scan(1) == 0;
+                SEB.scan_t = t;
+            }
+        } else {
+            if (SEB.scan) sh_bt_scan(0);
+            SEB.scan = 0;
+            SEB.scan_t = -1;
+        }
+        int cnt = st == 2 ? sh_bt_count() : 0;
+        if ((st != SEB.st || cnt != SEB.cnt) && t - SEB.build_t >= 300 && !SE.down) { se_build(); return 1; }
+        if (se_spin_want() != SEB.spin) { se_spin_set(se_spin_want()); relink(); ch = 1; }
+        else if (SEB.spin && t - SEB.spin_t >= 100) {
+            SEB.spin_k = (SEB.spin_k + 1) & 7;
+            SEB.spin_t = t;
+            se_spin_draw();
+            ch = 1;
+        }
+    } else if (SE.page == SE_DISPLAY && se_awake() && t - SEB.poll_t >= 2000 && !SE.down) {
+        SEB.poll_t = t;
+        if (cc_bright && cc_bright != SEB.bright) { se_build(); return 1; }   /* the slider follows Auto-Brightness */
+        int lux = sh_light_lux();
+        if (se_lux_round(lux) != se_lux_shown) { se_lux_redraw(lux); ch = 1; }
+    }
+    return ch;
+}
+static float se_next_update(float t)
+{
+    if (!SE.built || !se_owns() || AP.closing) return -1;
+    if (SE.page == SE_BT) {
+        if (!se_awake()) return SEB.scan ? 15 : -1;     /* asleep: the scan stops, nothing more */
+        if (SEB.spin) return tk_maxf(15, 100 - (t - SEB.spin_t));
+        int st = sh_bt_state();
+        return st == 1 || st == 2 || st != SEB.st ? 300 : -1;
+    }
+    if (SE.page == SE_DISPLAY && se_awake()) return tk_maxf(15, 2000 - (t - SEB.poll_t));
+    return -1;
+}
 /* the host's stills: "sub" names (display, wifi, cell as before; the new pages by name) and "sescroll" pt */
 static int se_sub_key(const char *k)
 {
     static const struct { const char *k; int p; } M[] = { { "display", SE_DISPLAY }, { "wifi", SE_WIFI }, { "cell", SE_CELL },
-        { "general", SE_GENERAL }, { "about", SE_ABOUT }, { "update", SE_UPDATE }, { "datetime", SE_DATETIME },
+        { "general", SE_GENERAL }, { "about", SE_ABOUT }, { "update", SU_SUB }, { "datetime", SE_DATETIME },
         { "keyboard", SE_KEYBOARD }, { "lang", SE_LANG }, { "reset", SE_RESET }, { "wallpaper", SE_WALL }, { "sounds", SE_SOUNDS },
         { "notif", SE_NOTIF }, { "notifapp", SE_NOTIF_APP }, { "battery", SE_BATTERY }, { "privacy", SE_PRIVACY },
-        { "emergency", SE_EMERGENCY }, { "linux", SE_LINUX }, { "search", SE_SEARCH } };
+        { "emergency", SE_EMERGENCY }, { "linux", SE_LINUX }, { "search", SE_SEARCH }, { "bluetooth", SE_BT },
+        { "health", SE_HEALTH } };
     for (unsigned i = 0; i < sizeof M / sizeof M[0]; i++) if (!tk_strcmp(M[i].k, k)) return M[i].p;
     return 0;
 }
 static int se_set(const char *what, const char *key, float v)
 {
     if (!tk_strcmp(what, "sescroll")) { SE.scroll = tk_clampf(v, 0, se_max()); se_place(); return 1; }
+    if (!tk_strcmp(what, "bt")) {                 /* the stills: Bluetooth on (v 1: it starts) or off (v 0) */
+        sh_bt_on(v > 0);
+        if (se_owns()) build_app_page(AP.a);
+        return 1;
+    }
     if (!tk_strcmp(what, "sehist")) {
         /* a pretend day for the stills: discharging from 100 %, a charge in the afternoon */
         BH.n = 0;

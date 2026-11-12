@@ -289,7 +289,11 @@ typedef struct {
     uint32_t gpu_halves;       /* such frames so far */
     uint32_t gpu_idle_flushed; /* v10: layers made ready for the GPU in idle time (not in a moving frame) */
     int gpu_stale;
-    uint32_t gpu_items;        /* the last GPU frame's quads */             /* P4: GPU frames since the CPU last drew everything (its canvases are behind) */
+    uint32_t gpu_items;        /* the last GPU frame's quads */
+    uint64_t us_flush, b_flush;    /* 1.0 (Track A): the last frame's layer flushes for the GPU (cache clean + block
+                                    * map of layers new or changed since the GPU last had them): time and bytes */
+    uint32_t n_flush;
+    uint64_t us_platform;      /* 1.0: the platform's own time in the last GPU frame (live backdrops, the compose's wait) */             /* P4: GPU frames since the CPU last drew everything (its canvases are behind) */
     uint64_t us_gpu;  /* the last frame's half-canvas catch-up (tk_comp_idle) and half copies made in it */  /* the last frame's wait for the free buffer and its catch-up pass */
 } tk_comp;
 int tk_comp_init(tk_comp *c, uint32_t *fb, uint32_t *panel);   /* NULL: allocated */

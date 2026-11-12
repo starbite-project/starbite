@@ -34,6 +34,46 @@ static void sha_block(uint32_t h[8], const uint8_t *p)
     h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += k;
 }
 
+/* the same hash in pieces (Software Update, update.c: an image read from the card a chunk at a time) */
+void pass_sha_init(struct pass_sha *c)
+{
+    static const uint32_t H0[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
+    for (int i = 0; i < 8; i++) c->h[i] = H0[i];
+    c->len = 0;
+    c->n = 0;
+}
+void pass_sha_update(struct pass_sha *c, const void *data, uint64_t n)
+{
+    const uint8_t *p = data;
+    c->len += n;
+    if (c->n) {
+        while (n && c->n < 64) { c->buf[c->n++] = *p++; n--; }
+        if (c->n < 64) return;
+        sha_block(c->h, c->buf);
+        c->n = 0;
+    }
+    for (; n >= 64; n -= 64, p += 64) sha_block(c->h, p);
+    while (n) { c->buf[c->n++] = *p++; n--; }
+}
+void pass_sha_final(struct pass_sha *c, uint8_t out[32])
+{
+    uint64_t bits = c->len * 8;
+    uint32_t i = c->n;
+    c->buf[i++] = 0x80;
+    if (i > 56) {
+        for (; i < 64; i++) c->buf[i] = 0;
+        sha_block(c->h, c->buf);
+        i = 0;
+    }
+    for (; i < 56; i++) c->buf[i] = 0;
+    for (int k = 0; k < 8; k++) c->buf[56 + k] = (uint8_t)(bits >> (56 - 8 * k));
+    sha_block(c->h, c->buf);
+    for (int k = 0; k < 8; k++) {
+        out[4 * k] = (uint8_t)(c->h[k] >> 24); out[4 * k + 1] = (uint8_t)(c->h[k] >> 16);
+        out[4 * k + 2] = (uint8_t)(c->h[k] >> 8); out[4 * k + 3] = (uint8_t)c->h[k];
+    }
+}
+
 void pass_sha256(const void *data, uint32_t n, uint8_t out[32])
 {
     static const uint32_t H0[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
