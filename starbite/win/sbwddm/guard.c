@@ -177,6 +177,8 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         /* T41: Windows' TDR calls (per engine, whole adapter) and status queries that found a hang */
         { L"Live_TdrEngineResets", a->TdrEngineResets }, { L"Live_TdrAdapterResets", a->TdrAdapterResets },
         { L"Live_TdrQueriedHung", a->TdrQueriedHung },
+        /* KMD-scratch: evictions that pointed PTEs at the read-only scratch page, and the PTEs written */
+        { L"Live_ScratchMaps", a->ScratchMaps }, { L"Live_ScratchPtes", a->ScratchPtes },
     };
     static_assert(sizeof(c) / sizeof(c[0]) < SBW_LIVE_MAX, "Live_ table too long");
     for (ULONG i = 0; i < sizeof(c) / sizeof(c[0]); i++)

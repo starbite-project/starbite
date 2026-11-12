@@ -94,6 +94,7 @@ void MwFaultLog(MW_ADAPTER *A)
     static char t[8192];
     static const char *const why[] = { "unread", "", "no view", "head in no mapped allocation", "page changed",
                                        "head unaligned" };
+    static const char *const pte[] = { "0", "1", "S" };   /* MW_PTE_*: S = the KMD-scratch page (evicted) */
     LONG n = A->FaultCount, first = n > 16 ? n - 16 : 0;
     size_t used = 0;
     MW_FAULT f;
@@ -141,14 +142,15 @@ void MwFaultLog(MW_ADAPTER *A)
                 (void)RtlStringCbPrintfA(listed, sizeof(listed), "NOT listed (last %ld renders before)",
                                          f.RunSeq - f.LListed);
             (void)RtlStringCbPrintfA(t + used, sizeof(t) - used,
-                " | LIVE 0x%llx+%lup %s age %lu ms, mapped %u pte %u, maps %lu (last %ld ms ago) unmaps %lu (last %ld ms ago), %s",
-                f.LVa, f.LPages, l[0] ? l : "?", f.Ms - f.LCreatedMs, f.LMapped, f.PteNow, f.LMaps,
+                " | LIVE 0x%llx+%lup %s age %lu ms, mapped %u pte %s, maps %lu (last %ld ms ago) unmaps %lu (last %ld ms ago), %s",
+                f.LVa, f.LPages, l[0] ? l : "?", f.Ms - f.LCreatedMs, f.LMapped,
+                f.PteNow < RTL_NUMBER_OF(pte) ? pte[f.PteNow] : "?", f.LMaps,
                 f.LMaps ? (LONG)(f.Ms - f.LMapMs) : -1L, f.LUnmaps, f.LUnmaps ? (LONG)(f.Ms - f.LUnmapMs) : -1L, listed);
         } else if (f.Where == MW_FAULT_IN_NONE) {
             ULONG64 bend = f.BelowVa + ((ULONG64)f.BelowPages << PAGE_SHIFT);
             (void)RtlStringCbPrintfA(t + used, sizeof(t) - used,
-                " | NONE of %lu live, pte %u: below 0x%llx+%lup (ends 0x%llx, %lld bytes before va) above 0x%llx+%lup (%lld bytes after va)",
-                f.LiveCount, f.PteNow, f.BelowVa, f.BelowPages, bend, f.BelowVa ? (LONG64)(f.Va - bend) : -1LL,
+                " | NONE of %lu live, pte %s: below 0x%llx+%lup (ends 0x%llx, %lld bytes before va) above 0x%llx+%lup (%lld bytes after va)",
+                f.LiveCount, f.PteNow < RTL_NUMBER_OF(pte) ? pte[f.PteNow] : "?", f.BelowVa, f.BelowPages, bend, f.BelowVa ? (LONG64)(f.Va - bend) : -1LL,
                 f.AboveVa, f.AbovePages, f.AboveVa ? (LONG64)(f.AboveVa - f.Va) : -1LL);
         }
         used = strlen(t);
@@ -392,6 +394,9 @@ static NTSTATUS APIENTRY MwStartDevice(IN_CONST_PVOID Context, IN_PDXGK_START_IN
         st = MkGpuInit(&a->Gpu);
     a->GpuUp = NT_SUCCESS(st);
     MwLog(a, L"GpuUp", NT_SUCCESS(st) ? 1 : (ULONG)st);
+    /* KMD-scratch: evictions point PTEs at a read-only zero page (default on; 0 = PTE 0 as before) */
+    a->ScratchUnmap = S9GetDword(L"Parameters", L"ScratchUnmap", 1) != 0 && a->Gpu.ScratchPa != 0;
+    MwLog(a, L"ScratchUnmap", a->ScratchUnmap);
     /* Fences complete from the GPU interrupt (and the poll goes through DxgkCbSynchronizeExecution, which
      * needs one). Without the Mali's interrupt lines (the stage-2 SSDT declares none) work would never
      * complete: repeated TDRs, then bugcheck 0x116. So after the whole bring-up (logged), refuse. */

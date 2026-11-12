@@ -75,6 +75,9 @@ typedef struct _MW_ALLOCATION {
     BOOLEAN InLive;
     volatile LONG LastListed;   /* the highest render sequence (MW_ADAPTER.RenderSeq) whose allocation list had it */
     ULONG CreatedMs, MapCount, UnmapCount, LastMapMs, LastUnmapMs;   /* BuildPagingBuffer's map/unmap of it */
+    /* KMD-scratch: evicted with its GPU pages pointed at the read-only scratch page (Parameters\ScratchUnmap), not
+     * PTE 0. Changed under MmuLock; destruction clears those PTEs to 0. */
+    BOOLEAN Scratched;
 } MW_ALLOCATION;
 
 typedef struct _MW_ADAPTER MW_ADAPTER;
@@ -165,6 +168,9 @@ typedef struct _MW_SUBMISSION {
 #define MW_FDESC_NOALLOC        3   /* JS_HEAD in no live, mapped, write-combined allocation, or not mapped by the GPU */
 #define MW_FDESC_CHANGED        4   /* the GPU's page at JS_HEAD changed while it was read */
 #define MW_FDESC_ALIGN          5   /* JS_HEAD not 64-byte aligned */
+#define MW_PTE_NONE             0   /* PTE 0 (or no L3 table) */
+#define MW_PTE_PAGE             1   /* a real page */
+#define MW_PTE_SCRATCH          2   /* KMD-scratch: the read-only scratch page (evicted); logged as "pte S" */
 typedef struct _MW_FAULT {
     ULONG64 Va, FreedVa;
     ULONG Status, Js, Ms, AgoMs, FreedPages, Creator[2], Kind, Submits;
@@ -177,7 +183,8 @@ typedef struct _MW_FAULT {
     ULONG64 LVa;
     ULONG LPages, LCreator[2], LCreatedMs, LMaps, LUnmaps, LMapMs, LUnmapMs;
     LONG LListed;               /* its LastListed */
-    BOOLEAN LMapped, PteNow;    /* resident per BuildPagingBuffer; the GPU page table maps the fault page now */
+    BOOLEAN LMapped;            /* resident per BuildPagingBuffer */
+    UCHAR PteNow;               /* the GPU page table at the fault page now: MW_PTE_* */
     /* Where == MW_FAULT_IN_NONE */
     ULONG64 BelowVa, AboveVa;
     ULONG BelowPages, AbovePages, LiveCount;
@@ -408,6 +415,10 @@ struct _MW_ADAPTER {
     ULONG LiveCount;
     volatile LONG RenderSeq;
     ULONG FaultsInLive, FaultsInNone, FaultDescReads;
+    /* KMD-scratch: Parameters\ScratchUnmap (default 1) and a scratch page exist: an eviction points the allocation's
+     * PTEs at the scratch page read-only instead of 0. ScratchMaps = evictions done so, ScratchPtes = PTEs written. */
+    BOOLEAN ScratchUnmap;
+    ULONG ScratchMaps, ScratchPtes;
     struct { volatile LONG Seq; ULONG64 Head; PFN_NUMBER Pfn; } FaultPend;
     LONG FaultPendDone;
 };

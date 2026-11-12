@@ -137,6 +137,11 @@
  * read + write, outer shareable. No XN bit in this format on the G72 (never tested; not set). */
 #define MK_PTE_PAGE             0x2C1ULL
 #define MK_PTE_XN               0ULL
+/* The same leaf, read-only: Mali LPAE has stage-1-like attributes but stage-2-like permissions (Linux
+ * drivers/iommu/io-pgtable-arm.c, arm_lpae_prot_to_pte: ARM_LPAE_PTE_HAP_READ 1 << 6, ARM_LPAE_PTE_HAP_WRITE 2 << 6,
+ * ARM_LPAE_PTE_SH_OS 2 << 8, ARM_LPAE_PTE_TYPE_BLOCK 1 at every level for ARM_MALI_LPAE, no AF). 0x2C1 = SH_OS |
+ * HAP_WRITE | HAP_READ | 1; without HAP_WRITE a GPU write is a permission fault, a read is served. */
+#define MK_PTE_PAGE_RO          0x241ULL
 
 typedef struct _GPU_FEATURES {
     ULONG Id, Revision;
@@ -166,6 +171,10 @@ typedef struct _MK_GPU {
     ULONG64 L0Pa;
     RTL_BITMAP VaMap;
     PULONG VaBits;
+    /* KMD-scratch: one zeroed page (non-cached, contiguous, below 40 bits) that MkMmuScratchPages points evicted
+     * pages at, read-only, so a stale GPU read returns zeros instead of a translation fault. 0/NULL: none. */
+    PULONG64 Scratch;
+    ULONG64 ScratchPa;
 
     /* What the ISR collected, for whoever waits on jobs. */
     volatile LONG JobIrqStatus; /* JOB_INT_STAT bits */
@@ -198,6 +207,9 @@ BOOLEAN MkVaAlloc(MK_GPU *Gpu, ULONG Pages, BOOLEAN Exec, ULONG64 *Va);
 void MkVaFree(MK_GPU *Gpu, ULONG64 Va, ULONG Pages);
 NTSTATUS MkMmuMapPages(MK_GPU *Gpu, ULONG64 Va, const PFN_NUMBER *Pfn, ULONG Pages, BOOLEAN NoExec);
 void MkMmuUnmapPages(MK_GPU *Gpu, ULONG64 Va, ULONG Pages);
+/* KMD-scratch: every page of [Va, Va + Pages) that has an L3 table becomes a read-only map of the scratch page, then
+ * the same barrier and AS flush as a map or unmap. Returns the PTEs written (0: no scratch page, nothing done). */
+ULONG MkMmuScratchPages(MK_GPU *Gpu, ULONG64 Va, ULONG Pages);
 
 /* Jobs: start a chain on a slot without waiting; collect its done (bit
  * slot) and error (bit 16 + slot) status, from the ISR or the raw register. */

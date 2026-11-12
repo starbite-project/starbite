@@ -1017,20 +1017,33 @@ static void Kick(MW_ADAPTER *A)
 
 /* ---- T44: hang forensics ---- */
 
-/* The page the GPU's own page table (AS0, ours) maps at Va; 0: none. Any IRQL: the tables are the KMD's non-paged
+/* The raw PTE the GPU's own page table (AS0, ours) has at Va; 0: none. Any IRQL: the tables are the KMD's non-paged
  * memory and are freed only by MkMmuFree, after the DPCs and the interrupt are gone. */
-static PFN_NUMBER GpuPfn(MK_GPU *Gpu, ULONG64 Va)
+static ULONG64 GpuPte(MK_GPU *Gpu, ULONG64 Va)
 {
     const volatile ULONG64 *l3;
-    ULONG64 pte;
 
     if (Va < MK_VA_START || Va >= MK_VA_END)
         return 0;
     l3 = *(const volatile ULONG64 *volatile *)&Gpu->L3[(Va >> 30) & 3][(Va >> 21) & 511];
     if (l3 == NULL)
         return 0;
-    pte = l3[(Va >> 12) & 511];
-    return pte != 0 ? (PFN_NUMBER)((pte & 0x0000FFFFFFFFF000ULL) >> PAGE_SHIFT) : 0;
+    return l3[(Va >> 12) & 511];
+}
+
+/* The page the GPU maps at Va; 0: none. KMD-scratch: the scratch page an evicted allocation points at counts as none
+ * (no allocation's memory is there; the hang and fault views never map it). */
+static PFN_NUMBER GpuPfn(MK_GPU *Gpu, ULONG64 Va)
+{
+    ULONG64 pa = GpuPte(Gpu, Va) & 0x0000FFFFFFFFF000ULL;
+    return pa != 0 && pa != Gpu->ScratchPa ? (PFN_NUMBER)(pa >> PAGE_SHIFT) : 0;
+}
+
+/* MW_PTE_* for the fault record */
+static UCHAR GpuPteState(MK_GPU *Gpu, ULONG64 Va)
+{
+    ULONG64 pa = GpuPte(Gpu, Va) & 0x0000FFFFFFFFF000ULL;
+    return pa == 0 ? MW_PTE_NONE : Gpu->ScratchPa != 0 && pa == Gpu->ScratchPa ? MW_PTE_SCRATCH : MW_PTE_PAGE;
 }
 
 static BOOLEAN IsRam(const MW_ADAPTER *A, PFN_NUMBER Pfn)
@@ -1262,7 +1275,7 @@ static void FaultRecord(MW_ADAPTER *A, ULONG Slot)
     }
     f->LiveCount = A->LiveCount;
     f->Where = va == 0 ? MW_FAULT_NONE : hit != NULL ? MW_FAULT_IN_LIVE : MW_FAULT_IN_NONE;
-    f->PteNow = va != 0 && GpuPfn(gpu, va & ~(ULONG64)(PAGE_SIZE - 1)) != 0;
+    f->PteNow = va != 0 ? GpuPteState(gpu, va & ~(ULONG64)(PAGE_SIZE - 1)) : MW_PTE_NONE;
     if (hit != NULL) {
         A->FaultsInLive++;
         f->LVa = hit->GpuVa;

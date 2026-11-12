@@ -220,6 +220,11 @@ NTSTATUS MkMmuInit(MK_GPU *Gpu)
     Gpu->L0[0] = l1pa | MK_PTE_TABLE;
     RtlInitializeBitMap(&Gpu->VaMap, Gpu->VaBits, MK_VA_PAGES);
     RtlClearAllBits(&Gpu->VaMap);
+    /* KMD-scratch: one page, zeroed, contiguous, non-cached (like the tables; nobody writes it again: the GPU maps it
+     * read-only). Not fatal: without it evictions unmap to PTE 0 as before. */
+    Gpu->Scratch = AllocTable(&Gpu->ScratchPa);
+    if (Gpu->Scratch == NULL)
+        Gpu->ScratchPa = 0;
     return STATUS_SUCCESS;
 }
 
@@ -236,6 +241,9 @@ void MkMmuFree(MK_GPU *Gpu)
     FreeTable(Gpu->L1);
     FreeTable(Gpu->L0);
     Gpu->L1 = Gpu->L0 = NULL;
+    FreeTable(Gpu->Scratch);              /* KMD-scratch: after the tables that pointed at it */
+    Gpu->Scratch = NULL;
+    Gpu->ScratchPa = 0;
     if (Gpu->VaBits != NULL)
         ExFreePoolWithTag(Gpu->VaBits, 'kmlM');
     Gpu->VaBits = NULL;
@@ -350,6 +358,26 @@ void MkMmuUnmapPages(MK_GPU *Gpu, ULONG64 Va, ULONG Pages)
     }
     MkStoreBarrier();
     FlushRange(Gpu, Va, (ULONG64)Pages << PAGE_SHIFT);
+}
+
+ULONG MkMmuScratchPages(MK_GPU *Gpu, ULONG64 Va, ULONG Pages)
+{
+    ULONG64 pte = Gpu->ScratchPa | MK_PTE_PAGE_RO;
+    ULONG written = 0;
+
+    if (Gpu->Scratch == NULL || Gpu->ScratchPa == 0)
+        return 0;
+    for (ULONG i = 0; i < Pages; i++) {
+        ULONG64 va = Va + ((ULONG64)i << PAGE_SHIFT);
+        PULONG64 l3 = Gpu->L3[(va >> 30) & 3][(va >> 21) & 511];
+        if (l3 != NULL) {                 /* no table: never mapped, already faults; nothing to replace */
+            l3[(va >> 12) & 511] = pte;
+            written++;
+        }
+    }
+    MkStoreBarrier();
+    FlushRange(Gpu, Va, (ULONG64)Pages << PAGE_SHIFT);
+    return written;
 }
 
 /* ---- jobs ---- */

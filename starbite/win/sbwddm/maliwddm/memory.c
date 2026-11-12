@@ -142,8 +142,10 @@ static void FreeAllocation(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
         A->Freed[i].Creator[1] = Alloc->Creator[1];
         A->Freed[i].Ms = (ULONG)((KeQueryInterruptTime() - A->StartTime) / 10000);
     }
-    if (Alloc->Mapped && A->GpuUp)
+    /* KMD-scratch: a scratch-mapped (evicted) allocation is truly unmapped too, so a use after free still faults */
+    if ((Alloc->Mapped || Alloc->Scratched) && A->GpuUp)
         MkMmuUnmapPages(&A->Gpu, Alloc->GpuVa, Alloc->Pages);
+    Alloc->Scratched = FALSE;
     if (Alloc->GpuVa != 0 && A->GpuUp)
         MkVaFree(&A->Gpu, Alloc->GpuVa, Alloc->Pages);
     if (Alloc->ScanSlot >= 0 && Alloc->ScanSlot < 3 && A->Slot[Alloc->ScanSlot].Owner == Alloc)
@@ -355,6 +357,9 @@ NTSTATUS APIENTRY MwBuildPagingBuffer(IN_CONST_HANDLE hAdapter, DXGKARG_BUILDPAG
             st = MkMmuMapPages(&a->Gpu, alloc->GpuVa, pfn, pages, nx);
         }
         alloc->Mapped = NT_SUCCESS(st);
+        if (alloc->Mapped)
+            alloc->Scratched = FALSE;       /* KMD-scratch: the real pages replaced the scratch PTEs (a failed map
+                                             * keeps the flag: some may remain, and destruction must clear them) */
         alloc->MapCount++;                  /* T46 */
         alloc->LastMapMs = (ULONG)((KeQueryInterruptTime() - a->StartTime) / 10000);
         if (alloc->CpuMap && alloc->Mdl)    /* a view of the previous pages */
@@ -383,8 +388,20 @@ NTSTATUS APIENTRY MwBuildPagingBuffer(IN_CONST_HANDLE hAdapter, DXGKARG_BUILDPAG
             return STATUS_SUCCESS;
         a->Unmaps++;
         ExAcquireFastMutex(&a->MmuLock);
-        if (alloc->Mapped)
-            MkMmuUnmapPages(&a->Gpu, alloc->GpuVa, alloc->Pages);
+        if (alloc->Mapped) {
+            /* KMD-scratch: evicted, not destroyed. A job may still read it through a descriptor its submission did
+             * not list (T46/T47: level-3 read translation faults, each a job stop and a GPU reset); with the PTEs
+             * on the read-only zero page such a read returns zeros. A write is still a (permission) fault. The
+             * next MAP_APERTURE_SEGMENT overwrites these PTEs; FreeAllocation sets them to 0. */
+            ULONG n = a->ScratchUnmap ? MkMmuScratchPages(&a->Gpu, alloc->GpuVa, alloc->Pages) : 0;
+            if (n != 0) {
+                alloc->Scratched = TRUE;
+                a->ScratchMaps++;
+                a->ScratchPtes += n;
+            } else {
+                MkMmuUnmapPages(&a->Gpu, alloc->GpuVa, alloc->Pages);
+            }
+        }
         alloc->Mapped = FALSE;
         alloc->UnmapCount++;                /* T46 */
         alloc->LastUnmapMs = (ULONG)((KeQueryInterruptTime() - a->StartTime) / 10000);
