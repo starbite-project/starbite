@@ -1,0 +1,27 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index bc73717..fb484d3 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -268,10 +268,20 @@ sb_veh_install(void)
+                            (LPCSTR)(void *)sb_veh_install, &self) || !GetModuleFileNameA(self, name, sizeof(name)))
+       return;
+    const char *b = strrchr(name, '\\');
+-   if (_stricmp(b ? b + 1 : name, "libgallium_wgl.dll") != 0)
++   int icd = _stricmp(b ? b + 1 : name, "libgallium_wgl.dll") == 0;
++   /* sb-patches/0142 (T50): also in our own test programs (sb*.exe: sbtex's SV_VertexID crash had no stack), never in
++    * DWM or any other process */
++   char exe[MAX_PATH];
++   int ours = 0;
++   if (GetModuleFileNameA(NULL, exe, sizeof(exe))) {
++      const char *e = strrchr(exe, '\\');
++      e = e ? e + 1 : exe;
++      ours = _strnicmp(e, "sb", 2) == 0;
++   }
++   if (!icd && !ours)
+       return;
+    AddVectoredExceptionHandler(1, sb_veh);
+-   sb_raw("sbumd: OpenGL ICD, first-chance exception log on (up to 12)\n");
++   sb_raw("sbumd: %s, first-chance exception log on (up to 12)\n", icd ? "OpenGL ICD" : "test program");
+ }
+ 
+ static void
