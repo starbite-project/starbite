@@ -1,0 +1,92 @@
+From 0773383b8370cb707fd1659b2f2c811b6c804775 Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Thu, 12 Nov 2026 04:28:04 +0200
+Subject: [PATCH] patch: 0436-starlte-sd-raw-user-io.patch - raw-device I/O
+ with a user buffer (physio on /dev/rsdroot0, B_PHYS) goes through a kernel
+ bounce buffer (copyin / copyout) in the issuing thread after the queued
+ writes drain: the queue worker stored card data straight into fsck_hfs's user
+ address from another map (S1c 2026-11-12: Kernel data abort in
+ sd_read_sectors from sdq_worker, far 0x1013f0000), and PAN forbids it in any
+ thread
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/starlte_sd.c | 41 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+diff --git a/bsd/dev/starlte_sd.c b/bsd/dev/starlte_sd.c
+index ca30d472..5f8a280e 100644
+--- a/bsd/dev/starlte_sd.c
++++ b/bsd/dev/starlte_sd.c
+@@ -1750,6 +1750,20 @@ sd_ssd(void)
+ static uint64_t sdq_rbytes, sdq_wbytes, sdq_rus, sdq_wus, sdq_nr, sdq_nw;
+ static uint64_t sdq_rhist[4];  /* 0405: reads <= 16 KiB, <= 64 KiB, <= 256 KiB, larger */
+ 
++/*
++ * 0436 (S1c 2026-11-12: "Kernel data abort" in sd_read_sectors from sdq_worker, far = a user address): raw-device
++ * I/O (physio on /dev/rsdroot0, fsck_hfs) carries the caller's user address (B_PHYS, the pages wired by vslock).
++ * Kernel code may not store through it (PAN), and the queue worker runs on another map. Such a buf runs in the thread
++ * that issued it (physio's caller, whose map holds the address; starlte_sd_strategy) through a kernel bounce buffer:
++ * copyin before a write, copyout after a read. User addresses are TTBR0's (bit 63 clear); a kernel uio's physio buf
++ * keeps the direct path.
++ */
++static inline bool
++sd_buf_is_user(buf_t bp)
++{
++	return (buf_flags(bp) & B_PHYS) && (buf_dataptr(bp) >> 63) == 0;
++}
++
+ static void
+ sd_do_buf(buf_t bp)
+ {
+@@ -1777,6 +1791,21 @@ sd_do_buf(buf_t bp)
+ 		error = EIO;
+ 		goto done;
+ 	}
++	caddr_t ubuf = NULL;
++	void *kbuf = NULL;
++	if (sd_buf_is_user(bp)) {
++		kbuf = kalloc_data(count, Z_WAITOK);
++		if (kbuf == NULL || (wr_ && copyin((user_addr_t)(uintptr_t)vaddr, kbuf, count))) {
++			if (kbuf != NULL) {
++				kfree_data(kbuf, count);
++			}
++			buf_unmap(bp);
++			error = kbuf == NULL ? ENOMEM : EFAULT;
++			goto done;
++		}
++		ubuf = vaddr;
++		vaddr = kbuf;
++	}
+ 	uint64_t bounce[SECTOR / 8];
+ 	lck_mtx_lock(&starlte_sd_lock);
+ 	for (uint32_t done = 0; done < count;) {
+@@ -1814,6 +1843,13 @@ sd_do_buf(buf_t bp)
+ 		buf_setresid(bp, count - done);
+ 	}
+ 	lck_mtx_unlock(&starlte_sd_lock);
++	if (kbuf != NULL) {
++		uint32_t got = count - (uint32_t)buf_resid(bp);
++		if (!wr_ && got && copyout(kbuf, (user_addr_t)(uintptr_t)ubuf, got)) {
++			error = EFAULT;
++		}
++		kfree_data(kbuf, count);
++	}
+ 	buf_unmap(bp);
+ 	if (wr_) {
+ 		sdq_wbytes += count;
+@@ -2003,6 +2039,11 @@ starlte_sd_strategy(buf_t bp)
+ 		sd_do_buf(bp);
+ 		return;
+ 	}
++	if (sd_buf_is_user(bp)) {
++		sdq_drain_writes();             /* a raw read sees every write queued before it */
++		sd_do_buf(bp);                  /* in the issuing thread: its map holds the address (0436) */
++		return;
++	}
+ 	bool wr_ = !(buf_flags(bp) & B_READ);
+ 	struct sdq_ring *r = wr_ ? &sdq_w : (buf_flags(bp) & B_ASYNC) ? &sdq_ra : &sdq_rs;
+ 	lck_mtx_lock(&sdq_lock);
+-- 
+2.53.0
+

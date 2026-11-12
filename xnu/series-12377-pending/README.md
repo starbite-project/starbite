@@ -25,3 +25,4 @@ tree was restored and relinked to sd432's sha256.
 | 0433-starbite-m8b-display-fb-from-adt.patch | Fix to 0428 (boot framebuffer from the ADT); sits on 0432 | with 0428 |
 | 0434-starbite-m8c-display-carveout.patch | Fix to 0428: flip/scaler buffers from the board ADT's scan-out carve-out (decon starbite,scanout-carveout, 0xa0000000 + 64 MiB); sits on 0433 | with 0428 |
 | 0435-starlte-sd-store-gap.patch | sdroot= ranges in the home card store's gap (head .. first data block, no directory entry there) allowed: the card store's used end now covers the Sequoia and Ventura roots. Applies on 0427 alone (starlte_sd.c unchanged by 0428-0434); changes every card-root boot (mac13 too), so held here until S1b passes | candidate for the daily series |
+| 0436-starlte-sd-raw-user-io.patch | raw-device I/O with a user buffer (physio, fsck_hfs on /dev/rsdroot0) through a kernel bounce buffer (copyin/copyout) in the issuing thread; on 0435 | with 0435 |
