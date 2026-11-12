@@ -2478,7 +2478,6 @@ enum { SE_STARTUP_PAGE = 30, SE_PASSCODE_PAGE = 31, SE_TZ_PAGE = 32 };   /* (P3x
 #define SH_HAS_STARTUP 1
 static void page_startup(dc *d);
 static int startup_tap(float x, float y);
-static void startup_set(const char *key, float v);
 #endif
 #if __has_include("shell_passcode.inc")
 #define SH_HAS_PASSCODE 1
@@ -4435,11 +4434,6 @@ void sh_set(const char *what, const char *key, float v)
     } else if (!tk_strcmp(what, "tab")) {
         static const char *const TK[4] = { "fav", "rec", "con", "pad" };
         for (int t = 0; t < 4; t++) if (!tk_strcmp(TK[t], key)) { AS.tab = t; build_app_page(AP.a); }
-#ifdef SH_HAS_STARTUP
-    } else if (!tk_strcmp(what, "startup")) {     /* Track J's stills: startup=VIEW:N (Settings open first) */
-        AS.sub = SE_STARTUP_PAGE;
-        if (AP.on) startup_set(key, v);
-#endif
     } else if (!tk_strcmp(what, "sub")) {
         /* the stills: a Settings page (display, wifi, cell, general, about, ...: se_sub_key; nothing is switched on) */
         AS.sub = se_sub_key(key);

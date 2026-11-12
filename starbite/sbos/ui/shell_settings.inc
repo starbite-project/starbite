@@ -225,7 +225,7 @@ static void se_rows(int p)
         nav(A_PASSCODE, SEI_PASS, "Passcode", 0);
         nav(SE_EMERGENCY, SEI_SOS, "Emergency", EMG ? "On" : 0);
         nav(SE_PRIVACY, SEI_PRIV, "Privacy", 0);
-        nav(A_STARTUP, SEI_START, "Startup", 0)->sub = "Operating systems, firmware, recovery";
+        nav(A_STARTUP, SEI_START, "Startup", 0)->sub = "OS, firmware, recovery";
         sec(0);
         nav(SE_LINUX, SEI_LINUX, "Linux Apps", 0);
         nav(A_STORE, SEI_STORE, "App Store", 0);

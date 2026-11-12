@@ -570,6 +570,16 @@ static void apply_state(const char *st)
         host_p10 = (int)(p * 10); host_r10 = (int)(r * 10);
         return;
     }
+    if (!strcmp(what, "tap")) {                  /* Track J: tap=X,Y (pt): a tap through the gestures, then settled */
+        static float tt = 1000;                  /* the stills' own clock, ms */
+        float x = 0, y = 0;
+        if (sscanf(eq + 1, "%f,%f", &x, &y) != 2) return;
+        sh_touch(0, x, y, tt);
+        sh_tick(1 / 60.0f, tt += 1000 / 60.0f);
+        sh_touch(2, x, y, tt += 64);
+        for (int i = 0; i < 600 && (i < 30 || sh_moving()); i++) sh_tick(1 / 60.0f, tt += 1000 / 60.0f);
+        return;
+    }
     if (!strcmp(what, "comms")) { comms_fake_state(key, v); return; }          /* helper I: comms=incoming, ... */
     if (!strcmp(what, "pass")) { (void)sh_pass_set("", key); return; }         /* Track A: pass=246810 */
     if (!strcmp(what, "passfail")) { for (int i = 0; i < (int)v; i++) (void)sh_pass_check("x"); return; }   /* passfail=:6 */
