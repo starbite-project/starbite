@@ -561,7 +561,10 @@ static void t_api_settings(void)
     CHECK(g32(b2 + 24) == (3U << SET_LOG_SHIFT | 2U << SET_POST_SHIFT | SET_SD_STORE | 0x1000U), "flags: levels, the rest kept");
     CHECK(b2[104] == 0 && b2[105] == 3 && b2[106] == 1 && b2[107] == 6 && b2[108] == 2 && b2[110] == 30 && b2[111] == 0,
           "bytes 104..111 (crash_timeout kept)");
-    CHECK(b2[115] == 0 && !strcmp((const char *)b2 + 144, "starbite-os"), "fw_flags, shell_key");
+    CHECK(b2[115] == SBFW_FLAG_SHELL_SET && !strcmp((const char *)b2 + 144, "starbite-os"),
+          "fw_flags: switched off, the user's choice (SHELL_SET); shell_key");
+    w.timeout_s = 13;
+    CHECK(sbfw_settings_write(&w) == 0 && b2[115] == SBFW_FLAG_SHELL_SET, "an unchanged shell keeps its bits");
     CHECK(!memcmp(b2 + 56, before + 56, 48), "last_key, next_key kept");
     CHECK(!memcmp(b2 + 112, before + 112, 3) && !memcmp(b2 + 116, before + 116, 28) && !memcmp(b2 + 168, before + 168, 88),
           "\"FW\" v1, the request fields, the undo record and the reserved bytes kept");
@@ -658,6 +661,9 @@ static void t_api_request(void)
     if (!setjmp(boot_jb))
         sb_boot_recovery_next();
     CHECK(!strcmp(boot_key, "recovery"), "Starbite Recovery: \"recovery\"");
+    if (!setjmp(boot_jb))
+        sb_boot_repair_next();
+    CHECK(!strcmp(boot_key, "recovery-repair"), "Repair and reset: \"recovery-repair\"");
 }
 
 /* sbfw_api.c: the crash reports, from the loader's own encoding */

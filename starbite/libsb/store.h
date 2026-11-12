@@ -115,6 +115,7 @@ int settings_save(struct star_settings *s);
  * loader's codec byte for byte (shim/starlte/sbfmt.h) ---- */
 #define SBSET_BYTES         256U  /* the record's bytes under its CRC (16..255) */
 #define SBFW_FLAG_SHELL     1U    /* fw_flags: start the shell entry instead of drawing the menu */
+#define SBFW_FLAG_SHELL_SET 8U    /* fw_flags: SBFW_FLAG_SHELL is the user's choice (else the loader build's default) */
 #define SBFW_FLAG_CON_NEVER 2U
 #define SBFW_FLAG_CON_ALWAYS 4U
 #define SBFW_REQ_NONE       0U
