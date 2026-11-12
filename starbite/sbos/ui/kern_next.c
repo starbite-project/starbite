@@ -390,7 +390,7 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
-    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3v");     /* P2y: the apps' live values */
+    sh_sysinfo(b.ok && b.charger, "Starbite OS Next P3w");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);
         sh_alarm(on, ah, am);
@@ -693,6 +693,32 @@ void sh_haptic(void)
 {
 #ifndef SBOS_SELFTEST_NEXT
     (void)vib_pulse(10);
+#endif
+}
+/* B3: the text fields' clipboard (the edit menu's Copy / Cut / Paste) in RAM; weak: the Linux session's platform
+ * (shared with the guest's apps) replaces it */
+static char clip_ram[4096];
+__attribute__((weak)) void sh_clip_set(const char *s)
+{
+    size_t n = 0;
+    while (s && s[n] && n < sizeof clip_ram - 1) n++;
+    while (n > 0 && n < sizeof clip_ram - 1 && s[n] && ((unsigned char)s[n] & 0xc0) == 0x80) n--;   /* whole characters */
+    if (n) tk_memcpy(clip_ram, s, n);
+    clip_ram[n] = 0;
+}
+__attribute__((weak)) const char *sh_clip_get(void) { return clip_ram; }
+/* B4: the feedback kinds (impact light / medium / heavy / soft / rigid, selection) as pulse lengths (the motor's PWM
+ * duty is fixed: a length stands for the strength); success / warning / error as short patterns (vib_buzz) */
+void sh_haptic_k(int kind)
+{
+#ifndef SBOS_SELFTEST_NEXT
+    static const unsigned MS[6] = { 8, 12, 18, 9, 6, 4 };
+    if (kind == SH_HAP_SUCCESS) (void)vib_buzz(2, 12, 60);
+    else if (kind == SH_HAP_WARNING) (void)vib_buzz(2, 12, 80);
+    else if (kind == SH_HAP_ERROR) (void)vib_buzz(3, 10, 50);
+    else (void)vib_pulse(MS[kind >= 0 && kind < 6 ? kind : 0]);
+#else
+    (void)kind;
 #endif
 }
 /* P3i: the shell's time outside the compositor (a tap that builds a page runs before the next frame: the pause
@@ -1653,11 +1679,49 @@ int sh_sms_get(int i, sh_sms_t *m)
     struct ksms k;
     if (kmodem_sms_get(i, &k) < 0) return -1;
     m->id = k.id; m->incoming = k.incoming; m->state = k.state; m->utc = k.utc;
+#ifdef KMODEM_SMS_STORE
+    m->unread = k.unread;                            /* states 4 delivered / 5 not delivered: SH_SMS_* */
+#else
+    m->unread = -1;
+#endif
     sb_strcpy(m->number, sizeof(m->number), k.number);
     sb_strcpy(m->text, sizeof(m->text), k.text);
     sb_strcpy(m->why, sizeof(m->why), k.why);
     return 0;
 }
+/* B5: the Clock's alarms (kern/alarm.c): set by the user's own Save or switch; the self test never sets one */
+int sh_alarm_set(int i, int h, int m, int days, int on)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i; (void)h; (void)m; (void)days; (void)on;
+    return -1;
+#else
+    return alarm_set(i, h, m, days, on);
+#endif
+}
+/* B5: the store (the modem session's KMODEM_SMS_STORE): read marks, deletes at the user's own tap; refused in the
+ * self test (it never changes what is stored) */
+#ifdef KMODEM_SMS_STORE
+int sh_sms_read(const char *number) { return kmodem_sms_read(number); }
+int sh_sms_delete(int id, char *why)
+{
+    COMMS_DRY("SMS delete", why);
+    int r = kmodem_sms_delete(id);
+    if (r < 0) comms_why(why, "The message couldn't be deleted");
+    return r < 0 ? r : 0;
+}
+int sh_sms_delete_thread(const char *number, char *why)
+{
+    COMMS_DRY("SMS delete", why);
+    int r = kmodem_sms_delete_thread(number);
+    if (r < 0) comms_why(why, "The conversation couldn't be deleted");
+    return r < 0 ? r : 0;
+}
+#else
+int sh_sms_read(const char *number) { (void)number; return 0; }
+int sh_sms_delete(int id, char *why) { (void)id; comms_why(why, "Not in this version"); return -1; }
+int sh_sms_delete_thread(const char *number, char *why) { (void)number; comms_why(why, "Not in this version"); return -1; }
+#endif
 /* the call's state and the inbox's generation to the shell when they change (from the draw hook: never inside a
  * frame); 1 if anything was pushed. An incoming call wakes the screen (the kernel notifies as well). */
 static int comms_now(void)
@@ -1698,6 +1762,9 @@ int sh_dtmf(char d) { (void)d; COMMS_DRY("key tone", (char *)0); return -1; }
 int sh_sms_send(const char *number, const char *utf8, char *why) { (void)number; (void)utf8; COMMS_DRY("SMS send", why); COMMS_NONE(why); }
 int sh_sms_count(void) { return 0; }
 int sh_sms_get(int i, sh_sms_t *m) { (void)i; (void)m; return -1; }
+int sh_sms_read(const char *number) { (void)number; return 0; }
+int sh_sms_delete(int id, char *why) { (void)id; comms_why(why, "Not in this version"); return -1; }
+int sh_sms_delete_thread(const char *number, char *why) { (void)number; comms_why(why, "Not in this version"); return -1; }
 static int comms_now(void) { return 0; }
 #endif
 
@@ -1707,12 +1774,14 @@ typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
 static const char *const FILM_NAME[11] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "sleep" };
 /* tools/films.txt's scripts (pt, ms) */
 static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 1300 } };
-static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 354, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 195, 354, 0, 0, 80 },
-                                { 0, 0, 0, 0, 0, 900 }, { 2, 200, 650, 200, 380, 250 }, { 0, 0, 0, 0, 0, 1200 }, { 1, 195, 578, 0, 0, 80 },
-                                { 0, 0, 0, 0, 0, 1800 } };
-static const step S_FOCUS[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 444, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 195, 506, 0, 0, 80 },
+/* B9: the Systems tiles (centres x 47 + 74 g, y 336): Apple opens and closes, Linux opens, Starbite takes its place,
+ * its first row (Starbite OS, "You are in Starbite OS"); Microsoft's Windows 11 row (y 420) opens the focus sheet */
+static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 47, 336, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 47, 336, 0, 0, 80 },
+                                { 0, 0, 0, 0, 0, 900 }, { 1, 269, 336, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 343, 336, 0, 0, 80 },
+                                { 0, 0, 0, 0, 0, 1200 }, { 1, 195, 420, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1800 } };
+static const step S_FOCUS[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 121, 336, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 195, 420, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 1000 }, { 2, 65, 743, 345, 743, 550 }, { 0, 0, 0, 0, 0, 2600 } };
-static const step S_HOLDS[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 72, 720, 0, 0, 650 }, { 0, 0, 0, 0, 0, 700 }, { 3, 318, 720, 0, 0, 950 },
+static const step S_HOLDS[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 71, 727, 0, 0, 650 }, { 0, 0, 0, 0, 0, 700 }, { 3, 319, 727, 0, 0, 950 },
                                 { 0, 0, 0, 0, 0, 900 } };
 static const step S_PAGES[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 },
                                 { 2, 320, 450, 60, 450, 200 }, { 0, 0, 0, 0, 0, 900 }, { 2, 60, 450, 330, 460, 220 }, { 0, 0, 0, 0, 0, 1200 } };
@@ -1729,11 +1798,12 @@ static const step S_PHONE[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330,
 static const step S_MSGS[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 152, 736, 0, 0, 80 },
                                { 0, 0, 0, 0, 0, 1000 }, { 1, 195, 204, 0, 0, 80 }, { 0, 0, 0, 0, 0, 800 }, { 1, 50, 63, 0, 0, 80 },
                                { 0, 0, 0, 0, 0, 600 }, { 2, 195, 795, 200, 450, 260 }, { 0, 0, 0, 0, 0, 1200 } };
-static const step S_EMERG[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 318, 720, 0, 0, 950 }, { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 795, 195, 330, 220 },
+static const step S_EMERG[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 319, 727, 0, 0, 950 }, { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 795, 195, 330, 220 },
                                 { 0, 0, 0, 0, 0, 900 }, { 2, 320, 450, 60, 450, 200 }, { 0, 0, 0, 0, 0, 900 },
                                 { 5, 0, 0, 0, 0, 20 }, { 0, 0, 0, 0, 0, 900 }, { 5, 0, 0, 0, 0, 20 },   /* helper D: the Power key relocks */
                                 { 0, 0, 0, 0, 0, 1200 }, { 2, 195, 600, 195, 250, 300 }, { 0, 0, 0, 0, 0, 1200 },
-                                { 1, 195, 624, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };   /* survival-next: the list scrolls to Exit */
+                                { 1, 195, 624, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 },        /* survival-next: the list scrolls to Exit */
+                                { 1, 265, 452, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };   /* helper B2: the alert's Exit (films.txt's emergency) */
 /* P2r: the Power key (kind 5, the kernel's own power_key_short): the fade to black and the screen off, the wake, a
  * fade undone by a second press */
 static const step S_SLEEP[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 158, 290, 0, 0, 80 },
@@ -1756,7 +1826,7 @@ static void film_start(int film)
     F.t0 = sb_ms();
     switch (film) {
     case 0: F.s = S_UNLOCK; F.n = 3; break;
-    case 1: F.s = S_GROUP; F.n = 9; break;
+    case 1: F.s = S_GROUP; F.n = (int)(sizeof S_GROUP / sizeof S_GROUP[0]); break;
     case 2: F.s = S_FOCUS; F.n = 7; break;
     case 3: F.s = S_HOLDS; F.n = 5; break;
     case 4: F.s = S_PAGES; F.n = 7; break;

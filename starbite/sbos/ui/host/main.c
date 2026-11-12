@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 void sh_torch(int lit) { fprintf(stderr, "torch: %s\n", lit ? "on" : "off"); }
 void sh_boot_os(const char *key) { fprintf(stderr, "slide to start: would restart into %s\n", key); }
@@ -158,6 +159,13 @@ int sh_blob_get(const char *name, void *p, unsigned cap)
 }
 void sh_vibrate(void) { fprintf(stderr, "vibrate: the timer ran out\n"); }
 void sh_haptic(void) { }
+/* B3: the edit menu's clipboard (weak: a platform with its own, e.g. the Linux session's gwin, replaces it) */
+static char host_clip[4096];
+__attribute__((weak)) void sh_clip_set(const char *s) { snprintf(host_clip, sizeof host_clip, "%s", s ? s : ""); }
+__attribute__((weak)) const char *sh_clip_get(void) { return host_clip; }
+void sh_haptic_k(int kind) { (void)kind; }
+/* B5: the Clock's alarms (the kernel's alarm.c on the phone) */
+int sh_alarm_set(int i, int h, int m, int days, int on) { fprintf(stderr, "alarm %d: %02d:%02d %s (days %x)\n", i, h, m, on ? "on" : "off", (unsigned)days); return 0; }
 /* L2 + L3: Linux apps and the App Store (the kernel's platform is starbite/guest/next/gwin.c): host/linux_fake.inc,
  * a pretend Linux with a catalog and a store. SBTK_NO_LINUX_FAKE: none (starbite/guest/next/host/gwin-host.c links
  * gwin.c itself and drives the shell) */
@@ -537,6 +545,13 @@ static int parse(const char *s, step *st, int max)
 
 static double memwalk(tk_layer *l, int depth);
 void host_memdump(const char *tag);
+/* the calling thread's CPU time, ms (SBTK_CPU: the shell's work in a frame, without a loaded Mac's waits) */
+static double cpu_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
 static int film(tk_comp *c, const char *out, const char *script, int half)
 {
     step st[192];               /* survival-next: the survival film is long */
@@ -557,6 +572,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
     while (t < total || sh_moving()) {
         /* the finger: events at 120 Hz between frames (the touch controller's rate) */
         uint64_t sh0 = tk_us();          /* P3i: the shell's own time in the frame (touch handling + tick) */
+        double cpu0 = cpu_ms();
         for (int sub = 1; sub <= 2; sub++) {
             float te = t + dt * sub / 2;
             while (si < n && te >= s0 + st[si].ms) {
@@ -612,12 +628,13 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         comms_fake_poll(t);                   /* helper I: the pretend network (comms_now's part on the phone) */
         surv_host_now_ms = (uint64_t)t;          /* survival-next: the simulated USB burst, SOS and the clock */
         int mv = sh_tick(dt / 1000, t);
-        double shell_ms = (tk_us() - sh0) / 1000.0;
+        double shell_ms = (tk_us() - sh0) / 1000.0, shell_cpu = cpu_ms() - cpu0;
         int motion = mv || sh_moving();
         tk_comp_frame(c, motion, 0);
         fprintf(log, "F %d %.1f %s px %d comp %.2f present %.2f total %.2f", frame, t, c->last_half ? "half" : "full",
                c->last_px, c->us_comp / 1000.0, c->us_present / 1000.0, c->last_us / 1000.0);
         fprintf(log, " idle %.2f halfs %.2f shell %.2f", c->us_idle / 1000.0, c->us_halfs / 1000.0, shell_ms);
+        if (getenv("SBTK_CPU")) fprintf(log, " cpu %.2f", shell_cpu);   /* the shell's CPU time in the frame */
         if (getenv("SBTK_HASH")) {             /* what the display shows now (two buffers: the one just presented) */
             uint64_t hh = 1469598103934665603ULL;
             for (size_t i = 0; i < (size_t)TK_W * TK_H; i++) hh = (hh ^ (c->panel.px[i] & 0xffffffu)) * 1099511628211ULL;   /* what shows: no alpha */
@@ -625,6 +642,14 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         }
         fputc('\n', log);
         if (getenv("SBTK_DUMP") && frame == atoi(getenv("SBTK_DUMP"))) write_ppm(getenv("SBTK_DUMPTO"), &c->panel);
+        if (getenv("SBTK_DUMPS")) {                   /* B5: "N,M,...": frames N, M ... to SBTK_DUMPTO-N.ppm */
+            for (const char *q = getenv("SBTK_DUMPS"); *q; q++)
+                if ((q == getenv("SBTK_DUMPS") || q[-1] == ',') && atoi(q) == frame) {
+                    char fn[600];
+                    snprintf(fn, sizeof fn, "%s-%d.ppm", getenv("SBTK_DUMPTO"), frame);
+                    write_ppm(fn, &c->panel);
+                }
+        }
         if (none) ;
         else if (half) {
             tk_bmp_down2(&h, &c->panel);

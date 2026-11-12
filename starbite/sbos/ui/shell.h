@@ -56,6 +56,9 @@ void sh_bright_now(int level);
 /* P2y: the apps' live values besides sh_status: charging or not, the software's name and version */
 void sh_sysinfo(int charging, const char *version);
 void sh_alarm(int on, int h, int m);
+/* B5: the Clock's alarm list to the kernel (alarm.c's alarm_set: slot i of 4, days a bit per weekday, 0 once); < 0
+ * refused (the self test) */
+int sh_alarm_set(int i, int h, int m, int days, int on);
 /* P2z, the Clock app: when to come back (ms; < 0 nothing pending), the redraw then (1: something changed), and the
  * platform's vibration for a timer that ran out (no sound) */
 int sh_next_update(float t_ms);
@@ -63,6 +66,19 @@ int sh_refresh(float t_ms);
 void sh_vibrate(void);
 void sh_year(int y);
 void sh_haptic(void);                     /* P3h: a key's light tap (the vibration motor, ~10 ms) */
+/* B3: the clipboard of the text fields' edit menu (Copy / Cut / Paste): one UTF-8 text, shared with the Linux apps
+ * (the Linux session's platform side; kern_next.c has a weak RAM copy until then). sh_clip_get: "" when empty. */
+void sh_clip_set(const char *utf8);
+const char *sh_clip_get(void);
+/* B4: iOS's feedback generators as motor pulses (docs/design/IOS-REFERENCE.md 17; lengths to tune on the phone) */
+enum { SH_HAP_LIGHT, SH_HAP_MEDIUM, SH_HAP_HEAVY, SH_HAP_SOFT, SH_HAP_RIGID, SH_HAP_SELECT, SH_HAP_SUCCESS, SH_HAP_WARNING,
+       SH_HAP_ERROR };
+void sh_haptic_k(int kind);
+/* B4: the app switcher's external entries (one per running Linux app): the provider (built with SW_EXT_PROVIDER)
+ * adds and removes them and defines sw_ext_title / sw_ext_icon / sw_ext_snapshot / sw_ext_open / sw_ext_close
+ * (shell_switcher.inc); without a provider nothing is added */
+void sw_ext_add(int subid);
+void sw_ext_remove(int subid);
 /* wifi-sbos-next: Wi-Fi for Settings > Wi-Fi, the status bar and the Control Centre. The platform pushes its state
  * with sh_wifi (only on a change); the shell asks with sh_wifi_power / _scan / _join / _fetch (< 0 refused). The
  * passphrase goes straight to the kernel's join (kept in RAM until a restart, never stored or logged); names and
@@ -200,9 +216,7 @@ const uint32_t *sh_linux_front(int *stride_px);
 void sh_linux_notify(unsigned id, const char *app_id, const char *app, const char *title, const char *body, int hm);
 void sh_linux_notify_close(unsigned id);
 void sh_linux_clip_in(const char *text);
-/* the shell-wide clipboard (text only, RAM; shell_linux.inc): Starbite's text fields copy / paste through these */
-int sh_clip_set(const char *text);       /* 1 kept (and offered to Linux) */
-const char *sh_clip_get(void);           /* "" when empty */
+/* the shell-wide clipboard: sh_clip_set / sh_clip_get above (B3), defined in shell_linux.inc (offered to Linux) */
 /* survival-next: Emergency mode's tools (shell_survival.inc), from the platform: the kernel's survival API
  * (kern/survival.h, services.c's SOS) on the phone, guide/survival_host.c on the host. Nothing starts by itself:
  * the shell calls sh_sos_set(1) and sh_usb_start() only at the end of the user's own hold, and the self test's
@@ -309,10 +323,11 @@ typedef struct {
     char why[SH_WHY];                   /* how it ended, in words */
     char audio_why[SH_WHY];             /* fa4ec7f: audio_ok 0: the missing part; audio_ok 1: a warning (the mic) */
 } sh_call_t;
-#define SH_SMS_MAX 32
-enum { SH_SMS_RECEIVED, SH_SMS_SENDING, SH_SMS_SENT, SH_SMS_FAILED };
+#define SH_SMS_MAX 200                  /* the newest this many (the kernel's store keeps up to 200, across restarts) */
+enum { SH_SMS_RECEIVED, SH_SMS_SENDING, SH_SMS_SENT, SH_SMS_FAILED, SH_SMS_DELIVERED, SH_SMS_UNDELIVERED };
 typedef struct {
-    int id, incoming, state;            /* SH_SMS_* */
+    int id, incoming, state;            /* SH_SMS_* (the kernel's ksms states) */
+    int unread;                         /* the kernel's (its store): 1 / 0; -1 not known (the shell keeps its own) */
     long long utc;
     char number[24];
     char text[512];                     /* UTF-8 */
@@ -332,5 +347,10 @@ int sh_dtmf(char digit);                /* 0-9 * # while connected */
 int sh_sms_send(const char *number, const char *utf8, char *why);
 int sh_sms_count(void);                 /* in RAM, newest last */
 int sh_sms_get(int i, sh_sms_t *m);     /* 0 ok */
+/* the kernel's SMS store (KMODEM_SMS_STORE; without it: read does nothing, the deletes refuse "Not in this version"):
+ * a thread shown is marked read; a message or a whole thread deleted by the user's own tap */
+int sh_sms_read(const char *number);
+int sh_sms_delete(int id, char *why);
+int sh_sms_delete_thread(const char *number, char *why);
 
 #endif
