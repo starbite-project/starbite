@@ -162,4 +162,5 @@ int sbg_net_send(const uint8_t *pkt, unsigned len);
 void sbg_net_config(int link, int uplink, const uint8_t guest_ip[4], const uint8_t gw_ip[4], const uint8_t dns_ip[4],
                     unsigned prefix);
 
+#include "sbg_snd.h"                                /* sbsnd: the mixer's pull / push API (Track I) */
 #endif
