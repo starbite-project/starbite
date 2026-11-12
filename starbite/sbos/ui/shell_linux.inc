@@ -467,7 +467,7 @@ static void st_line(const sh_lpkg_t *p, char *b, tk_col *c)
         *c = ACCENT();
         return;
     }
-    if (p->state == SH_PKG_FAILED) { lx_scopy(b, p->err[0] ? p->err : "Didn't install", 48); *c = tk_hex(0xff6961, 1); return; }
+    if (p->state == SH_PKG_FAILED) { lx_scopy(b, p->err[0] ? p->err : "Didn't install", 48); *c = C_RED; return; }
     lx_scopy(b, p->category[0] ? p->category : "Linux", 48);
     n = (int)tk_strlen(b);
     tk_memcpy(b + n, " \xc2\xb7 ", 4);
@@ -513,7 +513,7 @@ static void st_chunk_draw(int L, int c)
         st_line(p, ln, &col);
         d_text_box(&d, TK_IT400, 13, MARGIN + 60, bl(TK_IT400, 13, y + 35), ROW_BTN - 8 - MARGIN - 60, 0, ln, 0, 0, col, 0);
         st_button(&d, ROW_BTN, y + 17, p);
-        if (k + 1 < SS.n) d_rrect(&d, MARGIN + 60, y + 63.5f, CONTENT_R - MARGIN - 60, .5f, 0, W(.1f));
+        if (k + 1 < SS.n) d_rrect(&d, MARGIN + 60, y + 63.5f, CONTENT_R - MARGIN - 60, .5f, 0, C_SEP);
     }
     apstl[L].hidden = 0;
 }
@@ -568,7 +568,7 @@ static void st_head(void)
             d_text_box(&d, TK_IT400, 17, tx, bl(TK_IT400, 17, FIELD_Y + 7), fw - 50, 0, SS.q, 0, 0, INK, 0);
             if (SS.kb) d_rrect(&d, tx + tk_minf(tw(TK_IT400, 17, SS.q, 0, 0), fw - 50) + 1, FIELD_Y + 8, 2, 21, 1, ACCENT());
         } else
-            d_text(&d, TK_IT400, 17, tx, bl(TK_IT400, 17, FIELD_Y + 7), "Apps and Packages", 0, 0, tk_hex(0xa9a9a9, 1), 0);
+            d_text(&d, TK_IT400, 17, tx, bl(TK_IT400, 17, FIELD_Y + 7), "Apps and Packages", 0, 0, C_LABEL2, 0);
         if (SS.kb) d_text_box(&d, TK_IT400, 17, CONTENT_R, bl(TK_IT400, 17, FIELD_Y + 7), 64, 2, "Cancel", 0, 0, ACCENT(), 0);
     }
     d_h1(&d, "App Store");
@@ -577,7 +577,7 @@ static void st_head(void)
         lx_fmt_kb(f, LST->overlay_free_kb);
         lx_scopy(b, f, 40);
         lx_scopy(b + tk_strlen(b), " free", 40 - (int)tk_strlen(b));
-        d_text_box(&d, TK_IT400, 13, CONTENT_R, LARGE_BASE - 4, 120, 2, b, 0, 0, W(.55f), 0);
+        d_text_box(&d, TK_IT400, 13, CONTENT_R, LARGE_BASE - 4, 120, 2, b, 0, 0, C_LABEL2, 0);
     }
     if (empty) {
         const char *t, *l;
@@ -594,19 +594,19 @@ static void st_head(void)
     }
     int searching = SS.q[0] || SS.kb;
     if (!searching && SS.nfeat) {
-        d_text(&d, TK_IT600, 13, ROW_TX, bl(TK_IT600, 13, FIELD_Y + 52), "FEATURED", .4f, 0, W(.55f), 0);
+        d_text(&d, TK_IT600, 13, ROW_TX, bl(TK_IT600, 13, FIELD_Y + 52), "FEATURED", .4f, 0, C_LABEL2, 0);
         for (int k = 0; k < SS.nfeat; k++) {
             const sh_lpkg_t *p = &LST->pkg[SS.feat[k]];
             float x = MARGIN + (FEAT_W + 9) * k, cx = x + FEAT_W / 2, y = FIELD_Y + 70;
-            d_rrect(&d, x, y, FEAT_W, 128, 16, tk_hex(0x151c33, 1));
+            d_rrect(&d, x, y, FEAT_W, 128, 16, C_CARD);
             const tk_bmp *ic = st_icon(SS.feat[k]);
             if (ic->px) tk_blit(d.b, ic, (int)tk_floorf(PT(cx - 24) - d.ox + .5f), (int)tk_floorf(PT(y + 14) - d.oy + .5f), 1);
             d_text_box(&d, TK_IT600, 14, cx, bl(TK_IT600, 14, y + 72), FEAT_W - 12, 1, p->name, 0, 0, INK, 0);
-            d_text_box(&d, TK_IT400, 12, cx, bl(TK_IT400, 12, y + 94), FEAT_W - 12, 1, p->category, 0, 0, W(.55f), 0);
+            d_text_box(&d, TK_IT400, 12, cx, bl(TK_IT400, 12, y + 94), FEAT_W - 12, 1, p->category, 0, 0, C_LABEL2, 0);
         }
     }
     const char *cap = !SS.n ? "NO RESULTS" : searching ? "RESULTS" : "ALL APPS";
-    d_text(&d, TK_IT600, 13, ROW_TX, bl(TK_IT600, 13, SS.top - 22), cap, .4f, 0, W(.55f), 0);
+    d_text(&d, TK_IT600, 13, ROW_TX, bl(TK_IT600, 13, SS.top - 22), cap, .4f, 0, C_LABEL2, 0);
     apsth.hidden = 0;
 }
 static void st_list(void)
@@ -641,13 +641,13 @@ static void st_btn(void)
         char ln[48];
         tk_col c;
         st_line(p, ln, &c);
-        d_text_box(&d, TK_IT400, 13, bx, bl(TK_IT400, 13, DT + 85), bw, 0, ln, 0, 0, W(.6f), 0);
+        d_text_box(&d, TK_IT400, 13, bx, bl(TK_IT400, 13, DT + 85), bw, 0, ln, 0, 0, C_LABEL2, 0);
     } else if (p->state == SH_PKG_FAILED)
-        d_text_box(&d, TK_IT600, 13, 232, bl(TK_IT600, 13, DT + 76), CONTENT_R - 232, 0, "Didn't install", 0, 0, tk_hex(0xff6961, 1), 0);
+        d_text_box(&d, TK_IT600, 13, 232, bl(TK_IT600, 13, DT + 76), CONTENT_R - 232, 0, "Didn't install", 0, 0, C_RED, 0);
     else if (inst)
-        d_text_box(&d, TK_IT400, 13, 232, bl(TK_IT400, 13, DT + 76), CONTENT_R - 232, 0, (p->flags & SH_PKG_SYSTEM) ? "Part of the system" : "Installed", 0, 0, W(.55f), 0);
+        d_text_box(&d, TK_IT400, 13, 232, bl(TK_IT400, 13, DT + 76), CONTENT_R - 232, 0, (p->flags & SH_PKG_SYSTEM) ? "Part of the system" : "Installed", 0, 0, C_LABEL2, 0);
     else if (dim)
-        d_text_box(&d, TK_IT600, 13, 232, bl(TK_IT600, 13, DT + 76), CONTENT_R - 232, 0, "Not enough space", 0, 0, tk_hex(0xff6961, 1), 0);
+        d_text_box(&d, TK_IT600, 13, 232, bl(TK_IT600, 13, DT + 76), CONTENT_R - 232, 0, "Not enough space", 0, 0, C_RED, 0);
     apstb.hidden = 0;
 }
 /* a coloured note (a warning) at y: its title and wrapped lines; returns the y after it */
@@ -672,7 +672,7 @@ static void st_page(dc *d)
     d_back(d, ACCENT());                          /* P3p's pushed page: the glass back circle */
     if (st_dic.px) tk_blit(d->b, &st_dic, (int)tk_floorf(PT(MARGIN) - d->ox + .5f), (int)tk_floorf(PT(DT) - d->oy + .5f), 1);
     d_text_box(d, TK_IT700, 24, 136, bl(TK_IT700, 24, DT + 2), CONTENT_R - 136, 0, p->name, 0, 0, INK, 0);
-    d_text_box(d, TK_IT400, 15, 136, bl(TK_IT400, 15, DT + 34), CONTENT_R - 136, 0, p->pkg, 0, 0, W(.55f), 0);
+    d_text_box(d, TK_IT400, 15, 136, bl(TK_IT400, 15, DT + 34), CONTENT_R - 136, 0, p->pkg, 0, 0, C_LABEL2, 0);
     float y = DT + 124;
     int inst = (p->flags & SH_PKG_INSTALLED) != 0;
     if (p->flags & SH_PKG_TOO_BIG) {
@@ -705,7 +705,7 @@ static void st_page(dc *d)
         y += 22.0f * tk_mini(n, 3) + 16;
     }
     static const char *const L[5] = { "Category", "Download", "Installed size", "Memory in use", "Free space" };
-    d_rrect(d, GROUP_X, y, GROUP_W, 47 * 5 - 1, 16, tk_hex(0x151c33, 1));
+    d_rrect(d, GROUP_X, y, GROUP_W, 47 * 5 - 1, 16, C_CARD);
     for (int r = 0; r < 5; r++) {
         float ry = y + 47.0f * r;
         if (r == 0) lx_scopy(s, p->category[0] ? p->category : "Linux", 24);
@@ -714,17 +714,17 @@ static void st_page(dc *d)
         else if (r == 3) { char m[16]; lx_fmt_kb(m, p->ram_mb * 1000u); lx_scopy(s, "about ", 24); lx_scopy(s + 6, m, 18); }
         else lx_fmt_kb(s, LST->overlay_free_kb);
         d_text(d, TK_IT400, 16, ROW_TX, ry + 13 + 16, L[r], 0, 0, INK, 0);
-        d_text_box(d, TK_IT400, 16, CONTENT_R - 16, ry + 13 + 16, 170, 2, s, 0, TK_TNUM, W(.55f), 0);
-        if (r < 4) d_rrect(d, ROW_TX, ry + 46, CONTENT_R - ROW_TX, .5f, 0, W(.08f));
+        d_text_box(d, TK_IT400, 16, CONTENT_R - 16, ry + 13 + 16, 170, 2, s, 0, TK_TNUM, C_LABEL2, 0);
+        if (r < 4) d_rrect(d, ROW_TX, ry + 46, CONTENT_R - ROW_TX, .5f, 0, C_SEP);
     }
     y += 47 * 5 + 14;
     SS.rm_y = -1;
     if (inst && !st_busy(p)) {
         if (p->flags & SH_PKG_SYSTEM)
-            d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y), "Part of the system: it can't be removed.", 0, 0, W(.45f), 0);
+            d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y), "Part of the system: it can't be removed.", 0, 0, C_LABEL2, 0);
         else {
-            d_rrect(d, GROUP_X, y, GROUP_W, 46, 16, tk_hex(0x151c33, 1));
-            d_text(d, TK_IT400, 16, ROW_TX, y + 13 + 16, "Remove App", 0, 0, tk_hex(0xff453a, 1), 0);
+            d_rrect(d, GROUP_X, y, GROUP_W, 46, 16, C_CARD);
+            d_text(d, TK_IT400, 16, ROW_TX, y + 13 + 16, "Remove App", 0, 0, C_RED, 0);
             SS.rm_y = y;
         }
     }

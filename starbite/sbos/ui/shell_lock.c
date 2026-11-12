@@ -322,7 +322,7 @@ static void status_bar(dc *d, const char *left)
      * less, green while charging, the nub) */
     float fw = 21.0f * tk_clampf(ST.pct / 100.0f, .04f, 1);
     d_rrect(d, bx, by, 25, 12, 3.6f, W(.35f));
-    d_rrect(d, bx + 2, by + 2, fw, 8, 2, ST.pct <= 20 && !SYS_CHARGING() ? tk_hex(0xff453a, 1) : SYS_CHARGING() ? tk_hex(0x34c759, 1) : W(1));
+    d_rrect(d, bx + 2, by + 2, fw, 8, 2, ST.pct <= 20 && !SYS_CHARGING() ? C_RED : SYS_CHARGING() ? C_GREEN : W(1));
     d_rrect(d, bx + 26, by + 4, 1.6f, 4, .8f, W(.4f));
 }
 
@@ -448,7 +448,7 @@ static void rect_widget(dc *d, const char *glyph, const char *label, const char 
     if (glyph) { d_icon(d, glyph, x, 225, 1); x += 15; }
     d_text_box(d, TK_IT600, 15, x, 235, 275 - x, 0, label, 0, 0, W(.7f), 0);
     d_text_box(d, TK_IT600, 30, 122, 266, 150, 0, value, 0, TK_TNUM, INK, 0);
-    d_text_box(d, TK_IT400, 13, 123, 285, 150, 0, sub, 0, 0, W(.6f), 0);
+    d_text_box(d, TK_IT400, 13, 123, 285, 150, 0, sub, 0, 0, C_LABEL2, 0);
 }
 static void build_lwidgets(void)
 {
@@ -467,10 +467,10 @@ static void build_lwidgets(void)
         trim(&lwidgets);
         return;
     }
-    ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), tk_hex(0x4cd964, 1), num, "BATTERY");
+    ring_widget(&d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), C_GREEN, num, "BATTERY");
     int n = put_dec(num, ST.temp);
     num[n] = (char)0xc2; num[n + 1] = (char)0xb0; num[n + 2] = 0;
-    ring_widget(&d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), tk_hex(0x6fb3ff, 1), num, "TEMP");
+    ring_widget(&d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), C_ACCENT, num, "TEMP");
     char at[16] = "Off";                       /* P2y: the kernel's next alarm (sh_alarm), not the concept's */
     if (ALM.on) { at[0] = (char)('0' + ALM.h / 10); at[1] = (char)('0' + ALM.h % 10); at[2] = ':';
                   at[3] = (char)('0' + ALM.m / 10); at[4] = (char)('0' + ALM.m % 10); at[5] = 0; }
@@ -633,7 +633,7 @@ static void head_content(dc *d, int g, float top)
     em[3] = (char)('0' + gr->n);
     if (gr->n > 1) { em[11] = 's'; em[12] = 0; }
     float sb = base_of(TK_IT400, 13.5f, top + 38.55f, 0);
-    d_rrect(d, CARD_TX, sb - 7, 6, 6, 3, tk_hex(0x4cd964, 1));
+    d_rrect(d, CARD_TX, sb - 7, 6, 6, 3, C_GREEN);
     /* P3i: the chevron at one place on every card (iOS: a row's chevron never moves); the names give way with an
      * ellipsis so the count stays whole */
     K[g].chx = CARD_CHEV;
@@ -770,7 +770,7 @@ static void build_open(int g)
         if (tag) {
             float w = tw(TK_IT700, 10.5f, tag, .42f, 0) + 14;
             float tx = CARD_X + CARD_W - 20 - w, ty = ry + 18.5f;
-            d_rrect(&d, tx, ty, w, 19, 9.5f, s->self ? TK_RGBA(76, 217, 100, .18f) : TK_RGBA(111, 179, 255, .18f));
+            d_rrect(&d, tx, ty, w, 19, 9.5f, s->self ? sbca(SBC_GREEN, .18f) : sbca(SBC_ACCENT, .18f));
             d_text(&d, TK_IT700, 10.5f, tx + 7, ty + 3 + 10, tag, .42f, 0, s->self ? tk_hex(0xc9f7d3, 1) : tk_hex(0xcfe4ff, 1), 0);
         }
         tk_layer_add(&k->members, &k->rows[i]);
@@ -1207,7 +1207,7 @@ static void build_home(void)
         if (0) {                                   /* P2y: no badges (no calls or messages to count) */
             const char *bn = i ? "2" : "1";
             float bw = tk_maxf(20, tw(TK_IT700, 12, bn, 0, 0) + 10);
-            d_rrect(&d, x + 60 - bw, 699, bw, 20, 10, tk_hex(0xff3b30, 1));
+            d_rrect(&d, x + 60 - bw, 699, bw, 20, 10, C_RED);
             d_text(&d, TK_IT700, 12, x + 60 - bw / 2 - tw(TK_IT700, 12, bn, 0, 0) / 2, base_of(TK_IT700, 12, 699, 20), bn, 0, 0, INK, 0);
         }
     }
@@ -1353,7 +1353,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         for (int i = 0; i < nf; i++) dtw = tk_maxf(dtw, tw(TK_IT400, 14.5f, dt[i], 0, 0));
         for (int i = 0; i < nf; i++) {
             float b = FOC_Y + 102 + 24 * i + 14;
-            d_text(&d, TK_IT400, 14.5f, SL_X, b, dt[i], 0, 0, W(.55f), 0);
+            d_text(&d, TK_IT400, 14.5f, SL_X, b, dt[i], 0, 0, C_LABEL2, 0);
             d_text_box(&d, TK_IT400, 14.5f, SL_X + dtw + 14, b, SL_W - dtw - 14, 0, dd[i], 0, TK_TNUM, INK, 0);
         }
         sy = slider_y(nf);
@@ -1368,7 +1368,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     relayer(&ffill);
     focus_sy = sy;
     dc f = mk(&ffill, "fill", SL_X, sy, 62, 62, 1, 0);
-    d_rrect(&f, SL_X, sy, 62, 62, 31, TK_RGBA(111, 179, 255, .28f));
+    d_rrect(&f, SL_X, sy, 62, 62, 31, sbca(SBC_ACCENT, .28f));
     ffill.slice = 2;
     ffill.slice_s0 = PT(32);
     ffill.slice_s1 = PT(32);
@@ -1918,7 +1918,7 @@ __attribute__((unused)) static void d_lg_app(dc *d, float x, float y, float w, f
     int X = (int)tk_floorf(bx), Y = (int)tk_floorf(by), Wd = (int)(bx + PT(w) + .999f) - X, Hd = (int)(by + PT(h) + .999f) - Y;
     tk_bmp t;
     if (!tk_bmp_new(&t, Wd, Hd)) return;
-    tk_fill_rect_raw(&t, 0, 0, Wd, Hd, 0xff0a0f1fu);
+    tk_fill_rect_raw(&t, 0, 0, Wd, Hd, sbc_argb(SBC_GROUND));
     tk_blit(&t, d->b, -X, -Y, 1);
     tk_bmp_blur_sat(&t, PT(14), TK_GLASS_SAT, TK_GLASS_BRIGHT);
     tk_glass_local_put(d->b, &t, X, Y, bx, by, PT(w), PT(h), PT(r));
@@ -1930,7 +1930,7 @@ __attribute__((unused)) static void d_lg_app(dc *d, float x, float y, float w, f
 static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int dark)
 {
     tk_bmp g;
-    uint32_t c = 0xff0a0f1fu;
+    uint32_t c = sbc_argb(SBC_GROUND);
     if (tk_bmp_new(&g, 1, 1)) {
         g.px[0] = c;
         tk_bmp_satbright(&g, TK_GLASS_SAT, TK_GLASS_BRIGHT);
@@ -2003,7 +2003,7 @@ static void d_navtitle(dc *d, const char *t)
     d_text_box(d, TK_IT600, 17, 195, NAV_BASE, 390 - 2 * (BACK_X + BACK_D + 10), 1, t, 0, 0, INK, 0);
 }
 static void d_h1(dc *d, const char *t) { d_text_box(d, TK_IT700, 34, MARGIN, LARGE_BASE, CONTENT_W, 0, t, 0, 0, INK, 0); }   /* P3j: iOS's Large Title, Bold; P3p: in its row */
-static tk_col ACCENT(void) { return tk_hex(0x6fb3ff, 1); }
+static tk_col ACCENT(void) { return C_ACCENT; }
 /* a .row with an avatar: the name, an optional second line, the right-hand text, an optional unread dot */
 __attribute__((unused)) static float d_prow(dc *d, float y, const char *name, int nfw, tk_col nc, const char *sub, const char *right, int dot, int last)
 {
@@ -2017,17 +2017,17 @@ __attribute__((unused)) static float d_prow(dc *d, float y, const char *name, in
         char e[96];
         float avail = 358 - 78 - (rw > 0 ? rw + 10 : 0);
         ellipsize(e, sizeof e, TK_IT400, 13.5f, sub, tk_minf(230, avail));
-        d_text(d, TK_IT400, 13.5f, 78, bl(TK_IT400, 13.5f, y + 33), e, 0, 0, W(.55f), 0);
+        d_text(d, TK_IT400, 13.5f, 78, bl(TK_IT400, 13.5f, y + 33), e, 0, 0, C_LABEL2, 0);
     }
     if (rw > 0) {
         float rx = 358 - rw, rb = bl(TK_IT400, 16, y + 13 + (who - 20) / 2);
-        d_text(d, TK_IT400, 16, rx, rb, right, 0, TK_TNUM, W(.55f), 0);
-        if (dot) d_rrect(d, 358 - 9, rb - 9, 9, 9, 4.5f, tk_hex(0x2f7bf6, 1));
+        d_text(d, TK_IT400, 16, rx, rb, right, 0, TK_TNUM, C_LABEL2, 0);
+        if (dot) d_rrect(d, 358 - 9, rb - 9, 9, 9, 4.5f, C_ACCENT);
     }
-    if (!last) d_rrect(d, GROUP_X, y + rh, GROUP_W, 1, 0, W(.08f));
+    if (!last) d_rrect(d, GROUP_X, y + rh, GROUP_W, 1, 0, C_SEP);
     return rh + 1;
 }
-__attribute__((unused)) static void d_group(dc *d, float y, int n, int sub) { d_rrect(d, GROUP_X, y, GROUP_W, (sub ? 63.0f : 61.0f) * n - 1, 16, tk_hex(0x151c33, 1)); }
+__attribute__((unused)) static void d_group(dc *d, float y, int n, int sub) { d_rrect(d, GROUP_X, y, GROUP_W, (sub ? 63.0f : 61.0f) * n - 1, 16, C_CARD); }
 
 static const char *const KD[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#" };
 static const char *const KL[12] = { "", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ", "", "+", "" };
@@ -2048,7 +2048,7 @@ static void d_empty(dc *d, float area_top, float area_bot, const char *title, co
     d_text_box(d, TK_IT700, 22, 195, bl(TK_IT700, 22, top), CONTENT_W, 1, title, 0, 0, W(.9f), 0);
     for (int k = 0; k < n && k < 3; k++) {
         float lw = tw(TK_IT400, 15, ln[k], 0, 0);
-        d_text(d, TK_IT400, 15, (390 - lw) / 2, bl(TK_IT400, 15, top + 36 + 20 * k), ln[k], 0, 0, W(.5f), 0);
+        d_text(d, TK_IT400, 15, (390 - lw) / 2, bl(TK_IT400, 15, top + 36 + 20 * k), ln[k], 0, 0, C_LABEL2, 0);
     }
 }
 static void page_contacts(dc *d)
@@ -2128,9 +2128,9 @@ static void page_clock(dc *d)
     n += put_dec(dt + n, ST.day); dt[n++] = ' ';
     tk_memcpy(dt + n, mo, tk_strlen(mo) + 1);
     w = tw(TK_IT400, 15, dt, 0, 0);
-    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 192 + CLK_DY), dt, 0, 0, W(.55f), 0);
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 236 + CLK_DY), "STOPWATCH", .52f, 0, W(.55f), 0);
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 462 + CLK_DY), "TIMER", .52f, 0, W(.55f), 0);
+    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 192 + CLK_DY), dt, 0, 0, C_LABEL2, 0);
+    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 236 + CLK_DY), "STOPWATCH", .52f, 0, C_LABEL2, 0);
+    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, 462 + CLK_DY), "TIMER", .52f, 0, C_LABEL2, 0);
 }
 static void clk_digits(tk_layer *l, float y, const char *txt, const char *sub)
 {
@@ -2140,7 +2140,7 @@ static void clk_digits(tk_layer *l, float y, const char *txt, const char *sub)
     d_text(&d, TK_IT400, 54, (390 - w) / 2, bl(TK_IT400, 54, y), txt, 0, TK_TNUM, INK, 0);
     if (sub && sub[0]) {
         w = tw(TK_IT400, 14, sub, 0, TK_TNUM);
-        d_text(&d, TK_IT400, 14, (390 - w) / 2, bl(TK_IT400, 14, y + 66), sub, 0, TK_TNUM, W(.55f), 0);
+        d_text(&d, TK_IT400, 14, (390 - w) / 2, bl(TK_IT400, 14, y + 66), sub, 0, TK_TNUM, C_LABEL2, 0);
     }
     l->hidden = 0;
 }
@@ -2275,7 +2275,7 @@ static void page_calc(dc *d)
         float x, y, w;
         calc_key_rect(i, &x, &y, &w);
         int fn = i < 3, op = (i % 4 == 3 && i < 16) || i == 18;
-        d_rrect(d, x, y, w, 78, 39, op ? tk_hex(0xff9f0a, 1) : fn ? tk_hex(0xa5a5a5, 1) : tk_hex(0x333333, 1));
+        d_rrect(d, x, y, w, 78, 39, op ? C_ORANGE : fn ? tk_hex(0xa5a5a5, 1) : tk_hex(0x333333, 1));
         float tw0 = tw(TK_IT500, 32, CK[i], 0, 0);
         float tx = i == 16 ? x + 31 : x + (78 - tw0) / 2;
         d_text(d, TK_IT500, 32, tx, bl(TK_IT500, 32, y + 19), CK[i], 0, 0, fn ? tk_hex(0x000000, 1) : INK, 0);
@@ -2409,13 +2409,13 @@ static void page_light(dc *d)
     d_h1(d, "Flashlight");
     int on = Q[0].lit;
     d_rrect(d, 135, 250, 120, 240, 34, on ? tk_hex(0xffffff, 1) : W(.16f));
-    d_rrect(d, 135, on ? 250 : 370, 120, 120, 34, on ? tk_hex(0xffd60a, 1) : W(.32f));
+    d_rrect(d, 135, on ? 250 : 370, 120, 120, 34, on ? C_YELLOW : W(.32f));
     const char *t = on ? "On" : "Off";
     float w = tw(TK_IT600, 20, t, 0, 0);
     d_text(d, TK_IT600, 20, (390 - w) / 2, bl(TK_IT600, 20, 520), t, 0, 0, INK, 0);
     const char *h = "Tap to turn the LED on or off";
     w = tw(TK_IT400, 15, h, 0, 0);
-    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 556), h, 0, 0, W(.5f), 0);
+    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 556), h, 0, 0, C_LABEL2, 0);
 }
 
 /* P3c: the Calendar: this month's grid (Monday first, as iOS in Finland), today in a red circle, from the phone's
@@ -2429,13 +2429,13 @@ static void page_calendar(dc *d)
     d_text(d, TK_IT700, 34, MARGIN, LARGE_BASE, mo, 0, 0, INK, 0);
     char yb[8];
     put_dec(yb, cal_year);
-    d_text(d, TK_IT600, 17, MARGIN + tw(TK_IT700, 34, mo, 0, 0) + 10, LARGE_BASE, yb, 0, 0, tk_hex(0xff453a, 1), 0);
+    d_text(d, TK_IT600, 17, MARGIN + tw(TK_IT700, 34, mo, 0, 0) + 10, LARGE_BASE, yb, 0, 0, C_RED, 0);
     static const char *const H[7] = { "M", "T", "W", "T", "F", "S", "S" };
     for (int c = 0; c < 7; c++) {
         float w = tw(TK_IT600, 13, H[c], 0, 0);
         d_text(d, TK_IT600, 13, 20 + 50 * c + (50 - w) / 2, bl(TK_IT600, 13, 122 + CAL_DY), H[c], 0, 0, W(c >= 5 ? .4f : .6f), 0);
     }
-    d_rrect(d, MARGIN, 146 + CAL_DY, CONTENT_W, .5f, 0, W(.15f));
+    d_rrect(d, MARGIN, 146 + CAL_DY, CONTENT_W, .5f, 0, C_SEP);
     static const int DIM[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
     int m = (ST.mon + 11) % 12, nd = DIM[m];
     if (m == 1 && ((cal_year % 4 == 0 && cal_year % 100 != 0) || cal_year % 400 == 0)) nd = 29;
@@ -2447,12 +2447,12 @@ static void page_calendar(dc *d)
         char b[4];
         put_dec(b, day);
         int today = day == ST.day;
-        if (today) d_rrect(d, cx - 19, cy - 19, 38, 38, 19, tk_hex(0xff453a, 1));
+        if (today) d_rrect(d, cx - 19, cy - 19, 38, 38, 19, C_RED);
         float w = tw(today ? TK_IT700 : TK_IT400, 20, b, 0, TK_TNUM);
-        d_text(d, today ? TK_IT700 : TK_IT400, 20, cx - w / 2, bl(TK_IT400, 20, cy - 13), b, 0, TK_TNUM, today || c < 5 ? INK : W(.5f), 0);
+        d_text(d, today ? TK_IT700 : TK_IT400, 20, cx - w / 2, bl(TK_IT400, 20, cy - 13), b, 0, TK_TNUM, today || c < 5 ? INK : C_LABEL2, 0);
     }
     float y = 160 + CAL_DY + 56 * 6 + 10;
-    d_rrect(d, MARGIN, y, CONTENT_W, .5f, 0, W(.15f));
+    d_rrect(d, MARGIN, y, CONTENT_W, .5f, 0, C_SEP);
     char dt[48];
     const char *wd = WD[ST.wday % 7];
     int n = (int)tk_strlen(wd);
@@ -2460,7 +2460,7 @@ static void page_calendar(dc *d)
     n += put_dec(dt + n, ST.day); dt[n++] = ' ';
     tk_memcpy(dt + n, mo, tk_strlen(mo) + 1);
     d_text(d, TK_IT600, 15, 20, bl(TK_IT600, 15, y + 18), dt, 0, 0, W(.85f), 0);
-    d_text(d, TK_IT400, 15, 20, bl(TK_IT400, 15, y + 46), "No events", 0, 0, W(.45f), 0);
+    d_text(d, TK_IT400, 15, 20, bl(TK_IT400, 15, y + 46), "No events", 0, 0, C_LABEL2, 0);
 }
 
 /* P3d: Settings > Display & Brightness: iOS's brightness bar (a tap sets the panel's level 1..4) */
@@ -2473,8 +2473,8 @@ static void page_display(dc *d)
      * and the bright sun, the group where the other Settings pages start theirs */
     d_back(d, W(1));
     d_navtitle(d, "Display & Brightness");
-    d_text(d, TK_IT400, 13, ROW_TX, DSP_Y - 10, "BRIGHTNESS", .52f, 0, W(.55f), 0);
-    d_rrect(d, GROUP_X, DSP_Y, GROUP_W, 64, 16, tk_hex(0x151c33, 1));
+    d_text(d, TK_IT400, 13, ROW_TX, DSP_Y - 10, "BRIGHTNESS", .52f, 0, C_LABEL2, 0);
+    d_rrect(d, GROUP_X, DSP_Y, GROUP_W, 64, 16, C_CARD);
     int lv = cc_bright ? cc_bright : 3;
     float kx = DSP_TX + DSP_TW * lv / 4, cy = DSP_Y + 32;
     d_rrect(d, DSP_TX, cy - 3, DSP_TW, 6, 3, W(.18f));
@@ -2484,7 +2484,7 @@ static void page_display(dc *d)
     d_rrect(d, kx - 14, cy - 14, 28, 28, 14, W(1));
     d_icon(d, "cc-sun", GROUP_X + 10, cy - 11, .5f);
     d_icon(d, "cc-sun", DSP_TX + DSP_TW + 8, cy - 11, 1);
-    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, DSP_Y + 64 + 8), "Four steps, as the Control Centre's slider.", 0, 0, W(.45f), 0);
+    d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, DSP_Y + 64 + 8), "Four steps, as the Control Centre's slider.", 0, 0, C_LABEL2, 0);
 }
 
 /* ---- P3e: Notes with an iOS keyboard. The list (each note's first line), New, and the editor: the text with a
@@ -2572,7 +2572,7 @@ static void page_notes(dc *d)
         d_gcircle(d, GC_COMPOSE);
         {
             float cx = CONTENT_R - COMPOSE_D / 2, cy = COMPOSE_Y + COMPOSE_D / 2, x0 = cx - 10, y0 = cy - 8, x1 = cx + 7, y1 = cy + 9;
-            tk_col yl = tk_hex(0xffd60a, 1);
+            tk_col yl = C_YELLOW;
             d_seg(d, x0 + 2, y0, x0 + 8, y0, 2, yl);
             d_seg(d, x0, y0 + 2, x0, y1 - 2, 2, yl);
             d_seg(d, x0, y0 + 2, x0 + 2, y0, 2, yl);
@@ -2586,24 +2586,24 @@ static void page_notes(dc *d)
             char cnt[24];
             int k = put_dec(cnt, NS.n);
             tk_memcpy(cnt + k, NS.n == 1 ? " Note" : " Notes", NS.n == 1 ? 6 : 7);
-            if (NS.n) d_text_box(d, TK_IT400, 13, 195, COMPOSE_Y + COMPOSE_D / 2 + 4.7f, 200, 1, cnt, 0, 0, W(.6f), 0);
+            if (NS.n) d_text_box(d, TK_IT400, 13, 195, COMPOSE_Y + COMPOSE_D / 2 + 4.7f, 200, 1, cnt, 0, 0, C_LABEL2, 0);
         }
         if (!NS.n) { d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Notes", "Tap the pencil to write one. Notes are kept until the phone restarts."); return; }
-        d_rrect(d, GROUP_X, CONTENT_TOP, GROUP_W, 56.0f * NS.n - 1, 16, tk_hex(0x151c33, 1));
+        d_rrect(d, GROUP_X, CONTENT_TOP, GROUP_W, 56.0f * NS.n - 1, 16, C_CARD);
         for (int i = 0; i < NS.n; i++) {
             char t[136];
             note_title(NOTES[NS.n - 1 - i], t);
             d_text_box(d, TK_IT600, 17, ROW_TX, bl(TK_IT600, 17, CONTENT_TOP + 56 * i + 17), CONTENT_W - 32, 0, t, 0, 0, INK, 0);
-            if (i + 1 < NS.n) d_rrect(d, ROW_TX, CONTENT_TOP + 56 * i + 55, CONTENT_R - ROW_TX, .5f, 0, W(.1f));
+            if (i + 1 < NS.n) d_rrect(d, ROW_TX, CONTENT_TOP + 56 * i + 55, CONTENT_R - ROW_TX, .5f, 0, C_SEP);
         }
         return;
     }
-    d_back(d, tk_hex(0xffd60a, 1));                /* P3p (audit 13): Notes' yellow, on the glass circle */
+    d_back(d, C_YELLOW);                /* P3p (audit 13): Notes' yellow, on the glass circle */
     d_gcircle(d, GC_DONE);                         /* and Done: a yellow check mark */
     {
         float cx = CONTENT_R - BACK_D / 2, cy = NAV_MID;
-        d_seg(d, cx - 8, cy + .5f, cx - 2.5f, cy + 6, 2.6f, tk_hex(0xffd60a, 1));
-        d_seg(d, cx - 2.5f, cy + 6, cx + 8.5f, cy - 6.5f, 2.6f, tk_hex(0xffd60a, 1));
+        d_seg(d, cx - 8, cy + .5f, cx - 2.5f, cy + 6, 2.6f, C_YELLOW);
+        d_seg(d, cx - 2.5f, cy + 6, cx + 8.5f, cy - 6.5f, 2.6f, C_YELLOW);
     }
     kb_draw(d, NS.shift, NS.num);
 }
@@ -2637,7 +2637,7 @@ static void build_note(void)
         if (i < n && t[i] == '\n') { i++; if (i == n) { cx = 20; cy = y; } continue; }
         if (i >= n) break;
     }
-    d_rrect(&d, cx + 1, cy + 1, 2, 21, 1, tk_hex(0xffd60a, 1));          /* the caret */
+    d_rrect(&d, cx + 1, cy + 1, 2, 21, 1, C_YELLOW);          /* the caret */
     apnote.hidden = 0;
     relink();
 }
@@ -2718,7 +2718,7 @@ static void build_search(void)
     else d_lg_flat(&d, 16, 56, 288, 40, 20, 1);
     d_icon(&d, "search15", 30, 68.5f, 1);
     if (SR.q[0]) d_text(&d, TK_IT400, 17, 53, bl(TK_IT400, 17, 65), SR.q, 0, 0, INK, 0);
-    else d_text(&d, TK_IT400, 17, 53, bl(TK_IT400, 17, 65), "Search", 0, 0, tk_hex(0xa9a9a9, 1), 0);
+    else d_text(&d, TK_IT400, 17, 53, bl(TK_IT400, 17, 65), "Search", 0, 0, C_LABEL2, 0);
     if (SR.q[0]) d_rrect(&d, 53 + tw(TK_IT400, 17, SR.q, 0, 0) + 1, 66, 2, 21, 1, ACCENT());
     SR.nh = 0;
     for (int a = 0; a < NAPPS && SR.nh < 8; a++) {
@@ -2731,7 +2731,7 @@ static void build_search(void)
         d_text_box(&d, TK_IT500, 12, x + 31, bl(TK_IT500, 12, y + 67), 84, 1, APPS[a].name, 0, 0, INK, 0);
         SR.nh++;
     }
-    d_text(&d, TK_IT600, 13, 24, bl(TK_IT600, 13, 116), SR.nh ? (SR.q[0] ? "APPLICATIONS" : "SUGGESTIONS") : "NO RESULTS", .4f, 0, W(.55f), 0);
+    d_text(&d, TK_IT600, 13, 24, bl(TK_IT600, 13, 116), SR.nh ? (SR.q[0] ? "APPLICATIONS" : "SUGGESTIONS") : "NO RESULTS", .4f, 0, C_LABEL2, 0);
     apsrch.hidden = 0;
     relink();
 }
@@ -2774,7 +2774,7 @@ static void build_apnum(void)
                                (int)tk_floorf(PT(595) - tk_icon_pad("back") - e.oy + .5f), W(.85f));
         d_rrect(&e, 291, 595, 27, 20, 4, W(.85f));
         float xw = tw(TK_IT600, 16, "\xc3\x97", 0, 0);
-        d_text(&e, TK_IT600, 16, 291 + (27 - xw) / 2, bl(TK_IT600, 16, 596), "\xc3\x97", 0, 0, tk_hex(0x0a0f1f, 1), 0);
+        d_text(&e, TK_IT600, 16, 291 + (27 - xw) / 2, bl(TK_IT600, 16, 596), "\xc3\x97", 0, 0, C_GROUND, 0);
     }
     float w = tw(TK_IT500, 36, AS.num, 1, TK_TNUM);
     dc d = mk(&apnum, "dial", (390 - w) / 2, 86, w, 44, 2, 0);
@@ -2972,12 +2972,12 @@ static void build_app_page(int a)
             int k = 0;
             for (const char *c = S->cap; *c && k < 63; c++) up[k++] = *c >= 'a' && *c <= 'z' ? (char)(*c - 32) : *c;
             up[k] = 0;
-            d_text(&d, TK_IT400, 13, ROW_TX, y + (i ? 18 : 16) + 13, up, .52f, 0, W(.55f), 0);
+            d_text(&d, TK_IT400, 13, ROW_TX, y + (i ? 18 : 16) + 13, up, .52f, 0, C_LABEL2, 0);
             y += (i ? 18 : 16) + 16 + 6;
         } else
             y += 18;
         float gh = 47.0f * S->n - 1;
-        d_rrect(&d, GROUP_X, y, GROUP_W, gh, 16, tk_hex(0x151c33, 1));
+        d_rrect(&d, GROUP_X, y, GROUP_W, gh, 16, C_CARD);
         for (int r = 0; r < S->n; r++) {
             float ry = y + 47 * r;
             char lb[48], rb[48];
@@ -3005,8 +3005,8 @@ static void build_app_page(int a)
             float lw = tw(TK_IT400, 16, lt, 0, 0), vw = rt[0] ? tw(TK_IT400, 16, rt, 0, TK_TNUM) : 0;
             float lmax = rt[0] ? tk_maxf(room - vw - 16, room / 2) : room;
             d_text_box(&d, TK_IT400, 16, lx, ry + 13 + 16, lmax, 0, lt, 0, 0, INK, 0);
-            if (rt[0]) d_text_box(&d, TK_IT400, 16, right, ry + 13 + 16, room - tk_minf(lw, lmax) - 16, 2, rt, 0, TK_TNUM, W(.55f), 0);
-            if (r + 1 < S->n) d_rrect(&d, lx, ry + 46, CONTENT_R - lx, .5f, 0, W(.08f));
+            if (rt[0]) d_text_box(&d, TK_IT400, 16, right, ry + 13 + 16, room - tk_minf(lw, lmax) - 16, 2, rt, 0, TK_TNUM, C_LABEL2, 0);
+            if (r + 1 < S->n) d_rrect(&d, lx, ry + 46, CONTENT_R - lx, .5f, 0, C_SEP);
         }
         y += gh;
     }
@@ -3258,7 +3258,7 @@ void sh_confirm(const char *title, const char *l1, const char *l2, const char *l
     d_rrect(&d, 44, CF.hy, 302, 56, 28, W(.12f));
     relayer(&cffill);
     dc f = mk(&cffill, "confirm-fill", 44, CF.hy, 56, 56, 1, 0);
-    d_rrect(&f, 44, CF.hy, 56, 56, 28, TK_RGBA(111, 179, 255, .55f));
+    d_rrect(&f, 44, CF.hy, 56, 56, 28, sbca(SBC_ACCENT, .55f));
     cffill.slice = 2;
     cffill.slice_s0 = cffill.slice_s1 = PT(28);
     relayer(&cflabel);
@@ -3666,7 +3666,7 @@ void sh_init_begin(tk_comp *c)
     tk_layer_init(&appg, "app");
     appg.hidden = 1;
     tk_layer_init(&appbg, "app-ground");
-    appbg.solid = 0xff0a0f1fu;
+    appbg.solid = sbc_argb(SBC_GROUND);
     appbg.solid_w = TK_W;
     appbg.solid_h = TK_H;
     appbg.opaque = 1;
