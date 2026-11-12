@@ -13,6 +13,8 @@ id native_bridge_metal_open(const char *loader, const char *cache, uint64_t regi
 id native_bridge_metal_library_with_air(const void *bytes, size_t length);
 // One line for the plugin's status report: command buffers committed/failed locally, pipelines made, refusals, the last refusal's text.
 size_t native_bridge_metal_status(char *out, size_t size);
+// Event and handler counters (listeners added/fired, completed-handler runs begun/done, in flight, CPU waits, signals raised).
+size_t native_bridge_metal_events(char *out, size_t size);
 // The pixel formats of the textures asked for (first eight distinct) and how many texture requests the runtime refused.
 size_t native_bridge_metal_formats(char *out, size_t size);
 size_t native_bridge_metal_telemetry(char *out, size_t size);

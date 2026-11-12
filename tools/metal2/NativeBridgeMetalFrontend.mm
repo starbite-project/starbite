@@ -37,6 +37,9 @@ static void (*gMissing)(const char *, const char *);
 // What this device has been asked and refused, for the plugin's status line (native_bridge_metal_status): commits, render/compute pipelines made,
 // refusals, and the last two refusals' texts. Counters only; nothing here changes a result.
 static std::atomic<uint64_t> gCommits,gCommitFailures,gPipelines,gProblems,gCompleted;
+// S2s (macOS diagnostics, 2026-11-12): listener registrations/firings, completed-handler runs started/finished, CPU waits,
+// shared-event signals found unpublished at completion (raised from the CPU), see native_bridge_metal_events().
+static std::atomic<uint64_t> gListenAdded,gListenFired,gHandlerRunsBegun,gHandlerRunsDone,gCpuWaits,gCpuWaitFails,gSignalsChecked,gSignalsRaised;
 // What the render server actually asks of the GPU (int-141: 59 commits in 200 s, and a desktop that behaves like CPU compositing): render passes,
 // draws, the pixels of their first colour attachment, compute dispatches, blits and the largest pass (pixels).
 static std::atomic<uint64_t> gPasses,gDraws,gPassPixels,gDispatches,gBlits,gBiggestPass,gFullScreenPasses;
@@ -833,11 +836,25 @@ static bool reach_if_external(id event,NmbEvent *handle,uint64_t value,const cha
 @implementation NBSharedEvent
 - (uint64_t)signaledValue {return nmb_shared_event_value(self.handle);}
 - (void)setSignaledValue:(uint64_t)value {nmb_shared_event_set_value(self.handle,value);}
-- (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds {reach_if_external(self,self.handle,value,"CPU wait");return nmb_shared_event_wait(self.handle,value,milliseconds);}
+- (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds {
+ reach_if_external(self,self.handle,value,"CPU wait");
+ gCpuWaits++;
+ const BOOL ok=nmb_shared_event_wait(self.handle,value,milliseconds);
+ if(!ok)gCpuWaitFails++;
+ static std::atomic<int> told{0};
+ if(told.fetch_add(1)<8)NBLOG(@"native-metal: CPU wait %p at %llu (%llu ms): %s, now %llu",(__bridge void *)self,(unsigned long long)value,(unsigned long long)milliseconds,
+  ok?"reached":"timed out",(unsigned long long)nmb_shared_event_value(self.handle));
+ return ok;
+}
 // The block runs on the listener's dispatch queue (Metal's contract); the bridge's listener thread only forwards it there.
 - (void)notifyListener:(MTLSharedEventListener *)listener atValue:(uint64_t)value block:(MTLSharedEventNotificationBlock)block {
  if(!block)return;
  reach_if_external(self,self.handle,value,"listener");
+ gListenAdded++;
+ {
+  static std::atomic<int> told{0};
+  if(told.fetch_add(1)<8)NBLOG(@"native-metal: listener on %p at %llu (now %llu)",(__bridge void *)self,(unsigned long long)value,(unsigned long long)nmb_shared_event_value(self.handle));
+ }
  dispatch_queue_t queue=listener.dispatchQueue?:dispatch_get_global_queue(QOS_CLASS_DEFAULT,0);
  NSArray *job=@[self,queue,[block copy]];
  if(!nmb_shared_event_notify(self.handle,value,notified,(__bridge_retained void *)job)) {
@@ -863,6 +880,9 @@ static bool reach_if_external(id event,NmbEvent *handle,uint64_t value,const cha
 static void notified(void *context,uint64_t value) {
  NSArray *job=(__bridge_transfer NSArray *)context;
  id<MTLSharedEvent> event=job[0];MTLSharedEventNotificationBlock block=job[2];
+ gListenFired++;
+ static std::atomic<int> told{0};
+ if(told.fetch_add(1)<8)NBLOG(@"native-metal: listener on %p fired at %llu",(__bridge void *)event,(unsigned long long)value);
  dispatch_async(job[1],^{block(event,value);});
 }
 @interface NBFence : NBObject
@@ -904,6 +924,7 @@ static void notified(void *context,uint64_t value) {
 @property(nonatomic,strong) dispatch_group_t schedulingHandlers;
 @property(nonatomic) BOOL schedulingDelivered;
 @property(nonatomic,strong) NSMutableDictionary *userDict;
+@property(nonatomic,strong) NSMutableArray *sharedSignals;   // S2s: @[event, @(value)] pairs, checked at completion
 - (void)refuse:(NSString *)what;
 @end
 @interface NBEncoder : NBObject
@@ -1498,6 +1519,12 @@ static void scheduled(void *context);
  if(self.committed){[self refuse:@"event encoded after commit"];return;}
  [_resourceOwners addObject:event];
  NmbEvent *handle=[(NBEvent *)event handle];
+#if !TARGET_OS_IPHONE
+ if(signal && [(id)event isKindOfClass:[NBSharedEvent class]]) {
+  if(!_sharedSignals)_sharedSignals=[NSMutableArray array];
+  [_sharedSignals addObject:@[event,@(value)]];
+ }
+#endif
  if(!(signal?nmb_command_buffer_signal_event(_handle,handle,value):nmb_command_buffer_wait_event(_handle,handle,value)))
   [self refuse:[NSString stringWithFormat:@"%s: %@",signal?"encodeSignalEvent":"encodeWaitForEvent",lastError()]];
 }
@@ -1539,8 +1566,38 @@ static void scheduled(void *context);
   if(!_schedulingDelivered){_schedulingDelivered=YES;[_scheduledHandlers removeAllObjects];dispatch_group_leave(_schedulingHandlers);}
   completedHandlers=[_completedHandlers copy];[_completedHandlers removeAllObjects];
  }
+#if !TARGET_OS_IPHONE
+ // S2s (2026-11-12): every shared-event signal this command buffer carried should be visible once it has completed.
+ // S2r: WindowServer signalled two events to 2 on the GPU, all 6 command buffers completed, and nothing ever came next.
+ // If the value is still lower, the runtime did not publish it: raise it from the CPU (listeners fire) and say so.
+ if(!self.failedLocally) for(NSArray *pair in _sharedSignals) {
+  NBSharedEvent *event=pair[0];const uint64_t want=[pair[1] unsignedLongLongValue];
+  const uint64_t now=nmb_shared_event_value(event.handle);
+  gSignalsChecked++;
+  if(now<want) {
+   gSignalsRaised++;
+   static std::atomic<int> told{0};
+   if(told.fetch_add(1)<8)NBLOG(@"native-metal: completed #%u: signal %p at %llu not published (now %llu): raised from the CPU",self.commitIndex,(__bridge void *)event,
+    (unsigned long long)want,(unsigned long long)now);
+   nmb_shared_event_set_value(event.handle,want);
+  } else {
+   static std::atomic<int> told{0};
+   if(told.fetch_add(1)<4)NBLOG(@"native-metal: completed #%u: signal %p at %llu published (now %llu)",self.commitIndex,(__bridge void *)event,(unsigned long long)want,(unsigned long long)now);
+  }
+ }
+ [_sharedSignals removeAllObjects];
+ const uint32_t index=self.commitIndex;
+ dispatch_queue_t logQueue=_queue.completionQueue;
+ {
+  static std::atomic<int> told{0};
+  if(told.fetch_add(1)<12)NBLOG(@"native-metal: completed #%u: %lu handler(s) on %s",index,(unsigned long)completedHandlers.count,
+   logQueue?(dispatch_queue_get_label(logQueue)[0]?dispatch_queue_get_label(logQueue):"an unnamed completion queue"):"the runtime's thread");
+ }
+#endif
  void (^run)(void)=^{
+  gHandlerRunsBegun++;
   for(MTLCommandBufferHandler block in completedHandlers)block((id<MTLCommandBuffer>)self);
+  gHandlerRunsDone++;
   dispatch_group_leave(self->_handlers);
  };
  dispatch_queue_t queue=_queue.completionQueue;
@@ -2655,6 +2712,16 @@ extern "C" uint64_t native_bridge_metal_recent_commits(uint64_t windowUs) {
  return count;
 }
 
+// S2s: event/handler counters (listeners added/fired, completed-handler runs begun/done, command buffers in flight, CPU waits/timeouts,
+// shared-event signals checked/raised at completion).
+extern "C" size_t native_bridge_metal_events(char *out,size_t size) {
+ unsigned long inFlight=0;
+ if(gInFlight)@synchronized(gInFlight){inFlight=(unsigned long)gInFlight.count;}
+ return (size_t)snprintf(out,size,"listen %llu/%llu handlers %llu/%llu inflight %lu cpuwait %llu/%llu signals %llu raised %llu",
+  (unsigned long long)gListenAdded.load(),(unsigned long long)gListenFired.load(),(unsigned long long)gHandlerRunsBegun.load(),
+  (unsigned long long)gHandlerRunsDone.load(),inFlight,(unsigned long long)gCpuWaits.load(),(unsigned long long)gCpuWaitFails.load(),
+  (unsigned long long)gSignalsChecked.load(),(unsigned long long)gSignalsRaised.load());
+}
 extern "C" size_t native_bridge_metal_status(char *out,size_t size) {
  std::lock_guard<std::mutex> lock(gProblemLock);
  return (size_t)snprintf(out,size,"c%llu/%llu d%llu p%llu x%llu R%llu D%llu F%llu M%llu C%llu B%llu %s | %s",(unsigned long long)gCommits.load(),(unsigned long long)gCommitFailures.load(),(unsigned long long)gCompleted.load(),

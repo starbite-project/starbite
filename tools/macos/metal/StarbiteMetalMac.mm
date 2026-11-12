@@ -433,9 +433,11 @@ extern "C" id sbmtl_device(mach_port_t port)
 			dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), 15 * NSEC_PER_SEC, NSEC_PER_SEC);
 			__block int ticks = 0;
 			dispatch_source_set_event_handler(t, ^{
-				char line[512];
+				char line[512], events[256];
 				native_bridge_metal_status(line, sizeof line);
+				native_bridge_metal_events(events, sizeof events);
 				sm2_log("status %ds: %s", 15 * ++ticks, line);
+				sm2_log("events %ds: %s", 15 * ticks, events);
 				if (ticks >= 24)
 					dispatch_source_cancel(t);
 			});
