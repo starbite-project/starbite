@@ -1321,7 +1321,8 @@ static void comms_tick(void)
 #define SOAK_MS 30000U
 static int st_ph, st_round, st_fails, st_pass, st_restarted;
 static uint64_t st_t0, st_tp, st_all;
-static uint32_t st_min = 0xffffffffu, st_max, st_sum, st_n;
+static uint32_t st_min = 0xffffffffu, st_max, st_sum, st_n, st_up_ms[2], st_off_ms;
+static char st_audio[64];                   /* the audio stages, for the summary (a short pmsg tail keeps it) */
 
 static void st_line(const char *a, uint64_t ms)
 {
@@ -1335,6 +1336,15 @@ static void st_line(const char *a, uint64_t ms)
 }
 
 static const char *au_words(int v) { return v == 1 ? "ok" : v == -1 ? "FAILED" : "not run"; }
+
+void kmodem_selftest_abort(void)
+{
+    if (!cell_selftest)
+        return;
+    sb_log("selftest: cell: stopped by a touch or key: Cellular off (data off, detach, park)");
+    kmodem_cellular(0);
+    cell_selftest = 0;
+}
 
 int kmodem_selftest_phase(int *done)
 {
@@ -1365,6 +1375,7 @@ int kmodem_selftest_phase(int *done)
     case 1:                                 /* data up */
         if (cst == KCELL_DATA) {
             st_line(st_restarted ? "data up again (the restart in one boot) in " : "data up in ", now - st_t0);
+            st_up_ms[st_restarted ? 1 : 0] = (uint32_t)(now - st_t0);
             st_tp = now;
             st_ph = 2;
         } else if (cst == KCELL_FAILED || cst == KCELL_NO_SIM || cst == KCELL_SIM_LOCKED || now - st_t0 > 240000U) {
@@ -1395,6 +1406,7 @@ int kmodem_selftest_phase(int *done)
                 ub_s(&u, ", VSS ");
                 ub_s(&u, au_vss ? "started" : "not started");
                 sb_log(u.b);
+                sb_strcpy(st_audio, sizeof(st_audio), u.b + sizeof("selftest: cell: audio stages (no call, no sound): ") - 1);
             }
             st_round = 0;
             st_tp = now;
@@ -1464,8 +1476,10 @@ int kmodem_selftest_phase(int *done)
         break;
     case 8:
         if (cst == KCELL_OFF || cst == KCELL_FAILED || now - st_tp > 30000U) {
-            if (cst == KCELL_OFF && !kmodem_on())
+            if (cst == KCELL_OFF && !kmodem_on()) {
                 st_line("off and parked in ", now - st_tp);
+                st_off_ms = (uint32_t)(now - st_tp);
+            }
             else {
                 sb_log("selftest: cell: FAILED: not off and parked in 30 s; parking");
                 kmodem_stop("self test");
@@ -1492,6 +1506,14 @@ int kmodem_selftest_phase(int *done)
         ub_s(&u, " max ");
         ub_dec(&u, st_max);
         ub_s(&u, st_restarted ? "; restarted once in this boot" : "; no restart");
+        ub_s(&u, "; data up in ");
+        ub_dec(&u, st_up_ms[0]);
+        ub_s(&u, " / ");
+        ub_dec(&u, st_up_ms[1]);
+        ub_s(&u, " ms; parked in ");
+        ub_dec(&u, st_off_ms);
+        ub_s(&u, " ms; audio: ");
+        ub_s(&u, st_audio[0] ? st_audio : "not reached");
         sb_log(u.b);
         cell_selftest = 0;
         *done = 1;
@@ -1912,6 +1934,7 @@ int kmodem_cellular(int on) { (void)on; return SBOS_EAGAIN; }
 int kmodem_netif(struct sbnet **net, struct sbtcp **tcp) { (void)net; (void)tcp; return 0; }
 void kmodem_cell(struct kcell *c) { memset(c, 0, sizeof(*c)); c->bars = -1; }
 int kmodem_selftest_phase(int *done) { *done = 1; return 1; }
+void kmodem_selftest_abort(void) { }
 #endif
 
 void kmodem_timer(unsigned id)

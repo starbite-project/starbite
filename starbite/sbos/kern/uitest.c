@@ -188,6 +188,10 @@ void selftest_input(void)
     kt_cancel(KT_SELFTEST, 0);
     if (phase == 13)
         wifi_power(0);                      /* stopped during its Wi-Fi step: the radio off again */
+#ifdef SBOS_SELFTEST_NEXT_CELL
+    if (phase == 120)
+        kmodem_selftest_abort();            /* stopped mid-test: Cellular off (data off, detach, park) */
+#endif
 #if defined(SBOS_SELFTEST_SHUBPROBE) || defined(SBOS_SELFTEST_SHUB)
     shub_leave();                           /* stopped mid-probe: the hub in standby, every register as found */
 #endif

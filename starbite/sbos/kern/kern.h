@@ -731,6 +731,7 @@ int kmodem_set_apn(const char *apn);       /* [A-Za-z0-9.-] 1..63, "" = "interne
 void kmodem_get_apn(char *out, unsigned cap);
 int kmodem_cellular(int on);
 int kmodem_selftest_phase(int *done);  /* next-celltest (unattended data): every 500 ms; *done at the end, 0 = failed */
+void kmodem_selftest_abort(void);      /* next-celltest stopped by a touch or key: Cellular off */
 void kmodem_cell(struct kcell *c);
 struct sbnet;
 struct sbtcp;
