@@ -28,6 +28,9 @@ set /a W+=5
 tasklist /fi "imagename eq GeometryDash.exe" | find /i "GeometryDash.exe" > nul && goto up
 if !W! lss 360 goto wait
 echo GD2 GeometryDash.exe never appeared in 360 s >> %L%
+tasklist /fi "imagename eq steam*" >> %L% 2>&1
+dir /a /o:d /t:w "C:\Program Files (x86)\Steam\logs" >> %L% 2>&1
+if exist "C:\Program Files (x86)\Steam\logs\content_log.txt" powershell -NoProfile -Command "Get-Content -Tail 15 'C:\Program Files (x86)\Steam\logs\content_log.txt'" >> %L% 2>&1
 goto finish
 :up
 echo GD2 GeometryDash.exe up after !W! s >> %L%
