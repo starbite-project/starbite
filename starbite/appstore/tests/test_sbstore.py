@@ -538,6 +538,18 @@ class Source(unittest.TestCase):
         self.assertEqual(self.e.run_bin("hello"), "hello 1.0")
         self.assertEqual(self.e.state()["apps"]["hello"]["method"], "release")
 
+    def test_switch_failure_keeps_the_old_install(self):
+        publish_hello("1.0")
+        self.e.run("install", "hello", "--method", "release")
+        FILES.d["/src/hello-v1.0.tar.gz"] = tgz({"Makefile": (b"all:\n\tfalse\n", 0o644)}, top="hello-v1.0")
+        evs = self.e.run("install", "hello", "--method", "source", expect=1)
+        self.assertEqual(evs[-1]["short"], "build failed")
+        self.assertEqual(self.e.run_bin("hello"), "hello 1.0")              # the release install is back
+        st = self.e.state()["apps"]["hello"]
+        self.assertEqual((st["method"], st["version"]), ("release", "1.0"))
+        self.assertTrue(os.path.exists(self.e.path("/usr/local/share/applications/sbstore-hello.desktop")))
+        self.assertFalse(os.path.exists(self.e.path("/opt/sbstore/hello.switch")))
+
     def test_build_failure_cleans_up(self):
         publish_hello("1.0")
         FILES.d["/src/hello-v1.0.tar.gz"] = tgz({"Makefile": (b"all:\n\tfalse\n", 0o644)}, top="hello-v1.0")

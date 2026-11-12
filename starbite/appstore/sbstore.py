@@ -1332,11 +1332,49 @@ def op_install(cat, aid, method=None, prog=NOPROG, cancel=None, update=False):
     with Lock():
         st = load_state()
         cur = st["apps"].get(aid)
+        parked = None
+        opt_kind = lambda m, rec=None: m in ("release", "source") and not (rec or {}).get("debian_source") and \
+            (app.get(m) or {}).get("system") != "debian" and (app.get(m) or {}).get("format") != "deb"  # noqa: E731
         if cur and cur.get("method") != method:
-            log("switching %s from %s to %s: removing the %s install first" % (aid, cur["method"], method,
-                                                                               cur["method"]))
-            _remove_locked(cat, st, aid, prog, keep_refs=True)
+            if opt_kind(cur["method"], cur) and opt_kind(method) and os.path.isdir(app_dir(aid)):
+                # /opt to /opt (release <-> source): park the working install; it comes back if the new one fails
+                log("switching %s from %s to %s (the %s install is kept until the new one works)" %
+                    (aid, cur["method"], method, cur["method"]))
+                deactivate(aid, cur)
+                parked = (app_dir(aid) + ".switch", cur)
+                shutil.rmtree(parked[0], ignore_errors=True)
+                os.replace(app_dir(aid), parked[0])
+                del st["apps"][aid]
+                save_state(st)
+            else:
+                log("switching %s from %s to %s: removing the %s install first" % (aid, cur["method"], method,
+                                                                                   cur["method"]))
+                _remove_locked(cat, st, aid, prog, keep_refs=True)
             cur = None
+        try:
+            return _install_locked(app, st, aid, method, cur, prog, cancel, update)
+        except BaseException:
+            if parked:                                   # give the old install back
+                shutil.rmtree(app_dir(aid), ignore_errors=True)
+                os.replace(parked[0], app_dir(aid))
+                st = load_state()
+                st["apps"][aid] = parked[1]
+                pspec = app.get(parked[1]["method"]) or {}
+                try:
+                    parked[1]["links"] = activate(app, parked[1]["dir"], pspec.get("bin") or [], parked[1]["method"])
+                except StoreError as e:
+                    log("restoring %s: %s" % (aid, e.detail), aid)
+                save_state(st)
+                log("the switch failed: %s %s by %s is back" % (aid, parked[1]["version"], parked[1]["method"]), aid)
+            raise
+        finally:
+            if parked and os.path.isdir(parked[0]):
+                shutil.rmtree(parked[0], ignore_errors=True)
+
+
+def _install_locked(app, st, aid, method, cur, prog, cancel, update):
+    """op_install's body, under the lock"""
+    if True:
         log("%s %s by %s" % ("update" if update else "install", aid, method))
         if method == "distro":
             return _install_distro(app, st, prog, cancel, update)

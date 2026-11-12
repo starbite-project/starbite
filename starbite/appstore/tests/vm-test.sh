@@ -11,8 +11,10 @@ CH=$TOP/tools/vm-chroot.sh
 NAME=vmtest-$$
 M=$("$CH" fresh "$NAME" | tail -1)
 trap 'R=$M "$CH" umount; "$CH" drop "$NAME" >/dev/null 2>&1' EXIT
+# a GitHub token (optional, lifts the 60 requests / hour limit) from a file, never on a command line
+[ -n "${GH_TOKEN_FILE:-}" ] && sudo install -m 600 "$GH_TOKEN_FILE" "$M/root/.ghtok"
 run() { R=$M "$CH" run env SBSTORE_CATALOG="$CAT" SBSTORE_MIRROR=/nonexistent SBSTORE_REPO=/nonexistent \
-        ${SBSTORE_GITHUB_TOKEN:+SBSTORE_GITHUB_TOKEN=$SBSTORE_GITHUB_TOKEN} "$@"; }
+        sh -c '[ -f /root/.ghtok ] && export SBSTORE_GITHUB_TOKEN=$(cat /root/.ghtok); exec "$@"' sh "$@"; }
 sb() { run python3 "$TOP/sbstore.py" "$@"; }
 pass=0; fail=0
 ok() { echo "PASS $*"; pass=$((pass + 1)); }
