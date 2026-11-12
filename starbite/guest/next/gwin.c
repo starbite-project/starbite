@@ -492,10 +492,32 @@ int sh_linux_rotate(int q, int rows)
     return 1;
 }
 int sh_linux_rot_shown(void) { return guest_state() == GUEST_RUNNING ? (int)sbg_rot_shown() : 0; }
+/* Track A's sh_orientation while a Linux window is in front (every 200 ms: it keeps the accelerometer alive): the
+ * phone's top to the left (SH_ORI_TURNED_LEFT) is turn 1, to the right turn 3; upside down stays portrait. With the
+ * keyboard up the window stays portrait (the shell's keyboard is drawn portrait; a landscape keyboard would pass its
+ * rows to sh_linux_rotate). Hidden: portrait again (the next open reads the sensor again). */
+static void ori_tick(void)
+{
+    static uint64_t t;
+    uint64_t now = sb_ms();
+    if (!guest_shown() || want < 0) {
+        if (rot_q)
+            sh_linux_rotate(0, 0);
+        return;
+    }
+    if (now - t < 200)
+        return;
+    t = now;
+    int o = sh_orientation();
+    int q = o == SH_ORI_TURNED_LEFT ? 1 : o == SH_ORI_TURNED_RIGHT ? 3 : 0;
+    if (vp_rows < SH_LINUX_H)
+        q = 0;
+    sh_linux_rotate(q, 0);
+}
 static void rot_tick(void)
 {
-    if (!rot_dirty || guest_state() != GUEST_RUNNING || want < 0)
-        return;
+    if (!rot_dirty || guest_state() != GUEST_RUNNING || (want < 0 && rot_q))
+        return;                            /* (portrait goes at once, a turn only with a window in front) */
     int r = sbg_rotate((uint32_t)rot_q, (uint32_t)rot_rows);
     if (r > 0) {
         rot_dirty = 0;
@@ -686,6 +708,7 @@ int gwin_now(void)
     changed = was != last_state || words;
     if (was != last_state && last_state != GUEST_RUNNING && rot_q)
         rot_dirty = 1;                     /* the next guest gets the turn again */
+    ori_tick();
     rot_tick();
     if (guest_state() == GUEST_RUNNING) {
         unsigned ch = sbg_changes();

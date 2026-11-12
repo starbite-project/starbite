@@ -638,15 +638,25 @@ int main(int argc, char **argv)
     check(got.keys == 1, "Return as a key");
     tk_comp_frame(&C, 0, 1);
     write_ppm(argv[2], "gwin-editor.ppm", &C.panel);
-    sh_linux_rotate(1, 0);                                  /* cp7: the phone turned (top to the left) */
-    run(2);
-    check(frot == 1 && frot_rows == SH_LINUX_W && sh_linux_rot_shown() == 1, "cp7: ROTATE 1 sent, the turned frame on show");
-    sh_linux_rotate(0, 0);
-    run(2);
-    check(frot == 0 && sh_linux_rot_shown() == 0, "cp7: ROTATE 0 (portrait again)");
+    setenv("SBTK_ORI", "1", 1);                             /* cp7: the phone turned, its top to the left (sh_orientation) */
+    run(6);
+    check(frot == 0, "cp7: the keyboard up: the window stays portrait");
+    sh_linux_viewport(SH_LINUX_H);                          /* the keyboard down */
+    run(6);
+    check(frot == 1 && frot_rows == SH_LINUX_W && sh_linux_rot_shown() == 1, "cp7: sh_orientation TURNED_LEFT -> ROTATE 1, the turned frame on show");
+    setenv("SBTK_ORI", "3", 1);
+    run(6);
+    check(frot == 3, "cp7: TURNED_RIGHT -> ROTATE 3");
+    setenv("SBTK_ORI", "2", 1);
+    run(6);
+    check(frot == 0, "cp7: upside down -> portrait");
+    setenv("SBTK_ORI", "1", 1);
+    run(6);
+    unsetenv("SBTK_ORI");
     sh_set("app", "", 0);                                   /* home */
     run(2);
     check(got.activate_none == 1 && !shown, "home: ACTIVATE none, the window hidden (the app keeps running)");
+    check(frot == 0, "cp7: home: the guest portrait again");
     sh_set("store", "gimp", 1);                             /* the App Store on GIMP's page (Linux starts again) */
     run(25);
     check(busy, "the App Store open: Linux kept from its idle stop");
