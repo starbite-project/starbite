@@ -82,7 +82,8 @@ static int pm_set;                          /* Track H: power save (PM 2) set af
 static int join_hidden;                     /* Track H: the pending join is by name (the network may be hidden) */
 /* Track H: back by itself after a drop (2 s, 5 s, 15 s, 30 s, then every 60 s), and a background scan for a
  * remembered network while on and not joined (every 60 s with the screen on, 5 min off) */
-static uint64_t reconnect_at, bg_scan_at;
+static uint64_t reconnect_at, bg_scan_at, rssi_at;
+static unsigned revive_n;                   /* Track H: the chip stopped answering: powered up again (twice a boot) */
 static unsigned reconnect_n;
 static void reconnect_later(void);
 static int time_only;                       /* (1.2-alpha26, below) the boot's time check */
@@ -1448,6 +1449,15 @@ void wifi_timer(unsigned id)
     if (st == SBOS_WIFI_OFF)
         return;
     uint64_t now = sb_ms();
+    if (st == SBOS_WIFI_FAILED) {
+        /* Track H: only here when the chip stopped answering and a restart of the radio was asked for (below) */
+        if (user_on && !surv_off && !wifi_in_selftest() && revive_n < 2) {
+            ++revive_n;
+            logn("wifi: the radio is started again after it stopped answering, time ", revive_n, "");
+            (void)wifi_power(1);
+        }
+        return;
+    }
     if (time_only && (ntp_st == 3 || ntp_st == -1 || now - time_only_t > 90000U)) {
         wifi_time_only_end(ntp_st == 3 ? "the clock is set; Wi-Fi off again" : "no time came; Wi-Fi off again");
         wifi_power(0);
@@ -1532,6 +1542,9 @@ void wifi_timer(unsigned id)
             joined = -1;
             kt_cancel(KT_WIFI, 0);
             set_state(SBOS_WIFI_FAILED, "The radio stopped answering (logged)");
+            net_down();
+            if (user_on && !surv_off && !wifi_in_selftest() && revive_n < 2)
+                kt_set(KT_WIFI, 0, sb_ms(), 5000, 0);   /* Track H: once more in 5 s (wifi_timer, FAILED) */
             return;
         }
         if (scan_retry && st == SBOS_WIFI_UP && now >= scan_retry_at)
@@ -1664,6 +1677,24 @@ void wifi_timer(unsigned id)
     if (fx_state == 1 && st != SBOS_WIFI_CONNECTED)
         fetch_poll();                       /* the network went: the fetch ends */
     kgw_tick();                             /* Track H: the Linux guest's gateway follows the uplink */
+    if (st == SBOS_WIFI_CONNECTED && K.screen_on && fx_state != 1 && joined >= 0 && joined < nnets &&
+        now - rssi_at >= 10000U && w_ready && !w->dead) {
+        /* Track H: the joined network's signal now (WLC_GET_RSSI, brcmf_scb_val_le), for the status bar's bars */
+        uint8_t sv[12];
+        int fe = 0;
+        rssi_at = now;
+        memset(sv, 0, sizeof(sv));
+        hw_wdt_feed();
+        if (bcmw_ioctl(w, 0, 127, sv, sizeof(sv), 0, &fe) == BCMW_OK) {
+            int32_t v = (int32_t)((uint32_t)sv[0] | (uint32_t)sv[1] << 8 | (uint32_t)sv[2] << 16 | (uint32_t)sv[3] << 24);
+            if (v < 0 && v > -120) {
+                int was = nets[joined].rssi;
+                nets[joined].rssi = v;
+                if ((was > -60) != (v > -60) || (was > -70) != (v > -70))
+                    notify();               /* the bars changed */
+            }
+        }
+    }
     int busy = st == SBOS_WIFI_STARTING || st == SBOS_WIFI_SCANNING || st == SBOS_WIFI_JOINING || st == SBOS_WIFI_DHCP ||
                join_pending || join_active || dhcp_go || fx_state == 1;
     uint32_t every = st == SBOS_WIFI_STARTING ? 10U : K.screen_on ? TICK_ON_MS : TICK_OFF_MS;
