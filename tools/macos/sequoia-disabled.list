@@ -87,3 +87,4 @@ com.apple.ScreenTimeAgent
 com.apple.accessibility.axassetsd
 com.apple.corespotlightservice
 com.apple.Spotlight
+com.apple.security.cryptexd     # S1f 2026-11-12: abort every ~10 s, "unexpected failure: open: /System/Volumes/Preboot: ENOENT". The OS cryptex lives on the root (/System/Cryptexes/OS) and Preboot must not exist (CarbonCore registers it as a second volume of the root's device, S1d); no cryptex to manage

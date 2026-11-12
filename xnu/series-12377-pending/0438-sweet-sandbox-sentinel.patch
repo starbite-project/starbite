@@ -1,0 +1,63 @@
+From 30678de1d28278346b946e993203fdd6c448d43e Mon Sep 17 00:00:00 2001
+From: starbite <starbite@local>
+Date: Thu, 12 Nov 2026 06:48:59 +0200
+Subject: [PATCH] patch: 0438-sweet-sandbox-sentinel.patch -
+ security.mac.sandbox.sentinel (string, per-boot ".sb-%08x") from the Sandbox
+ stand-in, as Sandbox.kext provides it: libsystem_sandbox's _amkrtemp names
+ atomic temp files with it and fails without it, so MDS DbCreate failed and
+ securityd aborted ("load cssm failed"; Sequoia S1f 2026-11-12, Ventura needed
+ two securityd NOPs for this)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/kern/sweet_amfi.c | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index 07aefcf9..e4799a29 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -33,6 +33,7 @@
+ #include <sys/priv.h>
+ #include <sys/proc.h>
+ #include <sys/systm.h>
++#include <sys/sysctl.h>
+ #include <sys/ubc_internal.h>
+ #include <sys/vnode.h>
+ #include <security/mac_policy.h>
+@@ -467,6 +468,19 @@ static struct mac_policy_conf sweet_quarantine_mac_conf = {
+ 
+ static mac_policy_handle_t sweet_quarantine_mac_handle;
+ 
++/*
++ * 0438: security.mac.sandbox.sentinel, the Sandbox ABI's string sysctl (Sandbox.kext registers it). libsystem_sandbox's
++ * _amkrtemp builds atomic temp names as "<path><sentinel>-XXXXXX" and returns NULL without it, so Security's
++ * AtomicFile (MDS DbCreate) failed and securityd aborted ("load cssm failed", Sequoia S1f 2026-11-12; Ventura's
++ * securityd NOPs). The value is a per-boot ".sb-%08x", file-name safe like the real one.
++ */
++SYSCTL_DECL(_security_mac);
++SYSCTL_NODE(_security_mac, OID_AUTO, sandbox, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "Sandbox (SWEET stand-in)");
++static char sweet_sandbox_sentinel[16] = ".sb-00000000";
++SYSCTL_STRING(_security_mac_sandbox, OID_AUTO, sentinel, CTLFLAG_RD | CTLFLAG_LOCKED,
++    sweet_sandbox_sentinel, 0, "sandbox sentinel");
++extern uint64_t early_random(void);
++
+ /* Called from bsd_init once MAC policies can register, before any exec. */
+ void sweet_amfi_policy_register(void);
+ 
+@@ -476,9 +490,10 @@ sweet_amfi_policy_register(void)
+ 	int error = mac_policy_register(&sweet_amfi_mac_conf, &sweet_amfi_mac_handle, NULL);
+ 	printf("SWEET AMFI: platform binary policy %s (%d)\n",
+ 	    error ? "NOT registered" : "registered", error);
++	snprintf(sweet_sandbox_sentinel, sizeof(sweet_sandbox_sentinel), ".sb-%08x", (uint32_t)early_random());
+ 	error = mac_policy_register(&sweet_sandbox_mac_conf, &sweet_sandbox_mac_handle, NULL);
+-	printf("SWEET Sandbox: permissive policy %s (%d)\n",
+-	    error ? "NOT registered" : "registered", error);
++	printf("SWEET Sandbox: permissive policy %s (%d), sentinel %s\n",
++	    error ? "NOT registered" : "registered", error, sweet_sandbox_sentinel);
+ 	error = mac_policy_register(&sweet_quarantine_mac_conf, &sweet_quarantine_mac_handle, NULL);
+ 	printf("SWEET Quarantine: permissive policy %s (%d)\n",
+ 	    error ? "NOT registered" : "registered", error);
+-- 
+2.53.0
+
