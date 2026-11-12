@@ -2021,6 +2021,34 @@ Every app failure must be a removed device that the app or DWM recovers from.
   - If faults fall to ~0, eviction of unlisted own BOs was the cause.
   - If they don't, the remaining reader is DWM with a stale descriptor of a surface it already closed.
 
+### 6.56 T48 read; T49 = scratch-page KMD + SV_VertexID + GD diagnostic; T49b = no-IDVS A/B (2026-11-12)
+
+- **T48 (`build/win/results-t48`; 0139 list-all): not installed.**
+  - Faults in live allocations 0 (T47: 64), so listing every buffer does remove the eviction faults.
+  - But timeouts 54 (18), every one a `dwm.exe` `indexed-vertex` job; sbfps -10..-13%; sbdrag -27..-45% (it ran before
+    GD, so GD did not skew it).
+  - **Geometry Dash did not crash there:** our GD1 step gave it 40 s after Steam's 180 s start on the A55s, then
+    `taskkill`ed it while it was loading (427 MiB, no exception).
+- **sbwddm 7008b9e4:**
+  - the unmap paging operation points an evicted allocation's PTEs at a zeroed scratch page with read-only leaf
+    0x241 (Mali LPAE: no write bit; Linux io-pgtable-arm), so a stale read returns zeros instead of a translation
+    fault and GPU reset;
+  - FreeAllocation still unmaps (a use-after-free still faults);
+  - `Parameters\ScratchUnmap` (default 1); `Live_ScratchMaps`/`Live_ScratchPtes`; the fault log shows `pte S`.
+- **sb-patches/0141 (SV_VertexID):**
+  - d3d10umd emits TGSI `VERTEXID_NOBASE`, which becomes `load_vertex_id_zero_base`; Bifrost v6 had no case for it
+    ("Unhandled intrinsic", value never written);
+  - now lowered to `load_vertex_id - load_first_vertex`, with a per-draw sysval (index_bias / start): D3D11.3 §8.16;
+  - host-compiled evidence: `build/win/umd-vid/host-evidence/`.
+- **sb-patches/0149:** `C:\ProgramData\Starbite\noidvs` (or PAN_NO_IDVS=1) compiles vertex shaders without IDVS, to test
+  whether IDVS is what hangs DWM (T49b).
+- **sb-patches/0145:** the GL ICD presents straight from the mapped BGRA back buffer (no per-frame malloc/copy).
+  - The remaining cost is GDI's one read of write-combined memory, roughly 50-110 ms per full-screen frame
+    (§6.35's 87-180 MB/s). A cached CPU view or a D3DKMT present is next.
+- **sb-gd.bat:** a GD diagnostic replacing the sweep (360 s start, 300 s of 30-second rows, shots, events).
+- **Stage `sbwddm-t49`** (sbumd e01fa73f = 0137, 0138, 0141, 0149 on sb-int; 0139 reverted). T49b = the same stage
+  with the noidvs flag.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
