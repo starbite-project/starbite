@@ -24,6 +24,10 @@
 #include "../wpa.h"
 
 struct model M;
+/* Starbite OS's kernel harness (starbite/sbos/kern/host/wifi-kern-test.c): the AP as an undirected scan hears it,
+ * hidden (no name: only a directed scan by its name answers with it) or on 2.4 GHz (the directed scan stays 5 GHz) */
+int model_ap_hidden, model_ap_listed24;
+int model_link_gone;                        /* ... and every read all ones (the PCIe link gone: the chip stopped answering) */
 
 /* ---- the DMA arena: host memory with bus addresses below 4 GiB --------------------------------- */
 
@@ -222,6 +226,8 @@ uint32_t model_rd32(void *ctx, uint64_t pa)
     uint64_t b0 = bar(0), b2 = bar(2);
     (void)ctx;
     M.reads++;
+    if (model_link_gone)
+        return 0xffffffffu;
     note_access(pa, 0);
     if (pa >= EX_CFG && pa < EX_CFG + 0x1000) {
         uint32_t off = (uint32_t)(pa - EX_CFG);
@@ -624,7 +630,7 @@ static void answer(const uint8_t *req, uint16_t trans, uint32_t cmd, const uint8
             else
                 scan = (ver == 2 ? data[12] : data[8]) ? 2 : 1;  /* a name in the parameters: a directed scan */
             if (scan == 1 && (M.open_ap || M.echo_sync) && M.up)
-                scan = 2;               /* Starbite OS's preview: its own scans answered with their sync id */
+                scan = 3;               /* Starbite OS's preview: its own scans answered with their sync id */
         } else if (!strcmp(name, "mpc")) {
         } else {
             status = (uint16_t)-23;     /* BCME_UNSUPPORTED */
@@ -658,10 +664,17 @@ answered:
     }
     d2h_put(RING_D2H_CONTROL, it, sizeof(it));
     model_ap_after(cmd);
-    if (scan == 2) {
+    if (scan == 2 || scan == 3) {
         uint8_t r[400], old[12];
         uint16_t sync = (uint16_t)(in[strlen((const char *)in) + 1 + 6] | in[strlen((const char *)in) + 1 + 7] << 8);
         unsigned n = model_ap_scan_result(r, sizeof(r), sync);
+        if (scan == 3 && n >= 12 + 128 + 9 && model_ap_hidden) {
+            r[12 + 18] = 0;             /* undirected: a hidden AP's beacon has no name (the SSID element zeroed) */
+            memset(r + 12 + 19, 0, 32);
+            memset(r + 12 + 128 + 2, 0, r[12 + 128 + 1]);
+        }
+        if (scan == 3 && n >= 12 + 128 && model_ap_listed24)
+            put16le(r + 12 + 72, 0x1006);
         /* the earlier scan (step 10's, sync 0x1234) ended by the new one: status 9 (NEWSCAN) first */
         memset(old, 0, sizeof(old));
         put16le(old + 8, 0x1234);
