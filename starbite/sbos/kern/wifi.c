@@ -217,7 +217,7 @@ static void load_saved(void)
     buf[len] = 0;
 #else
     struct store_ent e;
-    if (!store_find("ufs:wifinet", &e) || !e.size || e.size >= sizeof(buf) || store_load(&e, (uintptr_t)buf, sizeof(buf)))
+    if (!store_find("home:wifinet", &e) || !e.size || e.size >= sizeof(buf) || store_load(&e, (uintptr_t)buf, sizeof(buf)))
         return;
     buf[e.size] = 0;
 #endif

@@ -4,6 +4,9 @@
  * as the single commit) and saves the settings record (one block, as the loader's settings_save);
  * removing or renaming an entry rewrites the directory and is tier 2. Every block goes through the
  * write fence (sb_write_store / sb_write) with the user's confirmation, and is read back.
+ * The home store (store_home, the loader's rule: store.h) holds the settings record and the OS's volatile
+ * state: the UFS store, or since 2026-11-11 the card's (docs/STORE-ON-CARD.md); the loader's SBFW table
+ * (sbfw.c) says which, and "card only" keeps libsb off the UFS store entirely.
  */
 #include <stdint.h>
 #include "store.h"
@@ -19,6 +22,7 @@
 struct medium {
     int state;                 /* 0 not tried, 1 open, -1 none */
     int version;
+    int home;                  /* the header's HOME flag (SBSTHOME extension) */
     uint64_t base, capacity, used, settings;
     uint32_t n_hdr, dir, dir_blocks;    /* the header's count and directory (v2) */
     unsigned count;
@@ -74,6 +78,9 @@ static int open_v2(struct medium *s, unsigned m, uint64_t limit)
     s->capacity = le(SCRATCH + 16, 8);
     s->used = le(SCRATCH + 24, 8);
     s->settings = le(SCRATCH + 40, 4);
+    s->home = le(SCRATCH + 64, 8) == 0x454d4f4854534253ULL &&                       /* "SBSTHOME" */
+              le(SCRATCH + 72, 4) == 1 && star_crc32(SCRATCH + 64, 24) == (uint32_t)le(SCRATCH + 88, 4) &&
+              (le(SCRATCH + 76, 4) & 1U);
     if (s->capacity > limit || s->used > s->capacity || n > STORE_MAX || !dir_blocks ||
         dir_blocks > STORE_MAX * 64U / 4096U || n * 64U > dir_blocks * 4096U ||
         dir + dir_blocks > s->capacity)
@@ -112,6 +119,7 @@ static int open_v1(struct medium *s, unsigned m)
     s->capacity = V1_BLOCKS;
     s->used = le(SCRATCH + 16, 8);
     s->settings = 0;
+    s->home = 0;
     for (uint32_t i = 0; i < n && i < 63; ++i) {
         uintptr_t p = SCRATCH + 64 + 64U * i;
         struct store_ent *e = &s->ent[s->count];
@@ -131,27 +139,40 @@ static int open_v1(struct medium *s, unsigned m)
     return 1;
 }
 
+/* ---- home store state (store.h) ------------------------------------------------------------------- */
+static int home = -2;          /* -2 not resolved, -3 resolving, -1 none, else the medium */
+
+int store_card_only(void)
+{
+    return sb_fw.valid && (sb_fw.flags & SBFW_TF_CARD_ONLY);
+}
+
 int store_open(unsigned m)
 {
     if (m >= STORE_MEDIA)
         return 0;
+    if (home == -2)
+        (void)store_home();            /* which media may be touched at all: decided first */
     struct medium *s = &med[m];
     if (s->state)
         return s->state > 0 ? (int)s->count : 0;
     s->state = -1;
     s->count = 0;
+    s->home = 0;
     uint64_t first, last, limit;
     if (m == STORE_UFS) {
+        /* USERDATA released to iOS (card only), or the card's store is home: the UFS store area is not
+         * read, listed or written again (docs/STORE-ON-CARD.md) */
+        if (store_card_only() || home == (int)STORE_SD)
+            return 0;
         if (!ufs_up() || !gpt_find("USERDATA", &first, &last) || last - first + 1 <= UFS_STORE_OFFSET + 16)
             return 0;
         s->base = first + UFS_STORE_OFFSET;
         limit = last - first + 1 - UFS_STORE_OFFSET;
     } else {
-        /* The card hardware is touched only once allowed (sd.h): by the settings record or by
-         * EngineerMode's microSD page, which then calls store_reset. */
-        struct star_settings st;
-        if (!sd_allowed() && settings_load(&st) && (st.flags & SET_SD_STORE))
-            sd_allow();
+        /* The card hardware is touched only once allowed (sd.h): by the loader's table (the card is home),
+         * the UFS settings record (store_home) or EngineerMode's microSD page, which then calls
+         * store_reset. */
         if (!sd_allowed())
             return 0;
         if (!sd_store_area(&first, &limit))
@@ -216,15 +237,29 @@ static int name_is(const char *a, const char *b)
 
 int store_find(const char *name, struct store_ent *e)
 {
-    unsigned from = 0, to = STORE_MEDIA;
+    int h = store_home();
+    unsigned order[STORE_MEDIA] = { STORE_UFS, STORE_SD }, n = STORE_MEDIA;
+    if (h == (int)STORE_SD) {          /* the home store first */
+        order[0] = STORE_SD;
+        order[1] = STORE_UFS;
+    }
     if (name[0] == 'u' && name[1] == 'f' && name[2] == 's' && name[3] == ':') {
         name += 4;
-        to = 1;
+        order[0] = STORE_UFS;
+        n = 1;
     } else if (name[0] == 's' && name[1] == 'd' && name[2] == ':') {
         name += 3;
-        from = 1;
+        order[0] = STORE_SD;
+        n = 1;
+    } else if (name[0] == 'h' && name[1] == 'o' && name[2] == 'm' && name[3] == 'e' && name[4] == ':') {
+        name += 5;
+        if (h < 0)
+            return 0;
+        order[0] = (unsigned)h;
+        n = 1;
     }
-    for (unsigned m = from; m < to; ++m) {
+    for (unsigned k = 0; k < n; ++k) {
+        unsigned m = order[k];
         if (!opened(m))
             continue;
         for (unsigned i = 0; i < med[m].count; ++i)
@@ -308,15 +343,36 @@ uint64_t store_used(unsigned m)
 }
 
 /* ---- settings record --------------------------------------------------------
- * Block 2 of the UFS store: "SBSETTNG", u32 version 1, u32 CRC32 of bytes 16..255, u32 seq,
- * u32 timeout_s, u32 flags, u32 0, char default_key[24], last_key[24], next_key[24], zeros.
+ * Block 2 of the home store: "SBSETTNG", u32 version 1, u32 CRC32 of bytes 16..255, u32 seq,
+ * u32 timeout_s, u32 flags, u32 0, char default_key[24], last_key[24], next_key[24], the loader's
+ * crash / watchdog bytes 104..111, the SBFW part 112..255 (store.h, sbfw.c).
  */
-static uint64_t settings_lba(void)
+/* Medium m's settings block (version 2, block 2), or 0. */
+static uint64_t settings_lba_of(unsigned m)
 {
-    struct medium *s = &med[STORE_UFS];
-    if (!opened(STORE_UFS) || s->version != 2 || s->settings != 2)
+    struct medium *s = &med[m];
+    if (!opened(m) || s->version != 2 || s->settings != 2)
         return 0;
     return s->base + s->settings;
+}
+
+/* The home store's settings block and its medium, or 0. */
+static uint64_t settings_lba(unsigned *m)
+{
+    int h = store_home();
+    if (h < 0)
+        return 0;
+    *m = (unsigned)h;
+    return settings_lba_of((unsigned)h);
+}
+
+/* The record at lba of medium m into UFS_BUF: 1 if it is a valid one (magic, version 1, CRC). */
+static int settings_read(unsigned m, uint64_t lba)
+{
+    if (m == STORE_UFS ? ufs_read(lba, 1) != 0 : sd_read4k(lba, 1, UFS_BUF) != 0)
+        return 0;
+    return le(UFS_BUF, 8) == SETTINGS_MAGIC && le(UFS_BUF + 8, 4) == 1 &&
+           star_crc32(UFS_BUF + 16, 240) == (uint32_t)le(UFS_BUF + 12, 4);
 }
 
 static void key_get(char *dst, uintptr_t src)
@@ -331,9 +387,9 @@ int settings_load(struct star_settings *st)
     uint8_t *z = (uint8_t *)st;
     for (unsigned i = 0; i < sizeof(*st); ++i)
         z[i] = 0;
-    uint64_t lba = settings_lba();
-    if (!lba || ufs_read(lba, 1) || le(UFS_BUF, 8) != SETTINGS_MAGIC || le(UFS_BUF + 8, 4) != 1 ||
-        star_crc32(UFS_BUF + 16, 240) != (uint32_t)le(UFS_BUF + 12, 4))
+    unsigned m = 0;
+    uint64_t lba = settings_lba(&m);
+    if (!lba || !settings_read(m, lba))
         return 0;
     st->seq = (uint32_t)le(UFS_BUF + 16, 4);
     st->timeout_s = (uint32_t)le(UFS_BUF + 20, 4);
@@ -555,21 +611,25 @@ int store_append(unsigned m, const char *name, unsigned type, const void *src, u
     return r;
 }
 
-/* The settings record (UFS store block 2): one block, as the loader's settings_save, read back. */
-int settings_save(struct star_settings *st)
+/* The settings record (the home store's block 2): one block, as the loader's settings_save, read back.
+ * fw: a new SBFW part (bytes 112..255), or 0 to keep the current one. */
+static int settings_write(struct star_settings *st, const struct sbfw_rec *fw)
 {
-    uint64_t lba = settings_lba();
+    unsigned m = 0;
+    uint64_t lba = settings_lba(&m);
     if (!lba)
         return -1;
     uintptr_t b = SB_STORE_IO + 0x60000;
     zero(b, 4096);
     /* Keep everything this record does not own: the loader's crash/watchdog settings at bytes
-     * 104..255 (docs/STARBITE-HEALTH.md) and anything a later loader adds. Only a valid current
-     * record is carried over; otherwise the block starts from zeros (the loader's defaults). */
-    if (!ufs_read(lba, 1) && le(UFS_BUF, 8) == SETTINGS_MAGIC && le(UFS_BUF + 8, 4) == 1 &&
-        star_crc32(UFS_BUF + 16, 240) == (uint32_t)le(UFS_BUF + 12, 4))
+     * 104..111 (docs/STARBITE-HEALTH.md), the SBFW part 112..255 (docs/STARBITE-FIRMWARE-LAYER.md 10.1)
+     * and anything a later loader adds. Only a valid current record is carried over; otherwise the
+     * block starts from zeros (the loader's defaults). */
+    if (settings_read(m, lba))
         for (unsigned i = 104; i < 256; ++i)
             *(volatile uint8_t *)(b + i) = *(volatile uint8_t *)(UFS_BUF + i);
+    if (fw)
+        sbfw_rec_encode((uint8_t *)b, fw);
     st->seq++;
     put(b, SETTINGS_MAGIC, 8);
     put(b + 8, 1, 4);
@@ -582,10 +642,37 @@ int settings_save(struct star_settings *st)
         *(volatile uint8_t *)(b + 80 + k) = (uint8_t)(k < 23 ? st->next_key[k] : 0);
     }
     put(b + 12, store_crc32((const void *)(b + 16), 240), 4);
-    int r = wr_block(STORE_UFS, lba, b);
+    int r = wr_block(m, lba, b);
     if (r)
         st->seq--;
     return r;
+}
+
+int settings_save(struct star_settings *st)
+{
+    return settings_write(st, 0);
+}
+
+int settings_fw_save(struct star_settings *st, const struct sbfw_rec *r)
+{
+    return settings_write(st, r);
+}
+
+int settings_fw_load(struct sbfw_rec *r)
+{
+    unsigned m = 0;
+    uint64_t lba = settings_lba(&m);
+    if (lba && settings_read(m, lba)) {
+        uint8_t blk[SBSET_BYTES];
+        for (unsigned i = 0; i < SBSET_BYTES; ++i)
+            blk[i] = *(volatile uint8_t *)(UFS_BUF + i);
+        sbfw_rec_decode(blk, r);
+        return 1;
+    }
+    uint8_t *q = (uint8_t *)r;                 /* no record: all zero */
+    for (unsigned i = 0; i < sizeof(*r); ++i)
+        q[i] = 0;
+    return 0;
 }
 
 /* Remove entry idx (directory index) or rename it: the directory is rewritten, then the header.
@@ -684,20 +771,26 @@ int store_verify(unsigned m, unsigned i, uint32_t *got)
     return *got == e->crc ? 0 : 1;
 }
 
-/* An OS's own volatile entry (docs/STARBITE-OS.md 6.5): found on UFS, with the volatile directory flag
- * (sbstore2.py --volatile), at least min_bytes; the fence then lets sb_write_volatile write exactly its
- * blocks. 1 granted (*e filled), 0 no such entry (or not volatile, too small: nothing granted). */
+/* An OS's own volatile entry (docs/STARBITE-OS.md 6.5): found on the home store (UFS, or the card's once it is
+ * home), with the volatile directory flag (sbstore2.py --volatile), at least min_bytes; the fence then lets
+ * sb_write_volatile write exactly its blocks. 1 granted (*e filled), 0 no such entry (or not volatile, too
+ * small: nothing granted). */
 int store_volatile_grant(const char *name, uint64_t min_bytes, struct store_ent *e)
 {
-    char full[40] = "ufs:";
-    sb_strcpy(full + 4, sizeof(full) - 4, name);
-    if (!store_open(STORE_UFS) || !store_find(full, e) || e->medium != STORE_UFS || !(e->flags & 1U) ||
+    int h = store_home();
+    if (h < 0)
+        return 0;
+    char full[40];
+    unsigned p = h == (int)STORE_SD ? 3U : 4U;
+    sb_strcpy(full, sizeof(full), h == (int)STORE_SD ? "sd:" : "ufs:");
+    sb_strcpy(full + p, sizeof(full) - p, name);
+    if (!store_open((unsigned)h) || !store_find(full, e) || e->medium != (unsigned)h || !(e->flags & 1U) ||
         e->size < min_bytes || (e->size & 4095U))
         return 0;
     /* the layout as this store's header says it, not as assumed: never blocks 0..1 (the v1 view, the header),
      * the settings block or the directory, and no other entry's blocks (a directory whose CRC is right can
      * still list overlapping entries) */
-    const struct medium *s = &med[STORE_UFS];
+    const struct medium *s = &med[h];
     uint64_t a = e->lba - s->base, n = e->size / 4096U;
     if (s->version != 2 || e->lba < s->base || a < 2 || (s->settings >= a && s->settings < a + n) ||
         (a < (uint64_t)s->dir + s->dir_blocks && a + n > s->dir)) {
@@ -714,5 +807,84 @@ int store_volatile_grant(const char *name, uint64_t min_bytes, struct store_ent 
             return 0;
         }
     }
-    return sb_volatile_grant(SB_MED_UFS, e->lba, n, e->name);
+    return sb_volatile_grant(h == (int)STORE_SD ? SB_MED_SD : SB_MED_UFS, e->lba, n, e->name);
+}
+
+/* ---- the home store (store.h) ---------------------------------------------------------------------- */
+
+int store_marked_home(unsigned m)
+{
+    return opened(m) && med[m].version == 2 && med[m].home;
+}
+
+/* The UFS store's settings flags (its own block 2, whoever is home), 0 without a valid record. */
+static uint32_t ufs_settings_flags(void)
+{
+    uint64_t lba = med[STORE_UFS].state > 0 ? settings_lba_of(STORE_UFS) : 0;
+    if (!lba || !settings_read(STORE_UFS, lba))
+        return 0;
+    return (uint32_t)le(UFS_BUF + 24, 4);
+}
+
+static void home_log(int h, const char *why)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "store: home ");
+    ub_s(&u, h == (int)STORE_SD ? "card" : h == (int)STORE_UFS ? "ufs" : "none");
+    if (h >= 0) {
+        ub_s(&u, " at ");
+        ub_dec(&u, med[h].base);
+    }
+    ub_s(&u, " (");
+    ub_s(&u, why);
+    ub_s(&u, store_card_only() ? ", card only)" : ")");
+    sb_log(u.b);
+}
+
+int store_home(void)
+{
+    if (home >= -1)
+        return home;
+    if (home == -3)
+        return -1;                     /* asked while resolving (store_open of a medium): none yet */
+    home = -3;
+    int h = -1;
+    const char *why;
+    if (sb_fw.valid) {
+        /* the loader decided: its home store, at the base it gives, or none (no probing, no UFS guess) */
+        unsigned m = sb_fw.store_medium;
+        why = "the loader's table";
+        if (m == STORE_SD || store_card_only())
+            sd_allow();
+        if (m == STORE_SD || (m == STORE_UFS && !store_card_only())) {
+            (void)store_open(m);
+            if (med[m].state > 0 && med[m].version == 2 && med[m].base == sb_fw.store_base)
+                h = (int)m;
+            else
+                why = med[m].state > 0 ? "the table's store is not this version 2 store: nothing written"
+                                       : "the table's store does not open: nothing written";
+        }
+        /* the UFS home's record may still let the card's store be read, as before */
+        if (h == (int)STORE_UFS && !sd_allowed() && (ufs_settings_flags() & SET_SD_STORE))
+            sd_allow();
+    } else {
+        /* an older loader: the card when its store says HOME (and the card may be touched), else UFS */
+        why = "no table: probed";
+        (void)store_open(STORE_UFS);
+        if (!sd_allowed() && (ufs_settings_flags() & SET_SD_STORE))
+            sd_allow();
+        if (sd_allowed() && (store_open(STORE_SD), med[STORE_SD].state > 0) && med[STORE_SD].version == 2 &&
+            med[STORE_SD].home)
+            h = (int)STORE_SD;
+        else if (med[STORE_UFS].state > 0)
+            h = (int)STORE_UFS;
+    }
+    if (h == (int)STORE_SD) {
+        med[STORE_UFS].state = -1;     /* the card is home: the UFS store is closed for this boot */
+        med[STORE_UFS].count = 0;
+    }
+    home = h;
+    home_log(h, why);
+    return home;
 }

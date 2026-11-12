@@ -216,6 +216,8 @@ uint64_t sb_arena_free(void)
 
 void sb_start(void)
 {
+    /* the loader's SBFW table first: it lies below the image, in RAM nothing of ours has used yet */
+    (void)sb_fw_read();
     volatile uint64_t *ll = (volatile uint64_t *)SB_LOADER_LOG;
     sb_boot.loader_tag = ll[0];
     sb_boot.loader_entry = ll[15];
