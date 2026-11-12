@@ -2000,6 +2000,27 @@ Every app failure must be a removed device that the app or DWM recovers from.
 - **The memory pressure itself** (C: 0.06-0.6 GB free, a 631 MB pagefile) is the user's disk: WIN11-GPU-CAPS.md §2
   and the morning note.
 
+### 6.55 T47 read; T48 = every live BO in every submission (sb-patches/0139)
+
+- **T47 (`build/win/results-t47`, 04:27-04:46): passed and installed.**
+  - No bugcheck; `sbd3d arm64` and `sbd3d x64` exit 0; Windows' TDR counters 0.
+  - The WER folder only held T45b's reports (the same IDs).
+  - Faults 82 (T46: 87), in live allocations 64 (74), job timeouts 18 (13). Commit free never fell below ~719 MB,
+    so there was less pressure than T45b.
+- **0138 did not fix the faults:** every resolved one is still `NOT listed`.
+  - The allocations: a 1-page SystemSettings allocation (unmapped for 150 s, last listed 8,396 renders before) and
+    TextInputHost and Taskmgr surfaces, read by fragment jobs.
+  - So it is not only surfaces DWM opened. A process's own BOs reached through descriptors are evicted too: T25
+    lists those once, then in every 64th submission of that process, and a rarely-submitting app goes thousands of
+    renders without.
+- **sb-patches/0139:** the shim's list-all mode (T25's `SB_LIST_ALL=1`) is now the default, for the runtime and the
+  D3DKMT (GL ICD) devices.
+  - Off with `C:\ProgramData\Starbite\listsome` or `SB_LIST_ALL=0`.
+  - The cost T23 measured is on the A55s; the user's main entry is now the big cores.
+- **T48** = T47 + sbumd ca3df477 (ARM64X, 0137-0139).
+  - If faults fall to ~0, eviction of unlisted own BOs was the cause.
+  - If they don't, the remaining reader is DWM with a stale descriptor of a surface it already closed.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

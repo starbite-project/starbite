@@ -1,0 +1,43 @@
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index bc73717..ad0b018 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -903,6 +903,20 @@ static __declspec(thread) struct {
+    unsigned vidpn, w, h, pitch, fmt;
+ } sb_next;
+ 
++/* sb-patches/0139 (docs/WIN11-GPU.md 6.55, T47): every live BO in every submission is now the default. T47 still had
++ * 64 GPU faults in live allocations nobody listed (a process's own BOs reached only through descriptors: T25 listed
++ * those once, then in every 64th submission, and a process that submits rarely went thousands of renders without).
++ * The cost T23 measured (DWM: 120-250 allocations per submission) matters on the A55s, not on the big cores the
++ * user now runs. SB_LIST_ALL=0 or C:\ProgramData\Starbite\listsome turns it off. */
++static int
++sb_list_all_default(void)
++{
++   const char *la = getenv("SB_LIST_ALL");
++   if (la && *la)
++      return *la == '1';
++   return GetFileAttributesA("C:\\ProgramData\\Starbite\\listsome") == INVALID_FILE_ATTRIBUTES;
++}
++
+ static struct sbdev *
+ sb_new_dev(void)
+ {
+@@ -910,6 +924,7 @@ sb_new_dev(void)
+    if (d) {
+       InitializeSRWLock(&d->lock);
+       d->id = (unsigned)InterlockedIncrement(&sb_ndev);
++      d->list_all = sb_list_all_default();   /* sb-patches/0139: the D3DKMT (GL ICD) devices too */
+    }
+    return d;
+ }
+@@ -1625,8 +1640,7 @@ malikm_bind_d3dddi(HANDLE hRTAdapter, HANDLE hRTDevice, const void *pKTCallbacks
+    e.PrivateDriverDataSize = sizeof(g);
+    g.Code = MW_ESCAPE_GPU_INFO;
+    if (cb->pfnEscapeCb(hRTAdapter, &e) >= 0 && g.Count != 0 && g.Valid != 0 && (d = sb_new_dev()) != NULL) {
+-      const char *la = getenv("SB_LIST_ALL");
+-      d->list_all = la && *la == '1';
++      d->list_all = sb_list_all_default();
+       const char *nm = getenv("SB_NO_MERGE");
+       d->no_merge = nm && *nm == '1';   /* T30: SB_NO_MERGE=1, every chain its own Render */
+       D3DDDICB_CREATECONTEXT c = {0};
