@@ -1023,6 +1023,9 @@ void next_kinit(void)
 #ifndef SBOS_NEXT_NOGPU
     /* P4: with two buffers (tear-free flips) and the GPU up (normal clocks, gpuheat's checks), the GPU composes */
     gpucomp_add_ro(sbtk_pack_start, (uint64_t)(sbtk_pack_end - sbtk_pack_start));  /* icons point into the pack */
+    /* 1.0 (Track E): the Linux guest's two window surfaces (guest/sbos/guest.h GUEST_WL: SBG_S9_SHM_BASE + 0x200000,
+     * 8 MiB covers both), sampled by the GPU in place through tk_layer_external; Normal non-cacheable on both sides */
+    gpucomp_add_ext((const void *)(uintptr_t)0x8e0200000ULL, 0x800000ULL);
     if (flip_on && heap_mem && gpucomp_init(heap_mem, heap_size)) {
         comp.gpu = next_gpu;
         comp.gpu_clean = next_gpu_clean;
@@ -1915,3 +1918,13 @@ void next_selftest_begin(void)
 }
 int next_selftest_ready(void) { return ready || baking; }
 #endif
+
+/* ---- Track A, 1.0: the Linux window sampled in place by the GPU (Track E's zero-copy path) ---- */
+int sh_linux_zero_copy(void)
+{
+#ifndef SBOS_NEXT_NOGPU
+    return comp.gpu != 0 && gpucomp_ext_ok();
+#else
+    return 0;
+#endif
+}

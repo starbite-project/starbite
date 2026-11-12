@@ -565,6 +565,8 @@ unsigned gpucomp_mhz(void);
 int gpucomp_ready(void);
 void *gpucomp_pool(void);
 void gpucomp_add_ro(const void *p, uint64_t bytes);   /* before gpucomp_init: read-only memory layers point into */
+void gpucomp_add_ext(const void *p, uint64_t bytes);  /* 1.0, before gpucomp_init: memory sampled in place (guest surfaces) */
+int gpucomp_ext_ok(void);                              /* 1.0: that range is mapped (else the shell copies the window) */
 uint64_t gpucomp_pool_bytes(void);
 uint64_t gpucomp_va(const void *p);
 void gpucomp_clean(const void *p, uint64_t n);
