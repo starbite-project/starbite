@@ -135,6 +135,7 @@ objs=""
 v80objs=""
 wifi="$root/starbite/wifi"
 for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$ut/exfat.c" \
+           "$ut/usb_dwc3.c" "$ut/usb_phy.c" "$ut/tb.c" \
            "$wifi/core.c" "$wifi/exynos_pcie.c" "$wifi/chip.c" "$wifi/fw.c" "$wifi/ring.c" "$wifi/msgbuf.c" "$wifi/link.c" \
            "$wifi/wpa.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" \
            "$wifi/tcp.c" "$wifi/netio.c" "$wifi/http.c" "$wifi/tls/ta.c" "$wifi/tls/tls_chains.c" "$wifi/tls/tls_check.c" \

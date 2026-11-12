@@ -18,7 +18,7 @@
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
-enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_MODEM, KT_SURV, KT_APP0 = 16 };
+enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_MODEM, KT_SURV, KT_USB /* usb.c */, KT_APP0 = 16 };
 #define KT_MAX 64
 #define KT_RESERVE 24                /* entries apps cannot take: the kernel's tasks always get theirs */
 struct ktimer {
