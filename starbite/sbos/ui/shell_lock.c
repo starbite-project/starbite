@@ -1771,9 +1771,19 @@ static void build_cc(void)
         tk_bmp_blur(&q, PT(26) / 4);
         tk_bmp_satbright(&q, 1.3f, 1);
         tk_bmp_tint(&q, TK_RGBA(0, 0, 0, .25f));
-        tk_bmp_up(&ccscrim.bmp, &q, 0, 0, 2);
-        tk_bmp_free(&q);
-        ccscrim.sx = ccscrim.sy = 2;
+        if (C && C->gpu) {
+            /* P3z: the GPU row keeps the 26 pt blur at quarter resolution, drawn 4x (its filtering is smooth on a blur
+             * this wide): 1 MB to flush to the GPU at the first open instead of the 4.2 MB half copy (cp3: compose
+             * 112 ms against the GPU's 9 on the CC's first open). The half copy is the CPU row's glass source
+             * (tk_glass_from_half in cc_tile), which the GPU row doesn't use (its tiles are the lens) */
+            tk_bmp_free(&ccscrim.bmp);
+            ccscrim.bmp = q;
+            ccscrim.sx = ccscrim.sy = 4;
+        } else {
+            tk_bmp_up(&ccscrim.bmp, &q, 0, 0, 2);
+            tk_bmp_free(&q);
+            ccscrim.sx = ccscrim.sy = 2;
+        }
         ccscrim.opaque = 1;
     }
     if (!ccsb.bmp.px) {
