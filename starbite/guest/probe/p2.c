@@ -74,7 +74,7 @@ static void guest_log(const char *l)
                                        "Oops", "BUG", "Unable", "rror", "ail", "Kernel command", "Run /init",
                                        "Memory:", "Machine model", "arch_timer", "Booted secondary", "reboot", "killed",
                                        "shut down", "trampoline", "online", "load:", "STARBITE-TERM", "simpledrm",
-                                       "frame buffer device", "terminal"};
+                                       "frame buffer device", "terminal", "sbwl", "touch at"};
     int k = seen <= 3;
     for (unsigned i = 0; !k && i < sizeof(keep) / sizeof(keep[0]); ++i)
         k = has(l, keep[i]);
@@ -317,6 +317,16 @@ static int cycle(unsigned n, int with_load)
                                  : "terminal: no STARBITE-TERM-OK from the shell in 10 s");
                 L();
                 touch_ok = term_ok;
+                /* a tap in the window's middle: the guest counts it (sbwl logs the surface it reached) */
+                sbg_touch(0, SBG_TOUCH_DOWN, SW / 2, SH / 2);
+                sbg_touch(0, SBG_TOUCH_UP, SW / 2, SH / 2);
+                tstep = 4;
+                t_touch = t;
+            } else if (tstep == 4 && (h->touches_seen >= 2 || t - t_touch > 3000)) {
+                ub_s(&u, "tap: touches seen by the guest ");
+                ub_dec(&u, h->touches_seen);
+                L();
+                touch_ok = touch_ok && h->touches_seen >= 2;
                 tstep = 5;                  /* the shared tail: show it, then stop */
                 t_run = t;
             }

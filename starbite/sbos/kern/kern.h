@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "sbapp.h"
+#include "passcode.h"                /* Track A: the passcode (pure: passcode.c) */
 
 #define SBOS_VERSION "1.2-alpha26"
 /* 1.2-alpha26: alpha25's lock screen (OS cards, swipe up, the Emergency hold, Heat only in Emergency) is off: the user
@@ -312,6 +313,31 @@ int state_valid(const uint8_t *half, uint64_t *seq);
 int state_find(const uint8_t *half, const char *id, const uint8_t **data);
 /* Of two halves, the valid one with the higher sequence: 0, 1, or -1 neither. */
 int state_pick(const uint8_t *a, const uint8_t *b);
+/* Track A: walk a valid half's records (*at = 0 first): 1 a record (id, data, n), 0 the end. */
+int state_next(const uint8_t *half, uint32_t *at, char id[24], const uint8_t **data, uint32_t *n);
+
+/* ---- prefs and blobs (prefs.c, pure; Track A, sbos-core-api.md 1-2): kept in the state slot with the settings -- */
+#define PREFS_KEY_MAX 31U           /* keys: [a-z0-9._-], 1..31 characters */
+#define PREFS_VAL_MAX 255U          /* values: C strings up to 255 bytes */
+#define PREFS_KEYS 400
+#define PREFS_BYTES (64U << 10)     /* the packed keys and values (17 records at most) */
+#define PREFS_BLOB_NAME 16U         /* blob names: as keys, up to 16 ("blob:<name>#7" fits a record id) */
+#define PREFS_BLOB_MAX (32U << 10)
+#define PREFS_BLOBS 16
+#define PREFS_BLOB_BYTES (160U << 10)
+#define PREFS_MEM (PREFS_BYTES + PREFS_BLOB_BYTES)   /* prefs_init's block */
+void prefs_init(void *mem);         /* PREFS_MEM bytes; until then (or with 0) every call refuses */
+void prefs_reset(void);             /* empty (RAM only) */
+int prefs_key_ok(const char *key);
+int prefs_get(const char *key, char *val, int cap);              /* the value's length, -1 not set */
+int prefs_set(const char *key, const char *val);                 /* 1 changed, 0 the same, -1 refused; val 0 deletes */
+int prefs_blob_put(const char *name, const void *p, uint32_t n);  /* 1 changed, 0 the same, -1 refused; n 0 deletes */
+int prefs_blob_get(const char *name, void *p, uint32_t cap);     /* bytes copied (up to cap), -1 none */
+void prefs_counts(int *keys, uint32_t *bytes, int *blobs, uint32_t *blob_bytes);
+/* the slot: save adds the records (all prefs or none, each blob whole or not at all): 0, -1 something left out;
+ * restore reads a valid half: 0, -1 something was not taken (a newer version, a broken entry) */
+int prefs_save(struct state_buf *b);
+int prefs_restore(const uint8_t *half);
 
 /* ---- the running kernel ------------------------------------------------------------------------ */
 struct kstate {
@@ -334,6 +360,7 @@ extern int pocket_lock;             /* 0.6: heating with the screen kept on: tou
 /* tasks */
 void input_init(void);
 int input_poll(void);               /* 1 if something happened */
+extern int input_fast;              /* P3k: Next keeps touch reads at 16 ms while the screen is on */
 void ui_kinit(void);
 void ui_kdraw(void);                /* draw what changed and present */
 void ui_kevent(const void *ev);     /* struct ui_ev from sbui */
@@ -391,18 +418,39 @@ int vib_on(void);
 /* 1.2-alpha8: wake-up alarms (alarm.c) */
 int alarm_set(int i, int h, int m, int days, int on);
 int alarm_any(void);
+int alarm_first(int *h, int *m);    /* P2y: the earliest alarm on (time of day); 0 none */
 int alarm_ringing(void);
 void alarm_minute(const struct sbos_time *t);
 void alarm_timer(void);
 int alarm_stop(int snooze);
+/* Track A (2026-11-12): Next's Alarm tab (the list of up to four, labels), kept in the record "sbos.alarm" */
+#define ALARM_REC_SIZE (4 + 4 * 28)
+int alarm_count(void);
+int alarm_get(int i, int *hm, int *days, int *on, char *label, int cap);
+int alarm_put(int i, int hm, int days, int on, const char *label);   /* i == alarm_count(): add */
+int alarm_del(int i);
+int alarm_pack(uint8_t out[ALARM_REC_SIZE]);        /* 1: the list is the kernel's (save it) */
+void alarm_unpack(const uint8_t in[ALARM_REC_SIZE]);
+int alarm_app_state(uint8_t out[20]);               /* the classic Clock app's state as the list (0: none yet) */
+/* Track A: the time zone in use (tzdb.c's index) and 12 / 24-hour; services.c, saved by settings.c */
+int clock_zone(void);
+void clock_zone_set(int i);
+extern int clock_24h;
 /* 1.2-alpha9: notifications (notif.c) */
 struct notif {
     char who[16], title[40], text[72];
     int hm;                         /* local hh * 100 + mm, -1 unknown */
+    unsigned flags;                 /* Track A: NOTIF_* (0 from notif_post) */
 };
 void notif_post(const char *who, const char *title, const char *text);
+/* Track A (sbos-core-api.md 7): a post by an app id ("phone", a Linux app's bridge, ...): who = app. Next's shell
+ * applies notif.dnd and notif.<app>.allow / .banners before it shows a banner */
+#define NOTIF_QUIET 1U              /* the Notification Centre only: never a banner */
+#define NOTIF_URGENT 2U             /* a banner also in Do Not Disturb (an alarm, SOS) */
+void notif_post_app(const char *app, const char *title, const char *text, unsigned flags);
 void power_last2_clock(int on);      /* 1.2-alpha27: Last 2 % (survival.c): the A55 at 455 MHz, screen on or off */
 int notif_count(void);
+unsigned notif_seq(void);           /* posts since boot (Starbite OS Next's shell copies the new ones) */
 int notif_unread(void);
 const struct notif *notif_get(int i);
 void notif_seen(void);
@@ -424,6 +472,14 @@ void kui_aod_frame(void);           /* draws and sends the dim clock's picture *
 int kfile_read(const char *path, void *dst, uint32_t cap);
 /* 1.2-alpha21: entries [first, first + max) of a folder: stored n, *total all (read only) */
 int kfile_list(const char *path, struct sbos_dirent *out, int max, int first, int *total);
+/* Next's Photos / Files / Music (read only): the state without touching the card (1 mounted, 0 not tried, -1 no card,
+ * -2 a card that cannot be read; *why in words), the mount (blocks: from an idle turn), a folder of any size a page
+ * at a time with dates (exFAT's stamp, see exfat.h), a file's bytes from an offset (how many were read) */
+struct kfile_ent { char name[128]; uint64_t size; int32_t dir; uint32_t mtime; };
+int kfile_state(const char **why);
+int kfile_mount(void);
+int kfile_list_at(const char *path, struct kfile_ent *out, int max, int first);
+int kfile_read_at(const char *path, uint64_t off, void *dst, uint32_t len);
 extern int sos_led_on;              /* settings: the LED flashes with SOS */
 
 /* apps (app.c; struct kapp in kapp.h) */
@@ -488,10 +544,19 @@ void kui_guest_open(int mode);      /* 1.2: the Linux view (GUEST_APP / GUEST_TE
 extern int kui_linux_on;            /* 1.2: Settings > Linux apps: the home tile (off at every start) */
 void kui_lock(void);
 int kui_awake_on(void);
+extern int (*kui_confirm_hook)(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
+                               void (*done)(int ok));
 void kui_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
                  void (*done)(int ok));
 void kui_power_menu(void);
 void kui_screen_changed(int on);
+/* P2r (Starbite OS Next): the UI's own screen off / on (no classic black frame) and the Power key's or the screen-off
+ * timer's fade first (1: the UI turns the screen off itself, through power_screen_set, when the fade has ended;
+ * key: the Power key, whose second press during the fade undoes it) */
+extern void (*kui_screen_hook)(int on);
+extern int (*kui_sleep_hook)(int key);
+/* Track A lifecycle: the UI's save before a restart or a switch-off (Next: every app's on_save, sh_save_all); 0 none */
+extern void (*kui_save_hook)(void);
 void kui_sos_changed(void);
 int kui_screen(void);
 void ui_ktimer(unsigned id);
@@ -515,9 +580,10 @@ int gpucomp_selftest_step(void);        /* P4: the GPU compositor's test (gpucom
 /* P4: the GPU compositor's backend for the UI (gpucomp.c). A quad is one of the toolkit's draw items: a bitmap (or a
  * solid of w x h), scaled (isx / isy: source px per screen px) from the screen point (dx0, dy0), alpha, clipped to a
  * rect with a rounded edge, faded by screen y, 3-sliced, and glass (the backdrop bd through the 8-bit mask) under it */
-#define GPUCOMP_MAX_QUADS 127U
+#define GPUCOMP_MAX_QUADS 200U              /* 1.0: was 127; comp2's quad area holds 204 (bins keep byte indices <= 254) */
 enum { GC_SOLID = 1, GC_BILINEAR = 2, GC_GLASS = 4, GC_FADE = 8, GC_SLICE_V = 16, GC_SLICE_H = 32,
-       GC_OPAQUE = 64 };                /* (CPU only) every px of src is opaque: what is under it is culled */
+       GC_OPAQUE = 64,                  /* (CPU only) every px of src is opaque: what is under it is culled */
+       GC_LENS = 256 };                 /* v9: Liquid Glass over the shape lx..lh (lens.h), the backdrop bd: a quad of its own */
 #define GC_OCC_PX 32                    /* gc_quad.occ: per 32 x 32 px block of src, 0 empty, 1 partial, 2 opaque */
 struct gc_quad {
     const void *src;
@@ -529,9 +595,15 @@ struct gc_quad {
     uint32_t bstride;
     float bk;
     uint32_t bw, bh;
+    float lx, ly, lw, lh;               /* v9 (GC_LENS): the glass shape (screen px; radius in radius); the quad is a
+                                         * transparent solid (its src unused) reaching LENS_APRON px past the shape */
+    float lsat;                         /* v10 (GC_LENS): the backdrop's saturation (0 = 1) */
+    uint32_t live;                      /* v10 (GC_LENS, the caller's): the backdrop is its first `live` quads, blurred
+                                         * (gpucomp_backdrop); 0: bd as given */
     const uint8_t *occ;                 /* (CPU only, may be 0) src's block map, occ_w x occ_h: bins skip empty blocks */
     uint32_t occ_w, occ_h;
     uint32_t gen;                       /* (CPU only) the caller's content stamp of src / mask / backdrop */
+    float lq[16];                       /* 1.0 (GC_LENS, glass V3): the lens's record (lens.h lens_make, LQ_N) */
 };
 int gpucomp_init(void *heap, uint64_t bytes);
 /* the last compose's bins: entries drawn, entries culled under opaque quads, entries skipped over empty blocks */
@@ -540,6 +612,8 @@ unsigned gpucomp_mhz(void);
 int gpucomp_ready(void);
 void *gpucomp_pool(void);
 void gpucomp_add_ro(const void *p, uint64_t bytes);   /* before gpucomp_init: read-only memory layers point into */
+void gpucomp_add_ext(const void *p, uint64_t bytes);  /* 1.0, before gpucomp_init: memory sampled in place (guest surfaces) */
+int gpucomp_ext_ok(void);                              /* 1.0: that range is mapped (else the shell copies the window) */
 uint64_t gpucomp_pool_bytes(void);
 uint64_t gpucomp_va(const void *p);
 void gpucomp_clean(const void *p, uint64_t n);
@@ -548,6 +622,13 @@ struct gc_rect { int x0, y0, x1, y1; };     /* half-open, screen px (the toolkit
 /* as gpucomp_compose, but only the 32 x 32 px tiles the rects touch are drawn; the rest of dst stays */
 int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *q, unsigned n, const struct gc_rect *r,
                            unsigned nr, uint64_t *us);
+/* v7: a big move's frame: composed at half resolution (the pool's top), then 2x into dst (the whole screen) */
+int gpucomp_compose_half(void *dst, uint32_t bg, const struct gc_quad *q, unsigned n, uint64_t *us);
+/* v10, a live glass backdrop: the quads composed at a quarter of the screen, then blurred (dual filter down to 1/16,
+ * up to 1/8) into backdrop `level` (0 .. GPUCOMP_LEVELS - 1); *bd etc. are what a GC_LENS quad points at. 1 done */
+#define GPUCOMP_LEVELS 3
+int gpucomp_backdrop(unsigned level, uint32_t bg, const struct gc_quad *q, unsigned n, const void **bd,
+                     uint32_t *bstride, uint32_t *bw, uint32_t *bh, float *bk, uint64_t *us);
 int uibench_setup(void);                /* 1.2-alpha26 P0: the UI compositor's benchmark (uibench.c) */
 void uibench_set(const char *label, unsigned ncores, const unsigned *cores, int worker_only);
 int app_is_test(int a);
@@ -618,7 +699,80 @@ extern int wifi_autojoin;              /* 1.2-alpha21: join a known network auto
 int wifi_known(struct sbos_wifi_known *out, int max);
 int wifi_forget(int k);
 int wifi_selftest_phase(int *done);
+extern int wifi_selftest_scan_only;          /* Next: the Wi-Fi self test scans only (and runs the TLS self-check) */
+/* Next (wifi-sbos-next): one HTTP(S) GET at a time over the joined network (starbite/wifi/http.h). wifi_fetch:
+ * 0 started, SBOS_EAGAIN not joined (or no memory), SBOS_EBUSY one is running. The status says how it went; the
+ * body (up to 64 KiB) stays until the next fetch. Never logged: the URL, the host, the body. */
+struct sbos_wifi_fetch {
+    int32_t state;                          /* 0 none yet, 1 running, 2 finished */
+    int32_t result;                         /* SBHTTP_DONE (1) or an SBHTTP_E_* (< 0) */
+    int32_t status, tls_err, tls, secs;     /* the HTTP status; BearSSL's error; 1 https; seconds so far */
+    uint32_t tls_version, tls_suite, bytes, kept;
+    uint32_t dns_ms, connect_ms, tls_ms, first_byte_ms, total_ms;
+    char host[64];                          /* for the screen */
+    char why[64];                           /* the result in words */
+};
+int wifi_fetch(const char *url);
+void wifi_fetch_status(struct sbos_wifi_fetch *f);
+const uint8_t *wifi_fetch_body(uint32_t *len);
+void wifi_fetch_cancel(void);
+int wifi_tls_selfcheck(void);               /* 0 passed, else the failed check's number (logged) */
 /* 1.2-alpha21: the modem, receive only (modem.c) */
+/* mobile data (kern/modem.c, Next): the user's Settings > Cellular switch is the only way the radio transmits.
+ * kmodem_cellular(1) starts the modem (SIM, radio on, the LTE attach APN, registration, the PDP context, a raw-IP
+ * interface); 0 deactivates, detaches and parks it. kmodem_netif gives the interface while data is up. */
+enum { KCELL_OFF = 0, KCELL_STARTING, KCELL_NO_SIM, KCELL_SIM_LOCKED, KCELL_SEARCHING, KCELL_REGISTERED,
+       KCELL_DATA, KCELL_STOPPING, KCELL_FAILED };
+struct kcell {
+    int32_t state, want;                    /* KCELL_*; want: the switch */
+    int32_t bars, rssi_dbm, roaming;        /* bars -1 unknown */
+    char rat[8];                            /* "LTE", "UMTS", "GSM", "" */
+    char oper[24];                          /* the operator's name: SCREEN ONLY, never logged */
+    char why[64];                           /* the last failure or step, in words */
+    uint32_t tx_packets, rx_packets;
+};
+void kmodem_reserve(void);              /* boot, before the UI's heap: the modem's buffers (no I/O) */
+/* calls + SMS (kern/modem.c, Next; the notes' modem-calls-sms-api.md). Only while Cellular is on and registered.
+ * Emergency numbers are refused before any frame is built, always; numbers and text never reach the log. */
+#define KMODEM_CALLS 1
+enum { KCALL_IDLE = 0, KCALL_DIALING, KCALL_ALERTING, KCALL_INCOMING, KCALL_ACTIVE, KCALL_HELD, KCALL_ENDING,
+       KCALL_ENDED };
+enum { KAUDIO_NONE = 0, KAUDIO_EARPIECE, KAUDIO_SPEAKER };
+struct kcall {
+    int32_t state, outgoing;
+    int32_t secs;
+    int32_t audio, muted;
+    int32_t audio_ok;                       /* 1: the call audio path is up (ABOX + VSS + the amp) */
+    char number[24];                        /* SCREEN ONLY */
+    char why[48];
+    char audio_why[48];                     /* when audio_ok is 0: which part is missing, in words for the call screen */
+};
+int kmodem_call_dial(const char *number);
+int kmodem_call_answer(void);
+int kmodem_call_hangup(void);
+int kmodem_call_route(int audio);
+int kmodem_call_mute(int on);
+int kmodem_call_dtmf(char digit);
+void kmodem_call(struct kcall *c);
+#define KSMS_MAX 32
+struct ksms {
+    int32_t id, incoming, state;            /* state: 0 received, 1 sending, 2 sent, 3 failed */
+    int64_t utc;
+    char number[24];                        /* SCREEN ONLY */
+    char text[512];
+    char why[48];
+};
+int kmodem_sms_send(const char *number, const char *utf8);
+int kmodem_sms_count(void);
+int kmodem_sms_get(int i, struct ksms *m);
+uint32_t kmodem_sms_gen(void);
+int kmodem_cellular(int on);
+void kmodem_cell(struct kcell *c);
+struct sbnet;
+struct sbtcp;
+int kmodem_netif(struct sbnet **net, struct sbtcp **tcp);   /* 1 = up (pointers filled when not NULL) */
+void wifi_fetch_poll_cell(void);
+void wifi_clock_checked_by(int how);        /* 1 checked, 2 corrected, 3 set (as Wi-Fi's NTP) */
 int kmodem_on(void);
 int kmodem_power(int on);              /* 1: the confirmation (the start only on its hold); 0: stop */
 void kmodem_stop(const char *why);     /* park now (no-op when off) */

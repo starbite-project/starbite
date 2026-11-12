@@ -1113,7 +1113,8 @@ static void check_allowed(const struct fakesoc *s)
                  a == SBM_PMU_PA + SBM_PMU_CENTRAL_SEQ_CP_CFG ||
                  (a >= SBM_MBOX_PA + SBM_MBOX_ISSR(0) && a <= SBM_MBOX_PA + SBM_MBOX_ISSR(63)) ||
                  (a == SBM_MBOX_PA + SBM_MBOX_INTGR1 && (v == 2 || v == 1)) ||
-                 (a == SBM_MBOX_PA + SBM_MBOX_INTCR0 && v == (1u << 16)) || (a == SBM_AP2CP_CFG_PA && v == 1);
+                 (a == SBM_MBOX_PA + SBM_MBOX_INTCR0 && v == (1u << 16)) || (a == SBM_AP2CP_CFG_PA && v == 1) ||
+                 (a == SBM_MBOX_PA + SBM_MBOX_MCUCTLR && v == 1);
         CHECK(ok);
         if (!ok)
             printf("  store not allowed: 0x%llx = 0x%x\n", (unsigned long long)a, v);
@@ -1156,6 +1157,773 @@ static void check_parked(const struct fakesoc *s)
     CHECK(s->ctrl[SBM_CP_CTRL_NS] & (1u << 17));
     CHECK(!s->cp_running);
     CHECK(!s->sss_on);
+}
+
+/* the session API as Starbite OS runs it: a streamed image (only NV in RAM), polls every ms, a query every 10 s */
+static int sess_run(struct sbm_modem *mo, struct sbm_plat *p, unsigned ms, unsigned query_every, unsigned *queries)
+{
+    for (unsigned t = 1; t <= ms; ++t) {
+        if (query_every && t % query_every == 0) {
+            if (sbm_modem_query(mo) == 0 && queries)
+                ++*queries;
+        }
+        int r = sbm_modem_poll(mo, 1);
+        if (r < 0)
+            return r;
+        p->udelay(p->ctx, 1000);
+    }
+    return 0;
+}
+
+static void stream_image(struct sbm_image *im, uint8_t *chunk, uint32_t chunk_size, const uint8_t *nv_pristine)
+{
+    boot_image(im, 0);
+    for (unsigned k = 0; k < im->plan.n; ++k)
+        if (im->plan.l[k].src == SBM_SRC_RADIO)
+            im->data[k] = 0;                   /* left on the partition */
+    im->chunk = chunk;
+    im->chunk_size = chunk_size;
+    im->nv_pristine = nv_pristine;
+}
+
+#ifdef SBM_ATTENDED_TX
+static struct sbm_net t_net;
+static struct sbm_modem *t_net_mo;
+static int t_net_tx(void *ctx, const uint8_t *pkt, uint32_t len)
+{
+    (void)ctx;
+    return sbm_modem_ip_tx(t_net_mo, pkt, len);
+}
+static void t_net_rx(void *ctx, const uint8_t *pkt, uint32_t len)
+{
+    (void)ctx;
+    sbm_net_rx(&t_net, pkt, len);
+}
+/* poll the session 1 ms at a time with the net client's timers until done() or ms */
+static int net_run(struct sbm_modem *mo, struct sbm_plat *p, unsigned ms, int (*done)(void))
+{
+    static uint32_t clock_ms;
+    for (unsigned t = 0; t < ms; ++t) {
+        int r = sbm_modem_poll(mo, 1);
+        if (r < 0)
+            return r;
+        sbm_net_tick(&t_net, ++clock_ms);
+        if (done && done())
+            return 1;
+        p->udelay(p->ctx, 1000);
+    }
+    return 0;
+}
+static int dns_done(void) { return t_net.dns_state != SBM_NET_WAITING; }
+static int http_done(void) { return t_net.http_state != SBM_NET_WAITING; }
+
+static void test_attended_data(struct fakesoc *s, struct sbm_image *im, struct sbm_modem *mo, uint32_t boot_crc,
+                               uint32_t main_crc)
+{
+    struct sbm_plat p;
+    static uint8_t d[SBM_GPRS_ACT_LONG_LEN];
+    /* the builder: exactly the GPRS shapes the test sends */
+    memset(d, 0, sizeof(d));
+    d[0] = 1; d[1] = 1; d[2] = 2; memcpy(d + 3, "internet", 8);
+    CHECK(sbm_ipc_attended_allowed(SBM_GPRS_DEFINE_PDP, SBM_IPC_SET, d, SBM_GPRS_DEFINE_LEN));
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_DEFINE_PDP, SBM_IPC_SET, d, SBM_GPRS_DEFINE_LEN - 1));
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_DEFINE_PDP, SBM_IPC_GET, d, SBM_GPRS_DEFINE_LEN));
+    d[5] = ' ';
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_DEFINE_PDP, SBM_IPC_SET, d, SBM_GPRS_DEFINE_LEN));   /* not an APN */
+    d[5] = 't'; d[120] = 1;
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_DEFINE_PDP, SBM_IPC_SET, d, SBM_GPRS_DEFINE_LEN));   /* 5G / address junk */
+    memset(d, 0, sizeof(d));
+    d[0] = 1; d[1] = 1;
+    CHECK(sbm_ipc_attended_allowed(SBM_GPRS_PDP_CONTEXT, SBM_IPC_SET, d, SBM_GPRS_ACT_LEN));
+    CHECK(sbm_ipc_attended_allowed(SBM_GPRS_PDP_CONTEXT, SBM_IPC_SET, d, SBM_GPRS_ACT_LONG_LEN));
+    d[6] = 'u';                                                                                      /* a user name */
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_PDP_CONTEXT, SBM_IPC_SET, d, SBM_GPRS_ACT_LEN));
+    d[6] = 0; d[1] = 2;
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_PDP_CONTEXT, SBM_IPC_SET, d, SBM_GPRS_ACT_LEN));        /* cid 2 */
+    static const uint8_t att[3] = { 1, 0, 0 }, det[3] = { 0, 0, 0 };
+    CHECK(sbm_ipc_attended_allowed(SBM_GPRS_PS, SBM_IPC_SET, att, 3));
+    CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_PS, SBM_IPC_SET, det, 3));
+    unsigned other = 0;
+    for (unsigned i = 0; i < 256; ++i)
+        for (unsigned t = 0; t < 8; ++t)
+            if (i != 0x01 && i != 0x03 && i != 0x04)
+                other += sbm_ipc_attended_allowed(SBM_CMD(SBM_G_GPRS, i), (uint8_t)t, d, SBM_GPRS_ACT_LEN);
+    CHECKEQ(other, 0);
+
+    for (int round = 0; round < 2; ++round) {          /* 0: as planned; 1: the short form refused, a lost SYN */
+        boot_image(im, 0);
+        fakesoc_init(s, &im->plan, boot_crc, main_crc);
+        s->sim_present = 2;
+        fakesoc_plat(s, &p, tlog);
+        memset(mo, 0, sizeof(*mo));
+        mo->attended = SBM_ATTENDED_DATA;
+        unsigned log0 = nlog;
+        CHECKEQ(sbm_modem_start(mo, &p, im), 0);
+        s->fcp.act_refuse_short = round;
+        s->fcp.net_drop_first_syn = round;
+        CHECKEQ(sbm_modem_ip_tx(mo, d, 40), SBM_EPERM);        /* no PDP yet */
+        CHECKEQ(sbm_modem_radio(mo, 1), 0);
+        CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
+        CHECKEQ(sbm_modem_pdp_define(mo, "internet"), 0);
+        CHECKEQ(sess_run(mo, &p, 200, 0, 0), 0);
+        CHECK(mo->b.pdp.define_seen && mo->b.pdp.define_res == 0x8000);
+        CHECK(!strcmp(s->fcp.apn, "internet"));
+        CHECKEQ(sbm_modem_pdp_activate(mo, 1, 0), 0);
+        CHECKEQ(sess_run(mo, &p, 200, 0, 0), 0);
+        CHECK(mo->b.pdp.act_seen);
+        if (round) {
+            CHECKEQ(mo->b.pdp.act_res, 0x000a);
+            CHECK(!mo->b.pdp.have_ip);
+            CHECKEQ(sbm_modem_pdp_activate(mo, 1, 1), 0);      /* the long form, as the probe falls back */
+            CHECKEQ(sess_run(mo, &p, 200, 0, 0), 0);
+        }
+        CHECKEQ(mo->b.pdp.act_res, 0x8000);
+        CHECK(mo->b.pdp.have_ip && mo->b.pdp.have_status && mo->b.pdp.status == 1);
+        CHECKEQ(mo->b.pdp.mtu, 1500);
+        t_net_mo = mo;
+        sbm_net_init(&t_net, mo->b.pdp.ip, mo->b.pdp.dns1, mo->b.pdp.mtu, t_net_tx, 0, 1234);
+        sbm_modem_ip_rx_cb(t_net_rx, 0);
+        CHECKEQ(sbm_net_dns(&t_net, "connectivitycheck.gstatic.com", 0), 0);
+        CHECKEQ(net_run(mo, &p, 5000, dns_done), 1);
+        CHECKEQ(t_net.dns_state, SBM_NET_DONE);
+        CHECK(t_net.dns_answer[0] == 93 && t_net.dns_answer[3] == 34);
+        CHECKEQ(sbm_net_http_get(&t_net, t_net.dns_answer, "connectivitycheck.gstatic.com", "/generate_204", 0), 0);
+        CHECKEQ(net_run(mo, &p, 15000, http_done), 1);
+        CHECKEQ(t_net.http_state, SBM_NET_DONE);
+        CHECKEQ(t_net.http_code, 204);
+        CHECKEQ(s->fcp.net_http, 1);
+        CHECK(s->fcp.net_dl >= 1 && s->fcp.net_dl_zc >= 3);
+        CHECKEQ(s->fcp.net_zc_full, 0);
+        CHECKEQ(s->fcp.net_bad, 0);
+        CHECK(mo->b.data_rx >= 1 && mo->b.data_rx_zc >= 3 && mo->b.data_rx_bad == 0);
+        CHECKEQ(t_net.rx_bad_csum, 0);
+        if (round)
+            CHECK(s->fcp.net_syn >= 2);
+        net_run(mo, &p, 300, 0);                           /* our FIN's ACK */
+        CHECKEQ(sbm_modem_pdp_activate(mo, 0, round), 0);
+        CHECKEQ(sess_run(mo, &p, 200, 0, 0), 0);
+        CHECK(mo->b.pdp.status == 0 && !s->fcp.pdp_up);
+        CHECKEQ(sbm_modem_radio(mo, 0), 0);
+        CHECKEQ(sess_run(mo, &p, 1000, 0, 0), 0);
+        sbm_modem_ip_rx_cb(0, 0);
+        CHECKEQ(sbm_modem_stop(mo), 0);
+        check_parked(s);
+        CHECKEQ(s->fcp.n_forbidden, 0);
+        CHECKEQ(s->fcp.n_call, 0);
+        unsigned leak = 0;
+        for (unsigned k = log0 > nlog - 256 && nlog > 256 ? log0 : (nlog > 256 ? nlog - 256 : 0); k < nlog; ++k)
+            leak += strstr(loglines[k % 256], "10.11.12") != 0 || strstr(loglines[k % 256], "00101") != 0;
+        CHECKEQ(leak, 0);
+        fakesoc_free(s);
+    }
+    boot_image(im, 0);
+}
+#endif
+
+static int submit_to_deliver(const uint8_t *s, uint32_t n, uint8_t *d);
+#ifdef SBM_ATTENDED_TX
+static struct sbm_inbox t_inbox;
+static void t_sms_rx(void *ctx, const struct sbm_sms *sm)
+{
+    (void)ctx;
+    sbm_inbox_add(&t_inbox, sm, 1000);
+}
+
+static void test_attended_comms(struct fakesoc *s, struct sbm_image *im, struct sbm_modem *mo, uint32_t boot_crc,
+                                uint32_t main_crc)
+{
+    struct sbm_plat p;
+    struct sbm_dial_policy pol, none;
+    static const char *const ecc[] = { "112", "911", "1234567" };   /* the last: a made-up operator emergency number */
+    memset(&pol, 0, sizeof(pol));
+    memset(&none, 0, sizeof(none));
+    pol.user_confirmed = SBM_DIAL_USER_CONFIRMED;
+    boot_image(im, 0);
+    fakesoc_init(s, &im->plan, boot_crc, main_crc);
+    s->sim_present = 2;
+    fakesoc_plat(s, &p, tlog);
+    memset(mo, 0, sizeof(*mo));
+    mo->attended = SBM_ATTENDED_DATA;
+    unsigned log0 = nlog;
+    CHECKEQ(sbm_modem_start(mo, &p, im), 0);
+    CHECKEQ(sbm_modem_radio(mo, 1), 0);
+    CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
+    fakecp_ecc(&s->fcp, ecc, 3);
+    CHECKEQ(sess_run(mo, &p, 200, 50, 0), 0);
+    CHECKEQ(mo->b.calls.n_ecc, 3);
+
+    /* the locks: no confirmation, the world list, the CP's own list, a short code */
+    CHECKEQ(sbm_modem_call_dial(mo, "+358401234567", &none), SBM_EPERM);
+    CHECKEQ(sbm_modem_call_dial(mo, "112", &pol), SBM_EPERM);
+    CHECKEQ(sbm_modem_call_dial(mo, "+44 999", &pol), SBM_EPERM);
+    CHECKEQ(sbm_modem_call_dial(mo, "1234567", &pol), SBM_EPERM);
+    CHECKEQ(sbm_modem_call_dial(mo, "16000", &pol), SBM_EPERM);
+    CHECKEQ(s->fcp.n_dial, 0);
+    {   /* and the builder refuses a hand-made emergency frame however it is called */
+        uint8_t d[SBM_CALL_DIAL_LEN] = { 0x00, 0x01, 0, 3, 0x21, '1', '1', '2' }, f[128];
+        CHECKEQ(sbm_ipc_frame_attended(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_CALL_DIAL, SBM_IPC_EXEC, d, sizeof(d)), SBM_EPERM);
+        uint8_t e[SBM_CALL_DIAL_LEN] = { 0x00, 0x07, 0, 7, 0x21, '0', '4', '0', '1', '2', '3', '4' };   /* the 07xx type */
+        CHECKEQ(sbm_ipc_frame_attended(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_CALL_DIAL, SBM_IPC_EXEC, e, sizeof(e)), SBM_EPERM);
+        uint8_t g[SBM_CALL_DIAL_LEN] = { 0x00, 0x01, 0, 7, 0x21, '1', '2', '3', '4', '5', '6', '7' };   /* the CP's list */
+        CHECKEQ(sbm_ipc_frame_attended(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_CALL_DIAL, SBM_IPC_EXEC, g, sizeof(g)), SBM_EPERM);
+    }
+
+    /* an outgoing call: dialing -> alerting -> active, DTMF, the CP's audio settings, hang up */
+    CHECKEQ(sbm_modem_call_dial(mo, "+358 40 123 4567", &pol), 0);
+    CHECKEQ(sess_run(mo, &p, 300, 50, 0), 0);
+    CHECK(mo->b.calls.dial_seen && mo->b.calls.dial_res == 0x8001);
+    CHECK(!strcmp(s->fcp.dialled, "+358401234567"));
+    CHECKEQ(mo->b.calls.n, 1);
+    CHECK(mo->b.calls.c[0].outgoing && !strcmp(mo->b.calls.c[0].number, "+358401234567"));
+    CHECKEQ(sess_run(mo, &p, 400, 50, 0), 0);
+    CHECKEQ(mo->b.calls.c[0].state, SBM_CALL_ACTIVE);
+    CHECKEQ(sbm_modem_call_dtmf(mo, '5', 1), 0);
+    CHECKEQ(sbm_modem_call_dtmf(mo, 0, 0), 0);
+    CHECKEQ(sbm_modem_snd(mo, 0, 4, 0), 0);
+    CHECKEQ(sess_run(mo, &p, 100, 50, 0), 0);
+    CHECKEQ(s->fcp.n_dtmf, 2);
+    CHECKEQ(s->fcp.n_snd, 3);
+    CHECKEQ(sbm_modem_call_hangup(mo, 0), 0);
+    CHECKEQ(sess_run(mo, &p, 300, 50, 0), 0);
+    CHECK(mo->b.calls.end_seen && mo->b.calls.end_cause == 5);
+    CHECKEQ(mo->b.calls.n, 0);
+
+    /* an incoming call: the list says who, answer, hang up */
+    fakecp_ring(&s->fcp, "+358409876543");
+    CHECKEQ(sess_run(mo, &p, 300, 50, 0), 0);
+    CHECKEQ(mo->b.calls.n, 1);
+    CHECK(!mo->b.calls.c[0].outgoing && mo->b.calls.c[0].state == SBM_CALL_INCOMING_ST &&
+          !strcmp(mo->b.calls.c[0].number, "+358409876543"));
+    CHECKEQ(sbm_modem_call_answer(mo), 0);
+    CHECKEQ(sess_run(mo, &p, 300, 50, 0), 0);
+    CHECKEQ(mo->b.calls.c[0].state, SBM_CALL_ACTIVE);
+    CHECKEQ(sbm_modem_call_hangup(mo, 0), 0);
+    CHECKEQ(sess_run(mo, &p, 300, 50, 0), 0);
+    CHECKEQ(mo->b.calls.n, 0);
+
+    /* SMS: ready + the SIM's SMSC, a two-part send, a refused one, an incoming one acknowledged */
+    CHECKEQ(sbm_modem_sms_ready(mo), 0);
+    CHECKEQ(sess_run(mo, &p, 200, 50, 0), 0);
+    CHECKEQ(mo->b.sms.smsc_len, 8);
+    static char lng[300];
+    for (unsigned i = 0; i < 200; ++i)
+        lng[i] = (char)('A' + i % 26);
+    lng[200] = 0;
+    CHECKEQ(sbm_modem_sms_send(mo, "112", "x", &pol, 3), SBM_EPERM);
+    CHECKEQ(sbm_modem_sms_send(mo, "+358401234567", lng, &none, 3), SBM_EPERM);
+    CHECKEQ(sbm_modem_sms_send(mo, "+358401234567", lng, &pol, 3), 2);
+    CHECKEQ(sess_run(mo, &p, 300, 50, 0), 0);
+    CHECK(mo->b.sms.done[0] && mo->b.sms.done[1] && mo->b.sms.res[0] == 0 && mo->b.sms.res[1] == 0);
+    CHECKEQ(mo->b.sms.sent, 2);
+    CHECKEQ(s->fcp.n_sms_sent, 2);
+    {   /* what reached the CP decodes back to the text, from the SIM's SMSC */
+        static char joined[400];
+        joined[0] = 0;
+        for (unsigned k = 0; k < 2; ++k) {
+            uint8_t dl[220];
+            struct sbm_sms m2;
+            int dn = submit_to_deliver(s->fcp.sms_pdu[k], s->fcp.sms_len[k], dl);
+            CHECKEQ(sbm_sms_deliver_decode(dl, (uint32_t)dn, &m2), 0);
+            strcat(joined, m2.text);
+        }
+        CHECK(!strcmp(joined, lng));
+    }
+    s->fcp.sms_fail = 1;
+    CHECKEQ(sbm_modem_sms_send(mo, "+358401234567", "fails", &pol, 4), 1);
+    CHECKEQ(sess_run(mo, &p, 200, 50, 0), 0);
+    CHECK(mo->b.sms.done[0] && mo->b.sms.res[0] == 0x802a);
+    CHECKEQ(mo->b.sms.failed, 1);
+    memset(&t_inbox, 0, sizeof(t_inbox));
+    sbm_modem_sms_rx_cb(t_sms_rx, 0);
+    {
+        static uint8_t pd[1][SBM_SMS_PDU_MAX];
+        uint16_t pl[1];
+        uint8_t dl[220];
+        CHECKEQ(sbm_sms_submit_parts(&pol, "+358409876543", "Moi! Toimiiko t\xc3\xa4m\xc3\xa4?", 9, pd, pl, 1), 1);
+        int dn = submit_to_deliver(pd[0], pl[0], dl);
+        fakecp_sms_deliver(&s->fcp, dl, (uint32_t)dn);
+    }
+    CHECKEQ(sess_run(mo, &p, 200, 50, 0), 0);
+    CHECKEQ(t_inbox.n, 1);
+    CHECK(!strcmp(t_inbox.m[0].text, "Moi! Toimiiko t\xc3\xa4m\xc3\xa4?") && !strcmp(t_inbox.m[0].from, "+358409876543"));
+    CHECKEQ(s->fcp.n_ack, 1);
+    CHECKEQ(s->fcp.n_ack_bad, 0);
+    CHECKEQ(mo->b.sms.acked, 1);
+    sbm_modem_sms_rx_cb(0, 0);
+
+    CHECKEQ(s->fcp.n_forbidden, 0);
+    unsigned leak = 0;
+    for (unsigned k = nlog > 256 ? nlog - 256 : 0; k < nlog; ++k)
+        leak += k >= log0 && (strstr(loglines[k % 256], "401234567") || strstr(loglines[k % 256], "409876543") ||
+                              strstr(loglines[k % 256], "Toimiiko") || strstr(loglines[k % 256], "ABCDEF"));
+    CHECKEQ(leak, 0);
+    CHECKEQ(sbm_modem_stop(mo), 0);
+    check_parked(s);
+    fakesoc_free(s);
+    boot_image(im, 0);
+}
+#endif
+
+#ifdef SBM_ATTENDED_TX
+/* the attended SIM test (modemsim.img only): what the builder allows, the guards off only for an attended session,
+ * radio normal -> registered, low power -> detached, parked; nothing else on the wire; no PLMN in the log */
+static void test_attended(struct fakesoc *s, struct sbm_image *im, struct sbm_modem *mo, uint32_t boot_crc,
+                          uint32_t main_crc)
+{
+    static const uint8_t dn[2] = { 0x02, 0x02 }, dl[2] = { 0x01, 0x00 }, bad1[2] = { 0x02, 0x01 }, bad3[3] = { 1, 0, 0 };
+    struct sbm_plat p;
+    struct sbm_modem_snap sn;
+    uint8_t f[64];
+    unsigned pass = 0, wrong = 0;
+    for (unsigned g = 0; g < 256; ++g)
+        for (unsigned i = 0; i < 256; ++i)
+            for (unsigned t = 0; t < 8; ++t) {
+                uint16_t c = SBM_CMD(g, i);
+                int a = sbm_ipc_attended_allowed(c, (uint8_t)t, dn, 2) || sbm_ipc_attended_allowed(c, (uint8_t)t, dl, 2) ||
+                        sbm_ipc_attended_allowed(c, (uint8_t)t, 0, 0);
+                pass += a;
+                /* CALL / SMS: only the no-data frames of 7.11 pass with these data shapes (the dial and the send need
+                 * a real number, checked below); SS, SAT, IMEI and RFS never */
+                int comms = (c == SBM_CALL_RELEASE && t == SBM_IPC_EXEC) || (c == SBM_CALL_ANSWER && t == SBM_IPC_EXEC) ||
+                            (c == SBM_CALL_LIST && t == SBM_IPC_GET) || (c == SBM_SMS_READY && t == SBM_IPC_SET) ||
+                            (c == SBM_SMS_SMSC && t == SBM_IPC_GET);
+                wrong += a && !comms && (g == SBM_G_CALL || g == SBM_G_SMS || g == SBM_G_SS || g == SBM_G_SAT ||
+                                         g == SBM_G_IMEI || g == SBM_G_RFS);
+            }
+    CHECKEQ(pass, 19);                     /* 11 status GETs, the radio EXEC, 5 no-data call / SMS frames, 2 sound SETs */
+    CHECKEQ(wrong, 0);
+    CHECK(!sbm_ipc_attended_allowed(SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, bad1, 2));
+    CHECK(!sbm_ipc_attended_allowed(SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, bad3, 3));
+    CHECK(!sbm_ipc_attended_allowed(SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, 0, 2));
+    CHECK(!sbm_ipc_attended_allowed(SBM_PWR_PHONE_STATE, SBM_IPC_SET, dn, 2));
+    CHECKEQ(sbm_ipc_frame_attended(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_CMD(SBM_G_CALL, 1), SBM_IPC_EXEC, dn, 2), SBM_EPERM);
+    CHECKEQ(sbm_ipc_frame(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, dn, 2), SBM_EPERM);
+    CHECKEQ(sbm_ipc_frame_attended(f, sizeof(f), SBM_CH_FMT0, 0x41, SBM_PWR_PHONE_STATE, SBM_IPC_EXEC, dn, 2), 4 + 7 + 2);
+    {
+        static uint8_t a[SBM_GPRS_ATTACH_LONG_LEN];
+        static const uint8_t autosel[8] = { 2, 0, 0, 0, 0, 0, 0, 0xff }, manual[8] = { 1, 0, 0, 0, 0, 0, 0, 0xff };
+        memset(a, 0, sizeof(a));
+        a[0] = 1; a[1] = 1; a[2] = 6; memcpy(a + 3, "internet", 8); a[192] = 6;
+        CHECK(sbm_ipc_attended_allowed(SBM_GPRS_LTE_ATTACH, SBM_IPC_SET, a, SBM_GPRS_ATTACH_LEN));
+        a[127] = 'u';                                                   /* a user name */
+        CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_LTE_ATTACH, SBM_IPC_SET, a, SBM_GPRS_ATTACH_LEN));
+        a[127] = 0; a[192] = 2;                                         /* roaming type differs */
+        CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_LTE_ATTACH, SBM_IPC_SET, a, SBM_GPRS_ATTACH_LEN));
+        a[192] = 0; a[328] = 6;
+        CHECK(sbm_ipc_attended_allowed(SBM_GPRS_LTE_ATTACH, SBM_IPC_SET, a, SBM_GPRS_ATTACH_LONG_LEN));
+        a[2] = 5; a[328] = 5;                                           /* IPv6 only: not offered */
+        CHECK(!sbm_ipc_attended_allowed(SBM_GPRS_LTE_ATTACH, SBM_IPC_SET, a, SBM_GPRS_ATTACH_LONG_LEN));
+        CHECK(sbm_ipc_attended_allowed(SBM_NET_PLMN_SEL, SBM_IPC_SET, autosel, 8));
+        CHECK(!sbm_ipc_attended_allowed(SBM_NET_PLMN_SEL, SBM_IPC_SET, manual, 8));   /* no manual selection */
+    }
+    CHECK(sbm_operator_name("00101#") && !strcmp(sbm_operator_name("00101#"), "Test network"));
+    CHECK(sbm_operator_name("24405F") && !strcmp(sbm_operator_name("24405F"), "Elisa"));
+    CHECK(!sbm_operator_name("99999") && !sbm_operator_name("1234") && !sbm_operator_name(0));
+
+    /* a SIM in, but the session is not attended: the guard parks, the radio call is refused */
+    boot_image(im, 0);
+    fakesoc_init(s, &im->plan, boot_crc, main_crc);
+    s->sim_present = 2;
+    fakesoc_plat(s, &p, tlog);
+    memset(mo, 0, sizeof(*mo));
+    mo->attended = 0x41545445u;            /* not the magic */
+    CHECKEQ(sbm_modem_start(mo, &p, im), 0);
+    CHECKEQ(sbm_modem_radio(mo, 1), SBM_EPERM);
+    CHECKEQ(sess_run(mo, &p, 2000, 0, 0), SBM_EPERM);
+    CHECKEQ(mo->state, SBM_MS_GUARD);
+    CHECKEQ(s->fcp.n_radio_exec, 0);
+    check_parked(s);
+    fakesoc_free(s);
+
+    /* attended: SIM ready, no guard; radio normal -> home on LTE; low power -> detached; parked */
+    boot_image(im, 0);
+    fakesoc_init(s, &im->plan, boot_crc, main_crc);
+    s->sim_present = 2;
+    fakesoc_plat(s, &p, tlog);
+    memset(mo, 0, sizeof(*mo));
+    mo->attended = SBM_ATTENDED_MAGIC;
+    unsigned log0 = nlog;
+    CHECKEQ(sbm_modem_start(mo, &p, im), 0);
+    CHECKEQ(mo->b.attended, SBM_ATTENDED_MAGIC);
+    CHECKEQ(sbm_modem_pdp_define(mo, "internet"), SBM_EPERM);      /* no data without SBM_ATTENDED_DATA */
+    CHECKEQ(sbm_modem_pdp_activate(mo, 1, 0), SBM_EPERM);
+    CHECKEQ(sess_run(mo, &p, 3000, 1000, 0), 0);
+    sbm_modem_snapshot(mo, &sn);
+    CHECKEQ(sn.sim, SBM_SIM_INIT_COMPLETE);
+    CHECK(sn.cs != SBM_REG_HOME && sn.ps != SBM_REG_HOME && mo->state == SBM_MS_ONLINE);
+    s->fcp.need_attach_apn = 1;                /* as the phone (simtest-a1): no attach without the attach APN */
+    CHECKEQ(sbm_modem_radio(mo, 1), 0);
+    CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
+    CHECK(mo->b.radio_res_seen);
+    CHECKEQ(mo->b.radio_res, 0x8000);
+    sbm_modem_snapshot(mo, &sn);
+    CHECK(sn.cs == SBM_REG_NONE && sn.ps == SBM_REG_NONE);
+    CHECKEQ(sbm_modem_net_auto(mo), 0);
+    CHECKEQ(sess_run(mo, &p, 500, 0, 0), 0);
+    CHECK(mo->b.ctl_seen && mo->b.ctl_res == 0x8000 && mo->b.ctl_cmd == SBM_NET_PLMN_SEL);
+    CHECKEQ(sbm_modem_ps_attach(mo), 0);
+    CHECKEQ(sess_run(mo, &p, 500, 0, 0), 0);
+    CHECK(mo->b.ctl_seen && mo->b.ctl_res == 0x8000 && mo->b.ctl_cmd == SBM_GPRS_PS);
+    CHECKEQ(sbm_modem_attach_apn(mo, "internet", 0x07, 0), SBM_EINVAL);
+    CHECKEQ(sbm_modem_attach_apn(mo, "inter net", 0x06, 0), SBM_EPERM);      /* the builder refuses the APN */
+    CHECKEQ(sbm_modem_attach_apn(mo, "internet", 0x06, 0), 0);
+    CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
+    CHECK(mo->b.ctl_seen && mo->b.ctl_res == 0x8000 && mo->b.ctl_cmd == SBM_GPRS_LTE_ATTACH);
+    CHECKEQ(s->fcp.n_attach_apn, 1);
+    CHECKEQ(s->fcp.n_net_auto, 1);
+    CHECKEQ(s->fcp.n_ps_attach, 1);
+    sbm_modem_snapshot(mo, &sn);
+    CHECK(sn.cs == SBM_REG_HOME && sn.ps == SBM_REG_HOME);
+    CHECKEQ(sn.rat, SBM_ACT_LTE);
+    CHECKEQ(sn.bars, 3);
+    CHECK(sn.have_plmn && !sn.emergency_only);
+    CHECK(sbm_operator_name(sn.plmn) && !strcmp(sbm_operator_name(sn.plmn), "Test network"));
+    CHECKEQ(sbm_modem_radio(mo, 0), 0);
+    CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
+    CHECK(mo->b.radio_res_seen);
+    sbm_modem_snapshot(mo, &sn);
+    CHECK(sn.cs != SBM_REG_HOME && sn.ps != SBM_REG_HOME && sn.cs != SBM_REG_ROAMING);
+    CHECKEQ(sbm_modem_stop(mo), 0);
+    CHECK(mo->b.parked);
+    check_parked(s);
+    CHECKEQ(s->fcp.n_radio_exec, 2);
+    CHECKEQ(s->fcp.n_call, 0);
+    CHECKEQ(s->fcp.n_forbidden, 0);
+    unsigned leak = 0;
+    for (unsigned k = log0; k < nlog; ++k)
+        leak += strstr(loglines[k % 256], "00101") != 0;
+    CHECKEQ(leak, 0);
+    fakesoc_free(s);
+
+    /* attended, but the SIM wants its PIN: the CP reports LOCK_SC (the probe stops there; nothing is sent) */
+    boot_image(im, 0);
+    fakesoc_init(s, &im->plan, boot_crc, main_crc);
+    s->sim_present = 2;
+    s->sim_pin = 1;
+    fakesoc_plat(s, &p, tlog);
+    memset(mo, 0, sizeof(*mo));
+    mo->attended = SBM_ATTENDED_MAGIC;
+    CHECKEQ(sbm_modem_start(mo, &p, im), 0);
+    CHECKEQ(sess_run(mo, &p, 2000, 1000, 0), 0);
+    sbm_modem_snapshot(mo, &sn);
+    CHECKEQ(sn.sim, SBM_SIM_LOCK_SC);
+    CHECKEQ(mo->b.cell.sim_key, 0x01);
+    CHECKEQ(sbm_modem_stop(mo), 0);
+    CHECKEQ(s->fcp.n_radio_exec, 0);
+    check_parked(s);
+    fakesoc_free(s);
+    boot_image(im, 0);
+    test_attended_data(s, im, mo, boot_crc, main_crc);
+    test_attended_comms(s, im, mo, boot_crc, main_crc);
+}
+#endif
+
+/* SMS-SUBMIT in parts, checked by turning each into the SMS-DELIVER the receiver gets and decoding it */
+static int submit_to_deliver(const uint8_t *s, uint32_t n, uint8_t *d)
+{
+    uint32_t o = 0, i = 0;
+    uint8_t fo = s[i++];
+    i++;                                             /* TP-MR */
+    uint32_t dal = s[i], dab = 2 + (dal + 1) / 2;
+    d[o++] = (uint8_t)(0x04 | (fo & 0x40));          /* SMS-DELIVER, UDHI kept */
+    memcpy(d + o, s + i, dab), o += dab, i += dab;   /* OA = DA */
+    d[o++] = s[i++];                                 /* PID */
+    d[o++] = s[i++];                                 /* DCS */
+    static const uint8_t scts[7] = { 0x62, 0x11, 0x11, 0x02, 0x00, 0x00, 0x00 };
+    memcpy(d + o, scts, 7), o += 7;
+    memcpy(d + o, s + i, n - i), o += n - i;         /* UDL + UD */
+    return (int)o;
+}
+
+static void test_sms_parts(void)
+{
+    static uint8_t pdu[SBM_SMS_MAX_PARTS][SBM_SMS_PDU_MAX];
+    uint16_t len[SBM_SMS_MAX_PARTS];
+    uint8_t dl[200];
+    struct sbm_sms m;
+    struct sbm_dial_policy pol;
+    memset(&pol, 0, sizeof(pol));
+    CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", "hi", 1, pdu, len, 4), SBM_EPERM);   /* no confirmation */
+    pol.user_confirmed = SBM_DIAL_USER_CONFIRMED;
+    CHECKEQ(sbm_sms_submit_parts(&pol, "112", "hi", 1, pdu, len, 4), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit_parts(&pol, "+358112", "hi", 1, pdu, len, 4), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit_parts(&pol, "0044999", "hi", 1, pdu, len, 4), SBM_EPERM);
+    CHECKEQ(sbm_sms_submit_parts(&pol, "16000", "hi", 1, pdu, len, 4), SBM_EPERM);
+    CHECKEQ(sbm_dial_check(&pol, "+358401234567"), 0);
+    pol.user_confirmed = 0x55534553u;                /* not the magic */
+    CHECKEQ(sbm_dial_check(&pol, "+358401234567"), SBM_EPERM);
+    pol.user_confirmed = SBM_DIAL_USER_CONFIRMED;
+    static char lng[700], cyr[300];
+    for (unsigned i = 0; i < 400; ++i)
+        lng[i] = (char)('a' + i % 26);
+    lng[400] = 0;
+    unsigned k = 0;
+    for (unsigned i = 0; i < 100; ++i) {
+        cyr[k++] = (char)0xD0;
+        cyr[k++] = (char)(0x90 + i % 32);           /* А..Я */
+    }
+    cyr[k] = 0;
+    struct { const char *t; int parts, alpha; } T[] = {
+        { "Hei! T\xc3\xa4m\xc3\xa4 on testi: \xc3\xa4\xc3\xb6\xc3\xa5 \xc3\x84\xc3\x96\xc3\x85 \xe2\x82\xac [x] {y} ~", 1, 0 },
+        { "\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82 Starbite", 1, 2 },
+        { "Emoji \xf0\x9f\x98\x80 ok", 1, 2 },
+        { lng, 3, 0 },
+        { cyr, 2, 2 },
+    };
+    for (unsigned t = 0; t < sizeof(T) / sizeof(T[0]); ++t) {
+        int n = sbm_sms_submit_parts(&pol, "+358401234567", T[t].t, 0x5a, pdu, len, 4);
+        CHECKEQ(n, T[t].parts);
+        static char joined[1400];
+        joined[0] = 0;
+        for (int p = 0; p < n; ++p) {
+            int dn = submit_to_deliver(pdu[p], len[p], dl);
+            CHECKEQ(sbm_sms_deliver_decode(dl, (uint32_t)dn, &m), 0);
+            CHECKEQ(m.alphabet, T[t].alpha);
+            CHECK(!strcmp(m.from, "+358401234567"));
+            if (n > 1)
+                CHECK(m.concat && m.ref == 0x5a && m.total == n && m.seq == p + 1);
+            strcat(joined, m.text);
+        }
+        CHECK(!strcmp(joined, T[t].t));
+        if (strcmp(joined, T[t].t))
+            printf("  sms text %u: got \"%.80s\"\n", t, joined);
+    }
+    CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", lng, 1, pdu, len, 2), SBM_ERANGE);   /* 3 parts > 2 */
+    CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", "\xff\xfe", 1, pdu, len, 4), SBM_EINVAL);
+}
+
+static void test_inbox(void)
+{
+    static struct sbm_inbox ib;
+    struct sbm_sms a;
+    memset(&ib, 0, sizeof(ib));
+    memset(&a, 0, sizeof(a));
+    strcpy(a.from, "+358401234567");
+    strcpy(a.text, "single");
+    CHECKEQ(sbm_inbox_add(&ib, &a, 1000), 1);
+    /* three parts out of order, interleaved with another sender's two parts */
+    struct sbm_sms p[3], q[2];
+    for (unsigned i = 0; i < 3; ++i) {
+        memset(&p[i], 0, sizeof(p[i]));
+        strcpy(p[i].from, "+358401234567");
+        p[i].concat = 1, p[i].ref = 7, p[i].total = 3, p[i].seq = (uint8_t)(i + 1);
+        snprintf(p[i].text, sizeof(p[i].text), "<%u>", i + 1);
+    }
+    for (unsigned i = 0; i < 2; ++i) {
+        memset(&q[i], 0, sizeof(q[i]));
+        strcpy(q[i].from, "+358409876543");
+        q[i].concat = 1, q[i].ref = 7, q[i].total = 2, q[i].seq = (uint8_t)(i + 1);
+        snprintf(q[i].text, sizeof(q[i].text), "(%u)", i + 1);
+    }
+    CHECKEQ(sbm_inbox_add(&ib, &p[2], 2000), 0);
+    CHECKEQ(sbm_inbox_add(&ib, &q[0], 2001), 0);
+    CHECKEQ(sbm_inbox_add(&ib, &p[0], 2002), 0);
+    CHECKEQ(sbm_inbox_add(&ib, &q[1], 2003), 1);
+    CHECKEQ(sbm_inbox_add(&ib, &p[1], 2004), 1);
+    CHECKEQ(ib.n, 3);
+    CHECK(!strcmp(ib.m[1].text, "(1)(2)") && !strcmp(ib.m[1].from, "+358409876543"));
+    CHECK(!strcmp(ib.m[2].text, "<1><2><3>"));
+    /* a lost part: given up after the timeout, delivered with a mark */
+    CHECKEQ(sbm_inbox_add(&ib, &p[0], 3000), 0);
+    CHECKEQ(sbm_inbox_add(&ib, &p[2], 3001), 0);
+    CHECKEQ(sbm_inbox_add(&ib, 0, 3000 + SBM_INBOX_PART_MS + 10), 0);
+    CHECKEQ(ib.n, 4);
+    CHECK(!strcmp(ib.m[3].text, "<1>[...]<3>"));
+    /* the newest SBM_INBOX_MAX kept */
+    for (unsigned i = 0; i < 40; ++i) {
+        snprintf(a.text, sizeof(a.text), "m%u", i);
+        sbm_inbox_add(&ib, &a, 5000 + i);
+    }
+    CHECKEQ(ib.n, SBM_INBOX_MAX);
+    CHECK(!strcmp(ib.m[SBM_INBOX_MAX - 1].text, "m39") && !strcmp(ib.m[0].text, "m8"));
+    CHECK(ib.m[SBM_INBOX_MAX - 1].id > ib.m[0].id);
+}
+
+static void test_session(uint32_t boot_crc, uint32_t main_crc)
+{
+    static struct fakesoc s;
+    static struct sbm_image im;
+    static struct sbm_modem mo;
+    static uint8_t chunk[0x40000], nv_pristine[0x100000];
+    struct sbm_plat p;
+    struct sbm_modem_snap sn, sn2;
+    char st[200];
+    unsigned q = 0;
+
+    /* start from a streamed image: BOOT/MAIN/VSS read from RADIO twice (check, copy), only NV in RAM */
+    stream_image(&im, chunk, sizeof(chunk), nv_pristine);
+    memcpy(nv_pristine, t_nv, sizeof(nv_pristine));
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.radio = t_radio;
+    s.radio_size = sizeof(t_radio);
+    s.rfs_mode = 1;
+    s.nosim_plmn = 1;
+    s.regist_seq_quirk = 1;                                      /* night-1110: CS answered with PS's seq */
+    s.nv_ref = nv_pristine;
+    fakesoc_plat(&s, &p, tlog);
+    memset(&mo, 0, sizeof(mo));
+    CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
+    CHECK(mo.up && !mo.b.parked && mo.b.init_end_sent && !mo.b.restart);
+    CHECKEQ(mo.state, SBM_MS_ONLINE);
+    CHECKEQ(mo.b.streamed, 0x1e40 + T_MAIN + T_VSS);
+    CHECKEQ(s.radio_bytes, 2ull * (0x1e40 + T_MAIN + T_VSS));   /* the check and the copy */
+    CHECK(s.cp_running && s.validated);                          /* EL3 accepted what was streamed in */
+    CHECK(im.data[0] == 0 && im.data[1] == 0);
+
+    /* 11 rounds, 10 s apart (sess-1's shape): every answer arrives and matches */
+    CHECKEQ(sess_run(&mo, &p, 110000, 10000, &q), 0);
+    CHECKEQ(q, 11);
+    CHECKEQ(mo.b.fmt_tx, 121);
+    CHECKEQ(mo.b.fmt_resp + mo.b.fmt_gen_res, 121);
+    CHECKEQ(mo.b.fmt_unmatched, 0);
+    CHECKEQ(mo.b.fmt_seq_fixed, 11);                             /* one per round, matched by command */
+    CHECKEQ(s.rfs_read_ok, 1);
+    CHECKEQ(s.rfs_write_ok, 1);
+    CHECKEQ(t_nv[0x80001], (uint8_t)(0x5A ^ 1));                 /* the CP's NV write: the RAM copy only */
+    CHECK(nv_pristine[0x80001] != t_nv[0x80001]);
+
+    /* the snapshot: what the UI shows; the PLMN only in its own field, never in the line */
+    sbm_modem_snapshot(&mo, &sn);
+    CHECKEQ(sn.state, SBM_MS_ONLINE);
+    CHECKEQ(sn.sim, SBM_SIM_ABSENT);
+    CHECKEQ(sn.cs, SBM_REG_EMERGENCY);
+    CHECK(sn.emergency_only);
+    CHECKEQ(sn.rat, SBM_ACT_GSM);
+    CHECK(sn.bars <= 5);
+    CHECK(sn.have_plmn && !strcmp(sn.plmn, "00101"));
+    CHECK(!strstr(sn.line, "00101") && strstr(sn.line, "PLMN set"));
+    CHECKEQ(sn.queries, 121);
+    CHECKEQ(sn.answers, 121);
+    CHECKEQ(sn.open, 0);
+    CHECKEQ(sn.starts, 1);
+    CHECK(sn.up_ms >= 110000 && sn.last_rx_ms < 11000);
+    CHECK(sn.gen > 0);
+    sbm_modem_snapshot(&mo, &sn2);
+    CHECKEQ(sn2.gen, sn.gen);                                    /* nothing changed: no redraw */
+
+    /* 12 minutes on: the old total frame budget (about 600 frames) would have stopped it after about 8 */
+    CHECKEQ(sess_run(&mo, &p, 12 * 60000, 10000, &q), 0);
+    CHECK(mo.up);
+    CHECKEQ(mo.b.fmt_resp + mo.b.fmt_gen_res, mo.b.fmt_tx);
+    CHECK(mo.b.fmt_tx >= 121 + 72 * 11);
+
+    /* stop = park; the snapshot says so and drops the radio fields */
+    CHECKEQ(sbm_modem_stop(&mo), 0);
+    CHECK(!mo.up && mo.b.parked);
+    check_parked(&s);
+    CHECKEQ((s.pmu[SBM_PMU_RESET_SEQ_STATUS / 4] & 7), 5);       /* as on the phone: the sequencer stays 5 */
+    CHECKEQ(s.ctrl[SBM_CP_CTRL_S] & 8, 0);                      /* and CP_START reads 0 (night-1111) */
+    sbm_modem_snapshot(&mo, &sn2);
+    CHECKEQ(sn2.state, SBM_MS_OFF);
+    CHECK(sn2.gen != sn.gen && sn2.bars == 0xFF && !sn2.have_plmn && sn2.sim == 0xFF);
+    sbm_modem_status(&mo, st, sizeof(st));
+    CHECK(!strcmp(st, "modem off (parked)"));
+    CHECKEQ(sbm_modem_poll(&mo, 1), SBM_EPERM);
+    CHECKEQ(sbm_modem_recover(&mo, 10000), SBM_EPERM);           /* a stop is the user's: no automatic restart */
+
+    /* start again in the same boot: Android's reset path (no second cp_init), NV restored from the pristine copy */
+    t_nv[5] ^= 0xFF;
+    CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
+    CHECK(mo.up && mo.b.restart);
+    CHECKEQ(s.releases, 1);
+    CHECKEQ(s.mbox_resets, 1);
+    CHECKEQ(t_nv[5], nv_pristine[5]);
+    CHECKEQ(mo.starts, 2);
+    CHECKEQ(sess_run(&mo, &p, 20000, 10000, 0), 0);
+    CHECKEQ(mo.b.fmt_resp + mo.b.fmt_gen_res, 22);
+    CHECKEQ(s.radio_bytes, 4ull * (0x1e40 + T_MAIN + T_VSS));
+
+    /* the CP goes quiet: a stall 20 s after the first unanswered query, parked; recover after 5 s */
+    s.cp_mute = 1;
+    uint64_t t0 = s.clock_us;
+    int r = sess_run(&mo, &p, 60000, 10000, 0);
+    CHECKEQ(r, SBM_ETIME);
+    CHECK(s.clock_us - t0 >= 29000000 && s.clock_us - t0 <= 34000000);   /* query at +10 s, stall 20 s later */
+    CHECKEQ(mo.state, SBM_MS_STALLED);
+    CHECK(!mo.up && mo.b.parked);
+    check_parked(&s);
+    sbm_modem_snapshot(&mo, &sn);
+    CHECKEQ(sn.state, SBM_MS_STALLED);
+    CHECKEQ(sn.last_err, SBM_ETIME);
+    CHECKEQ(sbm_modem_recover(&mo, 1000), 1);                    /* not yet: 5 s parked first */
+    s.cp_mute = 0;
+    CHECKEQ(sbm_modem_recover(&mo, 4000), 0);
+    CHECK(mo.up && mo.b.restart);
+    CHECKEQ(mo.restarts, 1);
+    CHECKEQ(sess_run(&mo, &p, 15000, 10000, 0), 0);
+    CHECK(mo.b.fmt_resp + mo.b.fmt_gen_res == 11);
+
+    /* three restarts in the window, then it stays off */
+    for (unsigned k = 0; k < 3; ++k) {
+        s.cp_mute = 1;
+        CHECKEQ(sess_run(&mo, &p, 60000, 10000, 0), SBM_ETIME);
+        s.cp_mute = 0;
+        r = sbm_modem_recover(&mo, 6000);
+        if (k < 2) {
+            CHECKEQ(r, 0);
+            CHECK(mo.up);
+        } else {
+            CHECKEQ(r, SBM_EPERM);
+            CHECK(!mo.up && mo.state == SBM_MS_STALLED);
+        }
+    }
+    CHECKEQ(mo.restarts, 3);
+    CHECKEQ(mo.stalls, 4);
+    check_parked(&s);
+    check_allowed(&s);
+    CHECKEQ(s.fcp.n_forbidden, 0);
+    CHECKEQ(s.fcp.n_call, 0);
+    fakesoc_free(&s);
+
+    /* RADIO reads differently at the copy than at the check: refused before EL3 sees it, parked */
+    stream_image(&im, chunk, sizeof(chunk), nv_pristine);
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.radio = t_radio;
+    s.radio_size = sizeof(t_radio);
+    s.radio_flip_at = 1 + (0x1e40 + 0x3ffff) / 0x40000 + (T_MAIN + 0x3ffff) / 0x40000 + (T_VSS + 0x3ffff) / 0x40000 + 1;
+    fakesoc_plat(&s, &p, tlog);
+    memset(&mo, 0, sizeof(mo));
+    CHECKEQ(sbm_modem_start(&mo, &p, &im), SBM_EIO);
+    CHECKEQ(mo.state, SBM_MS_FAILED);
+    CHECK(!mo.up && mo.b.copied == 0 && !mo.b.validated && mo.b.parked);
+    check_parked(&s);
+    CHECKEQ(sbm_modem_recover(&mo, 10000), SBM_EPERM);
+    fakesoc_free(&s);
+
+    /* the reset release never completes: the restart fails, parked again */
+    stream_image(&im, chunk, sizeof(chunk), nv_pristine);
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.radio = t_radio;
+    s.radio_size = sizeof(t_radio);
+    fakesoc_plat(&s, &p, tlog);
+    memset(&mo, 0, sizeof(mo));
+    CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
+    CHECKEQ(sbm_modem_stop(&mo), 0);
+    s.release_stuck = 1;
+    CHECKEQ(sbm_modem_start(&mo, &p, &im), SBM_ETIME);
+    CHECK(!mo.up && mo.b.restart && mo.b.parked && mo.state == SBM_MS_FAILED);
+    CHECK(!s.cp_running);
+    CHECKEQ((s.pmu[SBM_PMU_CENTRAL_SEQ_CP_ST / 4] >> 16) & 0xFF, 0x80);
+    fakesoc_free(&s);
+
+    /* a SIM appears: the guard parks from inside poll; no automatic restart after a guard */
+    boot_image(&im, 0);
+    fakesoc_init(&s, &im.plan, boot_crc, main_crc);
+    s.sim_present = 1;
+    fakesoc_plat(&s, &p, tlog);
+    memset(&mo, 0, sizeof(mo));
+    CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
+    CHECKEQ(sess_run(&mo, &p, 2000, 0, 0), SBM_EPERM);
+    CHECKEQ(mo.b.stopped_by, SBM_STOP_SIM);
+    CHECKEQ(mo.state, SBM_MS_GUARD);
+    CHECK(!mo.up && mo.b.parked);
+    CHECKEQ(sbm_modem_recover(&mo, 10000), SBM_EPERM);
+    check_parked(&s);
+    fakesoc_free(&s);
+    boot_image(&im, 0);
+#ifdef SBM_ATTENDED_TX
+    test_attended(&s, &im, &mo, boot_crc, main_crc);
+#endif
 }
 
 static void test_boot(void)
@@ -1540,59 +2308,7 @@ static void test_boot(void)
         boot_image(&im, 0);
     }
 
-    /* the session API (Starbite OS): start, poll from a loop, query, status, stop = park */
-    {
-        static uint8_t nv_before[0x100000];
-        static struct sbm_modem mo;
-        char st[200];
-        boot_image(&im, 0);
-        memcpy(nv_before, t_nv, sizeof(nv_before));
-        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
-        s.rfs_mode = 1;
-        s.nv_ref = nv_before;
-        fakesoc_plat(&s, &p, tlog);
-        CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
-        CHECK(mo.up && !mo.b.parked && mo.b.init_end_sent);
-        CHECK(s.cp_running);                                     /* not parked: the session owns it */
-        for (unsigned i = 0; i < 2000; ++i) {                    /* 2 s of an event loop, 1 ms per turn */
-            CHECKEQ(sbm_modem_poll(&mo, 1), 0);
-            p.udelay(p.ctx, 1000);
-        }
-        CHECKEQ(sbm_modem_query(&mo), 0);
-        for (unsigned i = 0; i < 100; ++i) {
-            sbm_modem_poll(&mo, 1);
-            p.udelay(p.ctx, 1000);
-        }
-        sbm_modem_status(&mo, st, sizeof(st));
-        CHECK(strstr(st, "SIM absent") && strstr(st, "CS emergency-only") && !strstr(st, "00101"));
-        CHECKEQ(s.rfs_read_ok, 1);
-        CHECKEQ(sbm_modem_stop(&mo), 0);
-        CHECK(!mo.up && mo.b.parked);
-        sbm_modem_status(&mo, st, sizeof(st));
-        CHECK(!strcmp(st, "modem off (parked)"));
-        CHECKEQ(sbm_modem_poll(&mo, 1), SBM_EPERM);
-        check_parked(&s);
-        check_allowed(&s);
-        fakesoc_free(&s);
-
-        /* a SIM appears: the guard parks the CP from inside poll */
-        boot_image(&im, 0);
-        fakesoc_init(&s, &im.plan, boot_crc, main_crc);
-        s.sim_present = 1;
-        fakesoc_plat(&s, &p, tlog);
-        CHECKEQ(sbm_modem_start(&mo, &p, &im), 0);
-        int r = 0;
-        for (unsigned i = 0; i < 2000 && r == 0; ++i) {
-            r = sbm_modem_poll(&mo, 1);
-            p.udelay(p.ctx, 1000);
-        }
-        CHECKEQ(r, 1);
-        CHECKEQ(mo.b.stopped_by, SBM_STOP_SIM);
-        CHECK(!mo.up && mo.b.parked);
-        check_parked(&s);
-        fakesoc_free(&s);
-        boot_image(&im, 0);
-    }
+    test_session(boot_crc, main_crc);
 
     /* ONLINE with a SIM present: stops at once on the SIM status, parked */
     fakesoc_init(&s, &im.plan, boot_crc, main_crc);
@@ -1826,6 +2542,8 @@ int main(int argc, char **argv)
     test_clk();
     test_rfs();
     test_policy_sms();
+    test_sms_parts();
+    test_inbox();
     printf("sbm host test: %u checks, %u failed%s\n", checks, fails, radio ? " (with this phone's RADIO image)" : "");
     return fails ? 1 : 0;
 }

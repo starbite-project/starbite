@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Term Test
+Comment=Terminal=true: sbwl runs it inside foot
+Exec=sh -c "echo STARBITE-TERMTEST; exec sleep 600"
+Terminal=true
+Icon=sbwl-no-such-icon

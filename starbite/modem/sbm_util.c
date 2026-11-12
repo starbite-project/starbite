@@ -18,6 +18,15 @@ void sbm_memset(void *d, int c, size_t n)
         *dp++ = (uint8_t)c;
 }
 
+int sbm_memcmp(const void *a, const void *b, size_t n)
+{
+    const uint8_t *x = a, *y = b;
+    for (; n; --n, ++x, ++y)
+        if (*x != *y)
+            return *x < *y ? -1 : 1;
+    return 0;
+}
+
 size_t sbm_strlcpy(char *d, const char *s, size_t cap)
 {
     size_t i = 0;
@@ -155,4 +164,32 @@ const char *sbm_strerror(int e)
     case SBM_EBADF: return "malformed";
     default: return "?";
     }
+}
+
+uint32_t sbm_strlen(const char *s)
+{
+    uint32_t n = 0;
+    while (s && s[n])
+        ++n;
+    return n;
+}
+
+void *sbm_memmove(void *d, const void *s, size_t n)
+{
+    uint8_t *a = d;
+    const uint8_t *b = s;
+    if (a < b)
+        for (size_t i = 0; i < n; ++i)
+            a[i] = b[i];
+    else
+        for (size_t i = n; i-- > 0;)
+            a[i] = b[i];
+    return d;
+}
+
+int sbm_strcmp(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        ++a, ++b;
+    return (int)(uint8_t)*a - (int)(uint8_t)*b;
 }

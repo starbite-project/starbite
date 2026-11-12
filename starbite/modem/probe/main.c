@@ -152,7 +152,7 @@ static const char *launched_key(char key[24])
             for (; i < 23 && blk[48 + i]; i++)
                 key[i] = (char)blk[48 + i];
             key[i] = 0;
-            if (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_streq(key, "modemsess"))
+            if (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_prefix(key, "modemsess") || sb_streq(key, "modemsim"))
                 return "the loader's launch record";
         }
     }
@@ -177,7 +177,7 @@ static const char *launched_key(char key[24])
                     at++;
                 }
                 key[i] = 0;
-                found = i > 0 && (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_streq(key, "modemsess"));
+                found = i > 0 && (sb_prefix(key, "modemprobe") || sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_prefix(key, "modemsess") || sb_streq(key, "modemsim"));
             }
         }
         if (found)
@@ -274,62 +274,628 @@ static void park_hook(void)
     sbm_cp_park(&park_plat);
 }
 
-/* modemsess: the session API as Starbite OS would use it: start, a 1 ms event loop for modem_hold seconds (default
- * 120), the status GETs every 10 s, the masked status line on the screen every second and in pmsg every 10 s, then
- * stop (park). The guards inside poll park the CP on a SIM or a registration. */
-static void session(void)
+/* modemsess*: the session API as Starbite OS uses it, from the small-footprint image (only nv_data in RAM; BOOT/MAIN/
+ * VSS streamed from RADIO at each start): start, a 1 ms event loop for modem_hold seconds, the status GETs every
+ * 10 s, a snapshot line in pmsg every 10 s and on the screen every second (masked: never the PLMN), then stop
+ * (park). A stall or a crash is recovered as Starbite OS would (sbm_modem_recover). The guards park on a SIM or a
+ * registration and stay parked.
+ *   modemsess        one session, modem_hold s (120)
+ *   modemsess-cycle  modem_cycles sessions (3) of modem_hold s (40) each, 6 s parked between: the same-boot restart
+ *   modemsess-long   one session of modem_hold s (1500 = 25 min): continuous use */
+static void snap_line(struct sbm_modem *mo, const char *tag, unsigned secs)
 {
-    static struct sbm_image im;
-    static struct sbm_modem mo;
+    struct sbm_modem_snap sn;
+    char s[COLS];
+    sbm_modem_snapshot(mo, &sn);
+    sbm_fmt(s, sizeof(s), "%s +%u s: %s | state %u gen %u | q %u a %u open %u | rssi %d dBm | rx %u ms ago | starts %u"
+            " restarts %u%s", tag, secs, sn.line, sn.state, sn.gen, sn.queries, sn.answers, sn.open, sn.rssi_dbm,
+            sn.last_rx_ms == 0xFFFFFFFFu ? 0 : sn.last_rx_ms, sn.starts, sn.restarts, sn.emergency_only ?
+            " | emergency calls only" : "");
+    line(s);
+}
+
+static int session_run(struct sbm_modem *mo, unsigned secs, unsigned cycle)
+{
     char s[COLS], st[COLS];
-    unsigned secs = arg("modem_hold", 120);
-    if (secs > 600)
-        secs = 600;
-    sb_storage_hold("modem session: no storage writes");
-    sbm_fmt(s, sizeof(s), "modemsess: session API demo, %u s; watchdog %u s", secs, sb_wdt_arm(30));
-    line(s);
-    sbm_sb_plat(&park_plat, plog);
-    if (sbm_sb_load_image(&im, line) < 0) {
-        line("modemsess: loading RADIO / EFS failed");
-        return;
-    }
-    sbm_sb_plat_stage4(&park_plat, im.mm.ipc_off);
-    park_armed = 1;
-    sb_before_reset = park_hook;
-    int r = sbm_modem_start(&mo, &park_plat, &im);
-    sbm_fmt(s, sizeof(s), "modemsess: start: %s", r == 0 ? "online" : sbm_strerror(r));
-    line(s);
-    uint64_t t0 = sb_ms(), last_draw = 0, last_q = 0;
-    while (mo.up && sb_ms() - t0 < secs * 1000ULL) {
-        r = sbm_modem_poll(&mo, 1);
-        if (r != 0) {
-            sbm_fmt(s, sizeof(s), "modemsess: poll stopped: %s (parked)", r < 0 ? sbm_strerror(r) : "a guard");
-            line(s);
-            break;
+    uint64_t t0 = sb_ms(), last = t0, last_draw = 0, last_q = 0;
+    while (sb_ms() - t0 < secs * 1000ULL) {
+        uint64_t t = sb_ms();
+        uint32_t el = (uint32_t)(t - last);
+        last = t;
+        uint64_t now = t - t0;
+        if (mo->up) {
+            int r = sbm_modem_poll(mo, el ? el : 1);
+            if (r < 0) {
+                sbm_fmt(s, sizeof(s), "modemsess: down: %s (parked)", sbm_strerror(r));
+                line(s);
+                snap_line(mo, "SESSION:", (unsigned)(now / 1000));
+                if (mo->state == SBM_MS_GUARD)
+                    return r;
+            }
+        } else {
+            int r = sbm_modem_recover(mo, el);
+            if (r == 0) {
+                line("modemsess: recovered (restarted)");
+                last = sb_ms();
+            } else if (r < 0) {
+                sbm_fmt(s, sizeof(s), "modemsess: no recovery: %s", sbm_strerror(r));
+                line(s);
+                return r;
+            }
         }
-        uint64_t now = sb_ms() - t0;
-        if (now >= 3000 && now - last_q >= 10000) {
+        if (mo->up && now >= 3000 && now - last_q >= 10000) {
             last_q = now;
-            sbm_modem_query(&mo);
-            sbm_modem_status(&mo, st, sizeof(st));
-            sbm_fmt(s, sizeof(s), "SESSION: +%u s: %s", (unsigned)(now / 1000), st);
+            unsigned q0 = mo->b.fmt_tx, a0 = mo->b.fmt_resp + mo->b.fmt_gen_res;
+            int qr = sbm_modem_query(mo);
+            sbm_fmt(s, sizeof(s), "SESSION: cycle %u +%u s: query round (q %u a %u before)%s", cycle,
+                    (unsigned)(now / 1000), q0, a0, qr < 0 ? " | query error" : "");
             line(s);
+            snap_line(mo, "SNAP:", (unsigned)(now / 1000));
         }
         if (now - last_draw >= 1000) {
             last_draw = now;
-            sbm_modem_status(&mo, st, sizeof(st));
+            sbm_modem_status(mo, st, sizeof(st));
             draw(st);
             sb_wdt_feed(0);
         }
         sb_udelay(1000);
     }
-    sbm_modem_status(&mo, st, sizeof(st));
-    sbm_fmt(s, sizeof(s), "SESSION: end: %s | FMT %u RFS %u queries %u answers %u", st, mo.b.fmt_rx, mo.b.rfs_rx,
-            mo.b.fmt_tx, mo.b.fmt_resp + mo.b.fmt_gen_res);
+    return 0;
+}
+
+static void session(const char *key)
+{
+    static struct sbm_image im;
+    static struct sbm_modem mo;
+    char s[COLS];
+    int cyc = sb_streq(key, "modemsess-cycle"), lng = sb_streq(key, "modemsess-long");
+    unsigned secs = arg("modem_hold", cyc ? 40 : lng ? 1500 : 120), cycles = arg("modem_cycles", cyc ? 3 : 1);
+    if (secs > 3600)
+        secs = 3600;
+    if (cycles < 1 || cycles > 5)
+        cycles = 3;
+    sb_storage_hold("modem session: no storage writes");
+    sbm_fmt(s, sizeof(s), "modemsess: session API demo (%s), %u x %u s; watchdog %u s", key, cycles, secs,
+            sb_wdt_arm(30));
+    line(s);
+    sbm_sb_plat(&park_plat, plog);
+    uint64_t used0 = sb_arena_used();
+    if (sbm_sb_load_image_stream(&im, line) < 0) {
+        line("modemsess: loading RADIO / EFS failed");
+        return;
+    }
+    sbm_fmt(s, sizeof(s), "modemsess: footprint: %u KiB of RAM for the modem (NV + its pristine copy + the stream chunk);"
+            " the core's static buffers are in the image", (unsigned)((sb_arena_used() - used0) >> 10));
+    line(s);
+    sbm_sb_plat_stage4(&park_plat, im.mm.ipc_off);
+    park_armed = 1;
+    sb_before_reset = park_hook;
+    for (unsigned c = 1; c <= cycles; ++c) {
+        uint64_t t = sb_ms();
+        int r = sbm_modem_start(&mo, &park_plat, &im);
+        sbm_fmt(s, sizeof(s), "modemsess: cycle %u start: %s in %u ms (%s, streamed %u KiB; check %u ms, copy %u ms,"
+                " link %u ms)", c, r == 0 ? "online" : sbm_strerror(r), (unsigned)(sb_ms() - t), mo.b.restart ?
+                "restart: reset release" : "first start: cp_init", mo.b.streamed >> 10, mo.b.check_ms, mo.b.copy_ms,
+                mo.b.link_ms);
+        line(s);
+        if (r != 0)
+            break;
+        r = session_run(&mo, secs, c);
+        snap_line(&mo, "SESSION: end", secs);
+        sbm_fmt(s, sizeof(s), "SESSION: end cycle %u: FMT %u RFS %u queries %u answers %u (unanswered %u stale %u"
+                " unmatched %u by-command %u bad %u) stalls %u crashes %u", c, mo.b.fmt_rx, mo.b.rfs_rx, mo.b.fmt_tx,
+                mo.b.fmt_resp + mo.b.fmt_gen_res, mo.b.fmt_tx - mo.b.fmt_resp - mo.b.fmt_gen_res, mo.b.fmt_stale,
+                mo.b.fmt_unmatched, mo.b.fmt_seq_fixed, mo.b.bad_rx, mo.stalls, mo.crashes);
+        line(s);
+        sbm_modem_stop(&mo);
+        line(mo.b.parked ? "modemsess: parked" : "modemsess: the park reported an error");
+        if (r < 0 || !mo.b.parked)
+            break;
+        if (c < cycles)
+            for (unsigned k = 0; k < 6; ++k) {      /* parked between the cycles, as a user's Stop / Start */
+                sb_udelay(1000000);
+                sb_wdt_feed(0);
+            }
+    }
+    park_armed = 0;
+}
+
+/* modemsim: the ATTENDED real-SIM test (docs/MODEM.md 7.8). Only in modemsim.img, the one image built with
+ * SBM_ATTENDED_TX; the session is marked attended, so the SIM and registration guards are off and the radio EXECs
+ * are allowed. Nothing else is: no call, SMS, SS, SAT or identity request can be built in any image. The user is at
+ * the phone with their SIM in. Steps: start (streamed), wait for the SIM, radio normal, wait for a registration,
+ * hold sim_hold s with the signal, then low power mode (the CP detaches) and park. The log is masked (no PLMN, no
+ * cell, no identity); the operator's name is drawn on the screen only. */
+#ifdef SBM_ATTENDED_TX
+static char sim_foot[COLS];
+static struct sbm_net sim_net;
+static struct sbm_modem *sim_mo;
+static int sim_net_on;
+static uint64_t sim_t0;
+
+static int sim_ip_tx(void *ctx, const uint8_t *pkt, uint32_t len)
+{
+    (void)ctx;
+    return sbm_modem_ip_tx(sim_mo, pkt, len);
+}
+static void sim_ip_rx(void *ctx, const uint8_t *pkt, uint32_t len)
+{
+    (void)ctx;
+    if (sim_net_on)
+        sbm_net_rx(&sim_net, pkt, len);
+}
+
+static int sim_registered(const struct sbm_modem_snap *sn)
+{
+    return sn->cs == SBM_REG_HOME || sn->cs == SBM_REG_ROAMING || sn->ps == SBM_REG_HOME || sn->ps == SBM_REG_ROAMING;
+}
+
+static int sim_ready(uint8_t s)
+{
+    return s == SBM_SIM_READY || s == SBM_SIM_INIT_COMPLETE || s == SBM_SIM_PB_INIT_COMPLETE;
+}
+
+/* the event loop for one phase: poll every 1 ms, the status GETs every q_ms, a masked SNAP line every 10 s, the
+ * screen every second; returns 1 when done(sn) says so, 0 at max_ms, < 0 when the session went down */
+static int sim_phase(struct sbm_modem *mo, const char *tag, uint32_t max_ms, uint32_t q_ms,
+                     int (*done)(const struct sbm_modem *, const struct sbm_modem_snap *), uint32_t *took)
+{
+    uint64_t t0 = sb_ms(), last = t0, last_q = 0, last_snap = 0, last_draw = 0;
+    struct sbm_modem_snap sn;
+    char s[COLS];
+    int first = 1;
+    for (;;) {
+        uint64_t t = sb_ms();
+        uint32_t el = (uint32_t)(t - last), now = (uint32_t)(t - t0);
+        last = t;
+        int r = sbm_modem_poll(mo, el ? el : 1);
+        if (sim_net_on)
+            sbm_net_tick(&sim_net, (uint32_t)(sb_ms() - sim_t0));
+        if (r < 0) {
+            sbm_fmt(s, sizeof(s), "modemsim: %s: the session went down (%s); parked", tag, sbm_strerror(r));
+            line(s);
+            return r;
+        }
+        if (first || now - last_q >= q_ms) {
+            first = 0;
+            last_q = now;
+            if (sbm_modem_query(mo) < 0) {
+                sbm_fmt(s, sizeof(s), "modemsim: %s: a status query could not be sent", tag);
+                line(s);
+            }
+        }
+        sbm_modem_snapshot(mo, &sn);
+        if (done && done(mo, &sn)) {
+            *took = now;
+            return 1;
+        }
+        if (now - last_snap >= 10000) {
+            last_snap = now;
+            sbm_fmt(s, sizeof(s), "SIM: %s +%u s: %s | bars %d | rssi %d dBm | q %u a %u", tag, now / 1000, sn.line,
+                    sn.bars == 0xFF ? -1 : (int)sn.bars, sn.rssi_dbm, sn.queries, sn.answers);
+            line(s);
+        }
+        if (now - last_draw >= 1000) {
+            last_draw = now;
+            const char *op = sn.have_plmn ? sbm_operator_name(sn.plmn) : 0;
+            if (sn.have_plmn && !op)
+                sbm_fmt(sim_foot, sizeof(sim_foot), "%s | network %s | %s | bars %d", tag, sn.plmn,
+                        sbm_act_name(sn.rat), sn.bars == 0xFF ? -1 : (int)sn.bars);
+            else
+                sbm_fmt(sim_foot, sizeof(sim_foot), "%s | %s | %s | bars %d", tag, op ? op : "no network yet",
+                        sbm_act_name(sn.rat), sn.bars == 0xFF ? -1 : (int)sn.bars);
+            draw(sim_foot);                 /* the screen only: never logged */
+            sb_wdt_feed(0);
+        }
+        if (now >= max_ms) {
+            *took = now;
+            return 0;
+        }
+        sb_udelay(1000);
+    }
+}
+
+static int done_sim(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)mo;
+    return sn->sim != 0xFF && (sim_ready(sn->sim) || sn->sim == SBM_SIM_LOCK_SC || sn->sim == SBM_SIM_LOCK_PN ||
+                               sn->sim == SBM_SIM_ERROR);
+}
+static int done_radio(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)sn;
+    return mo->b.radio_res_seen;
+}
+static int done_reg(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)mo;
+    return sim_registered(sn);
+}
+static int done_ctl(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)sn;
+    return mo->b.ctl_seen;
+}
+
+static int done_ps(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)mo;
+    return sn->ps == SBM_REG_HOME || sn->ps == SBM_REG_ROAMING;
+}
+static int done_define(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)sn;
+    return mo->b.pdp.define_seen;
+}
+static int done_act(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)sn;
+    return mo->b.pdp.act_seen;
+}
+static int done_ip(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)sn;
+    return (mo->b.pdp.have_ip && mo->b.pdp.have_status && mo->b.pdp.status == 1) ||
+           (mo->b.pdp.have_status && mo->b.pdp.status != 1 && mo->b.pdp.status_notis);
+}
+static int done_dns(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)mo;
+    (void)sn;
+    return sim_net.dns_state != SBM_NET_WAITING;
+}
+static int done_http(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)mo;
+    (void)sn;
+    return sim_net.http_state != SBM_NET_WAITING;
+}
+static int done_pdp_down(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    (void)sn;
+    return mo->b.pdp.act_seen && mo->b.pdp.have_status && mo->b.pdp.status != 1;
+}
+static int res_ok(uint16_t code) { return (code & 0xFF00) == 0x8000; }
+
+/* the data phase: PS attach if needed, define + activate cid 1 (the short form, the long one if refused), the IP
+ * configuration, a DNS A query, an HTTP GET, deactivate. Returns 0 when all of it worked; *what says where not. */
+static int sim_data(struct sbm_modem *mo, const char *apn, const char **what)
+{
+    char s[COLS];
+    uint32_t took = 0;
+    struct sbm_modem_snap sn;
+    int r;
+    sbm_modem_snapshot(mo, &sn);
+    if (!(sn.ps == SBM_REG_HOME || sn.ps == SBM_REG_ROAMING)) {
+        line("DATA: PS not registered: waiting 30 s for the CP's own attach");
+        r = sim_phase(mo, "PS", 30000, 5000, done_ps, &took);
+        if (r < 0) {
+            *what = "PS (down)";
+            return -1;
+        }
+        if (r == 0) {
+            *what = "PS attach";
+            return -1;
+        }
+    }
+    sbm_fmt(s, sizeof(s), "DATA: APN \"%s\": define cid 1 (IPv4)", apn);
+    line(s);
+    if (sbm_modem_pdp_define(mo, apn) < 0 || (r = sim_phase(mo, "PDP", 10000, 10000, done_define, &took)) < 0) {
+        *what = "define";
+        return -1;
+    }
+    sbm_fmt(s, sizeof(s), "DATA: define answered 0x%04x after %u ms", mo->b.pdp.define_res, took);
+    line(s);
+    if (!mo->b.pdp.define_seen || !res_ok(mo->b.pdp.define_res)) {
+        *what = "define (refused)";
+        return -1;
+    }
+    for (int lf = 0; lf < 2; ++lf) {
+        if (sbm_modem_pdp_activate(mo, 1, lf) < 0 || (r = sim_phase(mo, "PDP", 10000, 10000, done_act, &took)) < 0) {
+            *what = "activate";
+            return -1;
+        }
+        sbm_fmt(s, sizeof(s), "DATA: activate (%s form) answered 0x%04x after %u ms", lf ? "long" : "short",
+                mo->b.pdp.act_res, took);
+        line(s);
+        if (mo->b.pdp.act_seen && res_ok(mo->b.pdp.act_res))
+            break;
+        if (lf) {
+            *what = "activate (refused)";
+            return -1;
+        }
+    }
+    r = sim_phase(mo, "PDP", 30000, 10000, done_ip, &took);
+    sbm_fmt(s, sizeof(s), "DATA: after %u ms: status %s %u (cause %u), IPv4 %s, DNS %s, MTU %u (addresses masked)",
+            took, mo->b.pdp.have_status ? "" : "none", mo->b.pdp.status, mo->b.pdp.cause,
+            mo->b.pdp.have_ip ? "assigned" : "none", mo->b.pdp.dns1[0] ? "given" : "none", mo->b.pdp.mtu);
+    line(s);
+    if (r < 0 || !mo->b.pdp.have_ip || mo->b.pdp.status != 1) {
+        *what = r < 0 ? "PDP (down)" : "PDP up";
+        return -1;
+    }
+    sim_mo = mo;
+    sim_t0 = sb_ms();
+    sbm_net_init(&sim_net, mo->b.pdp.ip, mo->b.pdp.dns1, mo->b.pdp.mtu, sim_ip_tx, 0, (uint32_t)sb_ms() * 2654435761u);
+    sbm_modem_ip_rx_cb(sim_ip_rx, 0);
+    sim_net_on = 1;
+    static const char host[] = "connectivitycheck.gstatic.com";
+    int ok = 1;
+    if (sbm_net_dns(&sim_net, host, (uint32_t)(sb_ms() - sim_t0)) < 0)
+        ok = 0;
+    r = ok ? sim_phase(mo, "DNS", 12000, 10000, done_dns, &took) : -1;
+    sbm_fmt(s, sizeof(s), "DATA: DNS %s for %s after %u ms (rcode %u, %u sent, rx %u, tx %u)",
+            sim_net.dns_state == SBM_NET_DONE ? "answered" : "FAILED", host, took, sim_net.dns_rcode, sim_net.dns_sent,
+            sim_net.rx_packets, sim_net.tx_packets);
+    line(s);
+    if (sim_net.dns_state == SBM_NET_DONE) {
+        sbm_fmt(s, sizeof(s), "DATA: %s = %u.%u.%u.%u (a public address)", host, sim_net.dns_answer[0],
+                sim_net.dns_answer[1], sim_net.dns_answer[2], sim_net.dns_answer[3]);
+        line(s);
+        if (sbm_net_http_get(&sim_net, sim_net.dns_answer, host, "/generate_204", (uint32_t)(sb_ms() - sim_t0)) == 0)
+            r = sim_phase(mo, "HTTP", 20000, 10000, done_http, &took);
+        sbm_fmt(s, sizeof(s), "DATA: HTTP GET /generate_204: %s, status %d, %u bytes, after %u ms (TCP %s, segments sent %u,"
+                " out of order %u, bad csum %u)", sim_net.http_state == SBM_NET_DONE ? "done" : "FAILED",
+                sim_net.http_code, sim_net.http_bytes, took, sim_net.tcp_connected ? "connected" : "no connection",
+                sim_net.tcp_sent, sim_net.tcp_ooo, sim_net.rx_bad_csum);
+        line(s);
+    }
+    sbm_fmt(s, sizeof(s), "DATA: rings: tx %u (errors %u), rx %u + zero-copy %u (bad %u)", mo->b.data_tx,
+            mo->b.data_tx_err, mo->b.data_rx, mo->b.data_rx_zc, mo->b.data_rx_bad);
+    line(s);
+    sim_phase(mo, "HTTP", 1000, 10000, 0, &took);       /* the last ACKs */
+    sim_net_on = 0;
+    sbm_modem_ip_rx_cb(0, 0);
+    if (sbm_modem_pdp_activate(mo, 0, 0) == 0)
+        r = sim_phase(mo, "PDP", 10000, 10000, done_pdp_down, &took);
+    sbm_fmt(s, sizeof(s), "DATA: deactivate answered 0x%04x; status %u after %u ms", mo->b.pdp.act_res,
+            mo->b.pdp.status, took);
+    line(s);
+    if (sim_net.dns_state != SBM_NET_DONE) {
+        *what = "DNS";
+        return -1;
+    }
+    if (sim_net.http_state != SBM_NET_DONE || sim_net.http_code != 204) {
+        *what = "HTTP";
+        return -1;
+    }
+    return 0;
+}
+
+static int done_detached(const struct sbm_modem *mo, const struct sbm_modem_snap *sn)
+{
+    return mo->b.radio_res_seen && !sim_registered(sn);
+}
+#endif
+
+static void simtest(const char *key)
+{
+#ifndef SBM_ATTENDED_TX
+    (void)key;
+    line("modemsim: this image has no attended transmit path: boot modemsim.img for the SIM test");
+#else
+    static struct sbm_image im;
+    static struct sbm_modem mo;
+    struct sbm_modem_snap sn;
+    char s[COLS];
+    uint32_t took = 0, reg_ms = 0, det_ms = 0;
+    int registered = 0, data_done = 0;
+    const char *data_fail = 0;
+    uint8_t rat_reg = 0;
+    unsigned hold_s = arg("sim_hold", 60), bmin = 99, bmax = 0;
+    const char *fail = 0;
+    if (hold_s > 600)
+        hold_s = 600;
+    sb_storage_hold("modem SIM test: no storage writes");
+    sbm_fmt(s, sizeof(s), "modemsim: ATTENDED SIM TEST (%s): SIM, radio on, registration, signal, then detach and park;"
+            " watchdog %u s", key, sb_wdt_arm(30));
+    line(s);
+    line("modemsim: no call, no SMS, no data, no PIN entry. The log is masked: no PLMN, cell or identity.");
+    sbm_sb_plat(&park_plat, plog);
+    if (sbm_sb_load_image_stream(&im, line) < 0) {
+        line("SIMTEST: FAIL at load: reading RADIO / EFS failed");
+        return;
+    }
+    sbm_sb_plat_stage4(&park_plat, im.mm.ipc_off);
+    park_armed = 1;
+    sb_before_reset = park_hook;
+    mo.attended = arg("sim_data", 1) ? SBM_ATTENDED_DATA : SBM_ATTENDED_MAGIC;
+    uint64_t t = sb_ms();
+    int r = sbm_modem_start(&mo, &park_plat, &im);
+    sbm_fmt(s, sizeof(s), "modemsim: start: %s in %u ms (attended %s)", r == 0 ? "online" : sbm_strerror(r),
+            (unsigned)(sb_ms() - t), mo.b.attended == SBM_ATTENDED_DATA ? "yes, with data" : mo.b.attended == SBM_ATTENDED_MAGIC ? "yes" : "NO");
+    line(s);
+    if (r != 0 || !SBM_IS_ATTENDED(mo.b.attended)) {
+        fail = r != 0 ? "start" : "attended mode";
+        goto out;
+    }
+
+    /* 1. the SIM: ready, PIN, absent */
+    r = sim_phase(&mo, "SIM", 60000, 5000, done_sim, &took);
+    sbm_modem_snapshot(&mo, &sn);
+    sbm_fmt(s, sizeof(s), "SIM: status 0x%02x (%s), key 0x%02x, after %u ms", sn.sim, sbm_sim_name(sn.sim),
+            mo.b.cell.sim_key, took);
+    line(s);
+    if (r < 0) {
+        fail = "SIM (down)";
+        goto out;
+    }
+    if (sn.sim == SBM_SIM_ABSENT || sn.sim == 0xFF) {
+        line("SIMTEST: FAIL at SIM: no SIM seen. Power off, insert the SIM, boot this test again.");
+        fail = "";
+        goto out;
+    }
+    if (sn.sim == SBM_SIM_LOCK_SC) {
+        line("SIMTEST: STOP at SIM: the SIM wants its PIN (or PUK). This image enters no PIN: turn the PIN off in"
+             " another phone or One UI, then run it again. Nothing was sent to the network.");
+        fail = "";
+        goto out;
+    }
+    if (!sim_ready(sn.sim)) {
+        line("SIMTEST: STOP at SIM: the SIM is not ready (see the status above); nothing was sent to the network");
+        fail = "";
+        goto out;
+    }
+    line("SIM: ready");
+
+    /* 2. radio normal (RIL's RadioPowerUpHandler) */
+    if ((r = sbm_modem_radio(&mo, 1)) < 0) {
+        sbm_fmt(s, sizeof(s), "modemsim: radio normal could not be sent (%s)", sbm_strerror(r));
+        line(s);
+        fail = "radio on";
+        goto out;
+    }
+    r = sim_phase(&mo, "RADIO", 10000, 5000, done_radio, &took);
+    sbm_fmt(s, sizeof(s), "RADIO: normal: %s 0x%04x after %u ms", mo.b.radio_res_seen ? "answered" : "no answer",
+            mo.b.radio_res, took);
+    line(s);
+    if (r < 0) {
+        fail = "radio on (down)";
+        goto out;
+    }
+
+    /* 3. the LTE initial-attach APN (libsec-ril sends it at IMSI-ready and after radio-up; simtest-a1 camped on LTE
+     * for 180 s without it and never tried to attach), then registration with escalation while not registered:
+     * network selection automatic, PS attach, a radio off / on cycle (as airplane mode) */
+    char apn[SBM_APN_MAX + 1];
+    if (!cat_line || !token(cat_line, "sim_apn", apn, sizeof(apn)) || !apn[0])
+        sb_strcpy(apn, sizeof(apn), "internet");
+    uint8_t iat = arg("sim_ia_type", 6) == 2 ? 0x02 : 0x06;
+    for (int lf = 0; lf < 2; ++lf) {
+        if ((r = sbm_modem_attach_apn(&mo, apn, iat, lf)) < 0) {
+            sbm_fmt(s, sizeof(s), "ATTACH: the attach APN could not be sent (%s)", sbm_strerror(r));
+            line(s);
+            break;
+        }
+        r = sim_phase(&mo, "ATTACH", 10000, 5000, done_ctl, &took);
+        sbm_fmt(s, sizeof(s), "ATTACH: initial-attach APN \"%s\" (%s, %s form): %s 0x%04x after %u ms", apn,
+                iat == 0x06 ? "IPv4v6" : "IPv4", lf ? "long" : "short", mo.b.ctl_seen ? "answered" : "no answer",
+                mo.b.ctl_res, took);
+        line(s);
+        if (r < 0 || (mo.b.ctl_seen && mo.b.ctl_res == 0x8000))
+            break;                      /* else (refused or no answer) the long form once */
+    }
+    if (r < 0) {
+        fail = "attach APN (down)";
+        goto out;
+    }
+    {
+        static const struct { const char *tag; uint32_t ms; } step[] = {
+            { "REG", 60000 }, { "REG+AUTO", 40000 }, { "REG+PS", 40000 }, { "REG+CYCLE", 60000 },
+        };
+        uint32_t total = 0;
+        for (unsigned k = 0; k < 4; ++k) {
+            if (k == 1)
+                sbm_modem_net_auto(&mo);
+            if (k == 2)
+                sbm_modem_ps_attach(&mo);
+            if (k == 3) {
+                line("REG: radio off / on (airplane mode), then the attach APN again");
+                sbm_modem_radio(&mo, 0);
+                sim_phase(&mo, "CYCLE", 5000, 5000, 0, &took);
+                sbm_modem_radio(&mo, 1);
+                sim_phase(&mo, "CYCLE", 2000, 5000, 0, &took);
+                sbm_modem_attach_apn(&mo, apn, iat, 0);
+            }
+            r = sim_phase(&mo, step[k].tag, step[k].ms, 5000, done_reg, &took);
+            total += took;
+            if (k >= 1 && mo.b.ctl_seen) {
+                sbm_fmt(s, sizeof(s), "%s: the request answered 0x%04x", step[k].tag, mo.b.ctl_res);
+                line(s);
+            }
+            if (r != 0)
+                break;
+        }
+        reg_ms = total;
+    }
+    sbm_modem_snapshot(&mo, &sn);
+    if (r < 0) {
+        fail = "registration (down)";
+        goto out;
+    }
+    registered = r == 1;
+    rat_reg = sn.rat;
+    sbm_fmt(s, sizeof(s), "REG: %s after %u ms: CS %s, PS %s, %s (act 0x%02x); reject cause CS %u PS %u",
+            r == 1 ? "registered" : "NOT registered", reg_ms, sn.cs == 0xFF ? "?" : sbm_reg_name(sn.cs),
+            sn.ps == 0xFF ? "?" : sbm_reg_name(sn.ps), sbm_act_name(sn.rat), sn.rat, mo.b.cell.cs.reject,
+            mo.b.cell.ps.reject);
+    line(s);
+    if (r == 1) {
+        /* 4. hold: the signal while registered */
+        uint64_t h0 = sb_ms();
+        while (sb_ms() - h0 < hold_s * 1000ull) {
+            r = sim_phase(&mo, "HOLD", 10000, 10000, 0, &took);
+            if (r < 0)
+                break;
+            sbm_modem_snapshot(&mo, &sn);
+            if (sn.bars != 0xFF) {
+                bmin = sn.bars < bmin ? sn.bars : bmin;
+                bmax = sn.bars > bmax ? sn.bars : bmax;
+            }
+        }
+        if (r < 0) {
+            fail = "hold (down)";
+            goto out;
+        }
+        sbm_modem_snapshot(&mo, &sn);
+        sbm_fmt(s, sizeof(s), "HOLD: %u s registered: CS %s, PS %s, %s, bars %u..%u, rssi %d dBm, still registered: %s",
+                hold_s, sn.cs == 0xFF ? "?" : sbm_reg_name(sn.cs), sn.ps == 0xFF ? "?" : sbm_reg_name(sn.ps),
+                sbm_act_name(sn.rat), bmin == 99 ? 0 : bmin, bmax, sn.rssi_dbm, sim_registered(&sn) ? "yes" : "no");
+        line(s);
+        line(sn.have_plmn ? (sbm_operator_name(sn.plmn) ? "HOLD: operator name known (on the screen only)"
+                                                        : "HOLD: operator not in the table (its code is on the screen only)")
+                          : "HOLD: no serving network reported");
+    }
+
+    /* 5. data (sim_data=1): PDP, DNS, HTTP, deactivate */
+    if (registered && arg("sim_data", 1)) {
+        int dr = sim_data(&mo, apn, &data_fail);
+        data_done = dr == 0;
+        if (mo.up == 0) {
+            fail = data_fail ? data_fail : "data (down)";
+            goto out;
+        }
+    }
+
+    /* 6. detach: low power mode, then park */
+    if ((r = sbm_modem_radio(&mo, 0)) < 0) {
+        sbm_fmt(s, sizeof(s), "modemsim: low power could not be sent (%s): parking", sbm_strerror(r));
+        line(s);
+        fail = "detach";
+        goto out;
+    }
+    r = sim_phase(&mo, "DETACH", 20000, 3000, done_detached, &det_ms);
+    sbm_modem_snapshot(&mo, &sn);
+    sbm_fmt(s, sizeof(s), "DETACH: low power %s 0x%04x; %s after %u ms (CS %s, PS %s)",
+            mo.b.radio_res_seen ? "answered" : "no answer", mo.b.radio_res,
+            sim_registered(&sn) ? "STILL registered" : "not registered", det_ms, sn.cs == 0xFF ? "?" : sbm_reg_name(sn.cs),
+            sn.ps == 0xFF ? "?" : sbm_reg_name(sn.ps));
+    line(s);
+    if (r != 1)
+        fail = r < 0 ? "detach (down)" : "detach (timeout)";
+    else if (!registered || bmax == 0)
+        fail = registered ? "signal" : "registration";
+    else if (arg("sim_data", 1) && !data_done)
+        fail = data_fail ? data_fail : "data";
+out:
+    sbm_fmt(s, sizeof(s), "SIM: totals: FMT %u RFS %u queries %u answers %u (unanswered %u, by-command %u) stalls %u"
+            " crashes %u", mo.b.fmt_rx, mo.b.rfs_rx, mo.b.fmt_tx, mo.b.fmt_resp + mo.b.fmt_gen_res,
+            mo.b.fmt_tx - mo.b.fmt_resp - mo.b.fmt_gen_res, mo.b.fmt_seq_fixed, mo.stalls, mo.crashes);
     line(s);
     sbm_modem_stop(&mo);
+    sbm_cp_park(&park_plat);                 /* safe again */
+    line(mo.b.parked ? "modemsim: parked" : "modemsim: the park reported an error");
+    if (!fail) {
+        sbm_fmt(s, sizeof(s), "SIMTEST: PASS: SIM ready; registered in %u ms (%s); bars %u..%u; %s; detached in %u ms;"
+                " parked", reg_ms, sbm_act_name(rat_reg), bmin, bmax, data_done ? "data: DNS + HTTP 204" : "no data test",
+                det_ms);
+        line(s);
+    } else if (*fail) {
+        sbm_fmt(s, sizeof(s), "SIMTEST: FAIL at %s; %s; parked", fail, registered ? "registration worked" : "not registered");
+        line(s);
+    }
     park_armed = 0;
-    line(mo.b.parked ? "modemsess: parked" : "modemsess: the park reported an error");
+#endif
 }
 
 static void stage3(const char *key)
@@ -430,7 +996,8 @@ void sb_main(void)
         step = 1;
     autostart = arg("modem_auto", 0);
     ret = arg("modem_return", autostart ? 30 : 0);
-    is_load = sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_streq(key, "modemsess");
+    is_load = sb_prefix(key, "modemload") || sb_prefix(key, "modemlink") || sb_prefix(key, "modemsess") ||
+              sb_streq(key, "modemsim");
     if (is_load) {
         line("modemload: stage 3 test (docs/MODEM.md 6). RADIO and EFS are only read; every partition write is held.");
         line("modemload: -sec / -run start the CP's power sequence through EL3 and always end with the CP parked.");
@@ -447,8 +1014,12 @@ void sb_main(void)
         }
     }
     selftest();
-    if (sb_streq(key, "modemsess")) {
-        session();
+    if (sb_prefix(key, "modemsess")) {
+        session(key);
+        goto end;
+    }
+    if (sb_streq(key, "modemsim")) {
+        simtest(key);
         goto end;
     }
     if (is_load) {

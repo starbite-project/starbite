@@ -14,13 +14,21 @@
  * Writes (on the phone): only what bcmw_write_allowed() lists (PCIe channel 0, the chip's windows, single words of
  * the PMU, CMU_FSYS1, SYSREG_FSYS1, three GPIO banks); the radio's files are read from VENDOR, never written.
  * Logged: states, counts and times only: no network names, no addresses (the screen shows them, the pmsg ring
- * does not). Off: bcmw_quiesce (the chip in reset and unpowered). */
+ * does not). Off: bcmw_quiesce (the chip in reset and unpowered).
+ *
+ * Next (wifi-sbos-next): TCP (sbtcp), HTTPS (sbhttp on BearSSL, Mozilla's CA roots: starbite/wifi/tls) for one fetch
+ * at a time (wifi_fetch), its TLS randomness from an entropy pool (see ent_*), and a scan-only self test with the
+ * offline TLS self-check. The fetch's URL and the body are never logged; the log has steps, sizes and times. */
 #include "sb.h"
 #include "kern.h"
 #include "sbapp.h"
 #include "bcmw.h"
 #include "bcmw_priv.h"                      /* w->dead: the chip stopped answering */
 #include "net.h"
+#include "tcp.h"
+#include "netio.h"
+#include "http.h"
+#include "tls/tls_check.h"
 #include "store.h"
 #ifdef SB_HOST
 #include <stdlib.h>
@@ -114,6 +122,12 @@ static unsigned irq_n, irq_window_n, irq_storms, irq_missed;
 static uint64_t irq_window_t;
 static void irq_stop(void);                         /* bcmw_init succeeded on w (quiesce and leave only then) */
 static int dhcp_go;                         /* the link came up inside a callback: DHCP starts from the tick */
+static void net_tcp(void *ctx, const uint8_t from[4], const uint8_t *seg, uint32_t len);
+static void net_down(void);                 /* Next: sbnet stopped and every TCP connection ended */
+static void ent_tick(void);
+static void ent_add(const void *p, uint32_t n);
+static void fetch_poll(void);
+static int fx_state;
 
 /* ---- DMA memory reused across on / off (the review of 0.4: bcmw_init forgets the core's blocks, and the shim's
  * allocator never frees): the core asks for the same sizes in the same order every bring-up, so the n-th request
@@ -203,7 +217,7 @@ static void load_saved(void)
     buf[len] = 0;
 #else
     struct store_ent e;
-    if (!store_find("ufs:wifinet", &e) || !e.size || e.size >= sizeof(buf) || store_load(&e, (uintptr_t)buf, sizeof(buf)))
+    if (!store_find("home:wifinet", &e) || !e.size || e.size >= sizeof(buf) || store_load(&e, (uintptr_t)buf, sizeof(buf)))
         return;
     buf[e.size] = 0;
 #endif
@@ -274,6 +288,8 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
     (void)ctx;
     struct bcmw_bss b;
     uint16_t s = 0;
+    ent_tick();
+    ent_add(ev, sizeof(*ev));
     if (ev->type == BCMW_E_ESCAN_RESULT) {
         if (bcmw_bss_parse(ev, &b, &s)) {
             if (st != SBOS_WIFI_SCANNING || s != sync)
@@ -307,13 +323,13 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
             }
         } else {
             sb_log("wifi: the link went down");
-            sbnet_stop(&net);
+            net_down();
             set_state(SBOS_WIFI_UP, "The network dropped the phone");
             joined = -1;
         }
     } else if (ev->type == BCMW_E_DEAUTH || ev->type == BCMW_E_DEAUTH_IND || ev->type == BCMW_E_DISASSOC_IND) {
         sb_log("wifi: left by the access point");
-        sbnet_stop(&net);
+        net_down();
         set_state(SBOS_WIFI_UP, "The network dropped the phone");
         joined = -1;
     }
@@ -323,6 +339,8 @@ static void os_rx(void *ctx, unsigned ifidx, const uint8_t *frame, uint32_t len)
 {
     (void)ctx;
     (void)ifidx;
+    ent_tick();
+    ent_add(frame, len < 64 ? len : 64);
     sbnet_rx(&net, frame, len);
 }
 
@@ -391,6 +409,241 @@ static void net_log(void *ctx, const char *line)
     sb_logf("wifi: ", line);
 }
 
+/* ---- TCP, the entropy pool, HTTPS (Next) ------------------------------------------------------------------ */
+
+static struct sbtcp tcp;
+static struct sbnetio nio;
+
+static void net_tcp(void *ctx, const uint8_t from[4], const uint8_t *seg, uint32_t len)
+{
+    (void)ctx;
+    sbtcp_input(&tcp, from, seg, len);
+}
+
+static void net_down(void)
+{
+    sbnet_stop(&net);
+    sbtcp_down(&tcp);
+}
+
+/* The entropy pool for TLS's randomness (ECDHE keys, nonces). The phone gives this kernel no hardware random source
+ * (the Exynos TRNG is the secure world's), so a SHA-256 pool takes everything hard to predict from outside: the
+ * cycle counter at every radio interrupt, frame and event (their arrival times depend on the air and the chip),
+ * the frames' and events' first bytes, timing jitter of memory walks when a seed is drawn, and the radio
+ * firmware's own random source when it answers the "rand" iovar. Each seed is the pool's hash, then fed back in.
+ * Not a certified generator: good enough that a passive listener cannot reproduce the TLS keys. */
+static br_sha256_context ent;
+static int ent_ready, fw_rand_logged;
+static uint64_t ent_events;
+
+static void ent_add(const void *p, uint32_t n)
+{
+    if (!ent_ready) {
+        br_sha256_init(&ent);
+        ent_ready = 1;
+    }
+    br_sha256_update(&ent, p, n);
+    ent_events++;
+}
+static void ent_tick(void)
+{
+    uint64_t t = sb_ticks();
+    ent_add(&t, sizeof(t));
+}
+
+static void ent_seed(uint8_t out[32])
+{
+    static volatile uint8_t walk[8192];
+    uint8_t jit[256];
+    memset(jit, 0, sizeof(jit));
+    for (unsigned i = 0; i < 4096; i++) {
+        uint64_t a = sb_ticks();
+        for (unsigned k = 0; k < 48; k++)
+            walk[(i * 67u + k * 1031u) & 8191u] += (uint8_t)(a >> (k & 7));
+        jit[i & 255] ^= (uint8_t)(sb_ticks() - a) ^ (uint8_t)((sb_ticks() - a) >> 3);
+        if ((i & 255) == 255)
+            ent_add(jit, sizeof(jit));
+    }
+    if (w_ready && w && !w->dead) {
+        uint8_t fr[32];
+        int fe = 0;
+        memset(fr, 0, sizeof(fr));
+        int r = bcmw_iovar_get(w, "rand", fr, sizeof(fr), &fe);
+        int any = 0;
+        for (unsigned i = 0; i < sizeof(fr); i++)
+            any |= fr[i];
+        if (r == BCMW_OK && any)
+            ent_add(fr, sizeof(fr));
+        if (!fw_rand_logged) {
+            fw_rand_logged = 1;
+            sb_log(r == BCMW_OK && any ? "wifi: tls: the radio's random source answers: mixed into the pool"
+                                       : "wifi: tls: the radio has no random source (\"rand\"): timing only");
+        }
+        memset(fr, 0, sizeof(fr));
+    }
+    ent_tick();
+    {
+        br_sha256_context c = ent;          /* the seed: the pool's hash so far, then fed back */
+        br_sha256_out(&c, out);
+    }
+    ent_add(out, 32);
+}
+
+/* one fetch at a time: the request, its body (64 KiB kept), its result */
+#define FETCH_BODY (64U * 1024U)
+static struct sbhttp *fx;
+static uint8_t *fx_body;
+/* fx_state (declared above): 0 none, 1 running, 2 finished */
+static int fx_result;
+static char fx_host[64];
+static int fx_cell;                         /* this fetch runs over mobile data (kmodem_netif), not Wi-Fi */
+
+/* the clock was checked over mobile data (kern/modem.c's NTP on the cellular interface): certificates may use it */
+void wifi_clock_checked_by(int how)
+{
+    if (how > clock_checked)
+        clock_checked = how;
+}
+
+static uint64_t nio_unix(void *ctx)
+{
+    (void)ctx;
+    struct sbos_time t;
+    if (!clock_now(&t) || t.utc <= 0)
+        return 0;
+    if (t.approx && clock_checked <= 0)
+        return 0;                           /* the last known time, not checked yet: not good enough for certificates */
+    return (uint64_t)t.utc;
+}
+
+static uint64_t ms_now(void *ctx)
+{
+    (void)ctx;
+    return sb_ms();
+}
+
+/* the offline TLS self-check's log: to pmsg */
+static void tls_log(void *ctx, const char *line)
+{
+    (void)ctx;
+    sb_logf("wifi: ", line);
+}
+
+int wifi_tls_selfcheck(void)
+{
+    return sbtls_selfcheck(tls_log, 0, ms_now);
+}
+
+int wifi_fetch(const char *url)
+{
+    struct sbhttp_net hn;
+    uint8_t seed[32];
+    struct sbnet *fnet = &net;
+    struct sbtcp *ftcp = &tcp;
+    if (fx_state == 1)
+        return SBOS_EBUSY;
+    /* the interface: Wi-Fi when joined, else mobile data when the user turned it on and it is up */
+    if (st != SBOS_WIFI_CONNECTED && !kmodem_netif(&fnet, &ftcp))
+        return SBOS_EAGAIN;
+    fx_cell = st != SBOS_WIFI_CONNECTED;
+    if (!fx) {
+        fx = sb_alloc(sizeof(*fx));
+        fx_body = sb_alloc(FETCH_BODY);
+        if (!fx || !fx_body)
+            return SBOS_EAGAIN;
+    }
+    nio.net = fnet, nio.tcp = ftcp, nio.unix_time = nio_unix, nio.log = net_log, nio.ctx = 0;
+    sbnetio_init(&nio, &hn);
+    hn.log_host = 0;                        /* where the user goes is theirs: not logged */
+    {
+        /* the host, for the screen (never logged) */
+        const char *p = url;
+        unsigned n = 0;
+        if (sb_prefix(p, "https://"))
+            p += 8;
+        else if (sb_prefix(p, "http://"))
+            p += 7;
+        while (*p && *p != '/' && *p != ':' && n + 1 < sizeof(fx_host))
+            fx_host[n++] = *p++;
+        fx_host[n] = 0;
+    }
+    hw_wdt_feed();
+    ent_seed(seed);
+    hw_wdt_feed();
+    fx_state = 1;
+    fx_result = sbhttp_start(fx, &hn, url, fx_body, FETCH_BODY, seed, 30000);
+    memset(seed, 0, sizeof(seed));
+    if (fx_result != SBHTTP_BUSY)
+        fx_state = 2;
+    if (!fx_cell)
+        kt_set(KT_WIFI, 0, sb_ms(), 10, 0);
+    notify();
+    return 0;
+}
+
+static void fetch_poll(void)
+{
+    if (fx_state != 1)
+        return;
+    if (fx_cell ? !kmodem_netif(0, 0) : st != SBOS_WIFI_CONNECTED) {
+        sbhttp_abort(fx);
+        fx_result = SBHTTP_E_NETWORK;
+        fx_state = 2;
+        notify();
+        return;
+    }
+    hw_wdt_feed();                          /* a TLS handshake's RSA/ECDSA checks take tens of ms */
+    fx_result = sbhttp_poll(fx);
+    if (fx_result != SBHTTP_BUSY) {
+        fx_state = 2;
+        notify();
+    }
+}
+
+/* kern/modem.c's tick while mobile data is up: a fetch over it is driven from there (Wi-Fi may be off) */
+void wifi_fetch_poll_cell(void)
+{
+    if (fx_cell)
+        fetch_poll();
+}
+
+void wifi_fetch_cancel(void)
+{
+    if (fx_state == 1) {
+        sbhttp_abort(fx);
+        fx_result = SBHTTP_E_ABORTED;
+        fx_state = 2;
+        notify();
+    }
+}
+
+void wifi_fetch_status(struct sbos_wifi_fetch *f)
+{
+    memset(f, 0, sizeof(*f));
+    f->state = fx_state;
+    f->result = fx_result;
+    sb_strcpy(f->host, sizeof(f->host), fx_host);
+    if (!fx)
+        return;
+    sb_strcpy(f->why, sizeof(f->why), sbhttp_why(fx_result));
+    f->status = fx->status;
+    f->tls_err = fx->tls_err;
+    f->tls = fx->tls;
+    f->tls_version = fx->tls_version;
+    f->tls_suite = fx->tls_suite;
+    f->bytes = (uint32_t)(fx->body_total > 0xffffffffull ? 0xffffffffu : fx->body_total);
+    f->kept = fx->body_len;
+    f->dns_ms = fx->dns_ms, f->connect_ms = fx->connect_ms, f->tls_ms = fx->tls_ms, f->total_ms = fx->total_ms;
+    f->first_byte_ms = fx->first_byte_ms;
+    f->secs = (int32_t)((sb_ms() - fx->t_start) / 1000U);
+}
+
+const uint8_t *wifi_fetch_body(uint32_t *len)
+{
+    *len = fx && fx_state == 2 ? fx->body_len : 0;
+    return fx_body;
+}
+
 /* ---- on and off ------------------------------------------------------------------------------------------ */
 
 #ifdef SB_HOST
@@ -434,10 +687,11 @@ int wifi_power(int on)
     if (!on) {
         if (st == SBOS_WIFI_OFF)
             return 0;
+        wifi_fetch_cancel();
         irq_stop();
         logn("wifi: interrupts while on: ", irq_n, "");
         if (w_ready) {
-            sbnet_stop(&net);
+            net_down();
             if (joined >= 0 && !w->dead)
                 (void)bcmw_leave(w);
             bcmw_quiesce(w);
@@ -462,8 +716,11 @@ int wifi_power(int on)
     }
     if (!w) {
         w = sb_alloc(bcmw_size());
-        if (!w)
+        if (!w) {
+            sb_log("wifi: not enough memory for the Wi-Fi core");
+            set_state(SBOS_WIFI_FAILED, "Not enough memory for Wi-Fi");   /* P3n: the shell said "Heat?" */
             return SBOS_EAGAIN;
+        }
         memset(w, 0, bcmw_size());
     }
     w_ready = 0;
@@ -566,8 +823,9 @@ int wifi_join(int i, const char *pass)
         /* 0.6.1: bcmw_join_start (the directed scan, the PMK, SET_SSID: a few seconds at most) on the next tick, then
          * one handshake round per tick (bcmw_join_poll): the screen keeps working (0.6 blocked up to 15 s) */
         const struct bcmw_info *in = bcmw_info(w);
-        struct sbnet_os no = { 0, net_tx, net_now, net_random, net_log, net_udp };
+        struct sbnet_os no = { 0, net_tx, net_now, net_random, net_log, net_udp, net_tcp };
         sbnet_init(&net, &no, in->mac);
+        sbtcp_init(&tcp, &net);
         joined = i;
         join_pending = 1;
         sb_log("wifi: joining a secured network (name and passphrase not logged)");
@@ -575,8 +833,9 @@ int wifi_join(int i, const char *pass)
         return 0;
     }
     const struct bcmw_info *in = bcmw_info(w);
-    struct sbnet_os no = { 0, net_tx, net_now, net_random, net_log, net_udp };
+    struct sbnet_os no = { 0, net_tx, net_now, net_random, net_log, net_udp, net_tcp };
     sbnet_init(&net, &no, in->mac);
+    sbtcp_init(&tcp, &net);
     joined = i;
     sb_log("wifi: joining an open network (name not logged)");
     set_state(SBOS_WIFI_JOINING, "");       /* first: the association's events can arrive inside bcmw_connect */
@@ -675,6 +934,7 @@ int wifi_bar(void)
 void wifi_irq(void)
 {
     uint64_t now = sb_ms();
+    ent_tick();
     ++irq_n;
     if (now - irq_window_t >= 1000) {
         irq_window_t = now;
@@ -877,6 +1137,9 @@ void wifi_timer(unsigned id)
         }
         if (st == SBOS_WIFI_DHCP || st == SBOS_WIFI_CONNECTED) {
             sbnet_tick(&net);
+            sbtcp_tick(&tcp);
+            if (!fx_cell)
+                fetch_poll();
             if (st == SBOS_WIFI_DHCP && net.state == SBNET_BOUND) {
                 logn("wifi: an address from DHCP (not logged), lease ", net.lease_s, " s");
                 set_state(SBOS_WIFI_CONNECTED, "");
@@ -886,7 +1149,7 @@ void wifi_timer(unsigned id)
             } else if (st == SBOS_WIFI_DHCP && now - t_state > DHCP_MS) {
                 sb_log("wifi: no DHCP answer");
                 (void)bcmw_leave(w);
-                sbnet_stop(&net);
+                net_down();
                 joined = -1;
                 set_state(SBOS_WIFI_UP, "Joined, but no address came (DHCP)");
             }
@@ -930,17 +1193,23 @@ void wifi_timer(unsigned id)
             }
         }
     }
+    if (fx_state == 1 && st != SBOS_WIFI_CONNECTED)
+        fetch_poll();                       /* the network went: the fetch ends */
     int busy = st == SBOS_WIFI_STARTING || st == SBOS_WIFI_SCANNING || st == SBOS_WIFI_JOINING || st == SBOS_WIFI_DHCP ||
-               join_pending || join_active || dhcp_go;
+               join_pending || join_active || dhcp_go || fx_state == 1;
     uint32_t every = st == SBOS_WIFI_STARTING ? 10U : K.screen_on ? TICK_ON_MS : TICK_OFF_MS;
     if (irq_on && irq_n && irq_trusted && !busy)
         every = st == SBOS_WIFI_CONNECTED ? 250U : 1000U;   /* interrupts wake it; sbnet's timers need 250 ms */
+    if (fx_state == 1)
+        every = 5U;                         /* a fetch: TCP's segments and TLS's records without waiting */
     if (st != SBOS_WIFI_OFF && st != SBOS_WIFI_FAILED && !kt_pending(KT_WIFI, 0))
         kt_set(KT_WIFI, 0, sb_ms(), every, 0);
 }
 
 /* the self test: on, the bring-up, one scan; 0.6.1: then, if the saved network ("wifinet") was heard, a join with
  * its passphrase (WPA2 or open), an address, the router's ping and the clock check; then off. 1 passed, 0 failed */
+int wifi_selftest_scan_only;                /* Next's Wi-Fi self test: the scan only, never a join */
+
 int wifi_selftest_phase(int *done)
 {
     static int started, jstate;            /* jstate: 0 not yet, 1 joining, 2 done */
@@ -983,6 +1252,19 @@ int wifi_selftest_phase(int *done)
     if (!started) {
         started = 1;
         wifi_power(0);                      /* from off: a radio already on would make t_on stale */
+        if (wifi_selftest_scan_only) {
+            /* Next: TLS's own check first (no network): known answers and two real certificate chains */
+            uint64_t t0 = sb_ms();
+            hw_wdt_feed();
+            int tr = wifi_tls_selfcheck();
+            hw_wdt_feed();
+            logn(tr ? "selftest: wifi: the TLS self-check FAILED at check " : "selftest: wifi: the TLS self-check passed in ",
+                 tr ? (uint64_t)tr : sb_ms() - t0, tr ? "" : " ms");
+            if (tr) {
+                *done = 1;
+                return 0;
+            }
+        }
     }
     if (st == SBOS_WIFI_OFF) {
         if (wifi_power(1)) {
@@ -1003,6 +1285,17 @@ int wifi_selftest_phase(int *done)
         if (irq_missed)
             logn("selftest: wifi: work found without an interrupt, times: ", irq_missed, "");
         int heard = -1;
+        if (wifi_selftest_scan_only) {
+            int secure = 0;
+            for (int i = 0; i < nnets; ++i)
+                secure += nets[i].secure != 0;
+            logn("selftest: wifi: secured networks among them: ", (uint64_t)secure, "");
+            sb_log(nnets ? "selftest: wifi: passed: scan only (no join in this test)" :
+                           "selftest: wifi: FAILED: the scan heard nothing");
+            wifi_power(0);
+            *done = 1;
+            return nnets > 0;
+        }
         for (int i = 0; sv_ok && jstate == 0 && i < nnets; ++i)
             if (nets[i].ssid_len == sv_len && !memcmp(nets[i].ssid, sv_ssid, sv_len))
                 heard = i;

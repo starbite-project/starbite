@@ -14,6 +14,7 @@
 #include "sb.h"
 #include "kern.h"
 #include "gpucomp.h"
+#include "lens.h"
 
 #define VA(o) (GPUCOMP_VA_BASE + (uint64_t)(o))
 #define CPU(o) ((volatile uint32_t *)(uintptr_t)(SB_GPU_DATA + (uint64_t)(o)))
@@ -28,6 +29,11 @@ static uint64_t heap_size;
 #define VA_RO 0x30000000ULL                 /* read-only memory the UI's layers point into (the asset pack) */
 static uintptr_t ro_cpu;
 static uint64_t ro_size;
+#define VA_EXT 0x38000000ULL                /* 1.0: memory another part of the system draws into (the Linux guest's window
+                                             * surfaces, Track E): GPU read-only, sampled in place (no copy) */
+#define EXT_MAX (128ULL << 20)
+static uintptr_t ext_cpu;
+static uint64_t ext_size;
 #define JS 1U                               /* the compute slot, as Panfrost and gpuheat */
 
 static struct sb_auth au;
@@ -119,6 +125,12 @@ static int gc_up(void)
         fail("the GPU's extra mappings (the second and third scanout buffers, the pool, the heap) did not fit");
         return 0;
     }
+    /* 1.0: the guest surfaces (optional: without them the shell copies the Linux window as before) */
+    if (ext_cpu && !sb_gpu_map_ro(VA_EXT, ext_cpu & ~0xfffULL, (ext_size + (ext_cpu & 0xfffU) + 0xfffU) & ~0xfffULL)) {
+        sb_log("gpucomp: the guest surfaces did not fit the GPU's map: the Linux window is copied");
+        ext_cpu = 0;
+        ext_size = 0;
+    }
     cores = sb_gpu_rd(0x100);
     if (!cores)
         cores = 0x5771777U;
@@ -135,6 +147,8 @@ static int gc_up(void)
     put(GPUCOMP_O_SH_up, gpucomp_sh_up, sizeof gpucomp_sh_up / 4U);
     put(GPUCOMP_O_SH_comp2, gpucomp_sh_comp2, sizeof gpucomp_sh_comp2 / 4U);
     put(GPUCOMP_O_RSD_comp2, gpucomp_rsd_comp2, sizeof gpucomp_rsd_comp2 / 4U);
+    put(GPUCOMP_O_SH_up2x, gpucomp_sh_up2x, sizeof gpucomp_sh_up2x / 4U);
+    put(GPUCOMP_O_RSD_up2x, gpucomp_rsd_up2x, sizeof gpucomp_rsd_up2x / 4U);
     put(GPUCOMP_O_RSD_fill, gpucomp_rsd_fill, sizeof gpucomp_rsd_fill / 4U);
     put(GPUCOMP_O_RSD_comp, gpucomp_rsd_comp, sizeof gpucomp_rsd_comp / 4U);
     put(GPUCOMP_O_RSD_down, gpucomp_rsd_down, sizeof gpucomp_rsd_down / 4U);
@@ -206,10 +220,24 @@ void gpucomp_add_ro(const void *p, uint64_t bytes)
     if (p && bytes)
         sb_dcache_clean_inval(p, bytes);
 }
+/* 1.0, before gpucomp_init: a range the GPU samples in place (Track E's guest surfaces). Whoever writes it keeps it
+ * coherent for a non-coherent reader (the writer cleans its lines, or maps it non-cacheable); the GPU never writes */
+int gpucomp_ext_ok(void) { return up && !disabled && ext_cpu != 0; }
+void gpucomp_add_ext(const void *p, uint64_t bytes)
+{
+    if (!p || !bytes || bytes > EXT_MAX)
+        return;
+    ext_cpu = (uintptr_t)p;
+    ext_size = bytes;
+}
 int gpucomp_init(void *heap, uint64_t bytes)
 {
     if (disabled)
         return 0;
+    if (bytes + 0x2000U > VA_RO - VA_HEAP) {    /* the heap's GPU map would run into the read-only region */
+        sb_logx("gpucomp: the UI heap is too large for its GPU window, MiB: ", (uint32_t)(bytes >> 20));
+        return 0;
+    }
     heap_cpu = (uintptr_t)heap;
     heap_size = bytes;
     if (!gc_up()) {
@@ -227,7 +255,31 @@ int gpucomp_ready(void)
 /* the GPU-only pool (a destination or source gpucomp_compose takes): the UI's own use, e.g. a full-resolution
  * wallpaper (the self test uses it for its textures) */
 void *gpucomp_pool(void) { return (void *)(uintptr_t)SB_GPU_POOL; }
-uint64_t gpucomp_pool_bytes(void) { return SB_GPU_POOL_SIZE; }
+/* v7: the half-resolution canvas of big moves at the pool's top; the caller's part is what lies below it */
+#define HALF_W (SB_FB_W / 2U)
+#define HALF_H (SB_FB_H / 2U)
+#define HALF_BYTES ((((uint64_t)HALF_W * HALF_H * 4U) + 0xfffU) & ~0xfffULL)
+#define HALF_CPU (SB_GPU_POOL + SB_GPU_POOL_SIZE - HALF_BYTES)
+/* v10: the live backdrops below it: the quarter canvas, the 1/8 and 1/16 blur steps, and GPUCOMP_LEVELS results at 1/8 */
+#define PG(b) ((((uint64_t)(b)) + 0xfffU) & ~0xfffULL)
+#define BQ_W (SB_FB_W / 4U)
+#define BQ_H (SB_FB_H / 4U)
+#define BE_W (SB_FB_W / 8U)
+#define BE_H (SB_FB_H / 8U)
+#define BS_W (SB_FB_W / 16U)
+#define BS_H (SB_FB_H / 16U)
+#define BQ_BYTES PG(BQ_W * BQ_H * 4U)
+#define BE_BYTES PG(BE_W * BE_H * 4U)
+#define BS_BYTES PG(BS_W * BS_H * 4U)
+#define BD_BYTES (BQ_BYTES + BE_BYTES + BS_BYTES + GPUCOMP_LEVELS * BE_BYTES)
+#define BD_CPU (HALF_CPU - BD_BYTES)
+#define BQ_CPU BD_CPU
+#define BE_CPU (BQ_CPU + BQ_BYTES)
+#define BS_CPU (BE_CPU + BE_BYTES)
+#define BL_CPU(i) (BS_CPU + BS_BYTES + (uint64_t)(i) * BE_BYTES)
+uint64_t gpucomp_pool_bytes(void) { return SB_GPU_POOL_SIZE - HALF_BYTES - BD_BYTES; }
+_Static_assert(SB_GPU_POOL_SIZE - HALF_BYTES - BD_BYTES >= (uint64_t)SB_FB_W * SB_FB_H * 4U,
+               "the pool's caller part (Next's full-screen cache) does not fit below the half canvas and the backdrops");
 
 /* a CPU address the GPU can reach: its GPU address, or 0 */
 uint64_t gpucomp_va(const void *p)
@@ -237,6 +289,8 @@ uint64_t gpucomp_va(const void *p)
         return VA_HEAP + (heap_cpu & 0xfffU) + (a - heap_cpu);
     if (ro_cpu && a >= ro_cpu && a < ro_cpu + ro_size)
         return VA_RO + (ro_cpu & 0xfffU) + (a - ro_cpu);
+    if (ext_cpu && a >= ext_cpu && a < ext_cpu + ext_size)
+        return VA_EXT + (ext_cpu & 0xfffU) + (a - ext_cpu);
     if (a >= SB_FB && a < SB_FB + (uintptr_t)SB_FB_W * SB_FB_H * 4U)
         return SB_GPU_PANEL_VA + (a - SB_FB);
     if (a >= SCAN_B && a < SCAN_B + (uintptr_t)SB_FB_W * SB_FB_H * 4U)
@@ -265,6 +319,47 @@ static uint8_t bins[GPUCOMP_BIN_W * GPUCOMP_BIN_H][GPUCOMP_BIN_B] __attribute__(
 _Static_assert(GPUCOMP_O_C2 + 64U + GPUCOMP_MAX_QUADS * GPUCOMP_C2_QB <= GPUCOMP_O_BIN, "comp2's quads run into the bins");
 _Static_assert(GPUCOMP_O_BIN + GPUCOMP_BIN_W * GPUCOMP_BIN_H * GPUCOMP_BIN_B <= GPUCOMP_O_SH_comp2, "the bins run into comp2's code");
 _Static_assert(GPUCOMP_O_SH_comp2 + sizeof gpucomp_sh_comp2 <= SB_GPU_DATA_SIZE, "comp2's code is outside the window");
+_Static_assert(GPUCOMP_O_SH_up + 0x2000U <= GPUCOMP_O_SH_up2x && GPUCOMP_O_SH_up2x + sizeof gpucomp_sh_up2x <= GPUCOMP_O_RSD_fill,
+               "up2x's code overlaps another's or the RSDs");
+_Static_assert(GPUCOMP_O_PAR_up2x + 64U <= GPUCOMP_O_C2, "up2x's parameters run into comp2's quads");
+/* glass V3: comp2 reads the lens's face, glint and contour as fp16 pairs: a float as fp16 (round to nearest even;
+ * tiny values 0, the range clamped: the record's values are 0 .. 8) and back */
+static uint32_t f2h(float f)
+{
+    uint32_t x = fbits(f), sg = x >> 16 & 0x8000U, m = x & 0x7fffffU;
+    int e = (int)(x >> 23 & 255U) - 127 + 15;
+    if (e <= 0)
+        return sg;
+    if (e >= 31)
+        return sg | 0x7bffU;
+    uint32_t h = sg | (uint32_t)e << 10 | m >> 13, r = m & 0x1fffU;
+    if (r > 0x1000U || (r == 0x1000U && (h & 1U)))
+        h++;
+    return h;
+}
+static float h2f(uint32_t h)
+{
+    uint32_t e = h >> 10 & 31U, m = h & 1023U, x = (h & 0x8000U) << 16;
+    if (e)
+        x |= (e - 15U + 127U) << 23 | m << 13;
+    union { uint32_t u; float f; } v = { x };
+    return v.f;
+}
+static uint32_t h2(float lo, float hi) { return f2h(lo) | f2h(hi) << 16; }
+/* a lens quad's record as comp2 reads it: lens.h's, the chroma gain times the backdrop's saturation (1.2 over a live
+ * backdrop, 1 over the wallpaper's, saturated already: the saturate step itself is gone), all but the geometry as
+ * fp16 (the reference uses what the GPU gets) */
+_Static_assert(sizeof(((struct gc_quad *)0)->lq) == LQ_N * sizeof(float), "gc_quad.lq is lens.h's record");
+static void lens_rec(const struct gc_quad *s, float L[LQ_N])
+{
+    float k = s->lsat > 0 ? s->lsat : 1;
+    for (unsigned i = 0; i < LQ_N; ++i)
+        L[i] = s->lq[i];
+    L[LQ_K] *= k;
+    L[LQ_KB] *= k;
+    for (unsigned i = LQ_GL; i < LQ_N; ++i)
+        L[i] = h2f(f2h(L[i]));
+}
 static int floor_i(float v)
 {
     int i = (int)v;
@@ -273,7 +368,7 @@ static int floor_i(float v)
 static float fmaxf_(float a, float b) { return a > b ? a : b; }
 static float fminf_(float a, float b) { return a < b ? a : b; }
 static int bins_used;                       /* the last frame's bin entries (the log) */
-static uint32_t bins_culled, bins_empty;
+static uint32_t bins_culled, bins_empty, bins_full;   /* bins_full: entries a full bin had no room for */
 void gpucomp_last_stats(uint32_t *entries, uint32_t *culled, uint32_t *empty)
 {
     *entries = (uint32_t)bins_used;
@@ -302,6 +397,7 @@ static int occ_rect(const struct gc_quad *s, float u0, float v0, float u1, float
 
 /* only the bins the damage rects touch are drawn (nr 0: everything); the rest of dst keeps what it holds */
 static uint8_t dirty[GPUCOMP_BIN_W * GPUCOMP_BIN_H];
+static uint32_t frame_w = SB_FB_W, frame_h = SB_FB_H;   /* v7: the half canvas while gpucomp_compose_half draws */
 int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, unsigned n, const struct gc_rect *r,
                            unsigned nr, uint64_t *us);
 int gpucomp_compose(void *dst, uint32_t bg, const struct gc_quad *qs, unsigned n, uint64_t *us)
@@ -318,15 +414,15 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         return 0;
     volatile uint32_t *p = CPU(GPUCOMP_O_C2);
     put64(p, dva);
-    p[2] = SB_FB_W;
-    p[3] = SB_FB_W;
-    p[4] = SB_FB_H;
+    p[2] = frame_w;
+    p[3] = frame_w;
+    p[4] = frame_h;
     p[5] = n;
     p[6] = bg;
     for (unsigned k = 0; k < GPUCOMP_BIN_W * GPUCOMP_BIN_H; ++k)
         bins[k][0] = 0;
     bins_used = 0;
-    bins_culled = bins_empty = 0;
+    bins_culled = bins_empty = bins_full = 0;
     for (unsigned i = 0; i < n; ++i) {
         const struct gc_quad *s = &qs[i];
         volatile uint32_t *q = p + 16 + i * (GPUCOMP_C2_QB / 4U);
@@ -343,6 +439,12 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         }
         /* the shader's precomputed record (mesa-compjob.c, COMP2 v5's order: the common fields first) */
         float rad = s->radius >= .01f ? s->radius : 0, hx = (s->cx1 - s->cx0) * .5f, hy = (s->cy1 - s->cy0) * .5f;
+        float ccx = s->cx0 + hx, ccy = s->cy0 + hy;
+        if (s->flags & GC_LENS) {            /* v9: the rounded box is the glass shape, not the clip */
+            rad = s->radius >= .01f ? s->radius : .01f;
+            hx = s->lw * .5f; hy = s->lh * .5f;
+            ccx = s->lx + hx; ccy = s->ly + hy;
+        }
         /* the fade as two ramps: sat((fy - ft) * it) * sat((fb - fy) * ib); a ramp of no height is a step */
         float ft = -1e6f, it = 1, fb = 1e6f, ib = 1;
         if (s->flags & GC_FADE) {
@@ -360,7 +462,8 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         q[5] = fbits(s->dy0);
         q[6] = fbits(s->isx);
         q[7] = fbits(s->isy);
-        q[8] = (s->flags & 63U) | (rad > 0 ? 128U : 0);
+        /* a lens quad's coverage is the lens's own (its contour shows outside the shape): no rounded clip */
+        q[8] = (s->flags & 63U) | (rad > 0 && !(s->flags & GC_LENS) ? 128U : 0) | (s->flags & GC_LENS);
         q[9] = fbits(s->alpha);
         q[10] = fbits((float)s->w);
         q[11] = fbits((float)s->h);
@@ -368,8 +471,8 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         q[14] = s->stride;
         q[15] = s->solid;
         q[16] = fbits(rad);
-        q[17] = fbits(s->cx0 + hx);
-        q[18] = fbits(s->cy0 + hy);
+        q[17] = fbits(ccx);
+        q[18] = fbits(ccy);
         q[19] = fbits(hx - rad);
         q[20] = fbits(hy - rad);
         q[21] = fbits(ft);
@@ -388,6 +491,20 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         q[36] = s->bw;
         q[37] = s->bh;
         q[38] = q[39] = 0;
+        if (s->flags & GC_LENS) {            /* glass V3: the lens's record (mesa-compjob.c lens_px's layout) */
+            float L[LQ_N];
+            lens_rec(s, L);
+            q[12] = h2(L[LQ_ER], L[LQ_EG]);  /* src and stride: a lens quad has none */
+            q[13] = h2(L[LQ_EB], L[LQ_KB]);
+            q[14] = h2(L[LQ_TR], L[LQ_TG]);
+            q[25] = fbits(L[LQ_IH]);
+            q[26] = fbits(L[LQ_A]);
+            q[27] = fbits(L[LQ_IPT]);
+            q[28] = h2(L[LQ_TB], L[LQ_K]);   /* nor a mask */
+            q[29] = h2(L[LQ_LIFT], L[LQ_WC]);
+            q[30] = h2(L[LQ_GL], L[LQ_CA]);
+            q[31] = h2(L[LQ_CB], 0);
+        }
         /* its bins: the clip, within the source's extent on screen (u in [0, w or len), v in [0, h or len)) */
         if (!(s->alpha > 0))
             continue;
@@ -412,7 +529,7 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
          * the backdrop wherever its mask is) skips bins where it is empty; an opaque quad at full alpha without a fade
          * that covers a whole bin (inside its clip less the corner radius) drops everything under it there */
         int solid = (s->flags & GC_SOLID) != 0;
-        if (solid && !(s->solid >> 24))
+        if (solid && !(s->solid >> 24) && !(s->flags & GC_LENS))
             continue;
         int full = s->alpha >= .999f && !(s->flags & GC_FADE);
         int opq = full && (solid ? (s->solid >> 24) == 255U : (s->flags & GC_OPAQUE) != 0);
@@ -448,7 +565,8 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
                     e[1U + e[0]] = (uint8_t)i;
                     ++e[0];
                     ++bins_used;
-                }
+                } else
+                    ++bins_full;        /* 1.0: more than 127 quads over one 32 px bin: refused below (the CPU draws it) */
             }
     }
     if (nr) {
@@ -472,6 +590,8 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
             if (!dirty[k])
                 bins[k][0] = 255;
     }
+    if (bins_full)                              /* 1.0: a bin lost quads: refused, not drawn wrong (the caller's CPU) */
+        return 0;
     volatile uint32_t *bw = CPU(GPUCOMP_O_BIN);
     for (unsigned k = 0; k < GPUCOMP_BIN_W * GPUCOMP_BIN_H; ++k) {
         const uint32_t *src = (const uint32_t *)(const void *)bins[k];
@@ -479,7 +599,10 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         for (unsigned w = 0, nw = bins[k][0] == 255 ? 1U : (bins[k][0] + 4U) / 4U; w < nw; ++w)
             d[w] = src[w];
     }
-    uint64_t t = run(GPUCOMP_O_JOB_comp2_full, gpucomp_job_comp2_full, "the UI's frame");
+    /* v10: the grid that covers the frame (a half or quarter frame launched the full one's workgroups before) */
+    uint64_t t = frame_w == SB_FB_W ? run(GPUCOMP_O_JOB_comp2_full, gpucomp_job_comp2_full, "the UI's frame")
+               : frame_w == SB_FB_W / 2U ? run(GPUCOMP_O_JOB_comp2_half, gpucomp_job_comp2_half, "the UI's half frame")
+                                        : run(GPUCOMP_O_JOB_comp2_quarter, gpucomp_job_comp2_quarter, "a glass backdrop");
     if (!t) {
         disabled = 1;
         gc_down("a fault in the UI's frame: the CPU draws from now on");
@@ -487,6 +610,110 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
     }
     if (us)
         *us = t;
+    return 1;
+}
+
+/* v7: a big move's frame at half resolution (a quarter of the pixels): the quads scaled by .5 (screen px; their
+ * sources as they are, sampled bilinear: at exactly 2x that is the CPU's half copies' 2 x 2 box), composed into the
+ * pool's half canvas, then UP2X (the CPU present's 1/4 3/4 weights) into dst, all of it */
+static struct gc_quad hq[GPUCOMP_MAX_QUADS];
+static void scale_quads(const struct gc_quad *qs, unsigned n, float k)
+{
+    float ik = 1 / k;
+    for (unsigned i = 0; i < n; ++i) {
+        struct gc_quad *h = &hq[i];
+        *h = qs[i];
+        h->cx0 *= k; h->cy0 *= k; h->cx1 *= k; h->cy1 *= k;
+        h->dx0 *= k; h->dy0 *= k;
+        h->isx *= ik; h->isy *= ik;
+        h->radius *= k;
+        h->ft0 *= k; h->ft1 *= k; h->fb0 *= k; h->fb1 *= k;
+        if (h->flags & (GC_GLASS | GC_LENS))
+            h->bk *= ik;
+        h->lx *= k; h->ly *= k; h->lw *= k; h->lh *= k;
+        if (h->flags & GC_LENS)
+            lens_scale(h->lq, k);
+        if (!(h->flags & GC_SOLID))
+            h->flags |= GC_BILINEAR;
+    }
+}
+static void half_quads(const struct gc_quad *qs, unsigned n) { scale_quads(qs, n, .5f); }
+int gpucomp_compose_half(void *dst, uint32_t bg, const struct gc_quad *qs, unsigned n, uint64_t *us)
+{
+    if (!gpucomp_ready() || n > GPUCOMP_MAX_QUADS)
+        return 0;
+    uint64_t dva = gpucomp_va(dst);
+    if (!dva)
+        return 0;
+    half_quads(qs, n);
+    uint64_t t1 = 0;
+    frame_w = HALF_W;
+    frame_h = HALF_H;
+    int ok = gpucomp_compose_damage((void *)(uintptr_t)HALF_CPU, bg, hq, n, 0, 0, &t1);
+    frame_w = SB_FB_W;
+    frame_h = SB_FB_H;
+    if (!ok)
+        return 0;
+    volatile uint32_t *p = CPU(GPUCOMP_O_PAR_up2x);
+    put64(p, VA_POOL + (HALF_CPU - SB_GPU_POOL));
+    p[2] = HALF_W;
+    p[3] = HALF_W;
+    p[4] = HALF_H;
+    put64(p + 6, dva);
+    p[8] = SB_FB_W;
+    uint64_t t2 = run(GPUCOMP_O_JOB_up2x_half, gpucomp_job_up2x_half, "the 2x of a half frame");
+    if (!t2) {
+        disabled = 1;
+        gc_down("a fault in the 2x of a half frame: the CPU draws from now on");
+        return 0;
+    }
+    if (us)
+        *us = t1 + t2;
+    return 1;
+}
+
+static void par_blur(uint32_t par_off, uint64_t src, uint32_t sw, uint32_t sh, uint64_t dst, uint32_t dw, uint32_t dh);
+int gpucomp_backdrop(unsigned level, uint32_t bg, const struct gc_quad *qs, unsigned n, const void **bd,
+                     uint32_t *bstride, uint32_t *bw, uint32_t *bh, float *bk, uint64_t *us)
+{
+    if (!gpucomp_ready() || level >= GPUCOMP_LEVELS || n > GPUCOMP_MAX_QUADS)
+        return 0;
+    scale_quads(qs, n, .25f);
+    uint64_t t1 = 0, t = 0;
+    frame_w = BQ_W;
+    frame_h = BQ_H;
+    int ok = gpucomp_compose_damage((void *)(uintptr_t)BQ_CPU, bg, hq, n, 0, 0, &t1);
+    frame_w = SB_FB_W;
+    frame_h = SB_FB_H;
+    if (!ok)
+        return 0;
+#define PVA(c) (VA_POOL + ((c) - SB_GPU_POOL))
+    par_blur(GPUCOMP_O_PAR_down, PVA(BQ_CPU), BQ_W, BQ_H, PVA(BE_CPU), BE_W, BE_H);
+    uint64_t u = run(GPUCOMP_O_JOB_down_eighth, gpucomp_job_down_eighth, "a backdrop's blur down 1");
+    t += u;
+    if (u) {
+        par_blur(GPUCOMP_O_PAR_down, PVA(BE_CPU), BE_W, BE_H, PVA(BS_CPU), BS_W, BS_H);
+        u = run(GPUCOMP_O_JOB_down_16th, gpucomp_job_down_16th, "a backdrop's blur down 2");
+        t += u;
+    }
+    if (u) {
+        par_blur(GPUCOMP_O_PAR_up, PVA(BS_CPU), BS_W, BS_H, PVA(BL_CPU(level)), BE_W, BE_H);
+        u = run(GPUCOMP_O_JOB_up_eighth, gpucomp_job_up_eighth, "a backdrop's blur up");
+        t += u;
+    }
+#undef PVA
+    if (!u) {
+        disabled = 1;
+        gc_down("a fault in a glass backdrop's blur: the CPU draws from now on");
+        return 0;
+    }
+    *bd = (const void *)(uintptr_t)BL_CPU(level);
+    *bstride = BE_W;
+    *bw = BE_W;
+    *bh = BE_H;
+    *bk = 1.0f / 8;
+    if (us)
+        *us = t1 + t;
     return 1;
 }
 
@@ -724,8 +951,9 @@ static unsigned check_scene(const volatile uint32_t *fb, uint32_t bg, const char
 #define MASK_CARD (VA_POOL + 0xa50000ULL)                   /* 600 x 300 A8: the card's glass mask (rounded) */
 #define TEX_PILL (VA_POOL + 0xa80000ULL)                    /* 200 x 60: a pill drawn 3-sliced to 500 wide */
 #define TEX_SPARSE (VA_POOL + 0xb00000ULL)                  /* 256 x 256: only its top-left 32 x 32 block shows */
-static struct gc_quad G[8];
+static struct gc_quad G[12];
 static unsigned ng;
+
 
 static void make_comp2_scene(void)
 {
@@ -745,14 +973,53 @@ static void make_comp2_scene(void)
     const uint32_t *bgp = POOL_CPU(TEX_BG), *cd = POOL_CPU(TEX_CARD), *half = POOL_CPU(BUF_HALF);
     /* the wallpaper (bilinear 2x), a glass card (the blurred half buffer through the mask, then the card at .8),
      * a faded card (fades at 1500..1600 and 1900..2000), a 3-sliced pill, a solid inside a rounded clip */
-    G[ng++] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    G[ng++] = (struct gc_quad){ cd, 600, 600, 300, GC_GLASS, 0, .8f, 400, 500, 1, 1, 400, 500, 1000, 800, 0, 0, 0, 0, 0, 0, 0, 0,
-                                POOL_CPU(MASK_CARD), 600, half, 720, .5f, 720, 1480, 0, 0, 0, 0 };
-    G[ng++] = (struct gc_quad){ cd, 600, 600, 300, GC_FADE | GC_BILINEAR, 0, 1, 100, 1450, .5f, 1, 100, 1450, 1300, 2050, 0,
-                                1500, 1600, 1900, 2000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    G[ng++] = (struct gc_quad){ pl, 200, 200, 60, GC_SLICE_H, 0, 1, 300, 2300, 1, 1, 300, 2300, 800, 2360, 0, 0, 0, 0, 0,
-                                500, 30, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    G[ng++] = (struct gc_quad){ 0, 0, 200, 100, GC_SOLID, 0xccffffffU, 1, 1000, 2500, 1, 1, 900, 2450, 1250, 2650, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    G[ng++] = (struct gc_quad){ .src = bgp, .stride = 720, .w = 720, .h = 1480, .flags = GC_BILINEAR, .alpha = 1, .isx = .5f,
+                                .isy = .5f, .cx1 = 1440, .cy1 = 2960 };
+    G[ng++] = (struct gc_quad){ .src = cd, .stride = 600, .w = 600, .h = 300, .flags = GC_GLASS, .alpha = .8f, .dx0 = 400,
+                                .dy0 = 500, .isx = 1, .isy = 1, .cx0 = 400, .cy0 = 500, .cx1 = 1000,
+                                .cy1 = 800, .mask = POOL_CPU(MASK_CARD), .mstride = 600, .bd = half,
+                                .bstride = 720, .bk = .5f, .bw = 720, .bh = 1480 };
+    G[ng++] = (struct gc_quad){ .src = cd, .stride = 600, .w = 600, .h = 300, .flags = GC_FADE | GC_BILINEAR, .alpha = 1,
+                                .dx0 = 100, .dy0 = 1450, .isx = .5f, .isy = 1, .cx0 = 100,
+                                .cy0 = 1450, .cx1 = 1300, .cy1 = 2050, .ft0 = 1500, .ft1 = 1600,
+                                .fb0 = 1900, .fb1 = 2000 };
+    G[ng++] = (struct gc_quad){ .src = pl, .stride = 200, .w = 200, .h = 60, .flags = GC_SLICE_H, .alpha = 1, .dx0 = 300,
+                                .dy0 = 2300, .isx = 1, .isy = 1, .cx0 = 300, .cy0 = 2300, .cx1 = 800,
+                                .cy1 = 2360, .len = 500, .s0 = 30, .s1 = 30 };
+    G[ng++] = (struct gc_quad){ .w = 200, .h = 100, .flags = GC_SOLID, .solid = 0xccffffffU, .alpha = 1, .dx0 = 1000, .dy0 = 2500,
+                                .isx = 1, .isy = 1, .cx0 = 900, .cy0 = 2450, .cx1 = 1250,
+                                .cy1 = 2650, .radius = 40 };
+    /* v9: a Liquid Glass card (its lens over the blurred half buffer, from the shape), the card at .8 on top; glass
+     * V3: the quad reaches LENS_APRON px past the shape (the contour) */
+    {
+        struct gc_quad L = { 0 };
+        const float ap = LENS_APRON;
+        L.flags = GC_SOLID | GC_LENS;
+        L.alpha = 1;
+        L.dx0 = 760 - ap; L.dy0 = 60 - ap; L.isx = L.isy = 1; L.w = 600 + 2 * (uint32_t)ap; L.h = 300 + 2 * (uint32_t)ap;
+        L.cx0 = 760 - ap; L.cy0 = 60 - ap; L.cx1 = 1360 + ap; L.cy1 = 360 + ap;
+        L.radius = 40;
+        L.bd = half; L.bstride = 720; L.bk = .5f; L.bw = 720; L.bh = 1480;
+        L.lx = 760; L.ly = 60; L.lw = 600; L.lh = 300;
+        lens_make(L.lq, 600, 300, LENS_PT, 0, 0, 0, -1);        /* regular, large: dark */
+        G[ng++] = L;
+        /* 1.0, glass V2 (V3's record): a clear, pressed, green-tinted lens over a bright backdrop (dimmed) */
+        L.dx0 = 1000 - ap; L.dy0 = 900 - ap; L.w = 400 + 2 * (uint32_t)ap; L.h = 200 + 2 * (uint32_t)ap;
+        L.cx0 = 1000 - ap; L.cy0 = 900 - ap; L.cx1 = 1400 + ap; L.cy1 = 1100 + ap;
+        L.radius = 60;
+        L.lx = 1000; L.ly = 900; L.lw = 400; L.lh = 200;
+        lens_make(L.lq, 400, 200, LENS_PT, 1, 0x6634c759U, .5f, .6f);
+        G[ng++] = L;
+        /* glass V3: a small regular button over a bright backdrop: the light preset, its glint and contour */
+        L.dx0 = 300 - ap; L.dy0 = 1000 - ap; L.w = 160 + 2 * (uint32_t)ap; L.h = 160 + 2 * (uint32_t)ap;
+        L.cx0 = 300 - ap; L.cy0 = 1000 - ap; L.cx1 = 460 + ap; L.cy1 = 1160 + ap;
+        L.radius = 80;
+        L.lx = 300; L.ly = 1000; L.lw = 160; L.lh = 160;
+        lens_make(L.lq, 160, 160, LENS_PT, 0, 0, 0, .8f);
+        G[ng++] = L;
+    }
+    G[ng++] = (struct gc_quad){ .src = cd, .stride = 600, .w = 600, .h = 300, .flags = GC_BILINEAR, .alpha = .8f, .dx0 = 760,
+                                .dy0 = 60, .isx = 1, .isy = 1, .cx0 = 760, .cy0 = 60, .cx1 = 1360, .cy1 = 360 };
 }
 
 static float slice_c(float v, float len, float s0, float s1, float srch)
@@ -781,8 +1048,11 @@ static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
         const struct gc_quad *q = &cq[i];
         if (fx < q->cx0 || fx >= q->cx1 || fy < q->cy0 || fy >= q->cy1)
             continue;
-        float cov = 1;
-        if (q->radius >= .01f) {
+        float cov = 1, lsdv = 0, lgx = 0, lgy = 0;
+        if (q->flags & GC_LENS) {            /* v9: the lens's distance and normal (V3: its coverage is lens_blend's) */
+            float r = q->radius >= .01f ? q->radius : .01f;
+            lsdv = lens_sd(fx, fy, q->lx + q->lw * .5f, q->ly + q->lh * .5f, q->lw * .5f - r, q->lh * .5f - r, r, &lgx, &lgy);
+        } else if (q->radius >= .01f) {
             float hx = (q->cx1 - q->cx0) * .5f, hy = (q->cy1 - q->cy0) * .5f;
             float px = fx - (q->cx0 + hx), py = fy - (q->cy0 + hy);
             px = px < 0 ? -px : px;
@@ -805,6 +1075,23 @@ static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
             u = slice_c(u, q->len, q->s0, q->s1, (float)q->w);
         if (u < 0 || v < 0 || u >= (float)q->w || v >= (float)q->h)
             continue;
+        if ((q->flags & GC_LENS) && al > 0) {
+            /* comp2's lens path (glass V3): the offset from the shape, the backdrop bilinear at p + o, the face and
+             * glint, the contour outside, blended by the coverage */
+            float L[LQ_N], ox, oy, rgb[3], t[4][4], sv = lsdv < 0 ? -lsdv : 0;
+            lens_rec(q, L);
+            lens_offset(L, sv, lgx, lgy, &ox, &oy);
+            float uu = (fx + ox) * q->bk - .5f, vv = (fy + oy) * q->bk - .5f, u0 = fl(uu), v0 = fl(vv);
+            float tu = uu - u0, tv = vv - v0;
+            for (int k = 0; k < 4; ++k)
+                fetch_c((const uint32_t *)q->bd, q->bstride, (int)q->bw, (int)q->bh, (int)u0 + (k & 1), (int)v0 + (k >> 1), t[k]);
+            for (int c = 0; c < 3; ++c) {
+                float top = t[0][c] + (t[1][c] - t[0][c]) * tu, bot = t[2][c] + (t[3][c] - t[2][c]) * tu;
+                rgb[c] = top + (bot - top) * tv;
+            }
+            lens_face(L, rgb, sv, lgx);
+            lens_blend(acc, rgb, lsdv, al, lens_contour(L, lsdv, lgx));
+        }
         if (q->flags & GC_SOLID) {
             unpack_f(q->solid, s);
         } else {
@@ -840,6 +1127,28 @@ static uint32_t cpu_px2(unsigned x, unsigned y, uint32_t bg)
     return o;
 }
 
+/* v7: a half frame's 2x on the CPU (UP2X's weights) from cpu_px2 at half resolution (cq: the half quads) */
+static uint32_t cpu_up2x(unsigned x, unsigned y, uint32_t bg)
+{
+    int i = (int)(x >> 1), j = (int)(y >> 1), sx = (x & 1U) ? 1 : -1, sy = (y & 1U) ? 1 : -1;
+    int i2 = i + sx < 0 ? 0 : i + sx >= (int)HALF_W ? (int)HALF_W - 1 : i + sx;
+    int j2 = j + sy < 0 ? 0 : j + sy >= (int)HALF_H ? (int)HALF_H - 1 : j + sy;
+    const int pi[4] = { i, i2, i, i2 }, pj[4] = { j, j, j2, j2 };
+    const float w[4] = { .5625f, .1875f, .1875f, .0625f };
+    float acc[4] = { 0, 0, 0, 0 }, c[4];
+    for (int k = 0; k < 4; ++k) {
+        unpack_f(cpu_px2((unsigned)pi[k], (unsigned)pj[k], bg), c);
+        for (int q = 0; q < 4; ++q)
+            acc[q] += c[q] * w[k];
+    }
+    uint32_t o = 0;
+    for (int q = 0; q < 4; ++q) {
+        uint32_t u = (uint32_t)(clampf(acc[q]) * 255.0f + .5f);
+        o |= u << (q == 3 ? 24 : q == 0 ? 16 : q == 1 ? 8 : 0);
+    }
+    return o;
+}
+
 /* the motion frames' scene as the UI's quads: the wallpaper, 16 cards (600 x 300 stretched to 1200 wide, bilinear,
  * 60 px rounded clips, .92) sliding up by dy, the home bar: 18 quads, as an unlock's frame */
 static struct gc_quad GM[20];
@@ -848,14 +1157,17 @@ static void motion_scene(float dy)
 {
     const uint32_t *bgp = POOL_CPU(TEX_BG), *cd = POOL_CPU(TEX_CARD);
     ngm = 0;
-    GM[ngm++] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    GM[ngm++] = (struct gc_quad){ .src = bgp, .stride = 720, .w = 720, .h = 1480, .flags = GC_BILINEAR, .alpha = 1, .isx = .5f,
+                                .isy = .5f, .cx1 = 1440, .cy1 = 2960 };
     for (unsigned i = 0; i < 16U; ++i) {
         float x = 120.0f + (float)(i % 2) * 40.0f, y = 600.0f + (float)i * 260.0f + dy;
-        GM[ngm++] = (struct gc_quad){ cd, 600, 600, 300, GC_BILINEAR, 0, .92f, x, y, .5f, 1, x, y, x + 1200.0f, y + 300.0f, 60,
-                                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        GM[ngm++] = (struct gc_quad){ .src = cd, .stride = 600, .w = 600, .h = 300, .flags = GC_BILINEAR, .alpha = .92f, .dx0 = x,
+                                .dy0 = y, .isx = .5f, .isy = 1, .cx0 = x, .cy0 = y,
+                                .cx1 = x + 1200.0f, .cy1 = y + 300.0f, .radius = 60 };
     }
-    GM[ngm++] = (struct gc_quad){ 0, 0, 400, 18, GC_SOLID, 0xccffffffU, 1, 520, 2880, 1, 1, 520, 2880, 920, 2898, 9,
-                                  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    GM[ngm++] = (struct gc_quad){ .w = 400, .h = 18, .flags = GC_SOLID, .solid = 0xccffffffU, .alpha = 1, .dx0 = 520, .dy0 = 2880,
+                                .isx = 1, .isy = 1, .cx0 = 520, .cy0 = 2880, .cx1 = 920, .cy1 = 2898,
+                                .radius = 9 };
 }
 
 /* ---- the self test's steps ---------------------------------------------------------------------------------- */
@@ -977,7 +1289,13 @@ int gpucomp_selftest_step(void)
         log_us("comp2 (the UI's items: glass, fade, 3-slice, solid), full scanout", us);
         static const unsigned pt[][2] = { { 500, 600 }, { 405, 505 }, { 700, 650 }, { 300, 1550 }, { 300, 1950 },
                                            { 700, 1800 }, { 310, 2330 }, { 550, 2330 }, { 790, 2330 }, { 1100, 2550 },
-                                           { 905, 2455 }, { 1240, 2640 }, { 20, 20 }, { 999, 799 } };
+                                           { 905, 2455 }, { 1240, 2640 }, { 20, 20 }, { 999, 799 },
+                                           { 761, 210 }, { 1000, 61 }, { 1000, 358 }, { 775, 75 }, { 1060, 210 },
+                                           { 790, 210 }, { 1200, 1000 }, { 1004, 1000 }, { 1200, 903 }, { 1385, 1090 },
+                                           /* glass V3: the contour (card's side, the clear lens's side and bottom,
+                                            * the button's side), the light button's face, glint and rim */
+                                           { 758, 210 }, { 1402, 1000 }, { 1200, 1101 }, { 298, 1080 }, { 380, 1080 },
+                                           { 380, 1001 }, { 330, 1080 } };
         unsigned bad = 0;
         for (unsigned i = 0; i < sizeof pt / sizeof pt[0]; ++i) {
             uint32_t want = cpu_px2(pt[i][0], pt[i][1], bg), got = fb[pt[i][1] * SB_FB_W + pt[i][0]];
@@ -999,10 +1317,89 @@ int gpucomp_selftest_step(void)
             }
         }
         if (bad) {
-            sb_logx("gpucomp: FAILED: comp2: points off by more than 3 levels, of 14: ", bad);
+            sb_logx("gpucomp: FAILED: comp2: points off by more than 3 levels, of 31: ", bad);
             ++fails;
         } else {
-            sb_log("gpucomp: comp2: 14 points within 3 levels of the CPU's (glass, fade, 3-slice, solid)");
+            sb_log("gpucomp: comp2: 31 points within 3 levels of the CPU's (glass, Liquid Glass V3 regular dark / light, clear tinted pressed, contour, fade, 3-slice, solid)");
+        }
+        /* v7: the same scene as a big move's half frame (composed at half resolution, then UP2X into the panel) */
+        uint64_t uh = 0;
+        if (!gpucomp_compose_half((void *)SB_FB, bg, G, ng, &uh)) {
+            fail("the half frame did not run");
+            st = 8;
+            return 0;
+        }
+        log_us("comp2 at half resolution + the 2x (a big move's frame), full scanout", uh);
+        cq = hq;
+        ncq = ng;
+        unsigned hbad = 0;
+        for (unsigned i = 0; i < sizeof pt / sizeof pt[0]; ++i) {
+            uint32_t want = cpu_up2x(pt[i][0], pt[i][1], bg), got = fb[pt[i][1] * SB_FB_W + pt[i][0]];
+            if (!near(want, got, 3)) {
+                if (hbad < 4) {
+                    struct ub u;
+                    ub_init(&u);
+                    ub_s(&u, "gpucomp: half frame: pixel ");
+                    ub_dec(&u, pt[i][0]);
+                    ub_c(&u, ',');
+                    ub_dec(&u, pt[i][1]);
+                    ub_s(&u, " GPU ");
+                    ub_hex(&u, got, 8);
+                    ub_s(&u, " CPU ");
+                    ub_hex(&u, want, 8);
+                    sb_log(u.b);
+                }
+                ++hbad;
+            }
+        }
+        if (hbad) {
+            sb_logx("gpucomp: FAILED: half frame: points off by more than 3 levels, of 31: ", hbad);
+            ++fails;
+        } else {
+            sb_log("gpucomp: half frame: 31 points within 3 levels of the CPU's (2x of the half canvas)");
+        }
+        cq = G;
+        /* v10: a live glass backdrop of the wallpaper (quarter compose, blur to 1/16, up to 1/8): in the gradient's
+         * flat parts it keeps the colour */
+        {
+            const void *lbd = 0;
+            uint32_t lbs = 0, lbw = 0, lbh = 0;
+            float lbk = 0;
+            uint64_t ub = 0;
+            if (!gpucomp_backdrop(0, bg, G, 1, &lbd, &lbs, &lbw, &lbh, &lbk, &ub)) {
+                fail("the glass backdrop did not run");
+                st = 8;
+                return 0;
+            }
+            log_us("a live glass backdrop (the wallpaper at 1/4, blurred to 1/16, up to 1/8)", ub);
+            ncq = 1;
+            static const unsigned bp[][2] = { { 90, 100 }, { 60, 200 }, { 150, 300 } };
+            unsigned bbad = 0;
+            for (unsigned i = 0; i < 3; ++i) {
+                uint32_t got = ((const uint32_t *)lbd)[bp[i][1] * lbs + bp[i][0]];
+                uint32_t want = cpu_px2(bp[i][0] * 8U + 4U, bp[i][1] * 8U + 4U, bg);
+                if (!near(want, got, 8)) {
+                    struct ub u;
+                    ub_init(&u);
+                    ub_s(&u, "gpucomp: backdrop: px ");
+                    ub_dec(&u, bp[i][0]);
+                    ub_c(&u, ',');
+                    ub_dec(&u, bp[i][1]);
+                    ub_s(&u, " GPU ");
+                    ub_hex(&u, got, 8);
+                    ub_s(&u, " CPU (unblurred) ");
+                    ub_hex(&u, want, 8);
+                    sb_log(u.b);
+                    ++bbad;
+                }
+            }
+            if (bbad) {
+                sb_logx("gpucomp: FAILED: glass backdrop: points off by more than 8 levels, of 3: ", bbad);
+                ++fails;
+            } else {
+                sb_log("gpucomp: glass backdrop: 3 points within 8 levels of the wallpaper's");
+            }
+            ncq = ng;
         }
         st = 13;
         return 0;
@@ -1022,12 +1419,17 @@ int gpucomp_selftest_step(void)
         __asm__ volatile("dsb sy" ::: "memory");
         static struct gc_quad V[4];
         const uint32_t *bgp = POOL_CPU(TEX_BG), *cd = POOL_CPU(TEX_CARD);
-        V[0] = (struct gc_quad){ bgp, 720, 720, 1480, GC_BILINEAR, 0, 1, 0, 0, .5f, .5f, 0, 0, 1440, 2960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-        V[1] = (struct gc_quad){ sp, 256, 256, 256, 0, 0, 1, 600, 1600, 1, 1, 600, 1600, 856, 1856, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        V[0] = (struct gc_quad){ .src = bgp, .stride = 720, .w = 720, .h = 1480, .flags = GC_BILINEAR, .alpha = 1, .isx = .5f,
+                                .isy = .5f, .cx1 = 1440, .cy1 = 2960 };
+        V[1] = (struct gc_quad){ .src = sp, .stride = 256, .w = 256, .h = 256, .alpha = 1, .dx0 = 600, .dy0 = 1600, .isx = 1,
+                                .isy = 1, .cx0 = 600, .cy0 = 1600, .cx1 = 856, .cy1 = 1856 };
         V[1].occ = occ;
         V[1].occ_w = V[1].occ_h = 8;
-        V[2] = (struct gc_quad){ cd, 600, 600, 300, 0, 0, .9f, 200, 300, 1, 1, 200, 300, 800, 600, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-        V[3] = (struct gc_quad){ 0, 0, 900, 900, GC_SOLID, 0xff402060U, 1, 100, 100, 1, 1, 100, 100, 1000, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        V[2] = (struct gc_quad){ .src = cd, .stride = 600, .w = 600, .h = 300, .alpha = .9f, .dx0 = 200, .dy0 = 300, .isx = 1,
+                                .isy = 1, .cx0 = 200, .cy0 = 300, .cx1 = 800, .cy1 = 600,
+                                .radius = 30 };
+        V[3] = (struct gc_quad){ .w = 900, .h = 900, .flags = GC_SOLID, .solid = 0xff402060U, .alpha = 1, .dx0 = 100, .dy0 = 100,
+                                .isx = 1, .isy = 1, .cx0 = 100, .cy0 = 100, .cx1 = 1000, .cy1 = 1000 };
         uint64_t us = 0;
         if (!gpucomp_compose((void *)SB_FB, bg, V, 4, &us)) {
             fail("the bins' test did not run");

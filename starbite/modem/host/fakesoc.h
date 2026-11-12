@@ -23,12 +23,24 @@ struct fakesoc {
     unsigned nreg;
     /* faults to inject */
     int refuse_el3_write, refuse_carve, never_status, started_before, warm_pwron;
+    int cp_mute;
+    int nosim_plmn;                     /* passed to the fake CP: camped without a SIM, the PLMN reported */
+    int regist_seq_quirk;               /* passed to the fake CP: NET_REGIST (CS) answered with the next seq */                        /* the CP stops answering (no RESP, no NOTI): a stall */
+    int release_stuck;                  /* reset release: the central sequencer never leaves 0x80 */
+    unsigned asserts, releases, mbox_resets;
+    /* the RADIO partition for streamed loads (plat->radio_read): reads count; from read radio_flip_at on, one byte
+     * reads flipped (RADIO changed between the check and the copy) */
+    const uint8_t *radio;
+    uint32_t radio_size;
+    unsigned radio_reads, radio_flip_at;
+    uint64_t radio_bytes;
     /* stage 4: the IPC region, and the fake CP's side of the handshake */
     uint8_t *ipc;
     uint32_t ipc_size;
     enum { L_IDLE, L_UDL, L_INIT_SOON, L_WAIT_PIF, L_PHONE_SOON, L_DONE, L_ONLINE } link;
     struct fakecp fcp;                 /* the CP's online side: FMT NOTIs, RFS requests */
-    int sim_present, online_crash, crashed_no_magic;
+    int sim_present, online_crash, crashed_no_magic;   /* sim_present 2: FAKE_SIM (the attended test) */
+    int sim_pin;                       /* FAKE_SIM: the SIM wants its PIN */
     /* T10: the CP's RFS side (requests out, replies checked) */
     int rfs_mode;
     const uint8_t *nv_ref;              /* what NV reads must return (the test's RAM copy before the write) */

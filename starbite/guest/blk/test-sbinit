@@ -1,0 +1,212 @@
+#!/bin/sh
+# /sbin/sbinit of sbblk's test base image (starbite/guest/blk/mk-test-images.sh): the stand-in for the desktop
+# root's init. It runs the checks named on the kernel command line (sbblk.test=read,persist,speed,stress,fallback;
+# sbblk.phase=1|2 for persist; sbblk.tree=<md5 of /tree.md5, from the host>), writes one
+# "sbblk-test: PASS|FAIL <test>: ..." line each to the kernel log (the host reads it: ramoops), then
+# SBBLK-TEST-DONE, syncs, remounts read-only and powers off through sbguest.ko (CPU_OFF on every guest CPU).
+export PATH=/bin:/sbin
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+tests=""
+phase=1
+tree=""
+for a in $(cat /proc/cmdline); do
+    case "$a" in
+    sbblk.test=*) tests=$(echo "${a#sbblk.test=}" | tr , ' ') ;;
+    sbblk.phase=*) phase=${a#sbblk.phase=} ;;
+    sbblk.tree=*) tree=${a#sbblk.tree=} ;;
+    esac
+done
+say() { echo "sbinit: $*" > /dev/kmsg; }
+P() { echo "sbblk-test: PASS $*" > /dev/kmsg; }
+F() { echo "sbblk-test: FAIL $*" > /dev/kmsg; }
+ms() { t=$(cut -d' ' -f1 /proc/uptime); echo "${t%.*}${t#*.}0" | sed 's/^0*\([0-9]\)/\1/'; }
+drop() { sync; echo 3 > /proc/sys/vm/drop_caches; }
+rwfs=$(awk '$2 == "/.sbroot/rw" { print $3 }' /proc/mounts)
+say "tests: $tests (phase $phase); root upper on $rwfs; $(grep -c . /proc/partitions) lines in /proc/partitions"
+
+t_read() {
+    drop
+    bad=$(cd / && md5sum -c /tree.md5 2>/dev/null | grep -vc ': OK$')
+    n=$(wc -l < /tree.md5)
+    sum=$(md5sum < /tree.md5 | cut -d' ' -f1)
+    ro=$(cat /sys/block/sbblk0/ro)
+    wr=refused
+    dd if=/dev/zero of=/dev/sbblk0 bs=512 count=1 2>/dev/null && wr=ACCEPTED
+    repo="no repo device"
+    if [ -b /dev/sbblk2 ]; then
+        repo="repo BAD"
+        (cd /repo && md5sum -c repo.md5 >/dev/null 2>&1) && repo="repo ok"
+    fi
+    if [ "$bad" = 0 ] && [ "$sum" = "$tree" ] && [ "$ro" = 1 ] && [ $wr = refused ] && [ "$repo" != "repo BAD" ]; then
+        P "read: $n files of the base image match their md5 list ($sum = the host's), sbblk0 read-only (a write is $wr), $repo"
+    else
+        F "read: $bad of $n files differ, list md5 $sum (host: $tree), ro=$ro, write $wr, $repo"
+    fi
+}
+
+t_persist() {
+    d=/var/sbblk-persist
+    if [ "$rwfs" != ext4 ]; then
+        F "persist: the upper layer is $rwfs, not the overlay device"
+    elif [ "$phase" = 1 ]; then
+        rm -rf $d
+        mkdir -p $d
+        dd if=/dev/urandom of=$d/data bs=64k count=64 2>/dev/null
+        md5sum < $d/data | cut -d' ' -f1 > $d/md5
+        sync
+        P "persist-write: wrote $d/data (4 MiB, md5 $(cat $d/md5)) and synced"
+    else
+        drop
+        if [ -f $d/data ] && [ "$(md5sum < $d/data | cut -d' ' -f1)" = "$(cat $d/md5)" ]; then
+            P "persist: run 2 sees run 1's file, md5 $(cat $d/md5)"
+        else
+            F "persist: run 1's file is missing or differs"
+        fi
+    fi
+}
+
+t_speed() {
+    drop
+    t0=$(ms)
+    dd if=/dev/sbblk0 of=/dev/null bs=1M count=200 2>/tmp/dd.err || F "speed: read: $(tail -1 /tmp/dd.err)"
+    t1=$(ms)
+    r=$((t1 - t0))
+    t0=$(ms)
+    dd if=/dev/zero of=/var/speed.bin bs=1M count=100 conv=fsync 2>/tmp/dd.err || F "speed: write: $(tail -1 /tmp/dd.err)"
+    t1=$(ms)
+    w=$((t1 - t0))
+    sz=$(stat -c %s /var/speed.bin)
+    rm -f /var/speed.bin
+    sync
+    if [ "$sz" = 104857600 ] && [ $r -gt 0 ] && [ $w -gt 0 ] && [ "$rwfs" = ext4 ]; then
+        P "speed: read 200 MiB from sbblk0 in $r ms = $((200000 / r)) MiB/s; wrote 100 MiB to sbblk1 (ext4, fsync) in $w ms = $((100000 / w)) MiB/s"
+    else
+        F "speed: read $r ms, write $w ms, file size $sz, upper $rwfs"
+    fi
+}
+
+# parallel readers and writers with verification: 4 readers (md5 of the base image's files, caches dropped
+# under them), 3 writers (random files to the overlay, fsync or sync, read back after a cache drop), one raw
+# reader of sbblk0 (the same windows must read the same every time)
+t_stress() {
+    rounds=${1:-6}
+    mkdir -p /var/stress /tmp/st
+    rm -f /var/stress/* /tmp/st/*
+    : > /tmp/st/fail
+    for w in 1 2 3; do
+        dd if=/dev/urandom of=/tmp/st/src$w bs=1k count=$((5000 + 777 * w)) 2>/dev/null
+        md5sum < /tmp/st/src$w | cut -d' ' -f1 > /tmp/st/src$w.md5
+    done
+    ( while [ ! -f /tmp/st/stop ]; do echo 3 > /proc/sys/vm/drop_caches; sleep 1; done ) &
+    dropper=$!
+    ( sleep 1500; echo "timeout" >> /tmp/st/fail; F "stress: no end after 1500 s (a hang?)"
+      echo SBBLK-TEST-DONE > /dev/kmsg ) &
+    watchdog=$!
+    pids=""
+    for r in 1 2 3 4; do
+        (
+            i=0
+            while [ $i -lt $rounds ]; do
+                part=$(( (r + i) % 8 ))
+                (cd / && grep -e "big/part$part.bin" -e "tree/d$(( (r * 3 + i) % 12 ))/" /tree.md5 | md5sum -c 2>/dev/null |
+                    grep -v ': OK$' | head -3) > /tmp/st/r$r.bad
+                [ -s /tmp/st/r$r.bad ] && echo "reader $r round $i: $(head -1 /tmp/st/r$r.bad)" >> /tmp/st/fail
+                i=$((i + 1))
+            done
+            echo $i > /tmp/st/r$r.done
+        ) &
+        pids="$pids $!"
+    done
+    for w in 1 2 3; do
+        (
+            i=0
+            want=$(cat /tmp/st/src$w.md5)
+            while [ $i -lt $((rounds * 2)) ]; do
+                f=/var/stress/w$w.$i
+                if [ $((i % 2)) = 0 ]; then
+                    dd if=/tmp/st/src$w of=$f bs=$((4096 * w + 512)) conv=fsync 2>/dev/null || echo "writer $w round $i: dd failed" >> /tmp/st/fail
+                else
+                    cat /tmp/st/src$w > $f && sync || echo "writer $w round $i: write failed" >> /tmp/st/fail
+                fi
+                echo 3 > /proc/sys/vm/drop_caches
+                [ "$(md5sum < $f | cut -d' ' -f1)" = "$want" ] || echo "writer $w round $i: read back differs" >> /tmp/st/fail
+                [ $i -ge 2 ] && rm -f /var/stress/w$w.$((i - 2))
+                i=$((i + 1))
+            done
+            echo $i > /tmp/st/w$w.done
+        ) &
+        pids="$pids $!"
+    done
+    (
+        i=0
+        while [ $i -lt $((rounds * 2)) ]; do
+            for k in 3 61 147; do
+                m=$(dd if=/dev/sbblk0 bs=64k skip=$((k * 16)) count=96 2>/dev/null | md5sum | cut -d' ' -f1)
+                if [ -f /tmp/st/raw$k ]; then
+                    [ "$m" = "$(cat /tmp/st/raw$k)" ] || echo "raw window $k round $i: differs" >> /tmp/st/fail
+                else
+                    echo "$m" > /tmp/st/raw$k
+                fi
+            done
+            i=$((i + 1))
+        done
+        echo $i > /tmp/st/raw.done
+    ) &
+    pids="$pids $!"
+    t0=$(ms)
+    wait $pids
+    t1=$(ms)
+    : > /tmp/st/stop
+    kill $watchdog 2>/dev/null
+    wait $dropper 2>/dev/null
+    # what is left on the overlay must still read back, and the whole base tree once more
+    for w in 1 2 3; do
+        for f in /var/stress/w$w.*; do
+            [ "$(md5sum < $f | cut -d' ' -f1)" = "$(cat /tmp/st/src$w.md5)" ] || echo "final: $f differs" >> /tmp/st/fail
+        done
+    done
+    drop
+    bad=$(cd / && md5sum -c /tree.md5 2>/dev/null | grep -vc ': OK$')
+    [ "$bad" = 0 ] || echo "final: $bad base files differ" >> /tmp/st/fail
+    errs=$(dmesg | grep -c -e 'sbblk: ' -e 'I/O error' -e 'EXT4-fs error' -e 'erofs.*error')
+    done_n=$(cat /tmp/st/*.done 2>/dev/null | wc -l)
+    if [ ! -s /tmp/st/fail ] && [ "$errs" = 0 ] && [ "$done_n" = 8 ]; then
+        P "stress: 4 readers + 3 writers + 1 raw reader, $rounds rounds, $((t1 - t0)) ms: every md5 matched, 0 block errors in the kernel log, no hang"
+    else
+        F "stress: $(wc -l < /tmp/st/fail) mismatches ($(head -1 /tmp/st/fail)), $errs error lines in the kernel log, $done_n/8 workers finished"
+    fi
+    rm -rf /var/stress
+}
+
+t_fallback() {
+    warn=$(dmesg | grep -c 'guest-init: desktop: WARNING: .*tmpfs upper layer')
+    echo fallback-$$ > /var/fallback.txt
+    sync
+    back=$(cat /var/fallback.txt)
+    bad=$(cd / && grep 'tree/d1/' /tree.md5 | md5sum -c 2>/dev/null | grep -vc ': OK$')
+    if [ "$rwfs" = tmpfs ] && [ "$warn" = 1 ] && [ "$back" = "fallback-$$" ] && [ "$bad" = 0 ]; then
+        P "fallback: no usable overlay device ($([ -b /dev/sbblk1 ] && echo 'sbblk1 does not mount' || echo 'no sbblk1')): tmpfs upper, the warning is in the kernel log, the root is writable, the base reads"
+    else
+        F "fallback: upper $rwfs, warnings $warn, wrote/read '$back', $bad base files differ"
+    fi
+}
+
+for t in $tests; do
+    case "$t" in
+    read) t_read ;;
+    persist) t_persist ;;
+    speed) t_speed ;;
+    stress) t_stress 6 ;;
+    stress=*) t_stress "${t#stress=}" ;;
+    fallback) t_fallback ;;
+    *) F "$t: no such test" ;;
+    esac
+done
+echo SBBLK-TEST-DONE > /dev/kmsg
+sync
+mount -o remount,ro / 2>/dev/null
+mount -o remount,ro /.sbroot/rw 2>/dev/null && say "the upper layer's file system is read-only (clean)"
+sync
+poweroff -f
+sleep 60

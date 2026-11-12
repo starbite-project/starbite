@@ -19,11 +19,15 @@ if [ -z "$radio" ]; then
         if [ -f "$c" ]; then radio=$c; break; fi
     done
 fi
-src="$core/sbm_util.c $core/sbm_toc.c $core/sbm_sipc5.c $core/sbm_sbd.c $core/sbm_ipc.c $core/sbm_cell.c $core/sbm_probe.c $core/sbm_probe2.c $core/sbm_boot.c $core/sbm_link.c $core/sbm_clk.c $core/sbm_rfs.c $core/sbm_policy.c $core/sbm_sms.c"
+src="$core/sbm_util.c $core/sbm_toc.c $core/sbm_sipc5.c $core/sbm_sbd.c $core/sbm_ipc.c $core/sbm_cell.c $core/sbm_probe.c $core/sbm_probe2.c $core/sbm_boot.c $core/sbm_link.c $core/sbm_clk.c $core/sbm_rfs.c $core/sbm_policy.c $core/sbm_sms.c $core/sbm_net.c"
 # the core alone must build freestanding, without a C library (libsb images, an XNU kext)
 for f in $src; do
     $CC -std=c99 -O2 -Wall -Wextra -Werror -Wshadow -Wcast-align -ffreestanding -fno-builtin -c -I"$core" "$f" \
         -o "$OUT/$(basename "$f" .c).o"
+done
+for f in $src; do
+    $CC -std=c99 -O2 -Wall -Wextra -Werror -Wshadow -Wcast-align -ffreestanding -fno-builtin -DSBM_ATTENDED_TX -c \
+        -I"$core" "$f" -o "$OUT/att_$(basename "$f" .c).o"
 done
 # and for the phone: bare-metal aarch64 as libsb builds it (strict alignment, no FP/SIMD registers)
 if $CC --target=aarch64-none-elf -E -x c /dev/null >/dev/null 2>&1; then
@@ -47,6 +51,11 @@ $CC $flags -o "$OUT/sbm-test" $src "$here/fakecp.c" "$here/fakesoc.c" "$here/tes
 # shellcheck disable=SC2086
 $CC $flags -o "$OUT/sbm-lnk" $src "$here/lnk.c"
 if [ -n "$radio" ]; then "$OUT/sbm-test" "$radio"; else "$OUT/sbm-test"; fi
+# the attended SIM test's build (modemsim.img): the same tests plus the attended path (SBM_ATTENDED_TX)
+# shellcheck disable=SC2086
+$CC $flags -DSBM_ATTENDED_TX -o "$OUT/sbm-test-attended" $src "$here/fakecp.c" "$here/fakesoc.c" "$here/test.c"
+echo "attended build (SBM_ATTENDED_TX):"
+if [ -n "$radio" ]; then "$OUT/sbm-test-attended" "$radio"; else "$OUT/sbm-test-attended"; fi
 # EFS: the glue's ext4 reader + in-memory journal replay, on images from mk-efs-fixture.sh (made in the VM)
 $CC -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all \
     -o "$OUT/efs-test" "$core/sb/ext4.c" "$core/sb/jbd2.c" "$here/efs-test.c"

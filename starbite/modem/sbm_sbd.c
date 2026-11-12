@@ -268,3 +268,95 @@ void sbm_sbd_get_done(struct sbm_sbd *s, unsigned id, unsigned dir, const struct
     *p16(s, rbp_off(s, id, dir, 0)) = (uint16_t)((out + 1) % r->len);
     bar(p);
 }
+
+/* ---- the zero-copy DL ring (multipdp, ch 11; Android's zerocopy_adaptor without smapper) ----------------------
+ * Android (link_device_memory_sbd.c setup_zerocopy_adaptor, allocate_data_in_advance, sbd_pio_rx_zerocopy_adaptor):
+ * the DL ring's rp is the AP's producer of empty buffers (zdptr->wp = rb->rp) and the DL wp the CP's producer of
+ * filled ones (zdptr->rp = rb->wp); the AP's read index (pre_rp) is private. Each 8-byte slot holds a u64 offset
+ * from the IPC base to the data (a mif_buff cell in ZMB + NET_HEADROOM); the CP writes the packet there and puts
+ * len | ch << 16 in size_v. Here a slot keeps its cell: a consumed cell is handed back at once in the next free
+ * slot, so len - 1 cells are in use (2047 x 2560 bytes of ZMB's 11 MiB). Every offset read back is checked. */
+static uint32_t zc_slot_off(const struct sbm_ring *r, unsigned i) { return r->buff_off + i * r->size; }
+static uint64_t zc_cell_off(const struct sbm_sbd *s, unsigned cell)
+{
+    return (uint64_t)s->zc_zmb_rel + (uint64_t)cell * SBM_ZC_CELL + SBM_ZC_HEADROOM;
+}
+static void zc_put(struct sbm_sbd *s, const struct sbm_ring *r, unsigned slot)
+{
+    uint64_t off = zc_cell_off(s, s->zc_cell[slot]);
+    sbm_put32(s->ipc + zc_slot_off(r, slot), (uint32_t)off);
+    sbm_put32(s->ipc + zc_slot_off(r, slot) + 4, (uint32_t)(off >> 32));
+}
+
+int sbm_sbd_zc_fill(struct sbm_sbd *s, uint16_t ch, uint32_t zmb_rel, uint32_t zmb_size, const struct sbm_plat *p)
+{
+    int id = sbm_sbd_id(s, ch);
+    if (id < 0)
+        return SBM_EINVAL;
+    struct sbm_ring *r = &s->r[id][SBM_DL];
+    if (r->size < 8 || r->len > 2048 || (uint32_t)(r->len - 1) * SBM_ZC_CELL > zmb_size)
+        return SBM_ERANGE;
+    unsigned w = sbm_sbd_wp(s, (unsigned)id, SBM_DL), rp = sbm_sbd_rp(s, (unsigned)id, SBM_DL);
+    if (w != rp || w >= r->len)
+        return SBM_EIO;                  /* only on a fresh ring */
+    s->zc_pre_rp = (uint16_t)rp;
+    s->zc_zmb_rel = zmb_rel;
+    for (unsigned k = 0; k + 1 < r->len; ++k) {
+        unsigned slot = (rp + k) % r->len;
+        s->zc_cell[slot] = (uint16_t)k;
+        zc_put(s, r, slot);
+    }
+    bar(p);
+    *p16(s, rbp_off(s, (unsigned)id, SBM_DL, 0)) = (uint16_t)((rp + r->len - 1) % r->len);
+    bar(p);
+    s->zc_on = 1;
+    return (int)(r->len - 1);
+}
+
+int sbm_sbd_zc_get(struct sbm_sbd *s, uint16_t ch, uint32_t zmb_rel, uint32_t zmb_size, const uint8_t **pkt,
+                   uint16_t *iod_ch, const struct sbm_plat *p)
+{
+    *pkt = 0;
+    int id = sbm_sbd_id(s, ch);
+    if (id < 0 || !s->zc_on)
+        return 0;
+    struct sbm_ring *r = &s->r[id][SBM_DL];
+    unsigned w = sbm_sbd_wp(s, (unsigned)id, SBM_DL), out = s->zc_pre_rp;
+    if (w >= r->len || out >= r->len) {
+        s->zc_errors++;
+        return SBM_EIO;
+    }
+    if (w == out)
+        return 0;
+    bar(p);
+    uint32_t sv = *p32(s, r->size_v_off + 4 * out), len = sv & 0xFFFF;
+    const uint8_t *sl = s->ipc + zc_slot_off(r, out);
+    uint64_t off = (uint64_t)sbm_le32(sl) | (uint64_t)sbm_le32(sl + 4) << 32;
+    if (iod_ch)
+        *iod_ch = (uint16_t)(sv >> 16);
+    if (off != zc_cell_off(s, s->zc_cell[out]) || off + SBM_ZC_CELL - SBM_ZC_HEADROOM > (uint64_t)zmb_rel + zmb_size ||
+        len == 0 || len > SBM_ZC_CELL - SBM_ZC_HEADROOM) {
+        s->zc_errors++;
+        return SBM_EBADF;                /* the caller still calls zc_done: the slot is handed back */
+    }
+    *pkt = s->ipc + off;
+    return (int)len;
+}
+
+void sbm_sbd_zc_done(struct sbm_sbd *s, uint16_t ch, const struct sbm_plat *p)
+{
+    int id = sbm_sbd_id(s, ch);
+    if (id < 0 || !s->zc_on)
+        return;
+    struct sbm_ring *r = &s->r[id][SBM_DL];
+    unsigned out = s->zc_pre_rp, rp = sbm_sbd_rp(s, (unsigned)id, SBM_DL);
+    if (out >= r->len || rp >= r->len || out == sbm_sbd_wp(s, (unsigned)id, SBM_DL))
+        return;
+    /* the consumed slot's cell goes into the free slot at rp (from our own record, whatever the slot says now) */
+    s->zc_cell[rp] = s->zc_cell[out];
+    zc_put(s, r, rp);
+    bar(p);
+    *p16(s, rbp_off(s, (unsigned)id, SBM_DL, 0)) = (uint16_t)((rp + 1) % r->len);
+    s->zc_pre_rp = (uint16_t)((out + 1) % r->len);
+    bar(p);
+}

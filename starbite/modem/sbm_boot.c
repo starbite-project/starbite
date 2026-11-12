@@ -42,6 +42,15 @@ const struct sbm_seq sbm_seq_reset_assert[] = {
 };
 const unsigned sbm_seq_reset_assert_n = sizeof(sbm_seq_reset_assert) / sizeof(sbm_seq_reset_assert[0]);
 
+/* the same-boot restart (Android's ss310ap_reset on the 9810: enable dump_pc_no_pg, reset_assert, reset_release,
+ * mbox_sw_reset; the later load never runs cp_init again: link_device_shmem.c cp_init_done) */
+const struct sbm_seq sbm_seq_reset_release[] = {
+    { SBM_SEQ_WRITE_EL3, "CP_CTRL_S |= CP_START", SBM_CP_CTRL_S, 1u << 3, 1u << 3 },
+    { SBM_SEQ_WAIT, "CENTRAL_SEQ_CP_STATUS == 0x00", PMU(SBM_PMU_CENTRAL_SEQ_CP_ST), 0xFFu << 16, 0 },
+    { SBM_SEQ_WAIT, "GICD pending bit 28", SBM_GICD_CP_PEND, 1u << 28, 1u << 28 },
+};
+const unsigned sbm_seq_reset_release_n = sizeof(sbm_seq_reset_release) / sizeof(sbm_seq_reset_release[0]);
+
 const struct sbm_seq sbm_seq_dump_pc_no_pg[] = {
     { SBM_SEQ_WRITE_EL3, "CP_CTRL_NS |= dump_pc_no_pg", SBM_CP_CTRL_NS, 1u << 17, 1u << 17 },
 };
@@ -168,16 +177,45 @@ static uint32_t crc_fed(const struct sbm_plat *p, const uint8_t *d, uint32_t n)
     return c;
 }
 
+/* a RADIO section left on the partition: read in chunks (read only) */
+static int streamable(const struct sbm_plat *p, const struct sbm_image *im, const struct sbm_load *l)
+{
+    return l->src == SBM_SRC_RADIO && p->radio_read && im->chunk && im->chunk_size >= 4096 && !(im->chunk_size & 4095);
+}
+
+/* CRC of a streamed section; with copy, also writes each chunk into the carve-out */
+static int stream(const struct sbm_plat *p, const struct sbm_image *im, const struct sbm_load *l, int copy, uint32_t *crc)
+{
+    uint32_t c = 0;
+    for (uint32_t o = 0; o < l->size; o += im->chunk_size) {
+        uint32_t n = l->size - o < im->chunk_size ? l->size - o : im->chunk_size;
+        if (p->radio_read(p->ctx, (uint64_t)l->src_off + o, im->chunk, n) != 0)
+            return SBM_EIO;
+        c = sbm_crc32(c, im->chunk, n);
+        if (copy && !p->carve_write(p->ctx, l->dst_off + o, im->chunk, n))
+            return SBM_EIO;
+        feed(p);
+    }
+    *crc = c;
+    return 0;
+}
+
 int sbm_image_check(const struct sbm_plat *p, struct sbm_image *im)
 {
     if (im->plan.n != 4)
         return SBM_ENOENT;
     for (unsigned k = 0; k < im->plan.n; ++k) {
         const struct sbm_load *l = &im->plan.l[k];
-        if (!im->data[k])
+        if (!im->data[k] && !streamable(p, im, l))
             return SBM_ENOENT;
-        sbm_logf(p, "boot: checking %s (0x%x bytes)", l->name, l->size);
-        im->crc[k] = crc_fed(p, im->data[k], l->size);
+        sbm_logf(p, "boot: checking %s (0x%x bytes%s)", l->name, l->size, im->data[k] ? "" : ", read from RADIO");
+        if (im->data[k]) {
+            im->crc[k] = crc_fed(p, im->data[k], l->size);
+        } else {
+            int r = stream(p, im, l, 0, &im->crc[k]);
+            if (r < 0)
+                return r;
+        }
         if (l->src == SBM_SRC_NV) {
             /* NV has no CRC in the TOC; its content is the phone's own and is never shown */
             sbm_logf(p, "boot: %s: 0x%x bytes from EFS (crc 0x%08x)", l->name, l->size, im->crc[k]);
@@ -202,8 +240,20 @@ static int copy_in(const struct sbm_plat *p, struct sbm_image *im)
         return SBM_EPERM;
     for (unsigned k = 0; k < im->plan.n; ++k) {
         const struct sbm_load *l = &im->plan.l[k];
-        sbm_logf(p, "boot: copy %s to modem_if+0x%08x (0x%x bytes)", l->name, l->dst_off, l->size);
-        for (uint32_t o = 0; o < l->size; o += 0x100000) {
+        sbm_logf(p, "boot: copy %s to modem_if+0x%08x (0x%x bytes%s)", l->name, l->dst_off, l->size,
+                 im->data[k] ? "" : ", straight from RADIO");
+        if (!im->data[k]) {
+            uint32_t c0;
+            int r = streamable(p, im, l) ? stream(p, im, l, 1, &c0) : SBM_ENOENT;
+            if (r < 0)
+                return r;
+            if (c0 != im->crc[k]) {             /* RADIO read differently than at the check: not used */
+                sbm_logf(p, "boot: %s read from RADIO: crc 0x%08x, at the check 0x%08x: MISMATCH", l->name, c0,
+                         im->crc[k]);
+                return SBM_EIO;
+            }
+        }
+        for (uint32_t o = 0; im->data[k] && o < l->size; o += 0x100000) {
             uint32_t n = l->size - o < 0x100000 ? l->size - o : 0x100000;
             if (!p->carve_write(p->ctx, l->dst_off + o, im->data[k] + o, n))
                 return SBM_EIO;
@@ -233,6 +283,14 @@ static uint32_t reset_seq(const struct sbm_plat *p)
     if (!p->probe32 || !p->probe32(p->ctx, PMU(SBM_PMU_RESET_SEQ_STATUS), &v))
         return 0xFF;
     return v & 7;
+}
+
+static uint32_t central_st(const struct sbm_plat *p)
+{
+    uint32_t v = 0;
+    if (!p->probe32 || !p->probe32(p->ctx, PMU(SBM_PMU_CENTRAL_SEQ_CP_ST), &v))
+        return 0xFF;
+    return (v >> 16) & 0xFF;
 }
 
 int sbm_cp_park(const struct sbm_plat *p)
@@ -322,7 +380,13 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     int serve = b->rfs_serve, query = b->fmt_query;
     uint32_t period = b->query_period_ms;
     uint32_t keep = b->keep_running;
+#ifdef SBM_ATTENDED_TX
+    uint32_t attended = SBM_IS_ATTENDED(b->attended) ? b->attended : 0;
+#endif
     sbm_memset(b, 0, sizeof(*b));
+#ifdef SBM_ATTENDED_TX
+    b->attended = attended;
+#endif
     b->stop = want;
     b->hold_ms = hold > 600000 ? 600000 : hold;     /* 10 min at most (the soak) */
     b->rfs_serve = serve;
@@ -335,7 +399,9 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
              ? "the CP's first status (then parked)" : want == SBM_BOOT_LINK
              ? "stage 4: the link up to PHONE_START (no INIT_END; then parked)"
              : "stage 5a: INIT_END, receive only, then parked");
+    uint64_t tc = now(p);
     int r = sbm_image_check(p, im);
+    b->check_ms = (uint32_t)((now(p) - tc) / 1000);
     if (r < 0)
         return stop(p, b, r, "image check");
     b->checked = 1;
@@ -356,17 +422,44 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     /* Android's rule (shmem_security_request): cp_init when the sequencer reads 0. A warm reboot resets the
      * sequencer but keeps CP_PWRON in CP_CTRL_NS (T7 21:21 after One UI: 0x002016a2, sequencer 0); cal_cp_init
      * sets it anyway. A running sequencer or CP_START set means a CP that is up: not touched. */
-    if (b->reset_seq_before != 0 || (b->ctrl_s & (1u << 3)))
+    /* a CP parked earlier in this boot (by us: the sequencer stays 5 and the central sequencer reads 0x80 "in
+     * reset") restarts as Android restarts it: ss310ap_reset, no second cp_init. A CP that runs is never touched.
+     * The reset assert clears CP_START in CP_CTRL_S on this phone (night-1111: 0x8 before the park, 0x0 after it;
+     * that is why PMUCAL's reset_release sets it again), so CP_START is no part of the test: the central
+     * sequencer's 0x80 is what says "held in reset". */
+    uint32_t cst = central_st(p);
+    int restart = b->reset_seq_before == 5 && cst == 0x80;
+    if (!restart && (b->reset_seq_before != 0 || (b->ctrl_s & (1u << 3)))) {
+        sbm_logf(p, "boot: sequencer %u, central sequencer 0x%02x, CP_CTRL_S 0x%08x: a CP that runs", b->reset_seq_before,
+                 cst, b->ctrl_s);
         return stop(p, b, SBM_EPERM, "the CP was already started: not touched");
-    if (b->ctrl_ns & (1u << 1))
+    }
+    if (!restart && (b->ctrl_ns & (1u << 1)))
         sbm_logf(p, "boot: CP_PWRON left set by an earlier boot (a warm reboot keeps it); cp_init runs as on Android");
 
     b->inited = 1;                       /* from here on, every way out parks */
-    r = sbm_seq_run(p, sbm_seq_cp_init, sbm_seq_cp_init_n - 1, 100000);
-    if (r < 0)
-        return stop(p, b, r, "cp_init");
-    if (sbm_seq_run(p, &sbm_seq_cp_init[sbm_seq_cp_init_n - 1], 1, 100000) < 0)
-        sbm_logf(p, "boot: (the GIC pending bit did not show: PMUCAL only waits for it; going on)");
+    if (restart) {
+        b->restart = 1;
+        sbm_logf(p, "boot: restart: the CP was parked in this boot (sequencer 5, in reset): Android's reset, no cp_init");
+        r = sbm_cp_park(p);              /* wakeup, dump_pc_no_pg, reset assert: it is in reset already */
+        if (r < 0)
+            return stop(p, b, r, "restart: reset assert");
+        r = sbm_seq_run(p, sbm_seq_reset_release, sbm_seq_reset_release_n - 1, 100000);
+        if (r < 0)
+            return stop(p, b, r, "restart: reset release");
+        if (sbm_seq_run(p, &sbm_seq_reset_release[sbm_seq_reset_release_n - 1], 1, 100000) < 0)
+            sbm_logf(p, "boot: (the GIC pending bit did not show: PMUCAL only waits for it; going on)");
+        sbm_logf(p, "boot: restart: mailbox software reset (MCUCTLR.MSWRST)");
+        if (!p->mmio_wr32(p->ctx, SBM_MBOX_PA + SBM_MBOX_MCUCTLR, 1))
+            return stop(p, b, SBM_EPERM, "restart: mailbox reset");
+        delay(p, 5);
+    } else {
+        r = sbm_seq_run(p, sbm_seq_cp_init, sbm_seq_cp_init_n - 1, 100000);
+        if (r < 0)
+            return stop(p, b, r, "cp_init");
+        if (sbm_seq_run(p, &sbm_seq_cp_init[sbm_seq_cp_init_n - 1], 1, 100000) < 0)
+            sbm_logf(p, "boot: (the GIC pending bit did not show: PMUCAL only waits for it; going on)");
+    }
     sbm_cp_ctrl_read(p, SBM_CP_CTRL_S, &b->ctrl_s, &err);
     sbm_cp_ctrl_read(p, SBM_CP_CTRL_NS, &b->ctrl_ns, &err);
 
@@ -374,10 +467,25 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     if (b->sec2 != SBM_SEC_NOT_WORKING)
         sbm_logf(p, "boot: (mode 2 answered 0x%02x, Android got 0x0b; going on as cbd does)", b->sec2);
 
+    tc = now(p);
     r = copy_in(p, im);
+    b->copy_ms = (uint32_t)((now(p) - tc) / 1000);
     if (r < 0)
         return stop(p, b, r, "copy");
     b->copied = 1;
+    for (unsigned k = 0; k < im->plan.n; ++k)
+        if (!im->data[k])
+            b->streamed += im->plan.l[k].size;
+#ifdef SBM_ATTENDED_TX
+    /* calls (docs/MODEM.md 7.12): the VSS magic word at the VSS region + 0x600000 (the DT's magic_offset, past the
+     * VSS image) is cleared before the CP starts, as Android's ABOX driver does: the CP sets it when its side of the
+     * voice path is up, and Calliope's VSS_init_proc waits for it (leftover DRAM there would fake it) */
+    if (b->attended == SBM_ATTENDED_DATA && im->mm.vss_size > SBM_VSS_MAGIC_OFF + 4) {
+        static const uint8_t zero4[4];
+        if (p->carve_write(p->ctx, im->mm.vss_off + SBM_VSS_MAGIC_OFF, zero4, 4))
+            sbm_logf(p, "boot: the VSS magic word cleared (for the call audio path)");
+    }
+#endif
 
     uint64_t t0 = now(p);
     sbm_sec_req(p, SBM_SEC_NORMAL, im->plan.boot_size, im->plan.main_size, &b->sec0);
@@ -391,7 +499,9 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
     r = power_on(p, b);
     if (r < 0 || want == SBM_BOOT_RUN)
         return stop(p, b, r, r < 0 ? "power on" : "done (first status, parked)");
+    tc = now(p);
     r = sbm_link_boot(p, im, b);
+    b->link_ms = (uint32_t)((now(p) - tc) / 1000);
     if (want == SBM_BOOT_ONLINE && b->keep_running == SBM_KEEP_RUNNING && r == 0 && b->init_end_sent) {
         b->stopped_at = "online (session: running, not parked)";
         return 0;                             /* the session owns the CP now; sbm_modem_stop parks it */
@@ -406,8 +516,9 @@ int sbm_boot_run(const struct sbm_plat *p, struct sbm_image *im, struct sbm_boot
 void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
 {
     sbm_logf(p, "BOOT: %s: %s (stopped at: %s)", b->err ? "FAILED" : "ok", sbm_strerror(b->err), b->stopped_at);
-    sbm_logf(p, "BOOT: checked %u inited %u copied %u validated %u released %u parked %u", b->checked, b->inited,
-             b->copied, b->validated, b->released, b->parked);
+    sbm_logf(p, "BOOT: checked %u inited %u copied %u validated %u released %u parked %u restart %u streamed %u KiB",
+             b->checked, b->inited, b->copied, b->validated, b->released, b->parked, b->restart, b->streamed >> 10);
+    sbm_logf(p, "BOOT: times: check %u ms, copy %u ms, link %u ms", b->check_ms, b->copy_ms, b->link_ms);
     if (b->inited)
         sbm_logf(p, "BOOT: EL3 mode 2 0x%02x, mode 0 0x%02x in %u ms; CP_CTRL_S 0x%08x NS 0x%08x", b->sec2, b->sec0,
                  (unsigned)(b->sec0_us / 1000), b->ctrl_s, b->ctrl_ns);
@@ -427,8 +538,9 @@ void sbm_boot_report(const struct sbm_plat *p, const struct sbm_boot *b)
         sbm_logf(p, "ONLINE: %s", line);
         if (b->fmt_query)
             sbm_logf(p, "ONLINE: queries sent %u (refused by the allow-list %u), answered %u RESP + %u GEN_PHONE_RES;"
-                     " unanswered %u, stale %u, unmatched %u", b->fmt_tx, b->fmt_tx_refused, b->fmt_resp, b->fmt_gen_res,
-                     b->fmt_tx - b->fmt_resp - b->fmt_gen_res, b->fmt_stale, b->fmt_unmatched);
+                     " unanswered %u, stale %u, unmatched %u, matched by command %u", b->fmt_tx, b->fmt_tx_refused,
+                     b->fmt_resp, b->fmt_gen_res, b->fmt_tx - b->fmt_resp - b->fmt_gen_res, b->fmt_stale,
+                     b->fmt_unmatched, b->fmt_seq_fixed);
         if (b->rfs_serve || b->big_frames || b->big_dropped)
             sbm_logf(p, "ONLINE: RFS served %u replies (%u frames, %u bytes); joined %u long messages from %u pieces; big frames %u, dropped %u",
                      b->rfs_tx, b->rfs_tx_frames, b->rfs_tx_bytes, b->rfs_joined, b->rfs_parts, b->big_frames, b->big_dropped);

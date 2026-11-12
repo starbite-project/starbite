@@ -30,6 +30,7 @@
  */
 #include "sb.h"
 #include "ufs.h"
+#include "sd.h"
 
 static int eq(const char *a, const char *b)
 {
@@ -485,8 +486,10 @@ int sb_write_store(unsigned medium, uint64_t lba, uint64_t n, const void *src)
  * (sbstore2.py build --volatile NAME=BYTES) with the directory's volatile flag, like the loader's crash
  * log, which the loader writes in place the same way. store.c grants exactly that entry's blocks after
  * checking the flag; the grant must lie in the live store's data area (never its header, settings
- * block or directory: blocks 0..6), UFS only, at most 4 MiB. Every write is logged, honours the dry
- * run, uses forced unit access and ends with SYNCHRONIZE CACHE. A reboot clears the grant. */
+ * block or directory: blocks 0..6), on the home store's medium (UFS, or the card once its store is home:
+ * docs/STORE-ON-CARD.md), at most 4 MiB. Every write is logged, honours the dry run, and on UFS uses
+ * forced unit access and ends with SYNCHRONIZE CACHE; on the card (no FUA) the driver returns once the
+ * card has programmed the blocks and blkio.c reads them back. A reboot clears the grant. */
 static struct {
     int on;
     unsigned medium;
@@ -508,7 +511,7 @@ int sb_volatile_grant(unsigned medium, uint64_t first, uint64_t count, const cha
     vg.on = 0;
     if (!count)
         return 0;
-    if (medium != SB_MED_UFS || count > 1024 || !live[medium].used || first < live[medium].base + 7 ||
+    if (medium > SB_MED_SD || count > 1024 || !live[medium].used || first < live[medium].base + 7 ||
         first + count < first || first + count > live[medium].base + live[medium].used) {
         log_write("refused a standing grant for", medium, 0, first, count, &d, "outside the store's data area");
         return 0;
@@ -540,6 +543,141 @@ int sb_write_volatile(unsigned medium, uint64_t lba, uint64_t n, const void *src
     fence_active = 1;
     int r = sb_blk_write_sync(medium, 0, lba, n, src);
     fence_active = 0;
-    log_write(r ? "FAILED" : "wrote", medium, 0, lba, n, &d, r ? "I/O error" : "FUA + cache flush");
+    log_write(r ? "FAILED" : "wrote", medium, 0, lba, n, &d,
+              r ? "I/O error" : medium == SB_MED_SD ? "programmed + read back" : "FUA + cache flush");
     return r ? SB_W_IO : 0;
+}
+
+/* ---- the standing write of one file's extent on the microSD card (sb.h; Linux apps' overlay image) ----
+ * Not the gate and not the volatile grant above (Starbite OS's state slot keeps that one). The consent is the
+ * file: the user put /starbite/linux/overlay.img on the card's exFAT partition for exactly this. The caller
+ * resolves the file to its extent; the fence does not take its word for where that is: it reads the MBR and the
+ * exFAT boot sector and grants only a range wholly inside that partition's cluster heap. So whatever the caller
+ * got wrong, a write can never land in the card's other partitions (p2: the OS store, the parked roots), the
+ * partition table, the exFAT boot region or the FAT. Writes honour the storage hold and the dry run, go through
+ * the card driver only (sb_blk_write on SB_MED_SD under fence_active) and are not logged one by one (a guest
+ * writes thousands of blocks): refusals and I/O errors are. */
+static struct {
+    int on;
+    uint64_t first, count;                  /* 4 KiB blocks of the card */
+    uint32_t cid[4];
+    char name[32];
+} cg;
+static uint64_t cg_sec[64];                 /* one sector (the driver writes 64-bit words) */
+static unsigned cg_refused;
+
+static uint32_t cg_le32(const volatile uint8_t *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+void sb_card_grant_clear(void)
+{
+    cg.on = 0;
+}
+
+int sb_card_grant(uint64_t first, uint64_t count, const char *name)
+{
+    struct sb_wdecide d;
+    decide_init(&d);
+    sb_strcpy(d.part, sizeof(d.part), "card file");
+    d.tier = SB_TIER1;
+    cg.on = 0;
+    if (!count)
+        return 0;
+    const char *no = 0;
+    const volatile uint8_t *b = (const volatile uint8_t *)cg_sec;
+    uint64_t s0 = first * 8U, s1 = (first + count) * 8U, vol = 0, vlen = 0;
+    if (first + count < first || first + count > (1ULL << 40)) {
+        no = "a wrapping range";
+    } else if (in_live_store(SB_MED_SD, first, count)) {
+        no = "inside the card's OS store";
+    } else if (sd_read(0, 1, (uintptr_t)cg_sec)) {
+        no = "the card's partition table cannot be read";
+    } else if (b[510] != 0x55 || b[511] != 0xaa) {
+        no = "the card has no partition table";
+    } else {
+        int home = -1;
+        for (int i = 0; i < 4 && !no; ++i) {
+            const volatile uint8_t *e = b + 446 + 16 * i;
+            uint64_t p0 = cg_le32(e + 8), p1 = p0 + cg_le32(e + 12);
+            if (p1 == p0 || s0 >= p1 || s1 <= p0)
+                continue;                   /* an empty entry, or one the range does not touch */
+            if (e[4] != 0x07)
+                no = "touches a partition that is not the exFAT one (the OS store's p2?)";
+            else if (s0 < p0 || s1 > p1 || home >= 0)
+                no = "crosses the exFAT partition's boundary";
+            else {
+                home = i;
+                vol = p0;
+                vlen = p1 - p0;
+            }
+        }
+        if (!no && home < 0)
+            no = "outside every partition";
+    }
+    if (!no) {
+        /* the exFAT boot sector: the cluster heap is where files live (exFAT specification 3.1) */
+        if (sd_read(vol, 1, (uintptr_t)cg_sec)) {
+            no = "the exFAT boot sector cannot be read";
+        } else if (b[3] != 'E' || b[4] != 'X' || b[5] != 'F' || b[6] != 'A' || b[7] != 'T' || b[510] != 0x55 ||
+                   b[511] != 0xaa || b[108] != 9 || b[109] > 16) {
+            no = "the partition is not exFAT with 512-byte sectors";
+        } else {
+            uint64_t heap0 = vol + cg_le32(b + 88), heap1 = heap0 + ((uint64_t)cg_le32(b + 92) << b[109]);
+            if (heap0 <= vol || heap1 > vol + vlen || s0 < heap0 || s1 > heap1)
+                no = "outside the exFAT cluster heap (the boot region or the FAT)";
+        }
+    }
+    if (no) {
+        log_write("refused a card-file grant for", SB_MED_SD, 0, first, count, &d, no);
+        return 0;
+    }
+    cg.on = 1;
+    cg.first = first;
+    cg.count = count;
+    for (unsigned i = 0; i < 4; ++i)
+        cg.cid[i] = sd_rep.cid[i];
+    sb_strcpy(cg.name, sizeof(cg.name), name ? name : "?");
+    cg_refused = 0;
+    log_write("card-file grant for", SB_MED_SD, 0, first, count, &d, cg.name);
+    return 1;
+}
+
+int sb_write_card(uint64_t lba, uint64_t n, const void *src)
+{
+    struct sb_wdecide d;
+    decide_init(&d);
+    sb_strcpy(d.part, sizeof(d.part), cg.on ? cg.name : "card file");
+    d.tier = SB_TIER1;
+    const char *no = 0;
+    int r = 0;
+    if (!cg.on) {
+        no = "no card-file grant";
+        r = SB_W_AUTH;
+    } else if (cg.cid[0] != sd_rep.cid[0] || cg.cid[1] != sd_rep.cid[1] || cg.cid[2] != sd_rep.cid[2] ||
+               cg.cid[3] != sd_rep.cid[3]) {
+        cg.on = 0;                          /* the grant was for the card that was in the slot then */
+        no = "another card is in the slot: the grant is void";
+        r = SB_W_AUTH;
+    } else if (!n || !src || lba < cg.first || lba + n < lba || lba + n > cg.first + cg.count) {
+        no = "outside the granted file";
+        r = SB_W_RANGE;
+    } else if (hold_why) {
+        no = hold_why;
+        r = SB_W_HOLD;
+    } else if (dry_run) {
+        no = "DRY RUN, nothing written";
+        r = SB_W_DRYRUN;
+    }
+    if (!r) {
+        r = do_write(SB_MED_SD, 0, lba, n, src);
+        if (r)
+            no = "I/O error";
+    }
+    if (r && cg_refused < 8) {              /* a guest can ask thousands of times: the first few are enough */
+        ++cg_refused;
+        log_write(r == SB_W_DRYRUN ? "would write" : r == SB_W_IO ? "FAILED" : "refused", SB_MED_SD, 0, lba, n, &d, no);
+    }
+    return r;
 }

@@ -1,0 +1,267 @@
+[
+ {
+  "name": "lock",
+  "js": "sbSet('unlock', 0)",
+  "host": []
+ },
+ {
+  "name": "unlock-25",
+  "js": "sbSet('unlock', .25)",
+  "host": [
+   "unlock=:0.25"
+  ]
+ },
+ {
+  "name": "unlock-50",
+  "js": "sbSet('unlock', .5)",
+  "host": [
+   "unlock=:0.5"
+  ]
+ },
+ {
+  "name": "unlock-75",
+  "js": "sbSet('unlock', .75)",
+  "host": [
+   "unlock=:0.75"
+  ]
+ },
+ {
+  "name": "home",
+  "js": "sbSet('unlock', 1)",
+  "host": [
+   "unlock=:1"
+  ]
+ },
+ {
+  "name": "group-apple",
+  "js": "sbSet('group', 'apple')",
+  "host": [
+   "group=apple"
+  ]
+ },
+ {
+  "name": "group-microsoft",
+  "js": "sbSet('group', 'microsoft')",
+  "host": [
+   "group=microsoft"
+  ]
+ },
+ {
+  "name": "group-starbite",
+  "js": "sbSet('group', 'starbite'); document.getElementById('nscroll').scrollTop = 304",
+  "host": [
+   "group=starbite",
+   "scroll=:304"
+  ]
+ },
+ {
+  "name": "scroll-60",
+  "js": "document.getElementById('nscroll').scrollTop = 60",
+  "host": [
+   "scroll=:60"
+  ]
+ },
+ {
+  "name": "focus-win11",
+  "js": "sbSet('focus', ['win11', 1])",
+  "host": [
+   "focus=win11:1"
+  ]
+ },
+ {
+  "name": "focus-ios26-50",
+  "js": "sbSet('focus', ['ios26', .5])",
+  "host": [
+   "focus=ios26:0.5"
+  ]
+ },
+ {
+  "name": "home-page2",
+  "js": "sbSet('unlock', 1); sbSet('page', 1)",
+  "host": [
+   "unlock=:1",
+   "page=:1"
+  ]
+ },
+ {
+  "name": "home-page-50",
+  "js": "sbSet('unlock', 1); sbSet('page', .5)",
+  "host": [
+   "unlock=:1",
+   "page=:0.5"
+  ]
+ },
+ {
+  "name": "cc",
+  "js": "sbSet('unlock', 1); sbSet('cc', 1)",
+  "host": [
+   "unlock=:1",
+   "cc=:1"
+  ]
+ },
+ {
+  "name": "cc-50",
+  "js": "sbSet('unlock', 1); sbSet('cc', .5)",
+  "host": [
+   "unlock=:1",
+   "cc=:0.5"
+  ]
+ },
+ {
+  "name": "app-settings",
+  "js": "sbSet('unlock', 1); sbSet('app', ['settings', 1])",
+  "host": [
+   "unlock=:1",
+   "app=settings:1"
+  ]
+ },
+ {
+  "name": "app-calendar",
+  "js": "sbSet('unlock', 1); sbSet('app', ['calendar', 1])",
+  "host": [
+   "unlock=:1",
+   "app=calendar:1"
+  ]
+ },
+ {
+  "name": "app-clock-50",
+  "js": "sbSet('unlock', 1); sbSet('app', ['clock', .5])",
+  "host": [
+   "unlock=:1",
+   "app=clock:0.5"
+  ]
+ },
+ {
+  "name": "hint",
+  "js": "window.__hint = 1",
+  "host": [
+   "hint=:1"
+  ]
+ },
+ {
+  "name": "app-phone",
+  "js": "sbSet('unlock', 1); sbSet('app', ['phone', 1])",
+  "host": [
+   "unlock=:1",
+   "app=phone:1"
+  ]
+ },
+ {
+  "name": "app-phone-112",
+  "js": "sbSet('unlock', 1); sbSet('app', ['phone', 1]); for (const d of ['1','1','2']) document.querySelector('.key[data-d=\"' + d + '\"]').click()",
+  "host": [
+   "unlock=:1",
+   "app=phone:1",
+   "dial=112:0"
+  ]
+ },
+ {
+  "name": "app-phone-rec",
+  "js": "sbSet('unlock', 1); sbSet('app', ['phone', 1]); document.querySelector('[data-tab=rec]').click()",
+  "host": [
+   "unlock=:1",
+   "app=phone:1",
+   "tab=rec:0"
+  ]
+ },
+ {
+  "name": "app-phone-fav",
+  "js": "sbSet('unlock', 1); sbSet('app', ['phone', 1]); document.querySelector('[data-tab=fav]').click()",
+  "host": [
+   "unlock=:1",
+   "app=phone:1",
+   "tab=fav:0"
+  ]
+ },
+ {
+  "name": "app-messages",
+  "js": "sbSet('unlock', 1); sbSet('app', ['messages', 1])",
+  "host": [
+   "unlock=:1",
+   "app=messages:1"
+  ]
+ },
+ {
+  "name": "app-thread",
+  "js": "sbSet('unlock', 1); sbSet('app', ['messages', 1]); document.querySelector('[data-thread=\"Aino Virtanen\"]').click()",
+  "host": [
+   "unlock=:1",
+   "app=messages:1",
+   "thread=0:0"
+  ]
+ },
+ {
+  "name": "app-contacts",
+  "js": "sbSet('unlock', 1); sbSet('page', 1); sbSet('app', ['contacts', 1])",
+  "host": [
+   "unlock=:1",
+   "page=:1",
+   "app=contacts:1"
+  ]
+ },
+ {
+  "name": "app-photos",
+  "js": "sbSet('unlock', 1); sbSet('app', ['photos', 1])",
+  "host": [
+   "unlock=:1",
+   "app=photos:1"
+  ]
+ },
+ {
+  "name": "app-camera",
+  "js": "sbSet('unlock', 1); sbSet('app', ['camera', 1])",
+  "host": [
+   "unlock=:1",
+   "app=camera:1"
+  ]
+ },
+ {
+  "name": "app-phone-50",
+  "js": "sbSet('unlock', 1); sbSet('app', ['phone', .5])",
+  "host": [
+   "unlock=:1",
+   "app=phone:0.5"
+  ]
+ },
+ {
+  "name": "em-lock",
+  "js": "sbSet('emergency', 1)",
+  "host": [
+   "emergency=:1"
+  ]
+ },
+ {
+  "name": "em-home",
+  "js": "sbSet('emergency', 1); sbSet('unlock', 1)",
+  "host": [
+   "emergency=:1",
+   "unlock=:1"
+  ]
+ },
+ {
+  "name": "em-home-page2",
+  "js": "sbSet('emergency', 1); sbSet('unlock', 1); sbSet('page', 1)",
+  "host": [
+   "emergency=:1",
+   "unlock=:1",
+   "page=:1"
+  ]
+ },
+ {
+  "name": "em-cc",
+  "js": "sbSet('emergency', 1); sbSet('unlock', 1); sbSet('cc', 1)",
+  "host": [
+   "emergency=:1",
+   "unlock=:1",
+   "cc=:1"
+  ]
+ },
+ {
+  "name": "em-unlock-50",
+  "js": "sbSet('emergency', 1); sbSet('unlock', .5)",
+  "host": [
+   "emergency=:1",
+   "unlock=:0.5"
+  ]
+ }
+]

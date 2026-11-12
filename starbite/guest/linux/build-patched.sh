@@ -8,9 +8,11 @@
 #   limactl shell starbite -- /Users/dev/project-starbite/starbite/guest/linux/build-patched.sh
 # Writes $WORK/patch/*.patch (also copied next to this script) and $WORK/Image-patched.
 # GUEST=1: the guest kernel of its own (guest.config on allnoconfig, docs 12 step 2) in $WORK/gout (kept: sbguest.ko
-# builds against it), written to $WORK/Image-guest.
+# builds against it), written to $WORK/Image-guest. GCONF: another config fragment for GUEST=1 (default guest.config;
+# the desktop guest: guest-desktop.config with WORK=/mnt/build/sbguest2, docs/STARBITE-LINUX-APPS.md L3+).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
+GCONF=${GCONF:-$here/guest.config}
 S=${KSRC:-/mnt/build/src/mainline}
 WORK=${WORK:-/mnt/build/sbguest}
 K=$WORK/kout
@@ -42,12 +44,12 @@ mk 2 arch/arm64/kernel/psci.c mk-psci-patch.py 0002-arm64-psci-starbite-cpu-on-t
 sums=$(sha256sum drivers/irqchip/irq-gic.c arch/arm64/kernel/psci.c)
 if [ "${GUEST:-0}" = 1 ]; then
     mkdir -p "$K"
-    make -s O="$K" KCONFIG_ALLCONFIG="$here/guest.config" allnoconfig
+    make -s O="$K" KCONFIG_ALLCONFIG="$GCONF" allnoconfig
     miss=""
-    for o in $(grep -E '^CONFIG_[A-Z0-9_]+=' "$here/guest.config" | cut -d= -f1); do
+    for o in $(grep -E '^CONFIG_[A-Z0-9_]+=' "$GCONF" | cut -d= -f1); do
         grep -q "^$o=" "$K/.config" || miss="$miss $o"
     done
-    for o in $(grep -E '^# CONFIG_[A-Z0-9_]+ is not set' "$here/guest.config" | awk '{print $2}'); do
+    for o in $(grep -E '^# CONFIG_[A-Z0-9_]+ is not set' "$GCONF" | awk '{print $2}'); do
         grep -q "^$o=" "$K/.config" && miss="$miss $o(should be off)"
     done
     [ -z "$miss" ] || { echo "build-patched: guest.config not honoured:$miss"; exit 1; }

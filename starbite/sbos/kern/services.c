@@ -5,6 +5,7 @@
 #include "kern.h"
 #include "kinput.h"
 #include "tz.h"
+#include "tzdb.h"
 #include "survival.h"
 
 /* ---- SOS ------------------------------------------------------------------------------------- */
@@ -279,6 +280,22 @@ int64_t clock_set_net(int64_t utc, int *was_set)
     return d;
 }
 
+/* Track A (2026-11-12): the zone in use (tzdb.c; -1 the home zone, Helsinki) and 12 / 24-hour (the shell's
+ * formatting), both kept with the settings (settings.c ext[3]) */
+static int zone_cur = -1;
+int clock_24h = 1;
+
+int clock_zone(void)
+{
+    return zone_cur >= 0 && zone_cur < tzdb_n ? zone_cur : tzdb_home();
+}
+
+void clock_zone_set(int i)
+{
+    if (i >= 0 && i < tzdb_n)
+        zone_cur = i;
+}
+
 int clock_now(struct sbos_time *t)
 {
     uint64_t now = sb_ms();
@@ -310,7 +327,8 @@ int clock_now(struct sbos_time *t)
     t->approx = rtc_state == 3;
     int64_t utc = rtc_t + (int64_t)((now - rtc_ms) / 1000U) + clock_adj;
     struct tz_time l;
-    tz_local(&tz_zones[0], utc, &l);
+    int z = clock_zone();                   /* Track A: the user's zone (was utility/tz.c's tz_zones[0]) */
+    tzdb_local(z, utc, &l);
     t->utc = utc;
     t->y = l.y;
     t->mo = l.mo;
@@ -320,9 +338,9 @@ int clock_now(struct sbos_time *t)
     t->s = l.s;
     t->wday = l.wday;
     t->dst = l.dst;
-    t->off_min = tz_zones[0].off_min + (l.dst ? 60 : 0);
+    t->off_min = tzdb[z].off_min + (l.dst ? 60 : 0);
     sb_strcpy(t->abbr, sizeof(t->abbr), l.abbr);
-    sb_strcpy(t->zone, sizeof(t->zone), tz_zones[0].city);
+    sb_strcpy(t->zone, sizeof(t->zone), tzdb[z].city);
     return 1;
 }
 
@@ -553,6 +571,7 @@ void power_heater_took_clocks(void)
 
 int pocket_lock;
 
+static void arm_screen_off(void);           /* Track A (below) */
 static void screen(int on)
 {
     if (K.screen_on == on)
@@ -585,7 +604,7 @@ static void screen(int on)
             kt_set(KT_POWER, 2, sb_ms(), auto_off_min * 60000U, 0);
     } else {
         set_state(heater_running_ui() ? PS_HEAT : PS_ACTIVE);
-        kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+        arm_screen_off();                   /* Track A: Auto-Lock Never arms none */
         kt_cancel(KT_POWER, 2);
         kt_set(KT_HOUSE, 0, sb_ms(), 1000, 0);     /* the watchdog fed every second again (0.5.12) */
         sb_log("sbos: screen on");
@@ -598,10 +617,19 @@ static void screen(int on)
         app_event_send(a, EV_APP_POWER, 0, on);
 }
 
+/* Track A: the screen-off timer from now (Auto-Lock); 0 = Never: none */
+static void arm_screen_off(void)
+{
+    if (K.screen_off_s)
+        kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+    else
+        kt_cancel(KT_POWER, 1);
+}
+
 void power_input(void)
 {
     if (K.screen_on)
-        kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+        arm_screen_off();
 }
 
 void power_key_short(void)
@@ -617,6 +645,8 @@ void power_key_short(void)
             screen(1);
         return;                                     /* SOS and the light keep the screen */
     }
+    if (K.screen_on && kui_sleep_hook && kui_sleep_hook(1))
+        return;                                     /* P2r: Next fades to black first and turns the screen off then */
     screen(!K.screen_on);
     if (K.screen_on)
         kui_lock();
@@ -663,6 +693,8 @@ int power_auto_off(int rehearse)
     for (int a = 0; a < napps; ++a)
         app_event_send(a, EV_APP_SAVE, 0, 0);
     apps_service();                         /* their EV_APP_SAVE handlers run now */
+    if (kui_save_hook)
+        kui_save_hook();                    /* Track A lifecycle: Next's pages (on_save) */
     if (rehearse) {                         /* the rehearsal writes nothing (the self test's slot step does) */
         int was = sb_fence_is_dry_run();
         sb_fence_dry_run(1);
@@ -692,8 +724,8 @@ void power_timer(unsigned id)
             kt_set(KT_POWER, 2, sb_ms(), 10U * 60000U, 0);  /* kept on: ask again in 10 minutes */
         return;
     }
-    /* the screen-off timer: not while something must stay visible */
-    if (!K.screen_on)
+    /* the screen-off timer: not while something must stay visible (Track A: nor with Auto-Lock Never) */
+    if (!K.screen_on || !K.screen_off_s)
         return;
     int down = 0;
     kin_touch_held(&down);
@@ -712,6 +744,8 @@ void power_timer(unsigned id)
         kt_set(KT_POWER, 1, sb_ms(), 5000, 0);
         return;
     }
+    if (kui_sleep_hook && kui_sleep_hook(0))
+        return;                                     /* P2r: Next's fade, then the screen off */
     screen(0);
 }
 
@@ -720,6 +754,8 @@ void power_restart(int to_menu)
     torch_set(0);
     kmodem_stop("Restarting");              /* 1.2-alpha21: the CP parked before any reset */
     clock_saved = clock_saved_value();      /* 1.2-alpha26: the last known time kept (after the modem's storage hold) */
+    if (kui_save_hook)
+        kui_save_hook();                    /* Track A lifecycle: Next's pages (on_save) */
     settings_save_now();
     wifi_power(0);                          /* the radio held in reset and unpowered before the reset */
     guest_power_off();                      /* 1.2: Linux stopped; its last core powers the M3 cluster off (<= 1 s) */
@@ -736,6 +772,10 @@ void power_boot_os(const char *key)
 {
     torch_set(0);
     kmodem_stop("Restarting");
+    if (kui_save_hook)
+        kui_save_hook();                    /* Track A lifecycle: Next's pages (on_save), then the slot as a restart */
+    clock_saved = clock_saved_value();
+    settings_save_now();
     wifi_power(0);
     guest_power_off();
     heater_stop_all("Restarting");
@@ -763,6 +803,8 @@ void power_off_now(void)
     torch_set(0);
     kmodem_stop("Switching off");              /* 1.2-alpha21: the CP parked before any reset */
     clock_saved = clock_saved_value();      /* 1.2-alpha26: the last known time kept */
+    if (kui_save_hook)
+        kui_save_hook();                    /* Track A lifecycle: Next's pages (on_save) */
     settings_save_now();
     wifi_power(0);
     guest_power_off();                      /* 1.2: Linux stopped before the power goes */
@@ -784,7 +826,7 @@ void power_init(void)
     K.screen_off_s = 30;
     K.sleep_off_s = 300;
     set_state(PS_ACTIVE);
-    kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+    arm_screen_off();
     kt_set(KT_INPUT, 1, sb_ms(), 16, 1);
     kt_set(KT_BATTERY, 1, sb_ms(), 10000, 0);
 }

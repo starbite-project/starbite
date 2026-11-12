@@ -12,6 +12,15 @@
 #include <stdlib.h>
 #endif
 #include "kinput.h"
+#ifdef SBOS_NEXT
+/* "Starbite OS Next" (starbite-next images only): the sbtk shell is the UI (ui/kern_next.c) */
+void next_kinit(void), next_kdraw(void), next_kevent(const void *e), next_ktimer(unsigned id), next_kminute(void);
+#define ui_kinit next_kinit
+#define ui_kdraw next_kdraw
+#define ui_kevent next_kevent
+#define ui_ktimer next_ktimer
+#define ui_kminute next_kminute
+#endif
 #include "survival.h"
 
 struct kstate K;
@@ -115,6 +124,16 @@ static void handle_input(void)
         ui_kevent(&e);
     }
 }
+#ifdef SBOS_NEXT
+/* P3k (Next only): the touch read and handed to the UI now, at the start of a frame, so every frame sees the
+ * finger where it is (the 16 ms input timer alone beat against the 60 Hz frames: a frame without a new position
+ * every ~0.4 s) */
+void next_input_now(void)
+{
+    input_poll();
+    handle_input();
+}
+#endif
 
 #ifndef SB_HOST
 void sbos_spsel1(void);
@@ -126,6 +145,7 @@ void sb_main(void)
     sbos_spsel1();                          /* first: libsb's probe and crash vectors then use SP_EL1 */
 #endif
     uint64_t t_entry = sb_ms();             /* the counter runs from power-on: S-Boot and the loader before this */
+    kmodem_reserve();                       /* P3n: the modem's 2.25 MiB before the UI's heap takes the arena */
     if (!ui_init())
         sb_crash_show(ui_init_why(), 0);
     uint64_t t_ui = sb_ms();
@@ -175,7 +195,14 @@ void sb_main(void)
 #ifdef SB_HOST
     look_emergency = getenv("SBOS_HOST_NORMAL") ? 0 : 1;   /* the host tests' layout (Emergency Mode) unless asked */
 #endif
+#ifndef SBOS_NEXT
     look_init(look_saved_style);            /* 0.6: the wallpaper, once, after the first frame (the saved one) */
+#else
+    /* P3n: not in Next. The sbtk shell draws its own wallpaper; look's two 1440 x 2960 buffers (17 MB each) took most
+     * of the 24 MiB the UI heap leaves to the kernel (the first fits, the second fails, the first stays taken): the
+     * arena was at 54 KiB when the user turned Cellular on (P3m) and Wi-Fi could not start either */
+    sb_log("look: skipped in Next (the shell draws its own wallpaper)");
+#endif
     kui_redraw_all();
     apps_load_builtin();
     wifi_boot_time_check();                 /* 1.2-alpha26: no clock: Wi-Fi once for the time, then off */

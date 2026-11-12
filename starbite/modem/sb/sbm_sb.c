@@ -116,7 +116,8 @@ static int mmio_wr(void *ctx, uint64_t pa, uint32_t v)
              (pa >= SBM_MBOX_PA + SBM_MBOX_ISSR(0) && pa <= SBM_MBOX_PA + SBM_MBOX_ISSR(63) && !(pa & 3)) ||
              (pa == SBM_MBOX_PA + SBM_MBOX_INTGR1 && (v == 2 || (v == 1 && link_on))) ||
              (pa == SBM_MBOX_PA + SBM_MBOX_INTCR0 && v == (1u << 16) && link_on) ||
-             (pa == SBM_AP2CP_CFG_PA && v == 1);
+             (pa == SBM_AP2CP_CFG_PA && v == 1) ||
+             (pa == SBM_MBOX_PA + SBM_MBOX_MCUCTLR && v == 1);   /* the restart's mailbox reset (MSWRST) */
     if (!ok)
         return 0;
     *(volatile uint32_t *)(uintptr_t)pa = v;
@@ -183,6 +184,19 @@ static int radio_read(void *ctx, uint64_t off, void *buf, uint32_t len)
         uint32_t o = (uint32_t)(off % 4096), k = 4096 - o < len ? 4096 - o : len;
         if (lba > radio_last)
             return -1;
+        if (o == 0 && len >= 4096) {          /* whole blocks straight into the buffer (the streamed load) */
+            uint64_t n = len / 4096, room = radio_last - lba + 1;
+            if (n > room)
+                n = room;
+            if (n > 256)
+                n = 256;
+            if (sb_blk_read(SB_MED_UFS, 0, lba, n, d) != 0)
+                return -1;
+            d += n * 4096;
+            off += n * 4096;
+            len -= (uint32_t)(n * 4096);
+            continue;
+        }
         if (lba != radio_blk_lba) {
             if (sb_blk_read(SB_MED_UFS, 0, lba, 1, radio_blk) != 0) {
                 radio_blk_lba = ~0ULL;
@@ -490,6 +504,86 @@ int sbm_sb_load_image(struct sbm_image *im, void (*line)(const char *))
         }
         im->data[k] = d;
     }
+    return 0;
+}
+
+/* The small footprint: RADIO's TOC, map and plan, and EFS's nv_data.bin (read only) with a pristine copy; BOOT, MAIN
+ * and VSS stay on the partition and are streamed through a 256 KiB chunk at each start (sbm_image.chunk). The
+ * buffers are taken once and reused by every later call (libsb's arena has no free). About 2.3 MiB in all. */
+static uint8_t *s_chunk, *s_nv, *s_pristine;
+static uint32_t s_nv_cap, s_nv_size;
+
+/* Starbite OS: the stream loader's buffers taken at boot, before the UI's heap and the other services fill libsb's
+ * arena (P3m: 54 KiB left when the user turned Cellular on). No partition is read here. 0, or SBM_ENOSPC. */
+int sbm_sb_reserve(uint32_t nv_cap)
+{
+    if (!s_chunk && !(s_chunk = sb_alloc(SBM_SB_CHUNK)))
+        return SBM_ENOSPC;
+    if (!s_nv_cap) {
+        s_nv = sb_alloc(nv_cap);
+        s_pristine = sb_alloc(nv_cap);
+        if (!s_nv || !s_pristine)
+            return SBM_ENOSPC;
+        s_nv_cap = nv_cap;
+    }
+    return 0;
+}
+uint32_t sbm_sb_reserved(void) { return s_chunk && s_nv_cap ? SBM_SB_CHUNK + 2 * s_nv_cap : 0; }
+
+int sbm_sb_load_image_stream(struct sbm_image *im, void (*line)(const char *))
+{
+    uint8_t head[0x400];
+    char s[160];
+    memset(im, 0, sizeof(*im));
+    if (radio_read(0, 0, head, sizeof(head)) != 0) {
+        line("load: no RADIO partition");
+        return SBM_ENOENT;
+    }
+    uint64_t size = (radio_last - radio_first + 1) * 4096;
+    int r = sbm_toc_parse(head, size, &im->toc);
+    sbm_memmap_parse(head + SBM_MEMMAP_OFF, &im->mm);
+    if (r < 0 || !im->mm.valid || (r = sbm_plan_build(&im->toc, &im->mm, &im->plan)) < 0) {
+        sbm_fmt(s, sizeof(s), "load: RADIO's TOC / map / plan refused (%s, map %s)", sbm_strerror(r),
+                im->mm.valid ? "valid" : "invalid");
+        line(s);
+        return r < 0 ? r : SBM_EINVAL;
+    }
+    if (!s_chunk && !(s_chunk = sb_alloc(SBM_SB_CHUNK)))
+        return SBM_ENOSPC;
+    for (unsigned k = 0; k < im->plan.n; ++k) {
+        const struct sbm_load *l = &im->plan.l[k];
+        if (l->src == SBM_SRC_RADIO) {
+            sbm_fmt(s, sizeof(s), "load: RADIO %s 0x%x bytes at 0x%x: streamed at each start", l->name, l->size,
+                    l->src_off);
+            line(s);
+            continue;
+        }
+        if (!s_nv_size) {
+            if (s_nv_cap && l->size > s_nv_cap) {
+                line("load: nv_data.bin is larger than the space reserved at boot");
+                return SBM_ENOSPC;
+            }
+            if (!s_nv_cap) {
+                s_nv = sb_alloc(l->size);
+                s_pristine = sb_alloc(l->size);
+                if (!s_nv || !s_pristine)
+                    return SBM_ENOSPC;
+                s_nv_cap = l->size;
+            }
+            line("load: EFS /nv_data.bin (read only)");
+            int e = efs_nv(s_pristine, l->size, line);
+            if (e < 0)
+                return e;                      /* (the buffers stay; a retry reads again) */
+            s_nv_size = l->size;
+        }
+        if (l->size != s_nv_size)
+            return SBM_EINVAL;
+        memcpy(s_nv, s_pristine, l->size);
+        im->data[k] = s_nv;
+    }
+    im->chunk = s_chunk;
+    im->chunk_size = SBM_SB_CHUNK;
+    im->nv_pristine = s_pristine;
     return 0;
 }
 

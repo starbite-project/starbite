@@ -4,7 +4,8 @@
  *   1. never an emergency number: a built-in world list, plus the SIM's and the network's own lists when the caller
  *      has them; also any number that is an emergency number behind an international prefix ("+44999"), and every
  *      short code (fewer than 7 digits), so a forgotten local emergency number is still refused;
- *   2. only a number on the user's own allow-list, compared digit for digit.
+ *   2. only a number on the user's own allow-list, compared digit for digit, or (Starbite OS Next) a number the
+ *      user typed and confirmed with a hold (sbm_dial_policy.user_confirmed).
  * There is no switch that turns either off. This file builds nothing: the call and SMS frame builders are not part of
  * this core yet, and when they are, they must call sbm_dial_check first.
  */
@@ -84,6 +85,8 @@ int sbm_dial_check(const struct sbm_dial_policy *pol, const char *number)
         return SBM_EPERM;
     if (n < SBM_DIAL_MIN_DIGITS)
         return SBM_EPERM;                            /* short codes: never */
+    if (pol->user_confirmed == SBM_DIAL_USER_CONFIRMED)
+        return 0;                                    /* the user's own dial (Next's Phone / Messages) */
     for (unsigned i = 0; i < pol->n_allowed && i < SBM_DIAL_ALLOW_MAX; ++i)
         if (norm(pol->allowed[i], a, sizeof(a), &ap) && ap == plus && eq(a, d))
             return 0;

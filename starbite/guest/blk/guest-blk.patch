@@ -1,0 +1,134 @@
+--- a/starbite/guest/sbos/guest.c
++++ b/starbite/guest/sbos/guest.c
+@@ -149,10 +149,111 @@
+         return 0;
+     hw_m3_core_on(4, 1);
+     return 1;
++}
++
++/* ---- sbblk: the guest's block devices from store entries (starbite/guest/blk/README.md) -----------------------
++ * /dev/sbblk0 = GUEST_STORE_BASE and /dev/sbblk2 = GUEST_STORE_REPO, read-only, by range: sb_blk_read of the
++ * entry's own blocks (store_ent.lba + the request's block), into the bounce window below 4 GiB (UFS DMA above
++ * 4 GiB never ran on the phone), then word copies into the request's slot of the shared data window.
++ * /dev/sbblk1 = GUEST_STORE_OVERLAY, read-write: offered ONLY in a build with GUEST_BLK_WRITE=1 AND when the
++ * entry is there, on UFS, volatile (sbstore2.py --volatile) and store_volatile_grant gave the fence's standing
++ * grant for exactly its blocks; every write then goes through sb_write_volatile (the fence checks the range again,
++ * FUA + cache flush). In every other case the device is not offered and nothing here can write: the guest's init
++ * falls back to a tmpfs upper layer. As libsb stands the grant covers at most 1024 blocks (4 MiB) and there is
++ * one grant in the whole OS (kern/slot.c's state entry loses its own when this one is taken): see the README for
++ * what libsb needs before GUEST_BLK_WRITE can be switched on.
++ * Requests must be whole 4 KiB store blocks (sbguest.ko's logical block size is 4096): anything else is
++ * refused with -EINVAL; there is no read-modify-write of the phone's storage. */
++#ifndef GUEST_BLK_WRITE
++#define GUEST_BLK_WRITE 0                   /* 1: the overlay entry may be written (see above) */
++#endif
++#ifndef GUEST_STORE_BASE
++#define GUEST_STORE_BASE    "guest-base.erofs"
++#define GUEST_STORE_OVERLAY "guest-overlay.img"
++#define GUEST_STORE_REPO    "guest-repo.erofs"
++#endif
++static struct sbshm_blkdev blk_dev[SBSHM_BLK_DEVS];
++#ifndef GUEST_QEMU
++static struct store_ent blk_ent[SBSHM_BLK_DEVS];
++static int blk_writable;                    /* the standing grant for the overlay entry is ours */
++
++/* before each load: which devices this guest gets */
++static void blk_find(void)
++{
++    static const char *const nm[3] = {GUEST_STORE_BASE, GUEST_STORE_OVERLAY, GUEST_STORE_REPO};
++    static const char *const label[3] = {"base", "overlay", "repo"};
++    blk_writable = 0;
++    for (unsigned i = 0; i < SBSHM_BLK_DEVS; ++i) {
++        struct store_ent e;
++        blk_dev[i] = (struct sbshm_blkdev){0};
++        if (i >= 3 || !store_find(nm[i], &e) || e.size < 4096U)
++            continue;
++        if (i == SBSHM_BLK_OVERLAY) {
++#if GUEST_BLK_WRITE
++            struct store_ent g;
++            if (e.medium != STORE_UFS || !store_volatile_grant(nm[i], e.size & ~4095ULL, &g) || g.lba != e.lba) {
++                sb_log("guest: the overlay entry got no standing write grant: not offered (tmpfs upper in the guest)");
++                continue;
++            }
++            blk_writable = 1;
++#else
++            sb_log("guest: the overlay entry is there, this build cannot write it: not offered (tmpfs upper in the guest)");
++            continue;
++#endif
++        }
++        blk_ent[i] = e;
++        blk_dev[i].sectors = (e.size / 4096U) * 8U;
++        blk_dev[i].flags = SBSHM_BLKDEV_PRESENT | (i == SBSHM_BLK_OVERLAY ? 0U : SBSHM_BLKDEV_RO);
++        sb_strcpy(blk_dev[i].name, sizeof(blk_dev[i].name), label[i]);
++    }
++}
++
++static void blk_words(uintptr_t d, uintptr_t s, uint64_t bytes)
++{
++    volatile uint64_t *p = (volatile uint64_t *)d;
++    const volatile uint64_t *q = (const volatile uint64_t *)s;
++    for (uint64_t i = 0; i < bytes / 8; ++i)
++        p[i] = q[i];
++}
++
++/* sbghost's blk_io (from sbg_poll, in the guest timer): one request of at most 64 KiB. sbghost has checked the
++ * device and the range against the sizes blk_find gave it; the range is checked again against the entry here. */
++static int blk_io(uint32_t dev, uint32_t op, uint64_t sector, uint32_t count, void *buf)
++{
++    if (dev >= SBSHM_BLK_DEVS || !(blk_dev[dev].flags & SBSHM_BLKDEV_PRESENT))
++        return -SBG_ENODEV;
++    if (op == SBG_BLK_FLUSH)
++        return 0;                           /* sb_write_volatile: forced unit access and a cache flush per write */
++    const struct store_ent *e = &blk_ent[dev];
++    uint64_t blk = sector / 8U, n = count / 8U;
++    if ((sector & 7U) || (count & 7U) || !n || count > SBSHM_BLK_SLOT / 512U || blk >= e->size / 4096U ||
++        n > e->size / 4096U - blk)
++        return -SBG_EINVAL;
++    if (op == SBG_BLK_READ) {
++        if (sb_blk_read(e->medium == STORE_SD ? SB_MED_SD : SB_MED_UFS, 0, e->lba + blk, n, (void *)G_BOUNCE))
++            return -SBG_EIO;
++        blk_words((uintptr_t)buf, G_BOUNCE, n * 4096U);
++        return 0;
++    }
++#if GUEST_BLK_WRITE
++    if (op == SBG_BLK_WRITE && dev == SBSHM_BLK_OVERLAY && blk_writable) {
++        blk_words(G_BOUNCE, (uintptr_t)buf, n * 4096U);
++        /* the fence decides again: inside the granted entry or nothing is written (a dry run writes nothing
++         * either: the guest must not be told it did) */
++        return sb_write_volatile(SB_MED_UFS, e->lba + blk, n, (const void *)G_BOUNCE) ? -SBG_EIO : 0;
++    }
++#endif
++    return -SBG_EROFS;
+ }
++#else
++static void blk_find(void) {}               /* the QEMU run of this file has no block medium (sbsim serves files) */
++#endif
+ static const struct sbg_os shim = {
+     .ms = ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
+     .m3_prep = m3_prep,
++#ifndef GUEST_QEMU
++    .blk_io = blk_io,
++#endif
+ };
+ 
+ static uint8_t me_if;
+@@ -168,7 +269,11 @@
+         .host_lines = {0},                  /* the guest kernel has the shared-distributor patch */
+         .repair = 0,
+         .boot_timeout_ms = 30000, .stop_timeout_ms = 5000,
++        /* contract v2 (the block devices) only when the store has the base image: the other guests stay v1 */
++        .v2 = (blk_dev[SBSHM_BLK_BASE].flags & SBSHM_BLKDEV_PRESENT) ? 1U : 0U,
+     };
++    for (unsigned i = 0; i < SBSHM_BLK_DEVS; ++i)
++        cfg.blk[i] = blk_dev[i];
+     sbg_init(&shim, &cfg, me_if ? me_if : 1);
+ }
+ 
+@@ -235,6 +340,7 @@
+ /* the guest timer's first tick: the store's files into the bounce window, the copy, CPU_ON. 0, or < 0 and why */
+ static int load_and_start(void)
+ {
++    blk_find();                             /* the block devices this guest gets (sbblk) */
+     cfg_init();                             /* this mode's surface */
+     /* the bounce window below 4 GiB: the Image, then the DTB and the initrd, each at a MiB boundary */
+     uintptr_t pi = G_BOUNCE, pd = up_mib(pi + ld_i.size), pr = up_mib(pd + ld_d.size);

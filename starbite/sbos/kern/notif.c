@@ -10,6 +10,7 @@
 
 static struct notif nl[NN];
 static int nn, unread;
+static unsigned seq;               /* Starbite OS Next: posts so far (its shell copies the new ones) */
 
 static void cpy(char *d, unsigned cap, const char *s)
 {
@@ -21,6 +22,12 @@ static void cpy(char *d, unsigned cap, const char *s)
 
 void notif_post(const char *who, const char *title, const char *text)
 {
+    notif_post_app(who, title, text, 0);
+}
+
+/* Track A: the same list; the flags go to Next's shell (the classic UI shows every post alike) */
+void notif_post_app(const char *who, const char *title, const char *text, unsigned flags)
+{
     for (int i = (nn < NN ? nn : NN - 1); i > 0; --i)
         nl[i] = nl[i - 1];
     struct notif *n = &nl[0];
@@ -29,9 +36,11 @@ void notif_post(const char *who, const char *title, const char *text)
     cpy(n->text, sizeof(n->text), text);
     struct sbos_time t;
     n->hm = clock_now(&t) ? t.h * 100 + t.mi : -1;
+    n->flags = flags & (NOTIF_QUIET | NOTIF_URGENT);
     if (nn < NN)
         ++nn;
     ++unread;
+    ++seq;
     struct ub u;
     ub_init(&u);
     ub_s(&u, "notif: ");
@@ -40,6 +49,11 @@ void notif_post(const char *who, const char *title, const char *text)
     ub_s(&u, n->title);
     sb_log(u.b);
     ui_mark_dirty();
+}
+
+unsigned notif_seq(void)
+{
+    return seq;
 }
 
 int notif_count(void)

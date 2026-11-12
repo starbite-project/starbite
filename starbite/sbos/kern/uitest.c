@@ -153,6 +153,16 @@ static void logline(const char *what, int a)
     ++steps;
 }
 
+#ifdef SBOS_SELFTEST_NEXT_LINUX
+int next_ready(void), gwin_selftest_step(void);     /* ui/kern_next.c, starbite/guest/next/gwin.c */
+void guest_power_off(void);
+#endif
+#ifdef SBOS_SELFTEST_NEXT
+void next_selftest_begin(void);
+int next_selftest_step(void), next_selftest_ready(void), next_selftest_failed(void), next_selftest_clock_ok(void);
+int next_selftest_flips_ok(void);
+#endif
+
 void selftest_start(void)
 {
     if (!enabled())
@@ -280,13 +290,53 @@ void selftest_timer(unsigned id)
             return;
         }
 #endif
+#ifdef SBOS_SELFTEST_NEXT_LINUX
+        {
+            /* Starbite OS Next, Linux apps (L2, starbite/guest/next/gwin.c): the Terminal opened, foot on the M3
+             * cores, a typed command, a tap, the Terminal closed, the cluster off; no storage writes; then recovery
+             * (pmsg). The watchdog at 30 s, fed by the loop (the guest's load from the store feeds it too). */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: next-linux: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: next-linux: the watchdog could not be set (the loader's stays): ", w);
+            phase = 97;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
+#ifdef SBOS_SELFTEST_NEXT_WIFI
+        {
+            /* Starbite OS Next, Wi-Fi (wifi-sbos-next): silent: the TLS self-check (no network), the radio on, one
+             * scan, the radio off; never a join, never a transmission beyond the scan's probes; then recovery (pmsg).
+             * The watchdog at 30 s, fed by the loop; the 180 s STALLED timer restarts into recovery too. */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: next-wifi: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: next-wifi: the watchdog could not be set (the loader's stays): ", w);
+            sb_log("selftest: next-wifi: the TLS self-check, then on, the bring-up, one scan (no join), off");
+            wifi_selftest_scan_only = 1;
+            phase = 95;
+            break;
+        }
+#endif
+#ifdef SBOS_SELFTEST_NEXT
+        {
+            /* Starbite OS Next (ui/kern_next.c): the bake's times, the four films with synthetic touches and every
+             * frame timed, then recovery (pmsg) */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: next: the watchdog at 30 s, fed by the films: seconds " :
+                        "selftest: next: the watchdog could not be set (the loader's stays): ", w);
+            next_selftest_begin();
+            phase = next_selftest_ready() ? 90 : 91;
+            kt_set(KT_SELFTEST, 0, sb_ms(), phase == 90 ? 8 : 2000, phase == 90);
+            return;
+        }
+#endif
 #ifdef SBOS_SELFTEST_GPUCOMP
         {
             /* P4: the GPU compositor (gpucomp.c): fill, composite, blur, 120 motion frames; then recovery (pmsg) */
             unsigned w = hw_wdt_selftest(30);
             sb_logx(w ? "selftest: gpucomp: the watchdog at 30 s, fed by the loop and each GPU job: seconds " :
                         "selftest: gpucomp: the watchdog could not be set (the loader's stays): ", w);
-            phase = 90;
+            phase = 94;
             kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
             return;
         }
@@ -599,16 +649,34 @@ void selftest_timer(unsigned id)
         power_restart_recovery();
         return;
 #endif
-#ifdef SBOS_SELFTEST_GPUCOMP
+#ifdef SBOS_SELFTEST_NEXT
     case 90:
+        if (next_selftest_step())
+            return;
+        kt_cancel(KT_SELFTEST, 0);
+        sb_log(next_selftest_failed() ? "selftest: next: FAILED (see above); a restart into recovery (pmsg)" :
+               !next_selftest_clock_ok() ? "selftest: next: FAILED: clock check missing; a restart into recovery (pmsg)" :
+               next_selftest_flips_ok() ? "selftest: next: PASSED: clock check ok, flips ok (three buffers, no tearing); the bake and the films ran (frame times above); a restart into recovery (pmsg)" :
+               "selftest: next: PASSED: clock check ok, but flips OFF (one buffer: see 'next: flips' above); the bake and the films ran; a restart into recovery (pmsg)");
+        active = 0;
+        power_restart_recovery();
+        return;
+    case 91:
+        sb_log("selftest: FAILED: next: the new UI did not start; a restart into recovery (pmsg)");
+        active = 0;
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_GPUCOMP
+    case 94:
         if (!gpucomp_selftest_step()) {
             kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
             return;
         }
-        phase = 91;
+        phase = 95;
         kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
         return;
-    case 91:
+    case 95:
         sb_log("selftest: gpucomp: done; a restart into recovery (pmsg)");
         active = 0;
         power_restart_recovery();
@@ -688,6 +756,47 @@ void selftest_timer(unsigned id)
     case 43:
         active = 0;
         vib_off();
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_NEXT_LINUX
+    case 97: {                              /* every 100 ms once the shell is baked; 120 s at most */
+        int r = next_ready() ? gwin_selftest_step() : 0;
+        if (!r && sb_ms() - t0 < 120000U) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
+            return;
+        }
+        sb_logx(r > 0 ? "selftest: next-linux: PASSED; a restart into recovery (pmsg) after seconds " :
+                r < 0 ? "selftest: next-linux: FAILED (see above); a restart into recovery (pmsg) after seconds " :
+                        "selftest: next-linux: FAILED: not done within 120 s; a restart into recovery (pmsg) after seconds ",
+                (sb_ms() - t0) / 1000U);
+        if (!r)
+            guest_power_off();              /* the cluster off before the restart */
+        phase = 94;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
+        return;
+    }
+    case 94:
+        active = 0;
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_NEXT_WIFI
+    case 95: {
+        int done = 0;
+        if (!wifi_selftest_phase(&done))
+            ++fails;
+        if (!done)
+            break;
+        sb_logx(fails ? "selftest: next-wifi: FAILED (see above); a restart into recovery (pmsg) after seconds " :
+                        "selftest: next-wifi: PASSED; a restart into recovery (pmsg) after seconds ",
+                (sb_ms() - t0) / 1000U);
+        phase = 96;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
+        return;
+    }
+    case 96:
+        active = 0;
         power_restart_recovery();
         return;
 #endif

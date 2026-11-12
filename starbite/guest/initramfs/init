@@ -1,6 +1,7 @@
 #!/bin/busybox sh
 # The guest Linux's init on the M3 cluster (starbite/guest, docs/STARBITE-OS-LINUX-M3.md 6): mount the
 # kernel file systems, load sbguest.ko (power off without SYSTEM_OFF, /dev/sbshm), start guestd.
+# sbguest.mode= app (default: guestd's demo), term, wayland (sbwl), desktop (the root on sbblk, then /sbin/sbinit).
 # The full OS's guest (a distro root, a compositor bridge) replaces this; the contract stays sbshm.h.
 /bin/busybox --install -s /bin
 mount -t proc proc /proc
@@ -18,6 +19,70 @@ for a in $(cat /proc/cmdline); do
     sbguest.mode=*) mode=${a#sbguest.mode=} ;;
     esac
 done
+if [ "$mode" = desktop ]; then
+    # The desktop guest (docs/STARBITE-LINUX-APPS.md L4): the root is on the host's block devices (sbguest.ko's
+    # sbblk, starbite/guest/blk/README.md): /dev/sbblk0 the base image (EROFS, read-only), /dev/sbblk1 the overlay
+    # (ext4: upper + work), /dev/sbblk2 the package repo (EROFS, at /repo). Without a usable overlay device the
+    # upper layer is a tmpfs (nothing persists) and the kernel log says so. Then switch_root to /sbin/sbinit.
+    # The layers stay reachable in the new root under /.sbroot (base, rw) so its shutdown can remount rw read-only.
+    say() { echo "guest-init: $*" > /dev/kmsg; }
+    giveup() {      # no root: power the cluster off (sbguest.ko: CPU_OFF) instead of sitting there
+        say "desktop: $* -- powering off"
+        sync
+        poweroff -f
+        sleep 30
+        exec /bin/sh
+    }
+    i=0
+    while [ ! -b /dev/sbblk0 ] && [ $i -lt 100 ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+    [ -b /dev/sbblk0 ] || giveup "no /dev/sbblk0 (the host offers no base image, or sbguest.ko is missing)"
+    mkdir -p /sbroot/base /sbroot/rw /newroot
+    mount -t erofs -o ro /dev/sbblk0 /sbroot/base || giveup "/dev/sbblk0 does not mount as EROFS"
+    upper=overlay
+    if [ ! -b /dev/sbblk1 ]; then
+        say "desktop: WARNING: no overlay device (/dev/sbblk1): tmpfs upper layer, nothing will persist"
+        upper=tmpfs
+    elif ! mount -t ext4 -o noatime /dev/sbblk1 /sbroot/rw; then
+        say "desktop: WARNING: /dev/sbblk1 does not mount as ext4: tmpfs upper layer, nothing will persist"
+        upper=tmpfs
+    fi
+    [ $upper = overlay ] || mount -t tmpfs -o mode=0755 sbroot-rw /sbroot/rw || giveup "no tmpfs for the upper layer"
+    mkdir -p /sbroot/rw/upper /sbroot/rw/work
+    mount -t overlay -o lowerdir=/sbroot/base,upperdir=/sbroot/rw/upper,workdir=/sbroot/rw/work overlay /newroot ||
+        giveup "the overlay does not mount"
+    if [ -b /dev/sbblk2 ]; then
+        mkdir -p /newroot/repo
+        mount -t erofs -o ro /dev/sbblk2 /newroot/repo || say "desktop: WARNING: /dev/sbblk2 (the repo) does not mount"
+    fi
+    mkdir -p /newroot/dev /newroot/proc /newroot/sys /newroot/.sbroot/base /newroot/.sbroot/rw
+    mount -o move /sbroot/base /newroot/.sbroot/base
+    mount -o move /sbroot/rw /newroot/.sbroot/rw
+    mount -o move /dev /newroot/dev
+    mount -o move /proc /newroot/proc
+    mount -o move /sys /newroot/sys
+    new=/sbin/sbinit
+    [ -x /newroot$new ] || [ -L /newroot$new ] || new=/sbin/init
+    echo "guest-init: desktop: root = base (sbblk0) + $upper upper$([ -d /newroot/repo ] && grep -q ' /newroot/repo ' /newroot/proc/mounts && echo ', /repo (sbblk2)'); switch_root to $new" > /newroot/dev/kmsg
+    exec switch_root /newroot $new
+fi
+if [ "$mode" = wayland ] && [ -x /sbwl ]; then
+    # Linux apps (docs/STARBITE-LINUX-APPS.md, L1): sbwl, our Wayland compositor, publishes the app window into the
+    # shared surface and owns the ring (no guestd); it starts the app (foot) and keeps it running
+    mount -t tmpfs -o mode=0700 run /run
+    mkdir -p /dev/pts && mount -t devpts -o ptmxmode=0666 devpts /dev/pts     # the terminal app's PTY
+    mkdir -p /dev/shm && mount -t tmpfs -o mode=1777 shm /dev/shm             # wlroots' buffers (shm_open)
+    mkdir -p /root /tmp
+    export XDG_RUNTIME_DIR=/run HOME=/root SHELL=/bin/sh LC_ALL=C.UTF-8 PATH=/bin:/usr/bin
+    echo "guest-init: Wayland mode (sbwl + the app)" > /dev/kmsg
+    while true; do
+        /sbwl </dev/null >/dev/null 2>&1
+        echo "guest-init: sbwl exited ($?); starting it again" > /dev/kmsg
+        sleep 1
+    done
+fi
 if [ "$mode" = term ] && [ -e /dev/tty1 ]; then
     # the terminal (docs 12 step 3): fbcon draws tty1 into the shared surface, guestd publishes the changed rows and
     # turns Starbite's keys into a uinput keyboard; a shell on tty1, started again if it exits
