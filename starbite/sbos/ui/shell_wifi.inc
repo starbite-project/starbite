@@ -191,62 +191,8 @@ static void wf_list(dc *d)
     }
 }
 
-/* ---- the password view: a field and a keyboard with letters, numbers and symbols ------------------------------ */
-static const char *const WK[3][3] = { { "qwertyuiop", "asdfghjkl", "zxcvbnm" }, { "1234567890", "-/:;()&@\"", ".,?!'" },
-                                      { "[]{}#%^*+=", "_\\|~<>$`", ".,?!'" } };
-static float wk_x0(int layer, int r)
-{
-    int n = (int)tk_strlen(WK[layer][r]);
-    return r == 2 && !layer ? 61.5f : 3 + (10 - n) * 19.5f;
-}
-static void wf_kb(dc *d)
-{
-    d_rrect(d, 0, 540, 390, 262, 0, tk_hex(0x1e2030, 1));
-    for (int r = 0; r < 3; r++) {
-        const char *R = WK[WV.layer][r];
-        int n = (int)tk_strlen(R);
-        float x0 = wk_x0(WV.layer, r);
-        for (int i = 0; i < n; i++) {
-            char k[2] = { R[i], 0 };
-            if (!WV.layer && WV.shift) k[0] = (char)(k[0] - 32);
-            kb_key(d, x0 + 39 * i, 550 + 54 * r, 33, k, 0);
-        }
-    }
-    const char *mode = WV.layer == 0 ? "shift" : WV.layer == 1 ? "#+=" : "123";
-    float w = tw(TK_IT600, 13, mode, 0, 0);
-    int lit = !WV.layer && WV.shift;
-    d_rrect(d, 3, 658, 42, 46, 6, lit ? W(.9f) : tk_hex(0x3a3d4a, 1));
-    d_text(d, TK_IT600, 13, 3 + (42 - w) / 2, bl(TK_IT600, 13, 672), mode, 0, 0, lit ? tk_hex(0x1e2030, 1) : INK, 0);
-    d_rrect(d, 345, 658, 42, 46, 6, tk_hex(0x3a3d4a, 1));
-    d_icon(d, "back", 359, 670, 1);
-    kb_key(d, 3, 712, 88, WV.layer ? "ABC" : "123", 1);
-    kb_key(d, 97, 712, 196, "space", 1);
-    kb_key(d, 299, 712, 88, "join", 1);
-}
-/* 1 a character (*c), 2 the mode key, 3 ABC/123, 4 delete, 5 join, 0 nothing */
-static int wf_kb_hit(float x, float y, char *c)
-{
-    for (int r = 0; r < 3; r++) {
-        const char *R = WK[WV.layer][r];
-        int n = (int)tk_strlen(R);
-        float x0 = wk_x0(WV.layer, r), ky = 550 + 54 * r;
-        if (y < ky || y >= ky + 50) continue;
-        for (int i = 0; i < n; i++)
-            if (x >= x0 + 39 * i - 3 && x < x0 + 39 * i + 36) {
-                *c = R[i];
-                if (!WV.layer && WV.shift) *c = (char)(*c - 32);
-                return 1;
-            }
-        if (r == 2 && x < 55) return 2;
-        if (r == 2 && x >= 340) return 4;
-    }
-    if (y >= 712 && y < 760) {
-        if (x < 94) return 3;
-        if (x < 296) { *c = ' '; return 1; }
-        return 5;
-    }
-    return 0;
-}
+/* ---- the password view: a field over the shell keyboard (B3: shell_kb.inc; ASCII only, return is "join") ---- */
+static void wf_kb(dc *d) { kb_draw(d, 0, 0); }
 static int wf_pass_ok(void)
 {
     if (WV.plen == 64) {
@@ -323,28 +269,14 @@ static void wf_join(void)
 static void wifi_tap(float x, float y)
 {
     if (WV.view == 1) {
-        char c = 0;
         if (y >= 40 && y < 86 && x < 110) { wf_wipe(); WV.view = 0; WV.show = 0; build_app_page(AP.a); return; }
         if (y >= 40 && y < 86 && x >= 300) { wf_join(); return; }
         if (y >= 130 && y < 177 && x >= 300) { WV.show = !WV.show; build_app_page(AP.a); return; }
-        int k = wf_kb_hit(x, y, &c);
-        if (!k) return;
-        sh_haptic();
-        if (k == 1 && WV.plen < 64) {
-            WV.pass[WV.plen++] = c;
-            WV.pass[WV.plen] = 0;
-            if (!WV.layer && WV.shift) WV.shift = 0;
-        } else if (k == 2) {
-            if (!WV.layer) WV.shift = !WV.shift;
-            else WV.layer = WV.layer == 1 ? 2 : 1;
-        } else if (k == 3) {
-            WV.layer = WV.layer ? 0 : 1;
-        } else if (k == 4 && WV.plen) {
-            WV.pass[--WV.plen] = 0;
-        } else if (k == 5) {
-            wf_join();
-            return;
-        }
+        if (y < KB_TOP) return;                 /* B3: the keyboard's key; only ASCII reaches here (KB_ASCII) */
+        int k = kb_take(0);
+        if (k == KBE_RET) { wf_join(); return; }
+        if (!kb_edit(WV.pass, 64)) return;
+        WV.plen = (unsigned)tk_strlen(WV.pass);
         build_app_page(AP.a);
         return;
     }
@@ -375,6 +307,7 @@ static void wifi_tap(float x, float y)
                 WV.view = 1;
                 WV.shift = 0;
                 WV.layer = 0;
+                kb_focus(KB_ASCII, "join", "");      /* B3: the shell keyboard, ASCII only */
                 build_app_page(AP.a);
                 return;
             }

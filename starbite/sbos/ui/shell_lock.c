@@ -2563,7 +2563,6 @@ static void notes_load(void)
 }
 static tk_layer apnote;
 static void build_app_page(int a);
-static const char *const KR[2][3] = { { "qwertyuiop", "asdfghjkl", "zxcvbnm" }, { "1234567890", "-/:;()&@\"", ".,?!'" } };
 static void note_title(const char *t, char *out)
 {
     int k = 0;
@@ -2572,64 +2571,7 @@ static void note_title(const char *t, char *out)
     out[k] = 0;
     if (!k) tk_memcpy(out, "New Note", 9);
 }
-static void kb_key(dc *d, float x, float y, float w, const char *t, int special)
-{
-    d_rrect(d, x, y, w, 46, 6, special ? tk_hex(0x3a3d4a, 1) : tk_hex(0x6b6e7a, 1));
-    float tw0 = tw(TK_IT400, special ? 16 : 23, t, 0, 0);
-    d_text(d, TK_IT400, special ? 16 : 23, x + (w - tw0) / 2, bl(TK_IT400, special ? 16 : 23, y + (special ? 13 : 9)), t, 0, 0, INK, 0);
-}
-/* the keyboard (Notes, Search): iOS's dark layout from y 540; kb_hit: 1 a character (*c), 2 shift, 3 123/ABC,
- * 4 delete, 5 return (also *c = '\n'), 0 nothing */
-/* helper I: the rows passed in (Messages' To: field has its own 123 layer, with +) */
-static void kb_draw_r(dc *d, const char *const *R, int shift, int num)
-{
-    d_rrect(d, 0, 540, 390, 262, 0, tk_hex(0x1e2030, 1));
-    for (int r = 0; r < 3; r++) {
-        int n = (int)tk_strlen(R[r]);
-        float x0 = r == 2 && !num ? 61.5f : 3 + (10 - n) * 19.5f;
-        for (int i = 0; i < n; i++) {
-            char k[2] = { R[r][i], 0 };
-            if (!num && shift) k[0] = (char)(k[0] - 32);
-            kb_key(d, x0 + 39 * i, 550 + 54 * r, 33, k, 0);
-        }
-    }
-    if (!num) {
-        float w = tw(TK_IT600, 13, "shift", 0, 0);
-        d_rrect(d, 3, 658, 42, 46, 6, shift ? W(.9f) : tk_hex(0x3a3d4a, 1));
-        d_text(d, TK_IT600, 13, 3 + (42 - w) / 2, bl(TK_IT600, 13, 672), "shift", 0, 0, shift ? tk_hex(0x1e2030, 1) : INK, 0);
-    }
-    d_rrect(d, 345, 658, 42, 46, 6, tk_hex(0x3a3d4a, 1));
-    d_icon(d, "back", 359, 670, 1);                              /* delete: the font has no erase glyph */
-    kb_key(d, 3, 712, 88, num ? "ABC" : "123", 1);
-    kb_key(d, 97, 712, 196, "space", 1);           /* P3i: 16 pt like the other function keys */
-    kb_key(d, 299, 712, 88, "return", 1);
-}
-static void kb_draw(dc *d, int shift, int num) { kb_draw_r(d, KR[num], shift, num); }
-static int kb_hit_r(float x, float y, const char *const *R, int shift, int num, char *c);
-static int kb_hit(float x, float y, int shift, int num, char *c) { return kb_hit_r(x, y, KR[num], shift, num, c); }
-static int kb_hit_r(float x, float y, const char *const *R, int shift, int num, char *c)
-{
-    for (int r = 0; r < 3; r++) {
-        int n = (int)tk_strlen(R[r]);
-        float x0 = r == 2 && !num ? 61.5f : 3 + (10 - n) * 19.5f, ky = 550 + 54 * r;
-        if (y < ky || y >= ky + 50) continue;
-        for (int i = 0; i < n; i++)
-            if (x >= x0 + 39 * i - 3 && x < x0 + 39 * i + 36) {
-                *c = R[r][i];
-                if (!num && shift && *c >= 'a' && *c <= 'z') *c = (char)(*c - 32);
-                return 1;
-            }
-        if (r == 2 && x < 55 && !num) return 2;
-        if (r == 2 && x >= 340) return 4;
-    }
-    if (y >= 712 && y < 760) {
-        if (x < 94) return 3;
-        if (x < 296) { *c = ' '; return 1; }
-        *c = '\n';
-        return 5;
-    }
-    return 0;
-}
+#include "shell_kb.inc"                      /* B3: the keyboard (Notes, Search, Messages, the editors, Linux) */
 static void page_notes(dc *d)
 {
     if (!NS.view) {
@@ -2674,18 +2616,21 @@ static void page_notes(dc *d)
     }
     kb_draw(d, NS.shift, NS.num);
 }
+static float note_w, note_bot = PUSHED_TOP;   /* B3: the text's box (the edit menu's selection) */
 static void build_note(void)
 {
     relayer(&apnote);
     if (!NS.view || !is_app("notes")) { apnote.hidden = 1; return; }
     const char *t = NOTES[NS.cur];
-    dc d = mk(&apnote, "note-text", MARGIN - 4, PUSHED_TOP - 12, CONTENT_W + 8, 532 - PUSHED_TOP, 0, 0);
+    /* B3: down to the keyboard's strip (KB_TOP - KB_STRIP = 500) */
+    dc d = mk(&apnote, "note-text", MARGIN - 4, PUSHED_TOP - 12, CONTENT_W + 8, KB_TOP - KB_STRIP - 8 - PUSHED_TOP, 0, 0);
     /* the lines: the text's own line breaks, then words wrapped at 350 pt (17 pt, 24 pt lines), the caret after */
     char line[NOTELEN + 2];
     float y = PUSHED_TOP;
     int i = 0, n = (int)tk_strlen(t);
     float cx = 20, cy = PUSHED_TOP;
-    while (i <= n && y < 520) {
+    note_w = 0;
+    while (i <= n && y < KB_TOP - KB_STRIP - 20) {
         int k = 0, lastsp = -1, start = i;
         while (i < n && t[i] != '\n') {
             line[k] = t[i]; line[k + 1] = 0;
@@ -2699,12 +2644,15 @@ static void build_note(void)
         line[k] = 0;
         d_text(&d, TK_IT400, 17, 20, bl(TK_IT400, 17, y), line, 0, 0, INK, 0);
         cx = 20 + tw(TK_IT400, 17, line, 0, 0);
+        if (cx - 20 > note_w) note_w = cx - 20;
         cy = y;
         y += 24;
         if (i < n && t[i] == '\n') { i++; if (i == n) { cx = 20; cy = y; } continue; }
         if (i >= n) break;
     }
     d_rrect(&d, cx + 1, cy + 1, 2, 21, 1, C_YELLOW);          /* the caret */
+    note_bot = cy + 24;
+    trim(&apnote);                                 /* B3: a 9 MB box for a few lines: cut to them (the keyboard's heap) */
     apnote.hidden = 0;
     relink();
 }
@@ -2720,6 +2668,7 @@ static void notes_tap(float x, float y)
             NS.cur = NS.n - 1 - (int)((y - CONTENT_TOP) / 56);
             NS.view = 1; NS.shift = 0; NS.num = 0;
         } else return;
+        kb_focus(KB_AUTOCAP | KB_NL, 0, NOTES[NS.cur]);   /* B3: return is a new line; sentences start with a capital */
         build_app_page(AP.a);
         return;
     }
@@ -2733,21 +2682,9 @@ static void notes_tap(float x, float y)
         build_app_page(AP.a);
         return;
     }
-    if (y < 548) return;
-    char *t = NOTES[NS.cur];
-    int len = (int)tk_strlen(t), relayout = 0;
-    char c = 0;
-    int k = kb_hit(x, y, NS.shift, NS.num, &c);
-    if (k) sh_haptic();                                  /* P3h: a key's light tap, as iOS's keyboard */
-    if (k == 2) { NS.shift = !NS.shift; relayout = 1; }
-    else if (k == 3) { NS.num = !NS.num; relayout = 1; }
-    else if (k == 4 && len) t[len - 1] = 0;
-    else if ((k == 1 || k == 5) && len < NOTELEN - 1) {
-        if (NS.shift && c >= 'A' && c <= 'Z') { NS.shift = 0; relayout = 1; }
-        t[len] = c; t[len + 1] = 0;
-    }
-    if (k == 1 || k == 4 || k == 5) notes_save();     /* Track A: a typed or deleted character is kept */
-    if (relayout) build_app_page(AP.a); else build_note();
+    if (y < KB_TOP) return;
+    /* B3: the keyboard's key (shift, 123 and the capitals are the keyboard's own): only the text redraws */
+    if (kb_edit(NOTES[NS.cur], NOTELEN - 1)) { notes_save(); build_note(); }   /* Track A: a typed or deleted character is kept */
 }
 
 /* ---- P3g: Search (the home's Search pill, as iOS's): a field, the keyboard, the apps whose names contain what is
@@ -2801,6 +2738,7 @@ static void build_search(void)
         SR.nh++;
     }
     d_text(&d, TK_IT600, 13, 24, bl(TK_IT600, 13, 116), SR.nh ? (SR.q[0] ? "APPLICATIONS" : "SUGGESTIONS") : "NO RESULTS", .4f, 0, C_LABEL2, 0);
+    trim(&apsrch);                                 /* B3: cut to what it holds (the keyboard's heap) */
     apsrch.hidden = 0;
     relink();
 }
@@ -2814,18 +2752,13 @@ static void search_tap(float x, float y)
         int col = (int)((x - 15) / 90), row = (int)((y - 148) / ROW_PITCH), i = row * 4 + col;
         if (col >= 0 && col < 4 && i < SR.nh) { int a = SR.hits[i]; app_finish_close(); app_open(a); return; }
     }
-    char c = 0;
-    int k = kb_hit(x, y, SR.shift, SR.num, &c), n = (int)tk_strlen(SR.q), relayout = 0;
-    if (k) sh_haptic();
-    if (k == 2) { SR.shift = !SR.shift; relayout = 1; }
-    else if (k == 3) { SR.num = !SR.num; relayout = 1; }
-    else if (k == 4 && n) SR.q[n - 1] = 0;
-    else if (k == 5) { if (SR.nh) { int a = SR.hits[0]; app_finish_close(); app_open(a); } return; }
-    else if (k == 1 && n < 22 && !(c == ' ' && !n)) {
-        if (SR.shift) { SR.shift = 0; relayout = 1; }
-        SR.q[n] = c; SR.q[n + 1] = 0;
-    }
-    if (relayout) build_app_page(AP.a); else build_search();
+    if (y < KB_TOP) return;
+    /* B3: the keyboard's key; return opens the first app found; a space doesn't start the query */
+    const char *ks;
+    int ev = kb_take(&ks);
+    if (ev == KBE_RET) { if (SR.nh) { int a = SR.hits[0]; app_finish_close(); app_open(a); } return; }
+    if (ev == KBE_TEXT && ks[0] == ' ' && !SR.q[0]) return;
+    if (kb_edit(SR.q, (int)sizeof SR.q - 2)) build_search();
 }
 
 static tk_layer apkey, apnum, apdel;   /* apdel: the keypad's delete (P3j) */
@@ -2951,6 +2884,7 @@ static void own_strip(int a, int i)
 {
     const char *k = APPS[a].k;
     const infopg *inf = info_of(k);
+    if (i == 0) KB.want = 0;                            /* B3: the page says again whether the keyboard is up */
     if (med_is(k)) { relayer(&appst[i]); return; }      /* shell_media.inc: its own layers (med_build), no strips */
     if (lx_is(k) && !lx_strips(k)) { relayer(&appst[i]); appst[i].hidden = 1; return; }   /* shell_linux.inc: the same */
     dc d = strip_dc(i, "app-page");
@@ -2971,6 +2905,7 @@ static void own_strip(int a, int i)
     else if (!tk_strcmp(k, "maps")) page_maps(&d);   /* helper D */
     else if (inf) { d_h1(&d, APPS[a].name); d_empty(&d, CONTENT_TOP, EMPTY_BOT, inf->title, inf->line); }
     else page_camera(&d);
+    if (KB.want) kb_slim(&appst[i]);                 /* B3: the keys are not in the page: its strips hold little */
     tk_layer_prepare(&appst[i]);
 }
 static void own_extras(int a)
@@ -2985,6 +2920,7 @@ static void own_extras(int a)
     if (!tk_strcmp(k, "clock")) { relayer(&apsw); relayer(&aptm); relayer(&apctl); CLK.sw_ds = CLK.tm_s = -1; clk_update(now_ms); }
     sv_extras(k);                                    /* survival-next: the tools' live layers */
     cm_extras(k);                                    /* helper I */
+    kb_commit();                                     /* B3: the keyboard up or down, as the page drew */
     relink();
 }
 /* P3i: an opening app's own page drawn over its first frames (two strips a frame, then the extras) instead of all
@@ -3023,6 +2959,8 @@ static void build_app_page(int a)
         return;
     }
     (void)inf;
+    KB.want = 0;                                        /* B3: no keyboard on a generic page */
+    kb_commit();
     /* the concept's genericScreen: the large title, captions (or an 18 pt gap), grouped rows */
     const appdef *A = &APPS[a];
     float y = CONTENT_TOP - 18;                         /* P3p: under the large title's row */
@@ -3115,6 +3053,7 @@ static void set_app_rect(arect R)
     appc.alpha = ap_pending ? 0 : tk_clampf(p * 1.6f - .2f, 0, 1);
     if (sw_app_alpha()) appc.alpha = ap_pending ? 0 : 1;      /* helper D: a card in the switcher shows its page whole */
     apsb.alpha = appc.alpha;
+    kbg.alpha = appc.alpha;                                  /* B3: the keyboard fades in and out with the page */
     uint32_t t = APPS[AP.a].tint, b = sv_ground(AP.a);
     float m = tk_clampf(p * 2, 0, 1);
     uint32_t cr = (uint32_t)((t >> 16 & 255) * (1 - m) + (b >> 16 & 255) * m + .5f), cg = (uint32_t)((t >> 8 & 255) * (1 - m) + (b >> 8 & 255) * m + .5f),
@@ -3181,6 +3120,7 @@ static void app_open(int a)
     AS.sub = 0;
     cm_opened(a);                              /* helper I: Settings > Cellular, a notification's thread */
     sv_opened();
+    if (!tk_strcmp(APPS[a].k, "search")) kb_focus(0, "search", "");   /* B3: Search's field has the focus */
     apkey.hidden = 1;
     if (app_own(a)) {
         /* the page over the first frames (app_build_step); the previous app's strips gone now */
@@ -3224,6 +3164,8 @@ static void app_finish_close(void)
     relayer(&apnote); apnote.hidden = 1;
     relayer(&apsrch); apsrch.hidden = 1;
     cm_closed();                                 /* helper I */
+    kb_close();                                  /* B3 */
+    em_close(0);
     med_close();
     tk_bmp_free(&sfield);
     relayer(&apsb); apsb.hidden = 1;
@@ -3704,8 +3646,9 @@ static void relink(void)
     sw_link();                                       /* helper D: the switcher's cards (swg), a card's snapshot over its opening window */
     cm_link();                                       /* helper I: the call screen (cvl) */
     link(&root, r, 19);
-    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb, &apphl };
-    link(&appg, ag, 13);
+    tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &emsel, &kbg, &emp, &apsb, &apphl };
+    link(&appg, ag, 16);                             /* B3: emsel the edit menu's selection, emp its pill */
+    kb_link();                                       /* B3: the keyboard's panel, keys, lit key and balloon */
     tk_layer *st[NST + 64] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     int na = NST + med_layers(st + NST);
     na += lx_layers(st + na);                        /* L3: shell_linux.inc's */
@@ -3794,6 +3737,9 @@ void sh_init_begin(tk_comp *c)
     tk_layer_init(&icofg, "icon-pressed"); icofg.hidden = 1;
     tk_layer_init(&lockhl, "press"); lockhl.hidden = 1;
     tk_layer_init(&apphl, "press"); apphl.hidden = 1;
+    tk_layer_init(&kbg, "keyboard"); kbg.hidden = 1;        /* B3 */
+    tk_layer_init(&emp, "edit-menu"); emp.hidden = 1;
+    tk_layer_init(&emsel, "edit-selection"); emsel.hidden = 1;
     layout_list();
     relink();
     c->root = &root;
@@ -3988,9 +3934,24 @@ void sh_set(const char *what, const char *key, float v)
     }
 }
 
+/* B3: the text field under a long press (Notes' text, Search's field, Messages' message): 1 and *o */
+static int cm_em_target(float x, float y, emt *o);
+static int em_target(float x, float y, emt *o)
+{
+    if (is_app("notes") && NS.view && y >= PUSHED_TOP - 12 && y < KB_TOP - KB_STRIP) {
+        *o = (emt){ NOTES[NS.cur], NOTELEN - 1, { 18, PUSHED_TOP + 1, note_bot - PUSHED_TOP > 24 ? 354 : note_w + 4, note_bot - PUSHED_TOP - 2 }, build_note };
+        return 1;
+    }
+    if (is_app("search") && y >= 52 && y < 100 && x < 306) {
+        *o = (emt){ SR.q, (int)sizeof SR.q - 2, { 51, 63, tw(TK_IT400, 17, SR.q, 0, 0) + 4, 24 }, build_search };
+        return 1;
+    }
+    return cm_em_target(x, y, o);
+}
+
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
 enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL,
-       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX, G_NC, G_SW };   /* helper D: G_NC shell_nc.inc's (the Centre, the banner, the
+       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX, G_NC, G_SW, G_KB };   /* B3: G_KB the keyboard's (shell_kb.inc) */   /* helper D: G_NC shell_nc.inc's (the Centre, the banner, the
                                                      * lock's pill), G_SW shell_switcher.inc's (the cards) */
 static struct {
     int kind, arg, arg2, moved;
@@ -4101,21 +4062,6 @@ static float card_top(int g)
     for (int h = 0; h < g; h++) yy += 68 + K[h].memh + STACK_GAP(h);
     return yy;
 }
-/* a key of the dark keyboard under (x, y) (the three rows R, row 3 from 61.5 when r2x): its rect */
-static int kb_rect(float x, float y, const char *const *R, int r2x, tk_rect *o)
-{
-    for (int r = 0; r < 3; r++) {
-        int n = (int)tk_strlen(R[r]);
-        float x0 = r == 2 && r2x ? 61.5f : 3 + (10 - n) * 19.5f, ky = 550 + 54.0f * r;
-        if (y < ky || y >= ky + 50) continue;
-        for (int i = 0; i < n; i++)
-            if (x >= x0 + 39 * i - 3 && x < x0 + 39 * i + 36) { *o = (tk_rect){ x0 + 39 * i, ky, 33, 46 }; return 1; }
-        if (r == 2 && x < 55) { *o = (tk_rect){ 3, 658, 42, 46 }; return 1; }
-        if (r == 2 && x >= 340) { *o = (tk_rect){ 345, 658, 42, 46 }; return 1; }
-    }
-    if (y >= 712 && y < 760) { *o = x < 94 ? (tk_rect){ 3, 712, 88, 46 } : x < 296 ? (tk_rect){ 97, 712, 196, 46 } : (tk_rect){ 299, 712, 88, 46 }; return 1; }
-    return 0;
-}
 /* what lights under a finger on an open app's page */
 static void app_press(float x, float y)
 {
@@ -4176,7 +4122,7 @@ static void app_press(float x, float y)
         int num = is_app("notes") ? NS.num : SR.num;
         if (y >= 548 && kb_rect(x, y, KR[num], !num, &r)) { g = r; rad = 6; c = W(.35f); ok = 1; }
     } else if (is_app("settings") && AS.sub == 2 && WV.view == 1) {
-        if (y >= 548 && kb_rect(x, y, WK[WV.layer], !WV.layer, &r)) { g = r; rad = 6; c = W(.35f); ok = 1; }
+        if (y >= 548 && kb_rect(x, y, 0, 0, &r)) { g = r; rad = 6; c = W(.35f); ok = 1; }
     }
     if (ok) hl_set(&apphl, r, g, rad, c);
 }
@@ -4206,11 +4152,13 @@ void sh_touch(int phase, float x, float y, float t)
             else { T.kind = G_FOCUSDRAG; sp_focus.live = 0; focus_closing = 0; tk_tracker_add(&T.tr, y, t); }   /* P3p: drag it down */
             return;
         }
+        if (AP.on && em_down(x, y)) { T.kind = G_NONE; return; }   /* B3: the edit menu's item (or it closes) */
         if (nc_down(x, y, t)) { T.kind = G_NC; return; }    /* helper D: the banner, the open Notification Centre, the pill */
         if (sw_down(x, y, t)) { T.kind = G_SW; return; }    /* helper D: the app switcher */
         if (AP.on) {
             /* an open app (survival-next: also over the lock, from Emergency's cards): the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
             if (y < 36 && x < 195 && !AP.closing && !sp_app.live) { nc_pull_begin(x, y, t); T.kind = G_NC; return; }   /* helper D */
+            if (!AP.closing && !sp_app.live && kb_owns(x, y)) { T.kind = G_KB; kb_touch(0, x, y, t); return; }   /* B3 */
             if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
             else if (!sp_app.live && med_is(APPS[AP.a].k)) { T.kind = G_MEDIA; med_touch(0, x, y, t); }
             else if (!sp_app.live && !AP.closing && lx_touch(0, x, y)) T.kind = G_LINUX;   /* L3 */
@@ -4308,6 +4256,11 @@ void sh_touch(int phase, float x, float y, float t)
             T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0;
             tk_tracker_add(&T.tr, y, t);
         } else if (phase == 2) T.kind = G_NONE;
+        return;
+    }
+    if (T.kind == G_KB) {                    /* B3, shell_kb.inc: the keyboard */
+        kb_touch(phase, x, y, t);
+        if (phase == 2) T.kind = G_NONE;
         return;
     }
     if (T.kind == G_LINUX) {                 /* L3, shell_linux.inc: a Linux window, the App Store's list */
@@ -4816,6 +4769,11 @@ int sh_tick(float dt, float t)
     mv |= nc_tick(dt, t);                       /* helper D: the Notification Centre, the banner */
     mv |= sw_tick(dt, t);                       /* helper D: the app switcher */
     mv |= cm_tick(dt, t);                       /* helper I: the call button's hold, the call screen */
+    mv |= kb_tick(dt, t);                       /* B3: delete held */
+    if (T.kind == G_APPTAP && !T.moved && t - T.t0 >= 500) {    /* B3: a long press on a text field: the edit menu */
+        emt e;
+        if (em_target(T.x0, T.y0, &e)) { hl_off(); T.kind = G_NONE; em_open(&e, T.x0, T.y0); mv = 1; }
+    }
     if (mv && AP.on) sw_dirty = 1;              /* helper D: the page moved or changed: a new snapshot at the next rest */
     return mv;
 }
@@ -4878,6 +4836,7 @@ void sh_idle(void)
     mp_idle();                                   /* helper D: Maps' last GPS fix (it may read the card: idle only) */
     cm_idle();                                   /* helper I: the call screen's static parts while Cellular is on */
     home_badges(0);                              /* B8: the dock's badges, when a count changed */
+    kb_idle();                                   /* B3: the keyboard's accessory row (a Linux window's keys) */
     if (!EMG && cards_pending > 0) {
         /* after Emergency: the vendor cards again, one per idle turn (the platform calls again while
          * sh_idle_pending); the half copies below are made in the same turn (P2w: an unlock right after
@@ -4929,5 +4888,7 @@ int sh_moving(void)
     m |= IP.on && IP.t < 1;
     m |= nc_moving() || sw_moving();             /* helper D */
     m |= cm_moving();                            /* helper I */
+    m |= kb_moving();                            /* B3: delete held (its repeats need the frames) */
+    if (T.kind == G_APPTAP && !T.moved) { emt e; m |= em_target(T.x0, T.y0, &e); }   /* B3: a press on a text field: the long press's frames */
     return m;
 }

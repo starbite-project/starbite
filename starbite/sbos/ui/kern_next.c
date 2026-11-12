@@ -695,6 +695,18 @@ void sh_haptic(void)
     (void)vib_pulse(10);
 #endif
 }
+/* B3: the text fields' clipboard (the edit menu's Copy / Cut / Paste) in RAM; weak: the Linux session's platform
+ * (shared with the guest's apps) replaces it */
+static char clip_ram[4096];
+__attribute__((weak)) void sh_clip_set(const char *s)
+{
+    size_t n = 0;
+    while (s && s[n] && n < sizeof clip_ram - 1) n++;
+    while (n > 0 && n < sizeof clip_ram - 1 && s[n] && ((unsigned char)s[n] & 0xc0) == 0x80) n--;   /* whole characters */
+    if (n) tk_memcpy(clip_ram, s, n);
+    clip_ram[n] = 0;
+}
+__attribute__((weak)) const char *sh_clip_get(void) { return clip_ram; }
 /* P3i: the shell's time outside the compositor (a tap that builds a page runs before the next frame: the pause
  * the user sees is this, not the frame's own time); logged when over 8 ms, counted per gesture */
 static void shell_time(const char *what, uint64_t t0)

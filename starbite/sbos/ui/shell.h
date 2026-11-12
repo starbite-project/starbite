@@ -63,6 +63,10 @@ int sh_refresh(float t_ms);
 void sh_vibrate(void);
 void sh_year(int y);
 void sh_haptic(void);                     /* P3h: a key's light tap (the vibration motor, ~10 ms) */
+/* B3: the clipboard of the text fields' edit menu (Copy / Cut / Paste): one UTF-8 text, shared with the Linux apps
+ * (the Linux session's platform side; kern_next.c has a weak RAM copy until then). sh_clip_get: "" when empty. */
+void sh_clip_set(const char *utf8);
+const char *sh_clip_get(void);
 /* wifi-sbos-next: Wi-Fi for Settings > Wi-Fi, the status bar and the Control Centre. The platform pushes its state
  * with sh_wifi (only on a change); the shell asks with sh_wifi_power / _scan / _join / _fetch (< 0 refused). The
  * passphrase goes straight to the kernel's join (kept in RAM until a restart, never stored or logged); names and
