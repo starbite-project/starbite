@@ -96,6 +96,12 @@ if tool == "dpkg-query":
     for p, v in sorted(db["installed"].items()):
         print("%s ii  %s" % (p, v))
     save(); sys.exit(0)
+if tool == "dpkg":                       # --configure -a (the store's repair): the pending updates are applied
+    upd = os.environ.get("FAKEAPT_DPKG_UPDATES")
+    if upd and os.path.isdir(upd):
+        for f in os.listdir(upd):
+            os.unlink(os.path.join(upd, f))
+    save(); sys.exit(0)
 if tool == "dpkg-deb":
     print(json.load(open(words[-2] if len(words) > 1 else words[0]))[words[-1]]); save(); sys.exit(0)
 sys.exit(2)
