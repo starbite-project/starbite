@@ -159,9 +159,22 @@ if "%GDKIT%"=="0" del /f "%G%\opengl32.dll" "%G%\libgallium_wgl.dll" "%G%\opengl
 :gd1_clean
 del /f %D%\opengl32-gd.dll %D%\libgallium_wgl-gd.dll
 :gd1_done
+rem ZC1 (sb-patches 0150/0151, docs/WIN11-GPU-ZEROCOPY.md): the zero-copy GL present. sbglzc64.exe (an x64 GL program)
+rem draws 300 frames at 1280x720 through GDI, then 300 through the zero-copy path (DXGI flip swap chain on our
+rem adapter), with the zero-copy ICD app-local in glzc\; it prints fps for each, which path the driver took, and readback.
+if exist %D%\sbglzc64.exe (
+  if not exist %D%\glzc mkdir %D%\glzc
+  move /y %D%\sbglzc64.exe %D%\glzc\ > nul
+  move /y %D%\opengl32-zc.dll %D%\glzc\opengl32.dll > nul
+  move /y %D%\libgallium_wgl-zc.dll %D%\glzc\libgallium_wgl.dll > nul
+)
+if exist %D%\glzc\sbglzc64.exe pushd %D%\glzc
+if exist %D%\glzc\sbglzc64.exe sbglzc64.exe >> %D%\gputest.log 2>&1
+if exist %D%\glzc\sbglzc64.exe echo sbglzc x64 exit %errorlevel% >> %D%\gputest.log
+if exist %D%\glzc\sbglzc64.exe popd
 rem T44: free the ~110 MB the GL and UMD tests brought before the sweep (C: had 841 MiB in T42 and Explorer's
 rem pagefile growth took 490 of it); their results are in gputest.log and umdlog already.
-for %%F in (gl glx64 glec glx86) do if exist %D%\%%F rmdir /s /q %D%\%%F
+for %%F in (gl glx64 glec glx86 glzc) do if exist %D%\%%F rmdir /s /q %D%\%%F
 if exist %D%\sbumd-arm64x.dll del /f %D%\sbumd-arm64x.dll
 if exist %D%\sbumd-ec.dll del /f %D%\sbumd-ec.dll
 sbshow.exe disk >> %D%\gputest.log 2>&1
