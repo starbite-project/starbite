@@ -68,7 +68,8 @@ static int ntp_st, clock_checked;
 static int32_t clock_off;
 static uint64_t ntp_t;
 static uint8_t ntp_nonce[8], ntp_server[4];
-/* the saved network (0.4.2): the store entry "wifinet", two lines (name, WPA2 passphrase or empty), made on the
+/* the saved network (0.4.2): the store entry "wifinet" (Track H: UFS's store first, then the card's: the OS store
+ * moved to the card on 2026-11-11; h1 looked on UFS only and missed it), two lines (name, WPA2 passphrase or empty), made on the
  * Mac from the user's input for the Wi-Fi tests; read only, never logged, never shown (the passphrase) */
 static uint8_t sv_ssid[33];
 static unsigned sv_len;
@@ -310,7 +311,7 @@ static void load_saved(void)
     buf[len] = 0;
 #else
     struct store_ent e;
-    if (!store_find("ufs:wifinet", &e) || !e.size || e.size >= sizeof(buf) || store_load(&e, (uintptr_t)buf, sizeof(buf)))
+    if (!store_find("wifinet", &e) || !e.size || e.size >= sizeof(buf) || store_load(&e, (uintptr_t)buf, sizeof(buf)))
         return;
     buf[e.size] = 0;
 #endif
