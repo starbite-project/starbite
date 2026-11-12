@@ -21,7 +21,7 @@
  *   - the call screen: a swipe up from its bottom edge minimises a connected call into the capsule.
  * Nothing here sounds, transmits or starts anything: a tap only opens a screen. */
 
-enum { ISL_NONE, ISL_CALL, ISL_SOS, ISL_HEAT, ISL_USB, ISL_DATA };
+enum { ISL_NONE, ISL_CALL, ISL_SOS, ISL_HEAT, ISL_USB, ISL_DATA, ISL_JOB };   /* cp6: ISL_JOB a Linux / App Store job (iOS: a Live Activity) */
 #define ISL_CAP_H 24.0f
 #define ISL_CAP_X (MARGIN + 16 - 6)          /* the text where the time starts (MARGIN + 16) */
 #define ISL_CAP_Y (SB_MID - ISL_CAP_H / 2)
@@ -67,6 +67,26 @@ static int isl_spring(float *x, float *v, float to, float resp, float damp, floa
 }
 
 /* ---- the status capsule -------------------------------------------------------------------------------------- */
+/* cp6: Track E's running job (sh_linux_job), asked at most once a second: "Linux 45 %" (its percentage, else "Linux") */
+static struct { float t; int on; char pct[8]; } IJ = { -1e9f, 0, "" };
+static int isl_job(float t)
+{
+    if (t - IJ.t < 1000 && t >= IJ.t) return IJ.on;
+    IJ.t = t;
+    char j[96];
+    IJ.on = sh_linux_job(j, (int)sizeof j) == 1;
+    IJ.pct[0] = 0;
+    if (IJ.on) {                                 /* the first "N %" in the words */
+        for (int i = 0; j[i]; i++)
+            if (j[i] >= '0' && j[i] <= '9' && (i == 0 || j[i - 1] == ' ')) {
+                int k = i, n = 0;
+                while (j[k] >= '0' && j[k] <= '9' && n < 3) { IJ.pct[n++] = j[k++]; }
+                if (j[k] == ' ' && j[k + 1] == '%' && n) { IJ.pct[n++] = ' '; IJ.pct[n++] = '%'; IJ.pct[n] = 0; break; }
+                IJ.pct[0] = 0;
+            }
+    }
+    return IJ.on;
+}
 static int isl_want(char *b)
 {
     if (cm_live(CALL.state) && !CM.decl && !(CV.on && CV.at > 0)) {
@@ -79,6 +99,13 @@ static int isl_want(char *b)
     if (IS.heat) return ISL_HEAT;
     if (SV.usb.state == SH_USB_ON) return ISL_USB;
     if (CELL.data == SH_DATA_STARTING || CELL.data == SH_DATA_SEARCHING || CELL.data == SH_DATA_REGISTERED) return ISL_DATA;
+    if (!EMG && isl_job(now_ms)) {                   /* cp6: a Linux build / install runs (not in Emergency) */
+        int k = 0;
+        for (const char *p = "Linux"; *p;) b[k++] = *p++;
+        if (IJ.pct[0]) { b[k++] = ' '; for (const char *p = IJ.pct; *p && k < 15;) b[k++] = *p++; }
+        b[k] = 0;
+        return ISL_JOB;
+    }
     b[0] = 0;
     return ISL_NONE;
 }
@@ -166,6 +193,11 @@ static void isl_cap_tap(void)
     sh_haptic();
     if (IS.kind == ISL_CALL) { isl_call_min = 0; cv_reopen(); return; }
     if (IS.kind == ISL_DATA) { cm_open_cellular(); return; }
+    if (IS.kind == ISL_JOB && !is_app("store")) {    /* cp6: the job's page: the App Store */
+        if (AP.on) app_finish_close();
+        (void)open_app_key("store");
+        return;
+    }
     if (IS.kind == ISL_USB && !is_app("usb")) {
         int a = sv_app("usb");
         if (a < 0) return;
@@ -302,6 +334,10 @@ static float isl_next_update(float t)
     if (IS.pst == 1 && IS.hold_end >= 0) best = tk_maxf(1, IS.hold_end - t);
     if (SV.usb.state != SH_USB_OFF && !is_app("usb")) {
         float n = tk_maxf(1, IS.usb_next - t);
+        if (best < 0 || n < best) best = n;
+    }
+    if (IJ.on || IS.kind == ISL_JOB) {               /* cp6: a running job's percentage, once a second */
+        float n = tk_maxf(1, IJ.t + 1000 - t);
         if (best < 0 || n < best) best = n;
     }
     return best;
