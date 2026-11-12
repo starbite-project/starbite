@@ -658,12 +658,65 @@ static void fw_save(const char *what)
 void sbfw_boot_start(void)
 {
     fw_load();
-    unsigned st = fw_rec.req_state, now = sbfw_age(st);
-    if (now == st)
+    unsigned a = sbfw_boot_age(&fw_rec);
+    if (!a)
         return;
-    fw_rec.req_state = (uint8_t)now;
-    fw_save(now == SBFW_ST_SEEN ? "request armed for this boot" : now == SBFW_ST_REFUSED ? "request expired unused"
-                                                                 : "request done (one boot)");
+    fw_save(a == SBFW_AGE_SEEN ? "request armed for this boot" : a == SBFW_AGE_EXPIRED ? "request expired unused"
+            : a == SBFW_AGE_DONE ? "request done (one boot)"
+            : a == SBFW_AGE_ROLLBACK ? "update rolled back: its start was never confirmed, the previous version stays"
+                                     : "update expired unused: the previous version stays");
+}
+
+/* ---- the update slots (section 10.5) ---- */
+static uint8_t slot_hdr[4096];
+static int slot_state[3];               /* per slot: 0 not read, 1 valid header, -1 none */
+static struct store_ent slot_ent[3];
+static struct sbslot_info slot_inf[3];
+static unsigned slot_last;              /* the slot the last "@slot" resolve used (0 none) */
+
+static void ent_cpy(struct store_ent *d, const struct store_ent *s)   /* no struct copies: no libc memcpy */
+{
+    volatile const uint8_t *a = (volatile const uint8_t *)s;
+    uint8_t *b = (uint8_t *)d;
+    for (unsigned i = 0; i < sizeof(*s); ++i)
+        b[i] = a[i];
+}
+
+void sbfw_slot_reset(void)
+{
+    slot_last = 0;
+}
+
+int sbfw_slot_source(const char *key, struct store_ent *out)
+{
+    if (!fw_have)
+        fw_load();
+    unsigned slot = fw_rec.slot_active;
+    if (fw_rec.req_action == SBFW_REQ_UPDATE && fw_rec.slot_try &&
+        (fw_rec.req_state == SBFW_ST_ARMED || fw_rec.req_state == SBFW_ST_SEEN) && str_eq(fw_rec.req_key, key))
+        slot = fw_rec.slot_try;
+    if (slot != 1 && slot != 2)
+        return 0;
+    if (!slot_state[slot]) {
+        slot_state[slot] = -1;
+        struct store_ent e;
+        uint8_t *buf = slot_hdr;
+        __asm__("" : "+r"(buf));
+        if (store_find(slot == 1 ? "sbos-slot-a" : "sbos-slot-b", &e) && (e.flags & SF_VOLATILE) &&
+            !store_head(&e, (uintptr_t)buf) && sbslot_check(buf, e.size, key, &slot_inf[slot])) {
+            ent_cpy(&slot_ent[slot], &e);
+            slot_state[slot] = 1;
+        }
+    }
+    if (slot_state[slot] < 0 || !str_eq(slot_inf[slot].key, key))
+        return 0;
+    ent_cpy(out, &slot_ent[slot]);
+    out->lba += 1;                       /* the image after the header block */
+    out->size = slot_inf[slot].size;
+    out->crc = slot_inf[slot].crc;       /* store_load checks the image's CRC */
+    out->flags = 0;
+    slot_last = slot;
+    return 1;
 }
 
 static int req_live(void)
@@ -744,6 +797,12 @@ static void build_table(uint8_t *page, const char *key, unsigned req, unsigned w
 
 void sbfw_handoff(const char *key, unsigned req, unsigned why, unsigned level)
 {
+    if (req == SBFW_REQ_UPDATE && req_live() && fw_rec.req_action == req && slot_last != fw_rec.slot_try) {
+        fw_rec.slot_try = 0;               /* the new image did not load (bad header / CRC): the old one runs */
+        fw_rec.req_state = SBFW_ST_REFUSED;
+        fw_save("update image did not load: the previous version started");
+        req = 0;
+    }
     if (req && req_live() && fw_rec.req_action == req) {
         fw_rec.req_state = SBFW_ST_APPLIED;
         fw_save("request applied, undone at the next start");

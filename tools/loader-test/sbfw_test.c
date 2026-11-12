@@ -151,6 +151,61 @@ int main(int argc, char **argv)
     CHECK(sbfw_shell_decide(S, 1, SBFW_ST_SEEN, SBFW_REQ_NO_SHELL, 1, 1, -1, 0) == SBFW_SH_SKIP, "skip comes first");
     CHECK(!strcmp(sbfw_shell_why(SBFW_SH_CRASH), "the last start crashed: the menu shows it"), "reason text");
 
+    /* the update slots (section 10.5): record fields, the start-of-boot ageing with rollback, the header */
+    {
+        struct sbfw_rec u, v;
+        memset(&u, 0, sizeof(u));
+        u.slot_active = 1;
+        u.slot_try = 2;
+        u.slot_tries = 3;
+        u.req_action = SBFW_REQ_UPDATE;
+        u.req_state = SBFW_ST_ARMED;
+        memcpy(u.req_key, "starbite-next-gpu", 18);
+        sbfw_rec_encode(blk, &u);
+        sbfw_rec_decode(blk, &v);
+        CHECK(!memcmp(&u, &v, sizeof(u)) && blk[232] == 1 && blk[233] == 2 && blk[234] == 3, "slot fields at 232..234");
+        CHECK(sbfw_boot_age(&u) == SBFW_AGE_SEEN && u.req_state == SBFW_ST_SEEN && u.slot_try == 2,
+              "update armed -> seen, slot_try kept for this start");
+        struct sbfw_rec w = u;
+        w.req_state = SBFW_ST_APPLIED;     /* the trial started, the OS never committed */
+        CHECK(sbfw_boot_age(&w) == SBFW_AGE_ROLLBACK && w.slot_try == 0 && w.slot_active == 1 &&
+              w.req_state == SBFW_ST_REFUSED, "uncommitted trial -> rollback to slot_active");
+        CHECK(sbfw_boot_age(&u) == SBFW_AGE_UPD_EXPIRED && u.slot_try == 0 && u.req_state == SBFW_ST_REFUSED,
+              "seen but never started -> expired, slot_try cleared");
+        struct sbfw_rec c;
+        memset(&c, 0, sizeof(c));
+        c.req_action = SBFW_REQ_UPDATE;
+        c.req_state = SBFW_ST_DONE;        /* the OS committed: slot_active = 2, slot_try = 0 */
+        c.slot_active = 2;
+        CHECK(sbfw_boot_age(&c) == 0 && c.slot_active == 2 && c.req_state == SBFW_ST_DONE, "a committed update stays");
+        c.req_action = SBFW_REQ_SINGLE;
+        c.req_state = SBFW_ST_APPLIED;
+        CHECK(sbfw_boot_age(&c) == SBFW_AGE_DONE && c.req_state == SBFW_ST_DONE, "other requests age as before");
+        CHECK(!strcmp(sbfw_req_name(SBFW_REQ_UPDATE), "update") && sbfw_req_fits(SBFW_REQ_UPDATE, 5) &&
+              !sbfw_req_fits(SBFW_REQ_UPDATE, 2), "update: name, bare only");
+        static uint8_t h[4096];
+        struct sbslot_info si, so;
+        memset(&si, 0, sizeof(si));
+        si.size = 22552576;
+        si.crc = 0xdeadbeef;
+        memcpy(si.vstr, "1.0 P3x", 8);
+        memcpy(si.key, "starbite-next-gpu", 18);
+        sbslot_build(h, &si);
+        CHECK(sbslot_check(h, 64U << 20, "starbite-next-gpu", &so) && so.size == si.size && so.crc == si.crc &&
+              !strcmp(so.vstr, "1.0 P3x"), "slot header round trip");
+        CHECK(!sbslot_check(h, 64U << 20, "starbite-os", &so), "another row's key refused");
+        CHECK(!sbslot_check(h, 20U << 20, "starbite-next-gpu", &so), "an image bigger than the slot refused");
+        h[100] ^= 1;
+        CHECK(!sbslot_check(h, 64U << 20, "starbite-next-gpu", &so), "a damaged header refused");
+        h[100] ^= 1;
+        snprintf(path, sizeof(path), "%s/sbfw-slot-header.bin", argv[1]);
+        f = fopen(path, "wb");
+        if (f) {
+            fwrite(h, 1, sizeof(h), f);
+            fclose(f);
+        }
+    }
+
     /* a store head as Starbite Recovery's repair checks it (argv[2]: a compact home card store image) */
     if (argc > 2) {
         static uint8_t head[7 * 4096];

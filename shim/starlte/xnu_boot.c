@@ -617,12 +617,22 @@ static int str_eq(const char *a, const char *b)
     return *a == *b;
 }
 
+/* The catalog key the files being resolved belong to ("@slot" needs it). */
+static const char *res_key;
+
 /* The first alternative of a file field that exists. */
 static int resolve(const char *field, struct src *s)
 {
     char alt[64];
     s->kind = SRC_NONE;
     for (unsigned k = 0; cat_alt(field, k, alt); ++k) {
+        if (str_eq(alt, "@slot")) {       /* an update slot (docs/STARBITE-FIRMWARE-LAYER.md 10.5) */
+            if (!res_key || !sbfw_slot_source(res_key, &s->e))
+                continue;
+            s->kind = SRC_STORE;
+            s->size = s->e.size;
+            return 1;
+        }
         if (str_eq(alt, "@boot")) {
             if (!boot_p)
                 continue;
@@ -655,6 +665,7 @@ int star_entry_ready(unsigned i, const char **why)
     const struct cat_ent *e = cat_get(i);
     struct src s;
     const char *w = 0;
+    res_key = e ? e->key : 0;
     if (!e)
         w = "NO SUCH ENTRY";
     else if (e->method < M_XNU || e->method > M_BARE)
@@ -1674,6 +1685,8 @@ boot_entry(unsigned i, volatile uint64_t *log, uintptr_t fdt, const char *cmdlin
     if (!star_entry_ready(i, &why))
         return fail(log, -13, why);
     e = launch_prepare(e, log);
+    res_key = e->key;
+    sbfw_slot_reset();               /* the slot (if any) this start's own resolve picks */
     /* log level 0: none of the loader's own status lines; 3: all of them, even under menu v7 */
     int was = star_fb_muted();
     if (launch.lvl == 0)

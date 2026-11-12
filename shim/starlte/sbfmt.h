@@ -432,7 +432,8 @@ unsigned cl_excerpt(char *dst, unsigned cap, const char *src, unsigned len, uint
 #define SBFW_REQ_WINRE      6U
 #define SBFW_REQ_DRIVER_OFF 7U
 #define SBFW_REQ_NO_SHELL   8U
-#define SBFW_REQ_MAX        8U
+#define SBFW_REQ_UPDATE     9U   /* try the update slot slot_try once (section 10.5) */
+#define SBFW_REQ_MAX        9U
 #define SBFW_ST_NONE        0U   /* req_state */
 #define SBFW_ST_ARMED       1U   /* the OS asked (written by the OS) */
 #define SBFW_ST_APPLIED     2U   /* its start had it */
@@ -444,6 +445,7 @@ struct sbfw_rec {
     uint16_t req_seq;
     char req_key[24], shell_key[24];
     uint8_t undo[64];
+    uint8_t slot_active, slot_try, slot_tries;   /* bytes 232..234: the A/B update slots (section 10.5) */
 };
 /* bytes 112..255 of a settings block: all zero when they do not start with "FW" version 1 */
 void sbfw_rec_decode(const uint8_t *blk, struct sbfw_rec *r);
@@ -486,6 +488,22 @@ int sbfw_table_check(const uint8_t *page);
 /* The request's state at a loader start (armed -> seen, seen -> refused (expired), applied -> done);
  * the same state if nothing changes. */
 unsigned sbfw_age(unsigned state);
+/* The whole record's ageing at a loader start, update rollback included (section 10.5): changes r and
+ * returns what happened (SBFW_AGE_*, 0 nothing). */
+#define SBFW_AGE_SEEN      1U
+#define SBFW_AGE_EXPIRED   2U
+#define SBFW_AGE_DONE      3U
+#define SBFW_AGE_ROLLBACK  4U   /* the update's start was never committed by the OS: back to slot_active */
+#define SBFW_AGE_UPD_EXPIRED 5U
+unsigned sbfw_boot_age(struct sbfw_rec *r);
+
+/* ---- update slots (section 10.5): a volatile store entry, block 0 the header, the image from +4096 ----
+ *   0 "SBSLOT01"  8 u32 version 1  12 u32 CRC32 of bytes 16..4095  16 u64 image size  24 u32 image CRC32
+ *  28 u32 0  32 char version[32]  64 char key[24] (the catalog row it is for)  88.. zero */
+struct sbslot_info { uint32_t version; uint64_t size; uint32_t crc; char vstr[32], key[24]; };
+/* 1 if hdr is a valid slot header for key whose image fits entry_bytes - 4096 */
+int sbslot_check(const uint8_t *hdr, uint64_t entry_bytes, const char *key, struct sbslot_info *si);
+void sbslot_build(uint8_t *hdr4k, const struct sbslot_info *si);
 /* Shell mode's decision (section 10.1), as plain inputs. Returns SBFW_SH_START or why not. */
 #define SBFW_SH_START     0U
 #define SBFW_SH_OFF       1U

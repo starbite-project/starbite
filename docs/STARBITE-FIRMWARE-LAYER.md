@@ -207,7 +207,8 @@ The settings record (the HOME store's block 2, card p2 after the store move) get
 144 char shell_key[24] the shell's catalog key ("" = "starbite-os")
 168 u8 undo[64]        a write action's undo record (6.1): u8 part_id, u8 len/4, u16 offset, u32 lba, u32 crc_old,
                        u32 crc_new, the old bytes (<= 48)
-232 u8 reserved[24]    zero
+232 u8 slot_active, slot_try, slot_tries   the update slots (10.5)
+235 u8 reserved[21]    zero
 ```
 A record without "FW" at 112 reads as all zero (no shell, no request): every older record.
 
@@ -265,3 +266,36 @@ The OS never writes anything else of the loader's. The record's CRC (bytes 16..2
 | 6 | `winre` | Windows | BCD default -> WinRE for one boot: **plan only** (compiled out, 6.2) |
 | 7 | `driver-off` | Windows | table req_action = 7; our drivers stay off (needs the UEFI to reserve the table) |
 | 8 | `no-shell` | the shell | the next start shows the plain menu (same as the mailbox key) |
+| 9 | `update` | a bare row with an `@slot` file | its trial start runs slot_try instead of slot_active (10.5) |
+
+### 10.5 Software Update: A/B slots (2026-11-12, with Track A)
+
+The loader never rewrites store entries or the catalog. OS images live in two **volatile** store entries,
+`sbos-slot-a` (1) and `sbos-slot-b` (2), 64 MiB each. Block 0 of each is a header and the image follows at +4096:
+```
+0 "SBSLOT01"  8 u32 1  12 u32 CRC32 of 16..4095  16 u64 image size  24 u32 image CRC32 (zlib)  28 u32 0
+32 char version[32]  64 char key[24] (the catalog row it is for)
+```
+A row lists the slot first, `files = ["@slot|<its normal file>"]`. The `@slot` source gives:
+- the slot_try image during an update's trial start of that row;
+- otherwise the slot_active image;
+- and it is used only when the header is valid, its key equals the row, and the image fits.
+Anything else falls back to the row's normal file (the factory image). The image's CRC is checked as it loads, like
+every entry.
+
+| Step | Who | What |
+|---|---|---|
+| stage | the OS | the image into the **inactive** slot (store_volatile_grant, 4 MiB chunks), the header block last |
+| arm | the OS | `sbfw_update_arm(key, slot)`: slot_try = slot, req `update` armed for key; then `sb_boot_next(key)` |
+| trial | the loader | the next start of key loads slot_try; the request becomes *applied*. If the slot does not load, the old image starts and the request is *refused* with slot_try cleared |
+| commit | the OS | once the new image's home screen is up (plus 10 s without a crash), `sbfw_update_commit()`: slot_active = slot_try, slot_try = 0, *done* |
+| rollback | the loader | at the next start, a trial that was never committed (crash, hang, reset before the home screen) is rolled back: slot_try = 0, *refused*, slot_active as before ("update rolled back" in pmsg) |
+
+Code:
+- loader: sbfmt.c `sbfw_boot_age`, `sbslot_check`/`sbslot_build`; sbfw.c `sbfw_slot_source`; xnu_boot.c `resolve` ("@slot");
+- libsb: sbfw_api.c `sbfw_update_arm`/`commit`, `sbfw_slot_get`/`set`, the same header codec;
+- Mac: `sbstore2.py build --slot NAME=BYTES:IMAGE:KEY[:VERSION]` pre-fills a slot,
+  `sbstore2.py settings --req update --req-key KEY --slot-try N --slot-active N`.
+
+Host tests: sbfw_test (ageing with rollback, the header), libsb sbfw-store-test (the header byte for byte, arm,
+commit).

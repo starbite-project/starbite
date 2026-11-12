@@ -372,6 +372,19 @@ def build(a):
         if name not in items:
             items[name] = (TYPES['data'], bytes(size))
         vol.add(name)
+    # --slot NAME=BYTES:IMAGE:KEY[:VERSION]: an update slot (docs/STARBITE-FIRMWARE-LAYER.md 10.5), a volatile entry
+    # whose block 0 is the "SBSLOT01" header and the image follows at +4096 (sbfmt.c sbslot_build)
+    for arg in a.slot:
+        name, _, rest = arg.partition('=')
+        parts = rest.split(':')
+        if len(parts) < 3:
+            sys.exit(f'--slot {arg}: NAME=BYTES:IMAGE:KEY[:VERSION]')
+        size, img, key = int(parts[0], 0), Path(parts[1]).read_bytes(), parts[2]
+        ver = parts[3] if len(parts) > 3 else ''
+        if size % BLOCK or len(img) > size - BLOCK or len(key) > 23 or len(ver) > 31:
+            sys.exit(f'--slot {arg}: the image must fit BYTES - 4096 (BYTES a multiple of 4 KiB), KEY <= 23, VERSION <= 31')
+        items[name] = (TYPES['data'], slot_header(len(img), zlib.crc32(img), ver, key) + img + bytes(size - BLOCK - len(img)))
+        vol.add(name)
     if len(items) > MAX_ENTRIES:
         sys.exit('too many entries')
     dirb, v1, data = bytearray(DIR_BLOCKS * BLOCK), bytearray(BLOCK), bytearray()
@@ -435,6 +448,17 @@ def build(a):
     print(f'{a.out}: {blk} blocks ({blk * BLOCK / 2**20:.1f} MiB) of {a.capacity}, {n} entries ({nv1} in the v1 view)'
           + (f', data from block {data_at} (compact image: {DATA_BLOCK + blk - data_at} blocks)' if data_at != DATA_BLOCK else '')
           + (', HOME store' if a.home else ''))
+
+
+def slot_header(size, crc, ver, key):
+    """An update slot's header block (shim/starlte/sbfmt.c sbslot_build)."""
+    h = bytearray(BLOCK)
+    struct.pack_into('<8sI', h, 0, b'SBSLOT01', 1)
+    struct.pack_into('<QI', h, 16, size, crc)
+    h[32:64] = ver.encode().ljust(32, b'\0')
+    h[64:88] = key.encode().ljust(24, b'\0')
+    struct.pack_into('<I', h, 12, zlib.crc32(bytes(h[16:])))
+    return bytes(h)
 
 
 def header(a):
@@ -506,17 +530,18 @@ def settings_encode(st):
 
 # The SBFW part (bytes 112..255 = st['tail'][0..144]; shim/starlte/sbfmt.h, docs/STARBITE-FIRMWARE-LAYER.md 10.1)
 SBFW_REQS = {'none': 0, 'verbose': 1, 'safe': 2, 'single': 3, 'prev': 4, 'xnu-single': 5, 'winre': 6,
-             'driver-off': 7, 'no-shell': 8}
+             'driver-off': 7, 'no-shell': 8, 'update': 9}
 SBFW_STATES = {0: 'none', 1: 'armed', 2: 'applied', 3: 'done', 4: 'refused', 5: 'armed (seen)'}
 
 
 def sbfw_decode(tail):
     t = bytes(tail)
     if t[:3] != b'FW\x01':
-        return {'flags': 0, 'req': 0, 'state': 0, 'seq': 0, 'req_key': '', 'shell_key': '', 'undo': bytes(64)}
+        return {'flags': 0, 'req': 0, 'state': 0, 'seq': 0, 'req_key': '', 'shell_key': '', 'undo': bytes(64),
+                'slot_active': 0, 'slot_try': 0, 'slot_tries': 0}
     return {'flags': t[3], 'req': t[4], 'state': t[5], 'seq': struct.unpack_from('<H', t, 6)[0],
             'req_key': t[8:32].split(b'\0')[0].decode(), 'shell_key': t[32:56].split(b'\0')[0].decode(),
-            'undo': t[56:120]}
+            'undo': t[56:120], 'slot_active': t[120], 'slot_try': t[121], 'slot_tries': t[122]}
 
 
 def sbfw_encode(f):
@@ -527,6 +552,7 @@ def sbfw_encode(f):
     t[8:32] = f['req_key'].encode().ljust(24, b'\0')
     t[32:56] = f['shell_key'].encode().ljust(24, b'\0')
     t[56:120] = f['undo']
+    t[120], t[121], t[122] = f['slot_active'], f['slot_try'], f['slot_tries']
     return bytes(t)
 
 
@@ -550,7 +576,9 @@ def settings_text(st):
 def sbfw_text(f):
     req = next((k for k, v in SBFW_REQS.items() if v == f['req']), f"? ({f['req']})")
     return (f"\nStarbite OS as the boot menu {'on' if f['flags'] & 1 else 'off'} (shell {f['shell_key'] or 'starbite-os'}), "
-            f"one-shot {req} for {f['req_key'] or '-'}: {SBFW_STATES.get(f['state'], f['state'])} (#{f['seq']})")
+            f"one-shot {req} for {f['req_key'] or '-'}: {SBFW_STATES.get(f['state'], f['state'])} (#{f['seq']}); "
+            f"update slots: active {'-AB'[f['slot_active']] if f['slot_active'] < 3 else f['slot_active']}, "
+            f"trying {'-AB'[f['slot_try']] if f['slot_try'] < 3 else f['slot_try']}")
 
 
 def settings(a):
@@ -592,7 +620,8 @@ def settings(a):
             if not 10 <= secs <= 82:
                 sys.exit('--wdt: entry, off or 10..82 seconds')
             st['wdt_mode'], st['wdt_s'] = WDT_MODES['fixed'], secs
-    if a.shell is not None or a.shell_key is not None or a.req is not None:
+    if a.shell is not None or a.shell_key is not None or a.req is not None or a.slot_active is not None or \
+            a.slot_try is not None:
         f = sbfw_decode(st['tail'])
         if a.shell is not None:
             f['flags'] = (f['flags'] | 1) if a.shell == 'on' else (f['flags'] & ~1)
@@ -605,6 +634,12 @@ def settings(a):
             f['req_key'] = a.req_key or ''
             if a.req not in ('none', 'no-shell') and not a.req_key:
                 sys.exit('--req needs --req-key (the catalog key it is for)')
+        if a.slot_active is not None:
+            f['slot_active'] = a.slot_active
+        if a.slot_try is not None:
+            f['slot_try'] = a.slot_try
+            if a.slot_try:
+                f['slot_tries'] = (f['slot_tries'] + 1) & 0xff
         if len(f['shell_key']) > 23 or len(f['req_key']) > 23:
             sys.exit('keys are at most 23 characters')
         st['tail'] = sbfw_encode(f)
@@ -787,6 +822,8 @@ def main():
     b.add_argument('--omit', action='append', default=[], metavar='NAME', help='leave an imported entry out')
     b.add_argument('--crashlog', action='store_true', help='add the crash log entry (automatic with --medium ufs)')
     b.add_argument('--no-crashlog', dest='no_crashlog', action='store_true', help='no crash log entry')
+    b.add_argument('--slot', action='append', default=[], metavar='NAME=BYTES:IMAGE:KEY[:VERSION]',
+                   help='an update slot (volatile, header + image), e.g. sbos-slot-a=67108864:img:starbite-next-gpu:1.0')
     b.add_argument('--home', action='store_true', help='the loader\'s home store (settings + crash log here)')
     b.add_argument('--data-at', dest='data_at', metavar='BLOCK|layout', help='first data block (compact image)')
     b.add_argument('--volatile', action='append', default=[], metavar='NAME=BYTES',
@@ -819,6 +856,8 @@ def main():
     s.add_argument('--shell-key', dest='shell_key', help='the shell\'s catalog key ("" = starbite-os)')
     s.add_argument('--req', choices=list(SBFW_REQS), help='a one-shot for --req-key\'s next start (armed)')
     s.add_argument('--req-key', dest='req_key')
+    s.add_argument('--slot-active', dest='slot_active', type=int, choices=range(3), help='0 the normal file, 1 A, 2 B')
+    s.add_argument('--slot-try', dest='slot_try', type=int, choices=range(3), help='with --req update: the slot to try once')
     s.add_argument('--wdt', help='entry (each catalog entry\'s own), off, or SECONDS (10..82) for every entry that has one')
     ss = sub.add_parser('settings-show')
     ss.add_argument('block')

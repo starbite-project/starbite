@@ -1612,6 +1612,9 @@ void sbfw_rec_decode(const uint8_t *b, struct sbfw_rec *r)
     sget(r->shell_key, b + 144, 24);
     for (unsigned i = 0; i < 64; ++i)
         r->undo[i] = b[168 + i];
+    r->slot_active = b[232];
+    r->slot_try = b[233];
+    r->slot_tries = b[234];
 }
 
 void sbfw_rec_encode(uint8_t *b, const struct sbfw_rec *r)
@@ -1628,6 +1631,9 @@ void sbfw_rec_encode(uint8_t *b, const struct sbfw_rec *r)
     sput(b + 144, r->shell_key, 24);
     for (unsigned i = 0; i < 64; ++i)
         b[168 + i] = r->undo[i];
+    b[232] = r->slot_active;
+    b[233] = r->slot_try;
+    b[234] = r->slot_tries;
 }
 
 void sbset_crc_fix(uint8_t *b)
@@ -1646,6 +1652,7 @@ const char *sbfw_req_name(unsigned q)
     case SBFW_REQ_WINRE:      return "winre";
     case SBFW_REQ_DRIVER_OFF: return "driver-off";
     case SBFW_REQ_NO_SHELL:   return "no-shell";
+    case SBFW_REQ_UPDATE:     return "update";
     default:                  return 0;
     }
 }
@@ -1662,6 +1669,7 @@ int sbfw_req_fits(unsigned q, unsigned m)
     case SBFW_REQ_WINRE:      return 0;           /* plan only (compiled out): docs 6.2 */
     case SBFW_REQ_DRIVER_OFF: return m == 4;
     case SBFW_REQ_NO_SHELL:   return 0;           /* not a start's request: the shell decision reads it */
+    case SBFW_REQ_UPDATE:     return m == 5;      /* bare entries with an "@slot" file */
     default:                  return 0;
     }
 }
@@ -1799,4 +1807,62 @@ int sbstore_head_check(const uint8_t *h, uint64_t cap, struct sbhead_info *hi)
         hi->data_block = get(b + 80, 8);
     }
     return 1;
+}
+
+unsigned sbfw_boot_age(struct sbfw_rec *r)
+{
+    unsigned st = r->req_state;
+    if (r->req_action == SBFW_REQ_UPDATE && r->slot_try) {
+        if (st == SBFW_ST_APPLIED) {          /* the trial start never committed (crash, hang, early reset) */
+            r->slot_try = 0;
+            r->req_state = SBFW_ST_REFUSED;
+            return SBFW_AGE_ROLLBACK;
+        }
+        if (st == SBFW_ST_SEEN) {             /* armed, never started */
+            r->slot_try = 0;
+            r->req_state = SBFW_ST_REFUSED;
+            return SBFW_AGE_UPD_EXPIRED;
+        }
+    }
+    unsigned now = sbfw_age(st);
+    if (now == st)
+        return 0;
+    r->req_state = (uint8_t)now;
+    return now == SBFW_ST_SEEN ? SBFW_AGE_SEEN : now == SBFW_ST_REFUSED ? SBFW_AGE_EXPIRED : SBFW_AGE_DONE;
+}
+
+int sbslot_check(const uint8_t *h, uint64_t entry_bytes, const char *key, struct sbslot_info *si)
+{
+    z(si, sizeof(*si));
+    static const char m[8] = { 'S', 'B', 'S', 'L', 'O', 'T', '0', '1' };
+    for (unsigned i = 0; i < 8; ++i)
+        if (h[i] != (uint8_t)m[i])
+            return 0;
+    if (get(h + 8, 4) != 1 || sb_crc32(h + 16, 4096 - 16) != (uint32_t)get(h + 12, 4))
+        return 0;
+    si->version = 1;
+    si->size = get(h + 16, 8);
+    si->crc = (uint32_t)get(h + 24, 4);
+    sget(si->vstr, h + 32, 32);
+    sget(si->key, h + 64, 24);
+    if (!si->size || entry_bytes < 4096 || si->size > entry_bytes - 4096)
+        return 0;
+    unsigned k = 0;
+    while (k < 23 && key[k] && key[k] == si->key[k])
+        ++k;
+    return (k == 23 || key[k] == si->key[k]) && si->key[0];
+}
+
+void sbslot_build(uint8_t *h, const struct sbslot_info *si)
+{
+    z(h, 4096);
+    static const char m[8] = { 'S', 'B', 'S', 'L', 'O', 'T', '0', '1' };
+    for (unsigned i = 0; i < 8; ++i)
+        h[i] = (uint8_t)m[i];
+    put(h + 8, 1, 4);
+    put(h + 16, si->size, 8);
+    put(h + 24, si->crc, 4);
+    sput(h + 32, si->vstr, 32);
+    sput(h + 64, si->key, 24);
+    put(h + 12, sb_crc32(h + 16, 4096 - 16), 4);
 }

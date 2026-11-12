@@ -39,5 +39,11 @@ unsigned sbfw_req_apply(unsigned req, struct cat_ent *e, char *xfrag, unsigned x
 /* Right before the jump: the request applied this start (if any) is recorded, and the SBFW table
  * is written for the OS. why: SBFW_WHY_*. */
 void sbfw_handoff(const char *key, unsigned req, unsigned why, unsigned level);
+/* The "@slot" file source (section 10.5): the update slot this start of key uses (slot_try during an
+ * update's trial start, else slot_active), its image as a store entry (header checked, the image's CRC
+ * in out->crc). 0: no valid slot (the next file alternative is used). */
+struct store_ent;
+int sbfw_slot_source(const char *key, struct store_ent *out);
+void sbfw_slot_reset(void);
 /* The table as a hand-off now would write it (key "", why fastboot) into out: 4096 or 0. */
 unsigned sbfw_table_preview(uint8_t *out, unsigned cap);
