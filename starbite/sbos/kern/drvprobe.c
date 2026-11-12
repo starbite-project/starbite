@@ -11,6 +11,7 @@
 #include "bathealth.h"
 #include "snd.h"
 #include "codec_media.h"
+#include "bt.h"
 
 /* ---- the list: filled in as each driver is merged ---- */
 #define DRV_LIST_BEGIN const struct drv_probe drv_probes[] = {
@@ -21,6 +22,7 @@ DRV_LIST_BEGIN
     { "codec", drv_codec_probe, drv_codec_abort, 14000 },
     { "audio", drv_audio_probe, drv_audio_abort, 10000 },
     { "nled", drv_nled_probe, drv_nled_abort, 12000 },
+    { "bt", drv_bt_probe, drv_bt_abort, DRV_BT_BUDGET_MS },
 DRV_LIST_END
 #else
 DRV_HOST_LIST                               /* the host test's fake probes */
@@ -42,6 +44,10 @@ void drv_run_begin(int attended)
     r_done = 0;
     sb_logx("drvprobe: begin; probes ", drv_nprobes);
     sb_logx("drvprobe: highest level ", r_maxlevel);
+#ifndef DRV_HOST_LIST
+    /* the probe images may force UART_BT's / USI10_I2C's CMU gates on for Bluetooth; bt.c restores them */
+    bt_allow_clock_gates(1);
+#endif
 }
 
 /* One slice. Returns 0: call again after *wait_ms; 1: all done. */
