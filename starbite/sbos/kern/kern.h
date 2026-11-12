@@ -704,23 +704,40 @@ int kmodem_call_route(int audio);
 int kmodem_call_mute(int on);
 int kmodem_call_dtmf(char digit);
 void kmodem_call(struct kcall *c);
-#define KSMS_MAX 32
+#define KMODEM_SMS_STORE 1                 /* Track G: the store, unread, delete, delivery reports (kmodem_sms_read ...) */
+#define KSMS_MAX 200                        /* kept in RAM and in the state slot ("sms.NN"); the oldest go first */
+enum { KSMS_RECEIVED = 0, KSMS_SENDING, KSMS_SENT, KSMS_FAILED, KSMS_DELIVERED, KSMS_NOT_DELIVERED };
 struct ksms {
-    int32_t id, incoming, state;            /* state: 0 received, 1 sending, 2 sent, 3 failed */
+    int32_t id, incoming, state;            /* state: KSMS_* (sent = no delivery report yet) */
     int64_t utc;
     char number[24];                        /* SCREEN ONLY */
     char text[512];
     char why[48];
+    int32_t unread;                         /* an incoming message not yet shown (kmodem_sms_read) */
+    uint8_t mr[4], parts, rep;              /* kernel only: each part's reference, the parts delivered (bits) */
 };
 int kmodem_sms_send(const char *number, const char *utf8);
-int kmodem_sms_count(void);
+int kmodem_sms_count(void);                 /* oldest first, newest last */
 int kmodem_sms_get(int i, struct ksms *m);
 uint32_t kmodem_sms_gen(void);
+int kmodem_sms_read(const char *number);    /* that thread's incoming marked read; the number of messages changed */
+int kmodem_sms_delete(int32_t id);          /* 0, SBOS_EINVAL no such message, SBOS_EBUSY it is being sent */
+int kmodem_sms_delete_thread(const char *number);   /* the number of messages deleted (never one being sent) */
+struct state_buf;
+void kmodem_sms_save(struct state_buf *b);  /* settings.c's save: the messages as "sms.NN" records */
+void kmodem_sms_restore(const uint8_t *half);   /* settings.c's restore: the newest valid half */
 int kmodem_cellular(int on);
+int kmodem_selftest_phase(int *done);  /* next-celltest (unattended data): every 500 ms; *done at the end, 0 = failed */
 void kmodem_cell(struct kcell *c);
 struct sbnet;
 struct sbtcp;
 int kmodem_netif(struct sbnet **net, struct sbtcp **tcp);   /* 1 = up (pointers filled when not NULL) */
+/* guestnet.c (Track G): the Linux guest's network, NATed onto the active uplink (Wi-Fi first, else mobile data).
+ * The uplinks report themselves (n = 0: down) and offer every received IPv4 packet first: 1 = it was the guest's. */
+enum { KNET_UPLINK_WIFI = 1, KNET_UPLINK_CELL = 2 };   /* = sbshm-net.h's SBSHM_NET_UPLINK_* */
+void guestnet_uplink(int which, struct sbnet *n);
+int guestnet_rx(int which, const uint8_t *ip, uint32_t len);
+void guestnet_guest_started(void);         /* the guest's service, once sbghost runs: the uplink that is up */
 void wifi_fetch_poll_cell(void);
 void wifi_clock_checked_by(int how);        /* 1 checked, 2 corrected, 3 set (as Wi-Fi's NTP) */
 int kmodem_on(void);

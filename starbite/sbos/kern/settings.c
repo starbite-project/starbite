@@ -153,6 +153,7 @@ void settings_restore(void)
         if (state_find(half[cur_half], "sbos.surv", &q) == 16 && q)
             surv_unpack(q);
     }
+    kmodem_sms_restore(half[cur_half]);     /* Track G: the messages kept in the slot */
     int n = state_find(half[cur_half], REC, &d);
     struct saved s;
     if (n < (int)sizeof(uint32_t) * 2 + 4 || !d) {
@@ -331,6 +332,7 @@ void settings_timer(unsigned id)
         if (state_add(&b, id, apps[a].state, apps[a].state_n) < 0)
             sb_logf("settings: an app's state did not fit: ", apps[a].id);
     }
+    kmodem_sms_save(&b);                    /* Track G: the messages ("sms.NN", last: they take what is left) */
     uint32_t n = state_finish(&b);
     int w = hw_slot_write(to, half[to], n);
     if (w < 0) {
