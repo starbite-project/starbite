@@ -809,6 +809,23 @@ static std::string quartzCoreCallers();
 @interface NBSharedEvent : NBEvent
 @end
 static void notified(void *context,uint64_t value);
+// Starbite (macOS, S2p 2026-11-12): the macOS plugin answers a mach-port import with a local event and tags it with an
+// associated object under the selector "sbmtlImported". Its real signaller is in another process and cannot reach it, so
+// a GPU wait on it first raises it to the value waited for (CPU waits unchanged). S2p: after its first pipeline compiled,
+// WindowServer went idle with the runtime's scheduler waiting and no swap ever made: most likely CoreAnimation's frame
+// was held on this event's wait (the scheduler holds a batch until every event it waits for is reached).
+static inline __attribute__((always_inline)) bool reach_if_imported(id event,NmbEvent *handle,uint64_t value,const char *why) {
+#if !TARGET_OS_IPHONE
+ if(!objc_getAssociatedObject(event,sel_registerName("sbmtlImported")))return false;
+ uint64_t now=nmb_shared_event_value(handle);
+ static std::atomic<int> told{0};
+ if(told.fetch_add(1)<6)NBLOG(@"native-metal: imported event %s at %llu (was %llu): taken as reached",why,(unsigned long long)value,(unsigned long long)now);
+ if(now<value)nmb_shared_event_set_value(handle,value);
+ return true;
+#else
+ (void)event;(void)handle;(void)value;(void)why;return false;
+#endif
+}
 @implementation NBSharedEvent
 - (uint64_t)signaledValue {return nmb_shared_event_value(self.handle);}
 - (void)setSignaledValue:(uint64_t)value {nmb_shared_event_set_value(self.handle,value);}
@@ -1453,6 +1470,9 @@ static void scheduled(void *context);
    signal?"signal":"wait",(unsigned long long)value);
   return;
  }
+ // An imported event's real signaller is in another process: a GPU wait on it is reached at once, not held for ever.
+ if(!signal && reach_if_imported(event,[(NBEvent *)event handle],value,"GPU wait"))
+  return;
 #endif
  if(![(id)event isKindOfClass:[NBEvent class]]){[self refuse:@"foreign event"];return;}
  if(self.committed){[self refuse:@"event encoded after commit"];return;}

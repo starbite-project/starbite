@@ -358,10 +358,16 @@ static void fill_device(id dev, mach_port_t port)
 		(void)o;
 		return sbmtl_owned([(id<MTLDevice>)me newEvent]);
 	}), "@24@0:8Q16");
-	class_replaceMethod(c, sel_registerName("newSharedEventWithMachPort:"), imp_implementationWithBlock(^id(id me, mach_port_t p) {
-		(void)p;
-		missing(class_getName(object_getClass(me)), "newSharedEventWithMachPort: (local event)");
-		return sbmtl_owned([(id<MTLDevice>)me newSharedEvent]);
+	/*
+	 * S2p (2026-11-12): the import is tagged (associated object under the selector sbmtlImported, value itself, not
+	 * retained): the frontend takes a GPU wait on it as reached, as its real signaller is in another process. Kept small:
+	 * the bundle must stay exactly the card copy's size for an in-place write.
+	 */
+	class_replaceMethod(c, sel_registerName("newSharedEventWithMachPort:"), imp_implementationWithBlock(^id(__unsafe_unretained id me, mach_port_t p) {
+		(void)p;	/* no MISSING line here (size): the frontend logs "imported event ..." when a wait meets it */
+		id ev = sbmtl_owned([(id<MTLDevice>)me newSharedEvent]);
+		objc_setAssociatedObject(ev, @selector(sbmtlImported), ev, OBJC_ASSOCIATION_ASSIGN);
+		return ev;
 	}), "@20@0:8I16");
 	class_replaceMethod(c, sel_registerName("newSharedEventWithHandle:"), imp_implementationWithBlock(^id(id me, id h) {
 		(void)h;
