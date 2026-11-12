@@ -26,7 +26,8 @@
  *   ABOX's PLL_AUD, so the two stay within the PLLs' fractional error (well under a ppm); measured working on this phone.
  * - IN3L / IN4L go straight to AIF1TX1 / AIF1TX2. One UI passes them through LHPF1/2 and ASRC1 (sync to async); the
  *   LHPF coefficients are set by nothing in the vendor XMLs, and ASRC1 is only needed for the ASYNCCLK domain.
- * - MICBIAS2 (the headset microphone) and the jack detection are not configured. */
+ * - MICBIAS2 (the headset microphone) and the jack detection are not configured here: codec_media.c does them, the
+ *   headphones and media capture, through the small additive hooks at the end of this file (calls win). */
 #include <stdarg.h>
 #include "codec.h"
 
@@ -130,6 +131,12 @@ static const char *why = "not probed";
 static int spi_ready, probed, inited, mic_on, ldo34_by_us, clkout_saved;
 static uint32_t clkout_was;
 static int fll_on;
+/* codec_media.c's hooks (additive; see codec.h): its yield callback, the power-up count, its clocks */
+static void (*yield_fn)(int reset);
+static unsigned gen_count;
+static int media_clk;
+static void media_clocks_off(void);
+static void media_yield(int reset);
 
 /* ---- the log ---- */
 
@@ -812,8 +819,10 @@ static void shut(void)
 
 void codec_hal_set(const struct audio_hal *hal)
 {
+    if (H && probed)
+        media_yield(1);             /* codec_media.c lets go while the old HAL still works (nothing if not hooked) */
     H = hal;
-    spi_ready = probed = inited = mic_on = ldo34_by_us = clkout_saved = fll_on = 0;
+    spi_ready = probed = inited = mic_on = ldo34_by_us = clkout_saved = fll_on = media_clk = 0;
     why = "not probed";
 }
 
@@ -834,6 +843,7 @@ int codec_probe(void)
         return AUD_ENOSYS;
     }
     say("probe: SPI %x (USI01 of PERIC0), reset gpg1-0, LDO33 / LDO34", (unsigned)CODEC_SPI);
+    media_yield(1);
     if (mic_on)
         mic_path_off(), mic_on = 0;
     int rc = bus_up();
@@ -879,6 +889,8 @@ int codec_probe(void)
         rev & 0xFFU);
     probed = 1;
     inited = 0;
+    if (!++gen_count)
+        gen_count = 1;
     why = "probed";
     return 0;
 }
@@ -910,6 +922,7 @@ int codec_mic(int on)
     }
     if (mic_on)
         return 0;
+    media_yield(0);                 /* calls win: media's headphones / capture let go of AIF1 and the clocks */
     say("mic on: DMIC1/IN3L + DMIC4/IN4L to AIF1, an I2S slave of ABOX UAIF0, 48 kHz 2x16");
     if (!probed && (rc = codec_probe()))
         return rc;
@@ -930,6 +943,7 @@ void codec_off(void)
     if (!H)
         return;
     say("off");
+    media_yield(1);
     shut();
     why = "off";
 }
@@ -950,4 +964,116 @@ int codec_selftest(void)
     codec_off();
     say("selftest: done");
     return 0;
+}
+
+/* ---- for codec_media.c (the jack, the headphones, media capture): additive, the call path above is unchanged ---- */
+
+static void media_clocks_off(void)
+{
+    (void)c_upd(C_SYSTEM_CLOCK_1, 0x0040, 0x0000, 0);
+    fll1_off();
+    clkout_restore();
+    media_clk = 0;
+    say("media clocks off: SYSCLK and FLL1 off, CLKOUT0 back as found");
+}
+
+static void media_yield(int reset)
+{
+    if (yield_fn)
+        yield_fn(reset);
+    if (media_clk && probed && !mic_on)
+        media_clocks_off();
+    media_clk = 0;
+}
+
+void codec_set_yield(void (*fn)(int reset))
+{
+    yield_fn = fn;
+}
+
+const struct audio_hal *codec_hal(void)
+{
+    return H;
+}
+
+unsigned codec_gen(void)
+{
+    return probed ? gen_count : 0;
+}
+
+int codec_call_active(void)
+{
+    return mic_on;
+}
+
+int codec_up(unsigned *gen)
+{
+    if (!hal_ok()) {
+        why = "no HAL";
+        return AUD_ENOSYS;
+    }
+    int rc;
+    if (!probed && (rc = codec_probe()))
+        return rc;
+    if (!inited && (rc = chip_init()))
+        return fail(rc, "the after-boot setup (patch, MICBIAS, pins) failed");
+    if (gen)
+        *gen = gen_count;
+    return 0;
+}
+
+int codec_clocks(int on)
+{
+    if (!hal_ok() || !probed)
+        return AUD_ENOSYS;
+    if (mic_on)
+        return on ? AUD_EBUSY : 0;  /* the call path owns them */
+    if (!on) {
+        if (media_clk || fll_on)
+            media_clocks_off();
+        return 0;
+    }
+    if (media_clk)
+        return 0;
+    say("media clocks on: CLKOUT0, SYSCLK from FLL1, AIF1 (I2S slave of UAIF0, 48 kHz 2x16)");
+    media_clk = 1;
+    int rc = clocks_on();
+    if (!rc)
+        rc = aif1_setup();
+    if (!rc)
+        rc = c_upd(C_SYSTEM_CLOCK_1, 0x0040, 0x0040, 0x0040);  /* SYSCLK_ENA, then madera_spin_sysclk */
+    if (rc) {
+        say("media clocks: FAILED (%d)", rc);
+        media_clocks_off();
+        return rc;
+    }
+    for (int i = 0; i < 4; ++i) {
+        uint16_t v;
+        (void)c_rd(C_SOFTWARE_RESET, &v);
+    }
+    H->delay_us(300);
+    return 0;
+}
+
+int codec_write(uint32_t reg, uint16_t v)
+{
+    if (!hal_ok() || !probed)
+        return AUD_ENOSYS;
+    uint8_t tx[8] = { (uint8_t)(reg >> 24), (uint8_t)(reg >> 16), (uint8_t)(reg >> 8), (uint8_t)reg, 0, 0,
+                      (uint8_t)(v >> 8), (uint8_t)v };
+    int rc = xfer(tx, 0, 8);
+    if (rc)
+        say("register %04x <- %04x: the bus failed", reg, v);
+    return rc;
+}
+
+int codec_peek(uint32_t reg, uint16_t *v)
+{
+    if (!H || !H->gpio_get)
+        return AUD_ENOSYS;
+    if (probed)
+        return c_rd(reg, v);
+    if (!spi_ready || H->gpio_get(GPG1, 0) != 1)
+        return AUD_ENOSYS;          /* in reset, or the bus was never set up in this boot: nothing is set up here */
+    return c_rd(reg, v);
 }
