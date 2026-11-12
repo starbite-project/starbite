@@ -104,7 +104,11 @@ static struct {
  * page the field rides above the keyboard with a 44 "x" circle beside it */
 #define SE_SB_Y (H_PT - 30 - 8 - 48)
 #define SE_SF_Y (540 - 8 - 48)
-static tk_layer seclip, sescr, sepg, senav, sesb, sekb;   /* sesb: the root's search capsule (the field above the keyboard); sekb: its keyboard */
+/* the page in chunks of SE_CH panel rows (5.5 MB each: no 23 MB block a fragmented heap may not have) */
+#define SE_NCH 8
+#define SE_CH 1024
+static tk_layer sepg[SE_NCH];
+static tk_layer seclip, sescr, senav, sesb, sekb;   /* sesb: the root's search capsule (the field above the keyboard); sekb: its keyboard */
 #define SE_TOP (SAFE_TOP + NAVBAR_H)              /* the content shows below the nav row (a soft edge) */
 
 static const char *se_str(const char *a, const char *b)
@@ -619,22 +623,24 @@ static void se_draw_sec(dc *d, int i)
     for (int k = 0; k < s->n; k++) se_draw_row(d, &SE.r[s->first + k], k + 1 == s->n);
     if (s->foot) d_group_foot(d, s->fy, s->foot);
 }
-static dc se_dc(void) { dc d = { &sepg.bmp, 0, sepg.bx, sepg.by }; return d; }
-/* one group again (a switch's new state): its rect cleared, drawn over */
+/* one group again (a switch's new state): its rect cleared and drawn over in each chunk it crosses */
 static void se_redraw_sec(int i)
 {
-    if (!sepg.bmp.px) return;
-    dc d = se_dc();
     se_sec *s = &SE.s[i];
-    int y0 = (int)tk_floorf(PT(s->y) - d.oy) - 1, y1 = (int)(PT(s->y + s->h) - d.oy) + 2;
-    int x0 = (int)tk_floorf(PT(LG_X) - d.ox) - 1, x1 = (int)(PT(LG_RE) - d.ox) + 2;
-    tk_fill_rect_raw(&sepg.bmp, tk_maxi(0, x0), tk_maxi(0, y0), tk_mini(sepg.bmp.w, x1) - tk_maxi(0, x0), tk_mini(sepg.bmp.h, y1) - tk_maxi(0, y0), 0);
-    const char *f = s->foot;
-    const char *h = s->head;
-    s->foot = 0; s->head = 0;                         /* the words around it stay as they are */
-    se_draw_sec(&d, i);
-    s->foot = f; s->head = h;
-    tk_layer_dirty(&sepg);
+    for (int k = 0; k < SE_NCH; k++) {
+        tk_layer *l = &sepg[k];
+        if (!l->bmp.px) continue;
+        dc d = { &l->bmp, 0, l->bx, l->by };
+        int y0 = tk_maxi(0, (int)tk_floorf(PT(s->y) - d.oy) - 1), y1 = tk_mini(l->bmp.h, (int)(PT(s->y + s->h) - d.oy) + 2);
+        int x0 = tk_maxi(0, (int)tk_floorf(PT(LG_X) - d.ox) - 1), x1 = tk_mini(l->bmp.w, (int)(PT(LG_RE) - d.ox) + 2);
+        if (y1 <= y0 || x1 <= x0) continue;
+        tk_fill_rect_raw(&l->bmp, x0, y0, x1 - x0, y1 - y0, 0);
+        const char *f = s->foot, *h = s->head;
+        s->foot = 0; s->head = 0;                     /* the words around it stay as they are */
+        se_draw_sec(&d, i);
+        s->foot = f; s->head = h;
+        tk_layer_dirty(l);
+    }
 }
 
 /* ---- the layers ------------------------------------------------------------------------------------------------- */
@@ -705,8 +711,9 @@ static void se_kb_build(void)
 }
 static void se_free(void)
 {
-    relayer(&sepg); relayer(&senav); relayer(&sesb); relayer(&sekb);
-    sepg.hidden = senav.hidden = sesb.hidden = sekb.hidden = 1;
+    for (int k = 0; k < SE_NCH; k++) { relayer(&sepg[k]); sepg[k].hidden = 1; }
+    relayer(&senav); relayer(&sesb); relayer(&sekb);
+    senav.hidden = sesb.hidden = sekb.hidden = 1;
     seclip.hidden = 1;
     kit_slider_end();
     relayer(&ksw); ksw.hidden = 1;
@@ -717,7 +724,7 @@ static void se_build(void)
     if (!seclip.name) {
         tk_layer_init(&seclip, "settings-clip");
         tk_layer_init(&sescr, "settings-scroll");
-        tk_layer_init(&sepg, "settings-page");
+        for (int k = 0; k < SE_NCH; k++) { tk_layer_init(&sepg[k], "settings-page"); sepg[k].hidden = 1; }
         tk_layer_init(&senav, "settings-nav");
     }
     if (!se_owns()) { se_free(); return; }
@@ -737,13 +744,22 @@ static void se_build(void)
     se_rows(p);
     SE.content_h = se_layout() + (p == SE_ROOT ? 56 : 0);      /* the root's last card clears the search capsule */
     SE.scroll = tk_clampf(SE.scroll, 0, se_max());
-    relayer(&sepg);
-    dc d = mk(&sepg, "settings-page", LG_X - 2, 0, LG_W + 4, SE.content_h, 0, 0);
-    if (!d.b->px) { se_free(); return; }
-    if (p == SE_ROOT) d_h1(&d, "Settings");
-    for (int i = 0; i < SE.ns; i++) se_draw_sec(&d, i);
-    trim(&sepg);
-    sepg.hidden = 0;
+    /* the page: chunks of SE_CH panel rows from the top, each drawn with what crosses it and cut to what it holds */
+    for (int k = 0; k < SE_NCH; k++) { relayer(&sepg[k]); sepg[k].hidden = 1; }
+    int X0 = (int)tk_floorf(PT(LG_X - 2)), Wd = (int)PT(LG_W + 4) + 2, Hp = (int)PT(SE.content_h) + 2;
+    for (int k = 0; k < SE_NCH && k * SE_CH < Hp; k++) {
+        tk_layer *l = &sepg[k];
+        tk_layer_init(l, "settings-page");
+        int rows = tk_mini(SE_CH, Hp - k * SE_CH);
+        if (!tk_bmp_new(&l->bmp, Wd, rows)) { se_free(); return; }
+        l->x = l->bx = (float)X0;
+        l->y = l->by = (float)(k * SE_CH);
+        dc d = { &l->bmp, 0, (float)X0, (float)(k * SE_CH) };
+        if (p == SE_ROOT) d_h1(&d, "Settings");
+        for (int i = 0; i < SE.ns; i++) se_draw_sec(&d, i);
+        trim(l);
+        l->hidden = 0;
+    }
     /* the nav row: the back circle and the inline title (the root: the title only, once scrolled) */
     relayer(&senav);
     dc n = mk(&senav, "settings-nav", 0, SAFE_TOP, 390, NAVBAR_H, 0, 0);
@@ -766,8 +782,10 @@ static void se_build(void)
 static int se_layers(tk_layer **o)
 {
     if (!seclip.name) return 0;
-    tk_layer *s[] = { &sepg, &ksw, &kslf, &kslk };
-    link(&sescr, s, 4);
+    tk_layer *s[SE_NCH + 3];
+    for (int k = 0; k < SE_NCH; k++) s[k] = &sepg[k];
+    s[SE_NCH] = &ksw; s[SE_NCH + 1] = &kslf; s[SE_NCH + 2] = &kslk;
+    link(&sescr, s, SE_NCH + 3);
     tk_layer *c[] = { &sescr };
     link(&seclip, c, 1);
     o[0] = &seclip;
@@ -779,8 +797,9 @@ static int se_layers(tk_layer **o)
 static void se_close(void) { se_free(); SE.bld_page = -1; SE.press = -1; SE.ns_ = 0; for (int i = 0; i < SE_NPAGES; i++) SE.save[i] = 0; }
 static void se_idle(void)
 {
-    /* the page's half copy (its first scroll frame would make it: 6 ms) */
-    if (SE.built && !sepg.hidden && is_app("settings") && !AP.closing) tk_layer_prepare(&sepg);
+    /* the page's half copies (its first scroll frame would make them: 6 ms) */
+    if (!SE.built || !is_app("settings") || AP.closing) return;
+    for (int k = 0; k < SE_NCH; k++) if (sepg[k].bmp.px && !sepg[k].hidden) tk_layer_prepare(&sepg[k]);
 }
 
 /* ---- going places -------------------------------------------------------------------------------------------- */

@@ -2911,6 +2911,7 @@ static void own_strip(int a, int i)
     if (med_is(k)) { relayer(&appst[i]); return; }      /* shell_media.inc: its own layers (med_build), no strips */
     if (lx_is(k) && !lx_strips(k)) { relayer(&appst[i]); appst[i].hidden = 1; return; }   /* shell_linux.inc: the same */
     if (!tk_strcmp(k, "settings") && se_owns()) { relayer(&appst[i]); appst[i].hidden = 1; return; }   /* helper B2: its own layers */
+    if (!tk_strcmp(k, "settings") && i == 0) se_build();   /* helper B2: a strip page next: Settings' own page goes first (the heap) */
     dc d = strip_dc(i, "app-page");
     if (!d.b->px) return;
     if (!tk_strcmp(k, "phone")) page_phone(&d);
