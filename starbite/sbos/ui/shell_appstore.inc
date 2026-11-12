@@ -218,7 +218,6 @@ static void d_rrect_stroke(dc *d, float x, float y, float w, float h, float r, f
     tk_fm_free(&m);
 }
 static void d_chev(dc *d, float x, float cy, tk_col c) { d_seg(d, x, cy - 6, x + 6, cy, 2.2f, c); d_seg(d, x + 6, cy, x, cy + 6, 2.2f, c); }
-static void d_check(dc *d, float x, float cy, tk_col c) { d_seg(d, x, cy, x + 5, cy + 5, 2.4f, c); d_seg(d, x + 5, cy + 5, x + 15, cy - 6, 2.4f, c); }
 /* a category's 30 pt glyph square (Settings' style: a colour square, a white glyph) */
 static void d_catglyph(dc *d, int k, float x, float y)
 {
@@ -735,39 +734,47 @@ static float pg_app(pctx *c)
         y += 34;
     }
     y += 14;
-    /* the install method picker: one row per offered method, a check on the chosen one */
+    /* the install method picker (B2's kit): a segmented control of the offered methods, the chosen one's card */
     int nm = aq_mrow_n(p);
     if (nm) {
         y = aq_sec(c, y, "Install Method", 0, 0, 0);
         static const unsigned ORD[3] = { SH_M_RELEASE, SH_M_SOURCE, SH_M_DISTRO };
-        if (vis(c, y, 62.0f * nm)) d_rrect(c->d, GROUP_X, y, GROUP_W, 62.0f * nm, 16, C_CARD);
-        int r = 0;
+        static const char *const LBL[4] = { "", "Debian", "Latest Release", "From Source" };
+        const char *labels[3];
+        unsigned ms[3];
+        int n = 0, sel = -1;
         for (int q = 0; q < 3; q++) {
             unsigned m = ORD[q];
             if (!((p->methods >> m) & 1)) continue;
-            float ry = y + 62.0f * r;
-            if (vis(c, ry, 62)) {
-                dc *d = c->d;
-                char s[120], bm[8];
-                const char *v = aq_mver(p, m);
-                if (inst && p->method == m) {
-                    AQS(s, "Installed ", p->ver_inst[0] ? p->ver_inst : "", aq_upd(p) ? " \xc2\xb7 " : "", aq_upd(p) ? p->ver_new : "", aq_upd(p) ? " available" : "");
-                } else if (m == SH_M_RELEASE) {
-                    int deb = p->source[0] == 'D' && p->source[1] == 'e';
-                    AQS(s, v[0] ? v : "Newest", p->source[0] && !deb ? " \xc2\xb7 " : "", p->source[0] && !deb ? p->source : "");
-                } else if (m == SH_M_SOURCE) {
-                    aq_dec(bm, (int)(p->build_min ? p->build_min : 10));
-                    AQS(s, "About ", bm, " min on the M3 cores", v[0] ? " \xc2\xb7 " : "", v);
-                } else AQS(s, v[0] ? v : "Debian", " \xc2\xb7 Debian trixie");
-                d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, ry + 11), aq_mname(m), 0, 0, INK, 0);
-                d_text_box(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, ry + 35), GROUP_W - 32 - 34, 0, s, 0, 0, C_LABEL2, 0);
-                if ((unsigned)AQ.pick == m) d_check(d, CONTENT_R - 34, ry + 30, ACCENT());
-                if (r + 1 < nm) d_rrect(d, ROW_TX, ry + 61.5f, CONTENT_R - ROW_TX, .5f, 0, W(.1f));
-            }
-            if (at(c, GROUP_X, ry, GROUP_W, 62)) aq_hit(c, H_METHOD, i, (int)m);
-            r++;
+            if ((unsigned)AQ.pick == m) sel = n;
+            ms[n] = m, labels[n++] = LBL[m];
         }
-        y += 62.0f * nm + 10;
+        if (n > 1) {
+            float sw = (GROUP_W - 4) / n;
+            if (vis(c, y, 32)) kit_d_segment(c->d, GROUP_X, y, GROUP_W, labels, n, sel);
+            for (int k = 0; k < n; k++)
+                if (at(c, GROUP_X + 2 + sw * k, y - 6, sw, 44)) aq_hit(c, H_METHOD, i, (int)ms[k]);
+            y += 32 + 10;
+        }
+        unsigned m = sel >= 0 ? ms[sel] : ms[0];
+        if (vis(c, y, 62)) {
+            dc *d = c->d;
+            char s[120], bm[8];
+            const char *v = aq_mver(p, m);
+            if (inst && p->method == m) {
+                AQS(s, "Installed ", p->ver_inst[0] ? p->ver_inst : "", aq_upd(p) ? " \xc2\xb7 " : "", aq_upd(p) ? p->ver_new : "", aq_upd(p) ? " available" : "");
+            } else if (m == SH_M_RELEASE) {
+                int deb = p->source[0] == 'D' && p->source[1] == 'e';
+                AQS(s, v[0] ? v : "Newest", p->source[0] && !deb ? " \xc2\xb7 " : "", p->source[0] && !deb ? p->source : "");
+            } else if (m == SH_M_SOURCE) {
+                aq_dec(bm, (int)(p->build_min ? p->build_min : 10));
+                AQS(s, "About ", bm, " min on the M3 cores", v[0] ? " \xc2\xb7 " : "", v);
+            } else AQS(s, v[0] ? v : "Debian", " \xc2\xb7 Debian trixie");
+            d_rrect(d, GROUP_X, y, GROUP_W, 62, 16, C_CARD);
+            d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 11), aq_mname(m), 0, 0, INK, 0);
+            d_text_box(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 35), GROUP_W - 32, 0, s, 0, 0, C_LABEL2, 0);
+        }
+        y += 62 + 10;
         if (inst && !busy && AQ.pick && (unsigned)AQ.pick != p->method && !(p->flags & SH_PKG_SYSTEM)) {
             char t[64];
             AQS(t, "Reinstall: ", aq_mname(AQ.pick));
@@ -779,7 +786,7 @@ static float pg_app(pctx *c)
             y += 60;
         } else if (busy) y += 4;
         else if (vis(c, y, 20)) {
-            const char *f = inst ? "Choose another method, then Reinstall to switch." : "GET installs it with the method ticked.";
+            const char *f = inst ? "Choose another method, then Reinstall to switch." : "GET installs it the way chosen above.";
             d_text_box(c->d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y), GROUP_W - 32, 0, f, 0, 0, W(.45f), 0);
             y += 26;
         } else y += 26;
@@ -842,7 +849,7 @@ static float pg_app(pctx *c)
                 if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hit(c, H_ROLLBACK, i, 0);
                 y += 50;
             }
-            if (vis(c, y, 50)) d_text(c->d, AQ.rm_arm ? TK_IT600 : TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 14), AQ.rm_arm ? "Tap Again to Remove" : "Remove App", 0, 0, C_RED, 0);
+            if (vis(c, y, 50)) d_text(c->d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 14), "Remove App", 0, 0, C_RED, 0);
             if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hit(c, H_REMOVE, i, 0);
             y += 50;
         }
@@ -1247,6 +1254,12 @@ static void aq_act(int i, int m)
     if (aq_op(i, SH_PKG_OP_INSTALL, m) < 0) return;
     if (p->flags & SH_PKG_TOO_BIG) toast("It needs a lot of memory: it may run slowly");
 }
+static int aq_rm_pkg = -1;                       /* the package the Remove sheet is about */
+static void aq_rm_cb(int b)
+{
+    if (b == 0 && aq_rm_pkg >= 0 && aq_rm_pkg < aq_n()) (void)aq_op(aq_rm_pkg, SH_PKG_OP_REMOVE, 0);
+    aq_rm_pkg = -1;
+}
 static void aq_tap(float x, float y)
 {
     if (!is_app("store")) return;
@@ -1288,7 +1301,6 @@ static void aq_tap(float x, float y)
     pctx c = { 0, 0, 0, x, y + AQ.scroll, -1, 0, -1, 0 };
     aq_paint(&c);
     int i = c.hpkg;
-    if (c.hit != H_REMOVE && AQ.rm_arm) { AQ.rm_arm = 0; aq_redraw_all(); }
     switch (c.hit) {
     case H_APP: sh_haptic(); aq_push(i); break;
     case H_ACT: aq_act(i, 0); break;
@@ -1314,12 +1326,13 @@ static void aq_tap(float x, float y)
         if (AQ.pick != c.harg) { AQ.pick = c.harg; sh_haptic(); aq_area(); aq_redraw_all(); aq_place(0); }
         break;
     case H_REINSTALL: (void)aq_op(i, SH_PKG_OP_INSTALL, AQ.pick); break;
-    case H_REMOVE:
-        if (AQ.rm_arm && now_ms - AQ.rm_t < 3000) { AQ.rm_arm = 0; (void)aq_op(i, SH_PKG_OP_REMOVE, 0); }
-        else { AQ.rm_arm = 1; AQ.rm_t = now_ms; }
-        aq_redraw_all();
-        aq_place(0);
-        break;
+    case H_REMOVE: {                              /* B2's action sheet: one red row, a tap outside cancels */
+        static const kit_btn B[1] = { { "Remove App", KIT_DESTRUCTIVE } };
+        static char t[64];
+        AQS(t, "Remove ", LST->pkg[i].name, "?");
+        aq_rm_pkg = i;
+        if (kit_actions(t, B, 1, aq_rm_cb) < 0) aq_rm_pkg = -1;
+    } break;
     case H_SUGGEST: lx_scopy(AQ.q, AQ_SUGG[c.harg], 24); AQ.scroll = 0; aq_area(); aq_head(); aq_redraw_all(); aq_place(0); relink(); break;
     default: break;
     }
@@ -1358,7 +1371,6 @@ static int aq_moving(void)
 static int aq_tick(float dt)
 {
     if (!is_app("store") || ap_pending || AQ.empty) return 0;
-    if (AQ.rm_arm && now_ms - AQ.rm_t > 3000) { AQ.rm_arm = 0; aq_redraw_all(); }
     int pend = 0;
     if (!AQ.drag) {
         float m = aq_max();
