@@ -150,8 +150,15 @@ if exist %D%\sbumd-ec.dll del /f %D%\sbumd-ec.dll
 sbshow.exe disk >> %D%\gputest.log 2>&1
 rem T37: the sweep (sb-sweep.bat: ~27 surfaces, each as a GDI shot and a DWM dump, then the event logs); it replaces
 rem T36's shell steps (the keyboard A/B and the hit grids are in it). Run with --full-sec 900 and no keys self-test.
+rem Track K soak (sb-soak.bat): when staged it replaces the sweep (gpu-cycle.sh --full-sec 3600)
+if exist %D%\sb-soak.bat goto soak
 if exist %D%\sb-sweep.bat call %D%\sb-sweep.bat
+goto after_sweep
+:soak
+call %D%\sb-soak.bat
+:after_sweep
 echo shell surfaces opened %time% >> gputest.log
 echo sb-gputest end %date% %time% >> gputest.log
 rem T37: with the sweep, the boot restarts itself as soon as everything is written (sbwdog's timer is the backstop)
 if exist %D%\sb-sweep.bat shutdown /r /t 15 /c "Starbite gputest done"
+if exist %D%\sb-soak.bat shutdown /r /t 15 /c "Starbite soak done"
