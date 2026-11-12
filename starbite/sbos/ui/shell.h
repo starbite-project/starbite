@@ -414,3 +414,10 @@ int sh_fw_info(sh_fwinfo_t *i);           /* 1 the loader's table, 0 an older lo
  * Recovery): Wi-Fi isn't restored and nothing is saved until the next start. why: why this start, in words */
 int sh_safe_mode(void);
 int sh_boot_reason(char *why, int cap);
+
+/* Track A, 1.0: Restart and Shut Down (the shell's own slide-to-power-off is the confirmation, as on iOS). Both save
+ * first (the pages' on_save, the settings and prefs). Restart starts this same OS again when the loader said which it
+ * is (its SBFW table: the key of this start), else it goes back to the boot menu. In the self-test build they only log.
+ * < 0: refused (e.g. a heat session still running: the shell says so) */
+int sh_restart(void);
+int sh_power_off(void);

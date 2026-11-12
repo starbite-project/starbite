@@ -2256,3 +2256,29 @@ static void boot_notes(void)
         notif_post("Starbite OS", "Restarted After a Problem",
                    "The last start stopped unexpectedly. Details: Settings > Startup > Crash Reports.");
 }
+
+/* ---- Track A, 1.0: Restart and Shut Down from the shell ---- */
+int sh_restart(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: restart: refused (a dry run: the self test)");
+    return -1;
+#else
+    sb_log(sb_fw.valid && sb_fw.key[0] ? "next: restart (this OS again)" : "next: restart (to the boot menu: an older loader)");
+    if (sb_fw.valid && sb_fw.key[0])
+        power_boot_os(sb_fw.key);       /* does not return */
+    power_restart(1);
+    return -1;                          /* back here: refused */
+#endif
+}
+int sh_power_off(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: power off: refused (a dry run: the self test)");
+    return -1;
+#else
+    sb_log("next: power off (the user's slide)");
+    power_off_now();
+    return -1;                          /* back here: refused (power_off_now said why) */
+#endif
+}

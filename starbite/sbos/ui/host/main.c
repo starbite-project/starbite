@@ -858,6 +858,10 @@ static uint32_t *dbl_acquire(void *ctx, int *age)
 int sh_safe_mode(void) { const char *e = getenv("SBTK_SAFE"); return e && *e == '1'; }
 int sh_boot_reason(char *why, int cap) { if (why && cap > 0) snprintf(why, (size_t)cap, "Started on the host"); return -1; }
 
+/* Track A, 1.0: the host logs a restart / power off and stays up */
+int sh_restart(void) { fprintf(stderr, "host: restart\n"); return 0; }
+int sh_power_off(void) { fprintf(stderr, "host: power off\n"); return 0; }
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: sbtk-host PAK still|film|bench ...\n"); return 2; }
