@@ -404,7 +404,7 @@ static void kb_ctx(const char *t)
     int n = (int)tk_strlen(t), i = n;
     while (i > 0 && t[i - 1] == ' ') i--;
     int cap = !i || t[n - 1] == '\n' || (i < n && (t[i - 1] == '.' || t[i - 1] == '!' || t[i - 1] == '?'));
-    KB.shift = cap;
+    if (cap != KB.shift) { KB.shift = cap; kb_sync(); }   /* the letters and shift drawn again (only those) */
 }
 /* the key sent to the page now: 0 none, KBE_TEXT (*s the text), KBE_DEL, KBE_RET, KBE_DOT (". " for the last space) */
 static int kb_take(const char **s)
