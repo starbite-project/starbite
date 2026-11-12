@@ -141,10 +141,12 @@ static int open_v1(struct medium *s, unsigned m)
 
 /* ---- home store state (store.h) ------------------------------------------------------------------- */
 static int home = -2;          /* -2 not resolved, -3 resolving, -1 none, else the medium */
+static int probed_card_only;   /* 1.0 (Track A): an older loader without a table, on a card-only phone (sbstore=card, or
+                                * no UFS store at all): the card's store is home and UFS is not touched again */
 
 int store_card_only(void)
 {
-    return sb_fw.valid && (sb_fw.flags & SBFW_TF_CARD_ONLY);
+    return (sb_fw.valid && (sb_fw.flags & SBFW_TF_CARD_ONLY)) || probed_card_only;
 }
 
 int store_open(unsigned m)
@@ -905,13 +907,31 @@ int store_home(void)
     } else {
         /* an older loader: the card when its store says HOME (and the card may be touched), else UFS */
         why = "no table: probed";
-        (void)store_open(STORE_UFS);
-        if (!sd_allowed() && (ufs_settings_flags() & SET_SD_STORE))
+        /* 1.0 (Track A; wifi-core's card-only finding): S-Boot's sbstore=card says USERDATA is not ours (the UFS
+         * store area is not read at all); a UFS area without a store says the same. Then the card's version 2
+         * store is home whether or not it carries the HOME mark (a card made before SBSTHOME) */
+        int card_arg = 0;
+#ifndef SB_HOST_FAKE_MEM
+        {
+            char v[8];
+            card_arg = sb_bootarg("sbstore", v, sizeof v) && v[0] == 'c' && v[1] == 'a' && v[2] == 'r' && v[3] == 'd' && !v[4];
+        }
+#endif
+        if (card_arg)
+            probed_card_only = 1;
+        else
+            (void)store_open(STORE_UFS);
+        int no_ufs = card_arg || med[STORE_UFS].state <= 0;
+        if (!sd_allowed() && (no_ufs || (ufs_settings_flags() & SET_SD_STORE)))
             sd_allow();
         if (sd_allowed() && (store_open(STORE_SD), med[STORE_SD].state > 0) && med[STORE_SD].version == 2 &&
-            med[STORE_SD].home)
+            (med[STORE_SD].home || no_ufs)) {
             h = (int)STORE_SD;
-        else if (med[STORE_UFS].state > 0)
+            if (no_ufs) {
+                probed_card_only = 1;
+                why = card_arg ? "no table: sbstore=card" : "no table: no UFS store, the card's";
+            }
+        } else if (med[STORE_UFS].state > 0)
             h = (int)STORE_UFS;
     }
     if (h == (int)STORE_SD) {
