@@ -859,6 +859,14 @@ static void cv_refresh(void)
     cv_place();
     relink();
 }
+/* B7 (shell_island.inc): the call screen back from the status capsule (isl_call_min: minimised there; the pushes
+ * then leave the screen closed) */
+static int isl_call_min;
+static void cv_reopen(void)
+{
+    isl_call_min = 0;
+    if (cm_live(CALL.state)) cv_show(CALL.state == SH_CALL_INCOMING && !CV.answering ? CVM_INCOMING : CVM_CALL);
+}
 void sh_call(const sh_call_t *c)
 {
     sh_call_t o = CALL;
@@ -877,7 +885,7 @@ void sh_call(const sh_call_t *c)
     } else {
         if (cm_live(c->state)) {
             if (CV.on && CV.at > 0 && CV.mode == CVM_CALL) cv_refresh();
-            else cv_show(CVM_CALL);
+            else if (!isl_call_min) cv_show(CVM_CALL);
         } else if (CV.on && CV.at > 0 && CV.mode != CVM_ENDED && cm_live(o.state)) cv_ended();
         else if (CV.on && CV.at > 0) cv_refresh();
     }

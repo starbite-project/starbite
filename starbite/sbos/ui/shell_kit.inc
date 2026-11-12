@@ -65,6 +65,7 @@ static tk_col KIT_RED(void) { return C_RED; }
 static tk_col KIT_BLUE(void) { return C_ACCENT; }                  /* 15: the accent, dark */
 static tk_col KIT_SEC(void) { return C_LABEL2; }                   /* secondaryLabel, dark */
 
+static void isl_close(void);        /* B7's pill (shell_island.inc) */
 enum { KIT_NONE, KIT_ALERT, KIT_ACTIONS, KIT_SHEET };
 static tk_layer kitl, kdim, kitg, kglass, kfill, kcard, kbhl, ksw, kslf, kslk;
 static tk_bmp kknob, kslknob;       /* the switch's thumb and the slider's, drawn once */
@@ -190,7 +191,7 @@ static void kit_show(int kind)
     KT.at = 1;
     kitl.hidden = 0;
     kbhl.hidden = 1;
-    toast_left = tk_minf(toast_left, 1);           /* a toast under it goes */
+    isl_close();                                   /* a toast under it goes (B7: the pill closes) */
     press_cancel();
     kit_link();
     relink();

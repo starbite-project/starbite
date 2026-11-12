@@ -312,9 +312,10 @@ static void d_text_box(dc *d, int f, float size, float x, float base, float maxw
  * the RAT, 15 pt / 600) to its left, each 6 pt apart */
 #define SB_MID 30.0f
 #define SB_BASE 36.2f
+static int sb_cap;                   /* B7 (shell_island.inc): the status capsule shows: the left text stays out */
 static void status_bar(dc *d, const char *left)
 {
-    d_text_box(d, TK_IT600, 17, MARGIN + 16, SB_BASE, 150, 0, left, 0, 0, INK, 1);   /* the carrier: at most 150 pt */
+    if (!sb_cap) d_text_box(d, TK_IT600, 17, MARGIN + 16, SB_BASE, 150, 0, left, 0, 0, INK, 1);   /* the carrier: at most 150 pt */
     float bx = CONTENT_R - 16 - 27.6f, by = SB_MID - 6, x = bx - 6;
     /* wifi-sbos-next: the Wi-Fi glyph while joined with an address */
     if (SB_WIFI) { x -= 17; d_icon(d, "sb-wifi", x, SB_MID - 6, 1); x -= 6; }
@@ -2780,6 +2781,9 @@ static void clk_tap(float x, float y)
     }
     clk_update(t);
 }
+static float isl_next_update(float t);              /* B7: shell_island.inc */
+static int isl_refresh(float t);
+static int isl_sync(void);
 /* when the platform should come back for the clock (ms; < 0: nothing pending) */
 int sh_next_update(float t)
 {
@@ -2798,6 +2802,8 @@ int sh_next_update(float t)
     if (nb >= 0 && (best < 0 || nb < best)) best = nb;
     float cb = cm_next_update(t);                       /* helper I: an ended call's screen */
     if (cb >= 0 && (best < 0 || cb < best)) best = cb;
+    float ib = isl_next_update(t);                      /* B7: the pill's hold, USB power's capsule */
+    if (ib >= 0 && (best < 0 || ib < best)) best = ib;
     return (int)best;
 }
 int sh_refresh(float t)
@@ -2806,6 +2812,7 @@ int sh_refresh(float t)
     int ch = clk_update(t);
     if (med_pending() && !sh_moving()) ch |= med_work(10000, 1);
     ch |= sv_refresh(t) | nc_refresh(t) | cm_refresh(t);               /* survival-next: SOS's beacon, USB power's state; helper D: the banner */
+    ch |= isl_refresh(t);                              /* B7: the capsule (SOS, USB power), the pill's hold */
     if (ch && AP.on) sw_dirty = 1;                     /* helper D: the switcher's snapshot is old now */
     return ch;
 }
@@ -3697,42 +3704,8 @@ static void app_finish_close(void)
     sv_closed();                                                /* survival-next (over the lock: home hidden again) */
 }
 
-/* ---- the toast (the concept's #toast: dark glass, 13 pt / 600, from 90 pt above with an overshoot, 2 s) ------ */
+/* ---- the toast: B7 made it the live pill's expanded state (shell_island.inc: toast(), the island's group toastl) */
 static tk_layer toastl;
-static float toast_o = -90, toast_from = -90, toast_to = -90, toast_t = 1, toast_left;
-static tk_spring sp_toast;
-/* B4 (audit 17): it pops from the status bar's centre (scale .8 -> 1, a short drop, the fade) on the toast spring
- * (response .35, damping .75) and shrinks back the same way; toast_o is 0 shown, -90 gone (the states' values) */
-static void toast_place(void)
-{
-    if (toast_t >= 1) { toast_o = toast_to; sp_toast.live = 0; }
-    float p = tk_clampf(1 + toast_o / 90, 0, 1.15f);
-    toastl.sx = toastl.sy = .8f + .2f * p;
-    toastl.ox = PT(195);
-    toastl.oy = PT(23);
-    toastl.y = toastl.by + PT((1 - tk_minf(1, p)) * -12);
-    toastl.alpha = tk_clampf(p * 1.6f, 0, 1);
-    toastl.hidden = (toast_t >= 1 && toast_to <= -90) || toastl.alpha <= .004f;
-    if (toastl.hidden && toastl.bmp.px) relayer(&toastl);       /* P3s: nothing kept once it is gone */
-}
-static void toast(const char *msg)
-{
-    float w = tk_minf(tw(TK_IT600, 13, msg, 0, 0) + 30, CONTENT_W), x = 195 - w / 2;
-    relayer(&toastl);
-    /* in an app its backdrop is the app's ground; elsewhere the wallpaper's glass (the shell's backdrop) */
-    /* P3i (audit 17): in the status bar's band (y 6), never over the lock's date or a page's title */
-    dc d = mk(&toastl, "toast", x, 6, w, 34, 32, !AP.on);
-    if (AP.on) d_lg_flat(&d, x, 6, w, 34, 17, 1);
-    else d_glass(&d, x, 6, w, 34, 17, 1, 1);
-    d_text_box(&d, TK_IT600, 13, x + 15, bl(TK_IT600, 13, 6 + 9), w - 30, 0, msg, 0, 0, INK, 0);   /* P3p: one line */
-    trim(&toastl);
-    relink();
-    toast_from = toast_o;
-    toast_to = 0;
-    toast_t = 0;
-    toast_left = 2000;
-    toast_place();
-}
 
 /* ---- sleep and wake (P2r): the screen off as a fade to black, the screen on as the lock screen growing in from
  * black (iOS's wake: a little larger to its place); while black the shell goes back to the lock screen. The kernel
@@ -4078,6 +4051,7 @@ void sh_cell(const sh_cell_t *c)
     if (CCS.built) { build_cc_grid(); cc_link(); }
     relink();
     lock_ver++;
+    isl_sync();                                      /* B7: mobile data starting: the blue capsule (drawn in this push's frame) */
 }
 
 #include "shell_kit.inc"                             /* helper B2: alerts, action sheets, sheets, switches, sliders, lists */
@@ -4111,6 +4085,7 @@ void sh_restore(void)
     sw_restore();
     if (sh_pref_int("cc.wifi", 0) == 1) (void)sh_wifi_power(1);   /* a refusal leaves it off; the choice stays */
 }
+#include "shell_island.inc"                         /* B7: the status capsule, the live pill (toasts) */
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
@@ -4192,6 +4167,7 @@ static void relink(void)
     cm_link();                                       /* helper I: the call screen (cvl) */
     kit_link();                                      /* helper B2: an alert, an action sheet, a sheet (kitl) */
     link(&root, r, 21);
+    isl_link();                                      /* B7: the capsule, the pill and its words */
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &emsel, &kbg, &emp, &apsb, &apphl };
     link(&appg, ag, 16);                             /* B3: emsel the edit menu's selection, emp its pill */
     kb_link();                                       /* B3: the keyboard's panel, keys, lit key and balloon */
@@ -4256,8 +4232,7 @@ void sh_init_begin(tk_comp *c)
     apnum.hidden = 1;
     tk_layer_init(&apicon, "app-icon");
     apicon.hidden = 1;
-    tk_layer_init(&toastl, "toast");
-    toastl.hidden = 1;
+    isl_init();                                    /* B7: the island's group (toastl) */
     tk_layer_init(&cfl, "confirm");
     cfl.hidden = 1;
     tk_layer_init(&slp, "sleep");                  /* black over everything, its opacity the fade */
@@ -4374,7 +4349,7 @@ static void back_to_lock(int exit_em)
     sw_reset();                                    /* helper D: the switcher (the recents and their snapshots stay) */
     free_cc_all();                                 /* P3s: the lock keeps none of it */
     relink();
-    toast_t = 1; toast_to = toast_from = -90; toast_left = 0; toast_place();
+    isl_toast_hide();                              /* B7: the pill gone */
     locked = 1;
     set_lock(0);
     mark_a = mark_t; glyph_a = glyph_t; hint_a = 0; hint_left = 0;
@@ -4413,6 +4388,7 @@ void sh_set(const char *what, const char *key, float v)
                 }
     } else if (!tk_strcmp(what, "reset")) {
         cm_reset();                                /* helper I: a film's start: no call screen */
+        isl_reset();                               /* B7 */
         back_to_lock(1);
     } else if (!tk_strcmp(what, "sleep")) {        /* the films: the Power key's fade (v 1) and the wake (v 0) */
         if (v > 0) sh_sleep(0); else sh_wake();
@@ -4434,9 +4410,7 @@ void sh_set(const char *what, const char *key, float v)
         set_emergency(v > 0, 1);
         while (sv_idle_pending()) sv_idle();         /* survival-next: a set state is whole at once */
         place_list();
-        toast_t = 1;
-        toast_to = toast_from = 0;
-        toast_place();
+        isl_settle();                                /* B7: its toast whole */
     } else if (!tk_strcmp(what, "cell")) {
         /* the modem's state for the host's stills: "on" (emergency-only, GSM, v bars), "starting", "off" */
         sh_cell_t c = { SH_CELL_OFF, -1, 0, 0, -1, SH_DATA_OFF, "", "" };
@@ -4466,9 +4440,9 @@ void sh_set(const char *what, const char *key, float v)
         if (AP.on) build_app_page(AP.a);
     } else if (!tk_strcmp(what, "toast")) {
         toast(key);
-        toast_t = 1;
-        toast_to = toast_from = 0;
-        toast_place();
+        isl_settle();                                /* B7: the pill open with it */
+    } else if (!tk_strcmp(what, "island")) {
+        isl_set(key, v);                             /* B7: shell_island.inc */
     } else if (!tk_strcmp(what, "cc")) {
         if (!CCS.built || cc_stale) { build_cc(); cc_stale = 0; }
         sp_cc.live = 0;
@@ -4714,6 +4688,7 @@ static int notes_hold(float t)
 void sh_touch(int phase, float x, float y, float t)
 {
     now_ms = t;
+    { int r = isl_touch(phase, x, y, t); if (r) { if (r == 1) T.kind = G_NONE; return; } }   /* B7: the capsule, the call's minimise */
     if (cm_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* helper I: the call screen, the call button's hold */
     if (sv_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* survival-next: SOS's beacon, a tool's hold */
     if (kit_touch(phase, x, y, t)) { if (T.kind == G_SET) se_touch(2, -1, -1, t); T.kind = G_NONE; hl_off(); return; }   /* helper B2: modal */
@@ -5270,18 +5245,7 @@ int sh_tick(float dt, float t)
         if (t - T.t0 >= 700) { T.arg = 1; sh_haptic_k(SH_HAP_MEDIUM); set_emergency(!EMG, 0); }
         mv = 1;
     }
-    if (toast_t < 1) {
-        if (!sp_toast.live || sp_toast.to != toast_to)
-            tk_spring_start(&sp_toast, toast_o, toast_to, sp_toast.live ? sp_toast.v : 0, TK_SPR_POP);
-        if (!tk_spring_step(&sp_toast, dt)) toast_t = 1;
-        toast_o = sp_toast.x;
-        toast_place();
-        mv = 1;
-    }
-    if (toast_left > 0) {
-        toast_left -= dt * 1000;
-        if (toast_left <= 0) { toast_from = toast_o; toast_to = -90; toast_t = 0; }
-    }
+    mv |= isl_tick(dt, t);                           /* B7: the live pill (toasts), the status capsule */
     if (sp_cc.live) {
         int live = tk_spring_step(&sp_cc, dt);
         set_cc(tk_maxf(0, sp_cc.x));
@@ -5486,6 +5450,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
     }
     if (tchange || wchange) prep_tree(home.child);   /* P3g: not in the next frame that shows home (22 ms) */
     if (tchange || wchange) lock_ver++;
+    if (tchange) isl_sync();                     /* B7: the capsule's time */
 }
 
 /* the half copies of a subtree (hidden ones too: home is drawn the moment the unlock starts) */
@@ -5558,7 +5523,7 @@ int sh_moving(void)
 {
     int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB ||
             T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || T.kind == G_CC || T.kind == G_CCSL || sp_cc.live ||
-            T.kind == G_APP || sp_app.live || booting || toast_t < 1 || em_t < 1 || T.kind == G_CCEM ||
+            T.kind == G_APP || sp_app.live || booting || isl_moving() || em_t < 1 || T.kind == G_CCEM ||
             T.kind == G_CCCELL || CF.down || CF.a != CF.at || SL.dir || T.kind == G_CCDRAG || T.kind == G_FOCUSDRAG || sv_moving() ||
             T.kind == G_CCX || (T.kind == G_CCTAP && CCS.on) || cc_moving();
     for (int g = 0; g < NG; g++) m |= K[g].sp.live || K[g].chev_t < 1;
