@@ -76,7 +76,7 @@ void disassemble_bifrost(FILE *fp, const void *code, size_t size, bool verbose);
 #define O_TLS 0xb800u
 #define O_JOB(i) (0xc000u + (i) * 0x100u)
 #define O_PAR(i) (0x10000u + (i) * 0x2000u)  /* FILL, COMP (64 quads of 80 bytes after 64), DOWN, UP; COMP2 last: */
-#define O_C2 0x20000u                        /* COMP2 v2: a 64-byte header + 127 quads of C2_QB bytes */
+#define O_C2 0x20000u                        /* COMP2 v2: a 64-byte header + up to 204 quads of C2_QB bytes (the kernel uses 200) */
 #define C2_QB 160u
 #define O_BIN 0x28000u                       /* COMP2's bins: 32 x 32 px, BIN_W x BIN_H, BIN_B bytes each */
 #define BIN_W 45u
@@ -290,7 +290,7 @@ static void build_comp(nir_builder *b)
  *   +96  ib len k s0            (flag 8) fade = sat((fy-ft)*it) * sat((fb-fy)*ib); (16 / 32) the 3-slice
  *   +112 s1 mstride mask(64)    +128 backdrop(64) bstride bk   +144 bw bh -  -     (flag 4) glass
  * v9, (flag 256) Liquid Glass: a transparent solid over the glass shape (the rounded box at +64 is the shape's),
- * +100..+115 the lens (lb, lt, lc, lr), the backdrop at +128: lens_px;
+ * +100..+115 the lens (lb, lt, lc, lr), the backdrop at +128, the tone at +152, +156, +120 (k, a0, a1): lens_px;
  * and the bins at O_BIN: one per 32 x 32 px (BIN_W per row), BIN_B bytes: [0] count (255: not damaged, the pixels
  * keep what the buffer holds), [1..] quad indices bottom to top. A pixel only visits its bin's quads. */
 #ifndef C2_PX
@@ -394,10 +394,11 @@ static nir_def *lens_px(nir_builder *b, nir_def *q, nir_def *fx, nir_def *fy)
    nir_def *Y = nir_fdot3(b, rgb0, nir_imm_vec3(b, .2126f, .7152f, .0722f));
    /* v10: the saturation (+116: 1.2 over a live backdrop, 1 over the wallpaper's, already saturated) */
    nir_def *rgb = nir_fsat(b, nir_ffma(b, nir_fsub(b, rgb0, Y), ch(b, v7, 1), Y));
-   /* the tone: .82 c + mix(.04, .18, sat((Y - .40) x 10)) */
+   /* the tone (1.0, glass V2: lens_shade_t): k c + a0 + a1 sat((Y - .40) x 10), k at +152, a0 at +156, a1 at +120
+    * (regular .82 / .04 / .14) */
    nir_def *lt = nir_fsat(b, nir_fmul_imm(b, nir_fadd_imm(b, Y, -.40), 10.0));
-   nir_def *add = nir_fadd_imm(b, nir_fmul_imm(b, lt, .14), .04);
-   nir_def *v = nir_ffma(b, rgb, nir_imm_float(b, .82f), add);
+   nir_def *add = nir_ffma(b, lt, ch(b, v7, 2), ch(b, v9, 3));
+   nir_def *v = nir_ffma(b, rgb, ch(b, v9, 2), add);
    nir_def *up = nir_ffma(b, nir_fsub(b, one, v), e, v);
    nir_def *dn = nir_fmul(b, v, nir_fadd_imm(b, e, 1.0));
    nir_def *o = nir_bcsel(b, nir_flt(b, z, e), up, dn);
