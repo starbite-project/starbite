@@ -111,15 +111,21 @@ int bthci_rx_byte(struct bthci_rx *r, uint8_t b)
         }
         return BTHCI_RX_MORE;
     }
-    /* ACL: a 4-byte header with the length le16 in its last two; SCO: 3 bytes, the length u8 last */
+    /* ACL: a 4-byte header with the length le16 in its last two (kept whole when it fits); SCO: 3 bytes, the length
+     * u8 last (skipped) */
     unsigned hdr = r->type == H4_ACL ? 4U : 3U;
-    if (r->have < hdr)
+    if (r->type == H4_ACL && r->have < sizeof(r->acl))
+        r->acl[r->have] = b;
+    else if (r->have < hdr)
         r->ev[r->have] = b;
     r->have++;
     if (r->have == hdr)
-        r->need = (uint16_t)(hdr + (r->type == H4_ACL ? (unsigned)(r->ev[2] | r->ev[3] << 8) : r->ev[2]));
-    if (r->need && r->have >= r->need) {
+        r->need = (uint16_t)(hdr + (r->type == H4_ACL ? (unsigned)(r->acl[2] | r->acl[3] << 8) : r->ev[2]));
+    if (r->have >= hdr && r->have >= r->need) {
+        int acl = r->type == H4_ACL && r->need <= sizeof(r->acl);
         r->type = 0;
+        if (acl)
+            return BTHCI_RX_ACL;
         r->skipped++;
         return BTHCI_RX_SKIPPED;
     }
@@ -322,7 +328,7 @@ static int same(const uint8_t *a, const uint8_t *b)
 }
 
 static void heard(struct bthci_devs *l, const uint8_t *addr, int le, int addr_type, int rssi, uint32_t cod,
-                  const uint8_t *ad, unsigned adlen)
+                  const uint8_t *ad, unsigned adlen, uint8_t psrm, uint16_t clkoff)
 {
     struct bt_dev *s = 0;
     l->reports++;
@@ -342,6 +348,8 @@ static void heard(struct bthci_devs *l, const uint8_t *addr, int le, int addr_ty
         s->has_rssi = 0;
         s->rssi = 0;
         s->cod = 0;
+        s->psrm = 1;
+        s->clkoff = 0;
         s->hits = 0;
         s->name[0] = 0;
     }
@@ -353,6 +361,10 @@ static void heard(struct bthci_devs *l, const uint8_t *addr, int le, int addr_ty
     }
     if (cod)
         s->cod = cod;
+    if (!le) {
+        s->psrm = psrm;
+        s->clkoff = (uint16_t)(clkoff | 0x8000U);
+    }
     if (ad && adlen) {
         char nm[sizeof(s->name)];
         bthci_ad_name(ad, adlen, nm, sizeof(nm));
@@ -373,20 +385,22 @@ int bthci_scan_event(struct bthci_devs *l, const uint8_t *ev)
     case BTEV_INQUIRY_RESULT:      /* addr 6, page scan mode 1, reserved 2, class 3, clock offset 2 */
         for (unsigned i = 0; len >= 1 && i < p[0] && 1 + 14 * (i + 1) <= len; i++) {
             const uint8_t *r = p + 1 + 14 * i;
-            heard(l, r, 0, 0, 127, (uint32_t)r[9] | (uint32_t)r[10] << 8 | (uint32_t)r[11] << 16, 0, 0);
+            heard(l, r, 0, 0, 127, (uint32_t)r[9] | (uint32_t)r[10] << 8 | (uint32_t)r[11] << 16, 0, 0, r[6],
+                  (uint16_t)(r[12] | r[13] << 8));
         }
         return 1;
     case BTEV_INQUIRY_RESULT_RSSI: /* addr 6, page scan mode 1, reserved 1, class 3, clock offset 2, rssi 1 */
         for (unsigned i = 0; len >= 1 && i < p[0] && 1 + 14 * (i + 1) <= len; i++) {
             const uint8_t *r = p + 1 + 14 * i;
-            heard(l, r, 0, 0, (int8_t)r[13], (uint32_t)r[8] | (uint32_t)r[9] << 8 | (uint32_t)r[10] << 16, 0, 0);
+            heard(l, r, 0, 0, (int8_t)r[13], (uint32_t)r[8] | (uint32_t)r[9] << 8 | (uint32_t)r[10] << 16, 0, 0, r[6],
+                  (uint16_t)(r[11] | r[12] << 8));
         }
         return 1;
     case BTEV_EXT_INQUIRY_RESULT:  /* one: as with RSSI, then 240 bytes of EIR */
         if (len >= 15) {
             const uint8_t *r = p + 1;
             heard(l, r, 0, 0, (int8_t)r[13], (uint32_t)r[8] | (uint32_t)r[9] << 8 | (uint32_t)r[10] << 16, r + 14,
-                  len - 15);
+                  len - 15, r[6], (uint16_t)(r[11] | r[12] << 8));
         }
         return 1;
     case BTEV_LE_META:             /* subevent 2: n x (type, addr type, addr 6, length, data, rssi) */
@@ -396,7 +410,7 @@ int bthci_scan_event(struct bthci_devs *l, const uint8_t *ev)
                 unsigned dl = p[at + 8];
                 if (at + 10 + dl > len)
                     break;
-                heard(l, p + at + 2, 1, p[at + 1], (int8_t)p[at + 9 + dl], 0, p + at + 9, dl);
+                heard(l, p + at + 2, 1, p[at + 1], (int8_t)p[at + 9 + dl], 0, p + at + 9, dl, 0, 0);
                 at += 10 + dl;
             }
             return 1;

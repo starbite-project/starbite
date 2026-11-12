@@ -23,9 +23,12 @@
  * The patch: VENDOR firmware/bcm4361B2_semco.hcd (S9 #1's module is SEMCO: Wi-Fi read OTP a1 33) or _murata, also
  * etc/bluetooth/, then the card's /STARBITE/FW/. Read and checked whole before the chip is powered. Never in git.
  * Address: the controller's own (Read_BD_ADDR), never EFS; never logged; LE scans use a random static address.
- * Seen on a phone: nothing of this file yet. */
+ * Seen on a phone (2026-11-12 18:26 and 22:32 probes): the bring-up, the patch, 3 Mbaud with RTS/CTS, LE scan and
+ * inquiry (11 devices). Keyboards (bt_pair.c, bt_l2cap.c, bt_hid.c) ride on this file's UART and event loop: events
+ * the scan does not take go to bt_pair.c, ACL packets too, and its H4 bytes go out here; not seen on a phone yet. */
 #include "bt.h"
 #include "bt_uart.h"
+#include "bt_pair.h"
 
 #define ALIVE 0x14050000ULL
 #define GPQ0 (ALIVE + 0xA0)
@@ -91,12 +94,14 @@ static void guard_wr(uint64_t pa, uint32_t v)
     user_wr(pa, v);
 }
 
+static void btp_glue_init(void);
 void bt_hal_set(const struct bt_hal *h)
 {
     G = *h;
     user_wr = h->io.wr32;
     G.io.wr32 = guard_wr;
     hal_ok = 1;
+    btp_glue_init();
 }
 
 void bt_set_module(int semco)
@@ -212,6 +217,8 @@ static void on_event(const uint8_t *ev)
             } else {
                 c_st = -1;
             }
+        } else {
+            (void)btp_event(ev);            /* the keyboard's commands */
         }
         return;
     }
@@ -222,10 +229,14 @@ static void on_event(const uint8_t *ev)
                 c_st = -1;
             else if (c_accept_status)
                 c_st = 2;
+        } else {
+            (void)btp_event(ev);
         }
         return;
     }
     if (bthci_scan_event(&devs, ev))
+        return;
+    if (btp_event(ev))
         return;
     if (ev[0] == BTEV_HW_ERROR) {
         struct btl l;
@@ -255,8 +266,11 @@ static void pump(void)
         int c = bt_uart_getc(&U);
         if (c < 0)
             break;
-        if (bthci_rx_byte(&rx, (uint8_t)c) == BTHCI_RX_EVENT)
+        int k = bthci_rx_byte(&rx, (uint8_t)c);
+        if (k == BTHCI_RX_EVENT)
             on_event(rx.ev);
+        else if (k == BTHCI_RX_ACL)
+            btp_acl(rx.acl, 4U + (unsigned)(rx.acl[2] | rx.acl[3] << 8));
     }
 }
 
@@ -264,6 +278,8 @@ static void pump(void)
 static int do_cmd(uint16_t op, const uint8_t *p, uint8_t n, uint32_t ms, int accept_status)
 {
     if (!issued) {
+        if (btp_cmd_busy())
+            return 0;                       /* the keyboard's command is in flight: ours after it */
         uint8_t pkt[4 + 255];
         unsigned k = bthci_cmd(pkt, sizeof(pkt), op, p, n);
         issued = 1;
@@ -367,6 +383,7 @@ static void shutdown(void)
     restored = same;
     inf.rx_errors = U.rx_err;
     inf.junk = rx.junk;
+    btp_chip_off();                         /* a keyboard link is gone with the chip */
 }
 
 static void fail(const char *w)
@@ -651,8 +668,8 @@ int bt_on(void)
 
 int bt_scan(unsigned le_ms, unsigned inquiry_ms)
 {
-    if (st != BT_READY)
-        return -1;
+    if (st != BT_READY || !btp_scan_ok())
+        return -1;                          /* off, starting, scanning, or a keyboard is being paired */
     bthci_devs_clear(&devs);
     nsorted = 0;
     scan_le_ms = le_ms;
@@ -1128,6 +1145,9 @@ int bt_step(void)
     if (!hal_ok)
         return 1;
     uint64_t t0 = now();
+    pump();
+    if (st == BT_READY || st == BT_SCANNING)
+        btp_step();                         /* the keyboard: its timers, commands and ACL out */
     for (;;) {
         pump();
         if (st != BT_STARTING && st != BT_SCANNING)
@@ -1152,9 +1172,24 @@ unsigned bt_wait_ms(void)
     uint64_t t = now();
     if (st != BT_STARTING && st != BT_SCANNING)
         return 0;
+    unsigned w = issued && c_st == 1 ? 1U : 0U;
     if (wake > t)
-        return (unsigned)((wake - t + 999U) / 1000U);
-    return issued && c_st == 1 ? 1U : 0U;
+        w = (unsigned)((wake - t + 999U) / 1000U);
+    unsigned p = st == BT_SCANNING ? btp_poll_ms() : 0U;
+    return p && p < w ? p : w;
+}
+
+unsigned bt_poll_ms(void)
+{
+    return hal_ok && (st == BT_READY || st == BT_SCANNING) ? btp_poll_ms() : 0U;
+}
+
+int bt_pair(int dev_index)
+{
+    const struct bt_dev *d = dev_index >= 0 ? bt_dev_at((unsigned)dev_index) : 0;
+    if (!hal_ok || !d)
+        return -1;
+    return btp_pair_dev(d, 1);
 }
 
 int bt_state(void)
@@ -1164,7 +1199,47 @@ int bt_state(void)
 
 const char *bt_why(void)
 {
+    if ((st == BT_READY || st == BT_SCANNING) && bt_pair_state() != BT_PAIR_IDLE)
+        return bt_pair_why();
     return why_s;
+}
+
+/* ---- the keyboard's glue (bt_pair.h) ---- */
+static unsigned h4_lost;
+static void p_h4(const uint8_t *p, unsigned n)
+{
+    if (U.up && bt_uart_write(&U, p, n, 50000))
+        return;
+    if (!h4_lost++)
+        say("bt: keyboard: a packet could not be sent (UART not up, or CTS held for 50 ms)");
+}
+static uint64_t p_now_ms(void)
+{
+    return now() / 1000U;
+}
+static int p_others(void)
+{
+    return issued && c_st == 1;
+}
+static int p_ready(void)
+{
+    return st == BT_READY;
+}
+static int p_on(void)
+{
+    return st == BT_READY || st == BT_SCANNING;
+}
+static uint32_t p_random(void)
+{
+    uint64_t x = now() * 0x9E3779B97F4A7C15ULL ^ (uint64_t)rx.junk << 17 ^ U.rx_err;
+    x ^= x >> 31;
+    x *= 0xBF58476D1CE4E5B9ULL;
+    return (uint32_t)(x >> 29);
+}
+static const struct btp_io p_io = { p_h4, p_now_ms, say, p_others, p_ready, p_on, p_random };
+static void btp_glue_init(void)
+{
+    btp_init(&p_io);
 }
 
 const struct bt_info *bt_info(void)
@@ -1197,6 +1272,9 @@ static void plog(const char *s)
     say(l.b);
 }
 
+static int p_kb, p_kb_code, p_kb_ok;        /* level 2's keyboard (below) */
+static unsigned p_keys;
+
 static void pass_line(int level)
 {
     struct btl l;
@@ -1225,6 +1303,15 @@ static void pass_line(int level)
         btl_s(&l, ", strongest ");
         btl_i(&l, devs.d[sorted[0]].rssi);
         btl_s(&l, " dBm");
+    }
+    if (level >= 2 && p_kb_ok) {
+        btl_s(&l, "; keyboard paired (");
+        btl_s(&l, p_kb_code ? "a code typed" : "Just Works");
+        btl_s(&l, "), HID boot protocol, ");
+        btl_u(&l, p_keys);
+        btl_s(&l, " keys typed, unpaired");
+    } else if (level >= 2) {
+        btl_s(&l, "; no keyboard tried");
     }
     btl_s(&l, level == 2 ? "; level 2 list above; everything back as found" : "; everything back as found");
     plog(l.b);
@@ -1264,6 +1351,171 @@ static struct bt_hal k_hal;
 static int p_level = -1, p_scanned;
 static uint64_t p_t0;
 
+/* level 2's keyboard: a RAM-only key store (wiped when the probe ends), the typed characters for the log */
+#define KB_PAIR_MS 60000U
+#define KB_TYPE_MS 20000U
+static uint64_t p_kb_t;
+static const char *p_kb_why;
+static uint8_t pk_addr[6], pk_key[16];
+static int pk_have;
+static struct btl p_typed;
+static unsigned p_lines;
+
+static int pk_same(const uint8_t *a)
+{
+    for (unsigned i = 0; i < 6; i++)
+        if (a[i] != pk_addr[i])
+            return 0;
+    return 1;
+}
+static int pk_get(const uint8_t a[6], uint8_t k[16])
+{
+    if (!pk_have || !pk_same(a))
+        return 0;
+    bthci_copy(k, pk_key, 16);
+    return 1;
+}
+static void pk_wipe(void)
+{
+    volatile uint8_t *k = pk_key;
+    for (unsigned i = 0; i < 16; i++)
+        k[i] = 0;
+    pk_have = 0;
+}
+static void pk_put(const uint8_t a[6], const uint8_t *k)
+{
+    if (k) {
+        bthci_copy(pk_addr, a, 6);
+        bthci_copy(pk_key, k, 16);
+        pk_have = 1;
+    } else if (pk_have && pk_same(a)) {
+        pk_wipe();
+    }
+}
+static void p_flush(void)
+{
+    if (!p_typed.n)
+        return;
+    struct btl l;
+    btl_init(&l);
+    btl_s(&l, "drvprobe: bt: typed: ");
+    btl_s(&l, p_typed.b);
+    say(l.b);
+    btl_init(&p_typed);
+    p_lines++;
+}
+static void p_key(int usage, int down, uint32_t uc)
+{
+    if (!down || (usage >= 0xE0 && usage <= 0xE7))
+        return;
+    p_keys++;
+    if (uc == '\n') {
+        btl_s(&p_typed, "<Enter>");
+        p_flush();
+        return;
+    }
+    if (p_typed.n > 200)
+        p_flush();
+    if (uc >= 0x20 && uc < 0x7f) {
+        char c[2] = { (char)uc, 0 };
+        btl_s(&p_typed, c);
+    } else {
+        btl_s(&p_typed, uc == 8 ? "<Backspace>" : uc == 9 ? "<Tab>" : uc == 0x1b ? "<Esc>" : "<");
+        if (uc != 8 && uc != 9 && uc != 0x1b) {
+            btl_x(&p_typed, (uint64_t)usage, 2);
+            btl_s(&p_typed, ">");
+        }
+    }
+}
+
+/* level 2 after the scan: pair a keyboard heard in pairing mode, show its code, log 20 s of typing, unpair.
+ * 1 while this runs (call again), 0 when done (or nothing to do) */
+static int probe_keyboard(unsigned *wait_ms)
+{
+    uint64_t t = now();
+    struct btl l;
+    if (p_kb == 0) {
+        int idx = -1;
+        for (unsigned i = 0; i < bt_ndev(); i++)
+            if (bt_is_keyboard(bt_dev_at(i))) {
+                idx = (int)i;
+                break;
+            }
+        if (idx < 0) {
+            plog("level 2: no keyboard heard in pairing mode (pairing not tried)");
+            p_kb = 9;
+            return 0;
+        }
+        bt_set_link_key_store(pk_get, pk_put);
+        bt_hid_set_key_cb(p_key);
+        btl_init(&p_typed);
+        p_keys = p_lines = 0;
+        p_kb_code = p_kb_ok = 0;
+        p_kb_why = 0;
+        btl_init(&l);
+        btl_s(&l, "level 2: pairing the keyboard \"");
+        btl_s(&l, bt_dev_at((unsigned)idx)->name[0] ? bt_dev_at((unsigned)idx)->name : "(no name)");
+        btl_s(&l, "\" (classic, class ");
+        btl_x(&l, bt_dev_at((unsigned)idx)->cod, 6);
+        btl_s(&l, ")");
+        plog(l.b);
+        if (bt_pair(idx) < 0) {
+            p_kb_why = bt_pair_why();
+            p_kb = 3;
+        } else {
+            p_kb = 1;
+            p_kb_t = t;
+        }
+    }
+    (void)bt_step();
+    int ps = bt_pair_state();
+    if (p_kb == 1) {
+        if (ps == BT_PAIR_CODE && !p_kb_code) {
+            p_kb_code = 1;
+            btl_init(&l);
+            btl_s(&l, "type ");
+            btl_s(&l, bt_pair_code());
+            btl_s(&l, " on the keyboard, then Enter");
+            plog(l.b);
+        }
+        if (ps == BT_PAIR_CONNECTED) {
+            plog("level 2: keyboard connected: logging what is typed for 20 s");
+            p_kb = 2;
+            p_kb_t = t;
+        } else if (ps == BT_PAIR_FAILED || ps == BT_PAIR_IDLE) {
+            p_kb_why = bt_pair_why();
+            p_kb = 3;
+        } else if (t - p_kb_t > (uint64_t)KB_PAIR_MS * 1000U) {
+            p_kb_why = "The keyboard did not connect within 60 s";
+            p_kb = 3;
+        }
+    } else if (p_kb == 2) {
+        if (!bt_hid_connected() || t - p_kb_t > (uint64_t)KB_TYPE_MS * 1000U) {
+            p_flush();
+            p_kb_ok = 1;
+            if (!bt_hid_connected())
+                plog("level 2: the keyboard disconnected before the 20 s were over");
+            p_kb = 3;
+        }
+    }
+    if (p_kb == 3) {
+        bt_unpair();
+        p_kb = 4;
+        p_kb_t = t;
+    }
+    if (p_kb == 4) {
+        if (bt_pair_state() == BT_PAIR_IDLE || t - p_kb_t > 4000000U) {
+            pk_wipe();
+            bt_hid_set_key_cb(0);
+            bt_set_link_key_store(0, 0);
+            p_kb = 9;
+            return 0;
+        }
+    }
+    *wait_ms = bt_poll_ms() ? bt_poll_ms() : 10U;
+    return 1;
+}
+
 int drv_bt_probe(int level, unsigned *wait_ms)
 {
     *wait_ms = 0;
@@ -1302,6 +1554,7 @@ int drv_bt_probe(int level, unsigned *wait_ms)
     if (p_level != level) {
         p_level = level;
         p_scanned = 0;
+        p_kb = 0;
         p_t0 = now();
         plog(level >= 2 ? "level 2: on, patched, fast rate; LE scan 12 s + inquiry 10 s, every device listed; then "
                           "off and everything back"
@@ -1315,11 +1568,14 @@ int drv_bt_probe(int level, unsigned *wait_ms)
     }
     if (now() - p_t0 > (uint64_t)budget * 1000U) {
         bt_off();
+        pk_wipe();
         p_level = -1;
         plog(restored ? "FAIL did not finish within its budget (off, everything back as found)"
                       : "FAIL did not finish within its budget, and NOT everything is back as found");
         return 1;
     }
+    if (p_kb && p_kb < 9)
+        return probe_keyboard(wait_ms) ? 0 : (*wait_ms = 0, 0);
     if (!bt_step()) {
         *wait_ms = bt_wait_ms();
         return 0;
@@ -1329,14 +1585,29 @@ int drv_bt_probe(int level, unsigned *wait_ms)
         bt_scan(level >= 2 ? 12000U : 5000U, level >= 2 ? 10000U : 5000U);
         return 0;
     }
+    if (st == BT_READY && level >= 2 && !p_kb) {
+        list_devices(BT_MAX_DEV);
+        p_kb = 0;
+        if (probe_keyboard(wait_ms))
+            return 0;
+    }
     if (st == BT_READY) {
-        list_devices(level >= 2 ? BT_MAX_DEV : 3U);
+        if (level < 2)
+            list_devices(3U);
         bt_off();
         p_level = -1;
-        if (restored)
+        if (level >= 2 && p_kb_why && !p_kb_ok) {
+            struct btl l;
+            btl_init(&l);
+            btl_s(&l, "FAIL the scan passed, the keyboard did not: ");
+            btl_s(&l, p_kb_why);
+            btl_s(&l, restored ? " (unpaired, off, everything back as found)" : " (NOT everything is back as found)");
+            plog(l.b);
+        } else if (restored) {
             pass_line(level);
-        else
+        } else {
             plog("FAIL the scan ran, but NOT everything is back as found (see above)");
+        }
         return 1;
     }
     {
@@ -1356,6 +1627,8 @@ void drv_bt_abort(void)
 {
     if (hal_ok)
         bt_off();
+    pk_wipe();
+    p_kb = 0;
     p_level = -1;
 }
 

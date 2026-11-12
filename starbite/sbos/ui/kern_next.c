@@ -2544,9 +2544,11 @@ static void bt_snapshot(void)
         BTS.nsnap++;
     }
 }
-static void bt_tick(void)
+static unsigned bt_next_ms;                          /* the soonest step this tick asked for (0: none) */
+static void bt_want(unsigned ms) { ms = ms ? ms : 1; if (!bt_next_ms || ms < bt_next_ms) bt_next_ms = ms; }
+static void bt_tick_scan(void)
 {
-    if (!bt_step()) { bt_arm(bt_wait_ms()); return; }   /* starting or scanning: again when it asks */
+    if (!bt_step()) { bt_want(bt_wait_ms()); return; }  /* starting or scanning: again when it asks */
     int s = bt_state();
     if (BTS.scanning) {
         BTS.scanning = 0;
@@ -2557,10 +2559,20 @@ static void bt_tick(void)
     if (!BTS.scan) return;
     uint64_t now = sb_ms();
     if (now >= BTS.until) { BTS.scan = 0; sb_log("next: bluetooth: scanning stopped (60 s)"); return; }
-    if (now < BTS.next_at) { bt_arm((unsigned)(BTS.next_at - now)); return; }
+    if (now < BTS.next_at) { bt_want((unsigned)(BTS.next_at - now)); return; }
     if (bt_scan(BT_SCAN_LE_MS, BT_SCAN_INQ_MS) < 0) { BTS.scan = 0; return; }
     BTS.scanning = 1;
-    bt_arm(1);
+    bt_want(1);
+}
+/* the drivers track's keyboard (kern/bt_pair.c): while one is pairing, connected or paired, bt_poll_ms() > 0 and the
+ * chip is stepped that often even when no scan runs (its events and key reports are read in bt_step) */
+static void bt_tick(void)
+{
+    bt_next_ms = 0;
+    bt_tick_scan();
+    unsigned p = bt_poll_ms();
+    if (p) bt_want(p);
+    if (bt_next_ms) bt_arm(bt_next_ms);
 }
 int sh_bt_on(int on)
 {

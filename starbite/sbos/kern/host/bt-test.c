@@ -136,6 +136,7 @@ static unsigned c_have;
 static const uint8_t *hcd;
 static uint32_t hcd_len;
 static int c_default_addr;
+static int c_keyboard, c_pages, c_ssp, c_scan_enable = -1;   /* a keyboard in pairing mode heard by the inquiry */
 static unsigned c_powerups;
 
 struct sched { uint64_t t; uint8_t b[260]; unsigned n; };
@@ -328,8 +329,33 @@ static void c_command(void)
             le_report(T + 400000, 0xA1, -50, "Kettle", 0);       /* the same device, stronger */
         }
         break;
+    case 0x1005: {
+        uint8_t r[7] = { 0xfd, 0x03, 64, 8, 0, 8, 0 };   /* 1021-byte ACL packets, 8 buffers */
+        c_cc(op, r, 7);
+        break;
+    }
+    case 0x0C56:
+        c_ssp = p[0];
+        c_cc(op, 0, 0);
+        break;
+    case 0x0C1A:
+        c_scan_enable = p[0];
+        c_cc(op, 0, 0);
+        break;
+    case 0x0405: {
+        /* Create_Connection: nobody answers the page (the keyboard's side is bthid-test's) */
+        uint8_t cc[13] = { 0x03, 11, 0x04, 0, 0 };
+        memcpy(cc + 5, p, 6);
+        cc[11] = 1;
+        c_pages++;
+        c_cs(op, 0);
+        schedule(T + 300000, cc, 13);
+        break;
+    }
     case 0x0401:
         c_cs(op, 0);
+        if (c_keyboard)
+            inquiry_eir(T + 600000, 0xB7, -45, "Desk Keyboard");
         inquiry_eir(T + 500000, 0xB1, -55, "Speaker");
         inquiry_rssi(T + 800000, 0xB2, -70);
         {
@@ -637,10 +663,12 @@ static void test_hci(void)
             else
                 CHECK(bthci_cmd_status(r.ev, &op, &s) && op == 0x0401 && s == 0, "Command Status of Inquiry");
         }
-        if (k == BTHCI_RX_SKIPPED)
+        if (k == BTHCI_RX_ACL) {
             skipped++;
+            CHECK(r.acl[0] == 1 && r.acl[2] == 2 && r.acl[4] == 0xaa && r.acl[5] == 0xbb, "the ACL packet");
+        }
     }
-    CHECK(events == 2 && skipped == 1 && r.junk == 1, "H4 framing: two events, one ACL skipped, one junk byte");
+    CHECK(events == 2 && skipped == 1 && r.junk == 1, "H4 framing: two events, one ACL packet, one junk byte");
 
     uint8_t pkt[16];
     uint8_t p2[2] = { 1, 1 };
@@ -911,6 +939,61 @@ int main(int argc, char **argv)
         bt_off();
         CHECK(bt_state() == BT_OFF && bt_restored() && as_found(), "bt_off: everything back");
     }
+
+    /* the keyboard glue through bt.c: bt_pair pages over the UART, the answer comes back as an event */
+    phone(0, 0);
+    c_keyboard = 1;
+    c_pages = c_ssp = 0;
+    c_scan_enable = -1;
+    bt_on();
+    {
+        unsigned k = 0;
+        while (!bt_step() && k++ < 1000000)
+            T += (uint64_t)bt_wait_ms() * 1000;
+        CHECK(bt_scan(0, 2000) == 0, "a scan for the keyboard");
+        while (!bt_step() && k++ < 1000000)
+            T += (uint64_t)bt_wait_ms() * 1000;
+        int kb = -1;
+        for (unsigned i = 0; i < bt_ndev(); i++)
+            if (bt_is_keyboard(bt_dev_at(i)))
+                kb = (int)i;
+        CHECK(kb >= 0 && !strcmp(bt_dev_at((unsigned)kb)->name, "Desk Keyboard") &&
+                  (bt_dev_at((unsigned)kb)->clkoff & 0x8000), "the keyboard found by its class, with its clock offset");
+        CHECK(bt_pair(-1) < 0 && bt_pair(99) < 0, "bt_pair: no such device");
+        CHECK(bt_pair(kb) == 0 && bt_pair_state() == BT_PAIR_CONNECTING, "bt_pair started");
+        CHECK(bt_scan(1000, 0) < 0, "no scan while pairing");
+        int st = 0;
+        for (k = 0; k < 200000 && (st = bt_pair_state()) != BT_PAIR_FAILED; k++) {
+            bt_step();
+            unsigned w = bt_poll_ms();
+            T += (uint64_t)(w ? w : 1) * 1000;
+        }
+        CHECK(c_ssp == 1 && c_pages == 1 && st == BT_PAIR_FAILED, "SSP on, the keyboard paged, the page timed out");
+        CHECK(strstr(bt_why(), "is it on and in pairing mode"), "bt_why() gives the pairing's words");
+        CHECK(bt_scan(1000, 0) == 0, "scans allowed again");
+        while (!bt_step() && k++ < 1000000)
+            T += (uint64_t)bt_wait_ms() * 1000;
+        static const uint8_t pa[6] = { 1, 2, 3, 4, 5, 6 };
+        bt_set_paired(pa);
+        for (k = 0; k < 100; k++) {
+            bt_step();
+            T += 1000;
+        }
+        CHECK(c_scan_enable == 2 && bt_poll_ms() == 50 && bt_pair_state() == BT_PAIR_WAITING,
+              "a paired keyboard: page scan on, polled every 50 ms");
+        bt_off();
+        CHECK(bt_state() == BT_OFF && bt_restored() && as_found() && bt_poll_ms() == 0, "off: nothing polled");
+        bt_set_paired(0);
+    }
+
+    /* level 2 with a keyboard heard: it is paged, does not answer: FAIL in words, everything back */
+    phone(0, 0);
+    c_pages = 0;
+    log_clear();
+    CHECK(run(2, 200000000) && last_line("FAIL") && logged("level 2: pairing the keyboard \"Desk Keyboard\"") &&
+              logged("is it on and in pairing mode") && c_pages == 1 && as_found(),
+          "level 2: the keyboard paged; its failure in words; everything back");
+    c_keyboard = 0;
 
     printf("bt-test: %d checks, %d failed\n", checks, failures);
     free(the_hcd);
