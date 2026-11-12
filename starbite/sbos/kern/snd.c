@@ -20,6 +20,7 @@
  *   earpiece     peak -6 dBFS, short -12 dBFS RMS, long -18 dBFS RMS
  *   headphones   peak -1 dBFS, no budget (the codec's own level does the rest) */
 #include "snd.h"
+#include "codec_media.h"
 #include <stdarg.h>
 
 #ifdef SBOS_KERNEL
@@ -1191,5 +1192,17 @@ void snd_init_libsb(void)
     o.codec_mic = codec_mic, o.codec_off = codec_off;
     o.amp_bus_ready = k_amp_bus_ready, o.codec_id_readonly = k_codec_id;
     (void)snd_init(&o, &k_hal);
+    snd_set_hp(codec_hp);                   /* codec_media.c: headphones on HPOUT2 */
+}
+
+/* The kernel's jack tick (every CODEC_JACK_POLL_MS = 50 ms while the screen is on or sound plays): the jack state into
+ * AUTO routing. The codec stays out of reset while this runs (codec_media.c), so the OS stops it when idle with the
+ * screen off. Returns CODEC_JACK_*. */
+int snd_jack_tick(void)
+{
+    int j = codec_jack_poll();
+    if (j >= 0)
+        snd_jack(j > 0);
+    return j;
 }
 #endif

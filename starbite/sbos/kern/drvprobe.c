@@ -9,6 +9,8 @@
 #include "drvprobe.h"
 #include "nled.h"
 #include "bathealth.h"
+#include "snd.h"
+#include "codec_media.h"
 
 /* ---- the list: filled in as each driver is merged ---- */
 #define DRV_LIST_BEGIN const struct drv_probe drv_probes[] = {
@@ -16,6 +18,8 @@
 #ifndef DRV_HOST_LIST
 DRV_LIST_BEGIN
     { "bathealth", drv_bathealth_probe, drv_bathealth_abort, 2000 },
+    { "codec", drv_codec_probe, drv_codec_abort, 14000 },
+    { "audio", drv_audio_probe, drv_audio_abort, 10000 },
     { "nled", drv_nled_probe, drv_nled_abort, 12000 },
 DRV_LIST_END
 #else

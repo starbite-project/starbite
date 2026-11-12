@@ -72,6 +72,7 @@ void snd_init_libsb(void);              /* the kernel's: libsb's ABOX HAL, amp.c
 #endif
 void snd_set_hp(int (*codec_hp)(int on, int level));   /* the headphone hook, when codec_media.c is linked */
 void snd_jack(int plugged);             /* from the jack detection: AUTO follows it */
+int snd_jack_tick(void);                /* kernel only: codec_jack_poll() -> snd_jack(); every 50 ms */
 
 /* streams */
 int snd_open(void);                     /* a stream id 0..3, or SND_EBUSY */
