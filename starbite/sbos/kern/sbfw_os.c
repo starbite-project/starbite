@@ -6,7 +6,9 @@
  *     watchdog, crash detection and what follows a crash, Starbite OS as the boot menu (shell mode);
  *   - one-shot requests for an OS's next start (verbose, safe mode, single user, previous kernel, XNU single user);
  *   - the crash reports of the home store's "crashlog", the loader's table (sb_fw) for "why this start";
- *   - restarts: an OS once, the plain boot menu once, Starbite Recovery, Download mode.
+ *   - restarts: an OS once, the plain boot menu once, Starbite Recovery (its main page, or REPAIR AND RESET:
+ *     "recovery-repair"), Download mode; Starbite OS at power-on (sh_shell_set).
+ * The health checks, the store check, the logs and the update slots: kern/sbfw_health.c.
  * Every restart and every one-shot asks first with the kernel's hold confirmation (kui_confirm: Next draws it in
  * its own look) and switches everything off as for a restart (power_boot_os). A settings write is the user's tap
  * on that row: the store gate is opened for exactly that one record write (tier 1, kind store) and closed again.
@@ -115,7 +117,7 @@ static int known(const char *key)
 
 /* ---- confirmations and restarts ---------------------------------------------------------------------------------- */
 
-enum { RS_ONCE = 1, RS_REQ, RS_MENU, RS_RECOVERY, RS_DOWNLOAD };
+enum { RS_ONCE = 1, RS_REQ, RS_MENU, RS_RECOVERY, RS_DOWNLOAD, RS_REPAIR };
 static struct { int what; unsigned action; char key[24]; } pend;
 
 static void download_now(void)
@@ -181,6 +183,11 @@ static void restart_done(int ok)
         if (!dry())
             power_boot_os("recovery");
         break;
+    case RS_REPAIR:
+        say("restart to Starbite Recovery's repair page (\"recovery-repair\")", 0);
+        if (!dry())
+            power_boot_os("recovery-repair");
+        break;
     case RS_DOWNLOAD:
         say("restart to Download mode", 0);
         if (!dry())
@@ -220,7 +227,9 @@ int sh_req_fits(const char *key, int action)
 {
     int k = key && key[0] ? cat_find(key) : -1;
     const struct cat_ent *c = k >= 0 ? cat_get((unsigned)k) : 0;
-    return c && action > 0 && action != SH_REQ_WINRE && sbfw_req_fits((unsigned)action, c->method);
+    /* WINRE: plan only; NO_SHELL: not a start's request (sbfw_req_fits says 0 for both); DRIVER_OFF: UEFI rows */
+    return c && action > 0 && action != SH_REQ_WINRE && action != SH_REQ_NO_SHELL &&
+           sbfw_req_fits((unsigned)action, c->method);
 }
 
 int sh_req_start(const char *key, int action)
@@ -234,10 +243,86 @@ int sh_req_start(const char *key, int action)
     ub_s(&u, "Start ");
     ub_s(&u, c->name[0] ? c->name : key);
     ub_s(&u, action == SH_REQ_VERBOSE ? " verbose?" : action == SH_REQ_SAFE ? " in safe mode?" :
-              action == SH_REQ_PREV ? " with the previous kernel?" : " in single user mode?");
+              action == SH_REQ_PREV ? " with the previous kernel?" :
+              action == SH_REQ_DRIVER_OFF ? " with the Starbite drivers off?" : " in single user mode?");
     sb_strcpy(t, sizeof(t), u.b);
     return ask(RS_REQ, key, (unsigned)action, t, "For this one start only: the loader applies it and clears it after.",
                "Starbite OS closes now.");
+}
+
+/* ---- the lock screen's slide-to-start sheet: the one-shots with a reason, and the start after the slide ---------- */
+
+const char *sh_req_label(int action)
+{
+    switch (action) {
+    case SH_REQ_VERBOSE:    return "Verbose";
+    case SH_REQ_SAFE:       return "Safe Mode";
+    case SH_REQ_SINGLE:     return "Single User";
+    case SH_REQ_PREV:       return "Previous Kernel";
+    case SH_REQ_XNU_SINGLE: return "Single User (XNU)";
+    case SH_REQ_DRIVER_OFF: return "Drivers Off";
+    default:                return "";
+    }
+}
+
+int sh_req_why(const char *key, int action, char *why, int cap)
+{
+    const char *w = 0;
+    int k = key && key[0] ? cat_find(key) : -1;
+    const struct cat_ent *c = k >= 0 ? cat_get((unsigned)k) : 0;
+    if (!c)
+        w = "Not in the catalog";
+    else if (!sh_req_label(action)[0])
+        w = "Not available";
+    else if (!sbfw_req_fits((unsigned)action, c->method))
+        w = action == SH_REQ_SAFE ? "Only for Starbite systems" :
+            action == SH_REQ_SINGLE || action == SH_REQ_PREV ? "Only for Linux systems" :
+            action == SH_REQ_XNU_SINGLE ? "Only for Apple systems" :
+            action == SH_REQ_DRIVER_OFF ? "Only for Windows" : "Not for this system";
+    else if (!star_entry_ready((unsigned)k, 0))
+        w = "Not installed";
+    else if (store_home() < 0)
+        w = "No settings store";
+    else if (action == SH_REQ_PREV) {
+        struct store_ent e;                       /* the loader's rule: "linux-prev.image" in the store */
+        if (!store_find("linux-prev.image", &e))
+            w = "No previous kernel in the store";
+    }
+    if (why && cap > 0)
+        sb_strcpy(why, (unsigned)cap, w ? w : "");
+    return !w;
+}
+
+int sh_boot_os_req(const char *key, int action)
+{
+    char why[48];
+    if (!sh_req_why(key, action, why, sizeof(why))) {
+        sb_logf("startup: the one-shot does not fit: ", why);
+        return SBFW_E_NOFIT;
+    }
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "arm the one-shot \"");
+    ub_s(&u, sbfw_req_name((unsigned)action));
+    ub_s(&u, "\" (the slide) and restart into");
+    say(u.b, key);
+    if (dry())
+        return -1;
+    int e = store_gate("startup: a one-shot request (the slide)");
+    if (!e) {
+        e = sbfw_request_arm(key, (unsigned)action);
+        sb_gate_close();
+    }
+    if (e) {
+        ub_init(&u);
+        ub_s(&u, "startup: the request was not written (");
+        ub_sdec(&u, e);
+        ub_s(&u, "): not restarted");
+        sb_log(u.b);
+        return e < 0 ? e : -1;
+    }
+    power_boot_os(key);
+    return 0;
 }
 
 int sh_restart_menu(void)
@@ -252,6 +337,12 @@ int sh_restart_recovery(void)
                "Restart from there to come back.");
 }
 
+int sh_restart_repair(void)
+{
+    return ask(RS_REPAIR, 0, 0, "Restart to Repair and Reset?", "Starbite Recovery opens its repair page (an older loader: its main page).",
+               "Restart from there to come back.");
+}
+
 int sh_restart_download(void)
 {
     return ask(RS_DOWNLOAD, 0, 0, "Restart to Download mode?", "S-Boot's Odin mode, for flashing from a computer.",
@@ -259,6 +350,13 @@ int sh_restart_download(void)
 }
 
 /* ---- the loader's settings ----------------------------------------------------------------------------------------- */
+
+/* kern/sbfw_health.c's logs write too */
+int sbfw_os_gate(const char *what);
+int sbfw_os_gate(const char *what)
+{
+    return store_gate(what);
+}
 
 static int store_gate(const char *what)
 {
@@ -342,6 +440,16 @@ int sh_fw_set(const sh_fw_t *f)
     } else
         sb_log("startup: the loader's settings written (the next start reads them)");
     return e;
+}
+
+/* Starbite OS at power-on (shell mode): libsb marks a changed value as the user's choice (SBFW_FLAG_SHELL_SET) */
+int sh_shell_set(int on)
+{
+    sh_fw_t f;
+    if (sh_fw_get(&f) < 0)
+        return SBFW_E_NOHOME;
+    f.shell = !!on;
+    return sh_fw_set(&f);
 }
 
 int sh_os_make_default(const char *key)

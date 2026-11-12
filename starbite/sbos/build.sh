@@ -56,6 +56,7 @@ if [ "$native" = 1 ]; then
     CC=gcc sh "$here/kern/host/passcode-test.sh"          # Track A: the passcode (kern/passcode.c)
     CC=gcc sh "$here/kern/host/prefs-test.sh"             # Track A: prefs and blobs (kern/prefs.c)
     CC=gcc sh "$here/kern/host/update-test.sh"            # Track A: Software Update (kern/update.c on libsb's slots)
+    CC=gcc sh "$here/kern/host/sbfw-health-test.sh"       # Track J FW4: Settings > Startup's checks (kern/sbfw_health.c)
     CC=gcc sh "$here/kern/host/photos-test.sh"            # Track A: the Camera's photo store (kern/photos.c)
     CC=gcc sh "$here/kern/host/nledpol-test.sh"           # Track A: the notification LED's policy (kern/nledpol.c)
     gcc -std=gnu11 -O2 -Wall -Wextra -Werror -I "$here/kern" "$here/kern/host/lens-test.c" -lm -o "$ob/lens-test" &&
@@ -178,7 +179,8 @@ for src in "$lib"/*.c "$lib"/*.S "$here"/kern/*.c "$here"/kern/*.S "$ut/tz.c" "$
            "$wifi/core.c" "$wifi/exynos_pcie.c" "$wifi/chip.c" "$wifi/fw.c" "$wifi/ring.c" "$wifi/msgbuf.c" "$wifi/link.c" \
            "$wifi/wpa.c" "$wifi/sae.c" "$wifi/net.c" "$wifi/ext4.c" "$wifi/erofs.c" "$wifi/sb/bcmw_sb.c" \
            "$wifi/tcp.c" "$wifi/netio.c" "$wifi/http.c" "$wifi/tls/ta.c" "$wifi/tls/tls_chains.c" "$wifi/tls/tls_check.c" \
-           "$root/starbite/guest/sbos/guest.c" "$root/starbite/guest/host/sbghost.c"; do
+           "$root/starbite/guest/sbos/guest.c" "$root/starbite/guest/host/sbghost.c" \
+           "$root/shim/starlte/sbfwfs.c"; do      # Track J FW4: the loader's read-only checkers (kern/sbfw_health.c)
     obj="$ob/k_$(basename "$src" | tr . _).o"
     flags=$CFLAGS
     case "$src" in                          # BearSSL's headers include <string.h>: the shim's, not the C library's

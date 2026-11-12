@@ -57,6 +57,8 @@ int sbfw_settings_write(const struct sbfw_settings *s);
 /* The loader's mailbox keys (10.3): the plain boot menu once / Starbite Recovery (never return). */
 void sb_boot_menu_next(void) __attribute__((noreturn));
 void sb_boot_recovery_next(void) __attribute__((noreturn));
+/* Starbite Recovery's REPAIR AND RESET page once ("recovery-repair"; an older loader: Recovery's main page). */
+void sb_boot_repair_next(void) __attribute__((noreturn));
 
 /* 1 if request req (SBFW_REQ_*) can apply to an entry of catalog method m (catalog.h M_*): the loader's
  * sbfw_req_fits byte for byte (WINRE plan only, NO_SHELL not a start's request: 0). */
