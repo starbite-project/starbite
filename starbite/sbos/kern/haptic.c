@@ -156,6 +156,8 @@ static void end_hook(int ended)
         done();
         return;
     }
+    if (sb_ms() + 2U < H.t_due)             /* the end of a pulse we did not start (SOS's Morse vib_pulse): not ours */
+        return;
     advance();
 }
 

@@ -12,6 +12,12 @@ enum { SHUB_OFF = 0, SHUB_STARTING, SHUB_RUNNING, SHUB_FAILED };
  * version), then everything back as found; else the full start (the patch download, SSP, the three sensors on).
  * Nothing happens here: shub_step does the work. */
 void shub_begin(int probe_only);
+/* drivers track: shub_begin with only the listed sensors started (shub_begin(p) = shub_begin_ex(p, SHUB_SENS_ALL)) */
+#define SHUB_SENS_ACCEL 1U
+#define SHUB_SENS_MAG 2U
+#define SHUB_SENS_STEPS 4U
+#define SHUB_SENS_ALL 7U
+void shub_begin_ex(int probe_only, unsigned mask);
 /* One slice of the bring-up (at most about 100 ms). 0: call again after shub_wait_ms(); 1: finished (the probe:
  * done and left; the full start: running or failed: see shub_state) */
 int shub_step(void);

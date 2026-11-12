@@ -233,6 +233,7 @@ static struct {
     unsigned dl_off, dl_recs;
     uint64_t dl_t0;
     int ssp_i, ssp_tries;
+    unsigned mask;                          /* drivers track: SHUB_SENS_* started at bring-up */
     int pass;                               /* the probe: the ASIC id was read */
 } M;
 
@@ -1038,6 +1039,13 @@ void shub_leave(void)
 /* ---- the bring-up --------------------------------------------------------------------------------------------- */
 void shub_begin(int probe_only)
 {
+    shub_begin_ex(probe_only, SHUB_SENS_ALL);
+}
+
+/* drivers track: the same bring-up with only the SHUB_SENS_* sensors in mask added at the end (0: none, e.g. a call
+ * that needs only proximity, which shub_more.c adds with shub_enable_type) */
+void shub_begin_ex(int probe_only, unsigned mask)
+{
     if (F.clocks || F.pins || F.nstdby)
         shub_leave();                       /* (a second start: the first one's registers back first) */
     memset(&M, 0, sizeof(M));
@@ -1048,6 +1056,7 @@ void shub_begin(int probe_only)
     shp_rx_init(&L.rx);
     shp_ssp_rx_init(&SR);
     M.probe = probe_only;
+    M.mask = mask & SHUB_SENS_ALL;
     M.verbose = probe_only;
     M.st = ST_LOOK;
     M.state = SHUB_STARTING;
@@ -1488,12 +1497,15 @@ int shub_step(void)
         return 0;
     case ST_SSP:
         if (!C.busy) {
+            while (M.ssp_i >= 5 && M.ssp_i < SSP_STEPS && !(M.mask & (1U << (M.ssp_i - 5))))
+                ++M.ssp_i;                  /* drivers track: a sensor left out of shub_begin_ex's mask */
             if (M.ssp_i >= SSP_STEPS) {
                 M.state = SHUB_RUNNING;
                 M.why = "running";
                 M.st = ST_RUN;
                 ++X.starts;                 /* drivers track: shub_more.c turns its sensors on again */
-                sb_log("shub: running: accelerometer, magnetometer and step counter on (100 ms)");
+                sb_log(M.mask == SHUB_SENS_ALL ? "shub: running: accelerometer, magnetometer and step counter on (100 ms)" :
+                       "shub: running, with only some of accelerometer / magnetometer / steps (shub_begin_ex's mask)");
                 return 1;
             }
             if (!ssp_begin(M.ssp_i)) {
