@@ -1,0 +1,246 @@
+diff --git a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
+index 337f761..f9c7cfc 100644
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -103,47 +103,128 @@ wgl_panfrost_create(void)
+    return screen;
+ }
+ 
++/* sb-patches/0145: the present costs as little CPU as GDI allows.
++ *  - The window's back buffers are linear already: stw creates them with PIPE_BIND_DISPLAY_TARGET (stw_st.c), and
++ *    Panfrost makes every DISPLAY_TARGET/SCANOUT/SHARED resource created without a modifier linear
++ *    (panfrost_resource_create_with_modifier, PAN_BIND_SHARED_MASK). So the READ map below is the BO itself:
++ *    panfrost_ptr_map waits for the frame's writer and returns the pointer, with no detile or staging copy.
++ *  - stw's pixel formats are B8G8R8X8/B8G8R8A8 first, which is GDI's own layout: those go to StretchDIBits straight
++ *    from the mapping (a DIB stride/4 pixels wide, drawn 1:1), so this code touches no pixel at all.
++ *  - Other formats (RGBA swaps, A8R8G8B8, 10-bit, FP16) are converted into a buffer kept across frames.
++ *  - A minimized window or an empty clip box still waits for the frame (the map), but copies nothing.
++ * The back buffer is write-combined CPU memory (sbwddm's segment is not cache-coherent), so the one read GDI makes
++ * of it stays the main cost. SB_GL_PRESENT=copy forces the buffered path, for A/B tests. */
++#include "wgl_sb_present.h"
++#include "util/log.h"
++#include "util/simple_mtx.h"
++#include "util/u_atomic.h"
++
++DEBUG_GET_ONCE_OPTION(sb_gl_present, "SB_GL_PRESENT", NULL)
++
++static simple_mtx_t wgl_pan_present_mtx = SIMPLE_MTX_INITIALIZER;
++static void *wgl_pan_present_buf;   /* the converted frame, kept: no malloc per frame */
++static size_t wgl_pan_present_size;
++static int wgl_pan_direct = -1;     /* -1: not decided, 1: GDI reads the mapping, 0: it doesn't, copy */
++
++static int
++wgl_panfrost_dib(HDC hDC, const void *bits, unsigned dib_width, unsigned w, unsigned h)
++{
++   BITMAPINFO bmi = {0};
++   bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
++   bmi.bmiHeader.biWidth = (LONG)dib_width;
++   bmi.bmiHeader.biHeight = -(LONG)h; /* top-down, as gdi_sw_display: the GL frontend flips window framebuffers */
++   bmi.bmiHeader.biPlanes = 1;
++   bmi.bmiHeader.biBitCount = 32;
++   bmi.bmiHeader.biCompression = BI_RGB;
++   return StretchDIBits(hDC, 0, 0, (int)w, (int)h, 0, 0, (int)w, (int)h, bits, &bmi, DIB_RGB_COLORS, SRCCOPY);
++}
++
++/* Converts the mapped frame into the kept buffer and shows it; returns StretchDIBits' result (0: nothing shown). */
++static int
++wgl_panfrost_present_copy(HDC hDC, enum pipe_format format, enum sb_present_kind kind, const uint8_t *map,
++                          size_t stride, unsigned w, unsigned h)
++{
++   size_t row = (size_t)w * 4, size = row * h;
++   int shown = 0;
++
++   simple_mtx_lock(&wgl_pan_present_mtx);
++   if (size > wgl_pan_present_size) {
++      free(wgl_pan_present_buf);
++      wgl_pan_present_buf = malloc(size);
++      wgl_pan_present_size = wgl_pan_present_buf ? size : 0;
++   }
++   void *buf = wgl_pan_present_buf;
++   bool ok = buf != NULL;
++   if (ok) {
++      switch (kind) {
++      case SB_PRESENT_BGRX:
++         sb_present_copy_rows(buf, row, map, stride, row, h);
++         break;
++      case SB_PRESENT_RGBX:
++         sb_present_rgba_to_bgra_rows(buf, row, map, stride, w, h);
++         break;
++      default:
++         ok = util_format_translate(util_format_is_srgb(format) ? PIPE_FORMAT_B8G8R8X8_SRGB
++                                                                 : PIPE_FORMAT_B8G8R8X8_UNORM,
++                                    buf, (unsigned)row, 0, 0, format, map, (unsigned)stride, 0, 0, w, h);
++         break;
++      }
++   }
++   if (ok)
++      shown = wgl_panfrost_dib(hDC, buf, w, w, h);
++   simple_mtx_unlock(&wgl_pan_present_mtx);
++   return shown;
++}
++
+ static void
+ wgl_panfrost_present(struct pipe_context *pipe, struct pipe_resource *res, HDC hDC)
+ {
+-   const struct util_format_description *desc = util_format_description(res->format);
++   enum pipe_format format = res->format;
+    unsigned w = res->width0, h = res->height0;
+    struct pipe_transfer *xfer;
+ 
+-   if (!pipe || !desc || desc->block.bits != 32 || !hDC)
++   if (!pipe || !hDC || !w || !h || util_format_is_compressed(format) || util_format_is_depth_or_stencil(format))
+       return;
++
++   /* Nothing would be drawn: a minimized window, or a DC clipped to nothing. */
++   RECT clip;
++   HWND wnd = WindowFromDC(hDC);
++   bool hidden = (wnd && IsIconic(wnd)) || GetClipBox(hDC, &clip) == NULLREGION;
++
++   /* Map even when hidden: it waits for the frame, which paces SwapBuffers as before. */
+    const uint8_t *map = pipe_texture_map(pipe, res, 0, 0, PIPE_MAP_READ, 0, 0, w, h, &xfer);
+    if (!map)
+       return;
+-   /* GDI wants B, G, R, X in memory. */
+-   bool rgba = desc->swizzle[0] == PIPE_SWIZZLE_X;
+-   uint32_t *bits = malloc((size_t)w * h * 4);
+-   if (bits) {
+-      for (unsigned y = 0; y < h; y++) {
+-         const uint32_t *src = (const uint32_t *)(map + (size_t)y * xfer->stride);
+-         uint32_t *dst = bits + (size_t)y * w;
+-         if (rgba) {
+-            for (unsigned x = 0; x < w; x++) {
+-               uint32_t p = src[x];
+-               dst[x] = (p & 0xff00ff00u) | ((p & 0xffu) << 16) | ((p >> 16) & 0xffu);
+-            }
+-         } else {
+-            memcpy(dst, src, (size_t)w * 4);
++
++   if (!hidden) {
++      enum sb_present_kind kind = sb_present_kind(format);
++      unsigned dib_width = sb_present_dib_width(xfer->stride, w);
++      int direct = p_atomic_read(&wgl_pan_direct);
++
++      if (direct < 0) {
++         const char *mode = debug_get_option_sb_gl_present();
++         direct = !(mode && strcmp(mode, "copy") == 0);
++         p_atomic_set(&wgl_pan_direct, direct);
++      }
++
++      bool tried_direct = false;
++      int shown = 0;
++      if (kind == SB_PRESENT_BGRX && dib_width && direct) {
++         tried_direct = true;
++         shown = wgl_panfrost_dib(hDC, map, dib_width, w, h);
++      }
++      if (!shown) {
++         shown = wgl_panfrost_present_copy(hDC, format, kind, map, xfer->stride, w, h);
++         /* GDI refused the mapped back buffer but took the copy: copy from now on. */
++         if (tried_direct && shown) {
++            p_atomic_set(&wgl_pan_direct, 0);
++            mesa_logw("sb gl present: StretchDIBits failed on the mapped back buffer, copying frames from now on");
+          }
+       }
++      GdiFlush(); /* GDI has read the frame before the mapping is let go */
+    }
++
+    pipe_texture_unmap(pipe, xfer);
+-   if (!bits)
+-      return;
+-   BITMAPINFO bmi = {0};
+-   bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+-   bmi.bmiHeader.biWidth = (LONG)w;
+-   bmi.bmiHeader.biHeight = -(LONG)h; /* top-down, as gdi_sw_display: the GL frontend flips window framebuffers */
+-   bmi.bmiHeader.biPlanes = 1;
+-   bmi.bmiHeader.biBitCount = 32;
+-   bmi.bmiHeader.biCompression = BI_RGB;
+-   StretchDIBits(hDC, 0, 0, (int)w, (int)h, 0, 0, (int)w, (int)h, bits, &bmi, DIB_RGB_COLORS, SRCCOPY);
+-   free(bits);
+ }
+ #endif
+ 
+diff --git a/src/gallium/targets/wgl/wgl_sb_present.h b/src/gallium/targets/wgl/wgl_sb_present.h
+new file mode 100644
+index 0000000..e401b95
+--- /dev/null
++++ b/src/gallium/targets/wgl/wgl_sb_present.h
+@@ -0,0 +1,80 @@
++/*
++ * Starbite (sb-patches/0145, docs/WIN11-GPU-CAPS.md 5a): the CPU side of the Panfrost WGL present, kept free of
++ * Windows and gallium so a host test can build it (tools/win/mesa/tests/glpresent-rows-test.c).
++ *
++ * GDI's 32-bit BI_RGB DIBs are B, G, R, X in memory, rows DWORD-aligned. A back buffer in that byte order is shown
++ * straight from its mapping: the DIB is stride/4 pixels wide and GDI draws its first width pixels of each row, so a
++ * padded linear stride (Panfrost aligns rows to 64 bytes: 2220 px -> 8896 B) needs no repacking either.
++ */
++#ifndef WGL_SB_PRESENT_H
++#define WGL_SB_PRESENT_H
++
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "util/format/u_formats.h"
++
++enum sb_present_kind {
++   SB_PRESENT_BGRX,    /* B, G, R, A/X bytes: GDI's own layout, no conversion */
++   SB_PRESENT_RGBX,    /* R, G, B, A/X bytes: swap R and B */
++   SB_PRESENT_CONVERT, /* anything else: util_format_translate to B8G8R8X8 */
++};
++
++static inline enum sb_present_kind
++sb_present_kind(enum pipe_format format)
++{
++   switch (format) {
++   case PIPE_FORMAT_B8G8R8A8_UNORM:
++   case PIPE_FORMAT_B8G8R8X8_UNORM:
++   case PIPE_FORMAT_B8G8R8A8_SRGB:
++   case PIPE_FORMAT_B8G8R8X8_SRGB:
++      return SB_PRESENT_BGRX;
++   case PIPE_FORMAT_R8G8B8A8_UNORM:
++   case PIPE_FORMAT_R8G8B8X8_UNORM:
++   case PIPE_FORMAT_R8G8B8A8_SRGB:
++   case PIPE_FORMAT_R8G8B8X8_SRGB:
++      return SB_PRESENT_RGBX;
++   default:
++      return SB_PRESENT_CONVERT;
++   }
++}
++
++/* The DIB width that lets GDI read a 32-bit image of `width` pixels in place, rows `stride` bytes apart; 0 when it
++ * can't (a stride that isn't whole pixels, or narrower than the image). */
++static inline unsigned
++sb_present_dib_width(size_t stride, unsigned width)
++{
++   if (stride % 4 || stride / 4 < width || stride / 4 > 0x7fffffffu)
++      return 0;
++   return (unsigned)(stride / 4);
++}
++
++static inline void
++sb_present_copy_rows(void *dst, size_t dst_stride, const void *src, size_t src_stride, size_t row_bytes,
++                     unsigned height)
++{
++   if (dst_stride == row_bytes && src_stride == row_bytes) {
++      memcpy(dst, src, row_bytes * height);
++      return;
++   }
++   for (unsigned y = 0; y < height; y++)
++      memcpy((uint8_t *)dst + y * dst_stride, (const uint8_t *)src + y * src_stride, row_bytes);
++}
++
++/* R, G, B, A bytes -> B, G, R, A bytes (the A/X byte is kept; GDI ignores it). */
++static inline void
++sb_present_rgba_to_bgra_rows(void *dst, size_t dst_stride, const void *src, size_t src_stride, unsigned width,
++                             unsigned height)
++{
++   for (unsigned y = 0; y < height; y++) {
++      const uint32_t *s = (const uint32_t *)((const uint8_t *)src + y * src_stride);
++      uint32_t *d = (uint32_t *)((uint8_t *)dst + y * dst_stride);
++      for (unsigned x = 0; x < width; x++) {
++         uint32_t p = s[x];
++         d[x] = (p & 0xff00ff00u) | ((p & 0xffu) << 16) | ((p >> 16) & 0xffu);
++      }
++   }
++}
++
++#endif
