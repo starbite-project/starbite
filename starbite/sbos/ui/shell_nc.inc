@@ -603,6 +603,7 @@ static void nc_clear_group(const char *who, int fly)
 }
 void sh_notify(const char *who, const char *title, const char *body, int hm)
 {
+    if (!se_notif_allow(who)) return;       /* helper B2: Settings > Notifications > (app) > Allow Notifications off */
     if (nin == NC_MAX) {
         nc_slot *s = nc_slot_of(NI[NC_MAX - 1].id);
         if (s) s->ta = 0;
@@ -626,7 +627,7 @@ void sh_notify(const char *who, const char *title, const char *body, int hm)
     nc_pill_build();
     if (NC.built) { nc_head_build(); nc_layout(); }
     /* a banner on home and in apps (not on the lock, in the dark, over a sheet, or in the switcher) */
-    if (!locked && !SL.black && !SL.dir && !focus_on && !CF.on && !sw_on()) bn_show(n);
+    if (!locked && !SL.black && !SL.dir && !focus_on && !CF.on && !sw_on() && !kit_on() && se_notif_banner(who)) bn_show(n);   /* helper B2 */
 }
 
 /* ---- the lock's pill ------------------------------------------------------------------------------------------- */
@@ -791,6 +792,21 @@ static void nc_pull_begin(float x, float y, float t)
     if (BN.on) bn_hide(0);
     nc_place();
 }
+/* helper B2: the clear-all alert's answer (1 Clear) */
+static void nc_clear_answer(int i)
+{
+    NC.clrall = 0;
+    if (i == 1 && nin) {
+        for (int k = 0; k < NC_SLOTS; k++) if (NSL[k].id) NSL[k].ta = 0;
+        nin = 0;
+        NC.exp[0] = 0;
+        nc_ghead_build();
+        NC.anim = 1;
+    }
+    nc_head_build();
+    nc_layout();
+    relink();
+}
 /* the Centre's touches after the first: 2 hands the touch back to the lock's swipe (from the pill) */
 static int nc_touch(int ph, float x, float y, float t)
 {
@@ -928,14 +944,9 @@ static int nc_touch(int ph, float x, float y, float t)
         if (nin && cy >= NC_LT && cy < NC_LT + 40 && x >= CONTENT_R - (NC.clrall ? 70 : 40)) {
             if (!NC.clrall) { NC.clrall = 1; nc_head_build(); relink(); }
             else {
-                for (int k = 0; k < NC_SLOTS; k++) if (NSL[k].id) NSL[k].ta = 0;
-                nin = 0;
-                NC.clrall = 0;
-                NC.exp[0] = 0;
-                nc_ghead_build();
-                nc_head_build();
-                nc_layout();
-                relink();
+                /* helper B2: Clear asks first (iOS's alert) */
+                static const kit_btn B[2] = { { "Cancel", KIT_CANCEL }, { "Clear", KIT_DESTRUCTIVE } };
+                kit_alert("Clear All Notifications?", "Every notification in the Notification Centre goes.", B, 2, nc_clear_answer);
             }
             break;
         }

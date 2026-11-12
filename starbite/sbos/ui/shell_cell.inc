@@ -14,11 +14,22 @@ static int data_on(void)
            CELL.data == SH_DATA_UP;
 }
 
+/* helper B2: turning it on asks first (iOS's alert): the radio transmits and data may cost money */
+static void cell_on_answer(int i)
+{
+    if (i != 1) return;
+    if (sh_cellular(1) < 0) toast("Cellular data can't start now");
+    else toast("Cellular data on: connecting\xe2\x80\xa6");
+    if (is_app("settings")) build_app_page(AP.a);
+}
 static void cell_toggle(void)
 {
     if (data_on() || CELL.data == SH_DATA_STOPPING) { sh_cellular(0); toast("Cellular data off"); }
-    else if (sh_cellular(1) < 0) toast("Cellular data can't start now");
-    else toast("Cellular data on: connecting\xe2\x80\xa6");
+    else {
+        static const kit_btn B[2] = { { "Cancel", KIT_CANCEL }, { "Turn On", KIT_PREFERRED } };
+        kit_alert("Turn On Cellular Data?", "The modem connects to the mobile network. Your operator may charge for data.", B, 2, cell_on_answer);
+        return;
+    }
     if (is_app("settings")) build_app_page(AP.a);
 }
 

@@ -329,6 +329,7 @@ static void wifi_tap(float x, float y)
         if (y >= 130 && y < 177 && x >= 300) { WV.show = !WV.show; build_app_page(AP.a); return; }
         int k = wf_kb_hit(x, y, &c);
         if (!k) return;
+        kb_key_tap = 1;                          /* helper B2: a key (Keyboard Feedback) */
         sh_haptic();
         if (k == 1 && WV.plen < 64) {
             WV.pass[WV.plen++] = c;
