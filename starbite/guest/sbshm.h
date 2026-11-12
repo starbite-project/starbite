@@ -131,7 +131,9 @@ struct sbshm_hdr {
                                      * pixels must be opaque (X byte = 0xff) and written through a non-cacheable
                                      * mapping (/dev/sbshm is write-combine = Normal non-cacheable). Honour it only
                                      * when hdr.version >= 3 (a v2 host leaves 0 here). */
-    uint32_t pad0[1];
+    uint32_t guest_load;            /* written by the GUEST (was pad0[0]; 0 from an older guest): its CPU time over the
+                                     * last 5 s in % of one core (0..400), from sbguest.ko; the host's idle stops wait
+                                     * while it is busy (a build or an install running with the screen off) */
     /* ---- written by the guest ---- */
     uint32_t guest_state;
     uint32_t guest_heartbeat;       /* guestd, every frame / 100 ms */

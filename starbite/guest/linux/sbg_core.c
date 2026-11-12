@@ -25,6 +25,7 @@
 #include <linux/cpu.h>
 #include <linux/fs.h>
 #include <linux/interrupt.h>
+#include <linux/kernel_stat.h>
 #include <linux/io.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
@@ -151,6 +152,31 @@ static struct notifier_block sbg_restart_nb = {
  * kernel_power_off, so sbg_power_off takes the M3 cluster down). The host then sees the cluster off and may start
  * the guest again without a reset.
  */
+/* hdr.guest_load every 5 s: the CPU time of all guest CPUs (user, nice, system, irq, softirq) in % of one core */
+#define SBG_LOAD_PERIOD_S 5
+static u64 sbg_load_last;
+static struct timer_list sbg_load_timer;
+static u64 sbg_busy_ns(void)
+{
+	u64 t = 0;
+	unsigned int cpu;
+
+	for_each_online_cpu(cpu) {
+		const u64 *c = kcpustat_cpu(cpu).cpustat;
+
+		t += c[CPUTIME_USER] + c[CPUTIME_NICE] + c[CPUTIME_SYSTEM] + c[CPUTIME_IRQ] + c[CPUTIME_SOFTIRQ];
+	}
+	return t;
+}
+static void sbg_load_tick(struct timer_list *t)
+{
+	u64 now = sbg_busy_ns(), d = now - sbg_load_last;
+
+	sbg_load_last = now;
+	WRITE_ONCE(hdr->guest_load, (u32)min_t(u64, div_u64(d, SBG_LOAD_PERIOD_S * 10000000ULL), 400));
+	mod_timer(&sbg_load_timer, jiffies + SBG_LOAD_PERIOD_S * HZ);
+}
+
 #define SBG_STOP_GRACE_S 10
 static void sbg_stop_fallback(struct work_struct *w)
 {
@@ -629,6 +655,9 @@ static int sbg_probe(struct platform_device *pdev)
 	sbnet_init(&pdev->dev, irq_ok);
 	sbp9_init(&pdev->dev, irq_ok);
 	sbsnd_init(&pdev->dev, irq_ok);
+	sbg_load_last = sbg_busy_ns();
+	timer_setup(&sbg_load_timer, sbg_load_tick, 0);
+	mod_timer(&sbg_load_timer, jiffies + SBG_LOAD_PERIOD_S * HZ);
 	return 0;
 }
 
@@ -654,6 +683,9 @@ module_init(sbg_init);
 
 static void __exit sbg_exit(void)
 {
+	if (sbg_load_timer.function)
+		timer_shutdown_sync(&sbg_load_timer);
+	cancel_delayed_work_sync(&sbg_stop_work);
 	sbp9_exit();				/* the 9p transport is registered with 9pnet: take it back */
 	platform_driver_unregister(&sbg_driver);
 }
