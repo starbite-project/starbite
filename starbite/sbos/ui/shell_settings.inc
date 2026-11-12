@@ -231,8 +231,10 @@ static struct {
     float scan_t, build_t, spin_t, poll_t, spin_cx, spin_cy;
 } SEB = { 0, 0, 0, 0, 0, 0, 0, -1, -1e9f, 0, 0, 0, 0 };
 /* cp7: a keyboard's pairing (Track A's sh_bt_pair, the drivers track's bt_pair.c): the device asked, the state last
- * seen, the code alert up; the paired keyboard's name as the scan showed it (else "Keyboard") */
-static struct { int dev, st, alert; char name[48], kname[48]; } SBP = { -1, 0, 0, "", "" };
+ * seen, the code alert up, the name of the row tapped */
+static struct { int dev, st, alert; char name[48]; } SBP = { -1, 0, 0, "" };
+/* the paired keyboard's name (Track A keeps it across a restart; "Keyboard" when unknown) */
+static const char *se_bt_kname(void) { const char *n = sh_bt_kbd_name(); return n && n[0] ? n : "Keyboard"; }
 #define SE_BT_HEAD "Other Devices"
 #define SE_BT_MAXD 12                             /* named devices listed (the rest: a count in the footer) */
 static int se_awake(void) { return !locked && !SL.black; }
@@ -497,7 +499,7 @@ static void se_rows(int p)
         int paired = sh_bt_kbd_paired();
         if (paired) {
             sec("My Devices");
-            row(SR_VAL, A_BTKBD, se_str(SBP.kname[0] ? SBP.kname : "Keyboard", 0), sh_bt_kbd_connected() ? "Connected" : "Not Connected");
+            row(SR_VAL, A_BTKBD, se_str(se_bt_kname(), 0), sh_bt_kbd_connected() ? "Connected" : "Not Connected");
         }
         sec(SE_BT_HEAD);
         int n = sh_bt_count(), named = 0, unnamed = 0;
@@ -507,7 +509,7 @@ static void se_rows(int p)
             int rssi = 0;
             if (sh_bt_get(i, nm, sizeof nm, &rssi) < 0) continue;
             if (!nm[0] || named >= SE_BT_MAXD) { unnamed++; continue; }   /* iOS lists named devices: the rest counted */
-            if (paired && SBP.kname[0] && !tk_strcmp(nm, SBP.kname)) continue;   /* it is under My Devices */
+            if (paired && !tk_strcmp(nm, se_bt_kname())) continue;   /* it is under My Devices */
             int busy = SBP.dev == i && SBP.st != SH_BTP_FAILED;
             se_row *r = row(SR_VAL, A_BTDEV, se_str(nm, 0), busy ? "Connecting\xe2\x80\xa6" : "");
             r->dev = i;
@@ -1187,7 +1189,6 @@ static void se_bt_kbd_cb(int b)
     }
     if (b == (conn ? 0 : 1)) {                       /* Forget This Device */
         sh_bt_unpair();
-        SBP.kname[0] = 0;
         SBP.dev = -1;
         toast("Keyboard forgotten");
         se_bt_rebuild();
@@ -1197,7 +1198,7 @@ static void se_bt_kbd(void)
 {
     static const kit_btn B1[2] = { { "Forget This Device", KIT_DESTRUCTIVE }, { "Cancel", KIT_CANCEL } };
     static const kit_btn B2[3] = { { "Connect", KIT_DEFAULT }, { "Forget This Device", KIT_DESTRUCTIVE }, { "Cancel", KIT_CANCEL } };
-    const char *t = SBP.kname[0] ? SBP.kname : "Keyboard";
+    const char *t = se_bt_kname();
     if (sh_bt_kbd_connected()) kit_actions(t, B1, 2, se_bt_kbd_cb);
     else kit_actions(t, B2, 3, se_bt_kbd_cb);
 }
@@ -1221,10 +1222,9 @@ static int se_bt_pair_poll(void)
     }
     if (st == SH_BTP_CONNECTED) {
         se_bt_close_alert();
-        md_cat(SBP.kname, 0, sizeof SBP.kname, SBP.name);
         SBP.dev = -1;
         sh_haptic_k(SH_HAP_SUCCESS);
-        toast(se_str(SBP.kname[0] ? SBP.kname : "Keyboard", " Connected"));
+        toast(se_str(SBP.name[0] ? SBP.name : se_bt_kname(), " Connected"));
         se_bt_rebuild();
         return 1;
     }
