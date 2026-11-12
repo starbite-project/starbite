@@ -317,6 +317,19 @@ static id sbmtl_zero(id me, SEL s, ...)
  *  - peerGroupID 0, peerIndex 0, peerCount 1: one GPU, no peer group.
  *  - forwardingTargetForSelector: the zero catch-all above.
  */
+/*
+ * "new..." methods hand their caller a +1 reference, but a block used as a method (imp_implementationWithBlock) returns
+ * its object autoreleased under ARC (+0): one extra retain makes the caller own exactly one (S2n 2026-11-12: without it
+ * CoreAnimation released the event it got from -newSharedEventWithMachPort: once too often, and WindowServer died in the
+ * autorelease pool's pop).
+ */
+static id sbmtl_owned(id obj)
+{
+	if (obj)
+		(void)CFBridgingRetain(obj);
+	return obj;
+}
+
 static void fill_device(id dev, mach_port_t port)
 {
 	Class c = object_getClass(dev);
@@ -339,21 +352,21 @@ static void fill_device(id dev, mach_port_t port)
 	 */
 	class_replaceMethod(c, sel_registerName("newSharedEventWithOptions:"), imp_implementationWithBlock(^id(id me, NSUInteger o) {
 		(void)o;
-		return [(id<MTLDevice>)me newSharedEvent];
+		return sbmtl_owned([(id<MTLDevice>)me newSharedEvent]);
 	}), "@24@0:8Q16");
 	class_replaceMethod(c, sel_registerName("newEventWithOptions:"), imp_implementationWithBlock(^id(id me, NSUInteger o) {
 		(void)o;
-		return [(id<MTLDevice>)me newEvent];
+		return sbmtl_owned([(id<MTLDevice>)me newEvent]);
 	}), "@24@0:8Q16");
 	class_replaceMethod(c, sel_registerName("newSharedEventWithMachPort:"), imp_implementationWithBlock(^id(id me, mach_port_t p) {
 		(void)p;
 		missing(class_getName(object_getClass(me)), "newSharedEventWithMachPort: (local event)");
-		return [(id<MTLDevice>)me newSharedEvent];
+		return sbmtl_owned([(id<MTLDevice>)me newSharedEvent]);
 	}), "@20@0:8I16");
 	class_replaceMethod(c, sel_registerName("newSharedEventWithHandle:"), imp_implementationWithBlock(^id(id me, id h) {
 		(void)h;
 		missing(class_getName(object_getClass(me)), "newSharedEventWithHandle: (local event)");
-		return [(id<MTLDevice>)me newSharedEvent];
+		return sbmtl_owned([(id<MTLDevice>)me newSharedEvent]);
 	}), "@24@0:8@16");
 	static const char kAccelServiceKey = 0;
 	class_addMethod(c, sel_registerName("_setAcceleratorService:"), imp_implementationWithBlock(^(id me, id service) {
