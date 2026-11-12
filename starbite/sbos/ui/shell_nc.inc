@@ -237,23 +237,35 @@ static void nc_unview(tk_layer *v)
     v->hspan = 0;
     v->solid = 0;
     v->slice = 0;
+    v->ngsh = 0;
     v->gen++;
 }
+/* B9's approach (shell_lknote.inc's lkn_glass): a view of the platter glass takes the face's glass shapes too, so the
+ * GPU path draws its lens (without them a view is only the faint baked tint) */
+static void nc_view_shapes(tk_layer *v, const tk_layer *m)
+{
+    v->ngsh = m->ngsh;
+    tk_memcpy(v->gsh, m->gsh, sizeof v->gsh);
+    tk_memcpy(v->gvar, m->gvar, sizeof v->gvar);
+    tk_memcpy(v->gtint, m->gtint, sizeof v->gtint);
+    tk_memcpy(v->gpress, m->gpress, sizeof v->gpress);
+}
+/* B9: the lock's one platter glass is K[0] (x 14.5, w 361, r 23: the Centre's own platter), its lower cards K[0].gh */
 static int nc_face(void) { for (int g = 0; g < NG; g++) if (K[g].face.bmp.px) return g; return -1; }
-static int nc_peeksrc(void) { for (int g = 0; g < NG; g++) if (stack(g) && K[g].gh.bmp.px && K[g].face.bmp.px) return g; return -1; }
+static int nc_peeksrc(void) { for (int g = 0; g < NG; g++) if (K[g].gh.bmp.px && K[g].face.bmp.px) return g; return -1; }
 /* a platter's glass at (x, y), h tall, opacity a (pt; in its parent's space) */
 static void pl_glass(tk_layer *v, float x, float y, float h, float a)
 {
     int g = nc_face();
     if (g >= 0) {
-        if (v->bmp.px != K[g].face.bmp.px) nc_view(v, &K[g].face);
-        float top = LIST_TOP + K[g].y;          /* where the card was baked */
-        v->x = PT(x - CARD_X) + K[g].face.bx;
+        if (v->bmp.px != K[g].face.bmp.px) { nc_view(v, &K[g].face); nc_view_shapes(v, &K[g].face); }
+        float top = LIST_TOP + K[g].y;          /* where the platter was baked */
+        v->x = PT(x - PL_X) + K[g].face.bx;
         v->y = PT(y - top) + K[g].face.by;
-        /* B4: the lock card's glass stretched to the platter's width; under its 3-slice's 68 pt it is scaled down */
-        v->slice_h = PT(tk_maxf(68, h) + 2 * FACE_MG) - K[g].fcut;
-        v->sx = NC_W / CARD_W;
-        v->sy = h < 68 ? h / 68 : 1;
+        /* B9: the platter glass is the Centre's width already (PL_W = NC_W); under its 3-slice's 48 pt it is scaled down */
+        v->slice_h = PT(tk_maxf(48, h) + 2 * FACE_MG) - K[g].fcut;
+        v->sx = NC_W / PL_W;
+        v->sy = h < 48 ? h / 48 : 1;
         v->ox = PT(x); v->oy = PT(y);
         v->clip = 0;
     } else {
@@ -294,8 +306,8 @@ static void pl_peek(tk_layer *v, float x, float y, float h, float a)
     v->clip = 0;
     if (v->bmp.px != K[g].gh.bmp.px) nc_view(v, &K[g].gh);
     float top = LIST_TOP + K[g].y;
-    v->sx = NC_W / CARD_W; v->sy = 1; v->ox = PT(x); v->oy = 0;
-    v->x = PT(x - CARD_X) + K[g].gh.bx;
+    v->sx = NC_W / PL_W; v->sy = 1; v->ox = PT(x); v->oy = 0;
+    v->x = PT(x - PL_X) + K[g].gh.bx;
     v->y = tk_floorf(PT(y + h - 68 - top) + K[g].gh.by + .5f);
     v->alpha = a;
     v->hidden = 0;
