@@ -1943,6 +1943,33 @@ class Daemon:
                 st.get("checked_at", 0), len(text)) + (0,) * 9
         return hdr, pkgs, hdr3, pkgs3, text
 
+    def write_apps_map(self):
+        """/run/sbpkg/apps.tsv as sbpkg wrote it: store index, key, desktop id of each installed app's launchers"""
+        st = load_state()
+        rows = []
+        for i, aid in enumerate(self.order):
+            ia = st["apps"].get(aid)
+            pk = (ia or {}).get("packages") or ((self.cat[aid].get("distro") or {}).get("apt") if not ia else None) or []
+            if ia and os.path.exists(os.path.join(C.apps, "sbstore-%s.desktop" % aid)):
+                rows.append("%d\t%s\tsbstore-%s" % (i, aid, aid))
+            for p in pk:
+                for suf in ("", ":arm64", ":all"):
+                    lp = rp("/var/lib/dpkg/info/%s%s.list" % (p, suf))
+                    if os.path.exists(lp):
+                        for l in open(lp, errors="replace"):
+                            m = re.match(r"^/usr/share/applications/([^/]+)\.desktop$", l.strip())
+                            if m:
+                                rows.append("%d\t%s\t%s" % (i, aid, m.group(1)))
+                        break
+        d = env("SBSTORE_RUN", "/run/sbpkg")
+        try:
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "apps.tsv.tmp"), "w") as f:
+                f.write("".join(r + "\n" for r in rows))
+            os.replace(os.path.join(d, "apps.tsv.tmp"), os.path.join(d, "apps.tsv"))
+        except OSError:
+            pass
+
     def _has_icon(self, i):
         return self._icons.get(i) is not None if hasattr(self, "_icons") else False
 
@@ -2104,6 +2131,7 @@ class Daemon:
         if idx != SBSHM_NONE:
             if rc == 0:
                 self.live[idx] = {"state": PKG_IDLE, "pct": 100}
+                self.write_apps_map()
                 self.send("rescan")
             elif j.get("cancelled"):
                 self.live[idx] = {"state": PKG_IDLE, "pct": 0}       # cancelled: back to GET, no error
@@ -2150,6 +2178,7 @@ class Daemon:
             except OSError as e:
                 log("apt-get update at start: %s" % e)
         signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+        self.write_apps_map()
         last_pub = 0.0
         while True:
             self.connect()

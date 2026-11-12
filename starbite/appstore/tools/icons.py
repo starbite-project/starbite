@@ -1,7 +1,8 @@
 #!/usr/bin/python3
 """App Store icons (runs inside tools/vm-chroot.sh's trixie root: apt-get download, rsvg-convert, PIL).
 
-    icons.py CATALOG_DIR OUT_DIR [ID...]
+    icons.py CATALOG_DIR OUT_DIR [ID...]      (then copy OUT_DIR/<id>.png into starbite/appstore/icons/ with a
+                                              <id>-160.png beside it: install-rootfs.sh makes the .argb from those)
 
 For every recipe: download its Debian package (distro.apt[0], then its *-data / *-common dependencies if the icon
 is not in it), find the recipe's `icon` (hicolor scalable SVG first, then the biggest PNG, then pixmaps, then the
@@ -143,10 +144,13 @@ def main(argv):
                 x = extract(pk, d)
                 name = a.get("icon") or (x and desktop_icon(x)) or pk
                 src = x and (find_icon(x, name) or find_icon(x, desktop_icon(x) or name))
+                if x and not src and a.get("icon_pkg"):   # the recipe names the package with the icon
+                    extract(a["icon_pkg"], d)
+                    src = find_icon(x, name)
                 if x and not src:                         # the icon lives in a -data / -common package
                     deps = sh("apt-cache", "depends", pk).stdout
                     for dep in re.findall(r"Depends: (\S+)", deps):
-                        if re.search(r"-(data|common|icons|theme)$", dep):
+                        if re.search(r"-(data|common|icons|theme|bin)$", dep):
                             extract(dep, d)
                     src = find_icon(x, name) or find_icon(x, desktop_icon(x) or name)
                 if src:

@@ -5,8 +5,8 @@
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$here/.." && pwd)
-CAT=${1:-$here/vm-catalog}; shift || true
-T=${TESTS:-${*:-nvim-release btop-release btop-source sl-distro}}
+CAT=${1:-$TOP/catalog}; shift || true
+T=${TESTS:-${*:-neovim-release btop-release btop-source gnome-mines-distro}}
 CH=$TOP/tools/vm-chroot.sh
 NAME=vmtest-$$
 M=$("$CH" fresh "$NAME" | tail -1)

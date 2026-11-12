@@ -2,8 +2,9 @@
 """The App Store catalog: check the recipes (catalog/*.toml) and build catalog.json for the guest.
 
   catalog.py check                     validate every recipe (FORMAT.md); exit 1 on any error
-  catalog.py build OUT [--resolve]     OUT/catalog.json (+ OUT/icons/ copied from build/appstore-icons if present);
+  catalog.py build OUT [--resolve]     OUT/catalog.json + OUT/icons/ (from icons/*.png: .argb for the store table);
                                        --resolve asks upstream for each app's latest versions now ("known")
+  catalog.py icons OUT                 icons/<id>-160.png -> OUT/<id>.argb (+ the 256 px .png)
   catalog.py resolve [ID...]           print the latest version + asset per method (live; needs the network)
 Host only (Python 3.11+ for tomllib). Set SBSTORE_GITHUB_TOKEN to lift GitHub's 60 requests / hour limit.
 """
@@ -191,10 +192,77 @@ def cmd_build(out, do_resolve):
     with open(os.path.join(out, "catalog.json"), "w") as f:
         json.dump({"version": 1, "built": time.strftime("%Y-%m-%d", time.gmtime()),
                    "checked": known.get("checked"), "apps": lst}, f, indent=1, sort_keys=True)
-    icons = os.path.join(TOP, "..", "..", "build", "appstore-icons")
-    if os.path.isdir(icons):
-        shutil.copytree(icons, os.path.join(out, "icons"), dirs_exist_ok=True)
+    cmd_icons(os.path.join(out, "icons"))
     print("wrote %s/catalog.json (%d apps)" % (out, len(lst)))
+    return 0
+
+
+def png_rgba(path):
+    """a PIL-written PNG (8-bit RGBA or RGB, not interlaced) -> (w, h, rows of RGBA bytes); stdlib only"""
+    import struct
+    import zlib
+    data = open(path, "rb").read()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", path
+    pos, idat, w = 8, b"", 0
+    while pos < len(data):
+        n, typ = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        if typ == b"IHDR":
+            w, h, depth, ctype, _, _, inter = struct.unpack(">IIBBBBB", body)
+            assert depth == 8 and ctype in (2, 6) and not inter, "%s: unsupported PNG" % path
+        elif typ == b"IDAT":
+            idat += body
+        pos += 12 + n
+    bpp = 4 if ctype == 6 else 3
+    raw = zlib.decompress(idat)
+    stride = w * bpp
+    rows, prev, i = [], bytearray(stride), 0
+    for _ in range(h):
+        f = raw[i]
+        line = bytearray(raw[i + 1:i + 1 + stride])
+        i += 1 + stride
+        for x in range(stride):
+            a = line[x - bpp] if x >= bpp else 0
+            b = prev[x]
+            c = prev[x - bpp] if x >= bpp else 0
+            if f == 1:
+                line[x] = (line[x] + a) & 255
+            elif f == 2:
+                line[x] = (line[x] + b) & 255
+            elif f == 3:
+                line[x] = (line[x] + (a + b) // 2) & 255
+            elif f == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        prev = line
+        rows.append(bytes(line) if bpp == 4 else bytes(b for k in range(w) for b in (*line[3 * k:3 * k + 3], 255)))
+    return w, h, rows
+
+
+def cmd_icons(out):
+    """icons/<id>-160.png -> OUT/<id>.argb (the icon pool's premultiplied 0xAARRGGBB words) + OUT/<id>.png"""
+    import struct
+    src = os.path.join(TOP, "icons")
+    os.makedirs(out, exist_ok=True)
+    n = 0
+    for fn in sorted(os.listdir(src)):
+        if not fn.endswith("-160.png"):
+            continue
+        aid = fn[:-8]
+        w, h, rows = png_rgba(os.path.join(src, fn))
+        assert (w, h) == (160, 160), fn
+        o = bytearray()
+        for r in rows:
+            for k in range(0, len(r), 4):
+                R, G, B, A = r[k], r[k + 1], r[k + 2], r[k + 3]
+                o += struct.pack("<I", (A << 24) | ((R * A // 255) << 16) | ((G * A // 255) << 8) | (B * A // 255))
+        with open(os.path.join(out, aid + ".argb"), "wb") as f:
+            f.write(o)
+        if os.path.exists(os.path.join(src, aid + ".png")):
+            shutil.copyfile(os.path.join(src, aid + ".png"), os.path.join(out, aid + ".png"))
+        n += 1
+    print("icons: %d into %s" % (n, out))
     return 0
 
 
@@ -206,6 +274,8 @@ def main(argv):
         return cmd_check()
     if argv[0] == "build":
         return cmd_build(argv[1], "--resolve" in argv)
+    if argv[0] == "icons":
+        return cmd_icons(argv[1])
     if argv[0] == "resolve":
         resolve_all(argv[1:] or None)
         return 0

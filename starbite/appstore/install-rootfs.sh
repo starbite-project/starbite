@@ -10,12 +10,8 @@ R=${1:?usage: install-rootfs.sh ROOT}
 PY=${PYTHON:-python3}
 mkdir -p "$R/usr/local/sbin" && cp "$here/sbstore.py" "$R/usr/local/sbin/sbstore" && chmod 0755 "$R/usr/local/sbin/sbstore"
 "$PY" -I "$here/tools/catalog.py" build "$R/usr/share/starbite/appstore" >/dev/null
-icons=${SBSTORE_ICONS:-$here/../../build/appstore-icons}
-if [ -d "$icons" ]; then
-    mkdir -p "$R/usr/share/starbite/appstore/icons"
-    cp "$icons"/*.argb "$icons"/*.png "$R/usr/share/starbite/appstore/icons/" 2>/dev/null || true
-fi
 # the offline mirror (tools/mirror.py OUT; OUT/debs: .debs + Packages) for a guest without network
+SBSTORE_MIRROR_SRC=${SBSTORE_MIRROR_SRC-$here/../../build/appstore-mirror}
 if [ -n "${SBSTORE_MIRROR_SRC:-}" ] && [ -d "$SBSTORE_MIRROR_SRC" ]; then
     mkdir -p "$R/usr/share/starbite/appstore/mirror"
     cp -a "$SBSTORE_MIRROR_SRC/." "$R/usr/share/starbite/appstore/mirror/"

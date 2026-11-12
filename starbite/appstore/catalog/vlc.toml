@@ -6,6 +6,7 @@ category = "Media"
 licence = "GPL-2.0-or-later"
 homepage = "https://www.videolan.org/vlc/"
 icon = "vlc"
+icon_pkg = "vlc-data"
 ram_mb = 200
 featured = false
 default = "distro"

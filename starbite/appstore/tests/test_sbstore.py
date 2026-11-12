@@ -599,7 +599,8 @@ class DaemonTest(unittest.TestCase):
         self.srv = socket.socket(socket.AF_UNIX)
         self.srv.bind(self.sockp)
         self.srv.listen(1)
-        e = dict(self.e.env, SBSTORE_SHM=self.shm, SBSTORE_SOCK=self.sockp, SBSTORE_MEM_MB="1500")
+        e = dict(self.e.env, SBSTORE_SHM=self.shm, SBSTORE_SOCK=self.sockp, SBSTORE_MEM_MB="1500",
+                 SBSTORE_RUN=os.path.join(self.e.d, "run"))
         self.p = subprocess.Popen([sys.executable, SBSTORE, "daemon"], env=e, stdout=subprocess.DEVNULL,
                                   stderr=subprocess.PIPE)
         self.srv.settimeout(10)
@@ -661,6 +662,7 @@ class DaemonTest(unittest.TestCase):
         self.assertEqual(p3[0][1], 3)                                    # installed by source
         self.assertEqual(p3[0][16].rstrip(b"\0"), b"1.0")
         self.assertEqual(self.e.run_bin("hello"), "hello-from-source 1.0")
+        self.assertEqual(open(os.path.join(self.e.d, "run", "apps.tsv")).read(), "0\thello\tsbstore-hello\n")
         # a stale seq is ignored; a remove with the right one works
         self.c.sendall(b"op 0 2 %d\n" % (seq - 2))
         time.sleep(1)
