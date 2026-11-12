@@ -1285,6 +1285,12 @@ static int host_low;
 void sh_low_power(int on) { host_low = !!on; }
 int sh_low_power_on(void) { return host_low; }
 
+/* Track A, cp7: SBTK_ORI=0..3 pretends the phone is turned (stills / films of rotated apps) */
+static int host_ori_lock;
+int sh_orientation(void) { const char *e = getenv("SBTK_ORI"); return host_ori_lock || !e ? 0 : (atoi(e) & 3); }
+int sh_orientation_lock(void) { return host_ori_lock; }
+void sh_orientation_lock_set(int on) { host_ori_lock = !!on; }
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: sbtk-host PAK still|film|bench ...\n"); return 2; }

@@ -591,3 +591,14 @@ int sh_low_power_on(void);
 /* Track E, cp6 (gwin.c): the running App Store / Linux job in words ("Building btop from source, 45 %", "Downloading
  * Firefox, 12 %", "+ 2 more"); 1 with a job, 0 none (buf ""). Cheap: the shell polls it about once a second */
 int sh_linux_job(char *buf, int cap);
+
+/* Track A, cp7: the screen's orientation for apps that rotate (Photos' viewer, Camera, Calculator, Clock, Linux apps;
+ * home and lock stay portrait as on iPhone). Call sh_orientation() while such an app is open (each frame or every
+ * ~200 ms: it keeps the accelerometer alive; the hub starts in ~4 s, portrait until then; it stops itself 60 s after
+ * the last call). TURNED_LEFT: the phone turned counter-clockwise (its top edge on the left): the content turns
+ * clockwise to stay upright. The signs are to be confirmed on the phone. Orientation Lock (Control Centre): pref
+ * display.orientlock, off by default; on: always portrait. */
+enum { SH_ORI_PORTRAIT = 0, SH_ORI_TURNED_LEFT = 1, SH_ORI_UPSIDE_DOWN = 2, SH_ORI_TURNED_RIGHT = 3 };
+int sh_orientation(void);
+int sh_orientation_lock(void);
+void sh_orientation_lock_set(int on);

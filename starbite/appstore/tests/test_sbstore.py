@@ -540,6 +540,20 @@ class Source(unittest.TestCase):
         self.assertEqual(self.e.run_bin("hello"), "hello 1.0")
         self.assertEqual(self.e.state()["apps"]["hello"]["method"], "release")
 
+    def test_build_deps_and_what_they_pulled_in_are_removed(self):
+        """cp7 VM: removing only build-essential left gcc & co. (580 MB) on the 2 GiB overlay"""
+        e = Env(available={"make-dep": {"version": "4.4", "depends": ["libmake1"]}, "libmake1": {"version": "1"}})
+        try:
+            publish_hello("1.0")
+            e.run("install", "hello", "--method", "source")
+            inst = e.apt()["installed"]
+            self.assertNotIn("make-dep", inst)
+            self.assertNotIn("libmake1", inst)
+            self.assertIn("basepkg", inst)
+            self.assertIn(["apt-get", "-q", "clean"], [c[:3] for c in e.apt()["calls"]])
+        finally:
+            e.close()
+
     def test_switch_failure_keeps_the_old_install(self):
         publish_hello("1.0")
         self.e.run("install", "hello", "--method", "release")
@@ -850,6 +864,10 @@ class Network(unittest.TestCase):
         self.assertIn("/var/log/sbstore/btop.log", hint)
         for code, (sh, h) in sbstore.HINTS.items():
             self.assertLessEqual(len(sh.encode()), 31, code)
+        import re                                                   # every error the engine raises has words
+        src = open(SBSTORE).read()
+        codes = set(re.findall(r'(?:StoreError|NeedsNet)\("([^"]+)"', src))
+        self.assertEqual(sorted(c for c in codes if c not in sbstore.HINTS), [])
 
 
 class CardEngine(unittest.TestCase):
