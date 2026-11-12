@@ -820,6 +820,8 @@ static void handle(const uint32_t *m)
     }
 }
 
+static unsigned rx_trace;                       /* abox_trace_rx(): messages still to log raw */
+
 static void rx_process(void)
 {
     uint32_t m[RX_WORDS];
@@ -828,6 +830,17 @@ static void rx_process(void)
         for (unsigned i = 1; i < S.rxn; ++i)
             memcpy(S.rxq[i - 1], S.rxq[i], sizeof(S.rxq[0]));
         S.rxn--;
+        if (rx_trace) {                             /* abox_trace_rx(): the raw words first */
+            struct lb l;
+            rx_trace--;
+            lb_init(&l);
+            lb_s(&l, "abox: rx:");
+            for (unsigned i = 0; i < 8; ++i) {
+                lb_c(&l, ' ');
+                lb_x(&l, m[i]);
+            }
+            sayl(&l);
+        }
         handle(m);
     }
 }
@@ -1653,6 +1666,13 @@ int abox_pcm_msg(int capture, uint32_t id, uint32_t type, uint32_t a, uint32_t b
             what = nm[i].s;
     msg_pcm(capture ? IPC_PCMCAPTURE : IPC_PCMPLAYBACK, id, type, a, b, c);
     return ipc_send(what);
+}
+
+void abox_trace_rx(unsigned n) { rx_trace = n; }
+
+void abox_fw_log_more(unsigned n)
+{
+    C.fw_log_max = S.fw_lines + n;                  /* only a log cap: allowed while Calliope runs */
 }
 
 uint32_t abox_pcm_pointer(int capture, uint32_t id, uint32_t *count)
