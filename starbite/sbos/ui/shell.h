@@ -219,6 +219,23 @@ int sh_heading(int *deg_x10, int *accuracy);
 int sh_tilt(int *pitch_x10, int *roll_x10);
 int sh_steps(unsigned *n);
 long long sh_utc(void);                   /* the clock in seconds since 1970 (0 unknown): a GPS fix's age */
+/* Track A (sbos-core-api.md 4, 5): time zone, 12 / 24-hour, alarms. The platform applies the zone to every local
+ * time it pushes (sh_status, sh_alarm, the lock's times, notifications' hm); sh_utc stays UTC. Zones are indexed
+ * 0 .. sh_tz_count() - 1 (about 70; in regions, west to east). Kept across restarts. */
+int sh_tz_count(void);
+const char *sh_tz_name(int i, const char **city);   /* "Europe/Helsinki", city "Helsinki" */
+int sh_tz_offset_min(int i);                        /* the offset now, DST included */
+int sh_tz(void);
+void sh_tz_set(int i);                              /* the zone in use (index): the platform pushes sh_status again */
+int sh_clock24(void);
+void sh_clock24_set(int on);                        /* the shell redraws its times itself */
+/* the Clock app's alarms (up to 4): hm = hh * 100 + mm (local); days bit 0 Sunday .. bit 6 Saturday (0 once); label
+ * up to 19 bytes. put with i == sh_alarm_count() adds; 0 ok, -1 refused (full, bad values, the self test). Ringing and
+ * snooze stay the platform's; the lock's next alarm still comes through sh_alarm */
+int sh_alarm_count(void);
+int sh_alarm_get(int i, int *hm, int *days, int *on, char *label, int cap);
+int sh_alarm_put(int i, int hm, int days, int on, const char *label);
+int sh_alarm_del(int i);
 
 /* Starbite OS Next (helper D, shell_nc.inc): notifications. The platform pushes each new one (the kernel: notif.c's
  * posts, copied by kern_next.c's bridge outside the frames); the shell keeps the last 20 (RAM only) for the

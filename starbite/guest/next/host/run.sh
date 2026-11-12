@@ -18,7 +18,10 @@ for f in tk_math tk_raster tk_text tk_glass tk_comp tk_motion tk_pack shell_lock
     $CC -c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-math-errno -ffp-contract=fast $W -I"$ui" "$ui/$f.c" -o "$OUT/o/$f.o"
 done
 $CC -c -O2 -std=gnu11 $W -I"$ui" "$ui/host/plat.c" -o "$OUT/o/plat.o"
-$CC -c -O2 -std=gnu11 $W -DSBTK_NO_LINUX_FAKE -Dmain=sbtk_host_main -I"$ui" "$ui/host/main.c" -o "$OUT/o/main.o"
+$CC -c -O2 -std=gnu11 $W -DSBTK_NO_LINUX_FAKE -Dmain=sbtk_host_main -I"$ui" -I"$ui/../kern" -I"$T/starbite/utility" "$ui/host/main.c" -o "$OUT/o/main.o"
+# Track A: host/main.c's time zones are kern/tzdb.c's
+$CC -c -O2 -std=gnu11 $W -I"$ui/../kern" -I"$T/starbite/utility" "$ui/../kern/tzdb.c" -o "$OUT/o/tzdb.o"
+$CC -c -O2 -std=gnu11 $W -I"$T/starbite/utility" "$T/starbite/utility/tz.c" -o "$OUT/o/tz.o"
 $CC -c -O2 -std=gnu11 $W "$T/starbite/sbos/kern/passcode.c" -o "$OUT/o/passcode.o"     # Track A: the host's sh_pass_*
 $CC -c -O2 -std=gnu11 $W -I"$here/fake" -I"$T/starbite/guest/sbos" -I"$ui" "$here/../gwin.c" -o "$OUT/o/gwin.o"
 $CC -c -O2 -std=gnu11 $W -I"$here/fake" -I"$T/starbite/guest/sbos" -I"$ui" "$here/gwin-host.c" -o "$OUT/o/gwin-host.o"

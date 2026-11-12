@@ -25,6 +25,7 @@
 #include "shub.h"
 #include "store.h"
 #include "../guide/sbguide.h"
+#include "tzdb.h"                       /* Track A: time zones (kern/tzdb.c) */
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
 void tk_heap_init(void *mem, uint64_t size);
@@ -1700,6 +1701,90 @@ long long sh_utc(void)
 {
     struct sbos_time t;
     return clock_now(&t) ? (long long)t.utc : 0;
+}
+
+/* ---- Track A: time and alarms ---- */
+/* The zone and 12 / 24-hour (sbos-core-api.md 4): the kernel's clock_now applies the zone to every local time it
+ * hands out (sh_status, the alarms' minute, notifications, Sun); sh_utc stays UTC. Both are kept with the settings
+ * (settings.c ext[3]). The alarms (5): kern/alarm.c's four, the list and labels in its record "sbos.alarm"; ringing
+ * stays the kernel's, and the lock's next alarm goes out through sh_alarm. The self test writes nothing: the zone and
+ * 12 / 24-hour change in RAM only, and alarms are refused (they would buzz). */
+static void ta_keep(const char *what)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_logf("next: the self test keeps this in RAM only (no settings write): ", what);
+#else
+    (void)what;
+    settings_changed();
+#endif
+}
+int sh_tz_count(void) { return tzdb_n; }
+const char *sh_tz_name(int i, const char **city)
+{
+    if (i < 0 || i >= tzdb_n) { if (city) *city = ""; return ""; }
+    if (city) *city = tzdb[i].city;
+    return tzdb[i].name;
+}
+int sh_tz_offset_min(int i)
+{
+    struct sbos_time t;
+    if (i < 0 || i >= tzdb_n) return 0;
+    return clock_now(&t) && t.utc ? tzdb_offset(i, t.utc) : tzdb[i].off_min;
+}
+int sh_tz(void) { return clock_zone(); }
+void sh_tz_set(int i)
+{
+    if (i < 0 || i >= tzdb_n || i == clock_zone()) return;
+    clock_zone_set(i);
+    sb_logf("next: time zone ", tzdb[i].name);
+    ta_keep("the time zone");
+    if (ready) status_now();                         /* the local time, date and alarm's day again */
+}
+int sh_clock24(void) { return clock_24h; }
+void sh_clock24_set(int on)
+{
+    if (!!on == clock_24h) return;
+    clock_24h = !!on;
+    sb_log(on ? "next: 24-hour time" : "next: 12-hour time");
+    ta_keep("12 / 24-hour time");
+}
+int sh_alarm_count(void) { return alarm_count(); }
+int sh_alarm_get(int i, int *hm, int *days, int *on, char *label, int cap)
+{
+    return alarm_get(i, hm, days, on, label, cap) ? -1 : 0;
+}
+#ifndef SBOS_SELFTEST_NEXT
+static void ta_alarm_push(void)
+{
+    int h = 0, m = 0, on = alarm_first(&h, &m);
+    sh_alarm(on, h, m);
+}
+#endif
+int sh_alarm_put(int i, int hm, int days, int on, const char *label)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i; (void)hm; (void)days; (void)on; (void)label;
+    sb_log("next: the self test sets no alarm (dry run)");
+    return -1;
+#else
+    if (alarm_put(i, hm, days, on, label)) return -1;
+    settings_changed();
+    ta_alarm_push();
+    return 0;
+#endif
+}
+int sh_alarm_del(int i)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i;
+    sb_log("next: the self test deletes no alarm (dry run)");
+    return -1;
+#else
+    if (alarm_del(i)) return -1;
+    settings_changed();
+    ta_alarm_push();
+    return 0;
+#endif
 }
 
 /* ---- helper I: calls and SMS (shell_comms.inc) on the modem session's kmodem_call_* / kmodem_sms_* (kern.h defines

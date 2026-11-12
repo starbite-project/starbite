@@ -78,11 +78,7 @@ static int cm_emergency(const char *n)
 }
 static int cm_live(int st) { return st != SH_CALL_IDLE && st != SH_CALL_ENDED; }
 static int cm_now_hm(void) { return ST.h * 100 + ST.mi; }
-static void cm_hm(char *b, int hm)
-{
-    b[0] = (char)('0' + hm / 1000 % 10); b[1] = (char)('0' + hm / 100 % 10); b[2] = ':';
-    b[3] = (char)('0' + hm / 10 % 10); b[4] = (char)('0' + hm % 10); b[5] = 0;
-}
+static void cm_hm(char *b, int hm) { fmt_time(b, hm / 100, hm % 100, 1); }   /* Track A: "9:41 AM" in 12-hour (b: 9) */
 static int cm_cell_on(void) { return data_on(); }
 static int cm_registered(void) { return CELL.data == SH_DATA_REGISTERED || CELL.data == SH_DATA_UP; }
 static void cm_open_cellular(void);
@@ -509,7 +505,7 @@ static void page_phone(dc *d)
             for (int i = 0; i < n; i++) {
                 const cm_rec *r = &RC[i];
                 float y = CONTENT_TOP + REC_H * i;
-                char when[8], sub[48];
+                char when[12], sub[48];                  /* Track A: room for "12:05 AM" */
                 cm_hm(when, r->hm);
                 int k = 0;
                 for (const char *w = cm_rec_word(r->kind); *w; w++) sub[k++] = *w;
@@ -1061,7 +1057,7 @@ static int cm_unread(const char *num)
 }
 static void cm_when(char *b, const cm_msg *m, int with_day)
 {
-    char hm[8];
+    char hm[12];                                 /* Track A: room for "12:05 AM" */
     cm_hm(hm, m->hm);
     int k = 0;
     if (with_day || m->day != ST.day) {

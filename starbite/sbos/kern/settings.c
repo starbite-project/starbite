@@ -15,6 +15,7 @@
 #include "kapp.h"
 #include "sbapp.h"
 #include "survival.h"
+#include "tzdb.h"
 
 #define REC "sbos.settings"
 #define SAVE_DELAY_MS 3000U
@@ -24,7 +25,8 @@ struct saved {
     uint32_t screen_off_s;
     uint8_t panel_save, panel_off, sos_led, bright;
     uint32_t pad[4];
-    uint32_t ext[4];                        /* 1.2-alpha18: [0] the B2SOVRC note (0x100 | CHG_CNFG_05 as found) */
+    uint32_t ext[4];                        /* 1.2-alpha18: [0] the B2SOVRC note (0x100 | CHG_CNFG_05 as found);
+                                             * Track A: [3] bit 31 set, bit 30 12-hour, bits 0..29 the zone's id */
 };
 
 static uint8_t *half[2];
@@ -56,6 +58,7 @@ static void fill(struct saved *s)
     s->ext[0] = (uint32_t)heat_b2s_note;     /* 1.2-alpha18 */
     s->ext[1] = 0x10000U | (uint32_t)(heat_guard_mv & 0xffff);   /* 1.2-alpha24: the brownout guard's floor */
     s->ext[2] = clock_saved_value();         /* 1.2-alpha26: the last known time (UTC; 0 none) */
+    s->ext[3] = 0x80000000U | (uint32_t)(clock_24h == 0) << 30 | tzdb_id(clock_zone());   /* Track A: older: 0 */
     s->pad[3] = 0x10000U | (uint32_t)(heat_surv_stop_c10 & 0xffff) |  /* 1.2-alpha16: Survival's SoC limit (or none) */
                 (uint32_t)(heat_unlimited != 0) << 17 |               /* 1.2-alpha24: Unlimited */
                 (uint32_t)(heat_guard_on == 0) << 18 |                /* and the brownout guard OFF (0: on) */
@@ -169,6 +172,9 @@ void settings_restore(void)
         const uint8_t *q = 0;               /* 1.2-alpha27: the survival tools' options (SOS, Last 2 %, the location) */
         if (state_find(half[cur_half], "sbos.surv", &q) == 16 && q)
             surv_unpack(q);
+        q = 0;                              /* Track A: Next's alarm list and labels */
+        if (state_find(half[cur_half], "sbos.alarm", &q) == ALARM_REC_SIZE && q)
+            alarm_unpack(q);
     }
     {
         /* Track A: the passcode's record (salt, hash, wrong tries, the lock-out left; never the digits) */
@@ -225,6 +231,13 @@ void settings_restore(void)
         look_saved_style = (int)s.pad[2] - 1;   /* main makes it once, after this */
     if (s.ext[2] > 1577836800U)
         clock_restore_saved(s.ext[2]);      /* 1.2-alpha26: the last known time */
+    if (s.ext[3] & 0x80000000U) {           /* Track A: the time zone and 12 / 24-hour (older records: Helsinki, 24) */
+        int z = tzdb_by_id(s.ext[3] & 0x3fffffffU);
+        if (z >= 0)
+            clock_zone_set(z);
+        clock_24h = !(s.ext[3] >> 30 & 1U);
+        sb_logf("settings: the time zone restored: ", tzdb[clock_zone()].name);
+    }
     if ((s.ext[1] & 0xffff0000U) == 0x10000U) {     /* 1.2-alpha24 */
         int g = (int)(s.ext[1] & 0xffffU);
         if (g == 3200 || g == 3350 || g == 3500)
@@ -345,6 +358,14 @@ void settings_timer(unsigned id)
             sb_log("settings: the passcode record did not fit");
         memset(pr, 0, sizeof(pr));
     }
+    {
+        uint8_t ar[ALARM_REC_SIZE];         /* Track A: Next's alarm list (once it is the kernel's) */
+        if (alarm_pack(ar) && state_add(&b, "sbos.alarm", ar, ALARM_REC_SIZE) < 0)
+            sb_log("settings: the alarm list did not fit");
+        int c = app_by_id("clock"), n = c >= 0 ? alarm_app_state(apps[c].state) : 0;
+        if (n)
+            apps[c].state_n = (uint32_t)n;  /* the classic Clock app's alarms the same as the list */
+    }
     if (heat_rec.magic == 0x31435248U && state_add(&b, "heat", &heat_rec, sizeof(heat_rec)) < 0)
         sb_log("settings: the heat record did not fit");
     if (heat_log.magic == HLOG_MAGIC) {     /* 1.2-alpha6: the heat log in 4 KiB records */
@@ -399,6 +420,13 @@ void settings_timer(unsigned id)
 
 void settings_app_restore(int a)
 {
+    if (a >= 0 && a < napps && sb_streq(apps[a].id, "clock")) {
+        int n = alarm_app_state(apps[a].state);    /* Track A: the kernel's list (restored first) wins */
+        if (n) {
+            apps[a].state_n = (uint32_t)n;
+            return;
+        }
+    }
     if (!slot_ok || cur_half < 0 || a < 0 || a >= napps)
         return;
     char id[24] = "app:";

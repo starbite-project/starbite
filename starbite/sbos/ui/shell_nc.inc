@@ -166,8 +166,7 @@ static void nc_when(char *b, int hm)
         tk_memcpy(b + n, d < 60 ? "m ago" : "h ago", 6);
         return;
     }
-    b[0] = (char)('0' + hm / 1000 % 10); b[1] = (char)('0' + hm / 100 % 10); b[2] = ':';
-    b[3] = (char)('0' + hm / 10 % 10); b[4] = (char)('0' + hm % 10); b[5] = 0;
+    fmt_time(b, hm / 100, hm % 100, 1);          /* Track A: 12 / 24-hour */
 }
 static int nc_lines(const nc_item *n, char ln[4][96])
 {

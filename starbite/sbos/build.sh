@@ -57,6 +57,7 @@ if [ "$native" = 1 ]; then
     CC=gcc sh "$here/kern/host/prefs-test.sh"             # Track A: prefs and blobs (kern/prefs.c)
     gcc -std=gnu11 -O2 -Wall -Wextra -Werror -I "$here/kern" "$here/kern/host/lens-test.c" -lm -o "$ob/lens-test" &&
         "$ob/lens-test"                                   # Track A: Liquid Glass V3's model (kern/lens.h)
+    CC=gcc sh "$here/kern/host/tzdb-test.sh"     # Track A: the time zones against zoneinfo, the 12-hour text
 fi
 
 # The sensor hub's firmware patch (docs/SENSOR-HUB.md 2.2): never in the repository. Only the staged test image
