@@ -26,6 +26,20 @@
 #include "store.h"
 #include "../guide/sbguide.h"
 #include "tzdb.h"                       /* Track A: time zones (kern/tzdb.c) */
+#include "bt.h"                         /* Track A: drivers for the shell (the end of this file) */
+#include "cam.h"
+#include "shub_more.h"
+#include "bathealth.h"
+#include "haptic.h"
+#include "nledpol.h"
+static void drv_timer(unsigned id);             /* Track A: drivers for the shell (the end of this file) */
+static void drv_screen(int on);
+static void drv_after_bake(void);
+static int drv_touch_dark(void);
+#define KT_DRV_BT 30                            /* KT_UI ids: Bluetooth's steps, the camera's poll, Auto-Brightness, */
+#define KT_DRV_CAM 31                           /* the in-call proximity */
+#define KT_DRV_AUTO 32
+#define KT_DRV_PROX 33
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
 void tk_heap_init(void *mem, uint64_t size);
@@ -819,6 +833,7 @@ static int next_sleep(int key)
 static void next_screen(int on)
 {
     if (!ready) return;
+    drv_screen(on);                                  /* Track A: the LED's seen events, Auto-Brightness, proximity */
     if (!on) {
         kt_cancel(KT_UI, 20);
         ticking = 0;
@@ -1097,6 +1112,7 @@ static void bake_step(void)
     sh_bright_now(panel_bright_level);
     sh_restore();                                    /* Track A: what the shell keeps (settings_restore ran before) */
     boot_notes();                                    /* Track A, 1.0: a safe start, or the last start's crash */
+    drv_after_bake();                                /* Track A: the haptic level, Auto-Brightness, the LED policy */
     ready = need_full = 1;
     boost(0);
     kt_set(KT_UI, 23, sb_ms(), 5000, 0);            /* the workers off after 5 s unless a finger comes */
@@ -1190,6 +1206,12 @@ void next_kevent(const void *evp)
     const struct kin *e = evp;
     int ph = e->type == KIN_PRESS ? 0 : e->type == KIN_MOVE ? 1 : e->type == KIN_RELEASE ? 2 : -1;
     if (ph < 0) return;
+    static int dark_gesture;                         /* Track A: a touch that began with the panel dark at the ear */
+    if (ph == 0) dark_gesture = drv_touch_dark();
+    if (dark_gesture) {
+        if (ph == 2) dark_gesture = 0;
+        return;                                      /* the cheek: dropped, press to release */
+    }
     uint64_t st0 = tk_us();
     sh_touch(ph, e->x / TK_PT, e->y / TK_PT, (float)sb_ms());
     shell_time(ph == 0 ? "touch down" : ph == 1 ? "touch move" : "touch up", st0);
@@ -1228,6 +1250,7 @@ void next_ktimer(unsigned id)
         return;
     }
     if (ready && id == 26) { (void)kupdate_after_start(); return; }   /* Track A update: 10 s after the home screen */
+    if (id >= KT_DRV_BT && id <= KT_DRV_PROX) { drv_timer(id); return; }   /* Track A: drivers for the shell */
     ui_ktimer(id);
 }
 
@@ -1848,9 +1871,13 @@ int sh_answer(char *why)
     int r = kmodem_call_answer();
     return r < 0 ? call_refused(r, why) : 0;
 }
+static int call_declined;                            /* Track A: the LED: a declined call is not a missed one */
 int sh_hangup(void)
 {
     sb_log("next: comms: hang up (on the screen)");
+    struct kcall c;
+    kmodem_call(&c);
+    if (c.state == KCALL_INCOMING) call_declined = 1;
     return kmodem_call_hangup();
 }
 int sh_route(int audio, char *why)
@@ -1945,6 +1972,10 @@ static int comms_now(void)
     struct kcall c;
     kmodem_call(&c);
     if (!pushed || memcmp(&c, &last, sizeof(c))) {
+        if (pushed && last.state == KCALL_INCOMING && c.state != KCALL_INCOMING && c.state != KCALL_ACTIVE &&
+            c.state != KCALL_HELD && !call_declined)
+            nledpol_event(NLEDPOL_MISSED);           /* Track A: the LED: it rang and was not answered */
+        if (c.state == KCALL_INCOMING && last.state != KCALL_INCOMING) call_declined = 0;
         last = c;
         pushed = 1;
         sh_call_t s;
@@ -1959,7 +1990,16 @@ static int comms_now(void)
         ch = 1;
     }
     uint32_t g = kmodem_sms_gen();
-    if (g != gen) { gen = g; sh_sms_changed(g); ch = 1; }
+    static int unread = -1;                          /* Track A: the LED: a new unread message (the first look, at */
+    if (g != gen || unread < 0) {                    /* the home screen: the restored store, only counts) */
+        if (g != gen) { gen = g; sh_sms_changed(g); ch = 1; }
+        static struct ksms m;
+        int n = 0;
+        for (int i = 0; i < kmodem_sms_count(); i++)
+            if (kmodem_sms_get(i, &m) >= 0 && m.incoming && m.unread) n++;
+        if (unread >= 0 && n > unread) nledpol_event(NLEDPOL_MESSAGE);
+        unread = n;
+    }
     return ch;
 }
 #else
@@ -2413,3 +2453,375 @@ int sh_update_install(void)
     return r < 0 ? -1 : 0;
 }
 /* ---- end of Track A: Software Update ---- */
+
+/* ---- Track A: drivers for the shell ---- shell.h's sh_bt_*, sh_cam_*, the sensors, Auto-Brightness, the in-call
+ * proximity, battery health and the haptic patterns on the drivers track's kernel drivers (docs/drivers/), plus
+ * the notification LED's policy (kern/nledpol.c). Nothing here runs until the shell calls it, except, after the bake:
+ * the haptic level from the pref haptic.level (RAM only), Auto-Brightness when the pref display.auto is 1 (0 by
+ * default) and the LED policy; none of those three in any self-test image. Each running part has its own KT_UI timer
+ * (ids 30..33: Bluetooth's steps at bt_wait_ms, the camera's poll every 10 ms while open, Auto-Brightness every 2 s
+ * while the screen is on, the proximity every 200 ms in a call), so the UI loop never waits on hardware. In the
+ * self-test build (SBOS_SELFTEST_NEXT) every call that would power hardware is refused with a logged dry run.
+ * Not wired: sound (snd_*) and USB (their probes have not passed), Bluetooth pairing. */
+#ifdef SBOS_SELFTEST_NEXT
+static void drv_dry(const char *what)
+{
+    static const char *said[16];                     /* each kind once: the sensors are asked every frame */
+    for (int i = 0; i < 16; i++) {
+        if (said[i] == what) return;
+        if (!said[i]) { said[i] = what; break; }
+    }
+    sb_logf("next: drivers: refused (a dry run: the self test): ", what);
+}
+#define DRV_DRY(what, ret) do { drv_dry(what); return ret; } while (0)
+#define DRV_DRYV(what) do { drv_dry(what); return; } while (0)
+#define DRV_DRY_WHY "A dry run: the self test"
+#else
+#define DRV_DRY(what, ret) do { } while (0)
+#define DRV_DRYV(what) do { } while (0)
+#endif
+
+/* -- Bluetooth: scanning only. bt_set_module(wifi_module()) once Wi-Fi has read its module (wifi-track-h's
+ * kern/wifi.c; until that is in the trunk this weak one says "unknown" and bt.c keeps its default, SEMCO: S9 #1's) */
+int wifi_module(void);
+__attribute__((weak)) int wifi_module(void) { return -1; }
+#define BT_SCAN_LE_MS 6000U
+#define BT_SCAN_INQ_MS 5000U
+#define BT_SCAN_FOR_MS 60000U                        /* sh_bt_scan(1) repeats scans for at most this long */
+#define BT_SCAN_REST_MS 2000U
+static struct {
+    int scan, scanning;                              /* the shell wants scans; one of ours runs */
+    uint64_t until, next_at;
+    unsigned nsnap;                                  /* the last whole scan's list, shown while the next one fills */
+    struct { char name[33]; int rssi; } snap[BT_MAX_DEV];
+} BTS;
+static void bt_arm(unsigned ms) { kt_set(KT_UI, KT_DRV_BT, sb_ms(), ms ? ms : 1, 0); }
+static void bt_snapshot(void)
+{
+    unsigned n = bt_ndev();
+    if (n > BT_MAX_DEV) n = BT_MAX_DEV;
+    BTS.nsnap = 0;
+    for (unsigned i = 0; i < n; i++) {
+        const struct bt_dev *d = bt_dev_at(i);
+        if (!d) break;
+        sb_strcpy(BTS.snap[BTS.nsnap].name, sizeof BTS.snap[0].name, d->name);
+        BTS.snap[BTS.nsnap].rssi = d->has_rssi ? d->rssi : -127;
+        BTS.nsnap++;
+    }
+}
+static void bt_tick(void)
+{
+    if (!bt_step()) { bt_arm(bt_wait_ms()); return; }   /* starting or scanning: again when it asks */
+    int s = bt_state();
+    if (BTS.scanning) {
+        BTS.scanning = 0;
+        bt_snapshot();
+        BTS.next_at = sb_ms() + BT_SCAN_REST_MS;
+    }
+    if (s != BT_READY) { BTS.scan = 0; return; }      /* off or failed (sh_bt_why) */
+    if (!BTS.scan) return;
+    uint64_t now = sb_ms();
+    if (now >= BTS.until) { BTS.scan = 0; sb_log("next: bluetooth: scanning stopped (60 s)"); return; }
+    if (now < BTS.next_at) { bt_arm((unsigned)(BTS.next_at - now)); return; }
+    if (bt_scan(BT_SCAN_LE_MS, BT_SCAN_INQ_MS) < 0) { BTS.scan = 0; return; }
+    BTS.scanning = 1;
+    bt_arm(1);
+}
+int sh_bt_on(int on)
+{
+    if (!on) {
+        kt_cancel(KT_UI, KT_DRV_BT);
+        tk_memset(&BTS, 0, sizeof BTS);
+        if (bt_state() != BT_OFF) bt_off();          /* pins and registers back as found */
+        return 0;
+    }
+    DRV_DRY("Bluetooth on", -1);
+    static struct bt_hal h;
+    static int hal;
+    if (!hal) { bt_hal_libsb(&h); bt_hal_set(&h); hal = 1; }
+    int m = wifi_module();
+    if (m >= 0) bt_set_module(m);
+    if (bt_on() < 0) return -1;
+    sb_log("next: bluetooth: on (the shell)");
+    bt_arm(1);
+    return 0;
+}
+int sh_bt_state(void)
+{
+    int s = bt_state();
+    return s == BT_STARTING ? 1 : s == BT_READY || s == BT_SCANNING ? 2 : s == BT_FAILED ? -1 : 0;
+}
+const char *sh_bt_why(void) { return bt_why(); }
+int sh_bt_scan(int on)
+{
+    if (!on) { BTS.scan = 0; return 0; }             /* the scan that runs ends by itself */
+    DRV_DRY("Bluetooth scan", -1);
+    int s = bt_state();
+    if (s != BT_STARTING && s != BT_READY && s != BT_SCANNING) return -1;
+    BTS.until = sb_ms() + BT_SCAN_FOR_MS;
+    if (!BTS.scan) BTS.next_at = 0;
+    BTS.scan = 1;
+    if (s == BT_READY) bt_arm(1);                    /* else: the start's (or the scan's) own end goes on */
+    return 0;
+}
+static int bt_live(void) { return bt_state() == BT_SCANNING && bt_ndev() >= BTS.nsnap; }
+int sh_bt_count(void)
+{
+    if (bt_state() == BT_OFF) return 0;
+    return bt_live() ? (int)bt_ndev() : (int)BTS.nsnap;
+}
+int sh_bt_get(int i, char *name, int cap, int *rssi)
+{
+    if (i < 0 || i >= sh_bt_count()) return -1;
+    const char *n;
+    int r;
+    if (bt_live()) {
+        const struct bt_dev *d = bt_dev_at((unsigned)i);
+        if (!d) return -1;
+        n = d->name;
+        r = d->has_rssi ? d->rssi : -127;
+    } else {
+        n = BTS.snap[i].name;
+        r = BTS.snap[i].rssi;
+    }
+    if (name && cap > 0) sb_strcpy(name, (unsigned)cap, n);
+    if (rssi) *rssi = r;
+    return 0;
+}
+
+/* -- the front camera: cam_poll every 10 ms while it runs (each poll at most ~100 ms) */
+static int cam_running;
+static void cam_tick(void)
+{
+    int r = cam_poll();
+    if (r > 0) { kt_set(KT_UI, KT_DRV_CAM, sb_ms(), 10, 0); return; }
+    cam_running = 0;
+    if (r < 0) sb_logf("next: camera: stopped: ", cam_why());
+}
+int sh_cam_open(int w, int h)
+{
+    DRV_DRY("the front camera", -1);
+    if (w < 8 || h < 8) return CAM_EARG;
+    struct cam_req q = { CAM_FRONT, (unsigned)w, (unsigned)h, CAM_PORTRAIT_SELFIE, 1, 0, 0 };
+    int r = cam_open(&q);
+    if (r < 0) { sb_logf("next: camera: not opened: ", cam_why()); return r; }
+    cam_running = 1;
+    kt_set(KT_UI, KT_DRV_CAM, sb_ms(), 1, 0);
+    return 0;
+}
+const uint32_t *sh_cam_frame(int *w, int *h, unsigned *seq)
+{
+    struct cam_pic p;
+    if (!cam_running || !cam_frame(&p) || p.stride != p.w) return 0;
+    if (w) *w = (int)p.w;
+    if (h) *h = (int)p.h;
+    if (seq) *seq = p.seq;
+    return p.px;
+}
+int sh_cam_still(void)
+{
+    DRV_DRY("a still", -1);
+    return cam_running && cam_still() == 0 ? 0 : -1;
+}
+const uint32_t *sh_cam_still_get(int *w, int *h, const unsigned char **bmp, unsigned *bmp_len)
+{
+    struct cam_shot s;
+    if (!cam_running || !cam_still_get(&s) || s.stride != s.w) return 0;
+    if (w) *w = (int)s.w;
+    if (h) *h = (int)s.h;
+    if (bmp) *bmp = s.bmp;
+    if (bmp_len) *bmp_len = s.bmp_len;
+    return s.px;
+}
+const char *sh_cam_why(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    return DRV_DRY_WHY;
+#else
+    return cam_why();
+#endif
+}
+void sh_cam_close(void)
+{
+    kt_cancel(KT_UI, KT_DRV_CAM);
+    if (cam_running || cam_state() != CAM_ST_OFF) cam_close();   /* synchronous: everything off, as found */
+    cam_running = 0;
+}
+
+/* -- the hub's sensors (each getter keeps its sensor on for 10 s; the hub starts through survival.c) */
+int sh_light_lux(void)
+{
+    DRV_DRY("the light sensor", -1);
+    uint32_t lux;
+    return sens_lux(&lux) ? (int)(lux > 1000000U ? 1000000U : lux) : -1;
+}
+int sh_pressure_hpa10(void)
+{
+    DRV_DRY("the barometer", -1);
+    int32_t p, t;
+    return sens_pressure_hpa(&p, &t) ? (int)((p + 5) / 10) : -1;
+}
+int sh_proximity_near(void)
+{
+    DRV_DRY("the proximity sensor", -1);
+    return sens_prox_near();
+}
+int sh_gyro_mdps(int *x, int *y, int *z)
+{
+    DRV_DRY("the gyroscope", 0);
+    int32_t g[3];
+    if (!sens_gyro_mdps(g)) return 0;
+    if (x) *x = g[0];
+    if (y) *y = g[1];
+    if (z) *z = g[2];
+    return 1;
+}
+
+/* -- Auto-Brightness: sens_auto_brightness (0..255, a log curve of the lux) to the panel's four levels; a new level
+ * only after it was the same two looks in a row, and only when the light moved to another level (the user's own pick
+ * stays until then) */
+static int ab_on, ab_last = -1, ab_cand = -1;
+static int ab_level(int v) { return v < 28 ? 1 : v < 75 ? 2 : v < 150 ? 3 : 4; }   /* ~4, ~50, ~500 lux */
+static void ab_tick(void)
+{
+    if (!ab_on || !K.screen_on) return;              /* the screen's on arms it again */
+    kt_set(KT_UI, KT_DRV_AUTO, sb_ms(), 2000, 0);
+    int v = sens_auto_brightness();
+    if (v < 0) return;
+    int l = ab_level(v);
+    if (l != ab_cand) { ab_cand = l; return; }
+    if (l == ab_last) return;
+    ab_last = l;
+    if (l == panel_bright_level) return;
+    if (panel_brightness(l)) {
+        sh_bright_now(l);
+        sb_logx("next: Auto-Brightness: the panel's level ", (uint64_t)l);
+    }
+}
+static void ab_set(int on)
+{
+    ab_on = !!on;
+    ab_last = ab_cand = -1;
+    if (ab_on && K.screen_on) kt_set(KT_UI, KT_DRV_AUTO, sb_ms(), 1, 0);
+    if (!ab_on) {
+        kt_cancel(KT_UI, KT_DRV_AUTO);
+        sens_release(SENS_LIGHT);
+    }
+}
+void sh_auto_brightness(int on)
+{
+    DRV_DRYV("Auto-Brightness");
+    sh_pref_set_int("display.auto", !!on);
+    ab_set(on);
+}
+int sh_auto_brightness_on(void) { return ab_on; }
+
+/* -- a call at the ear: sens_incall + the panel dark while near (panel_blank: the display off, the screen on); the
+ * touches of that time dropped (next_kevent). Ends by itself with the call (kmodem_call, every 200 ms), or after 10 s
+ * when no call came. The Power key works as always: its screen on lights the panel again. */
+static int px_on, px_dark, px_call;
+static uint64_t px_t0;
+static void px_dark_set(int dark)
+{
+    if (dark == px_dark || !K.screen_on) return;    /* screen off: the screen's on lights it (drv_screen) */
+    if (panel_blank(dark)) px_dark = dark;
+    else sb_log(dark ? "next: proximity: the panel did not go dark" : "next: proximity: the panel did not light");
+}
+static void px_set(int on)
+{
+    on = !!on;
+    if (on == px_on) return;
+    px_on = on;
+    px_call = 0;
+    px_t0 = sb_ms();
+    sens_incall(on);
+    if (on) { kt_set(KT_UI, KT_DRV_PROX, sb_ms(), 200, 0); return; }
+    kt_cancel(KT_UI, KT_DRV_PROX);
+    px_dark_set(0);
+}
+static void px_tick(void)
+{
+    if (!px_on) return;
+    struct kcall c;
+    kmodem_call(&c);
+    if (c.state >= KCALL_DIALING && c.state <= KCALL_HELD) px_call = 1;
+    else if (px_call) { sb_log("next: proximity: the call ended: off"); px_set(0); return; }
+    else if (sb_ms() - px_t0 > 10000) { sb_log("next: proximity: no call came: off"); px_set(0); return; }
+    kt_set(KT_UI, KT_DRV_PROX, sb_ms(), 200, 0);
+    px_dark_set(sens_incall_screen_off());
+}
+void sh_call_proximity(int on)
+{
+    if (on) DRV_DRYV("the in-call proximity");
+    px_set(on);
+}
+static int drv_touch_dark(void) { return px_dark && K.screen_on; }
+
+/* -- battery health (read only: five gauge words, ~2 ms) */
+int sh_battery_health(int *max_pct, int *cycles, char *words, int cap)
+{
+    struct bathealth b;
+    int r = bathealth_read(&b) == 1;
+    if (max_pct) *max_pct = r ? b.shown_pct : -1;
+    if (cycles) *cycles = r ? (int)b.cycles : -1;
+    if (words && cap > 0) sb_strcpy(words, (unsigned)cap, r ? (b.words ? b.words : "") : bathealth_why());
+    return r;
+}
+
+/* -- haptic patterns at the kept intensity */
+_Static_assert((int)SH_VIB_RING == (int)HAPTIC_RING && (int)SH_VIB_NOTIFY == (int)HAPTIC_NOTIFY &&
+               (int)SH_VIB_ALARM == (int)HAPTIC_ALARM && (int)SH_VIB_TICK == (int)HAPTIC_TICK &&
+               (int)SH_VIB_SUCCESS == (int)HAPTIC_SUCCESS && (int)SH_VIB_WARNING == (int)HAPTIC_WARNING &&
+               (int)SH_VIB_ERROR == (int)HAPTIC_ERROR, "SH_VIB_* are HAPTIC_*");
+void sh_haptic_kind(int kind)
+{
+    DRV_DRYV("a haptic pattern");
+    int r = haptic_play(kind);
+    if (r < 0 && r != SBOS_EBUSY) sb_logf("next: haptic: not played: ", haptic_why());   /* busy: a ring / alarm plays */
+}
+void sh_haptic_stop(void) { haptic_stop(); }
+int sh_haptic_level(void) { return haptic_intensity(); }
+void sh_haptic_level_set(int level)
+{
+    level = level < 0 ? 0 : level > 3 ? 3 : level;
+    DRV_DRYV("the haptic level");
+    haptic_set_intensity(level);
+    sh_pref_set_int("haptic.level", level);
+}
+
+/* -- the kernel's side */
+static void drv_timer(unsigned id)
+{
+    if (id == KT_DRV_BT) bt_tick();
+    else if (id == KT_DRV_CAM) cam_tick();
+    else if (id == KT_DRV_AUTO) ab_tick();
+    else if (id == KT_DRV_PROX) px_tick();
+}
+static void drv_screen(int on)
+{
+    if (!on) { kt_cancel(KT_UI, KT_DRV_AUTO); return; }
+    if (px_dark) {                                   /* the Power key during a call: lit, the proximity decides again */
+        if (!panel_blank(0)) sb_log("next: proximity: the panel did not light");
+        px_dark = 0;
+    }
+    nledpol_screen(1);                               /* the missed call / message seen on the lock screen */
+    if (ab_on) kt_set(KT_UI, KT_DRV_AUTO, sb_ms(), 300, 0);
+}
+static void drv_after_bake(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: drivers: the haptic level, Auto-Brightness and the LED policy would start (a dry run: the self test)");
+#else
+    if (sbos_selftest_enabled) {
+        sb_log("next: drivers: a self-test image: no haptic level, Auto-Brightness or LED policy");
+        return;
+    }
+    haptic_set_intensity(sh_pref_int("haptic.level", 3));
+    if (sh_pref_int("display.auto", 0) == 1) ab_set(1);
+    struct sbos_battery b;
+    battery_get(&b);
+    nledpol_battery(b.ok, b.pct, b.charger);
+    nledpol_enable(1);
+#endif
+}
+/* ---- end of Track A: drivers for the shell ---- */

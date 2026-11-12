@@ -950,6 +950,187 @@ int sh_update_install(void)
     return 0;
 }
 
+/* Track A: drivers for the shell, simulated (the phone: kern_next.c's block on kern/bt.c, cam.c, shub_more.c,
+ * bathealth.c, haptic.c). Time is the film's clock (surv_host_now_ms) plus 50 ms a call, so a still's polls move on
+ * too. SBTK_BT=fail: Bluetooth's start fails; SBTK_CAM=fail: the camera does not answer; SBTK_PROX=1: something near.
+ * Nothing touches hardware; every change prints a line. */
+static uint64_t hd_now(void) { static uint64_t calls; return surv_host_now_ms + 50 * ++calls; }
+static int hd_env(const char *k, const char *v) { const char *e = getenv(k); return e && !strcmp(e, v); }
+/* Bluetooth: 1.5 s to start, then scans of 11 s (one device more every 0.4 s), repeated while asked, 60 s at most */
+static struct { int on, failed, scan; uint64_t t0, scan_t0, until; } HBT;
+static const struct { const char *name; int rssi; } hbt_dev[] = {
+    { "AirPods Pro", -48 }, { "JBL Flip 5", -61 }, { "Galaxy Buds2", -66 }, { "Mi Smart Band 6", -72 }, { "", -80 },
+    { "LE-Bose QC35 II", -84 },
+};
+#define HBT_N (int)(sizeof hbt_dev / sizeof hbt_dev[0])
+int sh_bt_on(int on)
+{
+    fprintf(stderr, "bluetooth: %s\n", on ? "on" : "off");
+    memset(&HBT, 0, sizeof HBT);
+    if (!on) return 0;
+    HBT.on = 1;
+    HBT.t0 = hd_now();
+    HBT.failed = hd_env("SBTK_BT", "fail");
+    return 0;
+}
+int sh_bt_state(void)
+{
+    if (!HBT.on) return 0;
+    if (hd_now() - HBT.t0 < 1500) return 1;
+    return HBT.failed ? -1 : 2;
+}
+const char *sh_bt_why(void)
+{
+    int s = sh_bt_state();
+    return s == 1 ? "Bluetooth is starting" : s == 2 ? "Bluetooth is on" :
+           s < 0 ? "The Bluetooth firmware is missing (VENDOR firmware/BCM4361B0_semco.hcd)" : "Bluetooth is off";
+}
+int sh_bt_scan(int on)
+{
+    if (!on) { HBT.scan = 0; return 0; }
+    if (sh_bt_state() < 1) return -1;
+    if (!HBT.scan) HBT.scan_t0 = hd_now();
+    HBT.scan = 1;
+    HBT.until = hd_now() + 60000;
+    fprintf(stderr, "bluetooth: scan\n");
+    return 0;
+}
+int sh_bt_count(void)
+{
+    if (sh_bt_state() != 2 || !HBT.scan_t0) return 0;
+    uint64_t now = hd_now();
+    if (HBT.scan && now >= HBT.until) HBT.scan = 0;
+    int n = (int)((now - HBT.scan_t0) / 400);
+    return n > HBT_N ? HBT_N : n;
+}
+int sh_bt_get(int i, char *name, int cap, int *rssi)
+{
+    if (i < 0 || i >= sh_bt_count()) return -1;
+    if (name && cap > 0) snprintf(name, (size_t)cap, "%s", hbt_dev[i].name);
+    if (rssi) *rssi = hbt_dev[i].rssi + (int)(hd_now() / 1000 % 3) - 1;
+    return 0;
+}
+/* the front camera: a moving test picture at 30 fps; a still 0.3 s after it is asked */
+static struct { int on, w, h, still; unsigned seq; uint64_t t0, still_t; uint32_t *px, *spx; uint8_t *bmp; unsigned bmp_len; } HCAM;
+static void hcam_draw(uint32_t *px, int w, int h, unsigned seq)
+{
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            unsigned r = (unsigned)(x * 255 / w), g = (unsigned)(y * 255 / h), b = (seq * 4 + (unsigned)(x + y) / 4) & 255;
+            int bar = ((unsigned)y + seq * 6) % (unsigned)h < (unsigned)h / 12;
+            px[y * w + x] = 0xFF000000u | (bar ? 0xF0F0F0u : r << 16 | g << 8 | b);
+        }
+}
+int sh_cam_open(int w, int h)
+{
+    if (HCAM.on) return -1;
+    if (w < 8 || h < 8 || w > 816 || h > 816 || w * h * 4 > 2 * 1024 * 1024) return -2;
+    fprintf(stderr, "camera: open %d x %d\n", w, h);
+    if (hd_env("SBTK_CAM", "fail")) return -5;
+    free(HCAM.px);
+    HCAM.px = malloc((size_t)w * (size_t)h * 4);
+    if (!HCAM.px) return -8;
+    HCAM.on = 1; HCAM.w = w; HCAM.h = h; HCAM.seq = 0; HCAM.still = 0;
+    HCAM.t0 = hd_now();
+    return 0;
+}
+const uint32_t *sh_cam_frame(int *w, int *h, unsigned *seq)
+{
+    if (!HCAM.on) return 0;
+    uint64_t e = hd_now() - HCAM.t0;
+    if (e < 600) return 0;                                         /* the sensor's start */
+    unsigned s = (unsigned)((e - 600) / 33) + 1;
+    if (s != HCAM.seq) { HCAM.seq = s; hcam_draw(HCAM.px, HCAM.w, HCAM.h, s); }
+    if (w) *w = HCAM.w;
+    if (h) *h = HCAM.h;
+    if (seq) *seq = HCAM.seq;
+    return HCAM.px;
+}
+int sh_cam_still(void)
+{
+    if (!HCAM.on || HCAM.still == 1) return -1;
+    HCAM.still = 1;
+    HCAM.still_t = hd_now() + 300;
+    fprintf(stderr, "camera: a still\n");
+    return 0;
+}
+const uint32_t *sh_cam_still_get(int *w, int *h, const unsigned char **bmp, unsigned *bmp_len)
+{
+    enum { SW = 612, SH = 816 };
+    if (!HCAM.on || !HCAM.still || (HCAM.still == 1 && hd_now() < HCAM.still_t)) return 0;
+    if (HCAM.still == 1) {
+        if (!HCAM.spx) HCAM.spx = malloc((size_t)SW * SH * 4);
+        HCAM.bmp_len = 54 + SW * 3 * SH;                           /* 612 x 3 = 1836: rows need no padding */
+        if (!HCAM.bmp) HCAM.bmp = malloc(HCAM.bmp_len);
+        if (!HCAM.spx || !HCAM.bmp) return 0;
+        hcam_draw(HCAM.spx, SW, SH, HCAM.seq);
+        uint8_t *b = HCAM.bmp;
+        memset(b, 0, 54);
+        b[0] = 'B'; b[1] = 'M';
+        uint32_t v[] = { HCAM.bmp_len, 0, 54, 40, SW, SH };
+        for (int k = 0; k < 6; k++) memcpy(b + 2 + 4 * k, &v[k], 4);
+        b[26] = 1; b[28] = 24;
+        for (int y = 0; y < SH; y++)
+            for (int x = 0; x < SW; x++) {
+                uint32_t p = HCAM.spx[(SH - 1 - y) * SW + x];
+                uint8_t *d = b + 54 + (y * SW + x) * 3;
+                d[0] = (uint8_t)p; d[1] = (uint8_t)(p >> 8); d[2] = (uint8_t)(p >> 16);
+            }
+        HCAM.still = 2;
+    }
+    if (w) *w = SW;
+    if (h) *h = SH;
+    if (bmp) *bmp = HCAM.bmp;
+    if (bmp_len) *bmp_len = HCAM.bmp_len;
+    return HCAM.spx;
+}
+const char *sh_cam_why(void)
+{
+    if (hd_env("SBTK_CAM", "fail")) return "The front camera does not answer";
+    return HCAM.on ? (hd_now() - HCAM.t0 < 600 ? "Starting the front camera" : "Front camera on") : "Camera off";
+}
+void sh_cam_close(void)
+{
+    if (HCAM.on) fprintf(stderr, "camera: close\n");
+    HCAM.on = 0;
+    HCAM.still = 0;
+}
+/* the sensors: an office (about 320 lux, 1013.2 hPa), the phone on a desk */
+int sh_light_lux(void) { return 320 + (int)(hd_now() / 700 % 9) - 4; }
+int sh_pressure_hpa10(void) { return 10132 + (int)(hd_now() / 5000 % 3) - 1; }
+int sh_proximity_near(void) { return hd_env("SBTK_PROX", "1"); }
+int sh_gyro_mdps(int *x, int *y, int *z)
+{
+    int j = (int)(hd_now() / 100 % 7) - 3;
+    if (x) *x = 140 + j * 10;
+    if (y) *y = -70 - j * 5;
+    if (z) *z = 35;
+    return 1;
+}
+void sh_auto_brightness(int on) { sh_pref_set_int("display.auto", !!on); fprintf(stderr, "Auto-Brightness: %s\n", on ? "on" : "off"); }
+int sh_auto_brightness_on(void) { return sh_pref_int("display.auto", 0) == 1; }
+void sh_call_proximity(int on) { fprintf(stderr, "call proximity: %s\n", on ? "on" : "off"); }
+int sh_battery_health(int *max_pct, int *cycles, char *words, int cap)
+{
+    if (max_pct) *max_pct = 91;
+    if (cycles) *cycles = 212;
+    if (words && cap > 0) snprintf(words, (size_t)cap, "Your battery is in good health.");
+    return 1;
+}
+static const char *const hvib[] = { "ring", "notify", "alarm", "tick", "success", "warning", "error" };
+void sh_haptic_kind(int kind)
+{
+    if (kind >= 0 && kind < (int)(sizeof hvib / sizeof hvib[0])) fprintf(stderr, "haptic: %s\n", hvib[kind]);
+}
+void sh_haptic_stop(void) { fprintf(stderr, "haptic: stop\n"); }
+int sh_haptic_level(void) { return sh_pref_int("haptic.level", 3); }
+void sh_haptic_level_set(int level)
+{
+    level = level < 0 ? 0 : level > 3 ? 3 : level;
+    sh_pref_set_int("haptic.level", level);
+    fprintf(stderr, "haptic: level %d\n", level);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: sbtk-host PAK still|film|bench ...\n"); return 2; }

@@ -425,6 +425,57 @@ typedef struct {
 } sh_fwinfo_t;
 int sh_fw_info(sh_fwinfo_t *i);           /* 1 the loader's table, 0 an older loader */
 
+/* ---- Track A: drivers for the shell (the kernel: kern_next.c's block of that name on kern/bt.c, cam.c, shub_more.c,
+ * bathealth.c, haptic.c; the host: simulated). Nothing here runs until the shell calls it, except the LED policy and
+ * auto-brightness (when display.auto is 1). Calls that would power hardware are logged dry runs in the self-test
+ * build (< 0 / 0 returned, why: "A dry run: the self test"). The kernel drives every running part from its own
+ * timers: no call here blocks the UI for more than ~20 ms (the camera's poll: ~100 ms at most). ---- */
+/* Bluetooth: scanning only (no pairing, no audio). sh_bt_on(1) starts the chip (firmware, patch: ~10 s); state 0 off,
+ * 1 starting, 2 on, -1 failed (sh_bt_why: plain words). sh_bt_scan(1) scans (LE, then classic) again and again while
+ * on, for at most 60 s; sh_bt_scan(0) stops after the scan that runs (they end by themselves, ~11 s). The devices:
+ * strongest first, name ("" when none was heard) and RSSI in dBm; the list stays between scans. < 0: refused. */
+int sh_bt_on(int on);
+int sh_bt_state(void);
+const char *sh_bt_why(void);
+int sh_bt_scan(int on);
+int sh_bt_count(void);
+int sh_bt_get(int i, char *name, int cap, int *rssi);   /* 0 ok, -1 no such device */
+/* the front camera (no flash: use a white screen): a portrait selfie preview w x h (each <= 816, w * h <= 512 K, e.g.
+ * 360 x 480), mirrored; 0 started, < 0 refused (sh_cam_why). The newest frame: 0xFFRRGGBB, w * h, row after row
+ * (stride = w), or 0 while none yet / closed / failed; seq counts up with each new frame. The memory is the camera's
+ * (uncached): copy it within the turn. sh_cam_still asks for a still (816 x 612 rotated: 612 x 816, not mirrored);
+ * sh_cam_still_get gives it once ready (until the next still or close): its pixels and its 24-bit BMP file. */
+int sh_cam_open(int w, int h);
+const uint32_t *sh_cam_frame(int *w, int *h, unsigned *seq);
+int sh_cam_still(void);                               /* 0 asked, < 0 not running / one already pending */
+const uint32_t *sh_cam_still_get(int *w, int *h, const unsigned char **bmp, unsigned *bmp_len);   /* 0 not (yet) */
+const char *sh_cam_why(void);
+void sh_cam_close(void);
+/* the hub's sensors (each call keeps its sensor on for 10 s; the first may take ~5 s while the hub starts): -1 when
+ * not known yet. Light in lux; pressure in hPa x 10 (10132 = 1013.2 hPa); proximity 1 near, 0 far; the gyroscope in
+ * millidegrees a second (Android axes; 1 valid) */
+int sh_light_lux(void);
+int sh_pressure_hpa10(void);
+int sh_proximity_near(void);
+int sh_gyro_mdps(int *x, int *y, int *z);
+/* Auto-Brightness (the pref display.auto, 0 by default): the panel's level (1..4) from the light every 2 s while the
+ * screen is on; a level the user picks stays until the light moves to another level. sh_bright_now tells the shell. */
+void sh_auto_brightness(int on);
+int sh_auto_brightness_on(void);
+/* a call at the ear: 1 while the call screen wants the proximity sensor (a call at the earpiece), 0 after. While
+ * something is near, the panel is dark and touches are dropped; the Power key still works. The kernel ends it by
+ * itself when the call ends. */
+void sh_call_proximity(int on);
+/* Settings > Battery: Maximum Capacity (0..100 %), cycle count, plain words; 1 read, 0 not (words: why) */
+int sh_battery_health(int *max_pct, int *cycles, char *words, int cap);
+/* haptic patterns (kern/haptic.c) at the haptic.level intensity (0 off, 1 light, 2 medium, 3 strong: the default);
+ * RING and ALARM loop until sh_haptic_stop (60 s at most). sh_haptic / sh_haptic_k above are unchanged. */
+enum { SH_VIB_RING, SH_VIB_NOTIFY, SH_VIB_ALARM, SH_VIB_TICK, SH_VIB_SUCCESS, SH_VIB_WARNING, SH_VIB_ERROR };
+void sh_haptic_kind(int kind);
+void sh_haptic_stop(void);
+int sh_haptic_level(void);
+void sh_haptic_level_set(int level);                  /* kept as the pref haptic.level */
+
 #endif
 
 /* Track A, 1.0 (sbos-core-api.md 10): a safe start (the loader's one-shot from Settings > Startup or Starbite

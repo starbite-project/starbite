@@ -401,6 +401,7 @@ void panel_kick(void);
 void panel_idle(void);
 void panel_save_set(int on);
 void panel_screen(int on);
+int panel_blank(int on);           /* Track A: the in-call proximity: display off / on, the screen kept; 1 done */
 unsigned panel_dcs_failures(void);
 extern int panel_bright_level;
 int panel_brightness(int level);    /* the user's level: 0 untouched, 1..4 low..high: 1 done */
