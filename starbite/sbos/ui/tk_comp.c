@@ -30,13 +30,24 @@ void tk_layer_init(tk_layer *l, const char *name)
     l->sx = l->sy = 1;
     l->alpha = 1;
 }
+tk_gstyle_t tk_gstyle;
+void tk_layer_glass_shape_v2(tk_layer *l, float x, float y, float w, float h, float r, int variant, uint32_t tint, float press)
+{
+    int i = 0;
+    for (; i < l->ngsh; i++)                /* the same box baked again (a redraw without tk_layer_init): its style anew */
+        if (l->gsh[i][0] == x && l->gsh[i][1] == y && l->gsh[i][2] == w && l->gsh[i][3] == h && l->gsh[i][4] == r) break;
+    if (i == l->ngsh) {
+        if (l->ngsh >= 24) return;
+        float *g = l->gsh[l->ngsh++];
+        g[0] = x; g[1] = y; g[2] = w; g[3] = h; g[4] = r;
+    }
+    l->gvar[i] = (uint8_t)(variant ? 1 : 0);
+    l->gtint[i] = tint;
+    l->gpress[i] = (uint8_t)(tk_clampf(press, 0, 1) * 255 + .5f);
+}
 void tk_layer_glass_shape(tk_layer *l, float x, float y, float w, float h, float r)
 {
-    for (int i = 0; i < l->ngsh; i++)       /* the same box baked again (a redraw without tk_layer_init) */
-        if (l->gsh[i][0] == x && l->gsh[i][1] == y && l->gsh[i][2] == w && l->gsh[i][3] == h && l->gsh[i][4] == r) return;
-    if (l->ngsh >= 24) return;
-    float *g = l->gsh[l->ngsh++];
-    g[0] = x; g[1] = y; g[2] = w; g[3] = h; g[4] = r;
+    tk_layer_glass_shape_v2(l, x, y, w, h, r, tk_gstyle.variant, tk_gstyle.tint, tk_gstyle.press);
 }
 void tk_layer_add(tk_layer *p, tk_layer *c)
 {
@@ -1375,12 +1386,15 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
 }
 
 static float fsh[24][5], fk = 1;
+static uint32_t ftint[24];
+static uint8_t fvar[24], fpress[24];   /* V2: the flattened shapes' style */
 static lens_par fpar[24];
 static int nfsh, fit[24];                   /* fit: the shape's item in flist (its clip, fade and opacity) */
 void tk_flatten_shapes(tk_layer *dst)
 {
     dst->ngsh = 0;
-    for (int i = 0; i < nfsh; i++) tk_layer_glass_shape(dst, fsh[i][0], fsh[i][1], fsh[i][2], fsh[i][3], fsh[i][4]);
+    for (int i = 0; i < nfsh; i++)
+        tk_layer_glass_shape_v2(dst, fsh[i][0], fsh[i][1], fsh[i][2], fsh[i][3], fsh[i][4], fvar[i], ftint[i], fpress[i] / 255.0f);
 }
 uint32_t tk_flat_lens(const tk_comp *c, int x, int y, uint32_t fb)
 {
@@ -1440,6 +1454,7 @@ void tk_flatten(tk_layer *g, tk_bmp *out, tk_a8 *mask, float k)
             {
                 fit[nfsh] = i;
                 shape_at(it, it->l->gsh[q], &fsh[nfsh][0], &fsh[nfsh][1], &fsh[nfsh][2], &fsh[nfsh][3], &fsh[nfsh][4]);
+                fvar[nfsh] = it->l->gvar[q]; ftint[nfsh] = it->l->gtint[q]; fpress[nfsh] = it->l->gpress[q];
                 fpar[nfsh] = lens_params(fsh[nfsh][2] / k, fsh[nfsh][3] / k, fsh[nfsh][4] / k, TK_PT);   /* screen px */
             }
     }
