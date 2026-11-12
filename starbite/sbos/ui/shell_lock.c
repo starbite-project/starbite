@@ -1889,6 +1889,8 @@ static void cc_unview(void)
 static void build_cc_grid(void)
 {
     cc_unview();
+    CCS.rot = 1;                                 /* cp6: iOS's Portrait Orientation Lock, always on (the panel doesn't rotate) */
+    CCS.save = sh_low_power_on();                /* cp6: Track A's Low Power Mode lights its tile */
     relayer(&ccgrid);
     dc d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, 4 * CC_U + 3 * CC_GAP, 44, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
     /* the connectivity 2x2: Airplane, Cellular, Wi-Fi and the mini cluster (Bluetooth, Nearby, Hotspot, VPN) */
@@ -2365,12 +2367,13 @@ static int cc_tap(float x, float y)
             sh_haptic_k(SH_HAP_LIGHT);       /* B4: a toggle, felt */
             return 1;
         }
-        else if (c == 1) { toast("The screen doesn't rotate yet"); return 1; }
+        else if (c == 1) { toast("Portrait Orientation Lock: On"); return 1; }   /* cp6: always on (no rotation) */
         else if (c == 3) {                   /* Track A, 1.0: Low Power Mode (kernel: the conservative clocks, kept) */
             int on = !sh_low_power_on();
             sh_low_power(on);
             sh_haptic_k(SH_HAP_LIGHT);
             toast(on ? "Low Power Mode On" : "Low Power Mode Off");
+            build_cc_grid(); cc_link();      /* cp6: the tile lit / unlit (a rare toggle: the grid's rects and glyphs, no bake on the GPU row) */
             return 1;
         }
         else return 1;                       /* Emergency: a hold (G_CCEM) */
