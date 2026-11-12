@@ -1,0 +1,30 @@
+id = "qalculate-gtk"
+name = "Qalculate!"
+summary = "A powerful calculator with units and symbols"
+description = """Qalculate! understands plain expressions with units, currencies, constants, functions, symbolic algebra and plotting. Results update as you type."""
+category = "Science"
+licence = "GPL-2.0-or-later"
+homepage = "https://qalculate.github.io"
+icon = "qalculate"
+ram_mb = 70
+featured = false
+default = "distro"
+touch = "ok"
+keywords = ["calculator", "math", "units", "science", "algebra"]
+
+[launcher]
+exec = "qalculate-gtk"
+terminal = false
+keyboard = true
+
+[distro]
+apt = ["qalculate-gtk"]
+
+[runtime]
+note = "Upstream's Linux binary is x86_64 only. Exchange rates need the network."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 8
+build_mb = 900

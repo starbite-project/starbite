@@ -1,0 +1,50 @@
+id = "neovim"
+name = "Neovim"
+summary = "Hyperextensible Vim-based text editor"
+description = """Neovim is a modern Vim: modal editing, Lua plugins, built-in LSP client and Tree-sitter highlighting. Runs in the terminal."""
+category = "Development"
+licence = "Apache-2.0 AND Vim"
+homepage = "https://neovim.io"
+icon = "nvim"
+ram_mb = 30
+featured = true
+default = "release"
+touch = "poor"
+keywords = ["editor", "vim", "code", "terminal", "cli"]
+
+[launcher]
+exec = "nvim"
+terminal = true
+keyboard = true
+
+[release]
+provider = "github"
+repo = "neovim/neovim"
+asset = "nvim-linux-arm64.tar.gz"
+prerelease = false
+version_from = "regex:^v(.+)$"
+format = "tar"
+strip = 1
+bin = ["bin/nvim"]
+size_mb = 40
+
+[release.verify]
+github_digest = true
+
+# Neovim's own Makefile builds its bundled dependencies (downloaded during the build)
+[source]
+tarball = "https://github.com/neovim/neovim/archive/refs/tags/{tag}.tar.gz"
+ref = "release"
+system = "script"
+build_deps = ["build-essential", "cmake", "ninja-build", "gettext", "curl", "unzip", "git"]
+steps = ["make CMAKE_BUILD_TYPE=Release CMAKE_INSTALL_PREFIX=\"$PREFIX\"", "make install"]
+bin = ["bin/nvim"]
+build_min = 20
+build_mb = 900
+
+[distro]
+apt = ["neovim"]
+
+[runtime]
+needs = ["keyboard"]
+note = "Debian has 0.10; the release is the current stable."

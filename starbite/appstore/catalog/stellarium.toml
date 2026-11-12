@@ -1,0 +1,32 @@
+id = "stellarium"
+name = "Stellarium"
+summary = "A planetarium: the night sky in real time"
+description = """Stellarium shows a realistic sky with stars, planets, constellations and deep-sky objects for any place and time."""
+category = "Education"
+licence = "GPL-2.0-or-later"
+homepage = "https://stellarium.org"
+icon = "stellarium"
+ram_mb = 400
+featured = false
+default = "distro"
+touch = "ok"
+keywords = ["astronomy", "stars", "sky", "planetarium", "science"]
+
+[launcher]
+exec = "stellarium"
+terminal = false
+keyboard = false
+env = { QT_QPA_PLATFORM = "wayland" }
+
+[distro]
+apt = ["stellarium", "qt6-wayland"]
+
+[runtime]
+needs = ["gpu"]
+note = "Needs OpenGL 3.3, which only Mesa's software renderer provides here: it runs, but at a few frames per second. Upstream's AppImages are x86_64 only."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 45
+build_mb = 3000

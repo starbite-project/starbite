@@ -1,0 +1,30 @@
+id = "gnome-text-editor"
+name = "Text Editor"
+summary = "A simple text editor"
+description = """GNOME Text Editor edits plain text and code with tabs, syntax highlighting, search and replace, and autosave of unsaved drafts."""
+category = "Utilities"
+licence = "GPL-3.0-or-later"
+homepage = "https://apps.gnome.org/TextEditor/"
+icon = "org.gnome.TextEditor"
+ram_mb = 90
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["text", "editor", "notes", "code"]
+
+[launcher]
+exec = "gnome-text-editor"
+terminal = false
+keyboard = true
+
+[distro]
+apt = ["gnome-text-editor"]
+
+[runtime]
+needs = ["files", "keyboard"]
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 5
+build_mb = 700

@@ -1,0 +1,27 @@
+id = "gnome-mines"
+name = "Mines"
+summary = "Clear hidden mines from a minefield"
+description = """GNOME Mines is the classic minesweeper puzzle in small, medium and large boards. Tap to reveal, long-press to flag."""
+category = "Games"
+licence = "GPL-3.0-or-later"
+homepage = "https://gitlab.gnome.org/GNOME/gnome-mines"
+icon = "org.gnome.Mines"
+ram_mb = 60
+featured = false
+default = "distro"
+touch = "good"
+keywords = ["game", "puzzle", "minesweeper"]
+
+[launcher]
+exec = "gnome-mines"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["gnome-mines"]
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 4
+build_mb = 600
