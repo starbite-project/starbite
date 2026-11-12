@@ -38,6 +38,124 @@ int sh_cellular(int on)
     return 0;
 }
 void sh_brightness(int level) { fprintf(stderr, "brightness: level %d\n", level); }
+/* Track A: prefs and blobs (the kernel's kern/prefs.c) in RAM, with its limits; SBTK_PREFS=FILE also keeps them in a
+ * file, read at the start and written at every change, so a still or film run after another with the same file
+ * shows what a restart keeps */
+#define HP_KEYS 400
+static struct { char k[32], v[256]; } HP[HP_KEYS];
+static int hpn;
+static struct { char n[17]; unsigned char *p; unsigned len; } HB[16];
+static int hbn;
+static int hp_name_ok(const char *k, size_t max)
+{
+    size_t n = 0;
+    if (!k || !k[0]) return 0;
+    for (; k[n]; n++)
+        if (n >= max || !((k[n] >= 'a' && k[n] <= 'z') || (k[n] >= '0' && k[n] <= '9') || strchr("._-", k[n])))
+            return 0;
+    return 1;
+}
+static void hp_write(void)
+{
+    const char *f = getenv("SBTK_PREFS");
+    FILE *o = f ? fopen(f, "wb") : 0;
+    if (!o) return;
+    fputs("SBTKPREFS1\n", o);
+    for (int i = 0; i < hpn; i++) fprintf(o, "P %zu %s %zu %s\n", strlen(HP[i].k), HP[i].k, strlen(HP[i].v), HP[i].v);
+    for (int i = 0; i < hbn; i++) {
+        fprintf(o, "B %zu %s %u ", strlen(HB[i].n), HB[i].n, HB[i].len);
+        fwrite(HB[i].p, 1, HB[i].len, o);
+        fputc('\n', o);
+    }
+    fclose(o);
+}
+static void hp_load(void)
+{
+    const char *f = getenv("SBTK_PREFS");
+    FILE *in = f ? fopen(f, "rb") : 0;
+    char line[16];
+    if (!in) return;
+    if (!fgets(line, sizeof line, in) || strcmp(line, "SBTKPREFS1\n")) { fclose(in); return; }
+    int c;
+    while ((c = fgetc(in)) == 'P' || c == 'B') {
+        size_t kl = 0, vl = 0;
+        char k[40];
+        if (fscanf(in, " %zu ", &kl) != 1 || kl > 31 || fread(k, 1, kl, in) != kl) break;
+        k[kl] = 0;
+        if (fscanf(in, " %zu", &vl) != 1 || fgetc(in) != ' ' || vl > (c == 'P' ? 255u : 32768u)) break;
+        char *v = malloc(vl + 1);
+        if (!v || fread(v, 1, vl, in) != vl) { free(v); break; }
+        v[vl] = 0;
+        if (c == 'P' && hpn < HP_KEYS) { strcpy(HP[hpn].k, k); strcpy(HP[hpn].v, v); hpn++; free(v); }
+        else if (c == 'B' && hbn < 16 && kl <= 16) {
+            strcpy(HB[hbn].n, k);
+            HB[hbn].p = (unsigned char *)v;
+            HB[hbn++].len = (unsigned)vl;
+        }
+        else free(v);
+        if (fgetc(in) != '\n') break;
+    }
+    fclose(in);
+    fprintf(stderr, "prefs: %d keys, %d blobs from %s\n", hpn, hbn, f);
+}
+int sh_pref_get(const char *key, char *val, int cap)
+{
+    if (val && cap > 0) val[0] = 0;
+    for (int i = 0; i < hpn; i++)
+        if (!strcmp(HP[i].k, key)) {
+            if (val && cap > 0) snprintf(val, (size_t)cap, "%s", HP[i].v);
+            return (int)strlen(HP[i].v);
+        }
+    return -1;
+}
+int sh_pref_set(const char *key, const char *val)
+{
+    if (!hp_name_ok(key, 31) || (val && strlen(val) > 255)) return -1;
+    int i = 0;
+    while (i < hpn && strcmp(HP[i].k, key)) i++;
+    if (!val) { if (i < hpn) { HP[i] = HP[--hpn]; hp_write(); } return 0; }
+    if (i == hpn) { if (hpn == HP_KEYS) return -1; strcpy(HP[hpn++].k, key); }
+    else if (!strcmp(HP[i].v, val)) return 0;
+    strcpy(HP[i].v, val);
+    hp_write();
+    return 0;
+}
+int sh_pref_int(const char *key, int def)
+{
+    char b[16], *e;
+    int n = sh_pref_get(key, b, sizeof b);
+    if (n <= 0 || n >= (int)sizeof b) return def;
+    long v = strtol(b, &e, 10);
+    return *e ? def : (int)v;
+}
+void sh_pref_set_int(const char *key, int v) { char b[16]; snprintf(b, sizeof b, "%d", v); (void)sh_pref_set(key, b); }
+int sh_blob_put(const char *name, const void *p, unsigned n)
+{
+    if (!hp_name_ok(name, 16) || n > 32768 || (n && !p)) return -1;
+    int i = 0;
+    while (i < hbn && strcmp(HB[i].n, name)) i++;
+    if (i < hbn && HB[i].len == n && !memcmp(HB[i].p, p, n)) return 0;
+    if (i < hbn) { free(HB[i].p); HB[i] = HB[--hbn]; }
+    if (n) {
+        if (hbn == 16) return -1;
+        strcpy(HB[hbn].n, name);
+        HB[hbn].p = malloc(n);
+        memcpy(HB[hbn].p, p, n);
+        HB[hbn++].len = n;
+    }
+    hp_write();
+    return 0;
+}
+int sh_blob_get(const char *name, void *p, unsigned cap)
+{
+    for (int i = 0; i < hbn; i++)
+        if (!strcmp(HB[i].n, name)) {
+            unsigned n = HB[i].len < cap ? HB[i].len : cap;
+            if (p) memcpy(p, HB[i].p, n);
+            return (int)n;
+        }
+    return -1;
+}
 void sh_vibrate(void) { fprintf(stderr, "vibrate: the timer ran out\n"); }
 void sh_haptic(void) { }
 /* L2 + L3: Linux apps and the App Store (the kernel's platform is starbite/guest/next/gwin.c): host/linux_fake.inc,
@@ -731,6 +849,8 @@ int main(int argc, char **argv)
     if (getenv("SBTK_MEM")) fprintf(stderr, "mem: layers %.1f MB\n", memwalk(c.root, 0) / 1e6);
     host_memdump("bake");
     lin_fake_init();
+    hp_load();                                 /* Track A: SBTK_PREFS's store, then what the shell keeps */
+    sh_restore();
     if (!strcmp(argv[2], "still") && argc >= 4) {
         for (int i = 4; i < argc; i++) { apply_state(argv[i]); lin_fake_settle(); }
         tk_comp_frame(&c, 0, 1);

@@ -4,7 +4,8 @@
  *   - Phone: the keypad dials with a 0.6 s hold on the green button (a ring fills round it; a tap only says "Hold to
  *     call"). Its line under the number says what stands in the way: Cellular off (a tap opens Settings > Cellular),
  *     an emergency number (the kernel's own words; such a number is never sent down), the kernel's last refusal.
- *     Recents are this boot's calls (the kernel keeps no call log: RAM only); a tap puts the number on the keypad;
+ *     Recents are the shell's call log (Track A: kept across restarts, the blob "calls"); a tap puts the number on
+ *     the keypad;
  *   - the call screen over everything, the lock too: incoming (the number, Decline and Accept; over the lock a slide
  *     or a tap on the thumb answers), Calling / Ringing / the timer / Call Ended, Speaker (the route), Mute, the
  *     keypad's tones and the red End; "No audio yet" while the kernel says the call has no audio path. Its round
@@ -25,7 +26,7 @@ static sh_call_t CALL;                     /* the platform's last push */
 #define CM_NREC 20
 enum { RC_OUT, RC_IN, RC_MISSED, RC_DECLINED, RC_NOANSWER };
 typedef struct { char num[24]; int kind, secs, hm; } cm_rec;
-static cm_rec RC[CM_NREC];                 /* Recents: this boot's calls, newest first */
+static cm_rec RC[CM_NREC];                 /* Recents: the calls, newest first (Track A: kept, the blob "calls") */
 static int nrc;
 /* the inbox: the platform's (newest last) with what the shell adds: when it was first seen, unread */
 typedef struct { sh_sms_t m; int hm, day, unread; } cm_msg;
@@ -360,6 +361,38 @@ static void cm_hold_up(int moved)
     else if (was) toast("Hold to call");
 }
 
+/* Track A: Recents kept across restarts in the blob "calls": version 1, the count, then each call's number (24 bytes),
+ * kind (1), seconds (4) and hm (2) */
+#define CM_REC 31
+static void cm_rec_save(void)
+{
+    uint8_t b[2 + CM_NREC * CM_REC];
+    b[0] = 1;
+    b[1] = (uint8_t)nrc;
+    for (int i = 0; i < nrc; i++) {
+        uint8_t *p = b + 2 + i * CM_REC;
+        tk_memcpy(p, RC[i].num, 24);
+        p[24] = (uint8_t)RC[i].kind;
+        for (int k = 0; k < 4; k++) p[25 + k] = (uint8_t)((unsigned)RC[i].secs >> (8 * k));
+        p[29] = (uint8_t)RC[i].hm; p[30] = (uint8_t)((unsigned)RC[i].hm >> 8);
+    }
+    (void)sh_blob_put("calls", b, 2 + (unsigned)nrc * CM_REC);
+}
+static void cm_rec_restore(void)
+{
+    uint8_t b[2 + CM_NREC * CM_REC];
+    int n = sh_blob_get("calls", b, sizeof b);
+    if (n < 2 || b[0] != 1 || b[1] > CM_NREC || n < 2 + b[1] * CM_REC) return;
+    nrc = b[1];
+    for (int i = 0; i < nrc; i++) {
+        const uint8_t *p = b + 2 + i * CM_REC;
+        tk_memcpy(RC[i].num, p, 24);
+        RC[i].num[23] = 0;
+        RC[i].kind = p[24] <= RC_NOANSWER ? p[24] : RC_OUT;
+        RC[i].secs = (int)(p[25] | p[26] << 8 | p[27] << 16 | (unsigned)p[28] << 24);
+        RC[i].hm = (int16_t)(p[29] | p[30] << 8);
+    }
+}
 /* Recents: a call followed from its first push to its end */
 static void cm_rec_add(const char *num, int kind, int secs)
 {
@@ -368,6 +401,7 @@ static void cm_rec_add(const char *num, int kind, int secs)
     cm_cpy(RC[0].num, sizeof RC[0].num, num);
     RC[0].kind = kind; RC[0].secs = secs; RC[0].hm = cm_now_hm();
     nrc++;
+    cm_rec_save();
 }
 static void cm_track(const sh_call_t *c)
 {

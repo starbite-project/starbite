@@ -152,6 +152,8 @@ int sh_linux_char(char c);               /* one character typed: committed text 
                                           * (Shift around capitals); '\n' Return and '\b' BackSpace are always keys */
 int sh_linux_viewport(int rows);         /* the rows the shell shows (SH_LINUX_H, or SH_LINUX_HKB with the keyboard) */
 int sh_linux_icon(int icon, uint32_t *px);     /* a pool icon into px (SH_LINUX_ICON squared); 0: none */
+int sh_linux_zero_copy(void);              /* 1.0: 1 when the GPU samples the guest's window surface in place: show it with
+                                            * tk_layer_external (the front buffer from the header) instead of the strips */
 int sh_linux_hold(int on);               /* 1: the App Store is open: Linux started if off and not stopped while idle */
 int sh_linux_pkg(int pkg, int op);       /* install / remove / cancel a store package; < 0 refused */
 /* the shell, called by the platform */
@@ -240,6 +242,25 @@ int sh_alarm_del(int i);
  * Notification Centre, the banner and the lock's "N notifications" pill. who: the poster ("clock", "battery", "modem",
  * "heat", "survival" or an app's name); hm: local hh * 100 + mm (-1 unknown). Titles and lines go to the screen only. */
 void sh_notify(const char *who, const char *title, const char *body, int hm);
+/* Track A (sbos-core-api.md 7): the same with the kernel's NOTIF_* flags (notif_post_app). Before a banner the shell
+ * applies the prefs notif.<app>.allow (0: dropped), notif.<app>.banners (0: the Centre only) and notif.dnd (1: no
+ * banners but SH_NOTIF_URGENT's); the list is kept across restarts (the blob "nc") */
+#define SH_NOTIF_QUIET 1U                 /* the Centre only */
+#define SH_NOTIF_URGENT 2U                /* a banner also in Do Not Disturb */
+void sh_notify_flags(const char *who, const char *title, const char *body, int hm, unsigned flags);
+
+/* ---- Track A (sbos-core-api.md 1, 2): prefs and blobs, kept across restarts (the kernel: kern/prefs.c in the state
+ * slot, saved 3 s after the last change and before a restart or switch-off; the host: in RAM, or the file
+ * SBTK_PREFS). The self test's build reads nothing (defaults) and writes nothing (a logged dry run). ---- */
+int sh_pref_get(const char *key, char *val, int cap);   /* length, or -1 when not set; keys [a-z0-9._-] <= 31 */
+int sh_pref_set(const char *key, const char *val);      /* 0, or -1 (store full / bad key); val 0 = delete; <= 255 bytes */
+int sh_pref_int(const char *key, int def);              /* parsed decimal, or def */
+void sh_pref_set_int(const char *key, int v);
+int sh_blob_put(const char *name, const void *p, unsigned n);   /* 0 / -1; n <= 32 KiB; n 0 = delete; names <= 16 */
+int sh_blob_get(const char *name, void *p, unsigned cap);        /* bytes read, or -1 when there is none */
+/* the shell, called by the platform once its store is ready (the kernel: after the bake; settings_restore ran before):
+ * Notes, the Notification Centre, call recents, the switcher's recents and the Control Centre come back */
+void sh_restore(void);
 /* the boot menu's last choice (the loader's settings record: a catalog key, "" unknown): the Systems widget's first */
 void sh_lastos(const char *key);
 /* the last GNSS fix (Maps; the kernel: kern/gnssfix.c, Android's fix on the card): 1 a fix, 0 none. Called from idle
