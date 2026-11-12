@@ -1128,6 +1128,11 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
             surv_usb_status(&u);
             return u.fire ? u.state : 0;
         }
+        case SET_SURV_USB_ILIM: {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            return u.ilim_ma;
+        }
         case SET_SURV_FIRE_INFO: {
             struct surv_usb u;
             surv_usb_status(&u);

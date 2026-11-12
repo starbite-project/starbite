@@ -152,15 +152,16 @@ static const struct sbg_page sbg_shelter[] = {
         "This phone can light tinder: see the next page (Emergency > USB power out and a pencil lead).",
         "! Never leave a fire alone. Put it out with water and stir until cold to the touch.") },
     { "Fire from the phone", SBG_L(
-        "The USB-C port gives 5 V at most 1.5 A (the charger chip's own limit). It lights tinder through an element "
-        "that glows: it needs about 5 ohm, so the port keeps its 5 V and puts 5-6 W into a few cm.",
-        "Best: a mechanical-pencil lead, 0.5 mm. Clamp or twist the two bare wires of a cut USB cable 4-6 cm apart on "
-        "it. Too short does nothing (a short); too long only warms: start long, slide closer until it glows red.",
-        "A 0.7 mm lead needs about twice the length (8-12 cm). A wooden pencil's 2 mm core is too thick: it would need "
-        "over half a metre.",
-        "A single copper strand or a gum-wrapper foil is a short for this phone: the chip cuts it to 30 ms pulses "
-        "and it will not glow. (It works on a battery, not on a current-limited USB port.)",
-        "Lay the glowing lead on dry tinder (paper, birch bark, fluff) and blow gently.",
+        "The USB-C port gives 5 V at most 1.5 A (the charger chip's own limit). A pencil lead across a cut cable's two "
+        "bare wires glows when it takes about 1.5 A: around 3.5 ohm, up to about 7.5 W in a few cm.",
+        "Contacts matter most: wrap each bare wire 3-4 tight turns around the lead (or a metal paper clip pinched on "
+        "it). Wires only touching spark and waste the heat at the contact instead of in the lead.",
+        "Length: the shortest gap that does not make the phone show 'the chip limited the current'. 0.3 mm lead: "
+        "about 1-2 cm. 0.5 mm: start at 4 cm, then 3, then 2.5. 0.7 mm: start at 6 cm.",
+        "Hold the lead in the air (not lying on stone: that cools it). Scrape the middle thinner with a knife for a "
+        "hot spot. Softer leads (2B) conduct better than HB: they need a longer gap.",
+        "No glow but sparks? Use the sparks: hold char cloth, cotton fluff or shredded tissue right at the spark.",
+        "A copper strand or foil is a short for this phone: the chip cuts it to pulses and it will not glow.",
         "! Hold only insulated parts. Work over stone or soil. Unplug any charger first. Never short the port itself.",
         "Emergency > USB power out: 10 s bursts; Extreme fire mode runs while you hold it, up to 2 minutes.") },
     { "Heat and sun", SBG_L(
