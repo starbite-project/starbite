@@ -1,0 +1,45 @@
+id = "helix"
+name = "Helix"
+summary = "A post-modern modal text editor"
+description = """Helix is a modal editor with multiple selections, built-in Tree-sitter highlighting and language-server support, working out of the box with no plugins. Runs in the terminal as hx."""
+category = "Development"
+licence = "MPL-2.0"
+homepage = "https://helix-editor.com"
+icon = "helix"
+ram_mb = 40
+featured = false
+default = "release"
+touch = "poor"
+keywords = ["editor", "modal", "code", "terminal", "cli"]
+
+[launcher]
+exec = "hx"
+terminal = true
+keyboard = true
+
+[release]
+provider = "github"
+repo = "helix-editor/helix"
+asset = "helix-*-aarch64-linux.tar.xz"
+prerelease = false
+version_from = "tag"
+format = "tar"
+strip = 1
+bin = ["hx"]
+size_mb = 80
+
+[release.verify]
+github_digest = true
+
+[distro]
+apt = ["hx"]
+
+[runtime]
+needs = ["keyboard"]
+note = "The release keeps its runtime/ (grammars, themes) next to hx. Debian's package is named hx. No source method: a cargo build plus grammar fetch is about 30 minutes and 3 GB for no gain over the release."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 25
+build_mb = 1800

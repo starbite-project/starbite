@@ -1,0 +1,41 @@
+id = "firefox"
+name = "Firefox"
+summary = "Mozilla's web browser"
+description = """The Firefox web browser. The release method installs Mozilla's own aarch64 build (latest Firefox); the Debian method installs Firefox ESR. Runs natively on Wayland; with no GPU, pages, WebGL and video are drawn in software."""
+category = "Internet"
+licence = "MPL-2.0"
+homepage = "https://www.mozilla.org/firefox/"
+icon = "firefox"
+ram_mb = 800
+featured = true
+default = "release"
+touch = "ok"
+keywords = ["browser", "web", "internet", "mozilla"]
+
+[launcher]
+exec = "sh -c \"exec $(command -v firefox || command -v firefox-esr)\""
+terminal = false
+keyboard = false
+env = { MOZ_ENABLE_WAYLAND = "1" }
+
+[release]
+provider = "url"
+version_url = "https://product-details.mozilla.org/1.0/firefox_versions.json"
+version_json = "LATEST_FIREFOX_VERSION"
+url = "https://archive.mozilla.org/pub/firefox/releases/{version}/linux-aarch64/en-US/firefox-{version}.tar.xz"
+format = "tar"
+strip = 1
+bin = ["firefox"]
+size_mb = 300
+
+[release.verify]
+sha256sums_url = "https://archive.mozilla.org/pub/firefox/releases/{version}/SHA256SUMS"
+sha256_line = "linux-aarch64/en-US/firefox-{version}.tar.xz"
+
+[distro]
+apt = ["firefox-esr"]
+
+[runtime]
+apt = ["libgtk-3-0t64", "libasound2t64", "libx11-xcb1", "libdbus-glib-1-2", "libpci3"]
+needs = ["network", "audio"]
+note = "About 800 MB in use with a few tabs; keep tab count low on 1.5 GiB. The Debian package is Firefox ESR (older, slower-moving)."

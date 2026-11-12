@@ -1,0 +1,22 @@
+id = "nvim"
+name = "Neovim"
+summary = "Vim-fork focused on extensibility and usability"
+category = "Development"
+licence = "Apache-2.0"
+icon = "nvim"
+ram_mb = 30
+default = "release"
+[launcher]
+exec = "nvim"
+terminal = true
+keyboard = true
+[release]
+provider = "github"
+repo = "neovim/neovim"
+asset = "nvim-linux-arm64.tar.gz"
+format = "tar"
+strip = 1
+bin = ["bin/nvim"]
+size_mb = 40
+[distro]
+apt = ["neovim"]

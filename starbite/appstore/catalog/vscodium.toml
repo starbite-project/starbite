@@ -1,0 +1,38 @@
+id = "vscodium"
+name = "VSCodium"
+summary = "VS Code without Microsoft's telemetry"
+description = """VSCodium is the open-source build of Visual Studio Code: editor, terminal, Git, debugging and extensions from Open VSX. An Electron app, so it is the heaviest editor here."""
+category = "Development"
+licence = "MIT"
+homepage = "https://vscodium.com"
+icon = "vscodium"
+ram_mb = 600
+featured = false
+default = "release"
+touch = "poor"
+keywords = ["editor", "ide", "code", "vscode", "electron"]
+
+[launcher]
+exec = "codium --ozone-platform=wayland"
+terminal = false
+keyboard = true
+
+[release]
+provider = "github"
+repo = "VSCodium/vscodium"
+asset = "VSCodium-linux-arm64-*.tar.gz"
+prerelease = false
+version_from = "tag"
+format = "tar"
+strip = 0
+bin = ["bin/codium"]
+size_mb = 550
+
+[release.verify]
+github_digest = true
+sha256_asset = "{asset}.sha256"
+
+[runtime]
+apt = ["libgtk-3-0t64", "libnss3", "libasound2t64", "libsecret-1-0", "libxkbfile1", "libgbm1", "libxss1"]
+needs = ["keyboard", "files"]
+note = "Electron: about 600 MB with one small folder open, more with extensions; close other apps first. Not packaged in Debian. Upstream also has an aarch64 AppImage and .deb; the tarball is used."

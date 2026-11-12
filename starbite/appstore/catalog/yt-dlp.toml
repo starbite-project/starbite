@@ -1,0 +1,47 @@
+id = "yt-dlp"
+name = "yt-dlp"
+summary = "Download video and audio from YouTube and 1000+ sites"
+description = """yt-dlp is a command-line downloader for video and audio from YouTube and many other sites, with format selection and subtitles. Sites change often, so the upstream release (updated every few weeks) is the default."""
+category = "Media"
+licence = "Unlicense"
+homepage = "https://github.com/yt-dlp/yt-dlp"
+icon = "utilities-terminal"
+ram_mb = 60
+featured = false
+default = "release"
+touch = "ok"
+keywords = ["youtube", "download", "video", "audio", "cli"]
+
+[launcher]
+exec = "bash -c \"yt-dlp --version; echo 'Usage: yt-dlp URL   (saves into the current folder)'; exec bash -i\""
+terminal = true
+keyboard = true
+
+# format appimage/binary: the downloaded file is installed and linked as bin[0]
+[release]
+provider = "github"
+repo = "yt-dlp/yt-dlp"
+asset = "yt-dlp_linux_aarch64"
+prerelease = false
+version_from = "tag"
+format = "binary"
+bin = ["yt-dlp"]
+size_mb = 40
+
+[release.verify]
+github_digest = true
+sha256_asset = "SHA2-256SUMS"
+
+[distro]
+apt = ["yt-dlp"]
+
+[runtime]
+apt = ["ffmpeg"]
+needs = ["network", "files"]
+note = "ffmpeg is needed to merge the best video and audio streams. Debian's package (2025.04) is too old for YouTube most of the time."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 3
+build_mb = 500

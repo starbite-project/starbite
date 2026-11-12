@@ -1,0 +1,50 @@
+id = "fzf"
+name = "fzf"
+summary = "Command-line fuzzy finder"
+description = """fzf filters any list (files, command history, processes) as you type. Adds Ctrl-T, Ctrl-R and Alt-C fuzzy search to the shell."""
+category = "Utilities"
+licence = "MIT"
+homepage = "https://github.com/junegunn/fzf"
+icon = "utilities-terminal"
+ram_mb = 15
+featured = false
+default = "release"
+touch = "poor"
+keywords = ["cli", "search", "fuzzy", "shell", "terminal"]
+
+[launcher]
+exec = "bash -c \"fzf --version; echo 'Try: ls | fzf    (shell keys: see fzf --help, KEY BINDINGS)'; exec bash -i\""
+terminal = true
+keyboard = true
+
+[release]
+provider = "github"
+repo = "junegunn/fzf"
+asset = "fzf-*-linux_arm64.tar.gz"
+prerelease = false
+version_from = "regex:^v(.+)$"
+format = "tar"
+strip = 0
+bin = ["fzf"]
+size_mb = 4
+
+[release.verify]
+github_digest = true
+sha256_asset = "fzf_{version}_checksums.txt"
+
+[source]
+tarball = "https://github.com/junegunn/fzf/archive/refs/tags/{tag}.tar.gz"
+ref = "release"
+system = "script"
+build_deps = ["golang-go", "ca-certificates", "git"]
+steps = ["go build -trimpath -ldflags '-s -w' -o fzf .", "install -Dm755 fzf \"$PREFIX/bin/fzf\""]
+bin = ["bin/fzf"]
+build_min = 4
+build_mb = 600
+
+[distro]
+apt = ["fzf"]
+
+[runtime]
+needs = ["keyboard"]
+note = "Source build fetches Go modules from the network (go 1.23 needed; trixie has 1.24)."

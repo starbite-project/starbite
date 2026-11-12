@@ -1,0 +1,47 @@
+id = "gimp"
+name = "GIMP"
+summary = "The GNU Image Manipulation Program"
+description = """GIMP is a full raster image editor: layers, masks, filters, colour tools, painting and photo retouching. The release method installs GIMP's official aarch64 AppImage (3.2 series); Debian has 3.0."""
+category = "Graphics"
+licence = "GPL-3.0-or-later"
+homepage = "https://www.gimp.org"
+icon = "gimp"
+ram_mb = 350
+featured = true
+default = "release"
+touch = "poor"
+keywords = ["image", "photo", "editor", "paint", "raster"]
+
+[launcher]
+exec = "gimp"
+terminal = false
+keyboard = false
+
+# the download path names the minor series (v3.2), so version_regex is held to 3.2.x; move both on the next stable series
+# format appimage/binary: the downloaded file is installed and linked as bin[0]
+[release]
+provider = "url"
+version_url = "https://www.gimp.org/gimp_versions.json"
+version_regex = "\"version\":\\s*\"(3\\.2\\.[0-9]+)\""
+url = "https://download.gimp.org/gimp/v3.2/linux/GIMP-{version}-aarch64.AppImage"
+format = "appimage"
+bin = ["gimp"]
+size_mb = 230
+
+[release.verify]
+sha256sums_url = "https://download.gimp.org/gimp/v3.2/linux/SHA256SUMS"
+sha256_line = "GIMP-{version}-aarch64.AppImage"
+
+[distro]
+apt = ["gimp"]
+
+[runtime]
+apt = ["libfuse2t64"]
+needs = ["files"]
+note = "Desktop-style tool panels made for a mouse; fine for crops and quick edits with touch. Large images use a lot of the 1.5 GiB."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 60
+build_mb = 3000

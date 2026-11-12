@@ -1,0 +1,31 @@
+id = "openttd"
+name = "OpenTTD"
+summary = "Build a transport empire (Transport Tycoon)"
+description = """OpenTTD is an open remake of Transport Tycoon Deluxe: build railways, roads, ports and airports and grow a transport company. Comes with the free OpenGFX graphics, OpenSFX sounds and OpenMSX music."""
+category = "Games"
+licence = "GPL-2.0-only"
+homepage = "https://www.openttd.org"
+icon = "openttd"
+ram_mb = 200
+featured = true
+default = "distro"
+touch = "ok"
+keywords = ["game", "strategy", "simulation", "trains", "tycoon"]
+
+[launcher]
+exec = "openttd"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["openttd", "openttd-opengfx", "openttd-opensfx", "openttd-openmsx"]
+
+[runtime]
+needs = ["audio"]
+note = "Upstream's Linux build is amd64 only (15.3), so Debian's 14.1 is used. Tap to click; drag with two steps. Turn the interface scale up in Settings."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 25
+build_mb = 1500

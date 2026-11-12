@@ -1,0 +1,45 @@
+id = "bat"
+name = "bat"
+summary = "A cat clone with syntax highlighting and Git markers"
+description = """bat prints files with syntax highlighting, line numbers and Git change markers, paging long output automatically."""
+category = "Utilities"
+licence = "MIT OR Apache-2.0"
+homepage = "https://github.com/sharkdp/bat"
+icon = "utilities-terminal"
+ram_mb = 20
+featured = false
+default = "release"
+touch = "poor"
+keywords = ["cli", "cat", "syntax", "viewer", "terminal"]
+
+[launcher]
+exec = "bash -c \"(bat --version || batcat --version) 2>/dev/null; echo 'Usage: bat FILE   (Debian names it batcat)'; exec bash -i\""
+terminal = true
+keyboard = true
+
+[release]
+provider = "github"
+repo = "sharkdp/bat"
+asset = "bat-v*-aarch64-unknown-linux-gnu.tar.gz"
+prerelease = false
+version_from = "regex:^v(.+)$"
+format = "tar"
+strip = 1
+bin = ["bat"]
+size_mb = 8
+
+[release.verify]
+github_digest = true
+
+[distro]
+apt = ["bat"]
+
+[runtime]
+needs = ["keyboard", "files"]
+note = "Debian installs the command as batcat. No source method: bat 0.26 needs Rust 1.87, trixie has 1.85."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 12
+build_mb = 1200
