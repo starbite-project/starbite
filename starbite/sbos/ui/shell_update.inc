@@ -10,11 +10,16 @@
  *   - "Updated to <version>" on the start that committed it.
  * The stills' states: update=open (the page, checked), update=stage:N (N chunks), update=ready, update=install. */
 
-/* SU_SUB (10, shell_lock.c): AS.sub of this page (5 passcode, 7 / 8 date and time, 9 startup) */
+/* SU_SUB (33, shell_lock.c): AS.sub of this page. P3x (Track B): on B2's kit, as iOS 26's Software Update: the
+ * update's card (the Starbite tile, the version, "Starbite · size", the notes or the progress) on a #1C1C1E group,
+ * the action as a full-width capsule under it (filled accent for Download and Install / Restart to Install, the card
+ * grey with accent words for Try Again / Check Again), the footer under that; up to date: the tile, the version and
+ * "Starbite OS is up to date" centred */
 #define SU_CARD_Y (PUSHED_TOP + 8)          /* the version's card */
-#define SU_CARD_H 150.0f
-#define SU_BTN_Y (SU_CARD_Y + SU_CARD_H + 20)   /* the action row */
-
+#define SU_CARD_H 160.0f
+#define SU_BTN_Y (SU_CARD_Y + SU_CARD_H + 16)   /* the action capsule */
+#define SU_BTN_H 50.0f
+#define SU_MID_Y (SU_CARD_Y + 96)           /* up to date: the tile's top */
 static struct { struct sh_update u; int checked, running; } SWU;
 
 static void su_check(void)
@@ -41,14 +46,26 @@ static const char *su_action(void)
     default: return 0;
     }
 }
-static void su_lines(dc *d, float y, const char *s, int max, tk_col c)   /* wrapped grey text under the card */
+static void su_lines(dc *d, float y, const char *s, int max, tk_col c)   /* wrapped text in the card, 15 pt */
 {
     char ln[4][96];
     float wm;
-    int n = wrapn(ln, max < 4 ? max : 4, TK_IT400, 13, s, CONTENT_R - 16 - ROW_TX, &wm);
-    for (int k = 0; k < n; k++) d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 17 * k), ln[k], 0, 0, c, 0);
+    int n = wrapn(ln, max < 4 ? max : 4, TK_IT400, 15, s, LG_W - 32, &wm);
+    for (int k = 0; k < n; k++) d_text(d, TK_IT400, 15, LG_TX, bl(TK_IT400, 15, y + 20 * k), ln[k], 0, 0, c, 0);
 }
-static float su_btn_y(void) { return SWU.u.state == 0 || (SWU.u.state == -1 && !SWU.u.version[0]) ? SU_CARD_Y + 200 : SU_BTN_Y; }
+static int su_primary(void) { return SWU.u.state == 1 || SWU.u.state == 3; }
+static float su_btn_y(void)
+{
+    if (SWU.u.state == 0 || SWU.u.state == 4 || (SWU.u.state == -1 && !SWU.u.version[0])) return SU_MID_Y + 52 + 112;
+    return SU_BTN_Y;
+}
+static void swu_cat(char *t, const char *a, const char *b)
+{
+    int k = 0;
+    while (*a && k < 80) t[k++] = *a++;
+    while (b && *b && k < 94) t[k++] = *b++;
+    t[k] = 0;
+}
 static void su_page(dc *d)
 {
     if (!SWU.checked) su_check();
@@ -56,66 +73,63 @@ static void su_page(dc *d)
     d_back(d, W(1));
     d_navtitle(d, "Software Update");
     char t[96], sz[16];
-    if (u->state == -1 && !u->version[0]) {
-        /* nothing to show of an update (no loader table, a broken manifest): why, centred */
-        float cy = SU_CARD_Y + 40;
-        d_text_box(d, TK_IT600, 20, 195, bl(TK_IT600, 20, cy), CONTENT_W, 1, "Can't Check for Updates", 0, 0, INK, 0);
-        d_text_box(d, TK_IT400, 15, 195, bl(TK_IT400, 15, cy + 32), CONTENT_W, 1, SYS.ver, 0, 0, C_LABEL2, 0);
-        d_text_box(d, TK_IT400, 13, 195, bl(TK_IT400, 13, cy + 56), CONTENT_W, 1, u->why, 0, 0, tk_hex(0xff453a, 1), 0);
-    } else if (u->state == 0 || u->state == 4) {
-        /* up to date: the running version centred, the detail under it */
-        float cy = SU_CARD_Y + 40;
-        if (u->state == 4) {
-            int k = 0;
-            for (const char *p = "Updated to "; *p;) t[k++] = *p++;
-            for (const char *p = u->version; *p && k < 80;) t[k++] = *p++;
-            t[k] = 0;
-            d_rrect(d, 195 - 22, cy, 44, 44, 22, tk_hex(0x34c759, 1));
-            d_seg(d, 195 - 9, cy + 23, 195 - 3, cy + 29, 3, W(1));
-            d_seg(d, 195 - 3, cy + 29, 195 + 10, cy + 15, 3, W(1));
-            cy += 60;
+    if (u->state == 0 || u->state == 4 || (u->state == -1 && !u->version[0])) {
+        /* up to date (or nothing to check): the tile, the running version, the line under it, centred */
+        float y = SU_MID_Y;
+        if (u->state == 4) {                          /* installed: a green check in place of the tile */
+            d_rrect(d, 195 - 26, y, 52, 52, 26, C_GREEN);
+            d_seg(d, 195 - 11, y + 27, 195 - 3, y + 35, 3.4f, W(1));
+            d_seg(d, 195 - 3, y + 35, 195 + 12, y + 18, 3.4f, W(1));
+        } else
+            d_systile(d, "starbite", 195 - 26, y);
+        swu_cat(t, "Starbite OS ", u->state == 4 ? u->version : 0);
+        d_text_box(d, TK_IT600, 17, 195, bl(TK_IT600, 17, y + 68), CONTENT_W, 1, u->state == 4 ? t : SYS.ver, 0, 0, INK, 0);
+        const char *l = u->state == 4 ? "Updated" : u->state == 0 ? "Starbite OS is up to date" : "Can't check for updates";
+        d_text_box(d, TK_IT400, 15, 195, bl(TK_IT400, 15, y + 94), CONTENT_W, 1, l, 0, 0, KIT_SEC(), 0);
+        if (u->why[0] && u->state != 4) {
+            char ln[3][96];
+            float wm;
+            int n = wrapn(ln, 2, TK_IT400, 13, u->why, CONTENT_W - 20, &wm);
+            for (int k = 0; k < n; k++)
+                d_text_box(d, TK_IT400, 13, 195, bl(TK_IT400, 13, y + 120 + 18.0f * k), CONTENT_W, 1, ln[k], 0, 0, u->state == -1 ? C_RED : C_LABEL3, 0);
         }
-        d_text_box(d, TK_IT600, 20, 195, bl(TK_IT600, 20, cy), CONTENT_W, 1, u->state == 4 ? t : "Starbite OS is up to date", 0, 0, INK, 0);
-        d_text_box(d, TK_IT400, 15, 195, bl(TK_IT400, 15, cy + 32), CONTENT_W, 1, SYS.ver, 0, 0, C_LABEL2, 0);
-        if (u->why[0] && u->state == 0) d_text_box(d, TK_IT400, 13, 195, bl(TK_IT400, 13, cy + 56), CONTENT_W, 1, u->why, 0, 0, W(.45f), 0);
     } else {
-        /* the update's card: the version, its size, the notes; the progress while staging */
-        d_rrect(d, GROUP_X, SU_CARD_Y, GROUP_W, SU_CARD_H, 16, tk_hex(0x151c33, 1));
-        d_rrect(d, ROW_TX, SU_CARD_Y + 16, 44, 44, 11, tk_hex(0x0a84ff, 1));
-        d_text_box(d, TK_IT700, 20, ROW_TX + 22, bl(TK_IT700, 20, SU_CARD_Y + 26), 40, 1, "S", 0, 0, W(1), 0);
-        int k = 0;
-        for (const char *p = "Starbite OS "; *p;) t[k++] = *p++;
-        for (const char *p = u->version; *p && k < 80;) t[k++] = *p++;
-        t[k] = 0;
-        d_text_box(d, TK_IT600, 17, ROW_TX + 58, bl(TK_IT600, 17, SU_CARD_Y + 18), CONTENT_R - ROW_TX - 74, 0, t, 0, 0, INK, 0);
+        /* the update's card: the tile, "Starbite OS <version>", "Starbite · size"; the notes, the progress, ready, failed */
+        d_group(d, SU_CARD_Y, SU_CARD_H);
+        d_systile(d, "starbite", LG_TX, SU_CARD_Y + 16);
+        swu_cat(t, "Starbite OS ", u->version);
+        d_text_box(d, TK_IT600, 17, LG_TX + 64, bl(TK_IT600, 17, SU_CARD_Y + 22), LG_W - 96, 0, t, 0, 0, INK, 0);
         su_size(sz, u->size);
-        d_text_box(d, TK_IT400, 13, ROW_TX + 58, bl(TK_IT400, 13, SU_CARD_Y + 42), 200, 0, sz, 0, TK_TNUM, C_LABEL2, 0);
+        swu_cat(t, "Starbite \xc2\xb7 ", sz);
+        d_text_box(d, TK_IT400, 15, LG_TX + 64, bl(TK_IT400, 15, SU_CARD_Y + 45), LG_W - 96, 0, t, 0, TK_TNUM, KIT_SEC(), 0);
+        float ty = SU_CARD_Y + 84;
         if (u->state == 2) {
-            float bx = ROW_TX, bw = CONTENT_R - 16 - ROW_TX, by = SU_CARD_Y + 82;
+            float bx = LG_TX, bw = LG_W - 32, by = ty + 4;
             int p = u->pct < 0 ? 0 : u->pct > 100 ? 100 : u->pct;
-            d_rrect(d, bx, by, bw, 6, 3, W(.14f));
-            if (p) d_rrect(d, bx, by, bw * (float)p / 100, 6, 3, ACCENT());
-            k = 0;
-            for (const char *s = p < 90 ? "Copying from the card\xe2\x80\xa6 " : "Checking\xe2\x80\xa6 "; *s;) t[k++] = *s++;
+            d_rrect(d, bx, by, bw, 6, 3, W(.16f));
+            if (p) d_rrect(d, bx, by, tk_maxf(6, bw * (float)p / 100), 6, 3, ACCENT());
+            int k = 0;
+            for (const char *s2 = p < 90 ? "Copying from the card\xe2\x80\xa6 " : "Verifying\xe2\x80\xa6 "; *s2;) t[k++] = *s2++;
             k += put_dec(t + k, p);
             t[k++] = ' '; t[k++] = '%'; t[k] = 0;
-            d_text(d, TK_IT400, 13, bx, bl(TK_IT400, 13, by + 16), t, 0, TK_TNUM, C_LABEL2, 0);
+            d_text(d, TK_IT400, 13, bx, bl(TK_IT400, 13, by + 18), t, 0, TK_TNUM, KIT_SEC(), 0);
         } else if (u->state == 3) {
-            su_lines(d, SU_CARD_Y + 76, "Ready. The phone restarts and starts the new version; if it doesn't start, the previous version comes back.", 3, C_LABEL2);
+            su_lines(d, ty, "Ready to install. The phone restarts into the new version; if it doesn't start, the previous version comes back.", 3, INK);
         } else if (u->state == -1) {
-            d_text(d, TK_IT600, 15, ROW_TX, bl(TK_IT600, 15, SU_CARD_Y + 74), "Update failed", 0, 0, tk_hex(0xff453a, 1), 0);
-            su_lines(d, SU_CARD_Y + 98, u->why, 2, C_LABEL2);
+            d_text(d, TK_IT600, 15, LG_TX, bl(TK_IT600, 15, ty), "Update Failed", 0, 0, C_RED, 0);
+            su_lines(d, ty + 24, u->why, 2, KIT_SEC());
         } else
-            su_lines(d, SU_CARD_Y + 76, u->notes[0] ? u->notes : "No notes.", 3, C_LABEL2);
+            su_lines(d, ty, u->notes[0] ? u->notes : "No release notes.", 3, INK);
     }
     const char *a = su_action();
     if (a) {
         float y = su_btn_y();
-        d_rrect(d, GROUP_X, y, GROUP_W, 47, 16, tk_hex(0x151c33, 1));
-        d_text_box(d, TK_IT400, 16, 195, y + 29, GROUP_W - 32, 1, a, 0, 0, ACCENT(), 0);
+        int pr = su_primary();
+        d_rrect(d, LG_X, y, LG_W, SU_BTN_H, SU_BTN_H / 2, pr ? ACCENT() : C_CARD);
+        d_text_box(d, TK_IT600, 17, 195, bl(TK_IT600, 17, y + (SU_BTN_H - lh(TK_IT600, 17)) / 2), LG_W - 32, 1, a, 0, 0, pr ? W(1) : ACCENT(), 0);
     }
     if (u->state == 1 || u->state == 3)
-        su_lines(d, SU_BTN_Y + 47 + 10, "From the microSD card's STARBITE/UPDATE folder. Starbite OS keeps the previous version until the new one has started.", 3, W(.45f));
+        d_group_foot(d, SU_BTN_Y + SU_BTN_H, "From the memory card's STARBITE/UPDATE folder. Starbite OS keeps the previous version until the new one has started.");
 }
 /* the About section's "Software" row on the Settings list (until Track B's General > Software Update) */
 static float su_row_main(void)
@@ -141,7 +155,7 @@ static int su_app_tap(float x, float y)
     if (AS.sub != SU_SUB) return 0;
     if (BACK_HIT(x, y)) { settings_back(); return 1; }   /* B2's Settings, where it was */
     float by = su_btn_y();
-    if (!su_action() || x < GROUP_X || x >= CONTENT_R || y < by || y >= by + 47) return 1;
+    if (!su_action() || x < LG_X || x >= LG_RE || y < by || y >= by + SU_BTN_H) return 1;
     if (SWU.u.state == 1) {                          /* Download and Install: the staging runs on refresh turns */
         SWU.running = 1;
         (void)sh_update_stage(&SWU.u);
@@ -155,18 +169,18 @@ static int su_app_tap(float x, float y)
 static int su_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
 {
     (void)c;
-    if (!is_app("settings") || x < GROUP_X || x >= CONTENT_R) return 0;
+    if (!is_app("settings") || x < LG_X || x >= LG_RE) return 0;
     float top = -1;
     if (!AS.sub) {
         float ry = su_row_main();
         if (ry >= 0 && y >= ry && y < ry + 47) top = ry;
     } else if (AS.sub == SU_SUB && su_action()) {
         float by = su_btn_y();
-        if (y >= by && y < by + 47) top = by;
+        if (y >= by && y < by + SU_BTN_H) top = by;
     }
     if (top < 0) return 0;
-    *r = *g = (tk_rect){ GROUP_X, top, GROUP_W, 47 };
-    *rad = 16;
+    *r = *g = (tk_rect){ LG_X, top, LG_W, SU_BTN_H };
+    *rad = SU_BTN_H / 2;
     return 1;
 }
 /* the staging's turns: a chunk each, the page redrawn (sh_refresh / sh_next_update) */
