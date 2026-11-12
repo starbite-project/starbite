@@ -6,6 +6,7 @@ category = "Development"
 licence = "MIT"
 homepage = "https://vscodium.com"
 icon = "vscodium"
+icon_url = "https://raw.githubusercontent.com/VSCodium/vscodium/master/icons/stable/codium_cnl.svg"
 ram_mb = 600
 featured = false
 default = "release"

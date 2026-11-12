@@ -26,6 +26,7 @@ category = "Media"            # Internet | Office | Graphics | Media | Games | U
 licence = "GPL-2.0-or-later"  # SPDX id, or "Proprietary (free)" when upstream binaries are not open source
 homepage = "https://mpv.io"
 icon = "mpv"                  # a freedesktop icon name (looked up in the installed app / theme), or "icons/<id>.svg|png" in this repo
+icon_url = "https://..."     # optional: an icon to fetch when no Debian package has one (the store's tile otherwise)
 ram_mb = 150                  # typical resident memory in use (honest; the store warns above what the guest can give)
 featured = false              # shown on Today
 default = "release"           # the method preselected on the app page

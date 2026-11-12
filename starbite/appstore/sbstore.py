@@ -22,7 +22,8 @@ SEQ" in; "store SEQ", "pkg IDX STATE PCT", "rescan" out), the same struct sbshm_
 Environment (tests and the host use these; the guest needs none):
   SBSTORE_ROOT (/)            every path below is under it
   SBSTORE_CATALOG             catalog.json, or a directory of *.toml (default <root>/usr/share/starbite/appstore/catalog.json)
-  SBSTORE_MIRROR (/repo/appstore)   the offline mirror (tools/mirror.py): used when the network is down
+  SBSTORE_MIRROR (/repo/appstore/mirror:/usr/share/starbite/appstore/mirror)   the offline mirror (tools/mirror.py),
+                              used when the network is down; its debs/ is an apt source (build deps offline)
   SBSTORE_REPO (/repo)        the offline Debian repo of the old store (its store/index.tsv entries join the catalog)
   SBSTORE_OFFLINE=1           never use the network
   SBSTORE_NET_PROBE (api.github.com:443)
@@ -84,7 +85,10 @@ class Cfg:
         self.bin = rp("/usr/local/bin")
         self.apps = rp("/usr/local/share/applications")
         self.icons = rp("/usr/local/share/icons/hicolor")
-        self.mirror = env("SBSTORE_MIRROR", "/repo/appstore")
+        # the offline mirror (tools/mirror.py): the first of these that exists
+        self.mirrors = [m for m in env("SBSTORE_MIRROR", "/repo/appstore/mirror:" +
+                                       rp("/usr/share/starbite/appstore/mirror")).split(":") if m]
+        self.mirror = next((m for m in self.mirrors if os.path.isdir(m)), self.mirrors[0])
         self.repo = env("SBSTORE_REPO", "/repo")
         self.offline = env("SBSTORE_OFFLINE") == "1"
         self.net_probe = env("SBSTORE_NET_PROBE", "api.github.com:443")
@@ -348,7 +352,14 @@ def _ctx():
     return ssl.create_default_context()
 
 
+def clock_ok():
+    return time.time() > 1735689600                     # 2025-01-01: TLS can check certificates
+
+
 def http_open(url, headers=None, timeout=30):
+    if url.startswith("https:") and not clock_ok():
+        raise StoreError("Linux clock not set", "the guest's clock says %s: TLS cannot check certificates" %
+                         time.strftime("%Y-%m-%d", time.gmtime()))
     h = {"User-Agent": C.ua}
     h.update(headers or {})
     req = urllib.request.Request(url, headers=h)
@@ -2095,6 +2106,9 @@ class Daemon:
             log("no shared region %s (%s): the table is not published" % (C.shm, e))
         log("daemon: %d apps (%s), mirror %s, network %s" % (len(self.order), C.catalog, C.mirror,
                                                             "up" if net_up() else "down"))
+        if env("SBSTORE_NO_APT_UPDATE") != "1":
+            rc, _ = run(C.apt + ["-q", "update"], timeout=300)   # file: sources (repo, mirror debs) work offline
+            log("apt-get update at start: %s" % ("ok" if rc == 0 else "rc %d (offline sources still read)" % rc))
         signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
         last_pub = 0.0
         while True:
