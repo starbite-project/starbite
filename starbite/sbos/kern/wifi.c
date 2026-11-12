@@ -30,6 +30,9 @@
 #include "http.h"
 #include "tls/tls_check.h"
 #include "store.h"
+#ifndef SB_HOST
+#include "sd.h"
+#endif
 #ifdef SB_HOST
 #include <stdlib.h>
 #include "host/model.h"
@@ -311,7 +314,24 @@ static void load_saved(void)
     buf[len] = 0;
 #else
     struct store_ent e;
-    if (!store_find("wifinet", &e) || !e.size || e.size >= sizeof(buf) || store_load(&e, (uintptr_t)buf, sizeof(buf)))
+    int found = store_find("wifinet", &e);
+    if (!found) {
+        /* h1b on the phone: a card-only boot (sbstore=card) has no UFS store, so libsb never opens the card's (it waits
+         * for the UFS settings' SET_SD_STORE, as before the store moved to the card). Starbite OS reads the card anyway
+         * (Files): allow it, forget the first miss, look there. */
+        static int card_tried;
+        if (!card_tried) {
+            card_tried = 1;
+            if (!sd_allowed()) {
+                sd_allow();
+                store_reset(STORE_SD);
+            }
+            found = store_find("sd:wifinet", &e);
+            sb_log(found ? "wifi: the saved network entry is on the card's store" :
+                           "wifi: no saved network entry (wifinet) on UFS's store or the card's");
+        }
+    }
+    if (!found || !e.size || e.size >= sizeof(buf) || store_load(&e, (uintptr_t)buf, sizeof(buf)))
         return;
     buf[e.size] = 0;
 #endif
@@ -2239,12 +2259,15 @@ int wifi_selftest_phase(int *done)
         return 0;
     }
     if (st == SBOS_WIFI_UP && !scan_retry) {
-        logn("selftest: wifi: up and scanned in ", sb_ms() - t_on, " ms");
-        logn("selftest: wifi: networks heard: ", (uint64_t)nnets, " (names not logged)");
-        logn("selftest: wifi: interrupts during the bring-up and scan: ", irq_n,
-             irq_storms ? " (a STORM: off, polling)" : irq_on ? " (on)" : " (polling)");
-        if (irq_missed)
-            logn("selftest: wifi: work found without an interrupt, times: ", irq_missed, "");
+        static int up_logged;               /* once: h1 comes back here while it waits for its second scan */
+        if (!up_logged++) {
+            logn("selftest: wifi: up and scanned in ", sb_ms() - t_on, " ms");
+            logn("selftest: wifi: networks heard: ", (uint64_t)nnets, " (names not logged)");
+            logn("selftest: wifi: interrupts during the bring-up and scan: ", irq_n,
+                 irq_storms ? " (a STORM: off, polling)" : irq_on ? " (on)" : " (polling)");
+            if (irq_missed)
+                logn("selftest: wifi: work found without an interrupt, times: ", irq_missed, "");
+        }
         int heard = -1;
         if (wifi_selftest_scan_only == 2) {
             /* h1b: a second scan 2 s after the first (the first one starts while the bring-up's own may still run) */
