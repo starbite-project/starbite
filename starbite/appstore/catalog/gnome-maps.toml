@@ -1,0 +1,31 @@
+id = "gnome-maps"
+name = "Maps"
+summary = "Find places and get directions"
+description = """GNOME Maps shows OpenStreetMap maps, searches places and gives walking, cycling, driving and public-transport routes."""
+category = "Utilities"
+licence = "GPL-2.0-or-later"
+homepage = "https://apps.gnome.org/Maps/"
+icon = "org.gnome.Maps"
+ram_mb = 250
+featured = true
+default = "distro"
+touch = "good"
+keywords = ["maps", "navigation", "directions", "openstreetmap", "gps"]
+
+[launcher]
+exec = "gnome-maps"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["gnome-maps"]
+
+[runtime]
+needs = ["network"]
+note = "Map tiles and search need the network. Your position comes from GeoClue when the guest provides one."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 5
+build_mb = 800

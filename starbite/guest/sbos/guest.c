@@ -72,6 +72,7 @@ static uint32_t blits, blit_ms_max, rows_copied;   /* the view's frames drawn, i
 static uint64_t t_hidden, t_screen_off;
 static int sb_up;
 static int kept;                            /* L3: guest_keep: no idle stop */
+static int apps;                            /* v3: guest_apps: Linux apps with a switcher card */
 /* 1.2-alpha3: two guests from the same service: the app demo (the S9 Linux, 720 x 1440 at 2x) and the terminal
  * (the guest kernel of its own, a shell on fbcon in Terminus 16 x 32, 720 x 1060 at 2x above Starbite's keyboard) */
 static int mode = GUEST_APP, term_ok;
@@ -102,6 +103,22 @@ void guest_keep(int on)
     if (kept && !on && !shown)
         t_hidden = sb_ms();                 /* the 60 s from now (an install that ran for minutes) */
     kept = on ? 1 : 0;
+}
+void guest_apps(int n)
+{
+    if (apps && n <= 0 && !shown)
+        t_hidden = sb_ms();                 /* the last card gone: the 60 s from now */
+    apps = n > 0 ? n : 0;
+}
+/* the idle stop (guest_timer, real and fake): hidden 60 s, or the screen off 60 s; with Linux apps on cards (v3) not for
+ * being hidden, and the screen off 30 min; never while kept (the App Store, a package operation) */
+static int idle_stop_due(uint64_t now)
+{
+    if (kept)
+        return 0;
+    uint64_t off = apps ? GUEST_APPS_SCREEN_OFF_MS : IDLE_STOP_MS;
+    return (!apps && !shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
+           (!screen && t_screen_off && now - t_screen_off > off);
 }
 
 #ifndef SB_HOST
@@ -159,10 +176,42 @@ static int m3_prep(void)
     return 1;
 }
 #include "guest-card.h"                     /* sbblk: the guest's block devices from files on the microSD card */
+/* ---- contract v3 (Track E): what Starbite serves the Linux apps (sbshm.h "contract v3") ----
+ * sbnet: the guest's IP packets go to Track G's NAT, a weak symbol until it is linked in (then NULL: no SVC_NET) */
+void sbos_nat_from_guest(const uint8_t *pkt, unsigned len) __attribute__((weak));
+#ifndef GUEST_QEMU                          /* (QEMU's kern-shim has no clock and no card: neither is offered) */
+/* the wall clock: UTC and the user's offset (the clock settings' zone) for the guest's time */
+static uint32_t unix_s(int32_t *tz_min)
+{
+    struct sbos_time t;
+    if (!clock_now(&t) || t.utc <= 0) {
+        *tz_min = 0;
+        return 0;
+    }
+    *tz_min = t.off_min;
+    return (uint32_t)t.utc;
+}
+/* sbp9: Starbite's files for the guest (/home/user/Starbite) through guest-fs.h's adapter over kfile_* (another
+ * session's; GUEST_FS_OPS names its struct sbg_fs). HOOK: without guest-fs.h, no SVC_P9. */
+#if defined(__has_include) && !defined(GUEST_QEMU)
+#if __has_include("guest-fs.h")
+#include "guest-fs.h"
+#endif
+#endif
+#define GUEST_UNIX_S unix_s
+#else
+#define GUEST_UNIX_S 0
+#endif
+#ifndef GUEST_FS_OPS
+#define GUEST_FS_OPS 0
+#endif
 static const struct sbg_os shim = {
     .ms = ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
     .m3_prep = m3_prep,
     .blk_io = gcard_io,
+    .unix_s = GUEST_UNIX_S,
+    .net_rx = sbos_nat_from_guest,          /* NULL until Track G's NAT is linked */
+    .fs = GUEST_FS_OPS,
 };
 
 static uint8_t me_if;
@@ -179,6 +228,10 @@ static void cfg_init(void)
         .repair = 0,
         .boot_timeout_ms = 30000, .stop_timeout_ms = 5000,
         .v2 = mode == GUEST_WL,             /* L3: the catalog, the store and the icons (sbshm.h contract v2) */
+        /* v3 (Linux apps: hdr.version 3): sbghost leaves out what has no sbg_os part (NET without the NAT, P9
+         * without guest-fs.h) */
+        .services = mode == GUEST_WL ? SBSHM_SVC_CLIP | SBSHM_SVC_NOTIF | SBSHM_SVC_CLOCK | SBSHM_SVC_NET |
+                                           SBSHM_SVC_P9 : 0,
     };
     sbg_init(&shim, &cfg, me_if ? me_if : 1);
 }
@@ -369,9 +422,9 @@ void guest_timer(unsigned id)
         if (h->surf_seq != seq_seen && shown)
             ui_mark_dirty();
         uint64_t now = sb_ms();
-        if (!kept && ((!shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
-                      (!screen && t_screen_off && now - t_screen_off > IDLE_STOP_MS))) {
-            sb_log("guest: unused for 60 s: stopping (the M3 cluster off)");
+        if (idle_stop_due(now)) {
+            sb_log(apps ? "guest: the screen off for 30 min: stopping (the M3 cluster off)" :
+                          "guest: unused for 60 s: stopping (the M3 cluster off)");
             guest_stop();
         }
     }
@@ -391,6 +444,21 @@ void guest_show(int on)
 int guest_frame_new(void)
 {
     return guest_shown() && sbg_hdr()->surf_seq != seq_blit;
+}
+
+const volatile uint32_t *guest_front(int *idx, unsigned *stride_px)
+{
+    if (!guest_shown())
+        return 0;
+    volatile struct sbshm_hdr *h = sbg_hdr();
+    uint32_t seq = h->surf_seq;
+    sbshm_dmb();
+    int f = (int)(h->surf_front & 1U);
+    *idx = f;
+    *stride_px = h->surf_stride / 4U;
+    seq_seen = seq_blit = seq;
+    ++blits;
+    return (const volatile uint32_t *)(uintptr_t)(G_SHM_BASE + h->surf_off[f]);
 }
 
 /* the guest's front buffer at 2x (app: 1440 x 2880; terminal: 1440 x 2120) into the back buffer at (x0, y0).
@@ -606,9 +674,9 @@ void guest_timer(unsigned id)
             fake_seq++;
             ui_mark_dirty();
         }
-        if (!kept && ((!shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
-                      (!screen && t_screen_off && now - t_screen_off > IDLE_STOP_MS))) {
-            sb_log("guest: unused for 60 s: stopping (the M3 cluster off)");
+        if (idle_stop_due(now)) {
+            sb_log(apps ? "guest: the screen off for 30 min: stopping (the M3 cluster off)" :
+                          "guest: unused for 60 s: stopping (the M3 cluster off)");
             guest_stop();
         }
     }
@@ -624,6 +692,13 @@ void guest_show(int on)
 }
 
 int guest_frame_new(void) { return guest_shown() && (uint32_t)fake_seq != seq_blit; }
+/* the host fake has no shared memory: no zero-copy front (the host's sh_linux_zero_copy is 0 anyway) */
+const volatile uint32_t *guest_front(int *idx, unsigned *stride_px)
+{
+    *idx = 0;
+    *stride_px = 0;
+    return 0;
+}
 
 static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0,
                     int *py1);

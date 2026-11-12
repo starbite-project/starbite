@@ -62,6 +62,13 @@ int guest_blit_rows(uint32_t *const *rows, int *py0, int *py1);
 /* L3: 1 while something of Linux runs without a window shown (the App Store open, a package being installed):
  * no idle stop; 0: the 60 s count starts again (while hidden) */
 void guest_keep(int on);
+/* v3 (Track E): n Linux apps with a switcher card in the shell: while n > 0 Linux is not stopped for being hidden, and
+ * only after GUEST_APPS_SCREEN_OFF_MS of the screen off (not 60 s); n = 0: the 60 s rules again */
+void guest_apps(int n);
+#define GUEST_APPS_SCREEN_OFF_MS (30U * 60U * 1000U)
+/* v3 + Track A's zero-copy window: the guest's front buffer now (NULL: not shown / not running), *idx its index for
+ * sbg_surf_reading, *stride_px its row pitch in px; the frame counts as drawn (guest_frame_new 0 until the next) */
+const volatile uint32_t *guest_front(int *idx, unsigned *stride_px);
 int guest_input(int kin_type, int x, int y);  /* KIN_PRESS/MOVE/RELEASE in panel pixels: 1 taken */
 int guest_key(unsigned linux_code, int down);
 

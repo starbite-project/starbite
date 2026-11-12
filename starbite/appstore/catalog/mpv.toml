@@ -1,0 +1,31 @@
+id = "mpv"
+name = "mpv"
+summary = "A free, small, powerful media player"
+description = """mpv plays almost any video or audio file and network stream with an on-screen controller. Light and fast, with software decoding on the M3 cores."""
+category = "Media"
+licence = "GPL-2.0-or-later"
+homepage = "https://mpv.io"
+icon = "mpv"
+ram_mb = 120
+featured = false
+default = "distro"
+touch = "ok"
+keywords = ["video", "audio", "player", "media"]
+
+[launcher]
+exec = "mpv --player-operation-mode=pseudo-gui"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["mpv"]
+
+[runtime]
+needs = ["audio", "files"]
+note = "Upstream publishes no Linux binaries; the latest source (0.42) needs libplacebo 7.387+, trixie has 7.349, so no source method. With no GPU, 1080p H.264 is the comfortable limit."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 10
+build_mb = 1500

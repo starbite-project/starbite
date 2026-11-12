@@ -1,0 +1,42 @@
+id = "libreoffice"
+name = "LibreOffice"
+summary = "Office suite: Writer, Calc and Impress"
+description = """LibreOffice Writer (documents), Calc (spreadsheets) and Impress (presentations), with the GTK 3 front end so it runs natively on Wayland. Opens and saves Microsoft Office and OpenDocument files."""
+category = "Office"
+licence = "MPL-2.0"
+homepage = "https://www.libreoffice.org"
+icon = "libreoffice-startcenter"
+ram_mb = 350
+featured = true
+default = "distro"
+touch = "poor"
+keywords = ["office", "word", "spreadsheet", "presentation", "docx", "xlsx", "odt"]
+
+[launcher]
+exec = "libreoffice"
+terminal = false
+keyboard = true
+
+[distro]
+apt = ["libreoffice-writer", "libreoffice-calc", "libreoffice-impress", "libreoffice-gtk3"]
+
+[runtime]
+needs = ["files"]
+note = "Latest release: The Document Foundation's own aarch64 build (a bundle of .deb packages installed with apt; about 200 MB to download). Desktop-style menus: usable with touch, better with a keyboard."
+
+[release]
+# The Document Foundation's aarch64 build: a tarball of .deb packages (installed with apt, dependencies resolved)
+provider = "url"
+version_url = "https://download.documentfoundation.org/libreoffice/stable/"
+version_regex = 'href="(\d+\.\d+\.\d+)/"'
+url = "https://download.documentfoundation.org/libreoffice/stable/{version}/deb/aarch64/LibreOffice_{version}_Linux_aarch64_deb.tar.gz"
+format = "deb"
+exec = "sh -c 'exec \"$(ls -1 /usr/bin/libreoffice[0-9]* | tail -1)\"'"
+size_mb = 650
+
+[release.verify]
+signature = "https://download.documentfoundation.org/libreoffice/stable/{version}/deb/aarch64/LibreOffice_{version}_Linux_aarch64_deb.tar.gz.asc"
+key = "keys/libreoffice.asc"
+fingerprint = "C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3"
+sha256sums_url = "https://download.documentfoundation.org/libreoffice/stable/{version}/deb/aarch64/LibreOffice_{version}_Linux_aarch64_deb.tar.gz.sha256"
+sha256_line = "LibreOffice_{version}_Linux_aarch64_deb.tar.gz"

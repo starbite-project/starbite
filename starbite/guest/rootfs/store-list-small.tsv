@@ -1,0 +1,19 @@
+# A small App Store repository for the first phone tests (mk-repo.sh NAME=repo-small LIST=store-list-small.tsv):
+# the entries of store-list.tsv that fit a quick adb push. Same format.
+# The App Store's curated list (mk-repo.sh's input). Tab-separated:
+# key	title	summary	category	featured	apt packages (space-separated; the first is the main one)	measure (measure-ram.py's workload)	[icon: a theme icon name instead of the .desktop's Icon=]
+# Entries whose packages are all in the base image show as SYSTEM (installed, cannot be removed).
+firefox-esr	Firefox	Mozilla's web browser (Extended Support Release)	Internet	1	firefox-esr	firefox
+libreoffice-writer	LibreOffice Writer	Word processor: documents, letters, .docx and .odt	Office	1	libreoffice-writer libreoffice-gtk3	lo-writer
+xournalpp	Xournal++	Handwritten notes, sketches and PDF annotation	Office	1	xournalpp	xournalpp
+drawing	Drawing	A simple drawing and image editing app	Graphics	1	drawing	drawing
+gnome-chess	Chess	Play chess against the computer (GNU Chess engine)	Games	1	gnome-chess gnuchess	gtk-app
+gnome-sudoku	Sudoku	Sudoku puzzles in four difficulties	Games	0	gnome-sudoku	gtk-app
+gnome-mines	Mines	Clear hidden mines from a minefield	Games	0	gnome-mines	gtk-app
+gnome-2048	2048	Slide the tiles and get to 2048	Games	0	gnome-2048	gtk-app
+foot	Terminal	foot, a fast Wayland terminal	Utilities	0	foot	foot
+gnome-text-editor	Text Editor	Plain text and Markdown editing	Utilities	0	gnome-text-editor	text-editor
+gnome-calculator	Calculator	Basic, advanced and programmer calculator	Utilities	0	gnome-calculator	gtk-app
+pcmanfm	Files	Browse and organise your files	Utilities	0	pcmanfm	files	folder
+gpicview	Image Viewer	Look at pictures	Graphics	0	gpicview	image-viewer	image-x-generic
+papers	Document Viewer	Read PDF documents	Office	0	papers	pdf-viewer

@@ -1,0 +1,25 @@
+# Measured RAM per store entry (measure-ram.sh in the Lima VM, 2026-11-11; aarch64 like the guest). ram_mb = peak PSS
+# of the app's whole session, rounded up to 10 MB. Columns: key, ram_mb, method. mk-repo.sh puts ram_mb into the index.
+firefox-esr	800	PSS peak 790 MB / last-5s 579 MB / RSS 1346 MB, 10 procs; cage headless pixman 720x1440, 45 s: Firefox ESR on a local 250 KB article (30 sections, tables, SVG, a canvas animation)
+libreoffice-writer	300	PSS peak 291 MB / last-5s 291 MB / RSS 305 MB, 2 procs; cage headless pixman 720x1440, 40 s: LibreOffice Writer (gtk3 VCL) with a 25-page document open
+libreoffice-calc	260	PSS peak 258 MB / last-5s 246 MB / RSS 268 MB, 2 procs; cage headless pixman 720x1440, 40 s: LibreOffice Calc with a 20000 x 8 sheet open
+libreoffice-impress	210	PSS peak 205 MB / last-5s 194 MB / RSS 216 MB, 2 procs; cage headless pixman 720x1440, 40 s: LibreOffice Impress with a 10-slide presentation open
+xournalpp	70	PSS peak 60 MB / last-5s 57 MB / RSS 65 MB, 1 procs; cage headless pixman 720x1440, 30 s: Xournal++ with a new notebook
+gimp	330	PSS peak 328 MB / last-5s 315 MB / RSS 381 MB, 120 procs; cage headless pixman 720x1440, 50 s: GIMP with a 4000x3000 photo open
+inkscape	710	PSS peak 705 MB / last-5s 705 MB / RSS 713 MB, 1 procs; cage headless pixman 720x1440, 45 s: Inkscape with a 2000-shape SVG open
+drawing	90	PSS peak 87 MB / last-5s 87 MB / RSS 95 MB, 1 procs; cage headless pixman 720x1440, 30 s: Drawing with a 1600x1200 picture open
+gnome-chess	60	PSS peak 59 MB / last-5s 59 MB / RSS 68 MB, 2 procs; cage headless pixman 720x1440, 20 s: launched from its .desktop Exec, idle main window
+gnome-sudoku	50	PSS peak 45 MB / last-5s 45 MB / RSS 53 MB, 1 procs; cage headless pixman 720x1440, 20 s: launched from its .desktop Exec, idle main window
+gnome-mines	50	PSS peak 43 MB / last-5s 43 MB / RSS 51 MB, 1 procs; cage headless pixman 720x1440, 20 s: launched from its .desktop Exec, idle main window
+gnome-2048	150	PSS peak 144 MB / last-5s 144 MB / RSS 155 MB, 1 procs; cage headless pixman 720x1440, 20 s: launched from its .desktop Exec, idle main window
+gnome-clocks	50	PSS peak 47 MB / last-5s 46 MB / RSS 54 MB, 1 procs; cage headless pixman 720x1440, 20 s: launched from its .desktop Exec, idle main window
+gnome-characters	70	PSS peak 69 MB / last-5s 68 MB / RSS 77 MB, 1 procs; cage headless pixman 720x1440, 20 s: launched from its .desktop Exec, idle main window
+baobab	50	PSS peak 47 MB / last-5s 47 MB / RSS 54 MB, 1 procs; cage headless pixman 720x1440, 20 s: launched from its .desktop Exec, idle main window
+foot	20	PSS peak 13 MB / last-5s 13 MB / RSS 16 MB, 1 procs; cage headless pixman 720x1440, 12 s: foot with a shell
+gnome-text-editor	70	PSS peak 69 MB / last-5s 68 MB / RSS 77 MB, 1 procs; cage headless pixman 720x1440, 20 s: Text Editor with a Markdown file
+gnome-calculator	70	PSS peak 64 MB / last-5s 63 MB / RSS 72 MB, 1 procs; cage headless pixman 720x1440, 20 s: launched from its .desktop Exec, idle main window
+pcmanfm	40	PSS peak 35 MB / last-5s 34 MB / RSS 41 MB, 1 procs; cage headless pixman 720x1440, 20 s: PCManFM on the home folder
+gpicview	70	PSS peak 60 MB / last-5s 0 MB / RSS 66 MB, 1 procs; cage headless pixman 720x1440, 20 s: gpicview on a 4000x3000 photo
+papers	90	PSS peak 89 MB / last-5s 89 MB / RSS 97 MB, 1 procs; cage headless pixman 720x1440, 20 s: Papers on a 25-page PDF
+nautilus	70	PSS peak 62 MB / last-5s 56 MB / RSS 74 MB, 1 procs; cage headless pixman 720x1440, 25 s: Nautilus on the home folder
+# LibreOffice headless (soffice --convert-to odt of the 250 KB article): peak RSS 224 MB

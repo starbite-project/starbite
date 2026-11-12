@@ -1,0 +1,31 @@
+id = "foot"
+name = "foot"
+summary = "A fast, lightweight Wayland terminal"
+description = """foot is a small, fast terminal emulator made for Wayland. It is the terminal the store opens command-line apps in."""
+category = "System"
+licence = "MIT"
+homepage = "https://codeberg.org/dnkl/foot"
+icon = "foot"
+ram_mb = 20
+featured = false
+default = "distro"
+touch = "ok"
+keywords = ["terminal", "shell", "console", "cli"]
+
+[launcher]
+exec = "foot"
+terminal = false
+keyboard = true
+
+[distro]
+apt = ["foot"]
+
+[runtime]
+needs = ["keyboard"]
+note = "Hosted on Codeberg with no binary releases; Debian's package is the method."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 4
+build_mb = 400

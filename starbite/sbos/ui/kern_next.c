@@ -25,6 +25,7 @@
 #include "shub.h"
 #include "store.h"
 #include "../guide/sbguide.h"
+#include "tzdb.h"                       /* Track A: time zones (kern/tzdb.c) */
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
 void tk_heap_init(void *mem, uint64_t size);
@@ -290,7 +291,13 @@ static int wifi_now(void)
     sh_wifi(&w);
     return 1;
 }
-int sh_wifi_power(int on) { return wifi_power(on); }
+int sh_wifi_power(int on)
+{
+    /* Track A: the user (or the shell's kept cc.wifi) wants Wi-Fi on while the boot's time check holds it: it stays
+     * on (else the check's end would switch it off under them) */
+    if (on && wifi_time_only()) wifi_time_only_end("the user wants Wi-Fi on: it stays on");
+    return wifi_power(on);
+}
 const char *sh_wifi_why(void)
 {
     static struct sbos_wifi s;
@@ -341,7 +348,7 @@ static int notif_now(void)
     seen = s;
     for (int i = n - 1; i >= 0; i--) {
         const struct notif *q = notif_get(i);
-        if (q) sh_notify(q->who, q->title, q->text, q->hm);
+        if (q) sh_notify_flags(q->who, q->title, q->text, q->hm, q->flags);   /* Track A: notif_post_app's flags */
     }
     return n > 0;
 }
@@ -834,16 +841,19 @@ _Static_assert(sizeof(tk_gpu_item) == sizeof(struct gc_quad), "tk_gpu_item is gp
  * cached: its frames read base_half bilinearly as they come. */
 static int same_item(const tk_gpu_item *a, const tk_gpu_item *b)
 {
-    return a->src == b->src && a->stride == b->stride && a->w == b->w && a->h == b->h && a->flags == b->flags &&
+    int same = a->src == b->src && a->stride == b->stride && a->w == b->w && a->h == b->h && a->flags == b->flags &&
            a->solid == b->solid && a->alpha == b->alpha && a->dx0 == b->dx0 && a->dy0 == b->dy0 && a->isx == b->isx &&
            a->isy == b->isy && a->cx0 == b->cx0 && a->cy0 == b->cy0 && a->cx1 == b->cx1 && a->cy1 == b->cy1 &&
            a->radius == b->radius && a->ft0 == b->ft0 && a->ft1 == b->ft1 && a->fb0 == b->fb0 && a->fb1 == b->fb1 &&
            a->len == b->len && a->s0 == b->s0 && a->s1 == b->s1 && a->mask == b->mask && a->mstride == b->mstride &&
            a->bd == b->bd && a->bstride == b->bstride && a->bk == b->bk && a->bw == b->bw && a->bh == b->bh &&
-           a->gen == b->gen && a->lx == b->lx && a->ly == b->ly && a->lw == b->lw && a->lh == b->lh && a->lb == b->lb &&
-           a->lt == b->lt && a->lc == b->lc && a->lr == b->lr && a->lsat == b->lsat && a->live == b->live &&
-           a->lk == b->lk && a->la0 == b->la0 && a->la1 == b->la1;
+           a->gen == b->gen && a->lx == b->lx && a->ly == b->ly && a->lw == b->lw && a->lh == b->lh &&
+           a->lsat == b->lsat && a->live == b->live;
+    for (unsigned k = 0; same && k < sizeof a->lq / sizeof a->lq[0]; k++)   /* glass V3: the lens's record */
+        same = a->lq[k] == b->lq[k];
+    return same;
 }
+static void boot_notes(void);                    /* Track A, 1.0 (the end of this file) */
 static tk_gpu_item prevq[TK_GPU_MAX], cacheq[TK_GPU_MAX], gx[TK_GPU_MAX];
 static int prev_n, cache_n, stable_p = -1, stable_k;
 static uint32_t wall_made, cache_made;
@@ -989,6 +999,7 @@ static void next_gpu_clean(void *ctx, const void *p, uint64_t n)
 }
 
 /* ---- the kernel's UI entry points in this image ------------------------------------------------------------- */
+static void next_save(void);                         /* Track A lifecycle (below) */
 void next_kinit(void)
 {
     boot_t0 = sb_ms();
@@ -1010,6 +1021,7 @@ void next_kinit(void)
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
     kui_sleep_hook = next_sleep;
+    kui_save_hook = next_save;                   /* Track A lifecycle: the pages' on_save before a restart / switch-off */
     input_fast = 1;                              /* P3k: touch read every 16 ms while the screen is on (no 50 ms first touch) */
     if (!tk_pack_open(sbtk_pack_start, (uint32_t)(sbtk_pack_end - sbtk_pack_start))) {
         sb_log("next: the sbtk pack is missing or bad: the regular UI runs");
@@ -1023,6 +1035,9 @@ void next_kinit(void)
 #ifndef SBOS_NEXT_NOGPU
     /* P4: with two buffers (tear-free flips) and the GPU up (normal clocks, gpuheat's checks), the GPU composes */
     gpucomp_add_ro(sbtk_pack_start, (uint64_t)(sbtk_pack_end - sbtk_pack_start));  /* icons point into the pack */
+    /* 1.0 (Track E): the Linux guest's two window surfaces (guest/sbos/guest.h GUEST_WL: SBG_S9_SHM_BASE + 0x200000,
+     * 8 MiB covers both), sampled by the GPU in place through tk_layer_external; Normal non-cacheable on both sides */
+    gpucomp_add_ext((const void *)(uintptr_t)0x8e0200000ULL, 0x800000ULL);
     if (flip_on && heap_mem && gpucomp_init(heap_mem, heap_size)) {
         comp.gpu = next_gpu;
         comp.gpu_clean = next_gpu_clean;
@@ -1063,6 +1078,8 @@ static void bake_step(void)
     baking = 0;
     status_now();
     sh_bright_now(panel_bright_level);
+    sh_restore();                                    /* Track A: what the shell keeps (settings_restore ran before) */
+    boot_notes();                                    /* Track A, 1.0: a safe start, or the last start's crash */
     ready = need_full = 1;
     boost(0);
     kt_set(KT_UI, 23, sb_ms(), 5000, 0);            /* the workers off after 5 s unless a finger comes */
@@ -1279,6 +1296,7 @@ void sh_brightness(int level)
     sb_log("next: brightness: would set the panel's level (a dry run: the self test)");
 #else
     if (!panel_brightness(level)) sb_log("next: brightness: the panel did not take the level");
+    else settings_changed();                         /* Track A: kept (the settings record's level, as the classic UI's) */
 #endif
 }
 
@@ -1291,6 +1309,213 @@ void sh_torch(int lit)
     if (r < 0) sb_log("next: torch: the LED did not answer");
 #endif
 }
+
+/* ---- Track A: passcode ----
+ * shell.h's sh_pass_* and sh_autolock* (sbos-core-api.md 3) on kern/passcode.c: the salted, iterated SHA-256 and the
+ * back-off, kept in the state slot's "sbos.pass" record (settings.c; written about 1 s after a change, so a wrong try
+ * is on the storage before anyone can restart around it). The digits go into passcode.c and nowhere else: nothing
+ * here logs them. The self test (SBOS_SELFTEST_NEXT) runs without the passcode (its films swipe to home and write
+ * nothing): sh_pass_on is 0 there and every setter is a logged dry run. */
+#ifndef SBOS_SELFTEST_NEXT
+static int64_t pass_utc(void)
+{
+    struct sbos_time t;
+    return clock_now(&t) ? (int64_t)t.utc : 0;
+}
+/* a new passcode's salt: the counter's jitter over memory walks (the arrival of the user's taps already makes the
+ * start unpredictable), the clocks, hashed; uniqueness is what a salt needs */
+static void pass_salt(uint8_t salt[PASS_SALT])
+{
+    static volatile uint8_t walk[4096];
+    static uint32_t made;
+    uint8_t pool[256 + 32], h[32];
+    for (unsigned i = 0; i < 256; i++) {
+        uint64_t a = sb_ticks();
+        for (unsigned k = 0; k < 24; k++) walk[(i * 131u + k * 523u) & 4095u] += (uint8_t)(a >> (k & 7));
+        pool[i] = (uint8_t)(sb_ticks() - a) ^ (uint8_t)a;
+    }
+    uint64_t t = sb_ticks(), ms = sb_ms();
+    int64_t u = pass_utc();
+    made++;
+    tk_memcpy(pool + 256, &t, 8);
+    tk_memcpy(pool + 264, &ms, 8);
+    tk_memcpy(pool + 272, &u, 8);
+    tk_memcpy(pool + 280, &made, 4);
+    tk_memset(pool + 284, 0, 4);
+    pass_sha256(pool, sizeof pool, h);
+    tk_memcpy(salt, h, PASS_SALT);
+    tk_memset(h, 0, sizeof h);
+}
+#endif
+int sh_pass_on(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    return 0;
+#else
+    return pass_len() > 0;
+#endif
+}
+int sh_pass_len(void) { return pass_len(); }
+int sh_pass_wait(void) { return (int)pass_wait(sb_ms()); }
+int sh_pass_fails(void) { return pass_fails(); }
+int sh_pass_check(const char *digits)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)digits;
+    sb_log("next: passcode: a check (a dry run: the self test has none)");
+    return 1;
+#else
+    int f0 = pass_fails();
+    uint64_t t0 = sb_ms();
+    int r = pass_check(digits, t0, pass_utc());
+    if (r == 1) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: passcode: right (the hash took ");
+        ub_dec(&u, sb_ms() - t0);
+        ub_s(&u, " ms)");
+        sb_log(u.b);
+    } else if (r == 0) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: passcode: wrong; tries in a row ");
+        ub_dec(&u, (uint64_t)pass_fails());
+        if (pass_wait(sb_ms())) { ub_s(&u, ", the next in "); ub_dec(&u, pass_wait(sb_ms())); ub_s(&u, " s"); }
+        sb_log(u.b);
+    }
+    if (pass_fails() != f0) settings_changed_soon(1000);     /* the tries on the storage within ~1 s */
+    return r;
+#endif
+}
+int sh_pass_set(const char *old, const char *nw)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)old; (void)nw;
+    sb_log("next: passcode: would be set / changed / removed (a dry run: the self test)");
+    return -1;
+#else
+    uint8_t salt[PASS_SALT];
+    int had = pass_len(), f0 = pass_fails();
+    pass_salt(salt);
+    int r = pass_set(old, nw, salt, sb_ms(), pass_utc());
+    tk_memset(salt, 0, sizeof salt);
+    if (!r) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, !pass_len() ? "next: passcode: removed" : had ? "next: passcode: changed (" : "next: passcode: set (");
+        if (pass_len()) { ub_dec(&u, (uint64_t)pass_len()); ub_s(&u, " digits)"); }
+        sb_log(u.b);
+    } else
+        sb_log("next: passcode: not changed (the old code was wrong, a wait runs, or the new one is not 4 or 6 digits)");
+    if (!r || pass_fails() != f0) settings_changed_soon(1000);
+    if (!settings_persistent()) sb_log("next: passcode: no state slot: it lasts until a restart");
+    return r;
+#endif
+}
+/* Auto-Lock: the kernel's screen-off time (services.c; kept in the settings record); 0 = Never */
+int sh_autolock(void) { return (int)K.screen_off_s; }
+void sh_autolock_set(int s)
+{
+    if (s != 0 && (s < 10 || s > 600)) return;
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: Auto-Lock: would change (a dry run: the self test)");
+#else
+    K.screen_off_s = (uint32_t)s;
+    power_input();                                   /* the timer from now (none for Never) */
+    settings_changed();
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: Auto-Lock: ");
+    if (s) { ub_dec(&u, (uint64_t)s); ub_s(&u, " s"); } else ub_s(&u, "Never");
+    sb_log(u.b);
+#endif
+}
+/* Track A lifecycle: the kernel's pre-restart / switch-off path (services.c's kui_save_hook): every page's on_save */
+static void next_save(void)
+{
+    if (ready) sh_save_all();
+}
+
+/* ---- Track A: prefs and blobs ---- (sbos-core-api.md 1, 2) on kern/prefs.c: the store lives in RAM and goes into
+ * the state slot with the settings (settings_changed: 3 s after the last change, at most one write in 10 s, held
+ * while the modem runs; settings_save_now before a restart or switch-off). The self test's build reads nothing (its
+ * films start from defaults whatever the phone keeps) and writes nothing: a logged dry run, the store untouched. */
+#ifdef SBOS_SELFTEST_NEXT
+static void prefs_dry(void)
+{
+    static int said;
+    if (!said) { said = 1; sb_log("next: prefs: a change would be kept (a dry run: the self test writes nothing)"); }
+}
+#endif
+int sh_pref_get(const char *key, char *val, int cap)
+{
+    if (val && cap > 0) val[0] = 0;
+#ifdef SBOS_SELFTEST_NEXT
+    (void)key;
+    return -1;
+#else
+    return prefs_get(key, val, cap);
+#endif
+}
+int sh_pref_set(const char *key, const char *val)
+{
+    if (!prefs_key_ok(key) || (val && sb_strlen(val) > PREFS_VAL_MAX)) return -1;
+#ifdef SBOS_SELFTEST_NEXT
+    prefs_dry();
+    return 0;
+#else
+    int r = prefs_set(key, val);
+    if (r > 0) settings_changed();
+    if (r < 0) sb_logf("next: prefs: the store is full: not kept: ", key);
+    return r < 0 ? -1 : 0;
+#endif
+}
+int sh_pref_int(const char *key, int def)
+{
+    char b[16];
+    int n = sh_pref_get(key, b, sizeof b), neg = b[0] == '-', v = 0, i = neg;
+    if (n <= neg || n >= (int)sizeof b) return def;
+    for (; b[i]; i++) {
+        if (b[i] < '0' || b[i] > '9' || v > 214748363) return def;
+        v = v * 10 + (b[i] - '0');
+    }
+    return neg ? -v : v;
+}
+void sh_pref_set_int(const char *key, int v)
+{
+    char b[16];
+    int i = 15;
+    unsigned u = v < 0 ? 0U - (unsigned)v : (unsigned)v;
+    b[i] = 0;
+    do { b[--i] = (char)('0' + u % 10); u /= 10; } while (u);
+    if (v < 0) b[--i] = '-';
+    (void)sh_pref_set(key, b + i);
+}
+int sh_blob_put(const char *name, const void *p, unsigned n)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)name; (void)p;
+    if (n > PREFS_BLOB_MAX) return -1;
+    prefs_dry();
+    return 0;
+#else
+    int r = prefs_blob_put(name, p, n);
+    if (r > 0) settings_changed();
+    if (r < 0) sb_logf("next: prefs: a blob was not kept (too big, a bad name or the store full): ", name);
+    return r < 0 ? -1 : 0;
+#endif
+}
+int sh_blob_get(const char *name, void *p, unsigned cap)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)name; (void)p; (void)cap;
+    return -1;
+#else
+    return prefs_blob_get(name, p, cap);
+#endif
+}
+_Static_assert(SH_NOTIF_QUIET == NOTIF_QUIET && SH_NOTIF_URGENT == NOTIF_URGENT, "SH_NOTIF_* are NOTIF_*");
+/* ---- end of Track A: prefs and blobs ---- */
 
 /* ---- survival-next: Emergency mode's tools (shell_survival.inc) on the kernel's survival API (kern/survival.h)
  * and services.c's SOS. The shell starts SOS and USB power out only at the end of the user's hold; the self test's
@@ -1478,6 +1703,90 @@ long long sh_utc(void)
 {
     struct sbos_time t;
     return clock_now(&t) ? (long long)t.utc : 0;
+}
+
+/* ---- Track A: time and alarms ---- */
+/* The zone and 12 / 24-hour (sbos-core-api.md 4): the kernel's clock_now applies the zone to every local time it
+ * hands out (sh_status, the alarms' minute, notifications, Sun); sh_utc stays UTC. Both are kept with the settings
+ * (settings.c ext[3]). The alarms (5): kern/alarm.c's four, the list and labels in its record "sbos.alarm"; ringing
+ * stays the kernel's, and the lock's next alarm goes out through sh_alarm. The self test writes nothing: the zone and
+ * 12 / 24-hour change in RAM only, and alarms are refused (they would buzz). */
+static void ta_keep(const char *what)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    sb_logf("next: the self test keeps this in RAM only (no settings write): ", what);
+#else
+    (void)what;
+    settings_changed();
+#endif
+}
+int sh_tz_count(void) { return tzdb_n; }
+const char *sh_tz_name(int i, const char **city)
+{
+    if (i < 0 || i >= tzdb_n) { if (city) *city = ""; return ""; }
+    if (city) *city = tzdb[i].city;
+    return tzdb[i].name;
+}
+int sh_tz_offset_min(int i)
+{
+    struct sbos_time t;
+    if (i < 0 || i >= tzdb_n) return 0;
+    return clock_now(&t) && t.utc ? tzdb_offset(i, t.utc) : tzdb[i].off_min;
+}
+int sh_tz(void) { return clock_zone(); }
+void sh_tz_set(int i)
+{
+    if (i < 0 || i >= tzdb_n || i == clock_zone()) return;
+    clock_zone_set(i);
+    sb_logf("next: time zone ", tzdb[i].name);
+    ta_keep("the time zone");
+    if (ready) status_now();                         /* the local time, date and alarm's day again */
+}
+int sh_clock24(void) { return clock_24h; }
+void sh_clock24_set(int on)
+{
+    if (!!on == clock_24h) return;
+    clock_24h = !!on;
+    sb_log(on ? "next: 24-hour time" : "next: 12-hour time");
+    ta_keep("12 / 24-hour time");
+}
+int sh_alarm_count(void) { return alarm_count(); }
+int sh_alarm_get(int i, int *hm, int *days, int *on, char *label, int cap)
+{
+    return alarm_get(i, hm, days, on, label, cap) ? -1 : 0;
+}
+#ifndef SBOS_SELFTEST_NEXT
+static void ta_alarm_push(void)
+{
+    int h = 0, m = 0, on = alarm_first(&h, &m);
+    sh_alarm(on, h, m);
+}
+#endif
+int sh_alarm_put(int i, int hm, int days, int on, const char *label)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i; (void)hm; (void)days; (void)on; (void)label;
+    sb_log("next: the self test sets no alarm (dry run)");
+    return -1;
+#else
+    if (alarm_put(i, hm, days, on, label)) return -1;
+    settings_changed();
+    ta_alarm_push();
+    return 0;
+#endif
+}
+int sh_alarm_del(int i)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)i;
+    sb_log("next: the self test deletes no alarm (dry run)");
+    return -1;
+#else
+    if (alarm_del(i)) return -1;
+    settings_changed();
+    ta_alarm_push();
+    return 0;
+#endif
 }
 
 /* ---- helper I: calls and SMS (shell_comms.inc) on the modem session's kmodem_call_* / kmodem_sms_* (kern.h defines
@@ -1915,3 +2224,35 @@ void next_selftest_begin(void)
 }
 int next_selftest_ready(void) { return ready || baking; }
 #endif
+
+/* ---- Track A, 1.0: the Linux window sampled in place by the GPU (Track E's zero-copy path) ---- */
+int sh_linux_zero_copy(void)
+{
+#ifndef SBOS_NEXT_NOGPU
+    return comp.gpu != 0 && gpucomp_ext_ok();
+#else
+    return 0;
+#endif
+}
+
+/* ---- Track A, 1.0: the safe start and why this start happened (the loader's SBFW table, Track J) ---- */
+int sh_safe_mode(void) { return sbos_safe_start(); }
+int sh_boot_reason(char *why, int cap)
+{
+    static const char *const W[6] = { "Started from the boot menu", "Started as the default", "Started once",
+                                       "Started as the boot menu", "Started again after a problem", "Started from USB" };
+    const char *w = !sb_fw.valid ? "Started (an older loader)" : sb_fw.boot_reason < 6U ? W[sb_fw.boot_reason] : "Started";
+    if (why && cap > 0) sb_strcpy(why, (unsigned)cap, w);
+    return sb_fw.valid ? (int)sb_fw.boot_reason : -1;
+}
+/* once at the end of the bake: say so when this is a safe start, or when the last start of Starbite OS crashed */
+static void boot_notes(void)
+{
+    if (sbos_safe_start())
+        notif_post("Starbite OS", "Safe Start",
+                   "Started without restoring Wi-Fi. Nothing is saved until you restart.");
+    else if (sb_fw.valid && sb_fw.crash_sev >= 2U && sb_fw.crash_key[0] &&
+             (!tk_strcmp(sb_fw.crash_key, "starbite-os") || !tk_strcmp(sb_fw.crash_key, sb_fw.key)))
+        notif_post("Starbite OS", "Restarted After a Problem",
+                   "The last start stopped unexpectedly. Details: Settings > Startup > Crash Reports.");
+}

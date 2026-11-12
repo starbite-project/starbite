@@ -40,10 +40,11 @@
 #include <uapi/linux/psci.h>
 
 #include "../sbshm.h"
+#include "sbg_core.h"
 
-static phys_addr_t shm_base;
-static u64 shm_size;
-static struct sbshm_hdr *hdr;           /* write-combine vmap of the header page */
+phys_addr_t shm_base;
+u64 shm_size;
+struct sbshm_hdr *hdr;           /* write-combine vmap of the header page */
 static void __iomem *gicd;
 static bool use_hvc;
 static u32 fn_cpu_off = PSCI_0_2_FN_CPU_OFF;
@@ -61,7 +62,7 @@ static void sbg_psci_cpu_off(void)
 		arm_smccc_smc(fn_cpu_off, 0, 0, 0, 0, 0, 0, 0, &res);
 }
 
-static void sbg_ring_host(void)
+void sbg_ring_host(void)
 {
 	u32 id = READ_ONCE(hdr->db_to_host);
 
@@ -151,6 +152,9 @@ static irqreturn_t sbg_db_irq(int irq, void *dev)
 	atomic_inc(&db_count);
 	wake_up_interruptible(&db_wait);
 	sbblk_kick();				/* the doorbell is shared: completions may be waiting */
+	sbnet_kick();				/* v3: each service checks its own rings */
+	sbp9_kick();
+	sbsnd_kick();
 	return IRQ_HANDLED;
 }
 
@@ -418,7 +422,7 @@ static const struct block_device_operations sbblk_fops = {
 };
 
 /* a write-combine mapping of part of the shared region (RAM reserved without no-map: ioremap refuses it) */
-static void *sbg_vmap_wc(u64 off, size_t len)
+void *sbg_vmap_wc(u64 off, size_t len)
 {
 	unsigned int i, n = PAGE_ALIGN(len) >> PAGE_SHIFT;
 	struct page **pages = kvmalloc_array(n, sizeof(*pages), GFP_KERNEL);
@@ -599,6 +603,10 @@ static int sbg_probe(struct platform_device *pdev)
 		 &shm_base, shm_size, use_hvc ? "hvc" : "smc", irq, hdr->guest_cpuif,
 		 fp_mbox ? ", FlexPMU cluster off" : "");
 	sbblk_init(&pdev->dev, irq_ok);		/* contract v2; the module works without it */
+	/* contract v3: each runs only when the host says it serves it (hdr.host_services) */
+	sbnet_init(&pdev->dev, irq_ok);
+	sbp9_init(&pdev->dev, irq_ok);
+	sbsnd_init(&pdev->dev, irq_ok);
 	return 0;
 }
 
@@ -618,5 +626,5 @@ static struct platform_driver sbg_driver = {
 };
 module_platform_driver(sbg_driver);
 
-MODULE_DESCRIPTION("Starbite OS guest: shared region, doorbells, power off without SYSTEM_OFF, sbblk");
+MODULE_DESCRIPTION("Starbite OS guest: shared region, doorbells, power off without SYSTEM_OFF, sbblk, sbnet, sbp9, sbsnd");
 MODULE_LICENSE("GPL");

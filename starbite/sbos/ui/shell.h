@@ -131,13 +131,33 @@ typedef struct { unsigned seq; int n; unsigned mem_total_kb, mem_avail_kb; sh_la
 enum { SH_PKG_IDLE, SH_PKG_QUEUED, SH_PKG_INSTALLING, SH_PKG_REMOVING, SH_PKG_FAILED };
 enum { SH_PKG_INSTALLED = 1, SH_PKG_SYSTEM = 2, SH_PKG_TOO_BIG = 4, SH_PKG_NO_SPACE = 8, SH_PKG_FEATURED = 16 };
 enum { SH_PKG_OP_INSTALL = 1, SH_PKG_OP_REMOVE = 2, SH_PKG_OP_CANCEL = 3 };
+/* Track F, the App Store v3 (starbite/appstore/sbshm-store3.h; FORMAT.md): install methods, phases, updates. The op
+ * word sh_linux_pkg takes is op | method << 8 (method 0: the entry's def_method); CHECK with SH_PKG_ALL checks every
+ * installed app. state stays SH_PKG_INSTALLING during the DOWNLOADING / BUILDING / VERIFYING phases. */
+enum { SH_PKG_UPDATE = 32, SH_PKG_ROLLBACK = 64, SH_PKG_NEEDS_NET = 128 };          /* more flags */
+enum { SH_PKG_OP_UPDATE = 4, SH_PKG_OP_ROLLBACK = 5, SH_PKG_OP_CHECK = 6 };
+enum { SH_M_DEFAULT = 0, SH_M_DISTRO = 1, SH_M_RELEASE = 2, SH_M_SOURCE = 3 };     /* methods: bit 1 << SH_M_* */
+enum { SH_PKG_DOWNLOADING = 5, SH_PKG_BUILDING = 6, SH_PKG_VERIFYING = 7 };       /* phases (besides the states) */
+enum { SH_NEED_NETWORK = 1, SH_NEED_AUDIO = 2, SH_NEED_GPU = 4, SH_NEED_CAMERA = 8, SH_NEED_FILES = 16, SH_NEED_KEYBOARD = 32 };
+enum { SH_PKG3_VERIFIED = 1, SH_PKG3_MIRROR = 4, SH_PKG3_TERMINAL = 8 };            /* flags3 */
+#define SH_PKG_OPWORD(op, m) ((int)((unsigned)(op) | (unsigned)(m) << 8))
+#define SH_PKG_ALL (-1)                                   /* sh_linux_pkg's index for CHECK: every installed app */
 #define SH_LPKGS 160
 typedef struct {
     char pkg[40], name[32], summary[96], category[16], err[32];
     unsigned dl_kb, inst_kb, ram_mb, flags, state, pct;
     int icon;                                             /* -1 none */
+    /* v3 (all 0 / "" when the guest has no store3) */
+    unsigned methods, method, def_method, phase;          /* methods offered (bits), installed with, preselected, phase */
+    unsigned done_kb, total_kb, eta_s, build_min, touch, needs, flags3, rel_size_mb;   /* touch 0 ?, 1 poor, 2 ok, 3 good */
+    char ver_inst[24], ver_new[24], ver_rel[24], ver_distro[24], ver_src[24], licence[24], source[48];
+    char desc[480];                                       /* the long description (UTF-8, cut at 479 bytes) */
 } sh_lpkg_t;
-typedef struct { unsigned seq; int n, repo_ok; unsigned overlay_total_kb, overlay_free_kb, mem_total_kb; sh_lpkg_t pkg[SH_LPKGS]; } sh_lstore_t;
+typedef struct {
+    unsigned seq; int n, repo_ok; unsigned overlay_total_kb, overlay_free_kb, mem_total_kb; sh_lpkg_t pkg[SH_LPKGS];
+    int v3;                                               /* 1: the guest wrote store3 (the v3 fields are valid) */
+    unsigned net_ok, mirror_ok, checked_at;               /* checked_at: unix time of the last update check (0 never) */
+} sh_lstore_t;
 
 /* the platform */
 int sh_linux_open(const char *id);       /* start Linux if off, launch the app (once the catalog has it), put its window
@@ -152,8 +172,11 @@ int sh_linux_char(char c);               /* one character typed: committed text 
                                           * (Shift around capitals); '\n' Return and '\b' BackSpace are always keys */
 int sh_linux_viewport(int rows);         /* the rows the shell shows (SH_LINUX_H, or SH_LINUX_HKB with the keyboard) */
 int sh_linux_icon(int icon, uint32_t *px);     /* a pool icon into px (SH_LINUX_ICON squared); 0: none */
+int sh_linux_zero_copy(void);              /* 1.0: 1 when the GPU samples the guest's window surface in place: show it with
+                                            * tk_layer_external (the front buffer from the header) instead of the strips */
 int sh_linux_hold(int on);               /* 1: the App Store is open: Linux started if off and not stopped while idle */
-int sh_linux_pkg(int pkg, int op);       /* install / remove / cancel a store package; < 0 refused */
+int sh_linux_pkg(int pkg, int op);       /* install / remove / cancel / update / ... a store package (op: the op word,
+                                          * SH_PKG_OPWORD; pkg SH_PKG_ALL for CHECK); < 0 refused */
 /* the shell, called by the platform */
 void sh_linux_state(int state, const char *why);   /* the guest's state changed (why: the reason when FAILED) */
 int sh_linux_frame(void);                /* the active window has new rows; 1 when the window took them (draw) */
@@ -161,6 +184,25 @@ void sh_linux_catalog(const sh_lcat_t *c);         /* the catalog changed (also 
 void sh_linux_store(const sh_lstore_t *s);         /* the packages changed (progress too); the platform's copy,
                                                     * kept by the shell: valid until the next call */
 void sh_linux_textfocus(int on);         /* the active app's text field wants the keyboard (1) or not (0) */
+/* Track E hook (contract v3, "apps work fully"; starbite/guest/next/INTEGRATION-NEXT.md "v3 hooks"). The platform
+ * (gwin.c; shell_linux.inc has weak no-op stand-ins for platforms without it, e.g. the host preview): */
+enum { SH_LMOD_CTRL = 1, SH_LMOD_ALT = 2 };       /* as sbshm.h's SBSHM_MOD_* */
+int sh_linux_close(const char *id);      /* a Linux app's card swiped away: SBG_MSG_APP_CLOSE for its catalog index */
+int sh_linux_key(int code, unsigned mods);         /* a Linux key code (down, up) with SH_LMOD_* held around it */
+int sh_linux_char_mods(char c, unsigned mods);     /* a typed character as keys with SH_LMOD_* held (Ctrl+C) */
+void sh_linux_cards(int n);              /* Linux apps with a switcher card: n > 0 keeps Linux up while hidden */
+int sh_linux_notif_act(unsigned id, int action);   /* a Linux notification tapped (0) or dismissed (-1) */
+int sh_linux_clip(const char *text);     /* offer Starbite's clipboard (UTF-8 text) to Linux's apps */
+/* Track A's zero-copy window: the guest's front buffer (720 px wide, *stride_px), marked as being read (the guest
+ * won't render into it) until the next front or sh_linux_hide; NULL: no window of the app's yet */
+const uint32_t *sh_linux_front(int *stride_px);
+/* the shell, called by the platform: a Linux notification (who "linux:<id in hex>"), its withdrawal, a Linux copy */
+void sh_linux_notify(unsigned id, const char *app_id, const char *app, const char *title, const char *body, int hm);
+void sh_linux_notify_close(unsigned id);
+void sh_linux_clip_in(const char *text);
+/* the shell-wide clipboard (text only, RAM; shell_linux.inc): Starbite's text fields copy / paste through these */
+int sh_clip_set(const char *text);       /* 1 kept (and offered to Linux) */
+const char *sh_clip_get(void);           /* "" when empty */
 /* survival-next: Emergency mode's tools (shell_survival.inc), from the platform: the kernel's survival API
  * (kern/survival.h, services.c's SOS) on the phone, guide/survival_host.c on the host. Nothing starts by itself:
  * the shell calls sh_sos_set(1) and sh_usb_start() only at the end of the user's own hold, and the self test's
@@ -217,12 +259,48 @@ int sh_heading(int *deg_x10, int *accuracy);
 int sh_tilt(int *pitch_x10, int *roll_x10);
 int sh_steps(unsigned *n);
 long long sh_utc(void);                   /* the clock in seconds since 1970 (0 unknown): a GPS fix's age */
+/* Track A (sbos-core-api.md 4, 5): time zone, 12 / 24-hour, alarms. The platform applies the zone to every local
+ * time it pushes (sh_status, sh_alarm, the lock's times, notifications' hm); sh_utc stays UTC. Zones are indexed
+ * 0 .. sh_tz_count() - 1 (about 70; in regions, west to east). Kept across restarts. */
+int sh_tz_count(void);
+const char *sh_tz_name(int i, const char **city);   /* "Europe/Helsinki", city "Helsinki" */
+int sh_tz_offset_min(int i);                        /* the offset now, DST included */
+int sh_tz(void);
+void sh_tz_set(int i);                              /* the zone in use (index): the platform pushes sh_status again */
+int sh_clock24(void);
+void sh_clock24_set(int on);                        /* the shell redraws its times itself */
+/* the Clock app's alarms (up to 4): hm = hh * 100 + mm (local); days bit 0 Sunday .. bit 6 Saturday (0 once); label
+ * up to 19 bytes. put with i == sh_alarm_count() adds; 0 ok, -1 refused (full, bad values, the self test). Ringing and
+ * snooze stay the platform's; the lock's next alarm still comes through sh_alarm */
+int sh_alarm_count(void);
+int sh_alarm_get(int i, int *hm, int *days, int *on, char *label, int cap);
+int sh_alarm_put(int i, int hm, int days, int on, const char *label);
+int sh_alarm_del(int i);
 
 /* Starbite OS Next (helper D, shell_nc.inc): notifications. The platform pushes each new one (the kernel: notif.c's
  * posts, copied by kern_next.c's bridge outside the frames); the shell keeps the last 20 (RAM only) for the
  * Notification Centre, the banner and the lock's "N notifications" pill. who: the poster ("clock", "battery", "modem",
  * "heat", "survival" or an app's name); hm: local hh * 100 + mm (-1 unknown). Titles and lines go to the screen only. */
 void sh_notify(const char *who, const char *title, const char *body, int hm);
+/* Track A (sbos-core-api.md 7): the same with the kernel's NOTIF_* flags (notif_post_app). Before a banner the shell
+ * applies the prefs notif.<app>.allow (0: dropped), notif.<app>.banners (0: the Centre only) and notif.dnd (1: no
+ * banners but SH_NOTIF_URGENT's); the list is kept across restarts (the blob "nc") */
+#define SH_NOTIF_QUIET 1U                 /* the Centre only */
+#define SH_NOTIF_URGENT 2U                /* a banner also in Do Not Disturb */
+void sh_notify_flags(const char *who, const char *title, const char *body, int hm, unsigned flags);
+
+/* ---- Track A (sbos-core-api.md 1, 2): prefs and blobs, kept across restarts (the kernel: kern/prefs.c in the state
+ * slot, saved 3 s after the last change and before a restart or switch-off; the host: in RAM, or the file
+ * SBTK_PREFS). The self test's build reads nothing (defaults) and writes nothing (a logged dry run). ---- */
+int sh_pref_get(const char *key, char *val, int cap);   /* length, or -1 when not set; keys [a-z0-9._-] <= 31 */
+int sh_pref_set(const char *key, const char *val);      /* 0, or -1 (store full / bad key); val 0 = delete; <= 255 bytes */
+int sh_pref_int(const char *key, int def);              /* parsed decimal, or def */
+void sh_pref_set_int(const char *key, int v);
+int sh_blob_put(const char *name, const void *p, unsigned n);   /* 0 / -1; n <= 32 KiB; n 0 = delete; names <= 16 */
+int sh_blob_get(const char *name, void *p, unsigned cap);        /* bytes read, or -1 when there is none */
+/* the shell, called by the platform once its store is ready (the kernel: after the bake; settings_restore ran before):
+ * Notes, the Notification Centre, call recents, the switcher's recents and the Control Centre come back */
+void sh_restore(void);
 /* the boot menu's last choice (the loader's settings record: a catalog key, "" unknown): the Systems widget's first */
 void sh_lastos(const char *key);
 /* the last GNSS fix (Maps; the kernel: kern/gnssfix.c, Android's fix on the card): 1 a fix, 0 none. Called from idle
@@ -272,6 +350,23 @@ int sh_sms_send(const char *number, const char *utf8, char *why);
 int sh_sms_count(void);                 /* in RAM, newest last */
 int sh_sms_get(int i, sh_sms_t *m);     /* 0 ok */
 
+/* Track A (sbos-core-api.md 3): the passcode and Auto-Lock, from the platform (the kernel: kern/passcode.c through
+ * kern_next.c, kept in the state slot as a salted, iterated SHA-256; the host: the same passcode.c in RAM). Digits go
+ * in and never come out; nothing logs them. Back-off: the 6th wrong try in a row waits 1 min, the 7th 5, the 8th 15,
+ * the 9th and later 1 h (kept across a restart). Never behind the passcode: Emergency mode, SOS, the medical card,
+ * the torch. The shell's page: shell_passcode.inc. */
+int sh_pass_on(void);                         /* 1 when a passcode is set */
+int sh_pass_len(void);                        /* 4 or 6 (digits), 0 when none */
+int sh_pass_check(const char *digits);        /* 1 right; 0 wrong; -N locked out for N more seconds */
+int sh_pass_set(const char *old, const char *nw);   /* set (old "" when none) / change / remove (nw ""): 0 or -1 */
+int sh_pass_wait(void);                       /* seconds until the next try is allowed (0 = now) */
+int sh_pass_fails(void);                      /* wrong tries in a row */
+int sh_autolock(void);                        /* the screen-off time, s; 0 = never */
+void sh_autolock_set(int seconds);
+/* Track A lifecycle (sbos-core-api.md 6): the platform calls this right before a restart or a switch-off: every app
+ * in the shell's table with an on_save runs it (pages keep their data with sh_blob_put) */
+void sh_save_all(void);
+
 /* Track J (shell_startup.inc, Settings > Startup): Starbite OS as the boot menu, on the firmware layer
  * (docs/STARBITE-FIRMWARE-LAYER.md 10; the kernel: kern/sbfw_os.c on libsb/sbfw_api.h; the host: host/startup_fake.inc).
  * The catalog's OS rows, the loader's settings (the home store's record), one-shot requests, the crash reports and
@@ -314,3 +409,8 @@ typedef struct {
 int sh_fw_info(sh_fwinfo_t *i);           /* 1 the loader's table, 0 an older loader */
 
 #endif
+
+/* Track A, 1.0 (sbos-core-api.md 10): a safe start (the loader's one-shot from Settings > Startup or Starbite
+ * Recovery): Wi-Fi isn't restored and nothing is saved until the next start. why: why this start, in words */
+int sh_safe_mode(void);
+int sh_boot_reason(char *why, int cap);

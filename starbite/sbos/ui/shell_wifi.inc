@@ -65,7 +65,7 @@ static void wf_fit(char *out, const char *s, float size, float w)
 
 static void wf_caption(dc *d, float y, const char *t)
 {
-    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, y), t, .52f, 0, W(.55f), 0);
+    d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, y), t, .52f, 0, C_LABEL2, 0);
 }
 
 static void wf_bars(dc *d, float x, float y, int rssi)
@@ -118,26 +118,26 @@ static void wf_list(dc *d)
     d_back(d, W(1));                       /* P3p (P3j-13): iOS 26's glass back and the inline title */
     d_navtitle(d, "Wi-Fi");
     /* the switch */
-    d_rrect(d, 16, L.sw, 358, 47, 16, tk_hex(0x151c33, 1));
+    d_rrect(d, 16, L.sw, 358, 47, 16, C_CARD);
     d_text(d, TK_IT400, 16, 32, L.sw + 13 + 16, "Wi-Fi", 0, 0, INK, 0);
     int on = WF_ON();
-    d_rrect(d, 307, L.sw + 8, 51, 31, 15.5f, on ? tk_hex(0x34c759, 1) : W(.16f));
+    d_rrect(d, 307, L.sw + 8, 51, 31, 15.5f, on ? C_GREEN : W(.16f));
     d_rrect(d, on ? 329 : 309, L.sw + 10, 27, 27, 13.5f, W(1));
     d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, L.status), wf_state_text(), 0, 0,
-           WF.state == SH_WIFI_FAILED ? tk_hex(0xff453a, 1) : W(.55f), 0);
+           WF.state == SH_WIFI_FAILED ? C_RED : C_LABEL2, 0);
     if (L.conn >= 0) {
         char nm[40];
         wf_caption(d, L.conn_cap, "CONNECTED");
-        d_rrect(d, 16, L.conn, 358, 93, 16, tk_hex(0x151c33, 1));
+        d_rrect(d, 16, L.conn, 358, 93, 16, C_CARD);
         d_rrect(d, 34, L.conn + 19.5f, 9, 9, 4.5f, ACCENT());   /* the joined one (the fonts have no check mark) */
         wf_fit(nm, WF.ssid, 16, 190);
         d_text(d, TK_IT400, 16, 54, L.conn + 13 + 16, nm, 0, 0, INK, 0);
         float w = tw(TK_IT400, 15, WF.ip, 0, TK_TNUM);
-        d_text(d, TK_IT400, 15, 358 - w, L.conn + 13 + 16, WF.ip, 0, TK_TNUM, W(.55f), 0);
-        d_rrect(d, 32, L.conn + 46, 342, .5f, 0, W(.08f));
+        d_text(d, TK_IT400, 15, 358 - w, L.conn + 13 + 16, WF.ip, 0, TK_TNUM, C_LABEL2, 0);
+        d_rrect(d, 32, L.conn + 46, 342, .5f, 0, C_SEP);
         d_text(d, TK_IT400, 16, 32, L.conn + 47 + 13 + 16,
                WF.fetch_state == 1 ? "Testing the Internet\xe2\x80\xa6" : "Test the Internet", 0, 0,
-               WF.fetch_state == 1 ? W(.45f) : ACCENT(), 0);
+               WF.fetch_state == 1 ? C_LABEL2 : ACCENT(), 0);
         if (WF.fetch_state == 2) {
             char r[96];
             int n = 0;
@@ -146,7 +146,7 @@ static void wf_list(dc *d)
             for (const char *b = WF.fetch_why; *b && n < 90; b++) r[n++] = *b;
             r[n] = 0;
             d_text(d, TK_IT600, 13, 36, bl(TK_IT600, 13, L.result), r, 0, 0,
-                   WF.fetch_ok ? tk_hex(0x34c759, 1) : tk_hex(0xff453a, 1), 0);
+                   WF.fetch_ok ? C_GREEN : C_RED, 0);
             char s2[96];
             n = 0;
             char hb[40];
@@ -168,26 +168,26 @@ static void wf_list(dc *d)
                 s2[n++] = ')';
             }
             s2[n] = 0;
-            d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, L.result + 18), s2, 0, TK_TNUM, W(.5f), 0);
+            d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, L.result + 18), s2, 0, TK_TNUM, C_LABEL2, 0);
         }
     }
     if (L.net >= 0) {
         wf_caption(d, L.net_cap, "NETWORKS");
-        d_rrect(d, 16, L.net, 358, 47.0f * (L.n + 1) - 1, 16, tk_hex(0x151c33, 1));
+        d_rrect(d, 16, L.net, 358, 47.0f * (L.n + 1) - 1, 16, C_CARD);
         for (int r = 0; r < L.n; r++) {
             const sh_wifi_net_t *N = &WF.nets[L.idx[r]];
             float ry = L.net + 47 * r;
             char nm[40];
             wf_fit(nm, N->ssid, 16, 230);
             d_text(d, TK_IT400, 16, 32, ry + 13 + 16, nm, 0, 0, INK, 0);
-            if (N->band5) d_text(d, TK_IT600, 10, 32 + tw(TK_IT400, 16, nm, 0, 0) + 6, ry + 13 + 15, "5G", 0, 0, W(.4f), 0);
+            if (N->band5) d_text(d, TK_IT600, 10, 32 + tw(TK_IT400, 16, nm, 0, 0) + 6, ry + 13 + 15, "5G", 0, 0, C_LABEL2, 0);
             if (N->secure) wf_lock(d, 318, ry + 17);
             wf_bars(d, 336, ry + 18, N->rssi);
-            d_rrect(d, 32, ry + 46, 342, .5f, 0, W(.08f));
+            d_rrect(d, 32, ry + 46, 342, .5f, 0, C_SEP);
         }
         d_text(d, TK_IT400, 16, 32, L.scan + 13 + 16,
                WF.state == SH_WIFI_SCANNING ? "Looking\xe2\x80\xa6" : "Scan Again", 0, 0,
-               WF.state == SH_WIFI_SCANNING ? W(.45f) : ACCENT(), 0);
+               WF.state == SH_WIFI_SCANNING ? C_LABEL2 : ACCENT(), 0);
     }
 }
 
@@ -265,7 +265,7 @@ static void wf_pass(dc *d)
     float w = tw(TK_IT600, 17, "Enter Password", 0, 0);
     d_text(d, TK_IT600, 17, (390 - w) / 2, NAV_BASE, "Enter Password", 0, 0, INK, 0);
     w = tw(TK_IT600, 17, "Join", 0, 0);
-    d_text(d, TK_IT600, 17, CONTENT_R - w, NAV_BASE, "Join", 0, 0, ok ? ACCENT() : W(.3f), 0);
+    d_text(d, TK_IT600, 17, CONTENT_R - w, NAV_BASE, "Join", 0, 0, ok ? ACCENT() : C_LABEL3, 0);
     char nm[40], line[64];
     wf_fit(nm, WV.ssid, 15, 300);
     int n = 0;
@@ -276,8 +276,8 @@ static void wf_pass(dc *d)
     while (*a) line[n++] = *a++;
     line[n] = 0;
     w = tw(TK_IT400, 15, line, 0, 0);
-    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 92), line, 0, 0, W(.6f), 0);
-    d_rrect(d, 16, 130, 358, 47, 16, tk_hex(0x151c33, 1));
+    d_text(d, TK_IT400, 15, (390 - w) / 2, bl(TK_IT400, 15, 92), line, 0, 0, C_LABEL2, 0);
+    d_rrect(d, 16, 130, 358, 47, 16, C_CARD);
     d_text(d, TK_IT400, 16, 32, 130 + 13 + 16, "Password", 0, 0, INK, 0);
     /* the value: dots, or the text with Show; the end of a long one */
     char v[70];
@@ -299,7 +299,7 @@ static void wf_pass(dc *d)
     d_text(d, TK_IT400, 15, 358 - w, 130 + 13 + 16, sh, 0, 0, ACCENT(), 0);
     d_text(d, TK_IT400, 13, 36, bl(TK_IT400, 13, 186),
            WV.plen && !ok ? "8 to 63 characters (or the 64-digit key)" : "WPA2 \xc2\xb7 kept in memory until a restart, never stored",
-           0, 0, W(.5f), 0);
+           0, 0, C_LABEL2, 0);
     wf_kb(d);
 }
 
@@ -352,10 +352,11 @@ static void wifi_tap(float x, float y)
     wf_lay(&L);
     if (x < 120 && y >= 40 && y < 86) { AS.sub = 0; build_app_page(AP.a); return; }
     if (y >= L.sw && y < L.sw + 47 && x >= 16 && x < 374) {
-        if (sh_wifi_power(!WF_ON()) < 0) {
+        int on = !WF_ON();
+        if (sh_wifi_power(on) < 0) {
             const char *y = sh_wifi_why();      /* P3n: the kernel's reason (it said "Heat?" whatever it was) */
             toast(WF_ON() ? "Wi-Fi can't stop now" : y && y[0] ? y : "Wi-Fi can't start now");
-        }
+        } else sh_pref_set_int("cc.wifi", on);  /* Track A: the user's switch, kept (sh_restore) */
         return;
     }
     if (L.conn >= 0 && y >= L.conn + 47 && y < L.conn + 94 && x >= 16 && x < 374) {

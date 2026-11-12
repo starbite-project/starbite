@@ -1,0 +1,31 @@
+id = "inkscape"
+name = "Inkscape"
+summary = "Vector graphics editor (SVG)"
+description = """Inkscape draws and edits vector graphics: shapes, paths, text, gradients and clones, saved as standard SVG and exported to PNG or PDF."""
+category = "Graphics"
+licence = "GPL-3.0-or-later"
+homepage = "https://inkscape.org"
+icon = "org.inkscape.Inkscape"
+ram_mb = 400
+featured = false
+default = "distro"
+touch = "poor"
+keywords = ["vector", "svg", "drawing", "illustration"]
+
+[launcher]
+exec = "inkscape"
+terminal = false
+keyboard = false
+
+[distro]
+apt = ["inkscape"]
+
+[runtime]
+needs = ["files"]
+note = "Upstream's AppImage is x86_64 only, so Debian's package is used. Built for mouse and keyboard; slow to start without a GPU."
+
+[source]
+# Debian's own source of the package, compiled on the M3s (matches trixie's libraries)
+system = "debian"
+build_min = 70
+build_mb = 3500

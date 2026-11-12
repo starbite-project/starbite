@@ -70,7 +70,7 @@ static int sv_key(const char *k)
            !tk_strcmp(k, "sun") || !tk_strcmp(k, "guide") || !tk_strcmp(k, "compass");
 }
 static int sv_own(const char *k) { return sv_key(k); }
-static uint32_t sv_ground(int a) { return sv_key(APPS[a].k) ? SV_GROUND : 0x0a0f1fU; }
+static uint32_t sv_ground(int a) { return sv_key(APPS[a].k) ? SV_GROUND : sbc_rgb(SBC_GROUND); }
 static int sv_app(const char *k)
 {
     for (int a = 0; a < NAPPS; a++) if (!tk_strcmp(APPS[a].k, k)) return a;
@@ -555,7 +555,7 @@ static void sv_page_card_edit(dc *d)
         sh_card(c);
         sv_back(d, "Medical Card");
         d_text(d, TK_IT400, 13, ROW_TX, CE_TOP - 10, "SHOWN IN EMERGENCY WITHOUT UNLOCKING", .52f, 0, W(.55f), 0);
-        d_rrect(d, GROUP_X, CE_TOP, GROUP_W, 47.0f * SH_CARD_NF - 1, 16, tk_hex(0x151c33, 1));
+        d_rrect(d, GROUP_X, CE_TOP, GROUP_W, 47.0f * SH_CARD_NF - 1, 16, C_CARD);
         for (int i = 0; i < SH_CARD_NF; i++) {
             float y = CE_TOP + 47.0f * i;
             d_text(d, TK_IT400, 16, ROW_TX, y + 13 + 16, sh_card_label(i), 0, 0, INK, 0);
@@ -571,7 +571,7 @@ static void sv_page_card_edit(dc *d)
         return;
     }
     sv_editbar(d, sh_card_label(SV.cf), ACCENT());
-    d_rrect(d, GROUP_X, CE_FLD, GROUP_W, 52, 14, tk_hex(0x151c33, 1));
+    d_rrect(d, GROUP_X, CE_FLD, GROUP_W, 52, 14, C_CARD);
     d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, CE_FLD + 64), "Up to 64 characters. Return or Done saves it.", 0, 0, W(.45f), 0);
     sv_kb(d, SV.shift, SV.num, 1);
 }
