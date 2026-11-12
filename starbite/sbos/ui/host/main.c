@@ -7,7 +7,7 @@
  *                                               resolution + the 2x present, the first frame at rest full); frames
  *                                               as raw BGRA (720 x 1480 with half), one "F" line per frame on stdout
  *   sbtk-host PAK bench                         uibench's kernels on this host (the A55 calibration)
- * A script: "wait MS", "tap X Y", "drag X0 Y0 X1 Y1 MS", "hold X Y MS" (pt, ms), separated by ';'; also "power", "powerhold",
+ * A script: "wait MS", "tap X Y [MS]", "drag X0 Y0 X1 Y1 MS", "hold X Y MS" (pt, ms), separated by ';'; also "power", "powerhold",
  * "notify WHO|TITLE|BODY", "dragh X0 Y0 X1 Y1 MS HOLD", "state WHAT=KEY:V" (a still's state, now), "ring MS" (the
  * pretend network's incoming call MS ms later) and "sms TEXT" (a message received now from a made-up number). */
 #include "../sbtk.h"
@@ -583,6 +583,19 @@ static void apply_state(const char *st)
         for (int i = 0; i < 600 && (i < 30 || sh_moving()); i++) sh_tick(1 / 60.0f, tt += 1000 / 60.0f);
         return;
     }
+    if (!strcmp(what, "wifistate")) {            /* cp6: wifistate=:N (SH_WIFI_*: 1 starting, 3 scanning, 4 joining) */
+        HW.state = (int)v;
+        hw_push();
+        return;
+    }
+    if (!strcmp(what, "down")) {                 /* cp6: down=X,Y (pt): a finger put down and held there (the press's still) */
+        static float td = 500000;
+        float x = 0, y = 0;
+        if (sscanf(eq + 1, "%f,%f", &x, &y) != 2) return;
+        sh_touch(0, x, y, td);
+        for (int i = 0; i < 6; i++) sh_tick(1 / 60.0f, td += 1000 / 60.0f);
+        return;
+    }
     if (!strcmp(what, "comms")) { comms_fake_state(key, v); return; }          /* helper I: comms=incoming, ... */
     if (!strcmp(what, "pass")) { (void)sh_pass_set("", key); return; }         /* Track A: pass=246810 */
     if (!strcmp(what, "hupd")) {                 /* Track A update: hupd=none|found|bad|old|installed (the host's card) */
@@ -618,7 +631,12 @@ static int parse(const char *s, step *st, int max)
         char w[16];
         if (sscanf(tok, " %15s", w) != 1) continue;
         if (!strcmp(w, "wait")) { p->kind = 0; sscanf(tok, " %*s %f", &p->ms); }
-        else if (!strcmp(w, "tap")) { p->kind = 1; sscanf(tok, " %*s %f %f", &p->x0, &p->y0); p->ms = 80; }
+        else if (!strcmp(w, "tap")) {        /* cp6: "tap X Y [MS]": MS the finger's time down (80); under the touch events' step
+                                              * (8.3 ms: "tap X Y 1") the down and the up come in the same event, before one frame */
+            float m = 0;
+            p->kind = 1;
+            p->ms = sscanf(tok, " %*s %f %f %f", &p->x0, &p->y0, &m) == 3 && m >= 1 ? m : 80;
+        }
         else if (!strcmp(w, "drag")) { p->kind = 2; sscanf(tok, " %*s %f %f %f %f %f", &p->x0, &p->y0, &p->x1, &p->y1, &p->ms); }
         else if (!strcmp(w, "hold")) { p->kind = 3; sscanf(tok, " %*s %f %f %f", &p->x0, &p->y0, &p->ms); }
         else if (!strcmp(w, "state") || !strcmp(w, "sms")) {   /* helper I: a state now; an SMS received now */
@@ -679,6 +697,10 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         for (int sub = 1; sub <= 2; sub++) {
             float te = t + dt * sub / 2;
             while (si < n && te >= s0 + st[si].ms) {
+                if (phase == -1 && st[si].kind == 1) {   /* cp6: a tap shorter than the touch events' step: down and up now */
+                    sh_touch(0, st[si].x0, st[si].y0, te);
+                    sh_touch(2, st[si].x0, st[si].y0, te);
+                }
                 if (phase >= 0 && st[si].kind && st[si].kind != 4 && st[si].kind != 5 && st[si].kind != 6 && st[si].kind < 8) {
                     step *p = &st[si];
                     float x = p->kind == 2 || p->kind == 7 ? p->x1 : p->x0, y = p->kind == 2 || p->kind == 7 ? p->y1 : p->y0;
@@ -716,6 +738,11 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
                     if (screen_off || sh_sleeping()) { screen_off = 0; sh_wake(); } else sh_sleep(0);
                     phase = 0;
                 }
+                continue;
+            }
+            if (phase < 0 && p->kind == 1 && p->ms < dt / 2) {   /* cp6: the quick tap's down and up in this one event */
+                if (phase == -1) { sh_touch(0, p->x0, p->y0, te); sh_touch(2, p->x0, p->y0, te); }
+                phase = -2;
                 continue;
             }
             if (phase < 0) { sh_touch(0, p->x0, p->y0, te); phase = 0; continue; }

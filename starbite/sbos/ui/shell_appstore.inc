@@ -1185,10 +1185,21 @@ static void aq_go(int dir)
     aq_tabs();
     relink();
 }
+static char aq_want[40];                        /* (defined with sh_linux_store below: st_route_app's page) */
 static void st_build(void)
 {
     if (!is_app("store")) return;
     AQ.empty = !LST || LST->n <= 0;
+    if (aq_want[0] && !AQ.empty && st_find(aq_want) >= 0) {   /* Track B, cp6: opened for this page (st_route_app) */
+        const sh_lpkg_t *p = &LST->pkg[st_find(aq_want)];
+        AQ.app = 1;
+        lx_scopy(AQ.pkg, p->pkg, 40);
+        AQ.pick = aq_inst(p) && p->method ? (int)p->method : p->def_method && (p->methods >> p->def_method & 1) ? (int)p->def_method : 0;
+        if (!AQ.pick && p->methods) for (unsigned m = 1; m <= 3 && !AQ.pick; m++) if (p->methods >> m & 1) AQ.pick = (int)m;
+        AQ.scroll = 0;
+        AQ.kb = 0;
+        aq_want[0] = 0;
+    }
     if (AQ.app && st_find(AQ.pkg) < 0) AQ.app = 0;
     AQ.badge = AQ.empty ? 0 : aq_badge();
     aq_tb_bake();
@@ -1237,7 +1248,7 @@ void sh_linux_store(const sh_lstore_t *s)
 /* cp6 (Track B, Track A's list of dead ends): the home's Browser and Weather keys. "browser": the installed Linux
  * browser opens; none: the App Store on Firefox's page (GET). "weather": the catalog has no weather app yet: 0, the
  * shell's own page stays. 1 = handled. Never blocks: opening the store only asks for Linux (gwin starts it). */
-__attribute__((unused)) static int st_route_app(const char *key)   /* (used once shell_lock.c's app_open has the hook) */
+static int st_route_app(const char *key)   /* 1 handled (a Linux browser opened); 2 open the App Store instead (shell_lock.c app_open) */
 {
     static const char *const BROWSERS[] = { "firefox", "firefox-esr", "chromium", "epiphany-browser" };
     if (tk_strcmp(key, "browser")) return 0;
@@ -1245,11 +1256,10 @@ __attribute__((unused)) static int st_route_app(const char *key)   /* (used once
         int i = st_find(BROWSERS[k]);
         if (i >= 0 && aq_inst(&LST->pkg[i]) && st_app(i) >= 0) { lx_open_app(st_app(i)); return 1; }
     }
-    sh_set("app", "store", 1);
-    if (!is_app("store")) return 0;
-    if (st_find("firefox") >= 0) { aq_push(st_find("firefox")); aq_want[0] = 0; }
-    else lx_scopy(aq_want, "firefox", sizeof aq_want);
-    return 1;
+    /* Track B, cp6: the caller opens the App Store as any app opens (its zoom, its page over frames); the page is
+     * Firefox's from the open's build (st_build), or once the store's table arrives (sh_linux_store) */
+    lx_scopy(aq_want, "firefox", sizeof aq_want);
+    return 2;
 }
 /* an app's page pushed (the method preselected: the installed one, else the store's default) */
 static void aq_push(int i)

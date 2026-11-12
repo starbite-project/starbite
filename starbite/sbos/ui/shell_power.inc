@@ -181,8 +181,7 @@ static void pw_close(void)
     if (!PW.on) return;
     PW.on = 0;
     PW.at = 0;
-    PW.slide = 0;
-    pwhl.hidden = 1;
+    PW.slide = 0;                                  /* (cp6: the press light fades with the sheet) */
 }
 static void pw_reset(void)                        /* sleep, a film's start: gone at once */
 {
@@ -205,12 +204,12 @@ static int pw_hit_btn(float x, float y)
 }
 static void pw_press(int i)
 {
-    relayer(&pwhl);
-    if (i < 0) { pwhl.hidden = 1; return; }
+    /* cp6: the shell's press light (a solid circle, no bitmap): lit at once, faded after (both circles are one layer:
+     * no scale of their own) */
+    if (i < 0) { hl_release(&pwhl); return; }
     float cx = pw_btn_cx(i);
-    dc d = mk(&pwhl, "pw-press", cx - PW_BTN_D / 2, PW_BTN_Y, PW_BTN_D, PW_BTN_D, 1, 0);
-    d_rrect(&d, cx - PW_BTN_D / 2, PW_BTN_Y, PW_BTN_D, PW_BTN_D, PW_BTN_D / 2, W(.22f));
-    pwhl.hidden = 0;
+    tk_rect c = { cx - PW_BTN_D / 2, PW_BTN_Y, PW_BTN_D, PW_BTN_D };
+    hl_set(&pwhl, c, c, PW_BTN_D / 2, W(.22f));
 }
 static void pw_start(int what)                     /* the slide's end, or Restart: the black first */
 {

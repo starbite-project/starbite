@@ -236,15 +236,45 @@ static void trim(tk_layer *l) { trim_layer(l, 0, 0); }
 static tk_layer root, home, lockflat, lockg, mark, glyph_c, glyph_o, list, etool, hint, homebar;
 static tk_layer boot, bootc, bootbar;
 typedef struct {
-    tk_layer face, facelit, icon, iconlit, ring, grp;
+    tk_layer face, facelit, icon, iconlit, ring, grp, hl;   /* cp6: hl its press light (the glass's glow) */
     tk_bmp ringbuf;
     float *ang, *cov;           /* the ring's per-pixel angle and radial coverage */
     float scale_from, scale_to, scale_t;
     tk_spring ss;               /* B4: the scale on the press spring (response .30, damping .6), velocity kept on a retarget */
     int down, fired, lit;
-    float t0, prog, ms;
+    float t0, prog, ms, rel_at;   /* cp6: rel_at: a quick tap's grow shown first, then back (ms; 0 none) */
 } hold_t;
 static hold_t Q[2];
+static tk_layer icobg, icofg, lockhl, apphl;   /* P3p: press feedback (the icon's, the lock list's, an app's) */
+static const void *lk_hl_key;     /* cp6: what the lock's press light (lockhl) is on: a card's face or a member's platter (0: an Emergency card) */
+/* cp6: the press engine (its block, near sh_touch, says how to use it) */
+static void hl_set(tk_layer *l, tk_rect r, tk_rect clip, float rad, tk_col c);
+static void hl_release(tk_layer *l);
+static void hl_kill(void);
+static void hl_geom(tk_layer *l, tk_rect r, tk_rect clip, float rad);
+static void hl_scale(tk_layer *l, float S, float cx, float cy);
+static int hl_lit(const tk_layer *l);
+static tk_col press_dim(tk_col ground);
+static float press_grow(float h);
+static void press_scale(tk_layer *l, float s, float cx, float cy);
+static void press_key(const void *k, float s, void (*place)(void));
+static float press_s(const void *k);
+static void press_unscale(const void *k);
+static void press_scale_kill(const void *k);
+static void lay_scale(tk_layer *l, float S, float cx, float cy);
+static int press_due(float t0);
+#define HL_MAX 8
+#define PRS_MAX 6
+#define PRESS_MIN_MS 100.0f
+#define PRESS_FADE .25f
+#define PRESS_DIM_FADE .2f
+#define PRESS_IN .1f
+#define PRESS_OUT .2f
+#define PRESS_ROW TK_RGBA(255, 255, 255, .132f)        /* over #1C1C1E: #3A3A3C */
+#define PRESS_ROW_BLACK TK_RGBA(255, 255, 255, .14f)
+#define PRESS_BTN TK_RGBA(255, 255, 255, .2f)
+#define PRESS_KEY TK_RGBA(255, 255, 255, .35f)
+enum { PK_LIGHT, PK_DIM };
 /* B9: the lock's one platter glass (iOS 26's notification platter: x 14.5, w 361, r 23) and the stack's lower cards
  * under it, baked once into K[0] (K[1..] stay empty): the vendor cards (B10), their members' platters, the lock's
  * notifications and the Notification Centre's platters (views, shell_nc.inc) all draw it as a 3-slice at any height */
@@ -763,6 +793,7 @@ static void platter_at(tk_layer *f, float y, float h)
 {
     card_t *k = &K[0];
     f->x = k->face.bx;                            /* (a view's own bx / by are not the face's) */
+    f->sx = f->sy = 1;                            /* cp6: a press's scale is composed after (lay_scale) */
     f->y = tk_floorf(PT(y - (LIST_TOP + k->y)) + k->face.by + .5f);
     f->slice_h = PT(tk_maxf(48, h) + 2 * FACE_MG) - k->fcut;
 }
@@ -1017,6 +1048,8 @@ static void place_list(void)
         int has = on && k->head.bmp.px;
         if (has && vc_glass(&k->face, top, 68)) k->face.alpha = 1;
         else k->face.hidden = 1;
+        float hs = press_s(&k->face);              /* cp6: the card pressed (.98 about its centre) */
+        k->head.sx = k->head.sy = k->chev.sx = k->chev.sy = k->gh.sx = k->gh.sy = 1;
         /* the stack's lower cards (K[0].gh, baked under a 68 pt card at LIST_TOP + K[0].y): B4: the baked peeks hand
          * over to the members' own platters as they come out */
         tk_layer *gh = &k->gh;
@@ -1052,6 +1085,11 @@ static void place_list(void)
             r->ox = PT(195); r->oy = PT(pt);
             r->alpha = tk_clampf((qi - .35f) / .65f, 0, 1);
             r->hidden = 0;
+            float ms = press_s(v);                 /* cp6: the member's platter pressed */
+            if (ms != 1) {
+                lay_scale(v, ms, PT(195), PT(pt + 34)); lay_scale(r, ms, PT(195), PT(pt + 34));
+                if (lk_hl_key == v) hl_scale(&lockhl, ms, PT(195), PT(pt + 34));
+            }
         }
         if (k->sl.bmp.px) {
             k->sl.y = k->sl.by + dy;
@@ -1064,6 +1102,12 @@ static void place_list(void)
         k->chev.clip_r = (tk_rect){ PT(VC_X), PT(top), PT(VC_W), PT(68) };
         k->chev.hidden = !has;
         k->members.hidden = !has;
+        if (hs != 1) {
+            float cx = PT(195), cy = PT(top + 34);
+            lay_scale(&k->face, hs, cx, cy); lay_scale(&k->head, hs, cx, cy); lay_scale(&k->chev, hs, cx, cy);
+            lay_scale(&k->gh, hs, cx, cy);
+            if (lk_hl_key == &k->face) hl_scale(&lockhl, hs, cx, cy);
+        }
         y += card_h(g);
     }
     float edy = PT(y - 448);
@@ -1217,7 +1261,7 @@ static void d_appicon(dc *d, const char *k, float x, float y)
     tk_blit(d->b, ic, X, Y, 1);
     if (ic == &calic && d->b == &hparts[2].bmp) { calic_x = X; calic_y = Y; }
 }
-static tk_layer icobg, icofg, lockhl, apphl;   /* P3p: press feedback (below) */
+/* icobg, icofg, lockhl, apphl: P3p's press feedback layers (declared with Q, cp6) */
 static void ico_free(void);
 static void hl_off(void);
 static tk_bmp dockbg[4];             /* P3p: the dock's glass under each icon (its press) */
@@ -1830,10 +1874,17 @@ static tk_spring cc_ps[CC_NM];
 static float cc_pscale[CC_NM] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
 static int cc_pressed = -1;
 static int cc_edge[2], cc_step[2];
+/* cp6: the press's glow (LIQUID-GLASS 5.1: +8 % white over the shape) on module cc_hlm's rect cc_hlr (pt: x y w h r),
+ * following the module's scale (cc_mods); ccxhl: the expanded panel's link under the finger. cc_t0 / cc_rel_at: a quick
+ * tap's grow shows for PRESS_MIN_MS before it springs back */
+static tk_layer cchl, ccxhl;
+static int cc_hlm = -1;
+static float cc_hlr[5], cc_t0, cc_rel_at;
 static void cc_link(void)
 {
     if (!ccx.name) { tk_layer_init(&ccx, "cc-expanded"); ccx.hidden = 1; }
-    tk_layer *g[CC_NM];
+    if (!cchl.name) { tk_layer_init(&cchl, "cc-press"); cchl.hidden = 1; tk_layer_init(&ccxhl, "cc-x-press"); ccxhl.hidden = 1; }
+    tk_layer *g[CC_NM + 1];
     for (int i = 0; i < CC_NM; i++) {
         tk_layer *m = &ccmod[i];
         if (!m->name) tk_layer_init(m, "cc-mod");
@@ -1853,7 +1904,8 @@ static void cc_link(void)
         v->clip = 1;
         v->clip_r = (tk_rect){ PT(c[0]), PT(c[1]), PT(c[2] - c[0]), PT(c[3] - c[1]) };
     }
-    link(&ccg, g, CC_NM);
+    g[CC_NM] = &cchl;
+    link(&ccg, g, CC_NM + 1);
     tk_layer *ch[] = { &cctop, &ccpg };
     link(&ccmod[11], ch, 2);
     for (int i = 0; i < CC_NV; i++) {
@@ -1868,8 +1920,8 @@ static void cc_link(void)
     cclit.hidden = !Q[0].lit || !cclit.bmp.px;
     tk_layer *xb[] = { &ccxlvl };
     link(&ccxbg, xb, 1);
-    tk_layer *x[] = { &ccxdim, &ccxbg, &ccxc };
-    link(&ccx, x, 3);
+    tk_layer *x[] = { &ccxdim, &ccxbg, &ccxc, &ccxhl };
+    link(&ccx, x, 4);
     tk_layer *k[] = { &ccblur1, &ccscrim, &ccsb, &ccg, &ccx };
     link(&ccl, k, 5);
 }
@@ -2095,6 +2147,18 @@ static void cc_mods(float p)
         m->y = PT((1 - q) * -30) / s;
         m->alpha = a;
         m->hidden = a <= .004f;
+        if (i == cc_hlm && hl_lit(&cchl)) {
+            /* cp6: the glow on the module as it is drawn: p = s (q + (0, y) - o) + o */
+            float X = s * (PT(cc_hlr[0]) - m->ox) + m->ox, Y = s * (PT(cc_hlr[1]) + m->y - m->oy) + m->oy;
+            cchl.x = X; cchl.y = Y;
+            cchl.solid_w = s * PT(cc_hlr[2]); cchl.solid_h = s * PT(cc_hlr[3]);
+            cchl.clip = 1;
+            cchl.clip_r = (tk_rect){ X, Y, cchl.solid_w, cchl.solid_h };
+            cchl.clip_radius = s * PT(cc_hlr[4]);
+            cchl.sx = cchl.sy = 1;
+            cchl.hidden = a < .99f;
+            cchl.gen++;
+        }
     }
 }
 /* the expanded panel's place: a rect between the module's and the panel's, its fill, its words */
@@ -2259,13 +2323,18 @@ static int cc_lk = -1;             /* the lock state and the lock's version the 
 static int cc_lv;
 static int cc_moving(void)
 {
-    if (CX.sp.live || (CX.m == 0 && CX.todo < 6)) return 1;
+    if (CX.sp.live || (CX.m == 0 && CX.todo < 6) || cc_rel_at > 0) return 1;
     for (int i = 0; i < CC_NM; i++) if (cc_ps[i].live) return 1;
     return 0;
 }
+static void cc_press(int i, int down);
 static int cc_x_tick(float dt)
 {
     int mv = 0;
+    if (cc_rel_at > 0) {                         /* cp6: a quick tap's grow, shown: back now */
+        if (press_due(cc_rel_at - PRESS_MIN_MS)) { cc_rel_at = 0; if (cc_pressed >= 0) cc_press(cc_pressed, 0); }
+        mv = 1;
+    }
     for (int i = 0; i < CC_NM; i++)
         if (cc_ps[i].live) { tk_spring_step(&cc_ps[i], dt); cc_pscale[i] = cc_ps[i].x; mv = 1; }
     if (CX.sp.live) {
@@ -2330,8 +2399,31 @@ static void cc_press(int i, int down)
     if (down && (i == 1 || i == 2)) { float v = CCS.lvl[i - 1]; cc_edge[i - 1] = v <= 0 ? 1 : v >= 1 ? 2 : 0; cc_step[i - 1] = (int)(v * 16); }
     tk_spring_start(&cc_ps[i], cc_pscale[i], to, cc_ps[i].live ? cc_ps[i].v : 0, TK_SPR_PRESS);
     cc_pressed = down ? i : -1;
+    if (down) {
+        /* cp6: the glow over the module (the sliders' too, while dragged); a quick tap shows its grow first */
+        cc_t0 = now_ms; cc_rel_at = 0;
+        cc_hlm = i;
+        for (int k = 0; k < 5; k++) cc_hlr[k] = r[k];
+        hl_set(&cchl, (tk_rect){ r[0], r[1], r[2], r[3] }, (tk_rect){ r[0], r[1], r[2], r[3] }, r[4], W(.08f));
+        cc_mods(CCS.p);
+    }
 }
-static void cc_release(void) { if (cc_pressed >= 0) cc_press(cc_pressed, 0); }
+static void cc_release(void)
+{
+    if (cc_pressed < 0) return;
+    hl_release(&cchl);
+    if (!press_due(cc_t0)) { if (cc_rel_at <= 0) cc_rel_at = cc_t0 + PRESS_MIN_MS; return; }
+    cc_rel_at = 0;
+    cc_press(cc_pressed, 0);
+}
+/* cp6: a lit circle on the chrome's + or Power (they are one layer with the page icons: no grow, the glow only) */
+static void cc_chrome_press(float cx)
+{
+    cc_hlm = 11;
+    cc_hlr[0] = cx - 14; cc_hlr[1] = 16; cc_hlr[2] = cc_hlr[3] = 28; cc_hlr[4] = 14;
+    hl_set(&cchl, (tk_rect){ cx - 14, 16, 28, 28 }, (tk_rect){ cx - 14, 16, 28, 28 }, 14, PRESS_BTN);
+    cc_mods(CCS.p);
+}
 /* a tap on the open Control Centre: a tile, a circle, or outside (close); 1 if it was on the grid */
 static void toast(const char *msg);
 static void cc_wifi_tap(void)
@@ -2350,6 +2442,7 @@ static int cc_tap(float x, float y)
 {
     float X = CC_COL(0), Y = CC_ROW(0);
     if (x >= 316 && x < 362 && y >= 8 && y < 52) { sh_power_held(); return 1; }   /* P3x: the Power circle: the power sheet */
+    if (x >= 28 && x < 75 && y >= 8 && y < 52) { toast("Editing the controls isn't in this version yet"); return 1; }   /* cp6: the + */
     if (x >= X && x < X + CC_W2 && y >= Y && y < Y + CC_W2) {
         int i = (x >= X + CC_W2 / 2) + 2 * (y >= Y + CC_W2 / 2);
         if (i == 1) return 1;                /* the modem: a hold (G_CCCELL) */
@@ -2719,7 +2812,6 @@ static int se_autocap(void);
 static int se_timer_vib(void);
 static int se_back_from_card(void);
 static void press_cancel(void);
-static void hl_set(tk_layer *l, tk_rect r, tk_rect clip, float rad, tk_col c);
 static float rubber(float over, float dim);
 void settings_back(void);                        /* a pushed Settings page's back: the Settings root */
 /* Settings > Startup (Track J's shell_startup.inc: SHELL_STARTUP, page_startup / startup_tap, startup_tick with
@@ -3627,8 +3719,14 @@ static arect ap_from;
 static unsigned char ap_warm[NAPPS];       /* Track A lifecycle: opened before and not thrown away: its state kept */
 static int sw_keeps(int a);
 static int sw_find(int a);
+static int st_route_app(const char *key);    /* Track F (shell_appstore.inc): the Browser key's routing */
 static void app_open(int a)
 {
+    {   /* cp6: the dock's Browser opens the installed Linux browser (1), else the App Store on Firefox's page (2) */
+        int r = st_route_app(APPS[a].k);
+        if (r == 1) return;
+        if (r == 2) for (int s = 0; s < NAPPS; s++) if (!tk_strcmp(APPS[s].k, "store")) { a = s; break; }
+    }
     int cold = !ap_warm[a] || (sw_keeps(a) && sw_find(a) < 0);   /* Track A lifecycle: first, or out of the recents */
     ap_warm[a] = 1;
     sw_opened(a);                              /* helper D: first in the recents */
@@ -4483,8 +4581,8 @@ static void relink(void)
     ls[n++] = &lockhl;
     link(&list, ls, n);
     for (int i = 0; i < 2; i++) {
-        tk_layer *q[] = { &Q[i].face, &Q[i].facelit, &Q[i].icon, &Q[i].iconlit, &Q[i].ring };
-        link(&Q[i].grp, q, 5);
+        tk_layer *q[] = { &Q[i].face, &Q[i].facelit, &Q[i].hl, &Q[i].icon, &Q[i].iconlit, &Q[i].ring };
+        link(&Q[i].grp, q, 6);
     }
     tk_layer *pg[] = { &hparts[1], &hparts[2], &hparts[4], &hparts[5], &hparts[6], &hparts[7] };   /* [5] the Linux page (3); [6] page 2's third row;
                                                                                                 * [7] page 1's Clock widget (helper D) */
@@ -4545,7 +4643,7 @@ void sh_init_begin(tk_comp *c)
     focus.hidden = 1;
     tk_layer_init(&boot, "boot");
     boot.hidden = 1;
-    for (int i = 0; i < 2; i++) tk_layer_init(&Q[i].grp, i ? "q-em" : "q-light");
+    for (int i = 0; i < 2; i++) { tk_layer_init(&Q[i].grp, i ? "q-em" : "q-light"); tk_layer_init(&Q[i].hl, "q-press"); Q[i].hl.hidden = 1; }
     for (int i = 0; i < NEC; i++) { tk_layer_init(&ecard[i], "ecard"); ecard[i].hidden = 1; }
     tk_layer_init(&hparts[6], "home-apps2e");
     hparts[6].hidden = 1;
@@ -4638,7 +4736,7 @@ static void back_to_lock(int exit_em)
     free_focus();
     booting = 0; boot.hidden = 1;
     if (boot.solid) { relayer(&bootc); relayer(&bootbar); boot.solid = 0; boot.child = 0; }   /* P3s: made again for the next */
-    ico_free(); hl_off();                          /* P3p */
+    ico_free(); hl_kill();                         /* P3p; cp6: every press out at once */
     vc_close_all(1);
     lkn_collapse(1);
     scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
@@ -4813,17 +4911,226 @@ static struct {
 static float rubber(float over, float dim) { return (1 - 1 / (over * .55f / dim + 1)) * dim; }
 static int list_over;                       /* B4: the lock list's drag is past an end (its haptic once) */
 
-/* ---- P3p (P3j-7): press feedback. Nothing is baked in a tap: an icon's press is two small layers (the ground
- * under it: the wallpaper or the dock's kept glass, and the icon dimmed (.2 black) and shrinking to .96 in .1 s and back in .2 s; B8, GAP #21: iOS dims slightly, hardly shrinks);
- * a row, card or key is a solid rounded rect with no bitmap (W .10 / lighter on keys), clipped to its group. Both
- * go on a move and at lift-off. --------------------------------------------------------------------------------- */
+/* ---- cp6: the press engine. Everything tappable answers the finger as iOS 26 does, and a quick tap (down and up
+ * between two frames) shows too. Nothing is baked or drawn in a tap: a light is a solid layer, a scale is a layer's
+ * transform (a few us a touch).
+ *
+ * Lights (a solid rounded rect over what is pressed):
+ *   hl_set(l, r, clip, rad, c)  light l over r (pt), clipped to clip rounded by rad, colour c, now (l's parent space is
+ *                               where r is: apphl the screen's, lockhl the list's content);
+ *   hl_release(l)               let it go: it stays lit at least PRESS_MIN_MS (100 ms) from its start and one composed
+ *                               frame, then fades out over PRESS_FADE (.25 s; a dim's over PRESS_DIM_FADE, .2 s);
+ *   hl_off()                    every light and scale let go (the shell's moves and lift-offs; modules may call it);
+ *   hl_kill()                   every light and scale out now (what is under them changed: a sheet, the lock);
+ *   hl_geom(l, r, clip, rad)    a light's place again (it follows a layer that moves: the Control Centre's modules).
+ *   A module's own light layer (kithl, cchl, ...) goes through the same calls: up to HL_MAX lights at once. apphl goes out
+ *   at once when the open app's page changes under it (a push, a tab, another app: hl_pagekey()). A light hidden from
+ *   outside (shell_push.inc hides apphl as a slide starts) stays hidden: a fade only sets alpha, never shows it again.
+ * Colours (c):
+ *   PRESS_ROW        a row on a grouped card (#1C1C1E): it shows as iOS's #3A3A3C (systemGray4) under the words;
+ *   PRESS_ROW_BLACK  a row on the black ground: W .14;
+ *   PRESS_BTN        a glass circle / capsule drawn into a page (not its own layer): W .20;
+ *   PRESS_KEY        a keyboard / keypad key: W .35;
+ *   press_dim(ground) a plain button (accent words, toolbar glyphs: "Edit", "Done", "+"): r is covered by its ground at
+ *                    .62, so the word reads at ~.35 as iOS's; it also marks the press a dim (back in .2 s).
+ *   The *_press(x, y, &r, &g, &rad, &c) protocol (app_press) is unchanged: return c as one of these (any colour still
+ *   works: it is a light). A module may also call press_scale() on its own layer from its *_press.
+ * Scales:
+ *   press_scale(l, s, cx, cy)   l goes to scale s about (cx, cy) pt (its parent's space) in .1 s: s < 1 shrinks (cards
+ *                               .98, the switcher's .97), s > 1 grows (Liquid Glass buttons, LIQUID-GLASS 5.1:
+ *                               press_grow(h) = 1 + min(6 / h, .15)); l must be at scale 1 at rest (nothing else sets its
+ *                               sx / sy / ox / oy);
+ *   press_key(key, s, place)    the same for layers a place function positions (the lock's cards, the Centre's
+ *                               platters): nothing is moved here; place() is called each frame the scale changes and
+ *                               reads press_s(key) (1: none), composing it with lay_scale(l, s, cx, cy) (px);
+ *   press_unscale(key)          back to 1 after the same minimum: .2 s with a small overshoot (a spring's settle);
+ *                               hl_off() does it for every scale, hl_kill() at once.
+ * Haptics are not here: only where iOS has them (switches, pickers, long presses), in the modules. ------------------ */
+static int press_kind;                       /* set by press_dim() (in a *_press); hl_set takes it, then resets it */
+static unsigned press_frames;                /* sh_tick's count: a light was composed at least once */
+/* a press started at t0 has shown long enough (a clock that went back, the host's next film, counts as long enough) */
+static int press_due(float t0) { return now_ms - t0 >= PRESS_MIN_MS || now_ms < t0; }
+__attribute__((unused)) static tk_col press_dim(tk_col ground) { press_kind = PK_DIM; ground.a = .62f; return ground; }
+__attribute__((unused)) static float press_grow(float h) { return 1 + tk_minf(6 / h, .15f); }
+typedef struct { tk_layer *l; int st, kind, pg; float t0, a; unsigned f0; tk_rect clip; float rad; } hl_ent;   /* st 1 held, 2 let go, 3 fading */
+static hl_ent HLS[HL_MAX];
+typedef struct { const void *k; tk_layer *l; void (*place)(void); int st; float s, from, to, t, t0; unsigned f0; } prs_ent;
+static prs_ent PRS[PRS_MAX];
+/* the open app's page (a light over it goes when it changes) */
+static int hl_pagekey(void)
+{
+    if (!AP.on) return -1;
+    return AP.a + 64 * (AS.sub + 64 * (AS.tab + 8 * (NS.view + 4 * (WV.view + 4 * (SE.page + 64 * (AS.thread + 1))))));
+}
+static void hl_geom(tk_layer *l, tk_rect r, tk_rect clip, float rad)
+{
+    l->x = PT(r.x); l->y = PT(r.y);
+    l->solid_w = PT(r.w); l->solid_h = PT(r.h);
+    l->clip = 1;
+    l->clip_r = (tk_rect){ PT(clip.x), PT(clip.y), PT(clip.w), PT(clip.h) };
+    l->clip_radius = PT(rad);
+    l->sx = l->sy = 1;
+    for (int i = 0; i < HL_MAX; i++) if (HLS[i].l == l) { HLS[i].clip = l->clip_r; HLS[i].rad = l->clip_radius; }
+    l->gen++;
+}
+static void hl_set(tk_layer *l, tk_rect r, tk_rect clip, float rad, tk_col c)
+{
+    hl_ent *e = 0;
+    for (int i = 0; i < HL_MAX && !e; i++) if (HLS[i].l == l) e = &HLS[i];
+    for (int i = 0; i < HL_MAX && !e; i++) if (!HLS[i].st) e = &HLS[i];
+    if (!e) e = &HLS[0];                       /* (never more than a few: the oldest slot) */
+    if (e->l && e->l != l && e->st) { e->l->hidden = 1; e->l->gen++; }
+    l->solid = tk_premul(c);
+    e->l = l;
+    hl_geom(l, r, clip, rad);
+    e->st = 1; e->kind = press_kind; e->t0 = now_ms; e->f0 = press_frames; e->a = 1;
+    e->pg = l == &apphl ? hl_pagekey() : 0;
+    press_kind = PK_LIGHT;
+    l->alpha = 1;
+    l->hidden = 0;
+    if (l == &lockhl) lock_ver++;
+}
+static void hl_out(hl_ent *e)
+{
+    if (e->l) {
+        e->l->hidden = 1; e->l->alpha = 1; e->l->gen++;
+        if (e->l == &lockhl) lock_ver++;
+    }
+    e->st = 0;
+}
+static void hl_release(tk_layer *l)
+{
+    for (int i = 0; i < HL_MAX; i++) if (HLS[i].l == l && HLS[i].st == 1) HLS[i].st = 2;
+}
+static int hl_lit(const tk_layer *l) { for (int i = 0; i < HL_MAX; i++) if (HLS[i].l == l && HLS[i].st) return 1; return 0; }
+/* compose a scale S about (cx, cy) px (the parent's space) onto a layer as placed: its own scale kept, its clip too */
+static void lay_scale(tk_layer *l, float S, float cx, float cy)
+{
+    if (S == 1) return;
+    float nx = S * l->sx, ny = S * l->sy;
+    if (tk_fabsf(1 - nx) < 1e-4f || tk_fabsf(1 - ny) < 1e-4f) return;
+    l->ox = (S * l->ox * (1 - l->sx) + (1 - S) * cx) / (1 - nx);
+    l->oy = (S * l->oy * (1 - l->sy) + (1 - S) * cy) / (1 - ny);
+    l->sx = nx; l->sy = ny;
+    if (l->clip) {
+        tk_rect r = l->clip_r;
+        l->clip_r = (tk_rect){ S * (r.x - cx) + cx, S * (r.y - cy) + cy, S * r.w, S * r.h };
+        l->clip_radius *= S;
+    }
+}
+/* a light's scale with the layer it lights (a card pressed to .98): from its own place, about (cx, cy) px */
+static void hl_scale(tk_layer *l, float S, float cx, float cy)
+{
+    for (int i = 0; i < HL_MAX; i++)
+        if (HLS[i].l == l && HLS[i].st) {
+            l->sx = l->sy = 1;
+            l->clip_r = HLS[i].clip;
+            l->clip_radius = HLS[i].rad;
+            lay_scale(l, S, cx, cy);
+        }
+}
+static prs_ent *prs_find(const void *k) { for (int i = 0; i < PRS_MAX; i++) if (PRS[i].st && PRS[i].k == k) return &PRS[i]; return 0; }
+static float press_s(const void *k) { prs_ent *p = prs_find(k); return p ? p->s : 1; }
+__attribute__((unused)) static void press_unscale(const void *k)
+{
+    prs_ent *p = prs_find(k);
+    if (p && p->st == 1) p->st = 2;
+}
+static void hl_off(void)
+{
+    for (int i = 0; i < HL_MAX; i++) if (HLS[i].st == 1) HLS[i].st = 2;
+    for (int i = 0; i < PRS_MAX; i++) if (PRS[i].st == 1) PRS[i].st = 2;
+}
+static void prs_apply(prs_ent *p)
+{
+    if (p->l) { p->l->sx = p->l->sy = p->s; p->l->gen++; }
+    if (p->place) p->place();
+}
+static void press_scale_kill(const void *k)
+{
+    prs_ent *p = prs_find(k);
+    if (!p) return;
+    p->st = 0; p->s = 1; prs_apply(p); p->k = 0;
+}
+static void hl_kill(void)
+{
+    for (int i = 0; i < HL_MAX; i++) if (HLS[i].st) hl_out(&HLS[i]);
+    for (int i = 0; i < PRS_MAX; i++) if (PRS[i].st) press_scale_kill(PRS[i].k);
+}
+static void press_key(const void *k, float s, void (*place)(void))
+{
+    prs_ent *p = prs_find(k);
+    if (!p) {
+        for (int i = 0; i < PRS_MAX && !p; i++) if (!PRS[i].st) p = &PRS[i];
+        if (!p) return;
+        p->s = 1; p->l = 0;
+    }
+    p->k = k; p->place = place;
+    p->st = 1; p->from = p->s; p->to = s; p->t = 0; p->t0 = now_ms; p->f0 = press_frames;
+}
+static void press_scale(tk_layer *l, float s, float cx, float cy)
+{
+    if (!prs_find(l)) { l->ox = PT(cx); l->oy = PT(cy); }
+    press_key(l, s, 0);
+    prs_ent *p = prs_find(l);
+    if (p) p->l = l;
+}
+static int press_moving(void)
+{
+    for (int i = 0; i < HL_MAX; i++) if (HLS[i].st >= 2) return 1;
+    for (int i = 0; i < PRS_MAX; i++) if (PRS[i].st >= 2 || (PRS[i].st == 1 && PRS[i].t < 1)) return 1;
+    return 0;
+}
+/* a frame: the lights let go fade, the scales move */
+static int press_tick(float dt)
+{
+    int mv = 0;
+    press_frames++;
+    int pk = hl_pagekey();
+    for (int i = 0; i < HL_MAX; i++) {
+        hl_ent *e = &HLS[i];
+        if (!e->st) continue;
+        if (e->l == &apphl && e->pg != pk) { hl_out(e); mv = 1; continue; }   /* the page under it changed */
+        if (e->st == 2 && press_due(e->t0) && press_frames - e->f0 >= 2) e->st = 3;
+        if (e->st == 2) { mv = 1; continue; }
+        if (e->st == 3) {
+            e->a -= dt / (e->kind == PK_DIM ? PRESS_DIM_FADE : PRESS_FADE);
+            if (e->a <= 0) { hl_out(e); mv = 1; continue; }
+            e->l->alpha = tk_bezier(.42f, 0, 1, 1, e->a);     /* ease-out: quick at first, settling */
+            if (e->l == &lockhl) lock_ver++;
+            mv = 1;
+        }
+    }
+    for (int i = 0; i < PRS_MAX; i++) {
+        prs_ent *p = &PRS[i];
+        if (!p->st) continue;
+        if (p->st == 2 && press_due(p->t0) && press_frames - p->f0 >= 2) { p->st = 3; p->from = p->s; p->t = 0; }
+        if (p->st <= 2) {
+            if (p->t >= 1) continue;
+            p->t = tk_minf(1, p->t + dt / PRESS_IN);
+            p->s = p->from + (p->to - p->from) * tk_bezier(.25f, .1f, .25f, 1, p->t);
+        } else {
+            p->t = tk_minf(1, p->t + dt / PRESS_OUT);
+            p->s = p->from + (1 - p->from) * tk_bezier(.34f, 1.56f, .64f, 1, p->t);   /* back with a small overshoot */
+            if (p->t >= 1) { p->s = 1; p->st = 0; }
+        }
+        prs_apply(p);
+        if (!p->st) p->k = 0;
+        mv = 1;
+    }
+    return mv;
+}
+
+/* ---- P3p (P3j-7): an icon's press. Nothing is baked in a tap: two small layers (the ground under it: the wallpaper
+ * or the dock's kept glass, and the icon dimmed (.2 black) and shrinking to .96 in .1 s and back in .2 s; B8, GAP #21:
+ * iOS dims slightly, hardly shrinks). cp6: a quick tap shows it too (held PRESS_MIN_MS, then back). ------------------- */
 /* icobg, icofg, lockhl, apphl: declared with the home's layers */
-static struct { int on; float s, from, to, t, dur; } IP = { 0, 1, 1, 1, 1, .1f };
+static struct { int on, rel; float s, from, to, t, dur, t0; } IP = { 0, 0, 1, 1, 1, 1, .1f, 0 };
 static void ico_free(void)
 {
     relayer(&icobg); relayer(&icofg);
     icobg.hidden = icofg.hidden = 1;
-    IP.on = 0; IP.t = 1; IP.s = 1;
+    IP.on = 0; IP.rel = 0; IP.t = 1; IP.s = 1;
 }
 static void icon_press(int a)
 {
@@ -4847,41 +5154,26 @@ static void icon_press(int a)
     icobg.y = icofg.y = (float)Y;
     icofg.ox = PT(R.x + R.w / 2);
     icofg.oy = PT(R.y + R.h / 2);
-    IP.on = 1; IP.from = 1; IP.to = .96f; IP.t = 0; IP.dur = .1f; IP.s = 1;
+    IP.on = 1; IP.rel = 0; IP.from = 1; IP.to = .96f; IP.t = 0; IP.dur = .1f; IP.s = 1; IP.t0 = now_ms;
     icofg.sx = icofg.sy = 1;
     relink();
 }
 static void icon_release(void)
 {
-    if (!IP.on) return;
+    if (!IP.on || IP.rel || IP.to >= 1) return;
+    if (!press_due(IP.t0)) { IP.rel = 1; return; }   /* cp6: a quick tap: it shows first (ico_step lets go) */
     IP.from = IP.s; IP.to = 1; IP.t = 0; IP.dur = .2f;
 }
 static int ico_step(float dt)
 {
-    if (!IP.on || IP.t >= 1) return 0;
+    if (IP.on && IP.rel && press_due(IP.t0)) { IP.rel = 0; icon_release(); }
+    if (!IP.on || (IP.t >= 1 && !IP.rel)) return 0;
+    if (IP.t >= 1) return 1;                     /* (a quick tap's hold: frames on) */
     IP.t = tk_minf(1, IP.t + dt / IP.dur);
     IP.s = IP.from + (IP.to - IP.from) * tk_bezier(.25f, .1f, .25f, 1, IP.t);
     icofg.sx = icofg.sy = IP.s;
     if (IP.t >= 1 && IP.to >= 1) ico_free();
     return 1;
-}
-/* a solid highlight: r the lit rect, clip the group's (rounded by rad) in pt; l's parent space is the screen's
- * (lockhl's is the list's content: its y + scroll) */
-static void hl_set(tk_layer *l, tk_rect r, tk_rect clip, float rad, tk_col c)
-{
-    l->solid = tk_premul(c);
-    l->x = PT(r.x); l->y = PT(r.y);
-    l->solid_w = PT(r.w); l->solid_h = PT(r.h);
-    l->clip = 1;
-    l->clip_r = (tk_rect){ PT(clip.x), PT(clip.y), PT(clip.w), PT(clip.h) };
-    l->clip_radius = PT(rad);
-    l->alpha = 1;
-    l->hidden = 0;
-    l->gen++;
-}
-static void hl_off(void)
-{
-    if (!lockhl.hidden || !apphl.hidden) { lockhl.hidden = apphl.hidden = 1; lockhl.gen++; apphl.gen++; lock_ver++; }
 }
 static void press_cancel(void) { hl_off(); if (IP.on) icon_release(); }
 
@@ -4890,7 +5182,8 @@ static void app_press(float x, float y)
 {
     tk_rect r = { 0, 0, 0, 0 }, g = r;
     float rad = 0;
-    tk_col c = W(.1f);
+    tk_col c = PRESS_ROW;                    /* cp6: a row on a card shows #3A3A3C (a module may say otherwise) */
+    press_kind = PK_LIGHT;
     int ok = 0;
     int pushed = (is_app("settings") && AS.sub && !(AS.sub == 2 && WV.view == 1) && !(AS.sub == 4 && SV.cf >= 0)) ||
                  (is_app("messages") && AS.thread >= 0) || (is_app("notes") && NS.view);
@@ -4900,15 +5193,16 @@ static void app_press(float x, float y)
     else if (med_press(x, y, &r, &g, &rad, &c)) ok = 1;            /* cp6: Photos' cells, Files' and Music's rows, the viewer */
     else if (pc_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* Track A: Settings > Passcode */
     else if (su_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* Track A update */
+    else if (se_strip_press(x, y, &r, &g, &rad, &c)) ok = 1;       /* cp6: Settings' strip pages (Wi-Fi, Cellular, Startup) */
     else if (pushed && BACK_HIT(x, y)) {
         r = g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D };   /* the glass back lights */
-        rad = BACK_D / 2; c = W(.16f); ok = 1;
+        rad = BACK_D / 2; c = PRESS_BTN; ok = 1;
     } else if (is_app("notes") && NS.view && DONE_HIT(x, y)) {
         r = g = (tk_rect){ CONTENT_R - BACK_D, SAFE_TOP, BACK_D, BACK_D };
-        rad = BACK_D / 2; c = W(.16f); ok = 1;
+        rad = BACK_D / 2; c = PRESS_BTN; ok = 1;
     } else if (is_app("notes") && !NS.view && COMPOSE_HIT(x, y)) {
         r = g = (tk_rect){ CONTENT_R - COMPOSE_D, COMPOSE_Y, COMPOSE_D, COMPOSE_D };
-        rad = COMPOSE_D / 2; c = W(.16f); ok = 1;
+        rad = COMPOSE_D / 2; c = PRESS_BTN; ok = 1;
     } else if (is_app("notes") && !NS.view && NS.n) {
         if (x >= GROUP_X && x < CONTENT_R && y >= CONTENT_TOP && y < CONTENT_TOP + NOTE_RH * NS.n) {
             int i = (int)((y - CONTENT_TOP) / NOTE_RH);
@@ -4918,9 +5212,9 @@ static void app_press(float x, float y)
         }
     } else if ((is_app("notes") && NS.view) || is_app("search")) {
         int num = is_app("notes") ? NS.num : SR.num;
-        if (y >= 548 && kb_rect(x, y, KR[num], !num, &r)) { g = r; rad = 6; c = W(.35f); ok = 1; }
+        if (y >= 548 && kb_rect(x, y, KR[num], !num, &r)) { g = r; rad = 6; c = PRESS_KEY; ok = 1; }
     } else if (is_app("settings") && AS.sub == 2 && WV.view == 1) {
-        if (y >= 548 && kb_rect(x, y, 0, 0, &r)) { g = r; rad = 6; c = W(.35f); ok = 1; }
+        if (y >= 548 && kb_rect(x, y, 0, 0, &r)) { g = r; rad = 6; c = PRESS_KEY; ok = 1; }
     }
     if (ok) hl_set(&apphl, r, g, rad, c);
 }
@@ -5026,13 +5320,24 @@ void sh_touch(int phase, float x, float y, float t)
                  * or outside it (it folds back) */
                 T.kind = G_CCX; T.arg = -1; T.arg2 = 0;
                 if (CX.closing) { T.arg = -2; return; }
-                if (CX.m == 0) { T.arg = cc_x_hit(x, y); if (T.arg == 2) { T.kind = G_CCCELL; T.arg = 0; return; } }
+                if (CX.m == 0) {
+                    T.arg = cc_x_hit(x, y);
+                    if (T.arg >= 0) {                    /* cp6: the link's circle lights */
+                        float cx, cy;
+                        cc_x_centre(T.arg, &cx, &cy);
+                        tk_rect c = { cx - 32, cy - 32, 64, 64 };
+                        hl_set(&ccxhl, c, c, 32, PRESS_BTN);
+                    }
+                    if (T.arg == 2) { T.kind = G_CCCELL; T.arg = 0; return; }
+                }
                 else { T.arg2 = 1; T.base = CCS.lvl[CX.m - 1]; }
                 tk_tracker_add(&T.tr, y, t);
                 return;
             }
             int m = cc_mod_at(x, y);
             cc_press(m, 1);                      /* B4: the module grows under the finger (the glass spec's press) */
+            if (m < 0 && y >= 8 && y < 52 && x >= 316 && x < 362) cc_chrome_press(338.75f);   /* cp6: Power */
+            else if (m < 0 && y >= 8 && y < 52 && x >= 28 && x < 75) cc_chrome_press(51.25f);   /* cp6: + */
             if (m == 5) { T.kind = G_CCEM; T.arg = 0; return; }
             /* the cellular circle: a hold starts the modem (then the kernel's confirmation) or stops it */
             float cxl = CC_COL(0) + CN_PAD + CN_D + 14, cyl = CC_ROW(0) + CN_PAD;
@@ -5067,7 +5372,13 @@ void sh_touch(int phase, float x, float y, float t)
                 page_dir = 0;
                 sp_page.live = 0;
                 tk_tracker_add(&T.tr, x, t);
-                if (!sp_page.live && tk_fabsf(page_x - tk_floorf(page_x / 390 + .5f) * 390) < 1) icon_press(app_hit(x, y));   /* P3p */
+                if (!sp_page.live && tk_fabsf(page_x - tk_floorf(page_x / 390 + .5f) * 390) < 1) {
+                    int a = app_hit(x, y);
+                    icon_press(a);                                   /* P3p */
+                    float x0 = x - page_x;                           /* cp6: the Clock widget: a card's press (.98) */
+                    if (a < 0 && hparts[7].bmp.px && page_x > -195 && x0 >= WID_X(0) && x0 < WID_X(0) + WID_W && y >= WCK_Y && y < WCK_Y + WID_W)
+                        press_scale(&hparts[7], .98f, WID_X(0) + WID_W / 2, WCK_Y + WID_W / 2);
+                }
             }
             return;
         }
@@ -5085,7 +5396,11 @@ void sh_touch(int phase, float x, float y, float t)
                 T.kind = G_HOLD;
                 T.arg = i;
                 Q[i].down = 1; Q[i].fired = 0; Q[i].t0 = t;
-                Q[i].scale_from = Q[i].grp.sx; Q[i].scale_to = 1.22f; Q[i].scale_t = 0;
+                Q[i].scale_from = Q[i].grp.sx; Q[i].scale_to = 1.22f; Q[i].scale_t = 0; Q[i].rel_at = 0;
+                {   /* cp6: the glass lights under the finger (LIQUID-GLASS 5.1's glow) as it grows */
+                    tk_rect c = { bx, HOLD_Y, 50, 50 };
+                    hl_set(&Q[i].hl, c, c, 25, W(.16f));
+                }
                 return;
             }
         }
@@ -5096,7 +5411,8 @@ void sh_touch(int phase, float x, float y, float t)
             T.arg = sv_ec_hit(x, y);                    /* survival-next: 0..7 a card, 8 Exit (the list scrolls) */
             if (T.arg >= 0 && T.arg < 8) {
                 tk_rect c = { CARD_X, LIST_TOP + 10 + 78.0f * T.arg, CARD_W, 68 };
-                hl_set(&lockhl, c, c, 26, W(.1f));
+                hl_set(&lockhl, c, c, 26, W(.14f));     /* cp6: lit, then fading (no scale: Emergency stays quiet) */
+                lk_hl_key = 0;
             }
             tk_tracker_add(&T.tr, y, t);
             return;
@@ -5109,12 +5425,23 @@ void sh_touch(int phase, float x, float y, float t)
             /* P3p: the row lights across its card (clipped to the card's rounded face) */
             float ct = LIST_TOP + card_top(gi);
             tk_rect pr = { VC_X, ct + 68 + 8 + MEM_P * r, VC_W, 68 };   /* B4: the member's own platter */
-            hl_set(&lockhl, pr, pr, VC_R, W(.08f));
+            hl_set(&lockhl, pr, pr, VC_R, W(.12f));
+            lk_hl_key = &V[gi].mpl[r];                   /* cp6: the platter goes to .98 (place_list) */
+            press_key(lk_hl_key, .98f, place_list);
             lock_ver++;
         } else if ((r = hit_head(x, y)) >= 0) {
             T.kind = G_TAP_HEAD; T.arg = r;
             tk_rect c = { VC_X, LIST_TOP + card_top(r), VC_W, 68 };
-            hl_set(&lockhl, c, c, VC_R, W(.1f));
+            if (y - LIST_TOP + scroll < card_top(r)) {   /* cp6: an open stack's "Show less": its capsule lights */
+                float w = tw(TK_IT600, 13, "Show less", 0, 0) + 24;
+                tk_rect p = { VC_X + VC_W - w, c.y - SL_BAND + 4, w, 28 };
+                hl_set(&lockhl, p, p, 14, PRESS_BTN);
+                lk_hl_key = 0;
+            } else {
+                hl_set(&lockhl, c, c, VC_R, W(.12f));
+                lk_hl_key = &V[r].face;                  /* cp6: the card goes to .98 (place_list) */
+                press_key(lk_hl_key, .98f, place_list);
+            }
             lock_ver++;
         }
         else if (in_list(y)) { T.kind = G_LIST; T.base = scroll; sp_scroll.live = 0; scroll_momentum = 0; list_over = scroll < 0 || scroll > max_scroll(); }
@@ -5242,7 +5569,7 @@ void sh_touch(int phase, float x, float y, float t)
         case G_CCTAP:
             /* P3p (P3j-10): a vertical drag on the open Control Centre moves it (up closes it) */
             tk_tracker_add(&T.tr, y, t);
-            if (T.moved) cc_release();
+            if (T.moved) { cc_release(); hl_off(); }
             if (T.moved && tk_fabsf(dy) > tk_fabsf(x - T.x0)) { T.kind = G_CCDRAG; sp_cc.live = 0; CCS.closing = 0; }
             if (T.kind == G_CCDRAG) set_cc(tk_clampf(dy < 0 ? 1 + dy / 260 : 1 + rubber(dy, H_PT) / 260, 0, 1.3f));
             break;
@@ -5254,6 +5581,7 @@ void sh_touch(int phase, float x, float y, float t)
             cc_set_level(T.arg, T.base - dy / CC_W2);
             break;
         case G_CCX:
+            if (T.moved) hl_off();                   /* cp6: a link's light goes on a move */
             if (T.arg2 == 1 && CX.m > 0) cc_set_level(CX.m - 1, T.base - dy / CXR[CX.m][3]);
             break;
         case G_PAGE: {
@@ -5302,7 +5630,8 @@ void sh_touch(int phase, float x, float y, float t)
     case G_HOLD: {
         hold_t *q = &Q[T.arg];
         q->down = 0;
-        q->scale_from = q->grp.sx; q->scale_to = 1; q->scale_t = 0;
+        if (!press_due(q->t0)) q->rel_at = q->t0 + PRESS_MIN_MS;   /* cp6: a quick tap's grow shows first */
+        else { q->scale_from = q->grp.sx; q->scale_to = 1; q->scale_t = 0; }
         if (!q->fired) toast("Press and hold");
         hold_ring(q, T.arg, 0);
         break;
@@ -5342,8 +5671,8 @@ void sh_touch(int phase, float x, float y, float t)
     case G_TAP_ROW: {
         const sys_t *s = &G[T.arg].it[T.arg2];
         if (s->self) { toast("You are in Starbite OS"); break; }
-        tk_comp_frame(C, 0, 0);
-        tk_comp_idle(C);                       /* P3p: the half canvas without the row's press light (the sheet's under-layer) */
+        tk_comp_frame(C, 0, 0);                /* cp6: the row lit (and pressed) while the sheet is made: iOS keeps it lit under */
+        tk_comp_idle(C);                       /* P3p: the half canvas (the sheet's under-layer) */
         uint64_t t0 = tk_us();
         build_focus(s, &G[T.arg]);
         lap_us("focus: snapshot and bake", tk_us() - t0);
@@ -5534,6 +5863,7 @@ int sh_tick(float dt, float t)
     }
     mv |= ico_step(dt);                          /* P3p: the pressed icon */
     mv |= ps_tick(dt);                           /* cp6: a page's push / pop (shell_push.inc) */
+    mv |= press_tick(dt);                        /* cp6: the lights let go fade, the press scales move */
     mv |= med_tick(dt);
     mv |= lx_tick(dt);                           /* L3, Track F: the App Store's page (scroll, momentum, builds) */
     ep_tick();                                   /* B6: Emergency's switch prepared during the hold, finished after */
@@ -5645,6 +5975,10 @@ int sh_tick(float dt, float t)
     }
     for (int i = 0; i < 2; i++) {
         hold_t *q = &Q[i];
+        if (q->rel_at > 0) {                     /* cp6: a quick tap's grow, shown: back now */
+            if (press_due(q->rel_at - PRESS_MIN_MS)) { q->rel_at = 0; q->scale_from = q->grp.sx; q->scale_to = 1; q->scale_t = 0; }
+            mv = 1;
+        }
         if (q->scale_t < 1) {
             if (q->scale_t <= 0) tk_spring_start(&q->ss, q->grp.sx, q->scale_to, q->ss.live ? q->ss.v : 0, TK_SPR_PRESS);
             q->scale_t = .5f;
@@ -5861,7 +6195,9 @@ int sh_moving(void)
     for (int g = 0; g < NG; g++) m |= V[g].sp.live || V[g].chev_t < 1;   /* B10 */
     m |= lkn_moving();                           /* B9 */
     m |= sp_focus.live || sp_thumb.live || med_moving() || lx_moving();
-    m |= IP.on && IP.t < 1;
+    m |= IP.on && (IP.t < 1 || IP.rel);
+    m |= Q[0].rel_at > 0 || Q[1].rel_at > 0;
+    m |= press_moving();                         /* cp6: a light fading, a scale moving */
     m |= nc_moving() || sw_moving();             /* helper D */
     m |= cm_moving();                            /* helper I */
     m |= kb_moving();                            /* B3: delete held (its repeats need the frames) */

@@ -20,7 +20,8 @@
 #define SU_BTN_Y (SU_CARD_Y + SU_CARD_H + 16)   /* the action capsule */
 #define SU_BTN_H 50.0f
 #define SU_MID_Y (SU_CARD_Y + 96)           /* up to date: the tile's top */
-static struct { struct sh_update u; int checked, running; } SWU;
+static struct { struct sh_update u; int checked, running, checking; float check_t; } SWU;   /* cp6: checking (Check Again's) */
+#define SU_CHECK_MS 600.0f                   /* cp6: "Checking\xe2\x80\xa6" shows at least this long */
 
 static void su_check(void)
 {
@@ -38,6 +39,7 @@ static void su_size(char *b, unsigned n)    /* "18.4 MB" */
 }
 static const char *su_action(void)
 {
+    if (SWU.checking) return "Checking\xe2\x80\xa6";
     switch (SWU.u.state) {
     case 1: return "Download and Install";
     case 3: return "Restart to Install";
@@ -53,7 +55,7 @@ static void su_lines(dc *d, float y, const char *s, int max, tk_col c)   /* wrap
     int n = wrapn(ln, max < 4 ? max : 4, TK_IT400, 15, s, LG_W - 32, &wm);
     for (int k = 0; k < n; k++) d_text(d, TK_IT400, 15, LG_TX, bl(TK_IT400, 15, y + 20 * k), ln[k], 0, 0, c, 0);
 }
-static int su_primary(void) { return SWU.u.state == 1 || SWU.u.state == 3; }
+static int su_primary(void) { return !SWU.checking && (SWU.u.state == 1 || SWU.u.state == 3); }
 static float su_btn_y(void)
 {
     if (SWU.u.state == 0 || SWU.u.state == 4 || (SWU.u.state == -1 && !SWU.u.version[0])) return SU_MID_Y + 52 + 112;
@@ -126,7 +128,8 @@ static void su_page(dc *d)
         float y = su_btn_y();
         int pr = su_primary();
         d_rrect(d, LG_X, y, LG_W, SU_BTN_H, SU_BTN_H / 2, pr ? ACCENT() : C_CARD);
-        d_text_box(d, TK_IT600, 17, 195, bl(TK_IT600, 17, y + (SU_BTN_H - lh(TK_IT600, 17)) / 2), LG_W - 32, 1, a, 0, 0, pr ? W(1) : ACCENT(), 0);
+        d_text_box(d, TK_IT600, 17, 195, bl(TK_IT600, 17, y + (SU_BTN_H - lh(TK_IT600, 17)) / 2), LG_W - 32, 1, a, 0, 0,
+                   SWU.checking ? KIT_SEC() : pr ? W(1) : ACCENT(), 0);   /* cp6: grey while it checks (the spinner beside) */
     }
     if (u->state == 1 || u->state == 3)
         d_group_foot(d, SU_BTN_Y + SU_BTN_H, "From the memory card's STARBITE/UPDATE folder. Starbite OS keeps the previous version until the new one has started.");
@@ -139,6 +142,7 @@ static float su_row_main(void)
 static void su_open(void)
 {
     AS.sub = SU_SUB;
+    SWU.checking = 0;
     su_check();
     build_app_page(AP.a);
 }
@@ -161,8 +165,11 @@ static int su_app_tap(float x, float y)
         (void)sh_update_stage(&SWU.u);
     } else if (SWU.u.state == 3) {
         if (sh_update_install() < 0) toast("The update can't be installed now");
+    } else if (!SWU.checking) {
+        SWU.checking = 1;                           /* cp6: Check Again / Try Again: "Checking\xe2\x80\xa6" at once, the check */
+        SWU.check_t = now_ms;                       /* on a refresh turn (su_refresh), a spinner meanwhile */
     } else
-        su_check();                                 /* Check Again / Try Again */
+        toast("Already checking for updates\xe2\x80\xa6");
     build_app_page(AP.a);
     return 1;
 }
@@ -174,24 +181,38 @@ static int su_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
     if (!AS.sub) {
         float ry = su_row_main();
         if (ry >= 0 && y >= ry && y < ry + 47) top = ry;
-    } else if (AS.sub == SU_SUB && su_action()) {
+    } else if (AS.sub == SU_SUB && su_action() && !SWU.checking) {
         float by = su_btn_y();
         if (y >= by && y < by + SU_BTN_H) top = by;
     }
     if (top < 0) return 0;
     *r = *g = (tk_rect){ LG_X, top, LG_W, SU_BTN_H };
     *rad = SU_BTN_H / 2;
+    *c = su_primary() ? SEP_FILL : SEP_ROW;           /* cp6: the filled capsule darkens, the grey one lights */
+    return 1;
+}
+/* cp6: the spinner beside "Checking\xe2\x80\xa6" (shell_settings.inc's strip spinner) */
+static int su_spin_at(float *cx, float *cy)
+{
+    if (!SWU.checking || AS.sub != SU_SUB) return 0;
+    *cx = 195 - tw(TK_IT600, 17, su_action(), 0, 0) / 2 - 18;
+    *cy = su_btn_y() + SU_BTN_H / 2;
     return 1;
 }
 /* the staging's turns: a chunk each, the page redrawn (sh_refresh / sh_next_update) */
 static float su_next_update(float t)
 {
-    (void)t;
+    if (SWU.checking) return tk_maxf(15, SU_CHECK_MS - (t - SWU.check_t));
     return SWU.running ? 4 : -1;
 }
 static int su_refresh(float t)
 {
-    (void)t;
+    if (SWU.checking && t - SWU.check_t >= SU_CHECK_MS && !sh_moving()) {
+        SWU.checking = 0;
+        su_check();
+        if (AP.on && is_app("settings") && AS.sub == SU_SUB) { build_app_page(AP.a); return 1; }
+        return 0;
+    }
     if (!SWU.running || sh_moving()) return 0;
     int st = sh_update_stage(&SWU.u);
     if (st != 2) SWU.running = 0;

@@ -143,8 +143,8 @@ static const char *su_kind(const char *k)
 #define SU_MAXHIT 32
 enum { R_NONE, R_OSL, R_FW, R_REC, R_SHELL, R_ONCE, R_MKDEF, R_WINRE, R_RST_MENU, R_RST_REC, R_RST_DL,
        R_OS0 = 20, R_REQ0 = 40, R_PICK0 = 50, R_OPT0 = 60 };
-static struct { float y, h; int id; } SUH[SU_MAXHIT];
-static struct { float y, rh; int nh, i, n, first, foot; } SUL;
+static struct { float y, h, gy, gh; int id, sw, dim; } SUH[SU_MAXHIT];   /* cp6: gy / gh its card; sw a switch row; dim no press */
+static struct { float y, rh, gy; int nh, i, n, first, foot; } SUL;
 static void su_begin(void) { SUL.y = SU_Y0; SUL.nh = 0; SUL.first = 1; SUL.foot = 0; SUL.n = SUL.i = 0; }
 /* a card of n rows rh high, under an optional header */
 static void su_sec(dc *d, const char *head, int n, float rh)
@@ -158,20 +158,27 @@ static void su_sec(dc *d, const char *head, int n, float rh)
     SUL.i = 0;
     SUL.n = n;
     SUL.rh = rh;
+    SUL.gy = SUL.y;
 }
 /* the next row's top (id: what a tap on it does, R_NONE nothing) */
 static float su_next(int id)
 {
     float y = SUL.y;
-    if (id && SUL.nh < SU_MAXHIT) { SUH[SUL.nh].y = y; SUH[SUL.nh].h = SUL.rh; SUH[SUL.nh].id = id; SUL.nh++; }
+    if (id && SUL.nh < SU_MAXHIT) {
+        SUH[SUL.nh].y = y; SUH[SUL.nh].h = SUL.rh; SUH[SUL.nh].id = id;
+        SUH[SUL.nh].gy = SUL.gy; SUH[SUL.nh].gh = SUL.rh * SUL.n; SUH[SUL.nh].sw = SUH[SUL.nh].dim = 0;
+        SUL.nh++;
+    }
     SUL.y += SUL.rh;
     SUL.i++;
     return y;
 }
+static int su_dim(tk_col c) { tk_col l3 = C_LABEL3; return c.a == l3.a && c.r == l3.r && c.g == l3.g && c.b == l3.b; }
 static void su_row(dc *d, int id, const char *l, tk_col lc, const char *v, int chev)
 {
     int last = SUL.i + 1 >= SUL.n;
     float y = su_next(id);
+    if (id && SUL.nh && SUH[SUL.nh - 1].id == id) SUH[SUL.nh - 1].dim = su_dim(lc) && !chev;   /* cp6: a greyed action: no press */
     if (d) d_row(d, y, SUL.rh, 0, l, v, chev, last, lc, 0);
 }
 /* a row with the kit's switch at the right */
@@ -179,6 +186,7 @@ static void su_switch_row(dc *d, int id, const char *l, int on, int enabled)
 {
     int last = SUL.i + 1 >= SUL.n;
     float y = su_next(id);
+    if (id && SUL.nh && SUH[SUL.nh - 1].id == id) { SUH[SUL.nh - 1].sw = 1; SUH[SUL.nh - 1].dim = !enabled; }
     if (!d) return;
     d_row(d, y, SUL.rh, 0, l, 0, 0, last, enabled ? INK : C_LABEL3, SU_SWX - 12);
     kit_d_switch(d, SU_SWX, y + (SUL.rh - KSW_H) / 2, on, enabled);
@@ -188,6 +196,7 @@ static void su_check_row(dc *d, int id, const char *l, tk_col lc, const char *v,
 {
     int last = SUL.i + 1 >= SUL.n;
     float y = su_next(id);
+    if (id && SUL.nh && SUH[SUL.nh - 1].id == id) SUH[SUL.nh - 1].dim = su_dim(lc);   /* cp6: a greyed choice: no press */
     if (!d) return;
     d_row(d, y, SUL.rh, 0, l, v, 0, last, lc, on ? LG_RE - 16 - 14 - 12 : 0);
     if (on) {
@@ -243,7 +252,7 @@ static void su_page_osl(dc *d)
         int n = put_dec(b, SU.more);
         su_catn(b + n, (int)sizeof b - n, " more in the catalog: the loader's menu lists them all. ", 0);
     }
-    su_catn(f, (int)sizeof f, b, "The default starts by itself after the menu's timeout. Tap a system to start it once.");
+    su_catn(f, (int)sizeof f, b, "The default starts by itself after the menu's timeout. Tap a system to start it once or make it the default.");
     su_foot(d, f);
 }
 
@@ -470,9 +479,14 @@ static int startup_tap(float x, float y)
     if (id >= R_PICK0 && id <= R_PICK0 + PK_AFTER) { SU.pick = id - R_PICK0; SU.view = SU_PICK; build_app_page(AP.a); return 1; }
     if (SU.view == SU_OSD && SU.os >= 0 && SU.os < SU.nos) {
         const su_os_t *o = &SU.o[SU.os];
-        if (id == R_ONCE) { if (o->ready) su_asked(sh_os_start_once(o->key), "Can't start it now"); return 1; }
+        if (id == R_ONCE) {
+            if (o->ready) su_asked(sh_os_start_once(o->key), "Can't start it now");
+            else toast("Its files are missing: it can't start");   /* cp6: never a silent tap */
+            return 1;
+        }
         if (id == R_MKDEF) {
             if (!o->ready) { toast("Its files are missing"); return 1; }
+            if (o->def) { toast("It is the default already"); return 1; }   /* cp6 */
             if (!o->def && sh_os_make_default(o->key) < 0) toast("Can't change the default now");
             su_load();
             build_app_page(AP.a);
@@ -486,6 +500,7 @@ static int startup_tap(float x, float y)
         int acts[5], n = su_req_n(o, acts);
         if (id >= R_REQ0 && id < R_REQ0 + n) {
             if (o->ready) su_asked(sh_req_start(o->key, SU_REQ[acts[id - R_REQ0]].act), "Can't start it now");
+            else toast("Its files are missing: it can't start");   /* cp6 */
             return 1;
         }
         return 0;
@@ -509,5 +524,21 @@ static int startup_tap(float x, float y)
         su_write();
         return 1;
     }
+    return 0;
+}
+
+/* cp6: what lights under the finger (shell_settings.inc's se_strip_press asks; shell_wifi.inc's press colours): a row
+ * its rect in its card, a switch row its switch's track; greyed actions and choices don't light (a tap says why) */
+static int startup_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
+{
+    if (kit_on() || x < LG_X || x >= LG_RE) return 0;
+    if (!SU.loaded) su_load();
+    su_lay(0);
+    for (int i = 0; i < SUL.nh; i++)
+        if (y >= SUH[i].y && y < SUH[i].y + SUH[i].h) {
+            if (SUH[i].dim) return 0;
+            if (SUH[i].sw) return sep_switch(r, g, rad, c, SU_SWX, SUH[i].y + (SUH[i].h - KSW_H) / 2);
+            return sep_row(r, g, rad, c, SUH[i].y, SUH[i].h, SUH[i].gy, SUH[i].gh);
+        }
     return 0;
 }

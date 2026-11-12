@@ -96,6 +96,7 @@ typedef struct {
     float y, h;                                   /* content pt at scroll 0 */
     const char *sub;                              /* a second line (the row is 66 tall) */
     int segn;                                     /* SR_SEG: its segments (0: two) */
+    const char *why;                              /* cp6: a disabled row's words when it is tapped */
 } se_row;
 typedef struct { int first, n; const char *head, *foot; float y, h, fy; int fl; } se_sec;
 #define SE_MAXR 32
@@ -165,13 +166,15 @@ static se_row *row(int kind, int id, const char *l, const char *v)
 {
     if (SE.nr >= SE_MAXR || !SE.ns) return &SE.r[SE_MAXR - 1];
     se_row *r = &SE.r[SE.nr++];
-    *r = (se_row){ kind, id, 0, 0, SEI_NONE, 0, l, v ? v : "", 0, 0, 0, 0 };
+    *r = (se_row){ kind, id, 0, 0, SEI_NONE, 0, l, v ? v : "", 0, 0, 0, 0, 0 };
     SE.s[SE.ns - 1].n++;
     return r;
 }
 static se_row *nav(int id, int ico, const char *l, const char *v) { se_row *r = row(SR_NAV, id, l, v); r->ico = ico; return r; }
 static se_row *val(const char *l, const char *v) { return row(SR_VAL, A_NONE, l, v); }
 static se_row *tog(int id, const char *l, int on) { se_row *r = row(SR_TOG, id, l, 0); r->on = on; return r; }
+/* cp6: a disabled row (.3 alpha, no press) and what a tap on it says */
+static se_row *se_off(se_row *r, const char *why) { r->dis = 1; r->why = why; return r; }
 
 static const char *se_autolock_text(int s)
 {
@@ -320,7 +323,7 @@ static void se_rows(int p)
         sec(0);
         tog(T_CLOCK24, "24-Hour Time", sh_clock24());
         sec(0);
-        { se_row *r = tog(A_NONE, "Set Automatically", 1); r->dis = 1; }
+        se_off(tog(A_NONE, "Set Automatically", 1), "The time always comes from the network");
         nav(A_TZ, 0, "Time Zone", se_str(city, 0));
         foot("The time comes from the network; daylight saving time follows the zone's own rules.");
         sec(0);
@@ -388,8 +391,8 @@ static void se_rows(int p)
         foot("How hard the motor buzzes for calls, alarms and notifications; each choice plays a sample. Off: no "
              "buzz for them at all. The light taps of System Haptics stay as they are.");
         sec("Vibrate");
-        { se_row *r = tog(T_CALLVIB, "Calls", 1); r->dis = 1; }
-        { se_row *r = tog(T_SMSVIB, "Messages", 1); r->dis = 1; }
+        se_off(tog(T_CALLVIB, "Calls", 1), "Set by the modem: it can't be changed yet");
+        se_off(tog(T_SMSVIB, "Messages", 1), "Set by the modem: it can't be changed yet");
         foot("The modem buzzes for calls and messages by itself; turning that off needs the modem's own setting.");
         sec("Sounds");
         val("Ringtone", "None");
@@ -407,7 +410,7 @@ static void se_rows(int p)
         tog(T_NALLOW, "Allow Notifications", se_get(SK_NALLOW + i));
         sec("Alerts");
         se_row *r = tog(T_NBANNER, "Banners", se_get(SK_NBANNER + i));
-        r->dis = !se_get(SK_NALLOW + i);
+        if (!se_get(SK_NALLOW + i)) se_off(r, "Turn on Allow Notifications first");
         val("Notification Centre", se_get(SK_NALLOW + i) ? "On" : "Off");
         foot("Off: nothing from it is shown. Banners off: it goes to the Notification Centre only.");
         break;
@@ -444,8 +447,8 @@ static void se_rows(int p)
         val("Location", "Kept on the phone");
         val("Analytics", "None");
         val("Accounts", "None");
-        foot("Nothing leaves this phone except what you turn on. Wi-Fi and Cellular Data are off at every start; "
-             "Starbite OS has no accounts, no analytics and no tracking, and keeps your notes, cards and places on the phone.");
+        foot("Nothing leaves this phone except what you turn on; Wi-Fi and Cellular Data are off at every start. No "
+             "accounts, no analytics, no tracking: your notes, cards and places stay on the phone.");
         break;
     case SE_EMERGENCY:
         sec(0);
@@ -495,7 +498,7 @@ static void se_rows(int p)
             int rssi = 0;
             if (sh_bt_get(i, nm, sizeof nm, &rssi) < 0) continue;
             if (!nm[0] || named >= SE_BT_MAXD) { unnamed++; continue; }   /* iOS lists named devices: the rest counted */
-            row(SR_VAL, A_BTDEV, se_str(nm, 0), 0);
+            row(SR_VAL, A_BTDEV, se_str(nm, 0), "Not Paired");   /* cp6: what a tap can't do yet, in grey */
             named++;
         }
         if (!n) foot("Looking for devices nearby\xe2\x80\xa6 The scan runs while this page is open.");
@@ -803,18 +806,55 @@ static void se_lux_redraw(int lux)
 }
 /* iOS's activity indicator (8 spokes, the bright one going round clockwise) in a 22 pt layer of the scroll group:
  * beside the switch while Bluetooth starts, beside Other Devices' header while it scans */
-static void se_spin_draw(void)
+static void se_spin_paint(tk_layer *l, float cx, float cy, int k)
 {
-    if (!sespin.bmp.px) return;
-    dc d = { &sespin.bmp, 0, sespin.bx, sespin.by };
-    tk_fill_rect_raw(&sespin.bmp, 0, 0, sespin.bmp.w, sespin.bmp.h, 0);
-    float cx = SEB.spin_cx, cy = SEB.spin_cy;
+    if (!l->bmp.px) return;
+    dc d = { &l->bmp, 0, l->bx, l->by };
+    tk_fill_rect_raw(&l->bmp, 0, 0, l->bmp.w, l->bmp.h, 0);
     for (int i = 0; i < 8; i++) {
         float a = .7853982f * i, sn = tk_sinf(a), co = tk_cosf(a);
-        int age = (SEB.spin_k - i + 8) & 7;
+        int age = (k - i + 8) & 7;
         d_seg(&d, cx + sn * 4.4f, cy - co * 4.4f, cx + sn * 8.4f, cy - co * 8.4f, 2.4f, TK_RGBA(235, 235, 245, .9f - .09f * age));
     }
-    tk_layer_dirty(&sespin);
+    tk_layer_dirty(l);
+}
+static void se_spin_draw(void) { se_spin_paint(&sespin, SEB.spin_cx, SEB.spin_cy, SEB.spin_k); }
+/* cp6: the same spinner over the strip pages (not scrolled: screen pt), where something loads: Wi-Fi starting /
+ * scanning / joining (shell_wifi.inc's wf_spin_at), Cellular connecting (cell_spin_at), Software Update checking
+ * (shell_update.inc's su_spin_at); stepped on the platform's refresh turns as Bluetooth's */
+static tk_layer sepspin;
+static struct { int on, k; float t, cx, cy; } SPS;
+static int su_spin_at(float *cx, float *cy);
+static int se_strip_spin_where(float *cx, float *cy)
+{
+    if (!AP.on || AP.closing || !is_app("settings") || !se_awake()) return 0;
+    if (AS.sub == SE_WIFI) return wf_spin_at(cx, cy);
+    if (AS.sub == SE_CELL) return cell_spin_at(cx, cy);
+    if (AS.sub == SU_SUB) return su_spin_at(cx, cy);
+    return 0;
+}
+/* where the page wants it now: 1 when the layer changed (the caller relinks) */
+static int se_strip_spin_set(void)
+{
+    float cx = 0, cy = 0;
+    int want = sepspin.name && se_strip_spin_where(&cx, &cy);
+    if (!want) {
+        int was = SPS.on;
+        if (sepspin.bmp.px) relayer(&sepspin);
+        sepspin.hidden = 1;
+        SPS.on = 0;
+        return was;
+    }
+    if (!sepspin.bmp.px || cx != SPS.cx || cy != SPS.cy) {
+        relayer(&sepspin);
+        SPS.cx = cx;
+        SPS.cy = cy;
+        (void)mk(&sepspin, "settings-strip-spin", cx - 11, cy - 11, 22, 22, 0, 0);
+    }
+    sepspin.hidden = !sepspin.bmp.px;
+    SPS.on = 1;
+    se_spin_paint(&sepspin, SPS.cx, SPS.cy, SPS.k);
+    return 1;
 }
 static int se_spin_want(void) { return SE.page == SE_BT && se_awake() && (SEB.st == 1 || (SEB.st == 2 && SEB.scan)); }
 static int se_spin_where(float *cx, float *cy)
@@ -942,7 +982,10 @@ static void se_build(void)
         tk_layer_init(&senav, "settings-nav");
         tk_layer_init(&sespin, "settings-spin");
         sespin.hidden = 1;
+        tk_layer_init(&sepspin, "settings-strip-spin");   /* cp6 */
+        sepspin.hidden = 1;
     }
+    (void)se_strip_spin_set();                    /* cp6: a strip page's spinner (or none) */
     if (!se_owns()) { se_free(); return; }
     int p = AS.sub;
     if (SE.bld_page != p || !SE.built) {
@@ -1011,9 +1054,10 @@ static int se_layers(tk_layer **o)
     o[1] = &senav;
     o[2] = &sesb;
     o[3] = &sekb;
-    return 4;
+    o[4] = &sepspin;                              /* cp6: over the strip pages */
+    return 5;
 }
-static void se_close(void) { se_free(); SE.bld_page = -1; SE.press = -1; SE.ns_ = 0; for (int i = 0; i < SE_NPAGES; i++) SE.save[i] = 0; }
+static void se_close(void) { relayer(&sepspin); sepspin.hidden = 1; SPS.on = 0; se_free(); SE.bld_page = -1; SE.press = -1; SE.ns_ = 0; for (int i = 0; i < SE_NPAGES; i++) SE.save[i] = 0; }
 static void se_idle(void)
 {
     /* the page's half copies (its first scroll frame would make them: 6 ms) */
@@ -1205,21 +1249,36 @@ static int se_row_at(float x, float y)
 }
 static int se_row_live(const se_row *r)
 {
-    return r->kind == SR_NAV || r->kind == SR_ACT || r->kind == SR_PROFILE || (r->kind == SR_TOG && !r->dis) ||
-           (r->kind == SR_VAL && r->id == A_BTDEV);
+    return !r->dis && (r->kind == SR_NAV || r->kind == SR_ACT || r->kind == SR_PROFILE || r->kind == SR_TOG ||
+                       r->kind == SR_SEG || (r->kind == SR_VAL && r->id == A_BTDEV));
 }
-static void se_light(int i)
+/* cp6: what lights under the finger (shell_wifi.inc's press colours): a row its rect in its card (#3A3A3C), a
+ * switch row its switch's track (darker; the row itself doesn't light, iOS), a segmented control the segment under x */
+static void se_light(int i, float x)
 {
     SE.press = i;
     if (i < 0) { hl_off(); return; }
     se_row *r = &SE.r[i];
-    if (r->kind == SR_TOG) return;                       /* a switch row doesn't light (iOS) */
-    for (int s = 0; s < SE.ns; s++)
-        if (i >= SE.s[s].first && i < SE.s[s].first + SE.s[s].n) {
-            tk_rect rr = { LG_X, r->y - SE.scroll, LG_W, r->h }, g = { LG_X, SE.s[s].y - SE.scroll, LG_W, SE.s[s].h };
-            if (g.y < SE_TOP) { g.h -= SE_TOP - g.y; g.y = SE_TOP; }
-            hl_set(&apphl, rr, g, 26, W(.1f));
-        }
+    tk_rect rr = { LG_X, r->y - SE.scroll, LG_W, r->h }, g = rr;
+    float rad = LG_RAD;
+    tk_col c = SEP_ROW;
+    if (r->kind == SR_TOG) {
+        rr = g = (tk_rect){ SE_SWX, r->y + (r->h - KSW_H) / 2 - SE.scroll, KSW_W, KSW_H };
+        rad = KSW_H / 2;
+        c = SEP_SW;
+    } else if (r->kind == SR_SEG) {
+        int n = r->segn ? r->segn : 2, k = kit_segment_hit(x, LG_TX, LG_RE - 16 - LG_TX, n);
+        float sw = (LG_RE - 16 - LG_TX - 4) / n;
+        if (k < 0) { hl_off(); return; }
+        rr = g = (tk_rect){ LG_TX + 2 + sw * k, r->y + 12 - SE.scroll, sw, 28 };
+        rad = 14;
+        c = SEP_SEG;
+    } else
+        for (int s = 0; s < SE.ns; s++)
+            if (i >= SE.s[s].first && i < SE.s[s].first + SE.s[s].n) g = (tk_rect){ LG_X, SE.s[s].y - SE.scroll, LG_W, SE.s[s].h };
+    if (g.y < SE_TOP) { g.h -= SE_TOP - g.y; g.y = SE_TOP; }   /* not over the nav row */
+    if (g.h <= 0) { hl_off(); return; }
+    hl_set(&apphl, rr, g, rad, c);
 }
 static float se_slider_frac(float x)
 {
@@ -1237,7 +1296,13 @@ static void se_slider_set(float frac)
         if (CCS.built) cc_levels();
     }
     for (int i = 0; i < SE.nr; i++)
-        if (SE.r[i].kind == SR_SLIDER) kit_slider_drag(LG_TX + 30, SE.r[i].y + 16, LG_RE - 16 - 30 - LG_TX - 30, frac, LG_GROUND);
+        if (SE.r[i].kind == SR_SLIDER) {
+            kit_slider_drag(LG_TX + 30, SE.r[i].y + 16, LG_RE - 16 - 30 - LG_TX - 30, frac, LG_GROUND);
+            /* cp6: the grabbed knob grows a little about its centre (the kit's knob bitmap has 8 pt of shadow room) */
+            kslk.ox = kslk.x + PT(8 + KSL_KW / 2);
+            kslk.oy = kslk.y + PT(8 + KSL_KH / 2);
+            kslk.sx = kslk.sy = 1.12f;
+        }
 }
 static void se_touch(int ph, float x, float y, float t)
 {
@@ -1267,17 +1332,24 @@ static void se_touch(int ph, float x, float y, float t)
             SE.press = -4;
             return;
         }
-        if (SE.page == SE_SEARCH && y >= SE_SF_Y && y < SE_SF_Y + 48) { SE.press = x >= CONTENT_R - 48 ? -5 : -6; return; }
+        if (SE.page == SE_SEARCH && y >= SE_SF_Y && y < SE_SF_Y + 48) {
+            SE.press = x >= CONTENT_R - 48 ? -5 : -6;
+            if (SE.press == -5) {                        /* cp6: the field's x circle lights */
+                tk_rect c = { CONTENT_R - 44, SE_SF_Y + 2, 44, 44 };
+                hl_set(&apphl, c, c, 22, W(.16f));
+            }
+            return;
+        }
         int i = se_row_at(x, y);
         if (i >= 0 && SE.r[i].kind == SR_SLIDER) { SE.slider = 1; se_slider_set(se_slider_frac(x)); return; }
-        se_light(i >= 0 && se_row_live(&SE.r[i]) ? i : -1);
+        se_light(i >= 0 && se_row_live(&SE.r[i]) ? i : -1, x);
         return;
     }
     if (ph == 1) {
         tk_tracker_add(&SE.tr, y, t);
         if (SE.slider) { se_slider_set(se_slider_frac(x)); return; }
         float dy = y - SE.y0;
-        if (!SE.moved && (tk_fabsf(dy) > 6 || tk_fabsf(x - SE.x0) > 6)) { SE.moved = 1; se_light(-1); }
+        if (!SE.moved && (tk_fabsf(dy) > 6 || tk_fabsf(x - SE.x0) > 6)) { SE.moved = 1; se_light(-1, 0); }
         if (SE.moved && SE.press > -3) {
             float s = SE.base - dy, m = se_max();
             if (s < 0) s = -rubber(-s, H_PT);
@@ -1337,10 +1409,11 @@ static void se_touch(int ph, float x, float y, float t)
     int i = se_row_at(x, y);
     if (i < 0) return;
     se_row *r = &SE.r[i];
+    if (r->dis) { if (r->why) toast(r->why); return; }   /* cp6: a disabled row says why (never a silent tap) */
     if (r->kind == SR_TOG) se_toggle(i);
     else if (r->kind == SR_SEG && r->id == A_RANGE) {
         int k = kit_segment_hit(x, LG_TX, LG_RE - 16 - LG_TX, 2);
-        if (k >= 0 && k != BH.range) { BH.range = k; build_app_page(AP.a); }
+        if (k >= 0 && k != BH.range) { BH.range = k; sh_haptic_k(SH_HAP_SELECT); build_app_page(AP.a); }
     } else if (r->kind == SR_SEG && r->id == A_HAPLVL) {
         /* Haptic Strength: the level kept (haptic.level), its group redrawn, a sample at the new level */
         int k = kit_segment_hit(x, LG_TX, LG_RE - 16 - LG_TX, 4);
@@ -1382,8 +1455,19 @@ static int se_moving(void) { return SE.built && (SE.sp.live || SE.momentum || (S
  * it shows changed (at most every 0.3 s), never under a finger. */
 static int se_refresh(float t)
 {
-    if (!SE.built || !se_owns() || AP.closing) return 0;
     int ch = 0;
+    if (sepspin.name) {                                  /* cp6: a strip page's spinner: there or not, its step */
+        float cx = 0, cy = 0;
+        int want = se_strip_spin_where(&cx, &cy);
+        if (want != SPS.on || (want && (cx != SPS.cx || cy != SPS.cy))) { if (se_strip_spin_set()) relink(); ch = 1; }
+        else if (SPS.on && t - SPS.t >= 100) {
+            SPS.k = (SPS.k + 1) & 7;
+            SPS.t = t;
+            se_spin_paint(&sepspin, SPS.cx, SPS.cy, SPS.k);
+            ch = 1;
+        }
+    }
+    if (!SE.built || !se_owns() || AP.closing) return ch;
     if (SE.page == SE_BT) {
         int st = sh_bt_state(), aw = se_awake();
         if (st == 2 && aw) {
@@ -1415,6 +1499,7 @@ static int se_refresh(float t)
 }
 static float se_next_update(float t)
 {
+    if (SPS.on) return tk_maxf(15, 100 - (t - SPS.t));   /* cp6: the strip spinner's step */
     if (!SE.built || !se_owns() || AP.closing) return -1;
     if (SE.page == SE_BT) {
         if (!se_awake()) return SEB.scan ? 15 : -1;     /* asleep: the scan stops, nothing more */
@@ -1424,6 +1509,22 @@ static float se_next_update(float t)
     }
     if (SE.page == SE_DISPLAY && se_awake()) return tk_maxf(15, 2000 - (t - SEB.poll_t));
     return -1;
+}
+/* cp6: the strip pages' presses (shell_lock.c's app_press asks, over the press protocol: rect, clip, radius, colour) */
+#ifdef SH_HAS_STARTUP
+static int startup_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c);
+#endif
+static int ta_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c);
+static int se_strip_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
+{
+    if (!is_app("settings") || kit_on()) return 0;
+    if (AS.sub == SE_WIFI) return wf_press(x, y, r, g, rad, c);
+    if (AS.sub == SE_CELL) return cell_press(x, y, r, g, rad, c);
+    if (AS.sub == SE_TZ_PAGE) return ta_press(x, y, r, g, rad, c);
+#ifdef SH_HAS_STARTUP
+    if (AS.sub == SE_STARTUP_PAGE) return startup_press(x, y, r, g, rad, c);
+#endif
+    return 0;
 }
 /* the host's stills: "sub" names (display, wifi, cell as before; the new pages by name) and "sescroll" pt */
 static int se_sub_key(const char *k)
