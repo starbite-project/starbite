@@ -411,7 +411,8 @@ typedef struct {
 int sh_fw_get(sh_fw_t *f);                /* 1 the record, 0 its defaults (none yet), < 0 no home store */
 int sh_fw_set(const sh_fw_t *f);          /* written and read back: 0 */
 /* one-shots for an OS's next start (the loader's SBFW_REQ_*); WINRE is plan only (never fits) */
-enum { SH_REQ_VERBOSE = 1, SH_REQ_SAFE = 2, SH_REQ_SINGLE = 3, SH_REQ_PREV = 4, SH_REQ_XNU_SINGLE = 5, SH_REQ_WINRE = 6 };
+enum { SH_REQ_VERBOSE = 1, SH_REQ_SAFE = 2, SH_REQ_SINGLE = 3, SH_REQ_PREV = 4, SH_REQ_XNU_SINGLE = 5, SH_REQ_WINRE = 6,
+       SH_REQ_DRIVER_OFF = 7, SH_REQ_NO_SHELL = 8 };
 int sh_req_fits(const char *key, int action);
 int sh_req_start(const char *key, int action);
 /* the crash reports (the home store's crash log), i = 0 the newest; severity 0 info, 1 warning, 2 crash; utc 0 unknown */
@@ -427,6 +428,30 @@ typedef struct {
     char why[40], crash_key[24], crash_kind[24];
 } sh_fwinfo_t;
 int sh_fw_info(sh_fwinfo_t *i);           /* 1 the loader's table, 0 an older loader */
+/* Track J FW4 (Settings > Startup complete): health checks, the OS store, logs, Starbite Recovery's repair page and
+ * the update slots. Read-only except sh_logs_save (one volatile entry, "loader-logs", behind the store gate). Each
+ * call reads a few blocks at most (superblocks, the BCD hive for Windows: <= ~1 MiB), so it runs from a tap; the
+ * page shows a spinner first and calls on the next frame. Lines are plain words, "" ends them. */
+#define SH_HEALTH_LINES 14
+typedef struct {
+    int bad;                              /* problems found (0: healthy) */
+    int checked;                          /* 1 a file system was checked; 0 nothing to check (RAM only, no root) */
+    char fs[16];                          /* "FAT32" "NTFS" "ext4" "HFS+" "APFS" "-" */
+    char where[40];                       /* the root in words: "card blocks 1234+5678" / "UFS LINUX" */
+    char line[SH_HEALTH_LINES][72];
+} sh_health_t;
+int sh_health_os(const char *key, sh_health_t *h);   /* 0 done (h->bad, lines), < 0 refused: line[0] says why */
+int sh_store_check(sh_health_t *h);                  /* the home store: header, head backup, settings, crash log,
+                                                      * entries (sizes inside the store; no CRC pass): 0 done */
+int sh_logs_save(void);                   /* Starbite OS's log, the loader's table lines and the crash log into
+                                           * "loader-logs" (SBLOGS01, sbstore2.py logs reads it): 0 saved, < 0 not */
+int sh_restart_repair(void);              /* asks, then Starbite Recovery opens REPAIR AND RESET (key
+                                           * "recovery-repair"; an older loader: Starbite Recovery's main page) */
+/* Software Update's slots (docs/STARBITE-FIRMWARE-LAYER.md 10.5): active / trying 0 the normal image, 1 A, 2 B;
+ * a slot's state 1 a valid image (version), 0 empty or not valid, -1 no slot entry on this store */
+typedef struct { int active, trying, state[3]; char version[3][32]; } sh_slots_t;
+int sh_slots_get(sh_slots_t *s);          /* 0 ok, < 0 no home store */
+int sh_shell_set(int on);                 /* Starbite OS at power-on: written as the user's choice; 0 ok */
 
 /* ---- Track A: drivers for the shell (the kernel: kern_next.c's block of that name on kern/bt.c, cam.c, shub_more.c,
  * bathealth.c, haptic.c; the host: simulated). Nothing here runs until the shell calls it, except the LED policy and
