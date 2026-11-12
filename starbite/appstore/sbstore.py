@@ -819,7 +819,35 @@ def apt_progress_cb(prog, lo_dl=0.0, hi_dl=0.6):
     return cb
 
 
+DEB_NET = ("deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian trixie main\n"
+           "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian-security "
+           "trixie-security main\n")
+
+
+def ensure_net_sources():
+    """online: Debian's mirror as an apt source (the base ships offline: file:/repo only, debian.list.disabled).
+    Returns True when a source was added (then apt needs an update)."""
+    if not net_up():
+        return False
+    d = rp("/etc/apt/sources.list.d")
+    try:
+        for fn in os.listdir(d):
+            if fn.endswith((".list", ".sources")) and "deb.debian.org" in open(os.path.join(d, fn)).read():
+                return False
+        if os.path.exists(rp("/etc/apt/sources.list")) and "deb.debian.org" in open(rp("/etc/apt/sources.list")).read():
+            return False
+        if not os.path.exists(rp("/usr/share/keyrings/debian-archive-keyring.gpg")):
+            return False
+        with open(os.path.join(d, "sbstore-debian.list"), "w") as f:
+            f.write(DEB_NET)
+        log("network up: Debian's mirror added as an apt source")
+        return True
+    except OSError:
+        return False
+
+
 def apt_update(app_id=None):
+    ensure_net_sources()
     if net_up():
         rc, _ = run(C.apt + ["-q", "update"], logto=_logp(app_id), timeout=900)
         if rc:
@@ -839,6 +867,12 @@ def apt_install(pkgs, app_id, prog=NOPROG, cancel=None, auto=False):
     rc, out = run(C.apt + ["-y", "-q", "--no-install-recommends", "-o", "APT::Status-Fd=@STATUSFD@",
                            "-o", "DPkg::Lock::Timeout=120", "install"] + missing,
                   logto=_logp(app_id), status_fd_cb=apt_progress_cb(prog), cancel=cancel)
+    if rc and ("Unable to locate package" in out or "has no installation candidate" in out) and net_up():
+        ensure_net_sources()
+        run(C.apt + ["-q", "update"], logto=_logp(app_id), timeout=900)
+        rc, out = run(C.apt + ["-y", "-q", "--no-install-recommends", "-o", "APT::Status-Fd=@STATUSFD@",
+                               "-o", "DPkg::Lock::Timeout=120", "install"] + missing,
+                      logto=_logp(app_id), status_fd_cb=apt_progress_cb(prog), cancel=cancel)
     if rc:
         if "Unable to locate package" in out or "has no installation candidate" in out:
             raise NeedsNet("package not available", "apt: %s" % out.strip().splitlines()[-1][:200])

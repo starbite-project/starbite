@@ -14,7 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 import sbstore  # noqa: E402
 
-cat = os.path.abspath(sys.argv[1])
+cat = sys.argv[1] if sys.argv[1].endswith(".json") else os.path.abspath(sys.argv[1])
 jobs = sys.argv[2:] or ["neovim:release", "gnome-mines:distro", "fzf:release"]
 d = tempfile.mkdtemp()
 shm = os.path.join(d, "shm")
@@ -24,9 +24,11 @@ sockp = os.path.join(d, "sbwl.sock")
 srv = socket.socket(socket.AF_UNIX)
 srv.bind(sockp)
 srv.listen(1)
-env = dict(os.environ, SBSTORE_SHM=shm, SBSTORE_SOCK=sockp, SBSTORE_CATALOG=cat, SBSTORE_MIRROR="/nonexistent",
-           SBSTORE_REPO="/nonexistent")
-p = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "..", "sbstore.py"), "daemon"], env=env,
+env = dict(os.environ, SBSTORE_SHM=shm, SBSTORE_SOCK=sockp, SBSTORE_CATALOG=cat)
+env.setdefault("SBSTORE_MIRROR", "/nonexistent")
+env.setdefault("SBSTORE_REPO", "/nonexistent")
+daemon = os.environ.get("SBSTORE_BIN") or os.path.join(HERE, "..", "sbstore.py")
+p = subprocess.Popen([sys.executable, "-I", daemon, "daemon"], env=env,
                      stderr=open(os.path.join(d, "daemon.log"), "w"))
 srv.settimeout(60)
 c, _ = srv.accept()
