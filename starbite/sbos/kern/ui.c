@@ -2482,8 +2482,11 @@ void kui_guest_open(int mode)
     guest_view_sync();
 }
 
+int (*kui_power_hook)(void);                /* Track A, 1.0: Next's own power sheet (sh_power_held); 1 = handled */
 void kui_power_menu(void)
 {
+    if (kui_power_hook && kui_power_hook())
+        return;
     if (screen == SCR_POWER || screen == SCR_SOS)
         return;
     cf_return = screen == SCR_LIGHT ? light_return : screen;

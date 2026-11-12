@@ -862,6 +862,8 @@ int sh_boot_reason(char *why, int cap) { if (why && cap > 0) snprintf(why, (size
 int sh_restart(void) { fprintf(stderr, "host: restart\n"); return 0; }
 int sh_power_off(void) { fprintf(stderr, "host: power off\n"); return 0; }
 
+__attribute__((weak)) void sh_power_held(void) { fprintf(stderr, "host: Power held (no power sheet yet)\n"); }
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: sbtk-host PAK still|film|bench ...\n"); return 2; }

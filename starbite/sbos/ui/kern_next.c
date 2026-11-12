@@ -854,6 +854,7 @@ static int same_item(const tk_gpu_item *a, const tk_gpu_item *b)
     return same;
 }
 static void boot_notes(void);                    /* Track A, 1.0 (the end of this file) */
+static int next_power_held(void);
 static tk_gpu_item prevq[TK_GPU_MAX], cacheq[TK_GPU_MAX], gx[TK_GPU_MAX];
 static int prev_n, cache_n, stable_p = -1, stable_k;
 static uint32_t wall_made, cache_made;
@@ -1019,6 +1020,7 @@ void next_kinit(void)
         sb_log(a.b);
     }
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
+    kui_power_hook = next_power_held;            /* Track A, 1.0: Power held: the shell's power sheet */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
     kui_sleep_hook = next_sleep;
     kui_save_hook = next_save;                   /* Track A lifecycle: the pages' on_save before a restart / switch-off */
@@ -2281,4 +2283,11 @@ int sh_power_off(void)
     power_off_now();
     return -1;                          /* back here: refused (power_off_now said why) */
 #endif
+}
+/* Power held: the shell's power sheet (Track B's P3x defines sh_power_held; this weak one is the fallback) */
+__attribute__((weak)) void sh_power_held(void) { sb_log("next: Power held: no power sheet in this shell yet"); }
+static int next_power_held(void)
+{
+    sh_power_held();
+    return 1;
 }

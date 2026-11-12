@@ -421,3 +421,6 @@ int sh_boot_reason(char *why, int cap);
  * < 0: refused (e.g. a heat session still running: the shell says so) */
 int sh_restart(void);
 int sh_power_off(void);
+/* the platform: Power held about a second (the screen is on now): the shell shows its power sheet (slide to power off,
+ * Restart, Cancel). Track B defines it; until then a weak default does nothing */
+void sh_power_held(void);
