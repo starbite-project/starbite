@@ -64,7 +64,7 @@ exit 0
 #include "util/u_dynarray.h"
 #include "util/u_math.h"
 void disassemble_bifrost(FILE *fp, const void *code, size_t size, bool verbose);
-#include "../sbos/kern/lens.h"         /* v6: Liquid Glass's constants (lens_px follows its lens_shade) */
+#include "../sbos/kern/lens.h"         /* Liquid Glass (V3): lens_px does its lens_offset, lens_face, lens_contour, lens_blend */
 
 #define GPU_ID_G72 0x6221u
 #define VA_BASE 0x02000000ull           /* SB_GPU_VA: the data window */
@@ -83,6 +83,7 @@ void disassemble_bifrost(FILE *fp, const void *code, size_t size, bool verbose);
 #define BIN_H 93u
 #define BIN_B 128u
 _Static_assert(O_BIN + BIN_W * BIN_H * BIN_B <= 0x100000u, "the bins run into COMP2's code");
+_Static_assert(O_C2 + 64u + 200u * C2_QB <= O_BIN, "COMP2's quads run into the bins");
 #define WG 16u
 
 enum { SH_FILL, SH_COMP, SH_DOWN, SH_UP, SH_COMP2, SH_UP2X, NSH };   /* UP2X (v7) in comp2's old slot, 0x9000 */
@@ -289,8 +290,11 @@ static void build_comp(nir_builder *b)
  *   +64  radius ccx ccy ex      (flag 128) the rounded clip: centre, half size - radius   +80  ey ft it fb
  *   +96  ib len k s0            (flag 8) fade = sat((fy-ft)*it) * sat((fb-fy)*ib); (16 / 32) the 3-slice
  *   +112 s1 mstride mask(64)    +128 backdrop(64) bstride bk   +144 bw bh -  -     (flag 4) glass
- * v9, (flag 256) Liquid Glass: a transparent solid over the glass shape (the rounded box at +64 is the shape's),
- * +100..+115 the lens (lb, lt, lc, lr), the backdrop at +128, the tone at +152, +156, +120 (k, a0, a1): lens_px;
+ * v9, (flag 256) Liquid Glass: a transparent solid over the glass shape (the rounded box at +64 is the shape's; no
+ * flag 128: the lens's coverage is its own, its contour shows outside the shape), the backdrop at +128; glass V3,
+ * the lens's record (lens.h LQ_*): +100 1/h, A, 1/pt (f32), and as fp16 pairs (lo, hi) the face, glint and contour
+ * where a lens quad has no use for the words: +48 (E.r, E.g), +52 (E.b, KB), +56 (T.r, T.g) (src and stride: v3,
+ * loaded anyway), +112 (T.b, K), +116 (lift, contour edge), +120 (glint, contour peak), +124 (peak x dir, 0): lens_px;
  * and the bins at O_BIN: one per 32 x 32 px (BIN_W per row), BIN_B bytes: [0] count (255: not damaged, the pixels
  * keep what the buffer holds), [1..] quad indices bottom to top. A pixel only visits its bin's quads. */
 #ifndef C2_PX
@@ -331,8 +335,9 @@ static nir_def *fetch16(nir_builder *b, nir_def *base, nir_def *stride, nir_def 
    nir_def *bl = nir_iand_imm(b, p, 0xff);
    return nir_u2f16(b, nir_vec3(b, r, g, bl));
 }
-static nir_def *bil_bd(nir_builder *b, nir_def *bd, nir_def *bs, nir_def *bw, nir_def *bh, nir_def *bk, nir_def *px,
-                       nir_def *py)
+/* the backdrop bilinear in fp16, 0..1 (glass V3 works the face in fp16 too: two values a register; in f32 it spilled) */
+static nir_def *bil_bd16(nir_builder *b, nir_def *bd, nir_def *bs, nir_def *bw, nir_def *bh, nir_def *bk, nir_def *px,
+                         nir_def *py)
 {
    nir_def *uu = nir_fadd_imm(b, nir_fmul(b, px, bk), -0.5), *vv = nir_fadd_imm(b, nir_fmul(b, py, bk), -0.5);
    nir_def *uf = nir_ffloor(b, uu), *vf = nir_ffloor(b, vv);
@@ -341,15 +346,18 @@ static nir_def *bil_bd(nir_builder *b, nir_def *bd, nir_def *bs, nir_def *bw, ni
    nir_def *ju1 = nir_iadd_imm(b, ju, 1), *jv1 = nir_iadd_imm(b, jv, 1);
    nir_def *top = nir_flrp(b, fetch16(b, bd, bs, bw, bh, ju, jv), fetch16(b, bd, bs, bw, bh, ju1, jv), tu);
    nir_def *bot = nir_flrp(b, fetch16(b, bd, bs, bw, bh, ju, jv1), fetch16(b, bd, bs, bw, bh, ju1, jv1), tu);
-   return nir_fmul_imm(b, nir_f2f32(b, nir_flrp(b, top, bot, tv)), 1.0 / 255.0);
+   return nir_fmul_imm(b, nir_flrp(b, top, bot, tv), 1.0 / 255.0);
 }
+static nir_def *lo16(nir_builder *b, nir_def *w) { return nir_unpack_32_2x16_split_x(b, w); }   /* fp16 pairs */
+static nir_def *hi16(nir_builder *b, nir_def *w) { return nir_unpack_32_2x16_split_y(b, w); }
+static nir_def *h16(nir_builder *b, float v) { return nir_imm_floatN_t(b, v, 16); }
 /* v9, Liquid Glass (flag 256, a quad of its own over the glass shape): the shape's rounded box (+64 v4, +80 v5.x),
- * the lens (+100 lb, +104 lt, +108 lc, +112 lr), the backdrop (+128 v8, +144 v9); lens.h's lens_sd + lens_eval +
- * lens_shade step by step. Returns the shaded backdrop (opaque) */
-static nir_def *lens_px(nir_builder *b, nir_def *q, nir_def *fx, nir_def *fy)
+ * glass V3's record (+96 v6.yzw f32; fp16 pairs in v3.xyz and +112 v7), the backdrop (+128 v8, +144 v9.xy);
+ * lens.h's lens_sd, lens_offset, lens_face, lens_contour and lens_blend step by step (the face, glint and contour in
+ * fp16). acc: what is under it, al: the quad's alpha x fade. Returns the new acc */
+static nir_def *lens_px(nir_builder *b, nir_def *q, nir_def *v3, nir_def *fx, nir_def *fy, nir_def *acc, nir_def *al)
 {
    nir_def *v4 = ld4(b, nir_iadd_imm(b, q, 64)), *v5 = ld4(b, nir_iadd_imm(b, q, 80));
-   nir_def *v6 = ld4(b, nir_iadd_imm(b, q, 96)), *v7 = ld4(b, nir_iadd_imm(b, q, 112));
    nir_def *rad = ch(b, v4, 0);
    nir_def *dx = nir_fsub(b, fx, ch(b, v4, 1)), *dy = nir_fsub(b, fy, ch(b, v4, 2));
    nir_def *sx = nir_bcsel(b, nir_flt_imm(b, dx, 0), nir_imm_float(b, -1), nir_imm_float(b, 1));
@@ -365,44 +373,43 @@ static nir_def *lens_px(nir_builder *b, nir_def *q, nir_def *fx, nir_def *fy)
    nir_def *il = nir_frsq(b, nir_ffma(b, nx0, nx0, nir_fmul(b, ny0, ny0)));
    nir_def *gx = nir_fmul(b, nir_fmul(b, sx, nx0), il), *gy = nir_fmul(b, nir_fmul(b, sy, ny0), il);
    nir_def *s = nir_fmax(b, nir_fneg(b, d), z);
-   /* the profile and Snell (n 1.5): D */
-   nir_def *t = nir_fsat(b, nir_fdiv(b, s, ch(b, v6, 1)));
-   nir_def *u = nir_fsub(b, one, t), *u2 = nir_fmul(b, u, u);
-   nir_def *h = nir_fsqrt(b, nir_fsqrt(b, nir_fsub(b, one, nir_fmul(b, u2, u2))));
-   nir_def *h3 = nir_fmax(b, nir_fmul(b, nir_fmul(b, h, h), h), nir_imm_float(b, 1e-6f));
-   nir_def *hp = nir_fmin(b, nir_fdiv(b, nir_fmul(b, u2, u), h3), nir_imm_float(b, 8));
-   nir_def *sl = nir_fmul(b, ch(b, v6, 2), hp);
-   nir_def *nz = nir_frsq(b, nir_ffma(b, sl, sl, one)), *nx = nir_fmul(b, sl, nz);
-   const double eta = 1.0 / 1.5;
-   nir_def *kk = nir_fsub(b, one, nir_fmul_imm(b, nir_fsub(b, one, nir_fmul(b, nz, nz)), eta * eta));
-   nir_def *a = nir_fsub(b, nir_fmul_imm(b, nz, eta), nir_fsqrt(b, nir_fmax(b, kk, z)));
-   nir_def *rx = nir_fabs(b, nir_fmul(b, a, nx)), *rz = nir_fadd_imm(b, nir_fmul(b, a, nz), -eta);
-   nir_def *D = nir_fmul(b, nir_fmul(b, nir_fdiv(b, rx, nir_fmax(b, nir_fneg(b, rz), nir_imm_float(b, 1e-4f))), h), ch(b, v6, 3));
-   nir_def *ox = nir_fneg(b, nir_fmul(b, gx, D)), *oy = nir_fneg(b, nir_fmul(b, gy, D));
-   /* the light */
-   nir_def *f = nir_ffma(b, gx, nir_imm_float(b, LENS_LX), nir_fmul_imm(b, gy, LENS_LY));
-   nir_def *fp = nir_fmax(b, f, z), *fn = nir_fmax(b, nir_fneg(b, f), z);
-   nir_def *rho = nir_fexp2(b, nir_fneg(b, nir_fmul(b, s, ch(b, v7, 0))));
-   nir_def *spec = nir_ffma(b, nir_fmul_imm(b, nir_fmul(b, fp, fp), .55), fp, nir_fmul_imm(b, nir_fmul(b, nir_fmul(b, fn, fn), fn), .25));
-   nir_def *w = nir_fsub(b, one, nz), *w2 = nir_fmul(b, w, w);
-   nir_def *fres = nir_ffma(b, nir_fmul_imm(b, nir_fmul(b, w2, w2), .48), w, nir_imm_float(b, .02f));
-   nir_def *e = nir_fsub(b, nir_ffma(b, rho, spec, fres), nir_fmul_imm(b, nir_fmul(b, u2, fn), .06));
-   /* the backdrop at p + o */
+   /* G1, lens_offset: t = sat(1 - s / h), d = A (1 - sqrt(1 - t^2)), the backdrop at p - g d */
+   nir_def *v6 = ld4(b, nir_iadd_imm(b, q, 96));
+   nir_def *t = nir_fsat(b, nir_ffma(b, nir_fneg(b, s), ch(b, v6, 1), one));
+   nir_def *D = nir_fmul(b, ch(b, v6, 2), nir_fsub(b, one, nir_fsqrt(b, nir_ffma(b, nir_fneg(b, t), t, one))));
+   /* what the face needs of the geometry, in fp16: the glint's ramp position, the lobe, the distance */
+   nir_def *sp = nir_f2f16(b, nir_fmul(b, s, ch(b, v6, 3)));
+   nir_def *lobe = nir_fsub(b, h16(b, 1), nir_f2f16(b, nir_fabs(b, gx)));
+   nir_def *d16 = nir_f2f16(b, d);
    nir_def *v8 = ld4(b, nir_iadd_imm(b, q, 128)), *v9 = ld4(b, nir_iadd_imm(b, q, 144));
-   nir_def *g = bil_bd(b, p64(b, v8, 0), ch(b, v8, 2), ch(b, v9, 0), ch(b, v9, 1), ch(b, v8, 3), nir_fadd(b, fx, ox), nir_fadd(b, fy, oy));
-   nir_def *rgb0 = nir_vec3(b, ch(b, g, 0), ch(b, g, 1), ch(b, g, 2));
-   nir_def *Y = nir_fdot3(b, rgb0, nir_imm_vec3(b, .2126f, .7152f, .0722f));
-   /* v10: the saturation (+116: 1.2 over a live backdrop, 1 over the wallpaper's, already saturated) */
-   nir_def *rgb = nir_fsat(b, nir_ffma(b, nir_fsub(b, rgb0, Y), ch(b, v7, 1), Y));
-   /* the tone (1.0, glass V2: lens_shade_t): k c + a0 + a1 sat((Y - .40) x 10), k at +152, a0 at +156, a1 at +120
-    * (regular .82 / .04 / .14) */
-   nir_def *lt = nir_fsat(b, nir_fmul_imm(b, nir_fadd_imm(b, Y, -.40), 10.0));
-   nir_def *add = nir_ffma(b, lt, ch(b, v7, 2), ch(b, v9, 3));
-   nir_def *v = nir_ffma(b, rgb, ch(b, v9, 2), add);
-   nir_def *up = nir_ffma(b, nir_fsub(b, one, v), e, v);
-   nir_def *dn = nir_fmul(b, v, nir_fadd_imm(b, e, 1.0));
-   nir_def *o = nir_bcsel(b, nir_flt(b, z, e), up, dn);
-   return nir_vec4(b, ch(b, o, 0), ch(b, o, 1), ch(b, o, 2), one);
+   nir_def *rgb = bil_bd16(b, p64(b, v8, 0), ch(b, v8, 2), ch(b, v9, 0), ch(b, v9, 1), ch(b, v8, 3),
+                           nir_ffma(b, nir_fneg(b, gx), D, fx), nir_ffma(b, nir_fneg(b, gy), D, fy));
+   /* G2, lens_face: face = sat(E + T lumY + (K + KB sat((chroma - .15) / .65)) (bg - Y)) */
+   nir_def *v7 = ld4(b, nir_iadd_imm(b, q, 112));
+   nir_def *r = ch(b, rgb, 0), *gg = ch(b, rgb, 1), *bb = ch(b, rgb, 2);
+   nir_def *Y = nir_ffma(b, r, h16(b, .2126f), nir_ffma(b, gg, h16(b, .7152f), nir_fmul_imm(b, bb, .0722)));
+   nir_def *lum = nir_ffma(b, nir_fmul(b, lo16(b, ch(b, v7, 1)), Y), nir_fsub(b, h16(b, 1), Y), Y);
+   nir_def *cmax = nir_fmax(b, nir_fmax(b, r, gg), bb), *cmin = nir_fmin(b, nir_fmin(b, r, gg), bb);
+   nir_def *boost = nir_fsat(b, nir_fmul_imm(b, nir_fadd_imm(b, nir_fsub(b, cmax, cmin), -.15), 1.0 / .65));
+   nir_def *K = nir_ffma(b, hi16(b, ch(b, v3, 1)), boost, hi16(b, ch(b, v7, 0)));
+   nir_def *E = nir_vec3(b, lo16(b, ch(b, v3, 0)), hi16(b, ch(b, v3, 0)), lo16(b, ch(b, v3, 1)));
+   nir_def *T = nir_vec3(b, lo16(b, ch(b, v3, 2)), hi16(b, ch(b, v3, 2)), lo16(b, ch(b, v7, 0)));
+   nir_def *f = nir_fsat(b, nir_ffma(b, nir_fsub(b, rgb, Y), K, nir_ffma(b, T, lum, E)));
+   /* G4, the glint: f toward 1.6 + 2.85 (f - luma(f)) by GL (1 - |g.x|) max(sat(1 - s / 1.2 pt), .21 sat(1 - s / 4.8 pt)) */
+   nir_def *Lf = nir_ffma(b, ch(b, f, 0), h16(b, .2126f), nir_ffma(b, ch(b, f, 1), h16(b, .7152f), nir_fmul_imm(b, ch(b, f, 2), .0722)));
+   nir_def *r1 = nir_fsat(b, nir_ffma(b, sp, h16(b, -1.0f / 1.2f), h16(b, 1)));
+   nir_def *r2 = nir_fmul_imm(b, nir_fsat(b, nir_ffma(b, sp, h16(b, -1.0f / 4.8f), h16(b, 1))), .21);
+   nir_def *gw = nir_fmul(b, nir_fmul(b, lo16(b, ch(b, v7, 2)), lobe), nir_fmax(b, r1, r2));
+   nir_def *tgt = nir_fadd_imm(b, nir_fmul_imm(b, nir_fsub(b, f, Lf), 2.85), 1.6);
+   nir_def *o = nir_f2f32(b, nir_fsat(b, nir_flrp(b, f, tgt, gw)));
+   /* G5, lens_contour + lens_blend: a black layer outside the shape, then the face by the coverage */
+   nir_def *ct = nir_fmul(b, nir_fsub(b, hi16(b, ch(b, v7, 2)), nir_fmul(b, lo16(b, ch(b, v7, 3)), lobe)),
+                          nir_fsat(b, nir_fsub(b, hi16(b, ch(b, v7, 1)), d16)));
+   nir_def *cov = nir_fsat(b, nir_fsub(b, h16(b, 0.5f), d16));
+   nir_def *x = nir_fmul(b, al, nir_f2f32(b, nir_fmul(b, ct, nir_fsub(b, h16(b, 1), cov))));
+   nir_def *m = nir_fmul(b, al, nir_f2f32(b, cov));
+   nir_def *dark = nir_ffma(b, acc, nir_fsub(b, one, x), nir_vec4(b, z, z, z, x));
+   return nir_flrp(b, dark, nir_vec4(b, ch(b, o, 0), ch(b, o, 1), ch(b, o, 2), one), m);
 }
 
 static void build_comp2(nir_builder *b)
@@ -515,8 +522,7 @@ static void build_comp2(nir_builder *b)
                   /* v9: Liquid Glass (its own quad: a transparent solid over the glass shape) */
                   nir_push_if(b, flag(b, flags, 256));
                   {
-                     nir_def *lc = lens_px(b, q, fx[k], fy);
-                     nir_store_var(b, acc[k], nir_flrp(b, nir_load_var(b, acc[k]), lc, alpha), 0xf);
+                     nir_store_var(b, acc[k], lens_px(b, q, v3, fx[k], fy, nir_load_var(b, acc[k]), alpha), 0xf);
                   }
                   nir_pop_if(b, NULL);
                   nir_variable *src = nir_local_variable_create(b->impl, glsl_vec4_type(), "src");

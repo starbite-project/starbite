@@ -840,15 +840,17 @@ _Static_assert(sizeof(tk_gpu_item) == sizeof(struct gc_quad), "tk_gpu_item is gp
  * cached: its frames read base_half bilinearly as they come. */
 static int same_item(const tk_gpu_item *a, const tk_gpu_item *b)
 {
-    return a->src == b->src && a->stride == b->stride && a->w == b->w && a->h == b->h && a->flags == b->flags &&
+    int same = a->src == b->src && a->stride == b->stride && a->w == b->w && a->h == b->h && a->flags == b->flags &&
            a->solid == b->solid && a->alpha == b->alpha && a->dx0 == b->dx0 && a->dy0 == b->dy0 && a->isx == b->isx &&
            a->isy == b->isy && a->cx0 == b->cx0 && a->cy0 == b->cy0 && a->cx1 == b->cx1 && a->cy1 == b->cy1 &&
            a->radius == b->radius && a->ft0 == b->ft0 && a->ft1 == b->ft1 && a->fb0 == b->fb0 && a->fb1 == b->fb1 &&
            a->len == b->len && a->s0 == b->s0 && a->s1 == b->s1 && a->mask == b->mask && a->mstride == b->mstride &&
            a->bd == b->bd && a->bstride == b->bstride && a->bk == b->bk && a->bw == b->bw && a->bh == b->bh &&
-           a->gen == b->gen && a->lx == b->lx && a->ly == b->ly && a->lw == b->lw && a->lh == b->lh && a->lb == b->lb &&
-           a->lt == b->lt && a->lc == b->lc && a->lr == b->lr && a->lsat == b->lsat && a->live == b->live &&
-           a->lk == b->lk && a->la0 == b->la0 && a->la1 == b->la1;
+           a->gen == b->gen && a->lx == b->lx && a->ly == b->ly && a->lw == b->lw && a->lh == b->lh &&
+           a->lsat == b->lsat && a->live == b->live;
+    for (unsigned k = 0; same && k < sizeof a->lq / sizeof a->lq[0]; k++)   /* glass V3: the lens's record */
+        same = a->lq[k] == b->lq[k];
+    return same;
 }
 static tk_gpu_item prevq[TK_GPU_MAX], cacheq[TK_GPU_MAX], gx[TK_GPU_MAX];
 static int prev_n, cache_n, stable_p = -1, stable_k;

@@ -579,15 +579,15 @@ struct gc_quad {
     uint32_t bstride;
     float bk;
     uint32_t bw, bh;
-    float lx, ly, lw, lh, lb, lt, lc, lr;   /* v9 (GC_LENS): the glass shape (screen px; radius in radius) and its lens
-                                             * (lens.h lens_par); the quad is a transparent solid, its src unused */
+    float lx, ly, lw, lh;               /* v9 (GC_LENS): the glass shape (screen px; radius in radius); the quad is a
+                                         * transparent solid (its src unused) reaching LENS_APRON px past the shape */
     float lsat;                         /* v10 (GC_LENS): the backdrop's saturation (0 = 1) */
     uint32_t live;                      /* v10 (GC_LENS, the caller's): the backdrop is its first `live` quads, blurred
                                          * (gpucomp_backdrop); 0: bd as given */
     const uint8_t *occ;                 /* (CPU only, may be 0) src's block map, occ_w x occ_h: bins skip empty blocks */
     uint32_t occ_w, occ_h;
     uint32_t gen;                       /* (CPU only) the caller's content stamp of src / mask / backdrop */
-    float lk, la0, la1;                 /* 1.0 (GC_LENS, glass V2): the tone (lens.h lens_tone); lk 0 = regular */
+    float lq[16];                       /* 1.0 (GC_LENS, glass V3): the lens's record (lens.h lens_make, LQ_N) */
 };
 int gpucomp_init(void *heap, uint64_t bytes);
 /* the last compose's bins: entries drawn, entries culled under opaque quads, entries skipped over empty blocks */
