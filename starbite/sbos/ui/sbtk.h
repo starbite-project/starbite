@@ -182,6 +182,8 @@ struct tk_layer {
     /* compositor state */
     float gsh[24][5];          /* v8: the glass shapes in its mask (x, y, w, h, r in bitmap px): the lens's geometry */
     int ngsh;
+    uint32_t gtint[24];        /* V2 (TK_GLASS_SHAPES_V2): each shape's tint, ARGB, 0 none */
+    uint8_t gvar[24], gpress[24];   /* V2: 0 regular / 1 clear (iOS 26); the press flex 0..255 (0 none) */
     uint32_t gpu_gen;          /* P4: gen + 1 when the GPU last had this layer's bitmap and mask flushed to it */
     uint8_t *gpu_occ;          /* P4 v4: per 32 px block of bmp 0 empty / 1 partial / 2 opaque (the GPU's bins skip and cull) */
     uint32_t gpu_occ_w, gpu_occ_h, gpu_occ_cap, gpu_occ_frame;
@@ -194,7 +196,13 @@ void tk_layer_init(tk_layer *l, const char *name);
 void tk_layer_add(tk_layer *parent, tk_layer *child);     /* appended on top */
 void tk_layer_dirty(tk_layer *l);                         /* its bitmap changed */
 void tk_layer_prepare(tk_layer *l);                       /* make its half copy now (idle time), not on first motion */
-void tk_layer_glass_shape(tk_layer *l, float x, float y, float w, float h, float r);   /* v8: a rounded box of its mask */
+void tk_layer_glass_shape(tk_layer *l, float x, float y, float w, float h, float r);
+/* V2 (Track A's request): each recorded shape carries a variant, a tint and a press; tk_layer_glass_shape takes them
+ * from tk_gstyle (set it around a d_glass call; {0, 0, 0} = regular, untinted, at rest) */
+#define TK_GLASS_SHAPES_V2 1
+typedef struct { int variant; uint32_t tint; float press; } tk_gstyle_t;
+extern tk_gstyle_t tk_gstyle;
+void tk_layer_glass_shape_v2(tk_layer *l, float x, float y, float w, float h, float r, int variant, uint32_t tint, float press);   /* v8: a rounded box of its mask */
 
 /* P4, the GPU compositor (kernel gpucomp.c): one draw item as the GPU takes it, the layout of the kernel's struct
  * gc_quad (a bitmap or a solid of w x h, isx / isy source px per screen px from (dx0, dy0), alpha, the clip rect with
