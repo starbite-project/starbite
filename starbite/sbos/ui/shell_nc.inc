@@ -773,12 +773,13 @@ static int nc_launch(unsigned id)
 {
     int i = nc_find(id);
     if (i < 0) return 0;
+    if (locked && pc_gate_launch(id)) return 1;   /* Track A: from the lock, the passcode first (it launches after) */
     int a = nc_app(NI[i].who);
     if (a >= 0) cm_nc_launch(NI[i].who, NI[i].title, a);   /* helper I: a message's thread, a missed call's Recents */
     nc_remove(i);
     if (a < 0) return 0;                    /* nothing to open (an unknown poster): read and cleared */
     if (locked) {
-        /* from the lock's Centre: the lock goes away behind it (no passcode here), the app opens over home */
+        /* from the lock's Centre: the lock goes away behind it (Track A: the passcode was asked above, when set) */
         sp_lock.live = 0;
         set_lock(-H_PT);
         locked = 0;

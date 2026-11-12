@@ -351,6 +351,31 @@ int sh_card_set(const sh_card_t *c) { struct surv_card k; memcpy(&k, c, sizeof k
 const char *sh_card_label(int i) { return i >= 0 && i < SURV_CARD_NF ? surv_card_label[i] : ""; }
 int sh_last2(void) { return surv_last2(); }
 int sh_sos_next(void) { return 50; }      /* the host: the old 20 Hz poll */
+/* Track A: the passcode on kern/passcode.c itself (in RAM, on the film's clock: surv_host_now_ms; no wall clock),
+ * Auto-Lock a number. States: pass=DIGITS sets a passcode, passfail=:N makes N wrong tries now */
+#include "../../kern/passcode.h"
+static int host_autolock = 30;
+int sh_pass_on(void) { return pass_len() > 0; }
+int sh_pass_len(void) { return pass_len(); }
+int sh_pass_wait(void) { return (int)pass_wait(surv_host_now_ms); }
+int sh_pass_fails(void) { return pass_fails(); }
+int sh_pass_check(const char *d)
+{
+    int r = pass_check(d, surv_host_now_ms, 0);
+    fprintf(stderr, "passcode: %s (wrong tries in a row %d, wait %u s)\n", r == 1 ? "right" : r == 0 ? "wrong" : "refused: a wait runs",
+            pass_fails(), pass_wait(surv_host_now_ms));
+    return r;
+}
+int sh_pass_set(const char *old, const char *nw)
+{
+    uint8_t salt[PASS_SALT];
+    for (unsigned i = 0; i < PASS_SALT; i++) salt[i] = (uint8_t)rand();
+    int r = pass_set(old, nw, salt, surv_host_now_ms, 0);
+    fprintf(stderr, "passcode: %s\n", r ? "not changed" : pass_len() ? "set" : "removed");
+    return r;
+}
+int sh_autolock(void) { return host_autolock; }
+void sh_autolock_set(int s) { host_autolock = s; fprintf(stderr, "auto-lock: %d s (0 never)\n", s); }
 const char *sh_last2_why(void) { return surv_last2_why(); }
 int sh_last2_set(int on) { fprintf(stderr, "last 2 %%: %s\n", on ? "on" : "off"); return surv_last2_set(on, "the switch in Emergency"); }
 int sh_last2_auto(void) { return surv_last2_auto; }
@@ -482,6 +507,8 @@ static void apply_state(const char *st)
         return;
     }
     if (!strcmp(what, "comms")) { comms_fake_state(key, v); return; }          /* helper I: comms=incoming, ... */
+    if (!strcmp(what, "pass")) { (void)sh_pass_set("", key); return; }         /* Track A: pass=246810 */
+    if (!strcmp(what, "passfail")) { for (int i = 0; i < (int)v; i++) (void)sh_pass_check("x"); return; }   /* passfail=:6 */
     if (!strcmp(what, "gnss")) {                 /* helper D: gnss=60.1699,24.9384 (a pretend fix: 8.5 m, 9 satellites) */
         double la = 0, lo = 0;
         if (sscanf(eq + 1, "%lf,%lf", &la, &lo) == 2) {

@@ -551,6 +551,7 @@ void power_heater_took_clocks(void)
 
 int pocket_lock;
 
+static void arm_screen_off(void);           /* Track A (below) */
 static void screen(int on)
 {
     if (K.screen_on == on)
@@ -583,7 +584,7 @@ static void screen(int on)
             kt_set(KT_POWER, 2, sb_ms(), auto_off_min * 60000U, 0);
     } else {
         set_state(heater_running_ui() ? PS_HEAT : PS_ACTIVE);
-        kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+        arm_screen_off();                   /* Track A: Auto-Lock Never arms none */
         kt_cancel(KT_POWER, 2);
         kt_set(KT_HOUSE, 0, sb_ms(), 1000, 0);     /* the watchdog fed every second again (0.5.12) */
         sb_log("sbos: screen on");
@@ -595,10 +596,19 @@ static void screen(int on)
         app_event_send(a, EV_APP_POWER, 0, on);
 }
 
+/* Track A: the screen-off timer from now (Auto-Lock); 0 = Never: none */
+static void arm_screen_off(void)
+{
+    if (K.screen_off_s)
+        kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+    else
+        kt_cancel(KT_POWER, 1);
+}
+
 void power_input(void)
 {
     if (K.screen_on)
-        kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+        arm_screen_off();
 }
 
 void power_key_short(void)
@@ -662,6 +672,8 @@ int power_auto_off(int rehearse)
     for (int a = 0; a < napps; ++a)
         app_event_send(a, EV_APP_SAVE, 0, 0);
     apps_service();                         /* their EV_APP_SAVE handlers run now */
+    if (kui_save_hook)
+        kui_save_hook();                    /* Track A lifecycle: Next's pages (on_save) */
     if (rehearse) {                         /* the rehearsal writes nothing (the self test's slot step does) */
         int was = sb_fence_is_dry_run();
         sb_fence_dry_run(1);
@@ -691,8 +703,8 @@ void power_timer(unsigned id)
             kt_set(KT_POWER, 2, sb_ms(), 10U * 60000U, 0);  /* kept on: ask again in 10 minutes */
         return;
     }
-    /* the screen-off timer: not while something must stay visible */
-    if (!K.screen_on)
+    /* the screen-off timer: not while something must stay visible (Track A: nor with Auto-Lock Never) */
+    if (!K.screen_on || !K.screen_off_s)
         return;
     int down = 0;
     kin_touch_held(&down);
@@ -721,6 +733,8 @@ void power_restart(int to_menu)
     torch_set(0);
     kmodem_stop("Restarting");              /* 1.2-alpha21: the CP parked before any reset */
     clock_saved = clock_saved_value();      /* 1.2-alpha26: the last known time kept (after the modem's storage hold) */
+    if (kui_save_hook)
+        kui_save_hook();                    /* Track A lifecycle: Next's pages (on_save) */
     settings_save_now();
     wifi_power(0);                          /* the radio held in reset and unpowered before the reset */
     guest_power_off();                      /* 1.2: Linux stopped; its last core powers the M3 cluster off (<= 1 s) */
@@ -737,6 +751,10 @@ void power_boot_os(const char *key)
 {
     torch_set(0);
     kmodem_stop("Restarting");
+    if (kui_save_hook)
+        kui_save_hook();                    /* Track A lifecycle: Next's pages (on_save), then the slot as a restart */
+    clock_saved = clock_saved_value();
+    settings_save_now();
     wifi_power(0);
     guest_power_off();
     heater_stop_all("Restarting");
@@ -764,6 +782,8 @@ void power_off_now(void)
     torch_set(0);
     kmodem_stop("Switching off");              /* 1.2-alpha21: the CP parked before any reset */
     clock_saved = clock_saved_value();      /* 1.2-alpha26: the last known time kept */
+    if (kui_save_hook)
+        kui_save_hook();                    /* Track A lifecycle: Next's pages (on_save) */
     settings_save_now();
     wifi_power(0);
     guest_power_off();                      /* 1.2: Linux stopped before the power goes */
@@ -785,7 +805,7 @@ void power_init(void)
     K.screen_off_s = 30;
     K.sleep_off_s = 300;
     set_state(PS_ACTIVE);
-    kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+    arm_screen_off();
     kt_set(KT_INPUT, 1, sb_ms(), 16, 1);
     kt_set(KT_BATTERY, 1, sb_ms(), 10000, 0);
 }

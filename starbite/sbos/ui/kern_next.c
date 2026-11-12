@@ -997,6 +997,7 @@ static void next_gpu_clean(void *ctx, const void *p, uint64_t n)
 }
 
 /* ---- the kernel's UI entry points in this image ------------------------------------------------------------- */
+static void next_save(void);                         /* Track A lifecycle (below) */
 void next_kinit(void)
 {
     boot_t0 = sb_ms();
@@ -1018,6 +1019,7 @@ void next_kinit(void)
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
     kui_sleep_hook = next_sleep;
+    kui_save_hook = next_save;                   /* Track A lifecycle: the pages' on_save before a restart / switch-off */
     input_fast = 1;                              /* P3k: touch read every 16 ms while the screen is on (no 50 ms first touch) */
     if (!tk_pack_open(sbtk_pack_start, (uint32_t)(sbtk_pack_end - sbtk_pack_start))) {
         sb_log("next: the sbtk pack is missing or bad: the regular UI runs");
@@ -1303,6 +1305,132 @@ void sh_torch(int lit)
     int r = torch_set(lit);
     if (r < 0) sb_log("next: torch: the LED did not answer");
 #endif
+}
+
+/* ---- Track A: passcode ----
+ * shell.h's sh_pass_* and sh_autolock* (sbos-core-api.md 3) on kern/passcode.c: the salted, iterated SHA-256 and the
+ * back-off, kept in the state slot's "sbos.pass" record (settings.c; written about 1 s after a change, so a wrong try
+ * is on the storage before anyone can restart around it). The digits go into passcode.c and nowhere else: nothing
+ * here logs them. The self test (SBOS_SELFTEST_NEXT) runs without the passcode (its films swipe to home and write
+ * nothing): sh_pass_on is 0 there and every setter is a logged dry run. */
+#ifndef SBOS_SELFTEST_NEXT
+static int64_t pass_utc(void)
+{
+    struct sbos_time t;
+    return clock_now(&t) ? (int64_t)t.utc : 0;
+}
+/* a new passcode's salt: the counter's jitter over memory walks (the arrival of the user's taps already makes the
+ * start unpredictable), the clocks, hashed; uniqueness is what a salt needs */
+static void pass_salt(uint8_t salt[PASS_SALT])
+{
+    static volatile uint8_t walk[4096];
+    static uint32_t made;
+    uint8_t pool[256 + 32], h[32];
+    for (unsigned i = 0; i < 256; i++) {
+        uint64_t a = sb_ticks();
+        for (unsigned k = 0; k < 24; k++) walk[(i * 131u + k * 523u) & 4095u] += (uint8_t)(a >> (k & 7));
+        pool[i] = (uint8_t)(sb_ticks() - a) ^ (uint8_t)a;
+    }
+    uint64_t t = sb_ticks(), ms = sb_ms();
+    int64_t u = pass_utc();
+    made++;
+    tk_memcpy(pool + 256, &t, 8);
+    tk_memcpy(pool + 264, &ms, 8);
+    tk_memcpy(pool + 272, &u, 8);
+    tk_memcpy(pool + 280, &made, 4);
+    tk_memset(pool + 284, 0, 4);
+    pass_sha256(pool, sizeof pool, h);
+    tk_memcpy(salt, h, PASS_SALT);
+    tk_memset(h, 0, sizeof h);
+}
+#endif
+int sh_pass_on(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    return 0;
+#else
+    return pass_len() > 0;
+#endif
+}
+int sh_pass_len(void) { return pass_len(); }
+int sh_pass_wait(void) { return (int)pass_wait(sb_ms()); }
+int sh_pass_fails(void) { return pass_fails(); }
+int sh_pass_check(const char *digits)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)digits;
+    sb_log("next: passcode: a check (a dry run: the self test has none)");
+    return 1;
+#else
+    int f0 = pass_fails();
+    uint64_t t0 = sb_ms();
+    int r = pass_check(digits, t0, pass_utc());
+    if (r == 1) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: passcode: right (the hash took ");
+        ub_dec(&u, sb_ms() - t0);
+        ub_s(&u, " ms)");
+        sb_log(u.b);
+    } else if (r == 0) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: passcode: wrong; tries in a row ");
+        ub_dec(&u, (uint64_t)pass_fails());
+        if (pass_wait(sb_ms())) { ub_s(&u, ", the next in "); ub_dec(&u, pass_wait(sb_ms())); ub_s(&u, " s"); }
+        sb_log(u.b);
+    }
+    if (pass_fails() != f0) settings_changed_soon(1000);     /* the tries on the storage within ~1 s */
+    return r;
+#endif
+}
+int sh_pass_set(const char *old, const char *nw)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)old; (void)nw;
+    sb_log("next: passcode: would be set / changed / removed (a dry run: the self test)");
+    return -1;
+#else
+    uint8_t salt[PASS_SALT];
+    int had = pass_len(), f0 = pass_fails();
+    pass_salt(salt);
+    int r = pass_set(old, nw, salt, sb_ms(), pass_utc());
+    tk_memset(salt, 0, sizeof salt);
+    if (!r) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, !pass_len() ? "next: passcode: removed" : had ? "next: passcode: changed (" : "next: passcode: set (");
+        if (pass_len()) { ub_dec(&u, (uint64_t)pass_len()); ub_s(&u, " digits)"); }
+        sb_log(u.b);
+    } else
+        sb_log("next: passcode: not changed (the old code was wrong, a wait runs, or the new one is not 4 or 6 digits)");
+    if (!r || pass_fails() != f0) settings_changed_soon(1000);
+    if (!settings_persistent()) sb_log("next: passcode: no state slot: it lasts until a restart");
+    return r;
+#endif
+}
+/* Auto-Lock: the kernel's screen-off time (services.c; kept in the settings record); 0 = Never */
+int sh_autolock(void) { return (int)K.screen_off_s; }
+void sh_autolock_set(int s)
+{
+    if (s != 0 && (s < 10 || s > 600)) return;
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: Auto-Lock: would change (a dry run: the self test)");
+#else
+    K.screen_off_s = (uint32_t)s;
+    power_input();                                   /* the timer from now (none for Never) */
+    settings_changed();
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: Auto-Lock: ");
+    if (s) { ub_dec(&u, (uint64_t)s); ub_s(&u, " s"); } else ub_s(&u, "Never");
+    sb_log(u.b);
+#endif
+}
+/* Track A lifecycle: the kernel's pre-restart / switch-off path (services.c's kui_save_hook): every page's on_save */
+static void next_save(void)
+{
+    if (ready) sh_save_all();
 }
 
 /* ---- Track A: prefs and blobs ---- (sbos-core-api.md 1, 2) on kern/prefs.c: the store lives in RAM and goes into

@@ -53,6 +53,7 @@ python3 "$here/tools/mergeassets.py" "$ob/sbassets.sb7" "$ob/libsb-assets.sb7" "
 
 if [ "$native" = 1 ]; then
     sh "$here/../tools/sbos-host-test.sh"
+    CC=gcc sh "$here/kern/host/passcode-test.sh"          # Track A: the passcode (kern/passcode.c)
 fi
 
 # The sensor hub's firmware patch (docs/SENSOR-HUB.md 2.2): never in the repository. Only the staged test image

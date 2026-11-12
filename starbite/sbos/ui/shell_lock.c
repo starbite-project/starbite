@@ -377,6 +377,8 @@ static void nc_sb_stale(void);
 static void nc_clock_stale(void);
 static void nc_cards_gone(void);
 static float nc_next_update(float t);
+static float pc_next_update(float t);                /* Track A: shell_passcode.inc */
+static int pc_refresh(float t);
 static int nc_refresh(float t);
 static int sw_app_alpha(void);
 static void sw_opened(int a);
@@ -1758,11 +1760,23 @@ static const appdef APPS[] = {
     { "store", "App Store", 0x0a6fe8, 1, { { "", 1, { { "", "" } } } } },
     { "maps", "Maps", 0xe3decd, 1, { { "", 1, { { "", "" } } } } },           /* helper D: shell_nc.inc's page_maps */
     { "settings", "Settings", 0x55555a, 3, { { "", 3, { { "Wi-Fi", "@wifi" }, { "Cellular", "No SIM" }, { "Battery", "@pct" } } },
-                                           { "", 6, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Airplane Mode", "Off" }, { "Date & Time", "Phone clock" },
+                                           { "", 6, { { "Display & Brightness", "@bright" }, { "Sounds & Haptics", "Vibration only" }, { "Bluetooth", "Not available" }, { "Face ID & Passcode", "@pass" }, { "Date & Time", "Phone clock" },
                                                       { "Medical Card", "" } } },
                                            { "About", 3, { { "Model", "Galaxy S9 (SM-G960F)" }, { "Software", "@ver" }, { "Memory", "4 GB" } } } } },
 };
 #define NAPPS ((int)(sizeof APPS / sizeof APPS[0]))
+/* Track A lifecycle (sbos-core-api.md 6): the apps' optional callbacks, beside APPS by key (an app without a row has
+ * none): on_show the page shown (cold: a first open, or after the switcher threw it away), on_hide it left the screen
+ * (closed, another app, the lock), on_save before a restart or a switch-off (sh_save_all: keep data with sh_blob_put) */
+typedef struct { const char *k; void (*on_show)(int cold); void (*on_hide)(void); void (*on_save)(void); } apphook;
+static const apphook APPHOOK[] = {
+    { 0, 0, 0, 0 },                                   /* (the pages add theirs here) */
+};
+static const apphook *ap_hook(int a)
+{
+    for (int i = 0; APPHOOK[i].k; i++) if (!tk_strcmp(APPHOOK[i].k, APPS[a].k)) return &APPHOOK[i];
+    return 0;
+}
 static tk_layer appg, appbg, appc, appst[4];      /* the page: a group of four strips (no 17 MB block) */
 #define NST 4
 /* strip i of the page: exact panel rows, so the strips meet without overlap */
@@ -2246,6 +2260,8 @@ int sh_next_update(float t)
     if (nb >= 0 && (best < 0 || nb < best)) best = nb;
     float cb = cm_next_update(t);                       /* helper I: an ended call's screen */
     if (cb >= 0 && (best < 0 || cb < best)) best = cb;
+    float pb = pc_next_update(t);                       /* Track A: the back-off's minutes */
+    if (pb >= 0 && (best < 0 || pb < best)) best = pb;
     return (int)best;
 }
 int sh_refresh(float t)
@@ -2253,7 +2269,7 @@ int sh_refresh(float t)
     now_ms = t;
     int ch = clk_update(t);
     if (med_pending() && !sh_moving()) ch |= med_work(10000, 1);
-    ch |= sv_refresh(t) | nc_refresh(t) | cm_refresh(t);               /* survival-next: SOS's beacon, USB power's state; helper D: the banner */
+    ch |= sv_refresh(t) | nc_refresh(t) | cm_refresh(t) | pc_refresh(t);   /* survival-next: SOS's beacon, USB power's state; helper D: the banner; Track A: the back-off */
     if (ch && AP.on) sw_dirty = 1;                     /* helper D: the switcher's snapshot is old now */
     return ch;
 }
@@ -2839,8 +2855,12 @@ static void page_wifi(dc *d);
 static void page_cell(dc *d);         /* shell_cell.inc: Settings > Cellular */
 static void cell_tap(float x, float y);
 static void wifi_tap(float x, float y);
+static const char *pc_live(const char *s);            /* Track A: shell_passcode.inc */
+static void pc_page(dc *d);
+static int pc_app_tap(float x, float y);
 static const char *live_text(const char *s, char *buf)
 {
+    { const char *pl = pc_live(s); if (pl) return pl; }   /* Track A: @pass */
     if (!tk_strcmp(s, "@wifi")) return wf_row_text();
     if (s[0] != '@') return s;
     int n = 0;
@@ -2868,6 +2888,7 @@ static const setico SETICO[] = {
     { "Display & Brightness", "cc-sun", 0x0a84ff, 20, 20 }, { "Sounds & Haptics", "cc-vol", 0xff375f, 20, 20 },
     { "Bluetooth", "cc-bt", 0x0a84ff, 12, 18 }, { "Airplane Mode", "cc-air", 0xff9f0a, 18, 18 }, { "Date & Time", "cc-timer", 0x8e8e93, 19, 19 },
     { "Medical Card", "heart", 0xff3b30, 18, 18 },      /* survival-next */
+    { "Face ID & Passcode", "lock-c", 0x30d158, 15, 20 },   /* Track A */
 };
 static const setico *set_icon(const char *app, const char *row)
 {
@@ -2929,7 +2950,7 @@ static void own_strip(int a, int i)
     else if (!tk_strcmp(k, "calc")) page_calc(&d);
     else if (!tk_strcmp(k, "light")) page_light(&d);
     else if (!tk_strcmp(k, "calendar")) page_calendar(&d);
-    else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else if (AS.sub == 4) sv_page_card_edit(&d); else page_display(&d); }
+    else if (!tk_strcmp(k, "settings")) { if (AS.sub == 2) page_wifi(&d); else if (AS.sub == 3) page_cell(&d); else if (AS.sub == 4) sv_page_card_edit(&d); else if (AS.sub == 5) pc_page(&d); /* Track A */ else page_display(&d); }
     else if (!tk_strcmp(k, "notes")) page_notes(&d);
     else if (!tk_strcmp(k, "search")) page_search(&d);
     else if (lx_is(k)) lx_page(&d);
@@ -3030,7 +3051,8 @@ static void build_app_page(int a)
                 lx = ROW_TX + 29 + 13;
             }
             int nav = !tk_strcmp(A->k, "settings") && (!tk_strcmp(S->rows[r].l, "Display & Brightness") || !tk_strcmp(S->rows[r].l, "Wi-Fi") ||
-                                                       !tk_strcmp(S->rows[r].l, "Cellular") || !tk_strcmp(S->rows[r].l, "Medical Card"));
+                                                       !tk_strcmp(S->rows[r].l, "Cellular") || !tk_strcmp(S->rows[r].l, "Medical Card") ||
+                                                       !tk_strcmp(S->rows[r].l, "Face ID & Passcode"));   /* Track A */
             if (nav) d_icon(&d, "chev", CONTENT_R - 30, ry + 16.5f, .45f);
             const char *rt = live_text(S->rows[r].r, rb);
             if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Cellular")) rt = md_text();
@@ -3134,17 +3156,24 @@ static int app_hit(float x, float y)
 }
 static int ap_from_on;                     /* helper D: the next open grows from this rect (a switcher card) */
 static arect ap_from;
+static unsigned char ap_warm[NAPPS];       /* Track A lifecycle: opened before and not thrown away: its state kept */
+static int sw_keeps(int a);
+static int sw_find(int a);
 static void app_open(int a)
 {
+    int cold = !ap_warm[a] || (sw_keeps(a) && sw_find(a) < 0);   /* Track A lifecycle: first, or out of the recents */
+    ap_warm[a] = 1;
     sw_opened(a);                              /* helper D: first in the recents */
     AP.a = a;
     AP.on = 1;
     AP.closing = AP.following = 0;
     free_cc();
-    AS.tab = 3;
-    AS.num[0] = 0;
-    AS.thread = -1;
-    AS.sub = 0;
+    if (cold) {                                /* Track A lifecycle: a warm open keeps the tab, number, thread, sub-page */
+        if (!tk_strcmp(APPS[a].k, "phone")) { AS.tab = 3; AS.num[0] = 0; }
+        if (!tk_strcmp(APPS[a].k, "messages")) AS.thread = -1;
+        if (!tk_strcmp(APPS[a].k, "settings")) AS.sub = 0;
+        if (!tk_strcmp(APPS[a].k, "notes")) NS.view = 0;
+    }
     cm_opened(a);                              /* helper I: Settings > Cellular, a notification's thread */
     sv_opened();
     apkey.hidden = 1;
@@ -3164,6 +3193,7 @@ static void app_open(int a)
     AP.to = FULLR;
     tk_spring_start(&sp_app, 0, 1, 0, TK_SPR_OPEN);
     set_app_rect(AP.icon);
+    { const apphook *h = ap_hook(a); if (h && h->on_show) h->on_show(cold); }   /* Track A lifecycle */
 }
 static void app_close(float v)
 {
@@ -3174,6 +3204,7 @@ static void app_close(float v)
 }
 static void app_finish_close(void)
 {
+    if (AP.on) { const apphook *h = ap_hook(AP.a); if (h && h->on_hide) h->on_hide(); }   /* Track A lifecycle */
     sw_app_gone();                               /* helper D: no window in the switcher */
     lx_close();                                  /* L3: the window's strips, the store's layers */
     ap_pending = 0;
@@ -3193,8 +3224,8 @@ static void app_finish_close(void)
     med_close();
     tk_bmp_free(&sfield);
     relayer(&apsb); apsb.hidden = 1;
-    SR.q[0] = 0; SR.shift = 0; SR.num = 0;                      /* Search opens empty */
-    NS.view = 0;                                                /* Notes opens on its list again */                        /* the Calculator keeps its value (CAL) */
+    SR.shift = 0; SR.num = 0;                                   /* Track A lifecycle: Search keeps its words */
+    /* Track A lifecycle: Notes reopens where it was (the list or the note) */                        /* the Calculator keeps its value (CAL) */
     apnum.hidden = apkey.hidden = 1;
     home.sx = home.sy = 1;
     home.alpha = 1;
@@ -3454,6 +3485,7 @@ static void key_down(int i)
 static int is_app(const char *k) { return AP.on && !tk_strcmp(APPS[AP.a].k, k); }
 static void app_tap(float x, float y)
 {
+    if (pc_app_tap(x, y)) return;                /* Track A: Settings > Face ID & Passcode */
     if (lx_tap(x, y)) return;                    /* L3: a Linux app's keyboard, the App Store */
     if (sv_tap(x, y)) return;                                   /* survival-next: the tools, Settings > Medical Card */
     if (cm_app_tap(x, y)) return;                             /* helper I: Phone and Messages (shell_comms.inc) */
@@ -3568,6 +3600,7 @@ void sh_cell(const sh_cell_t *c)
     lock_ver++;
 }
 
+static int pc_gate_launch(unsigned id);             /* Track A: shell_passcode.inc (shell_nc.inc asks it) */
 #include "shell_wifi.inc"
 #include "shell_cell.inc"
 #include "shell_media_img.inc"
@@ -3577,6 +3610,7 @@ void sh_cell(const sh_cell_t *c)
 #include "shell_nc.inc"                             /* helper D: notifications, the Notification Centre, the banner */
 #include "shell_switcher.inc"                       /* helper D: the app switcher */
 #include "shell_comms.inc"                          /* helper I: Phone and Messages, the call screen */
+#include "shell_passcode.inc"                       /* Track A: the passcode screen, Face ID & Passcode, the lock's lifecycle */
 
 /* ---- Track A: what the shell keeps across restarts (the platform's prefs and blobs), taken back once the store is
  * ready. Cellular data is never kept (off at every boot by design); Wi-Fi comes back on when the user left it on. -- */
@@ -3670,6 +3704,7 @@ static void relink(void)
     sw_link();                                       /* helper D: the switcher's cards (swg), a card's snapshot over its opening window */
     cm_link();                                       /* helper I: the call screen (cvl) */
     link(&root, r, 19);
+    pc_link();                                       /* Track A: the passcode screen (under the call screen) */
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &apsb, &apphl };
     link(&appg, ag, 13);
     tk_layer *st[NST + 64] = { &appst[0], &appst[1], &appst[2], &appst[3] };
@@ -3830,6 +3865,7 @@ static void back_to_lock(int exit_em)
     sp_page.live = 0; page_dragging = 0;
     set_page(0);
     CCS.on = 0; sp_cc.live = 0; set_cc(0);
+    pc_lock_note(exit_em);                         /* Track A lifecycle: the open app comes back after the unlock */
     if (AP.on) { sp_app.live = 0; app_finish_close(); }
     if (exit_em && EMG) set_emergency(0, 1);
     if (!EMG) while (cards_pending > 0) { build_card(NG - cards_pending); cards_pending--; }
@@ -3884,6 +3920,7 @@ void sh_set(const char *what, const char *key, float v)
     } else if (nc_set(what, key, v)) {            /* helper D: notify=, banner=, nc=, ncgroup=, ncswipe= (shell_nc.inc) */
     } else if (sw_set(what, key, v)) {            /* helper D: switcher=, swsnap= (shell_switcher.inc) */
     } else if (cm_set(what, key, v)) {            /* helper I: thread=, compose=, to=, dial=, recent=, callpad=, ... */
+    } else if (pc_set(what, key, v)) {            /* Track A: passcode=unlock:N, wrong:P, set, off */
     } else if (!tk_strcmp(what, "app")) {
         if (!key[0] && AP.on) app_finish_close();       /* L2: "app=" closes the open app at once */
         for (int a = 0; a < NAPPS; a++)
@@ -4092,6 +4129,7 @@ static void app_press(float x, float y)
                  (is_app("messages") && AS.thread >= 0) || (is_app("notes") && NS.view);
     if (sv_press(x, y, &r, &g, &rad, &c)) ok = 1;                 /* survival-next (E's bands): Emergency's tools, Settings > Medical Card */
     else if (cm_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* helper I: Recents, Messages */
+    else if (pc_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* Track A: Face ID & Passcode */
     else if (pushed && BACK_HIT(x, y)) {
         r = g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D };   /* the glass back lights */
         rad = BACK_D / 2; c = W(.16f); ok = 1;
@@ -4151,6 +4189,7 @@ void sh_touch(int phase, float x, float y, float t)
     now_ms = t;
     if (cm_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* helper I: the call screen, the call button's hold */
     if (sv_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* survival-next: SOS's beacon, a tool's hold */
+    if (pc_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* Track A: the passcode screen */
     if (phase == 0) {
         tk_tracker_reset(&T.tr);
         T.moved = 0;
@@ -4517,7 +4556,10 @@ void sh_touch(int phase, float x, float y, float t)
         } else {
             float v = tk_tracker_v(&T.tr), proj = lockY + v * 200;
             /* P3p (P3j-9): unlocked as soon as it is decided: taps in the settle reach home */
-            if (proj < -H_PT * .38f && locked) { tk_spring_start(&sp_lock, lockY, -H_PT, v * 1000, TK_SPR_UNLOCK); locked = 0; }
+            if (proj < -H_PT * .38f && locked) {
+                tk_spring_start(&sp_lock, lockY, -H_PT, v * 1000, TK_SPR_UNLOCK);
+                if (!pc_unlock_begin()) locked = 0;   /* Track A: the passcode first; else the kept app comes back */
+            }
             else tk_spring_start(&sp_lock, lockY, 0, v * 1000, TK_SPR_UNLOCK);
         }
         break;
@@ -4592,7 +4634,7 @@ int sh_tick(float dt, float t)
     if (sp_lock.live) {
         int live = tk_spring_step(&sp_lock, dt);
         set_lock(sp_lock.x);
-        if (!live && sp_lock.to <= -H_PT + .01f) { locked = 0; lockflat.hidden = 1; home.sx = home.sy = 1; }
+        if (!live && sp_lock.to <= -H_PT + .01f && !pc_holds()) { locked = 0; lockflat.hidden = 1; home.sx = home.sy = 1; }   /* Track A */
         mv = 1;
     }
     if (T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB || T.kind == G_RELOCK || T.kind == G_PAGE) mv = 1;
@@ -4781,6 +4823,7 @@ int sh_tick(float dt, float t)
     mv |= nc_tick(dt, t);                       /* helper D: the Notification Centre, the banner */
     mv |= sw_tick(dt, t);                       /* helper D: the app switcher */
     mv |= cm_tick(dt, t);                       /* helper I: the call button's hold, the call screen */
+    mv |= pc_tick(dt, t);                       /* Track A: the passcode screen */
     if (mv && AP.on) sw_dirty = 1;              /* helper D: the page moved or changed: a new snapshot at the next rest */
     return mv;
 }
@@ -4893,5 +4936,6 @@ int sh_moving(void)
     m |= IP.on && IP.t < 1;
     m |= nc_moving() || sw_moving();             /* helper D */
     m |= cm_moving();                            /* helper I */
+    m |= pc_moving();                            /* Track A */
     return m;
 }
