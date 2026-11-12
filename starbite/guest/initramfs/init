@@ -20,6 +20,19 @@ for a in $(cat /proc/cmdline); do
     esac
 done
 if [ "$mode" = desktop ]; then
+    # No base image offered (the card files not placed yet, or the host has no block devices): with sbwl in this
+    # initramfs, run the built-in terminal (the L2 wayland mode) instead of powering off
+    i=0
+    while [ ! -b /dev/sbblk0 ] && [ $i -lt 100 ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+    if [ ! -b /dev/sbblk0 ] && [ -x /sbwl ]; then
+        echo "guest-init: desktop: no base image (/dev/sbblk0): the built-in terminal instead" > /dev/kmsg
+        mode=wayland
+    fi
+fi
+if [ "$mode" = desktop ]; then
     # The desktop guest (docs/STARBITE-LINUX-APPS.md L4): the root is on the host's block devices (sbguest.ko's
     # sbblk, starbite/guest/blk/README.md): /dev/sbblk0 the base image (EROFS, read-only), /dev/sbblk1 the overlay
     # (ext4: upper + work), /dev/sbblk2 the package repo (EROFS, at /repo). Without a usable overlay device the

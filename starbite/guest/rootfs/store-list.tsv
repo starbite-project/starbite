@@ -1,0 +1,26 @@
+# The App Store's curated list (mk-repo.sh's input). Tab-separated:
+# key	title	summary	category	featured	apt packages (space-separated; the first is the main one)	measure (measure-ram.py's workload)	[icon: a theme icon name instead of the .desktop's Icon=]
+# Entries whose packages are all in the base image show as SYSTEM (installed, cannot be removed).
+firefox-esr	Firefox	Mozilla's web browser (Extended Support Release)	Internet	1	firefox-esr	firefox
+libreoffice-writer	LibreOffice Writer	Word processor: documents, letters, .docx and .odt	Office	1	libreoffice-writer libreoffice-gtk3	lo-writer
+libreoffice-calc	LibreOffice Calc	Spreadsheets with formulas and charts, .xlsx and .ods	Office	0	libreoffice-calc libreoffice-gtk3	lo-calc
+libreoffice-impress	LibreOffice Impress	Presentations, .pptx and .odp	Office	0	libreoffice-impress libreoffice-gtk3	lo-impress
+apostrophe	Apostrophe	Distraction-free Markdown editor with a live preview	Office	0	apostrophe python3-chardet	apostrophe
+xournalpp	Xournal++	Handwritten notes, sketches and PDF annotation	Office	1	xournalpp	xournalpp
+gimp	GIMP	The GNU Image Manipulation Program: photo retouching and painting	Graphics	0	gimp	gimp
+inkscape	Inkscape	Vector graphics editor (SVG)	Graphics	0	inkscape	inkscape
+drawing	Drawing	A simple drawing and image editing app	Graphics	1	drawing	drawing
+gnome-chess	Chess	Play chess against the computer (GNU Chess engine)	Games	1	gnome-chess gnuchess	gtk-app
+gnome-sudoku	Sudoku	Sudoku puzzles in four difficulties	Games	0	gnome-sudoku	gtk-app
+gnome-mines	Mines	Clear hidden mines from a minefield	Games	0	gnome-mines	gtk-app
+gnome-2048	2048	Slide the tiles and get to 2048	Games	0	gnome-2048	gtk-app
+gnome-clocks	Clocks	Alarms, world clocks, stopwatch and timers	Utilities	0	gnome-clocks	gtk-app
+gnome-characters	Characters	Find and copy special characters and emoji	Utilities	0	gnome-characters	gtk-app
+baobab	Disk Usage	See what takes the space on the Linux side	Utilities	0	baobab	gtk-app
+foot	Terminal	foot, a fast Wayland terminal	Utilities	0	foot	foot
+gnome-text-editor	Text Editor	Plain text and Markdown editing	Utilities	0	gnome-text-editor	text-editor
+gnome-calculator	Calculator	Basic, advanced and programmer calculator	Utilities	0	gnome-calculator	gtk-app
+pcmanfm	Files	Browse and organise your files	Utilities	0	pcmanfm	files	folder
+gpicview	Image Viewer	Look at pictures	Graphics	0	gpicview	image-viewer	image-x-generic
+papers	Document Viewer	Read PDF documents	Office	0	papers	pdf-viewer
+nautilus	Files (GNOME)	GNOME's file manager, with search and network places	Utilities	0	nautilus	nautilus
