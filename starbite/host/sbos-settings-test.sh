@@ -7,8 +7,8 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/starbite/out/sboshost"
 st="$out/settings-test.bin"
 rm -f "$st"
-run() { limactl shell --workdir "$root" starbite env SBOS_HOST_DUMPLOG=1 ${SLOT:+SBOS_HOST_STATE=$st} ${NOFILES:+SBOS_HOST_FILES=/nonexistent} "$out/sbos-host" "$out" /dev/null "$@" s:settings-test q 2>&1 | grep -E 'settings:|fence:|slot:'; }
-OPEN="w:300 g:1150,2310,0,700 w:400 t:382,1738 w:600"
+run() { limactl shell --workdir "$root" starbite flock /var/tmp/sbvm-heavy.lock env SBOS_HOST_DUMPLOG=1 ${SLOT:+SBOS_HOST_STATE=$st} ${NOFILES:+SBOS_HOST_FILES=/nonexistent} "$out/sbos-host" "$out" /dev/null "$@" s:settings-test q 2>&1 | grep -E 'settings:|fence:|slot:'; }
+OPEN="w:300 g:1150,2310,0,700 w:400 t:382,1542 w:600"     # 1.2-alpha28: 13 tiles in 7 rows (Guide): Settings 382,1542
 fails=0
 want() { if echo "$1" | grep -q -- "$2"; then echo "ok: $2"; else echo "FAIL: $2"; echo "$1" | sed 's/^/    /'; fails=$((fails + 1)); fi; }
 SLOT=1
