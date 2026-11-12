@@ -545,3 +545,7 @@ int sh_hold_awake(const char *who, int on);
 /* Track A, 1.0: Low Power Mode (the Control Centre's Power Saving tile): conservative clocks, kept across a restart */
 void sh_low_power(int on);
 int sh_low_power_on(void);
+
+/* Track E, cp6 (gwin.c): the running App Store / Linux job in words ("Building btop from source, 45 %", "Downloading
+ * Firefox, 12 %", "+ 2 more"); 1 with a job, 0 none (buf ""). Cheap: the shell polls it about once a second */
+int sh_linux_job(char *buf, int cap);

@@ -771,3 +771,10 @@ static void lin_fake_state(const char *st)
 }
 
 int sh_linux_zero_copy(void) { return 0; }   /* 1.0: the host has no GPU: the strips */
+/* cp6: Track E's store job in words (gwin.c); SBTK_JOB="Building btop from source, 45 %" pretends one runs */
+int sh_linux_job(char *buf, int cap)
+{
+    const char *j = getenv("SBTK_JOB");
+    if (buf && cap > 0) snprintf(buf, (size_t)cap, "%s", j ? j : "");
+    return j && j[0];
+}

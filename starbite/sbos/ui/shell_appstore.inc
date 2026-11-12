@@ -134,10 +134,14 @@ static int aq_status(const sh_lpkg_t *p, char *b, int cap, tk_col *c)
     } else if (p->phase == SH_PKG_DOWNLOADING) lx_scopy(b, "Downloading\xe2\x80\xa6", cap);
     else if (p->phase == SH_PKG_VERIFYING) lx_scopy(b, "Verifying\xe2\x80\xa6", cap);
     else if (p->phase == SH_PKG_BUILDING) {
-        if (!p->eta_s) lx_scopy(b, "Building\xe2\x80\xa6", cap);
-        else if (p->eta_s < 60) lx_scopy(b, "Building\xe2\x80\xa6 less than a minute left", cap);
-        else { aq_dec(x, (int)((p->eta_s + 59) / 60)); char t[96]; AQS(t, "Building\xe2\x80\xa6 about ", x, " min left"); lx_scopy(b, t, cap); }
-    } else lx_scopy(b, "Installing\xe2\x80\xa6", cap);
+        char t[96];
+        aq_dec(y, (int)(p->pct > 99 ? 99 : p->pct));      /* cp6: the step moves visibly (the engine's overall %) */
+        if (!p->eta_s) AQS(t, "Building ", y, " %");
+        else if (p->eta_s < 60) AQS(t, "Building ", y, " % \xc2\xb7 under a minute left");
+        else { aq_dec(x, (int)((p->eta_s + 59) / 60)); AQS(t, "Building ", y, " % \xc2\xb7 about ", x, " min left"); }
+        lx_scopy(b, t, cap);
+    } else if (p->pct) { char t[96]; aq_dec(y, (int)(p->pct > 99 ? 99 : p->pct)); AQS(t, "Installing ", y, " %"); lx_scopy(b, t, cap); }
+    else lx_scopy(b, "Installing\xe2\x80\xa6", cap);
     *c = W(.7f);
     return 1;
 }
@@ -253,11 +257,18 @@ static void d_catglyph(dc *d, int k, float x, float y)
 
 /* ---- the painter: the open page, in draw mode (c->d: one chunk's band) or hit mode (c->d NULL: what is at hx, hy).
  * Everything in screen pt as at scroll 0 ---- */
-typedef struct { dc *d; float y0, y1, hx, hy; int L, hit, hpkg, harg; } pctx;
+typedef struct { dc *d; float y0, y1, hx, hy; int L, hit, hpkg, harg; tk_rect hr; float hrad; int hbtn; } pctx;
 static int vis(const pctx *c, float y, float h) { return c->d && y < c->y1 && y + h > c->y0; }
 static int at(const pctx *c, float x, float y, float w, float h) { return !c->d && c->hx >= x && c->hx < x + w && c->hy >= y && c->hy < y + h; }
 static void aq_mark(pctx *c, int i) { if (c->L >= 0 && i >= 0 && i < SH_LPKGS) AQ.pk[c->L][i >> 5] |= 1u << (i & 31); }
 static void aq_hit(pctx *c, int what, int pkg, int arg) { if (!c->hit) { c->hit = what; c->hpkg = pkg; c->harg = arg; } }
+/* aq_hit plus the lit rect for the pressed state (cp6: aq_press; page coordinates, rad, btn: a round button) */
+static void aq_hitr(pctx *c, int what, int pkg, int arg, float x, float y, float w, float h, float rad, int btn)
+{
+    if (c->hit) return;
+    aq_hit(c, what, pkg, arg);
+    c->hr = (tk_rect){ x, y, w, h }; c->hrad = rad; c->hbtn = btn;
+}
 static void aq_live_add(int kind, int pkg, float x, float y, float w)
 {
     if (!aq_collect || aq_nl >= 32) return;
@@ -306,9 +317,9 @@ static float aq_row(pctx *c, float y, int i, const char *sub, int sep, int rollb
     }
     if (st_busy(p)) aq_live_add(LV_ROW, i, tx, y, tw_);
     if (!c->d && c->hy >= y && c->hy < y + h) {
-        if (c->hx >= PILL_X - 10 && c->hy >= y + 12 && c->hy < y + 64) aq_hit(c, H_ACT, i, 0);
-        else if (rb && c->hy >= y + 52 && c->hx >= tx && c->hx < tx + 250) aq_hit(c, H_ROLLBACK, i, 0);
-        else aq_hit(c, H_APP, i, 0);
+        if (c->hx >= PILL_X - 10 && c->hy >= y + 12 && c->hy < y + 64) aq_hitr(c, H_ACT, i, 0, PILL_X, y + 23, PILL_W, 30, 15, 1);
+        else if (rb && c->hy >= y + 52 && c->hx >= tx && c->hx < tx + 250) aq_hitr(c, H_ROLLBACK, i, 0, tx - 6, y + 54, 256, 24, 8, 1);
+        else aq_hitr(c, H_APP, i, 0, 0, y, 390, h, 0, 0);
     }
     return y + h;
 }
@@ -319,7 +330,7 @@ static float aq_sec(pctx *c, float y, const char *t, const char *link, int what,
         d_text_box(c->d, TK_IT700, 22, MARGIN, bl(TK_IT700, 22, y + 8), link ? CONTENT_W - 100 : CONTENT_W, 0, t, 0, 0, INK, 0);
         if (link) d_text_box(c->d, TK_IT400, 17, CONTENT_R, bl(TK_IT400, 17, y + 12), 120, 2, link, 0, 0, ACCENT(), 0);
     }
-    if (link && at(c, CONTENT_R - 110, y, 110, 40)) aq_hit(c, what, -1, arg);
+    if (link && at(c, CONTENT_R - 110, y, 110, 40)) aq_hitr(c, what, -1, arg, CONTENT_R - 110, y + 4, 116, 32, 10, 1);
     return y + 40;
 }
 static void aq_title(pctx *c, const char *t) { if (vis(c, SAFE_TOP + NAVBAR_H, LARGE_H)) d_h1(c->d, t); }
@@ -367,7 +378,10 @@ static float aq_card(pctx *c, float y, int i)
         aq_mark(c, i);
     }
     if (st_busy(p)) aq_live_add(LV_CARD, i, MARGIN + 80, y + CARD_H - 72, CONTENT_R - 20 - PILL_W - 10 - MARGIN - 80);
-    if (at(c, MARGIN, y, CONTENT_W, CARD_H)) aq_hit(c, c->hx >= CONTENT_R - 20 - PILL_W - 8 && c->hy >= y + CARD_H - 60 ? H_ACT : H_APP, i, 0);
+    if (at(c, MARGIN, y, CONTENT_W, CARD_H)) {
+        if (c->hx >= CONTENT_R - 20 - PILL_W - 8 && c->hy >= y + CARD_H - 60) aq_hitr(c, H_ACT, i, 0, CONTENT_R - 20 - PILL_W, y + CARD_H - 51, PILL_W, 30, 15, 1);
+        else aq_hitr(c, H_APP, i, 0, MARGIN, y, CONTENT_W, CARD_H, 20, 0);
+    }
     return y + CARD_H + 20;
 }
 /* the two categories with the most apps (ties: the catalog's order) */
@@ -434,7 +448,7 @@ static float pg_browse(pctx *c)
             d_chev(d, CONTENT_R - 24, ry + 26, W(.3f));
             if (r + 1 < n) d_rrect(d, GROUP_X + 58, ry + 51.5f, GROUP_W - 58, .5f, 0, W(.1f));
         }
-        if (at(c, GROUP_X, ry, GROUP_W, 52)) aq_hit(c, H_CAT, -1, k);
+        if (at(c, GROUP_X, ry, GROUP_W, 52)) aq_hitr(c, H_CAT, -1, k, GROUP_X, ry, GROUP_W, 52, 0, 0);
     }
     y += 52.0f * n + 18;
     if (vis(c, y, 40)) {
@@ -473,7 +487,7 @@ static float pg_search(pctx *c)
                 d_text(d, TK_IT400, 19, MARGIN + 28, bl(TK_IT400, 19, y + 10), AQ_SUGG[k], 0, 0, ACCENT(), 0);
                 if (k < 5) d_rrect(d, MARGIN + 28, y + 43.5f, CONTENT_W - 28, .5f, 0, W(.12f));
             }
-            if (at(c, MARGIN, y, CONTENT_W, 44)) aq_hit(c, H_SUGGEST, -1, k);
+            if (at(c, MARGIN, y, CONTENT_W, 44)) aq_hitr(c, H_SUGGEST, -1, k, 0, y, 390, 44, 0, 0);
             y += 44;
         }
         return y;
@@ -522,7 +536,7 @@ static float pg_updates(pctx *c)
         d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 14), "Check for Updates", 0, 0, ACCENT(), 0);
         d_text_box(d, TK_IT400, 15, CONTENT_R - 16, bl(TK_IT400, 15, y + 16), 150, 2, ck, 0, 0, W(.5f), 0);
     }
-    if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hit(c, H_CHECK, -1, 0);
+    if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hitr(c, H_CHECK, -1, 0, GROUP_X, y, GROUP_W, 50, 16, 0);
     y += 50;
     if (LST && LST->v3 && !LST->net_ok) {
         if (vis(c, y, 30))
@@ -668,7 +682,11 @@ static float pg_app(pctx *c)
     if (busy) aq_live_add(LV_HEAD, i, tx, y0 + 70, tw_);
     if (!c->d && c->hy >= y0 + 64 && c->hy < y0 + 108 && c->hx >= tx) {
         float w = tk_maxf(84, tw(TK_IT700, 15, aq_upd(p) ? "UPDATE" : "OPEN", .2f, 0) + 36);
-        aq_hit(c, aq_upd(p) && !busy && c->hx >= tx + w + 4 ? H_OPEN : H_MAIN, i, 0);
+        if (aq_upd(p) && !busy && c->hx >= tx + w + 4) aq_hitr(c, H_OPEN, i, 0, tx + w + 10, y0 + 70, 84, 32, 16, 1);
+        else {
+            const char *t = full ? "Not Enough Space" : aq_upd(p) ? "UPDATE" : inst ? "OPEN" : p->state == SH_PKG_FAILED ? "RETRY" : "GET";
+            aq_hitr(c, H_MAIN, i, 0, tx, y0 + 70, busy ? 32 : tk_maxf(84, tw(TK_IT700, 15, t, .2f, 0) + 36), 32, 16, 1);
+        }
     }
     float y = y0 + 116;
     /* a one-line note: Wi-Fi, space, the failure, memory */
@@ -771,7 +789,7 @@ static float pg_app(pctx *c)
             float sw = (GROUP_W - 4) / n;
             if (vis(c, y, 32)) kit_d_segment(c->d, GROUP_X, y, GROUP_W, labels, n, sel);
             for (int k = 0; k < n; k++)
-                if (at(c, GROUP_X + 2 + sw * k, y - 6, sw, 44)) aq_hit(c, H_METHOD, i, (int)ms[k]);
+                if (at(c, GROUP_X + 2 + sw * k, y - 6, sw, 44)) aq_hitr(c, H_METHOD, i, (int)ms[k], GROUP_X + 2 + sw * k, y + 2, sw, 28, 14, 1);
             y += 32 + 10;
         }
         unsigned m = sel >= 0 ? ms[sel] : ms[0];
@@ -800,7 +818,7 @@ static float pg_app(pctx *c)
                 d_rrect(c->d, GROUP_X, y, GROUP_W, 50, 16, C_CARD);
                 d_text_box(c->d, TK_IT600, 17, 195, bl(TK_IT600, 17, y + 14), GROUP_W - 32, 1, t, 0, 0, ACCENT(), 0);
             }
-            if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hit(c, H_REINSTALL, i, 0);
+            if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hitr(c, H_REINSTALL, i, 0, GROUP_X, y, GROUP_W, 50, 16, 0);
             y += 60;
         } else if (busy) y += 4;
         else if (vis(c, y, 20)) {
@@ -864,11 +882,11 @@ static float pg_app(pctx *c)
                     d_text(c->d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 14), "Roll Back to the Previous Version", 0, 0, ACCENT(), 0);
                     d_rrect(c->d, ROW_TX, y + 49.5f, CONTENT_R - ROW_TX, .5f, 0, W(.1f));
                 }
-                if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hit(c, H_ROLLBACK, i, 0);
+                if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hitr(c, H_ROLLBACK, i, 0, GROUP_X, y, GROUP_W, 50, 16, 0);
                 y += 50;
             }
             if (vis(c, y, 50)) d_text(c->d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 14), "Remove App", 0, 0, C_RED, 0);
-            if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hit(c, H_REMOVE, i, 0);
+            if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hitr(c, H_REMOVE, i, 0, GROUP_X, y, GROUP_W, 50, 16, 0);
             y += 50;
         }
     }
@@ -889,7 +907,7 @@ static void aq_area(void)
 {
     AQ.top = AQ.tab == AT_SEARCH && !AQ.app ? AQ_FIELD_Y + 46 : SAFE_TOP;
     AQ.bot = AQ.kb && AQ.tab == AT_SEARCH && !AQ.app ? 540 : H_PT;
-    pctx c = { 0, 0, 0, -1e9f, -1e9f, -1, 0, 0, 0 };
+    pctx c = { 0, 0, 0, -1e9f, -1e9f, -1, 0, 0, 0, { 0, 0, 0, 0 }, 0, 0 };
     aq_nl = 0;
     aq_collect = 1;
     float end = aq_paint(&c);
@@ -915,7 +933,7 @@ static void aq_chunk_draw(int L, int c)
     l->x = l->bx = 0;
     l->y = l->by = (float)Y0;
     dc d = { &l->bmp, 0, 0, (float)Y0 };
-    pctx p = { &d, y0, y0 + AQ_CH, 0, 0, L, 0, 0, 0 };
+    pctx p = { &d, y0, y0 + AQ_CH, 0, 0, L, 0, 0, 0, { 0, 0, 0, 0 }, 0, 0 };
     aq_paint(&p);
     trim_layer(l, 0, 0);
     l->hidden = 0;
@@ -1205,10 +1223,33 @@ static void st_changed(void)
         for (int k = 0; k < AQ_NLIVE; k++) if (aql_it[k] >= 0 && aql_it[k] < aq_nl && AQL[aql_it[k]].pkg == i) aql_dirty[k] = 1;
     }
 }
+static char aq_want[40];                        /* st_route_app: the page to push once the store's table has it */
+static void aq_push(int i);
 void sh_linux_store(const sh_lstore_t *s)
 {
     LST = s && s->n >= 0 ? s : 0;
     if (lx_baked && is_app("store") && !ap_pending) st_changed();
+    if (aq_want[0] && is_app("store") && st_find(aq_want) >= 0) {   /* (Linux just started for it: its page now) */
+        aq_push(st_find(aq_want));
+        aq_want[0] = 0;
+    }
+}
+/* cp6 (Track B, Track A's list of dead ends): the home's Browser and Weather keys. "browser": the installed Linux
+ * browser opens; none: the App Store on Firefox's page (GET). "weather": the catalog has no weather app yet: 0, the
+ * shell's own page stays. 1 = handled. Never blocks: opening the store only asks for Linux (gwin starts it). */
+__attribute__((unused)) static int st_route_app(const char *key)   /* (used once shell_lock.c's app_open has the hook) */
+{
+    static const char *const BROWSERS[] = { "firefox", "firefox-esr", "chromium", "epiphany-browser" };
+    if (tk_strcmp(key, "browser")) return 0;
+    for (unsigned k = 0; k < sizeof BROWSERS / sizeof BROWSERS[0]; k++) {
+        int i = st_find(BROWSERS[k]);
+        if (i >= 0 && aq_inst(&LST->pkg[i]) && st_app(i) >= 0) { lx_open_app(st_app(i)); return 1; }
+    }
+    sh_set("app", "store", 1);
+    if (!is_app("store")) return 0;
+    if (st_find("firefox") >= 0) { aq_push(st_find("firefox")); aq_want[0] = 0; }
+    else lx_scopy(aq_want, "firefox", sizeof aq_want);
+    return 1;
 }
 /* an app's page pushed (the method preselected: the installed one, else the store's default) */
 static void aq_push(int i)
@@ -1277,6 +1318,32 @@ static void aq_rm_cb(int b)
     if (b == 0 && aq_rm_pkg >= 0 && aq_rm_pkg < aq_n()) (void)aq_op(aq_rm_pkg, SH_PKG_OP_REMOVE, 0);
     aq_rm_pkg = -1;
 }
+/* cp6 (the user's "no visual feedback on buttons"): what lights under the finger, for shell_linux.inc's lx_press (G_LINUX
+ * touches never reach app_press): the same hit pass as aq_tap, with the matched element's rect; the *_press shape */
+#define AQ_HAS_PRESS 1
+static int aq_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *col)
+{
+    if (!is_app("store") || !LST) return 0;
+    if (AQ.kb && AQ.tab == AT_SEARCH && !AQ.app && y >= 548) return 0;          /* (the keyboard lights its own keys) */
+    if ((AQ.app || AQ.cat_on) && BACK_HIT(x, y)) {
+        *r = *g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *col = W(.16f);
+        return 1;
+    }
+    if (AQ.empty || AQ.hide || y < AQ.top || y >= AQ.bot) return 0;
+    pctx c = { 0, 0, 0, x, y + AQ.scroll, -1, 0, -1, 0, { 0, 0, 0, 0 }, 0, 0 };
+    aq_paint(&c);
+    if (!c.hit || c.hr.w <= 0) return 0;
+    *r = (tk_rect){ c.hr.x, c.hr.y - AQ.scroll, c.hr.w, c.hr.h };
+    *g = (tk_rect){ 0, AQ.top, 390, AQ.bot - AQ.top };
+    if (c.hrad > 0) {                              /* (the layer rounds its clip: a rounded element clips to itself, kept in view) */
+        float y0 = tk_maxf(r->y, AQ.top), y1 = tk_minf(r->y + r->h, AQ.bot);
+        if (y1 <= y0) return 0;
+        *g = (tk_rect){ r->x, y0, r->w, y1 - y0 };
+    }
+    *rad = c.hrad;
+    *col = c.hbtn ? W(.16f) : W(.1f);
+    return 1;
+}
 static void aq_tap(float x, float y)
 {
     if (!is_app("store")) return;
@@ -1315,7 +1382,7 @@ static void aq_tap(float x, float y)
         return;
     }
     if (y < AQ.top || y >= AQ.bot) return;
-    pctx c = { 0, 0, 0, x, y + AQ.scroll, -1, 0, -1, 0 };
+    pctx c = { 0, 0, 0, x, y + AQ.scroll, -1, 0, -1, 0, { 0, 0, 0, 0 }, 0, 0 };
     aq_paint(&c);
     int i = c.hpkg;
     switch (c.hit) {

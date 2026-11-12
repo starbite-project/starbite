@@ -18,6 +18,15 @@
  *                   720 x 1480 = 4.3 MB (+ 1.1); a decode: 192 KiB window (JPEG) or the file (PNG, at most 6 MiB)
  *   kept after the first open: the library's index (photos 120 KB, songs 68 KB at most). */
 
+/* cp6: the apps' press colours (shell_media / camera / apps / comms report a rect and one of these through the
+ * *_press protocol; app_press's light is over the content, so a row's is translucent: what it gives under the row's
+ * words is iOS's colour). One place to map them to the press engine's kinds at merge. */
+#define APR_CARD W(.132f)                    /* a row on a #1C1C1E card: #3A3A3C (systemGray4) under the words */
+#define APR_ROW W(.14f)                      /* a row on black */
+#define APR_CIRC W(.2f)                      /* a glass circle / capsule button: lit */
+#define APR_KEY W(.3f)                       /* a filled key (calculator, keypad): lighter */
+#define APR_DIM TK_RGBA(0, 0, 0, .55f)        /* a plain button (a tab, a text button, a glyph): dimmed */
+#define APR_CELL TK_RGBA(0, 0, 0, .2f)        /* a picture or a filled disc: darkened */
 #define MD_HDR (CONTENT_TOP + 8)             /* the header's height, pt (P3r: iOS's bands: nav row, large title, a caption) */
 #define MD_NT 12                           /* tiles at most: Files / Music 12 (a row each), Photos 7 */
 #define MD_RP 226                           /* a Files / Music row, px (61.2 pt) */
@@ -667,7 +676,7 @@ static void med_pheader(void)
     /* Select: a glass capsule (the card is read only: selecting does nothing yet) */
     float sw = tw(TK_IT500, 15, "Select", 0, 0) + 28;
     d_rrect(&d, CONTENT_R - sw, SAFE_TOP + 4, sw, 36, 18, W(.16f));
-    d_text(&d, TK_IT500, 15, CONTENT_R - sw + 14, bl(TK_IT500, 15, SAFE_TOP + 13), "Select", 0, 0, INK, 0);
+    d_text(&d, TK_IT500, 15, CONTENT_R - sw + 14, bl(TK_IT500, 15, SAFE_TOP + 13), "Select", 0, 0, W(.4f), 0);   /* cp6: dimmed (a tap says why) */
     med_seg();
 }
 static void med_header(void)
@@ -1593,7 +1602,11 @@ static void med_tap(float x, float y)
         MD.tap_wait = 1; MD.tap_t = now_ms; MD.tap_x = x; MD.tap_y = y;
         return;
     }
-    if (MD.play >= 0) { if (back && MD.pstage == 3) MD.pstage = 4; return; }   /* the list again in the next frame (med_tick) */
+    if (MD.play >= 0) {
+        if (back && MD.pstage == 3) MD.pstage = 4;       /* the list again in the next frame (med_tick) */
+        else if (MD.pstage == 3 && y >= 470 && y < 610) toast("Playback isn't available yet: there is no sound output");   /* cp6: the dimmed transport */
+        return;
+    }
     if (MD.app == MD_PHOTOS && (y < SAFE_TOP + 48 || y >= SEG_Y - 6)) { med_ptap(x, y); return; }
     if (y < md_top() && MD.app != MD_PHOTOS) {
         if (back && MD.app == MD_FILES && !md_root()) {
@@ -1706,6 +1719,71 @@ static void med_touch(int ph, float x, float y, float t)
             else if ((MD.vx > 80 || vx > .4f) && vw_can(-1)) { MD.vanim = 1; MD.vdir = -1; }
         } else if (MD.vy > 100 || vy > .5f) { MD.vanim = 3; MD.vat = 0; }
     }
+}
+/* cp6: what lights under a finger (app_press): a photo darkens, a row, a lit circle, a dimmed back; nothing for the
+ * dimmed controls (their tap says why) */
+static int med_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
+{
+    if (!MD.app || !AP.on || AP.closing || !med_is(APPS[AP.a].k)) return 0;
+    if (MD.view >= 0) {
+        if (!MD.vui) return 0;
+        if (x < MARGIN + 54 && y >= SAFE_TOP - 4 && y < SAFE_TOP + 48) {
+            *r = *g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *c = APR_CIRC;
+            return 1;
+        }
+        int cam = !MD.vsingle && MD.view < ML.nph && ML.ph[MD.view].dir == ML_STORE;
+        if (y >= VB_Y - 6 && y < VB_Y + 50)
+            for (int k = 2; k < 4; k++)                   /* info, and delete for a Camera photo (the others are dimmed) */
+                if ((k == 2 || cam) && x >= VBX[k] - 6 && x < VBX[k] + 50) {
+                    *r = *g = (tk_rect){ VBX[k], VB_Y, 44, 44 }; *rad = 22; *c = APR_CIRC;
+                    return 1;
+                }
+        return 0;
+    }
+    if (MD.play >= 0) {
+        if (MD.pstage == 3 && x < 150 && y >= 40 && y < 92) {
+            *r = *g = (tk_rect){ 8, SAFE_TOP + 2, 100, 40 }; *rad = 12; *c = APR_DIM;
+            return 1;
+        }
+        return 0;
+    }
+    if (MD.app == MD_PHOTOS) {
+        if (y >= SEG_Y - 6 && y < SEG_Y + 46 && tk_fabsf(x - 195) < SEG_W / 2) {
+            float x0 = 195 - SEG_W / 2, sw = SEG_W / 3;
+            int k = tk_mini(2, tk_maxi(0, (int)((x - x0) / sw)));
+            *r = *g = (tk_rect){ x0 + 3 + sw * k, SEG_Y + 3, sw - 6, 34 }; *rad = 17; *c = W(.16f);
+            return 1;
+        }
+        if (y < SAFE_TOP + 48) return 0;                 /* Select: dimmed (read only) */
+    } else if (y < md_top()) {
+        if (MD.app == MD_FILES && !md_root() && x < 150 && y >= 40 && y < 92) {
+            *r = *g = (tk_rect){ 8, SAFE_TOP + 2, 142, 40 }; *rad = 12; *c = APR_DIM;
+            return 1;
+        }
+        return 0;
+    }
+    if (!MD.rows) return 0;
+    float cp = y - md_top() + MD.scroll, tp = (float)MD.tp / TK_PT;
+    if (cp < 0) return 0;
+    int i = (int)(cp / tp);
+    float top = md_top() + i * tp - MD.scroll;
+    if (MD.app == MD_PHOTOS) {
+        if (MD.vmode) {
+            if (i >= MD.ngrp) return 0;
+            *r = *g = (tk_rect){ 16, top, 390 - 32, MD_CARD_H - 14 }; *rad = 22; *c = APR_CELL;
+            return 1;
+        }
+        int col = tk_mini(2, (int)(x / 130));
+        if (i * 3 + col >= ML.nph) return 0;
+        float cw = (float)(MD_CELL + 3) * 2 / TK_PT, cs = (float)MD_CELL * 2 / TK_PT;
+        *r = *g = (tk_rect){ col * cw, top, cs, cs }; *rad = 0; *c = APR_CELL;
+        return 1;
+    }
+    if (i >= (MD.app == MD_FILES ? MD.nent : ML.ntr)) return 0;   /* (the foot's count) */
+    *r = (tk_rect){ 0, top, 390, tp };
+    *g = (tk_rect){ 0, md_top(), 390, H_PT - md_top() };
+    *rad = 0; *c = APR_ROW;
+    return 1;
 }
 static int med_moving(void)
 {

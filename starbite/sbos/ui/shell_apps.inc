@@ -522,6 +522,15 @@ static void ck_glyph(dc *d, int k, float cx, float cy, tk_col c)
         d_rrect(d, cx - 1.6f, cy - 1.6f, 3.2f, 3.2f, 1.6f, c);
     }
 }
+/* cp6: a tab bar's tab under the finger (n tabs on the bar at 718: the Clock's, the Phone's): its glyph and label dim */
+static int tab_press(float x, float y, int n, tk_rect *r, tk_rect *g, float *rad, tk_col *c)
+{
+    if (y < 718 || y > 780 || x < GROUP_X || x >= GROUP_X + GROUP_W) return 0;
+    float w = GROUP_W / n;
+    int k = tk_mini(n - 1, (int)((x - GROUP_X) / w));
+    *r = *g = (tk_rect){ GROUP_X + w * k + 4, 722, w - 8, 54 }; *rad = 27; *c = APR_DIM;
+    return 1;
+}
 static void ck_tabs(dc *d)
 {
     static const char *const TL[4] = { "World Clock", "Alarms", "Stopwatch", "Timers" };
@@ -694,6 +703,13 @@ static void clk_digits(tk_layer *l, float y, float size, const char *txt)
     trim(l);
     l->hidden = 0;
 }
+/* cp6: the stopwatch's / timer's button k (0 left, 1 right) is dimmed (drawn so, no press; its tap says why) */
+static int ck_btn_dim(int k)
+{
+    if (CK.tab == 2) return !k && !CLK.sw_run && clk_sw_ms(now_ms) <= 0;
+    if (CK.tab == 3) return !CLK.tm_run && !CK.tm_paused && (!k || !(CK.wv[0] || CK.wv[1] || CK.wv[2]));
+    return 0;
+}
 static void clk_controls(void)
 {
     relayer(&apctl);
@@ -702,13 +718,12 @@ static void clk_controls(void)
     apctl.next = nx;
     if (CK.tab == 2) {
         float sw = clk_sw_ms(now_ms);
-        ck_button(&d, CKB_L, CKB_Y, CLK.sw_run || sw <= 0 ? "Lap" : "Reset", 0, !CLK.sw_run && sw <= 0);
+        ck_button(&d, CKB_L, CKB_Y, CLK.sw_run || sw <= 0 ? "Lap" : "Reset", 0, ck_btn_dim(0));
         ck_button(&d, CKB_R, CKB_Y, CLK.sw_run ? "Stop" : "Start", CLK.sw_run ? 0xff4245 : 0x30d158, 0);
     } else if (CK.tab == 3) {
-        int set = CK.wv[0] || CK.wv[1] || CK.wv[2];
-        ck_button(&d, CKB_L, CKB_Y, "Cancel", 0, !CLK.tm_run && !CK.tm_paused);
+        ck_button(&d, CKB_L, CKB_Y, "Cancel", 0, ck_btn_dim(0));
         if (CLK.tm_run) ck_button(&d, CKB_R, CKB_Y, "Pause", CK_ORANGE, 0);
-        else ck_button(&d, CKB_R, CKB_Y, CK.tm_paused ? "Resume" : "Start", 0x30d158, !CK.tm_paused && !set);
+        else ck_button(&d, CKB_R, CKB_Y, CK.tm_paused ? "Resume" : "Start", 0x30d158, ck_btn_dim(1));
     }
     trim(&apctl);
     apctl.hidden = 0;
@@ -805,6 +820,10 @@ static void clk_tap(float x, float y)
             kit_actions("Repeat", B, 5, ck_repeat_cb);
             return;
         }
+        if (y >= CK_ED_G + 47 && y < CK_ED_G + 94 && x >= GROUP_X && x < CONTENT_R) {   /* cp6: Label (no typing here yet) */
+            toast("Alarm labels can't be changed yet");
+            return;
+        }
         if (CK.edit < CK.nal && y >= CK_ED_DEL && y < CK_ED_DEL + 47 && x >= GROUP_X && x < CONTENT_R) {
             if (sh_alarm_del(CK.edit) < 0) toast("The alarm can't be deleted now");
             ck_load();
@@ -816,6 +835,10 @@ static void clk_tap(float x, float y)
     if (y >= 718 && y <= 780 && x >= GROUP_X && x < GROUP_X + GROUP_W) {
         int k = tk_mini(3, (int)((x - GROUP_X) / (GROUP_W / 4)));
         if (k != CK.tab) { sh_haptic(); CK.tab = k; LS.s = 0; build_app_page(AP.a); }
+        return;
+    }
+    if (CK.tab == 0) {                                  /* cp6: a city's row answers (its press lit) */
+        if (ckl_kind == CKL_CITIES && scv_hit(&LS, y, 0) >= 1) toast("The world clock's cities can't be changed yet");
         return;
     }
     if (CK.tab == 1) {
@@ -856,7 +879,7 @@ static void clk_tap(float x, float y)
                 if (CK.nlap < 100) CK.lap[CK.nlap++] = sw - acc;
                 CLK.laps = CK.nlap; CLK.lap_at = sw;
             } else if (sw > 0) { CLK.sw_acc = 0; CLK.laps = 0; CK.nlap = 0; CLK.sw_ds = -1; }
-            else return;
+            else { toast("Start the stopwatch to time laps"); return; }   /* cp6: the dimmed Lap says why */
             sh_haptic();
             CLK.ctl_ver++;
             CLK.sw_ds = -1;
@@ -868,12 +891,19 @@ static void clk_tap(float x, float y)
         return;
     }
     if (CK.tab == 3) {
+        if (!CLK.tm_run && !CK.tm_paused && y >= 540 && y < 592 && x >= GROUP_X && x < CONTENT_R) {   /* cp6: When Timer Ends */
+            toast("A timer vibrates when it ends: there is no sound yet");
+            return;
+        }
         if (dl <= 42 * 42 && (CLK.tm_run || CK.tm_paused)) {          /* Cancel */
             sh_haptic();
             CLK.tm_run = 0; CK.tm_paused = 0;
             CLK.ctl_ver++;
             build_app_page(AP.a);
+        } else if (dl <= 42 * 42) {
+            toast("No timer is running");                 /* cp6: the dimmed Cancel says why */
         } else if (dr <= 42 * 42) {
+            if (ck_btn_dim(1)) { toast("Choose a time on the wheels first"); return; }   /* cp6: the dimmed Start */
             sh_haptic();
             if (CLK.tm_run) { CK.tm_left = tk_maxf(0, CLK.tm_end - t); CLK.tm_run = 0; CK.tm_paused = 1; CLK.ctl_ver++; clk_update(t); }
             else if (CK.tm_paused) { CLK.tm_end = t + CK.tm_left; CLK.tm_run = 1; CK.tm_paused = 0; CLK.ctl_ver++; clk_update(t); }
@@ -1153,25 +1183,69 @@ static int ap_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
             float kx, ky, kw;
             calc_key_rect(i, &kx, &ky, &kw);
             float dx = x - (kx + 40), dy = y - (ky + 40);
-            if (dx * dx + dy * dy <= 44 * 44) { *r = *g = (tk_rect){ kx, ky, 80, 80 }; *rad = 40; *c = W(.3f); return 1; }
+            if (dx * dx + dy * dy <= 44 * 44) { *r = *g = (tk_rect){ kx, ky, 80, 80 }; *rad = 40; *c = APR_KEY; return 1; }
         }
         return 0;
     }
+    if (is_app("light")) {                                        /* cp6: the Flashlight's switch (a CC tile's press) */
+        if (x < 135 || x >= 255 || y < 250 || y >= 490) return 0;
+        *r = *g = (tk_rect){ 135, 250, 120, 240 }; *rad = 34; *c = Q[0].lit ? APR_CELL : APR_CIRC;
+        return 1;
+    }
+    if (is_app("notes") && !NS.view && NS.n) {                     /* cp6: a note's row on its card (systemGray4) */
+        if (x < GROUP_X || x >= CONTENT_R || y < CONTENT_TOP || y >= CONTENT_TOP + NOTE_RH * NS.n) return 0;
+        int i = (int)((y - CONTENT_TOP) / NOTE_RH);
+        *r = (tk_rect){ GROUP_X, CONTENT_TOP + NOTE_RH * i, GROUP_W, NOTE_RH };
+        *g = (tk_rect){ GROUP_X, CONTENT_TOP, GROUP_W, NOTE_RH * NS.n };
+        *rad = 16; *c = APR_CARD;
+        return 1;
+    }
     if (!is_app("clock")) return 0;
-    *c = W(.18f);
-    if (CK.edit >= 0) return 0;
+    *c = W(.22f);
+    if (CK.edit >= 0) {
+        /* cp6: the alarm editor: Cancel, Save (glass capsules), Repeat / Label (a card's rows), Delete Alarm */
+        if (IN_NAV(y)) {
+            float cw = capsule_w("Cancel", 0), sw = capsule_w("Save", 1);
+            if (x < MARGIN + cw + 6) *r = (tk_rect){ MARGIN, SAFE_TOP, cw, 44 };
+            else if (x > CONTENT_R - sw - 6) *r = (tk_rect){ CONTENT_R - sw, SAFE_TOP, sw, 44 };
+            else return 0;
+            *g = *r; *rad = 22; *c = APR_CIRC;
+            return 1;
+        }
+        if (x < GROUP_X || x >= CONTENT_R) return 0;
+        if (y >= CK_ED_G && y < CK_ED_G + 94) {
+            *r = (tk_rect){ GROUP_X, y < CK_ED_G + 47 ? CK_ED_G : CK_ED_G + 47, GROUP_W, 47 };
+            *g = (tk_rect){ GROUP_X, CK_ED_G, GROUP_W, 94 };
+            *rad = 16; *c = APR_CARD;
+            return 1;
+        }
+        if (CK.edit < CK.nal && y >= CK_ED_DEL && y < CK_ED_DEL + 47) {
+            *r = *g = (tk_rect){ GROUP_X, CK_ED_DEL, GROUP_W, 47 }; *rad = 16; *c = APR_CARD;
+            return 1;
+        }
+        return 0;
+    }
+    if (tab_press(x, y, 4, r, g, rad, c)) return 1;
     if (CK.tab >= 2) {
         float cx[2] = { CKB_L, CKB_R };
         for (int k = 0; k < 2; k++) {
             float dx = x - cx[k], dy = y - CKB_Y;
-            if (dx * dx + dy * dy <= 42 * 42) { *r = *g = (tk_rect){ cx[k] - 40, CKB_Y - 40, 80, 80 }; *rad = 40; return 1; }
+            if (dx * dx + dy * dy <= 42 * 42) {
+                if (ck_btn_dim(k)) return 0;                   /* dimmed: no press (its tap says why) */
+                *r = *g = (tk_rect){ cx[k] - 36, CKB_Y - 36, 72, 72 }; *rad = 36;
+                return 1;
+            }
         }
     }
-    if (CK.tab == 1 && DONE_HIT(x, y)) { *r = *g = (tk_rect){ CONTENT_R - BACK_D, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *c = W(.16f); return 1; }
-    if (ckl_kind == CKL_ALARMS && scv_contains(&LS, x, y) && x < CONTENT_R - 76) {
+    if (CK.tab == 1 && DONE_HIT(x, y)) { *r = *g = (tk_rect){ CONTENT_R - BACK_D, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *c = APR_CIRC; return 1; }
+    if (CK.tab == 3 && !CLK.tm_run && !CK.tm_paused && y >= 540 && y < 592 && x >= GROUP_X && x < CONTENT_R) {
+        *r = *g = (tk_rect){ GROUP_X, 540, GROUP_W, 52 }; *rad = 16; *c = APR_CARD;    /* When Timer Ends */
+        return 1;
+    }
+    if ((ckl_kind == CKL_ALARMS || ckl_kind == CKL_CITIES) && scv_contains(&LS, x, y) && (ckl_kind == CKL_CITIES || x < CONTENT_R - 76)) {
         float top;
         int i = scv_hit(&LS, y, &top);
-        if (i >= 1) { *r = (tk_rect){ 0, top, 390, 96 }; *g = (tk_rect){ 0, LS.top, 390, LS.bot - LS.top }; *rad = 0; *c = W(.08f); return 1; }
+        if (i >= 1) { *r = (tk_rect){ 0, top, 390, 96 }; *g = (tk_rect){ 0, LS.top, 390, LS.bot - LS.top }; *rad = 0; *c = APR_ROW; return 1; }
     }
     return 0;
 }

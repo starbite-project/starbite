@@ -1889,6 +1889,8 @@ static void cc_unview(void)
 static void build_cc_grid(void)
 {
     cc_unview();
+    CCS.rot = 1;                                 /* cp6: iOS's Portrait Orientation Lock, always on (the panel doesn't rotate) */
+    CCS.save = sh_low_power_on();                /* cp6: Track A's Low Power Mode lights its tile */
     relayer(&ccgrid);
     dc d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, 4 * CC_U + 3 * CC_GAP, 44, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
     /* the connectivity 2x2: Airplane, Cellular, Wi-Fi and the mini cluster (Bluetooth, Nearby, Hotspot, VPN) */
@@ -2365,12 +2367,13 @@ static int cc_tap(float x, float y)
             sh_haptic_k(SH_HAP_LIGHT);       /* B4: a toggle, felt */
             return 1;
         }
-        else if (c == 1) { toast("The screen doesn't rotate yet"); return 1; }
+        else if (c == 1) { toast("Portrait Orientation Lock: On"); return 1; }   /* cp6: always on (no rotation) */
         else if (c == 3) {                   /* Track A, 1.0: Low Power Mode (kernel: the conservative clocks, kept) */
             int on = !sh_low_power_on();
             sh_low_power(on);
             sh_haptic_k(SH_HAP_LIGHT);
             toast(on ? "Low Power Mode On" : "Low Power Mode Off");
+            build_cc_grid(); cc_link();      /* cp6: the tile lit / unlit (a rare toggle: the grid's rects and glyphs, no bake on the GPU row) */
             return 1;
         }
         else return 1;                       /* Emergency: a hold (G_CCEM) */
@@ -4130,6 +4133,7 @@ static void set_emergency(int on, int instant)
     if (EP.goal >= 0 && EP.goal != on) ep_cancel();   /* back before the last switch was whole: made again */
     if (EP.goal < 0) ep_begin(on);                   /* nothing prepared (Exit Emergency's tap): over the next frames */
     EMG = on;
+    sh_perf_mode(on);                                /* cp6 (Track A): Emergency's clocks drop 0.4 s after motion; normal mode holds 1.5 s */
     if (!on) { free_ecards(); cards_pending = LOCK_PARTS; }
     /* a fade still running stops where it is: the next one starts from there */
     tk_bmp_free(&em_wall);
@@ -4889,6 +4893,7 @@ static void app_press(float x, float y)
     if (sv_press(x, y, &r, &g, &rad, &c)) ok = 1;                 /* survival-next (E's bands): Emergency's tools, Settings > Medical Card */
     else if (cm_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* helper I: Recents, Messages */
     else if (ap_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* helper B5: the Calculator's keys, the Clock's buttons */
+    else if (med_press(x, y, &r, &g, &rad, &c)) ok = 1;            /* cp6: Photos' cells, Files' and Music's rows, the viewer */
     else if (pc_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* Track A: Settings > Passcode */
     else if (su_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* Track A update */
     else if (pushed && BACK_HIT(x, y)) {
@@ -4996,14 +5001,15 @@ void sh_touch(int phase, float x, float y, float t)
             if (y < H_PT - 30) sw_commit();          /* B4: the app is used: a quick switch's order is kept now */
             if (!AP.closing && !sp_app.live && kb_owns(x, y)) { T.kind = G_KB; kb_touch(0, x, y, t); return; }   /* B3 */
             if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; T.arg2 = 0; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
-            else if (!sp_app.live && med_is(APPS[AP.a].k)) { T.kind = G_MEDIA; med_touch(0, x, y, t); }
+            else if (!sp_app.live && med_is(APPS[AP.a].k)) { T.kind = G_MEDIA; med_touch(0, x, y, t); app_press(x, y); }   /* cp6: it lights */
             else if (!sp_app.live && !AP.closing && se_owns() && SE.built) { T.kind = G_SET; se_touch(0, x, y, t); }   /* helper B2 */
             else if (!sp_app.live && !AP.closing && lx_touch(0, x, y)) T.kind = G_LINUX;   /* L3 */
             else if (!sp_app.live) {
                 /* a tap on the app's page (a key lights while the finger is on it) */
                 T.kind = G_APPTAP;
-                if (is_app("phone") && AS.tab == 3) key_down(key_hit(x, y));
-                else app_press(x, y);                  /* P3p: rows, keys and buttons light */
+                int k = is_app("phone") && AS.tab == 3 ? key_hit(x, y) : -1;
+                if (k >= 0) key_down(k);
+                else app_press(x, y);                  /* P3p: rows, keys and buttons light (cp6: also the keypad's tabs, delete) */
             }
             return;
         }
@@ -5142,6 +5148,7 @@ void sh_touch(int phase, float x, float y, float t)
     }
     if (T.kind == G_MEDIA) {                 /* shell_media.inc: its lists, the viewer */
         med_touch(phase, x, y, t);
+        if (phase == 2 || MD.moved) hl_off();    /* cp6: the press goes at lift-off or with a drag */
         if (phase == 2) T.kind = G_NONE;
         return;
     }

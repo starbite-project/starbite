@@ -431,15 +431,17 @@ static int cam_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_co
     float dx = x - CAM_SH_X, dy = y - CAM_SH_Y;
     if (dx * dx + dy * dy <= 44 * 44 && cam_ok()) {
         *r = *g = (tk_rect){ CAM_SH_X - CAM_SH_R, CAM_SH_Y - CAM_SH_R, 2 * CAM_SH_R, 2 * CAM_SH_R };
-        *rad = CAM_SH_R; *c = TK_RGBA(0, 0, 0, .18f);
+        *rad = CAM_SH_R; *c = APR_CELL;
         return 1;
     }
-    static const float B[3][3] = { { CAM_FLASH_X, CAM_TOP_Y, 18 }, { CAM_THUMB_X, CAM_SH_Y, 22 }, { CAM_FLIP_X, CAM_SH_Y, 22 } };
-    for (int k = 0; k < 3; k++) {
+    /* cp6: the flash, and the thumbnail once there is a photo; Live, VIDEO and the flip are dimmed (a tap says why) */
+    static const float B[2][3] = { { CAM_FLASH_X, CAM_TOP_Y, 18 }, { CAM_THUMB_X, CAM_SH_Y, 22 } };
+    for (int k = 0; k < 2; k++) {
         float ex = x - B[k][0], ey = y - B[k][1], rr = B[k][2];
+        if (k == 1 && !CAM.nphotos && !CAM.stored) break;
         if (ex * ex + ey * ey <= (rr + 8) * (rr + 8)) {
             *r = *g = (tk_rect){ B[k][0] - rr, B[k][1] - rr, 2 * rr, 2 * rr };
-            *rad = rr; *c = W(.16f);
+            *rad = rr; *c = APR_CIRC;
             return 1;
         }
     }
@@ -472,6 +474,7 @@ static void camera_tap(float x, float y)
     } else if (tx * tx + dy * dy <= 30 * 30) {
         if (CAM.stored && !CAM.shot) CAM.photos = 1;            /* Photos at it, on the next turn (never in the tap) */
         else if (CAM.nphotos) cam_review(!CAM.review);          /* not kept: shown in the viewfinder */
+        else toast("No photos yet: tap the shutter");          /* cp6: never a silent tap */
     } else if (px * px + dy * dy <= 30 * 30) {
         toast("Only the front camera works yet");
     } else if (CAM.review && y >= CAM_VF_Y && y < CAM_VF_Y + CAM_VF_H) {
