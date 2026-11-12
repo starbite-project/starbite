@@ -67,7 +67,7 @@ static tk_col KIT_SEC(void) { return C_LABEL2; }                   /* secondaryL
 
 static void isl_close(void);        /* B7's pill (shell_island.inc) */
 enum { KIT_NONE, KIT_ALERT, KIT_ACTIONS, KIT_SHEET };
-static tk_layer kitl, kdim, kitg, kglass, kfill, kcard, kbhl, ksw, kslf, kslk;
+static tk_layer kitl, kdim, kitg, kglass, kfill, kcard, kithl, ksw, kslf, kslk;   /* cp6: kithl was kbhl: the same object as shell_kb.inc's lit key (one TU), in two lists */
 static tk_bmp kknob, kslknob;       /* the switch's thumb and the slider's, drawn once */
 static struct {
     int kind, closing, press, n, cancel;
@@ -112,8 +112,8 @@ static void kit_init(void)
     tk_layer_init(&kfill, "kit-fill");
     kfill.hidden = 1;
     tk_layer_init(&kcard, "kit-card");
-    tk_layer_init(&kbhl, "kit-press");
-    kbhl.hidden = 1;
+    tk_layer_init(&kithl, "kit-press");
+    kithl.hidden = 1;
     tk_layer_init(&ksw, "kit-switch");
     ksw.hidden = 1;
     tk_layer_init(&kslf, "kit-slider-fill");
@@ -125,7 +125,7 @@ static void kit_init(void)
 static void kit_link(void)
 {
     kit_init();
-    tk_layer *g[] = { &kglass, &kfill, &kcard, &kbhl };
+    tk_layer *g[] = { &kglass, &kfill, &kcard, &kithl };
     link(&kitg, g, 4);
     tk_layer *k[] = { &kdim, &kitg };
     link(&kitl, k, 2);
@@ -135,7 +135,7 @@ static void kit_free(void)
     relayer(&kcard); relayer(&kglass);
     kcard.ngsh = kglass.ngsh = 0;
     kglass.hidden = kfill.hidden = 1;
-    kbhl.hidden = 1;
+    kithl.hidden = 1;
     kitl.hidden = 1;
     KT.kind = KIT_NONE;
     KT.closing = 0;
@@ -190,7 +190,7 @@ static void kit_show(int kind)
     KT.a = 0;
     KT.at = 1;
     kitl.hidden = 0;
-    kbhl.hidden = 1;
+    kithl.hidden = 1;
     isl_close();                                   /* a toast under it goes (B7: the pill closes) */
     press_cancel();
     kit_link();
@@ -390,7 +390,7 @@ static void kit_dismiss(int i)
     if (!kit_on() || KT.closing) return;
     KT.closing = 1;
     KT.press = -1;
-    kbhl.hidden = 1;
+    hl_release(&kithl);                                     /* cp6: the pressed button stays lit as the card fades */
     kit_cb cb = KT.cb;
     KT.cb = 0;
     if (KT.kind == KIT_ALERT) KT.at = 0;                     /* fade only, .2 s */
@@ -419,9 +419,9 @@ static int kit_btn_at(float x, float y)
 static void kit_press(int i)
 {
     KT.press = i;
-    if (i < 0) { kbhl.hidden = 1; return; }
+    if (i < 0) { hl_release(&kithl); return; }            /* cp6: it fades (a quick tap shows it first) */
     tk_rect r = KT.br[i];
-    hl_set(&kbhl, r, r, r.h / 2, W(.14f));
+    hl_set(&kithl, r, r, r.h / 2, W(.16f));               /* iOS: the capsule's own fill lights (#363639 -> ~#545456) */
 }
 static int kit_touch(int phase, float x, float y, float t)
 {
@@ -437,11 +437,18 @@ static int kit_touch(int phase, float x, float y, float t)
             tk_tracker_add(&KT.tr, y, t);
             KT.drag = y >= top && y < top + KSH_HDR ? 1 : y < top ? 2 : 3;   /* the top drags it, above it dismisses */
             KT.sp.live = 0;
+            {   /* cp6: the close circle lights (its content space: the sheet at KT.y) */
+                float cx = KT.x + 16 + 22, cy = top + 16 + 22;
+                if (KT.drag == 1 && (x - cx) * (x - cx) + (y - cy) * (y - cy) < 26 * 26) {
+                    tk_rect c = { KT.x + 16, top + 16, 44, 44 };
+                    hl_set(&kithl, c, c, 22, PRESS_BTN);
+                }
+            }
             return 1;
         }
         if (phase == 1) {
             tk_tracker_add(&KT.tr, y, t);
-            if (tk_fabsf(y - KT.y0) > 6) KT.moved = 1;
+            if (tk_fabsf(y - KT.y0) > 6) { KT.moved = 1; hl_release(&kithl); }
             if (KT.drag == 1 && KT.moved) {
                 float nt = KT.top0 + y - KT.y0;
                 if (nt < KT.large) nt = KT.large - rubber(KT.large - nt, H_PT) * .5f;
@@ -451,6 +458,7 @@ static int kit_touch(int phase, float x, float y, float t)
         }
         int dr = KT.drag;
         KT.drag = 0;
+        hl_release(&kithl);
         float cx = KT.x + 16 + 22, cy = KT.top + 16 + 22;
         if (dr == 1 && KT.moved) {
             /* where the flick would carry it (200 ms): the nearer detent, or away below the medium one */
@@ -637,7 +645,7 @@ static int kit_tick(float dt)
         int live = tk_spring_step(&KT.sp, dt);
         kit_sheet_place(KT.sp.x);
         if (!live && KT.closing) kit_sheet_end();
-        else if (!KT.closing && !KT.landed && tk_fabsf(KT.sp.x - KT.sp.to) < 2) { KT.landed = 1; sh_haptic(); }   /* soft, on a detent */
+        else if (!KT.closing && !KT.landed && tk_fabsf(KT.sp.x - KT.sp.to) < 2) { KT.landed = 1; sh_haptic_k(SH_HAP_SOFT); }   /* soft, on a detent (cp6: iOS's .soft) */
         mv = 1;
     }
     return mv | (KT.drag == 1);

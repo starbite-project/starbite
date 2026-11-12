@@ -14,8 +14,8 @@
  *     It morphs in from a 6 pt dot and back (spring response .35, damping .75).
  *   - the live pill: a black capsule centred at the top (y 6), compact 126 x 28. toast() is its transient expanded
  *     state: the pill springs out to the message's size (at most 374 wide, 3 lines of 15 / 600 white, radius up to
- *     44; response .45, damping .75: the island's bounce), the words fade in once it is nearly open, it holds 2 s
- *     (toast_left: 6 s for the Clock's timer), then the words go and it springs back to 126 x 28 and fades. The pill is
+ *     44; response .45, damping .75: the island's bounce), the words fade in once it is nearly open, it holds 2.5 s
+ *     (longer for a long message; toast_left: 6 s for the Clock's timer), then the words go and it springs back to 126 x 28 and fades. The pill is
  *     a solid layer clipped round (no bitmap, nothing to bake); only its words are a small layer, made at the toast
  *     and freed when the pill has gone. Over the lock it is the same.
  *   - the call screen: a swipe up from its bottom edge minimises a connected call into the capsule.
@@ -223,7 +223,9 @@ static void toast(const char *msg)
     trim(&isltxt);
     isl_link();
     isltxt.clip = 1;
-    toast_left = 2000;                       /* armed at the next look (the Clock's timer sets 6000 after this) */
+    /* cp6: long enough to read: 2.5 s, and 60 ms more a character past 24 (6 s at most); armed at the next look (the
+     * Clock's timer sets 6000 after this) */
+    toast_left = tk_minf(6000, 2500 + 60 * (float)tk_maxi(0, (int)tk_strlen(msg) - 24));
     IS.hold_end = -1;
     isl_pill_place();
 }

@@ -206,7 +206,10 @@ static arect sw_rect(int i)
     float x, s;
     sw_geom(sw_pos(i), &x, &s);
     float dy = i == SW.thrown ? SW.dy : 0;
-    return (arect){ x, SW_MID - H_PT * s / 2 + dy, 390 * s, H_PT * s, SW_R };
+    arect R = { x, SW_MID - H_PT * s / 2 + dy, 390 * s, H_PT * s, SW_R };
+    float ps = press_s(&swcard[i]);              /* cp6: a card held: .97 about its centre */
+    if (ps != 1) { R.x += R.w * (1 - ps) / 2; R.y += R.h * (1 - ps) / 2; R.w *= ps; R.h *= ps; }
+    return R;
 }
 static const tk_bmp *sw_icon_of(int i, float *pad)
 {
@@ -404,6 +407,7 @@ static void sw_open(int i)
 {
     if (i < 0 || i >= swn) return;
     arect R = sw_rect(i);
+    press_scale_kill(&swcard[i]);                /* cp6: the press is the open's start */
     if (SWR[i].kind && !(i == 0 && SW.live && AP.on)) {   /* an external entry: its provider brings it up (the live one grows back) */
         if (AP.on) { sp_app.live = 0; app_finish_close(); }
         sw_ext_open(SWR[i].subid);
@@ -536,6 +540,7 @@ static int sw_down(float x, float y, float t)
         if (x >= R.x && x < R.x + R.w && y >= R.y - 40 && y < R.y + R.h) SW.sl = i;
     }
     SW.g = y >= H_PT - 34 ? SWG_HOME : SW.sl >= 0 ? SWG_CARD : SWG_BG;
+    if (SW.g == SWG_CARD) press_key(&swcard[SW.sl], .97f, sw_place);   /* cp6: a card's press */
     sp_sws.live = 0;
     SW.base = SW.scroll;
     tk_tracker_add(&SW.tr, x, t);
@@ -564,6 +569,7 @@ static void sw_touch(int ph, float x, float y, float t)
     if (ph == 1) {
         if (!SW.moved && dx * dx + dy * dy > 64) {
             SW.moved = 1;
+            hl_off();                                /* cp6: a move lets the press go */
             if (SW.g == SWG_HOME) ;
             else if (tk_fabsf(dx) > tk_fabsf(dy)) { SW.g = SWG_SCROLL; SW.x0 = x; dx = 0; }
             else if (SW.g == SWG_CARD && SW.thrown < 0) {
@@ -588,6 +594,7 @@ static void sw_touch(int ph, float x, float y, float t)
         return;
     }
     if (ph != 2) return;
+    hl_off();                                    /* cp6: the press lets go */
     float v = tk_tracker_v(&SW.tr);
     int g = SW.g;
     SW.g = SWG_NONE;

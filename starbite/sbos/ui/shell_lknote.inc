@@ -28,7 +28,7 @@
 #define LKN_LESS_H 28.0f
 typedef struct { unsigned id; tk_layer gl, tx; float h, yb; int nl, built; } lkn_slot;
 static lkn_slot LKS[LKN_MAX];
-static tk_layer lkng, lknless;
+static tk_layer lkng, lknless, lknhl;       /* cp6: lknhl the press light on "Show less" */
 enum { LG_NONE, LG_STACK, LG_ITEM, LG_LESS, LG_AREA, LG_SCROLL };
 static struct {
     int n, exp, g, moved, hit;
@@ -102,17 +102,19 @@ static void lkn_init(void)
 {
     tk_layer_init(&lkng, "lock-notes");
     tk_layer_init(&lknless, "lkn-less"); lknless.hidden = 1;
+    tk_layer_init(&lknhl, "lkn-press"); lknhl.hidden = 1;
     for (int i = 0; i < LKN_MAX; i++) { tk_layer_init(&LKS[i].gl, "lkn-glass"); LKS[i].gl.hidden = 1; tk_layer_init(&LKS[i].tx, "lkn-item"); LKS[i].tx.hidden = 1; }
     LK.sig = 0;
 }
 /* the tree: the peeks under the oldest, the front platter last (on top) */
 static void lkn_link(void)
 {
-    tk_layer *c[2 * LKN_MAX + 2];
+    tk_layer *c[2 * LKN_MAX + 3];
     int k = 0;
     c[k++] = &K[0].gh;
     for (int i = LKN_MAX - 1; i >= 0; i--) if (LKS[i].id) { c[k++] = &LKS[i].gl; c[k++] = &LKS[i].tx; }
     c[k++] = &lknless;
+    c[k++] = &lknhl;
     link(&lkng, c, k);
 }
 
@@ -171,6 +173,9 @@ static void lkn_place(void)
             s->tx.hidden = a <= .004f;
         } else
             s->tx.hidden = 1;
+        s->tx.sx = s->tx.sy = 1;
+        float ps = press_s(s);                  /* cp6: a platter pressed (.98 about its centre) */
+        if (ps != 1) { lay_scale(&s->gl, ps, PT(195), PT(y + s->h / 2)); lay_scale(&s->tx, ps, PT(195), PT(y + s->h / 2)); }
     }
     /* the lower cards under the front (one for two notifications): they fade as the stack fans out */
     tk_layer *g = &K[0].gh;
@@ -182,6 +187,9 @@ static void lkn_place(void)
         g->clip = 1;
         g->clip_r = (tk_rect){ 0, PT(y), (float)TK_W, PT(h + (LK.n == 2 ? PEEK1 + .5f : PEEK2 + 4)) };
         g->hidden = 0;
+        g->sx = g->sy = 1;
+        float ps = press_s(&LKS[0]);            /* cp6: the stack pressed: its peeks with the front platter */
+        if (ps != 1) lay_scale(g, ps, PT(195), PT(y + h / 2));
     } else
         g->hidden = 1;
     if (lknless.bmp.px) {
@@ -319,13 +327,21 @@ static int lkn_down(float x, float y, float t)
     if (!LK.exp) {
         if (y < lkn_front_c() || y > LKN_BOT + 2 || x < PL_X || x >= PL_X + PL_W) return 0;
         LK.g = LG_STACK;
+        press_key(&LKS[0], .98f, lkn_place);       /* cp6: the stack's press (its front platter and peeks) */
         return 1;
     }
     if (y < LKN_TOP - 6 || y > LKN_BOT + 4) return 0;
     float ly = lkn_less_e();
-    if (!lknless.hidden && y >= ly - 6 && y < ly + LKN_LESS_H + 6 && x >= PL_X + PL_W - 120) { LK.g = LG_LESS; return 1; }
+    if (!lknless.hidden && y >= ly - 6 && y < ly + LKN_LESS_H + 6 && x >= PL_X + PL_W - 120) {
+        LK.g = LG_LESS;
+        float w = tw(TK_IT600, 13, "Show less", 0, 0) + 24;   /* cp6: the capsule lights */
+        tk_rect c = { PL_X + PL_W - w, ly, w, LKN_LESS_H };
+        hl_set(&lknhl, c, c, LKN_LESS_H / 2, PRESS_BTN);
+        return 1;
+    }
     LK.hit = lkn_slot_at(x, y);
     LK.g = LK.hit >= 0 ? LG_ITEM : LG_AREA;
+    if (LK.hit >= 0) press_key(&LKS[LK.hit], .98f, lkn_place);   /* cp6: a card's press */
     LK.base = LK.off;
     LK.spo.live = 0;
     return 1;
@@ -338,6 +354,7 @@ static int lkn_touch(int ph, float x, float y, float t)
         tk_tracker_add(&LK.tr, y, t);
         if (!LK.moved && (tk_fabsf(dx) > 8 || tk_fabsf(dy) > 8)) {
             LK.moved = 1;
+            hl_off();                               /* cp6: a move lets the press go */
             if (LK.exp && lkn_max_off() > 0 && tk_fabsf(dy) > tk_fabsf(dx)) LK.g = LG_SCROLL;
             else { LK.g = LG_NONE; return 2; }
         }
@@ -349,6 +366,7 @@ static int lkn_touch(int ph, float x, float y, float t)
         return 0;
     }
     if (ph != 2) return 0;
+    hl_off();                                   /* cp6: the press lets go (lit at least 100 ms, then back) */
     int g = LK.g;
     LK.g = LG_NONE;
     if (g == LG_SCROLL) {
