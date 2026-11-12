@@ -63,13 +63,21 @@ uint32_t cal_play_ptr(uint32_t *count);     /* Calliope's last POINTER as a ring
 void cal_play_stop(void);                   /* best effort, safe at any point; leaves the call's routes alone */
 int cal_playing(void);
 const char *cal_why(void);
+/* diagnostics: cal_trace(1) logs every PCM message sent ("cal: ipc -> ..." with its fields and whether Calliope took
+ * it); cal_dump(tag) logs RDMA0's registers, SYSPOWER, ROUTE0, SPUS0 and the UAIF in one line, only while Calliope runs
+ * (never inside a powered-off AUD domain) */
+void cal_trace(int on);
+void cal_dump(const char *tag);
 
 /* ---- the driver probe (drvprobe.h) ------------------------------------------------------------------------------
  * level 0: reads only: the AUD domain and ABOX CPU state (PMU), IP_INDEX / SysMMU CTRL when the domain is on, and
  *          whether Calliope's three files are on VENDOR, with their sizes (read into abox_rmem, which nothing uses
  *          while ABOX's CPU is off; skipped when it is on).
- * level 1: silent: Calliope booted (amps off, the codec left in reset), RDMA0 plays zeroes to UAIF1 through Calliope,
- *          1 s measured in One UI's geometry, then 0.5 s in snd.c's; stopped; abox_off(); the AUD domain as found.
+ * level 1: silent: Calliope booted (amps off, the codec left in reset), 300 ms for its post-boot messages, RDMA0
+ *          plays zeroes to UAIF1 through Calliope, 1 s measured in One UI's geometry, then 0.5 s in snd.c's if it moved,
+ *          else 0.5 s to UAIF0 (One UI's boot route); every PCM message, Calliope's replies (raw) and its own log lines
+ *          after the stream's start are logged; stopped; abox_off() (the AUD domain ends off, as Android's runtime
+ *          suspend leaves it: by design, not restored).
  * level 2: attended: the same with a 1 kHz tone at -24 dBFS on the earpiece amp at its lowest level, 2 s.
  * Calliope's boot is one call of up to ~3.5 s (abox_boot() waits for BOOT_DONE: ~64 ms on Android, 3 s allowed). */
 int drv_calliope_probe(int level, unsigned *wait_ms);

@@ -57,7 +57,7 @@ static struct {
     struct { uint64_t seq, fn, a1, a2, a3; } smc[32];
     unsigned nsmc;
     unsigned violations, ram_violations;
-    int boot_ok, pcm_dead, rdma_dead, missing_sram;
+    int boot_ok, pcm_dead, rdma_dead, missing_sram, only_uaif0;
     /* the fake RDMA0 */
     int r_open, r_buf, r_par, r_prep, r_run;
     uint32_t r_iova, r_period, r_periods;
@@ -174,17 +174,32 @@ static int ring_mapped(void)
     return 1;
 }
 
+/* Calliope's own log: one line per PCM message into the SRAM ring at 0x30800 (writer, reader, size 256, text) */
+static void fw_say(const char *s)
+{
+    uint8_t *text = (uint8_t *)F.sram + 0x3080C;
+    uint32_t wr = F.sram[0x30800 / 4];
+    for (; *s; ++s) {
+        text[wr] = (uint8_t)*s;
+        wr = (wr + 1) % 256;
+    }
+    F.sram[0x30800 / 4] = wr;
+}
+
 static void pcm_msg(const uint32_t *m)
 {
     if (m[0] != 2 || m[3] != 0)
         return;
+    char line[32];
+    snprintf(line, sizeof line, "pcm %u\n", m[2]);
+    fw_say(line);
     switch (m[2]) {
     case 11: F.r_open = 1; break;
     case 20: F.r_buf = F.r_open, F.r_iova = m[4], F.r_period = m[5], F.r_periods = m[6]; break;
     case 14: F.r_par = F.r_buf && m[4] == 48000 && m[5] == 16 && m[6] == 2; break;
     case 16: F.r_prep = F.r_par; break;
     case 17:
-        if (m[4] == 1 && F.r_prep && F.r_iova == 0x91000000u) {
+        if (m[4] == 1 && F.r_prep && F.r_iova == 0x91000000u && (!F.only_uaif0 || (reg(ABOX_SFR + 0x40) & 0xF) == 1)) {
             if (!ring_mapped()) {                       /* the DMA's first read faults */
                 set(ABOX_SYSMMU + 0x060, 1);
                 set(ABOX_SYSMMU + 0x070, 0x91000000u);
@@ -372,13 +387,6 @@ static const char *last_line(void)
             return F.logs[i];
     return "";
 }
-static uint64_t last_wr(uint64_t pa)
-{
-    for (size_t i = F.nw; i--;)
-        if (F.w[i].pa == pa)
-            return F.w[i].seq;
-    return 0;
-}
 /* the index of the n-th playback-channel-0 message of `type` from `from` */
 static int find_pcm(unsigned from, uint32_t type)
 {
@@ -397,12 +405,14 @@ static int run(int level)
     return n < 400;
 }
 
+/* pd_on: the AUD domain expected after (abox_off powers it down by design; untouched when nothing booted) */
 static void off_as_found(const char *t, int pd_on)
 {
     CHECK(abox_state() == ABOX_ST_OFF, "%s: abox state %d", t, abox_state());
     CHECK(!(reg(ABOX_PMU + 0x4160) & 1), "%s: ABOX CPU still on", t);
-    CHECK((reg(ABOX_PMU + 0x4004) & 0xF) == (pd_on ? 0xFu : 0u), "%s: AUD domain %#x, found %s", t,
+    CHECK((reg(ABOX_PMU + 0x4004) & 0xF) == (pd_on ? 0xFu : 0u), "%s: AUD domain %#x, want %s", t,
           reg(ABOX_PMU + 0x4004), pd_on ? "on" : "off");
+    CHECK(!logged("DTZPC restore SMC answered") && !logged("back on"), "%s: the probe powered the domain", t);
     CHECK(!F.r_run, "%s: RDMA0 left running", t);
     CHECK(!F.amp_on, "%s: amp left on", t);
     CHECK(F.violations == 0 && F.ram_violations == 0, "%s: %u / %u writes outside the audio blocks / RAM", t,
@@ -450,6 +460,17 @@ static void test_level1(int pd_on)
           "%s: extra window line", t);
     CHECK(logged("Calliope sent 49 period pointers = 188160 B/s"), "%s: pointer rate", t);
     CHECK(F.r_starts == 2, "%s: RDMA0 started %u times (want 2)", t, F.r_starts);
+    /* run 6's diagnostics: settle, every PCM message with its fields, Calliope's messages raw, the dumps, its log */
+    CHECK(logged("1/4 boot: 300 ms after BOOT_DONE taken"), "%s: settle line", t);
+    CHECK(logged("cal: ipc -> PCMPLAYBACK (2) task 0 ch 0 SET_BUFFER (msgtype 20; 0x91000000, 0xf00, 0x4): taken") &&
+          logged("cal: ipc -> PCMPLAYBACK (2) task 0 ch 0 OPEN (msgtype 11; 0x0, 0x0, 0x0): taken") &&
+          logged("cal: ipc -> PCMPLAYBACK (2) task 0 ch 0 HW_PARAMS (msgtype 14; 0xbb80, 0x10, 0x2): taken") &&
+          logged("cal: ipc -> PCMPLAYBACK (2) task 0 ch 0 TRIGGER (msgtype 17; 0x1, 0x0, 0x0): taken") &&
+          logged("cal: ipc -> PCMPLAYBACK (2) task 0 ch 0 CLOSE (msgtype 12; 0x0, 0x0, 0x0): taken"), "%s: ipc trace", t);
+    CHECK(logged("abox: rx: 0x2 0x0 0x12 0x0 0x91000f00"), "%s: raw rx of the first pointer", t);
+    CHECK(logged("cal: dump 100 ms after TRIGGER: RDMA0 0x400001") && logged("cal: dump end of the phase"), "%s: dumps",
+          t);
+    CHECK(logged("abox: fw: pcm 17"), "%s: Calliope's log after the stream start", t);
 
     /* Samsung's order, both phases */
     int o = find_pcm(0, 11), b = find_pcm(0, 20), p = find_pcm(0, 14), pr = find_pcm(0, 16), tr = find_pcm(0, 17);
@@ -482,13 +503,10 @@ static void test_level1(int pd_on)
     CHECK((reg(ABOX_SFR + 0x200) & 0xF) == 0 && (reg(ABOX_SFR + 0x40) & 0xF0) == 0 && reg(ABOX_SFR + 0x510) == 0x1000010,
           "%s: SPUS0 %#x ROUTE0 %#x UAIF1 CTRL0 %#x not as found", t, reg(ABOX_SFR + 0x200), reg(ABOX_SFR + 0x40),
           reg(ABOX_SFR + 0x510));
-    off_as_found(t, pd_on);
-    if (pd_on)
-        CHECK(F.nsmc >= 2 && F.smc[F.nsmc - 1].a1 == 1 && F.smc[F.nsmc - 1].seq > last_wr(ABOX_PMU + 0x415C),
-              "%s: the domain back on with the DTZPC restore last", t);
-    else
-        CHECK(F.smc[F.nsmc - 1].a1 == 0, "%s: domain found off but restored on", t);
-    CHECK(logged(pd_on ? "AUD domain on (as found)" : "AUD domain off (as found)"), "%s: off line", t);
+    off_as_found(t, 0);
+    CHECK(F.smc[F.nsmc - 1].a1 == 0, "%s: the last SMC is not the TZPC save", t);
+    CHECK(logged(pd_on ? "AUD domain off (it was on from the boot; abox_off powers it down by design)"
+                       : "4/4 off: ABOX CPU off, AUD domain off"), "%s: off line", t);
 
     /* the extra window is gone: a later boot (a call) does not map it */
     reset(0);
@@ -519,7 +537,7 @@ static void test_level2(void)
     CHECK(peak >= 2000 && peak <= 2064 && s[2 * 12] == 2064 && s[2 * 12 + 1] == 2064 && s[2 * 36] == -2064 && sum == 0,
           "L2: tone peak %d sum %ld (-24 dBFS 1 kHz)", peak, sum);
     CHECK(F.rmem[CAL_RM_PLAY + 15360] == 0, "L2: guard zeroes");
-    off_as_found("L2", 1);
+    off_as_found("L2", 0);
 }
 
 static void test_failures(void)
@@ -531,7 +549,7 @@ static void test_failures(void)
     CHECK(strstr(last_line(), "FAIL 1/4 boot: Calliope did not boot: 12/13 ready: no BOOT_DONE within 3000 ms") &&
           strstr(last_line(), "everything off"), "boot fail: %s", last_line());
     CHECK(F.r_starts == 0, "boot fail: RDMA started");
-    off_as_found("boot fail", 1);
+    off_as_found("boot fail", 0);
 
     /* missing firmware */
     reset(0);
@@ -545,14 +563,25 @@ static void test_failures(void)
     F.pcm_dead = 1;
     CHECK(run(1), "pcm dead: did not finish");
     CHECK(strstr(last_line(), "FAIL 2/4 stream: RDMA0 did not start through Calliope"), "pcm dead: %s", last_line());
-    off_as_found("pcm dead", 1);
+    off_as_found("pcm dead", 0);
 
     /* RDMA0 never moves and no pointers */
     reset(1);
     F.rdma_dead = 1;
     CHECK(run(1), "rdma dead: did not finish");
-    CHECK(strstr(last_line(), "FAIL 3/4 measure: RDMA0 did not move through Calliope"), "rdma dead: %s", last_line());
-    off_as_found("rdma dead", 1);
+    CHECK(strstr(last_line(), "FAIL 3/4 measure: RDMA0 did not move through Calliope to UAIF1; to UAIF0 (One UI's "
+                              "boot route): 0 B/s (pointers)"), "rdma dead: %s", last_line());
+    CHECK(F.r_starts == 2, "rdma dead: UAIF1 then UAIF0 tried (%u starts)", F.r_starts);
+    off_as_found("rdma dead", 0);
+
+    /* RDMA0 moves only on One UI's boot route (SIFS0 -> UAIF0): phase 2 finds it */
+    reset(1);
+    F.only_uaif0 = 1;
+    CHECK(run(1), "uaif0 only: did not finish");
+    CHECK(strstr(last_line(), "FAIL 3/4 measure: RDMA0 did not move through Calliope to UAIF1; to UAIF0 (One UI's boot "
+                              "route) it DID: 192000 B/s (STATUS)"), "uaif0 only: %s", last_line());
+    CHECK(F.r_starts == 1, "uaif0 only: %u starts", F.r_starts);
+    off_as_found("uaif0 only", 0);
 
     /* both extra slots taken: the ring cannot be mapped -> nothing booted */
     reset(1);
@@ -580,10 +609,10 @@ static void test_failures(void)
     CHECK(F.r_run, "abort: RDMA0 should be running by now");
     drv_calliope_abort();
     CHECK(logged("aborted: putting everything back"), "abort: line");
-    off_as_found("abort", 1);
+    off_as_found("abort", 0);
     CHECK((reg(ABOX_SFR + 0x40) & 0xF0) == 0, "abort: route left");
     drv_calliope_abort();                                   /* twice is safe */
-    off_as_found("abort twice", 1);
+    off_as_found("abort twice", 0);
 }
 
 static void test_hooks(void)

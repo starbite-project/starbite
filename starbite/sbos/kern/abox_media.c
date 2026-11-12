@@ -238,6 +238,67 @@ uint32_t cal_ring_bytes(void) { return E.playing ? E.ring : 0; }
 static int abox_up(void) { return abox_state() == ABOX_ST_READY || abox_state() == ABOX_ST_CALL; }
 
 /* ---- the stream ---------------------------------------------------------------------------------------------- */
+static int trace_ipc;                           /* cal_trace(): every PCM message we send, with its fields */
+void cal_trace(int on) { trace_ipc = on; }
+
+/* one IPC_PCMPLAYBACK message for RDMA0 (abox.c: msgtype, channel_id = task_id = 0, three param words) */
+static int pcm(uint32_t type, uint32_t a, uint32_t b, uint32_t c)
+{
+    static const char *const nm[] = { "OPEN", "CLOSE", "?13", "HW_PARAMS", "HW_FREE", "PREPARE", "TRIGGER", "POINTER",
+                                      "?19", "SET_BUFFER" };
+    int r = abox_pcm_msg(0, CAL_ID, type, a, b, c);
+    if (trace_ipc) {
+        struct tb t;
+        tinit(&t, "cal: ipc -> PCMPLAYBACK (2) task 0 ch 0 ");
+        ts(&t, type >= 11U && type <= 20U ? nm[type - 11U] : "?");
+        ts(&t, " (msgtype ");
+        tu(&t, type);
+        ts(&t, "; ");
+        tx(&t, a);
+        ts(&t, ", ");
+        tx(&t, b);
+        ts(&t, ", ");
+        tx(&t, c);
+        ts(&t, r ? "): NOT taken (" : "): taken");
+        if (r) {
+            tu(&t, (uint64_t)(-r));
+            ts(&t, ")");
+        }
+        out(&t);
+    }
+    return r;
+}
+
+void cal_dump(const char *tag)
+{
+    struct tb t;
+    if (!have_hal || !abox_up())                /* never inside the domain when Calliope is not up */
+        return;
+    static const uint8_t ro[] = { 0x00, 0x04, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x20, 0x30 };
+    tinit(&t, "cal: dump ");
+    ts(&t, tag);
+    ts(&t, ": RDMA0");
+    for (unsigned i = 0; i < sizeof ro; ++i) {
+        tc(&t, ' ');
+        tx(&t, r32(ABOX_SFR + SFR_RDMA0 + ro[i]));
+    }
+    ts(&t, " | SYSPOWER ");
+    tx(&t, r32(ABOX_SFR + SFR_SYSPOWER_CTRL));
+    ts(&t, " ROUTE0 ");
+    tx(&t, r32(ABOX_SFR + SFR_ROUTE_CTRL0));
+    ts(&t, " SPUS0 ");
+    tx(&t, r32(ABOX_SFR + SFR_SPUS_CTRL0));
+    ts(&t, " UAIF");
+    tu(&t, (uint64_t)E.uaif);
+    tc(&t, ' ');
+    tx(&t, r32(ABOX_SFR + SFR_UAIF_CTRL0(E.uaif)));
+    tc(&t, ' ');
+    tx(&t, r32(ABOX_SFR + SFR_UAIF_CTRL1(E.uaif)));
+    ts(&t, " st ");
+    tx(&t, r32(ABOX_SFR + SFR_UAIF_STATUS(E.uaif)));
+    out(&t);
+}
+
 static int fail_start(const char *what, int r)
 {
     struct tb t;
@@ -292,17 +353,17 @@ int cal_play_start(int uaif, uint32_t period, uint32_t periods)
     memset(E.win, 0, CAL_RM_WINDOW);
     sync_ram();
     /* 3: the PCM task */
-    if ((r = abox_pcm_msg(0, CAL_ID, ABOX_PCM_OPEN, 0, 0, 0)) ||
-        (r = abox_pcm_msg(0, CAL_ID, ABOX_PCM_SET_BUFFER, CAL_IOVA, period, periods)) ||
-        (r = abox_pcm_msg(0, CAL_ID, ABOX_PCM_HW_PARAMS, CAL_RATE, 16, 2)) ||
-        (r = abox_pcm_msg(0, CAL_ID, ABOX_PCM_PREPARE, 0, 0, 0)))
+    if ((r = pcm(ABOX_PCM_OPEN, 0, 0, 0)) ||
+        (r = pcm(ABOX_PCM_SET_BUFFER, CAL_IOVA, period, periods)) ||
+        (r = pcm(ABOX_PCM_HW_PARAMS, CAL_RATE, 16, 2)) ||
+        (r = pcm(ABOX_PCM_PREPARE, 0, 0, 0)))
         return fail_start("Calliope did not take the PCM set-up (OPEN / SET_BUFFER / HW_PARAMS / PREPARE)", r);
     /* 4: start */
     m32(ABOX_SFR + SFR_SPUS_CTRL2, 1U, 1U);
     m32(ABOX_SFR + SFR_SYSPOWER_CTRL, 1U, 1U);
     m32(ABOX_SFR + SFR_UAIF_CTRL0(uaif), UAIF_SPK_EN, UAIF_SPK_EN);
     E.triggered = 1;
-    if ((r = abox_pcm_msg(0, CAL_ID, ABOX_PCM_TRIGGER, 1, 0, 0)))
+    if ((r = pcm(ABOX_PCM_TRIGGER, 1, 0, 0)))
         return fail_start("Calliope did not take TRIGGER start", r);
     E.playing = 1;
     tinit(&t, "cal: start: RDMA0 ");
@@ -352,7 +413,7 @@ void cal_play_stop(void)
     int up = have_hal && abox_up(), call = up && abox_state() == ABOX_ST_CALL;
     if (up) {
         if (E.triggered)
-            (void)abox_pcm_msg(0, CAL_ID, ABOX_PCM_TRIGGER, 0, 0, 0);
+            (void)pcm(ABOX_PCM_TRIGGER, 0, 0, 0);
         uint32_t t = 0;
         while ((r32(ABOX_SFR + SFR_RDMA0 + RDMA_CTRL0) & RDMA_ENABLE) && t < STOP_US) {
             H.delay_us(H.ctx, 100);
@@ -369,8 +430,8 @@ void cal_play_stop(void)
         }
         if (!call)
             m32(ABOX_SFR + SFR_SYSPOWER_CTRL, 1U, E.sysp);
-        (void)abox_pcm_msg(0, CAL_ID, ABOX_PCM_HW_FREE, 0, 0, 0);
-        (void)abox_pcm_msg(0, CAL_ID, ABOX_PCM_CLOSE, 0, 0, 0);
+        (void)pcm(ABOX_PCM_HW_FREE, 0, 0, 0);
+        (void)pcm(ABOX_PCM_CLOSE, 0, 0, 0);
         m32(ABOX_SFR + SFR_SPUS_CTRL0, CHAIN0_MASK, E.spus0);
         m32(ABOX_SFR + SFR_SPUS_CTRL2, 1U, 1U);
         say(call ? "stop: RDMA0 stopped and closed; the call's UAIF1, route and DRAM left on"
@@ -387,10 +448,19 @@ static struct {
     int level, step, active, booted, mapped, cfg, amp, found_pd, phase;
     uint64_t t0, tm0, boot_ms;
     uint64_t moved, sampled_us;
-    uint32_t last, st_first, st_last, ptr0, ptr1, polls;
-    uint32_t rate[2], prate[2];
-    int ok[2];
+    uint32_t last, st_first, st_last, ptr0, ptr1, polls, slices;
+    uint32_t rate[3], prate[3];
+    int ok[3], ran[3];
 } P;
+
+/* the stream phases: 0 One UI's ring to UAIF1, 1 snd's ring to UAIF1 (only after 0 moved), 2 One UI's ring to UAIF0
+ * (One UI's own boot route, the codec in reset: only after 0 did not move) */
+static const struct { int uaif; uint32_t period, periods; const char *name; } phs[3] = {
+    { CAL_UAIF1, CAL_ONEUI_PERIOD, CAL_ONEUI_PERIODS, "One UI's ring (4 x 3840) -> UAIF1" },
+    { CAL_UAIF1, CAL_SND_PERIOD, CAL_SND_PERIODS, "snd's ring (32 x 2048) -> UAIF1" },
+    { CAL_UAIF0, CAL_ONEUI_PERIOD, CAL_ONEUI_PERIODS, "One UI's ring (4 x 3840) -> UAIF0 (One UI's boot route)" },
+};
+#define SETTLE_US 300000U                       /* Calliope's post-boot messages (log ring, dumps, gear) taken first */
 
 static void dline(struct tb *t) { out(t); }
 static void dsay(const char *s)
@@ -455,10 +525,9 @@ static int finish(int pass, const char *a, struct tb *rest)
     return 1;
 }
 
-/* everything back: the amp, the stream, Calliope, the extra window, abox.c's cfg, the AUD domain as found */
+/* everything back: the amp, the stream, Calliope (abox_off), the extra window, abox.c's cfg, the traces */
 static void put_back(void)
 {
-    struct tb t;
     if (P.amp && O.amp_off)
         O.amp_off();
     P.amp = 0;
@@ -475,21 +544,11 @@ static void put_back(void)
         (void)abox_cfg_set(&c);
         P.cfg = 0;
     }
-    if (P.found_pd == 1 && !pd_on()) {
-        /* the boot left the AUD domain on (seen in every phone run): back on, as abox.c's step 2 does it */
-        m32(ABOX_PMU + ABOX_PMU_AUD_CONF, 0xFU, 0xFU);
-        uint32_t w = 0;
-        while (!pd_on() && w < 10000U) {
-            H.delay_us(H.ctx, 10);
-            w += 10;
-        }
-        int64_t smc = pd_on() ? H.smc(H.ctx, ABOX_SMC_PD, 1, ABOX_DTZPC, 0) : -1;
-        tinit(&t, "drvprobe: calliope: the AUD domain was on before: ");
-        ts(&t, pd_on() ? "back on (DTZPC restore SMC answered " : "DID NOT come back on (");
-        tx(&t, (uint64_t)smc);
-        ts(&t, ")");
-        dline(&t);
-    }
+    /* The AUD domain stays as abox_off() leaves it: off, as Android's runtime suspend does (SUSPEND / WFI, CPU off,
+     * SysMMU off, pad retention, the TZPC save SMC, aud_off), even when the boot had left it on. modem-core owns the
+     * power sequence (abox_pd_on / abox_pd_off later); nothing here powers it or reads inside it once it is off. */
+    cal_trace(0);
+    abox_trace_rx(0);
 }
 
 static int fail_out(const char *what, const char *why)
@@ -610,6 +669,7 @@ static void phase_begin(void)
 {
     P.moved = P.sampled_us = 0;
     P.st_first = P.st_last = 0;
+    P.slices = 0;
     (void)cal_play_ptr(&P.ptr0);
     P.tm0 = now_us();
 }
@@ -619,12 +679,13 @@ static void phase_end(unsigned ph)
     struct tb t;
     uint64_t wall = now_us() - P.tm0;
     (void)cal_play_ptr(&P.ptr1);
+    P.ran[ph] = 1;
     P.rate[ph] = P.sampled_us ? (uint32_t)(P.moved * 1000000U / P.sampled_us) : 0;
     P.prate[ph] = wall ? (uint32_t)((uint64_t)(P.ptr1 - P.ptr0) * E.period * 1000000U / wall) : 0;
     P.ok[ph] = (P.rate[ph] >= 144000U && P.rate[ph] <= 240000U) || (P.prate[ph] >= 144000U && P.prate[ph] <= 240000U);
     tinit(&t, "drvprobe: calliope: ");
-    ts(&t, ph ? "snd's ring (32 x 2048): " : "One UI's ring (4 x 3840): ");
-    ts(&t, "RDMA0 STATUS moved ");
+    ts(&t, phs[ph].name);
+    ts(&t, ": RDMA0 STATUS moved ");
     tu(&t, P.rate[ph]);
     ts(&t, " B/s over ");
     tu(&t, P.sampled_us / 1000U);
@@ -643,19 +704,39 @@ static void phase_end(unsigned ph)
     dline(&t);
 }
 
+static void put_ver(struct tb *t)
+{
+    uint32_t v = abox_version();
+    for (int s = 24; s >= 0; s -= 8) {
+        char c = (char)(v >> s);
+        tc(t, c >= 0x20 && c < 0x7f ? c : '?');
+    }
+}
+
+/* the rate of phase ph for the last line: "N B/s (STATUS)" / "N B/s (pointers)" */
+static void put_rate(struct tb *t, unsigned ph)
+{
+    tu(t, P.rate[ph] ? P.rate[ph] : P.prate[ph]);
+    ts(t, P.rate[ph] ? " B/s (STATUS)" : " B/s (pointers)");
+}
+
+/* Steps: 0 set-up, 1 boot, 2 settle (300 ms of Calliope's post-boot messages), 3 start a phase, 4 measure it,
+ * 5 off and the last line. */
 static int probe_active(unsigned *wait_ms)
 {
     struct tb t;
     int r;
+    *wait_ms = 0;
     switch (P.step) {
     case 0:
         P.active = 1;
         P.booted = P.mapped = P.cfg = P.amp = 0;
-        P.ok[0] = P.ok[1] = 0;
-        P.rate[0] = P.rate[1] = P.prate[0] = P.prate[1] = 0;
-        dsay(P.level == 1 ? "level 1 (silent): Calliope booted from VENDOR, RDMA0 zeroes -> SIFS0 -> UAIF1 (amps off, "
-                            "codec in reset) through Calliope's PCM IPC: 1 s One UI's ring, 0.5 s snd's; abox_off; "
-                            "budget 12 s (boot <= 3.5 s)"
+        for (unsigned i = 0; i < 3; ++i)
+            P.ok[i] = P.ran[i] = 0, P.rate[i] = P.prate[i] = 0;
+        dsay(P.level == 1 ? "level 1 (silent): Calliope booted from VENDOR, 300 ms for its post-boot messages, then "
+                            "RDMA0 zeroes -> SIFS0 -> UAIF1 (amps off, codec in reset) through Calliope's PCM IPC: 1 s "
+                            "One UI's ring, then 0.5 s snd's ring if it moved, else 0.5 s to UAIF0 (One UI's boot "
+                            "route); abox_off; budget 12 s (boot <= 3.5 s)"
                           : "level 2 (attended): Calliope booted, a 1 kHz tone at -24 dBFS -> UAIF1 -> the earpiece "
                             "amp at its lowest level, 2 s; then everything off");
         if (abox_state() != ABOX_ST_OFF && abox_state() != ABOX_ST_FAILED)
@@ -664,7 +745,7 @@ static int probe_active(unsigned *wait_ms)
         {
             struct abox_cfg c;
             abox_cfg_default(&c);
-            c.fw_log_max = 40;                  /* Calliope's own lines: the first 40 */
+            c.fw_log_max = 60;                  /* Calliope's boot lines (run 5: ~45); 60 more at each stream start */
             if (!abox_cfg_set(&c))
                 P.cfg = 1;
         }
@@ -675,7 +756,6 @@ static int probe_active(unsigned *wait_ms)
         }
         P.mapped = 1;
         P.step = 1;
-        *wait_ms = 0;
         return 0;
     case 1: {
         uint64_t t0 = now_us();
@@ -685,30 +765,46 @@ static int probe_active(unsigned *wait_ms)
         if (r)
             return fail_out("1/4 boot: Calliope did not boot", abox_why());
         tinit(&t, "drvprobe: calliope: 1/4 boot: Calliope said BOOT_DONE, version ");
-        uint32_t v = abox_version();
-        for (int s = 24; s >= 0; s -= 8) {
-            char c = (char)(v >> s);
-            tc(&t, c >= 0x20 && c < 0x7f ? c : '?');
-        }
+        put_ver(&t);
         ts(&t, " (");
-        tx(&t, v);
+        tx(&t, abox_version());
         ts(&t, "); abox_boot() took ");
         tu(&t, P.boot_ms);
         ts(&t, " ms with the VENDOR reads");
         dline(&t);
         P.step = 2;
-        *wait_ms = 0;
+        P.tm0 = now_us();
         return 0;
     }
-    case 2:
-    case 4:
-        P.phase = P.step == 4;
-        if ((r = cal_play_start(CAL_UAIF1, P.phase ? CAL_SND_PERIOD : CAL_ONEUI_PERIOD,
-                                P.phase ? CAL_SND_PERIODS : CAL_ONEUI_PERIODS))) {
-            if (!P.phase)
+    case 2: {
+        /* One UI opened RDMA0 ~1.3 s after BOOT_DONE; Calliope first sends its log ring, ~30 REPORT_DUMPs and a gear
+         * request, one at a time through the RX slot. Take them before our PCM messages. */
+        uint64_t t0 = now_us();
+        while (now_us() - t0 < 100000U) {
+            if (abox_poll() < 0)
+                return fail_out("1/4 boot: Calliope stopped after BOOT_DONE", abox_why());
+            H.delay_us(H.ctx, 5000);
+        }
+        if (now_us() - P.tm0 < SETTLE_US)
+            return 0;
+        dsay("1/4 boot: 300 ms after BOOT_DONE taken (Calliope's post-boot messages above)");
+        P.phase = 0;
+        P.step = 3;
+        return 0;
+    }
+    case 3: {
+        const unsigned ph = (unsigned)P.phase;
+        abox_fw_log_more(60);                   /* Calliope's own lines from the stream's start */
+        abox_trace_rx(24);                      /* and the messages it sends, raw */
+        cal_trace(1);
+        tinit(&t, "drvprobe: calliope: 2/4 stream: ");
+        ts(&t, phs[ph].name);
+        dline(&t);
+        if ((r = cal_play_start(phs[ph].uaif, phs[ph].period, phs[ph].periods))) {
+            if (ph == 0)
                 return fail_out("2/4 stream: RDMA0 did not start through Calliope", cal_why());
-            dsay("snd's ring did not start (One UI's did): see the cal: lines");
-            P.step = 6;
+            dsay("2/4 stream: that phase did not start: see the cal: lines");
+            P.step = 5;
             return 0;
         }
         if (P.level == 2) {
@@ -717,72 +813,76 @@ static int probe_active(unsigned *wait_ms)
                 return fail_out("2/4 stream: the earpiece amp did not come on", 0);
             P.amp = 1;
             dsay("2/4 stream: the tone plays on the earpiece now (amp level 0)");
-        } else {
-            dsay(P.phase ? "4/4 stream: snd's ring started (zeroes)" : "2/4 stream: RDMA0 started (zeroes, amps off)");
         }
         phase_begin();
-        P.step = P.step == 2 ? 3 : 5;
-        *wait_ms = 0;
+        P.step = 4;
         return 0;
-    case 3:
-    case 5: {
+    }
+    case 4: {
+        const unsigned ph = (unsigned)P.phase;
         if (measure_slice())
             return fail_out("3/4 measure: Calliope stopped during the stream", abox_why());
-        uint64_t want = P.step == 5 ? 500000U : P.level == 2 ? 2000000U : 1000000U;
-        if (P.sampled_us < want) {
-            *wait_ms = 0;
+        if (++P.slices == 1)
+            cal_dump("100 ms after TRIGGER");
+        uint64_t want = ph ? 500000U : P.level == 2 ? 2000000U : 1000000U;
+        if (P.sampled_us < want)
             return 0;
-        }
-        phase_end(P.step == 5);
+        cal_dump("end of the phase");
+        phase_end(ph);
         if (P.amp && O.amp_off)
             O.amp_off();
         P.amp = 0;
         cal_play_stop();
-        if (P.step == 3 && !P.ok[0] && P.rate[0] == 0 && P.prate[0] == 0)
-            return fail_out("3/4 measure: RDMA0 did not move through Calliope (STATUS and pointers above)", 0);
-        P.step = P.step == 3 && P.level == 1 ? 4 : 6;
-        *wait_ms = 0;
+        if (P.level == 1 && ph == 0) {
+            P.phase = P.ok[0] || P.rate[0] || P.prate[0] ? 1 : 2;
+            P.step = 3;
+        } else {
+            P.step = 5;
+        }
         return 0;
     }
     default: {
         put_back();
+        /* PMU registers only (outside the domain) */
         int pd = pd_on(), cpu = (int)(r32(ABOX_PMU + ABOX_PMU_CPU_STAT) & 1U);
         tinit(&t, "drvprobe: calliope: 4/4 off: ABOX CPU ");
         ts(&t, cpu ? "STILL ON" : "off");
         ts(&t, ", AUD domain ");
         ts(&t, pd ? "on" : "off");
-        ts(&t, P.found_pd == pd ? " (as found)" : " (NOT as found)");
+        ts(&t, P.found_pd == 1 ? " (it was on from the boot; abox_off powers it down by design)" : "");
         dline(&t);
-        tinit(&t, "");
-        tu(&t, P.rate[0] ? P.rate[0] : P.prate[0]);
-        ts(&t, " B/s through it (");
-        ts(&t, P.rate[0] ? "STATUS" : "period pointers");
-        ts(&t, ", 192000 expected)");
-        if (P.level == 1) {
-            ts(&t, "; snd's 32 x 2048 ring ");
-            tu(&t, P.rate[1] ? P.rate[1] : P.prate[1]);
-            ts(&t, P.ok[1] ? " B/s" : " B/s (NOT at rate)");
-        }
         if (cpu)
             return finish(0, "4/4 off: ABOX's CPU did not stop", 0);
-        if (!P.ok[0]) {
-            struct tb w;
-            tinit(&w, "3/4 measure: RDMA0 moved but not at 48 kHz: ");
-            ts(&w, t.b);
-            return finish(0, w.b, 0);
-        }
         struct tb p;
-        tinit(&p, "Calliope booted (");
-        uint32_t v = abox_version();
-        for (int s = 24; s >= 0; s -= 8) {
-            char c = (char)(v >> s);
-            tc(&p, c >= 0x20 && c < 0x7f ? c : '?');
+        tinit(&p, "");
+        if (P.ok[0]) {
+            tinit(&p, "Calliope booted (");
+            put_ver(&p);
+            ts(&p, " in ");
+            tu(&p, P.boot_ms);
+            ts(&p, P.level == 2 ? " ms), the earpiece tone played 2 s (did you hear it?); RDMA0 moved "
+                                : " ms), RDMA0 moved ");
+            put_rate(&p, 0);
+            ts(&p, " through it to UAIF1 (192000 expected)");
+            if (P.ran[1]) {
+                ts(&p, "; snd's 32 x 2048 ring ");
+                put_rate(&p, 1);
+                ts(&p, P.ok[1] ? "" : " NOT at rate");
+            }
+            return finish(1, p.b, 0);
         }
-        ts(&p, " in ");
-        tu(&p, P.boot_ms);
-        ts(&p, P.level == 2 ? " ms), the earpiece tone played 2 s (did you hear it?); RDMA0 moved "
-                            : " ms), RDMA0 moved ");
-        return finish(1, p.b, &t);
+        if (P.rate[0] || P.prate[0]) {
+            ts(&p, "3/4 measure: RDMA0 moved but not at 48 kHz: ");
+            put_rate(&p, 0);
+            return finish(0, p.b, 0);
+        }
+        ts(&p, "3/4 measure: RDMA0 did not move through Calliope to UAIF1");
+        if (P.ran[2]) {
+            ts(&p, P.ok[2] ? "; to UAIF0 (One UI's boot route) it DID: " : "; to UAIF0 (One UI's boot route): ");
+            put_rate(&p, 2);
+        }
+        ts(&p, " (see the cal: ipc / abox: rx / abox: fw lines)");
+        return finish(0, p.b, 0);
     }
     }
 }

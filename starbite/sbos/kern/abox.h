@@ -104,6 +104,10 @@ uint32_t abox_version(void);                /* Calliope's version word from BOOT
 int abox_map_extra(uint32_t iova, uint64_t pa, uint32_t size);
 int abox_pcm_msg(int capture, uint32_t id, uint32_t type, uint32_t a, uint32_t b, uint32_t c);
 uint32_t abox_pcm_pointer(int capture, uint32_t id, uint32_t *count);
+/* diagnostics: log the next n messages from Calliope raw ("abox: rx:" + 8 words) before handling them; copy n more
+ * of Calliope's own log lines ("abox: fw:") from now on, whatever fw_log_max allowed so far */
+void abox_trace_rx(unsigned n);
+void abox_fw_log_more(unsigned n);
 
 #define ABOX_ST_OFF     0
 #define ABOX_ST_BOOTING 1
