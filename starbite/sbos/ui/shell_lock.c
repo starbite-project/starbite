@@ -4531,6 +4531,7 @@ void sh_restore(void)
 #include "shell_island.inc"                         /* B7: the status capsule, the live pill (toasts) */
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
+static int lk_hint;             /* cp7: the lock's spring is a tap's hint bounce (set_lock moves the live lock) */
 static void set_lock(float y)
 {
     lockY = y;
@@ -4544,7 +4545,17 @@ static void set_lock(float y)
     if (y == 0) {
         lockg.hidden = 0;
         lockflat.hidden = 1;
+        lockg.y = 0;
+    } else if (lk_hint && C && C->gpu && !EMG) {
+        /* cp7: a tap's hint bounce moves the live lock (the GPU row moves layers and their glass for free, as the
+         * wake's scale): the flat copy would be made again on every change in the bounce (a card's press fading, a
+         * stack opening: the lens over the whole lock, ~90 ms a frame on the A55; cp6d's self test) */
+        lockg.hidden = 0;
+        lockflat.hidden = 1;
+        lockg.y = PT(y);
+        home.alpha = 0;
     } else {
+        lockg.y = 0;
         flatten_lock(0);
         lockg.hidden = 1;
         lockflat.hidden = 0;
@@ -4804,7 +4815,7 @@ static void back_to_lock(int exit_em)
     vc_close_all(1);
     lkn_collapse(1);
     scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
-    sp_lock.live = 0;
+    sp_lock.live = 0; lk_hint = 0;
     sp_page.live = 0; page_dragging = 0;
     set_page(0);
     CCS.on = 0; sp_cc.live = 0; cc_x_reset(); set_cc(0);
@@ -4833,7 +4844,7 @@ void sh_wake(void);
 void sh_set(const char *what, const char *key, float v)
 {
     if (!tk_strcmp(what, "unlock")) {
-        sp_lock.live = 0;
+        sp_lock.live = 0; lk_hint = 0;
         set_lock(-H_PT * v);
         locked = v < 1;
         mark_a = mark_t;
@@ -5486,7 +5497,7 @@ void sh_touch(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, y, t);
             return;
         }
-        if (y >= H_PT - 30) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
+        if (y >= H_PT - 30) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0; }
         /* B10: the notifications fanned out are over the list: theirs first (a tap beside them folds them back) */
         else if (lkn_p() > 0 && lkn_down(x, y, t)) { T.kind = G_LKN; return; }
         else if ((r = hit_row(x, y, &gi)) >= 0) {
@@ -5515,7 +5526,7 @@ void sh_touch(int phase, float x, float y, float t)
         }
         else if (in_list(y)) { T.kind = G_LIST; T.base = scroll; sp_scroll.live = 0; scroll_momentum = 0; list_over = scroll < 0 || scroll > max_scroll(); }
         else if (lkn_down(x, y, t)) { T.kind = G_LKN; return; }   /* B9: the notifications (a tap expands / opens) */
-        else { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
+        else { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0; }
         tk_tracker_add(&T.tr, y, t);
         return;
     }
@@ -5526,14 +5537,14 @@ void sh_touch(int phase, float x, float y, float t)
     }
     if (T.kind == G_LKN) {                   /* B9, shell_lknote.inc: 2 hands the touch to the lock's swipe */
         if (lkn_touch(phase, x, y, t) == 2) {
-            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0;
+            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0;
             tk_tracker_add(&T.tr, y, t);
         } else if (phase == 2) T.kind = G_NONE;
         return;
     }
     if (T.kind == G_NC) {                    /* helper D, shell_nc.inc */
         if (nc_touch(phase, x, y, t) == 2) {     /* the lock's pill moved: the lock's swipe after all */
-            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0;
+            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0;
             tk_tracker_add(&T.tr, y, t);
         } else if (phase == 2) T.kind = G_NONE;
         return;
@@ -5813,6 +5824,7 @@ void sh_touch(int phase, float x, float y, float t)
     case G_RELOCK: {
         /* P3p (P3j-10): decided by where the pull would carry it (200 ms), the finger's speed handed to the spring */
         float v = tk_tracker_v(&T.tr);
+        lk_hint = 0;
         if (lockY + v * 200 > -H_PT * .5f) { locked = 1; tk_spring_start(&sp_lock, lockY, 0, v * 1000, TK_SPR_UNLOCK); }
         else tk_spring_start(&sp_lock, lockY, -H_PT, v * 1000, TK_SPR_UNLOCK);
         break;
@@ -5821,6 +5833,7 @@ void sh_touch(int phase, float x, float y, float t)
         if (!T.moved) {
             hint_left = 2200;
             tk_spring_start(&sp_lock, 0, 0, -700, TK_SPR_UNLOCK);
+            lk_hint = 1;
         } else {
             float v = tk_tracker_v(&T.tr), proj = lockY + v * 200;
             /* P3p (P3j-9): unlocked as soon as it is decided: taps in the settle reach home */
@@ -5916,6 +5929,7 @@ int sh_tick(float dt, float t)
     }
     if (sp_lock.live) {
         int live = tk_spring_step(&sp_lock, dt);
+        if (!live) lk_hint = 0;
         set_lock(sp_lock.x);
         if (!live && sp_lock.to <= -H_PT + .01f && !pc_holds()) { locked = 0; lockflat.hidden = 1; home.sx = home.sy = 1; }   /* Track A */
         mv = 1;

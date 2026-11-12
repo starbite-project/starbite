@@ -302,15 +302,25 @@ void tk_draw_fm(tk_bmp *b, const tk_fm *m, int ox, int oy, const tk_paint *p, fl
 {
     tk_col sc = tk_paint_at(p, 0, 0);
     int solid = p->kind == TK_P_SOLID;
+    /* cp7: a solid paint's fully covered px is one packed value, over anything when it is opaque (over_px's ia is 0)
+     * and over an empty px (nothing to add); any px over an empty one is its own colour: bit for bit what over_px
+     * gives, without its float blend (a grouped list's card: most of a Settings page's build on the A55) */
+    uint32_t full = solid ? pack(sc.r * alpha, sc.g * alpha, sc.b * alpha, sc.a * alpha) : 0;
+    int full_opaque = solid && sc.a * alpha == 1.0f;
     for (int j = 0; j < m->h; j++) {
         int y = oy + j;
         if (y < 0 || y >= b->h) continue;
+        uint32_t *row = b->px + (size_t)y * b->stride;
+        const float *mv = m->v + (size_t)j * m->w;
         for (int i = 0; i < m->w; i++) {
             int x = ox + i;
-            float c = m->v[j * m->w + i] * alpha;
+            float v = mv[i], c = v * alpha;
             if (x < 0 || x >= b->w || c < 1.0f / 1024) continue;
+            uint32_t *d = &row[x];
+            if (solid && v == 1.0f && (full_opaque || !*d)) { *d = full; continue; }
             tk_col s = solid ? sc : tk_paint_at(p, x + 0.5f, y + 0.5f);
-            over_px(&b->px[y * b->stride + x], s.r * c, s.g * c, s.b * c, s.a * c);
+            if (!*d) { *d = pack(s.r * c, s.g * c, s.b * c, s.a * c); continue; }
+            over_px(d, s.r * c, s.g * c, s.b * c, s.a * c);
         }
     }
 }
