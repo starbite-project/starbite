@@ -153,6 +153,18 @@ void settings_restore(void)
         if (state_find(half[cur_half], "sbos.surv", &q) == 16 && q)
             surv_unpack(q);
     }
+    {
+        /* Track A: the passcode's record (salt, hash, wrong tries, the lock-out left; never the digits) */
+        const uint8_t *q = 0;
+        int pn = state_find(half[cur_half], PASS_REC, &q);
+        if (pn > 0 && q) {
+            struct sbos_time t;
+            if (pass_load(q, pn, sb_ms(), clock_now(&t) ? (int64_t)t.utc : 0))
+                sb_log(pass_len() ? "settings: the passcode restored" : "settings: the passcode's tries restored");
+            else
+                sb_log("settings: the passcode record is not valid: no passcode");
+        }
+    }
     int n = state_find(half[cur_half], REC, &d);
     struct saved s;
     if (n < (int)sizeof(uint32_t) * 2 + 4 || !d) {
@@ -170,7 +182,7 @@ void settings_restore(void)
         sb_log("settings: a settings record of another version: defaults, and it is not overwritten");
         return;
     }
-    if (s.screen_off_s >= 10 && s.screen_off_s <= 600) {
+    if ((s.screen_off_s >= 10 && s.screen_off_s <= 600) || s.screen_off_s == 0) {    /* Track A: 0 = Auto-Lock Never */
         K.screen_off_s = s.screen_off_s;
         power_input();                      /* the screen-off timer with the restored time */
     }
@@ -307,6 +319,14 @@ void settings_timer(unsigned id)
         surv_pack(sv);
         if (state_add(&b, "sbos.surv", sv, 16) < 0)
             sb_log("settings: the survival options did not fit");
+    }
+    {
+        uint8_t pr[PASS_REC_LEN];           /* Track A: the passcode (only when one is set or tries are counted) */
+        struct sbos_time t;
+        int pn = pass_pack(pr, sb_ms(), clock_now(&t) ? (int64_t)t.utc : 0);
+        if (pn > 0 && state_add(&b, PASS_REC, pr, (uint32_t)pn) < 0)
+            sb_log("settings: the passcode record did not fit");
+        memset(pr, 0, sizeof(pr));
     }
     if (heat_rec.magic == 0x31435248U && state_add(&b, "heat", &heat_rec, sizeof(heat_rec)) < 0)
         sb_log("settings: the heat record did not fit");

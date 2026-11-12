@@ -272,4 +272,21 @@ int sh_sms_send(const char *number, const char *utf8, char *why);
 int sh_sms_count(void);                 /* in RAM, newest last */
 int sh_sms_get(int i, sh_sms_t *m);     /* 0 ok */
 
+/* Track A (sbos-core-api.md 3): the passcode and Auto-Lock, from the platform (the kernel: kern/passcode.c through
+ * kern_next.c, kept in the state slot as a salted, iterated SHA-256; the host: the same passcode.c in RAM). Digits go
+ * in and never come out; nothing logs them. Back-off: the 6th wrong try in a row waits 1 min, the 7th 5, the 8th 15,
+ * the 9th and later 1 h (kept across a restart). Never behind the passcode: Emergency mode, SOS, the medical card,
+ * the torch. The shell's page: shell_passcode.inc. */
+int sh_pass_on(void);                         /* 1 when a passcode is set */
+int sh_pass_len(void);                        /* 4 or 6 (digits), 0 when none */
+int sh_pass_check(const char *digits);        /* 1 right; 0 wrong; -N locked out for N more seconds */
+int sh_pass_set(const char *old, const char *nw);   /* set (old "" when none) / change / remove (nw ""): 0 or -1 */
+int sh_pass_wait(void);                       /* seconds until the next try is allowed (0 = now) */
+int sh_pass_fails(void);                      /* wrong tries in a row */
+int sh_autolock(void);                        /* the screen-off time, s; 0 = never */
+void sh_autolock_set(int seconds);
+/* Track A lifecycle (sbos-core-api.md 6): the platform calls this right before a restart or a switch-off: every app
+ * in the shell's table with an on_save runs it (pages keep their data with sh_blob_put) */
+void sh_save_all(void);
+
 #endif

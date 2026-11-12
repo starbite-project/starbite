@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "sbapp.h"
+#include "passcode.h"                /* Track A: the passcode (pure: passcode.c) */
 
 #define SBOS_VERSION "1.2-alpha26"
 /* 1.2-alpha26: alpha25's lock screen (OS cards, swipe up, the Emergency hold, Heat only in Emergency) is off: the user
@@ -510,6 +511,8 @@ void kui_screen_changed(int on);
  * key: the Power key, whose second press during the fade undoes it) */
 extern void (*kui_screen_hook)(int on);
 extern int (*kui_sleep_hook)(int key);
+/* Track A lifecycle: the UI's save before a restart or a switch-off (Next: every app's on_save, sh_save_all); 0 none */
+extern void (*kui_save_hook)(void);
 void kui_sos_changed(void);
 int kui_screen(void);
 void ui_ktimer(unsigned id);

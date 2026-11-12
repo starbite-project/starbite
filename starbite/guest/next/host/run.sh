@@ -19,6 +19,7 @@ for f in tk_math tk_raster tk_text tk_glass tk_comp tk_motion tk_pack shell_lock
 done
 $CC -c -O2 -std=gnu11 $W -I"$ui" "$ui/host/plat.c" -o "$OUT/o/plat.o"
 $CC -c -O2 -std=gnu11 $W -DSBTK_NO_LINUX_FAKE -Dmain=sbtk_host_main -I"$ui" "$ui/host/main.c" -o "$OUT/o/main.o"
+$CC -c -O2 -std=gnu11 $W "$T/starbite/sbos/kern/passcode.c" -o "$OUT/o/passcode.o"     # Track A: the host's sh_pass_*
 $CC -c -O2 -std=gnu11 $W -I"$here/fake" -I"$T/starbite/guest/sbos" -I"$ui" "$here/../gwin.c" -o "$OUT/o/gwin.o"
 $CC -c -O2 -std=gnu11 $W -I"$here/fake" -I"$T/starbite/guest/sbos" -I"$ui" "$here/gwin-host.c" -o "$OUT/o/gwin-host.o"
 $CC -o "$OUT/gwin-host" "$OUT"/o/*.o
