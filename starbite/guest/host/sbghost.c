@@ -9,6 +9,7 @@ static struct sbg_cfg cfg;
 static struct sbg_stats st;
 static uint8_t host_if;
 static uint64_t t_start, t_stop_req, img_pa;
+static int boot_warned, gave_up;                   /* this start: the slow-start note given; stopped for no HELLO */
 static uint32_t log_pos;
 static int log_seen;
 static char line[160];
@@ -338,6 +339,7 @@ int sbg_start(void)
         return -2;
     }
     t_start = os->ms();
+    boot_warned = gave_up = 0;
     st.boots++;
     int64_t r = os->cpu_on(cfg.first_mpidr, tramp_pa(), cfg.linux_base + SBG_DTB_OFF);
     struct tb t = {.n = 0};
@@ -480,7 +482,8 @@ int sbg_stop(void)
     t_stop_req = os->ms();
     st.t_stop = t_stop_req - t_start;
     struct tb t = {.n = 0};
-    t_s(&t, was_booting ? "guest: MSG_STOP (still booting: it reads it after HELLO)" : "guest: MSG_STOP");
+    t_s(&t, gave_up ? "guest: MSG_STOP (no HELLO: sbguest.ko powers the guest off 10 s after it if user space does not)"
+            : was_booting ? "guest: MSG_STOP (still booting: it reads it after HELLO)" : "guest: MSG_STOP");
     say(&t);
     return 0;
 }
@@ -707,7 +710,8 @@ void sbg_poll(void)
             if (st.state == SBG_BOOTING)
                 st.state = SBG_RUNNING;
             struct tb tb = {.n = 0};
-            t_s(&tb, "guest: HELLO after ");
+            t_s(&tb, gave_up ? "guest: HELLO too late (already stopping) after " :
+                     boot_warned ? "guest: HELLO (a slow start) after " : "guest: HELLO after ");
             t_u(&tb, st.t_hello);
             t_s(&tb, " ms, ");
             t_u(&tb, m.a);
@@ -745,6 +749,19 @@ void sbg_poll(void)
             v2_changes |= SBG_CH_NOTIF;
         }
     }
+    if (st.state == SBG_BOOTING && cfg.boot_warn_ms && !boot_warned && t - t_start > cfg.boot_warn_ms &&
+        cfg.boot_warn_ms < cfg.boot_timeout_ms) {
+        boot_warned = 1;
+        log_stream();
+        struct tb tb = {.n = 0};
+        t_s(&tb, "guest: no HELLO yet after ");
+        t_u(&tb, (t - t_start) / 1000U);
+        t_s(&tb, " s: still waiting (up to ");
+        t_u(&tb, cfg.boot_timeout_ms / 1000U);
+        t_s(&tb, " s); the guest's last lines:");
+        say(&tb);
+        log_tail();
+    }
     if (st.state == SBG_BOOTING && t - t_start > cfg.boot_timeout_ms) {
         log_stream();
         struct tb tb = {.n = 0};
@@ -756,7 +773,8 @@ void sbg_poll(void)
         t_s(&tb, ((volatile struct sbshm_prz *)SHM(SBSHM_OOPS_OFF))->sig == SBSHM_PRZ_SIG ? "up" : "never set up");
         say(&tb);
         log_tail();
-        fail("no HELLO before the boot timeout (the M3 cluster stays on until the next reset)");
+        gave_up = 1;                                /* stop it: the cluster off, so the next start needs no reset */
+        sbg_stop();
         return;
     }
     if (st.state == SBG_STOPPING) {
@@ -772,9 +790,14 @@ void sbg_poll(void)
             t_u(&tb, st.t_off);
             t_s(&tb, " ms after MSG_STOP");
             say(&tb);
-        } else if (t - t_stop_req > cfg.stop_timeout_ms) {
+            if (gave_up)                            /* a failed start, but nothing left running: may start again */
+                fail("no HELLO before the boot timeout; stopped, the M3 cluster is off (it can be started again)");
+        } else if (t - t_stop_req > (gave_up && cfg.stop_timeout_ms < SBG_GIVEUP_STOP_MS ? SBG_GIVEUP_STOP_MS
+                                                                                       : cfg.stop_timeout_ms)) {
             log_stream();
-            fail(gs == SBG_GUEST_PANIC ? "the guest panicked while stopping" : "the cluster did not power off");
+            fail(gave_up ? "no HELLO before the boot timeout, and it did not power off when stopped (the M3 cluster "
+                           "stays on until the next reset)"
+                 : gs == SBG_GUEST_PANIC ? "the guest panicked while stopping" : "the cluster did not power off");
         }
     }
 }

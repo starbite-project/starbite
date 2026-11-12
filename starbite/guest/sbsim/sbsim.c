@@ -38,7 +38,12 @@
 #define PSCI_SYSTEM_OFF    0x84000008UL
 #define PSCI_VERSION       0x84000000UL
 
-enum { F_REPAIR = 1, F_STRICT = 2, F_STUB = 4, F_TERM = 8, F_POPUP = 32, F_BLKTEST = 64, F_V3 = 128 };
+#ifndef SBSIM_BOOT_WARN_MS
+#define SBSIM_BOOT_WARN_MS 0U
+#endif
+enum { F_REPAIR = 1, F_STRICT = 2, F_STUB = 4, F_TERM = 8, F_POPUP = 32, F_BLKTEST = 64, F_V3 = 128, F_RETRY = 256 };
+/* F_RETRY: a failed run whose M3 cluster is off (a start given up and stopped) is followed by the next run, as the
+ * next open on the phone (the verdict stays FAIL: the test reads the lines) */
 
 struct manifest {
     uint64_t magic;                     /* "SBSTORE1" */
@@ -809,6 +814,7 @@ void sbsim_main(void)
         .host_lines = {INTID_OWN, 0},
         .repair = (mf->flags & F_REPAIR) ? 1U : 0U,
         .boot_timeout_ms = (mf->boot_timeout_s ? mf->boot_timeout_s : 300) * 1000U,
+        .boot_warn_ms = SBSIM_BOOT_WARN_MS,         /* -DSBSIM_BOOT_WARN_MS=N: the slow-start note (sbghost) */
         .stop_timeout_ms = 60000,
         .v2 = blk_n ? 1U : 0U,                  /* contract v2 only with block devices: the rest stays v1 */
         .services = (blk_n && (mf->flags & F_V3)) ? 0xffffffffU : 0U,   /* v3: every service sim_v3.c stands in for */
@@ -835,11 +841,18 @@ void sbsim_main(void)
         sbsim_hvc(PSCI_SYSTEM_OFF, 0, 0, 0);
     }
     unsigned runs = mf->runs ? (mf->runs > 4 ? 4 : mf->runs) : 1, done = 0;
-    int ok = 1;
+    int ok = 1, failed_any = 0;
     for (unsigned r = 0; r < runs && ok; ++r) {
-        if (run_guest(r) < 0)
-            ok = 0;
-        else
+        if (run_guest(r) < 0) {
+            int off = cluster_off();
+            puts_("sbsim: run ");
+            putu(r);
+            puts_(off ? " failed; the M3 cluster is off\n" : " failed; the M3 cluster is still on\n");
+            if (!(mf->flags & F_RETRY) || !off || r + 1 == runs)
+                ok = 0;
+            else
+                ok = 1, failed_any = 1;
+        } else
             ++done;
     }
     /* sbsim keeps running after the guest powered off: the timer and the own SPI must still work */
@@ -851,6 +864,8 @@ void sbsim_main(void)
         own_check(now_ms());
     }
     int alive = st.own_ok > ok0 && st.timer_irqs > tick0;
+    if (failed_any)
+        ok = 0;
     const struct sbg_stats *s = sbg_stats();
     if (!alive)
         ok = 0;

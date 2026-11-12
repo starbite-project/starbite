@@ -312,6 +312,7 @@ static void cfg_init(void)
         /* the desktop: initramfs, the base and the overlay off the card, sbinit, sbwl (cp3 2026-11-12: 30 s was not
          * enough for a new base's first start) */
         .boot_timeout_ms = mode == GUEST_WL ? 90000 : 30000, .stop_timeout_ms = 5000,
+        .boot_warn_ms = mode == GUEST_WL ? 30000 : 0,   /* a slow start says so (and the guest's last lines) */
         .v2 = mode == GUEST_WL,             /* L3: the catalog, the store and the icons (sbshm.h contract v2) */
         /* v3 (Linux apps: hdr.version 3): sbghost leaves out what has no sbg_os part (NET without the NAT, P9
          * without guest-fs.h) */
