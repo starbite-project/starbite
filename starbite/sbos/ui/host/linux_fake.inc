@@ -161,7 +161,7 @@ typedef struct {
     const char *vi, *vn, *vr, *vd, *vs, *lic, *src, *desc;
 } fpkg;
 static const fpkg FP[] = {
-    { "firefox", "Firefox", "Mozilla's web browser", "Internet", "", 120000, 300000, 800, SH_PKG_FEATURED, 0, 0, K_FOX, "firefox-esr",
+    { "firefox", "Firefox", "Mozilla's web browser", "Internet", "", 120000, 300000, 800, SH_PKG_FEATURED | SH_PKG_NEEDS_NET, 0, 0, K_FOX, "firefox-esr",
       6, 0, 2, 0, 0, 0, 0, 0, 2, 3, 0, 300, 0x000000, "",
       "", "", "146.0.1", "140.6.0esr", "", "MPL-2.0", "archive.mozilla.org",
       "The Firefox web browser. The release method installs Mozilla's own aarch64 build (latest Firefox); the Debian method installs Firefox ESR. Runs natively on Wayland; with no GPU, pages, WebGL and video are drawn in software." },
@@ -181,7 +181,7 @@ static const fpkg FP[] = {
       14, 0, 2, SH_PKG_VERIFYING, 0, 0, 0, 20, 3, 16, 0, 40, 0x3d7fd6, "X+",
       "", "", "1.2.8", "1.2.6", "1.2.8", "GPL-2.0-or-later", "github.com/xournalpp/xournalpp",
       "Xournal++ is a notebook for handwriting, sketching and annotating PDFs, with pen, highlighter, shapes, text and LaTeX. Works with a finger or a stylus." },
-    { "inkscape", "Inkscape", "Vector graphics editor (SVG)", "Graphics", "checksum mismatch", 8000, 20000, 400, 0, SH_PKG_FAILED, 0, K_INK, "org.inkscape.Inkscape",
+    { "inkscape", "Inkscape", "Vector graphics editor (SVG)", "Graphics", "Download failed its check", 8000, 20000, 400, 0, SH_PKG_FAILED, 0, K_INK, "org.inkscape.Inkscape",
       10, 0, 1, 0, 0, 0, 0, 70, 1, 16, 0, 0, 0x000000, "",
       "", "", "", "1.4", "1.4.2", "GPL-3.0-or-later", "Debian (inkscape)",
       "Inkscape draws and edits vector graphics: shapes, paths, text, gradients and clones, saved as standard SVG and exported to PNG or PDF." },
@@ -335,6 +335,7 @@ static void fake_publish(void)
         FST.mem_total_kb = 1490000;
         FST.v3 = 1;                              /* Track F: store3 */
         FST.net_ok = 0;                          /* no network in the previews: the memory card's mirror */
+        FST.net_why = SH_NET_NO_CONNECTION;
         FST.mirror_ok = 1;
         FST.checked_at = 0;
         for (int i = 0; i < NFP; i++) {
@@ -345,6 +346,9 @@ static void fake_publish(void)
             snprintf(p->summary, sizeof p->summary, "%s", f->summary);
             snprintf(p->category, sizeof p->category, "%s", f->cat);
             snprintf(p->err, sizeof p->err, "%s", f->err);
+            if (f->state == SH_PKG_FAILED)       /* the engine's what-to-do sentence (sbstore.py HINTS) */
+                snprintf(p->hint, sizeof p->hint, "%s", "The file didn't match the project's published checksum, so it "
+                         "was not installed. Try again later, or choose another install method.");
             p->dl_kb = f->dl; p->inst_kb = f->inst; p->ram_mb = f->ram;
             p->flags = f->flags; p->state = f->state; p->pct = f->pct;
             p->icon = 64 + i;

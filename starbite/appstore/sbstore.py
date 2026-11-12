@@ -27,13 +27,15 @@ Environment (tests and the host use these; the guest needs none):
                               used when the network is down; its debs/ is an apt source (build deps offline)
   SBSTORE_REPO (/repo)        the offline Debian repo of the old store (its store/index.tsv entries join the catalog)
   SBSTORE_OFFLINE=1           never use the network
-  SBSTORE_NET_PROBE (api.github.com:443)
+  SBSTORE_NET_PROBE (deb.debian.org:80,api.github.com:443)   up = a default route, a DNS answer and one TCP connect
+  SBSTORE_PROC_ROUTE (/proc/net/route), SBSTORE_PROC_ROUTE6: where the default route is looked for (tests)
   SBSTORE_GITHUB_API (https://api.github.com), SBSTORE_GITLAB_API_<HOST> (https://<host>/api/v4)
-  SBSTORE_APT (apt-get), SBSTORE_APT_CACHE (apt-cache), SBSTORE_DPKG_QUERY (dpkg-query), SBSTORE_DPKG_DEB (dpkg-deb)
+  SBSTORE_APT (apt-get), SBSTORE_DPKG (dpkg), SBSTORE_APT_CACHE (apt-cache), SBSTORE_DPKG_QUERY (dpkg-query), SBSTORE_DPKG_DEB (dpkg-deb)
   SBSTORE_SHM (/dev/sbshm), SBSTORE_SOCK (/run/sbwl.sock), SBSTORE_RESERVE_MB (64), SBSTORE_JOBS (nproc)
   SBSTORE_BASE_LIST (/usr/share/starbite/base-packages.txt): packages a removal must never take
   SBSTORE_KEEP_BUILD_DEPS=1   keep the build dependencies after a source build
 """
+import errno
 import fcntl
 import fnmatch
 import hashlib
@@ -51,13 +53,14 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
 
-VERSION = "1.0"
+VERSION = "1.1"
 METHODS = ("distro", "release", "source")          # method numbers 1, 2, 3 (SBG_PKG_M_*)
 M_NUM = {"distro": 1, "release": 2, "source": 3}
 M_NAME = {v: k for k, v in M_NUM.items()}
@@ -92,7 +95,10 @@ class Cfg:
         self.mirror = next((m for m in self.mirrors if os.path.isdir(m)), self.mirrors[0])
         self.repo = env("SBSTORE_REPO", "/repo")
         self.offline = env("SBSTORE_OFFLINE") == "1"
-        self.net_probe = env("SBSTORE_NET_PROBE", "api.github.com:443")
+        self.net_probe = env("SBSTORE_NET_PROBE", "deb.debian.org:80,api.github.com:443")
+        self.proc_route = env("SBSTORE_PROC_ROUTE", "/proc/net/route")
+        self.proc_route6 = env("SBSTORE_PROC_ROUTE6", "/proc/net/ipv6_route")
+        self.dpkg = shlex.split(env("SBSTORE_DPKG", "dpkg"))
         self.github_api = env("SBSTORE_GITHUB_API", "https://api.github.com")
         self.apt = shlex.split(env("SBSTORE_APT", "apt-get"))
         self.apt_cache = shlex.split(env("SBSTORE_APT_CACHE", "apt-cache"))
@@ -122,6 +128,70 @@ class StoreError(Exception):
 
 class NeedsNet(StoreError):
     pass
+
+
+# what the user sees after a failure: the short (the table's 31-byte err) and one sentence on what to do. Keyed by the
+# StoreError short; NeedsNet's sentence depends on why the network looks down (net_why()).
+HINTS = {
+    "needs the network": ("Needs the internet", None),
+    "package not available": ("Not on the memory card", None),
+    "not in the repo": ("Not on the memory card", None),
+    "Linux clock not set": ("Linux's clock is wrong",
+                            "Secure downloads can't be checked while the clock is wrong. Set the date and time in "
+                            "Settings, then tap GET again."),
+    "not enough space": ("Not enough space",
+                         "The Linux space on the memory card is full. Remove an app you don't use, then try again."),
+    "download failed": ("Download stopped",
+                        "The download was cut off (weak Wi-Fi, or the phone slept). Tap GET again: it carries on "
+                        "where it stopped."),
+    "fetch failed": ("Download stopped",
+                     "Getting the source code was cut off. Check Wi-Fi, then tap GET again."),
+    "download damaged": ("Download was damaged",
+                         "The file arrived damaged and was thrown away. Tap GET to download it again."),
+    "checksum mismatch": ("Download failed its check",
+                          "The file didn't match the project's published checksum, so it was not installed. "
+                          "Try again later, or choose another install method."),
+    "signature check failed": ("Download failed its check",
+                               "The file's signature didn't match the project's key, so it was not installed. "
+                               "Choose another install method."),
+    "build failed": ("Compiling failed",
+                     "The build stopped with an error. Choose Latest Release or Debian instead. Details: "
+                     "/var/log/sbstore/{id}.log in the Terminal."),
+    "install failed": ("Install failed",
+                       "Debian's installer stopped with an error. Tap GET to try again: the store first repairs "
+                       "any half-finished install. Details: /var/log/sbstore/{id}.log."),
+    "remove failed": ("Remove failed",
+                      "Debian's installer couldn't remove it. Try again; details: /var/log/sbstore/{id}.log."),
+    "would remove system parts": ("Part of Linux itself",
+                                  "Removing this would take parts Linux needs, so the store left it."),
+    "store busy": ("Another install is running",
+                   "Wait for the other install to finish, then try again."),
+    "GitHub rate limit": ("GitHub is busy",
+                          "GitHub refused too many requests for now. Try again in an hour, or choose Debian."),
+    "not found upstream": ("Gone from the project's site",
+                           "The project no longer offers this download. Choose another install method."),
+    "bad answer upstream": ("Project site answered oddly",
+                            "Try again in a few minutes, or choose another install method."),
+    "no such method": ("Can't install that way",
+                       "This app doesn't offer that install method. Choose another one."),
+    "interrupted": ("Stopped part-way",
+                    "The install was interrupted (Linux stopped or the phone restarted). Tap GET again."),
+}
+HINT_ANY = ("Something went wrong",
+            "Tap GET to try again. If it keeps failing, the details are in /var/log/sbstore/{id}.log.")
+
+
+def explain(e, aid=""):
+    """(short for the table, one plain sentence on what to do)"""
+    short, hint = HINTS.get(getattr(e, "short", ""), HINT_ANY)
+    if isinstance(e, NeedsNet) or hint is None:
+        why = net_why()
+        if why == "ok":
+            hint = ("It isn't on the memory card, and the internet didn't answer just now. Tap GET to try again, "
+                    "or choose Debian to install from the memory card.")
+        else:
+            hint = NET_WHY_TEXT.get(why, NET_WHY_TEXT["no answer"]) + " Or choose Debian to install from the memory card."
+    return short[:31], hint.replace("{id}", aid or "sbstore")
 
 
 # ==== logging ==================================================================================================
@@ -330,23 +400,82 @@ class Lock:
 
 
 # ==== network ==================================================================================================
-_net = {"t": 0.0, "up": False}
+_net = {"t": 0.0, "up": False, "why": "not checked"}
+NET_WHY_TEXT = {
+    "offline mode": "The store is set to offline.",
+    "no connection": "Linux has no network connection yet. Join Wi-Fi (or turn on Mobile Data) in Settings, wait "
+                     "about 10 seconds, then tap GET again.",
+    "no dns": "Linux is connected but can't look up names (DNS). Check that Wi-Fi really reaches the internet, then "
+              "tap GET again.",
+    "no answer": "Linux is connected but the internet doesn't answer. Check that Wi-Fi really reaches the internet "
+                 "(open a web page in Starbite), then tap GET again.",
+}
+
+
+NET_WHY_CODE = {"ok": 0, "no connection": 1, "no dns": 2, "no answer": 3, "offline mode": 4}
+
+
+def _default_route():
+    """an IPv4 default route (sbnet-up's 'default via 10.77.0.1'), or an IPv6 one"""
+    try:
+        with open(C.proc_route) as f:
+            for l in f.readlines()[1:]:
+                p = l.split()
+                if len(p) > 3 and p[1] == "00000000" and int(p[3], 16) & 1:
+                    return True
+    except OSError:
+        return True                                    # (no /proc: don't judge by it)
+    try:
+        with open(C.proc_route6) as f:
+            for l in f:
+                p = l.split()
+                if len(p) > 9 and p[0] == "0" * 32 and p[1] == "00" and p[9] != "lo":
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def net_probe():
+    """(up, why): a default route, then a name lookup, then a TCP connect to any probe target"""
+    if C.offline:
+        return False, "offline mode"
+    if not _default_route():
+        return False, "no connection"
+    resolved = False
+    for t in C.net_probe.split(","):
+        host, _, port = t.strip().rpartition(":")
+        try:
+            addrs = socket.getaddrinfo(host, int(port), type=socket.SOCK_STREAM)
+        except (OSError, ValueError):
+            continue
+        resolved = True
+        for fam, typ, proto, _, sa in addrs[:2]:
+            try:
+                s = socket.socket(fam, typ, proto)
+                s.settimeout(5)
+                s.connect(sa)
+                s.close()
+                return True, "ok"
+            except OSError:
+                continue
+    return False, "no answer" if resolved else "no dns"
 
 
 def net_up(force=False):
     if C.offline:
         return False
-    if not force and time.monotonic() - _net["t"] < 30:
+    if not force and time.monotonic() - _net["t"] < 30 and _net["t"]:
         return _net["up"]
-    host, _, port = C.net_probe.rpartition(":")
-    up = False
-    try:
-        socket.create_connection((host, int(port)), timeout=4).close()
-        up = True
-    except OSError:
-        up = False
-    _net.update(t=time.monotonic(), up=up)
+    up, why = net_probe()
+    _net.update(t=time.monotonic(), up=up, why=why)
     return up
+
+
+def net_why():
+    if not _net["t"]:
+        net_up()
+    return _net["why"]
 
 
 def _ctx():
@@ -477,9 +606,12 @@ def download(url, dest, size=0, sha256=None, prog=NOPROG, cancel=None):
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             tries += 1
             log("download %s: %s (try %d, resuming)" % (url, e, tries))
-            if tries > 5:
+            if tries > 12:                                   # ~5 min of retries: a sleep, Wi-Fi coming back
                 raise StoreError("download failed", "%s: %s" % (url, e))
-            time.sleep(min(2 * tries, 10))
+            for _ in range(min(5 * tries, 30)):
+                if cancel and cancel():
+                    raise StoreError("cancelled")
+                time.sleep(1)
     h = sha_file(part)
     if size and os.path.getsize(part) != size:
         n = os.path.getsize(part)
@@ -868,12 +1000,85 @@ def ensure_mirror_source():
         return False
 
 
+def repair(app_id=None, at_start=False):
+    """put back what an interrupted job left (Linux stopped, the phone restarted, the screen slept and the guest was
+    stopped mid-dpkg): dpkg's half-configured packages, then apt's broken dependencies; at the daemon's start also the
+    leftover build trees and unpacked-but-not-switched versions. Returns True when something was repaired."""
+    did = False
+    upd = rp("/var/lib/dpkg/updates")
+    try:
+        pending = [f for f in os.listdir(upd) if f.isdigit()]
+    except OSError:
+        pending = []
+    if pending or os.path.exists(os.path.join(C.state_dir, "dpkg-running")):
+        log("repairing an interrupted install: dpkg --configure -a", app_id)
+        rc, out = run(C.dpkg + ["--force-confold", "--configure", "-a"], logto=_logp(app_id), timeout=1800,
+                      envx={"DEBIAN_FRONTEND": "noninteractive"})
+        if rc:
+            log("dpkg --configure -a exited %d: %s" % (rc, out[-200:]), app_id)
+        rc, out = run(C.apt + ["-y", "-q", "-f", "--no-install-recommends", "-o", "DPkg::Lock::Timeout=120",
+                               "install"], logto=_logp(app_id), timeout=1800)
+        if rc:
+            log("apt-get -f install exited %d: %s" % (rc, out[-200:]), app_id)
+        did = True
+    try:
+        os.unlink(os.path.join(C.state_dir, "dpkg-running"))
+    except OSError:
+        pass
+    if at_start:
+        b = os.path.join(C.state_dir, "build")
+        if os.path.isdir(b) and os.listdir(b):
+            log("removing unfinished build trees: %s" % " ".join(sorted(os.listdir(b))[:8]))
+            shutil.rmtree(b, ignore_errors=True)
+            did = True
+        try:
+            for aid in os.listdir(C.opt):
+                d = os.path.join(C.opt, aid)
+                for n in os.listdir(d) if os.path.isdir(d) else []:
+                    if n.startswith(".new-") or n.startswith(".current.tmp"):
+                        shutil.rmtree(os.path.join(d, n), ignore_errors=True)
+                        log("removed %s's unfinished %s" % (aid, n))
+                        did = True
+        except OSError:
+            pass
+    return did
+
+
 def apt_update(app_id=None):
     ensure_net_sources()
     if net_up():
         rc, _ = run(C.apt + ["-q", "update"], logto=_logp(app_id), timeout=900)
         if rc:
             log("apt-get update failed (%d)" % rc, app_id)
+
+
+APT_NET_OPTS = ["-o", "Acquire::Retries=5", "-o", "Acquire::http::Timeout=30", "-o", "Acquire::https::Timeout=30"]
+
+
+def _apt_get_install(missing, app_id, prog, cancel):
+    """apt-get install with progress; a marker while dpkg may be mid-way, so the next start repairs an interruption"""
+    mark = os.path.join(C.state_dir, "dpkg-running")
+    try:
+        os.makedirs(C.state_dir, exist_ok=True)
+        open(mark, "w").close()
+    except OSError:
+        mark = None
+    rc, out = run(C.apt + ["-y", "-q", "--no-install-recommends", "-o", "APT::Status-Fd=@STATUSFD@",
+                           "-o", "DPkg::Lock::Timeout=120"] + APT_NET_OPTS + ["install"] + missing,
+                  logto=_logp(app_id), status_fd_cb=apt_progress_cb(prog), cancel=cancel)
+    if rc and re.search(r"Failed to fetch|Temporary failure resolving|Could not resolve|Connection timed out", out) \
+            and not (cancel and cancel()):
+        log("apt: a download failed; trying once more in 10 s (the network may have dropped)", app_id)
+        time.sleep(10)
+        rc, out = run(C.apt + ["-y", "-q", "--no-install-recommends", "-o", "APT::Status-Fd=@STATUSFD@",
+                               "-o", "DPkg::Lock::Timeout=120"] + APT_NET_OPTS + ["install"] + missing,
+                      logto=_logp(app_id), status_fd_cb=apt_progress_cb(prog), cancel=cancel)
+    if mark and not rc:
+        try:
+            os.unlink(mark)
+        except OSError:
+            pass
+    return rc, out
 
 
 def apt_install(pkgs, app_id, prog=NOPROG, cancel=None, auto=False):
@@ -886,22 +1091,23 @@ def apt_install(pkgs, app_id, prog=NOPROG, cancel=None, auto=False):
     if not missing:
         prog.report(1.0)
         return []
+    repair(app_id)
     if ensure_mirror_source():                           # the mirror's debs (build deps offline) just appeared
         run(C.apt + ["-q", "update"], logto=_logp(app_id), timeout=600, cancel=cancel)
-    rc, out = run(C.apt + ["-y", "-q", "--no-install-recommends", "-o", "APT::Status-Fd=@STATUSFD@",
-                           "-o", "DPkg::Lock::Timeout=120", "install"] + missing,
-                  logto=_logp(app_id), status_fd_cb=apt_progress_cb(prog), cancel=cancel)
+    rc, out = _apt_get_install(missing, app_id, prog, cancel)
     if rc and ("Unable to locate package" in out or "has no installation candidate" in out) and net_up():
         ensure_net_sources()
         run(C.apt + ["-q", "update"], logto=_logp(app_id), timeout=900)
-        rc, out = run(C.apt + ["-y", "-q", "--no-install-recommends", "-o", "APT::Status-Fd=@STATUSFD@",
-                               "-o", "DPkg::Lock::Timeout=120", "install"] + missing,
-                      logto=_logp(app_id), status_fd_cb=apt_progress_cb(prog), cancel=cancel)
+        rc, out = _apt_get_install(missing, app_id, prog, cancel)
     if rc:
         if "Unable to locate package" in out or "has no installation candidate" in out:
             raise NeedsNet("package not available", "apt: %s" % out.strip().splitlines()[-1][:200])
         if "No space left" in out:
             raise StoreError("not enough space", "apt: no space left")
+        if "unmet dependencies" in out or "Unable to satisfy dependencies" in out or "held broken packages" in out:
+            if net_up(force=True):
+                raise StoreError("install failed", "apt: unmet dependencies: %s" % out[-300:])
+            raise NeedsNet("package not available", "apt: unmet dependencies offline: %s" % out[-300:])
         if re.search(r"Temporary failure resolving|Could not resolve|Failed to fetch", out):
             raise NeedsNet("needs the network", "apt: fetch failed")
         raise StoreError("install failed", "apt-get install exited %d: %s" % (rc, out[-300:]))
@@ -1956,9 +2162,19 @@ class Shm:
         size = os.fstat(self.fd).st_size
         if size and size < SBSHM_BLK_OFF:              # a test file: make it big enough
             os.ftruncate(self.fd, SBSHM_BLK_OFF)
-        self.base = SBSHM_STORE_OFF
-        self.m = mmap.mmap(self.fd, SBSHM_BLK_OFF - SBSHM_STORE_OFF, offset=SBSHM_STORE_OFF)
-        self.seq = struct.unpack_from("<I", self.m, 0)[0] & ~1
+        # the store region only (an offset map); a /dev/sbshm that refuses offsets (sbguest.ko before Track E's
+        # offset support: EINVAL) is mapped from 0 to the block rings instead, as sbpkg does
+        try:
+            if env("SBSTORE_SHM_NO_OFFSET") == "1":
+                raise OSError(errno.EINVAL, "offset maps disabled (test)")
+            self.m = mmap.mmap(self.fd, SBSHM_BLK_OFF - SBSHM_STORE_OFF, offset=SBSHM_STORE_OFF)
+            self.base = SBSHM_STORE_OFF
+        except OSError as e:
+            log("offset map of %s refused (%s): mapping it from 0" % (path, e))
+            self.m = mmap.mmap(self.fd, SBSHM_BLK_OFF, offset=0)
+            self.base = 0
+        self.seq_off = SBSHM_STORE_OFF - self.base
+        self.seq = struct.unpack_from("<I", self.m, self.seq_off)[0] & ~1
 
     def _w(self, off, data):
         """8-byte word stores into the write-combined region (like sbpkg's wcopy)"""
@@ -1974,7 +2190,7 @@ class Shm:
     def publish(self, store_hdr, pkgs, hdr3, pkgs3, text, icons):
         """the store seqlock: odd, the tables (and icons), even. Returns the new seq."""
         self.seq |= 1
-        struct.pack_into("<I", self.m, 0, self.seq)
+        struct.pack_into("<I", self.m, self.seq_off, self.seq)
         for i, px in icons:
             self._w(SBSHM_ICON_OFF + (SBSHM_ICONS_CAT + i) * SBSHM_ICON_BYTES, px)
         body = struct.pack(STORE_HDR_FMT, 0, *store_hdr)[4:] + b"".join(pkgs)
@@ -1982,7 +2198,7 @@ class Shm:
         self._w(SBSHM_STORE_TEXT_OFF, text[:SBSHM_STORE_TEXT_SIZE].ljust(SBSHM_STORE_TEXT_SIZE, b"\0")[:SBSHM_STORE_TEXT_SIZE])
         self._w(SBSHM_STORE3_OFF, struct.pack(STORE3_HDR_FMT, *hdr3) + b"".join(pkgs3))
         self.seq += 1
-        struct.pack_into("<I", self.m, 0, self.seq)
+        struct.pack_into("<I", self.m, self.seq_off, self.seq)
         return self.seq
 
 
@@ -2019,6 +2235,41 @@ class Daemon:
         self.dirty = True
         self.last_check = 0.0
         self.catdir = catalog_dir()
+        self.net = {"up": False, "why": "not checked"}
+        self.net_changed = False
+        self.net_kick = threading.Event()
+        self.aptup = None
+
+    # ---- the network, watched in a thread (a DNS lookup can block for many seconds: never in the loop)
+    def _net_loop(self):
+        while True:
+            up, why = net_probe()
+            _net.update(t=time.monotonic(), up=up, why=why)
+            if up != self.net["up"] or why != self.net["why"]:
+                self.net = {"up": up, "why": why}
+                self.net_changed = True
+            self.net_kick.wait(60 if up else 10)
+            self.net_kick.clear()
+
+    def on_net_change(self):
+        self.net_changed = False
+        up, why = self.net["up"], self.net["why"]
+        log("network %s" % ("up: the store can download releases and source" if up else
+                            "down (%s): releases and source builds use the memory card's copy" % why))
+        if up and ensure_net_sources():
+            self.apt_update_bg()
+        self.dirty = True
+
+    def apt_update_bg(self):
+        if self.aptup is not None and self.aptup.poll() is None:
+            return
+        try:                                            # jobs wait for it, the table does not
+            self.aptup = subprocess.Popen(C.apt + ["-q"] + APT_NET_OPTS + ["update"], stdin=subprocess.DEVNULL,
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                          start_new_session=True)
+            self.aptup_t0 = time.monotonic()
+        except OSError as e:
+            log("apt-get update: %s" % e)
 
     def _order(self):
         feat = sorted((a for a in self.cat.values() if a.get("featured")), key=lambda a: a["name"].lower())
@@ -2044,9 +2295,15 @@ class Daemon:
             mem_mb = 1500
         mem_mb = int(env("SBSTORE_MEM_MB", mem_mb))
         ram_limit = mem_mb - 600 if mem_mb > 900 else 300
-        net = net_up()
+        net = self.net["up"] if hasattr(self, "net") else net_up()
         pkgs, pkgs3 = [], []
         text = b""
+        hints = {}
+        for i, lv in self.live.items():                     # the failures' what-to-do sentences first (few, short)
+            h = _b(lv.get("hint", ""), 400)
+            if h and len(text) + len(h) + 1 <= SBSHM_STORE_TEXT_SIZE:
+                hints[i] = (len(text), len(h))
+                text += h + b"\0"
         for i, aid in enumerate(self.order):
             a = self.cat[aid]
             ms = app_methods(a)
@@ -2111,12 +2368,12 @@ class Daemon:
                 f3 |= 4                                     # from the offline mirror
             if (a.get("launcher") or {}).get("terminal"):
                 f3 |= 8                                     # opens in the terminal
-            rel_dl = 0
+            hoff, hlen = hints.get(i, (0, 0))
             pkgs3.append(struct.pack(
                 PKG3_FMT, mbits, M_NUM.get((ia or {}).get("method"), 0), M_NUM.get(sel, 0),
                 state if state >= PKG_DOWNLOADING else (state if state else 0), lv.get("done_kb", 0),
                 lv.get("total_kb", 0), lv.get("eta", 0), int(src_spec.get("build_min", 0)),
-                TOUCH.get(a.get("touch"), 0), needs, f3, doff, dlen, rel_dl, int(rel_spec.get("size_mb", 0)), 0,
+                TOUCH.get(a.get("touch"), 0), needs, f3, doff, dlen, hoff, int(rel_spec.get("size_mb", 0)), hlen,
                 _b((ia or {}).get("version", ""), 24),
                 _b(lat.get((ia or {}).get("method") or sel, {}).get("version", ""), 24),
                 _b(lat.get("release", {}).get("version", ""), 24), _b(lat.get("distro", {}).get("version", ""), 24),
@@ -2124,7 +2381,9 @@ class Daemon:
                 _b(_source_label(a), 48)))
         hdr = (len(pkgs), ov_total, ov_free, 1 if os.path.exists(os.path.join(C.repo, "Packages")) else 0) + (0,) * 11
         hdr3 = (STORE3_MAGIC, 1, len(pkgs3), 1 if net else 0, 1 if os.path.isdir(C.mirror) else 0,
-                st.get("checked_at", 0), len(text)) + (0,) * 9
+                st.get("checked_at", 0), len(text),
+                0 if net else NET_WHY_CODE.get(getattr(self, "net", _net)["why"], 5),
+                1 if (self.job or self.queue) else 0) + (0,) * 7
         return hdr, pkgs, hdr3, pkgs3, text
 
     def write_apps_map(self):
@@ -2256,6 +2515,8 @@ class Daemon:
         if any(q[0] == idx for q in self.queue) or (self.job and self.job["idx"] == idx):
             return
         self.queue.append((idx, op, method))
+        if not self.net["up"]:
+            self.net_kick.set()
         self.live[idx] = {"state": PKG_QUEUED, "pct": 0}
         self.send("pkg %d %d 0" % (idx, PKG_QUEUED))
         self.dirty = True
@@ -2266,10 +2527,11 @@ class Daemon:
             return
         if getattr(self, "aptup", None) is not None:
             rc = self.aptup.poll()
-            if rc is None:
-                return                                  # apt's lists first
-            log("apt-get update at start: %s" % ("ok" if rc == 0 else "rc %d (offline sources still read)" % rc))
-            self.aptup = None
+            if rc is None and time.monotonic() - self.aptup_t0 < 120:
+                return                                  # apt's lists first (a slow network: not for ever)
+            log("apt-get update: %s" % ("ok" if rc == 0 else "still running, jobs go ahead" if rc is None else
+                                        "rc %d (offline sources still read)" % rc))
+            self.aptup = None                           # (a slow one carries on detached; apt's lock serialises)
         idx, op, method = self.queue.pop(0)
         me = [sys.executable, os.path.abspath(__file__)]
         if op == OP_CHECK:
@@ -2283,8 +2545,15 @@ class Daemon:
             argv = me + [verb, aid, "--json"]
             if op == OP_INSTALL and method in M_NAME:
                 argv += ["--method", M_NAME[method]]
-        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+        try:
+            os.makedirs(C.log_dir, exist_ok=True)
+            errf = open(os.path.join(C.log_dir, "jobs.log"), "ab")     # a crash's traceback lands here, not nowhere
+        except OSError:
+            errf = subprocess.DEVNULL
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=errf, stdin=subprocess.DEVNULL,
                              start_new_session=True)
+        if errf is not subprocess.DEVNULL:
+            errf.close()
         os.set_blocking(p.stdout.fileno(), False)
         self.job = {"idx": idx, "op": op, "p": p, "buf": b"", "t0": time.monotonic(), "err": ""}
         if idx != SBSHM_NONE:
@@ -2320,7 +2589,12 @@ class Daemon:
             elif j.get("cancelled"):
                 self.live[idx] = {"state": PKG_IDLE, "pct": 0}       # cancelled: back to GET, no error
             else:
-                self.live[idx] = {"state": PKG_FAILED, "pct": 0, "err": j["err"] or "failed"}
+                if not j["err"]:                            # died without an error event (killed, a crash)
+                    short, hint = explain(StoreError("interrupted" if rc < 0 else "internal error"), self.order[idx])
+                    j["err"], j["hint"] = short, hint
+                self.live[idx] = {"state": PKG_FAILED, "pct": 0, "err": j["err"], "hint": j.get("hint", "")}
+                log("FAILED %s (exit %d): %s -- %s%s" % (self.order[idx], rc, j["err"], j.get("hint", ""),
+                                                         " [%s]" % j["detail"][:300] if j.get("detail") else ""))
             self.send("pkg %d %d %d" % (idx, self.live[idx]["state"], self.live[idx]["pct"]))
         self.job = None
         self.dirty = True
@@ -2329,6 +2603,8 @@ class Daemon:
         idx = j["idx"]
         if ev.get("ev") == "error":
             j["err"] = ev.get("short") or ev.get("msg", "failed")
+            j["hint"] = ev.get("hint", "")
+            j["detail"] = ev.get("msg", "")
         if idx == SBSHM_NONE or ev.get("ev") != "progress":
             return
         st = PHASE_STATE.get(ev.get("phase"), PKG_INSTALLING)
@@ -2351,18 +2627,17 @@ class Daemon:
             self.shm = Shm(C.shm)
         except OSError as e:
             log("no shared region %s (%s): the table is not published" % (C.shm, e))
+        up, why = net_probe()
+        _net.update(t=time.monotonic(), up=up, why=why)
+        self.net = {"up": up, "why": why}
         log("daemon: %d apps (%s), mirror %s, network %s" % (len(self.order), C.catalog, C.mirror,
-                                                            "up" if net_up() else "down"))
-        self.aptup = None
+                                                            "up" if up else "down (%s)" % why))
+        repair(at_start=True)
         ensure_mirror_source()
         ensure_net_sources()
         if env("SBSTORE_NO_APT_UPDATE") != "1":         # in the background: file: sources (repo, mirror debs)
-            try:                                        # work offline; jobs wait for it, the table does not
-                self.aptup = subprocess.Popen(C.apt + ["-q", "update"], stdin=subprocess.DEVNULL,
-                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                              start_new_session=True)
-            except OSError as e:
-                log("apt-get update at start: %s" % e)
+            self.apt_update_bg()                        # work offline
+        threading.Thread(target=self._net_loop, daemon=True).start()
         signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
         self.write_apps_map()
         last_pub = 0.0
@@ -2372,7 +2647,9 @@ class Daemon:
             self.poll_job()
             self.start_next()
             now = time.monotonic()
-            if net_up() and now - self.last_check > 6 * 3600 and not self.job and not self.queue:
+            if self.net_changed:
+                self.on_net_change()
+            if self.net["up"] and now - self.last_check > 6 * 3600 and not self.job and not self.queue:
                 self.last_check = now
                 self.queue.append((SBSHM_NONE, OP_CHECK, 0))
             if self.dirty and now - last_pub > 0.25 or now - last_pub > 5:
@@ -2410,6 +2687,34 @@ def _status(cat):
     return rows
 
 
+def card_engine():
+    """a newer engine + catalog on the card (appstore.erofs: engine/sbstore.py, engine/catalog.json, made by
+    tools/mirror-engine.sh) runs instead of the base's copy: store fixes ship with the card file, no new base.
+    Only ever newer (VERSION), only once (SBSTORE_FROM_CARD), never in tests (SBSTORE_NO_CARD_ENGINE=1)."""
+    if env("SBSTORE_FROM_CARD") == "1" or env("SBSTORE_NO_CARD_ENGINE") == "1":
+        return
+    for m in C.mirrors:
+        eng = os.path.join(m, "engine", "sbstore.py")
+        try:
+            with open(eng) as f:
+                v = re.search(r'^VERSION = "([^"]+)"', f.read(), re.M)
+        except OSError:
+            continue
+        if not v or not newer(v.group(1), VERSION):
+            log("the card's engine %s is not newer than %s: using the base's" % (v and v.group(1), VERSION))
+            return
+        e = dict(os.environ, SBSTORE_FROM_CARD="1")
+        cat = os.path.join(m, "engine", "catalog.json")
+        if not env("SBSTORE_CATALOG") and os.path.exists(cat):
+            e["SBSTORE_CATALOG"] = cat
+        log("running the card's newer engine %s (base has %s): %s" % (v.group(1), VERSION, eng))
+        try:
+            os.execve(sys.executable, [sys.executable, "-I", eng, "daemon"], e)
+        except OSError as ex:
+            log("the card's engine didn't start (%s): using the base's" % ex)
+        return
+
+
 def main(argv):
     import argparse
     ap = argparse.ArgumentParser(prog="sbstore", description="the Starbite App Store engine")
@@ -2428,6 +2733,7 @@ def main(argv):
         print(VERSION)
         return 0
     if a.cmd == "daemon":
+        card_engine()
         Daemon().run()
         return 0
     cat = load_catalog()
@@ -2501,15 +2807,21 @@ def main(argv):
             with open(p) as f:
                 sys.stdout.write("".join(f.readlines()[-200:]))
         return 0
-    except StoreError as e:
-        log("error: %s" % e.detail)
-        if a.json:
-            print(json.dumps({"ev": "error", "short": e.short, "msg": e.detail}), flush=True)
-        else:
-            print("sbstore: %s (%s)" % (e.short, e.detail), file=sys.stderr)
-        return 3 if isinstance(e, NeedsNet) else 1
     except KeyboardInterrupt:
         return 130
+    except Exception as e:                                  # noqa: BLE001: every failure reaches the user in words
+        if not isinstance(e, StoreError):
+            import traceback
+            log("error: internal: %s" % "".join(traceback.format_exception(e)).rstrip(), _applog)
+            e = StoreError("internal error", "%s: %s" % (type(e).__name__, e))
+        short, hint = explain(e, a.id or "")
+        log("error: %s (%s) -- told the user: %s" % (e.short, e.detail, hint))
+        if a.json:
+            print(json.dumps({"ev": "error", "code": e.short, "short": short, "hint": hint, "msg": e.detail}),
+                  flush=True)
+        else:
+            print("sbstore: %s: %s\n  (%s)" % (short, hint, e.detail), file=sys.stderr)
+        return 3 if isinstance(e, NeedsNet) else 1
 
 
 if __name__ == "__main__":

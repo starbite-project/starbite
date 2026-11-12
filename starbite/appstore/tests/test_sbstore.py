@@ -195,6 +195,8 @@ class Env:
             "SBSTORE_APT_MARK": "%s %s apt-mark" % (py, FAKEAPT),
             "SBSTORE_DPKG_QUERY": "%s %s dpkg-query" % (py, FAKEAPT),
             "SBSTORE_DPKG_DEB": "%s %s dpkg-deb" % (py, FAKEAPT), "SBSTORE_RESERVE_MB": "1",
+            "SBSTORE_DPKG": "%s %s dpkg" % (py, FAKEAPT),
+            "FAKEAPT_DPKG_UPDATES": os.path.join(self.root, "var/lib/dpkg/updates"),
             "SBSTORE_LOCK_WAIT": "5", "SBSTORE_OFFLINE": "", "SBSTORE_JOBS": "2"})
 
     def run(self, *args, expect=0, **envx):
@@ -371,7 +373,7 @@ class Release(unittest.TestCase):
         rel = FILES.d["/gh/repos/o/hello/releases/latest"]
         rel["assets"][0]["digest"] = "sha256:" + "0" * 64
         evs = self.e.run("install", "hello", expect=1)
-        self.assertEqual(evs[-1]["short"], "checksum mismatch")
+        self.assertEqual(evs[-1]["code"], "checksum mismatch")
         self.assertFalse(os.path.exists(self.e.path("/opt/sbstore/hello")))
         self.assertNotIn("libhello1", self.e.apt()["installed"])       # the runtime dep given back
         self.assertEqual(self.e.state()["apps"], {})
@@ -392,7 +394,7 @@ class Release(unittest.TestCase):
     def test_space(self):
         publish_hello("1.0")
         evs = self.e.run("install", "hello", expect=1, SBSTORE_RESERVE_MB=str(10 ** 9))
-        self.assertEqual(evs[-1]["short"], "not enough space")
+        self.assertEqual(evs[-1]["code"], "not enough space")
 
     def test_prerelease_skipped_and_tag_pattern(self):
         publish_hello("1.0", prerelease_newer="2.0")
@@ -405,7 +407,7 @@ class Release(unittest.TestCase):
     def test_offline_mirror_and_needs_net(self):
         body = publish_hello("1.0")
         evs = self.e.run("install", "hello", expect=3, SBSTORE_OFFLINE="1")
-        self.assertEqual(evs[-1]["short"], "needs the network")
+        self.assertEqual(evs[-1]["code"], "needs the network")
         m = os.path.join(self.e.mirror, "hello")
         os.makedirs(m)
         name = "hello-1.0-linux-aarch64.tar.gz"
@@ -543,7 +545,7 @@ class Source(unittest.TestCase):
         self.e.run("install", "hello", "--method", "release")
         FILES.d["/src/hello-v1.0.tar.gz"] = tgz({"Makefile": (b"all:\n\tfalse\n", 0o644)}, top="hello-v1.0")
         evs = self.e.run("install", "hello", "--method", "source", expect=1)
-        self.assertEqual(evs[-1]["short"], "build failed")
+        self.assertEqual(evs[-1]["code"], "build failed")
         self.assertEqual(self.e.run_bin("hello"), "hello 1.0")              # the release install is back
         st = self.e.state()["apps"]["hello"]
         self.assertEqual((st["method"], st["version"]), ("release", "1.0"))
@@ -554,7 +556,7 @@ class Source(unittest.TestCase):
         publish_hello("1.0")
         FILES.d["/src/hello-v1.0.tar.gz"] = tgz({"Makefile": (b"all:\n\tfalse\n", 0o644)}, top="hello-v1.0")
         evs = self.e.run("install", "hello", "--method", "source", expect=1)
-        self.assertEqual(evs[-1]["short"], "build failed")
+        self.assertEqual(evs[-1]["code"], "build failed")
         self.assertFalse(os.path.exists(self.e.path("/opt/sbstore/hello")))
         self.assertEqual(self.e.state()["apps"], {})
         log = open(self.e.path("/var/log/sbstore/hello.log")).read()
@@ -582,7 +584,7 @@ class Distro(unittest.TestCase):
         self.e.close()
         self.e = Env([t])
         evs = self.e.run("install", "hello", "--method", "distro", expect=3)
-        self.assertIn(evs[-1]["short"], ("package not available", "not in the repo"))
+        self.assertIn(evs[-1]["code"], ("package not available", "not in the repo"))
 
     def test_base_guard(self):
         t = TOML_HELLO.replace('apt = ["hello-deb"]', 'apt = ["needs-base"]')
@@ -594,12 +596,59 @@ class Distro(unittest.TestCase):
         json.dump({"apps": {"hello": {"method": "distro", "version": "1", "packages": ["needs-base"]}}},
                   open(os.path.join(st, "state.json"), "w"))
         evs = self.e.run("remove", "hello", expect=1)
-        self.assertEqual(evs[-1]["short"], "would remove system parts")
+        self.assertEqual(evs[-1]["code"], "would remove system parts")
         self.assertIn("basepkg", self.e.apt()["installed"])
+
+
+class DaemonNoOffset(unittest.TestCase):
+    """a /dev/sbshm that refuses offset maps (the old sbguest.ko): the table still lands at the store's offset"""
+
+    def test_table_without_offset_maps(self):
+        FILES.d.clear()
+        publish_hello("1.0")
+        e = Env()
+        try:
+            shm = os.path.join(e.d, "shm")
+            with open(shm, "wb") as f:
+                f.truncate(sbstore.SBSHM_BLK_OFF)
+            sockp = os.path.join(e.d, "s.sock")
+            srv = socket.socket(socket.AF_UNIX)
+            srv.bind(sockp)
+            srv.listen(1)
+            p = subprocess.Popen([sys.executable, SBSTORE, "daemon"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                 env=dict(e.env, SBSTORE_SHM=shm, SBSTORE_SOCK=sockp, SBSTORE_SHM_NO_OFFSET="1",
+                                          SBSTORE_RUN=os.path.join(e.d, "run")))
+            srv.settimeout(10)
+            c, _ = srv.accept()
+            c.settimeout(20)
+            buf = b""
+            while b"store " not in buf:
+                buf += c.recv(4096)
+            p.terminate()
+            err = p.communicate(timeout=5)[1].decode()
+            c.close()
+            srv.close()
+            self.assertIn("mapping it from 0", err)
+            with open(shm, "rb") as f:
+                f.seek(sbstore.SBSHM_STORE_OFF)
+                hdr = struct.unpack("<16I", f.read(64))
+                name = f.read(40).rstrip(b"\0")
+                f.seek(sbstore.SBSHM_STORE3_OFF)
+                magic = struct.unpack("<I", f.read(4))[0]
+                f.seek(0)
+                zero = f.read(4096)
+            self.assertEqual((hdr[1], name, magic), (1, b"hello", sbstore.STORE3_MAGIC))
+            self.assertEqual(hdr[0] % 2, 0)
+            self.assertEqual(zero, b"\0" * 4096)          # nothing written outside the store's regions
+        finally:
+            e.close()
 
 
 class DaemonTest(unittest.TestCase):
     """the daemon against a fake sbwl (a unix socket server) and a plain file as the shared region"""
+
+    def extra_env(self, e):
+        return {}
 
     def setUp(self):
         FILES.d.clear()
@@ -613,6 +662,7 @@ class DaemonTest(unittest.TestCase):
         self.srv.listen(1)
         e = dict(self.e.env, SBSTORE_SHM=self.shm, SBSTORE_SOCK=self.sockp, SBSTORE_MEM_MB="1500",
                  SBSTORE_RUN=os.path.join(self.e.d, "run"))
+        e.update(self.extra_env(self.e))
         self.p = subprocess.Popen([sys.executable, SBSTORE, "daemon"], env=e, stdout=subprocess.DEVNULL,
                                   stderr=subprocess.PIPE)
         self.srv.settimeout(10)
@@ -715,7 +765,131 @@ class DaemonTest(unittest.TestCase):
         time.sleep(0.6)
         hdr, pk, h3, p3, text = self.table()
         self.assertEqual(pk[0][9], sbstore.PKG_FAILED)
-        self.assertEqual(pk[0][4].rstrip(b"\0"), b"checksum mismatch")
+        self.assertEqual(pk[0][4].rstrip(b"\0"), b"Download failed its check")
+        hint = text[p3[0][13]:p3[0][13] + p3[0][15]].decode()             # hint_off, hint_len
+        self.assertIn("checksum", hint)
+        self.assertEqual(h3[7], 0)                                        # net_why: ok
+        self.assertEqual(h3[8], 0)                                        # busy: no job left
+
+
+class DaemonNoNet(DaemonTest):
+    """the network down (a closed port): the reason in the table, and an install says what to do in words"""
+
+    def extra_env(self, e):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()                                    # nothing listens there now
+        return {"SBSTORE_NET_PROBE": "127.0.0.1:%d" % port}
+
+    def test_table_and_install(self):
+        pass
+
+    def test_cancel(self):
+        pass
+
+    def test_failure_reported(self):
+        publish_hello("1.0")
+        seq = int(self.line(lambda l: l.startswith("store ")).split()[1])
+        hdr, pk, h3, p3, text = self.table()
+        self.assertEqual(h3[3], 0)                                        # net_ok
+        self.assertEqual(h3[7], 3)                                        # net_why: no answer
+        self.assertTrue(pk[0][8] & sbstore.F_NEEDS_NET)
+        self.c.sendall(b"op 0 %d %d\n" % (1 | (2 << 8), seq))
+        self.line(lambda l: l.startswith("pkg 0 4"), t=60)
+        time.sleep(0.6)
+        hdr, pk, h3, p3, text = self.table()
+        self.assertEqual(pk[0][4].rstrip(b"\0"), b"Needs the internet")
+        hint = text[p3[0][13]:p3[0][13] + p3[0][15]].decode()
+        self.assertIn("internet doesn't answer", hint)
+        self.assertIn("Debian", hint)
+
+
+class Network(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.old = (sbstore.C.proc_route, sbstore.C.proc_route6, sbstore.C.net_probe, sbstore.C.offline)
+
+    def tearDown(self):
+        sbstore.C.proc_route, sbstore.C.proc_route6, sbstore.C.net_probe, sbstore.C.offline = self.old
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def route(self, default):
+        p = os.path.join(self.d, "route")
+        with open(p, "w") as f:
+            f.write("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n")
+            f.write("sbnet0\t0000000A\t00000000\t0001\t0\t0\t0\tFCFFFFFF\n")
+            if default:
+                f.write("sbnet0\t00000000\t01004D0A\t0003\t0\t0\t0\t00000000\n")
+        sbstore.C.proc_route = p
+        sbstore.C.proc_route6 = os.path.join(self.d, "none")
+
+    def test_no_route(self):
+        self.route(False)
+        sbstore.C.net_probe = "127.0.0.1:%d" % PORT
+        self.assertEqual(sbstore.net_probe(), (False, "no connection"))
+
+    def test_no_dns(self):
+        self.route(True)
+        sbstore.C.net_probe = "no-such-host.invalid:80"
+        self.assertEqual(sbstore.net_probe(), (False, "no dns"))
+
+    def test_up_with_any_target(self):
+        self.route(True)
+        sbstore.C.net_probe = "no-such-host.invalid:80,127.0.0.1:%d" % PORT
+        self.assertEqual(sbstore.net_probe(), (True, "ok"))
+
+    def test_words(self):
+        self.route(False)
+        sbstore.C.net_probe = "127.0.0.1:%d" % PORT
+        sbstore._net.update(t=0)
+        short, hint = sbstore.explain(sbstore.NeedsNet("needs the network", "x"), "firefox")
+        self.assertEqual(short, "Needs the internet")
+        self.assertIn("Join Wi-Fi", hint)
+        short, hint = sbstore.explain(sbstore.StoreError("build failed", "x"), "btop")
+        self.assertIn("/var/log/sbstore/btop.log", hint)
+        for code, (sh, h) in sbstore.HINTS.items():
+            self.assertLessEqual(len(sh.encode()), 31, code)
+
+
+class CardEngine(unittest.TestCase):
+    def test_newer_engine_on_the_card_runs(self):
+        e = Env()
+        try:
+            eng = os.path.join(e.mirror, "engine")
+            os.makedirs(eng)
+            mark = os.path.join(e.d, "mark")
+            with open(os.path.join(eng, "sbstore.py"), "w") as f:
+                f.write('VERSION = "9.9"\nimport os, sys\nopen(os.environ["MARK"], "w").write('
+                        '" ".join(sys.argv[1:]) + " " + os.environ["SBSTORE_FROM_CARD"])\n')
+            subprocess.run([sys.executable, SBSTORE, "daemon"], env=dict(e.env, MARK=mark), timeout=30)
+            self.assertEqual(open(mark).read(), "daemon 1")
+            with open(os.path.join(eng, "sbstore.py"), "w") as f:      # an older one: the base's engine runs
+                f.write('VERSION = "0.9"\n')
+            p = subprocess.Popen([sys.executable, SBSTORE, "daemon"], env=dict(e.env, SBSTORE_SOCK="/nonexistent",
+                                 SBSTORE_SHM="/nonexistent"), stderr=subprocess.PIPE)
+            time.sleep(3)
+            p.terminate()
+            p.communicate(timeout=10)
+            self.assertIn("not newer", open(e.path("/var/log/sbstore/sbstore.log")).read())
+        finally:
+            e.close()
+
+
+class Repair(unittest.TestCase):
+    def test_interrupted_dpkg_is_repaired_before_the_next_install(self):
+        e = Env()
+        try:
+            upd = e.path("/var/lib/dpkg/updates")
+            os.makedirs(upd)
+            open(os.path.join(upd, "0001"), "w").close()                  # dpkg stopped mid-way
+            e.run("install", "hello", "--method", "distro")
+            calls = [c for c in e.apt()["calls"] if c[0] == "dpkg"]
+            self.assertTrue(any("--configure" in c and "-a" in c for c in calls), calls)
+            self.assertEqual(os.listdir(upd), [])
+            self.assertIn("2.10-3", e.state()["apps"]["hello"]["version"])
+        finally:
+            e.close()
 
 
 if __name__ == "__main__":
