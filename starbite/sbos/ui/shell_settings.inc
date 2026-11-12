@@ -24,7 +24,7 @@
 
 enum { SE_ROOT = 0, SE_DISPLAY = 1, SE_WIFI = 2, SE_CELL = 3, SE_CARD = 4,
        SE_GENERAL = 10, SE_ABOUT, SE_UPDATE, SE_DATETIME, SE_KEYBOARD, SE_LANG, SE_RESET, SE_WALL, SE_SOUNDS, SE_NOTIF,
-       SE_NOTIF_APP, SE_BATTERY, SE_PRIVACY, SE_EMERGENCY, SE_LINUX, SE_NPAGES };
+       SE_NOTIF_APP, SE_BATTERY, SE_PRIVACY, SE_EMERGENCY, SE_LINUX, SE_SEARCH, SE_NPAGES };
 /* actions (row ids from 100; a row id < 100 pushes that page) */
 enum { A_NONE = 100, A_CARD, A_PASSCODE, A_STARTUP, A_STORE, A_LAST2, A_HEALTH, A_TEXTSIZE, A_RESET, A_EMG, A_BRIGHT,
        A_RANGE, A_TERMINAL,
@@ -96,9 +96,15 @@ static struct {
     tk_tracker tr;
     tk_spring sp;
     float bright;                                 /* the slider's place (0..1) */
-    char foot[4][96];
+    char q[24];                                   /* Search: what is typed */
+    int shift, num;
+    int stack[8], ns_, popping;                   /* the pages pushed on the way here (back pops them, iOS) */
 } SE;
-static tk_layer seclip, sescr, sepg, senav;
+/* IOS-REFERENCE 6 / 10: Settings' search at the bottom: a 48 glass capsule (x 20..370, 38 above the bottom); on its
+ * page the field rides above the keyboard with a 44 "x" circle beside it */
+#define SE_SB_Y (H_PT - 30 - 8 - 48)
+#define SE_SF_Y (540 - 8 - 48)
+static tk_layer seclip, sescr, sepg, senav, sesb, sekb;   /* sesb: the root's search capsule (the field above the keyboard); sekb: its keyboard */
 #define SE_TOP (SAFE_TOP + NAVBAR_H)              /* the content shows below the nav row (a soft edge) */
 
 static const char *se_str(const char *a, const char *b)
@@ -159,6 +165,7 @@ static const char *se_title(int p)
     case SE_PRIVACY: return "Privacy";
     case SE_EMERGENCY: return "Emergency";
     case SE_LINUX: return "Linux Apps";
+    case SE_SEARCH: return "Search";
     default: return "Settings";
     }
 }
@@ -377,6 +384,27 @@ static void se_rows(int p)
         nav(A_STORE, SEI_STORE, "App Store", 0);
         nav(A_TERMINAL, SEI_LINUX, "Terminal", 0);
         foot("Linux apps run on the phone's big cores in their own window. Install them from the App Store.");
+        break;
+    }
+    case SE_SEARCH: {
+        /* the pages and settings whose names hold what is typed (all of them while it is empty: the first seven) */
+        static const struct { const char *t; int id, ico; const char *where; } IX[] = {
+            { "Wi-Fi", SE_WIFI, SEI_WIFI, 0 }, { "Cellular", SE_CELL, SEI_CELL, 0 }, { "Battery", SE_BATTERY, SEI_BATT, 0 },
+            { "General", SE_GENERAL, SEI_GENERAL, 0 }, { "Display & Brightness", SE_DISPLAY, SEI_DISPLAY, 0 },
+            { "Wallpaper", SE_WALL, SEI_WALL, 0 }, { "Sounds & Haptics", SE_SOUNDS, SEI_SOUNDS, 0 },
+            { "Notifications", SE_NOTIF, SEI_NOTIF, 0 }, { "Passcode", A_PASSCODE, SEI_PASS, 0 }, { "Emergency", SE_EMERGENCY, SEI_SOS, 0 },
+            { "Privacy", SE_PRIVACY, SEI_PRIV, 0 }, { "Startup", A_STARTUP, SEI_START, 0 }, { "Linux Apps", SE_LINUX, SEI_LINUX, 0 },
+            { "App Store", A_STORE, SEI_STORE, 0 }, { "About", SE_ABOUT, 0, "General" }, { "Software Update", SE_UPDATE, 0, "General" },
+            { "Date & Time", SE_DATETIME, 0, "General" }, { "Keyboard", SE_KEYBOARD, 0, "General" },
+            { "Language & Region", SE_LANG, 0, "General" }, { "Reset", SE_RESET, 0, "General" }, { "Brightness", SE_DISPLAY, 0, "Display" },
+            { "Auto-Lock", SE_DISPLAY, 0, "Display" }, { "Text Size", SE_DISPLAY, 0, "Display" }, { "Haptics", SE_SOUNDS, 0, "Sounds" },
+            { "Vibration", SE_SOUNDS, 0, "Sounds" }, { "Medical Card", A_CARD, SEI_HEART, "Emergency" },
+            { "Last 2 %", SE_BATTERY, 0, "Battery" }, { "Battery Health", SE_BATTERY, 0, "Battery" } };
+        sec(0);
+        int n = 0;
+        for (unsigned i = 0; i < sizeof IX / sizeof IX[0] && n < 7; i++)
+            if (ci_has(IX[i].t, SE.q)) { nav(IX[i].id, IX[i].ico, IX[i].t, IX[i].where); n++; }
+        if (!n) foot("No Results");
         break;
     }
     default: break;
@@ -632,10 +660,53 @@ static void se_place(void)
     else senav.alpha = 1;
     senav.hidden = !senav.bmp.px || senav.alpha <= 0;
 }
+/* the search capsule (root) or the field over the keyboard (Search): glass (the lens), the glyph, the words */
+static void se_search_build(void)
+{
+    relayer(&sesb);
+    tk_layer_init(&sesb, "settings-search");
+    sesb.hidden = 1;
+    if (SE.page != SE_ROOT && SE.page != SE_SEARCH) return;
+    int pg = SE.page == SE_SEARCH;
+    float y = pg ? SE_SF_Y : SE_SB_Y, w = pg ? CONTENT_W - 52 : CONTENT_W;
+    dc d = mk(&sesb, "settings-search", MARGIN, y, CONTENT_W, 48, 0, 0);
+    if (!d.b->px) return;
+    if (tk_glass_lens) {
+        kit_shape(&sesb, PT(MARGIN) - d.ox, PT(y) - d.oy, PT(w), PT(48), PT(24));
+        if (pg) kit_shape(&sesb, PT(CONTENT_R - 44) - d.ox, PT(y + 2) - d.oy, PT(44), PT(44), PT(22));
+    } else {
+        d_lg_flat(&d, MARGIN, y, w, 48, 24, 1);
+        if (pg) d_lg_flat(&d, CONTENT_R - 44, y + 2, 44, 44, 22, 1);
+    }
+    d_rrect(&d, MARGIN, y, w, 48, 24, tk_hex(0x1e1e20, .35f));
+    const tk_bmp *ic = tk_icon("search15");
+    if (ic) tk_blit_tinted(d.b, ic, (int)tk_floorf(PT(MARGIN + 16) - d.ox + .5f), (int)tk_floorf(PT(y + 24) - ic->h / 2.0f - d.oy + .5f), W(.6f));
+    const char *t = pg && SE.q[0] ? SE.q : "Search";
+    d_text_box(&d, TK_IT400, 17, MARGIN + 42, y + 30, w - 58, 0, t, 0, 0, pg && SE.q[0] ? INK : W(.45f), 0);
+    if (pg && SE.q[0]) d_rrect(&d, MARGIN + 43 + tw(TK_IT400, 17, SE.q, 0, 0), y + 13, 2, 22, 1, KIT_BLUE());   /* the caret */
+    else if (pg) d_rrect(&d, MARGIN + 41, y + 13, 2, 22, 1, KIT_BLUE());
+    if (pg) {
+        float cx = CONTENT_R - 22, cy = y + 24;
+        d_seg(&d, cx - 6, cy - 6, cx + 6, cy + 6, 2.2f, INK);
+        d_seg(&d, cx - 6, cy + 6, cx + 6, cy - 6, 2.2f, INK);
+    }
+    sesb.hidden = 0;
+}
+static void se_kb_build(void)
+{
+    relayer(&sekb);
+    tk_layer_init(&sekb, "settings-keyboard");
+    sekb.hidden = 1;
+    if (SE.page != SE_SEARCH) return;
+    dc d = mk(&sekb, "settings-keyboard", 0, 540, 390, 262, 0, 0);
+    if (!d.b->px) return;
+    kb_draw(&d, SE.shift, SE.num);
+    sekb.hidden = 0;
+}
 static void se_free(void)
 {
-    relayer(&sepg); relayer(&senav);
-    sepg.hidden = senav.hidden = 1;
+    relayer(&sepg); relayer(&senav); relayer(&sesb); relayer(&sekb);
+    sepg.hidden = senav.hidden = sesb.hidden = sekb.hidden = 1;
     seclip.hidden = 1;
     kit_slider_end();
     relayer(&ksw); ksw.hidden = 1;
@@ -652,9 +723,11 @@ static void se_build(void)
     if (!se_owns()) { se_free(); return; }
     int p = AS.sub;
     if (SE.bld_page != p || !SE.built) {
+        if (p == SE_SEARCH && !SE.popping) { SE.q[0] = 0; SE.shift = 1; SE.num = 0; relayer(&sekb); }   /* Search opens empty */
         if (SE.built && SE.bld_page >= 0 && SE.bld_page < SE_NPAGES) SE.save[SE.bld_page] = SE.scroll;
-        SE.scroll = p > 0 && p < SE_NPAGES && se_parent(SE.bld_page) == p ? SE.save[p] : 0;   /* back: where it was */
-        if (p == SE_ROOT && SE.bld_page != SE_ROOT && SE.built) SE.scroll = SE.save[SE_ROOT];
+        SE.scroll = (SE.popping || p == SE_ROOT) && p < SE_NPAGES ? SE.save[p] : 0;   /* back: where it was */
+        SE.popping = 0;
+        if (p == SE_ROOT) SE.ns_ = 0;
         SE.momentum = 0;
         SE.sp.live = 0;
     }
@@ -662,7 +735,7 @@ static void se_build(void)
     SE.bld_page = p;
     if (p == SE_DISPLAY && !SE.slider) SE.bright = ((cc_bright ? cc_bright : 3) - .5f) / 4;
     se_rows(p);
-    SE.content_h = se_layout();
+    SE.content_h = se_layout() + (p == SE_ROOT ? 56 : 0);      /* the root's last card clears the search capsule */
     SE.scroll = tk_clampf(SE.scroll, 0, se_max());
     relayer(&sepg);
     dc d = mk(&sepg, "settings-page", LG_X - 2, 0, LG_W + 4, SE.content_h, 0, 0);
@@ -679,6 +752,9 @@ static void se_build(void)
         d_navtitle(&n, se_title(p));
         trim(&senav);
     }
+    se_search_build();
+    if (p != SE_SEARCH) { relayer(&sekb); sekb.hidden = 1; }
+    else if (!sekb.bmp.px) se_kb_build();
     seclip.clip = 1;
     seclip.clip_r = (tk_rect){ 0, PT(SE_TOP - 6), (float)TK_W, PT(H_PT - SE_TOP + 6) };
     seclip.fade_top = PT(18);
@@ -696,9 +772,11 @@ static int se_layers(tk_layer **o)
     link(&seclip, c, 1);
     o[0] = &seclip;
     o[1] = &senav;
-    return 2;
+    o[2] = &sesb;
+    o[3] = &sekb;
+    return 4;
 }
-static void se_close(void) { se_free(); SE.bld_page = -1; SE.press = -1; }
+static void se_close(void) { se_free(); SE.bld_page = -1; SE.press = -1; SE.ns_ = 0; for (int i = 0; i < SE_NPAGES; i++) SE.save[i] = 0; }
 static void se_idle(void)
 {
     /* the page's half copy (its first scroll frame would make it: 6 ms) */
@@ -709,6 +787,7 @@ static void se_idle(void)
 static void se_push(int p)
 {
     SE.save[SE.page] = SE.scroll;
+    if (SE.ns_ < 8) SE.stack[SE.ns_++] = SE.page;
     AS.sub = p;
     build_app_page(AP.a);
 }
@@ -771,12 +850,12 @@ static void se_act(se_row *r)
     int id = r->id;
     if (id >= 1000) { SE.napp = id / 1000 - 1; id = SE_NOTIF_APP; }
     if (id < 100) {
-        if (id == SE_WIFI || id == SE_CELL) { AS.sub = id; build_app_page(AP.a); return; }   /* their own pages */
+        if (id == SE_WIFI || id == SE_CELL) { SE.save[SE.page] = SE.scroll; AS.sub = id; build_app_page(AP.a); return; }   /* their own pages */
         se_push(id);
         return;
     }
     switch (id) {
-    case A_CARD: sv_settings_card(); break;
+    case A_CARD: SE.save[SE.page] = SE.scroll; SE.popping = 1; sv_settings_card(); break;   /* (its back: Emergency, where it was) */
     case A_PASSCODE:
 #ifdef SH_HAS_PASSCODE
         SE.save[SE.page] = SE.scroll;
@@ -903,6 +982,20 @@ static void se_touch(int ph, float x, float y, float t)
             SE.press = -2;
             return;
         }
+        /* Search: the root's capsule (-3); on its page the keyboard (-4) and the field's x (-5) */
+        if (SE.page == SE_ROOT && x >= MARGIN && x < CONTENT_R && y >= SE_SB_Y && y < SE_SB_Y + 48) {
+            tk_rect c = { MARGIN, SE_SB_Y, CONTENT_W, 48 };
+            hl_set(&apphl, c, c, 24, W(.1f));
+            SE.press = -3;
+            return;
+        }
+        if (SE.page == SE_SEARCH && y >= 540) {
+            tk_rect k;
+            if (kb_rect(x, y, KR[SE.num], !SE.num, &k)) hl_set(&apphl, k, k, 6, W(.35f));
+            SE.press = -4;
+            return;
+        }
+        if (SE.page == SE_SEARCH && y >= SE_SF_Y && y < SE_SF_Y + 48) { SE.press = x >= CONTENT_R - 48 ? -5 : -6; return; }
         int i = se_row_at(x, y);
         if (i >= 0 && SE.r[i].kind == SR_SLIDER) { SE.slider = 1; se_slider_set(se_slider_frac(x)); return; }
         se_light(i >= 0 && se_row_live(&SE.r[i]) ? i : -1);
@@ -913,7 +1006,7 @@ static void se_touch(int ph, float x, float y, float t)
         if (SE.slider) { se_slider_set(se_slider_frac(x)); return; }
         float dy = y - SE.y0;
         if (!SE.moved && (tk_fabsf(dy) > 6 || tk_fabsf(x - SE.x0) > 6)) { SE.moved = 1; se_light(-1); }
-        if (SE.moved) {
+        if (SE.moved && SE.press > -3) {
             float s = SE.base - dy, m = se_max();
             if (s < 0) s = -rubber(-s, H_PT);
             else if (s > m) s = m + rubber(s - m, H_PT);
@@ -932,6 +1025,31 @@ static void se_touch(int ph, float x, float y, float t)
         build_app_page(AP.a);                            /* the page with the knob where it was left */
         return;
     }
+    if (pressed <= -3) {
+        if (SE.moved && pressed != -4) return;
+        if (pressed == -3) { se_push(SE_SEARCH); return; }
+        if (pressed == -5) { SE.q[0] = 0; se_build(); return; }
+        if (pressed == -4) {
+            /* a key: as Notes' keyboard (shift once after a capital, 123, delete; return opens the first result) */
+            char c = 0;
+            int k = kb_hit(x, y, SE.shift, SE.num, &c), n = (int)tk_strlen(SE.q), kb = 0;
+            if (k) sh_haptic();
+            if (k == 2) { SE.shift = !SE.shift; kb = 1; }
+            else if (k == 3) { SE.num = !SE.num; kb = 1; }
+            else if (k == 4 && n) SE.q[n - 1] = 0;
+            else if (k == 1 && n < (int)sizeof SE.q - 1) {
+                SE.q[n] = c; SE.q[n + 1] = 0;
+                if (SE.shift) { SE.shift = 0; kb = 1; }
+            } else if (k == 5) {
+                if (SE.nr) se_act(&SE.r[0]);
+                return;
+            }
+            if (!k) return;
+            if (kb) se_kb_build();
+            se_build();
+        }
+        return;
+    }
     if (SE.moved) {
         float m = se_max();
         if (SE.scroll < 0 || SE.scroll > m) tk_spring_start(&SE.sp, SE.scroll, SE.scroll < 0 ? 0 : m, 0, TK_SPR_ROWS);
@@ -939,7 +1057,8 @@ static void se_touch(int ph, float x, float y, float t)
         return;
     }
     if (pressed == -2 && BACK_HIT(x, y)) {
-        AS.sub = se_parent(SE.page);
+        AS.sub = SE.ns_ ? SE.stack[--SE.ns_] : se_parent(SE.page);
+        SE.popping = 1;
         build_app_page(AP.a);
         return;
     }
@@ -982,7 +1101,7 @@ static int se_sub_key(const char *k)
         { "general", SE_GENERAL }, { "about", SE_ABOUT }, { "update", SE_UPDATE }, { "datetime", SE_DATETIME },
         { "keyboard", SE_KEYBOARD }, { "lang", SE_LANG }, { "reset", SE_RESET }, { "wallpaper", SE_WALL }, { "sounds", SE_SOUNDS },
         { "notif", SE_NOTIF }, { "notifapp", SE_NOTIF_APP }, { "battery", SE_BATTERY }, { "privacy", SE_PRIVACY },
-        { "emergency", SE_EMERGENCY }, { "linux", SE_LINUX } };
+        { "emergency", SE_EMERGENCY }, { "linux", SE_LINUX }, { "search", SE_SEARCH } };
     for (unsigned i = 0; i < sizeof M / sizeof M[0]; i++) if (!tk_strcmp(M[i].k, k)) return M[i].p;
     return 0;
 }
