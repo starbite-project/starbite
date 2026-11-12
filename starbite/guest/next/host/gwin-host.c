@@ -735,6 +735,7 @@ int main(int argc, char **argv)
     check(got.acts == 2 && got.act_id == 0x1a && got.act_action == 0, "the banner's tap: NOTIF_ACT id 0x1a action 0");
     check(got.activate > a0 && got.last_act == 1 && shown, "the banner's tap opened the Text Editor (ACTIVATE 1)");
     /* Track A's zero-copy window: one external layer on the guest's front buffer */
+#ifndef GWIN_NO_ZC
     sh_set("app", "", 0);
     run(4);
     zc = 1;
@@ -760,6 +761,9 @@ int main(int argc, char **argv)
     run(3);
     check(got.done > dn, "zero-copy: home detaches it (sbg_surf_done)");
     zc = 0;
+#else
+    printf("gwin-host: zero-copy: SKIPPED (this UI tree has no tk_layer_external and the compat patch does not apply)\n");
+#endif
     /* Linux stops: every Linux card goes, the 60 s rule again */
     guest_stop();
     run(12);
