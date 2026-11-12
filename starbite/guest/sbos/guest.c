@@ -309,7 +309,9 @@ static void cfg_init(void)
         .db_guest = GUEST_DB_GUEST, .db_host = GUEST_DB_HOST,
         .host_lines = {0},                  /* the guest kernel has the shared-distributor patch */
         .repair = 0,
-        .boot_timeout_ms = 30000, .stop_timeout_ms = 5000,
+        /* the desktop: initramfs, the base and the overlay off the card, sbinit, sbwl (cp3 2026-11-12: 30 s was not
+         * enough for a new base's first start) */
+        .boot_timeout_ms = mode == GUEST_WL ? 90000 : 30000, .stop_timeout_ms = 5000,
         .v2 = mode == GUEST_WL,             /* L3: the catalog, the store and the icons (sbshm.h contract v2) */
         /* v3 (Linux apps: hdr.version 3): sbghost leaves out what has no sbg_os part (NET without the NAT, P9
          * without guest-fs.h) */
@@ -385,6 +387,10 @@ static int load_and_start(void)
 {
     cfg_init();                             /* this mode's surface */
     gcard_offer();                          /* the card's files as block devices, for this start (guest-card.h) */
+#ifdef GUEST_FS_H
+    if (mode == GUEST_WL)
+        (void)gfs_premount();               /* the card's exFAT for ~/Starbite: here, not in a 9P request */
+#endif
     /* the bounce window below 4 GiB: the Image, then the DTB and the initrd, each at a MiB boundary */
     uintptr_t pi = G_BOUNCE, pd = up_mib(pi + ld_i.size), pr = up_mib(pd + ld_d.size);
     if (ld_i.size > G_LINUX_SIZE || ld_d.size > G_LINUX_SIZE || ld_r.size > G_LINUX_SIZE ||

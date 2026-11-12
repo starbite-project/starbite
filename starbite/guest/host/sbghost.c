@@ -391,6 +391,46 @@ static void log_stream(void)
     }
 }
 
+/* no HELLO: the guest log's last lines, unfiltered, through os->log ("guest: tail| ..."; the phone's pmsg holds
+ * 16 KB and its guest_log keeps only some lines, so a stalled start otherwise says nothing about where it stopped) */
+#define SBG_TAIL_LINES 24U
+static void log_tail(void)
+{
+    volatile struct sbshm_prz *z = (volatile struct sbshm_prz *)SHM(SBSHM_OOPS_OFF);
+    if (z->sig != SBSHM_PRZ_SIG)
+        return;
+    uint32_t cap = SBSHM_OOPS_SIZE - 12U, start = z->start, size = z->size;
+    if (start >= cap)
+        return;
+    if (size > cap)
+        size = cap;
+    uint32_t pos = start, back = 0, lines = 0;
+    while (back < size && back < 4096U) {           /* back from the end: SBG_TAIL_LINES newlines, at most 4 KB */
+        uint32_t p = (pos + cap - 1) % cap;
+        if (z->data[p] == '\n' && back && ++lines > SBG_TAIL_LINES)
+            break;
+        pos = p;
+        ++back;
+    }
+    struct tb tb = {.n = 0};
+    t_s(&tb, "guest: tail| ");
+    for (; pos != start; pos = (pos + 1) % cap) {
+        char c = (char)z->data[pos];
+        if (c == '\n' || tb.n >= sizeof(tb.b) - 2) {
+            tb.b[tb.n] = 0;
+            if (tb.n > 13)
+                say(&tb);
+            tb.n = 0;
+            t_s(&tb, "guest: tail| ");
+        } else if (c >= 32 && c < 127) {
+            tb.b[tb.n++] = c;
+        }
+    }
+    tb.b[tb.n] = 0;
+    if (tb.n > 13)
+        say(&tb);
+}
+
 static int put_c(uint16_t type, uint32_t a, uint32_t b, uint32_t c, int32_t x, int32_t y)
 {
     if (st.state != SBG_RUNNING && !(type == SBG_MSG_STOP && st.state == SBG_BOOTING))
@@ -715,6 +755,7 @@ void sbg_poll(void)
         t_s(&tb, ", ramoops ");
         t_s(&tb, ((volatile struct sbshm_prz *)SHM(SBSHM_OOPS_OFF))->sig == SBSHM_PRZ_SIG ? "up" : "never set up");
         say(&tb);
+        log_tail();
         fail("no HELLO before the boot timeout (the M3 cluster stays on until the next reset)");
         return;
     }
