@@ -1040,12 +1040,18 @@ static void cm_when(char *b, const cm_msg *m, int with_day)
 }
 #define THR_TOP CONTENT_TOP
 #define THR_H 78.0f
-#define CM_FY_KB 492.0f                   /* the compose field over the keyboard */
+#define CM_FY_KB (KB_TOP - KB_STRIP - 48)  /* the compose field over the keyboard (B3: over its 40 pt strip) */
 #define CM_FY 726.0f                      /* without it */
 #define TO_Y PUSHED_TOP                     /* New Message's To: row */
 static float cm_field_y(void) { return CM.focus ? CM_FY_KB : CM_FY; }
 static const char *const TOK[3] = { "1234567890", "-/:;()+&@\"", ".,?!'" };   /* the To: field's 123 layer */
 static const char *const *cm_rows(void) { return CM.focus == 1 && CM.num ? TOK : KR[CM.num]; }
+/* B3: the keyboard for the field with the focus (To: a phone number on 123; the message: sentences, return a new line) */
+static void cm_kb_focus(void)
+{
+    if (CM.focus == 1) kb_focus(KB_DIGITS | KB_PHONE, 0, CM.to);
+    else if (CM.focus == 2) kb_focus(KB_AUTOCAP | KB_NL, 0, CM.txt);
+}
 static int cm_can_send(void)
 {
     int any = 0;
@@ -1199,6 +1205,7 @@ static void cm_field_build(void)
     d_rrect(&d, CONTENT_R - 38, fy + 1, 38, 38, 19, ok ? tk_hex(0x0a84ff, 1) : W(.16f));
     d_icon(&d, "send", CONTENT_R - 27, fy + 11, ok ? 1 : .5f);
     trim(&cmfld);
+    if (CM.focus) kb_ride(&cmfld);               /* B3: it rides up with the keyboard */
     cmfld.hidden = 0;
 }
 static void cm_to_build(void)
@@ -1226,7 +1233,8 @@ static void cm_send(void)
     CM.txt[0] = 0;
     int was_new = AS.thread == 1;
     if (was_new) { cm_cpy(CM.thr, sizeof CM.thr, num); AS.thread = 0; CM.focus = 2; CM.num = 0; }
-    if (msg_syncs == s0 || was_new) { CM.shift = 1; build_app_page(AP.a); }   /* the keyboard capitalises again */
+    kb_ctx(CM.txt);                              /* B3: the keyboard capitalises again */
+    if (msg_syncs == s0 || was_new) { CM.shift = 1; if (was_new) cm_kb_focus(); build_app_page(AP.a); }
     else { cm_field_build(); relink(); }         /* a push drew the bubble already: only the field, emptied */
 }
 static void cm_open_thread(const char *num)
@@ -1241,6 +1249,7 @@ static void cm_msgs_tap(float x, float y)
     if (AS.thread < 0) {
         if (DONE_HIT(x, y)) {                    /* compose: New Message, the To: field on the 123 layer */
             AS.thread = 1; CM.to[0] = 0; CM.focus = 1; CM.num = 1; CM.shift = 0;
+            cm_kb_focus();
             build_app_page(AP.a);
             return;
         }
@@ -1261,11 +1270,11 @@ static void cm_msgs_tap(float x, float y)
     float fy = cm_field_y();
     if (y >= fy - 4 && y < fy + 44) {
         if (x >= CONTENT_R - 44) { cm_send(); return; }
-        if (CM.focus != 2) { CM.focus = 2; CM.num = 0; CM.shift = !CM.txt[0]; build_app_page(AP.a); }
+        if (CM.focus != 2) { CM.focus = 2; CM.num = 0; CM.shift = !CM.txt[0]; cm_kb_focus(); build_app_page(AP.a); }
         return;
     }
     if (AS.thread == 1 && y >= TO_Y && y < TO_Y + 44) {
-        if (CM.focus != 1) { CM.focus = 1; CM.num = 1; CM.shift = 0; build_app_page(AP.a); }
+        if (CM.focus != 1) { CM.focus = 1; CM.num = 1; CM.shift = 0; cm_kb_focus(); build_app_page(AP.a); }
         return;
     }
     if (!CM.focus) return;
@@ -1273,28 +1282,31 @@ static void cm_msgs_tap(float x, float y)
         if (y > PUSHED_TOP && y < fy - 4) { CM.focus = 0; build_app_page(AP.a); }
         return;
     }
-    char c = 0;
-    int k = kb_hit_r(x, y, cm_rows(), CM.shift, CM.num, &c), relayout = 0;
-    if (k) sh_haptic();
-    if (k == 2) { CM.shift = !CM.shift; relayout = 1; }
-    else if (k == 3) { CM.num = !CM.num; CM.shift = 0; relayout = 1; }
-    else if (CM.focus == 1) {                    /* To: digits and a leading + only */
+    /* B3: the keyboard's key (shift, 123 and the capitals are the keyboard's own: no page build for them) */
+    const char *ks;
+    int ev = kb_take(&ks);
+    if (CM.focus == 1) {                         /* To: digits and a leading + only */
         int n = (int)tk_strlen(CM.to);
-        if (k == 4 && n) CM.to[n - 1] = 0;
-        else if (k == 5) { CM.focus = 2; CM.num = 0; CM.shift = !CM.txt[0]; relayout = 1; }
-        else if (k == 1 && n < 20 && ((c >= '0' && c <= '9') || (c == '+' && !n))) { CM.to[n] = c; CM.to[n + 1] = 0; }
-        else if (k == 1 && c != ' ') toast("Numbers only: there are no contacts yet");
-        if (!relayout) { cm_to_build(); cm_field_build(); relink(); }
-    } else {
-        int n = (int)tk_strlen(CM.txt);
-        if (k == 4 && n) { n--; while (n > 0 && ((unsigned char)CM.txt[n] & 0xc0) == 0x80) n--; CM.txt[n] = 0; }
-        else if ((k == 1 || k == 5) && n < (int)sizeof CM.txt - 2) {
-            if (CM.shift && c >= 'A' && c <= 'Z') { CM.shift = 0; relayout = 1; }
-            CM.txt[n] = c; CM.txt[n + 1] = 0;
-        }
-        if (!relayout) { cm_field_build(); relink(); }
-    }
-    if (relayout) build_app_page(AP.a);
+        char c = ev == KBE_TEXT && !ks[1] ? ks[0] : 0;
+        if (ev == KBE_DEL && n) CM.to[n - 1] = 0;
+        else if (ev == KBE_RET) { CM.focus = 2; CM.num = 0; CM.shift = !CM.txt[0]; cm_kb_focus(); build_app_page(AP.a); return; }
+        else if (c && n < 20 && ((c >= '0' && c <= '9') || (c == '+' && !n))) { CM.to[n] = c; CM.to[n + 1] = 0; }
+        else if (ev == KBE_TEXT && c != ' ') { toast("Numbers only: there are no contacts yet"); return; }
+        else return;
+        cm_to_build(); cm_field_build(); relink();
+    } else if (kb_edit(CM.txt, (int)sizeof CM.txt - 2)) { cm_field_build(); relink(); }
+}
+
+/* B3: the message field under a long press (the edit menu, shell_kb.inc) */
+static void cm_field_redraw(void) { cm_field_build(); relink(); }
+static int cm_em_target(float x, float y, emt *o)
+{
+    if (!is_app("messages") || AS.thread < 0) return 0;
+    float fy = cm_field_y();
+    if (y < fy - 4 || y >= fy + 44 || x >= CONTENT_R - 44) return 0;
+    float w = tk_minf(tw(TK_IT400, 16, CM.txt, 0, 0), CONTENT_W - 44 - 32);
+    *o = (emt){ CM.txt, (int)sizeof CM.txt - 2, { MARGIN + 14, fy + 8, w + 4, 24 }, cm_field_redraw };
+    return 1;
 }
 
 /* ---- the shell's hooks --------------------------------------------------------------------------------------- */
@@ -1510,10 +1522,11 @@ static int cm_set(const char *what, const char *key, float v)
         CM.focus = (int)v;
         CM.num = CM.focus == 1;
         CM.shift = CM.focus == 2 && !CM.txt[0];
+        cm_kb_focus();                           /* B3 */
         if (AP.on) build_app_page(AP.a);
         return 1;
     }
-    if (!tk_strcmp(what, "compose")) { cm_cpy(CM.txt, sizeof CM.txt, key); CM.shift = 0; if (AP.on) build_app_page(AP.a); return 1; }
+    if (!tk_strcmp(what, "compose")) { cm_cpy(CM.txt, sizeof CM.txt, key); CM.shift = 0; kb_ctx(CM.txt); if (AP.on) build_app_page(AP.a); return 1; }
     if (!tk_strcmp(what, "to")) { cm_cpy(CM.to, sizeof CM.to, key); if (AP.on) build_app_page(AP.a); return 1; }
     if (!tk_strcmp(what, "dial")) {
         cm_cpy(AS.num, sizeof AS.num, key);

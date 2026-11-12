@@ -198,18 +198,16 @@ static int lx_slot_icon(int s)
 static uint32_t *lrow[2 * SH_LINUX_H];           /* the window's bitmap rows (a hidden strip's: lsink) */
 static uint32_t lsink[2 * SH_LINUX_W] __attribute__((aligned(16)));
 static tk_layer apkb;                            /* the keyboard (Linux apps, the App Store's search) */
+/* B3: the shell keyboard (shell_kb.inc) on its own layers; apkb stays empty (kept for the layer list) */
 static void lx_build_kb(int on, int shift, int num)
 {
-    static int drawn = -1;                       /* the layout in the bitmap (redrawn only when it changes) */
-    int key = on ? 1 + 2 * !!shift + 4 * !!num : 0;
-    if (on && key == drawn && apkb.bmp.px) { apkb.hidden = 0; return; }
     relayer(&apkb);
     apkb.hidden = 1;
-    drawn = key;
-    if (!on) return;
-    dc d = mk(&apkb, "keyboard", 0, 540, 390, 262, 0, 0);
-    kb_draw(&d, shift, num);
-    apkb.hidden = 0;
+    if (on && !KB.shown && !KB.focused)        /* a terminal: ASCII, return is return; the store's search: "search" */
+        kb_focus(KB_ASCII, is_app("store") ? "search" : 0, "");
+    (void)shift; (void)num;
+    KB.want = on;
+    kb_set(on);
 }
 static void lx_build_state(void)
 {
@@ -353,14 +351,8 @@ static void lx_kb_tap(float x, float y)
     if (!LX.kb || y < 548) return;                /* the window's own touches went to Linux (G_LINUX) */
     char c = 0;
     int k = kb_hit(x, y, LX.shift, LX.num, &c);
-    if (k) sh_haptic();
-    if (k == 2) { LX.shift = !LX.shift; lx_build_kb(1, LX.shift, LX.num); relink(); }
-    else if (k == 3) { LX.num = !LX.num; lx_build_kb(1, LX.shift, LX.num); relink(); }
-    else if (k == 4) (void)sh_linux_char('\b');
-    else if (k == 1 || k == 5) {
-        (void)sh_linux_char(c);
-        if (LX.shift && c >= 'A' && c <= 'Z') { LX.shift = 0; lx_build_kb(1, LX.shift, LX.num); relink(); }
-    }
+    if (k == 4) (void)sh_linux_char('\b');     /* B3: shift and 123 are the keyboard's own; its haptic on touch down */
+    else if (k == 1 || k == 5) (void)sh_linux_char(c);
 }
 /* app_open of the Terminal or a Linux app (lx_pick): which app, its icon, the keyboard and the viewport first */
 static void lx_prepare(int a)
@@ -826,7 +818,7 @@ static void st_tap(float x, float y)
     if (SS.kb && y >= 548) {
         char c = 0;
         int k = kb_hit(x, y, SS.shift, SS.num, &c), n = (int)tk_strlen(SS.q), relayout = 0;
-        if (k) sh_haptic();
+        if (!k) return;                           /* B3: shift / 123 (the keyboard's own): the store is not built again */
         if (k == 2) SS.shift = !SS.shift;
         else if (k == 3) SS.num = !SS.num;
         else if (k == 4 && n) SS.q[n - 1] = 0;
