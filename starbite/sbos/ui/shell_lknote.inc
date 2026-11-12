@@ -25,7 +25,7 @@
 #define LKN_TXR (PL_X + PL_W - 18.3f)           /* their right edge (the time's) */
 #define LKN_LESS_H 28.0f
 typedef struct { unsigned id; tk_layer gl, tx; float h, yb; int nl, built; } lkn_slot;
-static lkn_slot LS[LKN_MAX];
+static lkn_slot LKS[LKN_MAX];
 static tk_layer lkng, lknless;
 enum { LG_NONE, LG_STACK, LG_ITEM, LG_LESS, LG_AREA, LG_SCROLL };
 static struct {
@@ -100,7 +100,7 @@ static void lkn_init(void)
 {
     tk_layer_init(&lkng, "lock-notes");
     tk_layer_init(&lknless, "lkn-less"); lknless.hidden = 1;
-    for (int i = 0; i < LKN_MAX; i++) { tk_layer_init(&LS[i].gl, "lkn-glass"); LS[i].gl.hidden = 1; tk_layer_init(&LS[i].tx, "lkn-item"); LS[i].tx.hidden = 1; }
+    for (int i = 0; i < LKN_MAX; i++) { tk_layer_init(&LKS[i].gl, "lkn-glass"); LKS[i].gl.hidden = 1; tk_layer_init(&LKS[i].tx, "lkn-item"); LKS[i].tx.hidden = 1; }
     LK.sig = 0;
 }
 /* the tree: the peeks under the oldest, the front platter last (on top) */
@@ -109,17 +109,17 @@ static void lkn_link(void)
     tk_layer *c[2 * LKN_MAX + 2];
     int k = 0;
     c[k++] = &K[0].gh;
-    for (int i = LKN_MAX - 1; i >= 0; i--) if (LS[i].id) { c[k++] = &LS[i].gl; c[k++] = &LS[i].tx; }
+    for (int i = LKN_MAX - 1; i >= 0; i--) if (LKS[i].id) { c[k++] = &LKS[i].gl; c[k++] = &LKS[i].tx; }
     c[k++] = &lknless;
     link(&lkng, c, k);
 }
 
 /* where the platters are: slot i's top (screen pt) at fan-out p, and the "Show less" row's */
-static float lkn_front_c(void) { return LKN_BOT - LS[0].h - (LK.n >= 3 ? PEEK2 : LK.n == 2 ? PEEK1 : 0); }
+static float lkn_front_c(void) { return LKN_BOT - LKS[0].h - (LK.n >= 3 ? PEEK2 : LK.n == 2 ? PEEK1 : 0); }
 static float lkn_top_e(int i)
 {
-    float y = LKN_BOT - LS[0].h;
-    for (int k = 1; k <= i && k < LK.n; k++) y -= LKN_GAP + LS[k].h;
+    float y = LKN_BOT - LKS[0].h;
+    for (int k = 1; k <= i && k < LK.n; k++) y -= LKN_GAP + LKS[k].h;
     return y + LK.off;
 }
 static float lkn_less_e(void) { return lkn_top_e(LK.n - 1) - 8 - LKN_LESS_H; }
@@ -157,7 +157,7 @@ static void lkn_place(void)
     LK.sa = SY.g >= 0 ? tk_clampf((cf - 4 - (SYC_Y + SY.h + 12)) / 16, 0, 1) : 1;
     float p = LK.p, sa = LK.sa;
     for (int i = 0; i < LKN_MAX; i++) {
-        lkn_slot *s = &LS[i];
+        lkn_slot *s = &LKS[i];
         if (!s->id) continue;
         float y = lkn_y(i), a = (i ? tk_clampf(p * 2.2f - .6f - .1f * i, 0, 1) : LK.in) * sa;   /* the others once apart */
         lkn_glass(&s->gl, y, s->h, a);
@@ -172,7 +172,7 @@ static void lkn_place(void)
     tk_layer *g = &K[0].gh;
     float pa = LK.n >= 2 ? tk_clampf(1 - p * 2.5f, 0, 1) * sa * LK.in : 0;
     if (g->bmp.px && pa > .004f) {
-        float y = lkn_y(0), h = LS[0].h;
+        float y = lkn_y(0), h = LKS[0].h;
         g->y = tk_floorf(PT(y + h - 68 - (LIST_TOP + K[0].y)) + g->by + .5f);
         g->alpha = pa;
         g->clip = 1;
@@ -196,12 +196,12 @@ static void lkn_place(void)
 /* the store as it is now: slot i holds the i-th newest unread (its words made again only if it changed) */
 static void lkn_sync(int animate)
 {
-    unsigned old0 = LS[0].id;
+    unsigned old0 = LKS[0].id;
     int n = lkn_count(), glass = !EMG && K[0].face.bmp.px;
     LK.sig = lkn_sig();
     if (!glass) n = 0;
     for (int i = 0; i < LKN_MAX; i++) {
-        lkn_slot *s = &LS[i];
+        lkn_slot *s = &LKS[i];
         unsigned id = i < n ? NI[i].id : 0;
         if (s->id == id && (s->built || !id)) continue;
         if (s->id != id) lkn_slot_free(s);
@@ -215,7 +215,7 @@ static void lkn_sync(int animate)
     LK.n = n;
     if (n < 2 && LK.exp) { LK.exp = 0; LK.sp.live = 0; LK.p = 0; LK.off = 0; }
     /* a new notification slides up into the front (iOS); none while the stack is fanned out or for a still */
-    if (animate && n && LS[0].id != old0 && LS[0].id > old0 && !LK.exp) LK.in = 0;
+    if (animate && n && LKS[0].id != old0 && LKS[0].id > old0 && !LK.exp) LK.in = 0;
     else if (!animate) LK.in = 1;
     if (n && !lknless.bmp.px && glass) lkn_less_build();
     relink();
@@ -223,7 +223,7 @@ static void lkn_sync(int animate)
 }
 static void lkn_free(void)
 {
-    for (int i = 0; i < LKN_MAX; i++) { lkn_slot_free(&LS[i]); LS[i].id = 0; }
+    for (int i = 0; i < LKN_MAX; i++) { lkn_slot_free(&LKS[i]); LKS[i].id = 0; }
     relayer(&lknless); lknless.hidden = 1;
     LK.n = 0; LK.exp = 0; LK.p = 0; LK.off = 0; LK.in = 1;
     LK.sp.live = LK.spo.live = 0;
@@ -242,7 +242,7 @@ static void lkn_collapse(int instant)
 {
     if (!LK.exp && LK.p <= 0) return;
     LK.exp = 0;
-    if (instant) { LK.p = 0; LK.off = 0; LK.sp.live = LK.spo.live = 0; for (int i = 1; i < LKN_MAX; i++) if (LS[i].built) { relayer(&LS[i].tx); LS[i].tx.hidden = 1; LS[i].built = 0; } lkn_place(); return; }
+    if (instant) { LK.p = 0; LK.off = 0; LK.sp.live = LK.spo.live = 0; for (int i = 1; i < LKN_MAX; i++) if (LKS[i].built) { relayer(&LKS[i].tx); LKS[i].tx.hidden = 1; LKS[i].built = 0; } lkn_place(); return; }
     tk_spring_start(&LK.sp, LK.p, 0, 0, TK_SPR_SHEET);
     if (LK.off != 0) tk_spring_start(&LK.spo, LK.off, 0, 0, TK_SPR_SHEET);
 }
@@ -251,7 +251,7 @@ static int lkn_build_some(int max)
 {
     int b = 0;
     for (int i = 0; i < LK.n && b < max; i++)
-        if (LS[i].id && !LS[i].built) { lkn_draw(&LS[i], &NI[i]); b++; }
+        if (LKS[i].id && !LKS[i].built) { lkn_draw(&LKS[i], &NI[i]); b++; }
     if (b) relink();
     return b;
 }
@@ -265,7 +265,7 @@ static int lkn_tick(float dt, float t)
         LK.p = tk_maxf(0, LK.sp.x);
         if (!live && !LK.exp) {
             LK.p = 0;
-            for (int i = 1; i < LKN_MAX; i++) if (LS[i].built) { relayer(&LS[i].tx); LS[i].tx.hidden = 1; LS[i].built = 0; }
+            for (int i = 1; i < LKN_MAX; i++) if (LKS[i].built) { relayer(&LKS[i].tx); LKS[i].tx.hidden = 1; LKS[i].built = 0; }
         }
         mv = 1;
     }
@@ -284,14 +284,14 @@ static int lkn_moving(void)
 static void lkn_idle(void)
 {
     if (LK.sig != lkn_sig()) lkn_sync(0);
-    for (int i = 0; i < LKN_MAX; i++) if (LS[i].built && LS[i].tx.bmp.px) tk_layer_prepare(&LS[i].tx);
+    for (int i = 0; i < LKN_MAX; i++) if (LKS[i].built && LKS[i].tx.bmp.px) tk_layer_prepare(&LKS[i].tx);
 }
 
 /* the minute: the times on the platters ("5m ago") */
 static void lkn_minute(void)
 {
     int any = 0;
-    for (int i = 0; i < LK.n; i++) if (LS[i].built) { lkn_draw(&LS[i], &NI[i]); any = 1; }
+    for (int i = 0; i < LK.n; i++) if (LKS[i].built) { lkn_draw(&LKS[i], &NI[i]); any = 1; }
     if (any) { relink(); lkn_place(); }
 }
 
@@ -301,7 +301,7 @@ static int lkn_slot_at(float x, float y)
     if (x < PL_X || x >= PL_X + PL_W) return -1;
     for (int i = 0; i < LK.n; i++) {
         float t = lkn_y(i);
-        if (y >= t && y < t + LS[i].h) return i;
+        if (y >= t && y < t + LKS[i].h) return i;
     }
     return -1;
 }
@@ -355,11 +355,11 @@ static int lkn_touch(int ph, float x, float y, float t)
     if (LK.moved) return 0;
     switch (g) {
     case LG_STACK:
-        if (LK.n == 1) nc_launch(LS[0].id);      /* the one notification: its app (the lock goes, as from the Centre) */
+        if (LK.n == 1) nc_launch(LKS[0].id);      /* the one notification: its app (the lock goes, as from the Centre) */
         else lkn_expand();
         break;
     case LG_ITEM:
-        if (LK.hit >= 0 && LK.hit < LK.n) nc_launch(LS[LK.hit].id);
+        if (LK.hit >= 0 && LK.hit < LK.n) nc_launch(LKS[LK.hit].id);
         break;
     case LG_LESS: case LG_AREA:
         lkn_collapse(0);

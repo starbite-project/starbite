@@ -321,8 +321,9 @@ static int isl_touch(int ph, float x, float y, float t)
     if (IS.replay) return 0;
     if (ph == 0) {
         IS.own = 0;
-        if (CV.on && CV.at > 0 && CV.mode == CVM_CALL && cm_live(CALL.state) && y >= H_PT - 34) IS.own = 2;
-        else if (isl_cap_hit(x, y)) IS.own = 1;
+        /* (the call screen's home swipe that minimises it into the capsule is shell_comms.inc's: B5's gesture,
+         * cv_minimise) */
+        if (isl_cap_hit(x, y)) IS.own = 1;
         if (!IS.own) return 0;
         IS.x0 = x; IS.y0 = y; IS.t0 = t;
         return 1;
@@ -341,10 +342,6 @@ static int isl_touch(int ph, float x, float y, float t)
         }
         if (ph == 2) { IS.own = 0; isl_cap_tap(); }
         return 1;
-    }
-    if (ph == 2) {
-        IS.own = 0;
-        if (-dy > 50 && CV.on && CV.mode == CVM_CALL && cm_live(CALL.state)) { isl_call_min = 1; cv_hide(); }
     }
     return 1;
 }

@@ -163,6 +163,8 @@ static char host_clip[4096];
 __attribute__((weak)) void sh_clip_set(const char *s) { snprintf(host_clip, sizeof host_clip, "%s", s ? s : ""); }
 __attribute__((weak)) const char *sh_clip_get(void) { return host_clip; }
 void sh_haptic_k(int kind) { (void)kind; }
+/* B5: the Clock's alarms (the kernel's alarm.c on the phone) */
+int sh_alarm_set(int i, int h, int m, int days, int on) { fprintf(stderr, "alarm %d: %02d:%02d %s (days %x)\n", i, h, m, on ? "on" : "off", (unsigned)days); return 0; }
 /* L2 + L3: Linux apps and the App Store (the kernel's platform is starbite/guest/next/gwin.c): host/linux_fake.inc,
  * a pretend Linux with a catalog and a store. SBTK_NO_LINUX_FAKE: none (starbite/guest/next/host/gwin-host.c links
  * gwin.c itself and drives the shell) */
@@ -630,6 +632,14 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         }
         fputc('\n', log);
         if (getenv("SBTK_DUMP") && frame == atoi(getenv("SBTK_DUMP"))) write_ppm(getenv("SBTK_DUMPTO"), &c->panel);
+        if (getenv("SBTK_DUMPS")) {                   /* B5: "N,M,...": frames N, M ... to SBTK_DUMPTO-N.ppm */
+            for (const char *q = getenv("SBTK_DUMPS"); *q; q++)
+                if ((q == getenv("SBTK_DUMPS") || q[-1] == ',') && atoi(q) == frame) {
+                    char fn[600];
+                    snprintf(fn, sizeof fn, "%s-%d.ppm", getenv("SBTK_DUMPTO"), frame);
+                    write_ppm(fn, &c->panel);
+                }
+        }
         if (none) ;
         else if (half) {
             tk_bmp_down2(&h, &c->panel);
