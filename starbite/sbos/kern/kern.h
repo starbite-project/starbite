@@ -677,6 +677,26 @@ int64_t hw_core_psci(unsigned w);   /* PSCI AFFINITY_INFO's raw answer for worke
  * 0 failed, -1 a dry run (nothing written) */
 int hw_slot_read(uint8_t *h0, uint8_t *h1);
 int hw_slot_write(int half, const uint8_t *src, uint32_t n);
+void hw_slot_lend(void);            /* Track A update: the fence's one volatile grant was taken (slot.c takes it back) */
+/* Track A: Software Update (update.c; docs/STARBITE-FIRMWARE-LAYER.md 10.5): the card's /STARBITE/UPDATE/MANIFEST.TXT,
+ * staged into the inactive update slot a chunk per call, armed for the loader, committed 10 s into the next start */
+enum { KUP_FAILED = -1, KUP_NONE = 0, KUP_FOUND, KUP_STAGING, KUP_READY, KUP_INSTALLED };
+struct kupdate {
+    char key[24], version[32], image[64], notes[160];
+    uint64_t size;
+    uint8_t sha[32];
+    int state, pct;                 /* KUP_*; staging 0..100 */
+    char why[80];                   /* KUP_FAILED: why; otherwise a detail ("No microSD card.") */
+};
+int kupdate_parse(const char *txt, int n, struct kupdate *u);   /* 0: every field there and well formed */
+unsigned kupdate_target(unsigned slot_active);                  /* the slot to stage into: 1 A, 2 B */
+int kupdate_check(struct kupdate *u);                           /* 1 an update for this row found */
+int kupdate_stage(struct kupdate *u, uint8_t *buf, uint32_t cap);   /* one chunk (cap <= 4 MiB): the new state */
+int kupdate_install(char *why, unsigned cap);                   /* arms and restarts; back here: refused (-1) */
+int kupdate_after_start(void);      /* 10 s after the home screen: 1 committed, 2 a rollback told, 0 nothing, -1 */
+int kupdate_committed(void);        /* 1 this start committed an update */
+void kupdate_dry(int on);           /* the host test: every write a dry run (the self test always is) */
+void kupdate_reset(void);           /* forget what was found or staged (the host test's next phone) */
 /* settings that last across a restart (settings.c) */
 void settings_restore(void);
 void settings_changed(void);

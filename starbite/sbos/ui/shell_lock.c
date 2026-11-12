@@ -404,6 +404,15 @@ static void nc_clock_stale(void);
 static void nc_cards_gone(void);
 static float nc_next_update(float t);
 static float pc_next_update(float t);                /* Track A: shell_passcode.inc */
+/* Track A update (shell_update.inc): Settings > Software Update, opened from About's Software row for now */
+static void su_page(dc *d);
+static int su_app_tap(float x, float y);
+static void su_open(void);
+static int su_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c);
+static int su_set(const char *what, const char *key, float v);
+static int su_refresh(float t);
+static float su_next_update(float t);
+#define SU_SUB 33                                   /* (B2's strip pages: 30 startup, 31 passcode, 32 zones) */
 static int pc_refresh(float t);
 static int nc_refresh(float t);
 static int sw_app_alpha(void);
@@ -2632,6 +2641,8 @@ int sh_next_update(float t)
     if (ib >= 0 && (best < 0 || ib < best)) best = ib;
     float pb = pc_next_update(t);                       /* Track A: the back-off's minutes */
     if (pb >= 0 && (best < 0 || pb < best)) best = pb;
+    float ub = su_next_update(t);                       /* Track A update: the staging's chunks */
+    if (ub >= 0 && (best < 0 || ub < best)) best = ub;
     return (int)best;
 }
 int sh_refresh(float t)
@@ -2639,7 +2650,7 @@ int sh_refresh(float t)
     now_ms = t;
     int ch = clk_update(t);
     if (med_pending() && !sh_moving()) ch |= med_work(10000, 1);
-    ch |= sv_refresh(t) | nc_refresh(t) | cm_refresh(t) | pc_refresh(t);   /* survival-next: SOS's beacon, USB power's state; helper D: the banner; Track A: the back-off */
+    ch |= sv_refresh(t) | nc_refresh(t) | cm_refresh(t) | pc_refresh(t) | su_refresh(t);   /* survival-next: SOS's beacon, USB power's state; helper D: the banner; Track A: the back-off */
     ch |= isl_refresh(t);                              /* B7: the capsule (SOS, USB power), the pill's hold */
     if (ch && AP.on) sw_dirty = 1;                     /* helper D: the switcher's snapshot is old now */
     return ch;
@@ -3133,6 +3144,7 @@ static void own_strip(int a, int i)
 #ifdef SH_HAS_PASSCODE
         else if (AS.sub == SE_PASSCODE_PAGE) page_passcode(&d);  /* Track A's */
 #endif
+        else if (AS.sub == SU_SUB) su_page(&d);                  /* Track A update: Software Update */
         else if (AS.sub == SE_TZ_PAGE) (void)ta_page(&d);        /* Track A's zone list (Date & Time is shell_settings.inc's) */
     }
     else if (!tk_strcmp(k, "notes")) page_notes(&d);
@@ -3243,7 +3255,8 @@ static void build_app_page(int a)
             int nav = !tk_strcmp(A->k, "settings") && (!tk_strcmp(S->rows[r].l, "Display & Brightness") || !tk_strcmp(S->rows[r].l, "Wi-Fi") ||
                                                        !tk_strcmp(S->rows[r].l, "Cellular") || !tk_strcmp(S->rows[r].l, "Medical Card") ||
                                                        !tk_strcmp(S->rows[r].l, "Face ID & Passcode") ||
-                                                       !tk_strcmp(S->rows[r].l, "Date & Time"));   /* Track A */
+                                                       !tk_strcmp(S->rows[r].l, "Date & Time") ||   /* Track A */
+                                                       !tk_strcmp(S->rows[r].l, "Software"));      /* Track A update */
             if (nav) d_icon(&d, "chev", CONTENT_R - 30, ry + 16.5f, .45f);
             const char *rt = live_text(S->rows[r].r, rb);
             if (!tk_strcmp(A->k, "settings") && !tk_strcmp(S->rows[r].l, "Cellular")) rt = md_text();
@@ -3968,6 +3981,7 @@ static void app_tap(float x, float y)
 #ifdef SH_HAS_PASSCODE
     else if (is_app("settings") && AS.sub == SE_PASSCODE_PAGE) (void)passcode_tap(x, y);    /* Track A's page */
 #endif
+    else if (is_app("settings") && AS.sub == SU_SUB) (void)su_app_tap(x, y);                 /* Track A update's page */
     /* helper B2: the other Settings pages are shell_settings.inc's (their own gesture, G_SET) */
 }
 
@@ -4070,6 +4084,7 @@ static int pc_gate_launch(unsigned id);             /* Track A: shell_passcode.i
 #endif
 #include "shell_passcode.inc"                       /* Track A: the passcode screen, Settings > Passcode, the lock's lifecycle */
 #include "shell_time.inc"                           /* Track A: the alarms API's Clock hooks, Settings > Date & Time's zone list */
+#include "shell_update.inc"                         /* Track A update: Settings > General > Software Update */
 /* B2's Settings hooks onto Track A's passcode page (AS.sub SE_PASSCODE_PAGE = shell_passcode.inc's PC_SUB) */
 static void page_passcode(dc *d) { pc_page(d); }
 static int passcode_tap(float x, float y) { return pc_app_tap(x, y); }
@@ -4415,6 +4430,7 @@ void sh_set(const char *what, const char *key, float v)
     } else if (cm_set(what, key, v)) {            /* helper I: thread=, compose=, to=, dial=, recent=, callpad=, ... */
     } else if (pc_set(what, key, v)) {            /* Track A: passcode=unlock:N, wrong:P, set, off */
     } else if (ta_set(what, key, v)) {            /* Track A: clock24=, tz=, sub=datetime / tz, clocktab=, alarmedit= */
+    } else if (su_set(what, key, v)) {            /* Track A update: update=open, stage:N, ready, install */
     } else if (!tk_strcmp(what, "app")) {
         if (!key[0] && AP.on) app_finish_close();       /* L2: "app=" closes the open app at once */
         for (int a = 0; a < NAPPS; a++)
@@ -4601,6 +4617,7 @@ static void app_press(float x, float y)
     else if (cm_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* helper I: Recents, Messages */
     else if (ap_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* helper B5: the Calculator's keys, the Clock's buttons */
     else if (pc_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* Track A: Settings > Passcode */
+    else if (su_press(x, y, &r, &g, &rad, &c)) ok = 1;             /* Track A update */
     else if (pushed && BACK_HIT(x, y)) {
         r = g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D };   /* the glass back lights */
         rad = BACK_D / 2; c = W(.16f); ok = 1;

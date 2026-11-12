@@ -438,6 +438,21 @@ int sh_boot_reason(char *why, int cap);
  * < 0: refused (e.g. a heat session still running: the shell says so) */
 int sh_restart(void);
 int sh_power_off(void);
+/* Track A (sbos-core-api.md 8, with Track J's loader half): Software Update. The card's /STARBITE/UPDATE/MANIFEST.TXT
+ * (key=, version=, image=, size=, sha256=, notes=) names an image for this OS's catalog row; it is staged into the
+ * inactive update slot (sbos-slot-a / -b), checked (SHA-256, then the slot's header and CRC32 read back), armed as
+ * the loader's one-shot and started; 10 s after the home screen of that start it becomes the active version, else
+ * the loader rolls back (a notification says either). In the self-test build every write and restart is a dry run.
+ * state: 0 none found (why: a detail), 1 found, 2 staging (pct), 3 ready (staged, restart to install), 4 installed
+ * (this start committed it), -1 failed (why) */
+#ifndef SH_UPDATE_DEFINED
+#define SH_UPDATE_DEFINED
+struct sh_update { char version[32], notes[160]; unsigned size; int state; int pct; char why[80]; };
+int sh_update_check(struct sh_update *u);   /* reads the manifest (may read the card: from a tap or an idle turn); 1 found */
+int sh_update_stage(struct sh_update *u);   /* one chunk a call, so the UI stays live, until state 3 or -1 */
+int sh_update_install(void);                /* arms and restarts (does not return on success); -1 refused */
+#endif
+
 /* the platform: Power held about a second (the screen is on now): the shell shows its power sheet (slide to power off,
  * Restart, Cancel). Track B defines it; until then a weak default does nothing */
 void sh_power_held(void);

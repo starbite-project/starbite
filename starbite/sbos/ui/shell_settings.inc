@@ -29,7 +29,7 @@ enum { SE_ROOT = 0, SE_DISPLAY = 1, SE_WIFI = 2, SE_CELL = 3, SE_CARD = 4,
        SE_NOTIF_APP, SE_BATTERY, SE_PRIVACY, SE_EMERGENCY, SE_LINUX, SE_SEARCH, SE_NPAGES };
 /* actions (row ids from 100; a row id < 100 pushes that page) */
 enum { A_NONE = 100, A_CARD, A_PASSCODE, A_STARTUP, A_STORE, A_LAST2, A_HEALTH, A_TEXTSIZE, A_RESET, A_EMG, A_BRIGHT,
-       A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK,
+       A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK, A_UPDATE,
        T_FIRST = 200, T_SYSHAP = T_FIRST, T_KBHAP, T_AUTOCAP, T_TIMERVIB, T_LAST2AUTO, T_NALLOW, T_NBANNER, T_CALLVIB, T_SMSVIB,
        T_CLOCK24 };
 
@@ -233,7 +233,7 @@ static void se_rows(int p)
     case SE_GENERAL:
         sec(0);
         nav(SE_ABOUT, 0, "About", 0);
-        nav(SE_UPDATE, 0, "Software Update", 0);
+        nav(A_UPDATE, 0, "Software Update", 0);   /* Track A update: its own page (shell_update.inc) */
         sec(0);
         nav(SE_DATETIME, 0, "Date & Time", 0);
         nav(SE_KEYBOARD, 0, "Keyboard", 0);
@@ -410,7 +410,7 @@ static void se_rows(int p)
             { "Wallpaper", SE_WALL, SEI_WALL, 0 }, { "Sounds & Haptics", SE_SOUNDS, SEI_SOUNDS, 0 },
             { "Notifications", SE_NOTIF, SEI_NOTIF, 0 }, { "Passcode", A_PASSCODE, SEI_PASS, 0 }, { "Emergency", SE_EMERGENCY, SEI_SOS, 0 },
             { "Privacy", SE_PRIVACY, SEI_PRIV, 0 }, { "Startup", A_STARTUP, SEI_START, 0 }, { "Linux Apps", SE_LINUX, SEI_LINUX, 0 },
-            { "App Store", A_STORE, SEI_STORE, 0 }, { "About", SE_ABOUT, 0, "General" }, { "Software Update", SE_UPDATE, 0, "General" },
+            { "App Store", A_STORE, SEI_STORE, 0 }, { "About", SE_ABOUT, 0, "General" }, { "Software Update", A_UPDATE, 0, "General" },
             { "Date & Time", SE_DATETIME, 0, "General" }, { "Keyboard", SE_KEYBOARD, 0, "General" },
             { "Language & Region", SE_LANG, 0, "General" }, { "Reset", SE_RESET, 0, "General" }, { "Brightness", SE_DISPLAY, 0, "Display" },
             { "Auto-Lock", SE_DISPLAY, 0, "Display" }, { "Time Zone", SE_DATETIME, 0, "General" }, { "Text Size", SE_DISPLAY, 0, "Display" }, { "Haptics", SE_SOUNDS, 0, "Sounds" },
@@ -659,7 +659,7 @@ static void se_redraw_sec(int i)
 static int se_owns(void)
 {
     return is_app("settings") && AS.sub != SE_WIFI && AS.sub != SE_CELL && AS.sub != SE_CARD && AS.sub != SE_STARTUP_PAGE &&
-           AS.sub != SE_PASSCODE_PAGE && AS.sub != SE_TZ_PAGE;
+           AS.sub != SE_PASSCODE_PAGE && AS.sub != SE_TZ_PAGE && AS.sub != SU_SUB;   /* (SU_SUB: Track A update) */
 }
 /* a strip page's back (Startup, Passcode): the Settings root, where it was */
 void settings_back(void)
@@ -895,6 +895,10 @@ static void se_act(se_row *r)
     }
     switch (id) {
     case A_CARD: SE.save[SE.page] = SE.scroll; SE.popping = 1; sv_settings_card(); break;   /* (its back: Emergency, where it was) */
+    case A_UPDATE:                               /* Track A update: Software Update's page, in the strips */
+        SE.save[SE.page] = SE.scroll;
+        su_open();
+        break;
     case A_PASSCODE:
 #ifdef SH_HAS_PASSCODE
         SE.save[SE.page] = SE.scroll;

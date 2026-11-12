@@ -69,6 +69,10 @@ uint64_t store_used(unsigned medium);
  * grant for exactly its blocks (e->medium says which medium: write it with sb_write_volatile(e->medium, ...)).
  * 1 granted. */
 int store_volatile_grant(const char *name, uint64_t min_bytes, struct store_ent *e);
+/* The same entry checks, granting only its blocks first .. first + count - 1 (cut at the entry's end; the fence takes at
+ * most 1024 blocks, 4 MiB, at a time): an entry larger than that written a window at a time (Software Update's
+ * "sbos-slot-a" / "-b"). One grant in the OS: the caller gives the state slot's back (kern/slot.c re-takes it). */
+int store_volatile_grant_part(const char *name, uint64_t min_bytes, uint64_t first, uint64_t count, struct store_ent *e);
 
 /* Forget what store_open found, so the next call reads the medium again. */
 void store_reset(unsigned medium);
@@ -122,7 +126,8 @@ int settings_save(struct star_settings *s);
 #define SBFW_REQ_WINRE      6U
 #define SBFW_REQ_DRIVER_OFF 7U
 #define SBFW_REQ_NO_SHELL   8U
-#define SBFW_REQ_MAX        8U
+#define SBFW_REQ_UPDATE     9U    /* try update slot slot_try once (docs/STARBITE-FIRMWARE-LAYER.md 10.5) */
+#define SBFW_REQ_MAX        9U
 #define SBFW_ST_NONE        0U    /* req_state */
 #define SBFW_ST_ARMED       1U    /* the OS asked (written by the OS) */
 #define SBFW_ST_APPLIED     2U    /* its start had it */
@@ -134,6 +139,7 @@ struct sbfw_rec {
     uint16_t req_seq;
     char req_key[24], shell_key[24];
     uint8_t undo[64];
+    uint8_t slot_active, slot_try, slot_tries;   /* bytes 232..234: the A/B update slots (section 10.5) */
 };
 /* bytes 112..255 of a settings block: all zero when they do not start with "FW" version 1 */
 void sbfw_rec_decode(const uint8_t *blk, struct sbfw_rec *r);

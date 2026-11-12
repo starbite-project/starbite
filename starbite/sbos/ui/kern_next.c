@@ -1227,6 +1227,7 @@ void next_ktimer(unsigned id)
         if (!ticking && !sh_moving()) workers_stop();
         return;
     }
+    if (ready && id == 26) { (void)kupdate_after_start(); return; }   /* Track A update: 10 s after the home screen */
     ui_ktimer(id);
 }
 
@@ -2314,6 +2315,7 @@ int sh_boot_reason(char *why, int cap)
 /* once at the end of the bake: say so when this is a safe start, or when the last start of Starbite OS crashed */
 static void boot_notes(void)
 {
+    kt_set(KT_UI, 26, sb_ms(), 10000, 0);           /* Track A update: the commit (or the rollback's notice) in 10 s */
     if (sbos_safe_start())
         notif_post("Starbite OS", "Safe Start",
                    "Started without restoring Wi-Fi. Nothing is saved until you restart.");
@@ -2357,3 +2359,57 @@ static int next_power_held(void)
     start_ticking();                             /* P3x: the sheet fades in (the screen may have just woken) */
     return 1;
 }
+
+/* ---- Track A: Software Update ---- (sbos-core-api.md 8) shell.h's sh_update_* on kern/update.c, which does the work on
+ * Track J's libsb half (sbfw_api.h: the slots, the one-shot, the commit). Staging goes a 1 MiB chunk per call (read from
+ * the card, hashed, written into the inactive slot through a window grant) through a buffer taken from the UI heap for
+ * the staging only. The commit is 10 s after the home screen (boot_notes arms KT_UI 26): a start that crashes or hangs
+ * before it never commits, and the loader rolls back. In the self-test build update.c reads no card and every write,
+ * the arming and the restart are logged dry runs (sbos_selftest_enabled). */
+#define UPD_CHUNK (1U << 20)
+static struct kupdate kup;
+static uint8_t *upd_buf;
+static void upd_out(struct sh_update *u)
+{
+    if (!u) return;
+    tk_memset(u, 0, sizeof *u);
+    sb_strcpy(u->version, sizeof u->version, kup.version);
+    sb_strcpy(u->notes, sizeof u->notes, kup.notes);
+    sb_strcpy(u->why, sizeof u->why, kup.why);
+    u->size = kup.size > 0xffffffffULL ? 0xffffffffU : (unsigned)kup.size;
+    u->state = kup.state;
+    u->pct = kup.pct;
+}
+int sh_update_check(struct sh_update *u)
+{
+    hw_wdt_feed();
+    int r = kupdate_check(&kup);
+    upd_out(u);
+    return r == 1;
+}
+int sh_update_stage(struct sh_update *u)
+{
+    if ((kup.state == KUP_FOUND || kup.state == KUP_STAGING) && !upd_buf) {
+        upd_buf = tk_alloc(UPD_CHUNK);
+        if (!upd_buf) sb_log("next: update: no 1 MiB in the UI heap for the copy");
+    }
+    hw_wdt_feed();
+    kupdate_stage(&kup, upd_buf, upd_buf ? UPD_CHUNK : 0);
+    if (kup.state != KUP_STAGING && upd_buf) {
+        tk_free(upd_buf);
+        upd_buf = 0;
+    }
+    upd_out(u);
+    return kup.state;
+}
+int sh_update_install(void)
+{
+    char why[80];
+#ifdef SBOS_SELFTEST_NEXT
+    sb_log("next: update: would arm the staged update and restart (a dry run: the self test)");
+#endif
+    int r = kupdate_install(why, sizeof why);
+    if (r < 0) sb_logf("next: update: not installed: ", why);
+    return r < 0 ? -1 : 0;
+}
+/* ---- end of Track A: Software Update ---- */

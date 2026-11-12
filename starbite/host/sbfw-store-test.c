@@ -604,13 +604,15 @@ static void t_api_request(void)
     for (unsigned q = 0; q < 9; ++q)
         for (unsigned m = 0; m < 6; ++m)
             fits_ok &= sbfw_req_fits(q, m) == want[q][m];
-    CHECK(fits_ok && !sbfw_req_fits(9, 2), "sbfw_req_fits: the loader's table");
-    CHECK(!strcmp(sbfw_req_name(SBFW_REQ_XNU_SINGLE), "xnu-single") && !sbfw_req_name(0) && !sbfw_req_name(9), "names");
+    CHECK(fits_ok && !sbfw_req_fits(9, 2) && sbfw_req_fits(9, 5) && !sbfw_req_fits(10, 5), "sbfw_req_fits: the loader's table");
+    CHECK(!strcmp(sbfw_req_name(SBFW_REQ_XNU_SINGLE), "xnu-single") && !sbfw_req_name(0) && !strcmp(sbfw_req_name(9), "update") &&
+          !sbfw_req_name(10), "names");
 
     auth_store(SB_MED_SD);
     CHECK(sbfw_request_arm("win11", SBFW_REQ_WINRE) == SBFW_E_INVAL, "WinRE: plan only");
     CHECK(sbfw_request_arm("starbite-os", SBFW_REQ_NO_SHELL) == SBFW_E_INVAL, "no-shell: not a start's request");
-    CHECK(sbfw_request_arm("ios26", 0) == SBFW_E_INVAL && sbfw_request_arm("ios26", 9) == SBFW_E_INVAL, "unknown actions");
+    CHECK(sbfw_request_arm("ios26", 0) == SBFW_E_INVAL && sbfw_request_arm("ios26", 10) == SBFW_E_INVAL &&
+          sbfw_request_arm("starbite-os", SBFW_REQ_UPDATE) == SBFW_E_INVAL, "unknown actions; update only via sbfw_update_arm");
     CHECK(sbfw_request_arm("linux-mainline", SBFW_REQ_XNU_SINGLE) == SBFW_E_NOFIT, "XNU single user on Linux: no");
     CHECK(sbfw_request_arm("android", SBFW_REQ_SAFE) == SBFW_E_NOFIT, "safe mode on Android: no");
     CHECK(sbfw_request_arm("nothing", SBFW_REQ_VERBOSE) == SBFW_E_NOFIT, "an unknown key");
@@ -715,6 +717,43 @@ static void t_ufs_plain(void) { t_ufs(0, 0, 0); }
 static void t_ufs_damaged(void) { t_ufs(1, 0, 1); }
 static void t_ufs_sd_allowed(void) { t_ufs(0, SET_SD_STORE, 0); }
 
+/* sbfw_api.c: the update slots (section 10.5): the header byte for byte as the loader's, arm, commit */
+static uint8_t fx_slot[4096];
+static void t_api_update(void)
+{
+    media(1, SET_SD_STORE);
+    table(STORE_SD, C_FIRST, SBFW_TF_CARD_ONLY, 0);
+    sb_fw_read();
+    uint8_t *b2 = card + 2 * 4096;
+    static uint8_t h[4096];
+    struct sbslot_info si, so;
+    memset(&si, 0, sizeof(si));
+    si.size = 22552576;
+    si.crc = 0xdeadbeef;
+    strcpy(si.vstr, "1.0 P3x");
+    strcpy(si.key, "starbite-next-gpu");
+    sbslot_build(h, &si);
+    CHECK(!memcmp(h, fx_slot, 4096), "slot header == the loader's (fixtures/sbfw/sbfw-slot-header.bin)");
+    CHECK(sbslot_check(fx_slot, 64U << 20, "starbite-next-gpu", &so) && so.size == si.size && so.crc == si.crc &&
+          !sbslot_check(fx_slot, 64U << 20, "starbite-os", &so), "the loader's header checks; another key refused");
+    unsigned a = 9, t = 9, n = 9;
+    CHECK(sbfw_slot_get(&a, &t, &n) == 1 && a == 0 && t == 0 && n == 0, "no slots yet");
+    auth_store(SB_MED_SD);
+    CHECK(sbfw_update_arm("linux-mainline", 1) == SBFW_E_NOFIT, "update on a Linux row: no");
+    CHECK(sbfw_update_arm("starbite-os", 3) == SBFW_E_INVAL, "slot 3: no");
+    CHECK(sbfw_update_arm("starbite-os", 1) == 0, "armed: slot A");
+    CHECK(b2[116] == SBFW_REQ_UPDATE && b2[117] == SBFW_ST_ARMED && b2[232] == 0 && b2[233] == 1 && b2[234] == 1 &&
+          !strcmp((const char *)b2 + 120, "starbite-os"), "req update armed, slot_try 1, tries 1");
+    CHECK(sbfw_update_commit() == SBFW_E_INVAL, "no commit before the loader applied it");
+    b2[117] = SBFW_ST_APPLIED;                          /* the loader's trial start */
+    sbset_crc_fix(b2);
+    auth_store(SB_MED_SD);
+    CHECK(sbfw_update_commit() == 0 && b2[232] == 1 && b2[233] == 0 && b2[117] == SBFW_ST_DONE, "commit: A active");
+    auth_store(SB_MED_SD);
+    CHECK(sbfw_update_arm("starbite-os", 1) == SBFW_E_INVAL, "staging into the active slot: no");
+    CHECK(sbfw_slot_set(2, 0, 0) == 0 && sbfw_slot_get(&a, &t, &n) == 1 && a == 2 && t == 0, "slot_set / get");
+}
+
 static void load(const char *dir, const char *name, uint8_t *dst)
 {
     char path[1024];
@@ -736,6 +775,7 @@ int main(int argc, char **argv)
     verbose = argc > 2;
     load(argv[1], "sbfw-table.bin", fx_table);
     load(argv[1], "sbfw-settings.bin", fx_settings);
+    load(argv[1], "sbfw-slot-header.bin", fx_slot);
     for (int i = 0; i < 3; ++i) {
         char nm[64];
         static uint8_t blk[4096];
@@ -765,6 +805,7 @@ int main(int argc, char **argv)
     bad += run("api: no home", t_api_nohome);
     bad += run("api: requests", t_api_request);
     bad += run("api: crash reports", t_api_crash);
+    bad += run("api: update slots", t_api_update);
     printf("sbfw-store-test: %d scenario(s) failed\n", bad);
     return bad ? 1 : 0;
 }
