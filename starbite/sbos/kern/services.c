@@ -546,8 +546,9 @@ static void a55_low(int low)
                                     "power: A55 asked for 455 MHz, the PLL does not show it (was ", was, " MHz)");
         return;
     }
-    if (!a55_lowered || surv_last2())
-        return;                             /* 1.2-alpha27: Last 2 % keeps the lowest step with the screen on */
+    if (!a55_lowered || surv_saver())
+        return;                             /* 1.2-alpha27: Last 2 % and Extreme power saving (by hand too) keep the
+                                             * lowest step with the screen on */
     a55_lowered = 0;
     if (heater_running_ui())
         return;                             /* the heater owns the clocks now */
