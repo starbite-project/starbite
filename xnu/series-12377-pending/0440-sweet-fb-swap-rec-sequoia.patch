@@ -1,0 +1,48 @@
+From: starbite <starbite@local>
+Date: Thu, 12 Nov 2026 23:30:00 +0200
+Subject: [PATCH] patch: 0440-sweet-fb-swap-rec-sequoia.patch - SweetFramebuffer
+ takes a swap record of 0x514 bytes or more as the shifted layout (swap id 0x98,
+ surfaces 0x9c, mask 0x14c): macOS 15 Sequoia's IOMobileFramebuffer sends that
+ record with 2 at 0x50, so the old test (0x98 set and 0x50 zero) read the iOS 16
+ offsets, found no enabled layer, and no WindowServer frame ever reached the panel
+ (S2s 2026-11-12)
+
+Applies on seq-12377 (0427 + 0361, SweetFramebuffer kept). Kernel seq1k = seq1j + this.
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-12 23:06:43
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-12 23:06:53
+@@ -597,11 +597,15 @@
+  * shows the latest frame every fFlushTicks ticks (boot-arg sweetfb_hz,
+  * default 10 Hz).
+  */
++/* Size of the latest swap record (0x514 on iPadOS 18 and macOS 15 Sequoia: the shifted layout, see present()). */
++static uint32_t sweet_fb_rec_size;
++
+ void
+ AppleCLCD::swap(const uint8_t *rec, uint32_t size)
+ {
+ 	IOLockLock(fLock);
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_MAX);
++	sweet_fb_rec_size = size;
+ 	fDirty = true;
+ 	IOLockUnlock(fLock);
+ #if defined(ARM64_BOARD_CONFIG_HEROLTE) || defined(ARM64_BOARD_CONFIG_STARLTE)
+@@ -821,8 +825,13 @@
+ {
+ 	/* iPadOS 18 (IOMobileFramebuffer 0x514-byte record): the same fields
+ 	 * 0x48 further in (swap id 0x98, surface ids 0x9c, enabled mask 0x14c);
+-	 * the record is zero past 0x46c on iOS 16, so the swap id tells. */
+-	const uint32_t sh = get32(rec, 0x98) != 0 && get32(rec, 0x50) == 0 ? 0x48 : 0;
++	 * the record is zero past 0x46c on iOS 16, so the swap id tells.
++	 * macOS 15 Sequoia sends the same 0x514 record but with 2 at 0x50, so
++	 * that test missed it and no frame ever reached the panel (S2s
++	 * 2026-11-12: swap id 0x98 = 1..4, surface 0x9c = 3/4, mask 0x14c = 1):
++	 * a record of 0x514 bytes or more is the shifted layout. */
++	const uint32_t sh = sweet_fb_rec_size >= 0x514 ||
++	    (get32(rec, 0x98) != 0 && get32(rec, 0x50) == 0) ? 0x48 : 0;
+ 	uint32_t mask = get32(rec, 0x104 + sh);
+ 	uint64_t copied = 0;
+ 
