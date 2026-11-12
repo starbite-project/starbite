@@ -188,8 +188,8 @@ static uint32_t gpu_clock_steps, gpu_clock_told;
 /* Track A, 1.0 (the user: "normal Starbite should have animations and be fast, unlike Emergency mode"): the top
  * clocks hold 1.5 s past the last motion frame in normal mode, 0.4 s (as before) when the shell says it is in a
  * conservative mode (Emergency, Survival, Extreme saving: sh_perf_mode) */
-static int perf_conservative;
-static uint32_t perf_tail_ms(void) { return perf_conservative ? 400U : 1500U; }
+static int perf_conservative, perf_low;     /* perf_low: the user's Low Power Mode (pref power.low) */
+static uint32_t perf_tail_ms(void) { return perf_conservative || perf_low ? 400U : 1500U; }
 static void boost(int on)
 {
     if (on == boosted) return;
@@ -1140,6 +1140,7 @@ static void bake_step(void)
     sh_bright_now(panel_bright_level);
     sh_restore();                                    /* Track A: what the shell keeps (settings_restore ran before) */
     boot_notes();                                    /* Track A, 1.0: a safe start, or the last start's crash */
+    perf_low = sh_pref_int("power.low", 0) == 1;     /* Track A, 1.0: Low Power Mode kept */
     drv_after_bake();                                /* Track A: the haptic level, Auto-Brightness, the LED policy */
     ready = need_full = 1;
     boost(0);
@@ -2978,3 +2979,14 @@ int sh_hold_awake(const char *who, int on)
     kui_hold_awake = n;                     /* the kernel's screen-off timer waits while any holder is on */
     return n;
 }
+
+
+/* ---- Track A, 1.0: Low Power Mode (the Control Centre's tile; pref power.low): the conservative clock tail, kept
+ * across a restart. Emergency / Survival set their own (sh_perf_mode); either one makes it conservative ---- */
+void sh_low_power(int on)
+{
+    perf_low = !!on;
+    sh_pref_set_int("power.low", perf_low);
+    sb_log(on ? "next: Low Power Mode on" : "next: Low Power Mode off");
+}
+int sh_low_power_on(void) { return perf_low; }

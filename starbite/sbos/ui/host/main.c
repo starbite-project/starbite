@@ -1254,6 +1254,10 @@ void sh_perf_mode(int conservative) { (void)conservative; }
 void sh_perf_hold(int ms) { (void)ms; }
 int sh_hold_awake(const char *who, int on) { static int n; n += on ? 1 : (n > 0 ? -1 : 0); fprintf(stderr, "host: keep awake %s %s (%d)\n", who ? who : "?", on ? "on" : "off", n); return n; }
 
+static int host_low;
+void sh_low_power(int on) { host_low = !!on; }
+int sh_low_power_on(void) { return host_low; }
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: sbtk-host PAK still|film|bench ...\n"); return 2; }

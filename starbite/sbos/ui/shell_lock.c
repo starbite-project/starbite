@@ -2161,6 +2161,7 @@ static void set_cc(float p)
     cc_x_place();
     ccl.hidden = !CCS.on;
 }
+static int open_app_key(const char *k);   /* Track A, 1.0 (after the app table) */
 static void cc_close(void)
 {
     CCS.closing = 1;
@@ -2365,10 +2366,23 @@ static int cc_tap(float x, float y)
             return 1;
         }
         else if (c == 1) { toast("The screen doesn't rotate yet"); return 1; }
-        else if (c == 3) { toast("Power Saving isn't in this version yet"); return 1; }
+        else if (c == 3) {                   /* Track A, 1.0: Low Power Mode (kernel: the conservative clocks, kept) */
+            int on = !sh_low_power_on();
+            sh_low_power(on);
+            sh_haptic_k(SH_HAP_LIGHT);
+            toast(on ? "Low Power Mode On" : "Low Power Mode Off");
+            return 1;
+        }
         else return 1;                       /* Emergency: a hold (G_CCEM) */
     } else if (y >= CC_R4 && y < CC_R4 + CC_U && x >= CCX[0] && x < CCX[3] + CC_U) {
-        toast("Not in this version yet");    /* Timer, Calculator, Mirror, Camera: the apps come later */
+        /* Track A, 1.0: Timer, Calculator, Mirror, Camera open their apps (Timer: Clock; Mirror: the front camera);
+         * on the lock screen they ask for the unlock first (no app over the lock without it) */
+        static const char *const K4[4] = { "clock", "calc", "camera", "camera" };
+        int c = x < CCX[1] - CC_GAP / 2 ? 0 : x < CCX[2] - CC_GAP / 2 ? 1 : x < CCX[3] - CC_GAP / 2 ? 2 : 3;
+        if (lockY > -H_PT * .5f) { toast("Unlock to open it"); return 1; }
+        sh_haptic_k(SH_HAP_LIGHT);
+        cc_close();
+        if (!open_app_key(K4[c])) toast("Not in this version yet");
         return 1;
     } else
         return 0;
@@ -3593,6 +3607,14 @@ static int app_hit(float x, float y)
     if (!k) return -1;
     for (int a = 0; a < NAPPS; a++) if (!tk_strcmp(APPS[a].k, k)) return a;
     return -1;
+}
+static void app_open(int a);
+/* Track A, 1.0: open an app by its key (the Control Centre's app tiles); 0 when there is none */
+static int open_app_key(const char *k)
+{
+    for (int a = 0; a < NAPPS; a++)
+        if (!tk_strcmp(APPS[a].k, k)) { app_open(a); return 1; }
+    return 0;
 }
 static int ap_from_on;                     /* helper D: the next open grows from this rect (a switcher card) */
 static arect ap_from;
