@@ -14,6 +14,9 @@ process, its DYLD_CHAINED_PTR_64 fixups applied, and its functions run.
 What it does per image (thin 64-bit Mach-O, or the arm64 slice of a fat file):
   - refuses one that holds non-HINT PAC instructions (an image built as arm64e: run tools/a64e/a64e-rewrite.py on
     it instead); HINT-space ones (PACIASP, AUTIASP, XPACLRI ...) are NOPs on the S9 and are allowed
+  - refuses one whose binds are dyld-info opcodes (LC_DYLD_INFO[_ONLY] with bind data): dyld rejects them in an
+    arm64e image ("old arm64e bind opcodes not supported"; S2g 2026-11-12, PanVK linked with -undefined
+    dynamic_lookup): link with -Wl,-fixup_chains
   - cputype ARM64, cpusubtype ARM64_ALL -> 0x80000002 (an arm64e image is left as it is)
 """
 import struct
@@ -57,6 +60,19 @@ def pac_sites(b, off):
     return n, first
 
 
+def opcode_binds(b, off):
+    """Bytes of bind / weak-bind / lazy-bind opcodes in LC_DYLD_INFO[_ONLY], 0 with chained fixups or none."""
+    ncmds = struct.unpack_from('<I', b, off + 16)[0]
+    p, n = off + 32, 0
+    for _ in range(ncmds):
+        cmd, csz = struct.unpack_from('<II', b, p)
+        if cmd in (0x22, 0x80000022):	# LC_DYLD_INFO, LC_DYLD_INFO_ONLY
+            _, _, _, bsz, _, wsz, _, lsz = struct.unpack_from('<8I', b, p + 8)
+            n += bsz + wsz + lsz
+        p += csz
+    return n
+
+
 def tag(b, off, path):
     magic, ct, st = struct.unpack_from('<III', b, off)
     if magic != 0xFEEDFACF or ct != CPU_TYPE_ARM64:
@@ -65,6 +81,10 @@ def tag(b, off, path):
         return 'already arm64e'
     if st & 0xFFFFFF != 0:
         sys.exit(f'{path}: cpusubtype {st:#x}: not arm64 (ARM64_ALL)')
+    ob = opcode_binds(b, off)
+    if ob:
+        sys.exit(f'{path}: {ob} bytes of dyld-info bind opcodes: dyld refuses them in an arm64e image '
+                 '("old arm64e bind opcodes not supported"); link with -Wl,-fixup_chains')
     n, first = pac_sites(b, off)
     if n:
         sys.exit(f'{path}: {n} non-HINT PAC instructions ({first} ...): an arm64e build, rewrite it with '

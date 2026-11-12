@@ -135,6 +135,14 @@ endian = 'little'
 
 [properties]
 needs_exe_wrapper = true
+
+[built-in options]
+# Chained fixups: Mesa links with -undefined dynamic_lookup (its weak panvk_* entry points), and then ld writes
+# old-style bind opcodes, which dyld refuses in an arm64e image ("old arm64e bind opcodes not supported"; S2g
+# 2026-11-12: WindowServer's dlopen of this dylib failed, LoaderNotFound). -fixup_chains keeps them as chained
+# flat-namespace weak imports.
+c_link_args = ['-Wl,-fixup_chains']
+cpp_link_args = ['-Wl,-fixup_chains']
 EOF
 	COMMON="-Dplatforms= -Dgallium-drivers= -Dglx=disabled -Degl=disabled -Dgbm=disabled -Dopengl=false -Dgles1=disabled
 		-Dgles2=disabled -Dzstd=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dvalgrind=disabled -Dlibunwind=disabled
