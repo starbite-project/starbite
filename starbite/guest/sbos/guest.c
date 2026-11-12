@@ -207,6 +207,86 @@ static uint32_t unix_s(int32_t *tz_min)
 #ifndef GUEST_FS_OPS
 #define GUEST_FS_OPS 0
 #endif
+/* sbsnd: Linux's sound through Track I's driver (starbite/sbos/kern/snd.h: one output stream, the main mic), when
+ * the kernel has it. Single-threaded: everything runs from this service's tick, every 5 ms while sound flows. */
+#if defined(__has_include) && !defined(GUEST_QEMU)
+#if __has_include("snd.h")
+#include "snd.h"
+#define GUEST_SND 1
+#endif
+#endif
+#ifdef GUEST_SND
+static const struct sbg_snd snd_cfg = {
+    .caps = SBG_SND_PLAY | SBG_SND_CAPTURE, .block_frames = 240, .latency_frames = 1536,
+};
+#define GUEST_SND_OPS (&snd_cfg)
+static int snd_id = -1, snd_cap, snd_fast;
+static uint64_t snd_cap_t;
+static int16_t snd_buf[2 * 480];
+/* returns 1 while sound flows (the tick must then run every 5 ms) */
+static int guest_snd_tick(void)
+{
+    int play = 0, cap = 0;
+    sbg_snd_active(&play, &cap);
+    if (play && snd_id < 0) {
+        snd_id = snd_open();                /* the amp powers up only now */
+        if (snd_id < 0)
+            snd_id = -1;
+        else
+            sbg_snd_set_latency(1536);
+    } else if (!play && snd_id >= 0) {
+        snd_close(snd_id);
+        snd_id = -1;
+    }
+    if (snd_id >= 0) {
+        unsigned n = snd_space(snd_id);
+        while (n) {
+            unsigned k = n < 480U ? n : 480U;
+            sbg_snd_pull(snd_buf, k);
+            snd_write(snd_id, snd_buf, k);
+            n -= k;
+        }
+    }
+    if (cap && !snd_cap) {
+        snd_cap = snd_cap_open() == 0;
+        snd_cap_t = sb_ms();
+    } else if (!cap && snd_cap) {
+        snd_cap_close();
+        snd_cap = 0;
+    }
+    if (snd_cap) {                          /* the mic's mono to L/R; silence for what it does not have */
+        uint64_t now = sb_ms();
+        unsigned want = (unsigned)(now - snd_cap_t) * 48U;
+        snd_cap_t = now;
+        while (want) {
+            unsigned k = want < 480U ? want : 480U;
+            int16_t *mono = snd_buf + 480;  /* (the upper half: read into it, widen downwards) */
+            unsigned got = snd_cap_read(mono, k);
+            for (unsigned i = 0; i < k; i++) {
+                int16_t v = i < got ? mono[i] : 0;
+                snd_buf[2 * i] = snd_buf[2 * i + 1] = v;
+            }
+            sbg_snd_push(snd_buf, k);
+            want -= k;
+        }
+    }
+    return snd_id >= 0 || snd_cap;
+}
+static void guest_snd_off(void)
+{
+    if (snd_id >= 0)
+        snd_close(snd_id);
+    if (snd_cap)
+        snd_cap_close();
+    snd_id = -1;
+    snd_cap = snd_fast = 0;
+}
+#else
+#define GUEST_SND_OPS 0
+static int guest_snd_tick(void) { return 0; }
+static void guest_snd_off(void) {}
+static int snd_fast;
+#endif
 static const struct sbg_os shim = {
     .ms = ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
     .m3_prep = m3_prep,
@@ -214,6 +294,7 @@ static const struct sbg_os shim = {
     .unix_s = GUEST_UNIX_S,
     .net_rx = sbos_nat_from_guest,          /* NULL until Track G's NAT is linked */
     .fs = GUEST_FS_OPS,
+    .snd = GUEST_SND_OPS,                   /* NULL until Track I's snd.h is in the kernel */
 };
 
 static uint8_t me_if;
@@ -233,7 +314,7 @@ static void cfg_init(void)
         /* v3 (Linux apps: hdr.version 3): sbghost leaves out what has no sbg_os part (NET without the NAT, P9
          * without guest-fs.h) */
         .services = mode == GUEST_WL ? SBSHM_SVC_CLIP | SBSHM_SVC_NOTIF | SBSHM_SVC_CLOCK | SBSHM_SVC_NET |
-                                           SBSHM_SVC_P9 : 0,
+                                           SBSHM_SVC_P9 | SBSHM_SVC_SND : 0,
     };
     sbg_init(&shim, &cfg, me_if ? me_if : 1);
 }
@@ -406,6 +487,7 @@ void guest_timer(unsigned id)
             sbg_send(SBG_MSG_FOCUS, 1, 0);
         ui_mark_dirty();
     } else if (s->state == SBG_OFF) {
+        guest_snd_off();
         st = GUEST_OFF;
         shown = 0;
         kt_cancel(KT_GUEST, KT_GUEST_ID_POLL);
@@ -413,6 +495,7 @@ void guest_timer(unsigned id)
         ui_mark_dirty();
         return;
     } else if (s->state == SBG_FAILED) {
+        guest_snd_off();
         st = GUEST_FAILED;
         shown = 0;
         why = s->why ? s->why : "the guest failed";
@@ -425,6 +508,11 @@ void guest_timer(unsigned id)
         volatile struct sbshm_hdr *h = sbg_hdr();
         if (h->surf_seq != seq_seen && shown)
             ui_mark_dirty();
+        int flowing = guest_snd_tick();     /* sound: a 5 ms tick while it flows, the normal one otherwise */
+        if (flowing != snd_fast) {
+            snd_fast = flowing;
+            arm(flowing ? 5 : shown ? 10 : 50);
+        }
         uint64_t now = sb_ms();
         if (idle_stop_due(now)) {
             sb_log(apps ? "guest: the screen off for 30 min: stopping (the M3 cluster off)" :
@@ -440,7 +528,7 @@ void guest_show(int on)
     t_hidden = on ? 0 : sb_ms();
     if (st == GUEST_RUNNING) {
         sbg_send(SBG_MSG_FOCUS, (uint32_t)shown, 0);
-        arm(shown ? 10 : 50);
+        arm(snd_fast ? 5 : shown ? 10 : 50);
     }
     seq_blit = 0;                           /* the next draw copies the whole surface */
 }
