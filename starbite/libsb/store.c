@@ -612,8 +612,9 @@ int store_append(unsigned m, const char *name, unsigned type, const void *src, u
 }
 
 /* The settings record (the home store's block 2): one block, as the loader's settings_save, read back.
- * fw: a new SBFW part (bytes 112..255), or 0 to keep the current one. */
-static int settings_write(struct star_settings *st, const struct sbfw_rec *fw)
+ * fw: a new SBFW part (bytes 112..255), or 0 to keep the current one; ldr: new loader bytes 104..111 (the crash /
+ * watchdog settings, docs/STARBITE-HEALTH.md), or 0 to keep them. */
+static int settings_write(struct star_settings *st, const struct sbfw_rec *fw, const uint8_t *ldr)
 {
     unsigned m = 0;
     uint64_t lba = settings_lba(&m);
@@ -628,6 +629,9 @@ static int settings_write(struct star_settings *st, const struct sbfw_rec *fw)
     if (settings_read(m, lba))
         for (unsigned i = 104; i < 256; ++i)
             *(volatile uint8_t *)(b + i) = *(volatile uint8_t *)(UFS_BUF + i);
+    if (ldr)
+        for (unsigned i = 0; i < 8; ++i)
+            *(volatile uint8_t *)(b + 104 + i) = ldr[i];
     if (fw)
         sbfw_rec_encode((uint8_t *)b, fw);
     st->seq++;
@@ -650,12 +654,42 @@ static int settings_write(struct star_settings *st, const struct sbfw_rec *fw)
 
 int settings_save(struct star_settings *st)
 {
-    return settings_write(st, 0);
+    return settings_write(st, 0, 0);
 }
 
 int settings_fw_save(struct star_settings *st, const struct sbfw_rec *r)
 {
-    return settings_write(st, r);
+    return settings_write(st, r, 0);
+}
+
+int settings_all_save(struct star_settings *st, const struct sbfw_rec *r, const uint8_t ldr[8])
+{
+    return settings_write(st, r, ldr);
+}
+
+int settings_ldr_load(uint8_t ldr[8])
+{
+    unsigned m = 0;
+    uint64_t lba = settings_lba(&m);
+    int ok = lba && settings_read(m, lba);
+    for (unsigned i = 0; i < 8; ++i)
+        ldr[i] = ok ? *(volatile uint8_t *)(UFS_BUF + 104 + i) : 0;
+    return ok;
+}
+
+/* Block k of entry e (no CRC: a volatile entry's blocks change under its directory CRC) into dst (plain RAM), via
+ * the store's DMA scratch. */
+int store_read_block(const struct store_ent *e, uint64_t k, void *dst)
+{
+    if (k >= (e->size + 4095U) / 4096U)
+        return -3;
+    uintptr_t b = SB_STORE_IO + 0x60000;
+    if (med_read(e->medium, e->lba + k, 1, b))
+        return -1;
+    uint8_t *d = (uint8_t *)dst;
+    for (unsigned i = 0; i < 4096; ++i)
+        d[i] = *(volatile uint8_t *)(b + i);
+    return 0;
 }
 
 int settings_fw_load(struct sbfw_rec *r)

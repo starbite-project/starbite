@@ -25,7 +25,13 @@ int sh_modem(int on)
     else fprintf(stderr, "modem: would stop\n");
     return 0;
 }
-void sh_confirmed(int ok) { fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled"); }
+/* Track J: Settings > Startup's pretend platform (the restarts' confirmations come back through sh_confirmed) */
+#include "startup_fake.inc"
+void sh_confirmed(int ok)
+{
+    if (startup_fake_confirmed(ok)) return;
+    fprintf(stderr, "confirm: %s\n", ok ? "held: the modem would start" : "cancelled");
+}
 /* a pretend network for the previews: on -> searching -> data up on "Operator" LTE, 3 bars */
 static int fc_net;                          /* helper I: comms_fake.inc's calls and SMS work while it is on */
 int sh_cellular(int on)
