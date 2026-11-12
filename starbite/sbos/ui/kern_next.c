@@ -3068,7 +3068,12 @@ static void bt_key_put(const uint8_t addr[6], const uint8_t *key16)
     tk_memset(b, 0, sizeof b);
 }
 __attribute__((weak)) void sh_hw_key(int usage, int down, uint32_t unicode) { (void)usage; (void)down; (void)unicode; }
-static void bt_key_cb(int usage, int down, uint32_t unicode) { sh_hw_key(usage, down, unicode); }
+/* cp7 (Track B): a key changes the page outside a frame: the frame that shows it now (the screen on, the shell ready) */
+static void bt_key_cb(int usage, int down, uint32_t unicode)
+{
+    sh_hw_key(usage, down, unicode);
+    if (down && ready && K.screen_on) start_ticking();
+}
 static void bt_kbd_init(void)
 {
     bt_set_link_key_store(bt_key_get, bt_key_put);
@@ -3077,9 +3082,12 @@ static void bt_kbd_init(void)
     if (sh_blob_get("bt.key", b, sizeof b) == 22) bt_set_paired(b);   /* only that keyboard may come back */
     tk_memset(b, 0, sizeof b);
 }
+static char bt_pair_name[32];                        /* the row being paired: its name, kept once it connects */
 int sh_bt_pair(int i)
 {
     DRV_DRY("Bluetooth pairing", -1);
+    const struct bt_dev *d = bt_dev_at(i);
+    sb_strcpy(bt_pair_name, sizeof bt_pair_name, d && d->name[0] ? d->name : "Keyboard");
     int r = bt_pair(i);
     if (r >= 0) bt_arm(1);
     return r;
@@ -3087,10 +3095,24 @@ int sh_bt_pair(int i)
 _Static_assert((int)SH_BTP_CODE == (int)BT_PAIR_CODE && (int)SH_BTP_CONNECTED == (int)BT_PAIR_CONNECTED &&
                (int)SH_BTP_FAILED == (int)BT_PAIR_FAILED,
                "shell.h's SH_BTP_* are bt.h's BT_PAIR_*");
-int sh_bt_pair_state(void) { return bt_pair_state(); }
+int sh_bt_pair_state(void)
+{
+    int s = bt_pair_state();
+    if (s == BT_PAIR_CONNECTED && bt_pair_name[0]) {   /* paired: its name kept with the key (pref bt.kbd.name) */
+        (void)sh_pref_set("bt.kbd.name", bt_pair_name);
+        bt_pair_name[0] = 0;
+    }
+    return s;
+}
+const char *sh_bt_kbd_name(void)
+{
+    static char n[32];
+    if (sh_pref_get("bt.kbd.name", n, sizeof n) <= 0) sb_strcpy(n, sizeof n, "Keyboard");
+    return n;
+}
 const char *sh_bt_pair_code(void) { return bt_pair_code(); }
 const char *sh_bt_pair_why(void) { return bt_pair_why(); }
 int sh_bt_kbd_paired(void) { uint8_t a[6]; return bt_paired(a); }
 int sh_bt_kbd_connected(void) { return bt_hid_connected(); }
-void sh_bt_unpair(void) { bt_unpair(); bt_arm(1); }
+void sh_bt_unpair(void) { bt_unpair(); (void)sh_pref_set("bt.kbd.name", 0); bt_arm(1); }
 int sh_bt_reconnect(void) { int r = bt_hid_reconnect(); if (r >= 0) bt_arm(1); return r; }

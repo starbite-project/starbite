@@ -615,6 +615,7 @@ int sh_bt_pair_state(void);
 const char *sh_bt_pair_code(void);
 const char *sh_bt_pair_why(void);
 int sh_bt_kbd_paired(void);
+const char *sh_bt_kbd_name(void);   /* the paired keyboard's name (kept across a restart), "Keyboard" when unknown */
 int sh_bt_kbd_connected(void);
 void sh_bt_unpair(void);
 int sh_bt_reconnect(void);

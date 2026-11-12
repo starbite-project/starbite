@@ -1319,6 +1319,7 @@ int sh_bt_pair(int i) { (void)i; return 0; }
 int sh_bt_pair_state(void) { const char *e = getenv("SBTK_BTP"); return e ? atoi(e) : 0; }
 const char *sh_bt_pair_code(void) { return sh_bt_pair_state() == 2 ? "042195" : ""; }
 const char *sh_bt_pair_why(void) { return sh_bt_pair_state() == 6 ? "The keyboard didn't answer. Turn it on and try again." : ""; }
+const char *sh_bt_kbd_name(void) { return "Magic Keyboard"; }
 int sh_bt_kbd_paired(void) { return sh_bt_pair_state() == 4; }
 int sh_bt_kbd_connected(void) { return sh_bt_pair_state() == 4; }
 void sh_bt_unpair(void) { }
