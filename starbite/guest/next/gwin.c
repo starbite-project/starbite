@@ -10,6 +10,10 @@
  *   gwin_selftest_step()  uitest.c's SBOS_SELFTEST_NEXT_LINUX variant, every 100 ms: 0 running, 1 passed, -1 failed
  * An L2 guest (no catalog: its sbwl starts foot itself) still works for the Terminal: when no catalog has come 2 s
  * after HELLO, the surface is taken as foot's.
+ * Contract v3 (Track E, "apps work fully"; shell.h's v3 hooks, INTEGRATION-NEXT.md "v3"): a card swiped away closes its
+ * app (APP_CLOSE), the key bar's keys with KEYMOD around them, the cards keep Linux up (guest_apps), the guest's
+ * notifications and clipboard to the shell (v3_poll) and Starbite's clipboard to the guest, and Track A's zero-copy
+ * window (sh_linux_front: the front buffer, sbg_surf_reading / sbg_surf_done).
  */
 #include "sb.h"
 #include "kern.h"
@@ -28,6 +32,7 @@ _Static_assert(SH_LINUX_ICON == SBSHM_ICON_PX && SH_LPKGS == SBSHM_PKGS_MAX && S
 _Static_assert(SH_LINUX_W == GUEST_WL_W && SH_LINUX_H == GUEST_WL_H, "the surface");
 _Static_assert(SAME(SH_PKG_UPDATE, SBSHM_PKG_UPDATE) && SAME(SH_PKG_NEEDS_NET, SBSHM_PKG_NEEDS_NET) && SAME(SH_PKG_OP_CHECK, SBG_PKG_OP_CHECK) &&
                SAME(SH_M_SOURCE, SBG_PKG_M_SOURCE) && SAME(SH_PKG_BUILDING, SBG_PKG_BUILDING), "Track F: store3");
+_Static_assert(SAME(SH_LMOD_CTRL, SBSHM_MOD_CTRL) && SAME(SH_LMOD_ALT, SBSHM_MOD_ALT), "key modifiers");
 
 static int last_state = -1;
 static unsigned frames;                    /* the window's frames (rows copied) since the start */
@@ -42,6 +47,8 @@ static int win_ok;                         /* the surface has want's window (or 
 static int legacy;                         /* an L2 guest: no catalog */
 static int vp_rows = SH_LINUX_H, text_on, hold, busy;
 static uint64_t t_running;
+static int ext_reading;                    /* v3 + Track A: a front buffer handed to the shell's GPU layer */
+#define CLIP_BYTES 8192U                   /* the shell's clipboard (shell_linux.inc LX_CLIP) */
 
 static void scopy(char *d, const volatile char *s, unsigned cap)
 {
@@ -65,8 +72,14 @@ static void push_state(void)
     int s = guest_state();
     if (s == last_state)
         return;
-    if (s == GUEST_RUNNING)
+    if (s == GUEST_RUNNING) {
         t_running = sb_ms();
+        const char *c = sh_clip_get();     /* v3: what Starbite copied before Linux ran, for Linux's paste */
+        if (c && c[0])
+            sh_linux_clip(c);
+    }
+    if (s != GUEST_RUNNING)
+        ext_reading = 0;                   /* (the header is gone with the guest) */
     if (last_state == GUEST_RUNNING && s != GUEST_RUNNING) {
         /* Linux went away: no app runs any more (the icons stay), nothing is in the surface */
         for (int i = 0; i < cat.n; i++)
@@ -268,8 +281,16 @@ int sh_linux_open(const char *id)
     return 0;
 }
 
+static void ext_done(void)
+{
+    if (ext_reading && guest_state() == GUEST_RUNNING)
+        sbg_surf_done();                   /* the GPU reads none of the guest's buffers now */
+    ext_reading = 0;
+}
+
 void sh_linux_hide(void)
 {
+    ext_done();
     if (want >= 0 && guest_state() == GUEST_RUNNING)
         sbg_activate(SBSHM_NONE);          /* home: no window in the surface; the app keeps running */
     guest_show(0);                         /* MSG_FOCUS 0; guest.c stops Linux after 60 s hidden and idle */
@@ -288,6 +309,7 @@ int sh_linux_blit(uint32_t *const *rows, int first, int *y0, int *y1)
         guest_full_next();
     if (!first && !guest_frame_new())
         return 0;
+    ext_done();                            /* (the strips again after the zero-copy layer) */
     int n = guest_blit_rows(rows, y0, y1); /* 2x; alpha forced opaque */
     if (n > 0) {
         frames++;
@@ -369,6 +391,112 @@ int sh_linux_pkg(int idx, int op)
     return sbg_pkg(idx == SH_PKG_ALL ? SBSHM_NONE : (uint32_t)idx, (uint32_t)op, store.seq) ? 0 : -1;
 }
 
+/* ---- contract v3 (Track E, "apps work fully"; shell.h's v3 hooks) ---- */
+/* a card swiped away: APP_CLOSE for its catalog index (this run's catalog) */
+int sh_linux_close(const char *id)
+{
+    int ci = guest_state() == GUEST_RUNNING && cat_live ? cat_find(id) : -1;
+    if (ci < 0)
+        return 0;
+    sb_logf("gwin: close ", id);
+    return sbg_app_close((uint32_t)ci);
+}
+/* the key bar: KEYMOD (Ctrl / Alt held), the key down and up, KEYMOD 0 */
+int sh_linux_key(int code, unsigned mods)
+{
+    if (!guest_shown() || code <= 0)
+        return 0;
+    mods &= SBSHM_MOD_CTRL | SBSHM_MOD_ALT;
+    if (mods)
+        sbg_keymod(mods);
+    int r = guest_key((unsigned)code, 1);
+    r &= guest_key((unsigned)code, 0);
+    if (mods)
+        sbg_keymod(0);
+    return r;
+}
+/* a typed character with Ctrl / Alt latched: always keys (Ctrl+C is a key, not text) */
+int sh_linux_char_mods(char c, unsigned mods)
+{
+    if (!guest_shown())
+        return 0;
+    mods &= SBSHM_MOD_CTRL | SBSHM_MOD_ALT;
+    if (mods)
+        sbg_keymod(mods);
+    int r = guest_type(c);
+    if (mods)
+        sbg_keymod(0);
+    return r;
+}
+/* Linux apps with a switcher card: guest.c keeps Linux up while hidden (guest_apps) */
+void sh_linux_cards(int n) { guest_apps(n); }
+int sh_linux_notif_act(unsigned id, int action)
+{
+    if (guest_state() != GUEST_RUNNING)
+        return 0;
+    return sbg_notif_act(id, action < 0 ? SBSHM_NONE : (uint32_t)action);
+}
+int sh_linux_clip(const char *text)
+{
+    unsigned n = 0;
+    while (text[n] && n < CLIP_BYTES)
+        n++;
+    return guest_state() == GUEST_RUNNING && sbg_clip_set("text/plain;charset=utf-8", (const uint8_t *)text, n);
+}
+/* Track A's zero-copy path: the front buffer for the shell's external layer, marked as read by the GPU */
+const uint32_t *sh_linux_front(int *stride_px)
+{
+    int idx = 0;
+    unsigned stride = 0;
+    const volatile uint32_t *px = win_ok && guest_shown() ? guest_front(&idx, &stride) : 0;
+    *stride_px = 0;
+    if (!px)
+        return 0;
+    sbg_surf_reading(idx);                 /* the guest won't render into it until the next front / the hide */
+    ext_reading = 1;
+    frames++;
+    *stride_px = (int)stride;
+    return (const uint32_t *)(uintptr_t)px;
+}
+static int is_text(const char *mime)
+{
+    static const char t[] = "text/plain";
+    for (unsigned i = 0; t[i]; i++)
+        if (mime[i] != t[i])
+            return 0;
+    return 1;
+}
+/* the guest's clipboard and notifications, after sbg_changes: 1 the screen may change */
+static int v3_poll(unsigned ch)
+{
+    int changed = 0;
+    if (ch & SBG_CH_CLIP) {
+        static char cb[CLIP_BYTES];
+        char mime[40];
+        unsigned n = sbg_clip_get(mime, (uint8_t *)cb, CLIP_BYTES - 1);
+        if (n && is_text(mime)) {          /* (0: empty, or too big for the shell's: the old one stays) */
+            cb[n] = 0;
+            sh_linux_clip_in(cb);
+        }
+    }
+    if (ch & SBG_CH_NOTIF) {
+        struct sbshm_notif n;
+        int k;
+        while ((k = sbg_notif_next(&n)) != 0) {
+            if (k == 2) {
+                sh_linux_notify_close(n.id);
+            } else {
+                struct sbos_time t;
+                int hm = clock_now(&t) ? t.h * 100 + t.mi : -1;
+                const char *app = cat_live && n.app < (uint32_t)cat.n ? cat.app[n.app].id : "";
+                sh_linux_notify(n.id, app, n.app_name, n.summary, n.body, hm);
+            }
+            changed = 1;
+        }
+    }
+    return changed;
+}
+
 /* every loop turn (next_kdraw), at most every 16 ms: the state, the tables, the window, its frames */
 int gwin_now(void)
 {
@@ -422,6 +550,8 @@ int gwin_now(void)
             }
         }
         try_launch();
+        if (v3_poll(ch))
+            changed = 1;
     }
     if (win_ok && guest_frame_new() && sh_linux_frame())
         changed = 1;

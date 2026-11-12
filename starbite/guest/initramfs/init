@@ -70,6 +70,10 @@ if [ "$mode" = desktop ]; then
         mkdir -p /newroot/repo
         mount -t erofs -o ro /dev/sbblk2 /newroot/repo || say "desktop: WARNING: /dev/sbblk2 (the repo) does not mount"
     fi
+    if [ -b /dev/sbblk3 ]; then             # Track F's offline App Store mirror (appstore.erofs), optional
+        mkdir -p /newroot/srv/appstore
+        mount -t erofs -o ro /dev/sbblk3 /newroot/srv/appstore || say "desktop: WARNING: /dev/sbblk3 (the App Store mirror) does not mount"
+    fi
     mkdir -p /newroot/dev /newroot/proc /newroot/sys /newroot/.sbroot/base /newroot/.sbroot/rw
     mount -o move /sbroot/base /newroot/.sbroot/base
     mount -o move /sbroot/rw /newroot/.sbroot/rw
