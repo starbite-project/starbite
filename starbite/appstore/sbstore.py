@@ -2053,6 +2053,12 @@ class Daemon:
     def start_next(self):
         if self.job or not self.queue:
             return
+        if getattr(self, "aptup", None) is not None:
+            rc = self.aptup.poll()
+            if rc is None:
+                return                                  # apt's lists first
+            log("apt-get update at start: %s" % ("ok" if rc == 0 else "rc %d (offline sources still read)" % rc))
+            self.aptup = None
         idx, op, method = self.queue.pop(0)
         me = [sys.executable, os.path.abspath(__file__)]
         if op == OP_CHECK:
@@ -2135,9 +2141,14 @@ class Daemon:
             log("no shared region %s (%s): the table is not published" % (C.shm, e))
         log("daemon: %d apps (%s), mirror %s, network %s" % (len(self.order), C.catalog, C.mirror,
                                                             "up" if net_up() else "down"))
-        if env("SBSTORE_NO_APT_UPDATE") != "1":
-            rc, _ = run(C.apt + ["-q", "update"], timeout=300)   # file: sources (repo, mirror debs) work offline
-            log("apt-get update at start: %s" % ("ok" if rc == 0 else "rc %d (offline sources still read)" % rc))
+        self.aptup = None
+        if env("SBSTORE_NO_APT_UPDATE") != "1":         # in the background: file: sources (repo, mirror debs)
+            try:                                        # work offline; jobs wait for it, the table does not
+                self.aptup = subprocess.Popen(C.apt + ["-q", "update"], stdin=subprocess.DEVNULL,
+                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                              start_new_session=True)
+            except OSError as e:
+                log("apt-get update at start: %s" % e)
         signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
         last_pub = 0.0
         while True:
