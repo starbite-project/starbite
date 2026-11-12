@@ -2206,7 +2206,10 @@ static const appdef APPS[] = {
  * none): on_show the page shown (cold: a first open, or after the switcher threw it away), on_hide it left the screen
  * (closed, another app, the lock), on_save before a restart or a switch-off (sh_save_all: keep data with sh_blob_put) */
 typedef struct { const char *k; void (*on_show)(int cold); void (*on_hide)(void); void (*on_save)(void); } apphook;
+static void cam_show(int cold);                   /* shell_camera.inc: the camera on with the page, off without it */
+static void cam_hide(void);
 static const apphook APPHOOK[] = {
+    { "camera", cam_show, cam_hide, 0 },
     { 0, 0, 0, 0 },                                   /* (the pages add theirs here) */
 };
 static const apphook *ap_hook(int a)
@@ -2570,7 +2573,7 @@ static void page_photos(dc *d)
     d_h1(d, "Photos");
     d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Photos", "The camera doesn't work on this phone yet, so there is nothing here.");
 }
-static void page_camera(dc *d);                  /* helper B5: shell_apps.inc (no driver yet: iOS's screen) */
+static void page_camera(dc *d);                  /* shell_camera.inc: the Camera on Track A's front-camera driver */
 static void camera_tap(float x, float y);
 /* ---- P2z: the Clock app: the live time, a stopwatch, a timer that vibrates (no sound). The page's static part is
  * drawn in the strips; the stopwatch's and the timer's digits and the buttons are three small layers, redrawn
@@ -4080,6 +4083,7 @@ static int pc_gate_launch(unsigned id);             /* Track A: shell_passcode.i
 #include "shell_nc.inc"                             /* helper D: notifications, the Notification Centre, the banner */
 #include "shell_lknote.inc"                         /* B9: the lock's notifications (the stack above the buttons) */
 #include "shell_switcher.inc"                       /* helper D: the app switcher */
+#include "shell_camera.inc"                         /* the Camera on Track A's front-camera driver */
 #include "shell_apps.inc"                           /* helper B5: the lists (SCV), the avatars, the dock's badges */
 #include "shell_comms.inc"                          /* helper I: Phone and Messages, the call screen */
 #include "shell_power.inc"                          /* P3x: Power held: slide to power off, Restart, Cancel */
@@ -4199,6 +4203,7 @@ static void relink(void)
     int na = NST + med_layers(st + NST);
     na += lx_layers(st + na);                        /* L3: shell_linux.inc's */
     na += se_layers(st + na);                        /* helper B2: Settings' page (scrolled, clipped) and its nav row */
+    na += cam_layers(st + na);                       /* the Camera's preview, shutter, thumbnail, flash (shell_camera.inc) */
     link(&appc, st, na + cm_layers(st + na));    /* helper I: the keypad's line and ring, Messages' fields */
     /* B9: the notifications' stack is the lock's (lkng); the Centre's "N Notifications" pill only in Emergency */
     tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &sysg, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
@@ -4436,6 +4441,7 @@ void sh_set(const char *what, const char *key, float v)
     } else if (pc_set(what, key, v)) {            /* Track A: passcode=unlock:N, wrong:P, set, off */
     } else if (ta_set(what, key, v)) {            /* Track A: clock24=, tz=, sub=datetime / tz, clocktab=, alarmedit= */
     } else if (su_set(what, key, v)) {            /* Track A update: update=open, stage:N, ready, install */
+    } else if (cam_set(what, key, v)) {           /* the Camera: cam=:0 (a frame in), shot, review, flash:V */
     } else if (!tk_strcmp(what, "app")) {
         if (!key[0] && AP.on) app_finish_close();       /* L2: "app=" closes the open app at once */
         for (int a = 0; a < NAPPS; a++)
@@ -5413,6 +5419,7 @@ int sh_tick(float dt, float t)
     mv |= sw_tick(dt, t);                       /* helper D: the app switcher */
     mv |= cm_tick(dt, t);                       /* helper I: the call button's hold, the call screen */
     mv |= pw_tick(dt, t);                       /* P3x: the power sheet */
+    mv |= cam_tick(dt, t);                      /* the Camera: its frames, a shot (shell_camera.inc) */
     mv |= kb_tick(dt, t);                       /* B3: delete held */
     if (T.kind == G_APPTAP && !T.moved && t - T.t0 >= 500) {    /* B3: a long press on a text field: the edit menu */
         emt e;

@@ -23,6 +23,7 @@
 #define MD_RP 226                           /* a Files / Music row, px (61.2 pt) */
 #define MD_CELL 238                         /* a thumbnail, half px; + 3 the gap */
 #define MD_PNG_MAX (6u << 20)
+#define MD_STORE_PATH "camera-store:"     /* a Camera photo's path for the decode job (ml_path) */
 enum { MD_NONE, MD_FILES, MD_PHOTOS, MD_MUSIC };
 enum { MK_OTHER, MK_PHOTO, MK_AUDIO, MK_IMAGE, MK_VIDEO, MK_DOC, MK_ZIP };
 
@@ -31,6 +32,10 @@ static tk_layer medtg, medseg, medvbot, medvth;      /* B5: Photos' tiles' clipp
                                                       * capsule, the viewer's bottom circles, the opening thumbnail */
 
 /* ---- the library: the card's pictures and songs, found a folder page at a time ------------------------------- */
+/* Photos also lists the Camera's photos (Track A's store, sh_photo_*: up to 32, newest i 0) among the card's, by date:
+ * an item with dir ML_STORE, its store index in size (re-read at every open, after a listing and after a delete);
+ * its pixels come from sh_photo_get (DS_STORE), and only these can be deleted (the card is read only) */
+#define ML_STORE 0xff
 #define ML_DIRS 48
 #define ML_PHOTOS 1500
 #define ML_TRACKS 400
@@ -77,6 +82,9 @@ static struct {
     int vsw, vsh;
     float tha, thx, thy, thw;                 /* the opening thumbnail's flight (tha 0..1) */
 } MD = { .view = -1, .play = -1, .vz = 1, .vzt = 1, .vui = 1 };
+static int ml_store_sync(int card_ok);       /* the Camera's photos (Track A's store) among the card's */
+static int ml_find_store(int i);
+static int ml_listed(void);
 /* Months / Years: the groups of the library (oldest first), a card each */
 #define MD_GRP 160
 static struct { int first, n, key; } MDG[MD_GRP];
@@ -239,7 +247,9 @@ static struct {
     int bw, bh;                 /* the box the picture must fill (thumbnail) or fit (viewer), before its turn */
     const char *err;
 } DJ;
-enum { DS_SNIFF, DS_PNG_READ, DS_JPEG, DS_PNG };
+enum { DS_SNIFF, DS_PNG_READ, DS_JPEG, DS_PNG, DS_STORE };
+static int dj_store = -1;                /* the job's Camera photo (its store index), or -1: a file on the card */
+static uint8_t dj_rgb[4096 * 3];         /* a store photo's row as RGB for the resampler */
 
 static int dj_read(void *ctx, uint64_t off, uint8_t *dst, uint32_t len) { (void)ctx; return sh_card_read(DJ.path, off, dst, len); }
 static void dj_row(void *ctx, int y, const uint8_t *rgb) { (void)ctx; mr_row(&DJ.r, y, rgb); }
@@ -258,6 +268,7 @@ static float dj_progress(void)
     if (DJ.stage == DS_JPEG && DJ.j.mcuy) return (float)DJ.j.my / (float)DJ.j.mcuy;
     if (DJ.stage == DS_PNG_READ && DJ.size) return .3f * (float)DJ.got / (float)DJ.size;
     if (DJ.stage == DS_PNG && DJ.p.h) return .3f + .7f * (float)DJ.p.y / (float)DJ.p.h;
+    if (DJ.stage == DS_STORE && DJ.r.sh) return (float)DJ.got / (float)DJ.r.sh;
     return 0;
 }
 /* the rows of a w x h picture (as decoded) into DJ.out: a centred square for a thumbnail, the whole for the viewer */
@@ -314,6 +325,30 @@ static void dj_want(int w, int h, int orient, int *ww, int *wh)
 /* 0 more to do, 1 done (DJ.out is the picture), -1 failed (DJ.err) */
 static int dj_step(void)
 {
+    if (DJ.stage == DS_SNIFF && dj_store >= 0) {
+        /* a Camera photo: read whole (~0.1 s on the card: a slow step), then its rows through the resampler */
+        int w = 0, h = 0;
+        long long utc = 0;
+        if (sh_photo_get(dj_store, 0, 0, &w, &h, &utc) <= 0 || w > 4096) { DJ.err = sh_photo_why(); return -1; }
+        DJ.file = tk_alloc((size_t)w * (size_t)h * 4);
+        if (!DJ.file) { DJ.err = "Not enough memory for this picture."; return -1; }
+        if (sh_photo_get(dj_store, (uint32_t *)(void *)DJ.file, w * h, &w, &h, &utc) <= 0) { DJ.err = sh_photo_why(); return -1; }
+        DJ.stage = DS_STORE;
+        DJ.got = 0;
+        return dj_target(w, h, 1) ? 0 : -1;
+    }
+    if (DJ.stage == DS_STORE) {
+        const uint32_t *px = (const uint32_t *)(const void *)DJ.file;
+        int w = DJ.r.sw, h = DJ.r.sh;
+        for (int k = 0; k < 64 && (int)DJ.got < h; k++, DJ.got++) {
+            const uint32_t *row = px + (size_t)DJ.got * (size_t)w;
+            for (int x = 0; x < w; x++) { dj_rgb[3 * x] = (uint8_t)(row[x] >> 16); dj_rgb[3 * x + 1] = (uint8_t)(row[x] >> 8); dj_rgb[3 * x + 2] = (uint8_t)row[x]; }
+            mr_row(&DJ.r, (int)DJ.got, dj_rgb);
+        }
+        if ((int)DJ.got < h) return 0;
+        mr_flush(&DJ.r);
+        return 1;
+    }
     if (DJ.stage == DS_SNIFF) {
         uint8_t sig[8];
         int n = sh_card_read(DJ.path, 0, sig, 8);
@@ -383,6 +418,10 @@ static void dj_begin(int kind, const char *path, uint64_t size, int bw, int bh)
     DJ.size = size;
     DJ.bw = bw; DJ.bh = bh;
     md_cat(DJ.path, 0, sizeof DJ.path, path);
+    dj_store = -1;
+    int n = 0;
+    while (MD_STORE_PATH[n] && path[n] == MD_STORE_PATH[n]) n++;
+    if (!MD_STORE_PATH[n]) { dj_store = 0; for (const char *c = path + n; *c >= '0' && *c <= '9'; c++) dj_store = dj_store * 10 + (*c - '0'); }
 }
 
 /* ---- the tiles ------------------------------------------------------------------------------------------------ */
@@ -615,7 +654,7 @@ static void med_pheader(void)
     d_text(&d, TK_IT700, 22, MARGIN, bl(TK_IT700, 22, SAFE_TOP + 6), t, 0, 0, INK, 0);
     const char *line = "";
     b[0] = 0;
-    if (ML.state == 2 && ML.nph) {
+    if (ml_listed() && ML.nph) {
         md_date(d1, ML.ph[0].date);
         md_date(d2, ML.ph[ML.nph - 1].date);
         int n = 0;
@@ -666,6 +705,12 @@ static void med_header(void)
 static int med_words(const char **title, const char **line)
 {
     *line = "";
+    if (MD.app == MD_PHOTOS && MD.card != SH_CARD_READY && MD.card != SH_CARD_MOUNTING) {
+        if (ML.nph) return 0;                   /* the Camera's photos without a card */
+        *title = "No Photos";
+        *line = "Take photos with Camera, or put a microSD card with pictures in the phone.";
+        return 1;
+    }
     if (MD.card == SH_CARD_MOUNTING) { *title = "Reading the Card\xe2\x80\xa6"; return 1; }
     if (MD.card == SH_CARD_NONE) { *title = "No Card"; *line = "Put a microSD card in the phone to see what is on it."; return 1; }
     if (MD.card == SH_CARD_ERROR) { *title = "Can't Read the Card"; *line = MD.why[0] ? MD.why : "The card did not answer."; return 1; }
@@ -676,7 +721,7 @@ static int med_words(const char **title, const char **line)
         return 0;
     }
     if (ML.state != 2) { *title = MD.app == MD_PHOTOS ? "Looking for Photos\xe2\x80\xa6" : "Looking for Music\xe2\x80\xa6"; return 1; }
-    if (MD.app == MD_PHOTOS && !ML.nph) { *title = "No Photos"; *line = "There are no JPEG or PNG pictures on the card."; return 1; }
+    if (MD.app == MD_PHOTOS && !ML.nph) { *title = "No Photos"; *line = "Take photos with Camera, or put JPEG or PNG pictures on the card."; return 1; }
     if (MD.app == MD_MUSIC && !ML.ntr) { *title = "No Music"; *line = "There are no MP3, AAC, M4A, FLAC or WAV files on the card."; return 1; }
     return 0;
 }
@@ -711,9 +756,10 @@ static void med_layout(void)
     medmsg.hidden = 1;
     if (words) {
         tk_layer *nx = medmsg.next;
-        dc d = mk(&medmsg, "med-msg", 0, 322, 390, 112, 0, 0);
+        dc d = mk(&medmsg, "med-msg", 0, 410, 390, 110, 0, 0);   /* (d_empty centres on 465: a title and 3 lines) */
         medmsg.next = nx;
         d_empty(&d, 150, 780, title, line);
+        trim(&medmsg);
     }
     medh.hidden = MD.app == MD_PHOTOS;                 /* Photos: the header is the fade (medht), no band */
     med_tiles_reset();
@@ -793,7 +839,14 @@ static void ml_step(void)
         ML.state = ML.ph && ML.tr ? 1 : 2;
         return;
     }
-    if (ML.cur >= ML.ndirs) { ML.state = 2; ml_sort(); med_layout(); return; }
+    if (ML.cur >= ML.ndirs) {
+        ML.state = 2;
+        int sv = MD.view >= 0 && !MD.vsingle && MD.view < ML.nph && ML.ph[MD.view].dir == ML_STORE ? (int)ML.ph[MD.view].size : -1;
+        ml_store_sync(1);                       /* (sorts) the Camera's photos among the card's */
+        if (sv >= 0 && ml_find_store(sv) >= 0) MD.view = ml_find_store(sv);
+        med_layout();
+        return;
+    }
     const char *dir = ML.dirs[ML.cur];
     int n = sh_card_list(dir[0] ? dir : "/", pg, 32, ML.first), found = ML.nph;
     ML.first += n > 0 ? n : 0;
@@ -831,7 +884,58 @@ static void ml_step(void)
     if (n < 32) { ML.cur++; ML.first = 0; }
     if (MD.app == MD_PHOTOS && found != ML.nph) { med_header(); relink(); }
 }
-static void ml_path(char *o, int cap, const ml_item *it) { md_path(o, cap, ML.dirs[it->dir], it->name); }
+static void ml_path(char *o, int cap, const ml_item *it)
+{
+    if (it->dir == ML_STORE) { int n = md_cat(o, 0, cap, MD_STORE_PATH); put_dec(o + n, (int)it->size); return; }   /* the store's i */
+    md_path(o, cap, ML.dirs[it->dir], it->name);
+}
+/* the Camera's photos into the library (the card's stay; without a card only these): 1 if the list changed */
+static int ml_nstore;
+static int md_want_store = -1;           /* the Camera's thumbnail: open the viewer at this store photo once listed */
+static int md_del = -1;                  /* a store photo to delete on the next turn (the confirmation's answer) */
+static uint32_t md_stamp(long long utc)  /* exFAT's local stamp from UTC (the zone the platform applies) */
+{
+    if (utc <= 0) return 0;
+    long long t = utc + (long long)sh_tz_offset_min(sh_tz()) * 60, days = t / 86400, sec = t % 86400;
+    if (sec < 0) { sec += 86400; days--; }
+    long long z = days + 719468, era = (z >= 0 ? z : z - 146096) / 146097, doe = z - era * 146097;   /* civil from days */
+    long long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365, y = yoe + era * 400, doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    long long mp = (5 * doy + 2) / 153, d = doy - (153 * mp + 2) / 5 + 1, m = mp < 10 ? mp + 3 : mp - 9;
+    if (m <= 2) y++;
+    if (y < 1980 || y > 2107) return 0;
+    return (uint32_t)(y - 1980) << 25 | (uint32_t)m << 21 | (uint32_t)d << 16 | (uint32_t)(sec / 3600) << 11 | (uint32_t)(sec / 60 % 60) << 5 | (uint32_t)(sec % 60 / 2);
+}
+static int ml_store_sync(int card_ok)
+{
+    if (!ML.ph) ML.ph = tk_alloc(sizeof(ml_item) * ML_PHOTOS);
+    if (!ML.ph) return 0;
+    int k = 0, before = ML.nph, had = ml_nstore;
+    for (int i = 0; i < ML.nph; i++) if (ML.ph[i].dir != ML_STORE && card_ok) ML.ph[k++] = ML.ph[i];
+    if (!card_ok) ML.state = 0;          /* no card: a listing again once there is one */
+    ML.nph = k;
+    ml_nstore = 0;
+    for (int i = 0; i < sh_photo_count() && ML.nph < ML_PHOTOS; i++) {
+        int w = 0, h = 0;
+        long long utc = 0;
+        if (sh_photo_get(i, 0, 0, &w, &h, &utc) <= 0) continue;
+        ml_item *it = &ML.ph[ML.nph++];
+        tk_memset(it, 0, sizeof *it);
+        it->date = md_stamp(utc);
+        it->size = (uint32_t)i;
+        it->dir = ML_STORE;
+        int n = md_cat(it->name, 0, sizeof it->name, "~camera ");
+        put_dec(it->name + n, 100 + 99 - i);    /* the same stamp: the older first */
+        ml_nstore++;
+    }
+    ml_sort();
+    return ML.nph != before || ml_nstore != had || ml_nstore;
+}
+static int ml_find_store(int i)
+{
+    for (int k = 0; k < ML.nph; k++) if (ML.ph[k].dir == ML_STORE && (int)ML.ph[k].size == i) return k;
+    return -1;
+}
+static int ml_listed(void) { return ML.state == 2 || (MD.card != SH_CARD_READY && MD.card != SH_CARD_MOUNTING); }
 
 /* ---- a song's title and artist from its ID3v2 tag (the first 4 KiB) ------------------------------------------ */
 static void id3_text(char *o, int cap, const uint8_t *p, uint32_t n)
@@ -1025,7 +1129,8 @@ static void vw_bottom(void)
         float cx = VBX[k] + 22, cy = VB_Y + 22;
         d_rrect(&d, VBX[k], VB_Y, 44, 44, 22, W(.2f));
         d_rrect(&d, VBX[k] + .5f, VB_Y + .5f, 43, 43, 21.5f, tk_hex(0x1c1f2a, .92f));
-        tk_col c = W(k == 2 ? 1 : .45f);
+        int cam = !MD.vsingle && MD.view >= 0 && MD.view < ML.nph && ML.ph[MD.view].dir == ML_STORE;   /* deletable */
+        tk_col c = W(k == 2 || (k == 3 && cam) ? 1 : .45f);
         if (k == 0) {                                   /* share: a box, an arrow up out of it */
             d_seg(&d, cx - 7, cy - 2, cx - 7, cy + 8, 1.8f, c); d_seg(&d, cx + 7, cy - 2, cx + 7, cy + 8, 1.8f, c);
             d_seg(&d, cx - 7, cy + 8, cx + 7, cy + 8, 1.8f, c);
@@ -1184,7 +1289,7 @@ static void np_build(void)
 /* the next thumbnail a tile in view still needs: 1 if a job was started */
 static int thumb_next(void)
 {
-    if (MD.app != MD_PHOTOS || ML.state != 2 || MD.view >= 0) return 0;
+    if (MD.app != MD_PHOTOS || !ml_listed() || MD.view >= 0) return 0;
     int best = -1, bs = 0, bc = 0;
     for (int s = 0; s < MD_NT; s++) {
         if (MD.tidx[s] < 0 || medt[s].hidden) continue;
@@ -1295,10 +1400,19 @@ static int med_step(int slow)
         med_layout();
         return 1;
     }
-    if (MD.card != SH_CARD_READY) return 0;
-    if (MD.app == MD_FILES && MD.listing) { if (!slow) return 2; files_step(); return 1; }
-    if (MD.app != MD_FILES && ML.state != 2) { if (!slow) return 2; ml_step(); return 1; }
+    if (MD.card != SH_CARD_READY) { if (MD.app != MD_PHOTOS || !ml_nstore) return 0; }   /* the Camera's photos only */
+    else {
+        if (MD.app == MD_FILES && MD.listing) { if (!slow) return 2; files_step(); return 1; }
+        if (MD.app != MD_FILES && ML.state != 2) { if (!slow) return 2; ml_step(); return 1; }
+    }
+    if (MD.app == MD_PHOTOS && md_want_store >= 0 && MD.view < 0) {   /* from the Camera's thumbnail: that photo */
+        int k = ml_find_store(md_want_store);
+        md_want_store = -1;
+        if (k >= 0) { if (DJ.kind) dj_free(); vw_open(k, 0); }
+        return 1;
+    }
     if (DJ.kind || thumb_next()) {
+        if (dj_store >= 0 && DJ.stage == DS_SNIFF && !slow) return 2;   /* a Camera photo's read: in idle time */
         int rc = dj_step();
         if (DJ.kind == 2) {
             if (rc > 0) {
@@ -1380,6 +1494,7 @@ static void med_build(void)
         if (app == MD_FILES) files_open("/");
     }
     med_card();
+    if (app == MD_PHOTOS) { tc_free(); ml_store_sync(MD.card == SH_CARD_READY || MD.card == SH_CARD_MOUNTING); }   /* the Camera's newest */
     med_layout();
 }
 static void med_close(void)
@@ -1417,6 +1532,8 @@ static int med_layers(tk_layer **o)
 /* ---- the finger ----------------------------------------------------------------------------------------------- */
 /* B5: the viewer's tap, once it is known not to be the first of a double tap: the bar's buttons, else the chrome
  * shown or hidden (iOS) */
+static int md_del_go;
+static void md_del_cb(int b) { if (b == 0 && md_del >= 0) md_del_go = 1; else md_del = -1; }
 static void vw_tap1(float x, float y)
 {
     if (MD.vui && x < MARGIN + 54 && y >= SAFE_TOP - 4 && y < SAFE_TOP + 48) { MD.vat = 0; MD.vanim = 3; MD.redo = MD.vsingle; return; }
@@ -1427,11 +1544,17 @@ static void vw_tap1(float x, float y)
                     char b[96], sz[24];
                     int n = 0;
                     if (MD.vsw) { n = put_dec(b, MD.vsw); n = md_cat(b, n, sizeof b, " \xc3\x97 "); n += put_dec(b + n, MD.vsh); n = md_cat(b, n, sizeof b, " \xc2\xb7 "); }
+                    int cam = !MD.vsingle && ML.ph[MD.view].dir == ML_STORE;
                     uint64_t size = MD.vsingle ? MD.ent[MD.view].size : ML.ph[MD.view].size;
                     md_size(sz, size);
-                    md_cat(b, n, sizeof b, sz);
+                    md_cat(b, n, sizeof b, cam ? "Camera" : sz);
                     toast(b);
-                } else toast(k == 0 ? "Sharing isn't available yet" : k == 1 ? "The card is read only: no Favourites yet" : "The card is read only: nothing is deleted");
+                } else if (k == 3 && !MD.vsingle && ML.ph[MD.view].dir == ML_STORE) {
+                    /* a Camera photo: iOS's confirmation (an action sheet), the delete itself on a later turn */
+                    static const kit_btn B[1] = { { "Delete Photo", KIT_DESTRUCTIVE } };
+                    md_del = (int)ML.ph[MD.view].size;
+                    if (kit_actions("This photo will be deleted from this phone.", B, 1, md_del_cb) < 0) md_del = -1;
+                } else toast(k == 0 ? "Sharing isn't available yet" : k == 1 ? "Favourites aren't available yet" : "The card is read only: nothing is deleted");
                 return;
             }
         return;
@@ -1591,10 +1714,25 @@ static int med_moving(void)
                       (MD.view >= 0 && (MD.vz != MD.vzt || MD.px != MD.pxt || MD.py != MD.pyt || MD.tap_wait || MD.tha < 1)));
 }
 /* a frame's worth of its motion, and a little of the work between a gesture's frames */
+/* the confirmed delete of a Camera photo (sh_photo_delete; not in the sheet's tap): the next photo shows, or the grid */
+static void md_delete_now(void)
+{
+    int i = md_del, at = MD.view;
+    md_del = -1; md_del_go = 0;
+    if (sh_photo_delete(i) < 0) { toast(sh_photo_why()); return; }
+    if (DJ.kind) dj_free();
+    tc_free();
+    ml_store_sync(MD.card == SH_CARD_READY || MD.card == SH_CARD_MOUNTING);
+    med_tiles_reset();
+    med_layout();
+    if (MD.view >= 0 && ML.nph) vw_show(tk_mini(at, ML.nph - 1));
+    else if (MD.view >= 0) vw_free();
+}
 static int med_tick(float dt)
 {
     if (!MD.app) return 0;
     int mv = 0;
+    if (md_del_go && md_del >= 0) { md_delete_now(); mv = 1; }
     if (MD.redo) { MD.redo = 0; med_tiles(); mv = 1; }
     if (MD.sp.live) {
         tk_spring_step(&MD.sp, dt);
@@ -1669,6 +1807,7 @@ static int med_set(const char *what, const char *key, float v)
     } else if (!tk_strcmp(what, "mview") && MD.app == MD_PHOTOS && (int)v < ML.nph) {
         vw_open((int)v, 0);
         MD.va = 1;
+        MD.tha = 1;                                  /* (at rest: no thumbnail in flight) */
         vw_place();
     } else if (!tk_strcmp(what, "mplay") && MD.app == MD_MUSIC && (int)v < ML.ntr) {
         MD.play = (int)v; MD.pstage = 1;
