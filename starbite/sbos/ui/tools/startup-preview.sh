@@ -18,7 +18,7 @@ host="$root/build/sbtk/sbtk-host"
 # Settings' root scrolled so the Startup row (its subtitle row) sits at y 521; the page's rows (pt): its first card at
 # PUSHED_TOP - 8 = 96, 52 per row (Operating Systems 122, Firmware 174, Recovery 226; the n-th OS 122 + 52 n; Firmware's
 # Diagnostics card from 287: Debug Level 313)
-open="unlock=:1 app=settings:1 sescroll=:400 tap=195,521"
+open="unlock=:1 app=settings:1 sescroll=:452 tap=195,521"   # (452: Bluetooth's root row moved Startup 52 pt down)
 while read -r name states; do
     # shellcheck disable=SC2086
     "$host" "$PAK" still "$out/$name.ppm" $states 2> "$out/$name.log" || { cat "$out/$name.log"; exit 1; }
