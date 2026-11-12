@@ -1,6 +1,7 @@
 # iOS 26 / 27 design reference for Starbite OS (sbtk)
 
-Track C, design-ref session. v1 2026-11-12. Owner of `docs/design/`. The UI session (sbos-ui-p1) builds from this file.
+Track C, design-ref session. v1.1 2026-11-12: §2 app switcher, §5 notifications, §9 lock / home / widgets and §11
+island sizes are now measured (Apple iPhone User Guide iOS 26 + 27 art, Newsroom WWDC25 full-resolution renders). Owner of `docs/design/`. The UI session (sbos-ui-p1) builds from this file.
 Companion files: [LIQUID-GLASS.md](LIQUID-GLASS.md) (the material, mapped onto our GPU compositor) and
 [GAP-LIST.md](GAP-LIST.md) (what to change in Starbite OS Next, ranked).
 
@@ -60,7 +61,7 @@ of side margin.
 | 2x1 wide (Focus) | 152 x 68.7 capsule | **150.5 x 68, r 34** | |
 | 1x2 tall slider | 68.7 x 152.5 capsule | **68 x 150.5, r 34** | |
 | 1x1 radius | full circle | **34** | |
-| "+" (top-left) and Power (top-right) | ~28 pt circles, centre y 36, outer edges on the grid margins | **28 dia, centre y 30**, outer edges x 37.25 / 352.75 | |
+| "+" (top-left) and Power (top-right) | iOS 27: ~28 pt glass circles, centre y 36, outer edges on the grid margins (iOS 26: bare glyphs at y ~40) | **28 dia, centre y 30**, outer edges x 37.25 / 352.75 | |
 | In-panel status row | centre y ~100 (Wi-Fi left, "100%" + battery right) | **centre y 92**: no island, so the band moves up 8 | |
 | First module row top | 127.4 | **119** | |
 | Rows | 127.4, 211, 294, 377.7, 461.4, 544.3 ... | **119 + 82.5 n** (119, 201.5, 284, 366.5, 449, 531.5, 614) | 7 rows fit above 700 |
@@ -125,22 +126,34 @@ Default page 1 (M, iOS 26):
 
 ## 2. App switcher  (priority 2)
 
-> v1: from the 2026-11-11 audit and iOS 17/18 behaviour (E). The measured iOS 26 values land in v1.1.
+Source: Apple iPhone User Guide "Switch between open apps", iOS 26 and iOS 27 editions (same geometry within 3 pt), M.
+Scales are ratios, so they transfer to the S9 directly. x values are @390.
 
-- Enter: in an app, swipe up from the bottom and **pause**: hold for ≥ 250 ms below 0.3 pt/ms, or release between
-  30 % and 60 % of the height.
-- Cards are app snapshots at **scale 0.60-0.64** (E), corner radius = display radius x scale (iOS: ~55 x 0.62 ≈ 34;
-  **ours: 26**, clamped up from 32 x 0.62 = 20 so it still reads as iOS).
-- The stack is horizontal, a "fanned deck": the focused card is centred; cards to its left overlap it. Card x pitch is
-  ~0.48 of the card width for cards left of centre and ~0.92 to the right (E). Left cards are slightly darker
-  (dim 0-15 % by distance).
-- Above each card: app icon 30 pt plus name 15 pt / 600 white, 8 pt above the card's top-left.
-- Flick a card up to close it: the card follows the finger 1:1. Release above −30 % height or at > 0.8 pt/ms upward
-  velocity throws it off; the neighbours close the gap on a spring with response 0.35, damping 0.85.
-- Tap a card: it grows back to full screen (response 0.40, damping 0.90).
-- Background: the wallpaper blurred heavily (same as CC), no dock.
-- Horizontal swipe along the home-indicator band (without entering the switcher) slides directly to the previous app,
-  card-to-card, with a spring of response 0.35.
+| Item | iOS 26 (M) | **Starbite (390 x 802)** |
+|---|---|---|
+| Focused card scale | **0.690** | 0.69: **269 x 553** |
+| Card behind (left) scale | 0.648 | 0.65 |
+| Card in front (right) scale | 0.700 | 0.70 |
+| Card vertical centre | 0.488 x screen height (rides ~11 pt high) | **y 391** |
+| Focused card left edge | 88.4 | **x 60.5** (centred: (390 − 269)/2) |
+| Behind card peek (to the left of the focused card) | **70** | 70 |
+| Next card (right) left edge | focused left + **209** (= 0.78 card width): it covers the focused card's right ~60 pt | focused left + 209 |
+| Stacking | cards further right sit **on top** (newest on the right, older under to the left) | |
+| Card radius | **~40** = display radius (~57) x scale | the rule gives 32 x .69 = 22 on the S9; use **30** (E) so it reads as iOS |
+| Shadow | none on light backdrops; on dark, ~20 blur, black 15-20 % (E) | |
+| Title row | app icon **25.5**, left = card left + 24, bottom 7 above the card top. Only the **focused** card shows its name: 17 / 600 white, 8 right of the icon | same |
+| Backdrop | home + wallpaper heavily blurred, dimmed ~30 % | blur + dim .30 |
+
+- **Enter:** in an app, swipe up from the home indicator and **pause** mid-screen (~1/3 height). The app shrinks with
+  the finger into a card and the neighbours slide in from the left. Light haptic when the switcher commits (E). Our
+  threshold today: < 0.3 pt/ms for 180 ms; keep it.
+- **Browse:** a horizontal pan with rubber band at the ends. Release decelerates and snaps a card into focus (spring
+  response ~0.40). Cards change scale continuously with x: interpolate .648 / .690 / .700 by position.
+- **Close:** fling a card up; it leaves with the release velocity and fades. The others close the gap (spring 0.35 /
+  0.85, E).
+- **Open:** tap a card; it scales .69 → 1 and its radius 30 → the display's (spring 0.40 / 0.90, E).
+- **Quick switch:** a horizontal swipe along the home indicator slides straight to the previous app. Full-screen cards
+  with a ~10-12 pt gap (E).
 
 ---
 
@@ -232,29 +245,49 @@ where they fill the width.
 
 ## 5. Notification Centre and banners  (priority 5)
 
-> v1: from the audit and iOS 17/18 conventions (E). The measured iOS 26 values land in v1.1.
+Source: Apple Newsroom WWDC25 iOS 26 hero (a straight-on iPhone 16 Pro lock screen, 1.972 px/pt, ±0.5 pt), M.
+Insets are fixed pt; width = screen − 2 x inset.
 
-- Platter (notification card): full width − 2 x 16 (**358** wide on 390) (E), radius **~24-26** (continuous; iOS 18
-  was 20-22, iOS 26 platters are rounder), regular glass.
-  - App icon 38 at x + 14, y + 14.
-  - Title 15 / 600; body 15 / 400 (up to 4 lines, tail truncation).
-  - Time 13 / 400 at secondaryLabel, top-right at x − 14.
-  - Padding 14.
-  - Minimum height 64 (one line) / 76 (two lines).
-- Stack (same app, collapsed): the top platter is solid; the 2nd and 3rd **peek 8 and 15 pt below** it, at scale 0.95
-  / 0.90 and alpha 0.7 / 0.4 of the glass (implemented in P3i as PEEK1 / PEEK2).
-  - Tap: fans out into a list with gaps of 8 and a "Show less" capsule header plus an "x" clear circle (spring
-    response 0.40, damping 0.85).
-- Notification Centre: pull down from the top-left / centre; the lock screen's own look (clock + date) slides in
-  from above.
-  - "Notification Centre" 34 / 700 large title only when the list is empty (E).
-  - The list is bottom-anchored, newest at the bottom (iOS 16+ lock screen layout).
-- Banner: the same platter, from the top: y = SAFE_TOP + 6 (**50** on the S9).
-  - In: slide down from −80 with a spring of response 0.45, damping 0.80 (slight overshoot).
-  - Stays 5 s (A, roughly), then out: slide up, 0.3 s.
-  - Swipe up dismisses; pull down expands.
-  - Haptic: none, unless it is a call or alarm.
-- Swipe left on a platter shows two glass actions (Options / Clear), 56 wide, scaling in from 0.8.
+### Platter
+| Item | iOS 26 (M) | **Starbite** |
+|---|---|---|
+| Side inset | **14.5** | 14.5: x 14.5, **w 361** |
+| Corner radius | **~23** (circle fit 22-24; continuous) | 23 |
+| Gap between platters | **8** | 8 |
+| Height | **24.6 + 18 x text lines** (first cap top 15 below the platter top) | same |
+| App icon / avatar | **38 x 38**, inset 13.7 from the left, **vertically centred**. A message's sending app is a ~17 pt badge at the avatar's bottom-right | same |
+| Text column | starts **65** from the platter edge | x 79.5 |
+| Title / sender | **15 / 600**, white | |
+| Body | **15 / 400**, white 90-95 %; line height **18**; lock screen truncates after **4** lines | |
+| Timestamp | 13-15 / 400 at white 60-70 %, right inset **18.3**, on the title's baseline | |
+| Material | regular glass; over a mid-grey sky it reads as a slight darkening (≈ black .12-.20 over the blurred wallpaper) with a 1 pt rim brighter at the top | lens glass (G16) |
+
+### Stacks, list, Notification Centre
+- **Display as:** Count ("N Notifications" pill), **Stack** (default: grouped per app, newest on top) or List (A).
+- Notifications collect at the **bottom** of the lock screen. The stack's bottom is **20.5** above the flashlight /
+  camera row.
+- **Collapsed group (E, not re-measured for 26):**
+  - the 2nd card is scale .95, visible 8-9 below the front, opacity .7;
+  - the 3rd is .90, a further 7-8, opacity .5.
+  - Matches PEEK1 / PEEK2.
+- **Expanded group:** a header row with the app name 20 / 700 white on the left; "Show Less" and "x" glass buttons on
+  the right; cards 8 apart.
+- **Clear:** an "x" glass circle (~31) next to the "Notification Centre" header; press-and-hold gives "Clear All". A
+  left swipe on a platter shows **Options / Clear** glass buttons (56 wide, scale in from .8); a long swipe clears.
+- **Notification Centre** = the lock-screen surface:
+  - Pull down from the top-left or centre of any screen (top-right is CC).
+  - The whole sheet follows the finger. The blur and dim ramp to full over the first ~25 % of travel; release past
+    ~1/3 commits (spring ~0.40, E).
+  - Clock, date and widgets at the top. Older history appears when scrolling up past the latest.
+
+### Banners (E unless stated)
+- The same platter, max 2 body lines.
+- On island iPhones it drops out of the island and sits **11** from the screen top, covering the status bar. On notch
+  phones it sits ~8 below the status bar.
+- **Starbite:** top **y 10** (it covers the status band; with the live pill of §11 it drops out of the pill).
+- In: from behind the island / pill, slide plus scale down, spring ~0.50 with slight overshoot.
+- Auto-dismiss after ~5-6 s, sliding back up. Swipe up dismisses; pull down expands; tap opens.
+- Haptic: the notification's own pattern only (no extra UI haptic). Persistent banners stay until dismissed.
 
 ---
 
@@ -326,35 +359,63 @@ Source: HIG iOS 26 list artwork (@2x) and MacStories iOS 26 Settings captures (M
 
 ---
 
-## 9. Lock screen, home screen, dock, widgets  (v1.1: measurements pending)
+## 9. Lock screen, home screen, dock, widgets
 
-> v1 carries the audit's numbers; the system research fills these in v1.1.
+### 9.1 Lock screen
+Source: Newsroom WWDC25 hero (iPhone 16 Pro, 402 x 874, 1.972 px/pt), M; MacStories edit-mode captures (±3); HIG
+widget sizes (A). For the S9 the vertical positions move up ~10 pt (no island: a 44 status band instead of 54-62).
 
-### Lock screen (E/A)
-- Date line 20-22 / 600 above the clock; the clock is an SF Pro **adaptive glass** clock, ~100-120 pt tall. iOS 26
-  can stretch it vertically to fill free wallpaper space; weight is user-selectable. Clock centred, tracking ~−1,
-  colon vertically centred.
-- Widgets row under the clock: accessoryCircular **72 x 72**, accessoryRectangular **~160 x 72**, inline 1 line on the
-  date row (A, WidgetKit sizes per device class, ±2).
-- Bottom: flashlight and camera **50 pt glass circles**, centres ~72 from each side, ~107 above the bottom (audit:
-  x 72 / 318, y 695 + 25).
-- Notifications at the bottom, platters as §5.
-- Unlock: swipe up from the home indicator; the lock slides up following the finger, home settles from scale 1.08.
+| Element | iOS 26 @402 (M unless noted) | **Starbite (390 x 802)** |
+|---|---|---|
+| Status bar on the lock | no time (the big clock replaces it); right cluster centre y 31 | as today (y 30) |
+| CC grabber under the right cluster | ~47 x 2.5 bar at y 48, white 60 % | 47 x 2.5 at x 300..347, y 40 |
+| Date | **22 / 600** white, centred, centre y 92 (e.g. "Tue Apr 1") | 22 / 600 centred, **centre y 82** (today 19 / 600 at baseline 96) |
+| Clock, default | digit height **~83** (≈ a 117 pt font at SF's cap ratio .71), centred, digits top ~y 120 | Display 700 → **600**, size **116**, digits top **y 108** |
+| Clock, stretched | user-resizable up to ~345 pt digits; hero mid-stretch: 188 pt digits | later (GAP #30) |
+| Clock material | iOS 26 "Glass" style: clear Liquid Glass digits, refraction and specular edges; the iOS 26.2 slider sets their glass intensity (A behaviour) | later: lens text mask (GAP #30); solid white tonight |
+| Widgets row | under the clock; with a tall clock they move above the buttons. Circular **72 x 72**, rectangular **160 x 72**, inline 234 x 26 (A, 390/393 class) | row top **y 214** |
+| Notifications | bottom-anchored; their bottom **20.5** above the button row; §5 platters | bottom at **y 677** |
+| Flashlight / camera | **50.2** glass circles at **71** from each side, centre **75 above the bottom** in the WWDC hero (Apple's later art shows ~58: unresolved) | 50 circles, centres **x 71 / 319, y 727** (today HOLD 47 / 293 + 25 → 72 / 318, y 720: move 7 down) |
+| Home indicator | **143.7 x 5**, 8.2 above the bottom (on 402); ~134 on 390 class | 134 x 5 at y 789 (today: OK) |
+| Live Activity on the lock | screen − 2 x 14.5 wide, 84-160 tall, inner margin **14**, radius ~23 (A + M) | §11 |
 
-### Home screen (A/E)
-- Icons **60** (iPhone 16: 62 at some sizes), continuous corner (squircle), radius ≈ 0.225 x size.
-- 4 columns; centres at 60 / 150 / 240 / 330 on 390 (pitch 90); row pitch ~98 (E).
-- Labels 12 / 400 white with a soft shadow, centred, 6 below the icon.
-- iOS 26 icon looks: Default, Dark, **Clear** (glass) light/dark, Tinted.
-- Dock: a glass platter inset ~**12** from the sides and bottom, radius = display radius − 12 (concentric) (E).
-  - 4 icons, height ~94.
-  - On the S9 the radius clamps: **max(32 − 12, 24) = 24**.
-- Search pill (iOS 26, replaces the page dots): glass capsule ~84 x 30, "Search" 13 / 600 with a magnifier, centred ~18
-  above the dock.
+- **Unlock (E):** the wallpaper zooms out slightly; clock and widgets fade up; home icons fly in from the edges, ~0.45 s.
+- **Wake:** a fade from black, ~0.25 s.
+- **Flashlight / camera:** press-and-hold with a **medium** haptic on activation (A behaviour).
+- **iOS 27:** an optional compact clock in the top row with the widgets; Now Playing can be cleared.
 
-### Widgets (A, HIG / WidgetKit, 390 class)
-- Small **158 x 158**, medium **338 x 158**, large **338 x 354**; radius ~22-26 (continuous); content margin 16.
-- iOS 26 widget looks: full colour, tinted, **clear glass**.
+### 9.2 Home screen
+Source: Newsroom "Home Screen customization" image (three straight-on iPhone 16 Pro, 2.0605 px/pt, ±0.5), M; @390 =
+x 0.970.
+
+| Element | iOS 26 @402 (M) | @390 | **Starbite** |
+|---|---|---|---|
+| App icon | **63.5** (squircle; circle-fit radius 16.8) | **61.6** | keep **62** (`ICON_PT`) |
+| Columns | 4; left edges 30.7 / 123 / 215.7 / 307.4: **pitch 92.3**, margin 30.6 | pitch 89.5, margin 29.7 → centres 60.5 / 150 / 239.5 / 329 | `COL_CX` 60 + 90 c (OK) |
+| Rows | 6 per page, **pitch 100.0** | 100 | `ROW_PITCH` 98 → **100** if 6 rows fit; on 802 tall keep 98 (E) |
+| Labels | 12 / 400 white, cap top ~10 below the icon, soft shadow on light wallpapers; hidden in "Large" icon mode | | 12 / **400** (today IT500) |
+| Small widgets | **164 x 164** at y 90, gap 20.9, radius **25.7** | HIG: **158** on 390/393 (A); radius 24.8 | `WID_W` 158 (OK); radius **25** (today 24) |
+| Search pill | glass capsule **~78 x 23**, centre y 719 (= 155 above the bottom); it turns into page dots while paging | | **78 x 24**, centre **y 647** (today 30 tall at y 640) |
+| Dock | glass platter, sides inset ~10-12, top 773.6 (100 above the bottom), **88 tall**, radius ~36-40 (E). 4 icons at pitch 89.4, icon top 12 below the platter top | | x 11..379, **top 702, h 88**, radius **max(32 − 11, 24) = 24**; icons at y 714 (today: dock 688 h 96, icons 705) |
+| Icon styles | Default, Dark, Clear light / dark, Tinted light / dark (A); Small / Large icon size | | Default + Dark tonight |
+
+- **Paging:** 1:1 drag, then a spring of ~0.35 s.
+- **Jiggle (E):** ±1.5° at ~7 Hz.
+- **Haptics:** medium impact for the long-press menu, light on drop.
+- **iOS 27:** extra-large widgets for Apple apps, sharper icons.
+
+### 9.3 Widgets (A, HIG table)
+| Screen (pt) | Small | Medium | Large | Circular | Rectangular | Inline |
+|---|---|---|---|---|---|---|
+| **390/393 class (ours)** | **158 x 158** | **338 x 158** | **338 x 354** | **72** | **160 x 72** | **234 x 26** |
+| 402 (16/17 Pro), M | 164 | ~349 x 164 | ~349 x 367 | | | |
+| 430 class | 170 | 364 x 170 | 364 x 382 | 76 | 172 x 76 | 257 x 26 |
+
+- Content margins **16** (standard) / **11** (tight); text ≥ 11 pt.
+- Radius ~25 for a small widget, continuous. Inner elements are concentric (ContainerRelativeShape).
+- Rendering modes: full colour, **accented** (tinted / clear: primary and accent groups tinted white), **vibrant** (lock
+  screen: greyscale → material).
+- Clear / tinted widgets = clear Liquid Glass with a white-tinted content layer.
 
 ### Dynamic Island equivalent (proposal; see §11)
 
@@ -380,6 +441,21 @@ Source: HIG iOS 26 list artwork (@2x) and MacStories iOS 26 Settings captures (M
 ---
 
 ## 11. The Dynamic Island equivalent (Starbite proposal)
+
+What iOS does (A: HIG Live Activities specs, 393 class; island measured on the 16 Pro hero):
+- The island at rest is **125.3 x 36.6**, top 13.9, a pure-black capsule.
+- **Compact:** leading and trailing views of **52.33 x 36.67** each, hugging the camera.
+- **Minimal:** 36.67-45 x 36.67, a separate circle at the right when two activities run.
+- **Expanded:** **371 x 84-160** (long-press), radius ~44.
+- Animations ≤ 2 s; expand / contract on a bouncy spring (~0.5 s, ~0.7 damping, E) with a blur cross-fade of the
+  content.
+- Non-island iPhones show a coloured capsule behind the status-bar time (A, Apple's status-icon guide):
+  - **green** = call / FaceTime;
+  - **red** = screen recording or mic recording;
+  - **blue** = hotspot, navigation, Screen Mirroring;
+  - **purple** = SharePlay.
+
+  It is ~24 tall, time width + 12 (E); tap returns to the app.
 
 The S9 has no cut-out, so there is no hardware island to wrap. iOS's own non-island iPhones (SE, 16e) put calls,
 recording and navigation in a **coloured status-bar capsule** and show Live Activities on the lock screen and as
@@ -577,7 +653,10 @@ Rules (A, HIG "Liquid Glass color"):
 - Apple HIG (fetched 2026-11-12): typography, color, layout, tab-bars, toolbars, search-fields, sheets, alerts,
   action-sheets, toggles, sliders, segmented-controls, buttons, menus, lists-and-tables, materials, motion,
   playing-haptics. https://developer.apple.com/design/human-interface-guidelines/
-- Apple iPhone User Guide, "Use and customize Control Center" (iOS 26):
+- Apple Newsroom, "Apple elevates the iPhone experience with iOS 26" (2025-06-09) full-resolution renders (lock
+  screen, home screen customisation, Live Activities): https://www.apple.com/newsroom/2025/06/apple-elevates-the-iphone-experience-with-ios-26/
+- Apple iPhone User Guide, iOS 26 and iOS 27 editions ("Switch between open apps", "View and respond to notifications",
+  status icons). Control Centre page (iOS 26):
   https://support.apple.com/guide/iphone/use-and-customize-control-center-iph59095ec58/ios
 - WWDC25 sessions 219 "Meet Liquid Glass", 356 "Get to know the new design system", 284 / 323 (UIKit / SwiftUI with the
   new design); WWDC23 "Animate with springs". https://developer.apple.com/videos/wwdc2025/
