@@ -18,8 +18,9 @@ cp "$WORK/sbwl/sbwl" "$R/sbwl"
 mkdir -p "$R/usr/bin" "$R/etc" "$R/run" "$R/root" "$R/tmp"
 cp /usr/bin/foot "$R/usr/bin/foot"
 cp "$WORK/sbwl/popuptest" "$R/usr/bin/popuptest"         # sbwl.app=popuptest: the popup check
+mkdir -p "$R/sbin" && rm -f "$R/sbin/e2fsck" && cp /usr/sbin/e2fsck "$R/sbin/e2fsck"   # init: the overlay checked first
 # the shared libraries, at their own paths, and the loader
-for f in $( (ldd "$R/sbwl"; ldd /usr/bin/foot; ldd "$R/usr/bin/popuptest") | awk '/=> \//{print $3} /^\t\/lib/{print $1}' | sort -u); do
+for f in $( (ldd "$R/sbwl"; ldd /usr/bin/foot; ldd "$R/usr/bin/popuptest"; ldd /usr/sbin/e2fsck) | awk '/=> \//{print $3} /^\t\/lib/{print $1}' | sort -u); do
     mkdir -p "$R$(dirname "$f")"
     cp -L "$f" "$R$f"
 done
