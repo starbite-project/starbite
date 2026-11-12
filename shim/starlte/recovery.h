@@ -34,6 +34,8 @@ int rec_rescue_take(void);
 #define REC_NEXT_MAINT        2
 #define REC_NEXT_MAINT_PREV   3
 #define REC_NEXT_MAINT_RESCUE 4
+#define REC_NEXT_MENU         5   /* "menu": the plain menu once (shell mode skipped), SBFW 10.3 */
+#define REC_NEXT_RECOVERY     6   /* "recovery": Starbite Recovery, asked for by an OS */
 int rec_next_take(void);
 /* The return key of an R7 mailbox when key is the one it started, else 0 (one shot). */
 const char *rec_return_key(const char *key);

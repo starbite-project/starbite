@@ -56,3 +56,29 @@ void fwb_s(struct fwb *s, const char *t);
 void fwb_u(struct fwb *s, uint64_t v);
 void fwb_x(struct fwb *s, uint64_t v, unsigned digits);
 void fwb_mb(struct fwb *s, uint64_t bytes);
+
+/* ---- ext4 / HFS+ / APFS health (read-only, superblock / volume header / container block 0) ---- */
+/* ext4: state, error counters and the first/last error, mount/write/check times, mount count, label,
+ * UUID, journal / needs_recovery / 64bit / metadata_csum, and the superblock crc32c when metadata_csum.
+ * Counts: bad magic, errors state, error count > 0, needs_recovery, bad checksum, values out of range. */
+void ext4_health(const struct fw_io *io, struct fw_out *o);
+/* HFS+ / HFSX volume header at byte 1024. Counts: no signature, not unmounted cleanly, inconsistent bit,
+ * values out of range. */
+void hfs_health(const struct fw_io *io, struct fw_out *o);
+/* APFS container superblock (block 0): Fletcher-64 verified, checkpoint area layout, volumes, the newest
+ * superblock found in the checkpoint descriptor area. Counts: bad magic, bad checksum, layout out of range. */
+void apfs_health(const struct fw_io *io, struct fw_out *o);
+
+/* the file system kinds fs_sniff / fs_health return */
+#define FS_UNKNOWN 0
+#define FS_FAT32 1
+#define FS_NTFS 2
+#define FS_EXT4 3
+#define FS_HFSPLUS 4
+#define FS_APFS 5
+#define FS_HFS 6       /* classic HFS ("BD"; maybe an HFS+ wrapper): named, not checked */
+#define FS_EXFAT 7     /* named, not checked */
+int fs_sniff(const struct fw_io *io);
+const char *fs_name(int kind);
+/* sniff, say what it is, run the matching health check; returns the kind */
+int fs_health(const struct fw_io *io, struct fw_out *o);

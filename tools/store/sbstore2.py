@@ -504,6 +504,32 @@ def settings_encode(st):
     return bytes(b)
 
 
+# The SBFW part (bytes 112..255 = st['tail'][0..144]; shim/starlte/sbfmt.h, docs/STARBITE-FIRMWARE-LAYER.md 10.1)
+SBFW_REQS = {'none': 0, 'verbose': 1, 'safe': 2, 'single': 3, 'prev': 4, 'xnu-single': 5, 'winre': 6,
+             'driver-off': 7, 'no-shell': 8}
+SBFW_STATES = {0: 'none', 1: 'armed', 2: 'applied', 3: 'done', 4: 'refused', 5: 'armed (seen)'}
+
+
+def sbfw_decode(tail):
+    t = bytes(tail)
+    if t[:3] != b'FW\x01':
+        return {'flags': 0, 'req': 0, 'state': 0, 'seq': 0, 'req_key': '', 'shell_key': '', 'undo': bytes(64)}
+    return {'flags': t[3], 'req': t[4], 'state': t[5], 'seq': struct.unpack_from('<H', t, 6)[0],
+            'req_key': t[8:32].split(b'\0')[0].decode(), 'shell_key': t[32:56].split(b'\0')[0].decode(),
+            'undo': t[56:120]}
+
+
+def sbfw_encode(f):
+    t = bytearray(144)
+    t[0:3] = b'FW\x01'
+    t[3], t[4], t[5] = f['flags'], f['req'], f['state']
+    struct.pack_into('<H', t, 6, f['seq'] & 0xffff)
+    t[8:32] = f['req_key'].encode().ljust(24, b'\0')
+    t[32:56] = f['shell_key'].encode().ljust(24, b'\0')
+    t[56:120] = f['undo']
+    return bytes(t)
+
+
 def settings_text(st):
     def name(d, v):
         return next((k for k, x in d.items() if x == v), f'? ({v})')
@@ -517,7 +543,14 @@ def settings_text(st):
             f"{'on' if st['flags'] & SET_SD_STORE else 'off'}\n"
             f"POST {post}, log level {name(LOG_LEVELS, ll)}, crash detection "
             f"{name(CRASH_MODES, st['crash_mode'])}, crash screen detail {st['crash_detail'] or 1}, after a crash "
-            f"{name(CRASH_ACTIONS, st['crash_action'])}, crash screen {tmo} s, watchdog {wdt}")
+            f"{name(CRASH_ACTIONS, st['crash_action'])}, crash screen {tmo} s, watchdog {wdt}"
+            + sbfw_text(sbfw_decode(st['tail'])))
+
+
+def sbfw_text(f):
+    req = next((k for k, v in SBFW_REQS.items() if v == f['req']), f"? ({f['req']})")
+    return (f"\nStarbite OS as the boot menu {'on' if f['flags'] & 1 else 'off'} (shell {f['shell_key'] or 'starbite-os'}), "
+            f"one-shot {req} for {f['req_key'] or '-'}: {SBFW_STATES.get(f['state'], f['state'])} (#{f['seq']})")
 
 
 def settings(a):
@@ -559,6 +592,22 @@ def settings(a):
             if not 10 <= secs <= 82:
                 sys.exit('--wdt: entry, off or 10..82 seconds')
             st['wdt_mode'], st['wdt_s'] = WDT_MODES['fixed'], secs
+    if a.shell is not None or a.shell_key is not None or a.req is not None:
+        f = sbfw_decode(st['tail'])
+        if a.shell is not None:
+            f['flags'] = (f['flags'] | 1) if a.shell == 'on' else (f['flags'] & ~1)
+        if a.shell_key is not None:
+            f['shell_key'] = a.shell_key
+        if a.req is not None:
+            f['req'] = SBFW_REQS[a.req]
+            f['state'] = 0 if a.req == 'none' else 1
+            f['seq'] += 1
+            f['req_key'] = a.req_key or ''
+            if a.req not in ('none', 'no-shell') and not a.req_key:
+                sys.exit('--req needs --req-key (the catalog key it is for)')
+        if len(f['shell_key']) > 23 or len(f['req_key']) > 23:
+            sys.exit('keys are at most 23 characters')
+        st['tail'] = sbfw_encode(f)
     if any(len(k) > 23 for k in st['keys']):
         sys.exit('keys are at most 23 characters')
     st['seq'] += 1
@@ -656,6 +705,44 @@ def report_text(r, level):
     return '\n'.join(out)
 
 
+def logs_cmd(a):
+    """The "loader-logs" bundle Starbite Recovery saves (shim/starlte/repair.c rp_logs_save): its sections
+    to OUTDIR/<name> (pmsg and dmesg as text, the rest raw)."""
+    src = Path(a.src)
+    if src.read_bytes()[:8] == b'SBLOGS01':
+        blob = src.read_bytes()
+    else:
+        blob = {n: b for n, _, b in read_store(src)}.get('loader-logs')
+        if blob is None:
+            sys.exit(f'{a.src}: no loader-logs entry')
+    if blob[:8] != b'SBLOGS01':
+        sys.exit('loader-logs: empty (Starbite Recovery > Repair and reset > Save logs fills it)')
+    ver, n = struct.unpack_from('<II', blob, 8)
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    for i in range(min(n, 160)):
+        name, off, size = struct.unpack_from('<16sII', blob, 16 + 24 * i)
+        name = name.split(b'\0')[0].decode(errors='replace') or f'section{i}'
+        data = blob[off:off + size]
+        if name in ('pmsg', 'dmesg'):
+            data = ring_text(data)
+        (out / name).write_bytes(data)
+        print(f'  {name:<16} {len(data):>8} bytes -> {out / name}')
+
+
+def ring_text(zone):
+    """A ramoops zone (u32 "DBGC", start, size, then the ring) as text, oldest first."""
+    if len(zone) < 12 or zone[:4] != b'DBGC':
+        return zone
+    start, size = struct.unpack_from('<II', zone, 4)
+    ring = zone[12:]
+    if size < len(ring):
+        text = ring[:size]
+    else:
+        text = ring[start:] + ring[:start]
+    return text.replace(b'\0', b'')
+
+
 def crashlog_cmd(a):
     import subprocess
     import tempfile
@@ -728,9 +815,16 @@ def main():
     s.add_argument('--crash-detail', dest='crash_detail', type=int, choices=range(1, 4))
     s.add_argument('--crash-action', dest='crash_action', choices=list(CRASH_ACTIONS))
     s.add_argument('--crash-timeout', dest='crash_timeout', type=int, help='seconds, 10..600 (stored in tens)')
+    s.add_argument('--shell', choices=['on', 'off'], help='Starbite OS (the shell key) instead of the boot menu')
+    s.add_argument('--shell-key', dest='shell_key', help='the shell\'s catalog key ("" = starbite-os)')
+    s.add_argument('--req', choices=list(SBFW_REQS), help='a one-shot for --req-key\'s next start (armed)')
+    s.add_argument('--req-key', dest='req_key')
     s.add_argument('--wdt', help='entry (each catalog entry\'s own), off, or SECONDS (10..82) for every entry that has one')
     ss = sub.add_parser('settings-show')
     ss.add_argument('block')
+    lg = sub.add_parser('logs')
+    lg.add_argument('src', help='store image (its "loader-logs" entry) or the raw entry')
+    lg.add_argument('out', help='directory for the sections')
     c2 = sub.add_parser('crashlog')
     c2.add_argument('src', help='store image, the raw 64 KiB entry, or "live" (the loader\'s fastboot)')
     c2.add_argument('--level', type=int, choices=range(1, 4), default=2)
@@ -762,6 +856,8 @@ def main():
         print(settings_text(st))
     elif a.cmd == 'crashlog':
         crashlog_cmd(a)
+    elif a.cmd == 'logs':
+        logs_cmd(a)
     else:
         settings(a)
 

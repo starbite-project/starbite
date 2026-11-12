@@ -19,6 +19,7 @@
 #include "ufs_fence.h"
 #include "mmu.h"
 #include "store.h"
+#include "sbfw.h"
 #include "catalog.h"
 #include "recovery.h"
 #include "post.h"
@@ -807,11 +808,12 @@ static uintptr_t image_load(volatile uint64_t *log, const struct store_ent *e, u
  * last two things before the OS starts.
  */
 static struct {
-    int valid, inform3, retry;
+    int valid, inform3, retry, prepared;
     char key[24], name[32];
-    unsigned method, wdt, lvl, flags;
+    unsigned method, wdt, lvl, flags, req;
     char xfrag[CAT_LOG_MAX + 32];
 } launch;
+static unsigned launch_why;     /* SBFW_WHY_* of the start being prepared (the SBFW table) */
 static struct cat_ent launch_ent;
 
 static void lscopy(char *d, unsigned cap, const char *s)
@@ -824,8 +826,8 @@ static void lscopy(char *d, unsigned cap, const char *s)
 
 static void launch_clear(void)
 {
-    launch.valid = launch.inform3 = 0;
-    launch.wdt = launch.flags = 0;
+    launch.valid = launch.inform3 = launch.prepared = 0;
+    launch.wdt = launch.flags = launch.req = 0;
     launch.xfrag[0] = 0;
 }
 
@@ -901,7 +903,9 @@ static const struct cat_ent *launch_prepare(const struct cat_ent *e, volatile ui
     for (unsigned i = 0; i < sizeof(launch_ent); ++i)
         dst[i] = src[i];
     launch_clear();
-    unsigned lvl = sbset_log(&s);
+    /* a one-shot request from Starbite OS for this entry (docs/STARBITE-FIRMWARE-LAYER.md 10.4) */
+    unsigned req = sbfw_req_for(e);
+    unsigned lvl = req == SBFW_REQ_VERBOSE ? 3U : sbset_log(&s);
     const char *frag = e->log[lvl];
     /* the watchdog: only where someone will feed it */
     unsigned wdt = 0, feed = e->wdt_feed, dropped = 0;
@@ -932,6 +936,10 @@ static const struct cat_ent *launch_prepare(const struct cat_ent *e, volatile ui
                 wdt = wdt_dropped(log, e->key, "s3c2410_wdt.tmr_atboot=1 tmr_margin", wdt), dropped = 1;
         }
     }
+    if (req)                    /* edits launch_ent's command line / files, XNU's fragment */
+        req = sbfw_req_apply(req, &launch_ent, launch.xfrag, sizeof(launch.xfrag));
+    launch.req = req;
+    launch.prepared = 1;
     lscopy(launch.key, sizeof(launch.key), e->key);
     lscopy(launch.name, sizeof(launch.name), e->name);
     launch.method = e->method;
@@ -2283,6 +2291,9 @@ uintptr_t star_prepare_xnu(uintptr_t fdt, volatile uint64_t *log, uint64_t el, u
     fbbg_off();
     if (entry) {
         launch_go(log);
+        /* the SBFW table for whatever starts (docs/STARBITE-FIRMWARE-LAYER.md 10.2) */
+        sbfw_handoff(launch.prepared ? launch.key : "", launch.prepared ? launch.req : 0U,
+                     launch.prepared ? launch_why : SBFW_WHY_FASTBOOT, launch.prepared ? launch.lvl : sbfw_level());
         clean_bytes(LOG_BASE, LOG_BASE + PAGE_SIZE);
     }
     return entry;
@@ -2313,6 +2324,14 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
     int next = rec_next_take();
     int rescue = next == REC_NEXT_RESCUE;
     uintptr_t entry;
+    int shell_skip = next == REC_NEXT_MENU;
+    if (next == REC_NEXT_RECOVERY && !rec) {
+        pmsg_put("STARBITE: boot-next \"recovery\": Starbite Recovery\n");
+        entry = recovery_loop(log, "ASKED FOR BY THE OS");
+        if (entry)
+            return entry;
+        next = REC_NEXT_NONE;
+    }
     if (rec) {
         pmsg_put("STARBITE: Bixby held: Starbite Recovery\n");
         if (next != REC_NEXT_NONE)
@@ -2376,7 +2395,7 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
     }
     /* Starbite Maintenance (the recovery menu's reboot, `reboot-to maint`, SBMAINT's own reboots):
      * no POST, no menu; a failure comes back to recovery with the reason. */
-    if (next >= REC_NEXT_MAINT) {
+    if (next >= REC_NEXT_MAINT && next <= REC_NEXT_MAINT_RESCUE) {
         unsigned variant = next == REC_NEXT_MAINT_PREV ? MAINT_PREV : next == REC_NEXT_MAINT_RESCUE ? MAINT_RESCUE
                                                                                                   : MAINT_NORMAL;
         entry = star_maint_boot(log, variant, MAINT_FROM_NEXT);
@@ -2400,6 +2419,8 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
         unsigned pf = (branded ? POST_F_TOUCH : 0U) | (branded && menu7_ready() ? POST_F_KEEP_LOGO : 0U) |
                       (sbset_log(&ps) >= SET_LOG_VERBOSE ? POST_F_LOG : 0U);
         int f = post_boot(sbset_post(&ps), pf, &bixby, &skipped, &why);
+        if (skipped)
+            shell_skip = 1;        /* Volume Down: the plain menu this boot (section 10.1) */
         if (f || bixby) {
             entry = recovery_loop(log, why);
             if (entry)
@@ -2407,6 +2428,7 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
         }
     }
     (void)cat_load();
+    sbfw_boot_start();             /* the one-shot request's life cycle (section 10.4) */
     /* From here every menu that waits for keys (the crash report, the boot menu, Starbite
      * Recovery) also serves USB fastboot, so the Mac can drive it (fbbg.h). It comes up at the
      * first poll of the first of them (after menu v7's intro, which polls nothing: a host would
@@ -2436,7 +2458,9 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
                 return entry;
         } else if (act == CRASH_GO_RETRY && retry >= 0) {
             launch.retry = 1;
+            launch_why = SBFW_WHY_RETRY;
             entry = boot_entry((unsigned)retry, log, fdt, cmdline);
+            launch_why = SBFW_WHY_MENU;
             launch.retry = 0;
             if (entry)
                 return entry;
@@ -2448,6 +2472,25 @@ static uintptr_t prepare(uintptr_t fdt, volatile uint64_t *log, uint64_t el, uin
         uintptr_t fb = fastboot_hook();
         if (fb)
             return fb;
+    }
+    /* Starbite OS as the boot menu (docs/STARBITE-FIRMWARE-LAYER.md 10.1): the shell starts instead
+     * of the menu; Volume Down, the "menu" key, a crash or a missing shell give the plain menu. */
+    {
+        const char *why = 0;
+        int si = sbfw_shell_pick(shell_skip, &why);
+        if (si >= 0) {
+            pmsg_put("STARBITE: shell mode: starting the shell instead of the menu\n");
+            launch_why = SBFW_WHY_SHELL;
+            entry = boot_entry((unsigned)si, log, fdt, cmdline);
+            launch_why = SBFW_WHY_MENU;
+            if (entry)
+                return entry;
+            pmsg_put("STARBITE: shell mode: the shell did not start: the menu\n");
+        } else if (why) {                       /* shell mode on: say why the menu shows */
+            pmsg_put("STARBITE: shell mode: the menu, because ");
+            pmsg_put(why);
+            pmsg_put("\n");
+        }
     }
     /* The boot menu (and Starbite Engineer) on the branded screen; XNU RAM is still free here,
      * for Engineer's RAM test. A start that fails comes back to the menu. Unbranded: iOS. */

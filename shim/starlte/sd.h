@@ -22,7 +22,7 @@ int sd_read4k(uint64_t lba, uint64_t count, uintptr_t dst);
 
 /* The write fence: slot 0..SD_FENCES-1 holds [lba, lba + count) in 4 KiB blocks (count 0 closes
  * it). Only store.c sets it, to the home card store's settings block and crash log entry. */
-#define SD_FENCES 2U
+#define SD_FENCES 3U   /* 0 settings, 1 crash log, 2 one volatile entry during store_volatile_write */
 void sd_fence(unsigned slot, uint64_t lba, uint64_t count);
 /* count 4 KiB blocks from src to 4 KiB block lba (CMD24/25, then the card's busy and CMD13 until
  * tran): 0 on success, -9 outside the fence (nothing touched), other < 0 a failed step. The

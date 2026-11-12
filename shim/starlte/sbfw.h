@@ -22,3 +22,22 @@ void sbfw_console_note(const char *a, const char *b);
  * starts. No-ops otherwise. */
 void sbfw_wdt_feed(void);
 void sbfw_wdt_release(void);
+
+/* ---- Starbite OS as the boot menu (docs/STARBITE-FIRMWARE-LAYER.md section 10) ---- */
+struct cat_ent;
+/* Once per boot, after POST (the store is up): ages the one-shot request (armed -> seen -> expired,
+ * applied -> done) and saves the record if it changed. */
+void sbfw_boot_start(void);
+/* The catalog index of the shell to start instead of the menu, or -1 (shell mode off, skip asked,
+ * a crash to show, a boot-next pending, no such ready entry). why: the reason when -1 (for pmsg). */
+int sbfw_shell_pick(int skip, const char **why);
+/* The one-shot request for this start of e (SBFW_REQ_*, 0 none): read only. */
+unsigned sbfw_req_for(const struct cat_ent *e);
+/* Apply request req to the copy e that will start (command line edits; *xfrag for XNU, cap bytes).
+ * Returns req if applied, 0 if it could not (the request is then marked refused). */
+unsigned sbfw_req_apply(unsigned req, struct cat_ent *e, char *xfrag, unsigned xcap);
+/* Right before the jump: the request applied this start (if any) is recorded, and the SBFW table
+ * is written for the OS. why: SBFW_WHY_*. */
+void sbfw_handoff(const char *key, unsigned req, unsigned why, unsigned level);
+/* The table as a hand-off now would write it (key "", why fastboot) into out: 4096 or 0. */
+unsigned sbfw_table_preview(uint8_t *out, unsigned cap);

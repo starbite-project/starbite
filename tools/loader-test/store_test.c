@@ -336,6 +336,51 @@ static void case_power_cycle(void)
     CHECK(store_head(&e, (uintptr_t)buf) == 0 && *(uint32_t *)(buf) != 0xffffffffU, "and the head reads");
 }
 
+/* SBFW (section 10): the firmware part survives the loader's ordinary settings saves */
+static void case_sbfw_part(void)
+{
+    load_ufs(D, "ufs-off.img");
+    load_card(D, "card-home.img");
+    store_cmdline("sbstore=card");
+    struct star_settings s;
+    struct sbfw_rec r, r2;
+    CHECK(settings_fw(&r) == 1 && r.fw_flags == 0, "card record without an SBFW part: zeros");
+    settings_load(&s);
+    r.fw_flags = SBFW_FLAG_SHELL;
+    r.req_action = SBFW_REQ_SAFE;
+    r.req_state = SBFW_ST_ARMED;
+    memcpy(r.req_key, "starbite-os", 12);
+    CHECK(settings_fw_save(&s, &r) == 0, "settings_fw_save writes");
+    memset(&r2, 0, sizeof(r2));
+    CHECK(settings_fw(&r2) == 1 && r2.fw_flags == SBFW_FLAG_SHELL && r2.req_state == SBFW_ST_ARMED &&
+          !strcmp(r2.req_key, "starbite-os"), "reads back");
+    settings_load(&s);
+    memcpy(s.last_key, "mac13", 6);
+    CHECK(settings_save(&s) == 0, "the menu's own save (last choice)");
+    memset(&r2, 0, sizeof(r2));
+    CHECK(settings_fw(&r2) == 1 && r2.fw_flags == SBFW_FLAG_SHELL && r2.req_action == SBFW_REQ_SAFE,
+          "the SBFW part survives the menu's save");
+    CHECK(settings_load(&s) == 1 && !strcmp(s.last_key, "mac13") && !strcmp(s.default_key, "card-def"),
+          "and the menu's fields are there");
+}
+
+static void case_sbfw_no_record(void)
+{
+    load_ufs(D, "ufs-off.img");
+    load_card(D, "card-home.img");
+    store_cmdline("sbstore=card");
+    memset(card + 2 * BLK, 0, BLK);          /* no settings record on the card yet */
+    struct star_settings s;
+    struct sbfw_rec r, r2;
+    CHECK(settings_fw(&r) == 0 && r.fw_flags == 0, "no record: zeros");
+    sbset_defaults(&s);
+    memcpy(s.default_key, "ios27", 6);
+    r.fw_flags = SBFW_FLAG_SHELL;
+    CHECK(settings_fw_save(&s, &r) == 0, "first record with an SBFW part");
+    CHECK(settings_fw(&r2) == 1 && r2.fw_flags == SBFW_FLAG_SHELL && settings_load(&s) == 1 &&
+          !strcmp(s.default_key, "ios27"), "both parts there");
+}
+
 static void case_cmdline(void)
 {
     store_cmdline("xsbstore=card sbstore=cardx sbstore=ufs");
@@ -367,6 +412,8 @@ int main(int argc, char **argv)
         { "card only, no card", case_card_only_no_card },
         { "card only, blank card", case_card_only_blank },
         { "power cycle between boot and launch (STC1)", case_power_cycle },
+        { "SBFW part kept by the menu's saves", case_sbfw_part },
+        { "SBFW part on a card without a record", case_sbfw_no_record },
         { "command line", case_cmdline },
     };
     int bad = 0;

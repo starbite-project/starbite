@@ -1594,3 +1594,209 @@ unsigned cl_excerpt(char *dst, unsigned cap, const char *src, unsigned len, uint
         *lines = (uint16_t)nl;
     return n;
 }
+
+/* ---- SBFW record and table (sbfmt.h) ----------------------------------------------------------- */
+
+#define FW_OFF 112U
+
+void sbfw_rec_decode(const uint8_t *b, struct sbfw_rec *r)
+{
+    z(r, sizeof(*r));
+    if (b[FW_OFF] != 'F' || b[FW_OFF + 1] != 'W' || b[FW_OFF + 2] != 1)
+        return;
+    r->fw_flags = b[115];
+    r->req_action = b[116];
+    r->req_state = b[117];
+    r->req_seq = (uint16_t)get(b + 118, 2);
+    sget(r->req_key, b + 120, 24);
+    sget(r->shell_key, b + 144, 24);
+    for (unsigned i = 0; i < 64; ++i)
+        r->undo[i] = b[168 + i];
+}
+
+void sbfw_rec_encode(uint8_t *b, const struct sbfw_rec *r)
+{
+    z(b + FW_OFF, SBSET_BYTES - FW_OFF);
+    b[112] = 'F';
+    b[113] = 'W';
+    b[114] = 1;
+    b[115] = r->fw_flags;
+    b[116] = r->req_action;
+    b[117] = r->req_state;
+    put(b + 118, r->req_seq, 2);
+    sput(b + 120, r->req_key, 24);
+    sput(b + 144, r->shell_key, 24);
+    for (unsigned i = 0; i < 64; ++i)
+        b[168 + i] = r->undo[i];
+}
+
+void sbset_crc_fix(uint8_t *b)
+{
+    put(b + 12, sb_crc32(b + 16, SBSET_BYTES - 16), 4);
+}
+
+const char *sbfw_req_name(unsigned q)
+{
+    switch (q) {
+    case SBFW_REQ_VERBOSE:    return "verbose";
+    case SBFW_REQ_SAFE:       return "safe";
+    case SBFW_REQ_SINGLE:     return "single";
+    case SBFW_REQ_PREV:       return "prev";
+    case SBFW_REQ_XNU_SINGLE: return "xnu-single";
+    case SBFW_REQ_WINRE:      return "winre";
+    case SBFW_REQ_DRIVER_OFF: return "driver-off";
+    case SBFW_REQ_NO_SHELL:   return "no-shell";
+    default:                  return 0;
+    }
+}
+
+/* catalog.h: M_XNU 1, M_LINUX 2, M_ANDROID 3, M_UEFI 4, M_BARE 5 (numbers, so sbfmt needs no catalog.h) */
+int sbfw_req_fits(unsigned q, unsigned m)
+{
+    switch (q) {
+    case SBFW_REQ_VERBOSE:    return m >= 1 && m <= 5;
+    case SBFW_REQ_SAFE:       return m == 5;
+    case SBFW_REQ_SINGLE:     return m == 2;
+    case SBFW_REQ_PREV:       return m == 2;
+    case SBFW_REQ_XNU_SINGLE: return m == 1;
+    case SBFW_REQ_WINRE:      return 0;           /* plan only (compiled out): docs 6.2 */
+    case SBFW_REQ_DRIVER_OFF: return m == 4;
+    case SBFW_REQ_NO_SHELL:   return 0;           /* not a start's request: the shell decision reads it */
+    default:                  return 0;
+    }
+}
+
+void sbfw_table_build(uint8_t *p, const struct sbfw_table_in *in, const char *lines, unsigned n)
+{
+    z(p, SBFW_TABLE_SIZE);
+    static const char magic[8] = { 'S', 'B', 'F', 'W', 'T', 'B', 'L', '1' };
+    for (unsigned i = 0; i < 8; ++i)
+        p[i] = (uint8_t)magic[i];
+    put(p + 8, 1, 4);
+    put(p + 16, in->debug_level, 4);
+    put(p + 20, in->req_action, 4);
+    sput(p + 24, in->key ? in->key : "", 24);
+    put(p + 48, in->console_y0, 4);
+    put(p + 52, in->console_y1, 4);
+    put(p + 56, in->fb_base, 8);
+    put(p + 64, in->stride, 4);
+    put(p + 68, in->fb_fmt, 4);
+    put(p + 72, in->loader_version, 4);
+    put(p + 76, in->boot_reason, 4);
+    put(p + 80, in->store_medium, 4);
+    put(p + 84, in->store_flags, 4);
+    put(p + 88, in->store_base, 8);
+    put(p + 96, in->store_capacity, 8);
+    put(p + 104, in->crash_kind, 4);
+    put(p + 108, in->crash_sev, 4);
+    sput(p + 112, in->crash_key ? in->crash_key : "", 24);
+    put(p + 136, in->post_fails, 4);
+    put(p + 140, in->post_warns, 4);
+    put(p + 144, in->settings_status, 4);
+    put(p + 148, in->flags, 4);
+    /* the last SBFW_LINES lines of lines[0..n), oldest first, each cut to SBFW_LINE - 1 */
+    unsigned starts[SBFW_LINES], k = 0, e = n;
+    while (e && (lines[e - 1] == '\n' || lines[e - 1] == 0))
+        --e;
+    unsigned i = e;
+    while (k < SBFW_LINES && i) {
+        unsigned s = i;
+        while (s && lines[s - 1] != '\n')
+            --s;
+        starts[k++] = s;
+        i = s ? s - 1 : 0;
+        if (!s)
+            break;
+    }
+    for (unsigned j = 0; j < k; ++j) {
+        unsigned s = starts[k - 1 - j];
+        uint8_t *d = p + 1024 + SBFW_LINE * j;
+        for (unsigned c = 0; c + 1 < SBFW_LINE && s + c < e && lines[s + c] != '\n'; ++c) {
+            uint8_t ch = (uint8_t)lines[s + c];
+            d[c] = ch >= 32 && ch < 127 ? ch : '.';
+        }
+    }
+    put(p + 12, sb_crc32(p + 16, SBFW_TABLE_SIZE - 16), 4);
+}
+
+int sbfw_table_check(const uint8_t *p)
+{
+    static const char magic[8] = { 'S', 'B', 'F', 'W', 'T', 'B', 'L', '1' };
+    for (unsigned i = 0; i < 8; ++i)
+        if (p[i] != (uint8_t)magic[i])
+            return 0;
+    return get(p + 8, 4) == 1 && sb_crc32(p + 16, SBFW_TABLE_SIZE - 16) == (uint32_t)get(p + 12, 4);
+}
+
+unsigned sbfw_age(unsigned st)
+{
+    return st == SBFW_ST_ARMED ? SBFW_ST_SEEN : st == SBFW_ST_SEEN ? SBFW_ST_REFUSED
+         : st == SBFW_ST_APPLIED ? SBFW_ST_DONE : st;
+}
+
+unsigned sbfw_shell_decide(unsigned fl, int skip, unsigned rs, unsigned ra, int crash_hold, int next_pending,
+                           int idx, int ready)
+{
+    if (!(fl & SBFW_FLAG_SHELL))
+        return SBFW_SH_OFF;
+    if (skip)
+        return SBFW_SH_SKIP;
+    if ((rs == SBFW_ST_ARMED || rs == SBFW_ST_SEEN) && ra == SBFW_REQ_NO_SHELL)
+        return SBFW_SH_NO_SHELL;
+    if (crash_hold)
+        return SBFW_SH_CRASH;
+    if (next_pending)
+        return SBFW_SH_NEXT;
+    if (idx < 0)
+        return SBFW_SH_MISSING;
+    if (!ready)
+        return SBFW_SH_NOT_READY;
+    return SBFW_SH_START;
+}
+
+const char *sbfw_shell_why(unsigned d)
+{
+    switch (d) {
+    case SBFW_SH_START:     return "start the shell";
+    case SBFW_SH_OFF:       return "shell mode off";
+    case SBFW_SH_SKIP:      return "plain menu asked (Volume Down or the \"menu\" key)";
+    case SBFW_SH_NO_SHELL:  return "the no-shell one-shot";
+    case SBFW_SH_CRASH:     return "the last start crashed: the menu shows it";
+    case SBFW_SH_NEXT:      return "a boot-next key or a one-shot next entry is pending";
+    case SBFW_SH_MISSING:   return "no shell entry in the catalog";
+    default:                return "the shell entry is not ready";
+    }
+}
+
+int sbstore_head_check(const uint8_t *h, uint64_t cap, struct sbhead_info *hi)
+{
+    z(hi, sizeof(*hi));
+    const uint8_t *b = h + 4096;
+    static const char m2[8] = { 'S', 'B', 'S', 'T', 'O', 'R', 'E', '2' };
+    for (unsigned i = 0; i < 8; ++i)
+        if (b[i] != (uint8_t)m2[i])
+            return 0;
+    if (get(b + 8, 4) != 2 || sb_crc32(b, 48) != (uint32_t)get(b + 48, 4))
+        return 0;
+    uint32_t n = (uint32_t)get(b + 12, 4), dir = (uint32_t)get(b + 32, 4), dirn = (uint32_t)get(b + 36, 4);
+    uint64_t c = get(b + 16, 8), used = get(b + 24, 8);
+    if (n > 256 || dir != 3 || dirn != 4 || get(b + 40, 4) != 2 || used > c || (cap && c != cap))
+        return 0;
+    if (sb_crc32(h + 3 * 4096, (uint64_t)n * 64U) != (uint32_t)get(b + 44, 4))
+        return 0;
+    hi->count = n;
+    hi->capacity = c;
+    hi->used = used;
+    hi->data_block = 7;
+    static const char mh[8] = { 'S', 'B', 'S', 'T', 'H', 'O', 'M', 'E' };
+    unsigned k = 0;
+    while (k < 8 && b[64 + k] == (uint8_t)mh[k])
+        ++k;
+    if (k == 8) {
+        if (get(b + 72, 4) != 1 || sb_crc32(b + 64, 24) != (uint32_t)get(b + 88, 4))
+            return 0;
+        hi->home = (int)(get(b + 76, 4) & 1U);
+        hi->data_block = get(b + 80, 8);
+    }
+    return 1;
+}

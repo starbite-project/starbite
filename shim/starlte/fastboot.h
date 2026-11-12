@@ -120,6 +120,8 @@ int fbp_cat_entry(unsigned i, const char **key, const char **name, unsigned *met
 int fbp_cat_find(const char *key);                              /* index or -1 */
 /* A log as text into out: "pmsg" (default), "dmesg", "loader", "usb". Bytes written. */
 unsigned fbp_log(const char *which, char *out, unsigned cap);
+/* The SBFW table as the next hand-off would write it (4096 bytes into out), 0 if cap is short. */
+unsigned fbp_sbfw_table(uint8_t *out, unsigned cap);
 /* Put the image where its OS wants it, exactly as the catalog's start paths do (xnu_boot.c
  * star_boot_ram); 1 when it is ready to start, 0 with *why. */
 int fbp_boot_prepare(unsigned method, const struct fb_image *img, const char **why);

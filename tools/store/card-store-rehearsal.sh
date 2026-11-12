@@ -55,6 +55,7 @@ grep -q 'entries: all' "$F/migrate.log" || fail "migrate compared the entries"
 [ "$(sum "$ud" 0 4915328)" = "$ufs_before" ] && pass "USERDATA unchanged by migrate" || fail "USERDATA changed"
 [ "$(marks)" = "$marks_before" ] && pass "p2 outside the head and the store data area untouched" || fail "p2 marks changed"
 $SB header "$W/card-store.img" | grep -q 'HOME store' && pass "card image is a home store" || fail "not home"
+[ "$(sum "$D/mmcblk0p2" 64 7)" = "$(sum "$D/mmcblk0p2" 0 7)" ] && pass "head backup at p2 blocks 64..70 = the head" || fail "head backup"
 dd if="$D/mmcblk0p2" bs=4096 skip=2 count=1 of="$F/cardset.bin" 2>/dev/null
 $SB settings-show "$F/cardset.bin" | grep -q 'default *linux' || { $SB settings-show "$F/cardset.bin"; fail "card settings = the UFS record"; }
 $SB settings-show "$F/cardset.bin" | grep -qi 'card store.*on' && pass "card settings: the UFS record, card store flag on" || { $SB settings-show "$F/cardset.bin"; fail "card flag"; }

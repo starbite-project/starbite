@@ -105,9 +105,14 @@ All of these only read. They run on demand from the per-OS page, and none mounts
 | FAT32 (WINESP, EFI) | boot sector, FSInfo, FAT[1] | signature, cluster size, **clean-shutdown and hard-error bits**, free clusters |
 | NTFS (WINDOWS) | boot sector, $MFT records 0-3, $MFTMirr | signature, cluster size, version, **$Volume dirty flag**, label, MFT vs mirror match |
 | BCD hive (Windows) | `\EFI\Microsoft\Boot\BCD` on WINESP | `regf` header checksum, **sequence numbers (clean / dirty)**, the default entry, its recovery sequence (WinRE) and whether that exists |
-| ext4 (Linux roots) | superblock | state (clean / errors), errors count, last mount and last check (**later**) |
-| HFS+ / APFS (Apple roots on microSD / USERDATA slots) | volume header / container superblock | the journal and clean-unmount bits (**later**) |
+| ext4 (Linux roots) | superblock | state (clean / errors), error count and the last error, needs_recovery (not cleanly unmounted), mount counts and times, label, UUID, the metadata_csum checksum (crc32c) |
+| HFS+ / HFSX (Apple roots on microSD) | volume header (+ the alternate at the end) | unmounted-cleanly and inconsistent bits, journaled, block counts, last mounted by, dates |
+| APFS (iOS 27 on USERDATA) | container superblock (block 0) and the newest checkpoint superblock | Fletcher-64 checksums, block size and count, checkpoint layout, volumes |
 | Store | the store's directory and settings record | entries, CRCs, settings status (the store tool already does this) |
+
+Since 2026-11-12 every per-OS page runs the matching check on that OS's root from the catalog's `root` field:
+`sd:lba A+N` (a card range), `ufs:NAME` (a GPT partition). `fs_health` sniffs FAT32 / NTFS / ext4 / HFS+ / APFS.
+Host test: `sh tools/menu/fwtest/run.sh [IMAGE...]` (36 checks, 3000 fuzzed images).
 
 ## 6. Per-OS actions
 
@@ -183,3 +188,80 @@ Safe mode (`sbfw.req=safe` in the table: no apps, no settings writes). libsb rea
   **plan** (the BCD change it would make, where, and from what to what). The write is not built in yet.
 * Host tests of the FAT32 / NTFS / BCD parsers against this phone's own files (`backup/20261107-win-profile/BCD`,
   `build/woa/ufstest-esp.img`).
+
+## 10. Starbite OS as the boot menu: the ABI (v1, 2026-11-12)
+
+The user's direction: Starbite OS replaces the boot menu. The OS chooser, the SBFW settings and the recovery UI live in
+Starbite OS. The loader stays the minimal safety net (watchdog, crash return, a key to the plain menu, Starbite
+Recovery, fastboot). Both sides use the formats below; the loader honours them whoever wrote them.
+
+### 10.1 Shell mode (who starts first)
+
+The settings record (the HOME store's block 2, card p2 after the store move) gets the SBFW part at bytes 112..255:
+
+```
+112 "FW" (u16 0x5746)   114 u8 version 1   115 u8 fw_flags (bit 0 SHELL: start the shell instead of the menu;
+                                                             bit 1 console never, bit 2 console always)
+116 u8 req_action (SBFW_REQ_*)  117 u8 req_state (0 none, 1 armed, 2 applied, 3 undone, 4 refused)  118 u16 req_seq
+120 char req_key[24]   the catalog key the one-shot is for
+144 char shell_key[24] the shell's catalog key ("" = "starbite-os")
+168 u8 undo[64]        a write action's undo record (6.1): u8 part_id, u8 len/4, u16 offset, u32 lba, u32 crc_old,
+                       u32 crc_new, the old bytes (<= 48)
+232 u8 reserved[24]    zero
+```
+A record without "FW" at 112 reads as all zero (no shell, no request): every older record.
+
+With SHELL set, on a normal start (no boot-next key, no crash to show, no Bixby, no Volume Up) the loader runs POST
+and then **starts the shell entry instead of drawing the menu**. The plain menu comes back:
+* **Volume Down held** during the boot (the key that already skips POST once): this boot only.
+* the mailbox key **`menu`** (`sb_boot_next("menu")`): this boot only, e.g. "Advanced boot menu" in Starbite OS.
+* the shell's own last start **crashed or hung** (crash.c judges it): the crash screen, then the plain menu, and the
+  shell is not started again until the next clean start.
+* the shell row is missing or does not load: the plain menu, with the reason.
+
+### 10.2 The loader to the OS: the SBFW table (0x91FFE000)
+
+Written right before every jump (every OS, not only the shell), after the launch record. 4 KiB, little endian:
+```
+0    "SBFWTBL1"   8 u32 version 1   12 u32 CRC32 of bytes 16..4095
+16   u32 debug_level 0..3           20 u32 req_action (for THIS start, 0 none)    24 char key[24] (this start)
+48   u32 console_y0, console_y1     56 u64 fb_base   64 u32 stride   68 u32 fb_fmt (0 = BGRA8888)
+72   u32 loader_version             76 u32 boot_reason (SBFW_WHY_*: 0 menu pick, 1 default/auto, 2 boot-next,
+                                                        3 shell mode, 4 retry after crash, 5 fastboot)
+80   u32 store_medium (0 UFS, 1 card)  84 u32 store_flags (bit 0 HOME)  88 u64 store_base (4 KiB blocks)
+96   u64 store_capacity              104 u32 last_crash_kind (crash.c kind, 0 none) 108 u32 last_crash_sev
+112  char last_crash_key[24]        136 u32 post_fails, post_warns   144 u32 settings_status   148 u32 flags
+                                                        (bit 0 card only, bit 1 shell mode on)
+128.. reserved up to 1024
+1024 char last_lines[24][120]       the console's last lines at hand-off (oldest first, NUL padded)
+```
+Starbite OS reads it first thing (it lies below its load address 0x92000000, beside the loader's log page
+0x91FFF000 it already reads). It tells the OS why it runs, where the home store is (no probing, no UFS guess), what the
+last start did, and what to show on its recovery page.
+
+### 10.3 The OS to the loader
+
+| Want | How (libsb) | Loader |
+|---|---|---|
+| start an OS once | `sb_boot_next(KEY)`: mailbox 0xFED17FE0 "SBNEXT2!" + key, warm reset | starts KEY (existing) |
+| start an OS, come back after | "SBNEXT2R" KEY\0RET (existing, docs/MAINTENANCE.md R7) | starts KEY, arms RET for its reset |
+| the plain menu once | `sb_boot_next("menu")` | **new**: menu, shell skipped this boot |
+| Starbite Recovery | `sb_boot_next("recovery")` | **new**: Starbite Recovery |
+| Rescue / Maintenance / loader fastboot | `sb_boot_next("rescue" / "maint" / "fastboot")` | existing |
+| change a setting (default OS, timeout, debug level, POST, watchdog, crash action, shell on/off) | read the record, change, write block 2 of the HOME store, read back (libsb `settings_save`, the codec in sbfmt) | reads it at its next start |
+| a one-shot for an OS (safe mode, single user, previous kernel, verbose once, Advanced Startup) | write `req_action/req_key`, `req_state = 1 armed`, `req_seq + 1` into the record, then `sb_boot_next(KEY)` | applies it to that start only, `req_state = 2`; at its next start runs the undo (writes) or just clears it (command-line requests), `req_state = 3` |
+
+The OS never writes anything else of the loader's. The record's CRC (bytes 16..255) covers the SBFW part.
+
+### 10.4 One-shot actions (SBFW_REQ_*)
+
+| # | Name | For | What the loader does for that one start |
+|---|---|---|---|
+| 1 | `verbose` | any | the debug level's Highest fragment instead of the configured one |
+| 2 | `safe` | bare (Starbite OS, Utility, Engineer) | table req_action = 2; the OS starts with no apps and writes no settings |
+| 3 | `single` | Linux | `single` (and `systemd.unit=rescue.target`) appended |
+| 4 | `prev` | Linux | the kernel `linux-prev.image` (or `<file>.prev`) instead of the entry's |
+| 5 | `xnu-single` | XNU | boot-arg `-s` |
+| 6 | `winre` | Windows | BCD default -> WinRE for one boot: **plan only** (compiled out, 6.2) |
+| 7 | `driver-off` | Windows | table req_action = 7; our drivers stay off (needs the UEFI to reserve the table) |
+| 8 | `no-shell` | the shell | the next start shows the plain menu (same as the mailbox key) |
