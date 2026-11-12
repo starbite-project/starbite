@@ -360,11 +360,11 @@ static void fill_device(id dev, mach_port_t port)
 	}), "@24@0:8Q16");
 	/*
 	 * S2p (2026-11-12): the import is tagged (associated object under the selector sbmtlImported, value itself, not
-	 * retained): the frontend takes a GPU wait on it as reached, as its real signaller is in another process. Kept small:
-	 * the bundle must stay exactly the card copy's size for an in-place write.
+	 * retained): the frontend takes a wait on it as reached, as its real signaller is in another process.
 	 */
 	class_replaceMethod(c, sel_registerName("newSharedEventWithMachPort:"), imp_implementationWithBlock(^id(__unsafe_unretained id me, mach_port_t p) {
-		(void)p;	/* no MISSING line here (size): the frontend logs "imported event ..." when a wait meets it */
+		(void)p;
+		missing(class_getName(object_getClass(me)), "newSharedEventWithMachPort: (local event)");
 		id ev = sbmtl_owned([(id<MTLDevice>)me newSharedEvent]);
 		objc_setAssociatedObject(ev, @selector(sbmtlImported), ev, OBJC_ASSOCIATION_ASSIGN);
 		return ev;
@@ -422,8 +422,25 @@ extern "C" id sbmtl_device(mach_port_t port)
 	static dispatch_once_t once;
 	dispatch_once(&once, ^{
 		gDevice = open_device(port);
-		if (gDevice)
+		if (gDevice) {
 			fill_device(gDevice, port);
+			/*
+			 * S2r (2026-11-12): the frontend's counters every 15 s for 6 minutes (commits/failures, completed, pipelines,
+			 * problems, passes, draws, full-screen passes ...): whether CoreAnimation keeps rendering after its first frame.
+			 */
+			dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+			    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+			dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), 15 * NSEC_PER_SEC, NSEC_PER_SEC);
+			__block int ticks = 0;
+			dispatch_source_set_event_handler(t, ^{
+				char line[512];
+				native_bridge_metal_status(line, sizeof line);
+				sm2_log("status %ds: %s", 15 * ++ticks, line);
+				if (ticks >= 24)
+					dispatch_source_cancel(t);
+			});
+			dispatch_resume(t);	/* kept alive by its handler, which captures it, until it cancels itself */
+		}
 	});
 	return gDevice;
 }

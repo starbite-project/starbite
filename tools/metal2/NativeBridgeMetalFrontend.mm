@@ -809,17 +809,21 @@ static std::string quartzCoreCallers();
 @interface NBSharedEvent : NBEvent
 @end
 static void notified(void *context,uint64_t value);
-// Starbite (macOS, S2p 2026-11-12): the macOS plugin answers a mach-port import with a local event and tags it with an
-// associated object under the selector "sbmtlImported". Its real signaller is in another process and cannot reach it, so
-// a GPU wait on it first raises it to the value waited for (CPU waits unchanged). S2p: after its first pipeline compiled,
-// WindowServer went idle with the runtime's scheduler waiting and no swap ever made: most likely CoreAnimation's frame
-// was held on this event's wait (the scheduler holds a batch until every event it waits for is reached).
-static inline __attribute__((always_inline)) bool reach_if_imported(id event,NmbEvent *handle,uint64_t value,const char *why) {
+// Starbite (macOS, S2p/S2r 2026-11-12): events whose other side is outside this process. The macOS plugin answers a
+// mach-port import with a local event tagged "sbmtlImported"; an event whose -eventPort CoreAnimation asked for (to hand
+// it to the display, which would signal it once a swapped buffer is released) is tagged "sbmtlExported" (the port given is
+// still 0). Neither will ever be signalled here, so a wait on one (GPU or CPU) first raises it to the value waited for.
+// That is also right for our display: its SwapEnd copies the surface before returning, so a buffer is free at once.
+// S2p/S2q: after the first frame setup WindowServer went idle with the runtime's scheduler waiting (it holds a batch
+// until every event it waits for is reached) and never swapped again.
+static bool reach_if_external(id event,NmbEvent *handle,uint64_t value,const char *why) {
 #if !TARGET_OS_IPHONE
- if(!objc_getAssociatedObject(event,sel_registerName("sbmtlImported")))return false;
+ const char *tag=objc_getAssociatedObject(event,sel_registerName("sbmtlImported"))?"imported":
+  objc_getAssociatedObject(event,sel_registerName("sbmtlExported"))?"exported":nullptr;
+ if(!tag)return false;
  uint64_t now=nmb_shared_event_value(handle);
  static std::atomic<int> told{0};
- if(told.fetch_add(1)<6)NBLOG(@"native-metal: imported event %s at %llu (was %llu): taken as reached",why,(unsigned long long)value,(unsigned long long)now);
+ if(told.fetch_add(1)<8)NBLOG(@"native-metal: %s event %p %s at %llu (was %llu): taken as reached",tag,(__bridge void *)event,why,(unsigned long long)value,(unsigned long long)now);
  if(now<value)nmb_shared_event_set_value(handle,value);
  return true;
 #else
@@ -829,10 +833,11 @@ static inline __attribute__((always_inline)) bool reach_if_imported(id event,Nmb
 @implementation NBSharedEvent
 - (uint64_t)signaledValue {return nmb_shared_event_value(self.handle);}
 - (void)setSignaledValue:(uint64_t)value {nmb_shared_event_set_value(self.handle,value);}
-- (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds {return nmb_shared_event_wait(self.handle,value,milliseconds);}
+- (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds {reach_if_external(self,self.handle,value,"CPU wait");return nmb_shared_event_wait(self.handle,value,milliseconds);}
 // The block runs on the listener's dispatch queue (Metal's contract); the bridge's listener thread only forwards it there.
 - (void)notifyListener:(MTLSharedEventListener *)listener atValue:(uint64_t)value block:(MTLSharedEventNotificationBlock)block {
  if(!block)return;
+ reach_if_external(self,self.handle,value,"listener");
  dispatch_queue_t queue=listener.dispatchQueue?:dispatch_get_global_queue(QOS_CLASS_DEFAULT,0);
  NSArray *job=@[self,queue,[block copy]];
  if(!nmb_shared_event_notify(self.handle,value,notified,(__bridge_retained void *)job)) {
@@ -841,6 +846,15 @@ static inline __attribute__((always_inline)) bool reach_if_imported(id event,Nmb
  }
 }
 // A handle for another process needs a kernel-backed event this bridge does not have yet: refused, never a handle that could not work.
+#if !TARGET_OS_IPHONE
+// No cross-process port yet (0, as the catch-all gave before); the event is tagged so waits on it are not held for ever.
+- (mach_port_t)eventPort {
+ objc_setAssociatedObject(self,sel_registerName("sbmtlExported"),self,OBJC_ASSOCIATION_ASSIGN);
+ static std::atomic<int> told{0};
+ if(told.fetch_add(1)<4)NBLOG(@"native-metal: eventPort of event %p asked: 0 given, its waits now count as reached",(__bridge void *)self);
+ return MACH_PORT_NULL;
+}
+#endif
 - (MTLSharedEventHandle *)newSharedEventHandle {
  if(gMissing)gMissing("NBSharedEvent","newSharedEventHandle (cross-process)");
  return nil;
@@ -1470,9 +1484,15 @@ static void scheduled(void *context);
    signal?"signal":"wait",(unsigned long long)value);
   return;
  }
- // An imported event's real signaller is in another process: a GPU wait on it is reached at once, not held for ever.
- if(!signal && reach_if_imported(event,[(NBEvent *)event handle],value,"GPU wait"))
+ // An imported or exported event's other side is outside this process: a GPU wait on it is reached at once.
+ if(!signal && [(id)event isKindOfClass:[NBSharedEvent class]] && reach_if_external(event,[(NBEvent *)event handle],value,"GPU wait"))
   return;
+ {
+  // S2r: the first event waits and signals CoreAnimation encodes, with the value then (shared events).
+  static std::atomic<int> told{0};
+  if(told.fetch_add(1)<16)NBLOG(@"native-metal: encode %s %s %p at %llu (now %lld)",signal?"signal":"wait",object_getClassName(event),
+   (__bridge void *)event,(unsigned long long)value,[(id)event isKindOfClass:[NBSharedEvent class]]?(long long)nmb_shared_event_value([(NBEvent *)event handle]):-1LL);
+ }
 #endif
  if(![(id)event isKindOfClass:[NBEvent class]]){[self refuse:@"foreign event"];return;}
  if(self.committed){[self refuse:@"event encoded after commit"];return;}

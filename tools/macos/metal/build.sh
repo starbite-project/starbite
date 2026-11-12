@@ -170,11 +170,14 @@ do_bundle() {
 	[ -f "$BR" ] && [ -f "$OUT/libvulkan_panfrost.dylib" ] || { log "bundle: run the bridge and panvk stages first"; exit 1; }
 	B=$OUT/StarbiteMetal.bundle
 	rm -rf "$B" && mkdir -p "$B/Contents/MacOS" "$B/Contents/Frameworks"
+	# -no_function_starts (2026-11-12): fixes go onto the card in place (card-file-replace.py), which needs the file at
+	# exactly the card copy's size; without this ~38 KB table (not used at run time) a rebuilt binary is smaller and is
+	# padded with zeros after its signature, as the PanVK dylib is.
 	# shellcheck disable=SC2086
 	$CC -x objective-c++ -std=c++17 -fobjc-arc -O2 -g -Wall -Wno-deprecated-declarations -Wno-unused-function \
 		-I"$ROOT/tools/metal2" -bundle -o "$B/Contents/MacOS/StarbiteMetal" \
 		"$HERE/StarbiteMetalMac.mm" "$ROOT/tools/metal2/NativeBridgeMetalFrontend.mm" -x none "$BR" \
-		-Wl,-dead_strip -Wl,-exported_symbol,_native_bridge_metal_open -Wl,-exported_symbol,_sbmtl_device \
+		-Wl,-dead_strip -Wl,-no_function_starts -Wl,-exported_symbol,_native_bridge_metal_open -Wl,-exported_symbol,_sbmtl_device \
 		-Wl,-exported_symbol,_sbmtl_status -Wl,-exported_symbol,'_OBJC_CLASS_$_StarbiteMTLDevice' \
 		-Wl,-exported_symbol,'_OBJC_METACLASS_$_StarbiteMTLDevice' \
 		-lc++ -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation
