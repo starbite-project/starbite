@@ -87,3 +87,19 @@ int sbfw_crash_count(void);
 int sbfw_crash_get(unsigned i, struct sbfw_crash *c);
 /* the loader's crash kind names (sbfmt.c sb_kind_name) */
 const char *sbfw_kind_name(unsigned kind);
+
+/* ---- update slots (docs/STARBITE-FIRMWARE-LAYER.md 10.5) ----------------------------------------------------
+ * Two volatile store entries "sbos-slot-a" (1) / "sbos-slot-b" (2): block 0 the header (sbslot_build), the image from
+ * +4096; a row whose files are "@slot|<normal file>" starts slot_try during an update's trial start, else
+ * slot_active, else its normal file. The OS stages into the inactive slot (store_volatile_grant, 4 MiB chunks,
+ * the header last), sbfw_update_arm, sb_boot_next(key); once the new image is up it calls sbfw_update_commit.
+ * Without the commit the loader's next start rolls back (slot_try cleared, req_state REFUSED). */
+int sbfw_slot_get(unsigned *active, unsigned *try_, unsigned *tries);      /* 1 if a record was read */
+int sbfw_slot_set(unsigned active, unsigned try_, unsigned tries);         /* 0, SBFW_E_INVAL / _NOHOME / SB_W_* */
+int sbfw_update_arm(const char *key, unsigned slot);   /* slot_try = slot, REQ_UPDATE armed for key: 0 or SBFW_E_* */
+int sbfw_update_commit(void);                          /* this start's trial becomes slot_active: 0 or SBFW_E_* */
+struct sbslot_info { uint32_t version; uint64_t size; uint32_t crc; char vstr[32], key[24]; };
+/* header block: "SBSLOT01", u32 1, u32 CRC32(16..4095), u64 image size, u32 image CRC32 (zlib), u32 0,
+ * char version[32] at 32, char key[24] at 64 (the catalog row) */
+int sbslot_check(const uint8_t *hdr, uint64_t entry_bytes, const char *key, struct sbslot_info *si);
+void sbslot_build(uint8_t *hdr4k, const struct sbslot_info *si);

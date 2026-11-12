@@ -126,6 +126,7 @@ const char *sbfw_req_name(unsigned q)
     case SBFW_REQ_WINRE:      return "winre";
     case SBFW_REQ_DRIVER_OFF: return "driver-off";
     case SBFW_REQ_NO_SHELL:   return "no-shell";
+    case SBFW_REQ_UPDATE:     return "update";
     default:                  return 0;
     }
 }
@@ -142,13 +143,15 @@ int sbfw_req_fits(unsigned q, unsigned m)
     case SBFW_REQ_WINRE:      return 0;           /* plan only (compiled out): docs 6.2 */
     case SBFW_REQ_DRIVER_OFF: return m == 4;
     case SBFW_REQ_NO_SHELL:   return 0;           /* not a start's request: the shell decision reads it */
+    case SBFW_REQ_UPDATE:     return m == 5;      /* bare rows with an "@slot" file */
     default:                  return 0;
     }
 }
 
 int sbfw_request_arm(const char *key, unsigned action)
 {
-    if (!sbfw_req_name(action) || action == SBFW_REQ_WINRE || action == SBFW_REQ_NO_SHELL)
+    if (!sbfw_req_name(action) || action == SBFW_REQ_WINRE || action == SBFW_REQ_NO_SHELL ||
+        action == SBFW_REQ_UPDATE)          /* update: sbfw_update_arm (it needs the slot) */
         return SBFW_E_INVAL;
     int i = key && key[0] ? cat_find(key) : -1;
     const struct cat_ent *c = i >= 0 ? cat_get((unsigned)i) : 0;
@@ -299,4 +302,132 @@ int sbfw_crash_get(unsigned i, struct sbfw_crash *c)
         }
     }
     return 0;
+}
+
+/* ---- update slots (docs/STARBITE-FIRMWARE-LAYER.md 10.5; the loader's shim/starlte/sbfmt.c, byte for byte) ---- */
+
+int sbfw_slot_get(unsigned *active, unsigned *try_, unsigned *tries)
+{
+    struct sbfw_rec r;
+    int ok = settings_fw_load(&r);
+    *active = r.slot_active;
+    *try_ = r.slot_try;
+    *tries = r.slot_tries;
+    return ok;
+}
+
+int sbfw_slot_set(unsigned active, unsigned try_, unsigned tries)
+{
+    if (active > 2 || try_ > 2 || tries > 255)
+        return SBFW_E_INVAL;
+    if (store_home() < 0)
+        return SBFW_E_NOHOME;
+    struct star_settings st;
+    struct sbfw_rec r;
+    settings_load(&st);
+    settings_fw_load(&r);
+    r.slot_active = (uint8_t)active;
+    r.slot_try = (uint8_t)try_;
+    r.slot_tries = (uint8_t)tries;
+    int e = settings_fw_save(&st, &r);
+    return e ? (e == -1 ? SBFW_E_NOHOME : e) : 0;
+}
+
+int sbfw_update_arm(const char *key, unsigned slot)
+{
+    if (slot != 1 && slot != 2)
+        return SBFW_E_INVAL;
+    int i = key && key[0] ? cat_find(key) : -1;
+    const struct cat_ent *c = i >= 0 ? cat_get((unsigned)i) : 0;
+    if (!c || !sbfw_req_fits(SBFW_REQ_UPDATE, c->method))
+        return SBFW_E_NOFIT;
+    if (store_home() < 0)
+        return SBFW_E_NOHOME;
+    struct star_settings st;
+    struct sbfw_rec r;
+    settings_load(&st);
+    settings_fw_load(&r);
+    if (r.req_state == SBFW_ST_APPLIED && r.undo[0])
+        return SBFW_E_BUSY;
+    if (slot == r.slot_active)
+        return SBFW_E_INVAL;                 /* stage into the inactive slot */
+    r.slot_try = (uint8_t)slot;
+    r.slot_tries = (uint8_t)(r.slot_tries + 1U);
+    r.req_action = SBFW_REQ_UPDATE;
+    r.req_state = SBFW_ST_ARMED;
+    r.req_seq = (uint16_t)(r.req_seq + 1U);
+    scopy(r.req_key, sizeof(r.req_key), c->key);
+    int e = settings_fw_save(&st, &r);
+    if (e)
+        return e == -1 ? SBFW_E_NOHOME : e;
+    sb_logf("sbfw: update armed for the next start of ", c->key);
+    return 0;
+}
+
+int sbfw_update_commit(void)
+{
+    if (store_home() < 0)
+        return SBFW_E_NOHOME;
+    struct star_settings st;
+    struct sbfw_rec r;
+    settings_load(&st);
+    settings_fw_load(&r);
+    if (r.req_action != SBFW_REQ_UPDATE || !r.slot_try || r.req_state != SBFW_ST_APPLIED)
+        return SBFW_E_INVAL;                 /* not this start's trial: nothing to commit */
+    r.slot_active = r.slot_try;
+    r.slot_try = 0;
+    r.req_state = SBFW_ST_DONE;
+    int e = settings_fw_save(&st, &r);
+    if (e)
+        return e == -1 ? SBFW_E_NOHOME : e;
+    sb_log("sbfw: update committed: the new version is the active one");
+    return 0;
+}
+
+static void sput_(uint8_t *dst, const char *src, unsigned n)
+{
+    unsigned k = 0;
+    for (; src && src[k] && k + 1 < n; ++k)
+        dst[k] = (uint8_t)src[k];
+    for (; k < n; ++k)
+        dst[k] = 0;
+}
+
+int sbslot_check(const uint8_t *h, uint64_t entry_bytes, const char *key, struct sbslot_info *si)
+{
+    uint8_t *q = (uint8_t *)si;
+    for (unsigned i = 0; i < sizeof(*si); ++i)
+        q[i] = 0;
+    static const char m[8] = { 'S', 'B', 'S', 'L', 'O', 'T', '0', '1' };
+    for (unsigned i = 0; i < 8; ++i)
+        if (h[i] != (uint8_t)m[i])
+            return 0;
+    if (get(h + 8, 4) != 1 || sb_crc32(h + 16, 4096 - 16) != (uint32_t)get(h + 12, 4))
+        return 0;
+    si->version = 1;
+    si->size = get(h + 16, 8);
+    si->crc = (uint32_t)get(h + 24, 4);
+    sget(si->vstr, h + 32, 32);
+    sget(si->key, h + 64, 24);
+    if (!si->size || entry_bytes < 4096 || si->size > entry_bytes - 4096)
+        return 0;
+    unsigned k = 0;
+    while (k < 23 && key[k] && key[k] == si->key[k])
+        ++k;
+    return (k == 23 || key[k] == si->key[k]) && si->key[0];
+}
+
+void sbslot_build(uint8_t *h, const struct sbslot_info *si)
+{
+    for (unsigned i = 0; i < 4096; ++i)
+        h[i] = 0;
+    static const char m[8] = { 'S', 'B', 'S', 'L', 'O', 'T', '0', '1' };
+    for (unsigned i = 0; i < 8; ++i)
+        h[i] = (uint8_t)m[i];
+    put(h + 8, 1, 4);
+    put(h + 16, si->size, 8);
+    put(h + 24, si->crc, 4);
+    sput_(h + 32, si->vstr, 32);
+    sput_(h + 64, si->key, 24);
+    put(h + 12, sb_crc32(h + 16, 4096 - 16), 4);
 }
