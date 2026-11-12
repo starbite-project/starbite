@@ -111,6 +111,7 @@ rem over a foreign opengl32.dll), Steam starts it, 45 s later a screenshot, then
 rem removed (left in place if the user's kit had put them there). The game's driver log is umdlog\GeometryDash.exe-*.log.
 set G=C:\Program Files (x86)\Steam\steamapps\common\Geometry Dash
 set GDKIT=0
+if exist %D%\sb-gd.bat goto gd1_done
 if not exist %D%\opengl32-gd.dll goto gd1_done
 if not exist "%G%\GeometryDash.exe" goto gd1_clean
 if exist "%G%\opengl32.dll.starbite" set GDKIT=1
@@ -152,13 +153,18 @@ rem T37: the sweep (sb-sweep.bat: ~27 surfaces, each as a GDI shot and a DWM dum
 rem T36's shell steps (the keyboard A/B and the hit grids are in it). Run with --full-sec 900 and no keys self-test.
 rem Track K soak (sb-soak.bat): when staged it replaces the sweep (gpu-cycle.sh --full-sec 3600)
 if exist %D%\sb-soak.bat goto soak
+if exist %D%\sb-gd.bat goto gd2
 if exist %D%\sb-sweep.bat call %D%\sb-sweep.bat
 goto after_sweep
 :soak
 call %D%\sb-soak.bat
+goto after_sweep
+:gd2
+call %D%\sb-gd.bat
 :after_sweep
 echo shell surfaces opened %time% >> gputest.log
 echo sb-gputest end %date% %time% >> gputest.log
 rem T37: with the sweep, the boot restarts itself as soon as everything is written (sbwdog's timer is the backstop)
 if exist %D%\sb-sweep.bat shutdown /r /t 15 /c "Starbite gputest done"
 if exist %D%\sb-soak.bat shutdown /r /t 15 /c "Starbite soak done"
+if exist %D%\sb-gd.bat shutdown /r /t 15 /c "Starbite GD diagnostic done"
