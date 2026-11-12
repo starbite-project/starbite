@@ -80,6 +80,12 @@ static int user_on;                         /* Track H: the user's Wi-Fi switch,
 static int surv_off, surv_was_on;           /* Track H: Survival mode holds Wi-Fi off (wifi_survival) */
 static int pm_set;                          /* Track H: power save (PM 2) set after the join */
 static int join_hidden;                     /* Track H: the pending join is by name (the network may be hidden) */
+/* Track H: back by itself after a drop (2 s, 5 s, 15 s, 30 s, then every 60 s), and a background scan for a
+ * remembered network while on and not joined (every 60 s with the screen on, 5 min off) */
+static uint64_t reconnect_at, bg_scan_at;
+static unsigned reconnect_n;
+static void reconnect_later(void);
+static int time_only;                       /* (1.2-alpha26, below) the boot's time check */
 static char jp_pass[65];                    /* the passphrase of the pending join */
 
 static void logn(const char *a, uint64_t n, const char *b);
@@ -464,12 +470,14 @@ static void os_event(void *ctx, const struct bcmw_event *ev)
             net_down();
             set_state(SBOS_WIFI_UP, "The network dropped the phone");
             joined = -1;
+            reconnect_later();
         }
     } else if (ev->type == BCMW_E_DEAUTH || ev->type == BCMW_E_DEAUTH_IND || ev->type == BCMW_E_DISASSOC_IND) {
         sb_log("wifi: left by the access point");
         net_down();
         set_state(SBOS_WIFI_UP, "The network dropped the phone");
         joined = -1;
+        reconnect_later();
     }
 }
 
@@ -835,6 +843,15 @@ static void say(const char *s)
 }
 #endif
 
+static void reconnect_later(void)
+{
+    static const uint32_t backoff[] = { 2000U, 5000U, 15000U, 30000U, 60000U };
+    if (!wifi_autojoin || wifi_in_selftest() || time_only)
+        return;
+    reconnect_at = sb_ms() + backoff[reconnect_n < 4 ? reconnect_n : 4];
+    ++reconnect_n;
+}
+
 int wifi_power(int on)
 {
     if (!on) {
@@ -879,6 +896,8 @@ int wifi_power(int on)
     w_ready = 0;
     scan_retry = 0;
     auto_pending = auto_done = 0;           /* 1.2-alpha21: one automatic join per power-on */
+    reconnect_at = bg_scan_at = 0;
+    reconnect_n = 0;
     irq_n = irq_missed = 0;
     irq_trusted = irq_kicked = 0;
     dk_next = dk_new = dk_reused = 0;      /* the DMA blocks of the first power-on, again in order */
@@ -1299,6 +1318,8 @@ int wifi_leave(void)
     }
     net_down();
     joined = -1;
+    reconnect_at = 0;
+    bg_scan_at = sb_ms() + 600000U;         /* asked to leave: no automatic join for 10 min */
     sb_log("wifi: left the network (asked)");
     set_state(SBOS_WIFI_UP, "");
     return 0;
@@ -1408,6 +1429,20 @@ void wifi_timer(unsigned id)
     if (M.now < now * 1000U)
         M.now = now * 1000U;                /* the model's clock follows the host's (a polled join's timeout) */
 #endif
+    if (st == SBOS_WIFI_UP && !time_only && !wifi_in_selftest() && wifi_autojoin && !join_pending && !join_active) {
+        /* Track H: after a drop, and now and then while not joined: a scan, then the automatic join of a known one */
+        int due = (reconnect_at && now >= reconnect_at) || (!reconnect_at && bg_scan_at && now >= bg_scan_at);
+        if (due && (nrem || sv_ok)) {
+            if (reconnect_at)
+                logn("wifi: trying to get back on a known network, attempt ", reconnect_n, "");
+            reconnect_at = 0;
+            bg_scan_at = now + (K.screen_on ? 60000U : 300000U);
+            auto_done = 0;
+            (void)wifi_scan();
+        } else if (!bg_scan_at) {
+            bg_scan_at = now + (K.screen_on ? 60000U : 300000U);
+        }
+    }
     if (auto_pending && st == SBOS_WIFI_UP) {   /* 1.2-alpha21: from the tick, not inside the chip's event */
         auto_pending = 0;
         auto_done = 1;
@@ -1533,6 +1568,8 @@ void wifi_timer(unsigned id)
             if (st == SBOS_WIFI_DHCP && net.state == SBNET_BOUND) {
                 logn("wifi: an address from DHCP (not logged), lease ", net.lease_s, " s");
                 set_state(SBOS_WIFI_CONNECTED, "");
+                reconnect_n = 0;
+                reconnect_at = 0;
                 pm_set = 0;
                 if (joined >= 0 && !nets[joined].secure && rem_find(nets[joined].ssid, nets[joined].ssid_len) < 0)
                     remember(nets[joined].ssid, nets[joined].ssid_len, "", 0, nsec[joined]);   /* Track H: open too */
