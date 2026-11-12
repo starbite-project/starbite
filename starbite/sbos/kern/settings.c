@@ -77,6 +77,7 @@ void settings_restore(void)
     if (!half[0]) {
         half[0] = sb_alloc(STATE_HALF);
         half[1] = sb_alloc(STATE_HALF);
+        prefs_init(sb_alloc(PREFS_MEM));    /* Track A: the prefs and blobs work in RAM also without a slot */
     }
     if (!half[0] || !half[1] || !hw_slot_read(half[0], half[1])) {
         sb_log("settings: no state slot yet: defaults, kept until a restart");
@@ -89,6 +90,22 @@ void settings_restore(void)
         return;
     }
     (void)state_valid(half[cur_half], &seq);
+    {
+        /* Track A: the prefs and blobs (prefs.c), before the shell asks for them (its bake runs after this) */
+        int r = prefs_restore(half[cur_half]), nk = 0, nb = 0;
+        uint32_t kb = 0, bb = 0;
+        prefs_counts(&nk, &kb, &nb, &bb);
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "settings: prefs restored: ");
+        ub_dec(&u, (uint64_t)nk);
+        ub_s(&u, " keys, ");
+        ub_dec(&u, (uint64_t)nb);
+        ub_s(&u, " blobs (");
+        ub_dec(&u, bb);
+        ub_s(&u, r ? " bytes; something was not taken: a broken entry or another version)" : " bytes)");
+        sb_log(u.b);
+    }
     const uint8_t *d = 0;
     {
         /* 0.6.3: the last heating session's record: still "running" means the power went while it heated */
@@ -331,6 +348,8 @@ void settings_timer(unsigned id)
         if (state_add(&b, id, apps[a].state, apps[a].state_n) < 0)
             sb_logf("settings: an app's state did not fit: ", apps[a].id);
     }
+    if (prefs_save(&b) < 0)                 /* Track A: the prefs and blobs (all prefs or none, each blob whole) */
+        sb_log("settings: some prefs or blobs did not fit (the slot's half is full)");
     uint32_t n = state_finish(&b);
     int w = hw_slot_write(to, half[to], n);
     if (w < 0) {

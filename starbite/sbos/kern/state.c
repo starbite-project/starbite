@@ -117,3 +117,19 @@ int state_pick(const uint8_t *a, const uint8_t *b)
         return sb > sa ? 1 : 0;
     return va ? 0 : vb ? 1 : -1;
 }
+
+/* Track A (prefs.c): walk a valid half's records. *at starts at 0; 1 a record (id NUL-terminated, its data and
+ * length), 0 past the last. */
+int state_next(const uint8_t *h, uint32_t *at, char id[24], const uint8_t **data, uint32_t *n)
+{
+    uint32_t len = get32(h + 16), o = *at < HDR ? HDR : *at;
+    if (o + 28U > len)
+        return 0;
+    for (unsigned i = 0; i < 23; ++i)
+        id[i] = (char)h[o + i];
+    id[23] = 0;
+    *n = get32(h + o + 24);
+    *data = h + o + 28;
+    *at = o + 28U + ((*n + 7U) & ~7U);
+    return 1;
+}

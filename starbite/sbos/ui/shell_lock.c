@@ -1722,7 +1722,10 @@ static int cc_tap(float x, float y)
         if (i == 2) {                        /* wifi-sbos-next: Wi-Fi is real */
             int on = CCS.wifi;
             if (sh_wifi_power(!on) < 0) toast(on ? "Wi-Fi can't stop now" : "Wi-Fi can't start now");
-            else toast(on ? "Wi-Fi off" : "Wi-Fi on: Settings > Wi-Fi to join");
+            else {
+                toast(on ? "Wi-Fi off" : "Wi-Fi on: Settings > Wi-Fi to join");
+                sh_pref_set_int("cc.wifi", !on);     /* Track A: the user's switch, kept (sh_restore) */
+            }
             return 1;
         }
         toast(i == 0 ? "Airplane mode isn't in this version yet" : "Bluetooth isn't available yet");
@@ -2521,12 +2524,43 @@ static void page_display(dc *d)
 }
 
 /* ---- P3e: Notes with an iOS keyboard. The list (each note's first line), New, and the editor: the text with a
- * caret over a dark keyboard (letters, shift, 123, space, return, delete). Kept in RAM until a restart (writing
- * them to the phone's storage needs the Starbite OS session's sbos-state path). ---- */
+ * caret over a dark keyboard (letters, shift, 123, space, return, delete). Track A: kept across restarts (the blob
+ * "notes" in the state slot, where the phone has one). ---- */
 #define NNOTES 8
 #define NOTELEN 600
 static char NOTES[NNOTES][NOTELEN];
 static struct { int n, view, cur, shift, num; } NS;
+/* Track A: the notes kept in the blob "notes" (the store saves 3 s after the last change): version 1, the count, then
+ * each note as a 2-byte length and its bytes */
+static void notes_save(void)
+{
+    static uint8_t b[2 + NNOTES * (2 + NOTELEN)];
+    unsigned n = 2;
+    b[0] = 1;
+    b[1] = (uint8_t)NS.n;
+    for (int i = 0; i < NS.n; i++) {
+        unsigned l = (unsigned)tk_strlen(NOTES[i]);
+        b[n] = (uint8_t)l; b[n + 1] = (uint8_t)(l >> 8);
+        tk_memcpy(b + n + 2, NOTES[i], l);
+        n += 2 + l;
+    }
+    (void)sh_blob_put("notes", b, n);
+}
+static void notes_load(void)
+{
+    static uint8_t b[2 + NNOTES * (2 + NOTELEN)];
+    int n = sh_blob_get("notes", b, sizeof b);
+    if (n < 2 || b[0] != 1 || b[1] > NNOTES) return;
+    int at = 2, k = 0;
+    for (; k < b[1] && at + 2 <= n; k++) {
+        int l = b[at] | b[at + 1] << 8;
+        if (l >= NOTELEN || at + 2 + l > n) break;
+        tk_memcpy(NOTES[k], b + at + 2, (size_t)l);
+        NOTES[k][l] = 0;
+        at += 2 + l;
+    }
+    NS.n = k;
+}
 static tk_layer apnote;
 static void build_app_page(int a);
 static const char *const KR[2][3] = { { "qwertyuiop", "asdfghjkl", "zxcvbnm" }, { "1234567890", "-/:;()&@\"", ".,?!'" } };
@@ -2621,7 +2655,7 @@ static void page_notes(dc *d)
             tk_memcpy(cnt + k, NS.n == 1 ? " Note" : " Notes", NS.n == 1 ? 6 : 7);
             if (NS.n) d_text_box(d, TK_IT400, 13, 195, COMPOSE_Y + COMPOSE_D / 2 + 4.7f, 200, 1, cnt, 0, 0, C_LABEL2, 0);
         }
-        if (!NS.n) { d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Notes", "Tap the pencil to write one. Notes are kept until the phone restarts."); return; }
+        if (!NS.n) { d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Notes", "Tap the pencil to write one."); return; }   /* trunk: notes persist now */
         d_rrect(d, GROUP_X, CONTENT_TOP, GROUP_W, 56.0f * NS.n - 1, 16, C_CARD);
         for (int i = 0; i < NS.n; i++) {
             char t[136];
@@ -2695,6 +2729,7 @@ static void notes_tap(float x, float y)
             NS.n--;
         }
         NS.view = 0;
+        notes_save();                                 /* Track A: kept (an empty note dropped) */
         build_app_page(AP.a);
         return;
     }
@@ -2711,6 +2746,7 @@ static void notes_tap(float x, float y)
         if (NS.shift && c >= 'A' && c <= 'Z') { NS.shift = 0; relayout = 1; }
         t[len] = c; t[len + 1] = 0;
     }
+    if (k == 1 || k == 4 || k == 5) notes_save();     /* Track A: a typed or deleted character is kept */
     if (relayout) build_app_page(AP.a); else build_note();
 }
 
@@ -3576,6 +3612,20 @@ void sh_cell(const sh_cell_t *c)
 #include "shell_switcher.inc"                       /* helper D: the app switcher */
 #include "shell_comms.inc"                          /* helper I: Phone and Messages, the call screen */
 
+/* ---- Track A: what the shell keeps across restarts (the platform's prefs and blobs), taken back once the store is
+ * ready. Cellular data is never kept (off at every boot by design); Wi-Fi comes back on when the user left it on. -- */
+void sh_restore(void)
+{
+    static int done;
+    if (done) return;
+    done = 1;
+    notes_load();
+    nc_restore();
+    cm_rec_restore();
+    sw_restore();
+    if (sh_pref_int("cc.wifi", 0) == 1) (void)sh_wifi_power(1);   /* a refusal leaves it off; the choice stays */
+}
+
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static void set_lock(float y)
 {
@@ -3906,6 +3956,7 @@ void sh_set(const char *what, const char *key, float v)
             while (key[n] && n < NOTELEN - 1) { NOTES[NS.n][n] = key[n]; n++; }
             NOTES[NS.n][n] = 0;
             NS.cur = NS.n++;
+            notes_save();                              /* Track A: kept (the host's "after a restart" stills) */
         }
         NS.view = v < 1;
         if (AP.on) build_app_page(AP.a);

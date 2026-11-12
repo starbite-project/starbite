@@ -352,10 +352,11 @@ static void wifi_tap(float x, float y)
     wf_lay(&L);
     if (x < 120 && y >= 40 && y < 86) { AS.sub = 0; build_app_page(AP.a); return; }
     if (y >= L.sw && y < L.sw + 47 && x >= 16 && x < 374) {
-        if (sh_wifi_power(!WF_ON()) < 0) {
+        int on = !WF_ON();
+        if (sh_wifi_power(on) < 0) {
             const char *y = sh_wifi_why();      /* P3n: the kernel's reason (it said "Heat?" whatever it was) */
             toast(WF_ON() ? "Wi-Fi can't stop now" : y && y[0] ? y : "Wi-Fi can't start now");
-        }
+        } else sh_pref_set_int("cc.wifi", on);  /* Track A: the user's switch, kept (sh_restore) */
         return;
     }
     if (L.conn >= 0 && y >= L.conn + 47 && y < L.conn + 94 && x >= 16 && x < 374) {

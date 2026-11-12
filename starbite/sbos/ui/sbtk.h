@@ -225,7 +225,7 @@ typedef struct {
     uint32_t bstride;
     float bk;
     uint32_t bw, bh;
-    float lx, ly, lw, lh, lb, lt, lc, lr;   /* v9 (LENS): the glass shape (screen px) and its lens (kern/lens.h) */
+    float lx, ly, lw, lh;      /* v9 (LENS): the glass shape (screen px); the quad reaches LENS_APRON px past it */
     float lsat;                /* v10 (LENS): the backdrop's saturation (0 = 1) */
     uint32_t live;             /* v10 (LENS): the backdrop is the frame's first `live` items, blurred (the platform's
                                 * gpu makes it; 0, or a platform without it: bd, the blurred wallpaper) */
@@ -233,8 +233,8 @@ typedef struct {
     uint32_t occ_w, occ_h;
     uint32_t gen;              /* the content's stamp (the layer's gen, the ground's): what a cache of the frame's
                                 * unchanged bottom items compares */
-    float lk, la0, la1;        /* 1.0 (LENS, glass V2): the tone (lens.h lens_tone of the shape's variant and press);
-                                * lk 0 = regular. The shape's tint is the lens quad's solid (premultiplied) */
+    float lq[16];              /* 1.0 (LENS, glass V3): the lens's record (kern/lens.h lens_make: the shape's size,
+                                * variant, tint, press and the backdrop's luminance under it; LQ_N floats) */
 } tk_gpu_item;
 #define TK_GPU_MAX 200     /* = GPUCOMP_MAX_QUADS (1.0: was 127, a busier frame went to the CPU) */
 
