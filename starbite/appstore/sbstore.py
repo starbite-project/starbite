@@ -886,6 +886,8 @@ def apt_install(pkgs, app_id, prog=NOPROG, cancel=None, auto=False):
     if not missing:
         prog.report(1.0)
         return []
+    if ensure_mirror_source():                           # the mirror's debs (build deps offline) just appeared
+        run(C.apt + ["-q", "update"], logto=_logp(app_id), timeout=600, cancel=cancel)
     rc, out = run(C.apt + ["-y", "-q", "--no-install-recommends", "-o", "APT::Status-Fd=@STATUSFD@",
                            "-o", "DPkg::Lock::Timeout=120", "install"] + missing,
                   logto=_logp(app_id), status_fd_cb=apt_progress_cb(prog), cancel=cancel)
