@@ -2,6 +2,7 @@
  * Starbite OS small services: SOS (docs 9), the clock (the Utility OS's tz.c), the battery and its model
  * (docs 4.5), and power (docs 4.1, 4.6). */
 #include "sb.h"
+#include "sbfw_api.h"                  /* Track A, 1.0: sb_boot_menu_next (shell mode) */
 #include "kern.h"
 #include "kinput.h"
 #include "tz.h"
@@ -765,8 +766,13 @@ void power_restart(int to_menu)
     heater_stop_all("Restarting");
     heater_trip_restore_now();              /* 1.1: the chip's trip back on before any reset we make */
     sb_mdelay(200);
-    if (to_menu)
+    if (to_menu) {
+        /* Track A, 1.0: in shell mode (Starbite OS starts at power-on) a plain restart comes back here: the boot
+         * menu is asked for once (the loader's "menu" mailbox key) */
+        if (sb_fw.valid && (sb_fw.flags & SBFW_TF_SHELL))
+            sb_boot_menu_next();
         sb_reboot(SB_INFORM_NORMAL);
+    }
     sb_boot_next("starbite-os");
 }
 

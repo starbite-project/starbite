@@ -74,7 +74,9 @@ static void dispatch_timer(unsigned owner, unsigned id)
     case KT_HOUSE:
         hw_wdt_feed();
         /* 0.1: started and never touched for 10 minutes (an unattended test boot): back to the menu */
-        if (!K.any_input && !heater_running_ui() && !sos_active() && sb_ms() - K.deadman_t0 >= 600000U) {
+        /* Track A, 1.0: not in shell mode, where Starbite OS is the phone's own system (an untouched phone stays on) */
+        if (!K.any_input && !heater_running_ui() && !sos_active() && sb_ms() - K.deadman_t0 >= 600000U &&
+            !(sb_fw.valid && (sb_fw.flags & SBFW_TF_SHELL))) {
             sb_log("sbos: no touch or key for 10 minutes since the start: back to the menu");
             power_restart(1);               /* the LED, the heater and the radio off first (0.5.12) */
         }
