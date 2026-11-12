@@ -128,7 +128,7 @@ the same layout with the roles swapped (a later step).
 ## 7. The probe (drvprobe.h)
 
 ```c
-int drv_audio_probe(int level, unsigned *wait_ms);   /* budget_ms 10000 (each level enforces its own: 2 / 4 / 10 s) */
+int drv_audio_probe(int level, unsigned *wait_ms);   /* budget_ms 12000 (each level enforces its own: 2 / 12 / 10 s) */
 void drv_audio_abort(void);
 ```
 
@@ -138,19 +138,50 @@ void drv_audio_abort(void);
   ID through `audio_probe()` (reads it only if the codec is powered and out of reset). Lines:
   `drvprobe: audio: PASS read only: AUD domain off (nothing in it read), amps/codec as logged` (or `... on, PLL_AUD
   read ...`); `FAIL the amplifiers did not answer (0x39 / 0x3A on HSI2C 0x108C0000)`.
-- Level 1 (silent, ~1.6 s, budget 4 s): apcm_up; RDMA0 plays zeroes to UAIF1 for 1 s with the amps OFF, measuring the
-  bytes per second from STATUS; then WDMA1 from UAIF0 for 0.5 s with the codec untouched (expected: a moving pointer at
-  192000 B/s and near-zero data; the codec's TX pin is idle); everything down, the domain back as found. Polls every
-  50 ms (must be < 341 ms). Lines: `PASS RDMA0 -> UAIF1 and UAIF0 -> WDMA1 ran at 48 kHz 16-bit stereo; all back as
-  found`; FAILs: `RDMA0 did not move ...`, `RDMA0 moved at the wrong rate: its CTRL0 format bits are needed ...`,
-  `... WDMA1 did not move ...`, `ABOX did not come up in bypass ...`, `the AUD domain is not back as found`,
-  `out of time: everything put back`.
+- Level 1 (silent, ~1.6 s, up to ~6 s with the sweep, budget 12 s): apcm_up; RDMA0 plays zeroes to UAIF1 for 1 s
+  with the amps OFF, measuring the bytes per second from STATUS. If RDMA0 does not move: `apcm_dump` (7 read-only
+  lines, see 8) and the **RDMA0 trial sweep** (276 settings, ~8 ms each, stops at the first that moves RDMA0: DYN_CLOCK_OFF
+  0, QCHANNEL_DISABLE all, SBANK_LIMIT 4 at 4 shifts, CTRL0 single bits 1..18 and 23..31, CTRL1 single bits and 9<<s,
+  then CTRL0 9<<s + one bit). A setting that moves RDMA0 is adopted (`apcm_trial_adopt`) and RDMA0's rate measured
+  again for 0.5 s with it. Then WDMA1 from UAIF0 for 0.5 s with the codec untouched (with the adopted setting too;
+  expected: a moving pointer at 192000 B/s, near-zero data); a dump if it does not move; everything down, the domain
+  back as found. Polls every 50 ms (must be < 341 ms). Lines: `PASS RDMA0 -> UAIF1 and UAIF0 -> WDMA1 ran at 48 kHz
+  16-bit stereo; all back as found`; `FAIL FOUND: RDMA0 runs at 48 kHz only with <setting>; WDMA1 moved with it too`
+  (the setting to make the default); FAILs: `RDMA0 did not move, nor with any trial setting (dump above): media needs
+  Calliope here`, `RDMA0 moved at the wrong rate ...`, `... WDMA1 did not move ...`, `ABOX did not come up in bypass
+  ...`, `RDMA0 did not stop during the trials`, `the AUD domain is not back as found`, `out of time: everything put
+  back`.
 - Level 2 (attended, ~4.1 s, budget 10 s): 1 kHz at -20 dBFS through the real mixer: 1 s earpiece at amp level 0, 1 s
   loudspeaker at amp level 0 (the quietest), then 2 s of the main mic with its RMS and peak logged. Line:
   `PASS 1 kHz sent to the earpiece and the loudspeaker (ask: both heard, quietly?); mic recorded` with
   `drvprobe: audio: mic: N samples in 2 s, RMS r, peak p (of 32767)` before it.
 
 ## 8. Risks and what is left
+
+**First phone run (drvprobe-adbf542, 2026-11-12):** AUD was on at boot; up, clocks, SysMMU (4 -> 0), pins, banks all
+took; RDMA0 then read 0 bytes in 1 s (UAIF1 STATUS 0) and WDMA1 wrote 0 (STATUS 0x80000000: in progress, nothing
+written; UAIF0 STATUS 2 = ERROR_OF_MIC: UAIF0 clocked and its FIFO overflowed, so the I2S side runs and the stall is
+between the SPUS/SPUM and memory). Compared with an earlier port's bypass, which played on this phone, two things differed:
+1. an earlier port makes the DTZPC restore SMC every time; we skipped it because the domain was already on. **Changed:** it is
+   now always made (a refusal only fails when we switched the domain on ourselves).
+2. an earlier port (default `abox_rdma_fmt=1`) writes RDMA0 / WDMA1 CTRL0's FUNC 0, FORMAT (16-bit stereo) and BUF_UPDATE, and
+   SBANK_LIMIT, "calliope's values" from a third reading (the Galaxy Tab Active3's). No public source names those bit
+   positions (Samsung's 9810 and S10 headers name only ENABLE and BURST_LEN). Both DMAs stalling fits a missing
+   BUF_UPDATE / FORMAT. **Diagnosed on the phone:** the level-1 sweep above finds the bit(s) if one or a format value
+   plus one bit is enough, and the dump shows everything else.
+
+Whether bypass can work: an earlier port's CHANGELOG lists the S9 speakers as seen working through exactly this path (RDMA0 ->
+SIFS1 -> UAIF1, SysMMU off, CPU off) at 192000 B/s, so the hardware allows it; what we lack is the CTRL0 / SBANK_LIMIT
+values. If the sweep finds nothing, media goes through Calliope (RDMA0 as a Calliope PCM: PCM_SET_BUFFER / HW_PARAMS /
+TRIGGER, the RDMA0 IOVA window mapped by abox.c), which is also what media needs while Cellular is on (section 5).
+
+`apcm_dump` lines ("apcm: dump <tag>: ..."): PMU AUD / CPU / pads, SYSPOWER ctrl/status, SYSTEM_CONFIG0, REMAP,
+DYN_CLOCK_OFF, QCHANNEL_DISABLE; CMU_AUD PLL_CON0/3, lock, muxes, every divider; the Q-channel words 0x3000-0x302C and
+0x3060; the SysMMU's CTRL/CFG/STATUS/INT/fault address; ROUTE_CTRL0-2, SPUS_CTRL0-3, the RDMA0 and MIXP sample banks,
+SPUM_CTRL0-3, NSRC0's bank; UAIF0/1 CTRL0/CTRL1/STATUS, the gpb0/gpb1 pins; RDMA0 and WDMA1 0x00-0x30. Read only,
+nothing if the domain is off. Also logged once a boot when the running engine finds RDMA0 stalled. `apcm_up` now logs
+one "found" line (RDMA0 / WDMA1 CTRL0, UAIF1 CTRL0, DYN_CLOCK_OFF, QCHANNEL_DISABLE, SYSPOWER) before it changes them;
+RDMA0 CTRL0/CTRL1/SBANK_LIMIT, WDMA1 CTRL0/SBANK_LIMIT and DYN_CLOCK_OFF are put back by `apcm_down` too.
 
 - **RDMA0's CTRL0 format** is not in the 9810's source: CTRL0 is left as after reset (plus BURST_LEN 8 and ENABLE).
   Level 1 measures the rate; if it is not 192000 B/s, `apcm_cfg.rdma_ctrl0_or` takes the format bits (the S10's
@@ -168,8 +199,10 @@ void drv_audio_abort(void);
 
 ## 9. Host test
 
-`sh starbite/sbos/kern/host/snd-test.sh` (160 checks): bring-up and stop order, no write outside the audio blocks and
+`sh starbite/sbos/kern/host/snd-test.sh` (202 checks): bring-up and stop order, no write outside the audio blocks and
 no access to the domain while it is off, the mixer (sum, volume, clipping, mono / stereo, mute, jack), tones by zero
 crossings, the guard on a full-scale square, call suspend / resume and a missed suspend, eleven injected failures each
-leaving AUD off and the pins as found, capture, and each probe level (with its FAILs, abort and time-out).
+leaving AUD off and the pins as found, capture, and each probe level (with its FAILs, abort and time-out), plus the
+phone's case: DMAs that move only with an unknown CTRL0 bit (the dump, the sweep finding and adopting it, WDMA1
+moving with it, all back as found, the dump writing nothing) and a sweep that finds nothing.
 `kern/host/audio-test.sh` and the abox host test still pass.
