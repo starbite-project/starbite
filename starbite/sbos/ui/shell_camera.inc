@@ -1,7 +1,7 @@
 /* The Camera (iOS 26's, dark) on Track A's front-camera driver (shell.h sh_cam_*; included by shell_lock.c next to
  * shell_apps.inc).
  *
- * The page: the static controls are the app's strips (page_camera: the top row's glass circles, the mode strip with
+ * The page: the static controls are the app's strips (page_camera: the top row's circles, the mode strip with
  * PHOTO in yellow and VIDEO disabled, the shutter's white ring, the thumbnail's and the flip button's circles); the
  * ground is the app's own (black). The live parts are small layers of this file, linked into the page after the
  * strips (cam_layers):
@@ -12,14 +12,16 @@
  *   - cammsg:   the empty state (iOS's ContentUnavailableView): the camera refused or stopped, in sh_cam_why's words;
  *   - camflash: the flash button's glyph (off: struck through; on: yellow);
  *   - camshut:  the shutter's white disc (it shrinks on a shot);
- *   - camthumb: the last photo, a circle at the bottom left (it grows in);
+ *   - camthumb: the newest photo (the store's at the open, then each shot's), a circle at the bottom left (it grows
+ *               in after a shot); a tap opens Photos at that photo;
  *   - camwhite: the front flash: the whole screen white (and the panel at its brightest) while the still is taken.
  * The lifecycle: APPHOOK's on_show asks for the camera; the next turn after the page's strips are drawn opens it
  * (never in a tap); on_hide (the app closed, another app, the lock, sleep, a film's reset: all go through
  * app_finish_close) closes it and frees every bitmap. A shot: the tap asks sh_cam_still (or starts the front flash);
- * later turns poll sh_cam_still_get, then make the photo's 360 x 480 copy (the review) and the thumbnail from it.
- * There is no photo store yet: cam_save is the one place a photo would be kept (it becomes Track A's sh_photo_save);
- * until then the photo lives in RAM until Camera closes, and the first shot says so. ------------------------------- */
+ * later turns poll sh_cam_still_get, then make the photo's 360 x 480 copy and the thumbnail from it; once the
+ * thumbnail has grown in, the next turn keeps the photo in Track A's store (sh_photo_save blocks ~0.2-0.4 s on the
+ * phone, so never in the tap, and only after the blink and the thumbnail are on the screen). A refusal says why in a
+ * toast; that photo then stays in RAM until Camera closes and its thumbnail shows it in the viewfinder. ----------- */
 
 #define CAM_PW 360                      /* the preview asked of the driver (its CAMERA.md's choice: each preview pixel  */
 #define CAM_PH 480                      /* costs the kernel's render a non-cacheable read); drawn 4x: 1440 x 1920 px */
@@ -41,7 +43,9 @@ enum { CS_OFF, CS_RUN, CS_FAIL };
 static tk_layer campv, camblink, cammsg, camflash, camshut, camthumb, camwhite;
 static tk_bmp camrev;                   /* the last photo at the preview's size (cached: the review, the thumbnail) */
 typedef struct {
-    int want, st, flash, review, shot, have, stalled, told, nphotos;   /* shot: 0 none, 1 the white rising, 2 asked */
+    int want, st, flash, review, shot, have, stalled, nphotos;   /* shot: 0 none, 1 the white rising, 2 asked, 3 to save */
+    int last, stored, photos;                                    /* last: the store's newest to show; stored: the
+                                                                  * thumbnail is a kept photo; photos: go to Photos */
     unsigned seq;
     float t_open, t_last, t_ask, t_white, t_why;                       /* ms (sh_tick's clock) */
     float blink, press, white, thumb_in;                               /* the animations' clocks, s (< 0 idle) */
@@ -51,13 +55,8 @@ typedef struct {
 #define CAM_STATE0 { .st = CS_OFF, .blink = -1, .press = -1, .white = 0, .thumb_in = -1 }
 static cam_state CAM = CAM_STATE0;
 
-/* the one place a photo is kept: Track A's photo store (sbos-photos, a ring of about 30) lands as sh_photo_save(argb,
- * w, h); wire it here. 0 kept, < 0 not (today: there is no store, the card's exFAT is read-only) */
-static int cam_save(const uint32_t *px, int w, int h)
-{
-    (void)px; (void)w; (void)h;
-    return -1;                          /* becomes: return sh_photo_save(px, w, h); */
-}
+/* the one place a photo is kept: Track A's store (sbos-photos: the newest 32). 0 kept, < 0 not (sh_photo_why) */
+static int cam_save(const uint32_t *px, int w, int h) { return sh_photo_save(px, w, h); }
 
 /* the circles: iOS's glass over the black ground reads as a dark grey disc with a faint rim. Drawn flat: the GPU's lens
  * (kit_shape) samples the wallpaper's backdrop, not the app's black ground (it showed the wallpaper's blue), and a
@@ -79,6 +78,16 @@ static void cam_bolt(dc *d, float cx, float cy, int on)
     if (!on) d_seg(d, cx - 8, cy - 8, cx + 8, cy + 8, 1.8f, W(.95f));
 }
 static int cam_ok(void) { return CAM.st == CS_RUN; }
+/* mk / tk_layer_init on a layer that is linked: its place in the page's list kept (init clears next, which would cut
+ * the layers after it loose until the next relink) */
+static void cam_init(tk_layer *l, const char *name) { tk_layer *nx = l->next; tk_layer_init(l, name); l->next = nx; }
+static dc cam_mk(tk_layer *l, const char *name, float x, float y, float w, float h, float mg, int glass)
+{
+    tk_layer *nx = l->next;
+    dc d = mk(l, name, x, y, w, h, mg, glass);
+    l->next = nx;
+    return d;
+}
 /* an arc clockwise from a0 (0: the top) through sweep, and an arrow head at its end pointing on round */
 static void cam_arc_head(dc *d, float cx, float cy, float r, float a0, float sweep, tk_col c)
 {
@@ -125,7 +134,7 @@ static void page_camera(dc *d)
 static void cam_draw_flash(void)
 {
     relayer(&camflash);
-    dc d = mk(&camflash, "cam-flash", CAM_FLASH_X - 12, CAM_TOP_Y - 12, 24, 24, 1, 0);
+    dc d = cam_mk(&camflash, "cam-flash", CAM_FLASH_X - 12, CAM_TOP_Y - 12, 24, 24, 1, 0);
     if (!d.b->px) return;
     cam_bolt(&d, CAM_FLASH_X, CAM_TOP_Y, CAM.flash);
     camflash.hidden = 0;
@@ -133,7 +142,7 @@ static void cam_draw_flash(void)
 static void cam_draw_shutter(void)
 {
     relayer(&camshut);
-    dc d = mk(&camshut, "cam-shutter", CAM_SH_X - CAM_SH_R, CAM_SH_Y - CAM_SH_R, 2 * CAM_SH_R, 2 * CAM_SH_R, 1, 0);
+    dc d = cam_mk(&camshut, "cam-shutter", CAM_SH_X - CAM_SH_R, CAM_SH_Y - CAM_SH_R, 2 * CAM_SH_R, 2 * CAM_SH_R, 1, 0);
     if (!d.b->px) return;
     d_rrect(&d, CAM_SH_X - CAM_SH_R, CAM_SH_Y - CAM_SH_R, 2 * CAM_SH_R, 2 * CAM_SH_R, CAM_SH_R, W(cam_ok() ? 1 : .3f));
     camshut.ox = PT(CAM_SH_X);
@@ -150,7 +159,7 @@ static void cam_msg(const char *title, const char *line)
     float wm;
     int n = line && line[0] ? wrapn(ln, 3, TK_IT400, 15, line, 300, &wm) : 0;
     float h = 36 + 20.0f * n - (n ? 2 : 8), gh = 44, top = tk_floorf(CAM_VF_Y + (CAM_VF_H - h - gh) / 2) + gh;
-    dc d = mk(&cammsg, "cam-msg", 40, top - gh, 310, h + gh + 6, 0, 0);
+    dc d = cam_mk(&cammsg, "cam-msg", 40, top - gh, 310, h + gh + 6, 0, 0);
     if (!d.b->px) return;
     /* the glyph: a camera body, its lens, struck through */
     float gx = 195, gy = top - gh + 12;
@@ -205,11 +214,10 @@ static void cam_stop(void)
     tk_layer *L[] = { &campv, &camblink, &cammsg, &camflash, &camshut, &camthumb, &camwhite };
     for (int i = 0; i < 7; i++) { relayer(L[i]); L[i]->solid = 0; L[i]->hidden = 1; L[i]->sx = L[i]->sy = 1; }
     tk_bmp_free(&camrev);
-    int flash = CAM.flash, told = CAM.told;
+    int flash = CAM.flash;
     static const cam_state zero = CAM_STATE0;
     CAM = zero;
     CAM.flash = flash;                                /* the flash setting stays (iOS keeps it) */
-    CAM.told = told;
 }
 static void cam_fail(const char *why)
 {
@@ -221,19 +229,20 @@ static void cam_fail(const char *why)
 static void cam_start(float t)
 {
     cam_draw_flash();
-    tk_layer_init(&camblink, "cam-blink");          /* solids: no bitmaps */
+    CAM.last = 1;                                    /* the store's newest as the thumbnail, on the next turn */
+    cam_init(&camblink, "cam-blink");          /* solids: no bitmaps */
     camblink.solid = 0xff000000u;
     camblink.x = 0; camblink.y = tk_floorf(PT(CAM_VF_Y));
     camblink.solid_w = TK_W; camblink.solid_h = 4 * CAM_PH;
     camblink.hidden = 1;
-    tk_layer_init(&camwhite, "cam-white");
+    cam_init(&camwhite, "cam-white");
     camwhite.solid = 0xffffffffu;
     camwhite.solid_w = TK_W; camwhite.solid_h = TK_H;
     camwhite.hidden = 1;
     int r = sh_cam_open(CAM_PW, CAM_PH);
     if (r < 0) { cam_fail(sh_cam_why()); return; }
     relayer(&campv);
-    tk_layer_init(&campv, "cam-preview");
+    cam_init(&campv, "cam-preview");
     if (!tk_bmp_new(&campv.bmp, CAM_PW, CAM_PH)) { sh_cam_close(); cam_fail("There isn't enough memory for the preview."); return; }
     campv.x = campv.ox = 0;
     campv.y = campv.oy = tk_floorf(PT(CAM_VF_Y));
@@ -274,7 +283,7 @@ static int cam_pull(float t)
 /* the still (612 x 816, uncached) into the review's 360 x 480 (2 x 2 means, two source rows copied at a time) and
  * the thumbnail's circle from that */
 static uint32_t cam_rows[2][816];
-static void cam_take(const uint32_t *px, int w, int h)
+static void cam_take(const uint32_t *px, int w, int h, int grow)
 {
     if (w <= 1 || h <= 1 || w > 816) return;
     if (!camrev.px && !tk_bmp_new(&camrev, CAM_PW, CAM_PH)) return;
@@ -293,7 +302,7 @@ static void cam_take(const uint32_t *px, int w, int h)
     }
     /* the thumbnail: the photo's middle square in a 40 pt circle (2 x 2 means of the review, edge smoothed) */
     relayer(&camthumb);
-    dc d = mk(&camthumb, "cam-thumb", CAM_THUMB_X - 20, CAM_SH_Y - 20, 40, 40, 1, 0);
+    dc d = cam_mk(&camthumb, "cam-thumb", CAM_THUMB_X - 20, CAM_SH_Y - 20, 40, 40, 1, 0);
     if (!d.b->px) return;
     float cx = PT(CAM_THUMB_X) - d.ox, cy = PT(CAM_SH_Y) - d.oy, r = PT(20), sc = CAM_PW / (2 * r);
     int y0 = (CAM_PH - CAM_PW) / 2;
@@ -313,8 +322,19 @@ static void cam_take(const uint32_t *px, int w, int h)
     camthumb.ox = PT(CAM_THUMB_X);
     camthumb.oy = PT(CAM_SH_Y);
     camthumb.hidden = 0;
-    CAM.thumb_in = 0;
+    CAM.thumb_in = grow ? 0 : -1;
     CAM.nphotos++;
+}
+/* the store's newest photo as the thumbnail (at the open; ~0.1 s read on the phone, a turn of its own) */
+static void cam_last(void)
+{
+    int w = 0, h = 0;
+    long long utc = 0;
+    if (sh_photo_count() <= 0 || sh_photo_get(0, 0, 0, &w, &h, &utc) <= 0 || w > 816 || h < 2) return;
+    uint32_t *px = tk_alloc((size_t)w * (size_t)h * 4);
+    if (!px) return;
+    if (sh_photo_get(0, px, w * h, &w, &h, &utc) > 0 && w <= 816) { cam_take(px, w, h, 0); CAM.stored = 1; }
+    tk_free(px);
 }
 static void cam_review(int on)
 {
@@ -349,7 +369,15 @@ static int cam_tick(float dt, float t)
 {
     if (!is_app("camera") || AP.closing) return 0;
     int mv = 0;
-    if (CAM.want && !ap_pending) { CAM.want = 0; cam_start(t); relink(); mv = 1; }
+    if (CAM.want && !ap_pending) { CAM.want = 0; cam_start(t); relink(); return 1; }
+    if (CAM.last) { CAM.last = 0; if (!CAM.nphotos) cam_last(); return 1; }
+    if (CAM.photos) {                                /* the thumbnail: Photos at the newest photo (this app goes) */
+        int a = -1;
+        for (int k = 0; k < NAPPS; k++) if (!tk_strcmp(APPS[k].k, "photos")) a = k;
+        CAM.photos = 0;
+        if (a >= 0) { md_want_store = 0; app_finish_close(); app_open(a); }
+        return 1;
+    }
     if (CAM.st == CS_RUN) {
         mv |= cam_pull(t);
         /* no new frame for a while: say why (the driver's words), and again when they change */
@@ -377,12 +405,17 @@ static int cam_tick(float dt, float t)
         const unsigned char *bmp = 0;
         unsigned len = 0;
         const uint32_t *px = CAM.st == CS_RUN ? sh_cam_still_get(&w, &h, &bmp, &len) : 0;
-        if (px) {
-            CAM.shot = 0;
-            if (cam_save(px, w, h) < 0 && !CAM.told) { CAM.told = 1; toast("Not saved: kept until Camera closes"); }
-            cam_take(px, w, h);
-        } else if (t - CAM.t_ask > 4000) { CAM.shot = 0; toast("The photo didn't come"); }
-        if (!CAM.shot) cam_white_end();
+        if (px) { CAM.shot = 3; cam_take(px, w, h, 1); CAM.stored = 0; }   /* kept once the thumbnail has grown in */
+        else if (t - CAM.t_ask > 4000) { CAM.shot = 0; toast("The photo didn't come"); }
+        if (CAM.shot != 2) cam_white_end();
+    } else if (CAM.shot == 3 && CAM.thumb_in < 0) {
+        int w = 0, h = 0;
+        const unsigned char *bmp = 0;
+        unsigned len = 0;
+        const uint32_t *px = CAM.st == CS_RUN ? sh_cam_still_get(&w, &h, &bmp, &len) : 0;   /* (still the driver's) */
+        CAM.shot = 0;
+        if (px && cam_save(px, w, h) == 0) CAM.stored = 1;
+        else { char b[120]; int n = md_cat(b, 0, sizeof b, "Not saved: "); md_cat(b, n, sizeof b, px ? sh_photo_why() : "the photo was gone"); toast(b); }
     }
     if (!CAM.shot && CAM.white > 0) CAM.white = tk_maxf(0, CAM.white - dt / .3f);
     if (CAM.blink >= 0) { CAM.blink += dt; if (CAM.blink > .26f) CAM.blink = -1; }
@@ -437,7 +470,8 @@ static void camera_tap(float x, float y)
     } else if (y >= CAM_MODE_Y - 8 && y < CAM_MODE_Y + 26 && x < 195 - 30) {
         toast("Video isn't available yet");
     } else if (tx * tx + dy * dy <= 30 * 30) {
-        if (CAM.nphotos) cam_review(!CAM.review);
+        if (CAM.stored && !CAM.shot) CAM.photos = 1;            /* Photos at it, on the next turn (never in the tap) */
+        else if (CAM.nphotos) cam_review(!CAM.review);          /* not kept: shown in the viewfinder */
     } else if (px * px + dy * dy <= 30 * 30) {
         toast("Only the front camera works yet");
     } else if (CAM.review && y >= CAM_VF_Y && y < CAM_VF_Y + CAM_VF_H) {
@@ -450,6 +484,7 @@ static int cam_set(const char *what, const char *key, float v)
 {
     if (tk_strcmp(what, "cam") || !is_app("camera")) return 0;
     if (CAM.want || CAM.st == CS_OFF) { CAM.want = 0; cam_start(now_ms); relink(); }
+    if (CAM.last) { CAM.last = 0; if (!CAM.nphotos) cam_last(); }
     for (int i = 0; i < 40 && CAM.st == CS_RUN && !CAM.have; i++) cam_pull(now_ms);   /* the fake's clock moves per call */
     if (!tk_strcmp(key, "shot") || !tk_strcmp(key, "review")) {
         if (cam_ok() && !CAM.shot && sh_cam_still() == 0) {
@@ -458,9 +493,8 @@ static int cam_set(const char *what, const char *key, float v)
             unsigned len = 0;
             const uint32_t *px = 0;
             for (int i = 0; i < 40 && !px; i++) px = sh_cam_still_get(&w, &h, &bmp, &len);
-            if (px) { (void)cam_save(px, w, h); cam_take(px, w, h); }
+            if (px) { cam_take(px, w, h, 0); CAM.stored = cam_save(px, w, h) == 0; }
         }
-        CAM.thumb_in = -1;
         if (!tk_strcmp(key, "review")) cam_review(1);
     } else if (!tk_strcmp(key, "flash")) {
         CAM.flash = 1;
