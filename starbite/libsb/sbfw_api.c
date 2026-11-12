@@ -45,6 +45,15 @@ static void scopy(char *dst, unsigned cap, const char *src)
 
 /* ---- settings ------------------------------------------------------------------------------------------------ */
 
+/* shell mode as it applies: the user's choice once set (SBFW_FLAG_SHELL_SET); else the loader build's default,
+ * which this start's table reports (SBFW_TF_SHELL); an older loader without a table: off */
+static unsigned shell_now(const struct sbfw_rec *r)
+{
+    if (r->fw_flags & SBFW_FLAG_SHELL_SET)
+        return (r->fw_flags & SBFW_FLAG_SHELL) ? 1U : 0U;
+    return sb_fw.valid && (sb_fw.flags & SBFW_TF_SHELL) ? 1U : 0U;
+}
+
 int sbfw_settings_read(struct sbfw_settings *s)
 {
     uint8_t *z = (uint8_t *)s;
@@ -66,7 +75,7 @@ int sbfw_settings_read(struct sbfw_settings *s)
     s->crash_action = l[2];
     s->wdt_mode = l[4];
     s->wdt_s = (uint16_t)get(l + 6, 2);
-    s->shell = r.fw_flags & SBFW_FLAG_SHELL;
+    s->shell = (uint8_t)shell_now(&r);
     scopy(s->shell_key, sizeof(s->shell_key), r.shell_key);
     return ok;
 }
@@ -95,7 +104,9 @@ int sbfw_settings_write(const struct sbfw_settings *s)
     l[2] = s->crash_action;
     l[4] = s->wdt_mode;
     put(l + 6, s->wdt_mode == SBFW_WDT_FIXED ? s->wdt_s : 0, 2);
-    r.fw_flags = (uint8_t)((r.fw_flags & ~SBFW_FLAG_SHELL) | (s->shell ? SBFW_FLAG_SHELL : 0));
+    if ((unsigned)s->shell != shell_now(&r))   /* only a change becomes the user's choice (SHELL_SET) */
+        r.fw_flags = (uint8_t)((r.fw_flags & ~SBFW_FLAG_SHELL) | (s->shell ? SBFW_FLAG_SHELL : 0) |
+                               SBFW_FLAG_SHELL_SET);
     scopy(r.shell_key, sizeof(r.shell_key), s->shell_key);
     int e = settings_all_save(&st, &r, l);
     return e == -1 ? SBFW_E_NOHOME : e;
