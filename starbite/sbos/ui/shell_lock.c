@@ -4051,6 +4051,11 @@ static int pc_gate_launch(unsigned id);             /* Track A: shell_passcode.i
 #include "shell_cell.inc"
 #include "shell_media_img.inc"
 #include "shell_media.inc"
+/* Track E's v3 hooks (starbite/guest/next/INTEGRATION-NEXT.md "v3 hooks"): the switcher's external cards
+ * (shell_switcher.inc's sw_ext_add / sw_ext_remove), B3's key bar (shell_kb.inc's kb_accessory / kb_accessory_tap in
+ * its 40 pt strip, 500..540) and the Centre's "linux:<id>" items (shell_nc.inc's nc_withdraw, lx_nc_*) */
+#define SH_EXT_API 1
+#define KB_ACC_H KB_STRIP
 #include "shell_linux.inc"
 #include "shell_survival.inc"
 #include "shell_nc.inc"                             /* helper D: notifications, the Notification Centre, the banner */

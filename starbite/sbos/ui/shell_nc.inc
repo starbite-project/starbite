@@ -52,8 +52,12 @@ static int nc_app(const char *who)
     for (int a = 0; a < NAPPS; a++) if (!tk_strcmp(APPS[a].k, k)) return a;
     return -1;
 }
+/* Track E v3: a Linux app's notification (who "linux:<hex id>", shell_linux.inc's lx_nc_*) */
+static int nc_is_lx(const char *who) { return who[0] == 'l' && who[1] == 'i' && who[2] == 'n' && who[3] == 'u' && who[4] == 'x' && who[5] == ':'; }
+static int nc_quiet;                               /* a removal that is not the user's (opened, withdrawn): no dismissal */
 static const char *nc_name(const char *who)
 {
+    if (nc_is_lx(who)) return lx_nc_name(who);     /* Track E: the Linux app's name */
     for (unsigned i = 0; i < sizeof NCSRC / sizeof NCSRC[0]; i++) if (!tk_strcmp(NCSRC[i].who, who)) return NCSRC[i].name;
     int a = nc_app(who);
     return a >= 0 ? APPS[a].name : who;
@@ -153,6 +157,7 @@ static void nc_blit_scaled(tk_bmp *dst, const tk_bmp *src, float X, float Y, flo
     }
 }
 /* an app's icon at s pt (Emergency's drawn tiles, the pack's 62 pt tiles scaled, else a grey tile with an initial) */
+static void nc_icon_who(dc *d, const char *who, int a, const char *name, float x, float y, float s);
 static void nc_icon(dc *d, int a, const char *name, float x, float y, float s)
 {
     if (a >= 0 && sv_tile(d, APPS[a].k, x, y, s)) return;
@@ -162,6 +167,13 @@ static void nc_icon(dc *d, int a, const char *name, float x, float y, float s)
     d_rrect(d, x, y, s, s, s * .225f, tk_hex(0x8e8e93, 1));
     char in[2] = { name[0] >= 'a' && name[0] <= 'z' ? (char)(name[0] - 32) : name[0], 0 };
     d_text(d, TK_IT600, s * .5f, x + s / 2 - tw(TK_IT600, s * .5f, in, 0, 0) / 2, y + s * .68f, in, 0, 0, W(1), 0);
+}
+/* a poster's icon: a Linux app's own (Track E's lx_nc_icon: 62 pt, pad 0), else nc_icon */
+static void nc_icon_who(dc *d, const char *who, int a, const char *name, float x, float y, float s)
+{
+    const tk_bmp *li = nc_is_lx(who) ? lx_nc_icon(who) : 0;
+    if (li) { nc_blit_scaled(d->b, li, PT(x) - d->ox, PT(y) - d->oy, s / 62); return; }
+    nc_icon(d, a, name, x, y, s);
 }
 /* "now", "5m ago", "2h ago" (iOS's), else the time it came */
 static void nc_when(char *b, int hm)
@@ -191,7 +203,7 @@ static void nc_draw_item_x(dc *d, const nc_item *n, float x, float top, float h,
 {
     int a = nc_app(n->who);
     float hb = h - (act ? NC_ACT : 0);          /* the words' part */
-    nc_icon(d, a, nc_name(n->who), x + 13.7f, act ? top + 13.7f : top + (hb - 38) / 2, 38);
+    nc_icon_who(d, n->who, a, nc_name(n->who), x + 13.7f, act ? top + 13.7f : top + (hb - 38) / 2, 38);
     float tx = x + 65, right = x + NC_W - 18.3f;
     char when[16];
     nc_when(when, n->hm);
@@ -682,6 +694,7 @@ static void bk_free(void);
 static void nc_remove(int i)
 {
     if (i < 0 || i >= nin) return;
+    if (!nc_quiet && nc_is_lx(NI[i].who)) lx_nc_dismissed(NI[i].who);   /* Track E: the user removed it (swipe, Clear) */
     unsigned id = NI[i].id;
     for (int k = i; k + 1 < nin; k++) NI[k] = NI[k + 1];
     nin--;
@@ -704,6 +717,15 @@ static void nc_clear_group(const char *who, int fly)
     }
     if (!tk_strcmp(NC.exp, w)) { NC.exp[0] = 0; nc_ghead_build(); }
     if (NC.built) nc_layout();
+}
+/* Track E's gwin-host: how many of the Centre's items are who's */
+int nc_compat_count(const char *who);
+int nc_compat_count(const char *who) { int n = 0; for (int i = 0; i < nin; i++) n += !tk_strcmp(NI[i].who, who); return n; }
+/* Track E v3: the Centre's items of who removed (Linux withdrew them): no dismiss callback */
+static void nc_withdraw(const char *who)
+{
+    for (int i = nin - 1; i >= 0; i--)
+        if (!tk_strcmp(NI[i].who, who)) { nc_quiet = 1; nc_remove(i); nc_quiet = 0; }
 }
 void sh_notify(const char *who, const char *title, const char *body, int hm) { sh_notify_flags(who, title, body, hm, 0); }
 void sh_notify_flags(const char *who, const char *title, const char *body, int hm, unsigned flags)
@@ -914,9 +936,13 @@ static int nc_launch(unsigned id)
     if (i < 0) return 0;
     if (locked && pc_gate_launch(id)) return 1;   /* Track A: from the lock, the passcode first (it launches after) */
     int a = nc_app(NI[i].who);
+    char lxw[16] = "";
+    if (nc_is_lx(NI[i].who)) nc_cpy(lxw, sizeof lxw, NI[i].who);   /* Track E: a Linux app's notification */
     if (a >= 0) cm_nc_launch(NI[i].who, NI[i].title, a);   /* helper I: a message's thread, a missed call's Recents */
+    nc_quiet = 1;                           /* (opened, not dismissed) */
     nc_remove(i);
-    if (a < 0) return 0;                    /* nothing to open (an unknown poster): read and cleared */
+    nc_quiet = 0;
+    if (a < 0 && !lxw[0]) return 0;         /* nothing to open (an unknown poster): read and cleared */
     if (locked) {
         /* from the lock's Centre: the lock goes away behind it (Track A: the passcode was asked above, when set) */
         sp_lock.live = 0;
@@ -925,6 +951,7 @@ static int nc_launch(unsigned id)
         lockflat.hidden = 1;
         home.sx = home.sy = 1;
     }
+    if (lxw[0]) return lx_open_id(lxw);     /* Track E: NOTIF_ACT 0 and the Linux app (after the lock's handling) */
     if (AP.on && AP.a == a && !AP.closing) return 1;
     if (AP.on) { sp_app.live = 0; app_finish_close(); }
     app_open(a);
@@ -1018,6 +1045,7 @@ static void nc_clear_answer(int i)
     NC.clrall = 0;
     if (i == 1 && nin) {
         for (int k = 0; k < NC_SLOTS; k++) if (NSL[k].id) NSL[k].ta = 0;
+        for (int k = 0; k < nin; k++) if (nc_is_lx(NI[k].who)) lx_nc_dismissed(NI[k].who);   /* Track E: cleared by the user */
         nin = 0;
         nc_save();                                  /* Track A */
         NC.exp[0] = 0;

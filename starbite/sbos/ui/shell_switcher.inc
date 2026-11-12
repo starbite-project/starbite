@@ -32,15 +32,15 @@ static int swn, sw_dirty = 1;
 static int sw_keeps(int a) { const char *k = APPS[a].k; return !lx_is(k) && tk_strcmp(k, "search") && tk_strcmp(k, "linux"); }
 static int sw_find(int a) { for (int i = 0; i < swn; i++) if (!SWR[i].kind && SWR[i].a == a) return i; return -1; }
 
-/* ---- external entries (B4): the provider's side. A provider (the Linux session's gwin.c) defines SW_EXT_PROVIDER
- * and these five; without one they are no-ops and nothing is ever added ---- */
-#ifdef SW_EXT_PROVIDER
-const char *sw_ext_title(int subid);
-const tk_bmp *sw_ext_icon(int subid);          /* a 62 pt app icon (its pad as the pack's), or 0 */
-int sw_ext_snapshot(int subid, tk_bmp *out);   /* draw the window into out (SNAP_W x SNAP_H); 0: none (a plain card) */
-void sw_ext_open(int subid);
-void sw_ext_close(int subid);
+/* ---- external entries (B4; P3x: Track E's v3 contract, starbite/guest/next/INTEGRATION-NEXT.md "v3 hooks"). With
+ * SH_EXT_API the provider is shell_linux.inc (static, defined before this file): sw_ext_title / sw_ext_icon (62 pt,
+ * pad 0) / sw_ext_snapshot (*out = a VIEW it owns: never freed here; read again at each show) / sw_ext_open /
+ * sw_ext_close, and lx_sw_current() (the open Linux app's subid: the live first card). Without it they are no-ops
+ * and nothing is ever added ---- */
+#ifdef SH_EXT_API
+#define SW_EXT_LIVE(s) (lx_sw_current() == (s))
 #else
+#define SW_EXT_LIVE(s) 0
 static const char *sw_ext_title(int subid) { (void)subid; return "App"; }
 static const tk_bmp *sw_ext_icon(int subid) { (void)subid; return 0; }
 static int sw_ext_snapshot(int subid, tk_bmp *out) { (void)subid; (void)out; return 0; }
@@ -88,7 +88,7 @@ static void sw_restore(void)
 static void sw_remove(int i)
 {
     if (i < 0 || i >= swn) return;
-    tk_bmp_free(&SWR[i].snap);
+    if (!SWR[i].kind) tk_bmp_free(&SWR[i].snap);   /* (an external entry's is the provider's view) */
     for (int k = i; k + 1 < swn; k++) SWR[k] = SWR[k + 1];
     swn--;
     SWR[swn].snap = (tk_bmp){ 0, 0, 0, 0 };
@@ -154,18 +154,23 @@ static void sw_opened(int a)
     SWR[0] = e;
     sw_save();                                   /* Track A */
 }
-/* B4: the provider's entries (one per running Linux app): in front, as a newly opened app */
-void sw_ext_add(int subid)
+/* B4: the provider's entries (one per running Linux app): in front, as a newly opened app (Track E calls it at every
+ * open: an entry already there moves to the front) */
+static __attribute__((unused)) void sw_ext_add(int subid)
 {
-    if (sw_find_ext(subid) >= 0) return;
-    if (swn == SW_MAX) sw_remove(SW_MAX - 1);
-    for (int k = swn; k > 0; k--) SWR[k] = SWR[k - 1];
-    SWR[0] = (sw_ent){ -1, { 0, 0, 0, 0 }, 1, subid };
-    swn++;
+    int i = sw_find_ext(subid);
+    sw_ent e = { -1, { 0, 0, 0, 0 }, 1, subid };
+    if (i < 0) {
+        if (swn == SW_MAX) sw_remove(SW_MAX - 1);
+        i = swn++;
+    } else e = SWR[i];
+    for (int k = i; k > 0; k--) SWR[k] = SWR[k - 1];
+    SWR[0] = e;
+    sw_dirty = 1;
 }
 static void sw_labels(void);
 static void relink(void);
-void sw_ext_remove(int subid)
+static __attribute__((unused)) void sw_ext_remove(int subid)
 {
     int i = sw_find_ext(subid);
     if (i < 0) return;
@@ -313,9 +318,9 @@ static void sw_show(void)
     for (int i = 0; i < SW_MAX; i++) {
         tk_layer_init(&swcard[i], "sw-card"); swcard[i].hidden = 1;
         tk_layer_init(&swshade[i], "sw-shade"); swshade[i].hidden = 1;
-        if (i < swn && SWR[i].kind) {             /* an external entry's window now */
-            if (!SWR[i].snap.px) tk_bmp_new(&SWR[i].snap, SNAP_W, SNAP_H);
-            if (SWR[i].snap.px && !sw_ext_snapshot(SWR[i].subid, &SWR[i].snap)) tk_bmp_free(&SWR[i].snap);
+        if (i < swn && SWR[i].kind) {             /* an external entry's window now (the provider's view, not ours) */
+            tk_bmp v = { 0, 0, 0, 0 };
+            SWR[i].snap = sw_ext_snapshot(SWR[i].subid, &v) ? v : (tk_bmp){ 0, 0, 0, 0 };
         }
     }
     sw_labels();
@@ -323,7 +328,7 @@ static void sw_show(void)
     SW.scroll = 0; sp_sws.live = 0;
     SW.thrown = -1; SW.dy = 0; SW.ta = 1; sp_swdy.live = 0;
     SW.gapi = -1; sp_swgap.live = 0; sp_swgap.x = 0;
-    SW.live = AP.on && !AP.closing && swn && !SWR[0].kind && SWR[0].a == AP.a;
+    SW.live = AP.on && !AP.closing && swn && (SWR[0].kind ? SW_EXT_LIVE(SWR[0].subid) : SWR[0].a == AP.a);   /* Track E: a Linux app's card */
     relink();
     tk_spring_start(&sp_sw, SW.p, 1, 0, TK_SPR_CC);
 }
@@ -348,7 +353,11 @@ static void sw_reset(void)
 /* ---- from an app: the home bar's swipe (shell_lock.c's G_APP) ---------------------------------------------- */
 static void sw_drag(float travel, float v, float t)
 {
+#ifdef SH_EXT_API
+    if (locked || !AP.on || (!sw_keeps(AP.a) && lx_sw_current() < 0)) return;   /* Track E: a Linux app's card too */
+#else
     if (locked || !AP.on || !sw_keeps(AP.a)) return;
+#endif
     SW.dragging = 1;
     if (travel < -40 && tk_fabsf(v) < .3f) { if (SW.slow_t0 <= 0) SW.slow_t0 = t; }
     else {
@@ -395,7 +404,7 @@ static void sw_open(int i)
 {
     if (i < 0 || i >= swn) return;
     arect R = sw_rect(i);
-    if (SWR[i].kind) {                           /* an external entry: its provider brings it up */
+    if (SWR[i].kind && !(i == 0 && SW.live && AP.on)) {   /* an external entry: its provider brings it up (the live one grows back) */
         if (AP.on) { sp_app.live = 0; app_finish_close(); }
         sw_ext_open(SWR[i].subid);
         SW.live = 0;
@@ -719,4 +728,22 @@ static int sw_set(const char *what, const char *key, float v)
         return 1;
     }
     return 0;
+}
+/* Track E's gwin-host (starbite/guest/next/host): its view of the recents, "S:<key>" or "L:<title>" per card, newest
+ * first, ',' between; the count */
+int sw_compat_dump(char *out, int cap);
+int sw_compat_dump(char *out, int cap)
+{
+    int n = 0;
+    out[0] = 0;
+    for (int i = 0; i < swn; i++) {
+        const char *t = SWR[i].kind ? sw_ext_title(SWR[i].subid) : APPS[SWR[i].a].k;
+        if (n + 4 + (int)tk_strlen(t) >= cap) break;
+        if (i) out[n++] = ',';
+        out[n++] = SWR[i].kind ? 'L' : 'S';
+        out[n++] = ':';
+        for (; *t; t++) out[n++] = *t;
+        out[n] = 0;
+    }
+    return swn;
 }

@@ -62,7 +62,7 @@ static void lkn_draw(lkn_slot *s, const nc_item *n)
     float h = s->h, top = LKN_BOT - h;
     relayer(&s->tx);
     dc d = mk(&s->tx, "lkn-item", PL_X, top, PL_W, h, 2, 0);
-    nc_icon(&d, a, nc_name(n->who), PL_X + 13.7f, top + (h - 38) / 2, 38);
+    nc_icon_who(&d, n->who, a, nc_name(n->who), PL_X + 13.7f, top + (h - 38) / 2, 38);   /* Track E: a Linux app's icon */
     char when[16];
     nc_when(when, n->hm);
     float ww = when[0] ? tw(TK_IT400, 13, when, 0, 0) : 0;

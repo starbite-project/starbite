@@ -592,7 +592,7 @@ int main(int argc, char **argv)
     check(got.viewport >= 1 && got.last_vp == SH_LINUX_H, "the viewport 1344 rows (no keyboard)");
     check(win == 1 && has_win && draws > 0, "its window in the surface and drawn");
     sh_touch(0, 195, 300, (float)now_ms); sh_touch(2, 195, 300, (float)now_ms);   /* a tap in its text area */
-    run(3);
+    run(30);                                                 /* (B3: the keyboard takes keys once its slide rests; run() steps springs 50 ms) */
     check(got.last_vp == KBROWS, "the field focused: the keyboard up, the viewport above the keyboard and its key bar");
     sh_touch(0, 195, 735, (float)now_ms); sh_touch(2, 195, 735, (float)now_ms);   /* the keyboard's space */
     sh_touch(0, 156, 627, (float)now_ms); sh_touch(2, 156, 627, (float)now_ms);   /* 'f' */
@@ -675,6 +675,7 @@ int main(int argc, char **argv)
     run(8);
     if (!focus) { tap(195, 300); run(3); }
     check(got.last_vp == KBROWS, "the keyboard up: the viewport above the key bar");
+    run(25);                                                /* (P3x, B3's keyboard: its keys and bar once its slide rests) */
     evon = 1;
     ev[0] = 0;
     tap(121.9f, 520);                                       /* Ctrl */
