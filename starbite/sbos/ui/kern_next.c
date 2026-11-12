@@ -2352,6 +2352,8 @@ int sh_power_off(void)
 __attribute__((weak)) void sh_power_held(void) { sb_log("next: Power held: no power sheet in this shell yet"); }
 static int next_power_held(void)
 {
+    if (!ready) return 0;                        /* the bake: the classic menu (never drawn: nothing to do) */
     sh_power_held();
+    start_ticking();                             /* P3x: the sheet fades in (the screen may have just woken) */
     return 1;
 }

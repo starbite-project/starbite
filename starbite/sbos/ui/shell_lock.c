@@ -2115,6 +2115,7 @@ static const char *const CC_NOT[6] = { "Airplane mode isn't in this version yet"
 static int cc_tap(float x, float y)
 {
     float X = CC_COL(0), Y = CC_ROW(0);
+    if (x >= 316 && x < 362 && y >= 8 && y < 52) { sh_power_held(); return 1; }   /* P3x: the Power circle: the power sheet */
     if (x >= X && x < X + CC_W2 && y >= Y && y < Y + CC_W2) {
         int i = (x >= X + CC_W2 / 2) + 2 * (y >= Y + CC_W2 / 2);
         if (i == 1) return 1;                /* the modem: a hold (G_CCCELL) */
@@ -4062,6 +4063,7 @@ static int pc_gate_launch(unsigned id);             /* Track A: shell_passcode.i
 #include "shell_switcher.inc"                       /* helper D: the app switcher */
 #include "shell_apps.inc"                           /* helper B5: the lists (SCV), the avatars, the dock's badges */
 #include "shell_comms.inc"                          /* helper I: Phone and Messages, the call screen */
+#include "shell_power.inc"                          /* P3x: Power held: slide to power off, Restart, Cancel */
 #include "shell_settings.inc"                       /* helper B2: Settings */
 #ifdef SH_HAS_STARTUP
 #include "shell_startup.inc"                        /* Track J: Settings > Startup */
@@ -4161,12 +4163,13 @@ static void relink(void)
 {
     if (!apdim.name) { tk_layer_init(&apdim, "app-dim"); apdim.hidden = 1; }
     tk_layer *r[] = { &star, &star_e, &home, &swg, &lockg, &lockflat, &apdim, &appg, &apicon, &swcover, &ncl, &focus, &ccl, &bnl, &cfl, &kitl, &cvl,
-                      &boot, &homebar, &toastl, &slp };
+                      &boot, &homebar, &pwl, &toastl, &slp };   /* P3x: pwl the power sheet */
     nc_link();                                       /* helper D: the Notification Centre (ncl), the banner (bnl) */
     sw_link();                                       /* helper D: the switcher's cards (swg), a card's snapshot over its opening window */
     cm_link();                                       /* helper I: the call screen (cvl) */
     kit_link();                                      /* helper B2: an alert, an action sheet, a sheet (kitl) */
-    link(&root, r, 21);
+    pw_link();                                       /* P3x: the power sheet (pwl) */
+    link(&root, r, 22);
     pc_link();                                       /* Track A: the passcode screen (under the call screen) */
     isl_link();                                      /* B7: the capsule, the pill and its words */
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &emsel, &kbg, &emp, &apsb, &apphl };
@@ -4354,6 +4357,7 @@ static void back_to_lock(int exit_em)
     if (exit_em) ep_finish();                      /* B6: a switch's rest at once (a prepared one goes) */
     if (!EMG) while (cards_pending > 0) { build_lockpart(LOCK_PARTS - cards_pending); cards_pending--; }
     if (CF.on) cf_close(0);
+    pw_reset();                                    /* P3x: the power sheet goes */
     kit_reset();                                   /* helper B2: an alert or a sheet goes, unanswered */
     nc_reset();                                    /* helper D: the Notification Centre and the banner gone */
     sw_reset();                                    /* helper D: the switcher (the recents and their snapshots stay) */
@@ -4402,6 +4406,7 @@ void sh_set(const char *what, const char *key, float v)
         back_to_lock(1);
     } else if (!tk_strcmp(what, "sleep")) {        /* the films: the Power key's fade (v 1) and the wake (v 0) */
         if (v > 0) sh_sleep(0); else sh_wake();
+    } else if (pw_set(what, key, v)) {            /* P3x: power=:V (the power sheet, its thumb at V; -1 closed) */
     } else if (lx_set(what, key, v)) {            /* L3: lapp=; Track F: store=, storecat=, storeq=, storeapp=, ... */
     } else if (lkn_set(what, key, v)) {           /* B9: lkn= (the lock's notifications fanned out) */
     } else if (nc_set(what, key, v)) {            /* helper D: notify=, banner=, nc=, ncgroup=, ncswipe= (shell_nc.inc) */
@@ -4660,6 +4665,7 @@ static int notes_hold(float t)
 void sh_touch(int phase, float x, float y, float t)
 {
     now_ms = t;
+    if (pw_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* P3x: the power sheet, over everything (modal) */
     { int r = isl_touch(phase, x, y, t); if (r) { if (r == 1) T.kind = G_NONE; return; } }   /* B7: the capsule, the call's minimise */
     if (cm_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* helper I: the call screen, the call button's hold */
     if (sv_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* survival-next: SOS's beacon, a tool's hold */
@@ -5124,6 +5130,7 @@ void sh_touch(int phase, float x, float y, float t)
 void sh_sleep(int now)
 {
     T.kind = G_NONE;
+    pw_reset();                                    /* P3x: the Power key (or the screen's timer) cancels the power sheet */
     if (now) {
         if (SL.black && !SL.dir) return;   /* dark already (the fade ended) */
         SL.dir = 0;
@@ -5383,6 +5390,7 @@ int sh_tick(float dt, float t)
     mv |= nc_tick(dt, t);                       /* helper D: the Notification Centre, the banner */
     mv |= sw_tick(dt, t);                       /* helper D: the app switcher */
     mv |= cm_tick(dt, t);                       /* helper I: the call button's hold, the call screen */
+    mv |= pw_tick(dt, t);                       /* P3x: the power sheet */
     mv |= kb_tick(dt, t);                       /* B3: delete held */
     if (T.kind == G_APPTAP && !T.moved && t - T.t0 >= 500) {    /* B3: a long press on a text field: the edit menu */
         emt e;
@@ -5511,7 +5519,7 @@ int sh_moving(void)
     int m = sp_lock.live || sp_scroll.live || scroll_momentum || T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB ||
             T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || T.kind == G_CC || T.kind == G_CCSL || sp_cc.live ||
             T.kind == G_APP || sp_app.live || booting || isl_moving() || em_t < 1 || T.kind == G_CCEM ||
-            T.kind == G_CCCELL || CF.down || CF.a != CF.at || SL.dir || T.kind == G_CCDRAG || T.kind == G_FOCUSDRAG || sv_moving() ||
+            T.kind == G_CCCELL || CF.down || CF.a != CF.at || pw_moving() || SL.dir || T.kind == G_CCDRAG || T.kind == G_FOCUSDRAG || sv_moving() ||
             T.kind == G_CCX || (T.kind == G_CCTAP && CCS.on) || cc_moving();
     m |= SY.sp.live || lkn_moving();             /* B9 */
     m |= sp_focus.live || sp_thumb.live || med_moving() || lx_moving();
