@@ -35,7 +35,7 @@ enum { SE_ROOT = 0, SE_DISPLAY = 1, SE_WIFI = 2, SE_CELL = 3, SE_CARD = 4,
        SE_NOTIF_APP, SE_BATTERY, SE_PRIVACY, SE_EMERGENCY, SE_LINUX, SE_SEARCH, SE_BT, SE_HEALTH, SE_NPAGES };
 /* actions (row ids from 100; a row id < 100 pushes that page) */
 enum { A_NONE = 100, A_CARD, A_PASSCODE, A_STARTUP, A_STORE, A_LAST2, A_TEXTSIZE, A_RESET, A_EMG, A_BRIGHT,
-       A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK, A_UPDATE, A_BTDEV, A_HAPLVL,
+       A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK, A_UPDATE, A_BTDEV, A_BTKBD, A_HAPLVL,
        T_FIRST = 200, T_SYSHAP = T_FIRST, T_KBHAP, T_AUTOCAP, T_TIMERVIB, T_LAST2AUTO, T_NALLOW, T_NBANNER, T_CALLVIB, T_SMSVIB,
        T_CLOCK24, T_BT, T_AUTOBRIGHT };
 
@@ -97,6 +97,7 @@ typedef struct {
     const char *sub;                              /* a second line (the row is 66 tall) */
     int segn;                                     /* SR_SEG: its segments (0: two) */
     const char *why;                              /* cp6: a disabled row's words when it is tapped */
+    int dev;                                      /* cp7: A_BTDEV: the scan's device index */
 } se_row;
 typedef struct { int first, n; const char *head, *foot; float y, h, fy; int fl; } se_sec;
 #define SE_MAXR 32
@@ -166,7 +167,7 @@ static se_row *row(int kind, int id, const char *l, const char *v)
 {
     if (SE.nr >= SE_MAXR || !SE.ns) return &SE.r[SE_MAXR - 1];
     se_row *r = &SE.r[SE.nr++];
-    *r = (se_row){ kind, id, 0, 0, SEI_NONE, 0, l, v ? v : "", 0, 0, 0, 0, 0 };
+    *r = (se_row){ kind, id, 0, 0, SEI_NONE, 0, l, v ? v : "", 0, 0, 0, 0, 0, 0 };
     SE.s[SE.ns - 1].n++;
     return r;
 }
@@ -229,6 +230,9 @@ static struct {
     int st, cnt, scan, spin, spin_k, lux_h, bright;
     float scan_t, build_t, spin_t, poll_t, spin_cx, spin_cy;
 } SEB = { 0, 0, 0, 0, 0, 0, 0, -1, -1e9f, 0, 0, 0, 0 };
+/* cp7: a keyboard's pairing (Track A's sh_bt_pair, the drivers track's bt_pair.c): the device asked, the state last
+ * seen, the code alert up; the paired keyboard's name as the scan showed it (else "Keyboard") */
+static struct { int dev, st, alert; char name[48], kname[48]; } SBP = { -1, 0, 0, "", "" };
 #define SE_BT_HEAD "Other Devices"
 #define SE_BT_MAXD 12                             /* named devices listed (the rest: a count in the footer) */
 static int se_awake(void) { return !locked && !SL.black; }
@@ -487,9 +491,14 @@ static void se_rows(int p)
         else if (st < 0) {
             const char *why = sh_bt_why();
             foot(se_sentence("Bluetooth didn't start. ", why && why[0] ? why : "The chip didn't answer."));
-        } else foot("Starbite OS can look for Bluetooth devices nearby. Pairing, audio and file transfer aren't in this "
-                    "version yet.");
+        } else foot("Starbite OS can pair one Bluetooth keyboard. Audio and file transfer aren't in this version yet.");
         if (st != 2) break;
+        /* cp7: My Devices: the paired keyboard (one), connected or not; a tap: Connect / Forget This Device */
+        int paired = sh_bt_kbd_paired();
+        if (paired) {
+            sec("My Devices");
+            row(SR_VAL, A_BTKBD, se_str(SBP.kname[0] ? SBP.kname : "Keyboard", 0), sh_bt_kbd_connected() ? "Connected" : "Not Connected");
+        }
         sec(SE_BT_HEAD);
         int n = sh_bt_count(), named = 0, unnamed = 0;
         SEB.cnt = n;
@@ -498,16 +507,19 @@ static void se_rows(int p)
             int rssi = 0;
             if (sh_bt_get(i, nm, sizeof nm, &rssi) < 0) continue;
             if (!nm[0] || named >= SE_BT_MAXD) { unnamed++; continue; }   /* iOS lists named devices: the rest counted */
-            row(SR_VAL, A_BTDEV, se_str(nm, 0), "Not Paired");   /* cp6: what a tap can't do yet, in grey */
+            if (paired && SBP.kname[0] && !tk_strcmp(nm, SBP.kname)) continue;   /* it is under My Devices */
+            int busy = SBP.dev == i && SBP.st != SH_BTP_FAILED;
+            se_row *r = row(SR_VAL, A_BTDEV, se_str(nm, 0), busy ? "Connecting\xe2\x80\xa6" : "");
+            r->dev = i;
             named++;
         }
         if (!n) foot("Looking for devices nearby\xe2\x80\xa6 The scan runs while this page is open.");
         else if (unnamed) {
             char b[12];
             put_dec(b, unnamed);
-            foot(se_str(b, unnamed == 1 ? " more device without a name. Scanning only: pairing and audio aren't available yet." :
-                                          " more devices without a name. Scanning only: pairing and audio aren't available yet."));
-        } else foot("Scanning only: pairing and audio aren't available yet.");
+            foot(se_str(b, unnamed == 1 ? " more device without a name. Tap a keyboard to pair it." :
+                                          " more devices without a name. Tap a keyboard to pair it."));
+        } else foot("Tap a keyboard to pair it. Pairing works for keyboards only in this version.");
         break;
     }
     case SE_HEALTH: {
@@ -1135,6 +1147,100 @@ static void se_sheet(const char *title, const char *text)
     se_sheet_text = text;
     kit_sheet(title, 200, se_sheet_draw, 0, 0);
 }
+/* ---- cp7: pairing a Bluetooth keyboard (iOS: the row says Connecting..., then "Bluetooth Pairing Request" with the
+ * code to type; My Devices once it is paired; Forget This Device) ---- */
+static void se_build(void);
+static void se_bt_rebuild(void) { if (SE.built && se_owns() && SE.page == SE_BT && !SE.down) se_build(); }
+static void se_bt_code_cb(int b)
+{
+    (void)b;                                         /* Cancel (the only button): the pairing stops */
+    SBP.alert = 0;
+    if (SBP.dev >= 0) { sh_bt_unpair(); SBP.dev = -1; SBP.st = 0; se_bt_rebuild(); }
+}
+static void se_bt_close_alert(void)
+{
+    if (SBP.alert && kit_on()) { KT.cb = 0; kit_dismiss(-1); }   /* closed by the pairing's end, not a button */
+    SBP.alert = 0;
+}
+static void se_bt_pair(const se_row *r)
+{
+    if (SBP.dev >= 0 && SBP.st != SH_BTP_FAILED) { toast("A device is pairing now"); return; }
+    if (sh_bt_kbd_paired()) { toast("One keyboard at a time: forget the paired one first"); return; }
+    int rc = sh_bt_pair(r->dev);
+    if (rc < 0) {
+        const char *w = sh_bt_pair_why();
+        toast(w && w[0] ? w : "Pairing didn't start");
+        return;
+    }
+    SBP.dev = r->dev;
+    SBP.st = -1;
+    md_cat(SBP.name, 0, sizeof SBP.name, r->l);
+    sh_haptic_k(SH_HAP_LIGHT);
+    se_bt_rebuild();
+}
+static void se_bt_kbd_cb(int b)
+{
+    int conn = sh_bt_kbd_connected();
+    if (!conn && b == 0) {                           /* Connect */
+        if (sh_bt_reconnect() < 0) toast("The keyboard didn't answer. Turn it on and try again");
+        return;
+    }
+    if (b == (conn ? 0 : 1)) {                       /* Forget This Device */
+        sh_bt_unpair();
+        SBP.kname[0] = 0;
+        SBP.dev = -1;
+        toast("Keyboard forgotten");
+        se_bt_rebuild();
+    }
+}
+static void se_bt_kbd(void)
+{
+    static const kit_btn B1[2] = { { "Forget This Device", KIT_DESTRUCTIVE }, { "Cancel", KIT_CANCEL } };
+    static const kit_btn B2[3] = { { "Connect", KIT_DEFAULT }, { "Forget This Device", KIT_DESTRUCTIVE }, { "Cancel", KIT_CANCEL } };
+    const char *t = SBP.kname[0] ? SBP.kname : "Keyboard";
+    if (sh_bt_kbd_connected()) kit_actions(t, B1, 2, se_bt_kbd_cb);
+    else kit_actions(t, B2, 3, se_bt_kbd_cb);
+}
+/* the pairing's state, polled (se_refresh) while one runs, on any page: 1 something shown changed */
+static int se_bt_pair_poll(void)
+{
+    if (SBP.dev < 0) return 0;
+    int st = sh_bt_pair_state();
+    if (st == SBP.st) return 0;
+    SBP.st = st;
+    if (st == SH_BTP_CODE) {
+        static const kit_btn B[1] = { { "Cancel", KIT_CANCEL } };
+        static char msg[160];
+        int n = md_cat(msg, 0, sizeof msg, "Enter the code \xe2\x80\x9c");
+        n = md_cat(msg, n, sizeof msg, sh_bt_pair_code());
+        n = md_cat(msg, n, sizeof msg, "\xe2\x80\x9d on \xe2\x80\x9c");
+        n = md_cat(msg, n, sizeof msg, SBP.name[0] ? SBP.name : "the keyboard");
+        md_cat(msg, n, sizeof msg, "\xe2\x80\x9d, followed by the return or enter key.");
+        if (kit_alert("Bluetooth Pairing Request", msg, B, 1, se_bt_code_cb) >= 0) SBP.alert = 1;
+        return 1;
+    }
+    if (st == SH_BTP_CONNECTED) {
+        se_bt_close_alert();
+        md_cat(SBP.kname, 0, sizeof SBP.kname, SBP.name);
+        SBP.dev = -1;
+        sh_haptic_k(SH_HAP_SUCCESS);
+        toast(se_str(SBP.kname[0] ? SBP.kname : "Keyboard", " Connected"));
+        se_bt_rebuild();
+        return 1;
+    }
+    if (st == SH_BTP_FAILED) {
+        se_bt_close_alert();
+        static const kit_btn B[1] = { { "OK", KIT_DEFAULT } };
+        const char *w = sh_bt_pair_why();
+        kit_alert("Pairing Unsuccessful", w && w[0] ? w : "The keyboard didn't finish pairing. Try again.", B, 1, 0);
+        SBP.dev = -1;
+        se_bt_rebuild();
+        return 1;
+    }
+    if (st == SH_BTP_IDLE && SBP.alert) { se_bt_close_alert(); SBP.dev = -1; se_bt_rebuild(); return 1; }
+    se_bt_rebuild();                                 /* connecting / securing: the row says so */
+    return 1;
+}
 static void se_act(se_row *r)
 {
     int id = r->id;
@@ -1184,7 +1290,8 @@ static void se_act(se_row *r)
     case A_STORE: se_open_app("store"); break;
     case A_TERMINAL: se_open_app("terminal"); break;
     case A_LAST2: se_open_app("power"); break;
-    case A_BTDEV: toast("Pairing isn't available yet"); break;   /* Track A's Bluetooth scans only */
+    case A_BTDEV: se_bt_pair(r); break;           /* cp7: a keyboard's pairing (the code in an alert) */
+    case A_BTKBD: se_bt_kbd(); break;
     case A_TEXTSIZE:
         se_sheet("Text Size", "Text has one size in this version: iOS's Body is 17 pt.\nLarger text needs every page "
                               "laid out again; it is planned.");
@@ -1250,7 +1357,7 @@ static int se_row_at(float x, float y)
 static int se_row_live(const se_row *r)
 {
     return !r->dis && (r->kind == SR_NAV || r->kind == SR_ACT || r->kind == SR_PROFILE || r->kind == SR_TOG ||
-                       r->kind == SR_SEG || (r->kind == SR_VAL && r->id == A_BTDEV));
+                       r->kind == SR_SEG || (r->kind == SR_VAL && (r->id == A_BTDEV || r->id == A_BTKBD)));
 }
 /* cp6: what lights under the finger (shell_wifi.inc's press colours): a row its rect in its card (#3A3A3C), a
  * switch row its switch's track (darker; the row itself doesn't light, iOS), a segmented control the segment under x */
@@ -1455,7 +1562,7 @@ static int se_moving(void) { return SE.built && (SE.sp.live || SE.momentum || (S
  * it shows changed (at most every 0.3 s), never under a finger. */
 static int se_refresh(float t)
 {
-    int ch = 0;
+    int ch = se_bt_pair_poll();                          /* cp7: a keyboard pairing (any page) */
     if (sepspin.name) {                                  /* cp6: a strip page's spinner: there or not, its step */
         float cx = 0, cy = 0;
         int want = se_strip_spin_where(&cx, &cy);
@@ -1500,6 +1607,7 @@ static int se_refresh(float t)
 static float se_next_update(float t)
 {
     if (SPS.on) return tk_maxf(15, 100 - (t - SPS.t));   /* cp6: the strip spinner's step */
+    if (SBP.dev >= 0) return 250;                        /* cp7: a keyboard pairing's state */
     if (!SE.built || !se_owns() || AP.closing) return -1;
     if (SE.page == SE_BT) {
         if (!se_awake()) return SEB.scan ? 15 : -1;     /* asleep: the scan stops, nothing more */

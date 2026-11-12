@@ -3031,6 +3031,7 @@ static float ori_next_update(void);           /* cp7: shell_orient.inc */
 static int ori_poll(float t);
 static int ori_tick(float dt);
 static int ori_moving(void);
+static int hwk_refresh(void);                 /* cp7: shell_hwkey.inc */
 int sh_next_update(float t)
 {
     int open = AP.on && is_app("clock");
@@ -3069,6 +3070,7 @@ int sh_refresh(float t)
     ch |= isl_refresh(t);                              /* B7: the capsule (SOS, USB power), the pill's hold */
     ch |= se_refresh(t);                               /* Track B: Settings' Bluetooth list, the lux reading */
     ch |= ori_poll(t);                                 /* cp7: the phone turned (the app's new layout fades in) */
+    ch |= hwk_refresh();                               /* cp7: a hardware key changed the page */
     if (ch && AP.on) sw_dirty = 1;                     /* helper D: the switcher's snapshot is old now */
     return ch;
 }
@@ -4526,6 +4528,7 @@ static int pc_gate_launch(unsigned id);             /* Track A: shell_passcode.i
 #include "shell_time.inc"                           /* Track A: the alarms API's Clock hooks, Settings > Date & Time's zone list */
 #include "shell_update.inc"                         /* Track A update: Settings > General > Software Update */
 #include "shell_orient.inc"                         /* cp7: the screens that turn with the phone (Photos' viewer, Camera, ...) */
+#include "shell_hwkey.inc"                          /* cp7: a Bluetooth keyboard's keys (sh_hw_key) */
 /* B2's Settings hooks onto Track A's passcode page (AS.sub SE_PASSCODE_PAGE = shell_passcode.inc's PC_SUB) */
 static void page_passcode(dc *d) { pc_page(d); }
 static int passcode_tap(float x, float y) { return pc_app_tap(x, y); }

@@ -7,7 +7,7 @@
  *                                               resolution + the 2x present, the first frame at rest full); frames
  *                                               as raw BGRA (720 x 1480 with half), one "F" line per frame on stdout
  *   sbtk-host PAK bench                         uibench's kernels on this host (the A55 calibration)
- * A script: "wait MS", "tap X Y [MS]", "drag X0 Y0 X1 Y1 MS", "hold X Y MS" (pt, ms), "ori N" (cp7: the phone turned, 0..3), separated by ';'; also "power", "powerhold",
+ * A script: "wait MS", "tap X Y [MS]", "drag X0 Y0 X1 Y1 MS", "hold X Y MS" (pt, ms), "ori N" (cp7: the phone turned, 0..3), "keys TEXT" (cp7: a hardware keyboard), separated by ';'; also "power", "powerhold",
  * "notify WHO|TITLE|BODY", "dragh X0 Y0 X1 Y1 MS HOLD", "state WHAT=KEY:V" (a still's state, now), "ring MS" (the
  * pretend network's incoming call MS ms later) and "sms TEXT" (a message received now from a made-up number). */
 #include "../sbtk.h"
@@ -649,7 +649,13 @@ static int parse(const char *s, step *st, int max)
         } else if (!strcmp(w, "ring")) { p->kind = 8; p->ms = 20; sscanf(tok, " %*s %f", &p->x0); }   /* helper I */
         else if (!strcmp(w, "power")) { p->kind = 5; p->ms = 20; }      /* the Power key: sleep, or wake if off */
         else if (!strcmp(w, "powerhold")) { p->kind = 10; p->ms = 20; }   /* P3x: the Power key held 1 s: the power sheet */
-        else if (!strcmp(w, "ori")) { p->kind = 11; p->ms = 20; sscanf(tok, " %*s %f", &p->x0); }   /* cp7: the phone turned (0..3) */
+        else if (!strcmp(w, "ori")) { p->kind = 11; p->ms = 20; sscanf(tok, " %*s %f", &p->x0); }
+        else if (!strcmp(w, "keys")) {      /* cp7: "keys TEXT": a Bluetooth keyboard types TEXT now ('|' Return, '<' Delete) */
+            p->kind = 12; p->ms = 20;
+            const char *a = strstr(tok, "keys") + 4;
+            while (*a == ' ') a++;
+            snprintf(p->txt, sizeof p->txt, "%s", a);
+        }   /* cp7: the phone turned (0..3) */
         else if (!strcmp(w, "notify")) {     /* helper D: "notify WHO|TITLE|BODY": a pretend notification from the platform */
             p->kind = 6; p->ms = 20;
             const char *a = strstr(tok, "notify") + 6;
@@ -726,6 +732,17 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
                     if (p->kind == 4) { fprintf(stderr, "state at %.0f ms: %s\n", te, p->txt); apply_state(p->txt); }
                     else if (p->kind == 8) { fprintf(stderr, "ring at %.0f ms: in %.0f ms\n", te, p->x0); comms_fake_ring(p->x0); }
                     else { fprintf(stderr, "sms at %.0f ms (the text is not logged)\n", te); comms_fake_sms(p->txt); }
+                    phase = 0;
+                }
+                continue;
+            }
+            if (p->kind == 12) {
+                if (phase < 0) {
+                    for (const char *c = p->txt; *c; c++) {
+                        uint32_t u = *c == '|' ? '\n' : *c == '<' ? 0x08 : (uint32_t)(unsigned char)*c;
+                        sh_hw_key(0, 1, u);
+                        sh_hw_key(0, 0, u);
+                    }
                     phase = 0;
                 }
                 continue;
