@@ -514,7 +514,7 @@ static int run_guest(unsigned run)
     uint64_t t_pub = 0;
     term_ok_seen = 0;
     blktest_done = blktest_fail = 0;
-    uint64_t last_comp = 0, t_touch = 0;
+    uint64_t last_comp = 0, t_touch = 0, t_load = now_ms();
     int touch_ok = 0;
     const struct sbg_stats *s = sbg_stats();
     volatile struct sbshm_hdr *h = sbg_hdr();
@@ -530,6 +530,12 @@ static int run_guest(unsigned run)
         s = sbg_stats();
         if (s->state == SBG_FAILED)
             return -1;
+        if (t - t_load >= 5000) {           /* hdr.guest_load (sbguest.ko, every 5 s): what guest.c's idle stop reads */
+            t_load = t;
+            puts_("sbsim: guest load ");
+            putu(h->guest_load);
+            puts_(" %\n");
+        }
         if (s->state == SBG_OFF)
             break;
         if (t - last_comp >= 100 && sbg_frame(&seq, &px, &stride)) {
