@@ -1906,8 +1906,9 @@ int sh_alarm_set(int i, int h, int m, int days, int on)
 /* B5: the store (the modem session's KMODEM_SMS_STORE): read marks, deletes at the user's own tap; refused in the
  * self test (it never changes what is stored) */
 #ifdef KMODEM_SMS_STORE
-_Static_assert(KSMS_RECEIVED == SH_SMS_RECEIVED && KSMS_SENDING == SH_SMS_SENDING && KSMS_SENT == SH_SMS_SENT &&
-               KSMS_FAILED == SH_SMS_FAILED && KSMS_DELIVERED == SH_SMS_DELIVERED && KSMS_NOT_DELIVERED == SH_SMS_UNDELIVERED,
+_Static_assert((int)KSMS_RECEIVED == (int)SH_SMS_RECEIVED && (int)KSMS_SENDING == (int)SH_SMS_SENDING &&
+               (int)KSMS_SENT == (int)SH_SMS_SENT && (int)KSMS_FAILED == (int)SH_SMS_FAILED &&
+               (int)KSMS_DELIVERED == (int)SH_SMS_DELIVERED && (int)KSMS_NOT_DELIVERED == (int)SH_SMS_UNDELIVERED,
                "P3x: shell.h's SH_SMS_* are kern.h's KSMS_* (Track G 1c2e473)");
 _Static_assert(KSMS_MAX == SH_SMS_MAX, "P3x: the shell lists what the kernel's store keeps");
 int sh_sms_read(const char *number) { return kmodem_sms_read(number); }
