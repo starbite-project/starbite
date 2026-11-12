@@ -1,0 +1,46 @@
+diff --git a/src/gallium/drivers/panfrost/pan_shader.c b/src/gallium/drivers/panfrost/pan_shader.c
+index ffd0c89..9c54393 100644
+--- a/src/gallium/drivers/panfrost/pan_shader.c
++++ b/src/gallium/drivers/panfrost/pan_shader.c
+@@ -93,6 +93,29 @@ lower_sample_mask_writes(nir_builder *b, nir_intrinsic_instr *intrin,
+ 
+ static bool sb_retype_int_attribs(nir_builder *b, nir_intrinsic_instr *intr, void *data);
+ 
++#ifdef _WIN32
++/* only this one call: windows.h's macros clash with Mesa's headers */
++__declspec(dllimport) unsigned long __stdcall GetFileAttributesA(const char *lpFileName);
++#endif
++static bool
++sb_no_idvs(void)
++{
++   static int v = -1;
++   if (v < 0) {
++      const char *e = getenv("PAN_NO_IDVS");
++      if (e && *e)
++         v = *e == '1';
++#ifdef _WIN32
++      else
++         v = GetFileAttributesA("C:\\ProgramData\\Starbite\\noidvs") != 0xFFFFFFFFul;
++#else
++      else
++         v = 0;
++#endif
++   }
++   return v;
++}
++
+ static void
+ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
+                         struct util_debug_callback *dbg,
+@@ -127,7 +150,10 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
+    /* Lower this early so the backends don't have to worry about it */
+    if (s->info.stage == MESA_SHADER_VERTEX) {
+       /* No IDVS for internal XFB shaders */
+-      inputs.no_idvs = s->info.has_transform_feedback_varyings;
++      /* sb-patches/0149 (docs/WIN11-GPU.md 6.56): every GPU hang T44-T48 recorded was a DWM "indexed-vertex" (IDVS) job
++    * on the Mali-G72. PAN_NO_IDVS=1 or the file C:\ProgramData\Starbite\noidvs compiles vertex shaders without
++    * IDVS (separate vertex + tiler jobs), to test whether IDVS is what hangs. */
++   inputs.no_idvs = s->info.has_transform_feedback_varyings || sb_no_idvs();
+ 
+       if (s->info.has_transform_feedback_varyings) {
+          NIR_PASS(_, s, nir_opt_constant_folding);

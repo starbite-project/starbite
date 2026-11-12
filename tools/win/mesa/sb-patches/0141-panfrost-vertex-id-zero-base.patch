@@ -1,0 +1,95 @@
+diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.c b/src/gallium/drivers/panfrost/pan_cmdstream.c
+index 5a58fab..89f1800 100644
+--- a/src/gallium/drivers/panfrost/pan_cmdstream.c
++++ b/src/gallium/drivers/panfrost/pan_cmdstream.c
+@@ -1416,6 +1416,7 @@ panfrost_upload_sysvals(struct panfrost_batch *batch, void *ptr_cpu,
+          uniforms[i].u[0] = batch->ctx->offset_start;
+          uniforms[i].u[1] = batch->ctx->base_vertex;
+          uniforms[i].u[2] = batch->ctx->base_instance;
++         uniforms[i].u[3] = batch->ctx->first_vertex;
+          break;
+       case PAN_SYSVAL_DRAWID:
+          uniforms[i].u[0] = batch->ctx->drawid;
+@@ -3434,6 +3435,7 @@ panfrost_single_draw_direct(struct panfrost_batch *batch,
+       draw->count + (info->index_size ? abs(draw->index_bias) : 0);
+    ctx->instance_count = info->instance_count;
+    ctx->base_vertex = info->index_size ? draw->index_bias : 0;
++   ctx->first_vertex = info->index_size ? draw->index_bias : draw->start;
+    ctx->base_instance = info->start_instance;
+    ctx->drawid = drawid_offset;
+ 
+diff --git a/src/gallium/drivers/panfrost/pan_context.h b/src/gallium/drivers/panfrost/pan_context.h
+index 3b2a396..fa2f068 100644
+--- a/src/gallium/drivers/panfrost/pan_context.h
++++ b/src/gallium/drivers/panfrost/pan_context.h
+@@ -167,6 +167,9 @@ struct panfrost_context {
+    unsigned offset_start;
+    unsigned base_vertex;
+    unsigned base_instance;
++   /* gl_VertexID of the first vertex (load_first_vertex): index_bias for
++    * indexed draws, start for non-indexed ones. */
++   unsigned first_vertex;
+    enum mesa_prim active_prim;
+ 
+    /* If instancing is enabled, vertex count padded for instance; if
+diff --git a/src/gallium/drivers/panfrost/pan_nir_lower_sysvals.c b/src/gallium/drivers/panfrost/pan_nir_lower_sysvals.c
+index 3cc1314..8b9f40a 100644
+--- a/src/gallium/drivers/panfrost/pan_nir_lower_sysvals.c
++++ b/src/gallium/drivers/panfrost/pan_nir_lower_sysvals.c
+@@ -75,6 +75,9 @@ sysval_for_intrinsic(unsigned arch, nir_intrinsic_instr *intr, unsigned *offset)
+    case nir_intrinsic_load_base_instance:
+       *offset = 8;
+       return PAN_SYSVAL_VERTEX_INSTANCE_OFFSETS;
++   case nir_intrinsic_load_first_vertex:
++      *offset = 12;
++      return PAN_SYSVAL_VERTEX_INSTANCE_OFFSETS;
+ 
+    case nir_intrinsic_load_draw_id:
+       if (arch >= 10)
+diff --git a/src/gallium/drivers/panfrost/pan_shader.c b/src/gallium/drivers/panfrost/pan_shader.c
+index ffd0c89..42b6792 100644
+--- a/src/gallium/drivers/panfrost/pan_shader.c
++++ b/src/gallium/drivers/panfrost/pan_shader.c
+@@ -518,6 +518,29 @@ panfrost_default_shader_key(struct panfrost_uncompiled_shader *so)
+    return key;
+ }
+ 
++/* D3D10/11 SV_VertexID reaches us from d3d10umd as TGSI_SEMANTIC_VERTEXID_NOBASE,
++ * i.e. load_vertex_id_zero_base: the vertex number from 0 for Draw(), the raw
++ * index-buffer value (without BaseVertexLocation) for DrawIndexed(). Neither
++ * the Midgard nor the Bifrost backend implements that intrinsic (Bifrost
++ * printed "Unhandled intrinsic" and left the value undefined). Rewrite it as
++ * load_vertex_id - load_first_vertex: load_vertex_id is what GL uses
++ * (lowered to raw_vertex_id_pan + raw_vertex_offset_pan on v4-v7, native on
++ * v9+), and load_first_vertex is a sysval (index_bias for indexed draws,
++ * start otherwise), which is the base load_vertex_id already includes.
++ */
++static bool
++panfrost_lower_vertex_id_zero_base(nir_builder *b, nir_intrinsic_instr *intr,
++                                   UNUSED void *data)
++{
++   if (intr->intrinsic != nir_intrinsic_load_vertex_id_zero_base)
++      return false;
++
++   b->cursor = nir_before_instr(&intr->instr);
++   nir_def_replace(&intr->def,
++                   nir_isub(b, nir_load_vertex_id(b), nir_load_first_vertex(b)));
++   return true;
++}
++
+ static void *
+ panfrost_create_shader_state(struct pipe_context *pctx,
+                              const struct pipe_shader_state *cso)
+@@ -583,6 +606,12 @@ panfrost_create_shader_state(struct pipe_context *pctx,
+       so->fragcolor_lowered = true;
+    }
+ 
++   /* Must run before pan_preprocess_nir, which lowers load_vertex_id. */
++   if (nir->info.stage == MESA_SHADER_VERTEX)
++      NIR_PASS(_, nir, nir_shader_intrinsics_pass,
++               panfrost_lower_vertex_id_zero_base, nir_metadata_control_flow,
++               NULL);
++
+    /* Then run the suite of lowering and optimization, including I/O lowering */
+    struct panfrost_device *dev = pan_device(pctx->screen);
+    pan_preprocess_nir(nir, panfrost_device_gpu_id(dev));
