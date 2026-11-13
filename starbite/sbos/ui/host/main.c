@@ -750,6 +750,11 @@ static double cpu_ms(void)
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
     return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
+/* 8c: the phone's "touch to frame" on the host (SBTK_TTF=1): a touch's down or up to the next frame that drew, said
+ * when over 50 ms (a touch whose first frame shows nothing: no pressed state, or a stall); the film's touches only */
+static float host_tp = -1;
+static void ht_mark(int ph, float t) { if (ph != 1 && host_tp < 0) host_tp = t; }
+#define sh_touch(p_, x_, y_, t_) (ht_mark((p_), (t_)), sh_touch((p_), (x_), (y_), (t_)))
 static int film(tk_comp *c, const char *out, const char *script, int half)
 {
     step st[192];               /* survival-next: the survival film is long */
@@ -868,6 +873,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         double shell_ms = (tk_us() - sh0) / 1000.0, shell_cpu = cpu_ms() - cpu0;
         int motion = mv || sh_moving();
         tk_comp_frame(c, motion, 0);
+        if (host_tp >= 0 && c->last_px) { if (t + dt - host_tp > 50 && getenv("SBTK_TTF")) fprintf(stderr, "TTF %.0f ms (touch at %.0f)\n", t + dt - host_tp, host_tp); host_tp = -1; }
         fprintf(log, "F %d %.1f %s px %d comp %.2f present %.2f total %.2f", frame, t, c->last_half ? "half" : "full",
                c->last_px, c->us_comp / 1000.0, c->us_present / 1000.0, c->last_us / 1000.0);
         fprintf(log, " idle %.2f halfs %.2f shell %.2f", c->us_idle / 1000.0, c->us_halfs / 1000.0, shell_ms);

@@ -85,6 +85,7 @@ static struct {
     tk_tracker tr;
     void (*sdraw)(dc *d, float x, float y, float w);
     void (*stap)(float x, float y);
+    int (*spress)(float x, float y, tk_rect *r, float *rad);   /* 8c: what lights under the finger (kit_sheet_press) */
     void (*sdone)(void);
     char stitle[48];                          /* (kept for kit_sheet_redraw) */
     /* the switch's animation */
@@ -349,6 +350,9 @@ static void kit_sheet_redraw(void)
     if (KT.kind != KIT_SHEET || KT.closing) return;
     if (kit_sheet_card() == 0) { kit_sheet_place(KT.top); relink(); }
 }
+/* 8c: the open sheet's press: fn(x, y, &rect, &radius) in its tap's space returns 1 and the rect (a capsule radius:
+ * a button's press, else a row's) to light under a touch-down; call it right after kit_sheet */
+__attribute__((unused)) static void kit_sheet_press(int (*fn)(float x, float y, tk_rect *r, float *rad)) { KT.spress = fn; }
 static int kit_sheet(const char *title, float content_h, void (*draw)(dc *d, float x, float y, float w), void (*tap)(float x, float y),
                      void (*done)(void))
 {
@@ -357,6 +361,7 @@ static int kit_sheet(const char *title, float content_h, void (*draw)(dc *d, flo
     KT.cb = 0;
     KT.sdraw = draw;
     KT.stap = tap;
+    KT.spress = 0;                            /* (kit_sheet_press after this call sets it) */
     KT.sdone = done;
     KT.large = KSH_LARGE;
     KT.med = KSH_MED;
@@ -462,6 +467,14 @@ static int kit_touch(int phase, float x, float y, float t)
                     tk_rect c = { KT.x + 16, top + 16, 44, 44 };
                     hl_set(&kithl, c, c, 22, PRESS_BTN);
                 }
+            }
+            if (KT.drag == 3 && KT.spress) {
+                /* 8c (F's SBTK_TTF sweep: sheet rows and buttons showed nothing at the touch): the owner's rect under
+                 * the finger (the same space as its tap's: the sheet at KT.y) lights at once, iOS's row / button press;
+                 * a move or the lift lets it go */
+                tk_rect r;
+                float rad = 0;
+                if (KT.spress(x, y - (top - KT.y), &r, &rad)) hl_set(&kithl, r, r, rad, rad >= r.h / 2 - .5f ? PRESS_BTN : PRESS_ROW);
             }
             return 1;
         }

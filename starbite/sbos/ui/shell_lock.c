@@ -1239,11 +1239,13 @@ static void place_list(void)
         list.alpha *= sysx;
         list.y += PT(60 * (1 - sysx));
         sysplat.alpha = (1 - tk_clampf(sysx * 1.6f, 0, 1)) * (1 - tk_clampf(lkn_p() * 1.6f, 0, 1));
-        float s = .96f + .04f * (1 - sysx);
+        float s = (.96f + .04f * (1 - sysx)) * press_s(&sysplat);   /* 8c: its press (iOS's platter: .97 under the finger) */
         sysplat.ox = PT(195); sysplat.oy = PT(SYSP_Y + SYSP_H / 2);
         sysplat.sx = sysplat.sy = s;
         sysplat.hidden = !sysplat.bmp.px || sysplat.alpha <= .004f;
         sysless.alpha = tk_clampf(sysx * 1.6f - .6f, 0, 1);
+        sysless.ox = PT(195); sysless.oy = PT(SYSL_Y + SYSL_H / 2);
+        sysless.sx = sysless.sy = press_s(&sysless);
         sysless.hidden = !sysless.bmp.px || sysless.alpha <= .004f;
     } else
         sysplat.hidden = sysless.hidden = 1;
@@ -1718,15 +1720,29 @@ static int focus_faces_idle(int keep)
     return 0;
 }
 /* a closed sheet keeps nothing of its own (about 19 MB) */
+static tk_bmp focus_q;                      /* 8c: build_focus's part 1's snapshot (a quarter), blurred by part 2 */
 static void free_focus(void)
 {
+    tk_bmp_free(&focus_q);
     relayer(&scrim); relayer(&funder); relayer(&fcard); relayer(&ffill); relayer(&flabel); relayer(&fthumb);
     focus.child = 0;
 }
 static void free_cc_all(void);
 static void focus_label(const sys_t *s, float sy);
-static void build_focus(const sys_t *s, const grp_t *gr)
+/* 8c (the Mac's focus film: a 16.5 ms frame at the row's tap, ~120 ms on the phone): the sheet in three parts, a
+ * frame each from the tap (focus_stage, sh_tick) while it starts rising from below the screen (its first frames show
+ * next to nothing of it): 1 the snapshot and the screen under it, 2 the scrim (its blur), 3 the card, 4 the slider
+ * and the group; build_focus makes them all at once (the host's stills) */
+static int focus_stage;
+static const sys_t *focus_bs;
+static const grp_t *focus_bg;
+static void build_focus_part(const sys_t *s, const grp_t *gr, int part);
+#define FOCUS_PARTS 4
+static void build_focus(const sys_t *s, const grp_t *gr) { for (int k = 1; k <= FOCUS_PARTS; k++) build_focus_part(s, gr, k); }
+static void build_focus_part(const sys_t *s, const grp_t *gr, int part)
 {
+    static float sy;
+    if (part == 1) {
     focus_req = 0;                           /* cp6: every sheet opens on a normal start */
     free_cc_all();                           /* B4: the lock's Control Centre makes room for the sheet */
     /* the scrim: what is on the panel now, blurred 22 pt, saturated 1.3, under rgba(4, 8, 26, .28) */
@@ -1736,16 +1752,8 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     /* half resolution, drawn 2x (it is a blur): 4 MB instead of 17 */
     tk_bmp_new(&scrim.bmp, TK_W / 2, TK_H / 2);
     scrim.sx = scrim.sy = 2;
-    {
-        tk_bmp q;
-        shown_quarter(&q);                       /* cp7f (the GPU path: no whole CPU frame first) */
-        tk_bmp_blur(&q, PT(22) / 4);
-        tk_bmp_satbright(&q, 1.3f, 1);
-        /* the tint over it at this size (a constant over a smooth image: the same after the bilinear up) */
-        tk_bmp_tint(&q, TK_RGBA(0, 0, 0, .2f));       /* P3p (P3j-19): a neutral dim */
-        tk_bmp_up(&scrim.bmp, &q, 0, 0, 2);
-        tk_bmp_free(&q);
-    }
+    tk_bmp_free(&focus_q);
+    shown_quarter(&focus_q);                     /* cp7f (the GPU path: no whole CPU frame first); 8c: blurred next frame */
     scrim.opaque = 1;                        /* nothing under it needs drawing once it is fully in */
     /* what is under the sheet does not change while it is open: the screen as it is now (the half canvas follows
      * every rest frame), one opaque layer, so a frame draws it and the scrim instead of every lock layer */
@@ -1756,9 +1764,28 @@ static void build_focus(const sys_t *s, const grp_t *gr)
         funder.sx = funder.sy = 2;
         funder.opaque = 1;
     }
+    return;
+    }
+    if (part == 2) {                         /* 8c: the snapshot blurred into the scrim */
+        tk_bmp q = focus_q;
+        tk_memset(&focus_q, 0, sizeof focus_q);
+        if (q.px) {
+            tk_bmp_blur(&q, PT(22) / 4);
+            tk_bmp_satbright(&q, 1.3f, 1);
+            /* the tint over it at this size (a constant over a smooth image: the same after the bilinear up) */
+            tk_bmp_tint(&q, TK_RGBA(0, 0, 0, .2f));       /* P3p (P3j-19): a neutral dim */
+            tk_bmp_up(&scrim.bmp, &q, 0, 0, 2);
+            tk_bmp_free(&q);
+        }
+        focus.child = 0;                     /* the scrim (and what is under it) first */
+        if (funder.bmp.px) tk_layer_add(&focus, &funder);
+        tk_layer_add(&focus, &scrim);
+        return;
+    }
+    if (part == 3) {
     /* the card: its backdrop is the scrim filtered again (blur 14, saturate 1.9, brightness 1.06), taken once at
      * rest and moved with the card while it springs in (Chrome filters the live scene under it each frame) */
-    float sy = 0;
+    sy = 0;
     uint64_t tb0 = tk_us();
     for (int pass = 0; pass < 1; pass++) {
         tk_layer *L = &fcard;
@@ -1802,6 +1829,8 @@ static void build_focus(const sys_t *s, const grp_t *gr)
             bake_slider_face(nf);
             tk_blit(d.b, &sf->bmp, (int)(sf->x - d.ox), (int)(sf->y - d.oy), 1);
         }
+    }
+    return;
     }
     relayer(&ffill);
     focus_sy = sy;
@@ -2535,6 +2564,38 @@ static int build_cc_step(void)
     if (ccb_again) { ccb_again = 0; return 1; }   /* (the same stage's second call next) */
     ccb_next = ccb_next < CCB_STAGES ? ccb_next + 1 : 0;
     return ccb_next != 0;
+}
+/* 8c (the Mac's cc film: a 40.7 ms first pull frame, 8c's 306 ms turn on the phone): a pull that comes before home's
+ * idle time has made the Control Centre no longer makes all of it at the touch (build_cc). The pull's frames go on
+ * with its stages, two a frame; what is made shows as it comes (the blurs, the status row), the grid once whole (a
+ * part-made grid's views would each copy it every frame); its modules fly in by row from there, as the pull would
+ * show them anyway */
+static int cc_fill;
+static void set_cc(float p);
+static void cc_fill_link(void)
+{
+    if (!ccl.name) tk_layer_init(&ccl, "cc");
+    tk_layer *k[3];
+    int n = 0;
+    if (ccblur1.name) k[n++] = &ccblur1;
+    if (ccscrim.name) k[n++] = &ccscrim;
+    if (ccsb.name) k[n++] = &ccsb;
+    link(&ccl, k, n);
+}
+static void cc_fill_begin(void)
+{
+    if (CCS.built) return;
+    cc_fill = 1;
+    cc_fill_link();
+}
+static int cc_fill_tick(void)
+{
+    if (!cc_fill) return 0;
+    for (int i = 0; i < 2 && cc_fill; i++) if (!build_cc_step()) cc_fill = 0;
+    if (cc_fill) cc_fill_link();             /* (the last stage links it whole: cc_link) */
+    set_cc(CCS.p);
+    relink();
+    return 1;
 }
 static void cc_x_reset(void);
 /* an open app needs the room (its page is a whole screen): the Control Centre's snapshot and grid go, home's idle
@@ -3334,6 +3395,7 @@ static int kit_alert(const char *title, const char *msg, const kit_btn *b, int n
 static int kit_actions(const char *title, const kit_btn *b, int n, kit_cb cb);
 static int kit_sheet(const char *title, float content_h, void (*draw)(dc *d, float x, float y, float w), void (*tap)(float x, float y),
                      void (*done)(void));
+__attribute__((unused)) static void kit_sheet_press(int (*fn)(float x, float y, tk_rect *r, float *rad));   /* 8c (shell_kit.inc) */
 static int kit_on(void);
 static void toast(const char *msg);
 /* the Options sheet: the one-shots that fit this OS (the others dimmed: a tap says why), "Start Normally" once one is
@@ -5863,8 +5925,26 @@ static void icon_press(int a)
     if (a < 0 || !tk_strcmp(APPS[a].k, "search")) return;
     float pad;
     const tk_bmp *ic = app_icon(APPS[a].k, &pad);      /* (Calendar: today's composed tile) */
-    if (!ic) return;
     arect R = icon_rect(a);
+    if (!ic) {
+        /* 8c (the films' SBTK_TTF: Emergency's page-2 tools showed nothing at the touch): a tile drawn on the page
+         * (no icon bitmap): iOS's darkening as a rounded dim over it, pressed and let go as the icons' */
+        tk_layer_init(&icobg, "icon-ground");
+        tk_layer_init(&icofg, "icon-pressed");
+        icobg.hidden = 1;
+        icofg.solid = tk_premul(TK_RGBA(0, 0, 0, .22f));
+        icofg.x = PT(R.x); icofg.y = PT(R.y);
+        icofg.solid_w = PT(R.w); icofg.solid_h = PT(R.h);
+        icofg.clip = 1;
+        icofg.clip_r = (tk_rect){ PT(R.x), PT(R.y), PT(R.w), PT(R.h) };
+        icofg.clip_radius = PT(R.r > 0 ? R.r : 14);
+        icofg.ox = PT(R.x + R.w / 2);
+        icofg.oy = PT(R.y + R.h / 2);
+        IP.on = 1; IP.rel = 0; IP.from = 1; IP.to = .96f; IP.t = 0; IP.dur = .1f; IP.s = 1; IP.t0 = now_ms;
+        icofg.sx = icofg.sy = 1;
+        relink();
+        return;
+    }
     int X = (int)tk_floorf(PT(R.x) - pad + .5f), Y = (int)tk_floorf(PT(R.y) - pad + .5f);
     tk_layer_init(&icobg, "icon-ground");
     tk_layer_init(&icofg, "icon-pressed");
@@ -6163,7 +6243,7 @@ static void sh_touch_(int phase, float x, float y, float t)
             if (y < 56 && x >= 195) {           /* the top-right corner: the Control Centre */
                 T.kind = G_CC;
                 sp_cc.live = 0;
-                if (!CCS.built) build_cc();
+                cc_fill_begin();                 /* 8c: its rest over the pull's frames (was build_cc here) */
                 tk_tracker_add(&T.tr, y, t);
                 return;
             }
@@ -6173,7 +6253,11 @@ static void sh_touch_(int phase, float x, float y, float t)
             /* elsewhere but the dock, Search and the widgets: the pages (direction decided after 8 pt) */
             int on_w = page_x > -195 && y >= 60 && y <= 60 + WID_W && ((x >= WID_X(0) && x <= WID_X(0) + WID_W) || (x >= WID_X(1) && x <= WID_X(1) + WID_W));
             if (y >= DOCK_TOP && y < H_PT - 30) { T.kind = G_DOCK; icon_press(app_hit(x, y)); return; }   /* the dock: a tap opens its app */
-            if (SRCH_HIT(x, y)) { T.kind = G_DOCK; return; }   /* P3g: Search */
+            if (SRCH_HIT(x, y)) {                /* P3g: Search; 8c: the pill presses at the touch (it showed nothing) */
+                T.kind = G_DOCK;
+                press_scale(&hsearch[0], .94f, SRCH_X + SRCH_W / 2, SRCH_Y + SRCH_H / 2);
+                return;
+            }
             if (y >= 56 && y < DOCK_TOP && !SRCH_HIT(x, y) && !on_w) {
                 /* 8b (8a2's phone: "touch down: home 133 ms" after Emergency's switch): page 2's rest is made while the
                  * pages move (sh_tick: two parts a frame), not all here */
@@ -6196,7 +6280,9 @@ static void sh_touch_(int phase, float x, float y, float t)
             /* B4 (IOS-REFERENCE 1): the Control Centre opens over the lock too (made in the lock's idle time) */
             T.kind = G_CC;
             sp_cc.live = 0;
-            if (!CCS.built || cc_stale) { build_cc(); cc_stale = 0; }
+            if (cc_stale && CCS.built) { CCS.built = 0; ccb_next = 0; }   /* 8c: made again over the pull's frames */
+            cc_stale = 0;
+            cc_fill_begin();
             tk_tracker_add(&T.tr, y, t);
             return;
         }
@@ -6226,6 +6312,11 @@ static void sh_touch_(int phase, float x, float y, float t)
                 tk_rect c = { CARD_X, LIST_TOP + 10 + 78.0f * T.arg, CARD_W, 68 };
                 hl_set(&lockhl, c, c, 26, W(.14f));     /* cp6: lit, then fading (no scale: Emergency stays quiet) */
                 lk_hl_key = 0;
+            } else if (T.arg == 8) {                    /* 8c (8c's phone: touch to frame 193 ms): Exit Emergency's capsule lights at once too */
+                float w = 14 + tw(TK_IT600, 13, "Exit Emergency", 0, 0) + 14;
+                tk_rect c = { 195 - w / 2, LIST_TOP + 10 + 78 * 8 - 10 + 12, w, 32 };
+                hl_set(&lockhl, c, c, 16, PRESS_BTN);
+                lk_hl_key = 0;
             }
             tk_tracker_add(&T.tr, y, t);
             return;
@@ -6239,12 +6330,14 @@ static void sh_touch_(int phase, float x, float y, float t)
             tk_rect c = { 195 - w / 2, SYSL_Y, w, SYSL_H };
             hl_set(&lockhl, c, c, SYSL_H / 2, PRESS_BTN);
             lk_hl_key = 0;
+            press_key(&sysless, .92f, place_list);     /* 8c (the highlight is the list's: clipped above the pill) */
             lock_ver++;
         }
         else if (sysp_hit(x, y)) {                   /* 8a: the Systems platter: lit, a tap fans the cards out */
             T.kind = G_SYSP; T.arg = 0;
             tk_rect c = { PL_X, SYSP_Y, PL_W, SYSP_H };
             hl_set(&lockhl, c, c, PL_R, W(.12f));
+            press_key(&sysplat, .97f, place_list);     /* 8c: the folded list hides lockhl: the card's own press shows at once */
             lk_hl_key = 0;
             lock_ver++;
         }
@@ -6498,6 +6591,7 @@ static void sh_touch_(int phase, float x, float y, float t)
         }
         break;
     case G_DOCK:
+        hl_off();                                /* 8c: the Search pill's press lets go */
         if (!T.moved) { int a = app_hit(x, y); if (a >= 0) app_open(a); }
         break;
     case G_APPTAP:
@@ -6518,12 +6612,13 @@ static void sh_touch_(int phase, float x, float y, float t)
         const sys_t *s = &G[T.arg].it[T.arg2];
         if (s->self) { toast("You are in Starbite OS"); break; }
         tp_mark("touch up: lock row, frame");
-        tk_comp_frame(C, 0, 0);                /* cp6: the row lit (and pressed) while the sheet is made: iOS keeps it lit under */
-        tk_comp_idle(C);                       /* P3p: the half canvas (the sheet's under-layer) */
-        uint64_t t0 = tk_us();
+        uint64_t t0 = tk_us();                 /* 8c: the row's lit frame and the half canvas are the sheet's first part's */
         tp_mark("touch up: lock row, the sheet");
-        build_focus(s, &G[T.arg]);
-        lap_us("focus: snapshot and bake", tk_us() - t0);
+        (void)t0;
+        /* 8c: the sheet made over its first three frames (focus_stage), the spring started now */
+        focus_bs = s; focus_bg = &G[T.arg];
+        focus_stage = 1;
+        focus.child = 0;
         focus_on = 1;
         focus_closing = 0;
         set_focus(0);
@@ -6676,6 +6771,7 @@ int sh_tick(float dt, float t)
     clk_update(t);
     if (ap_pending) { app_build_step(); mv = 1; if (!ap_pending && AP.on) set_app_rect(AP.R); }   /* P3i */
     mv |= sysp_tick(dt);                          /* 8a: the Systems platter folding / fanning */
+    mv |= cc_fill_tick();                         /* 8c: a pulled Control Centre's rest */
     if (EP.goal >= 0 && (EP.post & EP_APPS2) && (T.kind == G_PAGE || sp_page.live || page_x < -1)) {
         /* 8b: page 2 being part-made while the pages move: two parts a frame (~10 ms each on the phone) */
         for (int i = 0; i < 2 && (EP.post & EP_APPS2); i++) if (!home_apps2_step()) EP.post &= ~EP_APPS2;
@@ -6871,6 +6967,15 @@ int sh_tick(float dt, float t)
         }
     }
     if (focus_on) {
+        if (focus_stage && focus_on && !focus_closing) {   /* 8c: the sheet's next part */
+            uint64_t t0 = tk_us();
+            if (focus_stage == 1) tk_comp_idle(C);   /* the half canvas (the screen under the sheet) */
+            build_focus_part(focus_bs, focus_bg, focus_stage);
+            focus_stage = focus_stage < FOCUS_PARTS ? focus_stage + 1 : 0;
+            if (!focus_stage) lap_us("focus: snapshot and bake (three frames)", tk_us() - t0);
+            set_focus(focus_p);
+            mv = 1;
+        }
         if (sp_focus.live) {
             int live = tk_spring_step(&sp_focus, dt);
             set_focus(tk_maxf(0, sp_focus.x));
