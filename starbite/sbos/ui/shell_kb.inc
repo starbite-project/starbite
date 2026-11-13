@@ -269,6 +269,20 @@ static void kb_sync(void)
 #define KB_STRIP 40.0f
 static struct { int n; char lab[12][8]; uint8_t lit[12]; void (*tap)(int); int dirty; } KA;   /* the accessory row */
 static tk_layer kbacc;
+/* 8a (top ten #10): the predictive strip's first honest part: the word typed so far, in quotes in the middle slot
+ * (iOS's "typed word" slot), between the bar's two hairlines; nothing while there's no word. Never in a password or a
+ * terminal (KB_ASCII: no strip). Drawn at idle (kb_idle), as the accessory row */
+static char kb_tw[28];
+static void kb_word_set(const char *t)
+{
+    int n = (int)tk_strlen(t), i = n;
+    while (i > 0 && t[i - 1] != ' ' && t[i - 1] != '\n') i--;
+    char w[28];
+    int k = 0;
+    for (int j = i; j < n && k < 27; j++) w[k++] = t[j];
+    w[k] = 0;
+    if (tk_strcmp(w, kb_tw)) { tk_memcpy(kb_tw, w, (size_t)k + 1); KA.dirty = 1; }
+}
 static int kb_strip_on(void) { return KA.n > 0 || !(KB.flags & KB_ASCII); }
 static float kb_top(void) { return KB_TOP - (kb_strip_on() ? KB_STRIP : 0); }
 static void kb_solid(tk_layer *l, const char *name, float top, float r, uint32_t pm)
@@ -366,7 +380,7 @@ static void kb_set(int on)
     tk_layer_init(&kbhl, "kb-lit"); kbhl.hidden = 1;
     tk_layer_init(&kbpop, "kb-balloon"); kbpop.hidden = 1;
     if (!kbacc.bmp.px) { tk_layer_init(&kbacc, "kb-accessory"); kbacc.hidden = 1; }
-    KA.dirty = KA.n > 0;
+    KA.dirty = KA.n > 0 || kb_tw[0];
     kb_layout();
     mk(&kbl, "kb-keys", 0, KB_RY(0) - 1, 390, KB_EMO_Y + 13 - (KB_RY(0) - 1), 0, 0);
     KB.shown = 1;
@@ -407,6 +421,7 @@ static void kb_draw(dc *d, int shift, int num) { kb_draw_r(d, 0, shift, num); }
 /* a capital next? (the text so far: empty, after a new line, or after . ! ? and a space) */
 static void kb_ctx(const char *t)
 {
+    kb_word_set(t);
     if (!(KB.flags & KB_AUTOCAP) || KB.shift == 2 || KB.layer) return;
     int n = (int)tk_strlen(t), i = n;
     while (i > 0 && t[i - 1] == ' ') i--;
@@ -662,6 +677,20 @@ static void ka_build(void)
 {
     KA.dirty = 0;
     relayer(&kbacc);
+    if (!KA.n && KB.shown && kb_tw[0] && kb_strip_on()) {        /* 8a: the typed word */
+        dc d = mk(&kbacc, "kb-accessory", 0, KA_Y, 390, KA_H, 0, 0);
+        for (int i = 1; i <= 2; i++) d_rrect(&d, 390 * i / 3.0f, KA_Y + 6, .5f, KA_H - 12, 0, W(.18f));
+        char q[36];
+        int k = 0;
+        q[k++] = (char)0xe2; q[k++] = (char)0x80; q[k++] = (char)0x9c;          /* the curly quotes */
+        for (const char *p = kb_tw; *p;) q[k++] = *p++;
+        q[k++] = (char)0xe2; q[k++] = (char)0x80; q[k++] = (char)0x9d;
+        q[k] = 0;
+        d_text_box(&d, TK_IT400, 17, 195, KA_Y + KA_H / 2 + 6, 390 / 3.0f - 12, 1, q, 0, 0, W(1), 0);
+        kbacc.hidden = 0;
+        relink();
+        return;
+    }
     if (!KA.n || !KB.shown) { kbacc.hidden = 1; return; }
     dc d = mk(&kbacc, "kb-accessory", 0, KA_Y, 390, KA_H, 0, 0);
     for (int i = 0; i < KA.n; i++) {

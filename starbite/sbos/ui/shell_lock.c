@@ -5024,7 +5024,7 @@ static void relink(void)
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &emsel, &kbg, &emp, &apsb, &apphl };
     ps_link(ag, 16);                                 /* B3: emsel, emp the edit menu's; cp6: the content in pushg (the slide) */
     kb_link();                                       /* B3: the keyboard's panel, keys, lit key and balloon */
-    tk_layer *st[NST + 64] = { &appst[0], &appst[1], &appst[2], &appst[3] };
+    tk_layer *st[NST + 80] = { &appst[0], &appst[1], &appst[2], &appst[3] };
     int na = NST + med_layers(st + NST);
     na += lx_layers(st + na);                        /* L3: shell_linux.inc's */
     na += se_layers(st + na);                        /* helper B2: Settings' page (scrolled, clipped) and its nav row */
