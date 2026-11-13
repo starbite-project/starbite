@@ -5705,7 +5705,7 @@ static int notes_hold(float t)
     note_del = NS.n - 1 - (int)((y - CONTENT_TOP) / NOTE_RH);
     T.kind = G_NONE;
     hl_off();
-    sh_haptic();                                   /* iOS: a medium tap at a long press */
+    sh_haptic_k(SH_HAP_MEDIUM);                    /* iOS: a medium tap at a long press (was the light key tap) */
     static char msg[200];
     char nt[136];
     note_title(NOTES[note_del], nt);
