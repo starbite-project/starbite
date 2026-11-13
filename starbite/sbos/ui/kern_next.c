@@ -1440,6 +1440,11 @@ void next_kminute(void)
     if (!ready) { ui_kminute(); return; }
     status_now();
     lastos_now();                                    /* helper D: once */
+    if (!K.screen_on)                                /* 8a (the drivers' run 9: "timer 7/0" 496-1079 ms every minute
+                                                      * with the screen off at 455 MHz: a frame nobody sees and the
+                                                      * idle work rebuilding Control Centre's pictures): the time is
+                                                      * noted; the wake draws it and starts the idle work again */
+        return;
     if (!ticking) {
         tk_comp_frame(&comp, 0, 0);
         present();
