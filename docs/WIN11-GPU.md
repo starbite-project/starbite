@@ -2467,6 +2467,19 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   after 3 s; a game still running at a run's end is killed before the files are put back.
 - **T65** (`sbwddm-t65` = T62 + those, sb-gd-ab.txt `glec twice`): A/A2 x64, B/B2 ARM64EC, big cores.
 
+### 6.74 T60 read: the DComp surface's clear arrives as a draw that writes nothing
+
+- All regular tests pass (sbtwo, sbtext, sbtex, triangle, sbdrag). VIS2 hwnd: the app's clear arrives (1 clear per
+  frame, 0xff00008c), the window is not composed (as T58). VIS2 dcsurf, per frame into the 1216x704 atlas:
+  1. **the clear, emulated by the runtime:** a 4-vertex triangle strip, no input layout, no VS constant buffer, PS cb0
+     = (0, 0, 0.55, 1) = sbcomp's colour 0,0,140; viewport 1200x700; scissor (0,0)-(1201,701);
+  2. 96 vertices from the atlas into a 64x320 texture; 3. 96 vertices from it back into the atlas.
+  Every present's samples are 0x00000000 and both textures' centres stay 0: draw 1 writes nothing, so 2 and 3 copy
+  nothing. Scissor and viewport cover the window; predication is set and off.
+- **Next (zero-copy track, after the GD work):** dump draw 1's VS/PS TGSI (where its positions come from: SV_VertexID
+  alone, or a VS buffer that is not bound) and its blend/rasterizer/depth state; compare with sbtex's passing
+  vertexid test.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
