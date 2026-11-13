@@ -2168,10 +2168,11 @@ static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330
  * Apple opens (its head 36 lower, "Show less" above it at x >= 285), "Show less" folds it, the list scrolls to its
  * end, Starbite opens (and scrolls into view), its first row (Starbite OS, "You are in Starbite OS"). The focus film:
  * Microsoft opens, its Windows 11 row (525..593) opens the focus sheet, the slide starts it */
-static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 354, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 330, 334, 0, 0, 80 },
+/* 8a: S_GROUP and S_FOCUS open the lock's Systems card first (the user's lock: one card that expands in place) */
+static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 645, 0, 0, 80 }, { 0, 0, 0, 0, 0, 700 }, { 1, 195, 354, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 330, 334, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 900 }, { 2, 200, 650, 200, 380, 250 }, { 0, 0, 0, 0, 0, 1200 }, { 1, 195, 578, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 1800 }, { 1, 195, 464, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };
-static const step S_FOCUS[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 444, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 195, 559, 0, 0, 80 },
+static const step S_FOCUS[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 645, 0, 0, 80 }, { 0, 0, 0, 0, 0, 700 }, { 1, 195, 444, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 195, 559, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 1000 }, { 2, 65, 743, 345, 743, 550 }, { 0, 0, 0, 0, 0, 2600 } };
 static const step S_HOLDS[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 71, 727, 0, 0, 650 }, { 0, 0, 0, 0, 0, 700 }, { 3, 319, 727, 0, 0, 950 },
                                 { 0, 0, 0, 0, 0, 900 } };

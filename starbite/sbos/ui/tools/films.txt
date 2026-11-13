@@ -1,6 +1,6 @@
 unlock: wait 400; drag 195 795 195 330 220; wait 1300
-group: wait 300; tap 195 354; wait 1000; tap 330 334; wait 900; drag 200 650 200 380 250; wait 1200; tap 195 578; wait 1800; tap 195 464; wait 1200
-focus: wait 300; tap 195 444; wait 900; tap 195 559; wait 1000; drag 65 743 345 743 550; wait 2600
+group: wait 300; tap 195 645; wait 700; tap 195 354; wait 1000; tap 330 334; wait 900; drag 200 650 200 380 250; wait 1200; tap 195 578; wait 1800; tap 195 464; wait 1200
+focus: wait 300; tap 195 645; wait 700; tap 195 444; wait 900; tap 195 559; wait 1000; drag 65 743 345 743 550; wait 2600
 holds: wait 300; hold 71 727 650; wait 700; hold 319 727 950; wait 900
 relock: wait 300; drag 195 795 195 330 220; wait 900; power; wait 900; power; wait 1200
 pages: wait 300; drag 195 795 195 330 220; wait 900; drag 320 450 60 450 200; wait 900; drag 60 450 330 460 220; wait 1200

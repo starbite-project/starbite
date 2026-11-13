@@ -161,6 +161,7 @@ static void lkn_place(void)
     if (!on) { lock_ver++; return; }
     /* B10: out of an opening vendor card's way (its members run down to the buttons: list_bot fades the same way) */
     LK.sa = tk_clampf(1 - vc_open_q() * 3, 0, 1);
+    if (sysp_on()) LK.sa *= tk_clampf(1 - sysx * 2, 0, 1);   /* 8a: the expanded Systems take their room */
     float p = LK.p, sa = LK.sa;
     for (int i = 0; i < LKN_MAX; i++) {
         lkn_slot *s = &LKS[i];

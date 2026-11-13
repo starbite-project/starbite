@@ -855,7 +855,7 @@ static void cv_prox_sync(void)
 static void cv_ring_sync(void)
 {
     int want = CV.on && CV.at > 0 && CV.mode == CVM_INCOMING && !CV.answering && !CV.ending;
-    if (want && snd_ring_who != 1) snd_ring(1, SH_SND_RING);
+    if (want && snd_ring_who != 1 && !snd_silent()) snd_ring(1, SH_SND_RING);   /* 8a: Silent Mode: the call vibrates only (the modem buzzes; iOS) */
     else if (!want) snd_ring_stop(1);
 }
 /* where everything is for the mode (and the lock: the slider) */

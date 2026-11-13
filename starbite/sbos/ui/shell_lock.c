@@ -77,7 +77,9 @@ static int shown_quarter(tk_bmp *q);           /* cp7f: what shows, a quarter ea
 #define PL_W 361.0f
 #define PL_R 23.0f
 #define LKN_TOP 310.0f                               /* the notifications' area fanned out (the list's top: LIST_TOP) */
-#define LKN_BOT 677.0f
+#define LKN_BOT0 677.0f                              /* the stack's bottom on iOS's lock (20.5 above the buttons) */
+static float lkn_bot(void);                          /* 8a: above the Systems card while it shows */
+#define LKN_BOT (lkn_bot())
 /* B10: a vendor card is an iOS platter (PL_X / PL_W / PL_R, the notifications' glass): its icon, name, systems and
  * chevron where B4's cards had them (11 / 69 / 81 in, the chevron 32 from the right) */
 #define VC_X PL_X
@@ -727,11 +729,14 @@ static int vc_any_open(void) { for (int g = 0; g < NG; g++) if (V[g].isopen) ret
 /* the list's bottom (screen pt): above the notifications' stack while it shows, else (or while a card is open) above
  * the buttons, as B4's list */
 static float lkn_stack_top(void);       /* shell_lknote.inc: the stack's top (0: no notifications) */
+static int sysp_on(void);               /* 8a: the Systems card (below) */
+static float sysx;
 static float list_bot(void)
 {
     float lb = LIST_TOP + LIST_H, st = EMG ? 0 : lkn_stack_top();
     if (st <= 0) return lb;
     float a = tk_clampf(1 - vc_open_q() * 3, 0, 1);       /* (the notifications' fade: lkn_place) */
+    if (sysp_on()) a *= 1 - sysx;                          /* 8a: the expanded Systems take the room to the buttons */
     return lb + (tk_minf(lb, st - 10) - lb) * a;
 }
 static float list_h(void) { return list_bot() - LIST_TOP; }
@@ -1051,21 +1056,22 @@ static void build_empill(void)
 
 /* place every list layer for the current scroll, heights and row animations (and the notifications, which make
  * room for an open card) */
-/* 8a (top ten #1, option a, the user's decision pending: pref lock.systems = 1 turns it on, 0 the cards as they are):
- * the Systems as ONE compact glass platter under the widgets (the four vendors' logos in a row, "Systems", how many);
- * a tap fans today's cards out over it (the platter fades, the list comes in on the FAN spring); a tap on the bare
- * wallpaper, the next lock or Emergency folds them back. The lock's first look is iOS's: wallpaper, clock, widgets,
- * the notifications' own stack at the bottom. */
+/* 8a (top ten #1; the user's decision 2026-11-13: option a, the systems as one notification card that expands in place
+ * like an iOS grouped stack; pref lock.systems = 0 brings back the four cards): ONE glass card styled as a notification
+ * at the stack's bottom place (on y 677, as iOS's notifications), the four vendors' logos, "Systems", how many; the
+ * lock's notifications stack above it. A tap expands it in place: today's cards rise out of it into the list (the FAN
+ * spring; the card fades, the notifications give way as for an open card); a tap on the clock, the widgets or bare
+ * wallpaper, the next lock or Emergency's exit folds them. */
 static void d_icon_s(dc *d, const char *name, float x, float y, float s);
-#define SYSP_Y (LIST_TOP + 10)
 #define SYSP_H 64.0f
+#define SYSP_Y (LKN_BOT0 - SYSP_H)
 static int sysp_mode = -1;               /* the pref, read at the lock's build (-1 not yet) */
 static float sysx = 1;                   /* 0 folded (the platter), 1 the cards out */
 static tk_spring sp_sysx;
 static tk_layer sysplat;
 static int sysp_on(void)
 {
-    if (sysp_mode < 0) { sysp_mode = sh_pref_int("lock.systems", 0) == 1; sysx = sysp_mode ? 0 : 1; }
+    if (sysp_mode < 0) { sysp_mode = sh_pref_int("lock.systems", 1) == 1; sysx = sysp_mode ? 0 : 1; }
     return sysp_mode;
 }
 static int sysp_hit(float x, float y) { return sysp_on() && !EMG && sysx < .5f && x >= PL_X && x < PL_X + PL_W && y >= SYSP_Y && y < SYSP_Y + SYSP_H; }
@@ -1075,7 +1081,7 @@ static void sysp_build(void)
     tk_layer_init(&sysplat, "lock-systems");
     sysplat.hidden = 1;
     if (!sysp_on()) return;
-    dc d = mk(&sysplat, "lock-systems", PL_X, SYSP_Y, PL_W, SYSP_H, 44, 1);
+    dc d = mk(&sysplat, "lock-systems", PL_X, SYSP_Y, PL_W, SYSP_H, 18, 1);   /* (18: its shadow; 44 cost 2 MB more) */
     if (!d.b->px) return;
     d_glass(&d, PL_X, SYSP_Y, PL_W, SYSP_H, PL_R, 1, 1);
     int n = 0, total = 0;
@@ -1097,6 +1103,7 @@ static void sysp_build(void)
     d_icon(&d, "chev", PL_X + PL_W - 26, SYSP_Y + SYSP_H / 2 - 6.5f, .35f);
     trim(&sysplat);
 }
+static float lkn_bot(void) { return sysp_on() && !EMG ? SYSP_Y - 10 : LKN_BOT0; }
 static void place_list(void);
 static void sysp_fold(int open, int instant)
 {
@@ -1197,8 +1204,9 @@ static void place_list(void)
     list.clip_r = (tk_rect){ 0, PT(LIST_TOP), PT(390), PT(lh) };
     /* B10: the notifications fanned out over the list: it gives way (and takes no touches, sh_touch) */
     list.alpha = EMG ? 1 : 1 - tk_clampf(lkn_p() * 1.6f, 0, 1);
-    if (!EMG && sysp_on()) {                      /* 8a: the platter, or the cards fanned out over it */
+    if (!EMG && sysp_on()) {                      /* 8a: the card, or the cards risen out of it */
         list.alpha *= sysx;
+        list.y += PT(60 * (1 - sysx));
         sysplat.alpha = (1 - tk_clampf(sysx * 1.6f, 0, 1)) * (1 - tk_clampf(lkn_p() * 1.6f, 0, 1));
         float s = .96f + .04f * (1 - sysx);
         sysplat.ox = PT(195); sysplat.oy = PT(SYSP_Y + SYSP_H / 2);
@@ -1983,12 +1991,13 @@ static int cc_bright;           /* the panel's brightness level the slider last 
 static int snd_ring_who;
 static void snd_ring(int who, int kind) { if (sh_snd_tone(kind) == 0) snd_ring_who = who; }
 static void snd_ring_stop(int who) { if (snd_ring_who == who) { sh_snd_tone_stop(); snd_ring_who = 0; } }
-/* 8a (top ten #8): Silent Mode (pref snd.silent; the Control Centre's bell, Settings > Sounds & Haptics): the one-shot
- * sounds stay quiet (clicks, the lock, notifications, the shutter, the charging chime); calls, alarms and timers ring
- * (snd_ring), as Track A's rule; Emergency is quiet anyway */
+/* 8a (top ten #8): Silent Mode (pref snd.silent; the Control Centre's bell, Settings > Sounds & Haptics), iOS's: the
+ * one-shot sounds stay quiet (clicks, the lock, notifications, the shutter, the charging chime) and an incoming call
+ * only vibrates (the modem buzzes by itself; shell_comms.inc's cv_ring_sync); alarms and timers still ring (snd_ring);
+ * Emergency is quiet anyway */
 static int snd_silent(void) { return sh_pref_int("snd.silent", 0) != 0; }
 static void cc_silent_changed(void);
-static void snd_silent_set(int on) { sh_pref_set_int("snd.silent", !!on); cc_silent_changed(); }
+static void snd_silent_set(int on) { sh_pref_set_int("snd.silent", !!on); if (on) snd_ring_stop(1); cc_silent_changed(); }   /* a ringing call goes quiet */
 static void snd_once(int kind) { if (!snd_ring_who && !EMG && !snd_silent()) (void)sh_snd_tone(kind); }   /* gap list B: Emergency is quiet */
 /* cp7x (Track A): the kernel's alarm (alarm.c rings and stops it): owner 4; it takes over any other ring */
 void sh_alarm_sound(int on) { if (on) snd_ring(4, SH_SND_ALARM); else snd_ring_stop(4); }

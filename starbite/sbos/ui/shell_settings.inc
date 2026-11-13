@@ -420,8 +420,8 @@ static void se_rows(int p)
         foot("A tap plays the sound.");
         sec(0);
         tog(T_SILENT, "Silent Mode", snd_silent());
-        foot("Silent Mode quiets key clicks, the lock, notifications and the charging chime (the Control Centre's "
-             "bell too). Calls, alarms and timers still ring.");
+        foot("Silent Mode quiets key clicks, the lock, notifications, the shutter and the charging chime, and calls "
+             "only vibrate (the Control Centre's bell too). Alarms and timers still ring.");
         sec(0);
         tog(T_KBSND, "Keyboard Clicks", se_get(SK_KBSND));
         tog(T_LOCKSND, "Lock Sound", se_get(SK_LOCKSND));
