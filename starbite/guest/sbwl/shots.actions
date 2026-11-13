@@ -1,0 +1,18 @@
+# shots.sh's steps after shot 1, per catalog id: hostsim script commands separated by ';', "shot CAPTION" dumps the
+# next screenshot (2, 3) with that caption (default: the app's name; shot 1 is always the app's name). Keys are Linux
+# key codes (28 Enter, 15 Tab, 1 Esc, 103 Up, 108 Down); taps in surface pixels (720 x 1280: the carousel's viewport).
+# "pre: ..." steps run before shot 1 (a first-run dialog closed). "id+: pkg ..." installs more packages for the shot.
+# Apps not listed: shot 1 only.
+gnome-calculator: type 1234*56; key 28; shot Calculator: a sum and its result; type 2^10; key 28; shot Calculator: powers and history
+qalculate-gtk: type 1 mile in km; key 28; shot Qalculate!: units converted as you type
+gnome-text-editor: type Shopping list for Sunday: bread, coffee, apples, oranges, tea and a birthday cake for Anna.; shot Text Editor: write notes and lists
+gnome-chess: tap 399 835; sleep 800; tap 399 679; sleep 6000; shot Chess: play against the computer
+gnome-sudoku: key 28; shot Sudoku: a new puzzle
+gnome-mines: key 28; shot Mines: a new field
+libreoffice: type Meeting notes, Friday: the new phone builds pass their tests; next, the App Store's pages.; shot LibreOffice Writer: documents, with Calc and Impress
+drawing: pre: key 1; sleep 1500
+gcompris-qt: pre: key 1; sleep 1500
+gimp: pre: key 1; sleep 1500
+inkscape: pre: key 1; sleep 1500
+kdenlive: pre: key 28; sleep 1500
+openttd+: openttd-opengfx openttd-openmsx openttd-opensfx
