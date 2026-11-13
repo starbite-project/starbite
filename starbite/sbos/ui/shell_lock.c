@@ -771,7 +771,12 @@ static void erase_rrect(tk_bmp *b, float ox, float oy, float x, float y, float w
 }
 /* the platter glass (K[0]): the face, a 3-slice drawn at any height from 48 pt, and the stack's lower cards under a
  * 68 pt one (shell_nc.inc's pl_peek places them so). Baked once at boot (and again after Emergency); never in a tap */
-static void build_platter(void)
+/* 8b (8b's phone: "lock card 42 ms", the platter in one part after Emergency): its ghost stack and its glass face as
+ * two parts (build_platter: both, the bake's) */
+static void build_platter_gh(void);
+static void build_platter_face(void);
+static void build_platter(void) { build_platter_gh(); build_platter_face(); }
+static void build_platter_gh(void)
 {
     card_t *k = &K[0];
     k->y = 10;
@@ -786,6 +791,12 @@ static void build_platter(void)
     erase_rrect(e.b, e.ox, e.oy, PL_X, top, PL_W, 68, PL_R);
     trim(&k->gh);
     k->gh.hidden = 1;
+}
+static void build_platter_face(void)
+{
+    card_t *k = &K[0];
+    k->y = 10;
+    float top = LIST_TOP + k->y;
     /* P3q (P3j-11): made with a glass mask so d_glass records the box's shape (the GPU row's live, refracted glass),
      * the mask freed at once (the CPU path keeps the baked look; no heap kept) */
     dc d = mk(&k->face, "face", PL_X, top, PL_W, 68 + 12, FACE_MG, 1);
@@ -1013,8 +1024,8 @@ static void ec_card(dc *d, int i, float top) { ec_card_part(d, i, top, -1); }
  * the layers of cards 4..7: B6's ep_card, a piece at a time, below set_emergency) */
 static void free_ecards(void) { for (int i = 0; i < NEC; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } ec_next = 8; }
 static int cards_pending;       /* the platter glass, the vendor cards and the tools still to make again after Emergency (one per idle turn) */
-static void build_lockpart(int i) { if (i == 0) build_platter(); else if (i <= NG) build_vcard(i - 1); else build_etool(); }
-#define LOCK_PARTS (NG + 2)
+static void build_lockpart(int i) { if (i == 0) build_platter_gh(); else if (i == 1) build_platter_face(); else if (i <= NG + 1) build_vcard(i - 2); else build_etool(); }
+#define LOCK_PARTS (NG + 3)
 static void lkn_free(void);
 static void toggle_group(int g, int instant);
 /* every open card closed (instant: at once, its rows freed) */
@@ -6982,6 +6993,21 @@ static void prep_tree(tk_layer *l)
         prep_tree(l->child);
     }
 }
+/* 8b (8b's phone: "prep_tree 22-26 ms" in one idle call after home's rebuild): at most *n missing half copies a call;
+ * 1 while some are left (the idle comes back: sh_idle_pending) */
+static int prep_left;
+static int prep_some(tk_layer *l, int *n)
+{
+    for (; l; l = l->next) {
+        if (l->bmp.px && !l->external && !l->half.px) {
+            if (*n <= 0) return 1;
+            tk_layer_prepare(l);
+            (*n)--;
+        }
+        if (prep_some(l->child, n)) return 1;
+    }
+    return 0;
+}
 /* cp7f (Track A): each piece timed, named when slow (sh_slow_piece: 7e's 245-273 ms idle calls on the phone) */
 #define IP_(name, stmt) do { uint64_t ip0_ = tk_us(); stmt; sh_slow_piece(name, (unsigned)(tk_us() - ip0_)); } while (0)
 void sh_idle(void)
@@ -7037,7 +7063,7 @@ void sh_idle(void)
     } else if (ccb_next && !CCS.on) free_cc();     /* not wanted any more (an app needs the room): its parts go, later again */
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
-    IP_("prep_tree", prep_tree(home.child));                     /* home's pages too (their widgets and app grids, P2s) */
+    { int n_ = 2; IP_("prep_tree", prep_left = prep_some(home.child, &n_)); if (prep_left) return; }   /* home's pages too (their widgets and app grids, P2s); 8b: two a call */
     uint64_t lp0_ = tk_us();
     tk_layer_prepare(&star);
     tk_layer_prepare(&homebar);
@@ -7058,7 +7084,7 @@ void sh_idle(void)
 }
 #undef IP_
 
-int sh_idle_pending(void) { return (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C) ||
+int sh_idle_pending(void) { return prep_left || (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C) ||
                                    fl_row >= 0 || ccb_next || lx_idle_pending(); }   /* cp7c: the sliced flatten, the CC's stages */
 
 int sh_moving(void)
