@@ -159,12 +159,26 @@ static int finish(void)
     sb_log(u.b);
     int was_fast = sd_rep.fast;
     put_back();
-    if (crc[0] != crc[1])
-        return fail("the fast path read different data than the old path (CRC32)");
-    if (!was_fast)
-        return fail(sd_rep.fast_why ? sd_rep.fast_why : "fast reads turned off during the read");
-    if (fast < SDP_MIN_MBS * 1000U)
-        return fail("the fast path is under 10 MB/s");
+    /* the numbers first in a FAIL line too (run 10: only the summary's ~100 characters survived in pmsg) */
+    const char *why = crc[0] != crc[1] ? "the fast path read different data than the old path (CRC32)"
+                      : !was_fast    ? (sd_rep.fast_why ? sd_rep.fast_why : "fast reads turned off during the read")
+                      : fast < SDP_MIN_MBS * 1000U ? "the fast path is under 10 MB/s" : 0;
+    if (why) {
+        ub_init(&u);
+        ub_s(&u, "fast ");
+        ub_fix(&u, fast, 2);
+        ub_s(&u, " MB/s (old ");
+        ub_fix(&u, rate_milli(ticks[0]), 2);
+        ub_s(&u, "), IDMAC ");
+        ub_dec(&u, sd_rep.dma_chunks);
+        ub_s(&u, "/");
+        ub_dec(&u, sd_rep.dma_errors);
+        ub_s(&u, " err, card ");
+        ub_dec(&u, sd_rep.card_hz / 1000000U);
+        ub_s(&u, " MHz: ");
+        ub_s(&u, why);
+        return fail(u.b);
+    }
     ub_init(&u);
     ub_s(&u, "drvprobe: sd: PASS same data, fast path ");
     ub_fix(&u, fast, 2);

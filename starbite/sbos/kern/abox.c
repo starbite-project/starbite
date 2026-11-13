@@ -308,14 +308,30 @@ static void sayw(struct lb *l)
     set_why(l->b + (l->n > 6 && l->b[0] == 'a' && l->b[4] == ':' ? 6 : 0));
 }
 
+/* CRC32 (zlib's) of the files as loaded, for the log. Table-driven, reading abox_rmem (non-cacheable) 8 bytes at a time:
+ * the bitwise loop over byte loads took ~0.4 s for calliope_dram.bin at the screen-off 455 MHz (drivers run 10: the
+ * cold start's longest step, 438 ms, stage 1). Same values as before. */
+static uint32_t crc_tab[256];
 static uint32_t ab_crc32(const uint8_t *p, uint64_t n)
 {
+    if (!crc_tab[1])
+        for (uint32_t i = 0; i < 256U; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k)
+                c = (c >> 1) ^ (0xEDB88320U & (0U - (c & 1U)));
+            crc_tab[i] = c;
+        }
     uint32_t c = 0xFFFFFFFFU;
-    for (uint64_t i = 0; i < n; ++i) {
-        c ^= p[i];
-        for (int k = 0; k < 8; ++k)
-            c = (c >> 1) ^ (0xEDB88320U & (0U - (c & 1U)));
+    uint64_t i = 0;
+    for (; i < n && ((uintptr_t)(p + i) & 7U); ++i)
+        c = crc_tab[(c ^ p[i]) & 0xFFU] ^ (c >> 8);
+    for (; i + 8U <= n; i += 8U) {
+        uint64_t w = *(const volatile uint64_t *)(const void *)(p + i);     /* one load per 8 bytes */
+        for (int k = 0; k < 8; ++k, w >>= 8)
+            c = crc_tab[(c ^ (uint32_t)w) & 0xFFU] ^ (c >> 8);
     }
+    for (; i < n; ++i)
+        c = crc_tab[(c ^ p[i]) & 0xFFU] ^ (c >> 8);
     return ~c;
 }
 
