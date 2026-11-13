@@ -32,7 +32,7 @@ static void lx_open_app(int ci);
 #define AQ_PAD 110.0f                            /* under a page's last row: the tab bar's room */
 enum { AT_TODAY, AT_GAMES, AT_APPS, AT_SEARCH };   /* iOS 27's App Store: Today / Games / Apps + the search circle */
 #define AQ_ACCT "@account"                       /* AQ.cat of the Account page (pushed from the account button) */
-enum { H_NONE, H_APP, H_ACT, H_CAT, H_CHECK, H_UPALL, H_ROLLBACK, H_METHOD, H_MAIN, H_OPEN, H_REINSTALL, H_REMOVE, H_SUGGEST, H_OPTS, H_ACCT };
+enum { H_NONE, H_APP, H_ACT, H_CAT, H_CHECK, H_UPALL, H_ROLLBACK, H_METHOD, H_MAIN, H_OPEN, H_REINSTALL, H_REMOVE, H_SUGGEST, H_OPTS, H_ACCT, H_MORE };
 static const char *const AQ_CATS[10] = { "Internet", "Office", "Graphics", "Media", "Games", "Utilities", "Development",
                                          "Education", "Science", "System" };
 static const uint32_t AQ_CATC[11] = { 0x0a84ff, 0xff9f0a, 0xff375f, 0xff453a, 0xbf5af2, 0x8e8e93, 0x5e5ce6, 0x30d158,
@@ -40,6 +40,7 @@ static const uint32_t AQ_CATC[11] = { 0x0a84ff, 0xff9f0a, 0xff375f, 0xff453a, 0x
 static const char *const AQ_SUGG[6] = { "Games", "Text editor", "Graphics", "Office", "Terminal", "Media" };
 static struct {
     int tab, cat_on, app, pick, kb, shift, num, rm_arm, badge, empty, opts;   /* opts: Install Options expanded */
+    int more;                                     /* the product page's description opened ("more") */
     char cat[16], pkg[40], q[24];
     float scroll, v, top, bot, h, rm_t, sroot[4], scat;
     int ck[AQ_NCH], dirty[AQ_NCH];               /* each chunk layer's chunk (-1 none), to be drawn again */
@@ -688,10 +689,19 @@ static float pg_updates(pctx *c)
 /* the app's page */
 static int aq_needs_net(const sh_lpkg_t *p) { return !aq_inst(p) && (p->flags & SH_PKG_NEEDS_NET) && (!AQ.pick || (unsigned)AQ.pick == p->def_method); }
 static int aq_mrow_n(const sh_lpkg_t *p) { int n = 0; for (unsigned m = 1; m <= 3; m++) n += (p->methods >> m) & 1; return n; }
+static float aq_textblock_n(pctx *c, float y, int f, float size, float lhh, const char *s, tk_col col, int maxl, int *cut);
 static float aq_textblock(pctx *c, float y, int f, float size, float lhh, const char *s, tk_col col)
+{
+    return aq_textblock_n(c, y, f, size, lhh, s, col, 0, 0);
+}
+/* maxl > 0: at most maxl lines; if text is left, the last line ends in "…" and iOS's blue "more" sits at its right
+ * (*cut = 1, a tap on it is the caller's) */
+static float aq_textblock_n(pctx *c, float y, int f, float size, float lhh, const char *s, tk_col col, int maxl, int *cut)
 {
     /* greedy word wrap of a long text (whole words; a word wider than the line by characters) */
     float maxw = CONTENT_W;
+    int nl = 0;
+    if (cut) *cut = 0;
     while (*s) {
         char t[200];
         int st = 0, last = -1, k = 0;
@@ -715,6 +725,17 @@ static float aq_textblock(pctx *c, float y, int f, float size, float lhh, const 
         (void)st;
         tk_memcpy(t, s, (size_t)last);
         t[last] = 0;
+        if (maxl > 0 && ++nl == maxl && s[last] && s[last + 1]) {   /* the last allowed line, with text after it */
+            float mw = tw(f, size, "more", 0, 0);
+            char e[200];
+            ellipsize(e, sizeof e, f, size, s, maxw - mw - 14);
+            if (vis(c, y - size, size * 1.6f)) {
+                d_text(c->d, f, size, MARGIN, y, e, 0, 0, col, 0);
+                d_text(c->d, f, size, CONTENT_R - mw, y, "more", 0, 0, ACCENT(), 0);
+            }
+            if (cut) *cut = 1;
+            return y + lhh;
+        }
         if (vis(c, y - size, size * 1.6f)) d_text(c->d, f, size, MARGIN, y, t, 0, 0, col, 0);
         y += lhh;
         s += last;
@@ -871,8 +892,31 @@ static float pg_app(pctx *c)
         y += 34;
     }
     y += 14;
-    /* the description, what it needs */
-    y = aq_textblock(c, y + 18, TK_IT400, 16, 22, p->desc[0] ? p->desc : p->summary[0] ? p->summary : p->name, INK) - 4;
+    /* What's New (iOS: the section, the version and its notes); ours: the newest version and where it comes from */
+    {
+        unsigned m = AQ.pick ? (unsigned)AQ.pick : p->def_method;
+        const char *nv = p->ver_new[0] ? p->ver_new : aq_mver(p, m);
+        if (nv[0]) {
+            y = aq_sec(c, y + 4, "What's New", 0, 0, 0);
+            char vl[48], note[160];
+            AQS(vl, "Version ", nv);
+            if (vis(c, y, 22)) d_text(c->d, TK_IT400, 15, MARGIN, bl(TK_IT400, 15, y), vl, 0, 0, C_LABEL2, 0);
+            int deb = p->source[0] == 'D' && p->source[1] == 'e';
+            if (inst && aq_upd(p)) AQS(note, p->ver_inst, " is on this phone. ", nv, " is ready: tap UPDATE.");
+            else if (inst) AQS(note, "You have the newest version, ", p->ver_inst[0] ? p->ver_inst : nv, ".");
+            else if (m == SH_M_DISTRO || deb) AQS(note, "Debian 13's package, updated with Debian's security fixes.");
+            else AQS(note, "The developer's newest release", p->source[0] ? ", from " : ".", p->source[0] ? p->source : "", p->source[0] ? "." : "");
+            y = aq_textblock(c, y + 44, TK_IT400, 16, 22, note, INK) + 6;
+        }
+    }
+    /* the description: three lines and "more" (iOS), all of it once opened */
+    {
+        int cut = 0;
+        float y0 = y + 18;
+        y = aq_textblock_n(c, y0, TK_IT400, 16, 22, p->desc[0] ? p->desc : p->summary[0] ? p->summary : p->name, INK,
+                           AQ.more ? 0 : 3, &cut) - 4;
+        if (cut && at(c, MARGIN, y0 - 20, CONTENT_W, y - y0 + 26)) aq_hitr(c, H_MORE, i, 0, MARGIN, y0 - 18, CONTENT_W, y - y0 + 22, 10, 0);
+    }
     if (p->needs) {
         static const char *const NN[6] = { "Network", "Audio", "GPU", "Camera", "Files", "Keyboard" };
         char s[96];
@@ -1580,6 +1624,7 @@ static void aq_push(int i)
     AQ.scroll = 0;
     AQ.kb = 0;
     AQ.opts = 0;                                  /* (Install Options shut on every page) */
+    AQ.more = 0;
     aq_go(1);
 }
 static void aq_back(void)
@@ -1752,6 +1797,7 @@ static void aq_tap(float x, float y)
         if (AQ.pick != c.harg) { AQ.pick = c.harg; sh_haptic(); aq_area(); aq_redraw_all(); aq_place(0); }
         break;
     case H_REINSTALL: (void)aq_op(i, SH_PKG_OP_INSTALL, AQ.pick); break;
+    case H_MORE: AQ.more = 1; aq_area(); aq_redraw_all(); aq_place(0); break;
     case H_OPTS: AQ.opts = !AQ.opts; sh_haptic(); aq_area(); aq_redraw_all(); aq_place(0); break;
     case H_REMOVE: {                              /* B2's action sheet: one red row, a tap outside cancels */
         static const kit_btn B[1] = { { "Remove App", KIT_DESTRUCTIVE } };
