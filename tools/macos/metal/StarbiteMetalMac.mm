@@ -466,6 +466,11 @@ extern "C" id sbmtl_device(mach_port_t port)
 				native_bridge_metal_events(events, sizeof events);
 				sm2_log("status %ds: %s", 15 * ++ticks, line);
 				sm2_log("events %ds: %s", 15 * ticks, events);
+				/* the MTLPixelFormats asked for (first eight distinct): what WindowServer's framebuffer surface
+				 * (IOSurface format 0x26773461) is rendered as, for the display driver's colour conversion */
+				char formats[160];
+				native_bridge_metal_formats(formats, sizeof formats);
+				sm2_log("formats %ds: %s", 15 * ticks, formats);
 				if (ticks >= 24)
 					dispatch_source_cancel(t);
 			});
