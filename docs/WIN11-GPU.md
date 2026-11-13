@@ -2271,6 +2271,24 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - **0155 (sbumd 3a59aeec):** `update_velems` binds an empty vertex-elements state when no layout is set. T58 checks it
   (sbtex vertexid should exit 0) and reruns VIS2 so the DComp surface path can be seen.
 
+### 6.64 T57 read: cached back buffers never mapped (IgnoreSync); 0156; T59 staged (2026-11-13)
+
+- **T57 (`build/win/results-t57`): clean, nothing installed.** gputest as T55 (sbfps 662/828, sbglzc zc 179 fps).
+  - **GD A** (async, write-combined): ~18.5 fps (181-191 frames per 10 s), copy avg ~46-48 ms, async wait ~27 ms,
+    329 MB at the end.
+  - **GD B** (async + cached): no frame presented. 16,567 lines `MESA: error: mmap(..., size=17186816, prot=3,
+    flags=0x1) failed: Invalid argument`, no glstats line, 685 MB at the end.
+  - Hive: Live_CachedAllocs 3 (the KMD made them; no refusal logged), Live_CacheOps 0 (never got that far).
+- **Why:** the shim maps a BO by locking its allocation with `IgnoreSync`. D3DDDICB_LOCKFLAGS: IgnoreSync cannot be
+  set "with a cached allocation when cache coherency is not supported by the graphics adapter". Our aperture segment
+  is not CacheCoherent, so every lock of a cached allocation failed.
+- **0156** (shim, `src-tc` only = GD's ICD): a cached BO is locked once right after it is made, without IgnoreSync (no
+  GPU work can reference it yet, so the lock does not wait), and stays mapped until GEM_CLOSE like every BO. If that
+  lock fails too, the allocation is destroyed and remade write-combined (logged once). Runtime-resource allocations
+  never ask for cached pages. GD ICD libgallium_wgl ed17e3b3, opengl32 13d0746d.
+- **T59** = T57 + that ICD (`build/win/stage/sbwddm-t59`): B should log `cached allocations on`, no mmap errors, and
+  show copy avg well under A's ~46 ms with a correct picture.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

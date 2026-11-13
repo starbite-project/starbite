@@ -1,0 +1,114 @@
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -821,6 +821,7 @@
+    uint64_t used;       /* T15: the last submission that named it; WAIT_BO waits for that one */
+    int listed_once;     /* T25: in an allocation list at least once (made resident) */
+    uint32_t list_idx;   /* T30: its index in the allocation list of the submission being built */
++   int cached;          /* sb-patches/0156: cached pages (MW_ALLOC_CPU_CACHED), locked once at creation */
+ };
+ 
+ /* Allocations whose BO is closed but which a job submitted earlier may still use. Linux's panfrost keeps a
+@@ -1260,22 +1261,31 @@
+    kmt.DestroyAllocation(&da);
+ }
+ 
++/* sb-patches/0156: IgnoreSync cannot be set for a cached allocation when the adapter is not cache coherent
++ * (D3DDDICB_LOCKFLAGS; ours is not): T57's cached back buffers all failed to map. Those are locked without it,
++ * once, when they are made (nothing can be using them yet, so the lock does not wait). */
+ static void *
+-w_lock(struct sbdev *d, D3DKMT_HANDLE h)
++w_lock_flags(struct sbdev *d, D3DKMT_HANDLE h, int ignore_sync)
+ {
+    if (d->on) {
+       D3DDDICB_LOCK l = {0};
+       l.hAllocation = h;
+-      l.Flags.IgnoreSync = 1;
++      l.Flags.IgnoreSync = ignore_sync ? 1 : 0;
+       return d->cb.pfnLockCb(d->device, &l) >= 0 ? l.pData : NULL;
+    }
+    D3DKMT_LOCK l = {0};
+    l.hDevice = d->kdevice;
+    l.hAllocation = h;
+-   l.Flags.IgnoreSync = 1;
++   l.Flags.IgnoreSync = ignore_sync ? 1 : 0;
+    return kmt.Lock(&l) >= 0 ? l.pData : NULL;
+ }
+ 
++static void *
++w_lock(struct sbdev *d, D3DKMT_HANDLE h)
++{
++   return w_lock_flags(d, h, 1);
++}
++
+ static void
+ w_unlock(struct sbdev *d, D3DKMT_HANDLE h)
+ {
+@@ -1750,8 +1760,8 @@
+       pi.Flags = (a->flags & PANFROST_BO_NOEXEC) ? MW_ALLOC_NOEXEC : 0;
+       /* sb-patches/0154: a CPU-read buffer (Panfrost's WB_MMAP: the GL ICD's window back buffers) gets cached pages;
+        * the reader invalidates through MW_ESCAPE_SB_CACHE (SYNC_BO below) */
+-      if ((a->flags & PANFROST_BO_WB_MMAP) && !(a->flags & PANFROST_BO_HEAP))
+-         pi.Flags |= MW_ALLOC_CPU_CACHED;
++      if ((a->flags & PANFROST_BO_WB_MMAP) && !(a->flags & PANFROST_BO_HEAP) && !(sb_next.armed && d->on))
++         pi.Flags |= MW_ALLOC_CPU_CACHED;   /* 0156: never for a runtime resource's allocation */
+       pi.Size = sz;
+       D3DDDI_ALLOCATIONINFO ai = {0};
+       ai.pPrivateDriverData = &pi;
+@@ -1783,6 +1793,26 @@
+          ai.hAllocation = 0;
+          created = w_create_res(d, &ai, hres) >= 0;
+       }
++      void *cached_cpu = NULL;
++      if (created && (pi.Flags & MW_ALLOC_CPU_CACHED)) {
++         /* sb-patches/0156: map it now, without IgnoreSync; if even that is refused, write-combined as before */
++         cached_cpu = w_lock_flags(d, ai.hAllocation, 0);
++         if (!cached_cpu) {
++            static int said_lock;
++            if (!said_lock++)
++               fprintf(stderr, "sbumd: a cached allocation (%llu KiB) could not be locked: write-combined\n",
++                       (unsigned long long)(sz >> 10));
++            w_destroy(d, ai.hAllocation);
++            pi.Flags &= ~MW_ALLOC_CPU_CACHED;
++            ai.hAllocation = 0;
++            created = w_create_res(d, &ai, hres) >= 0;
++         } else {
++            static int said_ok;
++            if (!said_ok++)
++               fprintf(stderr, "sbumd: cached allocations on (%llu KiB, locked without IgnoreSync)\n",
++                       (unsigned long long)(sz >> 10));
++         }
++      }
+       if (!created && d->dead_n) {
+          /* sb-patches/0125: closed allocations still count against the segment until destroyed (struct wdead).
+           * Mesa's answer to a failed allocation is to empty its BO cache and try again, which here only moves
+@@ -1819,6 +1849,8 @@
+       if (w_escape(d, &where, sizeof(where)) < 0 || where.GpuVa == 0) {
+          fprintf(stderr, "sbumd: allocation of %llu KiB has no GPU address\n", (unsigned long long)(sz >> 10));
+          malikm_note_count(26);           /* UmdNote_26: allocations without a GPU address */
++         if (cached_cpu)
++            w_unlock(d, ai.hAllocation);
+          if (hres)
+             w_destroy_res(d, hres);
+          else
+@@ -1827,6 +1859,8 @@
+       }
+       uint32_t h = wddm_bo_slot(d);
+       if (!h) {
++         if (cached_cpu)
++            w_unlock(d, ai.hAllocation);
+          if (hres)
+             w_destroy_res(d, hres);
+          else
+@@ -1834,6 +1868,12 @@
+          return -MK_ENOMEM;
+       }
+       d->bo[h - 1] = (struct wbo){ai.hAllocation, where.Size, where.GpuVa, NULL, 0, hres ? 1 : 0, hres, 0};
++      if (cached_cpu) {
++         /* 0156: IOCTL_MALIKM_MAP finds it mapped; the lock stays until GEM_CLOSE, as any BO's */
++         d->bo[h - 1].cpu = cached_cpu;
++         d->bo[h - 1].cached = 1;
++         d->st_maps++;
++      }
+       d->mem_live += where.Size;
+       if (d->mem_live > d->mem_peak)
+          d->mem_peak = d->mem_live;
