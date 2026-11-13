@@ -1,0 +1,108 @@
+--- a/src/panfrost/compiler/bifrost/bi_ra.c	2026-11-13 08:37:15
++++ b/src/panfrost/compiler/bifrost/bi_ra.c	2026-11-13 08:37:15
+@@ -9,6 +9,10 @@
+ #include "compiler.h"
+ #include "nodearray.h"
+ #include "valhall.h"
++#include <fcntl.h>
++#include <stdio.h>
++#include <time.h>
++#include <unistd.h>
+ 
+ struct lcra_state {
+    unsigned node_count;
+@@ -65,6 +69,59 @@
+    free(l->affinity);
+    free(l->solutions);
+    free(l);
++}
++
++/* Starbite (S2ab 2026-11-13): what the register allocator holds for macOS WindowServer's shaders, written to
++ * /dev/console (copied into the kernel log as UCON lines). S2aa: one compile still took WindowServer past 1.3 GB with
++ * the SSA spill at 32; this says whether the interference graph (dense rows, 2 bytes x node count each) or the
++ * shader's growth over the spill rounds holds that memory. Small graphs are not logged. Logging only: the allocation
++ * itself is unchanged. */
++static uint64_t
++sb_ra_ms(void)
++{
++   struct timespec ts;
++   clock_gettime(CLOCK_MONOTONIC, &ts);
++   return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
++}
++
++static void
++sb_ra_log(bi_context *ctx, struct lcra_state *l, const char *what, unsigned iter, unsigned extra, uint64_t t0)
++{
++   static int fd = -2;
++   unsigned dense = 0, instrs = 0;
++   uint64_t edges = 0, bytes = 0;
++   char buf[320];
++
++   if (l) {
++      for (unsigned i = 0; i < l->node_count; ++i) {
++         nodearray *a = &l->linear[i];
++         if (nodearray_is_sparse(a)) {
++            edges += a->size;
++            bytes += (uint64_t)a->sparse_capacity * sizeof(nodearray_sparse);
++         } else {
++            dense++;
++            bytes += (uint64_t)NODEARRAY_DENSE_ALIGN(a->size) * sizeof(nodearray_value);
++         }
++      }
++      bytes += (uint64_t)l->node_count * (sizeof(l->linear[0]) + sizeof(l->solutions[0]) + sizeof(l->affinity[0]));
++      /* a small graph on an early round: nothing to learn */
++      if (bytes < (16u << 20) && iter < 3)
++         return;
++   }
++   if (fd == -2)
++      fd = open("/dev/console", O_WRONLY | O_NOCTTY | O_CLOEXEC);
++   if (fd < 0)
++      return;
++   bi_foreach_instr_global(ctx, I)
++      instrs++;
++   int n = snprintf(buf, sizeof(buf),
++                    "PANRA[%d] %s stage %d iter %u nodes %u ssa %u instrs %u blocks %u dense %u edges %llu "
++                    "graph %llu KiB extra %u t %llu ms\n",
++                    (int)getpid(), what, (int)ctx->stage, iter, l ? l->node_count : 0, ctx->ssa_alloc, instrs,
++                    ctx->num_blocks, dense, (unsigned long long)edges, (unsigned long long)(bytes >> 10), extra,
++                    (unsigned long long)(sb_ra_ms() - t0));
++   if (n > 0)
++      (void)!write(fd, buf, (size_t)MIN2((unsigned)n, sizeof(buf) - 1));
+ }
+ 
+ static void
+@@ -1232,6 +1289,7 @@
+ 
+    unsigned iter_count = 0;
+    unsigned max_iters = 2000;
++   const uint64_t sb_t0 = sb_ra_ms();   /* Starbite S2ab: allocator statistics */
+    /* Number of bytes of memory we've spilled into */
+    unsigned spill_count = ctx->info.tls_size;
+ 
+@@ -1253,6 +1311,8 @@
+          bi_print_shader(ctx, stderr);
+       }
+       unsigned register_demand = bi_calc_register_demand(ctx);
++      if (register_demand > BI_MAX_REGS)
++         sb_ra_log(ctx, NULL, "demand", 0, register_demand, sb_t0);   /* Starbite S2ab */
+       /* Starbite (S2o 2026-11-12: one macOS WindowServer shader kept the RA loop below busy for 6+ minutes on a
+        * Mali-G72's A55 host): when the estimate is over the register file, SSA-spill down to 48 instead of 64, so the
+        * estimate's slack leaves room and the spill-and-retry loop (a full interference graph per round) rarely runs.
+@@ -1292,6 +1352,7 @@
+    /* Try with reduced register pressure to improve thread count */
+    if (ctx->arch >= 7) {
+       l = bi_allocate_registers(ctx, &success, false);
++      sb_ra_log(ctx, l, success ? "try32-ok" : "try32", 0, spill_count, sb_t0);   /* Starbite S2ab */
+ 
+       if (success) {
+          ctx->info.work_reg_count = 32;
+@@ -1304,6 +1365,9 @@
+    /* Otherwise, use the register file and spill until we succeed */
+    while (!success && ((iter_count++) < max_iters)) {
+       l = bi_allocate_registers(ctx, &success, true);
++      /* Starbite S2ab: the first rounds, then every 16th, and the last */
++      if (success || iter_count <= 4 || iter_count % 16 == 0)
++         sb_ra_log(ctx, l, success ? "done" : "round", iter_count, spill_count, sb_t0);
+ 
+       if (success) {
+          ctx->info.work_reg_count = BI_MAX_REGS;
