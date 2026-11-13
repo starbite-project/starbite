@@ -132,6 +132,23 @@ void guest_keep(int on)
         (void)sbg_freeze(0);                /* instant start: the App Store holds it: thawed */
 #endif
 }
+/* instant start: Linux started in the background and frozen once its boot settles (the idle freeze: hidden from
+ * the start; the busy rule waits for its boot work), so even the first open after a restart only thaws it. The
+ * caller (Track A) picks the moment, e.g. a while after the home screen first shows, or on the charger. 1 started,
+ * 0 nothing to do (already up, no Linux files), < 0 refused (guest_why) */
+int guest_prewarm(void)
+{
+    if (st != GUEST_OFF && st != GUEST_FAILED)
+        return 0;
+    if (!guest_available_mode(GUEST_WL))
+        return 0;
+    int r = guest_start_mode(GUEST_WL);
+    if (r < 0)
+        return r;
+    t_hidden = sb_ms();                     /* never shown: hidden from now (the freeze follows the boot's work) */
+    sb_log("guest: Linux started in the background (pre-warm): it freezes once its boot work settles");
+    return 1;
+}
 void guest_apps(int n)
 {
     if (apps && n <= 0 && !shown)
