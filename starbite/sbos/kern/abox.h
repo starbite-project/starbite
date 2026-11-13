@@ -72,6 +72,18 @@ int abox_cfg_set(const struct abox_cfg *c);     /* 0, or ABOX_ECFG (kept the pre
 
 /* ---- the interface -------------------------------------------------------------------------------------------- */
 int abox_boot(void);
+/* the same boot in stages, so a caller's loop is never held for the whole ~1 s (snd.c's media boot):
+ *   abox_boot_start()   1 = pending, 0 = Calliope already runs (logged as abox_boot does), < 0 (no HAL, booting)
+ *   abox_boot_step()    one stage per call: 1 still pending, 0 READY (step 13 done), < 0 failed (torn down, FAILED,
+ *                       as abox_boot fails). Stages: sram.bin; dram.bin + its zero fill; iva + ext_bins; steps 2-4;
+ *                       5-9; 10-11; then one BOOT_DONE look per call (timeout C.boot_timeout_ms on the HAL's now_us;
+ *                       without one each look counts 100 us), step 13 in the call that sees BOOT_DONE.
+ *   abox_boot_finish()  a pending boot run to its end here (blocking, as abox_boot): 0 or < 0.
+ * abox_boot() = start + finish; called while a staged boot is pending it finishes that one (never ABOX_ESTATE).
+ * abox_off() at any point of a pending boot undoes what was done ("abox: stopped: ..."). */
+int abox_boot_start(void);
+int abox_boot_step(void);
+int abox_boot_finish(void);
 void abox_vss_prepare(void);
 int abox_vss_start(void);
 int abox_call(int on);

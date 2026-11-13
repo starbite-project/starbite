@@ -693,6 +693,149 @@ static void test_cfg(void)
     CHECK(abox_cfg_set(&c) == 0, "cfg: defaults back");
 }
 
+
+/* ---- the staged boot (abox_boot_start / abox_boot_step / abox_boot_finish) ---------------------------------------- */
+#define SLINES 200
+static char slines[2][SLINES][200];
+/* the boot's own lines ("abox: ..."), the timing line left out and "after N ms" cut (a staged wait looks every 5 ms) */
+static unsigned boot_lines(char (*out)[200])
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < F.nlogs && n < SLINES; ++i) {
+        if (strncmp(F.logs[i], "abox: ", 6) || strstr(F.logs[i], "abox: boot timing"))
+            continue;
+        snprintf(out[n], 200, "%s", F.logs[i]);
+        char *a = strstr(out[n], ") after ");
+        if (a && strstr(out[n], "ready to sing"))
+            a[1] = 0;
+        n++;
+    }
+    return n;
+}
+
+static void test_staged(void)
+{
+    /* the blocking boot, then the same boot a stage per call with 5 ms between calls: the same lines and IPCs */
+    reset();
+    install(0);
+    CHECK(abox_boot() == 0, "staged: blocking boot %s", abox_why());
+    unsigned nb = boot_lines(slines[0]), nipc_b = F.nipc;
+    CHECK(logged("abox: boot timing: ") && logged(" ms in all: files "), "staged: no timing line");
+    abox_off();
+
+    reset();
+    install(0);
+    CHECK(abox_boot_start() == 1 && abox_state() == ABOX_ST_BOOTING, "staged: start not pending");
+    CHECK(F.nw == 0 && F.nsmc == 0, "staged: start touched the hardware");
+    int r, calls = 0;
+    while ((r = abox_boot_step()) > 0 && calls < 2000) {
+        CHECK(abox_state() == ABOX_ST_BOOTING, "staged: state %d while pending", abox_state());
+        F.now += 5000;                                      /* the caller's loop runs meanwhile */
+        calls++;
+        if (calls == 1)
+            CHECK(logged("1/13 files: calliope_sram.bin") && !logged("calliope_dram.bin"), "staged: stage 1 not sram only");
+        if (calls == 2)
+            CHECK(logged("calliope_dram.bin") && !logged("calliope_iva.bin"), "staged: stage 2 not dram only");
+        if (calls == 3)
+            CHECK(F.nw == 0 && F.nsmc == 0, "staged: the files stages touched the hardware");
+    }
+    CHECK(r == 0 && abox_state() == ABOX_ST_READY && abox_version() == 0x43524C30, "staged: %d (%s)", r, abox_why());
+    CHECK(calls >= 7 && calls <= 30, "staged: %d calls (6 stages + the 64 ms wait at 5 ms)", calls);
+    unsigned ns = boot_lines(slines[1]);
+    CHECK(nb == ns, "staged: %u lines, blocking %u", ns, nb);
+    for (unsigned i = 0; i < nb && i < ns; ++i)
+        CHECK(!strcmp(slines[0][i], slines[1][i]), "staged: line %u differs: '%s' / '%s'", i, slines[0][i], slines[1][i]);
+    CHECK(F.nipc == nipc_b, "staged: %u IPCs, blocking %u", F.nipc, nipc_b);
+    CHECK(abox_boot_step() == 0 && abox_boot_finish() == 0, "staged: step / finish after READY");
+    CHECK(abox_boot() == 0 && logged("abox: boot: Calliope already runs"), "staged: the modem's boot after it");
+    common_after("staged");
+    abox_off();
+    CHECK(abox_boot_step() == ABOX_ESTATE, "staged: step while off");
+
+    /* abox_boot() while a staged boot is pending finishes it (a call never gets ABOX_ESTATE) */
+    reset();
+    install(0);
+    CHECK(abox_boot_start() == 1 && abox_boot_step() == 1 && abox_boot_step() == 1, "staged: two stages");
+    CHECK(abox_boot_start() == ABOX_ESTATE, "staged: a second start while pending");
+    CHECK(abox_pd_on() == ABOX_ESTATE, "staged: pd_on while booting");
+    CHECK(abox_boot() == 0 && abox_state() == ABOX_ST_READY, "staged: abox_boot while pending %s", abox_why());
+    CHECK(logged("abox: boot: a staged boot is pending: finished here"), "staged: not said");
+    CHECK(logged("13/13 restore") && !logged("Calliope already runs"), "staged: restore");
+    common_after("staged finish");
+    abox_off();
+
+    /* abox_boot_finish on its own */
+    reset();
+    install(0);
+    CHECK(abox_boot_start() == 1 && abox_boot_finish() == 0 && abox_state() == ABOX_ST_READY, "staged: finish");
+    abox_off();
+
+    /* a failure in a stage: torn down, FAILED, step keeps returning the error */
+    reset();
+    F.pll_ok = 0;
+    install(0);
+    CHECK(abox_boot_start() == 1, "staged PLL: start");
+    while ((r = abox_boot_step()) > 0)
+        ;
+    CHECK(r == ABOX_ECLOCK && abox_boot_step() == ABOX_ECLOCK, "staged PLL: %d", r);
+    teardown_checks("staged PLL");
+
+    /* no BOOT_DONE, staged: the timeout on the HAL's clock (3 s), not on the number of calls */
+    reset();
+    F.boot_ok = 0;
+    install(0);
+    CHECK(abox_boot_start() == 1, "staged timeout: start");
+    calls = 0;
+    while ((r = abox_boot_step()) > 0 && calls++ < 100000)
+        F.now += 20000;
+    CHECK(r == ABOX_ETIME && calls > 140 && calls < 170, "staged timeout: %d after %d calls of 20 ms", r, calls);
+    teardown_checks("staged timeout");
+}
+
+/* abox_off() after every stage of a pending boot: everything undone, the next boot works */
+static void test_off_each_stage(void)
+{
+    for (int k = 0; k <= 7; ++k) {
+        char t[48];
+        snprintf(t, sizeof t, "off after %d stages", k);
+        reset();
+        install(0);
+        CHECK(abox_boot_start() == 1, "%s: start", t);
+        for (int i = 0; i < k; ++i)
+            CHECK(abox_boot_step() == 1, "%s: step %d", t, i);
+        F.nlogs = 0;
+        abox_off();
+        CHECK(logged("abox: stopped: "), "%s: no stopped line", t);
+        CHECK(abox_state() == ABOX_ST_OFF, "%s: state %d", t, abox_state());
+        CHECK((reg(ABOX_PMU + 0x4004) & 0xF) == 0 && !(reg(ABOX_PMU + 0x4160) & 1), "%s: domain / CPU left on", t);
+        CHECK(k < 4 ? logged("AUD domain not touched") : logged("AUD domain off"), "%s: domain line", t);
+        CHECK(abox_boot_step() == ABOX_ESTATE, "%s: step after off", t);
+        CHECK(abox_boot() == 0 && abox_state() == ABOX_ST_READY, "%s: the next boot %s", t, abox_why());
+        common_after(t);
+        abox_off();
+    }
+}
+
+/* a HAL without now_us (optional): abox_boot's wait counts its 100 us delays, as before */
+static void test_no_clock(void)
+{
+    reset();
+    F.boot_ok = 0;
+    struct abox_hal h = { 0 };
+    h.rd32 = f_rd32, h.wr32 = f_wr32, h.smc = f_smc, h.delay_us = f_delay, h.log = f_log, h.file = f_file;
+    h.ram = f_ram;
+    abox_hal_set(&h);
+    int r = abox_boot();
+    CHECK(r == ABOX_ETIME && F.now >= 3000000 && F.now < 3600000, "no clock: %d after %llu us", r,
+          (unsigned long long)F.now);
+    CHECK(!logged("abox: boot timing"), "no clock: a timing line without a clock");
+    reset();
+    abox_hal_set(&h);
+    CHECK(abox_boot() == 0 && logged("ready to sing (version CRL0) after 64 ms"), "no clock: boot %s", abox_why());
+    abox_off();
+    install(0);
+}
+
 int main(int argc, char **argv)
 {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
@@ -713,6 +856,9 @@ int main(int argc, char **argv)
     test_pd_left_on();
     test_ipc_dead();
     test_dvfs_hook();
+    test_staged();
+    test_off_each_stage();
+    test_no_clock();
     printf("abox host test: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

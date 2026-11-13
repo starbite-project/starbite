@@ -434,7 +434,7 @@ static void t_mixer(void)
     gen_at = 0;
     /* both streams fed every poll */
     uint64_t end = clk + 400000;
-    int16_t buf[2 * 4096];
+    static int16_t buf[2 * SND_STREAM_FRAMES];
     while (clk < end) {
         unsigned n = snd_space(a);
         g_1000(buf, n, 0);
@@ -464,7 +464,7 @@ static void t_mixer(void)
         snd_poll(clk);
         clk += 5000;
     }
-    p = peak_of(4000, nplayed, 0);
+    p = peak_of(9000, nplayed, 0);                       /* was 4000: 16 periods (8192 frames) are mixed ahead */
     CHECK(p >= 530 && p <= 536, "volume 9 = -15 dB (3000 -> %d)", p);
     /* clipping: 30000 + 30000 on the headphones (stereo, ceiling -1 dBFS) */
     snd_close(b);
@@ -490,7 +490,7 @@ static void t_mixer(void)
     /* stereo kept on the headphones */
     snd_close(b);
     nplayed = 0;
-    end = clk + 300000;
+    end = clk + 400000;                                 /* was 300000 */
     while (clk < end) {
         unsigned n = snd_space(a);
         g_stereo(buf, n, 0);
@@ -498,12 +498,13 @@ static void t_mixer(void)
         snd_poll(clk);
         clk += 5000;
     }
-    CHECK(played[2 * 12000] > 3900 && played[2 * 12000 + 1] < -3900, "headphones keep L and R (%d, %d)",
-          played[2 * 12000], played[2 * 12000 + 1]);
+    /* was 12000: the stream's own queue + 16 periods mixed ahead of the old sound come first */
+    CHECK(played[2 * 18000] > 3900 && played[2 * 18000 + 1] < -3900, "headphones keep L and R (%d, %d)",
+          played[2 * 18000], played[2 * 18000 + 1]);
     snd_mute(1);
     nplayed = 0;
-    run(200, 5, a, g_stereo, clk + 200000);
-    CHECK(peak_of(3000, nplayed, 0) == 0, "mute: silence");
+    run(300, 5, a, g_stereo, clk + 300000);              /* was 200 / 3000: 16 periods mixed before the mute */
+    CHECK(peak_of(9000, nplayed, 0) == 0, "mute: silence");
     snd_mute(0);
     snd_jack(0);
     run(100, 5, a, g_stereo, clk + 100000);
@@ -819,6 +820,93 @@ static void t_probe(void)
     CHECK(aud_is_off() && snd_get_volume(SND_OUT_SPEAKER) == 7, "level 2: AUD off, the user's volume back");
 }
 
+/* the mix-ahead: 16 periods while a stream is open (the shell's long turns), 3 with tones only; switching both ways
+ * without a gap, a stale burst or a dry period */
+static unsigned ring_lead(void)
+{
+    const uint8_t *ring = apcm_play_buf();
+    uint32_t pos = apcm_play_pos(0);
+    if (!ring || pos == APCM_NOPOS)
+        return 99;
+    unsigned c = pos / APCM_PERIOD_BYTES, n = 0;
+    for (unsigned k = 1; k < APCM_PERIODS; ++k) {
+        const uint8_t *p = ring + ((c + k) % APCM_PERIODS) * APCM_PERIOD_BYTES;
+        unsigned nz = 0;
+        for (unsigned i = 0; i < APCM_PERIOD_BYTES; ++i)
+            nz |= p[i];
+        if (!nz)
+            break;
+        n++;
+    }
+    return n;
+}
+static void t_deep(void)
+{
+    struct snd_stats a, b;
+    reset_fake(0, 0);
+    init_snd(0);
+    snd_volume(SND_OUT_SPEAKER, 15);
+    /* a steady stream fed at real time, the kernel loop's turn 120 ms */
+    int id = snd_open();
+    static int16_t buf[2 * SND_STREAM_FRAMES];
+    uint64_t made = 0, written = 0, t0 = clk;
+    unsigned lead = 0;
+    gen_at = 0;
+    for (unsigned turn = 0; turn < 30; ++turn) {
+        made = (clk - t0) * 48U / 1000U + SND_STREAM_FRAMES;   /* the app fills its queue at open */
+        unsigned n = snd_space(id), want = (unsigned)(made - written);
+        n = n < want ? n : want;
+        g_1000(buf, n, 0);
+        written += snd_write(id, buf, n);
+        snd_poll(clk);
+        if (turn == 2)
+            snd_stats(&a);
+        lead = ring_lead();
+        clk += 120000;
+    }
+    snd_stats(&b);
+    CHECK(b.xruns == a.xruns, "deep: %u dry periods at 120 ms turns", b.xruns - a.xruns);
+    uint32_t s0 = first_nonzero(), zeros = 0;
+    for (uint32_t i = s0; i < nplayed; ++i)
+        zeros += !played[2 * i];
+    CHECK(s0 < nplayed && nplayed - s0 > 48000U * 3U && zeros == 0, "deep: %u silent frames of %u in the stream", zeros,
+          nplayed - s0);
+    CHECK(b.late_polls >= 25, "deep: late polls %u (every 120 ms turn is one)", b.late_polls);
+    CHECK(lead >= 15 && lead <= 16, "deep: %u periods ahead with a stream open (want 16)", lead);
+    snd_close(id);
+    run(3000, 5, -1, 0, 0);
+
+    /* tones only: 3 ahead; a stream opens (deeper, no gap), closes (what was mixed plays out, back to 3) */
+    reset_fake(0, 0);
+    init_snd(0);
+    snd_volume(SND_OUT_SPEAKER, 15);
+    snd_tone(SND_TONE_TEST);
+    run(100, 5, -1, 0, 0);
+    CHECK(ring_lead() >= 2 && ring_lead() <= 3, "deep: tone only: %u periods ahead (want 3)", ring_lead());
+    snd_stats(&a);
+    id = snd_open();
+    run(100, 5, id, g_1000, clk + 100000);
+    CHECK(ring_lead() >= 15 && ring_lead() <= 16, "deep: stream opened: %u periods ahead (want 16)", ring_lead());
+    snd_close(id);
+    snd_tone_stop();
+    nplayed = 0;
+    run(400, 5, -1, 0, 0);
+    uint32_t heard = 0;
+    for (uint32_t i = 0; i < nplayed; ++i)
+        heard += played[2 * i] != 0;
+    CHECK(heard >= 16U * 512U - 512U && heard <= 17U * 512U + 512U, "deep: %u frames of what was mixed played out after "
+          "the close (16 periods = 8192)", heard);
+    CHECK(peak_of(17U * 512U + 1024U, nplayed, 0) == 0, "deep: a stale burst after the play-out");
+    snd_tone(SND_TONE_TEST);
+    run(100, 5, -1, 0, 0);
+    CHECK(ring_lead() >= 2 && ring_lead() <= 3, "deep: back to %u periods ahead (want 3)", ring_lead());
+    snd_stats(&b);
+    CHECK(b.xruns == a.xruns, "deep: %u dry periods across the switches", b.xruns - a.xruns);
+    snd_tone_stop();
+    run(3000, 5, -1, 0, 0);
+    CHECK(aud_is_off() && bad_writes == 0, "deep: end state");
+}
+
 int main(int argc, char **argv)
 {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
@@ -834,6 +922,7 @@ int main(int argc, char **argv)
     t_failures();
     t_capture();
     t_probe();
+    t_deep();
     printf("snd-test: %d of %d checks passed\n", checks - fails, checks);
     free(rmem);
     free(played);

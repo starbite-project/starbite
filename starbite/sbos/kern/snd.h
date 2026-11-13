@@ -14,13 +14,16 @@
  *   - Capture: the main mic (codec IN3L -> AIF1TX1 -> UAIF0 -> WDMA1), 48 kHz mono S16 for apps (the left slot).
  *     With use_calliope (the kernel's) both directions run through Calliope (abox_media.c: RDMA0 / WDMA1 on its PCM
  *     IPC), together if wanted, on one Calliope boot.
- *   - Calls win: snd_suspend_for_call() stops everything and gives ABOX back before abox_boot();
+ *   - Calls win: snd_suspend_for_call() stops everything and gives ABOX back before abox_boot() (a Calliope boot of
+ *     snd's still pending is finished there, so the modem's abox_boot() finds it running; a tone or capture that was
+ *     waiting for it is dropped);
  *     snd_resume_after_call() after abox_off(). While suspended, streams keep their queued frames and nothing plays.
  *
- * Polling: snd_poll(now_us) from the kernel loop. While snd_busy(), every 5 ms (at most 15 ms apart: the mixer keeps
- * 3 periods of 10.67 ms queued ahead of the DMA; later than ~21 ms the DMA plays zeroes, never stale sound, unless the
- * kernel stalls longer than the whole 341 ms ring). Output latency: 21..32 ms + the app's own queue. When idle it
- * needs no poll (snd_busy() 0); a write, a tone or a capture makes it busy again. The engine stops 2 s after the last
+ * Polling: snd_poll(now_us) from the kernel loop. While snd_busy(), every 5 ms. The mixer keeps 3 periods of 10.67 ms
+ * queued ahead of the DMA with only tones (polls at most ~21 ms apart), 16 (~170 ms) while a stream is open (a tone
+ * then starts after those); later than that the DMA plays zeroes, never stale sound, unless the kernel stalls longer
+ * than the whole 341 ms ring. A Calliope boot (~1 s) runs a step per poll, never in one. Output latency: 21..32 ms
+ * (tones), ~170 ms (streams) + the app's own queue. When idle it needs no poll (snd_busy() 0); a write, a tone or a capture makes it busy again. The engine stops 2 s after the last
  * sound (amps off first), so the AUD domain is off while nothing plays. */
 #ifndef SBOS_SND_H
 #define SBOS_SND_H
@@ -29,7 +32,7 @@
 
 #define SND_STREAMS 4
 #define SND_VOL_MAX 15
-#define SND_STREAM_FRAMES 4096U         /* each stream's queue: 85 ms */
+#define SND_STREAM_FRAMES 8192U         /* each stream's queue: 170 ms (an app writing once per 120 ms turn keeps up) */
 #define SND_CAP_SAMPLES 24000U          /* the capture queue: 0.5 s mono */
 
 /* outputs (also the volume index) */
