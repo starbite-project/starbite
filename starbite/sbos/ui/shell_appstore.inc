@@ -812,9 +812,11 @@ static float pg_app(pctx *c)
             dc *d = c->d;
             d_rrect(d, GROUP_X, y, GROUP_W, 52, 16, C_CARD);
             d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 15), "Install Options", 0, 0, INK, 0);
-            if (nm > 1 || !AQ.opts) {
-                float vw = tw(TK_IT400, 17, aq_mname(cur), 0, 0);
-                d_text_box(d, TK_IT400, 17, CONTENT_R - 44 - tk_minf(vw, 190), bl(TK_IT400, 17, y + 15), 190, 0, aq_mname(cur), 0, 0, C_LABEL2, 0);
+            {   /* the chosen way, right-aligned before the chevron, cut to the room the label leaves */
+                float lw = tw(TK_IT400, 17, "Install Options", 0, 0), room = CONTENT_R - 40 - (ROW_TX + lw + 14);
+                char v[48];
+                ellipsize(v, sizeof v, TK_IT400, 17, aq_mname(cur), room);
+                d_text_box(d, TK_IT400, 17, CONTENT_R - 40, bl(TK_IT400, 17, y + 15), room, 2, v, 0, 0, C_LABEL2, 0);
             }
             /* the chevron: right when shut, down when open */
             if (AQ.opts) { d_seg(d, CONTENT_R - 34, y + 23, CONTENT_R - 28, y + 29, 2.2f, W(.3f)); d_seg(d, CONTENT_R - 28, y + 29, CONTENT_R - 22, y + 23, 2.2f, W(.3f)); }
@@ -1237,9 +1239,13 @@ static void aq_go(int dir)
     relink();
 }
 static char aq_want[40];                        /* (defined with sh_linux_store below: st_route_app's page) */
+static sh_lstore_t aq_cache;                     /* (the kept table: defined with sh_linux_store below) */
+static int aq_cached;
+static int aqk_load(void);
 static void st_build(void)
 {
     if (!is_app("store")) return;
+    if ((!LST || LST->n <= 0) && LX.state != SH_LINUX_FAILED && aqk_load()) { LST = &aq_cache; aq_cached = 1; }
     AQ.empty = !LST || LST->n <= 0;
     if (aq_want[0] && !AQ.empty && st_find(aq_want) >= 0) {   /* Track B, cp6: opened for this page (st_route_app) */
         const sh_lpkg_t *p = &LST->pkg[st_find(aq_want)];
@@ -1287,9 +1293,106 @@ static void st_changed(void)
 }
 static char aq_want[40];                        /* st_route_app: the page to push once the store's table has it */
 static void aq_push(int i);
+/* ---- cp7z (gaps-f-store.md #1): the last table kept in the home store (one sh_blob, ~10 KB for 55 apps: no long
+ * descriptions, no icons), drawn at once when the store opens before Linux is up; a GET then waits for the real table.
+ * Packed: "AKC1", n (u16), then per app u32 flags, inst_kb, dl_kb; u16 build_min, ram_mb, rel_size_mb; u8 methods,
+ * method, def_method, touch, needs, flags3; then 11 NUL-ended strings (pkg, name, summary, category, the five versions,
+ * licence, source). Written only when it differs from what is kept. ---- */
+#define AQK_MAX 32768u
+static sh_lstore_t aq_cache;                     /* (the platform's table shape, filled from the blob) */
+static int aq_cached;                            /* LST is aq_cache: Linux not up yet */
+static uint32_t aqk_kept;                        /* the kept blob's hash (0: not read yet this boot) */
+static struct { char pkg[40]; int op, m; } aq_pend;   /* one action asked for while cached */
+static unsigned aqk_str(uint8_t *b, unsigned o, const char *s)
+{
+    while (*s && o < AQK_MAX - 1) b[o++] = (uint8_t)*s++;
+    if (o < AQK_MAX) b[o++] = 0;
+    return o;
+}
+static uint32_t aqk_rd(const uint8_t *b, unsigned *o, int w) { uint32_t v = 0; for (int k = 0; k < w; k++) v |= (uint32_t)b[(*o)++] << (8 * k); return v; }
+static unsigned aqk_u(uint8_t *b, unsigned o, uint32_t v, int w) { for (int k = 0; k < w && o < AQK_MAX; k++) b[o++] = (uint8_t)(v >> (8 * k)); return o; }
+static void aqk_save(const sh_lstore_t *t)
+{
+    if (!t || !t->v3 || t->n <= 0) return;
+    static uint8_t b[AQK_MAX];                      /* (every table update packs: progress changes nothing kept, so the
+                                                     * hash matches and nothing is written) */
+    unsigned o = aqk_u(b, 0, 0x31434b41u, 4);      /* "AKC1" */
+    o = aqk_u(b, o, (uint32_t)t->n, 2);
+    int n = 0;
+    for (int i = 0; i < t->n && i < SH_LPKGS; i++) {
+        const sh_lpkg_t *p = &t->pkg[i];
+        if (o > AQK_MAX - 600) break;               /* (room for one more at most: the rest are left out) */
+        unsigned f = p->flags & ~(SH_PKG_NO_SPACE);  /* (space is the guest's to say, live) */
+        o = aqk_u(b, o, f, 4); o = aqk_u(b, o, p->inst_kb, 4); o = aqk_u(b, o, p->dl_kb, 4);
+        o = aqk_u(b, o, p->build_min, 2); o = aqk_u(b, o, p->ram_mb, 2); o = aqk_u(b, o, p->rel_size_mb, 2);
+        o = aqk_u(b, o, p->methods, 1); o = aqk_u(b, o, p->method, 1); o = aqk_u(b, o, p->def_method, 1);
+        o = aqk_u(b, o, p->touch, 1); o = aqk_u(b, o, p->needs, 1); o = aqk_u(b, o, p->flags3, 1);
+        const char *ss[11] = { p->pkg, p->name, p->summary, p->category, p->ver_inst, p->ver_new, p->ver_rel,
+                               p->ver_distro, p->ver_src, p->licence, p->source };
+        for (int k = 0; k < 11; k++) o = aqk_str(b, o, ss[k]);
+        n++;
+    }
+    b[4] = (uint8_t)n; b[5] = (uint8_t)(n >> 8);
+    uint32_t h = aq_hash(2166136261u, "");
+    for (unsigned k = 0; k < o; k++) h = aq_hu(h, b[k]);
+    if (!aqk_kept) {                                /* the kept one's hash, once a boot */
+        uint8_t *k2 = tk_alloc(AQK_MAX);
+        int r = k2 ? sh_blob_get("store.cache", k2, AQK_MAX) : -1;
+        aqk_kept = 1;
+        if (r > 0) { uint32_t h2 = aq_hash(2166136261u, ""); for (int k = 0; k < r; k++) h2 = aq_hu(h2, k2[k]); aqk_kept = h2 | 1; }
+        if (k2) tk_free(k2);
+    }
+    if ((h | 1) != aqk_kept && sh_blob_put("store.cache", b, o) == 0) aqk_kept = h | 1;
+}
+static int aqk_load(void)
+{
+    uint8_t *b = tk_alloc(AQK_MAX);
+    if (!b) return 0;
+    int r = sh_blob_get("store.cache", b, AQK_MAX), n = 0;
+    if (r >= 6 && b[0] == 'A' && b[1] == 'K' && b[2] == 'C' && b[3] == '1') {
+        int want = b[4] | b[5] << 8;
+        unsigned o = 6;
+        tk_memset(&aq_cache, 0, sizeof aq_cache);
+        for (; n < want && n < SH_LPKGS && o + 27 <= (unsigned)r; n++) {
+            sh_lpkg_t *p = &aq_cache.pkg[n];
+            p->flags = aqk_rd(b, &o, 4); p->inst_kb = aqk_rd(b, &o, 4); p->dl_kb = aqk_rd(b, &o, 4);
+            p->build_min = aqk_rd(b, &o, 2); p->ram_mb = aqk_rd(b, &o, 2); p->rel_size_mb = aqk_rd(b, &o, 2);
+            p->methods = aqk_rd(b, &o, 1); p->method = aqk_rd(b, &o, 1); p->def_method = aqk_rd(b, &o, 1);
+            p->touch = aqk_rd(b, &o, 1); p->needs = aqk_rd(b, &o, 1); p->flags3 = aqk_rd(b, &o, 1);
+            char *ds[11] = { p->pkg, p->name, p->summary, p->category, p->ver_inst, p->ver_new, p->ver_rel,
+                             p->ver_distro, p->ver_src, p->licence, p->source };
+            const unsigned cap[11] = { sizeof p->pkg, sizeof p->name, sizeof p->summary, sizeof p->category,
+                                       sizeof p->ver_inst, sizeof p->ver_new, sizeof p->ver_rel, sizeof p->ver_distro,
+                                       sizeof p->ver_src, sizeof p->licence, sizeof p->source };
+            for (int k = 0; k < 11; k++) {
+                unsigned j = 0;
+                while (o < (unsigned)r && b[o]) { if (j < cap[k] - 1) ds[k][j++] = (char)b[o]; o++; }
+                ds[k][j] = 0;
+                o++;
+            }
+            p->icon = -1;                           /* (icons come with Linux: a tile with the initials until then) */
+        }
+        aq_cache.n = n;
+        aq_cache.v3 = 1;
+        aq_cache.repo_ok = 1;
+    }
+    tk_free(b);
+    return n > 0;
+}
 void sh_linux_store(const sh_lstore_t *s)
 {
-    LST = s && s->n >= 0 ? s : 0;
+    if (s && s->n > 0) {                          /* the real table: it replaces the kept one, and is kept */
+        int was = aq_cached;
+        aq_cached = 0;
+        LST = s;
+        aqk_save(s);
+        if (aq_pend.pkg[0] && st_find(aq_pend.pkg) >= 0) {   /* the GET asked for while Linux started */
+            int i = st_find(aq_pend.pkg);
+            aq_pend.pkg[0] = 0;
+            if (!st_busy(&LST->pkg[i])) (void)sh_linux_pkg(i, SH_PKG_OPWORD(aq_pend.op, aq_pend.m));
+        }
+        (void)was;
+    } else if (!aq_cached) LST = s && s->n >= 0 ? s : 0;
     if (lx_baked && is_app("store") && !ap_pending) st_changed();
     if (aq_want[0] && is_app("store") && st_find(aq_want) >= 0) {   /* (Linux just started for it: its page now) */
         aq_push(st_find(aq_want));
@@ -1357,6 +1460,22 @@ static void aq_tab(int t)
 /* ---- actions ---- */
 static int aq_op(int i, int op, int m)
 {
+    if (aq_cached) {                              /* Linux still starting: the GET waits for the real table */
+        if (op == SH_PKG_OP_CANCEL) {             /* the waiting GET / UPDATE taken back */
+            if (!tk_strcmp(aq_pend.pkg, LST->pkg[i].pkg)) aq_pend.pkg[0] = 0;
+            aq_cache.pkg[i].state = 0;
+            st_changed();
+            return 0;
+        }
+        if (op == SH_PKG_OP_REMOVE) { toast("Linux is starting: try again in a moment"); return -1; }
+        if (aq_pend.pkg[0] && st_find(aq_pend.pkg) >= 0) aq_cache.pkg[st_find(aq_pend.pkg)].state = 0;   /* (one waits) */
+        lx_scopy(aq_pend.pkg, LST->pkg[i].pkg, sizeof aq_pend.pkg);
+        aq_pend.op = op; aq_pend.m = m;
+        aq_cache.pkg[i].state = SH_PKG_QUEUED;
+        toast(op == SH_PKG_OP_INSTALL ? "It installs as soon as Linux has started" : "It updates as soon as Linux has started");
+        st_changed();
+        return 0;
+    }
     if (sh_linux_pkg(i, SH_PKG_OPWORD(op, m)) < 0) { toast("Linux isn't running: try again in a moment"); return -1; }
     return 0;
 }
@@ -1368,6 +1487,7 @@ static void aq_act(int i, int m)
     if (st_busy(p)) { (void)aq_op(i, SH_PKG_OP_CANCEL, 0); return; }
     if (aq_upd(p)) { (void)aq_op(i, SH_PKG_OP_UPDATE, 0); return; }
     if (aq_inst(p)) {
+        if (aq_cached) { toast("Linux is starting: it opens in a moment"); return; }
         int a = st_app(i);
         if (a >= 0) lx_open_app(a);
         else toast("Installed. It has no window of its own");

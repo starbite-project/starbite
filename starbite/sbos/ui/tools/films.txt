@@ -62,3 +62,6 @@ sounds: wait 300; drag 195 795 195 330 220; wait 900; tap 325 736; wait 1100; dr
 wavplay: wait 300; drag 195 795 195 330 220; wait 900; tap 152 392; wait 2500; tap 195 615; wait 1200; tap 195 570; wait 1500; tap 195 570; wait 600; tap 290 570; wait 900; tap 60 63; wait 800; drag 195 795 200 450 260; wait 1200
 gcold: wait 300; state store=today; wait 6000
 gopts: wait 300; state storeapp=helix; wait 900; state storescroll=:400; wait 900; state storepick=:3; wait 900
+gtoday: wait 300; state store=today; wait 1500; drag 195 700 195 300 300; wait 1200
+gcache: wait 300; state store=today; wait 1500; state storeapp=neovim; wait 1200; tap 178 190; wait 1500
+gcache2: wait 300; state storeapp=neovim; wait 900; tap 178 190; wait 900; tap 178 190; wait 900
