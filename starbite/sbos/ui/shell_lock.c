@@ -454,7 +454,7 @@ static int fmt_time(char *b, int h, int m, int ampm) { return sh_fmt_time(b, h, 
 static void fmt_hm(char *b) { fmt_time(b, ST.h, ST.mi, 0); }
 
 static tk_layer lstatus, lclock, lwidgets;
-#define LK_GRAB_X (CONTENT_R - 16 - 47)           /* 8a: the CC grabber's left (its right edge on the battery's) */
+#define LK_GRAB_X 300.0f                            /* 8a: the CC grabber (design-ref §1: x 300..347, y 39, white 60 %) */
 static void relink(void);
 /* helper D (shell_nc.inc, shell_switcher.inc): the hooks this file calls before their definitions */
 static void nc_sb_stale(void);
@@ -487,7 +487,7 @@ static void build_lstatus(void)
     dc d = mk(&lstatus, "lock-status", 0, 0, 390, 48, 2, 0);
     status_bar(&d, carrier);
     /* 8a (top ten #1, gaps-c #11): iOS's Control Centre grabber, ~47 x 2.5 under the right status cluster */
-    d_rrect(&d, LK_GRAB_X, 41, 47, 2.5f, 1.25f, W(.55f));
+    d_rrect(&d, LK_GRAB_X, 39, 47, 2.5f, 1.25f, W(.6f));
     trim(&lstatus);
     nc_sb_stale();                               /* helper D: the Notification Centre's status bar too */
 }
@@ -1063,18 +1063,24 @@ static void build_empill(void)
  * spring; the card fades, the notifications give way as for an open card); a tap on the clock, the widgets or bare
  * wallpaper, the next lock or Emergency's exit folds them. */
 static void d_icon_s(dc *d, const char *name, float x, float y, float s);
-#define SYSP_H 64.0f
-#define SYSP_Y (LKN_BOT0 - SYSP_H)
+#define SYSP_H 58.0f                     /* design-ref-lock-and-wallpaper.md §1 (a): h 58 at y 620..678 */
+#define SYSP_Y 620.0f
+/* "Show less" (iOS's expanded stack's): a glass capsule centred between the torch and Emergency buttons, where the
+ * card was (above the cards the widgets leave no room) */
+#define SYSL_H 30.0f
+#define SYSL_Y 712.0f
+static float sysl_w(void);
 static int sysp_mode = -1;               /* the pref, read at the lock's build (-1 not yet) */
 static float sysx = 1;                   /* 0 folded (the platter), 1 the cards out */
 static tk_spring sp_sysx;
-static tk_layer sysplat;
+static tk_layer sysplat, sysless;
 static int sysp_on(void)
 {
     if (sysp_mode < 0) { sysp_mode = sh_pref_int("lock.systems", 1) == 1; sysx = sysp_mode ? 0 : 1; }
     return sysp_mode;
 }
 static int sysp_hit(float x, float y) { return sysp_on() && !EMG && sysx < .5f && x >= PL_X && x < PL_X + PL_W && y >= SYSP_Y && y < SYSP_Y + SYSP_H; }
+static int sysl_hit(float x, float y) { return sysp_on() && !EMG && sysx > .5f && tk_fabsf(x - 195) < sysl_w() / 2 + 8 && y >= SYSL_Y - 8 && y < SYSL_Y + SYSL_H + 8; }
 static void sysp_build(void)
 {
     relayer(&sysplat);
@@ -1084,26 +1090,40 @@ static void sysp_build(void)
     dc d = mk(&sysplat, "lock-systems", PL_X, SYSP_Y, PL_W, SYSP_H, 18, 1);   /* (18: its shadow; 44 cost 2 MB more) */
     if (!d.b->px) return;
     d_glass(&d, PL_X, SYSP_Y, PL_W, SYSP_H, PL_R, 1, 1);
+    /* §1 (a): the four vendor tiles 34 pt, 7 apart from x 27.5; "Systems" 15 / 600 and "N ready · tap to choose"
+     * 13 / 400 at white 60 % from x 212; a chevron at white 50 % */
     int n = 0, total = 0;
     for (int g = 0; g < NG; g++) {
+        if (!tk_strcmp(G[g].key, "starbite")) continue;      /* (this OS and its tools: not "systems to choose") */
         total += G[g].n;
-        if (n >= 4 || !tk_strcmp(G[g].key, "starbite")) continue;
+        if (n >= 4) continue;
         char tn[40] = "t46-";
         tk_memcpy(tn + 4, G[g].key, tk_strlen(G[g].key) + 1);
-        d_icon_s(&d, tn, PL_X + 14 + 38 * n, SYSP_Y + (SYSP_H - 33) / 2, 33.0f / 46);
+        d_icon_s(&d, tn, 27.5f + 41 * n, SYSP_Y + (SYSP_H - 34) / 2, 34.0f / 46);
         n++;
     }
-    float tx = PL_X + 14 + 38 * n + 8;
-    d_text(&d, TK_IT600, 17, tx, SYSP_Y + 28, "Systems", 0, 0, INK, 0);
+    float tx = 198;                                   /* (§1 says 212: "8 ready · tap to choose" needs the 14 pt) */
+    d_text(&d, TK_IT600, 15, tx, SYSP_Y + 25, "Systems", 0, 0, W(1), 0);
     char sub[40];
     int k = put_dec(sub, total);
-    for (const char *p = " systems on this phone"; *p;) sub[k++] = *p++;
+    for (const char *p = " ready \xc2\xb7 tap to choose"; *p;) sub[k++] = *p++;
     sub[k] = 0;
-    d_text_box(&d, TK_IT400, 13, tx, SYSP_Y + 47, PL_X + PL_W - 32 - tx, 0, sub, 0, 0, W(.6f), 0);
-    d_icon(&d, "chev", PL_X + PL_W - 26, SYSP_Y + SYSP_H / 2 - 6.5f, .35f);
+    d_text_box(&d, TK_IT400, 13, tx, SYSP_Y + 43, PL_X + PL_W - 24 - tx, 0, sub, 0, 0, W(.6f), 0);
+    d_icon(&d, "chev", PL_X + PL_W - 22, SYSP_Y + SYSP_H / 2 - 6.5f, .5f);
     trim(&sysplat);
+    /* the expanded stack's "Show less" */
+    relayer(&sysless);
+    tk_layer_init(&sysless, "lock-systems-less");
+    sysless.hidden = 1;
+    float w = sysl_w(), x = 195 - w / 2;
+    d = mk(&sysless, "lock-systems-less", x, SYSL_Y, w, SYSL_H, 14, 1);
+    if (!d.b->px) return;
+    d_glass(&d, x, SYSL_Y, w, SYSL_H, SYSL_H / 2, 1, 1);
+    d_text(&d, TK_IT600, 13, x + 14, SYSL_Y + 19.5f, "Show less", 0, 0, W(1), 0);
+    trim(&sysless);
 }
-static float lkn_bot(void) { return sysp_on() && !EMG ? SYSP_Y - 10 : LKN_BOT0; }
+static float sysl_w(void) { return tw(TK_IT600, 13, "Show less", 0, 0) + 28; }
+static float lkn_bot(void) { return sysp_on() && !EMG ? SYSP_Y - 8 : LKN_BOT0; }   /* §1 (a): the stack 8 pt over the card */
 static void place_list(void);
 static void sysp_fold(int open, int instant)
 {
@@ -1212,8 +1232,10 @@ static void place_list(void)
         sysplat.ox = PT(195); sysplat.oy = PT(SYSP_Y + SYSP_H / 2);
         sysplat.sx = sysplat.sy = s;
         sysplat.hidden = !sysplat.bmp.px || sysplat.alpha <= .004f;
+        sysless.alpha = tk_clampf(sysx * 1.6f - .6f, 0, 1);
+        sysless.hidden = !sysless.bmp.px || sysless.alpha <= .004f;
     } else
-        sysplat.hidden = 1;
+        sysplat.hidden = sysless.hidden = 1;
     list.hidden = list.alpha <= .004f;
     lkn_place();
     lock_ver++;
@@ -5152,10 +5174,11 @@ static void relink(void)
     link(&appc, st, na + cm_layers(st + na));    /* helper I: the keypad's line and ring, Messages' fields */
     /* B9: the notifications' stack is the lock's (lkng, over the list: fanned out it takes the list's room); the
      * Centre's "N Notifications" pill only in Emergency */
-    tk_layer *lk[] = { &lkground, &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &sysplat, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
+    tk_layer *lk[] = { &lkground, &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &sysplat, &sysless, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
     if (!lkground.name) { tk_layer_init(&lkground, "lock-ground"); lkground.hidden = 1; }   /* cp7q: the moving lock's ground */
     if (!sysplat.name) { tk_layer_init(&sysplat, "lock-systems"); sysplat.hidden = 1; }   /* 8a */
-    link(&lockg, lk, EMG ? 15 : 14);
+    if (!sysless.name) { tk_layer_init(&sysless, "lock-systems-less"); sysless.hidden = 1; }
+    link(&lockg, lk, EMG ? 16 : 15);
     lkn_link();
     /* B10: the vendor cards in the list as B4 had them: the lower cards, the members' platters and words under the
      * head card, "Show less" above it, the chevron on top */
@@ -6077,8 +6100,16 @@ static void sh_touch_(int phase, float x, float y, float t)
         if (y >= H_PT - 30) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0; }
         /* B10: the notifications fanned out are over the list: theirs first (a tap beside them folds them back) */
         else if (lkn_p() > 0 && lkn_down(x, y, t)) { T.kind = G_LKN; return; }
+        else if (sysl_hit(x, y)) {                   /* 8a: "Show less": the cards fold back into the card */
+            T.kind = G_SYSP; T.arg = 1;
+            float w = sysl_w();
+            tk_rect c = { 195 - w / 2, SYSL_Y, w, SYSL_H };
+            hl_set(&lockhl, c, c, SYSL_H / 2, PRESS_BTN);
+            lk_hl_key = 0;
+            lock_ver++;
+        }
         else if (sysp_hit(x, y)) {                   /* 8a: the Systems platter: lit, a tap fans the cards out */
-            T.kind = G_SYSP;
+            T.kind = G_SYSP; T.arg = 0;
             tk_rect c = { PL_X, SYSP_Y, PL_W, SYSP_H };
             hl_set(&lockhl, c, c, PL_R, W(.12f));
             lk_hl_key = 0;
@@ -6347,7 +6378,8 @@ static void sh_touch_(int phase, float x, float y, float t)
     case G_SYSP:
         hl_off();
         sh_haptic_k(SH_HAP_LIGHT);
-        sysp_fold(1, 0);
+        if (T.arg) { vc_close_all(0); scroll = 0; sp_scroll.live = 0; scroll_momentum = 0; }   /* "Show less": folded whole */
+        sysp_fold(!T.arg, 0);
         break;
     case G_TAP_ROW: {
         const sys_t *s = &G[T.arg].it[T.arg2];

@@ -32,7 +32,7 @@
 
 enum { SE_ROOT = 0, SE_DISPLAY = 1, SE_WIFI = 2, SE_CELL = 3, SE_CARD = 4,
        SE_GENERAL = 10, SE_ABOUT, SE_UPDATE, SE_DATETIME, SE_KEYBOARD, SE_LANG, SE_RESET, SE_WALL, SE_SOUNDS, SE_NOTIF,
-       SE_NOTIF_APP, SE_BATTERY, SE_PRIVACY, SE_EMERGENCY, SE_LINUX, SE_SEARCH, SE_BT, SE_HEALTH, SE_NPAGES };
+       SE_NOTIF_APP, SE_BATTERY, SE_PRIVACY, SE_EMERGENCY, SE_LINUX, SE_SEARCH, SE_BT, SE_HEALTH, SE_LEGAL, SE_NPAGES };
 /* actions (row ids from 100; a row id < 100 pushes that page) */
 enum { A_NONE = 100, A_CARD, A_PASSCODE, A_STARTUP, A_STORE, A_LAST2, A_TEXTSIZE, A_RESET, A_EMG, A_BRIGHT,
        A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK, A_UPDATE, A_BTDEV, A_BTKBD, A_HAPLVL, A_VOLUME, A_TONE_RING, A_TONE_TEXT, A_TONE_ALARM,
@@ -212,6 +212,7 @@ static const char *se_title(int p)
     case SE_SEARCH: return "Search";
     case SE_BT: return "Bluetooth";
     case SE_HEALTH: return "Battery Health";
+    case SE_LEGAL: return "Legal & Regulatory";
     default: return "Settings";
     }
 }
@@ -221,6 +222,7 @@ static int se_parent(int p)
     if (p == SE_NOTIF_APP) return SE_NOTIF;
     if (p == SE_CARD) return SE_EMERGENCY;
     if (p == SE_HEALTH) return SE_BATTERY;
+    if (p == SE_LEGAL) return SE_ABOUT;
     return SE_ROOT;
 }
 static const char *se_card_words(void)
@@ -328,6 +330,13 @@ static void se_rows(int p)
         val("Storage", se_card_words());
         val("Processor", "Exynos 9810");
         foot("Starbite OS runs from the memory card. The serial number and the modem's numbers are not shown.");
+        sec(0);
+        nav(SE_LEGAL, 0, "Legal & Regulatory", 0);   /* (iOS's place for the notices) */
+        break;
+    case SE_LEGAL:                               /* the data the OS ships, credited as its licences ask */
+        sec("Data");
+        val("City Names and Locations", "GeoNames");
+        foot("City names and locations: GeoNames (geonames.org), licensed under CC BY 4.0.");
         break;
     case SE_DATETIME: {                          /* Track A's time: 12 / 24-hour, the zone (sbos-core-api.md 4) */
         char t[12];
