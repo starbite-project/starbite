@@ -21,6 +21,8 @@
 static int kb_key_tap;
 static int se_haptic_ok(int key);
 #define sh_haptic() do { int kk_ = kb_key_tap; kb_key_tap = 0; if (se_haptic_ok(kk_)) sh_haptic(); } while (0)
+/* gap list B: the feedback kinds too (iOS: System Haptics off silences every UI haptic; rings use sh_haptic_kind) */
+#define sh_haptic_k(k_) do { if (se_haptic_ok(0)) sh_haptic_k(k_); } while (0)
 
 #define H_PT TK_HPT
 static tk_comp *C;
@@ -75,7 +77,9 @@ static int shown_quarter(tk_bmp *q);           /* cp7f: what shows, a quarter ea
 #define PL_W 361.0f
 #define PL_R 23.0f
 #define LKN_TOP 310.0f                               /* the notifications' area fanned out (the list's top: LIST_TOP) */
-#define LKN_BOT 677.0f
+#define LKN_BOT0 677.0f                              /* the stack's bottom on iOS's lock (20.5 above the buttons) */
+static float lkn_bot(void);                          /* 8a: above the Systems card while it shows */
+#define LKN_BOT (lkn_bot())
 /* B10: a vendor card is an iOS platter (PL_X / PL_W / PL_R, the notifications' glass): its icon, name, systems and
  * chevron where B4's cards had them (11 / 69 / 81 in, the chevron 32 from the right) */
 #define VC_X PL_X
@@ -337,7 +341,9 @@ static void build_wall(void)
     const tk_bmp *st = tk_icon("star");
     float pad = tk_icon_pad("star");
     tk_layer_init(&star, "star");
-    star.bmp = *st;                       /* a view into the pack */
+    /* 8a (top ten #1 / #5): the default wallpaper has no star (iOS's has no decoration; on home it overlapped the
+     * Recent widget): the layer stays, empty and hidden; Emergency keeps its warm one (star_e) */
+    star.hidden = 1;
     star.x = (float)(int)tk_floorf(PT(390 - 34 - 36) - pad + .5f);
     star.y = (float)(int)tk_floorf(PT(56) - pad + .5f);
     /* Emergency's star: the same with a warm glow (.7 s, with the wallpaper) */
@@ -352,7 +358,7 @@ static void build_wall(void)
     tk_bmp_copy(&src, 0, 0, &C->base_half, 0, 0, src.w, src.h);
     tk_bmp_new(&sh, (st->w + 1) / 2, (st->h + 1) / 2);
     tk_bmp_down2(&sh, st);
-    tk_blit(&src, &sh, (int)star.x / 2, (int)star.y / 2, 1);
+    if (star.bmp.px) tk_blit(&src, &sh, (int)star.x / 2, (int)star.y / 2, 1);
     tk_glass_backdrop(&C->bw_half, &src);
     tk_bmp_free(&sh);
     tk_bmp_free(&src);
@@ -425,7 +431,9 @@ static void ring_widget(dc *d, float x, float p, tk_col col, const char *num, co
     dg[k] = 0;
     float w = tw(TK_IT600, 18, dg, 0, TK_TNUM);
     d_text(d, TK_IT600, 18, cx - w / 2, cy + 6.5f, num, 0, TK_TNUM, INK, 0);
-    /* the label, mixed case, 10 pt / 600 in the gap */
+    /* 8a (top ten #1): iOS's gauges carry a glyph in the gap, not a caption: a lower-case lbl is the glyph's icon
+     * (12 pt); Emergency's upper-case ones stay captions (its "Saving" has no glyph) */
+    if (lbl[0] >= 'a' && lbl[0] <= 'z') { d_icon(d, lbl, cx - 6, cy + 29 - 7, .75f); return; }
     char lb[16];
     int n = 0;
     for (; lbl[n] && n < 15; n++) lb[n] = n && lbl[n] >= 'A' && lbl[n] <= 'Z' ? (char)(lbl[n] + 32) : lbl[n];
@@ -446,6 +454,7 @@ static int fmt_time(char *b, int h, int m, int ampm) { return sh_fmt_time(b, h, 
 static void fmt_hm(char *b) { fmt_time(b, ST.h, ST.mi, 0); }
 
 static tk_layer lstatus, lclock, lwidgets;
+#define LK_GRAB_X (CONTENT_R - 16 - 47)           /* 8a: the CC grabber's left (its right edge on the battery's) */
 static void relink(void);
 /* helper D (shell_nc.inc, shell_switcher.inc): the hooks this file calls before their definitions */
 static void nc_sb_stale(void);
@@ -477,6 +486,8 @@ static void build_lstatus(void)
     relayer(&lstatus);
     dc d = mk(&lstatus, "lock-status", 0, 0, 390, 48, 2, 0);
     status_bar(&d, carrier);
+    /* 8a (top ten #1, gaps-c #11): iOS's Control Centre grabber, ~47 x 2.5 under the right status cluster */
+    d_rrect(&d, LK_GRAB_X, 41, 47, 2.5f, 1.25f, W(.55f));
     trim(&lstatus);
     nc_sb_stale();                               /* helper D: the Notification Centre's status bar too */
 }
@@ -507,8 +518,10 @@ static void build_lclock(void)
     date[n++] = ' ';
     for (const char *p = MO[(ST.mon + 11) % 12]; *p;) date[n++] = *p++;
     date[n] = 0;
-    float w = tw(TK_IT600, 22, date, 0, 0);
-    d_text(&d, TK_IT600, 22, (390 - w) / 2, 82 + 22 * INTER_CAP / 2, date, 0, 0, W(.9f), 1);
+    /* 8a (top ten #1, design-ref gaps-c #4): the date a weight lighter (iOS's reads semibold in SF; Inter 600 reads
+     * bold), the clock solid white (no blue gradient), Inter 500, digits ~83 pt tall (110 pt type) */
+    float w = tw(TK_IT500, 22, date, 0, 0);
+    d_text(&d, TK_IT500, 22, (390 - w) / 2, 82 + 22 * INTER_CAP / 2, date, 0, 0, W(.9f), 1);
     char hm[8];
     fmt_hm(hm);
     /* P3j (audit 3): hours, colon and minutes as three runs: proportional figures at -1 pt (the -4 pt tabular
@@ -516,14 +529,14 @@ static void build_lclock(void)
      * middle (Inter's sits at x-height) with even room each side, the whole centred */
     int hn = hm[1] == ':' ? 1 : 2;               /* Track A: "9:41" in 12-hour time */
     char hh[3] = { hm[0], hn == 2 ? hm[1] : 0, 0 }, mm[3] = { hm[hn + 1], hm[hn + 2], 0 };
-    const float cs = 116, ctop = 108;
-    float wh = tw(TK_IT600, cs, hh, -1, 0), wc = tw(TK_IT600, cs, ":", 0, 0), wm = tw(TK_IT600, cs, mm, -1, 0), gap = 2;
+    const float cs = 110, ctop = 110;
+    const int cf = TK_IT500;
+    float wh = tw(cf, cs, hh, -1, 0), wc = tw(cf, cs, ":", 0, 0), wm = tw(cf, cs, mm, -1, 0), gap = 2;
     float x0 = (390 - (wh + gap + wc + gap + wm)) / 2, base = ctop + cs * INTER_CAP;
-    tk_stop s[2] = { { 0, tk_hex(0xffffff, 1) }, { 1, tk_hex(0xdfe9ff, 1) } };
-    tk_paint p = tk_linear(180, -d.ox, PT(ctop) - d.oy, PT(390), PT(cs * INTER_CAP), 2, s);
-    tk_text(d.b, TK_IT600, PT(cs), PT(x0) - d.ox, PT(base) - d.oy, hh, PT(-1), 0, &p, 0);
-    tk_text(d.b, TK_IT600, PT(cs), PT(x0 + wh + gap) - d.ox, PT(base - cs * .0906f) - d.oy, ":", 0, 0, &p, 0);
-    tk_text(d.b, TK_IT600, PT(cs), PT(x0 + wh + gap + wc + gap) - d.ox, PT(base) - d.oy, mm, PT(-1), 0, &p, 0);
+    tk_paint p = tk_solid(tk_hex(0xffffff, 1));
+    tk_text(d.b, cf, PT(cs), PT(x0) - d.ox, PT(base) - d.oy, hh, PT(-1), 0, &p, 0);
+    tk_text(d.b, cf, PT(cs), PT(x0 + wh + gap) - d.ox, PT(base - cs * .0906f) - d.oy, ":", 0, 0, &p, 0);
+    tk_text(d.b, cf, PT(cs), PT(x0 + wh + gap + wc + gap) - d.ox, PT(base) - d.oy, mm, PT(-1), 0, &p, 0);
     trim(&lclock);
     nc_clock_stale();                            /* helper D: the Notification Centre shows it (a view: again now) */
 }
@@ -558,11 +571,11 @@ static void lw_draw(dc *d, int emg, int part)
         }
         return;
     }
-    if (part <= 0) ring_widget(d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), C_GREEN, num, "BATTERY");
+    if (part <= 0) ring_widget(d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), C_GREEN, num, "home-batt");
     if (part < 0 || part == 1) {
         int n = put_dec(num, ST.temp);
         num[n] = (char)0xc2; num[n + 1] = (char)0xb0; num[n + 2] = 0;
-        ring_widget(d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), C_ACCENT, num, "TEMP");
+        ring_widget(d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), C_ACCENT, num, "thermometer");
     }
     if (part < 0 || part == 2) {
         char at[16] = "Off";                       /* P2y: the kernel's next alarm (sh_alarm), not the concept's */
@@ -582,10 +595,10 @@ static void build_lwidgets(void)
 
 static void build_marks(void)
 {
+    /* 8a (top ten #1): no "starbite" wordmark above the date (iOS shows nothing there; About keeps the name): the
+     * layer stays, empty, so its fades need no special case */
     dc d = mk(&mark, "mark", 150, 45, 90, 30, 4, 0);
-    float w = tw(TK_OF300, 16, "starbite", -.15f, 0), x0 = (390 - (w + 1 + 9)) / 2;
-    d_text(&d, TK_OF300, 16, x0, 66, "starbite", -.15f, 0, W(.82f), 1);
-    d_icon(&d, "mark-star", x0 + w + 1, 51, 1);
+    float w;
     d = mk(&glyph_c, "glyph", 187.5f, 50, 15, 20, 2, 0);
     d_icon(&d, "lock-c", 187.5f, 50, 1);
     d = mk(&glyph_o, "glyph-open", 187.5f, 50, 15, 20, 2, 0);
@@ -716,11 +729,14 @@ static int vc_any_open(void) { for (int g = 0; g < NG; g++) if (V[g].isopen) ret
 /* the list's bottom (screen pt): above the notifications' stack while it shows, else (or while a card is open) above
  * the buttons, as B4's list */
 static float lkn_stack_top(void);       /* shell_lknote.inc: the stack's top (0: no notifications) */
+static int sysp_on(void);               /* 8a: the Systems card (below) */
+static float sysx;
 static float list_bot(void)
 {
     float lb = LIST_TOP + LIST_H, st = EMG ? 0 : lkn_stack_top();
     if (st <= 0) return lb;
     float a = tk_clampf(1 - vc_open_q() * 3, 0, 1);       /* (the notifications' fade: lkn_place) */
+    if (sysp_on()) a *= 1 - sysx;                          /* 8a: the expanded Systems take the room to the buttons */
     return lb + (tk_minf(lb, st - 10) - lb) * a;
 }
 static float list_h(void) { return list_bot() - LIST_TOP; }
@@ -1040,6 +1056,69 @@ static void build_empill(void)
 
 /* place every list layer for the current scroll, heights and row animations (and the notifications, which make
  * room for an open card) */
+/* 8a (top ten #1; the user's decision 2026-11-13: option a, the systems as one notification card that expands in place
+ * like an iOS grouped stack; pref lock.systems = 0 brings back the four cards): ONE glass card styled as a notification
+ * at the stack's bottom place (on y 677, as iOS's notifications), the four vendors' logos, "Systems", how many; the
+ * lock's notifications stack above it. A tap expands it in place: today's cards rise out of it into the list (the FAN
+ * spring; the card fades, the notifications give way as for an open card); a tap on the clock, the widgets or bare
+ * wallpaper, the next lock or Emergency's exit folds them. */
+static void d_icon_s(dc *d, const char *name, float x, float y, float s);
+#define SYSP_H 64.0f
+#define SYSP_Y (LKN_BOT0 - SYSP_H)
+static int sysp_mode = -1;               /* the pref, read at the lock's build (-1 not yet) */
+static float sysx = 1;                   /* 0 folded (the platter), 1 the cards out */
+static tk_spring sp_sysx;
+static tk_layer sysplat;
+static int sysp_on(void)
+{
+    if (sysp_mode < 0) { sysp_mode = sh_pref_int("lock.systems", 1) == 1; sysx = sysp_mode ? 0 : 1; }
+    return sysp_mode;
+}
+static int sysp_hit(float x, float y) { return sysp_on() && !EMG && sysx < .5f && x >= PL_X && x < PL_X + PL_W && y >= SYSP_Y && y < SYSP_Y + SYSP_H; }
+static void sysp_build(void)
+{
+    relayer(&sysplat);
+    tk_layer_init(&sysplat, "lock-systems");
+    sysplat.hidden = 1;
+    if (!sysp_on()) return;
+    dc d = mk(&sysplat, "lock-systems", PL_X, SYSP_Y, PL_W, SYSP_H, 18, 1);   /* (18: its shadow; 44 cost 2 MB more) */
+    if (!d.b->px) return;
+    d_glass(&d, PL_X, SYSP_Y, PL_W, SYSP_H, PL_R, 1, 1);
+    int n = 0, total = 0;
+    for (int g = 0; g < NG; g++) {
+        total += G[g].n;
+        if (n >= 4 || !tk_strcmp(G[g].key, "starbite")) continue;
+        char tn[40] = "t46-";
+        tk_memcpy(tn + 4, G[g].key, tk_strlen(G[g].key) + 1);
+        d_icon_s(&d, tn, PL_X + 14 + 38 * n, SYSP_Y + (SYSP_H - 33) / 2, 33.0f / 46);
+        n++;
+    }
+    float tx = PL_X + 14 + 38 * n + 8;
+    d_text(&d, TK_IT600, 17, tx, SYSP_Y + 28, "Systems", 0, 0, INK, 0);
+    char sub[40];
+    int k = put_dec(sub, total);
+    for (const char *p = " systems on this phone"; *p;) sub[k++] = *p++;
+    sub[k] = 0;
+    d_text_box(&d, TK_IT400, 13, tx, SYSP_Y + 47, PL_X + PL_W - 32 - tx, 0, sub, 0, 0, W(.6f), 0);
+    d_icon(&d, "chev", PL_X + PL_W - 26, SYSP_Y + SYSP_H / 2 - 6.5f, .35f);
+    trim(&sysplat);
+}
+static float lkn_bot(void) { return sysp_on() && !EMG ? SYSP_Y - 10 : LKN_BOT0; }
+static void place_list(void);
+static void sysp_fold(int open, int instant)
+{
+    if (!sysp_on()) return;
+    if (instant) { sp_sysx.live = 0; sysx = (float)open; place_list(); return; }
+    tk_spring_start(&sp_sysx, sysx, (float)open, 0, TK_SPR_FAN);
+}
+static int sysp_tick(float dt)
+{
+    if (!sp_sysx.live) return 0;
+    tk_spring_step(&sp_sysx, dt);
+    sysx = tk_clampf(sp_sysx.x, 0, 1);
+    place_list();
+    return 1;
+}
 static void place_list(void)
 {
     float y = 10;
@@ -1125,6 +1204,16 @@ static void place_list(void)
     list.clip_r = (tk_rect){ 0, PT(LIST_TOP), PT(390), PT(lh) };
     /* B10: the notifications fanned out over the list: it gives way (and takes no touches, sh_touch) */
     list.alpha = EMG ? 1 : 1 - tk_clampf(lkn_p() * 1.6f, 0, 1);
+    if (!EMG && sysp_on()) {                      /* 8a: the card, or the cards risen out of it */
+        list.alpha *= sysx;
+        list.y += PT(60 * (1 - sysx));
+        sysplat.alpha = (1 - tk_clampf(sysx * 1.6f, 0, 1)) * (1 - tk_clampf(lkn_p() * 1.6f, 0, 1));
+        float s = .96f + .04f * (1 - sysx);
+        sysplat.ox = PT(195); sysplat.oy = PT(SYSP_Y + SYSP_H / 2);
+        sysplat.sx = sysplat.sy = s;
+        sysplat.hidden = !sysplat.bmp.px || sysplat.alpha <= .004f;
+    } else
+        sysplat.hidden = 1;
     list.hidden = list.alpha <= .004f;
     lkn_place();
     lock_ver++;
@@ -1167,7 +1256,7 @@ static float card_top(int g)
     return yy + SL_BAND * stack_q(g);
 }
 /* B10: a touch on the list (not past its bottom, nor while the notifications are fanned out over it) */
-static int in_list(float y) { return !EMG && lkn_p() <= 0 && y >= LIST_TOP && y <= list_bot(); }
+static int in_list(float y) { return !EMG && lkn_p() <= 0 && (!sysp_on() || sysx > .5f) && y >= LIST_TOP && y <= list_bot(); }
 static int hit_head(float x, float y)
 {
     if (!in_list(y) || !V[0].head.bmp.px) return -1;
@@ -1894,7 +1983,7 @@ static tk_layer ccl, ccscrim, ccsb, ccg, ccgrid, cclvl[2], ccic[2], cclit;   /* 
 static tk_layer ccem;                   /* B6: Emergency's red tile (Emergency mode switches it: no grid rebuild) */
 static tk_layer ccblur1;            /* P3p (P3j-20): a lighter blur (8 pt, quarter resolution) for the first part of the pull */
 static void cc_status_stale(void) { relayer(&ccsb); cc_stale = 1; }
-static struct { int on, built, closing, wifi, cell, bt, air, rot, save; float p, lvl[2]; } CCS = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, { .62f, .4f } };   /* P2y: Wi-Fi and rotation lock off (neither is real) */
+static struct { int on, built, closing, wifi, cell, bt, air, rot, save; float p, lvl[2]; int sil; } CCS = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, { .62f, .4f }, 0 };   /* P2y: Wi-Fi and rotation lock off (neither is real) */
 static void cc_levels(void);
 static int cc_bright;           /* the panel's brightness level the slider last sent (1..4; 0: none yet) */
 /* cp7w: sound (Track A's sh_snd_*, the drivers track's snd.c): the repeating tone the shell started (1 a call's ring,
@@ -1902,7 +1991,14 @@ static int cc_bright;           /* the panel's brightness level the slider last 
 static int snd_ring_who;
 static void snd_ring(int who, int kind) { if (sh_snd_tone(kind) == 0) snd_ring_who = who; }
 static void snd_ring_stop(int who) { if (snd_ring_who == who) { sh_snd_tone_stop(); snd_ring_who = 0; } }
-static void snd_once(int kind) { if (!snd_ring_who) (void)sh_snd_tone(kind); }
+/* 8a (top ten #8): Silent Mode (pref snd.silent; the Control Centre's bell, Settings > Sounds & Haptics), iOS's: the
+ * one-shot sounds stay quiet (clicks, the lock, notifications, the shutter, the charging chime) and an incoming call
+ * only vibrates (the modem buzzes by itself; shell_comms.inc's cv_ring_sync); alarms and timers still ring (snd_ring);
+ * Emergency is quiet anyway */
+static int snd_silent(void) { return sh_pref_int("snd.silent", 0) != 0; }
+static void cc_silent_changed(void);
+static void snd_silent_set(int on) { sh_pref_set_int("snd.silent", !!on); if (on) snd_ring_stop(1); cc_silent_changed(); }   /* a ringing call goes quiet */
+static void snd_once(int kind) { if (!snd_ring_who && !EMG && !snd_silent()) (void)sh_snd_tone(kind); }   /* gap list B: Emergency is quiet */
 /* cp7x (Track A): the kernel's alarm (alarm.c rings and stops it): owner 4; it takes over any other ring */
 void sh_alarm_sound(int on) { if (on) snd_ring(4, SH_SND_ALARM); else snd_ring_stop(4); }
 static int cc_vol = -1;         /* the volume (0..15) the Control Centre's slider last sent */
@@ -1994,6 +2090,20 @@ static void cc_tile(dc *d, float x, float y, float w, float h, float r, int on)
     if (!C || !C->gpu) tk_glass_from_half(d->b, (int)d->ox, (int)d->oy, &ccscrim.bmp, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r));
     d_glass(d, x, y, w, h, r, 0, 1);
     if (on) d_rrect(d, x, y, w, h, r, W(1));
+}
+/* 8a: the Silent Mode tile's bell (drawn: no icon in the pack), with a slash while silent (iOS's red bell.slash on the
+ * lit tile) */
+static void cc_bell(dc *d, float cx, float cy, int on)
+{
+    tk_col c = on ? tk_hex(0xff3b30, 1) : W(1);
+    d_rrect(d, cx - 7, cy - 9, 14, 15, 7, c);
+    d_rrect(d, cx - 7, cy - 3, 14, 8, 1.5f, c);
+    d_rrect(d, cx - 9.5f, cy + 4, 19, 2.6f, 1.3f, c);
+    d_rrect(d, cx - 2.2f, cy + 7.2f, 4.4f, 3.6f, 1.8f, c);
+    if (on) {
+        d_seg(d, cx - 10, cy - 11, cx + 10, cy + 9, 5, W(1));
+        d_seg(d, cx - 10, cy - 11, cx + 10, cy + 9, 2.2f, c);
+    }
 }
 static void cc_glyph(dc *d, const char *name, float tx, float ty, float w, float h)
 {
@@ -2091,6 +2201,7 @@ static void cc_grid_part(int k)
     cc_unview();
     CCS.rot = sh_orientation_lock();             /* cp7: iOS's Portrait Orientation Lock, a real switch (off by default) */
     CCS.save = sh_low_power_on();                /* cp6: Track A's Low Power Mode lights its tile */
+    CCS.sil = snd_silent();                      /* 8a: Silent Mode lights its bell */
     relayer(&ccgrid);
     d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, 4 * CC_U + 3 * CC_GAP, 44, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
     ccg_d = d;
@@ -2125,7 +2236,7 @@ static void cc_grid_part(int k)
     cc_tile(&d, CC_COL(2), CC_ROW(0), CC_U, CC_W2, 34, 0);
     cc_tile(&d, CC_COL(3), CC_ROW(0), CC_U, CC_W2, 34, 0);
     } else if (k == 6) {
-    /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Mirror, Camera */
+    /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Silent (8a), Camera */
     /* P3i: the torch's tile baked off; its lit look is a small layer over it, so the tap shows it at once (the
      * whole grid's rebuild took ~300 ms at the tap) */
     cc_tile(&d, CCX[0], CC_R3, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-light", CCX[0], CC_R3, 16, 24);
@@ -2157,7 +2268,8 @@ static void cc_grid_part(int k)
     /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place); P3p: baked ones */
     cc_tile(&d, CCX[1], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-calc", CCX[1], CC_R4, 24, 24);
     } else {
-    cc_tile(&d, CCX[2], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-wifi2", CCX[2], CC_R4, 22, 22);
+    /* 8a (top ten #8): Silent Mode where the Mirror tile was (it opened the Camera, as the tile beside it) */
+    cc_tile(&d, CCX[2], CC_R4, CC_U, CC_U, 34, CCS.sil); cc_bell(&d, CCX[2] + CC_U / 2, CC_R4 + CC_U / 2, CCS.sil);
     cc_tile(&d, CCX[3], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-camera", CCX[3], CC_R4, 24, 24);
     tk_a8_free(&ccgrid.glass);
     trim(&ccgrid);
@@ -2323,6 +2435,13 @@ static int build_cc_step(void)
 static void cc_x_reset(void);
 /* an open app needs the room (its page is a whole screen): the Control Centre's snapshot and grid go, home's idle
  * time builds them again */
+/* 8a: Silent Mode changed (the tile or Settings): a built grid shows it now */
+static void cc_silent_changed(void)
+{
+    if (!CCS.on && !CCS.built) return;
+    build_cc_grid();
+    cc_link();
+}
 static void free_cc(void)
 {
     if (CCS.on) return;
@@ -2707,6 +2826,13 @@ static int cc_tap(float x, float y)
          * on the lock screen they ask for the unlock first (no app over the lock without it) */
         static const char *const K4[4] = { "clock", "calc", "camera", "camera" };
         int c = x < CCX[1] - CC_GAP / 2 ? 0 : x < CCX[2] - CC_GAP / 2 ? 1 : x < CCX[3] - CC_GAP / 2 ? 2 : 3;
+        if (c == 2) {                        /* 8a: Silent Mode (works on the lock too, as iOS's) */
+            int on = !snd_silent();
+            sh_haptic_k(SH_HAP_LIGHT);
+            snd_silent_set(on);
+            toast(on ? "Silent Mode On" : "Silent Mode Off");
+            return 1;
+        }
         if (lockY > -H_PT * .5f) { toast("Unlock to open it"); return 1; }
         sh_haptic_k(SH_HAP_LIGHT);
         cc_close();
@@ -3700,6 +3826,9 @@ void sh_alarm(int on, int h, int m)
 }
 void sh_sysinfo(int charging, const char *version)
 {
+    static int seen;                               /* 8a: the chime only for a change, never the boot's first report */
+    if (seen && charging && !sys_charging) snd_once(SH_SND_CHARGE);
+    seen = 1;
     if (!!charging != sys_charging) { sys_charging = !!charging; build_lstatus(); build_home_sb(); build_home_w(); if (AP.on) build_apsb(); relink(); lock_ver++; prep_tree(home.child); }
     SYS.charging = charging;
     int n = 0;
@@ -4360,7 +4489,7 @@ static void em_step(float e)
         em_e = e;
     star.alpha = EMG ? 1 - e : e;
     star_e.alpha = EMG ? e : 1 - e;
-    star.hidden = star.alpha <= 0;
+    star.hidden = star.alpha <= 0 || !star.bmp.px;
     star_e.hidden = star_e.alpha <= 0;
     if (e >= 1) { emf_drop(); tk_bmp_free(&em_wall); tk_bmp_free(&em_bw); }
 }
@@ -4441,7 +4570,7 @@ static int ep_ground_step(int big_ok)
     if (!EP.qd) {
         /* the star into the wallpaper (what is under it kept), the quarter from both, the wallpaper as it was */
         if (!tk_bmp_new(&EP.q, EP.wall.w / 2, EP.wall.h / 2)) { ep_noroom(); return 1; }
-        const tk_bmp *st = tk_icon(on ? "star-e" : "star");
+        const tk_bmp *st = on ? tk_icon("star-e") : 0;       /* 8a: no star on the default wallpaper */
         tk_bmp sh = { 0, 0, 0, 0 }, keep = { 0, 0, 0, 0 };
         int sx = (int)(on ? star_e.x : star.x) / 2, sy = (int)star.y / 2;
         if (st && tk_bmp_new(&sh, (st->w + 1) / 2, (st->h + 1) / 2) && tk_bmp_new(&keep, sh.w, sh.h)) {
@@ -4878,6 +5007,8 @@ void sh_restore(void)
     nc_restore();
     cm_rec_restore();
     sw_restore();
+    sysp_mode = -1;                                  /* 8a: the Systems platter's pref as kept (read again now) */
+    if (sysp_on()) { sysp_build(); place_list(); relink(); }
     if (sh_pref_int("cc.wifi", 0) == 1 && !sh_safe_mode()) (void)sh_wifi_power(1);   /* a refusal leaves it off; the choice stays; not in a safe start (Track A) */
 }
 #include "shell_island.inc"                         /* B7: the status capsule, the live pill (toasts) */
@@ -5021,9 +5152,10 @@ static void relink(void)
     link(&appc, st, na + cm_layers(st + na));    /* helper I: the keypad's line and ring, Messages' fields */
     /* B9: the notifications' stack is the lock's (lkng, over the list: fanned out it takes the list's room); the
      * Centre's "N Notifications" pill only in Emergency */
-    tk_layer *lk[] = { &lkground, &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
+    tk_layer *lk[] = { &lkground, &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &sysplat, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
     if (!lkground.name) { tk_layer_init(&lkground, "lock-ground"); lkground.hidden = 1; }   /* cp7q: the moving lock's ground */
-    link(&lockg, lk, EMG ? 14 : 13);
+    if (!sysplat.name) { tk_layer_init(&sysplat, "lock-systems"); sysplat.hidden = 1; }   /* 8a */
+    link(&lockg, lk, EMG ? 15 : 14);
     lkn_link();
     /* B10: the vendor cards in the list as B4 had them: the lower cards, the members' platters and words under the
      * head card, "Show less" above it, the chevron on top */
@@ -5151,7 +5283,7 @@ int sh_init_step(void)
         break;
     case 2: build_platter(); lap("bake: the platter glass"); break;
     case 3: case 4: case 5: case 6: build_vcard(init_step - 4); lap("bake: a card's words"); break;   /* B10 */
-    case 7: build_vcard(4); build_etool(); build_hold(0); build_hold(1); build_empill(); lap("bake: tools and holds"); break;
+    case 7: build_vcard(4); build_etool(); build_hold(0); build_hold(1); build_empill(); sysp_build(); place_list(); lap("bake: tools and holds"); break;
     case 8: build_home(); back_bake(); lap("bake: home"); break;
     case 9: {
         /* the flattened lock is only ever seen moving (half-resolution frames): kept at half resolution, drawn 2x */
@@ -5201,6 +5333,7 @@ static void back_to_lock(int exit_em)
     ico_free(); hl_kill();                         /* P3p; cp6: every press out at once */
     vc_close_all(1);
     lkn_collapse(1);
+    sysp_fold(0, 1);                               /* 8a: the next lock shows the platter again */
     scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
     sp_lock.live = 0; lk_hint = 0;
     sp_page.live = 0; page_dragging = 0;
@@ -5363,7 +5496,7 @@ static int em_target(float x, float y, emt *o)
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
 enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL,
-       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX, G_NC, G_SW, G_KB, G_CCX, G_SET, G_LKN };   /* B3: G_KB the keyboard's (shell_kb.inc); B4: G_CCX the Control Centre's expanded module; helper B2: G_SET Settings' own pages; B9: G_LKN the lock's notifications (shell_lknote.inc) */   /* helper D: G_NC shell_nc.inc's (the Centre, the banner, the
+       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX, G_NC, G_SW, G_KB, G_CCX, G_SET, G_LKN, G_SYSP };   /* B3: G_KB the keyboard's (shell_kb.inc); B4: G_CCX the Control Centre's expanded module; helper B2: G_SET Settings' own pages; B9: G_LKN the lock's notifications (shell_lknote.inc) */   /* helper D: G_NC shell_nc.inc's (the Centre, the banner, the
                                                      * lock's pill), G_SW shell_switcher.inc's (the cards) */
 static struct {
     int kind, arg, arg2, moved;
@@ -5703,7 +5836,7 @@ static int notes_hold(float t)
     note_del = NS.n - 1 - (int)((y - CONTENT_TOP) / NOTE_RH);
     T.kind = G_NONE;
     hl_off();
-    sh_haptic();                                   /* iOS: a medium tap at a long press */
+    sh_haptic_k(SH_HAP_MEDIUM);                    /* iOS: a medium tap at a long press (was the light key tap) */
     static char msg[200];
     char nt[136];
     note_title(NOTES[note_del], nt);
@@ -5800,6 +5933,14 @@ static void sh_touch_(int phase, float x, float y, float t)
         tp_mark("touch down: switcher");
         if (sw_down(x, y, t)) { T.kind = G_SW; return; }    /* helper D: the app switcher */
         tp_mark("touch down: home / lock");
+        if (AP.on && AP.closing && sp_app.live) {
+            /* 8b (top ten #7, gap list B2): a touch while an app shrinks home is home's, as on iOS: the close ends at
+             * once (the window is nearly at its icon) and the touch goes on to home's pages, icons and dock, so the
+             * next app opens without waiting for the spring */
+            sp_app.live = 0;
+            app_finish_close();
+            lock_ver++;
+        }
         if (AP.on) {
             /* an open app (survival-next: also over the lock, from Emergency's cards): the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
             tp_mark("touch down: app, nc");
@@ -5936,6 +6077,13 @@ static void sh_touch_(int phase, float x, float y, float t)
         if (y >= H_PT - 30) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0; }
         /* B10: the notifications fanned out are over the list: theirs first (a tap beside them folds them back) */
         else if (lkn_p() > 0 && lkn_down(x, y, t)) { T.kind = G_LKN; return; }
+        else if (sysp_hit(x, y)) {                   /* 8a: the Systems platter: lit, a tap fans the cards out */
+            T.kind = G_SYSP;
+            tk_rect c = { PL_X, SYSP_Y, PL_W, SYSP_H };
+            hl_set(&lockhl, c, c, PL_R, W(.12f));
+            lk_hl_key = 0;
+            lock_ver++;
+        }
         else if ((r = hit_row(x, y, &gi)) >= 0) {
             T.kind = G_TAP_ROW; T.arg = gi; T.arg2 = r;
             /* P3p: the row lights across its card (clipped to the card's rounded face) */
@@ -6029,6 +6177,10 @@ static void sh_touch_(int phase, float x, float y, float t)
             break;
         case G_DOCK:
             if (T.moved) press_cancel();
+            break;
+        case G_SYSP:                              /* 8a: a drag from the platter is the lock's swipe */
+            if (T.moved) { hl_off(); T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0; }
+            tk_tracker_add(&T.tr, y, t);
             break;
         case G_TAP_HEAD: case G_TAP_ROW: case G_ETAP:
             if (T.moved) hl_off();
@@ -6192,6 +6344,11 @@ static void sh_touch_(int phase, float x, float y, float t)
     case G_TAP_HEAD:
         toggle_group(T.arg, 0);
         break;
+    case G_SYSP:
+        hl_off();
+        sh_haptic_k(SH_HAP_LIGHT);
+        sysp_fold(1, 0);
+        break;
     case G_TAP_ROW: {
         const sys_t *s = &G[T.arg].it[T.arg2];
         if (s->self) { toast("You are in Starbite OS"); break; }
@@ -6269,6 +6426,7 @@ static void sh_touch_(int phase, float x, float y, float t)
         break;
     }
     case G_LOCK:
+        if (!T.moved && sysp_on() && !EMG && sysx > .5f && y > 60 && (y < LIST_TOP || y > list_bot()) && y < H_PT - 120) { sysp_fold(0, 0); break; }   /* 8a: a tap beside the cards (the clock, the widgets, bare wallpaper) folds them */
         if (!T.moved) {
             hint_left = 2200;
             tk_spring_start(&sp_lock, 0, 0, -700, TK_SPR_UNLOCK);
@@ -6290,10 +6448,12 @@ static void sh_touch_(int phase, float x, float y, float t)
 /* ---- time ------------------------------------------------------------------------------------------------- */
 /* the Power key (or the screen-off timer): the fade to black; again during it: back (now: black at once, the
  * screen already off) */
+static int se_lock_snd(void);
 void sh_sleep(int now)
 {
     T.kind = G_NONE;
-    pw_reset();                                    /* P3x: the Power key (or the screen's timer) cancels the power sheet */
+    pw_reset();
+    if (!SL.black && SL.dir >= 0 && se_lock_snd()) snd_once(SH_SND_LOCK);   /* 8a: iOS's Lock Sound (Settings) */                                    /* P3x: the Power key (or the screen's timer) cancels the power sheet */
     if (now) {
         if (SL.black && !SL.dir) return;   /* dark already (the fade ended) */
         SL.dir = 0;
@@ -6350,6 +6510,7 @@ int sh_tick(float dt, float t)
     now_ms = t;
     clk_update(t);
     if (ap_pending) { app_build_step(); mv = 1; if (!ap_pending && AP.on) set_app_rect(AP.R); }   /* P3i */
+    mv |= sysp_tick(dt);                          /* 8a: the Systems platter folding / fanning */
     if (SL.dir) {
         SL.t = tk_minf(1, SL.t + dt / (SL.dir < 0 ? SL_OUT : SL_IN));
         if (SL.t >= 1) {
@@ -6745,7 +6906,7 @@ int sh_moving(void)
             T.kind == G_RELOCK || T.kind == G_PAGE || sp_page.live || T.kind == G_CC || T.kind == G_CCSL || sp_cc.live ||
             T.kind == G_APP || sp_app.live || booting || isl_moving() || em_t < 1 || T.kind == G_CCEM ||
             T.kind == G_CCCELL || CF.down || CF.a != CF.at || pw_moving() || SL.dir || T.kind == G_CCDRAG || T.kind == G_FOCUSDRAG || sv_moving() ||
-            T.kind == G_CCX || (T.kind == G_CCTAP && CCS.on) || cc_moving();
+            T.kind == G_CCX || (T.kind == G_CCTAP && CCS.on) || cc_moving() || sp_sysx.live;
     for (int g = 0; g < NG; g++) m |= V[g].sp.live || V[g].chev_t < 1;   /* B10 */
     m |= lkn_moving();                           /* B9 */
     m |= sp_focus.live || sp_thumb.live || med_moving() || lx_moving();

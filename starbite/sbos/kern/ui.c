@@ -2483,6 +2483,7 @@ void kui_guest_open(int mode)
     guest_view_sync();
 }
 
+void (*kui_finger_hook)(int type, int id, int x, int y);   /* 8a (Track A): Next's multi-touch (sh_touch_finger) */
 int (*kui_power_hook)(void);                /* Track A, 1.0: Next's own power sheet (sh_power_held); 1 = handled */
 void kui_power_menu(void)
 {

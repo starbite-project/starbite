@@ -91,6 +91,7 @@ void settings_restore(void)
         half[0] = sb_alloc(STATE_HALF);
         half[1] = sb_alloc(STATE_HALF);
         prefs_init(sb_alloc(PREFS_MEM));    /* Track A: the prefs and blobs work in RAM also without a slot */
+        docs_init(sb_alloc(DOCS_MEM));      /* 8a: Notes' and Contacts' documents, the same */
     }
     if (!half[0] || !half[1] || !hw_slot_read(half[0], half[1])) {
         sb_log("settings: no state slot yet: defaults, kept until a restart");
@@ -105,6 +106,8 @@ void settings_restore(void)
     (void)state_valid(half[cur_half], &seq);
     {
         /* Track A: the prefs and blobs (prefs.c), before the shell asks for them (its bake runs after this) */
+        if (docs_restore(half[cur_half]) < 0)   /* 8a */
+            sb_log("settings: some documents were not taken (broken, or over a budget)");
         int r = prefs_restore(half[cur_half]), nk = 0, nb = 0;
         uint32_t kb = 0, bb = 0;
         prefs_counts(&nk, &kb, &nb, &bb);
@@ -184,8 +187,9 @@ void settings_restore(void)
         if (state_find(half[cur_half], "sbos.surv", &q) == 16 && q)
             surv_unpack(q);
         q = 0;                              /* Track A: Next's alarm list and labels */
-        if (state_find(half[cur_half], "sbos.alarm", &q) == ALARM_REC_SIZE && q)
-            alarm_unpack(q);
+        int alen = state_find(half[cur_half], "sbos.alarm", &q);
+        if ((alen == (int)ALARM_REC_SIZE || alen == (int)ALARM_REC_SIZE_V1) && q)
+            alarm_unpack(q, (unsigned)alen);      /* 8a: 32 slots; a four-slot record from before still read */
     }
     {
         /* Track A: the passcode's record (salt, hash, wrong tries, the lock-out left; never the digits) */
@@ -419,6 +423,8 @@ void settings_timer(unsigned id)
     }
     if (prefs_save(&b) < 0)                 /* Track A: the prefs and blobs (all prefs or none, each blob whole) */
         sb_log("settings: some prefs or blobs did not fit (the slot's half is full)");
+    if (docs_save(&b) < 0)                  /* 8a: Notes' and Contacts' documents (each whole) */
+        sb_log("settings: some documents did not fit (the slot's half is full)");
     kmodem_sms_save(&b);                    /* Track G: the messages ("sms.NN", last: they take what is left) */
     uint32_t n = state_finish(&b);
     int w = hw_slot_write(to, half[to], n);

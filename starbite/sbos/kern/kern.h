@@ -340,6 +340,25 @@ void prefs_counts(int *keys, uint32_t *bytes, int *blobs, uint32_t *blob_bytes);
 int prefs_save(struct state_buf *b);
 int prefs_restore(const uint8_t *half);
 
+/* ---- documents (docs.c, pure; Track A, 8a): Notes' and Contacts' stores, kept in the state slot -------------- */
+#define DOC_COLLS 2
+enum { DOC_NOTES = 0, DOC_CONTACTS = 1 };
+#define DOC_MAX (32U << 10)                 /* one document */
+#define DOC_BUDGET_NOTES (96U << 10)
+#define DOC_BUDGET_CONTACTS (64U << 10)
+#define DOC_ENTRIES 768                      /* documents in all */
+#define DOCS_MEM (DOC_BUDGET_NOTES + DOC_BUDGET_CONTACTS)
+void docs_init(void *mem);          /* DOCS_MEM bytes; until then every call refuses */
+void docs_reset(void);
+int docs_put(int c, uint32_t id, const void *p, uint32_t n);   /* 1 changed, 0 the same, -1 refused (full, too big); n 0 deletes */
+int docs_get(int c, uint32_t id, void *p, uint32_t cap);       /* the document's length (copied up to cap), -1 none */
+int docs_count(int c);
+uint32_t docs_id_at(int c, int k);  /* the k-th id in id order, 0 none */
+uint32_t docs_new_id(int c);        /* an unused id (the highest + 1) */
+void docs_usage(int c, uint32_t *used, uint32_t *budget);
+int docs_save(struct state_buf *b);  /* each document whole or not at all: 0, -1 something left out */
+int docs_restore(const uint8_t *half);   /* 0, -1 something was not taken */
+
 /* ---- the running kernel ------------------------------------------------------------------------ */
 struct kstate {
     int irq_mode;                   /* 1 interrupts work, 0 polling */
@@ -438,13 +457,15 @@ void alarm_timer(void);
 int alarm_stop(int snooze);
 void alarm_sound(int on);                     /* cp7x: the alarm's sound (weak no-op; the Next shell plays it) */
 /* Track A (2026-11-12): Next's Alarm tab (the list of up to four, labels), kept in the record "sbos.alarm" */
-#define ALARM_REC_SIZE (4 + 4 * 28)
+#define ALARM_SLOTS 32               /* 8a (Track A; iOS has no small limit): was 4 */
+#define ALARM_REC_SIZE (4 + ALARM_SLOTS * 28)
+#define ALARM_REC_SIZE_V1 (4 + 4 * 28)   /* a record from before 8a (four slots): still read */
 int alarm_count(void);
 int alarm_get(int i, int *hm, int *days, int *on, char *label, int cap);
 int alarm_put(int i, int hm, int days, int on, const char *label);   /* i == alarm_count(): add */
 int alarm_del(int i);
 int alarm_pack(uint8_t out[ALARM_REC_SIZE]);        /* 1: the list is the kernel's (save it) */
-void alarm_unpack(const uint8_t in[ALARM_REC_SIZE]);
+void alarm_unpack(const uint8_t *in, unsigned len);   /* ALARM_REC_SIZE or ALARM_REC_SIZE_V1 */
 int alarm_app_state(uint8_t out[20]);               /* the classic Clock app's state as the list (0: none yet) */
 /* Track A: the time zone in use (tzdb.c's index) and 12 / 24-hour; services.c, saved by settings.c */
 int clock_zone(void);
@@ -564,6 +585,7 @@ extern int (*kui_confirm_hook)(const char *title, const char *l1, const char *l2
 void kui_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
                  void (*done)(int ok));
 void kui_power_menu(void);
+extern void (*kui_finger_hook)(int type, int id, int x, int y);   /* 8a: fingers 1.. (KIN_PRESS / MOVE / RELEASE, panel px) */
 extern int (*kui_power_hook)(void);     /* Track A, 1.0: a UI with its own power sheet (Next); 1 = handled */
 void kui_screen_changed(int on);
 /* P2r (Starbite OS Next): the UI's own screen off / on (no classic black frame) and the Power key's or the screen-off

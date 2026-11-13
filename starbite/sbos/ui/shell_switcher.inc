@@ -180,6 +180,10 @@ static __attribute__((unused)) void sw_ext_remove(int subid)
 }
 
 /* ---- the deck ------------------------------------------------------------------------------------------------ */
+/* 8b (top ten #9): iOS blurs home behind the cards (dim ~.30): swbg is a view of the wallpaper's blurred glass
+ * backdrop (C->bw_half, half resolution drawn 2x, as the Notification Centre's wallpaper view: nothing made, nothing
+ * freed), faded in with the switcher, under a .30 dim (was a .72 black over a sharp home) */
+static tk_layer swbg;
 static tk_layer swg, swdim, swcard[SW_MAX], swlab[SW_MAX], swname[SW_MAX], swshade[SW_MAX], swcover;
 static int sw_on(void) { return SW.on; }
 static float sw_max_scroll(void) { return swn > 1 ? (swn - 1) * SW_PITCH : 0; }
@@ -254,7 +258,9 @@ static void sw_card_view(int i)
 static void sw_place(void)
 {
     swg.hidden = !SW.on;
-    swdim.solid = tk_premul(TK_RGBA(0, 0, 0, .72f));
+    swbg.alpha = tk_clampf(SW.p, 0, 1);
+    swbg.hidden = !SW.on || !swbg.bmp.px || swbg.alpha <= 0;
+    swdim.solid = tk_premul(TK_RGBA(0, 0, 0, swbg.bmp.px ? .30f : .72f));
     swdim.solid_w = TK_W; swdim.solid_h = TK_H;
     swdim.alpha = tk_clampf(SW.p, 0, 1);
     float a = tk_clampf(SW.p, 0, 1);
@@ -312,6 +318,8 @@ static void sw_free(void)
         swshade[i].hidden = 1;
     }
     swg.hidden = 1;
+    swbg.bmp = (tk_bmp){ 0, 0, 0, 0 };            /* 8b: a view (the compositor's): never freed here */
+    swbg.hidden = 1;
 }
 static void sw_show(void)
 {
@@ -319,6 +327,10 @@ static void sw_show(void)
     sw_commit();
     tk_layer_init(&swg, "switcher");
     tk_layer_init(&swdim, "sw-dim");
+    tk_layer_init(&swbg, "sw-blur");
+    swbg.bmp = C->bw_half;
+    swbg.sx = swbg.sy = 2;
+    swbg.opaque = 1;
     for (int i = 0; i < SW_MAX; i++) {
         tk_layer_init(&swcard[i], "sw-card"); swcard[i].hidden = 1;
         tk_layer_init(&swshade[i], "sw-shade"); swshade[i].hidden = 1;
@@ -696,8 +708,10 @@ static void sw_link(void)
 {
     if (!swg.name) { tk_layer_init(&swg, "switcher"); swg.hidden = 1; }
     if (!swcover.name) { tk_layer_init(&swcover, "sw-cover"); swcover.hidden = 1; }
-    tk_layer *c[1 + 4 * SW_MAX];
+    tk_layer *c[2 + 4 * SW_MAX];
     int n = 0;
+    if (!swbg.name) { tk_layer_init(&swbg, "sw-blur"); swbg.hidden = 1; }
+    c[n++] = &swbg;
     c[n++] = &swdim;
     for (int i = SW_MAX - 1; i >= 0; i--) { c[n++] = &swcard[i]; c[n++] = &swshade[i]; c[n++] = &swlab[i]; c[n++] = &swname[i]; }   /* the older under the newer */
     if (SW.on) link(&swg, c, n);

@@ -668,6 +668,12 @@ extern void (*sb_before_reset)(void);
 /* ---- the Mali-G72 (mali.c, mali_desc.c) ------------------------------------------------------- */
 
 #define SB_GPU 0x17500000UL
+/* DRAM bank 2's high end (Track A, 2026-11-13): Linux's carve-out 0x8_8000_0000..0x8_DFFF_FFFF (1.5 GiB), its shared
+ * region 0x8_E000_0000..0x8_E3FF_FFFF (64 MiB), then RESERVED for the region's growth to 128 MiB (Track E's v4
+ * contract: Linux apps' surfaces at the panel's resolution) 0x8_E400_0000..0x8_E7FF_FFFF; nothing else may use it.
+ * 0x8_E800_0000..0x8_EFFF_FFFF is free. */
+#define SB_GUEST_SHM_HI 0x8e4000000ULL      /* the reserved 64 MiB (see above) */
+#define SB_GUEST_SHM_HI_SIZE 0x4000000ULL
 #define SB_GPU_MEM 0x8f0000000ULL           /* 32 MiB of DRAM bank 2: page tables + data */
 #define SB_GPU_MEM_SIZE (32ULL << 20)
 #define SB_GPU_DATA (SB_GPU_MEM + 0x10000ULL)

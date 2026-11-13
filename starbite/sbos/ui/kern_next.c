@@ -26,6 +26,7 @@
 #include "store.h"
 #include "../guide/sbguide.h"
 #include "tzdb.h"                       /* Track A: time zones (kern/tzdb.c) */
+#include "tzcities.h"                   /* 8a: World Clock's and Weather's cities (GeoNames) */
 #include "bt.h"                         /* Track A: drivers for the shell (the end of this file) */
 #include "cam.h"
 #include "snd.h"                         /* Track A, cp7: sound for the shell (the end of this file) */
@@ -45,6 +46,8 @@ static int drv_touch_dark(void);
 #define KT_DRV_PROX 33
 #define KT_DRV_SND 34                           /* cp7: sound's poll (5 ms while busy) */
 #define KT_DRV_JACK 35                          /* cp7: the headphone jack (50 ms while sound plays or the screen is on) */
+#define KT_DRV_PREWARM 36                       /* 8a: Linux prewarmed in the dark (Track E's guest_prewarm) */
+static void prewarm_arm(int screen_on);
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
 void tk_heap_init(void *mem, uint64_t size);
@@ -980,6 +983,7 @@ static void next_screen(int on)
             tk_comp_frame(&comp, 0, 0);
             present();
         }
+        prewarm_arm(0);                              /* 8a: Linux prewarmed after 15 s of dark (once a boot) */
         sh_idle();                                   /* P2v: the half canvas and the lock's caches now, in the dark
                                                       * (the wake's first frame spent 8 ms on them) */
 #ifndef SBOS_SELFTEST_NEXT
@@ -987,6 +991,7 @@ static void next_screen(int on)
 #endif
         return;
     }
+    prewarm_arm(1);
     status_now();
     sh_wake();
     if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 200, 0);   /* cp7: the idle work the dark left (after the wake's frames) */
@@ -1178,6 +1183,16 @@ static void next_gpu_clean(void *ctx, const void *p, uint64_t n)
 
 /* ---- the kernel's UI entry points in this image ------------------------------------------------------------- */
 static void next_save(void);                         /* Track A lifecycle (below) */
+/* 8a (Track A, multi-touch): fingers 1.. (finger 0 stays sh_touch's single touch). The shell defines sh_touch_finger
+ * when it has two-finger gestures (pinch); until then they are dropped. ph: 0 down, 1 move, 2 up, as sh_touch */
+__attribute__((weak)) void sh_touch_finger(int finger, int ph, float x, float y, float t_ms) { (void)finger; (void)ph; (void)x; (void)y; (void)t_ms; }
+static void next_finger(int type, int id, int x, int y)
+{
+    if (!ready) return;
+    int ph = type == KIN_PRESS ? 0 : type == KIN_MOVE ? 1 : 2;
+    sh_touch_finger(id, ph, x / TK_PT, y / TK_PT, (float)sb_ms());
+    start_ticking();
+}
 void next_kinit(void)
 {
     boot_t0 = sb_ms();
@@ -1198,6 +1213,7 @@ void next_kinit(void)
     }
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
     kui_power_hook = next_power_held;            /* Track A, 1.0: Power held: the shell's power sheet */
+    kui_finger_hook = next_finger;               /* 8a: fingers 1.. for the shell's pinch and other two-finger gestures */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
     kui_sleep_hook = next_sleep;
     kui_save_hook = next_save;                   /* Track A lifecycle: the pages' on_save before a restart / switch-off */
@@ -1414,7 +1430,7 @@ void next_ktimer(unsigned id)
         return;
     }
     if (ready && id == 26) { (void)kupdate_after_start(); return; }   /* Track A update: 10 s after the home screen */
-    if (id >= KT_DRV_BT && id <= KT_DRV_JACK) { drv_timer(id); return; }   /* Track A: drivers for the shell */
+    if (id >= KT_DRV_BT && id <= KT_DRV_PREWARM) { drv_timer(id); return; }   /* Track A: drivers for the shell */
     ui_ktimer(id);
 }
 
@@ -1424,6 +1440,11 @@ void next_kminute(void)
     if (!ready) { ui_kminute(); return; }
     status_now();
     lastos_now();                                    /* helper D: once */
+    if (!K.screen_on)                                /* 8a (the drivers' run 9: "timer 7/0" 496-1079 ms every minute
+                                                      * with the screen off at 455 MHz: a frame nobody sees and the
+                                                      * idle work rebuilding Control Centre's pictures): the time is
+                                                      * noted; the wake draws it and starts the idle work again */
+        return;
     if (!ticking) {
         tk_comp_frame(&comp, 0, 0);
         present();
@@ -1710,6 +1731,32 @@ int sh_blob_put(const char *name, const void *p, unsigned n)
     return r < 0 ? -1 : 0;
 #endif
 }
+/* 8a (Track A): Notes' and Contacts' documents (kern/docs.c), saved with the settings; the self test: dry runs */
+int sh_doc_put(int coll, unsigned id, const void *p, unsigned n)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)coll; (void)id; (void)p;
+    if (n > DOC_MAX) return -1;
+    prefs_dry();
+    return 0;
+#else
+    int r = docs_put(coll, id, p, n);
+    if (r > 0) settings_changed();
+    if (r < 0) sb_log("next: docs: a document was not kept (too big, or its collection is full)");
+    return r < 0 ? -1 : 0;
+#endif
+}
+int sh_doc_get(int coll, unsigned id, void *p, unsigned cap) { return docs_get(coll, id, p, cap); }
+int sh_doc_count(int coll) { return docs_count(coll); }
+unsigned sh_doc_id_at(int coll, int k) { return docs_id_at(coll, k); }
+unsigned sh_doc_new_id(int coll) { return docs_new_id(coll); }
+void sh_doc_usage(int coll, unsigned *used, unsigned *budget)
+{
+    uint32_t u = 0, b = 0;
+    docs_usage(coll, &u, &b);
+    if (used) *used = u;
+    if (budget) *budget = b;
+}
 int sh_blob_get(const char *name, void *p, unsigned cap)
 {
 #ifdef SBOS_SELFTEST_NEXT
@@ -1924,6 +1971,20 @@ static void ta_keep(const char *what)
     (void)what;
     settings_changed();
 #endif
+}
+/* 8a: the cities (kern/tzcities.c, GeoNames CC BY 4.0) */
+int sh_city_count(void) { return tzcities_n; }
+int sh_city_find(const char *query, int *out, int max) { return tzc_find(query, out, max); }
+int sh_city_get(int i, const char **name, const char **country, int *tz, int *lat_e4, int *lon_e4)
+{
+    if (i < 0 || i >= tzcities_n) return -1;
+    const struct tzcity *c = &tzcities[i];
+    if (name) *name = c->name;
+    if (country) *country = tzc_country[c->country];
+    if (tz) *tz = c->zone;
+    if (lat_e4) *lat_e4 = c->lat_e4;
+    if (lon_e4) *lon_e4 = c->lon_e4;
+    return 0;
 }
 int sh_tz_count(void) { return tzdb_n; }
 const char *sh_tz_name(int i, const char **city)
@@ -2190,16 +2251,22 @@ typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
 static const char *const FILM_NAME[14] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "wheels", "sleep",
                                            "pages-half", "pages-full" };   /* 8a: the home swipe with and without half-resolution GPU frames */
 static uint32_t film_halves0;                   /* comp.gpu_halves at the film's start */
+/* 8c (Track A, spec-glass-8c.md rank 1): the glass calibration stills after the films, for the phone photos: the
+ * lock, home and Control Centre, each at LENS_GAIN .33, .66 and 1, 3 s apiece, each logged with its time so the
+ * camera's shots can be matched ("next: glass still ... at +N ms"). gcal: -1 the films, 0.. the stills, 10 done */
+static int gcal = -1;
+static uint64_t gcal_t;
 /* tools/films.txt's scripts (pt, ms) */
 static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 1300 } };
 /* B10: the vendor cards again (B4's list from y 320: Apple 320, Microsoft 413, Google 491, Linux 584, Starbite 677):
  * Apple opens (its head 36 lower, "Show less" above it at x >= 285), "Show less" folds it, the list scrolls to its
  * end, Starbite opens (and scrolls into view), its first row (Starbite OS, "You are in Starbite OS"). The focus film:
  * Microsoft opens, its Windows 11 row (525..593) opens the focus sheet, the slide starts it */
-static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 354, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 330, 334, 0, 0, 80 },
+/* 8a: S_GROUP and S_FOCUS open the lock's Systems card first (the user's lock: one card that expands in place) */
+static const step S_GROUP[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 645, 0, 0, 80 }, { 0, 0, 0, 0, 0, 700 }, { 1, 195, 354, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 }, { 1, 330, 334, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 900 }, { 2, 200, 650, 200, 380, 250 }, { 0, 0, 0, 0, 0, 1200 }, { 1, 195, 578, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 1800 }, { 1, 195, 464, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };
-static const step S_FOCUS[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 444, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 195, 559, 0, 0, 80 },
+static const step S_FOCUS[] = { { 0, 0, 0, 0, 0, 300 }, { 1, 195, 645, 0, 0, 80 }, { 0, 0, 0, 0, 0, 700 }, { 1, 195, 444, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 195, 559, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 1000 }, { 2, 65, 743, 345, 743, 550 }, { 0, 0, 0, 0, 0, 2600 } };
 static const step S_HOLDS[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 71, 727, 0, 0, 650 }, { 0, 0, 0, 0, 0, 700 }, { 3, 319, 727, 0, 0, 950 },
                                 { 0, 0, 0, 0, 0, 900 } };
@@ -2243,6 +2310,47 @@ static int st_started, st_failed, clock_ok;
 int next_selftest_clock_ok(void) { return clock_ok; }
 static uint64_t st_t0;
 int next_selftest_failed(void) { return st_failed || heap_full; }
+
+extern float lens_gain;                         /* kern/lens.h (weak, 1 by default) */
+static int glass_cal_step(void)
+{
+    static const float GAIN[3] = { .33f, .66f, 1.0f };
+    static const char *const VIEW[3] = { "lock", "home", "control centre" };
+    if (gcal >= 10) return 0;
+    if (gcal > 0 && sb_ms() - gcal_t < 3000) return 1;
+    if (gcal == 9) {
+        lens_gain = 1.0f;
+        sh_set("reset", "", 0);
+        need_full = 1;
+        next_kdraw();
+        sb_log("next: glass stills: done (gain back to 1)");
+        gcal = 10;
+        return 0;
+    }
+    int v = gcal / 3, g = gcal % 3;
+    lens_gain = GAIN[g];
+    if (g == 0) {
+        sh_set("reset", "", 0);
+        if (v >= 1) sh_set("unlock", "", 1);
+        if (v == 2) sh_set("cc", "", 1);
+    }
+    need_full = 1;
+    next_kdraw();
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: glass still ");
+    ub_s(&u, VIEW[v]);
+    ub_s(&u, ", glass strength ");
+    ub_dec(&u, (uint64_t)(GAIN[g] * 100 + .5f));
+    ub_s(&u, " %");
+    ub_s(&u, " at +");
+    ub_dec(&u, sb_ms() - st_t0);
+    ub_s(&u, " ms (3 s)");
+    sb_log(u.b);
+    gcal_t = sb_ms();
+    gcal++;
+    return 1;
+}
 
 static void film_start(int film)
 {
@@ -2468,6 +2576,7 @@ int next_selftest_step(void)
         return 1;
     }
     if (ticking || sh_moving()) return 1;          /* let it settle */
+    if (gcal < 0) {                              /* the films (until the last one ends) */
     stats_log(FILM_NAME[F.film]);
     if (F.film >= 12) {                          /* 8a: what full-resolution motion costs (the top ten's item 4) */
         struct ub u;
@@ -2486,6 +2595,9 @@ int next_selftest_step(void)
     }
     if (F.film < 13) { film_start(F.film + 1); return 1; }
     tk_gpu_no_half = 0;
+    gcal = 0;
+    }
+    if (glass_cal_step()) return 1;
 #ifndef SBOS_NEXT_NOGPU
     gpu_vs_cpu();
 #endif
@@ -3004,6 +3116,7 @@ static void drv_timer(unsigned id)
     else if (id == KT_DRV_AUTO) ab_tick();
     else if (id == KT_DRV_PROX) px_tick();
     else if (id == KT_DRV_SND || id == KT_DRV_JACK) snd_tick(id);
+    else if (id == KT_DRV_PREWARM) prewarm_arm(-1);
 }
 static void drv_screen(int on)
 {
@@ -3358,3 +3471,25 @@ void sh_snd_close(int id)
 }
 const char *sh_snd_why(void) { return snd_up ? snd_why() : "Sound starts when something plays"; }
 void alarm_sound(int on) { sh_alarm_sound(on); }   /* cp7x: alarm.c's ring -> the shell's ring owner 4 */
+
+/* ---- 8a (Track E's instant start, 4cb49c26): Linux prewarmed, so even the first open after a restart only thaws
+ * it. Once a boot, after 15 s with the screen off, only for someone who opened a Linux app before (pref linux.used,
+ * gwin.c), never in Low Power Mode or a self test. The guest boots unseen, then its idle freeze takes it.
+ * prewarm_arm: 0 the screen went off (armed), 1 it came on (cancelled), -1 the timer */
+static void prewarm_arm(int screen_on)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)screen_on;
+#else
+    static int pw_done;
+    if (screen_on == 1) { kt_cancel(KT_UI, KT_DRV_PREWARM); return; }
+    if (pw_done || sbos_selftest_enabled || perf_low || sh_pref_int("linux.used", 0) != 1) return;
+    if (guest_state() != GUEST_OFF) { pw_done = 1; return; }
+    if (screen_on == 0) { kt_set(KT_UI, KT_DRV_PREWARM, sb_ms(), 15000, 0); return; }
+    if (K.screen_on) return;
+    pw_done = 1;
+    int r = guest_prewarm();
+    sb_log(r > 0 ? "next: Linux prewarmed in the dark (it freezes once up; the first open thaws it)"
+                 : r == 0 ? "next: Linux prewarm: nothing to do" : "next: Linux prewarm: refused");
+#endif
+}

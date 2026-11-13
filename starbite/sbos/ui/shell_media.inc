@@ -80,6 +80,7 @@ static struct {
     int view, vsingle, vanim, vdir, verr;
     char vpath[400];
     float vx, vy, va, vat;
+    tk_spring vsp;              /* 8a: the page's slide (vanim 1) and the snap back (vanim 2) on x, from the flick */
     /* Now Playing */
     int play, pstage, redo;
     float pa;
@@ -1942,6 +1943,10 @@ static void med_touch(int ph, float x, float y, float t)
             if ((MD.vx < -80 || vx < -.4f) && vw_can(1)) { MD.vanim = 1; MD.vdir = 1; }
             else if ((MD.vx > 80 || vx > .4f) && vw_can(-1)) { MD.vanim = 1; MD.vdir = -1; }
         } else if (MD.vy > 100 || vy > .5f) { MD.vanim = 3; MD.vat = 0; }
+        /* 8a (gap list B3): iOS's paging is a spring that starts at the finger's speed (.32, damping 1), not a fixed
+         * .16 s slide: a fast flick lands fast, a slow one glides; the snap back the same toward 0 */
+        if (MD.vanim == 1) tk_spring_start(&MD.vsp, MD.vx, -(float)MD.vdir * (vw_span() + 10), vx * 1000, TK_SPR_FAST);
+        else if (MD.vanim == 2) tk_spring_start(&MD.vsp, MD.vx, 0, MD.axis == 1 ? vx * 1000 : 0, TK_SPR_FAST);
     }
 }
 /* cp6: what lights under a finger (app_press): a photo darkens, a row, a lit circle, a dimmed back; nothing for the
@@ -2078,14 +2083,15 @@ static int med_tick(float dt)
         }
     }
     if (MD.vanim == 1) {
-        MD.vx -= (float)MD.vdir * vw_span() * dt / .16f;
+        int live = tk_spring_step(&MD.vsp, dt);
+        MD.vx = MD.vsp.x;
         mv = 1;
-        if (tk_fabsf(MD.vx) >= vw_span() + 10) vw_show(MD.vsingle ? vw_files_next(MD.view, MD.vdir) : MD.view + MD.vdir); else vw_place();
+        if (!live || tk_fabsf(MD.vx) >= vw_span() + 10) vw_show(MD.vsingle ? vw_files_next(MD.view, MD.vdir) : MD.view + MD.vdir); else vw_place();
     } else if (MD.vanim == 2) {
-        float k = tk_minf(1, dt * 16);
-        MD.vx -= MD.vx * k;
-        MD.vy -= MD.vy * k;
-        if (tk_fabsf(MD.vx) < .3f && tk_fabsf(MD.vy) < .3f) { MD.vx = MD.vy = 0; MD.vanim = 0; }
+        int live = tk_spring_step(&MD.vsp, dt);
+        MD.vx = MD.vsp.x;
+        MD.vy -= MD.vy * tk_minf(1, dt * 16);
+        if (!live && tk_fabsf(MD.vy) < .3f) { MD.vx = MD.vy = 0; MD.vanim = 0; }
         vw_place();
         mv = 1;
     }

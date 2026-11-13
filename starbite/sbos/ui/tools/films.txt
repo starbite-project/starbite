@@ -1,6 +1,6 @@
 unlock: wait 400; drag 195 795 195 330 220; wait 1300
-group: wait 300; tap 195 354; wait 1000; tap 330 334; wait 900; drag 200 650 200 380 250; wait 1200; tap 195 578; wait 1800; tap 195 464; wait 1200
-focus: wait 300; tap 195 444; wait 900; tap 195 559; wait 1000; drag 65 743 345 743 550; wait 2600
+group: wait 300; tap 195 645; wait 700; tap 195 354; wait 1000; tap 330 334; wait 900; drag 200 650 200 380 250; wait 1200; tap 195 578; wait 1800; tap 195 464; wait 1200
+focus: wait 300; tap 195 645; wait 700; tap 195 444; wait 900; tap 195 559; wait 1000; drag 65 743 345 743 550; wait 2600
 holds: wait 300; hold 71 727 650; wait 700; hold 319 727 950; wait 900
 relock: wait 300; drag 195 795 195 330 220; wait 900; power; wait 900; power; wait 1200
 pages: wait 300; drag 195 795 195 330 220; wait 900; drag 320 450 60 450 200; wait 900; drag 60 450 330 460 220; wait 1200
@@ -75,3 +75,4 @@ a1nav: wait 300; state store=games; wait 1200; tap 352 112; wait 1000; tap 195 5
 a1pill: wait 300; state store=today; wait 900; tap 152 749; wait 900; tap 325 749; wait 900; tap 65 749; wait 900
 a1sheet: wait 300; state storeapp=firefox; wait 1200; tap 185 222; wait 1200; tap 195 600; wait 800; tap 195 708; wait 2500
 a1acct: wait 300; state store=today; wait 1200; tap 352 112; wait 1300; tap 195 550; wait 1800
+interrupt: wait 300; drag 195 795 195 330 220; wait 900; tap 238 289; wait 1100; drag 195 795 200 450 200; wait 60; tap 158 392; wait 1200; drag 195 795 200 450 260; wait 1200

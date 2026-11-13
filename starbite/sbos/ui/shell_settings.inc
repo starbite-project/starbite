@@ -37,11 +37,11 @@ enum { SE_ROOT = 0, SE_DISPLAY = 1, SE_WIFI = 2, SE_CELL = 3, SE_CARD = 4,
 enum { A_NONE = 100, A_CARD, A_PASSCODE, A_STARTUP, A_STORE, A_LAST2, A_TEXTSIZE, A_RESET, A_EMG, A_BRIGHT,
        A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK, A_UPDATE, A_BTDEV, A_BTKBD, A_HAPLVL, A_VOLUME, A_TONE_RING, A_TONE_TEXT, A_TONE_ALARM,
        T_FIRST = 200, T_SYSHAP = T_FIRST, T_KBHAP, T_AUTOCAP, T_TIMERVIB, T_LAST2AUTO, T_NALLOW, T_NBANNER, T_CALLVIB, T_SMSVIB,
-       T_CLOCK24, T_BT, T_AUTOBRIGHT, T_KBSND };
+       T_CLOCK24, T_BT, T_AUTOBRIGHT, T_KBSND, T_LOCKSND, T_SILENT };
 
 /* ---- the shell's own settings: Track A's prefs (kept across restarts; every one defaults to on) ------------------ */
-enum { SK_SYSHAP, SK_KBHAP, SK_AUTOCAP, SK_TIMERVIB, SK_KBSND, SK_NALLOW, SK_NBANNER = SK_NALLOW + 8, SK_N = SK_NBANNER + 8 };
-static const char *const SK_KEY[SK_NALLOW] = { "haptic.system", "kb.haptic", "kb.autocap", "clock.timervib", "kb.click" };
+enum { SK_SYSHAP, SK_KBHAP, SK_AUTOCAP, SK_TIMERVIB, SK_KBSND, SK_LOCKSND, SK_NALLOW, SK_NBANNER = SK_NALLOW + 8, SK_N = SK_NBANNER + 8 };
+static const char *const SK_KEY[SK_NALLOW] = { "haptic.system", "kb.haptic", "kb.autocap", "clock.timervib", "kb.click", "snd.lock" };
 static const char *se_notif_who(int i);
 static int se_get(int k)
 {
@@ -63,6 +63,7 @@ static int se_haptic_ok(int key) { return se_get(SK_SYSHAP) && (!key || se_get(S
 static int se_autocap(void) { return se_get(SK_AUTOCAP); }
 static int se_timer_vib(void) { return se_get(SK_TIMERVIB); }
 static int se_kb_click(void) { return se_get(SK_KBSND); }         /* cp7w: Keyboard Clicks */
+static int se_lock_snd(void) { return se_get(SK_LOCKSND); }       /* 8a: Lock Sound (iOS's, on by default) */
 static float se_tone_until;                     /* cp7w: a ringtone's preview stops then (ms; 0 none) */
 /* the notification posters Settings lists (shell_nc.inc's NCSRC, plus Phone and Messages) */
 static const struct { const char *who, *name; } SEN[] = { { "clock", "Clock" }, { "battery", "Battery" }, { "modem", "Cellular" },
@@ -129,7 +130,11 @@ static struct {
 #define SE_NCH 8
 #define SE_CH 1024
 static tk_layer sepg[SE_NCH];
-static tk_layer seclip, sescr, senav, sesb, sekb;   /* sesb: the root's search capsule (the field above the keyboard); sekb: its keyboard */
+static tk_layer seclip, sescr, senav, sesb, sekb;
+/* 8a (gaps-c #9): the root's bottom scroll edge: the rows fade into the black ground under the search capsule (iOS
+ * 26's soft edge; nothing legible below the bar), a half-resolution bitmap drawn 2x (as the NC's wallpaper view) */
+static tk_layer seedge;
+#define SE_EDGE_Y (SE_SB_Y - 30)   /* sesb: the root's search capsule (the field above the keyboard); sekb: its keyboard */
 #define SE_TOP (SAFE_TOP + NAVBAR_H)              /* the content shows below the nav row (a soft edge) */
 
 static const char *se_str(const char *a, const char *b)
@@ -414,7 +419,12 @@ static void se_rows(int p)
         row(SR_VAL, A_TONE_ALARM, "Alarms and Timers", "Beeps");
         foot("A tap plays the sound.");
         sec(0);
+        tog(T_SILENT, "Silent Mode", snd_silent());
+        foot("Silent Mode quiets key clicks, the lock, notifications, the shutter and the charging chime, and calls "
+             "only vibrate (the Control Centre's bell too). Alarms and timers still ring.");
+        sec(0);
         tog(T_KBSND, "Keyboard Clicks", se_get(SK_KBSND));
+        tog(T_LOCKSND, "Lock Sound", se_get(SK_LOCKSND));
         break;
     case SE_NOTIF:
         sec("Notification Style");
@@ -732,11 +742,23 @@ static void se_draw_row(dc *d, const se_row *r, int last)
     if (r->ico) se_tile(d, y, r->h, r->ico);
     switch (r->kind) {
     case SR_PROFILE: {
-        /* the account row: the Starbite tile as the avatar (56), the device's name 20 / 600, "Starbite OS" */
-        const tk_bmp *ic = tk_icon("t52-starbite");
+        /* the account row: iOS's initials avatar (56: systemGray's gradient, white initials 22 / 600; 8a, gaps-c #8:
+         * the Starbite tile was missing from the pack and left an empty navy circle), the device's name 20 / 600,
+         * "Starbite OS" */
         float ax = LG_X + 12, ay = y + 5;
-        d_rrect(d, ax, ay, 56, 56, 28, tk_hex(0x0d1530, 1));
-        if (ic) tk_blit(d->b, ic, (int)tk_floorf(PT(ax + 28) - ic->w / 2.0f - d->ox + .5f), (int)tk_floorf(PT(ay + 28) - ic->h / 2.0f - d->oy + .5f), 1);
+        {
+            tk_stop gs[2] = { { 0, tk_hex(0xa5a5ab, 1) }, { 1, tk_hex(0x6c6c72, 1) } };
+            tk_paint gp = tk_linear(180, PT(ax) - d->ox, PT(ay) - d->oy, PT(56), PT(56), 2, gs);
+            tk_fm m;
+            int bx = (int)tk_floorf(PT(ax) - d->ox) - 1, by = (int)tk_floorf(PT(ay) - d->oy) - 1, n = (int)PT(56) + 3;
+            if (tk_fm_new(&m, n, n)) {
+                tk_fm_rrect(&m, d->ox + bx, d->oy + by, PT(ax), PT(ay), PT(56), PT(56), PT(28));
+                tk_draw_fm(d->b, &m, bx, by, &gp, 1);
+                tk_fm_free(&m);
+            }
+            float iw = tw(TK_IT600, 22, "S9", 0, 0);
+            d_text(d, TK_IT600, 22, ax + 28 - iw / 2, ay + 28 + 22 * INTER_CAP / 2, "S9", 0, 0, W(1), 0);
+        }
         d_text_box(d, TK_IT600, 20, ax + 56 + 13, y + 30, LG_RE - 40 - ax - 69, 0, r->l, 0, 0, INK, 0);
         d_text_box(d, TK_IT400, 15, ax + 56 + 13, y + 50, LG_RE - 40 - ax - 69, 0, r->v, 0, 0, KIT_SEC(), 0);
         d_icon(d, "chev", LG_RE - 16 - 8, y + r->h / 2 - 6.5f, .35f);
@@ -957,6 +979,23 @@ static void se_search_build(void)
     relayer(&sesb);
     tk_layer_init(&sesb, "settings-search");
     sesb.hidden = 1;
+    relayer(&seedge);
+    tk_layer_init(&seedge, "settings-edge");
+    seedge.hidden = 1;
+    if (SE.page == SE_ROOT) {
+        int h = (int)PT(H_PT - SE_EDGE_Y) / 2 + 1, top = (int)tk_floorf(PT(SE_EDGE_Y));
+        if (tk_bmp_new(&seedge.bmp, TK_W / 2, h)) {
+            for (int j = 0; j < h; j++) {
+                float t = tk_clampf((j * 2.0f / TK_PT) / 54, 0, 1);         /* 0 at the edge's top, 1 at 54 pt */
+                unsigned a = (unsigned)(255 * t * t * (3 - 2 * t) + .5f);
+                for (int i = 0; i < seedge.bmp.w; i++) seedge.bmp.px[j * seedge.bmp.stride + i] = a << 24;
+            }
+            seedge.sx = seedge.sy = 2;
+            seedge.x = seedge.ox = 0;
+            seedge.y = seedge.oy = (float)top;
+            seedge.hidden = 0;
+        }
+    }
     if (SE.page != SE_ROOT && SE.page != SE_SEARCH) return;
     int pg = SE.page == SE_SEARCH;
     float y = pg ? SE_SF_Y : SE_SB_Y, w = pg ? CONTENT_W - 52 : CONTENT_W;
@@ -997,8 +1036,8 @@ static void se_kb_build(void)
 static void se_free(void)
 {
     for (int k = 0; k < SE_NCH; k++) { relayer(&sepg[k]); sepg[k].hidden = 1; }
-    relayer(&senav); relayer(&sesb); relayer(&sekb);
-    senav.hidden = sesb.hidden = sekb.hidden = 1;
+    relayer(&senav); relayer(&sesb); relayer(&sekb); relayer(&seedge);
+    senav.hidden = sesb.hidden = sekb.hidden = seedge.hidden = 1;
     seclip.hidden = 1;
     kit_slider_end();
     relayer(&ksw); ksw.hidden = 1;
@@ -1084,11 +1123,12 @@ static int se_layers(tk_layer **o)
     tk_layer *c[] = { &sescr };
     link(&seclip, c, 1);
     o[0] = &seclip;
-    o[1] = &senav;
-    o[2] = &sesb;
-    o[3] = &sekb;
-    o[4] = &sepspin;                              /* cp6: over the strip pages */
-    return 5;
+    o[1] = &seedge;                               /* 8a: under the nav row and the capsule */
+    o[2] = &senav;
+    o[3] = &sesb;
+    o[4] = &sekb;
+    o[5] = &sepspin;                              /* cp6: over the strip pages */
+    return 6;
 }
 static void se_close(void) { relayer(&sepspin); sepspin.hidden = 1; SPS.on = 0; se_free(); SE.bld_page = -1; SE.press = -1; SE.ns_ = 0; for (int i = 0; i < SE_NPAGES; i++) SE.save[i] = 0; }
 static void se_idle(void)
@@ -1344,6 +1384,8 @@ static void se_toggle(int ri)
     case T_AUTOCAP: se_put(SK_AUTOCAP, on); break;
     case T_TIMERVIB: se_put(SK_TIMERVIB, on); break;
     case T_KBSND: se_put(SK_KBSND, on); break;          /* cp7w */
+    case T_LOCKSND: se_put(SK_LOCKSND, on); break;      /* 8a */
+    case T_SILENT: snd_silent_set(on); break;           /* 8a (the Control Centre's bell shows it too) */
     case T_LAST2AUTO: sh_last2_auto_set(on); on = sh_last2_auto(); break;
     case T_NALLOW: se_put(SK_NALLOW + SE.napp, on); break;
     case T_NBANNER: se_put(SK_NBANNER + SE.napp, on); break;
