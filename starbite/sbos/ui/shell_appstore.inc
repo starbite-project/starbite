@@ -293,15 +293,39 @@ static void aq_live_add(int kind, int pkg, float x, float y, float w)
 }
 static void aq_blit(dc *d, const tk_bmp *b, float x, float y) { if (b && b->px) tk_blit(d->b, b, (int)tk_floorf(PT(x) - d->ox + .5f), (int)tk_floorf(PT(y) - d->oy + .5f), 1); }
 /* the row's button (PILL_W x 30): GET / OPEN / UPDATE / RETRY, or the progress ring with its stop square */
+/* an arc from angle a0 (radians, 0 = 12 o'clock, clockwise) over sweep: the waiting spinner */
+static void aq_darc(dc *d, float cx, float cy, float r, float sw, float a0, float sweep, tk_col c)
+{
+    int bx = (int)tk_floorf(PT(cx - r - sw) - d->ox) - 2, by = (int)tk_floorf(PT(cy - r - sw) - d->oy) - 2;
+    int n = (int)PT(2 * (r + sw)) + 5;
+    tk_fm m;
+    tk_fm_new(&m, n, n);
+    tk_fm_arc(&m, d->ox + bx, d->oy + by, PT(cx), PT(cy), PT(r), PT(sw), a0, sweep, 1);
+    tk_paint pp = tk_solid(c);
+    tk_draw_fm(d->b, &m, bx, by, &pp, 1);
+    tk_fm_free(&m);
+}
+/* iOS's states after GET: "waiting" (an indeterminate spinner: queued, or started with nothing measurable yet), then
+ * the progress ring with its stop square (tap = cancel), then OPEN */
+static int aq_waiting(const sh_lpkg_t *p)
+{
+    if (p->state == SH_PKG_QUEUED) return 1;
+    if (p->state != SH_PKG_INSTALLING) return 0;
+    if (p->phase == SH_PKG_DOWNLOADING && p->total_kb) return 0;
+    return p->pct < 2;
+}
+static float aq_spin_a(void) { return (float)((long long)now_ms % 1000) * 6.2831853f / 1000.0f; }   /* one turn a second */
+static void aq_ring(dc *d, float cx, float cy, const sh_lpkg_t *p, int light)
+{
+    tk_col fg = light ? W(1) : ACCENT();
+    d_ring(d, cx, cy, 13, 2.6f, 1, W(.18f), 0);
+    if (aq_waiting(p) && p->state != SH_PKG_REMOVING) { aq_darc(d, cx, cy, 13, 2.6f, aq_spin_a(), 1.7f, fg); return; }
+    d_ring(d, cx, cy, 13, 2.6f, aq_frac(p), fg, 1);
+    if (p->state != SH_PKG_REMOVING) d_rrect(d, cx - 4, cy - 4, 8, 8, 1.5f, fg);
+}
 static void aq_pill(dc *d, float x, float y, const sh_lpkg_t *p, int light)
 {
-    if (st_busy(p)) {
-        float cx = x + PILL_W / 2, cy = y + 15;
-        d_ring(d, cx, cy, 13, 2.6f, 1, W(.18f), 0);
-        d_ring(d, cx, cy, 13, 2.6f, aq_frac(p), light ? W(1) : ACCENT(), 1);
-        if (p->state != SH_PKG_REMOVING) d_rrect(d, cx - 4, cy - 4, 8, 8, 1.5f, light ? W(1) : ACCENT());
-        return;
-    }
+    if (st_busy(p)) { aq_ring(d, x + PILL_W / 2, y + 15, p, light); return; }
     int inst = aq_inst(p), dim = !inst && (p->flags & SH_PKG_NO_SPACE);   /* (never for "the network looked down": GET tries) */
     const char *t = aq_upd(p) ? "UPDATE" : inst ? "OPEN" : p->state == SH_PKG_FAILED ? "RETRY" : "GET";
     d_rrect(d, x, y, PILL_W, 30, 15, light ? W(.24f) : W(.14f));
@@ -1056,6 +1080,7 @@ static void aq_live_draw(int k, int it)
     if (!aq_status(p, s, sizeof s, &sc)) s[0] = 0;
     if (AQL[it].kind == LV_ROW) {
         dc d = mk(l, "store-live", x, y + 20, CONTENT_R - x, 40, 1, 0);
+        tk_fill_rect_raw(d.b, 0, 0, d.b->w, d.b->h, 0xff000000u);   /* (as above: the row's old line and pill hidden) */
         d_text_box(&d, TK_IT400, 13, x, bl(TK_IT400, 13, y + 39), w, 0, s, 0, 0, sc, 0);
         aq_pill(&d, PILL_X, y + 23, p, 0);
     } else if (AQL[it].kind == LV_CARD) {
@@ -1064,11 +1089,10 @@ static void aq_live_draw(int k, int it)
         aq_pill(&d, CONTENT_R - 20 - PILL_W, y + 21, p, 1);
     } else {
         dc d = mk(l, "store-live", x, y - 2, w, 40, 1, 0);
-        d_ring(&d, x + 16, y + 16, 14, 2.8f, 1, W(.18f), 0);
-        d_ring(&d, x + 16, y + 16, 14, 2.8f, aq_frac(p), ACCENT(), 1);
-        if (p->state != SH_PKG_REMOVING) d_rrect(&d, x + 11.5f, y + 11.5f, 9, 9, 2, ACCENT());
-        d_text_box(&d, TK_IT500, 13, x + 42, bl(TK_IT500, 13, y + 1), w - 42, 0, s, 0, 0, W(.75f), 0);
-        if (p->state != SH_PKG_REMOVING) d_text(&d, TK_IT600, 13, x + 42, bl(TK_IT600, 13, y + 18), "Cancel", 0, 0, ACCENT(), 0);
+        tk_fill_rect_raw(d.b, 0, 0, d.b->w, d.b->h, 0xff000000u);   /* (the page's black over the GET under it until
+                                                                       * the page's own chunk is drawn again) */
+        aq_ring(&d, x + 16, y + 16, p, 0);        /* (where GET was: a tap on it cancels, as iOS) */
+        d_text_box(&d, TK_IT500, 13, x + 42, bl(TK_IT500, 13, y + 9), w - 42, 0, s, 0, 0, W(.75f), 0);
     }
     l->hidden = 0;
 }
@@ -1501,6 +1525,17 @@ void sh_linux_store(const sh_lstore_t *s)
         aq_cached = 0;
         LST = s;
         aqk_save(s);
+        {   /* iOS: a success haptic when an install / update the user is watching ends, a warning when it fails */
+            static char prev[SH_LPKGS];
+            static int prev_n;
+            for (int i = 0; i < s->n && i < SH_LPKGS; i++) {
+                int st = (int)s->pkg[i].state, busy = st == SH_PKG_QUEUED || st == SH_PKG_INSTALLING;
+                if (!was && i < prev_n && prev[i] && !busy && is_app("store") && !ap_pending)
+                    sh_haptic_k(st == SH_PKG_FAILED ? SH_HAP_WARNING : SH_HAP_SUCCESS);
+                prev[i] = (char)busy;
+            }
+            prev_n = s->n;
+        }
         if (aq_pend.pkg[0] && st_find(aq_pend.pkg) >= 0) {   /* the GET asked for while Linux started */
             int i = st_find(aq_pend.pkg);
             aq_pend.pkg[0] = 0;
@@ -1598,6 +1633,7 @@ static void aq_act(int i, int m)
 {
     const sh_lpkg_t *p = &LST->pkg[i];
     if (p->state == SH_PKG_REMOVING) return;
+    sh_haptic_k(SH_HAP_LIGHT);                    /* (iOS: a light impact on GET / OPEN / UPDATE / the ring) */
     if (st_busy(p)) { (void)aq_op(i, SH_PKG_OP_CANCEL, 0); return; }
     if (aq_upd(p)) { (void)aq_op(i, SH_PKG_OP_UPDATE, 0); return; }
     if (aq_inst(p)) {
@@ -1754,10 +1790,12 @@ static int aq_touch(int ph, float x, float y)
     }
     return 1;
 }
+static int aq_spinning(void);
 static int aq_moving(void)
 {
     if (!is_app("store")) return 0;
     if (!aqbf.hidden) return 1;                   /* (the cold start's bar moves) */
+    if (aq_spinning()) return 1;                  /* (a waiting spinner turns) */
     return AQ.drag || AQ.hide || AQ.left > 0 || AQ.rev < 1 || tk_fabsf(AQ.v) > 1 || AQ.scroll < 0 || AQ.scroll > aq_max() + .5f;
 }
 /* the cold start's bar: elapsed / the expected start, held at 95 % until Linux is up; the words change once when late */
@@ -1779,10 +1817,24 @@ static int aq_bar(void)
     hl_set(&aqbf, fr, fr, 2.5f, ACCENT());
     return 1;
 }
+static int aq_spinning(void)
+{
+    for (int k = 0; k < AQ_NLIVE; k++)
+        if (aql_it[k] >= 0 && aql_it[k] < aq_nl && LST && AQL[aql_it[k]].pkg < aq_n() && aq_waiting(&LST->pkg[AQL[aql_it[k]].pkg]))
+            return 1;
+    return 0;
+}
 static int aq_tick(float dt)
 {
     if (aq_bar()) return 1;
     if (!is_app("store") || ap_pending || AQ.empty) return 0;
+    static float spin_t;
+    if (aq_spinning() && now_ms - spin_t >= 33) {   /* the waiting spinners turn (~30 frames a second) */
+        spin_t = now_ms;
+        for (int k = 0; k < AQ_NLIVE; k++)
+            if (aql_it[k] >= 0 && aql_it[k] < aq_nl && AQL[aql_it[k]].pkg < aq_n() && aq_waiting(&LST->pkg[AQL[aql_it[k]].pkg])) aql_dirty[k] = 1;
+        aq_place(0);
+    }
     int pend = 0;
     if (!AQ.drag) {
         float m = aq_max();
