@@ -142,7 +142,10 @@ static int se_kb_click(void);                  /* cp7w: Settings > Sounds & Hapt
 static void kb_feel(void)
 {
     if (kb_haptics()) { kb_key_tap = 1; sh_haptic(); }
-    if (se_kb_click()) snd_once(SH_SND_CLICK);   /* cp7w: a key's click (never over a ring) */
+    if (se_kb_click()) {                         /* cp7w: a key's click (never over a ring); 8a: iOS's three: */
+        int k = KB.key >= 0 && KB.key < KB.nk ? KB.k[KB.key].kind : -1;    /* letters, delete, the rest */
+        snd_once(k == KK_CHAR ? SH_SND_CLICK : k == KK_DEL ? SH_SND_CLICK_DEL : SH_SND_CLICK_MOD);
+    }
 }
 
 /* ---- drawing ---------------------------------------------------------------------------------------------- */

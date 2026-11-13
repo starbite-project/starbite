@@ -99,13 +99,25 @@ static const struct seg t_alarm[] = {
 static const struct seg t_notify[] = { { 784, 0, 90, L_NOTE, 0 }, { 0, 0, 20, 0, 0 }, { 1175, 0, 160, L_NOTE, 0 } };
 static const struct seg t_click[] = { { 3000, 0, 6, 6554, 1 } };
 static const struct seg t_test[] = { { 1000, 0, 1000, 3277, 0 } };     /* -20 dBFS */
-static const struct { const struct seg *s; unsigned n, repeat; } tones[6] = {
+/* 8a (Track B): the keyboard's other two clicks, the lock, the shutter, the charging chime (generic, synthesized) */
+static const struct seg t_click_del[] = { { 2000, 0, 6, 6554, 1 } };
+static const struct seg t_click_mod[] = { { 1500, 0, 7, 5243, 1 } };
+static const struct seg t_lock[] = { { 1400, 700, 14, 8192, 1 }, { 0, 0, 12, 0, 0 }, { 900, 450, 22, 6554, 1 } };
+static const struct seg t_shutter[] = { { 2600, 1900, 9, 7864, 1 }, { 0, 0, 55, 0, 0 }, { 2200, 1500, 12, 7209, 1 } };
+static const struct seg t_charge[] = { { 1319, 2637, 360, L_NOTE, 1 } };
+#define NSEG(t) (sizeof t / sizeof t[0])
+static const struct { const struct seg *s; unsigned n, repeat; } tones[SND_TONE_MAX + 1] = {
     { 0, 0, 0 },
     { t_ring, sizeof t_ring / sizeof t_ring[0], 1 },
     { t_alarm, sizeof t_alarm / sizeof t_alarm[0], 1 },
     { t_notify, sizeof t_notify / sizeof t_notify[0], 0 },
     { t_click, 1, 0 },
     { t_test, 1, 1 },
+    { t_click_del, NSEG(t_click_del), 0 },
+    { t_click_mod, NSEG(t_click_mod), 0 },
+    { t_lock, NSEG(t_lock), 0 },
+    { t_shutter, NSEG(t_shutter), 0 },
+    { t_charge, NSEG(t_charge), 0 },
 };
 #define ENV_SAMPLES 192U                /* 4 ms ramps where a note starts or ends */
 
@@ -399,9 +411,9 @@ static int cal_cold(void);
 static int cal_up(void);
 int snd_tone(int kind)
 {
-    if (kind < 1 || kind > SND_TONE_TEST)
+    if (kind < 1 || kind > SND_TONE_MAX)
         return SND_EINVAL;
-    if (kind == SND_TONE_CLICK && cal_cold()) {
+    if ((kind == SND_TONE_CLICK || kind == SND_TONE_CLICK_DEL || kind == SND_TONE_CLICK_MOD) && cal_cold()) {
         /* a 6 ms key click ~1 s late is worse than none: dropped, but Calliope boots so that the next one plays */
         if (!G.cal_boot && !G.cal_settling) {
             say("tone: a click while Calliope is off: dropped; Calliope boots for the next one");

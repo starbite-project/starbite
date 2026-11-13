@@ -37,11 +37,11 @@ enum { SE_ROOT = 0, SE_DISPLAY = 1, SE_WIFI = 2, SE_CELL = 3, SE_CARD = 4,
 enum { A_NONE = 100, A_CARD, A_PASSCODE, A_STARTUP, A_STORE, A_LAST2, A_TEXTSIZE, A_RESET, A_EMG, A_BRIGHT,
        A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK, A_UPDATE, A_BTDEV, A_BTKBD, A_HAPLVL, A_VOLUME, A_TONE_RING, A_TONE_TEXT, A_TONE_ALARM,
        T_FIRST = 200, T_SYSHAP = T_FIRST, T_KBHAP, T_AUTOCAP, T_TIMERVIB, T_LAST2AUTO, T_NALLOW, T_NBANNER, T_CALLVIB, T_SMSVIB,
-       T_CLOCK24, T_BT, T_AUTOBRIGHT, T_KBSND };
+       T_CLOCK24, T_BT, T_AUTOBRIGHT, T_KBSND, T_LOCKSND, T_SILENT };
 
 /* ---- the shell's own settings: Track A's prefs (kept across restarts; every one defaults to on) ------------------ */
-enum { SK_SYSHAP, SK_KBHAP, SK_AUTOCAP, SK_TIMERVIB, SK_KBSND, SK_NALLOW, SK_NBANNER = SK_NALLOW + 8, SK_N = SK_NBANNER + 8 };
-static const char *const SK_KEY[SK_NALLOW] = { "haptic.system", "kb.haptic", "kb.autocap", "clock.timervib", "kb.click" };
+enum { SK_SYSHAP, SK_KBHAP, SK_AUTOCAP, SK_TIMERVIB, SK_KBSND, SK_LOCKSND, SK_NALLOW, SK_NBANNER = SK_NALLOW + 8, SK_N = SK_NBANNER + 8 };
+static const char *const SK_KEY[SK_NALLOW] = { "haptic.system", "kb.haptic", "kb.autocap", "clock.timervib", "kb.click", "snd.lock" };
 static const char *se_notif_who(int i);
 static int se_get(int k)
 {
@@ -63,6 +63,7 @@ static int se_haptic_ok(int key) { return se_get(SK_SYSHAP) && (!key || se_get(S
 static int se_autocap(void) { return se_get(SK_AUTOCAP); }
 static int se_timer_vib(void) { return se_get(SK_TIMERVIB); }
 static int se_kb_click(void) { return se_get(SK_KBSND); }         /* cp7w: Keyboard Clicks */
+static int se_lock_snd(void) { return se_get(SK_LOCKSND); }       /* 8a: Lock Sound (iOS's, on by default) */
 static float se_tone_until;                     /* cp7w: a ringtone's preview stops then (ms; 0 none) */
 /* the notification posters Settings lists (shell_nc.inc's NCSRC, plus Phone and Messages) */
 static const struct { const char *who, *name; } SEN[] = { { "clock", "Clock" }, { "battery", "Battery" }, { "modem", "Cellular" },
@@ -418,7 +419,12 @@ static void se_rows(int p)
         row(SR_VAL, A_TONE_ALARM, "Alarms and Timers", "Beeps");
         foot("A tap plays the sound.");
         sec(0);
+        tog(T_SILENT, "Silent Mode", snd_silent());
+        foot("Silent Mode quiets key clicks, the lock, notifications and the charging chime (the Control Centre's "
+             "bell too). Calls, alarms and timers still ring.");
+        sec(0);
         tog(T_KBSND, "Keyboard Clicks", se_get(SK_KBSND));
+        tog(T_LOCKSND, "Lock Sound", se_get(SK_LOCKSND));
         break;
     case SE_NOTIF:
         sec("Notification Style");
@@ -1378,6 +1384,8 @@ static void se_toggle(int ri)
     case T_AUTOCAP: se_put(SK_AUTOCAP, on); break;
     case T_TIMERVIB: se_put(SK_TIMERVIB, on); break;
     case T_KBSND: se_put(SK_KBSND, on); break;          /* cp7w */
+    case T_LOCKSND: se_put(SK_LOCKSND, on); break;      /* 8a */
+    case T_SILENT: snd_silent_set(on); break;           /* 8a (the Control Centre's bell shows it too) */
     case T_LAST2AUTO: sh_last2_auto_set(on); on = sh_last2_auto(); break;
     case T_NALLOW: se_put(SK_NALLOW + SE.napp, on); break;
     case T_NBANNER: se_put(SK_NBANNER + SE.napp, on); break;

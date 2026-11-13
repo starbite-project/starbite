@@ -483,6 +483,7 @@ static void camera_tap(float x, float y)
         if (!cam_ok()) { sh_haptic(); toast(CAM.st == CS_FAIL ? "The camera isn't available" : "The camera is starting"); return; }
         if (CAM.shot) return;                         /* one at a time */
         CAM.press = 0;
+        snd_once(SH_SND_SHUTTER);                     /* 8a: iOS's shutter sound (Silent Mode quiets it) */
         if (CAM.flash) {                              /* the front flash: white first, the still once it lights the face */
             CAM.shot = 1;
             CAM.white = .001f;
