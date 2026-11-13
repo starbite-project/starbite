@@ -157,8 +157,11 @@ void sb_main(void)
 {
 #ifndef SB_HOST
     sbos_spsel1();                          /* first: libsb's probe and crash vectors then use SP_EL1 */
+#ifdef SBOS_SD_FAST                         /* Track A (8a2): off until the drivers' probe says the fast path is ready (run 10:
+                                             * "under 10 MB/s"); the OS store is on this card, so no default change before that */
     sd_set_fast(SD_FAST_ON);                /* the card's fast reads (libsb sd.c: CMD6 high speed + IDMAC) from its first
                                              * sd_up on; nothing touches the card here. A failure: 25 MHz PIO, one log line */
+#endif
 #endif
     uint64_t t_entry = sb_ms();             /* the counter runs from power-on: S-Boot and the loader before this */
     kmodem_reserve();                       /* P3n: the modem's 2.25 MiB before the UI's heap takes the arena */
