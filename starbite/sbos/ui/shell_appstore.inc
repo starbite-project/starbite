@@ -2140,6 +2140,23 @@ static void is_tap(float x, float y)
         (void)aq_op(i, SH_PKG_OP_INSTALL, (int)m);
     }
 }
+/* what lights under the finger (kit_sheet_press, B's 295b517b): a way's row, or the Install capsule */
+static int is_press(float x, float y, tk_rect *r, float *rad)
+{
+    if (AIS.pkg < 0 || !LST || AIS.pkg >= aq_n()) return 0;
+    const sh_lpkg_t *p = &LST->pkg[AIS.pkg];
+    float cy = AIS.top + 78;
+    int n = 0;
+    for (int q = 0; q < 3; q++) n += (p->methods >> IS_ORD[q]) & 1;
+    if (y >= cy && y < cy + 56.0f * n && x >= 16 && x < 374) {
+        int k = (int)((y - cy) / 56);
+        *r = (tk_rect){ 16, cy + 56.0f * k, 358, 56 }; *rad = 0;
+        return 1;
+    }
+    float by = cy + 56.0f * n + 50;
+    if (y >= by - 4 && y < by + 54 && x >= 6 && x < 384) { *r = (tk_rect){ 26, by, 338, 50 }; *rad = 25; return 1; }
+    return 0;
+}
 static int is_open(int i, unsigned m)
 {
     const sh_lpkg_t *p = &LST->pkg[i];
@@ -2149,7 +2166,9 @@ static int is_open(int i, unsigned m)
     AIS.pkg = i;
     AIS.m = m && (p->methods >> m & 1) ? m : p->def_method && (p->methods >> p->def_method & 1) ? p->def_method : IS_ORD[0];
     if (!((p->methods >> AIS.m) & 1)) for (int q = 0; q < 3; q++) if ((p->methods >> IS_ORD[q]) & 1) { AIS.m = IS_ORD[q]; break; }
-    return kit_sheet("Install", 78 + 56.0f * n + 10 + 40 + 56, is_draw, is_tap, is_done);
+    int rc = kit_sheet("Install", 78 + 56.0f * n + 10 + 40 + 56, is_draw, is_tap, is_done);
+    if (rc == 0) kit_sheet_press(is_press);
+    return rc;
 }
 /* ---- the Account sheet (spec 2.7, "Your Apps"): the owner's card, App Updates and Installed (each opens the App
  * Updates page), the memory card's free space, Linux's state ---- */
@@ -2198,6 +2217,12 @@ static void acs_tap(float x, float y)
     float gy = ACS_top + 84;
     (void)x;
     if (y >= gy && y < gy + 104) { sh_haptic_k(SH_HAP_LIGHT); kit_dismiss(0); acs_open_updates(); }   /* the updates and installed apps */
+}
+static int acs_press(float x, float y, tk_rect *r, float *rad)
+{
+    float gy = ACS_top + 84;
+    if (y >= gy && y < gy + 104 && x >= 16 && x < 374) { *r = (tk_rect){ 16, gy + (y < gy + 52 ? 0 : 52), 358, 52 }; *rad = 0; return 1; }
+    return 0;
 }
 static void acs_open_updates(void)
 {
@@ -2265,6 +2290,7 @@ static void aq_tap(float x, float y)
     if (search && !AQ.cat_on && !AQ.kb && x >= ACCT_X - 6 && y >= ACCT_Y - 6 && y < ACCT_Y + ACCT_D + 6) {   /* Account */
         sh_haptic_k(SH_HAP_LIGHT);
         if (kit_sheet("Your Apps", 84 + 52 * 4 + 16, acs_draw, acs_tap, 0) < 0) acs_open_updates();
+        else kit_sheet_press(acs_press);
         return;
     }
     if (search && !AQ.cat_on && y >= AQ_FY() - 6 && y < AQ_FY() + 50) {   /* the field, its clear, the cancel circle */
@@ -2324,6 +2350,7 @@ static void aq_tap(float x, float y)
     case H_ACCT:                                  /* the account button: the "Your Apps" sheet (spec 2.7) */
         sh_haptic_k(SH_HAP_LIGHT);
         if (kit_sheet("Your Apps", 84 + 52 * 4 + 16, acs_draw, acs_tap, 0) < 0) acs_open_updates();
+        else kit_sheet_press(acs_press);
         break;
     case H_CHECK:
         if (sh_linux_pkg(SH_PKG_ALL, SH_PKG_OPWORD(SH_PKG_OP_CHECK, 0)) < 0) toast("Linux isn't running: try again in a moment");
