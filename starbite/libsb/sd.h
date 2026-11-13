@@ -22,6 +22,20 @@ int sd_write4k(uint64_t lba, uint64_t count, uintptr_t src);
 /* The end of the MBR's last partition, in sectors (a lower bound of the card size): 0 unknown. */
 uint64_t sd_sectors_hint(void);
 
+/* Fast reads (sd.c's header): off unless an image asks. SD_FAST_ON: CMD6 high speed at the fastest card
+ * clock <= 50 MHz the bus gives (33.58 MHz from 201.5 MHz) and CMD18 by IDMAC; SD_FAST_HS50 the same at
+ * 50.375 MHz (CLKDIV 2: Linux's and XNU's clock, 0.75 % over the HS limit). Read only; writes keep the old
+ * clock and code. Before sd_up it is only remembered (sd_up switches); on a card that is up it switches now.
+ * Any failure: 25 MHz PIO again and one log line. 1 when fast reads are on afterwards. */
+#define SD_FAST_OFF 0
+#define SD_FAST_ON 1
+#define SD_FAST_HS50 2
+int sd_set_fast(int mode);
+int sd_fast_mode(void);                     /* the last sd_set_fast mode */
+/* CMD6 mode 0 (a read-only query; ACMD51 first when the SCR is not known): 1 the card offers high speed,
+ * 0 not, -1 no card or no answer. */
+int sd_hs_query(void);
+
 /* What the last sd_up() found, step by step (EngineerMode shows it). */
 struct sd_report {
     int state;                  /* 0 not tried, 1 ready, -1 failed */
@@ -37,5 +51,16 @@ struct sd_report {
     int last_error;             /* the last failed read_chunk (-1..-8), 0 none */
     int card_state;             /* CMD13 state after the last recovery (4 tran), -1 no answer */
     uint32_t recoveries;        /* sd_recover() runs */
+    /* fast reads (sd_set_fast) */
+    uint32_t csd[4];            /* CMD9 at sd_up when fast reads were asked for first (RESP0..3) */
+    int csd_ok;
+    uint8_t scr[8];             /* ACMD51, bus order: scr[0] = SCR[63:56] */
+    int scr_ok;
+    int hs_asked, hs_support;   /* CMD6 query: 1 offered, 0 not, -1 no answer */
+    int hs_card;                /* the card took high speed (CMD6 mode 1) */
+    int fast;                   /* 0 the old path, else the SD_FAST_* mode running */
+    const char *fast_why;       /* why fast reads are off after the last attempt, 0 none */
+    uint32_t dma_chunks, dma_errors, dma_idsts;
+    int dma_last_error;         /* the last failed IDMAC chunk (-1..-13), 0 none */
 };
 extern struct sd_report sd_rep;

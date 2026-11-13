@@ -847,6 +847,31 @@ static void test_no_clock(void)
     install(0);
 }
 
+/* the "1/13 files: <name> <size> bytes, crc32 <x>" lines carry zlib's CRC32 of each file (the table-driven version
+ * reads rmem 8 bytes at a time: same values as the old bitwise loop) */
+static uint32_t ref_crc32(unsigned f)
+{
+    uint32_t c = 0xFFFFFFFFU;
+    for (long i = 0; i < files[f].size; ++i) {
+        c ^= fbyte(f, i);
+        for (int k = 0; k < 8; ++k)
+            c = (c >> 1) ^ (0xEDB88320U & (0U - (c & 1U)));
+    }
+    return ~c;
+}
+static void test_file_crcs(void)
+{
+    reset();
+    install(0);
+    CHECK(abox_boot() == 0, "crc: boot %s", abox_why());
+    for (unsigned f = 0; f < 3; ++f) {
+        char want[96];
+        snprintf(want, sizeof want, "%s %ld bytes, crc32 0x%x", files[f].name, files[f].size, ref_crc32(f));
+        CHECK(logged(want), "crc: no line '%s'", want);
+    }
+    abox_off();
+}
+
 int main(int argc, char **argv)
 {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
@@ -854,6 +879,7 @@ int main(int argc, char **argv)
     if (!F.rmem)
         return 2;
     CHECK(abox_boot() == ABOX_ESTATE, "boot without a HAL");
+    test_file_crcs();
     test_cfg();
     test_full_cycle(0, 0);
     test_full_cycle(1, 0);

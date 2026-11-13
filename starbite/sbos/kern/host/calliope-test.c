@@ -1319,11 +1319,20 @@ static int run_snd(int level, unsigned *max_rcv_peak, unsigned *max_spk_peak)
     }
     return n < 20000;
 }
+/* the probe's last PASS / FAIL line without its "longest boot step ... boot; " prefix (checked once below) */
+static int snd_last_had_boot;
 static const char *snd_last(void)
 {
+    static char b[512];
     for (unsigned i = F.nlogs; i--;)
-        if (strstr(F.logs[i], "drvprobe: audio: PASS") || strstr(F.logs[i], "drvprobe: audio: FAIL"))
-            return F.logs[i];
+        if (strstr(F.logs[i], "drvprobe: audio: PASS") || strstr(F.logs[i], "drvprobe: audio: FAIL")) {
+            const char *l = F.logs[i], *pre = strstr(l, "longest boot step "), *end = pre ? strstr(pre, " boot; ") : 0;
+            snd_last_had_boot = end != 0;
+            if (!end)
+                return l;
+            snprintf(b, sizeof b, "%.*s%s", (int)(pre - l), l, end + 7);
+            return b;
+        }
     return "";
 }
 static void snd_all_off(const char *t)
@@ -1341,6 +1350,8 @@ static void test_snd_probe(void)
     snd_setup();
     snd_volume(SND_OUT_SPEAKER, 7);
     CHECK(run_snd(1, 0, 0), "snd L1: did not finish");
+    (void)snd_last();
+    CHECK(snd_last_had_boot, "snd L1: the boot's longest step not first in the PASS line");
     CHECK(strstr(snd_last(), "PASS snd's engine through Calliope: RDMA0 19") && strstr(snd_last(), "WDMA1 19") &&
           strstr(snd_last(), "output stayed off"), "snd L1: %s", snd_last());
     CHECK(amp_calls_snd == 0 && logged("output: loudspeaker kept off (the probe's silent run)"),
