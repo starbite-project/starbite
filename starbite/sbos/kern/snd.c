@@ -13,8 +13,12 @@
  *      mono queue for snd_cap_read.
  * With the Calliope engine (abox_media.c; the kernel's, since bypass moves neither RDMA0 nor WDMA1 on this phone)
  * playback is RDMA0 and capture WDMA1 through Calliope's PCM IPC; both may run at the same time on one Calliope boot,
- * which snd boots when nobody runs it (300 ms for its post-boot messages, cal_settle) and switches off 30 s after the
- * last of the two stopped (cal_release).
+ * which snd boots when nobody runs it and switches off 30 s after the last of the two stopped (cal_release). The boot
+ * never holds the kernel loop: abox_boot_start(), then one abox_boot_step() per snd_poll (cal_tick: ~1 s on the phone,
+ * the longest single step the calliope_dram.bin read), then 300 ms of abox_poll() by a deadline for Calliope's
+ * post-boot messages (run 6: taken before our PCM messages). Meanwhile streams keep their queued frames, a requested
+ * tone or capture waits and starts on the first poll after; a key click on a cold Calliope is dropped (it would come
+ * ~1 s late) but starts the boot, so the next one plays.
  *
  * The guard stands in for Maxim's DSM speaker protection, which runs on ABOX's firmware and not here. It is ours:
  * a no-lookahead peak limiter (instant attack, ~40 ms release) to the ceiling, and a power budget on the mean square
@@ -36,7 +40,10 @@ void *memset(void *d, int c, size_t n);
 void *memcpy(void *d, const void *s, size_t n);
 #endif
 
-#define W_AHEAD 3U                      /* periods mixed ahead of the one RDMA0 reads */
+#define W_AHEAD 3U                      /* periods mixed ahead of the one RDMA0 reads: tones / clicks only (~32 ms) */
+#define W_DEEP 16U                      /* while a stream is open (~170 ms of the 341 ms ring): the shell's turns of
+                                         * 20-45 ms, sometimes 100-176 ms, do not starve music; a tone that starts
+                                         * then plays after what is already mixed (~170 ms later) */
 #define IDLE_STOP_US 2000000ULL
 #define RETRY_US 2000000ULL             /* after a failed start, the next try */
 #define LATE_US 15000ULL
@@ -117,11 +124,14 @@ static int inited;
 static struct {
     int eng, out_on, cur_out, route, jack, muted, suspended, cap, cap_codec, amp_override, dumped;
     int ce, cal_own, cal_bad, cal_fails;    /* Calliope engine running, snd booted it, given up on it */
+    int cal_boot, cal_settling, cap_want;   /* snd's staged boot pending; its 300 ms settle; a capture waits for it */
+    uint64_t cal_t0, cal_settle_at;
     int cc;                                 /* capture runs through Calliope (WDMA1) */
     int silent;                             /* the probe's silent run: output_on() leaves the amps / codec off */
     uint64_t cal_off_at;
     unsigned vol[4];
     uint32_t fill_idx, zero_idx, last_pos;
+    uint32_t lead;                          /* periods ahead of RDMA0 after the last fill (+1: the one it reads) */
     uint64_t last_poll, idle_since, retry_at, moved_at;
     /* tone */
     int tone;
@@ -385,10 +395,20 @@ static void seg_start(void)
     G.seg_len = (unsigned)s->ms * (APCM_RATE / 1000U);
 }
 
+static int cal_cold(void);
+static int cal_up(void);
 int snd_tone(int kind)
 {
     if (kind < 1 || kind > SND_TONE_TEST)
         return SND_EINVAL;
+    if (kind == SND_TONE_CLICK && cal_cold()) {
+        /* a 6 ms key click ~1 s late is worse than none: dropped, but Calliope boots so that the next one plays */
+        if (!G.cal_boot && !G.cal_settling) {
+            say("tone: a click while Calliope is off: dropped; Calliope boots for the next one");
+            (void)cal_up();
+        }
+        return 0;
+    }
     G.tone = kind;
     G.seg = 0;
     G.ph1 = G.ph2 = 0;
@@ -673,6 +693,10 @@ static void cal_release(const char *what)
     if (!G.cal_own || G.ce || G.cc)
         return;
     G.cal_own = 0;
+    if (abox_vss_started()) {               /* the CP's voice path runs on it: Calliope is the modem's now */
+        say("engine: Calliope left running (%s): the call audio (VSS) uses it", what);
+        return;
+    }
     if (abox_state() == ABOX_ST_READY || abox_state() == ABOX_ST_FAILED) {
         cal_dump_off("snd");
         abox_off();
@@ -680,42 +704,141 @@ static void cal_release(const char *what)
     }
 }
 
-/* Calliope running for media (playback or capture), booting it first if nobody runs it, then 300 ms for its post-boot
- * messages (run 6: taken before our PCM messages); 0 or <0 */
+/* the Calliope engine would have to boot (or is booting) before anything plays */
+static int cal_cold(void)
+{
+    if (!inited || !cal_avail || G.cal_bad || G.eng || G.suspended || in_call() || apcm_state() != APCM_ST_OFF)
+        return 0;
+    return G.cal_boot || G.cal_settling || (abox_state() != ABOX_ST_READY && abox_state() != ABOX_ST_CALL);
+}
+
+/* a boot of snd's failed (r): Calliope off, counted; the second failure in a row gives up on it */
+static void cal_failed(int r)
+{
+    char cause[160];
+    const char *w = abox_why();
+    unsigned i = 0;
+    for (; w && w[i] && i + 1 < sizeof cause; ++i)          /* abox_off() replaces abox_why() with "ABOX off" */
+        cause[i] = w[i];
+    cause[i] = 0;
+    (void)r;
+    abox_off();
+    say("engine: Calliope did not boot: %s", cause);
+    if (++G.cal_fails >= 2) {
+        G.cal_bad = 1;
+        say("engine: Calliope failed twice: media uses the bypass engine from now on");
+    }
+}
+
+/* Calliope running for media (playback or capture): 0 ready, 1 pending (snd's staged boot or its settle: the caller
+ * starts on a later poll), < 0 failed. Booting it when nobody runs it only starts the boot (abox_boot_start); cal_tick
+ * does the rest, one step per snd_poll. */
 static int cal_up(void)
 {
     int r, st = abox_state();
+    if (G.cal_boot || G.cal_settling)
+        return 1;
     if (st == ABOX_ST_BOOTING)
         return SND_EBUSY;
     if (st == ABOX_ST_READY || st == ABOX_ST_CALL)
         return 0;
-    uint64_t t0 = now();
+    G.cal_t0 = now();
     (void)cal_map();                                /* again: a probe may have taken its own windows away */
     cal_abox_hal();                                 /* abox.c's HAL: snd may be the first to boot Calliope */
-    r = abox_boot();
-    cal_unmap();
-    if (!r)
-        r = cal_settle(CAL_SETTLE_MS);
-    if (r) {
-        char cause[160];
-        const char *w = abox_why();
-        unsigned i = 0;
-        for (; w && w[i] && i + 1 < sizeof cause; ++i)      /* abox_off() replaces abox_why() with "ABOX off" */
-            cause[i] = w[i];
-        cause[i] = 0;
-        abox_off();
-        say("engine: Calliope did not boot: %s", cause);
-        if (++G.cal_fails >= 2) {
-            G.cal_bad = 1;
-            say("engine: Calliope failed twice: media uses the bypass engine from now on");
-        }
-        return r;
+    r = abox_boot_start();
+    if (r > 0) {
+        G.cal_boot = 1;
+        why("Sound is starting: the audio processor (Calliope) boots");
+        return 1;
     }
+    cal_unmap();
+    if (r < 0)
+        cal_failed(r);
+    return r;
+}
+
+/* what waited for snd's boot learns that it failed: as a failed start did before (no stale burst later) */
+static void cal_start_failed(int r)
+{
+    cal_failed(r);
+    if (need_play()) {
+        G.retry_at = now() + RETRY_US;
+        for (int i = 0; i < SND_STREAMS; ++i)
+            if (st[i].open && !st[i].sh)
+                st[i].tail = st[i].head;
+        G.tone = 0;
+        why("Sound could not start: the audio processor (Calliope) did not start");
+    }
+    if (G.cap_want) {
+        G.cap_want = 0;
+        why("The microphone could not start: the audio processor (Calliope) did not start");
+    }
+}
+
+/* snd's staged boot, one step per poll, then the settle by its deadline (abox_poll once a poll); never a delay loop */
+static void cal_tick(void)
+{
+    int r;
+    if (G.cal_boot) {
+        if ((r = abox_boot_step()) > 0)
+            return;
+        G.cal_boot = 0;
+        cal_unmap();
+        if (r == 0 && abox_state() == ABOX_ST_READY) {
+            G.cal_settling = 1;
+            G.cal_settle_at = now() + CAL_SETTLE_MS * 1000ULL;
+            return;
+        }
+        if (r < 0 && abox_state() == ABOX_ST_FAILED) {
+            cal_start_failed(r);
+            return;
+        }
+        /* someone else's abox_off() or abox_call() during our boot: not ours any more, nothing counted */
+        say("engine: Calliope's boot for media was taken over (state %d)", SL(abox_state()));
+        G.cap_want = 0;
+        G.retry_at = now() + RETRY_US;
+        return;
+    }
+    if (!G.cal_settling)
+        return;
+    if (abox_state() != ABOX_ST_READY) {
+        G.cal_settling = 0;
+        say("engine: Calliope was taken over while it settled (state %d)", SL(abox_state()));
+        G.cap_want = 0;
+        G.retry_at = now() + RETRY_US;
+        return;
+    }
+    if ((r = abox_poll()) < 0) {
+        G.cal_settling = 0;
+        cal_start_failed(r);
+        return;
+    }
+    if (now() < G.cal_settle_at)
+        return;
+    G.cal_settling = 0;
     G.cal_own = 1;
     G.cal_off_at = now() + CAL_IDLE_OFF_US;
     say("engine: Calliope booted for media in %u ms (with %u ms for its post-boot messages)",
-        UL((now() - t0) / 1000U), UL(CAL_SETTLE_MS));
-    return 0;
+        UL((now() - G.cal_t0) / 1000U), UL(CAL_SETTLE_MS));
+}
+
+/* snd's pending boot dropped (the probe's abort / end): Calliope off unless a call has it */
+static void cal_cancel(const char *what)
+{
+    if (!G.cal_boot && !G.cal_settling)
+        return;
+    if (G.cal_boot)
+        cal_unmap();
+    G.cal_boot = G.cal_settling = G.cap_want = 0;
+    G.cal_own = 0;
+    if (abox_vss_started()) {
+        say("engine: Calliope's boot for media handed to the call audio (%s)", what);
+        return;
+    }
+    if (abox_state() != ABOX_ST_CALL) {
+        abox_off();
+        say("engine: Calliope's boot for media cancelled (%s)", what);
+    }
 }
 
 /* RDMA0 through Calliope (abox_media.c); 0 or <0 */
@@ -743,6 +866,8 @@ static int engine_start(void)
     }
     if (cal_avail && !G.cal_bad && apcm_state() == APCM_ST_OFF) {
         if ((r = cal_engine_start(out))) {
+            if (r > 0)
+                return r;                       /* Calliope boots: a later poll starts the stream */
             why("Sound could not start: the audio processor (Calliope) did not start");
             return r;
         }
@@ -767,7 +892,7 @@ static int engine_start(void)
 started:
     G.eng = 1;
     G.cur_out = out;
-    G.fill_idx = 1, G.zero_idx = 0;
+    G.fill_idx = 1, G.zero_idx = 0, G.lead = 1;
     G.moved_at = now(), G.last_pos = APCM_NOPOS;
     G.lim_q16 = 65536;
     G.s_avg = G.l_avg = 0;
@@ -826,20 +951,28 @@ static void engine_fill(uint64_t t)
     if (pos == APCM_NOPOS)
         return;
     uint32_t c = pos / APCM_PERIOD_BYTES, dist = (G.fill_idx + APCM_PERIODS - c) % APCM_PERIODS;
-    if (dist == 0 || dist > W_AHEAD + 1) {
+    /* dist only shrinks between fills (RDMA0 moves on, fill_idx does not): more than after the last fill, or 0, means
+     * RDMA0 passed what was mixed (ran dry). The depth may change between fills: deeper is just mixing more; shallower
+     * lets what is already mixed (the stream's own audio) play out, neither re-mixed nor zeroed */
+    if (dist == 0 || dist > G.lead) {
         G.stats.xruns++;
         G.fill_idx = (c + 1) % APCM_PERIODS;
         dist = 1;
     }
+    uint32_t depth = W_AHEAD;
+    for (int i = 0; i < SND_STREAMS; ++i)
+        if (st[i].open)
+            depth = W_DEEP;
     while (G.zero_idx != c) {
         zero_period(G.zero_idx);
         G.zero_idx = (G.zero_idx + 1) % APCM_PERIODS;
     }
-    while (dist < W_AHEAD + 1) {
+    while (dist < depth + 1) {
         mix_period(G.fill_idx);
         G.fill_idx = (G.fill_idx + 1) % APCM_PERIODS;
         dist++;
     }
+    G.lead = dist;
     if (G.ce)
         cal_sync();
     else
@@ -874,6 +1007,10 @@ static int cal_cap_open(void)
 {
     int r;
     if ((r = cal_up())) {
+        if (r > 0) {
+            G.cap_want = 1;                     /* Calliope boots: snd_poll opens the mic after it */
+            return 0;
+        }
         why("The microphone could not start: the audio processor (Calliope) did not start");
         return r;
     }
@@ -904,7 +1041,7 @@ int snd_cap_open(void)
     int r;
     if (!inited)
         return SND_ESTATE;
-    if (G.cap)
+    if (G.cap || G.cap_want)
         return 0;
     if (G.suspended || in_call()) {
         why("The microphone is busy: a call has the audio hardware");
@@ -984,6 +1121,7 @@ unsigned snd_cap_level(void) { return G.cap_level; }
 
 void snd_cap_close(void)
 {
+    G.cap_want = 0;                             /* a capture still waiting for Calliope's boot never starts */
     if (!G.cap)
         return;
     if (G.cc)
@@ -1006,7 +1144,11 @@ void snd_cap_close(void)
 }
 
 /* ---- the loop ------------------------------------------------------------------------------------------------ */
-int snd_busy(void) { return inited && !G.suspended && (G.eng || G.cap || G.cal_own || need_play()); }
+int snd_busy(void)
+{
+    return inited && !G.suspended &&
+           (G.eng || G.cap || G.cal_own || G.cal_boot || G.cal_settling || G.cap_want || need_play());
+}
 
 void snd_poll(uint64_t t)
 {
@@ -1065,12 +1207,13 @@ void snd_poll(uint64_t t)
     }
     if (G.suspended)
         return;
+    cal_tick();
     if (G.last_poll && t - G.last_poll > LATE_US && G.eng)
         G.stats.late_polls++;
     G.last_poll = t;
     int need = need_play();
     if (need && !G.eng && t >= G.retry_at) {
-        if (engine_start()) {
+        if (engine_start() < 0) {
             G.retry_at = t + RETRY_US;
             for (int i = 0; i < SND_STREAMS; ++i)       /* no stale burst later */
                 if (st[i].open && !st[i].sh)
@@ -1092,6 +1235,11 @@ void snd_poll(uint64_t t)
         else if (t - G.idle_since >= IDLE_STOP_US)
             engine_stop("2 s of silence");
     }
+    if (G.cap_want && !G.cal_boot && !G.cal_settling) {
+        G.cap_want = 0;
+        if (!in_call())
+            (void)cal_cap_open();               /* Calliope is up now; its failures are said there */
+    }
     if (G.cap)
         cap_pull();
 }
@@ -1101,6 +1249,21 @@ void snd_suspend_for_call(void)
     if (!inited)
         return;
     G.suspended = 1;
+    if (G.cal_boot || G.cal_settling) {
+        /* snd's staged boot is finished here (blocking, as the modem's own abox_boot would be): the modem's
+         * abox_boot() then finds Calliope running ("already runs"), or boots afresh after a failure (Calliope off) */
+        int r = 0;
+        if (G.cal_boot) {
+            r = abox_boot_finish();
+            cal_unmap();
+        }
+        G.cal_boot = G.cal_settling = G.cap_want = 0;
+        G.tone = 0;                             /* it never started: no tone after the call */
+        if (r < 0)
+            cal_failed(r);
+        else
+            say("call: Calliope's boot for media finished here; Calliope left running for the call");
+    }
     if (G.ce) {
         /* Calliope stays booted: the modem's abox_boot() then finds it running and uses it (abox_call) */
         G.tone = 0;
@@ -1170,9 +1333,12 @@ static struct {
 /* level 1: the combined RDMA0 sweep (bypass), ~1100 trials of ~8 ms; level 2: Calliope's boot (<= 3.5 s) + 0.3 s +
  * the mic's 1.1 s baseline + 2.1 s earpiece + 1.1 s loudspeaker + the starts and stops */
 static const unsigned budget_of[3] = { 2000, 20000, 14000 };
+#define ENGINE_WAIT_US 4000000ULL               /* the probes' wait for snd's staged Calliope boot + settle */
 
 static int pfinish(int ok, const char *line)
 {
+    if (P.level > 0 && !G.eng && !G.cap)
+        cal_cancel("the probe is done");        /* a boot the probe started and no longer waits for */
     if (!G.eng)
         cal_release("the probe is done");       /* a probe leaves Calliope off (snd booted it for the tones) */
     psay("%s %s", ok ? "PASS" : "FAIL", line);
@@ -1195,6 +1361,7 @@ void drv_audio_abort(void)
     if (G.ce)
         cal_play_stop();
     G.ce = 0;
+    cal_cancel("the probe was aborted");
     cal_release("the probe was aborted");
     apcm_cap_stop();
     apcm_play_stop();
@@ -1492,10 +1659,20 @@ static int probe1c(void)
         P.sid_open = 1;
         feed_zeros();
         G.retry_at = 0;
+        P.ts = now(), P.step = 5;
+        /* fall through */
+    case 5:                                     /* snd boots Calliope a step per poll (~1 s), then starts: <= 4 s */
+        feed_zeros();
         snd_poll(now());
-        if (!G.eng || !G.ce)
-            return cfail(G.eng ? "the engine started in bypass, not through Calliope (Calliope failed before?)"
-                               : "the engine did not start through Calliope (see the snd / cal / abox lines)");
+        if (!G.eng) {
+            if (!G.cal_boot && !G.cal_settling)
+                return cfail("the engine did not start through Calliope (see the snd / cal / abox lines)");
+            if (now() - P.ts > ENGINE_WAIT_US)
+                return cfail("the engine through Calliope did not start within 4 s");
+            return 0;
+        }
+        if (!G.ce)
+            return cfail("the engine started in bypass, not through Calliope (Calliope failed before?)");
         P.tm = 0, P.moved = 0, P.ts = now(), P.step = 1;
         return 0;
     case 1:
@@ -1587,6 +1764,19 @@ static int probe2c(void)
         G.vol[SND_OUT_SPEAKER] = 13;                /* -5 dB: -25 dBFS */
         if (snd_cap_open())
             return cfail("the main mic did not start through Calliope (codec or WDMA1; see the lines above)");
+        P.ts = now(), P.step = 5;
+        /* fall through */
+    case 5:                                     /* the mic waits for snd's staged Calliope boot: <= 4 s */
+        if (!G.cap) {
+            snd_poll(now());
+            if (!G.cap) {
+                if (!G.cap_want)
+                    return cfail("the main mic did not start through Calliope (codec or WDMA1; see the lines above)");
+                if (now() - P.ts > ENGINE_WAIT_US)
+                    return cfail("the main mic through Calliope did not start within 4 s");
+                return 0;
+            }
+        }
         if (!G.cc)
             return cfail("the mic opened in bypass, not through Calliope");
         gz_reset(&P.gb);

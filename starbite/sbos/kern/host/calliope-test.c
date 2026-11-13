@@ -984,7 +984,7 @@ static void test_snd_engine(void)
 
     /* a tone boots Calliope and plays through RDMA0 in snd's geometry */
     CHECK(snd_tone(SND_TONE_TEST) == 0, "snd: tone");
-    polls(300);
+    polls(600);                                             /* staged boot (~100 ms here) + 300 ms settle (was 300) */
     CHECK(logged("engine: Calliope booted for media"), "snd: Calliope not booted");
     CHECK(F.r_starts == 1 && F.r_run, "snd: RDMA0 not running through Calliope");
     int b = find_pcm(0, 20);
@@ -1006,7 +1006,7 @@ static void test_snd_engine(void)
 
     /* a call: snd_suspend_for_call leaves Calliope booted for the modem, which takes it over */
     CHECK(snd_tone(SND_TONE_TEST) == 0, "snd: tone 2");
-    polls(200);
+    polls(600);                                             /* Calliope was off: the staged boot first (was 200) */
     CHECK(F.r_run, "snd: second start");
     snd_suspend_for_call();
     CHECK(!F.r_run && abox_state() == ABOX_ST_READY, "snd: suspend stopped the stream and kept Calliope");
@@ -1032,6 +1032,131 @@ static void test_snd_engine(void)
     abox_off();
     polls(100);
     CHECK(abox_state() == ABOX_ST_OFF && F.violations == 0 && !logged("REFUSED"), "snd: end state");
+    drv_audio_abort();
+}
+
+static void snd_setup(void);
+/* snd's staged Calliope start: nothing blocks a poll; what waits for the boot starts after it (or not, when stopped) */
+static uint64_t worst_poll;
+static void polls_w(unsigned ms)
+{
+    for (unsigned i = 0; i < ms / 5U; ++i) {
+        uint64_t a = F.now;
+        snd_poll(F.now);
+        worst_poll = F.now - a > worst_poll ? F.now - a : worst_poll;
+        F.now += 5000;
+    }
+}
+static void test_snd_staged(void)
+{
+    /* (a) a cold tone (ring): 0 at once, no time spent; no poll of the boot or the settle spends more than 20 ms */
+    snd_setup();
+    uint64_t t0 = F.now;
+    CHECK(snd_tone(SND_TONE_RING) == 0 && F.now == t0, "staged: snd_tone not at once (%llu us)",
+          (unsigned long long)(F.now - t0));
+    CHECK(abox_state() == ABOX_ST_OFF && snd_busy(), "staged: the tone must make snd busy");
+    worst_poll = 0;
+    polls_w(5);
+    CHECK(abox_state() == ABOX_ST_BOOTING && snd_tone_playing() == SND_TONE_RING, "staged: boot not pending (%d)",
+          abox_state());
+    unsigned n = 0;
+    while (abox_state() == ABOX_ST_BOOTING && n++ < 200)
+        polls_w(5);
+    CHECK(abox_state() == ABOX_ST_READY && n >= 6, "staged: %u polls to BOOT_DONE", n);
+    CHECK(!F.r_starts && !logged("engine: Calliope booted for media"), "staged: started before the settle");
+    polls_w(250);
+    CHECK(!F.r_starts, "staged: started 250 ms into the 300 ms settle");
+    polls_w(100);
+    /* (b) the tone plays after the boot + the settle */
+    CHECK(logged("engine: Calliope booted for media in ") && logged("(with 300 ms for its post-boot messages)"),
+          "staged: no booted line");
+    CHECK(F.r_starts == 1 && F.r_run && ring_nonzero() && spk_on, "staged: the ring tone does not play after the boot");
+    CHECK(worst_poll <= 20000, "staged: one snd_poll spent %llu us (> 20 ms)", (unsigned long long)worst_poll);
+    CHECK(logged("abox: boot timing: "), "staged: no boot timing line");
+    CHECK(!F.violations && !logged("REFUSED"), "staged: stray writes");
+    snd_tone_stop();
+    polls(2600);
+    abox_off();
+    polls(10);
+    drv_audio_abort();
+
+    /* a ring stopped (and a stream closed) before Calliope is ready: nothing ever reaches the ring */
+    snd_setup();
+    CHECK(snd_tone(SND_TONE_RING) == 0, "staged stop: tone");
+    int id = snd_open();
+    int16_t f[2 * 512];
+    for (unsigned i = 0; i < 1024; ++i)
+        f[i] = 8000;
+    CHECK(id >= 0 && snd_write(id, f, 512) == 512, "staged stop: stream");
+    polls(30);
+    CHECK(abox_state() == ABOX_ST_BOOTING, "staged stop: not booting");
+    snd_tone_stop();
+    snd_close(id);
+    polls(800);
+    CHECK(abox_state() == ABOX_ST_READY && !F.r_starts && !ring_nonzero() && !spk_on,
+          "staged stop: something played after the stop (starts %u)", F.r_starts);
+    abox_off();
+    polls(10);
+    drv_audio_abort();
+
+    /* (c) a click while cold: 0, dropped (never played late), but it boots Calliope; the next click plays */
+    snd_setup();
+    CHECK(snd_tone(SND_TONE_CLICK) == 0 && !snd_tone_playing(), "staged click: not dropped");
+    CHECK(logged("a click while Calliope is off: dropped") && abox_state() == ABOX_ST_BOOTING && snd_busy(),
+          "staged click: the boot did not start");
+    CHECK(snd_tone(SND_TONE_CLICK) == 0 && !snd_tone_playing(), "staged click: a second click while booting");
+    polls(800);
+    CHECK(abox_state() == ABOX_ST_READY && !F.r_starts && !ring_nonzero(), "staged click: played late");
+    CHECK(snd_tone(SND_TONE_CLICK) == 0 && snd_tone_playing() == SND_TONE_CLICK, "staged click: warm click refused");
+    polls(20);
+    CHECK(F.r_starts == 1 && ring_nonzero(), "staged click: the warm click did not play");
+    polls(2600);
+    abox_off();
+    polls(10);
+    drv_audio_abort();
+
+    /* (d) a call while snd's boot is pending: snd_suspend_for_call finishes it; the modem's abox_boot finds it */
+    snd_setup();
+    CHECK(snd_tone(SND_TONE_NOTIFY) == 0 && snd_cap_open() == 0, "staged call: tone + mic");
+    polls(15);
+    CHECK(abox_state() == ABOX_ST_BOOTING, "staged call: not booting");
+    snd_suspend_for_call();
+    CHECK(abox_state() == ABOX_ST_READY && logged("call: Calliope's boot for media finished here"),
+          "staged call: suspend left state %d", abox_state());
+    CHECK(!snd_busy() && !snd_tone_playing() && !F.r_starts && !F.w_starts && !F.mic_on, "staged call: stray state");
+    F.nlogs = 0;
+    CHECK(abox_boot() == 0 && logged("abox: boot: Calliope already runs") && abox_call(1) == 0,
+          "staged call: the modem's boot / call");
+    polls(100);
+    CHECK(!F.r_starts && !F.w_starts && !logged("Calliope booted for media"), "staged call: snd acted in the call");
+    abox_call(0);
+    snd_resume_after_call();
+    polls(50);
+    CHECK(!F.r_starts && !F.w_starts && !snd_busy(), "staged call: the dropped tone / mic came back");
+    abox_off();
+    polls(10);
+    /* the modem's abox_boot() itself while snd's boot is pending (snd_suspend_for_call missed): finished, not ESTATE */
+    CHECK(snd_tone(SND_TONE_RING) == 0, "staged call 2: tone");
+    polls(15);
+    CHECK(abox_state() == ABOX_ST_BOOTING && abox_boot() == 0 && abox_call(1) == 0, "staged call 2: %s", abox_why());
+    polls(500);
+    CHECK(!F.r_run && logged("Calliope's boot for media was taken over"), "staged call 2: snd played in the call");
+    snd_tone_stop();
+    abox_call(0);
+    abox_off();
+    polls(10);
+    CHECK(F.violations == 0 && !logged("REFUSED"), "staged call: stray writes");
+    drv_audio_abort();
+
+    /* a failed staged boot: counted as before (twice: bypass), what waited is dropped */
+    snd_setup();
+    F.boot_ok = 0;
+    CHECK(snd_tone(SND_TONE_RING) == 0, "staged fail: tone");
+    polls(4000);
+    CHECK(logged("engine: Calliope did not boot: ") && !snd_tone_playing() && abox_state() == ABOX_ST_OFF,
+          "staged fail: state %d", abox_state());
+    CHECK(!(reg(ABOX_PMU + 0x4004) & 0xF), "staged fail: domain left on");
+    F.boot_ok = 1;
     drv_audio_abort();
 }
 
@@ -1100,6 +1225,8 @@ static void test_snd_capture(void)
     snd_setup();
     /* the mic alone boots Calliope (300 ms settle) and records through WDMA1 */
     CHECK(snd_cap_open() == 0, "snd cap: open");
+    CHECK(!F.w_run && snd_busy(), "snd cap: the mic waits for the staged boot, polled");
+    (void)polls_mic(600, 0, 0);                             /* the boot + settle (was: done inside snd_cap_open) */
     CHECK(logged("engine: Calliope booted for media") && logged("(with 300 ms for its post-boot messages)"),
           "snd cap: Calliope booted with the settle");
     CHECK(F.w_run && F.mic_on && cal_capping() && logged("capture: the main mic through Calliope (WDMA1)"),
@@ -1132,7 +1259,7 @@ static void test_snd_capture(void)
     CHECK(abox_state() == ABOX_ST_OFF, "snd cap: Calliope not off 30 s after");
     /* the mic alone: Calliope off 30 s after it closes */
     CHECK(snd_cap_open() == 0, "snd cap: open 2");
-    (void)polls_mic(100, 0, 0);
+    (void)polls_mic(600, 0, 0);                             /* was 100: the staged boot first */
     snd_cap_close();
     polls(1000);
     CHECK(abox_state() == ABOX_ST_READY, "snd cap: Calliope off at once after the mic");
@@ -1140,7 +1267,7 @@ static void test_snd_capture(void)
     CHECK(abox_state() == ABOX_ST_OFF && !(reg(ABOX_PMU + 0x4004) & 0xF), "snd cap: Calliope / domain not off");
     /* a call: the mic stops before it, refused during it; then the modem's Calliope carries it */
     CHECK(snd_cap_open() == 0, "snd cap: open 3");
-    (void)polls_mic(50, 0, 0);
+    (void)polls_mic(600, 0, 0);                             /* was 50: the staged boot first */
     snd_suspend_for_call();
     CHECK(!F.w_run && !F.mic_on && !cal_capping() && abox_state() == ABOX_ST_READY &&
           logged("call: the mic's capture stopped; Calliope left running for the call"), "snd cap: suspend");
@@ -1165,7 +1292,7 @@ static void test_snd_capture(void)
     abox_off();
     /* Calliope stops under the mic */
     CHECK(snd_cap_open() == 0, "snd cap: open 5");
-    (void)polls_mic(50, 0, 0);
+    (void)polls_mic(600, 0, 0);                             /* was 50: the staged boot first */
     abox_off();
     polls(20);
     CHECK(logged("Calliope stopped while the mic recorded: capture dropped") && !cal_capping() && !F.mic_on,
@@ -1224,7 +1351,7 @@ static void test_snd_probe(void)
     /* the user's settings back: unmuted, volume 7, a tone plays out loud again */
     CHECK(snd_get_volume(SND_OUT_SPEAKER) == 7, "snd L1: volume");
     CHECK(snd_tone(SND_TONE_TEST) == 0, "snd L1: tone after");
-    polls(300);
+    polls(600);                                             /* was 300: the staged boot first */
     CHECK(ring_nonzero() && spk_on, "snd L1: muted / silent left on");
     snd_tone_stop();
     polls(2600);
@@ -1300,6 +1427,25 @@ static void test_probe_order(void)
     }
 }
 
+/* modem-core's guard (abox_vss_started): VSS started on a Calliope snd booted for media: snd's idle-off leaves it */
+static void test_vss_guard(void)
+{
+    snd_setup();
+    CHECK(snd_tone(SND_TONE_TEST) == 0, "vss: tone");
+    polls(800);
+    CHECK(abox_state() == ABOX_ST_READY && F.r_run, "vss: Calliope not up for the tone (state %d)", abox_state());
+    snd_tone_stop();
+    polls(2600);
+    int r = abox_vss_start();
+    CHECK(r == 0 && abox_vss_started(), "vss: START_VSS %d", r);
+    polls(31000);
+    CHECK(abox_state() == ABOX_ST_READY && logged("Calliope left running"), "vss: snd turned off the call's Calliope (%d)",
+          abox_state());
+    CHECK(!snd_busy(), "vss: snd still busy");
+    abox_off();
+    drv_audio_abort();
+}
+
 int main(int argc, char **argv)
 {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
@@ -1313,10 +1459,12 @@ int main(int argc, char **argv)
     test_failures();
     test_hooks();
     test_snd_engine();
+    test_snd_staged();
     test_goertzel();
     test_snd_capture();
     test_snd_probe();
     test_probe_order();
+    test_vss_guard();
     printf("calliope host test: %d checks, %d failed\n", checks, fails);
     free(F.w);
     free(F.rmem);

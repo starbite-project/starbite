@@ -213,6 +213,9 @@ static struct {
     int state, err;
     uint8_t *rm;                        /* CPU pointer to abox_rmem */
     int pd_touched, cpu_started, mmu_set, pins_set, call_on, vss_started, boot_done, dump_win;
+    unsigned bstage, bwait_polled;      /* the staged boot: the next stage; step 12 looked and waits */
+    uint32_t bwaited;                   /* step 12's wait without a HAL clock (100 us a look) */
+    uint64_t bt0, bt_files, bt_dram, bt12, bt_max;  /* the boot's timing (HAL clock; 0 without one) */
     int vss_magic, vss_timeout;             /* Calliope's log: "CP Magic Code is ready" / "VSS init timed out" */
     unsigned qch_set;                   /* bit i: qch_regs[i] CLOCK_REQ set by us */
     uint32_t version, sram_bytes;
@@ -1030,27 +1033,65 @@ static long load(const char *name, uint64_t off, uint32_t cap, int required)
     return got;
 }
 
-static int step_files(void)
+/* the staged boot's stages (abox_boot_step: one per call) */
+#define BST_SRAM 0U                     /* 1: calliope_sram.bin */
+#define BST_DRAM 1U                     /* 1: calliope_dram.bin (one VENDOR read of 2.2 MB) + its 18 MiB zero fill */
+#define BST_REST 2U                     /* 1: calliope_iva.bin + the ext_bins */
+#define BST_HW1  3U                     /* 2-4: power, CPU stopped, clocks */
+#define BST_HW2  4U                     /* 5-9: SysMMU, GIC, pins, routes, SRAM */
+#define BST_HW3  5U                     /* 10-11: CPU on, pads */
+#define BST_WAIT 6U                     /* 12 (one look per call), then 13 in the call that sees BOOT_DONE */
+static uint64_t bnow(void) { return H.now_us ? H.now_us(H.ctx) : 0; }
+
+/* step 1 in three stages (abox_boot_step): calliope_sram.bin; calliope_dram.bin + the rest of its 18 MiB zeroed;
+ * calliope_iva.bin + the ext_bins. Nothing but abox_rmem is touched. 0, or the boot's error (state FAILED). */
+static int files_fail(int r)
 {
-    long sram, dram, iva;
+    struct lb l;
+    S.state = ABOX_ST_FAILED;
+    S.err = r < 0 && r != -1 ? r : ABOX_EMMU;
+    if (r == -1) {
+        lb_init(&l);
+        lb_s(&l, "abox: 1/13 files: abox_rmem is not mappable as RAM: nothing touched");
+        sayw(&l);
+    }
+    return S.err;
+}
+
+static int stage_sram(void)
+{
+    long sram;
     S.rm = (uint8_t *)H.ram(H.ctx, C.rmem_base, C.rmem_size);
     if (!S.rm)
-        return -1;
+        return files_fail(-1);
     S.dump_win = C.rmem_size >= ABOX_RM_DUMP + ABOX_RM_DRAM_SZ;
     sram = load("calliope_sram.bin", ABOX_RM_RDMA4, ABOX_SRAM_SIZE, 1);   /* scratch until step 9 */
     if (sram < 0)
-        return ABOX_EFILE;
+        return files_fail(ABOX_EFILE);
     S.sram_bytes = (uint32_t)sram;
-    dram = load("calliope_dram.bin", ABOX_RM_DRAM, ABOX_RM_DRAM_SZ, 1);
+    return 0;
+}
+
+static int stage_dram(void)
+{
+    uint64_t t = bnow();
+    long dram = load("calliope_dram.bin", ABOX_RM_DRAM, ABOX_RM_DRAM_SZ, 1);
     if (dram < 0)
-        return ABOX_EFILE;
+        return files_fail(ABOX_EFILE);
     memset(rm(ABOX_RM_DRAM + (uint64_t)dram, ABOX_RM_DRAM_SZ - (uint64_t)dram), 0, ABOX_RM_DRAM_SZ - (uint64_t)dram);
-    iva = load("calliope_iva.bin", ABOX_RM_IVA, 0x80000U, 0);
+    S.bt_dram = bnow() - t;
+    return 0;
+}
+
+static int stage_rest(void)
+{
+    long iva = load("calliope_iva.bin", ABOX_RM_IVA, 0x80000U, 0);
     if (iva < 0)
         iva = 0;
     memset(rm(ABOX_RM_IVA + (uint64_t)iva, SECT - (uint64_t)iva), 0, SECT - (uint64_t)iva);
     for (unsigned i = 0; i < sizeof(ext_bins) / sizeof(ext_bins[0]); ++i)
         (void)load(ext_bins[i].name, ABOX_RM_DRAM + ext_bins[i].off, ABOX_RM_DRAM_SZ - ext_bins[i].off, 0);
+    S.bt_files = bnow();
     return 0;
 }
 
@@ -1198,37 +1239,12 @@ static int step_clocks(struct lb *l)
     return 1;
 }
 
-int abox_boot(void)
+/* steps 2-4: power, ABOX's CPU stopped, clocks; 0 or the error (fail(): torn down, state FAILED) */
+static int stage_hw1(void)
 {
     struct lb l;
     uint32_t took = 0;
-    int r;
-    if (!have_hal) {
-        set_why("no HAL: abox_hal_set() first");
-        return ABOX_ESTATE;
-    }
-    if (S.state == ABOX_ST_READY || S.state == ABOX_ST_CALL) {
-        say("abox: boot: Calliope already runs");
-        return 0;
-    }
-    if (S.state == ABOX_ST_BOOTING)
-        return ABOX_ESTATE;
-    memset(&S, 0, sizeof(S));
-    S.state = ABOX_ST_BOOTING;
-    S.gear = GEAR_MIN;
     lb_init(&l);
-
-    /* 1: files (no hardware touched) */
-    r = step_files();
-    if (r) {
-        S.state = ABOX_ST_FAILED;
-        S.err = r < 0 && r != -1 ? r : ABOX_EMMU;
-        if (r == -1) {
-            lb_s(&l, "abox: 1/13 files: abox_rmem is not mappable as RAM: nothing touched");
-            sayw(&l);
-        }
-        return S.err;
-    }
 
     /* 2: the AUD power domain (flexpmu aud_on), then the DTZPC restore (exynos_pd_tz_restore) */
     if (pd_is_on() && pd_left_on) {
@@ -1280,6 +1296,15 @@ int abox_boot(void)
     /* 4: clocks */
     if (!step_clocks(&l))
         return fail(ABOX_ECLOCK, &l);
+
+    return 0;
+}
+
+/* steps 5-9: SysMMU, GIC, pins, routes, the firmware into SRAM */
+static int stage_hw2(void)
+{
+    struct lb l;
+    lb_init(&l);
 
     /* 5: SysMMU */
     if (!step_sysmmu()) {
@@ -1340,6 +1365,16 @@ int abox_boot(void)
         ram_sync();
     }
 
+    return 0;
+}
+
+/* steps 10-11: the CPU on, pads out of retention; the BOOT_DONE wait starts */
+static int stage_hw3(void)
+{
+    struct lb l;
+    uint32_t took = 0;
+    lb_init(&l);
+
     /* 10: the CPU (abox_request_dram_on(true), abox_cpu_power(true), abox_cpu_enable(true): 1 s) */
     m32(ABOX_SFR + SFR_SYSPOWER_CTRL, 1U, 1U);
     m32(ABOX_PMU + ABOX_PMU_CPU_CONF, 1U, 1U);
@@ -1359,53 +1394,22 @@ int abox_boot(void)
     m32(ABOX_PMU + ABOX_PMU_PAD_RET, 1U << 28, 1U << 28);
     m32(ABOX_PMU + ABOX_PMU_GPIO_MODE, 1U, 1U);
     say("abox: 11/13 pads: retention released");
+    S.bt12 = bnow();
+    S.bwaited = 0;
+    return 0;
+}
 
-    /* 12: BOOT_DONE ("Calliope is ready to sing") */
-    uint32_t waited = 0, limit = C.boot_timeout_ms * 1000U;
-    while (!S.boot_done) {
-        rx_take();
-        rx_process();
-        fw_log_flush();
-        if (S.boot_done || S.fault)
-            break;
-        if (r32(ABOX_SYSMMU + MMU_INT_STATUS)) {
-            lb_s(&l, "abox: 12/13 ready: a SysMMU fault at ABOX address ");
-            lb_x(&l, r32(ABOX_SYSMMU + MMU_FAULT_ADDR));
-            lb_s(&l, " (info ");
-            lb_x(&l, r32(ABOX_SYSMMU + MMU_FAULT_INFO));
-            lb_s(&l, ") before BOOT_DONE");
-            return fail(ABOX_EFAULT, &l);
-        }
-        if (waited >= limit)
-            break;
-        H.delay_us(H.ctx, 100);
-        waited += 100;
-    }
-    fw_line_out();
-    if (S.fault) {
-        lb_s(&l, "abox: 12/13 ready: Calliope reported a fault while booting");
-        return fail(ABOX_EFAULT, &l);
-    }
-    if (!S.boot_done) {
-        lb_s(&l, "abox: 12/13 ready: no BOOT_DONE within ");
-        lb_u(&l, C.boot_timeout_ms);
-        lb_s(&l, " ms (ABOX PC ");
-        lb_x(&l, r32(ABOX_SFR + SFR_CPU_PC));
-        lb_s(&l, ", messages ");
-        lb_u(&l, S.ipc_recv);
-        lb_s(&l, ")");
-        return fail(ABOX_ETIME, &l);
-    }
-    S.state = ABOX_ST_READY;
-    lb_s(&l, "abox: 12/13 ready: Calliope is ready to sing (version ");
-    lb_ver(&l, S.version);
-    lb_s(&l, ") after ");
-    lb_u(&l, waited / 1000U);
-    lb_s(&l, " ms");
-    sayl(&l);
+/* how long step 12 has waited: the HAL's clock, or (no now_us) the 100 us each pending poll stands for */
+static uint32_t waited_us(void) { return H.now_us ? (uint32_t)(bnow() - S.bt12) : S.bwaited; }
+
+/* 13: abox_boot_done_work_func(): RESUME, abox_restore_data(), gear MIN, DRAM off; 0 or the error */
+static int stage_restore(void)
+{
+    struct lb l;
+    int r;
+    uint64_t t = bnow();
     lb_init(&l);
 
-    /* 13: abox_boot_done_work_func(): RESUME, abox_restore_data(), gear MIN, DRAM off */
     msg_sys(SYS_RESUME, 0, 0, 0);
     r = ipc_send("RESUME");
     for (uint32_t i = 0; !r && i < 9; ++i) {                    /* SET_MIXER..INMUX4_SAMPLE_RATE: 48000 */
@@ -1449,7 +1453,150 @@ int abox_boot(void)
     lb_ver(&l, S.version);
     lb_s(&l, " ready, VSS not started");
     sayw(&l);
+    if (H.now_us) {                                             /* where the boot's time went (a separate line) */
+        uint64_t e = bnow();
+        lb_init(&l);
+        lb_s(&l, "abox: boot timing: ");
+        lb_u(&l, (e - S.bt0) / 1000U);
+        lb_s(&l, " ms in all: files ");
+        lb_u(&l, (S.bt_files - S.bt0) / 1000U);
+        lb_s(&l, " ms (calliope_dram.bin ");
+        lb_u(&l, S.bt_dram / 1000U);
+        lb_s(&l, " ms), steps 2-11 ");
+        lb_u(&l, (S.bt12 - S.bt_files) / 1000U);
+        lb_s(&l, " ms, BOOT_DONE wait ");
+        lb_u(&l, (t - S.bt12) / 1000U);
+        lb_s(&l, " ms, restore ");
+        lb_u(&l, (e - t) / 1000U);
+        lb_s(&l, " ms; longest single stage ");
+        lb_u(&l, (S.bt_max > e - t ? S.bt_max : e - t) / 1000U);
+        lb_s(&l, " ms");
+        sayl(&l);
+    }
     return 0;
+}
+
+/* 12: BOOT_DONE ("Calliope is ready to sing"), one look per call: 1 pending, 0 READY (13 done in the same call, so
+ * nobody sees READY before the restore), < 0 the error */
+static int stage_wait(void)
+{
+    struct lb l;
+    lb_init(&l);
+    S.bwait_polled = 0;
+    if (!S.boot_done) {
+        rx_take();
+        rx_process();
+        fw_log_flush();
+        if (!S.boot_done && !S.fault) {
+            if (r32(ABOX_SYSMMU + MMU_INT_STATUS)) {
+                lb_s(&l, "abox: 12/13 ready: a SysMMU fault at ABOX address ");
+                lb_x(&l, r32(ABOX_SYSMMU + MMU_FAULT_ADDR));
+                lb_s(&l, " (info ");
+                lb_x(&l, r32(ABOX_SYSMMU + MMU_FAULT_INFO));
+                lb_s(&l, ") before BOOT_DONE");
+                return fail(ABOX_EFAULT, &l);
+            }
+            if (waited_us() < C.boot_timeout_ms * 1000U) {
+                S.bwait_polled = 1;
+                if (!H.now_us)
+                    S.bwaited += 100;
+                return 1;
+            }
+        }
+    }
+    uint32_t waited = waited_us();
+    fw_line_out();
+    if (S.fault) {
+        lb_s(&l, "abox: 12/13 ready: Calliope reported a fault while booting");
+        return fail(ABOX_EFAULT, &l);
+    }
+    if (!S.boot_done) {
+        lb_s(&l, "abox: 12/13 ready: no BOOT_DONE within ");
+        lb_u(&l, C.boot_timeout_ms);
+        lb_s(&l, " ms (ABOX PC ");
+        lb_x(&l, r32(ABOX_SFR + SFR_CPU_PC));
+        lb_s(&l, ", messages ");
+        lb_u(&l, S.ipc_recv);
+        lb_s(&l, ")");
+        return fail(ABOX_ETIME, &l);
+    }
+    S.state = ABOX_ST_READY;
+    lb_s(&l, "abox: 12/13 ready: Calliope is ready to sing (version ");
+    lb_ver(&l, S.version);
+    lb_s(&l, ") after ");
+    lb_u(&l, waited / 1000U);
+    lb_s(&l, " ms");
+    sayl(&l);
+    return stage_restore();
+}
+
+/* the staged boot (abox.h): abox_boot_start, then abox_boot_step until it is no longer pending */
+int abox_boot_start(void)
+{
+    if (!have_hal) {
+        set_why("no HAL: abox_hal_set() first");
+        return ABOX_ESTATE;
+    }
+    if (S.state == ABOX_ST_READY || S.state == ABOX_ST_CALL) {
+        say("abox: boot: Calliope already runs");
+        return 0;
+    }
+    if (S.state == ABOX_ST_BOOTING)
+        return ABOX_ESTATE;
+    memset(&S, 0, sizeof(S));
+    S.state = ABOX_ST_BOOTING;
+    S.gear = GEAR_MIN;
+    S.bt0 = bnow();
+    return 1;
+}
+
+int abox_boot_step(void)
+{
+    if (!have_hal || S.state != ABOX_ST_BOOTING)
+        return S.state == ABOX_ST_READY || S.state == ABOX_ST_CALL ? 0 : S.state == ABOX_ST_FAILED && S.err ? S.err
+                                                                                                         : ABOX_ESTATE;
+    uint64_t t = bnow();
+    int r;
+    switch (S.bstage) {
+    case BST_SRAM: r = stage_sram(); break;
+    case BST_DRAM: r = stage_dram(); break;
+    case BST_REST: r = stage_rest(); break;
+    case BST_HW1: r = stage_hw1(); break;
+    case BST_HW2: r = stage_hw2(); break;
+    case BST_HW3: r = stage_hw3(); break;
+    default: r = stage_wait(); break;
+    }
+    if (bnow() - t > S.bt_max)
+        S.bt_max = bnow() - t;
+    if (r < 0)
+        return r;
+    if (S.bstage < BST_WAIT) {
+        S.bstage++;
+        return 1;
+    }
+    return r;
+}
+
+int abox_boot_finish(void)
+{
+    int r;
+    if (!have_hal || S.state != ABOX_ST_BOOTING)
+        return abox_boot_step();
+    while ((r = abox_boot_step()) > 0)
+        if (S.bwait_polled)                                     /* only between BOOT_DONE looks, as before */
+            H.delay_us(H.ctx, 100);
+    return r;
+}
+
+int abox_boot(void)
+{
+    if (have_hal && S.state == ABOX_ST_BOOTING) {
+        /* a staged boot (snd's) is pending: the caller (a call) gets it finished, never ABOX_ESTATE */
+        say("abox: boot: a staged boot is pending: finished here");
+        return abox_boot_finish();
+    }
+    int r = abox_boot_start();
+    return r <= 0 ? r : abox_boot_finish();
 }
 
 /* ---- VSS ------------------------------------------------------------------------------------------------------------ */
@@ -1840,6 +1987,13 @@ int abox_pd_on(void)
 int abox_vss_ready(void)
 {
     return S.vss_magic ? 1 : S.vss_timeout ? -1 : 0;
+}
+
+/* START_VSS was sent and Calliope still runs (READY or CALL): the CP's voice path is on ABOX, so ABOX is the modem's
+ * (snd.c leaves it running instead of turning it off) */
+int abox_vss_started(void)
+{
+    return S.vss_started && (S.state == ABOX_ST_READY || S.state == ABOX_ST_CALL);
 }
 
 void abox_pd_off(void)

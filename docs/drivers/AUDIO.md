@@ -384,3 +384,19 @@ ring (otherwise a SysMMU fault). It covers:
 - the abox.c hooks' refusals;
 - snd's Calliope engine: boot, play, idle stop, off after 30 s, call suspend / resume, the modem's `abox_off`, and
   a missed suspend.
+
+## 11. On the phone, 2026-11-13: sound works (runs 6-7f)
+- Run 6: RDMA0 moves through Calliope (191,610 B/s of 192,000), after a 300 ms settle following BOOT_DONE. Calliope
+  sends no period POINTER messages; snd takes the position from RDMA0 STATUS.
+- Run 7: capture through Calliope (IPC_PCMCAPTURE, WDMA1 at IOVA 0x92100000, UAIF0 MIC -> NSRC0 -> SIFM0) moves at
+  191,743 B/s; the bypass capture never did.
+- Runs 7b-7c: snd boots Calliope itself (it now hands abox.c its HAL); a false 250 ms stall right after a ~1 s boot
+  (unsigned underflow) fixed; snd's level 1 passes.
+- Runs 7c-7e: the MAX98512 pair never answered through USI07's HSI2C (TRANS_STATUS 00080001: stuck in START, with
+  the gates held on too), but by hand on gpp4-4/5 both dies ACK (0x39, 0x3A; an empty 0x10 does not). amp.c's
+  transfers now go over that bit-banged bus (amp_bb_xfer, amp_use_bb = 1); the audio stays I2S on UAIF1.
+- Run 7f: the 1 kHz test tone heard by the main mic through Calliope: earpiece +38.3 dB over the room baseline,
+  loudspeaker +68.7 dB (amp level 0). audio=P at levels 0, 1, 2.
+- Open: after a capture, abox_off leaves the AUD domain on (AUD_STAT 0x10000f) although every ABOX SFR we touch is
+  back (CTRL0 enables off, SYSPOWER 0, QCH_DISABLE 0); modem-core's abox.c (claude/sbos-calls 2fcec962, e590856d)
+  power-cycles such a domain before the next boot. Why the HSI2C does not start on USI07 is not known yet.
