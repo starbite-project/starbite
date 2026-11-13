@@ -1,0 +1,304 @@
+From: starbite <starbite@local>
+Date: Fri, 13 Nov 2026 20:30:00 +0200
+Subject: [PATCH] patch: 0445-sweet-hid-trackpad.patch - macOS touch screen as a real
+ trackpad (sweettouchrel=2, the new default): one finger moves the pointer by relative motion
+ (light acceleration), tap = left click (after a 250 ms double-tap window), tap then touch-and-move
+ = drag, tap tap = double click, two-finger tap = right click, two-finger drag = scroll;
+ sweettouchrel=1 keeps 0397's direct touch
+
+S3z2 2026-11-13: the menu bar is on the panel; the user asked for the touch screen to work like a
+trackpad instead of the pointer jumping under the finger. Applies on 0444 (seq-12377 line).
+Kernel seq1p = seq1o + this.
+---
+
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-13 20:21:04
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-13 20:21:04
+@@ -370,6 +370,9 @@
+ private:
+ 	void mouseTouch(int finger, bool down, int x, int y, IOFixed nx, IOFixed ny);
+ 	void trackpadTouch(int finger, bool down, int x, int y);
++	/* 0445: a real trackpad (sweettouchrel=2, the macOS default): relative motion, tap = click */
++	void padTouch(int finger, bool down, int x, int y);
++	void padTick(void);
+ 	/* sweettouchtest=N: N s after boot, then every 60 s, a synthetic one-finger drag (0390): the
+ 	 * trackpad path checked on an unattended boot (the frame dumps show the pointer move) */
+ 	static void touchTestFired(OSObject *owner, IOTimerEventSource *sender);
+@@ -396,6 +399,7 @@
+ };
+ OSDefineMetaClassAndStructors(SweetHIDTouch, IOHIDEventService);
+ 
++static int sweet_touch_mode(void);
+ static SweetHIDButtons *gSweetButtons;
+ static SweetHIDTouch *gSweetTouch;
+ 
+@@ -611,8 +615,10 @@
+ 		}
+ 	}
+ 	if (fMouse) {
+-		IOLog("SWEET HID: touch registered as an absolute pointer (macOS): %dx%d panel, %dx%d shown strip at %d,%d; "
+-		    "scroll %d px/line\n", fPanelW, fPanelH, fLogicalW, fLogicalH, -fOffX, -fOffY, fScrollStep);
++		IOLog("SWEET HID: touch registered as a pointer (macOS, sweettouchrel=%d: %s): %dx%d panel, %dx%d shown strip "
++		    "at %d,%d; scroll %d px/line\n", sweet_touch_mode(), sweet_touch_mode() == 2 ? "trackpad" :
++		    sweet_touch_mode() == 1 ? "direct touch" : "absolute", fPanelW, fPanelH, fLogicalW, fLogicalH, -fOffX, -fOffY,
++		    fScrollStep);
+ 	} else {
+ 		IOLog("SWEET HID: touch registered\n");
+ 	}
+@@ -635,15 +641,26 @@
+  * moves the pointer by the finger's movement (panel pixels -> the 828x1792 canvas' points), a short
+  * tap (< 300 ms, < 40 px of travel) clicks button 1. Other fingers are ignored.
+  */
+-static bool
+-sweet_touch_relative(void)
++/*
++ * 0445: sweettouchrel=2 (the default now) is a real trackpad (padTouch below): the user asked for the
++ * touch screen to work like a Mac trackpad, not a pointer that jumps under the finger (S3z2
++ * 2026-11-13). =1 keeps 0397's direct touch, =0 the absolute pointer.
++ */
++static int
++sweet_touch_mode(void)
+ {
+ 	static int rel = -1;
+ 	if (rel < 0) {
+-		rel = 1;
++		rel = 2;
+ 		PE_parse_boot_argn("sweettouchrel", &rel, sizeof(rel));
+ 	}
+-	return rel != 0;
++	return rel;
++}
++
++static bool
++sweet_touch_relative(void)
++{
++	return sweet_touch_mode() != 0;
+ }
+ 
+ void
+@@ -727,6 +744,11 @@
+ 	uint64_t now = mach_absolute_time();
+ 	bool again;
+ 
++	if (sweet_touch_mode() == 2) {
++		padTick();
++		return;
++	}
++
+ 	IOLockLock(fLock);
+ 	uint32_t seq = __atomic_load_n(&sweet_fb_cur_seq, __ATOMIC_ACQUIRE);
+ 	if (st.cal == 0) {
+@@ -911,16 +933,214 @@
+ 	}
+ 	if (kick && fSteer) {
+ 		fSteer->setTimeoutMS(1);
++	}
++}
++
++/*
++ * 0445 trackpad (sweettouchrel=2): the whole touch screen is a trackpad, the pointer stays where it is
++ * until a finger moves it.
++ *   one finger moving: the pointer moves by the finger's movement (panel pixels -> canvas points, x1
++ *     slow, up to x2.5 for fast swipes: a light acceleration);
++ *   one-finger tap (< 250 ms, < 30 px of travel): a left click where the pointer is, sent 250 ms after
++ *     the lift unless the finger comes back first: tap, then touch and move = drag (button held until
++ *     that finger lifts), tap, tap = double click;
++ *   two-finger tap: a right click; two fingers moving: scroll (natural direction, 24 px a line).
++ */
++static struct {
++	uint32_t downMask;
++	int primary, lastX, lastY, travel, maxFingers;
++	uint64_t downAt;
++	int64_t fracX, fracY;
++	int accX, accY;
++	bool dragging, armDrag;
++	int pendingClicks;              /* one-finger taps waiting for the double-tap window */
++	uint64_t pendingAt;
++	UInt32 buttons;
++} pad = { 0, -1 };
++
++static int
++sweet_popcount(uint32_t v)
++{
++	int n = 0;
++	for (; v; v &= v - 1) {
++		n++;
++	}
++	return n;
++}
++
++void
++SweetHIDTouch::padTouch(int finger, bool down, int x, int y)
++{
++	uint64_t now = mach_absolute_time();
++	IOHIDEvent *events[4] = { NULL, NULL, NULL, NULL };
++	int ne = 0;
++	const char *what = NULL;
++	bool arm = false;
++	int cw, ch;
++	sweet_canvas(&cw, &ch);
++	int strip = fLogicalW > 0 ? fLogicalW : fPanelW;
++
++	IOLockLock(fLock);
++	uint32_t bit = 1u << finger;
++	bool was = (pad.downMask & bit) != 0;
++	if (down) {
++		pad.downMask |= bit;
++	} else {
++		pad.downMask &= ~bit;
++	}
++	int n = sweet_popcount(pad.downMask);
++	if (down && !was) {
++		if (pad.primary < 0) {
++			pad.primary = finger;
++			pad.lastX = x;
++			pad.lastY = y;
++			pad.travel = 0;
++			pad.maxFingers = 1;
++			pad.downAt = now;
++			pad.fracX = pad.fracY = 0;
++			pad.accX = pad.accY = 0;
++			uint64_t ns = 0;
++			absolutetime_to_nanoseconds(now - pad.pendingAt, &ns);
++			pad.armDrag = pad.pendingClicks > 0 && ns < 250000000ULL;
++			what = pad.armDrag ? "down after a tap" : "down";
++		} else if (n > pad.maxFingers) {
++			pad.maxFingers = n;
++			pad.accX = pad.accY = 0;
++			what = "another finger";
++		}
++	} else if (down && finger == pad.primary) {
++		int dx = x - pad.lastX, dy = y - pad.lastY;
++		pad.lastX = x;
++		pad.lastY = y;
++		int speed = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
++		pad.travel += speed;
++		if (n >= 2) {
++			pad.accX += dx;
++			pad.accY += dy;
++			int sx = pad.accX / 24, sy = pad.accY / 24;
++			if (sx || sy) {
++				pad.accX -= sx * 24;
++				pad.accY -= sy * 24;
++				events[ne++] = IOHIDEvent::scrollEvent(now, -sx, -sy, 0);
++			}
++		} else if (speed) {
++			if (pad.armDrag && !pad.dragging && pad.travel > 10) {
++				/* tap, then touch and move: drag instead of the pending click */
++				pad.armDrag = false;
++				pad.pendingClicks = 0;
++				pad.dragging = true;
++				pad.buttons = 1;
++				events[ne++] = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 1, 0);
++				what = "drag start";
++			}
++			int64_t mult = 100 + (speed * 5 > 150 ? 150 : speed * 5);     /* percent */
++			int64_t unit = (int64_t)strip * 100;
++			pad.fracX += (int64_t)dx * cw * mult;
++			pad.fracY += (int64_t)dy * cw * mult;
++			int32_t ex = (int32_t)(pad.fracX / unit), ey = (int32_t)(pad.fracY / unit);
++			pad.fracX -= (int64_t)ex * unit;
++			pad.fracY -= (int64_t)ey * unit;
++			if (ex || ey) {
++				events[ne++] = IOHIDEvent::relativePointerEvent(now, ex, ey, 0, pad.buttons, pad.buttons);
++			}
++		}
++	} else if (!down && was && pad.downMask == 0 && pad.primary >= 0) {
++		uint64_t ns = 0;
++		absolutetime_to_nanoseconds(now - pad.downAt, &ns);
++		bool tap = ns < 250000000ULL && pad.travel < 30;
++		if (pad.dragging) {
++			events[ne++] = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 0, pad.buttons);
++			pad.buttons = 0;
++			pad.dragging = false;
++			what = "drag end";
++		} else if (pad.maxFingers >= 2) {
++			if (tap || (ns < 350000000ULL && pad.travel < 40)) {
++				events[ne++] = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 2, 0);
++				events[ne++] = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 0, 2);
++				what = "two-finger tap = right click";
++			} else {
++				what = "scroll end";
++			}
++			pad.pendingClicks = 0;
++		} else if (tap) {
++			pad.pendingClicks++;
++			pad.pendingAt = now;
++			arm = true;
++			what = pad.pendingClicks > 1 ? "tap (double)" : "tap";
++		} else {
++			what = "up";
++		}
++		pad.primary = -1;
++		pad.armDrag = false;
++	} else if (!down && was && finger == pad.primary) {
++		for (int i = 0; i < SWEET_TOUCH_FINGERS; i++) {
++			if (pad.downMask & (1u << i)) {
++				pad.primary = i;
++				pad.lastX = x;
++				pad.lastY = y;
++				break;
++			}
++		}
+ 	}
++	IOLockUnlock(fLock);
++	if (what) {
++		IOLog("SWEET HID: pad %s (finger %d, %d down) at %d,%d travel %d\n", what, finger, n, x, y, pad.travel);
++	}
++	for (int i = 0; i < ne; i++) {
++		dispatchEvent(events[i]);
++		events[i]->release();
++	}
++	if (arm && fSteer) {
++		fSteer->setTimeoutMS(260);
++	}
+ }
+ 
++/* the timer: send the pending tap clicks once the double-tap window is over and no finger is down */
+ void
++SweetHIDTouch::padTick(void)
++{
++	uint64_t now = mach_absolute_time();
++	int clicks = 0;
++	IOLockLock(fLock);
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(now - pad.pendingAt, &ns);
++	if (pad.pendingClicks > 0 && pad.downMask == 0 && ns >= 240000000ULL) {
++		clicks = pad.pendingClicks > 2 ? 2 : pad.pendingClicks;
++		pad.pendingClicks = 0;
++	}
++	bool again = pad.pendingClicks > 0;
++	IOLockUnlock(fLock);
++	for (int i = 0; i < clicks; i++) {
++		IOHIDEvent *d = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 1, 0);
++		IOHIDEvent *u = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 0, 1);
++		if (d) {
++			dispatchEvent(d);
++			d->release();
++		}
++		if (u) {
++			dispatchEvent(u);
++			u->release();
++		}
++	}
++	if (clicks) {
++		IOLog("SWEET HID: pad click x%d\n", clicks);
++	}
++	if (again && fSteer) {
++		fSteer->setTimeoutMS(50);
++	}
++}
++
++void
+ SweetHIDTouch::mouseTouch(int finger, bool down, int x, int y, IOFixed nx, IOFixed ny)
+ {
+ 	uint64_t now = mach_absolute_time();
+ 	IOHIDEvent *event = NULL, *scroll = NULL;
+ 	const char *what = NULL;
+ 
++	if (sweet_touch_mode() == 2) {
++		padTouch(finger, down, x, y);
++		return;
++	}
+ 	if (sweet_touch_relative()) {
+ 		trackpadTouch(finger, down, x, y);
+ 		return;
