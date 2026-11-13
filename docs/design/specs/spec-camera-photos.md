@@ -165,8 +165,10 @@ is listed in §7.
     one is set.
 - **Tap the viewfinder** = focus/exposure at the point (C4). **Touch-and-hold** = **AE/AF Lock** (A).
 - **Pinch** = zoom (A); **touch-and-hold a zoom button** opens the zoom dial (A; E look: an arc dial 390 wide over the
-  bottom of the frame, ticks every 0.1×, labels at the lens stops). Without multi-touch, the dial is the only
-  continuous zoom.
+  bottom of the frame, ticks every 0.1×, labels at the lens stops). **Pinch is required** (multi-touch is in the trunk:
+  finger 0 through `sh_touch`, fingers 1.. through `sh_touch_finger(finger, ph, x, y, t_ms)`, shell.h). Zoom =
+  start zoom × (current finger distance / start distance), clamped to the lens range; the dial and the zoom pill
+  follow it live.
 - **Flip:** switch front / rear (the preview blurs out and in, motion table).
 - **Thumbnail:** opens the Photos viewer on the newest photo (C-variant of P4). Its top-left back circle
   (chevron) returns to Camera, and so does a swipe down (E).
@@ -297,7 +299,8 @@ is listed in §7.
 **Interactions**
 - **Pinch in / out** = column levels **1 · 3 · 5 · 9**: 3 is the default, pinch out goes 5 → 9, pinch in from 3 goes
   to **1** (full width, aspect-correct). (E: iOS has had 1 / 3 / 5 plus a dense level since iOS 13.)
-  Without multi-touch, View Options' Zoom In / Zoom Out are the way (A).
+  **Required** (multi-touch is in the trunk: `sh_touch` + `sh_touch_finger`, shell.h). View Options' Zoom In / Zoom Out
+  stay as the menu equivalent (A).
   - The zoom animates by **scaling the grid around the pinch centre**. On release, it cross-fades to the new layout
     with the item under the fingers kept under them (spring 0.35 / 1.0, E).
 - **Scroll:** momentum + rubber band at both ends (IOS-REFERENCE §16).
@@ -791,7 +794,7 @@ scroll ends (E).
     rubber band, swipe-down dismiss, 44 back circle, bottom 44 circles (share / heart dimmed with toasts; info = a
     toast; delete = an action sheet "Delete Photo" for store photos);
   - empty / error states in words; rotation in the viewer.
-  - Missing: tabs, Collections, Search, Select, pinch (the shell has **no multi-touch**), info panel, edit, share,
+  - Missing: tabs, Collections, Search, Select, pinch (multi-touch now exists in the trunk, `sh_touch_finger`; no recogniser yet), info panel, edit, share,
     favourites, Recently Deleted, filmstrip, the iOS 27 date capsule and toolbar grouping.
 
 **Ranked changes** (S ≤ 1 day, M 2-4 days, L ≥ 1 week):
@@ -802,7 +805,7 @@ scroll ends (E).
 | 2 | Photos: the **tab bar + Search circle** (Library / Collections), its minimise on scroll with Years/Months/All as the accessory; title 34 / 700 + subtitle; Sort & Filter circle + Select capsule | M |
 | 3 | Photos viewer to iOS 27: date capsule, ⋯ circle, **48 toolbar** (share · [heart info edit] · trash), filmstrip, info panel (details card from EXIF / store header), working favourite (store flag) | M |
 | 4 | **Select mode** with drag-select + auto-scroll, check circles, the Show Selected / share / trash bar, multi-delete sheet | M |
-| 5 | **Multi-touch in the shell** (2 contacts from the touch driver → pinch for Camera zoom, grid levels, viewer zoom). Platform work | L |
+| 5 | **Pinch recognisers** on the trunk's multi-touch (`sh_touch_finger`, shell.h): Camera zoom, the grid's column levels, the viewer's zoom and pan, two-finger rotation off. **A requirement, not later.** Centre = the midpoint of the two fingers; the scale is the distance ratio; the release springs per the motion table #21 / #24 | M |
 | 6 | **Recently Deleted** in the store (a deleted flag + time, a purge after 30 days, recover) + the locked collection behind the passcode; until then, the "permanently deleted" words | M |
 | 7 | Camera: focus / exposure square + sun slider + AE/AF Lock (needs the driver's AE compensation; AF if any) | S-M (driver-gated) |
 | 8 | Camera: tools menu (Flash, Timer, Exposure, Aspect, Grid) + the timer countdown + volume-key capture + the shutter sound + mode / flip motion | M |

@@ -36,6 +36,14 @@ Companion files: [LIQUID-GLASS.md](LIQUID-GLASS.md) (the material, mapped onto o
 | Content margin | 20 (`MARGIN`) | 16 (lists), 20 (large title, cards) | iOS uses 16 inside lists and 20 for large titles. Keep 20 for page content. Lists: see §6. |
 | Display corner radius | **32** (`S9_CORNER_PT`, unverified) | ~55 (iPhone 16) | Concentric radii are computed from **our** corner: `r_child = 32 - inset`. iOS's look relies on big radii, so where a rule gives less than the iOS value, clamp to the minimum given per component (`CONCENTRIC()` clamps at 24). |
 
+### Multi-touch (2026-11-13)
+The trunk delivers every finger:
+- finger 0 through `sh_touch`, as before;
+- fingers 1.. through `sh_touch_finger(finger, ph, x, y, t_ms)` (shell.h).
+
+So every iOS pinch, two-finger rotate and two-finger tap in these specs is a **requirement**, not a later item:
+Photos grid and viewer, Camera zoom, Maps, Files previews.
+
 ### Dark and light
 iOS 26 is light by default, with a system Dark appearance. Starbite OS Next is dark-first today (wallpaper and glass).
 Every colour table gives both. Build dark first, then light. Glass flips per element by what is behind it (LIQUID-GLASS §3),
