@@ -221,6 +221,76 @@ static void ps_lap(uint64_t us)
     b[n++] = ' '; b[n++] = 'u'; b[n++] = 's'; b[n] = 0;
     tk_log(b);
 }
+/* cp7g: the GPU path's picture without tk_comp_shown (a whole CPU frame, ~200 ms on the phone, in the tap): the app's
+ * page flattened at half, its glass layers apart (the flatten has no lens: their bodies would show the page through):
+ * pass 1 the page without them, then each one's shapes filled with the dark glass the lens gives over a dark page,
+ * and its own pixels (rim, words, glyphs) over that, where the compositor would put them */
+#define PSG_MAX 48
+static struct { tk_layer *l; float a, tx, ty, al; } PSG[PSG_MAX];
+static int psg_n;
+static void ps_glass_hide(tk_layer *l, float a, float tx, float ty, float al)
+{
+    for (; l; l = l->next) {
+        if (l->hidden || l->alpha <= 0) continue;
+        float A = a * l->sx, TX = a * (l->sx * l->x + (1 - l->sx) * l->ox) + tx, TY = a * (l->sy * l->y + (1 - l->sy) * l->oy) + ty;
+        float AL = al * l->alpha;
+        if ((l->ngsh > 0 || l->glass.v) && psg_n < PSG_MAX) {
+            PSG[psg_n++] = (typeof(PSG[0])){ l, A, TX, TY, AL };
+            l->hidden = 1;
+            continue;
+        }
+        if (l->child) ps_glass_hide(l->child, A, TX, TY, AL);
+    }
+}
+static void ps_flat_page(tk_bmp *out)
+{
+    float ca = appc.alpha, sa = apsb.alpha;
+    appc.alpha = apsb.alpha = 1;                     /* as it is at rest */
+    int ph = pshot.hidden;
+    pshot.hidden = 1;                                /* (the picture's own layer is in appg: never into itself) */
+    psg_n = 0;
+    ps_glass_hide(appg.child, 1, 0, 0, 1);
+    flat_cuts++;
+    tk_flatten(&appg, out, 0, .5f);
+    tk_paint dark = tk_solid(tk_hex(0x202126, 1));
+    for (int i = 0; i < psg_n; i++) {
+        tk_layer *l = PSG[i].l;
+        l->hidden = 0;
+        float a = PSG[i].a * .5f;
+        for (int q = 0; q < l->ngsh; q++)
+            tk_fill_rrect(out, PSG[i].tx * .5f + a * l->gsh[q][0], PSG[i].ty * .5f + a * l->gsh[q][1], a * l->gsh[q][2],
+                          a * l->gsh[q][3], a * l->gsh[q][4], &dark, PSG[i].al);
+        if (tk_fabsf(PSG[i].a - 1) < .01f && l->bmp.px) {
+            tk_layer_prepare(l);
+            if (l->half.px) tk_blit(out, &l->half, (int)tk_floorf(PSG[i].tx * .5f + .5f), (int)tk_floorf(PSG[i].ty * .5f + .5f), PSG[i].al);
+        }
+    }
+    /* the row or button lit under the finger (apphl: not linked while the push builds; its place is on the layer):
+     * its rect inside its rounded clip (the card) */
+    if (!apphl.hidden && apphl.solid && apphl.alpha > 0) {
+        float x0 = apphl.x, y0 = apphl.y, x1 = x0 + apphl.solid_w, y1 = y0 + apphl.solid_h;
+        if (apphl.clip) {
+            x0 = tk_maxf(x0, apphl.clip_r.x); y0 = tk_maxf(y0, apphl.clip_r.y);
+            x1 = tk_minf(x1, apphl.clip_r.x + apphl.clip_r.w); y1 = tk_minf(y1, apphl.clip_r.y + apphl.clip_r.h);
+        }
+        int X = (int)tk_floorf(x0 * .5f), Y = (int)tk_floorf(y0 * .5f), w = (int)(x1 * .5f) + 1 - X, h = (int)(y1 * .5f) + 1 - Y;
+        tk_bmp t;
+        if (w > 0 && h > 0) {
+            uint32_t c = apphl.solid;
+            float a = (c >> 24) / 255.0f;
+            tk_paint pt = tk_solid(TK_RGBA(a > 0 ? (c >> 16 & 255) / a : 0, a > 0 ? (c >> 8 & 255) / a : 0, a > 0 ? (c & 255) / a : 0, a));
+            tk_rect r = apphl.clip ? apphl.clip_r : (tk_rect){ apphl.x, apphl.y, apphl.solid_w, apphl.solid_h };
+            /* the clip's rounded rect, cut to the lit rect by the bitmap's own edges */
+            if (tk_bmp_new(&t, w, h)) {
+                tk_fill_rrect(&t, r.x * .5f - X, r.y * .5f - Y, r.w * .5f, r.h * .5f, apphl.clip ? apphl.clip_radius * .5f : 0, &pt, 1);
+                tk_blit(out, &t, X, Y, apphl.alpha);
+                tk_bmp_free(&t);
+            }
+        }
+    }
+    pshot.hidden = ph;
+    appc.alpha = ca; apsb.alpha = sa;
+}
 /* the picture of the screen now (the page about to go), half resolution, the status band painted as the ground
  * (clear: see-through, for a modal page going down: no dark bar on its top edge) */
 static int ps_snap(int clear)
@@ -231,8 +301,11 @@ static int ps_snap(int clear)
         tk_layer_init(&pshot, "push-picture");
         if (!tk_bmp_new(&pshot.bmp, TK_W / 2, TK_H / 2)) return 0;
     }
-    if (!C->gpu && C->last_half) tk_comp_frame(C, 0, 0);     /* the CPU's RAM frame after a moving one: whole first */
-    tk_bmp_down2(&pshot.bmp, shown_frame());
+    if (C->gpu) ps_flat_page(&pshot.bmp);             /* cp7g: no whole CPU frame in the tap */
+    else {
+        if (C->last_half) tk_comp_frame(C, 0, 0);     /* the CPU's RAM frame after a moving one: whole first */
+        tk_bmp_down2(&pshot.bmp, shown_frame());
+    }
     tk_fill_rect_raw(&pshot.bmp, 0, 0, pshot.bmp.w, (int)(PT(SAFE_TOP) / 2), clear ? 0 : appbg.solid);   /* (the status bar stays) */
     if (KB.shown && !kbg.hidden) {                     /* the keyboard stays too (it goes down on its own) */
         int y0 = tk_maxi(0, (int)(PT(kb_top()) / 2) - 2);
