@@ -6603,6 +6603,7 @@ void sh_idle(void)
     IP_("cm_idle", cm_idle());                                 /* helper I: the call screen's static parts while Cellular is on */
     IP_("home_badges", home_badges(0));                            /* B8: the dock's badges, when a count changed */
     IP_("kb_idle", kb_idle());                                 /* B3: the keyboard's accessory row (a Linux window's keys) */
+    IP_("lx_idle", lx_idle());                                 /* cp7u (Track E): page 3's Linux icons, one per idle turn */
     IP_("se_idle", se_idle());                                 /* helper B2: Settings' page's half copy */
     if (!EMG && cards_pending > 0) {
         /* after Emergency: the vendor cards again, one per idle turn (the platform calls again while
@@ -6657,7 +6658,7 @@ void sh_idle(void)
 #undef IP_
 
 int sh_idle_pending(void) { return (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C) ||
-                                   fl_row >= 0 || ccb_next; }   /* cp7c: the sliced flatten, the CC's stages */
+                                   fl_row >= 0 || ccb_next || lx_idle_pending(); }   /* cp7c: the sliced flatten, the CC's stages */
 
 int sh_moving(void)
 {

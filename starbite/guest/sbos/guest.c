@@ -454,6 +454,8 @@ static uint32_t ls_crc;
 #define GUEST_COPY_PIECE (256U << 10)
 #define GUEST_STEP_US 8000U                 /* a tick's work: ~8 ms, then the UI's turn */
 #define GUEST_STEP_BYTES (2U << 20)         /* cp7o: the shared region cleared 2 MiB a tick (1 ms on the phone) */
+static uint32_t pump_reads, pump_sectors, pump_spent;   /* this start's: served, and calls that found the budget spent */
+static uint32_t ls_blk0;                    /* sbblk's read count at this start (its stats run since boot) */
 static char ls_sum[320];                    /* the start's line, logged again at HELLO (pmsg drops the early one) */
 static uint64_t gt_max;                     /* the slowest guest timer call since HELLO */
 
@@ -512,6 +514,8 @@ static int load_step(void)
         stage = "";
         t_go = 0;
         ls_k = 0;
+        pump_reads = pump_sectors = pump_spent = 0;
+        ls_blk0 = sbg_stats()->blk_reads;
         cfg_init();                         /* this mode's surface */
         gcard_begin();                      /* the card's files as block devices, for this start (guest-card.h) */
         ls = LS_CARD;
@@ -674,13 +678,15 @@ void guest_pump(void)
         win0 = t;
         spent = 0;
     }
-    if (spent >= GUEST_PUMP_US)
+    uint32_t max = spent >= GUEST_PUMP_US ? 0 : (uint32_t)((GUEST_PUMP_US - spent) / (pump_us_sec ? pump_us_sec : 1));
+    if (!max) {
+        pump_spent++;
         return;
-    uint32_t max = (uint32_t)((GUEST_PUMP_US - spent) / (pump_us_sec ? pump_us_sec : 1));
-    if (!max)
-        return;
+    }
     int n = sbg_pump(max);
     if (n > 0) {
+        pump_reads++;
+        pump_sectors += (uint32_t)n;
         uint64_t d = sb_us() - t;
         spent += d;
         uint32_t m = (uint32_t)(d / (uint64_t)n);
@@ -749,7 +755,19 @@ void guest_timer(unsigned id)
             ub_s(&u, s->poll_part ? s->poll_part : "-");
             ub_s(&u, " ");
             ub_dec(&u, s->poll_part_ms);
-            ub_s(&u, " ms");
+            ub_s(&u, " ms; block reads ");
+            ub_dec(&u, s->blk_reads - ls_blk0);
+            ub_s(&u, ", the pump's ");
+            ub_dec(&u, pump_reads);
+            ub_s(&u, " (");
+            ub_dec(&u, pump_sectors / 2U);
+            ub_s(&u, " KiB; left as too big or a write ");
+            ub_dec(&u, s->pump_left);
+            ub_s(&u, ", budget spent ");
+            ub_dec(&u, pump_spent);
+            ub_s(&u, ", ");
+            ub_dec(&u, pump_us_sec);
+            ub_s(&u, " us a sector)");
             sb_log(u.b);
             gt_max = 0;
         }
