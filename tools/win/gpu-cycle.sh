@@ -50,8 +50,13 @@ esac
 out=${1:?usage: gpu-cycle.sh STAGE OUT [...]}; shift
 tkey=win11-gpu; ckey=win11-auto; keep=0
 full_sec=300
-while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --no-trace) notrace=1; shift;; --scan-flip) scan_flip=$2; shift 2;; --cached-blt) cached_blt=$2; shift 2;; --parallel-blt) par_blt=$2; shift 2;; --blt-no-drain) no_drain=$2; shift 2;; --keys) keys=$2; shift 2;; --crashdump) crashdump=$2; shift 2;; --afbc) afbc=$2; shift 2;; --keys-selftest) keys_selftest=$2; shift 2;; --reference) reference=1; shift;; --sas) sas=$2; shift 2;; --full-sec) full_sec=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
+while [ $# -gt 0 ]; do case $1 in --test-key) tkey=$2; shift 2;; --clean-key) ckey=$2; shift 2;; --keep-unattended) keep=1; shift;; --no-trace) notrace=1; shift;; --scan-flip) scan_flip=$2; shift 2;; --cached-blt) cached_blt=$2; shift 2;; --parallel-blt) par_blt=$2; shift 2;; --blt-no-drain) no_drain=$2; shift 2;; --keys) keys=$2; shift 2;; --crashdump) crashdump=$2; shift 2;; --afbc) afbc=$2; shift 2;; --keys-selftest) keys_selftest=$2; shift 2;; --reference) reference=1; shift;; --sas) sas=$2; shift 2;; --full-sec) full_sec=$2; shift 2;; --sbxta) sbxta=$2; shift 2;; *) echo "bad arg $1"; exit 1;; esac; done
 case $full_sec in ''|*[!0-9]*) echo "--full-sec needs seconds"; exit 1;; esac
+# T64 (any mode that installs): --sbxta K=V[,K=V]: DWORDs in Services\sbxta\Parameters (sbxta.sys, the big-core
+# row's per-CPU XtaCache policy, installed 2026-11-11), e.g. DisableOnM3=0,SwapCache=1 = the M3 row builds and keeps
+# its own x86/x64 translation cache; DisableOnM3=1,SwapCache=0 = back to sbxta's default. Refused if sbxta is missing.
+sbxta=${sbxta:-}
+case $sbxta in ''|*[!A-Za-z0-9=,]*) [ -z "$sbxta" ] || { echo "--sbxta K=V[,K=V] (DWORDs)"; exit 1; } ;; esac
 # T32: sbkeys (Bixby held 3 s = clean restart; docs/WIN11-GPU.md 6.40). --keys 1 installs STAGE/sbkeys.sys as a
 # service (Start 2) with Enable=1; --keys off sets Enable=0; default: leave whatever is there. --keys-selftest N (test
 # cycles only): sbkeys "holds" Bixby itself from N s after it starts, so the test boot must end in ITS clean restart at
@@ -246,6 +251,15 @@ install() {
     elif [ "$keys" = off ] && python3 tools/woa/hive.py "$tmp/S3" 'ControlSet001\Services\sbkeys' 2>/dev/null | grep -q "Start"; then
         python3 "$HS" "$tmp/S3" "$tmp/S3k" param sbkeys Enable=0 SelfTestSec=0 >/dev/null
         mv "$tmp/S3k" "$tmp/S3"
+    fi
+    if [ -n "$sbxta" ]; then
+        if ! python3 tools/woa/hive.py "$tmp/S3" 'ControlSet001\Services\sbxta' 2>/dev/null | grep -q "Start"; then
+            umount_w; log "--sbxta: no sbxta service in this hive"; exit 1
+        fi
+        # shellcheck disable=SC2046
+        python3 "$HS" "$tmp/S3" "$tmp/S3x" param sbxta $(echo "$sbxta" | tr ',' ' ') >/dev/null
+        mv "$tmp/S3x" "$tmp/S3"
+        log "sbxta Parameters: $(python3 tools/woa/hive.py "$tmp/S3" 'ControlSet001\Services\sbxta\Parameters' 2>/dev/null | tr -s ' \n' ' ')"
     fi
     local rc=0
     push_check "$tmp/S3" "$W/$HIVE" || rc=4

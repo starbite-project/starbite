@@ -2412,6 +2412,23 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   start (no XtaCache on the M3); memory (4 GB, GD ~700 MB private); the guard's throttle to 1066 MHz at 80 C.
   The 5-minute shutdown points at a service that would not stop. 7043 / 203 events will name it.
 
+### 6.71 T64: a translation cache of their own for the big cores (sbxta's SwapCache mode)
+
+- **Why.** Steam and GD are x64. On the big-core row the XtaCache service has been off since 2026-11-11 (sbxta.sys
+  42056cc, `DisableOnM3` default 1): the shared cache holds translations made on the A55 (LSE, LDAPR) that fault on
+  the ARMv8.0 M3. So every Steam/GD start on the big cores translates from scratch, and code first reached mid-level
+  is translated on the game's thread: a suspect for slow starts and for hitches (0158's `glworst` game-thread CPU).
+- **The mode was already there, unused.** sbxta.sys has `Parameters\SwapCache` (renames at system start,
+  same-directory, ReplaceIfExists FALSE): M3 boot `XtaCache -> XtaCache.a55`, `XtaCache.m3 -> XtaCache`; A55 boot
+  the reverse. With `DisableOnM3=0` the service runs on the M3 row too and fills the M3's own folder (xtajit's
+  feature latch is off on the M3, so those translations are ARMv8.0). Registry only; no new binary.
+- **gpu-cycle.sh `--sbxta K=V[,K=V]`** (any installing mode): DWORDs into `Services\sbxta\Parameters`, refused when
+  sbxta is not installed; rehearsed on T61's post hive (set and back).
+- **sb-user.bat** logs sbxta `State\Result`/`Swap`, the XtaCache service state and the cache folders at start and
+  before the restart, and "steam.exe up after N s".
+- **T64** (`sbwddm-t64` = T63 + that sb-user.bat): T64a cold, T64b warm, both `--sbxta DisableOnM3=0,SwapCache=1`;
+  restore with `--sbxta DisableOnM3=1,SwapCache=0`. Compare start times and hitches with T63.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

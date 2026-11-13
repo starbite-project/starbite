@@ -10,6 +10,8 @@ rem   3. GD closed the normal way (taskkill without /f = WM_CLOSE), seconds unti
 rem   4. 120 s idle after GD (does the system stay slow?);
 rem   5. the restart, timed: uptime logged right before "shutdown /r /t 0"; the host has the time to the menu, the
 rem      next boot's Diagnostics-Performance 200/203 has Windows' own shutdown time and the services that slowed it.
+rem T64: the x86/x64 translation cache (sbxta State, the XtaCache service, the folders) logged at start and before the
+rem restart; Steam's and GD's start times (steam.exe first seen, GeometryDash.exe up).
 setlocal EnableDelayedExpansion
 set D=C:\starbite\auto\gpu
 set L=%D%\gputest.log
@@ -17,6 +19,7 @@ set U=C:\ProgramData\Starbite\umdlog
 set G=C:\Program Files (x86)\Steam\steamapps\common\Geometry Dash
 cd /d %D%
 call :up "USR1 start"
+call :xta start
 start "" /b typeperf -cf %D%\sb-perf-counters.txt -si 5 -f CSV -o %U%\perf-user.csv -y > %U%\typeperf.txt 2>&1
 ping -n 4 127.0.0.1 > nul
 tasklist /v /fo csv > %U%\tasks-start.csv 2>&1
@@ -42,9 +45,11 @@ echo starbite > "%G%\opengl32.dll.starbite"
 call :up "USR1 GD start"
 start "" steam://rungameid/322170
 set /a W=0
+set STEAMUP=
 :wait
 ping -n 6 127.0.0.1 > nul
 set /a W+=5
+if not defined STEAMUP tasklist /fi "imagename eq steam.exe" | find /i "steam.exe" > nul && (set STEAMUP=!W!& call :up "USR1 steam.exe up after !W! s")
 tasklist /fi "imagename eq GeometryDash.exe" | find /i "GeometryDash.exe" > nul && goto gd_up
 if !W! lss 360 goto wait
 echo USR1 GeometryDash.exe never appeared in 360 s >> %L%
@@ -108,10 +113,24 @@ tasklist /v /fo csv > %U%\tasks-after.csv 2>&1
 wevtutil qe Application /q:"*[System[(EventID=1000 or EventID=1002)]]" /rd:true /c:40 /f:text > %U%\user-app-events.txt 2>&1
 taskkill /im typeperf.exe > nul 2>&1
 ping -n 3 127.0.0.1 > nul
+call :xta end
 rem ---- 5. the timed restart (sb-gputest.cmd must not add its own) ----
 call :up "USR1 restart now"
 echo on> %D%\sb-user.done
 shutdown /r /t 0 /c "Starbite user-style session done"
+exit /b 0
+
+:xta
+echo USR1 xta %1: >> %L%
+reg query HKLM\SYSTEM\CurrentControlSet\Services\sbxta\State /v Result >> %L% 2>&1
+reg query HKLM\SYSTEM\CurrentControlSet\Services\sbxta\State /v Swap >> %L% 2>&1
+sc query XtaCache | find "STATE" >> %L% 2>&1
+for /d %%x in (C:\Windows\XtaCache*) do (
+  set XN=0
+  for /f %%n in ('dir /a /s /b "%%x" 2^>nul ^| find /c /v ""') do set XN=%%n
+  echo USR1 xta folder %%x: !XN! entries >> %L%
+)
+powershell -NoProfile -Command "Get-ChildItem C:\Windows\XtaCache -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum | %%{ 'USR1 xta XtaCache: ' + $_.Count + ' files, ' + [int]($_.Sum/1MB) + ' MiB (readable part)' }" >> %L% 2>&1
 exit /b 0
 
 :up
