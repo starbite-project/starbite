@@ -4174,7 +4174,9 @@ static void app_build_step(void)
 {
     if (!ap_pending || !AP.on) { ap_pending = 0; return; }
     int st = ap_pending - 1;
-    if (st < NST / 2) { own_strip(AP.a, 2 * st); own_strip(AP.a, 2 * st + 1); relink(); ap_pending++; return; }
+    /* 8c (8c2's phone: app-open frames of 102-118 ms in the app, phone, wheels and sleep films): one strip a frame (two
+     * were up to 7 ms on the Mac, the bottom one with a tab bar's flat glass ~5 of it), then the extras */
+    if (st < NST) { own_strip(AP.a, st); relink(); ap_pending++; return; }
     own_extras(AP.a);
     ap_pending = 0;
 }
@@ -7060,6 +7062,31 @@ static void cal_newday(void)
     tk_blit(&hparts[2].bmp, ic, calic_x, calic_y, 1);
     tk_layer_dirty(&hparts[2]);
 }
+/* 8c: the minute's (and the battery's) layers still to make again */
+enum { MS_LCLOCK = 1, MS_HOMESB = 2, MS_APSB = 4, MS_NC = 8, MS_LKN = 16, MS_WCLOCK = 32, MS_CM = 64, MS_LW = 128, MS_HOMEW = 256 };
+static unsigned min_stale;
+static int prep_left;
+static void min_do(unsigned m)
+{
+    if (!m) return;
+    if (m & MS_LCLOCK) build_lclock();
+    if (m & MS_HOMESB) build_home_sb();
+    if ((m & MS_APSB) && AP.on && !AP.closing) build_apsb();
+    if (m & MS_NC) nc_minute();                  /* helper D: the platters' "5m ago" */
+    if (m & MS_LKN) lkn_minute();                /* B9: the lock's too */
+    if (m & MS_WCLOCK) build_wclock();           /* helper D: the Clock widget's hands (and the Calendar widget) */
+    if (m & MS_CM) cm_minute();                  /* helper I: the call screen's status bar */
+    if (m & MS_LW) build_lwidgets();
+    if (m & MS_HOMEW) build_home_w();            /* P2y: home's battery widget shows the same live values */
+    min_stale &= ~m;
+    relink();
+}
+/* the idle's: the next stale one; 1 if one was made */
+static int min_step(void)
+{
+    for (unsigned b = 1; b <= MS_HOMEW; b <<= 1) if (min_stale & b) { min_do(b); return 1; }
+    return 0;
+}
 void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
 {
     int tchange = h != ST.h || mi != ST.mi || wday != ST.wday || day != ST.day || mon != ST.mon;
@@ -7068,29 +7095,31 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
     se_batt_sample(h, mi, pct);                   /* helper B2: Settings > Battery's history since the start (RAM) */
     if (tchange && AP.on && (is_app("clock") || is_app("calendar")) && !AP.closing) build_app_page(AP.a);   /* the time, today */
     if (tchange && ALM.on && alm_when != (ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? 1 : 2)) wchange = 1;   /* P3p: Today / Tomorrow */
+    /* 8c (8c2's phone: the minute's turn 130 ms, 253 ms with the Control Centre over it): what shows now is made now,
+     * the rest marked stale and made in idle slices, one a call (min_step); home's half copies through prep_some (it
+     * was prep_tree here, all at once). The layers keep their place in the tree: rebuilt in place */
     if (tchange) {
-        /* the layers keep their place in the tree: rebuilt in place */
         if (calic_key != cal_key()) cal_newday();
-        build_lclock();
-        build_home_sb();
-        if (AP.on && !AP.closing) build_apsb();
-        nc_minute();                             /* helper D: the platters' "5m ago" */
-        lkn_minute();                            /* B9: the lock's too */
-        build_wclock();                          /* helper D: the Clock widget's hands */
-        cm_minute();                             /* helper I: the call screen's status bar */
-        relink();
+        min_stale |= MS_LCLOCK | MS_HOMESB | MS_APSB | MS_NC | MS_LKN | MS_WCLOCK | MS_CM;
     }
-    if (wchange) {
-        build_lwidgets();
-        build_home_w();                         /* P2y: home's battery widget shows the same live values */
-        relink();
+    if (wchange) min_stale |= MS_LW | MS_HOMEW;
+    if (tchange || wchange) {
+        int lock_vis = locked || lockY > -H_PT + 1, home_vis = !locked && (!AP.on || AP.closing) && !CCS.on;
+        unsigned now = 0;
+        /* only the minute's own digits now (the clock, a status bar); widgets, ages, hands: the next idle slices */
+        if (lock_vis || nc_on()) now |= MS_LCLOCK;                     /* (the Notification Centre shows the lock's clock) */
+        if (home_vis) now |= MS_HOMESB;
+        if (AP.on && !AP.closing) now |= MS_APSB;
+        if (CCS.on) now = 0;                                              /* (over it: nothing of these shows) */
+        min_do(min_stale & now);
+        prep_left = 1;
+        lock_ver++;
     }
-    if (tchange || wchange) prep_tree(home.child);   /* P3g: not in the next frame that shows home (22 ms) */
-    if (tchange || wchange) lock_ver++;
     if (tchange) isl_sync();                     /* B7: the capsule's time */
 }
 
 /* the half copies of a subtree (hidden ones too: home is drawn the moment the unlock starts) */
+static void prep_tree(tk_layer *l) __attribute__((unused));
 static void prep_tree(tk_layer *l)
 {
     for (; l; l = l->next) {
@@ -7100,7 +7129,6 @@ static void prep_tree(tk_layer *l)
 }
 /* 8b (8b's phone: "prep_tree 22-26 ms" in one idle call after home's rebuild): at most *n missing half copies a call;
  * 1 while some are left (the idle comes back: sh_idle_pending) */
-static int prep_left;
 static int prep_some(tk_layer *l, int *n)
 {
     for (; l; l = l->next) {
@@ -7120,6 +7148,7 @@ void sh_idle(void)
     /* P3j: an app page still being drawn (an open without frames, e.g. the host's stills): finish it now */
     IP_("app page", if (ap_pending) { while (ap_pending) app_build_step(); if (AP.on) set_app_rect(AP.R); });
     if (sh_moving()) return;
+    { int r_ = 0; IP_("minute", r_ = min_step()); if (r_) return; }   /* 8c: the minute's stale layers, one a call, first */
     /* B6: a prepared switch nobody holds any more goes; a switch's rest, a slice a turn (sh_idle_pending) */
     if (EP.goal >= 0 && EP.goal != EMG && !ep_holding()) ep_cancel();
     /* cp7i / 7k: when only home's parts are left (home is not seen from the lock), what the lock shows and needs goes
@@ -7189,7 +7218,7 @@ void sh_idle(void)
 }
 #undef IP_
 
-int sh_idle_pending(void) { return prep_left || (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C) ||
+int sh_idle_pending(void) { return prep_left || min_stale || (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C) ||
                                    fl_row >= 0 || ccb_next || lx_idle_pending(); }   /* cp7c: the sliced flatten, the CC's stages */
 
 int sh_moving(void)

@@ -1483,7 +1483,9 @@ int main(int argc, char **argv)
         tk_comp_frame(&c, 0, 1);
         uint32_t before = 0, after = 0;
         for (int y = PT(96); y < PT(204); y++) for (int x = 0; x < TK_W; x += 3) before = before * 31 + c.panel.px[y * TK_W + x];
-        sh_status(21, 6, 2, 10, 11, 87, 41);
+        uint64_t st0 = tk_us();
+        sh_status(21, 6, 2, 10, 11, 86, 41);       /* 8c: a new minute and a new charge: its own time (what shows only) */
+        fprintf(stderr, "clocktest: sh_status %.2f ms\n", (tk_us() - st0) / 1000.0);
         int px = tk_comp_frame(&c, 0, 0);
         for (int y = PT(96); y < PT(204); y++) for (int x = 0; x < TK_W; x += 3) after = after * 31 + c.panel.px[y * TK_W + x];
         printf("clocktest: %s (%d px redrawn)\n", before != after && px > 0 ? "PASSED: the clock changed on the panel" : "FAILED: the panel kept the old minute", px);
