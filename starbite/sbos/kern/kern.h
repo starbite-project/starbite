@@ -357,6 +357,8 @@ struct kstate {
      * gate; the log line is >= 200 ms) */
     uint32_t user_turn_ms, user_turn_owner, user_turn_id, turns_100;
     const char *user_turn_what;
+    uint16_t turns_100_by[18];      /* cp7p: those turns by their slowest piece: a timer's owner 0..15 (KT_*), 16 an
+                                     * app timer (KT_APP0+), 17 not a timer (input, apps, draw) */
     uint64_t deadman_t0;            /* the 10-minute return to the menu counts from here (the start; the self-test
                                      * image: the last input) */
 };

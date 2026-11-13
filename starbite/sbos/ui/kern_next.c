@@ -2339,7 +2339,8 @@ int next_selftest_step(void)
     if (!ready) return 1;                            /* the bake is still running */
     if (!st_started) {
         st_started = 1;
-        K.user_turn_ms = 0; K.user_turn_what = 0; K.turns_100 = 0;   /* cp7m: the summary counts from the films (7l: the
+        K.user_turn_ms = 0; K.user_turn_what = 0; K.turns_100 = 0;
+        for (unsigned i_ = 0; i_ < 18; i_++) K.turns_100_by[i_] = 0;   /* cp7m: the summary counts from the films (7l: the
                                                                      * bake's own turns, timer 1/22, counted 40 / 515 ms) */
         /* the clock: a new minute must reach the panel through an ordinary frame (P2a-P2g kept the old one) */
         {

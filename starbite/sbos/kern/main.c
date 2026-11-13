@@ -274,8 +274,12 @@ void sb_main(void)
                 K.user_turn_owner = slow_owner;
                 K.user_turn_id = slow_id;
             }
-            if (took >= 100)
+            if (took >= 100) {
                 K.turns_100++;
+                unsigned b_ = slow_what[0] != 't' ? 17U : slow_owner < 16U ? slow_owner : 16U;
+                if (K.turns_100_by[b_] < 65535U)
+                    K.turns_100_by[b_]++;
+            }
         }
         if (took >= 200 && sb_ms() - slow_logged >= 1000) {
             slow_logged = sb_ms();

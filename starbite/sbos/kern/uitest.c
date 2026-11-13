@@ -704,7 +704,14 @@ void selftest_timer(unsigned id)
                 ub_s(&u, "/");
                 ub_dec(&u, K.user_turn_id);
             }
-            ub_s(&u, ")");
+            ub_s(&u, "); by owner:");
+            for (unsigned i = 0; i < 18; i++)            /* cp7p: owner (KT_*) = count; 16 app timers, 17 not a timer */
+                if (K.turns_100_by[i]) {
+                    ub_s(&u, " ");
+                    ub_dec(&u, i);
+                    ub_s(&u, "=");
+                    ub_dec(&u, K.turns_100_by[i]);
+                }
             sb_log(u.b);
         }
         sb_log(next_selftest_failed() ? "selftest: next: FAILED (see above); a restart into recovery (pmsg)" :
