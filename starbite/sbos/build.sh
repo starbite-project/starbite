@@ -290,7 +290,7 @@ if [ -n "$PAK" ]; then
     ndobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrv.o#")
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_DRV -DSBOS_SELFTEST_NEXT_DRV_ATTENDED "$here/kern/uitest.c" -o "$ob/k_uitest_ndrva.o"
     ndaobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrva.o#")
-    # drivers track: the quiet daytime sound image (codec, snd's engine, Calliope up to level 2; the mic checks the tones)
+    # drivers track: the quiet daytime sound image (snd's engine and Calliope up to level 2; the mic checks the tones)
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_DRV -DSBOS_SELFTEST_NEXT_DRV_SOUND "$here/kern/uitest.c" -o "$ob/k_uitest_ndrvs.o"
     ndsobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrvs.o#")
     # Track G: Next with the unattended Cellular self test (mobile data on, HTTPS GETs, off, on again; no SMS, no calls)
