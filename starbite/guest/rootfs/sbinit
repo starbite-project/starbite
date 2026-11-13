@@ -104,12 +104,16 @@ export XDG_CURRENT_DESKTOP=Starbite HOME=/root
 # a desktop start 30 s, first start of a new base included): the App Store's repository, the dpkg status merge, the
 # network link, Starbite's files and the App Store daemon wait for sbwl's socket (at most 60 s), then run here ----
 services() {
+    # instant start (8a2 2026-11-13: a cold boot is card-bound, ~46 MiB read at ~2.9 MB/s): after sbwl's HELLO
+    # (/run/sbwl.hello), not its socket, so these reads (python for the store, the merge, 9P, zram) no longer race
+    # sbwl's and the app's on the way to HELLO; at most 60 s
     i=0
-    while [ ! -S /run/sbwl.sock ] && [ "$i" -lt 120 ]; do
+    while [ ! -e /run/sbwl.hello ] && [ "$i" -lt 120 ]; do
         sleep 0.5
         i=$((i + 1))
     done
-    log "services: after sbwl's socket ($((i / 2)) s)"
+    log "services: after sbwl's HELLO ($((i / 2)) s)"
+    [ "$ZRAM" = 1 ] && zram_on &
     # ---- the App Store's repository (read-only EROFS) ----
     mkdir -p /repo
     if ! mountpoint -q /repo; then
@@ -205,11 +209,11 @@ mkdir -p /var/log
         sleep 5
         { echo "starbite-boot: +$((i * 5)) s, $(date -u '+%F %T') UTC"; dmesg; } > /var/log/starbite-boot.log.new 2>&1 &&
             mv -f /var/log/starbite-boot.log.new /var/log/starbite-boot.log
-        sync
+        # instant start: no sync of its own (the card's writes stalled the boot's reads); the stop's overlay freeze
+        # writes it out. After HELLO it is not needed any more (it is for starts that never get there): one last log
+        [ -e /run/sbwl.hello ] && break
     done
 ) </dev/null >/dev/null 2>&1 &
-
-[ "$ZRAM" = 1 ] && zram_on &
 
 # PID 1: reap whatever ends (orphans come here); the children above run on
 while true; do
