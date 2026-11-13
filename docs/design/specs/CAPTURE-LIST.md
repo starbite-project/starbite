@@ -109,4 +109,13 @@ Use the same wallpaper and the same framing, iOS 27 then Starbite:
 
 Then Starbite again at `LENS_GAIN` .33 / .66 / 1.0 for G1-G3.
 
+- **From batch 8a (trunk ca7f0209 on) the Starbite half runs itself.** The self test ends with the calibration stills:
+  lock, home and Control Centre, each at 33 / 66 / 100 % glass strength, 3 s apiece. The strength is the runtime
+  `lens_gain`, 1 by default.
+- Each still is announced in the self-test log as `next: glass still <view>, glass strength N % at +T ms (3 s)`.
+  Match each Photo Booth shot to its still by that line's `+T`. Take the shot in the middle of the 3 s window, not
+  at its edges.
+- Name the files `starbite-<view>-<N>.jpg` (e.g. `starbite-cc-66.jpg`) and the iOS 27 pairs `ios27-<view>.jpg`, so
+  the comparison can be scripted.
+
 **Total ≈ 90 min attended.** If time is short, do **A (stills + clips 1-6), B, G** first.
