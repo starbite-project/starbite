@@ -1,0 +1,62 @@
+From: starbite <starbite@local>
+Date: Fri, 13 Nov 2026 14:30:00 +0200
+Subject: [PATCH] patch: 0444-sweet-fb-cursor-surface-log.patch - "SWEET CURSOR": what
+ the pointer layer's surface holds (alpha 0/255/between, opaque-black count, 16 x 16 alpha and
+ brightness pictures), for a new surface id then every 20th pointer swap, up to 12 times
+
+S3v 2026-11-13: a black box around the beachball on the panel, although the upper-layer blend
+is premultiplied-correct (alpha 0 leaves the frame below): is the box in WindowServer's cursor
+surface itself? Diagnostic. Applies on 0443 (seq-12377 line). Kernel seq1o = seq1n + this.
+---
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-13 14:03:00
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-13 14:03:00
+@@ -1052,6 +1052,48 @@
+ 			}
+ 		}
+ 		sweet_fb_blend = layer > 0;
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++		if (layer > 0 && src != 0 && bpe == 4 && s->width <= 256 && s->height <= 256) {
++			/*
++			 * 0444: what the pointer surface holds (S3v 2026-11-13: a black box around the
++			 * beachball although the blend above is premultiplied-correct). For a new surface
++			 * id, then every 20th pointer swap, up to 12 times: alpha 0 / 255 / between, the
++			 * opaque-black count, and a 16 x 16 picture of alpha ("A") and brightness ("Y").
++			 */
++			static uint32_t logs, seen, lastId;
++			seen++;
++			if (logs < 12 && (id != lastId || seen % 20 == 0)) {
++				logs++;
++				lastId = id;
++				uint32_t a0 = 0, a255 = 0, amid = 0, black = 0;
++				const uint8_t *base = (const uint8_t *)(src + s->offset);
++				for (uint32_t y = 0; y < s->height; y++) {
++					const uint32_t *row = (const uint32_t *)(base + (size_t)y * s->bytesPerRow);
++					for (uint32_t x = 0; x < s->width; x++) {
++						uint32_t v = row[x], a = v >> 24;
++						a0 += a == 0;
++						a255 += a == 255;
++						amid += a != 0 && a != 255;
++						black += a == 255 && (v & 0xffffff) == 0;
++					}
++				}
++				IOLog("SWEET CURSOR: surface %u %ux%u fmt 0x%x bpr %u at %d,%d: alpha0 %u alpha255 %u between %u opaque-black %u\n",
++				    id, s->width, s->height, s->pixelFormat, s->bytesPerRow, dx, dy, a0, a255, amid, black);
++				for (uint32_t gy = 0; gy < 16; gy++) {
++					char ra[17], ry[17];
++					for (uint32_t gx = 0; gx < 16; gx++) {
++						uint32_t px = (gx * 2 + 1) * s->width / 32, py = (gy * 2 + 1) * s->height / 32;
++						uint32_t v = *(const uint32_t *)(base + (size_t)py * s->bytesPerRow + px * 4);
++						uint32_t a = v >> 24, B = v & 0xff, G = (v >> 8) & 0xff, R = (v >> 16) & 0xff;
++						ra[gx] = " .:-=+*#%@"[a * 10 / 256];
++						ry[gx] = " .:-=+*#%@"[((R * 3 + G * 6 + B) / 10) * 10 / 256];
++					}
++					ra[16] = ry[16] = 0;
++					IOLog("SWEET CURSOR: A|%s| Y|%s|\n", ra, ry);
++				}
++			}
++		}
++#endif
+ 		/*
+ 		 * Pointer save-under (0396, replaces 0392's restore from the last layer 0, which WindowServer's
+ 		 * double buffering left stale: trails for ~30 s). Before the pointer layer is blended in, the
