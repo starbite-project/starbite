@@ -1,0 +1,129 @@
+From: starbite <starbite@local>
+Date: Fri, 13 Nov 2026 23:20:00 +0200
+Subject: [PATCH] patch: 0449-sweet-fb-changed-rows.patch - SweetFramebuffer keeps the last full
+ frame shown and rescales only the rows that changed (exact row compare); the old pointer comes off a
+ frame's rows first; any other panel writer invalidates the copy; STATS count redrawn/unchanged rows
+
+S3z7 2026-11-13: WindowServer presents ~11 full frames a second on the idle desktop; the vsync thread
+call ("thread call kernel-high #1" in STARLTE TOPK) spent ~60 % of a core rescaling all of each
+828x1792 frame to 1440x2960, tore the picture while doing it and held the pointer to ~11 updates a
+second. Applies on 0448. Kernel seq1u = seq1t + this.
+---
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-13 22:05:20
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-13 22:05:20
+@@ -107,6 +107,18 @@
+ #define SWEET_FB_NOTIFY_TYPES           8
+ #define SWEET_FB_NOTIFY_VSYNC           5
+ #define SWEET_FB_VSYNC_US               16667
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++/*
++ * 0449: the last full frame shown (logical, 4 bytes a pixel), so scaledCopy() rescales only the rows that changed.
++ * S3z7 2026-11-13: WindowServer presents ~11 full frames a second on the idle desktop and the vsync thread call
++ * spent ~60 % of a core rescaling all 828x1792 -> 1440x2960 of each one (and tore the picture while it did).
++ * Any other writer of the panel (the power-off fade) clears sweet_fb_prev_valid.
++ */
++static uint8_t *sweet_fb_prev;
++static uint32_t sweet_fb_prev_size;
++static volatile bool sweet_fb_prev_valid;
++static uint32_t sweet_fb_rows_same, sweet_fb_rows_new;
++#endif
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+ #define SWEET_FB_DOT_PITCH              A5XELTE_FB_DOT_PITCH
+ #else
+@@ -382,6 +394,9 @@
+ 		}
+ 		IOLockUnlock(fb->fLock);
+ 		if (step <= 6) {
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++			sweet_fb_prev_valid = false;    /* 0449: the panel no longer shows the last frame */
++#endif
+ 			for (uint32_t y = 0; y < fb->fHeight; y++) {
+ 				volatile uint32_t *row = (volatile uint32_t *)(fb->fPixels + (uint64_t)y * fb->fRowBytes);
+ 				for (uint32_t x = 0; x < fb->fWidth; x++) {
+@@ -721,10 +736,46 @@
+ 	}
+ 	int32_t sprev = -1;
+ 	uint32_t *sprevRow = NULL;
++	/* 0449: a full frame of layer 0: compare each source row with the last one shown */
++	bool diff = !sweet_fb_blend && dx == 0 && dy == 0 && w == lw && h == lh;
++	uint32_t rowBytes = (uint32_t)w * 4;
++	if (diff && (sweet_fb_prev == NULL || sweet_fb_prev_size != rowBytes * (uint32_t)h)) {
++		if (sweet_fb_prev != NULL) {
++			IOFreeData(sweet_fb_prev, sweet_fb_prev_size);
++		}
++		sweet_fb_prev_size = rowBytes * (uint32_t)h;
++		sweet_fb_prev = (uint8_t *)IOMallocData(sweet_fb_prev_size);
++		sweet_fb_prev_valid = false;
++	}
++	if (sweet_fb_prev == NULL) {
++		diff = false;
++	}
++	if (!sweet_fb_blend && !diff) {
++		sweet_fb_prev_valid = false;    /* a partial layer-0 copy: the saved frame no longer matches the panel */
++	}
++	bool valid = diff && sweet_fb_prev_valid;
++	int32_t checked = -1;
++	bool same = false;
+ 	for (int32_t py = spy0; py < spy1; py++) {
+ 		int32_t r = (int32_t)((int64_t)(py - barY) * lh / outH) - dy;
+ 		r = r < 0 ? 0 : (r >= h ? h - 1 : r);
+ 		uint32_t *out = (uint32_t *)(fPixels + (uint64_t)py * fRowBytes + (uint64_t)spx0 * 4);
++		if (diff && r != checked) {
++			checked = r;
++			const uint8_t *in = (const uint8_t *)(src + (uint64_t)r * srcRowBytes);
++			uint8_t *old = sweet_fb_prev + (size_t)r * rowBytes;
++			same = valid && memcmp(in, old, rowBytes) == 0;
++			if (same) {
++				sweet_fb_rows_same++;
++			} else {
++				memcpy(old, in, rowBytes);
++				sweet_fb_rows_new++;
++			}
++		}
++		if (diff && same) {
++			sprevRow = NULL;        /* the panel row already holds this source row */
++			continue;
++		}
+ 		if (sweet_fb_blend) {
+ 			/* layers above the first (the pointer, overlays): premultiplied BGRA over what is
+ 			 * there, so a transparent pixel leaves the frame below instead of a black box */
+@@ -758,6 +809,9 @@
+ 		}
+ 		sprevRow = out;
+ 	}
++	if (diff) {
++		sweet_fb_prev_valid = true;
++	}
+ 	return (uint64_t)spw * (uint64_t)(spy1 - spy0) * 4;
+ #endif
+ 	int32_t px0 = dx * 3 / 2, px1 = (dx + w) * 3 / 2;
+@@ -903,10 +957,12 @@
+ 		uint32_t secs = (uint32_t)(upns / (10ULL * NSEC_PER_SEC));
+ 		if (secs != lastLog) {
+ 			lastLog = secs;
+-			IOLog("SWEET FB STATS: %u presents (frame %u, pointer %u), pointer carried %u, swaps merged %u\n",
+-			    presents, l0n, l1n, carried, sweet_fb_merged);
++			IOLog("SWEET FB STATS: %u presents (frame %u, pointer %u), pointer carried %u, swaps merged %u; rows "
++			    "redrawn %u, unchanged %u\n", presents, l0n, l1n, carried, sweet_fb_merged, sweet_fb_rows_new,
++			    sweet_fb_rows_same);
+ 			presents = l0n = l1n = carried = 0;
+ 			sweet_fb_merged = 0;
++			sweet_fb_rows_new = sweet_fb_rows_same = 0;
+ 		}
+ 	}
+ #endif
+@@ -1191,6 +1247,13 @@
+ 			}
+ 			sweetSaveUnderRect(dx, dy, w, h);
+ 			sweetSaveUnder(true);
++		}
++#endif
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++		/* 0449: a frame keeps the rows that did not change, so the old pointer must come off them first */
++		if (layer == 0 && src != 0 && fScaled && sweet_su_have) {
++			sweetSaveUnder(false);
++			sweet_su_have = false;
+ 		}
+ #endif
+ 		if (src != 0 && bpe == 4 && fScaled) {
