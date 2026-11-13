@@ -7,13 +7,17 @@
  *   level 1  the card up (sd_up), then the first 8 MiB of the OS store's partition (MBR type 0xDA, the area the
  *            store already reads) twice: on the old path (25 MHz, CPU FIFO) and on the fast path (sd_set_fast:
  *            high speed + IDMAC). PASS when both CRC32s match and the fast path reads >= 10 MB/s. The fast mode
- *            the kernel had is put back afterwards (and by the abort).
+ *            the kernel had is put back afterwards (and by the abort). Before the fast path the card's CMU divider
+ *            is raised (sdclk.c, between commands with the card clock stopped: S-Boot's /16 gave a 6 MHz card clock
+ *            on both paths, run 11) unless the kernel already did (SBOS_SD_CLK); a divider raised here is put back
+ *            with the fast mode. Each path's line has its CMU divider, bus and card clocks.
  *   level 2  nothing. */
 #include "sb.h"
 #include "sd.h"
 #include "ufs.h"
 #include "drvprobe.h"
 #include "sdprobe.h"
+#include "sdclk.h"
 
 #define SDP_BYTES (8U << 20)                /* the region read twice */
 #define SDP_CHUNK 256U                      /* sectors per sd_read: one CMD18 */
@@ -23,15 +27,27 @@
 static int st;                              /* level 1: 0 start, 1 old path, 2 fast path */
 static int prev = -1;                       /* sd_fast_mode before the probe, -1 not saved */
 static uint8_t *buf;
-static uint64_t base, ticks[2], hz[2];
-static uint32_t done, crc[2];
+static uint64_t base, ticks[2], hz[2], bus[2];
+static uint32_t done, crc[2], cmu[2];
+static int raised_here;                     /* the probe raised the CMU divider: sdclk_restore at the end */
 
 static void put_back(void)
 {
     if (prev >= 0)
         (void)sd_set_fast(prev);
     prev = -1;
+    if (raised_here && sdclk_restore())
+        sb_log("drvprobe: sd: the CMU divider did not go back (sdclk_restore)");
+    raised_here = 0;
     st = 0;
+}
+
+/* the clocks of the path that just started: CMU divider, bus, card */
+static void note(int i)
+{
+    hz[i] = sd_rep.card_hz;
+    bus[i] = sd_rep.bus_hz;
+    cmu[i] = sd_rep.cmu_div;
 }
 
 void drv_sd_abort(void)
@@ -78,6 +94,8 @@ static void facts(void)
     ub_c(&u, '-');
     ub_dec2(&u, (c[0] >> 8) & 0xfU);
     ub_s(&u, sd_rep.high_capacity ? ", SDHC/SDXC" : ", SDSC");
+    ub_s(&u, ", CMU divider ");
+    ub_hex(&u, sd_rep.cmu_div, 8);
     ub_s(&u, ", bus clock ");
     ub_dec(&u, sd_rep.bus_hz / 1000U);
     ub_s(&u, " kHz, card clock ");
@@ -132,7 +150,11 @@ static void say_rate(struct ub *u, int i)
     ub_fix(u, rate_milli(ticks[i]), 2);
     ub_s(u, " MB/s at ");
     ub_dec(u, hz[i] / 1000U);
-    ub_s(u, " kHz, CRC32 ");
+    ub_s(u, " kHz (bus ");
+    ub_dec(u, bus[i] / 1000U);
+    ub_s(u, " kHz, CMU /");
+    ub_dec(u, (cmu[i] & 0x1ffU) + 1U);
+    ub_s(u, "), CRC32 ");
     ub_hex(u, crc[i], 8);
 }
 
@@ -174,8 +196,12 @@ static int finish(void)
         ub_s(&u, "/");
         ub_dec(&u, sd_rep.dma_errors);
         ub_s(&u, " err, card ");
-        ub_dec(&u, sd_rep.card_hz / 1000000U);
-        ub_s(&u, " MHz: ");
+        ub_dec(&u, hz[1] / 1000000U);
+        ub_s(&u, " MHz (bus ");
+        ub_dec(&u, bus[1] / 1000000U);
+        ub_s(&u, ", CMU /");
+        ub_dec(&u, (cmu[1] & 0x1ffU) + 1U);
+        ub_s(&u, "): ");
         ub_s(&u, why);
         return fail(u.b);
     }
@@ -232,7 +258,7 @@ int drv_sd_probe(int level, unsigned *wait_ms)
         done = 0;
         ticks[0] = ticks[1] = 0;
         crc[0] = crc[1] = 0;
-        hz[0] = sd_rep.card_hz;
+        note(0);
         st = 1;
         return 0;
     }
@@ -258,9 +284,19 @@ int drv_sd_probe(int level, unsigned *wait_ms)
         return 0;
     if (st == 2)
         return finish();
+    if (!sdclk_rep.raised) {                /* the card clock off between commands, /16 -> /1, back on (sdclk.c) */
+        int r = sdclk_raise();
+        if (r < 0)
+            return fail("the CMU divider change failed (sd_rebus): 25 MHz PIO");
+        if (r == 1)
+            raised_here = 1;
+        else
+            sb_logf("drvprobe: sd: CMU divider left as found: ",
+                    sdclk_rep.why ? sdclk_rep.why : "already at the stock 800 MHz CIU");
+    }
     if (!sd_set_fast(SD_FAST_ON))
         return fail(sd_rep.fast_why ? sd_rep.fast_why : "fast reads did not start");
-    hz[1] = sd_rep.card_hz;
+    note(1);
     done = 0;
     st = 2;
     return 0;

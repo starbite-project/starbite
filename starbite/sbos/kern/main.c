@@ -24,6 +24,7 @@ void next_kinit(void), next_kdraw(void), next_kevent(const void *e), next_ktimer
 #include "survival.h"
 #include "usb.h"
 #include "sd.h"
+#include "sdclk.h"
 
 struct kstate K;
 static uint64_t boot_ms;
@@ -157,6 +158,14 @@ void sb_main(void)
 {
 #ifndef SB_HOST
     sbos_spsel1();                          /* first: libsb's probe and crash vectors then use SP_EL1 */
+#if defined(SBOS_SD_FAST) && !defined(SBOS_SD_CLK)
+#define SBOS_SD_CLK                         /* fast reads need the raised card clock (run 11: 6 MHz on both paths) */
+#endif
+#ifdef SBOS_SD_CLK                          /* 8a2: off until the drivers' probe (sdprobe.c, which raises it for its own
+                                             * fast-path read and puts it back) passes on the phone */
+    (void)sdclk_raise();                    /* kern/sdclk.c: the card's CMU divider /16 -> /1 (bus 12.5 -> 200 MHz) at
+                                             * its first sd_up, the card clock stopped; nothing is touched here */
+#endif
 #ifdef SBOS_SD_FAST                         /* Track A (8a2): off until the drivers' probe says the fast path is ready (run 10:
                                              * "under 10 MB/s"); the OS store is on this card, so no default change before that */
     sd_set_fast(SD_FAST_ON);                /* the card's fast reads (libsb sd.c: CMD6 high speed + IDMAC) from its first
