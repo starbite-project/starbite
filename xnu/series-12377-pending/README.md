@@ -39,3 +39,4 @@ tree was restored and relinked to sd432's sha256.
 | 0447-sweet-topk-kernel-threads.patch | "STARLTE TOPK" lines: the busiest kernel_task threads every 10 s. Diagnostic. Kernel seq1s = seq1r + 0447 | diagnostic |
 | 0448-sweet-fb-persistent-pointer.patch | SweetFramebuffer keeps the pointer layer across frames (mask = updated layers), merges unshown swaps, SWEET FB STATS; trackpad gain x1, acceleration capped x1.8 (S3z3-5: flashing, jumping pointer). Kernel seq1t = seq1s + 0448 | after the user confirms a steady pointer |
 | 0449-sweet-fb-changed-rows.patch | SweetFramebuffer rescales only changed rows of a full frame (S3z7: ~60 % of a core rescaling unchanged frames 11x a second). Kernel seq1u = seq1t + 0449 | with 0448 |
+| 0450-sweet-fb-dirty-bands-log.patch | "SWEET FB DIRTY": the changed bands/rows of sampled frames next to swap-record words (is 0x40 a damage mask?). Diagnostic. Kernel seq1v = seq1u + 0450 | diagnostic |

@@ -1,0 +1,72 @@
+From: starbite <starbite@local>
+Date: Fri, 13 Nov 2026 23:50:00 +0200
+Subject: [PATCH] patch: 0450-sweet-fb-dirty-bands-log.patch - "SWEET FB DIRTY": for sampled
+ frames, the 32 canvas bands and row range that actually changed, next to the swap record's words at
+ 0x40/0x44/0x48/0x50/0x78/0xec/0x150/0x334
+
+S3z8 2026-11-13: only ~9 rows of each 828x1792 frame change, WindowServer presents ~17 frames a second
+and comparing whole frames still costs the vsync thread ~40 % of a core. Which rows change (what keeps
+WindowServer drawing), and is 0x40 a damage-band mask the driver could trust? Diagnostic. Applies on
+0449. Kernel seq1v = seq1u + this.
+---
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-13 22:34:46
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-13 22:34:46
+@@ -118,6 +118,10 @@
+ static uint32_t sweet_fb_prev_size;
+ static volatile bool sweet_fb_prev_valid;
+ static uint32_t sweet_fb_rows_same, sweet_fb_rows_new;
++/* 0450: which rows a frame changed, as 32 bands of the canvas, and the first/last changed row (diagnostic: does
++ * the swap record's word at 0x40 carry the same "damage" bands?) */
++static uint32_t sweet_fb_dirty_bands;
++static int32_t sweet_fb_dirty_lo, sweet_fb_dirty_hi;
+ #endif
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+ #define SWEET_FB_DOT_PITCH              A5XELTE_FB_DOT_PITCH
+@@ -770,6 +774,15 @@
+ 			} else {
+ 				memcpy(old, in, rowBytes);
+ 				sweet_fb_rows_new++;
++				if (valid) {
++					sweet_fb_dirty_bands |= 1u << (uint32_t)((int64_t)r * 32 / h);
++					if (sweet_fb_dirty_lo < 0 || r < sweet_fb_dirty_lo) {
++						sweet_fb_dirty_lo = r;
++					}
++					if (r > sweet_fb_dirty_hi) {
++						sweet_fb_dirty_hi = r;
++					}
++				}
+ 			}
+ 		}
+ 		if (diff && same) {
+@@ -952,6 +965,8 @@
+ 		}
+ 		memcpy(recl + 0x104 + sh, &mask, 4);
+ 		rec = recl;
++		sweet_fb_dirty_bands = 0;
++		sweet_fb_dirty_lo = sweet_fb_dirty_hi = -1;
+ 		uint64_t upns = 0;
+ 		absolutetime_to_nanoseconds(mach_absolute_time(), &upns);
+ 		uint32_t secs = (uint32_t)(upns / (10ULL * NSEC_PER_SEC));
+@@ -1290,6 +1305,21 @@
+ 		}
+ 	}
+ #endif
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	{
++		/* 0450: 40 frames after 100 s of uptime, then every 100th: the changed bands next to the record's words */
++		static uint32_t frames, logged;
++		uint64_t upns = 0;
++		absolutetime_to_nanoseconds(mach_absolute_time(), &upns);
++		if ((mask & 1u) && upns > 100ULL * NSEC_PER_SEC && (logged < 40 || (++frames % 100) == 0)) {
++			logged++;
++			IOLog("SWEET FB DIRTY: swap %u bands 0x%08x rows %d..%d; rec 0x40 0x%08x 0x44 0x%08x 0x48 0x%x 0x50 0x%x "
++			    "0x78 0x%x 0xec 0x%x 0x150 0x%x 0x334 0x%x\n", get32(rec, 0x50 + sh), sweet_fb_dirty_bands,
++			    sweet_fb_dirty_lo, sweet_fb_dirty_hi, get32(rec, 0x40), get32(rec, 0x44), get32(rec, 0x48),
++			    get32(rec, 0x50), get32(rec, 0x78), get32(rec, 0xec), get32(rec, 0x150), get32(rec, 0x334));
++		}
++	}
++#endif
+ 	if (copied != 0 && sweet_fb_first_present == 0) {
+ 		sweet_fb_first_present = mach_absolute_time();
+ 	}
