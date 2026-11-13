@@ -210,8 +210,26 @@ static uint64_t gpu_registry_id(mach_port_t port)
 	return id;
 }
 
+/*
+ * The runtime's process-wide pipeline compile budget (metal2vulkan-runtime pipeline/budget.rs,
+ * set_making_budget_for_measurement(turns, ahead) -> Result<(), MakingBudgetStarted>: two usize in x0/x1, a one-byte
+ * result, 0 = set). On Apple targets it is four turns, three compiles running ahead at once. S2y 2026-11-13: once login
+ * reached the desktop, WindowServer's three concurrent PanVK compiles (~200 MB each on the A55s) took it past 600 MB
+ * and jetsam killed it ("killing largest compressed process WindowServer") every ~70 s, before any compile finished
+ * or was cached: one at a time here. The symbol is the runtime's own (in libnative_metal_bridge.a).
+ */
+extern "C" uint8_t sbmtl_set_compile_budget(size_t turns, size_t ahead)
+	__asm__("__RNvNtNtCs1wLbxd3DEbL_20metal2vulkan_runtime8pipeline6budget33set_making_budget_for_measurement");
+
 static id open_device(mach_port_t port)
 {
+	{
+		static dispatch_once_t once;
+		dispatch_once(&once, ^{
+			uint8_t err = sbmtl_set_compile_budget(1, 1);
+			sm2_log("compile budget: 1 at a time%s", err ? " (refused: budget already in use)" : "");
+		});
+	}
 	if (!listed()) {
 		snprintf(sbmtl_error, sizeof(sbmtl_error), "%s is not a listed client (/private/var/local/mtl2-clients)", getprogname());
 		sm2_log("%s: no Metal device", sbmtl_error);
