@@ -60,7 +60,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 METHODS = ("distro", "release", "source")          # method numbers 1, 2, 3 (SBG_PKG_M_*)
 M_NUM = {"distro": 1, "release": 2, "source": 3}
 M_NAME = {v: k for k, v in M_NUM.items()}
@@ -138,16 +138,16 @@ HINTS = {
     "not in the repo": ("Not on the memory card", None),
     "Linux clock not set": ("Linux's clock is wrong",
                             "Secure downloads can't be checked while the clock is wrong. Set the date and time in "
-                            "Settings, then tap GET again."),
+                            "Settings, then tap Get again."),
     "not enough space": ("Not enough space",
                          "The Linux space on the memory card is full. Remove an app you don't use, then try again."),
     "download failed": ("Download stopped",
-                        "The download was cut off (weak Wi-Fi, or the phone slept). Tap GET again: it carries on "
+                        "The download was cut off (weak Wi-Fi, or the phone slept). Tap Get again: it carries on "
                         "where it stopped."),
     "fetch failed": ("Download stopped",
-                     "Getting the source code was cut off. Check Wi-Fi, then tap GET again."),
+                     "Getting the source code was cut off. Check Wi-Fi, then tap Get again."),
     "download damaged": ("Download was damaged",
-                         "The file arrived damaged and was thrown away. Tap GET to download it again."),
+                         "The file arrived damaged and was thrown away. Tap Get to download it again."),
     "checksum mismatch": ("Download failed its check",
                           "The file didn't match the project's published checksum, so it was not installed. "
                           "Try again later, or choose another install method."),
@@ -158,7 +158,7 @@ HINTS = {
                      "The build stopped with an error. Choose Latest Release or Debian instead. Details: "
                      "/var/log/sbstore/{id}.log in the Terminal."),
     "install failed": ("Install failed",
-                       "Debian's installer stopped with an error. Tap GET to try again: the store first repairs "
+                       "Debian's installer stopped with an error. Tap Get to try again: the store first repairs "
                        "any half-finished install. Details: /var/log/sbstore/{id}.log."),
     "remove failed": ("Remove failed",
                       "Debian's installer couldn't remove it. Try again; details: /var/log/sbstore/{id}.log."),
@@ -177,7 +177,7 @@ HINTS = {
     "not installed": ("Not installed",
                       "It isn't installed by the store, so there was nothing to remove."),
     "internal error": ("The store hit a bug",
-                       "Tap GET to try again. If it happens again, the details are in /var/log/sbstore/jobs.log."),
+                       "Tap Get to try again. If it happens again, the details are in /var/log/sbstore/jobs.log."),
     "apt lists broken": ("Linux's package list is damaged",
                          "The store tried to repair it and couldn't. Restart Linux (close all Linux apps), then try "
                          "again. Details: /var/log/sbstore/{id}.log."),
@@ -185,13 +185,13 @@ HINTS = {
                            "The download didn't contain the program the store expected, so nothing was installed. "
                            "Choose another install method (Debian usually works)."),
     "unpack failed": ("Couldn't unpack the download",
-                      "The downloaded file couldn't be opened. Tap GET to download it again, or choose another method."),
+                      "The downloaded file couldn't be opened. Tap Get to download it again, or choose another method."),
     "bad recipe": ("The store's recipe is wrong",
                    "This install method isn't set up correctly in the store. Choose another install method."),
     "build deps failed": ("Couldn't get the build tools",
-                          "The tools needed to compile it didn't install. Check Wi-Fi and tap GET again, or choose "
+                          "The tools needed to compile it didn't install. Check Wi-Fi and tap Get again, or choose "
                           "Latest Release or Debian."),
-    "cancelled": ("Cancelled", "Nothing was changed. Tap GET to start again."),
+    "cancelled": ("Cancelled", "Nothing was changed. Tap Get to start again."),
     "no aarch64 release": ("No phone build of this release",
                            "The project didn't publish a build for this phone's processor this time. Choose From "
                            "Source or Debian."),
@@ -218,7 +218,7 @@ HINTS = {
                     "Only one version is installed, so there is nothing older to go back to."),
     "no such app": ("Not in the store", "This app isn't in the store's catalog any more."),
     "took too long": ("Took too long",
-                      "It ran much longer than expected and was stopped. Tap GET to try again, or choose Latest "
+                      "It ran much longer than expected and was stopped. Tap Get to try again, or choose Latest "
                       "Release or Debian."),
     "tool missing": ("A Linux tool is missing",
                      "A program the store needs isn't in Linux. Choose Debian instead; details in "
@@ -226,10 +226,10 @@ HINTS = {
     "update failed": ("Update failed",
                       "The update stopped with an error; the installed version still works. Tap UPDATE to try again."),
     "interrupted": ("Stopped part-way",
-                    "The install was interrupted (Linux stopped or the phone restarted). Tap GET again."),
+                    "The install was interrupted (Linux stopped or the phone restarted). Tap Get again."),
 }
 HINT_ANY = ("Something went wrong",
-            "Tap GET to try again. If it keeps failing, the details are in /var/log/sbstore/{id}.log.")
+            "Tap Get to try again. If it keeps failing, the details are in /var/log/sbstore/{id}.log.")
 
 
 def explain(e, aid=""):
@@ -238,7 +238,7 @@ def explain(e, aid=""):
     if isinstance(e, NeedsNet) or hint is None:
         why = net_why()
         if why == "ok":
-            hint = ("It isn't on the memory card, and the internet didn't answer just now. Tap GET to try again, "
+            hint = ("It isn't on the memory card, and the internet didn't answer just now. Tap Get to try again, "
                     "or choose Debian to install from the memory card.")
         else:
             hint = NET_WHY_TEXT.get(why, NET_WHY_TEXT["no answer"]) + " Or choose Debian to install from the memory card."
@@ -455,11 +455,11 @@ _net = {"t": 0.0, "up": False, "why": "not checked"}
 NET_WHY_TEXT = {
     "offline mode": "The store is set to offline.",
     "no connection": "Linux has no network connection yet. Join Wi-Fi (or turn on Mobile Data) in Settings, wait "
-                     "about 10 seconds, then tap GET again.",
+                     "about 10 seconds, then tap Get again.",
     "no dns": "Linux is connected but can't look up names (DNS). Check that Wi-Fi really reaches the internet, then "
-              "tap GET again.",
+              "tap Get again.",
     "no answer": "Linux is connected but the internet doesn't answer. Check that Wi-Fi really reaches the internet "
-                 "(open a web page in Starbite), then tap GET again.",
+                 "(open a web page in Starbite), then tap Get again.",
 }
 
 
