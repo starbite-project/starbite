@@ -32,7 +32,7 @@ static void lx_open_app(int ci);
 #define AQ_PAD 110.0f                            /* under a page's last row: the tab bar's room */
 enum { AT_TODAY, AT_GAMES, AT_APPS, AT_SEARCH };   /* iOS 27's App Store: Today / Games / Apps + the search circle */
 #define AQ_ACCT "@account"                       /* AQ.cat of the Account page (pushed from the account button) */
-enum { H_NONE, H_APP, H_ACT, H_CAT, H_CHECK, H_UPALL, H_ROLLBACK, H_METHOD, H_MAIN, H_OPEN, H_REINSTALL, H_REMOVE, H_SUGGEST, H_OPTS, H_ACCT, H_MORE };
+enum { H_NONE, H_APP, H_ACT, H_CAT, H_CHECK, H_UPALL, H_ROLLBACK, H_METHOD, H_MAIN, H_OPEN, H_REINSTALL, H_REMOVE, H_SUGGEST, H_OPTS, H_ACCT, H_MORE, H_STORY };
 static const char *const AQ_CATS[10] = { "Internet", "Office", "Graphics", "Media", "Games", "Utilities", "Development",
                                          "Education", "Science", "System" };
 static const uint32_t AQ_CATC[11] = { 0x0a84ff, 0xff9f0a, 0xff375f, 0xff453a, 0xbf5af2, 0x8e8e93, 0x5e5ce6, 0x30d158,
@@ -41,6 +41,7 @@ static const char *const AQ_SUGG[6] = { "Games", "Text editor", "Graphics", "Off
 static struct {
     int tab, cat_on, app, pick, kb, shift, num, rm_arm, badge, empty, opts;   /* opts: Install Options expanded */
     int more;                                     /* the product page's description opened ("more") */
+    int story;                                    /* a Today story open: its package + 1 (0: none) */
     char cat[16], pkg[40], q[24];
     float scroll, v, top, bot, h, rm_t, sroot[4], scat;
     int ck[AQ_NCH], dirty[AQ_NCH];               /* each chunk layer's chunk (-1 none), to be drawn again */
@@ -55,7 +56,14 @@ static tk_layer aqc[AQ_NCH], aqh, aqtb, aqtg;
 /* the cold start (Linux not up yet): a determinate bar under the words, two solid layers (no drawing per frame), paced
  * by the last start this boot (the phone's first: ~35 s to HELLO + the store's table, 7u's self test) */
 static tk_layer aqbt, aqbf;
-static tk_layer aqit;                            /* the inline title (17 / 600, centred) a root page's large title collapses into */
+static tk_layer aqit;
+/* the story's zoom (iOS: the Today card grows into the story, matched geometry, spring response 0.45 damping 0.85;
+ * the story shrinks back into its card on close or a drag down): aqz the card's face redrawn once at card size and
+ * scaled, aqzb the black page growing with it; phase 1 opening, 2 open (aqz until the story's chunks are drawn), 3 closing */
+static tk_layer aqz, aqzb;
+static struct { int phase, pkg; float t, v; tk_rect card; float sroot, drag, dv; } ZS;
+static void aq_story_open(int i, tk_rect card);
+static void aq_story_close(void);                            /* the inline title (17 / 600, centred) a root page's large title collapses into */
 static float aq_st0, aq_st_exp = 35000, aq_bar_y;
 static int aq_st_late;    /* the chunks, the fixed head, the tab bar's glass and its glyphs */
 static tk_bmp aq_dic;                            /* the app page's 100 pt icon */
@@ -406,51 +414,75 @@ static void aq_title_acct(pctx *c, const char *t)
 }
 
 /* Today: the date and the large title, the featured cards, "Top Apps in" the two biggest categories */
-#define CARD_H 264.0f
+#define CARD_H 460.0f                            /* iOS's Today card: full width - 40, 450-480 tall (IOS-REFERENCE 13) */
+#define CARD_R 24.0f
+/* a story's art (ours, no screenshots yet): the app's icon as a staggered pattern over its colour, darkening to the
+ * bottom so the words and the app row read; the card (x, y, w, h, r) and the story's hero use it */
+static void aq_art(dc *d, int i, float x, float y, float w, float h, float r, float top)
+{
+    uint32_t col = aq_card_col(i);
+    tk_col c0 = tk_hex(col, 1), c1 = tk_hex(col, 1);
+    c0.r *= .78f; c0.g *= .78f; c0.b *= .78f;
+    c1.r *= .30f; c1.g *= .30f; c1.b *= .30f;
+    tk_stop s[2] = { { 0, c0 }, { 1, c1 } };
+    tk_paint g = tk_linear(160, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), 2, s);
+    tk_fill_rrect(d->b, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), &g, 1);
+    const tk_bmp *ic = aq_icon(i);
+    if (ic && ic->px) {                           /* the pattern: 48 pt icons every 74 pt, rows offset by half a step */
+        float st = 74, ox = x + 14, oy = top;
+        for (int row = 0; oy + row * st < y + h - 110; row++)
+            for (int k = -1; ox + k * st + (row & 1) * st / 2 < x + w - 10; k++) {
+                float ix = ox + k * st + (row & 1) * st / 2, iy = oy + row * st;
+                if (ix < x + 4 || iy + 48 > y + h - 96) continue;
+                int bx = (int)tk_floorf(PT(ix) - d->ox + .5f), by = (int)tk_floorf(PT(iy) - d->oy + .5f);
+                if (bx + ic->w < 0 || by + ic->h < 0 || bx > d->b->w || by > d->b->h) continue;
+                tk_blit(d->b, ic, bx, by, row == 1 && k == 1 ? 1 : .32f);   /* (one of them at full strength) */
+            }
+    }
+    tk_stop sh[2] = { { 0, tk_hex(0x000000, 0) }, { 1, tk_hex(0x000000, .55f) } };   /* the app row's band */
+    tk_paint gb = tk_linear(180, PT(x) - d->ox, PT(y + h - 150) - d->oy, PT(w), PT(150), 2, sh);
+    tk_fill_rrect(d->b, PT(x) - d->ox, PT(y + h - 150) - d->oy, PT(w), PT(150), 0, &gb, 1);
+}
+/* the card's face at (x, y) scaled by k (1: the card; the story's hero is the same face at 390 / 350): its art, the
+ * label, the headline, the app row (with its pill when pill) */
+static void aq_card_face(dc *d, int i, float x, float y, float k, int pill)
+{
+    const sh_lpkg_t *p = &LST->pkg[i];
+    float w = CONTENT_W * k, h = CARD_H * k;
+    char ln[4][96];
+    float wm;
+    int n = wrapn(ln, 3, TK_IT700, 30 * k, p->summary[0] ? p->summary : p->name, w - 40 * k, &wm);
+    aq_art(d, i, x, y, w, h, pill ? CARD_R : 0, y + (44 + 34.0f * n + 14) * k);
+    char up[40];
+    int q = 0;
+    const char *lab = p->flags & SH_PKG_INSTALLED ? "ON YOUR PHONE" : !tk_strcmp(p->category, "Games") ? "GAME OF THE DAY" : "APP OF THE DAY";
+    for (const char *z = lab; *z && q < 38; z++) up[q++] = *z;
+    up[q] = 0;
+    d_text(d, TK_IT600, 13 * k, x + 20 * k, bl(TK_IT600, 13 * k, y + 22 * k), up, .3f, 0, W(.75f), 0);
+    for (int j = 0; j < n; j++) d_text(d, TK_IT700, 30 * k, x + 20 * k, bl(TK_IT700, 30 * k, y + (44 + 34.0f * j) * k), ln[j], 0, 0, W(1), 0);
+    float by = y + h - 72 * k;
+    aq_blit(d, aq_icon(i), x + 20 * k, by + 12 * k);
+    float tx = x + 80 * k, tw_ = x + w - (20 + PILL_W + 10) * k - tx;
+    d_text_box(d, TK_IT600, 16, tx, bl(TK_IT600, 16, by + 15 * k), tw_, 0, p->name, 0, 0, W(1), 0);
+    if (!st_busy(p)) {
+        char l2[96];
+        tk_col lc;
+        if (!aq_status(p, l2, sizeof l2, &lc)) lx_scopy(l2, p->category, sizeof l2);
+        d_text_box(d, TK_IT400, 13, tx, bl(TK_IT400, 13, by + 38 * k), tw_, 0, l2, 0, 0, W(.7f), 0);
+        if (pill) aq_pill(d, x + w - (20 + PILL_W) * k, by + 21 * k, p, 1);
+    }
+}
 static float aq_card(pctx *c, float y, int i)
 {
     const sh_lpkg_t *p = &LST->pkg[i];
     if (vis(c, y, CARD_H + 20)) {
-        dc *d = c->d;
-        uint32_t col = aq_card_col(i);
-        tk_col c0 = tk_hex(col, 1), c1 = tk_hex(col, 1);
-        c0.r *= .62f; c0.g *= .62f; c0.b *= .62f;
-        c1.r *= .22f; c1.g *= .22f; c1.b *= .22f;
-        tk_stop s[2] = { { 0, c0 }, { 1, c1 } };
-        tk_paint g = tk_linear(180, PT(MARGIN) - d->ox, PT(y) - d->oy, PT(CONTENT_W), PT(CARD_H), 2, s);
-        tk_fill_rrect(d->b, PT(MARGIN) - d->ox, PT(y) - d->oy, PT(CONTENT_W), PT(CARD_H), PT(22), &g, 1);
-        char up[40];
-        int k = 0;
-        const char *lab = p->flags & SH_PKG_INSTALLED ? "ON YOUR PHONE" : "FEATURED APP";
-        for (const char *q = lab; *q && k < 38; q++) up[k++] = *q;
-        up[k] = 0;
-        d_text(d, TK_IT600, 13, MARGIN + 20, bl(TK_IT600, 13, y + 20), up, .3f, 0, W(.7f), 0);
-        char ln[4][96];
-        float wm;
-        int n = wrapn(ln, 2, TK_IT700, 27, p->summary[0] ? p->summary : p->name, CONTENT_W - 40, &wm);
-        for (int j = 0; j < n; j++) d_text(d, TK_IT700, 27, MARGIN + 20, bl(TK_IT700, 27, y + 42 + 32.0f * j), ln[j], 0, 0, W(1), 0);
-        if (p->desc[0]) {                        /* the description's start under it (iOS's editorial line) */
-            int m = wrapn(ln, 3, TK_IT400, 15, p->desc, CONTENT_W - 40, &wm);
-            for (int j = 0; j < m; j++) d_text(d, TK_IT400, 15, MARGIN + 20, bl(TK_IT400, 15, y + 52 + 32.0f * n + 20.0f * j), ln[j], 0, 0, W(.72f), 0);
-        }
-        float by = y + CARD_H - 72;
-        d_rrect(d, MARGIN + 20, by, CONTENT_W - 40, .5f, 0, W(.18f));
-        aq_blit(d, aq_icon(i), MARGIN + 20, by + 12);
-        float tx = MARGIN + 80, tw_ = CONTENT_R - 20 - PILL_W - 10 - tx;
-        d_text_box(d, TK_IT600, 16, tx, bl(TK_IT600, 16, by + 15), tw_, 0, p->name, 0, 0, W(1), 0);
-        if (!st_busy(p)) {
-            char l2[96];
-            tk_col lc;
-            if (!aq_status(p, l2, sizeof l2, &lc)) lx_scopy(l2, p->category, sizeof l2);
-            d_text_box(d, TK_IT400, 13, tx, bl(TK_IT400, 13, by + 38), tw_, 0, l2, 0, 0, W(.7f), 0);
-            aq_pill(d, CONTENT_R - 20 - PILL_W, by + 21, p, 1);
-        }
+        aq_card_face(c->d, i, MARGIN, y, 1, 1);
         aq_mark(c, i);
     }
     if (st_busy(p)) aq_live_add(LV_CARD, i, MARGIN + 80, y + CARD_H - 72, CONTENT_R - 20 - PILL_W - 10 - MARGIN - 80);
     if (at(c, MARGIN, y, CONTENT_W, CARD_H)) {
         if (c->hx >= CONTENT_R - 20 - PILL_W - 8 && c->hy >= y + CARD_H - 60) aq_hitr(c, H_ACT, i, 0, CONTENT_R - 20 - PILL_W, y + CARD_H - 51, PILL_W, 30, 15, 1);
-        else aq_hitr(c, H_APP, i, 0, MARGIN, y, CONTENT_W, CARD_H, 20, 0);
+        else aq_hitr(c, H_STORY, i, 0, MARGIN, y, CONTENT_W, CARD_H, CARD_R, 0);   /* (iOS: the card opens its story) */
     }
     return y + CARD_H + 20;
 }
@@ -1061,8 +1093,37 @@ static float pg_app(pctx *c)
     }
     return y;
 }
+/* a Today story (iOS's card opened): the card's face full width as the hero, the full text, the app's row */
+#define HERO_K (390.0f / CONTENT_W)
+static float pg_story(pctx *c)
+{
+    int i = AQ.story - 1;
+    if (i < 0 || i >= aq_n()) return AQ.top;
+    const sh_lpkg_t *p = &LST->pkg[i];
+    float hh = CARD_H * HERO_K;
+    if (vis(c, 0, hh)) aq_card_face(c->d, i, 0, 0, HERO_K, 0);
+    float y = hh + 26;
+    y = aq_textblock(c, y + 18, TK_IT400, 17, 24, p->desc[0] ? p->desc : p->summary, INK) + 10;
+    /* the app's row in a card, as iOS ends a story: icon, name, category, GET; the row opens the product page */
+    if (vis(c, y, 76)) {
+        dc *d = c->d;
+        d_rrect(d, GROUP_X, y, GROUP_W, 76, 18, C_CARD);
+        aq_blit(d, aq_icon(i), GROUP_X + 14, y + 14);
+        float tx = GROUP_X + 76, tw_ = PILL_X - 14 - tx;
+        d_text_box(d, TK_IT600, 16, tx, bl(TK_IT600, 16, y + 18), tw_, 0, p->name, 0, 0, INK, 0);
+        d_text_box(d, TK_IT400, 13, tx, bl(TK_IT400, 13, y + 41), tw_, 0, p->category, 0, 0, C_LABEL2, 0);
+        if (!st_busy(p)) aq_pill(d, PILL_X - 8, y + 23, p, 0);
+        aq_mark(c, i);
+    }
+    if (at(c, GROUP_X, y, GROUP_W, 76)) {
+        if (c->hx >= PILL_X - 18) aq_hitr(c, H_ACT, i, 0, PILL_X - 8, y + 23, PILL_W, 30, 15, 1);
+        else aq_hitr(c, H_APP, i, 0, GROUP_X, y, GROUP_W, 76, 18, 0);
+    }
+    return y + 76 + 40;
+}
 static float aq_paint(pctx *c)
 {
+    if (AQ.story) return pg_story(c);
     if (!LST || LST->n <= 0) return AQ.top;
     if (AQ.app) return pg_app(c);
     if (AQ.cat_on) return pg_cat(c);
@@ -1075,7 +1136,7 @@ static float aq_paint(pctx *c)
 /* ---- the layers ---- */
 static void aq_area(void)
 {
-    AQ.top = AQ.tab == AT_SEARCH && !AQ.app ? AQ_FIELD_Y + 46 : SAFE_TOP;
+    AQ.top = AQ.story ? 0 : AQ.tab == AT_SEARCH && !AQ.app ? AQ_FIELD_Y + 46 : SAFE_TOP;
     AQ.bot = AQ.kb && AQ.tab == AT_SEARCH && !AQ.app ? 540 : H_PT;
     pctx c = { 0, 0, 0, -1e9f, -1e9f, -1, 0, 0, 0, { 0, 0, 0, 0 }, 0, 0 };
     aq_nl = 0;
@@ -1168,6 +1229,9 @@ static int aq_place(int max)
         off = (float)AQ.dir * PT(70) * (1 - e);
         al = AQ.dir ? e : 1;
     }
+    if (ZS.phase == 1 || ZS.phase == 3) al *= 1 - .35f * tk_clampf(ZS.t, 0, 1);   /* (the page dims under the zoom) */
+    float dsc = 1, dty = 0;
+    if (AQ.story && ZS.drag > 0) { dsc = 1 - .2f * tk_minf(ZS.drag / 300, 1); dty = ZS.drag * .35f; }
     for (int L = 0; L < AQ_NCH; L++) {
         tk_layer *l = &aqc[L];
         if (!l->bmp.px) continue;
@@ -1184,6 +1248,14 @@ static int aq_place(int max)
          * out behind the glass, nothing shows round its rounded ends) */
         l->fade_bot = AQ.bot < H_PT - 1 ? (AQ.top + AQ.h - s > AQ.bot + 1 ? PT(24) : 0) : PT(64);
         if (AQ.bot >= H_PT - 1) l->clip_r.h = PT(TB_Y + 16 - AQ.top);
+        if (AQ.story) l->clip_r = (tk_rect){ 0, 0, TK_W, PT(H_PT) };
+        l->sx = l->sy = dsc; l->ox = PT(195); l->oy = 0; l->clip_radius = 0;
+        if (dsc < 1) {
+            l->y += PT(dty) / dsc;
+            l->clip_r = (tk_rect){ PT(195 - 195 * dsc), PT(dty), PT(390 * dsc), PT(H_PT * dsc) };
+            l->clip_radius = PT(32);
+            l->fade_top = 0;
+        }
     }
     /* the live layers: the visible busy items (drawn when new or moved on) */
     for (int k = 0; k < AQ_NLIVE; k++)
@@ -1221,7 +1293,7 @@ static int aq_place(int max)
 /* the fixed head: the back circle on a pushed page; Search's title and field; an empty store's words */
 static const char *aq_inline_t(void)
 {
-    if (AQ.app || AQ.empty) return 0;
+    if (AQ.app || AQ.empty || AQ.story) return 0;
     if (AQ.cat_on) return !tk_strcmp(AQ.cat, AQ_ACCT) ? "Account" : AQ.cat[0] ? AQ.cat : "All Apps";
     return AQ.tab == AT_TODAY ? "Today" : AQ.tab == AT_GAMES ? "Games" : AQ.tab == AT_APPS ? "Apps" : 0;
 }
@@ -1271,6 +1343,16 @@ static void aq_head(void)
         aqh.hidden = 0;
         return;
     }
+    if (AQ.story) {                               /* the story's close: a dark glass circle with an X, top right */
+        float cx = CONTENT_R - 17, cy = SAFE_TOP + 19;
+        dc d = mk(&aqh, "store-story-x", CONTENT_R - 40, SAFE_TOP - 4, 46, 46, 0, 0);
+        d_rrect(&d, cx - 17, cy - 17, 34, 34, 17, tk_hex(0x1c1c1e, .72f));
+        d_seg(&d, cx - 5.5f, cy - 5.5f, cx + 5.5f, cy + 5.5f, 2.4f, W(.9f));
+        d_seg(&d, cx + 5.5f, cy - 5.5f, cx - 5.5f, cy + 5.5f, 2.4f, W(.9f));
+        trim_layer(&aqh, 0, 0);
+        aqh.hidden = 0;
+        return;
+    }
     if (AQ.app || AQ.cat_on) {
         dc d = mk(&aqh, "store-nav", 0, SAFE_TOP - 20, 390, NAVBAR_H + 40, 0, 0);
         d_back(&d, ACCENT());
@@ -1313,7 +1395,7 @@ static void aq_tabs(void)
 {
     relayer(&aqtg);
     aqtg.hidden = aqtb.hidden = 1;
-    if (!is_app("store") || (AQ.kb && AQ.tab == AT_SEARCH && !AQ.app)) return;
+    if (!is_app("store") || (AQ.kb && AQ.tab == AT_SEARCH && !AQ.app) || AQ.story) return;
     aqtb.hidden = 0;
     dc d = mk(&aqtg, "store-tabs", MARGIN, TB_Y, CONTENT_W, TB_H, 2, 0);
     static const char *const TL[3] = { "Today", "Games", "Apps" };
@@ -1629,6 +1711,7 @@ static void aq_push(int i)
 }
 static void aq_back(void)
 {
+    if (AQ.story) { aq_story_close(); return; }
     if (AQ.app) { AQ.app = 0; tk_bmp_free(&aq_dic); aq_dic_pkg[0] = 0; AQ.scroll = AQ.cat_on ? AQ.scat : AQ.sroot[AQ.tab]; }
     else if (AQ.cat_on) { AQ.cat_on = 0; AQ.scroll = AQ.sroot[AQ.tab]; }
     aq_go(-1);
@@ -1705,6 +1788,10 @@ static int aq_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
 {
     if (!is_app("store") || !LST) return 0;
     if (AQ.kb && AQ.tab == AT_SEARCH && !AQ.app && y >= 548) return 0;          /* (the keyboard lights its own keys) */
+    if (AQ.story && x >= CONTENT_R - 46 && y < SAFE_TOP + 46) {
+        *r = *g = (tk_rect){ CONTENT_R - 34, SAFE_TOP + 2, 34, 34 }; *rad = 17; *col = W(.16f);
+        return 1;
+    }
     if ((AQ.app || AQ.cat_on) && BACK_HIT(x, y)) {
         *r = *g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *col = W(.16f);
         return 1;
@@ -1735,6 +1822,7 @@ static void aq_tap(float x, float y)
         return;
     }
     if (AQ.empty || AQ.hide) return;              /* (a page still being drawn: nothing to tap yet) */
+    if (AQ.story && x >= CONTENT_R - 46 && y < SAFE_TOP + 46) { sh_haptic_k(SH_HAP_LIGHT); aq_story_close(); return; }
     if ((AQ.app || AQ.cat_on) && BACK_HIT(x, y)) { aq_back(); return; }
     if (search && y >= AQ_FIELD_Y - 6 && y < AQ_FIELD_Y + 44) {   /* the field: the keyboard; Cancel: all again */
         if (AQ.kb && x >= CONTENT_R - 72) { AQ.kb = 0; AQ.q[0] = 0; AQ.scroll = 0; aq_go(0); return; }
@@ -1766,7 +1854,8 @@ static void aq_tap(float x, float y)
     aq_paint(&c);
     int i = c.hpkg;
     switch (c.hit) {
-    case H_APP: sh_haptic(); aq_push(i); break;
+    case H_APP: sh_haptic(); if (AQ.story) { AQ.story = 0; ZS.phase = 0; } aq_push(i); break;
+    case H_STORY: aq_story_open(i, (tk_rect){ c.hr.x, c.hr.y - AQ.scroll, c.hr.w, c.hr.h }); break;
     case H_ACT: aq_act(i, 0); break;
     case H_OPEN: { int a = st_app(i); if (a >= 0) lx_open_app(a); } break;
     case H_MAIN: aq_act(i, AQ.pick); break;
@@ -1819,6 +1908,12 @@ static int aq_touch(int ph, float x, float y)
     }
     if (!AQ.drag) return 0;
     if (tk_fabsf(y - AQ.y0) > 6) AQ.moved = AQ.moved ? AQ.moved : 1 + (AQ.y0 >= AQ.top && AQ.y0 < AQ.bot && AQ.y0 < TB_Y);
+    if (ph == 1 && AQ.moved == 2 && AQ.story && ZS.phase == 2 && AQ.s0 <= 0 && (y > AQ.y0 || ZS.drag > 0)) {
+        ZS.drag = tk_maxf(0, y - AQ.y0);          /* iOS: at the story's top, a drag down shrinks it toward its card */
+        AQ.scroll = 0;
+        aq_place(0);
+        return 1;
+    }
     if (ph == 1 && AQ.moved == 2) {          /* (1: moved off a tap, not on the page: no scroll) */
         float s = AQ.s0 - (y - AQ.y0), m = aq_max();
         if (s < 0) s = s * .4f;                   /* the rubber band */
@@ -1828,6 +1923,11 @@ static int aq_touch(int ph, float x, float y)
         AQ.ly = y; AQ.lt = now_ms;
         AQ.scroll = s;
         aq_place(1);
+    }
+    if (ph == 2 && ZS.drag > 0) {
+        AQ.drag = 0;
+        if (ZS.drag > 110) { ZS.drag = 0; aq_story_close(); }   /* (past the threshold: closes; else springs back) */
+        return 1;
     }
     if (ph == 2) {
         AQ.drag = 0;
@@ -1842,6 +1942,7 @@ static int aq_moving(void)
     if (!is_app("store")) return 0;
     if (!aqbf.hidden) return 1;                   /* (the cold start's bar moves) */
     if (aq_spinning()) return 1;                  /* (a waiting spinner turns) */
+    if (ZS.phase == 1 || ZS.phase == 3 || aqz.bmp.px || ZS.drag > 0) return 1;   /* (the story's zoom) */
     return AQ.drag || AQ.hide || AQ.left > 0 || AQ.rev < 1 || tk_fabsf(AQ.v) > 1 || AQ.scroll < 0 || AQ.scroll > aq_max() + .5f;
 }
 /* the cold start's bar: elapsed / the expected start, held at 95 % until Linux is up; the words change once when late */
@@ -1863,6 +1964,97 @@ static int aq_bar(void)
     hl_set(&aqbf, fr, fr, 2.5f, ACCENT());
     return 1;
 }
+static void aq_go(int dir);
+static void aq_z_face(void)
+{
+    relayer(&aqz);
+    dc d = mk(&aqz, "store-zoom", ZS.card.x, ZS.card.y, CONTENT_W, CARD_H, 0, 0);
+    aq_card_face(&d, ZS.pkg, ZS.card.x, ZS.card.y, 1, 0);
+    aqz.hidden = 0;
+}
+/* the zoom's frame at t (0 the card, 1 the story's hero full width) */
+static void aq_z_apply(void)
+{
+    float t = ZS.t, hh = CARD_H * HERO_K;
+    tk_rect R = { ZS.card.x * (1 - t), ZS.card.y * (1 - t), CONTENT_W + (390 - CONTENT_W) * t, CARD_H + (hh - CARD_H) * t };
+    float sc = R.w / CONTENT_W, rad = CARD_R + (32 - CARD_R) * tk_clampf(t, 0, 1);
+    if (aqz.bmp.px) {
+        aqz.sx = aqz.sy = sc; aqz.ox = aqz.oy = 0;
+        aqz.x = PT(R.x) / sc + (aqz.bx - PT(ZS.card.x));
+        aqz.y = PT(R.y) / sc + (aqz.by - PT(ZS.card.y));
+        aqz.clip = 1;
+        aqz.clip_r = (tk_rect){ PT(R.x), PT(R.y), PT(R.w), PT(R.h) };
+        aqz.clip_radius = PT(rad);
+    }
+    tk_rect P = { R.x, R.y, R.w, CARD_H + (H_PT - CARD_H) * t };   /* the black page grows to the screen */
+    hl_set(&aqzb, P, P, rad, tk_hex(0x000000, 1));
+    float tb = 1 - tk_clampf(t, 0, 1);
+    aqtb.alpha = aqtg.alpha = tb;
+}
+static void aq_story_open(int i, tk_rect card)
+{
+    if (ZS.phase) return;
+    ZS.pkg = i; ZS.card = card; ZS.t = 0; ZS.v = 0; ZS.phase = 1; ZS.drag = 0;
+    ZS.sroot = AQ.scroll;
+    aq_z_face();
+    aq_z_apply();
+    relink();
+}
+static void aq_story_close(void)
+{
+    if (ZS.phase != 2 || !AQ.story) return;
+    ZS.pkg = AQ.story - 1;
+    aq_z_face();
+    ZS.t = 1; ZS.v = 0; ZS.phase = 3; ZS.drag = 0;
+    AQ.story = 0;
+    AQ.scroll = ZS.sroot;
+    aq_tabs();
+    aq_go(0);
+    aq_z_apply();
+    relink();
+}
+/* one frame of the zoom's spring (k = (2 pi / 0.45)^2, c = 4 pi 0.85 / 0.45, IOS-REFERENCE 16) */
+static int aq_z_tick(float dt)
+{
+    if (!ZS.phase) return 0;
+    if (ZS.phase == 1 || ZS.phase == 3) {
+        float tgt = ZS.phase == 1 ? 1 : 0, k = 194.95f, cd = 23.74f;
+        for (float left = dt; left > 0; left -= .004f) {
+            float h = tk_minf(left, .004f);
+            ZS.v += (k * (tgt - ZS.t) - cd * ZS.v) * h;
+            ZS.t += ZS.v * h;
+        }
+        if (tk_fabsf(ZS.t - tgt) < .002f && tk_fabsf(ZS.v) < .05f) {
+            ZS.t = tgt;
+            if (ZS.phase == 1) {                  /* the story's own page now, drawn under the zoom's face */
+                ZS.phase = 2;
+                AQ.story = ZS.pkg + 1;
+                AQ.scroll = 0;
+                aq_tabs();
+                aq_go(0);
+            } else {
+                ZS.phase = 0;
+                relayer(&aqz); relayer(&aqzb);
+                aqz.hidden = aqzb.hidden = 1;
+                aqtb.alpha = aqtg.alpha = 1;
+                relink();
+                return 1;
+            }
+        }
+        aq_z_apply();
+        aq_place(0);
+        return 1;
+    }
+    /* open: the face stays until the story's chunks are drawn; a drag down that didn't close springs back */
+    if (aqz.bmp.px && !AQ.hide) { relayer(&aqz); relayer(&aqzb); aqz.hidden = aqzb.hidden = 1; relink(); }
+    if (!AQ.drag && ZS.drag > 0) {
+        ZS.drag *= tk_expf(-dt * 14);
+        if (ZS.drag < .5f) ZS.drag = 0;
+        aq_place(0);
+        return 1;
+    }
+    return aqz.bmp.px != 0;
+}
 static int aq_spinning(void)
 {
     for (int k = 0; k < AQ_NLIVE; k++)
@@ -1873,6 +2065,7 @@ static int aq_spinning(void)
 static int aq_tick(float dt)
 {
     if (aq_bar()) return 1;
+    int zm = is_app("store") ? aq_z_tick(dt) : 0;   /* (the zoom moves; the page under it keeps drawing) */
     if (!is_app("store") || ap_pending || AQ.empty) return 0;
     static float spin_t;
     if (aq_spinning() && now_ms - spin_t >= 33) {   /* the waiting spinners turn (~30 frames a second) */
@@ -1903,7 +2096,7 @@ static int aq_tick(float dt)
         if (AQ.rev < 1) AQ.rev = tk_minf(1, AQ.rev + dt / .32f);
         pend = aq_place(1);                       /* (a chunk is the frame's work: ~20 ms of text on the Mac) */
     }
-    return pend > 0 || aq_moving();
+    return pend > 0 || aq_moving() || zm;
 }
 static void aq_open(void)
 {
@@ -1918,8 +2111,10 @@ static void aq_close(void)
 {
     for (int L = 0; L < AQ_NCH; L++) { relayer(&aqc[L]); aqc[L].hidden = 1; aqc[L].clip = 0; AQ.ck[L] = -1; }
     for (int k = 0; k < AQ_NLIVE; k++) { relayer(&aql[k]); aql[k].hidden = 1; aql[k].clip = 0; aql_it[k] = -1; }
-    relayer(&aqh); relayer(&aqtb); relayer(&aqtg); relayer(&aqbt); relayer(&aqbf); relayer(&aqit);
-    aqh.hidden = aqtb.hidden = aqtg.hidden = aqbt.hidden = aqbf.hidden = aqit.hidden = 1;
+    relayer(&aqh); relayer(&aqtb); relayer(&aqtg); relayer(&aqbt); relayer(&aqbf); relayer(&aqit); relayer(&aqz); relayer(&aqzb);
+    aqh.hidden = aqtb.hidden = aqtg.hidden = aqbt.hidden = aqbf.hidden = aqit.hidden = aqz.hidden = aqzb.hidden = 1;
+    tk_memset(&ZS, 0, sizeof ZS);
+    AQ.story = 0;
     aq_tb_baked = 0;
     AQ.kb = AQ.drag = AQ.hide = 0;
     AQ.v = 0;
@@ -1937,6 +2132,8 @@ static int aq_layers(tk_layer **o)
     o[n++] = &aqbf;
     o[n++] = &aqtb;
     o[n++] = &aqtg;
+    o[n++] = &aqzb;
+    o[n++] = &aqz;
     return n;
 }
 /* the stills: "store=" (Today) / today / browse / search / updates / a package's id (its page); "storecat=NAME"
