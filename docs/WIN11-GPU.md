@@ -2429,6 +2429,25 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - **T64** (`sbwddm-t64` = T63 + that sb-user.bat): T64a cold, T64b warm, both `--sbxta DisableOnM3=0,SwapCache=1`;
   restore with `--sbxta DisableOnM3=1,SwapCache=0`. Compare start times and hitches with T63.
 
+### 6.72 The user's session and T63 read
+
+- **The user's post-fix session (19:21-19:40) ran on the A55 row** (sbxta/sbthermal/sbwdog all A55; the only Windows
+  boot between the 19:18 install-default and the night pull). GD at 2960x1440: copy 61 ms/frame uncached on the A55s
+  (T61 on the M3s: 14.5 ms, cached 5 ms) -> ~15 fps. Windows' clock on these boots runs 2 h behind.
+- **Their "5-minute shutdown" is not in Windows:** T63's boot logged Diagnostics-Performance 200 for it:
+  ShutdownTime 34.5 s (user session 20.1 s, services 5.0 s, kernel 3.0 s); System 1074 -> 6006 +28 s -> 109 +4 s ->
+  13 +2 s; sbwdog PrevBootText "clean shutdown or restart after 1093 s". (The first pull missed 109/13: not yet
+  flushed into the copy.) The wait must be after Windows (loader / next OS) or before the restart request.
+- **T63 (big cores, USR1):** ran in full (20 min, own restart, clean). GD up 5 s after the Steam URL (Steam already
+  running from logon). Clicks reached the level select, not the level (Play applied > 6 s later; the card click
+  landed in the page change): fixed for T64 (wait 15 s, card centre 50%/31% twice). Menus/level select: 40.7 fps avg,
+  1% low 19.2, 0.1% low 4.8, 39 frames > 100 ms; the 3 worst (11.1, 6.6, 6.6 s) are the game thread busy
+  (10.1/6.3/6.0 s CPU, 60-100k page faults): loading/translation, T64's target. Close: WM_CLOSE, gone in 4 s.
+- **The idle desktop on the big cores is busy:** 80 % CPU on all 3 cores, run queue 4.8, 360 MB available, 2200
+  pages/s, disk 440 % busy. Top: steamwebhelper 40 %, System 35 %, svchost (the c000001d loops + WerFault),
+  MsMpEng 16 %, OneDriveSetup 10 %. Under GD (300 % = 3 cores): GD 142 %, dwm 25, MsMpEng 24, System 24, sblinkd
+  15-28 %. Commit 3.75 GB idle -> 4.65 GB with GD (4 GB RAM).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

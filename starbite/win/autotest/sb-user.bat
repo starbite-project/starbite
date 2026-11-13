@@ -65,9 +65,13 @@ sbshow.exe snap 41-user-gd-menu >> %L% 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -File %D%\sb-click.ps1 0.5 0.733 >> %L% 2>&1
 ping -n 4 127.0.0.1 > nul
 powershell -NoProfile -ExecutionPolicy Bypass -File %D%\sb-click.ps1 0.5 0.5 >> %L% 2>&1
-ping -n 7 127.0.0.1 > nul
+rem T63: Play took effect only after the 6 s snap and the card click landed in the page change: wait 15 s, then click
+rem the Stereo Madness card's centre (50%/31%) twice, 10 s apart (in the level a click is a jump: harmless)
+ping -n 16 127.0.0.1 > nul
 sbshow.exe snap 42-user-gd-levels >> %L% 2>&1
-powershell -NoProfile -ExecutionPolicy Bypass -File %D%\sb-click.ps1 0.5 0.45 >> %L% 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -File %D%\sb-click.ps1 0.5 0.31 >> %L% 2>&1
+ping -n 11 127.0.0.1 > nul
+powershell -NoProfile -ExecutionPolicy Bypass -File %D%\sb-click.ps1 0.5 0.31 >> %L% 2>&1
 call :up "USR1 GD clicks sent"
 for /l %%T in (1,1,10) do (
   ping -n 31 127.0.0.1 > nul
