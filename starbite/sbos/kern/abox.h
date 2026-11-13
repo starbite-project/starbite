@@ -84,6 +84,9 @@ int abox_boot(void);
 int abox_boot_start(void);
 int abox_boot_step(void);
 int abox_boot_finish(void);
+unsigned abox_boot_stage(void);             /* the stage the next abox_boot_step() runs (as abox_boot_slowest's) */
+uint32_t abox_boot_slowest(unsigned *stage);  /* the longest step (us) of the last boot and its stage (0 sram,
+                                               * 1 dram, 2 dram fill, 3 rest, 4 dump fill, 5-7 hardware, 8 BOOT_DONE) */
 void abox_vss_prepare(void);
 int abox_vss_start(void);
 int abox_call(int on);
