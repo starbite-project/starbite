@@ -446,7 +446,9 @@ static int mmio_writes_allowed(void)
             continue;
         unsigned a = evs[i].a;
         int ok = a == USI07_MODE || a == GPP4 || a == GPP4 + 8 || a == USI01_MODE || a == GPP0 || a == GPP0 + 8 ||
-                 a == CMU0 + 0x1808 || a == CLKOUT0 || (a >= SPIB && a < SPIB + 0x100);
+                 a == CMU0 + 0x1808 || a == CLKOUT0 || (a >= SPIB && a < SPIB + 0x100) ||
+                 /* USI07's four gates, held on while amp.c uses the bus (run 7c) and put back by amp_off */
+                 a == CMU1 + 0x203C || a == CMU1 + 0x2094 || a == CMU1 + 0x20E4 || a == CMU1 + 0x20E8;
         if (!ok) {
             printf("  MMIO write outside the allowed set: %08x <- %08x\n", a, evs[i].b);
             return 0;
@@ -475,6 +477,11 @@ static void t_amp_probe(void)
     CHECK(*mmref(GPP4) == 0x11220000, "gpp4 con %08x", *mmref(GPP4));
     CHECK(mmio_writes_allowed(), "mmio");
     CHECK(strstr(logbuf, "amp: probe: both dies found") != 0, "log line");
+    CHECK(*mmref(CMU1 + 0x203C) == 0x00300000 && strstr(logbuf, "USI07 gates held on"), "gates held on %08x",
+          *mmref(CMU1 + 0x203C));
+    amp_off();
+    CHECK(*mmref(CMU1 + 0x203C) == 0x00200000 && *mmref(CMU1 + 0x20E8) == 0x00200000 &&
+          strstr(logbuf, "USI07 gates back as found"), "gates not back %08x", *mmref(CMU1 + 0x203C));
 
     printf("amp_probe (0x39 a MAX98512B, 0x3A the first revision)\n");
     world('B', 'A', 1, 1);

@@ -95,6 +95,7 @@ static struct die dies[2] = {
     { AMP_ADDR_SPK, "0x3A (speaker)", 0, 0, 0x3E, 0x02, 0 },
 };
 static int bus_up_done;
+int amp_use_bb = 1;                 /* amp.c's transfers by hand on gpp4-4/5 (run 7e); 0: USI07's HSI2C */
 static int any_b;                   /* a B among them: max98512_probe's extra block, written to both */
 static uint8_t boost_mode;          /* BOOST_BYPASS_2: 0 (automatic) when the 0x39 die is a B, else 2 (off) */
 
@@ -309,6 +310,19 @@ static int gate_closed(uint32_t v)
     return (v & 0x00300000U) == 0x00100000U;    /* MANUAL 1 with CG_VAL 0 */
 }
 
+static uint32_t gate_found[4];
+static int gates_held;
+static const uint16_t usi07_gates[4] = { 0x203C, 0x2094, 0x20E4, 0x20E8 };
+static void gates_back(void)
+{
+    if (!gates_held)
+        return;
+    for (unsigned i = 0; i < 4; ++i)
+        H->wr32(CMU_PERIC1 + usi07_gates[i], gate_found[i]);
+    gates_held = 0;
+    bus_up_done = 0;                /* the next use holds them again */
+    say("bus: USI07 gates back as found");
+}
 static int bus_up(void)
 {
     if (bus_up_done)
@@ -319,11 +333,29 @@ static int bus_up(void)
         g[i] = H->rd32(CMU_PERIC1 + gates[i]);
     uint32_t mux = H->rd32(CMU_PERIC1 + 0x0120), div = H->rd32(CMU_PERIC1 + 0x181C);
     uint32_t mode = H->rd32(USI07_MODE), con = H->rd32(GPP4), pud = H->rd32(GPP4 + 8);
+    uint32_t dat = H->rd32(GPP4 + 4);
     say("bus: CMU_PERIC1 USI07 gates %08x %08x %08x %08x, IP_USER mux %08x, div %08x; usi07 mode %x; gpp4 con %08x pud %08x",
         g[0], g[1], g[2], g[3], mux, div, mode, con, pud);
+    /* read-only: the line levels before the pins become SCL / SDA (both 1 = pulled up and idle; 0 = held low, or the
+     * pull-ups' rail is off) */
+    say("bus: lines before set-up: SCL (gpp4-4) %u, SDA (gpp4-5) %u (gpp4 dat %02x)", (dat >> 4) & 1U, (dat >> 5) & 1U,
+        dat & 0xFFU);
     for (unsigned i = 0; i < 4; ++i)
         if (gate_closed(g[i]))
             return fail(AUD_EPERM, "a CMU_PERIC1 gate of USI07 is closed (not opened from here)");
+    /* Drivers run 7c: with the four gates in automatic mode (00200000: bit 21 on, bit 20 manual off) the HSI2C sat in
+     * its START state (TRANS_STATUS 00080001, no interrupt) while SCL / SDA idled high: its clock does not run. Held
+     * on manually (bit 20 + 21, as cam.c does for its I2C buses) while amp.c uses the bus; amp_off() puts them back. */
+    for (unsigned i = 0; i < 4; ++i) {
+        gate_found[i] = g[i];
+        if ((g[i] & 0x00300000U) != 0x00300000U) {
+            H->wr32(CMU_PERIC1 + gates[i], g[i] | 0x00300000U);
+            gates_held = 1;
+        }
+    }
+    if (gates_held)
+        say("bus: USI07 gates held on: %08x %08x %08x %08x", H->rd32(CMU_PERIC1 + gates[0]),
+            H->rd32(CMU_PERIC1 + gates[1]), H->rd32(CMU_PERIC1 + gates[2]), H->rd32(CMU_PERIC1 + gates[3]));
     if ((mode & 0x7U) != USI_MODE_I2C) {
         H->wr32(USI07_MODE, (mode & ~0x7U) | USI_MODE_I2C);
         say("bus: USI07 mode %x -> %x (I2C)", mode, H->rd32(USI07_MODE));
@@ -345,6 +377,152 @@ static int bus_up(void)
 /* ---- the dies ------------------------------------------------------------------------------------------------ */
 
 /* max98512_i2c_probe: REV_ID (0x0402) >= 0x40 is the first revision; else REV_ID at 0x0600 >= 0x40 is a B */
+/* ---- a bit-banged address check (diagnostic, read-only towards the chip) --------------------------------------
+ * Drivers run 7c / 7d: the HSI2C never left its START state while SCL / SDA idled high. To tell "our controller does
+ * not drive the bus" from "nobody answers", gpp4-4 (SCL) / gpp4-5 (SDA) are briefly plain GPIOs: open-drain by hand
+ * (input = released, the board's pull-ups make it 1; output 0 = pulled low), ~50 kHz, then an address-only write
+ * (i2cdetect's quick write: START, addr << 1, the ACK bit, STOP; no register pointer, no data). The pins go back to
+ * function 2 afterwards. */
+#define BB_SCL 4U
+#define BB_SDA 5U
+static void bb_pin(unsigned pin, int low)
+{
+    uint32_t con = H->rd32(GPP4), dat = H->rd32(GPP4 + 4);
+    if (low) {
+        H->wr32(GPP4 + 4, dat & ~(1U << pin));
+        H->wr32(GPP4, (con & ~(0xFU << (4 * pin))) | (1U << (4 * pin)));
+    } else {
+        H->wr32(GPP4, con & ~(0xFU << (4 * pin)));
+    }
+    H->delay_us(10);
+}
+static unsigned bb_get(unsigned pin) { return (H->rd32(GPP4 + 4) >> pin) & 1U; }
+static int bb_quick(unsigned addr, unsigned *scl_stuck)
+{
+    unsigned byte = (addr << 1) & 0xFEU, ack;
+    *scl_stuck = 0;
+    bb_pin(BB_SDA, 0), bb_pin(BB_SCL, 0);
+    bb_pin(BB_SDA, 1);                          /* START: SDA falls while SCL is high */
+    bb_pin(BB_SCL, 1);
+    for (int i = 7; i >= 0; --i) {
+        bb_pin(BB_SDA, !((byte >> i) & 1U));
+        bb_pin(BB_SCL, 0);
+        for (unsigned w = 0; w < 100 && !bb_get(BB_SCL); ++w)
+            H->delay_us(10);                    /* clock stretching, up to 1 ms */
+        if (!bb_get(BB_SCL))
+            *scl_stuck = 1;
+        bb_pin(BB_SCL, 1);
+    }
+    bb_pin(BB_SDA, 0);                          /* released: the slave pulls it low to acknowledge */
+    bb_pin(BB_SCL, 0);
+    ack = !bb_get(BB_SDA);
+    bb_pin(BB_SCL, 1);
+    bb_pin(BB_SDA, 1);                          /* STOP: SDA rises while SCL is high */
+    bb_pin(BB_SCL, 0);
+    bb_pin(BB_SDA, 0);
+    return (int)ack;
+}
+/* ---- the bit-banged bus amp.c uses for its transfers (run 7e) ------------------------------------------------
+ * Run 7e: by hand on gpp4-4/5 both dies acknowledge (0x39, 0x3A ACK; an empty address does not), while USI07's HSI2C
+ * never leaves its START state (runs 7c / 7d). So amp.c's register traffic (a few dozen bytes per call or stream
+ * start) goes over the same two pins as open-drain GPIOs, ~25 kHz; the audio itself is I2S on UAIF1, not this bus.
+ * Pins: input = released (the board's pull-ups), output 0 = low; never driven high. */
+static int bb_scl_release(void)
+{
+    bb_pin(BB_SCL, 0);
+    for (unsigned w = 0; w < 200 && !bb_get(BB_SCL); ++w)
+        H->delay_us(10);                        /* clock stretching: up to 2 ms */
+    return bb_get(BB_SCL) ? 0 : -1;
+}
+static int bb_start(void)                       /* also a repeated start (from SCL low) */
+{
+    bb_pin(BB_SDA, 0);
+    if (bb_scl_release())
+        return -1;
+    if (!bb_get(BB_SDA))
+        return -1;                              /* SDA held low by someone */
+    bb_pin(BB_SDA, 1);
+    bb_pin(BB_SCL, 1);
+    return 0;
+}
+static void bb_stop(void)
+{
+    bb_pin(BB_SDA, 1);
+    (void)bb_scl_release();
+    bb_pin(BB_SDA, 0);
+}
+static int bb_wbyte(uint8_t b)                  /* 0 when acknowledged */
+{
+    for (int i = 7; i >= 0; --i) {
+        bb_pin(BB_SDA, !((b >> i) & 1U));
+        if (bb_scl_release())
+            return -1;
+        bb_pin(BB_SCL, 1);
+    }
+    bb_pin(BB_SDA, 0);
+    if (bb_scl_release())
+        return -1;
+    int nack = (int)bb_get(BB_SDA);
+    bb_pin(BB_SCL, 1);
+    return nack ? -1 : 0;
+}
+static int bb_rbyte(uint8_t *b, int ack)
+{
+    unsigned v = 0;
+    bb_pin(BB_SDA, 0);
+    for (int i = 0; i < 8; ++i) {
+        if (bb_scl_release())
+            return -1;
+        v = (v << 1) | bb_get(BB_SDA);
+        bb_pin(BB_SCL, 1);
+    }
+    bb_pin(BB_SDA, ack);                        /* ACK: pull SDA low; the last byte: NACK (released) */
+    if (bb_scl_release())
+        return -1;
+    bb_pin(BB_SCL, 1);
+    bb_pin(BB_SDA, 0);
+    *b = (uint8_t)v;
+    return 0;
+}
+/* wn bytes written to addr, then (rn > 0) a repeated start and rn bytes read; a stop at the end. 0 or -1. */
+int amp_bb_xfer(unsigned addr, const uint8_t *w, unsigned wn, uint8_t *r, unsigned rn)
+{
+    uint32_t con = H->rd32(GPP4), pud = H->rd32(GPP4 + 8);
+    if ((con >> 16) & 0xFFU)                    /* SCL / SDA as plain inputs (released), no internal pulls */
+        H->wr32(GPP4, con & ~0x00FF0000U);
+    if ((pud >> 8) & 0xFU || (pud >> 16) & 0xFFU)
+        H->wr32(GPP4 + 8, pud & ~0x00FF0F00U & ~0x00FF0000U);
+    int rc = 0;
+    if (wn) {
+        rc = bb_start() || bb_wbyte((uint8_t)(addr << 1));
+        for (unsigned i = 0; !rc && i < wn; ++i)
+            rc = bb_wbyte(w[i]);
+    }
+    if (!rc && rn) {
+        rc = bb_start() || bb_wbyte((uint8_t)((addr << 1) | 1U));
+        for (unsigned i = 0; !rc && i < rn; ++i)
+            rc = bb_rbyte(&r[i], i + 1 < rn);
+    }
+    bb_stop();
+    return rc ? -1 : 0;
+}
+
+static void bb_check(void)
+{
+    uint32_t con = H->rd32(GPP4), dat = H->rd32(GPP4 + 4);
+    unsigned st39 = 0, st3a = 0;
+    bb_pin(BB_SCL, 0), bb_pin(BB_SDA, 0);
+    unsigned idle_scl = bb_get(BB_SCL), idle_sda = bb_get(BB_SDA);
+    int a39 = bb_quick(0x39, &st39), a3a = bb_quick(0x3A, &st3a), a00 = 0;
+    unsigned st00 = 0;
+    a00 = bb_quick(0x10, &st00);                /* an address nobody on this bus has: must NACK */
+    H->wr32(GPP4, con);                         /* the pins back to SCL / SDA (function 2) */
+    H->wr32(GPP4 + 4, dat);
+    say("bit-bang (GPIO, ~50 kHz, address only): idle SCL %u SDA %u; 0x39 %s, 0x3A %s, 0x10 (nobody) %s%s", idle_scl,
+        idle_sda, a39 ? "ACK" : "no ACK", a3a ? "ACK" : "no ACK", a00 ? "ACK (SDA stuck low?)" : "no ACK",
+        st39 || st3a || st00 ? "; SCL held low by someone" : "");
+}
+
 static int identify(struct die *d)
 {
     uint8_t id = 0, idb = 0;
@@ -363,9 +541,22 @@ static int identify(struct die *d)
     if (d->kind)
         say("%s: MAX98512%s, revision %02x (REV_ID at %04x)", d->name, d->kind == 'B' ? "B" : "", d->rev,
             d->kind == 'B' ? R_REV_ID_B : R_REV_ID);
-    else
+    else {
         say("%s: no MAX98512 answers (REV_ID 0x0402: %s %02x, 0x0600: %s %02x)", d->name, ra ? "bus error" : "read",
             id, rb ? (ra ? "bus error" : "not read") : "read", idb);
+        /* read-only: the HSI2C's own view of that last read (libsb enables only XFER_DONE, so a NACK reads as 00):
+         * TRANS_STATUS 0x50 (its NO_DEV / NO_DEV_ACK bits), INT_STAT 0x24, FIFO_STAT 0x30, CTL 0x00, CONF 0x40,
+         * and the line levels now */
+        say("%s: HSI2C TRANS_STATUS %08x INT_STAT %08x FIFO_STAT %08x CTL %08x CONF %08x; gpp4 dat %02x", d->name,
+            H->rd32(AMP_BUS + 0x50), H->rd32(AMP_BUS + 0x24), H->rd32(AMP_BUS + 0x30), H->rd32(AMP_BUS + 0x00),
+            H->rd32(AMP_BUS + 0x40), H->rd32(GPP4 + 4) & 0xFFU);
+        /* read-only: a plain one-byte read with no register write first (no repeated start), to tell "nobody
+         * acknowledges" from "the write-then-read does not work" (modem-core's suspect 2) */
+        uint8_t one = 0;
+        int rp = H->i2c_xfer(AMP_BUS, d->addr, 0, 0, &one, 1);
+        say("%s: plain 1-byte read: %s %02x; TRANS_STATUS %08x", d->name, rp ? "bus error" : "read", one,
+            H->rd32(AMP_BUS + 0x50));
+    }
     return d->kind ? 0 : AUD_ENODEV;
 }
 
@@ -550,9 +741,12 @@ int amp_probe(void)
     int r0 = identify(&dies[0]), r1 = identify(&dies[1]);
     any_b = dies[0].kind == 'B' || dies[1].kind == 'B';
     boost_mode = dies[0].kind == 'B' ? 0x00 : 0x02;
-    if (r0 || r1)
+    if (r0 || r1) {
+        bb_check();
+        gates_back();
         return fail(AUD_ENODEV, r0 ? "the 0x39 die (earpiece) does not answer as a MAX98512" :
                                      "the 0x3A die (speaker) does not answer as a MAX98512");
+    }
     why = "probed";
     say("probe: both dies found (boost bypass mode %u)", boost_mode);
     return 0;
@@ -588,6 +782,7 @@ void amp_off(void)
         else
             say("%s: never identified: not touched", dies[i].name);
     H->delay_us(RAMP_DOWN_US);
+    gates_back();
     why = "off";
 }
 
@@ -740,6 +935,8 @@ static int k_i2c_xfer(uintptr_t bus, unsigned addr, const uint8_t *w, unsigned w
 {
     if (bus != AMP_BUS || wn > 32 || rn > 32 || (!wn && !rn))
         return AUD_EINVAL;
+    if (amp_use_bb)                 /* run 7e: the HSI2C never starts a transfer; the dies answer by hand */
+        return amp_bb_xfer(addr, w, wn, r, rn) ? AUD_EIO : 0;
     if (!k_amp_bus.state) {         /* first use: S-Boot's timing, else Android's 200 MHz / 400 kHz one (fled.c) */
         k_amp_bus.fs1 = k_rd32(bus + 0x60), k_amp_bus.fs2 = k_rd32(bus + 0x64), k_amp_bus.fs3 = k_rd32(bus + 0x68);
         if (!((k_amp_bus.fs3 >> 16) & 0xffU)) {

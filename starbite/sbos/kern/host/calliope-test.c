@@ -6,17 +6,22 @@
  * bits, abox_rmem as RAM, VENDOR files with the phone's sizes) plus RDMA0 as Calliope runs it: it only starts on an
  * IPC_PCMPLAYBACK TRIGGER 1 for channel 0 after OPEN, SET_BUFFER, HW_PARAMS and PREPARE, and only if IOVA 0x91000000
  * is mapped in OUR page tables to the ring (else a SysMMU fault, as the hardware would raise); then STATUS advances at
- * 192000 bytes a second and Calliope sends a PCM_PLTDAI_POINTER every period; TRIGGER 0 stops it.
+ * 192000 bytes a second and Calliope sends a PCM_PLTDAI_POINTER every period; TRIGGER 0 stops it. WDMA1 the same on
+ * IPC_PCMCAPTURE channel 1 (IOVA 0x92100000 -> CAL_RM_CAP): its STATUS advances at 192000 bytes a second and it writes
+ * the "mic" into the ring: with NSRC0 = UAIF0, UAIF0 MIC_EN and the codec's mic on, a 1 kHz sine (amplitude 3000)
+ * while a fake amp is on, plus noise (+-200) always; zeroes otherwise. F.deaf: noise only (the mic hears nothing).
  * Checked: the probe at levels 0 / 1 / 2, Samsung's IPC order, the page tables, the routes and the AUD domain put back,
  * every failure step leaving ABOX off, the abort, and the abox.c hooks' refusals. Exit status 0 = all passed. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 #include "abox.h"
 #include "abox_media.h"
 #include "drvprobe.h"
 #include "snd.h"
+#include "goertzel.h"
 
 static int verbose, fails, checks;
 #define CHECK(c, ...)                                                                                                  \
@@ -35,6 +40,7 @@ static int verbose, fails, checks;
 #define MAGIC_PA  (0xF7900000ULL + 0x600000ULL)
 #define HSLOTS    (1u << 16)
 #define RD0       (ABOX_SFR + 0x1000)
+#define WD1       (ABOX_SFR + 0x2100)
 
 struct wr { uint64_t seq, pa; uint32_t v; };
 struct ipc { uint64_t seq, at; uint32_t w[8]; };
@@ -57,16 +63,25 @@ static struct {
     struct { uint64_t seq, fn, a1, a2, a3; } smc[32];
     unsigned nsmc;
     unsigned violations, ram_violations;
-    int boot_ok, pcm_dead, rdma_dead, missing_sram, only_uaif0;
+    int boot_ok, pcm_dead, rdma_dead, missing_sram, only_uaif0, wdma_dead, deaf;
     /* the fake RDMA0 */
     int r_open, r_buf, r_par, r_prep, r_run;
     uint32_t r_iova, r_period, r_periods;
     uint64_t r_t0, r_next;
     unsigned r_starts, r_ptrs;
+    /* the fake WDMA1 */
+    int w_open, w_buf, w_par, w_prep, w_run;
+    uint32_t w_iova, w_period, w_periods, w_route1, w_spum0, w_qch;
+    uint64_t w_t0, w_done, w_trig_seq, w_stop_seq;
+    unsigned w_starts;
+    uint32_t noise;
     /* the fake amp */
     int amp_on;
     uint64_t amp_on_seq, amp_off_seq;
     unsigned amp_calls;
+    /* the fake codec mic */
+    int mic_on;
+    unsigned mic_calls, codec_offs;
     char logs[6000][220];
     unsigned nlogs;
 } F;
@@ -132,7 +147,7 @@ static void cpu_update(void)
         calliope_start();
     }
     if (!on)
-        F.r_run = 0;
+        F.r_run = 0, F.w_run = 0;
 }
 
 /* RDMA0's position and Calliope's period pointers, as time passes */
@@ -155,23 +170,58 @@ static void rdma_tick(void)
     }
 }
 
-/* the SysMMU walk for the ring: our L1 at PT_BASE, a page entry, L2 small pages onto the ring */
-static int ring_mapped(void)
+/* the SysMMU walk for a ring: our L1 at PT_BASE, a page entry, L2 small pages onto the ring */
+static int ring_mapped_at(uint32_t iova, uint64_t rm_off, uint32_t bytes)
 {
     uint64_t pt = (uint64_t)reg(ABOX_SYSMMU + 0x00C) << 12;
     if (pt < RMEM_BASE || pt >= RMEM_BASE + RMEM_SIZE || !(reg(ABOX_SYSMMU) & 1))
         return 0;
-    uint32_t e = ((uint32_t *)(void *)(F.rmem + (pt - RMEM_BASE)))[0x910];
+    uint32_t e = ((uint32_t *)(void *)(F.rmem + (pt - RMEM_BASE)))[iova >> 20];
     if ((e & 3) != 1)
         return 0;
     uint64_t l2 = (uint64_t)(e & ~0x3Fu) << 4;
     if (l2 < RMEM_BASE || l2 >= RMEM_BASE + RMEM_SIZE)
         return 0;
     uint32_t *t2 = (uint32_t *)(void *)(F.rmem + (l2 - RMEM_BASE));
-    for (uint32_t k = 0; k < (F.r_period * F.r_periods + 0xFFF) >> 12; ++k)
-        if ((t2[k] & 3) != 2 || ((uint64_t)(t2[k] & ~0xFFu) << 4) != RMEM_BASE + CAL_RM_PLAY + 0x1000ULL * k)
+    for (uint32_t k = 0; k < (bytes + 0xFFF) >> 12; ++k)
+        if ((t2[k] & 3) != 2 || ((uint64_t)(t2[k] & ~0xFFu) << 4) != RMEM_BASE + rm_off + 0x1000ULL * k)
             return 0;
     return 1;
+}
+static int ring_mapped(void) { return ring_mapped_at(0x91000000u, CAL_RM_PLAY, F.r_period * F.r_periods); }
+
+/* WDMA1: bytes written so far, and the "mic" into the ring up to now */
+static unsigned spk_on, rcv_on;                             /* snd's fake amp hooks (below) */
+static uint32_t wdma_bytes(void)
+{
+    if (!F.w_run || F.wdma_dead)
+        return 0;
+    return (uint32_t)((F.now - F.w_t0) * 192000ULL / 1000000ULL);
+}
+static void wdma_fill(void)
+{
+    uint32_t ring = F.w_period * F.w_periods, total = wdma_bytes() & ~3u;
+    if (!F.w_run || !ring)
+        return;
+    int16_t *d = (int16_t *)(void *)(F.rmem + CAL_RM_CAP);
+    int path = (reg(ABOX_SFR + 0x44) & 0xF) == 8 && !(reg(ABOX_SFR + 0x300) & 0x90) && (reg(ABOX_SFR + 0x500) & 2) &&
+               F.mic_on;
+    int tone = (F.amp_on || spk_on || rcv_on) && !F.deaf;
+    if (F.w_done + ring < total)
+        F.w_done = total - ring;
+    for (uint64_t b = F.w_done; b < total; b += 4) {
+        uint32_t fr = (uint32_t)(b / 4), off = (uint32_t)(b % ring) / 2;
+        int32_t v = 0;
+        if (path) {
+            F.noise = F.noise * 1103515245u + 12345u;
+            v = (int32_t)((F.noise >> 16) % 401u) - 200;
+            if (tone)
+                v += (int32_t)lround(3000.0 * sin(2.0 * M_PI * (fr % 48u) / 48.0));
+        }
+        d[off] = (int16_t)v;
+        d[off + 1] = 0;
+    }
+    F.w_done = total;
 }
 
 /* Calliope's own log: one line per PCM message into the SRAM ring at 0x30800 (writer, reader, size 256, text) */
@@ -186,8 +236,44 @@ static void fw_say(const char *s)
     F.sram[0x30800 / 4] = wr;
 }
 
+static void pcm_cap_msg(const uint32_t *m)
+{
+    char line[32];
+    snprintf(line, sizeof line, "cap %u\n", m[2]);
+    fw_say(line);
+    switch (m[2]) {
+    case 11: F.w_open = 1; break;
+    case 20: F.w_buf = F.w_open, F.w_iova = m[4], F.w_period = m[5], F.w_periods = m[6]; break;
+    case 14: F.w_par = F.w_buf && m[4] == 48000 && m[5] == 16 && m[6] == 2; break;
+    case 16: F.w_prep = F.w_par; break;
+    case 17:
+        if (m[4] == 1 && F.w_prep && F.w_iova == 0x92100000u) {
+            if (!ring_mapped_at(0x92100000u, CAL_RM_CAP, F.w_period * F.w_periods)) {
+                set(ABOX_SYSMMU + 0x060, 1);
+                set(ABOX_SYSMMU + 0x070, 0x92100000u);
+                break;
+            }
+            F.w_run = 1, F.w_t0 = F.now, F.w_done = 0, F.w_starts++, F.w_trig_seq = F.seq;
+            F.w_route1 = reg(ABOX_SFR + 0x44), F.w_spum0 = reg(ABOX_SFR + 0x300), F.w_qch = reg(ABOX_SFR + 0x38);
+            set(WD1, reg(WD1) | 1);
+            set(WD1 + 8, F.w_iova);
+        } else if (m[4] == 0) {
+            wdma_fill();
+            F.w_run = 0, F.w_stop_seq = F.seq;
+            set(WD1, reg(WD1) & ~1u);
+        }
+        break;
+    case 15: F.w_prep = F.w_par = F.w_buf = 0; break;
+    case 12: F.w_open = 0; break;
+    }
+}
+
 static void pcm_msg(const uint32_t *m)
 {
+    if (m[0] == 3 && m[1] == 1 && m[3] == 1) {
+        pcm_cap_msg(m);
+        return;
+    }
     if (m[0] != 2 || m[3] != 0)
         return;
     char line[32];
@@ -222,6 +308,13 @@ static void pcm_msg(const uint32_t *m)
 static uint32_t f_rd32(void *c, uint64_t pa)
 {
     (void)c;
+    wdma_fill();
+    if (pa == WD1 + 0x30) {
+        if (!F.w_run)
+            return 0;
+        uint32_t ring = F.w_period * F.w_periods, pos = ring ? wdma_bytes() % ring : 0;
+        return 0x80000000u | ((pos >> 4) << 16) | (pos & 0xF);
+    }
     if (pa >= ABOX_SRAM && pa < ABOX_SRAM + ABOX_SRAM_SIZE)
         return F.sram[(pa - ABOX_SRAM) / 4];
     if (pa == ABOX_GICC + 0x0C) {
@@ -348,6 +441,14 @@ static void a_off(void)
         F.amp_off_seq = F.seq;
     F.amp_on = 0;
 }
+static int c_mic(int on)
+{
+    F.seq++;
+    F.mic_on = on;
+    F.mic_calls++;
+    return 0;
+}
+static void c_off(void) { F.codec_offs++; }
 
 static void reset(int pd_on)
 {
@@ -358,6 +459,9 @@ static void reset(int pd_on)
     F.rmem = rm, F.w = w, F.capw = capw;
     memset(F.rmem, 0, RMEM_SIZE);
     F.boot_ok = 1;
+    F.noise = 1;
+    spk_on = rcv_on = 0;
+    set(ABOX_SFR + 0x300, 0x90);                           /* SPUM NSRC0 ASRC on, OUT not WDMA: capture must change it */
     set(ABOX_SFR + 0x0, 0x41424F58);
     set(ABOX_SFR + 0x4, 0x10100);
     set(ABOX_SYSMMU + 0x0, 0x4);
@@ -368,7 +472,7 @@ static void reset(int pd_on)
     struct abox_hal h = { 0 };
     h.rd32 = f_rd32, h.wr32 = f_wr32, h.smc = f_smc, h.delay_us = f_delay, h.log = f_log, h.file = f_file;
     h.ram = f_ram, h.now_us = f_now;
-    struct cal_probe_ops o = { f_file, a_probe, a_rcv, a_off };
+    struct cal_probe_ops o = { f_file, a_probe, a_rcv, a_off, c_mic, c_off };
     cal_probe_setup(&h, &o);
     abox_hal_set(&h);
 }
@@ -394,6 +498,57 @@ static int find_pcm(unsigned from, uint32_t type)
         if (F.ipc[i].w[0] == 2 && F.ipc[i].w[3] == 0 && F.ipc[i].w[2] == type)
             return (int)i;
     return -1;
+}
+/* the same for capture channel 1 (task 1) */
+static int find_cap(unsigned from, uint32_t type)
+{
+    for (unsigned i = from; i < F.nipc; ++i)
+        if (F.ipc[i].w[0] == 3 && F.ipc[i].w[1] == 1 && F.ipc[i].w[3] == 1 && F.ipc[i].w[2] == type)
+            return (int)i;
+    return -1;
+}
+/* the seq of the first write to pa that sets (on) / clears (!on) bit, after seq from; 0 none */
+static uint64_t bit_write(uint64_t pa, uint32_t bit, int on, uint64_t from)
+{
+    uint32_t was = 0;
+    int known = 0;
+    for (size_t i = 0; i < F.nw; ++i) {
+        if (F.w[i].pa != pa)
+            continue;
+        int now = !!(F.w[i].v & bit);
+        if (F.w[i].seq > from && now == on && (!known || (int)!!(was & bit) != on))
+            return F.w[i].seq;
+        was = F.w[i].v, known = 1;
+    }
+    return 0;
+}
+
+/* WDMA1's capture: Samsung's message order, its arguments, the routes while it ran, the routes after */
+static void check_capture(const char *t, uint32_t period, uint32_t periods)
+{
+    int o = find_cap(0, 11), b = find_cap(0, 20), p = find_cap(0, 14), pr = find_cap(0, 16), tr = find_cap(0, 17);
+    CHECK(o >= 0 && o < b && b < p && p < pr && pr < tr, "%s: capture OPEN %d SET_BUFFER %d HW_PARAMS %d PREPARE %d "
+          "TRIGGER %d", t, o, b, p, pr, tr);
+    if (o < 0 || b < 0 || p < 0 || tr < 0)
+        return;
+    CHECK(F.ipc[b].w[4] == 0x92100000u && F.ipc[b].w[5] == period && F.ipc[b].w[6] == periods,
+          "%s: capture SET_BUFFER %#x %u %u", t, F.ipc[b].w[4], F.ipc[b].w[5], F.ipc[b].w[6]);
+    CHECK(F.ipc[p].w[4] == 48000 && F.ipc[p].w[5] == 16 && F.ipc[p].w[6] == 2 && F.ipc[tr].w[4] == 1,
+          "%s: capture HW_PARAMS / TRIGGER 1", t);
+    int ts = find_cap((unsigned)tr + 1, 17), hf = find_cap((unsigned)tr + 1, 15), cl = find_cap((unsigned)tr + 1, 12);
+    CHECK(ts > tr && F.ipc[ts].w[4] == 0 && hf > ts && cl > hf, "%s: capture stop TRIGGER 0 %d HW_FREE %d CLOSE %d", t,
+          ts, hf, cl);
+    /* the DMA first, then UAIF0's MIC side; stopped the same way round (One UI's log) */
+    uint64_t mic_on = bit_write(ABOX_SFR + 0x500, 2, 1, 0), mic_off = mic_on ? bit_write(ABOX_SFR + 0x500, 2, 0, mic_on) : 0;
+    CHECK(mic_on > F.ipc[tr].seq && mic_off > F.ipc[ts].seq && (hf < 0 || mic_off < F.ipc[hf].seq),
+          "%s: UAIF0 MIC_EN after TRIGGER 1 (%llu / %llu) and off after TRIGGER 0, before HW_FREE", t,
+          (unsigned long long)mic_on, (unsigned long long)F.ipc[tr].seq);
+    CHECK((F.w_route1 & 0xF) == 8 && !(F.w_spum0 & 0x90) && (F.w_qch & 4), "%s: while WDMA1 ran: ROUTE1 %#x SPUM0 %#x "
+          "QCH_DIS %#x", t, F.w_route1, F.w_spum0, F.w_qch);
+    CHECK((reg(ABOX_SFR + 0x44) & 0xF) == 0 && (reg(ABOX_SFR + 0x300) & 0x90) == 0x90 && !(reg(ABOX_SFR + 0x38) & 4) &&
+          reg(ABOX_SFR + 0x500) == 0, "%s: after: ROUTE1 %#x SPUM0 %#x QCH_DIS %#x UAIF0 CTRL0 %#x not as found", t,
+          reg(ABOX_SFR + 0x44), reg(ABOX_SFR + 0x300), reg(ABOX_SFR + 0x38), reg(ABOX_SFR + 0x500));
+    CHECK(!F.w_run && !cal_capping(), "%s: WDMA1 left running", t);
 }
 
 /* the probe at one level until it says it is done (or 400 calls) */
@@ -452,8 +607,21 @@ static void test_level1(int pd_on)
     reset(pd_on);
     CHECK(run(1), "%s: did not finish", t);
     const char *l = last_line();
-    CHECK(strstr(l, "PASS Calliope booted (CRL0 in ") && strstr(l, "RDMA0 moved 19") && strstr(l, "STATUS") &&
-          strstr(l, "snd's 32 x 2048 ring 19"), "%s: %s", t, l);
+    CHECK(strstr(l, "PASS Calliope booted (CRL0 in ") && strstr(l, "RDMA0 192000 B/s (STATUS) to UAIF1") &&
+          strstr(l, "snd's 32 x 2048 ring 19") && strstr(l, "; WDMA1 192000 B/s, mic RMS 11"), "%s: %s", t, l);
+    CHECK(strlen(l) < 199, "%s: the PASS line is cut (%zu chars)", t, strlen(l));
+    check_capture(t, 2048, 32);
+    CHECK(F.w_starts == 1 && F.mic_calls == 2 && !F.mic_on && F.codec_offs == 1, "%s: one capture, mic on and off "
+          "(%u starts, %u mic calls)", t, F.w_starts, F.mic_calls);
+    CHECK(logged("cal: ipc -> PCMCAPTURE (3) task 1 ch 1 SET_BUFFER (msgtype 20; 0x92100000, 0x800, 0x20): taken") &&
+          logged("cal: capture: WDMA1 32 x 2048 bytes at IOVA 0x92100000 <- SIFM0 <- NSRC0 <- UAIF0 MIC") &&
+          logged("cal: dump 100 ms after capture TRIGGER: WDMA1 0x1") &&
+          logged("capture snd's ring (32 x 2048): WDMA1 STATUS moved 192000 B/s over 500 ms") &&
+          logged("cal: capture: WDMA1 stopped and closed, UAIF0 and routes as found"), "%s: capture lines", t);
+    CHECK(logged("abox: 5/13 SysMMU: extra window 0x92100000 -> 0xfc7a0000 (128 KiB, 4 KiB pages)"),
+          "%s: WDMA1's extra window line", t);
+    /* while capturing, the dump has no stale RDMA0 line */
+    CHECK(!logged("cal: dump 100 ms after capture TRIGGER: RDMA0"), "%s: RDMA0 dumped while only WDMA1 ran", t);
     CHECK(logged("abox: 2/13") && logged("abox: 12/13 ready") && logged("abox: fw: Calliope boot") &&
           logged("1/4 boot: Calliope said BOOT_DONE, version CRL0"), "%s: abox step / BOOT_DONE / fw lines", t);
     CHECK(logged("abox: 5/13 SysMMU: extra window 0x91000000 -> 0xfc780000 (128 KiB, 4 KiB pages)"),
@@ -499,6 +667,12 @@ static void test_level1(int pd_on)
     CHECK(l2[0] == (uint32_t)(((RMEM_BASE + CAL_RM_PLAY) >> 4) | 2) &&
           l2[31] == (uint32_t)(((RMEM_BASE + CAL_RM_PLAY + 31 * 4096) >> 4) | 2) && l2[32] == 0, "%s: L2 pages", t);
     CHECK(l1[0x914] == (uint32_t)(((RMEM_BASE + ABOX_RM_RDMA4) >> 4) | 2), "%s: the call's RDMA4 window kept", t);
+    CHECK(l1[0x922] == (uint32_t)(((RMEM_BASE + ABOX_RM_WDMA2) >> 4) | 2), "%s: the call's WDMA2 window kept", t);
+    uint32_t *l2c = (uint32_t *)(void *)(F.rmem + ABOX_RM_PT_L2 + 0x800);
+    CHECK(l1[0x921] == (uint32_t)(((RMEM_BASE + ABOX_RM_PT_L2 + 0x800) >> 4) | 1) &&
+          l2c[0] == (uint32_t)(((RMEM_BASE + CAL_RM_CAP) >> 4) | 2) &&
+          l2c[31] == (uint32_t)(((RMEM_BASE + CAL_RM_CAP + 31 * 4096) >> 4) | 2) && l2c[32] == 0,
+          "%s: WDMA1's L1[0x921] %#x / L2 pages", t, l1[0x921]);
     /* routes and UAIF1 as found */
     CHECK((reg(ABOX_SFR + 0x200) & 0xF) == 0 && (reg(ABOX_SFR + 0x40) & 0xF0) == 0 && reg(ABOX_SFR + 0x510) == 0x1000010,
           "%s: SPUS0 %#x ROUTE0 %#x UAIF1 CTRL0 %#x not as found", t, reg(ABOX_SFR + 0x200), reg(ABOX_SFR + 0x40),
@@ -511,7 +685,8 @@ static void test_level1(int pd_on)
     /* the extra window is gone: a later boot (a call) does not map it */
     reset(0);
     CHECK(abox_boot() == 0, "%s: plain boot", t);
-    CHECK(((uint32_t *)(void *)(F.rmem + ABOX_RM_PT))[0x910] == 0, "%s: extra window left mapped", t);
+    CHECK(((uint32_t *)(void *)(F.rmem + ABOX_RM_PT))[0x910] == 0 &&
+          ((uint32_t *)(void *)(F.rmem + ABOX_RM_PT))[0x921] == 0, "%s: extra window left mapped", t);
     abox_off();
 }
 
@@ -519,12 +694,21 @@ static void test_level2(void)
 {
     reset(1);
     CHECK(run(2), "L2: did not finish");
-    CHECK(strstr(last_line(), "PASS Calliope booted (CRL0") && strstr(last_line(), "earpiece tone played 2 s"),
+    CHECK(strstr(last_line(), "PASS earpiece tone: heard by the mic: yes (1 kHz ") &&
+          strstr(last_line(), " dB over baseline); Calliope CRL0, RDMA0 192000 B/s (STATUS), WDMA1 192000 B/s"),
           "L2: %s", last_line());
+    CHECK(logged("drvprobe: calliope: loopback: 1 kHz ") && logged("): heard yes"), "L2: loopback line");
     int tr = find_pcm(0, 17);
     int ts = tr >= 0 ? find_pcm((unsigned)tr + 1, 17) : -1;
     CHECK(tr >= 0 && ts > tr && F.amp_on_seq > F.ipc[tr].seq && F.amp_off_seq && F.amp_off_seq < F.ipc[ts].seq,
           "L2: amp on after TRIGGER 1 and off before TRIGGER 0");
+    /* the mic's baseline first, then the tone while it records; the capture stops after the tone */
+    int ctr = find_cap(0, 17), cts = ctr >= 0 ? find_cap((unsigned)ctr + 1, 17) : -1;
+    CHECK(ctr >= 0 && ctr < tr && cts > ts && F.ipc[tr].at - F.ipc[ctr].at >= 1100000, "L2: capture TRIGGER %d, "
+          "baseline >= 1.1 s before the tone's TRIGGER %d, capture stopped %d after it %d", ctr, tr, cts, ts);
+    check_capture("L2", 2048, 32);
+    CHECK(F.mic_calls == 2 && !F.mic_on && F.codec_offs == 1, "L2: the codec's mic on, off, codec off (%u, %u)",
+          F.mic_calls, F.codec_offs);
     CHECK(F.ipc[ts].at - F.ipc[tr].at >= 2000000, "L2: tone shorter than 2 s");
     CHECK(find_pcm(0, 20) >= 0 && F.ipc[find_pcm(0, 20)].w[5] == 3840, "L2: One UI's ring");
     const int16_t *s = (const int16_t *)(const void *)(F.rmem + CAL_RM_PLAY);
@@ -538,6 +722,32 @@ static void test_level2(void)
           "L2: tone peak %d sum %ld (-24 dBFS 1 kHz)", peak, sum);
     CHECK(F.rmem[CAL_RM_PLAY + 15360] == 0, "L2: guard zeroes");
     off_as_found("L2", 0);
+
+    /* the mic hears nothing: still PASS (the earpiece is quiet and far from the mic), but it says "no" */
+    reset(1);
+    F.deaf = 1;
+    CHECK(run(2), "L2 deaf: did not finish");
+    CHECK(strstr(last_line(), "PASS earpiece tone: heard by the mic: no (1 kHz "), "L2 deaf: %s", last_line());
+    off_as_found("L2 deaf", 0);
+
+    /* WDMA1 does not move: FAIL with the capture first */
+    reset(1);
+    F.wdma_dead = 1;
+    CHECK(run(2), "L2 wdma dead: did not finish");
+    CHECK(strstr(last_line(), "FAIL capture: WDMA1 did not move through Calliope (UAIF0 mic): WDMA1 0 B/s; RDMA0 "
+                              "192000 B/s (STATUS) ok"), "L2 wdma dead: %s", last_line());
+    off_as_found("L2 wdma dead", 0);
+
+    /* abort while the tone plays and the mic records: the amp, both DMAs and the mic off */
+    reset(1);
+    unsigned w = 0, n = 0;
+    while (!F.amp_on && n++ < 100)
+        (void)drv_calliope_probe(2, &w);
+    CHECK(F.amp_on && F.r_run && F.w_run && F.mic_on, "L2 abort: tone and capture should be running");
+    drv_calliope_abort();
+    off_as_found("L2 abort", 0);
+    CHECK(!F.w_run && !F.mic_on && !cal_capping() && (reg(ABOX_SFR + 0x500) & 2) == 0 &&
+          (reg(ABOX_SFR + 0x44) & 0xF) == 0, "L2 abort: WDMA1 / mic / UAIF0 MIC / NSRC0 left on");
 }
 
 static void test_failures(void)
@@ -573,6 +783,19 @@ static void test_failures(void)
                               "boot route): 0 B/s (pointers)"), "rdma dead: %s", last_line());
     CHECK(F.r_starts == 2, "rdma dead: UAIF1 then UAIF0 tried (%u starts)", F.r_starts);
     off_as_found("rdma dead", 0);
+
+    /* WDMA1 never moves: both capture geometries tried, FAIL with the capture first */
+    reset(1);
+    F.wdma_dead = 1;
+    CHECK(run(1), "wdma dead: did not finish");
+    CHECK(strstr(last_line(), "FAIL capture: WDMA1 did not move through Calliope (UAIF0 mic): WDMA1 0 B/s, 4 x 1920 "
+                              "ring 0 B/s; RDMA0 192000 B/s (STATUS) ok"), "wdma dead: %s", last_line());
+    CHECK(F.w_starts == 2 && find_cap(0, 20) >= 0 && F.ipc[find_cap((unsigned)find_cap(0, 20) + 1, 20)].w[5] == 1920,
+          "wdma dead: snd's then One UI's capture ring (%u starts)", F.w_starts);
+    CHECK(strlen(last_line()) - strlen("drvprobe: calliope: ") > 72 &&
+          !strncmp(last_line() + strlen("drvprobe: calliope: FAIL "), "capture: WDMA1 did not move", 27),
+          "wdma dead: the key fact first");
+    off_as_found("wdma dead", 0);
 
     /* RDMA0 moves only on One UI's boot route (SIFS0 -> UAIF0): phase 2 finds it */
     reset(1);
@@ -641,10 +864,49 @@ static void test_hooks(void)
     CHECK(abox_pcm_msg(0, 0, ABOX_PCM_OPEN, 0, 0, 0) == ABOX_ESTATE, "pcm: while off");
     CHECK(cal_play_start(CAL_UAIF1, 3840, 4) == ABOX_ESTATE, "cal: while off");
     CHECK(cal_play_pos(0) == CAL_NOPOS && cal_play_buf() == 0, "cal: pos / buf while off");
+    /* capture's refusals */
+    CHECK(cal_cap_start(CAL_UAIF0, 2048, 32) == ABOX_ESTATE && !cal_capping(), "cap: while off");
+    CHECK(cal_cap_pos(0) == CAL_NOPOS && cal_cap_buf() == 0, "cap: pos / buf while off");
+    /* cal_map needs both slots: with one taken it fails and leaves nothing of its own mapped */
+    reset(0);
+    CHECK(abox_map_extra(0x95000000u, RMEM_BASE + 0x1510000, 0x1000) == 0, "map: one slot taken");
+    CHECK(cal_map() == ABOX_ECFG, "map: cal_map with one free slot");
+    CHECK(abox_map_extra(0x96000000u, RMEM_BASE + 0x1511000, 0x1000) == 0, "map: the RDMA0 slot was given back");
+    (void)abox_map_extra(0x95000000u, 0, 0);
+    (void)abox_map_extra(0x96000000u, 0, 0);
+    CHECK(cal_map() == 0, "map: both free");
+    CHECK(abox_boot() == 0, "cap: boot");
+    CHECK(cal_cap_start(CAL_UAIF1, 2048, 32) == ABOX_ECFG && cal_cap_start(CAL_UAIF0, 100, 4) == ABOX_ECFG,
+          "cap: UAIF1 / bad period refused");
+    CHECK(!F.w_open && reg(ABOX_SFR + 0x38) == 0 && (reg(ABOX_SFR + 0x44) & 0xF) == 0, "cap: a refusal touched things");
+    /* playback and capture together: the UAIF / DRAM found values come back when the last one stops */
+    set(ABOX_SFR + 0x10, 0);
+    CHECK(cal_play_start(CAL_UAIF0, 2048, 32) == 0 && cal_cap_start(CAL_UAIF0, 2048, 32) == 0, "both: start");
+    CHECK(F.r_run && F.w_run && (reg(ABOX_SFR + 0x500) & 3) == 3, "both: RDMA0, WDMA1, UAIF0 SPK and MIC");
+    cal_play_stop();
+    CHECK(F.w_run && (reg(ABOX_SFR + 0x500) & 0x16) == 0x16 && (reg(ABOX_SFR + 0x10) & 1) &&
+          (reg(ABOX_SFR + 0x504) & 0x1FFFFFFF) == 0x0984F000, "both: playback's stop kept the capture's UAIF0 / DRAM");
+    cal_cap_stop();
+    CHECK(reg(ABOX_SFR + 0x500) == 0 && reg(ABOX_SFR + 0x504) == 0 && !(reg(ABOX_SFR + 0x10) & 1),
+          "both: UAIF0 CTRL0 %#x CTRL1 %#x SYSPOWER %#x not as found", reg(ABOX_SFR + 0x500), reg(ABOX_SFR + 0x504),
+          reg(ABOX_SFR + 0x10));
+    /* the other way round */
+    CHECK(cal_cap_start(CAL_UAIF0, 2048, 32) == 0 && cal_play_start(CAL_UAIF0, 2048, 32) == 0, "both 2: start");
+    cal_cap_stop();
+    CHECK(F.r_run && (reg(ABOX_SFR + 0x500) & 0x17) == 0x15 && (reg(ABOX_SFR + 0x10) & 1), "both 2: kept for playback");
+    cal_play_stop();
+    CHECK(reg(ABOX_SFR + 0x500) == 0 && !(reg(ABOX_SFR + 0x10) & 1), "both 2: not as found");
+    /* a call owns UAIF0 MIC: capture refused */
+    CHECK(abox_call(1) == 0, "cap: call on");
+    uint32_t r1 = reg(ABOX_SFR + 0x44);
+    CHECK(cal_cap_start(CAL_UAIF0, 2048, 32) == ABOX_ESTATE && reg(ABOX_SFR + 0x44) == r1, "cap: refused in a call");
+    abox_call(0);
+    abox_off();
+    cal_unmap();
+    CHECK(F.violations == 0 && !logged("REFUSED"), "cap hooks: stray writes");
 }
 
 /* ---- snd.c with the Calliope engine ------------------------------------------------------------------------------ */
-static unsigned spk_on;
 static void s_log(const char *s) { f_log(0, s); }
 static uint64_t s_now(void) { return F.now; }
 static int s_owns(void)
@@ -652,9 +914,47 @@ static int s_owns(void)
     int s = abox_state();
     return s == ABOX_ST_BOOTING || s == ABOX_ST_READY || s == ABOX_ST_CALL;
 }
-static int s_spk(int on, int level) { (void)level; spk_on = (unsigned)on; return 0; }
-static int s_rcv(int on, int level) { (void)on, (void)level; return 0; }
-static void s_off(void) { spk_on = 0; }
+static char aev[64][16];                                   /* the amp calls, in order */
+static uint64_t spk_t0, rcv_t0;
+static unsigned naev, amp_calls_snd;
+static void aev_add(const char *e)
+{
+    if (naev < 64)
+        snprintf(aev[naev++], sizeof aev[0], "%s", e);
+    amp_calls_snd++;
+}
+static int aev_at(const char *e, int from)
+{
+    for (unsigned i = (unsigned)(from < 0 ? 0 : from); i < naev; ++i)
+        if (!strcmp(aev[i], e))
+            return (int)i;
+    return -1;
+}
+static int s_spk(int on, int level)
+{
+    char b[16];
+    snprintf(b, sizeof b, "spk(%d,%d)", on, level);
+    aev_add(b);
+    if (on && !spk_on)
+        spk_t0 = F.now;
+    spk_on = (unsigned)on;
+    return 0;
+}
+static int s_rcv(int on, int level)
+{
+    char b[16];
+    snprintf(b, sizeof b, "rcv(%d,%d)", on, level);
+    aev_add(b);
+    if (on && !rcv_on)
+        rcv_t0 = F.now;
+    rcv_on = (unsigned)on;
+    return 0;
+}
+static void s_off(void)
+{
+    aev_add("off");
+    spk_on = rcv_on = 0;
+}
 static void polls(unsigned ms)
 {
     for (unsigned i = 0; i < ms / 5U; ++i) {
@@ -735,6 +1035,271 @@ static void test_snd_engine(void)
     drv_audio_abort();
 }
 
+/* goertzel.h on its own: a 1 kHz sine is heard over noise, noise and a 700 Hz tone are not */
+static void test_goertzel(void)
+{
+    struct gz base, tone, other;
+    struct gz_verdict v;
+    uint32_t n = 1;
+    gz_reset(&base), gz_reset(&tone), gz_reset(&other);
+    for (unsigned i = 0; i < 48000; ++i) {
+        n = n * 1103515245u + 12345u;
+        int32_t noise = (int32_t)((n >> 16) % 401u) - 200;
+        gz_put(&base, noise);
+        gz_put(&tone, noise + (int32_t)lround(300.0 * sin(2.0 * M_PI * 1000.0 * i / 48000.0)));
+        gz_put(&other, noise + (int32_t)lround(3000.0 * sin(2.0 * M_PI * 700.0 * i / 48000.0)));
+    }
+    CHECK(base.blocks == 50 && gz_rms(&base) >= 110 && gz_rms(&base) <= 122, "gz: blocks %u RMS %u", base.blocks,
+          gz_rms(&base));
+    gz_judge(&tone, &base, &v);
+    CHECK(v.heard && v.over_base > 200 && v.over_nb > 200, "gz: 1 kHz at 300 over noise 200: %d / %d tenths", v.over_base,
+          v.over_nb);
+    gz_judge(&base, &base, &v);
+    CHECK(!v.heard && v.over_base == 0, "gz: noise against itself");
+    gz_judge(&other, &base, &v);
+    CHECK(!v.heard && v.over_nb < 0, "gz: a 700 Hz tone is not 1 kHz (%d / %d)", v.over_base, v.over_nb);
+    CHECK(gz_db10(100, 1) == 200 && gz_db10(1, 100) == -200 && gz_db10(2, 1) == 30 && gz_db10(0, 0) == 0,
+          "gz: dB %d %d %d", gz_db10(100, 1), gz_db10(1, 100), gz_db10(2, 1));
+}
+
+/* snd with the Calliope engine and a mic */
+static void snd_setup(void)
+{
+    reset(0);
+    naev = amp_calls_snd = 0;
+    static struct abox_hal h;
+    memset(&h, 0, sizeof h);
+    h.rd32 = f_rd32, h.wr32 = f_wr32, h.smc = f_smc, h.delay_us = f_delay, h.log = f_log, h.file = f_file;
+    h.ram = f_ram, h.now_us = f_now;
+    struct snd_ops o;
+    memset(&o, 0, sizeof o);
+    o.log = s_log, o.now_us = s_now, o.call_owns_abox = s_owns, o.amp_speaker = s_spk, o.amp_receiver = s_rcv;
+    o.amp_off = s_off, o.codec_mic = c_mic, o.codec_off = c_off, o.use_calliope = 1;
+    CHECK(snd_init(&o, &h) == 0, "snd: init");
+}
+/* poll for ms, reading the mic into g (if given) after skip samples */
+static unsigned polls_mic(unsigned ms, struct gz *g, unsigned skip)
+{
+    int16_t b[512];
+    unsigned got = 0, k;
+    for (unsigned i = 0; i < ms / 5U; ++i) {
+        snd_poll(F.now);
+        while ((k = snd_cap_read(b, 512)) > 0)
+            for (unsigned j = 0; j < k; ++j, ++got)
+                if (g && got >= skip)
+                    gz_put(g, b[j]);
+        F.now += 5000;
+    }
+    return got;
+}
+
+static void test_snd_capture(void)
+{
+    struct gz base, tone;
+    struct gz_verdict v;
+    snd_setup();
+    /* the mic alone boots Calliope (300 ms settle) and records through WDMA1 */
+    CHECK(snd_cap_open() == 0, "snd cap: open");
+    CHECK(logged("engine: Calliope booted for media") && logged("(with 300 ms for its post-boot messages)"),
+          "snd cap: Calliope booted with the settle");
+    CHECK(F.w_run && F.mic_on && cal_capping() && logged("capture: the main mic through Calliope (WDMA1)"),
+          "snd cap: WDMA1 / mic not on");
+    CHECK(snd_busy(), "snd cap: not busy while capturing");
+    gz_reset(&base);
+    unsigned got = polls_mic(500, &base, 0);
+    CHECK(got >= 23500 && got <= 24200, "snd cap: 0.5 s of samples (%u)", got);
+    CHECK(snd_cap_level() >= 80 && snd_cap_level() <= 160, "snd cap: noise level %u", snd_cap_level());
+    /* the loudspeaker plays a tone while the mic records: one Calliope, both DMAs */
+    CHECK(snd_tone(SND_TONE_TEST) == 0, "snd cap: tone");
+    (void)polls_mic(200, 0, 0);
+    CHECK(F.r_run && F.w_run && spk_on, "snd cap: RDMA0 %d and WDMA1 %d together, speaker %u", F.r_run, F.w_run, spk_on);
+    gz_reset(&tone);
+    (void)polls_mic(500, &tone, 0);
+    gz_judge(&tone, &base, &v);
+    CHECK(v.heard, "snd cap: the fake room's 1 kHz heard (%d / %d)", v.over_base, v.over_nb);
+    CHECK(F.r_starts == 1 && F.w_starts == 1, "snd cap: one start each (%u / %u)", F.r_starts, F.w_starts);
+    /* the mic closes while the tone plays: the stream goes on, UAIF0 back as found */
+    snd_cap_close();
+    CHECK(!F.w_run && F.r_run && !F.mic_on && F.codec_offs == 1 && abox_state() == ABOX_ST_READY,
+          "snd cap: close kept playback / Calliope");
+    CHECK(reg(ABOX_SFR + 0x500) == 0 && (reg(ABOX_SFR + 0x44) & 0xF) == 0 && (reg(ABOX_SFR + 0x10) & 1),
+          "snd cap: UAIF0 %#x NSRC0 %#x not as found, or DRAM off under the playback", reg(ABOX_SFR + 0x500),
+          reg(ABOX_SFR + 0x44));
+    snd_tone_stop();
+    polls(2600);
+    CHECK(!F.r_run && abox_state() == ABOX_ST_READY, "snd cap: stream stopped, Calliope kept");
+    polls(31000);
+    CHECK(abox_state() == ABOX_ST_OFF, "snd cap: Calliope not off 30 s after");
+    /* the mic alone: Calliope off 30 s after it closes */
+    CHECK(snd_cap_open() == 0, "snd cap: open 2");
+    (void)polls_mic(100, 0, 0);
+    snd_cap_close();
+    polls(1000);
+    CHECK(abox_state() == ABOX_ST_READY, "snd cap: Calliope off at once after the mic");
+    polls(30500);
+    CHECK(abox_state() == ABOX_ST_OFF && !(reg(ABOX_PMU + 0x4004) & 0xF), "snd cap: Calliope / domain not off");
+    /* a call: the mic stops before it, refused during it; then the modem's Calliope carries it */
+    CHECK(snd_cap_open() == 0, "snd cap: open 3");
+    (void)polls_mic(50, 0, 0);
+    snd_suspend_for_call();
+    CHECK(!F.w_run && !F.mic_on && !cal_capping() && abox_state() == ABOX_ST_READY &&
+          logged("call: the mic's capture stopped; Calliope left running for the call"), "snd cap: suspend");
+    CHECK(snd_cap_open() == SND_EBUSY, "snd cap: opened while suspended");
+    CHECK(abox_boot() == 0 && abox_call(1) == 0, "snd cap: the modem's call");
+    CHECK(snd_cap_open() == SND_EBUSY, "snd cap: opened during the call");
+    abox_call(0);
+    snd_resume_after_call();
+    CHECK(snd_cap_open() == 0 && F.w_run && !logged("engine: Calliope booted for media in 0"), "snd cap: on the "
+          "modem's Calliope");
+    snd_cap_close();
+    polls(31000);
+    CHECK(abox_state() == ABOX_ST_READY, "snd cap: snd switched off the modem's Calliope");
+    /* a call without snd_suspend_for_call */
+    CHECK(snd_cap_open() == 0, "snd cap: open 4");
+    CHECK(abox_call(1) == 0, "snd cap: call 2");
+    polls(20);
+    CHECK(logged("a call took Calliope while the mic recorded") && !cal_capping() && !F.w_run, "snd cap: missed "
+          "suspend");
+    CHECK(F.mic_on, "snd cap: the call's codec mic switched off by snd");
+    abox_call(0);
+    abox_off();
+    /* Calliope stops under the mic */
+    CHECK(snd_cap_open() == 0, "snd cap: open 5");
+    (void)polls_mic(50, 0, 0);
+    abox_off();
+    polls(20);
+    CHECK(logged("Calliope stopped while the mic recorded: capture dropped") && !cal_capping() && !F.mic_on,
+          "snd cap: drop not noticed");
+    CHECK(!snd_busy() || abox_state() == ABOX_ST_OFF, "snd cap: busy");
+    CHECK(F.violations == 0 && F.ram_violations == 0 && !logged("REFUSED"), "snd cap: stray writes");
+    drv_audio_abort();
+}
+
+static int run_snd(int level, unsigned *max_rcv_peak, unsigned *max_spk_peak)
+{
+    unsigned w = 0, n = 0;
+    while (!drv_audio_probe(level, &w) && ++n < 20000) {
+        F.now += (uint64_t)(w ? w : 1) * 1000U;
+        /* the ring holds only this output's periods 400 ms after it came on (the ring is 341 ms) */
+        if (max_rcv_peak && ((rcv_on && F.now - rcv_t0 > 400000) || (spk_on && F.now - spk_t0 > 400000))) {
+            const int16_t *r = (const int16_t *)(const void *)(F.rmem + CAL_RM_PLAY);
+            unsigned pk = 0;
+            for (unsigned i = 0; i < 0x10000 / 2; ++i)
+                pk = (unsigned)abs(r[i]) > pk ? (unsigned)abs(r[i]) : pk;
+            unsigned *m = rcv_on ? max_rcv_peak : max_spk_peak;
+            *m = pk > *m ? pk : *m;
+        }
+    }
+    return n < 20000;
+}
+static const char *snd_last(void)
+{
+    for (unsigned i = F.nlogs; i--;)
+        if (strstr(F.logs[i], "drvprobe: audio: PASS") || strstr(F.logs[i], "drvprobe: audio: FAIL"))
+            return F.logs[i];
+    return "";
+}
+static void snd_all_off(const char *t)
+{
+    CHECK(abox_state() == ABOX_ST_OFF && !(reg(ABOX_PMU + 0x4004) & 0xF), "%s: Calliope / AUD domain left on", t);
+    CHECK(!F.r_run && !F.w_run && !F.mic_on && !spk_on && !rcv_on && !cal_playing() && !cal_capping(),
+          "%s: something left on (RDMA0 %d WDMA1 %d mic %d spk %u rcv %u)", t, F.r_run, F.w_run, F.mic_on, spk_on,
+          rcv_on);
+    CHECK(F.violations == 0 && F.ram_violations == 0 && !logged("REFUSED"), "%s: stray writes", t);
+}
+
+static void test_snd_probe(void)
+{
+    /* level 1: silent, the real engine through Calliope, then the mic */
+    snd_setup();
+    snd_volume(SND_OUT_SPEAKER, 7);
+    CHECK(run_snd(1, 0, 0), "snd L1: did not finish");
+    CHECK(strstr(snd_last(), "PASS snd's engine through Calliope: RDMA0 19") && strstr(snd_last(), "WDMA1 19") &&
+          strstr(snd_last(), "output stayed off"), "snd L1: %s", snd_last());
+    CHECK(amp_calls_snd == 0 && logged("output: loudspeaker kept off (the probe's silent run)"),
+          "snd L1: the amps were touched (%u calls)", amp_calls_snd);
+    CHECK(F.mic_calls == 2 && F.r_starts == 1 && F.w_starts == 1, "snd L1: mic calls %u, starts %u / %u", F.mic_calls,
+          F.r_starts, F.w_starts);
+    snd_all_off("snd L1");
+    /* the user's settings back: unmuted, volume 7, a tone plays out loud again */
+    CHECK(snd_get_volume(SND_OUT_SPEAKER) == 7, "snd L1: volume");
+    CHECK(snd_tone(SND_TONE_TEST) == 0, "snd L1: tone after");
+    polls(300);
+    CHECK(ring_nonzero() && spk_on, "snd L1: muted / silent left on");
+    snd_tone_stop();
+    polls(2600);
+    abox_off();
+    polls(10);
+    drv_audio_abort();
+
+    /* level 1, WDMA1 dead: FAIL with the mic first */
+    snd_setup();
+    F.wdma_dead = 1;
+    CHECK(run_snd(1, 0, 0), "snd L1 wdma: did not finish");
+    CHECK(strstr(snd_last(), "FAIL the mic through Calliope: WDMA1 0 B/s (192000 expected); RDMA0 192000 B/s ok"),
+          "snd L1 wdma: %s", snd_last());
+    snd_all_off("snd L1 wdma");
+
+    /* level 2: the earpiece then the loudspeaker, both heard; quiet levels; the user's volume back */
+    snd_setup();
+    snd_volume(SND_OUT_SPEAKER, 7);
+    unsigned prcv = 0, pspk = 0;
+    CHECK(run_snd(2, &prcv, &pspk), "snd L2: did not finish");
+    const char *l = snd_last();
+    CHECK(strstr(l, "PASS earpiece: heard by the mic: yes (1 kHz ") &&
+          strstr(l, "; loudspeaker: heard by the mic: yes (1 kHz "), "snd L2: %s", l);
+    int a = aev_at("rcv(1,0)", 0), b = aev_at("off", a), c = aev_at("spk(1,0)", b), d = aev_at("off", c);
+    CHECK(a >= 0 && b > a && c > b && d > c && naev == 4, "snd L2: amp order rcv %d off %d spk %d off %d (%u calls)", a,
+          b, c, d, naev);
+    CHECK(prcv > 3000 && prcv <= 3277 && pspk > 1700 && pspk <= 1843, "snd L2: peaks earpiece %u (<= -20 dBFS), "
+          "loudspeaker %u (<= -25 dBFS)", prcv, pspk);
+    CHECK(logged("drvprobe: audio: baseline: the mic's RMS") && logged("drvprobe: audio: earpiece: 1 kHz ") &&
+          logged("drvprobe: audio: loudspeaker: 1 kHz "), "snd L2: lines");
+    CHECK(snd_get_volume(SND_OUT_SPEAKER) == 7 && snd_get_volume(SND_OUT_EARPIECE) == 10, "snd L2: volumes back");
+    CHECK(F.w_starts == 1 && F.r_starts == 1, "snd L2: one capture, one stream (%u / %u)", F.w_starts, F.r_starts);
+    snd_all_off("snd L2");
+
+    /* level 2, nothing heard: FAIL, everything off */
+    snd_setup();
+    F.deaf = 1;
+    CHECK(run_snd(2, 0, 0), "snd L2 deaf: did not finish");
+    CHECK(strstr(snd_last(), "FAIL no tone heard: earpiece: heard by the mic: no (1 kHz ") &&
+          strstr(snd_last(), "loudspeaker: heard by the mic: no"), "snd L2 deaf: %s", snd_last());
+    snd_all_off("snd L2 deaf");
+
+    /* level 2 aborted while the loudspeaker plays */
+    snd_setup();
+    snd_volume(SND_OUT_SPEAKER, 7);
+    unsigned w = 0, n = 0;
+    while (!spk_on && n++ < 5000) {
+        (void)drv_audio_probe(2, &w);
+        F.now += (uint64_t)(w ? w : 1) * 1000U;
+    }
+    CHECK(spk_on && F.w_run && F.r_run, "snd L2 abort: the loudspeaker phase not reached");
+    drv_audio_abort();
+    CHECK(!spk_on && !rcv_on && !F.w_run && !F.mic_on && snd_get_volume(SND_OUT_SPEAKER) == 7, "snd L2 abort: left on");
+    polls(10);
+    CHECK(abox_state() == ABOX_ST_OFF, "snd L2 abort: Calliope left on");
+    snd_all_off("snd L2 abort");
+}
+
+/* the phone's run order (run 7): audio L0, calliope L0, calliope L1, then audio L1 (and the old order, audio L1
+ * right after calliope L0) */
+static void test_probe_order(void)
+{
+    for (int order = 0; order < 2; ++order) {
+        snd_setup();
+        CHECK(run_snd(0, 0, 0), "order %d: audio L0 did not finish", order);
+        CHECK(run(0), "order %d: calliope L0 did not finish", order);
+        if (order == 0)
+            CHECK(run(1), "order %d: calliope L1 did not finish", order);
+        CHECK(run_snd(1, 0, 0), "order %d: audio L1 did not finish", order);
+        CHECK(strstr(snd_last(), "PASS snd's engine through Calliope"), "order %d: audio L1: %s", order, snd_last());
+        snd_all_off("order");
+        drv_audio_abort();
+    }
+}
+
 int main(int argc, char **argv)
 {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
@@ -748,6 +1313,10 @@ int main(int argc, char **argv)
     test_failures();
     test_hooks();
     test_snd_engine();
+    test_goertzel();
+    test_snd_capture();
+    test_snd_probe();
+    test_probe_order();
     printf("calliope host test: %d checks, %d failed\n", checks, fails);
     free(F.w);
     free(F.rmem);

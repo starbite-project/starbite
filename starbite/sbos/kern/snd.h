@@ -12,6 +12,8 @@
  *     headphones (UAIF0 -> the codec's AIF1RX, codec_hp() when linked). The amp outputs get a mono mix on both slots.
  *     Route AUTO = headphones when plugged (and the hook exists), else the loudspeaker; the earpiece only on request.
  *   - Capture: the main mic (codec IN3L -> AIF1TX1 -> UAIF0 -> WDMA1), 48 kHz mono S16 for apps (the left slot).
+ *     With use_calliope (the kernel's) both directions run through Calliope (abox_media.c: RDMA0 / WDMA1 on its PCM
+ *     IPC), together if wanted, on one Calliope boot.
  *   - Calls win: snd_suspend_for_call() stops everything and gives ABOX back before abox_boot();
  *     snd_resume_after_call() after abox_off(). While suspended, streams keep their queued frames and nothing plays.
  *
@@ -134,9 +136,17 @@ struct snd_shring {
 #define SND_SHRING_MAGIC 0x52444E53U
 int snd_attach_shring(int id, struct snd_shring *r);   /* the stream reads from r instead of snd_write; NULL detaches */
 
-/* ---- the driver probe (drvprobe.h) ---------------------------------------------------------------------------- */
+/* ---- the driver probe (drvprobe.h) ----------------------------------------------------------------------------
+ * level 0: reads only. With the Calliope engine (use_calliope and the firmware's reader):
+ * level 1: silent: snd's real engine through Calliope (zeroes, muted, the amps / codec output kept off) 1 s, measured
+ *          from RDMA0 STATUS (PASS 182400..201600 B/s), then the main mic through Calliope 0.5 s (WDMA1's rate, RMS,
+ *          peak); everything back, Calliope off after (abox_off) if snd booted it.
+ * level 2: quiet, may run unattended: the mic's 1 s baseline, then snd_tone's 1 kHz on the earpiece (amp level 0,
+ *          -20 dBFS) 2 s and the loudspeaker (amp level 0, -25 dBFS) 1 s while the mic records; a Goertzel filter
+ *          (goertzel.h) says per output "heard by the mic: yes/no (1 kHz N dB over baseline)"; FAIL if neither was.
+ * Without Calliope (bypass, the host tests): level 1 the RDMA0 / WDMA1 sweep, level 2 the tones then the mic. */
 int drv_audio_probe(int level, unsigned *wait_ms);
 void drv_audio_abort(void);
-#define DRV_AUDIO_BUDGET_MS 12000U      /* level 0: 2 s, level 1: 12 s (with the trials), level 2: 10 s */
+#define DRV_AUDIO_BUDGET_MS 20000U      /* level 0: 2 s, level 1: 20 s (the bypass trials), level 2: 14 s */
 
 #endif

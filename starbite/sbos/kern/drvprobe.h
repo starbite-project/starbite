@@ -43,6 +43,8 @@ extern const unsigned drv_nprobes;
 
 /* The runner (drvprobe.c): level 0 for every probe, then level 1, then (attended) level 2. */
 void drv_run_begin(int attended);
+/* before drv_run_begin: run only the probes named in csv ("audio,calliope"); NULL or "" = all. Others show '-'. */
+void drv_run_select(const char *csv);
 int drv_run_step(unsigned *wait_ms);        /* 0: again after *wait_ms; 1: all done */
 void drv_run_abort(void);
 
