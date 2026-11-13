@@ -3395,6 +3395,7 @@ static int kit_alert(const char *title, const char *msg, const kit_btn *b, int n
 static int kit_actions(const char *title, const kit_btn *b, int n, kit_cb cb);
 static int kit_sheet(const char *title, float content_h, void (*draw)(dc *d, float x, float y, float w), void (*tap)(float x, float y),
                      void (*done)(void));
+__attribute__((unused)) static void kit_sheet_press(int (*fn)(float x, float y, tk_rect *r, float *rad));   /* 8c (shell_kit.inc) */
 static int kit_on(void);
 static void toast(const char *msg);
 /* the Options sheet: the one-shots that fit this OS (the others dimmed: a tap says why), "Start Normally" once one is
@@ -5924,8 +5925,26 @@ static void icon_press(int a)
     if (a < 0 || !tk_strcmp(APPS[a].k, "search")) return;
     float pad;
     const tk_bmp *ic = app_icon(APPS[a].k, &pad);      /* (Calendar: today's composed tile) */
-    if (!ic) return;
     arect R = icon_rect(a);
+    if (!ic) {
+        /* 8c (the films' SBTK_TTF: Emergency's page-2 tools showed nothing at the touch): a tile drawn on the page
+         * (no icon bitmap): iOS's darkening as a rounded dim over it, pressed and let go as the icons' */
+        tk_layer_init(&icobg, "icon-ground");
+        tk_layer_init(&icofg, "icon-pressed");
+        icobg.hidden = 1;
+        icofg.solid = tk_premul(TK_RGBA(0, 0, 0, .22f));
+        icofg.x = PT(R.x); icofg.y = PT(R.y);
+        icofg.solid_w = PT(R.w); icofg.solid_h = PT(R.h);
+        icofg.clip = 1;
+        icofg.clip_r = (tk_rect){ PT(R.x), PT(R.y), PT(R.w), PT(R.h) };
+        icofg.clip_radius = PT(R.r > 0 ? R.r : 14);
+        icofg.ox = PT(R.x + R.w / 2);
+        icofg.oy = PT(R.y + R.h / 2);
+        IP.on = 1; IP.rel = 0; IP.from = 1; IP.to = .96f; IP.t = 0; IP.dur = .1f; IP.s = 1; IP.t0 = now_ms;
+        icofg.sx = icofg.sy = 1;
+        relink();
+        return;
+    }
     int X = (int)tk_floorf(PT(R.x) - pad + .5f), Y = (int)tk_floorf(PT(R.y) - pad + .5f);
     tk_layer_init(&icobg, "icon-ground");
     tk_layer_init(&icofg, "icon-pressed");
@@ -6234,7 +6253,11 @@ static void sh_touch_(int phase, float x, float y, float t)
             /* elsewhere but the dock, Search and the widgets: the pages (direction decided after 8 pt) */
             int on_w = page_x > -195 && y >= 60 && y <= 60 + WID_W && ((x >= WID_X(0) && x <= WID_X(0) + WID_W) || (x >= WID_X(1) && x <= WID_X(1) + WID_W));
             if (y >= DOCK_TOP && y < H_PT - 30) { T.kind = G_DOCK; icon_press(app_hit(x, y)); return; }   /* the dock: a tap opens its app */
-            if (SRCH_HIT(x, y)) { T.kind = G_DOCK; return; }   /* P3g: Search */
+            if (SRCH_HIT(x, y)) {                /* P3g: Search; 8c: the pill presses at the touch (it showed nothing) */
+                T.kind = G_DOCK;
+                press_scale(&hsearch[0], .94f, SRCH_X + SRCH_W / 2, SRCH_Y + SRCH_H / 2);
+                return;
+            }
             if (y >= 56 && y < DOCK_TOP && !SRCH_HIT(x, y) && !on_w) {
                 /* 8b (8a2's phone: "touch down: home 133 ms" after Emergency's switch): page 2's rest is made while the
                  * pages move (sh_tick: two parts a frame), not all here */
@@ -6568,6 +6591,7 @@ static void sh_touch_(int phase, float x, float y, float t)
         }
         break;
     case G_DOCK:
+        hl_off();                                /* 8c: the Search pill's press lets go */
         if (!T.moved) { int a = app_hit(x, y); if (a >= 0) app_open(a); }
         break;
     case G_APPTAP:
