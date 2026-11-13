@@ -4,6 +4,17 @@ Version 1.0, 2026-11-13 (design-ref Track C, for builder A2). Frame, units and s
 `docs/design/IOS-REFERENCE.md` (cited **IR §n**) and `docs/design/LIQUID-GLASS.md` (cited **LG §n**). This file
 replaces the short IR §7 (Messages) and IR §13 (Phone) entries where they differ; differences are flagged "**(IR fix)**".
 
+> **Decisions (Track A, 2026-11-13; build to these):**
+> 1. **Tap to dial**, as iOS does. The trunk's 0.6 s hold (a testing-phase guard) goes. The guard that matters stays:
+>    self tests never place a call. Track A has told the main session in case the user prefers the hold.
+> 2. **Hold** takes FaceTime's slot in the in-call grid.
+> 3. **SMS reactions are sent as text** (Loved "…" etc.), as iOS does for SMS.
+> 4. **The Contacts store exists.** Track A builds it before A2 reaches Contacts: settings-state records like Notes'
+>    (chunked 4 KB records, a size budget). Spec and build Contacts as if the store is there, with a **full state**: a
+>    "Storage Full" alert ("Delete some contacts or notes to make room.", OK). A save that fails keeps the edit form
+>    open with a footer "Not saved: storage full" (13 / 400, systemRed). Names then appear everywhere iOS shows them:
+>    Calls, Messages, banners, the in-call screen.
+
 **Tags.** **A** Apple stated · **M** measured (source named) · **3P** a reviewer · **E** estimate.
 
 **Measurement sources (M).** Every one is a public image, kept git-ignored under `build/design-ref/apps27/`:
@@ -228,8 +239,7 @@ Dark mode (E): keys glass over black ≈ #2C2C2E with a 1 px light rim; digits w
   Long-press the number → **"Paste"** edit menu (A: "Tap the phone number field… then tap Paste"; TB: hold the blank
   area above the keys).
 - **Call with an empty number:** fill in the **last dialled number** (no call). The second tap calls (A).
-- **Call:** dial at once → §2.5. **Decision for the user:** today's trunk requires a 0.6 s hold on the call button as
-  a misdial guard. iOS dials on tap. This spec says **tap** (A); keep the hold behind a Settings switch if wanted.
+- **Call:** dial at once → §2.5. **Decided (box at the top): tap to dial**, as iOS does (A). The trunk's 0.6 s hold goes.
 - Tap the T9 capsule → the number field takes that contact's number (E). Then the call button calls it.
 - Add-to-contacts → action sheet anchored to it (IR §3.2): **Create New Contact**, **Add to Existing Contact** (A
   wording from "Use contacts from the Phone app").
@@ -253,7 +263,7 @@ Measured on UGi (402 @1.1095). Full screen over everything, the lock screen too.
 | Glass circles | clear glass over the gradient, white glyph 26 pt; **on** state (Speaker, Mute, Hold) = **white fill, dark glyph** (E: unchanged since iOS 7) | same |
 | Banner slot | a glass card **332 x 77**, r ≈ 18, inset 30, sits 32 above row 1 (Hold Assist / Call Context) | used only for **our** notices: "No audio yet" and the kernel's audio reasons (today's text), as this card: title 17 / 600 white + subtitle 15 / 400 white 70 %. Card x 29..361, bottom **y 487** |
 
-- **Hold slot (local, decision):** FaceTime is omitted. We put **Hold** there (modem `AT+CHLD=2`; lit when held, the
+- **Hold slot (local; decided):** FaceTime is omitted. We put **Hold** there (modem `AT+CHLD=2`; lit when held, the
   status line says "On Hold"). If the modem refuses hold, the circle shows dimmed, as iOS dims an unavailable
   FaceTime (M UGi shows FaceTime dimmed with a "?" video glyph). Mute long-press also toggles Hold (A).
 - **More** → glass menu (morph from the circle): **Add Call** (only if the modem supports a second call), **Send
