@@ -757,6 +757,16 @@ int guest_stop(void)
  * 9P and writes wait for the guest timer's poll. */
 #define GUEST_PUMP_US 2000U
 #define GUEST_PUMP_WIN_US 16667U
+/* a booting Linux's mode: how fast the host serves it (guest_pump's budget, the guest timer's period) */
+enum { BM_BACKGROUND, BM_SHOWN, BM_DARK, BM_N };
+static uint32_t bm_ticks[BM_N];             /* the guest timer's ticks in each mode during this boot (HELLO's line) */
+static int bm_last = -1;
+static int boot_mode(void)
+{
+    if (st != GUEST_STARTING || loading)
+        return BM_BACKGROUND;
+    return !screen ? BM_DARK : shown ? BM_SHOWN : BM_BACKGROUND;
+}
 /* cp7q (Track A's 7p: a 64 KiB read is ~20 ms from the microSD, 36 late frames): the pump measures its own reads
  * (us per sector, a running average; first guess 180 us = ~2.9 MB/s) and takes a request only when its predicted
  * time fits what is left of the window's budget (4 KiB at the card's speed: ~1.4 ms) */
@@ -771,9 +781,11 @@ void guest_pump(void)
         win0 = t;
         spent = 0;
     }
-    /* instant start: while Linux boots ("Starting Linux" on screen, nothing animates) 3x the budget: its boot is
-     * card-bound, every synchronous read waits for the host */
-    uint64_t budget = st == GUEST_STARTING ? 3U * GUEST_PUMP_US : GUEST_PUMP_US;
+    /* instant start: a booting Linux's reads (card-bound, each one waits for the host) get more budget where frames
+     * matter less (Track A): its window shown ("Starting Linux") 3x, the screen off 6x, a start in the background
+     * (a card's app, the self test's films) the frame-friendly 1x */
+    int bm = boot_mode();
+    uint64_t budget = bm == BM_DARK ? 6U * GUEST_PUMP_US : bm == BM_SHOWN ? 3U * GUEST_PUMP_US : GUEST_PUMP_US;
     uint32_t max = spent >= budget ? 0 : (uint32_t)((budget - spent) / (pump_us_sec ? pump_us_sec : 1));
     if (!max) {
         pump_spent++;
@@ -808,8 +820,11 @@ void guest_timer(unsigned id)
             return;                         /* the next step at the next tick */
         loading = 0;
         if (lr > 0) {
-            arm(2);                         /* the guest's poll from here: 2 ms while it boots (its reads wait for it;
-                                             * HELLO sets 10 / 50) */
+            arm(10);                        /* the guest's poll from here (the boot's mode below sets 2 or 10; HELLO
+                                             * sets 10 / 50) */
+            bm_last = -1;
+            for (int i = 0; i < BM_N; ++i)
+                bm_ticks[i] = 0;
         } else {
             gcard_abort();
             st = GUEST_FAILED;
@@ -821,6 +836,14 @@ void guest_timer(unsigned id)
             ui_mark_dirty();
         }
         return;
+    }
+    if (st == GUEST_STARTING) {             /* the boot's mode: shown or dark, the poll every 2 ms; else 10 */
+        int bm = boot_mode();
+        bm_ticks[bm]++;
+        if (bm != bm_last) {
+            bm_last = bm;
+            arm(bm == BM_BACKGROUND ? 10 : 2);
+        }
     }
     uint64_t gt0 = sb_ms();
     sbg_poll();
@@ -864,7 +887,12 @@ void guest_timer(unsigned id)
             ub_dec(&u, pump_spent);
             ub_s(&u, ", ");
             ub_dec(&u, pump_us_sec);
-            ub_s(&u, " us a sector)");
+            ub_s(&u, " us a sector); served as (ticks): shown ");
+            ub_dec(&u, bm_ticks[BM_SHOWN]);
+            ub_s(&u, ", dark ");
+            ub_dec(&u, bm_ticks[BM_DARK]);
+            ub_s(&u, ", background (throttled) ");
+            ub_dec(&u, bm_ticks[BM_BACKGROUND]);
             sb_log(u.b);
             gt_max = 0;
             bt_log();
