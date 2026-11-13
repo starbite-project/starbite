@@ -162,6 +162,25 @@ static void lx_make_store_icon(tk_bmp *out, int px)
 
 
 /* ---- the home's third page: the App Store, then the catalog's apps (not the Terminal: page 2 has it) ---- */
+/* cp7u (Track A's 7s: a 418 ms "UI's draw" at Linux's HELLO, the screen off, the A55 at 455 MHz: page 3 built with
+ * all its icons inside sh_linux_catalog): while page 3 is not in view the icons are made one per idle turn
+ * (lx_idle, from sh_idle; none while the screen is off) into a cache that lives only until the page is baked from it */
+static tk_bmp lx_icache[LHOME];
+static uint32_t lx_ikey[LHOME];
+static int lx_p3_want;                           /* page 3 is to be built again (its icons first, in idle turns) */
+static uint32_t lx_icon_key(int s, int px)
+{
+    const sh_lapp_t *a = &LCAT.app[LH.cat[s]];
+    uint32_t h = 2166136261u ^ (uint32_t)px;
+    for (const char *t = a->name; *t; t++) h = (h ^ (uint8_t)*t) * 16777619u;
+    h = (h ^ (uint32_t)a->icon) * 16777619u;
+    return h ? h : 1;
+}
+static void lx_icache_free(void)
+{
+    for (int s = 0; s < LHOME; s++) { tk_bmp_free(&lx_icache[s]); lx_ikey[s] = 0; }
+}
+static int lx_p3_seen(void) { return !sh_sleeping() && !locked && !AP.on && page_x < -585; }
 static void lx_build_page3(void)
 {
     if (!store_ic.px) lx_make_store_icon(&store_ic, (int)(PT(ICON_PT) + .5f));
@@ -172,14 +191,17 @@ static void lx_build_page3(void)
         float cx = COL_CX(i % 4), y = HOME_TOP2 + ROW_PITCH * (i / 4);
         /* the icons are drawn once into the page (none kept: a press or an open copies its one back out) */
         tk_bmp t = { 0, 0, 0, 0 };
-        if (i) lx_make_icon(&t, (int)(PT(ICON_PT) + .5f), LCAT.app[LH.cat[i - 1]].icon, LCAT.app[LH.cat[i - 1]].name, 1);
-        const tk_bmp *ic = i ? &t : &store_ic;
+        int px = (int)(PT(ICON_PT) + .5f), cached = i && lx_ikey[i - 1] == lx_icon_key(i - 1, px) && lx_icache[i - 1].px;
+        if (i && !cached) lx_make_icon(&t, px, LCAT.app[LH.cat[i - 1]].icon, LCAT.app[LH.cat[i - 1]].name, 1);
+        const tk_bmp *ic = !i ? &store_ic : cached ? &lx_icache[i - 1] : &t;
         LH.ix[i] = (int)tk_floorf(PT(cx - ICON_PT / 2) - d.ox + .5f);
         LH.iy[i] = (int)tk_floorf(PT(y) - d.oy + .5f);
         if (ic->px) tk_blit(d.b, ic, LH.ix[i], LH.iy[i], 1);
         tk_bmp_free(&t);
         d_text_box(&d, TK_IT400, 12, cx, y + 68 + 12, 84, 1, i ? LCAT.app[LH.cat[i - 1]].name : "App Store", 0, 0, INK, 1);
     }
+    lx_icache_free();                            /* drawn into the page: none kept */
+    lx_p3_want = 0;
     hparts[5].x = hparts[5].bx = hparts[5].x + PT(780);   /* drawn as if on screen, then two pages right */
     /* P3s: cut to what it holds; the icons' places (copied out for a press or an open) move with the cut */
     float ox = hparts[5].x, oy = hparts[5].y;
@@ -203,8 +225,31 @@ static void lx_page3_update(void)
     for (int i = 0; i < LCAT.n && LH.n < LHOME; i++)
         if (!lx_term_id(LCAT.app[i].id)) LH.cat[LH.n++] = i;
     if (lx_ic_slot >= 0 && !is_app("linux")) lx_ic_slot = -1;   /* (an open app keeps its icon) */
+    if (!lx_p3_seen()) {                         /* not in view: its icons in idle turns, then the page (lx_idle) */
+        lx_p3_want = 1;
+        return;
+    }
     lx_build_page3();
     relink();
+}
+/* sh_idle: page 3's next icon, or the page once all are made; 1 if it did something */
+static int lx_idle_pending(void) { return lx_p3_want && lx_baked && !sh_sleeping(); }
+static int lx_idle(void)
+{
+    if (!lx_idle_pending()) return 0;
+    if (lx_p3_seen()) { lx_build_page3(); relink(); return 1; }   /* in view now: the rest at once, as before */
+    int px = (int)(PT(ICON_PT) + .5f);
+    if (!store_ic.px) { lx_make_store_icon(&store_ic, px); return 1; }
+    for (int s = 0; s < LH.n; s++) {
+        uint32_t k = lx_icon_key(s, px);
+        if (lx_ikey[s] == k && lx_icache[s].px) continue;
+        if (lx_make_icon(&lx_icache[s], px, LCAT.app[LH.cat[s]].icon, LCAT.app[LH.cat[s]].name, 1)) lx_ikey[s] = k;
+        else lx_p3_want = 0;                     /* no memory: the page is built whole when next seen */
+        return 1;
+    }
+    lx_build_page3();                            /* every icon made: the page from them (labels and blits) */
+    relink();
+    return 1;
 }
 /* page 3's icon of slot s (an app) copied out of the page into lx_ic (the press's and the open's): 1 done */
 static int lx_slot_icon(int s)

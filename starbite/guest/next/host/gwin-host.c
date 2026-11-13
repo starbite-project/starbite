@@ -531,6 +531,7 @@ static void run(int n)
         if (gwin_now()) draws++;
         sh_tick(.1f, (float)now_ms);
         tk_comp_frame(&C, 0, 0);
+        if (!sh_moving() && sh_idle_pending()) sh_idle();   /* cp7u: as kern_next's idle timer (KT_UI 24), a piece a step */
     }
 }
 static int fails, nchecks;

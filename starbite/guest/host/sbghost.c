@@ -420,6 +420,7 @@ int sbg_start(void)
     boot_extra = 0;
     st.poll_part_ms = 0;
     st.poll_part = "-";
+    st.pump_left = 0;
     st.boots++;
     int64_t r = os->cpu_on(cfg.first_mpidr, tramp_pa(), cfg.linux_base + SBG_DTB_OFF);
     struct tb t = {.n = 0};
@@ -786,8 +787,10 @@ int sbg_pump(uint32_t max_sectors)
     sbshm_dmb();
     const volatile struct sbshm_blkreq *q = &b->req[blk_tail & (SBSHM_BLK_RING - 1)];
     uint32_t count = q->count;
-    if (q->op != SBG_BLK_READ || count > max_sectors)
+    if (q->op != SBG_BLK_READ || count > max_sectors) {
+        st.pump_left++;
         return 0;                                   /* a write or a big read: the next poll's */
+    }
     return blk_serve_n(1, 0) ? (int)count : 0;
 }
 
