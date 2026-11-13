@@ -825,7 +825,11 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
             fprintf(log, "R %d %.1f hash %016llx\n", frame, t, (unsigned long long)hh);
             if (getenv("SBTK_DUMPR") && frame == atoi(getenv("SBTK_DUMPR"))) write_ppm(getenv("SBTK_DUMPTO"), &c->panel);
         }
-        if (!motion) sh_idle();     /* between frames: on the phone, the time left in the frame */
+        if (!motion) {               /* between frames: on the phone, the time left in the frame */
+            uint64_t i0 = tk_us();
+            sh_idle();
+            if (getenv("SBTK_IDLEMS") && tk_us() - i0 > 1000) fprintf(stderr, "IDLE %d %.1f ms\n", frame, (tk_us() - i0) / 1000.0);   /* cp7c */
+        }
         /* the phone's refresh timer (the Clock's digits, the card's work a turn at a time): a frame if it drew */
         if (!motion && sh_next_update(t) >= 0 && sh_refresh(t)) tk_comp_frame(c, 0, 0);
         if (t > total + 8000) break;

@@ -1734,13 +1734,16 @@ static void under_rows(void *v, int y0, int y1)
         }
     }
 }
-static void flatten_lock(int ground)          /* ground: also when the wallpaper changed (idle; not mid-swipe) */
+/* cp7c: the idle's flatten in slices (fl_row: the next band's first row, -1 none started): tk_flatten in one call, the
+ * ground under it a band a call (the lens: ~90 ms on the A55 in one piece, a lost tap after an animation). Another
+ * tk_flatten between the slices (the switcher's snapshot: flat_cuts) takes the lens's shapes: the slices start over */
+static int fl_row = -1;
+static int fl_ver;
+static uint32_t fl_gnd, fl_cut;
+unsigned flat_cuts;                               /* bumped by every other tk_flatten (shell_switcher.inc) */
+#define FL_BAND 96                                /* half-resolution rows a slice (1480 in all: 16 slices) */
+static void flatten_end(void)
 {
-    if (flat_ver == lock_ver && (!ground || flat_ground == C->ground_gen)) return;
-    tk_a8_new(&flatmask, TK_W / 2, TK_H / 2);    /* P3p: the glass goes into its own ground (P3s: made for this only) */
-    tk_flatten(&lockg, &lockflat.bmp, &flatmask, .5f);
-    under_ctx U = { &lockflat.bmp, &flatmask };
-    tk_par_rows(0, lockflat.bmp.h, under_rows, &U);
     tk_a8_free(&flatmask);
     /* the star (nothing of the lock's is drawn where it is) */
     tk_layer *s[2] = { &star, &star_e };
@@ -1749,9 +1752,44 @@ static void flatten_lock(int ground)          /* ground: also when the wallpaper
         tk_layer_prepare(s[i]);
         if (s[i]->half.px) tk_blit(&lockflat.bmp, &s[i]->half, (int)s[i]->x / 2, (int)s[i]->y / 2, s[i]->alpha);
     }
+    tk_layer_dirty(&lockflat);
+}
+static void flatten_lock(int ground)          /* ground: also when the wallpaper changed (idle; not mid-swipe) */
+{
+    if (flat_ver == lock_ver && (!ground || flat_ground == C->ground_gen)) return;
+    fl_row = -1;                                  /* (a sliced one in progress: done whole now) */
+    tk_a8_free(&flatmask);
+    tk_a8_new(&flatmask, TK_W / 2, TK_H / 2);    /* P3p: the glass goes into its own ground (P3s: made for this only) */
+    tk_flatten(&lockg, &lockflat.bmp, &flatmask, .5f);
+    under_ctx U = { &lockflat.bmp, &flatmask };
+    tk_par_rows(0, lockflat.bmp.h, under_rows, &U);
     flat_ver = lock_ver;
     flat_ground = C->ground_gen;
-    tk_layer_dirty(&lockflat);
+    flatten_end();
+}
+/* the idle's: one slice; 1 while more slices are to come (sh_idle_pending) */
+static int flatten_lock_step(void)
+{
+    if (fl_row >= 0 && (fl_ver != lock_ver || fl_gnd != C->ground_gen || fl_cut != flat_cuts)) fl_row = -1;   /* changed: again */
+    if (fl_row < 0) {
+        if (flat_ver == lock_ver && flat_ground == C->ground_gen) return 0;
+        tk_a8_free(&flatmask);
+        if (!tk_a8_new(&flatmask, TK_W / 2, TK_H / 2)) { flatten_lock(1); return 0; }
+        tk_flatten(&lockg, &lockflat.bmp, &flatmask, .5f);
+        fl_ver = lock_ver; fl_gnd = C->ground_gen; fl_cut = flat_cuts;
+        fl_row = 0;
+        return 1;
+    }
+    under_ctx U = { &lockflat.bmp, &flatmask };
+    int y1 = tk_mini(lockflat.bmp.h, fl_row + FL_BAND);
+    tk_par_rows(fl_row, y1, under_rows, &U);
+    fl_row = y1;
+    if (fl_row < lockflat.bmp.h) return 1;
+    fl_row = -1;
+    flat_ver = fl_ver;
+    flat_ground = fl_gnd;
+    flatten_end();
+    return 0;
 }
 
 /* ---- home's pages: the grid slides, the Search pill shows the page dots while it moves ---------------------- */
@@ -1961,13 +1999,22 @@ static void cc_unview(void)
         v->gen++;
     }
 }
-static void build_cc_grid(void)
+/* cp7c: the grid in six parts (a tile or two each: their glass bakes), so build_cc's idle stages stay short; ccg_part:
+ * the next part of a grid being drawn (0 none); a whole build_cc_grid (a toggle) ends any part-drawn one */
+static dc ccg_d;
+static int ccg_part;
+#define CCG_PARTS 6
+static void cc_grid_part(int k)
 {
+    if (k != 1 && k != ccg_part) return;         /* (that grid was made again whole meanwhile) */
+    dc d = ccg_d;
+    if (k == 1) {
     cc_unview();
     CCS.rot = sh_orientation_lock();             /* cp7: iOS's Portrait Orientation Lock, a real switch (off by default) */
     CCS.save = sh_low_power_on();                /* cp6: Track A's Low Power Mode lights its tile */
     relayer(&ccgrid);
-    dc d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, 4 * CC_U + 3 * CC_GAP, 44, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
+    d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, 4 * CC_U + 3 * CC_GAP, 44, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
+    ccg_d = d;
     /* the connectivity 2x2: Airplane, Cellular, Wi-Fi and the mini cluster (Bluetooth, Nearby, Hotspot, VPN) */
     float X = CC_COL(0), Y = CC_ROW(0);
     cc_tile(&d, X, Y, CC_W2, CC_W2, 30, 0);
@@ -1989,9 +2036,11 @@ static void build_cc_grid(void)
             else cc_draw_link(&d, k - 1, mx + CN_MD / 2, my + CN_MD / 2, .85f, W(1));
         }
     }
+    } else if (k == 2) {
     /* the sliders' glass (their level and glyph are layers above) */
     cc_tile(&d, CC_COL(2), CC_ROW(0), CC_U, CC_W2, 34, 0);
     cc_tile(&d, CC_COL(3), CC_ROW(0), CC_U, CC_W2, 34, 0);
+    } else if (k == 3) {
     /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Mirror, Camera */
     /* P3i: the torch's tile baked off; its lit look is a small layer over it, so the tap shows it at once (the
      * whole grid's rebuild took ~300 ms at the tap) */
@@ -2005,6 +2054,7 @@ static void build_cc_grid(void)
         cclit.hidden = !Q[0].lit;
     }
     cc_tile(&d, CCX[1], CC_R3, CC_U, CC_U, 34, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], CC_R3, 22, 22);
+    } else if (k == 4) {
     cc_tile(&d, CCX[2], CC_R3, CC_U, CC_U, 34, 0);
     cc_glyph(&d, "cc-flame", CCX[2], CC_R3, 20, 24);
     {
@@ -2018,14 +2068,22 @@ static void build_cc_grid(void)
         ccem.hidden = !EMG;
     }
     cc_tile(&d, CCX[3], CC_R3, CC_U, CC_U, 34, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], CC_R3, 24, 14);
+    } else if (k == 5) {
     cc_tile(&d, CCX[0], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-timer", CCX[0], CC_R4, 22, 22);
     /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place); P3p: baked ones */
     cc_tile(&d, CCX[1], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-calc", CCX[1], CC_R4, 24, 24);
+    } else {
     cc_tile(&d, CCX[2], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-wifi2", CCX[2], CC_R4, 22, 22);
     cc_tile(&d, CCX[3], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-camera", CCX[3], CC_R4, 24, 24);
     tk_a8_free(&ccgrid.glass);
     trim(&ccgrid);
     tk_layer_prepare(&ccgrid);
+    }
+    ccg_part = k < CCG_PARTS ? k + 1 : 0;
+}
+static void build_cc_grid(void)
+{
+    for (int k = 1; k <= CCG_PARTS; k++) cc_grid_part(k);
 }
 static void cc_levels(void)
 {
@@ -2034,12 +2092,21 @@ static void cc_levels(void)
         cclvl[i].clip_r = (tk_rect){ PT(x), PT(CC_ROW(0) + CC_W2 * (1 - v)), PT(CC_U), PT(CC_W2 * v) };
     }
 }
-static void build_cc(void)
+/* cp7c: build_cc in stages, one an idle call (sh_idle_pending while some are left: the whole was ~0.6-1.2 s on the
+ * phone in one turn after each move on home, and a tap in it was lost). 1: home's picture, the light blur; 2: the
+ * heavy blur; 3: the status, chrome, page dots, sliders; 4-9: the grid; 10: linked, built. A pull before the end builds
+ * it whole (build_cc). The stages' picture: ccq (quarter) between 1 and 2. The grid: stages 4-9 (cc_grid_part) */
+static int ccb_next;                              /* the next stage, 0 none in progress */
+static tk_bmp ccq;
+static void build_cc_stage(int st)
 {
+    if (st == 1) {
     /* the scrim from home as it is now (half resolution, drawn 2x), then the grid over it */
+    CCS.built = 0;                               /* (being made: a pull now builds it whole) */
     tk_comp_frame(C, 0, 0);
     relayer(&ccscrim);
     tk_layer_init(&ccscrim, "cc-scrim");
+    tk_bmp_free(&ccq);
     if (tk_bmp_new(&ccscrim.bmp, TK_W / 2, TK_H / 2)) {
         tk_bmp q;
         tk_bmp_new(&q, TK_W / 4, TK_H / 4);
@@ -2057,6 +2124,14 @@ static void build_cc(void)
             ccblur1.sx = ccblur1.sy = 4;
             ccblur1.opaque = 1;
         }
+        ccq = q;
+    }
+    return;
+    }
+    if (st == 2) {
+    if (ccscrim.bmp.px && ccq.px) {
+        tk_bmp q = ccq;
+        tk_memset(&ccq, 0, sizeof ccq);
         tk_bmp_blur(&q, PT(26) / 4);
         tk_bmp_satbright(&q, 1.3f, 1);
         tk_bmp_tint(&q, TK_RGBA(0, 0, 0, .25f));
@@ -2075,6 +2150,9 @@ static void build_cc(void)
         }
         ccscrim.opaque = 1;
     }
+    return;
+    }
+    if (st == 3) {
     if (!ccsb.bmp.px) {
         dc d = mk(&ccsb, "cc-status", 0, 0, 390, 48, 2, 0);
         status_bar(&d, carrier);
@@ -2116,7 +2194,9 @@ static void build_cc(void)
             d_icon(&g, i ? "cc-vol" : "cc-sun", x + 23, y + CC_W2 - 33, 1);
         }
     }
-    build_cc_grid();
+    return;
+    }
+    if (st >= 4 && st < 4 + CCG_PARTS) { cc_grid_part(st - 3); return; }
     tk_layer_init(&ccg, "cc-grid-group");
     ccg.ox = PT(CC_COL(0) + .85f * (4 * CC_U + 3 * CC_GAP));
     ccg.oy = PT(CC_ROW(0));
@@ -2124,12 +2204,27 @@ static void build_cc(void)
     cc_levels();
     CCS.built = 1;
 }
+#define CCB_STAGES (4 + CCG_PARTS)
+static void build_cc(void)
+{
+    for (int st = 1; st <= CCB_STAGES; st++) build_cc_stage(st);
+    ccb_next = 0;
+}
+/* the idle's: the next stage; 1 while stages are left */
+static int build_cc_step(void)
+{
+    if (!ccb_next) ccb_next = 1;
+    build_cc_stage(ccb_next);
+    ccb_next = ccb_next < CCB_STAGES ? ccb_next + 1 : 0;
+    return ccb_next != 0;
+}
 static void cc_x_reset(void);
 /* an open app needs the room (its page is a whole screen): the Control Centre's snapshot and grid go, home's idle
  * time builds them again */
 static void free_cc(void)
 {
-    if (!CCS.built || CCS.on) return;
+    if (CCS.on) return;
+    if (!CCS.built && !ccb_next && !ccscrim.bmp.px && !ccblur1.bmp.px && !ccgrid.bmp.px) return;   /* cp7c: a staged one too */
     cc_x_reset();
     cc_unview();
     relayer(&ccscrim);
@@ -2137,6 +2232,8 @@ static void free_cc(void)
     relayer(&ccgrid);
     relayer(&ccem);
     CCS.built = 0;
+    ccb_next = ccg_part = 0;                      /* cp7c: a staged build's rest (its grid's drawing context) goes too */
+    tk_bmp_free(&ccq);
 }
 /* P3s: on the lock (it opens only from home) nothing of it is kept; home's idle time builds it again */
 static void free_cc_all(void)
@@ -6268,13 +6365,16 @@ void sh_idle(void)
     if (locked && !cc_lock_ok) free_cc_all();
     if (focus_faces_idle(focus_faces_keep())) return;    /* a sheet's glass: one bake a turn (sh_idle_pending) */
     lkn_idle();                                  /* B9: the lock's notifications as the store has them (before the cache below) */
-    if (locked && lockY == 0 && !focus_on) flatten_lock(1);
+    /* cp7c: the heavy pieces one an idle call (the platform calls again while sh_idle_pending): the lock's flat copy a
+     * band at a time, the Control Centre a stage at a time */
+    if (locked && lockY == 0 && !focus_on) { if (flatten_lock_step()) return; }
+    else if (fl_row >= 0) { fl_row = -1; tk_a8_free(&flatmask); }
     /* home at rest: the Control Centre's snapshot and grid ready before the pull */
     if ((!locked || cc_lock_ok) && !CCS.on && !AP.on && !nc_on() &&
-        (!CCS.built || cc_stale || cc_lk != locked || (locked && cc_lv != lock_ver))) {
-        build_cc();
-        cc_stale = 0; cc_lk = locked; cc_lv = lock_ver;
-    }
+        (ccb_next || !CCS.built || cc_stale || cc_lk != locked || (locked && cc_lv != lock_ver))) {
+        if (!ccb_next) { cc_stale = 0; cc_lk = locked; cc_lv = lock_ver; }   /* (a change during the stages: again after) */
+        if (build_cc_step()) return;
+    } else if (ccb_next && !CCS.on) free_cc();     /* not wanted any more (an app needs the room): its parts go, later again */
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
     prep_tree(home.child);                       /* home's pages too (their widgets and app grids, P2s) */
@@ -6295,7 +6395,8 @@ void sh_idle(void)
     tk_layer_prepare(&mark); tk_layer_prepare(&glyph_c); tk_layer_prepare(&glyph_o); tk_layer_prepare(&hint);
 }
 
-int sh_idle_pending(void) { return (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C); }
+int sh_idle_pending(void) { return (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C) ||
+                                   fl_row >= 0 || ccb_next; }   /* cp7c: the sliced flatten, the CC's stages */
 
 int sh_moving(void)
 {
