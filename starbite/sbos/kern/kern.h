@@ -863,8 +863,12 @@ int kmodem_sms_delete_thread(const char *number);   /* the number of messages de
 struct state_buf;
 void kmodem_sms_save(struct state_buf *b);  /* settings.c's save: the messages as "sms.NN" records */
 void kmodem_sms_restore(const uint8_t *half);   /* settings.c's restore: the newest valid half */
+#define KMODEM_APN 1                       /* Settings > Cellular > APN */
+int kmodem_set_apn(const char *apn);       /* [A-Za-z0-9.-] 1..63, "" = "internet"; from the next Cellular on; saved */
+void kmodem_get_apn(char *out, unsigned cap);
 int kmodem_cellular(int on);
 int kmodem_selftest_phase(int *done);  /* next-celltest (unattended data): every 500 ms; *done at the end, 0 = failed */
+void kmodem_selftest_abort(void);      /* next-celltest stopped by a touch or key: Cellular off */
 void kmodem_cell(struct kcell *c);
 struct sbnet;
 struct sbtcp;

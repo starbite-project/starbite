@@ -407,10 +407,13 @@ static void recover(void)
  * operator code and its name never reach the log; the name is for the screen. */
 enum { CS_IDLE, CS_SIM, CS_RADIO, CS_ATTACH, CS_REG, CS_CYCLE_OFF, CS_CYCLE_ON, CS_DEFINE, CS_ACT, CS_IP, CS_UP,
        CS_RETRY, CS_DEACT, CS_DETACH };
-#define CELL_APN "internet"                /* Elisa, DNA, Telia (FI); others: a setting later */
+#define CELL_APN_DEFAULT "internet"        /* Elisa, DNA, Telia (FI) */
+static char cell_apn[64] = CELL_APN_DEFAULT;   /* Settings > Cellular > APN (kmodem_set_apn); the state slot keeps it */
+#define CELL_APN cell_apn
 static int cell_want, cst = KCELL_OFF, cstep = CS_IDLE, c_lf, c_esc, cnet_up, c_check, c_ntp, c_sms_ready;
 static int cell_selftest;                  /* next-celltest: the unattended data self test (kmodem_selftest_phase) */
 static int c_check_ok;                     /* the session's HTTPS check passed */
+static uint32_t c_nitz_seen;               /* the NITZ time already looked at */
 static uint64_t c_ntp_t;
 static uint8_t c_ntp_nonce[8], c_ntp_server[4];
 #define C_NTP_PORT 50124
@@ -585,6 +588,7 @@ static void cell_begin(void)
 {
     c_lf = c_esc = 0;
     c_sms_ready = 0;
+    c_nitz_seen = 0;
     comms_begin();
     cset(KCELL_STARTING, "Starting the modem");
     cgo(CS_SIM);
@@ -596,12 +600,34 @@ static int c_registered(const struct sbm_modem_snap *sn)
     return sn->cs == SBM_REG_HOME || sn->cs == SBM_REG_ROAMING || sn->ps == SBM_REG_HOME || sn->ps == SBM_REG_ROAMING;
 }
 
+/* the network's time (NITZ, MISC 0x0A05): sets the clock only when Starbite OS has none (or only the last known
+ * time); a clock from NTP or the PMIC stays (NTP over mobile data checks it anyway) */
+static void c_nitz(void)
+{
+    const struct sbm_cell_state *cs = &mo.b.cell;
+    if (cs->nitz_gen == c_nitz_seen)
+        return;
+    c_nitz_seen = cs->nitz_gen;
+    if (!cs->have_nitz || !cs->nitz_utc || cs->nitz_utc < 1577836800LL)
+        return;
+    struct sbos_time t;
+    if (clock_now(&t) && !t.approx)
+        return;
+    int was = 0;
+    (void)clock_set_net(cs->nitz_utc, &was);
+    if (was) {
+        wifi_clock_checked_by(3);
+        sb_log("cell: the clock was set from the network's time (NITZ)");
+    }
+}
+
 static void cell_step(void)
 {
     struct sbm_modem_snap sn;
     if (!mo.up)
         return;                             /* down: poll()'s restart (or a stop) decides */
     comms_tick();
+    c_nitz();
     sbm_modem_snapshot(&mo, &sn);
     switch (cstep) {
     case CS_SIM:
@@ -893,7 +919,10 @@ void kmodem_cell(struct kcell *c)
     c->roaming = sn.cs == SBM_REG_ROAMING || sn.ps == SBM_REG_ROAMING;
     if (sn.rat)
         sb_strcpy(c->rat, sizeof(c->rat), sbm_act_name(sn.rat));
-    if (sn.have_plmn && c_registered(&sn)) {
+    if (c_registered(&sn) && mo.b.cell.have_names) {  /* the network's own name (NITZ): the short one fits */
+        const char *nn = mo.b.cell.net_short[0] ? mo.b.cell.net_short : mo.b.cell.net_full;
+        sb_strcpy(c->oper, sizeof(c->oper), nn);
+    } else if (sn.have_plmn && c_registered(&sn)) {
         const char *n = sbm_operator_name(sn.plmn);
         if (n)
             sb_strcpy(c->oper, sizeof(c->oper), n);
@@ -1292,7 +1321,31 @@ static void comms_tick(void)
 #define SOAK_MS 30000U
 static int st_ph, st_round, st_fails, st_pass, st_restarted;
 static uint64_t st_t0, st_tp, st_all;
-static uint32_t st_min = 0xffffffffu, st_max, st_sum, st_n;
+static uint32_t st_min = 0xffffffffu, st_max, st_sum, st_n, st_up_ms[2], st_off_ms;
+static char st_audio[64];                   /* the audio stages, for the summary (a short pmsg tail keeps it) */
+/* no SIM (2026-11-13: the SIM is out for the day): the modem and the call-audio path start and stop twice */
+static int st_nosim, st_hs[2], st_abox_ok[2];
+static char st_aud[2][64];
+
+static void st_audio_snap(int k)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "amp ");
+    ub_s(&u, au_amp == 1 ? "ok" : au_amp == -1 ? "FAILED" : "not run");
+    ub_s(&u, ", codec ");
+    ub_s(&u, au_codec == 1 ? "ok" : au_codec == -1 ? "FAILED" : "not run");
+    ub_s(&u, ", ABOX ");
+    ub_s(&u, au_abox == 1 ? "ok" : au_abox == -1 ? "FAILED" : "not run");
+    ub_s(&u, ", VSS ");
+    ub_s(&u, au_vss ? "started" : "not started");
+    sb_strcpy(st_aud[k], sizeof(st_aud[k]), u.b);
+    if (au_abox == 1)
+        st_abox_ok[k] = 1;
+    int v = abox_vss_ready();
+    if (v && !st_hs[k])
+        st_hs[k] = v;
+}
 
 static void st_line(const char *a, uint64_t ms)
 {
@@ -1306,6 +1359,15 @@ static void st_line(const char *a, uint64_t ms)
 }
 
 static const char *au_words(int v) { return v == 1 ? "ok" : v == -1 ? "FAILED" : "not run"; }
+
+void kmodem_selftest_abort(void)
+{
+    if (!cell_selftest)
+        return;
+    sb_log("selftest: cell: stopped by a touch or key: Cellular off (data off, detach, park)");
+    kmodem_cellular(0);
+    cell_selftest = 0;
+}
 
 int kmodem_selftest_phase(int *done)
 {
@@ -1334,8 +1396,21 @@ int kmodem_selftest_phase(int *done)
         st_ph = 1;
         break;
     case 1:                                 /* data up */
+        if (au_abox)
+            st_audio_snap(st_restarted);    /* before a stop resets it (no SIM: the stop comes after 8 s) */
+        if (cst == KCELL_NO_SIM) {
+            if (!st_nosim)
+                sb_log("selftest: cell: no SIM: the radio test only (the modem and the call-audio path start and "
+                       "stop, twice; no registration, nothing transmitted)");
+            st_nosim = 1;
+            st_tp = now;
+            st_ph = st_restarted ? 9 : 6;
+            st_restarted = 1;
+            break;
+        }
         if (cst == KCELL_DATA) {
             st_line(st_restarted ? "data up again (the restart in one boot) in " : "data up in ", now - st_t0);
+            st_up_ms[st_restarted ? 1 : 0] = (uint32_t)(now - st_t0);
             st_tp = now;
             st_ph = 2;
         } else if (cst == KCELL_FAILED || cst == KCELL_NO_SIM || cst == KCELL_SIM_LOCKED || now - st_t0 > 240000U) {
@@ -1366,6 +1441,7 @@ int kmodem_selftest_phase(int *done)
                 ub_s(&u, ", VSS ");
                 ub_s(&u, au_vss ? "started" : "not started");
                 sb_log(u.b);
+                sb_strcpy(st_audio, sizeof(st_audio), u.b + sizeof("selftest: cell: audio stages (no call, no sound): ") - 1);
             }
             st_round = 0;
             st_tp = now;
@@ -1427,6 +1503,10 @@ int kmodem_selftest_phase(int *done)
         st_ph = ++st_round >= SOAK_N ? 7 : 3;
         break;
     }
+    case 6:                                 /* no SIM: parked; start again after 3 s (the AUD domain's power-on path) */
+        if (!kmodem_on() && now - st_tp > 3000U)
+            st_ph = 0;
+        break;
     case 7:                                 /* Cellular off: deactivate, detach, park */
         sb_log("selftest: cell: Cellular off");
         kmodem_cellular(0);
@@ -1435,8 +1515,10 @@ int kmodem_selftest_phase(int *done)
         break;
     case 8:
         if (cst == KCELL_OFF || cst == KCELL_FAILED || now - st_tp > 30000U) {
-            if (cst == KCELL_OFF && !kmodem_on())
+            if (cst == KCELL_OFF && !kmodem_on()) {
                 st_line("off and parked in ", now - st_tp);
+                st_off_ms = (uint32_t)(now - st_tp);
+            }
             else {
                 sb_log("selftest: cell: FAILED: not off and parked in 30 s; parking");
                 kmodem_stop("self test");
@@ -1452,6 +1534,21 @@ int kmodem_selftest_phase(int *done)
     default: {
         struct ub u;
         ub_init(&u);
+        if (st_nosim) {
+            int ok = st_abox_ok[0] && st_abox_ok[1] && !kmodem_on();
+            ub_s(&u, ok ? "selftest: cell: PASS (no SIM): " : "selftest: cell: FAILED (no SIM): ");
+            for (int k = 0; k < 2; ++k) {
+                ub_s(&u, k ? "; start 2: " : "start 1: ");
+                ub_s(&u, st_aud[k][0] ? st_aud[k] : "audio not reached");
+                ub_s(&u, ", VSS handshake ");
+                ub_s(&u, st_hs[k] == 1 ? "done" : st_hs[k] == -1 ? "TIMED OUT" : "not seen");
+            }
+            ub_s(&u, kmodem_on() ? "; the modem is STILL ON" : "; parked");
+            sb_log(u.b);
+            cell_selftest = 0;
+            *done = 1;
+            return ok;
+        }
         ub_s(&u, st_fails ? "selftest: cell: FAILED: " : "selftest: cell: PASS: ");
         ub_dec(&u, (uint32_t)st_pass);
         ub_s(&u, " HTTPS GETs passed, ");
@@ -1463,6 +1560,14 @@ int kmodem_selftest_phase(int *done)
         ub_s(&u, " max ");
         ub_dec(&u, st_max);
         ub_s(&u, st_restarted ? "; restarted once in this boot" : "; no restart");
+        ub_s(&u, "; data up in ");
+        ub_dec(&u, st_up_ms[0]);
+        ub_s(&u, " / ");
+        ub_dec(&u, st_up_ms[1]);
+        ub_s(&u, " ms; parked in ");
+        ub_dec(&u, st_off_ms);
+        ub_s(&u, " ms; audio: ");
+        ub_s(&u, st_audio[0] ? st_audio : "not reached");
         sb_log(u.b);
         cell_selftest = 0;
         *done = 1;
@@ -1732,6 +1837,8 @@ static void sms_to_store(const struct ksms *k, struct sbm_store_msg *m)
 void kmodem_sms_save(struct state_buf *b)
 {
     static struct sbm_store_msg m;
+    if (!sb_streq(cell_apn, CELL_APN_DEFAULT) && state_add(b, "cell.apn", cell_apn, sb_strlen(cell_apn) + 1) < 0)
+        sb_log("cell: the APN setting did not fit in the slot");
     uint32_t room = SMS_RECS * (STATE_REC_MAX - 8U) * 7U / 8U, need = 0;   /* 1/8 slack for record ends */
     int first = nkmsg;
     while (first > 0) {
@@ -1781,9 +1888,50 @@ void kmodem_sms_save(struct state_buf *b)
     }
 }
 
+static int apn_valid(const char *a)
+{
+    unsigned n = 0;
+    for (; a[n]; ++n) {
+        char c = a[n];
+        if (n >= sizeof(cell_apn) - 1 || !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                                           c == '.' || c == '-'))
+            return 0;
+    }
+    return n > 0;
+}
+
+/* the APN for mobile data and the LTE attach: [A-Za-z0-9.-], 1..63 characters (the builder allows the same set);
+ * "" or 0 = the default "internet". Used from the next Cellular on; saved in the state slot. Never logged. */
+int kmodem_set_apn(const char *apn)
+{
+    if (!apn || !*apn)
+        apn = CELL_APN_DEFAULT;
+    if (!apn_valid(apn))
+        return SBOS_EINVAL;
+    if (!sb_streq(apn, cell_apn)) {
+        sb_strcpy(cell_apn, sizeof(cell_apn), apn);
+        settings_changed();
+        sb_log("cell: the APN was changed (used from the next Cellular on)");
+    }
+    return 0;
+}
+
+void kmodem_get_apn(char *out, unsigned cap)
+{
+    sb_strcpy(out, cap, cell_apn);
+}
+
 void kmodem_sms_restore(const uint8_t *half)
 {
     static struct sbm_store_msg m;
+    {
+        const uint8_t *a = 0;
+        int an = half ? state_find(half, "cell.apn", &a) : 0;
+        if (an > 1 && an <= (int)sizeof(cell_apn) && a && !a[an - 1] && apn_valid((const char *)a)) {
+            sb_strcpy(cell_apn, sizeof(cell_apn), (const char *)a);
+            sb_log("cell: the APN setting restored");
+        }
+    }
     char id[8] = "sms.00";
     int got = 0;
     for (unsigned k = 0; half && k < SMS_RECS; ++k) {
@@ -1833,11 +1981,14 @@ int kmodem_sms_delete(int32_t id) { (void)id; return SBOS_EINVAL; }
 int kmodem_sms_delete_thread(const char *number) { (void)number; return 0; }
 void kmodem_sms_save(struct state_buf *b) { (void)b; }
 void kmodem_sms_restore(const uint8_t *half) { (void)half; }
+int kmodem_set_apn(const char *apn) { (void)apn; return 0; }
+void kmodem_get_apn(char *out, unsigned cap) { sb_strcpy(out, cap, "internet"); }
 
 int kmodem_cellular(int on) { (void)on; return SBOS_EAGAIN; }
 int kmodem_netif(struct sbnet **net, struct sbtcp **tcp) { (void)net; (void)tcp; return 0; }
 void kmodem_cell(struct kcell *c) { memset(c, 0, sizeof(*c)); c->bars = -1; }
 int kmodem_selftest_phase(int *done) { *done = 1; return 1; }
+void kmodem_selftest_abort(void) { }
 #endif
 
 void kmodem_timer(unsigned id)

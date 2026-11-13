@@ -1715,6 +1715,82 @@ static void test_sms_parts(void)
     CHECKEQ(sbm_sms_submit_parts(&pol, "+358401234567", "\xff\xfe", 1, pdu, len, 4), SBM_EINVAL);
 }
 
+static void test_nitz(void)
+{
+    struct sbm_cell_state st;
+    struct sbm_ipc_msg m;
+    static uint8_t d[200];
+    sbm_cell_init(&st);
+    /* NET_IDENTITY, the 149-byte frame (data 142): short "Elisa" in GSM 7-bit packed, full "Testi Verkko \xc3\xa4" in
+     * UCS-2 (made-up names) */
+    memset(d, 0, sizeof(d));
+    memset(&m, 0, sizeof(m));
+    m.cmd = SBM_NET_IDENTITY, m.type = SBM_IPC_NOTI, m.data = d, m.data_len = 142;
+    d[1] = 3;
+    {   /* "Elisa" packed: septets E l i s a */
+        const char *txt = "Elisa";
+        unsigned bits = 0;
+        for (unsigned i = 0; txt[i]; ++i, bits += 7)
+            for (unsigned b = 0; b < 7; ++b)
+                if ((txt[i] >> b) & 1)
+                    d[5 + (bits + b) / 8] |= (uint8_t)(1u << ((bits + b) % 8));
+        d[3] = (uint8_t)((bits + 7) / 8);
+        d[4] = 2;
+    }
+    {
+        const uint16_t u[] = { 'T', 'e', 's', 't', 'i', ' ', 0xe4 };
+        unsigned fo = 5 + 64 + 1;
+        d[fo] = (uint8_t)(2 * 7);
+        d[fo + 1] = 3;
+        for (unsigned i = 0; i < 7; ++i)
+            d[fo + 2 + 2 * i] = (uint8_t)(u[i] >> 8), d[fo + 3 + 2 * i] = (uint8_t)u[i];
+    }
+    CHECKEQ(sbm_cell_update(&st, &m), 1);
+    CHECKEQ(st.have_names, 1);
+    CHECK(!strcmp(st.net_short, "Elisa"));
+    CHECK(!strcmp(st.net_full, "Testi \xc3\xa4"));
+    CHECKEQ(sbm_cell_update(&st, &m), 0);      /* the same names: no change */
+    /* the 69-byte layout (data 62): short only, 8-bit */
+    memset(d, 0, sizeof(d));
+    m.data_len = 62;
+    d[1] = 1, d[3] = 3, d[4] = 1, d[5] = 'A', d[6] = 'B', d[7] = 'C';
+    CHECKEQ(sbm_cell_update(&st, &m), 1);
+    CHECK(!strcmp(st.net_short, "ABC") && st.net_full[0] == 0);
+    m.data_len = 20;                            /* too short for any layout */
+    unsigned bad0 = st.n_bad;
+    CHECKEQ(sbm_cell_update(&st, &m), 0);
+    CHECKEQ(st.n_bad, bad0 + 1);
+    /* MISC_TIME_INFO: 2026-11-12 16:45:30 UTC, +8 quarter hours (UTC+2), DST 0 */
+    uint8_t t[12] = { 1, 1, 26, 11, 12, 16, 45, 30, 8, 0, 0, 0 };
+    m.cmd = SBM_MISC_TIME_INFO, m.type = SBM_IPC_NOTI, m.data = t, m.data_len = 12;
+    CHECKEQ(sbm_cell_update(&st, &m), 1);
+    CHECKEQ(st.nitz_utc, 1794501930LL);   /* 2026-11-12 16:45:30 UTC */
+    CHECKEQ(st.nitz_tz_q, 8);
+    CHECKEQ(st.nitz_gen, 1);
+    t[0] = 5;                                   /* zone only */
+    CHECKEQ(sbm_cell_update(&st, &m), 1);
+    CHECKEQ(st.nitz_utc, 0);
+    t[0] = 1, t[3] = 13;                        /* a bad month */
+    CHECKEQ(sbm_cell_update(&st, &m), 0);
+    t[3] = 2, t[4] = 29, t[2] = 28;             /* 2028-02-29 00:00:00 (a leap day) */
+    t[5] = t[6] = t[7] = 0;
+    CHECKEQ(sbm_cell_update(&st, &m), 1);
+    CHECKEQ(st.nitz_utc, 1835395200LL);
+    m.type = SBM_IPC_RESP;                      /* only the NOTI counts */
+    unsigned g = st.nitz_gen;
+    sbm_cell_update(&st, &m);
+    CHECKEQ(st.nitz_gen, g);
+    /* text codings */
+    char o[16];
+    static const uint8_t odd[] = { 0, 'A', 0 };
+    CHECKEQ(sbm_text_decode(3, odd, 3, o, sizeof(o)), 0);
+    CHECKEQ(o[0], 0);
+    CHECKEQ(sbm_text_decode(9, odd, 3, o, sizeof(o)), SBM_EBADF);
+    static const uint8_t lng[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    CHECKEQ(sbm_text_decode(1, lng, 26, o, sizeof(o)), 0);
+    CHECKEQ(strlen(o), sizeof(o) - 1);
+}
+
 static void test_store(void)
 {
     static uint8_t rec[SBM_STORE_REC];
@@ -2641,6 +2717,7 @@ int main(int argc, char **argv)
     test_sms_parts();
     test_inbox();
     test_store();
+    test_nitz();
     printf("sbm host test: %u checks, %u failed%s\n", checks, fails, radio ? " (with this phone's RADIO image)" : "");
     return fails ? 1 : 0;
 }

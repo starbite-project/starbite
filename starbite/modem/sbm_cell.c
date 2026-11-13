@@ -124,6 +124,59 @@ int sbm_cell_update(struct sbm_cell_state *st, const struct sbm_ipc_msg *m)
         SET(st->have_plmn, 1);
         break;
     }
+    case SBM_NET_IDENTITY: {
+        /* libsec-ril IpcRxNetIdentity: three layouts by frame length (data + 7): < 70, 70..117, >= 118 */
+        if (m->type == SBM_IPC_RESP)
+            break;
+        unsigned fl = n + 7, scap = fl < 70 ? 16 : fl < 118 ? 32 : 64, fcap = fl < 70 ? 32 : 64;
+        unsigned so = 5, fo = 5 + scap + 1;         /* data offsets: short (len at 3, coding 4), full (len, coding) */
+        if (n < fo + 2 + fcap)
+            goto bad;
+        char sh[32], fu[64];
+        sh[0] = fu[0] = 0;
+        if (d[1] & 1)
+            (void)sbm_text_decode(d[4], d + so, d[3] < scap ? d[3] : scap, sh, sizeof(sh));
+        if (d[1] & 2)
+            (void)sbm_text_decode(d[fo + 1], d + fo + 2, d[fo] < fcap ? d[fo] : fcap, fu, sizeof(fu));
+        int diff = 0;
+        for (unsigned i = 0; i < sizeof(sh) && !diff; ++i)
+            diff = st->net_short[i] != sh[i];
+        for (unsigned i = 0; i < sizeof(fu) && !diff; ++i)
+            diff = st->net_full[i] != fu[i];
+        if (diff || !st->have_names) {
+            sbm_memcpy(st->net_short, sh, sizeof(sh));
+            sbm_memcpy(st->net_full, fu, sizeof(fu));
+            st->have_names = sh[0] || fu[0];
+            st->names_gen++;
+            changed = 1;
+        }
+        break;
+    }
+    case SBM_MISC_TIME_INFO: {
+        /* libsec-ril (MISC 0x0A05, NOTI): type (1, 2 the time; 5 the zone only), DST valid, yy mm dd hh mi ss (UTC,
+         * binary), tz (signed quarter hours), DST */
+        if (m->type != SBM_IPC_NOTI)
+            break;
+        if (n < 10 || (d[0] != 1 && d[0] != 2 && d[0] != 5))
+            goto bad;
+        st->nitz_type = d[0];
+        st->nitz_tz_q = (int8_t)d[8];
+        st->nitz_dst = d[1] ? d[9] : 0;
+        st->nitz_utc = 0;
+        if (d[0] != 5) {
+            int y = 2000 + d[2], mo = d[3], dd = d[4];
+            if (mo < 1 || mo > 12 || dd < 1 || dd > 31 || d[5] > 23 || d[6] > 59 || d[7] > 60)
+                goto bad;
+            y -= mo <= 2;
+            int era = y / 400, yoe = y - era * 400, mp = (mo + 9) % 12;
+            int doy = (153 * mp + 2) / 5 + dd - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            st->nitz_utc = ((int64_t)era * 146097 + doe - 719468) * 86400 + d[5] * 3600 + d[6] * 60 + d[7];
+        }
+        st->have_nitz = 1;
+        st->nitz_gen++;
+        changed = 1;
+        break;
+    }
     case SBM_NET_PLMN_SEL:
         if (n < 1)
             goto bad;
