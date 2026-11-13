@@ -598,6 +598,17 @@ int guest_stop(void)
     return -1;
 }
 
+/* cp7j (Track A: HELLO 21 s -> 31 s once the start stopped freezing the UI): the host serves the guest's block
+ * and 9P requests once per main-loop turn, and a self-test film's turns take ~0.5 s, so a booting guest's
+ * synchronous reads each waited a turn. guest_pump serves only those requests (cheap when none wait): call it from
+ * inside long work on the main thread (a frame's compositing, between layers or strips), never from an interrupt
+ * or from inside card I/O. */
+void guest_pump(void)
+{
+    if (!loading && (st == GUEST_STARTING || st == GUEST_RUNNING || st == GUEST_STOPPING))
+        sbg_pump();
+}
+
 void guest_irq(void)
 {
     sbg_doorbell();
@@ -842,6 +853,7 @@ static char typed[96];                      /* the fake terminal: the line being
 static int ntyped, shown_chars;
 
 void guest_init(void) { sb_up = 1; }
+void guest_pump(void) {}
 int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED ? 1 : fake_m3 && st == GUEST_FAILED; }
 /* SBOS_HOST_GUEST=1 (or fail): both guests' files; =app: only the app's */
 int guest_available_mode(int m)
