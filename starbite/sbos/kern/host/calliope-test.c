@@ -1427,6 +1427,25 @@ static void test_probe_order(void)
     }
 }
 
+/* modem-core's guard (abox_vss_started): VSS started on a Calliope snd booted for media: snd's idle-off leaves it */
+static void test_vss_guard(void)
+{
+    snd_setup();
+    CHECK(snd_tone(SND_TONE_TEST) == 0, "vss: tone");
+    polls(800);
+    CHECK(abox_state() == ABOX_ST_READY && F.r_run, "vss: Calliope not up for the tone (state %d)", abox_state());
+    snd_tone_stop();
+    polls(2600);
+    int r = abox_vss_start();
+    CHECK(r == 0 && abox_vss_started(), "vss: START_VSS %d", r);
+    polls(31000);
+    CHECK(abox_state() == ABOX_ST_READY && logged("Calliope left running"), "vss: snd turned off the call's Calliope (%d)",
+          abox_state());
+    CHECK(!snd_busy(), "vss: snd still busy");
+    abox_off();
+    drv_audio_abort();
+}
+
 int main(int argc, char **argv)
 {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
@@ -1445,6 +1464,7 @@ int main(int argc, char **argv)
     test_snd_capture();
     test_snd_probe();
     test_probe_order();
+    test_vss_guard();
     printf("calliope host test: %d checks, %d failed\n", checks, fails);
     free(F.w);
     free(F.rmem);

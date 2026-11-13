@@ -693,6 +693,10 @@ static void cal_release(const char *what)
     if (!G.cal_own || G.ce || G.cc)
         return;
     G.cal_own = 0;
+    if (abox_vss_started()) {               /* the CP's voice path runs on it: Calliope is the modem's now */
+        say("engine: Calliope left running (%s): the call audio (VSS) uses it", what);
+        return;
+    }
     if (abox_state() == ABOX_ST_READY || abox_state() == ABOX_ST_FAILED) {
         cal_dump_off("snd");
         abox_off();
@@ -826,6 +830,11 @@ static void cal_cancel(const char *what)
     if (G.cal_boot)
         cal_unmap();
     G.cal_boot = G.cal_settling = G.cap_want = 0;
+    G.cal_own = 0;
+    if (abox_vss_started()) {
+        say("engine: Calliope's boot for media handed to the call audio (%s)", what);
+        return;
+    }
     if (abox_state() != ABOX_ST_CALL) {
         abox_off();
         say("engine: Calliope's boot for media cancelled (%s)", what);
