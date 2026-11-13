@@ -2220,6 +2220,12 @@ static int aq_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
 {
     if (!is_app("store") || !LST) return 0;
     if ((AQ.app || AQ.cat_on) && !AQ.story && x < 20 && y > SAFE_TOP) return 0;   /* (a back swipe starts there: nothing lights) */
+    if (!aqtg.hidden && y >= TB_Y && y < TB_Y + TB_H && x >= TB_X && x < TB_X + TB_W) {   /* spec 2.1.1: the slot lights */
+        int k = tk_maxi(0, tk_mini(3, (int)((x - TB_X - 4) / TB_TABW)));
+        *r = *g = (tk_rect){ TB_X + 4 + TB_TABW * k, TB_Y + 4, TB_TABW, TB_H - 8 };
+        *rad = (TB_H - 8) / 2; *col = W(.1f);
+        return 1;
+    }
     if (AQ.kb && AQ.tab == AT_SEARCH && !AQ.app && y >= 548) return 0;          /* (the keyboard lights its own keys) */
     if (AQ.story && x >= CONTENT_R - 46 && y < SAFE_TOP + 46) {
         *r = *g = (tk_rect){ CONTENT_R - 34, SAFE_TOP + 2, 34, 34 }; *rad = 17; *col = W(.16f);
