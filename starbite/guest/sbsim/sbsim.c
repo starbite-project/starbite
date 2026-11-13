@@ -41,7 +41,8 @@
 #ifndef SBSIM_BOOT_WARN_MS
 #define SBSIM_BOOT_WARN_MS 0U
 #endif
-enum { F_REPAIR = 1, F_STRICT = 2, F_STUB = 4, F_TERM = 8, F_POPUP = 32, F_BLKTEST = 64, F_V3 = 128, F_RETRY = 256 };
+enum { F_REPAIR = 1, F_STRICT = 2, F_STUB = 4, F_TERM = 8, F_POPUP = 32, F_BLKTEST = 64, F_V3 = 128, F_RETRY = 256,
+       F_FREEZE = 512 };   /* instant start: after the terminal's check, two freeze / thaw cycles, a tap, then the stop */
 /* F_RETRY: a failed run whose M3 cluster is off (a start given up and stopped) is followed by the next run, as the
  * next open on the phone (the verdict stays FAIL: the test reads the lines) */
 
@@ -420,6 +421,9 @@ static void own_check(uint64_t t)
 /* ---- the shim for sbghost ------------------------------------------------------------------------- */
 static void host_log(const char *l) { puts_("sbsim: "); puts_(l); puts_("\n"); }
 static int term_ok_seen, blktest_done, blktest_fail;
+static int frz_logged, thaw_logged;         /* F_FREEZE: sbguest's "freezing" / "thawed" lines seen */
+static uint32_t frz_ok, frz_cycles, frz_quiet, touch0;
+static uint64_t frz_db0;
 static int has(const char *l, const char *w)
 {
     for (; *l; ++l) {
@@ -440,6 +444,8 @@ static void guest_log(const char *l)
         blktest_done |= has(l, "SBBLK-TEST-DONE") | has(l, "V3-TEST-DONE");     /* (v3: the services' tests) */
         blktest_fail |= has(l, "sbblk-test: FAIL") | (has(l, "v3-test: ") && has(l, ": FAIL"));
     }
+    frz_logged |= has(l, "sbguest: freezing");
+    thaw_logged |= has(l, "sbguest: thawed");
     for (const char *p = l; *p; ++p) {      /* the terminal scenario's typed command, run by the guest's shell */
         const char *w = "STARBITE-TERM-OK";
         unsigned i = 0;
@@ -629,6 +635,12 @@ static int run_guest(unsigned run)
                                       "count=16 2>/dev/null; cp /etc/services $HOME/s.tmp && mv $HOME/s.tmp "
                                       "$HOME/s$((i%50)); echo $i > $HOME/n; done) >/dev/null 2>&1 & "
                                       "echo STARBITE-TERM-OK > /dev/kmsg\n";
+#elif defined(SBSIM_TERM_MEM)
+            /* instant start (2026-11-13): the guest's memory with foot, then with a GTK app (the snapshot's size) */
+            static const char cmd[] = "m() { grep -E 'MemTotal|MemFree|MemAvail|^Cached|AnonPages|Shmem:|Slab|KernelStack"
+                                      "|PageTables|Mapped' /proc/meminfo | while read l; do echo \"MEM$1 $l\" > /dev/kmsg;"
+                                      " done; }; m 0; (gnome-calculator >/dev/null 2>&1 &); sleep 9; m 1; "
+                                      "echo STARBITE-TERM-OK > /dev/kmsg\n";
 #else
             static const char cmd[] = "echo STARBITE-TERM-OK > /dev/kmsg\n";
 #endif
@@ -683,12 +695,79 @@ static int run_guest(unsigned run)
                 putu(h->touches_seen);
                 puts_("\n");
                 tstep = 5;
+                if (mf->flags & F_FREEZE) {
+                    tstep = 10;
+                    t_touch = t;
+                    frz_ok = 0;
+                    frz_cycles = 0;
+                    continue;
+                }
 #ifdef SBSIM_TERM_STRESS
                 puts_("sbsim: stress: the writer runs on; no stop (the test kills QEMU: a hard power-off)\n");
                 tstep = 6;
 #else
                 sbg_stop();
 #endif
+            } else if (tstep == 10) {          /* F_FREEZE: ask the freeze */
+                int r = sbg_freeze(1);
+                puts_(r > 0 ? "sbsim: freeze asked\n" : "sbsim: the guest cannot freeze (no SBSHM_CAP_FREEZE)\n");
+                frz_logged = thaw_logged = 0;
+                t_touch = t;
+                tstep = r > 0 ? 11 : 5;
+                if (r <= 0)
+                    sbg_stop();
+            } else if (tstep == 11 && sbg_frozen()) {
+                puts_("sbsim: frozen ");
+                putu(t - t_touch);
+                puts_(" ms after the ask\n");
+                t_touch = t;
+                tstep = 12;
+            } else if (tstep == 12 && t - t_touch >= 1000) {   /* (the freeze's own sync is over by now) */
+                frz_db0 = st.db_from_guest;
+                t_touch = t;
+                tstep = 15;
+            } else if (tstep == 15 && t - t_touch >= 2000) {
+                puts_("sbsim: frozen, then 2 s quiet? doorbells from the guest ");
+                putu(st.db_from_guest - frz_db0);
+                puts_(", its log quiet ");
+                putu(!thaw_logged);
+                puts_("; thaw asked\n");
+                frz_quiet = st.db_from_guest - frz_db0;
+                (void)sbg_freeze(0);
+                t_touch = t;
+                tstep = 13;
+            } else if (tstep == 13 && !sbg_frozen() && thaw_logged) {
+                puts_("sbsim: thawed ");
+                putu(t - t_touch);
+                puts_(" ms after the ask (CPUs back)\n");
+                if (frz_quiet <= 2)
+                    frz_ok++;
+                if (++frz_cycles < 2) {
+                    tstep = 10;
+                } else {
+                    touch0 = h->touches_seen;
+                    sbg_touch(0, SBG_TOUCH_DOWN, (int32_t)mf->surf_w / 2, (int32_t)mf->surf_h / 2);
+                    sbg_touch(0, SBG_TOUCH_UP, (int32_t)mf->surf_w / 2, (int32_t)mf->surf_h / 2);
+                    t_touch = t;
+                    tstep = 14;
+                }
+            } else if (tstep == 14 && (h->touches_seen >= touch0 + 2 || t - t_touch > 5000)) {
+                puts_("sbsim: after the thaws a tap reached sbwl: ");
+                putu(h->touches_seen >= touch0 + 2);
+                puts_("; freeze cycles quiet ");
+                putu(frz_ok);
+                puts_("/2\n");
+                if (h->touches_seen < touch0 + 2 || frz_ok < 2)
+                    damage_bad = 1;          /* (the run fails) */
+                tstep = 5;
+                sbg_stop();
+            } else if (((tstep >= 11 && tstep <= 13) || tstep == 15) && t - t_touch > 20000) {
+                puts_("sbsim: FREEZE STEP TIMED OUT at step ");
+                putu(tstep);
+                puts_("\n");
+                damage_bad = 1;
+                tstep = 5;
+                sbg_stop();
             } else if (tstep == 2 && t - t_touch > 20000) {
                 puts_("sbsim: no STARBITE-TERM-OK from the guest's shell in 20 s\n");
                 tstep = 5;

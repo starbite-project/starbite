@@ -151,10 +151,16 @@ struct sbshm_hdr {
     uint32_t guest_caps;            /* SBSHM_CAP_* (was pad1[0]; 0 from an older guest), set before HELLO */
     uint32_t guest_rot;             /* the quarter turns (SBG_MSG_ROTATE's a) of the frame at surf_seq: the host
                                      * turns its own chrome when this matches what it asked (was pad1[1]) */
-    uint32_t pad1[13];
+    /* instant start (2026-11-13; were pad1[2..3]): Linux stays resident and freezes itself while hidden */
+    uint32_t host_freeze;           /* written by the HOST: 1 freeze (then the doorbell), 0 run (then the doorbell).
+                                     * Only with SBSHM_CAP_FREEZE. A message other than SCREEN / FOCUS clears it. */
+    uint32_t guest_frozen;          /* written by the GUEST (sbguest.ko): 1 from "about to suspend" until thawed and
+                                     * its CPUs back; the host's doorbell wakes it (IRQF_NO_SUSPEND) */
+    uint32_t pad1[11];
 };
 /* hdr.guest_caps */
 #define SBSHM_CAP_ROTATE 1U         /* SBG_MSG_ROTATE: landscape apps (cp7) */
+#define SBSHM_CAP_FREEZE 2U         /* host_freeze: suspend-to-idle with CPUs 1..n offline (sbguest.ko, CONFIG_SUSPEND) */
 
 /* ---- damage per row (guestd since 2026-11-09) ----------------------------------------------------------
  * row_seq[y] = the surf_seq of the frame in which surface row y last changed. The guest writes the rows of a

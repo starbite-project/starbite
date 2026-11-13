@@ -76,7 +76,7 @@ if [ "${GUEST:-0}" = 1 ]; then
     targets="Image modules"                 # modules: Module.symvers for sbguest.ko against this tree
     out=$WORK/Image-guest
 fi
-time make -s -j"$(nproc)" O="$K" $targets 2>&1 | grep -v 'warning: no previous prototype\|^ *[0-9]* | \|^ *| *\^' || true
+time make -s -j"${JOBS:-$(nproc)}" O="$K" $targets 2>&1 | grep -v 'warning: no previous prototype\|^ *[0-9]* | \|^ *| *\^' || true
 cp "$K/arch/arm64/boot/Image" "$out"
 for prop in starbite,shared-distributor starbite,cpu-on-trampoline; do
     grep -q "$prop" "$out" || { echo "build-patched: the Image lacks $prop"; exit 1; }

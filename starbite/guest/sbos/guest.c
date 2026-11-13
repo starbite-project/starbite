@@ -127,6 +127,10 @@ void guest_keep(int on)
     if (kept && !on && !shown)
         t_hidden = sb_ms();                 /* the 60 s from now (an install that ran for minutes) */
     kept = on ? 1 : 0;
+#ifndef SB_HOST
+    if (on && st == GUEST_RUNNING)
+        (void)sbg_freeze(0);                /* instant start: the App Store holds it: thawed */
+#endif
 }
 void guest_apps(int n)
 {
@@ -136,14 +140,24 @@ void guest_apps(int n)
 }
 /* the idle stop (guest_timer, real and fake): hidden 60 s, or the screen off 60 s; with Linux apps on cards (v3) not for
  * being hidden, and the screen off 30 min; never while kept (the App Store, a package operation) */
+/* instant start (2026-11-13): a guest that can freeze (SBSHM_CAP_FREEZE) is frozen instead of stopped, sooner
+ * (hidden 10 s, the screen off 10 s; with Linux apps on cards the screen off 30 s), and stopped only after
+ * GUEST_FROZEN_STOP_MS frozen */
+#define IDLE_FREEZE_MS 10000U
+#define IDLE_FREEZE_APPS_MS 30000U
+#define GUEST_FROZEN_STOP_MS (6U * 60U * 60U * 1000U)
+static int idle_due(uint64_t now, uint64_t hide_ms, uint64_t off_ms);
 static int idle_stop_due(uint64_t now)
+{
+    return idle_due(now, IDLE_STOP_MS, apps ? GUEST_APPS_SCREEN_OFF_MS : IDLE_STOP_MS);
+}
+static int idle_due(uint64_t now, uint64_t hide_ms, uint64_t off)
 {
     if (kept)
         return 0;
-    uint64_t off = apps ? GUEST_APPS_SCREEN_OFF_MS : IDLE_STOP_MS;
     int busy = t_busy && now - t_busy < IDLE_STOP_MS;
     if (busy && (screen || !t_screen_off || now - t_screen_off < GUEST_BUSY_SCREEN_OFF_MS)) {
-        if (!busy_said && ((!apps && !shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
+        if (!busy_said && ((!apps && !shown && t_hidden && now - t_hidden > hide_ms) ||
                            (!screen && t_screen_off && now - t_screen_off > off))) {
             busy_said = 1;                  /* once per busy stretch: the idle stop waits */
             sb_log("guest: Linux is busy (a job runs): the idle stop waits");
@@ -151,13 +165,15 @@ static int idle_stop_due(uint64_t now)
         return 0;
     }
     busy_said = 0;
-    return (!apps && !shown && t_hidden && now - t_hidden > IDLE_STOP_MS) ||
+    return (!apps && !shown && t_hidden && now - t_hidden > hide_ms) ||
            (!screen && t_screen_off && now - t_screen_off > off);
 }
 
 #ifndef SB_HOST
 /* ===================================== the guest (phone, QEMU) ===================================== */
 static uint64_t t_busy_win, busy_sectors;    /* the busy sample's window (idle_stop_due) */
+static int frz;                             /* instant start: the freeze asked (until host_freeze goes 0) */
+static uint64_t t_frz;
 static uint64_t ms(void) { return sb_ms(); }
 static void host_log(const char *l)
 {
@@ -514,6 +530,7 @@ static int load_step(void)
         stage = "";
         t_go = 0;
         ls_k = 0;
+        frz = 0;
         pump_reads = pump_sectors = pump_spent = 0;
         ls_blk0 = sbg_stats()->blk_reads;
         cfg_init();                         /* this mode's surface */
@@ -810,7 +827,23 @@ void guest_timer(unsigned id)
             busy_sectors = sec;
             t_busy_win = now;
         }
-        if (idle_stop_due(now)) {
+        volatile struct sbshm_hdr *fh = sbg_hdr();
+        if (frz && !fh->host_freeze) {      /* thawed (shown, a message for Linux, the App Store): freeze again later */
+            frz = 0;
+            t_hidden = shown ? 0 : now;
+            arm(snd_fast ? 5 : shown ? 10 : 50);
+        }
+        if (!frz && (fh->guest_caps & SBSHM_CAP_FREEZE) &&
+            idle_due(now, IDLE_FREEZE_MS, apps ? IDLE_FREEZE_APPS_MS : IDLE_FREEZE_MS) && sbg_freeze(1) > 0) {
+            frz = 1;
+            t_frz = now;
+            sb_log(shown ? "guest: the screen off: freezing Linux (it stays resident; the next open thaws it)" :
+                           "guest: hidden: freezing Linux (it stays resident; the next open thaws it)");
+            arm(200);                       /* only the rings' service while frozen */
+        } else if (frz && now - t_frz > GUEST_FROZEN_STOP_MS) {
+            sb_log("guest: frozen for 6 h: stopping (the M3 cluster off)");
+            guest_stop();
+        } else if (!(fh->guest_caps & SBSHM_CAP_FREEZE) && idle_stop_due(now)) {
             sb_log(apps ? "guest: the screen off for 30 min: stopping (the M3 cluster off)" :
                           "guest: unused for 60 s: stopping (the M3 cluster off)");
             guest_stop();
@@ -823,6 +856,8 @@ void guest_show(int on)
     shown = on ? 1 : 0;
     t_hidden = on ? 0 : sb_ms();
     if (st == GUEST_RUNNING) {
+        if (on)
+            (void)sbg_freeze(0);            /* instant start: shown: thawed (its last frame is in the surface already) */
         sbg_send(SBG_MSG_FOCUS, (uint32_t)shown, 0);
         arm(snd_fast ? 5 : shown ? 10 : 50);
     }
