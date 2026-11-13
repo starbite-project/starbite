@@ -977,10 +977,12 @@ static const ecard_t EC[8] = {
     { "sun", "Sun", 0, "sun" },
     { "guide", "Survival Guide", "First aid, water, shelter, signals: offline", "guide" },
     { "compass", "Compass / Level", "Heading, level and steps: live from the sensors", "compass" } };
-static void ec_card(dc *d, int i, float top)
+/* cp7i: a card in two parts (0 its glass, 1 its icon and words; -1 both): sv_idle makes one an idle turn */
+static void ec_card_part(dc *d, int i, float top, int part)
 {
     /* P3i: no blur of the layer under each card (only the card above's shadow: ~200 ms for nothing seen) */
-    d_glass(d, CARD_X, top, CARD_W, 68, 26, 0, 1);
+    if (part <= 0) d_glass(d, CARD_X, top, CARD_W, 68, 26, 0, 1);
+    if (!part) return;
     if (!sv_tile(d, EC[i].icon, CARD_ICON, top + 11, 46)) d_icon(d, EC[i].icon, CARD_ICON, top + 11, 1);
     /* b: 19 / 800 / -.5, line-height 1.1 (half-leading floored); .sub 13.5, .82 */
     d_text(d, TK_IT700, 19, CARD_TX, top + 12.55f + tk_floorf(tk_ascent(TK_IT700, PT(19)) / TK_PT + .5f), EC[i].t, 0, 0, INK, 0);
@@ -990,6 +992,7 @@ static void ec_card(dc *d, int i, float top)
     d_text(d, TK_IT400, 13.5f, CARD_TX, top + 37.44f + tk_floorf(tk_ascent(TK_IT400, PT(13.5f)) / TK_PT + .5f), sub, 0, 0, W(.82f), 0);
     d_icon(d, "chev", CARD_CHEV, top + 27, 1);
 }
+static void ec_card(dc *d, int i, float top) { ec_card_part(d, i, top, -1); }
 /* (the first four cards in one layer, each card's backdrop what is drawn before it, as in the list; then Exit, then
  * the layers of cards 4..7: B6's ep_card, a piece at a time, below set_emergency) */
 static void free_ecards(void) { for (int i = 0; i < NEC; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } ec_next = 8; }
