@@ -116,6 +116,13 @@ static NTSTATUS NewAllocation(MW_ADAPTER *A, const MW_ALLOCATION_INFO *In, DXGK_
     Out->AllocationPriority = D3DDDI_ALLOCATIONPRIORITY_NORMAL;
     Out->Flags.Value = 0;
     Out->Flags.CpuVisible = TRUE;
+    /* T57: cached pages for a CPU-read GPU buffer. DXGK_ALLOCATIONINFOFLAGS.Cached in a segment that is not cache
+     * coherent: VidMm flushes the CPU caches when it pages the allocation; after that the GPU writes past them, and
+     * the reader cleans + invalidates first (MW_ESCAPE_SB_CACHE). Never for write-only allocations (the docs). */
+    if (In->Flags & MW_ALLOC_CPU_CACHED) {
+        Out->Flags.Cached = TRUE;
+        InterlockedIncrement(&A->CachedAllocs);
+    }
     return STATUS_SUCCESS;
 }
 

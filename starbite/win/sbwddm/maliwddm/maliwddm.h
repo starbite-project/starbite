@@ -315,6 +315,9 @@ struct _MW_ADAPTER {
      * a whole frame, so the panel stayed black around them. A real scanout shows the scanned primary's pages:
      * the refresh copies ScanAlloc to the framebuffer whenever work completed since the last refresh. */
     ULONG PresentFlipFlag, PresentBltFlag, PresentFillFlag, PresentOtherFlag;
+    /* T57: cached CPU-read allocations and MW_ESCAPE_SB_CACHE */
+    LONG CachedAllocs, CacheOps, CacheOpsNotCached, CacheOpFails;
+    LONG64 CacheOpBytes, CacheOp100ns;
     ULONG PrimaryBltsToScan, PrimaryBltsOther;
     ULONG Refreshes, RefreshSkipsBlack, RefreshSkipsNoScan, RefreshUsMax, ScanContent;
     ULONG PresentLogged;
@@ -485,6 +488,7 @@ DXGKDDI_CLOSEALLOCATION MwCloseAllocation;
 DXGKDDI_BUILDPAGINGBUFFER MwBuildPagingBuffer;
 NTSTATUS MwQuerySegment(MW_ADAPTER *A, const DXGKARG_QUERYADAPTERINFO *Info);
 NTSTATUS MwEscapeAllocInfo(MW_ADAPTER *A, const DXGKARG_ESCAPE *Esc, MW_ESCAPE_ALLOC_INFO_DATA *D);
+NTSTATUS MwEscapeCache(MW_ADAPTER *A, const DXGKARG_ESCAPE *Esc, MW_ESCAPE_SB_CACHE_DATA *D);   /* T57 */
 
 /* command.c: devices, contexts, render, submission, fences */
 DXGKDDI_CREATEDEVICE MwCreateDevice;

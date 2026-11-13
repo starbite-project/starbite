@@ -25,6 +25,9 @@ typedef unsigned __int64 mw_u64;
 /* Allocation private data (D3DDDI_ALLOCATIONINFO.pPrivateDriverData). */
 #define MW_ALLOC_NOEXEC         0x1     /* not shader code: may lie anywhere, XN */
 #define MW_ALLOC_PRIMARY        0x2     /* scan-out capable (step d) */
+/* T57 (docs/WIN11-GPU.md 6.62): a GPU-written buffer the CPU reads (the GL ICD's window back buffers): its pages are
+ * cached (DXGK_ALLOCATIONINFOFLAGS.Cached), and the reader drops the stale lines first (MW_ESCAPE_SB_CACHE). */
+#define MW_ALLOC_CPU_CACHED     0x4
 
 typedef struct _MW_ALLOCATION_INFO {
     mw_u32 Version;                     /* MW_ABI_VERSION */
@@ -64,6 +67,19 @@ typedef struct _MW_ESCAPE_SB_RATES_DATA {
     mw_u64 GpuBusy100ns, PresentWait100ns, PresentCpu100ns, Now100ns;
     mw_u32 ThermalHolds, Reserved;
 } MW_ESCAPE_SB_RATES_DATA;
+/* T57: cache maintenance of a cached allocation's CPU view (MW_ALLOC_CPU_CACHED), done by the KMD because the
+ * GL ICD may run as emulated x64 and Windows does not let user mode run DC CIVAC: clean + invalidate every line of
+ * [Offset, Offset + Size) of the allocation (Op 1 = clean + invalidate, before the CPU reads what the GPU wrote;
+ * Op 2 = clean, after the CPU wrote; both are done as clean + invalidate). Result: 0 done, 1 not cached (nothing to
+ * do), 2 not resident, 3 no CPU view, 4 bad range. */
+#define MW_ESCAPE_SB_CACHE      0x5B03
+typedef struct _MW_ESCAPE_SB_CACHE_DATA {
+    mw_u32 Code;                        /* MW_ESCAPE_SB_CACHE */
+    mw_u32 hAllocation;                 /* in: D3DKMT allocation handle */
+    mw_u64 Offset, Size;                /* in: bytes */
+    mw_u32 Op;                          /* in */
+    mw_u32 Result;                      /* out */
+} MW_ESCAPE_SB_CACHE_DATA;
 typedef struct _MW_ESCAPE_SB_NOTE_DATA {
     mw_u32 Code;                        /* MW_ESCAPE_SB_NOTE */
     mw_u32 Id;                          /* < 64 */

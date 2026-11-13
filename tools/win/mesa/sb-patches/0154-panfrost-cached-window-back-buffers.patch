@@ -1,0 +1,280 @@
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -406,6 +406,9 @@
+    case MALIKM_NR_SYNCOBJ_SIGNAL:
+       extra = (size_t)((const struct drm_syncobj_array *)arg)->count_handles * 4;
+       break;
++   case MALIKM_NR_PANFROST_SYNC_BO:   /* sb-patches/0154 */
++      extra = (size_t)((const struct drm_panfrost_sync_bo *)arg)->op_count * sizeof(struct drm_panfrost_bo_sync_op);
++      break;
+    }
+ 
+    size_t len = sizeof(MALIKM_DRM_HEADER) + size + extra;
+@@ -454,6 +457,13 @@
+       memcpy(body + size, (void *)(uintptr_t)s->handles, extra);
+       break;
+    }
++   case MALIKM_NR_PANFROST_SYNC_BO: {
++      const struct drm_panfrost_sync_bo *s = arg;
++      ((struct drm_panfrost_sync_bo *)body)->ops = size;
++      if (extra)
++         memcpy(body + size, (void *)(uintptr_t)s->ops, extra);
++      break;
++   }
+    }
+ 
+    int ret = call(fd, IOCTL_MALIKM_DRM, buf, (DWORD)len);
+@@ -1738,6 +1748,10 @@
+       MW_ALLOCATION_INFO pi = {0};
+       pi.Version = MW_ABI_VERSION;
+       pi.Flags = (a->flags & PANFROST_BO_NOEXEC) ? MW_ALLOC_NOEXEC : 0;
++      /* sb-patches/0154: a CPU-read buffer (Panfrost's WB_MMAP: the GL ICD's window back buffers) gets cached pages;
++       * the reader invalidates through MW_ESCAPE_SB_CACHE (SYNC_BO below) */
++      if ((a->flags & PANFROST_BO_WB_MMAP) && !(a->flags & PANFROST_BO_HEAP))
++         pi.Flags |= MW_ALLOC_CPU_CACHED;
+       pi.Size = sz;
+       D3DDDI_ALLOCATIONINFO ai = {0};
+       ai.pPrivateDriverData = &pi;
+@@ -1759,6 +1773,16 @@
+          sb_next.armed = 0;
+       }
+       int created = w_create_res(d, &ai, hres) >= 0;
++      if (!created && (pi.Flags & MW_ALLOC_CPU_CACHED)) {
++         /* sb-patches/0154: VidMm may refuse cached pages: write-combined as before */
++         static int said;
++         if (!said++)
++            fprintf(stderr, "sbumd: a cached allocation (%llu KiB) was refused (0x%08lx): write-combined\n",
++                    (unsigned long long)(sz >> 10), (unsigned long)sb_alloc_hr);
++         pi.Flags &= ~MW_ALLOC_CPU_CACHED;
++         ai.hAllocation = 0;
++         created = w_create_res(d, &ai, hres) >= 0;
++      }
+       if (!created && d->dead_n) {
+          /* sb-patches/0125: closed allocations still count against the segment until destroyed (struct wdead).
+           * Mesa's answer to a failed allocation is to empty its BO cache and try again, which here only moves
+@@ -1846,6 +1870,36 @@
+    case MALIKM_NR_PANFROST_MADVISE:
+       ((struct drm_panfrost_madvise *)b)->retained = 1;
+       return 0;
++   case MALIKM_NR_PANFROST_SYNC_BO: {
++      /* sb-patches/0154: cache maintenance of cached (WB_MMAP) BOs, by the KMD (MW_ESCAPE_SB_CACHE): Windows has no
++       * user-mode DC CIVAC, and an x64 ICD runs emulated. Every op is clean + invalidate. */
++      struct drm_panfrost_sync_bo *a = (void *)b;
++      /* the ops follow the struct (drmIoctl inlined them; size is the struct's own) */
++      if (a->ops != size || a->op_count > 4096)
++         return -MK_EINVAL;
++      const struct drm_panfrost_bo_sync_op *op = (const void *)(b + a->ops);
++      static int kmd_old;
++      for (uint32_t i = 0; i < a->op_count && !kmd_old; i++) {
++         struct wbo *bo = wddm_bo(d, op[i].handle);
++         if (!bo || bo->kind == 2)
++            continue;
++         MW_ESCAPE_SB_CACHE_DATA c = {0};
++         c.Code = MW_ESCAPE_SB_CACHE;
++         c.hAllocation = bo->h;
++         c.Offset = op[i].offset;
++         c.Size = op[i].size;
++         c.Op = op[i].type == PANFROST_BO_SYNC_CPU_CACHE_FLUSH ? 2 : 1;
++         if (w_escape(d, &c, sizeof(c)) < 0) {
++            kmd_old = 1;   /* a KMD without MW_ESCAPE_SB_CACHE: it made no cached pages either */
++            fprintf(stderr, "sbumd: the KMD does not do MW_ESCAPE_SB_CACHE: no cache maintenance\n");
++         } else if (c.Result >= 2) {
++            static unsigned fails;
++            if (fails++ < 4)
++               fprintf(stderr, "sbumd: cache maintenance of bo %u failed (result %u)\n", op[i].handle, c.Result);
++         }
++      }
++      return 0;
++   }
+    case MALIKM_NR_PANFROST_WAIT_BO: {
+       /* T15: the submission that last named this BO, not everything: the user's DWM made 19,134 waits for
+        * 17,386 submissions, each one draining the GPU, Mesa's zero-timeout "is it idle?" (its BO cache)
+--- a/include/win32-compat/malikm_ioctl.h
++++ b/include/win32-compat/malikm_ioctl.h
+@@ -63,6 +63,7 @@
+ #define MALIKM_NR_PANFROST_GET_PARAM    0x44
+ #define MALIKM_NR_PANFROST_GET_BO_OFFSET 0x45
+ #define MALIKM_NR_PANFROST_MADVISE      0x48
++#define MALIKM_NR_PANFROST_SYNC_BO      0x4c   /* sb-patches/0154 */
+ /* Not DRM: a sync file has no Windows equivalent, so the shim keeps one as
+  * the fence's sequence number and these move it in and out of a syncobj. */
+ #define MALIKM_NR_SYNCOBJ_EXPORT_SEQ    0xF0
+--- a/include/win32-compat/maliwddm_abi.h
++++ b/include/win32-compat/maliwddm_abi.h
+@@ -25,6 +25,19 @@
+ /* Allocation private data (D3DDDI_ALLOCATIONINFO.pPrivateDriverData). */
+ #define MW_ALLOC_NOEXEC         0x1     /* not shader code: may lie anywhere, XN */
+ #define MW_ALLOC_PRIMARY        0x2     /* scan-out capable (step d) */
++/* T57 (sb-patches/0154): a GPU-written buffer the CPU reads (the GL ICD's window back buffers): cached pages
++ * (DXGK_ALLOCATIONINFOFLAGS.Cached); the reader drops the stale lines first (MW_ESCAPE_SB_CACHE) */
++#define MW_ALLOC_CPU_CACHED     0x4
++/* T57: the KMD cleans + invalidates [Offset, Offset + Size) of a cached allocation's lines (Result: 0 done, 1 not
++ * cached, 2 not resident, 3 no CPU view, 4 bad range); an older KMD answers STATUS_NOT_SUPPORTED */
++#define MW_ESCAPE_SB_CACHE      0x5B03
++typedef struct _MW_ESCAPE_SB_CACHE_DATA {
++    mw_u32 Code;
++    mw_u32 hAllocation;
++    mw_u64 Offset, Size;
++    mw_u32 Op;
++    mw_u32 Result;
++} MW_ESCAPE_SB_CACHE_DATA;
+ 
+ typedef struct _MW_ALLOCATION_INFO {
+     mw_u32 Version;                     /* MW_ABI_VERSION */
+--- a/src/gallium/drivers/panfrost/pan_bo.h
++++ b/src/gallium/drivers/panfrost/pan_bo.h
+@@ -38,6 +38,9 @@
+  * PAN_BO_SHARED if the BO has not been exported yet */
+ #define PAN_BO_SHAREABLE (1 << 5)
+ 
++/* Starbite (sb-patches/0154): CPU-read, GPU-written: cached CPU mapping (WB_MMAP), synced on map/unmap */
++#define PAN_BO_SB_CPU_CACHED (1 << 6)
++
+ /* GPU access flags */
+ 
+ /* BO is either shared (can be accessed by more than one GPU batch) or private
+--- a/src/gallium/drivers/panfrost/pan_bo.c
++++ b/src/gallium/drivers/panfrost/pan_bo.c
+@@ -46,6 +46,8 @@
+       kmod_bo_flags |= PAN_KMOD_BO_FLAG_ALLOC_ON_FAULT;
+    if (flags & PAN_BO_INVISIBLE)
+       kmod_bo_flags |= PAN_KMOD_BO_FLAG_NO_MMAP;
++   if (flags & PAN_BO_SB_CPU_CACHED)   /* sb-patches/0154 */
++      kmod_bo_flags |= PAN_KMOD_BO_FLAG_WB_MMAP;
+ 
+    return kmod_bo_flags;
+ }
+--- a/src/gallium/drivers/panfrost/pan_device.c
++++ b/src/gallium/drivers/panfrost/pan_device.c
+@@ -33,7 +33,13 @@
+ {
+    dev->memctx = memctx;
+ 
++#ifdef _WIN32
++   /* sb-patches/0154: cache maintenance of WB_MMAP BOs goes through the shim's SYNC_BO (the KMD): no user-mode
++    * DC CIVAC on Windows, and the x64 ICD runs emulated */
++   dev->kmod.dev = pan_kmod_dev_create(fd, PAN_KMOD_DEV_FLAG_OWNS_FD | PAN_KMOD_DEV_FLAG_MMAP_SYNC_THROUGH_KERNEL, NULL);
++#else
+    dev->kmod.dev = pan_kmod_dev_create(fd, PAN_KMOD_DEV_FLAG_OWNS_FD, NULL);
++#endif
+    if (!dev->kmod.dev) {
+       close(fd);
+       return -1;
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -1095,6 +1095,7 @@
+    return tmp.plane.layout.data_size_B <= memory;
+ }
+ 
++extern int panfrost_sb_cached_display_targets;   /* sb-patches/0154 */
+ static struct pipe_resource *
+ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
+                                        const struct pipe_resource *template,
+@@ -1207,6 +1208,10 @@
+       /* If the resource is never exported, we can make the BO private. */
+       if (template->bind & PIPE_BIND_SHARED)
+          flags |= PAN_BO_SHAREABLE;
++      /* sb-patches/0154: the GL ICD's window back buffers, read by the CPU every present: cached pages */
++      if ((template->bind & PIPE_BIND_DISPLAY_TARGET) && !(template->bind & PIPE_BIND_SHARED) &&
++          p_atomic_read(&panfrost_sb_cached_display_targets))
++         flags |= PAN_BO_SB_CPU_CACHED;
+ 
+       char *res_label =
+          panfrost_resource_new_label(so, so->image.props.modifier , NULL);
+@@ -1876,11 +1881,22 @@
+                transfer->base.box.x, transfer->base.box.width);
+       }
+ 
+-      return bo->ptr.cpu + rsrc->plane.layout.slices[level].offset_B +
+-             box->z * transfer->base.layer_stride +
+-             box_blocks.y *
+-                rsrc->plane.layout.slices[level].tiled_or_linear.row_stride_B +
+-             box_blocks.x * bytes_per_block;
++      {
++         uint64_t off = rsrc->plane.layout.slices[level].offset_B + box->z * transfer->base.layer_stride +
++                        box_blocks.y * rsrc->plane.layout.slices[level].tiled_or_linear.row_stride_B +
++                        box_blocks.x * bytes_per_block;
++         /* sb-patches/0154: a cached (WB_MMAP) BO the GPU wrote: drop the CPU's stale lines before reading */
++         if ((usage & PIPE_MAP_READ) && (bo->kmod_bo->flags & PAN_KMOD_BO_FLAG_WB_MMAP)) {
++            uint64_t len = (uint64_t)(box->depth - 1) * transfer->base.layer_stride +
++                           (uint64_t)(box_blocks.height - 1) *
++                              rsrc->plane.layout.slices[level].tiled_or_linear.row_stride_B +
++                           (uint64_t)box_blocks.width * bytes_per_block;
++            pan_kmod_queue_bo_map_sync(bo->kmod_bo, off, bo->ptr.cpu + off, len,
++                                       PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH_AND_INVALIDATE);
++            pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
++         }
++         return bo->ptr.cpu + off;
++      }
+    }
+ }
+ 
+@@ -2412,6 +2428,14 @@
+    if (transfer->usage & PIPE_MAP_WRITE)
+       pan_crc_state_invalidate(&prsrc->crc_state);
+ 
++   /* sb-patches/0154: the CPU wrote a cached (WB_MMAP) BO: clean its lines before the GPU reads it */
++   if ((transfer->usage & PIPE_MAP_WRITE) && !trans->staging.rsrc && prsrc->bo &&
++       (prsrc->bo->kmod_bo->flags & PAN_KMOD_BO_FLAG_WB_MMAP)) {
++      pan_kmod_queue_bo_map_sync(prsrc->bo->kmod_bo, 0, prsrc->bo->ptr.cpu, panfrost_bo_size(prsrc->bo),
++                                 PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH);
++      pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
++   }
++
+    /* AFBC/AFRC will use a staging resource. `initialized` will be set when
+     * the fragment job is created; this is deferred to prevent useless surface
+     * reloads that can cascade into DATA_INVALID_FAULTs due to reading
+@@ -2857,6 +2881,9 @@
+ /* Starbite (sb-patches/0153, docs/WIN11-GPU.md 6.60): the CPU range of a resource's BO. wgl's async present checks
+  * that a READ map of a window's back buffer points into it (the BO itself, linear: no staging copy), so the pointer
+  * stays valid after the unmap while the resource is referenced. */
++/* sb-patches/0154: set by the GL ICD (wgl.c): window back buffers (DISPLAY_TARGET) get cached pages */
++int panfrost_sb_cached_display_targets;
++
+ bool panfrost_sb_bo_cpu_range(struct pipe_resource *p, const uint8_t **base, size_t *size);
+ bool
+ panfrost_sb_bo_cpu_range(struct pipe_resource *p, const uint8_t **base, size_t *size)
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -76,6 +76,7 @@
+ #include "util/xmlconfig.h"
+ #include "util/u_inlines.h"
+ #include "util/format/u_format.h"
++extern int panfrost_sb_cached_display_targets;   /* sb-patches/0154, pan_resource.c */
+ int malikm_open(void);
+ void glsl_type_singleton_init_or_ref(void);
+ static const driOptionDescription wgl_pan_driconf[] = {
+@@ -98,6 +99,16 @@
+       glsl_type_singleton_init_or_ref();
+       driParseOptionInfo(&wgl_pan_info, wgl_pan_driconf, ARRAY_SIZE(wgl_pan_driconf));
+    }
++   /* sb-patches/0154: window back buffers in cached pages (the present reads them at cached speed after a cache
++    * invalidate by the KMD) when SB_GL_CACHED=1 or C:\ProgramData\Starbite\glcached exists */
++   {
++      const char *e = getenv("SB_GL_CACHED");
++      int on = e ? e[0] == '1'
++                 : GetFileAttributesA("C:\\ProgramData\\Starbite\\glcached") != INVALID_FILE_ATTRIBUTES;
++      panfrost_sb_cached_display_targets = on;
++      fprintf(stderr, "sbumd: gl present: cached back buffers %s (%s)\n", on ? "on" : "off",
++              e ? "SB_GL_CACHED" : "C:\\ProgramData\\Starbite\\glcached");
++   }
+    struct pipe_screen *screen = panfrost_drm_screen_create(fd, &config);
+    _close(fd); /* the screen keeps its own duplicate */
+    return screen;
+@@ -449,12 +460,14 @@
+ {
+    int on = p_atomic_read(&wgl_pan_async_on);
+    if (on < 0) {
++      /* sb-patches/0154: on by default since T55 (GD menu 13.9 -> 18.9 fps); off with SB_GL_ASYNC=0 or the file
++       * C:\ProgramData\Starbite\glsync */
+       const char *env = getenv("SB_GL_ASYNC");
+       on = env ? env[0] == '1'
+-               : GetFileAttributesA("C:\\ProgramData\\Starbite\\glasync") != INVALID_FILE_ATTRIBUTES;
++               : GetFileAttributesA("C:\\ProgramData\\Starbite\\glsync") == INVALID_FILE_ATTRIBUTES;
+       p_atomic_set(&wgl_pan_async_on, on);
+       fprintf(stderr, "sbumd: gl present: async %s (%s)\n", on ? "on" : "off",
+-              env ? "SB_GL_ASYNC" : "C:\\ProgramData\\Starbite\\glasync");
++              env ? "SB_GL_ASYNC" : "C:\\ProgramData\\Starbite\\glsync");
+    }
+    return on;
+ }

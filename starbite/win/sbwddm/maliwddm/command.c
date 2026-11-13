@@ -362,6 +362,55 @@ static void InvalidateRect(const UCHAR *Base, LONG Pitch, LONG L, LONG T, LONG R
     __asm__ volatile("dsb sy" : : : "memory");
 }
 
+/* T57 (MW_ESCAPE_SB_CACHE): clean + invalidate a byte range of a cached allocation (MW_ALLOC_CPU_CACHED), through
+ * the KMD's cached view of its pages, before the UMD reads what the GPU wrote there (or after it wrote). Cache
+ * maintenance by VA acts on the physical lines, so the UMD's own cached mapping of the same pages sees memory next.
+ * PASSIVE_LEVEL (an escape), in the caller's process. */
+NTSTATUS MwEscapeCache(MW_ADAPTER *A, const DXGKARG_ESCAPE *Esc, MW_ESCAPE_SB_CACHE_DATA *D)
+{
+    DXGKARGCB_GETHANDLEDATA get = {0};
+    MW_ALLOCATION *alloc;
+
+    if (Esc->hDevice == NULL)
+        return STATUS_INVALID_PARAMETER;
+    get.hObject = (D3DKMT_HANDLE)D->hAllocation;
+    get.Type = DXGK_HANDLE_ALLOCATION;
+    alloc = (MW_ALLOCATION *)A->Dxgk.DxgkCbGetHandleData(&get);
+    if (alloc == NULL)
+        return STATUS_INVALID_HANDLE;
+    if (!(alloc->Flags & MW_ALLOC_CPU_CACHED)) {
+        D->Result = 1;
+        InterlockedIncrement(&A->CacheOpsNotCached);
+        return STATUS_SUCCESS;
+    }
+    if (D->Size == 0 || D->Offset >= alloc->Size || D->Size > alloc->Size - D->Offset) {
+        D->Result = 4;
+        InterlockedIncrement(&A->CacheOpFails);
+        return STATUS_SUCCESS;
+    }
+    if (alloc->Mdl == NULL) {
+        D->Result = 2;                    /* not resident: the GPU cannot be writing it either */
+        InterlockedIncrement(&A->CacheOpFails);
+        return STATUS_SUCCESS;
+    }
+    ULONG64 t0 = KeQueryInterruptTime();
+    PUCHAR v = AllocationVaCached(A, alloc);
+    if (v == NULL) {
+        D->Result = 3;
+        InterlockedIncrement(&A->CacheOpFails);
+        return STATUS_SUCCESS;
+    }
+    ULONG_PTR p = (ULONG_PTR)(v + D->Offset) & ~(ULONG_PTR)63, e = (ULONG_PTR)(v + D->Offset + D->Size);
+    for (; p < e; p += 64)
+        __asm__ volatile("dc civac, %0" : : "r"(p) : "memory");
+    __asm__ volatile("dsb sy" : : : "memory");
+    InterlockedIncrement(&A->CacheOps);
+    InterlockedAdd64(&A->CacheOpBytes, (LONG64)D->Size);
+    InterlockedAdd64(&A->CacheOp100ns, (LONG64)(KeQueryInterruptTime() - t0));
+    D->Result = 0;
+    return STATUS_SUCCESS;
+}
+
 static PUCHAR AllocationVa(MW_ADAPTER *A, MW_ALLOCATION *Alloc)
 {
     if (Alloc == NULL || Alloc->Mdl == NULL)

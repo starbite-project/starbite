@@ -23,7 +23,7 @@
 #define SBW_HEALTHY_MS 60000U
 #define SBW_HEALTHY_FLIPS 30U             /* DWM frames to the panel (flips + primary blts); with FbLiveSecs >= 30 */
 #define SBW_HEALTHY_JOBS 30U
-#define SBW_LIVE_MAX 192U   /* T27: 128 -> 192 (the guard thread keeps one stack array of these) */
+#define SBW_LIVE_MAX 224U   /* T27: 128 -> 192; T57: 224 (the guard thread keeps one stack array of these) */
 
 NTSTATUS SdDriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath);   /* sbdisplay (sd_embed.c) */
 
@@ -96,6 +96,9 @@ static void LiveCounters(MW_ADAPTER *a, ULONG *Prev)
         { L"Live_LastFbRectLT", a->LastFbRectLT }, { L"Live_LastFbRectRB", a->LastFbRectRB },
         { L"Live_PrimaryOwnCopies", a->PrimaryOwnCopies },
         { L"Live_PresentFlipFlag", a->PresentFlipFlag }, { L"Live_PresentBltFlag", a->PresentBltFlag },
+        { L"Live_CachedAllocs", (ULONG)a->CachedAllocs }, { L"Live_CacheOps", (ULONG)a->CacheOps },
+        { L"Live_CacheOpsNotCached", (ULONG)a->CacheOpsNotCached }, { L"Live_CacheOpFails", (ULONG)a->CacheOpFails },
+        { L"Live_CacheOpMB", (ULONG)(a->CacheOpBytes >> 20) }, { L"Live_CacheOpMs", (ULONG)(a->CacheOp100ns / 10000) },
         { L"Live_PresentFillFlag", a->PresentFillFlag }, { L"Live_PresentOtherFlag", a->PresentOtherFlag },
         { L"Live_PrimaryBltsToScan", a->PrimaryBltsToScan }, { L"Live_PrimaryBltsOther", a->PrimaryBltsOther },
         { L"Live_Refreshes", a->Refreshes }, { L"Live_RefreshSkipsBlack", a->RefreshSkipsBlack },

@@ -2228,6 +2228,29 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   1024x1024 atlases), so a DComp route may work where HWND swap chains don't: a way to show GD's zero-copy frames,
   and a pointer to what the HWND path lacks.
 
+### 6.62 T55 read: async present +35 %; T57 staged: cached GL back buffers (sb-patches 0154, sbwddm d85e0d3a) (2026-11-13)
+
+- **T55 (GD menu, A55s, 2960x1440, steady glstats):** A (sync) 13.2-14.2 fps, interval 70-76 ms, copy ~48 ms;
+  B (0153 async) 18.0-19.2 fps, interval 52-56 ms, copy ~46 ms, gdi ~5 ms, async wait ~26 ms. The game's ~26 ms now runs
+  beside the copy: the frame is the copy + GDI. B's snaps show the menu right; no exceptions. B's working set is
+  ~200 MB above A's, as in T53, so that is the game's second launch, not the async present. **Adopted: async is the
+  default from 0154 on** (off: `glsync` file or `SB_GL_ASYNC=0`).
+- **The copy is the limit: 17 MB from write-combined memory, ~370 MB/s on 4 threads.** T26/T27 showed a kernel "cached"
+  view of the same pages reads as slowly (Windows maps them with their write-combined attribute).
+- **0154 + sbwddm d85e0d3a:** the window back buffers are cached pages from the start, and their stale lines are
+  dropped before each CPU read.
+  - KMD: `MW_ALLOC_CPU_CACHED` -> `DXGK_ALLOCATIONINFOFLAGS.Cached` (allowed in a non-coherent segment: VidMm flushes
+    when paging); `MW_ESCAPE_SB_CACHE` = DC CIVAC over a byte range through the KMD's cached view (no user-mode DC CIVAC
+    on Windows; GD's ICD is emulated x64). Counters Live_CachedAllocs/CacheOps/CacheOpsNotCached/CacheOpFails/
+    CacheOpMB/CacheOpMs; `SBW_LIVE_MAX` 192 -> 224.
+  - Shim: Panfrost's `PANFROST_BO_WB_MMAP` -> `MW_ALLOC_CPU_CACHED` (refused -> write-combined, logged); DRM `SYNC_BO`
+    (inlined ops) -> the escape; an older KMD (no escape) is noticed once and left alone.
+  - Panfrost: `PAN_BO_SB_CPU_CACHED` -> `PAN_KMOD_BO_FLAG_WB_MMAP` for DISPLAY_TARGET resources when the ICD asks
+    (`glcached` / `SB_GL_CACHED=1`); a READ map of a WB_MMAP BO invalidates the mapped range first (glReadPixels stays
+    right); a CPU write is cleaned at unmap; `PAN_KMOD_DEV_FLAG_MMAP_SYNC_THROUGH_KERNEL` on Windows. The BO cache only
+    reuses a BO for the same flags.
+- **T57** = T55 + this KMD + the 0154 GD driver; A = async, B = async + cached (`glcached`).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
