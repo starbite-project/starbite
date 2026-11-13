@@ -2480,6 +2480,26 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   alone, or a VS buffer that is not bound) and its blend/rasterizer/depth state; compare with sbtex's passing
   vertexid test.
 
+### 6.75 T64 read: no M3 cache was made (the service needs its folder); GD in the level at ~33-37 fps
+
+- **The swap worked, the cache did not start:** M3 boots: `to M3: XtaCache->.a55 0x0, .m3->XtaCache 0x0` (the
+  second only as "not tried": there was no XtaCache.m3 yet), A55 clean boots: `to A55: XtaCache->.m3 0x0,
+  .a55->XtaCache 0x0` (the first likewise "not tried"). On both M3 boots XtaCache (LocalSystem, LaunchProtected 2,
+  ServiceSidType 1) stopped with **7023 ERROR_FILE_NOT_FOUND**: it does not create C:\Windows\XtaCache. So T64a and
+  T64b both ran without a cache; T64 = two more T63-style sessions, now in the level.
+- **Fix (not staged):** an empty `C:\Windows\XtaCache.m3` with the security descriptor of the A55's XtaCache
+  folder (ntfs-3g `system.ntfs_acl` copy from TWRP, or sbxta creating it with that descriptor). Value is limited:
+  Steam is already running at logon (GD up 5 s after the URL); the cache would mostly cut GD's one-time 6-12 s loading
+  stalls (game thread 6-10 s CPU, 60-100k page faults) at each start.
+- **GD in Stereo Madness (clicks fixed; screenshots in the level, GD's counter 37):** T64b 35.4 fps avg over 10 s
+  windows, gllows 33.0 fps, 1% low 18.2, 0.1% low 6.2, 20 frames > 100 ms (T63 on menus: 39); copy 5-7 ms.
+- **Big-core crash loops cost more than the crashing services:** each boot 25 WpnUserService, 8 MoUsoCoreWorker,
+  7 OneSyncSvc, 6 DiagTrack, 6 PushToInstall c000001d crashes, and 7031/7034 for the services sharing their svchost
+  (WpnService, PushToInstall, Task Scheduler, Themes, WMI, Group Policy, IP Helper, Server, SENS, Shell Hardware
+  Detection, UsoSvc, User Manager, Application Information, Web Account Manager): on 4 GB the services are grouped,
+  so one c000001d restarts the whole netsvcs host. The service list for sbxta v2 (user's decision) should then be
+  WpnService, WpnUserService, PushToInstall, DiagTrack, OneSyncSvc, CDPUserSvc, UsoSvc, wuauserv.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
