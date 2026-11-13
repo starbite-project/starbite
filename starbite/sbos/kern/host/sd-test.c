@@ -2,7 +2,9 @@
  * Host test of libsb sd.c's fast reads (sd_set_fast: CMD6 high speed + IDMAC) on a fake DesignWare MSHC and a fake
  * SDXC card: the old path stays the default; CMD6 mode 1 only after the mode 0 query offered high speed, and only
  * with 0x80fffff1; CLKSEL / CLKDIV; the IDMAC descriptor chain of a 256-sector CMD18; the PIO fallback after an
- * IDMAC error; never a write command. */
+ * IDMAC error; never a write command. The bus clock hook (sd_set_bus_hook / sd_rebus, kern/sdclk.c's): called once with
+ * the card clock stopped before the 400 kHz init, its bus clock used for every CLKDIV, the old divider put back and
+ * one more try when the card fails on the new clock, and the same between commands on a card that is up. */
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -38,6 +40,10 @@ static unsigned fh, ft;
 static int app_next, hs_offer = 1, card_hs, query_said_yes, dma_fail_next, scr_spec = 2;
 static unsigned bad_cmds, cmd6_set, cmd6_query, n_cmd18_dma, n_cmd18_pio, n_cmd9, n_acmd51;
 static uint32_t clkdiv_now, clksel_last;
+static uint32_t cmu_div_reg;                 /* DIV_CLKCMU_FSYS1_MMC_CARD as the fake CMU has it */
+static int clk_on_at_update, fail_cmd8_on_div0;
+static uint32_t clkdivs[64];                 /* CLKDIV at every clock update with the card clock on */
+static unsigned nclkdivs;
 static int log_cmds[256], ncmds;
 struct desc { uint32_t d[8]; };
 static struct desc cap[64];                  /* the last IDMAC chain as the controller found it */
@@ -106,6 +112,9 @@ static void command(uint32_t v)
 {
     if (v & (1U << 21)) {                       /* clock update */
         clkdiv_now = R(0x08);
+        clk_on_at_update = R(0x10) & 1U;
+        if (clk_on_at_update && nclkdivs < 64)
+            clkdivs[nclkdivs++] = clkdiv_now;
         return;
     }
     unsigned idx = v & 0x3fU;
@@ -123,7 +132,13 @@ static void command(uint32_t v)
     R(0x44) |= 1U << 2;                         /* CD */
     switch (app ? 100 + idx : idx) {
     case 0: card_hs = 0; break;
-    case 8: R(0x30) = arg & 0xfffU; break;
+    case 8:
+        if (fail_cmd8_on_div0 && !(cmu_div_reg & 0x1ffU)) {
+            R(0x44) |= 1U << 8;                 /* RTO: the card "fails" on the raised clock */
+            break;
+        }
+        R(0x30) = arg & 0xfffU;
+        break;
     case 55: R(0x30) = 0x120; app_next = 1; break;
     case 141: R(0x30) = 0xc0ff8000U; break;
     case 2: R(0x30) = 0x00012345; R(0x34) = 0x30abcdef; R(0x38) = 0x43363447; R(0x3c) = 0x1b534d53; break;
@@ -192,7 +207,8 @@ void sd_fake_fifo_wr(uint64_t v) { (void)v; ++bad_cmds; }
 uint32_t sd_fake_mrd(uintptr_t a)
 {
     if (a == 0x1a242070UL || a == 0x11402030UL || a == 0x11402034UL) return 3U << 20;
-    return 0;                                   /* CMU divider /1, card detect low (present), pins */
+    if (a == 0x1a241864UL) return cmu_div_reg;
+    return 0;                                   /* card detect low (present), pins */
 }
 void sd_fake_mwr(uintptr_t a, uint32_t v) { (void)a; (void)v; }
 
@@ -221,6 +237,11 @@ static void reset(uint32_t hcon)
     fast_want = 0;
     allowed = 0;
     lastlog[0] = 0;
+    cmu_div_reg = 0;                            /* /1 unless a test says otherwise */
+    clk_on_at_update = fail_cmd8_on_div0 = 0;
+    nclkdivs = 0;
+    bus_hook = 0;
+    bus_fixed = 0;
 }
 
 #define HCON_OK ((1U << 27) | (0U << 16) | (2U << 7))   /* 64-bit addressing, IDMAC, 64-bit FIFO */
@@ -391,6 +412,130 @@ static void t_late(void)
     CHECK(bad_cmds == 0, "late: no write command");
 }
 
+/* ---- the bus clock hook (kern/sdclk.c's divider through sd_set_bus_hook / sd_rebus) ---- */
+#define BUS_RAISED 199999969ULL                 /* PLL_MMC 799.99988 MHz / 1 / 4 */
+#define BUS_SBOOT  12499998ULL                  /* the same / 16 / 4 */
+static unsigned hook_raise, hook_restore, hook_bad;
+static int hook_changes = 1;
+
+static uint64_t fake_hook(int restore)
+{
+    if (R(0x10) != 0 || clk_on_at_update)       /* the card clock must be stopped, and the controller told so */
+        ++hook_bad;
+    if (restore) {
+        ++hook_restore;
+        cmu_div_reg = (cmu_div_reg & ~0x1ffU) | 15U;
+        return BUS_SBOOT;
+    }
+    ++hook_raise;
+    if (!hook_changes)
+        return (cmu_div_reg & 0x1ffU) == 0 ? BUS_RAISED : BUS_SBOOT;
+    cmu_div_reg &= ~0x1ffU;
+    return BUS_RAISED;
+}
+
+static void hook_reset(void)
+{
+    hook_raise = hook_restore = hook_bad = 0;
+    hook_changes = 1;
+}
+
+/* What drivers run 11 saw: S-Boot's /16, no hook: 6.3 MHz on both paths; the divider's 9 bits read */
+static void t_sboot_div(void)
+{
+    reset(HCON_OK);
+    cmu_div_reg = 0x1000000fU;                  /* DIVRATIO 15, automatic clock gating bit 28 */
+    sd_allow();
+    sd_set_fast(SD_FAST_ON);
+    CHECK(sd_up() == 1, "S-Boot /16: card up");
+    CHECK(sd_rep.bus_hz == 806000000ULL / 16U / 4U && sd_rep.cmu_div == 0x1000000fU, "S-Boot /16: bus 12.59 MHz estimated");
+    CHECK(sd_rep.fast == SD_FAST_ON && clkdiv_now == 1 && sd_rep.card_hz < 6300000ULL, "S-Boot /16: fast path at 6.3 MHz (run 11)");
+    CHECK(sd_set_fast(SD_FAST_OFF) == 0 && clkdiv_now == 1, "S-Boot /16: old path at 6.3 MHz too");
+    reset(HCON_OK);
+    cmu_div_reg = 0x1fU;                        /* DIVRATIO 31: bits 8:0, not 3:0 */
+    sd_allow();
+    CHECK(sd_up() == 1 && sd_rep.bus_hz == 806000000ULL / 32U / 4U, "DIVRATIO is 9 bits wide");
+    CHECK(bad_cmds == 0, "S-Boot /16: no write command");
+}
+
+static void t_hook(int mode)
+{
+    reset(HCON_OK);
+    hook_reset();
+    cmu_div_reg = 0x1000000fU;
+    sd_set_bus_hook(fake_hook);
+    sd_allow();
+    sd_set_fast(mode);
+    CHECK(hook_raise == 0, "hook: not called before sd_up");
+    CHECK(sd_up() == 1, "hook: card up");
+    CHECK(hook_raise == 1 && hook_restore == 0 && hook_bad == 0, "hook: called once, with the card clock stopped");
+    CHECK(find_cmd(0, 0) >= 0 && ncmds > 0, "hook: then the init");
+    CHECK(sd_rep.bus_set == 1 && sd_rep.cmu_div_was == 0x1000000fU && sd_rep.cmu_div == 0x10000000U &&
+          sd_rep.bus_hz_was == 806000000ULL / 16U / 4U && sd_rep.bus_hz == BUS_RAISED,
+          "hook: report (was /16, now /1, its bus clock)");
+    CHECK(nclkdivs >= 3 && clkdivs[0] == 250U, "hook: init at 400 kHz from 200 MHz (CLKDIV 250)");
+    CHECK(nclkdivs >= 3 && clkdivs[1] == 4U, "hook: 25 MHz from 200 MHz (CLKDIV 4)");
+    CHECK(sd_rep.fast == mode && clkdiv_now == 2U && sd_rep.card_hz <= 50000000ULL && sd_rep.card_hz > 49900000ULL,
+          "hook: high speed at 50.0 MHz (CLKDIV 2), not over");
+    CHECK(sd_set_fast(SD_FAST_OFF) == 0 && clkdiv_now == 4U && sd_rep.card_hz <= 25000000ULL &&
+          sd_rep.card_hz > 24900000ULL, "hook: off = 25.0 MHz");
+    memset(big, 0, sizeof big);
+    CHECK(sd_read(77, 256, (uintptr_t)big) == 0 && data_ok(77, 256, big), "hook: reads");
+    CHECK(bad_cmds == 0, "hook: no write command");
+}
+
+static void t_hook_fail(void)
+{
+    reset(HCON_OK);
+    hook_reset();
+    cmu_div_reg = 15U;
+    fail_cmd8_on_div0 = 1;                      /* the card fails on the raised clock */
+    sd_set_bus_hook(fake_hook);
+    sd_allow();
+    unsigned n0 = nlogs;
+    CHECK(sd_up() == 1, "hook fail: up on the second try");
+    CHECK(hook_raise == 1 && hook_restore == 1 && hook_bad == 0, "hook fail: raised, put back, card clock stopped both times");
+    CHECK((cmu_div_reg & 0x1ffU) == 15U && sd_rep.bus_hz == BUS_SBOOT && sd_rep.bus_set == -1, "hook fail: /16 again, its bus clock");
+    CHECK(sd_rep.bus_why && strstr(sd_rep.bus_why, "CMD8"), "hook fail: the failed step kept");
+    CHECK(nlogs == n0 + 1 && strstr(lastlog, "failed on the raised bus clock"), "hook fail: one log line");
+    CHECK(clkdiv_now == 1U, "hook fail: 25 MHz from 12.5 MHz = CLKDIV 1");
+
+    /* the divider did not change (already /1): no second try, no put back */
+    reset(HCON_OK);
+    hook_reset();
+    hook_changes = 0;
+    fail_cmd8_on_div0 = 1;
+    sd_set_bus_hook(fake_hook);
+    sd_allow();
+    CHECK(sd_up() == 0 && hook_raise == 1 && hook_restore == 0 && sd_rep.bus_set == 2, "unchanged divider: no retry");
+    CHECK(bad_cmds == 0, "hook fail: no write command");
+}
+
+static void t_rebus(void)
+{
+    reset(HCON_OK);
+    hook_reset();
+    cmu_div_reg = 15U;
+    CHECK(sd_rebus(fake_hook, 0) == -1 && hook_raise == 0, "rebus: card not up = refused, hook not called");
+    sd_allow();
+    sd_set_fast(SD_FAST_ON);
+    CHECK(sd_up() == 1 && sd_rep.fast == SD_FAST_ON && clkdiv_now == 1U, "rebus: up at /16 (6.3 MHz)");
+    int cmds0 = ncmds;
+    CHECK(sd_rebus(fake_hook, 0) == 0 && hook_raise == 1 && hook_bad == 0, "rebus: raised with the card clock stopped");
+    CHECK(ncmds == cmds0, "rebus: no card command");
+    CHECK(sd_rep.fast == SD_FAST_ON && clkdiv_now == 2U && sd_rep.bus_hz == BUS_RAISED && sd_rep.bus_set == 1,
+          "rebus: fast reads go on at 50.0 MHz");
+    memset(big, 0, sizeof big);
+    unsigned dma0 = n_cmd18_dma;
+    CHECK(sd_read(300, 256, (uintptr_t)big) == 0 && data_ok(300, 256, big) && n_cmd18_dma == dma0 + 1, "rebus: IDMAC reads");
+    CHECK(sd_rebus(fake_hook, 1) == 0 && hook_restore == 1 && hook_bad == 0, "rebus: put back with the card clock stopped");
+    CHECK((cmu_div_reg & 0x1ffU) == 15U && sd_rep.bus_hz == BUS_SBOOT && sd_rep.bus_set == 0 && clkdiv_now == 1U,
+          "rebus: /16 again, 6.25 MHz");
+    sd_set_fast(SD_FAST_OFF);
+    CHECK(sd_rebus(fake_hook, 0) == 0 && sd_rep.fast == 0 && clkdiv_now == 4U, "rebus on the old path: 25.0 MHz");
+    CHECK(bad_cmds == 0, "rebus: no write command");
+}
+
 int main(void)
 {
     t_default();
@@ -401,6 +546,11 @@ int main(void)
     t_no_idmac();
     t_dma_check_fails();
     t_late();
+    t_sboot_div();
+    t_hook(SD_FAST_ON);
+    t_hook(SD_FAST_HS50);
+    t_hook_fail();
+    t_rebus();
     printf("sd-test: %s (%d failed)\n", fails ? "FAIL" : "ok", fails);
     return fails ? 1 : 0;
 }

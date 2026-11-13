@@ -7,8 +7,12 @@
  *            GATE_CLKCMU_FSYS1_MMC_CARD 0x1a242070, FSYS1 ACLK 0x11402030 and SDCLKIN 0x11402034.
  *            PLL_MMC (~806 MHz) / (DIV_CLKCMU_FSYS1_MMC_CARD 0x1a241864 + 1) / (CLKSEL div 3 + 1)
  *            = the controller's bus clock (~200 MHz when the CMU divider is /1, as Linux sets it;
- *            the loader leaves the divider alone and computes with it)
- *   pins     GPF1-0..5 function 2 (pinctrl_fsys1 0x11430000), no pulls, drive 4 (clock) / 3
+ *            the loader leaves the divider alone and computes with it). DIVRATIO is bits 8:0
+ *            (Samsung cmucal-sfr.c); S-Boot leaves 15 (/16: a 12.5 MHz bus, 6.25 MHz card clock,
+ *            XNU 0347 and drivers run 11). libsb never writes it: Starbite OS's kernel may, through
+ *            sd_set_bus_hook (kern/sdclk.c), with the card clock stopped, and then says the bus clock
+ *            it read off the PLL (sd_rep.bus_set)
+ *   pins    GPF1-0..5 function 2 (pinctrl_fsys1 0x11430000), no pulls, drive 4 (clock) / 3
  *   card     detect GPA1-5 active low; rails S2MPS18 LDO31 2.8 V + LDO2 3.3 V (read only here,
  *            which power-cycles the card), 3.3 V signalling only: no UHS
  *   TMOUT    always ~0: with the default every read ended in a data read timeout
@@ -39,8 +43,10 @@
  *               timing but DDR / HS400, so SD HS keeps CLKSEL 0x03020000 (timing fields). The clock:
  *               PLL_MMC 806 MHz / CMU /1 / CLKSEL /4 = 201.5 MHz; CLKDIV 2 gives 50.375 MHz, over the
  *               50 MHz HS limit (what Linux, XNU 0348 and stock Samsung, at CMU /4 and CLKDIV bypass,
- *               actually run), so SD_FAST_ON takes the highest exact rate <= 50 MHz: CLKDIV 3 =
- *               33.58 MHz. SD_FAST_HS50 takes CLKDIV 2. libsb never writes the CMU divider.
+ *               actually run), so SD_FAST_ON takes the highest exact rate <= 50 MHz of the bus clock
+ *               it has: CLKDIV 3 = 33.58 MHz from that estimate, CLKDIV 2 = 50.0 MHz from the 200.0 MHz
+ *               kern/sdclk.c reads off PLL_MMC (799.99988 MHz). SD_FAST_HS50 takes CLKDIV 2. libsb
+ *               never writes the CMU divider.
  *   IDMAC       CMD18 (2..256 sectors) through the controller's internal DMA in 64-bit address mode
  *               (HCON bits 17:16 = 0 IDMAC, bit 27 = 1 64-bit; Linux dw_mmc.c dw_mci_idmac_init /
  *               dw_mci_prepare_desc64 / dw_mci_idmac_start_dma): chained 32-byte descriptors of 4 KiB,
@@ -118,6 +124,8 @@
 
 struct sd_report sd_rep;
 static int allowed;
+static sd_bus_fn bus_hook;                  /* sd_set_bus_hook: the kernel's CMU divider change, 0 none */
+static uint64_t bus_fixed;                  /* the bus clock the hook said, 0 = the estimate from the divider */
 static int fast_want;                       /* sd_set_fast: SD_FAST_OFF / SD_FAST_ON / SD_FAST_HS50 */
 static int fast_try(void);
 
@@ -281,12 +289,30 @@ static int acmd(unsigned idx, uint32_t arg, uint32_t flags)
     return r ? r : cmd(idx, arg, flags);
 }
 
-int sd_up(void)
+void sd_set_bus_hook(sd_bus_fn fn)
 {
-    if (sd_rep.state)
-        return sd_rep.state > 0;
-    if (!allowed)
-        return 0;
+    bus_hook = fn;
+}
+
+/* PLL_MMC_HZ / (DIVRATIO + 1) / 4, or what the hook measured */
+static void bus_from_cmu(void)
+{
+    sd_rep.cmu_div = mrd(0x1a241864UL);
+    sd_rep.bus_hz = bus_fixed ? bus_fixed : PLL_MMC_HZ / ((sd_rep.cmu_div & 0x1ffU) + 1U) / 4U;
+}
+
+/* The hook's answer: hz the bus clock now (0 = unknown: the estimate); the divider read again for the report. */
+static void bus_took(uint64_t hz)
+{
+    bus_fixed = hz;
+    bus_from_cmu();
+}
+
+static int fast_fail(const char *why);
+static int hs_clock(int mode);
+
+static int up_once(void)
+{
     sd_rep.state = -1;
     sd_rep.present = !(mrd(ALIVE_GPA1_DAT) & (1U << 5));
     if (!sd_rep.present) {
@@ -300,8 +326,11 @@ int sd_up(void)
         uintptr_t a = i == 0 ? 0x1a242070UL : i == 1 ? 0x11402030UL : 0x11402034UL;
         sd_rep.gate[i] = mrd(a);
     }
-    sd_rep.cmu_div = mrd(0x1a241864UL);
-    sd_rep.bus_hz = PLL_MMC_HZ / ((sd_rep.cmu_div & 0xfU) + 1U) / 4U;
+    bus_from_cmu();
+    if (!sd_rep.bus_set) {
+        sd_rep.cmu_div_was = sd_rep.cmu_div;
+        sd_rep.bus_hz_was = sd_rep.bus_hz;
+    }
     for (unsigned i = 0; i < 3; ++i)               /* an unclocked controller can stall the bus */
         if ((sd_rep.gate[i] & (3U << 20)) != (3U << 20)) {
             sd_rep.why = "card clocks off (Engineer OS does not write CMU blocks)";
@@ -336,6 +365,16 @@ int sd_up(void)
     /* ciu div 3, drive phase 2, sample phase 0; the bits outside SDMMC_CLKSEL_TIMING_MASK stay */
     wr(CLKSEL64, (rd(CLKSEL64) & ~0x07070007U) | (3U << 24) | (2U << 16));
     sd_rep.clksel = rd(CLKSEL64);
+    if (bus_hook && !sd_rep.bus_set) {         /* the kernel's CMU divider, once, with the card clock stopped */
+        wr(CLKENA, 0);
+        if (update_clock(0)) {
+            sd_rep.bus_set = -2;
+        } else {
+            uint64_t hz = bus_hook(0);
+            bus_took(hz);
+            sd_rep.bus_set = !hz ? -3 : sd_rep.cmu_div != sd_rep.cmu_div_was ? 1 : 2;
+        }
+    }
     wr(CTYPE, 0);
     wr(PWREN, 1);
     sb_mdelay(5);
@@ -388,6 +427,60 @@ int sd_up(void)
     if (fast_want)
         (void)fast_try();                      /* any failure: back to 25 MHz PIO, one log line */
     return 1;
+}
+
+int sd_up(void)
+{
+    if (sd_rep.state)
+        return sd_rep.state > 0;
+    if (!allowed)
+        return 0;
+    if (up_once())
+        return 1;
+    if (sd_rep.bus_set != 1)
+        return 0;
+    /* The card did not come up on the bus clock the hook set: the old divider back (card clock stopped), and once
+     * more from it, as before the hook existed. One log line. */
+    const char *why = sd_rep.why;
+    wr(CLKENA, 0);
+    (void)update_clock(0);
+    bus_took(bus_hook(1));
+    sd_rep.bus_set = -1;
+    sd_rep.bus_why = why;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "sd: the card failed on the raised bus clock (");
+    ub_s(&u, why ? why : "?");
+    ub_s(&u, "): CMU divider put back, bus ");
+    ub_dec(&u, sd_rep.bus_hz / 1000U);
+    ub_s(&u, " kHz, once more");
+    sb_log(u.b);
+    return up_once();
+}
+
+int sd_rebus(sd_bus_fn fn, int restore)
+{
+    if (sd_rep.state != 1 || !fn)
+        return -1;
+    wr(CLKENA, 0);                             /* between commands: nothing runs on the card */
+    if (update_clock(1)) {
+        if (sd_rep.fast)
+            (void)fast_fail("the card clock did not stop for a bus clock change");
+        else
+            (void)set_clock(25000000);
+        return -1;
+    }
+    uint64_t hz = fn(restore);                 /* restore: the hook's measure of the old divider */
+    bus_took(hz);
+    sd_rep.bus_set = restore ? 0 : hz ? 1 : -3;
+    if (sd_rep.fast) {
+        if (hs_clock(sd_rep.fast)) {
+            (void)fast_fail("clock update after a bus clock change");
+            return -1;
+        }
+        return 0;
+    }
+    return set_clock(25000000) ? -1 : 0;
 }
 
 /* Up to 256 sectors with one CMD17/18 (auto stop), drained from the FIFO by the CPU. */
