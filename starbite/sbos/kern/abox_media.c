@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * Starbite OS: media playback through Calliope (abox_media.h has the what, the wiring and the sources).
+ * Starbite OS: media playback and capture through Calliope (abox_media.h has the what, the wiring and the sources).
  *
  * The stream (cal_play_start), in Samsung's order (abox_rdma.c / abox_if.c / abox.c, as One UI ran it on this phone):
  *   1  the mixer controls: SPUS chain 0 = IN RDMA, ASRC off (abox_try_to_asrc_off), OUT SIFS0 (SPUS_CTRL0 [3:0] 0x2);
@@ -14,16 +14,31 @@
  * for the UAIF FIFO, UAIFn SPK_EN off, DRAM off, HW_FREE, CLOSE, the routes and the UAIF as found, MIXP flush (POST_PMD).
  * While a call has ABOX (abox_state() CALL) the call's settings are left alone: UAIF1, its route and DRAM on.
  *
- * Writes only: ABOX SFR's SYSPOWER_CTRL, ROUTE_CTRL0, SPUS_CTRL0 / CTRL2, UAIF0/1 CTRL0 / CTRL1; CMU_AUD's AUDIF and
- * UAIF0/1 dividers; the PMU's AUD_CONF (only to switch the domain back on when the probe found it on); abox_rmem's ring
- * window. Reads only registers Samsung's driver or our earlier phone runs read (RDMA0 CTRL0 / BUF_STR / STATUS, UAIF
- * STATUS, the PMU AUD / CPU status, IP_INDEX, SysMMU CTRL). Everything else goes through abox.c's own calls. */
+ * The capture (cal_cap_start), the same steps for WDMA1 (abox_media.h: the facts and where they come from):
+ *   1  NSRC0 = UAIF0 (ROUTE_CTRL1 [3:0] 8, nsrcx_texts), SPUM NSRC0 ASRC off and OUT to WDMA (SPUM_CTRL0 bits 4, 7 = 0);
+ *      AUDIF / UAIF0 BCLK dividers; UAIF0 I2S master 48 kHz 2 x 16; QCHANNEL_DISABLE bit 2 (UAIF0's BCLK runs);
+ *   2  the ring zeroed;
+ *   3  IPC_PCMCAPTURE channel 1: OPEN, SET_BUFFER (IOVA 0x92100000, period bytes, periods), HW_PARAMS, PREPARE;
+ *   4  SIFM0 flush (SPUM_CTRL3 bit 0, PRE_PMU), DRAM on, TRIGGER 1, then UAIF0 MIC_EN (capture: the DMA first, as One
+ *      UI's log shows abox_wdma_trigger before abox_uaif_trigger[C]).
+ * Stop (cal_cap_stop): TRIGGER 0, wait for WDMA1 CTRL0 ENABLE to clear (40 ms, as RDMA0's barrier), UAIF0 MIC_EN off
+ * (One UI: abox_wdma_trigger(0), then abox_uaif_trigger[C](0)), DRAM off, HW_FREE, CLOSE, NSRC0 / SPUM / UAIF0 /
+ * QCHANNEL_DISABLE as found, SIFM0 flush (POST_PMD). The call's own capture (NSRC1 -> SIFM1 -> WDMA2, abox.c) is never
+ * touched; while a call has ABOX, capture is refused (the call owns UAIF0 MIC).
+ *
+ * Writes only: ABOX SFR's SYSPOWER_CTRL, QCHANNEL_DISABLE (bit 2), ROUTE_CTRL0 / CTRL1, SPUS_CTRL0 / CTRL2, SPUM_CTRL0
+ * / CTRL3, UAIF0/1 CTRL0 / CTRL1; CMU_AUD's AUDIF and UAIF0/1 dividers; the PMU's AUD_CONF (only to switch the domain
+ * back on when the probe found it on); abox_rmem's two ring windows. Reads only registers Samsung's driver or our
+ * earlier phone runs read (RDMA0 / WDMA1 CTRL0 / BUF_STR / STATUS, UAIF STATUS, the PMU AUD / CPU status, IP_INDEX,
+ * SysMMU CTRL). Everything else goes through abox.c's own calls. */
 #include "abox_media.h"
 #include "drvprobe.h"
+#include "goertzel.h"
 
 #ifdef SBOS_KERNEL
 #include "sb.h"
 #include "amp.h"
+#include "codec.h"
 #include "sb/bcmw_sb.h"
 #else
 void *memset(void *d, int c, size_t n);
@@ -31,19 +46,25 @@ void *memset(void *d, int c, size_t n);
 
 #define SFR_SYSPOWER_CTRL  0x0010U
 #define SFR_IP_INDEX       0x0000U
+#define SFR_QCH_DISABLE    0x0038U          /* bit 2: BCLK_UAIF0 always on (abox.c's call path, set_tristate(0)) */
 #define SFR_ROUTE_CTRL0    0x0040U
+#define SFR_ROUTE_CTRL1    0x0044U          /* NSRCn [4n+3:4n]: 8 = UAIF0 (nsrcx_texts) */
 #define SFR_SPUS_CTRL0     0x0200U
 #define SFR_SPUS_CTRL2     0x0208U
+#define SFR_SPUM_CTRL0     0x0300U          /* NSRC0: ASRC bit 4, OUT bit 7 (0 = WDMA) */
+#define SFR_SPUM_CTRL3     0x030CU          /* SIFMn flush bit n */
 #define SFR_UAIF_CTRL0(n)  (0x0500U + 0x10U * (unsigned)(n))
 #define SFR_UAIF_CTRL1(n)  (0x0504U + 0x10U * (unsigned)(n))
 #define SFR_UAIF_STATUS(n) (0x050CU + 0x10U * (unsigned)(n))
 #define SFR_RDMA0          0x1000U
+#define SFR_WDMA1          0x2100U          /* 17c52100.abox_wdma */
 #define RDMA_CTRL0         0x00U
 #define RDMA_BUF_STR       0x08U
 #define RDMA_STATUS        0x30U
 #define RDMA_ENABLE        (1U << 0)
 #define RDMA_PROGRESS      (1U << 31)
 #define UAIF_SPK_EN        (1U << 0)
+#define UAIF_MIC_EN        (1U << 1)
 #define UAIF_MASTER        (1U << 2)
 #define UAIF_IRQ_MODE      (1U << 3)
 #define UAIF_DATA_MODE     (1U << 4)
@@ -51,6 +72,10 @@ void *memset(void *d, int c, size_t n);
 #define UAIF_CTRL1_VAL     0x0984F000U
 #define CHAIN0_MASK        0xFU
 #define CHAIN0_SIFS0       0x2U             /* IN 0 (RDMA), OUT 1 (SIFS0) at [2:1], ASRC 0 */
+#define NSRC0_MASK         0xFU
+#define NSRC0_UAIF0        0x8U
+#define SPUM_NSRC0_BITS    ((1U << 4) | (1U << 7))
+#define QCH_UAIF0          (1U << 2)
 #define CMU_DIV_AUDIF      0x1800U
 #define CMU_DIV_UAIF(n)    (0x1824U + 4U * (unsigned)(n))
 #define DIV_BUSY           (1U << 16)
@@ -66,11 +91,22 @@ static struct cal_probe_ops O;
 static int ops_set;
 
 static struct {
-    int playing, opened, triggered, uaif, call;
+    int playing, opened, triggered, uaif, call, t_uaif, t_dram;
     uint32_t period, periods, ring;
     uint8_t *win;
-    uint32_t spus0, route0, uc0, uc1, sysp;
+    uint32_t spus0, route0;
 } E;
+/* the capture (WDMA1) */
+static struct {
+    int capping, opened, triggered, t_uaif, t_dram, t_qch;
+    uint32_t period, periods, ring;
+    uint8_t *win;
+    uint32_t route1, spum0, qch;
+} K;
+/* shared by the two directions: a UAIF's format (found values back when its last user stops) and DRAM on */
+static struct { int users; uint32_t c0, c1; } U[2];
+static int dram_users;
+static uint32_t dram_found;
 static char why_buf[160] = "off";
 
 /* ---- text: "cal: " + %s %u %x ------------------------------------------------------------------------------- */
@@ -144,9 +180,10 @@ static int reg_ok(uint64_t pa)
     if (pa == ABOX_PMU + ABOX_PMU_AUD_CONF || pa == ABOX_CMU + CMU_DIV_AUDIF || pa == ABOX_CMU + CMU_DIV_UAIF(0) ||
         pa == ABOX_CMU + CMU_DIV_UAIF(1))
         return 1;
-    return pa >= ABOX_SFR && (s == SFR_SYSPOWER_CTRL || s == SFR_ROUTE_CTRL0 || s == SFR_SPUS_CTRL0 ||
-                              s == SFR_SPUS_CTRL2 || s == SFR_UAIF_CTRL0(0) || s == SFR_UAIF_CTRL1(0) ||
-                              s == SFR_UAIF_CTRL0(1) || s == SFR_UAIF_CTRL1(1));
+    return pa >= ABOX_SFR && (s == SFR_SYSPOWER_CTRL || s == SFR_QCH_DISABLE || s == SFR_ROUTE_CTRL0 ||
+                              s == SFR_ROUTE_CTRL1 || s == SFR_SPUS_CTRL0 || s == SFR_SPUS_CTRL2 ||
+                              s == SFR_SPUM_CTRL0 || s == SFR_SPUM_CTRL3 || s == SFR_UAIF_CTRL0(0) ||
+                              s == SFR_UAIF_CTRL1(0) || s == SFR_UAIF_CTRL0(1) || s == SFR_UAIF_CTRL1(1));
 }
 static uint32_t r32(uint64_t pa) { return H.rd32(H.ctx, pa); }
 static void w32(uint64_t pa, uint32_t v)
@@ -198,58 +235,111 @@ int cal_hal_set(const struct abox_hal *h)
     return 0;
 }
 
-/* the window is shared by its users (snd.c keeps it for any boot, the probe adds and removes its own): counted */
+/* the windows are shared by their users (snd.c keeps them for any boot, the probe adds and removes its own): counted.
+ * Both or neither: RDMA0's (slot 1 of abox.c's two) and WDMA1's (slot 2). */
 static int map_users;
 int cal_map(void)
 {
     int r = abox_map_extra(CAL_IOVA, rmem_base() + CAL_RM_PLAY, CAL_RM_WINDOW);
+    if (!r && (r = abox_map_extra(CAL_CAP_IOVA, rmem_base() + CAL_RM_CAP, CAL_RM_WINDOW)) && !map_users)
+        (void)abox_map_extra(CAL_IOVA, 0, 0);
     if (!r)
         map_users++;
     return r;
 }
 void cal_unmap(void)
 {
-    if (map_users > 0 && --map_users == 0)
+    if (map_users > 0 && --map_users == 0) {
         (void)abox_map_extra(CAL_IOVA, 0, 0);
+        (void)abox_map_extra(CAL_CAP_IOVA, 0, 0);
+    }
 }
 void cal_sync(void) { sync_ram(); }
 
-/* our own tables (abox.c writes them at boot into abox_rmem): is RDMA0's IOVA a page table onto the ring? */
-static int ring_mapped(uint32_t bytes)
+/* our own tables (abox.c writes them at boot into abox_rmem): is iova a page table onto the window at rm_off? */
+static int ring_mapped(uint32_t iova, uint32_t rm_off, uint32_t bytes)
 {
     uint64_t base = rmem_base();
     const uint32_t *l1 = (const uint32_t *)H.ram(H.ctx, base + ABOX_RM_PT, 0x4000);
     if (!l1)
         return 0;
-    uint32_t e = l1[CAL_IOVA >> 20];
+    uint32_t e = l1[iova >> 20];
     uint64_t l2pa = (uint64_t)(e & ~0x3FU) << 4;
     if ((e & 3U) != 1U || l2pa < base + ABOX_RM_PT || l2pa >= base + ABOX_RM_PT + 0x10000U)
         return 0;
     const uint32_t *l2 = (const uint32_t *)H.ram(H.ctx, l2pa, 0x400);
     for (uint32_t k = 0; l2 && k < (bytes + 0xFFFU) >> 12; ++k)
-        if ((l2[k] & 3U) != 2U || (uint64_t)(l2[k] & ~0xFFU) << 4 != base + CAL_RM_PLAY + 0x1000ULL * k)
+        if ((l2[k] & 3U) != 2U || (uint64_t)(l2[k] & ~0xFFU) << 4 != base + rm_off + 0x1000ULL * k)
             return 0;
     return l2 != 0;
 }
 int cal_playing(void) { return E.playing; }
 uint8_t *cal_play_buf(void) { return E.playing ? E.win : 0; }
 uint32_t cal_ring_bytes(void) { return E.playing ? E.ring : 0; }
+int cal_capping(void) { return K.capping; }
+const uint8_t *cal_cap_buf(void) { return K.capping ? K.win : 0; }
+uint32_t cal_cap_ring_bytes(void) { return K.capping ? K.ring : 0; }
 
 static int abox_up(void) { return abox_state() == ABOX_ST_READY || abox_state() == ABOX_ST_CALL; }
 
-/* ---- the stream ---------------------------------------------------------------------------------------------- */
+int cal_settle(uint32_t ms)
+{
+    if (!have_hal || !abox_up())
+        return ABOX_ESTATE;
+    for (uint32_t t = 0; t < ms; t += 5U) {
+        int r = abox_poll();
+        if (r < 0)
+            return r;
+        H.delay_us(H.ctx, 5000);
+    }
+    return 0;
+}
+
+/* ---- shared by both directions ------------------------------------------------------------------------------- */
+static void uaif_take(int n)
+{
+    if (!U[n].users++) {
+        U[n].c0 = r32(ABOX_SFR + SFR_UAIF_CTRL0(n));
+        U[n].c1 = r32(ABOX_SFR + SFR_UAIF_CTRL1(n));
+    }
+    uint32_t mask = UAIF_MASTER | (n == CAL_UAIF0 ? UAIF_DATA_MODE | UAIF_IRQ_MODE : 0U);
+    m32(ABOX_SFR + SFR_UAIF_CTRL0(n), mask, UAIF_MASTER | (n == CAL_UAIF0 ? UAIF_DATA_MODE : 0U));
+    m32(ABOX_SFR + SFR_UAIF_CTRL1(n), UAIF_CTRL1_MASK, UAIF_CTRL1_VAL);
+}
+/* write 0: only counted (the call has the UAIF now) */
+static void uaif_give(int n, int write)
+{
+    if (U[n].users <= 0 || --U[n].users || !write)
+        return;
+    m32(ABOX_SFR + SFR_UAIF_CTRL0(n), ~(UAIF_SPK_EN | UAIF_MIC_EN), U[n].c0);
+    m32(ABOX_SFR + SFR_UAIF_CTRL1(n), UAIF_CTRL1_MASK, U[n].c1);
+}
+static void dram_take(void)
+{
+    if (!dram_users++)
+        dram_found = r32(ABOX_SFR + SFR_SYSPOWER_CTRL);
+    m32(ABOX_SFR + SFR_SYSPOWER_CTRL, 1U, 1U);
+}
+static void dram_give(int write)
+{
+    if (dram_users > 0 && !--dram_users && write)
+        m32(ABOX_SFR + SFR_SYSPOWER_CTRL, 1U, dram_found);
+}
+
+/* ---- the streams --------------------------------------------------------------------------------------------- */
 static int trace_ipc;                           /* cal_trace(): every PCM message we send, with its fields */
 void cal_trace(int on) { trace_ipc = on; }
 
-/* one IPC_PCMPLAYBACK message for RDMA0 (abox.c: msgtype, channel_id = task_id = 0, three param words) */
-static int pcm(uint32_t type, uint32_t a, uint32_t b, uint32_t c)
+/* one PCM task message: IPC_PCMPLAYBACK for RDMA0 or IPC_PCMCAPTURE for WDMA1 (abox.c: msgtype, channel_id =
+ * task_id, three param words) */
+static int pcm_x(int cap, uint32_t type, uint32_t a, uint32_t b, uint32_t c)
 {
     static const char *const nm[] = { "OPEN", "CLOSE", "?13", "HW_PARAMS", "HW_FREE", "PREPARE", "TRIGGER", "POINTER",
                                       "?19", "SET_BUFFER" };
-    int r = abox_pcm_msg(0, CAL_ID, type, a, b, c);
+    int r = abox_pcm_msg(cap, cap ? CAL_CAP_ID : CAL_ID, type, a, b, c);
     if (trace_ipc) {
         struct tb t;
-        tinit(&t, "cal: ipc -> PCMPLAYBACK (2) task 0 ch 0 ");
+        tinit(&t, cap ? "cal: ipc -> PCMCAPTURE (3) task 1 ch 1 " : "cal: ipc -> PCMPLAYBACK (2) task 0 ch 0 ");
         ts(&t, type >= 11U && type <= 20U ? nm[type - 11U] : "?");
         ts(&t, " (msgtype ");
         tu(&t, type);
@@ -268,6 +358,8 @@ static int pcm(uint32_t type, uint32_t a, uint32_t b, uint32_t c)
     }
     return r;
 }
+static int pcm(uint32_t type, uint32_t a, uint32_t b, uint32_t c) { return pcm_x(0, type, a, b, c); }
+static int pcmc(uint32_t type, uint32_t a, uint32_t b, uint32_t c) { return pcm_x(1, type, a, b, c); }
 
 void cal_dump(const char *tag)
 {
@@ -275,6 +367,8 @@ void cal_dump(const char *tag)
     if (!have_hal || !abox_up())                /* never inside the domain when Calliope is not up */
         return;
     static const uint8_t ro[] = { 0x00, 0x04, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x20, 0x30 };
+    if (!E.opened && K.opened)
+        goto wdma1;
     tinit(&t, "cal: dump ");
     ts(&t, tag);
     ts(&t, ": RDMA0");
@@ -296,6 +390,29 @@ void cal_dump(const char *tag)
     tx(&t, r32(ABOX_SFR + SFR_UAIF_CTRL1(E.uaif)));
     ts(&t, " st ");
     tx(&t, r32(ABOX_SFR + SFR_UAIF_STATUS(E.uaif)));
+    out(&t);
+    if (!K.opened)
+        return;
+wdma1:
+    tinit(&t, "cal: dump ");
+    ts(&t, tag);
+    ts(&t, ": WDMA1");
+    for (unsigned i = 0; i < sizeof ro; ++i) {
+        tc(&t, ' ');
+        tx(&t, r32(ABOX_SFR + SFR_WDMA1 + ro[i]));
+    }
+    ts(&t, " | ROUTE1 ");
+    tx(&t, r32(ABOX_SFR + SFR_ROUTE_CTRL1));
+    ts(&t, " SPUM0 ");
+    tx(&t, r32(ABOX_SFR + SFR_SPUM_CTRL0));
+    ts(&t, " QCH_DIS ");
+    tx(&t, r32(ABOX_SFR + SFR_QCH_DISABLE));
+    ts(&t, " UAIF0 ");
+    tx(&t, r32(ABOX_SFR + SFR_UAIF_CTRL0(0)));
+    tc(&t, ' ');
+    tx(&t, r32(ABOX_SFR + SFR_UAIF_CTRL1(0)));
+    ts(&t, " st ");
+    tx(&t, r32(ABOX_SFR + SFR_UAIF_STATUS(0)));
     out(&t);
 }
 
@@ -324,7 +441,7 @@ int cal_play_start(int uaif, uint32_t period, uint32_t periods)
     if ((uaif != CAL_UAIF0 && uaif != CAL_UAIF1) || period < 128U || period % 16U || periods < 2U ||
         periods > CAL_RING_MAX / 128U || period * periods > CAL_RING_MAX)
         return fail_start("bad geometry (period >= 128 bytes in 16-byte steps, ring <= 64 KiB)", ABOX_ECFG);
-    if (!ring_mapped(period * periods))
+    if (!ring_mapped(CAL_IOVA, CAL_RM_PLAY, period * periods))
         return fail_start("RDMA0's ring is not in ABOX's SysMMU tables (Calliope was booted before cal_map())",
                           ABOX_EMMU);
     E.win = (uint8_t *)H.ram(H.ctx, rmem_base() + CAL_RM_PLAY, CAL_RM_WINDOW);
@@ -336,18 +453,14 @@ int cal_play_start(int uaif, uint32_t period, uint32_t periods)
     /* 1: mixer controls, clocks, UAIF (the found values kept to put back) */
     E.spus0 = r32(ABOX_SFR + SFR_SPUS_CTRL0);
     E.route0 = r32(ABOX_SFR + SFR_ROUTE_CTRL0);
-    E.uc0 = r32(ABOX_SFR + SFR_UAIF_CTRL0(uaif));
-    E.uc1 = r32(ABOX_SFR + SFR_UAIF_CTRL1(uaif));
-    E.sysp = r32(ABOX_SFR + SFR_SYSPOWER_CTRL);
     E.opened = 1;                               /* from here cal_play_stop() puts things back */
     if (!cmu_div(CMU_DIV_AUDIF, 0x1FFU, DIV_AUDIF_UAIF) || !cmu_div(CMU_DIV_UAIF(uaif), 0x1FFU, DIV_UAIF_BCLK))
         return fail_start("a UAIF clock divider did not take its value", ABOX_ECLOCK);
     m32(ABOX_SFR + SFR_SPUS_CTRL0, CHAIN0_MASK, CHAIN0_SIFS0);
     m32(ABOX_SFR + SFR_ROUTE_CTRL0, 0xFU << (4 * uaif), 1U << (4 * uaif));
     if (!(E.call && uaif == CAL_UAIF1)) {
-        uint32_t mask = UAIF_MASTER | (uaif == CAL_UAIF0 ? UAIF_DATA_MODE | UAIF_IRQ_MODE : 0U);
-        m32(ABOX_SFR + SFR_UAIF_CTRL0(uaif), mask, UAIF_MASTER | (uaif == CAL_UAIF0 ? UAIF_DATA_MODE : 0U));
-        m32(ABOX_SFR + SFR_UAIF_CTRL1(uaif), UAIF_CTRL1_MASK, UAIF_CTRL1_VAL);
+        uaif_take(uaif);
+        E.t_uaif = 1;
     }
     /* 2: the ring and its guard zeroes */
     memset(E.win, 0, CAL_RM_WINDOW);
@@ -360,7 +473,8 @@ int cal_play_start(int uaif, uint32_t period, uint32_t periods)
         return fail_start("Calliope did not take the PCM set-up (OPEN / SET_BUFFER / HW_PARAMS / PREPARE)", r);
     /* 4: start */
     m32(ABOX_SFR + SFR_SPUS_CTRL2, 1U, 1U);
-    m32(ABOX_SFR + SFR_SYSPOWER_CTRL, 1U, 1U);
+    dram_take();
+    E.t_dram = 1;
     m32(ABOX_SFR + SFR_UAIF_CTRL0(uaif), UAIF_SPK_EN, UAIF_SPK_EN);
     E.triggered = 1;
     if ((r = pcm(ABOX_PCM_TRIGGER, 1, 0, 0)))
@@ -386,6 +500,14 @@ int cal_play_start(int uaif, uint32_t period, uint32_t periods)
     return 0;
 }
 
+/* a DMA's STATUS as a ring offset (abox_rdma_pointer(): RBUF_OFFSET [28:16] in 16 bytes + RBUF_CNT [12:0]) */
+static uint32_t pos_of(uint32_t st, uint32_t ring)
+{
+    if (!(st & RDMA_PROGRESS) || !ring)
+        return CAL_NOPOS;
+    return ((((st >> 16) & 0x1FFFU) << 4) + (st & 0x1FFFU)) % ring;
+}
+
 uint32_t cal_play_pos(uint32_t *status)
 {
     if (!E.playing || !abox_up())
@@ -393,9 +515,7 @@ uint32_t cal_play_pos(uint32_t *status)
     uint32_t st = r32(ABOX_SFR + SFR_RDMA0 + RDMA_STATUS);
     if (status)
         *status = st;
-    if (!(st & RDMA_PROGRESS))
-        return CAL_NOPOS;
-    return ((((st >> 16) & 0x1FFFU) << 4) + (st & 0x1FFFU)) % E.ring;
+    return pos_of(st, E.ring);
 }
 
 uint32_t cal_play_ptr(uint32_t *count)
@@ -406,6 +526,18 @@ uint32_t cal_play_ptr(uint32_t *count)
     return p - CAL_IOVA;
 }
 
+/* RDMA0 / WDMA1 CTRL0 ENABLE cleared by Calliope after TRIGGER 0 (abox_rdma_disable_barrier: 40 ms) */
+static void barrier(uint32_t dma, const char *late)
+{
+    uint32_t t = 0;
+    while ((r32(ABOX_SFR + dma + RDMA_CTRL0) & RDMA_ENABLE) && t < STOP_US) {
+        H.delay_us(H.ctx, 100);
+        t += 100;
+    }
+    if (t >= STOP_US)
+        say(late);
+}
+
 void cal_play_stop(void)
 {
     if (!E.opened)
@@ -414,22 +546,18 @@ void cal_play_stop(void)
     if (up) {
         if (E.triggered)
             (void)pcm(ABOX_PCM_TRIGGER, 0, 0, 0);
-        uint32_t t = 0;
-        while ((r32(ABOX_SFR + SFR_RDMA0 + RDMA_CTRL0) & RDMA_ENABLE) && t < STOP_US) {
-            H.delay_us(H.ctx, 100);
-            t += 100;
-        }
-        if (t >= STOP_US)
-            say("stop: RDMA0 still enabled after 40 ms (Calliope's barrier): going on");
+        barrier(SFR_RDMA0, "stop: RDMA0 still enabled after 40 ms (Calliope's barrier): going on");
         H.delay_us(H.ctx, FLUSH_US);
         if (!(call && E.uaif == CAL_UAIF1)) {
             m32(ABOX_SFR + SFR_UAIF_CTRL0(E.uaif), UAIF_SPK_EN, 0);
-            m32(ABOX_SFR + SFR_UAIF_CTRL0(E.uaif), ~UAIF_SPK_EN, E.uc0);
-            m32(ABOX_SFR + SFR_UAIF_CTRL1(E.uaif), UAIF_CTRL1_MASK, E.uc1);
+            if (E.t_uaif)
+                uaif_give(E.uaif, 1);
             m32(ABOX_SFR + SFR_ROUTE_CTRL0, 0xFU << (4 * E.uaif), E.route0);
+        } else if (E.t_uaif) {
+            uaif_give(E.uaif, 0);
         }
-        if (!call)
-            m32(ABOX_SFR + SFR_SYSPOWER_CTRL, 1U, E.sysp);
+        if (E.t_dram)
+            dram_give(!call);
         (void)pcm(ABOX_PCM_HW_FREE, 0, 0, 0);
         (void)pcm(ABOX_PCM_CLOSE, 0, 0, 0);
         m32(ABOX_SFR + SFR_SPUS_CTRL0, CHAIN0_MASK, E.spus0);
@@ -437,20 +565,159 @@ void cal_play_stop(void)
         say(call ? "stop: RDMA0 stopped and closed; the call's UAIF1, route and DRAM left on"
                  : "stop: RDMA0 stopped and closed, UAIF and routes as found");
     } else {
+        if (E.t_uaif)
+            uaif_give(E.uaif, 0);
+        if (E.t_dram)
+            dram_give(0);
         say("stop: Calliope is no longer running: the stream is just forgotten");
     }
-    E.playing = E.opened = E.triggered = 0;
-    set_why("off");
+    E.playing = E.opened = E.triggered = E.t_uaif = E.t_dram = 0;
+    set_why(K.capping ? "capturing through Calliope" : "off");
+}
+
+/* ---- capture: WDMA1 <- SIFM0 <- NSRC0 <- UAIF0 MIC ------------------------------------------------------------- */
+static int fail_cap(const char *what, int r)
+{
+    struct tb t;
+    tinit(&t, "cal: capture: ");
+    ts(&t, what);
+    out(&t);
+    set_why(t.b + 5);
+    cal_cap_stop();
+    set_why(t.b + 5);
+    return r;
+}
+
+int cal_cap_start(int uaif, uint32_t period, uint32_t periods)
+{
+    struct tb t;
+    int r;
+    if (!have_hal)
+        return ABOX_ESTATE;
+    if (K.capping || K.opened)
+        return fail_cap("already capturing", ABOX_ESTATE);
+    if (!abox_up())
+        return fail_cap("Calliope is not running (abox_boot first)", ABOX_ESTATE);
+    if (abox_state() == ABOX_ST_CALL)
+        return fail_cap("a call has the mic (UAIF0 MIC is the call's): refused", ABOX_ESTATE);
+    if (uaif != CAL_UAIF0 || period < 128U || period % 16U || periods < 2U || periods > CAL_RING_MAX / 128U ||
+        period * periods > CAL_RING_MAX)
+        return fail_cap("bad UAIF or geometry (UAIF0; period >= 128 bytes in 16-byte steps, ring <= 64 KiB)",
+                        ABOX_ECFG);
+    if (!ring_mapped(CAL_CAP_IOVA, CAL_RM_CAP, period * periods))
+        return fail_cap("WDMA1's ring is not in ABOX's SysMMU tables (Calliope was booted before cal_map())",
+                        ABOX_EMMU);
+    K.win = (uint8_t *)H.ram(H.ctx, rmem_base() + CAL_RM_CAP, CAL_RM_WINDOW);
+    if (!K.win)
+        return fail_cap("the ring's window in abox_rmem is not mappable", ABOX_EMMU);
+    K.period = period, K.periods = periods, K.ring = period * periods;
+
+    /* 1: routes, clocks, UAIF0 (the found values kept to put back) */
+    K.route1 = r32(ABOX_SFR + SFR_ROUTE_CTRL1);
+    K.spum0 = r32(ABOX_SFR + SFR_SPUM_CTRL0);
+    K.qch = r32(ABOX_SFR + SFR_QCH_DISABLE);
+    K.opened = 1;                               /* from here cal_cap_stop() puts things back */
+    if (!cmu_div(CMU_DIV_AUDIF, 0x1FFU, DIV_AUDIF_UAIF) || !cmu_div(CMU_DIV_UAIF(0), 0x1FFU, DIV_UAIF_BCLK))
+        return fail_cap("a UAIF clock divider did not take its value", ABOX_ECLOCK);
+    m32(ABOX_SFR + SFR_ROUTE_CTRL1, NSRC0_MASK, NSRC0_UAIF0);
+    m32(ABOX_SFR + SFR_SPUM_CTRL0, SPUM_NSRC0_BITS, 0);
+    uaif_take(CAL_UAIF0);
+    K.t_uaif = 1;
+    m32(ABOX_SFR + SFR_QCH_DISABLE, QCH_UAIF0, QCH_UAIF0);
+    K.t_qch = 1;
+    /* 2: the ring and its guard zeroes */
+    memset(K.win, 0, CAL_RM_WINDOW);
+    sync_ram();
+    /* 3: the PCM task */
+    if ((r = pcmc(ABOX_PCM_OPEN, 0, 0, 0)) ||
+        (r = pcmc(ABOX_PCM_SET_BUFFER, CAL_CAP_IOVA, period, periods)) ||
+        (r = pcmc(ABOX_PCM_HW_PARAMS, CAL_RATE, 16, 2)) ||
+        (r = pcmc(ABOX_PCM_PREPARE, 0, 0, 0)))
+        return fail_cap("Calliope did not take the PCM set-up (OPEN / SET_BUFFER / HW_PARAMS / PREPARE)", r);
+    /* 4: start: the DMA first, then the UAIF's MIC side */
+    m32(ABOX_SFR + SFR_SPUM_CTRL3, 1U, 1U);
+    dram_take();
+    K.t_dram = 1;
+    K.triggered = 1;
+    if ((r = pcmc(ABOX_PCM_TRIGGER, 1, 0, 0)))
+        return fail_cap("Calliope did not take TRIGGER start", r);
+    m32(ABOX_SFR + SFR_UAIF_CTRL0(0), UAIF_MIC_EN, UAIF_MIC_EN);
+    K.capping = 1;
+    tinit(&t, "cal: capture: WDMA1 ");
+    tu(&t, periods);
+    ts(&t, " x ");
+    tu(&t, period);
+    ts(&t, " bytes at IOVA ");
+    tx(&t, CAL_CAP_IOVA);
+    ts(&t, " <- SIFM0 <- NSRC0 <- UAIF0 MIC; WDMA1 CTRL0 ");
+    tx(&t, r32(ABOX_SFR + SFR_WDMA1 + RDMA_CTRL0));
+    ts(&t, " BUF_STR ");
+    tx(&t, r32(ABOX_SFR + SFR_WDMA1 + RDMA_BUF_STR));
+    ts(&t, " STATUS ");
+    tx(&t, r32(ABOX_SFR + SFR_WDMA1 + RDMA_STATUS));
+    out(&t);
+    set_why("capturing through Calliope");
+    return 0;
+}
+
+uint32_t cal_cap_pos(uint32_t *status)
+{
+    if (!K.capping || !abox_up())
+        return CAL_NOPOS;
+    uint32_t st = r32(ABOX_SFR + SFR_WDMA1 + RDMA_STATUS);
+    if (status)
+        *status = st;
+    return pos_of(st, K.ring);
+}
+
+void cal_cap_stop(void)
+{
+    if (!K.opened)
+        return;
+    int up = have_hal && abox_up(), call = up && abox_state() == ABOX_ST_CALL;
+    if (up) {
+        if (K.triggered)
+            (void)pcmc(ABOX_PCM_TRIGGER, 0, 0, 0);
+        barrier(SFR_WDMA1, "capture: WDMA1 still enabled after 40 ms (Calliope's barrier): going on");
+        if (!call) {                            /* a call (one came without snd_suspend_for_call) owns UAIF0 MIC */
+            m32(ABOX_SFR + SFR_UAIF_CTRL0(0), UAIF_MIC_EN, 0);
+            if (K.t_qch)
+                m32(ABOX_SFR + SFR_QCH_DISABLE, QCH_UAIF0, K.qch);
+        }
+        if (K.t_uaif)
+            uaif_give(CAL_UAIF0, !call);
+        if (K.t_dram)
+            dram_give(!call);
+        (void)pcmc(ABOX_PCM_HW_FREE, 0, 0, 0);
+        (void)pcmc(ABOX_PCM_CLOSE, 0, 0, 0);
+        m32(ABOX_SFR + SFR_ROUTE_CTRL1, NSRC0_MASK, K.route1);
+        m32(ABOX_SFR + SFR_SPUM_CTRL0, SPUM_NSRC0_BITS, K.spum0);
+        m32(ABOX_SFR + SFR_SPUM_CTRL3, 1U, 1U);
+        say(call ? "capture: WDMA1 stopped and closed; the call's UAIF0 MIC and DRAM left on"
+                 : "capture: WDMA1 stopped and closed, UAIF0 and routes as found");
+    } else {
+        if (K.t_uaif)
+            uaif_give(CAL_UAIF0, 0);
+        if (K.t_dram)
+            dram_give(0);
+        say("capture: Calliope is no longer running: the capture is just forgotten");
+    }
+    K.capping = K.opened = K.triggered = K.t_uaif = K.t_dram = K.t_qch = 0;
+    set_why(E.playing ? (E.uaif ? "playing through Calliope to the amplifiers" : "playing through Calliope to the codec")
+                      : "off");
 }
 
 /* ======================================== the driver probe ======================================================== */
 static struct {
-    int level, step, active, booted, mapped, cfg, amp, found_pd, phase;
+    int level, step, active, booted, mapped, cfg, amp, mic, found_pd, phase, cphase;
     uint64_t t0, tm0, boot_ms;
-    uint64_t moved, sampled_us;
-    uint32_t last, st_first, st_last, ptr0, ptr1, polls, slices;
-    uint32_t rate[3], prate[3];
-    int ok[3], ran[3];
+    uint64_t moved, sampled_us, cmoved, csampled_us;
+    uint32_t last, st_first, st_last, ptr0, ptr1, polls, slices, cst_first, cst_last, crd, cskip;
+    uint32_t rate[3], prate[3], crate[2];
+    int ok[3], ran[3], cran[2], cok;
+    struct gz gz[2];                            /* the mic: [0] level 1's capture / level 2's baseline, [1] the tone */
+    struct gz *gzc;
+    struct gz_verdict heard;
 } P;
 
 /* the stream phases: 0 One UI's ring to UAIF1, 1 snd's ring to UAIF1 (only after 0 moved), 2 One UI's ring to UAIF0
@@ -460,7 +727,15 @@ static const struct { int uaif; uint32_t period, periods; const char *name; } ph
     { CAL_UAIF1, CAL_SND_PERIOD, CAL_SND_PERIODS, "snd's ring (32 x 2048) -> UAIF1" },
     { CAL_UAIF0, CAL_ONEUI_PERIOD, CAL_ONEUI_PERIODS, "One UI's ring (4 x 3840) -> UAIF0 (One UI's boot route)" },
 };
+/* the capture phases: 0 snd's ring (the engine's), 1 One UI's capture geometry (only after 0 did not move) */
+static const struct { uint32_t period, periods; const char *name; } cph[2] = {
+    { CAL_SND_PERIOD, CAL_SND_PERIODS, "snd's ring (32 x 2048)" },
+    { CAL_ONEUI_CPERIOD, CAL_ONEUI_CPERIODS, "One UI's ring (4 x 1920)" },
+};
 #define SETTLE_US 300000U                       /* Calliope's post-boot messages (log ring, dumps, gear) taken first */
+#define CSKIP 4800U                             /* level 2: the first 100 ms of the mic / of the tone not judged */
+#define RATE_OK(r) ((r) >= 182400U && (r) <= 201600U)
+enum { S_SETUP, S_BOOT, S_SETTLE, S_PLAY, S_PMEAS, S_CAP, S_CMEAS, S_OFF };
 
 static void dline(struct tb *t) { out(t); }
 static void dsay(const char *s)
@@ -497,11 +772,15 @@ static int setup(void)
         O.amp_probe = amp_probe;
         O.amp_receiver = amp_receiver;
         O.amp_off = amp_off;
+        O.codec_mic = codec_mic;
+        O.codec_off = codec_off;
         abox_hal_libsb(&kh, k_file, 0);
         (void)cal_hal_set(&kh);
         ops_set = 1;
     }
     amp_hal_set(audio_hal_libsb());
+    if (!codec_hal())
+        codec_hal_set(audio_hal_libsb());
 #endif
     if (!have_hal || !H.now_us || !H.file)
         return -1;
@@ -520,7 +799,7 @@ static int finish(int pass, const char *a, struct tb *rest)
         ts(&t, rest->b);
     dline(&t);
     P.active = 0;
-    P.step = 0;
+    P.step = S_SETUP;
     P.found_pd = -1;                            /* a later abort never powers the domain from a stale finding */
     return 1;
 }
@@ -532,6 +811,12 @@ static void put_back(void)
         O.amp_off();
     P.amp = 0;
     cal_play_stop();
+    cal_cap_stop();
+    if (P.mic && O.codec_mic)
+        (void)O.codec_mic(0);
+    if (P.mic && O.codec_off)
+        O.codec_off();
+    P.mic = 0;
     if (P.booted)
         abox_off();
     P.booted = 0;
@@ -640,28 +925,63 @@ static void tone_fill(void)
     sync_ram();
 }
 
-/* up to ~100 ms of 1 ms samples of RDMA0's position (and Calliope's messages every 10 ms); 0 ok, <0 Calliope fell */
+/* the mic's samples WDMA1 wrote since the last look (the left slot: AIF1TX1, the main mic) into the current filter */
+static void cap_take(void)
+{
+    const uint8_t *ring = cal_cap_buf();
+    uint32_t rb = cal_cap_ring_bytes(), pos = cal_cap_pos(0);
+    if (!ring || !P.gzc || pos == CAL_NOPOS)
+        return;
+    pos &= ~3U;
+    for (uint32_t guard = rb / 4U; P.crd != pos && guard--; P.crd = (P.crd + 4U) % rb) {
+        int16_t l = (int16_t)(ring[P.crd] | ring[P.crd + 1] << 8);
+        if (P.cskip) {
+            P.cskip--;
+            continue;
+        }
+        gz_put(P.gzc, l);
+    }
+}
+
+/* up to ~100 ms of 1 ms samples of RDMA0's and WDMA1's positions (and Calliope's messages and the mic's samples every
+ * 10 ms); 0 ok, <0 Calliope fell */
 static int measure_slice(void)
 {
     uint64_t t0 = now_us(), t = t0;
-    uint32_t last = cal_play_pos(&P.st_last);
+    uint32_t last = cal_play_pos(&P.st_last), clast = cal_cap_pos(&P.cst_last);
+    int play = cal_playing(), cap = cal_capping();
     unsigned n = 0;
-    if (!P.st_first)
+    if (play && !P.st_first)
         P.st_first = P.st_last;
+    if (cap && !P.cst_first)
+        P.cst_first = P.cst_last;
     while (t - t0 < 100000U) {
         if (!(n++ % 10U)) {
             P.polls++;
             if (abox_poll() < 0)
                 return -1;
+            cap_take();
         }
         H.delay_us(H.ctx, 1000);
-        uint32_t pos = cal_play_pos(&P.st_last);
-        if (pos != CAL_NOPOS && last != CAL_NOPOS)
-            P.moved += (pos + cal_ring_bytes() - last) % cal_ring_bytes();
-        last = pos;
+        if (play) {
+            uint32_t pos = cal_play_pos(&P.st_last);
+            if (pos != CAL_NOPOS && last != CAL_NOPOS)
+                P.moved += (pos + cal_ring_bytes() - last) % cal_ring_bytes();
+            last = pos;
+        }
+        if (cap) {
+            uint32_t pos = cal_cap_pos(&P.cst_last);
+            if (pos != CAL_NOPOS && clast != CAL_NOPOS)
+                P.cmoved += (pos + cal_cap_ring_bytes() - clast) % cal_cap_ring_bytes();
+            clast = pos;
+        }
         t = now_us();
     }
-    P.sampled_us += t - t0;
+    cap_take();
+    if (play)
+        P.sampled_us += t - t0;
+    if (cap)
+        P.csampled_us += t - t0;
     return 0;
 }
 
@@ -704,6 +1024,52 @@ static void phase_end(unsigned ph)
     dline(&t);
 }
 
+static void cap_begin(void)
+{
+    P.crd = 0;
+    P.cmoved = P.csampled_us = 0;
+    P.cst_first = P.cst_last = 0;
+    P.slices = 0;
+    gz_reset(&P.gz[0]);
+    gz_reset(&P.gz[1]);
+    P.gzc = &P.gz[0];
+    P.cskip = P.level == 2 ? CSKIP : 0U;
+}
+
+/* the capture's rate and the mic's level; the mic off and WDMA1 stopped */
+static void cap_end(unsigned c)
+{
+    struct tb t;
+    const struct gz *g = &P.gz[0];
+    P.cran[c] = 1;
+    P.crate[c] = P.csampled_us ? (uint32_t)(P.cmoved * 1000000U / P.csampled_us) : 0;
+    P.cok |= RATE_OK(P.crate[c]);
+    tinit(&t, "drvprobe: calliope: capture ");
+    ts(&t, cph[c].name);
+    ts(&t, ": WDMA1 STATUS moved ");
+    tu(&t, P.crate[c]);
+    ts(&t, " B/s over ");
+    tu(&t, P.csampled_us / 1000U);
+    ts(&t, " ms (STATUS ");
+    tx(&t, P.cst_first);
+    ts(&t, " .. ");
+    tx(&t, P.cst_last);
+    ts(&t, "); mic RMS ");
+    tu(&t, gz_rms(g));
+    ts(&t, " peak ");
+    tu(&t, g->peak);
+    ts(&t, P.mic ? " (codec mic on)" : " (codec mic NOT on)");
+    ts(&t, "; UAIF0 STATUS ");
+    tx(&t, r32(ABOX_SFR + SFR_UAIF_STATUS(0)));
+    dline(&t);
+    cal_cap_stop();
+    if (P.mic && O.codec_mic)
+        (void)O.codec_mic(0);
+    if (P.mic && O.codec_off)
+        O.codec_off();                          /* the codec back in reset */
+    P.mic = 0;
+}
+
 static void put_ver(struct tb *t)
 {
     uint32_t v = abox_version();
@@ -719,26 +1085,53 @@ static void put_rate(struct tb *t, unsigned ph)
     tu(t, P.rate[ph] ? P.rate[ph] : P.prate[ph]);
     ts(t, P.rate[ph] ? " B/s (STATUS)" : " B/s (pointers)");
 }
+/* tenths of a dB as "-12.3" */
+static void put_db(struct tb *t, int32_t d10)
+{
+    if (d10 < 0) {
+        tc(t, '-');
+        d10 = -d10;
+    }
+    tu(t, (uint64_t)d10 / 10U);
+    tc(t, '.');
+    tu(t, (uint64_t)d10 % 10U);
+}
+/* the capture's rates: "WDMA1 N B/s" (snd's ring) [", One UI's ring N B/s"] */
+static void put_crate(struct tb *t)
+{
+    ts(t, "WDMA1 ");
+    tu(t, P.crate[0]);
+    ts(t, " B/s");
+    if (P.cran[1]) {
+        ts(t, ", 4 x 1920 ring ");
+        tu(t, P.crate[1]);
+        ts(t, " B/s");
+    }
+}
 
-/* Steps: 0 set-up, 1 boot, 2 settle (300 ms of Calliope's post-boot messages), 3 start a phase, 4 measure it,
- * 5 off and the last line. */
+/* Steps: S_SETUP, S_BOOT, S_SETTLE (300 ms of Calliope's post-boot messages), S_PLAY / S_PMEAS (a playback phase),
+ * S_CAP / S_CMEAS (a capture phase), S_OFF (off and the last line).
+ * Level 1: the playback phases, then the capture phases. Level 2: the capture (1 s of baseline), then playback phase 0
+ * with the tone and the earpiece amp while the capture goes on, then everything off. */
 static int probe_active(unsigned *wait_ms)
 {
     struct tb t;
     int r;
     *wait_ms = 0;
     switch (P.step) {
-    case 0:
+    case S_SETUP:
         P.active = 1;
-        P.booted = P.mapped = P.cfg = P.amp = 0;
+        P.booted = P.mapped = P.cfg = P.amp = P.mic = 0;
+        P.cok = 0;
         for (unsigned i = 0; i < 3; ++i)
             P.ok[i] = P.ran[i] = 0, P.rate[i] = P.prate[i] = 0;
-        dsay(P.level == 1 ? "level 1 (silent): Calliope booted from VENDOR, 300 ms for its post-boot messages, then "
-                            "RDMA0 zeroes -> SIFS0 -> UAIF1 (amps off, codec in reset) through Calliope's PCM IPC: 1 s "
-                            "One UI's ring, then 0.5 s snd's ring if it moved, else 0.5 s to UAIF0 (One UI's boot "
-                            "route); abox_off; budget 12 s (boot <= 3.5 s)"
-                          : "level 2 (attended): Calliope booted, a 1 kHz tone at -24 dBFS -> UAIF1 -> the earpiece "
-                            "amp at its lowest level, 2 s; then everything off");
+        for (unsigned i = 0; i < 2; ++i)
+            P.cran[i] = 0, P.crate[i] = 0;
+        P.gzc = 0;
+        dsay(P.level == 1 ? "level 1 (silent): Calliope booted, 300 ms settle; RDMA0 zeroes -> UAIF1 (amps off) 1 s + "
+                            "0.5 s; WDMA1 <- UAIF0 mic 0.5 s; abox_off; budget 12 s"
+                          : "level 2 (quiet): Calliope booted; mic baseline 1 s, then 1 kHz -24 dBFS on the earpiece "
+                            "(amp level 0) 2 s while the mic listens (Goertzel); then everything off");
         if (abox_state() != ABOX_ST_OFF && abox_state() != ABOX_ST_FAILED)
             return finish(0, "ABOX is in use already (a call?): not touched", 0);
         P.found_pd = pd_on();
@@ -755,9 +1148,9 @@ static int probe_active(unsigned *wait_ms)
             return fail_out("RDMA0's ring could not be added to ABOX's SysMMU tables", t.b);
         }
         P.mapped = 1;
-        P.step = 1;
+        P.step = S_BOOT;
         return 0;
-    case 1: {
+    case S_BOOT: {
         uint64_t t0 = now_us();
         P.booted = 1;                           /* abox_off() even on a failure (abox.c already tore down) */
         r = abox_boot();
@@ -772,11 +1165,11 @@ static int probe_active(unsigned *wait_ms)
         tu(&t, P.boot_ms);
         ts(&t, " ms with the VENDOR reads");
         dline(&t);
-        P.step = 2;
+        P.step = S_SETTLE;
         P.tm0 = now_us();
         return 0;
     }
-    case 2: {
+    case S_SETTLE: {
         /* One UI opened RDMA0 ~1.3 s after BOOT_DONE; Calliope first sends its log ring, ~30 REPORT_DUMPs and a gear
          * request, one at a time through the RX slot. Take them before our PCM messages. */
         uint64_t t0 = now_us();
@@ -789,10 +1182,11 @@ static int probe_active(unsigned *wait_ms)
             return 0;
         dsay("1/4 boot: 300 ms after BOOT_DONE taken (Calliope's post-boot messages above)");
         P.phase = 0;
-        P.step = 3;
+        P.cphase = 0;
+        P.step = P.level == 2 ? S_CAP : S_PLAY;
         return 0;
     }
-    case 3: {
+    case S_PLAY: {
         const unsigned ph = (unsigned)P.phase;
         abox_fw_log_more(60);                   /* Calliope's own lines from the stream's start */
         abox_trace_rx(24);                      /* and the messages it sends, raw */
@@ -804,7 +1198,7 @@ static int probe_active(unsigned *wait_ms)
             if (ph == 0)
                 return fail_out("2/4 stream: RDMA0 did not start through Calliope", cal_why());
             dsay("2/4 stream: that phase did not start: see the cal: lines");
-            P.step = 5;
+            P.step = S_CAP;
             return 0;
         }
         if (P.level == 2) {
@@ -812,13 +1206,13 @@ static int probe_active(unsigned *wait_ms)
             if (!O.amp_probe || !O.amp_receiver || O.amp_probe() || O.amp_receiver(1, 0))
                 return fail_out("2/4 stream: the earpiece amp did not come on", 0);
             P.amp = 1;
-            dsay("2/4 stream: the tone plays on the earpiece now (amp level 0)");
+            dsay("2/4 stream: the tone plays on the earpiece now (amp level 0); the mic listens");
         }
         phase_begin();
-        P.step = 4;
+        P.step = S_PMEAS;
         return 0;
     }
-    case 4: {
+    case S_PMEAS: {
         const unsigned ph = (unsigned)P.phase;
         if (measure_slice())
             return fail_out("3/4 measure: Calliope stopped during the stream", abox_why());
@@ -833,11 +1227,88 @@ static int probe_active(unsigned *wait_ms)
             O.amp_off();
         P.amp = 0;
         cal_play_stop();
-        if (P.level == 1 && ph == 0) {
+        if (P.level == 2) {
+            gz_judge(&P.gz[1], &P.gz[0], &P.heard);
+            tinit(&t, "drvprobe: calliope: loopback: 1 kHz ");
+            put_db(&t, P.heard.over_base);
+            ts(&t, " dB over the baseline, ");
+            put_db(&t, P.heard.over_nb);
+            ts(&t, " dB over 700/1300 Hz (");
+            tu(&t, P.gz[1].blocks);
+            ts(&t, " x 20 ms; tone RMS ");
+            tu(&t, gz_rms(&P.gz[1]));
+            ts(&t, ", baseline RMS ");
+            tu(&t, gz_rms(&P.gz[0]));
+            ts(&t, "): heard ");
+            ts(&t, P.heard.heard ? "yes" : "no");
+            dline(&t);
+            cap_end(0);
+            P.step = S_OFF;
+        } else if (ph == 0) {
             P.phase = P.ok[0] || P.rate[0] || P.prate[0] ? 1 : 2;
-            P.step = 3;
+            P.step = S_PLAY;
         } else {
-            P.step = 5;
+            P.step = S_CAP;
+        }
+        return 0;
+    }
+    case S_CAP: {
+        const unsigned c = (unsigned)P.cphase;
+        abox_fw_log_more(30);
+        abox_trace_rx(12);
+        cal_trace(1);
+        tinit(&t, "drvprobe: calliope: capture: WDMA1 <- UAIF0 mic, ");
+        ts(&t, cph[c].name);
+        ts(&t, P.level == 2 ? ", 1 s of baseline first" : ", 0.5 s");
+        dline(&t);
+        if (O.codec_mic && !P.mic) {
+            if (O.codec_mic(1))
+                dsay("capture: the codec's mic did not come on (WDMA1 runs anyway)");
+            else
+                P.mic = 1;
+        }
+        if ((r = cal_cap_start(CAL_UAIF0, cph[c].period, cph[c].periods))) {
+            if (P.level == 2)
+                return fail_out("capture: WDMA1 did not start through Calliope", cal_why());
+            dsay("capture: WDMA1 did not start: see the cal: lines");
+            P.cran[c] = 1;
+            P.step = S_OFF;
+            return 0;
+        }
+        cap_begin();
+        P.step = S_CMEAS;
+        return 0;
+    }
+    case S_CMEAS: {
+        const unsigned c = (unsigned)P.cphase;
+        if (measure_slice())
+            return fail_out("capture: Calliope stopped during the capture", abox_why());
+        if (++P.slices == 1)
+            cal_dump("100 ms after capture TRIGGER");
+        if (P.csampled_us < (P.level == 2 ? 1100000U : 500000U))
+            return 0;
+        if (P.level == 2) {                     /* the baseline is in gz[0]; the tone's samples go to gz[1] */
+            P.gzc = &P.gz[1];
+            P.cskip = CSKIP;
+            tinit(&t, "drvprobe: calliope: capture: baseline RMS ");
+            tu(&t, gz_rms(&P.gz[0]));
+            ts(&t, " peak ");
+            tu(&t, P.gz[0].peak);
+            ts(&t, ", WDMA1 so far ");
+            tu(&t, P.csampled_us ? (uint32_t)(P.cmoved * 1000000U / P.csampled_us) : 0U);
+            ts(&t, " B/s");
+            dline(&t);
+            P.phase = 0;
+            P.step = S_PLAY;
+            return 0;
+        }
+        cal_dump("end of the capture");
+        cap_end(c);
+        if (c == 0 && !P.crate[0]) {
+            P.cphase = 1;
+            P.step = S_CAP;
+        } else {
+            P.step = S_OFF;
         }
         return 0;
     }
@@ -855,25 +1326,51 @@ static int probe_active(unsigned *wait_ms)
             return finish(0, "4/4 off: ABOX's CPU did not stop", 0);
         struct tb p;
         tinit(&p, "");
-        if (P.ok[0]) {
-            tinit(&p, "Calliope booted (");
+        if (P.ok[0] && P.cok && P.level == 2) {
+            ts(&p, "earpiece tone: heard by the mic: ");
+            ts(&p, P.heard.heard ? "yes (1 kHz " : "no (1 kHz ");
+            put_db(&p, P.heard.over_base);
+            ts(&p, " dB over baseline); Calliope ");
+            put_ver(&p);
+            ts(&p, ", RDMA0 ");
+            put_rate(&p, 0);
+            ts(&p, ", ");
+            put_crate(&p);
+            return finish(1, p.b, 0);
+        }
+        if (P.ok[0] && P.cok) {
+            ts(&p, "Calliope booted (");
             put_ver(&p);
             ts(&p, " in ");
             tu(&p, P.boot_ms);
-            ts(&p, P.level == 2 ? " ms), the earpiece tone played 2 s (did you hear it?); RDMA0 moved "
-                                : " ms), RDMA0 moved ");
+            ts(&p, " ms); RDMA0 ");
             put_rate(&p, 0);
-            ts(&p, " through it to UAIF1 (192000 expected)");
+            ts(&p, " to UAIF1");
             if (P.ran[1]) {
                 ts(&p, "; snd's 32 x 2048 ring ");
                 put_rate(&p, 1);
                 ts(&p, P.ok[1] ? "" : " NOT at rate");
             }
+            ts(&p, "; ");
+            put_crate(&p);
+            ts(&p, ", mic RMS ");
+            tu(&p, gz_rms(&P.gz[0]));
             return finish(1, p.b, 0);
+        }
+        if (P.ok[0]) {
+            ts(&p, P.crate[0] || P.crate[1] ? "capture: WDMA1 moved but not at 48 kHz: "
+                                            : "capture: WDMA1 did not move through Calliope (UAIF0 mic): ");
+            put_crate(&p);
+            ts(&p, "; RDMA0 ");
+            put_rate(&p, 0);
+            ts(&p, " ok");
+            return finish(0, p.b, 0);
         }
         if (P.rate[0] || P.prate[0]) {
             ts(&p, "3/4 measure: RDMA0 moved but not at 48 kHz: ");
             put_rate(&p, 0);
+            ts(&p, "; ");
+            put_crate(&p);
             return finish(0, p.b, 0);
         }
         ts(&p, "3/4 measure: RDMA0 did not move through Calliope to UAIF1");
@@ -881,7 +1378,8 @@ static int probe_active(unsigned *wait_ms)
             ts(&p, P.ok[2] ? "; to UAIF0 (One UI's boot route) it DID: " : "; to UAIF0 (One UI's boot route): ");
             put_rate(&p, 2);
         }
-        ts(&p, " (see the cal: ipc / abox: rx / abox: fw lines)");
+        ts(&p, " (see the cal: / abox: lines); ");
+        put_crate(&p);
         return finish(0, p.b, 0);
     }
     }
@@ -895,7 +1393,7 @@ int drv_calliope_probe(int level, unsigned *wait_ms)
     *wait_ms = 0;
     if (!P.active || P.level != level) {
         P.level = level;
-        P.step = 0;
+        P.step = S_SETUP;
         if (setup()) {
             dsay("FAIL no hardware access set up (HAL / clock / VENDOR reader missing)");
             return 1;
@@ -913,5 +1411,5 @@ void drv_calliope_abort(void)
     dsay("aborted: putting everything back");
     put_back();
     P.active = 0;
-    P.step = 0;
+    P.step = S_SETUP;
 }

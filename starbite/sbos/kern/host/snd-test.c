@@ -15,6 +15,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "snd.h"
+#include "goertzel.h"
 
 static int verbose, fails, checks;
 #define CHECK(c, ...)                                                                                                  \
@@ -683,6 +684,14 @@ static void t_capture(void)
     double hz = z / 2.0 / ((got - 1001) / 48000.0);
     CHECK(hz > 430 && hz < 450, "the left slot (main mic) comes through: %.1f Hz", hz);
     CHECK(snd_cap_level() > 4000 && snd_cap_level() < 5000, "level %u (triangle 8000: RMS 4619)", snd_cap_level());
+    /* goertzel.h on the bypass mic: a 440 Hz triangle is no 1 kHz tone (its 3rd harmonic is 1320 Hz, a neighbour) */
+    struct gz g0, g1;
+    struct gz_verdict v;
+    gz_reset(&g0), gz_reset(&g1);
+    for (unsigned i = 1001; i < got; ++i)
+        gz_put(i < 1001 + 9600 ? &g0 : &g1, m[i]);
+    gz_judge(&g1, &g0, &v);
+    CHECK(!v.heard && g1.blocks >= 10, "the 440 Hz mic is not heard as 1 kHz (%d / %d tenths)", v.over_base, v.over_nb);
     CHECK(!aud_is_off() && snd_busy(), "busy while capturing");
     snd_cap_close();
     CHECK(ev_at("uaif0_mic_off", 0) >= 0 && ev_at("wdma_off", 0) > ev_at("uaif0_mic_off", 0) &&
