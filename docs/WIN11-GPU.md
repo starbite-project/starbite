@@ -2251,6 +2251,26 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
     reuses a BO for the same flags.
 - **T57** = T55 + this KMD + the 0154 GD driver; A = async, B = async + cached (`glcached`).
 
+### 6.63 T56 read (VIS2): HWND swap chains never show; DComp swap chain present rejected; a NULL-layout draw crash (sb-patches 0155) (2026-11-13)
+
+- **Shots (sbcomp, 1200x700 topmost window):** GDI yellow shows. HWND FLIP_SEQUENTIAL (red) and HWND DISCARD (magenta):
+  **the window is absent**, the console behind it shows. sbumd's side is fine: presents at 64/67 fps (Present(1, 0),
+  vsync-paced), centre colours right, `pfnPresentCb` succeeds; the flip-model swap chain is emulated by the runtime
+  (sbumd stats: "rotate id 638", every present Flags 0x1 = Blt, no destination).
+- **DComp swap chain (dcsc):** the first present's `pfnPresentCb(src, dst 0)` fails **0x88760873
+  (D3DDDIERR_INVALIDHANDLE)**, then DXGI_ERROR_DEVICE_REMOVED. First explicit error on this path.
+- **DComp surface (dcsurf): sbumd crashed**, 0xC0000005 at `panfrost_draw_vbo+0x72c` reading 0x348: `ctx->vertex`
+  (offset 0xE060, the vertex-elements state, found by an offsetof probe) was NULL. DirectComposition's internal draw has
+  no input layout (IASetInputLayout(NULL), positions from SV_VertexID), which D3D allows; d3d10umd's `update_velems`
+  bound nothing. **The sbtex "vertexid" crash is the same address** (T56 sbtex.exe-6256).
+- **sbumd's DXGI DDI is 1.0** (Device.cpp fills DXGI_DDI_BASE_FUNCTIONS only; D3D10.0/10.1/11.0 interfaces), while the
+  KMD reports WDDM 1.3 without DirectFlip. Working theory: Windows takes the WDDM 1.2+ presentation route for this
+  adapter, and a DXGI 1.0 UMD's emulated windowed presents never become something DWM composes (and a composition
+  swap chain's present is refused). The ETW traces that would show it need administrator rights (logman: "Access is
+  denied" in the non-elevated autotest); a RunOnce-elevated capture is the way.
+- **0155 (sbumd 3a59aeec):** `update_velems` binds an empty vertex-elements state when no layout is set. T58 checks it
+  (sbtex vertexid should exit 0) and reruns VIS2 so the DComp surface path can be seen.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

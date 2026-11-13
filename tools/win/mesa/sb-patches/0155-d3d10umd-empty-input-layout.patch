@@ -1,0 +1,41 @@
+From fbc32c39a42a84609ea8196995e7d4d0c3b4b037 Mon Sep 17 00:00:00 2001
+From: sb <sb@localhost>
+Date: Fri, 13 Nov 2026 08:20:14 +0200
+Subject: [PATCH] 0155: d3d10umd binds an empty vertex-elements state when no
+ input layout is set
+
+---
+ src/gallium/frontends/d3d10umd/Draw.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/gallium/frontends/d3d10umd/Draw.cpp b/src/gallium/frontends/d3d10umd/Draw.cpp
+index 261f169..5a60692 100644
+--- a/src/gallium/frontends/d3d10umd/Draw.cpp
++++ b/src/gallium/frontends/d3d10umd/Draw.cpp
+@@ -32,6 +32,7 @@
+ 
+ 
+ #include "Draw.h"
++#include <string.h>
+ #include "State.h"
+ #include "Shader.h"
+ 
+@@ -64,6 +65,15 @@ update_velems(Device *pDevice)
+       for (unsigned i = 0; i < state->count; i++)
+          state->velems[i].src_stride = pDevice->vertex_strides[state->velems[i].vertex_buffer_index];
+       cso_set_vertex_elements(pDevice->cso, state);
++   } else {
++      /* Starbite (sb-patches/0155, docs/WIN11-GPU.md 6.63): D3D10/11 allow a draw with no input layout (IASetInputLayout
++       * (NULL): the vertex shader makes its positions from SV_VertexID, as DirectComposition's and d3d11's own internal
++       * draws do). Nothing was bound then, so the driver kept the layout of an earlier draw, or none at all: Panfrost's
++       * draw dereferenced a NULL vertex-elements state (T56: sbcomp's DComp surface, sbumd!panfrost_draw_vbo+0x72c, read
++       * 0x348; the sbtex "vertexid" crash). Bind an empty one: no vertex inputs, as D3D says. */
++      struct cso_velems_state empty;
++      memset(&empty, 0, sizeof empty);
++      cso_set_vertex_elements(pDevice->cso, &empty);
+    }
+ 
+    pDevice->velems_changed = false;
+-- 
+2.43.0
+
