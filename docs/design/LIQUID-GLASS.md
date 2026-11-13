@@ -62,7 +62,8 @@ then    the content on the glass (glyphs: vibrant, light/dark by the element's f
 ### 2.2 The Liquid Glass slider (iOS 26.1 toggle → iOS 27 continuous slider)
 - iOS 26.1 added Settings > Display & Brightness > Liquid Glass: Clear / Tinted. iOS 27 replaced it with a continuous
   slider "clear ↔ tinted" (A).
-- **Starbite exposes the same slider**: Settings > Display & Brightness > Liquid Glass, `s ∈ [0, 1]`. Default
+- **Starbite exposes the same slider** where iOS 27 has it: Settings > **Appearance** > Liquid Glass (A, iOS 27 User
+  Guide; see specs/spec-settings.md), `s ∈ [0, 1]`. Default
   **s = 0.2** (E: between iOS 26's "Clear" default and iOS 27's higher-contrast default).
 - Every material constant below is a function of s (3P, iOS 27 fits).
 
@@ -286,7 +287,7 @@ so the track shows through, magnified. This is the "magnifier" preset: band 8, a
 | G14 | **Clear variant + 35 % dim** | `TK_GLASS_SAT_CLEAR` only | the clear preset; dim over bright backdrop | preset id per quad | GPU + UI | none |
 | G15 | **Tint** | none | the §2.4 tint for prominent buttons and active CC tiles | tint rgb + alpha per quad | GPU + UI | +4 ALU |
 | G16 | **In-app glass is fake** | apps draw a flat dark "glass" | real lens quads for nav circles, tab bars, toolbars, search, sheets, the keyboard panel | UI: app bars as glass shapes in their layer (`tk_layer_glass_shape`) over a live backdrop of the app's content | UI | live backdrop per app frame (already budgeted for the lock screen) |
-| G17 | **Accessibility + the slider** | none | Settings > Display & Brightness > Liquid Glass slider; Reduce Transparency / Increase Contrast / Reduce Motion | the shell passes s and flags into the preset tables | UI | none |
+| G17 | **Accessibility + the slider** | none | Settings > Appearance > Liquid Glass slider; Reduce Transparency / Increase Contrast / Reduce Motion | the shell passes s and flags into the preset tables | UI | none |
 | G18 | **Dispersion off** | v8 had dispersion ("refraction, dispersion, rim...") | **0** for regular and clear | make sure nothing adds it | GPU | − |
 | G19 | **Light during lock / unlock** | fixed | A: lights travel around the material during lock/unlock: rotate L by up to 40° with the unlock progress | one float per frame | GPU | none |
 

@@ -60,7 +60,7 @@ session (starbite-os).
 | # | Item | Note | Size |
 |---|---|---|---|
 | 27 | **Light appearance** | All of §15's light column; glass presets already have light variants. A Display & Brightness "Appearance" choice. Needs every literal colour behind the table from #1 | L |
-| 28 | **Liquid Glass slider + accessibility** (G17) | Settings > Display & Brightness > Liquid Glass (Clear ↔ Tinted); Accessibility: Reduce Transparency / Increase Contrast / Reduce Motion / Reduce Bright Effects | M |
+| 28 | **Liquid Glass slider + accessibility** (G17) | Settings > **Appearance** > Liquid Glass (iOS 27's place; Clear ↔ Tinted); Accessibility: Reduce Transparency / Increase Contrast / Reduce Motion / Reduce Bright Effects | M |
 | 29 | **Glass merging (G8) + morph (G11)** | the tab bar's selection and search circle, CC expansion, menus | L (GPU) |
 | 30 | **Lock clock iOS 26** | the glass numerals: a lens-glass text mask; adaptive height; weight choice | L |
 | 31 | **Camera, Clock tabs, Calculator iOS 26, Weather sky** | audit "Later" items, unchanged | M each |

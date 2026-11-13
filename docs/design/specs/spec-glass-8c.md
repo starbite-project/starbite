@@ -27,7 +27,7 @@ in [../LIQUID-GLASS.md](../LIQUID-GLASS.md); G numbers refer to its §6.2.
 | 9 | **G13: adaptive shadow on the GPU** | Shadows are baked and constant. iOS darkens more over text. iOS 27 leans on the contour, so this is low | Darken the backdrop by .10-.14 × a detail factor from the variance of diffuse − sharp (needs G3) | comp2 | S |
 | 10 | **G8: merging (smooth union)** | Needed for the tab bar's selection and search circle, CC's expand and the keyboard's balloon (shell_kb.inc already does a CPU smin) | N ≤ 4 rects per lens quad; `smin` with angular k (§3.3); normals by central differences | lens quad layout + comp2 | L |
 | 11 | **G11: morph** | Button → menu / popover / sheet | Toolkit: one spring drives rect, radius, A, h and the preset | UI | M |
-| 12 | **G17: the slider + accessibility** | Settings > Display & Brightness > Liquid Glass; Reduce Transparency / Increase Contrast / Reduce Motion / Reduce Bright Effects | `LENS_S` becomes a runtime value; flags into lens_make | UI + lens.h | S |
+| 12 | **G17: the slider + accessibility** | Settings > **Appearance** > Liquid Glass (iOS 27's place; spec-settings.md); Reduce Transparency / Increase Contrast / Reduce Motion / Reduce Bright Effects | `LENS_S` becomes a runtime value; flags into lens_make | UI + lens.h | S |
 | 13 | **G19: light during lock / unlock** | iOS 27 dropped tilt-driven highlights. Keep the fixed light | — | — | skip |
 
 **Note: iOS 27 scroll edge.** iOS 27 changed the default scroll edge to "hard" (a near-opaque band + 0.5 pt border), and

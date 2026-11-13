@@ -146,13 +146,25 @@ unless they say "@402".
 **Interactions**
 - Tap a row → the caller's **Info** page (§2.5.6): a contact's card, or the number's page with **Create New
   Contact / Add to Existing Contact** (A). Tap the call button → dial at once.
-- **Swipe left** on a row (A/3P): trailing actions **Remind Me** (blue, clock glyph) and **Delete** (red, trash
-  glyph). A full swipe deletes (A: "Swipe a call all the way to the left"). Remind Me opens a menu: "In 1 hour",
-  "Tonight", "Tomorrow", "Custom…" (3P TB) → a local reminder that posts a notification. Reminder rows show at the
-  top of Calls (3P TB): a 44 row with a clock glyph, "Call back <name>" and the time (E).
-- **Long-press a row** → context menu (IR §3.3). For a known contact: "Call", "Send Message", "Add to Favorites",
-  "Delete from Recents" (red). For an unknown number: "Call", "Send Message", "Create New Contact", "Add to Existing
-  Contact", "Delete from Recents" (red) (A: items exist; E: order).
+- **Swipe left** on a row (A/3P; M TB "Reminders" screenshot): the row turns into a **light grey rounded card**
+  (systemGray6, radius ≈ 24, full row height) that follows the finger left. Two **round action buttons Ø 50** are
+  revealed in the freed space, not full-height blocks: **Remind Me** (systemBlue, white clock glyph 24) and
+  **Delete** (systemRed, white trash glyph 24). Delete is outermost, its right edge **11** from the screen edge, gap
+  **10** between the circles.
+  - The S9 centres are x **309 / 368**, on the row's centre line.
+  - A full swipe (past 60 % of the width) leaves only the red circle and deletes (A: "Swipe a call all the way to
+    the left").
+  - Remind Me opens a glass menu over the row (M TB). Header "**Call Back Reminder**" (15 / 400 secondaryLabel),
+    then **Remind Me in 1 Hour**, **Remind Me Tonight**, **Remind Me Tomorrow**, **Remind Me Later…** (17 / 400, row
+    pitch 42). Later… opens a date-time picker sheet.
+  - The result is a local reminder that posts a notification. Reminder rows show at the top of Calls (3P TB): a 44
+    row with a clock glyph, "Call back <name>" and the time (E).
+- **Long-press a row** (M TB) → the row lifts as a **white capsule card** (≈ 358 x 67, radius ≈ 33, shadow), the rest
+  dims grey (≈ black 20 %). A glass menu sits above it, aligned right: **Message ›**, **Call ›** (submenus listing the
+  contact's numbers), (iOS: Mail › → **omit**), separator, **Delete** (red, trash glyph).
+  - Unknown number: **Message**, **Call**, **Create New Contact**, **Add to Existing Contact**, separator, **Delete**
+    (A: the add items exist; E: order).
+  - Menu rows pitch 42, 17 / 400 label, 22 pt glyph at x +24, chevron at the right inset 24.
 - Favourite tile: tap = call (A: "To contact someone in your Favorites, tap their name"). Long-press → menu: the
   contact's numbers and methods ("Call mobile", "Message mobile"), "Edit Favorites", "Remove from Favorites" (red)
   (E). In Edit Favorites, tiles jiggle (IR §9.2) with a **"−" badge** top-left; drag to reorder; "+" top right adds
