@@ -839,7 +839,8 @@ static void frame(void)
             shell_time("idle (after a gesture)", si0);
             fb_idle = tk_us() - si0;
         }
-        if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);   /* the rest of the idle work, a turn at a time */
+        if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 20, 0);   /* the rest of the idle work, a turn at a time (cp7l: 20 ms
+                                                                       * apart, was 40: ~30 pieces after Emergency took 1.2 s) */
         clock_again();                                               /* P2z: the Clock's next digit */
         kt_set(KT_UI, 21, sb_ms(), perf_tail_ms(), 0);   /* back to the screen-on clock unless something moves again (1.0: 1.5 s in normal mode) */
         kt_set(KT_UI, 23, sb_ms(), 5000, 0);        /* and the band workers off after 5 s */
@@ -1336,7 +1337,7 @@ void next_ktimer(unsigned id)
             uint64_t si0 = tk_us();
             sh_idle();
             shell_time("idle", si0);                  /* cp7: named when it is slow */
-            if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);
+            if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 20, 0);   /* cp7l: 20 ms apart (was 40) */
         } else
             kt_set(KT_UI, 24, sb_ms(), 200, 0);
         return;
