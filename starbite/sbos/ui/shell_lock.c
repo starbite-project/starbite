@@ -3984,6 +3984,7 @@ static void own_strip(int a, int i)
     if (KB.want || ap_slim(k)) kb_slim(&appst[i]);   /* B3 / B5: one trim: a strip cut to what it holds (gone if empty) */
     tk_layer_prepare(&appst[i]);
 }
+static void wf_list_build(void);
 static void own_extras(int a)
 {
     const char *k = APPS[a].k;
@@ -3995,6 +3996,7 @@ static void own_extras(int a)
     if (lx_is(k)) lx_build();
     ck_extras_of(k);                                 /* helper B5: the Clock's and the Calculator's layers */
     sv_extras(k);                                    /* survival-next: the tools' live layers */
+    wf_list_build();                                 /* 8b: Settings > Wi-Fi's list (before cm_extras turns an unused one off) */
     cm_extras(k);                                    /* helper I */
     kb_commit();                                     /* B3: the keyboard up or down, as the page drew */
     relink();
@@ -5003,6 +5005,7 @@ static int pc_gate_launch(unsigned id);             /* Track A: shell_passcode.i
 #include "shell_switcher.inc"                       /* helper D: the app switcher */
 #include "shell_camera.inc"                         /* the Camera on Track A's front-camera driver */
 #include "shell_apps.inc"                           /* helper B5: the lists (SCV), the avatars, the dock's badges */
+#include "shell_wifi_list.inc"                      /* 8b: Settings > Wi-Fi scrolls (on SCV) */
 #include "shell_comms.inc"                          /* helper I: Phone and Messages, the call screen */
 #include "shell_power.inc"                          /* P3x: Power held: slide to power off, Restart, Cancel */
 #include "shell_settings.inc"                       /* helper B2: Settings */

@@ -231,13 +231,16 @@ static sh_wifi_t HW;
 static void hw_push(void) { sh_wifi(&HW); }
 int sh_wifi_power(int on)
 {
-    static const char *const N[4] = { "Home Wi-Fi", "Guest", "Upstairs 5G", "Cafe Corner" };
-    static const int R[4] = { -48, -55, -67, -80 }, S[4] = { 1, 0, 1, 1 }, B[4] = { 1, 0, 1, 0 };
+    /* 8b: a busy street's worth (12), so the page's list scrolls on the host too */
+    static const char *const N[12] = { "Home Wi-Fi", "Guest", "Upstairs 5G", "Cafe Corner", "Neighbour", "Library Free",
+                                       "Printer-Direct", "Kitchen", "Garage", "Studio 5G", "Bakery", "Hotspot 7" };
+    static const int R[12] = { -48, -55, -67, -80, -70, -72, -74, -76, -78, -82, -84, -86 };
+    static const int S[12] = { 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1 }, B[12] = { 1, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0 };
     memset(&HW, 0, sizeof(HW));
     HW.state = on ? SH_WIFI_UP : SH_WIFI_OFF;
     if (on) {
-        HW.nnets = 4;
-        for (int i = 0; i < 4; i++) {
+        HW.nnets = 12 < SH_WIFI_NETS ? 12 : SH_WIFI_NETS;
+        for (int i = 0; i < HW.nnets; i++) {
             strcpy(HW.nets[i].ssid, N[i]);
             HW.nets[i].rssi = R[i], HW.nets[i].secure = S[i], HW.nets[i].band5 = B[i];
         }

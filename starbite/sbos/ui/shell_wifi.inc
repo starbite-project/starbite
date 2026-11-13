@@ -123,7 +123,7 @@ static int sep_word(tk_rect *r, tk_rect *g, float *rad, tk_col *c, float x, floa
  * scanning) with the networks heard and "Scan Again" */
 #define WF_Y0 (PUSHED_TOP - 8)
 #define WF_SWX (LG_RE - 16 - KSW_W)
-typedef struct { float sw, conn, foot, test, tfoot, net, scan; int n, idx[8]; } wlay;
+typedef struct { float sw, conn, foot, test, tfoot, net, scan, end; int n, idx[SH_WIFI_NETS]; } wlay;
 static int wf_busy(void) { return WF.state == SH_WIFI_JOINING || WF.state == SH_WIFI_DHCP; }
 static float wf_foot_h(const char *t) { return t && t[0] ? d_group_foot(0, 0, t) : 0; }
 static const char *wf_status(void) { return WF.state == SH_WIFI_CONNECTED ? 0 : wf_state_text(); }
@@ -146,15 +146,17 @@ static void wf_lay(wlay *L)
         foot = WF.fetch_state == 2;
     }
     L->n = 0;
+    L->end = y;
     if (!WF_ON()) return;
     y += LG_GAP + (foot ? 12 : 0);
     L->net = y;
-    int room = (int)((H_PT - 40 - y) / LG_ROW) - 1;      /* the rows that fit above the home bar ("Scan Again" last) */
-    for (int i = 0; i < WF.nnets && L->n < 8 && L->n < room; i++) {
+    /* 8b (gap list B8): every network heard, the page scrolls (wf_list_build: the shared list) */
+    for (int i = 0; i < WF.nnets && L->n < SH_WIFI_NETS; i++) {
         if (WF.state == SH_WIFI_CONNECTED && !tk_strcmp(WF.nets[i].ssid, WF.ssid)) continue;
         L->idx[L->n++] = i;
     }
     L->scan = L->net + LG_ROW * L->n;
+    L->end = L->scan + LG_ROW;
 }
 
 /* a network's row: the name (and 5G), the lock and the bars at the right; dim while another one joins */
@@ -180,12 +182,17 @@ static void wf_foot_line(dc *d, float y, const char *t, int f, tk_col c)
 {
     d_text_box(d, f, 13, LG_TX, bl(f, 13, y), LG_W - 32, 0, t, 0, TK_TNUM, c, 0);
 }
+static void wf_list_body(dc *d);
 static void wf_list(dc *d)
+{
+    d_back(d, W(1));                       /* P3p (P3j-13): iOS 26's glass back and the inline title */
+    d_navtitle(d, "Wi-Fi");
+    /* 8b: the rest is the shared scrolling list's (wf_list_build, from own_extras) */
+}
+static void wf_list_body(dc *d)
 {
     wlay L;
     wf_lay(&L);
-    d_back(d, W(1));                       /* P3p (P3j-13): iOS 26's glass back and the inline title */
-    d_navtitle(d, "Wi-Fi");
     int on = WF_ON();
     d_group(d, L.sw, L.conn >= 0 ? 2 * LG_ROW : LG_ROW);
     d_row(d, L.sw, LG_ROW, 0, "Wi-Fi", 0, 0, L.conn < 0, INK, WF_SWX - 12);
@@ -242,9 +249,21 @@ static void wf_list(dc *d)
         d_row(d, L.scan, LG_ROW, 0, sc ? "Scanning\xe2\x80\xa6" : "Scan Again", 0, 0, 1, sc ? C_LABEL3 : KIT_BLUE(), 0);
     }
 }
+/* 8b (gap list B8): the page scrolls on the shared list (shell_wifi_list.inc, after shell_apps.inc's SCV) */
+static int wfl_on;
+static uint32_t wf_gen;                     /* the page's look changed (sh_wifi): its top item drawn again */
+static float wf_y(float y);                 /* a screen point as the page's (the list scrolled) */
+static float wf_ls_s(void);                 /* the list's scroll now (0: none) */
 /* the spinner's place (shell_settings.inc's strip spinner): beside the switch while the radio starts, beside
  * "Networks" while it scans, at the joining network's right while it joins */
+static int wf_spin_at_c(float *cx, float *cy);
 static int wf_spin_at(float *cx, float *cy)
+{
+    int k = wf_spin_at_c(cx, cy);
+    if (k) *cy -= wf_ls_s();                   /* 8b: where it is on the screen (placed when the page is built) */
+    return k;
+}
+static int wf_spin_at_c(float *cx, float *cy)
 {
     if (WV.view) return 0;
     wlay L;
@@ -355,9 +374,10 @@ static void wifi_tap(float x, float y)
         build_app_page(AP.a);
         return;
     }
+    if (BACK_HIT(x, y)) { AS.sub = 0; build_app_page(AP.a); return; }
+    y = wf_y(y);                               /* 8b: the list scrolls */
     wlay L;
     wf_lay(&L);
-    if (BACK_HIT(x, y)) { AS.sub = 0; build_app_page(AP.a); return; }
     if (x < LG_X || x >= LG_RE) return;
     if (y >= L.sw && y < L.sw + LG_ROW) {
         int on = !WF_ON();
@@ -410,6 +430,15 @@ static int wf_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
         return 0;
     }
     if (x < LG_X || x >= LG_RE) return 0;
+    static int inner;                          /* 8b: the list's scroll (the lights are drawn on the screen) */
+    float sy = inner ? 0 : wf_y(y) - y;
+    if (sy != 0) {
+        inner = 1;
+        int k = wf_press(x, y + sy, r, g, rad, c);
+        inner = 0;
+        if (k) { r->y -= sy; g->y -= sy; }
+        return k;
+    }
     wlay L;
     wf_lay(&L);
     if (y >= L.sw && y < L.sw + LG_ROW) return sep_switch(r, g, rad, c, WF_SWX, L.sw + (LG_ROW - KSW_H) / 2);
@@ -425,6 +454,7 @@ static int wf_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
 void sh_wifi(const sh_wifi_t *w)
 {
     int was_on = WF_ON(), was_bar = SB_WIFI;
+    wf_gen++;                                   /* 8b: the list's top item is drawn again */
     WF = *w;
     SB_WIFI = WF.state == SH_WIFI_CONNECTED;
     CCS.wifi = WF_ON();
