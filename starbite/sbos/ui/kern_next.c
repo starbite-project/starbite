@@ -30,6 +30,7 @@
 #include "bt.h"                         /* Track A: drivers for the shell (the end of this file) */
 #include "cam.h"
 #include "snd.h"                         /* Track A, cp7: sound for the shell (the end of this file) */
+#include "usb.h"                         /* 8b: the USB console (Settings > Developer) */
 #include "shub_more.h"
 #include "bathealth.h"
 #include "haptic.h"
@@ -3129,8 +3130,22 @@ static void drv_screen(int on)
     if (ab_on) kt_set(KT_UI, KT_DRV_AUTO, sb_ms(), 300, 0);
 }
 static void bt_kbd_init(void);                       /* Track A, cp7: the keyboard's key store (below) */
+/* 8b (Track A; the drivers' usb.c): the read-only USB console behind Settings > Developer > USB Console, off by
+ * default (pref dev.usb, restored at the bake's end); never in a self test (the probe drives USB there) */
+void sh_usb_console(int on)
+{
+    on = !!on;
+    sh_pref_set_int("dev.usb", on);
+#ifndef SBOS_SELFTEST_NEXT
+    if (!sbos_selftest_enabled) usb_enable(on);
+#endif
+}
+int sh_usb_console_on(void) { return sh_pref_int("dev.usb", 0) == 1; }
 static void drv_after_bake(void)
 {
+#ifndef SBOS_SELFTEST_NEXT
+    if (!sbos_selftest_enabled && sh_pref_int("dev.usb", 0) == 1) usb_enable(1);   /* 8b: the Developer switch kept */
+#endif
     bt_kbd_init();
 #ifdef SBOS_SELFTEST_NEXT
     sb_log("next: drivers: the haptic level, Auto-Brightness and the LED policy would start (a dry run: the self test)");

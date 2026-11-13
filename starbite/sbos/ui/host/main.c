@@ -499,6 +499,9 @@ int sh_city_get(int i, const char **name, const char **country, int *tz, int *la
     if (lon_e4) *lon_e4 = c->lon_e4;
     return 0;
 }
+static int host_usb;
+void sh_usb_console(int on) { host_usb = !!on; }
+int sh_usb_console_on(void) { return host_usb; }
 int sh_tz_count(void) { return tzdb_n; }
 const char *sh_tz_name(int i, const char **city)
 {
