@@ -64,7 +64,18 @@ static tk_layer aqc[AQ_NCH], aqh, aqtb, aqtg;
  * by the last start this boot (the phone's first: ~35 s to HELLO + the store's table, 7u's self test) */
 static tk_layer aqbt, aqbf;
 static tk_layer aqit;
-static tk_layer aqtp;                            /* the tab bar's selected pill: a solid that slides (spec 2.1.1) */
+static tk_layer aqtp;
+/* the product page's screenshots (spec 2.3.4): Track E's captures on card p1 /starbite/linux/shots/<id>-<n>.jpg
+ * (720 x 1280 baseline JPEG), decoded one after another through Photos' decoder (dj_*) at the shown size into their
+ * own layers (a sideways swipe moves layers, nothing is drawn again); at most three, freed when the page goes */
+#define SS_DIR "/starbite/linux/shots"
+#define SS_H 235.0f
+#define SS_W (SS_H * 9 / 16)
+#define SS_GAP 9.0f
+static tk_layer aqss[3];
+static struct { char pkg[40]; int n, k, active, loading, hdrag; char file[3][64]; uint64_t size[3]; float y, x, v, to, x0, sx0; } SS = { "", 0, 0, 0, -1, 0, { "", "", "" }, { 0, 0, 0 }, 0, 0, 0, 0, 0, 0 };
+static struct { char n[48]; uint64_t sz; } SSD[160];
+static int ss_nd = -1;                            /* the tab bar's selected pill: a solid that slides (spec 2.1.1) */
 static struct { float x, v, to; int set; } TP;
 /* the story's zoom (iOS: the Today card grows into the story, matched geometry, spring response 0.45 damping 0.85;
  * the story shrinks back into its card on close or a drag down): aqz the card's face redrawn once at card size and
@@ -1043,6 +1054,17 @@ static float pg_app(pctx *c)
         y += 34;
     }
     y += 14;
+    /* Preview (spec 2.3.4): the screenshots, 235 tall, r 22, 9 apart; placeholders until each is decoded */
+    if (SS.n && !tk_strcmp(SS.pkg, p->pkg)) {
+        y = aq_sec(c, y + 4, "Preview", 0, 0, 0);
+        SS.y = y;
+        if (vis(c, y, SS_H))
+            for (int k = 0; k < SS.n; k++) {
+                float x = MARGIN + k * (SS_W + SS_GAP);
+                if (x < 390 && !aqss[k].bmp.px) d_rrect(c->d, x, y, SS_W, SS_H, 22, C_CARD);
+            }
+        y += SS_H + 18;
+    }
     /* What's New (iOS: the section, the version and its notes); ours: the newest version and where it comes from */
     {
         unsigned m = AQ.pick ? (unsigned)AQ.pick : p->def_method;
@@ -1211,6 +1233,97 @@ static float pg_app(pctx *c)
         }
     }
     return y;
+}
+/* ---- the screenshots ---- */
+static void ss_free(void)
+{
+    if (SS.loading >= 0 && DJ.kind) dj_free();
+    SS.loading = -1;
+    for (int k = 0; k < 3; k++) { relayer(&aqss[k]); aqss[k].hidden = 1; }
+    SS.pkg[0] = 0; SS.n = 0; SS.x = SS.v = SS.to = 0; SS.hdrag = 0;
+}
+static void ss_list(void)
+{
+    if (sh_card_mount() != SH_CARD_READY) return;   /* (still mounting, or no card: asked again at the next page) */
+    ss_nd = 0;
+    sh_dirent_t *e = tk_alloc(sizeof(sh_dirent_t) * 32);
+    if (!e) return;
+    for (int first = 0; ss_nd < 160;) {
+        int n = sh_card_list(SS_DIR, e, 32, first);
+        if (n <= 0) break;
+        for (int k = 0; k < n && ss_nd < 160; k++)
+            if (!e[k].dir && tk_strlen(e[k].name) < 48) { lx_scopy(SSD[ss_nd].n, e[k].name, 48); SSD[ss_nd].sz = e[k].size; ss_nd++; }
+        if (n < 32) break;
+        first += n;
+    }
+    tk_free(e);
+}
+static void ss_next(void)
+{
+    SS.loading = -1;
+    for (int k = 0; k < SS.n; k++)
+        if (!aqss[k].bmp.px) {
+            SS.loading = k;
+            dj_begin(1, SS.file[k], SS.size[k], (int)(PT(SS_W) + .5f), (int)(PT(SS_H) + .5f));
+            return;
+        }
+}
+/* the page's shots: the card's files for this app (the listing read once per opening of the store) */
+static void ss_sync(void)
+{
+    if (!AQ.app || AQ.story) { if (SS.pkg[0]) ss_free(); return; }
+    if (!tk_strcmp(SS.pkg, AQ.pkg)) return;
+    ss_free();
+    lx_scopy(SS.pkg, AQ.pkg, 40);
+    if (ss_nd < 0) ss_list();
+    for (int n = 1; n <= 3 && ss_nd > 0; n++) {
+        char want[64], nb[4];
+        aq_dec(nb, n);
+        AQS(want, AQ.pkg, "-", nb, ".jpg");
+        for (int k = 0; k < ss_nd; k++)
+            if (!tk_strcmp(SSD[k].n, want)) { AQS(SS.file[SS.n], SS_DIR, "/", want); SS.size[SS.n] = SSD[k].sz; SS.n++; break; }
+    }
+    if (SS.n) ss_next();
+}
+/* a few decoder steps a frame; a finished picture becomes its layer's bitmap */
+static int ss_tick(void)
+{
+    if (SS.loading < 0 || !DJ.kind) return 0;
+    for (int st = 0; st < 6; st++) {
+        int rc = dj_step();
+        if (rc == 0) continue;
+        int k = SS.loading;
+        if (rc > 0 && k >= 0 && k < 3) {
+            tk_layer *l = &aqss[k];
+            if (!l->name) tk_layer_init(l, "store-shot");
+            relayer(l);
+            l->bmp = DJ.out;                      /* (the decoder's bitmap is the layer's now) */
+            tk_memset(&DJ.out, 0, sizeof DJ.out);
+            tk_layer_dirty(l);
+        }
+        dj_free();
+        ss_next();
+        relink();
+        return 1;
+    }
+    return 1;
+}
+static float ss_max(void) { return tk_maxf(0, SS.n * SS_W + (SS.n - 1) * SS_GAP + 2 * MARGIN - 390); }
+/* the shots where the page and the sideways scroll put them (aq_place) */
+static void ss_place(float s, float off, float al)
+{
+    for (int k = 0; k < 3; k++) {
+        tk_layer *l = &aqss[k];
+        if (!l->bmp.px || !AQ.app || k >= SS.n) { l->hidden = 1; continue; }
+        float x = MARGIN + k * (SS_W + SS_GAP) - SS.x, y = SS.y - s;
+        l->x = PT(x) + off; l->y = PT(y);
+        l->sx = l->sy = 1; l->alpha = al;
+        l->hidden = AQ.hide || y + SS_H < AQ.top || y > AQ.bot;
+        float y0 = tk_maxf(y, AQ.top), y1 = tk_minf(y + SS_H, AQ.bot >= H_PT - 1 ? TB_Y + 16 : AQ.bot);
+        l->clip = 1;
+        l->clip_r = (tk_rect){ PT(x) + off, PT(y0), PT(SS_W), PT(tk_maxf(0, y1 - y0)) };
+        l->clip_radius = PT(22);
+    }
 }
 /* a Today story (iOS's card opened): the card's face full width as the hero, the full text, the app's row */
 #define HERO_K (390.0f / CONTENT_W)
@@ -1405,6 +1518,7 @@ static int aq_place(int max)
         l->clip_r = (tk_rect){ 0, PT(AQ.top), TK_W, PT(area) };
         if (AQ.bot >= H_PT - 1) l->clip_r.h = PT(TB_Y + 16 - AQ.top);
     }
+    ss_place(s, off, al);
     if (AQ.app || AQ.cat_on) { aqh.x = aqh.bx + tk_floorf(off + .5f); aqh.alpha = al; }
     if (aqit.bmp.px) {                            /* iOS: the inline title cross-fades in over 20 pt once the large one is under the bar */
         aqit.alpha = tk_clampf((s - 30) / 20, 0, 1) * al;
@@ -1621,6 +1735,7 @@ static void aq_flush(void)
 /* a new page: its chunks hidden and drawn over the next frames, then slid in from dir (0: at once) */
 static void aq_go(int dir)
 {
+    ss_sync();                                    /* (the product page's screenshots: before its layout) */
     AQ.rm_arm = 0;
     AQ.v = 0;
     for (int L = 0; L < AQ_NCH; L++) { relayer(&aqc[L]); aqc[L].hidden = 1; AQ.ck[L] = -1; AQ.dirty[L] = 0; }
@@ -2260,10 +2375,29 @@ static int aq_touch(int ph, float x, float y)
         return 1;
     }
     if (ph == 0) {
-        AQ.drag = 1; AQ.moved = 0; AQ.y0 = y; AQ.s0 = AQ.scroll; AQ.v = 0; AQ.ly = y; AQ.lt = now_ms;
+        SS.hdrag = 0;
+        SS.x0 = AQ.app && SS.n && y >= SS.y - AQ.scroll && y < SS.y - AQ.scroll + SS_H ? x : -1;   /* (in the carousel) */
+        SS.sx0 = SS.x;
+        AQ.drag = 1; AQ.moved = 0; AQ.y0 = y; AQ.s0 = AQ.scroll; AQ.v = 0; AQ.ly = SS.x0 >= 0 ? x : y; AQ.lt = now_ms;
         return 1;
     }
     if (!AQ.drag) return 0;
+    if (SS.x0 >= 0 && !SS.hdrag && ph == 1 && tk_fabsf(x - SS.x0) > 8 && tk_fabsf(x - SS.x0) > tk_fabsf(y - AQ.y0)) SS.hdrag = 1;
+    if (SS.hdrag) {                               /* the screenshots scroll sideways; on release they snap to a shot */
+        float m = ss_max(), sx = SS.sx0 - (x - SS.x0), dt = now_ms - AQ.lt;
+        if (sx < 0) sx *= .4f; else if (sx > m) sx = m + (sx - m) * .4f;
+        if (ph == 1) {
+            if (dt > 0) SS.v = .6f * SS.v + .4f * (-(x - AQ.ly) / dt * 1000);
+            AQ.ly = x; AQ.lt = now_ms;
+            SS.x = sx;
+            aq_place(0);
+        } else if (ph == 2) {
+            float st = SS_W + SS_GAP, proj = SS.x + SS.v * .15f;
+            SS.to = tk_clampf(tk_floorf(proj / st + .5f) * st, 0, m);
+            SS.hdrag = 0; AQ.drag = 0; AQ.moved = 1;
+        }
+        return 1;
+    }
     if (tk_fabsf(y - AQ.y0) > 6) AQ.moved = AQ.moved ? AQ.moved : 1 + (AQ.y0 >= AQ.top && AQ.y0 < AQ.bot && AQ.y0 < TB_Y);
     if (ph == 1 && AQ.moved == 2 && AQ.story && ZS.phase == 2 && AQ.s0 <= 0 && (y > AQ.y0 || ZS.drag > 0)) {
         ZS.drag = tk_maxf(0, y - AQ.y0);          /* iOS: at the story's top, a drag down shrinks it toward its card */
@@ -2425,6 +2559,17 @@ static int aq_tick(float dt)
     if (aq_bar()) return 1;
     int zm = is_app("store") ? aq_z_tick(dt) : 0;   /* (the zoom moves; the page under it keeps drawing) */
     if (is_app("store") && aq_pill_tick(dt)) zm = 1;   /* (the tab pill slides) */
+    if (is_app("store") && !ap_pending && ss_tick()) { aq_place(0); zm = 1; }   /* (the screenshots decode) */
+    if (!SS.hdrag && SS.n && tk_fabsf(SS.x - SS.to) > .2f) {   /* the snap: response 0.35, damping 1 */
+        for (float left = dt; left > 0; left -= .004f) {
+            float h = tk_minf(left, .004f);
+            SS.v += (322.3f * (SS.to - SS.x) - 35.9f * SS.v) * h;
+            SS.x += SS.v * h;
+        }
+        if (tk_fabsf(SS.x - SS.to) < .3f && tk_fabsf(SS.v) < 20) { SS.x = SS.to; SS.v = 0; }
+        aq_place(0);
+        zm = 1;
+    }
     if (!is_app("store") || ap_pending || AQ.empty) return 0;
     static float spin_t;
     if (aq_spinning() && now_ms - spin_t >= 33) {   /* the waiting spinners turn (~30 frames a second) */
@@ -2483,6 +2628,8 @@ static void aq_close(void)
     relayer(&aqtp); aqtp.hidden = 1; TP.set = 0;
     tk_memset(&ZS, 0, sizeof ZS);
     AQ.story = 0;
+    ss_free();
+    ss_nd = -1;                                   /* (the card's shots listed again at the next opening) */
     aq_tb_baked = 0;
     AQ.kb = AQ.drag = AQ.hide = 0;
     AQ.v = 0;
@@ -2494,6 +2641,7 @@ static int aq_layers(tk_layer **o)
     int n = 0;
     for (int L = 0; L < AQ_NCH; L++) o[n++] = &aqc[L];
     for (int k = 0; k < AQ_NLIVE; k++) o[n++] = &aql[k];
+    for (int k = 0; k < 3; k++) o[n++] = &aqss[k];
     o[n++] = &aqh;
     o[n++] = &aqit;
     o[n++] = &aqbt;

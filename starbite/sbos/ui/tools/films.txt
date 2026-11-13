@@ -76,3 +76,5 @@ a1pill: wait 300; state store=today; wait 900; tap 152 749; wait 900; tap 325 74
 a1sheet: wait 300; state storeapp=firefox; wait 1200; tap 185 222; wait 1200; tap 195 600; wait 800; tap 195 708; wait 2500
 a1acct: wait 300; state store=today; wait 1200; tap 352 112; wait 1300; tap 195 550; wait 1800
 interrupt: wait 300; drag 195 795 195 330 220; wait 900; tap 238 289; wait 1100; drag 195 795 200 450 200; wait 60; tap 158 392; wait 1200; drag 195 795 200 450 260; wait 1200
+a1shots: wait 300; state storeapp=gnome-calculator; wait 3000; state storeapp=gnome-chess; wait 3000
+a1shots2: wait 300; state storeapp=gnome-calculator; wait 1500; drag 300 480 60 480 250; wait 800; drag 120 480 360 480 250; wait 800; drag 195 600 195 300 300; wait 900
