@@ -109,6 +109,7 @@ const char *cal_why(void);
  * (never inside a powered-off AUD domain) */
 void cal_trace(int on);
 void cal_dump(const char *tag);
+void cal_dump_off(const char *who);         /* read-only, before abox_off(): DMAs, UAIFs, SYSPOWER, QCH, flushes, AUD_STAT */
 
 /* ---- the driver probe (drvprobe.h) ------------------------------------------------------------------------------
  * level 0: reads only: the AUD domain and ABOX CPU state (PMU), IP_INDEX / SysMMU CTRL when the domain is on, and

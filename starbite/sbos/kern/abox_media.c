@@ -367,6 +367,36 @@ static int pcm_x(int cap, uint32_t type, uint32_t a, uint32_t b, uint32_t c)
 static int pcm(uint32_t type, uint32_t a, uint32_t b, uint32_t c) { return pcm_x(0, type, a, b, c); }
 static int pcmc(uint32_t type, uint32_t a, uint32_t b, uint32_t c) { return pcm_x(1, type, a, b, c); }
 
+/* read-only, just before abox_off(): what could still hold the AUD domain on (run 7: AUD_STAT 0x15000f after
+ * capture; run 6, playback only, went off). Only while Calliope is up (never inside a powered-off domain). */
+void cal_dump_off(const char *who)
+{
+    if (!have_hal || !abox_up())
+        return;
+    struct tb t;
+    tinit(&t, "cal: before off (");
+    ts(&t, who);
+    ts(&t, "): RDMA0 CTRL0 ");
+    tx(&t, r32(ABOX_SFR + SFR_RDMA0));
+    ts(&t, " WDMA1 CTRL0 ");
+    tx(&t, r32(ABOX_SFR + SFR_WDMA1));
+    ts(&t, " UAIF0 ");
+    tx(&t, r32(ABOX_SFR + SFR_UAIF_CTRL0(0)));
+    ts(&t, " UAIF1 ");
+    tx(&t, r32(ABOX_SFR + SFR_UAIF_CTRL0(1)));
+    ts(&t, " SYSPOWER ");
+    tx(&t, r32(ABOX_SFR + SFR_SYSPOWER_CTRL));
+    ts(&t, " QCH_DIS ");
+    tx(&t, r32(ABOX_SFR + SFR_QCH_DISABLE));
+    ts(&t, " SPUS2 ");
+    tx(&t, r32(ABOX_SFR + SFR_SPUS_CTRL2));
+    ts(&t, " SPUM3 ");
+    tx(&t, r32(ABOX_SFR + SFR_SPUM_CTRL3));
+    ts(&t, " AUD_STAT ");
+    tx(&t, r32(ABOX_PMU + ABOX_PMU_AUD_STAT));
+    out(&t);
+}
+
 void cal_dump(const char *tag)
 {
     struct tb t;
@@ -823,8 +853,10 @@ static void put_back(void)
     if (P.mic && O.codec_off)
         O.codec_off();
     P.mic = 0;
-    if (P.booted)
+    if (P.booted) {
+        cal_dump_off("the probe");
         abox_off();
+    }
     P.booted = 0;
     if (P.mapped)
         cal_unmap();

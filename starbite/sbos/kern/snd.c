@@ -674,6 +674,7 @@ static void cal_release(const char *what)
         return;
     G.cal_own = 0;
     if (abox_state() == ABOX_ST_READY || abox_state() == ABOX_ST_FAILED) {
+        cal_dump_off("snd");
         abox_off();
         say("engine: Calliope off (%s)", what);
     }
