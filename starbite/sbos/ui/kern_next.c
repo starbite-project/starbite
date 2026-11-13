@@ -116,7 +116,17 @@ static void band_worker(unsigned w, void *arg)
         __asm__ volatile("yield");
     }
 }
+static uint32_t kpar_n;                     /* cp7s: parallel jobs and their time (a slow shell call's line names them) */
+static uint64_t kpar_us;
+static void kpar_(void (*fn)(void *, int), void *arg, int n);
 static void kpar(void (*fn)(void *, int), void *arg, int n)
+{
+    uint64_t t0 = sb_us();
+    kpar_(fn, arg, n);
+    kpar_n++;
+    kpar_us += sb_us() - t0;
+}
+static void kpar_(void (*fn)(void *, int), void *arg, int n)
 {
     if (!workers_on) {
         for (int i = 0; i < n; i++) fn(arg, i);
@@ -748,6 +758,12 @@ void sh_haptic_k(int kind)
 }
 /* P3i: the shell's time outside the compositor (a tap that builds a page runs before the next frame: the pause
  * the user sees is this, not the frame's own time); logged when over 8 ms, counted per gesture */
+/* cp7s: the platform's share of a shell call, from st_mark (the touch paths) to shell_time: ACPM exchanges, parallel
+ * jobs (and whether the band workers were on), the GPU's waits; named when the call took over 50 ms (7r: a 157 ms
+ * touch-down at Emergency's hold that is 0.04 ms of shell code on the Mac) */
+static uint32_t stm_acpm_n, stm_kpar_n;
+static uint64_t stm_acpm_us, stm_kpar_us;
+static void st_mark(void) { stm_acpm_n = sb_acpm_calls; stm_acpm_us = sb_acpm_us; stm_kpar_n = kpar_n; stm_kpar_us = kpar_us; }
 static void shell_time(const char *what, uint64_t t0)
 {
     uint32_t us = (uint32_t)(tk_us() - t0);
@@ -761,6 +777,17 @@ static void shell_time(const char *what, uint64_t t0)
     ub_c(&u, ' ');
     ub_dec(&u, us / 1000);
     ub_s(&u, " ms");
+    if (us > 50000) {
+        ub_s(&u, " (ACPM ");
+        ub_dec(&u, sb_acpm_calls - stm_acpm_n);
+        ub_s(&u, " / ");
+        ub_dec(&u, (sb_acpm_us - stm_acpm_us) / 1000U);
+        ub_s(&u, " ms, parallel jobs ");
+        ub_dec(&u, kpar_n - stm_kpar_n);
+        ub_s(&u, " / ");
+        ub_dec(&u, (kpar_us - stm_kpar_us) / 1000U);
+        ub_s(&u, workers_on ? " ms, workers on)" : " ms, workers off)");
+    }
     sb_log(u.b);
 }
 /* cp7f: a named piece inside the shell's idle work (7e's self test: "idle (after a gesture)" 245-273 ms on the
@@ -812,6 +839,7 @@ static void frame(void)
     }
     last_tick = now;
     last_us = nus;
+    st_mark();
     uint64_t st0 = tk_us();
     int mv = sh_tick(dt, (float)now);
     shell_time("tick", st0);
@@ -1304,6 +1332,7 @@ void next_kevent(const void *evp)
         if (ph == 2) dark_gesture = 0;
         return;                                      /* the cheek: dropped, press to release */
     }
+    st_mark();
     uint64_t st0 = tk_us();
     sh_touch(ph, e->x / TK_PT, e->y / TK_PT, (float)sb_ms());
     shell_time(ph == 0 ? "touch down" : ph == 1 ? "touch move" : "touch up", st0);
@@ -2365,7 +2394,7 @@ int next_selftest_step(void)
         const step *p = &F.s[F.i];
         if (F.down && p->kind == 5) F.down = 0;
         else if (F.down) {
-            { uint64_t st0 = tk_us(); sh_touch(2, p->kind == 2 ? p->x1 : p->x0, p->kind == 2 ? p->y1 : p->y0, (float)sb_ms()); shell_time("touch up", st0); }
+            { st_mark(); uint64_t st0 = tk_us(); sh_touch(2, p->kind == 2 ? p->x1 : p->x0, p->kind == 2 ? p->y1 : p->y0, (float)sb_ms()); shell_time("touch up", st0); }
             F.down = 0;
             start_ticking();
         } else if (p->kind == 5) {
@@ -2387,7 +2416,7 @@ int next_selftest_step(void)
                 power_key_short();
             }
         } else if (p->kind) {
-            if (!F.down) { uint64_t st0 = tk_us(); sh_touch(0, p->x0, p->y0, (float)sb_ms()); shell_time("touch down", st0); F.down = 1; start_ticking(); }
+            if (!F.down) { st_mark(); uint64_t st0 = tk_us(); sh_touch(0, p->x0, p->y0, (float)sb_ms()); shell_time("touch down", st0); F.down = 1; start_ticking(); }
             else if (p->kind == 2) {
                 float u = (t - F.s0) / p->ms;
                 sh_touch(1, p->x0 + (p->x1 - p->x0) * u, p->y0 + (p->y1 - p->y0) * u, (float)sb_ms());

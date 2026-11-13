@@ -104,6 +104,8 @@ void sb_main(void);
 uint64_t sb_ticks(void);
 uint64_t sb_freq(void);                 /* CNTFRQ, 26 MHz when S-Boot left it 0 */
 uint64_t sb_us(void);                   /* since power-on (counter) */
+extern uint32_t sb_acpm_calls;           /* cp7s: ACPM exchanges so far, and their time (acpm.c) */
+extern uint64_t sb_acpm_us;
 uint64_t sb_ms(void);
 void sb_udelay(uint64_t us);
 void sb_mdelay(unsigned ms);
