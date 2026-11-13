@@ -98,6 +98,7 @@ struct sbg_stats {
     /* cp7o: the slowest part of one sbg_poll since sbg_start (lines, log, blk, net, 9p, snd, msgs) and its ms */
     const char *poll_part;
     uint32_t poll_part_ms;
+    uint32_t pump_left;                             /* cp7u: sbg_pump calls that found a write or a too-big read waiting */
 };
 
 void sbg_init(const struct sbg_os *os, const struct sbg_cfg *cfg, uint8_t host_cpuif);
