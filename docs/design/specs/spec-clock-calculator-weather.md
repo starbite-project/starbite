@@ -4,6 +4,18 @@ Version 1.0, 2026-11-13 (design-ref Track C, for builder A3). Frame, units and s
 `docs/design/IOS-REFERENCE.md` (cited **IR §n**) and `docs/design/LIQUID-GLASS.md` (cited **LG §n**). This file only
 adds what is specific to the three apps.
 
+> **Platform decisions (Track A, 2026-11-13; build to these, don't wait):**
+> - **Alarms:** the platform holds **32** (trunk 24a6efa8; old records are still read). The Alarm tab's own limit
+>   ships with A3's Clock.
+> - **City / time-zone list:** Track A builds one city table over `kern/tzdb.c`'s zones, shared by World Clock add-city
+>   and Weather search (A2.1a). Code against it; until it lands, use the fixed `WC[5]`.
+> - **Scientific maths:** A3 ports the functions it needs from **musl's libm** (MIT).
+> - **Forecasts:** **Open-Meteo** (free, no key), cached in a blob, with the location **rounded to ~1 km** before any
+>   request.
+> - **Currency rates:** not decided by Track A. Use the same pattern (a free no-key source, cached, dated); Convert's
+>   units work fully offline.
+> - **Haptics:** no haptic on Calculator keys (as iOS); remove the trunk's.
+
 **Tags.** **A** Apple stated · **M** measured (source named) · **3P** a reviewer · **E** estimate.
 
 ## Sources and calibration
@@ -187,9 +199,8 @@ family and row pitch.)**
 - **Edit:** ⊖ badges and a chevron › on each row; the toggles hide; Edit becomes Done (✓).
 - **+** opens **Add Alarm** with the time preset to the current time, rounded (E: iOS presets now).
 - When an alarm is armed, a toast-like confirmation is **not** shown in iOS (E). Don't add one.
-- **Limit:** iOS has no practical limit. The trunk platform holds **4** (`CK_NAL`). **Raise the platform limit to at
-  least 32** (gap list). Until then, + at the limit shows the alert "Can't Add Alarm" / "You can have up to 4 alarms."
-  with OK.
+- **Limit:** iOS has no practical limit. The platform now holds **32** (trunk 24a6efa8). At 32, + shows the alert
+  "Can't Add Alarm" / "You can have up to 32 alarms." with OK.
 
 ### A2.3 Add / Edit Alarm (sheet) (M UG-AL)
 
@@ -496,7 +507,7 @@ Accessibility > Touch > **Prefer Single-Touch Actions** (3P 9to5Mac).
 
 - The order of operations is standard: × before + (A). Expressions show in full, with parentheses, before = (A).
 - **Maths:** needs double precision maths in the shell: sin / cos / tan / log / exp / pow / gamma for x!. The trunk
-  comment notes "the double maths the kernel doesn't have". Use our libm port; this is an **L** item. Rand = uniform
+  comment notes "the double maths the kernel doesn't have". Port the functions needed from **musl's libm** (MIT; Track A's decision); this is an **L** item. Rand = uniform
   [0, 1) from the kernel RNG.
 
 ### B2.3 Convert (M UG-CV; A text)
@@ -516,7 +527,7 @@ Accessibility > Touch > **Prefer Single-Touch Actions** (3P 9to5Mac).
     15 / 400 secondaryLabel; a search field at the top.
 - Either field can be edited; the other converts as you type (A).
 - **Currency: local equivalent.** Rates need the internet.
-  - Online: fetch daily rates from a free no-key provider (provider choice is the user's; not decided here) and cache
+  - Online: fetch daily rates from a free no-key provider (not decided yet; same pattern as the forecasts) and cache
     them with a timestamp.
   - Offline with a cache: convert and show "Rates from 12 Nov" 13 / 400 secondaryLabel under the to-row.
   - Offline and never fetched: the Currency chip shows "Currency rates need the internet." centred in the list.
@@ -563,8 +574,8 @@ Accessibility > Touch > **Prefer Single-Touch Actions** (3P 9to5Mac).
 
 ## C0. What Weather can be on our phone
 - iOS Weather is Apple's forecast service. **Local equivalent:** a provider abstraction. When the phone is online,
-  fetch from a free no-key forecast API (the provider is the user's decision, e.g. Open-Meteo or MET Norway; not
-  decided here). **Cache every fetched location** (current conditions, 24 h hourly, 10 days, the details) with its
+  fetch from **Open-Meteo** (free, no key; Track A's decision), with the location **rounded to ~1 km** before the
+  request. **Cache every fetched location** (current conditions, 24 h hourly, 10 days, the details) with its
   time.
 - **My Location:**
   - with a GNSS fix (Starbite location service, when present), else
@@ -875,7 +886,7 @@ Our tones (originals; our names):
 - **Timers:** Cancel · Start · Pause · Resume · When Timer Ends · Presets · Recents · MIN · SEC · HR · hours · min
   · sec
 - **Firing:** slide to stop · Stop · Snooze · Repeat · Timer done · Snoozed
-- **Limits:** Can't Add Alarm · You can have up to 4 alarms. (until the platform limit is raised) · OK
+- **Limits:** Can't Add Alarm · You can have up to 32 alarms. · OK
 
 **Calculator:**
 - **Modes and history:** Basic · Scientific · Math Notes (omit) · Convert · History · Edit · Clear All ·
@@ -940,7 +951,7 @@ Our tones (originals; our names):
 | 1 | **Weather app from zero**: provider abstraction + cache + offline states (C0, C2.2), the location page with the header, hourly, 10-day and computed sun/moon tiles; the bottom bar; the locations list + search | **L** |
 | 2 | **City database + tz rules** shared by World Clock add-city and Weather search (A2.1a); replace the fixed `WC[5]` | **M** |
 | 3 | **Alarm firing UI**: full-screen slide to stop + Snooze, Snooze Duration, banner/pill when unlocked, Prefer Single-Touch Actions setting (A2.6) | **M** |
-| 4 | **Alarm editor as a sheet** (A2.3): ✕ / ✓ glass, inline day circles, inline Label editing (keyboard), Sound list, Snooze + Duration, 12-h AM/PM column, the wheel at pitch 32 / font 24 with a cylinder look + ticks; raise the platform alarm limit from 4 to ≥ 32 | **M** |
+| 4 | **Alarm editor as a sheet** (A2.3): ✕ / ✓ glass, inline day circles, inline Label editing (keyboard), Sound list, Snooze + Duration, 12-h AM/PM column, the wheel at pitch 32 / font 24 with a cylinder look + ticks; the platform already holds 32 (24a6efa8) | **M** |
 | 5 | **Timers**: multiple timers, Label, Presets, Recents, the Timer sheet, a paused state, the Live Activity platter + pill, Stop Playing, Repeat | **M** |
 | 6 | **Calculator Scientific (portrait)** + the double maths library + Rad/Deg, 2nd, memory (B2.2) | **L** |
 | 7 | **Calculator** mode menu, History sheet, Convert (units offline, currency cached), AC↔C, hold-to-clear, swipe to delete, the Copy/Paste menu (B2.1-B2.5) | **M** |

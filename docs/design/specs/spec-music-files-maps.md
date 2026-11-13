@@ -3,6 +3,13 @@
 Track C, design-ref. v1 2026-11-13. Builders: implement straight from this file; shared components are in
 [IOS-REFERENCE.md](../IOS-REFERENCE.md) (§ numbers below) and [LIQUID-GLASS.md](../LIQUID-GLASS.md) (§5 behaviour).
 
+> **Platform decisions (Track A, 2026-11-13):**
+> - **Music decoders:** **MP3 (minimp3) and FLAC (dr_flac) first**. AAC / M4A comes later (licensing): show such
+>   files greyed, with "This format isn't supported yet."
+> - **Later, not in this wave:**
+>   - **exFAT write** on the card (card-write safety first). Build Files read-only, with write actions hidden.
+>   - **Live GPS** (drivers / modem-core). Maps uses the saved fix and the states below.
+
 **Sources** (study images in `build/design-ref/apps27/{music,files,maps}/`, git-ignored, never shipped):
 - **UG27**: Apple iPhone User Guide, iOS 27 edition (support.apple.com/guide/iphone): Music "Use the music player
   controls" (iph676daac9b), "Play music" (iph0138fb328), "Queue up your music" (ipha4521ef7d), "Shuffle or repeat"
