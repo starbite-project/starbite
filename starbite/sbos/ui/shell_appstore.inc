@@ -421,7 +421,7 @@ static void aq_title_acct(pctx *c, const char *t)
 }
 
 /* Today: the date and the large title, the featured cards, "Top Apps in" the two biggest categories */
-#define CARD_H 460.0f                            /* iOS's Today card: full width - 40, 450-480 tall (IOS-REFERENCE 13) */
+#define CARD_H 440.0f                            /* spec 2.4.1: the Today card 350 x 440, r 24 */
 #define CARD_R 24.0f
 /* a story's art (ours, no screenshots yet): the app's icon as a staggered pattern over its colour, darkening to the
  * bottom so the words and the app row read; the card (x, y, w, h, r) and the story's hero use it */
@@ -920,19 +920,19 @@ static float pg_app(pctx *c)
     int i = st_find(AQ.pkg);
     if (i < 0) return AQ.top;
     const sh_lpkg_t *p = &LST->pkg[i];
-    float y0 = PUSHED_TOP, tx = 136, tw_ = CONTENT_R - tx;
+    float y0 = PUSHED_TOP, tx = 154, tw_ = CONTENT_R - tx;
     int inst = aq_inst(p), busy = st_busy(p), net = aq_needs_net(p), full = !inst && (p->flags & SH_PKG_NO_SPACE);
     /* the head: the icon, the name, the summary, the main button (or the progress) */
     if (vis(c, y0, 104)) {
         dc *d = c->d;
-        if (tk_strcmp(aq_dic_pkg, p->pkg) || !aq_dic.px) { lx_make_icon(&aq_dic, (int)(PT(100) + .5f), p->icon, p->name, 0); lx_scopy(aq_dic_pkg, p->pkg, 40); }
+        if (tk_strcmp(aq_dic_pkg, p->pkg) || !aq_dic.px) { lx_make_icon(&aq_dic, (int)(PT(118) + .5f), p->icon, p->name, 0); lx_scopy(aq_dic_pkg, p->pkg, 40); }
         aq_blit(d, &aq_dic, MARGIN, y0);
         d_text_box(d, TK_IT700, 22, tx, bl(TK_IT700, 22, y0 + 2), tw_, 0, p->name, 0, 0, INK, 0);
         char ln[4][96];
         float wm;
         int n = wrapn(ln, 2, TK_IT400, 14, p->summary[0] ? p->summary : p->category, tw_, &wm);
         for (int k = 0; k < n; k++) d_text(d, TK_IT400, 14, tx, bl(TK_IT400, 14, y0 + 30 + 18.0f * k), ln[k], 0, 0, C_LABEL2, 0);
-        float by = y0 + 70;
+        float by = y0 + 86;
         if (busy) {
             /* the live layer: the ring, the phase, Cancel */
         } else {
@@ -950,16 +950,16 @@ static float pg_app(pctx *c)
         }
         aq_mark(c, i);
     }
-    if (busy) aq_live_add(LV_HEAD, i, tx, y0 + 70, tw_);
-    if (!c->d && c->hy >= y0 + 64 && c->hy < y0 + 108 && c->hx >= tx) {
+    if (busy) aq_live_add(LV_HEAD, i, tx, y0 + 86, tw_);
+    if (!c->d && c->hy >= y0 + 80 && c->hy < y0 + 124 && c->hx >= tx) {
         float w = tk_maxf(74, tw(TK_IT600, 17, aq_upd(p) ? "Update" : "Open", 0, 0) + 40);
-        if (aq_upd(p) && !busy && c->hx >= tx + w + 4) aq_hitr(c, H_OPEN, i, 0, tx + w + 10, y0 + 70, 74, 32, 16, 1);
+        if (aq_upd(p) && !busy && c->hx >= tx + w + 4) aq_hitr(c, H_OPEN, i, 0, tx + w + 10, y0 + 86, 74, 32, 16, 1);
         else {
             const char *t = full ? "Not Enough Space" : aq_upd(p) ? "Update" : inst ? "Open" : p->state == SH_PKG_FAILED ? "Retry" : "Get";
-            aq_hitr(c, H_MAIN, i, 0, tx, y0 + 70, busy ? 32 : tk_maxf(74, tw(TK_IT600, 17, t, 0, 0) + 40), 32, 16, 1);
+            aq_hitr(c, H_MAIN, i, 0, tx, y0 + 86, busy ? 32 : tk_maxf(74, tw(TK_IT600, 17, t, 0, 0) + 40), 32, 16, 1);
         }
     }
-    float y = y0 + 116;
+    float y = y0 + 134;   /* (spec 2.3.1: a 118 pt icon, Get 74 x 32 flush with its bottom) */
     /* a one-line note: Wi-Fi, space, the failure, memory */
     const char *note = 0;
     uint32_t ncol = 0xffb340;
