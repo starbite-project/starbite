@@ -3279,6 +3279,21 @@ void sh_snd_volume_set(int v)
 int sh_snd_open(void) { if (!snd_ready()) return -1; return snd_open(); }
 unsigned sh_snd_write(int id, const int16_t *frames, unsigned n) { if (!snd_up) return 0; unsigned k = snd_write(id, frames, n); snd_arm(); return k; }
 unsigned sh_snd_space(int id) { return snd_up ? snd_space(id) : 0; }
-void sh_snd_close(int id) { if (snd_up) snd_close(id); }
+void sh_snd_close(int id)
+{
+    if (!snd_up) return;
+    snd_close(id);
+    struct snd_stats t;                     /* cp7y: did the music drop out? (the mix runs ~21-32 ms ahead of the DMA) */
+    snd_stats(&t);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: sound: a stream closed; since the start: periods ");
+    ub_dec(&u, t.periods);
+    ub_s(&u, ", ran dry ");
+    ub_dec(&u, t.xruns);
+    ub_s(&u, ", late polls ");
+    ub_dec(&u, t.late_polls);
+    sb_log(u.b);
+}
 const char *sh_snd_why(void) { return snd_up ? snd_why() : "Sound starts when something plays"; }
 void alarm_sound(int on) { sh_alarm_sound(on); }   /* cp7x: alarm.c's ring -> the shell's ring owner 4 */
