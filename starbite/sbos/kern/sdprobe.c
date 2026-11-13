@@ -156,13 +156,13 @@ static int write_check(struct ub *m)
         ub_s(m, "write check skipped: the state slot is not on the card");
         return 0;
     }
-    if (!sh[0])
-        sh[0] = sb_alloc(SDP_HALF);
-    if (!sh[1])
-        sh[1] = sb_alloc(SDP_HALF);
     if (!sh[0] || !sh[1]) {
-        ub_s(m, "write check skipped: no 1 MiB for the two halves");
-        return 0;
+        /* run 14: the probe image's arena was full (sb_alloc failed): the lab I/O buffer's first 1 MiB instead (3 MiB,
+         * non-cacheable, the kernel does not use it; this probe's reads, which may also use it, are done by now) */
+        sh[0] = sb_alloc(SDP_HALF);
+        sh[1] = sh[0] ? sb_alloc(SDP_HALF) : 0;
+        if (!sh[0] || !sh[1])
+            sh[0] = (uint8_t *)SB_IO_BUF, sh[1] = (uint8_t *)SB_IO_BUF + SDP_HALF;
     }
     if (!hw_slot_read(sh[0], sh[1])) {
         ub_s(m, "the state slot's read failed");
