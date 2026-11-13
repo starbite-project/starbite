@@ -1,0 +1,154 @@
+--- /tmp/wgl.c.pre0158	2026-11-13 15:01:41.231206182 +0200
++++ src/gallium/targets/wgl/wgl.c	2026-11-13 15:02:23.719450993 +0200
+@@ -35,6 +35,7 @@
+ 
+ 
+ #include <windows.h>
++#include <psapi.h> /* 0158: K32GetProcessMemoryInfo (kernel32) */
+ 
+ #include "util/u_debug.h"
+ #include "stw_winsys.h"
+@@ -259,6 +260,85 @@
+    ReleaseSRWLockExclusive(&wgl_pan_pool.lock);
+ }
+ 
++/* sb-patches/0158: frame-time lows. Present intervals go into 1 ms buckets (0..1999 ms, last = 2 s or more), per
++ * window and for the whole run; "1% low" = 1000 / the 99th-percentile interval (0.1%: 99.9th). The slowest interval
++ * of each window is explained: the present costs of the frame before it and of the one ending it (map = GPU wait,
++ * copy, gdi, async wait), the game thread's CPU time inside it (CPU ~ wall: the game computed, e.g. x64 JIT; CPU << wall:
++ * it waited: page-ins, locks, preemption, a GPU wait outside present) and the process' page faults inside it. */
++#define WGL_PAN_BUCKETS 2000
++struct wgl_pan_hist {
++   unsigned b[WGL_PAN_BUCKETS];
++   unsigned n, over100, over250;
++};
++
++static void
++wgl_pan_hist_add(struct wgl_pan_hist *h, double ms)
++{
++   unsigned i = ms < 0 ? 0 : ms >= WGL_PAN_BUCKETS - 1 ? WGL_PAN_BUCKETS - 1 : (unsigned)ms;
++   h->b[i]++;
++   h->n++;
++   if (ms >= 100.0)
++      h->over100++;
++   if (ms >= 250.0)
++      h->over250++;
++}
++
++/* the interval (upper edge of its 1 ms bucket) that a fraction `q` of the frames do not exceed */
++static double
++wgl_pan_hist_pct(const struct wgl_pan_hist *h, double q)
++{
++   if (!h->n)
++      return 0.0;
++   unsigned want = (unsigned)(q * h->n + 0.999999), seen = 0;
++   if (want < 1)
++      want = 1;
++   for (unsigned i = 0; i < WGL_PAN_BUCKETS; i++) {
++      seen += h->b[i];
++      if (seen >= want)
++         return (double)(i + 1);
++   }
++   return (double)WGL_PAN_BUCKETS;
++}
++
++static void
++wgl_pan_hist_print(char *out, size_t len, const struct wgl_pan_hist *h)
++{
++   double p99 = wgl_pan_hist_pct(h, 0.99), p999 = wgl_pan_hist_pct(h, 0.999);
++   snprintf(out, len, "1%% low %.1f fps (p99 %.0f ms), 0.1%% low %.1f fps (p99.9 %.0f ms), %u over 100 ms, %u over 250 ms",
++            p99 > 0 ? 1000.0 / p99 : 0.0, p99, p999 > 0 ? 1000.0 / p999 : 0.0, p999, h->over100, h->over250);
++}
++
++static struct wgl_pan_hist wgl_pan_hist_win, wgl_pan_hist_run;
++static struct {
++   int64_t run_start;
++   unsigned run_frames;
++   uint64_t last_cpu100ns; /* the game thread's user+kernel time at the last present */
++   unsigned last_faults;   /* the process' page faults at the last present */
++   bool have_last;
++   /* the window's slowest interval */
++   double worst_ms, worst_cpu_ms;
++   unsigned worst_faults;
++   int64_t worst_prev[5], worst_this[5]; /* map, copy, gdi, wait, total */
++   int64_t prev[5];
++} wgl_pan_low;
++
++static uint64_t
++wgl_pan_thread_cpu(void)
++{
++   FILETIME c, e, k, u;
++   if (!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u))
++      return 0;
++   return ((uint64_t)k.dwHighDateTime << 32 | k.dwLowDateTime) + ((uint64_t)u.dwHighDateTime << 32 | u.dwLowDateTime);
++}
++
++static unsigned
++wgl_pan_faults(void)
++{
++   PROCESS_MEMORY_COUNTERS pmc;
++   pmc.cb = sizeof(pmc);
++   return K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)) ? pmc.PageFaultCount : 0;
++}
++
+ /* Per-10 s timing (QueryPerformanceCounter ticks). */
+ struct wgl_pan_stat {
+    int64_t sum, max;
+@@ -316,6 +396,29 @@
+       wgl_pan_stats.freq = f.QuadPart ? f.QuadPart : 1;
+       wgl_pan_stats.window_start = start;
+    }
++   /* 0158: lows and the slowest interval's causes */
++   uint64_t cpu_now = wgl_pan_thread_cpu();
++   unsigned faults_now = wgl_pan_faults();
++   int64_t this_parts[5] = {map, copy, gdi, wait, end - start};
++   if (!wgl_pan_low.run_start)
++      wgl_pan_low.run_start = start;
++   wgl_pan_low.run_frames++;
++   if (wgl_pan_stats.last_present) {
++      double ms = wgl_pan_ms(start - wgl_pan_stats.last_present);
++      wgl_pan_hist_add(&wgl_pan_hist_win, ms);
++      wgl_pan_hist_add(&wgl_pan_hist_run, ms);
++      if (ms > wgl_pan_low.worst_ms) {
++         wgl_pan_low.worst_ms = ms;
++         wgl_pan_low.worst_cpu_ms = wgl_pan_low.have_last ? (double)(cpu_now - wgl_pan_low.last_cpu100ns) / 10000.0 : -1.0;
++         wgl_pan_low.worst_faults = wgl_pan_low.have_last ? faults_now - wgl_pan_low.last_faults : 0;
++         memcpy(wgl_pan_low.worst_prev, wgl_pan_low.prev, sizeof(wgl_pan_low.prev));
++         memcpy(wgl_pan_low.worst_this, this_parts, sizeof(this_parts));
++      }
++   }
++   memcpy(wgl_pan_low.prev, this_parts, sizeof(this_parts));
++   wgl_pan_low.last_cpu100ns = cpu_now;
++   wgl_pan_low.last_faults = faults_now;
++   wgl_pan_low.have_last = true;
+    if (wgl_pan_stats.last_present)
+       wgl_pan_stat_add(&wgl_pan_stats.interval, start - wgl_pan_stats.last_present);
+    wgl_pan_stats.last_present = start;
+@@ -357,6 +460,27 @@
+               wgl_pan_mode_name[wgl_panfrost_mode()], wgl_pan_pool.created ? wgl_pan_pool.threads : 1, w, h,
+               wgl_pan_stats.by_mode[WGL_PAN_PARALLEL], wgl_pan_stats.by_mode[WGL_PAN_DIRECT],
+               wgl_pan_stats.by_mode[WGL_PAN_COPY], wgl_pan_stats.by_mode[WGL_PAN_ASYNC]);
++      /* 0158: the window's and the run's lows, and what the slowest interval was made of (ms; -1 = didn't run) */
++      {
++         char hw[160], hr[160];
++         const int64_t *a = wgl_pan_low.worst_prev, *b = wgl_pan_low.worst_this;
++#define WGL_PAN_PMS(x) ((x) < 0 ? -1.0 : wgl_pan_ms(x))
++         wgl_pan_hist_print(hw, sizeof(hw), &wgl_pan_hist_win);
++         wgl_pan_hist_print(hr, sizeof(hr), &wgl_pan_hist_run);
++         double run_s = (double)(end - wgl_pan_low.run_start) / (double)wgl_pan_stats.freq;
++         fprintf(stderr, "sbumd: gllows %.1f s: %s\n", secs, hw);
++         fprintf(stderr, "sbumd: gllows run %.0f s, %u frames (%.1f fps avg): %s\n", run_s, wgl_pan_low.run_frames,
++                 run_s > 0 ? wgl_pan_low.run_frames / run_s : 0.0, hr);
++         fprintf(stderr,
++                 "sbumd: glworst %.1f ms: game thread cpu %.1f ms, page faults %u; frame before: map %.1f copy %.1f "
++                 "gdi %.1f wait %.1f present %.1f; frame after: map %.1f copy %.1f gdi %.1f wait %.1f present %.1f\n",
++                 wgl_pan_low.worst_ms, wgl_pan_low.worst_cpu_ms, wgl_pan_low.worst_faults, WGL_PAN_PMS(a[0]),
++                 WGL_PAN_PMS(a[1]), WGL_PAN_PMS(a[2]), WGL_PAN_PMS(a[3]), WGL_PAN_PMS(a[4]), WGL_PAN_PMS(b[0]),
++                 WGL_PAN_PMS(b[1]), WGL_PAN_PMS(b[2]), WGL_PAN_PMS(b[3]), WGL_PAN_PMS(b[4]));
++#undef WGL_PAN_PMS
++         memset(&wgl_pan_hist_win, 0, sizeof(wgl_pan_hist_win));
++         wgl_pan_low.worst_ms = 0;
++      }
+       int64_t freq = wgl_pan_stats.freq, last = wgl_pan_stats.last_present;
+       memset(&wgl_pan_stats, 0, sizeof(wgl_pan_stats));
+       wgl_pan_stats.freq = freq;

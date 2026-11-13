@@ -2351,6 +2351,23 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - App crashes: only WpnUserService / MoUsoCoreWorker c000001d (winsqlite3, the known big-core gap).
 - **T62** (`build/win/stage/sbwddm-t62`): T61 + sb-gputest.cmd `twice` (sb-gd-ab.txt `glcached twice`: A B A2 B2).
 
+### 6.68 Frame-time lows are a first-class metric (0158); T62 carries it (held until after 20:00)
+
+- **The user:** "the frame drops are extreme, like 1% low is ~2 fps". The 10 s averages hid it. T61's per-window
+  worst interval (glstats `interval max`): A 24 of 31 windows >= 100 ms (74 .. 181 ms typical, then 264, 395,
+  1537 ms); B 39 of 43 >= 100 ms (up to 8381 ms). So a visible hitch about every 10 s, and some multi-second stalls.
+- **sb-patches 0158** (`wgl.c`, GD's ICD only; libgallium_wgl b3befb40): present intervals go into 1 ms buckets per
+  window and for the run. New lines every 10 s:
+  - `gllows` (window) and `gllows run`: 1% low = 1000 / p99 interval, 0.1% low = 1000 / p99.9, plus frames over
+    100 ms and over 250 ms;
+  - `glworst`: the window's slowest interval, with the game thread's CPU time inside it (GetThreadTimes: CPU ~ wall
+    means the game computed, e.g. x64 translation on the M3s without XtaCache; CPU << wall means it waited), the
+    process's page faults inside it, and map (GPU wait) / copy / gdi / async wait / present of the frames on both
+    sides.
+- Thermal stays on the host side: the guard's `=M3H` (peak, throttle count) from zone0.
+- T62 (`build/win/stage/sbwddm-t62`) now ships it (A B A2 B2, big cores). The user wants no phone work 15:30-20:00,
+  so T62 runs after 20:00.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
