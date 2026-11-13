@@ -633,13 +633,13 @@ static int32_t blk_one(const struct sbshm_blkreq *r)
     return e > 0 ? -SBG_EIO : e;
 }
 
-static void blk_serve(void)
+/* up to max requests in max_ms (the poll), or exactly one (the pump: max 1); the number served */
+static uint32_t blk_serve_n(uint32_t max, uint32_t max_ms)
 {
     if (!cfg.v2 || !os->blk_io || blk_ring_bad)
-        return;
+        return 0;
     volatile struct sbshm_blk *b = (volatile struct sbshm_blk *)SHM(SBSHM_BLK_OFF);
-    uint32_t max = cfg.blk_per_poll ? cfg.blk_per_poll : SBG_BLK_PER_POLL;
-    uint32_t max_ms = cfg.blk_poll_ms ? cfg.blk_poll_ms : SBG_BLK_POLL_MS, n = 0;
+    uint32_t n = 0;
     uint64_t t0 = os->ms(), t1 = t0;
     for (;;) {
         uint32_t head = b->req_head;
@@ -698,7 +698,7 @@ static void blk_serve(void)
         t1 = os->ms();
     }
     if (!n)
-        return;
+        return 0;
     sbshm_dmb();
     if (cfg.db_guest)
         wr32((uintptr_t)cfg.gicd + 0x200 + 4 * (cfg.db_guest / 32), 1U << (cfg.db_guest % 32));   /* ISPENDR */
@@ -707,14 +707,27 @@ static void blk_serve(void)
         st.blk_batch_max = n;
     if (t1 - t0 > st.blk_poll_ms_max)
         st.blk_poll_ms_max = (uint32_t)(t1 - t0);
+    return n;
+}
+static void blk_serve(void)
+{
+    (void)blk_serve_n(cfg.blk_per_poll ? cfg.blk_per_poll : SBG_BLK_PER_POLL,
+                      cfg.blk_poll_ms ? cfg.blk_poll_ms : SBG_BLK_POLL_MS);
 }
 
-void sbg_pump(void)
+int sbg_pump(uint32_t max_sectors)
 {
-    if (st.state != SBG_BOOTING && st.state != SBG_RUNNING && st.state != SBG_STOPPING)
-        return;
-    blk_serve();
-    sbg_p9_poll();                                  /* (returns at once without the service) */
+    if ((st.state != SBG_BOOTING && st.state != SBG_RUNNING && st.state != SBG_STOPPING) || !cfg.v2 || !os->blk_io ||
+        blk_ring_bad)
+        return 0;
+    volatile struct sbshm_blk *b = (volatile struct sbshm_blk *)SHM(SBSHM_BLK_OFF);
+    if (b->req_head == blk_tail || b->req_head - blk_tail > SBSHM_BLK_RING || blk_head - b->done_tail >= SBSHM_BLK_RING)
+        return 0;                                   /* none waiting (or the poll's cases: left to it) */
+    sbshm_dmb();
+    const volatile struct sbshm_blkreq *q = &b->req[blk_tail & (SBSHM_BLK_RING - 1)];
+    if (q->op != SBG_BLK_READ || q->count > max_sectors)
+        return 0;                                   /* a write or a big read: the next poll's */
+    return (int)blk_serve_n(1, 0);
 }
 
 void sbg_poll(void)
