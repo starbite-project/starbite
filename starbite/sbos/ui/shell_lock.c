@@ -31,6 +31,7 @@ static const tk_bmp *shown_frame(void) { return tk_comp_shown(C); }
 #else
 static const tk_bmp *shown_frame(void) { return &C->fb; }
 #endif
+static int shown_quarter(tk_bmp *q);           /* cp7f: what shows, a quarter each way, for the blurred scrims (below) */
 
 /* P3p (audit 15): the safe margins. The S9's long edges curve away from x < 72 px and x > 1368 px (rims and
  * highlights bend and dim there): every card, group, dock and sheet keeps MARGIN pt from the sides (iOS: 16 pt on a
@@ -1564,7 +1565,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     focus_req = 0;                           /* cp6: every sheet opens on a normal start */
     free_cc_all();                           /* B4: the lock's Control Centre makes room for the sheet */
     /* the scrim: what is on the panel now, blurred 22 pt, saturated 1.3, under rgba(4, 8, 26, .28) */
-    tk_comp_frame(C, 0, 0);                  /* the frame in RAM is current (only what changed is drawn) */
+    if (!C->gpu) tk_comp_frame(C, 0, 0);    /* the frame in RAM is current (only what changed is drawn); cp7f: GPU: shown_quarter */
     relayer(&scrim);
     tk_layer_init(&scrim, "scrim");
     /* half resolution, drawn 2x (it is a blur): 4 MB instead of 17 */
@@ -1572,9 +1573,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     scrim.sx = scrim.sy = 2;
     {
         tk_bmp q;
-        tk_bmp_new(&q, TK_W / 4, TK_H / 4);
-        tk_bmp_down2(&scrim.bmp, shown_frame());
-        tk_bmp_down2(&q, &scrim.bmp);
+        shown_quarter(&q);                       /* cp7f (the GPU path: no whole CPU frame first) */
         tk_bmp_blur(&q, PT(22) / 4);
         tk_bmp_satbright(&q, 1.3f, 1);
         /* the tint over it at this size (a constant over a smooth image: the same after the bilinear up) */
@@ -1741,6 +1740,32 @@ static int fl_row = -1;
 static int fl_ver;
 static uint32_t fl_gnd, fl_cut;
 unsigned flat_cuts;                               /* bumped by every other tk_flatten (shell_switcher.inc) */
+/* cp7f: what the panel shows, at a quarter each way, for the blurred scrims (the Control Centre, the focus sheet, the
+ * power sheet). The CPU path: its RAM frame halved twice (as before). The GPU path: its RAM frame would first be drawn
+ * whole on the CPU (tk_comp_shown: ~200-250 ms on the phone, 7e's "idle after a gesture"); instead the wallpaper's
+ * quarter with the visible layers flattened at a quarter over it (1/16 of the px; no lens: under a 20+ pt blur none
+ * of it would show). 0: no memory */
+static int shown_quarter(tk_bmp *q)
+{
+    if (!tk_bmp_new(q, TK_W / 4, TK_H / 4)) return 0;
+    if (!C || !C->gpu) {
+        tk_bmp h;
+        if (!tk_bmp_new(&h, TK_W / 2, TK_H / 2)) { tk_bmp_free(q); return 0; }
+        tk_bmp_down2(&h, shown_frame());
+        tk_bmp_down2(q, &h);
+        tk_bmp_free(&h);
+        return 1;
+    }
+    tk_bmp_down2(q, &C->base_half);
+    tk_bmp f;
+    if (tk_bmp_new(&f, q->w, q->h)) {
+        flat_cuts++;                              /* (the lock's sliced flatten starts over) */
+        tk_flatten(&root, &f, 0, .25f);
+        tk_blit(q, &f, 0, 0, 1);
+        tk_bmp_free(&f);
+    }
+    return 1;
+}
 #define FL_BAND 96                                /* half-resolution rows a slice (1480 in all: 16 slices) */
 static void flatten_end(void)
 {
@@ -2103,10 +2128,14 @@ static void build_cc_stage(int st)
     if (st == 1) {
     /* the scrim from home as it is now (half resolution, drawn 2x), then the grid over it */
     CCS.built = 0;                               /* (being made: a pull now builds it whole) */
-    tk_comp_frame(C, 0, 0);
     relayer(&ccscrim);
     tk_layer_init(&ccscrim, "cc-scrim");
     tk_bmp_free(&ccq);
+    if (C && C->gpu) {                           /* cp7f: the GPU row keeps only the quarter (stage 3): shown_quarter */
+        shown_quarter(&ccq);
+        return;
+    }
+    tk_comp_frame(C, 0, 0);
     if (tk_bmp_new(&ccscrim.bmp, TK_W / 2, TK_H / 2)) {
         tk_bmp q;
         tk_bmp_new(&q, TK_W / 4, TK_H / 4);
@@ -2117,7 +2146,7 @@ static void build_cc_stage(int st)
     return;
     }
     if (st == 2) {                               /* cp7c (7e): the light blur a stage of its own */
-    if (ccscrim.bmp.px && ccq.px) {
+    if (ccq.px) {
         tk_bmp q = ccq;
         /* P3p (P3j-20): the blur and the dim grow with the pull: an 8 pt level (dim .12, quarter resolution, 1 MB)
          * comes in first, the 26 pt one (neutral dim .25, not a blue tint) over it */
@@ -2135,7 +2164,7 @@ static void build_cc_stage(int st)
     return;
     }
     if (st == 3) {
-    if (ccscrim.bmp.px && ccq.px) {
+    if (ccq.px && (ccscrim.bmp.px || (C && C->gpu))) {
         tk_bmp q = ccq;
         tk_memset(&ccq, 0, sizeof ccq);
         tk_bmp_blur(&q, PT(26) / 4);
