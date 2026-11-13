@@ -12,6 +12,10 @@
  *   - at RestartSec a clean restart (NtShutdownSystem(ShutdownReboot) from a second thread: drivers get
  *     IRP_MJ_SHUTDOWN, the hives and NTFS are flushed and closed), while the feeder keeps feeding;
  *   - at CapSec the feeder stops: the watchdog resets the SoC within its timeout, whatever state Windows is in.
+ *     T61 (big-core boots, MIDR not an A55): the big-core firmware's A55 guard also feeds this watchdog
+ *     (WTCNT = WTDAT every 0.5 s while Windows' clock ticks), so stopping is not enough there. At CapSec sbwdog
+ *     loads it with 16 counts instead (WTDAT = WTCNT = 0x10, ~20 ms): the guard's own feeding then reloads 16, and
+ *     the SoC resets (the guard's forced-reset path, M3Early.c, does the same). State\CapForced = 1.
  * The times depend on sbwddm's mode this boot (Services\sbwddm\State\WddmMode, read at 60 s):
  *   full mode (a GPU test)  FullRestartSec 300, FullCapSec 360;
  *   display-only            DisplayRestartSec 120, DisplayCapSec 180 (the clean boot after a test).
@@ -240,7 +244,24 @@ static void Feed(void)
     Wr(g.Wdt, WTCNT, Rd(g.Wdt, WTDAT));
 }
 
-/* The loader's sequence (shim/starlte/wdt.c wdt_arm), for ArmSec when nothing armed it. */
+/* The loader's sequence (shim/starlte/wdt.c wdt_arm) with a raw count (T61: also the big-core cap's 0x10). */
+static BOOLEAN ArmCount(ULONG c)
+{
+    if (!g.PmuWritable)
+        return FALSE;
+    Wr(g.Wdt, WTCON, 0);
+    Wr(g.Wdt, WTDAT, c);
+    Wr(g.Wdt, WTCNT, c);
+    Wr(g.Wdt, WTCLRINT, 0);
+    Wr(g.Wdt, WTCON, WDT_WTCON);
+    if (Rd(g.Pmu, PMU_WDT_DISABLE) & (1U << WDT1_PMU_BIT))
+        Wr(g.Pmu, PMU_WDT_DISABLE, Rd(g.Pmu, PMU_WDT_DISABLE) & ~(1U << WDT1_PMU_BIT));
+    if (Rd(g.Pmu, PMU_WDT_MASK) & (1U << WDT1_PMU_BIT))
+        Wr(g.Pmu, PMU_WDT_MASK, Rd(g.Pmu, PMU_WDT_MASK) & ~(1U << WDT1_PMU_BIT));
+    return Armed();
+}
+
+/* for ArmSec when nothing armed it */
 static BOOLEAN Arm(ULONG Secs)
 {
     ULONG64 c;
@@ -249,16 +270,15 @@ static BOOLEAN Arm(ULONG Secs)
     c = (ULONG64)Secs * WDT_HZ_X1000 / 1000ULL;
     if (c > 0xFFFF)
         c = 0xFFFF;
-    Wr(g.Wdt, WTCON, 0);
-    Wr(g.Wdt, WTDAT, (ULONG)c);
-    Wr(g.Wdt, WTCNT, (ULONG)c);
-    Wr(g.Wdt, WTCLRINT, 0);
-    Wr(g.Wdt, WTCON, WDT_WTCON);
-    if (Rd(g.Pmu, PMU_WDT_DISABLE) & (1U << WDT1_PMU_BIT))
-        Wr(g.Pmu, PMU_WDT_DISABLE, Rd(g.Pmu, PMU_WDT_DISABLE) & ~(1U << WDT1_PMU_BIT));
-    if (Rd(g.Pmu, PMU_WDT_MASK) & (1U << WDT1_PMU_BIT))
-        Wr(g.Pmu, PMU_WDT_MASK, Rd(g.Pmu, PMU_WDT_MASK) & ~(1U << WDT1_PMU_BIT));
-    return Armed();
+    return ArmCount((ULONG)c);
+}
+
+/* T61: an A55 (Cortex-A55: implementer 0x41, part 0xD05) or not (the M3s of the big-core entry) */
+static BOOLEAN CpuIsA55(void)
+{
+    ULONG64 midr;
+    __asm__ volatile("mrs %0, midr_el1" : "=r"(midr));
+    return ((midr >> 24) & 0xFFU) == 0x41U && ((midr >> 4) & 0xFFFU) == 0xD05U;
 }
 
 /* ---- T35: the crash ledger ------------------------------------------------------------------------------ */
@@ -625,6 +645,11 @@ static VOID FeedThread(PVOID Ctx)
         if (capSec && feeding && elapsed >= capSec) {
             feeding = FALSE;              /* the watchdog resets the SoC within its timeout */
             State(L"CapAt", elapsed, TRUE);
+            if (!CpuIsA55()) {
+                /* T61: someone else (the big-core guard) feeds it too: 16 counts, so its reload resets as well */
+                State(L"CapForced", 1, TRUE);
+                (void)ArmCount(0x10);
+            }
         }
     }
 }
@@ -680,6 +705,8 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT Drv, PUNICODE_STRING Reg)
     State(L"PmuMask", Rd(g.Pmu, PMU_WDT_MASK), FALSE);
     State(L"RestartAt", 0, FALSE);
     State(L"CapAt", 0, FALSE);
+    State(L"CapForced", 0, FALSE);
+    State(L"BigCore", !CpuIsA55(), FALSE);
     State(L"Mode", 2, FALSE);
     /* ArmedBySelf: 1 = it was stopped and we armed it; 0 = the loader's arming survived (or ArmSec 0) */
     if (!Armed() && armSec)

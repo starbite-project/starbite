@@ -22,7 +22,7 @@ export SB_SIGN_CERT=${SB_SIGN_CERT:-$main/build/woa/ufs-sys/sign/starbite-test.c
 "$win/build.sh" wdm "$out/sbthermal.sys" "$here/sbthermal/sbthermal.c" "$here/sbthermal/sbth_core.c" "$here/common/sbw_acpm.c"
 # the dead-man feeder for unattended boots (the loader's cluster-1 watchdog), a boot-start service
 # T17: link maps next to the drivers, so a bugcheck address can be named (tools/win/kdump.py --map)
-LDFLAGS="/map:$out/sbwdog.map" "$win/build.sh" wdm "$out/sbwdog.sys" "$here/sbwdog/sbwdog.c"
+LDFLAGS="/map:$out/sbwdog.map" "$win/build.sh" wdm "$out/sbwdog.sys" "$here/sbwdog/sbwdog.c" "$here/sbwdog/sbcl_core.c"
 # the S9's keys (Bixby held: clean restart), a plain service like sbwdog (docs/WIN11-GPU.md 6.40)
 LDFLAGS="/map:$out/sbkeys.map" "$win/build.sh" wdm "$out/sbkeys.sys" "$here/sbkeys/sbkeys.c" "$here/sbkeys/sbk_core.c"
 LIBS="displib.lib ntstrsafe.lib libcntpr.lib" \

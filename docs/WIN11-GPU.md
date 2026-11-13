@@ -2312,6 +2312,30 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   `sb-comp-trace.txt`.
 - **T60** (`build/win/stage/sbwddm-t60`): T58 + fa68467d, VIS2 = `hwnd dcsurf`, dcsurf traced.
 
+### 6.66 Big cores are the GD/fps target; T61 = T59's GD A/B on win11-big (2026-11-13 afternoon)
+
+- **The user:** the big-core entry is their Windows ("I hate the small cores"). T49-T60 all booted `win11-gpu`
+  (A55s). From T61 on, GD and fps are measured on `win11-big`.
+- **Same install, same driver:** both rows boot `ufs:WINDOWS (NTFS)`. `windows-big3i.uefi` = the win11 row's
+  `windows-t32s-nocache.uefi` (SBGPU, USB, WLAN, SMBIOS) with only Star2LteSsdtDxe swapped (docs/WIN11-M3-CLEAN.md
+  on the big-core branch, sections 27-32). sbwddm ran in full mode there (big3-1794: WddmMode 1). The installed
+  default (T51) is therefore the big-core entry's driver too.
+- **What blocked unattended big-core cycles:** only the cap. The big-core module's A55 guard feeds WDT1
+  (`WTCNT = WTDAT` every 0.5 s while KUSER InterruptTime advances, M3Early.c v10 free run), so sbwdog stopping its
+  own feeding at FullCapSec could not reset a Windows that is alive but never restarted. Covered anyway: gputest's
+  own restart, sbwdog's clean restart, bugcheck + AutoReboot, and the guard for a frozen clock. T49-T58's test boots
+  all ended in a clean restart.
+- **sbwdog 24b4ae14 (T61):** `ArmCount()` (the loader's arm sequence with a raw count; `Arm()` uses it). At the cap,
+  on a CPU whose MIDR is not a Cortex-A55, it loads WDT1 with 16 counts (~20 ms). The guard's reload then reloads 16
+  too, the same mechanism as the guard's own forced reset. State `BigCore` and `CapForced`. A55 path unchanged.
+  starbite/win/build.sh now links sbcl_core.c into sbwdog (T35's ledger; the line had lost it).
+- **gpu-cycle:** no change. `--test-key win11-big` passes its catalog check (uefi, wdt 82, wdt_feed own). The clean
+  boot stays `win11-auto` (A55; sbxta puts XtaCache back to Start 2).
+- **T61** (`build/win/stage/sbwddm-t61`): T59 + sbwdog 24b4ae14:
+  `gpu-cycle.sh .../sbwddm-t61 OUT --test-key win11-big --full-sec 2700 --no-trace --keys 1 --afbc 0`.
+  It reads out GD A/B fps and copy avg on the M3s against the A55 baseline (~18.5 fps, ~46 ms copy) and the guard's
+  `=M3H` temperatures. T59 (the same A/B on the A55s) is optional.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
