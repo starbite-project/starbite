@@ -19,7 +19,9 @@ IMAGE=${IMAGE:-/mnt/build/sbguest2/Image-guest}
 OUT=${OUT:-$WORK/bundle}
 [ -f "$IMAGE" ] || { echo "desktop-bundle: no $IMAGE" >&2; exit 1; }
 mkdir -p "$OUT" "$WORK/out"
-WORK="$WORK" KOUT="$KOUT" "$here/../sbwl/mk-initrd.sh" > "$OUT/build.log" 2>&1 || { tail -20 "$OUT/build.log"; exit 1; }
+# DESKTOP_ONLY (default 1, instant start): the initrd without the L2 built-in terminal (~1.5 MB instead of ~10 MB)
+DESKTOP_ONLY=${DESKTOP_ONLY:-1} WORK="$WORK" KOUT="$KOUT" "$here/../sbwl/mk-initrd.sh" > "$OUT/build.log" 2>&1 ||
+    { tail -20 "$OUT/build.log"; exit 1; }
 rd="$WORK/out/initrd-wl.cpio.gz"
 python3 "$here/../mk-guest-dts.py" --profile s9 --rd-size "$(stat -c %s "$rd")" --db-guest 511 \
     --bootargs-extra "sbguest.mode=desktop snd_dummy.enable=0" "$OUT/guest-wl.dts" >/dev/null

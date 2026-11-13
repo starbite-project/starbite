@@ -7,7 +7,7 @@
 #include "sb.h"
 #include "kern.h"
 
-#define NALARM 4
+#define NALARM ALARM_SLOTS             /* 8a: 32 (was 4); the classic Clock app's state still covers the first four */
 #define SNOOZE_MIN 9
 #define RING_MAX_MS 600000U
 #define RING_EVERY_MS 2500U
@@ -23,6 +23,9 @@ static uint8_t used[NALARM];
 static char label[NALARM][LABEL_MAX];
 static int kept;                            /* the list came from "sbos.alarm" (or was edited in Next) */
 static int ringing = -1;                    /* the alarm ringing (or -1) */
+/* cp7x (Track A): the alarm's sound. The Next shell plays snd's ALARM tone (kern_next.c -> shell_lock.c's
+ * sh_alarm_sound, the shell's ring owner 4) from the ring until Stop / Snooze / the 10 minutes; other shells: none */
+__attribute__((weak)) void alarm_sound(int on) { (void)on; }
 static uint64_t ring_t0;
 static int64_t snooze_utc;                  /* a snoozed alarm rings again at this time (0 none) */
 static int snooze_idx = -1;
@@ -92,6 +95,7 @@ static void ring(int i, const char *why)
         app_event_send(a, EV_APP_SERVICE, 3, i | al[i].h << 8 | al[i].m << 16);
     }
     (void)vib_buzz(3, 500, 300);
+    alarm_sound(1);
     kt_set(KT_CLOCK, 1, sb_ms(), RING_EVERY_MS, 0);
 }
 
@@ -152,6 +156,7 @@ int alarm_stop(int snooze)
     ringing = -1;
     kt_cancel(KT_CLOCK, 1);
     vib_off();
+    alarm_sound(0);
     if (snooze) {
         struct sbos_time t;
         if (clock_now(&t) && t.utc) {
@@ -264,13 +269,16 @@ int alarm_pack(uint8_t out[ALARM_REC_SIZE])
     return kept;
 }
 
-void alarm_unpack(const uint8_t in[ALARM_REC_SIZE])
+void alarm_unpack(const uint8_t *in, unsigned len)
 {
     uint32_t m;
+    if (len < 4)
+        return;
     memcpy(&m, in, 4);
     if (m != REC_MAGIC)
         return;
-    for (int k = 0; k < NALARM; ++k) {
+    int slots = (int)((len - 4) / 28);      /* 4 in a record from before 8a */
+    for (int k = 0; k < NALARM && k < slots; ++k) {
         const uint8_t *p = in + 4 + k * 28;
         if (p[2] > 23 || p[3] > 59 || p[4] > 0x7f)
             continue;
@@ -293,7 +301,7 @@ int alarm_app_state(uint8_t out[20])
         return 0;
     uint32_t m = 0x314d4c41U;
     memcpy(out, &m, 4);
-    for (int k = 0; k < NALARM; ++k) {
+    for (int k = 0; k < 4; ++k) {             /* the classic app knows four */
         out[4 + 4 * k] = al[k].on;
         out[5 + 4 * k] = al[k].h;
         out[6 + 4 * k] = al[k].m;

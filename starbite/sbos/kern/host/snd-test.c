@@ -548,6 +548,15 @@ static void t_tones(void)
     snd_tone(SND_TONE_CLICK);
     run(100, 5, -1, 0, 0);
     CHECK(!snd_tone_playing(), "the key click ends");
+    /* 8a: the added one-shot tones each play and end; an unknown kind is refused */
+    for (int k = SND_TONE_CLICK_DEL; k <= SND_TONE_MAX; k++) {
+        nplayed = 0;
+        CHECK(snd_tone(k) == 0, "tone %d starts", k);
+        run(500, 5, -1, 0, 0);
+        CHECK(!snd_tone_playing(), "tone %d plays once and ends", k);
+        CHECK(first_nonzero() < nplayed, "tone %d was heard", k);
+    }
+    CHECK(snd_tone(SND_TONE_MAX + 1) == SND_EINVAL, "an unknown tone is refused");
     run(2500, 5, -1, 0, 0);
     CHECK(aud_is_off(), "tones: AUD off after");
 }

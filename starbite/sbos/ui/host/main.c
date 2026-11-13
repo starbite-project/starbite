@@ -136,6 +136,49 @@ int sh_pref_int(const char *key, int def)
     return *e ? def : (int)v;
 }
 void sh_pref_set_int(const char *key, int v) { char b[16]; snprintf(b, sizeof b, "%d", v); (void)sh_pref_set(key, b); }
+/* 8a: Notes' and Contacts' documents (kern/docs.c on the phone) in RAM, with the phone's limits */
+static struct { int c; unsigned id, n; unsigned char *p; } HD[256];
+static int hdn;
+static unsigned hd_used(int c) { unsigned u = 0; for (int i = 0; i < hdn; i++) if (HD[i].c == c) u += HD[i].n; return u; }
+int sh_doc_put(int coll, unsigned id, const void *p, unsigned n)
+{
+    unsigned budget = coll == 0 ? 96u << 10 : 64u << 10;
+    if (coll < 0 || coll > 1 || !id || n > (32u << 10)) return -1;
+    int k = -1;
+    for (int i = 0; i < hdn; i++) if (HD[i].c == coll && HD[i].id == id) k = i;
+    if (!n) { if (k >= 0) { free(HD[k].p); HD[k] = HD[--hdn]; } return 0; }
+    if (hd_used(coll) - (k >= 0 ? HD[k].n : 0) + n > budget) return -1;
+    if (k < 0) { if (hdn >= 256) return -1; k = hdn++; HD[k].c = coll; HD[k].id = id; HD[k].p = 0; }
+    free(HD[k].p);
+    HD[k].p = malloc(n);
+    memcpy(HD[k].p, p, n);
+    HD[k].n = n;
+    return 0;
+}
+int sh_doc_get(int coll, unsigned id, void *p, unsigned cap)
+{
+    for (int i = 0; i < hdn; i++)
+        if (HD[i].c == coll && HD[i].id == id) { if (p) memcpy(p, HD[i].p, HD[i].n < cap ? HD[i].n : cap); return (int)HD[i].n; }
+    return -1;
+}
+int sh_doc_count(int coll) { int n = 0; for (int i = 0; i < hdn; i++) n += HD[i].c == coll; return n; }
+unsigned sh_doc_id_at(int coll, int k)
+{
+    unsigned last = 0;
+    for (int s = 0; s <= k; s++) {
+        unsigned best = 0;
+        for (int i = 0; i < hdn; i++) if (HD[i].c == coll && HD[i].id > last && (!best || HD[i].id < best)) best = HD[i].id;
+        if (!best) return 0;
+        last = best;
+    }
+    return last;
+}
+unsigned sh_doc_new_id(int coll) { unsigned m = 0; for (int i = 0; i < hdn; i++) if (HD[i].c == coll && HD[i].id > m) m = HD[i].id; return m + 1; }
+void sh_doc_usage(int coll, unsigned *used, unsigned *budget)
+{
+    if (used) *used = hd_used(coll);
+    if (budget) *budget = coll == 0 ? 96u << 10 : 64u << 10;
+}
 int sh_blob_put(const char *name, const void *p, unsigned n)
 {
     if (!hp_name_ok(name, 16) || n > 32768 || (n && !p)) return -1;
@@ -437,7 +480,22 @@ long long sh_utc(void) { return 1794500000LL + 25 * 60 + (long long)(surv_host_n
 /* Track A: the time zones on kern/tzdb.c itself (linked in), 12 / 24-hour and four alarms in RAM (two made up). The
  * host's sh_status stays the concept's 21:05 whatever the zone */
 #include "tzdb.h"
+#include "tzcities.h"
 static int host_tz = -1, host_24 = 1;
+/* 8a: the cities (kern/tzcities.c, GeoNames CC BY 4.0) */
+int sh_city_count(void) { return tzcities_n; }
+int sh_city_find(const char *query, int *out, int max) { return tzc_find(query, out, max); }
+int sh_city_get(int i, const char **name, const char **country, int *tz, int *lat_e4, int *lon_e4)
+{
+    if (i < 0 || i >= tzcities_n) return -1;
+    const struct tzcity *c = &tzcities[i];
+    if (name) *name = c->name;
+    if (country) *country = tzc_country[c->country];
+    if (tz) *tz = c->zone;
+    if (lat_e4) *lat_e4 = c->lat_e4;
+    if (lon_e4) *lon_e4 = c->lon_e4;
+    return 0;
+}
 int sh_tz_count(void) { return tzdb_n; }
 const char *sh_tz_name(int i, const char **city)
 {
@@ -1343,7 +1401,13 @@ void sh_snd_tone_stop(void) { }
 int sh_snd_volume(void) { return host_vol; }
 void sh_snd_volume_set(int v) { host_vol = v < 0 ? 0 : v > 15 ? 15 : v; }
 int sh_snd_open(void) { return 0; }
-unsigned sh_snd_write(int id, const int16_t *frames, unsigned n) { (void)id; (void)frames; return n; }
+unsigned sh_snd_write(int id, const int16_t *frames, unsigned n)   /* cp7w: SBTK_SNDOUT=file keeps what is written (raw 48 kHz stereo s16) */
+{
+    (void)id;
+    const char *o = getenv("SBTK_SNDOUT");
+    if (o) { FILE *f = fopen(o, "ab"); if (f) { fwrite(frames, 4, n, f); fclose(f); } }
+    return n;
+}
 unsigned sh_snd_space(int id) { (void)id; return 4096; }
 void sh_snd_close(int id) { (void)id; }
 const char *sh_snd_why(void) { return "The host has no sound"; }

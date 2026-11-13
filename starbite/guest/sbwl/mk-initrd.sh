@@ -4,6 +4,9 @@
 # 24.04 arm64), the xkb data (us keymap), DejaVu Sans Mono with a fontconfig setup, a passwd entry.
 #   limactl shell starbite -- /Users/dev/project-starbite/starbite/guest/sbwl/mk-initrd.sh
 # Writes $WORK/out/initrd-wl.cpio.gz (reproducible: fixed mtimes, gzip -n).
+# DESKTOP_ONLY=1 (instant start, 2026-11-13): only what the desktop root switch needs (busybox, init, sbguest.ko,
+# e2fsck and its libraries): ~10 MB -> ~1.5 MB on the card (each MB is ~0.35 s at the card's 2.9 MB/s); without
+# a base image on the card the guest then powers off with init's "no /dev/sbblk0" (no built-in L2 terminal).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 WORK=${WORK:-/mnt/build/sbguest}
@@ -14,6 +17,21 @@ BUILD_ONLY=1 WORK="$WORK" KOUT="$KOUT" "$here/../run-qemu.sh" wl > "$WORK/out/mk
 R=$WORK/rd-wl
 rm -rf "$R"
 cp -a "$WORK/rd" "$R"
+if [ "${DESKTOP_ONLY:-0}" = 1 ]; then
+    rm -f "$R/guestd"                       # (the app / terminal modes' publisher: the desktop root has sbwl)
+    mkdir -p "$R/sbin" "$R/etc" "$R/tmp" && rm -f "$R/sbin/e2fsck" && cp /usr/sbin/e2fsck "$R/sbin/e2fsck"
+    for f in $(ldd /usr/sbin/e2fsck | awk '/=> \//{print $3} /^\t\/lib/{print $1}' | sort -u); do
+        mkdir -p "$R$(dirname "$f")"
+        cp -L "$f" "$R$f"
+    done
+    echo 'root:x:0:0:root:/root:/bin/sh' > "$R/etc/passwd"
+    echo 'root:x:0:' > "$R/etc/group"
+    find "$R" -exec touch -h -d @0 {} +
+    (cd "$R" && find . | sort | cpio -o -H newc --quiet --owner=0:0 --reproducible | gzip -9 -n) > "$WORK/out/initrd-wl.cpio.gz"
+    echo "mk-initrd: desktop only: $(du -sh "$R" | cut -f1) unpacked, $(stat -c %s "$WORK/out/initrd-wl.cpio.gz") bytes gz," \
+         "sha256 $(sha256sum "$WORK/out/initrd-wl.cpio.gz" | cut -c1-16)"
+    exit 0
+fi
 cp "$WORK/sbwl/sbwl" "$R/sbwl"
 mkdir -p "$R/usr/bin" "$R/etc" "$R/run" "$R/root" "$R/tmp"
 cp /usr/bin/foot "$R/usr/bin/foot"

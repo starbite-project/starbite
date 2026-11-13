@@ -99,6 +99,8 @@ struct sbg_stats {
     const char *poll_part;
     uint32_t poll_part_ms;
     uint32_t pump_left;                             /* cp7u: sbg_pump calls that found a write or a too-big read waiting */
+    uint32_t freezes, thaws;                        /* instant start: asked since sbg_start */
+    uint32_t t_thawed;                              /* the last thaw: ms from the ask to guest_frozen 0 (0: none yet) */
 };
 
 void sbg_init(const struct sbg_os *os, const struct sbg_cfg *cfg, uint8_t host_cpuif);
@@ -162,6 +164,11 @@ int sbg_launch(uint32_t idx, uint32_t cat_seq);
 int sbg_activate(uint32_t idx);                     /* SBSHM_NONE: no window in the surface (home) */
 int sbg_app_close(uint32_t idx);
 int sbg_viewport(uint32_t rows, uint32_t width);
+/* Instant start (sbshm.h hdr.host_freeze): 1 freeze / 0 thaw a running guest with SBSHM_CAP_FREEZE (1 asked, 0 not
+ * running, -1 it cannot: stop it instead). Any message but SCREEN / FOCUS thaws it too; sbg_stop thaws it first.
+ * sbg_frozen: 1 while the guest says it is frozen. */
+int sbg_freeze(int on);
+int sbg_frozen(void);
 /* cp7 landscape: SBG_MSG_ROTATE (sbshm.h). 1 sent, 0 not now (not running, the ring full), -1 this guest cannot
  * turn (no SBSHM_CAP_ROTATE). sbg_rot_shown: the turn of the frame on show (hdr.guest_rot; 0 when not running). */
 int sbg_rotate(uint32_t quarter_turns, uint32_t rows);

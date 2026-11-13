@@ -30,15 +30,17 @@ static void lx_open_app(int ci);
 #define PILL_X (CONTENT_R - PILL_W)
 #define AQ_FIELD_Y CONTENT_TOP                   /* the search field, under Search's large title */
 #define AQ_PAD 110.0f                            /* under a page's last row: the tab bar's room */
-enum { AT_TODAY, AT_BROWSE, AT_UPDATES, AT_SEARCH };
-enum { H_NONE, H_APP, H_ACT, H_CAT, H_CHECK, H_UPALL, H_ROLLBACK, H_METHOD, H_MAIN, H_OPEN, H_REINSTALL, H_REMOVE, H_SUGGEST };
+enum { AT_TODAY, AT_GAMES, AT_APPS, AT_SEARCH };   /* iOS 27's App Store: Today / Games / Apps + the search circle */
+#define AQ_ACCT "@account"                       /* AQ.cat of the Account page (pushed from the account button) */
+enum { H_NONE, H_APP, H_ACT, H_CAT, H_CHECK, H_UPALL, H_ROLLBACK, H_METHOD, H_MAIN, H_OPEN, H_REINSTALL, H_REMOVE, H_SUGGEST, H_OPTS, H_ACCT, H_MORE };
 static const char *const AQ_CATS[10] = { "Internet", "Office", "Graphics", "Media", "Games", "Utilities", "Development",
                                          "Education", "Science", "System" };
 static const uint32_t AQ_CATC[11] = { 0x0a84ff, 0xff9f0a, 0xff375f, 0xff453a, 0xbf5af2, 0x8e8e93, 0x5e5ce6, 0x30d158,
                                       0x32ade6, 0x636366, 0x2c7be5 };   /* [10]: All Apps */
 static const char *const AQ_SUGG[6] = { "Games", "Text editor", "Graphics", "Office", "Terminal", "Media" };
 static struct {
-    int tab, cat_on, app, pick, kb, shift, num, rm_arm, badge, empty;
+    int tab, cat_on, app, pick, kb, shift, num, rm_arm, badge, empty, opts;   /* opts: Install Options expanded */
+    int more;                                     /* the product page's description opened ("more") */
     char cat[16], pkg[40], q[24];
     float scroll, v, top, bot, h, rm_t, sroot[4], scat;
     int ck[AQ_NCH], dirty[AQ_NCH];               /* each chunk layer's chunk (-1 none), to be drawn again */
@@ -49,7 +51,13 @@ static struct {
     float y0, s0, ly, lt;                        /* the finger: down y, the scroll then, the last move's y and time */
     uint32_t sig, psig[SH_LPKGS];                /* what the pages show (structure), each package's progress */
 } AQ;
-static tk_layer aqc[AQ_NCH], aqh, aqtb, aqtg;    /* the chunks, the fixed head, the tab bar's glass and its glyphs */
+static tk_layer aqc[AQ_NCH], aqh, aqtb, aqtg;
+/* the cold start (Linux not up yet): a determinate bar under the words, two solid layers (no drawing per frame), paced
+ * by the last start this boot (the phone's first: ~35 s to HELLO + the store's table, 7u's self test) */
+static tk_layer aqbt, aqbf;
+static tk_layer aqit;                            /* the inline title (17 / 600, centred) a root page's large title collapses into */
+static float aq_st0, aq_st_exp = 35000, aq_bar_y;
+static int aq_st_late;    /* the chunks, the fixed head, the tab bar's glass and its glyphs */
 static tk_bmp aq_dic;                            /* the app page's 100 pt icon */
 static char aq_dic_pkg[40];
 static struct { int icon; uint32_t key; tk_bmp b; } SIC[24];   /* the packages' 48 pt icons */
@@ -95,7 +103,16 @@ static int aq_cat_n(const char *cat)
     for (int i = 0; i < aq_n(); i++) n += !cat[0] || !tk_strcmp(LST->pkg[i].category, cat);
     return n;
 }
-static const char *aq_mname(unsigned m) { return m == SH_M_RELEASE ? "Latest release" : m == SH_M_SOURCE ? "Build from source" : m == SH_M_DISTRO ? "Debian package" : "Default"; }
+/* the methods in plain words (cp7z, the user's first minute: no "release / source / distro"): the card's title, the
+ * segment's label, one line on what it means */
+static const char *aq_mname(unsigned m) { return m == SH_M_RELEASE ? "Newest from the developer" : m == SH_M_SOURCE ? "Build on this phone" : m == SH_M_DISTRO ? "From Debian" : "Default"; }
+static const char *aq_mseg(unsigned m) { return m == SH_M_RELEASE ? "Newest" : m == SH_M_SOURCE ? "Build" : "Debian"; }
+static const char *aq_mwhy(unsigned m)
+{
+    return m == SH_M_RELEASE ? "The developer's own build of the newest version, checked before it installs." :
+           m == SH_M_SOURCE ? "Compiled on this phone from the developer's code: takes a while, needs Wi-Fi." :
+                              "Debian's package: tested with the rest of Linux, sometimes an older version.";
+}
 static const char *aq_mver(const sh_lpkg_t *p, unsigned m) { return m == SH_M_RELEASE ? p->ver_rel : m == SH_M_SOURCE ? p->ver_src : p->ver_distro; }
 /* a string built of parts (NULL-terminated), cut at cap */
 static void aq_cat(char *b, int cap, const char *const *parts)
@@ -137,8 +154,8 @@ static int aq_status(const sh_lpkg_t *p, char *b, int cap, tk_col *c)
         char t[96];
         aq_dec(y, (int)(p->pct > 99 ? 99 : p->pct));      /* cp6: the step moves visibly (the engine's overall %) */
         if (!p->eta_s) AQS(t, "Building ", y, " %");
-        else if (p->eta_s < 60) AQS(t, "Building ", y, " % \xc2\xb7 under a minute left");
-        else { aq_dec(x, (int)((p->eta_s + 59) / 60)); AQS(t, "Building ", y, " % \xc2\xb7 about ", x, " min left"); }
+        else if (p->eta_s < 60) AQS(t, "Building ", y, " % \xc2\xb7 <1 min");
+        else { aq_dec(x, (int)((p->eta_s + 59) / 60)); AQS(t, "Building ", y, " % \xc2\xb7 ", x, " min left"); }
         lx_scopy(b, t, cap);
     } else if (p->pct) { char t[96]; aq_dec(y, (int)(p->pct > 99 ? 99 : p->pct)); AQS(t, "Installing ", y, " %"); lx_scopy(b, t, cap); }
     else lx_scopy(b, "Installing\xe2\x80\xa6", cap);
@@ -277,16 +294,40 @@ static void aq_live_add(int kind, int pkg, float x, float y, float w)
 }
 static void aq_blit(dc *d, const tk_bmp *b, float x, float y) { if (b && b->px) tk_blit(d->b, b, (int)tk_floorf(PT(x) - d->ox + .5f), (int)tk_floorf(PT(y) - d->oy + .5f), 1); }
 /* the row's button (PILL_W x 30): GET / OPEN / UPDATE / RETRY, or the progress ring with its stop square */
+/* an arc from angle a0 (radians, 0 = 12 o'clock, clockwise) over sweep: the waiting spinner */
+static void aq_darc(dc *d, float cx, float cy, float r, float sw, float a0, float sweep, tk_col c)
+{
+    int bx = (int)tk_floorf(PT(cx - r - sw) - d->ox) - 2, by = (int)tk_floorf(PT(cy - r - sw) - d->oy) - 2;
+    int n = (int)PT(2 * (r + sw)) + 5;
+    tk_fm m;
+    tk_fm_new(&m, n, n);
+    tk_fm_arc(&m, d->ox + bx, d->oy + by, PT(cx), PT(cy), PT(r), PT(sw), a0, sweep, 1);
+    tk_paint pp = tk_solid(c);
+    tk_draw_fm(d->b, &m, bx, by, &pp, 1);
+    tk_fm_free(&m);
+}
+/* iOS's states after GET: "waiting" (an indeterminate spinner: queued, or started with nothing measurable yet), then
+ * the progress ring with its stop square (tap = cancel), then OPEN */
+static int aq_waiting(const sh_lpkg_t *p)
+{
+    if (p->state == SH_PKG_QUEUED) return 1;
+    if (p->state != SH_PKG_INSTALLING) return 0;
+    if (p->phase == SH_PKG_DOWNLOADING && p->total_kb) return 0;
+    return p->pct < 2;
+}
+static float aq_spin_a(void) { return (float)((long long)now_ms % 1000) * 6.2831853f / 1000.0f; }   /* one turn a second */
+static void aq_ring(dc *d, float cx, float cy, const sh_lpkg_t *p, int light)
+{
+    tk_col fg = light ? W(1) : ACCENT();
+    d_ring(d, cx, cy, 13, 2.6f, 1, W(.18f), 0);
+    if (aq_waiting(p) && p->state != SH_PKG_REMOVING) { aq_darc(d, cx, cy, 13, 2.6f, aq_spin_a(), 1.7f, fg); return; }
+    d_ring(d, cx, cy, 13, 2.6f, aq_frac(p), fg, 1);
+    if (p->state != SH_PKG_REMOVING) d_rrect(d, cx - 4, cy - 4, 8, 8, 1.5f, fg);
+}
 static void aq_pill(dc *d, float x, float y, const sh_lpkg_t *p, int light)
 {
-    if (st_busy(p)) {
-        float cx = x + PILL_W / 2, cy = y + 15;
-        d_ring(d, cx, cy, 13, 2.6f, 1, W(.18f), 0);
-        d_ring(d, cx, cy, 13, 2.6f, aq_frac(p), light ? W(1) : ACCENT(), 1);
-        if (p->state != SH_PKG_REMOVING) d_rrect(d, cx - 4, cy - 4, 8, 8, 1.5f, light ? W(1) : ACCENT());
-        return;
-    }
-    int inst = aq_inst(p), dim = !inst && (p->flags & (SH_PKG_NO_SPACE | SH_PKG_NEEDS_NET));
+    if (st_busy(p)) { aq_ring(d, x + PILL_W / 2, y + 15, p, light); return; }
+    int inst = aq_inst(p), dim = !inst && (p->flags & SH_PKG_NO_SPACE);   /* (never for "the network looked down": GET tries) */
     const char *t = aq_upd(p) ? "UPDATE" : inst ? "OPEN" : p->state == SH_PKG_FAILED ? "RETRY" : "GET";
     d_rrect(d, x, y, PILL_W, 30, 15, light ? W(.24f) : W(.14f));
     tk_col c = light ? W(1) : ACCENT();
@@ -333,7 +374,36 @@ static float aq_sec(pctx *c, float y, const char *t, const char *link, int what,
     if (link && at(c, CONTENT_R - 110, y, 110, 40)) aq_hitr(c, what, -1, arg, CONTENT_R - 110, y + 4, 116, 32, 10, 1);
     return y + 40;
 }
-static void aq_title(pctx *c, const char *t) { if (vis(c, SAFE_TOP + NAVBAR_H, LARGE_H)) d_h1(c->d, t); }
+static int aq_badge(void);
+/* a root page's large title, the account button at its right (iOS: a 36 pt circle level with the title, the updates'
+ * badge on it; it scrolls away with the title) */
+#define ACCT_D 36.0f
+#define ACCT_X (CONTENT_R - ACCT_D)
+#define ACCT_Y (LARGE_BASE - 29)
+static void aq_title(pctx *c, const char *t)
+{
+    if (vis(c, SAFE_TOP + NAVBAR_H, LARGE_H)) d_h1(c->d, t);
+}
+static void aq_title_acct(pctx *c, const char *t)
+{
+    if (vis(c, SAFE_TOP + NAVBAR_H, LARGE_H)) {
+        dc *d = c->d;
+        d_text_box(d, TK_IT700, 34, MARGIN, LARGE_BASE, CONTENT_W - ACCT_D - 12, 0, t, 0, 0, INK, 0);
+        float cx = ACCT_X + ACCT_D / 2, cy = ACCT_Y + ACCT_D / 2;
+        d_rrect(d, ACCT_X, ACCT_Y, ACCT_D, ACCT_D, ACCT_D / 2, W(.16f));
+        d_rrect(d, cx - 5, cy - 10, 10, 10, 5, W(.85f));             /* our person glyph: a head and shoulders */
+        d_rrect(d, cx - 9.5f, cy + 2, 19, 10, 5, W(.85f));
+        int b = aq_badge();
+        if (b > 0) {
+            char nb[8];
+            aq_dec(nb, tk_mini(b, 99));
+            float bw = tk_maxf(19, tw(TK_IT600, 12, nb, 0, 0) + 10);
+            d_rrect(d, ACCT_X + ACCT_D - 12, ACCT_Y - 5, bw, 19, 9.5f, C_RED);
+            d_text_box(d, TK_IT600, 12, ACCT_X + ACCT_D - 12 + bw / 2, bl(TK_IT600, 12, ACCT_Y - 2.5f), bw, 1, nb, 0, TK_TNUM, W(1), 0);
+        }
+    }
+    if (at(c, ACCT_X - 6, ACCT_Y - 6, ACCT_D + 12, ACCT_D + 12)) aq_hitr(c, H_ACCT, -1, 0, ACCT_X, ACCT_Y, ACCT_D, ACCT_D, ACCT_D / 2, 1);
+}
 
 /* Today: the date and the large title, the featured cards, "Top Apps in" the two biggest categories */
 #define CARD_H 264.0f
@@ -390,6 +460,7 @@ static void aq_topcats(int *a, int *b)
     int n[10];
     *a = *b = -1;
     for (int k = 0; k < 10; k++) n[k] = aq_cat_n(AQ_CATS[k]);
+    n[4] = 0;                                      /* (Games has its own tab) */
     for (int k = 0; k < 10; k++) if (n[k] && (*a < 0 || n[k] > n[*a])) *a = k;
     for (int k = 0; k < 10; k++) if (n[k] && k != *a && (*b < 0 || n[k] > n[*b])) *b = k;
 }
@@ -412,7 +483,7 @@ static float pg_today(pctx *c)
         for (char *q = t; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32);
         d_text(c->d, TK_IT600, 13, MARGIN, LARGE_BASE - 38, t, .3f, 0, C_LABEL2, 0);
     }
-    aq_title(c, "Today");
+    aq_title_acct(c, "Today");
     float y = CONTENT_TOP + 4;
     int ka, kb, nf = 0;
     aq_topcats(&ka, &kb);
@@ -426,14 +497,12 @@ static float pg_today(pctx *c)
     if (kb >= 0) y = aq_top(c, y + 4, kb);
     return y;
 }
-/* Browse: the categories (with All Apps first) as an inset group */
-static float pg_browse(pctx *c)
+/* the categories as an inset group (Apps' end: iOS's "Top Categories"), All Apps first; games: 1 only the Games row */
+static float aq_cats(pctx *c, float y)
 {
-    aq_title(c, "Browse");
-    float y = CONTENT_TOP + 4;
     int rows[11], n = 0;
     rows[n++] = 10;
-    for (int k = 0; k < 10; k++) if (aq_cat_n(AQ_CATS[k])) rows[n++] = k;
+    for (int k = 0; k < 10; k++) if (k != 4 && aq_cat_n(AQ_CATS[k])) rows[n++] = k;
     if (vis(c, y, 52.0f * n)) d_rrect(c->d, GROUP_X, y, GROUP_W, 52.0f * n, 16, C_CARD);
     for (int r = 0; r < n; r++) {
         float ry = y + 52 * r;
@@ -450,18 +519,51 @@ static float pg_browse(pctx *c)
         }
         if (at(c, GROUP_X, ry, GROUP_W, 52)) aq_hitr(c, H_CAT, -1, k, GROUP_X, ry, GROUP_W, 52, 0, 0);
     }
-    y += 52.0f * n + 18;
+    return y + 52.0f * n;
+}
+/* Apps (iOS 27): the featured non-game apps' cards, every category's top three (See All), the categories */
+static float pg_apps(pctx *c)
+{
+    aq_title_acct(c, "Apps");
+    float y = CONTENT_TOP + 4;
+    int nf = 0;
+    for (int i = 0; i < aq_n() && nf < 2; i++) {
+        const sh_lpkg_t *p = &LST->pkg[i];
+        if (!(p->flags & SH_PKG_FEATURED) || !tk_strcmp(p->category, "Games")) continue;
+        y = aq_card(c, y, i);
+        nf++;
+    }
+    for (int k = 0; k < 10; k++) if (k != 4 && aq_cat_n(AQ_CATS[k])) y = aq_top(c, y + 4, k);
+    y = aq_sec(c, y + 4, "Top Categories", 0, 0, 0);
+    y = aq_cats(c, y) + 18;
     if (vis(c, y, 40)) {
         char ln[4][96];
         float wm;
-        int m = wrapn(ln, 2, TK_IT400, 13, "Apps run in Linux on the phone's big cores. Each one installs from its latest release, from source or as a Debian package.", GROUP_W - 32, &wm);
+        int m = wrapn(ln, 2, TK_IT400, 13, "Apps run in Linux on the phone's big cores. Each one installs from the developer, builds on the phone or comes from Debian.", GROUP_W - 32, &wm);
         for (int j = 0; j < m; j++) d_text(c->d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 18.0f * j), ln[j], 0, 0, W(.5f), 0);
     }
     return y + 44;
 }
-/* a category's apps (pushed from Browse; "" all) */
+/* Games: a featured game's card, then every game */
+static float pg_games(pctx *c)
+{
+    aq_title_acct(c, "Games");
+    float y = CONTENT_TOP + 4;
+    int first = -1, tot = aq_cat_n("Games"), k = 0;
+    for (int i = 0; i < aq_n() && first < 0; i++)
+        if (!tk_strcmp(LST->pkg[i].category, "Games") && (LST->pkg[i].flags & SH_PKG_FEATURED)) first = i;
+    for (int i = 0; i < aq_n() && first < 0; i++) if (!tk_strcmp(LST->pkg[i].category, "Games")) first = i;
+    if (first >= 0) y = aq_card(c, y, first);
+    y = aq_sec(c, y + 4, "Top Games", 0, 0, 0);
+    for (int i = 0; i < aq_n(); i++)
+        if (!tk_strcmp(LST->pkg[i].category, "Games")) y = aq_row(c, y, i, 0, ++k < tot, 0);
+    return y + 22;
+}
+static float pg_updates(pctx *c);
+/* a category's apps (pushed from Apps' See All / Top Categories; "" all); the Account page */
 static float pg_cat(pctx *c)
 {
+    if (!tk_strcmp(AQ.cat, AQ_ACCT)) return pg_updates(c);
     aq_title(c, AQ.cat[0] ? AQ.cat : "All Apps");
     float y = CONTENT_TOP;
     int tot = aq_cat_n(AQ.cat), k = 0;
@@ -526,7 +628,7 @@ static void aq_checked(char *b, int cap)
 }
 static float pg_updates(pctx *c)
 {
-    aq_title(c, "Updates");
+    aq_title(c, "Account");
     float y = CONTENT_TOP + 4;
     if (vis(c, y, 50)) {
         dc *d = c->d;
@@ -587,10 +689,19 @@ static float pg_updates(pctx *c)
 /* the app's page */
 static int aq_needs_net(const sh_lpkg_t *p) { return !aq_inst(p) && (p->flags & SH_PKG_NEEDS_NET) && (!AQ.pick || (unsigned)AQ.pick == p->def_method); }
 static int aq_mrow_n(const sh_lpkg_t *p) { int n = 0; for (unsigned m = 1; m <= 3; m++) n += (p->methods >> m) & 1; return n; }
+static float aq_textblock_n(pctx *c, float y, int f, float size, float lhh, const char *s, tk_col col, int maxl, int *cut);
 static float aq_textblock(pctx *c, float y, int f, float size, float lhh, const char *s, tk_col col)
+{
+    return aq_textblock_n(c, y, f, size, lhh, s, col, 0, 0);
+}
+/* maxl > 0: at most maxl lines; if text is left, the last line ends in "…" and iOS's blue "more" sits at its right
+ * (*cut = 1, a tap on it is the caller's) */
+static float aq_textblock_n(pctx *c, float y, int f, float size, float lhh, const char *s, tk_col col, int maxl, int *cut)
 {
     /* greedy word wrap of a long text (whole words; a word wider than the line by characters) */
     float maxw = CONTENT_W;
+    int nl = 0;
+    if (cut) *cut = 0;
     while (*s) {
         char t[200];
         int st = 0, last = -1, k = 0;
@@ -614,6 +725,17 @@ static float aq_textblock(pctx *c, float y, int f, float size, float lhh, const 
         (void)st;
         tk_memcpy(t, s, (size_t)last);
         t[last] = 0;
+        if (maxl > 0 && ++nl == maxl && s[last] && s[last + 1]) {   /* the last allowed line, with text after it */
+            float mw = tw(f, size, "more", 0, 0);
+            char e[200];
+            ellipsize(e, sizeof e, f, size, s, maxw - mw - 14);
+            if (vis(c, y - size, size * 1.6f)) {
+                d_text(c->d, f, size, MARGIN, y, e, 0, 0, col, 0);
+                d_text(c->d, f, size, CONTENT_R - mw, y, "more", 0, 0, ACCENT(), 0);
+            }
+            if (cut) *cut = 1;
+            return y + lhh;
+        }
         if (vis(c, y - size, size * 1.6f)) d_text(c->d, f, size, MARGIN, y, t, 0, 0, col, 0);
         y += lhh;
         s += last;
@@ -770,12 +892,71 @@ static float pg_app(pctx *c)
         y += 34;
     }
     y += 14;
-    /* the install method picker (B2's kit): a segmented control of the offered methods, the chosen one's card */
+    /* What's New (iOS: the section, the version and its notes); ours: the newest version and where it comes from */
+    {
+        unsigned m = AQ.pick ? (unsigned)AQ.pick : p->def_method;
+        const char *nv = p->ver_new[0] ? p->ver_new : aq_mver(p, m);
+        if (nv[0]) {
+            y = aq_sec(c, y + 4, "What's New", 0, 0, 0);
+            char vl[48], note[160];
+            AQS(vl, "Version ", nv);
+            if (vis(c, y, 22)) d_text(c->d, TK_IT400, 15, MARGIN, bl(TK_IT400, 15, y), vl, 0, 0, C_LABEL2, 0);
+            int deb = p->source[0] == 'D' && p->source[1] == 'e';
+            if (inst && aq_upd(p)) AQS(note, p->ver_inst, " is on this phone. ", nv, " is ready: tap UPDATE.");
+            else if (inst) AQS(note, "You have the newest version, ", p->ver_inst[0] ? p->ver_inst : nv, ".");
+            else if (m == SH_M_DISTRO || deb) AQS(note, "Debian 13's package, updated with Debian's security fixes.");
+            else AQS(note, "The developer's newest release", p->source[0] ? ", from " : ".", p->source[0] ? p->source : "", p->source[0] ? "." : "");
+            y = aq_textblock(c, y + 44, TK_IT400, 16, 22, note, INK) + 6;
+        }
+    }
+    /* the description: three lines and "more" (iOS), all of it once opened */
+    {
+        int cut = 0;
+        float y0 = y + 18;
+        y = aq_textblock_n(c, y0, TK_IT400, 16, 22, p->desc[0] ? p->desc : p->summary[0] ? p->summary : p->name, INK,
+                           AQ.more ? 0 : 3, &cut) - 4;
+        if (cut && at(c, MARGIN, y0 - 20, CONTENT_W, y - y0 + 26)) aq_hitr(c, H_MORE, i, 0, MARGIN, y0 - 18, CONTENT_W, y - y0 + 22, 10, 0);
+    }
+    if (p->needs) {
+        static const char *const NN[6] = { "Network", "Audio", "GPU", "Camera", "Files", "Keyboard" };
+        char s[96];
+        int n = 0;
+        s[0] = 0;
+        for (int k = 0; k < 6; k++)
+            if (p->needs & 1u << k) {
+                const char *parts[3] = { n ? ", " : "Needs: ", NN[k], 0 };
+                int l = (int)tk_strlen(s);
+                aq_cat(s + l, (int)sizeof s - l, parts);
+                n++;
+            }
+        if (vis(c, y, 24)) d_text_box(c->d, TK_IT400, 14, MARGIN, bl(TK_IT400, 14, y + 6), CONTENT_W, 0, s, 0, 0, C_LABEL2, 0);
+        y += 28;
+    }
+    y += 16;
+    /* Install Options (cp7z): collapsed under the description; GET uses the preselected (recommended, or the user's
+     * last) method without asking. Open: B2's segmented control of the offered methods and the chosen one's card */
     int nm = aq_mrow_n(p);
     if (nm) {
-        y = aq_sec(c, y, "Install Method", 0, 0, 0);
+        y += 6;
+        unsigned cur = AQ.pick ? (unsigned)AQ.pick : p->def_method;
+        if (vis(c, y, 52)) {
+            dc *d = c->d;
+            d_rrect(d, GROUP_X, y, GROUP_W, 52, 16, C_CARD);
+            d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 15), "Install Options", 0, 0, INK, 0);
+            {   /* the chosen way, right-aligned before the chevron, cut to the room the label leaves */
+                float lw = tw(TK_IT400, 17, "Install Options", 0, 0), room = CONTENT_R - 40 - (ROW_TX + lw + 14);
+                char v[48];
+                ellipsize(v, sizeof v, TK_IT400, 17, aq_mname(cur), room);
+                d_text_box(d, TK_IT400, 17, CONTENT_R - 40, bl(TK_IT400, 17, y + 15), room, 2, v, 0, 0, C_LABEL2, 0);
+            }
+            /* the chevron: right when shut, down when open */
+            if (AQ.opts) { d_seg(d, CONTENT_R - 34, y + 23, CONTENT_R - 28, y + 29, 2.2f, W(.3f)); d_seg(d, CONTENT_R - 28, y + 29, CONTENT_R - 22, y + 23, 2.2f, W(.3f)); }
+            else d_chev(d, CONTENT_R - 30, y + 26, W(.3f));
+        }
+        if (at(c, GROUP_X, y, GROUP_W, 52)) aq_hitr(c, H_OPTS, i, 0, GROUP_X, y, GROUP_W, 52, 16, 0);
+        y += 52 + 10;
+        if (AQ.opts) {
         static const unsigned ORD[3] = { SH_M_RELEASE, SH_M_SOURCE, SH_M_DISTRO };
-        static const char *const LBL[4] = { "", "Debian", "Latest Release", "From Source" };
         const char *labels[3];
         unsigned ms[3];
         int n = 0, sel = -1;
@@ -783,7 +964,7 @@ static float pg_app(pctx *c)
             unsigned m = ORD[q];
             if (!((p->methods >> m) & 1)) continue;
             if ((unsigned)AQ.pick == m) sel = n;
-            ms[n] = m, labels[n++] = LBL[m];
+            ms[n] = m, labels[n++] = aq_mseg(m);
         }
         if (n > 1) {
             float sw = (GROUP_W - 4) / n;
@@ -804,8 +985,8 @@ static float pg_app(pctx *c)
                 AQS(s, v[0] ? v : "Newest", p->source[0] && !deb ? " \xc2\xb7 " : "", p->source[0] && !deb ? p->source : "");
             } else if (m == SH_M_SOURCE) {
                 aq_dec(bm, (int)(p->build_min ? p->build_min : 10));
-                AQS(s, "About ", bm, " min on the M3 cores", v[0] ? " \xc2\xb7 " : "", v);
-            } else AQS(s, v[0] ? v : "Debian", " \xc2\xb7 Debian trixie");
+                AQS(s, "About ", bm, " min on this phone", v[0] ? " \xc2\xb7 " : "", v);
+            } else AQS(s, v[0] ? v : "Debian", " \xc2\xb7 Debian 13");
             d_rrect(d, GROUP_X, y, GROUP_W, 62, 16, C_CARD);
             d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 11), aq_mname(m), 0, 0, INK, 0);
             d_text_box(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 35), GROUP_W - 32, 0, s, 0, 0, C_LABEL2, 0);
@@ -821,31 +1002,19 @@ static float pg_app(pctx *c)
             if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hitr(c, H_REINSTALL, i, 0, GROUP_X, y, GROUP_W, 50, 16, 0);
             y += 60;
         } else if (busy) y += 4;
-        else if (vis(c, y, 20)) {
-            const char *f = inst ? "Choose another method, then Reinstall to switch." : "GET installs it the way chosen above.";
-            d_text_box(c->d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y), GROUP_W - 32, 0, f, 0, 0, W(.45f), 0);
-            y += 26;
-        } else y += 26;
-        y += 14;
+        else {
+            char ln[4][96];                       /* (wrapn's array is 4 rows: gcc 13 checks the size) */
+            float wm;
+            const char *f = inst ? "Choose another way, then Reinstall to switch." : aq_mwhy(m);
+            int k = wrapn(ln, 2, TK_IT400, 13, f, GROUP_W - 32, &wm);
+            for (int q = 0; q < k; q++)
+                if (vis(c, y + 17.0f * q, 20)) d_text(c->d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 17.0f * q), ln[q], 0, 0, W(.45f), 0);
+            y += 9 + 17.0f * k;
+        }
+        y += 6;
+        }
+        y += 8;
     }
-    /* the description, what it needs */
-    y = aq_textblock(c, y + 18, TK_IT400, 16, 22, p->desc[0] ? p->desc : p->summary[0] ? p->summary : p->name, INK) - 4;
-    if (p->needs) {
-        static const char *const NN[6] = { "Network", "Audio", "GPU", "Camera", "Files", "Keyboard" };
-        char s[96];
-        int n = 0;
-        s[0] = 0;
-        for (int k = 0; k < 6; k++)
-            if (p->needs & 1u << k) {
-                const char *parts[3] = { n ? ", " : "Needs: ", NN[k], 0 };
-                int l = (int)tk_strlen(s);
-                aq_cat(s + l, (int)sizeof s - l, parts);
-                n++;
-            }
-        if (vis(c, y, 24)) d_text_box(c->d, TK_IT400, 14, MARGIN, bl(TK_IT400, 14, y + 6), CONTENT_W, 0, s, 0, 0, C_LABEL2, 0);
-        y += 28;
-    }
-    y += 16;
     /* Information: label and value rows */
     y = aq_sec(c, y, "Information", 0, 0, 0);
     {
@@ -896,9 +1065,10 @@ static float aq_paint(pctx *c)
 {
     if (!LST || LST->n <= 0) return AQ.top;
     if (AQ.app) return pg_app(c);
+    if (AQ.cat_on) return pg_cat(c);
     if (AQ.tab == AT_TODAY) return pg_today(c);
-    if (AQ.tab == AT_BROWSE) return AQ.cat_on ? pg_cat(c) : pg_browse(c);
-    if (AQ.tab == AT_UPDATES) return pg_updates(c);
+    if (AQ.tab == AT_GAMES) return pg_games(c);
+    if (AQ.tab == AT_APPS) return pg_apps(c);
     return pg_search(c);
 }
 
@@ -954,6 +1124,7 @@ static void aq_live_draw(int k, int it)
     if (!aq_status(p, s, sizeof s, &sc)) s[0] = 0;
     if (AQL[it].kind == LV_ROW) {
         dc d = mk(l, "store-live", x, y + 20, CONTENT_R - x, 40, 1, 0);
+        tk_fill_rect_raw(d.b, 0, 0, d.b->w, d.b->h, 0xff000000u);   /* (as above: the row's old line and pill hidden) */
         d_text_box(&d, TK_IT400, 13, x, bl(TK_IT400, 13, y + 39), w, 0, s, 0, 0, sc, 0);
         aq_pill(&d, PILL_X, y + 23, p, 0);
     } else if (AQL[it].kind == LV_CARD) {
@@ -962,11 +1133,10 @@ static void aq_live_draw(int k, int it)
         aq_pill(&d, CONTENT_R - 20 - PILL_W, y + 21, p, 1);
     } else {
         dc d = mk(l, "store-live", x, y - 2, w, 40, 1, 0);
-        d_ring(&d, x + 16, y + 16, 14, 2.8f, 1, W(.18f), 0);
-        d_ring(&d, x + 16, y + 16, 14, 2.8f, aq_frac(p), ACCENT(), 1);
-        if (p->state != SH_PKG_REMOVING) d_rrect(&d, x + 11.5f, y + 11.5f, 9, 9, 2, ACCENT());
-        d_text_box(&d, TK_IT500, 13, x + 42, bl(TK_IT500, 13, y + 1), w - 42, 0, s, 0, 0, W(.75f), 0);
-        if (p->state != SH_PKG_REMOVING) d_text(&d, TK_IT600, 13, x + 42, bl(TK_IT600, 13, y + 18), "Cancel", 0, 0, ACCENT(), 0);
+        tk_fill_rect_raw(d.b, 0, 0, d.b->w, d.b->h, 0xff000000u);   /* (the page's black over the GET under it until
+                                                                       * the page's own chunk is drawn again) */
+        aq_ring(&d, x + 16, y + 16, p, 0);        /* (where GET was: a tap on it cancels, as iOS) */
+        d_text_box(&d, TK_IT500, 13, x + 42, bl(TK_IT500, 13, y + 9), w - 42, 0, s, 0, 0, W(.75f), 0);
     }
     l->hidden = 0;
 }
@@ -1007,7 +1177,9 @@ static int aq_place(int max)
         l->alpha = al;
         l->clip = 1;
         l->clip_r = (tk_rect){ 0, PT(AQ.top), TK_W, PT(area) };
-        l->fade_top = s > 1 ? PT(30) : 0;           /* iOS 26's soft edge under the status bar and the back circle */
+        /* iOS 26's scroll edge: a soft fade under the status bar and the back circle; once the inline title shows,
+         * deep enough (the nav row) that the page fades out before it reaches the title */
+        l->fade_top = s > 1 ? PT(30) : 0;
         /* the bottom: over the keyboard a short fade; else iOS 26's scroll edge under the tab bar (the page fades
          * out behind the glass, nothing shows round its rounded ends) */
         l->fade_bot = AQ.bot < H_PT - 1 ? (AQ.top + AQ.h - s > AQ.bot + 1 ? PT(24) : 0) : PT(64);
@@ -1038,25 +1210,63 @@ static int aq_place(int max)
         if (AQ.bot >= H_PT - 1) l->clip_r.h = PT(TB_Y + 16 - AQ.top);
     }
     if (AQ.app || AQ.cat_on) { aqh.x = aqh.bx + tk_floorf(off + .5f); aqh.alpha = al; }
+    if (aqit.bmp.px) {                            /* iOS: the inline title cross-fades in over 20 pt once the large one is under the bar */
+        aqit.alpha = tk_clampf((s - 30) / 20, 0, 1) * al;
+        aqit.x = aqit.bx + tk_floorf(off + .5f);
+    }
     if (drew) relink();
     AQ.left = left;
     return left;
 }
 /* the fixed head: the back circle on a pushed page; Search's title and field; an empty store's words */
+static const char *aq_inline_t(void)
+{
+    if (AQ.app || AQ.empty) return 0;
+    if (AQ.cat_on) return !tk_strcmp(AQ.cat, AQ_ACCT) ? "Account" : AQ.cat[0] ? AQ.cat : "All Apps";
+    return AQ.tab == AT_TODAY ? "Today" : AQ.tab == AT_GAMES ? "Games" : AQ.tab == AT_APPS ? "Apps" : 0;
+}
 static void aq_head(void)
 {
     relayer(&aqh);
-    aqh.hidden = 1;
+    relayer(&aqit);
+    aqh.hidden = aqit.hidden = 1;
     if (!is_app("store")) return;
+    const char *it = aq_inline_t();
+    if (it) {                                     /* (shown by aq_place as the large title scrolls under the bar) */
+        /* iOS 26's scroll edge under the bar: the page's black over it, fading out 24 pt below the nav row */
+        float hh = SAFE_TOP + NAVBAR_H + 24;
+        dc d = mk(&aqit, "store-inline", 0, 0, 390, hh, 0, 0);
+        tk_stop st[3] = { { 0, tk_hex(0x000000, 1) }, { (SAFE_TOP + NAVBAR_H - 6) / hh, tk_hex(0x000000, .92f) }, { 1, tk_hex(0x000000, 0) } };
+        tk_paint pg = tk_linear(180, 0, 0, (float)d.b->w, (float)d.b->h, 3, st);
+        tk_fill_rrect(d.b, 0, 0, (float)d.b->w, (float)d.b->h, 0, &pg, 1);
+        d_text_box(&d, TK_IT600, 17, 195, NAV_BASE, 250, 1, it, 0, 0, INK, 0);
+        aqit.alpha = 0;
+        aqit.hidden = 0;
+    }
     if (AQ.empty) {
         const char *t, *l;
         if (LX.state == SH_LINUX_FAILED) { t = "Linux Didn't Start"; l = LX.why[0] ? LX.why : "The big cores did not start."; }
-        else if (LX.state != SH_LINUX_RUNNING) { t = "Starting Linux"; l = "The App Store opens when Linux is up, in a few seconds."; }
+        else if (LX.state != SH_LINUX_RUNNING) {
+            static char sl[120];
+            char n[8];
+            aq_dec(n, (int)((aq_st_exp + 2500) / 5000) * 5);
+            t = "Starting Linux";
+            if (LX.why[0]) l = LX.why;            /* the start's own words (a disk check: Track E) */
+            else if (aq_st_late) l = "Taking longer than usual. After a restart, Linux checks its disk first: this can take a minute.";
+            else { AQS(sl, "The App Store's apps run in Linux on the big cores. Starting it takes about ", n, " seconds."); l = sl; }
+        }
         else if (!LST) { t = "Reading the Catalog"; l = "The apps' list comes from the memory card."; }
         else { t = "No Apps"; l = LST->repo_ok ? "The catalog is empty." : "The App Store's catalog isn't on the memory card yet."; }
         dc d = mk(&aqh, "store-head", 0, SAFE_TOP, 390, TB_Y - SAFE_TOP, 0, 0);
         d_h1(&d, "App Store");
         d_empty(&d, CONTENT_TOP, TB_Y, t, l);
+        {   /* (where d_empty put the words: the bar 22 pt under them) */
+            char ln[4][96];
+            float wm;
+            int n = wrapn(ln, 3, TK_IT400, 15, l, 300, &wm);
+            float h = 36 + 20.0f * n - (n ? 2 : 8);
+            aq_bar_y = tk_floorf((CONTENT_TOP + TB_Y - h) / 2) + h + 22;
+        }
         trim_layer(&aqh, 0, 0);
         aqh.hidden = 0;
         return;
@@ -1106,30 +1316,28 @@ static void aq_tabs(void)
     if (!is_app("store") || (AQ.kb && AQ.tab == AT_SEARCH && !AQ.app)) return;
     aqtb.hidden = 0;
     dc d = mk(&aqtg, "store-tabs", MARGIN, TB_Y, CONTENT_W, TB_H, 2, 0);
-    static const char *const TL[3] = { "Today", "Browse", "Updates" };
+    static const char *const TL[3] = { "Today", "Games", "Apps" };
     for (int t = 0; t < 3; t++) {
         float bx = MARGIN + TB_TABW * t, cx = bx + TB_TABW / 2, cy = TB_Y + 22;
         int on = AQ.tab == t;
         tk_col c = on ? ACCENT() : W(.75f);
         if (on) d_rrect(&d, bx + 5, TB_Y + 5, TB_TABW - 10, TB_H - 10, (TB_H - 10) / 2, W(.1f));
-        if (t == 0) {
+        if (t == 0) {                             /* Today: a page with a picture and lines */
             d_rrect_stroke(&d, cx - 9, cy - 11, 18, 22, 4, 1.8f, c);
             d_rrect(&d, cx - 5, cy - 7, 10, 6, 1.5f, c);
             d_seg(&d, cx - 5, cy + 3, cx + 5, cy + 3, 1.6f, c);
             d_seg(&d, cx - 5, cy + 7, cx + 2, cy + 7, 1.6f, c);
-        } else if (t == 1) {
-            for (int q = 0; q < 4; q++) d_rrect(&d, cx - 10 + 11 * (q % 2), cy - 10 + 11 * (q / 2), 9, 9, 2.5f, c);
-        } else {
-            d_ring(&d, cx, cy, 10.5f, 1.8f, 1, c, 0);
-            d_seg(&d, cx, cy - 5.5f, cx, cy + 5, 1.9f, c);
-            d_seg(&d, cx - 4.5f, cy + .5f, cx, cy + 5, 1.9f, c);
-            d_seg(&d, cx + 4.5f, cy + .5f, cx, cy + 5, 1.9f, c);
-            if (AQ.badge > 0) {
-                char nb[8];
-                aq_dec(nb, tk_mini(AQ.badge, 99));
-                float bw = tk_maxf(19, tw(TK_IT600, 12, nb, 0, 0) + 10);
-                d_rrect(&d, cx + 6, cy - 16, bw, 19, 9.5f, C_RED);
-                d_text_box(&d, TK_IT600, 12, cx + 6 + bw / 2, bl(TK_IT600, 12, cy - 13.5f), bw, 1, nb, 0, TK_TNUM, W(1), 0);
+        } else if (t == 1) {                      /* Games: our controller (a rounded body, a cross and two buttons) */
+            d_rrect_stroke(&d, cx - 12, cy - 7, 24, 15, 7.5f, 1.8f, c);
+            d_seg(&d, cx - 7.5f, cy + .5f, cx - 2.5f, cy + .5f, 1.7f, c);
+            d_seg(&d, cx - 5, cy - 2, cx - 5, cy + 3, 1.7f, c);
+            d_rrect(&d, cx + 3, cy - 2.2f, 3, 3, 1.5f, c);
+            d_rrect(&d, cx + 6.2f, cy + .8f, 3, 3, 1.5f, c);
+        } else {                                  /* Apps: three stacked layers */
+            for (int q = 0; q < 3; q++) {
+                float yy = cy - 8 + 5.5f * q;
+                d_seg(&d, cx - 10, yy + 3, cx, yy - 1, 1.7f, c); d_seg(&d, cx, yy - 1, cx + 10, yy + 3, 1.7f, c);
+                d_seg(&d, cx - 10, yy + 3, cx, yy + 7, 1.7f, c); d_seg(&d, cx, yy + 7, cx + 10, yy + 3, 1.7f, c);
             }
         }
         d_text_box(&d, TK_IT600, 10.5f, cx, bl(TK_IT600, 10.5f, TB_Y + 39), TB_TABW - 8, 1, TL[t], 0, 0, c, 0);
@@ -1186,9 +1394,13 @@ static void aq_go(int dir)
     relink();
 }
 static char aq_want[40];                        /* (defined with sh_linux_store below: st_route_app's page) */
+static sh_lstore_t aq_cache;                     /* (the kept table: defined with sh_linux_store below) */
+static int aq_cached;
+static int aqk_load(void);
 static void st_build(void)
 {
     if (!is_app("store")) return;
+    if ((!LST || LST->n <= 0) && LX.state != SH_LINUX_FAILED && aqk_load()) { LST = &aq_cache; aq_cached = 1; }
     AQ.empty = !LST || LST->n <= 0;
     if (aq_want[0] && !AQ.empty && st_find(aq_want) >= 0) {   /* Track B, cp6: opened for this page (st_route_app) */
         const sh_lpkg_t *p = &LST->pkg[st_find(aq_want)];
@@ -1236,9 +1448,145 @@ static void st_changed(void)
 }
 static char aq_want[40];                        /* st_route_app: the page to push once the store's table has it */
 static void aq_push(int i);
+/* ---- cp7z (gaps-f-store.md #1): the last table kept in the home store (one sh_blob, ~10 KB for 55 apps: no long
+ * descriptions, no icons), drawn at once when the store opens before Linux is up; a GET then waits for the real table.
+ * Packed: "AKC1", n (u16), then per app u32 flags, inst_kb, dl_kb; u16 build_min, ram_mb, rel_size_mb; u8 methods,
+ * method, def_method, touch, needs, flags3; then 11 NUL-ended strings (pkg, name, summary, category, the five versions,
+ * licence, source). Written only when it differs from what is kept. ---- */
+#define AQK_MAX 32768u
+static sh_lstore_t aq_cache;                     /* (the platform's table shape, filled from the blob) */
+static int aq_cached;                            /* LST is aq_cache: Linux not up yet */
+static uint32_t aqk_kept, aqk_dkept;             /* the kept blobs' hashes (0: not read yet this boot) */
+static struct { char pkg[40]; int op, m; } aq_pend;   /* one action asked for while cached */
+static unsigned aqk_str(uint8_t *b, unsigned o, const char *s)
+{
+    while (*s && o < AQK_MAX - 1) b[o++] = (uint8_t)*s++;
+    if (o < AQK_MAX) b[o++] = 0;
+    return o;
+}
+static uint32_t aqk_rd(const uint8_t *b, unsigned *o, int w) { uint32_t v = 0; for (int k = 0; k < w; k++) v |= (uint32_t)b[(*o)++] << (8 * k); return v; }
+static unsigned aqk_u(uint8_t *b, unsigned o, uint32_t v, int w) { for (int k = 0; k < w && o < AQK_MAX; k++) b[o++] = (uint8_t)(v >> (8 * k)); return o; }
+static void aqk_save(const sh_lstore_t *t)
+{
+    if (!t || !t->v3 || t->n <= 0) return;
+    static uint8_t b[AQK_MAX];                      /* (every table update packs: progress changes nothing kept, so the
+                                                     * hash matches and nothing is written) */
+    unsigned o = aqk_u(b, 0, 0x31434b41u, 4);      /* "AKC1" */
+    o = aqk_u(b, o, (uint32_t)t->n, 2);
+    int n = 0;
+    for (int i = 0; i < t->n && i < SH_LPKGS; i++) {
+        const sh_lpkg_t *p = &t->pkg[i];
+        if (o > AQK_MAX - 600) break;               /* (room for one more at most: the rest are left out) */
+        unsigned f = p->flags & ~(SH_PKG_NO_SPACE);  /* (space is the guest's to say, live) */
+        o = aqk_u(b, o, f, 4); o = aqk_u(b, o, p->inst_kb, 4); o = aqk_u(b, o, p->dl_kb, 4);
+        o = aqk_u(b, o, p->build_min, 2); o = aqk_u(b, o, p->ram_mb, 2); o = aqk_u(b, o, p->rel_size_mb, 2);
+        o = aqk_u(b, o, p->methods, 1); o = aqk_u(b, o, p->method, 1); o = aqk_u(b, o, p->def_method, 1);
+        o = aqk_u(b, o, p->touch, 1); o = aqk_u(b, o, p->needs, 1); o = aqk_u(b, o, p->flags3, 1);
+        const char *ss[11] = { p->pkg, p->name, p->summary, p->category, p->ver_inst, p->ver_new, p->ver_rel,
+                               p->ver_distro, p->ver_src, p->licence, p->source };
+        for (int k = 0; k < 11; k++) o = aqk_str(b, o, ss[k]);
+        n++;
+    }
+    b[4] = (uint8_t)n; b[5] = (uint8_t)(n >> 8);
+    uint32_t h = aq_hash(2166136261u, "");
+    for (unsigned k = 0; k < o; k++) h = aq_hu(h, b[k]);
+    if (!aqk_kept) {                                /* the kept one's hash, once a boot */
+        uint8_t *k2 = tk_alloc(AQK_MAX);
+        int r = k2 ? sh_blob_get("store.cache", k2, AQK_MAX) : -1;
+        aqk_kept = 1;
+        if (r > 0) { uint32_t h2 = aq_hash(2166136261u, ""); for (int k = 0; k < r; k++) h2 = aq_hu(h2, k2[k]); aqk_kept = h2 | 1; }
+        if (k2) tk_free(k2);
+    }
+    if ((h | 1) != aqk_kept && sh_blob_put("store.cache", b, o) == 0) aqk_kept = h | 1;
+    /* the long descriptions: a second blob, "store.desc", in the same order, NUL-ended, cut so all fit in 32 KiB */
+    static uint8_t d[AQK_MAX];
+    unsigned q = 0, per = n ? (AQK_MAX - 64) / (unsigned)n : 0;
+    if (per > sizeof t->pkg[0].desc) per = sizeof t->pkg[0].desc;
+    for (int i = 0; i < n; i++) {
+        const char *ds = t->pkg[i].desc;
+        unsigned k = 0;
+        while (ds[k] && k + 1 < per) k++;
+        while (k > 0 && ds[k] && ((uint8_t)ds[k] & 0xc0) == 0x80) k--;   /* (not half a UTF-8 character) */
+        for (unsigned j = 0; j < k && q < AQK_MAX - 1; j++) d[q++] = (uint8_t)ds[j];
+        d[q++] = 0;
+    }
+    uint32_t hd = aq_hash(2166136261u, "");
+    for (unsigned k = 0; k < q; k++) hd = aq_hu(hd, d[k]);
+    if (!aqk_dkept) {
+        static uint8_t k2[AQK_MAX];
+        int r = sh_blob_get("store.desc", k2, AQK_MAX);
+        aqk_dkept = 1;
+        if (r > 0) { uint32_t h2 = aq_hash(2166136261u, ""); for (int k = 0; k < r; k++) h2 = aq_hu(h2, k2[k]); aqk_dkept = h2 | 1; }
+    }
+    if ((hd | 1) != aqk_dkept && sh_blob_put("store.desc", d, q) == 0) aqk_dkept = hd | 1;
+}
+static int aqk_load(void)
+{
+    uint8_t *b = tk_alloc(AQK_MAX);
+    if (!b) return 0;
+    int r = sh_blob_get("store.cache", b, AQK_MAX), n = 0;
+    if (r >= 6 && b[0] == 'A' && b[1] == 'K' && b[2] == 'C' && b[3] == '1') {
+        int want = b[4] | b[5] << 8;
+        unsigned o = 6;
+        tk_memset(&aq_cache, 0, sizeof aq_cache);
+        for (; n < want && n < SH_LPKGS && o + 27 <= (unsigned)r; n++) {
+            sh_lpkg_t *p = &aq_cache.pkg[n];
+            p->flags = aqk_rd(b, &o, 4); p->inst_kb = aqk_rd(b, &o, 4); p->dl_kb = aqk_rd(b, &o, 4);
+            p->build_min = aqk_rd(b, &o, 2); p->ram_mb = aqk_rd(b, &o, 2); p->rel_size_mb = aqk_rd(b, &o, 2);
+            p->methods = aqk_rd(b, &o, 1); p->method = aqk_rd(b, &o, 1); p->def_method = aqk_rd(b, &o, 1);
+            p->touch = aqk_rd(b, &o, 1); p->needs = aqk_rd(b, &o, 1); p->flags3 = aqk_rd(b, &o, 1);
+            char *ds[11] = { p->pkg, p->name, p->summary, p->category, p->ver_inst, p->ver_new, p->ver_rel,
+                             p->ver_distro, p->ver_src, p->licence, p->source };
+            const unsigned cap[11] = { sizeof p->pkg, sizeof p->name, sizeof p->summary, sizeof p->category,
+                                       sizeof p->ver_inst, sizeof p->ver_new, sizeof p->ver_rel, sizeof p->ver_distro,
+                                       sizeof p->ver_src, sizeof p->licence, sizeof p->source };
+            for (int k = 0; k < 11; k++) {
+                unsigned j = 0;
+                while (o < (unsigned)r && b[o]) { if (j < cap[k] - 1) ds[k][j++] = (char)b[o]; o++; }
+                ds[k][j] = 0;
+                o++;
+            }
+            p->icon = -1;                           /* (icons come with Linux: a tile with the initials until then) */
+        }
+        aq_cache.n = n;
+        aq_cache.v3 = 1;
+        aq_cache.repo_ok = 1;
+        int rd = sh_blob_get("store.desc", b, AQK_MAX);   /* (b is free again: the descriptions, if kept) */
+        for (int i = 0, o2 = 0; i < n && o2 < rd; i++) {
+            unsigned j = 0;
+            while (o2 < rd && b[o2]) { if (j < sizeof aq_cache.pkg[i].desc - 1) aq_cache.pkg[i].desc[j++] = (char)b[o2]; o2++; }
+            aq_cache.pkg[i].desc[j] = 0;
+            o2++;
+        }
+    }
+    tk_free(b);
+    return n > 0;
+}
 void sh_linux_store(const sh_lstore_t *s)
 {
-    LST = s && s->n >= 0 ? s : 0;
+    if (s && s->n > 0) {                          /* the real table: it replaces the kept one, and is kept */
+        int was = aq_cached;
+        aq_cached = 0;
+        LST = s;
+        aqk_save(s);
+        {   /* iOS: a success haptic when an install / update the user is watching ends, a warning when it fails */
+            static char prev[SH_LPKGS];
+            static int prev_n;
+            for (int i = 0; i < s->n && i < SH_LPKGS; i++) {
+                int st = (int)s->pkg[i].state, busy = st == SH_PKG_QUEUED || st == SH_PKG_INSTALLING;
+                if (!was && i < prev_n && prev[i] && !busy && is_app("store") && !ap_pending)
+                    sh_haptic_k(st == SH_PKG_FAILED ? SH_HAP_WARNING : SH_HAP_SUCCESS);
+                prev[i] = (char)busy;
+            }
+            prev_n = s->n;
+        }
+        if (aq_pend.pkg[0] && st_find(aq_pend.pkg) >= 0) {   /* the GET asked for while Linux started */
+            int i = st_find(aq_pend.pkg);
+            aq_pend.pkg[0] = 0;
+            if (!st_busy(&LST->pkg[i])) (void)sh_linux_pkg(i, SH_PKG_OPWORD(aq_pend.op, aq_pend.m));
+        }
+        (void)was;
+    } else if (!aq_cached) LST = s && s->n >= 0 ? s : 0;
     if (lx_baked && is_app("store") && !ap_pending) st_changed();
     if (aq_want[0] && is_app("store") && st_find(aq_want) >= 0) {   /* (Linux just started for it: its page now) */
         aq_push(st_find(aq_want));
@@ -1268,18 +1616,20 @@ static int st_route_app(const char *key)   /* 1 handled (a Linux app opened); 2 
 static void aq_push(int i)
 {
     const sh_lpkg_t *p = &LST->pkg[i];
-    if (!AQ.app) { if (AQ.cat_on && AQ.tab == AT_BROWSE) AQ.scat = AQ.scroll; else AQ.sroot[AQ.tab] = AQ.scroll; }
+    if (!AQ.app) { if (AQ.cat_on) AQ.scat = AQ.scroll; else AQ.sroot[AQ.tab] = AQ.scroll; }
     AQ.app = 1;
     lx_scopy(AQ.pkg, p->pkg, 40);
     AQ.pick = aq_inst(p) && p->method ? (int)p->method : p->def_method && (p->methods >> p->def_method & 1) ? (int)p->def_method : 0;
     if (!AQ.pick && p->methods) for (unsigned m = 1; m <= 3 && !AQ.pick; m++) if (p->methods >> m & 1) AQ.pick = (int)m;
     AQ.scroll = 0;
     AQ.kb = 0;
+    AQ.opts = 0;                                  /* (Install Options shut on every page) */
+    AQ.more = 0;
     aq_go(1);
 }
 static void aq_back(void)
 {
-    if (AQ.app) { AQ.app = 0; tk_bmp_free(&aq_dic); aq_dic_pkg[0] = 0; AQ.scroll = AQ.cat_on && AQ.tab == AT_BROWSE ? AQ.scat : AQ.sroot[AQ.tab]; }
+    if (AQ.app) { AQ.app = 0; tk_bmp_free(&aq_dic); aq_dic_pkg[0] = 0; AQ.scroll = AQ.cat_on ? AQ.scat : AQ.sroot[AQ.tab]; }
     else if (AQ.cat_on) { AQ.cat_on = 0; AQ.scroll = AQ.sroot[AQ.tab]; }
     aq_go(-1);
 }
@@ -1290,11 +1640,10 @@ static void aq_tab(int t)
         else if (AQ.scroll > 0) { AQ.scroll = 0; AQ.v = 0; aq_place(0); }
         return;
     }
-    if (!AQ.app && !(AQ.cat_on && AQ.tab == AT_BROWSE)) AQ.sroot[AQ.tab] = AQ.scroll;
+    if (!AQ.app && !AQ.cat_on) AQ.sroot[AQ.tab] = AQ.scroll;
     AQ.tab = t;
     AQ.app = 0;
-    AQ.cat_on = t == AT_BROWSE && AQ.cat_on;
-    if (t != AT_BROWSE) AQ.cat_on = 0;
+    AQ.cat_on = 0;                                /* (a tab opens at its root) */
     AQ.kb = 0;
     AQ.scroll = AQ.sroot[t];
     tk_bmp_free(&aq_dic);
@@ -1305,6 +1654,22 @@ static void aq_tab(int t)
 /* ---- actions ---- */
 static int aq_op(int i, int op, int m)
 {
+    if (aq_cached) {                              /* Linux still starting: the GET waits for the real table */
+        if (op == SH_PKG_OP_CANCEL) {             /* the waiting GET / UPDATE taken back */
+            if (!tk_strcmp(aq_pend.pkg, LST->pkg[i].pkg)) aq_pend.pkg[0] = 0;
+            aq_cache.pkg[i].state = 0;
+            st_changed();
+            return 0;
+        }
+        if (op == SH_PKG_OP_REMOVE) { toast("Linux is starting: try again in a moment"); return -1; }
+        if (aq_pend.pkg[0] && st_find(aq_pend.pkg) >= 0) aq_cache.pkg[st_find(aq_pend.pkg)].state = 0;   /* (one waits) */
+        lx_scopy(aq_pend.pkg, LST->pkg[i].pkg, sizeof aq_pend.pkg);
+        aq_pend.op = op; aq_pend.m = m;
+        aq_cache.pkg[i].state = SH_PKG_QUEUED;
+        toast(op == SH_PKG_OP_INSTALL ? "It installs as soon as Linux has started" : "It updates as soon as Linux has started");
+        st_changed();
+        return 0;
+    }
     if (sh_linux_pkg(i, SH_PKG_OPWORD(op, m)) < 0) { toast("Linux isn't running: try again in a moment"); return -1; }
     return 0;
 }
@@ -1313,9 +1678,11 @@ static void aq_act(int i, int m)
 {
     const sh_lpkg_t *p = &LST->pkg[i];
     if (p->state == SH_PKG_REMOVING) return;
+    sh_haptic_k(SH_HAP_LIGHT);                    /* (iOS: a light impact on GET / OPEN / UPDATE / the ring) */
     if (st_busy(p)) { (void)aq_op(i, SH_PKG_OP_CANCEL, 0); return; }
     if (aq_upd(p)) { (void)aq_op(i, SH_PKG_OP_UPDATE, 0); return; }
     if (aq_inst(p)) {
+        if (aq_cached) { toast("Linux is starting: it opens in a moment"); return; }
         int a = st_app(i);
         if (a >= 0) lx_open_app(a);
         else toast("Installed. It has no window of its own");
@@ -1404,10 +1771,17 @@ static void aq_tap(float x, float y)
     case H_OPEN: { int a = st_app(i); if (a >= 0) lx_open_app(a); } break;
     case H_MAIN: aq_act(i, AQ.pick); break;
     case H_CAT:
-        AQ.sroot[AQ.tab] = AQ.scroll;
-        if (AQ.tab != AT_BROWSE) { AQ.tab = AT_BROWSE; aq_tabs(); }
+        AQ.sroot[AQ.tab] = AQ.scroll;           /* (pushed in this tab, as iOS's See All) */
         AQ.cat_on = 1;
         lx_scopy(AQ.cat, c.harg >= 10 ? "" : AQ_CATS[c.harg], 16);
+        AQ.scroll = 0;
+        aq_go(1);
+        break;
+    case H_ACCT:                                  /* the account button: Account (updates, installed apps) */
+        sh_haptic();
+        if (!AQ.cat_on) AQ.sroot[AQ.tab] = AQ.scroll;
+        AQ.cat_on = 1;
+        lx_scopy(AQ.cat, AQ_ACCT, 16);
         AQ.scroll = 0;
         aq_go(1);
         break;
@@ -1423,6 +1797,8 @@ static void aq_tap(float x, float y)
         if (AQ.pick != c.harg) { AQ.pick = c.harg; sh_haptic(); aq_area(); aq_redraw_all(); aq_place(0); }
         break;
     case H_REINSTALL: (void)aq_op(i, SH_PKG_OP_INSTALL, AQ.pick); break;
+    case H_MORE: AQ.more = 1; aq_area(); aq_redraw_all(); aq_place(0); break;
+    case H_OPTS: AQ.opts = !AQ.opts; sh_haptic(); aq_area(); aq_redraw_all(); aq_place(0); break;
     case H_REMOVE: {                              /* B2's action sheet: one red row, a tap outside cancels */
         static const kit_btn B[1] = { { "Remove App", KIT_DESTRUCTIVE } };
         static char t[64];
@@ -1460,14 +1836,51 @@ static int aq_touch(int ph, float x, float y)
     }
     return 1;
 }
+static int aq_spinning(void);
 static int aq_moving(void)
 {
     if (!is_app("store")) return 0;
+    if (!aqbf.hidden) return 1;                   /* (the cold start's bar moves) */
+    if (aq_spinning()) return 1;                  /* (a waiting spinner turns) */
     return AQ.drag || AQ.hide || AQ.left > 0 || AQ.rev < 1 || tk_fabsf(AQ.v) > 1 || AQ.scroll < 0 || AQ.scroll > aq_max() + .5f;
+}
+/* the cold start's bar: elapsed / the expected start, held at 95 % until Linux is up; the words change once when late */
+static int aq_bar(void)
+{
+    int on = is_app("store") && !ap_pending && AQ.empty && LX.state != SH_LINUX_RUNNING && LX.state != SH_LINUX_FAILED;
+    if (!on) {
+        if (aq_st0 > 0 && LX.state == SH_LINUX_RUNNING && now_ms > aq_st0)       /* this boot's real start: next time's pace */
+            aq_st_exp = tk_clampf(now_ms - aq_st0, 5000, 90000);
+        if (!AQ.empty || LX.state == SH_LINUX_RUNNING) aq_st0 = 0, aq_st_late = 0;
+        aqbt.hidden = aqbf.hidden = 1;
+        return 0;
+    }
+    if (aq_st0 <= 0) aq_st0 = now_ms;
+    float el = now_ms - aq_st0, p = tk_clampf(el / aq_st_exp, .02f, .95f);
+    if (!aq_st_late && el > aq_st_exp + 10000) { aq_st_late = 1; aq_head(); }
+    tk_rect tr = { 95, aq_bar_y, 200, 5 }, fr = { 95, aq_bar_y, tk_maxf(5, 200 * p), 5 };
+    hl_set(&aqbt, tr, tr, 2.5f, W(.16f));
+    hl_set(&aqbf, fr, fr, 2.5f, ACCENT());
+    return 1;
+}
+static int aq_spinning(void)
+{
+    for (int k = 0; k < AQ_NLIVE; k++)
+        if (aql_it[k] >= 0 && aql_it[k] < aq_nl && LST && AQL[aql_it[k]].pkg < aq_n() && aq_waiting(&LST->pkg[AQL[aql_it[k]].pkg]))
+            return 1;
+    return 0;
 }
 static int aq_tick(float dt)
 {
+    if (aq_bar()) return 1;
     if (!is_app("store") || ap_pending || AQ.empty) return 0;
+    static float spin_t;
+    if (aq_spinning() && now_ms - spin_t >= 33) {   /* the waiting spinners turn (~30 frames a second) */
+        spin_t = now_ms;
+        for (int k = 0; k < AQ_NLIVE; k++)
+            if (aql_it[k] >= 0 && aql_it[k] < aq_nl && AQL[aql_it[k]].pkg < aq_n() && aq_waiting(&LST->pkg[AQL[aql_it[k]].pkg])) aql_dirty[k] = 1;
+        aq_place(0);
+    }
     int pend = 0;
     if (!AQ.drag) {
         float m = aq_max();
@@ -1505,8 +1918,8 @@ static void aq_close(void)
 {
     for (int L = 0; L < AQ_NCH; L++) { relayer(&aqc[L]); aqc[L].hidden = 1; aqc[L].clip = 0; AQ.ck[L] = -1; }
     for (int k = 0; k < AQ_NLIVE; k++) { relayer(&aql[k]); aql[k].hidden = 1; aql[k].clip = 0; aql_it[k] = -1; }
-    relayer(&aqh); relayer(&aqtb); relayer(&aqtg);
-    aqh.hidden = aqtb.hidden = aqtg.hidden = 1;
+    relayer(&aqh); relayer(&aqtb); relayer(&aqtg); relayer(&aqbt); relayer(&aqbf); relayer(&aqit);
+    aqh.hidden = aqtb.hidden = aqtg.hidden = aqbt.hidden = aqbf.hidden = aqit.hidden = 1;
     aq_tb_baked = 0;
     AQ.kb = AQ.drag = AQ.hide = 0;
     AQ.v = 0;
@@ -1519,6 +1932,9 @@ static int aq_layers(tk_layer **o)
     for (int L = 0; L < AQ_NCH; L++) o[n++] = &aqc[L];
     for (int k = 0; k < AQ_NLIVE; k++) o[n++] = &aql[k];
     o[n++] = &aqh;
+    o[n++] = &aqit;
+    o[n++] = &aqbt;
+    o[n++] = &aqbf;
     o[n++] = &aqtb;
     o[n++] = &aqtg;
     return n;
@@ -1536,13 +1952,17 @@ static int aq_set(const char *what, const char *key, float v)
     if (st || ((cat || ap || q) && !is_app("store"))) sh_set("app", "store", st ? v : 1);
     if (!is_app("store")) return 1;
     if (st) {
-        static const char *const TN[4] = { "today", "browse", "updates", "search" };
+        static const char *const TN[4] = { "today", "games", "apps", "search" };
         for (int t = 0; t < 4; t++) if (!tk_strcmp(key, TN[t])) { AQ.tab = t; AQ.app = AQ.cat_on = 0; AQ.scroll = 0; aq_still(); return 1; }
+        if (!tk_strcmp(key, "browse")) { AQ.tab = AT_APPS; AQ.app = AQ.cat_on = 0; AQ.scroll = 0; aq_still(); return 1; }
+        if (!tk_strcmp(key, "updates") || !tk_strcmp(key, "account")) {   /* (the old Updates tab: the Account page) */
+            AQ.tab = AT_TODAY; AQ.app = 0; AQ.cat_on = 1; lx_scopy(AQ.cat, AQ_ACCT, 16); AQ.scroll = 0; aq_still(); return 1;
+        }
         if (key[0] && st_find(key) >= 0) { aq_push(st_find(key)); aq_flush(); }
         return 1;
     }
     if (cat) {
-        AQ.tab = AT_BROWSE; AQ.app = 0; AQ.cat_on = 1; AQ.scroll = 0;
+        AQ.tab = AT_APPS; AQ.app = 0; AQ.cat_on = 1; AQ.scroll = 0;
         lx_scopy(AQ.cat, tk_strcmp(key, "All") ? key : "", 16);
         aq_tabs();
         aq_still();
@@ -1557,6 +1977,6 @@ static int aq_set(const char *what, const char *key, float v)
     }
     if (ap) { if (st_find(key) >= 0) { aq_push(st_find(key)); aq_flush(); } return 1; }
     if (sc) { aq_area(); AQ.scroll = tk_clampf(v, 0, aq_max()); aq_redraw_all(); aq_flush(); return 1; }
-    if (pk && AQ.app) { AQ.pick = (int)v; aq_area(); aq_redraw_all(); aq_flush(); return 1; }
+    if (pk && AQ.app) { AQ.pick = (int)v; AQ.opts = 1; aq_area(); aq_redraw_all(); aq_flush(); return 1; }
     return 1;
 }

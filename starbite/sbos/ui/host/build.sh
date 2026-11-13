@@ -16,10 +16,12 @@ $CC -c -O2 -std=gnu11 $WARN -I"$here" "$here/host/plat.c" -o "$out/plat.o"
 $CC -c -O2 -std=gnu11 $WARN -I"$here" -I"$here/../kern" -I"$here/../../utility" "$here/host/main.c" -o "$out/main.o"
 # Track A: the time zones as the kernel has them (kern/tzdb.c on the Utility OS's civil dates)
 $CC -c -O2 -std=gnu11 $WARN -I"$here/../kern" -I"$here/../../utility" "$here/../kern/tzdb.c" -o "$out/tzdb.o"
+$CC -c -O2 -std=gnu11 $WARN -I"$here/../kern" "$here/../kern/tzcities.c" -o "$out/tzcities.o"   # 8a: the cities (GeoNames)
+$CC -c -O2 -std=gnu11 $WARN -I"$here/../kern" "$here/../kern/tzcity.c" -o "$out/tzcity.o"
 $CC -c -O2 -std=gnu11 $WARN -I"$here/../../utility" "$here/../../utility/tz.c" -o "$out/tz.o"
 # survival-next: the survival API with simulated state (Emergency mode's tools; nothing touches hardware)
 $CC -c -O2 -std=gnu11 $WARN "$here/../guide/survival_host.c" -o "$out/survival_host.o"
 # Track A: the passcode (kern/passcode.c, pure) behind the host's sh_pass_* fakes
 $CC -c -O2 -std=gnu11 $WARN "$here/../kern/passcode.c" -o "$out/passcode.o"
-$CC -o "$out/sbtk-host" "$out"/tk_*.o "$out/shell_lock.o" "$out/plat.o" "$out/main.o" "$out/survival_host.o" "$out/passcode.o" "$out/tzdb.o" "$out/tz.o"
+$CC -o "$out/sbtk-host" "$out"/tk_*.o "$out/shell_lock.o" "$out/plat.o" "$out/main.o" "$out/survival_host.o" "$out/passcode.o" "$out/tzdb.o" "$out/tzcities.o" "$out/tzcity.o" "$out/tz.o"
 echo "$out/sbtk-host"

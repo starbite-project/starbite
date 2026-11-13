@@ -558,6 +558,17 @@ static void page_phone(dc *d)
 /* the lists' rows (Recents, Favourites): iOS 26's, a monogram, the number, its line, the time and the info button */
 #define REC_H 64.0f
 static void cl_title(dc *d, const char *t) { d_h1(d, t); }
+/* 8a (gaps-c #13): iOS's search field under Messages' large title: a 36 pt capsule of tertiarySystemFill, the
+ * glyph and "Search" 17 / 400 secondary; a tap says search isn't there yet (never a silent tap) */
+#define MSF_H 46.0f
+static void d_msearch(dc *d, float y)
+{
+    d_rrect(d, MARGIN, y, CONTENT_W, 36, 18, tk_hex(0x767680, .24f));
+    const tk_bmp *ic = tk_icon("search15");
+    if (ic) tk_blit_tinted(d->b, ic, (int)tk_floorf(PT(MARGIN + 11) - d->ox + .5f), (int)tk_floorf(PT(y + 18) - ic->h / 2.0f - d->oy + .5f), W(.6f));
+    d_text(d, TK_IT400, 17, MARGIN + 35, bl(TK_IT400, 17, y + 7.5f), "Search", 0, 0, C_LABEL2, 0);
+}
+static int msearch_hit(float x, float y, float top) { return y >= top - 4 && y < top + 40 && x >= MARGIN && x < CONTENT_R; }
 static void cl_rec_row(dc *d, const cm_rec *r, float y, int last)
 {
     char when[12], sub[48];                  /* Track A: room for "12:05 AM" */
@@ -840,10 +851,18 @@ static void cv_prox_sync(void)
     cv_prox_on = want;
     sh_call_proximity(want);
 }
+/* cp7w: the ringtone while the call screen shows an incoming call (until it is answered, declined or gone) */
+static void cv_ring_sync(void)
+{
+    int want = CV.on && CV.at > 0 && CV.mode == CVM_INCOMING && !CV.answering && !CV.ending;
+    if (want && snd_ring_who != 1) snd_ring(1, SH_SND_RING);
+    else if (!want) snd_ring_stop(1);
+}
 /* where everything is for the mode (and the lock: the slider) */
 static void cv_place(void)
 {
     cv_prox_sync();
+    cv_ring_sync();
     int inc = CV.mode == CVM_INCOMING, slider = inc && locked;
     tk_layer *P[5] = { &cvdec, &cvacc, &cvend, &cvtrack, &cvthumb };
     for (int i = 0; i < 5; i++) { P[i]->x = P[i]->bx; P[i]->y = P[i]->by; }
@@ -880,6 +899,7 @@ static void cv_light(float cx, float cy, float r, tk_col c)
 }
 static void cv_free(void)
 {
+    snd_ring_stop(1);                         /* cp7w */
     tk_layer *P[6] = { &cvsb, &cvtop, &cvst, &cvctl, &cvhide, &cvbg };
     for (int i = 0; i < 6; i++) { relayer(P[i]); P[i]->hidden = 1; }
     cvbg.solid = 0;
@@ -919,6 +939,7 @@ static void cv_show(int mode)
 static void cv_hide(void)
 {
     if (!CV.on) return;
+    snd_ring_stop(1);                         /* cp7w: the ring stops with the screen's fade */
     CV.at = 0;                                /* a .25 s fade (cm_tick), then everything goes */
     CV.close_at = -1; CV.pend_close = 0;
     cvhl.hidden = 1;
@@ -955,7 +976,7 @@ void sh_call(const sh_call_t *c)
 {
     sh_call_t o = CALL;
     CALL = *c;
-    if (c->state != SH_CALL_INCOMING) CV.answering = 0;
+    if (c->state != SH_CALL_INCOMING) { CV.answering = 0; snd_ring_stop(1); }   /* cp7w: answered, declined or gone */
     if (!cm_live(c->state) || c->state == SH_CALL_ENDING) CV.ending = 0;
     cm_track(c);
     if (CM.decl) {                            /* declined here: no screen for its last pushes (ENDING ...) */
@@ -1024,7 +1045,7 @@ static void cv_answer(void)
     char why[SH_WHY] = "";
     sh_haptic();
     if (sh_answer(why) < 0) { CV.thumb = 0; cv_place(); toast(why[0] ? why : "The call couldn't be answered"); return; }
-    if (CALL.state == SH_CALL_INCOMING) CV.answering = 1;   /* "Connecting..." until the kernel says so */
+    if (CALL.state == SH_CALL_INCOMING) { CV.answering = 1; snd_ring_stop(1); }   /* "Connecting..." until the kernel says so; cp7w: quiet */
     if (CV.mode != CVM_CALL) cv_show(CVM_CALL);
 }
 static void cv_up(void)
@@ -1042,6 +1063,7 @@ static void cv_up(void)
         sh_haptic();
         sh_hangup();
         CV.ending = 1;
+        snd_ring_stop(1);                     /* cp7w */
         cv_status();
         break;
     case CVB_DEC:
@@ -1374,7 +1396,7 @@ static void cl_draw(dc *d, int i, float top)
         else if (CLF[i] & CF_FAV) cl_fav_row(d, &FAV[CLI[i]], top, CLF[i] & BF_LAST);
         else cl_rec_row(d, &RC[CLI[i]], top, CLF[i] & BF_LAST);
         break;
-    case CL_THREADS: if (!i) cl_title(d, "Messages"); else cl_thread_row(d, i, top); break;
+    case CL_THREADS: if (!i) { cl_title(d, "Messages"); d_msearch(d, top + TITLE_H); } else cl_thread_row(d, i, top); break;
     case CL_BUBBLES: cl_bubble(d, i, top); break;
     default: break;
     }
@@ -1406,8 +1428,9 @@ static void cm_list_build(void)
     if (kind != CL_BUBBLES) {
         LS.top = LIST_T0;
         LS.bot = kind == CL_THREADS ? H_PT : EMPTY_TAB;
-        LS.iy[0] = 0; LS.ih[0] = TITLE_H; LS.ik[0] = cm_key(kind, 0x7171u, 0); CLI[0] = -1; CLF[0] = 0;
-        y = TITLE_H; n = 1;
+        float th = TITLE_H + (kind == CL_THREADS ? MSF_H : 0);   /* 8a: the threads' search field under the title */
+        LS.iy[0] = 0; LS.ih[0] = th; LS.ik[0] = cm_key(kind, 0x7171u, 0); CLI[0] = -1; CLF[0] = 0;
+        y = th; n = 1;
         if (kind == CL_CALLS) {
             /* the favourites (with their header), then the calls (a header too when there are favourites) */
             for (int sct = 0; sct < 2; sct++) {
@@ -1516,11 +1539,12 @@ static void page_messages(dc *d)
         int last[SH_SMS_MAX];
         if (!cm_threads(last, SH_SMS_MAX)) {      /* else the threads are the list (its title the first item) */
             d_h1(d, "Messages");
+            d_msearch(d, CONTENT_TOP);
             const char *l = !sh_comms_ok() ? "Text messages aren't in this version yet." :
                             cm_cell_on() ? "Texts you send and receive show here until the phone restarts." :
                             "Turn on Cellular to send and receive text messages.";
-            d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Messages", l);
-            if (sh_comms_ok() && !cm_cell_on()) cm_cell_button(d, cm_empty_bot(CONTENT_TOP, EMPTY_BOT, l) + 18);
+            d_empty(d, CONTENT_TOP + MSF_H, EMPTY_BOT, "No Messages", l);
+            if (sh_comms_ok() && !cm_cell_on()) cm_cell_button(d, cm_empty_bot(CONTENT_TOP + MSF_H, EMPTY_BOT, l) + 18);
         }
         return;
     }
@@ -1637,12 +1661,15 @@ static void cm_msgs_tap(float x, float y)
             return;
         }
         if (cl_kind != CL_THREADS) {
+            if (msearch_hit(x, y, CONTENT_TOP)) { toast("Search isn't in Messages yet"); return; }
             const char *l = "Turn on Cellular to send and receive text messages.";
-            float by = cm_empty_bot(CONTENT_TOP, EMPTY_BOT, l) + 18;
+            float by = cm_empty_bot(CONTENT_TOP + MSF_H, EMPTY_BOT, l) + 18;
             if (sh_comms_ok() && !cm_cell_on() && y >= by && y < by + 40 && tk_fabsf(x - 195) < CM_BTN_W / 2) cm_open_cellular();
             return;
         }
-        int i = scv_hit(&LS, y, 0);
+        float t0;
+        int i = scv_hit(&LS, y, &t0);
+        if (i == 0 && msearch_hit(x, y, t0 + TITLE_H)) { toast("Search isn't in Messages yet"); return; }
         if (i >= 1) { cm_open_thread(MSG[CLI[i]].m.number); build_app_page(AP.a); }
         return;
     }
@@ -2094,8 +2121,12 @@ static int cm_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
     }
     if (AS.thread < 0) {
         if (DONE_HIT(x, y)) { *r = *g = (tk_rect){ CONTENT_R - BACK_D, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *c = APR_CIRC; return 1; }
+        if (cl_kind != CL_THREADS && msearch_hit(x, y, CONTENT_TOP)) {          /* 8a: the search field */
+            *r = *g = (tk_rect){ MARGIN, CONTENT_TOP, CONTENT_W, 36 }; *rad = 18; *c = APR_DIM;
+            return 1;
+        }
         if (cl_kind != CL_THREADS && sh_comms_ok() && !cm_cell_on()) {          /* cp6: the empty list's Cellular Settings */
-            float by = cm_empty_bot(CONTENT_TOP, EMPTY_BOT, "Turn on Cellular to send and receive text messages.") + 18;
+            float by = cm_empty_bot(CONTENT_TOP + MSF_H, EMPTY_BOT, "Turn on Cellular to send and receive text messages.") + 18;
             if (y >= by && y < by + 40 && tk_fabsf(x - 195) < CM_BTN_W / 2) {
                 *r = *g = (tk_rect){ 195 - CM_BTN_W / 2, by, CM_BTN_W, 40 }; *rad = 20; *c = APR_CIRC;
                 return 1;

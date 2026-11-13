@@ -1214,6 +1214,10 @@ const tk_bmp *tk_comp_shown(tk_comp *c)
     return &c->fb;
 }
 
+/* 8a (Track A, the top ten's item 4: "motion goes soft"): 1 = never a half-resolution GPU frame, for the self test's
+ * pages-full film, which measures what full-resolution motion costs on the phone */
+int tk_gpu_no_half;
+
 int tk_comp_frame(tk_comp *c, int motion, int full)
 {
     uint64_t ti = tk_us();
@@ -1290,14 +1294,14 @@ int tk_comp_frame(tk_comp *c, int motion, int full)
      * (as the CPU's half canvas); a half frame covers everything, and the first frame at rest after one redraws
      * everything sharp */
     static int gpu_big, gpu_last_half;
-    if (!motion) gpu_big = 0;
+    if (!motion || tk_gpu_no_half) gpu_big = 0;
     if (c->gpu && c->acquire && (nd || (!motion && gpu_last_half))) {
         uint64_t tg = tk_us();
         int half = 0;
         if (motion) {
             long a = 0;
             for (int q = 0; q < nd; q++) a += (long)(D[q].x1 - D[q].x0) * (D[q].y1 - D[q].y0);
-            if (gpu_big || a > (long)TK_W * TK_H / 6) gpu_big = half = 1;
+            if (!tk_gpu_no_half && (gpu_big || a > (long)TK_W * TK_H / 6)) gpu_big = half = 1;
         }
         if (half || gpu_last_half) { D[0] = screen; nd = 1; }
         c->gpu_half = half;

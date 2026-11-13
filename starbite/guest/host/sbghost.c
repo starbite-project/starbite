@@ -10,7 +10,8 @@ static struct sbg_stats st;
 static uint8_t host_if;
 static uint64_t t_start, t_stop_req, img_pa;
 static uint32_t boot_extra;                        /* this start: sbg_boot_extend's time on top of the timeout */
-static int boot_warned, gave_up;                   /* this start: the slow-start note given; stopped for no HELLO */
+static int boot_warned, gave_up;
+static uint64_t t_thaw;                             /* the last thaw asked (sbg_freeze 0 or a message) */                   /* this start: the slow-start note given; stopped for no HELLO */
 static uint32_t log_pos;
 static int log_seen;
 static char line[160];
@@ -421,6 +422,8 @@ int sbg_start(void)
     st.poll_part_ms = 0;
     st.poll_part = "-";
     st.pump_left = 0;
+    st.freezes = st.thaws = st.t_thawed = 0;
+    t_thaw = 0;
     st.boots++;
     int64_t r = os->cpu_on(cfg.first_mpidr, tramp_pa(), cfg.linux_base + SBG_DTB_OFF);
     struct tb t = {.n = 0};
@@ -518,6 +521,11 @@ static int put_c(uint16_t type, uint32_t a, uint32_t b, uint32_t c, int32_t x, i
 {
     if (st.state != SBG_RUNNING && !(type == SBG_MSG_STOP && st.state == SBG_BOOTING))
         return 0;
+    if (HDR->host_freeze && type != SBG_MSG_SCREEN && type != SBG_MSG_FOCUS) {
+        HDR->host_freeze = 0;                       /* instant start: a message for Linux thaws it (the doorbell below) */
+        st.thaws++;
+        t_thaw = os->ms();
+    }
     struct sbshm_msg m = {0};
     m.type = type;
     m.a = a;
@@ -537,6 +545,31 @@ static int put_c(uint16_t type, uint32_t a, uint32_t b, uint32_t c, int32_t x, i
 
 static int put(uint16_t type, uint32_t a, uint32_t b, int32_t x, int32_t y) { return put_c(type, a, b, 0, x, y); }
 
+/* instant start: freeze (1) / thaw (0) a guest with SBSHM_CAP_FREEZE; 1 asked, 0 not running, -1 it cannot */
+int sbg_freeze(int on)
+{
+    if (st.state != SBG_RUNNING)
+        return 0;
+    if (!(HDR->guest_caps & SBSHM_CAP_FREEZE))
+        return -1;
+    if (!on == !HDR->host_freeze)
+        return 1;
+    sbshm_dmb();
+    HDR->host_freeze = on ? 1U : 0U;
+    if (on) {
+        st.freezes++;
+    } else {
+        st.thaws++;
+        t_thaw = os->ms();
+    }
+    sbshm_dmb();
+    if (cfg.db_guest)
+        wr32((uintptr_t)cfg.gicd + 0x200 + 4 * (cfg.db_guest / 32), 1U << (cfg.db_guest % 32));   /* ISPENDR */
+    return 1;
+}
+/* 1 the guest says it is frozen (its CPUs offline, suspended to idle), 0 not (thawed, or still freezing) */
+int sbg_frozen(void) { return st.state == SBG_RUNNING && HDR->guest_frozen; }
+
 int sbg_touch(uint32_t slot, uint32_t phase, int32_t x, int32_t y)
 {
     int r = put(SBG_MSG_TOUCH, slot, phase, x, y);
@@ -553,6 +586,11 @@ int sbg_screen(int on)
 
 int sbg_stop(void)
 {
+    if (HDR->host_freeze) {                         /* a frozen guest thaws for its stop (the doorbell below) */
+        HDR->host_freeze = 0;
+        st.thaws++;
+        t_thaw = os->ms();
+    }
     if (st.state != SBG_RUNNING && st.state != SBG_BOOTING)
         return -1;
     HDR->host_state = SBG_HOST_STOPPING;
@@ -875,6 +913,19 @@ void sbg_poll(void)
     }
     POLL_PART("msgs");
 #undef POLL_PART
+    if (t_thaw && !HDR->host_freeze && !HDR->guest_frozen) {   /* instant start: the thaw's time, once */
+        st.t_thawed = (uint32_t)(t - t_thaw);
+        t_thaw = 0;
+        struct tb tb = {.n = 0};
+        t_s(&tb, "guest: thawed in ");
+        t_u(&tb, st.t_thawed);
+        t_s(&tb, " ms (freezes ");
+        t_u(&tb, st.freezes);
+        t_s(&tb, ", thaws ");
+        t_u(&tb, st.thaws);
+        t_s(&tb, ")");
+        say(&tb);
+    }
     if (st.state == SBG_BOOTING && cfg.boot_warn_ms && !boot_warned && t - t_start > cfg.boot_warn_ms &&
         cfg.boot_warn_ms < cfg.boot_timeout_ms) {
         boot_warned = 1;

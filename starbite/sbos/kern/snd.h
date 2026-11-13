@@ -47,6 +47,13 @@
 #define SND_TONE_NOTIFY 3               /* two notes, once */
 #define SND_TONE_CLICK 4                /* a 6 ms 3 kHz tick, once */
 #define SND_TONE_TEST 5                 /* 1 kHz steady (the probe), until snd_tone_stop() */
+/* 8a (Track B, the top ten's sounds; generic synthesized sounds, nothing recorded): once each */
+#define SND_TONE_CLICK_DEL 6            /* the delete key: a deeper 6 ms tick (iOS's keyboard has three clicks) */
+#define SND_TONE_CLICK_MOD 7            /* shift, 123, space, return: a softer, lower 7 ms tick */
+#define SND_TONE_LOCK 8                 /* the screen locks: a short two-part latch */
+#define SND_TONE_SHUTTER 9              /* the Camera's shutter: two quick ticks */
+#define SND_TONE_CHARGE 10              /* power connected: a bell with its octave, fading */
+#define SND_TONE_MAX SND_TONE_CHARGE
 
 #define SND_EBUSY (-16)                 /* no free stream / a call has the hardware */
 #define SND_EINVAL (-22)

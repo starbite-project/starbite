@@ -367,4 +367,5 @@ int tk_strcmp(const char *a, const char *b);
 void tk_memcpy(void *d, const void *s, size_t n);
 void tk_memset(void *d, int v, size_t n);
 
+extern int tk_gpu_no_half;     /* 8a: never a half-resolution GPU frame (tk_comp.c; the self test's pages-full film) */
 #endif
