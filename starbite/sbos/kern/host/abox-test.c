@@ -109,7 +109,9 @@ static void rx_push(uint64_t at, uint32_t ipcid, uint32_t type, uint32_t p1, uin
 /* what the fake firmware does when its CPU starts: a log ring, a gear request, BOOT_DONE 64 ms later */
 static void calliope_start(void)
 {
-    static const char text[] = "Calliope boot\nVSS_init_proc\n";
+    /* the DRAM-ring variant also says the VSS handshake is done (abox_vss_ready) */
+    const char *text = F.log_in_dram ? "Calliope boot\nVSS_init_proc\n[VSS] CP Magic Code is ready, VHM_initialize done\n"
+                                     : "Calliope boot\nVSS_init_proc\n";
     uint32_t addr = F.log_in_dram ? 0x80100000u : 0x30800u, n = (uint32_t)strlen(text);
     if (F.log_in_dram) {
         uint8_t *p = F.rmem + 0x100000;
@@ -347,6 +349,8 @@ static void test_full_cycle(int log_in_dram, int no_irq)
     CHECK(abox_version() == 0x43524C30, "%s: version %#x", t, abox_version());
     CHECK(logged("Calliope is ready to sing (version CRL0)"), "%s: no ready line", t);
     CHECK(logged("abox: fw: Calliope boot") && logged("abox: fw: VSS_init_proc"), "%s: firmware log lines missing", t);
+    CHECK(abox_vss_ready() == (log_in_dram ? 1 : 0), "%s: abox_vss_ready %d", t, abox_vss_ready());
+    CHECK(!log_in_dram || logged("abox: VSS: Calliope says the CP's magic code is ready"), "%s: no VSS handshake line", t);
     if (no_irq)
         CHECK(logged("no interrupt at ABOX's GICC"), "%s: fallback not noted", t);
     F.booted_once = 1;

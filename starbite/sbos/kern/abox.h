@@ -79,6 +79,8 @@ int abox_poll(void);
 void abox_off(void);
 /* the AUD power domain alone, for media sound while ABOX is off (aud_on + the DTZPC restore SMC / the TZPC save SMC +
  * aud_off: the same sequence as abox_boot / abox_off). ABOX_ESTATE while ABOX boots or runs. */
+/* the VSS handshake from Calliope's own log: 1 "CP Magic Code is ready", -1 "VSS init timed out", 0 neither yet */
+int abox_vss_ready(void);
 int abox_pd_on(void);
 void abox_pd_off(void);
 const char *abox_why(void);

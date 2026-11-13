@@ -213,6 +213,7 @@ static struct {
     int state, err;
     uint8_t *rm;                        /* CPU pointer to abox_rmem */
     int pd_touched, cpu_started, mmu_set, pins_set, call_on, vss_started, boot_done, dump_win;
+    int vss_magic, vss_timeout;             /* Calliope's log: "CP Magic Code is ready" / "VSS init timed out" */
     unsigned qch_set;                   /* bit i: qch_regs[i] CLOCK_REQ set by us */
     uint32_t version, sram_bytes;
     unsigned ipc_sent, ipc_recv, ipc_timeouts, ipc_fail_row, refused, ipc_lines, fw_lines, fw_lost;
@@ -522,12 +523,31 @@ static int ipc_send(const char *what)
 }
 
 /* ---- Calliope's log rings (abox_log.c) --------------------------------------------------------------------------- */
+static int has(const char *h, const char *n)
+{
+    for (; *h; ++h) {
+        unsigned i = 0;
+        while (n[i] && h[i] == n[i])
+            ++i;
+        if (!n[i])
+            return 1;
+    }
+    return 0;
+}
+
 static void fw_line_out(void)
 {
     struct lb l;
     if (!S.linen)
         return;
     S.line[S.linen] = 0;
+    /* the VSS handshake, as Calliope reports it (kept even when the line itself is past fw_log_max) */
+    if (!S.vss_magic && has(S.line, "Magic Code is ready")) {
+        S.vss_magic = 1;
+        say("abox: VSS: Calliope says the CP's magic code is ready (the voice link's handshake is done)");
+    }
+    if (!S.vss_timeout && has(S.line, "VSS init timed out"))
+        S.vss_timeout = 1;
     if (S.fw_lines < C.fw_log_max) {
         lb_init(&l);
         lb_s(&l, "abox: fw: ");
@@ -893,6 +913,7 @@ static void teardown(void)
     }
     sayl(&l);
     S.pd_touched = S.cpu_started = S.mmu_set = S.pins_set = S.call_on = S.boot_done = S.vss_started = 0;
+    S.vss_magic = S.vss_timeout = 0;
     S.aud_khz = S.int_khz = 0;
     S.nlogs = 0;
 }
@@ -1682,6 +1703,11 @@ int abox_pd_on(void)
     lb_s(&l, " us, DTZPC restored");
     sayl(&l);
     return 0;
+}
+
+int abox_vss_ready(void)
+{
+    return S.vss_magic ? 1 : S.vss_timeout ? -1 : 0;
 }
 
 void abox_pd_off(void)

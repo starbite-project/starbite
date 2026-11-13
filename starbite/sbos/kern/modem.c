@@ -1323,6 +1323,29 @@ static int st_ph, st_round, st_fails, st_pass, st_restarted;
 static uint64_t st_t0, st_tp, st_all;
 static uint32_t st_min = 0xffffffffu, st_max, st_sum, st_n, st_up_ms[2], st_off_ms;
 static char st_audio[64];                   /* the audio stages, for the summary (a short pmsg tail keeps it) */
+/* no SIM (2026-11-13: the SIM is out for the day): the modem and the call-audio path start and stop twice */
+static int st_nosim, st_hs[2], st_abox_ok[2];
+static char st_aud[2][64];
+
+static void st_audio_snap(int k)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "amp ");
+    ub_s(&u, au_amp == 1 ? "ok" : au_amp == -1 ? "FAILED" : "not run");
+    ub_s(&u, ", codec ");
+    ub_s(&u, au_codec == 1 ? "ok" : au_codec == -1 ? "FAILED" : "not run");
+    ub_s(&u, ", ABOX ");
+    ub_s(&u, au_abox == 1 ? "ok" : au_abox == -1 ? "FAILED" : "not run");
+    ub_s(&u, ", VSS ");
+    ub_s(&u, au_vss ? "started" : "not started");
+    sb_strcpy(st_aud[k], sizeof(st_aud[k]), u.b);
+    if (au_abox == 1)
+        st_abox_ok[k] = 1;
+    int v = abox_vss_ready();
+    if (v && !st_hs[k])
+        st_hs[k] = v;
+}
 
 static void st_line(const char *a, uint64_t ms)
 {
@@ -1373,6 +1396,18 @@ int kmodem_selftest_phase(int *done)
         st_ph = 1;
         break;
     case 1:                                 /* data up */
+        if (au_abox)
+            st_audio_snap(st_restarted);    /* before a stop resets it (no SIM: the stop comes after 8 s) */
+        if (cst == KCELL_NO_SIM) {
+            if (!st_nosim)
+                sb_log("selftest: cell: no SIM: the radio test only (the modem and the call-audio path start and "
+                       "stop, twice; no registration, nothing transmitted)");
+            st_nosim = 1;
+            st_tp = now;
+            st_ph = st_restarted ? 9 : 6;
+            st_restarted = 1;
+            break;
+        }
         if (cst == KCELL_DATA) {
             st_line(st_restarted ? "data up again (the restart in one boot) in " : "data up in ", now - st_t0);
             st_up_ms[st_restarted ? 1 : 0] = (uint32_t)(now - st_t0);
@@ -1468,6 +1503,10 @@ int kmodem_selftest_phase(int *done)
         st_ph = ++st_round >= SOAK_N ? 7 : 3;
         break;
     }
+    case 6:                                 /* no SIM: parked; start again after 3 s (the AUD domain's power-on path) */
+        if (!kmodem_on() && now - st_tp > 3000U)
+            st_ph = 0;
+        break;
     case 7:                                 /* Cellular off: deactivate, detach, park */
         sb_log("selftest: cell: Cellular off");
         kmodem_cellular(0);
@@ -1495,6 +1534,21 @@ int kmodem_selftest_phase(int *done)
     default: {
         struct ub u;
         ub_init(&u);
+        if (st_nosim) {
+            int ok = st_abox_ok[0] && st_abox_ok[1] && !kmodem_on();
+            ub_s(&u, ok ? "selftest: cell: PASS (no SIM): " : "selftest: cell: FAILED (no SIM): ");
+            for (int k = 0; k < 2; ++k) {
+                ub_s(&u, k ? "; start 2: " : "start 1: ");
+                ub_s(&u, st_aud[k][0] ? st_aud[k] : "audio not reached");
+                ub_s(&u, ", VSS handshake ");
+                ub_s(&u, st_hs[k] == 1 ? "done" : st_hs[k] == -1 ? "TIMED OUT" : "not seen");
+            }
+            ub_s(&u, kmodem_on() ? "; the modem is STILL ON" : "; parked");
+            sb_log(u.b);
+            cell_selftest = 0;
+            *done = 1;
+            return ok;
+        }
         ub_s(&u, st_fails ? "selftest: cell: FAILED: " : "selftest: cell: PASS: ");
         ub_dec(&u, (uint32_t)st_pass);
         ub_s(&u, " HTTPS GETs passed, ");
