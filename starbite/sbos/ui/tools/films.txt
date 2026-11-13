@@ -80,3 +80,4 @@ wifiscroll: wait 300; drag 195 795 195 330 220; wait 900; tap 325 736; wait 1100
 pinch: wait 300; drag 195 795 195 330 220; wait 900; tap 65 392; wait 2600; tap 195 330; wait 1600; pinch 195 420 60 240 400; wait 1200; drag 195 420 120 300 300; wait 900; pinch 195 420 240 50 400; wait 1200; drag 195 300 195 620 240; wait 900; drag 195 795 200 450 260; wait 1200
 a1shots: wait 300; state storeapp=gnome-calculator; wait 3000; state storeapp=gnome-chess; wait 3000
 a1shots2: wait 300; state storeapp=gnome-calculator; wait 1500; drag 300 480 60 480 250; wait 800; drag 120 480 360 480 250; wait 800; drag 195 600 195 300 300; wait 900
+developer: wait 300; drag 195 795 195 330 220; wait 900; tap 325 736; wait 1100; drag 195 700 195 100 250; wait 4000; tap 195 660; wait 1000; tap 340 122; wait 900; tap 340 122; wait 900; tap 50 63; wait 900; drag 195 795 200 450 260; wait 1200
