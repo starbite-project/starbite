@@ -1239,11 +1239,13 @@ static void place_list(void)
         list.alpha *= sysx;
         list.y += PT(60 * (1 - sysx));
         sysplat.alpha = (1 - tk_clampf(sysx * 1.6f, 0, 1)) * (1 - tk_clampf(lkn_p() * 1.6f, 0, 1));
-        float s = .96f + .04f * (1 - sysx);
+        float s = (.96f + .04f * (1 - sysx)) * press_s(&sysplat);   /* 8c: its press (iOS's platter: .97 under the finger) */
         sysplat.ox = PT(195); sysplat.oy = PT(SYSP_Y + SYSP_H / 2);
         sysplat.sx = sysplat.sy = s;
         sysplat.hidden = !sysplat.bmp.px || sysplat.alpha <= .004f;
         sysless.alpha = tk_clampf(sysx * 1.6f - .6f, 0, 1);
+        sysless.ox = PT(195); sysless.oy = PT(SYSL_Y + SYSL_H / 2);
+        sysless.sx = sysless.sy = press_s(&sysless);
         sysless.hidden = !sysless.bmp.px || sysless.alpha <= .004f;
     } else
         sysplat.hidden = sysless.hidden = 1;
@@ -6226,6 +6228,11 @@ static void sh_touch_(int phase, float x, float y, float t)
                 tk_rect c = { CARD_X, LIST_TOP + 10 + 78.0f * T.arg, CARD_W, 68 };
                 hl_set(&lockhl, c, c, 26, W(.14f));     /* cp6: lit, then fading (no scale: Emergency stays quiet) */
                 lk_hl_key = 0;
+            } else if (T.arg == 8) {                    /* 8c (8c's phone: touch to frame 193 ms): Exit Emergency's capsule lights at once too */
+                float w = 14 + tw(TK_IT600, 13, "Exit Emergency", 0, 0) + 14;
+                tk_rect c = { 195 - w / 2, LIST_TOP + 10 + 78 * 8 - 10 + 12, w, 32 };
+                hl_set(&lockhl, c, c, 16, PRESS_BTN);
+                lk_hl_key = 0;
             }
             tk_tracker_add(&T.tr, y, t);
             return;
@@ -6239,12 +6246,14 @@ static void sh_touch_(int phase, float x, float y, float t)
             tk_rect c = { 195 - w / 2, SYSL_Y, w, SYSL_H };
             hl_set(&lockhl, c, c, SYSL_H / 2, PRESS_BTN);
             lk_hl_key = 0;
+            press_key(&sysless, .92f, place_list);     /* 8c (the highlight is the list's: clipped above the pill) */
             lock_ver++;
         }
         else if (sysp_hit(x, y)) {                   /* 8a: the Systems platter: lit, a tap fans the cards out */
             T.kind = G_SYSP; T.arg = 0;
             tk_rect c = { PL_X, SYSP_Y, PL_W, SYSP_H };
             hl_set(&lockhl, c, c, PL_R, W(.12f));
+            press_key(&sysplat, .97f, place_list);     /* 8c: the folded list hides lockhl: the card's own press shows at once */
             lk_hl_key = 0;
             lock_ver++;
         }
