@@ -46,6 +46,9 @@ static struct {
     int more;                                     /* the product page's description opened ("more") */
     int story;                                    /* a Today story open: its package + 1 (0: none) */
     int sub;                                      /* Search: the query submitted (results), else suggestions while typing */
+    float px, pv;                                 /* the page's slide (pt) and its speed: push / pop / the edge swipe */
+    int edge;                                     /* a back swipe from the left edge is following the finger */
+    float ex0;
     char cat[16], pkg[40], q[24];
     float scroll, v, top, bot, h, rm_t, sroot[4], scat;
     int ck[AQ_NCH], dirty[AQ_NCH];               /* each chunk layer's chunk (-1 none), to be drawn again */
@@ -1343,10 +1346,10 @@ static int aq_place(int max)
         else left++;
     }
     float off = 0, al = 1;
-    if (AQ.rev < 1) {                                       /* the new page slides in (iOS's push: from the right) */
-        float e = 1 - (1 - AQ.rev) * (1 - AQ.rev) * (1 - AQ.rev);
-        off = (float)AQ.dir * PT(70) * (1 - e);
-        al = AQ.dir ? e : 1;
+    if (AQ.px != 0) {                                       /* spec 2.1.6: a push slides the full width; a pop comes from
+                                                             * -30 % (the page that was under), faded from 0.6 */
+        off = PT(AQ.px);
+        al = AQ.px < 0 ? 1 - .4f * tk_minf(1, -AQ.px / 117) : 1;
     }
     if (ZS.phase == 1 || ZS.phase == 3) al *= 1 - .35f * tk_clampf(ZS.t, 0, 1);   /* (the page dims under the zoom) */
     float dsc = 1, dty = 0;
@@ -1921,6 +1924,7 @@ static void aq_rm_cb(int b)
 static int aq_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *col)
 {
     if (!is_app("store") || !LST) return 0;
+    if ((AQ.app || AQ.cat_on) && !AQ.story && x < 20 && y > SAFE_TOP) return 0;   /* (a back swipe starts there: nothing lights) */
     if (AQ.kb && AQ.tab == AT_SEARCH && !AQ.app && y >= 548) return 0;          /* (the keyboard lights its own keys) */
     if (AQ.story && x >= CONTENT_R - 46 && y < SAFE_TOP + 46) {
         *r = *g = (tk_rect){ CONTENT_R - 34, SAFE_TOP + 2, 34, 34 }; *rad = 17; *col = W(.16f);
@@ -2058,8 +2062,27 @@ static void aq_tap(float x, float y)
     }
 }
 /* the finger on the page: a drag scrolls it (a rubber band past the ends, momentum after), a tap is aq_tap */
+static void aq_back(void);
 static int aq_touch(int ph, float x, float y)
 {
+    if (ph == 0 && (AQ.app || AQ.cat_on) && !AQ.story && x < 20 && y > SAFE_TOP) {   /* iOS's back swipe from the edge */
+        AQ.edge = 1; AQ.ex0 = x; AQ.drag = 1; AQ.moved = 0; AQ.lt = now_ms; AQ.ly = x; AQ.pv = 0;
+        return 1;
+    }
+    if (AQ.edge) {
+        float dt = now_ms - AQ.lt;
+        if (ph == 1) {
+            if (dt > 0) AQ.pv = .6f * AQ.pv + .4f * ((x - AQ.ly) / dt * 1000);
+            AQ.ly = x; AQ.lt = now_ms;
+            AQ.px = tk_maxf(0, x - AQ.ex0);
+            aq_place(0);
+        } else if (ph == 2) {
+            AQ.edge = 0; AQ.drag = 0;
+            if (AQ.px > 130 || (AQ.pv > 500 && AQ.px > 20)) { AQ.px = 0; AQ.pv = 0; sh_haptic_k(SH_HAP_LIGHT); aq_back(); }   /* (pops: the page under slides in) */
+            else AQ.pv = 0;                       /* (springs back: aq_tick) */
+        }
+        return 1;
+    }
     if (ph == 0) {
         AQ.drag = 1; AQ.moved = 0; AQ.y0 = y; AQ.s0 = AQ.scroll; AQ.v = 0; AQ.ly = y; AQ.lt = now_ms;
         return 1;
@@ -2101,7 +2124,7 @@ static int aq_moving(void)
     if (!aqbf.hidden) return 1;                   /* (the cold start's bar moves) */
     if (aq_spinning()) return 1;                  /* (a waiting spinner turns) */
     if (ZS.phase == 1 || ZS.phase == 3 || aqz.bmp.px || ZS.drag > 0) return 1;   /* (the story's zoom) */
-    return AQ.drag || AQ.hide || AQ.left > 0 || AQ.rev < 1 || tk_fabsf(AQ.v) > 1 || AQ.scroll < 0 || AQ.scroll > aq_max() + .5f;
+    return AQ.drag || AQ.hide || AQ.left > 0 || AQ.px != 0 || tk_fabsf(AQ.v) > 1 || AQ.scroll < 0 || AQ.scroll > aq_max() + .5f;
 }
 /* the cold start's bar: elapsed / the expected start, held at 95 % until Linux is up; the words change once when late */
 static int aq_bar(void)
@@ -2249,9 +2272,17 @@ static int aq_tick(float dt)
     }
     if (AQ.hide) {                                /* a new page: two chunks a frame, then it shows */
         pend = aq_place(3);
-        if (!pend) { AQ.hide = 0; AQ.rev = AQ.dir ? 0 : 1; aq_place(0); }
+        if (!pend) { AQ.hide = 0; AQ.rev = 1; AQ.px = AQ.dir > 0 ? 390 : AQ.dir < 0 ? -117 : 0; AQ.pv = 0; aq_place(0); }
     } else {
-        if (AQ.rev < 1) AQ.rev = tk_minf(1, AQ.rev + dt / .32f);
+        if (!AQ.edge && AQ.px != 0) {             /* the slide's spring: response 0.45, damping 1.0 (critical) */
+            for (float left = dt; left > 0; left -= .004f) {
+                float h = tk_minf(left, .004f);
+                AQ.pv += (194.95f * -AQ.px - 27.93f * AQ.pv) * h;
+                AQ.px += AQ.pv * h;
+            }
+            if (tk_fabsf(AQ.px) < .3f && tk_fabsf(AQ.pv) < 20) { AQ.px = 0; AQ.pv = 0; }
+            aq_place(0);
+        }
         pend = aq_place(1);                       /* (a chunk is the frame's work: ~20 ms of text on the Mac) */
     }
     return pend > 0 || aq_moving() || zm;

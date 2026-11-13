@@ -71,3 +71,4 @@ a1page: wait 300; state storeapp=gimp; wait 1200; state storescroll=:500; wait 1
 a1more: wait 300; state storeapp=gimp; wait 1200; tap 350 500; wait 1200
 a1story: wait 300; state store=today; wait 1200; tap 195 300; wait 1500; drag 195 600 195 300 400; wait 1200; tap 353 63; wait 1500; tap 195 300; wait 1500; drag 195 250 195 520 500; wait 1500
 a1search: wait 300; state store=search; wait 1500; drag 195 650 195 250 300; wait 1200; state storeq=gi:1; wait 1200; state storeq=edit:0; wait 1200; state storeq=zzq:0; wait 1200
+a1nav: wait 300; state store=games; wait 1200; tap 352 112; wait 1400; drag 6 400 260 400 500; wait 1200; tap 352 112; wait 1400; drag 6 400 70 400 300; wait 1200
