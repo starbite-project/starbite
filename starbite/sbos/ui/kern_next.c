@@ -1265,9 +1265,17 @@ void next_kdraw(void)
 {
     if (!ready && !baking) { ui_kdraw(); return; }
     /* L2 + L3: Linux apps: a state change, the catalog or the store, or a new frame (rows copied) drawn at once */
-    if (ready && gwin_now() && !ticking && K.screen_on) {
-        tk_comp_frame(&comp, 0, 0);
-        present();
+    if (ready) {
+        uint64_t g0 = tk_us();
+        int gn = gwin_now();
+        shell_time("gwin_now (Linux's window state)", g0);   /* cp7t: 7s: a 418 ms "UI's draw" turn with the screen off at
+                                                              * Linux's HELLO (455 MHz): named when it is this */
+        if (gn && !ticking && K.screen_on) {
+            uint64_t f0 = tk_us();
+            tk_comp_frame(&comp, 0, 0);
+            present();
+            shell_time("a Linux window frame", f0);
+        }
     }
     /* helper I: the call's state and the inbox ten times a second (a copy of ~150 bytes and a counter), also with the
      * screen off (an incoming call wakes it); a change is drawn at once */
