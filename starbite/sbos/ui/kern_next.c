@@ -918,6 +918,7 @@ static void next_screen(int on)
     }
     status_now();
     sh_wake();
+    if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 200, 0);   /* cp7: the idle work the dark left (after the wake's frames) */
     boosted = 0;                                     /* the kernel sets the screen-on clock after this: the first
                                                       * frame takes the top step (frame()) */
     workers_start();
@@ -1314,6 +1315,9 @@ void next_ktimer(unsigned id)
         return;
     }
     if (ready && id == 24) {
+        if (!K.screen_on)                            /* cp7 (7c's self test: 1854 ms here at 455 MHz with the screen
+                                                      * off): no idle UI work nobody sees; the wake starts it again */
+            return;
         if (!ticking && !sh_moving()) {
             uint64_t si0 = tk_us();
             sh_idle();
