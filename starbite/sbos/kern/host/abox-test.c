@@ -859,6 +859,54 @@ static uint32_t ref_crc32(unsigned f)
     }
     return ~c;
 }
+/* file_part: calliope_dram.bin (files[1]) in pieces; fail_at >= 0: that piece fails (the whole file is read instead) */
+static int part_calls, part_fail_at = -1;
+static long f_part(void *c, const char *path, void *dst, uint32_t off, uint32_t len)
+{
+    (void)c;
+    if (strcmp(path, "firmware/calliope_dram.bin"))
+        return -1;
+    if (!len)
+        return files[1].size;
+    if (part_calls++ == part_fail_at)
+        return -1;
+    if (off > files[1].size || len > files[1].size - off)
+        return -1;
+    for (uint32_t i = 0; i < len; ++i)
+        ((uint8_t *)dst)[i] = fbyte(1, (long)off + i);
+    return (long)len;
+}
+static void test_file_part(void)
+{
+    for (int fail = -1; fail <= 3; fail += 4) {
+        reset();
+        struct abox_hal h = { 0 };
+        h.rd32 = f_rd32, h.wr32 = f_wr32, h.smc = f_smc, h.delay_us = f_delay, h.log = f_log, h.file = f_file;
+        h.ram = f_ram, h.now_us = f_now, h.file_part = f_part;
+        abox_hal_set(&h);
+        part_calls = 0, part_fail_at = fail;
+        CHECK(abox_boot_start() == 1, "part: start");
+        int r, steps = 0, dram_steps = 0;
+        while ((r = abox_boot_step()) > 0 && steps < 2000) {
+            if (abox_boot_stage() == 1)
+                dram_steps++;
+            F.now += 5000;
+            steps++;
+        }
+        char want[96];
+        snprintf(want, sizeof want, "calliope_dram.bin %ld bytes, crc32 0x%x", files[1].size, ref_crc32(1));
+        CHECK(r == 0 && abox_state() == ABOX_ST_READY, "part %d: boot %s", fail, abox_why());
+        CHECK(logged(want), "part %d: the dram line differs from the whole-file one", fail);
+        if (fail < 0)
+            CHECK(dram_steps >= 8 && part_calls == (int)((files[1].size + 0x3FFFF) / 0x40000) + 0,
+                  "part: %d dram steps, %d parts (256 KiB each)", dram_steps, part_calls);
+        else
+            CHECK(part_calls == fail + 1, "part %d: parts after the failure (%d)", fail, part_calls);
+        abox_off();
+    }
+    abox_hal_set(0);
+}
+
 static void test_file_crcs(void)
 {
     reset();
@@ -880,6 +928,7 @@ int main(int argc, char **argv)
         return 2;
     CHECK(abox_boot() == ABOX_ESTATE, "boot without a HAL");
     test_file_crcs();
+    test_file_part();
     test_cfg();
     test_full_cycle(0, 0);
     test_full_cycle(1, 0);
