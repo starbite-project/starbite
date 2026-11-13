@@ -408,6 +408,7 @@ int sh_linux_open(const char *id)
         pend[0] = 0;
     }
     guest_show(1);                         /* MSG_FOCUS 1; the guest's idle stop cancelled */
+    if (sh_pref_int("linux.used", 0) != 1) (void)sh_pref_set_int("linux.used", 1);   /* Track A: prewarm only for Linux users */
     guest_full_next();
     push_state();
     try_launch();

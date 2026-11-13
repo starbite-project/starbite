@@ -45,6 +45,8 @@ static int drv_touch_dark(void);
 #define KT_DRV_PROX 33
 #define KT_DRV_SND 34                           /* cp7: sound's poll (5 ms while busy) */
 #define KT_DRV_JACK 35                          /* cp7: the headphone jack (50 ms while sound plays or the screen is on) */
+#define KT_DRV_PREWARM 36                       /* 8a: Linux prewarmed in the dark (Track E's guest_prewarm) */
+static void prewarm_arm(int screen_on);
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
 void tk_heap_init(void *mem, uint64_t size);
@@ -980,6 +982,7 @@ static void next_screen(int on)
             tk_comp_frame(&comp, 0, 0);
             present();
         }
+        prewarm_arm(0);                              /* 8a: Linux prewarmed after 15 s of dark (once a boot) */
         sh_idle();                                   /* P2v: the half canvas and the lock's caches now, in the dark
                                                       * (the wake's first frame spent 8 ms on them) */
 #ifndef SBOS_SELFTEST_NEXT
@@ -987,6 +990,7 @@ static void next_screen(int on)
 #endif
         return;
     }
+    prewarm_arm(1);
     status_now();
     sh_wake();
     if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 200, 0);   /* cp7: the idle work the dark left (after the wake's frames) */
@@ -1414,7 +1418,7 @@ void next_ktimer(unsigned id)
         return;
     }
     if (ready && id == 26) { (void)kupdate_after_start(); return; }   /* Track A update: 10 s after the home screen */
-    if (id >= KT_DRV_BT && id <= KT_DRV_JACK) { drv_timer(id); return; }   /* Track A: drivers for the shell */
+    if (id >= KT_DRV_BT && id <= KT_DRV_PREWARM) { drv_timer(id); return; }   /* Track A: drivers for the shell */
     ui_ktimer(id);
 }
 
@@ -3004,6 +3008,7 @@ static void drv_timer(unsigned id)
     else if (id == KT_DRV_AUTO) ab_tick();
     else if (id == KT_DRV_PROX) px_tick();
     else if (id == KT_DRV_SND || id == KT_DRV_JACK) snd_tick(id);
+    else if (id == KT_DRV_PREWARM) prewarm_arm(-1);
 }
 static void drv_screen(int on)
 {
@@ -3358,3 +3363,25 @@ void sh_snd_close(int id)
 }
 const char *sh_snd_why(void) { return snd_up ? snd_why() : "Sound starts when something plays"; }
 void alarm_sound(int on) { sh_alarm_sound(on); }   /* cp7x: alarm.c's ring -> the shell's ring owner 4 */
+
+/* ---- 8a (Track E's instant start, 4cb49c26): Linux prewarmed, so even the first open after a restart only thaws
+ * it. Once a boot, after 15 s with the screen off, only for someone who opened a Linux app before (pref linux.used,
+ * gwin.c), never in Low Power Mode or a self test. The guest boots unseen, then its idle freeze takes it.
+ * prewarm_arm: 0 the screen went off (armed), 1 it came on (cancelled), -1 the timer */
+static void prewarm_arm(int screen_on)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)screen_on;
+#else
+    static int pw_done;
+    if (screen_on == 1) { kt_cancel(KT_UI, KT_DRV_PREWARM); return; }
+    if (pw_done || sbos_selftest_enabled || perf_low || sh_pref_int("linux.used", 0) != 1) return;
+    if (guest_state() != GUEST_OFF) { pw_done = 1; return; }
+    if (screen_on == 0) { kt_set(KT_UI, KT_DRV_PREWARM, sb_ms(), 15000, 0); return; }
+    if (K.screen_on) return;
+    pw_done = 1;
+    int r = guest_prewarm();
+    sb_log(r > 0 ? "next: Linux prewarmed in the dark (it freezes once up; the first open thaws it)"
+                 : r == 0 ? "next: Linux prewarm: nothing to do" : "next: Linux prewarm: refused");
+#endif
+}
