@@ -1,6 +1,6 @@
 unlock: wait 400; drag 195 795 195 330 220; wait 1300
-group: wait 300; tap 195 354; wait 1000; tap 330 334; wait 900; drag 200 650 200 380 250; wait 1200; tap 195 578; wait 1800; tap 195 464; wait 1200
-focus: wait 300; tap 195 444; wait 900; tap 195 559; wait 1000; drag 65 743 345 743 550; wait 2600
+group: wait 300; tap 195 645; wait 700; tap 195 354; wait 1000; tap 330 334; wait 900; drag 200 650 200 380 250; wait 1200; tap 195 578; wait 1800; tap 195 464; wait 1200
+focus: wait 300; tap 195 645; wait 700; tap 195 444; wait 900; tap 195 559; wait 1000; drag 65 743 345 743 550; wait 2600
 holds: wait 300; hold 71 727 650; wait 700; hold 319 727 950; wait 900
 relock: wait 300; drag 195 795 195 330 220; wait 900; power; wait 900; power; wait 1200
 pages: wait 300; drag 195 795 195 330 220; wait 900; drag 320 450 60 450 200; wait 900; drag 60 450 330 460 220; wait 1200
@@ -72,3 +72,4 @@ a1more: wait 300; state storeapp=gimp; wait 1200; tap 350 500; wait 1200
 a1story: wait 300; state store=today; wait 1200; tap 195 300; wait 1500; drag 195 600 195 300 400; wait 1200; tap 353 63; wait 1500; tap 195 300; wait 1500; drag 195 250 195 520 500; wait 1500
 a1search: wait 300; state store=search; wait 1500; drag 195 650 195 250 300; wait 1200; state storeq=gi:1; wait 1200; state storeq=edit:0; wait 1200; state storeq=zzq:0; wait 1200
 a1nav: wait 300; state store=games; wait 1200; tap 352 112; wait 1400; drag 6 400 260 400 500; wait 1200; tap 352 112; wait 1400; drag 6 400 70 400 300; wait 1200
+interrupt: wait 300; drag 195 795 195 330 220; wait 900; tap 238 289; wait 1100; drag 195 795 200 450 200; wait 60; tap 158 392; wait 1200; drag 195 795 200 450 260; wait 1200
