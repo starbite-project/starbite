@@ -35,6 +35,7 @@
 #include "nledpol.h"
 static void drv_timer(unsigned id);             /* Track A: drivers for the shell (the end of this file) */
 static void snd_tick(unsigned id);              /* Track A, cp7: sound (the end of this file) */
+static void snd_boot(void);                     /* cp7y: snd up (Calliope's files into RAM) at the bake's end */
 static void drv_screen(int on);
 static void drv_after_bake(void);
 static int drv_touch_dark(void);
@@ -1229,6 +1230,7 @@ static void bake_step(void)
         present();
         return;
     }
+    snd_boot();                                      /* cp7y: ~0.3 s once, still behind the boot screen */
     kt_cancel(KT_UI, 22);
     baking = 0;
     status_now();
@@ -3242,6 +3244,25 @@ static void snd_tick(unsigned id)
     if (id == KT_DRV_SND) snd_poll(sb_us());
     else (void)snd_jack_tick();
     snd_arm();
+}
+/* cp7y (the drivers' 4f735a44): snd_init_libsb prefetches Calliope's ~2.7 MB from VENDOR into RAM, so no Calliope
+ * start reads VENDOR on the main loop. Called once at the bake's end, before "ready"; the self test refuses sound. */
+static void snd_boot(void)
+{
+#ifndef SBOS_SELFTEST_NEXT
+    if (sbos_selftest_enabled || snd_up) return;
+    uint64_t t0 = sb_us();
+    snd_init_libsb();
+    snd_up = 1;
+    int v = sh_pref_int("snd.vol", 8);
+    snd_volume(SND_OUT_SPEAKER, (unsigned)(v < 0 ? 0 : v > 15 ? 15 : v));
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: sound: up at boot (Calliope's files in RAM) in ");
+    ub_dec(&u, (sb_us() - t0) / 1000U);
+    ub_s(&u, " ms");
+    sb_log(u.b);
+#endif
 }
 static int snd_ready(void)
 {
