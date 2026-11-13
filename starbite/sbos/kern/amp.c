@@ -309,6 +309,19 @@ static int gate_closed(uint32_t v)
     return (v & 0x00300000U) == 0x00100000U;    /* MANUAL 1 with CG_VAL 0 */
 }
 
+static uint32_t gate_found[4];
+static int gates_held;
+static const uint16_t usi07_gates[4] = { 0x203C, 0x2094, 0x20E4, 0x20E8 };
+static void gates_back(void)
+{
+    if (!gates_held)
+        return;
+    for (unsigned i = 0; i < 4; ++i)
+        H->wr32(CMU_PERIC1 + usi07_gates[i], gate_found[i]);
+    gates_held = 0;
+    bus_up_done = 0;                /* the next use holds them again */
+    say("bus: USI07 gates back as found");
+}
 static int bus_up(void)
 {
     if (bus_up_done)
@@ -329,6 +342,19 @@ static int bus_up(void)
     for (unsigned i = 0; i < 4; ++i)
         if (gate_closed(g[i]))
             return fail(AUD_EPERM, "a CMU_PERIC1 gate of USI07 is closed (not opened from here)");
+    /* Drivers run 7c: with the four gates in automatic mode (00200000: bit 21 on, bit 20 manual off) the HSI2C sat in
+     * its START state (TRANS_STATUS 00080001, no interrupt) while SCL / SDA idled high: its clock does not run. Held
+     * on manually (bit 20 + 21, as cam.c does for its I2C buses) while amp.c uses the bus; amp_off() puts them back. */
+    for (unsigned i = 0; i < 4; ++i) {
+        gate_found[i] = g[i];
+        if ((g[i] & 0x00300000U) != 0x00300000U) {
+            H->wr32(CMU_PERIC1 + gates[i], g[i] | 0x00300000U);
+            gates_held = 1;
+        }
+    }
+    if (gates_held)
+        say("bus: USI07 gates held on: %08x %08x %08x %08x", H->rd32(CMU_PERIC1 + gates[0]),
+            H->rd32(CMU_PERIC1 + gates[1]), H->rd32(CMU_PERIC1 + gates[2]), H->rd32(CMU_PERIC1 + gates[3]));
     if ((mode & 0x7U) != USI_MODE_I2C) {
         H->wr32(USI07_MODE, (mode & ~0x7U) | USI_MODE_I2C);
         say("bus: USI07 mode %x -> %x (I2C)", mode, H->rd32(USI07_MODE));
@@ -568,9 +594,11 @@ int amp_probe(void)
     int r0 = identify(&dies[0]), r1 = identify(&dies[1]);
     any_b = dies[0].kind == 'B' || dies[1].kind == 'B';
     boost_mode = dies[0].kind == 'B' ? 0x00 : 0x02;
-    if (r0 || r1)
+    if (r0 || r1) {
+        gates_back();
         return fail(AUD_ENODEV, r0 ? "the 0x39 die (earpiece) does not answer as a MAX98512" :
                                      "the 0x3A die (speaker) does not answer as a MAX98512");
+    }
     why = "probed";
     say("probe: both dies found (boost bypass mode %u)", boost_mode);
     return 0;
@@ -606,6 +634,7 @@ void amp_off(void)
         else
             say("%s: never identified: not touched", dies[i].name);
     H->delay_us(RAMP_DOWN_US);
+    gates_back();
     why = "off";
 }
 
