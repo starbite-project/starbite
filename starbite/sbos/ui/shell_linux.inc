@@ -306,7 +306,7 @@ static void lx_build_state(void)
             lx_scopy(l, LX.why, 96);
         } else {
             for (const char *s = nm; *s && k < 40; s++) l[k++] = *s;
-            lx_scopy(l + k, " opens on the big cores in a few seconds.", 96 - k);
+            lx_scopy(l + k, " opens once Linux has started: about 30 seconds.", 96 - k);   /* (7u: HELLO 31.8 s) */
         }
     } else {
         tk_memcpy(t, "Opening ", 8);
