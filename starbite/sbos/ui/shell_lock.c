@@ -1785,6 +1785,17 @@ unsigned flat_cuts;                               /* bumped by every other tk_fl
  * whole on the CPU (tk_comp_shown: ~200-250 ms on the phone, 7e's "idle after a gesture"); instead the wallpaper's
  * quarter with the visible layers flattened at a quarter over it (1/16 of the px; no lens: under a 20+ pt blur none
  * of it would show). 0: no memory */
+/* the GPU path's second half: the visible layers flattened at a quarter over q (the wallpaper's quarter) */
+static void shown_layers_over(tk_bmp *q)
+{
+    tk_bmp f;
+    if (tk_bmp_new(&f, q->w, q->h)) {
+        flat_cuts++;                              /* (the lock's sliced flatten starts over) */
+        tk_flatten(&root, &f, 0, .25f);
+        tk_blit(q, &f, 0, 0, 1);
+        tk_bmp_free(&f);
+    }
+}
 static int shown_quarter(tk_bmp *q)
 {
     if (!tk_bmp_new(q, TK_W / 4, TK_H / 4)) return 0;
@@ -1797,13 +1808,7 @@ static int shown_quarter(tk_bmp *q)
         return 1;
     }
     tk_bmp_down2(q, &C->base_half);
-    tk_bmp f;
-    if (tk_bmp_new(&f, q->w, q->h)) {
-        flat_cuts++;                              /* (the lock's sliced flatten starts over) */
-        tk_flatten(&root, &f, 0, .25f);
-        tk_blit(q, &f, 0, 0, 1);
-        tk_bmp_free(&f);
-    }
+    shown_layers_over(q);
     return 1;
 }
 #define FL_BAND 96                                /* half-resolution rows a slice (1480 in all: 16 slices) */
@@ -2068,7 +2073,7 @@ static void cc_unview(void)
  * the next part of a grid being drawn (0 none); a whole build_cc_grid (a toggle) ends any part-drawn one */
 static dc ccg_d;
 static int ccg_part;
-#define CCG_PARTS 7
+#define CCG_PARTS 8
 static void cc_grid_part(int k)
 {
     if (k != 1 && k != ccg_part) return;         /* (that grid was made again whole meanwhile) */
@@ -2083,6 +2088,8 @@ static void cc_grid_part(int k)
     /* the connectivity 2x2: Airplane, Cellular, Wi-Fi and the mini cluster (Bluetooth, Nearby, Hotspot, VPN) */
     float X = CC_COL(0), Y = CC_ROW(0);
     cc_tile(&d, X, Y, CC_W2, CC_W2, 30, 0);
+    } else if (k == 2) {                         /* cp7m (7l: the first part 29-50 ms): the three circles a part of their own */
+    float X = CC_COL(0), Y = CC_ROW(0);
     static const char *CI[3] = { "cc-air", "cc-cell", "cc-wifi" };
     static const float CW[3][2] = { { 20, 20 }, { 20, 18 }, { 22, 16 } };
     int ons[3] = { CCS.air, cell_running(), CCS.wifi };
@@ -2092,7 +2099,7 @@ static void cc_grid_part(int k)
         d_rrect(&d, cx, cy, CN_D, CN_D, CN_D / 2, ons[i] ? tk_hex(ONC[i], 1) : W(.2f));
         d_icon(&d, CI[i], cx + (CN_D - CW[i][0]) / 2, cy + (CN_D - CW[i][1]) / 2, 1);
     }
-    } else if (k == 2) {                         /* cp7i: the mini cluster a part of its own */
+    } else if (k == 3) {                         /* cp7i: the mini cluster a part of its own */
     float X = CC_COL(0), Y = CC_ROW(0);
     {
         float bx = X + CN_PAD + CN_D + 14, by = Y + CN_PAD + CN_D + 14;
@@ -2103,11 +2110,11 @@ static void cc_grid_part(int k)
             else cc_draw_link(&d, k - 1, mx + CN_MD / 2, my + CN_MD / 2, .85f, W(1));
         }
     }
-    } else if (k == 3) {
+    } else if (k == 4) {
     /* the sliders' glass (their level and glyph are layers above) */
     cc_tile(&d, CC_COL(2), CC_ROW(0), CC_U, CC_W2, 34, 0);
     cc_tile(&d, CC_COL(3), CC_ROW(0), CC_U, CC_W2, 34, 0);
-    } else if (k == 4) {
+    } else if (k == 5) {
     /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Mirror, Camera */
     /* P3i: the torch's tile baked off; its lit look is a small layer over it, so the tap shows it at once (the
      * whole grid's rebuild took ~300 ms at the tap) */
@@ -2121,7 +2128,7 @@ static void cc_grid_part(int k)
         cclit.hidden = !Q[0].lit;
     }
     cc_tile(&d, CCX[1], CC_R3, CC_U, CC_U, 34, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], CC_R3, 22, 22);
-    } else if (k == 5) {
+    } else if (k == 6) {
     cc_tile(&d, CCX[2], CC_R3, CC_U, CC_U, 34, 0);
     cc_glyph(&d, "cc-flame", CCX[2], CC_R3, 20, 24);
     {
@@ -2135,7 +2142,7 @@ static void cc_grid_part(int k)
         ccem.hidden = !EMG;
     }
     cc_tile(&d, CCX[3], CC_R3, CC_U, CC_U, 34, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], CC_R3, 24, 14);
-    } else if (k == 6) {
+    } else if (k == 7) {
     cc_tile(&d, CCX[0], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-timer", CCX[0], CC_R4, 22, 22);
     /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place); P3p: baked ones */
     cc_tile(&d, CCX[1], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-calc", CCX[1], CC_R4, 24, 24);
@@ -2161,20 +2168,22 @@ static void cc_levels(void)
 }
 /* cp7c: build_cc in stages, one an idle call (sh_idle_pending while some are left: the whole was ~0.6-1.2 s on the
  * phone in one turn after each move on home, and a tap in it was lost). 1: home's picture; 2: the light blur; 3: the
- * heavy blur; 4: the status, chrome, page dots, sliders; 5-10: the grid (cc_grid_part); 11: linked, built. A pull
+ * heavy blur; 4: the status, chrome, page dots, sliders; 5-12: the grid (cc_grid_part); 13: linked, built. A pull
  * before the end builds it whole (build_cc). The quarter picture ccq lives from stage 1 to 3 */
 static int ccb_next;                              /* the next stage, 0 none in progress */
 static tk_bmp ccq;
+static int ccq1, ccb_again;                       /* cp7m: stage 1's second call (the GPU row's layers); a stage to run again */
 static void build_cc_stage(int st)
 {
     if (st == 1) {
+    if (ccq1) { ccq1 = 0; if (ccq.px) shown_layers_over(&ccq); return; }   /* cp7m (7l: 24-39 ms): the layers, a call of their own */
     /* the scrim from home as it is now (half resolution, drawn 2x), then the grid over it */
     CCS.built = 0;                               /* (being made: a pull now builds it whole) */
     relayer(&ccscrim);
     tk_layer_init(&ccscrim, "cc-scrim");
     tk_bmp_free(&ccq);
-    if (C && C->gpu) {                           /* cp7f: the GPU row keeps only the quarter (stage 3): shown_quarter */
-        shown_quarter(&ccq);
+    if (C && C->gpu) {                           /* cp7f: the GPU row keeps only the quarter (stage 3): shown_quarter's halves */
+        if (tk_bmp_new(&ccq, TK_W / 4, TK_H / 4)) { tk_bmp_down2(&ccq, &C->base_half); ccq1 = ccb_again = 1; }
         return;
     }
     tk_comp_frame(C, 0, 0);
@@ -2275,7 +2284,7 @@ static void build_cc_stage(int st)
     }
     return;
     }
-    if (st >= 5 && st < 5 + CCG_PARTS) { cc_grid_part(st - 4); return; }   /* (5-11) */
+    if (st >= 5 && st < 5 + CCG_PARTS) { cc_grid_part(st - 4); return; }   /* (5-12) */
     tk_layer_init(&ccg, "cc-grid-group");
     ccg.ox = PT(CC_COL(0) + .85f * (4 * CC_U + 3 * CC_GAP));
     ccg.oy = PT(CC_ROW(0));
@@ -2286,14 +2295,16 @@ static void build_cc_stage(int st)
 #define CCB_STAGES (5 + CCG_PARTS)
 static void build_cc(void)
 {
-    for (int st = 1; st <= CCB_STAGES; st++) build_cc_stage(st);
+    ccq1 = 0;
+    for (int st = 1; st <= CCB_STAGES; st++) { build_cc_stage(st); if (ccb_again) { ccb_again = 0; st--; } }
     ccb_next = 0;
 }
 /* the idle's: the next stage; 1 while stages are left */
 static int build_cc_step(void)
 {
-    if (!ccb_next) ccb_next = 1;
+    if (!ccb_next) { ccb_next = 1; ccq1 = 0; }
     build_cc_stage(ccb_next);
+    if (ccb_again) { ccb_again = 0; return 1; }   /* (the same stage's second call next) */
     ccb_next = ccb_next < CCB_STAGES ? ccb_next + 1 : 0;
     return ccb_next != 0;
 }
@@ -2311,7 +2322,7 @@ static void free_cc(void)
     relayer(&ccgrid);
     relayer(&ccem);
     CCS.built = 0;
-    ccb_next = ccg_part = 0;                      /* cp7c: a staged build's rest (its grid's drawing context) goes too */
+    ccb_next = ccg_part = ccq1 = 0;               /* cp7c: a staged build's rest (its grid's drawing context) goes too */
     tk_bmp_free(&ccq);
 }
 /* P3s: on the lock (it opens only from home) nothing of it is kept; home's idle time builds it again */
@@ -2921,8 +2932,25 @@ __attribute__((unused)) static void d_lg_app(dc *d, float x, float y, float w, f
 }
 /* the same over the bare ground (nothing drawn under it): the blur of a flat colour is that colour, so no backdrop
  * buffer is needed (a card over the dimmed screen: its 4.6 MB backdrop refused on a full heap) */
+static void d_lg_flat_raw(tk_bmp *b, float X, float Y, float w, float h, float r, int dark, uint32_t c)
+{
+    tk_paint p = tk_solid(TK_RGBA((float)(c >> 16 & 255), (float)(c >> 8 & 255), (float)(c & 255), 1));
+    tk_fill_rrect(b, X, Y, PT(w), PT(h), PT(r), &p, 1);
+    tk_glass_bake(b, 0, X, Y, PT(w), PT(h), PT(r), dark, 1);
+}
+/* cp7m (7l: the Clock's tab change / Add Alarm / Cancel 92-110 ms on the phone, half of it its tab bar's bake): a flat
+ * glass baked once over nothing, cut to its pixels, and blitted (the bake is a fill and layers over it: the same over
+ * a page's transparent strip); four kept, the least recently used given back; the key its size, corner, tone, ground
+ * colour and place within a px (in 64ths: the strips' offsets are big floats). A strip it doesn't reach: nothing */
+#define LGC_N 4
+#define LGC_M 118                                   /* PT(32): room for the shadow, px */
+static struct { tk_bmp b; int x0, y0, dark, qx, qy; float w, h, r; uint32_t c, use; } LGC[LGC_N];
+static uint32_t lgc_clock;
 static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int dark)
 {
+    float X = PT(x) - d->ox, Y = PT(y) - d->oy;
+    int ix = (int)tk_floorf(X), iy = (int)tk_floorf(Y);
+    if (iy - LGC_M > d->b->h || iy + (int)PT(h) + LGC_M < 0 || ix - LGC_M > d->b->w || ix + (int)PT(w) + LGC_M < 0) return;
     tk_bmp g;
     uint32_t c = sbc_argb(SBC_GROUND);
     if (tk_bmp_new(&g, 1, 1)) {
@@ -2931,9 +2959,42 @@ static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int da
         c = g.px[0];
         tk_bmp_free(&g);
     }
-    tk_paint p = tk_solid(TK_RGBA((float)(c >> 16 & 255), (float)(c >> 8 & 255), (float)(c & 255), 1));
-    tk_fill_rrect(d->b, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), &p, 1);
-    tk_glass_bake(d->b, 0, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), dark, 1);
+    int qx = (int)((X - (float)ix) * 64 + .5f), qy = (int)((Y - (float)iy) * 64 + .5f);
+    if (qx >= 64) { qx = 0; ix++; }
+    if (qy >= 64) { qy = 0; iy++; }
+    int k = -1, old = 0;
+    for (int i = 0; i < LGC_N; i++) {
+        if (LGC[i].b.px && LGC[i].w == w && LGC[i].h == h && LGC[i].r == r && LGC[i].dark == dark && LGC[i].c == c &&
+            LGC[i].qx == qx && LGC[i].qy == qy) { k = i; break; }
+        if (!LGC[i].b.px || (LGC[old].b.px && LGC[i].use < LGC[old].use)) old = i;
+    }
+    if (k < 0) {
+        k = old;
+        tk_bmp_free(&LGC[k].b);
+        tk_bmp t;
+        if (!tk_bmp_new(&t, (int)PT(w) + 2 * LGC_M + 2, (int)PT(h) + 2 * LGC_M + 2)) { d_lg_flat_raw(d->b, X, Y, w, h, r, dark, c); return; }
+        d_lg_flat_raw(&t, (float)LGC_M + qx / 64.0f, (float)LGC_M + qy / 64.0f, w, h, r, dark, c);
+        int x0 = t.w, x1 = 0, y0 = t.h, y1 = 0;
+        for (int j = 0; j < t.h; j++) {
+            const uint32_t *row = t.px + (size_t)j * t.stride;
+            int a = 0;
+            while (a < t.w && !row[a]) a++;
+            if (a == t.w) continue;
+            int e = t.w;
+            while (e > a && !row[e - 1]) e--;
+            if (a < x0) x0 = a;
+            if (e > x1) x1 = e;
+            if (j < y0) y0 = j;
+            y1 = j + 1;
+        }
+        if (x1 <= x0 || !tk_bmp_new(&LGC[k].b, x1 - x0, y1 - y0)) { tk_bmp_free(&t); d_lg_flat_raw(d->b, X, Y, w, h, r, dark, c); return; }
+        tk_bmp_copy(&LGC[k].b, 0, 0, &t, x0, y0, x1 - x0, y1 - y0);
+        tk_bmp_free(&t);
+        LGC[k].x0 = x0 - LGC_M; LGC[k].y0 = y0 - LGC_M;
+        LGC[k].w = w; LGC[k].h = h; LGC[k].r = r; LGC[k].dark = dark; LGC[k].c = c; LGC[k].qx = qx; LGC[k].qy = qy;
+    }
+    LGC[k].use = ++lgc_clock;
+    tk_blit(d->b, &LGC[k].b, ix + LGC[k].x0, iy + LGC[k].y0, 1);
 }
 /* P3p (P3j-13): a pushed page's nav row, as iOS 26: a 44 pt glass circle at the leading edge with the back chevron
  * (no text), the title inline (17 pt / 600) centred. The circle's glass is baked once (init; 300 KB) and copied. */
@@ -4029,6 +4090,7 @@ static void app_close(float v)
 }
 static void app_finish_close(void)
 {
+    for (int k = 0; k < LGC_N; k++) tk_bmp_free(&LGC[k].b);   /* cp7m: the flat glass cache goes with the app (the heap) */
     if (AP.on) { const apphook *h = ap_hook(AP.a); if (h && h->on_hide) h->on_hide(); }   /* Track A lifecycle */
     sw_app_gone();                               /* helper D: no window in the switcher */
     lx_close();                                  /* L3: the window's strips, the store's layers */
@@ -6470,12 +6532,12 @@ void sh_idle(void)
     if ((!locked || cc_lock_ok) && !CCS.on && !AP.on && !nc_on() &&
         (ccb_next || !CCS.built || cc_stale || cc_lk != locked || (locked && cc_lv != lock_ver))) {
         if (!ccb_next) { cc_stale = 0; cc_lk = locked; cc_lv = lock_ver; }   /* (a change during the stages: again after) */
-        { static const char *const CCN[13] = { "build_cc_step", "build_cc 1 picture", "build_cc 2 light blur", "build_cc 3 heavy blur",
-                                                "build_cc 4 chrome", "build_cc 5 grid conn", "build_cc 6 grid mini", "build_cc 7 grid sliders",
-                                                "build_cc 8 grid torch", "build_cc 9 grid flame", "build_cc 10 grid timer", "build_cc 11 grid last",
-                                                "build_cc 12 link" };
+        { static const char *const CCN[14] = { "build_cc_step", "build_cc 1 picture", "build_cc 2 light blur", "build_cc 3 heavy blur",
+                                                "build_cc 4 chrome", "build_cc 5 grid conn", "build_cc 6 grid circles", "build_cc 7 grid mini",
+                                                "build_cc 8 grid sliders", "build_cc 9 grid torch", "build_cc 10 grid flame", "build_cc 11 grid timer",
+                                                "build_cc 12 grid last", "build_cc 13 link" };
           int r_ = 0, st_ = ccb_next ? ccb_next : 1;
-          IP_(CCN[st_ < 13 ? st_ : 0], r_ = build_cc_step()); if (r_) return; }   /* cp7i: the stage in the name */
+          IP_(CCN[st_ < 14 ? st_ : 0], r_ = build_cc_step()); if (r_) return; }   /* cp7i: the stage in the name */
     } else if (ccb_next && !CCS.on) free_cc();     /* not wanted any more (an app needs the room): its parts go, later again */
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
