@@ -623,3 +623,19 @@ int sh_bt_kbd_connected(void);
 void sh_bt_unpair(void);
 int sh_bt_reconnect(void);
 void sh_hw_key(int usage, int down, uint32_t unicode);
+
+/* Track A, cp7: sound (the drivers track's snd.c). Nothing runs until the first call. Tones: SH_SND_RING / ALARM /
+ * NOTIFY / CLICK (= snd.h's SND_TONE_*), synthesized beeps; one at a time, sh_snd_tone_stop ends a repeating one.
+ * The volume 0..15 is kept (pref snd.vol) and is the Control Centre's / Sounds & Haptics' slider. Music: a stream
+ * (sh_snd_open, then sh_snd_write 48 kHz stereo int16 frames as sh_snd_space allows, never blocking; sh_snd_close).
+ * sh_snd_why: plain words for what sound does or why not (e.g. a call has the hardware). Self test: refused. */
+enum { SH_SND_RING = 1, SH_SND_ALARM = 2, SH_SND_NOTIFY = 3, SH_SND_CLICK = 4 };
+int sh_snd_tone(int kind);
+void sh_snd_tone_stop(void);
+int sh_snd_volume(void);
+void sh_snd_volume_set(int v);
+int sh_snd_open(void);
+unsigned sh_snd_write(int id, const int16_t *frames, unsigned n);
+unsigned sh_snd_space(int id);
+void sh_snd_close(int id);
+const char *sh_snd_why(void);

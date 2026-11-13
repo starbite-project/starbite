@@ -28,11 +28,13 @@
 #include "tzdb.h"                       /* Track A: time zones (kern/tzdb.c) */
 #include "bt.h"                         /* Track A: drivers for the shell (the end of this file) */
 #include "cam.h"
+#include "snd.h"                         /* Track A, cp7: sound for the shell (the end of this file) */
 #include "shub_more.h"
 #include "bathealth.h"
 #include "haptic.h"
 #include "nledpol.h"
 static void drv_timer(unsigned id);             /* Track A: drivers for the shell (the end of this file) */
+static void snd_tick(unsigned id);              /* Track A, cp7: sound (the end of this file) */
 static void drv_screen(int on);
 static void drv_after_bake(void);
 static int drv_touch_dark(void);
@@ -40,6 +42,8 @@ static int drv_touch_dark(void);
 #define KT_DRV_CAM 31                           /* the in-call proximity */
 #define KT_DRV_AUTO 32
 #define KT_DRV_PROX 33
+#define KT_DRV_SND 34                           /* cp7: sound's poll (5 ms while busy) */
+#define KT_DRV_JACK 35                          /* cp7: the headphone jack (50 ms while sound plays or the screen is on) */
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
 void tk_heap_init(void *mem, uint64_t size);
@@ -1384,7 +1388,7 @@ void next_ktimer(unsigned id)
         return;
     }
     if (ready && id == 26) { (void)kupdate_after_start(); return; }   /* Track A update: 10 s after the home screen */
-    if (id >= KT_DRV_BT && id <= KT_DRV_PROX) { drv_timer(id); return; }   /* Track A: drivers for the shell */
+    if (id >= KT_DRV_BT && id <= KT_DRV_JACK) { drv_timer(id); return; }   /* Track A: drivers for the shell */
     ui_ktimer(id);
 }
 
@@ -2957,6 +2961,7 @@ static void drv_timer(unsigned id)
     else if (id == KT_DRV_CAM) cam_tick();
     else if (id == KT_DRV_AUTO) ab_tick();
     else if (id == KT_DRV_PROX) px_tick();
+    else if (id == KT_DRV_SND || id == KT_DRV_JACK) snd_tick(id);
 }
 static void drv_screen(int on)
 {
@@ -3220,3 +3225,59 @@ int sh_bt_kbd_paired(void) { uint8_t a[6]; return bt_paired(a); }
 int sh_bt_kbd_connected(void) { return bt_hid_connected(); }
 void sh_bt_unpair(void) { bt_unpair(); (void)sh_pref_set("bt.kbd.name", 0); bt_arm(1); }
 int sh_bt_reconnect(void) { int r = bt_hid_reconnect(); if (r >= 0) bt_arm(1); return r; }
+
+/* ---- Track A, cp7: sound for the shell (the drivers track's snd.c on Calliope's PCM path; drivers-integration.md) ----
+ * Nothing runs until the shell first asks (snd_init_libsb then): the poll every 5 ms while snd_busy(), the jack every
+ * 50 ms while sound plays or the screen is on. The volume is the output's, kept as pref snd.vol (0..15, default 8). In
+ * the self test every call is a logged dry run. Calls and the modem keep ABOX through snd_suspend_for_call (modem-core). */
+static int snd_up;
+static void snd_arm(void)
+{
+    if (snd_busy()) kt_set(KT_UI, KT_DRV_SND, sb_ms(), 5, 0);
+    if (snd_busy() || K.screen_on) kt_set(KT_UI, KT_DRV_JACK, sb_ms(), 50, 0);
+}
+static void snd_tick(unsigned id)
+{
+    if (!snd_up) return;
+    if (id == KT_DRV_SND) snd_poll(sb_us());
+    else (void)snd_jack_tick();
+    snd_arm();
+}
+static int snd_ready(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    static int said;
+    if (!said) { said = 1; sb_log("next: sound: refused (a dry run: the self test)"); }
+    return 0;
+#else
+    if (sbos_selftest_enabled) return 0;
+    if (!snd_up) {
+        snd_init_libsb();
+        snd_up = 1;
+        int v = sh_pref_int("snd.vol", 8);
+        snd_volume(SND_OUT_SPEAKER, (unsigned)(v < 0 ? 0 : v > 15 ? 15 : v));
+        sb_log("next: sound: ready (the shell's first ask)");
+    }
+    return 1;
+#endif
+}
+int sh_snd_tone(int kind)
+{
+    if (!snd_ready()) return -1;
+    int r = snd_tone(kind);
+    snd_arm();
+    return r;
+}
+void sh_snd_tone_stop(void) { if (snd_up) snd_tone_stop(); }
+int sh_snd_volume(void) { return sh_pref_int("snd.vol", 8); }
+void sh_snd_volume_set(int v)
+{
+    v = v < 0 ? 0 : v > 15 ? 15 : v;
+    sh_pref_set_int("snd.vol", v);
+    if (snd_ready()) snd_volume(snd_output(), (unsigned)v);
+}
+int sh_snd_open(void) { if (!snd_ready()) return -1; return snd_open(); }
+unsigned sh_snd_write(int id, const int16_t *frames, unsigned n) { if (!snd_up) return 0; unsigned k = snd_write(id, frames, n); snd_arm(); return k; }
+unsigned sh_snd_space(int id) { return snd_up ? snd_space(id) : 0; }
+void sh_snd_close(int id) { if (snd_up) snd_close(id); }
+const char *sh_snd_why(void) { return snd_up ? snd_why() : "Sound starts when something plays"; }
