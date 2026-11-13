@@ -731,7 +731,7 @@ static void test_staged(void)
     install(0);
     CHECK(abox_boot_start() == 1 && abox_state() == ABOX_ST_BOOTING, "staged: start not pending");
     CHECK(F.nw == 0 && F.nsmc == 0, "staged: start touched the hardware");
-    int r, calls = 0;
+    int r, calls = 0, hw_seen = 0;
     while ((r = abox_boot_step()) > 0 && calls < 2000) {
         CHECK(abox_state() == ABOX_ST_BOOTING, "staged: state %d while pending", abox_state());
         F.now += 5000;                                      /* the caller's loop runs meanwhile */
@@ -740,11 +740,17 @@ static void test_staged(void)
             CHECK(logged("1/13 files: calliope_sram.bin") && !logged("calliope_dram.bin"), "staged: stage 1 not sram only");
         if (calls == 2)
             CHECK(logged("calliope_dram.bin") && !logged("calliope_iva.bin"), "staged: stage 2 not dram only");
-        if (calls == 3)
-            CHECK(F.nw == 0 && F.nsmc == 0, "staged: the files stages touched the hardware");
+        if (abox_boot_stage() == 5 && !hw_seen) {               /* BST_HW1 next: the files and fills are done */
+            hw_seen = 1;
+            CHECK(F.nw == 0 && F.nsmc == 0, "staged: the files / fill stages touched the hardware");
+        }
+        unsigned sl = 0;
+        (void)abox_boot_slowest(&sl);
     }
     CHECK(r == 0 && abox_state() == ABOX_ST_READY && abox_version() == 0x43524C30, "staged: %d (%s)", r, abox_why());
-    CHECK(calls >= 7 && calls <= 30, "staged: %d calls (6 stages + the 64 ms wait at 5 ms)", calls);
+    CHECK(hw_seen, "staged: never at the hardware stages");
+    /* 9 stages: the DRAM fill (18 MiB less the image) and the dump fill (18 MiB) in 2 MiB calls, + the 64 ms wait */
+    CHECK(calls >= 20 && calls <= 50, "staged: %d calls (9 stages, 2 MiB fills, the 64 ms wait at 5 ms)", calls);
     unsigned ns = boot_lines(slines[1]);
     CHECK(nb == ns, "staged: %u lines, blocking %u", ns, nb);
     for (unsigned i = 0; i < nb && i < ns; ++i)
@@ -792,27 +798,28 @@ static void test_staged(void)
     calls = 0;
     while ((r = abox_boot_step()) > 0 && calls++ < 100000)
         F.now += 20000;
-    CHECK(r == ABOX_ETIME && calls > 140 && calls < 170, "staged timeout: %d after %d calls of 20 ms", r, calls);
+    CHECK(r == ABOX_ETIME && calls > 140 && calls < 195, "staged timeout: %d after %d calls of 20 ms (fills included)", r,
+          calls);
     teardown_checks("staged timeout");
 }
 
 /* abox_off() after every stage of a pending boot: everything undone, the next boot works */
 static void test_off_each_stage(void)
 {
-    for (int k = 0; k <= 7; ++k) {
+    for (int k = 0; k <= 8; ++k) {                              /* stop before stage k (BST_*: 5 = the first hardware) */
         char t[48];
         snprintf(t, sizeof t, "off after %d stages", k);
         reset();
         install(0);
         CHECK(abox_boot_start() == 1, "%s: start", t);
-        for (int i = 0; i < k; ++i)
+        for (int i = 0; i < 200 && abox_boot_stage() < (unsigned)k; ++i)
             CHECK(abox_boot_step() == 1, "%s: step %d", t, i);
         F.nlogs = 0;
         abox_off();
         CHECK(logged("abox: stopped: "), "%s: no stopped line", t);
         CHECK(abox_state() == ABOX_ST_OFF, "%s: state %d", t, abox_state());
         CHECK((reg(ABOX_PMU + 0x4004) & 0xF) == 0 && !(reg(ABOX_PMU + 0x4160) & 1), "%s: domain / CPU left on", t);
-        CHECK(k < 4 ? logged("AUD domain not touched") : logged("AUD domain off"), "%s: domain line", t);
+        CHECK(k < 6 ? logged("AUD domain not touched") : logged("AUD domain off"), "%s: domain line", t);
         CHECK(abox_boot_step() == ABOX_ESTATE, "%s: step after off", t);
         CHECK(abox_boot() == 0 && abox_state() == ABOX_ST_READY, "%s: the next boot %s", t, abox_why());
         common_after(t);

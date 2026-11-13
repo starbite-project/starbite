@@ -214,6 +214,8 @@ static struct {
     uint8_t *rm;                        /* CPU pointer to abox_rmem */
     int pd_touched, cpu_started, mmu_set, pins_set, call_on, vss_started, boot_done, dump_win;
     unsigned bstage, bwait_polled;      /* the staged boot: the next stage; step 12 looked and waits */
+    uint64_t fill_off, dump_off;        /* the chunked zero fills' progress */
+    unsigned bt_max_stage;              /* the stage of bt_max */
     uint32_t bwaited;                   /* step 12's wait without a HAL clock (100 us a look) */
     uint64_t bt0, bt_files, bt_dram, bt12, bt_max;  /* the boot's timing (HAL clock; 0 without one) */
     int vss_magic, vss_timeout;             /* Calliope's log: "CP Magic Code is ready" / "VSS init timed out" */
@@ -1034,13 +1036,17 @@ static long load(const char *name, uint64_t off, uint32_t cap, int required)
 }
 
 /* the staged boot's stages (abox_boot_step: one per call) */
-#define BST_SRAM 0U                     /* 1: calliope_sram.bin */
-#define BST_DRAM 1U                     /* 1: calliope_dram.bin (one VENDOR read of 2.2 MB) + its 18 MiB zero fill */
-#define BST_REST 2U                     /* 1: calliope_iva.bin + the ext_bins */
-#define BST_HW1  3U                     /* 2-4: power, CPU stopped, clocks */
-#define BST_HW2  4U                     /* 5-9: SysMMU, GIC, pins, routes, SRAM */
-#define BST_HW3  5U                     /* 10-11: CPU on, pads */
-#define BST_WAIT 6U                     /* 12 (one look per call), then 13 in the call that sees BOOT_DONE */
+#define BST_SRAM  0U                    /* 1: calliope_sram.bin */
+#define BST_DRAM  1U                    /* 1: calliope_dram.bin (one VENDOR read of 2.2 MB, or a copy from snd's cache) */
+#define BST_DFILL 2U                    /* 1: its zero fill to 18 MiB, BST_FILL_CHUNK per call (non-cacheable RAM) */
+#define BST_REST  3U                    /* 1: calliope_iva.bin + the ext_bins */
+#define BST_DUMPZ 4U                    /* the dump window's zero fill (was in step 9), BST_FILL_CHUNK per call */
+#define BST_HW1   5U                    /* 2-4: power, CPU stopped, clocks */
+#define BST_HW2   6U                    /* 5-9: SysMMU, GIC, pins, routes, SRAM */
+#define BST_HW3   7U                    /* 10-11: CPU on, pads */
+#define BST_WAIT  8U                    /* 12 (one look per call), then 13 in the call that sees BOOT_DONE */
+#define BST_AGAIN 2                     /* a stage's "call me again" (a chunked fill not done yet) */
+#define BST_FILL_CHUNK 0x200000U        /* 2 MiB of zeroes per call (drivers run 8: 0.3-0.4 s cold-start stalls) */
 static uint64_t bnow(void) { return H.now_us ? H.now_us(H.ctx) : 0; }
 
 /* step 1 in three stages (abox_boot_step): calliope_sram.bin; calliope_dram.bin + the rest of its 18 MiB zeroed;
@@ -1078,9 +1084,36 @@ static int stage_dram(void)
     long dram = load("calliope_dram.bin", ABOX_RM_DRAM, ABOX_RM_DRAM_SZ, 1);
     if (dram < 0)
         return files_fail(ABOX_EFILE);
-    memset(rm(ABOX_RM_DRAM + (uint64_t)dram, ABOX_RM_DRAM_SZ - (uint64_t)dram), 0, ABOX_RM_DRAM_SZ - (uint64_t)dram);
+    S.fill_off = (uint64_t)dram;
     S.bt_dram = bnow() - t;
     return 0;
+}
+
+/* the rest of the DRAM image's 18 MiB zeroed, BST_FILL_CHUNK per call (abox_boot() runs them back to back) */
+static int stage_dfill(void)
+{
+    uint64_t n = ABOX_RM_DRAM_SZ - S.fill_off;
+    if (n > BST_FILL_CHUNK)
+        n = BST_FILL_CHUNK;
+    if (n)
+        memset(rm(ABOX_RM_DRAM + S.fill_off, n), 0, n);
+    S.fill_off += n;
+    return S.fill_off < ABOX_RM_DRAM_SZ ? BST_AGAIN : 0;
+}
+
+/* the dump window (IOVA 0xD0000000) zeroed before the CPU runs, BST_FILL_CHUNK per call (was step 9's one memset;
+ * nothing reads it before step 10) */
+static int stage_dumpz(void)
+{
+    if (!S.dump_win)
+        return 0;
+    uint64_t n = ABOX_RM_DRAM_SZ - S.dump_off;
+    if (n > BST_FILL_CHUNK)
+        n = BST_FILL_CHUNK;
+    if (n)
+        memset(rm(ABOX_RM_DUMP + S.dump_off, n), 0, n);
+    S.dump_off += n;
+    return S.dump_off < ABOX_RM_DRAM_SZ ? BST_AGAIN : 0;
 }
 
 static int stage_rest(void)
@@ -1351,8 +1384,7 @@ static int stage_hw2(void)
             w32(ABOX_SRAM + i, 0);
         uint32_t back = r32(ABOX_SRAM), want = (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
                                                 (uint32_t)p[3] << 24;
-        if (S.dump_win)
-            memset(rm(ABOX_RM_DUMP, ABOX_RM_DRAM_SZ), 0, ABOX_RM_DRAM_SZ);
+        /* the dump window was zeroed by stage_dumpz (before step 2) */
         if (back != want) {
             lb_s(&l, "abox: 9/13 sram: the first SRAM word does not read back");
             return fail(ABOX_EMMU, &l);
@@ -1560,21 +1592,36 @@ int abox_boot_step(void)
     switch (S.bstage) {
     case BST_SRAM: r = stage_sram(); break;
     case BST_DRAM: r = stage_dram(); break;
+    case BST_DFILL: r = stage_dfill(); break;
     case BST_REST: r = stage_rest(); break;
+    case BST_DUMPZ: r = stage_dumpz(); break;
     case BST_HW1: r = stage_hw1(); break;
     case BST_HW2: r = stage_hw2(); break;
     case BST_HW3: r = stage_hw3(); break;
     default: r = stage_wait(); break;
     }
     if (bnow() - t > S.bt_max)
-        S.bt_max = bnow() - t;
+        S.bt_max = bnow() - t, S.bt_max_stage = S.bstage;
     if (r < 0)
         return r;
+    if (r == BST_AGAIN)
+        return 1;
     if (S.bstage < BST_WAIT) {
         S.bstage++;
         return 1;
     }
     return r;
+}
+
+/* the stage the next abox_boot_step() call runs (BST_*; host tests, diagnostics) */
+unsigned abox_boot_stage(void) { return S.bstage; }
+
+/* the longest single abox_boot_step() call of the last boot (us, HAL clock; 0 without one) and its stage */
+uint32_t abox_boot_slowest(unsigned *stage)
+{
+    if (stage)
+        *stage = S.bt_max_stage;
+    return (uint32_t)S.bt_max;
 }
 
 int abox_boot_finish(void)

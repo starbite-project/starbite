@@ -818,8 +818,10 @@ static void cal_tick(void)
     G.cal_settling = 0;
     G.cal_own = 1;
     G.cal_off_at = now() + CAL_IDLE_OFF_US;
-    say("engine: Calliope booted for media in %u ms (with %u ms for its post-boot messages)",
-        UL((now() - G.cal_t0) / 1000U), UL(CAL_SETTLE_MS));
+    unsigned slow_stage = 0;
+    uint32_t slow_us = abox_boot_slowest(&slow_stage);
+    say("engine: Calliope booted for media in %u ms (with %u ms for its post-boot messages); the longest step %u ms "
+        "(stage %u)", UL((now() - G.cal_t0) / 1000U), UL(CAL_SETTLE_MS), UL(slow_us / 1000U), UL(slow_stage));
 }
 
 /* snd's pending boot dropped (the probe's abort / end): Calliope off unless a call has it */
@@ -1993,10 +1995,90 @@ static int k_codec_id(void) { return audio_probe(); }
 
 /* Calliope's firmware from VENDOR (as modem.c reads it): with it the Calliope engine is used (abox_media.c) */
 long bcmw_sb_vendor_read(const char *path, void *dst, uint32_t cap);
+
+/* Calliope's files kept in RAM after their first read (run 8: a cold start still stalled the main loop 0.3-0.4 s,
+ * mostly calliope_dram.bin's 2.2 MB VENDOR read into non-cacheable abox_rmem). The VENDOR partition does not change
+ * while the OS runs, so a later boot copies from here (cacheable, ~ms). One sb_alloc of FWC_BYTES, never freed; if it
+ * fails or is full, the files are read from VENDOR as before. snd_init_libsb fills it once (snd_fw_prefetch). */
+#define FWC_BYTES 0x300000U                 /* the 10 files: ~2.67 MB */
+#define FWC_N 12U
+static struct { char path[48]; uint32_t off, len; } fwc[FWC_N];
+static unsigned fwc_n;
+static uint8_t *fwc_buf;
+static uint32_t fwc_used;
+static int fwc_find(const char *p)
+{
+    for (unsigned i = 0; i < fwc_n; ++i) {
+        unsigned k = 0;
+        while (p[k] && fwc[i].path[k] == p[k])
+            ++k;
+        if (!p[k] && !fwc[i].path[k])
+            return (int)i;
+    }
+    return -1;
+}
+static int fwc_room(const char *path)
+{
+    unsigned k = 0;
+    while (path[k])
+        ++k;
+    if (fwc_n >= FWC_N || k >= sizeof fwc[0].path)
+        return 0;
+    if (!fwc_buf)
+        fwc_buf = (uint8_t *)sb_alloc(FWC_BYTES);
+    return fwc_buf != 0;
+}
+static void fwc_add(const char *path, uint32_t len)
+{
+    unsigned k = 0;
+    for (; path[k]; ++k)
+        fwc[fwc_n].path[k] = path[k];
+    fwc[fwc_n].path[k] = 0;
+    fwc[fwc_n].off = fwc_used, fwc[fwc_n].len = len;
+    fwc_used += (len + 63U) & ~63U;
+    fwc_n++;
+}
 static long k_vendor(void *ctx, const char *path, void *dst, uint32_t cap)
 {
     (void)ctx;
-    return bcmw_sb_vendor_read(path, dst, cap);
+    int i = fwc_find(path);
+    if (i >= 0) {
+        if (fwc[i].len > cap)
+            return -1;
+        memcpy(dst, fwc_buf + fwc[i].off, fwc[i].len);
+        return (long)fwc[i].len;
+    }
+    long got = bcmw_sb_vendor_read(path, dst, cap);
+    if (got > 0 && fwc_room(path) && fwc_used + (uint32_t)got <= FWC_BYTES) {
+        memcpy(fwc_buf + fwc_used, dst, (uint32_t)got);
+        fwc_add(path, (uint32_t)got);
+    }
+    return got;
+}
+
+/* once, at snd_init_libsb (the OS's start, before its main loop): Calliope's files straight into the cache, so even
+ * the first sound after power-on needs no VENDOR read on the main loop. Names as abox.c loads them. */
+static void snd_fw_prefetch(void)
+{
+    static const char *const names[] = {
+        "firmware/calliope_sram.bin", "firmware/calliope_dram.bin", "firmware/calliope_iva.bin",
+        "firmware/dsm.bin", "firmware/AP_AUDIO_SLSI.bin", "firmware/APBargeIn_AUDIO_SLSI.bin",
+        "firmware/SoundBoosterParam.bin", "firmware/APDV_AUDIO_SLSI.bin", "firmware/APBiBF_AUDIO_SLSI.bin",
+        "firmware/dsm_tune.bin",
+    };
+    uint64_t t0 = sb_us();
+    unsigned got_n = 0;
+    for (unsigned i = 0; i < sizeof names / sizeof names[0]; ++i) {
+        if (fwc_find(names[i]) >= 0 || !fwc_room(names[i]) || fwc_used >= FWC_BYTES)
+            continue;
+        long got = bcmw_sb_vendor_read(names[i], fwc_buf + fwc_used, FWC_BYTES - fwc_used);
+        if (got > 0) {
+            fwc_add(names[i], (uint32_t)got);
+            got_n++;
+        }
+    }
+    say("engine: Calliope's %u files kept in RAM (%u KiB, %u ms at start-up): later starts skip VENDOR",
+        UL(got_n), UL(fwc_used / 1024U), UL((sb_us() - t0) / 1000U));
 }
 
 static struct abox_hal k_hal;
@@ -2016,6 +2098,7 @@ void snd_init_libsb(void)
     o.use_calliope = 1;                     /* bypass does not move ABOX's DMAs on this phone (AUDIO.md 8, 9) */
     (void)snd_init(&o, &k_hal);
     snd_set_hp(codec_hp);                   /* codec_media.c: headphones on HPOUT2 */
+    snd_fw_prefetch();
 }
 
 /* The kernel's jack tick (every CODEC_JACK_POLL_MS = 50 ms while the screen is on or sound plays): the jack state into

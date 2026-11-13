@@ -984,7 +984,7 @@ static void test_snd_engine(void)
 
     /* a tone boots Calliope and plays through RDMA0 in snd's geometry */
     CHECK(snd_tone(SND_TONE_TEST) == 0, "snd: tone");
-    polls(600);                                             /* staged boot (~100 ms here) + 300 ms settle (was 300) */
+    polls(700);                                             /* staged boot (~200 ms here: + the chunked fills) + 300 ms settle */
     CHECK(logged("engine: Calliope booted for media"), "snd: Calliope not booted");
     CHECK(F.r_starts == 1 && F.r_run, "snd: RDMA0 not running through Calliope");
     int b = find_pcm(0, 20);
