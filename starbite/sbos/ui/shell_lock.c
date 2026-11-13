@@ -3857,16 +3857,21 @@ static float gen_row_y(const appdef *A, int s, int r)
 static int ap_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c);
 static void ps_will_build(void);                        /* cp6: shell_push.inc (iOS's push / pop) */
 static void ps_link(tk_layer **ag, int n);
+static void tp_mark(const char *n);
 static void build_app_page(int a)
 {
+    tp_mark("page: the picture");
     ps_will_build();                                    /* cp6: a page change slides (the screen's picture first) */
     const infopg *inf = info_of(APPS[a].k);
     int own = app_own(a);
     ap_pending = 0;
     build_apsb();
     if (own) {
-        for (int i = 0; i < NST; i++) own_strip(a, i);
+        static const char *const SN[4] = { "page: strip 0", "page: strip 1", "page: strip 2", "page: strip 3" };
+        for (int i = 0; i < NST; i++) { tp_mark(SN[i & 3]); own_strip(a, i); }
+        tp_mark("page: extras");
         own_extras(a);
+        tp_mark("page: done");
         return;
     }
     (void)inf;
@@ -5639,8 +5644,10 @@ static int notes_hold(float t)
  * pieces timed (each mark ends the last piece; the platform logs one over 20 ms: "next: shell piece touch ...") */
 static uint64_t tp_t;
 static const char *tp_n;
+static int tp_in;                                /* inside a touch (a build outside one marks nothing) */
 static void tp_mark(const char *n)
 {
+    if (!tp_in) return;
     uint64_t now = tk_us();
     if (tp_n) sh_slow_piece(tp_n, (unsigned)(now - tp_t));
     tp_n = n;
@@ -5651,11 +5658,13 @@ void sh_touch(int phase, float x, float y, float t)
 {
     const char *on = tp_n;
     uint64_t ot = tp_t;
+    int oin = tp_in;
     tp_n = 0;
+    tp_in = 1;
     tp_mark(phase == 0 ? "touch down: power sheet" : phase == 1 ? "touch move: power sheet" : "touch up: power sheet");
     sh_touch_(phase, x, y, t);
     tp_mark(0);
-    tp_n = on; tp_t = ot;                        /* (the capsule's replay calls this inside a touch) */
+    tp_n = on; tp_t = ot; tp_in = oin;           /* (the capsule's replay calls this inside a touch) */
 }
 static void sh_touch_(int phase, float x, float y, float t)
 {
@@ -5714,9 +5723,13 @@ static void sh_touch_(int phase, float x, float y, float t)
         tp_mark("touch down: home / lock");
         if (AP.on) {
             /* an open app (survival-next: also over the lock, from Emergency's cards): the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
+            tp_mark("touch down: app, nc");
             if (y < 36 && x < 195 && !AP.closing && !sp_app.live) { nc_pull_begin(x, y, t); T.kind = G_NC; return; }   /* helper D */
+            tp_mark("touch down: app, sw_commit");
             if (y < H_PT - 30) sw_commit();          /* B4: the app is used: a quick switch's order is kept now */
+            tp_mark("touch down: app, keyboard");
             if (!AP.closing && !sp_app.live && kb_owns(x, y)) { T.kind = G_KB; kb_touch(0, x, y, t); return; }   /* B3 */
+            tp_mark("touch down: app, its page");
             if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; T.arg2 = 0; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
             else if (!sp_app.live && med_is(APPS[AP.a].k)) { T.kind = G_MEDIA; med_touch(0, x, y, t); app_press(x, y); }   /* cp6: it lights */
             else if (!sp_app.live && !AP.closing && se_owns() && SE.built) { T.kind = G_SET; se_touch(0, x, y, t); }   /* helper B2 */
@@ -5724,12 +5737,14 @@ static void sh_touch_(int phase, float x, float y, float t)
             else if (!sp_app.live) {
                 /* a tap on the app's page (a key lights while the finger is on it) */
                 T.kind = G_APPTAP;
+                tp_mark("touch down: app, press");
                 int k = is_app("phone") && AS.tab == 3 ? key_hit(x, y) : -1;
                 if (k >= 0) key_down(k);
                 else app_press(x, y);                  /* P3p: rows, keys and buttons light (cp6: also the keypad's tabs, delete) */
             }
             return;
         }
+        tp_mark("touch down: the Control Centre");
         if (CCS.on && !CCS.closing) {
             /* the open Control Centre (B4: from the lock too): a slider, a tile, or outside it (closes it) */
             if (CX.m >= 0) {
@@ -5768,6 +5783,7 @@ static void sh_touch_(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, y, t);
             return;
         }
+        tp_mark(locked ? "touch down: lock" : "touch down: home");
         if (!locked) {
             if (y < 56 && x >= 195) {           /* the top-right corner: the Control Centre */
                 T.kind = G_CC;
@@ -5808,6 +5824,7 @@ static void sh_touch_(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, y, t);
             return;
         }
+        tp_mark("touch down: lock, holds");
         for (int i = 0; i < 2; i++) {
             float bx = HOLD_X(i);
             if (x >= bx - 4 && x <= bx + 54 && y >= HOLD_Y - 4 && y <= HOLD_Y + 54) {
@@ -5823,6 +5840,7 @@ static void sh_touch_(int phase, float x, float y, float t)
                 return;
             }
         }
+        tp_mark("touch down: lock, list");
         int gi = -1, r;
         if (EMG && y >= LIST_TOP && y < LIST_TOP + LIST_H && y < H_PT - 30) {
             /* Emergency's list: a card (survival-next: its tool over the lock), Exit Emergency, or a scroll */
@@ -6089,6 +6107,7 @@ static void sh_touch_(int phase, float x, float y, float t)
         break;
     case G_APPTAP:
         if (!apkey.hidden) key_down(-1);
+        tp_mark("touch up: app tap");
         if (!T.moved) app_tap(x, y);
         break;
     case G_TAP_HEAD:
@@ -6097,9 +6116,11 @@ static void sh_touch_(int phase, float x, float y, float t)
     case G_TAP_ROW: {
         const sys_t *s = &G[T.arg].it[T.arg2];
         if (s->self) { toast("You are in Starbite OS"); break; }
+        tp_mark("touch up: lock row, frame");
         tk_comp_frame(C, 0, 0);                /* cp6: the row lit (and pressed) while the sheet is made: iOS keeps it lit under */
         tk_comp_idle(C);                       /* P3p: the half canvas (the sheet's under-layer) */
         uint64_t t0 = tk_us();
+        tp_mark("touch up: lock row, the sheet");
         build_focus(s, &G[T.arg]);
         lap_us("focus: snapshot and bake", tk_us() - t0);
         focus_on = 1;
