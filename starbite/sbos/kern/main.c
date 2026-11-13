@@ -187,9 +187,9 @@ void sb_main(void)
     K.deadman_t0 = boot_ms;
     hw_irq_init();
     guest_init();                           /* 1.2: the guest's doorbell (INTID 510) routed here; nothing runs yet */
-    /* cp7m: sb_gpu_wait_hook stays NULL. 7l set it to guest_pump (HELLO 31 s -> 20 s with the films running), but a pump
-     * serves up to 8 block requests / 4 ms plus 9P each time, several times a frame: 7l's Emergency film while Linux
-     * booted had 47 frames over 16.7 ms (7j: 6), GPU waits of 25-31 ms. Again with a pump that keeps to ~1 ms. */
+    sb_gpu_wait_hook = guest_pump;          /* cp7n: a booting guest's small reads served while a frame waits on the GPU, with
+                                             * Track E's budget (one read <= 64 KiB a call, at most 2 ms per 16.7 ms). 7l's
+                                             * unbudgeted pump made 25-31 ms GPU waits while Linux booted (7m: off) */
     if (!sb_touch_start())
         sb_log("sbos: no touch");
     input_init();
