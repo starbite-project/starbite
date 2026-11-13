@@ -771,7 +771,10 @@ void guest_pump(void)
         win0 = t;
         spent = 0;
     }
-    uint32_t max = spent >= GUEST_PUMP_US ? 0 : (uint32_t)((GUEST_PUMP_US - spent) / (pump_us_sec ? pump_us_sec : 1));
+    /* instant start: while Linux boots ("Starting Linux" on screen, nothing animates) 3x the budget: its boot is
+     * card-bound, every synchronous read waits for the host */
+    uint64_t budget = st == GUEST_STARTING ? 3U * GUEST_PUMP_US : GUEST_PUMP_US;
+    uint32_t max = spent >= budget ? 0 : (uint32_t)((budget - spent) / (pump_us_sec ? pump_us_sec : 1));
     if (!max) {
         pump_spent++;
         return;
@@ -805,7 +808,8 @@ void guest_timer(unsigned id)
             return;                         /* the next step at the next tick */
         loading = 0;
         if (lr > 0) {
-            arm(10);                        /* the guest's poll from here */
+            arm(2);                         /* the guest's poll from here: 2 ms while it boots (its reads wait for it;
+                                             * HELLO sets 10 / 50) */
         } else {
             gcard_abort();
             st = GUEST_FAILED;
