@@ -3240,6 +3240,11 @@ int main(int argc, char **argv)
 	g2h_send(SBG_MSG_HELLO, hdr->guest_ncpus, 1);
 	say("HELLO: Wayland %s, output %ux%u, contract v%u (services %#x), %s%s, kernel %s", sock, W, H, v3 ? 3 : v2 ? 2 : 1, svc,
 	    S.argv ? "app " : "catalog", S.argv ? S.argv[0] : "", u.release);
+	if (!sim) {                                /* sbinit starts the services after this (instant start: their reads */
+		int hf = open("/run/sbwl.hello", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);   /* no longer race ours) */
+		if (hf >= 0)
+			close(hf);
+	}
 	if (svc & SBSHM_SVC_NOTIF)
 		session_start();                       /* the session bus and sbnotify now, before the host's first launch */
 	wl_display_run(S.display);
