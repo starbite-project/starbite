@@ -44,6 +44,7 @@ int guest_term_ok(void);                   /* the terminal's typed self-test com
 void guest_full_next(void);                /* the next guest_blit copies every row (the view redrawn whole) */
 int guest_stop(void);                      /* MSG_STOP; the cluster goes off by itself */
 int guest_state(void);                     /* GUEST_* */
+int guest_frozen(void);                    /* instant start: running but frozen (idle, nothing shown): the heater may stop it */
 const char *guest_why(void);               /* GUEST_FAILED: the reason */
 const char *guest_stage(void);             /* GUEST_STARTING: what the start is doing, in the user's words ("": usual) */
 void guest_pump(void);                     /* the guest's waiting block / 9P requests only; main thread, mid-work */

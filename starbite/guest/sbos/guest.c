@@ -402,6 +402,7 @@ void guest_init(void)
 }
 
 int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED ? 1 : hw_m3_on() && st == GUEST_FAILED; }
+int guest_frozen(void) { return st == GUEST_RUNNING && frz; }   /* Track A (7z): the heater stops a frozen guest */
 
 int guest_available_mode(int m)
 {
@@ -1017,6 +1018,7 @@ static int ntyped, shown_chars;
 void guest_init(void) { sb_up = 1; }
 void guest_pump(void) {}
 int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED ? 1 : fake_m3 && st == GUEST_FAILED; }
+int guest_frozen(void) { return 0; }
 /* SBOS_HOST_GUEST=1 (or fail): both guests' files; =app: only the app's */
 int guest_available_mode(int m)
 {

@@ -205,6 +205,20 @@ int heater_guest_refuses(void)
     return guest_owns_m3();
 }
 
+/* 7z (Track E's instant start: Linux freezes instead of stopping): a frozen guest only holds the big cores while
+ * idle, so a heater start stops it (MSG_STOP; the cluster goes off by itself) and asks again in a moment. A guest in
+ * use still refuses the heater, as before. 1 when it was asked to stop. */
+static int heater_stops_frozen_guest(void)
+{
+    if (!guest_owns_m3() || !guest_frozen())
+        return 0;
+    (void)guest_stop();
+    sb_log("heater: Linux was frozen (idle): stopped for the big cores; ask again when it's off");
+    sb_strcpy(ctl.why, sizeof(ctl.why), "Closing Linux for the heater: try again in a moment");
+    ctl.state = HEAT_ST_REFUSED;
+    return 1;
+}
+
 void heater_m3_released(void)
 {
     m3_prepped = 0;                         /* the guest's last core powered the cluster down (CPD): defaults again */
@@ -1591,6 +1605,8 @@ static void start_now(void)
         sb_log("heater: refused at the start: Wi-Fi is on");
         return;
     }
+    if (heater_stops_frozen_guest())        /* 7z: a frozen Linux gives the big cores up */
+        return;
     if (heater_guest_refuses()) {           /* 1.2: Linux came on while the confirmation was up (it cannot: belt) */
         sb_strcpy(ctl.why, sizeof(ctl.why), "Close Linux first (it runs on the big cores)");
         ctl.state = HEAT_ST_REFUSED;
@@ -1935,6 +1951,8 @@ int heater_request(int level, int minutes)
         sb_log("heater: refused: Wi-Fi is on");
         return SBOS_EAGAIN;
     }
+    if (!heater_running_ui() && heater_stops_frozen_guest())   /* 7z: a frozen Linux gives the big cores up */
+        return SBOS_EAGAIN;
     if (heater_guest_refuses() && !heater_running_ui()) {
         /* 1.2: Linux runs on the four big cores: never both (Survival included) */
         sb_strcpy(ctl.why, sizeof(ctl.why), "Close Linux first (it runs on the big cores)");
