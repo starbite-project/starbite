@@ -32,12 +32,12 @@
 
 enum { SE_ROOT = 0, SE_DISPLAY = 1, SE_WIFI = 2, SE_CELL = 3, SE_CARD = 4,
        SE_GENERAL = 10, SE_ABOUT, SE_UPDATE, SE_DATETIME, SE_KEYBOARD, SE_LANG, SE_RESET, SE_WALL, SE_SOUNDS, SE_NOTIF,
-       SE_NOTIF_APP, SE_BATTERY, SE_PRIVACY, SE_EMERGENCY, SE_LINUX, SE_SEARCH, SE_BT, SE_HEALTH, SE_NPAGES };
+       SE_NOTIF_APP, SE_BATTERY, SE_PRIVACY, SE_EMERGENCY, SE_LINUX, SE_SEARCH, SE_BT, SE_HEALTH, SE_LEGAL, SE_DEV, SE_NPAGES };
 /* actions (row ids from 100; a row id < 100 pushes that page) */
 enum { A_NONE = 100, A_CARD, A_PASSCODE, A_STARTUP, A_STORE, A_LAST2, A_TEXTSIZE, A_RESET, A_EMG, A_BRIGHT,
        A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK, A_UPDATE, A_BTDEV, A_BTKBD, A_HAPLVL, A_VOLUME, A_TONE_RING, A_TONE_TEXT, A_TONE_ALARM,
        T_FIRST = 200, T_SYSHAP = T_FIRST, T_KBHAP, T_AUTOCAP, T_TIMERVIB, T_LAST2AUTO, T_NALLOW, T_NBANNER, T_CALLVIB, T_SMSVIB,
-       T_CLOCK24, T_BT, T_AUTOBRIGHT, T_KBSND, T_LOCKSND, T_SILENT };
+       T_CLOCK24, T_BT, T_AUTOBRIGHT, T_KBSND, T_LOCKSND, T_SILENT, T_USBCON };
 
 /* ---- the shell's own settings: Track A's prefs (kept across restarts; every one defaults to on) ------------------ */
 enum { SK_SYSHAP, SK_KBHAP, SK_AUTOCAP, SK_TIMERVIB, SK_KBSND, SK_LOCKSND, SK_NALLOW, SK_NBANNER = SK_NALLOW + 8, SK_N = SK_NBANNER + 8 };
@@ -92,7 +92,7 @@ static void se_batt_sample(int h, int mi, int pct)
 /* ---- the page's rows ------------------------------------------------------------------------------------------- */
 enum { SR_NAV, SR_VAL, SR_TOG, SR_ACT, SR_SLIDER, SR_SEG, SR_PROFILE, SR_BIG, SR_GRAPH, SR_WALL };
 enum { SEI_NONE, SEI_WIFI, SEI_CELL, SEI_BATT, SEI_GENERAL, SEI_DISPLAY, SEI_WALL, SEI_SOUNDS, SEI_NOTIF, SEI_PASS,
-       SEI_SOS, SEI_PRIV, SEI_START, SEI_LINUX, SEI_STORE, SEI_HEART, SEI_BT };
+       SEI_SOS, SEI_PRIV, SEI_START, SEI_LINUX, SEI_STORE, SEI_HEART, SEI_BT, SEI_DEV };
 typedef struct {
     int kind, id, on, dis, ico, red;
     const char *l, *v;
@@ -212,6 +212,8 @@ static const char *se_title(int p)
     case SE_SEARCH: return "Search";
     case SE_BT: return "Bluetooth";
     case SE_HEALTH: return "Battery Health";
+    case SE_LEGAL: return "Legal & Regulatory";
+    case SE_DEV: return "Developer";
     default: return "Settings";
     }
 }
@@ -221,6 +223,7 @@ static int se_parent(int p)
     if (p == SE_NOTIF_APP) return SE_NOTIF;
     if (p == SE_CARD) return SE_EMERGENCY;
     if (p == SE_HEALTH) return SE_BATTERY;
+    if (p == SE_LEGAL) return SE_ABOUT;
     return SE_ROOT;
 }
 static const char *se_card_words(void)
@@ -305,6 +308,14 @@ static void se_rows(int p)
         sec(0);
         nav(SE_LINUX, SEI_LINUX, "Linux Apps", 0);
         nav(A_STORE, SEI_STORE, "App Store", 0);
+        sec(0);
+        nav(SE_DEV, SEI_DEV, "Developer", 0);        /* 8b: at the root's bottom, as iOS's */
+        break;
+    case SE_DEV:                                     /* 8b (Track A's sh_usb_console: the drivers' usb.c; pref dev.usb) */
+        sec(0);
+        tog(T_USBCON, "USB Console", sh_usb_console_on());
+        foot("When this is on, the phone shows up as a read-only serial console while it's plugged into a computer. "
+             "The first time, a Mac asks \xe2\x80\x9c" "Allow accessory to connect?\xe2\x80\x9d" " Turning it off is the same as unplugging it.");
         break;
     case SE_GENERAL:
         sec(0);
@@ -328,6 +339,13 @@ static void se_rows(int p)
         val("Storage", se_card_words());
         val("Processor", "Exynos 9810");
         foot("Starbite OS runs from the memory card. The serial number and the modem's numbers are not shown.");
+        sec(0);
+        nav(SE_LEGAL, 0, "Legal & Regulatory", 0);   /* (iOS's place for the notices) */
+        break;
+    case SE_LEGAL:                               /* the data the OS ships, credited as its licences ask */
+        sec("Data");
+        val("City Names and Locations", "GeoNames");
+        foot("City names and locations: GeoNames (geonames.org), licensed under CC BY 4.0.");
         break;
     case SE_DATETIME: {                          /* Track A's time: 12 / 24-hour, the zone (sbos-core-api.md 4) */
         char t[12];
@@ -575,7 +593,7 @@ static void se_rows(int p)
             { "Language & Region", SE_LANG, 0, "General" }, { "Reset", SE_RESET, 0, "General" }, { "Brightness", SE_DISPLAY, 0, "Display" },
             { "Auto-Lock", SE_DISPLAY, 0, "Display" }, { "Time Zone", SE_DATETIME, 0, "General" }, { "Text Size", SE_DISPLAY, 0, "Display" }, { "Haptics", SE_SOUNDS, 0, "Sounds" },
             { "Vibration", SE_SOUNDS, 0, "Sounds" }, { "Medical Card", A_CARD, SEI_HEART, "Emergency" },
-            { "Last 2 %", SE_BATTERY, 0, "Battery" }, { "Battery Health", SE_HEALTH, 0, "Battery" },
+            { "Last 2 %", SE_BATTERY, 0, "Battery" }, { "Battery Health", SE_HEALTH, 0, "Battery" }, { "USB Console", SE_DEV, 0, "Developer" },
             { "Auto-Brightness", SE_DISPLAY, 0, "Display" }, { "Haptic Strength", SE_SOUNDS, 0, "Sounds" } };
         sec(0);
         int n = 0;
@@ -649,8 +667,8 @@ static void se_glyph(dc *d, const char *name, float cx, float cy)
 static void se_tile(dc *d, float ry, float rh, int ico)
 {
     static const uint32_t COL[] = { 0, 0x0a84ff, 0x30d158, 0x30d158, 0x8e8e93, 0x0a84ff, 0x32ade6, 0xff375f, 0xff3b30, 0xff3b30,
-                                    0xff3b30, 0x0a84ff, 0x636366, 0x2c2c2e, 0x0a84ff, 0xff3b30, 0x0a84ff };
-    if (ico <= SEI_NONE || ico > SEI_BT) return;
+                                    0xff3b30, 0x0a84ff, 0x636366, 0x2c2c2e, 0x0a84ff, 0xff3b30, 0x0a84ff, 0x8e8e93 };
+    if (ico <= SEI_NONE || ico > SEI_DEV) return;
     d_icon_tile(d, ry, rh, COL[ico]);
     float x = LG_X + 16 + .5f, y = ry + (rh - LG_ICON) / 2 + .5f;   /* the glyphs below are placed in a 29 pt box */
     float cx = LG_X + 16 + LG_ICON / 2, cy = ry + rh / 2;
@@ -679,6 +697,10 @@ static void se_tile(dc *d, float ry, float rh, int ico)
         d_seg(d, x + 8, y + 16, x + 5.5f, y + 12.5f, 2.4f, W(1));
         break;
     case SEI_LINUX: d_text_box(d, TK_IT700, 13, cx, cy + 4.6f, 28, 1, ">_", 0, 0, W(1), 0); break;
+    case SEI_DEV:                                  /* 8b: iOS's Developer hammer: a handle and its head */
+        d_seg(d, cx - 6, cy + 7, cx + 2.5f, cy - 1.5f, 2.6f, W(1));
+        d_seg(d, cx - .5f, cy - 6.5f, cx + 6.5f, cy + .5f, 4.2f, W(1));
+        break;
     case SEI_STORE:
         d_seg(d, cx - 5, cy + 6, cx + 1.5f, cy - 6, 2.2f, W(1));
         d_seg(d, cx + 5, cy + 6, cx - 1.5f, cy - 6, 2.2f, W(1));
@@ -1386,6 +1408,7 @@ static void se_toggle(int ri)
     case T_KBSND: se_put(SK_KBSND, on); break;          /* cp7w */
     case T_LOCKSND: se_put(SK_LOCKSND, on); break;      /* 8a */
     case T_SILENT: snd_silent_set(on); break;           /* 8a (the Control Centre's bell shows it too) */
+    case T_USBCON: sh_usb_console(on); on = sh_usb_console_on(); break;   /* 8b: kept in dev.usb by the kernel */
     case T_LAST2AUTO: sh_last2_auto_set(on); on = sh_last2_auto(); break;
     case T_NALLOW: se_put(SK_NALLOW + SE.napp, on); break;
     case T_NBANNER: se_put(SK_NBANNER + SE.napp, on); break;

@@ -215,6 +215,7 @@ static struct {
     int pd_touched, cpu_started, mmu_set, pins_set, call_on, vss_started, boot_done, dump_win;
     unsigned bstage, bwait_polled;      /* the staged boot: the next stage; step 12 looked and waits */
     uint64_t fill_off, dump_off;        /* the chunked zero fills' progress */
+    uint32_t dram_total, dram_off, dram_crc;    /* calliope_dram.bin in parts (file_part) */
     unsigned bt_max_stage;              /* the stage of bt_max */
     uint32_t bwaited;                   /* step 12's wait without a HAL clock (100 us a look) */
     uint64_t bt0, bt_files, bt_dram, bt12, bt_max;  /* the boot's timing (HAL clock; 0 without one) */
@@ -308,15 +309,33 @@ static void sayw(struct lb *l)
     set_why(l->b + (l->n > 6 && l->b[0] == 'a' && l->b[4] == ':' ? 6 : 0));
 }
 
-static uint32_t ab_crc32(const uint8_t *p, uint64_t n)
+/* CRC32 (zlib's) of the files as loaded, for the log. Table-driven, reading abox_rmem (non-cacheable) 8 bytes at a time:
+ * the bitwise loop over byte loads took ~0.4 s for calliope_dram.bin at the screen-off 455 MHz (drivers run 10: the
+ * cold start's longest step, 438 ms, stage 1). Same values as before. */
+static uint32_t crc_tab[256];
+static uint32_t ab_crc32_more(uint32_t c, const uint8_t *p, uint64_t n);
+static uint32_t ab_crc32(const uint8_t *p, uint64_t n) { return ~ab_crc32_more(0xFFFFFFFFU, p, n); }
+/* c: the running register (start 0xFFFFFFFF; the CRC is its complement at the end) */
+static uint32_t ab_crc32_more(uint32_t c, const uint8_t *p, uint64_t n)
 {
-    uint32_t c = 0xFFFFFFFFU;
-    for (uint64_t i = 0; i < n; ++i) {
-        c ^= p[i];
-        for (int k = 0; k < 8; ++k)
-            c = (c >> 1) ^ (0xEDB88320U & (0U - (c & 1U)));
+    if (!crc_tab[1])
+        for (uint32_t i = 0; i < 256U; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k)
+                c = (c >> 1) ^ (0xEDB88320U & (0U - (c & 1U)));
+            crc_tab[i] = c;
+        }
+    uint64_t i = 0;
+    for (; i < n && ((uintptr_t)(p + i) & 7U); ++i)
+        c = crc_tab[(c ^ p[i]) & 0xFFU] ^ (c >> 8);
+    for (; i + 8U <= n; i += 8U) {
+        uint64_t w = *(const volatile uint64_t *)(const void *)(p + i);     /* one load per 8 bytes */
+        for (int k = 0; k < 8; ++k, w >>= 8)
+            c = crc_tab[(c ^ (uint32_t)w) & 0xFFU] ^ (c >> 8);
     }
-    return ~c;
+    for (; i < n; ++i)
+        c = crc_tab[(c ^ p[i]) & 0xFFU] ^ (c >> 8);
+    return c;
 }
 
 /* ---- guarded access ------------------------------------------------------------------------------------------------- */
@@ -1078,9 +1097,38 @@ static int stage_sram(void)
     return 0;
 }
 
+#define DRAM_PART 0x40000U               /* 256 KiB of calliope_dram.bin per step when the HAL has file_part */
 static int stage_dram(void)
 {
     uint64_t t = bnow();
+    if (H.file_part) {
+        static const char path[] = "firmware/calliope_dram.bin";
+        if (!S.dram_total) {
+            long total = H.file_part(H.ctx, path, 0, 0, 0);
+            if (total > 0 && (uint64_t)total <= ABOX_RM_DRAM_SZ)
+                S.dram_total = (uint32_t)total, S.dram_off = 0, S.dram_crc = 0xFFFFFFFFU;
+        }
+        if (S.dram_total) {
+            uint32_t n = S.dram_total - S.dram_off > DRAM_PART ? DRAM_PART : S.dram_total - S.dram_off;
+            if (H.file_part(H.ctx, path, rm(ABOX_RM_DRAM + S.dram_off, n), S.dram_off, n) == (long)n) {
+                S.dram_crc = ab_crc32_more(S.dram_crc, rm(ABOX_RM_DRAM + S.dram_off, n), n);
+                S.dram_off += n;
+                S.bt_dram += bnow() - t;
+                if (S.dram_off < S.dram_total)
+                    return BST_AGAIN;
+                struct lb l;                    /* load()'s line, byte for byte */
+                lb_init(&l);
+                lb_s(&l, "abox: 1/13 files: calliope_dram.bin ");
+                lb_u(&l, S.dram_total);
+                lb_s(&l, " bytes, crc32 ");
+                lb_x(&l, ~S.dram_crc);
+                sayl(&l);
+                S.fill_off = S.dram_total;
+                return 0;
+            }
+            S.dram_total = 0;                   /* a part failed: the whole file the usual way */
+        }
+    }
     long dram = load("calliope_dram.bin", ABOX_RM_DRAM, ABOX_RM_DRAM_SZ, 1);
     if (dram < 0)
         return files_fail(ABOX_EFILE);

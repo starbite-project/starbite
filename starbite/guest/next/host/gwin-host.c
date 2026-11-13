@@ -661,7 +661,7 @@ int main(int argc, char **argv)
     sh_set("store", "gimp", 1);                             /* the App Store on GIMP's page (Linux starts again) */
     run(25);
     check(busy, "the App Store open: Linux kept from its idle stop");
-    sh_touch(0, 178, 176, (float)now_ms); sh_touch(2, 178, 176, (float)now_ms);   /* GET */
+    sh_touch(0, 178, 190, (float)now_ms); sh_touch(2, 178, 190, (float)now_ms);   /* Get (Track F's A1 page: y 190, its films') */
     run(4);
     check(got.pkg == 1 && got.pkg_seq_ok == 1, "GET: SBG_MSG_PKG install with the store's seq");
     {

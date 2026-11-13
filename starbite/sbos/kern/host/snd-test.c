@@ -279,7 +279,7 @@ static int o_hp(int on, int lvl)
 static int o_bus_ready(void) { return F.bus_ready; }
 static int o_codec_id(void) { o_log("audio: codec held in reset (fake)"); return 1; }
 
-static struct abox_hal hal = { 0, f_rd, f_wr, f_smc, f_delay, f_log, f_file, f_ram, 0, 0, 0, 0 };
+static struct abox_hal hal = { 0, f_rd, f_wr, f_smc, f_delay, f_log, f_file, f_ram, 0, 0, 0, 0, 0 };
 
 /* a fresh phone: AUD off, CPU off, pins idle (a recognisable pattern to check "as found") */
 static void reset_fake(int aud_was_on, int cpu_was_on)

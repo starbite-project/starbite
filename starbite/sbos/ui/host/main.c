@@ -231,13 +231,16 @@ static sh_wifi_t HW;
 static void hw_push(void) { sh_wifi(&HW); }
 int sh_wifi_power(int on)
 {
-    static const char *const N[4] = { "Home Wi-Fi", "Guest", "Upstairs 5G", "Cafe Corner" };
-    static const int R[4] = { -48, -55, -67, -80 }, S[4] = { 1, 0, 1, 1 }, B[4] = { 1, 0, 1, 0 };
+    /* 8b: a busy street's worth (12), so the page's list scrolls on the host too */
+    static const char *const N[12] = { "Home Wi-Fi", "Guest", "Upstairs 5G", "Cafe Corner", "Neighbour", "Library Free",
+                                       "Printer-Direct", "Kitchen", "Garage", "Studio 5G", "Bakery", "Hotspot 7" };
+    static const int R[12] = { -48, -55, -67, -80, -70, -72, -74, -76, -78, -82, -84, -86 };
+    static const int S[12] = { 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1 }, B[12] = { 1, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0 };
     memset(&HW, 0, sizeof(HW));
     HW.state = on ? SH_WIFI_UP : SH_WIFI_OFF;
     if (on) {
-        HW.nnets = 4;
-        for (int i = 0; i < 4; i++) {
+        HW.nnets = 12 < SH_WIFI_NETS ? 12 : SH_WIFI_NETS;
+        for (int i = 0; i < HW.nnets; i++) {
             strcpy(HW.nets[i].ssid, N[i]);
             HW.nets[i].rssi = R[i], HW.nets[i].secure = S[i], HW.nets[i].band5 = B[i];
         }
@@ -496,6 +499,9 @@ int sh_city_get(int i, const char **name, const char **country, int *tz, int *la
     if (lon_e4) *lon_e4 = c->lon_e4;
     return 0;
 }
+static int host_usb;
+void sh_usb_console(int on) { host_usb = !!on; }
+int sh_usb_console_on(void) { return host_usb; }
 int sh_tz_count(void) { return tzdb_n; }
 const char *sh_tz_name(int i, const char **city)
 {
@@ -698,6 +704,11 @@ static int parse(const char *s, step *st, int max)
         }
         else if (!strcmp(w, "drag")) { p->kind = 2; sscanf(tok, " %*s %f %f %f %f %f", &p->x0, &p->y0, &p->x1, &p->y1, &p->ms); }
         else if (!strcmp(w, "hold")) { p->kind = 3; sscanf(tok, " %*s %f %f %f", &p->x0, &p->y0, &p->ms); }
+        else if (!strcmp(w, "pinch")) {     /* 8b: "pinch CX CY D0 D1 MS": two fingers on a level line round (CX, CY), D0 apart
+                                             * to D1 apart over MS: finger 0 through sh_touch, finger 1 sh_touch_finger */
+            p->kind = 13;
+            sscanf(tok, " %*s %f %f %f %f %f", &p->x0, &p->y0, &p->x1, &p->y1, &p->ms);
+        }
         else if (!strcmp(w, "state") || !strcmp(w, "sms")) {   /* helper I: a state now; an SMS received now */
             p->kind = w[1] == 't' ? 4 : 9;
             p->ms = 20;
@@ -767,6 +778,11 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
                     sh_touch(0, st[si].x0, st[si].y0, te);
                     sh_touch(2, st[si].x0, st[si].y0, te);
                 }
+                if (phase >= 0 && st[si].kind == 13) {   /* 8b: the pinch's two fingers up (the second first) */
+                    step *p = &st[si];
+                    sh_touch_finger(1, 2, p->x0 + p->y1 / 2, p->y0, s0 + p->ms);
+                    sh_touch(2, p->x0 - p->y1 / 2, p->y0, s0 + p->ms);
+                }
                 if (phase >= 0 && st[si].kind && st[si].kind != 4 && st[si].kind != 5 && st[si].kind != 6 && st[si].kind < 8) {
                     step *p = &st[si];
                     float x = p->kind == 2 || p->kind == 7 ? p->x1 : p->x0, y = p->kind == 2 || p->kind == 7 ? p->y1 : p->y0;
@@ -807,6 +823,12 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
             }
             if (p->kind == 11) {
                 if (phase < 0) { host_ori_film = (int)p->x0 & 3; phase = 0; }
+                continue;
+            }
+            if (p->kind == 13) {                 /* 8b: the pinch */
+                float d = p->x1 + (p->y1 - p->x1) * (u > 1 ? 1 : u);
+                if (phase < 0) { sh_touch(0, p->x0 - d / 2, p->y0, te); sh_touch_finger(1, 0, p->x0 + d / 2, p->y0, te); phase = 0; }
+                else { sh_touch(1, p->x0 - d / 2, p->y0, te); sh_touch_finger(1, 1, p->x0 + d / 2, p->y0, te); }
                 continue;
             }
             if (p->kind == 10) {

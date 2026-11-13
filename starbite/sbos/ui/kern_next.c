@@ -30,6 +30,7 @@
 #include "bt.h"                         /* Track A: drivers for the shell (the end of this file) */
 #include "cam.h"
 #include "snd.h"                         /* Track A, cp7: sound for the shell (the end of this file) */
+#include "usb.h"                         /* 8b: the USB console (Settings > Developer) */
 #include "shub_more.h"
 #include "bathealth.h"
 #include "haptic.h"
@@ -649,6 +650,14 @@ static void stats_add(void)
             ub_dec(&u, emp);
             ub_s(&u, " GPU MHz ");
             ub_dec(&u, gpucomp_mhz());
+            uint32_t tb = 0, tu = 0, tr = 0;         /* 8c: the CPU's binning, the bins' upload, the job's run */
+            gpucomp_last_times(&tb, &tu, &tr);
+            ub_s(&u, "; bin ");
+            ub_dec(&u, tb);
+            ub_s(&u, " up ");
+            ub_dec(&u, tu);
+            ub_s(&u, " run ");
+            ub_dec(&u, tr);
             ub_s(&u, ")");
         }
         sb_log(u.b);
@@ -1448,7 +1457,9 @@ void next_kminute(void)
     if (!ticking) {
         tk_comp_frame(&comp, 0, 0);
         present();
-        sh_idle();
+        /* 8a2's self test: "timer 7/0" 283 ms with the screen on: the whole idle work in the minute's turn. Now the
+         * idle timer takes it in slices between frames, as everywhere else */
+        if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 20, 0);
     }
 }
 
@@ -2272,8 +2283,9 @@ static const step S_HOLDS[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 71, 727, 0, 0, 650 
                                 { 0, 0, 0, 0, 0, 900 } };
 static const step S_PAGES[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 },
                                 { 2, 320, 450, 60, 450, 200 }, { 0, 0, 0, 0, 0, 900 }, { 2, 60, 450, 330, 460, 220 }, { 0, 0, 0, 0, 0, 1200 } };
+/* 8b: S_CC on iOS 27's page 1 (the Flashlight at row 4, the Brightness slider under Now Playing) */
 static const step S_CC[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 2, 320, 20, 320, 330, 260 },
-                             { 0, 0, 0, 0, 0, 900 }, { 1, 70, 290, 0, 0, 80 }, { 0, 0, 0, 0, 0, 500 }, { 2, 240, 230, 240, 120, 300 },
+                             { 0, 0, 0, 0, 0, 900 }, { 1, 70, 483, 0, 0, 80 }, { 0, 0, 0, 0, 0, 500 }, { 2, 236, 400, 236, 300, 300 },
                              { 0, 0, 0, 0, 0, 600 }, { 1, 195, 600, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1000 } };
 static const step S_APP[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 158, 290, 0, 0, 80 },
                               { 0, 0, 0, 0, 0, 1100 }, { 2, 195, 795, 200, 450, 260 }, { 0, 0, 0, 0, 0, 1200 } };
@@ -2328,6 +2340,7 @@ static int glass_cal_step(void)
         return 0;
     }
     int v = gcal / 3, g = gcal % 3;
+    sbos_film_now = "glass stills";
     lens_gain = GAIN[g];
     if (g == 0) {
         sh_set("reset", "", 0);
@@ -2375,6 +2388,7 @@ static void film_start(int film)
     default: F.s = S_PAGES; F.n = 7; break;     /* 8a: 12 pages-half, 13 pages-full (a measurement, not the gate's) */
     }
     tk_gpu_no_half = film == 13;
+    sbos_film_now = FILM_NAME[film];
     /* each film from the plain lock screen */
     sh_set("reset", "", 0);
     need_full = 1;
@@ -2519,7 +2533,7 @@ int next_selftest_step(void)
     if (!ready) return 1;                            /* the bake is still running */
     if (!st_started) {
         st_started = 1;
-        K.user_turn_ms = 0; K.user_turn_what = 0; K.turns_100 = 0;
+        K.user_turn_ms = 0; K.user_turn_what = 0; K.turns_100 = 0; K.tl_n = 0;
         for (unsigned i_ = 0; i_ < 18; i_++) K.turns_100_by[i_] = 0;   /* cp7m: the summary counts from the films (7l: the
                                                                      * bake's own turns, timer 1/22, counted 40 / 515 ms) */
         /* the clock: a new minute must reach the panel through an ordinary frame (P2a-P2g kept the old one) */
@@ -3129,8 +3143,22 @@ static void drv_screen(int on)
     if (ab_on) kt_set(KT_UI, KT_DRV_AUTO, sb_ms(), 300, 0);
 }
 static void bt_kbd_init(void);                       /* Track A, cp7: the keyboard's key store (below) */
+/* 8b (Track A; the drivers' usb.c): the read-only USB console behind Settings > Developer > USB Console, off by
+ * default (pref dev.usb, restored at the bake's end); never in a self test (the probe drives USB there) */
+void sh_usb_console(int on)
+{
+    on = !!on;
+    sh_pref_set_int("dev.usb", on);
+#ifndef SBOS_SELFTEST_NEXT
+    if (!sbos_selftest_enabled) usb_enable(on);
+#endif
+}
+int sh_usb_console_on(void) { return sh_pref_int("dev.usb", 0) == 1; }
 static void drv_after_bake(void)
 {
+#ifndef SBOS_SELFTEST_NEXT
+    if (!sbos_selftest_enabled && sh_pref_int("dev.usb", 0) == 1) usb_enable(1);   /* 8b: the Developer switch kept */
+#endif
     bt_kbd_init();
 #ifdef SBOS_SELFTEST_NEXT
     sb_log("next: drivers: the haptic level, Auto-Brightness and the LED policy would start (a dry run: the self test)");

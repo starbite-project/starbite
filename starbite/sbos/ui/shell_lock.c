@@ -454,7 +454,7 @@ static int fmt_time(char *b, int h, int m, int ampm) { return sh_fmt_time(b, h, 
 static void fmt_hm(char *b) { fmt_time(b, ST.h, ST.mi, 0); }
 
 static tk_layer lstatus, lclock, lwidgets;
-#define LK_GRAB_X (CONTENT_R - 16 - 47)           /* 8a: the CC grabber's left (its right edge on the battery's) */
+#define LK_GRAB_X 300.0f                            /* 8a: the CC grabber (design-ref §1: x 300..347, y 39, white 60 %) */
 static void relink(void);
 /* helper D (shell_nc.inc, shell_switcher.inc): the hooks this file calls before their definitions */
 static void nc_sb_stale(void);
@@ -487,7 +487,7 @@ static void build_lstatus(void)
     dc d = mk(&lstatus, "lock-status", 0, 0, 390, 48, 2, 0);
     status_bar(&d, carrier);
     /* 8a (top ten #1, gaps-c #11): iOS's Control Centre grabber, ~47 x 2.5 under the right status cluster */
-    d_rrect(&d, LK_GRAB_X, 41, 47, 2.5f, 1.25f, W(.55f));
+    d_rrect(&d, LK_GRAB_X, 39, 47, 2.5f, 1.25f, W(.6f));
     trim(&lstatus);
     nc_sb_stale();                               /* helper D: the Notification Centre's status bar too */
 }
@@ -771,7 +771,12 @@ static void erase_rrect(tk_bmp *b, float ox, float oy, float x, float y, float w
 }
 /* the platter glass (K[0]): the face, a 3-slice drawn at any height from 48 pt, and the stack's lower cards under a
  * 68 pt one (shell_nc.inc's pl_peek places them so). Baked once at boot (and again after Emergency); never in a tap */
-static void build_platter(void)
+/* 8b (8b's phone: "lock card 42 ms", the platter in one part after Emergency): its ghost stack and its glass face as
+ * two parts (build_platter: both, the bake's) */
+static void build_platter_gh(void);
+static void build_platter_face(void);
+static void build_platter(void) { build_platter_gh(); build_platter_face(); }
+static void build_platter_gh(void)
 {
     card_t *k = &K[0];
     k->y = 10;
@@ -786,6 +791,12 @@ static void build_platter(void)
     erase_rrect(e.b, e.ox, e.oy, PL_X, top, PL_W, 68, PL_R);
     trim(&k->gh);
     k->gh.hidden = 1;
+}
+static void build_platter_face(void)
+{
+    card_t *k = &K[0];
+    k->y = 10;
+    float top = LIST_TOP + k->y;
     /* P3q (P3j-11): made with a glass mask so d_glass records the box's shape (the GPU row's live, refracted glass),
      * the mask freed at once (the CPU path keeps the baked look; no heap kept) */
     dc d = mk(&k->face, "face", PL_X, top, PL_W, 68 + 12, FACE_MG, 1);
@@ -1013,8 +1024,8 @@ static void ec_card(dc *d, int i, float top) { ec_card_part(d, i, top, -1); }
  * the layers of cards 4..7: B6's ep_card, a piece at a time, below set_emergency) */
 static void free_ecards(void) { for (int i = 0; i < NEC; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } ec_next = 8; }
 static int cards_pending;       /* the platter glass, the vendor cards and the tools still to make again after Emergency (one per idle turn) */
-static void build_lockpart(int i) { if (i == 0) build_platter(); else if (i <= NG) build_vcard(i - 1); else build_etool(); }
-#define LOCK_PARTS (NG + 2)
+static void build_lockpart(int i) { if (i == 0) build_platter_gh(); else if (i == 1) build_platter_face(); else if (i <= NG + 1) build_vcard(i - 2); else build_etool(); }
+#define LOCK_PARTS (NG + 3)
 static void lkn_free(void);
 static void toggle_group(int g, int instant);
 /* every open card closed (instant: at once, its rows freed) */
@@ -1063,18 +1074,24 @@ static void build_empill(void)
  * spring; the card fades, the notifications give way as for an open card); a tap on the clock, the widgets or bare
  * wallpaper, the next lock or Emergency's exit folds them. */
 static void d_icon_s(dc *d, const char *name, float x, float y, float s);
-#define SYSP_H 64.0f
-#define SYSP_Y (LKN_BOT0 - SYSP_H)
+#define SYSP_H 58.0f                     /* design-ref-lock-and-wallpaper.md §1 (a): h 58 at y 620..678 */
+#define SYSP_Y 620.0f
+/* "Show less" (iOS's expanded stack's): a glass capsule centred between the torch and Emergency buttons, where the
+ * card was (above the cards the widgets leave no room) */
+#define SYSL_H 30.0f
+#define SYSL_Y 712.0f
+static float sysl_w(void);
 static int sysp_mode = -1;               /* the pref, read at the lock's build (-1 not yet) */
 static float sysx = 1;                   /* 0 folded (the platter), 1 the cards out */
 static tk_spring sp_sysx;
-static tk_layer sysplat;
+static tk_layer sysplat, sysless;
 static int sysp_on(void)
 {
     if (sysp_mode < 0) { sysp_mode = sh_pref_int("lock.systems", 1) == 1; sysx = sysp_mode ? 0 : 1; }
     return sysp_mode;
 }
 static int sysp_hit(float x, float y) { return sysp_on() && !EMG && sysx < .5f && x >= PL_X && x < PL_X + PL_W && y >= SYSP_Y && y < SYSP_Y + SYSP_H; }
+static int sysl_hit(float x, float y) { return sysp_on() && !EMG && sysx > .5f && tk_fabsf(x - 195) < sysl_w() / 2 + 8 && y >= SYSL_Y - 8 && y < SYSL_Y + SYSL_H + 8; }
 static void sysp_build(void)
 {
     relayer(&sysplat);
@@ -1084,26 +1101,40 @@ static void sysp_build(void)
     dc d = mk(&sysplat, "lock-systems", PL_X, SYSP_Y, PL_W, SYSP_H, 18, 1);   /* (18: its shadow; 44 cost 2 MB more) */
     if (!d.b->px) return;
     d_glass(&d, PL_X, SYSP_Y, PL_W, SYSP_H, PL_R, 1, 1);
+    /* §1 (a): the four vendor tiles 34 pt, 7 apart from x 27.5; "Systems" 15 / 600 and "N ready · tap to choose"
+     * 13 / 400 at white 60 % from x 212; a chevron at white 50 % */
     int n = 0, total = 0;
     for (int g = 0; g < NG; g++) {
+        if (!tk_strcmp(G[g].key, "starbite")) continue;      /* (this OS and its tools: not "systems to choose") */
         total += G[g].n;
-        if (n >= 4 || !tk_strcmp(G[g].key, "starbite")) continue;
+        if (n >= 4) continue;
         char tn[40] = "t46-";
         tk_memcpy(tn + 4, G[g].key, tk_strlen(G[g].key) + 1);
-        d_icon_s(&d, tn, PL_X + 14 + 38 * n, SYSP_Y + (SYSP_H - 33) / 2, 33.0f / 46);
+        d_icon_s(&d, tn, 27.5f + 41 * n, SYSP_Y + (SYSP_H - 34) / 2, 34.0f / 46);
         n++;
     }
-    float tx = PL_X + 14 + 38 * n + 8;
-    d_text(&d, TK_IT600, 17, tx, SYSP_Y + 28, "Systems", 0, 0, INK, 0);
+    float tx = 198;                                   /* (§1 says 212: "8 ready · tap to choose" needs the 14 pt) */
+    d_text(&d, TK_IT600, 15, tx, SYSP_Y + 25, "Systems", 0, 0, W(1), 0);
     char sub[40];
     int k = put_dec(sub, total);
-    for (const char *p = " systems on this phone"; *p;) sub[k++] = *p++;
+    for (const char *p = " ready \xc2\xb7 tap to choose"; *p;) sub[k++] = *p++;
     sub[k] = 0;
-    d_text_box(&d, TK_IT400, 13, tx, SYSP_Y + 47, PL_X + PL_W - 32 - tx, 0, sub, 0, 0, W(.6f), 0);
-    d_icon(&d, "chev", PL_X + PL_W - 26, SYSP_Y + SYSP_H / 2 - 6.5f, .35f);
+    d_text_box(&d, TK_IT400, 13, tx, SYSP_Y + 43, PL_X + PL_W - 24 - tx, 0, sub, 0, 0, W(.6f), 0);
+    d_icon(&d, "chev", PL_X + PL_W - 22, SYSP_Y + SYSP_H / 2 - 6.5f, .5f);
     trim(&sysplat);
+    /* the expanded stack's "Show less" */
+    relayer(&sysless);
+    tk_layer_init(&sysless, "lock-systems-less");
+    sysless.hidden = 1;
+    float w = sysl_w(), x = 195 - w / 2;
+    d = mk(&sysless, "lock-systems-less", x, SYSL_Y, w, SYSL_H, 14, 1);
+    if (!d.b->px) return;
+    d_glass(&d, x, SYSL_Y, w, SYSL_H, SYSL_H / 2, 1, 1);
+    d_text(&d, TK_IT600, 13, x + 14, SYSL_Y + 19.5f, "Show less", 0, 0, W(1), 0);
+    trim(&sysless);
 }
-static float lkn_bot(void) { return sysp_on() && !EMG ? SYSP_Y - 10 : LKN_BOT0; }
+static float sysl_w(void) { return tw(TK_IT600, 13, "Show less", 0, 0) + 28; }
+static float lkn_bot(void) { return sysp_on() && !EMG ? SYSP_Y - 8 : LKN_BOT0; }   /* §1 (a): the stack 8 pt over the card */
 static void place_list(void);
 static void sysp_fold(int open, int instant)
 {
@@ -1212,8 +1243,10 @@ static void place_list(void)
         sysplat.ox = PT(195); sysplat.oy = PT(SYSP_Y + SYSP_H / 2);
         sysplat.sx = sysplat.sy = s;
         sysplat.hidden = !sysplat.bmp.px || sysplat.alpha <= .004f;
+        sysless.alpha = tk_clampf(sysx * 1.6f - .6f, 0, 1);
+        sysless.hidden = !sysless.bmp.px || sysless.alpha <= .004f;
     } else
-        sysplat.hidden = 1;
+        sysplat.hidden = sysless.hidden = 1;
     list.hidden = list.alpha <= .004f;
     lkn_place();
     lock_ver++;
@@ -1514,7 +1547,10 @@ static void home_apps2_part(int k)
             d_text_box(dd, TK_IT400, 12, cx, y + 68 + 12, 84, 1, P2N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
         }
     } else
-        for (int q = 4; q <= 6; q += 2) { hparts[q].x = hparts[q].bx = hparts[q].x + PT(390); trim(&hparts[q]); }
+        for (int q = 4; q <= 6; q += 2) trim(&hparts[q]);
+    /* 8b: page 2's layers at their place (one page right) from the start, so a part-made page 2 can show as it
+     * fills in (the pages' move makes its rest a part or two a frame: no whole build at the touch) */
+    if (k == 0) for (int q = 4; q <= 6; q += 2) if (hparts[q].bmp.px) hparts[q].x = hparts[q].bx = hparts[q].x + PT(390);
     a2_next = k <= NP2 ? k + 1 : -1;
 }
 static void build_home_apps2(void) { for (int k = 0; k <= NP2 + 1; k++) home_apps2_part(k); }
@@ -2017,11 +2053,18 @@ static tk_spring sp_cc;
 #define CC_W2 (2 * CC_U + CC_GAP)                 /* a 2x2 / a tall slider's length: 150.5 */
 #define CC_COL(c) (37.25f + CC_P * (c))
 #define CC_ROW(r) (119.0f + CC_P * (r))
-#define CC_R3 CC_ROW(2)                            /* the round modules' rows (under the 2x2 and the sliders) */
-#define CC_R4 CC_ROW(3)
-static const float CCX[4] = { CC_COL(0), CC_COL(1), CC_COL(2), CC_COL(3) };
-#define CC_NV 11                                   /* the views: 0 connectivity, 1 Brightness, 2 Volume, 3..6 row 3, 7..10 row 4 */
-#define CC_NM 12                                   /* + 11: the chrome (the + and Power circles, the page icons) */
+/* 8b (top ten #9, IOS-REFERENCE 1's default page 1, iOS 27): the modules' places as (column, row, columns, rows) on
+ * the lattice: row 0-1 connectivity 2x2 | Now Playing 2x2; rows 2-3 Orientation Lock, Silent, Focus 2x1 | the two tall
+ * sliders; row 4 Flashlight, Timer, Calculator, Camera; row 5 ours (Emergency, Low Power). The indices stay B4's
+ * (0 connectivity, 1 Brightness, 2 Volume, 3 Flashlight, 4 Rotation, 5 Emergency, 6 Saving, 7 Timer, 8 Calculator,
+ * 9 Silent, 10 Camera) plus 11 Now Playing, 12 Focus; the chrome is CC_CHROME */
+#define CC_NV 13
+#define CC_NM 14
+#define CC_CHROME CC_NV                            /* the chrome (the + and Power circles, the page icons) */
+#define CC_ROWS 6
+static const signed char CCL[CC_NV][4] = {
+    { 0, 0, 2, 2 }, { 2, 2, 1, 2 }, { 3, 2, 1, 2 }, { 0, 4, 1, 1 }, { 0, 2, 1, 1 }, { 0, 5, 1, 1 }, { 1, 5, 1, 1 },
+    { 1, 4, 1, 1 }, { 2, 4, 1, 1 }, { 1, 2, 1, 1 }, { 3, 4, 1, 1 }, { 2, 0, 2, 2 }, { 0, 3, 2, 1 } };
 static tk_layer ccmod[CC_NM], ccview[CC_NV], cctop, ccpg;
 static void *cc_vhalf[CC_NV];                      /* the half copy each view was given (another one is the view's own) */
 /* the connectivity module's circles: Airplane, Cellular, Wi-Fi (55.6 pt), and the mini cluster (24.7 pt) */
@@ -2030,19 +2073,22 @@ static void *cc_vhalf[CC_NV];                      /* the half copy each view wa
 #define CN_MD 24.7f
 static void cc_mod_rect(int i, float *r)
 {
-    if (i == 11) { r[0] = 37.25f; r[1] = 16; r[2] = 315.5f; r[3] = 28; r[4] = 14; return; }
-    if (i == 0) { r[0] = CC_COL(0); r[1] = CC_ROW(0); r[2] = r[3] = CC_W2; r[4] = 30; return; }
-    if (i < 3) { r[0] = CC_COL(i + 1); r[1] = CC_ROW(0); r[2] = CC_U; r[3] = CC_W2; r[4] = 34; return; }
-    r[0] = CCX[(i - 3) % 4]; r[1] = i < 7 ? CC_R3 : CC_R4; r[2] = r[3] = CC_U; r[4] = 34;
+    if (i == CC_CHROME) { r[0] = 37.25f; r[1] = 16; r[2] = 315.5f; r[3] = 28; r[4] = 14; return; }
+    const signed char *L = CCL[i];
+    r[0] = CC_COL(L[0]); r[1] = CC_ROW(L[1]);
+    r[2] = L[2] * CC_U + (L[2] - 1) * CC_GAP; r[3] = L[3] * CC_U + (L[3] - 1) * CC_GAP;
+    r[4] = L[2] == 2 && L[3] == 2 ? 30 : 34;
 }
-/* the cell a module's view shows (they tile the bitmap: the gaps split down the middle) */
+/* the cell a module's view shows (they tile the bitmap: the gaps split down the middle; the outer ones run off) */
 static void cc_mod_cell(int i, float *c)
 {
-    static const float XB[5] = { -400, CC_COL(1) - CC_GAP / 2, CC_COL(2) - CC_GAP / 2, CC_COL(3) - CC_GAP / 2, 800 };
-    int c0 = i == 0 ? 0 : i < 3 ? i + 1 : (i - 3) % 4, c1 = i == 0 ? 2 : c0 + 1;
-    c[0] = XB[c0]; c[2] = XB[c1];
-    c[1] = i < 3 ? -400 : i < 7 ? CC_R3 - CC_GAP / 2 : CC_R4 - CC_GAP / 2;
-    c[3] = i < 3 ? CC_R3 - CC_GAP / 2 : i < 7 ? CC_R4 - CC_GAP / 2 : 1200;
+    float r[5];
+    cc_mod_rect(i, r);
+    const signed char *L = CCL[i];
+    c[0] = L[0] == 0 ? -400 : r[0] - CC_GAP / 2;
+    c[2] = L[0] + L[2] == 4 ? 800 : r[0] + r[2] + CC_GAP / 2;
+    c[1] = L[1] == 0 ? -400 : r[1] - CC_GAP / 2;
+    c[3] = L[1] + L[3] == CC_ROWS ? 1200 : r[1] + r[3] + CC_GAP / 2;
 }
 static void nc_blit_scaled(tk_bmp *dst, const tk_bmp *src, float X, float Y, float f);
 /* a glyph at scale s, its box's top-left at (x, y) pt */
@@ -2121,7 +2167,7 @@ static const float CXR[3][5] = { { 36, 200, 318, 262, 38 }, { 120, 160, 150, 400
 /* the press (the glass spec's gel, IOS-REFERENCE 1): a module under the finger grows by min(.12, 10 / its short side),
  * a slider being dragged to 1.05, on the press spring; back to 1 when it is let go */
 static tk_spring cc_ps[CC_NM];
-static float cc_pscale[CC_NM] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+static float cc_pscale[CC_NM] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
 static int cc_pressed = -1;
 static int cc_edge[2], cc_step[2];
 /* cp6: the press's glow (LIQUID-GLASS 5.1: +8 % white over the shape) on module cc_hlm's rect cc_hlr (pt: x y w h r),
@@ -2157,7 +2203,7 @@ static void cc_link(void)
     g[CC_NM] = &cchl;
     link(&ccg, g, CC_NM + 1);
     tk_layer *ch[] = { &cctop, &ccpg };
-    link(&ccmod[11], ch, 2);
+    link(&ccmod[CC_CHROME], ch, 2);
     for (int i = 0; i < CC_NV; i++) {
         tk_layer *k[3] = { &ccview[i], 0, 0 };
         int n = 1;
@@ -2190,9 +2236,45 @@ static void cc_unview(void)
 }
 /* cp7c: the grid in six parts (a tile or two each: their glass bakes), so build_cc's idle stages stay short; ccg_part:
  * the next part of a grid being drawn (0 none); a whole build_cc_grid (a toggle) ends any part-drawn one */
+/* 8b: Now Playing (2x2): the WAV player's track (shell_media.inc's cc_np_info) or "Not Playing", the art's place,
+ * the transport (back, play / pause, forward); Focus (2x1): Do Not Disturb (pref notif.dnd, shell_nc.inc's), lit */
+static int cc_np_info(const char **title, const char **artist, int *playing);
+static int cc_np_toggle(void);
+static void d_tri(dc *d, float ax, float ay, float bx, float by, float cx, float cy, tk_col col);
+static void d_note(dc *d, float x, float y, float s, tk_col c);
+static void cc_now_playing(dc *d)
+{
+    float r[5];
+    cc_mod_rect(11, r);
+    float x = r[0], y = r[1];
+    cc_tile(d, x, y, r[2], r[3], r[4], 0);
+    const char *ti = 0, *ar = 0;
+    int playing = 0, have = cc_np_info(&ti, &ar, &playing);
+    d_rrect(d, x + 16, y + 16, 48, 48, 10, have ? tk_hex(0xff375f, 1) : W(.16f));
+    d_note(d, x + 26, y + 26, 28, W(have ? 1 : .7f));
+    d_text_box(d, TK_IT600, 15, x + 16, y + 88, r[2] - 32, 0, have ? ti : "Not Playing", 0, 0, W(have ? 1 : .7f), 0);
+    if (have && ar) d_text_box(d, TK_IT400, 13, x + 16, y + 105, r[2] - 32, 0, ar, 0, 0, W(.6f), 0);
+    tk_col tc = W(have ? 1 : .35f);
+    float cy = y + 128, cx = x + r[2] / 2;
+    d_tri(d, cx - 36, cy, cx - 26, cy - 7, cx - 26, cy + 7, tc); d_tri(d, cx - 46, cy, cx - 36, cy - 7, cx - 36, cy + 7, tc);
+    if (playing) { d_rrect(d, cx - 6, cy - 8, 4.5f, 16, 1.5f, tc); d_rrect(d, cx + 1.5f, cy - 8, 4.5f, 16, 1.5f, tc); }
+    else d_tri(d, cx - 6, cy - 9, cx + 9, cy, cx - 6, cy + 9, tc);
+    d_tri(d, cx + 36, cy, cx + 26, cy - 7, cx + 26, cy + 7, tc); d_tri(d, cx + 46, cy, cx + 36, cy - 7, cx + 36, cy + 7, tc);
+}
+static void cc_focus(dc *d)
+{
+    float r[5];
+    cc_mod_rect(12, r);
+    int on = sh_pref_int("notif.dnd", 0) != 0;
+    cc_tile(d, r[0], r[1], r[2], r[3], r[4], on);
+    float cx = r[0] + 34, cy = r[1] + r[3] / 2;
+    tk_col mc = on ? tk_hex(0x5e5ce6, 1) : W(1);
+    cc_arc(d, cx + 1, cy, 7.5f, 4.5f, 3.4f, 4.1f, mc);           /* the moon: a thick crescent */
+    d_text(d, TK_IT600, 15, r[0] + 58, cy + 5.5f, "Focus", 0, 0, on ? tk_hex(0x1c1c1e, 1) : W(1), 0);
+}
 static dc ccg_d;
 static int ccg_part;
-#define CCG_PARTS 9
+#define CCG_PARTS 13
 static void cc_grid_part(int k)
 {
     if (k != 1 && k != ccg_part) return;         /* (that grid was made again whole meanwhile) */
@@ -2203,7 +2285,8 @@ static void cc_grid_part(int k)
     CCS.save = sh_low_power_on();                /* cp6: Track A's Low Power Mode lights its tile */
     CCS.sil = snd_silent();                      /* 8a: Silent Mode lights its bell */
     relayer(&ccgrid);
-    d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, 4 * CC_U + 3 * CC_GAP, 44, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
+    /* 8b: six rows now: the margin 32 (the 2x2s' shadows reach ~33 pt: sigma ~10 + 3.5 offset; 44 cost ~1 MB more) */
+    d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, CC_ROWS * CC_U + (CC_ROWS - 1) * CC_GAP, 32, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
     ccg_d = d;
     /* the connectivity 2x2: Airplane, Cellular, Wi-Fi and the mini cluster (Bluetooth, Nearby, Hotspot, VPN) */
     } else if (k == 2) {                         /* cp7p (7m: 43 ms): the grid's bitmap made, then its first tile */
@@ -2233,46 +2316,64 @@ static void cc_grid_part(int k)
     }
     } else if (k == 5) {
     /* the sliders' glass (their level and glyph are layers above) */
-    cc_tile(&d, CC_COL(2), CC_ROW(0), CC_U, CC_W2, 34, 0);
-    cc_tile(&d, CC_COL(3), CC_ROW(0), CC_U, CC_W2, 34, 0);
+    float r1[5], r2[5];
+    cc_mod_rect(1, r1); cc_mod_rect(2, r2);
+    cc_tile(&d, r1[0], r1[1], r1[2], r1[3], 34, 0);
+    cc_tile(&d, r2[0], r2[1], r2[2], r2[3], 34, 0);
     } else if (k == 6) {
-    /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Silent (8a), Camera */
     /* P3i: the torch's tile baked off; its lit look is a small layer over it, so the tap shows it at once (the
      * whole grid's rebuild took ~300 ms at the tap) */
-    cc_tile(&d, CCX[0], CC_R3, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-light", CCX[0], CC_R3, 16, 24);
+    float r[5];
+    cc_mod_rect(3, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-light", r[0], r[1], 16, 24);
     {
         relayer(&cclit);
-        dc e = mk(&cclit, "cc-lit", CCX[0], CC_R3, CC_U, CC_U, 1, 0);
-        d_rrect(&e, CCX[0], CC_R3, CC_U, CC_U, 34, W(1));
-        cc_glyph(&e, "cc-light-on", CCX[0], CC_R3, 16, 24);
+        dc e = mk(&cclit, "cc-lit", r[0], r[1], CC_U, CC_U, 1, 0);
+        d_rrect(&e, r[0], r[1], CC_U, CC_U, 34, W(1));
+        cc_glyph(&e, "cc-light-on", r[0], r[1], 16, 24);
         tk_layer_prepare(&cclit);
         cclit.hidden = !Q[0].lit;
     }
-    cc_tile(&d, CCX[1], CC_R3, CC_U, CC_U, 34, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], CC_R3, 22, 22);
+    cc_mod_rect(4, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", r[0], r[1], 22, 22);
     } else if (k == 7) {
-    cc_tile(&d, CCX[2], CC_R3, CC_U, CC_U, 34, 0);
-    cc_glyph(&d, "cc-flame", CCX[2], CC_R3, 20, 24);
+    float r[5];
+    cc_mod_rect(5, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, 0);
+    cc_glyph(&d, "cc-flame", r[0], r[1], 20, 24);
     {
         /* B6: Emergency's red a small layer over its tile, as the torch's: the switch shows it (the grid's rebuild
          * was most of a frame); B4's module 5 holds it */
         relayer(&ccem);
-        dc e = mk(&ccem, "cc-em", CCX[2], CC_R3, CC_U, CC_U, 1, 0);
-        d_rrect(&e, CCX[2], CC_R3, CC_U, CC_U, 34, tk_hex(0xff5a4e, 1));
-        cc_glyph(&e, "cc-flame", CCX[2], CC_R3, 20, 24);
+        dc e = mk(&ccem, "cc-em", r[0], r[1], CC_U, CC_U, 1, 0);
+        d_rrect(&e, r[0], r[1], CC_U, CC_U, 34, tk_hex(0xff5a4e, 1));
+        cc_glyph(&e, "cc-flame", r[0], r[1], 20, 24);
         tk_layer_prepare(&ccem);
         ccem.hidden = !EMG;
     }
-    cc_tile(&d, CCX[3], CC_R3, CC_U, CC_U, 34, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], CC_R3, 24, 14);
+    cc_mod_rect(6, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", r[0], r[1], 24, 14);
     } else if (k == 8) {
-    cc_tile(&d, CCX[0], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-timer", CCX[0], CC_R4, 22, 22);
+    float r[5];
+    cc_mod_rect(7, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-timer", r[0], r[1], 22, 22);
     /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place); P3p: baked ones */
-    cc_tile(&d, CCX[1], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-calc", CCX[1], CC_R4, 24, 24);
-    } else {
-    /* 8a (top ten #8): Silent Mode where the Mirror tile was (it opened the Camera, as the tile beside it) */
-    cc_tile(&d, CCX[2], CC_R4, CC_U, CC_U, 34, CCS.sil); cc_bell(&d, CCX[2] + CC_U / 2, CC_R4 + CC_U / 2, CCS.sil);
-    cc_tile(&d, CCX[3], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-camera", CCX[3], CC_R4, 24, 24);
+    cc_mod_rect(8, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-calc", r[0], r[1], 24, 24);
+    } else if (k == 9) {
+    float r[5];
+    cc_mod_rect(9, r);                           /* 8a (top ten #8): Silent Mode */
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, CCS.sil); cc_bell(&d, r[0] + CC_U / 2, r[1] + CC_U / 2, CCS.sil);
+    cc_mod_rect(10, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-camera", r[0], r[1], 24, 24);
+    } else if (k == 10) {
+    cc_now_playing(&d);                          /* 8b: iOS 27's page 1: Now Playing and Focus */
+    } else if (k == 11) {
+    cc_focus(&d);
+    } else if (k == 12) {                        /* 8b (8a2's phone: "build_cc 13 grid last" 32-46 ms): the end in two */
     tk_a8_free(&ccgrid.glass);
     trim(&ccgrid);
+    } else {
     tk_layer_prepare(&ccgrid);
     }
     ccg_part = k < CCG_PARTS ? k + 1 : 0;
@@ -2284,8 +2385,9 @@ static void build_cc_grid(void)
 static void cc_levels(void)
 {
     for (int i = 0; i < 2; i++) {
-        float x = CC_COL(2 + i), v = CCS.lvl[i];
-        cclvl[i].clip_r = (tk_rect){ PT(x), PT(CC_ROW(0) + CC_W2 * (1 - v)), PT(CC_U), PT(CC_W2 * v) };
+        float r[5], v = CCS.lvl[i];
+        cc_mod_rect(1 + i, r);
+        cclvl[i].clip_r = (tk_rect){ PT(r[0]), PT(r[1] + CC_W2 * (1 - v)), PT(CC_U), PT(CC_W2 * v) };
     }
 }
 /* cp7c: build_cc in stages, one an idle call (sh_idle_pending while some are left: the whole was ~0.6-1.2 s on the
@@ -2397,7 +2499,9 @@ static void build_cc_stage(int st)
     }
     if (!cclvl[0].bmp.px) {
         for (int i = 0; i < 2; i++) {
-            float x = CC_COL(2 + i), y = CC_ROW(0);
+            float rr[5];
+            cc_mod_rect(1 + i, rr);
+            float x = rr[0], y = rr[1];
             dc l = mk(&cclvl[i], "cc-level", x, y, CC_U, CC_W2, 0, 0);
             d_rrect(&l, x, y, CC_U, CC_W2, 34, W(1));
             cclvl[i].clip = 1;
@@ -2408,7 +2512,7 @@ static void build_cc_stage(int st)
     }
     return;
     }
-    if (st >= 5 && st < 5 + CCG_PARTS) { cc_grid_part(st - 4); return; }   /* (5-13) */
+    if (st >= 5 && st < 5 + CCG_PARTS) { cc_grid_part(st - 4); return; }   /* (5-17) */
     tk_layer_init(&ccg, "cc-grid-group");
     ccg.ox = PT(CC_COL(0) + .85f * (4 * CC_U + 3 * CC_GAP));
     ccg.oy = PT(CC_ROW(0));
@@ -2474,8 +2578,8 @@ static void cc_mods(float p)
         tk_layer *m = &ccmod[i];
         float r[5];
         cc_mod_rect(i, r);
-        int row = i < 3 || i == 11 ? 0 : i < 7 ? 1 : 2;
-        float dl = .07f * row, q = tk_clampf((p - dl) / (1 - dl), 0, 1);
+        int row = i == CC_CHROME ? 0 : CCL[i][1];            /* 8b: six rows: .045 a row (B4's three were .07) */
+        float dl = .045f * row, q = tk_clampf((p - dl) / (1 - dl), 0, 1);
         float s = .9f + .1f * q, a = tk_clampf(q * 1.6f, 0, 1);
         s *= cc_pscale[i];
         if (e > 0) {
@@ -2763,7 +2867,7 @@ static void cc_release(void)
 /* cp6: a lit circle on the chrome's + or Power (they are one layer with the page icons: no grow, the glow only) */
 static void cc_chrome_press(float cx)
 {
-    cc_hlm = 11;
+    cc_hlm = CC_CHROME;
     cc_hlr[0] = cx - 14; cc_hlr[1] = 16; cc_hlr[2] = cc_hlr[3] = 28; cc_hlr[4] = 14;
     hl_set(&cchl, (tk_rect){ cx - 14, 16, 28, 28 }, (tk_rect){ cx - 14, 16, 28, 28 }, 14, PRESS_BTN);
     cc_mods(CCS.p);
@@ -2796,50 +2900,71 @@ static int cc_tap(float x, float y)
         int k = (x >= X + CN_PAD + CN_D + 14 + CN_MD + 2.75f) + 2 * (y >= Y + CN_PAD + CN_D + 14 + CN_MD + 3.1f);
         toast(k == 0 ? CC_NOT[4] : k == 1 ? CC_NOT[1] : k == 2 ? CC_NOT[5] : "VPN isn't available yet");
         return 1;
-    } else if (y >= CC_R3 && y < CC_R3 + CC_U) {
-        int c = x < CCX[1] - CC_GAP / 2 ? 0 : x < CCX[2] - CC_GAP / 2 ? 1 : x < CCX[3] - CC_GAP / 2 ? 2 : 3;
-        if (c == 0) {
-            Q[0].lit = !Q[0].lit; Q[0].facelit.hidden = Q[0].iconlit.hidden = !Q[0].lit; Q[0].face.hidden = Q[0].icon.hidden = Q[0].lit; sh_torch(Q[0].lit); lock_ver++;
-            cclit.hidden = !Q[0].lit || !cclit.bmp.px;
-            sh_haptic_k(SH_HAP_LIGHT);       /* B4: a toggle, felt */
-            return 1;
-        }
-        else if (c == 1) {                   /* cp7: Portrait Orientation Lock (Track A's pref; the apps that turn) */
-            int on = !sh_orientation_lock();
-            sh_orientation_lock_set(on);
-            sh_haptic_k(SH_HAP_LIGHT);
-            toast(on ? "Portrait Orientation Lock: On" : "Portrait Orientation Lock: Off");
-            build_cc_grid(); cc_link();
-            return 1;
-        }
-        else if (c == 3) {                   /* Track A, 1.0: Low Power Mode (kernel: the conservative clocks, kept) */
-            int on = !sh_low_power_on();
-            sh_low_power(on);
-            sh_haptic_k(SH_HAP_LIGHT);
-            toast(on ? "Low Power Mode On" : "Low Power Mode Off");
-            build_cc_grid(); cc_link();      /* cp6: the tile lit / unlit (a rare toggle: the grid's rects and glyphs, no bake on the GPU row) */
-            return 1;
-        }
-        else return 1;                       /* Emergency: a hold (G_CCEM) */
-    } else if (y >= CC_R4 && y < CC_R4 + CC_U && x >= CCX[0] && x < CCX[3] + CC_U) {
-        /* Track A, 1.0: Timer, Calculator, Mirror, Camera open their apps (Timer: Clock; Mirror: the front camera);
-         * on the lock screen they ask for the unlock first (no app over the lock without it) */
-        static const char *const K4[4] = { "clock", "calc", "camera", "camera" };
-        int c = x < CCX[1] - CC_GAP / 2 ? 0 : x < CCX[2] - CC_GAP / 2 ? 1 : x < CCX[3] - CC_GAP / 2 ? 2 : 3;
-        if (c == 2) {                        /* 8a: Silent Mode (works on the lock too, as iOS's) */
-            int on = !snd_silent();
-            sh_haptic_k(SH_HAP_LIGHT);
-            snd_silent_set(on);
-            toast(on ? "Silent Mode On" : "Silent Mode Off");
+    }
+    /* 8b: the round and wide modules by their index (CCL's places) */
+    int m = cc_mod_at(x, y);
+    if (m == 3) {                                /* Flashlight */
+        Q[0].lit = !Q[0].lit; Q[0].facelit.hidden = Q[0].iconlit.hidden = !Q[0].lit; Q[0].face.hidden = Q[0].icon.hidden = Q[0].lit; sh_torch(Q[0].lit); lock_ver++;
+        cclit.hidden = !Q[0].lit || !cclit.bmp.px;
+        sh_haptic_k(SH_HAP_LIGHT);               /* B4: a toggle, felt */
+        return 1;
+    }
+    if (m == 4) {                                /* cp7: Portrait Orientation Lock (Track A's pref; the apps that turn) */
+        int on = !sh_orientation_lock();
+        sh_orientation_lock_set(on);
+        sh_haptic_k(SH_HAP_LIGHT);
+        toast(on ? "Portrait Orientation Lock: On" : "Portrait Orientation Lock: Off");
+        build_cc_grid(); cc_link();
+        return 1;
+    }
+    if (m == 6) {                                /* Track A, 1.0: Low Power Mode (kernel: the conservative clocks, kept) */
+        int on = !sh_low_power_on();
+        sh_low_power(on);
+        sh_haptic_k(SH_HAP_LIGHT);
+        toast(on ? "Low Power Mode On" : "Low Power Mode Off");
+        build_cc_grid(); cc_link();              /* cp6: the tile lit / unlit (a rare toggle: the grid's rects and glyphs, no bake on the GPU row) */
+        return 1;
+    }
+    if (m == 5) return 1;                        /* Emergency: a hold (G_CCEM) */
+    if (m == 9) {                                /* 8a: Silent Mode (works on the lock too, as iOS's) */
+        int on = !snd_silent();
+        sh_haptic_k(SH_HAP_LIGHT);
+        snd_silent_set(on);
+        toast(on ? "Silent Mode On" : "Silent Mode Off");
+        return 1;
+    }
+    if (m == 12) {                               /* 8b: Focus: Do Not Disturb (no banners or sounds, the urgent ones still) */
+        int on = !sh_pref_int("notif.dnd", 0);
+        sh_pref_set_int("notif.dnd", on);
+        sh_haptic_k(SH_HAP_LIGHT);
+        toast(on ? "Do Not Disturb: On" : "Do Not Disturb: Off");
+        build_cc_grid(); cc_link();
+        return 1;
+    }
+    if (m == 11) {                               /* 8b: Now Playing: its play / pause; elsewhere on it, Music */
+        float r[5];
+        cc_mod_rect(11, r);
+        if (y >= r[1] + 108 && tk_fabsf(x - (r[0] + r[2] / 2)) < 20) {
+            if (cc_np_toggle()) { sh_haptic_k(SH_HAP_LIGHT); build_cc_grid(); cc_link(); }
+            else toast("Nothing is playing");
             return 1;
         }
         if (lockY > -H_PT * .5f) { toast("Unlock to open it"); return 1; }
         sh_haptic_k(SH_HAP_LIGHT);
         cc_close();
-        if (!open_app_key(K4[c])) toast("Not in this version yet");
+        if (!open_app_key("music")) toast("Not in this version yet");
         return 1;
-    } else
-        return 0;
+    }
+    if (m == 7 || m == 8 || m == 10) {
+        /* Track A, 1.0: Timer, Calculator, Camera open their apps (Timer: Clock); on the lock screen they ask for
+         * the unlock first (no app over the lock without it) */
+        if (lockY > -H_PT * .5f) { toast("Unlock to open it"); return 1; }
+        sh_haptic_k(SH_HAP_LIGHT);
+        cc_close();
+        if (!open_app_key(m == 7 ? "clock" : m == 8 ? "calc" : "camera")) toast("Not in this version yet");
+        return 1;
+    }
+    return m >= 0;
 }
 /* B4: a tap on the expanded panel's links (the Cellular one is a hold: G_CCCELL) */
 static void cc_x_tap(int k)
@@ -3962,6 +4087,7 @@ static void own_strip(int a, int i)
     if (KB.want || ap_slim(k)) kb_slim(&appst[i]);   /* B3 / B5: one trim: a strip cut to what it holds (gone if empty) */
     tk_layer_prepare(&appst[i]);
 }
+static void wf_list_build(void);
 static void own_extras(int a)
 {
     const char *k = APPS[a].k;
@@ -3973,6 +4099,7 @@ static void own_extras(int a)
     if (lx_is(k)) lx_build();
     ck_extras_of(k);                                 /* helper B5: the Clock's and the Calculator's layers */
     sv_extras(k);                                    /* survival-next: the tools' live layers */
+    wf_list_build();                                 /* 8b: Settings > Wi-Fi's list (before cm_extras turns an unused one off) */
     cm_extras(k);                                    /* helper I */
     kb_commit();                                     /* B3: the keyboard up or down, as the page drew */
     relink();
@@ -4981,6 +5108,7 @@ static int pc_gate_launch(unsigned id);             /* Track A: shell_passcode.i
 #include "shell_switcher.inc"                       /* helper D: the app switcher */
 #include "shell_camera.inc"                         /* the Camera on Track A's front-camera driver */
 #include "shell_apps.inc"                           /* helper B5: the lists (SCV), the avatars, the dock's badges */
+#include "shell_wifi_list.inc"                      /* 8b: Settings > Wi-Fi scrolls (on SCV) */
 #include "shell_comms.inc"                          /* helper I: Phone and Messages, the call screen */
 #include "shell_power.inc"                          /* P3x: Power held: slide to power off, Restart, Cancel */
 #include "shell_settings.inc"                       /* helper B2: Settings */
@@ -5152,10 +5280,11 @@ static void relink(void)
     link(&appc, st, na + cm_layers(st + na));    /* helper I: the keypad's line and ring, Messages' fields */
     /* B9: the notifications' stack is the lock's (lkng, over the list: fanned out it takes the list's room); the
      * Centre's "N Notifications" pill only in Emergency */
-    tk_layer *lk[] = { &lkground, &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &sysplat, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
+    tk_layer *lk[] = { &lkground, &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &sysplat, &sysless, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
     if (!lkground.name) { tk_layer_init(&lkground, "lock-ground"); lkground.hidden = 1; }   /* cp7q: the moving lock's ground */
     if (!sysplat.name) { tk_layer_init(&sysplat, "lock-systems"); sysplat.hidden = 1; }   /* 8a */
-    link(&lockg, lk, EMG ? 15 : 14);
+    if (!sysless.name) { tk_layer_init(&sysless, "lock-systems-less"); sysless.hidden = 1; }
+    link(&lockg, lk, EMG ? 16 : 15);
     lkn_link();
     /* B10: the vendor cards in the list as B4 had them: the lower cards, the members' platters and words under the
      * head card, "Show less" above it, the chevron on top */
@@ -5866,8 +5995,34 @@ static void tp_mark(const char *n)
     tp_t = now;
 }
 static void sh_touch_(int phase, float x, float y, float t);
+/* 8b: the pinch (sbtk's tk_pinch on finger 0 = sh_touch and finger 1 = sh_touch_finger): who takes it, and the
+ * finger left down after it (ignored until it lifts, as iOS: a pinch's end is no pan or tap). Today: Photos' viewer
+ * (shell_media.inc's med_pinch); the grids and the Camera are the app builders' (the same recogniser) */
+static tk_pinch PIN;
+static int pin_on, pin_swallow;
+static int med_pinch_ok(void);
+static void med_pinch(int st, const tk_pinch *p);
+static int pin_route(int r)
+{
+    if (r == TK_PINCH_BEGAN && T.kind == G_MEDIA && med_pinch_ok()) { pin_on = 1; med_pinch(1, &PIN); return 1; }
+    if (!pin_on) return 0;
+    if (r == TK_PINCH_CHANGED) med_pinch(2, &PIN);
+    else if (r == TK_PINCH_ENDED) { med_pinch(3, &PIN); pin_on = 0; pin_swallow = 1; T.kind = G_NONE; }
+    return 1;
+}
+void sh_touch_finger(int finger, int ph, float x, float y, float t_ms)
+{
+    if (finger != 1) return;                         /* (two fingers: a third is iOS's too, unused) */
+    (void)pin_route(tk_pinch_touch(&PIN, 1, ph, x, y, t_ms));   /* (the kernel ticks after it: next_finger) */
+}
 void sh_touch(int phase, float x, float y, float t)
 {
+    {   /* 8b: finger 0 into the pinch first; while it pinches (or after, until it lifts) the rest never sees it */
+        int r = tk_pinch_touch(&PIN, 0, phase, x, y, t);
+        if (phase == 0) pin_swallow = 0;
+        if (pin_route(r) || (pin_on && phase != 0)) return;
+        if (pin_swallow) { if (phase == 2) pin_swallow = 0; return; }
+    }
     const char *on = tp_n;
     uint64_t ot = tp_t;
     int oin = tp_in;
@@ -6020,7 +6175,8 @@ static void sh_touch_(int phase, float x, float y, float t)
             if (y >= DOCK_TOP && y < H_PT - 30) { T.kind = G_DOCK; icon_press(app_hit(x, y)); return; }   /* the dock: a tap opens its app */
             if (SRCH_HIT(x, y)) { T.kind = G_DOCK; return; }   /* P3g: Search */
             if (y >= 56 && y < DOCK_TOP && !SRCH_HIT(x, y) && !on_w) {
-                ep_apps2_now();                  /* cp7k: page 2 whole before it can show (Emergency's switch's rest) */
+                /* 8b (8a2's phone: "touch down: home 133 ms" after Emergency's switch): page 2's rest is made while the
+                 * pages move (sh_tick: two parts a frame), not all here */
                 T.kind = G_PAGE;
                 T.base = page_x;
                 page_dir = 0;
@@ -6077,8 +6233,16 @@ static void sh_touch_(int phase, float x, float y, float t)
         if (y >= H_PT - 30) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0; }
         /* B10: the notifications fanned out are over the list: theirs first (a tap beside them folds them back) */
         else if (lkn_p() > 0 && lkn_down(x, y, t)) { T.kind = G_LKN; return; }
+        else if (sysl_hit(x, y)) {                   /* 8a: "Show less": the cards fold back into the card */
+            T.kind = G_SYSP; T.arg = 1;
+            float w = sysl_w();
+            tk_rect c = { 195 - w / 2, SYSL_Y, w, SYSL_H };
+            hl_set(&lockhl, c, c, SYSL_H / 2, PRESS_BTN);
+            lk_hl_key = 0;
+            lock_ver++;
+        }
         else if (sysp_hit(x, y)) {                   /* 8a: the Systems platter: lit, a tap fans the cards out */
-            T.kind = G_SYSP;
+            T.kind = G_SYSP; T.arg = 0;
             tk_rect c = { PL_X, SYSP_Y, PL_W, SYSP_H };
             hl_set(&lockhl, c, c, PL_R, W(.12f));
             lk_hl_key = 0;
@@ -6347,7 +6511,8 @@ static void sh_touch_(int phase, float x, float y, float t)
     case G_SYSP:
         hl_off();
         sh_haptic_k(SH_HAP_LIGHT);
-        sysp_fold(1, 0);
+        if (T.arg) { vc_close_all(0); scroll = 0; sp_scroll.live = 0; scroll_momentum = 0; }   /* "Show less": folded whole */
+        sysp_fold(!T.arg, 0);
         break;
     case G_TAP_ROW: {
         const sys_t *s = &G[T.arg].it[T.arg2];
@@ -6511,6 +6676,12 @@ int sh_tick(float dt, float t)
     clk_update(t);
     if (ap_pending) { app_build_step(); mv = 1; if (!ap_pending && AP.on) set_app_rect(AP.R); }   /* P3i */
     mv |= sysp_tick(dt);                          /* 8a: the Systems platter folding / fanning */
+    if (EP.goal >= 0 && (EP.post & EP_APPS2) && (T.kind == G_PAGE || sp_page.live || page_x < -1)) {
+        /* 8b: page 2 being part-made while the pages move: two parts a frame (~10 ms each on the phone) */
+        for (int i = 0; i < 2 && (EP.post & EP_APPS2); i++) if (!home_apps2_step()) EP.post &= ~EP_APPS2;
+        relink();
+        mv = 1;
+    }
     if (SL.dir) {
         SL.t = tk_minf(1, SL.t + dt / (SL.dir < 0 ? SL_OUT : SL_IN));
         if (SL.t >= 1) {
@@ -6822,6 +6993,21 @@ static void prep_tree(tk_layer *l)
         prep_tree(l->child);
     }
 }
+/* 8b (8b's phone: "prep_tree 22-26 ms" in one idle call after home's rebuild): at most *n missing half copies a call;
+ * 1 while some are left (the idle comes back: sh_idle_pending) */
+static int prep_left;
+static int prep_some(tk_layer *l, int *n)
+{
+    for (; l; l = l->next) {
+        if (l->bmp.px && !l->external && !l->half.px) {
+            if (*n <= 0) return 1;
+            tk_layer_prepare(l);
+            (*n)--;
+        }
+        if (prep_some(l->child, n)) return 1;
+    }
+    return 0;
+}
 /* cp7f (Track A): each piece timed, named when slow (sh_slow_piece: 7e's 245-273 ms idle calls on the phone) */
 #define IP_(name, stmt) do { uint64_t ip0_ = tk_us(); stmt; sh_slow_piece(name, (unsigned)(tk_us() - ip0_)); } while (0)
 void sh_idle(void)
@@ -6867,16 +7053,17 @@ void sh_idle(void)
     if ((!locked || cc_lock_ok) && !CCS.on && !AP.on && !nc_on() &&
         (ccb_next || !CCS.built || cc_stale || cc_lk != locked || (locked && cc_lv != lock_ver))) {
         if (!ccb_next) { cc_stale = 0; cc_lk = locked; cc_lv = lock_ver; }   /* (a change during the stages: again after) */
-        { static const char *const CCN[15] = { "build_cc_step", "build_cc 1 picture", "build_cc 2 light blur", "build_cc 3 heavy blur",
+        { static const char *const CCN[19] = { "build_cc_step", "build_cc 1 picture", "build_cc 2 light blur", "build_cc 3 heavy blur",
                                                 "build_cc 4 chrome", "build_cc 5 grid bitmap", "build_cc 6 grid conn", "build_cc 7 grid circles",
                                                 "build_cc 8 grid mini", "build_cc 9 grid sliders", "build_cc 10 grid torch", "build_cc 11 grid flame",
-                                                "build_cc 12 grid timer", "build_cc 13 grid last", "build_cc 14 link" };
+                                                "build_cc 12 grid timer", "build_cc 13 grid bell", "build_cc 14 grid playing",
+                                                "build_cc 15 grid focus", "build_cc 16 grid trim", "build_cc 17 grid half", "build_cc 18 link" };
           int r_ = 0, st_ = ccb_next ? ccb_next : 1;
-          IP_(CCN[st_ < 15 ? st_ : 0], r_ = build_cc_step()); if (r_) return; }   /* cp7i: the stage in the name */
+          IP_(CCN[st_ < 19 ? st_ : 0], r_ = build_cc_step()); if (r_) return; }   /* cp7i: the stage in the name */
     } else if (ccb_next && !CCS.on) free_cc();     /* not wanted any more (an app needs the room): its parts go, later again */
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
-    IP_("prep_tree", prep_tree(home.child));                     /* home's pages too (their widgets and app grids, P2s) */
+    { int n_ = 2; IP_("prep_tree", prep_left = prep_some(home.child, &n_)); if (prep_left) return; }   /* home's pages too (their widgets and app grids, P2s); 8b: two a call */
     uint64_t lp0_ = tk_us();
     tk_layer_prepare(&star);
     tk_layer_prepare(&homebar);
@@ -6897,7 +7084,7 @@ void sh_idle(void)
 }
 #undef IP_
 
-int sh_idle_pending(void) { return (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C) ||
+int sh_idle_pending(void) { return prep_left || (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C) ||
                                    fl_row >= 0 || ccb_next || lx_idle_pending(); }   /* cp7c: the sliced flatten, the CC's stages */
 
 int sh_moving(void)

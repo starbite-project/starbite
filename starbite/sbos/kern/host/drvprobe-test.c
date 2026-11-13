@@ -72,6 +72,8 @@ int main(void)
     CHECK(strstr(logbuf, "drvprobe: summary L1: a=P b=T") != 0, "summary L1");
     CHECK(strstr(logbuf, "drvprobe: summary: b L0: the widget did not move") != 0, "summary FAIL reason");
     CHECK(strstr(logbuf, "drvprobe: summary: b L1: out of time") != 0, "summary timeout");
+    CHECK(strstr(logbuf, "drvprobe: summary: a L1 ok: fine") != 0, "summary: a passing probe's facts at its highest level");
+    CHECK(strstr(logbuf, "drvprobe: summary: a L0 ok") == 0, "summary: only the highest passing level");
     memset(calls_a, 0, sizeof calls_a); memset(calls_b, 0, sizeof calls_b); aborts_b = 0; norder = 0;
     logbuf[0] = 0;
     run(1);

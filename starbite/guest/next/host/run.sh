@@ -62,6 +62,9 @@ $CC -c -O2 -std=gnu11 $W -DSBTK_NO_LINUX_FAKE -Dmain=sbtk_host_main -I"$ui" -I"$
 # Track A: host/main.c's time zones are kern/tzdb.c's
 $CC -c -O2 -std=gnu11 $W -I"$ui/../kern" -I"$T/starbite/utility" "$ui/../kern/tzdb.c" -o "$OUT/o/tzdb.o"
 $CC -c -O2 -std=gnu11 $W -I"$T/starbite/utility" "$T/starbite/utility/tz.c" -o "$OUT/o/tz.o"
+for f in tzcities tzcity; do                  # Track A 8a: the cities (host/main.c's sh_city_*), when the tree has them
+    [ -f "$ui/../kern/$f.c" ] && $CC -c -O2 -std=gnu11 $W -I"$ui/../kern" "$ui/../kern/$f.c" -o "$OUT/o/$f.o"
+done
 $CC -c -O2 -std=gnu11 $W "$T/starbite/sbos/kern/passcode.c" -o "$OUT/o/passcode.o"     # Track A: the host's sh_pass_*
 $CC -c -O2 -std=gnu11 $W "$sb/guide/survival_host.c" -o "$OUT/o/survival_host.o"   # (main.c's survival API)
 $CC -c -O2 -std=gnu11 $W -I"$here/fake" -I"$T/starbite/guest/sbos" -I"$ui" "$here/../gwin.c" -o "$OUT/o/gwin.o"

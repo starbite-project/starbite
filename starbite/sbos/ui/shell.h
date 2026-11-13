@@ -645,6 +645,10 @@ void sh_alarm_sound(int on);
 int sh_city_count(void);
 int sh_city_find(const char *query, int *out, int max);
 int sh_city_get(int i, const char **name, const char **country, int *tz, int *lat_e4, int *lon_e4);
+/* 8b (Track A): Settings > Developer > USB Console (off by default): on, the phone is a read-only serial console when
+ * plugged into a computer (a Mac asks "Allow accessory to connect?" the first time); kept in pref dev.usb */
+void sh_usb_console(int on);
+int sh_usb_console_on(void);
 enum { SH_DOC_NOTES = 0, SH_DOC_CONTACTS = 1 };
 int sh_doc_put(int coll, unsigned id, const void *p, unsigned n);
 int sh_doc_get(int coll, unsigned id, void *p, unsigned cap);

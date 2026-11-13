@@ -73,6 +73,8 @@ static uint64_t t_go;                       /* this start's CPU_ON (0: not yet) 
 #define GUEST_SLOW_MS 30000U                /* "taking longer than usual" from here (the host waits 90 s) */
 #define GUEST_FSCK_EXTEND_MS 180000U        /* the disk check: the host waits this much longer for HELLO */
 static uint32_t seq_seen = 0, seq_blit = 0;
+static uint32_t full_pos;                   /* a whole copy under way: its next row (blit_any) */
+#define GUEST_FULL_ROWS 336U                /* a whole copy's rows a call (a quarter of 1344: ~20 ms on the phone) */
 static uint32_t blits, blit_ms_max, rows_copied;   /* the view's frames drawn, its slowest copy, rows copied */
 static uint64_t t_hidden, t_screen_off;
 /* Linux busy (cp3 2026-11-12: a build and installs broke when the phone slept): the last time its CPU load
@@ -100,7 +102,7 @@ static unsigned surf_h(void) { return mode == GUEST_TERM ? GUEST_TERM_H : mode =
 int guest_mode(void) { return mode; }
 int guest_scale(void) { return 2; }      /* (the terminal: a 16 x 32 font instead of 8 x 16 at 4x) */
 int guest_term_ok(void) { return term_ok; }
-void guest_full_next(void) { seq_blit = 0; }     /* the next blit copies every row */
+void guest_full_next(void) { seq_blit = 0; full_pos = 0; }   /* the next blits copy every row (in pieces) */
 
 static void arm(uint32_t period)
 {
@@ -201,8 +203,64 @@ static void host_log(const char *l)
     sb_log(u.b);
 }
 /* the guest kernel's log: only what matters goes to pmsg (it holds 16 KB) */
+/* instant start: Linux's own boot milestones by its log's "[ s.us]" stamps (its clock from CPU_ON), logged in one
+ * line at HELLO (8a2 on the phone: ~23 s from CPU_ON to HELLO; pmsg's ring kept none of the guest's lines) */
+enum { BT_INIT, BT_KO, BT_FSCK0, BT_FSCK1, BT_ROOT, BT_SBINIT, BT_SBWL, BT_OUT, BT_HELLO, BT_SVC, BT_N };
+static uint32_t bt_ms[BT_N];                /* ms + 1 (0: not seen) */
+static const char *const bt_key[BT_N] = {"Run /init", "guest-init: sbguest.ko loaded", "overlay check: started",
+                                         "overlay check: e2fsck", "switch_root to", "sbinit: ", "sbinit: starting",
+                                         "sbwl: output", "sbwl: HELLO", "sbinit: services: up"};
+static const char *const bt_name[BT_N] = {"init ", ", sbguest.ko ", ", disk check ", "-", ", root ", ", sbinit ",
+                                          ", sbwl ", ", its output ", ", HELLO ", ", services "};
+static int bt_has(const char *l, const char *k)
+{
+    for (; *l; ++l)
+        if (sb_prefix(l, k))
+            return 1;
+    return 0;
+}
+static uint32_t bt_stamp(const char *l)     /* "[   12.345678] ..." -> 12345 + 1; 0 without a stamp */
+{
+    while (*l == ' ')
+        ++l;
+    if (*l++ != '[')
+        return 0;
+    while (*l == ' ')
+        ++l;
+    uint32_t s = 0, f = 0, nf = 0;
+    for (; *l >= '0' && *l <= '9'; ++l)
+        s = s * 10U + (uint32_t)(*l - '0');
+    if (*l++ != '.')
+        return 0;
+    for (; *l >= '0' && *l <= '9' && nf < 3; ++l, ++nf)
+        f = f * 10U + (uint32_t)(*l - '0');
+    while (nf++ < 3)
+        f *= 10U;
+    return s * 1000U + f + 1U;
+}
+static void bt_log(void)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "guest: Linux's boot (its clock, ms): ");
+    for (int k = 0; k < BT_N; ++k) {
+        ub_s(&u, bt_name[k]);
+        if (bt_ms[k])
+            ub_dec(&u, bt_ms[k] - 1U);
+        else
+            ub_s(&u, "-");
+    }
+    sb_log(u.b);
+}
 static void guest_log(const char *l)
 {
+    uint32_t bt = bt_stamp(l);
+    for (int k = 0; bt && k < BT_N; ++k)
+        if (!bt_ms[k] && bt_has(l, bt_key[k])) {
+            bt_ms[k] = bt;
+            if (k == BT_SVC && st == GUEST_RUNNING)
+                bt_log();                   /* (the services after HELLO: the line again, now with them) */
+        }
     static const char *const keep[] = {"guestd", "sbguest", "guest-init", "panic", "Oops", "BUG", "Unable",
                                        "failed", "error", "smp: Brought up", "STARBITE"};
     int has_echo = 0;
@@ -549,6 +607,8 @@ static int load_step(void)
         t_go = 0;
         ls_k = 0;
         frz = 0;
+        for (int i = 0; i < BT_N; ++i)
+            bt_ms[i] = 0;
         pump_reads = pump_sectors = pump_spent = 0;
         ls_blk0 = sbg_stats()->blk_reads;
         cfg_init();                         /* this mode's surface */
@@ -699,6 +759,16 @@ int guest_stop(void)
  * 9P and writes wait for the guest timer's poll. */
 #define GUEST_PUMP_US 2000U
 #define GUEST_PUMP_WIN_US 16667U
+/* a booting Linux's mode: how fast the host serves it (guest_pump's budget, the guest timer's period) */
+enum { BM_BACKGROUND, BM_SHOWN, BM_DARK, BM_N };
+static uint32_t bm_ticks[BM_N];             /* the guest timer's ticks in each mode during this boot (HELLO's line) */
+static int bm_last = -1;
+static int boot_mode(void)
+{
+    if (st != GUEST_STARTING || loading)
+        return BM_BACKGROUND;
+    return !screen ? BM_DARK : shown ? BM_SHOWN : BM_BACKGROUND;
+}
 /* cp7q (Track A's 7p: a 64 KiB read is ~20 ms from the microSD, 36 late frames): the pump measures its own reads
  * (us per sector, a running average; first guess 180 us = ~2.9 MB/s) and takes a request only when its predicted
  * time fits what is left of the window's budget (4 KiB at the card's speed: ~1.4 ms) */
@@ -713,7 +783,12 @@ void guest_pump(void)
         win0 = t;
         spent = 0;
     }
-    uint32_t max = spent >= GUEST_PUMP_US ? 0 : (uint32_t)((GUEST_PUMP_US - spent) / (pump_us_sec ? pump_us_sec : 1));
+    /* instant start: a booting Linux's reads (card-bound, each one waits for the host) get more budget where frames
+     * matter less (Track A): its window shown ("Starting Linux") 3x, the screen off 6x, a start in the background
+     * (a card's app, the self test's films) the frame-friendly 1x */
+    int bm = boot_mode();
+    uint64_t budget = bm == BM_DARK ? 6U * GUEST_PUMP_US : bm == BM_SHOWN ? 3U * GUEST_PUMP_US : GUEST_PUMP_US;
+    uint32_t max = spent >= budget ? 0 : (uint32_t)((budget - spent) / (pump_us_sec ? pump_us_sec : 1));
     if (!max) {
         pump_spent++;
         return;
@@ -747,7 +822,11 @@ void guest_timer(unsigned id)
             return;                         /* the next step at the next tick */
         loading = 0;
         if (lr > 0) {
-            arm(10);                        /* the guest's poll from here */
+            arm(10);                        /* the guest's poll from here (the boot's mode below sets 2 or 10; HELLO
+                                             * sets 10 / 50) */
+            bm_last = -1;
+            for (int i = 0; i < BM_N; ++i)
+                bm_ticks[i] = 0;
         } else {
             gcard_abort();
             st = GUEST_FAILED;
@@ -759,6 +838,14 @@ void guest_timer(unsigned id)
             ui_mark_dirty();
         }
         return;
+    }
+    if (st == GUEST_STARTING) {             /* the boot's mode: shown or dark, the poll every 2 ms; else 10 */
+        int bm = boot_mode();
+        bm_ticks[bm]++;
+        if (bm != bm_last) {
+            bm_last = bm;
+            arm(bm == BM_BACKGROUND ? 10 : 2);
+        }
     }
     uint64_t gt0 = sb_ms();
     sbg_poll();
@@ -804,7 +891,18 @@ void guest_timer(unsigned id)
             ub_dec(&u, pump_us_sec);
             ub_s(&u, " us a sector)");
             sb_log(u.b);
+            /* Track A: on its own line (the one above is cut at 256 characters: the start summary alone is ~250), so
+             * the main session's HELLO gate can read it */
+            ub_init(&u);
+            ub_s(&u, "guest: HELLO served as (ticks): shown ");
+            ub_dec(&u, bm_ticks[BM_SHOWN]);
+            ub_s(&u, ", dark ");
+            ub_dec(&u, bm_ticks[BM_DARK]);
+            ub_s(&u, ", background (throttled) ");
+            ub_dec(&u, bm_ticks[BM_BACKGROUND]);
+            sb_log(u.b);
             gt_max = 0;
+            bt_log();
         }
         arm(shown ? 10 : 50);
         if (shown)
@@ -912,6 +1010,7 @@ int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int
     return blit_any(0, back, stride_px, x0, y0, py0, py1);
 }
 int guest_blit_rows(uint32_t *const *rows, int *py0, int *py1) { return blit_any(rows, 0, 0, 0, 0, py0, py1); }
+static uint32_t full_seq0;                  /* the whole copy's first frame (blit_any) */
 /* the target's row r: the table's (L3), else the back buffer's at (x0, y0 + r) */
 #define TROW(r) (rowt ? rowt[r] : back + (uintptr_t)(y0 + (r)) * stride_px + x0)
 static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0,
@@ -932,9 +1031,24 @@ static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, u
     }
     const volatile uint32_t *rows = sbg_rows();
     uint32_t drawn = seq_blit, w = surf_w(), hh = surf_h(), k = (uint32_t)guest_scale(), n = 0;
-    seq_seen = seq_blit = seq;
+    uint32_t ylo = 0, yhi = hh;
+    if (!drawn) {
+        /* a whole copy (an open, the keyboard up / down) in pieces of GUEST_FULL_ROWS rows a call (8a2: the open of
+         * a Linux app after a thaw, "shell tick 82 ms": all 1344 rows from the non-cacheable surface doubled into
+         * 15.5 MB in one tick); unfinished, it stays "whole" (seq_blit 0); finished, the rows newer than the pass's
+         * first frame come by the row table as usual */
+        if (!full_pos)
+            full_seq0 = seq;
+        ylo = full_pos;
+        yhi = full_pos + GUEST_FULL_ROWS < hh ? full_pos + GUEST_FULL_ROWS : hh;
+        full_pos = yhi >= hh ? 0 : yhi;
+        seq_seen = seq;
+        seq_blit = full_pos ? 0 : full_seq0;
+    } else {
+        seq_seen = seq_blit = seq;
+    }
     uint64_t t0 = sb_ms();
-    for (uint32_t y = 0; y < hh; ++y) {
+    for (uint32_t y = ylo; y < yhi; ++y) {
         if (rows && drawn && !sbshm_row_newer(rows[y], drawn))
             continue;
         const volatile uint32_t *s = (const volatile uint32_t *)((uintptr_t)px + (uintptr_t)y * stride);

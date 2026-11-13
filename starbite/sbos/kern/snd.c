@@ -221,6 +221,40 @@ static void snprintf_like(char *d, unsigned cap, const char *a, const char *b, c
 }
 #define SL(x) ((long)(x))
 
+static struct abox_hal snd_hal;             /* snd_init's HAL, kept for snd's own boots */
+static int snd_hal_ok;
+/* the last Calliope boot snd made: its longest single step (the main-loop stall it can cause), stage, total */
+static uint32_t boot_slow_ms, boot_slow_stage, boot_total_ms;
+static int pfinish_raw(int ok, const char *line);
+/* "longest boot step N ms (stage S), boot N ms; " into b; its length */
+static unsigned snprintf_like3(char *b, unsigned cap, uint32_t slow, uint32_t stage, uint32_t total)
+{
+    char t[96];
+    unsigned n = 0;
+    const char *parts[3] = { "longest boot step ", " ms (stage ", ") of a "};
+    uint32_t vals[3] = { slow, stage, total };
+    for (unsigned k = 0; k < 3; ++k) {
+        for (const char *q = parts[k]; *q; ++q)
+            t[n++] = *q;
+        char d[12];
+        unsigned m = 0;
+        uint32_t v = vals[k];
+        do {
+            d[m++] = (char)('0' + v % 10U);
+            v /= 10U;
+        } while (v && m < sizeof d);
+        while (m)
+            t[n++] = d[--m];
+    }
+    for (const char *q = " ms boot; "; *q; ++q)
+        t[n++] = *q;
+    unsigned i = 0;
+    for (; i < n && i + 1 < cap; ++i)
+        b[i] = t[i];
+    b[i] = 0;
+    return i;
+}
+
 /* the newest failure line snd said (for the probe's FAIL line: pmsg keeps only the run's tail) */
 static char last_bad[112];
 static int has_s(const char *h, const char *n)
@@ -296,6 +330,8 @@ int snd_init(const struct snd_ops *ops, const struct abox_hal *hal)
     }
     /* the ring's window goes into every later abox_boot() (ours or the modem's), so either can carry media */
     if (ops->use_calliope && hal->file) {
+        snd_hal = *hal;                     /* snd's own (its RAM copy of the files, file_part): see cal_up */
+        snd_hal_ok = 1;
         if (!cal_avail)
             cal_avail = !cal_hal_set(hal) && !cal_map();
     } else {
@@ -756,6 +792,10 @@ static int cal_up(void)
         return 0;
     G.cal_t0 = now();
     (void)cal_map();                                /* again: a probe may have taken its own windows away */
+    /* snd's own HAL for its boot (its RAM copy, file_part), also when another user (the Calliope probe, the modem)
+     * set one since (drivers run 13: the probe's HAL had neither, so the copy was not used) */
+    if (snd_hal_ok)
+        (void)cal_hal_set(&snd_hal);
     cal_abox_hal();                                 /* abox.c's HAL: snd may be the first to boot Calliope */
     r = abox_boot_start();
     if (r > 0) {
@@ -832,6 +872,7 @@ static void cal_tick(void)
     G.cal_off_at = now() + CAL_IDLE_OFF_US;
     unsigned slow_stage = 0;
     uint32_t slow_us = abox_boot_slowest(&slow_stage);
+    boot_slow_ms = slow_us / 1000U, boot_slow_stage = slow_stage, boot_total_ms = (uint32_t)((now() - G.cal_t0) / 1000U);
     say("engine: Calliope booted for media in %u ms (with %u ms for its post-boot messages); the longest step %u ms "
         "(stage %u)", UL((now() - G.cal_t0) / 1000U), UL(CAL_SETTLE_MS), UL(slow_us / 1000U), UL(slow_stage));
 }
@@ -1350,6 +1391,20 @@ static const unsigned budget_of[3] = { 2000, 20000, 14000 };
 #define ENGINE_WAIT_US 4000000ULL               /* the probes' wait for snd's staged Calliope boot + settle */
 
 static int pfinish(int ok, const char *line)
+{
+    if (boot_total_ms) {                /* the boot's timing first: pmsg / the run's summary keep ~100 characters */
+        char b[240];
+        unsigned n = 0;
+        n = (unsigned)snprintf_like3(b, sizeof b, boot_slow_ms, boot_slow_stage, boot_total_ms);
+        for (const char *q = line; *q && n + 1 < sizeof b; ++q)
+            b[n++] = *q;
+        b[n] = 0;
+        boot_total_ms = 0;
+        return pfinish_raw(ok, b);
+    }
+    return pfinish_raw(ok, line);
+}
+static int pfinish_raw(int ok, const char *line)
 {
     if (P.level > 0 && !G.eng && !G.cap)
         cal_cancel("the probe is done");        /* a boot the probe started and no longer waits for */
@@ -2068,6 +2123,21 @@ static long k_vendor(void *ctx, const char *path, void *dst, uint32_t cap)
     return got;
 }
 
+/* abox.c's file_part: the cached file's size (len 0) or a piece of it; < 0 when not cached (abox.c then reads it whole) */
+static long k_file_part(void *ctx, const char *path, void *dst, uint32_t off, uint32_t len)
+{
+    (void)ctx;
+    int i = fwc_find(path);
+    if (i < 0)
+        return -1;
+    if (!len)
+        return (long)fwc[i].len;
+    if (!dst || off > fwc[i].len || len > fwc[i].len - off)
+        return -1;
+    memcpy(dst, fwc_buf + fwc[i].off + off, len);
+    return (long)len;
+}
+
 /* once, at snd_init_libsb (the OS's start, before its main loop): Calliope's files straight into the cache, so even
  * the first sound after power-on needs no VENDOR read on the main loop. Names as abox.c loads them. */
 static void snd_fw_prefetch(void)
@@ -2099,6 +2169,7 @@ void snd_init_libsb(void)
     if (inited)
         return;
     abox_hal_libsb(&k_hal, k_vendor, 0);
+    k_hal.file_part = k_file_part;          /* calliope_dram.bin from the RAM copy in 256 KiB steps */
     amp_hal_set(audio_hal_libsb());
     codec_hal_set(audio_hal_libsb());
     struct snd_ops o;
