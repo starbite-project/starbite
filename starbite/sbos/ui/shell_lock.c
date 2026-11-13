@@ -5978,8 +5978,34 @@ static void tp_mark(const char *n)
     tp_t = now;
 }
 static void sh_touch_(int phase, float x, float y, float t);
+/* 8b: the pinch (sbtk's tk_pinch on finger 0 = sh_touch and finger 1 = sh_touch_finger): who takes it, and the
+ * finger left down after it (ignored until it lifts, as iOS: a pinch's end is no pan or tap). Today: Photos' viewer
+ * (shell_media.inc's med_pinch); the grids and the Camera are the app builders' (the same recogniser) */
+static tk_pinch PIN;
+static int pin_on, pin_swallow;
+static int med_pinch_ok(void);
+static void med_pinch(int st, const tk_pinch *p);
+static int pin_route(int r)
+{
+    if (r == TK_PINCH_BEGAN && T.kind == G_MEDIA && med_pinch_ok()) { pin_on = 1; med_pinch(1, &PIN); return 1; }
+    if (!pin_on) return 0;
+    if (r == TK_PINCH_CHANGED) med_pinch(2, &PIN);
+    else if (r == TK_PINCH_ENDED) { med_pinch(3, &PIN); pin_on = 0; pin_swallow = 1; T.kind = G_NONE; }
+    return 1;
+}
+void sh_touch_finger(int finger, int ph, float x, float y, float t_ms)
+{
+    if (finger != 1) return;                         /* (two fingers: a third is iOS's too, unused) */
+    (void)pin_route(tk_pinch_touch(&PIN, 1, ph, x, y, t_ms));   /* (the kernel ticks after it: next_finger) */
+}
 void sh_touch(int phase, float x, float y, float t)
 {
+    {   /* 8b: finger 0 into the pinch first; while it pinches (or after, until it lifts) the rest never sees it */
+        int r = tk_pinch_touch(&PIN, 0, phase, x, y, t);
+        if (phase == 0) pin_swallow = 0;
+        if (pin_route(r) || (pin_on && phase != 0)) return;
+        if (pin_swallow) { if (phase == 2) pin_swallow = 0; return; }
+    }
     const char *on = tp_n;
     uint64_t ot = tp_t;
     int oin = tp_in;

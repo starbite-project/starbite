@@ -1811,6 +1811,44 @@ static void vw_tap1(float x, float y)
     MD.vui = !MD.vui;
     vw_place();
 }
+/* 8b: the viewer's pinch (iOS Photos): the picture scales round the fingers' middle and follows it (the point that
+ * was under the middle stays under it), past 1x and the most a rubber band; let go: the zoom springs into 1x..5x
+ * (with the fling's speed a little further), the pan back inside. Portrait only (the landscape viewer keeps its double
+ * tap); a page slide or the pull down in progress is cancelled */
+#define VW_ZMAX 5.0f
+static float pz0, ppx0, ppy0;
+static int med_pinch_ok(void) { return is_app("photos") && MD.view >= 0 && MD.vanim != 3 && !vw_o() && medvimg.bmp.px; }
+static void med_pinch(int st, const tk_pinch *p)
+{
+    float ox = 195, oy = H_PT / 2;
+    if (st == 1) {
+        pz0 = MD.vz; ppx0 = MD.px; ppy0 = MD.py;
+        MD.vanim = 0; MD.vx = MD.vy = 0; MD.vsp.live = 0;
+        MD.down = 0; MD.moved = 1; MD.tap_wait = 0;
+        MD.vui = 0;
+        vw_place();
+        return;
+    }
+    float z = pz0 * p->s;
+    if (z < 1) z = 1 - md_rubber(1 - z, .5f);                     /* below 1x: a rubber band (to .5x at most) */
+    else if (z > VW_ZMAX) z = VW_ZMAX + md_rubber(z - VW_ZMAX, 2);
+    /* the picture's point under the first middle stays under the middle now */
+    float qx = (p->cx0 - ox - ppx0) / pz0, qy = (p->cy0 - oy - ppy0) / pz0;
+    float px = p->cx - ox - qx * z, py = p->cy - oy - qy * z;
+    if (st == 2) {
+        MD.vz = MD.vzt = z; MD.px = MD.pxt = px; MD.py = MD.pyt = py;
+        vw_place();
+        return;
+    }
+    float zt = tk_clampf(z * (1 + tk_clampf(p->v, -2, 2) * .08f), 1, VW_ZMAX), rx, ry;   /* a flick carries it on a little */
+    MD.vz = z; MD.px = px; MD.py = py;
+    if (zt <= 1.01f) { MD.vzt = 1; MD.pxt = MD.pyt = 0; return; }
+    MD.vzt = zt;
+    vw_room(zt, &rx, &ry);
+    float k = zt / z;                                              /* the pan scaled with the settle, about the middle */
+    MD.pxt = tk_clampf((px - (p->cx - ox)) * k + (p->cx - ox), -rx, rx);
+    MD.pyt = tk_clampf((py - (p->cy - oy)) * k + (p->cy - oy), -ry, ry);
+}
 /* a double tap: in to 2.5x round the finger (the picture again at the panel's resolution), or back out */
 static void vw_tap2(float x, float y)
 {

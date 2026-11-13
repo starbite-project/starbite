@@ -74,3 +74,4 @@ a1search: wait 300; state store=search; wait 1500; drag 195 650 195 250 300; wai
 a1nav: wait 300; state store=games; wait 1200; tap 352 112; wait 1400; drag 6 400 260 400 500; wait 1200; tap 352 112; wait 1400; drag 6 400 70 400 300; wait 1200
 interrupt: wait 300; drag 195 795 195 330 220; wait 900; tap 238 289; wait 1100; drag 195 795 200 450 200; wait 60; tap 158 392; wait 1200; drag 195 795 200 450 260; wait 1200
 wifiscroll: wait 300; drag 195 795 195 330 220; wait 900; tap 325 736; wait 1100; tap 195 252; wait 900; tap 340 122; wait 1200; drag 195 650 195 250 300; wait 1500; drag 195 300 195 700 300; wait 1200; tap 60 63; wait 900; drag 195 795 200 450 260; wait 1200
+pinch: wait 300; drag 195 795 195 330 220; wait 900; tap 65 392; wait 2600; tap 195 330; wait 1600; pinch 195 420 60 240 400; wait 1200; drag 195 420 120 300 300; wait 900; pinch 195 420 240 50 400; wait 1200; drag 195 300 195 620 240; wait 900; drag 195 795 200 450 260; wait 1200
