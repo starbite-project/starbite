@@ -377,6 +377,12 @@ static int identify(struct die *d)
         say("%s: HSI2C TRANS_STATUS %08x INT_STAT %08x FIFO_STAT %08x CTL %08x CONF %08x; gpp4 dat %02x", d->name,
             H->rd32(AMP_BUS + 0x50), H->rd32(AMP_BUS + 0x24), H->rd32(AMP_BUS + 0x30), H->rd32(AMP_BUS + 0x00),
             H->rd32(AMP_BUS + 0x40), H->rd32(GPP4 + 4) & 0xFFU);
+        /* read-only: a plain one-byte read with no register write first (no repeated start), to tell "nobody
+         * acknowledges" from "the write-then-read does not work" (modem-core's suspect 2) */
+        uint8_t one = 0;
+        int rp = H->i2c_xfer(AMP_BUS, d->addr, 0, 0, &one, 1);
+        say("%s: plain 1-byte read: %s %02x; TRANS_STATUS %08x", d->name, rp ? "bus error" : "read", one,
+            H->rd32(AMP_BUS + 0x50));
     }
     return d->kind ? 0 : AUD_ENODEV;
 }
