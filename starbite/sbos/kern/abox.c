@@ -855,9 +855,19 @@ static int cpu_stop(void)
 /* the AUD domain off: the TZPC save SMC (exynos_pd_tz_save), then aud_off; 1 = it reads off */
 static int pd_power_off(int64_t *smc)
 {
+    struct lb l;
+    uint32_t took = 0;
     *smc = H.smc(H.ctx, ABOX_SMC_PD, 0, ABOX_DTZPC, 0);
     m32(ABOX_PMU + ABOX_PMU_AUD_CONF, 0xFU, 0);
-    return wait32(ABOX_PMU + ABOX_PMU_AUD_STAT, 0xFU, 0, 10000, 10, 0);
+    /* up to 200 ms (the drivers' run 7b: still on after 10 ms and after 200 ms, AUD_STAT 0x15000f) */
+    int ok = wait32(ABOX_PMU + ABOX_PMU_AUD_STAT, 0xFU, 0, 200000, 10, &took);
+    lb_init(&l);
+    lb_s(&l, ok ? "abox: power: AUD domain off in " : "abox: power: AUD domain STILL ON after ");
+    lb_u(&l, ok ? took : 200000);
+    lb_s(&l, " us, AUD_STAT ");
+    lb_x(&l, r32(ABOX_PMU + ABOX_PMU_AUD_STAT));
+    sayl(&l);
+    return ok;
 }
 
 /* the AUD domain on: aud_on, then the DTZPC restore SMC (exynos_pd_tz_restore). 0, or ABOX_EPOWER with l saying why */
