@@ -147,13 +147,22 @@ static inline void lens_scale(float L[LQ_N], float k)
 }
 
 /* a rounded box (centre cx, cy; half size less the radius ex, ey; radius r) at (px, py): the signed distance
- * (negative inside) and the outward normal, as comp2 computes them */
+ * (negative inside) and the outward normal, as comp2 computes them.
+ * G7 (8c, Track A; spec-glass-8c.md rank 2): the distance is the box's own, but the normal comes from the same box with
+ * its radius x 1.5 (ex, ey shrunk by .5 r, at least 0). With the 60 pt inward sample, the circular corner's normal
+ * field changed curvature exactly where the arc met the straight edge, a seam in the mirrored rim; the wider corner's
+ * normals turn earlier and more gently, so the rim's image flows round the corner. Circles and pill ends unchanged */
 static inline float lens_sd(float px, float py, float cx, float cy, float ex, float ey, float r, float *gx, float *gy)
 {
     float dx = px - cx, dy = py - cy, sx = dx < 0 ? -1.0f : 1.0f, sy = dy < 0 ? -1.0f : 1.0f;
-    float qx = dx * sx - ex, qy = dy * sy - ey, mx = qx > 0 ? qx : 0, my = qy > 0 ? qy : 0, mm = qx > qy ? qx : qy;
+    float ax = dx * sx, ay = dy * sy;
+    float qx = ax - ex, qy = ay - ey, mx = qx > 0 ? qx : 0, my = qy > 0 ? qy : 0, mm = qx > qy ? qx : qy;
     float l = lens_sqrt(mx * mx + my * my);
-    float nx = l > 0 ? mx : qx >= qy ? 1.0f : 0, ny = l > 0 ? my : qx >= qy ? 0 : 1.0f, il = 1 / lens_sqrt(nx * nx + ny * ny);
+    float hr = .5f * r, ex2 = ex > hr ? ex - hr : 0, ey2 = ey > hr ? ey - hr : 0;
+    float qx2 = ax - ex2, qy2 = ay - ey2, mx2 = qx2 > 0 ? qx2 : 0, my2 = qy2 > 0 ? qy2 : 0;
+    float l2 = mx2 * mx2 + my2 * my2;
+    float nx = l2 > 0 ? mx2 : qx2 >= qy2 ? 1.0f : 0, ny = l2 > 0 ? my2 : qx2 >= qy2 ? 0 : 1.0f;
+    float il = 1 / lens_sqrt(nx * nx + ny * ny);
     *gx = sx * nx * il;
     *gy = sy * ny * il;
     return l + (mm < 0 ? mm : 0) - r;

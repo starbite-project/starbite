@@ -367,9 +367,15 @@ static nir_def *lens_px(nir_builder *b, nir_def *q, nir_def *v3, nir_def *fx, ni
    nir_def *mx = nir_fmax(b, qx, z), *my = nir_fmax(b, qy, z);
    nir_def *l = nir_fsqrt(b, nir_ffma(b, mx, mx, nir_fmul(b, my, my)));
    nir_def *d = nir_fsub(b, nir_fadd(b, l, nir_fmin(b, nir_fmax(b, qx, qy), z)), rad);
-   nir_def *corner = nir_flt(b, z, l), *xa = nir_fge(b, qx, qy);
-   nir_def *nx0 = nir_bcsel(b, corner, mx, nir_bcsel(b, xa, one, z));
-   nir_def *ny0 = nir_bcsel(b, corner, my, nir_bcsel(b, xa, z, one));
+   /* G7 (8c): the normal from the box with its radius x 1.5 (ex, ey less .5 r, at least 0); the distance d stays the
+    * box's own (lens.h lens_sd) */
+   nir_def *hr = nir_fmul_imm(b, rad, .5);
+   nir_def *qx2 = nir_fsub(b, nir_fabs(b, dx), nir_fmax(b, nir_fsub(b, ch(b, v4, 3), hr), z));
+   nir_def *qy2 = nir_fsub(b, nir_fabs(b, dy), nir_fmax(b, nir_fsub(b, ch(b, v5, 0), hr), z));
+   nir_def *mx2 = nir_fmax(b, qx2, z), *my2 = nir_fmax(b, qy2, z);
+   nir_def *corner = nir_flt(b, z, nir_ffma(b, mx2, mx2, nir_fmul(b, my2, my2))), *xa = nir_fge(b, qx2, qy2);
+   nir_def *nx0 = nir_bcsel(b, corner, mx2, nir_bcsel(b, xa, one, z));
+   nir_def *ny0 = nir_bcsel(b, corner, my2, nir_bcsel(b, xa, z, one));
    nir_def *il = nir_frsq(b, nir_ffma(b, nx0, nx0, nir_fmul(b, ny0, ny0)));
    nir_def *gx = nir_fmul(b, nir_fmul(b, sx, nx0), il), *gy = nir_fmul(b, nir_fmul(b, sy, ny0), il);
    nir_def *s = nir_fmax(b, nir_fneg(b, d), z);
