@@ -47,7 +47,8 @@ int guest_state(void);                     /* GUEST_* */
 int guest_frozen(void);                    /* instant start: running but frozen (idle, nothing shown): the heater may stop it */
 const char *guest_why(void);               /* GUEST_FAILED: the reason */
 const char *guest_stage(void);             /* GUEST_STARTING: what the start is doing, in the user's words ("": usual) */
-void guest_pump(void);                     /* the guest's waiting block / 9P requests only; main thread, mid-work */
+void guest_pump(void);
+int guest_prewarm(void);                   /* instant start: Linux started unseen, frozen once up (1 started, 0 nothing) */                     /* the guest's waiting block / 9P requests only; main thread, mid-work */
 int guest_owns_m3(void);                   /* 1 from the start until the cluster is off: the heater must not start */
 
 void guest_timer(unsigned id);             /* main.c dispatch_timer, owner KT_GUEST */
