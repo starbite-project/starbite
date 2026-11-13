@@ -86,7 +86,7 @@ def events(path, ids):
             data = re.findall(r'<Data Name="([^"]+)">([^<]*)</Data>', x)
             if not data:
                 data = [('', v) for v in re.findall(r'<Data>([^<]*)</Data>', x)]
-            out.append((t.group(1)[:19] if t else '?', int(m.group(1)), p.group(1) if p else '?', data))
+            out.append((t.group(1)[:19].replace(' ', 'T') if t else '?', int(m.group(1)), p.group(1) if p else '?', data))
     out.sort()
     return out
 
