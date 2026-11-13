@@ -86,6 +86,7 @@ static struct {
     void (*sdraw)(dc *d, float x, float y, float w);
     void (*stap)(float x, float y);
     void (*sdone)(void);
+    char stitle[48];                          /* (kept for kit_sheet_redraw) */
     /* the switch's animation */
     float sw_t, sw_x, sw_y;
     int sw_to;
@@ -321,6 +322,33 @@ static void kit_sheet_place(float top)
     kfill.gen++;
     kdim.alpha = (.1f + .15f * o) * away;
 }
+/* the sheet's card: the grabber, the close circle, the title and the content (drawn once, as tall as the content) */
+static int kit_sheet_card(void)
+{
+    relayer(&kcard);
+    dc d = mk(&kcard, "kit-sheet", 0, KT.y, 390, KSH_HDR + KT.cont_h, 0, 0);
+    if (!d.b->px) return -1;
+    if (!tk_glass_lens) d_lg_flat(&d, KT.x, KT.y, KT.w, H_PT - KAS_IN - KT.y, KT.r, 1);
+    d_rrect(&d, 195 - 18, KT.y + 5, 36, 5, 2.5f, tk_hex(0x5a5a5e, 1));       /* the grabber: 36 x 5, 5 down */
+    {
+        /* the close button: a 44 glass circle with an x, 16 from the top and the leading edge */
+        float cx = KT.x + 16 + 22, cy = KT.y + 16 + 22;
+        d_rrect(&d, cx - 22, cy - 22, 44, 44, 22, W(.12f));
+        d_seg(&d, cx - 6, cy - 6, cx + 6, cy + 6, 2.2f, INK);
+        d_seg(&d, cx - 6, cy + 6, cx + 6, cy - 6, 2.2f, INK);
+    }
+    if (KT.stitle[0]) d_text_box(&d, TK_IT600, 17, 195, KT.y + 16 + 22 + 6, KT.w - 140, 1, KT.stitle, 0, 0, INK, 0);
+    if (KT.sdraw) KT.sdraw(&d, KT.x + 20, KT.y + KSH_HDR, KT.w - 40);
+    trim(&kcard);
+    kcard.hidden = 0;
+    return 0;
+}
+/* Track F (the App Store's Install sheet): the content drawn again in place (a choice changed), the sheet where it is */
+static void kit_sheet_redraw(void)
+{
+    if (KT.kind != KIT_SHEET || KT.closing) return;
+    if (kit_sheet_card() == 0) { kit_sheet_place(KT.top); relink(); }
+}
 static int kit_sheet(const char *title, float content_h, void (*draw)(dc *d, float x, float y, float w), void (*tap)(float x, float y),
                      void (*done)(void))
 {
@@ -337,21 +365,12 @@ static int kit_sheet(const char *title, float content_h, void (*draw)(dc *d, flo
     KT.w = 390 - 2 * KAS_IN;
     KT.y = KT.med;
     KT.r = KSH_R;
-    relayer(&kcard);
-    dc d = mk(&kcard, "kit-sheet", 0, KT.y, 390, KSH_HDR + KT.cont_h, 0, 0);
-    if (!d.b->px) { kit_free(); return -1; }
-    if (!tk_glass_lens) d_lg_flat(&d, KT.x, KT.y, KT.w, H_PT - KAS_IN - KT.y, KT.r, 1);
-    d_rrect(&d, 195 - 18, KT.y + 5, 36, 5, 2.5f, tk_hex(0x5a5a5e, 1));       /* the grabber: 36 x 5, 5 down */
-    {
-        /* the close button: a 44 glass circle with an x, 16 from the top and the leading edge */
-        float cx = KT.x + 16 + 22, cy = KT.y + 16 + 22;
-        d_rrect(&d, cx - 22, cy - 22, 44, 44, 22, W(.12f));
-        d_seg(&d, cx - 6, cy - 6, cx + 6, cy + 6, 2.2f, INK);
-        d_seg(&d, cx - 6, cy + 6, cx + 6, cy - 6, 2.2f, INK);
+    {   /* (kept for kit_sheet_redraw) */
+        unsigned k = 0;
+        for (const char *q = title ? title : ""; *q && k + 1 < sizeof KT.stitle; q++) KT.stitle[k++] = *q;
+        KT.stitle[k] = 0;
     }
-    if (title && title[0]) d_text_box(&d, TK_IT600, 17, 195, KT.y + 16 + 22 + 6, KT.w - 140, 1, title, 0, 0, INK, 0);
-    if (KT.sdraw) KT.sdraw(&d, KT.x + 20, KT.y + KSH_HDR, KT.w - 40);
-    trim(&kcard);
+    if (kit_sheet_card() < 0) { kit_free(); return -1; }
     relayer(&kglass);
     tk_layer_init(&kglass, "kit-glass");
     if (tk_glass_lens && tk_bmp_new(&kglass.bmp, TK_W, 4)) {
