@@ -1057,7 +1057,10 @@ static const tk_gpu_item *live_backdrops(const tk_gpu_item *it, int n, const tk_
         }
     if (!any) return it;
     tk_memcpy(lq, it, sizeof(tk_gpu_item) * (size_t)n);
-    int remade = 0, budget = comp.gpu_half ? 1 : GPUCOMP_LEVELS;   /* a big move's frame: one level a frame */
+    /* a big move's frame: one level a frame. 8f (Track A, 8c2's split: a full-resolution motion frame's backdrops
+     * took ~4.8 ms of its ~17-25, the GPU's run ~11.4): any frame while something moves, too; the glass over moving
+     * content catches up a level a frame, all of it at rest */
+    int remade = 0, budget = comp.gpu_half || sh_moving() ? 1 : GPUCOMP_LEVELS;
     for (int L = 0; L < nl; L++) {
         int p = lv[L];
         int same = lv_ok[L] && lvn[L] == p && !remade;
