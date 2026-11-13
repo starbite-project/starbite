@@ -29,7 +29,7 @@ for p in sorted(cat.glob('*.toml')):
     l, a = d.get('launcher', {}), d.get('distro', {}).get('apt')
     if l.get('terminal') or not a or (want and d['id'] not in want):
         continue
-    print(d['id'] + ':' + ','.join(a))
+    print(d['id'] + ':' + ','.join(a) + ':' + d.get('icon', '-') + ':' + d.get('name', d['id']).replace(' ', '_'))
 EOF
 )
 down() {
@@ -38,7 +38,11 @@ down() {
 }
 for entry in $apps; do
     id=${entry%%:*}
-    pkgs=$(echo "${entry#*:}" | tr ',' ' ')
+    rest=${entry#*:}
+    pkgs=$(echo "${rest%%:*}" | tr ',' ' ')
+    rest=${rest#*:}
+    icon=${rest%%:*}
+    name=$(echo "${rest#*:}" | tr '_' ' ')
     down
     mkdir -p "$S/up" "$S/work" "$S/root"
     sudo mount -t overlay -o lowerdir="$BASE",upperdir="$S/up",workdir="$S/work" overlay "$S/root" || continue
@@ -61,23 +65,41 @@ for entry in $apps; do
             --no-install-recommends install $pkgs >/tmp/apt.log 2>&1 || { tail -3 /tmp/apt.log; exit 1; }"; then
         echo "$id: not installed"; down; continue
     fi
-    desk=$(sudo chroot "$S/root" sh -c "for p in $pkgs; do dpkg -L \$p 2>/dev/null; done" |
-        grep -E '^/usr/share/applications/[^/]+\.desktop$' | head -1)
+    # the app's own .desktop: the one named as the catalog's icon (org.gnome.Papers, not its -previewer), else the
+    # first that is shown in menus
+    all=$(sudo chroot "$S/root" sh -c "for p in $pkgs; do dpkg -L \$p 2>/dev/null; done" |
+        grep -E '^/usr/share/applications/[^/]+\.desktop$')
+    desk=$(echo "$all" | grep -m1 "/$icon\.desktop\$")
+    [ -n "$desk" ] || for f in $all; do
+        sudo grep -qi '^NoDisplay=true' "$S/root$f" || { desk=$f; break; }
+    done
     desk=$(basename "${desk:-none}" .desktop)
     [ "$desk" != none ] || { echo "$id: no .desktop file"; down; continue; }
     # the script: settle, shot 1, then this app's steps (shots.actions: "id: step; step; ...", "shot" dumps the next)
     {
-        printf 'wait_hello 20000\nwait_catalog 30000\nlaunch %s\nwait_window %s 1 90000\nwait_frame 60000\nsleep 6000\ndump %s-1\n' \
+        # Track F's carousel: 720 x 1280 (9:16): the apps laid out in that viewport, the dumps of its rows
+        printf 'wait_hello 20000\nwait_catalog 30000\nviewport 1280 720\nlaunch %s\nwait_window %s 1 90000\nwait_frame 60000\nsleep 6000\ndump %s-1\n' \
             "$desk" "$desk" "$id"
+        printf '1\t%s\n' "$name" > "$OUT/$id.captions"
         n=2
         steps=$(grep -E "^$id:" "$here/shots.actions" 2>/dev/null | cut -d: -f2-)
         IFS=';'
+        set -f                              # (steps like "type 1234*56": no file name expansion)
         for st in $steps; do
             st=$(echo "$st" | sed 's/^ *//; s/ *$//')
             [ -n "$st" ] || continue
-            if [ "$st" = shot ]; then printf 'sleep 2500\ndump %s-%d\n' "$id" "$n"; n=$((n + 1)); else echo "$st"; fi
+            case "$st" in
+            shot | "shot "*)
+                printf 'sleep 2500\ndump %s-%d\n' "$id" "$n"
+                cap=${st#shot}
+                cap=$(echo "$cap" | sed 's/^ *//')
+                printf '%d\t%s\n' "$n" "${cap:-$name}" >> "$OUT/$id.captions"
+                n=$((n + 1)) ;;
+            *) echo "$st" ;;
+            esac
         done
         unset IFS
+        set +f
         printf 'stop 8000\n'
     } > "$S/script"
     sudo cp "$S/script" "$S/root/hs/shot.script"

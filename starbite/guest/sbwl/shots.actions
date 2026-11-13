@@ -1,9 +1,10 @@
-# shots.sh's steps after shot 1, per catalog id: hostsim script commands separated by ';', "shot" dumps the next
-# screenshot (2, 3). Keys are Linux key codes (28 Enter, 15 Tab, 1 Esc, 103 Up, 108 Down); taps in surface pixels
-# (720 x 1344). Apps not listed: shot 1 only.
-gnome-calculator: type 1234*56; key 28; shot; type 2^10; key 28; shot
-qalculate-gtk: type 1 mile in km; key 28; shot
-gnome-text-editor: type Shopping list for Sunday: bread, coffee, apples, oranges, tea and a birthday cake for Anna.; shot
-gnome-chess: shot
-gnome-sudoku: key 28; shot
-gnome-mines: key 28; shot
+# shots.sh's steps after shot 1, per catalog id: hostsim script commands separated by ';', "shot CAPTION" dumps the
+# next screenshot (2, 3) with that caption (default: the app's name; shot 1 is always the app's name). Keys are Linux
+# key codes (28 Enter, 15 Tab, 1 Esc, 103 Up, 108 Down); taps in surface pixels (720 x 1280: the carousel's viewport).
+# Apps not listed: shot 1 only.
+gnome-calculator: type 1234*56; key 28; shot Calculator: a sum and its result; type 2^10; key 28; shot Calculator: powers and history
+qalculate-gtk: type 1 mile in km; key 28; shot Qalculate!: units converted as you type
+gnome-text-editor: type Shopping list for Sunday: bread, coffee, apples, oranges, tea and a birthday cake for Anna.; shot Text Editor: write notes and lists
+gnome-chess: tap 399 835; sleep 800; tap 399 679; sleep 6000; shot Chess: play against the computer
+gnome-sudoku: key 28; shot Sudoku: a new puzzle
+gnome-mines: key 28; shot Mines: a new field
