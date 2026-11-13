@@ -6340,50 +6340,50 @@ static void prep_tree(tk_layer *l)
         prep_tree(l->child);
     }
 }
+/* cp7f (Track A): each piece timed, named when slow (sh_slow_piece: 7e's 245-273 ms idle calls on the phone) */
+#define IP_(name, stmt) do { uint64_t ip0_ = tk_us(); stmt; sh_slow_piece(name, (unsigned)(tk_us() - ip0_)); } while (0)
 void sh_idle(void)
 {
     /* P3j: an app page still being drawn (an open without frames, e.g. the host's stills): finish it now */
-    if (ap_pending) { while (ap_pending) app_build_step(); if (AP.on) set_app_rect(AP.R); }
+    IP_("app page", if (ap_pending) { while (ap_pending) app_build_step(); if (AP.on) set_app_rect(AP.R); });
     if (sh_moving()) return;
     /* B6: a prepared switch nobody holds any more goes; a switch's rest, a slice a turn (sh_idle_pending) */
     if (EP.goal >= 0 && EP.goal != EMG && !ep_holding()) ep_cancel();
-    if (EP.goal >= 0 && EP.goal == EMG && !(!EMG && cards_pending > 0)) { ep_work(1); return; }   /* lock's cards first */
-    tk_comp_idle(C);
-    sw_idle();                                   /* helper D: the open app's snapshot for the switcher (when it changed) */
-    mp_idle();                                   /* helper D: Maps' last GPS fix (it may read the card: idle only) */
-    cm_idle();                                   /* helper I: the call screen's static parts while Cellular is on */
-    home_badges(0);                              /* B8: the dock's badges, when a count changed */
-    kb_idle();                                   /* B3: the keyboard's accessory row (a Linux window's keys) */
-    se_idle();                                   /* helper B2: Settings' page's half copy */
+    if (EP.goal >= 0 && EP.goal == EMG && !(!EMG && cards_pending > 0)) { IP_("ep_work", ep_work(1)); return; }   /* lock's cards first */
+    IP_("tk_comp_idle", tk_comp_idle(C));
+    IP_("sw_idle", sw_idle());                                   /* helper D: the open app's snapshot for the switcher (when it changed) */
+    IP_("mp_idle", mp_idle());                                 /* helper D: Maps' last GPS fix (it may read the card: idle only) */
+    IP_("cm_idle", cm_idle());                                 /* helper I: the call screen's static parts while Cellular is on */
+    IP_("home_badges", home_badges(0));                            /* B8: the dock's badges, when a count changed */
+    IP_("kb_idle", kb_idle());                                 /* B3: the keyboard's accessory row (a Linux window's keys) */
+    IP_("se_idle", se_idle());                                 /* helper B2: Settings' page's half copy */
     if (!EMG && cards_pending > 0) {
         /* after Emergency: the vendor cards again, one per idle turn (the platform calls again while
          * sh_idle_pending); the half copies below are made in the same turn (P2w: an unlock right after
          * Emergency made them in its first frame, 31 ms) */
-        build_lockpart(LOCK_PARTS - cards_pending);
-        cards_pending--;
-        relink();
-        place_list();
+        IP_("lock card", build_lockpart(LOCK_PARTS - cards_pending); cards_pending--; relink(); place_list());
     }
-    sv_idle();                                   /* survival-next: Emergency's next card, the lock's widgets */
+    IP_("sv_idle", sv_idle());                                 /* survival-next: Emergency's next card, the lock's widgets */
     /* P3s: what is not shown here and the next gesture does not need goes; what the next one needs is made */
     /* B4: the lock keeps it too (it opens there), unless a sheet needs the room */
     int cc_lock_ok = locked && lockY == 0 && !focus_on;
-    if (locked && !cc_lock_ok) free_cc_all();
-    if (focus_faces_idle(focus_faces_keep())) return;    /* a sheet's glass: one bake a turn (sh_idle_pending) */
-    lkn_idle();                                  /* B9: the lock's notifications as the store has them (before the cache below) */
+    if (locked && !cc_lock_ok) IP_("free_cc_all", free_cc_all());
+    { int r_ = 0; IP_("focus_faces", r_ = focus_faces_idle(focus_faces_keep())); if (r_) return; }    /* a sheet's glass: one bake a turn (sh_idle_pending) */
+    IP_("lkn_idle", lkn_idle());                                /* B9: the lock's notifications as the store has them (before the cache below) */
     /* cp7c: the heavy pieces one an idle call (the platform calls again while sh_idle_pending): the lock's flat copy a
      * band at a time, the Control Centre a stage at a time */
-    if (locked && lockY == 0 && !focus_on) { if (flatten_lock_step()) return; }
+    if (locked && lockY == 0 && !focus_on) { int r_ = 0; IP_("flatten_lock_step", r_ = flatten_lock_step()); if (r_) return; }
     else if (fl_row >= 0) { fl_row = -1; tk_a8_free(&flatmask); }
     /* home at rest: the Control Centre's snapshot and grid ready before the pull */
     if ((!locked || cc_lock_ok) && !CCS.on && !AP.on && !nc_on() &&
         (ccb_next || !CCS.built || cc_stale || cc_lk != locked || (locked && cc_lv != lock_ver))) {
         if (!ccb_next) { cc_stale = 0; cc_lk = locked; cc_lv = lock_ver; }   /* (a change during the stages: again after) */
-        if (build_cc_step()) return;
+        { int r_ = 0; IP_("build_cc_step", r_ = build_cc_step()); if (r_) return; }
     } else if (ccb_next && !CCS.on) free_cc();     /* not wanted any more (an app needs the room): its parts go, later again */
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
-    prep_tree(home.child);                       /* home's pages too (their widgets and app grids, P2s) */
+    IP_("prep_tree", prep_tree(home.child));                     /* home's pages too (their widgets and app grids, P2s) */
+    uint64_t lp0_ = tk_us();
     tk_layer_prepare(&star);
     tk_layer_prepare(&homebar);
     if (K[0].gh.bmp.px) tk_layer_prepare(&K[0].gh);
@@ -6399,7 +6399,9 @@ void sh_idle(void)
         tk_layer_prepare(&Q[i].icon); tk_layer_prepare(&Q[i].iconlit);
     }
     tk_layer_prepare(&mark); tk_layer_prepare(&glyph_c); tk_layer_prepare(&glyph_o); tk_layer_prepare(&hint);
+    sh_slow_piece("layer prepares", (unsigned)(tk_us() - lp0_));
 }
+#undef IP_
 
 int sh_idle_pending(void) { return (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C) ||
                                    fl_row >= 0 || ccb_next; }   /* cp7c: the sliced flatten, the CC's stages */

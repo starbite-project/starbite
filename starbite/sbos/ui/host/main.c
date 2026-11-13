@@ -1311,6 +1311,12 @@ int sh_hold_awake(const char *who, int on) { static int n; n += on ? 1 : (n > 0 
 static int host_low;
 void sh_low_power(int on) { host_low = !!on; }
 int sh_low_power_on(void) { return host_low; }
+void sh_slow_piece(const char *what, unsigned us)    /* cp7f: as the phone's, over SBTK_SLOWMS (default 20) */
+{
+    static int lim = -1;
+    if (lim < 0) { const char *e = getenv("SBTK_SLOWMS"); lim = e ? atoi(e) : 20; }
+    if (us > (unsigned)lim * 1000u) fprintf(stderr, "shell piece %s %u ms\n", what, us / 1000);
+}
 
 /* Track A, cp7: SBTK_ORI=0..3 pretends the phone is turned (stills / films of rotated apps); a film's "ori N" too */
 static int host_ori_lock;

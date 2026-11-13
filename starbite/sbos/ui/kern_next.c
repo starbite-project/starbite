@@ -763,6 +763,20 @@ static void shell_time(const char *what, uint64_t t0)
     ub_s(&u, " ms");
     sb_log(u.b);
 }
+/* cp7f: a named piece inside the shell's idle work (7e's self test: "idle (after a gesture)" 245-273 ms on the
+ * phone, 3-4 ms on the Mac: which piece) */
+void sh_slow_piece(const char *what, unsigned us)
+{
+    if (us <= 20000) return;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: shell piece ");
+    ub_s(&u, what);
+    ub_c(&u, ' ');
+    ub_dec(&u, us / 1000);
+    ub_s(&u, " ms");
+    sb_log(u.b);
+}
 static uint64_t tick3;                      /* the next frame's time in thirds of a ms (one buffer: a free timer) */
 /* P3k: frames paced by the panel. A frame starts just after the last flip has latched at a TE (looks 1 ms apart
  * from 14.7 ms after the last start), so each TE gets one new frame: the free 16.67 ms timer drifted against the
