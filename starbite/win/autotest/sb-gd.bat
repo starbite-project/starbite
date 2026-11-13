@@ -17,6 +17,10 @@ if exist C:\ProgramData\Starbite\panthreaded (echo GD2 [%R%] threaded GL driver 
 if exist C:\ProgramData\Starbite\glasync (echo GD2 [%R%] async present flag ON >> %L%) else (echo GD2 [%R%] async present flag off >> %L%)
 if exist C:\ProgramData\Starbite\glcached (echo GD2 [%R%] cached back buffers flag ON >> %L%) else (echo GD2 [%R%] cached back buffers flag off >> %L%)
 if exist C:\ProgramData\Starbite\glsync echo GD2 [%R%] glsync flag ON: async present off >> %L%
+rem T65: flag file glec = this run uses the ARM64EC build of the same GL driver (native code in the x64 game)
+set GDDLL=gd
+if exist C:\ProgramData\Starbite\glec if exist %D%\opengl32-gd-ec.dll set GDDLL=gd-ec
+echo GD2 [%R%] GL driver files: opengl32-%GDDLL%.dll, libgallium_wgl-%GDDLL%.dll >> %L%
 if not exist "%G%\GeometryDash.exe" (echo GD2: Geometry Dash not installed >> %L% & exit /b 0)
 if not exist %D%\opengl32-gd.dll (echo GD2: no opengl32-gd.dll staged >> %L% & exit /b 0)
 set GDKIT=0
@@ -27,8 +31,8 @@ if "%GDKIT%"=="1" (
   copy /y "%G%\opengl32.dll" "%G%\opengl32.dll.user" > nul
   copy /y "%G%\libgallium_wgl.dll" "%G%\libgallium_wgl.dll.user" > nul
 )
-copy /y %D%\opengl32-gd.dll "%G%\opengl32.dll" > nul
-copy /y %D%\libgallium_wgl-gd.dll "%G%\libgallium_wgl.dll" > nul
+copy /y %D%\opengl32-%GDDLL%.dll "%G%\opengl32.dll" > nul
+copy /y %D%\libgallium_wgl-%GDDLL%.dll "%G%\libgallium_wgl.dll" > nul
 echo starbite > "%G%\opengl32.dll.starbite"
 sbshow.exe disk >> %L% 2>&1
 start "" steam://rungameid/322170
@@ -45,10 +49,26 @@ if exist "C:\Program Files (x86)\Steam\logs\content_log.txt" powershell -NoProfi
 goto finish
 :up
 echo GD2 [%R%] GeometryDash.exe up after !W! s >> %L%
+rem T65: into Stereo Madness as in sb-user.bat (T63: the terms notice, Play, then the level card twice)
+if exist %D%\sb-click.ps1 (
+  ping -n 41 127.0.0.1 > nul
+  powershell -NoProfile -ExecutionPolicy Bypass -File %D%\sb-click.ps1 0.5 0.733 >> %L% 2>&1
+  ping -n 4 127.0.0.1 > nul
+  powershell -NoProfile -ExecutionPolicy Bypass -File %D%\sb-click.ps1 0.5 0.5 >> %L% 2>&1
+  ping -n 16 127.0.0.1 > nul
+  powershell -NoProfile -ExecutionPolicy Bypass -File %D%\sb-click.ps1 0.5 0.31 >> %L% 2>&1
+  ping -n 11 127.0.0.1 > nul
+  powershell -NoProfile -ExecutionPolicy Bypass -File %D%\sb-click.ps1 0.5 0.31 >> %L% 2>&1
+)
 for /l %%T in (1,1,10) do (
   ping -n 31 127.0.0.1 > nul
   set ALIVE=gone
   for /f "tokens=5" %%m in ('tasklist /fi "imagename eq GeometryDash.exe" /nh ^| find /i "GeometryDash"') do set ALIVE=%%m K
+  rem T62: one "gone" was wrong (the game ran on and the next run measured it): ask again 3 s later
+  if "!ALIVE!"=="gone" (
+    ping -n 4 127.0.0.1 > nul
+    for /f "tokens=5" %%m in ('tasklist /fi "imagename eq GeometryDash.exe" /nh ^| find /i "GeometryDash"') do set ALIVE=%%m K
+  )
   echo GD2 [%R%] t+%%T x30s: !ALIVE! >> %L%
   sbshow.exe disk >> %L% 2>&1
   if not "!ALIVE!"=="gone" sbshow.exe snap 28-gd-%R%-%%T >> %L% 2>&1
@@ -61,6 +81,8 @@ goto finish
 echo GD2 GeometryDash.exe EXITED BY ITSELF >> %L%
 :finish
 ping -n 4 127.0.0.1 > nul
+rem T62: never leave a game running into the next run (it would be measured there, with the files put back under it)
+tasklist /fi "imagename eq GeometryDash.exe" | find /i "GeometryDash.exe" > nul && (echo GD2 [%R%] still running at the end: taskkill /f >> %L% & taskkill /f /im GeometryDash.exe >> %L% 2>&1 & ping -n 6 127.0.0.1 > nul)
 if "%GDKIT%"=="0" del /f "%G%\opengl32.dll" "%G%\libgallium_wgl.dll" "%G%\opengl32.dll.starbite"
 if "%GDKIT%"=="1" if exist "%G%\opengl32.dll.user" (
   move /y "%G%\opengl32.dll.user" "%G%\opengl32.dll" > nul

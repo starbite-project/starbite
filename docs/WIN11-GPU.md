@@ -2448,6 +2448,25 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   MsMpEng 16 %, OneDriveSetup 10 %. Under GD (300 % = 3 cores): GD 142 %, dwm 25, MsMpEng 24, System 24, sblinkd
   15-28 %. Commit 3.75 GB idle -> 4.65 GB with GD (4 GB RAM).
 
+### 6.73 T62 read (cached buffers: copy 3x faster, no fps gain) and T65 staged: the GD GL driver as ARM64EC
+
+- **T62 (big cores, menus, glcached A/B twice):** A (cached off) 34-36 fps, copy 14.7 ms; B and B2 (cached on)
+  31.4-33.5 fps, copy 5.7 ms, map 3.4 ms (cache maintenance). gllows: A 31.9 fps avg, 1% low 17.5; B 30.2 / 14.9;
+  B2 29.2 / 14.1. **A2 is void:** B's "t+5: gone" was a false reading, GD (pid 2472, cached on) ran on for 656 s,
+  A2's Steam URL only focused it. With the async present the copy is off the game thread, so a faster copy can't
+  raise fps: the game thread's ~28 ms/frame is ~5 ms GPU waits (1 submit + 1 blocking wait per frame), ~2.6 ms
+  present, ~20 ms game + driver CPU.
+- **Both GD and its GL driver are x64,** so all of Mesa/Panfrost's CPU work is translated by xtajit64 (and on the
+  M3 row without a translation cache). The ARM64EC build (6.4x of WIN11-GPU-CAPS.md: built 11-11, never run in GD)
+  runs the driver natively inside the x64 process.
+- **build-tc-ec** (`~/sbmesa/tc-ec-build.sh`, clang/lld 20.1.2, cross-ec.ini) from src-tc = 0158 **+ 0140** (applied
+  to src-tc now; without it util/format took the MMX/SSE paths and failed): opengl32-gd-ec.dll bc64cc58,
+  libgallium_wgl-gd-ec.dll bc2b9626 (build/win/gd-ec-0158). CHPE v2: 8.84 MB ARM64EC, 4.9 KB AMD64 thunks; the
+  present copy compiles to its NEON path.
+- **sb-gd.bat (T65):** flag file `glec` selects `*-gd-ec.dll`; clicks into Stereo Madness; a "gone" is re-checked
+  after 3 s; a game still running at a run's end is killed before the files are put back.
+- **T65** (`sbwddm-t65` = T62 + those, sb-gd-ab.txt `glec twice`): A/A2 x64, B/B2 ARM64EC, big cores.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
