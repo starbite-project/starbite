@@ -561,7 +561,7 @@ static int run_guest(unsigned run)
          * the full poll only every 40 ms (a long frame's turn): the block service mostly through the pump */
         {
             static uint32_t it, pumped;
-            pumped += (uint32_t)sbg_pump(SBSHM_BLK_SLOT / 512U);
+            pumped += sbg_pump(SBSHM_BLK_SLOT / 512U) > 0;
             if (++it % 20) {
                 if (it % 5000 == 1) {
                     puts_("sbsim: pump: block reads served by sbg_pump so far ");

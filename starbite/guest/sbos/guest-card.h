@@ -257,7 +257,7 @@ static void gc_say(const char *what, const char *name, const char *why)
  * card's CID, the first cluster, the size and the modified stamp); while all of those are the same the walk is
  * skipped. A file put back on the card (copied again) has a new stamp or place, so it is walked again; a file
  * with NoFatChain needs no walk. Self-test images keep nothing. */
-#define GC_FAT_BATCH 128U                   /* FAT sectors per read (64 KiB of gc_buf: 16384 clusters' links) */
+#define GC_FAT_BATCH 32U                    /* FAT sectors per read (16 KiB, ~5.5 ms from the card: 4096 links) */
 #define GC_LIST 24
 enum { GC_IDLE, GC_DIR, GC_PROVE, GC_DONE };
 static const char *const gc_path[SBSHM_BLK_DEVS] = {GCARD_BASE, GCARD_OVERLAY, GCARD_REPO, GCARD_APPSTORE};

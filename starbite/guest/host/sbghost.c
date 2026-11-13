@@ -785,9 +785,10 @@ int sbg_pump(uint32_t max_sectors)
         return 0;                                   /* none waiting (or the poll's cases: left to it) */
     sbshm_dmb();
     const volatile struct sbshm_blkreq *q = &b->req[blk_tail & (SBSHM_BLK_RING - 1)];
-    if (q->op != SBG_BLK_READ || q->count > max_sectors)
+    uint32_t count = q->count;
+    if (q->op != SBG_BLK_READ || count > max_sectors)
         return 0;                                   /* a write or a big read: the next poll's */
-    return (int)blk_serve_n(1, 0);
+    return blk_serve_n(1, 0) ? (int)count : 0;
 }
 
 void sbg_poll(void)

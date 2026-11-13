@@ -448,8 +448,12 @@ static uintptr_t ls_pi, ls_pd, ls_pr;
 static uint64_t ls_k;                       /* the store file's next 4 KiB block; the copy's next byte */
 static uint64_t ls_toff;                    /* the Image's text_offset (its header): its place in the carve-out */
 static uint32_t ls_crc;
-#define GUEST_LOAD_BLOCKS 256U              /* 1 MiB of a store file per tick */
-#define GUEST_STEP_BYTES (2U << 20)         /* cp7o: the shared region cleared / the files copied, 2 MiB a tick */
+/* cp7q (Track A's 7p: the store is on the microSD now, ~2.9 MB/s: 1 MiB was ~350 ms a tick): the store files and
+ * the copy go by time, not size: pieces of GUEST_LOAD_BLOCKS / GUEST_COPY_PIECE until GUEST_STEP_US has passed */
+#define GUEST_LOAD_BLOCKS 4U                /* 16 KiB a read (~5.5 ms from the card) */
+#define GUEST_COPY_PIECE (256U << 10)
+#define GUEST_STEP_US 8000U                 /* a tick's work: ~8 ms, then the UI's turn */
+#define GUEST_STEP_BYTES (2U << 20)         /* cp7o: the shared region cleared 2 MiB a tick (1 ms on the phone) */
 static char ls_sum[320];                    /* the start's line, logged again at HELLO (pmsg drops the early one) */
 static uint64_t gt_max;                     /* the slowest guest timer call since HELLO */
 
@@ -534,16 +538,21 @@ static int load_step(void)
         break;
     case LS_IMG:
     case LS_DTB:
-    case LS_RD: {                           /* GUEST_LOAD_BLOCKS of the file per tick, its CRC carried */
+    case LS_RD: {                           /* 16 KiB reads for ~8 ms a tick, the CRC carried */
         const struct store_ent *e = ls == LS_IMG ? &ld_i : ls == LS_DTB ? &ld_d : &ld_r;
         uintptr_t dst = ls == LS_IMG ? ls_pi : ls == LS_DTB ? ls_pd : ls_pr;
         uint64_t cap = ls == LS_IMG ? ls_pd - ls_pi : ls == LS_DTB ? ls_pr - ls_pd : up_mib(ls_pr + ld_r.size) - ls_pr;
-        if (store_load_part(e, dst, cap, ls_k, GUEST_LOAD_BLOCKS, &ls_crc)) {
-            why = "a Linux file did not load (read or size)";
-            r = -5;
+        uint64_t u0 = sb_us();
+        do {
+            if (store_load_part(e, dst, cap, ls_k, GUEST_LOAD_BLOCKS, &ls_crc)) {
+                why = "a Linux file did not load (read or size)";
+                r = -5;
+                break;
+            }
+            ls_k += GUEST_LOAD_BLOCKS;
+        } while (ls_k * 4096U < e->size && sb_us() - u0 < GUEST_STEP_US);
+        if (r)
             break;
-        }
-        ls_k += GUEST_LOAD_BLOCKS;
         if (ls_k * 4096U >= e->size) {
             if (store_load_done(e, ls_crc)) {
                 why = "a Linux file did not load (CRC)";
@@ -565,11 +574,14 @@ static int load_step(void)
             }
         }
         break;
-    case LS_COPY: {                         /* the three files from the bounce window to their places, 2 MiB a tick */
+    case LS_COPY: {                         /* the three files from the bounce window to their places, ~8 ms a tick */
         const uint64_t at[3] = {ls_toff, SBG_DTB_OFF, SBG_RD_OFF};
         const uintptr_t src[3] = {ls_pi, ls_pd, ls_pr};
         const uint64_t len[3] = {ld_i.size, ld_d.size, ld_r.size};
-        uint64_t left = GUEST_STEP_BYTES, base = 0;
+        uint64_t u0 = sb_us(), base;
+        do {
+        uint64_t left = GUEST_COPY_PIECE;
+        base = 0;
         for (unsigned f = 0; f < 3 && left; ++f) {
             uint64_t n = (len[f] + 7) & ~7ULL;
             if (ls_k < base + n) {
@@ -583,6 +595,7 @@ static int load_step(void)
             }
             base += n;
         }
+        } while (ls_k < base && sb_us() - u0 < GUEST_STEP_US);
         if (ls_k >= base) {
             ls_k = 0;
             ls = LS_GO;
@@ -647,6 +660,10 @@ int guest_stop(void)
  * 9P and writes wait for the guest timer's poll. */
 #define GUEST_PUMP_US 2000U
 #define GUEST_PUMP_WIN_US 16667U
+/* cp7q (Track A's 7p: a 64 KiB read is ~20 ms from the microSD, 36 late frames): the pump measures its own reads
+ * (us per sector, a running average; first guess 180 us = ~2.9 MB/s) and takes a request only when its predicted
+ * time fits what is left of the window's budget (4 KiB at the card's speed: ~1.4 ms) */
+static uint32_t pump_us_sec = 180;
 void guest_pump(void)
 {
     static uint64_t win0, spent;
@@ -659,8 +676,16 @@ void guest_pump(void)
     }
     if (spent >= GUEST_PUMP_US)
         return;
-    if (sbg_pump(SBSHM_BLK_SLOT / 512U))
-        spent += sb_us() - t;
+    uint32_t max = (uint32_t)((GUEST_PUMP_US - spent) / (pump_us_sec ? pump_us_sec : 1));
+    if (!max)
+        return;
+    int n = sbg_pump(max);
+    if (n > 0) {
+        uint64_t d = sb_us() - t;
+        spent += d;
+        uint32_t m = (uint32_t)(d / (uint64_t)n);
+        pump_us_sec = (3U * pump_us_sec + (m ? m : 1)) / 4U;
+    }
 }
 
 void guest_irq(void)
