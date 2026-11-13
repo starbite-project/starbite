@@ -889,7 +889,12 @@ void guest_timer(unsigned id)
             ub_dec(&u, pump_spent);
             ub_s(&u, ", ");
             ub_dec(&u, pump_us_sec);
-            ub_s(&u, " us a sector); served as (ticks): shown ");
+            ub_s(&u, " us a sector)");
+            sb_log(u.b);
+            /* Track A: on its own line (the one above is cut at 256 characters: the start summary alone is ~250), so
+             * the main session's HELLO gate can read it */
+            ub_init(&u);
+            ub_s(&u, "guest: HELLO served as (ticks): shown ");
             ub_dec(&u, bm_ticks[BM_SHOWN]);
             ub_s(&u, ", dark ");
             ub_dec(&u, bm_ticks[BM_DARK]);
