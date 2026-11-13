@@ -12,6 +12,8 @@ expect_app org.starbite.GtkTest4
 expect_app sbwl-termtest
 expect_no_app sbwl-hidden
 expect_no_app sbwl-gnomeonly
+# instant start: the first catalog (before HELLO) has no icons; sbwl renders them one by one after HELLO
+expect_log 30000 catalog: every icon rendered
 expect_icon foot
 expect_icon galculator
 expect_icon org.gnome.Calculator

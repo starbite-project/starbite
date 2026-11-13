@@ -34,9 +34,15 @@ mnt_t tmpfs run /run -o mode=0755,nosuid,nodev,size=32m
 [ -e /dev/fd ] || ln -s /proc/self/fd /dev/fd
 # the self tests' marker comes from the user's shell (echo ... > /dev/kmsg in foot, which runs as "user"); the
 # guest's kernel log is the guest's own, so letting users write to it is harmless
-chmod 0622 /dev/kmsg
-mkdir -p /run/lock /tmp /var/tmp && chmod 1777 /tmp /var/tmp
-rm -rf /tmp/* /tmp/.[!.]* 2>/dev/null       # /tmp is on the overlay (no RAM for a tmpfs): start clean
+# instant start: an initramfs that did these (and the clock) with its own busybox leaves /run/sbinit.early: no
+# program of the root's runs here then (each one is card reads on the phone)
+EARLY=0
+[ -e /run/sbinit.early ] && EARLY=1
+if [ "$EARLY" = 0 ]; then
+    chmod 0622 /dev/kmsg
+    mkdir -p /run/lock /tmp /var/tmp && chmod 1777 /tmp /var/tmp
+    rm -rf /tmp/* /tmp/.[!.]* 2>/dev/null   # /tmp is on the overlay (no RAM for a tmpfs): start clean
+fi
 # ---- options from the kernel command line ----
 REPO_DEV= ZRAM=1 PKG=1 WL=1 EPOCH=
 read -r CMDLINE < /proc/cmdline
@@ -53,7 +59,9 @@ done
 # ---- the clock: the guest has no RTC and no network time. hdr.host_time_ms is Starbite's uptime, not a date, so
 # the host passes the wall clock as sbinit.epoch=SECONDS (UTC) on the kernel command line; without it, at least not
 # 1970: the base image's build date (TLS, apt and file times want a plausible date) ----
-if [ -n "$EPOCH" ] && date -u -s "@$EPOCH" >/dev/null 2>&1; then
+if [ "$EARLY" = 1 ] && [ -n "$EPOCH" ]; then
+    :                                       # (set by the initramfs; logged after sbwl started)
+elif [ -n "$EPOCH" ] && date -u -s "@$EPOCH" >/dev/null 2>&1; then
     log "clock set from the host: $(date -u '+%F %T') UTC"
 elif [ "$(date -u +%Y)" -lt 2025 ] && [ -s /usr/share/starbite/base-date ]; then
     date -u -s "$(cat /usr/share/starbite/base-date)" >/dev/null 2>&1 &&
