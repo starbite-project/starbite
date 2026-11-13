@@ -400,6 +400,8 @@ static uintptr_t up_mib(uintptr_t a) { return (a + 0xfffffUL) & ~0xfffffUL; }
 /* 1.2-alpha1: the load runs at the guest timer's first tick, not inside guest_start: the caller (the home tile)
  * draws "Starting Linux..." first, and a slow UFS read never looks like a hang */
 static int loading;
+enum { LS_BEGIN, LS_CARD, LS_FS, LS_IMG, LS_DTB, LS_RD, LS_ZERO, LS_COPY, LS_GO, LS_N };
+static int ls;                              /* load_step's next step */
 static struct store_ent ld_i, ld_d, ld_r;
 
 int guest_start(void) { return guest_start_mode(GUEST_APP); }
@@ -429,77 +431,213 @@ int guest_start_mode(int m)
     term_ok = 0;
     st = GUEST_STARTING;                    /* the big cores are the guest's from here (the heater refuses) */
     loading = 1;
+    ls = LS_BEGIN;                          /* load_step: one step per tick, 2 ms apart (the UI draws between) */
     seq_seen = seq_blit = 0;
-    arm(10);
+    arm(2);
     return 0;
 }
 
-/* the guest timer's first tick: the store's files into the bounce window, the copy, CPU_ON. 0, or < 0 and why */
-static int load_and_start(void)
+/* The start, one step per guest timer tick (cp7i: all of it in one loop turn froze Starbite OS's UI for 7.6 s on
+ * cp7g, "a loop turn took 7589 ms"): the card's files proven (guest-card.h, a batch of FAT sectors per tick), the
+ * card's exFAT for ~/Starbite, the store's three files, then the copy and CPU_ON. Between the steps the UI draws
+ * "Starting Linux" and takes touches. One log line at the end times every step. */
+static uint64_t ls_t0, ls_ms[LS_N], ls_max;
+static unsigned ls_ticks;
+static int ls_max_at;
+static uintptr_t ls_pi, ls_pd, ls_pr;
+static uint64_t ls_k;                       /* the store file's next 4 KiB block; the copy's next byte */
+static uint64_t ls_toff;                    /* the Image's text_offset (its header): its place in the carve-out */
+static uint32_t ls_crc;
+/* cp7q (Track A's 7p: the store is on the microSD now, ~2.9 MB/s: 1 MiB was ~350 ms a tick): the store files and
+ * the copy go by time, not size: pieces of GUEST_LOAD_BLOCKS / GUEST_COPY_PIECE until GUEST_STEP_US has passed */
+#define GUEST_LOAD_BLOCKS 4U                /* 16 KiB a read (~5.5 ms from the card) */
+#define GUEST_COPY_PIECE (256U << 10)
+#define GUEST_STEP_US 8000U                 /* a tick's work: ~8 ms, then the UI's turn */
+#define GUEST_STEP_BYTES (2U << 20)         /* cp7o: the shared region cleared 2 MiB a tick (1 ms on the phone) */
+static uint32_t pump_reads, pump_sectors, pump_spent;   /* this start's: served, and calls that found the budget spent */
+static uint32_t ls_blk0;                    /* sbblk's read count at this start (its stats run since boot) */
+static char ls_sum[320];                    /* the start's line, logged again at HELLO (pmsg drops the early one) */
+static uint64_t gt_max;                     /* the slowest guest timer call since HELLO */
+
+static void ls_log(void)
 {
-    t_busy = t_busy_win = busy_sectors = 0;
-    busy_said = 0;
-    stage = "";
-    t_go = 0;
-    cfg_init();                             /* this mode's surface */
-    gcard_offer();                          /* the card's files as block devices, for this start (guest-card.h) */
+    static const char *const nm[LS_N] = {"card ", ", card files ", ", ~/Starbite ", ", Image ", ", DTB ", ", initrd ",
+                                         ", clear ", ", copy ", ", CPU_ON "};
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "guest: start in ");
+    ub_dec(&u, sb_ms() - ls_t0);
+    ub_s(&u, " ms over ");
+    ub_dec(&u, ls_ticks);
+    ub_s(&u, " ticks (slowest ");
+    ub_dec(&u, ls_max);
+    ub_s(&u, " ms, step ");
+    ub_dec(&u, (uint64_t)ls_max_at);
+    ub_s(&u, "): ");
+    for (int k = 0; k < LS_N; ++k) {
+        ub_s(&u, nm[k]);
+        ub_dec(&u, ls_ms[k]);
+        ub_s(&u, " ms");
+    }
+    ub_s(&u, "; FAT reads ");
+    ub_dec(&u, gc.reads);
+    ub_s(&u, ", proofs cached ");
+    ub_dec(&u, gc.cached);
+    ub_s(&u, ", walked ");
+    ub_dec(&u, gc.walked);
+    ub_s(&u, "; bytes ");
+    ub_dec(&u, ld_i.size);
+    ub_s(&u, " + ");
+    ub_dec(&u, ld_d.size);
+    ub_s(&u, " + ");
+    ub_dec(&u, ld_r.size);
+    sb_log(u.b);
+    sb_strcpy(ls_sum, sizeof ls_sum, u.b + 7);  /* (without "guest: ") */
+}
+
+/* one step: 0 more to do, 1 started (CPU_ON), < 0 failed (and why) */
+static int load_step(void)
+{
+    uint64_t t = sb_ms();
+    int k = ls, r = 0;
+    hw_wdt_feed();
+    switch (ls) {
+    case LS_BEGIN:
+        ls_t0 = t;
+        ls_ticks = 0;
+        ls_max = 0;
+        ls_max_at = 0;
+        for (int i = 0; i < LS_N; ++i)
+            ls_ms[i] = 0;
+        t_busy = t_busy_win = busy_sectors = 0;
+        busy_said = 0;
+        stage = "";
+        t_go = 0;
+        ls_k = 0;
+        pump_reads = pump_sectors = pump_spent = 0;
+        ls_blk0 = sbg_stats()->blk_reads;
+        cfg_init();                         /* this mode's surface */
+        gcard_begin();                      /* the card's files as block devices, for this start (guest-card.h) */
+        ls = LS_CARD;
+        break;
+    case LS_CARD:
+        if (gcard_tick())
+            ls = LS_FS;
+        break;
+    case LS_FS:
 #ifdef GUEST_FS_H
-    if (mode == GUEST_WL)
-        (void)gfs_premount();               /* the card's exFAT for ~/Starbite: here, not in a 9P request */
+        if (mode == GUEST_WL)
+            (void)gfs_premount();           /* the card's exFAT for ~/Starbite: here, not in a 9P request */
 #endif
-    /* the bounce window below 4 GiB: the Image, then the DTB and the initrd, each at a MiB boundary */
-    uintptr_t pi = G_BOUNCE, pd = up_mib(pi + ld_i.size), pr = up_mib(pd + ld_d.size);
-    if (ld_i.size > G_LINUX_SIZE || ld_d.size > G_LINUX_SIZE || ld_r.size > G_LINUX_SIZE ||
-        up_mib(pr + ld_r.size) > G_BOUNCE_END) {
-        why = "the Linux files are too big for the load window";
-        return -5;
+        /* the bounce window below 4 GiB: the Image, then the DTB and the initrd, each at a MiB boundary */
+        ls_pi = G_BOUNCE;
+        ls_pd = up_mib(ls_pi + ld_i.size);
+        ls_pr = up_mib(ls_pd + ld_d.size);
+        if (ld_i.size > G_LINUX_SIZE || ld_d.size > G_LINUX_SIZE || ld_r.size > G_LINUX_SIZE ||
+            up_mib(ls_pr + ld_r.size) > G_BOUNCE_END) {
+            why = "the Linux files are too big for the load window";
+            r = -5;
+        }
+        ls = LS_IMG;
+        break;
+    case LS_IMG:
+    case LS_DTB:
+    case LS_RD: {                           /* 16 KiB reads for ~8 ms a tick, the CRC carried */
+        const struct store_ent *e = ls == LS_IMG ? &ld_i : ls == LS_DTB ? &ld_d : &ld_r;
+        uintptr_t dst = ls == LS_IMG ? ls_pi : ls == LS_DTB ? ls_pd : ls_pr;
+        uint64_t cap = ls == LS_IMG ? ls_pd - ls_pi : ls == LS_DTB ? ls_pr - ls_pd : up_mib(ls_pr + ld_r.size) - ls_pr;
+        uint64_t u0 = sb_us();
+        do {
+            if (store_load_part(e, dst, cap, ls_k, GUEST_LOAD_BLOCKS, &ls_crc)) {
+                why = "a Linux file did not load (read or size)";
+                r = -5;
+                break;
+            }
+            ls_k += GUEST_LOAD_BLOCKS;
+        } while (ls_k * 4096U < e->size && sb_us() - u0 < GUEST_STEP_US);
+        if (r)
+            break;
+        if (ls_k * 4096U >= e->size) {
+            if (store_load_done(e, ls_crc)) {
+                why = "a Linux file did not load (CRC)";
+                r = -5;
+            }
+            ls_k = 0;
+            ls++;
+        }
+        break;
     }
-    uint64_t t0 = sb_ms();
-    hw_wdt_feed();
-    int r = store_load(&ld_i, pi, pd - pi);
-    hw_wdt_feed();
-    if (!r)
-        r = store_load(&ld_d, pd, pr - pd);
-    if (!r)
-        r = store_load(&ld_r, pr, up_mib(pr + ld_r.size) - pr);
-    hw_wdt_feed();
-    if (r) {
-        why = "a Linux file did not load (CRC or size)";
-        return -5;
+    case LS_ZERO:                           /* what sbg_load clears, 2 MiB a tick (~15 MB, non-cacheable) */
+        if (sbg_prep_step(GUEST_STEP_BYTES)) {
+            ls = LS_COPY;
+            ls_k = 0;
+            ls_toff = ((const volatile uint64_t *)ls_pi)[1];   /* the Image's text_offset: where it goes */
+            if (ls_toff >= (2U << 20) || (ls_toff & 0xfffU) || ls_toff + ld_i.size > SBG_DTB_OFF) {
+                why = "the Linux Image's header has an unusable text_offset";
+                r = -5;
+            }
+        }
+        break;
+    case LS_COPY: {                         /* the three files from the bounce window to their places, ~8 ms a tick */
+        const uint64_t at[3] = {ls_toff, SBG_DTB_OFF, SBG_RD_OFF};
+        const uintptr_t src[3] = {ls_pi, ls_pd, ls_pr};
+        const uint64_t len[3] = {ld_i.size, ld_d.size, ld_r.size};
+        uint64_t u0 = sb_us(), base;
+        do {
+        uint64_t left = GUEST_COPY_PIECE;
+        base = 0;
+        for (unsigned f = 0; f < 3 && left; ++f) {
+            uint64_t n = (len[f] + 7) & ~7ULL;
+            if (ls_k < base + n) {
+                uint64_t from = ls_k - base, take = n - from < left ? n - from : left;
+                const volatile uint64_t *q = (const volatile uint64_t *)(src[f] + from);
+                volatile uint64_t *d = (volatile uint64_t *)(uintptr_t)(G_LINUX_BASE + at[f] + from);
+                for (uint64_t i = 0; i < take / 8; ++i)
+                    d[i] = q[i];
+                ls_k += take;
+                left -= take;
+            }
+            base += n;
+        }
+        } while (ls_k < base && sb_us() - u0 < GUEST_STEP_US);
+        if (ls_k >= base) {
+            ls_k = 0;
+            ls = LS_GO;
+        }
+        break;
     }
-    uint64_t t1 = sb_ms();
-    int lr = sbg_load((const void *)pi, ld_i.size, (const void *)pd, ld_d.size, (const void *)pr, ld_r.size);
-    hw_wdt_feed();
-    {
-        struct ub u;
-        ub_init(&u);
-        ub_s(&u, "guest: the store's files read in ");
-        ub_dec(&u, t1 - t0);
-        ub_s(&u, " ms, copied into the carve-out in ");
-        ub_dec(&u, sb_ms() - t1);
-        ub_s(&u, " ms (Image ");
-        ub_dec(&u, ld_i.size);
-        ub_s(&u, ", DTB ");
-        ub_dec(&u, ld_d.size);
-        ub_s(&u, ", initrd ");
-        ub_dec(&u, ld_r.size);
-        ub_s(&u, " bytes)");
-        sb_log(u.b);
+    default: {                              /* LS_GO: the header and the trampoline (nothing big), CPU_ON */
+        int lr = sbg_load_placed(ls_toff, ld_i.size, ld_d.size, ld_r.size);
+        hw_wdt_feed();
+        if (lr < 0 || sbg_start() < 0) {
+            why = sbg_stats()->why ? sbg_stats()->why : "the guest did not start";
+            r = -6;
+        } else {
+            t_go = sb_ms();
+            if (guestnet_guest_started && (sbg_hdr()->host_services & SBSHM_SVC_NET))
+                guestnet_guest_started();   /* sbg_net_config for an uplink already up (the guest starts at link 0) */
+            r = 1;
+        }
+        break;
     }
-    if (lr < 0 || sbg_start() < 0) {
-        why = sbg_stats()->why ? sbg_stats()->why : "the guest did not start";
-        return -6;
     }
-    t_go = sb_ms();
-    if (guestnet_guest_started && (sbg_hdr()->host_services & SBSHM_SVC_NET))
-        guestnet_guest_started();           /* sbg_net_config for an uplink already up (the guest starts at link 0) */
-    return 0;
+    uint64_t d = sb_ms() - t;
+    ls_ms[k] += d;
+    ls_ticks++;
+    if (d > ls_max) {
+        ls_max = d;
+        ls_max_at = k;
+    }
+    if (r)
+        ls_log();
+    return r;
 }
 
 int guest_stop(void)
 {
-    if (st == GUEST_STARTING && loading) {  /* stopped before its load: nothing ran */
+    if (st == GUEST_STARTING && loading) {  /* stopped before CPU_ON: nothing ran */
         loading = 0;
+        gcard_abort();
         st = GUEST_OFF;
         shown = 0;
         kt_cancel(KT_GUEST, KT_GUEST_ID_POLL);
@@ -516,6 +654,46 @@ int guest_stop(void)
     return -1;
 }
 
+/* cp7j (Track A: HELLO 21 s -> 31 s once the start stopped freezing the UI): the host serves the guest's block
+ * and 9P requests once per main-loop turn, and a self-test film's turns take ~0.5 s, so a booting guest's
+ * synchronous reads each waited a turn. guest_pump serves only those requests (cheap when none wait): call it from
+ * inside long work on the main thread (a frame's compositing, between layers or strips), never from an interrupt
+ * or from inside card I/O. */
+/* cp7m (Track A: the unbudgeted pump made frames late, GPU waits 25-31 ms): at most one block read of <= 64 KiB
+ * per call (~1 ms from the card), and at most GUEST_PUMP_US of them in any GUEST_PUMP_WIN_US window (a frame);
+ * 9P and writes wait for the guest timer's poll. */
+#define GUEST_PUMP_US 2000U
+#define GUEST_PUMP_WIN_US 16667U
+/* cp7q (Track A's 7p: a 64 KiB read is ~20 ms from the microSD, 36 late frames): the pump measures its own reads
+ * (us per sector, a running average; first guess 180 us = ~2.9 MB/s) and takes a request only when its predicted
+ * time fits what is left of the window's budget (4 KiB at the card's speed: ~1.4 ms) */
+static uint32_t pump_us_sec = 180;
+void guest_pump(void)
+{
+    static uint64_t win0, spent;
+    if (loading || (st != GUEST_STARTING && st != GUEST_RUNNING && st != GUEST_STOPPING))
+        return;
+    uint64_t t = sb_us();
+    if (t - win0 >= GUEST_PUMP_WIN_US) {
+        win0 = t;
+        spent = 0;
+    }
+    uint32_t max = spent >= GUEST_PUMP_US ? 0 : (uint32_t)((GUEST_PUMP_US - spent) / (pump_us_sec ? pump_us_sec : 1));
+    if (!max) {
+        pump_spent++;
+        return;
+    }
+    int n = sbg_pump(max);
+    if (n > 0) {
+        pump_reads++;
+        pump_sectors += (uint32_t)n;
+        uint64_t d = sb_us() - t;
+        spent += d;
+        uint32_t m = (uint32_t)(d / (uint64_t)n);
+        pump_us_sec = (3U * pump_us_sec + (m ? m : 1)) / 4U;
+    }
+}
+
 void guest_irq(void)
 {
     sbg_doorbell();
@@ -529,8 +707,14 @@ void guest_timer(unsigned id)
     if (st == GUEST_OFF || st == GUEST_FAILED)
         return;
     if (loading) {
+        int lr = load_step();
+        if (!lr)
+            return;                         /* the next step at the next tick */
         loading = 0;
-        if (load_and_start() < 0) {
+        if (lr > 0) {
+            arm(10);                        /* the guest's poll from here */
+        } else {
+            gcard_abort();
             st = GUEST_FAILED;
             shown = 0;
             kt_cancel(KT_GUEST, KT_GUEST_ID_POLL);
@@ -541,10 +725,52 @@ void guest_timer(unsigned id)
         }
         return;
     }
+    uint64_t gt0 = sb_ms();
     sbg_poll();
     const struct sbg_stats *s = sbg_stats();
+    {   /* cp7o: a poll of 50 ms or more, each time a new slowest: its time and the slowest part since the start */
+        uint64_t d = sb_ms() - gt0;
+        if (d >= 50 && d > gt_max) {
+            gt_max = d;
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "guest: a poll took ");
+            ub_dec(&u, d);
+            ub_s(&u, " ms (the slowest part since the start: ");
+            ub_s(&u, s->poll_part ? s->poll_part : "-");
+            ub_s(&u, " ");
+            ub_dec(&u, s->poll_part_ms);
+            ub_s(&u, " ms)");
+            sb_log(u.b);
+        }
+    }
     if (s->state == SBG_RUNNING && st == GUEST_STARTING) {
         st = GUEST_RUNNING;
+        {   /* cp7o: the start's line again (pmsg's ring drops the early one) and the slowest poll part so far */
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "guest: at HELLO: ");
+            ub_s(&u, ls_sum[0] ? ls_sum : "(no start line)");
+            ub_s(&u, "; slowest poll part ");
+            ub_s(&u, s->poll_part ? s->poll_part : "-");
+            ub_s(&u, " ");
+            ub_dec(&u, s->poll_part_ms);
+            ub_s(&u, " ms; block reads ");
+            ub_dec(&u, s->blk_reads - ls_blk0);
+            ub_s(&u, ", the pump's ");
+            ub_dec(&u, pump_reads);
+            ub_s(&u, " (");
+            ub_dec(&u, pump_sectors / 2U);
+            ub_s(&u, " KiB; left as too big or a write ");
+            ub_dec(&u, s->pump_left);
+            ub_s(&u, ", budget spent ");
+            ub_dec(&u, pump_spent);
+            ub_s(&u, ", ");
+            ub_dec(&u, pump_us_sec);
+            ub_s(&u, " us a sector)");
+            sb_log(u.b);
+            gt_max = 0;
+        }
         arm(shown ? 10 : 50);
         if (shown)
             sbg_send(SBG_MSG_FOCUS, 1, 0);
@@ -754,6 +980,7 @@ static char typed[96];                      /* the fake terminal: the line being
 static int ntyped, shown_chars;
 
 void guest_init(void) { sb_up = 1; }
+void guest_pump(void) {}
 int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED ? 1 : fake_m3 && st == GUEST_FAILED; }
 /* SBOS_HOST_GUEST=1 (or fail): both guests' files; =app: only the app's */
 int guest_available_mode(int m)

@@ -104,6 +104,8 @@ void sb_main(void);
 uint64_t sb_ticks(void);
 uint64_t sb_freq(void);                 /* CNTFRQ, 26 MHz when S-Boot left it 0 */
 uint64_t sb_us(void);                   /* since power-on (counter) */
+extern uint32_t sb_acpm_calls;           /* cp7s: ACPM exchanges so far, and their time (acpm.c) */
+extern uint64_t sb_acpm_us;
 uint64_t sb_ms(void);
 void sb_udelay(uint64_t us);
 void sb_mdelay(unsigned ms);
@@ -709,6 +711,9 @@ int sb_gpu_up(uint32_t shaders, unsigned us[4]);     /* reset, power, AS0 */
 int sb_gpu_submit(unsigned js, uint64_t job_va, uint32_t affinity);
 int sb_gpu_wait(unsigned js_mask, uint64_t timeout_us, struct sb_gpu_result *r);
 int sb_gpu_run(unsigned js, uint64_t job_va, uint32_t affinity, uint64_t timeout_us, struct sb_gpu_result *r);
+/* cp7k: called from sb_gpu_wait's spin at most every 2 ms of waiting (NULL: nothing). Starbite OS serves a booting Linux
+ * guest's block / 9P requests here (guest_pump); it must not start GPU work or wait on the GPU itself. */
+extern void (*sb_gpu_wait_hook)(void);
 const char *sb_gpu_exc_name(uint32_t code);
 void sb_gpu_cycles(int on);
 uint64_t sb_gpu_cycle_count(void);

@@ -689,6 +689,31 @@ void selftest_timer(unsigned id)
         if (next_selftest_step())
             return;
         kt_cancel(KT_SELFTEST, 0);
+        {   /* cp7k: the slowest loop turn of the whole run, kept to the end (the pmsg ring drops the early lines) */
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "selftest: next: loop turns of 100 ms or more (not the self test's own): ");
+            ub_dec(&u, K.turns_100);
+            ub_s(&u, "; the slowest ");
+            ub_dec(&u, K.user_turn_ms);
+            ub_s(&u, " ms (");
+            ub_s(&u, K.user_turn_what ? K.user_turn_what : "-");
+            if (K.user_turn_what && K.user_turn_what[0] == 't') {
+                ub_s(&u, " ");
+                ub_dec(&u, K.user_turn_owner);
+                ub_s(&u, "/");
+                ub_dec(&u, K.user_turn_id);
+            }
+            ub_s(&u, "); by owner:");
+            for (unsigned i = 0; i < 18; i++)            /* cp7p: owner (KT_*) = count; 16 app timers, 17 not a timer */
+                if (K.turns_100_by[i]) {
+                    ub_s(&u, " ");
+                    ub_dec(&u, i);
+                    ub_s(&u, "=");
+                    ub_dec(&u, K.turns_100_by[i]);
+                }
+            sb_log(u.b);
+        }
         sb_log(next_selftest_failed() ? "selftest: next: FAILED (see above); a restart into recovery (pmsg)" :
                !next_selftest_clock_ok() ? "selftest: next: FAILED: clock check missing; a restart into recovery (pmsg)" :
                next_selftest_flips_ok() ? "selftest: next: PASSED: clock check ok, flips ok (three buffers, no tearing); the bake and the films ran (frame times above); a restart into recovery (pmsg)" :

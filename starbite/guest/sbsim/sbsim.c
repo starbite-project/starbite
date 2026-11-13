@@ -501,9 +501,41 @@ static void blk_report(unsigned run)
 /* ---- one guest run ----------------------------------------------------------------------------------- */
 static int run_guest(unsigned run)
 {
+#ifdef SBSIM_STEPPED
+    /* cp7o: Starbite OS's stepped start: the shared region cleared 2 MiB a step (sbg_prep_step; first poisoned, so a
+     * byte it misses shows), the files put in place by the host, then sbg_load_placed (which clears nothing) */
+    {
+        volatile uint64_t *shm = (volatile uint64_t *)(uintptr_t)SBG_QEMU_SHM_BASE;
+        for (uint64_t i = 0; i < 0x200000U / 8; ++i)
+            shm[i] = 0xa5a5a5a5a5a5a5a5ULL;        /* the header, rings and ramoops zone poisoned */
+        unsigned steps = 1;
+        while (!sbg_prep_step(2U << 20))
+            ++steps;
+        uint64_t bad = 0;
+        for (uint64_t i = 0; i < 0x200000U / 8; ++i)
+            bad += shm[i] != 0;
+        puts_("sbsim: stepped: the shared region cleared in ");
+        putu(steps);
+        puts_(" steps of 2 MiB, poisoned words left ");
+        putu(bad);
+        puts_("\n");
+        const uint64_t toff = ((const volatile uint64_t *)(STORE + mf->img_off))[1];
+        const uint64_t at[3] = {toff, SBG_DTB_OFF, SBG_RD_OFF};
+        const uint64_t off[3] = {mf->img_off, mf->dtb_off, mf->rd_off}, len[3] = {mf->img_size, mf->dtb_size, mf->rd_size};
+        for (unsigned f = 0; f < 3; ++f) {
+            const volatile uint64_t *q = (const volatile uint64_t *)(STORE + off[f]);
+            volatile uint64_t *d = (volatile uint64_t *)(uintptr_t)(SBG_QEMU_LINUX_BASE + at[f]);
+            for (uint64_t i = 0; i < (len[f] + 7) / 8; ++i)
+                d[i] = q[i];
+        }
+        if (bad || sbg_load_placed(toff, mf->img_size, mf->dtb_size, mf->rd_size) < 0 || sbg_start() < 0)
+            return -1;
+    }
+#else
     if (sbg_load((const void *)(STORE + mf->img_off), mf->img_size, (const void *)(STORE + mf->dtb_off),
                  mf->dtb_size, (const void *)(STORE + mf->rd_off), mf->rd_size) < 0 || sbg_start() < 0)
         return -1;
+#endif
     fill(0, BAR, 0x00202a44U);                 /* Starbite's status bar */
     fill(ph - BAR, BAR, 0x00202a44U);          /* its navigation bar */
     drawn_seq = 0;
@@ -524,6 +556,22 @@ static int run_guest(unsigned run)
         irq_poll();
         uint64_t t = now_ms();
         own_check(t);
+#ifdef SBSIM_PUMP
+        /* cp7m: Starbite OS's GPU-wait hook (guest_pump -> sbg_pump, one block read <= 64 KiB per call) every 2 ms,
+         * the full poll only every 40 ms (a long frame's turn): the block service mostly through the pump */
+        {
+            static uint32_t it, pumped;
+            pumped += sbg_pump(SBSHM_BLK_SLOT / 512U) > 0;
+            if (++it % 20) {
+                if (it % 5000 == 1) {
+                    puts_("sbsim: pump: block reads served by sbg_pump so far ");
+                    putu(pumped);
+                    puts_("\n");
+                }
+                continue;
+            }
+        }
+#endif
         sbg_poll();
         if (mf->flags & F_V3)
             sim_v3_tick(t);

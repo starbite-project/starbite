@@ -18,6 +18,9 @@ int sh_tick(float dt, float t_ms);
 int sh_moving(void);
 void sh_idle(void);
 int sh_idle_pending(void);                /* idle work left (call sh_idle again soon) */
+/* cp7f (Track A): a piece of the shell's work that took long, by name (the platform logs it over 20 ms; the host:
+ * over SBTK_SLOWMS, default 20). "what" stays the caller's (a literal). */
+void sh_slow_piece(const char *what, unsigned us);
 /* the live values: local time (wday 0 = Sunday, mon 1..12), battery %, temperature C; rebuilds what changed */
 void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp);                       /* idle time: prepare the caches the next gesture needs */
 
@@ -615,6 +618,7 @@ int sh_bt_pair_state(void);
 const char *sh_bt_pair_code(void);
 const char *sh_bt_pair_why(void);
 int sh_bt_kbd_paired(void);
+const char *sh_bt_kbd_name(void);   /* the paired keyboard's name (kept across a restart), "Keyboard" when unknown */
 int sh_bt_kbd_connected(void);
 void sh_bt_unpair(void);
 int sh_bt_reconnect(void);

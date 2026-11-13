@@ -7,7 +7,7 @@
  *                                               resolution + the 2x present, the first frame at rest full); frames
  *                                               as raw BGRA (720 x 1480 with half), one "F" line per frame on stdout
  *   sbtk-host PAK bench                         uibench's kernels on this host (the A55 calibration)
- * A script: "wait MS", "tap X Y [MS]", "drag X0 Y0 X1 Y1 MS", "hold X Y MS" (pt, ms), separated by ';'; also "power", "powerhold",
+ * A script: "wait MS", "tap X Y [MS]", "drag X0 Y0 X1 Y1 MS", "hold X Y MS" (pt, ms), "ori N" (cp7: the phone turned, 0..3), "keys TEXT" (cp7: a hardware keyboard), separated by ';'; also "power", "powerhold",
  * "notify WHO|TITLE|BODY", "dragh X0 Y0 X1 Y1 MS HOLD", "state WHAT=KEY:V" (a still's state, now), "ring MS" (the
  * pretend network's incoming call MS ms later) and "sms TEXT" (a message received now from a made-up number). */
 #include "../sbtk.h"
@@ -620,6 +620,7 @@ static void apply_state(const char *st)
 
 /* ---- the film ------------------------------------------------------------------------------------------- */
 typedef struct { int kind; float x0, y0, x1, y1, ms, dms; char txt[120]; } step;   /* dms: dragh's drag (then held) */
+static int host_ori_film = -1;          /* cp7: a film's "ori N" (the pretend accelerometer), -1 none */
 static int parse(const char *s, step *st, int max)
 {
     int n = 0;
@@ -648,6 +649,13 @@ static int parse(const char *s, step *st, int max)
         } else if (!strcmp(w, "ring")) { p->kind = 8; p->ms = 20; sscanf(tok, " %*s %f", &p->x0); }   /* helper I */
         else if (!strcmp(w, "power")) { p->kind = 5; p->ms = 20; }      /* the Power key: sleep, or wake if off */
         else if (!strcmp(w, "powerhold")) { p->kind = 10; p->ms = 20; }   /* P3x: the Power key held 1 s: the power sheet */
+        else if (!strcmp(w, "ori")) { p->kind = 11; p->ms = 20; sscanf(tok, " %*s %f", &p->x0); }
+        else if (!strcmp(w, "keys")) {      /* cp7: "keys TEXT": a Bluetooth keyboard types TEXT now ('|' Return, '<' Delete) */
+            p->kind = 12; p->ms = 20;
+            const char *a = strstr(tok, "keys") + 4;
+            while (*a == ' ') a++;
+            snprintf(p->txt, sizeof p->txt, "%s", a);
+        }   /* cp7: the phone turned (0..3) */
         else if (!strcmp(w, "notify")) {     /* helper D: "notify WHO|TITLE|BODY": a pretend notification from the platform */
             p->kind = 6; p->ms = 20;
             const char *a = strstr(tok, "notify") + 6;
@@ -728,6 +736,21 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
                 }
                 continue;
             }
+            if (p->kind == 12) {
+                if (phase < 0) {
+                    for (const char *c = p->txt; *c; c++) {
+                        uint32_t u = *c == '|' ? '\n' : *c == '<' ? 0x08 : (uint32_t)(unsigned char)*c;
+                        sh_hw_key(0, 1, u);
+                        sh_hw_key(0, 0, u);
+                    }
+                    phase = 0;
+                }
+                continue;
+            }
+            if (p->kind == 11) {
+                if (phase < 0) { host_ori_film = (int)p->x0 & 3; phase = 0; }
+                continue;
+            }
             if (p->kind == 10) {
                 if (phase < 0) { fprintf(stderr, "power held at %.0f ms\n", te); sh_power_held(); phase = 0; }
                 continue;
@@ -802,7 +825,11 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
             fprintf(log, "R %d %.1f hash %016llx\n", frame, t, (unsigned long long)hh);
             if (getenv("SBTK_DUMPR") && frame == atoi(getenv("SBTK_DUMPR"))) write_ppm(getenv("SBTK_DUMPTO"), &c->panel);
         }
-        if (!motion) sh_idle();     /* between frames: on the phone, the time left in the frame */
+        if (!motion) {               /* between frames: on the phone, the time left in the frame */
+            uint64_t i0 = tk_us();
+            sh_idle();
+            if (getenv("SBTK_IDLEMS") && tk_us() - i0 > 1000) fprintf(stderr, "IDLE %d %.1f ms\n", frame, (tk_us() - i0) / 1000.0);   /* cp7c */
+        }
         /* the phone's refresh timer (the Clock's digits, the card's work a turn at a time): a frame if it drew */
         if (!motion && sh_next_update(t) >= 0 && sh_refresh(t)) tk_comp_frame(c, 0, 0);
         if (t > total + 8000) break;
@@ -1284,10 +1311,16 @@ int sh_hold_awake(const char *who, int on) { static int n; n += on ? 1 : (n > 0 
 static int host_low;
 void sh_low_power(int on) { host_low = !!on; }
 int sh_low_power_on(void) { return host_low; }
+void sh_slow_piece(const char *what, unsigned us)    /* cp7f: as the phone's, over SBTK_SLOWMS (default 20) */
+{
+    static int lim = -1;
+    if (lim < 0) { const char *e = getenv("SBTK_SLOWMS"); lim = e ? atoi(e) : 20; }
+    if (us > (unsigned)lim * 1000u) fprintf(stderr, "shell piece %s %u ms\n", what, us / 1000);
+}
 
-/* Track A, cp7: SBTK_ORI=0..3 pretends the phone is turned (stills / films of rotated apps) */
+/* Track A, cp7: SBTK_ORI=0..3 pretends the phone is turned (stills / films of rotated apps); a film's "ori N" too */
 static int host_ori_lock;
-int sh_orientation(void) { const char *e = getenv("SBTK_ORI"); return host_ori_lock || !e ? 0 : (atoi(e) & 3); }
+int sh_orientation(void) { const char *e = getenv("SBTK_ORI"); return host_ori_lock ? 0 : host_ori_film >= 0 ? host_ori_film : !e ? 0 : (atoi(e) & 3); }
 int sh_orientation_lock(void) { return host_ori_lock; }
 void sh_orientation_lock_set(int on) { host_ori_lock = !!on; }
 
@@ -1296,6 +1329,7 @@ int sh_bt_pair(int i) { (void)i; return 0; }
 int sh_bt_pair_state(void) { const char *e = getenv("SBTK_BTP"); return e ? atoi(e) : 0; }
 const char *sh_bt_pair_code(void) { return sh_bt_pair_state() == 2 ? "042195" : ""; }
 const char *sh_bt_pair_why(void) { return sh_bt_pair_state() == 6 ? "The keyboard didn't answer. Turn it on and try again." : ""; }
+const char *sh_bt_kbd_name(void) { return "Magic Keyboard"; }
 int sh_bt_kbd_paired(void) { return sh_bt_pair_state() == 4; }
 int sh_bt_kbd_connected(void) { return sh_bt_pair_state() == 4; }
 void sh_bt_unpair(void) { }

@@ -102,7 +102,12 @@ ents += mkfile(5, 'long.img', 3 * CB, False, [c, c + 1, c + 2, c + 3])
 ents += mkfile(6, 'tiny.img', 100, True)
 ents += entry_set('sub', d_sub, CB, True, True)
 img[cl_off(d_linux):cl_off(d_linux) + len(ents)] = ents
-e = entry_set('linux', d_linux, CB, True, True)
+# cp7q: a folder of 200 files (19200 bytes of entries in one 32 KiB cluster): the reader's 16 KiB pieces, with
+# an entry set across the piece boundary (f170's at 16320..16415)
+d_big = alloc(1)
+big = b''.join(entry_set('f%03d.txt' % i, 0, 0, False, True) for i in range(200))
+img[cl_off(d_big):cl_off(d_big) + len(big)] = big
+e = entry_set('linux', d_linux, CB, True, True) + entry_set('big', d_big, CB, True, True)
 img[cl_off(d_starbite):cl_off(d_starbite) + len(e)] = e
 # the root: bitmap and up-case entries first (the reader skips them), a label, then the folder
 r = bytes([0x81]) + bytes(31) + bytes([0x82]) + bytes(31) + bytes([0x83, 4]) + 'TEST'.encode('utf-16-le') + bytes(22)

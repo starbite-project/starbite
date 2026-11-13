@@ -48,7 +48,19 @@ static uint32_t acpm_find(uint32_t id)
     return 0;
 }
 
+/* cp7s: every ACPM exchange counted and timed (Starbite OS names a slow shell call's platform time with them) */
+uint32_t sb_acpm_calls;
+uint64_t sb_acpm_us;
+static int acpm_send_(uint32_t c, uint32_t id, uint32_t cmd[4]);
 static int acpm_send(uint32_t c, uint32_t id, uint32_t cmd[4])
+{
+    uint64_t t0 = sb_us();
+    int r = acpm_send_(c, id, cmd);
+    sb_acpm_calls++;
+    sb_acpm_us += sb_us() - t0;
+    return r;
+}
+static int acpm_send_(uint32_t c, uint32_t id, uint32_t cmd[4])
 {
     uint32_t qlen = ard(c + 0x34), esz = ard(c + 0x38);
     uint32_t tx_rear = ard(c + 0x10), tx_front = ard(c + 0x14), tx_base = ard(c + 0x18);

@@ -31,6 +31,7 @@ static const tk_bmp *shown_frame(void) { return tk_comp_shown(C); }
 #else
 static const tk_bmp *shown_frame(void) { return &C->fb; }
 #endif
+static int shown_quarter(tk_bmp *q);           /* cp7f: what shows, a quarter each way, for the blurred scrims (below) */
 
 /* P3p (audit 15): the safe margins. The S9's long edges curve away from x < 72 px and x > 1368 px (rims and
  * highlights bend and dim there): every card, group, dock and sheet keeps MARGIN pt from the sides (iOS: 16 pt on a
@@ -976,10 +977,12 @@ static const ecard_t EC[8] = {
     { "sun", "Sun", 0, "sun" },
     { "guide", "Survival Guide", "First aid, water, shelter, signals: offline", "guide" },
     { "compass", "Compass / Level", "Heading, level and steps: live from the sensors", "compass" } };
-static void ec_card(dc *d, int i, float top)
+/* cp7i: a card in two parts (0 its glass, 1 its icon and words; -1 both): sv_idle makes one an idle turn */
+static void ec_card_part(dc *d, int i, float top, int part)
 {
     /* P3i: no blur of the layer under each card (only the card above's shadow: ~200 ms for nothing seen) */
-    d_glass(d, CARD_X, top, CARD_W, 68, 26, 0, 1);
+    if (part <= 0) d_glass(d, CARD_X, top, CARD_W, 68, 26, 0, 1);
+    if (!part) return;
     if (!sv_tile(d, EC[i].icon, CARD_ICON, top + 11, 46)) d_icon(d, EC[i].icon, CARD_ICON, top + 11, 1);
     /* b: 19 / 800 / -.5, line-height 1.1 (half-leading floored); .sub 13.5, .82 */
     d_text(d, TK_IT700, 19, CARD_TX, top + 12.55f + tk_floorf(tk_ascent(TK_IT700, PT(19)) / TK_PT + .5f), EC[i].t, 0, 0, INK, 0);
@@ -989,6 +992,7 @@ static void ec_card(dc *d, int i, float top)
     d_text(d, TK_IT400, 13.5f, CARD_TX, top + 37.44f + tk_floorf(tk_ascent(TK_IT400, PT(13.5f)) / TK_PT + .5f), sub, 0, 0, W(.82f), 0);
     d_icon(d, "chev", CARD_CHEV, top + 27, 1);
 }
+static void ec_card(dc *d, int i, float top) { ec_card_part(d, i, top, -1); }
 /* (the first four cards in one layer, each card's backdrop what is drawn before it, as in the list; then Exit, then
  * the layers of cards 4..7: B6's ep_card, a piece at a time, below set_emergency) */
 static void free_ecards(void) { for (int i = 0; i < NEC; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } ec_next = 8; }
@@ -1314,12 +1318,23 @@ static void d_systile(dc *d, const char *k, float x, float y)
     float f = 52.0f / 66, pad = tk_icon_pad(nm) * f;
     nc_blit_scaled(d->b, ic, PT(x) - pad - d->ox, PT(y) - pad - d->oy, f);
 }
-static void build_home_w(void)
+/* cp7i: home's widgets in five parts (each widget's glass, Battery's words, Recent's tiles, the captions) and page 2 an icon a
+ * part, so Emergency's switch makes them a part a slice (7g: ep_work 71 / 156 ms on the phone was these whole);
+ * build_home_w / build_home_apps2 still make them whole (a part-made one is then made again) */
+static dc hw_d;
+static int hw_next;                               /* the next part of a part-made home-w, 0 none */
+static void home_w_part(int k)
 {
+    if (k != 1 && k != hw_next) return;
+    dc d = hw_d;
+    if (k == 1) {
     relayer(&hparts[1]);
-    dc d = mk(&hparts[1], "home-w", 0, 50, 390, 200, 44, 1);
+    d = mk(&hparts[1], "home-w", 0, 50, 390, 200, 44, 1);
+    hw_d = d;
     d_glass(&d, WID_X(0), 60, WID_W, WID_W, 24, 0, 1);
+    } else if (k == 2) {
     d_glass(&d, WID_X(1), 60, WID_W, WID_W, 24, 0, 1);
+    } else if (k == 3) {
     /* Battery: .lab, .big, three rows */
     if (EMG) {
         /* Emergency: the battery glyph amber (#ffb547) */
@@ -1349,6 +1364,7 @@ static void build_home_w(void)
             y += 15;
         }
     }
+    } else if (k == 4) {
     d_icon(&d, "home-star", WID_X(1) + 16, 74 + 1.5f, 1);
     d_text(&d, TK_IT700, 11.5f, WID_X(1) + 34, base_of(TK_IT700, 11.5f, 74, 0), "Recent", .345f, 0, W(.7f), 0);
     {
@@ -1360,39 +1376,64 @@ static void build_home_w(void)
         for (int i = 0; i < 4 && n < 4; i++) if (!LAST || tk_strcmp(T4[i], LAST)) rk[n++] = T4[i];
         for (int i = 0; i < 4; i++) d_systile(&d, rk[i], WID_X(1) + 16 + (i & 1) * (WID_W - 32 - 52), 74 + 14 + 9 + (i >> 1) * 60);
     }
+    } else {
     float cw = tw(TK_IT400, 12, "Battery", 0, 0);
     d_text(&d, TK_IT400, 12, WID_X(0) + WID_W / 2 - cw / 2, 224 + 12, "Battery", 0, 0, INK, 1);
     cw = tw(TK_IT400, 12, "Systems", 0, 0);
     d_text(&d, TK_IT400, 12, WID_X(1) + WID_W / 2 - cw / 2, 224 + 12, "Systems", 0, 0, INK, 1);
     trim(&hparts[1]);
+    }
+    hw_next = k < 5 ? k + 1 : 0;
 }
-static void build_home_apps2(void)
+static void build_home_w(void) { for (int k = 1; k <= 5; k++) home_w_part(k); }
+/* a part a call (relink after the first: the layer was made again); 1 while parts are left */
+static int home_w_step(void)
 {
-    /* page 2: the second grid (top 62) */
-    {
-        static const char *P2N_[9] = { "Contacts", "Files", "Flashlight", "Battery", "Terminal", "Browser", "Medical Card", "SOS", "Maps" };
-        static const char *P2EN[12] = { "Survival Heat", "Last 2 %", "SOS", "Medical Card", "USB Power", "Sun", "Guide", "Compass",
-                                        "Flashlight", "Battery", "Contacts", "Files" };
-        const char *const *P2 = EMG ? P2E : P2K, *const *P2N = EMG ? P2EN : P2N_;
+    int k = hw_next ? hw_next : 1;
+    home_w_part(k);
+    return hw_next != 0;
+}
+/* page 2's parts: 0 the layers, 1..NP2 an icon each (its tile or icon and its name), NP2 + 1 moved and trimmed */
+static dc a2_d, a2_d3;
+static int a2_next = -1;                          /* the next part of a part-made page 2, -1 none */
+static void home_apps2_part(int k)
+{
+    static const char *P2N_[9] = { "Contacts", "Files", "Flashlight", "Battery", "Terminal", "Browser", "Medical Card", "SOS", "Maps" };
+    static const char *P2EN[12] = { "Survival Heat", "Last 2 %", "SOS", "Medical Card", "USB Power", "Sun", "Guide", "Compass",
+                                    "Flashlight", "Battery", "Contacts", "Files" };
+    const char *const *P2 = EMG ? P2E : P2K, *const *P2N = EMG ? P2EN : P2N_;
+    if (k != 0 && k != a2_next) return;
+    if (k == 0) {
+        /* page 2: the second grid (top 62) */
         relayer(&hparts[4]);
         relayer(&hparts[6]);
         /* drawn as if on screen, then moved one page to the right (layers never extend past the panel's sides).
          * survival-next (the merge): Emergency's third row (the tools) in a layer of its own (one 7 MB layer was refused in the 160 MiB
          * heap's holes; 5 + 1.5 MB fit) */
-        dc d = mk(&hparts[4], "home-apps2", 0, 55, 390, 220, 4, 0), d3 = { 0 };
-        if (NP2 > 8) d3 = mk(&hparts[6], "home-apps2e", 0, HOME_TOP2 + 2 * ROW_PITCH - 5, 390, 96, 4, 0);
+        a2_d = mk(&hparts[4], "home-apps2", 0, 55, 390, 220, 4, 0);
+        a2_d3 = (dc){ 0 };
+        if (NP2 > 8) a2_d3 = mk(&hparts[6], "home-apps2e", 0, HOME_TOP2 + 2 * ROW_PITCH - 5, 390, 96, 4, 0);
         hparts[6].hidden = NP2 <= 8;
-        for (int i = 0; i < NP2; i++) {
-            float cx = COL_CX(i % 4), y = HOME_TOP2 + ROW_PITCH * (i / 4);
-            dc *dd = i < 8 ? &d : &d3;
-            if (!dd->b || !dd->b->px) continue;
+    } else if (k <= NP2) {
+        int i = k - 1;
+        float cx = COL_CX(i % 4), y = HOME_TOP2 + ROW_PITCH * (i / 4);
+        dc *dd = i < 8 ? &a2_d : &a2_d3;
+        if (dd->b && dd->b->px) {
             char n[40] = "a62-";
             tk_memcpy(n + 4, P2[i], tk_strlen(P2[i]) + 1);
             if (!sv_tile(dd, P2[i], cx - 31, y, 62)) d_icon(dd, n, cx - 31, y, 1);
             d_text_box(dd, TK_IT400, 12, cx, y + 68 + 12, 84, 1, P2N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
         }
-        for (int k = 4; k <= 6; k += 2) { hparts[k].x = hparts[k].bx = hparts[k].x + PT(390); trim(&hparts[k]); }
-    }
+    } else
+        for (int q = 4; q <= 6; q += 2) { hparts[q].x = hparts[q].bx = hparts[q].x + PT(390); trim(&hparts[q]); }
+    a2_next = k <= NP2 ? k + 1 : -1;
+}
+static void build_home_apps2(void) { for (int k = 0; k <= NP2 + 1; k++) home_apps2_part(k); }
+/* a part a call; 1 while parts are left */
+static int home_apps2_step(void)
+{
+    home_apps2_part(a2_next < 0 ? 0 : a2_next);
+    return a2_next >= 0;
 }
 /* B8 (GAP-LIST #21): the dock's badges, iOS's: a red (#FF4245) 18 pt circle (wider for more digits) with the count
  * 12 / 600, its top-right corner 5 pt out from the icon's. Only where a count exists: shell_comms.inc's cm_badge()
@@ -1564,7 +1605,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     focus_req = 0;                           /* cp6: every sheet opens on a normal start */
     free_cc_all();                           /* B4: the lock's Control Centre makes room for the sheet */
     /* the scrim: what is on the panel now, blurred 22 pt, saturated 1.3, under rgba(4, 8, 26, .28) */
-    tk_comp_frame(C, 0, 0);                  /* the frame in RAM is current (only what changed is drawn) */
+    if (!C->gpu) tk_comp_frame(C, 0, 0);    /* the frame in RAM is current (only what changed is drawn); cp7f: GPU: shown_quarter */
     relayer(&scrim);
     tk_layer_init(&scrim, "scrim");
     /* half resolution, drawn 2x (it is a blur): 4 MB instead of 17 */
@@ -1572,9 +1613,7 @@ static void build_focus(const sys_t *s, const grp_t *gr)
     scrim.sx = scrim.sy = 2;
     {
         tk_bmp q;
-        tk_bmp_new(&q, TK_W / 4, TK_H / 4);
-        tk_bmp_down2(&scrim.bmp, shown_frame());
-        tk_bmp_down2(&q, &scrim.bmp);
+        shown_quarter(&q);                       /* cp7f (the GPU path: no whole CPU frame first) */
         tk_bmp_blur(&q, PT(22) / 4);
         tk_bmp_satbright(&q, 1.3f, 1);
         /* the tint over it at this size (a constant over a smooth image: the same after the bilinear up) */
@@ -1734,13 +1773,47 @@ static void under_rows(void *v, int y0, int y1)
         }
     }
 }
-static void flatten_lock(int ground)          /* ground: also when the wallpaper changed (idle; not mid-swipe) */
+/* cp7c: the idle's flatten in slices (fl_row: the next band's first row, -1 none started): tk_flatten in one call, the
+ * ground under it a band a call (the lens: ~90 ms on the A55 in one piece, a lost tap after an animation). Another
+ * tk_flatten between the slices (the switcher's snapshot: flat_cuts) takes the lens's shapes: the slices start over */
+static int fl_row = -1;
+static int fl_ver;
+static uint32_t fl_gnd, fl_cut;
+unsigned flat_cuts;                               /* bumped by every other tk_flatten (shell_switcher.inc) */
+/* cp7f: what the panel shows, at a quarter each way, for the blurred scrims (the Control Centre, the focus sheet, the
+ * power sheet). The CPU path: its RAM frame halved twice (as before). The GPU path: its RAM frame would first be drawn
+ * whole on the CPU (tk_comp_shown: ~200-250 ms on the phone, 7e's "idle after a gesture"); instead the wallpaper's
+ * quarter with the visible layers flattened at a quarter over it (1/16 of the px; no lens: under a 20+ pt blur none
+ * of it would show). 0: no memory */
+/* the GPU path's second half: the visible layers flattened at a quarter over q (the wallpaper's quarter) */
+static void shown_layers_over(tk_bmp *q)
 {
-    if (flat_ver == lock_ver && (!ground || flat_ground == C->ground_gen)) return;
-    tk_a8_new(&flatmask, TK_W / 2, TK_H / 2);    /* P3p: the glass goes into its own ground (P3s: made for this only) */
-    tk_flatten(&lockg, &lockflat.bmp, &flatmask, .5f);
-    under_ctx U = { &lockflat.bmp, &flatmask };
-    tk_par_rows(0, lockflat.bmp.h, under_rows, &U);
+    tk_bmp f;
+    if (tk_bmp_new(&f, q->w, q->h)) {
+        flat_cuts++;                              /* (the lock's sliced flatten starts over) */
+        tk_flatten(&root, &f, 0, .25f);
+        tk_blit(q, &f, 0, 0, 1);
+        tk_bmp_free(&f);
+    }
+}
+static int shown_quarter(tk_bmp *q)
+{
+    if (!tk_bmp_new(q, TK_W / 4, TK_H / 4)) return 0;
+    if (!C || !C->gpu) {
+        tk_bmp h;
+        if (!tk_bmp_new(&h, TK_W / 2, TK_H / 2)) { tk_bmp_free(q); return 0; }
+        tk_bmp_down2(&h, shown_frame());
+        tk_bmp_down2(q, &h);
+        tk_bmp_free(&h);
+        return 1;
+    }
+    tk_bmp_down2(q, &C->base_half);
+    shown_layers_over(q);
+    return 1;
+}
+#define FL_BAND 96                                /* half-resolution rows a slice (1480 in all: 16 slices) */
+static void flatten_end(void)
+{
     tk_a8_free(&flatmask);
     /* the star (nothing of the lock's is drawn where it is) */
     tk_layer *s[2] = { &star, &star_e };
@@ -1749,9 +1822,44 @@ static void flatten_lock(int ground)          /* ground: also when the wallpaper
         tk_layer_prepare(s[i]);
         if (s[i]->half.px) tk_blit(&lockflat.bmp, &s[i]->half, (int)s[i]->x / 2, (int)s[i]->y / 2, s[i]->alpha);
     }
+    tk_layer_dirty(&lockflat);
+}
+static void flatten_lock(int ground)          /* ground: also when the wallpaper changed (idle; not mid-swipe) */
+{
+    if (flat_ver == lock_ver && (!ground || flat_ground == C->ground_gen)) return;
+    fl_row = -1;                                  /* (a sliced one in progress: done whole now) */
+    tk_a8_free(&flatmask);
+    tk_a8_new(&flatmask, TK_W / 2, TK_H / 2);    /* P3p: the glass goes into its own ground (P3s: made for this only) */
+    tk_flatten(&lockg, &lockflat.bmp, &flatmask, .5f);
+    under_ctx U = { &lockflat.bmp, &flatmask };
+    tk_par_rows(0, lockflat.bmp.h, under_rows, &U);
     flat_ver = lock_ver;
     flat_ground = C->ground_gen;
-    tk_layer_dirty(&lockflat);
+    flatten_end();
+}
+/* the idle's: one slice; 1 while more slices are to come (sh_idle_pending) */
+static int flatten_lock_step(void)
+{
+    if (fl_row >= 0 && (fl_ver != lock_ver || fl_gnd != C->ground_gen || fl_cut != flat_cuts)) fl_row = -1;   /* changed: again */
+    if (fl_row < 0) {
+        if (flat_ver == lock_ver && flat_ground == C->ground_gen) return 0;
+        tk_a8_free(&flatmask);
+        if (!tk_a8_new(&flatmask, TK_W / 2, TK_H / 2)) { flatten_lock(1); return 0; }
+        tk_flatten(&lockg, &lockflat.bmp, &flatmask, .5f);
+        fl_ver = lock_ver; fl_gnd = C->ground_gen; fl_cut = flat_cuts;
+        fl_row = 0;
+        return 1;
+    }
+    under_ctx U = { &lockflat.bmp, &flatmask };
+    int y1 = tk_mini(lockflat.bmp.h, fl_row + FL_BAND);
+    tk_par_rows(fl_row, y1, under_rows, &U);
+    fl_row = y1;
+    if (fl_row < lockflat.bmp.h) return 1;
+    fl_row = -1;
+    flat_ver = fl_ver;
+    flat_ground = fl_gnd;
+    flatten_end();
+    return 0;
 }
 
 /* ---- home's pages: the grid slides, the Search pill shows the page dots while it moves ---------------------- */
@@ -1961,16 +2069,28 @@ static void cc_unview(void)
         v->gen++;
     }
 }
-static void build_cc_grid(void)
+/* cp7c: the grid in six parts (a tile or two each: their glass bakes), so build_cc's idle stages stay short; ccg_part:
+ * the next part of a grid being drawn (0 none); a whole build_cc_grid (a toggle) ends any part-drawn one */
+static dc ccg_d;
+static int ccg_part;
+#define CCG_PARTS 9
+static void cc_grid_part(int k)
 {
+    if (k != 1 && k != ccg_part) return;         /* (that grid was made again whole meanwhile) */
+    dc d = ccg_d;
+    if (k == 1) {
     cc_unview();
-    CCS.rot = 1;                                 /* cp6: iOS's Portrait Orientation Lock, always on (the panel doesn't rotate) */
+    CCS.rot = sh_orientation_lock();             /* cp7: iOS's Portrait Orientation Lock, a real switch (off by default) */
     CCS.save = sh_low_power_on();                /* cp6: Track A's Low Power Mode lights its tile */
     relayer(&ccgrid);
-    dc d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, 4 * CC_U + 3 * CC_GAP, 44, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
+    d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, 4 * CC_U + 3 * CC_GAP, 44, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
+    ccg_d = d;
     /* the connectivity 2x2: Airplane, Cellular, Wi-Fi and the mini cluster (Bluetooth, Nearby, Hotspot, VPN) */
+    } else if (k == 2) {                         /* cp7p (7m: 43 ms): the grid's bitmap made, then its first tile */
     float X = CC_COL(0), Y = CC_ROW(0);
     cc_tile(&d, X, Y, CC_W2, CC_W2, 30, 0);
+    } else if (k == 3) {                         /* cp7m (7l: the first part 29-50 ms): the three circles a part of their own */
+    float X = CC_COL(0), Y = CC_ROW(0);
     static const char *CI[3] = { "cc-air", "cc-cell", "cc-wifi" };
     static const float CW[3][2] = { { 20, 20 }, { 20, 18 }, { 22, 16 } };
     int ons[3] = { CCS.air, cell_running(), CCS.wifi };
@@ -1980,6 +2100,8 @@ static void build_cc_grid(void)
         d_rrect(&d, cx, cy, CN_D, CN_D, CN_D / 2, ons[i] ? tk_hex(ONC[i], 1) : W(.2f));
         d_icon(&d, CI[i], cx + (CN_D - CW[i][0]) / 2, cy + (CN_D - CW[i][1]) / 2, 1);
     }
+    } else if (k == 4) {                         /* cp7i: the mini cluster a part of its own */
+    float X = CC_COL(0), Y = CC_ROW(0);
     {
         float bx = X + CN_PAD + CN_D + 14, by = Y + CN_PAD + CN_D + 14;
         for (int k = 0; k < 4; k++) {
@@ -1989,9 +2111,11 @@ static void build_cc_grid(void)
             else cc_draw_link(&d, k - 1, mx + CN_MD / 2, my + CN_MD / 2, .85f, W(1));
         }
     }
+    } else if (k == 5) {
     /* the sliders' glass (their level and glyph are layers above) */
     cc_tile(&d, CC_COL(2), CC_ROW(0), CC_U, CC_W2, 34, 0);
     cc_tile(&d, CC_COL(3), CC_ROW(0), CC_U, CC_W2, 34, 0);
+    } else if (k == 6) {
     /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Mirror, Camera */
     /* P3i: the torch's tile baked off; its lit look is a small layer over it, so the tap shows it at once (the
      * whole grid's rebuild took ~300 ms at the tap) */
@@ -2005,6 +2129,7 @@ static void build_cc_grid(void)
         cclit.hidden = !Q[0].lit;
     }
     cc_tile(&d, CCX[1], CC_R3, CC_U, CC_U, 34, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], CC_R3, 22, 22);
+    } else if (k == 7) {
     cc_tile(&d, CCX[2], CC_R3, CC_U, CC_U, 34, 0);
     cc_glyph(&d, "cc-flame", CCX[2], CC_R3, 20, 24);
     {
@@ -2018,14 +2143,22 @@ static void build_cc_grid(void)
         ccem.hidden = !EMG;
     }
     cc_tile(&d, CCX[3], CC_R3, CC_U, CC_U, 34, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], CC_R3, 24, 14);
+    } else if (k == 8) {
     cc_tile(&d, CCX[0], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-timer", CCX[0], CC_R4, 22, 22);
     /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place); P3p: baked ones */
     cc_tile(&d, CCX[1], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-calc", CCX[1], CC_R4, 24, 24);
+    } else {
     cc_tile(&d, CCX[2], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-wifi2", CCX[2], CC_R4, 22, 22);
     cc_tile(&d, CCX[3], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-camera", CCX[3], CC_R4, 24, 24);
     tk_a8_free(&ccgrid.glass);
     trim(&ccgrid);
     tk_layer_prepare(&ccgrid);
+    }
+    ccg_part = k < CCG_PARTS ? k + 1 : 0;
+}
+static void build_cc_grid(void)
+{
+    for (int k = 1; k <= CCG_PARTS; k++) cc_grid_part(k);
 }
 static void cc_levels(void)
 {
@@ -2034,29 +2167,60 @@ static void cc_levels(void)
         cclvl[i].clip_r = (tk_rect){ PT(x), PT(CC_ROW(0) + CC_W2 * (1 - v)), PT(CC_U), PT(CC_W2 * v) };
     }
 }
-static void build_cc(void)
+/* cp7c: build_cc in stages, one an idle call (sh_idle_pending while some are left: the whole was ~0.6-1.2 s on the
+ * phone in one turn after each move on home, and a tap in it was lost). 1: home's picture; 2: the light blur; 3: the
+ * heavy blur; 4: the status, chrome, page dots, sliders; 5-13: the grid (cc_grid_part); 14: linked, built. A pull
+ * before the end builds it whole (build_cc). The quarter picture ccq lives from stage 1 to 3 */
+static int ccb_next;                              /* the next stage, 0 none in progress */
+static tk_bmp ccq;
+static int ccq1, ccb_again;                       /* cp7m: stage 1's second call (the GPU row's layers); a stage to run again */
+static void build_cc_stage(int st)
 {
+    if (st == 1) {
+    if (ccq1) { ccq1 = 0; if (ccq.px) shown_layers_over(&ccq); return; }   /* cp7m (7l: 24-39 ms): the layers, a call of their own */
     /* the scrim from home as it is now (half resolution, drawn 2x), then the grid over it */
-    tk_comp_frame(C, 0, 0);
+    CCS.built = 0;                               /* (being made: a pull now builds it whole) */
     relayer(&ccscrim);
     tk_layer_init(&ccscrim, "cc-scrim");
+    tk_bmp_free(&ccq);
+    if (C && C->gpu) {                           /* cp7f: the GPU row keeps only the quarter (stage 3): shown_quarter's halves */
+        if (tk_bmp_new(&ccq, TK_W / 4, TK_H / 4)) { tk_bmp_down2(&ccq, &C->base_half); ccq1 = ccb_again = 1; }
+        return;
+    }
+    tk_comp_frame(C, 0, 0);
     if (tk_bmp_new(&ccscrim.bmp, TK_W / 2, TK_H / 2)) {
         tk_bmp q;
         tk_bmp_new(&q, TK_W / 4, TK_H / 4);
         tk_bmp_down2(&ccscrim.bmp, shown_frame());
         tk_bmp_down2(&q, &ccscrim.bmp);
+        ccq = q;
+    }
+    return;
+    }
+    if (st == 2) {                               /* cp7c (7e): the light blur a stage of its own */
+    if (ccq.px) {
+        tk_bmp q = ccq;
         /* P3p (P3j-20): the blur and the dim grow with the pull: an 8 pt level (dim .12, quarter resolution, 1 MB)
          * comes in first, the 26 pt one (neutral dim .25, not a blue tint) over it */
         relayer(&ccblur1);
         tk_layer_init(&ccblur1, "cc-blur1");
-        if (tk_bmp_new(&ccblur1.bmp, q.w, q.h)) {
-            tk_bmp_copy(&ccblur1.bmp, 0, 0, &q, 0, 0, q.w, q.h);
-            tk_bmp_blur(&ccblur1.bmp, PT(8) / 4);
+        /* cp7k (7j: this stage 45 ms on the phone): at an eighth each way (an 8 pt blur is smooth at that size; a
+         * quarter of the px), drawn 8x */
+        if (tk_bmp_new(&ccblur1.bmp, (q.w + 1) / 2, (q.h + 1) / 2)) {
+            tk_bmp_down2(&ccblur1.bmp, &q);
+            tk_bmp_blur(&ccblur1.bmp, PT(8) / 8);
             tk_bmp_satbright(&ccblur1.bmp, 1.15f, 1);
             tk_bmp_tint(&ccblur1.bmp, TK_RGBA(0, 0, 0, .12f));
-            ccblur1.sx = ccblur1.sy = 4;
+            ccblur1.sx = ccblur1.sy = 8;
             ccblur1.opaque = 1;
         }
+    }
+    return;
+    }
+    if (st == 3) {
+    if (ccq.px && (ccscrim.bmp.px || (C && C->gpu))) {
+        tk_bmp q = ccq;
+        tk_memset(&ccq, 0, sizeof ccq);
         tk_bmp_blur(&q, PT(26) / 4);
         tk_bmp_satbright(&q, 1.3f, 1);
         tk_bmp_tint(&q, TK_RGBA(0, 0, 0, .25f));
@@ -2075,6 +2239,9 @@ static void build_cc(void)
         }
         ccscrim.opaque = 1;
     }
+    return;
+    }
+    if (st == 4) {
     if (!ccsb.bmp.px) {
         dc d = mk(&ccsb, "cc-status", 0, 0, 390, 48, 2, 0);
         status_bar(&d, carrier);
@@ -2116,7 +2283,9 @@ static void build_cc(void)
             d_icon(&g, i ? "cc-vol" : "cc-sun", x + 23, y + CC_W2 - 33, 1);
         }
     }
-    build_cc_grid();
+    return;
+    }
+    if (st >= 5 && st < 5 + CCG_PARTS) { cc_grid_part(st - 4); return; }   /* (5-13) */
     tk_layer_init(&ccg, "cc-grid-group");
     ccg.ox = PT(CC_COL(0) + .85f * (4 * CC_U + 3 * CC_GAP));
     ccg.oy = PT(CC_ROW(0));
@@ -2124,12 +2293,29 @@ static void build_cc(void)
     cc_levels();
     CCS.built = 1;
 }
+#define CCB_STAGES (5 + CCG_PARTS)
+static void build_cc(void)
+{
+    ccq1 = 0;
+    for (int st = 1; st <= CCB_STAGES; st++) { build_cc_stage(st); if (ccb_again) { ccb_again = 0; st--; } }
+    ccb_next = 0;
+}
+/* the idle's: the next stage; 1 while stages are left */
+static int build_cc_step(void)
+{
+    if (!ccb_next) { ccb_next = 1; ccq1 = 0; }
+    build_cc_stage(ccb_next);
+    if (ccb_again) { ccb_again = 0; return 1; }   /* (the same stage's second call next) */
+    ccb_next = ccb_next < CCB_STAGES ? ccb_next + 1 : 0;
+    return ccb_next != 0;
+}
 static void cc_x_reset(void);
 /* an open app needs the room (its page is a whole screen): the Control Centre's snapshot and grid go, home's idle
  * time builds them again */
 static void free_cc(void)
 {
-    if (!CCS.built || CCS.on) return;
+    if (CCS.on) return;
+    if (!CCS.built && !ccb_next && !ccscrim.bmp.px && !ccblur1.bmp.px && !ccgrid.bmp.px) return;   /* cp7c: a staged one too */
     cc_x_reset();
     cc_unview();
     relayer(&ccscrim);
@@ -2137,6 +2323,8 @@ static void free_cc(void)
     relayer(&ccgrid);
     relayer(&ccem);
     CCS.built = 0;
+    ccb_next = ccg_part = ccq1 = 0;               /* cp7c: a staged build's rest (its grid's drawing context) goes too */
+    tk_bmp_free(&ccq);
 }
 /* P3s: on the lock (it opens only from home) nothing of it is kept; home's idle time builds it again */
 static void free_cc_all(void)
@@ -2483,7 +2671,14 @@ static int cc_tap(float x, float y)
             sh_haptic_k(SH_HAP_LIGHT);       /* B4: a toggle, felt */
             return 1;
         }
-        else if (c == 1) { toast("Portrait Orientation Lock: On"); return 1; }   /* cp6: always on (no rotation) */
+        else if (c == 1) {                   /* cp7: Portrait Orientation Lock (Track A's pref; the apps that turn) */
+            int on = !sh_orientation_lock();
+            sh_orientation_lock_set(on);
+            sh_haptic_k(SH_HAP_LIGHT);
+            toast(on ? "Portrait Orientation Lock: On" : "Portrait Orientation Lock: Off");
+            build_cc_grid(); cc_link();
+            return 1;
+        }
         else if (c == 3) {                   /* Track A, 1.0: Low Power Mode (kernel: the conservative clocks, kept) */
             int on = !sh_low_power_on();
             sh_low_power(on);
@@ -2738,8 +2933,25 @@ __attribute__((unused)) static void d_lg_app(dc *d, float x, float y, float w, f
 }
 /* the same over the bare ground (nothing drawn under it): the blur of a flat colour is that colour, so no backdrop
  * buffer is needed (a card over the dimmed screen: its 4.6 MB backdrop refused on a full heap) */
+static void d_lg_flat_raw(tk_bmp *b, float X, float Y, float w, float h, float r, int dark, uint32_t c)
+{
+    tk_paint p = tk_solid(TK_RGBA((float)(c >> 16 & 255), (float)(c >> 8 & 255), (float)(c & 255), 1));
+    tk_fill_rrect(b, X, Y, PT(w), PT(h), PT(r), &p, 1);
+    tk_glass_bake(b, 0, X, Y, PT(w), PT(h), PT(r), dark, 1);
+}
+/* cp7m (7l: the Clock's tab change / Add Alarm / Cancel 92-110 ms on the phone, half of it its tab bar's bake): a flat
+ * glass baked once over nothing, cut to its pixels, and blitted (the bake is a fill and layers over it: the same over
+ * a page's transparent strip); four kept, the least recently used given back; the key its size, corner, tone, ground
+ * colour and place within a px (in 64ths: the strips' offsets are big floats). A strip it doesn't reach: nothing */
+#define LGC_N 4
+#define LGC_M 118                                   /* PT(32): room for the shadow, px */
+static struct { tk_bmp b; int x0, y0, dark, qx, qy; float w, h, r; uint32_t c, use; } LGC[LGC_N];
+static uint32_t lgc_clock;
 static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int dark)
 {
+    float X = PT(x) - d->ox, Y = PT(y) - d->oy;
+    int ix = (int)tk_floorf(X), iy = (int)tk_floorf(Y);
+    if (iy - LGC_M > d->b->h || iy + (int)PT(h) + LGC_M < 0 || ix - LGC_M > d->b->w || ix + (int)PT(w) + LGC_M < 0) return;
     tk_bmp g;
     uint32_t c = sbc_argb(SBC_GROUND);
     if (tk_bmp_new(&g, 1, 1)) {
@@ -2748,9 +2960,42 @@ static void d_lg_flat(dc *d, float x, float y, float w, float h, float r, int da
         c = g.px[0];
         tk_bmp_free(&g);
     }
-    tk_paint p = tk_solid(TK_RGBA((float)(c >> 16 & 255), (float)(c >> 8 & 255), (float)(c & 255), 1));
-    tk_fill_rrect(d->b, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), &p, 1);
-    tk_glass_bake(d->b, 0, PT(x) - d->ox, PT(y) - d->oy, PT(w), PT(h), PT(r), dark, 1);
+    int qx = (int)((X - (float)ix) * 64 + .5f), qy = (int)((Y - (float)iy) * 64 + .5f);
+    if (qx >= 64) { qx = 0; ix++; }
+    if (qy >= 64) { qy = 0; iy++; }
+    int k = -1, old = 0;
+    for (int i = 0; i < LGC_N; i++) {
+        if (LGC[i].b.px && LGC[i].w == w && LGC[i].h == h && LGC[i].r == r && LGC[i].dark == dark && LGC[i].c == c &&
+            LGC[i].qx == qx && LGC[i].qy == qy) { k = i; break; }
+        if (!LGC[i].b.px || (LGC[old].b.px && LGC[i].use < LGC[old].use)) old = i;
+    }
+    if (k < 0) {
+        k = old;
+        tk_bmp_free(&LGC[k].b);
+        tk_bmp t;
+        if (!tk_bmp_new(&t, (int)PT(w) + 2 * LGC_M + 2, (int)PT(h) + 2 * LGC_M + 2)) { d_lg_flat_raw(d->b, X, Y, w, h, r, dark, c); return; }
+        d_lg_flat_raw(&t, (float)LGC_M + qx / 64.0f, (float)LGC_M + qy / 64.0f, w, h, r, dark, c);
+        int x0 = t.w, x1 = 0, y0 = t.h, y1 = 0;
+        for (int j = 0; j < t.h; j++) {
+            const uint32_t *row = t.px + (size_t)j * t.stride;
+            int a = 0;
+            while (a < t.w && !row[a]) a++;
+            if (a == t.w) continue;
+            int e = t.w;
+            while (e > a && !row[e - 1]) e--;
+            if (a < x0) x0 = a;
+            if (e > x1) x1 = e;
+            if (j < y0) y0 = j;
+            y1 = j + 1;
+        }
+        if (x1 <= x0 || !tk_bmp_new(&LGC[k].b, x1 - x0, y1 - y0)) { tk_bmp_free(&t); d_lg_flat_raw(d->b, X, Y, w, h, r, dark, c); return; }
+        tk_bmp_copy(&LGC[k].b, 0, 0, &t, x0, y0, x1 - x0, y1 - y0);
+        tk_bmp_free(&t);
+        LGC[k].x0 = x0 - LGC_M; LGC[k].y0 = y0 - LGC_M;
+        LGC[k].w = w; LGC[k].h = h; LGC[k].r = r; LGC[k].dark = dark; LGC[k].c = c; LGC[k].qx = qx; LGC[k].qy = qy;
+    }
+    LGC[k].use = ++lgc_clock;
+    tk_blit(d->b, &LGC[k].b, ix + LGC[k].x0, iy + LGC[k].y0, 1);
 }
 /* P3p (P3j-13): a pushed page's nav row, as iOS 26: a 44 pt glass circle at the leading edge with the back chevron
  * (no text), the title inline (17 pt / 600) centred. The circle's glass is baked once (init; 300 KB) and copied. */
@@ -3020,6 +3265,11 @@ static float isl_next_update(float t);              /* B7: shell_island.inc */
 static int isl_refresh(float t);
 static int isl_sync(void);
 /* when the platform should come back for the clock (ms; < 0: nothing pending) */
+static float ori_next_update(void);           /* cp7: shell_orient.inc */
+static int ori_poll(float t);
+static int ori_tick(float dt);
+static int ori_moving(void);
+static int hwk_refresh(void);                 /* cp7: shell_hwkey.inc */
 int sh_next_update(float t)
 {
     int open = AP.on && is_app("clock");
@@ -3045,6 +3295,8 @@ int sh_next_update(float t)
     if (ub >= 0 && (best < 0 || ub < best)) best = ub;
     float sb = se_next_update(t);                       /* Track B: Settings' Bluetooth / Display polls */
     if (sb >= 0 && (best < 0 || sb < best)) best = sb;
+    float ob = ori_next_update();                       /* cp7: the orientation's poll while a screen that turns shows */
+    if (ob >= 0 && (best < 0 || ob < best)) best = ob;
     return (int)best;
 }
 int sh_refresh(float t)
@@ -3055,6 +3307,8 @@ int sh_refresh(float t)
     ch |= sv_refresh(t) | nc_refresh(t) | cm_refresh(t) | pc_refresh(t) | su_refresh(t);   /* survival-next: SOS's beacon, USB power's state; helper D: the banner; Track A: the back-off */
     ch |= isl_refresh(t);                              /* B7: the capsule (SOS, USB power), the pill's hold */
     ch |= se_refresh(t);                               /* Track B: Settings' Bluetooth list, the lux reading */
+    ch |= ori_poll(t);                                 /* cp7: the phone turned (the app's new layout fades in) */
+    ch |= hwk_refresh();                               /* cp7: a hardware key changed the page */
     if (ch && AP.on) sw_dirty = 1;                     /* helper D: the switcher's snapshot is old now */
     return ch;
 }
@@ -3603,16 +3857,21 @@ static float gen_row_y(const appdef *A, int s, int r)
 static int ap_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c);
 static void ps_will_build(void);                        /* cp6: shell_push.inc (iOS's push / pop) */
 static void ps_link(tk_layer **ag, int n);
+static void tp_mark(const char *n);
 static void build_app_page(int a)
 {
+    tp_mark("page: the picture");
     ps_will_build();                                    /* cp6: a page change slides (the screen's picture first) */
     const infopg *inf = info_of(APPS[a].k);
     int own = app_own(a);
     ap_pending = 0;
     build_apsb();
     if (own) {
-        for (int i = 0; i < NST; i++) own_strip(a, i);
+        static const char *const SN[4] = { "page: strip 0", "page: strip 1", "page: strip 2", "page: strip 3" };
+        for (int i = 0; i < NST; i++) { tp_mark(SN[i & 3]); own_strip(a, i); }
+        tp_mark("page: extras");
         own_extras(a);
+        tp_mark("page: done");
         return;
     }
     (void)inf;
@@ -3837,6 +4096,7 @@ static void app_close(float v)
 }
 static void app_finish_close(void)
 {
+    for (int k = 0; k < LGC_N; k++) tk_bmp_free(&LGC[k].b);   /* cp7m: the flat glass cache goes with the app (the heap) */
     if (AP.on) { const apphook *h = ap_hook(AP.a); if (h && h->on_hide) h->on_hide(); }   /* Track A lifecycle */
     sw_app_gone();                               /* helper D: no window in the switcher */
     lx_close();                                  /* L3: the window's strips, the store's layers */
@@ -4264,8 +4524,9 @@ static int ep_post_step(int big_ok, int idle)
     if (EP.post & (EP_CARDS | EP_LW)) return -1;
     if (!EP.post) { ep_reset(); return 0; }
     if (!idle || !big_ok) return -1;
-    if (EP.post & EP_HOMEW) { EP.post &= ~EP_HOMEW; build_home_w(); }
-    else { EP.post &= ~EP_APPS2; build_home_apps2(); }
+    /* cp7i: a part a slice (relink: the first part makes its layer again) */
+    if (EP.post & EP_HOMEW) { if (!home_w_step()) EP.post &= ~EP_HOMEW; }
+    else if (!home_apps2_step()) EP.post &= ~EP_APPS2;
     relink();
     return 2;
 }
@@ -4282,9 +4543,20 @@ static void ep_work(int idle)
 /* home is about to show (the lock lifting, the Control Centre closed): its pieces now */
 static void ep_home_now(void)
 {
-    if (EP.post & EP_HOMEW) build_home_w();
-    if (EP.post & EP_APPS2) build_home_apps2();
-    EP.post &= ~(EP_HOMEW | EP_APPS2);
+    /* cp7k (7j: a 203 ms sh_tick at the unlock right after the hold: both finished here at once): only page 1's widgets
+     * (seen as the lock lifts); page 2 goes on a part an idle turn, made whole only if the pages move first
+     * (ep_apps2_now) */
+    if (EP.post & EP_HOMEW) while (home_w_step()) ;           /* (a part-made one finished) */
+    EP.post &= ~EP_HOMEW;
+    if (page_x < -195 && (EP.post & EP_APPS2)) { while (home_apps2_step()) continue; EP.post &= ~EP_APPS2; }   /* home opens on page 2 */
+    relink();
+}
+/* cp7k: page 2 about to show (the pages move): its rest now */
+static void ep_apps2_now(void)
+{
+    if (EP.goal < 0 || !(EP.post & EP_APPS2)) return;
+    while (home_apps2_step()) ;
+    EP.post &= ~EP_APPS2;
     relink();
 }
 /* all of it now (a set state, the reset): a switch's rest made, a prepared one dropped */
@@ -4511,6 +4783,8 @@ static int pc_gate_launch(unsigned id);             /* Track A: shell_passcode.i
 #include "shell_passcode.inc"                       /* Track A: the passcode screen, Settings > Passcode, the lock's lifecycle */
 #include "shell_time.inc"                           /* Track A: the alarms API's Clock hooks, Settings > Date & Time's zone list */
 #include "shell_update.inc"                         /* Track A update: Settings > General > Software Update */
+#include "shell_orient.inc"                         /* cp7: the screens that turn with the phone (Photos' viewer, Camera, ...) */
+#include "shell_hwkey.inc"                          /* cp7: a Bluetooth keyboard's keys (sh_hw_key) */
 /* B2's Settings hooks onto Track A's passcode page (AS.sub SE_PASSCODE_PAGE = shell_passcode.inc's PC_SUB) */
 static void page_passcode(dc *d) { pc_page(d); }
 static int passcode_tap(float x, float y) { return pc_app_tap(x, y); }
@@ -4531,6 +4805,38 @@ void sh_restore(void)
 #include "shell_island.inc"                         /* B7: the status capsule, the live pill (toasts) */
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
+static int lk_hint;             /* cp7: the lock's spring is a tap's hint bounce (set_lock moves the live lock) */
+/* cp7q (7r: the unlock drag's first move 85-100 ms and the ticks after it on the phone: the flat copy made whole there,
+ * stale after a wake or any change on the lock): on the GPU row the live lock moves with its own ground under it, the
+ * wallpaper's half and its star (lkground, lockg's first child; as the flat copy's ground was): the GPU moves layers
+ * and their glass for nothing, so no flat copy at all. Made at the lock's idle (a 4 MB copy), freed once unlocked */
+static tk_layer lkground;
+static uint32_t lkg_gen = ~0u;
+static int lk_ground_ready(void)
+{
+    if (!C || !C->base_half.px) return 0;
+    if (lkground.bmp.px && lkg_gen == C->ground_gen) return 1;
+    if (!lkground.bmp.px) {
+        tk_layer *nx = lkground.next;
+        tk_layer_init(&lkground, "lock-ground");
+        lkground.next = nx;
+        lkground.hidden = 1;
+        if (!tk_bmp_new(&lkground.bmp, C->base_half.w, C->base_half.h)) return 0;
+    }
+    tk_bmp_copy(&lkground.bmp, 0, 0, &C->base_half, 0, 0, C->base_half.w, C->base_half.h);
+    tk_layer *st[2] = { &star, &star_e };
+    for (int i = 0; i < 2; i++) {
+        if (st[i]->hidden || st[i]->alpha <= 0 || !st[i]->bmp.px) continue;
+        tk_layer_prepare(st[i]);
+        if (st[i]->half.px) tk_blit(&lkground.bmp, &st[i]->half, (int)st[i]->x / 2, (int)st[i]->y / 2, st[i]->alpha);
+    }
+    lkground.x = lkground.y = lkground.ox = lkground.oy = 0;
+    lkground.sx = lkground.sy = 2;
+    lkground.opaque = 1;
+    tk_layer_dirty(&lkground);
+    lkg_gen = C->ground_gen;
+    return 1;
+}
 static void set_lock(float y)
 {
     lockY = y;
@@ -4544,7 +4850,19 @@ static void set_lock(float y)
     if (y == 0) {
         lockg.hidden = 0;
         lockflat.hidden = 1;
+        lockg.y = 0;
+        lkground.hidden = 1;
+    } else if (C && C->gpu && lk_ground_ready()) {
+        /* cp7 / 7q: the GPU row: the live lock and its ground move (a hint bounce, the unlock, the relock): no flat
+         * copy (cp6d: ~90 ms a frame when the lock changed in a bounce; 7r: 85-100 ms at the unlock's first move) */
+        lockg.hidden = 0;
+        lockflat.hidden = 1;
+        lockg.y = PT(y);
+        lkground.hidden = 0;
+        lkground.alpha = 1;
     } else {
+        lkground.hidden = 1;
+        lockg.y = 0;
         flatten_lock(0);
         lockg.hidden = 1;
         lockflat.hidden = 0;
@@ -4624,8 +4942,9 @@ static void relink(void)
     link(&appc, st, na + cm_layers(st + na));    /* helper I: the keypad's line and ring, Messages' fields */
     /* B9: the notifications' stack is the lock's (lkng, over the list: fanned out it takes the list's room); the
      * Centre's "N Notifications" pill only in Emergency */
-    tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
-    link(&lockg, lk, EMG ? 13 : 12);
+    tk_layer *lk[] = { &lkground, &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
+    if (!lkground.name) { tk_layer_init(&lkground, "lock-ground"); lkground.hidden = 1; }   /* cp7q: the moving lock's ground */
+    link(&lockg, lk, EMG ? 14 : 13);
     lkn_link();
     /* B10: the vendor cards in the list as B4 had them: the lower cards, the members' platters and words under the
      * head card, "Show less" above it, the chevron on top */
@@ -4804,7 +5123,7 @@ static void back_to_lock(int exit_em)
     vc_close_all(1);
     lkn_collapse(1);
     scroll = 0; sp_scroll.live = 0; scroll_momentum = 0;
-    sp_lock.live = 0;
+    sp_lock.live = 0; lk_hint = 0;
     sp_page.live = 0; page_dragging = 0;
     set_page(0);
     CCS.on = 0; sp_cc.live = 0; cc_x_reset(); set_cc(0);
@@ -4833,7 +5152,7 @@ void sh_wake(void);
 void sh_set(const char *what, const char *key, float v)
 {
     if (!tk_strcmp(what, "unlock")) {
-        sp_lock.live = 0;
+        sp_lock.live = 0; lk_hint = 0;
         set_lock(-H_PT * v);
         locked = v < 1;
         mark_a = mark_t;
@@ -4932,6 +5251,7 @@ void sh_set(const char *what, const char *key, float v)
         if (CCS.built && CCS.on) { cc_x_open((int)v); while (CX.todo < 6) cc_x_link_step(); CX.sp.live = 0; CX.e = 1; set_cc(CCS.p); }
     } else if (!tk_strcmp(what, "page")) {
         sp_page.live = 0;
+        ep_apps2_now();                              /* cp7k */
         set_page(-390 * v);
     } else if (!tk_strcmp(what, "hint")) {
         hint_a = v;
@@ -5320,17 +5640,51 @@ static int notes_hold(float t)
 }
 
 #include "shell_push.inc"                           /* cp6: iOS's push / pop between an app's pages, the edge swipe */
+/* cp7p (7m / 7p: "shell touch down 133 / 156 ms" at Emergency's hold on the phone, 0.04 ms on the Mac): the touch's
+ * pieces timed (each mark ends the last piece; the platform logs one over 20 ms: "next: shell piece touch ...") */
+static uint64_t tp_t;
+static const char *tp_n;
+static int tp_in;                                /* inside a touch (a build outside one marks nothing) */
+static void tp_mark(const char *n)
+{
+    if (!tp_in) return;
+    uint64_t now = tk_us();
+    if (tp_n) sh_slow_piece(tp_n, (unsigned)(now - tp_t));
+    tp_n = n;
+    tp_t = now;
+}
+static void sh_touch_(int phase, float x, float y, float t);
 void sh_touch(int phase, float x, float y, float t)
+{
+    const char *on = tp_n;
+    uint64_t ot = tp_t;
+    int oin = tp_in;
+    tp_n = 0;
+    tp_in = 1;
+    tp_mark(phase == 0 ? "touch down: power sheet" : phase == 1 ? "touch move: power sheet" : "touch up: power sheet");
+    sh_touch_(phase, x, y, t);
+    tp_mark(0);
+    tp_n = on; tp_t = ot; tp_in = oin;           /* (the capsule's replay calls this inside a touch) */
+}
+static void sh_touch_(int phase, float x, float y, float t)
 {
     now_ms = t;
     if (pw_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* P3x: the power sheet, over everything (modal) */
+    tp_mark("touch: capsule");
     { int r = isl_touch(phase, x, y, t); if (r) { if (r == 1) T.kind = G_NONE; return; } }   /* B7: the capsule, the call's minimise */
+    tp_mark("touch: call screen");
     if (cm_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* helper I: the call screen, the call button's hold */
+    tp_mark("touch: survival");
     if (sv_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* survival-next: SOS's beacon, a tool's hold */
+    tp_mark("touch: passcode");
     if (pc_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* Track A: the passcode screen (over the kit's modals) */
+    tp_mark("touch: kit");
     if (kit_touch(phase, x, y, t)) { if (T.kind == G_SET) se_touch(2, -1, -1, t); T.kind = G_NONE; hl_off(); return; }   /* helper B2: modal */
+    tp_mark("touch: zones");
     if (ta_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* Track A: the zone list's scroll */
+    tp_mark("touch: push");
     if (ps_touch(phase, x, y, t)) return;                         /* cp6: the left-edge swipe back (shell_push.inc) */
+    tp_mark(phase == 0 ? "touch down: the rest" : phase == 1 ? "touch move: the rest" : "touch up: the rest");
     if (phase == 0) {
         tk_tracker_reset(&T.tr);
         T.moved = 0;
@@ -5360,15 +5714,22 @@ void sh_touch(int phase, float x, float y, float t)
         /* B9: the lock shows its notifications' stack (below), not the Centre's "N Notifications" pill (Emergency does) */
         int pill = ncpill.hidden;
         if (locked && !EMG) ncpill.hidden = 1;
+        tp_mark("touch down: notifications");
         int ncd = nc_down(x, y, t);
         ncpill.hidden = pill;
         if (ncd) { T.kind = G_NC; return; }       /* helper D: the banner, the open Notification Centre, the pill */
+        tp_mark("touch down: switcher");
         if (sw_down(x, y, t)) { T.kind = G_SW; return; }    /* helper D: the app switcher */
+        tp_mark("touch down: home / lock");
         if (AP.on) {
             /* an open app (survival-next: also over the lock, from Emergency's cards): the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
+            tp_mark("touch down: app, nc");
             if (y < 36 && x < 195 && !AP.closing && !sp_app.live) { nc_pull_begin(x, y, t); T.kind = G_NC; return; }   /* helper D */
+            tp_mark("touch down: app, sw_commit");
             if (y < H_PT - 30) sw_commit();          /* B4: the app is used: a quick switch's order is kept now */
+            tp_mark("touch down: app, keyboard");
             if (!AP.closing && !sp_app.live && kb_owns(x, y)) { T.kind = G_KB; kb_touch(0, x, y, t); return; }   /* B3 */
+            tp_mark("touch down: app, its page");
             if (y >= H_PT - 30 && !AP.closing) { T.kind = G_APP; T.arg2 = 0; sp_app.live = 0; AP.following = 1; tk_tracker_add(&T.tr, y, t); }
             else if (!sp_app.live && med_is(APPS[AP.a].k)) { T.kind = G_MEDIA; med_touch(0, x, y, t); app_press(x, y); }   /* cp6: it lights */
             else if (!sp_app.live && !AP.closing && se_owns() && SE.built) { T.kind = G_SET; se_touch(0, x, y, t); }   /* helper B2 */
@@ -5376,12 +5737,14 @@ void sh_touch(int phase, float x, float y, float t)
             else if (!sp_app.live) {
                 /* a tap on the app's page (a key lights while the finger is on it) */
                 T.kind = G_APPTAP;
+                tp_mark("touch down: app, press");
                 int k = is_app("phone") && AS.tab == 3 ? key_hit(x, y) : -1;
                 if (k >= 0) key_down(k);
                 else app_press(x, y);                  /* P3p: rows, keys and buttons light (cp6: also the keypad's tabs, delete) */
             }
             return;
         }
+        tp_mark("touch down: the Control Centre");
         if (CCS.on && !CCS.closing) {
             /* the open Control Centre (B4: from the lock too): a slider, a tile, or outside it (closes it) */
             if (CX.m >= 0) {
@@ -5420,6 +5783,7 @@ void sh_touch(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, y, t);
             return;
         }
+        tp_mark(locked ? "touch down: lock" : "touch down: home");
         if (!locked) {
             if (y < 56 && x >= 195) {           /* the top-right corner: the Control Centre */
                 T.kind = G_CC;
@@ -5436,6 +5800,7 @@ void sh_touch(int phase, float x, float y, float t)
             if (y >= DOCK_TOP && y < H_PT - 30) { T.kind = G_DOCK; icon_press(app_hit(x, y)); return; }   /* the dock: a tap opens its app */
             if (SRCH_HIT(x, y)) { T.kind = G_DOCK; return; }   /* P3g: Search */
             if (y >= 56 && y < DOCK_TOP && !SRCH_HIT(x, y) && !on_w) {
+                ep_apps2_now();                  /* cp7k: page 2 whole before it can show (Emergency's switch's rest) */
                 T.kind = G_PAGE;
                 T.base = page_x;
                 page_dir = 0;
@@ -5459,9 +5824,11 @@ void sh_touch(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, y, t);
             return;
         }
+        tp_mark("touch down: lock, holds");
         for (int i = 0; i < 2; i++) {
             float bx = HOLD_X(i);
             if (x >= bx - 4 && x <= bx + 54 && y >= HOLD_Y - 4 && y <= HOLD_Y + 54) {
+                tp_mark("touch down: a hold");
                 T.kind = G_HOLD;
                 T.arg = i;
                 Q[i].down = 1; Q[i].fired = 0; Q[i].t0 = t;
@@ -5473,6 +5840,7 @@ void sh_touch(int phase, float x, float y, float t)
                 return;
             }
         }
+        tp_mark("touch down: lock, list");
         int gi = -1, r;
         if (EMG && y >= LIST_TOP && y < LIST_TOP + LIST_H && y < H_PT - 30) {
             /* Emergency's list: a card (survival-next: its tool over the lock), Exit Emergency, or a scroll */
@@ -5486,7 +5854,7 @@ void sh_touch(int phase, float x, float y, float t)
             tk_tracker_add(&T.tr, y, t);
             return;
         }
-        if (y >= H_PT - 30) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
+        if (y >= H_PT - 30) { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0; }
         /* B10: the notifications fanned out are over the list: theirs first (a tap beside them folds them back) */
         else if (lkn_p() > 0 && lkn_down(x, y, t)) { T.kind = G_LKN; return; }
         else if ((r = hit_row(x, y, &gi)) >= 0) {
@@ -5515,7 +5883,7 @@ void sh_touch(int phase, float x, float y, float t)
         }
         else if (in_list(y)) { T.kind = G_LIST; T.base = scroll; sp_scroll.live = 0; scroll_momentum = 0; list_over = scroll < 0 || scroll > max_scroll(); }
         else if (lkn_down(x, y, t)) { T.kind = G_LKN; return; }   /* B9: the notifications (a tap expands / opens) */
-        else { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; }
+        else { T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0; }
         tk_tracker_add(&T.tr, y, t);
         return;
     }
@@ -5526,14 +5894,14 @@ void sh_touch(int phase, float x, float y, float t)
     }
     if (T.kind == G_LKN) {                   /* B9, shell_lknote.inc: 2 hands the touch to the lock's swipe */
         if (lkn_touch(phase, x, y, t) == 2) {
-            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0;
+            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0;
             tk_tracker_add(&T.tr, y, t);
         } else if (phase == 2) T.kind = G_NONE;
         return;
     }
     if (T.kind == G_NC) {                    /* helper D, shell_nc.inc */
         if (nc_touch(phase, x, y, t) == 2) {     /* the lock's pill moved: the lock's swipe after all */
-            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0;
+            T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0;
             tk_tracker_add(&T.tr, y, t);
         } else if (phase == 2) T.kind = G_NONE;
         return;
@@ -5739,6 +6107,7 @@ void sh_touch(int phase, float x, float y, float t)
         break;
     case G_APPTAP:
         if (!apkey.hidden) key_down(-1);
+        tp_mark("touch up: app tap");
         if (!T.moved) app_tap(x, y);
         break;
     case G_TAP_HEAD:
@@ -5747,9 +6116,11 @@ void sh_touch(int phase, float x, float y, float t)
     case G_TAP_ROW: {
         const sys_t *s = &G[T.arg].it[T.arg2];
         if (s->self) { toast("You are in Starbite OS"); break; }
+        tp_mark("touch up: lock row, frame");
         tk_comp_frame(C, 0, 0);                /* cp6: the row lit (and pressed) while the sheet is made: iOS keeps it lit under */
         tk_comp_idle(C);                       /* P3p: the half canvas (the sheet's under-layer) */
         uint64_t t0 = tk_us();
+        tp_mark("touch up: lock row, the sheet");
         build_focus(s, &G[T.arg]);
         lap_us("focus: snapshot and bake", tk_us() - t0);
         focus_on = 1;
@@ -5813,6 +6184,7 @@ void sh_touch(int phase, float x, float y, float t)
     case G_RELOCK: {
         /* P3p (P3j-10): decided by where the pull would carry it (200 ms), the finger's speed handed to the spring */
         float v = tk_tracker_v(&T.tr);
+        lk_hint = 0;
         if (lockY + v * 200 > -H_PT * .5f) { locked = 1; tk_spring_start(&sp_lock, lockY, 0, v * 1000, TK_SPR_UNLOCK); }
         else tk_spring_start(&sp_lock, lockY, -H_PT, v * 1000, TK_SPR_UNLOCK);
         break;
@@ -5821,6 +6193,7 @@ void sh_touch(int phase, float x, float y, float t)
         if (!T.moved) {
             hint_left = 2200;
             tk_spring_start(&sp_lock, 0, 0, -700, TK_SPR_UNLOCK);
+            lk_hint = 1;
         } else {
             float v = tk_tracker_v(&T.tr), proj = lockY + v * 200;
             /* P3p (P3j-9): unlocked as soon as it is decided: taps in the settle reach home */
@@ -5888,7 +6261,7 @@ static void ep_tick(void)
     if (EP.goal >= 0 && EP.goal != EMG && !ep_holding()) ep_cancel();
     if (EP.goal < 0 && ep_holding() && em_t >= 1) ep_begin(!EMG);
     if (EP.goal < 0) return;
-    if (EP.goal == EMG && EP.post & (EP_HOMEW | EP_APPS2) && (locked ? lockY != 0 : !CCS.on)) ep_home_now();
+    if (EP.goal == EMG && EP.post & EP_HOMEW && (locked ? lockY != 0 : !CCS.on)) ep_home_now();
     if (!EP.fresh) ep_work(0);                   /* the frame of a tap's switch does the switch only */
     EP.fresh = 0;
 }
@@ -5916,8 +6289,12 @@ int sh_tick(float dt, float t)
     }
     if (sp_lock.live) {
         int live = tk_spring_step(&sp_lock, dt);
+        if (!live) lk_hint = 0;
         set_lock(sp_lock.x);
-        if (!live && sp_lock.to <= -H_PT + .01f && !pc_holds()) { locked = 0; lockflat.hidden = 1; home.sx = home.sy = 1; }   /* Track A */
+        if (!live && sp_lock.to <= -H_PT + .01f && !pc_holds()) {
+            locked = 0; lockflat.hidden = 1; home.sx = home.sy = 1;   /* Track A */
+            relayer(&lkground); lkground.hidden = 1; lkg_gen = ~0u;    /* cp7q: the moving lock's ground goes (the heap) */
+        }
         mv = 1;
     }
     if (T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB || T.kind == G_RELOCK || T.kind == G_PAGE) mv = 1;
@@ -5940,6 +6317,7 @@ int sh_tick(float dt, float t)
     mv |= ico_step(dt);                          /* P3p: the pressed icon */
     mv |= ps_tick(dt);                           /* cp6: a page's push / pop (shell_push.inc) */
     mv |= press_tick(dt);                        /* cp6: the lights let go fade, the press scales move */
+    mv |= ori_poll(t) | ori_tick(dt);            /* cp7: the phone turned: the app's layout, its fade */
     mv |= med_tick(dt);
     mv |= lx_tick(dt);                           /* L3, Track F: the App Store's page (scroll, momentum, builds) */
     ep_tick();                                   /* B6: Emergency's switch prepared during the hold, finished after */
@@ -6204,47 +6582,62 @@ static void prep_tree(tk_layer *l)
         prep_tree(l->child);
     }
 }
+/* cp7f (Track A): each piece timed, named when slow (sh_slow_piece: 7e's 245-273 ms idle calls on the phone) */
+#define IP_(name, stmt) do { uint64_t ip0_ = tk_us(); stmt; sh_slow_piece(name, (unsigned)(tk_us() - ip0_)); } while (0)
 void sh_idle(void)
 {
     /* P3j: an app page still being drawn (an open without frames, e.g. the host's stills): finish it now */
-    if (ap_pending) { while (ap_pending) app_build_step(); if (AP.on) set_app_rect(AP.R); }
+    IP_("app page", if (ap_pending) { while (ap_pending) app_build_step(); if (AP.on) set_app_rect(AP.R); });
     if (sh_moving()) return;
     /* B6: a prepared switch nobody holds any more goes; a switch's rest, a slice a turn (sh_idle_pending) */
     if (EP.goal >= 0 && EP.goal != EMG && !ep_holding()) ep_cancel();
-    if (EP.goal >= 0 && EP.goal == EMG && !(!EMG && cards_pending > 0)) { ep_work(1); return; }   /* lock's cards first */
-    tk_comp_idle(C);
-    sw_idle();                                   /* helper D: the open app's snapshot for the switcher (when it changed) */
-    mp_idle();                                   /* helper D: Maps' last GPS fix (it may read the card: idle only) */
-    cm_idle();                                   /* helper I: the call screen's static parts while Cellular is on */
-    home_badges(0);                              /* B8: the dock's badges, when a count changed */
-    kb_idle();                                   /* B3: the keyboard's accessory row (a Linux window's keys) */
-    se_idle();                                   /* helper B2: Settings' page's half copy */
+    /* cp7i / 7k: when only home's parts are left (home is not seen from the lock), what the lock shows and needs goes
+     * first: its own cards (sv_idle), then its flat copy (the unlock's first frame; each card restarts it), then home's
+     * widgets and page 2 (7j: a 203 ms tick at an unlock right after the hold, the flat copy and home made there) */
+    int ep_home_only = EP.ground && !(EP.post & (EP_CARDS | EP_LW));
+    int lock_first = sv_idle_pending() || (locked && lockY == 0 && !focus_on && !C->gpu && (flat_ver != lock_ver || flat_ground != C->ground_gen));
+    if (EP.goal >= 0 && EP.goal == EMG && !(!EMG && cards_pending > 0) && !(ep_home_only && lock_first)) { IP_("ep_work", ep_work(1)); return; }   /* lock's cards first */
+    IP_("tk_comp_idle", tk_comp_idle(C));
+    IP_("sw_idle", sw_idle());                                   /* helper D: the open app's snapshot for the switcher (when it changed) */
+    IP_("mp_idle", mp_idle());                                 /* helper D: Maps' last GPS fix (it may read the card: idle only) */
+    IP_("cm_idle", cm_idle());                                 /* helper I: the call screen's static parts while Cellular is on */
+    IP_("home_badges", home_badges(0));                            /* B8: the dock's badges, when a count changed */
+    IP_("kb_idle", kb_idle());                                 /* B3: the keyboard's accessory row (a Linux window's keys) */
+    IP_("lx_idle", lx_idle());                                 /* cp7u (Track E): page 3's Linux icons, one per idle turn */
+    IP_("se_idle", se_idle());                                 /* helper B2: Settings' page's half copy */
     if (!EMG && cards_pending > 0) {
         /* after Emergency: the vendor cards again, one per idle turn (the platform calls again while
          * sh_idle_pending); the half copies below are made in the same turn (P2w: an unlock right after
          * Emergency made them in its first frame, 31 ms) */
-        build_lockpart(LOCK_PARTS - cards_pending);
-        cards_pending--;
-        relink();
-        place_list();
+        IP_("lock card", build_lockpart(LOCK_PARTS - cards_pending); cards_pending--; relink(); place_list());
     }
-    sv_idle();                                   /* survival-next: Emergency's next card, the lock's widgets */
+    IP_("sv_idle", sv_idle());                                 /* survival-next: Emergency's next card, the lock's widgets */
     /* P3s: what is not shown here and the next gesture does not need goes; what the next one needs is made */
     /* B4: the lock keeps it too (it opens there), unless a sheet needs the room */
     int cc_lock_ok = locked && lockY == 0 && !focus_on;
-    if (locked && !cc_lock_ok) free_cc_all();
-    if (focus_faces_idle(focus_faces_keep())) return;    /* a sheet's glass: one bake a turn (sh_idle_pending) */
-    lkn_idle();                                  /* B9: the lock's notifications as the store has them (before the cache below) */
-    if (locked && lockY == 0 && !focus_on) flatten_lock(1);
+    if (locked && !cc_lock_ok) IP_("free_cc_all", free_cc_all());
+    { int r_ = 0; IP_("focus_faces", r_ = focus_faces_idle(focus_faces_keep())); if (r_) return; }    /* a sheet's glass: one bake a turn (sh_idle_pending) */
+    IP_("lkn_idle", lkn_idle());                                /* B9: the lock's notifications as the store has them (before the cache below) */
+    /* cp7c: the heavy pieces one an idle call (the platform calls again while sh_idle_pending): the lock's flat copy a
+     * band at a time, the Control Centre a stage at a time */
+    if (locked && lockY == 0 && !focus_on && C->gpu) IP_("lock ground", lk_ground_ready());   /* cp7q: no flat copy on the GPU row */
+    else if (locked && lockY == 0 && !focus_on) { int r_ = 0; IP_("flatten_lock_step", r_ = flatten_lock_step()); if (r_) return; }
+    else if (fl_row >= 0) { fl_row = -1; tk_a8_free(&flatmask); }
     /* home at rest: the Control Centre's snapshot and grid ready before the pull */
     if ((!locked || cc_lock_ok) && !CCS.on && !AP.on && !nc_on() &&
-        (!CCS.built || cc_stale || cc_lk != locked || (locked && cc_lv != lock_ver))) {
-        build_cc();
-        cc_stale = 0; cc_lk = locked; cc_lv = lock_ver;
-    }
+        (ccb_next || !CCS.built || cc_stale || cc_lk != locked || (locked && cc_lv != lock_ver))) {
+        if (!ccb_next) { cc_stale = 0; cc_lk = locked; cc_lv = lock_ver; }   /* (a change during the stages: again after) */
+        { static const char *const CCN[15] = { "build_cc_step", "build_cc 1 picture", "build_cc 2 light blur", "build_cc 3 heavy blur",
+                                                "build_cc 4 chrome", "build_cc 5 grid bitmap", "build_cc 6 grid conn", "build_cc 7 grid circles",
+                                                "build_cc 8 grid mini", "build_cc 9 grid sliders", "build_cc 10 grid torch", "build_cc 11 grid flame",
+                                                "build_cc 12 grid timer", "build_cc 13 grid last", "build_cc 14 link" };
+          int r_ = 0, st_ = ccb_next ? ccb_next : 1;
+          IP_(CCN[st_ < 15 ? st_ : 0], r_ = build_cc_step()); if (r_) return; }   /* cp7i: the stage in the name */
+    } else if (ccb_next && !CCS.on) free_cc();     /* not wanted any more (an app needs the room): its parts go, later again */
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
-    prep_tree(home.child);                       /* home's pages too (their widgets and app grids, P2s) */
+    IP_("prep_tree", prep_tree(home.child));                     /* home's pages too (their widgets and app grids, P2s) */
+    uint64_t lp0_ = tk_us();
     tk_layer_prepare(&star);
     tk_layer_prepare(&homebar);
     if (K[0].gh.bmp.px) tk_layer_prepare(&K[0].gh);
@@ -6260,9 +6653,12 @@ void sh_idle(void)
         tk_layer_prepare(&Q[i].icon); tk_layer_prepare(&Q[i].iconlit);
     }
     tk_layer_prepare(&mark); tk_layer_prepare(&glyph_c); tk_layer_prepare(&glyph_o); tk_layer_prepare(&hint);
+    sh_slow_piece("layer prepares", (unsigned)(tk_us() - lp0_));
 }
+#undef IP_
 
-int sh_idle_pending(void) { return (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C); }
+int sh_idle_pending(void) { return (EP.goal >= 0 && EP.goal == EMG) || (!EMG && cards_pending > 0) || sv_idle_pending() || focus_faces_missing() || tk_comp_idle_pending(C) ||
+                                   fl_row >= 0 || ccb_next || lx_idle_pending(); }   /* cp7c: the sliced flatten, the CC's stages */
 
 int sh_moving(void)
 {
@@ -6277,6 +6673,7 @@ int sh_moving(void)
     m |= IP.on && (IP.t < 1 || IP.rel);
     m |= Q[0].rel_at > 0 || Q[1].rel_at > 0;
     m |= press_moving();                         /* cp6: a light fading, a scale moving */
+    m |= ori_moving();                           /* cp7: a turned app's fade */
     m |= nc_moving() || sw_moving();             /* helper D */
     m |= cm_moving();                            /* helper I */
     m |= kb_moving();                            /* B3: delete held (its repeats need the frames) */

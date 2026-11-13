@@ -225,7 +225,12 @@ static struct {
     unsigned nlogs;
     char line[128];
     unsigned linen;
+    uint32_t pcm_ptr[2][8], pcm_ptr_n[2][8];   /* abox_pcm_pointer(): the last POINTER per direction / channel */
 } S;
+
+/* abox_map_extra()'s windows (kept across boots) */
+#define XMAPS 2
+static struct { uint32_t iova, size; uint64_t pa; } xmap[XMAPS];
 
 static uint32_t tx[IPC_WORDS];
 static char why_buf[160] = "ABOX off";
@@ -722,6 +727,10 @@ static void handle(const uint32_t *m)
     struct lb l;
     if (m[0] == IPC_PCMPLAYBACK || m[0] == IPC_PCMCAPTURE) {
         if (type == PCM_PLTDAI_POINTER) {
+            if (p1 < 8U) {
+                S.pcm_ptr[m[0] == IPC_PCMCAPTURE][p1] = m[4];
+                S.pcm_ptr_n[m[0] == IPC_PCMCAPTURE][p1]++;
+            }
             if (!S.pointer_msgs++)
                 ipc_note(m[0] == IPC_PCMPLAYBACK ? "first period pointer, playback (channel)"
                                                  : "first period pointer, capture (channel)", p1, 0, 0);
@@ -811,6 +820,8 @@ static void handle(const uint32_t *m)
     }
 }
 
+static unsigned rx_trace;                       /* abox_trace_rx(): messages still to log raw */
+
 static void rx_process(void)
 {
     uint32_t m[RX_WORDS];
@@ -819,6 +830,17 @@ static void rx_process(void)
         for (unsigned i = 1; i < S.rxn; ++i)
             memcpy(S.rxq[i - 1], S.rxq[i], sizeof(S.rxq[0]));
         S.rxn--;
+        if (rx_trace) {                             /* abox_trace_rx(): the raw words first */
+            struct lb l;
+            rx_trace--;
+            lb_init(&l);
+            lb_s(&l, "abox: rx:");
+            for (unsigned i = 0; i < 8; ++i) {
+                lb_c(&l, ' ');
+                lb_x(&l, m[i]);
+            }
+            sayl(&l);
+        }
         handle(m);
     }
 }
@@ -1000,6 +1022,30 @@ static int step_sysmmu(void)
         map_sect(l1, ABOX_IOVA_DUMP, C.rmem_base + ABOX_RM_DUMP, ABOX_RM_DRAM_SZ);
     l1[ABOX_IOVA_CHIPID >> 20] = (uint32_t)(l2pa >> 4) | 1U;      /* mk_lv1ent_page(): a 1 KiB L2 table */
     l2[0] = (uint32_t)(ABOX_IOVA_CHIPID >> 4) | 2U;               /* mk_lv2ent_spage(0x10000000): 4 KiB, 1:1 */
+    for (unsigned i = 0; i < XMAPS; ++i) {                        /* abox_map_extra(): one L2 table each */
+        uint32_t *x2 = (uint32_t *)(void *)rm(ABOX_RM_PT_L2 + 0x400U * (i + 1U), 0x400);
+        if (!xmap[i].size || !x2)
+            continue;
+        lb_init(&l);
+        lb_s(&l, "abox: 5/13 SysMMU: extra window ");
+        lb_x(&l, xmap[i].iova);
+        if (l1[xmap[i].iova >> 20] || xmap[i].pa < C.rmem_base + ABOX_RM_PT + 0x10000U ||
+            xmap[i].pa + xmap[i].size > C.rmem_base + ABOX_RM_DUMP) {
+            lb_s(&l, " clashes with one of ours or is outside abox_rmem's free section: not mapped");
+            sayl(&l);
+            continue;
+        }
+        memset(x2, 0, 0x400);
+        for (uint32_t o = 0; o < xmap[i].size; o += 0x1000U)
+            x2[o >> 12] = (uint32_t)((xmap[i].pa + o) >> 4) | 2U;
+        l1[xmap[i].iova >> 20] = (uint32_t)((l2pa + 0x400U * (i + 1U)) >> 4) | 1U;
+        lb_s(&l, " -> ");
+        lb_x(&l, xmap[i].pa);
+        lb_s(&l, " (");
+        lb_u(&l, xmap[i].size >> 10);
+        lb_s(&l, " KiB, 4 KiB pages)");
+        sayl(&l);
+    }
     ram_sync();
     uint32_t was = r32(ABOX_SYSMMU + MMU_CTRL);
     /* __sysmmu_enable_nocount(): BLOCK, CFG (keep the bits outside CFG_MASK), PT_BASE_PPN, FLUSH, ENABLE */
@@ -1572,6 +1618,69 @@ int abox_call(int on)
     lb_s(&l, ")");
     sayw(&l);
     return 0;
+}
+
+/* ---- media PCMs (abox_media.c): additive hooks, abox.h has the contract --------------------------------------------- */
+int abox_map_extra(uint32_t iova, uint64_t pa, uint32_t size)
+{
+    unsigned i, free = XMAPS;
+    if (S.state == ABOX_ST_BOOTING || S.state == ABOX_ST_READY || S.state == ABOX_ST_CALL)
+        return ABOX_ESTATE;
+    if ((iova & (SECT - 1U)) || (pa & 0xFFFU) || size > 0xF0000U || (size & 0xFFFU))
+        return ABOX_ECFG;
+    for (i = 0; i < XMAPS; ++i) {
+        if (xmap[i].size && xmap[i].iova == iova)
+            break;
+        if (!xmap[i].size && free == XMAPS)
+            free = i;
+    }
+    if (!size) {
+        if (i < XMAPS)
+            xmap[i].size = 0;
+        return 0;
+    }
+    if (pa < C.rmem_base + ABOX_RM_PT + 0x10000U || pa + size > C.rmem_base + ABOX_RM_DUMP)
+        return ABOX_ECFG;
+    if (i == XMAPS)
+        i = free;
+    if (i == XMAPS)
+        return ABOX_ECFG;
+    xmap[i].iova = iova, xmap[i].pa = pa, xmap[i].size = size;
+    return 0;
+}
+
+int abox_pcm_msg(int capture, uint32_t id, uint32_t type, uint32_t a, uint32_t b, uint32_t c)
+{
+    static const struct { uint32_t t; const char *s; } nm[] = {
+        { PCM_PLTDAI_OPEN, "media PCM OPEN" },         { PCM_PLTDAI_CLOSE, "media PCM CLOSE" },
+        { PCM_PLTDAI_HW_PARAMS, "media PCM HW_PARAMS" }, { PCM_PLTDAI_HW_FREE, "media PCM HW_FREE" },
+        { PCM_PLTDAI_PREPARE, "media PCM PREPARE" },   { PCM_PLTDAI_TRIGGER, "media PCM TRIGGER" },
+        { PCM_SET_BUFFER, "media PCM SET_BUFFER" },
+    };
+    const char *what = "media PCM message";
+    if ((S.state != ABOX_ST_READY && S.state != ABOX_ST_CALL) || id >= 8U || (!capture && id == 4U) ||
+        (capture && id == 2U))
+        return ABOX_ESTATE;
+    for (unsigned i = 0; i < sizeof(nm) / sizeof(nm[0]); ++i)
+        if (nm[i].t == type)
+            what = nm[i].s;
+    msg_pcm(capture ? IPC_PCMCAPTURE : IPC_PCMPLAYBACK, id, type, a, b, c);
+    return ipc_send(what);
+}
+
+void abox_trace_rx(unsigned n) { rx_trace = n; }
+
+void abox_fw_log_more(unsigned n)
+{
+    C.fw_log_max = S.fw_lines + n;                  /* only a log cap: allowed while Calliope runs */
+}
+
+uint32_t abox_pcm_pointer(int capture, uint32_t id, uint32_t *count)
+{
+    unsigned d = capture ? 1U : 0U;
+    if (count)
+        *count = id < 8U ? S.pcm_ptr_n[d][id] : 0;
+    return id < 8U ? S.pcm_ptr[d][id] : 0;
 }
 
 /* ---- the timer's poll ---------------------------------------------------------------------------------------------- */

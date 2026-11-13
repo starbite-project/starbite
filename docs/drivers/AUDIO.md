@@ -100,7 +100,7 @@ If a call takes ABOX without the first line, `snd_poll` notices (`abox_state()`)
 `apcm_forget()` and writes nothing more to ABOX. Note: modem.c boots ABOX when Cellular starts (VSS must be up before
 the CP), so with these lines **media sound pauses whenever Cellular is on**, not only during a call. Playing media
 while Calliope runs needs the firmware path (RDMA0 through Calliope's PCM IPC, with RDMA0's IOVA window mapped by
-abox.c): a later step for modem-core and this track.
+abox.c): section 10 adds it, and with the Calliope engine media shares the modem's Calliope instead of pausing.
 
 ## 6. Interfaces for apps and the Linux guest (proposals; app.c and sbapp.h are not edited)
 
@@ -206,3 +206,181 @@ leaving AUD off and the pins as found, capture, and each probe level (with its F
 phone's case: DMAs that move only with an unknown CTRL0 bit (the dump, the sweep finding and adopting it, WDMA1
 moving with it, all back as found, the dump writing nothing) and a sweep that finds nothing.
 `kern/host/audio-test.sh` and the abox host test still pass.
+
+## 10. Calliope media
+
+Four probe runs on 2026-11-12 showed that bypass does not work on this phone. Power, PLL_AUD, AUDIF, UAIF BCLK,
+pins, the SysMMU and the DTZPC SMC were all fine, and UAIF0 even clocked, but RDMA0 / WDMA1 never moved
+(STATUS 0x80000000), whatever the 1004 trial settings were. So media goes the way One UI sends it: through Calliope.
+
+Files: `kern/abox_media.c/.h` (the stream and the probe `calliope`), additive hooks in `kern/abox.c/.h`, and the
+Calliope engine in `kern/snd.c`. Host test: `kern/host/calliope-test.c` + `calliope-test.sh`.
+
+### The path
+
+```
+ring in abox_rmem (0xFB200000 + 0x1580000, IOVA 0x91000000 in ABOX's SysMMU)
+  -> RDMA0, run by Calliope -> SPUS chain 0 (ASRC off) -> SIFS0 (the mixer, MIXP) -> UAIF1 SPK -> the amps
+                                                                                  or UAIF0 SPK -> the codec
+```
+
+One UI on this phone, from build/test-boots/20261108-091233-android-logged/dmesg-final.txt:
+- Calliope says "ready to sing (version:CRL0)" 64 ms after abox_cpu_enable.
+- It plays RDMA0 at 48000 Hz, 16 bit, 2 channels, as 4 periods of 3840 bytes (15360 bytes), into SIFS0 -> UAIF0.
+- The order is: uaif startup, OPEN, uaif hw_params, SET_BUFFER + HW_PARAMS, PREPARE, abox_flush_mixp, then the
+  uaif trigger, then the rdma trigger.
+- It also runs RDMA7 -> SIFS1 -> UAIF1 and WDMA4 from UAIF1 (Maxim's DSM speaker protection on ABOX). We do not
+  copy that: our speaker stays capped in amp.c.
+
+### What the AP does (Samsung's abox_rdma.c, abox.c, abox_if.c)
+
+1. Before `abox_boot()`, `cal_map()` asks abox.c (`abox_map_extra`) to add the ring to our SysMMU tables. It gets
+   its own L2 table at abox_rmem + 0x1504400, with 4 KiB pages: IOVA 0x91000000 + 128 KiB -> abox_rmem + 0x1580000.
+   This is the same window abox_pcm.c uses. The two never run together, because apcm refuses while Calliope owns
+   ABOX. The window is counted: snd.c keeps it for every later boot, and the probe adds and removes its own.
+2. `abox_boot()` (abox.c, unchanged, steps 1..13).
+3. `cal_play_start(uaif, period, periods)`:
+   - routes: SPUS_CTRL0 [3:0] = 0x2 (IN RDMA, OUT SIFS0, ASRC off), ROUTE_CTRL0 UAIFn SPK = 1 (SIFS0);
+   - clocks: AUDIF /16 = 73.728 MHz, UAIFn /48 = BCLK 1.536 MHz; UAIFn master, CTRL1 0x0984F000;
+   - the ring is zeroed;
+   - IPC_PCMPLAYBACK channel 0: OPEN, SET_BUFFER (0x91000000, period, periods), HW_PARAMS (48000, 16, 2), PREPARE;
+   - MIXP flush, SYSPOWER_CTRL bit 0 (DRAM on), UAIFn SPK_EN, TRIGGER 1.
+   - It refuses if the ring is not in the tables the last boot wrote. That happens when someone booted Calliope
+     before `cal_map()`; without this check, Calliope would fault on the SysMMU and stop.
+4. Position: RDMA0 STATUS (SFR + 0x1030: offset [28:16] x 16 + count [12:0]). Calliope also sends
+   PCM_PLTDAI_POINTER once a period; `abox_pcm_pointer()` keeps the last one and a count. `abox_poll()` takes
+   Calliope's messages, every 10 ms or less.
+5. `cal_play_stop()`:
+   - TRIGGER 0, then wait up to 40 ms for RDMA0 ENABLE to clear, then 1 ms for the UAIF FIFO;
+   - SPK_EN off, the UAIF, the routes and SYSPOWER as found, then HW_FREE, CLOSE and a MIXP flush.
+   - During a call, the call's UAIF1, its route and DRAM on are left alone.
+
+### Changes to abox.c (modem-core's file; additive, reviewed by them)
+
+- `abox_map_extra(iova, pa, size)`: up to 2 extra windows. They are kept until removed with size 0, and step 5
+  writes them into the tables. A window that clashes with one of ours, or lies outside abox_rmem's free
+  page-table section (0x1510000..0x1600000), is refused or skipped, with a log line.
+- `abox_pcm_msg(capture, id, type, a, b, c)`: one PCM task message. It refuses the call's own channels (playback 4,
+  capture 2) and ids of 8 or more.
+- `abox_pcm_pointer(capture, id, &count)`: `handle()` now stores the POINTER messages it already counted.
+- `ABOX_IOVA_RDMA(n)` and `ABOX_PCM_*` in abox.h. Nothing else changes: the call path and its tests are as before.
+
+### The probe `calliope` (in drvprobe.c just before `audio`; budget 12 s a level)
+
+- **Level 0** only reads:
+  - the AUD domain and the ABOX CPU (PMU), and IP_INDEX / SysMMU CTRL when the domain is on;
+  - Calliope's three files on VENDOR, with their sizes and the time they took to read. They are read into
+    abox_rmem, which nothing uses while ABOX's CPU is off. If the CPU is on, they are not read.
+- **Level 1** is silent: the amps stay off and the codec stays in reset.
+  - It boots Calliope and logs abox.c's 13 step lines, BOOT_DONE's version and up to 60 of Calliope's own
+    "abox: fw:" lines. No CP runs, so no VSS "magic" line is expected.
+  - It waits 300 ms and takes Calliope's post-boot messages (its log ring, about 30 REPORT_DUMPs, a gear request).
+  - It plays zeroes on RDMA0 -> SIFS0 -> UAIF1 for 1 s in One UI's geometry. If that moved, it plays 0.5 s in
+    snd's ring (32 x 2048). If it did not, it plays 0.5 s to UAIF0 instead (One UI's own boot route).
+  - It measures RDMA0's STATUS (1 ms samples) and Calliope's pointer messages.
+  - At each stream start it logs 60 more of Calliope's own lines, every PCM message it sends (with its fields),
+    the next 24 messages Calliope sends (raw), and RDMA0's registers 100 ms after TRIGGER and at the end.
+  - Then it stops and calls `abox_off()`. The AUD domain ends off, as Android's runtime suspend leaves it
+    (SUSPEND / WFI, CPU off, SysMMU off, pad retention, TZPC save, aud_off). That is by design: the probe does not
+    power it again and reads nothing inside it once it is off. modem-core owns the power sequence.
+- **Level 2** is attended: the same, with a 1 kHz tone at -24 dBFS on the earpiece amp at level 0 (its lowest)
+  for 2 s.
+- Last line, one of:
+  - `PASS Calliope booted (CRL0 in N ms), RDMA0 moved N B/s (STATUS) through it to UAIF1 (192000 expected); snd's 32 x 2048 ring N B/s (STATUS)`
+  - `FAIL 3/4 measure: RDMA0 did not move through Calliope to UAIF1; to UAIF0 (One UI's boot route)[ it DID]: N B/s (...)`
+  - `FAIL <step>: <why>; everything off`
+  The steps are 1/4 boot, 2/4 stream, 3/4 measure and 4/4 off. The probe passes at 144000..240000 B/s, by
+  STATUS or by pointers.
+- `abox_boot()` is one call of up to about 3.5 s: the VENDOR reads plus up to 3 s waiting for BOOT_DONE. The
+  runner's per-call limit (~100 ms) cannot be kept there.
+
+### snd.c's Calliope engine (`snd_ops.use_calliope`; the kernel's `snd_init_libsb` sets it)
+
+- snd's API is unchanged; `snd_ops` gains the optional `use_calliope` field (0 keeps bypass only, as the snd host
+  test does).
+- When something must play and apcm is off, snd uses the Calliope engine:
+  - If Calliope does not run, snd boots it itself (one blocking `abox_boot()`, about 0.1..0.5 s).
+  - It plays its usual 32 x 2048 ring through RDMA0 and calls `abox_poll()` from `snd_poll()`.
+  - The stream stops after 2 s of silence. Calliope (if snd booted it) goes off 30 s later, so the next sound
+    starts without a boot.
+- If Calliope fails to boot twice, snd uses the bypass engine from then on.
+- Capture still uses the bypass engine. It is refused while Calliope runs, and playback uses bypass while capture
+  is open.
+- How it works with modem.c:
+  - **If the modem booted Calliope** (Cellular is on), snd plays through it and never turns it off.
+  - **`snd_suspend_for_call()`** stops the stream, leaves Calliope running and hands it to the modem. The modem's
+    `abox_boot()` then says "already runs", and its `audio_stop()` turns it off.
+  - **`snd_resume_after_call()`**: media plays through the modem's Calliope again.
+  - **A call without the suspend** (`abox_state()` CALL): snd stops its stream within one poll.
+  - **The modem's `abox_off()` under a playing stream**: snd drops the stream and, 2 s later, boots its own.
+  - In-call media mixing is possible (SIFS0 is the mixer), but calls still win: snd does not play during
+    ABOX_ST_CALL.
+- Proposed modem.c hooks (not edited):
+  - `snd_suspend_for_call()` right before `abox_boot()` in `audio_prepare()` (as in section 5);
+  - `snd_resume_after_call()` after `abox_call(0)` in `audio_route(0)`. That way media comes back after each call,
+    not only after Cellular stops;
+  - in `audio_stop()`, skip `abox_off()` while `snd_busy()` (a playing stream keeps Calliope), or call a new
+    `snd_calliope_adopt()` that makes snd the owner.
+
+### Risks
+
+- None of this has run on the phone. abox.c's boot itself never ran on the phone either: the level 1 probe is its
+  first run.
+- No ACPM AUD DVFS hook, so the CA7 runs at the idle 294.9 MHz. One UI raised it to 1180 MHz while booting.
+- `abox_boot()` blocks the single-threaded kernel loop while it reads VENDOR and waits for BOOT_DONE.
+- Calliope may want more than One UI's RDMA0 messages before it moves a normal (non-call) RDMA, for example
+  ABOX_CONFIG for UAIF1 or a gear request. If RDMA0 does not move, the probe's STATUS / pointer lines and
+  Calliope's own log lines show where it stopped.
+- The level 1 probe leaves the AUD domain off (abox_off). The bypass "audio" probe runs before it, so nothing in
+  the probe image needs the domain afterwards.
+- The bypass probe runs first and leaves its own values in ABOX's registers (RDMA0 BUF_STR = the ring's PA, the
+  sample banks) while the domain stays on. Calliope then boots on that state, not on a reset one as on Android.
+
+### Run 5 (1f1f277, 2026-11-13) and what run 6 adds
+
+What run 5 showed:
+- Calliope booted (CRL0 after 115 ms), and steps 1..13 went through.
+- RDMA0 never started: CTRL0 stayed 0x400000, STATUS 0x80000000, no pointer messages.
+- BUF_STR stayed at the bypass probe's 0xfc780000. Calliope never programmed RDMA0, so it did not act on our
+  TRIGGER, or it refused an earlier message.
+- Its log copy stopped at the 40-line cap during its boot lines.
+- Its ~30 post-boot messages (REPORT_DUMP and the log ring) were still waiting in the RX slot while we sent the
+  PCM messages. They were only taken during the measurement.
+
+Our sequence, field by field, against Samsung's abox_rdma.c / abox.c / abox_gic.c and One UI's dmesg (both logged
+boots: 20261108-091233 and 20261108-110840):
+
+| | Samsung / One UI | ours |
+|---|---|---|
+| IPC id, SGI | IPC_PCMPLAYBACK 2; GICD SOFTINT (1 << 16) \| 2 | the same |
+| task_id, channel_id | both = the RDMA id (0) | 0, 0 |
+| order | OPEN (pcm open) -> uaif hw_params -> SET_BUFFER, HW_PARAMS (rdma hw_params) -> PREPARE -> flush MIXP -> uaif trigger -> TRIGGER 1 | the same |
+| SET_BUFFER | phyaddr IOVA_RDMA_BUFFER(0) = 0x91000000, size = period bytes (3840), count = periods (4) | the same |
+| HW_PARAMS | rate 48000, width 16, channels 2 | the same |
+| TRIGGER | param.trigger 1 / 0; DRAM on (SYSPOWER) around it | the same |
+| RDMA0 registers | the AP only reads CTRL0 (the disable barrier) and STATUS (the pointer) | the same: Calliope programs BUF_STR / END / CTRL0 |
+| ERAP, mixer | ABOX_CONFIG rates / formats and ERAP close at boot (abox_restore_data) | the same, at boot (Calliope logged "Changing MIXER sample rate") |
+| routes | SFR registers through regmap (SPUS_CTRL0, ROUTE_CTRL0): there is no SET_ROUTE IPC | the same registers |
+| UAIF | abox_if_config_put is AP-side only; UAIF CTRL0 / CTRL1 written by the AP: no UAIF IPC | the same |
+| CPU gear | gear 4 (394 MHz) requested at rdma open / uaif startup | none: no AUD DVFS hook, CA7 at 294.9 MHz |
+| timing | RDMA0 opened ~1.3 s after BOOT_DONE | run 5: right after; run 6: 300 ms after |
+
+Run 6 changes:
+- 300 ms of post-boot messages are taken before the stream.
+- At the stream start, abox.c gets 60 more fw lines (`abox_fw_log_more`) and 24 raw rx messages
+  (`abox_trace_rx`). Both are new additive diagnostics hooks.
+- Every PCM message is logged with its fields.
+- RDMA0's registers are dumped after 100 ms and at the end.
+- If UAIF1 does not move, UAIF0 (One UI's own route) is tried for 0.5 s.
+- The domain is no longer powered again after `abox_off`.
+
+Host test: `sh starbite/sbos/kern/host/calliope-test.sh` (234 checks). It runs against abox-test's fake plus a fake
+RDMA0 that Calliope starts only after the full IPC sequence, and only if IOVA 0x91000000 is a page table onto the
+ring (otherwise a SysMMU fault). It covers:
+- each probe level;
+- Samsung's order, the page tables, and the routes, UAIF and AUD domain as found;
+- failures at every step leaving ABOX off: no BOOT_DONE, missing firmware, PCM IPC dead, RDMA0 still, no free
+  window, ABOX busy, abort;
+- the abox.c hooks' refusals;
+- snd's Calliope engine: boot, play, idle stop, off after 30 s, call suspend / resume, the modem's `abox_off`, and
+  a missed suspend.

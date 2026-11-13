@@ -108,13 +108,10 @@ static void pw_build(void)
      * Control Centre's scrim, cheaper: one level); no memory: a plain dim */
     relayer(&pwdim);
     tk_layer_init(&pwdim, "pw-dim");
-    tk_bmp h;
     int ok = 0;
-    if (tk_bmp_new(&h, TK_W / 2, TK_H / 2)) {
-        tk_comp_frame(C, 0, 0);
-        tk_bmp_down2(&h, shown_frame());
-        if (tk_bmp_new(&pwdim.bmp, TK_W / 4, TK_H / 4)) {
-            tk_bmp_down2(&pwdim.bmp, &h);
+    {
+        if (!C->gpu) tk_comp_frame(C, 0, 0);     /* cp7f: the GPU path's quarter needs no whole CPU frame (shown_quarter) */
+        if (shown_quarter(&pwdim.bmp)) {
             tk_bmp_blur(&pwdim.bmp, PT(20) / 4);
             tk_bmp_satbright(&pwdim.bmp, 1.2f, 1);
             tk_bmp_tint(&pwdim.bmp, TK_RGBA(0, 0, 0, .55f));
@@ -122,7 +119,6 @@ static void pw_build(void)
             pwdim.opaque = 1;
             ok = 1;
         }
-        tk_bmp_free(&h);
     }
     if (!ok) {
         pwdim.solid = 0xb3000000u;                   /* black at .7 (premultiplied) */
