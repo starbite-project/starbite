@@ -2073,7 +2073,7 @@ static void cc_unview(void)
  * the next part of a grid being drawn (0 none); a whole build_cc_grid (a toggle) ends any part-drawn one */
 static dc ccg_d;
 static int ccg_part;
-#define CCG_PARTS 8
+#define CCG_PARTS 9
 static void cc_grid_part(int k)
 {
     if (k != 1 && k != ccg_part) return;         /* (that grid was made again whole meanwhile) */
@@ -2086,9 +2086,10 @@ static void cc_grid_part(int k)
     d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, 4 * CC_U + 3 * CC_GAP, 44, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
     ccg_d = d;
     /* the connectivity 2x2: Airplane, Cellular, Wi-Fi and the mini cluster (Bluetooth, Nearby, Hotspot, VPN) */
+    } else if (k == 2) {                         /* cp7p (7m: 43 ms): the grid's bitmap made, then its first tile */
     float X = CC_COL(0), Y = CC_ROW(0);
     cc_tile(&d, X, Y, CC_W2, CC_W2, 30, 0);
-    } else if (k == 2) {                         /* cp7m (7l: the first part 29-50 ms): the three circles a part of their own */
+    } else if (k == 3) {                         /* cp7m (7l: the first part 29-50 ms): the three circles a part of their own */
     float X = CC_COL(0), Y = CC_ROW(0);
     static const char *CI[3] = { "cc-air", "cc-cell", "cc-wifi" };
     static const float CW[3][2] = { { 20, 20 }, { 20, 18 }, { 22, 16 } };
@@ -2099,7 +2100,7 @@ static void cc_grid_part(int k)
         d_rrect(&d, cx, cy, CN_D, CN_D, CN_D / 2, ons[i] ? tk_hex(ONC[i], 1) : W(.2f));
         d_icon(&d, CI[i], cx + (CN_D - CW[i][0]) / 2, cy + (CN_D - CW[i][1]) / 2, 1);
     }
-    } else if (k == 3) {                         /* cp7i: the mini cluster a part of its own */
+    } else if (k == 4) {                         /* cp7i: the mini cluster a part of its own */
     float X = CC_COL(0), Y = CC_ROW(0);
     {
         float bx = X + CN_PAD + CN_D + 14, by = Y + CN_PAD + CN_D + 14;
@@ -2110,11 +2111,11 @@ static void cc_grid_part(int k)
             else cc_draw_link(&d, k - 1, mx + CN_MD / 2, my + CN_MD / 2, .85f, W(1));
         }
     }
-    } else if (k == 4) {
+    } else if (k == 5) {
     /* the sliders' glass (their level and glyph are layers above) */
     cc_tile(&d, CC_COL(2), CC_ROW(0), CC_U, CC_W2, 34, 0);
     cc_tile(&d, CC_COL(3), CC_ROW(0), CC_U, CC_W2, 34, 0);
-    } else if (k == 5) {
+    } else if (k == 6) {
     /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Mirror, Camera */
     /* P3i: the torch's tile baked off; its lit look is a small layer over it, so the tap shows it at once (the
      * whole grid's rebuild took ~300 ms at the tap) */
@@ -2128,7 +2129,7 @@ static void cc_grid_part(int k)
         cclit.hidden = !Q[0].lit;
     }
     cc_tile(&d, CCX[1], CC_R3, CC_U, CC_U, 34, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], CC_R3, 22, 22);
-    } else if (k == 6) {
+    } else if (k == 7) {
     cc_tile(&d, CCX[2], CC_R3, CC_U, CC_U, 34, 0);
     cc_glyph(&d, "cc-flame", CCX[2], CC_R3, 20, 24);
     {
@@ -2142,7 +2143,7 @@ static void cc_grid_part(int k)
         ccem.hidden = !EMG;
     }
     cc_tile(&d, CCX[3], CC_R3, CC_U, CC_U, 34, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], CC_R3, 24, 14);
-    } else if (k == 7) {
+    } else if (k == 8) {
     cc_tile(&d, CCX[0], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-timer", CCX[0], CC_R4, 22, 22);
     /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place); P3p: baked ones */
     cc_tile(&d, CCX[1], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-calc", CCX[1], CC_R4, 24, 24);
@@ -2168,7 +2169,7 @@ static void cc_levels(void)
 }
 /* cp7c: build_cc in stages, one an idle call (sh_idle_pending while some are left: the whole was ~0.6-1.2 s on the
  * phone in one turn after each move on home, and a tap in it was lost). 1: home's picture; 2: the light blur; 3: the
- * heavy blur; 4: the status, chrome, page dots, sliders; 5-12: the grid (cc_grid_part); 13: linked, built. A pull
+ * heavy blur; 4: the status, chrome, page dots, sliders; 5-13: the grid (cc_grid_part); 14: linked, built. A pull
  * before the end builds it whole (build_cc). The quarter picture ccq lives from stage 1 to 3 */
 static int ccb_next;                              /* the next stage, 0 none in progress */
 static tk_bmp ccq;
@@ -2284,7 +2285,7 @@ static void build_cc_stage(int st)
     }
     return;
     }
-    if (st >= 5 && st < 5 + CCG_PARTS) { cc_grid_part(st - 4); return; }   /* (5-12) */
+    if (st >= 5 && st < 5 + CCG_PARTS) { cc_grid_part(st - 4); return; }   /* (5-13) */
     tk_layer_init(&ccg, "cc-grid-group");
     ccg.ox = PT(CC_COL(0) + .85f * (4 * CC_U + 3 * CC_GAP));
     ccg.oy = PT(CC_ROW(0));
@@ -5600,17 +5601,47 @@ static int notes_hold(float t)
 }
 
 #include "shell_push.inc"                           /* cp6: iOS's push / pop between an app's pages, the edge swipe */
+/* cp7p (7m / 7p: "shell touch down 133 / 156 ms" at Emergency's hold on the phone, 0.04 ms on the Mac): the touch's
+ * pieces timed (each mark ends the last piece; the platform logs one over 20 ms: "next: shell piece touch ...") */
+static uint64_t tp_t;
+static const char *tp_n;
+static void tp_mark(const char *n)
+{
+    uint64_t now = tk_us();
+    if (tp_n) sh_slow_piece(tp_n, (unsigned)(now - tp_t));
+    tp_n = n;
+    tp_t = now;
+}
+static void sh_touch_(int phase, float x, float y, float t);
 void sh_touch(int phase, float x, float y, float t)
+{
+    const char *on = tp_n;
+    uint64_t ot = tp_t;
+    tp_n = 0;
+    tp_mark(phase == 0 ? "touch down: power sheet" : phase == 1 ? "touch move: power sheet" : "touch up: power sheet");
+    sh_touch_(phase, x, y, t);
+    tp_mark(0);
+    tp_n = on; tp_t = ot;                        /* (the capsule's replay calls this inside a touch) */
+}
+static void sh_touch_(int phase, float x, float y, float t)
 {
     now_ms = t;
     if (pw_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* P3x: the power sheet, over everything (modal) */
+    tp_mark("touch: capsule");
     { int r = isl_touch(phase, x, y, t); if (r) { if (r == 1) T.kind = G_NONE; return; } }   /* B7: the capsule, the call's minimise */
+    tp_mark("touch: call screen");
     if (cm_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* helper I: the call screen, the call button's hold */
+    tp_mark("touch: survival");
     if (sv_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* survival-next: SOS's beacon, a tool's hold */
+    tp_mark("touch: passcode");
     if (pc_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* Track A: the passcode screen (over the kit's modals) */
+    tp_mark("touch: kit");
     if (kit_touch(phase, x, y, t)) { if (T.kind == G_SET) se_touch(2, -1, -1, t); T.kind = G_NONE; hl_off(); return; }   /* helper B2: modal */
+    tp_mark("touch: zones");
     if (ta_touch(phase, x, y, t)) { T.kind = G_NONE; return; }   /* Track A: the zone list's scroll */
+    tp_mark("touch: push");
     if (ps_touch(phase, x, y, t)) return;                         /* cp6: the left-edge swipe back (shell_push.inc) */
+    tp_mark(phase == 0 ? "touch down: the rest" : phase == 1 ? "touch move: the rest" : "touch up: the rest");
     if (phase == 0) {
         tk_tracker_reset(&T.tr);
         T.moved = 0;
@@ -5640,10 +5671,13 @@ void sh_touch(int phase, float x, float y, float t)
         /* B9: the lock shows its notifications' stack (below), not the Centre's "N Notifications" pill (Emergency does) */
         int pill = ncpill.hidden;
         if (locked && !EMG) ncpill.hidden = 1;
+        tp_mark("touch down: notifications");
         int ncd = nc_down(x, y, t);
         ncpill.hidden = pill;
         if (ncd) { T.kind = G_NC; return; }       /* helper D: the banner, the open Notification Centre, the pill */
+        tp_mark("touch down: switcher");
         if (sw_down(x, y, t)) { T.kind = G_SW; return; }    /* helper D: the app switcher */
+        tp_mark("touch down: home / lock");
         if (AP.on) {
             /* an open app (survival-next: also over the lock, from Emergency's cards): the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
             if (y < 36 && x < 195 && !AP.closing && !sp_app.live) { nc_pull_begin(x, y, t); T.kind = G_NC; return; }   /* helper D */
@@ -5743,6 +5777,7 @@ void sh_touch(int phase, float x, float y, float t)
         for (int i = 0; i < 2; i++) {
             float bx = HOLD_X(i);
             if (x >= bx - 4 && x <= bx + 54 && y >= HOLD_Y - 4 && y <= HOLD_Y + 54) {
+                tp_mark("touch down: a hold");
                 T.kind = G_HOLD;
                 T.arg = i;
                 Q[i].down = 1; Q[i].fired = 0; Q[i].t0 = t;
@@ -6532,12 +6567,12 @@ void sh_idle(void)
     if ((!locked || cc_lock_ok) && !CCS.on && !AP.on && !nc_on() &&
         (ccb_next || !CCS.built || cc_stale || cc_lk != locked || (locked && cc_lv != lock_ver))) {
         if (!ccb_next) { cc_stale = 0; cc_lk = locked; cc_lv = lock_ver; }   /* (a change during the stages: again after) */
-        { static const char *const CCN[14] = { "build_cc_step", "build_cc 1 picture", "build_cc 2 light blur", "build_cc 3 heavy blur",
-                                                "build_cc 4 chrome", "build_cc 5 grid conn", "build_cc 6 grid circles", "build_cc 7 grid mini",
-                                                "build_cc 8 grid sliders", "build_cc 9 grid torch", "build_cc 10 grid flame", "build_cc 11 grid timer",
-                                                "build_cc 12 grid last", "build_cc 13 link" };
+        { static const char *const CCN[15] = { "build_cc_step", "build_cc 1 picture", "build_cc 2 light blur", "build_cc 3 heavy blur",
+                                                "build_cc 4 chrome", "build_cc 5 grid bitmap", "build_cc 6 grid conn", "build_cc 7 grid circles",
+                                                "build_cc 8 grid mini", "build_cc 9 grid sliders", "build_cc 10 grid torch", "build_cc 11 grid flame",
+                                                "build_cc 12 grid timer", "build_cc 13 grid last", "build_cc 14 link" };
           int r_ = 0, st_ = ccb_next ? ccb_next : 1;
-          IP_(CCN[st_ < 14 ? st_ : 0], r_ = build_cc_step()); if (r_) return; }   /* cp7i: the stage in the name */
+          IP_(CCN[st_ < 15 ? st_ : 0], r_ = build_cc_step()); if (r_) return; }   /* cp7i: the stage in the name */
     } else if (ccb_next && !CCS.on) free_cc();     /* not wanted any more (an app needs the room): its parts go, later again */
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
