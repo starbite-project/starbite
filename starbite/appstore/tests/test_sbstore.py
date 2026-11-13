@@ -907,6 +907,21 @@ class CardEngine(unittest.TestCase):
             e.close()
 
 
+class QtPlugin(unittest.TestCase):
+    def test_qt_apps_get_their_wayland_plugin(self):
+        """Track E: Calibre / KeePassXC / Stellarium abort without Qt's Wayland plugin (only a Recommends)"""
+        e = Env(available={"hello-deb": {"version": "2.10-3", "depends": ["libhello1", "libqt6gui6"]},
+                           "libqt6gui6": {"version": "6.8"}, "qt6-wayland": {"version": "6.8"}})
+        try:
+            e.run("install", "hello", "--method", "distro")
+            inst = e.apt()["installed"]
+            self.assertIn("qt6-wayland", inst)
+            e.run("remove", "hello")
+            self.assertNotIn("qt6-wayland", e.apt()["installed"])       # (it goes with the app)
+        finally:
+            e.close()
+
+
 class Repair(unittest.TestCase):
     def test_lists_apt_cant_read_are_started_afresh(self):
         e = Env()

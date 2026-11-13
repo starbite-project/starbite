@@ -60,7 +60,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-VERSION = "1.1.4"
+VERSION = "1.1.5"
 METHODS = ("distro", "release", "source")          # method numbers 1, 2, 3 (SBG_PKG_M_*)
 M_NUM = {"distro": 1, "release": 2, "source": 3}
 M_NAME = {v: k for k, v in M_NUM.items()}
@@ -2039,6 +2039,7 @@ def _install_debs(app, path, st, prog, cancel):
         raise StoreError("install failed", "apt-get install (debs) exited %d: %s" % (rc, out[-300:]))
     old = [p for p in (st["apps"].get(aid) or {}).get("packages", []) if p not in names]
     refs_add(st, names, aid)
+    qt_companions(st, aid, prog, cancel)
     if old:                                             # the previous version's packages (other names)
         try:
             apt_remove(old, aid, prog)
@@ -2050,6 +2051,27 @@ def _install_debs(app, path, st, prog, cancel):
     st.setdefault("_deb_names", {})[aid] = names
     if not path.endswith(".deb"):
         shutil.rmtree(path + ".x", ignore_errors=True)
+
+
+# Qt apps abort on the phone without Qt's Wayland platform plugin ("no Qt platform plugin could be initialized",
+# Track E's screenshot run: Calibre, KeePassXC, Stellarium); Debian only Recommends it and apt runs with
+# --no-install-recommends. Whatever brought Qt in brings its plugin too.
+QT_WAYLAND = (("libqt6gui6", "qt6-wayland"), ("libqt5gui5t64", "qtwayland5"), ("libqt5gui5", "qtwayland5"))
+
+
+def qt_companions(st, aid, prog=NOPROG, cancel=None):
+    inst = dpkg_installed()
+    want = sorted({plug for lib, plug in QT_WAYLAND if lib in inst and plug not in inst})
+    if not want:
+        return []
+    log("Qt is installed without its Wayland plugin: adding %s" % " ".join(want), aid)
+    try:
+        added = apt_install(want, aid, prog, cancel, auto=True)
+    except StoreError as e:
+        log("the Qt Wayland plugin didn't install: %s (the app may not start)" % e.detail, aid)
+        return []
+    refs_add(st, added, aid)
+    return added
 
 
 def _install_distro(app, st, prog, cancel, update):
@@ -2074,6 +2096,7 @@ def _install_distro(app, st, prog, cancel, update):
     else:
         added = apt_install(pkgs, aid, prog, cancel)
         refs_add(st, added, aid)
+    qt_companions(st, aid, prog, cancel)
     ver = dpkg_installed().get(pkgs[0], rel.get("version"))
     links = []
     if app.get("launcher"):
@@ -2181,6 +2204,7 @@ def _install_debian_source(app, st, prog, cancel):
                 except StoreError as e:
                     log("build deps kept: %s" % e.detail, aid)
     refs_add(st, [p for p in pkgs if p not in before], aid)
+    qt_companions(st, aid, prog, cancel)
     rec = {"method": "source", "version": ver or "?", "packages": pkgs, "links": [], "debian_source": srcpkg,
            "installed_at": int(time.time()), "verified": "built from Debian source (signed .dsc)", "from": "net"}
     st["apps"][aid] = rec
