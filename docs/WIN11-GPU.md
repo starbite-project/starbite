@@ -2336,6 +2336,21 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   It reads out GD A/B fps and copy avg on the M3s against the A55 baseline (~18.5 fps, ~46 ms copy) and the guard's
   `=M3H` temperatures. T59 (the same A/B on the A55s) is optional.
 
+### 6.67 T61 read: GD on the big cores ~2x the A55s; A/B scenes differed; T62 (A B A2 B2) staged
+
+- **T61** (win11-big, 14:26-14:51): exit 0. The test boot ended in gputest's clean restart at 1201 s. sbwdog
+  `BigCore 1`, `CapForced 0`; no bugcheck. sbd3d arm64/landscape/x64 exit 0, sbfps flip 649 / blt 829 fps.
+- **GD2 [A]** (async present): **34.3 fps** average over 31 glstats rows (copy 14.7 ms, gdi 4.2, present 5.0, interval
+  29.5) on the menu with the terms Notice. The A55s gave ~18.5 fps with a ~46 ms copy (T57 A).
+- **GD2 [B]** (+ cached back buffers): the 0156 path ran (`cached allocations on (... locked without IgnoreSync)`),
+  0 mmap failures. **21.1 fps** (copy **5.1 ms**, map 3.6, gdi 10.7, present 7.8, interval 49.6), but the game was in
+  a level (Attempt 32 -> 140, drawn right): the first gameplay frames in a test. Who started the level is unknown
+  (stray touches on the big-core row, 6.66's touch report, are one candidate). Two scenes, so the A/B is open; the
+  cached copy itself is 3x faster.
+- **Thermal:** `=M3H t41 hi51 s0 c2 g0 n6`: peak 81 C, 6 throttles to 1066 MHz (part of A's min 20.3 fps).
+- App crashes: only WpnUserService / MoUsoCoreWorker c000001d (winsqlite3, the known big-core gap).
+- **T62** (`build/win/stage/sbwddm-t62`): T61 + sb-gputest.cmd `twice` (sb-gd-ab.txt `glcached twice`: A B A2 B2).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

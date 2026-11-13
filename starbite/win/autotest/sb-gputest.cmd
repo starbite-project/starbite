@@ -199,11 +199,21 @@ rem async present, sb-patches 0153); empty: panthreaded (T53, sb-patches 0152).
 set ABF=panthreaded
 if exist %D%\sb-gd-ab.txt for /f "usebackq tokens=1" %%a in ("%D%\sb-gd-ab.txt") do set ABF=%%a
 if not exist %D%\sb-gd-ab.txt call %D%\sb-gd.bat A
+rem T62: a second word "twice" in sb-gd-ab.txt runs A B A2 B2 (T61 on the big cores: A sat on the menu, B was in a
+rem level, so one pass each compared two different scenes).
+set ABN=
+if exist %D%\sb-gd-ab.txt for /f "usebackq tokens=2" %%a in ("%D%\sb-gd-ab.txt") do set ABN=%%a
 if exist %D%\sb-gd-ab.txt (
   call %D%\sb-gd.bat A
   echo on> C:\ProgramData\Starbite\%ABF%
   call %D%\sb-gd.bat B
   del C:\ProgramData\Starbite\%ABF%
+  if /i "%ABN%"=="twice" (
+    call %D%\sb-gd.bat A2
+    echo on> C:\ProgramData\Starbite\%ABF%
+    call %D%\sb-gd.bat B2
+    del C:\ProgramData\Starbite\%ABF%
+  )
 )
 :after_sweep
 echo shell surfaces opened %time% >> gputest.log
