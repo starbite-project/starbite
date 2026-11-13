@@ -1897,6 +1897,13 @@ static void cc_status_stale(void) { relayer(&ccsb); cc_stale = 1; }
 static struct { int on, built, closing, wifi, cell, bt, air, rot, save; float p, lvl[2]; } CCS = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, { .62f, .4f } };   /* P2y: Wi-Fi and rotation lock off (neither is real) */
 static void cc_levels(void);
 static int cc_bright;           /* the panel's brightness level the slider last sent (1..4; 0: none yet) */
+/* cp7w: sound (Track A's sh_snd_*, the drivers track's snd.c): the repeating tone the shell started (1 a call's ring,
+ * 2 the timer's), so a notification or a key's click never cuts it, and each one stops only its own */
+static int snd_ring_who;
+static void snd_ring(int who, int kind) { if (sh_snd_tone(kind) == 0) snd_ring_who = who; }
+static void snd_ring_stop(int who) { if (snd_ring_who == who) { sh_snd_tone_stop(); snd_ring_who = 0; } }
+static void snd_once(int kind) { if (!snd_ring_who) (void)sh_snd_tone(kind); }
+static int cc_vol = -1;         /* the volume (0..15) the Control Centre's slider last sent */
 /* the platform's brightness now (1..4; 0: the boot's own): the slider starts there */
 void sh_bright_now(int level)
 {
@@ -2242,6 +2249,8 @@ static void build_cc_stage(int st)
     return;
     }
     if (st == 4) {
+    cc_vol = sh_snd_volume();                     /* cp7w: the volume slider where the sound's volume is */
+    CCS.lvl[1] = cc_vol / 15.0f;
     if (!ccsb.bmp.px) {
         dc d = mk(&ccsb, "cc-status", 0, 0, 390, 48, 2, 0);
         status_bar(&d, carrier);
@@ -2588,6 +2597,9 @@ static void cc_set_level(int i, float v)
     if (i == 0) {                        /* P2r: the brightness slider sets the panel's level (1..4) */
         int lv = 1 + (int)(v * 3.999f);
         if (lv != cc_bright) { cc_bright = lv; sh_brightness(lv); }
+    } else {                             /* cp7w: the volume slider sets the sound's (0..15, kept) */
+        int vv = (int)(v * 15 + .5f);
+        if (vv != cc_vol) { cc_vol = vv; sh_snd_volume_set(vv); }
     }
     if (CX.m == i + 1) cc_x_place();
 }
@@ -3270,10 +3282,11 @@ static int ori_poll(float t);
 static int ori_tick(float dt);
 static int ori_moving(void);
 static int hwk_refresh(void);                 /* cp7: shell_hwkey.inc */
+static float ck_ring_next(float t);           /* cp7w: shell_apps.inc (the timer's ring stops after two minutes) */
 int sh_next_update(float t)
 {
     int open = AP.on && is_app("clock");
-    float best = -1;
+    float best = ck_ring_next(t);
     if (CLK.sw_run && open) best = 100 - (float)((int)clk_sw_ms(t) % 100);
     if (CLK.tm_run) {
         float tl = CLK.tm_end - t, nx = open ? (float)((int)tl % 1000) + 1 : tl;

@@ -1308,7 +1308,7 @@ static void np_build(void)
         d_tri(&d, 300, 570, 278, 556, 278, 584, dim);
         w = tw(TK_IT600, 15, "Playback isn't available yet", 0, 0);
         d_text(&d, TK_IT600, 15, 195 - w / 2, bl(TK_IT600, 15, 632), "Playback isn't available yet", 0, 0, W(.7f), 0);
-        const char *l2 = "Starbite OS has no sound output so far.";
+        const char *l2 = "Sound works; reading music files comes next.";
         w = tw(TK_IT400, 13, l2, 0, 0);
         d_text(&d, TK_IT400, 13, 195 - w / 2, bl(TK_IT400, 13, 656), l2, 0, 0, C_LABEL2, 0);
         MD.pstage = 3;
@@ -1630,7 +1630,7 @@ static void med_tap(float x, float y)
     }
     if (MD.play >= 0) {
         if (back && MD.pstage == 3) MD.pstage = 4;       /* the list again in the next frame (med_tick) */
-        else if (MD.pstage == 3 && y >= 470 && y < 610) toast("Playback isn't available yet: there is no sound output");   /* cp6: the dimmed transport */
+        else if (MD.pstage == 3 && y >= 470 && y < 610) toast("Playback isn't available yet: music files can't be read so far");   /* cp6: the dimmed transport */
         return;
     }
     if (MD.app == MD_PHOTOS && (y < SAFE_TOP + 48 || y >= SEG_Y - 6)) { med_ptap(x, y); return; }

@@ -769,6 +769,8 @@ void sh_notify_flags(const char *who, const char *title, const char *body, int h
      * B2: nor over an alert or sheet */
     int bn_ok = !(flags & SH_NOTIF_QUIET) && nc_pref(n->who, "banners") &&
                 (!sh_pref_int("notif.dnd", 0) || (flags & SH_NOTIF_URGENT));
+    /* cp7w: its tone (not a quiet one, nor in Do Not Disturb unless urgent, nor in Emergency; never over a ring) */
+    if (!(flags & SH_NOTIF_QUIET) && (!sh_pref_int("notif.dnd", 0) || (flags & SH_NOTIF_URGENT)) && !EMG) snd_once(SH_SND_NOTIFY);
     if (bn_ok && !locked && !SL.black && !SL.dir && !focus_on && !CF.on && !sw_on() && !kit_on()) bn_show(n);
 }
 

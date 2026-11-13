@@ -35,13 +35,13 @@ enum { SE_ROOT = 0, SE_DISPLAY = 1, SE_WIFI = 2, SE_CELL = 3, SE_CARD = 4,
        SE_NOTIF_APP, SE_BATTERY, SE_PRIVACY, SE_EMERGENCY, SE_LINUX, SE_SEARCH, SE_BT, SE_HEALTH, SE_NPAGES };
 /* actions (row ids from 100; a row id < 100 pushes that page) */
 enum { A_NONE = 100, A_CARD, A_PASSCODE, A_STARTUP, A_STORE, A_LAST2, A_TEXTSIZE, A_RESET, A_EMG, A_BRIGHT,
-       A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK, A_UPDATE, A_BTDEV, A_BTKBD, A_HAPLVL,
+       A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK, A_UPDATE, A_BTDEV, A_BTKBD, A_HAPLVL, A_VOLUME, A_TONE_RING, A_TONE_TEXT, A_TONE_ALARM,
        T_FIRST = 200, T_SYSHAP = T_FIRST, T_KBHAP, T_AUTOCAP, T_TIMERVIB, T_LAST2AUTO, T_NALLOW, T_NBANNER, T_CALLVIB, T_SMSVIB,
-       T_CLOCK24, T_BT, T_AUTOBRIGHT };
+       T_CLOCK24, T_BT, T_AUTOBRIGHT, T_KBSND };
 
 /* ---- the shell's own settings: Track A's prefs (kept across restarts; every one defaults to on) ------------------ */
-enum { SK_SYSHAP, SK_KBHAP, SK_AUTOCAP, SK_TIMERVIB, SK_NALLOW, SK_NBANNER = SK_NALLOW + 8, SK_N = SK_NBANNER + 8 };
-static const char *const SK_KEY[SK_NALLOW] = { "haptic.system", "kb.haptic", "kb.autocap", "clock.timervib" };
+enum { SK_SYSHAP, SK_KBHAP, SK_AUTOCAP, SK_TIMERVIB, SK_KBSND, SK_NALLOW, SK_NBANNER = SK_NALLOW + 8, SK_N = SK_NBANNER + 8 };
+static const char *const SK_KEY[SK_NALLOW] = { "haptic.system", "kb.haptic", "kb.autocap", "clock.timervib", "kb.click" };
 static const char *se_notif_who(int i);
 static int se_get(int k)
 {
@@ -62,6 +62,8 @@ static void se_defaults(void) { for (int k = 0; k < SK_N; k++) se_put(k, 1); }
 static int se_haptic_ok(int key) { return se_get(SK_SYSHAP) && (!key || se_get(SK_KBHAP)); }
 static int se_autocap(void) { return se_get(SK_AUTOCAP); }
 static int se_timer_vib(void) { return se_get(SK_TIMERVIB); }
+static int se_kb_click(void) { return se_get(SK_KBSND); }         /* cp7w: Keyboard Clicks */
+static float se_tone_until;                     /* cp7w: a ringtone's preview stops then (ms; 0 none) */
 /* the notification posters Settings lists (shell_nc.inc's NCSRC, plus Phone and Messages) */
 static const struct { const char *who, *name; } SEN[] = { { "clock", "Clock" }, { "battery", "Battery" }, { "modem", "Cellular" },
     { "wifi", "Wi-Fi" }, { "messages", "Messages" }, { "phone", "Phone" }, { "heat", "Survival Heat" }, { "survival", "USB Power" } };
@@ -114,6 +116,7 @@ static struct {
     tk_tracker tr;
     tk_spring sp;
     float bright;                                 /* the slider's place (0..1) */
+    float vol;                                    /* cp7w: Sounds & Haptics' volume slider's place (0..1) */
     char q[24];                                   /* Search: what is typed */
     int shift, num;
     int stack[8], ns_, popping;                   /* the pages pushed on the way here (back pops them, iOS) */
@@ -400,9 +403,18 @@ static void se_rows(int p)
         se_off(tog(T_CALLVIB, "Calls", 1), "Set by the modem: it can't be changed yet");
         se_off(tog(T_SMSVIB, "Messages", 1), "Set by the modem: it can't be changed yet");
         foot("The modem buzzes for calls and messages by itself; turning that off needs the modem's own setting.");
+        /* cp7w: the loudspeaker (Track A's sh_snd_*): the volume (the Control Centre's too), the tones (a tap plays one) */
+        sec("Ringer and Alerts");
+        row(SR_SLIDER, A_VOLUME, 0, 0);
+        foot("The loudspeaker's volume for ringtones, alarms, timers and notifications, the same as the Control "
+             "Centre's. Calls and music have their own.");
         sec("Sounds");
-        val("Ringtone", "None");
-        foot("Starbite OS plays no sounds yet: the speaker's driver isn't in this version.");
+        { se_row *r = row(SR_VAL, A_TONE_RING, "Ringtone", "Ring"); (void)r; }
+        row(SR_VAL, A_TONE_TEXT, "Text Tone", "Note");
+        row(SR_VAL, A_TONE_ALARM, "Alarms and Timers", "Beeps");
+        foot("A tap plays the sound.");
+        sec(0);
+        tog(T_KBSND, "Keyboard Clicks", se_get(SK_KBSND));
         break;
     case SE_NOTIF:
         sec("Notification Style");
@@ -743,6 +755,12 @@ static void se_draw_row(dc *d, const se_row *r, int last)
         }
         return;
     case SR_SLIDER:
+        if (r->id == A_VOLUME) {                  /* cp7w: the volume's (a speaker small and loud) */
+            d_icon_s(d, "cc-vol", LG_TX - 4, y + 19, .6f);
+            kit_d_slider(d, LG_TX + 30, y + 16, LG_RE - 16 - 30 - LG_TX - 30, SE.vol);
+            d_icon(d, "cc-vol", LG_RE - 16 - 22, y + 19, 1);
+            return;
+        }
         d_icon(d, "cc-sun", LG_TX - 4, y + 19, .45f);
         kit_d_slider(d, LG_TX + 30, y + 16, LG_RE - 16 - 30 - LG_TX - 30, SE.bright);
         d_icon(d, "cc-sun", LG_RE - 16 - 22, y + 19, 1);
@@ -1016,6 +1034,7 @@ static void se_build(void)
     if (p != SE_BT) se_bt_leave();
     else SEB.build_t = now_ms;
     if (p == SE_DISPLAY && !SE.slider) SE.bright = ((cc_bright ? cc_bright : 3) - .5f) / 4;
+    if (p == SE_SOUNDS && !SE.slider) SE.vol = sh_snd_volume() / 15.0f;   /* cp7w */
     se_rows(p);
     SE.content_h = se_layout() + (p == SE_ROOT ? 56 : 0);      /* the root's last card clears the search capsule */
     SE.scroll = tk_clampf(SE.scroll, 0, se_max());
@@ -1292,6 +1311,16 @@ static void se_act(se_row *r)
     case A_LAST2: se_open_app("power"); break;
     case A_BTDEV: se_bt_pair(r); break;           /* cp7: a keyboard's pairing (the code in an alert) */
     case A_BTKBD: se_bt_kbd(); break;
+    case A_TONE_RING: case A_TONE_ALARM:           /* cp7w: a repeating tone: three seconds of it */
+        snd_ring_stop(3);
+        snd_ring(3, id == A_TONE_RING ? SH_SND_RING : SH_SND_ALARM);
+        if (snd_ring_who == 3) se_tone_until = now_ms + 3000;
+        else { const char *w = sh_snd_why(); toast(w && w[0] ? w : "The sound didn't play"); }
+        break;
+    case A_TONE_TEXT:
+        if (snd_ring_who) { toast("Another sound is playing"); break; }
+        if (sh_snd_tone(SH_SND_NOTIFY) < 0) { const char *w = sh_snd_why(); toast(w && w[0] ? w : "The sound didn't play"); }
+        break;
     case A_TEXTSIZE:
         se_sheet("Text Size", "Text has one size in this version: iOS's Body is 17 pt.\nLarger text needs every page "
                               "laid out again; it is planned.");
@@ -1314,6 +1343,7 @@ static void se_toggle(int ri)
     case T_KBHAP: se_put(SK_KBHAP, on); break;
     case T_AUTOCAP: se_put(SK_AUTOCAP, on); break;
     case T_TIMERVIB: se_put(SK_TIMERVIB, on); break;
+    case T_KBSND: se_put(SK_KBSND, on); break;          /* cp7w */
     case T_LAST2AUTO: sh_last2_auto_set(on); on = sh_last2_auto(); break;
     case T_NALLOW: se_put(SK_NALLOW + SE.napp, on); break;
     case T_NBANNER: se_put(SK_NBANNER + SE.napp, on); break;
@@ -1357,7 +1387,8 @@ static int se_row_at(float x, float y)
 static int se_row_live(const se_row *r)
 {
     return !r->dis && (r->kind == SR_NAV || r->kind == SR_ACT || r->kind == SR_PROFILE || r->kind == SR_TOG ||
-                       r->kind == SR_SEG || (r->kind == SR_VAL && (r->id == A_BTDEV || r->id == A_BTKBD)));
+                       r->kind == SR_SEG || (r->kind == SR_VAL && (r->id == A_BTDEV || r->id == A_BTKBD || r->id == A_TONE_RING ||
+                                                                   r->id == A_TONE_TEXT || r->id == A_TONE_ALARM)));
 }
 /* cp6: what lights under the finger (shell_wifi.inc's press colours): a row its rect in its card (#3A3A3C), a
  * switch row its switch's track (darker; the row itself doesn't light, iOS), a segmented control the segment under x */
@@ -1394,6 +1425,11 @@ static float se_slider_frac(float x)
 }
 static void se_slider_set(float frac)
 {
+    if (SE.slider == A_VOLUME) {                  /* cp7w: the volume (0..15, kept; the Control Centre's follows) */
+        SE.vol = frac;
+        int v = (int)(frac * 15 + .5f);
+        if (v != sh_snd_volume()) { sh_snd_volume_set(v); CCS.lvl[1] = v / 15.0f; if (CCS.built) cc_levels(); }
+    } else {
     SE.bright = frac;
     int lv = 1 + (int)(frac * 3.999f);
     if (lv != cc_bright) {
@@ -1402,8 +1438,9 @@ static void se_slider_set(float frac)
         CCS.lvl[0] = frac;
         if (CCS.built) cc_levels();
     }
+    }
     for (int i = 0; i < SE.nr; i++)
-        if (SE.r[i].kind == SR_SLIDER) {
+        if (SE.r[i].kind == SR_SLIDER && SE.r[i].id == SE.slider) {
             kit_slider_drag(LG_TX + 30, SE.r[i].y + 16, LG_RE - 16 - 30 - LG_TX - 30, frac, LG_GROUND);
             /* cp6: the grabbed knob grows a little about its centre (the kit's knob bitmap has 8 pt of shadow room) */
             kslk.ox = kslk.x + PT(8 + KSL_KW / 2);
@@ -1448,7 +1485,7 @@ static void se_touch(int ph, float x, float y, float t)
             return;
         }
         int i = se_row_at(x, y);
-        if (i >= 0 && SE.r[i].kind == SR_SLIDER) { SE.slider = 1; se_slider_set(se_slider_frac(x)); return; }
+        if (i >= 0 && SE.r[i].kind == SR_SLIDER) { SE.slider = SE.r[i].id; se_slider_set(se_slider_frac(x)); return; }   /* cp7w: which one */
         se_light(i >= 0 && se_row_live(&SE.r[i]) ? i : -1, x);
         return;
     }
@@ -1471,9 +1508,11 @@ static void se_touch(int ph, float x, float y, float t)
     hl_off();
     SE.press = -1;
     if (SE.slider) {
+        int vol = SE.slider == A_VOLUME;
         SE.slider = 0;
         kit_slider_end();
         build_app_page(AP.a);                            /* the page with the knob where it was left */
+        if (vol) snd_once(SH_SND_NOTIFY);                /* cp7w: the new volume heard (iOS plays the ringer's sound) */
         return;
     }
     if (pressed <= -3) {
@@ -1562,6 +1601,7 @@ static int se_moving(void) { return SE.built && (SE.sp.live || SE.momentum || (S
  * it shows changed (at most every 0.3 s), never under a finger. */
 static int se_refresh(float t)
 {
+    if (se_tone_until > 0 && t >= se_tone_until) { se_tone_until = 0; snd_ring_stop(3); }   /* cp7w: the preview's end */
     int ch = se_bt_pair_poll();                          /* cp7: a keyboard pairing (any page) */
     if (sepspin.name) {                                  /* cp6: a strip page's spinner: there or not, its step */
         float cx = 0, cy = 0;
@@ -1606,6 +1646,7 @@ static int se_refresh(float t)
 }
 static float se_next_update(float t)
 {
+    if (se_tone_until > 0) return tk_maxf(1, se_tone_until - t);   /* cp7w */
     if (SPS.on) return tk_maxf(15, 100 - (t - SPS.t));   /* cp6: the strip spinner's step */
     if (SBP.dev >= 0) return 250;                        /* cp7: a keyboard pairing's state */
     if (!SE.built || !se_owns() || AP.closing) return -1;

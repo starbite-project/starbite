@@ -138,7 +138,12 @@ static int kb_at(float x, float y)
 static int kb_haptics(void) { return 1; }
 /* helper B2's Settings: a key's tap follows Sounds & Haptics > Keyboard Feedback (kb_key_tap: shell_lock.c's
  * sh_haptic wrapper reads it) */
-static void kb_feel(void) { if (kb_haptics()) { kb_key_tap = 1; sh_haptic(); } }
+static int se_kb_click(void);                  /* cp7w: Settings > Sounds & Haptics > Keyboard Clicks */
+static void kb_feel(void)
+{
+    if (kb_haptics()) { kb_key_tap = 1; sh_haptic(); }
+    if (se_kb_click()) snd_once(SH_SND_CLICK);   /* cp7w: a key's click (never over a ring) */
+}
 
 /* ---- drawing ---------------------------------------------------------------------------------------------- */
 static void kb_glyph(dc *d, const char *name, float x, float y, tk_col c)

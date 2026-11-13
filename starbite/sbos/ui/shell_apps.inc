@@ -743,14 +743,30 @@ static void ck_ring(float left_frac)
 }
 static float ck_tm_left(float t) { return CLK.tm_run ? tk_maxf(0, CLK.tm_end - t) : CK.tm_left; }
 /* the digits and the buttons as of t (ms); 1 if anything was redrawn. A timer that ran out vibrates (sh_vibrate). */
+/* cp7w: a timer that ran out rings (the alarm's beeps) until Stop, or two minutes */
+static float ck_ring_until;
+static void ck_ring_stop_cb(int b) { (void)b; snd_ring_stop(2); ck_ring_until = 0; }
+static float ck_ring_next(float t) { return ck_ring_until > 0 ? tk_maxf(1, ck_ring_until - t) : -1; }
 static int clk_update(float t)
 {
     int any = 0;
+    if (ck_ring_until > 0 && t >= ck_ring_until) {
+        snd_ring_stop(2);
+        ck_ring_until = 0;
+        if (kit_on() && KT.cb == ck_ring_stop_cb) { KT.cb = 0; kit_dismiss(-1); }
+        any = 1;
+    }
     if (CLK.tm_run && t >= CLK.tm_end) {
         CLK.tm_run = 0; CK.tm_paused = 0;
         CLK.ctl_ver++;
         if (se_timer_vib()) sh_vibrate();   /* the platform also wakes the screen (P3f); helper B2: Sounds & Haptics > Clock Timer */
-        toast("Timer done");
+        snd_ring(2, SH_SND_ALARM);
+        if (snd_ring_who == 2) {            /* it rings: iOS's alert with Stop */
+            static const kit_btn B[1] = { { "Stop", KIT_DEFAULT } };
+            ck_ring_until = t + 120000;
+            if (kit_alert("Timer", "The timer has ended.", B, 1, ck_ring_stop_cb) < 0) toast("Timer done");
+        } else
+            toast("Timer done");
         toast_left = 6000;                  /* an alert stays longer than a toast */
         if (is_app("clock") && CK.tab == 3 && AP.on && !AP.closing) build_app_page(AP.a);
         any = 1;

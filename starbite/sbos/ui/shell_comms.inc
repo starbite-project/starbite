@@ -840,10 +840,18 @@ static void cv_prox_sync(void)
     cv_prox_on = want;
     sh_call_proximity(want);
 }
+/* cp7w: the ringtone while the call screen shows an incoming call (until it is answered, declined or gone) */
+static void cv_ring_sync(void)
+{
+    int want = CV.on && CV.at > 0 && CV.mode == CVM_INCOMING && !CV.answering && !CV.ending;
+    if (want && snd_ring_who != 1) snd_ring(1, SH_SND_RING);
+    else if (!want) snd_ring_stop(1);
+}
 /* where everything is for the mode (and the lock: the slider) */
 static void cv_place(void)
 {
     cv_prox_sync();
+    cv_ring_sync();
     int inc = CV.mode == CVM_INCOMING, slider = inc && locked;
     tk_layer *P[5] = { &cvdec, &cvacc, &cvend, &cvtrack, &cvthumb };
     for (int i = 0; i < 5; i++) { P[i]->x = P[i]->bx; P[i]->y = P[i]->by; }
@@ -880,6 +888,7 @@ static void cv_light(float cx, float cy, float r, tk_col c)
 }
 static void cv_free(void)
 {
+    snd_ring_stop(1);                         /* cp7w */
     tk_layer *P[6] = { &cvsb, &cvtop, &cvst, &cvctl, &cvhide, &cvbg };
     for (int i = 0; i < 6; i++) { relayer(P[i]); P[i]->hidden = 1; }
     cvbg.solid = 0;
@@ -919,6 +928,7 @@ static void cv_show(int mode)
 static void cv_hide(void)
 {
     if (!CV.on) return;
+    snd_ring_stop(1);                         /* cp7w: the ring stops with the screen's fade */
     CV.at = 0;                                /* a .25 s fade (cm_tick), then everything goes */
     CV.close_at = -1; CV.pend_close = 0;
     cvhl.hidden = 1;
@@ -955,7 +965,7 @@ void sh_call(const sh_call_t *c)
 {
     sh_call_t o = CALL;
     CALL = *c;
-    if (c->state != SH_CALL_INCOMING) CV.answering = 0;
+    if (c->state != SH_CALL_INCOMING) { CV.answering = 0; snd_ring_stop(1); }   /* cp7w: answered, declined or gone */
     if (!cm_live(c->state) || c->state == SH_CALL_ENDING) CV.ending = 0;
     cm_track(c);
     if (CM.decl) {                            /* declined here: no screen for its last pushes (ENDING ...) */
@@ -1024,7 +1034,7 @@ static void cv_answer(void)
     char why[SH_WHY] = "";
     sh_haptic();
     if (sh_answer(why) < 0) { CV.thumb = 0; cv_place(); toast(why[0] ? why : "The call couldn't be answered"); return; }
-    if (CALL.state == SH_CALL_INCOMING) CV.answering = 1;   /* "Connecting..." until the kernel says so */
+    if (CALL.state == SH_CALL_INCOMING) { CV.answering = 1; snd_ring_stop(1); }   /* "Connecting..." until the kernel says so; cp7w: quiet */
     if (CV.mode != CVM_CALL) cv_show(CVM_CALL);
 }
 static void cv_up(void)
@@ -1042,6 +1052,7 @@ static void cv_up(void)
         sh_haptic();
         sh_hangup();
         CV.ending = 1;
+        snd_ring_stop(1);                     /* cp7w */
         cv_status();
         break;
     case CVB_DEC:
