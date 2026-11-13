@@ -228,6 +228,16 @@ static id open_device(mach_port_t port)
 		dispatch_once(&once, ^{
 			uint8_t err = sbmtl_set_compile_budget(1, 1);
 			sm2_log("compile budget: 1 at a time%s", err ? " (refused: budget already in use)" : "");
+			/*
+			 * MetalPerformanceShaders' GPU class (S2y 2026-11-13: WindowServer's desktop_window_effects_update ->
+			 * MPS -> MPSDevice::GetMPSDevice returned NULL for this device and MPSCreateFunctionConstantValues read
+			 * 0x5c4 through it, SIGSEGV). Without MPS_DEVICE_SET, MPSCore takes the class from supportsFamily:
+			 * Apple9/8/7/5 (and a private one) only; this device answers the target hardware's families, Apple1-3
+			 * (iPad7,1, A10X: TARGET_FAMILIES in the bridge). MPS_DEVICE_SET=A10X (MPSCore's own switch: class 6)
+			 * names that same hardware. Not overridden when the process already has it.
+			 */
+			if (setenv("MPS_DEVICE_SET", "A10X", 0) == 0)
+				sm2_log("MPS_DEVICE_SET=%s", getenv("MPS_DEVICE_SET"));
 		});
 	}
 	if (!listed()) {
