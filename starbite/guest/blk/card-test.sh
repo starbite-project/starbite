@@ -26,6 +26,10 @@ python3 "$here/card-test-image.py" "$W/card-u.img" --p1-start 2049 > "$W/card-u.
 gcc -O1 -Wall -Wextra -Werror -Wno-unused-parameter -I"$T/libsb" -I"$T/utility" -I"$T/guest/sbos" -o "$W/card-test" \
     "$here/card-test.c" "$T/libsb/str.c" "$T/libsb/fence.c" "$T/utility/exfat.c"
 "$W/card-test" "$W/card.img" "$W/card.h" "$W/card-u.img" "$W/card-u.h"
+# cp7i: the phone glue's stepped offer (gcard_begin / gcard_tick / gcard_abort) and its proof cache
+gcc -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function -I"$T/libsb" -I"$T/utility" -I"$T/guest/sbos" \
+    -o "$W/card-glue-test" "$here/card-glue-test.c" "$T/libsb/str.c" "$T/libsb/fence.c" "$T/utility/exfat.c"
+"$W/card-glue-test" "$W/card.img" | grep -v "^  log:"
 # the same resolver on a volume the real tools made
 if command -v mkfs.exfat > /dev/null && sudo -n true 2> /dev/null; then
     gcc -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function -I"$T/libsb" -I"$T/utility" -I"$T/guest/sbos" \

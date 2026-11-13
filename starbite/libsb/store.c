@@ -39,16 +39,16 @@ static uint64_t le(uintptr_t p, unsigned n)
 }
 
 /* CRC32 (IEEE, reflected, as zlib.crc32) with the ARMv8 CRC32 instructions. */
-static __attribute__((target("+crc"))) uint32_t star_crc32(uintptr_t p, uint64_t n)
+static __attribute__((target("+crc"))) uint32_t crc_more(uint32_t c, uintptr_t p, uint64_t n)
 {
-    uint32_t c = 0xffffffffU;
     uint64_t i = 0;
     for (; i + 8 <= n; i += 8)
         __asm__("crc32x %w0, %w0, %x1" : "+r"(c) : "r"(*(volatile uint64_t *)(p + i)));
     for (; i < n; ++i)
         __asm__("crc32b %w0, %w0, %w1" : "+r"(c) : "r"((uint32_t)*(volatile uint8_t *)(p + i)));
-    return ~c;
+    return c;
 }
+static uint32_t star_crc32(uintptr_t p, uint64_t n) { return ~crc_more(0xffffffffU, p, n); }
 
 /* count 4 KiB blocks of a medium to dst (DMA-visible memory). */
 static int med_read(unsigned m, uint64_t lba, uint64_t count, uintptr_t dst)
@@ -313,6 +313,41 @@ int store_load(const struct store_ent *e, uintptr_t dst, uint64_t cap)
          * place, so its directory CRC is not kept up to date and is not checked */
         r = (e->flags & 1U) || got == e->crc ? 0 : -2;
     }
+    unsigned i = 0;
+    for (; i + 1 < sizeof(last_ld.name) && i < sizeof(e->name) && e->name[i]; ++i)
+        last_ld.name[i] = e->name[i];
+    last_ld.name[i] = 0;
+    last_ld.res = r;
+    last_ld.size = e->size;
+    last_ld.want = e->crc;
+    last_ld.got = got;
+    return r;
+}
+
+int store_load_part(const struct store_ent *e, uintptr_t dst, uint64_t cap, uint64_t k, uint64_t n, uint32_t *crc)
+{
+    uint64_t blocks = (e->size + 4095U) / 4096U;
+    if (e->size > cap)
+        return -3;
+    if (k == 0)
+        *crc = 0xffffffffU;
+    if (k >= blocks)
+        return 0;
+    if (n > blocks - k)
+        n = blocks - k;
+    if (med_read(e->medium, e->lba + k, n, dst + k * 4096U))
+        return -1;
+    uint64_t b0 = k * 4096U, b1 = (k + n) * 4096U;
+    if (b1 > e->size)
+        b1 = e->size;
+    *crc = crc_more(*crc, dst + b0, b1 - b0);
+    return 0;
+}
+
+int store_load_done(const struct store_ent *e, uint32_t crc)
+{
+    uint32_t got = ~crc;
+    int r = (e->flags & 1U) || got == e->crc ? 0 : -2;
     unsigned i = 0;
     for (; i + 1 < sizeof(last_ld.name) && i < sizeof(e->name) && e->name[i]; ++i)
         last_ld.name[i] = e->name[i];

@@ -53,6 +53,11 @@ int store_get(unsigned medium, unsigned i, struct store_ent *e);
 int store_find(const char *name, struct store_ent *e);
 /* Whole entry to dst (at most cap bytes), CRC checked: 0, -1 read error, -2 CRC, -3 too large. */
 int store_load(const struct store_ent *e, uintptr_t dst, uint64_t cap);
+/* store_load in parts (cp7i: Starbite OS's Linux start reads ~1 MiB per timer tick, the UI drawing between): blocks
+ * [k, k + n) of e to dst + k * 4096, the CRC carried in *crc (set at k = 0); give the parts in order from k = 0.
+ * 0, -1 read error, -3 e bigger than cap. Then store_load_done checks the CRC as store_load does (0 or -2). */
+int store_load_part(const struct store_ent *e, uintptr_t dst, uint64_t cap, uint64_t k, uint64_t n, uint32_t *crc);
+int store_load_done(const struct store_ent *e, uint32_t crc);
 /* The last store_load since store_last_clear: its result (0, -1, -2, -3; 1 = none since the clear),
  * the entry's name (cut to cap), size, the directory's CRC32 and the one computed (0 unless read).
  * For the menu's error card ("expected 0x... · read 0x..."). */

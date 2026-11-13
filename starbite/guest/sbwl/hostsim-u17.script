@@ -5,4 +5,5 @@ wait_catalog 8000
 expect_app org.starbite.WlTest
 expect_app org.starbite.NotifyTest
 include hostsim-v3.script
+include hostsim-rot.script
 stop 5000

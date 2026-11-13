@@ -1,0 +1,43 @@
+# cp7 landscape (Track E), included by hostsim.script (trixie) and hostsim-u17.script (the Ubuntu VM): SBG_MSG_ROTATE.
+# wltest (white 32 x 16 marker at its top-left) is laid out 1344 x 720, its frame turned into the portrait surface, a
+# tap in surface pixels turned back into its own coordinates; then the other way, then portrait again.
+sleep 1500
+sh rm -f /tmp/sbwl-wltest.txt
+expect_caps 1
+launch org.starbite.WlTest
+wait_window org.starbite.WlTest 1 10000
+wait_frame 5000
+expect_pixel 0 0 ffffff
+expect_pixel 31 15 ffffff
+# the phone's top to the left: the content's top-left at the panel's top-right, its x down the panel
+rotate 1 0
+expect_line /tmp/sbwl-wltest.txt configure:1344x720 3000
+expect_rot 1 5000
+expect_pixel 719 0 ffffff
+expect_pixel 704 31 ffffff
+dump rot1
+tap 360 672
+expect_line /tmp/sbwl-wltest.txt press:672,359 3000
+# the landscape keyboard up: 400 content rows (the rest black, at the panel's left)
+rotate 1 400
+expect_line /tmp/sbwl-wltest.txt configure:1344x400 3000
+wait_frame 3000
+expect_pixel 719 0 ffffff
+expect_pixel 100 600 000000
+# the phone's top to the right: the content's top-left at the panel's bottom-left
+rotate 3 0
+expect_line /tmp/sbwl-wltest.txt configure:1344x720 3000
+expect_rot 3 5000
+expect_pixel 0 1343 ffffff
+expect_pixel 15 1312 ffffff
+dump rot3
+tap 100 200
+expect_line /tmp/sbwl-wltest.txt press:1143,100 3000
+# portrait again
+rotate 0 0
+expect_line /tmp/sbwl-wltest.txt configure:720x1344 3000
+expect_rot 0 5000
+expect_pixel 0 0 ffffff
+tap 300 500
+expect_line /tmp/sbwl-wltest.txt press:300,500 3000
+close org.starbite.WlTest

@@ -108,6 +108,51 @@ static int addr(const uint8_t *p, uint32_t n, char *out, size_t cap, int *alpha)
     return (int)(2 + bytes);
 }
 
+/* a network name as libsec-ril's GetNameFromNitz codes it: 1 8-bit (ASCII), 2 GSM 7-bit packed (n octets),
+ * 3 UCS-2 big endian (an odd length: empty), 4 empty. UTF-8 out; 0 or SBM_EBADF (an unknown coding). */
+int sbm_text_decode(uint8_t coding, const uint8_t *b, uint32_t n, char *out, size_t cap)
+{
+    size_t o = 0;
+    if (!cap)
+        return SBM_EBADF;
+    out[0] = 0;
+    switch (coding) {
+    case 1:
+        for (uint32_t i = 0; i < n && b[i]; ++i)
+            if (put_utf8(out, cap, &o, b[i] < 0x80 ? b[i] : '?') < 0)
+                break;
+        return 0;
+    case 2:
+        for (uint32_t i = 0; i < n * 8 / 7; ++i) {
+            uint8_t c = septet(b, i);
+            if (c == 0x0D && i + 1 == n * 8 / 7)
+                break;                                  /* the padding septet (CR) at the end */
+            if (c == 0x1B)
+                continue;
+            if (put_utf8(out, cap, &o, gsm7[c]) < 0)
+                break;
+        }
+        return 0;
+    case 3:
+        if (n & 1)
+            return 0;
+        for (uint32_t i = 0; i + 1 < n; i += 2) {
+            uint32_t cp = (uint32_t)b[i] << 8 | b[i + 1];
+            if (!cp)
+                break;
+            if (cp >= 0xD800 && cp < 0xE000)
+                cp = '?';
+            if (put_utf8(out, cap, &o, cp) < 0)
+                break;
+        }
+        return 0;
+    case 4:
+        return 0;
+    default:
+        return SBM_EBADF;
+    }
+}
+
 int sbm_sms_deliver_decode(const uint8_t *t, uint32_t n, struct sbm_sms *s)
 {
     sbm_memset(s, 0, sizeof(*s));

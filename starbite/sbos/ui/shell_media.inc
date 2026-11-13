@@ -89,6 +89,7 @@ static struct {
     int vmode, to_end, ngrp, vui, vfull, tap_wait;
     float vz, vzt, px, py, pxt, pyt, tap_t, tap_x, tap_y;
     int vsw, vsh;
+    int vrot;                                 /* cp7: the turn the picture's bitmap has (an SH_ORI_*; shell_orient.inc) */
     float tha, thx, thy, thw;                 /* the opening thumbnail's flight (tha 0..1) */
 } MD = { .view = -1, .play = -1, .vz = 1, .vzt = 1, .vui = 1 };
 static int ml_store_sync(int card_ok);       /* the Camera's photos (Track A's store) among the card's */
@@ -1001,6 +1002,14 @@ static void id3_read(ml_track *t)
 }
 
 /* ---- the viewer ----------------------------------------------------------------------------------------------- */
+/* cp7: the viewer's orientation (shell_orient.inc's, while it shows), its chrome (none in landscape), its long side */
+static int ori_cur;
+static int ori_q(int o);
+static void ori_map(int o, float *x, float *y);
+static void ori_off(int o, float lx, float ly, float *dx, float *dy);
+static int vw_o(void) { return MD.view >= 0 ? ori_cur : 0; }
+static int vw_ui(void) { return MD.vui && !vw_o(); }
+static float vw_span(void) { return vw_o() ? H_PT : 390; }
 static float md_ease(float t) { t = tk_clampf(t, 0, 1); return 1 - (1 - t) * (1 - t) * (1 - t); }
 static void vw_place(void)
 {
@@ -1008,17 +1017,18 @@ static void vw_place(void)
     float a = MD.va * (1 - tk_clampf(MD.vy / 420, 0, .7f)), ui = a * (MD.vui ? 1 : 0);
     medvbg.hidden = !on;
     medvbg.alpha = a;
-    medvui.hidden = !on || !medvui.bmp.px || ui <= 0;
+    medvui.hidden = !on || !medvui.bmp.px || ui <= 0 || vw_o();
     medvui.alpha = ui;
-    medvbot.hidden = !on || !medvbot.bmp.px || ui <= 0;
+    medvbot.hidden = !on || !medvbot.bmp.px || ui <= 0 || vw_o();
     medvbot.alpha = ui;
     medverr.hidden = !on || !MD.verr || !medverr.bmp.px;
     medverr.alpha = a;
     medvimg.hidden = !on || !medvimg.bmp.px;
     if (medvimg.bmp.px) {
         float bw = (float)medvimg.bmp.w, bh = (float)medvimg.bmp.h;
-        float f = tk_minf((float)TK_W / bw, (float)TK_H / bh) * (1 - tk_clampf(MD.vy / 1000, 0, .35f)) * MD.vz;
-        float X = ((float)TK_W - bw * f) / 2 + PT(MD.vx + MD.px), Y = ((float)TK_H - bh * f) / 2 + PT(MD.vy + MD.py);
+        float f = tk_minf((float)TK_W / bw, (float)TK_H / bh) * (1 - tk_clampf(MD.vy / 1000, 0, .35f)) * MD.vz, dx, dy;
+        ori_off(vw_o(), MD.vx + MD.px, MD.vy + MD.py, &dx, &dy);     /* cp7: the landscape's offsets turned */
+        float X = ((float)TK_W - bw * f) / 2 + PT(dx), Y = ((float)TK_H - bh * f) / 2 + PT(dy);
         medvimg.sx = medvimg.sy = f;
         medvimg.ox = medvimg.oy = 0;
         medvimg.x = X / f;
@@ -1027,7 +1037,7 @@ static void vw_place(void)
         medvimg.gen++;
     }
     /* B5: the tile's thumbnail flying into place while the picture decodes (iOS: the tile zooms into the viewer) */
-    medvth.hidden = !on || !medvth.bmp.px || (medvimg.bmp.px && MD.tha >= 1);
+    medvth.hidden = !on || !medvth.bmp.px || (medvimg.bmp.px && MD.tha >= 1) || vw_o();
     if (!medvth.hidden) {
         float e = md_ease(MD.tha), w = MD.thw + (390 - MD.thw) * e, x = MD.thx * (1 - e) + MD.vx, y = MD.thy + ((H_PT - 390) / 2 - MD.thy) * e + MD.vy;
         float sc = PT(w) / (float)medvth.bmp.w;
@@ -1047,6 +1057,18 @@ static void vw_place(void)
     medvbar.alpha = .8f * a;
     medvbar.gen++;
 }
+/* cp7: the phone turned while the viewer shows: the picture turned to match, at its whole (no zoom, no pan) */
+static void med_turn(int from, int to)
+{
+    (void)from;
+    if (MD.view < 0) return;
+    MD.vz = MD.vzt = 1; MD.px = MD.py = MD.pxt = MD.pyt = 0; MD.vx = MD.vy = 0; MD.vanim = 0; MD.tap_wait = 0;
+    if (medvimg.bmp.px && MD.vrot != to && tk_bmp_turn(&medvimg.bmp, ori_q(to) - ori_q(MD.vrot))) {
+        MD.vrot = to;
+        tk_layer_dirty(&medvimg);
+    }
+    vw_place();
+}
 /* the pan's room at this zoom (pt each way) */
 static void vw_room(float z, float *rx, float *ry)
 {
@@ -1055,6 +1077,7 @@ static void vw_room(float z, float *rx, float *ry)
     float bw = (float)medvimg.bmp.w, bh = (float)medvimg.bmp.h, f = tk_minf((float)TK_W / bw, (float)TK_H / bh) * z;
     *rx = tk_maxf(0, (bw * f / TK_PT - 390) / 2);
     *ry = tk_maxf(0, (bh * f / TK_PT - H_PT) / 2);
+    if (vw_o()) { float t = *rx; *rx = *ry; *ry = t; }      /* cp7: the landscape's (its x is the panel's height) */
 }
 /* a picture after (dir 1) or before (-1) this one (a file opened from Files stands alone) */
 /* the photo entry of Files' folder after (dir 1) or before (-1) entry i, or -1 */
@@ -1432,6 +1455,8 @@ static int med_step(int slow)
                 if (MD.vfull == 1) MD.vfull = 2;       /* B5: the zoomed picture at the panel's resolution now */
                 medvimg.bmp = DJ.out;
                 tk_memset(&DJ.out, 0, sizeof DJ.out);
+                MD.vrot = 0;                            /* cp7: turned as the phone is (no memory: as decoded) */
+                if (vw_o() && tk_bmp_turn(&medvimg.bmp, ori_q(vw_o()))) MD.vrot = vw_o();
                 dj_free();
                 relink();
             } else if (rc < 0 && MD.vfull == 1) {
@@ -1545,8 +1570,8 @@ static int md_del_go;
 static void md_del_cb(int b) { if (b == 0 && md_del >= 0) md_del_go = 1; else md_del = -1; }
 static void vw_tap1(float x, float y)
 {
-    if (MD.vui && x < MARGIN + 54 && y >= SAFE_TOP - 4 && y < SAFE_TOP + 48) { MD.vat = 0; MD.vanim = 3; MD.redo = MD.vsingle; return; }
-    if (MD.vui && y >= VB_Y - 6 && y < VB_Y + 50) {
+    if (vw_ui() && x < MARGIN + 54 && y >= SAFE_TOP - 4 && y < SAFE_TOP + 48) { MD.vat = 0; MD.vanim = 3; MD.redo = MD.vsingle; return; }
+    if (vw_ui() && y >= VB_Y - 6 && y < VB_Y + 50) {
         for (int k = 0; k < 4; k++)
             if (x >= VBX[k] - 6 && x < VBX[k] + 50) {
                 if (k == 2) {
@@ -1578,8 +1603,9 @@ static void vw_tap2(float x, float y)
     float z = 2.5f, rx, ry;
     MD.vzt = z;
     vw_room(z, &rx, &ry);
-    MD.pxt = tk_clampf((195 - x) * (z - 1), -rx, rx);
-    MD.pyt = tk_clampf((H_PT / 2 - y) * (z - 1), -ry, ry);
+    float cx = vw_o() ? H_PT / 2 : 195, cy = vw_o() ? 195 : H_PT / 2;    /* cp7: the landscape's middle */
+    MD.pxt = tk_clampf((cx - x) * (z - 1), -rx, rx);
+    MD.pyt = tk_clampf((cy - y) * (z - 1), -ry, ry);
     MD.vui = 0;
 }
 static void med_ptap(float x, float y)
@@ -1598,7 +1624,7 @@ static void med_tap(float x, float y)
     if (MD.view >= 0) {
         /* a tap waits 280 ms for a second one (a double tap zooms) */
         if (MD.tap_wait && now_ms - MD.tap_t < 280 && tk_fabsf(x - MD.tap_x) < 40 && tk_fabsf(y - MD.tap_y) < 40) { MD.tap_wait = 0; vw_tap2(x, y); return; }
-        if (MD.vui && (y < SAFE_TOP + 48 || y >= VB_Y - 6)) { MD.tap_wait = 0; vw_tap1(x, y); return; }   /* buttons at once */
+        if (vw_ui() && (y < SAFE_TOP + 48 || y >= VB_Y - 6)) { MD.tap_wait = 0; vw_tap1(x, y); return; }   /* buttons at once */
         MD.tap_wait = 1; MD.tap_t = now_ms; MD.tap_x = x; MD.tap_y = y;
         return;
     }
@@ -1656,6 +1682,7 @@ static void med_tap(float x, float y)
 }
 static void med_touch(int ph, float x, float y, float t)
 {
+    if (vw_o()) ori_map(vw_o(), &x, &y);             /* cp7: the viewer turned: its own points */
     if (ph == 0) {
         MD.x0 = x; MD.y0 = y;
         MD.moved = 0; MD.axis = 0; MD.down = 1;
@@ -1726,7 +1753,7 @@ static int med_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_co
 {
     if (!MD.app || !AP.on || AP.closing || !med_is(APPS[AP.a].k)) return 0;
     if (MD.view >= 0) {
-        if (!MD.vui) return 0;
+        if (!vw_ui()) return 0;
         if (x < MARGIN + 54 && y >= SAFE_TOP - 4 && y < SAFE_TOP + 48) {
             *r = *g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *c = APR_CIRC;
             return 1;
@@ -1854,9 +1881,9 @@ static int med_tick(float dt)
         }
     }
     if (MD.vanim == 1) {
-        MD.vx -= (float)MD.vdir * 390 * dt / .16f;
+        MD.vx -= (float)MD.vdir * vw_span() * dt / .16f;
         mv = 1;
-        if (tk_fabsf(MD.vx) >= 400) vw_show(MD.vsingle ? vw_files_next(MD.view, MD.vdir) : MD.view + MD.vdir); else vw_place();
+        if (tk_fabsf(MD.vx) >= vw_span() + 10) vw_show(MD.vsingle ? vw_files_next(MD.view, MD.vdir) : MD.view + MD.vdir); else vw_place();
     } else if (MD.vanim == 2) {
         float k = tk_minf(1, dt * 16);
         MD.vx -= MD.vx * k;

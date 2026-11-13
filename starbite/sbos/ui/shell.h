@@ -18,6 +18,9 @@ int sh_tick(float dt, float t_ms);
 int sh_moving(void);
 void sh_idle(void);
 int sh_idle_pending(void);                /* idle work left (call sh_idle again soon) */
+/* cp7f (Track A): a piece of the shell's work that took long, by name (the platform logs it over 20 ms; the host:
+ * over SBTK_SLOWMS, default 20). "what" stays the caller's (a literal). */
+void sh_slow_piece(const char *what, unsigned us);
 /* the live values: local time (wday 0 = Sunday, mon 1..12), battery %, temperature C; rebuilds what changed */
 void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp);                       /* idle time: prepare the caches the next gesture needs */
 
@@ -187,6 +190,13 @@ int sh_linux_touch(int phase, int x, int y);   /* surface px, phase 0 down / 1 m
 int sh_linux_char(char c);               /* one character typed: committed text for a focused text field, else keys
                                           * (Shift around capitals); '\n' Return and '\b' BackSpace are always keys */
 int sh_linux_viewport(int rows);         /* the rows the shell shows (SH_LINUX_H, or SH_LINUX_HKB with the keyboard) */
+/* cp7 landscape (Track E): q = quarter turns clockwise of the Linux window on the panel (0 portrait, 1 the phone's
+ * top to the left, 3 to the right); rows = the window's rows shown when turned (the landscape keyboard up: fewer;
+ * 0 all SH_LINUX_W). The surface, the blit and sh_linux_touch stay in portrait surface px: the guest turns its
+ * frame and maps touches back. sh_linux_rot_shown: the turn of the frame on show; turn the chrome when it equals q
+ * (a guest that cannot turn stays at 0: keep that app portrait). */
+int sh_linux_rotate(int q, int rows);
+int sh_linux_rot_shown(void);
 int sh_linux_icon(int icon, uint32_t *px);     /* a pool icon into px (SH_LINUX_ICON squared); 0: none */
 int sh_linux_zero_copy(void);              /* 1.0: 1 when the GPU samples the guest's window surface in place: show it with
                                             * tk_layer_external (the front buffer from the header) instead of the strips */
@@ -584,3 +594,48 @@ int sh_low_power_on(void);
 /* Track E, cp6 (gwin.c): the running App Store / Linux job in words ("Building btop from source, 45 %", "Downloading
  * Firefox, 12 %", "+ 2 more"); 1 with a job, 0 none (buf ""). Cheap: the shell polls it about once a second */
 int sh_linux_job(char *buf, int cap);
+
+/* Track A, cp7: the screen's orientation for apps that rotate (Photos' viewer, Camera, Calculator, Clock, Linux apps;
+ * home and lock stay portrait as on iPhone). Call sh_orientation() while such an app is open (each frame or every
+ * ~200 ms: it keeps the accelerometer alive; the hub starts in ~4 s, portrait until then; it stops itself 60 s after
+ * the last call). TURNED_LEFT: the phone turned counter-clockwise (its top edge on the left): the content turns
+ * clockwise to stay upright. The signs are to be confirmed on the phone. Orientation Lock (Control Centre): pref
+ * display.orientlock, off by default; on: always portrait. */
+enum { SH_ORI_PORTRAIT = 0, SH_ORI_TURNED_LEFT = 1, SH_ORI_UPSIDE_DOWN = 2, SH_ORI_TURNED_RIGHT = 3 };
+int sh_orientation(void);
+int sh_orientation_lock(void);
+void sh_orientation_lock_set(int on);
+
+/* Track A, cp7: a Bluetooth keyboard (one, classic, boot protocol; the drivers track's bt_pair.c). Settings >
+ * Bluetooth: sh_bt_pair(i) on a scan row (bt_is_keyboard ones), then show sh_bt_pair_state():
+ * SH_BTP_CODE: "Type <sh_bt_pair_code()> on the keyboard, then press Enter"; CONNECTED: the keyboard works;
+ * FAILED: sh_bt_pair_why(). Its key is kept (blob bt.key) and it comes back when Bluetooth is on. Typed keys arrive in
+ * sh_hw_key (HID usage, 1 down / 0 up, the character: US layout, '\n' Enter, 0x08 Backspace; 0 for none); the
+ * shell defines it (a weak default drops them). No key repeat from the kernel (the UI repeats). */
+enum { SH_BTP_IDLE = 0, SH_BTP_CONNECTING, SH_BTP_CODE, SH_BTP_SECURING, SH_BTP_CONNECTED, SH_BTP_WAITING, SH_BTP_FAILED };
+int sh_bt_pair(int i);
+int sh_bt_pair_state(void);
+const char *sh_bt_pair_code(void);
+const char *sh_bt_pair_why(void);
+int sh_bt_kbd_paired(void);
+const char *sh_bt_kbd_name(void);   /* the paired keyboard's name (kept across a restart), "Keyboard" when unknown */
+int sh_bt_kbd_connected(void);
+void sh_bt_unpair(void);
+int sh_bt_reconnect(void);
+void sh_hw_key(int usage, int down, uint32_t unicode);
+
+/* Track A, cp7: sound (the drivers track's snd.c). Nothing runs until the first call. Tones: SH_SND_RING / ALARM /
+ * NOTIFY / CLICK (= snd.h's SND_TONE_*), synthesized beeps; one at a time, sh_snd_tone_stop ends a repeating one.
+ * The volume 0..15 is kept (pref snd.vol) and is the Control Centre's / Sounds & Haptics' slider. Music: a stream
+ * (sh_snd_open, then sh_snd_write 48 kHz stereo int16 frames as sh_snd_space allows, never blocking; sh_snd_close).
+ * sh_snd_why: plain words for what sound does or why not (e.g. a call has the hardware). Self test: refused. */
+enum { SH_SND_RING = 1, SH_SND_ALARM = 2, SH_SND_NOTIFY = 3, SH_SND_CLICK = 4 };
+int sh_snd_tone(int kind);
+void sh_snd_tone_stop(void);
+int sh_snd_volume(void);
+void sh_snd_volume_set(int v);
+int sh_snd_open(void);
+unsigned sh_snd_write(int id, const int16_t *frames, unsigned n);
+unsigned sh_snd_space(int id);
+void sh_snd_close(int id);
+const char *sh_snd_why(void);

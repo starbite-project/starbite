@@ -27,6 +27,39 @@ int tk_bmp_new(tk_bmp *b, int w, int h)
     return b->px != 0;
 }
 void tk_bmp_free(tk_bmp *b) { if (b->px) tk_free(b->px); b->px = 0; b->w = b->h = 0; }
+/* cp7: src turned exactly (no resampling) a quarter clockwise (q 1), a half (2) or a quarter counter-clockwise (3)
+ * into a new dst (q 0: a copy). 0: no memory (dst empty) */
+int tk_bmp_turned(tk_bmp *dst, const tk_bmp *src, int q)
+{
+    q &= 3;
+    int w = src->w, h = src->h;
+    if (!src->px || !tk_bmp_new(dst, q & 1 ? h : w, q & 1 ? w : h)) return 0;
+    for (int y = 0; y < h; y++) {
+        const uint32_t *s = src->px + (size_t)y * src->stride;
+        if (!q) tk_memcpy(dst->px + (size_t)y * dst->stride, s, (size_t)w * 4);
+        else if (q == 2) {
+            uint32_t *d = dst->px + (size_t)(h - 1 - y) * dst->stride + (w - 1);
+            for (int x = 0; x < w; x++) *d-- = s[x];
+        } else if (q == 1) {
+            uint32_t *d = dst->px + (h - 1 - y);                    /* column h-1-y, from the top */
+            for (int x = 0; x < w; x++, d += dst->stride) *d = s[x];
+        } else {
+            uint32_t *d = dst->px + (size_t)(w - 1) * dst->stride + y; /* column y, from the bottom */
+            for (int x = 0; x < w; x++, d -= dst->stride) *d = s[x];
+        }
+    }
+    return 1;
+}
+/* b turned in place (a new bitmap takes its place: both exist for a moment). 0: no memory (b as it was) */
+int tk_bmp_turn(tk_bmp *b, int q)
+{
+    if (!(q & 3) || !b->px) return 1;
+    tk_bmp o;
+    if (!tk_bmp_turned(&o, b, q)) return 0;
+    tk_bmp_free(b);
+    *b = o;
+    return 1;
+}
 int tk_fm_new(tk_fm *m, int w, int h)
 {
     m->v = w > 0 && h > 0 ? tk_alloc((size_t)w * h * 4) : 0;
@@ -302,15 +335,25 @@ void tk_draw_fm(tk_bmp *b, const tk_fm *m, int ox, int oy, const tk_paint *p, fl
 {
     tk_col sc = tk_paint_at(p, 0, 0);
     int solid = p->kind == TK_P_SOLID;
+    /* cp7: a solid paint's fully covered px is one packed value, over anything when it is opaque (over_px's ia is 0)
+     * and over an empty px (nothing to add); any px over an empty one is its own colour: bit for bit what over_px
+     * gives, without its float blend (a grouped list's card: most of a Settings page's build on the A55) */
+    uint32_t full = solid ? pack(sc.r * alpha, sc.g * alpha, sc.b * alpha, sc.a * alpha) : 0;
+    int full_opaque = solid && sc.a * alpha == 1.0f;
     for (int j = 0; j < m->h; j++) {
         int y = oy + j;
         if (y < 0 || y >= b->h) continue;
+        uint32_t *row = b->px + (size_t)y * b->stride;
+        const float *mv = m->v + (size_t)j * m->w;
         for (int i = 0; i < m->w; i++) {
             int x = ox + i;
-            float c = m->v[j * m->w + i] * alpha;
+            float v = mv[i], c = v * alpha;
             if (x < 0 || x >= b->w || c < 1.0f / 1024) continue;
+            uint32_t *d = &row[x];
+            if (solid && v == 1.0f && (full_opaque || !*d)) { *d = full; continue; }
             tk_col s = solid ? sc : tk_paint_at(p, x + 0.5f, y + 0.5f);
-            over_px(&b->px[y * b->stride + x], s.r * c, s.g * c, s.b * c, s.a * c);
+            if (!*d) { *d = pack(s.r * c, s.g * c, s.b * c, s.a * c); continue; }
+            over_px(d, s.r * c, s.g * c, s.b * c, s.a * c);
         }
     }
 }
@@ -434,6 +477,32 @@ static void box_mirror(float *v, float *t, int n, int r)
 }
 static void bmp_blur_full(tk_bmp *b, float sigma);
 void tk_bmp_blur(tk_bmp *b, float sigma) { tk_bmp_blur_sat(b, sigma, 1, 1); }
+/* rows y0..y1 of b: the quarter q bilinear up 4x (tk_bmp_blur_sat's wide blur) */
+typedef struct { tk_bmp *b; const tk_bmp *q; } up4_ctx;
+static void up4_rows(void *v, int y0r, int y1r)
+{
+    up4_ctx *U = v;
+    tk_bmp *b = U->b;
+    const tk_bmp *q = U->q;
+    for (int j = y0r; j < y1r; j++) {
+        float fy = (j + .5f) / 4 - .5f;
+        int ya = (int)tk_floorf(fy);
+        unsigned ty = (unsigned)((fy - ya) * 256);
+        int y0 = tk_maxi(0, ya), y1 = tk_mini(q->h - 1, ya + 1);
+        for (int i = 0; i < b->w; i++) {
+            float fx = (i + .5f) / 4 - .5f;
+            int xa = (int)tk_floorf(fx);
+            unsigned tx = (unsigned)((fx - xa) * 256);
+            int x0 = tk_maxi(0, xa), x1 = tk_mini(q->w - 1, xa + 1);
+            uint32_t p00 = q->px[y0 * q->w + x0], p01 = q->px[y0 * q->w + x1], p10 = q->px[y1 * q->w + x0], p11 = q->px[y1 * q->w + x1], o = 0;
+            for (int sh = 0; sh < 32; sh += 8) {
+                unsigned t0 = (p00 >> sh & 255) * (256 - tx) + (p01 >> sh & 255) * tx, t1 = (p10 >> sh & 255) * (256 - tx) + (p11 >> sh & 255) * tx;
+                o |= ((t0 * (256 - ty) + t1 * ty + 32768) >> 16) << sh;
+            }
+            b->px[j * b->stride + i] = o;
+        }
+    }
+}
 void tk_bmp_blur_sat(tk_bmp *b, float sigma, float sat, float bright)
 {
     /* the blur, then CSS saturate / brightness; for a wide blur both at a quarter of the resolution (the result
@@ -449,67 +518,70 @@ void tk_bmp_blur_sat(tk_bmp *b, float sigma, float sat, float bright)
     tk_bmp_down2(&q, &a);
     bmp_blur_full(&q, sigma / 4);
     if (filt) tk_bmp_satbright(&q, sat, bright);
-    for (int j = 0; j < b->h; j++) {
-        float fy = (j + .5f) / 4 - .5f;
-        int ya = (int)tk_floorf(fy);
-        unsigned ty = (unsigned)((fy - ya) * 256);
-        int y0 = tk_maxi(0, ya), y1 = tk_mini(q.h - 1, ya + 1);
-        for (int i = 0; i < b->w; i++) {
-            float fx = (i + .5f) / 4 - .5f;
-            int xa = (int)tk_floorf(fx);
-            unsigned tx = (unsigned)((fx - xa) * 256);
-            int x0 = tk_maxi(0, xa), x1 = tk_mini(q.w - 1, xa + 1);
-            uint32_t p00 = q.px[y0 * q.w + x0], p01 = q.px[y0 * q.w + x1], p10 = q.px[y1 * q.w + x0], p11 = q.px[y1 * q.w + x1], o = 0;
-            for (int sh = 0; sh < 32; sh += 8) {
-                unsigned t0 = (p00 >> sh & 255) * (256 - tx) + (p01 >> sh & 255) * tx, t1 = (p10 >> sh & 255) * (256 - tx) + (p11 >> sh & 255) * tx;
-                o |= ((t0 * (256 - ty) + t1 * ty + 32768) >> 16) << sh;
-            }
-            b->px[j * b->stride + i] = o;
-        }
-    }
+    up4_ctx U = { b, &q };
+    tk_par_rows(0, b->h, up4_rows, &U);         /* cp7c: the bilinear up over the cores (rows are independent) */
     tk_bmp_free(&a);
     tk_bmp_free(&q);
 }
+/* cp7c: the rows, then the columns, in 8 bands over the cores (tk_par; each band its own scratch, made here: the
+ * workers allocate nothing); every line is filtered as before, so the result is the same bit for bit */
+typedef struct { tk_bmp *b; int r[3], n, cols; float *scr; } bbf_ctx;
+static void bbf_band(void *v, int k)
+{
+    bbf_ctx *B = v;
+    tk_bmp *b = B->b;
+    int n = B->n, len = B->cols ? b->w : b->h, a = len * k / 8, e = len * (k + 1) / 8;
+    float *ch = B->scr + (size_t)k * (size_t)n * 5, *t = ch + 4 * (size_t)n;
+    for (int L = a; L < e; L++) {
+        if (!B->cols) {
+            uint32_t *row = b->px + L * b->stride;
+            for (int c = 0; c < 4; c++) {
+                float *v2 = ch + c * n;
+                for (int i = 0; i < b->w; i++) v2[i] = (float)(row[i] >> (8 * c) & 255);
+                for (int p = 0; p < 3; p++) box_mirror(v2, t, b->w, tk_mini(B->r[p], b->w - 1));
+            }
+            for (int i = 0; i < b->w; i++) {
+                uint32_t o = 0;
+                for (int c = 0; c < 4; c++) { int q = (int)(ch[c * n + i] + 0.5f); o |= (uint32_t)(q > 255 ? 255 : q) << (8 * c); }
+                row[i] = o;
+            }
+        } else {
+            int i = L;
+            for (int c = 0; c < 4; c++) {
+                float *v2 = ch + c * n;
+                for (int j = 0; j < b->h; j++) v2[j] = (float)(b->px[j * b->stride + i] >> (8 * c) & 255);
+                for (int p = 0; p < 3; p++) box_mirror(v2, t, b->h, tk_mini(B->r[p], b->h - 1));
+            }
+            for (int j = 0; j < b->h; j++) {
+                uint32_t o = 0;
+                for (int c = 0; c < 4; c++) { int q = (int)(ch[c * n + j] + 0.5f); o |= (uint32_t)(q > 255 ? 255 : q) << (8 * c); }
+                b->px[j * b->stride + i] = o;
+            }
+        }
+    }
+}
 static void bmp_blur_full(tk_bmp *b, float sigma)
 {
-    int r[3];
-    boxes(sigma, r);
-    int n = tk_maxi(b->w, b->h);
-    for (int k = 0; k < 3; k++) r[k] = tk_mini(r[k], n - 1);
-    float *ch = tk_alloc((size_t)n * 4 * 4), *t = tk_alloc((size_t)n * 4);
-    if (!ch || !t) { tk_free(ch); tk_free(t); return; }
-    for (int j = 0; j < b->h; j++) {
-        uint32_t *row = b->px + j * b->stride;
-        for (int c = 0; c < 4; c++) {
-            float *v = ch + c * n;
-            for (int i = 0; i < b->w; i++) v[i] = (float)(row[i] >> (8 * c) & 255);
-            for (int p = 0; p < 3; p++) box_mirror(v, t, b->w, tk_mini(r[p], b->w - 1));
-        }
-        for (int i = 0; i < b->w; i++) {
-            uint32_t o = 0;
-            for (int c = 0; c < 4; c++) { int q = (int)(ch[c * n + i] + 0.5f); o |= (uint32_t)(q > 255 ? 255 : q) << (8 * c); }
-            row[i] = o;
-        }
+    bbf_ctx B;
+    boxes(sigma, B.r);
+    B.b = b;
+    B.n = tk_maxi(b->w, b->h);
+    for (int k = 0; k < 3; k++) B.r[k] = tk_mini(B.r[k], B.n - 1);
+    B.scr = tk_alloc((size_t)B.n * 5 * 4 * 8);
+    if (!B.scr) return;
+    for (B.cols = 0; B.cols < 2; B.cols++) {
+        if (tk_par && (B.cols ? b->w : b->h) >= 64) tk_par(bbf_band, &B, 8);
+        else for (int k = 0; k < 8; k++) bbf_band(&B, k);
     }
-    for (int i = 0; i < b->w; i++) {
-        for (int c = 0; c < 4; c++) {
-            float *v = ch + c * n;
-            for (int j = 0; j < b->h; j++) v[j] = (float)(b->px[j * b->stride + i] >> (8 * c) & 255);
-            for (int p = 0; p < 3; p++) box_mirror(v, t, b->h, tk_mini(r[p], b->h - 1));
-        }
-        for (int j = 0; j < b->h; j++) {
-            uint32_t o = 0;
-            for (int c = 0; c < 4; c++) { int q = (int)(ch[c * n + j] + 0.5f); o |= (uint32_t)(q > 255 ? 255 : q) << (8 * c); }
-            b->px[j * b->stride + i] = o;
-        }
-    }
-    tk_free(ch);
-    tk_free(t);
+    tk_free(B.scr);
 }
-void tk_bmp_satbright(tk_bmp *b, float s, float br)
+typedef struct { tk_bmp *b; float s, br; } sb_ctx;
+static void satbright_rows(void *v, int y0, int y1)
 {
-    /* CSS saturate() and brightness() on the unpremultiplied colour, clamped after each */
-    for (int j = 0; j < b->h; j++)
+    sb_ctx *S = v;
+    tk_bmp *b = S->b;
+    float s = S->s, br = S->br;
+    for (int j = y0; j < y1; j++)
         for (int i = 0; i < b->w; i++) {
             uint32_t *p = &b->px[j * b->stride + i], v = *p;
             float a = (v >> 24) / 255.0f;
@@ -521,6 +593,12 @@ void tk_bmp_satbright(tk_bmp *b, float s, float br)
             r2 = tk_clampf(r2, 0, 255) * br; g2 = tk_clampf(g2, 0, 255) * br; b2 = tk_clampf(b2, 0, 255) * br;
             *p = pack(tk_minf(r2, 255) * a, tk_minf(g2, 255) * a, tk_minf(b2, 255) * a, a);
         }
+}
+void tk_bmp_satbright(tk_bmp *b, float s, float br)
+{
+    /* CSS saturate() and brightness() on the unpremultiplied colour, clamped after each (cp7c: over the cores) */
+    sb_ctx S = { b, s, br };
+    tk_par_rows(0, b->h, satbright_rows, &S);
 }
 void tk_bmp_copy(tk_bmp *dst, int dx, int dy, const tk_bmp *src, int sx, int sy, int w, int h)
 {

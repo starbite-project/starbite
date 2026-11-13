@@ -55,8 +55,33 @@ typedef struct {
 #define CAM_STATE0 { .st = CS_OFF, .blink = -1, .press = -1, .white = 0, .thumb_in = -1 }
 static cam_state CAM = CAM_STATE0;
 
-/* the one place a photo is kept: Track A's store (sbos-photos: the newest 32). 0 kept, < 0 not (sh_photo_why) */
-static int cam_save(const uint32_t *px, int w, int h) { return sh_photo_save(px, w, h); }
+/* cp7 (shell_orient.inc): the phone's turn while the Camera shows */
+static int ori_cur;
+static int ori_q(int o);
+/* the one place a photo is kept: Track A's store (sbos-photos: the newest 32). 0 kept, < 0 not (sh_photo_why).
+ * cp7: a photo taken with the phone on its side is kept upright (turned as the screen's content is) */
+static int cam_save(const uint32_t *px, int w, int h)
+{
+    int q = ori_q(ori_cur);
+    if (!q) return sh_photo_save(px, w, h);
+    tk_bmp s = { w, h, w, (uint32_t *)px }, t;
+    if (!tk_bmp_turned(&t, &s, q)) return sh_photo_save(px, w, h);    /* no memory: as taken */
+    int r = sh_photo_save(t.px, t.w, t.h);
+    tk_bmp_free(&t);
+    return r;
+}
+/* cp7: a small square glyph layer turned in place (its middle stays where it is) */
+static void cam_turn_layer(tk_layer *l, int q)
+{
+    if (!(q & 3) || !l->bmp.px || l->bmp.w != l->bmp.h) return;
+    if (tk_bmp_turn(&l->bmp, q)) tk_layer_dirty(l);
+}
+static void cam_turn(int from, int to)
+{
+    int q = ori_q(to) - ori_q(from);
+    cam_turn_layer(&camflash, q);
+    cam_turn_layer(&camthumb, q);
+}
 
 /* the circles: iOS's glass over the black ground reads as a dark grey disc with a faint rim. Drawn flat: the GPU's lens
  * (kit_shape) samples the wallpaper's backdrop, not the app's black ground (it showed the wallpaper's blue), and a
@@ -137,6 +162,7 @@ static void cam_draw_flash(void)
     dc d = cam_mk(&camflash, "cam-flash", CAM_FLASH_X - 12, CAM_TOP_Y - 12, 24, 24, 1, 0);
     if (!d.b->px) return;
     cam_bolt(&d, CAM_FLASH_X, CAM_TOP_Y, CAM.flash);
+    cam_turn_layer(&camflash, ori_q(ori_cur));          /* cp7: upright as the phone is turned */
     camflash.hidden = 0;
 }
 static void cam_draw_shutter(void)
@@ -319,6 +345,7 @@ static void cam_take(const uint32_t *px, int w, int h, int grow)
             }
             d.b->px[(size_t)j * d.b->stride + i] = q | (uint32_t)(255 * cov + .5f) << 24;
         }
+    cam_turn_layer(&camthumb, ori_q(ori_cur));          /* cp7: the photo's square upright as the phone is turned */
     camthumb.ox = PT(CAM_THUMB_X);
     camthumb.oy = PT(CAM_SH_Y);
     camthumb.hidden = 0;

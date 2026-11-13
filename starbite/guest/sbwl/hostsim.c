@@ -46,6 +46,10 @@
  *   expect_opaque                   every pixel of the shown buffer (and the other, once used) has X = 0xff
  *   cpu T PATTERN... | expect_cpu_below PCT T PATTERN...   CPU of sbwl's processes whose command line has
  *                                   PATTERN ("sbwl": sbwl itself) over T ms
+ * cp7 landscape:
+ *   expect_caps BITS                hdr.guest_caps has BITS (SBSHM_CAP_*)
+ *   rotate Q ROWS                   SBG_MSG_ROTATE (Q quarter turns clockwise, ROWS the content rows shown, 0 all)
+ *   expect_rot Q T                  hdr.guest_rot is Q within T (a turned frame published)
  */
 #define _GNU_SOURCE
 #ifndef HOSTSIM_NO_PNG
@@ -600,6 +604,25 @@ static void run_line(char *l)
 		int i = app_find(a1);
 		put(SBG_MSG_APP_CLOSE, (uint32_t)i, 0, 0, 0, 0);
 		note("-> APP_CLOSE %d (%s)", i, a1);
+	} else if (!strcmp(c, "expect_caps")) {
+		uint32_t b = (uint32_t)strtoul(a1, NULL, 0);
+		result((hdr->guest_caps & b) == b, "guest_caps %#x has %#x", hdr->guest_caps, b);
+	} else if (!strcmp(c, "rotate")) {
+		frame_mark = hdr->surf_seq;
+		rows_floor = hdr->surf_seq;
+		VR = (uint32_t)atoi(a1) ? H : VR;
+		put(SBG_MSG_ROTATE, (uint32_t)atoi(a1), (uint32_t)atoi(a2), 0, 0, 0);
+		note("-> ROTATE %d, %d rows", atoi(a1), atoi(a2));
+	} else if (!strcmp(c, "expect_rot")) {
+		uint32_t q = (uint32_t)atoi(a1);
+		T = (unsigned)atoi(a2);
+		uint64_t end = ms_now() + T, t0 = ms_now();
+		while (hdr->guest_rot != q && ms_now() < end)
+			wait_ms(10);
+		wait_ms(300);
+		result(hdr->guest_rot == q, "guest_rot %u (want %u) after %llu ms", hdr->guest_rot, q,
+		       (unsigned long long)(ms_now() - t0));
+		frame_mark = hdr->surf_seq;
 	} else if (!strcmp(c, "viewport")) {
 		VR = (uint32_t)atoi(a1);
 		rows_floor = hdr->surf_seq;

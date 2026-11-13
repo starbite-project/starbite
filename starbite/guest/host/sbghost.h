@@ -95,6 +95,10 @@ struct sbg_stats {
     uint32_t blk_capped;                            /* polls that stopped at a bound with requests left */
     uint32_t blk_poll_ms_max;                       /* the longest time one poll spent on blocks */
     uint64_t blk_rd_sectors, blk_wr_sectors;
+    /* cp7o: the slowest part of one sbg_poll since sbg_start (lines, log, blk, net, 9p, snd, msgs) and its ms */
+    const char *poll_part;
+    uint32_t poll_part_ms;
+    uint32_t pump_left;                             /* cp7u: sbg_pump calls that found a write or a too-big read waiting */
 };
 
 void sbg_init(const struct sbg_os *os, const struct sbg_cfg *cfg, uint8_t host_cpuif);
@@ -104,18 +108,30 @@ void sbg_gic_prepare(void);
 /* Copy the guest in (word copies) and write the header. 0, or < 0 (and stats.why). */
 int sbg_load(const void *image, uint64_t image_size, const void *dtb, uint64_t dtb_size, const void *initrd,
              uint64_t initrd_size);
-/* The same when the host already put the files at their places (Starbite OS: store_load straight into the
- * carve-out): the Image at linux_base + SBG_IMAGE_AT (its text_offset must be that), the DTB at + SBG_DTB_OFF,
- * the initrd at + SBG_RD_OFF. Checks the Image's header, then the shared region and the header as sbg_load. */
+/* The same when the host already put the files at their places (Starbite OS's stepped start copies them in
+ * 2 MiB pieces): the Image at linux_base + its own text_offset (header word 1: 0 since Linux 5.8, SBG_IMAGE_AT
+ * for the S9 port), the DTB at + SBG_DTB_OFF, the initrd at + SBG_RD_OFF. Checks the Image's header, then the
+ * shared region and the header as sbg_load (no clearing after sbg_prep_step finished). */
 #define SBG_IMAGE_AT 0x80000ULL
-int sbg_load_placed(uint64_t image_size, uint64_t dtb_size, uint64_t initrd_size);
+int sbg_load_placed(uint64_t text_offset, uint64_t image_size, uint64_t dtb_size, uint64_t initrd_size);
 /* The block devices for the next sbg_load, for a host that learns them after sbg_init (Starbite OS: the card's
  * files, resolved at each guest start): SBSHM_BLK_DEVS entries replace cfg.blk; a PRESENT one also selects
  * contract v2. NULL: none (cfg.v2 stays as sbg_init got it). */
 void sbg_set_blk(const struct sbshm_blkdev *blk);
 int sbg_start(void);
+/* Clears in steps what sbg_load clears (the header, rings, ramoops, both surfaces, the v2 tables, the v3 rings), at
+ * most max_bytes a call, so a host can spread ~15 MB of non-cacheable writes over its ticks: 1 all done (the next
+ * load skips it), 0 more to do, -1 a guest is up. Optional: without it the load clears all at once. */
+int sbg_prep_step(uint64_t max_bytes);
+/* More time before the no-HELLO give-up (this start only; the extra capped at SBG_BOOT_EXTRA_MAX). */
+#define SBG_BOOT_EXTRA_MAX 300000U
+void sbg_boot_extend(uint32_t ms);
 /* From the host's tick: the guest's messages and log, state changes, timeouts, the line checks. */
 void sbg_poll(void);
+/* One waiting block READ of at most max_sectors (nothing else: no 9P, no messages, no state; a write or a bigger
+ * read waits for sbg_poll): the sectors served, 0 none. For a host that calls it from inside long work (a frame's GPU wait)
+ * so a booting guest's reads do not each wait a whole loop turn, under its own time budget. */
+int sbg_pump(uint32_t max_sectors);
 /* The host received db_host (from its own interrupt loop). */
 void sbg_doorbell(void);
 /* A new frame since *seq: 1 and the front buffer, else 0. */
@@ -146,6 +162,10 @@ int sbg_launch(uint32_t idx, uint32_t cat_seq);
 int sbg_activate(uint32_t idx);                     /* SBSHM_NONE: no window in the surface (home) */
 int sbg_app_close(uint32_t idx);
 int sbg_viewport(uint32_t rows, uint32_t width);
+/* cp7 landscape: SBG_MSG_ROTATE (sbshm.h). 1 sent, 0 not now (not running, the ring full), -1 this guest cannot
+ * turn (no SBSHM_CAP_ROTATE). sbg_rot_shown: the turn of the frame on show (hdr.guest_rot; 0 when not running). */
+int sbg_rotate(uint32_t quarter_turns, uint32_t rows);
+uint32_t sbg_rot_shown(void);
 int sbg_text(const char *utf8);                     /* commit text (split at characters, 8 bytes a message) */
 int sbg_pkg(uint32_t idx, uint32_t op, uint32_t store_seq);
 

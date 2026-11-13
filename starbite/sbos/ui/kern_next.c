@@ -28,11 +28,13 @@
 #include "tzdb.h"                       /* Track A: time zones (kern/tzdb.c) */
 #include "bt.h"                         /* Track A: drivers for the shell (the end of this file) */
 #include "cam.h"
+#include "snd.h"                         /* Track A, cp7: sound for the shell (the end of this file) */
 #include "shub_more.h"
 #include "bathealth.h"
 #include "haptic.h"
 #include "nledpol.h"
 static void drv_timer(unsigned id);             /* Track A: drivers for the shell (the end of this file) */
+static void snd_tick(unsigned id);              /* Track A, cp7: sound (the end of this file) */
 static void drv_screen(int on);
 static void drv_after_bake(void);
 static int drv_touch_dark(void);
@@ -40,6 +42,8 @@ static int drv_touch_dark(void);
 #define KT_DRV_CAM 31                           /* the in-call proximity */
 #define KT_DRV_AUTO 32
 #define KT_DRV_PROX 33
+#define KT_DRV_SND 34                           /* cp7: sound's poll (5 ms while busy) */
+#define KT_DRV_JACK 35                          /* cp7: the headphone jack (50 ms while sound plays or the screen is on) */
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
 void tk_heap_init(void *mem, uint64_t size);
@@ -116,7 +120,17 @@ static void band_worker(unsigned w, void *arg)
         __asm__ volatile("yield");
     }
 }
+static uint32_t kpar_n;                     /* cp7s: parallel jobs and their time (a slow shell call's line names them) */
+static uint64_t kpar_us;
+static void kpar_(void (*fn)(void *, int), void *arg, int n);
 static void kpar(void (*fn)(void *, int), void *arg, int n)
+{
+    uint64_t t0 = sb_us();
+    kpar_(fn, arg, n);
+    kpar_n++;
+    kpar_us += sb_us() - t0;
+}
+static void kpar_(void (*fn)(void *, int), void *arg, int n)
 {
     if (!workers_on) {
         for (int i = 0; i < n; i++) fn(arg, i);
@@ -678,7 +692,7 @@ static void stats_log(const char *what)
     sb_log(u.b);
     /* every frame's work in ms, in order (P2r: the numbers the main session sends back; 60 a line), then the
      * waits for the display (the last flip latching at the panel's TE) */
-#ifndef SBOS_SELFTEST_NEXT                         /* the self test's eleven films would fill pmsg's 16 KB */
+#ifndef SBOS_SELFTEST_NEXT                         /* the self test's twelve films would fill pmsg's 16 KB */
     uint32_t nf = FS.n < sizeof FS.ms ? FS.n : (uint32_t)sizeof FS.ms;
     for (uint32_t i0 = 0; i0 < nf; i0 += 60) {
         ub_init(&u);
@@ -748,6 +762,12 @@ void sh_haptic_k(int kind)
 }
 /* P3i: the shell's time outside the compositor (a tap that builds a page runs before the next frame: the pause
  * the user sees is this, not the frame's own time); logged when over 8 ms, counted per gesture */
+/* cp7s: the platform's share of a shell call, from st_mark (the touch paths) to shell_time: ACPM exchanges, parallel
+ * jobs (and whether the band workers were on), the GPU's waits; named when the call took over 50 ms (7r: a 157 ms
+ * touch-down at Emergency's hold that is 0.04 ms of shell code on the Mac) */
+static uint32_t stm_acpm_n, stm_kpar_n;
+static uint64_t stm_acpm_us, stm_kpar_us;
+static void st_mark(void) { stm_acpm_n = sb_acpm_calls; stm_acpm_us = sb_acpm_us; stm_kpar_n = kpar_n; stm_kpar_us = kpar_us; }
 static void shell_time(const char *what, uint64_t t0)
 {
     uint32_t us = (uint32_t)(tk_us() - t0);
@@ -757,6 +777,31 @@ static void shell_time(const char *what, uint64_t t0)
     struct ub u;
     ub_init(&u);
     ub_s(&u, "next: shell ");
+    ub_s(&u, what);
+    ub_c(&u, ' ');
+    ub_dec(&u, us / 1000);
+    ub_s(&u, " ms");
+    if (us > 50000) {
+        ub_s(&u, " (ACPM ");
+        ub_dec(&u, sb_acpm_calls - stm_acpm_n);
+        ub_s(&u, " / ");
+        ub_dec(&u, (sb_acpm_us - stm_acpm_us) / 1000U);
+        ub_s(&u, " ms, parallel jobs ");
+        ub_dec(&u, kpar_n - stm_kpar_n);
+        ub_s(&u, " / ");
+        ub_dec(&u, (kpar_us - stm_kpar_us) / 1000U);
+        ub_s(&u, workers_on ? " ms, workers on)" : " ms, workers off)");
+    }
+    sb_log(u.b);
+}
+/* cp7f: a named piece inside the shell's idle work (7e's self test: "idle (after a gesture)" 245-273 ms on the
+ * phone, 3-4 ms on the Mac: which piece) */
+void sh_slow_piece(const char *what, unsigned us)
+{
+    if (us <= 20000) return;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: shell piece ");
     ub_s(&u, what);
     ub_c(&u, ' ');
     ub_dec(&u, us / 1000);
@@ -787,8 +832,9 @@ static void frame(void)
         if (tick3 <= n3) tick3 = n3 + 50;           /* fell behind: from now */
         kt_set(KT_UI, 20, tick3 / 3, 0, 0);
     }
+    uint64_t fb0 = sb_us(), fb_boost = 0, fb_tick = 0, fb_comp = 0, fb_pres = 0, fb_idle = 0;   /* cp7: a slow frame's parts */
     next_input_now();                            /* the finger where it is now */
-    if (!boosted) boost(1);                      /* a wake: the kernel set the screen-on clock after the hook */
+    if (!boosted) { uint64_t b0 = sb_us(); boost(1); fb_boost = sb_us() - b0; }   /* a wake: the kernel set the screen-on clock after the hook */
     uint64_t now = sb_ms();
     float dt = last_tick ? (float)(now - last_tick) / 1000.0f : 1.0f / 60;
     if (flip_on && comp.acquire && last_us) {
@@ -797,12 +843,18 @@ static void frame(void)
     }
     last_tick = now;
     last_us = nus;
+    st_mark();
     uint64_t st0 = tk_us();
     int mv = sh_tick(dt, (float)now);
     shell_time("tick", st0);
+    fb_tick = tk_us() - st0;
     int motion = mv || sh_moving();
+    uint64_t c0 = sb_us();
     tk_comp_frame(&comp, motion, 0);
+    fb_comp = sb_us() - c0;
+    c0 = sb_us();
     present();
+    fb_pres = sb_us() - c0;
     stats_add();
     if (slept_now) {
         slept_now = 0;
@@ -813,8 +865,14 @@ static void frame(void)
         kt_cancel(KT_UI, 20);
         ticking = 0;
         last_tick = 0; last_us = 0;
-        sh_idle();
-        if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);   /* the rest of the idle work, a turn at a time */
+        {   /* cp7: the idle work timed like the shell's other calls (7b's self test: 580-1180 ms turns were here) */
+            uint64_t si0 = tk_us();
+            sh_idle();
+            shell_time("idle (after a gesture)", si0);
+            fb_idle = tk_us() - si0;
+        }
+        if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 20, 0);   /* the rest of the idle work, a turn at a time (cp7l: 20 ms
+                                                                       * apart, was 40: ~30 pieces after Emergency took 1.2 s) */
         clock_again();                                               /* P2z: the Clock's next digit */
         kt_set(KT_UI, 21, sb_ms(), perf_tail_ms(), 0);   /* back to the screen-on clock unless something moves again (1.0: 1.5 s in normal mode) */
         kt_set(KT_UI, 23, sb_ms(), 5000, 0);        /* and the band workers off after 5 s */
@@ -823,14 +881,46 @@ static void frame(void)
         stats_reset();
 #endif
     }
+    uint64_t fall = sb_us() - fb0;
+    if (fall > 100000) {                         /* cp7: a frame over 100 ms: which part (7b: 580-680 ms frames) */
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: a slow frame ");
+        ub_dec(&u, fall / 1000);
+        ub_s(&u, " ms: boost ");
+        ub_dec(&u, fb_boost / 1000);
+        ub_s(&u, ", shell tick ");
+        ub_dec(&u, fb_tick / 1000);
+        ub_s(&u, ", compose ");
+        ub_dec(&u, fb_comp / 1000);
+        ub_s(&u, ", present ");
+        ub_dec(&u, fb_pres / 1000);
+        ub_s(&u, ", idle ");
+        ub_dec(&u, fb_idle / 1000);
+        ub_s(&u, " ms");
+        sb_log(u.b);
+    }
 }
 
 static void start_ticking(void)
 {
     kt_cancel(KT_UI, 21);
     kt_cancel(KT_UI, 23);
+    uint64_t sb0 = sb_us();
     boost(1);
+    uint64_t sb1 = sb_us();
     workers_start();
+    uint64_t sb2 = sb_us();
+    if (sb2 - sb0 > 50000) {                     /* cp7: a slow start of motion: the clocks (ACPM) or the band workers (PSCI) */
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: a slow motion start: boost ");
+        ub_dec(&u, (sb1 - sb0) / 1000);
+        ub_s(&u, " ms, band workers ");
+        ub_dec(&u, (sb2 - sb1) / 1000);
+        ub_s(&u, " ms");
+        sb_log(u.b);
+    }
     if (ticking) return;
     ticking = 1;
     last_tick = sb_ms();
@@ -875,6 +965,7 @@ static void next_screen(int on)
     }
     status_now();
     sh_wake();
+    if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 200, 0);   /* cp7: the idle work the dark left (after the wake's frames) */
     boosted = 0;                                     /* the kernel sets the screen-on clock after this: the first
                                                       * frame takes the top step (frame()) */
     workers_start();
@@ -1178,9 +1269,17 @@ void next_kdraw(void)
 {
     if (!ready && !baking) { ui_kdraw(); return; }
     /* L2 + L3: Linux apps: a state change, the catalog or the store, or a new frame (rows copied) drawn at once */
-    if (ready && gwin_now() && !ticking && K.screen_on) {
-        tk_comp_frame(&comp, 0, 0);
-        present();
+    if (ready) {
+        uint64_t g0 = tk_us();
+        int gn = gwin_now();
+        shell_time("gwin_now (Linux's window state)", g0);   /* cp7t: 7s: a 418 ms "UI's draw" turn with the screen off at
+                                                              * Linux's HELLO (455 MHz): named when it is this */
+        if (gn && !ticking && K.screen_on) {
+            uint64_t f0 = tk_us();
+            tk_comp_frame(&comp, 0, 0);
+            present();
+            shell_time("a Linux window frame", f0);
+        }
     }
     /* helper I: the call's state and the inbox ten times a second (a copy of ~150 bytes and a counter), also with the
      * screen off (an incoming call wakes it); a change is drawn at once */
@@ -1245,6 +1344,7 @@ void next_kevent(const void *evp)
         if (ph == 2) dark_gesture = 0;
         return;                                      /* the cheek: dropped, press to release */
     }
+    st_mark();
     uint64_t st0 = tk_us();
     sh_touch(ph, e->x / TK_PT, e->y / TK_PT, (float)sb_ms());
     shell_time(ph == 0 ? "touch down" : ph == 1 ? "touch move" : "touch up", st0);
@@ -1271,9 +1371,14 @@ void next_ktimer(unsigned id)
         return;
     }
     if (ready && id == 24) {
+        if (!K.screen_on)                            /* cp7 (7c's self test: 1854 ms here at 455 MHz with the screen
+                                                      * off): no idle UI work nobody sees; the wake starts it again */
+            return;
         if (!ticking && !sh_moving()) {
+            uint64_t si0 = tk_us();
             sh_idle();
-            if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 40, 0);
+            shell_time("idle", si0);                  /* cp7: named when it is slow */
+            if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 20, 0);   /* cp7l: 20 ms apart (was 40) */
         } else
             kt_set(KT_UI, 24, sb_ms(), 200, 0);
         return;
@@ -1283,7 +1388,7 @@ void next_ktimer(unsigned id)
         return;
     }
     if (ready && id == 26) { (void)kupdate_after_start(); return; }   /* Track A update: 10 s after the home screen */
-    if (id >= KT_DRV_BT && id <= KT_DRV_PROX) { drv_timer(id); return; }   /* Track A: drivers for the shell */
+    if (id >= KT_DRV_BT && id <= KT_DRV_JACK) { drv_timer(id); return; }   /* Track A: drivers for the shell */
     ui_ktimer(id);
 }
 
@@ -2056,7 +2161,7 @@ static int comms_now(void) { return 0; }
 /* ---- the self test --------------------------------------------------------------------------------------- */
 #ifdef SBOS_SELFTEST_NEXT
 typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
-static const char *const FILM_NAME[11] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "sleep" };
+static const char *const FILM_NAME[12] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "wheels", "sleep" };
 /* tools/films.txt's scripts (pt, ms) */
 static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 1300 } };
 /* B10: the vendor cards again (B4's list from y 320: Apple 320, Microsoft 413, Google 491, Linux 584, Starbite 677):
@@ -2093,6 +2198,13 @@ static const step S_EMERG[] = { { 0, 0, 0, 0, 0, 300 }, { 3, 319, 727, 0, 0, 950
                                 { 1, 265, 452, 0, 0, 80 }, { 0, 0, 0, 0, 0, 1200 } };   /* helper B2: the alert's Exit (films.txt's emergency) */
 /* P2r: the Power key (kind 5, the kernel's own power_key_short): the fade to black and the screen off, the wake, a
  * fade undone by a second press */
+/* cp7 (Track B, films.txt's wheels): the Clock's Add Alarm wheels: the hours dragged up, the minutes down (each a
+ * momentum and a settle at 60 fps), Cancel, home */
+static const step S_WHEELS[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 238, 289, 0, 0, 80 },
+                                 { 0, 0, 0, 0, 0, 1100 }, { 1, 151, 749, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 }, { 1, 348, 66, 0, 0, 80 },
+                                 { 0, 0, 0, 0, 0, 900 }, { 2, 162, 290, 162, 200, 220 }, { 0, 0, 0, 0, 0, 1300 },
+                                 { 2, 248, 280, 248, 360, 220 }, { 0, 0, 0, 0, 0, 1300 }, { 1, 58, 66, 0, 0, 80 }, { 0, 0, 0, 0, 0, 900 },
+                                 { 2, 195, 795, 200, 450, 260 }, { 0, 0, 0, 0, 0, 1200 } };
 static const step S_SLEEP[] = { { 0, 0, 0, 0, 0, 300 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 900 }, { 1, 158, 290, 0, 0, 80 },
                                 { 0, 0, 0, 0, 0, 1100 }, { 5, 0, 0, 0, 0, 20 }, { 0, 0, 0, 0, 0, 900 }, { 5, 0, 0, 0, 0, 20 },
                                 { 0, 0, 0, 0, 0, 1200 }, { 5, 0, 0, 0, 0, 20 }, { 0, 0, 0, 0, 0, 120 }, { 5, 0, 0, 0, 0, 20 },
@@ -2122,6 +2234,7 @@ static void film_start(int film)
     case 7: F.s = S_PHONE; F.n = 17; break;
     case 8: F.s = S_MSGS; F.n = 11; break;
     case 9: F.s = S_EMERG; F.n = (int)(sizeof S_EMERG / sizeof S_EMERG[0]); break;
+    case 10: F.s = S_WHEELS; F.n = (int)(sizeof S_WHEELS / sizeof S_WHEELS[0]); break;
     default: F.s = S_SLEEP; F.n = 13; break;
     }
     /* each film from the plain lock screen */
@@ -2130,6 +2243,8 @@ static void film_start(int film)
     next_kdraw();
     for (int i = 0; i < 8 && sh_idle_pending(); i++) { hw_wdt_feed(); sh_idle(); }   /* as the idle time would */
     sh_idle();
+    F.t0 = sb_ms();   /* cp7: the film's clock after its reset and idle work (~0.5 s): its first steps no longer pass
+                       * "during a stall" (the unlock swipe of the phone film was skipped so, Track B's finding) */
     {   /* P2w: a marker for the camera (the main session times its shots from the films' starts) */
         struct ub u;
         ub_init(&u);
@@ -2265,6 +2380,9 @@ int next_selftest_step(void)
     if (!ready) return 1;                            /* the bake is still running */
     if (!st_started) {
         st_started = 1;
+        K.user_turn_ms = 0; K.user_turn_what = 0; K.turns_100 = 0;
+        for (unsigned i_ = 0; i_ < 18; i_++) K.turns_100_by[i_] = 0;   /* cp7m: the summary counts from the films (7l: the
+                                                                     * bake's own turns, timer 1/22, counted 40 / 515 ms) */
         /* the clock: a new minute must reach the panel through an ordinary frame (P2a-P2g kept the old one) */
         {
             sh_status(12, 34, 3, 11, 11, 50, 30);
@@ -2279,7 +2397,7 @@ int next_selftest_step(void)
             sb_log("selftest: FAILED: next: the band workers never started (cores 1-3: no stack?); every frame on one core");
             st_failed = 1;
         }
-        sb_log("selftest: next: the eleven films (unlock, group, focus, holds, pages, cc, app, phone, messages, emergency, sleep) with synthetic touches; sleep presses the real Power path");
+        sb_log("selftest: next: the twelve films (unlock, group, focus, holds, pages, cc, app, phone, messages, emergency, wheels, sleep) with synthetic touches; sleep presses the real Power path");
         film_start(0);
         return 1;
     }
@@ -2288,7 +2406,7 @@ int next_selftest_step(void)
         const step *p = &F.s[F.i];
         if (F.down && p->kind == 5) F.down = 0;
         else if (F.down) {
-            { uint64_t st0 = tk_us(); sh_touch(2, p->kind == 2 ? p->x1 : p->x0, p->kind == 2 ? p->y1 : p->y0, (float)sb_ms()); shell_time("touch up", st0); }
+            { st_mark(); uint64_t st0 = tk_us(); sh_touch(2, p->kind == 2 ? p->x1 : p->x0, p->kind == 2 ? p->y1 : p->y0, (float)sb_ms()); shell_time("touch up", st0); }
             F.down = 0;
             start_ticking();
         } else if (p->kind == 5) {
@@ -2310,7 +2428,7 @@ int next_selftest_step(void)
                 power_key_short();
             }
         } else if (p->kind) {
-            if (!F.down) { uint64_t st0 = tk_us(); sh_touch(0, p->x0, p->y0, (float)sb_ms()); shell_time("touch down", st0); F.down = 1; start_ticking(); }
+            if (!F.down) { st_mark(); uint64_t st0 = tk_us(); sh_touch(0, p->x0, p->y0, (float)sb_ms()); shell_time("touch down", st0); F.down = 1; start_ticking(); }
             else if (p->kind == 2) {
                 float u = (t - F.s0) / p->ms;
                 sh_touch(1, p->x0 + (p->x1 - p->x0) * u, p->y0 + (p->y1 - p->y0) * u, (float)sb_ms());
@@ -2320,12 +2438,12 @@ int next_selftest_step(void)
     }
     if (ticking || sh_moving()) return 1;          /* let it settle */
     stats_log(FILM_NAME[F.film]);
-    if (F.film == 10 && !K.screen_on) {
+    if (F.film == 11 && !K.screen_on) {          /* sleep: the last film (cp7: wheels is 10) */
         sb_log("selftest: FAILED: next: the sleep film ended with the screen off");
         st_failed = 1;
         power_screen_set(1);
     }
-    if (F.film < 10) { film_start(F.film + 1); return 1; }
+    if (F.film < 11) { film_start(F.film + 1); return 1; }
 #ifndef SBOS_NEXT_NOGPU
     gpu_vs_cpu();
 #endif
@@ -2590,7 +2708,7 @@ int sh_bt_on(int on)
     if (m >= 0) bt_set_module(m);
     if (bt_on() < 0) return -1;
     sb_log("next: bluetooth: on (the shell)");
-    bt_arm(1);
+    bt_arm(1);                                       /* (a paired keyboard: page scan goes on when the chip is up) */
     return 0;
 }
 int sh_bt_state(void)
@@ -2843,6 +2961,7 @@ static void drv_timer(unsigned id)
     else if (id == KT_DRV_CAM) cam_tick();
     else if (id == KT_DRV_AUTO) ab_tick();
     else if (id == KT_DRV_PROX) px_tick();
+    else if (id == KT_DRV_SND || id == KT_DRV_JACK) snd_tick(id);
 }
 static void drv_screen(int on)
 {
@@ -2854,8 +2973,10 @@ static void drv_screen(int on)
     nledpol_screen(1);                               /* the missed call / message seen on the lock screen */
     if (ab_on) kt_set(KT_UI, KT_DRV_AUTO, sb_ms(), 300, 0);
 }
+static void bt_kbd_init(void);                       /* Track A, cp7: the keyboard's key store (below) */
 static void drv_after_bake(void)
 {
+    bt_kbd_init();
 #ifdef SBOS_SELFTEST_NEXT
     sb_log("next: drivers: the haptic level, Auto-Brightness and the LED policy would start (a dry run: the self test)");
 #else
@@ -3006,3 +3127,157 @@ void sh_low_power(int on)
     sb_log(on ? "next: Low Power Mode on" : "next: Low Power Mode off");
 }
 int sh_low_power_on(void) { return perf_low; }
+
+/* ---- Track A, cp7: the screen's orientation for apps that rotate (the user: "landscape where it makes sense") ----
+ * From the sensor hub's accelerometer (surv_tilt: pitch = the long axis against level, roll = the short one). Each call
+ * keeps the accelerometer alive (surv_sensors_on_mask: a keep-alive; the hub switches itself off 60 s after the last
+ * ask, and this never switches it off, so the Compass page is never cut). 10 degrees of hysteresis; flat on a table
+ * (both under 25 degrees) keeps the last answer. The signs are the hub's (Android) convention: to be confirmed on the
+ * phone (a still in each orientation). Orientation Lock (pref display.orientlock, off by default): always portrait. */
+static int ori_last;
+int sh_orientation(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    return SH_ORI_PORTRAIT;
+#else
+    if (sh_pref_int("display.orientlock", 0) == 1) return ori_last = SH_ORI_PORTRAIT;
+    if (surv_sensors_on_mask(SHUB_SENS_ACCEL) < 0) return ori_last;   /* the saver: no hub, as it was */
+    int p = 0, r = 0;
+    if (!surv_tilt(&p, &r)) return ori_last;                          /* starting (about 4 s) or no data yet */
+    int ap = p < 0 ? -p : p, ar = r < 0 ? -r : r;
+    if (ap < 250 && ar < 250) return ori_last;                        /* flat */
+    if (ap > ar + 100) ori_last = p > 0 ? SH_ORI_PORTRAIT : SH_ORI_UPSIDE_DOWN;
+    else if (ar > ap + 100) ori_last = r > 0 ? SH_ORI_TURNED_LEFT : SH_ORI_TURNED_RIGHT;
+    return ori_last;
+#endif
+}
+int sh_orientation_lock(void) { return sh_pref_int("display.orientlock", 0) == 1; }
+void sh_orientation_lock_set(int on) { sh_pref_set_int("display.orientlock", on ? 1 : 0); if (on) ori_last = SH_ORI_PORTRAIT; }
+
+/* ---- Track A, cp7: the Bluetooth keyboard (the drivers track's bt_pair.c / bt_hid.c) for the shell ----
+ * One paired keyboard. Its link key lives in the blob "bt.key" (6 bytes address + 16 bytes key; never logged): the
+ * chip asks for it through bt_set_link_key_store. Keys typed on it go to the shell's sh_hw_key (a weak default drops
+ * them until the UI handles them). */
+static int bt_key_get(const uint8_t addr[6], uint8_t key[16])
+{
+    uint8_t b[22];
+    if (sh_blob_get("bt.key", b, sizeof b) != 22) return 0;
+    for (int i = 0; i < 6; i++) if (b[i] != addr[i]) return 0;
+    tk_memcpy(key, b + 6, 16);
+    tk_memset(b, 0, sizeof b);
+    return 1;
+}
+static void bt_key_put(const uint8_t addr[6], const uint8_t *key16)
+{
+    if (!key16) { (void)sh_blob_put("bt.key", 0, 0); return; }
+    uint8_t b[22];
+    tk_memcpy(b, addr, 6);
+    tk_memcpy(b + 6, key16, 16);
+    (void)sh_blob_put("bt.key", b, sizeof b);
+    tk_memset(b, 0, sizeof b);
+}
+__attribute__((weak)) void sh_hw_key(int usage, int down, uint32_t unicode) { (void)usage; (void)down; (void)unicode; }
+/* cp7 (Track B): a key changes the page outside a frame: the frame that shows it now (the screen on, the shell ready) */
+static void bt_key_cb(int usage, int down, uint32_t unicode)
+{
+    sh_hw_key(usage, down, unicode);
+    if (down && ready && K.screen_on) start_ticking();
+}
+static void bt_kbd_init(void)
+{
+    bt_set_link_key_store(bt_key_get, bt_key_put);
+    bt_hid_set_key_cb(bt_key_cb);
+    uint8_t b[22];
+    if (sh_blob_get("bt.key", b, sizeof b) == 22) bt_set_paired(b);   /* only that keyboard may come back */
+    tk_memset(b, 0, sizeof b);
+}
+static char bt_pair_name[32];                        /* the row being paired: its name, kept once it connects */
+int sh_bt_pair(int i)
+{
+    DRV_DRY("Bluetooth pairing", -1);
+    const struct bt_dev *d = bt_dev_at(i);
+    sb_strcpy(bt_pair_name, sizeof bt_pair_name, d && d->name[0] ? d->name : "Keyboard");
+    int r = bt_pair(i);
+    if (r >= 0) bt_arm(1);
+    return r;
+}
+_Static_assert((int)SH_BTP_CODE == (int)BT_PAIR_CODE && (int)SH_BTP_CONNECTED == (int)BT_PAIR_CONNECTED &&
+               (int)SH_BTP_FAILED == (int)BT_PAIR_FAILED,
+               "shell.h's SH_BTP_* are bt.h's BT_PAIR_*");
+int sh_bt_pair_state(void)
+{
+    int s = bt_pair_state();
+    if (s == BT_PAIR_CONNECTED && bt_pair_name[0]) {   /* paired: its name kept with the key (pref bt.kbd.name) */
+        (void)sh_pref_set("bt.kbd.name", bt_pair_name);
+        bt_pair_name[0] = 0;
+    }
+    return s;
+}
+const char *sh_bt_kbd_name(void)
+{
+    static char n[32];
+    if (sh_pref_get("bt.kbd.name", n, sizeof n) <= 0) sb_strcpy(n, sizeof n, "Keyboard");
+    return n;
+}
+const char *sh_bt_pair_code(void) { return bt_pair_code(); }
+const char *sh_bt_pair_why(void) { return bt_pair_why(); }
+int sh_bt_kbd_paired(void) { uint8_t a[6]; return bt_paired(a); }
+int sh_bt_kbd_connected(void) { return bt_hid_connected(); }
+void sh_bt_unpair(void) { bt_unpair(); (void)sh_pref_set("bt.kbd.name", 0); bt_arm(1); }
+int sh_bt_reconnect(void) { int r = bt_hid_reconnect(); if (r >= 0) bt_arm(1); return r; }
+
+/* ---- Track A, cp7: sound for the shell (the drivers track's snd.c on Calliope's PCM path; drivers-integration.md) ----
+ * Nothing runs until the shell first asks (snd_init_libsb then): the poll every 5 ms while snd_busy(), the jack every
+ * 50 ms while sound plays or the screen is on. The volume is the output's, kept as pref snd.vol (0..15, default 8). In
+ * the self test every call is a logged dry run. Calls and the modem keep ABOX through snd_suspend_for_call (modem-core). */
+static int snd_up;
+static void snd_arm(void)
+{
+    if (snd_busy()) kt_set(KT_UI, KT_DRV_SND, sb_ms(), 5, 0);
+    if (snd_busy() || K.screen_on) kt_set(KT_UI, KT_DRV_JACK, sb_ms(), 50, 0);
+}
+static void snd_tick(unsigned id)
+{
+    if (!snd_up) return;
+    if (id == KT_DRV_SND) snd_poll(sb_us());
+    else (void)snd_jack_tick();
+    snd_arm();
+}
+static int snd_ready(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    static int said;
+    if (!said) { said = 1; sb_log("next: sound: refused (a dry run: the self test)"); }
+    return 0;
+#else
+    if (sbos_selftest_enabled) return 0;
+    if (!snd_up) {
+        snd_init_libsb();
+        snd_up = 1;
+        int v = sh_pref_int("snd.vol", 8);
+        snd_volume(SND_OUT_SPEAKER, (unsigned)(v < 0 ? 0 : v > 15 ? 15 : v));
+        sb_log("next: sound: ready (the shell's first ask)");
+    }
+    return 1;
+#endif
+}
+int sh_snd_tone(int kind)
+{
+    if (!snd_ready()) return -1;
+    int r = snd_tone(kind);
+    snd_arm();
+    return r;
+}
+void sh_snd_tone_stop(void) { if (snd_up) snd_tone_stop(); }
+int sh_snd_volume(void) { return sh_pref_int("snd.vol", 8); }
+void sh_snd_volume_set(int v)
+{
+    v = v < 0 ? 0 : v > 15 ? 15 : v;
+    sh_pref_set_int("snd.vol", v);
+    if (snd_ready()) snd_volume(snd_output(), (unsigned)v);
+}
+int sh_snd_open(void) { if (!snd_ready()) return -1; return snd_open(); }
+unsigned sh_snd_write(int id, const int16_t *frames, unsigned n) { if (!snd_up) return 0; unsigned k = snd_write(id, frames, n); snd_arm(); return k; }
+unsigned sh_snd_space(int id) { return snd_up ? snd_space(id) : 0; }
+void sh_snd_close(int id) { if (snd_up) snd_close(id); }
+const char *sh_snd_why(void) { return snd_up ? snd_why() : "Sound starts when something plays"; }

@@ -261,11 +261,23 @@ static void sv_idle(void)
     if (l2 != SV.l2_seen) { SV.l2_seen = l2; if (EMG) SV.lw_stale = 1; }
     sv_ec_skip();
     if (EMG && ec_next < 8) {
+        /* cp7i (7g: sv_idle 26-39 ms on the phone, a card a turn): a card in two turns, its glass then its words; the
+         * layer is marked changed only when the card is whole (its glass alone never shows) */
+        static int part, part_of = -1;
+        static const uint32_t *part_px;
         tk_layer *l = EC_LAYER(ec_next);
-        tk_a8_new(&l->glass, l->bmp.w, l->bmp.h);       /* P3q: the card's glass shape recorded, the mask freed at once */
-        dc d = { &l->bmp, l->glass.v ? &l->glass : 0, l->x, l->y };
-        ec_card(&d, ec_next, LIST_TOP + 10 + 78 * ec_next);
-        tk_a8_free(&l->glass);
+        if (part_of != ec_next || part_px != l->bmp.px) { part_of = ec_next; part_px = l->bmp.px; part = 0; }   /* (a new layer: from its glass) */
+        if (!part) {
+            tk_a8_new(&l->glass, l->bmp.w, l->bmp.h);   /* P3q: the card's glass shape recorded, the mask freed at once */
+            dc d = { &l->bmp, l->glass.v ? &l->glass : 0, l->x, l->y };
+            ec_card_part(&d, ec_next, LIST_TOP + 10 + 78 * ec_next, 0);
+            tk_a8_free(&l->glass);
+            part = 1;
+            return;
+        }
+        dc d = { &l->bmp, 0, l->x, l->y };
+        ec_card_part(&d, ec_next, LIST_TOP + 10 + 78 * ec_next, 1);
+        part_of = -1;
         ec_next++;
         tk_layer_dirty(l);
         l->hidden = 0;

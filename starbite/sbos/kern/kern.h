@@ -352,6 +352,13 @@ struct kstate {
     int heat_confirmed;             /* the first-run heater confirmation this boot */
     int any_input;                  /* a touch or key since the start (the 0.1 dead-man return) */
     uint32_t slow_turn_ms;          /* the slowest loop turn so far */
+    /* cp7k: the same without the self test's own timer (KT_SELFTEST: its film setup), for its summary: the slowest
+     * turn, its slowest piece ("timer", "input", ...) with a timer's owner / id, and the turns of 100 ms or more (the
+     * gate; the log line is >= 200 ms) */
+    uint32_t user_turn_ms, user_turn_owner, user_turn_id, turns_100;
+    const char *user_turn_what;
+    uint16_t turns_100_by[18];      /* cp7p: those turns by their slowest piece: a timer's owner 0..15 (KT_*), 16 an
+                                     * app timer (KT_APP0+), 17 not a timer (input, apps, draw) */
     uint64_t deadman_t0;            /* the 10-minute return to the menu counts from here (the start; the self-test
                                      * image: the last input) */
 };
@@ -856,8 +863,12 @@ int kmodem_sms_delete_thread(const char *number);   /* the number of messages de
 struct state_buf;
 void kmodem_sms_save(struct state_buf *b);  /* settings.c's save: the messages as "sms.NN" records */
 void kmodem_sms_restore(const uint8_t *half);   /* settings.c's restore: the newest valid half */
+#define KMODEM_APN 1                       /* Settings > Cellular > APN */
+int kmodem_set_apn(const char *apn);       /* [A-Za-z0-9.-] 1..63, "" = "internet"; from the next Cellular on; saved */
+void kmodem_get_apn(char *out, unsigned cap);
 int kmodem_cellular(int on);
 int kmodem_selftest_phase(int *done);  /* next-celltest (unattended data): every 500 ms; *done at the end, 0 = failed */
+void kmodem_selftest_abort(void);      /* next-celltest stopped by a touch or key: Cellular off */
 void kmodem_cell(struct kcell *c);
 struct sbnet;
 struct sbtcp;

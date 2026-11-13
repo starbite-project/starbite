@@ -346,6 +346,28 @@ static void t_card_only(void)
     CHECK(store_find("catalog", &e) && e.medium == STORE_SD && e.lba == C_FIRST + C_DATA, "catalog from the card");
     CHECK(!store_find("ufs:catalog", &e) && !store_find("ufs:wifinet", &e), "no UFS entries");
     CHECK(store_find("home:crashlog", &e) && e.medium == STORE_SD, "home: prefix");
+    {   /* cp7i: store_load in parts (the Linux start's 1 MiB per tick) gives store_load's bytes and verdict */
+        static uint8_t a[1048576 + 4096], b[1048576 + 4096];
+        struct store_ent c, v;
+        uint32_t crc = 0;
+        int ok = store_find("catalog", &c) && store_load(&c, (uintptr_t)a, sizeof a) == 0;
+        memset(b, 0, sizeof b);
+        ok = ok && store_load_part(&c, (uintptr_t)b, sizeof b, 0, 256, &crc) == 0 && store_load_done(&c, crc) == 0 &&
+             !memcmp(a, b, c.size);
+        CHECK(ok, "store_load_part + store_load_done: the catalog as store_load reads it, its CRC good");
+        ok = store_find("sbos-state", &v) && store_load(&v, (uintptr_t)a, sizeof a) == 0;
+        memset(b, 0, sizeof b);
+        for (uint64_t k = 0; ok && k * 4096 < v.size; k += 7)
+            ok = store_load_part(&v, (uintptr_t)b, sizeof b, k, 7, &crc) == 0;
+        CHECK(ok && store_load_done(&v, crc) == 0 && !memcmp(a, b, v.size), "1 MiB in parts of 7 blocks: the same bytes");
+        CHECK(store_load_part(&v, (uintptr_t)b, 4096, 0, 7, &crc) == -3, "a part of an entry bigger than the room: -3");
+        uint8_t *cb = card + (C_DATA) * 4096;
+        cb[10] ^= 0x40;                     /* the catalog's bytes changed under its CRC */
+        crc = 0;
+        CHECK(store_load(&c, (uintptr_t)a, sizeof a) == -2 && store_load_part(&c, (uintptr_t)b, sizeof b, 0, 256, &crc) == 0 &&
+              store_load_done(&c, crc) == -2, "a bad CRC: -2 both ways");
+        cb[10] ^= 0x40;
+    }
     CHECK(store_open(STORE_UFS) == 0 && store_version(STORE_UFS) == 0, "the UFS store stays closed");
 
     /* settings_save: the gate first, then block 2 of the card, the tail kept */
