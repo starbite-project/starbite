@@ -76,3 +76,4 @@ a1nav: wait 300; state store=games; wait 1200; tap 352 112; wait 1000; tap 195 5
 a1pill: wait 300; state store=today; wait 900; tap 152 749; wait 900; tap 325 749; wait 900; tap 65 749; wait 900
 a1sheet: wait 300; state storeapp=firefox; wait 1200; tap 185 222; wait 1200; tap 195 600; wait 800; tap 195 708; wait 2500
 a1acct: wait 300; state store=today; wait 1200; tap 352 112; wait 1300; tap 195 550; wait 1800
+wifiscroll: wait 300; drag 195 795 195 330 220; wait 900; tap 325 736; wait 1100; tap 195 252; wait 900; tap 340 122; wait 1200; drag 195 650 195 250 300; wait 1500; drag 195 300 195 700 300; wait 1200; tap 60 63; wait 900; drag 195 795 200 450 260; wait 1200
