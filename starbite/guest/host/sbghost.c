@@ -172,6 +172,53 @@ static void zero_words(uintptr_t d, uint64_t n)
         p[i] = 0;
 }
 
+/* cp7o: what load() clears, ahead of it in steps (sbg_prep_step): the header, rings, ramoops and both surfaces;
+ * with contract v2 the tables; with v3 services the v3 rings. prezeroed: all of it done since the last load. */
+static int prezeroed;
+static uint64_t prez_at;                            /* bytes of the list below done */
+static uint64_t prez_list(unsigned k, uint64_t *off)
+{
+    uint64_t surf = (uint64_t)cfg.surf_w * 4 * cfg.surf_h;
+    switch (k) {
+    case 0: *off = 0; return SBSHM_SURF_OFF + 2 * surf;
+    case 1: *off = SBSHM_CAT_OFF; return cfg.v2 ? sizeof(struct sbshm_cat) : 0;
+    case 2: *off = SBSHM_STORE_OFF; return cfg.v2 ? sizeof(struct sbshm_store) : 0;
+    case 3: *off = SBSHM_BLK_OFF; return cfg.v2 ? sizeof(struct sbshm_blk) : 0;
+    case 4: *off = SBSHM_NET_OFF; return cfg.v2 && cfg.services ? SBSHM_V3_FREE_OFF - SBSHM_NET_OFF : 0;
+    default: return ~0ULL;
+    }
+}
+int sbg_prep_step(uint64_t max_bytes)
+{
+    if (st.state != SBG_OFF && st.state != SBG_FAILED)
+        return -1;
+    if (prezeroed)
+        return 1;
+    uint64_t base = 0, done = 0;
+    for (unsigned k = 0;; ++k) {
+        uint64_t off, n = prez_list(k, &off);
+        if (n == ~0ULL)
+            break;
+        if (prez_at < base + n) {                   /* this region has bytes left */
+            uint64_t from = prez_at - base, take = n - from;
+            if (take > max_bytes - done)
+                take = max_bytes - done;
+            take &= ~7ULL;
+            if (!take)
+                return 0;
+            zero_words((uintptr_t)SHM(off + from), take);
+            prez_at += take;
+            done += take;
+            if (prez_at < base + n)
+                return 0;                           /* the budget is spent mid-region */
+        }
+        base += n;
+    }
+    prezeroed = 1;
+    prez_at = 0;
+    return 1;
+}
+
 void sbg_init(const struct sbg_os *o, const struct sbg_cfg *c, uint8_t cpuif)
 {
     os = o;
@@ -207,11 +254,15 @@ int sbg_load(const void *image, uint64_t image_size, const void *dtb, uint64_t d
     return load(image, image_size, dtb, dtb_size, initrd, initrd_size, 0);
 }
 
-int sbg_load_placed(uint64_t image_size, uint64_t dtb_size, uint64_t initrd_size)
+int sbg_load_placed(uint64_t text_offset, uint64_t image_size, uint64_t dtb_size, uint64_t initrd_size)
 {
-    const void *img = (const void *)(uintptr_t)(cfg.linux_base + SBG_IMAGE_AT);
-    if (((const volatile uint64_t *)img)[1] != SBG_IMAGE_AT) {
-        fail("the placed Image's text_offset is not 0x80000");
+    if (text_offset >= (2U << 20) || (text_offset & 0xfffU)) {
+        fail("the Image's text_offset is not a 4 KiB multiple below 2 MiB");
+        return -5;
+    }
+    const void *img = (const void *)(uintptr_t)(cfg.linux_base + text_offset);
+    if (((const volatile uint64_t *)img)[1] != text_offset) {
+        fail("the placed Image's header does not say the text_offset it was placed at");
         return -5;
     }
     return load(img, image_size, 0, dtb_size, 0, initrd_size, 1);
@@ -245,16 +296,22 @@ static int load(const void *image, uint64_t image_size, const void *dtb, uint64_
         fail("the surface does not fit below the v2 tables");
         return -4;
     }
-    zero_words(SHM(0), SBSHM_SURF_OFF);              /* header, rings, the ramoops zone: a fresh log */
-    zero_words(SHM(SBSHM_SURF_OFF), 2 * surf);
+    int pz = prezeroed;                             /* sbg_prep_step cleared it all already (in steps) */
+    prezeroed = 0;
+    if (!pz) {
+        zero_words(SHM(0), SBSHM_SURF_OFF);          /* header, rings, the ramoops zone: a fresh log */
+        zero_words(SHM(SBSHM_SURF_OFF), 2 * surf);
+    }
     v2_changes = 0;
     v2_window = SBSHM_NONE;
     v2_has_window = v2_text = 0;
     v2_purpose = 0;
     if (cfg.v2) {                                   /* the tables empty (seq 0, n 0); the block devices offered */
-        zero_words(SHM(SBSHM_CAT_OFF), sizeof(struct sbshm_cat));
-        zero_words(SHM(SBSHM_STORE_OFF), sizeof(struct sbshm_store));
-        zero_words(SHM(SBSHM_BLK_OFF), sizeof(struct sbshm_blk));
+        if (!pz) {
+            zero_words(SHM(SBSHM_CAT_OFF), sizeof(struct sbshm_cat));
+            zero_words(SHM(SBSHM_STORE_OFF), sizeof(struct sbshm_store));
+            zero_words(SHM(SBSHM_BLK_OFF), sizeof(struct sbshm_blk));
+        }
         if (os->blk_io)                             /* no server, no devices */
             copy_words(SHM(SBSHM_BLK_OFF), cfg.blk, sizeof(cfg.blk));
     }
@@ -271,7 +328,8 @@ static int load(const void *image, uint64_t image_size, const void *dtb, uint64_
             svc |= cfg.services & SBSHM_SVC_SND;
         if (os->unix_s)
             svc |= cfg.services & SBSHM_SVC_CLOCK;
-        zero_words(SHM(SBSHM_NET_OFF), SBSHM_V3_FREE_OFF - SBSHM_NET_OFF);
+        if (!pz)
+            zero_words(SHM(SBSHM_NET_OFF), SBSHM_V3_FREE_OFF - SBSHM_NET_OFF);
         v3_reset();
     }
     img_pa = cfg.linux_base + text_off;
@@ -360,6 +418,8 @@ int sbg_start(void)
     t_start = os->ms();
     boot_warned = gave_up = 0;
     boot_extra = 0;
+    st.poll_part_ms = 0;
+    st.poll_part = "-";
     st.boots++;
     int64_t r = os->cpu_on(cfg.first_mpidr, tramp_pa(), cfg.linux_base + SBG_DTB_OFF);
     struct tb t = {.n = 0};
@@ -743,13 +803,22 @@ void sbg_poll(void)
         h->host_unix_s = os->unix_s(&tz);
         h->host_tz_min = tz;
     }
+    /* cp7o: the slowest part of a poll since the start (Track A: one guest timer call took ~0.4 s) */
+    uint64_t tp = os->ms();
+#define POLL_PART(what) do { uint64_t d_ = os->ms() - tp; if (d_ > st.poll_part_ms) { st.poll_part_ms = (uint32_t)d_; st.poll_part = (what); } tp = os->ms(); } while (0)
     lines_check();
+    POLL_PART("lines");
     log_stream();
+    POLL_PART("log");
     blk_serve();
+    POLL_PART("blk");
     if (svc) {
         sbg_net_poll();
+        POLL_PART("net");
         sbg_p9_poll();
+        POLL_PART("9p");
         sbg_snd_poll();
+        POLL_PART("snd");
     }
     struct sbshm_msg m;
     while (sbshm_get(G2H, &m)) {
@@ -800,6 +869,8 @@ void sbg_poll(void)
             v2_changes |= SBG_CH_NOTIF;
         }
     }
+    POLL_PART("msgs");
+#undef POLL_PART
     if (st.state == SBG_BOOTING && cfg.boot_warn_ms && !boot_warned && t - t_start > cfg.boot_warn_ms &&
         cfg.boot_warn_ms < cfg.boot_timeout_ms) {
         boot_warned = 1;

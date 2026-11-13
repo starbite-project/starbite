@@ -400,7 +400,7 @@ static uintptr_t up_mib(uintptr_t a) { return (a + 0xfffffUL) & ~0xfffffUL; }
 /* 1.2-alpha1: the load runs at the guest timer's first tick, not inside guest_start: the caller (the home tile)
  * draws "Starting Linux..." first, and a slow UFS read never looks like a hang */
 static int loading;
-enum { LS_BEGIN, LS_CARD, LS_FS, LS_IMG, LS_DTB, LS_RD, LS_GO, LS_N };
+enum { LS_BEGIN, LS_CARD, LS_FS, LS_IMG, LS_DTB, LS_RD, LS_ZERO, LS_COPY, LS_GO, LS_N };
 static int ls;                              /* load_step's next step */
 static struct store_ent ld_i, ld_d, ld_r;
 
@@ -445,14 +445,18 @@ static uint64_t ls_t0, ls_ms[LS_N], ls_max;
 static unsigned ls_ticks;
 static int ls_max_at;
 static uintptr_t ls_pi, ls_pd, ls_pr;
-static uint64_t ls_k;                       /* the store file's next 4 KiB block */
+static uint64_t ls_k;                       /* the store file's next 4 KiB block; the copy's next byte */
+static uint64_t ls_toff;                    /* the Image's text_offset (its header): its place in the carve-out */
 static uint32_t ls_crc;
 #define GUEST_LOAD_BLOCKS 256U              /* 1 MiB of a store file per tick */
+#define GUEST_STEP_BYTES (2U << 20)         /* cp7o: the shared region cleared / the files copied, 2 MiB a tick */
+static char ls_sum[320];                    /* the start's line, logged again at HELLO (pmsg drops the early one) */
+static uint64_t gt_max;                     /* the slowest guest timer call since HELLO */
 
 static void ls_log(void)
 {
     static const char *const nm[LS_N] = {"card ", ", card files ", ", ~/Starbite ", ", Image ", ", DTB ", ", initrd ",
-                                         ", copy "};
+                                         ", clear ", ", copy ", ", CPU_ON "};
     struct ub u;
     ub_init(&u);
     ub_s(&u, "guest: start in ");
@@ -482,6 +486,7 @@ static void ls_log(void)
     ub_s(&u, " + ");
     ub_dec(&u, ld_r.size);
     sb_log(u.b);
+    sb_strcpy(ls_sum, sizeof ls_sum, u.b + 7);  /* (without "guest: ") */
 }
 
 /* one step: 0 more to do, 1 started (CPU_ON), < 0 failed (and why) */
@@ -549,9 +554,43 @@ static int load_step(void)
         }
         break;
     }
-    default: {                              /* LS_GO */
-        int lr = sbg_load((const void *)ls_pi, ld_i.size, (const void *)ls_pd, ld_d.size, (const void *)ls_pr,
-                          ld_r.size);
+    case LS_ZERO:                           /* what sbg_load clears, 2 MiB a tick (~15 MB, non-cacheable) */
+        if (sbg_prep_step(GUEST_STEP_BYTES)) {
+            ls = LS_COPY;
+            ls_k = 0;
+            ls_toff = ((const volatile uint64_t *)ls_pi)[1];   /* the Image's text_offset: where it goes */
+            if (ls_toff >= (2U << 20) || (ls_toff & 0xfffU) || ls_toff + ld_i.size > SBG_DTB_OFF) {
+                why = "the Linux Image's header has an unusable text_offset";
+                r = -5;
+            }
+        }
+        break;
+    case LS_COPY: {                         /* the three files from the bounce window to their places, 2 MiB a tick */
+        const uint64_t at[3] = {ls_toff, SBG_DTB_OFF, SBG_RD_OFF};
+        const uintptr_t src[3] = {ls_pi, ls_pd, ls_pr};
+        const uint64_t len[3] = {ld_i.size, ld_d.size, ld_r.size};
+        uint64_t left = GUEST_STEP_BYTES, base = 0;
+        for (unsigned f = 0; f < 3 && left; ++f) {
+            uint64_t n = (len[f] + 7) & ~7ULL;
+            if (ls_k < base + n) {
+                uint64_t from = ls_k - base, take = n - from < left ? n - from : left;
+                const volatile uint64_t *q = (const volatile uint64_t *)(src[f] + from);
+                volatile uint64_t *d = (volatile uint64_t *)(uintptr_t)(G_LINUX_BASE + at[f] + from);
+                for (uint64_t i = 0; i < take / 8; ++i)
+                    d[i] = q[i];
+                ls_k += take;
+                left -= take;
+            }
+            base += n;
+        }
+        if (ls_k >= base) {
+            ls_k = 0;
+            ls = LS_GO;
+        }
+        break;
+    }
+    default: {                              /* LS_GO: the header and the trampoline (nothing big), CPU_ON */
+        int lr = sbg_load_placed(ls_toff, ld_i.size, ld_d.size, ld_r.size);
         hw_wdt_feed();
         if (lr < 0 || sbg_start() < 0) {
             why = sbg_stats()->why ? sbg_stats()->why : "the guest did not start";
@@ -655,10 +694,40 @@ void guest_timer(unsigned id)
         }
         return;
     }
+    uint64_t gt0 = sb_ms();
     sbg_poll();
     const struct sbg_stats *s = sbg_stats();
+    {   /* cp7o: a poll of 50 ms or more, each time a new slowest: its time and the slowest part since the start */
+        uint64_t d = sb_ms() - gt0;
+        if (d >= 50 && d > gt_max) {
+            gt_max = d;
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "guest: a poll took ");
+            ub_dec(&u, d);
+            ub_s(&u, " ms (the slowest part since the start: ");
+            ub_s(&u, s->poll_part ? s->poll_part : "-");
+            ub_s(&u, " ");
+            ub_dec(&u, s->poll_part_ms);
+            ub_s(&u, " ms)");
+            sb_log(u.b);
+        }
+    }
     if (s->state == SBG_RUNNING && st == GUEST_STARTING) {
         st = GUEST_RUNNING;
+        {   /* cp7o: the start's line again (pmsg's ring drops the early one) and the slowest poll part so far */
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "guest: at HELLO: ");
+            ub_s(&u, ls_sum[0] ? ls_sum : "(no start line)");
+            ub_s(&u, "; slowest poll part ");
+            ub_s(&u, s->poll_part ? s->poll_part : "-");
+            ub_s(&u, " ");
+            ub_dec(&u, s->poll_part_ms);
+            ub_s(&u, " ms");
+            sb_log(u.b);
+            gt_max = 0;
+        }
         arm(shown ? 10 : 50);
         if (shown)
             sbg_send(SBG_MSG_FOCUS, 1, 0);
