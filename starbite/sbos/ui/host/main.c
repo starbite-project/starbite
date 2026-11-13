@@ -704,6 +704,11 @@ static int parse(const char *s, step *st, int max)
         }
         else if (!strcmp(w, "drag")) { p->kind = 2; sscanf(tok, " %*s %f %f %f %f %f", &p->x0, &p->y0, &p->x1, &p->y1, &p->ms); }
         else if (!strcmp(w, "hold")) { p->kind = 3; sscanf(tok, " %*s %f %f %f", &p->x0, &p->y0, &p->ms); }
+        else if (!strcmp(w, "pinch")) {     /* 8b: "pinch CX CY D0 D1 MS": two fingers on a level line round (CX, CY), D0 apart
+                                             * to D1 apart over MS: finger 0 through sh_touch, finger 1 sh_touch_finger */
+            p->kind = 13;
+            sscanf(tok, " %*s %f %f %f %f %f", &p->x0, &p->y0, &p->x1, &p->y1, &p->ms);
+        }
         else if (!strcmp(w, "state") || !strcmp(w, "sms")) {   /* helper I: a state now; an SMS received now */
             p->kind = w[1] == 't' ? 4 : 9;
             p->ms = 20;
@@ -773,6 +778,11 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
                     sh_touch(0, st[si].x0, st[si].y0, te);
                     sh_touch(2, st[si].x0, st[si].y0, te);
                 }
+                if (phase >= 0 && st[si].kind == 13) {   /* 8b: the pinch's two fingers up (the second first) */
+                    step *p = &st[si];
+                    sh_touch_finger(1, 2, p->x0 + p->y1 / 2, p->y0, s0 + p->ms);
+                    sh_touch(2, p->x0 - p->y1 / 2, p->y0, s0 + p->ms);
+                }
                 if (phase >= 0 && st[si].kind && st[si].kind != 4 && st[si].kind != 5 && st[si].kind != 6 && st[si].kind < 8) {
                     step *p = &st[si];
                     float x = p->kind == 2 || p->kind == 7 ? p->x1 : p->x0, y = p->kind == 2 || p->kind == 7 ? p->y1 : p->y0;
@@ -813,6 +823,12 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
             }
             if (p->kind == 11) {
                 if (phase < 0) { host_ori_film = (int)p->x0 & 3; phase = 0; }
+                continue;
+            }
+            if (p->kind == 13) {                 /* 8b: the pinch */
+                float d = p->x1 + (p->y1 - p->x1) * (u > 1 ? 1 : u);
+                if (phase < 0) { sh_touch(0, p->x0 - d / 2, p->y0, te); sh_touch_finger(1, 0, p->x0 + d / 2, p->y0, te); phase = 0; }
+                else { sh_touch(1, p->x0 - d / 2, p->y0, te); sh_touch_finger(1, 1, p->x0 + d / 2, p->y0, te); }
                 continue;
             }
             if (p->kind == 10) {

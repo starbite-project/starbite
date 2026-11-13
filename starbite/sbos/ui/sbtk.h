@@ -334,6 +334,17 @@ typedef struct { float y[64]; float t[64]; int n; } tk_tracker;      /* the last
 void tk_tracker_reset(tk_tracker *t);
 void tk_tracker_add(tk_tracker *t, float y, float t_ms);
 float tk_tracker_v(const tk_tracker *t);                             /* units per ms, as the concept's v() */
+/* 8b: a two-finger pinch (iOS's UIPinchGestureRecognizer): fingers 0 and 1 (finger 0 as sh_touch sends it, 1.. from
+ * sh_touch_finger), ph 0 down / 1 move / 2 up, pt and ms. While both are down: s the scale from their first distance,
+ * (cx, cy) their middle now, (cx0, cy0) where it began, v the scale's speed (1 / s) at the end. Returns
+ * TK_PINCH_BEGAN at the second finger's down, TK_PINCH_CHANGED as either moves, TK_PINCH_ENDED when one lifts, else 0 */
+enum { TK_PINCH_NONE, TK_PINCH_BEGAN, TK_PINCH_CHANGED, TK_PINCH_ENDED };
+typedef struct {
+    int down[2], on;
+    float x[2], y[2], d0, s, cx, cy, cx0, cy0, v;
+    tk_tracker tr;
+} tk_pinch;
+int tk_pinch_touch(tk_pinch *p, int finger, int ph, float x, float y, float t_ms);
 
 /* ---- platform ---------------------------------------------------------------------------------------------- */
 void *tk_alloc(size_t n);          /* zeroed, 64-byte aligned */

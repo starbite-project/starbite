@@ -73,3 +73,34 @@ float tk_tracker_v(const tk_tracker *t)
     if (t->n < 2) return 0;
     return (t->y[t->n - 1] - t->y[0]) / tk_maxf(1, t->t[t->n - 1] - t->t[0]);
 }
+
+/* 8b: the pinch (sbtk.h): the scale is the fingers' distance over the first (at least 8 pt, so a near-touch start
+ * can't explode); its speed from the tracker (the scale x 1000 tracked: tk_tracker_v gives it per second) */
+int tk_pinch_touch(tk_pinch *p, int finger, int ph, float x, float y, float t_ms)
+{
+    if (finger < 0 || finger > 1) return TK_PINCH_NONE;
+    p->x[finger] = x; p->y[finger] = y;
+    if (ph == 0) p->down[finger] = 1;
+    float dx = p->x[1] - p->x[0], dy = p->y[1] - p->y[0], d = tk_sqrtf(dx * dx + dy * dy);
+    if (ph == 2) {
+        p->down[finger] = 0;
+        if (!p->on) return TK_PINCH_NONE;
+        p->on = 0;
+        p->v = tk_tracker_v(&p->tr);
+        return TK_PINCH_ENDED;
+    }
+    if (!p->down[0] || !p->down[1]) return TK_PINCH_NONE;
+    p->cx = (p->x[0] + p->x[1]) / 2; p->cy = (p->y[0] + p->y[1]) / 2;
+    if (!p->on) {
+        p->on = 1;
+        p->d0 = tk_maxf(8, d);
+        p->s = 1; p->v = 0;
+        p->cx0 = p->cx; p->cy0 = p->cy;
+        tk_tracker_reset(&p->tr);
+        tk_tracker_add(&p->tr, 1000, t_ms);
+        return TK_PINCH_BEGAN;
+    }
+    p->s = tk_maxf(8, d) / p->d0;
+    tk_tracker_add(&p->tr, p->s * 1000, t_ms);
+    return TK_PINCH_CHANGED;
+}
