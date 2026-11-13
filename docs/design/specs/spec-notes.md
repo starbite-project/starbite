@@ -5,6 +5,15 @@ sheets / menus / sheets, §4 keyboard, §6 list geometry, §10 bars and bottom s
 colour, §16 motion, §17 haptics), [LIQUID-GLASS.md](../LIQUID-GLASS.md) §5, and [spec-settings.md](spec-settings.md)
 §2.0 (row / card / header geometry used here too).
 
+> **Platform decision (Track A, 2026-11-13): storage.** Notes become records in the settings state: 512 KB per half,
+> chunked into 4 KB records, with a size budget. **Build for "plenty, with a full state"**, not the trunk's 8 x 600 B:
+> - no fixed note count; one note up to ~64 KB (E);
+> - when the budget is reached, a **"Storage Full"** alert: "Delete some notes or empty Recently Deleted to make
+>   room." (OK);
+> - a new note or edit that can't be saved keeps its text on screen with a footer line "Not saved: storage full"
+>   (13 / 400, systemRed);
+> - Recently Deleted counts toward the budget, and its notes are purged after 30 days.
+
 **Sources**
 - Apple iPhone User Guide, **iOS 27 edition** (fetched 2026-11-13): "Get started with Notes", "Create and format notes"
   (two editor screens of art), "Search notes", "Organize in folders", "Delete and recover notes", "Change the Notes
@@ -198,7 +207,7 @@ title 13 / 600 (2 lines max) and date 12 / 400 secondary, centred. Date sections
   (E; trunk uses "New Note").
 - Read-only (in Recently Deleted): tap anywhere → alert **"Recover Note?"** / "Notes in Recently Deleted can't be
   edited." (ours) / Cancel · **Recover** (E).
-- Very long note: fine; storage limit (ours): 64 KB per note (E target; trunk is 600 bytes).
+- Very long note: fine up to ~64 KB per note (E); past the shared budget see the "Storage Full" state in the box at the top.
 
 **Interactions**
 - Tap text → caret there + keyboard up. Double-tap word → select + the edit menu (IOS-REF §3.3 compact horizontal

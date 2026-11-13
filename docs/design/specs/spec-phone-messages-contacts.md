@@ -112,9 +112,9 @@ unless they say "@402".
 |---|---|---|
 | Nav row | Edit glass capsule **62 x 44** at x 16.5, centre y 83; Filter glass circle **44** at x 342..386 (16 from the right); title "Calls" Headline 17 / 600 centred on the row | Edit capsule 62 x 44 at x 16, centre **NAV_MID 66**; Filter circle 44 at x 330..374; title centred at 66. **No large title** (A: SUP art). **(IR fix:** today's code draws a large "Calls" title.) |
 | Favourites grid | **4 columns**, tile **81 x 122.8**, side margin 15.8, gap 15.8 (pitch 96.6), first tile top 122 (17 below the nav row); row pitch **158.5** | tile **77.6 x 117**, margin 16, gap 15.8 (pitch 93.4); column x 16 / 109.4 / 202.8 / 296.2. Row 1 top **105**, row 2 top **258.5** |
-| Tile | rounded rect, radius ≈ **14** (M ±2), the contact poster (photo or monogram) fills it | local poster (§2.12): tinted gradient plus a 52 initials disc centred 45 % down (M TB: the "EE" disc sits inside a pale tile) |
-| Tile label | phone glyph (12 pt, secondaryLabel) + first name, Subheadline **15 / 400 secondaryLabel**, centred, centre 11.7 below the tile | same; one line, middle-truncated |
-| Max tiles | **up to 8**; with more favourites the 8th spot is a smaller **"Show All"** item (A: Support 126076; 3P TB) | same |
+| Tile | rounded rect, radius ≈ **20** (M TB ±3; SUP suggests 14-18), the contact poster fills it. Without a poster photo: a **pale tinted tile with the contact's circular photo or initials disc Ø 49 centred** (M TB "EE", "Chris") | local poster (§2.12): tinted tile + initials disc Ø 49 at the centre |
+| Tile label | phone glyph (12 pt, secondaryLabel) + first name, Subheadline **15 / 400 secondaryLabel**, centred, centre 12-13 below the tile | same; one line, middle-truncated |
+| Max tiles | **up to 8**. With more favourites the 8th spot is **"Show All"**: a 2 x 2 cluster of small tiles / discs (≈ 37 each) in the tile's place, labelled "Show All" without a glyph (A: Support 126076; M TB) | same |
 | "Recents" header | Title 2 **22 / 700**, x 18.5 (≈ 20 with the glyph bearing), centre 38 below the last tile row's bottom | 22 / 700 at x 20, centre y **413** |
 | Recent row | **74.1** pitch; avatar **50** circle at x 16; text x **76**; separator 0.5 pt from x 76 to 386 (16 from the right) | row height **74**; avatar 50 at x 16; text x 76; separator x 76..374. First row top **433** |
 | Row line 1 | name Headline 17 / 600, label colour; **missed = systemRed** (M: #FF4245 sampled) | same |
@@ -335,7 +335,7 @@ trunk (B7). Keep it; check the colour and the timer font.
 |---|---|---|
 | Nav row | **Edit** glass capsule (≈ 62 x 44) left at x 16; **Filter** glass circle 44 right at x 342..386 (line.3.horizontal.decrease) | Edit at x 16, Filter x 330..374, both centred on **NAV_MID 66** |
 | Large title | "Messages" Large Title **34 / 700**, x 20, below the nav row | baseline **LARGE_BASE 124** (IR §6). Collapses to an inline 17 / 600 title on scroll (IR §10) |
-| Pinned | (none in the art) a grid of up to 9 circles, 3 per row (E: 86 Ø, name 13 / 400 below, unread dot top-left, latest message as a speech bubble above) | 3 columns at x 65 / 195 / 325 centres, Ø 86, row pitch 120 (E) |
+| Pinned | (M UGm filter / swipe art) up to 9 **circles Ø 90**, 3 per row, column centres 71 / 200 / 330 (pitch 129.4), row pitch **127**. Name **12 / 400 secondaryLabel** centred 57.6 below the circle centre, preceded by a **Ø 9 systemBlue dot** when unread. A recent incoming message or reaction shows as a small white speech bubble overlapping the circle's top-right (e.g. "❤️") | Ø 90, centres x **69 / 195 / 321**, first row centre **y 170** (SAFE_TOP + 44 + 82), row pitch **124** |
 | Row | pitch **88.7**, the same for one- and two-line previews (M: "Animation Team" has no preview but the same height) | **88** |
 | Unread dot | **Ø 10.9 systemBlue** at x 8..19 (centre x **13.5**), centred on the name line (M) | Ø 11, centre (13.5, row top + 23) |
 | Avatar | **Ø 46.8** at x 27, vertically centred on the row (M) | **Ø 47 at x 27** |
@@ -362,12 +362,16 @@ trunk (B7). Keep it; check the colour and the timer font.
 
 #### 2.9.1 Interactions
 - Tap a row → thread (push).
-- **Swipe right** (leading): **Unread / Read** (systemBlue, envelope-badge glyph). A full swipe toggles (A: "Swipe right
-  on a conversation to mark it as unread").
-- **Swipe left** (trailing), from the right edge: **Delete** (red #FF383C, trash) and **Hide Alerts / Show Alerts**
-  (systemIndigo #6155F5, bell.slash) (A: Delete; E: Alerts and colours). A full swipe deletes. The row then slides
-  out; the conversation goes to **Recently Deleted** for 30 days (A). Local: we keep a Recently Deleted list
-  (the filter item) instead of erasing at once.
+- **Swipe style (M UGm swipe art):** the row becomes a **grey rounded card** (systemGray5 light #E5E5EA, radius
+  ≈ 23, full row height 88) that slides with the finger. The revealed actions are **Ø 50 coloured circles** with
+  white glyphs, 10 from the screen edge, not full-height blocks. Same component as Phone §2.1.
+- **Swipe right** (leading): one **systemBlue Ø 50** circle with the **unread glyph** (a speech bubble with a dot;
+  read glyph when unread), centre x **35**. A full swipe toggles (A: "Swipe right on a conversation to mark it as
+  unread").
+- **Swipe left** (trailing), outermost first: **Delete** (systemRed, trash) at centre x **355**, then **Hide Alerts
+  / Show Alerts** (systemIndigo #6155F5, bell.slash) at x 295 (A: Delete; E: Alerts and its colour).
+  - A full swipe deletes: the row slides out and the conversation goes to **Recently Deleted** for 30 days (A).
+  - Local: we keep a Recently Deleted list (the filter item) instead of erasing at once.
 - **Long-press a row** → the thread preview lifts (a 300 x 360 glass-edged card showing the last bubbles) + menu
   below: **Pin**, **Mark as Unread / Read**, **Hide Alerts**, **Delete** (red) (A: Pin, Delete; E: order and the
   rest). Haptic: medium impact.
@@ -377,11 +381,16 @@ trunk (B7). Keep it; check the colour and the timer font.
 - Compose → New Message sheet (§2.11).
 
 #### 2.9.3 Filter menu
-Glass menu from the Filter circle, same component as §2.3 (no layout picker). Rows (E order; A: the items exist):
-**Messages** (all; check by default) · **Unread** · **Known Senders** · **Unknown Senders** · **Recently Deleted**, then
-a separator and **Manage Filtering** (→ Settings > Apps > Messages > Screen Unknown Senders). Omit Spam,
-Transactions and Promotions. When "Screen Unknown Senders" is on, messages from numbers not in Contacts go to Unknown
-Senders, and their notifications are muted (A behaviour, local equivalent).
+Glass menu from the Filter circle, same component as §2.3 (no layout picker).
+- Measured (M UGm filter art): panel **254 wide**, right edge 10 from the screen edge, top at the button's top, radius
+  ≈ 27, rows pitch **43**, check at x +27, glyph at x +62, label 17 / 400 at x +88. The default iOS 27 rows are
+  **Messages** (two-bubbles glyph, checked) · **Spam** (bin-with-x) · **Recently Deleted** (trash), then a separator
+  and **Manage Filtering** (no glyph).
+- **Ours:** **Messages** · **Unread** (A: "tap the Filter button, then tap Unread") · **Unknown Senders** (only while
+  Screen Unknown Senders is on; A) · **Recently Deleted**, then separator, **Manage Filtering** (→ Settings > Apps >
+  Messages > Screen Unknown Senders). Spam is **omitted** (no spam data), and so are Transactions and Promotions.
+- With Screen Unknown Senders on, messages from numbers not in Contacts go to Unknown Senders and their notifications
+  are muted (A behaviour, local equivalent).
 
 **Recently Deleted** page: title "Recently Deleted", rows as the list with "n days" left, select mode with
 **Recover** and **Delete** (red) at the bottom. Delete asks "Permanently delete n conversations? This can't be
@@ -488,10 +497,18 @@ glass capsule (E) appears above the input bar; tap → scroll to the end.
 #### 2.10.6 Reaction mode (long-press / double-tap)
 - The pressed bubble lifts (scale 1.03, shadow σ 16 black 20 %) and stays in place. The rest of the screen blurs
   (σ ≈ 20) and dims 25 % (IR §3.3, E).
-- **Reaction bar** above the bubble (below it when there isn't room): a glass capsule **≈ 300 x 48**, aligned to the
-  bubble's outer edge. It holds **❤️ 👍 👎 😂 ‼️ ❓**, each 28 pt in a 40 hit circle, and then an **emoji button**
-  (smiley + "+") that opens the emoji picker (A: the six classics and "any emoji"; E: sizes). The current reaction
-  sits in a systemBlue Ø 40 disc. Selection haptic when the finger slides across items.
+- **Reaction bar** (M UGm tapback art @402): a glass capsule **63 tall**, starting **10** from the left screen edge
+  and running past the right edge. It **scrolls horizontally**: swipe left for suggested emoji (A). Its bottom sits
+  **6 above the bubble's top** (below the bubble when there isn't room, E).
+  - Items: **❤️ 👍 👎 "HA HA" ‼️ ❓**, then recent / suggested emoji, at a pitch of **50**, each ≈ 27 pt, the first
+    centred 41 from the bar's left end.
+  - The current reaction sits in a **systemBlue Ø 45 disc**.
+  - Our art draws the six classics as our own glyphs (heart, thumb up/down, "HA HA" lettering, double "!", "?"),
+    not Apple's.
+  - Separately, a **Ø 36 glass emoji button** (a smiley) sits on the bubble's top-outer corner with two thought
+    dots. It opens the emoji picker for any emoji (A: "tap the Emoji button").
+  - Selection haptic when the finger slides across items.
+- **Double-tap** shows the reaction bar only (M: the art shows no menu). **Long-press** adds the menu below (E).
 - **Menu** below the bubble (IR §3.3 menu, 250 wide), items in order (E; A for Reply/Copy/Select/More):
   1. **Reply** → **omit** (SMS has no threads).
   2. **Copy** (doc.on.doc)
@@ -540,8 +557,8 @@ status get a glass pill behind them for legibility. Not in v1.
   teal, green, orange, pink, purple, indigo, brown at 35 % saturation). It is used for the favourites tile, the card
   header and the call background. The user can change it in Edit → "Poster colour" (local; replaces Apple's poster
   editor).
-- **Poster tile** (favourites): the tint as a soft vertical gradient (top +10 % light), monogram disc Ø 52 at 45 %
-  height. Name under the tile, not on it (M SUP).
+- **Poster tile** (favourites): the tint as a pale soft vertical gradient (top +10 % light; M TB tiles are pale
+  beige / grey / sage), monogram disc Ø 49 at the tile centre. Name under the tile, not on it (M SUP/TB).
 
 ### 2.13 Contacts: list (Contacts app and Phone's Contacts tab)
 

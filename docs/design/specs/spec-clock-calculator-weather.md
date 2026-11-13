@@ -12,8 +12,8 @@ adds what is specific to the three apps.
 > - **Scientific maths:** A3 ports the functions it needs from **musl's libm** (MIT).
 > - **Forecasts:** **Open-Meteo** (free, no key), cached in a blob, with the location **rounded to ~1 km** before any
 >   request.
-> - **Currency rates:** not decided by Track A. Use the same pattern (a free no-key source, cached, dated); Convert's
->   units work fully offline.
+>- **Currency rates:** **Frankfurter** (the ECB's reference rates; free, no key; Track A's decision). Cache and date them
+>   like the forecasts. Convert's units work fully offline.
 > - **Haptics:** no haptic on Calculator keys (as iOS); remove the trunk's.
 
 **Tags.** **A** Apple stated · **M** measured (source named) · **3P** a reviewer · **E** estimate.
@@ -527,7 +527,7 @@ Accessibility > Touch > **Prefer Single-Touch Actions** (3P 9to5Mac).
     15 / 400 secondaryLabel; a search field at the top.
 - Either field can be edited; the other converts as you type (A).
 - **Currency: local equivalent.** Rates need the internet.
-  - Online: fetch daily rates from a free no-key provider (not decided yet; same pattern as the forecasts) and cache
+  - Online: fetch daily rates from **Frankfurter** (the ECB's reference rates, free, no key; Track A's decision) and cache
     them with a timestamp.
   - Offline with a cache: convert and show "Rates from 12 Nov" 13 / 400 secondaryLabel under the to-row.
   - Offline and never fetched: the Currency chip shows "Currency rates need the internet." centred in the list.
