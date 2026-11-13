@@ -239,6 +239,17 @@ def plan(a):
     # elsewhere (e.g. a journal replay into a block that is not metadata) would be lost on the card -> refuse
     allowed = [(k * C, (k + 1) * C) for k in pulled] + [(b * bs, (b + n) * bs) for b, n in new_runs]
     allowed.sort()
+
+    def bit(bm, blk):
+        return (bm[blk // 8] >> (7 - blk % 8)) & 1
+
+    # Journal replay (S3z 2026-11-13): when the card's last boot ended with transactions still in the journal, the
+    # Mac's mount replays them, and HFS+ journals symlink DATA blocks too ("../../../../Keychains" etc. from
+    # containermanagerd). Those land in blocks of existing files, outside the pulled chunks. The push carries the
+    # journal (now empty) in its chunk, so it must carry these blocks as well, or the card's symlinks lose their
+    # targets. A non-zero 4 KiB block there that was allocated at the pull and still is = a replayed block; zero
+    # blocks next to it are the Mac's page-sized writes and are left alone; non-zero data in a free block refuses.
+    replay = []
     fd = os.open(img, os.O_RDONLY)
     try:
         pos, size = 0, os.fstat(fd).st_size
@@ -255,22 +266,38 @@ def plan(a):
             while x < d1:                               # walk the region through the allowed spans
                 inside = [hi for lo, hi in allowed if lo <= x < hi]
                 if not inside:
-                    # data the plan would not write: only all-zero pages are harmless (APFS may keep them)
                     nxt = min([lo for lo, hi in allowed if lo > x] + [d1])
-                    blk = os.pread(fd, min(1 << 20, nxt - x, d1 - x), x)
-                    if any(blk):
-                        sys.exit(f'the image has data at byte {x} outside the pulled chunks and the new blocks: '
-                                 f'something wrote there that the push would not carry; stopping')
-                    x += len(blk)
+                    if x % bs:
+                        sys.exit(f'data region at byte {x} not block aligned; stopping')
+                    end = min(nxt, d1)
+                    while x < end:
+                        n = min(bs, end - x)
+                        blk = os.pread(fd, n, x)
+                        b = x // bs
+                        if any(blk):
+                            if n != bs or not (bit(old_bitmap, b) and bit(new_bitmap, b)):
+                                sys.exit(f'the image has data at byte {x} (block {b}) outside the pulled chunks '
+                                         f'and the new blocks, in a block that is not allocated: stopping')
+                            if replay and replay[-1][0] + replay[-1][1] == b:
+                                replay[-1] = (replay[-1][0], replay[-1][1] + 1)
+                            else:
+                                replay.append((b, 1))
+                        x += n
                 else:
                     x = max(inside)
             pos = d1
     finally:
         os.close(fd)
+    for b, n in replay:
+        print(f'  journal-replayed blocks {b}+{n} (allocated before and after): carried by the push')
     freed = sum(bin(o & ~n & 0xff).count('1') for o, n in zip(old_bitmap, new_bitmap))
+    if replay and not changed:
+        sys.exit('journal-replayed blocks but no changed metadata chunk: unexpected; stopping')
     p = {'changed_chunks': changed, 'new_runs': new_runs, 'freed_blocks': freed,
          'image_chunk_sha256': {k: hashlib.sha256(read(k * C, C)).hexdigest() for k in changed},
-         'run_sha256': [hashlib.sha256(read(b * bs, n * bs)).hexdigest() for b, n in new_runs]}
+         'run_sha256': [hashlib.sha256(read(b * bs, n * bs)).hexdigest() for b, n in new_runs],
+         'replay_runs': replay,
+         'replay_sha256': [hashlib.sha256(read(b * bs, n * bs)).hexdigest() for b, n in replay]}
     Path(str(img) + '.plan.json').write_text(json.dumps(p, indent=1))
     nb = sum(n for _, n in new_runs)
     print(f'changed metadata chunks: {changed}')
@@ -313,7 +340,8 @@ def push(a):
             sys.exit(f'image chunk {k} changed after plan: run plan again')
         if not (lo <= base + k * C and base + (k + 1) * C <= hi):
             sys.exit(f'chunk {k} outside the range')
-    for (b, n), h in zip(p['new_runs'], p['run_sha256']):
+    replay = [tuple(r) for r in p.get('replay_runs', [])]
+    for (b, n), h in list(zip(p['new_runs'], p['run_sha256'])) + list(zip(replay, p.get('replay_sha256', []))):
         if hashlib.sha256(read(b * bs, n * bs)).hexdigest() != h:
             sys.exit(f'image blocks {b}+{n} changed after plan: run plan again')
         if not (lo <= base + b * bs and base + (b + n) * bs <= hi):
@@ -328,6 +356,9 @@ def push(a):
         for b1 in range(b, b + n, step):
             m = min(step, b + n - b1)
             push_piece(base + b1 * bs, read(b1 * bs, m * bs), f'new blocks {b1}+{m}', a.dry_run)
+    for b, n in replay:
+        # blocks the Mac's journal replay wrote home (symlink data): before the chunk with the emptied journal
+        push_piece(base + b * bs, read(b * bs, n * bs), f'journal-replayed blocks {b}+{n}', a.dry_run)
     order = sorted(p['changed_chunks'], key=lambda k: (k == 0, k))    # the volume header's chunk last
     for k in order:
         push_piece(base + k * C, read(k * C, C), f'metadata chunk {k}', a.dry_run)
