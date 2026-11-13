@@ -1989,6 +1989,13 @@ int abox_vss_ready(void)
     return S.vss_magic ? 1 : S.vss_timeout ? -1 : 0;
 }
 
+/* START_VSS was sent and Calliope still runs (READY or CALL): the CP's voice path is on ABOX, so ABOX is the modem's
+ * (snd.c leaves it running instead of turning it off) */
+int abox_vss_started(void)
+{
+    return S.vss_started && (S.state == ABOX_ST_READY || S.state == ABOX_ST_CALL);
+}
+
 void abox_pd_off(void)
 {
     struct lb l;
