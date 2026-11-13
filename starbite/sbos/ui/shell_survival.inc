@@ -37,7 +37,7 @@ static tk_col SVC(uint32_t c) { return tk_hex(c, 1); }
 /* the layers: the page's live parts (a group appended to the page's strips) and SOS's beacon (over everything but
  * the toast) */
 enum { SVL_A, SVL_B, SVL_SEG, SVL_CTL, SVL_TXT, SVL_RING, SVL_FLD, SVL_DIAL, SVL_N };   /* helper J: the compass's dial */
-static tk_layer svgrp, svl[SVL_N], sosl, sosbg, sostx;
+static tk_layer svgrp, svl[SVL_N], sosl, sosbg, sostx, soshl;   /* soshl (8c): the beacon's Stop pressed */
 static struct {
     int from_lock;                      /* opened from the lock's Emergency list: it closes back into that card */
     arect lock_r;
@@ -1601,7 +1601,41 @@ static int sv_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
     int kb = (is_app("settings") && AS.sub == 4 && SV.cf >= 0) || (is_app("sun") && SV.sun_edit);
     if (kb) {
         if (y >= 548 && kb_rect(x, y, KR[SV.num], !SV.num, r)) { *g = *r; *rad = 6; *c = W(.35f); return 1; }
+        /* 8c: the editors' Cancel (a word) and Done (the glass check), and Sun's two rows and its GPS button */
+        if (DONE_HIT(x, y)) { *r = *g = (tk_rect){ CONTENT_R - BACK_D, SAFE_TOP, BACK_D, BACK_D }; *rad = BACK_D / 2; *c = W(.16f); return 1; }
+        if (SV_CANCEL_HIT(x, y)) return sep_word(r, g, rad, c, MARGIN, tw(TK_IT400, 17, "Cancel", 0, 0));
+        if (is_app("sun") && x >= GROUP_X && x < CONTENT_R) {
+            if (SV.fix_have && y >= SUN_FIX_BTN && y < SUN_FIX_BTN + 44) { *r = *g = (tk_rect){ GROUP_X, SUN_FIX_BTN, GROUP_W, 44 }; *rad = 22; *c = W(.16f); return 1; }
+            if (y >= SUN_ED && y < SUN_ED + 94) { *r = (tk_rect){ GROUP_X, SUN_ED + (y < SUN_ED + 47 ? 0 : 47), GROUP_W, 47 }; *g = (tk_rect){ GROUP_X, SUN_ED, GROUP_W, 93 }; *rad = 16; *c = W(.1f); return 1; }
+        }
         return 0;
+    }
+    /* 8c (the films' SBTK_TTF: the tools' own controls showed nothing until the lift): switches' tracks, SOS's beacon
+     * choices, USB's Stop, Sun's place, the Guide's Previous / Next and back, the Compass's halves */
+    if (AP.on && !is_app("settings")) {
+        const char *k = APPS[AP.a].k;
+        tk_rect q = { 0, 0, 0, 0 };
+        float qr = 0;
+        int hit = 0, in = x >= GROUP_X && x < CONTENT_R;
+        if (!tk_strcmp(k, "sos") && in && y >= SOS_ROW && y < SOS_ROW + 94) { q = (tk_rect){ SV_SW_X, (y < SOS_ROW + 47 ? SOS_ROW : SOS_ROW + 47) + 8, 51, 31 }; qr = 15.5f; hit = 1; }
+        else if (!tk_strcmp(k, "sos") && in && y >= SOS_SEG_Y && y < SOS_SEG_Y + 36) {
+            int b = (int)((x - GROUP_X - 2) / SOS_SEG_W);
+            b = b < 0 ? 0 : b > 3 ? 3 : b;
+            q = (tk_rect){ GROUP_X + 2 + SOS_SEG_W * b, SOS_SEG_Y + 2, SOS_SEG_W, 32 }; qr = 9; hit = 1;
+        }
+        else if (!tk_strcmp(k, "power") && in && y >= L2_ROW && y < L2_ROW + 94) { q = (tk_rect){ SV_SW_X, (y < L2_ROW + 47 ? L2_ROW : L2_ROW + 47) + 8, 51, 31 }; qr = 15.5f; hit = 1; }
+        else if (!tk_strcmp(k, "usb") && SV.usb.state == SH_USB_ON && x >= 24 && x < 366 && y >= 690 && y < 756) { q = (tk_rect){ 24, 690, 342, 66 }; qr = 33; hit = 1; }
+        else if (!tk_strcmp(k, "sun") && x >= CONTENT_R - 120 && y >= SUN_LOC && y < SUN_LOC + 47) { q = (tk_rect){ GROUP_X, SUN_LOC, GROUP_W, 47 }; qr = 16; hit = 2; }
+        else if (!tk_strcmp(k, "sun") && SV.fix_have && in && y >= SUN_LOC + 47 && y < SUN_LOC + 47 + SUN_FIX_ROW) { q = (tk_rect){ GROUP_X, SUN_LOC + 47, GROUP_W, SUN_FIX_ROW }; qr = 16; hit = 2; }
+        else if (!tk_strcmp(k, "guide") && SV.gpg >= 0 && BACK_HIT(x, y)) { q = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D }; qr = BACK_D / 2; hit = 1; }
+        else if (!tk_strcmp(k, "guide") && SV.gpg >= 0 && y >= GD_NAV - 6 && y < GD_NAV + 52) {
+            if (x < MARGIN + GD_BTN + 10) { q = (tk_rect){ MARGIN, GD_NAV, GD_BTN, 46 }; qr = 23; hit = 1; }
+            else if (x >= CONTENT_R - GD_BTN - 10) { q = (tk_rect){ CONTENT_R - GD_BTN, GD_NAV, GD_BTN, 46 }; qr = 23; hit = 1; }
+        }
+        else if (!tk_strcmp(k, "compass") && y >= CP_SEG_Y - 6 && y < CP_SEG_Y + 38 && x >= CP_SEG_X && x < CP_SEG_X + CP_SEG_W) {
+            q = (tk_rect){ CP_SEG_X + (x >= CP_SEG_X + CP_SEG_W / 2 ? CP_SEG_W / 2 : 0), CP_SEG_Y, CP_SEG_W / 2, 32 }; qr = 16; hit = 1;
+        }
+        if (hit) { *r = *g = q; *rad = qr; *c = hit == 2 ? W(.1f) : W(.16f); return 1; }
     }
     if (((is_app("settings") && AS.sub == 4) || (is_app("guide") && SV.gch >= 0)) && BACK_HIT(x, y)) {
         *r = *g = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D };
@@ -1660,7 +1694,19 @@ static int sv_touch(int phase, float x, float y, float t)
     if (SV.sos_on) {
         int in = x >= 44 && x < 346 && y >= SOS_STOP_Y - 8 && y < SOS_STOP_Y + 72;
         if (phase == 0) SV.sos_down = in;
-        else if (phase == 2 && SV.sos_down && in) sv_sos_stop();
+        {   /* 8c: the Stop lights while the finger is on it (it showed nothing until the lift) */
+            int lit = phase != 2 && SV.sos_down && in;
+            if (lit && soshl.hidden) {
+                soshl.solid = tk_premul(TK_RGBA(255, 255, 255, .22f));
+                soshl.x = PT(44); soshl.y = PT(SOS_STOP_Y);
+                soshl.solid_w = PT(302); soshl.solid_h = PT(64);
+                soshl.clip = 1;
+                soshl.clip_r = (tk_rect){ PT(44), PT(SOS_STOP_Y), PT(302), PT(64) };
+                soshl.clip_radius = PT(32);
+            }
+            if (soshl.hidden == lit) { soshl.hidden = !lit; soshl.gen++; }
+        }
+        if (phase == 2 && SV.sos_down && in) sv_sos_stop();
         return 1;
     }
     if (!AP.on || AP.closing || sp_app.live || ap_pending) return 0;
@@ -1818,8 +1864,9 @@ static void sv_relink(void)
     svgrp.next = 0;
     if (!p) appc.child = &svgrp;
     else { while (p->next) p = p->next; p->next = &svgrp; }
-    tk_layer *s[] = { &sosbg, &sostx };
-    link(&sosl, s, 2);
+    if (!soshl.name) { tk_layer_init(&soshl, "sos-press"); soshl.hidden = 1; }
+    tk_layer *s[] = { &sosbg, &sostx, &soshl };
+    link(&sosl, s, 3);
     sosl.next = 0;
     for (p = root.child; p; p = p->next) if (p->next == &toastl) { sosl.next = &toastl; p->next = &sosl; break; }
 }
