@@ -2336,6 +2336,15 @@ static int glass_cal_step(void)
         need_full = 1;
         next_kdraw();
         sb_log("next: glass stills: done (gain back to 1)");
+        {   /* 8c+: the arena at the end (the drivers: snd's 3 MiB firmware cache at boot comes from it; the pmsg ring
+             * drops the boot's own "arena free" line) */
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "next: arena free at the self test's end: ");
+            ub_dec(&u, sb_arena_free() >> 10);
+            ub_s(&u, sb_arena_free() >= (3ULL << 20) ? " KiB (snd's 3 MiB cache would fit)" : " KiB (snd's 3 MiB cache would NOT fit)");
+            sb_log(u.b);
+        }
         gcal = 10;
         return 0;
     }
