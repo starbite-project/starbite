@@ -716,6 +716,7 @@ int64_t hw_core_psci(unsigned w);   /* PSCI AFFINITY_INFO's raw answer for worke
  * 0 failed, -1 a dry run (nothing written) */
 int hw_slot_read(uint8_t *h0, uint8_t *h1);
 int hw_slot_write(int half, const uint8_t *src, uint32_t n);
+int hw_slot_medium(void);               /* SB_MED_SD / SB_MED_UFS, -1 no slot */
 void hw_slot_lend(void);            /* Track A update: the fence's one volatile grant was taken (slot.c takes it back) */
 /* Track A: Software Update (update.c; docs/STARBITE-FIRMWARE-LAYER.md 10.5): the card's /STARBITE/UPDATE/MANIFEST.TXT,
  * staged into the inactive update slot a chunk per call, armed for the loader, committed 10 s into the next start */

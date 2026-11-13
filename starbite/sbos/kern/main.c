@@ -8,6 +8,7 @@
 #include "sb.h"
 #include "sbui.h"
 #include "kern.h"
+#include "snd.h"
 #ifdef SB_HOST
 #include <stdlib.h>
 #endif
@@ -180,6 +181,9 @@ void sb_main(void)
 #endif
     uint64_t t_entry = sb_ms();             /* the counter runs from power-on: S-Boot and the loader before this */
     kmodem_reserve();                       /* P3n: the modem's 2.25 MiB before the UI's heap takes the arena */
+#ifdef SBOS_KERNEL
+    snd_reserve();                          /* the drivers' sound: Calliope's files' 3 MiB RAM copy, same reason */
+#endif
     if (!ui_init())
         sb_crash_show(ui_init_why(), 0);
     uint64_t t_ui = sb_ms();

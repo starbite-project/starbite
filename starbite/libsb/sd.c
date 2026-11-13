@@ -1107,6 +1107,8 @@ int sd_write(uint64_t sector, uint32_t count, uintptr_t src)
         sd_rep.hs_card = 0;
         sb_mdelay(1);
     }
+    sd_rep.write_hz = sd_rep.card_hz;       /* what the write runs at (drivers' sd probe logs it) */
+    sd_rep.write_hs = sd_rep.hs_card;
     int r = write_sectors(sector, count, src);
     if (slowed)
         (void)set_div(div_before);

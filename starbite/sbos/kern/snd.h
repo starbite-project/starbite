@@ -159,4 +159,7 @@ int drv_audio_probe(int level, unsigned *wait_ms);
 void drv_audio_abort(void);
 #define DRV_AUDIO_BUDGET_MS 20000U      /* level 0: 2 s, level 1: 20 s (the bypass trials), level 2: 14 s */
 
+#ifdef SBOS_KERNEL
+void snd_reserve(void);                     /* boot, before the UI's heap: the firmware cache's 3 MiB (no I/O) */
+#endif
 #endif
