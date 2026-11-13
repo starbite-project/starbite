@@ -184,8 +184,9 @@ void settings_restore(void)
         if (state_find(half[cur_half], "sbos.surv", &q) == 16 && q)
             surv_unpack(q);
         q = 0;                              /* Track A: Next's alarm list and labels */
-        if (state_find(half[cur_half], "sbos.alarm", &q) == ALARM_REC_SIZE && q)
-            alarm_unpack(q);
+        int alen = state_find(half[cur_half], "sbos.alarm", &q);
+        if ((alen == (int)ALARM_REC_SIZE || alen == (int)ALARM_REC_SIZE_V1) && q)
+            alarm_unpack(q, (unsigned)alen);      /* 8a: 32 slots; a four-slot record from before still read */
     }
     {
         /* Track A: the passcode's record (salt, hash, wrong tries, the lock-out left; never the digits) */

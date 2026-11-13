@@ -438,13 +438,15 @@ void alarm_timer(void);
 int alarm_stop(int snooze);
 void alarm_sound(int on);                     /* cp7x: the alarm's sound (weak no-op; the Next shell plays it) */
 /* Track A (2026-11-12): Next's Alarm tab (the list of up to four, labels), kept in the record "sbos.alarm" */
-#define ALARM_REC_SIZE (4 + 4 * 28)
+#define ALARM_SLOTS 32               /* 8a (Track A; iOS has no small limit): was 4 */
+#define ALARM_REC_SIZE (4 + ALARM_SLOTS * 28)
+#define ALARM_REC_SIZE_V1 (4 + 4 * 28)   /* a record from before 8a (four slots): still read */
 int alarm_count(void);
 int alarm_get(int i, int *hm, int *days, int *on, char *label, int cap);
 int alarm_put(int i, int hm, int days, int on, const char *label);   /* i == alarm_count(): add */
 int alarm_del(int i);
 int alarm_pack(uint8_t out[ALARM_REC_SIZE]);        /* 1: the list is the kernel's (save it) */
-void alarm_unpack(const uint8_t in[ALARM_REC_SIZE]);
+void alarm_unpack(const uint8_t *in, unsigned len);   /* ALARM_REC_SIZE or ALARM_REC_SIZE_V1 */
 int alarm_app_state(uint8_t out[20]);               /* the classic Clock app's state as the list (0: none yet) */
 /* Track A: the time zone in use (tzdb.c's index) and 12 / 24-hour; services.c, saved by settings.c */
 int clock_zone(void);
