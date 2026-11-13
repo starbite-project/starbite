@@ -21,6 +21,8 @@
 static int kb_key_tap;
 static int se_haptic_ok(int key);
 #define sh_haptic() do { int kk_ = kb_key_tap; kb_key_tap = 0; if (se_haptic_ok(kk_)) sh_haptic(); } while (0)
+/* gap list B: the feedback kinds too (iOS: System Haptics off silences every UI haptic; rings use sh_haptic_kind) */
+#define sh_haptic_k(k_) do { if (se_haptic_ok(0)) sh_haptic_k(k_); } while (0)
 
 #define H_PT TK_HPT
 static tk_comp *C;
@@ -1902,7 +1904,7 @@ static int cc_bright;           /* the panel's brightness level the slider last 
 static int snd_ring_who;
 static void snd_ring(int who, int kind) { if (sh_snd_tone(kind) == 0) snd_ring_who = who; }
 static void snd_ring_stop(int who) { if (snd_ring_who == who) { sh_snd_tone_stop(); snd_ring_who = 0; } }
-static void snd_once(int kind) { if (!snd_ring_who) (void)sh_snd_tone(kind); }
+static void snd_once(int kind) { if (!snd_ring_who && !EMG) (void)sh_snd_tone(kind); }   /* gap list B: Emergency is quiet */
 /* cp7x (Track A): the kernel's alarm (alarm.c rings and stops it): owner 4; it takes over any other ring */
 void sh_alarm_sound(int on) { if (on) snd_ring(4, SH_SND_ALARM); else snd_ring_stop(4); }
 static int cc_vol = -1;         /* the volume (0..15) the Control Centre's slider last sent */
