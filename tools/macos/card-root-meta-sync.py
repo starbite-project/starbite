@@ -25,6 +25,7 @@ Data blocks of existing files are never written. Freed blocks are not written (f
 other card tools apply: TWRP, the 128 GB card, every write inside [--start, --start + --count).
 
   tools/macos/card-root-meta-sync.py pull IMG [--start 182888448] [--count 33554432]
+  tools/macos/card-root-meta-sync.py remove IMG LIST     (Mac: delete the listed paths, metadata only)
   tools/macos/card-root-meta-sync.py plan IMG
   tools/macos/card-root-meta-sync.py push IMG [--dry-run]
 """
@@ -413,18 +414,77 @@ def add(a):
     print(f'{len(added)} item(s) added to {img}; next: plan')
 
 
+def remove(a):
+    """Mac side: delete the paths listed in LIST (one per line, relative to the volume root, '#' comments) from IMG,
+    to free space on the card root (2026-11-13, S3w: 114 MiB free, under HFS's root-only reserve, so non-root
+    programs got ENOSPC). Only metadata changes (catalog, bitmap, journal): freed blocks are never written. Every
+    other record keeps the card's owners (dumped first, applied again after)."""
+    img = Path(a.image)
+    paths = []
+    for line in Path(a.src).read_text().splitlines():
+        line = line.split('#', 1)[0].strip()
+        if not line:
+            continue
+        p = os.path.normpath('/' + line.lstrip('/'))
+        if p in ('/', '/System', '/Library', '/private', '/usr', '/Users') or '..' in p.split('/'):
+            sys.exit(f'refusing to remove {p}')
+        paths.append(p)
+    own_path = Path(str(img) + '.owners.json')
+    if not own_path.exists():
+        subprocess.run(['python3', '-I', str(ROOT / 'tools/macos/hfs-owners.py'), str(img), str(own_path), '--dump'],
+                       check=True)
+    own = json.loads(own_path.read_text())
+    fsck_image(img)
+    if own_device(img):
+        sys.exit(f'{img} is already attached: refusing')
+    out = subprocess.run(['hdiutil', 'attach', '-nobrowse', '-imagekey', 'diskimage-class=CRawDiskImage', img],
+                         capture_output=True, text=True, check=True).stdout
+    mnts = [l.split('\t')[-1].strip() for l in out.splitlines() if '/Volumes/' in l]
+    if len(mnts) != 1:
+        sys.exit(f'no single mount point for {img}: {out}')
+    mnt = mnts[0]
+    gone = []
+    try:
+        before = os.statvfs(mnt)
+        for p in paths:
+            t = mnt + p
+            if not os.path.lexists(t):
+                print(f'  not there: {p}')
+                continue
+            kb = int(subprocess.run(['du', '-skx', t], capture_output=True, text=True).stdout.split()[0] or 0)
+            subprocess.run(['rm', '-rf', t], check=True)
+            gone.append((p, kb))
+        subprocess.run(['sync'], check=True)
+        after = os.statvfs(mnt)
+        print(f'  free: {before.f_bavail * before.f_frsize >> 20} MiB -> {after.f_bavail * after.f_frsize >> 20} MiB')
+    finally:
+        subprocess.run(['hdiutil', 'detach', mnt], capture_output=True)     # by mount point
+    if own_device(img):
+        sys.exit(f'{img} still attached after detaching {mnt}: stopping')
+    prefixes = tuple(p + '/' for p, _ in gone)
+    own = {k: v for k, v in own.items() if k not in dict(gone) and not k.startswith(prefixes)}
+    new_own = Path(str(img) + '.owners-new.json')
+    new_own.write_text(json.dumps(own))
+    subprocess.run(['python3', '-I', str(ROOT / 'tools/macos/hfs-owners.py'), str(img), str(new_own)], check=True)
+    fsck_image(img)
+    for p, kb in gone:
+        print(f'  removed {p} ({kb >> 10} MiB)')
+    print(f'{len(gone)} item(s) removed from {img}; next: plan')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('cmd', choices=['pull', 'add', 'plan', 'push'])
+    ap.add_argument('cmd', choices=['pull', 'add', 'remove', 'plan', 'push'])
     ap.add_argument('image')
-    ap.add_argument('src', nargs='?', help='add: a directory tree laid out like the volume root')
+    ap.add_argument('src', nargs='?', help='add: a directory tree laid out like the volume root; '
+                    'remove: a file listing paths to delete')
     ap.add_argument('--start', type=int, default=182888448)
     ap.add_argument('--count', type=int, default=33554432)
     ap.add_argument('--dry-run', action='store_true')
     a = ap.parse_args()
-    if a.cmd == 'add' and not a.src:
-        sys.exit('add needs SRC')
-    {'pull': pull, 'add': add, 'plan': plan, 'push': push}[a.cmd](a)
+    if a.cmd in ('add', 'remove') and not a.src:
+        sys.exit(f'{a.cmd} needs SRC')
+    {'pull': pull, 'add': add, 'remove': remove, 'plan': plan, 'push': push}[a.cmd](a)
 
 
 if __name__ == '__main__':
