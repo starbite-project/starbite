@@ -129,6 +129,11 @@ static void handle_input(void)
         if (!K.screen_on || pocket_lock)
             continue;                       /* the screen is off, or touch locked: only the Power key counts */
         power_input();
+        if (e.id != 0 && (e.type == KIN_PRESS || e.type == KIN_MOVE || e.type == KIN_RELEASE)) {
+            if (kui_finger_hook)            /* 8a: a second (third...) finger: the UI's multi-touch, if it has one */
+                kui_finger_hook(e.type, e.id, e.x, e.y);
+            continue;
+        }
         ui_kevent(&e);
     }
 }

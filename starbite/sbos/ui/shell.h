@@ -633,7 +633,10 @@ enum { SH_SND_RING = 1, SH_SND_ALARM = 2, SH_SND_NOTIFY = 3, SH_SND_CLICK = 4 };
 /* 8a (Track B; snd.h's SND_TONE_CLICK_DEL .. CHARGE, once each): the keyboard's delete and modifier clicks, the lock,
  * the Camera's shutter, power connected */
 enum { SH_SND_CLICK_DEL = 6, SH_SND_CLICK_MOD = 7, SH_SND_LOCK = 8, SH_SND_SHUTTER = 9, SH_SND_CHARGE = 10 };
-void sh_alarm_sound(int on);    /* cp7x: the kernel's wake-up alarm rings (1) / stops (0): shell_lock.c, ring owner 4 */
+void sh_alarm_sound(int on);
+/* 8a (Track A, multi-touch): the second (third ...) finger, as sh_touch's phases (0 down, 1 move, 2 up), pt and ms.
+ * Finger 0 is sh_touch's. The kernel has a weak no-op; define it in the shell for pinch and two-finger gestures */
+void sh_touch_finger(int finger, int ph, float x, float y, float t_ms);    /* cp7x: the kernel's wake-up alarm rings (1) / stops (0): shell_lock.c, ring owner 4 */
 int sh_snd_tone(int kind);
 void sh_snd_tone_stop(void);
 int sh_snd_volume(void);

@@ -564,6 +564,7 @@ extern int (*kui_confirm_hook)(const char *title, const char *l1, const char *l2
 void kui_confirm(const char *title, const char *l1, const char *l2, const char *l3, const char *hold,
                  void (*done)(int ok));
 void kui_power_menu(void);
+extern void (*kui_finger_hook)(int type, int id, int x, int y);   /* 8a: fingers 1.. (KIN_PRESS / MOVE / RELEASE, panel px) */
 extern int (*kui_power_hook)(void);     /* Track A, 1.0: a UI with its own power sheet (Next); 1 = handled */
 void kui_screen_changed(int on);
 /* P2r (Starbite OS Next): the UI's own screen off / on (no classic black frame) and the Power key's or the screen-off

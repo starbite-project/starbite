@@ -23,7 +23,7 @@ static int power_long_sent, bixby_long_sent, t_down;
 static uint64_t last_input;
 int input_fast;                    /* P3k: set by Starbite OS Next: 16 ms reads while the screen is on (no 50 ms first touch) */
 
-void kin_push(int type, int x, int y)
+void kin_push_id(int type, int id, int x, int y)
 {
     unsigned n = (qh + 1) % 32;
     if (n == qt)
@@ -31,7 +31,13 @@ void kin_push(int type, int x, int y)
     q[qh].type = type;
     q[qh].x = x;
     q[qh].y = y;
+    q[qh].id = id;
     qh = n;
+}
+
+void kin_push(int type, int x, int y)
+{
+    kin_push_id(type, 0, x, y);
 }
 
 int kin_pop(struct kin *e)
@@ -125,21 +131,30 @@ static void keys_poll(uint64_t now)
     }
 }
 
+/* 8a (Track A, multi-touch): every finger's events (sb_touch_events keeps the touch IC's TID), each with its id; finger
+ * 0 is the first, as before (the UIs' single touch); the others go to the UI's finger hook (main.c). t_down: any
+ * finger down; fdown: which */
 static void touch_poll(uint64_t now)
 {
-    int st, x, y;
-    for (unsigned n = 0; n < 16 && sb_touch_event(&st, &x, &y); ++n) {
+    static unsigned fdown;
+    int id[16], st[16], x[16], y[16];
+    int n = sb_touch_events(id, st, x, y, 16);
+    for (int k = 0; k < n; ++k) {
+        unsigned bit = id[k] >= 0 && id[k] < 16 ? 1U << id[k] : 0;
+        if (!bit)
+            continue;
         last_input = now;
-        if (st == 1) {
-            t_down = 1;
-            kin_push(KIN_PRESS, x, y);
-        } else if (st == 2 && t_down) {
-            kin_push(KIN_MOVE, x, y);
-        } else if (st == 3 && t_down) {
-            t_down = 0;
-            kin_push(KIN_RELEASE, x, y);
+        if (st[k] == 1) {
+            fdown |= bit;
+            kin_push_id(KIN_PRESS, id[k], x[k], y[k]);
+        } else if (st[k] == 2 && (fdown & bit)) {
+            kin_push_id(KIN_MOVE, id[k], x[k], y[k]);
+        } else if (st[k] == 3 && (fdown & bit)) {
+            fdown &= ~bit;
+            kin_push_id(KIN_RELEASE, id[k], x[k], y[k]);
         }
     }
+    t_down = fdown != 0;
 }
 
 int input_poll(void)

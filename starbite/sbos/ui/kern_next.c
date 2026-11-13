@@ -1182,6 +1182,16 @@ static void next_gpu_clean(void *ctx, const void *p, uint64_t n)
 
 /* ---- the kernel's UI entry points in this image ------------------------------------------------------------- */
 static void next_save(void);                         /* Track A lifecycle (below) */
+/* 8a (Track A, multi-touch): fingers 1.. (finger 0 stays sh_touch's single touch). The shell defines sh_touch_finger
+ * when it has two-finger gestures (pinch); until then they are dropped. ph: 0 down, 1 move, 2 up, as sh_touch */
+__attribute__((weak)) void sh_touch_finger(int finger, int ph, float x, float y, float t_ms) { (void)finger; (void)ph; (void)x; (void)y; (void)t_ms; }
+static void next_finger(int type, int id, int x, int y)
+{
+    if (!ready) return;
+    int ph = type == KIN_PRESS ? 0 : type == KIN_MOVE ? 1 : 2;
+    sh_touch_finger(id, ph, x / TK_PT, y / TK_PT, (float)sb_ms());
+    start_ticking();
+}
 void next_kinit(void)
 {
     boot_t0 = sb_ms();
@@ -1202,6 +1212,7 @@ void next_kinit(void)
     }
     kui_confirm_hook = next_confirm;             /* the kernel's hold confirmations (the modem's Start) in this UI */
     kui_power_hook = next_power_held;            /* Track A, 1.0: Power held: the shell's power sheet */
+    kui_finger_hook = next_finger;               /* 8a: fingers 1.. for the shell's pinch and other two-finger gestures */
     kui_screen_hook = next_screen;               /* P2r: sleep and wake as animations */
     kui_sleep_hook = next_sleep;
     kui_save_hook = next_save;                   /* Track A lifecycle: the pages' on_save before a restart / switch-off */
