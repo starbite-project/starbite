@@ -78,3 +78,5 @@ a1sheet: wait 300; state storeapp=firefox; wait 1200; tap 185 222; wait 1200; ta
 a1acct: wait 300; state store=today; wait 1200; tap 352 112; wait 1300; tap 195 550; wait 1800
 wifiscroll: wait 300; drag 195 795 195 330 220; wait 900; tap 325 736; wait 1100; tap 195 252; wait 900; tap 340 122; wait 1200; drag 195 650 195 250 300; wait 1500; drag 195 300 195 700 300; wait 1200; tap 60 63; wait 900; drag 195 795 200 450 260; wait 1200
 pinch: wait 300; drag 195 795 195 330 220; wait 900; tap 65 392; wait 2600; tap 195 330; wait 1600; pinch 195 420 60 240 400; wait 1200; drag 195 420 120 300 300; wait 900; pinch 195 420 240 50 400; wait 1200; drag 195 300 195 620 240; wait 900; drag 195 795 200 450 260; wait 1200
+a1shots: wait 300; state storeapp=gnome-calculator; wait 3000; state storeapp=gnome-chess; wait 3000
+a1shots2: wait 300; state storeapp=gnome-calculator; wait 1500; drag 300 480 60 480 250; wait 800; drag 120 480 360 480 250; wait 800; drag 195 600 195 300 300; wait 900
