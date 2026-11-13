@@ -1511,7 +1511,7 @@ static void build_wclock(void)
     tk_layer *l = &hparts[7];
     relayer(l);
     float x = WID_X(0), y = WCK_Y, s = WID_W, cx = x + s / 2, cy = y + s / 2;
-    dc d = mk(l, "home-clock", x, y, s, s + 30, 2, 0);
+    dc d = mk(l, "home-clock", x, y, WID_X(1) + WID_W - x, s + 30, 2, 0);
     tk_col ink = tk_hex(0x1c1c1e, 1);
     d_rrect(&d, x, y, s, s, 24, ink);                              /* iOS's Clock widget: a black plate, a white face */
     d_rrect(&d, cx - 66, cy - 66, 132, 132, 66, W(1));
@@ -1532,6 +1532,35 @@ static void build_wclock(void)
     d_rrect(&d, cx - 2, cy - 2, 4, 4, 2, C_ORANGE);
     float cw = tw(TK_IT400, 12, "Clock", 0, 0);
     d_text(&d, TK_IT400, 12, cx - cw / 2, y + s + 18, "Clock", 0, 0, INK, 1);
+    /* 8a (top ten #5): page 1 filled as iOS's: the Calendar widget beside the Clock (iOS's small Calendar widget in
+     * dark mode: a #1c1c1e plate, the weekday 12 / 700 red, the day 44 / 400, then the day's line), so the row is
+     * two widgets, not a widget and a hole */
+    {
+        float x1 = WID_X(1), tx = x1 + 16;
+        d_rrect(&d, x1, y, s, s, 24, ink);
+        char wd[12];
+        int n = 0;
+        for (const char *p = WD[ST.wday % 7]; *p && n < 11; p++) wd[n++] = *p >= 'a' && *p <= 'z' ? (char)(*p - 32) : *p;
+        wd[n] = 0;
+        d_text(&d, TK_IT700, 12, tx, base_of(TK_IT700, 12, y + 16, 0), wd, .3f, 0, C_RED, 0);
+        char dn[4];
+        dn[put_dec(dn, ST.day)] = 0;
+        d_text(&d, TK_IT400, 44, tx - 2, base_of(TK_IT400, 44, y + 34, 0), dn, -.8f, TK_TNUM, INK, 0);
+        char at[16], line[40];
+        int k = 0;
+        if (ALM.on) {
+            fmt_time(at, ALM.h, ALM.m, 1);
+            const char *pre = ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? "Alarm " : "Tomorrow ";
+            for (const char *p = pre; *p;) line[k++] = *p++;
+            for (const char *p = at; *p && k < 38;) line[k++] = *p++;
+        } else
+            for (const char *p = "No alarm set"; *p;) line[k++] = *p++;
+        line[k] = 0;
+        d_text(&d, TK_IT600, 12.5f, tx, y + s - 38, "No events today", 0, 0, W(.6f), 0);
+        d_text(&d, TK_IT400, 12.5f, tx, y + s - 20, line, 0, TK_TNUM, W(.6f), 0);
+        float kw = tw(TK_IT400, 12, "Calendar", 0, 0);
+        d_text(&d, TK_IT400, 12, x1 + s / 2 - kw / 2, y + s + 18, "Calendar", 0, 0, INK, 1);
+    }
     trim(l);
     tk_layer_prepare(l);
     l->hidden = 0;
@@ -1540,11 +1569,13 @@ static void build_wclock(void)
 static int wclock_tap(float x, float y)
 {
     float x0 = x - page_x;
-    if (x0 < WID_X(0) || x0 >= WID_X(0) + WID_W || y < WCK_Y || y >= WCK_Y + WID_W || page_x < -195) return 0;
+    if (y < WCK_Y || y >= WCK_Y + WID_W || page_x < -195) return 0;
+    int w = x0 >= WID_X(0) && x0 < WID_X(0) + WID_W ? 0 : x0 >= WID_X(1) && x0 < WID_X(1) + WID_W ? 1 : -1;
+    if (w < 0) return 0;
     for (int a = 0; a < NAPPS; a++)
-        if (!tk_strcmp(APPS[a].k, "clock")) {
+        if (!tk_strcmp(APPS[a].k, w ? "calendar" : "clock")) {     /* 8a: the Calendar widget opens Calendar */
             ap_from_on = 1;
-            ap_from = (arect){ WID_X(0) + page_x, WCK_Y, WID_W, WID_W, 24 };
+            ap_from = (arect){ WID_X(w) + page_x, WCK_Y, WID_W, WID_W, 24 };
             app_open(a);
             return 1;
         }
