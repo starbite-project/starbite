@@ -95,6 +95,7 @@ static struct die dies[2] = {
     { AMP_ADDR_SPK, "0x3A (speaker)", 0, 0, 0x3E, 0x02, 0 },
 };
 static int bus_up_done;
+int amp_use_bb = 1;                 /* amp.c's transfers by hand on gpp4-4/5 (run 7e); 0: USI07's HSI2C */
 static int any_b;                   /* a B among them: max98512_probe's extra block, written to both */
 static uint8_t boost_mode;          /* BOOST_BYPASS_2: 0 (automatic) when the 0x39 die is a B, else 2 (off) */
 
@@ -421,6 +422,91 @@ static int bb_quick(unsigned addr, unsigned *scl_stuck)
     bb_pin(BB_SDA, 0);
     return (int)ack;
 }
+/* ---- the bit-banged bus amp.c uses for its transfers (run 7e) ------------------------------------------------
+ * Run 7e: by hand on gpp4-4/5 both dies acknowledge (0x39, 0x3A ACK; an empty address does not), while USI07's HSI2C
+ * never leaves its START state (runs 7c / 7d). So amp.c's register traffic (a few dozen bytes per call or stream
+ * start) goes over the same two pins as open-drain GPIOs, ~25 kHz; the audio itself is I2S on UAIF1, not this bus.
+ * Pins: input = released (the board's pull-ups), output 0 = low; never driven high. */
+static int bb_scl_release(void)
+{
+    bb_pin(BB_SCL, 0);
+    for (unsigned w = 0; w < 200 && !bb_get(BB_SCL); ++w)
+        H->delay_us(10);                        /* clock stretching: up to 2 ms */
+    return bb_get(BB_SCL) ? 0 : -1;
+}
+static int bb_start(void)                       /* also a repeated start (from SCL low) */
+{
+    bb_pin(BB_SDA, 0);
+    if (bb_scl_release())
+        return -1;
+    if (!bb_get(BB_SDA))
+        return -1;                              /* SDA held low by someone */
+    bb_pin(BB_SDA, 1);
+    bb_pin(BB_SCL, 1);
+    return 0;
+}
+static void bb_stop(void)
+{
+    bb_pin(BB_SDA, 1);
+    (void)bb_scl_release();
+    bb_pin(BB_SDA, 0);
+}
+static int bb_wbyte(uint8_t b)                  /* 0 when acknowledged */
+{
+    for (int i = 7; i >= 0; --i) {
+        bb_pin(BB_SDA, !((b >> i) & 1U));
+        if (bb_scl_release())
+            return -1;
+        bb_pin(BB_SCL, 1);
+    }
+    bb_pin(BB_SDA, 0);
+    if (bb_scl_release())
+        return -1;
+    int nack = (int)bb_get(BB_SDA);
+    bb_pin(BB_SCL, 1);
+    return nack ? -1 : 0;
+}
+static int bb_rbyte(uint8_t *b, int ack)
+{
+    unsigned v = 0;
+    bb_pin(BB_SDA, 0);
+    for (int i = 0; i < 8; ++i) {
+        if (bb_scl_release())
+            return -1;
+        v = (v << 1) | bb_get(BB_SDA);
+        bb_pin(BB_SCL, 1);
+    }
+    bb_pin(BB_SDA, ack);                        /* ACK: pull SDA low; the last byte: NACK (released) */
+    if (bb_scl_release())
+        return -1;
+    bb_pin(BB_SCL, 1);
+    bb_pin(BB_SDA, 0);
+    *b = (uint8_t)v;
+    return 0;
+}
+/* wn bytes written to addr, then (rn > 0) a repeated start and rn bytes read; a stop at the end. 0 or -1. */
+int amp_bb_xfer(unsigned addr, const uint8_t *w, unsigned wn, uint8_t *r, unsigned rn)
+{
+    uint32_t con = H->rd32(GPP4), pud = H->rd32(GPP4 + 8);
+    if ((con >> 16) & 0xFFU)                    /* SCL / SDA as plain inputs (released), no internal pulls */
+        H->wr32(GPP4, con & ~0x00FF0000U);
+    if ((pud >> 8) & 0xFU || (pud >> 16) & 0xFFU)
+        H->wr32(GPP4 + 8, pud & ~0x00FF0F00U & ~0x00FF0000U);
+    int rc = 0;
+    if (wn) {
+        rc = bb_start() || bb_wbyte((uint8_t)(addr << 1));
+        for (unsigned i = 0; !rc && i < wn; ++i)
+            rc = bb_wbyte(w[i]);
+    }
+    if (!rc && rn) {
+        rc = bb_start() || bb_wbyte((uint8_t)((addr << 1) | 1U));
+        for (unsigned i = 0; !rc && i < rn; ++i)
+            rc = bb_rbyte(&r[i], i + 1 < rn);
+    }
+    bb_stop();
+    return rc ? -1 : 0;
+}
+
 static void bb_check(void)
 {
     uint32_t con = H->rd32(GPP4), dat = H->rd32(GPP4 + 4);
@@ -849,6 +935,8 @@ static int k_i2c_xfer(uintptr_t bus, unsigned addr, const uint8_t *w, unsigned w
 {
     if (bus != AMP_BUS || wn > 32 || rn > 32 || (!wn && !rn))
         return AUD_EINVAL;
+    if (amp_use_bb)                 /* run 7e: the HSI2C never starts a transfer; the dies answer by hand */
+        return amp_bb_xfer(addr, w, wn, r, rn) ? AUD_EIO : 0;
     if (!k_amp_bus.state) {         /* first use: S-Boot's timing, else Android's 200 MHz / 400 kHz one (fled.c) */
         k_amp_bus.fs1 = k_rd32(bus + 0x60), k_amp_bus.fs2 = k_rd32(bus + 0x64), k_amp_bus.fs3 = k_rd32(bus + 0x68);
         if (!((k_amp_bus.fs3 >> 16) & 0xffU)) {
