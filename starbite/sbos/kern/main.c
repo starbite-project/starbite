@@ -28,7 +28,8 @@ void next_kinit(void), next_kdraw(void), next_kevent(const void *e), next_ktimer
 #include "sdclk.h"
 
 struct kstate K;
-const char *sbos_film_now;          /* 8c+: the self test's current film (kern_next.c); 0 outside the films */
+const char *sbos_film_now;
+uint64_t sbos_film_t0;          /* 8c+: the self test's current film (kern_next.c); 0 outside the films */
 static uint64_t boot_ms;
 
 static void dispatch_timer(unsigned owner, unsigned id)
@@ -310,6 +311,10 @@ void sb_main(void)
                     unsigned j_ = K.tl_n++;
                     K.tl_ms[j_] = took > 65535 ? 65535 : (uint16_t)took;
                     K.tl_film[j_] = sbos_film_now;
+                    {
+                        uint64_t at_ = sbos_film_now && turn0 > sbos_film_t0 ? turn0 - sbos_film_t0 : 0;
+                        K.tl_at[j_] = at_ > 65535 ? 65535 : (uint16_t)at_;
+                    }
                     K.tl_what[j_] = slow_what;
                     K.tl_owner[j_] = (uint8_t)slow_owner;
                     K.tl_id[j_] = (uint8_t)slow_id;

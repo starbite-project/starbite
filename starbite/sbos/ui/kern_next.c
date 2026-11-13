@@ -2361,6 +2361,7 @@ static int glass_cal_step(void)
         return 0;
     }
     int v = gcal / 3, g = gcal % 3;
+    if (!sbos_film_now || sbos_film_now[0] != 'g' || sbos_film_now[1] != 'l') sbos_film_t0 = sb_ms();
     sbos_film_now = "glass stills";
     lens_gain = GAIN[g];
     if (g == 0) {
@@ -2418,6 +2419,7 @@ static void film_start(int film)
     sh_idle();
     F.t0 = sb_ms();   /* cp7: the film's clock after its reset and idle work (~0.5 s): its first steps no longer pass
                        * "during a stall" (the unlock swipe of the phone film was skipped so, Track B's finding) */
+    sbos_film_t0 = F.t0;                   /* 8f: the slow turns' times count from here (the films' scripts do) */
     {   /* P2w: a marker for the camera (the main session times its shots from the films' starts) */
         struct ub u;
         ub_init(&u);

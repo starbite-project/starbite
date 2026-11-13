@@ -743,6 +743,7 @@ void selftest_timer(unsigned id)
                 }
                 ub_s(&u, " ");
                 ub_dec(&u, K.tl_ms[i]);
+                if (K.tl_film[i]) { ub_s(&u, "@+"); ub_dec(&u, K.tl_at[i]); }   /* 8f: when, in the film */
             }
             sb_log(u.b);
         }
