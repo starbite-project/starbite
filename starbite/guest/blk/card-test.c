@@ -187,6 +187,53 @@ static void test_resolve(void)
     CHECK(!changed_outside(0, 0), "resolving wrote nothing");
 }
 
+/* ---- cp7i: the stepped proof (batches of FAT sectors, as the phone's start does one per tick) gives the same
+ * verdict and run as the one-sector walk, in fewer reads ---------------------------------------------------- */
+static const char *stepped(const char *path, uint32_t batch, uint64_t *s, uint64_t *n, uint32_t *reads)
+{
+    static struct exfat_ent hit[1];
+    static uint8_t fbuf[256 * 512];
+    struct exfat_ent e;
+    struct gcard_proof p;
+    *s = *n = 0;
+    *reads = 0;
+    if (exfat_walk(&fs, path, &e, hit, 1))
+        return "the file is not on the card";
+    gcard_proof_begin(&p, &fs, p_start, p_len, &e);
+    int steps = 0;
+    while (!gcard_proof_step(&p, &fs, fbuf, batch))
+        ++steps;
+    *reads = p.reads;
+    return gcard_proof_result(&p, &fs, s, n);
+}
+static void test_stepped(void)
+{
+    static const char *const files[] = {GCARD_BASE, GCARD_REPO, GCARD_OVERLAY, GCARD_DIR "frag.img",
+                                        GCARD_DIR "long.img", GCARD_DIR "tiny.img", GCARD_DIR "sub"};
+    mount_card();
+    for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
+        uint64_t s1, n1, s2, n2, s3, n3;
+        uint32_t r2, r3;
+        const char *a = gcard_extent(&fs, p_start, p_len, files[i], (uint8_t *)sec, &s1, &n1);
+        const char *b = stepped(files[i], 1, &s2, &n2, &r2);
+        const char *c = stepped(files[i], 128, &s3, &n3, &r3);
+        CHECK(((!a && !b && !c) || (a && b && c && !strcmp(a, b) && !strcmp(a, c))) && s1 == s2 && s1 == s3 &&
+              n1 == n2 && n1 == n3, "%s: the same verdict stepped (batch 1 and 128): %s / %s / %s", files[i],
+              a ? a : "ok", b ? b : "ok", c ? c : "ok");
+        CHECK(r3 <= r2, "%s: batch 128 reads %u <= batch 1 reads %u", files[i], r3, r2);
+    }
+    /* a broken link found in a batch too */
+    uint64_t c = (L("T_REPO_SECTOR") - L("T_HEAP")) / 64 + 2, s, n;
+    uint8_t *link = card + L("T_FAT") * 512 + c * 4;
+    uint8_t keep = link[0];
+    uint32_t r;
+    link[0] = (uint8_t)(keep + 5);
+    const char *no = stepped(GCARD_REPO, 128, &s, &n, &r);
+    CHECK(no && strstr(no, "fragmented"), "batch 128: repo.erofs with a changed FAT link refused: %s", no ? no : "offered");
+    link[0] = keep;
+    CHECK(!changed_outside(0, 0), "the stepped proofs wrote nothing");
+}
+
 /* ---- the fence: the card-file grant and its writes ------------------------------------------------------ */
 static void test_fence(void)
 {
@@ -285,6 +332,9 @@ int main(int argc, char **argv)
     int c0 = checks, f0 = fails;
     test_resolve();
     printf("%s card-test: resolver (exFAT files to one run each): %d checks\n", fails == f0 ? "PASS" : "FAIL", checks - c0);
+    c0 = checks, f0 = fails;
+    test_stepped();
+    printf("%s card-test: stepped proof (cp7i: FAT batches, the same verdicts): %d checks\n", fails == f0 ? "PASS" : "FAIL", checks - c0);
     c0 = checks, f0 = fails;
     test_fence();
     printf("%s card-test: fence (card-file grant, writes inside only, p2 untouched, UFS calls %d): %d checks\n",
