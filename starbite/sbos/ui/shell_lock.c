@@ -2194,12 +2194,14 @@ static void build_cc_stage(int st)
          * comes in first, the 26 pt one (neutral dim .25, not a blue tint) over it */
         relayer(&ccblur1);
         tk_layer_init(&ccblur1, "cc-blur1");
-        if (tk_bmp_new(&ccblur1.bmp, q.w, q.h)) {
-            tk_bmp_copy(&ccblur1.bmp, 0, 0, &q, 0, 0, q.w, q.h);
-            tk_bmp_blur(&ccblur1.bmp, PT(8) / 4);
+        /* cp7k (7j: this stage 45 ms on the phone): at an eighth each way (an 8 pt blur is smooth at that size; a
+         * quarter of the px), drawn 8x */
+        if (tk_bmp_new(&ccblur1.bmp, (q.w + 1) / 2, (q.h + 1) / 2)) {
+            tk_bmp_down2(&ccblur1.bmp, &q);
+            tk_bmp_blur(&ccblur1.bmp, PT(8) / 8);
             tk_bmp_satbright(&ccblur1.bmp, 1.15f, 1);
             tk_bmp_tint(&ccblur1.bmp, TK_RGBA(0, 0, 0, .12f));
-            ccblur1.sx = ccblur1.sy = 4;
+            ccblur1.sx = ccblur1.sy = 8;
             ccblur1.opaque = 1;
         }
     }
@@ -4473,9 +4475,20 @@ static void ep_work(int idle)
 /* home is about to show (the lock lifting, the Control Centre closed): its pieces now */
 static void ep_home_now(void)
 {
+    /* cp7k (7j: a 203 ms sh_tick at the unlock right after the hold: both finished here at once): only page 1's widgets
+     * (seen as the lock lifts); page 2 goes on a part an idle turn, made whole only if the pages move first
+     * (ep_apps2_now) */
     if (EP.post & EP_HOMEW) while (home_w_step()) ;           /* (a part-made one finished) */
-    if (EP.post & EP_APPS2) while (home_apps2_step()) ;
-    EP.post &= ~(EP_HOMEW | EP_APPS2);
+    EP.post &= ~EP_HOMEW;
+    if (page_x < -195 && (EP.post & EP_APPS2)) { while (home_apps2_step()) continue; EP.post &= ~EP_APPS2; }   /* home opens on page 2 */
+    relink();
+}
+/* cp7k: page 2 about to show (the pages move): its rest now */
+static void ep_apps2_now(void)
+{
+    if (EP.goal < 0 || !(EP.post & EP_APPS2)) return;
+    while (home_apps2_step()) ;
+    EP.post &= ~EP_APPS2;
     relink();
 }
 /* all of it now (a set state, the reset): a switch's rest made, a prepared one dropped */
@@ -5136,6 +5149,7 @@ void sh_set(const char *what, const char *key, float v)
         if (CCS.built && CCS.on) { cc_x_open((int)v); while (CX.todo < 6) cc_x_link_step(); CX.sp.live = 0; CX.e = 1; set_cc(CCS.p); }
     } else if (!tk_strcmp(what, "page")) {
         sp_page.live = 0;
+        ep_apps2_now();                              /* cp7k */
         set_page(-390 * v);
     } else if (!tk_strcmp(what, "hint")) {
         hint_a = v;
@@ -5640,6 +5654,7 @@ void sh_touch(int phase, float x, float y, float t)
             if (y >= DOCK_TOP && y < H_PT - 30) { T.kind = G_DOCK; icon_press(app_hit(x, y)); return; }   /* the dock: a tap opens its app */
             if (SRCH_HIT(x, y)) { T.kind = G_DOCK; return; }   /* P3g: Search */
             if (y >= 56 && y < DOCK_TOP && !SRCH_HIT(x, y) && !on_w) {
+                ep_apps2_now();                  /* cp7k: page 2 whole before it can show (Emergency's switch's rest) */
                 T.kind = G_PAGE;
                 T.base = page_x;
                 page_dir = 0;
@@ -6094,7 +6109,7 @@ static void ep_tick(void)
     if (EP.goal >= 0 && EP.goal != EMG && !ep_holding()) ep_cancel();
     if (EP.goal < 0 && ep_holding() && em_t >= 1) ep_begin(!EMG);
     if (EP.goal < 0) return;
-    if (EP.goal == EMG && EP.post & (EP_HOMEW | EP_APPS2) && (locked ? lockY != 0 : !CCS.on)) ep_home_now();
+    if (EP.goal == EMG && EP.post & EP_HOMEW && (locked ? lockY != 0 : !CCS.on)) ep_home_now();
     if (!EP.fresh) ep_work(0);                   /* the frame of a tap's switch does the switch only */
     EP.fresh = 0;
 }
@@ -6421,9 +6436,12 @@ void sh_idle(void)
     if (sh_moving()) return;
     /* B6: a prepared switch nobody holds any more goes; a switch's rest, a slice a turn (sh_idle_pending) */
     if (EP.goal >= 0 && EP.goal != EMG && !ep_holding()) ep_cancel();
-    /* cp7i: when only home's parts are left (home is not seen from the lock), the lock's own cards (sv_idle) go first */
+    /* cp7i / 7k: when only home's parts are left (home is not seen from the lock), what the lock shows and needs goes
+     * first: its own cards (sv_idle), then its flat copy (the unlock's first frame; each card restarts it), then home's
+     * widgets and page 2 (7j: a 203 ms tick at an unlock right after the hold, the flat copy and home made there) */
     int ep_home_only = EP.ground && !(EP.post & (EP_CARDS | EP_LW));
-    if (EP.goal >= 0 && EP.goal == EMG && !(!EMG && cards_pending > 0) && !(ep_home_only && sv_idle_pending())) { IP_("ep_work", ep_work(1)); return; }   /* lock's cards first */
+    int lock_first = sv_idle_pending() || (locked && lockY == 0 && !focus_on && (flat_ver != lock_ver || flat_ground != C->ground_gen));
+    if (EP.goal >= 0 && EP.goal == EMG && !(!EMG && cards_pending > 0) && !(ep_home_only && lock_first)) { IP_("ep_work", ep_work(1)); return; }   /* lock's cards first */
     IP_("tk_comp_idle", tk_comp_idle(C));
     IP_("sw_idle", sw_idle());                                   /* helper D: the open app's snapshot for the switcher (when it changed) */
     IP_("mp_idle", mp_idle());                                 /* helper D: Maps' last GPS fix (it may read the card: idle only) */
