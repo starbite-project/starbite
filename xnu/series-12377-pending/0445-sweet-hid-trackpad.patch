@@ -8,11 +8,11 @@ Subject: [PATCH] patch: 0445-sweet-hid-trackpad.patch - macOS touch screen as a 
 
 S3z2 2026-11-13: the menu bar is on the panel; the user asked for the touch screen to work like a
 trackpad instead of the pointer jumping under the finger. Applies on 0444 (seq-12377 line).
-Kernel seq1p = seq1o + this.
+Kernel seq1p = seq1o + this; seq1q: tap-then-drag needs 30 px (S3z3: 11 px of jitter on a second tap started a drag).
 ---
 
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-13 20:21:04
-+++ b/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-13 20:21:04
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-13 20:40:23
 @@ -370,6 +370,9 @@
  private:
  	void mouseTouch(int finger, bool down, int x, int y, IOFixed nx, IOFixed ny);
@@ -87,7 +87,7 @@ Kernel seq1p = seq1o + this.
  	IOLockLock(fLock);
  	uint32_t seq = __atomic_load_n(&sweet_fb_cur_seq, __ATOMIC_ACQUIRE);
  	if (st.cal == 0) {
-@@ -911,16 +933,214 @@
+@@ -911,16 +933,215 @@
  	}
  	if (kick && fSteer) {
  		fSteer->setTimeoutMS(1);
@@ -122,11 +122,11 @@ Kernel seq1p = seq1o + this.
 +	int n = 0;
 +	for (; v; v &= v - 1) {
 +		n++;
-+	}
+ 	}
 +	return n;
-+}
-+
-+void
+ }
+ 
+ void
 +SweetHIDTouch::padTouch(int finger, bool down, int x, int y)
 +{
 +	uint64_t now = mach_absolute_time();
@@ -182,7 +182,8 @@ Kernel seq1p = seq1o + this.
 +				events[ne++] = IOHIDEvent::scrollEvent(now, -sx, -sy, 0);
 +			}
 +		} else if (speed) {
-+			if (pad.armDrag && !pad.dragging && pad.travel > 10) {
++			/* 30 panel px: S3z3 2026-11-13, a second tap's 11 px of jitter started a drag */
++			if (pad.armDrag && !pad.dragging && pad.travel > 30) {
 +				/* tap, then touch and move: drag instead of the pending click */
 +				pad.armDrag = false;
 +				pad.pendingClicks = 0;
@@ -239,7 +240,7 @@ Kernel seq1p = seq1o + this.
 +				break;
 +			}
 +		}
- 	}
++	}
 +	IOLockUnlock(fLock);
 +	if (what) {
 +		IOLog("SWEET HID: pad %s (finger %d, %d down) at %d,%d travel %d\n", what, finger, n, x, y, pad.travel);
@@ -251,10 +252,10 @@ Kernel seq1p = seq1o + this.
 +	if (arm && fSteer) {
 +		fSteer->setTimeoutMS(260);
 +	}
- }
- 
++}
++
 +/* the timer: send the pending tap clicks once the double-tap window is over and no finger is down */
- void
++void
 +SweetHIDTouch::padTick(void)
 +{
 +	uint64_t now = mach_absolute_time();
