@@ -2368,6 +2368,25 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - T62 (`build/win/stage/sbwddm-t62`) now ships it (A B A2 B2, big cores). The user wants no phone work 15:30-20:00,
   so T62 runs after 20:00.
 
+### 6.69 Why the user's own big-core boot ran GD at ~0.3 fps: test cycles left full mode off
+
+- **User report (19:15):** a normal boot of "Windows 11 (big cores)" ran GD at ~0.3 fps, then froze. T61 measured
+  ~34 fps on the same entry.
+- **Cause (process, not drivers):** every gpu-cycle test install writes `GuardAutoClear=0` and resets
+  `FullGuardBoots=0`. The full-mode test boot counts itself (`FullGuardBoots=1`) and, with auto-clear off, never
+  clears it. Every later boot therefore refuses full mode: T61's post hive has `FullGuardBootsAtStart 1,
+  FullRefused 1, WddmMode 0`. Only `--install-default` sets `GuardAutoClear=1` / `FullGuardBoots=0` again. The last
+  one was T51's (22:24, 11-12), and T52 was the next test cycle (23:42), so every user boot since has been
+  display-only (no GPU): GD drew in software. Test cycles also leave `LiveSec/LiveFlushSec 1/1` (a hive flush every
+  second) and their own drivers.
+- **GD's GL driver** is app-local in the game folder, which `--install-default` never touches. sb-gd.bat removed it
+  after each test (no kit marker) or overwrote the user's copy (marker).
+- **Fix:** `--install-default` with T61's stage plus the four blt switches every test ran with
+  (`--scan-flip 1 --cached-blt 1 --parallel-blt 1 --blt-no-drain 1`; install-default defaults them to 0), then
+  `tools/win/gd-kit-push.sh STAGE/gputest` (new: the GD driver into the game folder with the kit marker, read back,
+  refuses a foreign opengl32.dll; `--show` is read-only). After every test cycle, chain both again.
+- sb-gd.bat (T62): the user's GD driver copy is kept aside (`*.user`) and put back after the test.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

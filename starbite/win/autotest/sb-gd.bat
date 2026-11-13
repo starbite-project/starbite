@@ -22,6 +22,11 @@ if not exist %D%\opengl32-gd.dll (echo GD2: no opengl32-gd.dll staged >> %L% & e
 set GDKIT=0
 if exist "%G%\opengl32.dll.starbite" set GDKIT=1
 if exist "%G%\opengl32.dll" if "%GDKIT%"=="0" (echo GD2 skipped: a foreign opengl32.dll is in the game folder >> %L% & exit /b 0)
+rem T62 (6.69): the user's own copy (gd-kit-push.sh / the kit) is kept aside and put back after the test
+if "%GDKIT%"=="1" (
+  copy /y "%G%\opengl32.dll" "%G%\opengl32.dll.user" > nul
+  copy /y "%G%\libgallium_wgl.dll" "%G%\libgallium_wgl.dll.user" > nul
+)
 copy /y %D%\opengl32-gd.dll "%G%\opengl32.dll" > nul
 copy /y %D%\libgallium_wgl-gd.dll "%G%\libgallium_wgl.dll" > nul
 echo starbite > "%G%\opengl32.dll.starbite"
@@ -57,6 +62,11 @@ echo GD2 GeometryDash.exe EXITED BY ITSELF >> %L%
 :finish
 ping -n 4 127.0.0.1 > nul
 if "%GDKIT%"=="0" del /f "%G%\opengl32.dll" "%G%\libgallium_wgl.dll" "%G%\opengl32.dll.starbite"
+if "%GDKIT%"=="1" if exist "%G%\opengl32.dll.user" (
+  move /y "%G%\opengl32.dll.user" "%G%\opengl32.dll" > nul
+  move /y "%G%\libgallium_wgl.dll.user" "%G%\libgallium_wgl.dll" > nul
+  echo GD2 [%R%] the user's GL driver copy put back >> %L%
+)
 wevtutil qe Application /q:"*[System[(EventID=1000 or EventID=1001 or EventID=1002 or EventID=1026)]]" /rd:true /c:30 /f:text > C:\ProgramData\Starbite\umdlog\gd-app-events.txt 2>&1
 wevtutil qe System /q:"*[System[(EventID=4101 or EventID=2004 or EventID=2019 or EventID=2020)]]" /rd:true /c:30 /f:text > C:\ProgramData\Starbite\umdlog\gd-sys-events.txt 2>&1
 echo GD2 [%R%] end %date% %time% >> %L%
