@@ -185,7 +185,12 @@ static uint64_t bd_us_frame;                /* (the frame log reads it before it
 static uint64_t last_tick, boot_t0;
 /* the frame statistics of the current gesture (logged per film in the self test, per gesture otherwise) */
 static struct { uint32_t n, nhalf, over16, maxus, nboost, nwait; uint64_t sumus, sumwait; uint32_t hist[64]; uint8_t ms[120];
-                 uint32_t shmax, shover; } FS;   /* P3i: the shell's own time (a touch's handling, a tick) */
+                 uint32_t shmax, shover; uint32_t tpn, tpmax, tpdrop; uint64_t tpsum; } FS;   /* P3i: the shell's own time (a touch's handling, a tick) */
+/* 8a (the top ten's item 3, B's B9): touch to photon, from a finger's down or up to the next frame handed to the
+ * display (queued for its latch: up to one refresh more on the glass). One touch at a time; none counted when no
+ * frame follows within 500 ms (the touch changed nothing on the screen) */
+static uint64_t tp_t;
+static void touch_mark(int ph) { if (ph != 1 && !tp_t) tp_t = sb_us(); }
 
 static void log_mb(const char *what, uint64_t v)
 {
@@ -558,6 +563,12 @@ static void scan_init(void)
 void next_kdraw(void);
 static void present(void)
 {
+    if (comp.last_px && tp_t) {
+        uint64_t d = sb_us() - tp_t;
+        tp_t = 0;
+        if (d > 500000) FS.tpdrop++;
+        else { FS.tpn++; FS.tpsum += d; if (d > FS.tpmax) FS.tpmax = (uint32_t)d; }
+    }
     if (comp.last_px) {
         if (flip_on && comp.acquire) {
             if (flip_pending()) flips_replaced++;    /* the queued frame is never shown */
@@ -715,6 +726,18 @@ static void stats_log(const char *what)
     ub_s(&u, flip_on ? " (three buffers), replaced while queued " : " (one buffer)");
     if (flip_on) ub_dec(&u, flips_replaced);
     if (flip_timeouts) { ub_s(&u, "; latch timeouts "); ub_dec(&u, flip_timeouts); }
+    if (FS.tpn) {                                /* 8a: touch to photon (to the frame queued) */
+        ub_s(&u, "; touch to frame: ");
+        ub_dec(&u, FS.tpn);
+        ub_s(&u, " touches, mean ");
+        ub_dec(&u, FS.tpsum / FS.tpn / 1000);
+        ub_c(&u, '.');
+        ub_dec(&u, FS.tpsum / FS.tpn / 100 % 10);
+        ub_s(&u, " ms, max ");
+        ub_dec(&u, FS.tpmax / 1000);
+        ub_s(&u, " ms");
+        if (FS.tpdrop) { ub_s(&u, ", no frame "); ub_dec(&u, FS.tpdrop); }
+    }
     sb_log(u.b);
 }
 
@@ -1347,6 +1370,7 @@ void next_kevent(const void *evp)
         return;                                      /* the cheek: dropped, press to release */
     }
     st_mark();
+    touch_mark(ph);
     uint64_t st0 = tk_us();
     sh_touch(ph, e->x / TK_PT, e->y / TK_PT, (float)sb_ms());
     shell_time(ph == 0 ? "touch down" : ph == 1 ? "touch move" : "touch up", st0);
@@ -2163,7 +2187,9 @@ static int comms_now(void) { return 0; }
 /* ---- the self test --------------------------------------------------------------------------------------- */
 #ifdef SBOS_SELFTEST_NEXT
 typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
-static const char *const FILM_NAME[12] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "wheels", "sleep" };
+static const char *const FILM_NAME[14] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "wheels", "sleep",
+                                           "pages-half", "pages-full" };   /* 8a: the home swipe with and without half-resolution GPU frames */
+static uint32_t film_halves0;                   /* comp.gpu_halves at the film's start */
 /* tools/films.txt's scripts (pt, ms) */
 static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 1300 } };
 /* B10: the vendor cards again (B4's list from y 320: Apple 320, Microsoft 413, Google 491, Linux 584, Starbite 677):
@@ -2237,8 +2263,10 @@ static void film_start(int film)
     case 8: F.s = S_MSGS; F.n = 11; break;
     case 9: F.s = S_EMERG; F.n = (int)(sizeof S_EMERG / sizeof S_EMERG[0]); break;
     case 10: F.s = S_WHEELS; F.n = (int)(sizeof S_WHEELS / sizeof S_WHEELS[0]); break;
-    default: F.s = S_SLEEP; F.n = 13; break;
+    case 11: F.s = S_SLEEP; F.n = 13; break;
+    default: F.s = S_PAGES; F.n = 7; break;     /* 8a: 12 pages-half, 13 pages-full (a measurement, not the gate's) */
     }
+    tk_gpu_no_half = film == 13;
     /* each film from the plain lock screen */
     sh_set("reset", "", 0);
     need_full = 1;
@@ -2258,6 +2286,7 @@ static void film_start(int film)
         sb_log(u.b);
     }
     stats_reset();
+    film_halves0 = comp.gpu_halves;
 }
 
 #ifndef SBOS_NEXT_NOGPU
@@ -2399,7 +2428,7 @@ int next_selftest_step(void)
             sb_log("selftest: FAILED: next: the band workers never started (cores 1-3: no stack?); every frame on one core");
             st_failed = 1;
         }
-        sb_log("selftest: next: the twelve films (unlock, group, focus, holds, pages, cc, app, phone, messages, emergency, wheels, sleep) with synthetic touches; sleep presses the real Power path");
+        sb_log("selftest: next: the fourteen films (unlock, group, focus, holds, pages, cc, app, phone, messages, emergency, wheels, sleep, pages-half, pages-full) with synthetic touches; sleep presses the real Power path; pages-full is a measurement (no half-resolution GPU frames), not the gate's");
         film_start(0);
         return 1;
     }
@@ -2408,7 +2437,7 @@ int next_selftest_step(void)
         const step *p = &F.s[F.i];
         if (F.down && p->kind == 5) F.down = 0;
         else if (F.down) {
-            { st_mark(); uint64_t st0 = tk_us(); sh_touch(2, p->kind == 2 ? p->x1 : p->x0, p->kind == 2 ? p->y1 : p->y0, (float)sb_ms()); shell_time("touch up", st0); }
+            { st_mark(); touch_mark(2); uint64_t st0 = tk_us(); sh_touch(2, p->kind == 2 ? p->x1 : p->x0, p->kind == 2 ? p->y1 : p->y0, (float)sb_ms()); shell_time("touch up", st0); }
             F.down = 0;
             start_ticking();
         } else if (p->kind == 5) {
@@ -2430,7 +2459,7 @@ int next_selftest_step(void)
                 power_key_short();
             }
         } else if (p->kind) {
-            if (!F.down) { st_mark(); uint64_t st0 = tk_us(); sh_touch(0, p->x0, p->y0, (float)sb_ms()); shell_time("touch down", st0); F.down = 1; start_ticking(); }
+            if (!F.down) { st_mark(); touch_mark(0); uint64_t st0 = tk_us(); sh_touch(0, p->x0, p->y0, (float)sb_ms()); shell_time("touch down", st0); F.down = 1; start_ticking(); }
             else if (p->kind == 2) {
                 float u = (t - F.s0) / p->ms;
                 sh_touch(1, p->x0 + (p->x1 - p->x0) * u, p->y0 + (p->y1 - p->y0) * u, (float)sb_ms());
@@ -2440,12 +2469,23 @@ int next_selftest_step(void)
     }
     if (ticking || sh_moving()) return 1;          /* let it settle */
     stats_log(FILM_NAME[F.film]);
+    if (F.film >= 12) {                          /* 8a: what full-resolution motion costs (the top ten's item 4) */
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: frames: ");
+        ub_s(&u, FILM_NAME[F.film]);
+        ub_s(&u, ": GPU frames at half resolution ");
+        ub_dec(&u, comp.gpu_halves - film_halves0);
+        ub_s(&u, F.film == 13 ? " (none allowed: a measurement, not part of the gate)" : " (allowed, as in use)");
+        sb_log(u.b);
+    }
     if (F.film == 11 && !K.screen_on) {          /* sleep: the last film (cp7: wheels is 10) */
         sb_log("selftest: FAILED: next: the sleep film ended with the screen off");
         st_failed = 1;
         power_screen_set(1);
     }
-    if (F.film < 11) { film_start(F.film + 1); return 1; }
+    if (F.film < 13) { film_start(F.film + 1); return 1; }
+    tk_gpu_no_half = 0;
 #ifndef SBOS_NEXT_NOGPU
     gpu_vs_cpu();
 #endif
