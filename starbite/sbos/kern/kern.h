@@ -646,6 +646,7 @@ struct gc_quad {
 int gpucomp_init(void *heap, uint64_t bytes);
 /* the last compose's bins: entries drawn, entries culled under opaque quads, entries skipped over empty blocks */
 void gpucomp_last_stats(uint32_t *entries, uint32_t *culled, uint32_t *empty);
+void gpucomp_last_times(uint32_t *bin_us, uint32_t *up_us, uint32_t *run_us);   /* 8c: the last compose's CPU parts */
 unsigned gpucomp_mhz(void);
 int gpucomp_ready(void);
 void *gpucomp_pool(void);

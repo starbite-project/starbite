@@ -369,6 +369,15 @@ static float fmaxf_(float a, float b) { return a > b ? a : b; }
 static float fminf_(float a, float b) { return a < b ? a : b; }
 static int bins_used;                       /* the last frame's bin entries (the log) */
 static uint32_t bins_culled, bins_empty, bins_full;   /* bins_full: entries a full bin had no room for */
+/* 8c (Track A, the top ten's item 4: what a full-resolution frame's "platform" time is): the last compose's CPU
+ * parts: the records and binning, the bins' upload into the GPU's (uncached) memory, and the job's run (the wait) */
+static uint32_t t_bin, t_up, t_run;
+void gpucomp_last_times(uint32_t *bin_us, uint32_t *up_us, uint32_t *run_us)
+{
+    *bin_us = t_bin;
+    *up_us = t_up;
+    *run_us = t_run;
+}
 void gpucomp_last_stats(uint32_t *entries, uint32_t *culled, uint32_t *empty)
 {
     *entries = (uint32_t)bins_used;
@@ -412,6 +421,7 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
     uint64_t dva = gpucomp_va(dst);
     if (!dva)
         return 0;
+    uint64_t tm0 = sb_us();
     volatile uint32_t *p = CPU(GPUCOMP_O_C2);
     put64(p, dva);
     p[2] = frame_w;
@@ -592,6 +602,7 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
     }
     if (bins_full)                              /* 1.0: a bin lost quads: refused, not drawn wrong (the caller's CPU) */
         return 0;
+    uint64_t tm1 = sb_us();
     volatile uint32_t *bw = CPU(GPUCOMP_O_BIN);
     for (unsigned k = 0; k < GPUCOMP_BIN_W * GPUCOMP_BIN_H; ++k) {
         const uint32_t *src = (const uint32_t *)(const void *)bins[k];
@@ -599,6 +610,7 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
         for (unsigned w = 0, nw = bins[k][0] == 255 ? 1U : (bins[k][0] + 4U) / 4U; w < nw; ++w)
             d[w] = src[w];
     }
+    uint64_t tm2 = sb_us();
     /* v10: the grid that covers the frame (a half or quarter frame launched the full one's workgroups before) */
     uint64_t t = frame_w == SB_FB_W ? run(GPUCOMP_O_JOB_comp2_full, gpucomp_job_comp2_full, "the UI's frame")
                : frame_w == SB_FB_W / 2U ? run(GPUCOMP_O_JOB_comp2_half, gpucomp_job_comp2_half, "the UI's half frame")
@@ -610,6 +622,9 @@ int gpucomp_compose_damage(void *dst, uint32_t bg, const struct gc_quad *qs, uns
     }
     if (us)
         *us = t;
+    t_bin = (uint32_t)(tm1 - tm0);
+    t_up = (uint32_t)(tm2 - tm1);
+    t_run = (uint32_t)(sb_us() - tm2);
     return 1;
 }
 

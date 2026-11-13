@@ -650,6 +650,14 @@ static void stats_add(void)
             ub_dec(&u, emp);
             ub_s(&u, " GPU MHz ");
             ub_dec(&u, gpucomp_mhz());
+            uint32_t tb = 0, tu = 0, tr = 0;         /* 8c: the CPU's binning, the bins' upload, the job's run */
+            gpucomp_last_times(&tb, &tu, &tr);
+            ub_s(&u, "; bin ");
+            ub_dec(&u, tb);
+            ub_s(&u, " up ");
+            ub_dec(&u, tu);
+            ub_s(&u, " run ");
+            ub_dec(&u, tr);
             ub_s(&u, ")");
         }
         sb_log(u.b);
