@@ -2115,6 +2115,21 @@ static long k_vendor(void *ctx, const char *path, void *dst, uint32_t cap)
     return got;
 }
 
+/* abox.c's file_part: the cached file's size (len 0) or a piece of it; < 0 when not cached (abox.c then reads it whole) */
+static long k_file_part(void *ctx, const char *path, void *dst, uint32_t off, uint32_t len)
+{
+    (void)ctx;
+    int i = fwc_find(path);
+    if (i < 0)
+        return -1;
+    if (!len)
+        return (long)fwc[i].len;
+    if (!dst || off > fwc[i].len || len > fwc[i].len - off)
+        return -1;
+    memcpy(dst, fwc_buf + fwc[i].off + off, len);
+    return (long)len;
+}
+
 /* once, at snd_init_libsb (the OS's start, before its main loop): Calliope's files straight into the cache, so even
  * the first sound after power-on needs no VENDOR read on the main loop. Names as abox.c loads them. */
 static void snd_fw_prefetch(void)
@@ -2146,6 +2161,7 @@ void snd_init_libsb(void)
     if (inited)
         return;
     abox_hal_libsb(&k_hal, k_vendor, 0);
+    k_hal.file_part = k_file_part;          /* calliope_dram.bin from the RAM copy in 256 KiB steps */
     amp_hal_set(audio_hal_libsb());
     codec_hal_set(audio_hal_libsb());
     struct snd_ops o;

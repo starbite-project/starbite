@@ -45,6 +45,10 @@ struct abox_hal {
     void (*sync)(void *ctx);                                        /* dsb sy: RAM stores visible to ABOX */
     int (*dvfs_aud)(void *ctx, uint32_t khz);                       /* ACPM AUD domain (9) level; 0 = release */
     int (*dvfs_int)(void *ctx, uint32_t khz);                       /* ACPM INT floor; 0 = release */
+    /* a part of a file (snd's RAM copy of Calliope's files): len 0 -> the file's size (< 0: not available, then the
+     * whole-file `file` is used); else len bytes from off into dst -> len or < 0. With it the staged boot copies
+     * calliope_dram.bin in DRAM_PART pieces, one per abox_boot_step() (drivers run 11: 183 ms in one step). */
+    long (*file_part)(void *ctx, const char *path, void *dst, uint32_t off, uint32_t len);
 };
 void abox_hal_set(const struct abox_hal *h);
 #ifdef SBOS_KERNEL
