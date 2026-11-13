@@ -137,6 +137,66 @@ static void facts(void)
     sb_log(u.b);
 }
 
+/* ---- the write check (Track A, before fast reads go on for everyone): the state slot's INACTIVE half rewritten with
+ * its own bytes through sd_write's wrapper while fast reads and the raised bus clock are on, read back on the fast
+ * path. The active half is not written; the slot's A/B design covers a bad write of the inactive one (it is the half
+ * the next settings save overwrites anyway). kern.h's slot calls, declared here (kern.h pulls in the whole kernel). */
+int hw_slot_medium(void);
+int hw_slot_read(uint8_t *h0, uint8_t *h1);
+int hw_slot_write(int half, const uint8_t *src, uint32_t n);
+int state_pick(const uint8_t *a, const uint8_t *b);
+#define SDP_HALF (512U << 10)                       /* kern.h STATE_HALF */
+static uint8_t *sh[2];
+static int was_fast_now(void) { return sd_rep.fast != 0; }
+
+/* 1 written and verified, 0 skipped (why in m), -1 failed (why in m) */
+static int write_check(struct ub *m)
+{
+    if (hw_slot_medium() != (int)SB_MED_SD) {
+        ub_s(m, "write check skipped: the state slot is not on the card");
+        return 0;
+    }
+    if (!sh[0])
+        sh[0] = sb_alloc(SDP_HALF);
+    if (!sh[1])
+        sh[1] = sb_alloc(SDP_HALF);
+    if (!sh[0] || !sh[1]) {
+        ub_s(m, "write check skipped: no 1 MiB for the two halves");
+        return 0;
+    }
+    if (!hw_slot_read(sh[0], sh[1])) {
+        ub_s(m, "the state slot's read failed");
+        return -1;
+    }
+    int act = state_pick(sh[0], sh[1]);
+    if (act < 0) {
+        ub_s(m, "write check skipped: no valid half (nothing saved yet)");
+        return 0;
+    }
+    int in = 1 - act;
+    uint32_t c_in = sb_crc32(sh[in], SDP_HALF), c_act = sb_crc32(sh[act], SDP_HALF);
+    sd_rep.write_hz = 0;
+    int r = hw_slot_write(in, sh[in], SDP_HALF);    /* fenced; slot.c reads it back and compares */
+    if (r == -1) {
+        ub_s(m, "write check skipped: the fence is in dry-run mode");
+        return 0;
+    }
+    if (r != 1 || !sd_rep.write_hz) {
+        ub_s(m, r != 1 ? "the inactive half's write or its read-back FAILED (the active half was not written)"
+                       : "the write did not go through sd_write");
+        return -1;
+    }
+    if (!hw_slot_read(sh[0], sh[1]) || sb_crc32(sh[in], SDP_HALF) != c_in || sb_crc32(sh[act], SDP_HALF) != c_act ||
+        state_pick(sh[0], sh[1]) != act) {
+        ub_s(m, "after the write the halves read back different (CRC / the active half)");
+        return -1;
+    }
+    ub_s(m, "write at ");
+    ub_dec(m, sd_rep.write_hz / 1000U);
+    ub_s(m, sd_rep.write_hs ? " kHz, HIGH SPEED (not expected)" : " kHz, default speed, verified");
+    return sd_rep.write_hs ? -1 : 1;
+}
+
 /* MB/s x 1000 for SDP_BYTES in t ticks */
 static uint64_t rate_milli(uint64_t t)
 {
@@ -179,8 +239,23 @@ static int finish(void)
     ub_dec(&u, sd_rep.recoveries);
     ub_s(&u, " recoveries");
     sb_log(u.b);
+    /* the write check while fast reads and the raised bus clock are on */
+    struct ub wm;
+    ub_init(&wm);
+    int wc = was_fast_now() ? write_check(&wm) : 0;
+    if (!was_fast_now() && !wm.n)
+        ub_s(&wm, "write check skipped: fast reads were off");
+    {
+        struct ub l;
+        ub_init(&l);
+        ub_s(&l, "drvprobe: sd: ");
+        ub_s(&l, wm.b);
+        sb_log(l.b);
+    }
     int was_fast = sd_rep.fast;
     put_back();
+    if (wc < 0)
+        return fail(wm.b);
     /* the numbers first in a FAIL line too (run 10: only the summary's ~100 characters survived in pmsg) */
     const char *why = crc[0] != crc[1] ? "the fast path read different data than the old path (CRC32)"
                       : !was_fast    ? (sd_rep.fast_why ? sd_rep.fast_why : "fast reads turned off during the read")
@@ -210,7 +285,8 @@ static int finish(void)
     ub_fix(&u, fast, 2);
     ub_s(&u, " MB/s (old ");
     ub_fix(&u, rate_milli(ticks[0]), 2);
-    ub_s(&u, " MB/s)");
+    ub_s(&u, " MB/s); ");
+    ub_s(&u, wm.b);
     sb_log(u.b);
     return 1;
 }

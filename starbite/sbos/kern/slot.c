@@ -50,6 +50,12 @@ static int find(void)
     return 1;
 }
 
+/* the slot's medium (SB_MED_SD / SB_MED_UFS), -1 no slot (the drivers' sd probe writes its inactive half on the card) */
+int hw_slot_medium(void)
+{
+    return find() ? (int)med : -1;
+}
+
 int hw_slot_read(uint8_t *h0, uint8_t *h1)
 {
     if (!find())
