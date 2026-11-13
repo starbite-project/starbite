@@ -5924,6 +5924,14 @@ static void sh_touch_(int phase, float x, float y, float t)
         tp_mark("touch down: switcher");
         if (sw_down(x, y, t)) { T.kind = G_SW; return; }    /* helper D: the app switcher */
         tp_mark("touch down: home / lock");
+        if (AP.on && AP.closing && sp_app.live) {
+            /* 8b (top ten #7, gap list B2): a touch while an app shrinks home is home's, as on iOS: the close ends at
+             * once (the window is nearly at its icon) and the touch goes on to home's pages, icons and dock, so the
+             * next app opens without waiting for the spring */
+            sp_app.live = 0;
+            app_finish_close();
+            lock_ver++;
+        }
         if (AP.on) {
             /* an open app (survival-next: also over the lock, from Emergency's cards): the bottom bar's swipe up closes it (the rest of its page does nothing yet) */
             tp_mark("touch down: app, nc");
