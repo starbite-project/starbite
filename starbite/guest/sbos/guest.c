@@ -201,8 +201,64 @@ static void host_log(const char *l)
     sb_log(u.b);
 }
 /* the guest kernel's log: only what matters goes to pmsg (it holds 16 KB) */
+/* instant start: Linux's own boot milestones by its log's "[ s.us]" stamps (its clock from CPU_ON), logged in one
+ * line at HELLO (8a2 on the phone: ~23 s from CPU_ON to HELLO; pmsg's ring kept none of the guest's lines) */
+enum { BT_INIT, BT_KO, BT_FSCK0, BT_FSCK1, BT_ROOT, BT_SBINIT, BT_SBWL, BT_OUT, BT_HELLO, BT_SVC, BT_N };
+static uint32_t bt_ms[BT_N];                /* ms + 1 (0: not seen) */
+static const char *const bt_key[BT_N] = {"Run /init", "guest-init: sbguest.ko loaded", "overlay check: started",
+                                         "overlay check: e2fsck", "switch_root to", "sbinit: ", "sbinit: starting",
+                                         "sbwl: output", "sbwl: HELLO", "sbinit: services: up"};
+static const char *const bt_name[BT_N] = {"init ", ", sbguest.ko ", ", disk check ", "-", ", root ", ", sbinit ",
+                                          ", sbwl ", ", its output ", ", HELLO ", ", services "};
+static int bt_has(const char *l, const char *k)
+{
+    for (; *l; ++l)
+        if (sb_prefix(l, k))
+            return 1;
+    return 0;
+}
+static uint32_t bt_stamp(const char *l)     /* "[   12.345678] ..." -> 12345 + 1; 0 without a stamp */
+{
+    while (*l == ' ')
+        ++l;
+    if (*l++ != '[')
+        return 0;
+    while (*l == ' ')
+        ++l;
+    uint32_t s = 0, f = 0, nf = 0;
+    for (; *l >= '0' && *l <= '9'; ++l)
+        s = s * 10U + (uint32_t)(*l - '0');
+    if (*l++ != '.')
+        return 0;
+    for (; *l >= '0' && *l <= '9' && nf < 3; ++l, ++nf)
+        f = f * 10U + (uint32_t)(*l - '0');
+    while (nf++ < 3)
+        f *= 10U;
+    return s * 1000U + f + 1U;
+}
+static void bt_log(void)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "guest: Linux's boot (its clock, ms): ");
+    for (int k = 0; k < BT_N; ++k) {
+        ub_s(&u, bt_name[k]);
+        if (bt_ms[k])
+            ub_dec(&u, bt_ms[k] - 1U);
+        else
+            ub_s(&u, "-");
+    }
+    sb_log(u.b);
+}
 static void guest_log(const char *l)
 {
+    uint32_t bt = bt_stamp(l);
+    for (int k = 0; bt && k < BT_N; ++k)
+        if (!bt_ms[k] && bt_has(l, bt_key[k])) {
+            bt_ms[k] = bt;
+            if (k == BT_SVC && st == GUEST_RUNNING)
+                bt_log();                   /* (the services after HELLO: the line again, now with them) */
+        }
     static const char *const keep[] = {"guestd", "sbguest", "guest-init", "panic", "Oops", "BUG", "Unable",
                                        "failed", "error", "smp: Brought up", "STARBITE"};
     int has_echo = 0;
@@ -549,6 +605,8 @@ static int load_step(void)
         t_go = 0;
         ls_k = 0;
         frz = 0;
+        for (int i = 0; i < BT_N; ++i)
+            bt_ms[i] = 0;
         pump_reads = pump_sectors = pump_spent = 0;
         ls_blk0 = sbg_stats()->blk_reads;
         cfg_init();                         /* this mode's surface */
@@ -805,6 +863,7 @@ void guest_timer(unsigned id)
             ub_s(&u, " us a sector)");
             sb_log(u.b);
             gt_max = 0;
+            bt_log();
         }
         arm(shown ? 10 : 50);
         if (shown)

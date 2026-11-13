@@ -49,6 +49,9 @@ for entry in $apps; do
     for d in proc sys dev repo hs out var/lib/apt/lists; do sudo mkdir -p "$S/root/$d"; done
     sudo mount -t proc proc "$S/root/proc"; sudo mount --rbind /sys "$S/root/sys"; sudo mount --rbind /dev "$S/root/dev"
     sudo mount -t tmpfs -o mode=0755 run "$S/root/run"; sudo mount -t tmpfs -o mode=1777 tmp "$S/root/tmp"
+    # a terminal's PTY (foot): a devpts of its own, its ptmx over /dev/ptmx
+    sudo mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,gid=5 devpts "$S/root/dev/pts" &&
+        sudo mount --bind "$S/root/dev/pts/ptmx" "$S/root/dev/ptmx"
     [ -f "$REPO" ] && sudo mount -o ro,loop -t erofs "$REPO" "$S/root/repo"
     sudo mount --bind "$S/lists" "$S/root/var/lib/apt/lists"       # (the lists shared between the apps)
     sudo cp "$HS" "$S/root/hs/hostsim"
@@ -60,11 +63,19 @@ for entry in $apps; do
     # the first-boot parts of sbinit: the user's home, the machine id
     sudo chroot "$S/root" sh -c 'mkdir -p /home/user && cp -a /etc/skel/. /home/user/ 2>/dev/null; chown -R user:user /home/user;
         [ -s /etc/machine-id ] || dbus-uuidgen > /etc/machine-id' 2>/dev/null
+    # extra packages an app needs to run here (shots.actions "id+: pkg ..."), e.g. a game's data
+    extra=$(grep -E "^$id\+:" "$here/shots.actions" 2>/dev/null | cut -d: -f2-)
+    pkgs="$pkgs $extra"
     echo "== $id: $pkgs"
     if ! sudo chroot "$S/root" sh -c "apt-get -q update >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get -q -y \
             --no-install-recommends install $pkgs >/tmp/apt.log 2>&1 || { tail -3 /tmp/apt.log; exit 1; }"; then
         echo "$id: not installed"; down; continue
     fi
+    # Qt apps on Wayland need Qt's wayland platform plugin (only a Recommends of theirs: without it they abort with
+    # "no Qt platform plugin could be initialized")
+    sudo chroot "$S/root" sh -c 'q=; dpkg -s libqt6gui6 >/dev/null 2>&1 && q="$q qt6-wayland";
+        dpkg -s libqt5gui5 >/dev/null 2>&1 && q="$q qtwayland5";
+        [ -z "$q" ] || DEBIAN_FRONTEND=noninteractive apt-get -q -y --no-install-recommends install $q >/dev/null 2>&1'
     # the app's own .desktop: the one named as the catalog's icon (org.gnome.Papers, not its -previewer), else the
     # first that is shown in menus
     all=$(sudo chroot "$S/root" sh -c "for p in $pkgs; do dpkg -L \$p 2>/dev/null; done" |
@@ -78,11 +89,14 @@ for entry in $apps; do
     # the script: settle, shot 1, then this app's steps (shots.actions: "id: step; step; ...", "shot" dumps the next)
     {
         # Track F's carousel: 720 x 1280 (9:16): the apps laid out in that viewport, the dumps of its rows
-        printf 'wait_hello 20000\nwait_catalog 30000\nviewport 1280 720\nlaunch %s\nwait_window %s 1 90000\nwait_frame 60000\nsleep 6000\ndump %s-1\n' \
-            "$desk" "$desk" "$id"
+        printf 'wait_hello 20000\nwait_catalog 30000\nviewport 1280 720\nlaunch %s\nwait_window %s 1 90000\nwait_frame 60000\nsleep 6000\n' \
+            "$desk" "$desk"
+        # "id: pre: ...": before shot 1 (a first-run dialog closed)
+        grep -E "^$id: *pre:" "$here/shots.actions" 2>/dev/null | cut -d: -f3- | tr ';' '\n' | sed 's/^ *//; s/ *$//' | grep -v '^$'
+        printf 'sleep 1500\ndump %s-1\n' "$id"
         printf '1\t%s\n' "$name" > "$OUT/$id.captions"
         n=2
-        steps=$(grep -E "^$id:" "$here/shots.actions" 2>/dev/null | cut -d: -f2-)
+        steps=$(grep -E "^$id:" "$here/shots.actions" 2>/dev/null | grep -vE "^$id: *pre:" | cut -d: -f2-)
         IFS=';'
         set -f                              # (steps like "type 1234*56": no file name expansion)
         for st in $steps; do
