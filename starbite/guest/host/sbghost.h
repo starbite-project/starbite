@@ -119,6 +119,9 @@ int sbg_start(void);
 void sbg_boot_extend(uint32_t ms);
 /* From the host's tick: the guest's messages and log, state changes, timeouts, the line checks. */
 void sbg_poll(void);
+/* Only the guest's waiting block and 9P requests (no messages, no state): cheap when none wait; for a host that
+ * can call it from inside long work (a frame) so a booting guest's reads do not each wait a whole loop turn. */
+void sbg_pump(void);
 /* The host received db_host (from its own interrupt loop). */
 void sbg_doorbell(void);
 /* A new frame since *seq: 1 and the front buffer, else 0. */

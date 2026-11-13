@@ -45,7 +45,8 @@ void guest_full_next(void);                /* the next guest_blit copies every r
 int guest_stop(void);                      /* MSG_STOP; the cluster goes off by itself */
 int guest_state(void);                     /* GUEST_* */
 const char *guest_why(void);               /* GUEST_FAILED: the reason */
-const char *guest_stage(void);             /* GUEST_STARTING: what the start is doing, in the user's words ("": usual) */
+const char *guest_stage(void);
+void guest_pump(void);                     /* the guest's waiting block / 9P requests only; main thread, mid-work */             /* GUEST_STARTING: what the start is doing, in the user's words ("": usual) */
 int guest_owns_m3(void);                   /* 1 from the start until the cluster is off: the heater must not start */
 
 void guest_timer(unsigned id);             /* main.c dispatch_timer, owner KT_GUEST */

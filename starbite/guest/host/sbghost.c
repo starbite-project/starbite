@@ -709,6 +709,14 @@ static void blk_serve(void)
         st.blk_poll_ms_max = (uint32_t)(t1 - t0);
 }
 
+void sbg_pump(void)
+{
+    if (st.state != SBG_BOOTING && st.state != SBG_RUNNING && st.state != SBG_STOPPING)
+        return;
+    blk_serve();
+    sbg_p9_poll();                                  /* (returns at once without the service) */
+}
+
 void sbg_poll(void)
 {
     if (st.state == SBG_OFF || st.state == SBG_LOADED)
