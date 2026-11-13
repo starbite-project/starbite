@@ -1,0 +1,22 @@
+From: starbite <starbite@local>
+Date: Fri, 13 Nov 2026 21:10:00 +0200
+Subject: [PATCH] patch: 0446-sweet-a64e-hot-pcs.patch - every arm64e-emulation trap's PC
+ goes into the hot-site table, so "STARLTE LSE hot:" names the hottest emulated instructions
+
+S3z4 2026-11-13: ~55k traps/s from WindowServer and ControlCenter on the idle desktop, nearly all
+"other", cost the kernel ~60 % of a core. Diagnostic. Applies on 0445. Kernel seq1r = seq1q + this.
+---
+
+--- a/osfmk/arm64/sweet_a64e.c	2026-11-13 21:06:28
++++ b/osfmk/arm64/sweet_a64e.c	2026-11-13 21:06:28
+@@ -630,6 +630,10 @@
+ 	}
+ 	sweet_a64e_count_pid();
+ 	uint64_t pc = get_saved_state_pc(ss);
++	/* 0446: every arm64e trap's PC goes into the hot-site table too ("STARLTE LSE hot:" every 10 s): S3z4
++	 * 2026-11-13, ~55k traps/s from WindowServer and ControlCenter, nearly all "other", cost the kernel ~60 %
++	 * of a core on the idle desktop; which instructions? (shared-cache PCs: one slide for every process) */
++	lse_site(pc);
+ 
+ 	if ((w & 0xFFFFFBFF) == 0xD65F0BFF) {                   /* RETAA, RETAB */
+ 		set_saved_state_pc(ss, reg_get(ss, 30, false));
