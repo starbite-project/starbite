@@ -315,8 +315,8 @@ void selftest_timer(unsigned id)
             sb_logx(w ? "selftest: drivers: the watchdog at 60 s, fed by the loop: seconds " :
                         "selftest: drivers: the watchdog could not be set (the loader's stays): ", w);
 #ifdef SBOS_SELFTEST_NEXT_DRV_SOUND
-            /* the quiet daytime sound image: snd's engine and Calliope only, up to level 2 (tones the mic checks) */
-            drv_run_select("audio,calliope");
+            /* the quiet daytime sound image: snd's engine only (its Calliope boots from a powered-off domain), up to level 2 (tones the mic checks) */
+            drv_run_select("audio");
             drv_run_begin(1);
 #elif defined(SBOS_SELFTEST_NEXT_DRV_ATTENDED)
             drv_run_begin(1);

@@ -696,8 +696,14 @@ static int cal_up(void)
     if (!r)
         r = cal_settle(CAL_SETTLE_MS);
     if (r) {
+        char cause[160];
+        const char *w = abox_why();
+        unsigned i = 0;
+        for (; w && w[i] && i + 1 < sizeof cause; ++i)      /* abox_off() replaces abox_why() with "ABOX off" */
+            cause[i] = w[i];
+        cause[i] = 0;
         abox_off();
-        say("engine: Calliope did not boot: %s", abox_why());
+        say("engine: Calliope did not boot: %s", cause);
         if (++G.cal_fails >= 2) {
             G.cal_bad = 1;
             say("engine: Calliope failed twice: media uses the bypass engine from now on");

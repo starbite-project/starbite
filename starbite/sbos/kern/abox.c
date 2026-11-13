@@ -858,6 +858,7 @@ static void teardown(void)
 {
     struct lb l;
     int cpu_ok = 1, pd_ok = 1;
+    uint32_t pd_us = 0;
     int64_t smc = 0;
     if (S.pd_touched && pd_is_on()) {
         if (S.cpu_started || (r32(ABOX_PMU + ABOX_PMU_CPU_STAT) & 1U))
@@ -877,7 +878,9 @@ static void teardown(void)
             (void)H.dvfs_int(H.ctx, 0);
         smc = H.smc(H.ctx, ABOX_SMC_PD, 0, ABOX_DTZPC, 0);     /* exynos_pd_tz_save() */
         m32(ABOX_PMU + ABOX_PMU_AUD_CONF, 0xFU, 0);             /* aud_off */
-        pd_ok = wait32(ABOX_PMU + ABOX_PMU_AUD_STAT, 0xFU, 0, 10000, 10, 0);
+        /* up to 200 ms (was 10 ms: drivers run 7 saw "STILL ON" after media capture, and the next boot then got no
+         * BOOT_DONE); how long it took is logged */
+        pd_ok = wait32(ABOX_PMU + ABOX_PMU_AUD_STAT, 0xFU, 0, 200000, 10, &pd_us);
     }
     lb_init(&l);
     lb_s(&l, "abox: stopped: CPU ");
@@ -888,6 +891,14 @@ static void teardown(void)
         lb_s(&l, " (TZPC save SMC ");
         lb_u(&l, (uint64_t)(smc < 0 ? -smc : smc));
         lb_s(&l, smc < 0 ? " negative)" : ")");
+        if (pd_ok && pd_us) {
+            lb_s(&l, " after ");
+            lb_u(&l, (uint64_t)pd_us);
+            lb_s(&l, " us");
+        } else if (!pd_ok) {
+            lb_s(&l, ": AUD_STAT ");
+            lb_x(&l, r32(ABOX_PMU + ABOX_PMU_AUD_STAT));
+        }
     }
     sayl(&l);
     S.pd_touched = S.cpu_started = S.mmu_set = S.pins_set = S.call_on = S.boot_done = S.vss_started = 0;
