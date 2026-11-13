@@ -340,6 +340,25 @@ void prefs_counts(int *keys, uint32_t *bytes, int *blobs, uint32_t *blob_bytes);
 int prefs_save(struct state_buf *b);
 int prefs_restore(const uint8_t *half);
 
+/* ---- documents (docs.c, pure; Track A, 8a): Notes' and Contacts' stores, kept in the state slot -------------- */
+#define DOC_COLLS 2
+enum { DOC_NOTES = 0, DOC_CONTACTS = 1 };
+#define DOC_MAX (32U << 10)                 /* one document */
+#define DOC_BUDGET_NOTES (96U << 10)
+#define DOC_BUDGET_CONTACTS (64U << 10)
+#define DOC_ENTRIES 768                      /* documents in all */
+#define DOCS_MEM (DOC_BUDGET_NOTES + DOC_BUDGET_CONTACTS)
+void docs_init(void *mem);          /* DOCS_MEM bytes; until then every call refuses */
+void docs_reset(void);
+int docs_put(int c, uint32_t id, const void *p, uint32_t n);   /* 1 changed, 0 the same, -1 refused (full, too big); n 0 deletes */
+int docs_get(int c, uint32_t id, void *p, uint32_t cap);       /* the document's length (copied up to cap), -1 none */
+int docs_count(int c);
+uint32_t docs_id_at(int c, int k);  /* the k-th id in id order, 0 none */
+uint32_t docs_new_id(int c);        /* an unused id (the highest + 1) */
+void docs_usage(int c, uint32_t *used, uint32_t *budget);
+int docs_save(struct state_buf *b);  /* each document whole or not at all: 0, -1 something left out */
+int docs_restore(const uint8_t *half);   /* 0, -1 something was not taken */
+
 /* ---- the running kernel ------------------------------------------------------------------------ */
 struct kstate {
     int irq_mode;                   /* 1 interrupts work, 0 polling */

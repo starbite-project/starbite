@@ -1725,6 +1725,32 @@ int sh_blob_put(const char *name, const void *p, unsigned n)
     return r < 0 ? -1 : 0;
 #endif
 }
+/* 8a (Track A): Notes' and Contacts' documents (kern/docs.c), saved with the settings; the self test: dry runs */
+int sh_doc_put(int coll, unsigned id, const void *p, unsigned n)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    (void)coll; (void)id; (void)p;
+    if (n > DOC_MAX) return -1;
+    prefs_dry();
+    return 0;
+#else
+    int r = docs_put(coll, id, p, n);
+    if (r > 0) settings_changed();
+    if (r < 0) sb_log("next: docs: a document was not kept (too big, or its collection is full)");
+    return r < 0 ? -1 : 0;
+#endif
+}
+int sh_doc_get(int coll, unsigned id, void *p, unsigned cap) { return docs_get(coll, id, p, cap); }
+int sh_doc_count(int coll) { return docs_count(coll); }
+unsigned sh_doc_id_at(int coll, int k) { return docs_id_at(coll, k); }
+unsigned sh_doc_new_id(int coll) { return docs_new_id(coll); }
+void sh_doc_usage(int coll, unsigned *used, unsigned *budget)
+{
+    uint32_t u = 0, b = 0;
+    docs_usage(coll, &u, &b);
+    if (used) *used = u;
+    if (budget) *budget = b;
+}
 int sh_blob_get(const char *name, void *p, unsigned cap)
 {
 #ifdef SBOS_SELFTEST_NEXT

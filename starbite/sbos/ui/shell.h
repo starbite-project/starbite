@@ -634,6 +634,17 @@ enum { SH_SND_RING = 1, SH_SND_ALARM = 2, SH_SND_NOTIFY = 3, SH_SND_CLICK = 4 };
  * the Camera's shutter, power connected */
 enum { SH_SND_CLICK_DEL = 6, SH_SND_CLICK_MOD = 7, SH_SND_LOCK = 8, SH_SND_SHUTTER = 9, SH_SND_CHARGE = 10 };
 void sh_alarm_sound(int on);
+/* 8a (Track A, docs.c): Notes' and Contacts' documents, kept across restarts with the settings. A document is the app's
+ * own bytes (up to 32 KiB) under a stable id (1..); each collection has a budget (Notes 96 KiB, Contacts 64 KiB).
+ * put: n 0 deletes; 0 ok, -1 refused (full, too big; the self test: a dry run). get: the length (copied up to cap),
+ * -1 none. id_at: the k-th id in id order (0 none). usage: bytes used and the budget (the "Storage Full" state) */
+enum { SH_DOC_NOTES = 0, SH_DOC_CONTACTS = 1 };
+int sh_doc_put(int coll, unsigned id, const void *p, unsigned n);
+int sh_doc_get(int coll, unsigned id, void *p, unsigned cap);
+int sh_doc_count(int coll);
+unsigned sh_doc_id_at(int coll, int k);
+unsigned sh_doc_new_id(int coll);
+void sh_doc_usage(int coll, unsigned *used, unsigned *budget);
 /* 8a (Track A, multi-touch): the second (third ...) finger, as sh_touch's phases (0 down, 1 move, 2 up), pt and ms.
  * Finger 0 is sh_touch's. The kernel has a weak no-op; define it in the shell for pinch and two-finger gestures */
 void sh_touch_finger(int finger, int ph, float x, float y, float t_ms);    /* cp7x: the kernel's wake-up alarm rings (1) / stops (0): shell_lock.c, ring owner 4 */

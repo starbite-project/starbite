@@ -55,6 +55,7 @@ if [ "$native" = 1 ]; then
     sh "$here/../tools/sbos-host-test.sh"
     CC=gcc sh "$here/kern/host/passcode-test.sh"          # Track A: the passcode (kern/passcode.c)
     CC=gcc sh "$here/kern/host/prefs-test.sh"             # Track A: prefs and blobs (kern/prefs.c)
+    CC=gcc sh "$here/kern/host/docs-test.sh"              # Track A, 8a: Notes and Contacts documents (kern/docs.c)
     CC=gcc sh "$here/kern/host/update-test.sh"            # Track A: Software Update (kern/update.c on libsb's slots)
     CC=gcc sh "$here/kern/host/sbfw-health-test.sh"       # Track J FW4: Settings > Startup's checks (kern/sbfw_health.c)
     CC=gcc sh "$here/kern/host/photos-test.sh"            # Track A: the Camera's photo store (kern/photos.c)
