@@ -878,6 +878,8 @@ static int pd_power_on(uint32_t *took, struct lb *l)
     return 0;
 }
 
+static int pd_left_on;                      /* our last power-down did not take: the domain is not S-Boot's state */
+
 static void teardown(void)
 {
     struct lb l;
@@ -900,6 +902,7 @@ static void teardown(void)
         if (H.dvfs_int && S.int_khz)
             (void)H.dvfs_int(H.ctx, 0);
         pd_ok = pd_power_off(&smc);
+        pd_left_on = !pd_ok;                /* the next boot power-cycles it (drivers run 7: no BOOT_DONE otherwise) */
     }
     lb_init(&l);
     lb_s(&l, "abox: stopped: CPU ");
@@ -1172,6 +1175,16 @@ int abox_boot(void)
     }
 
     /* 2: the AUD power domain (flexpmu aud_on), then the DTZPC restore (exynos_pd_tz_restore) */
+    if (pd_is_on() && pd_left_on) {
+        /* our own last abox_off left it on (the drivers' run 7: the next boot then got no BOOT_DONE): a full cycle */
+        int64_t sv = 0;
+        if (!pd_power_off(&sv)) {
+            lb_s(&l, "abox: 2/13 power: the AUD domain was left on by the last stop and does not go off");
+            return fail(ABOX_EPOWER, &l);
+        }
+        say("abox: 2/13 power: the AUD domain was left on by the last stop: cycled off first");
+        pd_left_on = 0;
+    }
     if (pd_is_on()) {
         say("abox: 2/13 power: the AUD domain is already on (S-Boot): no TZPC restore needed");
         S.pd_touched = 1;

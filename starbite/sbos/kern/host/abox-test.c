@@ -57,6 +57,7 @@ static struct {
     unsigned violations, ram_violations;
     /* behaviour */
     int boot_ok, pll_ok, ipc_dead_after_boot, ipc_dead, log_in_dram, no_irq, missing_sram, cpu_was_on, pd_was_on;
+    int pd_stuck;                   /* aud_off does not take (drivers run 7) */
     uint64_t cpu_on_at;
     int booted_once;
     char logs[4000][200];
@@ -180,7 +181,7 @@ static void f_wr32(void *c, uint64_t pa, uint32_t v)
         return;
     }
     set(pa, v);
-    if (pa == ABOX_PMU + 0x4000)
+    if (pa == ABOX_PMU + 0x4000 && !(F.pd_stuck && !(v & 0xF)))
         set(ABOX_PMU + 0x4004, v & 0xF);
     if (pa == ABOX_PMU + 0x415C || pa == ABOX_PMU + 0x4164)
         cpu_update();
@@ -603,6 +604,34 @@ static void test_sboot_left_on(void)
     abox_off();
 }
 
+/* drivers run 7: abox_off's aud_off did not take; the next abox_boot must cycle the domain, not take it for S-Boot's */
+static void test_pd_left_on(void)
+{
+    reset();
+    install(0);
+    CHECK(abox_boot() == 0, "left on: first boot %s", abox_why());
+    F.pd_stuck = 1;
+    abox_off();
+    CHECK(logged("AUD domain STILL ON"), "left on: the stop says so");
+    CHECK((reg(ABOX_PMU + 0x4004) & 0xF) == 0xF, "left on: the fake kept it on");
+    F.pd_stuck = 0;
+    unsigned ns = F.nsmc;
+    CHECK(abox_boot() == 0, "left on: second boot %s", abox_why());
+    CHECK(logged("left on by the last stop: cycled off first"), "left on: no cycle logged");
+    CHECK(!logged("already on (S-Boot)"), "left on: taken for S-Boot's state");
+    int restore = 0;
+    for (unsigned i = ns; i < F.nsmc; ++i)
+        restore += F.smc[i].a1 == 1;
+    CHECK(restore == 1, "left on: one restore SMC after the cycle (%d)", restore);
+    abox_off();
+    /* stuck for good: the boot fails cleanly instead of booting Calliope on a stale domain */
+    F.pd_stuck = 1;
+    CHECK(abox_boot() == 0, "left on: third boot %s", abox_why());
+    abox_off();
+    CHECK(abox_boot() == ABOX_EPOWER, "left on: a domain that never goes off must fail the boot");
+    F.pd_stuck = 0;
+}
+
 static void test_pd_export(void)
 {
     reset();
@@ -681,6 +710,7 @@ int main(int argc, char **argv)
     test_faults();
     test_sboot_left_on();
     test_pd_export();
+    test_pd_left_on();
     test_ipc_dead();
     test_dvfs_hook();
     printf("abox host test: %d checks, %d failed\n", checks, fails);
