@@ -593,6 +593,7 @@ static int sd_recover(void)
 
 #define SW_QUERY_HS 0x00fffff1U             /* CMD6 mode 0: would group 1 take function 1? (no change) */
 #define SW_SET_HS   0x80fffff1U             /* CMD6 mode 1: group 1 = 1 (high speed), groups 2-6 0xf = keep */
+#define SD_WRITE_HZ 6250000U              /* writes with fast reads on: the card clock writes always had (see sd_write) */
 #define SW_SET_DS   0x80fffff0U             /* CMD6 mode 1: group 1 = 0 (default speed), groups 2-6 0xf = keep: before writes */
 
 #ifndef SD_DMA_LIMIT
@@ -1053,10 +1054,22 @@ int sd_write(uint64_t sector, uint32_t count, uintptr_t src)
     int was = sd_rep.fast, hs = sd_rep.hs_card;
     if (was) {
         sd_rep.fast = 0;
-        if (set_clock(25000000)) {
+        /* the card clock every write on this phone had until now: the "25 MHz" setting ran at 6.25 MHz under S-Boot's
+         * CMU /16 (drivers run 11). With the kernel's sdclk at /1 a 25 MHz setting would really be 25 MHz, never tried
+         * for writes to the OS store: so writes keep 6.25 MHz (CLKDIV, no CMU change) */
+        if (set_clock(SD_WRITE_HZ)) {
             (void)fast_fail("clock update before a write");
             return -1;
         }
+    }
+    /* Fast reads off (or turned off after an error) but the bus clock raised (the kernel's sdclk): the card clock
+     * would be faster than any write ever ran here; a write still runs at SD_WRITE_HZ, the old setting after it */
+    uint32_t div_before = rd(CLKDIV) & 0xffU;
+    int slowed = 0;
+    if (!was && sd_rep.card_hz > SD_WRITE_HZ) {
+        if (set_clock(SD_WRITE_HZ))
+            return -1;
+        slowed = 1;
     }
     /* A write runs exactly as before the fast reads existed: the card back in default speed too (CMD6 mode 1, group 1
      * function 0), not only the clock. If that switch does not take, the write is refused (nothing written): the card
@@ -1073,6 +1086,8 @@ int sd_write(uint64_t sector, uint32_t count, uintptr_t src)
         sb_mdelay(1);
     }
     int r = write_sectors(sector, count, src);
+    if (slowed)
+        (void)set_div(div_before);
     if (hs && was) {
         uint64_t st[8];
         if (short_read(6, SW_SET_HS, 0, 64, st) || (((const uint8_t *)st)[16] & 0xfU) != 1U) {
