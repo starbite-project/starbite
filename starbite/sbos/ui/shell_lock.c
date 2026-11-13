@@ -4268,9 +4268,65 @@ static void lerp_rows(void *v, int y0, int y1)
         }
     }
 }
+/* cp7u (7s: Emergency's 0.7 s cross-fade 72-88 ms a frame on the phone: both 4 MB grounds lerped every frame): on the
+ * GPU row the new ground is a layer over the old one (emfade: a view of em_wall, not its owner; under the stars) at
+ * the fade's opacity, and the grounds are swapped once at its end (the CPU row's last step is the same exact copy:
+ * f 256). The glass keeps the old ground's blur until then. A fade stopped midway puts its point into the grounds
+ * once (emf_bake: the next one starts from there, as on the CPU row) */
+static tk_layer emfade;
+static float emf_bw;                             /* the glass's backdrop's point (it steps at a third and two: not every frame) */
+static void emf_drop(void)
+{
+    emfade.bmp = (tk_bmp){ 0, 0, 0, 0 };          /* (em_wall's: never freed here) */
+    emfade.hidden = 1;
+    tk_layer_dirty(&emfade);
+}
+static void emf_bake(void)
+{
+    if (!emfade.bmp.px) return;
+    if (em_wall.px && em_bw.px && em_e > 0) {
+        lerp_ctx L = { &C->base_half, &em_wall, (int)(em_e * 256 + .5f) };
+        tk_par_rows(0, C->base_half.h, lerp_rows, &L);
+        if (em_e > emf_bw) {                      /* the backdrop from its last step to the fade's point */
+            L.a = &C->bw_half;
+            L.t = &em_bw;
+            L.f = (int)((em_e - emf_bw) / (1 - emf_bw) * 256 + .5f);
+            tk_par_rows(0, C->bw_half.h, lerp_rows, &L);
+        }
+        C->ground_gen++;
+    }
+    emf_drop();
+}
 static void em_step(float e)
 {
-    if (em_wall.px && em_bw.px) {
+    if (C && C->gpu && em_wall.px && em_bw.px && e < 1) {
+        if (!emfade.name) tk_layer_init(&emfade, "em-fade");
+        if (emfade.bmp.px != em_wall.px) {
+            emfade.bmp = em_wall;
+            emfade.x = emfade.y = emfade.ox = emfade.oy = 0;
+            emfade.sx = emfade.sy = 2;
+            tk_layer_dirty(&emfade);
+        }
+        emfade.hidden = e <= 0;
+        emfade.alpha = e;
+        emfade.opaque = 0;
+        if (em_e <= 0) emf_bw = 0;
+        /* the glass would keep the old ground's tone for the whole fade (blue cards over Emergency's red): its backdrop
+         * steps toward the new one at a third and two thirds (one 4 MB lerp each; the end is the exact copy) */
+        int step = (emf_bw < 1.0f / 3 && e >= 1.0f / 3) || (emf_bw < 2.0f / 3 && e >= 2.0f / 3);
+        if (step) {
+            lerp_ctx L = { &C->bw_half, &em_bw, (int)((e - emf_bw) / (1 - emf_bw) * 256 + .5f) };
+            if (L.f > 0) { tk_par_rows(0, C->bw_half.h, lerp_rows, &L); C->ground_gen++; }
+            emf_bw = e;
+        }
+        em_e = e;
+    } else if (C && C->gpu && em_wall.px && em_bw.px) {   /* the end: the grounds swapped once */
+        emf_drop();
+        tk_bmp_copy(&C->base_half, 0, 0, &em_wall, 0, 0, em_wall.w, em_wall.h);
+        tk_bmp_copy(&C->bw_half, 0, 0, &em_bw, 0, 0, em_bw.w, em_bw.h);
+        C->ground_gen++;
+        em_e = e;
+    } else if (em_wall.px && em_bw.px) {
         float f = e >= 1 ? 1 : (e - em_e) / (1 - em_e);
         lerp_ctx L = { &C->base_half, &em_wall, (int)(f * 256 + .5f) };
         if (L.f > 0) {
@@ -4280,13 +4336,14 @@ static void em_step(float e)
             tk_par_rows(0, C->bw_half.h, lerp_rows, &L);
             C->ground_gen++;
         }
-    }
-    em_e = e;
+        em_e = e;
+    } else
+        em_e = e;
     star.alpha = EMG ? 1 - e : e;
     star_e.alpha = EMG ? e : 1 - e;
     star.hidden = star.alpha <= 0;
     star_e.hidden = star_e.alpha <= 0;
-    if (e >= 1) { tk_bmp_free(&em_wall); tk_bmp_free(&em_bw); }
+    if (e >= 1) { emf_drop(); tk_bmp_free(&em_wall); tk_bmp_free(&em_bw); }
 }
 static void build_home_w(void);
 static void build_home_apps2(void);
@@ -4396,6 +4453,7 @@ static int ep_ground_step(int big_ok)
 /* the ground to the fade: from this frame on the wallpaper and backdrop move toward it */
 static void ep_handover(void)
 {
+    emf_bake();                                  /* cp7u: a fade stopped midway: its point into the grounds */
     tk_bmp_free(&em_wall);
     tk_bmp_free(&em_bw);
     em_wall = EP.wall;
@@ -4574,6 +4632,7 @@ static void set_emergency(int on, int instant)
     sh_perf_mode(on);                                /* cp6 (Track A): Emergency's clocks drop 0.4 s after motion; normal mode holds 1.5 s */
     if (!on) { free_ecards(); cards_pending = LOCK_PARTS; }
     /* a fade still running stops where it is: the next one starts from there */
+    emf_bake();                                  /* cp7u: (the GPU row's: its point into the grounds) */
     tk_bmp_free(&em_wall);
     tk_bmp_free(&em_bw);
     em_e = 0;
@@ -4921,14 +4980,15 @@ static void link(tk_layer *parent, tk_layer **kids, int n)
 static void relink(void)
 {
     if (!apdim.name) { tk_layer_init(&apdim, "app-dim"); apdim.hidden = 1; }
-    tk_layer *r[] = { &star, &star_e, &home, &swg, &lockg, &lockflat, &apdim, &appg, &apicon, &swcover, &ncl, &focus, &ccl, &bnl, &cfl, &kitl, &cvl,
+    if (!emfade.name) { tk_layer_init(&emfade, "em-fade"); emfade.hidden = 1; }   /* cp7u: Emergency's fade on the GPU row */
+    tk_layer *r[] = { &emfade, &star, &star_e, &home, &swg, &lockg, &lockflat, &apdim, &appg, &apicon, &swcover, &ncl, &focus, &ccl, &bnl, &cfl, &kitl, &cvl,
                       &boot, &homebar, &pwl, &toastl, &slp };   /* P3x: pwl the power sheet */
     nc_link();                                       /* helper D: the Notification Centre (ncl), the banner (bnl) */
     sw_link();                                       /* helper D: the switcher's cards (swg), a card's snapshot over its opening window */
     cm_link();                                       /* helper I: the call screen (cvl) */
     kit_link();                                      /* helper B2: an alert, an action sheet, a sheet (kitl) */
     pw_link();                                       /* P3x: the power sheet (pwl) */
-    link(&root, r, 22);
+    link(&root, r, 23);
     pc_link();                                       /* Track A: the passcode screen (under the call screen) */
     isl_link();                                      /* B7: the capsule, the pill and its words */
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &emsel, &kbg, &emp, &apsb, &apphl };
