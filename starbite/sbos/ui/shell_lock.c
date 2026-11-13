@@ -1536,7 +1536,10 @@ static void home_apps2_part(int k)
             d_text_box(dd, TK_IT400, 12, cx, y + 68 + 12, 84, 1, P2N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
         }
     } else
-        for (int q = 4; q <= 6; q += 2) { hparts[q].x = hparts[q].bx = hparts[q].x + PT(390); trim(&hparts[q]); }
+        for (int q = 4; q <= 6; q += 2) trim(&hparts[q]);
+    /* 8b: page 2's layers at their place (one page right) from the start, so a part-made page 2 can show as it
+     * fills in (the pages' move makes its rest a part or two a frame: no whole build at the touch) */
+    if (k == 0) for (int q = 4; q <= 6; q += 2) if (hparts[q].bmp.px) hparts[q].x = hparts[q].bx = hparts[q].x + PT(390);
     a2_next = k <= NP2 ? k + 1 : -1;
 }
 static void build_home_apps2(void) { for (int k = 0; k <= NP2 + 1; k++) home_apps2_part(k); }
@@ -2260,7 +2263,7 @@ static void cc_focus(dc *d)
 }
 static dc ccg_d;
 static int ccg_part;
-#define CCG_PARTS 10
+#define CCG_PARTS 13
 static void cc_grid_part(int k)
 {
     if (k != 1 && k != ccg_part) return;         /* (that grid was made again whole meanwhile) */
@@ -2352,11 +2355,14 @@ static void cc_grid_part(int k)
     cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, CCS.sil); cc_bell(&d, r[0] + CC_U / 2, r[1] + CC_U / 2, CCS.sil);
     cc_mod_rect(10, r);
     cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-camera", r[0], r[1], 24, 24);
-    } else {
+    } else if (k == 10) {
     cc_now_playing(&d);                          /* 8b: iOS 27's page 1: Now Playing and Focus */
+    } else if (k == 11) {
     cc_focus(&d);
+    } else if (k == 12) {                        /* 8b (8a2's phone: "build_cc 13 grid last" 32-46 ms): the end in two */
     tk_a8_free(&ccgrid.glass);
     trim(&ccgrid);
+    } else {
     tk_layer_prepare(&ccgrid);
     }
     ccg_part = k < CCG_PARTS ? k + 1 : 0;
@@ -2495,7 +2501,7 @@ static void build_cc_stage(int st)
     }
     return;
     }
-    if (st >= 5 && st < 5 + CCG_PARTS) { cc_grid_part(st - 4); return; }   /* (5-13) */
+    if (st >= 5 && st < 5 + CCG_PARTS) { cc_grid_part(st - 4); return; }   /* (5-17) */
     tk_layer_init(&ccg, "cc-grid-group");
     ccg.ox = PT(CC_COL(0) + .85f * (4 * CC_U + 3 * CC_GAP));
     ccg.oy = PT(CC_ROW(0));
@@ -6158,7 +6164,8 @@ static void sh_touch_(int phase, float x, float y, float t)
             if (y >= DOCK_TOP && y < H_PT - 30) { T.kind = G_DOCK; icon_press(app_hit(x, y)); return; }   /* the dock: a tap opens its app */
             if (SRCH_HIT(x, y)) { T.kind = G_DOCK; return; }   /* P3g: Search */
             if (y >= 56 && y < DOCK_TOP && !SRCH_HIT(x, y) && !on_w) {
-                ep_apps2_now();                  /* cp7k: page 2 whole before it can show (Emergency's switch's rest) */
+                /* 8b (8a2's phone: "touch down: home 133 ms" after Emergency's switch): page 2's rest is made while the
+                 * pages move (sh_tick: two parts a frame), not all here */
                 T.kind = G_PAGE;
                 T.base = page_x;
                 page_dir = 0;
@@ -6658,6 +6665,12 @@ int sh_tick(float dt, float t)
     clk_update(t);
     if (ap_pending) { app_build_step(); mv = 1; if (!ap_pending && AP.on) set_app_rect(AP.R); }   /* P3i */
     mv |= sysp_tick(dt);                          /* 8a: the Systems platter folding / fanning */
+    if (EP.goal >= 0 && (EP.post & EP_APPS2) && (T.kind == G_PAGE || sp_page.live || page_x < -1)) {
+        /* 8b: page 2 being part-made while the pages move: two parts a frame (~10 ms each on the phone) */
+        for (int i = 0; i < 2 && (EP.post & EP_APPS2); i++) if (!home_apps2_step()) EP.post &= ~EP_APPS2;
+        relink();
+        mv = 1;
+    }
     if (SL.dir) {
         SL.t = tk_minf(1, SL.t + dt / (SL.dir < 0 ? SL_OUT : SL_IN));
         if (SL.t >= 1) {
@@ -7014,12 +7027,13 @@ void sh_idle(void)
     if ((!locked || cc_lock_ok) && !CCS.on && !AP.on && !nc_on() &&
         (ccb_next || !CCS.built || cc_stale || cc_lk != locked || (locked && cc_lv != lock_ver))) {
         if (!ccb_next) { cc_stale = 0; cc_lk = locked; cc_lv = lock_ver; }   /* (a change during the stages: again after) */
-        { static const char *const CCN[15] = { "build_cc_step", "build_cc 1 picture", "build_cc 2 light blur", "build_cc 3 heavy blur",
+        { static const char *const CCN[19] = { "build_cc_step", "build_cc 1 picture", "build_cc 2 light blur", "build_cc 3 heavy blur",
                                                 "build_cc 4 chrome", "build_cc 5 grid bitmap", "build_cc 6 grid conn", "build_cc 7 grid circles",
                                                 "build_cc 8 grid mini", "build_cc 9 grid sliders", "build_cc 10 grid torch", "build_cc 11 grid flame",
-                                                "build_cc 12 grid timer", "build_cc 13 grid last", "build_cc 14 link" };
+                                                "build_cc 12 grid timer", "build_cc 13 grid bell", "build_cc 14 grid playing",
+                                                "build_cc 15 grid focus", "build_cc 16 grid trim", "build_cc 17 grid half", "build_cc 18 link" };
           int r_ = 0, st_ = ccb_next ? ccb_next : 1;
-          IP_(CCN[st_ < 15 ? st_ : 0], r_ = build_cc_step()); if (r_) return; }   /* cp7i: the stage in the name */
+          IP_(CCN[st_ < 19 ? st_ : 0], r_ = build_cc_step()); if (r_) return; }   /* cp7i: the stage in the name */
     } else if (ccb_next && !CCS.on) free_cc();     /* not wanted any more (an app needs the room): its parts go, later again */
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
