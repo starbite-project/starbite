@@ -1,0 +1,117 @@
+From: starbite <starbite@local>
+Date: Fri, 13 Nov 2026 13:30:00 +0200
+Subject: [PATCH] patch: 0442-sweet-copyio-silent-recover-log.patch - log the copyio
+ recoveries that return EFAULT with no line (a fault on a kernel address, an alignment
+ fault: "SWEET RECOVER") and the copies that go through a CPU copy window (a source or
+ sink page with non-default cache attributes: "SWEET COPYWIN")
+
+S3t 2026-11-13: the per-user containermanagerd read() its 6626-byte sandbox profile into
+a 16 KiB stdio buffer and got EFAULT after exactly 4 KiB, every one of 35 starts, with no
+SWEET COPYIO FAULT line; sandbox_init failed, containermanagerd_main returned 0, and pkd,
+the camera service, Control Center and Finder wait on it forever (no menu bar).
+Diagnostic; applies on 0441 (seq-12377 line). Kernel seq1m = seq1l + this.
+---
+
+--- a/osfmk/arm64/sleh.c	2026-11-13 13:19:34
++++ b/osfmk/arm64/sleh.c	2026-11-13 13:19:34
+@@ -2620,8 +2620,44 @@
+ 		EXC_GUARD_ENCODE_FLAVOR(info.mx_code, kGUARD_EXC_GUARD_OBJECT_ASYNC_USER_FAULT);
+ 		exit_with_mach_exception_using_ast(info, PX_KTRIAGE,
+ 		    task->task_exc_guard & TASK_EXC_GUARD_VM_FATAL);
++	}
++}
++
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++/*
++ * 0442: copyio recoveries the SWEET COPYIO FAULT line does not report: a fault on a
++ * kernel address (the kernel side of the copy, e.g. a CPU copy window) and alignment
++ * faults (an unaligned access to a Device-typed mapping). Both return EFAULT to the
++ * caller with nothing logged (S3t 2026-11-13: containermanagerd's read() of its
++ * sandbox profile failed with EFAULT after exactly 4 KiB, 35 times, no fault line).
++ * PAR_EL1 of the faulting address gives the physical page and its memory attributes
++ * (bits 63:56: 0x00/0x04 Device, 0x44 Normal non-cacheable, 0xff write-back).
++ */
++static void
++sweet_recover_log(const char *what, arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr, int result)
++{
++	extern int proc_selfpid(void);
++	extern void proc_selfname(char *buf, int size);
++	static uint32_t sweet_recover_logs;
++	uint32_t n = os_atomic_inc_orig(&sweet_recover_logs, relaxed);
++	if (n >= 24 && (n & (n - 1)) != 0) {
++		return;
++	}
++	uint64_t par = 0;
++	boolean_t istate = ml_set_interrupts_enabled(FALSE);
++	if (fault_addr & TTBR_SELECTOR) {
++		__asm__ volatile ("at s1e1r, %1\n isb\n mrs %0, par_el1" : "=r"(par) : "r"(fault_addr));
++	} else {
++		__asm__ volatile ("at s1e0r, %1\n isb\n mrs %0, par_el1" : "=r"(par) : "r"(fault_addr));
+ 	}
++	ml_set_interrupts_enabled(istate);
++	char name[32] = "";
++	proc_selfname(name, sizeof(name));
++	printf("SWEET RECOVER #%u: %s in %s[%d]: esr %#llx far %#llx par %#llx result %d pc %#llx lr %#llx\n",
++	    n, what, name, proc_selfpid(), esr, (uint64_t)fault_addr, par, result,
++	    (uint64_t)VM_KERNEL_UNSLIDE(get_saved_state_pc(state)), (uint64_t)VM_KERNEL_UNSLIDE(get_saved_state_lr(state)));
+ }
++#endif
+ 
+ static void
+ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr,
+@@ -2808,7 +2844,12 @@
+ 				if (result == KERN_INVALID_GUARD_OBJECT_SLOT) {
+ 					handle_kernel_guard_object_fault(fault_addr, thread);
+ 				}
++			}
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++			else {
++				sweet_recover_log("kernel-address fault", state, esr, fault_addr, result);
+ 			}
++#endif
+ 
+ 			/*
+ 			 *  If we have a recover handler, invoke it now.
+@@ -2820,6 +2861,9 @@
+ 		panic_fault_address = fault_addr;
+ 	} else if (is_alignment_fault(fault_code)) {
+ 		if (recover) {
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++			sweet_recover_log("alignment fault", state, esr, fault_addr, 0);
++#endif
+ 			handle_kernel_abort_recover(state, esr, fault_addr, thread, recover);
+ 			return;
+ 		}
+--- a/osfmk/arm64/loose_ends.c	2026-11-13 13:19:34
++++ b/osfmk/arm64/loose_ends.c	2026-11-13 13:19:34
+@@ -133,6 +133,30 @@
+ 
+ 		char *tmp_src;
+ 		char *tmp_dst;
++
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++		/*
++		 * 0442: copies through a CPU copy window: a physical page with non-default
++		 * cache attributes (pp_attr WIMG) or outside the managed range. A managed
++		 * page that kept a GPU buffer's write-combined/IO attribute after it was
++		 * freed (0330's class) lands here when it is reused as file cache.
++		 */
++		if (use_copy_window_src || use_copy_window_dst) {
++			static uint32_t sweet_copywin_logs;
++			uint32_t nlog = os_atomic_inc_orig(&sweet_copywin_logs, relaxed);
++			if (nlog < 24 || (nlog & (nlog - 1)) == 0) {
++				printf("SWEET COPYWIN #%u: src %#llx%s wimg %#x valid %d -> dst %#llx%s wimg %#x valid %d, %lu of %lu bytes, flags %#x, caller %#llx\n",
++				    nlog, (uint64_t)src, use_copy_window_src ? " (window)" : "",
++				    BCOPY_PHYS_SRC_IS_PHYS(flags) ? wimg_bits_src : 0,
++				    BCOPY_PHYS_SRC_IS_PHYS(flags) ? (int)pmap_valid_address(src) : -1,
++				    (uint64_t)dst, use_copy_window_dst ? " (window)" : "",
++				    BCOPY_PHYS_DST_IS_PHYS(flags) ? wimg_bits_dst : 0,
++				    BCOPY_PHYS_DST_IS_PHYS(flags) ? (int)pmap_valid_address(dst) : -1,
++				    (unsigned long)(count < count2 ? count : count2), (unsigned long)bytes, flags,
++				    (uint64_t)VM_KERNEL_UNSLIDE(__builtin_return_address(0)));
++			}
++		}
++#endif
+ 
+ 		if (use_copy_window_src || use_copy_window_dst) {
+ 			mp_disable_preemption();
