@@ -524,6 +524,22 @@ static int run_guest(unsigned run)
         irq_poll();
         uint64_t t = now_ms();
         own_check(t);
+#ifdef SBSIM_PUMP
+        /* cp7m: Starbite OS's GPU-wait hook (guest_pump -> sbg_pump, one block read <= 64 KiB per call) every 2 ms,
+         * the full poll only every 40 ms (a long frame's turn): the block service mostly through the pump */
+        {
+            static uint32_t it, pumped;
+            pumped += (uint32_t)sbg_pump(SBSHM_BLK_SLOT / 512U);
+            if (++it % 20) {
+                if (it % 5000 == 1) {
+                    puts_("sbsim: pump: block reads served by sbg_pump so far ");
+                    putu(pumped);
+                    puts_("\n");
+                }
+                continue;
+            }
+        }
+#endif
         sbg_poll();
         if (mf->flags & F_V3)
             sim_v3_tick(t);

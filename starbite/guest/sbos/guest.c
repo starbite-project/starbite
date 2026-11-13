@@ -603,10 +603,25 @@ int guest_stop(void)
  * synchronous reads each waited a turn. guest_pump serves only those requests (cheap when none wait): call it from
  * inside long work on the main thread (a frame's compositing, between layers or strips), never from an interrupt
  * or from inside card I/O. */
+/* cp7m (Track A: the unbudgeted pump made frames late, GPU waits 25-31 ms): at most one block read of <= 64 KiB
+ * per call (~1 ms from the card), and at most GUEST_PUMP_US of them in any GUEST_PUMP_WIN_US window (a frame);
+ * 9P and writes wait for the guest timer's poll. */
+#define GUEST_PUMP_US 2000U
+#define GUEST_PUMP_WIN_US 16667U
 void guest_pump(void)
 {
-    if (!loading && (st == GUEST_STARTING || st == GUEST_RUNNING || st == GUEST_STOPPING))
-        sbg_pump();
+    static uint64_t win0, spent;
+    if (loading || (st != GUEST_STARTING && st != GUEST_RUNNING && st != GUEST_STOPPING))
+        return;
+    uint64_t t = sb_us();
+    if (t - win0 >= GUEST_PUMP_WIN_US) {
+        win0 = t;
+        spent = 0;
+    }
+    if (spent >= GUEST_PUMP_US)
+        return;
+    if (sbg_pump(SBSHM_BLK_SLOT / 512U))
+        spent += sb_us() - t;
 }
 
 void guest_irq(void)
