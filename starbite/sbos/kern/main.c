@@ -263,6 +263,17 @@ void sb_main(void)
         uint64_t took = sb_ms() - turn0;
         if (took > K.slow_turn_ms)
             K.slow_turn_ms = (uint32_t)took;
+        if (!(slow_what[0] == 't' && slow_owner == KT_SELFTEST)) {   /* cp7k: the self test's summary (the pmsg ring
+                                                                       * may drop the line) */
+            if (took > K.user_turn_ms) {
+                K.user_turn_ms = (uint32_t)took;
+                K.user_turn_what = slow_what;
+                K.user_turn_owner = slow_owner;
+                K.user_turn_id = slow_id;
+            }
+            if (took >= 100)
+                K.turns_100++;
+        }
         if (took >= 200 && sb_ms() - slow_logged >= 1000) {
             slow_logged = sb_ms();
             struct ub u;

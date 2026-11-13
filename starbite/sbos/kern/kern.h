@@ -352,6 +352,11 @@ struct kstate {
     int heat_confirmed;             /* the first-run heater confirmation this boot */
     int any_input;                  /* a touch or key since the start (the 0.1 dead-man return) */
     uint32_t slow_turn_ms;          /* the slowest loop turn so far */
+    /* cp7k: the same without the self test's own timer (KT_SELFTEST: its film setup), for its summary: the slowest
+     * turn, its slowest piece ("timer", "input", ...) with a timer's owner / id, and the turns of 100 ms or more (the
+     * gate; the log line is >= 200 ms) */
+    uint32_t user_turn_ms, user_turn_owner, user_turn_id, turns_100;
+    const char *user_turn_what;
     uint64_t deadman_t0;            /* the 10-minute return to the menu counts from here (the start; the self-test
                                      * image: the last input) */
 };
