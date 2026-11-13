@@ -23,6 +23,7 @@
 #include <linux/blk-mq.h>
 #include <linux/blkdev.h>
 #include <linux/cpu.h>
+#include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
@@ -35,6 +36,7 @@
 #include <linux/poll.h>
 #include <linux/reboot.h>
 #include <linux/slab.h>
+#include <linux/suspend.h>
 #include <linux/timer.h>
 #include <linux/vmalloc.h>
 #include <linux/workqueue.h>
@@ -192,6 +194,81 @@ static void sbg_stop_fallback(struct work_struct *w)
 static DECLARE_DELAYED_WORK(sbg_stop_work, sbg_stop_fallback);
 static atomic_t sbg_stop_armed = ATOMIC_INIT(0);
 
+/* ---- instant start (2026-11-13): freeze / thaw on the host's hdr.host_freeze --------------------------------
+ * Starbite OS stopped Linux 60 s after it was hidden, so nearly every open was a cold boot (~20-30 s on the phone).
+ * Now the host freezes it instead: this work takes CPUs 1..n offline (PSCI CPU_OFF, as at power off), says
+ * guest_frozen and suspends to idle (tasks frozen, the file systems synced first, the ticks stopped, CPU 0 in WFI);
+ * the doorbell (IRQF_NO_SUSPEND) wakes it when host_freeze goes 0 or the host stops it; then the CPUs come back
+ * (PSCI CPU_ON through the trampoline, as at boot) and guest_frozen goes 0. The carve-out stays as it is. */
+#ifdef CONFIG_SUSPEND
+static bool freeze_offline = true;
+module_param(freeze_offline, bool, 0644);
+MODULE_PARM_DESC(freeze_offline, "take CPUs 1..n offline while frozen (default 1)");
+static atomic_t sbg_freeze_busy = ATOMIC_INIT(0);
+static bool sbg_in_suspend;
+static bool sbg_freeze_wanted(void)
+{
+	return READ_ONCE(hdr->host_freeze) && READ_ONCE(hdr->host_state) != SBG_HOST_STOPPING;
+}
+static void sbg_freeze_fn(struct work_struct *w)
+{
+	unsigned long offl = 0;
+	unsigned int cpu, n = 0, fails = 0;
+	u64 t0;
+	int r;
+
+	do {
+		if (freeze_offline) {
+			unsigned long want = 0;
+
+			for_each_online_cpu(cpu)
+				if (cpu && cpu < BITS_PER_LONG)
+					want |= BIT(cpu);
+			for_each_set_bit(cpu, &want, BITS_PER_LONG)
+				if (!remove_cpu(cpu))
+					offl |= BIT(cpu);
+		}
+		pr_info("sbguest: freezing (the host asked; CPUs offline %#lx)\n", offl);
+		WRITE_ONCE(hdr->guest_frozen, 1);
+		sbg_ring_host();
+		while (sbg_freeze_wanted()) {
+			WRITE_ONCE(sbg_in_suspend, true);
+			r = pm_suspend(PM_SUSPEND_TO_IDLE);
+			WRITE_ONCE(sbg_in_suspend, false);
+			n++;
+			if (r) {	/* a task that would not freeze, a wakeup during the freeze: again soon */
+				if (fails++ < 4)
+					pr_warn("sbguest: suspend to idle: %d (again)\n", r);
+				msleep(200);
+			}
+		}
+		t0 = ktime_get_ns();
+		for_each_set_bit(cpu, &offl, BITS_PER_LONG)
+			if (add_cpu(cpu))
+				pr_warn("sbguest: CPU %u did not come back\n", cpu);
+		offl = 0;
+		WRITE_ONCE(hdr->guest_frozen, 0);
+		sbg_ring_host();
+		pr_info("sbguest: thawed after %u suspend(s); CPUs back in %llu us\n", n,
+			div_u64(ktime_get_ns() - t0, 1000));
+		atomic_set(&sbg_freeze_busy, 0);
+		/* the host may have asked again while the CPUs came back */
+	} while (sbg_freeze_wanted() && !atomic_xchg(&sbg_freeze_busy, 1));
+}
+static DECLARE_WORK(sbg_freeze_work, sbg_freeze_fn);
+static void sbg_freeze_db(void)
+{
+	if (sbg_freeze_wanted()) {
+		if (!atomic_xchg(&sbg_freeze_busy, 1))
+			queue_work(system_unbound_wq, &sbg_freeze_work);
+	} else if (READ_ONCE(sbg_in_suspend)) {
+		pm_system_wakeup();		/* thaw (or the host stops it): out of suspend to idle */
+	}
+}
+#else
+static void sbg_freeze_db(void) { }
+#endif
+
 /* ---- /dev/sbshm ------------------------------------------------------------------------------------ */
 static void sbblk_kick(void);
 
@@ -205,6 +282,7 @@ static irqreturn_t sbg_db_irq(int irq, void *dev)
 	sbsnd_kick();
 	if (READ_ONCE(hdr->host_state) == SBG_HOST_STOPPING && !atomic_xchg(&sbg_stop_armed, 1))
 		schedule_delayed_work(&sbg_stop_work, SBG_STOP_GRACE_S * HZ);
+	sbg_freeze_db();
 	return IRQ_HANDLED;
 }
 
@@ -655,7 +733,8 @@ static int sbg_probe(struct platform_device *pdev)
 
 	irq = platform_get_irq_optional(pdev, 0);
 	if (irq > 0) {
-		ret = devm_request_irq(&pdev->dev, irq, sbg_db_irq, 0, "sbshm-doorbell", NULL);
+		/* IRQF_NO_SUSPEND: the doorbell also thaws a guest suspended to idle (instant start) */
+		ret = devm_request_irq(&pdev->dev, irq, sbg_db_irq, IRQF_NO_SUSPEND, "sbshm-doorbell", NULL);
 		if (ret)
 			dev_warn(&pdev->dev, "doorbell irq %d: %d (polling)\n", irq, ret);
 		irq_ok = !ret;
@@ -674,6 +753,10 @@ static int sbg_probe(struct platform_device *pdev)
 	sbnet_init(&pdev->dev, irq_ok);
 	sbp9_init(&pdev->dev, irq_ok);
 	sbsnd_init(&pdev->dev, irq_ok);
+#ifdef CONFIG_SUSPEND
+	if (irq_ok)
+		WRITE_ONCE(hdr->guest_caps, READ_ONCE(hdr->guest_caps) | SBSHM_CAP_FREEZE);
+#endif
 	sbg_load_last = sbg_busy_ns();
 	timer_setup(&sbg_load_timer, sbg_load_tick, 0);
 	mod_timer(&sbg_load_timer, jiffies + SBG_LOAD_PERIOD_S * HZ);
@@ -705,6 +788,9 @@ static void __exit sbg_exit(void)
 	if (sbg_load_timer.function)
 		timer_shutdown_sync(&sbg_load_timer);
 	cancel_delayed_work_sync(&sbg_stop_work);
+#ifdef CONFIG_SUSPEND
+	cancel_work_sync(&sbg_freeze_work);
+#endif
 	sbp9_exit();				/* the 9p transport is registered with 9pnet: take it back */
 	platform_driver_unregister(&sbg_driver);
 }
