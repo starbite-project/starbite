@@ -59,18 +59,6 @@ static uint64_t r_t0;
 static char r_res[DRV_MAXP][3];
 static char r_why[DRV_MAXP][3][DRV_WHY];
 
-static int has(const char *h, const char *n)
-{
-    for (; *h; ++h) {
-        unsigned k = 0;
-        while (n[k] && h[k] == n[k])
-            ++k;
-        if (!n[k])
-            return 1;
-    }
-    return 0;
-}
-
 static const char *after(const char *h, const char *n)
 {
     for (; *h; ++h) {
@@ -136,10 +124,12 @@ static void note_result(unsigned idx, unsigned level, int timed_out)
         const char *l = sb_log_line(n - 1U - k);
         if (!l)
             break;
-        const char *a = after(l, fail);
-        if (a || has(l, pass)) {
+        const char *a = after(l, fail), *ap = a ? 0 : after(l, pass);
+        if (a || ap) {
             r_res[idx][level] = a ? 'F' : 'P';
-            if (a) {
+            if (!a)
+                a = ap;                     /* the PASS line's facts too (the summary prints them last) */
+            {
                 while (*a == ' ')
                     ++a;
                 unsigned j = 0;
@@ -169,6 +159,23 @@ static void summary(void)
         }
         sb_log(u.b);
     }
+    /* each passing probe's facts at the highest level it passed (the run's last lines: pmsg keeps only its tail) */
+    for (unsigned i = 0; i < drv_nprobes && i < DRV_MAXP; ++i)
+        for (unsigned lv = r_maxlevel + 1U; lv-- > 0;)
+            if (r_res[i][lv] == 'P') {
+                if (r_why[i][lv][0]) {
+                    struct ub u;
+                    ub_init(&u);
+                    ub_s(&u, "drvprobe: summary: ");
+                    ub_s(&u, drv_probes[i].name);
+                    ub_s(&u, " L");
+                    ub_dec(&u, lv);
+                    ub_s(&u, " ok: ");
+                    ub_s(&u, r_why[i][lv]);
+                    sb_log(u.b);
+                }
+                break;
+            }
     for (unsigned lv = 0; lv <= r_maxlevel; ++lv)
         for (unsigned i = 0; i < drv_nprobes && i < DRV_MAXP; ++i)
             if (r_res[i][lv] == 'F' || r_res[i][lv] == 'T') {
