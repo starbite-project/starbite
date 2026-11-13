@@ -1,0 +1,17 @@
+--- a/src/panfrost/compiler/bifrost/bi_ra.c	2026-11-13 07:22:43
++++ b/src/panfrost/compiler/bifrost/bi_ra.c	2026-11-13 07:22:43
+@@ -1255,9 +1255,12 @@
+       unsigned register_demand = bi_calc_register_demand(ctx);
+       /* Starbite (S2o 2026-11-12: one macOS WindowServer shader kept the RA loop below busy for 6+ minutes on a
+        * Mali-G72's A55 host): when the estimate is over the register file, SSA-spill down to 48 instead of 64, so the
+-       * estimate's slack leaves room and the spill-and-retry loop (a full interference graph per round) rarely runs. */
++       * estimate's slack leaves room and the spill-and-retry loop (a full interference graph per round) rarely runs.
++       * S2z 2026-11-13: after login WindowServer's larger shaders still ran that loop for 100+ s, the interference rows
++       * going dense (about node count squared bytes) took WindowServer past 1 GB and jetsam killed it: spill to 32,
++       * which halves what is live at once, keeps the rows sparse and the retry loop rarer still. */
+       if (register_demand > regs_to_use && regs_to_use == BI_MAX_REGS && !ctx->inputs->is_blend)
+-         regs_to_use = BI_MAX_REGS - 16;
++         regs_to_use = BI_MAX_REGS - 32;
+       if (register_demand > regs_to_use) {
+          /* spill registers if we can */
+          if (ctx->inputs->is_blend)
