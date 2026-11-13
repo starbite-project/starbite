@@ -773,7 +773,10 @@ void guest_pump(void)
     }
     /* instant start: while Linux boots ("Starting Linux" on screen, nothing animates) 3x the budget: its boot is
      * card-bound, every synchronous read waits for the host */
-    uint64_t budget = st == GUEST_STARTING ? 3U * GUEST_PUMP_US : GUEST_PUMP_US;
+    /* Track A: only where nobody pays for it in frames: the screen off (a prewarm: 6x) or Linux's own window shown
+     * (3x); a start behind other screens (the self test's films, a Linux card while the user is elsewhere) keeps 1x */
+    uint64_t budget = st != GUEST_STARTING ? GUEST_PUMP_US : !screen ? 6U * GUEST_PUMP_US
+                    : shown ? 3U * GUEST_PUMP_US : GUEST_PUMP_US;
     uint32_t max = spent >= budget ? 0 : (uint32_t)((budget - spent) / (pump_us_sec ? pump_us_sec : 1));
     if (!max) {
         pump_spent++;
