@@ -13,6 +13,11 @@ reg query "HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0" /v ProcessorName
 reg query "HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0" /v VendorIdentifier >> gputest.log 2>&1
 reg query "HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0" /v ~MHz >> gputest.log 2>&1
 reg query "HKLM\HARDWARE\DESCRIPTION\System\BIOS" >> gputest.log 2>&1
+rem T63 (6.70): a staged sb-user.bat replaces every test: a session like the user's, measured; it restarts itself
+if exist %D%\sb-user.bat (
+  call %D%\sb-user.bat
+  exit /b 0
+)
 rem give DWM and the session a moment to settle
 ping -n 16 127.0.0.1 > nul
 rem T23: a window drag, DWM fps and where the time goes; with Starbite link (sblinkd) running, then without

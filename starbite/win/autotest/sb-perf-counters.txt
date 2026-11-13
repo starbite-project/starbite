@@ -1,0 +1,18 @@
+\Processor(*)\% Processor Time
+\Processor(_Total)\% DPC Time
+\Processor(_Total)\% Interrupt Time
+\Processor Information(_Total)\% Processor Performance
+\Processor Information(_Total)\Processor Frequency
+\System\Processor Queue Length
+\System\Context Switches/sec
+\Memory\Available MBytes
+\Memory\Committed Bytes
+\Memory\Pages/sec
+\Memory\Page Reads/sec
+\Memory\Page Faults/sec
+\Paging File(_Total)\% Usage
+\PhysicalDisk(_Total)\% Disk Time
+\PhysicalDisk(_Total)\Avg. Disk Queue Length
+\PhysicalDisk(_Total)\Avg. Disk sec/Transfer
+\Process(*)\% Processor Time
+\Process(*)\Working Set - Private

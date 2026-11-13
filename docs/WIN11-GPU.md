@@ -2387,6 +2387,31 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   refuses a foreign opengl32.dll; `--show` is read-only). After every test cycle, chain both again.
 - sb-gd.bat (T62): the user's GD driver copy is kept aside (`*.user`) and put back after the test.
 
+### 6.70 What the user feels: user-session pull and T63 (a measured user-style session on the big cores)
+
+- **User report after the 6.69 fix** (big cores, 19:2x-19:5x): GD Stereo Madness ~15 fps, Grief ~3 fps; "Windows is
+  extremely slow"; after quitting GD the shutdown took over 5 minutes.
+- **tools/win/user-pull.sh OUT** (read-only, from TWRP, before any cycle: installs empty umdlog) and
+  **tools/win/user-report.py OUT**: GD frame times per log (fps, windows with a frame >= 100 / 500 ms, the worst
+  intervals; 0158's gllows/glworst when present), sbwddm/sbwdog/sbthermal/sbxta state, boots and shutdowns
+  (System 12/13/41/1074/6005/6006/6008), service trouble (7000-7043), Diagnostics-Performance 100-110 / 200-207
+  (boot and shutdown durations, the services and apps that delayed them), app crashes and hangs (1000/1002).
+- **T63** (`build/win/stage/sbwddm-t63`), T61's drivers plus the 0158 GD driver. gputest holds only
+  `sb-user.bat`; sb-gputest.cmd hands over to it at logon. The session:
+  - 180 s idle with typeperf every 5 s (`sb-perf-counters.txt`: CPU per core, DPC/interrupt, queue, memory,
+    paging, disk, per process);
+  - GD via Steam, with clicks from `sb-click.ps1` (DPI-aware mouse_event: terms OK, Play, the first level), then
+    360 s;
+  - WM_CLOSE, timed;
+  - 120 s idle;
+  - a timed `shutdown /r /t 0`.
+  Run with `live_sec=10 live_flush=60` in the environment (gpu-cycle takes those from it), so the driver logs at
+  the user's rate.
+- **Suspects on paper** for the slowness: the winsqlite3 crash loops on M3 boots (WpnUserService, DiagTrack,
+  OneSync, UsoSvc: each crash also starts WER); x64 Steam + steamwebhelper translated from scratch on every
+  start (no XtaCache on the M3); memory (4 GB, GD ~700 MB private); the guard's throttle to 1066 MHz at 80 C.
+  The 5-minute shutdown points at a service that would not stop. 7043 / 203 events will name it.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
