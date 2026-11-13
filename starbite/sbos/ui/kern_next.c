@@ -186,6 +186,7 @@ extern const uint8_t sbtk_pack_start[], sbtk_pack_end[];
 static tk_comp comp;
 static int ready, baking, need_full, ticking, boosted;
 static uint64_t bd_us_frame;                /* (the frame log reads it before its definition below: a tentative one here) */
+static uint32_t cache_us_frame;             /* 8f: the same (its definition below) */
 static uint64_t last_tick, boot_t0;
 /* the frame statistics of the current gesture (logged per film in the self test, per gesture otherwise) */
 static struct { uint32_t n, nhalf, over16, maxus, nboost, nwait; uint64_t sumus, sumwait; uint32_t hist[64]; uint8_t ms[120];
@@ -658,6 +659,8 @@ static void stats_add(void)
             ub_dec(&u, tu);
             ub_s(&u, " run ");
             ub_dec(&u, tr);
+            ub_s(&u, " cache ");                    /* 8f: a bottom-cache compose in this frame (0 none) */
+            ub_dec(&u, cache_us_frame);
             ub_s(&u, ")");
         }
         sb_log(u.b);
@@ -1120,9 +1123,11 @@ static const tk_gpu_item *live_backdrops(const tk_gpu_item *it, int n, const tk_
 
 static int next_gpu_(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us);
 static uint64_t bd_us_frame;               /* 1.0: this frame's live backdrops (the frame log) */
+static uint32_t cache_us_frame;            /* 8f: this frame's bottom-cache compose, if one ran (the frame log) */
 static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us)
 {
     uint64_t t = sb_us();
+    cache_us_frame = 0;
     int r = next_gpu_(ctx, dst, it, n, dmg, ndmg, us);
     comp.us_platform = sb_us() - t;
     return r;
@@ -1149,9 +1154,13 @@ static int next_gpu_(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, con
         /* a longer still prefix than the cache holds, still for two frames: the cache again (all of it, at most
          * n - 1 items: the top one is usually what moves) */
         int want = p < n ? p : n - 1;
-        if (stable_k >= 2 && want >= 1 && (!valid || want > cache_n)) {
-            uint64_t u2 = 0;
-            if (gpucomp_compose(cache, 0xff000000U, (const struct gc_quad *)it, (unsigned)want, &u2)) {
+        /* 8f: a valid cache isn't grown while anything moves (a grow is a second full compose in that frame: 8c2's
+         * emergency frames at 17-22 ms with a GPU run of 3-6 ms); a broken one is rebuilt as before */
+        if (stable_k >= 2 && want >= 1 && (!valid || (want > cache_n && !sh_moving()))) {
+            uint64_t u2 = 0, tc0 = sb_us();
+            int okc = gpucomp_compose(cache, 0xff000000U, (const struct gc_quad *)it, (unsigned)want, &u2);
+            cache_us_frame = (uint32_t)(sb_us() - tc0);
+            if (okc) {
                 tk_memcpy(cacheq, it, sizeof(tk_gpu_item) * (size_t)want);
                 cache_n = want;
                 valid = 1;
