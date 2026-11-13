@@ -31,8 +31,9 @@ DRV_LIST_BEGIN
     { "bt", drv_bt_probe, drv_bt_abort, DRV_BT_BUDGET_MS },
     { "cam", drv_cam_probe, drv_cam_abort, CAM_PROBE_BUDGET_MS },
     { "usb", drv_usb_probe, drv_usb_abort, DRV_USB_BUDGET_MS },
-    /* "audio" (the bypass engine) is left out since run 6: four runs showed RDMA0 never moves without Calliope, and its
-     * leftover register state would be Calliope's start state. drv_audio_probe stays in snd.c. */
+    /* "audio" = snd's engine end to end; since run 7 it runs through Calliope (run 6: RDMA0 at 48 kHz through Calliope;
+     * the bypass sweep, four runs that never moved, is no longer its level 1 when Calliope's files are there) */
+    { "audio", drv_audio_probe, drv_audio_abort, 20000 },
     /* media through Calliope (abox_media.c), LAST so Calliope's boot and stream lines are in pmsg's tail (run 5: the
      * first Calliope boot on this phone; the bypass "audio" probe before it is known not to move, run 4) */
     { "calliope", drv_calliope_probe, drv_calliope_abort, DRV_CALLIOPE_BUDGET_MS },
@@ -45,6 +46,7 @@ const unsigned drv_nprobes = sizeof drv_probes / sizeof drv_probes[0] - 1U;
 /* ---- the runner ---- */
 static unsigned r_idx, r_level, r_maxlevel, r_timeouts;
 static int r_started, r_done;
+static const char *r_only;                  /* drv_run_select's list, 0 = all */
 static uint64_t r_t0;
 
 /* The result of every probe at every level, kept for the summary at the end (pmsg keeps only the run's last few
@@ -77,6 +79,27 @@ static const char *after(const char *h, const char *n)
     }
     return 0;
 }
+
+/* is name one of csv's comma-separated names? */
+static int selected(const char *name)
+{
+    if (!r_only || !*r_only)
+        return 1;
+    for (const char *c = r_only; *c;) {
+        unsigned k = 0;
+        while (name[k] && c[k] == name[k])
+            ++k;
+        if (!name[k] && (c[k] == ',' || !c[k]))
+            return 1;
+        while (*c && *c != ',')
+            ++c;
+        if (*c == ',')
+            ++c;
+    }
+    return 0;
+}
+
+void drv_run_select(const char *csv) { r_only = csv; }
 
 /* the probe's own last line ("drvprobe: <name>: PASS ..." / "FAIL ..."), searched among the newest log lines */
 static void note_result(unsigned idx, unsigned level, int timed_out)
@@ -170,6 +193,8 @@ void drv_run_begin(int attended)
         r_res[i][0] = r_res[i][1] = r_res[i][2] = 0;
     sb_logx("drvprobe: begin; probes ", drv_nprobes);
     sb_logx("drvprobe: highest level ", r_maxlevel);
+    if (r_only && *r_only)
+        sb_logf("drvprobe: only: ", r_only);
 #ifndef DRV_HOST_LIST
     /* the probe images may force UART_BT's / USI10_I2C's CMU gates on for Bluetooth; bt.c restores them */
     bt_allow_clock_gates(1);
@@ -194,6 +219,10 @@ int drv_run_step(unsigned *wait_ms)
         sb_logx("drvprobe: level ", r_level);
     }
     const struct drv_probe *p = &drv_probes[r_idx];
+    if (!r_started && !selected(p->name)) {
+        ++r_idx;                                /* not selected: shows '-' in the summary */
+        return 0;
+    }
     if (!r_started) {
         r_started = 1;
         r_t0 = sb_ms();
