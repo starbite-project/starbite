@@ -235,6 +235,12 @@ int cal_hal_set(const struct abox_hal *h)
     return 0;
 }
 
+void cal_abox_hal(void)
+{
+    if (have_hal && abox_state() == ABOX_ST_OFF)
+        abox_hal_set(&H);
+}
+
 /* the windows are shared by their users (snd.c keeps them for any boot, the probe adds and removes its own): counted.
  * Both or neither: RDMA0's (slot 1 of abox.c's two) and WDMA1's (slot 2). */
 static int map_users;

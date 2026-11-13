@@ -31,12 +31,12 @@ DRV_LIST_BEGIN
     { "bt", drv_bt_probe, drv_bt_abort, DRV_BT_BUDGET_MS },
     { "cam", drv_cam_probe, drv_cam_abort, CAM_PROBE_BUDGET_MS },
     { "usb", drv_usb_probe, drv_usb_abort, DRV_USB_BUDGET_MS },
-    /* "audio" = snd's engine end to end; since run 7 it runs through Calliope (run 6: RDMA0 at 48 kHz through Calliope;
-     * the bypass sweep, four runs that never moved, is no longer its level 1 when Calliope's files are there) */
-    { "audio", drv_audio_probe, drv_audio_abort, 20000 },
     /* media through Calliope (abox_media.c), LAST so Calliope's boot and stream lines are in pmsg's tail (run 5: the
      * first Calliope boot on this phone; the bypass "audio" probe before it is known not to move, run 4) */
     { "calliope", drv_calliope_probe, drv_calliope_abort, DRV_CALLIOPE_BUDGET_MS },
+    /* "audio" = snd's engine end to end through Calliope, LAST (run 7: its failure lines were cut from pmsg's tail
+     * behind calliope's; calliope itself passed runs 6 and 7) */
+    { "audio", drv_audio_probe, drv_audio_abort, 20000 },
 DRV_LIST_END
 #else
 DRV_HOST_LIST                               /* the host test's fake probes */
@@ -52,7 +52,7 @@ static uint64_t r_t0;
 /* The result of every probe at every level, kept for the summary at the end (pmsg keeps only the run's last few
  * hundred lines): 'P' pass, 'F' fail, 'T' out of time, '?' no PASS/FAIL line found, 0 not run. */
 #define DRV_MAXP 16
-#define DRV_WHY 72
+#define DRV_WHY 104
 static char r_res[DRV_MAXP][3];
 static char r_why[DRV_MAXP][3][DRV_WHY];
 

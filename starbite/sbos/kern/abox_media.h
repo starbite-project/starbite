@@ -81,6 +81,7 @@
 #define CAL_NOPOS        0xFFFFFFFFU
 
 int cal_hal_set(const struct abox_hal *h);  /* 0, or ABOX_ESTATE when a required hook is missing */
+void cal_abox_hal(void);                    /* hands cal_hal_set's HAL to abox.c (abox_hal_set) before a boot */
 int cal_map(void);                          /* 0 or < 0 (abox_map_extra): RDMA0's and WDMA1's windows (2 slots) */
 void cal_unmap(void);                       /* counted: the window goes when its last user unmaps */
 void cal_sync(void);                        /* after CPU stores into the ring */

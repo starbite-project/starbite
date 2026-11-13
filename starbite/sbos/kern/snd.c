@@ -199,6 +199,29 @@ static void snprintf_like(char *d, unsigned cap, const char *a, const char *b, c
 }
 #define SL(x) ((long)(x))
 
+/* the newest failure line snd said (for the probe's FAIL line: pmsg keeps only the run's tail) */
+static char last_bad[112];
+static int has_s(const char *h, const char *n)
+{
+    for (; *h; ++h) {
+        unsigned k = 0;
+        while (n[k] && h[k] == n[k])
+            ++k;
+        if (!n[k])
+            return 1;
+    }
+    return 0;
+}
+static void note_bad(const char *l)
+{
+    if (!has_s(l, "did not") && !has_s(l, "did NOT") && !has_s(l, "fell over") && !has_s(l, "failed") &&
+        !has_s(l, "refused") && !has_s(l, "stopped while") && !has_s(l, "took Calliope"))
+        return;
+    unsigned i = 0;
+    for (; l[i] && i + 1 < sizeof last_bad; ++i)
+        last_bad[i] = l[i];
+    last_bad[i] = 0;
+}
 static void say(const char *fmt, ...)
 {
     char b[220];
@@ -208,6 +231,7 @@ static void say(const char *fmt, ...)
     va_end(ap);
     if (inited && O.log)
         O.log(b);
+    note_bad(b + 5);
 }
 /* the probe's lines ("drvprobe: audio: ...") */
 static void psay(const char *fmt, ...)
@@ -666,6 +690,7 @@ static int cal_up(void)
         return 0;
     uint64_t t0 = now();
     (void)cal_map();                                /* again: a probe may have taken its own windows away */
+    cal_abox_hal();                                 /* abox.c's HAL: snd may be the first to boot Calliope */
     r = abox_boot();
     cal_unmap();
     if (!r)
@@ -1388,9 +1413,21 @@ static void cprobe_restore(void)
 /* every failure: the tone, the output (amps first), the streams, the mic, Calliope if snd booted it, the settings */
 static int cfail(const char *line)
 {
+    char b[240];
+    unsigned n = 0;
     psay("%s", why_buf);
+    psay("failed: %s", line);
+    /* the cause first (snd's newest failure line), then the probe's step: the summary keeps ~100 characters */
+    for (const char *q = last_bad[0] ? last_bad : line; *q && n + 1 < sizeof b; ++q)
+        b[n++] = *q;
+    if (last_bad[0])
+        for (const char *q = " | step: "; *q && n + 1 < sizeof b; ++q)
+            b[n++] = *q;
+    for (const char *q = last_bad[0] ? line : ""; *q && n + 1 < sizeof b; ++q)
+        b[n++] = *q;
+    b[n] = 0;
     drv_audio_abort();
-    return pfinish(0, line);
+    return pfinish(0, b);
 }
 static void feed_zeros(void)
 {
@@ -1715,6 +1752,7 @@ int drv_audio_probe(int level, unsigned *wait_ms)
     if (!P.active || P.level != level) {
         memset(&P, 0, sizeof P);
         P.active = 1, P.level = level, P.t0 = now();
+        last_bad[0] = 0;
     }
     if (now() - P.t0 > (uint64_t)budget_of[level] * 1000ULL) {
         drv_audio_abort();

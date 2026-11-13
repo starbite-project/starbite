@@ -1283,6 +1283,23 @@ static void test_snd_probe(void)
     snd_all_off("snd L2 abort");
 }
 
+/* the phone's run order (run 7): audio L0, calliope L0, calliope L1, then audio L1 (and the old order, audio L1
+ * right after calliope L0) */
+static void test_probe_order(void)
+{
+    for (int order = 0; order < 2; ++order) {
+        snd_setup();
+        CHECK(run_snd(0, 0, 0), "order %d: audio L0 did not finish", order);
+        CHECK(run(0), "order %d: calliope L0 did not finish", order);
+        if (order == 0)
+            CHECK(run(1), "order %d: calliope L1 did not finish", order);
+        CHECK(run_snd(1, 0, 0), "order %d: audio L1 did not finish", order);
+        CHECK(strstr(snd_last(), "PASS snd's engine through Calliope"), "order %d: audio L1: %s", order, snd_last());
+        snd_all_off("order");
+        drv_audio_abort();
+    }
+}
+
 int main(int argc, char **argv)
 {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
@@ -1299,6 +1316,7 @@ int main(int argc, char **argv)
     test_goertzel();
     test_snd_capture();
     test_snd_probe();
+    test_probe_order();
     printf("calliope host test: %d checks, %d failed\n", checks, fails);
     free(F.w);
     free(F.rmem);
