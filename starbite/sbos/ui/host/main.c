@@ -480,7 +480,22 @@ long long sh_utc(void) { return 1794500000LL + 25 * 60 + (long long)(surv_host_n
 /* Track A: the time zones on kern/tzdb.c itself (linked in), 12 / 24-hour and four alarms in RAM (two made up). The
  * host's sh_status stays the concept's 21:05 whatever the zone */
 #include "tzdb.h"
+#include "tzcities.h"
 static int host_tz = -1, host_24 = 1;
+/* 8a: the cities (kern/tzcities.c, GeoNames CC BY 4.0) */
+int sh_city_count(void) { return tzcities_n; }
+int sh_city_find(const char *query, int *out, int max) { return tzc_find(query, out, max); }
+int sh_city_get(int i, const char **name, const char **country, int *tz, int *lat_e4, int *lon_e4)
+{
+    if (i < 0 || i >= tzcities_n) return -1;
+    const struct tzcity *c = &tzcities[i];
+    if (name) *name = c->name;
+    if (country) *country = tzc_country[c->country];
+    if (tz) *tz = c->zone;
+    if (lat_e4) *lat_e4 = c->lat_e4;
+    if (lon_e4) *lon_e4 = c->lon_e4;
+    return 0;
+}
 int sh_tz_count(void) { return tzdb_n; }
 const char *sh_tz_name(int i, const char **city)
 {

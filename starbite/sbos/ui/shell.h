@@ -638,6 +638,13 @@ void sh_alarm_sound(int on);
  * own bytes (up to 32 KiB) under a stable id (1..); each collection has a budget (Notes 96 KiB, Contacts 64 KiB).
  * put: n 0 deletes; 0 ok, -1 refused (full, too big; the self test: a dry run). get: the length (copied up to cap),
  * -1 none. id_at: the k-th id in id order (0 none). usage: bytes used and the budget (the "Storage Full" state) */
+/* 8a (Track A, kern/tzcities.c from GeoNames, CC BY 4.0: credit it in Settings > About > Legal): ~3000 cities in the
+ * modelled time zones for World Clock's and Weather's search. find: indexes of cities whose name (or a word of it)
+ * starts with query, case and Latin accents ignored, by name. get: 0 ok (name, country in English, the zone as an
+ * sh_tz_* index, the place in degrees x 10000), -1 no such city */
+int sh_city_count(void);
+int sh_city_find(const char *query, int *out, int max);
+int sh_city_get(int i, const char **name, const char **country, int *tz, int *lat_e4, int *lon_e4);
 enum { SH_DOC_NOTES = 0, SH_DOC_CONTACTS = 1 };
 int sh_doc_put(int coll, unsigned id, const void *p, unsigned n);
 int sh_doc_get(int coll, unsigned id, void *p, unsigned cap);
