@@ -477,6 +477,32 @@ static void box_mirror(float *v, float *t, int n, int r)
 }
 static void bmp_blur_full(tk_bmp *b, float sigma);
 void tk_bmp_blur(tk_bmp *b, float sigma) { tk_bmp_blur_sat(b, sigma, 1, 1); }
+/* rows y0..y1 of b: the quarter q bilinear up 4x (tk_bmp_blur_sat's wide blur) */
+typedef struct { tk_bmp *b; const tk_bmp *q; } up4_ctx;
+static void up4_rows(void *v, int y0r, int y1r)
+{
+    up4_ctx *U = v;
+    tk_bmp *b = U->b;
+    const tk_bmp *q = U->q;
+    for (int j = y0r; j < y1r; j++) {
+        float fy = (j + .5f) / 4 - .5f;
+        int ya = (int)tk_floorf(fy);
+        unsigned ty = (unsigned)((fy - ya) * 256);
+        int y0 = tk_maxi(0, ya), y1 = tk_mini(q->h - 1, ya + 1);
+        for (int i = 0; i < b->w; i++) {
+            float fx = (i + .5f) / 4 - .5f;
+            int xa = (int)tk_floorf(fx);
+            unsigned tx = (unsigned)((fx - xa) * 256);
+            int x0 = tk_maxi(0, xa), x1 = tk_mini(q->w - 1, xa + 1);
+            uint32_t p00 = q->px[y0 * q->w + x0], p01 = q->px[y0 * q->w + x1], p10 = q->px[y1 * q->w + x0], p11 = q->px[y1 * q->w + x1], o = 0;
+            for (int sh = 0; sh < 32; sh += 8) {
+                unsigned t0 = (p00 >> sh & 255) * (256 - tx) + (p01 >> sh & 255) * tx, t1 = (p10 >> sh & 255) * (256 - tx) + (p11 >> sh & 255) * tx;
+                o |= ((t0 * (256 - ty) + t1 * ty + 32768) >> 16) << sh;
+            }
+            b->px[j * b->stride + i] = o;
+        }
+    }
+}
 void tk_bmp_blur_sat(tk_bmp *b, float sigma, float sat, float bright)
 {
     /* the blur, then CSS saturate / brightness; for a wide blur both at a quarter of the resolution (the result
@@ -492,24 +518,8 @@ void tk_bmp_blur_sat(tk_bmp *b, float sigma, float sat, float bright)
     tk_bmp_down2(&q, &a);
     bmp_blur_full(&q, sigma / 4);
     if (filt) tk_bmp_satbright(&q, sat, bright);
-    for (int j = 0; j < b->h; j++) {
-        float fy = (j + .5f) / 4 - .5f;
-        int ya = (int)tk_floorf(fy);
-        unsigned ty = (unsigned)((fy - ya) * 256);
-        int y0 = tk_maxi(0, ya), y1 = tk_mini(q.h - 1, ya + 1);
-        for (int i = 0; i < b->w; i++) {
-            float fx = (i + .5f) / 4 - .5f;
-            int xa = (int)tk_floorf(fx);
-            unsigned tx = (unsigned)((fx - xa) * 256);
-            int x0 = tk_maxi(0, xa), x1 = tk_mini(q.w - 1, xa + 1);
-            uint32_t p00 = q.px[y0 * q.w + x0], p01 = q.px[y0 * q.w + x1], p10 = q.px[y1 * q.w + x0], p11 = q.px[y1 * q.w + x1], o = 0;
-            for (int sh = 0; sh < 32; sh += 8) {
-                unsigned t0 = (p00 >> sh & 255) * (256 - tx) + (p01 >> sh & 255) * tx, t1 = (p10 >> sh & 255) * (256 - tx) + (p11 >> sh & 255) * tx;
-                o |= ((t0 * (256 - ty) + t1 * ty + 32768) >> 16) << sh;
-            }
-            b->px[j * b->stride + i] = o;
-        }
-    }
+    up4_ctx U = { b, &q };
+    tk_par_rows(0, b->h, up4_rows, &U);         /* cp7c: the bilinear up over the cores (rows are independent) */
     tk_bmp_free(&a);
     tk_bmp_free(&q);
 }

@@ -104,6 +104,7 @@ static void sw_snap(void)
     if (!SWR[i].snap.px && !tk_bmp_new(&SWR[i].snap, SNAP_W, SNAP_H)) return;
     float ca = appc.alpha, sa = apsb.alpha;
     appc.alpha = apsb.alpha = 1;                 /* as it is at rest */
+    flat_cuts++;                                 /* cp7c: the lock's sliced flatten starts over (shell_lock.c) */
     tk_flatten(&appg, &SWR[i].snap, 0, .25f);
     appc.alpha = ca; apsb.alpha = sa;
     sw_dirty = 0;
