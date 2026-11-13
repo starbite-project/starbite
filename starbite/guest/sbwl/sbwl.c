@@ -1968,6 +1968,11 @@ static int icon_render(const struct app *a, const char *file, uint32_t *px)
 }
 #endif
 
+/* instant start (2026-11-13, the phone's card emulated in QEMU: 5.8 s of a 15.8 s HELLO was these renders, librsvg
+ * and the theme read from the card): icons_budget renders at most that many icons a call (-1: all). 0 before HELLO
+ * (the catalog goes out without them: Starbite can launch at once); after HELLO one per icons_tick, the catalog
+ * published again each time. icons_pending: some app still without its icon. */
+static int icons_budget = -1, icons_pending;
 /* the icons for the catalog's first SBSHM_ICONS_CAT apps (pool index = catalog index), rendered outside the seqlock */
 static void icons_prepare(void)
 {
@@ -1976,6 +1981,10 @@ static void icons_prepare(void)
 	 * instead of being rendered again. Pass 1 matches the keys, pass 2 renders the rest into the buffers left over. */
 	static uint32_t *old_px[SBSHM_ICONS_CAT];
 	static char old_key[SBSHM_ICONS_CAT][300], file[SBSHM_ICONS_CAT][512], key[SBSHM_ICONS_CAT][300];
+	if (icons_budget == 0) {                   /* before HELLO: not even the theme's folders (card reads) */
+		icons_pending = 1;
+		return;
+	}
 	memcpy(old_px, icon_px, sizeof(old_px));
 	memcpy(old_key, icon_key, sizeof(old_key));
 	memset(icon_px, 0, sizeof(icon_px));
@@ -1993,9 +2002,17 @@ static void icons_prepare(void)
 				break;
 			}
 	}
+	int budget = icons_budget;
+	icons_pending = 0;
 	for (int i = 0; i < n; ++i) {
 		if (icon_px[i])
 			continue;
+		if (budget == 0) {
+			icons_pending = 1;             /* (rendered at a later icons_tick) */
+			continue;
+		}
+		if (budget > 0)
+			--budget;
 		for (int j = 0; j < (int)SBSHM_ICONS_CAT && !icon_px[i]; ++j)
 			if (old_px[j]) {                   /* a buffer nobody wants any more */
 				icon_px[i] = old_px[j];
@@ -3015,6 +3032,22 @@ static void clock_tick(uint64_t now)
 
 static uint64_t t0;
 static struct wl_event_source *tick_src;
+/* after HELLO: the catalog's icons one per call, the catalog published again each time, until none is missing */
+static struct wl_event_source *icons_src;
+static int icons_tick(void *data)
+{
+	(void)data;
+	cat_dirty = 2;
+	cat_publish();
+	if (icons_pending) {
+		wl_event_source_timer_update(icons_src, 30);
+	} else {
+		icons_budget = -1;                     /* (later changes: all at once, as before) */
+		say("catalog: every icon rendered");
+	}
+	return 0;
+}
+
 static int tick(void *data)
 {
 	(void)data;
@@ -3173,9 +3206,47 @@ int main(int argc, char **argv)
 	wlr_seat_set_capabilities(S.seat, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH);
 	static const struct wlr_keyboard_impl kimpl = {.name = "starbite-keys"};
 	wlr_keyboard_init(&S.kbd, &kimpl, "starbite-keys");
-	struct xkb_context *xc = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-	struct xkb_rule_names names = {.layout = "us"};
-	struct xkb_keymap *km = xc ? xkb_keymap_new_from_names(xc, &names, XKB_KEYMAP_COMPILE_NO_FLAGS) : NULL;
+	/* instant start: the compiled keymap kept in one file after the first boot (xkbcommon's compile reads dozens of
+	 * small files under /usr/share/X11/xkb, each a card read on the phone: inside 8c's 10.3 s from sbwl to its output) */
+	static const char kcache[] = "/var/cache/sbwl/keymap-us.xkb";
+	struct xkb_keymap *km = NULL;
+	struct xkb_context *xc = xkb_context_new(XKB_CONTEXT_NO_DEFAULT_INCLUDES | XKB_CONTEXT_NO_ENVIRONMENT_NAMES);
+	if (xc && !sim) {
+		FILE *kf = fopen(kcache, "re");
+		if (kf) {
+			static char kb[256 * 1024];
+			size_t kn = fread(kb, 1, sizeof(kb) - 1, kf);
+			fclose(kf);
+			kb[kn] = 0;
+			if (kn > 0 && kn < sizeof(kb) - 1)
+				km = xkb_keymap_new_from_string(xc, kb, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+			if (!km)
+				say("keymap: the cached %s did not load: compiling it again", kcache);
+		}
+	}
+	if (!km) {
+		if (xc)
+			xkb_context_unref(xc);
+		xc = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+		struct xkb_rule_names names = {.layout = "us"};
+		km = xc ? xkb_keymap_new_from_names(xc, &names, XKB_KEYMAP_COMPILE_NO_FLAGS) : NULL;
+		char *ks = km && !sim ? xkb_keymap_get_as_string(km, XKB_KEYMAP_FORMAT_TEXT_V1) : NULL;
+		if (ks) {                              /* for the next boots */
+			mkdir("/var/cache/sbwl", 0755);
+			char tmp[sizeof(kcache) + 8];
+			snprintf(tmp, sizeof(tmp), "%s.new", kcache);
+			FILE *kf = fopen(tmp, "we");
+			if (kf) {
+				int ok = fputs(ks, kf) >= 0;
+				ok &= fclose(kf) == 0;
+				if (ok && rename(tmp, kcache) == 0)
+					say("keymap: compiled and kept in %s", kcache);
+				else
+					unlink(tmp);
+			}
+			free(ks);
+		}
+	}
 	if (km)
 		wlr_keyboard_set_keymap(&S.kbd, km);
 	else
@@ -3226,6 +3297,7 @@ int main(int argc, char **argv)
 		if (inotify_fd >= 0)
 			wl_event_loop_add_fd(S.loop, inotify_fd, WL_EVENT_READABLE, inotify_ev, NULL);
 		scan_apps();
+		icons_budget = 0;                      /* the catalog before HELLO without icons; they follow (icons_tick) */
 		cat_publish();
 	}
 	clock_tick(ms_now());                      /* the clock and TZ before the first app */
@@ -3244,6 +3316,16 @@ int main(int argc, char **argv)
 		int hf = open("/run/sbwl.hello", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);   /* no longer race ours) */
 		if (hf >= 0)
 			close(hf);
+	}
+	if (icons_pending) {                       /* the catalog's icons now, one per tick */
+		icons_budget = 1;
+		icons_src = wl_event_loop_add_timer(S.loop, icons_tick, NULL);
+		if (icons_src)
+			wl_event_source_timer_update(icons_src, 30);
+		else
+			icons_budget = -1;
+	} else {
+		icons_budget = -1;
 	}
 	if (svc & SBSHM_SVC_NOTIF)
 		session_start();                       /* the session bus and sbnotify now, before the host's first launch */

@@ -265,6 +265,15 @@ static int blk_io(uint32_t dev, uint32_t op, uint64_t sector, uint32_t count, vo
         return -SBG_ENODEV;
     if (op == SBG_BLK_FLUSH)
         return 0;
+#ifdef SBSIM_CARD_US_PER_SECTOR
+    /* the phone's card as it is today (~2.9 MB/s: 176 us a sector, -DSBSIM_CARD_US_PER_SECTOR=176): each request
+     * takes as long as it would there, on the host's CPU, one at a time (the card is serial) */
+    {
+        uint64_t end = cnt() + (uint64_t)count * SBSIM_CARD_US_PER_SECTOR * frq / 1000000U;
+        while (cnt() < end)
+            ;
+    }
+#endif
     uint64_t sk[2] = {(uint64_t)blk_fd[dev], sector * 512U};
     if (sbsim_semi(0x0a, sk))                                           /* SYS_SEEK */
         return -SBG_EIO;
@@ -740,7 +749,7 @@ static int run_guest(unsigned run)
                 puts_("sbsim: thawed ");
                 putu(t - t_touch);
                 puts_(" ms after the ask (CPUs back)\n");
-                if (frz_quiet <= 2)
+                if (frz_quiet <= 8)                 /* (the kernel answering a packet from the doorbell: no thaw) */
                     frz_ok++;
                 if (++frz_cycles < 2) {
                     tstep = 10;

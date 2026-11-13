@@ -258,8 +258,8 @@ static void guest_log(const char *l)
     for (int k = 0; bt && k < BT_N; ++k)
         if (!bt_ms[k] && bt_has(l, bt_key[k])) {
             bt_ms[k] = bt;
-            if (k == BT_SVC && st == GUEST_RUNNING)
-                bt_log();                   /* (the services after HELLO: the line again, now with them) */
+            if ((k == BT_SVC || k == BT_HELLO) && st == GUEST_RUNNING)
+                bt_log();                   /* (sbwl's HELLO line after the host's HELLO; the services after it) */
         }
     static const char *const keep[] = {"guestd", "sbguest", "guest-init", "panic", "Oops", "BUG", "Unable",
                                        "failed", "error", "smp: Brought up", "STARBITE"};
@@ -902,7 +902,8 @@ void guest_timer(unsigned id)
             ub_dec(&u, bm_ticks[BM_BACKGROUND]);
             sb_log(u.b);
             gt_max = 0;
-            bt_log();
+            if (bt_ms[BT_HELLO])
+                bt_log();                   /* (else at sbwl's own HELLO line, which comes just after the message) */
         }
         arm(shown ? 10 : 50);
         if (shown)
