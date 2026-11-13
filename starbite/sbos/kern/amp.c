@@ -319,8 +319,13 @@ static int bus_up(void)
         g[i] = H->rd32(CMU_PERIC1 + gates[i]);
     uint32_t mux = H->rd32(CMU_PERIC1 + 0x0120), div = H->rd32(CMU_PERIC1 + 0x181C);
     uint32_t mode = H->rd32(USI07_MODE), con = H->rd32(GPP4), pud = H->rd32(GPP4 + 8);
+    uint32_t dat = H->rd32(GPP4 + 4);
     say("bus: CMU_PERIC1 USI07 gates %08x %08x %08x %08x, IP_USER mux %08x, div %08x; usi07 mode %x; gpp4 con %08x pud %08x",
         g[0], g[1], g[2], g[3], mux, div, mode, con, pud);
+    /* read-only: the line levels before the pins become SCL / SDA (both 1 = pulled up and idle; 0 = held low, or the
+     * pull-ups' rail is off) */
+    say("bus: lines before set-up: SCL (gpp4-4) %u, SDA (gpp4-5) %u (gpp4 dat %02x)", (dat >> 4) & 1U, (dat >> 5) & 1U,
+        dat & 0xFFU);
     for (unsigned i = 0; i < 4; ++i)
         if (gate_closed(g[i]))
             return fail(AUD_EPERM, "a CMU_PERIC1 gate of USI07 is closed (not opened from here)");
@@ -363,9 +368,16 @@ static int identify(struct die *d)
     if (d->kind)
         say("%s: MAX98512%s, revision %02x (REV_ID at %04x)", d->name, d->kind == 'B' ? "B" : "", d->rev,
             d->kind == 'B' ? R_REV_ID_B : R_REV_ID);
-    else
+    else {
         say("%s: no MAX98512 answers (REV_ID 0x0402: %s %02x, 0x0600: %s %02x)", d->name, ra ? "bus error" : "read",
             id, rb ? (ra ? "bus error" : "not read") : "read", idb);
+        /* read-only: the HSI2C's own view of that last read (libsb enables only XFER_DONE, so a NACK reads as 00):
+         * TRANS_STATUS 0x50 (its NO_DEV / NO_DEV_ACK bits), INT_STAT 0x24, FIFO_STAT 0x30, CTL 0x00, CONF 0x40,
+         * and the line levels now */
+        say("%s: HSI2C TRANS_STATUS %08x INT_STAT %08x FIFO_STAT %08x CTL %08x CONF %08x; gpp4 dat %02x", d->name,
+            H->rd32(AMP_BUS + 0x50), H->rd32(AMP_BUS + 0x24), H->rd32(AMP_BUS + 0x30), H->rd32(AMP_BUS + 0x00),
+            H->rd32(AMP_BUS + 0x40), H->rd32(GPP4 + 4) & 0xFFU);
+    }
     return d->kind ? 0 : AUD_ENODEV;
 }
 

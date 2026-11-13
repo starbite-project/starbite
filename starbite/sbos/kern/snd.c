@@ -811,7 +811,9 @@ static void engine_fill(uint64_t t)
     uint32_t stt = 0, pos = G.ce ? cal_play_pos(&stt) : apcm_play_pos(&stt);
     if (pos != APCM_NOPOS && pos != G.last_pos)
         G.moved_at = t, G.last_pos = pos;
-    if (t - G.moved_at > STALL_US) {    /* no position, or the same one, for 250 ms: the DMA does not run */
+    /* no position, or the same one, for 250 ms: the DMA does not run. t is the poll's start, older than moved_at when
+     * this poll booted Calliope (~1 s on the phone, run 7b): no stall then (was an unsigned underflow) */
+    if (t > G.moved_at && t - G.moved_at > STALL_US) {
         say("engine: RDMA0 does not move (STATUS %x)", UL(stt));
         if (!G.ce && !G.dumped++)
             apcm_dump("engine");        /* once a boot: the registers for the log */
