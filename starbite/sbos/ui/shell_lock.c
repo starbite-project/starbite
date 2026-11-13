@@ -4801,6 +4801,37 @@ void sh_restore(void)
 
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static int lk_hint;             /* cp7: the lock's spring is a tap's hint bounce (set_lock moves the live lock) */
+/* cp7q (7r: the unlock drag's first move 85-100 ms and the ticks after it on the phone: the flat copy made whole there,
+ * stale after a wake or any change on the lock): on the GPU row the live lock moves with its own ground under it, the
+ * wallpaper's half and its star (lkground, lockg's first child; as the flat copy's ground was): the GPU moves layers
+ * and their glass for nothing, so no flat copy at all. Made at the lock's idle (a 4 MB copy), freed once unlocked */
+static tk_layer lkground;
+static uint32_t lkg_gen = ~0u;
+static int lk_ground_ready(void)
+{
+    if (!C || !C->base_half.px) return 0;
+    if (lkground.bmp.px && lkg_gen == C->ground_gen) return 1;
+    if (!lkground.bmp.px) {
+        tk_layer *nx = lkground.next;
+        tk_layer_init(&lkground, "lock-ground");
+        lkground.next = nx;
+        lkground.hidden = 1;
+        if (!tk_bmp_new(&lkground.bmp, C->base_half.w, C->base_half.h)) return 0;
+    }
+    tk_bmp_copy(&lkground.bmp, 0, 0, &C->base_half, 0, 0, C->base_half.w, C->base_half.h);
+    tk_layer *st[2] = { &star, &star_e };
+    for (int i = 0; i < 2; i++) {
+        if (st[i]->hidden || st[i]->alpha <= 0 || !st[i]->bmp.px) continue;
+        tk_layer_prepare(st[i]);
+        if (st[i]->half.px) tk_blit(&lkground.bmp, &st[i]->half, (int)st[i]->x / 2, (int)st[i]->y / 2, st[i]->alpha);
+    }
+    lkground.x = lkground.y = lkground.ox = lkground.oy = 0;
+    lkground.sx = lkground.sy = 2;
+    lkground.opaque = 1;
+    tk_layer_dirty(&lkground);
+    lkg_gen = C->ground_gen;
+    return 1;
+}
 static void set_lock(float y)
 {
     lockY = y;
@@ -4815,15 +4846,17 @@ static void set_lock(float y)
         lockg.hidden = 0;
         lockflat.hidden = 1;
         lockg.y = 0;
-    } else if (lk_hint && C && C->gpu && !EMG) {
-        /* cp7: a tap's hint bounce moves the live lock (the GPU row moves layers and their glass for free, as the
-         * wake's scale): the flat copy would be made again on every change in the bounce (a card's press fading, a
-         * stack opening: the lens over the whole lock, ~90 ms a frame on the A55; cp6d's self test) */
+        lkground.hidden = 1;
+    } else if (C && C->gpu && lk_ground_ready()) {
+        /* cp7 / 7q: the GPU row: the live lock and its ground move (a hint bounce, the unlock, the relock): no flat
+         * copy (cp6d: ~90 ms a frame when the lock changed in a bounce; 7r: 85-100 ms at the unlock's first move) */
         lockg.hidden = 0;
         lockflat.hidden = 1;
         lockg.y = PT(y);
-        home.alpha = 0;
+        lkground.hidden = 0;
+        lkground.alpha = 1;
     } else {
+        lkground.hidden = 1;
         lockg.y = 0;
         flatten_lock(0);
         lockg.hidden = 1;
@@ -4904,8 +4937,9 @@ static void relink(void)
     link(&appc, st, na + cm_layers(st + na));    /* helper I: the keypad's line and ring, Messages' fields */
     /* B9: the notifications' stack is the lock's (lkng, over the list: fanned out it takes the list's room); the
      * Centre's "N Notifications" pill only in Emergency */
-    tk_layer *lk[] = { &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
-    link(&lockg, lk, EMG ? 13 : 12);
+    tk_layer *lk[] = { &lkground, &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
+    if (!lkground.name) { tk_layer_init(&lkground, "lock-ground"); lkground.hidden = 1; }   /* cp7q: the moving lock's ground */
+    link(&lockg, lk, EMG ? 14 : 13);
     lkn_link();
     /* B10: the vendor cards in the list as B4 had them: the lower cards, the members' platters and words under the
      * head card, "Show less" above it, the chevron on top */
@@ -6236,7 +6270,10 @@ int sh_tick(float dt, float t)
         int live = tk_spring_step(&sp_lock, dt);
         if (!live) lk_hint = 0;
         set_lock(sp_lock.x);
-        if (!live && sp_lock.to <= -H_PT + .01f && !pc_holds()) { locked = 0; lockflat.hidden = 1; home.sx = home.sy = 1; }   /* Track A */
+        if (!live && sp_lock.to <= -H_PT + .01f && !pc_holds()) {
+            locked = 0; lockflat.hidden = 1; home.sx = home.sy = 1;   /* Track A */
+            relayer(&lkground); lkground.hidden = 1; lkg_gen = ~0u;    /* cp7q: the moving lock's ground goes (the heap) */
+        }
         mv = 1;
     }
     if (T.kind == G_LOCK || T.kind == G_LIST || T.kind == G_THUMB || T.kind == G_RELOCK || T.kind == G_PAGE) mv = 1;
@@ -6537,7 +6574,7 @@ void sh_idle(void)
      * first: its own cards (sv_idle), then its flat copy (the unlock's first frame; each card restarts it), then home's
      * widgets and page 2 (7j: a 203 ms tick at an unlock right after the hold, the flat copy and home made there) */
     int ep_home_only = EP.ground && !(EP.post & (EP_CARDS | EP_LW));
-    int lock_first = sv_idle_pending() || (locked && lockY == 0 && !focus_on && (flat_ver != lock_ver || flat_ground != C->ground_gen));
+    int lock_first = sv_idle_pending() || (locked && lockY == 0 && !focus_on && !C->gpu && (flat_ver != lock_ver || flat_ground != C->ground_gen));
     if (EP.goal >= 0 && EP.goal == EMG && !(!EMG && cards_pending > 0) && !(ep_home_only && lock_first)) { IP_("ep_work", ep_work(1)); return; }   /* lock's cards first */
     IP_("tk_comp_idle", tk_comp_idle(C));
     IP_("sw_idle", sw_idle());                                   /* helper D: the open app's snapshot for the switcher (when it changed) */
@@ -6561,7 +6598,8 @@ void sh_idle(void)
     IP_("lkn_idle", lkn_idle());                                /* B9: the lock's notifications as the store has them (before the cache below) */
     /* cp7c: the heavy pieces one an idle call (the platform calls again while sh_idle_pending): the lock's flat copy a
      * band at a time, the Control Centre a stage at a time */
-    if (locked && lockY == 0 && !focus_on) { int r_ = 0; IP_("flatten_lock_step", r_ = flatten_lock_step()); if (r_) return; }
+    if (locked && lockY == 0 && !focus_on && C->gpu) IP_("lock ground", lk_ground_ready());   /* cp7q: no flat copy on the GPU row */
+    else if (locked && lockY == 0 && !focus_on) { int r_ = 0; IP_("flatten_lock_step", r_ = flatten_lock_step()); if (r_) return; }
     else if (fl_row >= 0) { fl_row = -1; tk_a8_free(&flatmask); }
     /* home at rest: the Control Centre's snapshot and grid ready before the pull */
     if ((!locked || cc_lock_ok) && !CCS.on && !AP.on && !nc_on() &&
