@@ -1449,7 +1449,9 @@ void next_kminute(void)
     if (!ticking) {
         tk_comp_frame(&comp, 0, 0);
         present();
-        sh_idle();
+        /* 8a2's self test: "timer 7/0" 283 ms with the screen on: the whole idle work in the minute's turn. Now the
+         * idle timer takes it in slices between frames, as everywhere else */
+        if (sh_idle_pending()) kt_set(KT_UI, 24, sb_ms(), 20, 0);
     }
 }
 
