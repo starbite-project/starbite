@@ -2194,6 +2194,11 @@ typedef struct { int kind; float x0, y0, x1, y1, ms; } step;
 static const char *const FILM_NAME[14] = { "unlock", "group", "focus", "holds", "pages", "cc", "app", "phone", "messages", "emergency", "wheels", "sleep",
                                            "pages-half", "pages-full" };   /* 8a: the home swipe with and without half-resolution GPU frames */
 static uint32_t film_halves0;                   /* comp.gpu_halves at the film's start */
+/* 8c (Track A, spec-glass-8c.md rank 1): the glass calibration stills after the films, for the phone photos: the
+ * lock, home and Control Centre, each at LENS_GAIN .33, .66 and 1, 3 s apiece, each logged with its time so the
+ * camera's shots can be matched ("next: glass still ... at +N ms"). gcal: -1 the films, 0.. the stills, 10 done */
+static int gcal = -1;
+static uint64_t gcal_t;
 /* tools/films.txt's scripts (pt, ms) */
 static const step S_UNLOCK[] = { { 0, 0, 0, 0, 0, 400 }, { 2, 195, 795, 195, 330, 220 }, { 0, 0, 0, 0, 0, 1300 } };
 /* B10: the vendor cards again (B4's list from y 320: Apple 320, Microsoft 413, Google 491, Linux 584, Starbite 677):
@@ -2247,6 +2252,47 @@ static int st_started, st_failed, clock_ok;
 int next_selftest_clock_ok(void) { return clock_ok; }
 static uint64_t st_t0;
 int next_selftest_failed(void) { return st_failed || heap_full; }
+
+extern float lens_gain;                         /* kern/lens.h (weak, 1 by default) */
+static int glass_cal_step(void)
+{
+    static const float GAIN[3] = { .33f, .66f, 1.0f };
+    static const char *const VIEW[3] = { "lock", "home", "control centre" };
+    if (gcal >= 10) return 0;
+    if (gcal > 0 && sb_ms() - gcal_t < 3000) return 1;
+    if (gcal == 9) {
+        lens_gain = 1.0f;
+        sh_set("reset", "", 0);
+        need_full = 1;
+        next_kdraw();
+        sb_log("next: glass stills: done (gain back to 1)");
+        gcal = 10;
+        return 0;
+    }
+    int v = gcal / 3, g = gcal % 3;
+    lens_gain = GAIN[g];
+    if (g == 0) {
+        sh_set("reset", "", 0);
+        if (v >= 1) sh_set("unlock", "", 1);
+        if (v == 2) sh_set("cc", "", 1);
+    }
+    need_full = 1;
+    next_kdraw();
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: glass still ");
+    ub_s(&u, VIEW[v]);
+    ub_s(&u, ", glass strength ");
+    ub_dec(&u, (uint64_t)(GAIN[g] * 100 + .5f));
+    ub_s(&u, " %");
+    ub_s(&u, " at +");
+    ub_dec(&u, sb_ms() - st_t0);
+    ub_s(&u, " ms (3 s)");
+    sb_log(u.b);
+    gcal_t = sb_ms();
+    gcal++;
+    return 1;
+}
 
 static void film_start(int film)
 {
@@ -2472,6 +2518,7 @@ int next_selftest_step(void)
         return 1;
     }
     if (ticking || sh_moving()) return 1;          /* let it settle */
+    if (gcal < 0) {                              /* the films (until the last one ends) */
     stats_log(FILM_NAME[F.film]);
     if (F.film >= 12) {                          /* 8a: what full-resolution motion costs (the top ten's item 4) */
         struct ub u;
@@ -2490,6 +2537,9 @@ int next_selftest_step(void)
     }
     if (F.film < 13) { film_start(F.film + 1); return 1; }
     tk_gpu_no_half = 0;
+    gcal = 0;
+    }
+    if (glass_cal_step()) return 1;
 #ifndef SBOS_NEXT_NOGPU
     gpu_vs_cpu();
 #endif

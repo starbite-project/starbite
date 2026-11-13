@@ -42,7 +42,10 @@
 
 #define LENS_PT 3.6923077f        /* px per pt */
 #ifndef LENS_GAIN
-#define LENS_GAIN 1.0f            /* G1: the refraction amount's scale (ramp it .33 -> 1 while checking on the phone) */
+/* G1: the refraction amount's scale, at run time (8c, Track A): 1 by default; the self test's glass calibration stills
+ * show .33 / .66 / 1 for the phone photos (spec-glass-8c.md rank 1). Weak: one definition for every image */
+__attribute__((weak)) float lens_gain = 1.0f;
+#define LENS_GAIN lens_gain
 #endif
 #ifndef LENS_S
 #define LENS_S .2f                /* section 2.2: the Liquid Glass slider s, clear 0 .. tinted 1 (G17 makes it a setting) */
