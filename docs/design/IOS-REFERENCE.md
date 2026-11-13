@@ -329,8 +329,16 @@ Source: HIG iOS 26 list artwork (@2x) and MacStories iOS 26 Settings captures (M
 
 ## 7. Messages  (priority 7)
 
-> E: no raw iOS 26 Messages capture was measured yet. The bubble geometry is unchanged since iOS 17 apart from the
-> glass chrome.
+> **Superseded by [specs/spec-phone-messages-contacts.md](specs/spec-phone-messages-contacts.md)**, which measured iOS 27
+> from public images:
+> - bubble radius **20**;
+> - one-line bubble **40** tall + 21 per extra line;
+> - max width **266**;
+> - gap **4.5**;
+> - a new hook-shaped tail;
+> - the SMS input bar with a + circle 40 and a field 40.
+>
+> Build from the spec; the table below is the old v1 estimate.
 
 | Item | Value |
 |---|---|

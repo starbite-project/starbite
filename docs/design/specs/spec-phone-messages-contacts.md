@@ -151,7 +151,7 @@ unless they say "@402".
   revealed in the freed space, not full-height blocks: **Remind Me** (systemBlue, white clock glyph 24) and
   **Delete** (systemRed, white trash glyph 24). Delete is outermost, its right edge **11** from the screen edge, gap
   **10** between the circles.
-  - The S9 centres are x **309 / 368**, on the row's centre line.
+  - The S9 centres are x **294 / 354**, on the row's centre line.
   - A full swipe (past 60 % of the width) leaves only the red circle and deletes (A: "Swipe a call all the way to
     the left").
   - Remind Me opens a glass menu over the row (M TB). Header "**Call Back Reminder**" (15 / 400 secondaryLabel),
