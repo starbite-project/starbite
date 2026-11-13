@@ -1,0 +1,128 @@
+From: starbite <starbite@local>
+Date: Fri, 13 Nov 2026 22:40:00 +0200
+Subject: [PATCH] patch: 0448-sweet-fb-persistent-pointer.patch - SweetFramebuffer: a swap's
+ mask names the layers it UPDATES, so the pointer layer is kept and drawn again with every present
+ until a swap hides it (surface 0); a not-yet-shown swap's layers are merged into the next swap;
+ "SWEET FB STATS" every 10 s. SweetHID trackpad: x1 gain, acceleration only above 20 px a report,
+ capped at x1.8
+
+S3z3-S3z5 2026-11-13, the user: the pointer flashes, disappears and jumps around, unusable. The
+driver treated the mask as visibility, so every frame (layer 0 only) wiped the pointer until the
+next pointer move, and a frame followed by a pointer move within one vsync was lost; the trackpad's
+x2.5 acceleration threw the pointer across the screen. Applies on 0447. Kernel seq1t = seq1s + this.
+---
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-13 21:50:59
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-13 21:50:59
+@@ -597,6 +597,9 @@
+  * shows the latest frame every fFlushTicks ticks (boot-arg sweetfb_hz,
+  * default 10 Hz).
+  */
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++static uint32_t sweet_fb_merged;        /* 0448: layer updates carried into the next swap */
++#endif
+ /* Size of the latest swap record (0x514 on iPadOS 18 and macOS 15 Sequoia: the shifted layout, see present()). */
+ static uint32_t sweet_fb_rec_size;
+ 
+@@ -604,7 +607,35 @@
+ AppleCLCD::swap(const uint8_t *rec, uint32_t size)
+ {
+ 	IOLockLock(fLock);
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	/*
++	 * 0448: a swap names the layers it UPDATES (mask). If the previous swap was not shown yet, its updated layers
++	 * that this swap does not touch are carried over, so a frame (layer 0) followed within one vsync by a
++	 * pointer move (layer 1) is no longer lost (S3z3 2026-11-13: a flashing, jumping pointer).
++	 */
++	if (fDirty && size <= SWEET_FB_SWAP_REC_MAX) {
++		const uint32_t sh = size >= 0x514 || (get32(rec, 0x98) != 0 && get32(rec, 0x50) == 0) ? 0x48 : 0;
++		uint8_t merged[SWEET_FB_SWAP_REC_MAX];
++		memcpy(merged, rec, SWEET_FB_SWAP_REC_MAX);
++		uint32_t oldMask = get32(fPending, 0x104 + sh), newMask = get32(merged, 0x104 + sh);
++		for (uint32_t l = 0; l < SWEET_FB_LAYERS; l++) {
++			if ((oldMask & (1u << l)) && !(newMask & (1u << l))) {
++				memcpy(merged + 0x54 + sh + 4 * l, fPending + 0x54 + sh + 4 * l, 4);
++				memcpy(merged + 0x64 + sh + 16 * l, fPending + 0x64 + sh + 16 * l, 16);
++				memcpy(merged + 0xc4 + sh + 16 * l, fPending + 0xc4 + sh + 16 * l, 16);
++				newMask |= 1u << l;
++				sweet_fb_merged++;
++			}
++		}
++		uint32_t nm = newMask;
++		memcpy(merged + 0x104 + sh, &nm, 4);
++		memcpy(fPending, merged, SWEET_FB_SWAP_REC_MAX);
++	} else {
++		memcpy(fPending, rec, SWEET_FB_SWAP_REC_MAX);
++	}
++#else
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_MAX);
++#endif
+ 	sweet_fb_rec_size = size;
+ 	fDirty = true;
+ 	IOLockUnlock(fLock);
+@@ -834,6 +865,51 @@
+ 	    (get32(rec, 0x98) != 0 && get32(rec, 0x50) == 0) ? 0x48 : 0;
+ 	uint32_t mask = get32(rec, 0x104 + sh);
+ 	uint64_t copied = 0;
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	/*
++	 * 0448: the layers keep their last surface until a swap updates them (IOMobileFramebuffer semantics: the mask
++	 * names the layers a swap updates; a layer is hidden by updating it to surface 0). The driver used to treat
++	 * the mask as "visible", so every frame (layer 0 only) wiped the pointer until the next pointer move: the
++	 * pointer flashed and disappeared (S3z3-S3z5 2026-11-13). Upper layers that are still shown are drawn again
++	 * with every present: the pointer stays.
++	 */
++	uint8_t recl[SWEET_FB_SWAP_REC_MAX];
++	{
++		static struct { uint32_t id; uint8_t a[16], b[16]; bool on; } sl[SWEET_FB_LAYERS];
++		static uint32_t presents, l0n, l1n, carried, lastLog;
++		memcpy(recl, rec, SWEET_FB_SWAP_REC_MAX);
++		presents++;
++		l0n += (mask & 1u) != 0;
++		l1n += (mask & ~1u) != 0;
++		for (uint32_t l = 0; l < SWEET_FB_LAYERS; l++) {
++			if (mask & (1u << l)) {
++				uint32_t id = get32(recl, 0x54 + sh + 4 * l);
++				sl[l].on = id != 0;
++				sl[l].id = id;
++				memcpy(sl[l].a, recl + 0x64 + sh + 16 * l, 16);
++				memcpy(sl[l].b, recl + 0xc4 + sh + 16 * l, 16);
++			} else if (l > 0 && sl[l].on) {
++				memcpy(recl + 0x54 + sh + 4 * l, &sl[l].id, 4);
++				memcpy(recl + 0x64 + sh + 16 * l, sl[l].a, 16);
++				memcpy(recl + 0xc4 + sh + 16 * l, sl[l].b, 16);
++				mask |= 1u << l;
++				carried++;
++			}
++		}
++		memcpy(recl + 0x104 + sh, &mask, 4);
++		rec = recl;
++		uint64_t upns = 0;
++		absolutetime_to_nanoseconds(mach_absolute_time(), &upns);
++		uint32_t secs = (uint32_t)(upns / (10ULL * NSEC_PER_SEC));
++		if (secs != lastLog) {
++			lastLog = secs;
++			IOLog("SWEET FB STATS: %u presents (frame %u, pointer %u), pointer carried %u, swaps merged %u\n",
++			    presents, l0n, l1n, carried, sweet_fb_merged);
++			presents = l0n = l1n = carried = 0;
++			sweet_fb_merged = 0;
++		}
++	}
++#endif
+ 
+ 
+ 	if (!fConsolePaused) {
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-13 21:50:59
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-13 21:50:59
+@@ -1034,7 +1034,10 @@
+ 				events[ne++] = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 1, 0);
+ 				what = "drag start";
+ 			}
+-			int64_t mult = 100 + (speed * 5 > 150 ? 150 : speed * 5);     /* percent */
++			/* 0448: x1 up to 20 px a report, then up to x1.8 (S3z3: x2.5 from 30 px threw the pointer across
++			 * the screen in one frame) */
++			int64_t over = speed > 20 ? (speed - 20) * 2 : 0;
++			int64_t mult = 100 + (over > 80 ? 80 : over);                /* percent */
+ 			int64_t unit = (int64_t)strip * 100;
+ 			pad.fracX += (int64_t)dx * cw * mult;
+ 			pad.fracY += (int64_t)dy * cw * mult;
