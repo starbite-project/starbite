@@ -1315,12 +1315,23 @@ static void d_systile(dc *d, const char *k, float x, float y)
     float f = 52.0f / 66, pad = tk_icon_pad(nm) * f;
     nc_blit_scaled(d->b, ic, PT(x) - pad - d->ox, PT(y) - pad - d->oy, f);
 }
-static void build_home_w(void)
+/* cp7i: home's widgets in five parts (each widget's glass, Battery's words, Recent's tiles, the captions) and page 2 an icon a
+ * part, so Emergency's switch makes them a part a slice (7g: ep_work 71 / 156 ms on the phone was these whole);
+ * build_home_w / build_home_apps2 still make them whole (a part-made one is then made again) */
+static dc hw_d;
+static int hw_next;                               /* the next part of a part-made home-w, 0 none */
+static void home_w_part(int k)
 {
+    if (k != 1 && k != hw_next) return;
+    dc d = hw_d;
+    if (k == 1) {
     relayer(&hparts[1]);
-    dc d = mk(&hparts[1], "home-w", 0, 50, 390, 200, 44, 1);
+    d = mk(&hparts[1], "home-w", 0, 50, 390, 200, 44, 1);
+    hw_d = d;
     d_glass(&d, WID_X(0), 60, WID_W, WID_W, 24, 0, 1);
+    } else if (k == 2) {
     d_glass(&d, WID_X(1), 60, WID_W, WID_W, 24, 0, 1);
+    } else if (k == 3) {
     /* Battery: .lab, .big, three rows */
     if (EMG) {
         /* Emergency: the battery glyph amber (#ffb547) */
@@ -1350,6 +1361,7 @@ static void build_home_w(void)
             y += 15;
         }
     }
+    } else if (k == 4) {
     d_icon(&d, "home-star", WID_X(1) + 16, 74 + 1.5f, 1);
     d_text(&d, TK_IT700, 11.5f, WID_X(1) + 34, base_of(TK_IT700, 11.5f, 74, 0), "Recent", .345f, 0, W(.7f), 0);
     {
@@ -1361,39 +1373,64 @@ static void build_home_w(void)
         for (int i = 0; i < 4 && n < 4; i++) if (!LAST || tk_strcmp(T4[i], LAST)) rk[n++] = T4[i];
         for (int i = 0; i < 4; i++) d_systile(&d, rk[i], WID_X(1) + 16 + (i & 1) * (WID_W - 32 - 52), 74 + 14 + 9 + (i >> 1) * 60);
     }
+    } else {
     float cw = tw(TK_IT400, 12, "Battery", 0, 0);
     d_text(&d, TK_IT400, 12, WID_X(0) + WID_W / 2 - cw / 2, 224 + 12, "Battery", 0, 0, INK, 1);
     cw = tw(TK_IT400, 12, "Systems", 0, 0);
     d_text(&d, TK_IT400, 12, WID_X(1) + WID_W / 2 - cw / 2, 224 + 12, "Systems", 0, 0, INK, 1);
     trim(&hparts[1]);
+    }
+    hw_next = k < 5 ? k + 1 : 0;
 }
-static void build_home_apps2(void)
+static void build_home_w(void) { for (int k = 1; k <= 5; k++) home_w_part(k); }
+/* a part a call (relink after the first: the layer was made again); 1 while parts are left */
+static int home_w_step(void)
 {
-    /* page 2: the second grid (top 62) */
-    {
-        static const char *P2N_[9] = { "Contacts", "Files", "Flashlight", "Battery", "Terminal", "Browser", "Medical Card", "SOS", "Maps" };
-        static const char *P2EN[12] = { "Survival Heat", "Last 2 %", "SOS", "Medical Card", "USB Power", "Sun", "Guide", "Compass",
-                                        "Flashlight", "Battery", "Contacts", "Files" };
-        const char *const *P2 = EMG ? P2E : P2K, *const *P2N = EMG ? P2EN : P2N_;
+    int k = hw_next ? hw_next : 1;
+    home_w_part(k);
+    return hw_next != 0;
+}
+/* page 2's parts: 0 the layers, 1..NP2 an icon each (its tile or icon and its name), NP2 + 1 moved and trimmed */
+static dc a2_d, a2_d3;
+static int a2_next = -1;                          /* the next part of a part-made page 2, -1 none */
+static void home_apps2_part(int k)
+{
+    static const char *P2N_[9] = { "Contacts", "Files", "Flashlight", "Battery", "Terminal", "Browser", "Medical Card", "SOS", "Maps" };
+    static const char *P2EN[12] = { "Survival Heat", "Last 2 %", "SOS", "Medical Card", "USB Power", "Sun", "Guide", "Compass",
+                                    "Flashlight", "Battery", "Contacts", "Files" };
+    const char *const *P2 = EMG ? P2E : P2K, *const *P2N = EMG ? P2EN : P2N_;
+    if (k != 0 && k != a2_next) return;
+    if (k == 0) {
+        /* page 2: the second grid (top 62) */
         relayer(&hparts[4]);
         relayer(&hparts[6]);
         /* drawn as if on screen, then moved one page to the right (layers never extend past the panel's sides).
          * survival-next (the merge): Emergency's third row (the tools) in a layer of its own (one 7 MB layer was refused in the 160 MiB
          * heap's holes; 5 + 1.5 MB fit) */
-        dc d = mk(&hparts[4], "home-apps2", 0, 55, 390, 220, 4, 0), d3 = { 0 };
-        if (NP2 > 8) d3 = mk(&hparts[6], "home-apps2e", 0, HOME_TOP2 + 2 * ROW_PITCH - 5, 390, 96, 4, 0);
+        a2_d = mk(&hparts[4], "home-apps2", 0, 55, 390, 220, 4, 0);
+        a2_d3 = (dc){ 0 };
+        if (NP2 > 8) a2_d3 = mk(&hparts[6], "home-apps2e", 0, HOME_TOP2 + 2 * ROW_PITCH - 5, 390, 96, 4, 0);
         hparts[6].hidden = NP2 <= 8;
-        for (int i = 0; i < NP2; i++) {
-            float cx = COL_CX(i % 4), y = HOME_TOP2 + ROW_PITCH * (i / 4);
-            dc *dd = i < 8 ? &d : &d3;
-            if (!dd->b || !dd->b->px) continue;
+    } else if (k <= NP2) {
+        int i = k - 1;
+        float cx = COL_CX(i % 4), y = HOME_TOP2 + ROW_PITCH * (i / 4);
+        dc *dd = i < 8 ? &a2_d : &a2_d3;
+        if (dd->b && dd->b->px) {
             char n[40] = "a62-";
             tk_memcpy(n + 4, P2[i], tk_strlen(P2[i]) + 1);
             if (!sv_tile(dd, P2[i], cx - 31, y, 62)) d_icon(dd, n, cx - 31, y, 1);
             d_text_box(dd, TK_IT400, 12, cx, y + 68 + 12, 84, 1, P2N[i], 0, 0, INK, 1);   /* P3p: one line, at most 84 pt */
         }
-        for (int k = 4; k <= 6; k += 2) { hparts[k].x = hparts[k].bx = hparts[k].x + PT(390); trim(&hparts[k]); }
-    }
+    } else
+        for (int q = 4; q <= 6; q += 2) { hparts[q].x = hparts[q].bx = hparts[q].x + PT(390); trim(&hparts[q]); }
+    a2_next = k <= NP2 ? k + 1 : -1;
+}
+static void build_home_apps2(void) { for (int k = 0; k <= NP2 + 1; k++) home_apps2_part(k); }
+/* a part a call; 1 while parts are left */
+static int home_apps2_step(void)
+{
+    home_apps2_part(a2_next < 0 ? 0 : a2_next);
+    return a2_next >= 0;
 }
 /* B8 (GAP-LIST #21): the dock's badges, iOS's: a red (#FF4245) 18 pt circle (wider for more digits) with the count
  * 12 / 600, its top-right corner 5 pt out from the icon's. Only where a count exists: shell_comms.inc's cm_badge()
@@ -2028,7 +2065,7 @@ static void cc_unview(void)
  * the next part of a grid being drawn (0 none); a whole build_cc_grid (a toggle) ends any part-drawn one */
 static dc ccg_d;
 static int ccg_part;
-#define CCG_PARTS 6
+#define CCG_PARTS 7
 static void cc_grid_part(int k)
 {
     if (k != 1 && k != ccg_part) return;         /* (that grid was made again whole meanwhile) */
@@ -2052,6 +2089,8 @@ static void cc_grid_part(int k)
         d_rrect(&d, cx, cy, CN_D, CN_D, CN_D / 2, ons[i] ? tk_hex(ONC[i], 1) : W(.2f));
         d_icon(&d, CI[i], cx + (CN_D - CW[i][0]) / 2, cy + (CN_D - CW[i][1]) / 2, 1);
     }
+    } else if (k == 2) {                         /* cp7i: the mini cluster a part of its own */
+    float X = CC_COL(0), Y = CC_ROW(0);
     {
         float bx = X + CN_PAD + CN_D + 14, by = Y + CN_PAD + CN_D + 14;
         for (int k = 0; k < 4; k++) {
@@ -2061,11 +2100,11 @@ static void cc_grid_part(int k)
             else cc_draw_link(&d, k - 1, mx + CN_MD / 2, my + CN_MD / 2, .85f, W(1));
         }
     }
-    } else if (k == 2) {
+    } else if (k == 3) {
     /* the sliders' glass (their level and glyph are layers above) */
     cc_tile(&d, CC_COL(2), CC_ROW(0), CC_U, CC_W2, 34, 0);
     cc_tile(&d, CC_COL(3), CC_ROW(0), CC_U, CC_W2, 34, 0);
-    } else if (k == 3) {
+    } else if (k == 4) {
     /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Mirror, Camera */
     /* P3i: the torch's tile baked off; its lit look is a small layer over it, so the tap shows it at once (the
      * whole grid's rebuild took ~300 ms at the tap) */
@@ -2079,7 +2118,7 @@ static void cc_grid_part(int k)
         cclit.hidden = !Q[0].lit;
     }
     cc_tile(&d, CCX[1], CC_R3, CC_U, CC_U, 34, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], CC_R3, 22, 22);
-    } else if (k == 4) {
+    } else if (k == 5) {
     cc_tile(&d, CCX[2], CC_R3, CC_U, CC_U, 34, 0);
     cc_glyph(&d, "cc-flame", CCX[2], CC_R3, 20, 24);
     {
@@ -2093,7 +2132,7 @@ static void cc_grid_part(int k)
         ccem.hidden = !EMG;
     }
     cc_tile(&d, CCX[3], CC_R3, CC_U, CC_U, 34, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], CC_R3, 24, 14);
-    } else if (k == 5) {
+    } else if (k == 6) {
     cc_tile(&d, CCX[0], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-timer", CCX[0], CC_R4, 22, 22);
     /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place); P3p: baked ones */
     cc_tile(&d, CCX[1], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-calc", CCX[1], CC_R4, 24, 24);
@@ -2231,7 +2270,7 @@ static void build_cc_stage(int st)
     }
     return;
     }
-    if (st >= 5 && st < 5 + CCG_PARTS) { cc_grid_part(st - 4); return; }
+    if (st >= 5 && st < 5 + CCG_PARTS) { cc_grid_part(st - 4); return; }   /* (5-11) */
     tk_layer_init(&ccg, "cc-grid-group");
     ccg.ox = PT(CC_COL(0) + .85f * (4 * CC_U + 3 * CC_GAP));
     ccg.oy = PT(CC_ROW(0));
@@ -4412,8 +4451,9 @@ static int ep_post_step(int big_ok, int idle)
     if (EP.post & (EP_CARDS | EP_LW)) return -1;
     if (!EP.post) { ep_reset(); return 0; }
     if (!idle || !big_ok) return -1;
-    if (EP.post & EP_HOMEW) { EP.post &= ~EP_HOMEW; build_home_w(); }
-    else { EP.post &= ~EP_APPS2; build_home_apps2(); }
+    /* cp7i: a part a slice (relink: the first part makes its layer again) */
+    if (EP.post & EP_HOMEW) { if (!home_w_step()) EP.post &= ~EP_HOMEW; }
+    else if (!home_apps2_step()) EP.post &= ~EP_APPS2;
     relink();
     return 2;
 }
@@ -4430,8 +4470,8 @@ static void ep_work(int idle)
 /* home is about to show (the lock lifting, the Control Centre closed): its pieces now */
 static void ep_home_now(void)
 {
-    if (EP.post & EP_HOMEW) build_home_w();
-    if (EP.post & EP_APPS2) build_home_apps2();
+    if (EP.post & EP_HOMEW) while (home_w_step()) ;           /* (a part-made one finished) */
+    if (EP.post & EP_APPS2) while (home_apps2_step()) ;
     EP.post &= ~(EP_HOMEW | EP_APPS2);
     relink();
 }
@@ -6378,7 +6418,9 @@ void sh_idle(void)
     if (sh_moving()) return;
     /* B6: a prepared switch nobody holds any more goes; a switch's rest, a slice a turn (sh_idle_pending) */
     if (EP.goal >= 0 && EP.goal != EMG && !ep_holding()) ep_cancel();
-    if (EP.goal >= 0 && EP.goal == EMG && !(!EMG && cards_pending > 0)) { IP_("ep_work", ep_work(1)); return; }   /* lock's cards first */
+    /* cp7i: when only home's parts are left (home is not seen from the lock), the lock's own cards (sv_idle) go first */
+    int ep_home_only = EP.ground && !(EP.post & (EP_CARDS | EP_LW));
+    if (EP.goal >= 0 && EP.goal == EMG && !(!EMG && cards_pending > 0) && !(ep_home_only && sv_idle_pending())) { IP_("ep_work", ep_work(1)); return; }   /* lock's cards first */
     IP_("tk_comp_idle", tk_comp_idle(C));
     IP_("sw_idle", sw_idle());                                   /* helper D: the open app's snapshot for the switcher (when it changed) */
     IP_("mp_idle", mp_idle());                                 /* helper D: Maps' last GPS fix (it may read the card: idle only) */
@@ -6407,7 +6449,12 @@ void sh_idle(void)
     if ((!locked || cc_lock_ok) && !CCS.on && !AP.on && !nc_on() &&
         (ccb_next || !CCS.built || cc_stale || cc_lk != locked || (locked && cc_lv != lock_ver))) {
         if (!ccb_next) { cc_stale = 0; cc_lk = locked; cc_lv = lock_ver; }   /* (a change during the stages: again after) */
-        { int r_ = 0; IP_("build_cc_step", r_ = build_cc_step()); if (r_) return; }
+        { static const char *const CCN[13] = { "build_cc_step", "build_cc 1 picture", "build_cc 2 light blur", "build_cc 3 heavy blur",
+                                                "build_cc 4 chrome", "build_cc 5 grid conn", "build_cc 6 grid mini", "build_cc 7 grid sliders",
+                                                "build_cc 8 grid torch", "build_cc 9 grid flame", "build_cc 10 grid timer", "build_cc 11 grid last",
+                                                "build_cc 12 link" };
+          int r_ = 0, st_ = ccb_next ? ccb_next : 1;
+          IP_(CCN[st_ < 13 ? st_ : 0], r_ = build_cc_step()); if (r_) return; }   /* cp7i: the stage in the name */
     } else if (ccb_next && !CCS.on) free_cc();     /* not wanted any more (an app needs the room): its parts go, later again */
     /* the half copies of what moves (the rest are never drawn at half resolution: the half canvas follows the
      * rest frames) */
