@@ -300,9 +300,10 @@ int sb_gpu_submit(unsigned js, uint64_t job_va, uint32_t affinity)
 /* Wait until every slot in js_mask finished (or one failed, or an MMU / GPU fault, or the time is
  * up); fill r. 1 when every slot finished without a fault. On failure the slots are hard-stopped
  * (the caller resets the GPU before the next job). */
+void (*sb_gpu_wait_hook)(void);
 int sb_gpu_wait(unsigned js_mask, uint64_t timeout_us, struct sb_gpu_result *r)
 {
-    uint64_t t0 = sb_ticks();
+    uint64_t t0 = sb_ticks(), th = t0;
     uint32_t done = js_mask, fail = js_mask << 16, j = 0, m = 0, g = 0;
     int to = 0;
     for (;;) {
@@ -314,6 +315,10 @@ int sb_gpu_wait(unsigned js_mask, uint64_t timeout_us, struct sb_gpu_result *r)
         if (ticks_us(sb_ticks() - t0) >= timeout_us) {
             to = 1;
             break;
+        }
+        if (sb_gpu_wait_hook && ticks_us(sb_ticks() - th) >= 2000) {   /* cp7k: the main thread's other work (a guest's I/O) */
+            sb_gpu_wait_hook();
+            th = sb_ticks();
         }
 #ifdef SB_HOST
         sb_udelay(1);

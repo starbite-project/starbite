@@ -187,6 +187,8 @@ void sb_main(void)
     K.deadman_t0 = boot_ms;
     hw_irq_init();
     guest_init();                           /* 1.2: the guest's doorbell (INTID 510) routed here; nothing runs yet */
+    sb_gpu_wait_hook = guest_pump;          /* cp7k: a booting guest's reads served while a frame waits on the GPU (7j: HELLO
+                                             * 21 s -> 31 s with the films running: its requests waited a loop turn each) */
     if (!sb_touch_start())
         sb_log("sbos: no touch");
     input_init();
