@@ -376,6 +376,67 @@ static int bus_up(void)
 /* ---- the dies ------------------------------------------------------------------------------------------------ */
 
 /* max98512_i2c_probe: REV_ID (0x0402) >= 0x40 is the first revision; else REV_ID at 0x0600 >= 0x40 is a B */
+/* ---- a bit-banged address check (diagnostic, read-only towards the chip) --------------------------------------
+ * Drivers run 7c / 7d: the HSI2C never left its START state while SCL / SDA idled high. To tell "our controller does
+ * not drive the bus" from "nobody answers", gpp4-4 (SCL) / gpp4-5 (SDA) are briefly plain GPIOs: open-drain by hand
+ * (input = released, the board's pull-ups make it 1; output 0 = pulled low), ~50 kHz, then an address-only write
+ * (i2cdetect's quick write: START, addr << 1, the ACK bit, STOP; no register pointer, no data). The pins go back to
+ * function 2 afterwards. */
+#define BB_SCL 4U
+#define BB_SDA 5U
+static void bb_pin(unsigned pin, int low)
+{
+    uint32_t con = H->rd32(GPP4), dat = H->rd32(GPP4 + 4);
+    if (low) {
+        H->wr32(GPP4 + 4, dat & ~(1U << pin));
+        H->wr32(GPP4, (con & ~(0xFU << (4 * pin))) | (1U << (4 * pin)));
+    } else {
+        H->wr32(GPP4, con & ~(0xFU << (4 * pin)));
+    }
+    H->delay_us(10);
+}
+static unsigned bb_get(unsigned pin) { return (H->rd32(GPP4 + 4) >> pin) & 1U; }
+static int bb_quick(unsigned addr, unsigned *scl_stuck)
+{
+    unsigned byte = (addr << 1) & 0xFEU, ack;
+    *scl_stuck = 0;
+    bb_pin(BB_SDA, 0), bb_pin(BB_SCL, 0);
+    bb_pin(BB_SDA, 1);                          /* START: SDA falls while SCL is high */
+    bb_pin(BB_SCL, 1);
+    for (int i = 7; i >= 0; --i) {
+        bb_pin(BB_SDA, !((byte >> i) & 1U));
+        bb_pin(BB_SCL, 0);
+        for (unsigned w = 0; w < 100 && !bb_get(BB_SCL); ++w)
+            H->delay_us(10);                    /* clock stretching, up to 1 ms */
+        if (!bb_get(BB_SCL))
+            *scl_stuck = 1;
+        bb_pin(BB_SCL, 1);
+    }
+    bb_pin(BB_SDA, 0);                          /* released: the slave pulls it low to acknowledge */
+    bb_pin(BB_SCL, 0);
+    ack = !bb_get(BB_SDA);
+    bb_pin(BB_SCL, 1);
+    bb_pin(BB_SDA, 1);                          /* STOP: SDA rises while SCL is high */
+    bb_pin(BB_SCL, 0);
+    bb_pin(BB_SDA, 0);
+    return (int)ack;
+}
+static void bb_check(void)
+{
+    uint32_t con = H->rd32(GPP4), dat = H->rd32(GPP4 + 4);
+    unsigned st39 = 0, st3a = 0;
+    bb_pin(BB_SCL, 0), bb_pin(BB_SDA, 0);
+    unsigned idle_scl = bb_get(BB_SCL), idle_sda = bb_get(BB_SDA);
+    int a39 = bb_quick(0x39, &st39), a3a = bb_quick(0x3A, &st3a), a00 = 0;
+    unsigned st00 = 0;
+    a00 = bb_quick(0x10, &st00);                /* an address nobody on this bus has: must NACK */
+    H->wr32(GPP4, con);                         /* the pins back to SCL / SDA (function 2) */
+    H->wr32(GPP4 + 4, dat);
+    say("bit-bang (GPIO, ~50 kHz, address only): idle SCL %u SDA %u; 0x39 %s, 0x3A %s, 0x10 (nobody) %s%s", idle_scl,
+        idle_sda, a39 ? "ACK" : "no ACK", a3a ? "ACK" : "no ACK", a00 ? "ACK (SDA stuck low?)" : "no ACK",
+        st39 || st3a || st00 ? "; SCL held low by someone" : "");
+}
+
 static int identify(struct die *d)
 {
     uint8_t id = 0, idb = 0;
@@ -595,6 +656,7 @@ int amp_probe(void)
     any_b = dies[0].kind == 'B' || dies[1].kind == 'B';
     boost_mode = dies[0].kind == 'B' ? 0x00 : 0x02;
     if (r0 || r1) {
+        bb_check();
         gates_back();
         return fail(AUD_ENODEV, r0 ? "the 0x39 die (earpiece) does not answer as a MAX98512" :
                                      "the 0x3A die (speaker) does not answer as a MAX98512");
