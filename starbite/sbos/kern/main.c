@@ -27,6 +27,7 @@ void next_kinit(void), next_kdraw(void), next_kevent(const void *e), next_ktimer
 #include "sdclk.h"
 
 struct kstate K;
+const char *sbos_film_now;          /* 8c+: the self test's current film (kern_next.c); 0 outside the films */
 static uint64_t boot_ms;
 
 static void dispatch_timer(unsigned owner, unsigned id)
@@ -296,6 +297,14 @@ void sb_main(void)
             }
             if (took >= 100) {
                 K.turns_100++;
+                if (K.tl_n < 12) {                  /* 8c+: which film, which piece (the self test's end lists them) */
+                    unsigned j_ = K.tl_n++;
+                    K.tl_ms[j_] = took > 65535 ? 65535 : (uint16_t)took;
+                    K.tl_film[j_] = sbos_film_now;
+                    K.tl_what[j_] = slow_what;
+                    K.tl_owner[j_] = (uint8_t)slow_owner;
+                    K.tl_id[j_] = (uint8_t)slow_id;
+                }
                 unsigned b_ = slow_what[0] != 't' ? 17U : slow_owner < 16U ? slow_owner : 16U;
                 if (K.turns_100_by[b_] < 65535U)
                     K.turns_100_by[b_]++;

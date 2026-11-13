@@ -378,6 +378,11 @@ struct kstate {
     const char *user_turn_what;
     uint16_t turns_100_by[18];      /* cp7p: those turns by their slowest piece: a timer's owner 0..15 (KT_*), 16 an
                                      * app timer (KT_APP0+), 17 not a timer (input, apps, draw) */
+    /* 8c+: the first twelve of those turns, each with the film it was in (sbos_film_now), its slowest piece and ms,
+     * for the self test's end (the pmsg ring drops the early films' lines) */
+    uint8_t tl_n, tl_owner[12], tl_id[12];
+    uint16_t tl_ms[12];
+    const char *tl_film[12], *tl_what[12];
     uint64_t deadman_t0;            /* the 10-minute return to the menu counts from here (the start; the self-test
                                      * image: the last input) */
 };
@@ -646,6 +651,7 @@ struct gc_quad {
 int gpucomp_init(void *heap, uint64_t bytes);
 /* the last compose's bins: entries drawn, entries culled under opaque quads, entries skipped over empty blocks */
 void gpucomp_last_stats(uint32_t *entries, uint32_t *culled, uint32_t *empty);
+extern const char *sbos_film_now;   /* 8c+: the self test's current film (kern_next.c sets it; 0 none) */
 void gpucomp_last_times(uint32_t *bin_us, uint32_t *up_us, uint32_t *run_us);   /* 8c: the last compose's CPU parts */
 unsigned gpucomp_mhz(void);
 int gpucomp_ready(void);
