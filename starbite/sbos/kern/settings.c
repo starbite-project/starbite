@@ -16,6 +16,7 @@
 #include "sbapp.h"
 #include "survival.h"
 #include "tzdb.h"
+#include "sd.h"                           /* 8d: sd_rep (the card clock at the first save) */
 
 #define REC "sbos.settings"
 #define SAVE_DELAY_MS 3000U
@@ -440,6 +441,16 @@ void settings_timer(unsigned id)
     cur_half = to;
     ++seq;
     ++saves;
+    if (saves == 1) {                       /* 8d: the first save's card clock (the drivers' write wrapper: <= 6.25 MHz) */
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "settings: the first save written at the card's ");
+        ub_dec(&u, sd_rep.card_hz / 1000U);
+        ub_s(&u, " kHz (the bus ");
+        ub_dec(&u, sd_rep.bus_hz / 1000000U);
+        ub_s(&u, " MHz)");
+        sb_log(u.b);
+    }
     last_save = sb_ms();
     struct ub u;
     ub_init(&u);

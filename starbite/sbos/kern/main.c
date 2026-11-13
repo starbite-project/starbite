@@ -155,6 +155,11 @@ void next_input_now(void)
 void sbos_spsel1(void);
 #endif
 
+/* 8d (Track A, the drivers' go: run 13 "same data, fast path 23.25 MB/s (old 3.01 MB/s)", CRC-equal over 8 MiB of the
+ * store; run 14 a write through sd_write's wrapper verified): the card's fast reads on. Writes keep 6.25 MHz default
+ * speed (sd.c's wrapper); a card without High Speed gets S-Boot's divider back (6.25 MHz, as before) */
+#define SBOS_SD_FAST
+
 void sb_main(void)
 {
 #ifndef SB_HOST
