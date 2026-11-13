@@ -59,11 +59,14 @@ void tk_wall_draw_rows(tk_bmp *b, int emergency, float k, int y0, int y1)
     float bx = PT(-30), by = PT(-30), bw = PT(450), bh = PT(862);
     tk_paint lin, r1, r2, r3;
     if (!emergency) {
-        /* P3j-16: deep, low-chroma darks (the S9's AMOLED showed the old ones as electric royal blue) */
-        tk_stop l[3] = { { 0, tk_hex(0x080e26, 1) }, { .45f, tk_hex(0x0c1636, 1) }, { 1, tk_hex(0x04060f, 1) } };
-        tk_stop a[2] = { { 0, TK_RGBA(80, 110, 200, .34f) }, { .6f, TK_RGBA(0, 0, 0, 0) } };
-        tk_stop c[2] = { { 0, TK_RGBA(50, 75, 160, .22f) }, { .7f, TK_RGBA(0, 0, 0, 0) } };
-        tk_stop d[2] = { { 0, TK_RGBA(40, 60, 130, .14f) }, { .7f, TK_RGBA(0, 0, 0, 0) } };
+        /* 8a (top ten #2): a vivid, deep original default ("Starbite dusk": not Apple's art): an indigo-to-plum
+         * ground, an electric-blue bloom at the top right, a magenta-coral one at the bottom left and a violet glow
+         * in the middle, so the glass, the dock and the widgets take colour from it. The top stays deep enough for
+         * the white clock (P3j-16's darks were the AMOLED's royal-blue complaint; these are saturated on purpose) */
+        tk_stop l[3] = { { 0, tk_hex(0x140b45, 1) }, { .5f, tk_hex(0x2b0f63, 1) }, { 1, tk_hex(0x24072f, 1) } };
+        tk_stop a[2] = { { 0, TK_RGBA(30, 130, 255, .62f) }, { .62f, TK_RGBA(0, 0, 0, 0) } };
+        tk_stop c[2] = { { 0, TK_RGBA(255, 70, 140, .62f) }, { .72f, TK_RGBA(0, 0, 0, 0) } };
+        tk_stop d[2] = { { 0, TK_RGBA(150, 70, 255, .30f) }, { .7f, TK_RGBA(0, 0, 0, 0) } };
         lin = tk_linear(180, bx, by, bw, bh, 3, l);
         r1 = tk_radial(1.2f, .7f, .92f, .04f, bx, by, bw, bh, 2, a);
         r2 = tk_radial(.9f, .6f, .08f, .96f, bx, by, bw, bh, 2, c);

@@ -339,7 +339,9 @@ static void build_wall(void)
     const tk_bmp *st = tk_icon("star");
     float pad = tk_icon_pad("star");
     tk_layer_init(&star, "star");
-    star.bmp = *st;                       /* a view into the pack */
+    /* 8a (top ten #1 / #5): the default wallpaper has no star (iOS's has no decoration; on home it overlapped the
+     * Recent widget): the layer stays, empty and hidden; Emergency keeps its warm one (star_e) */
+    star.hidden = 1;
     star.x = (float)(int)tk_floorf(PT(390 - 34 - 36) - pad + .5f);
     star.y = (float)(int)tk_floorf(PT(56) - pad + .5f);
     /* Emergency's star: the same with a warm glow (.7 s, with the wallpaper) */
@@ -354,7 +356,7 @@ static void build_wall(void)
     tk_bmp_copy(&src, 0, 0, &C->base_half, 0, 0, src.w, src.h);
     tk_bmp_new(&sh, (st->w + 1) / 2, (st->h + 1) / 2);
     tk_bmp_down2(&sh, st);
-    tk_blit(&src, &sh, (int)star.x / 2, (int)star.y / 2, 1);
+    if (star.bmp.px) tk_blit(&src, &sh, (int)star.x / 2, (int)star.y / 2, 1);
     tk_glass_backdrop(&C->bw_half, &src);
     tk_bmp_free(&sh);
     tk_bmp_free(&src);
@@ -427,7 +429,9 @@ static void ring_widget(dc *d, float x, float p, tk_col col, const char *num, co
     dg[k] = 0;
     float w = tw(TK_IT600, 18, dg, 0, TK_TNUM);
     d_text(d, TK_IT600, 18, cx - w / 2, cy + 6.5f, num, 0, TK_TNUM, INK, 0);
-    /* the label, mixed case, 10 pt / 600 in the gap */
+    /* 8a (top ten #1): iOS's gauges carry a glyph in the gap, not a caption: a lower-case lbl is the glyph's icon
+     * (12 pt); Emergency's upper-case ones stay captions (its "Saving" has no glyph) */
+    if (lbl[0] >= 'a' && lbl[0] <= 'z') { d_icon(d, lbl, cx - 6, cy + 29 - 7, .75f); return; }
     char lb[16];
     int n = 0;
     for (; lbl[n] && n < 15; n++) lb[n] = n && lbl[n] >= 'A' && lbl[n] <= 'Z' ? (char)(lbl[n] + 32) : lbl[n];
@@ -448,6 +452,7 @@ static int fmt_time(char *b, int h, int m, int ampm) { return sh_fmt_time(b, h, 
 static void fmt_hm(char *b) { fmt_time(b, ST.h, ST.mi, 0); }
 
 static tk_layer lstatus, lclock, lwidgets;
+#define LK_GRAB_X (CONTENT_R - 16 - 47)           /* 8a: the CC grabber's left (its right edge on the battery's) */
 static void relink(void);
 /* helper D (shell_nc.inc, shell_switcher.inc): the hooks this file calls before their definitions */
 static void nc_sb_stale(void);
@@ -479,6 +484,8 @@ static void build_lstatus(void)
     relayer(&lstatus);
     dc d = mk(&lstatus, "lock-status", 0, 0, 390, 48, 2, 0);
     status_bar(&d, carrier);
+    /* 8a (top ten #1, gaps-c #11): iOS's Control Centre grabber, ~47 x 2.5 under the right status cluster */
+    d_rrect(&d, LK_GRAB_X, 41, 47, 2.5f, 1.25f, W(.55f));
     trim(&lstatus);
     nc_sb_stale();                               /* helper D: the Notification Centre's status bar too */
 }
@@ -509,8 +516,10 @@ static void build_lclock(void)
     date[n++] = ' ';
     for (const char *p = MO[(ST.mon + 11) % 12]; *p;) date[n++] = *p++;
     date[n] = 0;
-    float w = tw(TK_IT600, 22, date, 0, 0);
-    d_text(&d, TK_IT600, 22, (390 - w) / 2, 82 + 22 * INTER_CAP / 2, date, 0, 0, W(.9f), 1);
+    /* 8a (top ten #1, design-ref gaps-c #4): the date a weight lighter (iOS's reads semibold in SF; Inter 600 reads
+     * bold), the clock solid white (no blue gradient), Inter 500, digits ~83 pt tall (110 pt type) */
+    float w = tw(TK_IT500, 22, date, 0, 0);
+    d_text(&d, TK_IT500, 22, (390 - w) / 2, 82 + 22 * INTER_CAP / 2, date, 0, 0, W(.9f), 1);
     char hm[8];
     fmt_hm(hm);
     /* P3j (audit 3): hours, colon and minutes as three runs: proportional figures at -1 pt (the -4 pt tabular
@@ -518,14 +527,14 @@ static void build_lclock(void)
      * middle (Inter's sits at x-height) with even room each side, the whole centred */
     int hn = hm[1] == ':' ? 1 : 2;               /* Track A: "9:41" in 12-hour time */
     char hh[3] = { hm[0], hn == 2 ? hm[1] : 0, 0 }, mm[3] = { hm[hn + 1], hm[hn + 2], 0 };
-    const float cs = 116, ctop = 108;
-    float wh = tw(TK_IT600, cs, hh, -1, 0), wc = tw(TK_IT600, cs, ":", 0, 0), wm = tw(TK_IT600, cs, mm, -1, 0), gap = 2;
+    const float cs = 110, ctop = 110;
+    const int cf = TK_IT500;
+    float wh = tw(cf, cs, hh, -1, 0), wc = tw(cf, cs, ":", 0, 0), wm = tw(cf, cs, mm, -1, 0), gap = 2;
     float x0 = (390 - (wh + gap + wc + gap + wm)) / 2, base = ctop + cs * INTER_CAP;
-    tk_stop s[2] = { { 0, tk_hex(0xffffff, 1) }, { 1, tk_hex(0xdfe9ff, 1) } };
-    tk_paint p = tk_linear(180, -d.ox, PT(ctop) - d.oy, PT(390), PT(cs * INTER_CAP), 2, s);
-    tk_text(d.b, TK_IT600, PT(cs), PT(x0) - d.ox, PT(base) - d.oy, hh, PT(-1), 0, &p, 0);
-    tk_text(d.b, TK_IT600, PT(cs), PT(x0 + wh + gap) - d.ox, PT(base - cs * .0906f) - d.oy, ":", 0, 0, &p, 0);
-    tk_text(d.b, TK_IT600, PT(cs), PT(x0 + wh + gap + wc + gap) - d.ox, PT(base) - d.oy, mm, PT(-1), 0, &p, 0);
+    tk_paint p = tk_solid(tk_hex(0xffffff, 1));
+    tk_text(d.b, cf, PT(cs), PT(x0) - d.ox, PT(base) - d.oy, hh, PT(-1), 0, &p, 0);
+    tk_text(d.b, cf, PT(cs), PT(x0 + wh + gap) - d.ox, PT(base - cs * .0906f) - d.oy, ":", 0, 0, &p, 0);
+    tk_text(d.b, cf, PT(cs), PT(x0 + wh + gap + wc + gap) - d.ox, PT(base) - d.oy, mm, PT(-1), 0, &p, 0);
     trim(&lclock);
     nc_clock_stale();                            /* helper D: the Notification Centre shows it (a view: again now) */
 }
@@ -560,11 +569,11 @@ static void lw_draw(dc *d, int emg, int part)
         }
         return;
     }
-    if (part <= 0) ring_widget(d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), C_GREEN, num, "BATTERY");
+    if (part <= 0) ring_widget(d, 33, tk_clampf(ST.pct / 100.0f, 0, 1), C_GREEN, num, "home-batt");
     if (part < 0 || part == 1) {
         int n = put_dec(num, ST.temp);
         num[n] = (char)0xc2; num[n + 1] = (char)0xb0; num[n + 2] = 0;
-        ring_widget(d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), C_ACCENT, num, "TEMP");
+        ring_widget(d, 285, tk_clampf(ST.temp / 100.0f, 0, 1), C_ACCENT, num, "thermometer");
     }
     if (part < 0 || part == 2) {
         char at[16] = "Off";                       /* P2y: the kernel's next alarm (sh_alarm), not the concept's */
@@ -584,10 +593,10 @@ static void build_lwidgets(void)
 
 static void build_marks(void)
 {
+    /* 8a (top ten #1): no "starbite" wordmark above the date (iOS shows nothing there; About keeps the name): the
+     * layer stays, empty, so its fades need no special case */
     dc d = mk(&mark, "mark", 150, 45, 90, 30, 4, 0);
-    float w = tw(TK_OF300, 16, "starbite", -.15f, 0), x0 = (390 - (w + 1 + 9)) / 2;
-    d_text(&d, TK_OF300, 16, x0, 66, "starbite", -.15f, 0, W(.82f), 1);
-    d_icon(&d, "mark-star", x0 + w + 1, 51, 1);
+    float w;
     d = mk(&glyph_c, "glyph", 187.5f, 50, 15, 20, 2, 0);
     d_icon(&d, "lock-c", 187.5f, 50, 1);
     d = mk(&glyph_o, "glyph-open", 187.5f, 50, 15, 20, 2, 0);
@@ -4362,7 +4371,7 @@ static void em_step(float e)
         em_e = e;
     star.alpha = EMG ? 1 - e : e;
     star_e.alpha = EMG ? e : 1 - e;
-    star.hidden = star.alpha <= 0;
+    star.hidden = star.alpha <= 0 || !star.bmp.px;
     star_e.hidden = star_e.alpha <= 0;
     if (e >= 1) { emf_drop(); tk_bmp_free(&em_wall); tk_bmp_free(&em_bw); }
 }
@@ -4443,7 +4452,7 @@ static int ep_ground_step(int big_ok)
     if (!EP.qd) {
         /* the star into the wallpaper (what is under it kept), the quarter from both, the wallpaper as it was */
         if (!tk_bmp_new(&EP.q, EP.wall.w / 2, EP.wall.h / 2)) { ep_noroom(); return 1; }
-        const tk_bmp *st = tk_icon(on ? "star-e" : "star");
+        const tk_bmp *st = on ? tk_icon("star-e") : 0;       /* 8a: no star on the default wallpaper */
         tk_bmp sh = { 0, 0, 0, 0 }, keep = { 0, 0, 0, 0 };
         int sx = (int)(on ? star_e.x : star.x) / 2, sy = (int)star.y / 2;
         if (st && tk_bmp_new(&sh, (st->w + 1) / 2, (st->h + 1) / 2) && tk_bmp_new(&keep, sh.w, sh.h)) {
