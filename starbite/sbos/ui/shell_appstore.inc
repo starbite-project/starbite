@@ -64,6 +64,8 @@ static tk_layer aqc[AQ_NCH], aqh, aqtb, aqtg;
  * by the last start this boot (the phone's first: ~35 s to HELLO + the store's table, 7u's self test) */
 static tk_layer aqbt, aqbf;
 static tk_layer aqit;
+static tk_layer aqtp;                            /* the tab bar's selected pill: a solid that slides (spec 2.1.1) */
+static struct { float x, v, to; int set; } TP;
 /* the story's zoom (iOS: the Today card grows into the story, matched geometry, spring response 0.45 damping 0.85;
  * the story shrinks back into its card on close or a drag down): aqz the card's face redrawn once at card size and
  * scaled, aqzb the black page growing with it; phase 1 opening, 2 open (aqz until the story's chunks are drawn), 3 closing */
@@ -1529,10 +1531,31 @@ static void aq_tb_bake(void)
     aq_tb_baked = 1;
 }
 /* the tab bar's glyphs and labels, the selected tab's lighter pill, the Updates badge (redrawn on a change) */
+/* the selected pill: 86.5 x 54 at TP.x, stretched up to 1.15x toward its motion */
+static void aq_pill_place(void)
+{
+    if (aqtg.hidden || !TP.set) { aqtp.hidden = 1; return; }
+    float st = 1 + tk_minf(tk_fabsf(TP.v) / 1500, .15f), w = TB_TABW * st, x = TP.x - (TP.v > 0 ? 0 : w - TB_TABW);
+    tk_rect r = { x, TB_Y + 4, w, TB_H - 8 };
+    hl_set(&aqtp, r, r, (TB_H - 8) / 2, W(.14f));
+    aqtp.alpha = ZS.phase ? aqtb.alpha : 1;     /* (faded only by the story's zoom) */
+}
+/* one frame of its spring (response 0.35, damping 0.75: k 322.3, c 26.9) */
+static int aq_pill_tick(float dt)
+{
+    if (!TP.set || (tk_fabsf(TP.x - TP.to) < .2f && tk_fabsf(TP.v) < 5)) { if (TP.set && TP.x != TP.to) { TP.x = TP.to; TP.v = 0; aq_pill_place(); } return 0; }
+    for (float left = dt; left > 0; left -= .004f) {
+        float h = tk_minf(left, .004f);
+        TP.v += (322.3f * (TP.to - TP.x) - 26.9f * TP.v) * h;
+        TP.x += TP.v * h;
+    }
+    aq_pill_place();
+    return 1;
+}
 static void aq_tabs(void)
 {
     relayer(&aqtg);
-    aqtg.hidden = aqtb.hidden = 1;
+    aqtg.hidden = aqtb.hidden = aqtp.hidden = 1;
     if (!is_app("store") || (AQ.kb && AQ.tab == AT_SEARCH && !AQ.app) || AQ.story) return;
     aqtb.hidden = 0;
     dc d = mk(&aqtg, "store-tabs", TB_X, TB_Y, TB_W, TB_H, 2, 0);
@@ -1541,7 +1564,7 @@ static void aq_tabs(void)
         float bx = TB_X + 4 + TB_TABW * t, cx = bx + TB_TABW / 2, cy = TB_Y + 22;
         int on = AQ.tab == t;
         tk_col c = on ? tk_hex(0x0091ff, 1) : tk_hex(0xf5f5f5, 1);   /* (spec: selected #0091FF, others #F5F5F5) */
-        if (on) d_rrect(&d, bx, TB_Y + 4, TB_TABW, TB_H - 8, (TB_H - 8) / 2, W(.14f));   /* the pill 86.5 x 54 */
+        if (on) { TP.to = bx; if (!TP.set) { TP.x = bx; TP.v = 0; TP.set = 1; } }   /* (the pill is aqtp: aq_pill_place) */
         if (t == 0) {                             /* Today: a page with a picture and lines */
             d_rrect_stroke(&d, cx - 9, cy - 11, 18, 22, 4, 1.8f, c);
             d_rrect(&d, cx - 5, cy - 7, 10, 6, 1.5f, c);
@@ -1567,6 +1590,7 @@ static void aq_tabs(void)
     }
     trim_layer(&aqtg, 0, 0);
     aqtg.hidden = 0;
+    aq_pill_place();
 }
 /* what the open page shows (structure, not progress): a change redraws the page in place */
 static uint32_t aq_sig(void)
@@ -2124,6 +2148,7 @@ static int aq_moving(void)
     if (!aqbf.hidden) return 1;                   /* (the cold start's bar moves) */
     if (aq_spinning()) return 1;                  /* (a waiting spinner turns) */
     if (ZS.phase == 1 || ZS.phase == 3 || aqz.bmp.px || ZS.drag > 0) return 1;   /* (the story's zoom) */
+    if (TP.set && (tk_fabsf(TP.x - TP.to) > .2f || tk_fabsf(TP.v) > 5)) return 1;   /* (the tab pill) */
     return AQ.drag || AQ.hide || AQ.left > 0 || AQ.px != 0 || tk_fabsf(AQ.v) > 1 || AQ.scroll < 0 || AQ.scroll > aq_max() + .5f;
 }
 /* the cold start's bar: elapsed / the expected start, held at 95 % until Linux is up; the words change once when late */
@@ -2170,7 +2195,7 @@ static void aq_z_apply(void)
     tk_rect P = { R.x, R.y, R.w, CARD_H + (H_PT - CARD_H) * t };   /* the black page grows to the screen */
     hl_set(&aqzb, P, P, rad, tk_hex(0x000000, 1));
     float tb = 1 - tk_clampf(t, 0, 1);
-    aqtb.alpha = aqtg.alpha = tb;
+    aqtb.alpha = aqtg.alpha = aqtp.alpha = tb;
 }
 static void aq_story_open(int i, tk_rect card)
 {
@@ -2247,6 +2272,7 @@ static int aq_tick(float dt)
 {
     if (aq_bar()) return 1;
     int zm = is_app("store") ? aq_z_tick(dt) : 0;   /* (the zoom moves; the page under it keeps drawing) */
+    if (is_app("store") && aq_pill_tick(dt)) zm = 1;   /* (the tab pill slides) */
     if (!is_app("store") || ap_pending || AQ.empty) return 0;
     static float spin_t;
     if (aq_spinning() && now_ms - spin_t >= 33) {   /* the waiting spinners turn (~30 frames a second) */
@@ -2302,6 +2328,7 @@ static void aq_close(void)
     for (int k = 0; k < AQ_NLIVE; k++) { relayer(&aql[k]); aql[k].hidden = 1; aql[k].clip = 0; aql_it[k] = -1; }
     relayer(&aqh); relayer(&aqtb); relayer(&aqtg); relayer(&aqbt); relayer(&aqbf); relayer(&aqit); relayer(&aqz); relayer(&aqzb);
     aqh.hidden = aqtb.hidden = aqtg.hidden = aqbt.hidden = aqbf.hidden = aqit.hidden = aqz.hidden = aqzb.hidden = 1;
+    relayer(&aqtp); aqtp.hidden = 1; TP.set = 0;
     tk_memset(&ZS, 0, sizeof ZS);
     AQ.story = 0;
     aq_tb_baked = 0;
@@ -2320,6 +2347,7 @@ static int aq_layers(tk_layer **o)
     o[n++] = &aqbt;
     o[n++] = &aqbf;
     o[n++] = &aqtb;
+    o[n++] = &aqtp;
     o[n++] = &aqtg;
     o[n++] = &aqzb;
     o[n++] = &aqz;
