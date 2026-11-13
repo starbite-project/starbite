@@ -500,6 +500,7 @@ static int sd_recover(void)
 
 #define SW_QUERY_HS 0x00fffff1U             /* CMD6 mode 0: would group 1 take function 1? (no change) */
 #define SW_SET_HS   0x80fffff1U             /* CMD6 mode 1: group 1 = 1 (high speed), groups 2-6 0xf = keep */
+#define SW_SET_DS   0x80fffff0U             /* CMD6 mode 1: group 1 = 0 (default speed), groups 2-6 0xf = keep: before writes */
 
 #ifndef SD_DMA_LIMIT
 #define SD_DMA_LIMIT 0x100000000ULL         /* IDMAC buffers and descriptors below 4 GiB */
@@ -956,7 +957,7 @@ int sd_write(uint64_t sector, uint32_t count, uintptr_t src)
         return -9;                             /* not through the fence: nothing touched */
     if (!sd_up())
         return -1;
-    int was = sd_rep.fast;
+    int was = sd_rep.fast, hs = sd_rep.hs_card;
     if (was) {
         sd_rep.fast = 0;
         if (set_clock(25000000)) {
@@ -964,7 +965,30 @@ int sd_write(uint64_t sector, uint32_t count, uintptr_t src)
             return -1;
         }
     }
+    /* A write runs exactly as before the fast reads existed: the card back in default speed too (CMD6 mode 1, group 1
+     * function 0), not only the clock. If that switch does not take, the write is refused (nothing written): the card
+     * holds the OS store, and writes in high-speed mode at 25 MHz were never tried on this phone. */
+    if (hs) {
+        uint64_t st[8];
+        if (short_read(6, SW_SET_DS, 0, 64, st) || (((const uint8_t *)st)[16] & 0xfU) != 0U) {
+            (void)sd_recover();
+            (void)fast_fail("CMD6 back to default speed before a write: refused, nothing written");
+            sd_rep.hs_card = 0;
+            return -1;
+        }
+        sd_rep.hs_card = 0;
+        sb_mdelay(1);
+    }
     int r = write_sectors(sector, count, src);
+    if (hs && was) {
+        uint64_t st[8];
+        if (short_read(6, SW_SET_HS, 0, 64, st) || (((const uint8_t *)st)[16] & 0xfU) != 1U) {
+            (void)fast_fail("CMD6 back to high speed after a write");
+            return r;
+        }
+        sd_rep.hs_card = 1;
+        sb_mdelay(1);
+    }
     if (was) {
         if (hs_clock(was))
             (void)fast_fail("clock update after a write");
