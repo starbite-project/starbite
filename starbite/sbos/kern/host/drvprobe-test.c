@@ -84,6 +84,20 @@ int main(void)
     drv_run_step(&w);                        /* a started */
     drv_run_abort();
     CHECK(drv_run_step(&w) == 1, "abort ends the run");
+    /* drv_run_select: only b runs; a shows '-' */
+    memset(calls_a, 0, sizeof calls_a); memset(calls_b, 0, sizeof calls_b); aborts_b = 0; norder = 0;
+    logbuf[0] = 0;
+    drv_run_select("x,b");
+    run(0);
+    CHECK(calls_a[0] == 0 && calls_a[1] == 0, "select: a not run");
+    CHECK(calls_b[0] == 1, "select: b run");
+    CHECK(strstr(logbuf, "drvprobe: summary L0: a=- b=F") != 0, "select: summary shows a as -");
+    CHECK(strstr(logbuf, "drvprobe: only: x,b") != 0, "select: logged");
+    drv_run_select("bb,a");                  /* a prefix or a longer name is not a match */
+    memset(calls_a, 0, sizeof calls_a); memset(calls_b, 0, sizeof calls_b);
+    run(0);
+    CHECK(calls_a[0] == 2 && calls_b[0] == 0, "select: exact names only");
+    drv_run_select(0);
     printf("drvprobe host test: %s (%d failed)\n", fails ? "FAILED" : "passed", fails);
     return fails != 0;
 }

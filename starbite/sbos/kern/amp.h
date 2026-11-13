@@ -90,3 +90,8 @@ int amp_die_kind(unsigned addr, uint8_t *rev);
 /* The first attended check: probe, both dies' status, the earpiece on at level 0 for hold_ms (the bus clocks from
  * UAIF1 are not needed: CLK_MON is off), its status read back, then everything off. 0 or <0. */
 int amp_selftest(unsigned hold_ms);
+
+/* the amplifier bus by hand (open-drain GPIOs on gpp4-4/5): amp.c's kernel transfers use it while amp_use_bb is set
+ * (default: run 7e showed USI07's HSI2C never starting a transfer while the dies answer by hand) */
+extern int amp_use_bb;
+int amp_bb_xfer(unsigned addr, const uint8_t *w, unsigned wn, uint8_t *r, unsigned rn);

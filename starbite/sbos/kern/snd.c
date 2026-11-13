@@ -11,6 +11,10 @@
  *   4  2 s without anything to play: the output off first, then RDMA0, then (no capture) the AUD domain;
  *   5  capture: what WDMA1 wrote since the last poll is taken (the left slot: AIF1TX1, the main mic) into a 0.5 s
  *      mono queue for snd_cap_read.
+ * With the Calliope engine (abox_media.c; the kernel's, since bypass moves neither RDMA0 nor WDMA1 on this phone)
+ * playback is RDMA0 and capture WDMA1 through Calliope's PCM IPC; both may run at the same time on one Calliope boot,
+ * which snd boots when nobody runs it (300 ms for its post-boot messages, cal_settle) and switches off 30 s after the
+ * last of the two stopped (cal_release).
  *
  * The guard stands in for Maxim's DSM speaker protection, which runs on ABOX's firmware and not here. It is ours:
  * a no-lookahead peak limiter (instant attack, ~40 ms release) to the ceiling, and a power budget on the mean square
@@ -22,6 +26,7 @@
 #include "snd.h"
 #include "codec_media.h"
 #include "abox_media.h"
+#include "goertzel.h"
 #include <stdarg.h>
 
 #ifdef SBOS_KERNEL
@@ -112,6 +117,8 @@ static int inited;
 static struct {
     int eng, out_on, cur_out, route, jack, muted, suspended, cap, cap_codec, amp_override, dumped;
     int ce, cal_own, cal_bad, cal_fails;    /* Calliope engine running, snd booted it, given up on it */
+    int cc;                                 /* capture runs through Calliope (WDMA1) */
+    int silent;                             /* the probe's silent run: output_on() leaves the amps / codec off */
     uint64_t cal_off_at;
     unsigned vol[4];
     uint32_t fill_idx, zero_idx, last_pos;
@@ -192,6 +199,29 @@ static void snprintf_like(char *d, unsigned cap, const char *a, const char *b, c
 }
 #define SL(x) ((long)(x))
 
+/* the newest failure line snd said (for the probe's FAIL line: pmsg keeps only the run's tail) */
+static char last_bad[112];
+static int has_s(const char *h, const char *n)
+{
+    for (; *h; ++h) {
+        unsigned k = 0;
+        while (n[k] && h[k] == n[k])
+            ++k;
+        if (!n[k])
+            return 1;
+    }
+    return 0;
+}
+static void note_bad(const char *l)
+{
+    if (!has_s(l, "did not") && !has_s(l, "did NOT") && !has_s(l, "fell over") && !has_s(l, "failed") &&
+        !has_s(l, "refused") && !has_s(l, "stopped while") && !has_s(l, "took Calliope"))
+        return;
+    unsigned i = 0;
+    for (; l[i] && i + 1 < sizeof last_bad; ++i)
+        last_bad[i] = l[i];
+    last_bad[i] = 0;
+}
 static void say(const char *fmt, ...)
 {
     char b[220];
@@ -201,6 +231,7 @@ static void say(const char *fmt, ...)
     va_end(ap);
     if (inited && O.log)
         O.log(b);
+    note_bad(b + 5);
 }
 /* the probe's lines ("drvprobe: audio: ...") */
 static void psay(const char *fmt, ...)
@@ -467,6 +498,11 @@ static int output_on(int out)
 {
     int r;
     int lvl = G.amp_override >= 0 ? G.amp_override : -1;
+    if (G.silent) {
+        G.out_on = 0;
+        say("output: %s kept off (the probe's silent run)", out_name(out));
+        return 0;
+    }
     if (out == SND_OUT_HEADPHONES)
         r = O.codec_hp ? O.codec_hp(1, (int)G.vol[out]) : SND_ESTATE;
     else if (out == SND_OUT_EARPIECE)
@@ -631,41 +667,63 @@ static void engine_stop(const char *what)
     why("Sound is ready (nothing playing)");
 }
 
-/* Calliope off if snd booted it and nothing else uses it */
+/* Calliope off if snd booted it and nothing else uses it (neither our playback nor our capture) */
 static void cal_release(const char *what)
 {
-    if (!G.cal_own)
+    if (!G.cal_own || G.ce || G.cc)
         return;
     G.cal_own = 0;
     if (abox_state() == ABOX_ST_READY || abox_state() == ABOX_ST_FAILED) {
+        cal_dump_off("snd");
         abox_off();
         say("engine: Calliope off (%s)", what);
     }
 }
 
-/* RDMA0 through Calliope (abox_media.c), booting Calliope first if nobody runs it; 0 or <0 */
-static int cal_engine_start(int out)
+/* Calliope running for media (playback or capture), booting it first if nobody runs it, then 300 ms for its post-boot
+ * messages (run 6: taken before our PCM messages); 0 or <0 */
+static int cal_up(void)
 {
     int r, st = abox_state();
     if (st == ABOX_ST_BOOTING)
         return SND_EBUSY;
-    if (st != ABOX_ST_READY && st != ABOX_ST_CALL) {
-        uint64_t t0 = now();
-        (void)cal_map();                            /* again: a probe may have taken its own window away */
-        r = abox_boot();
-        cal_unmap();
-        if (r) {
-            abox_off();
-            say("engine: Calliope did not boot: %s", abox_why());
-            if (++G.cal_fails >= 2) {
-                G.cal_bad = 1;
-                say("engine: Calliope failed twice: media uses the bypass engine from now on");
-            }
-            return r;
+    if (st == ABOX_ST_READY || st == ABOX_ST_CALL)
+        return 0;
+    uint64_t t0 = now();
+    (void)cal_map();                                /* again: a probe may have taken its own windows away */
+    cal_abox_hal();                                 /* abox.c's HAL: snd may be the first to boot Calliope */
+    r = abox_boot();
+    cal_unmap();
+    if (!r)
+        r = cal_settle(CAL_SETTLE_MS);
+    if (r) {
+        char cause[160];
+        const char *w = abox_why();
+        unsigned i = 0;
+        for (; w && w[i] && i + 1 < sizeof cause; ++i)      /* abox_off() replaces abox_why() with "ABOX off" */
+            cause[i] = w[i];
+        cause[i] = 0;
+        abox_off();
+        say("engine: Calliope did not boot: %s", cause);
+        if (++G.cal_fails >= 2) {
+            G.cal_bad = 1;
+            say("engine: Calliope failed twice: media uses the bypass engine from now on");
         }
-        G.cal_own = 1;
-        say("engine: Calliope booted for media in %u ms", UL((now() - t0) / 1000U));
+        return r;
     }
+    G.cal_own = 1;
+    G.cal_off_at = now() + CAL_IDLE_OFF_US;
+    say("engine: Calliope booted for media in %u ms (with %u ms for its post-boot messages)",
+        UL((now() - t0) / 1000U), UL(CAL_SETTLE_MS));
+    return 0;
+}
+
+/* RDMA0 through Calliope (abox_media.c); 0 or <0 */
+static int cal_engine_start(int out)
+{
+    int r;
+    if ((r = cal_up()))
+        return r;
     if ((r = cal_play_start(uaif_of(out), APCM_PERIOD_BYTES, APCM_PERIODS))) {
         say("engine: RDMA0 did not start through Calliope: %s", cal_why());
         cal_release("the stream did not start");
@@ -754,7 +812,9 @@ static void engine_fill(uint64_t t)
     uint32_t stt = 0, pos = G.ce ? cal_play_pos(&stt) : apcm_play_pos(&stt);
     if (pos != APCM_NOPOS && pos != G.last_pos)
         G.moved_at = t, G.last_pos = pos;
-    if (t - G.moved_at > STALL_US) {    /* no position, or the same one, for 250 ms: the DMA does not run */
+    /* no position, or the same one, for 250 ms: the DMA does not run. t is the poll's start, older than moved_at when
+     * this poll booted Calliope (~1 s on the phone, run 7b): no stall then (was an unsigned underflow) */
+    if (t > G.moved_at && t - G.moved_at > STALL_US) {
         say("engine: RDMA0 does not move (STATUS %x)", UL(stt));
         if (!G.ce && !G.dumped++)
             apcm_dump("engine");        /* once a boot: the registers for the log */
@@ -804,6 +864,41 @@ static unsigned isqrt64(uint64_t m)
     return (unsigned)r;
 }
 
+static void cap_reset_queue(void)
+{
+    G.cap_last = 0, G.cap_head = G.cap_tail = 0, G.cap_n = 0, G.cap_sq = 0, G.cap_level = 0;
+}
+
+/* the main mic through Calliope: WDMA1 <- UAIF0 (abox_media.c), booting Calliope if nobody runs it; 0 or <0 */
+static int cal_cap_open(void)
+{
+    int r;
+    if ((r = cal_up())) {
+        why("The microphone could not start: the audio processor (Calliope) did not start");
+        return r;
+    }
+    if ((r = O.codec_mic(1))) {
+        say("capture: the codec's mic did not start (%d)", SL(r));
+        cal_release("the mic did not start");
+        why("The microphone could not start: the codec did not answer");
+        return r;
+    }
+    G.cap_codec = 1;
+    if ((r = cal_cap_start(CAL_UAIF0, APCM_PERIOD_BYTES, APCM_PERIODS))) {
+        say("capture: WDMA1 did not start through Calliope: %s", cal_why());
+        (void)O.codec_mic(0);
+        G.cap_codec = 0;
+        cal_release("the capture did not start");
+        why("The microphone could not start: the capture DMA did not start");
+        return r;
+    }
+    G.cc = 1;
+    G.cap = 1;
+    cap_reset_queue();
+    say("capture: the main mic through Calliope (WDMA1), 48 kHz mono");
+    return 0;
+}
+
 int snd_cap_open(void)
 {
     int r;
@@ -811,14 +906,19 @@ int snd_cap_open(void)
         return SND_ESTATE;
     if (G.cap)
         return 0;
-    if (G.suspended || call_has()) {
-        why(in_call() || G.suspended ? "The microphone is busy: a call has the audio hardware"
-                                     : "The microphone is busy: the audio processor plays media");
+    if (G.suspended || in_call()) {
+        why("The microphone is busy: a call has the audio hardware");
         return SND_EBUSY;
     }
     if (!O.codec_mic) {
         why("No microphone: the codec driver is not linked");
         return SND_ESTATE;
+    }
+    if (cal_avail && !G.cal_bad && apcm_state() == APCM_ST_OFF)
+        return cal_cap_open();
+    if (call_has()) {
+        why("The microphone is busy: the audio processor plays media");
+        return SND_EBUSY;
     }
     if ((r = apcm_up())) {
         why("The microphone could not start: the audio block did not come up");
@@ -841,19 +941,20 @@ int snd_cap_open(void)
         return r;
     }
     G.cap = 1;
-    G.cap_last = 0, G.cap_head = G.cap_tail = 0, G.cap_n = 0, G.cap_sq = 0, G.cap_level = 0;
+    cap_reset_queue();
     say("capture: the main mic, 48 kHz mono");
     return 0;
 }
 
 static void cap_pull(void)
 {
-    uint32_t stt = 0, pos = apcm_cap_pos(&stt);
-    const uint8_t *ring = apcm_cap_buf();
-    if (pos == APCM_NOPOS || !ring)
+    uint32_t stt = 0, pos = G.cc ? cal_cap_pos(&stt) : apcm_cap_pos(&stt);
+    const uint8_t *ring = G.cc ? cal_cap_buf() : apcm_cap_buf();
+    uint32_t rb = G.cc ? cal_cap_ring_bytes() : APCM_RING_BYTES;
+    if (pos == APCM_NOPOS || !ring || !rb)
         return;
     pos &= ~3U;
-    unsigned guard = APCM_RING_BYTES / 4;
+    unsigned guard = rb / 4;
     while (G.cap_last != pos && guard--) {
         int16_t l = (int16_t)(ring[G.cap_last] | ring[G.cap_last + 1] << 8);
         if (G.cap_head - G.cap_tail < SND_CAP_SAMPLES) {
@@ -867,7 +968,7 @@ static void cap_pull(void)
             G.cap_level = isqrt64(G.cap_sq / 4800U);
             G.cap_n = 0, G.cap_sq = 0;
         }
-        G.cap_last = (G.cap_last + 4U) % APCM_RING_BYTES;
+        G.cap_last = (G.cap_last + 4U) % rb;
     }
 }
 
@@ -885,15 +986,22 @@ void snd_cap_close(void)
 {
     if (!G.cap)
         return;
-    apcm_cap_stop();
+    if (G.cc)
+        cal_cap_stop();
+    else
+        apcm_cap_stop();
     if (G.cap_codec && O.codec_mic)
         (void)O.codec_mic(0);
     if (G.cap_codec && O.codec_off && !(G.eng && G.cur_out == SND_OUT_HEADPHONES))
         O.codec_off();
     G.cap_codec = 0;
     G.cap = 0;
-    if (!G.eng)
+    if (G.cc) {
+        G.cc = 0;
+        G.cal_off_at = now() + CAL_IDLE_OFF_US;     /* Calliope stays booted a while, as after playback */
+    } else if (!G.eng) {
         apcm_down();
+    }
     say("capture: closed");
 }
 
@@ -904,32 +1012,48 @@ void snd_poll(uint64_t t)
 {
     if (!inited)
         return;
-    if (G.ce && (in_call() || (abox_state() != ABOX_ST_READY && abox_state() != ABOX_ST_CALL))) {
+    if ((G.ce || G.cc) && (in_call() || (abox_state() != ABOX_ST_READY && abox_state() != ABOX_ST_CALL))) {
         /* a call came without snd_suspend_for_call(), or Calliope stopped under us (the modem's abox_off) */
         int c = in_call();
-        say(c ? "a call took Calliope while media played (snd_suspend_for_call was not called): stream stopped"
-              : "Calliope stopped while media played: stream dropped");
-        output_off();
-        cal_play_stop();
-        G.eng = G.ce = 0;
+        if (G.ce)
+            say(c ? "a call took Calliope while media played (snd_suspend_for_call was not called): stream stopped"
+                  : "Calliope stopped while media played: stream dropped");
+        if (G.cc)
+            say(c ? "a call took Calliope while the mic recorded (snd_suspend_for_call was not called): capture "
+                    "stopped" : "Calliope stopped while the mic recorded: capture dropped");
+        if (G.ce) {
+            output_off();
+            cal_play_stop();
+        }
+        if (G.cc) {
+            cal_cap_stop();                     /* during a call it leaves UAIF0 MIC (the call's) alone */
+            if (G.cap_codec && O.codec_mic && !c)
+                (void)O.codec_mic(0);           /* the call's codec path is the call's */
+        }
+        G.eng = G.ce = G.cap = G.cc = G.cap_codec = 0;
         G.cal_own = 0;                          /* the call's (or nobody's) now */
         G.retry_at = t + RETRY_US;
         why(c ? "Sound is paused: a call has the audio hardware" : "Sound stopped: the audio processor stopped");
         return;
     }
-    if ((G.ce || G.cal_own) && abox_poll() < 0) {
+    if ((G.ce || G.cc || G.cal_own) && abox_poll() < 0) {
         say("Calliope fell over: %s", abox_why());
         output_off();
         cal_play_stop();
+        cal_cap_stop();
+        if (G.cc && G.cap_codec && O.codec_mic)
+            (void)O.codec_mic(0);
         abox_off();
         G.eng = G.ce = G.cal_own = 0;
+        if (G.cc)
+            G.cap = G.cc = G.cap_codec = 0;
         G.retry_at = t + RETRY_US;
         why("Sound stopped: the audio processor stopped");
         return;
     }
     if (!G.eng && G.cal_own && t >= G.cal_off_at)
         cal_release("30 s without media");
-    if (((G.eng && !G.ce) || G.cap) && call_has()) {
+    if (((G.eng && !G.ce) || (G.cap && !G.cc)) && call_has()) {
         /* a missed snd_suspend_for_call(): ABOX is Calliope's now; nothing of ours is written to it */
         say("a call took ABOX while media sound ran (snd_suspend_for_call was not called): sound state dropped");
         apcm_forget();
@@ -985,6 +1109,14 @@ void snd_suspend_for_call(void)
         G.eng = G.ce = 0;
         say("call: media sound stopped; Calliope left running for the call");
     }
+    if (G.cc) {
+        /* the mic before the call takes UAIF0 MIC and the codec */
+        cal_cap_stop();
+        if (G.cap_codec && O.codec_mic)
+            (void)O.codec_mic(0);
+        G.cap = G.cc = G.cap_codec = 0;
+        say("call: the mic's capture stopped; Calliope left running for the call");
+    }
     G.cal_own = 0;                              /* the modem's now: its audio_stop() turns it off */
     if (G.eng || G.cap || apcm_state() != APCM_ST_OFF) {
         G.tone = 0;
@@ -1027,9 +1159,17 @@ static struct {
     unsigned trial, found, trials_run;
     uint32_t found_moved, rate2;
     char found_desc[48];
+    /* through Calliope */
+    int sid, sid_open, saved, saved_muted;
+    uint64_t tm;                                /* when the measured window began (0: not yet) */
+    uint32_t skip;
+    struct gz gb, gt;                           /* the mic: baseline, the tone now */
+    struct gz_verdict v[2];                     /* the earpiece, the loudspeaker */
 } P;
 
-static const unsigned budget_of[3] = { 2000, 20000, 10000 };   /* level 1: the combined RDMA0 sweep, ~1100 trials of ~8 ms */
+/* level 1: the combined RDMA0 sweep (bypass), ~1100 trials of ~8 ms; level 2: Calliope's boot (<= 3.5 s) + 0.3 s +
+ * the mic's 1.1 s baseline + 2.1 s earpiece + 1.1 s loudspeaker + the starts and stops */
+static const unsigned budget_of[3] = { 2000, 20000, 14000 };
 
 static int pfinish(int ok, const char *line)
 {
@@ -1046,6 +1186,10 @@ void drv_audio_abort(void)
         return;
     G.tone = 0;
     output_off();
+    G.silent = 0;
+    if (P.active && P.sid_open)
+        snd_close(P.sid);
+    P.sid_open = 0;
     if (G.cap)
         snd_cap_close();
     if (G.ce)
@@ -1057,11 +1201,14 @@ void drv_audio_abort(void)
     apcm_down();
     G.eng = G.cap = 0;
     G.amp_override = -1;
-    if (P.active && P.level == 2) {
+    if (P.active && (P.level == 2 || P.saved)) {
         G.route = P.saved_route;
         for (int i = 1; i < 4; ++i)
             G.vol[i] = (unsigned)P.saved_vol[i];
     }
+    if (P.active && P.saved)
+        G.muted = P.saved_muted;
+    P.saved = 0;
     P.active = 0;
 }
 
@@ -1233,6 +1380,276 @@ static int probe1(void)
     }
 }
 
+/* ---- the probe through Calliope (cal_avail): snd's real engine end to end ------------------------------------ */
+static void lfmt(char *b, unsigned cap, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vfmt(b, cap, "", fmt, ap);
+    va_end(ap);
+}
+/* tenths of a dB as "-12.3" */
+static const char *db_str(char *b, int32_t d10)
+{
+    unsigned a = (unsigned)(d10 < 0 ? -d10 : d10);
+    lfmt(b, 16, "%s%u.%u", d10 < 0 ? "-" : "", UL(a / 10U), UL(a % 10U));
+    return b;
+}
+static void cprobe_save(void)
+{
+    P.saved = 1;
+    P.saved_route = G.route;
+    P.saved_muted = G.muted;
+    for (int i = 1; i < 4; ++i)
+        P.saved_vol[i] = (int)G.vol[i];
+}
+/* the user's settings back (drv_audio_abort does the same on its way) */
+static void cprobe_restore(void)
+{
+    if (P.sid_open)
+        snd_close(P.sid);
+    P.sid_open = 0;
+    G.silent = 0;
+    G.amp_override = -1;
+    if (P.saved) {
+        G.route = P.saved_route;
+        G.muted = P.saved_muted;
+        for (int i = 1; i < 4; ++i)
+            G.vol[i] = (unsigned)P.saved_vol[i];
+    }
+    P.saved = 0;
+}
+/* every failure: the tone, the output (amps first), the streams, the mic, Calliope if snd booted it, the settings */
+static int cfail(const char *line)
+{
+    char b[240];
+    unsigned n = 0;
+    psay("%s", why_buf);
+    psay("failed: %s", line);
+    /* the cause first (snd's newest failure line), then the probe's step: the summary keeps ~100 characters */
+    for (const char *q = last_bad[0] ? last_bad : line; *q && n + 1 < sizeof b; ++q)
+        b[n++] = *q;
+    if (last_bad[0])
+        for (const char *q = " | step: "; *q && n + 1 < sizeof b; ++q)
+            b[n++] = *q;
+    for (const char *q = last_bad[0] ? line : ""; *q && n + 1 < sizeof b; ++q)
+        b[n++] = *q;
+    b[n] = 0;
+    drv_audio_abort();
+    return pfinish(0, b);
+}
+static void feed_zeros(void)
+{
+    static const int16_t z[2 * 256];
+    while (P.sid_open && snd_space(P.sid) && snd_write(P.sid, z, 256))
+        ;
+}
+/* the mic's queued samples into g (the first P.skip dropped) */
+static void take_mic(struct gz *g)
+{
+    int16_t b[256];
+    unsigned k;
+    while ((k = snd_cap_read(b, 256)) > 0)
+        for (unsigned i = 0; i < k; ++i) {
+            P.n++;
+            if (P.skip) {
+                P.skip--;
+                continue;
+            }
+            gz_put(g, b[i]);
+        }
+}
+/* bytes a position moved since the last; the window starts at the first valid position. 1 once ms have passed. */
+static int window(uint32_t pos, uint32_t *moved, uint32_t ms)
+{
+    uint64_t t = now();
+    if (!P.tm) {
+        if (pos != CAL_NOPOS)
+            P.tm = t, P.last = pos;
+        return 0;
+    }
+    *moved += moved_since(&P.last, pos);
+    return t - P.tm >= ms * 1000ULL;
+}
+
+/* Level 1 (silent): zeroes through snd's engine (Calliope's RDMA0, output kept off, muted) 1 s, then the main mic
+ * through Calliope's WDMA1 0.5 s; Calliope off after if snd booted it (abox_off: the AUD domain ends off). */
+static int probe1c(void)
+{
+    char line[200];
+    switch (P.step) {
+    case 0:
+        if (in_call())
+            return pfinish(0, "a call has ABOX: not run (nothing touched)");
+        if (G.eng || G.cap)
+            return pfinish(0, "media sound is in use: not run (nothing touched)");
+        psay("level 1 (silent, through Calliope): snd's engine plays zeroes 1 s (output kept off), then the main mic "
+             "0.5 s; Calliope off after if snd booted it");
+        cprobe_save();
+        G.silent = 1, G.muted = 1;
+        if ((P.sid = snd_open()) < 0)
+            return cfail("no free stream for the probe");
+        P.sid_open = 1;
+        feed_zeros();
+        G.retry_at = 0;
+        snd_poll(now());
+        if (!G.eng || !G.ce)
+            return cfail(G.eng ? "the engine started in bypass, not through Calliope (Calliope failed before?)"
+                               : "the engine did not start through Calliope (see the snd / cal / abox lines)");
+        P.tm = 0, P.moved = 0, P.ts = now(), P.step = 1;
+        return 0;
+    case 1:
+        feed_zeros();
+        snd_poll(now());
+        if (!G.eng || !G.ce)
+            return cfail("the engine stopped during its 1 s (see the snd lines)");
+        if (!P.tm && now() - P.ts > 1000000ULL)
+            return cfail("RDMA0 shows no position through Calliope (STATUS not in progress for 1 s)");
+        if (!window(cal_play_pos(0), &P.moved, 1000))
+            return 0;
+        P.rate = (uint32_t)((uint64_t)P.moved * 1000000ULL / (now() - P.tm));
+        {
+            struct snd_stats ss;
+            snd_stats(&ss);
+            psay("engine: RDMA0 read %u B/s through Calliope (%u periods mixed, %u xruns); output stayed off",
+                 UL(P.rate), UL(ss.periods), UL(ss.xruns));
+        }
+        snd_close(P.sid);
+        P.sid_open = 0;
+        engine_stop("the probe's 1 s is done");
+        if (snd_cap_open())
+            return cfail("the main mic did not start through Calliope (codec or WDMA1; see the lines above)");
+        if (!G.cc)
+            return cfail("the mic opened in bypass, not through Calliope");
+        gz_reset(&P.gb);
+        P.tm = 0, P.cap_moved = 0, P.n = 0, P.skip = 0, P.ts = now(), P.step = 2;
+        return 0;
+    default: {
+        snd_poll(now());
+        if (!G.cap || !G.cc)
+            return cfail("the capture stopped during its 0.5 s (see the lines above)");
+        take_mic(&P.gb);
+        if (!P.tm && now() - P.ts > 1000000ULL)
+            return cfail("WDMA1 shows no position through Calliope (STATUS not in progress for 1 s)");
+        if (!window(cal_cap_pos(0), &P.cap_moved, 500))
+            return 0;
+        P.cap_rate = (uint32_t)((uint64_t)P.cap_moved * 1000000ULL / (now() - P.tm));
+        snd_cap_close();
+        cprobe_restore();
+        psay("mic: WDMA1 wrote %u B/s through Calliope; %u samples, RMS %u, peak %u (of 32767)", UL(P.cap_rate),
+             UL(P.n), UL(gz_rms(&P.gb)), UL(P.gb.peak));
+        int play_ok = P.rate >= 182400U && P.rate <= 201600U, cap_ok = P.cap_rate >= 182400U && P.cap_rate <= 201600U;
+        if (!play_ok) {
+            lfmt(line, sizeof line, "snd's engine through Calliope: RDMA0 %u B/s (192000 expected); WDMA1 %u B/s",
+                 UL(P.rate), UL(P.cap_rate));
+            return pfinish(0, line);
+        }
+        if (!cap_ok) {
+            lfmt(line, sizeof line, "the mic through Calliope: WDMA1 %u B/s (192000 expected); RDMA0 %u B/s ok",
+                 UL(P.cap_rate), UL(P.rate));
+            return pfinish(0, line);
+        }
+        lfmt(line, sizeof line, "snd's engine through Calliope: RDMA0 %u B/s, WDMA1 %u B/s, mic RMS %u peak %u; "
+             "output stayed off", UL(P.rate), UL(P.cap_rate), UL(gz_rms(&P.gb)), UL(P.gb.peak));
+        return pfinish(1, line);
+    }
+    }
+}
+
+/* one output's loopback result, for the logs and the last line */
+static void heard_line(const char *out, const struct gz_verdict *v, const struct gz *g)
+{
+    char a[16], b[16];
+    psay("%s: 1 kHz %s dB over the baseline, %s dB over 700/1300 Hz (%u x 20 ms, RMS %u): heard %s", out,
+         db_str(a, v->over_base), db_str(b, v->over_nb), UL(g->blocks), UL(gz_rms(g)), v->heard ? "yes" : "no");
+}
+
+/* Level 2 (quiet, may run unattended): the mic's 1 s baseline through Calliope, then snd_tone's 1 kHz on the earpiece
+ * (amp level 0, -20 dBFS: the tone's own level) 2 s and on the loudspeaker (amp level 0, volume 13: -25 dBFS) 1 s while
+ * the mic records; a Goertzel filter judges each (goertzel.h). Output and amps off on every way out. */
+#define CP_SKIP 4800U                   /* the first 100 ms of the mic / of each output not judged */
+static int probe2c(void)
+{
+    char line[220], a[16], b[16];
+    switch (P.step) {
+    case 0:
+        if (in_call())
+            return pfinish(0, "a call has ABOX: not run (nothing touched)");
+        if (G.eng || G.cap)
+            return pfinish(0, "media sound is in use: not run (nothing touched)");
+        psay("level 2 (quiet, through Calliope): the mic's baseline 1 s, then 1 kHz on the earpiece (-20 dBFS, amp "
+             "level 0) 2 s and the loudspeaker (-25 dBFS, amp level 0) 1 s while the mic listens");
+        cprobe_save();
+        G.amp_override = 0;
+        G.route = SND_OUT_EARPIECE;
+        G.muted = 0;
+        G.vol[SND_OUT_EARPIECE] = SND_VOL_MAX;      /* the test tone as made: -20 dBFS */
+        G.vol[SND_OUT_SPEAKER] = 13;                /* -5 dB: -25 dBFS */
+        if (snd_cap_open())
+            return cfail("the main mic did not start through Calliope (codec or WDMA1; see the lines above)");
+        if (!G.cc)
+            return cfail("the mic opened in bypass, not through Calliope");
+        gz_reset(&P.gb);
+        P.n = 0, P.skip = CP_SKIP, P.ts = now(), P.step = 1;
+        return 0;
+    case 1:
+        snd_poll(now());
+        if (!G.cap || !G.cc)
+            return cfail("the capture stopped during the baseline (see the lines above)");
+        take_mic(&P.gb);
+        if (P.gb.blocks < 50U) {                    /* 1 s */
+            if (now() - P.ts > 3000000ULL)
+                return cfail("the mic gave less than 1 s of samples in 3 s (WDMA1 through Calliope)");
+            return 0;
+        }
+        psay("baseline: the mic's RMS %u, peak %u over %u ms", UL(gz_rms(&P.gb)), UL(P.gb.peak),
+             UL(P.gb.blocks * 20U));
+        (void)snd_tone(SND_TONE_TEST);
+        G.retry_at = 0;
+        snd_poll(now());
+        if (!G.eng || !G.ce || G.cur_out != SND_OUT_EARPIECE)
+            return cfail("the earpiece path did not start through Calliope (see the snd / cal / amp lines)");
+        gz_reset(&P.gt);
+        P.skip = CP_SKIP, P.ts = now(), P.step = 2;
+        return 0;
+    case 2:
+        snd_poll(now());
+        if (!G.eng || !G.cap)
+            return cfail("the earpiece path or the mic stopped (see the lines above)");
+        take_mic(&P.gt);
+        if (now() - P.ts < 2000000ULL)
+            return 0;
+        gz_judge(&P.gt, &P.gb, &P.v[0]);
+        heard_line("earpiece", &P.v[0], &P.gt);
+        G.route = SND_OUT_SPEAKER;
+        snd_poll(now());
+        if (!G.eng || G.cur_out != SND_OUT_SPEAKER)
+            return cfail("the loudspeaker path did not start (see the lines above)");
+        gz_reset(&P.gt);
+        P.skip = CP_SKIP, P.ts = now(), P.step = 3;
+        return 0;
+    default: {
+        snd_poll(now());
+        if (!G.eng || !G.cap)
+            return cfail("the loudspeaker path or the mic stopped (see the lines above)");
+        take_mic(&P.gt);
+        if (now() - P.ts < 1000000ULL)
+            return 0;
+        gz_judge(&P.gt, &P.gb, &P.v[1]);
+        heard_line("loudspeaker", &P.v[1], &P.gt);
+        snd_tone_stop();
+        engine_stop("the probe's tones are done");  /* the amp off first */
+        snd_cap_close();
+        cprobe_restore();
+        int any = P.v[0].heard || P.v[1].heard;
+        lfmt(line, sizeof line, "%searpiece: heard by the mic: %s (1 kHz %s dB over baseline); loudspeaker: heard by "
+             "the mic: %s (1 kHz %s dB over baseline)", any ? "" : "no tone heard: ", P.v[0].heard ? "yes" : "no",
+             db_str(a, P.v[0].over_base), P.v[1].heard ? "yes" : "no", db_str(b, P.v[1].over_base));
+        return pfinish(any, line);
+    }
+    }
+}
+
 static void probe2_restore(void)
 {
     G.amp_override = -1;
@@ -1344,15 +1761,16 @@ int drv_audio_probe(int level, unsigned *wait_ms)
     if (!P.active || P.level != level) {
         memset(&P, 0, sizeof P);
         P.active = 1, P.level = level, P.t0 = now();
+        last_bad[0] = 0;
     }
     if (now() - P.t0 > (uint64_t)budget_of[level] * 1000ULL) {
         drv_audio_abort();
         psay("did not finish within %u ms", UL(budget_of[level]));
         return pfinish(0, "out of time: everything put back");
     }
-    int done = level == 0 ? probe0() : level == 1 ? probe1() : probe2();
+    int done = level == 0 ? probe0() : level == 1 ? (cal_avail ? probe1c() : probe1()) : cal_avail ? probe2c() : probe2();
     if (!done && wait_ms)
-        *wait_ms = level == 1 ? 50U : 5U;
+        *wait_ms = level == 1 && !cal_avail ? 50U : 5U;
     return done;
 }
 

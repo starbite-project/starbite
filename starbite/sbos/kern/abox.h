@@ -77,13 +77,20 @@ int abox_vss_start(void);
 int abox_call(int on);
 int abox_poll(void);
 void abox_off(void);
+/* the AUD power domain alone, for media sound while ABOX is off (aud_on + the DTZPC restore SMC / the TZPC save SMC +
+ * aud_off: the same sequence as abox_boot / abox_off). ABOX_ESTATE while ABOX boots or runs. */
+/* the VSS handshake from Calliope's own log: 1 "CP Magic Code is ready", -1 "VSS init timed out", 0 neither yet */
+int abox_vss_ready(void);
+int abox_pd_on(void);
+void abox_pd_off(void);
 const char *abox_why(void);
 int abox_state(void);                       /* ABOX_ST_* */
 uint32_t abox_version(void);                /* Calliope's version word from BOOT_DONE ("CRL0" = 0x43524C30), 0 none */
 
 /* ---- media through Calliope (abox_media.c): additive hooks ----------------------------------------------------
  * abox_map_extra(): one more ABOX window in our SysMMU tables (4 KiB pages through its own L2 table), set BEFORE
- *   abox_boot() and kept until removed with size 0 (2 slots, found by iova). iova: 1 MiB aligned, not one of the
+ *   abox_boot() and kept until removed with size 0 (2 slots, found by iova; abox_media.c uses both: RDMA0's
+ *   0x91000000 and WDMA1's 0x92100000). iova: 1 MiB aligned, not one of the
  *   windows above (abox_boot() logs and skips a clash); pa: 4 KiB aligned, inside abox_rmem's page-table section
  *   past its first 64 KiB (0x1510000 .. 0x1600000), so ABOX never sees anything but abox_rmem; size <= 960 KiB.
  *   0 or ABOX_ECFG (ABOX_ESTATE while Calliope runs: the tables are written at boot).

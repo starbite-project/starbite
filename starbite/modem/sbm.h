@@ -418,6 +418,7 @@ enum { SBM_CALL_ACTIVE = 1, SBM_CALL_HELD, SBM_CALL_DIALING, SBM_CALL_ALERTING, 
 #define SBM_NET_PREF_PLMN        SBM_CMD(SBM_G_NET, 0x01)
 #define SBM_NET_PLMN_SEL         SBM_CMD(SBM_G_NET, 0x02)
 #define SBM_NET_SERVING_NETWORK  SBM_CMD(SBM_G_NET, 0x03)
+#define SBM_NET_IDENTITY         SBM_CMD(SBM_G_NET, 0x0C)   /* the network's names (NITZ), CP NOTI / INDI */
 #define SBM_NET_PLMN_LIST        SBM_CMD(SBM_G_NET, 0x04)
 #define SBM_NET_REGIST           SBM_CMD(SBM_G_NET, 0x05)
 #define SBM_NET_SUBSCRIBER_NUM   SBM_CMD(SBM_G_NET, 0x06)
@@ -526,6 +527,10 @@ struct sbm_cell_state {
     int have_ps;    struct sbm_reg ps;
     int have_plmn;  char plmn[7];      /* MCC-MNC of the serving network (operator identity only) */
     uint8_t plmn_sel;                  /* NET_PLMN_SEL: 2 automatic, 3 manual */
+    /* NET_IDENTITY 0x080C: the network's own names (NITZ); SCREEN ONLY, never logged */
+    int have_names; char net_short[32], net_full[64]; uint32_t names_gen;
+    /* MISC_TIME_INFO 0x0A05 (NITZ): type 1/2 with the time (UTC), 5 zone only; tz in quarter hours */
+    int have_nitz; uint8_t nitz_type, nitz_dst; int8_t nitz_tz_q; int64_t nitz_utc; uint32_t nitz_gen;
     uint32_t n_msgs, n_unknown, n_bad, n_gen_err;
 };
 void sbm_cell_init(struct sbm_cell_state *st);
@@ -876,6 +881,7 @@ struct sbm_sms {
     uint32_t binary_len;              /* 8-bit data: its length (the data is not kept) */
     char text[SBM_SMS_TEXT_MAX];      /* UTF-8 */
 };
+int sbm_text_decode(uint8_t coding, const uint8_t *b, uint32_t n, char *out, size_t cap);   /* NITZ name codings */
 int sbm_sms_deliver_decode(const uint8_t *tpdu, uint32_t n, struct sbm_sms *s);
 int sbm_sms_incoming(const struct sbm_ipc_msg *m, struct sbm_sms *s);
 /* delivery reports: the reference (TP-MR, as the send's RESP gave it) and TP-ST (0x00..0x1F delivered, 0x20..0x3F

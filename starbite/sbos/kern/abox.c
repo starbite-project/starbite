@@ -213,6 +213,7 @@ static struct {
     int state, err;
     uint8_t *rm;                        /* CPU pointer to abox_rmem */
     int pd_touched, cpu_started, mmu_set, pins_set, call_on, vss_started, boot_done, dump_win;
+    int vss_magic, vss_timeout;             /* Calliope's log: "CP Magic Code is ready" / "VSS init timed out" */
     unsigned qch_set;                   /* bit i: qch_regs[i] CLOCK_REQ set by us */
     uint32_t version, sram_bytes;
     unsigned ipc_sent, ipc_recv, ipc_timeouts, ipc_fail_row, refused, ipc_lines, fw_lines, fw_lost;
@@ -527,12 +528,31 @@ static int ipc_send(const char *what)
 }
 
 /* ---- Calliope's log rings (abox_log.c) --------------------------------------------------------------------------- */
+static int has(const char *h, const char *n)
+{
+    for (; *h; ++h) {
+        unsigned i = 0;
+        while (n[i] && h[i] == n[i])
+            ++i;
+        if (!n[i])
+            return 1;
+    }
+    return 0;
+}
+
 static void fw_line_out(void)
 {
     struct lb l;
     if (!S.linen)
         return;
     S.line[S.linen] = 0;
+    /* the VSS handshake, as Calliope reports it (kept even when the line itself is past fw_log_max) */
+    if (!S.vss_magic && has(S.line, "Magic Code is ready")) {
+        S.vss_magic = 1;
+        say("abox: VSS: Calliope says the CP's magic code is ready (the voice link's handshake is done)");
+    }
+    if (!S.vss_timeout && has(S.line, "VSS init timed out"))
+        S.vss_timeout = 1;
     if (S.fw_lines < C.fw_log_max) {
         lb_init(&l);
         lb_s(&l, "abox: fw: ");
@@ -854,6 +874,44 @@ static int cpu_stop(void)
 }
 
 /* everything back off, whatever was reached; logs one line */
+/* the AUD domain off: the TZPC save SMC (exynos_pd_tz_save), then aud_off; 1 = it reads off */
+static int pd_power_off(int64_t *smc)
+{
+    struct lb l;
+    uint32_t took = 0;
+    *smc = H.smc(H.ctx, ABOX_SMC_PD, 0, ABOX_DTZPC, 0);
+    m32(ABOX_PMU + ABOX_PMU_AUD_CONF, 0xFU, 0);
+    /* up to 200 ms (the drivers' run 7b: still on after 10 ms and after 200 ms, AUD_STAT 0x15000f) */
+    int ok = wait32(ABOX_PMU + ABOX_PMU_AUD_STAT, 0xFU, 0, 200000, 10, &took);
+    lb_init(&l);
+    lb_s(&l, ok ? "abox: power: AUD domain off in " : "abox: power: AUD domain STILL ON after ");
+    lb_u(&l, ok ? took : 200000);
+    lb_s(&l, " us, AUD_STAT ");
+    lb_x(&l, r32(ABOX_PMU + ABOX_PMU_AUD_STAT));
+    sayl(&l);
+    return ok;
+}
+
+/* the AUD domain on: aud_on, then the DTZPC restore SMC (exynos_pd_tz_restore). 0, or ABOX_EPOWER with l saying why */
+static int pd_power_on(uint32_t *took, struct lb *l)
+{
+    m32(ABOX_PMU + ABOX_PMU_AUD_CONF, 0xFU, 0xFU);
+    if (!wait32(ABOX_PMU + ABOX_PMU_AUD_STAT, 0xFU, 0xFU, 10000, 10, took)) {
+        lb_s(l, "abox: power: the AUD domain did not come on in 10 ms");
+        return ABOX_EPOWER;
+    }
+    int64_t smc = H.smc(H.ctx, ABOX_SMC_PD, 1, ABOX_DTZPC, 0);
+    if (smc) {
+        lb_s(l, "abox: power: the DTZPC restore SMC failed (");
+        lb_x(l, (uint64_t)smc);
+        lb_s(l, ")");
+        return ABOX_EPOWER;
+    }
+    return 0;
+}
+
+static int pd_left_on;                      /* our last power-down did not take: the domain is not S-Boot's state */
+
 static void teardown(void)
 {
     struct lb l;
@@ -875,9 +933,8 @@ static void teardown(void)
             (void)H.dvfs_aud(H.ctx, 0);
         if (H.dvfs_int && S.int_khz)
             (void)H.dvfs_int(H.ctx, 0);
-        smc = H.smc(H.ctx, ABOX_SMC_PD, 0, ABOX_DTZPC, 0);     /* exynos_pd_tz_save() */
-        m32(ABOX_PMU + ABOX_PMU_AUD_CONF, 0xFU, 0);             /* aud_off */
-        pd_ok = wait32(ABOX_PMU + ABOX_PMU_AUD_STAT, 0xFU, 0, 10000, 10, 0);
+        pd_ok = pd_power_off(&smc);
+        pd_left_on = !pd_ok;                /* the next boot power-cycles it (drivers run 7: no BOOT_DONE otherwise) */
     }
     lb_init(&l);
     lb_s(&l, "abox: stopped: CPU ");
@@ -891,6 +948,7 @@ static void teardown(void)
     }
     sayl(&l);
     S.pd_touched = S.cpu_started = S.mmu_set = S.pins_set = S.call_on = S.boot_done = S.vss_started = 0;
+    S.vss_magic = S.vss_timeout = 0;
     S.aud_khz = S.int_khz = 0;
     S.nlogs = 0;
 }
@@ -1173,23 +1231,23 @@ int abox_boot(void)
     }
 
     /* 2: the AUD power domain (flexpmu aud_on), then the DTZPC restore (exynos_pd_tz_restore) */
+    if (pd_is_on() && pd_left_on) {
+        /* our own last abox_off left it on (the drivers' run 7: the next boot then got no BOOT_DONE): a full cycle */
+        int64_t sv = 0;
+        if (!pd_power_off(&sv)) {
+            lb_s(&l, "abox: 2/13 power: the AUD domain was left on by the last stop and does not go off");
+            return fail(ABOX_EPOWER, &l);
+        }
+        say("abox: 2/13 power: the AUD domain was left on by the last stop: cycled off first");
+        pd_left_on = 0;
+    }
     if (pd_is_on()) {
         say("abox: 2/13 power: the AUD domain is already on (S-Boot): no TZPC restore needed");
         S.pd_touched = 1;
     } else {
         S.pd_touched = 1;
-        m32(ABOX_PMU + ABOX_PMU_AUD_CONF, 0xFU, 0xFU);
-        if (!wait32(ABOX_PMU + ABOX_PMU_AUD_STAT, 0xFU, 0xFU, 10000, 10, &took)) {
-            lb_s(&l, "abox: 2/13 power: the AUD domain did not come on in 10 ms");
+        if (pd_power_on(&took, &l))
             return fail(ABOX_EPOWER, &l);
-        }
-        int64_t smc = H.smc(H.ctx, ABOX_SMC_PD, 1, ABOX_DTZPC, 0);
-        if (smc) {
-            lb_s(&l, "abox: 2/13 power: the DTZPC restore SMC failed (");
-            lb_x(&l, (uint64_t)smc);
-            lb_s(&l, ")");
-            return fail(ABOX_EPOWER, &l);
-        }
         lb_s(&l, "abox: 2/13 power: AUD domain on in ");
         lb_u(&l, took);
         lb_s(&l, " us, DTZPC restored (SMC 0x82000410 answered 0)");
@@ -1753,6 +1811,48 @@ void abox_off(void)
     S.state = ABOX_ST_OFF;
     S.err = 0;
     set_why("ABOX off");
+}
+
+/* ---- the AUD domain alone (media sound, kern/snd.c: ABOX in bypass) --------------------------------------------------
+ * One place owns the power + DTZPC sequence. Refused while ABOX itself is booting or running (abox_boot / abox_off own
+ * the domain then). abox_pd_on when it is already on: 0, nothing done. */
+int abox_pd_on(void)
+{
+    struct lb l;
+    uint32_t took = 0;
+    if (!have_hal || (S.state != ABOX_ST_OFF && S.state != ABOX_ST_FAILED))
+        return ABOX_ESTATE;
+    if (pd_is_on())
+        return 0;
+    lb_init(&l);
+    int r = pd_power_on(&took, &l);
+    if (r) {
+        sayw(&l);
+        return r;
+    }
+    lb_s(&l, "abox: the AUD domain on (for media) in ");
+    lb_u(&l, took);
+    lb_s(&l, " us, DTZPC restored");
+    sayl(&l);
+    return 0;
+}
+
+int abox_vss_ready(void)
+{
+    return S.vss_magic ? 1 : S.vss_timeout ? -1 : 0;
+}
+
+void abox_pd_off(void)
+{
+    struct lb l;
+    int64_t smc = 0;
+    if (!have_hal || (S.state != ABOX_ST_OFF && S.state != ABOX_ST_FAILED) || !pd_is_on())
+        return;
+    int ok = pd_power_off(&smc);
+    lb_init(&l);
+    lb_s(&l, ok ? "abox: the AUD domain off (media), TZPC save SMC " : "abox: the AUD domain STILL ON (media), TZPC save SMC ");
+    lb_u(&l, (uint64_t)(smc < 0 ? -smc : smc));
+    sayl(&l);
 }
 
 /* ---- libsb glue ------------------------------------------------------------------------------------------------------ */
