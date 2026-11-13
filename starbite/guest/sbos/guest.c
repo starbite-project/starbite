@@ -73,6 +73,8 @@ static uint64_t t_go;                       /* this start's CPU_ON (0: not yet) 
 #define GUEST_SLOW_MS 30000U                /* "taking longer than usual" from here (the host waits 90 s) */
 #define GUEST_FSCK_EXTEND_MS 180000U        /* the disk check: the host waits this much longer for HELLO */
 static uint32_t seq_seen = 0, seq_blit = 0;
+static uint32_t full_pos;                   /* a whole copy under way: its next row (blit_any) */
+#define GUEST_FULL_ROWS 336U                /* a whole copy's rows a call (a quarter of 1344: ~20 ms on the phone) */
 static uint32_t blits, blit_ms_max, rows_copied;   /* the view's frames drawn, its slowest copy, rows copied */
 static uint64_t t_hidden, t_screen_off;
 /* Linux busy (cp3 2026-11-12: a build and installs broke when the phone slept): the last time its CPU load
@@ -100,7 +102,7 @@ static unsigned surf_h(void) { return mode == GUEST_TERM ? GUEST_TERM_H : mode =
 int guest_mode(void) { return mode; }
 int guest_scale(void) { return 2; }      /* (the terminal: a 16 x 32 font instead of 8 x 16 at 4x) */
 int guest_term_ok(void) { return term_ok; }
-void guest_full_next(void) { seq_blit = 0; }     /* the next blit copies every row */
+void guest_full_next(void) { seq_blit = 0; full_pos = 0; }   /* the next blits copy every row (in pieces) */
 
 static void arm(uint32_t period)
 {
@@ -1003,6 +1005,7 @@ int guest_blit(uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int
     return blit_any(0, back, stride_px, x0, y0, py0, py1);
 }
 int guest_blit_rows(uint32_t *const *rows, int *py0, int *py1) { return blit_any(rows, 0, 0, 0, 0, py0, py1); }
+static uint32_t full_seq0;                  /* the whole copy's first frame (blit_any) */
 /* the target's row r: the table's (L3), else the back buffer's at (x0, y0 + r) */
 #define TROW(r) (rowt ? rowt[r] : back + (uintptr_t)(y0 + (r)) * stride_px + x0)
 static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, unsigned x0, unsigned y0, int *py0,
@@ -1023,9 +1026,24 @@ static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, u
     }
     const volatile uint32_t *rows = sbg_rows();
     uint32_t drawn = seq_blit, w = surf_w(), hh = surf_h(), k = (uint32_t)guest_scale(), n = 0;
-    seq_seen = seq_blit = seq;
+    uint32_t ylo = 0, yhi = hh;
+    if (!drawn) {
+        /* a whole copy (an open, the keyboard up / down) in pieces of GUEST_FULL_ROWS rows a call (8a2: the open of
+         * a Linux app after a thaw, "shell tick 82 ms": all 1344 rows from the non-cacheable surface doubled into
+         * 15.5 MB in one tick); unfinished, it stays "whole" (seq_blit 0); finished, the rows newer than the pass's
+         * first frame come by the row table as usual */
+        if (!full_pos)
+            full_seq0 = seq;
+        ylo = full_pos;
+        yhi = full_pos + GUEST_FULL_ROWS < hh ? full_pos + GUEST_FULL_ROWS : hh;
+        full_pos = yhi >= hh ? 0 : yhi;
+        seq_seen = seq;
+        seq_blit = full_pos ? 0 : full_seq0;
+    } else {
+        seq_seen = seq_blit = seq;
+    }
     uint64_t t0 = sb_ms();
-    for (uint32_t y = 0; y < hh; ++y) {
+    for (uint32_t y = ylo; y < yhi; ++y) {
         if (rows && drawn && !sbshm_row_newer(rows[y], drawn))
             continue;
         const volatile uint32_t *s = (const volatile uint32_t *)((uintptr_t)px + (uintptr_t)y * stride);
