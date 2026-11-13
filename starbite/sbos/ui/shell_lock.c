@@ -2093,9 +2093,9 @@ static void cc_levels(void)
     }
 }
 /* cp7c: build_cc in stages, one an idle call (sh_idle_pending while some are left: the whole was ~0.6-1.2 s on the
- * phone in one turn after each move on home, and a tap in it was lost). 1: home's picture, the light blur; 2: the
- * heavy blur; 3: the status, chrome, page dots, sliders; 4-9: the grid; 10: linked, built. A pull before the end builds
- * it whole (build_cc). The stages' picture: ccq (quarter) between 1 and 2. The grid: stages 4-9 (cc_grid_part) */
+ * phone in one turn after each move on home, and a tap in it was lost). 1: home's picture; 2: the light blur; 3: the
+ * heavy blur; 4: the status, chrome, page dots, sliders; 5-10: the grid (cc_grid_part); 11: linked, built. A pull
+ * before the end builds it whole (build_cc). The quarter picture ccq lives from stage 1 to 3 */
 static int ccb_next;                              /* the next stage, 0 none in progress */
 static tk_bmp ccq;
 static void build_cc_stage(int st)
@@ -2112,6 +2112,13 @@ static void build_cc_stage(int st)
         tk_bmp_new(&q, TK_W / 4, TK_H / 4);
         tk_bmp_down2(&ccscrim.bmp, shown_frame());
         tk_bmp_down2(&q, &ccscrim.bmp);
+        ccq = q;
+    }
+    return;
+    }
+    if (st == 2) {                               /* cp7c (7e): the light blur a stage of its own */
+    if (ccscrim.bmp.px && ccq.px) {
+        tk_bmp q = ccq;
         /* P3p (P3j-20): the blur and the dim grow with the pull: an 8 pt level (dim .12, quarter resolution, 1 MB)
          * comes in first, the 26 pt one (neutral dim .25, not a blue tint) over it */
         relayer(&ccblur1);
@@ -2124,11 +2131,10 @@ static void build_cc_stage(int st)
             ccblur1.sx = ccblur1.sy = 4;
             ccblur1.opaque = 1;
         }
-        ccq = q;
     }
     return;
     }
-    if (st == 2) {
+    if (st == 3) {
     if (ccscrim.bmp.px && ccq.px) {
         tk_bmp q = ccq;
         tk_memset(&ccq, 0, sizeof ccq);
@@ -2152,7 +2158,7 @@ static void build_cc_stage(int st)
     }
     return;
     }
-    if (st == 3) {
+    if (st == 4) {
     if (!ccsb.bmp.px) {
         dc d = mk(&ccsb, "cc-status", 0, 0, 390, 48, 2, 0);
         status_bar(&d, carrier);
@@ -2196,7 +2202,7 @@ static void build_cc_stage(int st)
     }
     return;
     }
-    if (st >= 4 && st < 4 + CCG_PARTS) { cc_grid_part(st - 3); return; }
+    if (st >= 5 && st < 5 + CCG_PARTS) { cc_grid_part(st - 4); return; }
     tk_layer_init(&ccg, "cc-grid-group");
     ccg.ox = PT(CC_COL(0) + .85f * (4 * CC_U + 3 * CC_GAP));
     ccg.oy = PT(CC_ROW(0));
@@ -2204,7 +2210,7 @@ static void build_cc_stage(int st)
     cc_levels();
     CCS.built = 1;
 }
-#define CCB_STAGES (4 + CCG_PARTS)
+#define CCB_STAGES (5 + CCG_PARTS)
 static void build_cc(void)
 {
     for (int st = 1; st <= CCB_STAGES; st++) build_cc_stage(st);
