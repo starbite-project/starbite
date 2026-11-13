@@ -1301,7 +1301,7 @@ static void aq_push(int i);
 #define AQK_MAX 32768u
 static sh_lstore_t aq_cache;                     /* (the platform's table shape, filled from the blob) */
 static int aq_cached;                            /* LST is aq_cache: Linux not up yet */
-static uint32_t aqk_kept;                        /* the kept blob's hash (0: not read yet this boot) */
+static uint32_t aqk_kept, aqk_dkept;             /* the kept blobs' hashes (0: not read yet this boot) */
 static struct { char pkg[40]; int op, m; } aq_pend;   /* one action asked for while cached */
 static unsigned aqk_str(uint8_t *b, unsigned o, const char *s)
 {
@@ -1343,6 +1343,27 @@ static void aqk_save(const sh_lstore_t *t)
         if (k2) tk_free(k2);
     }
     if ((h | 1) != aqk_kept && sh_blob_put("store.cache", b, o) == 0) aqk_kept = h | 1;
+    /* the long descriptions: a second blob, "store.desc", in the same order, NUL-ended, cut so all fit in 32 KiB */
+    static uint8_t d[AQK_MAX];
+    unsigned q = 0, per = n ? (AQK_MAX - 64) / (unsigned)n : 0;
+    if (per > sizeof t->pkg[0].desc) per = sizeof t->pkg[0].desc;
+    for (int i = 0; i < n; i++) {
+        const char *ds = t->pkg[i].desc;
+        unsigned k = 0;
+        while (ds[k] && k + 1 < per) k++;
+        while (k > 0 && ds[k] && ((uint8_t)ds[k] & 0xc0) == 0x80) k--;   /* (not half a UTF-8 character) */
+        for (unsigned j = 0; j < k && q < AQK_MAX - 1; j++) d[q++] = (uint8_t)ds[j];
+        d[q++] = 0;
+    }
+    uint32_t hd = aq_hash(2166136261u, "");
+    for (unsigned k = 0; k < q; k++) hd = aq_hu(hd, d[k]);
+    if (!aqk_dkept) {
+        static uint8_t k2[AQK_MAX];
+        int r = sh_blob_get("store.desc", k2, AQK_MAX);
+        aqk_dkept = 1;
+        if (r > 0) { uint32_t h2 = aq_hash(2166136261u, ""); for (int k = 0; k < r; k++) h2 = aq_hu(h2, k2[k]); aqk_dkept = h2 | 1; }
+    }
+    if ((hd | 1) != aqk_dkept && sh_blob_put("store.desc", d, q) == 0) aqk_dkept = hd | 1;
 }
 static int aqk_load(void)
 {
@@ -1375,6 +1396,13 @@ static int aqk_load(void)
         aq_cache.n = n;
         aq_cache.v3 = 1;
         aq_cache.repo_ok = 1;
+        int rd = sh_blob_get("store.desc", b, AQK_MAX);   /* (b is free again: the descriptions, if kept) */
+        for (int i = 0, o2 = 0; i < n && o2 < rd; i++) {
+            unsigned j = 0;
+            while (o2 < rd && b[o2]) { if (j < sizeof aq_cache.pkg[i].desc - 1) aq_cache.pkg[i].desc[j++] = (char)b[o2]; o2++; }
+            aq_cache.pkg[i].desc[j] = 0;
+            o2++;
+        }
     }
     tk_free(b);
     return n > 0;
