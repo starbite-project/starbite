@@ -177,6 +177,7 @@ static void start_now(void)
     if (r != 0) {
         sbm_cp_park(&plat);                 /* the core parked it already; safe again */
         armed = 0;
+        audio_stop();                       /* ABOX off and media sound back (it stayed booted before) */
         struct ub u;
         ub_init(&u);
         ub_s(&u, "modem: start failed (");
@@ -374,6 +375,7 @@ static void recover(void)
     if (r < 0) {
         armed = 0;
         sbm_cp_park(&plat);
+        audio_stop();                       /* ABOX off and media sound back (it stayed booted before) */
         struct ub u;
         ub_init(&u);
         ub_s(&u, "modem: no restart (");
@@ -964,6 +966,12 @@ static struct sbm_inbox kinbox;
  * and the log says which step. The speaker is capped in amp.c (no speaker protection here). */
 static struct abox_hal au_hal;
 static int au_hal_set, au_amp, au_codec, au_abox, au_vss, au_on, au_speaker;
+/* the drivers' sound service (snd.c): media sound pauses while Cellular holds ABOX (Calliope + the CP's VSS), so
+ * its idle-off can never stop ABOX under the modem, and a staged media boot of Calliope is finished before ours.
+ * Weak: a kernel without snd.c links, and these are then skipped. */
+void snd_suspend_for_call(void) __attribute__((weak));
+void snd_resume_after_call(void) __attribute__((weak));
+static int au_snd_held;
 
 static long au_file(void *ctx, const char *path, void *dst, uint32_t cap)
 {
@@ -987,6 +995,13 @@ static void au_log(const char *what, int r, const char *why)
 
 static void audio_prepare(void)
 {
+    if (!au_snd_held) {
+        au_snd_held = 1;
+        if (snd_suspend_for_call) {         /* before our HAL is set: a pending media boot finishes on snd's */
+            snd_suspend_for_call();
+            sb_log("audio: media sound paused while Cellular is on (ABOX is the modem's)");
+        }
+    }
     if (!au_hal_set) {
         abox_hal_libsb(&au_hal, au_file, 0);
         abox_hal_set(&au_hal);
@@ -1080,6 +1095,13 @@ static void audio_stop(void)
         codec_off();
     au_abox = au_vss = 0;
     au_codec = 0;
+    if (au_snd_held) {                      /* after abox_off(): snd boots Calliope afresh when it next plays */
+        au_snd_held = 0;
+        if (snd_resume_after_call) {
+            snd_resume_after_call();
+            sb_log("audio: media sound may play again (Cellular off)");
+        }
+    }
 }
 
 static int audio_ok(void)
