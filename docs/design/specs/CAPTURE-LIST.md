@@ -1,5 +1,10 @@
 # iOS 27 capture session on the S9: what to capture (design-ref, 2026-11-13)
 
+> **Status 2026-11-13 ~19:50: the user cancelled the attended iOS 27 capture (groups A-F).** Their decision, via
+> the main session: the specs come from public iOS 27 sources (Apple's pages and HIG, press images, reviews,
+> walkthroughs), each value marked "measured from <source>" or E. **Group G stays:** it is Starbite on our own phone,
+> from the self test's calibration stills. Groups A-F are kept below only as a checklist of what the specs must cover.
+
 **Goal:** one attended session on this S9 running iOS 27, to turn the specs' **E** values into **M**. Captures are for
 study only. They stay local in `build/design-ref/ios27-captures/` in the design-ref worktree (git-ignored) and are
 never committed or shipped.
