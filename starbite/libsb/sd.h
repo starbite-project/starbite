@@ -23,7 +23,7 @@ int sd_write4k(uint64_t lba, uint64_t count, uintptr_t src);
 uint64_t sd_sectors_hint(void);
 
 /* Fast reads (sd.c's header): off unless an image asks. SD_FAST_ON: CMD6 high speed at the fastest card
- * clock <= 50 MHz the bus gives (33.58 MHz from 201.5 MHz) and CMD18 by IDMAC; SD_FAST_HS50 the same at
+ * clock <= 50 MHz the bus gives (33.58 MHz from 201.5 MHz, 50.0 MHz from 200.0 MHz) and CMD18 by IDMAC; SD_FAST_HS50 the same at
  * 50.375 MHz (CLKDIV 2: Linux's and XNU's clock, 0.75 % over the HS limit). Read only; writes keep the old
  * clock and code. Before sd_up it is only remembered (sd_up switches); on a card that is up it switches now.
  * Any failure: 25 MHz PIO again and one log line. 1 when fast reads are on afterwards. */
@@ -35,6 +35,18 @@ int sd_fast_mode(void);                     /* the last sd_set_fast mode */
 /* CMD6 mode 0 (a read-only query; ACMD51 first when the SCR is not known): 1 the card offers high speed,
  * 0 not, -1 no card or no answer. */
 int sd_hs_query(void);
+
+/* The card's bus clock (Starbite OS's kernel only: libsb never writes CMU blocks; kern/sdclk.c). fn(0) may change the
+ * card's CMU divider (DIV_CLKCMU_FSYS1_MMC_CARD) and returns the controller's bus clock after it in Hz (after CLKSEL's
+ * /4), 0 = unknown (sd.c then estimates it from the divider); fn(1) puts the old divider back and returns the bus
+ * clock of that, 0 unknown. sd_up calls fn(0) once, after the controller reset and before the 400 kHz init, with the
+ * card clock stopped; when the divider changed and the card then does not come up, it calls fn(1) and tries once
+ * more from the old clock. sd_rebus does the same on a card that
+ * is up (between commands: the card clock stopped, fn(restore), the clock back at the running mode's rate from the
+ * new bus clock): 0 ok, -1 not up or a clock update failed (then 25 MHz PIO). */
+typedef uint64_t (*sd_bus_fn)(int restore);
+void sd_set_bus_hook(sd_bus_fn fn);
+int sd_rebus(sd_bus_fn fn, int restore);
 
 /* What the last sd_up() found, step by step (EngineerMode shows it). */
 struct sd_report {
@@ -62,5 +74,12 @@ struct sd_report {
     const char *fast_why;       /* why fast reads are off after the last attempt, 0 none */
     uint32_t dma_chunks, dma_errors, dma_idsts;
     int dma_last_error;         /* the last failed IDMAC chunk (-1..-13), 0 none */
+    /* the bus clock hook (sd_set_bus_hook) */
+    int bus_set;                /* 0 none, 1 the hook changed the divider, 2 it gave the rate of the unchanged one,
+                                 * -1 the card failed on the changed one (put back), -2 the card clock did not stop
+                                 * (not called), -3 the hook did not know the rate */
+    uint32_t cmu_div_was;       /* the divider and bus clock sd_up found, before the hook */
+    uint64_t bus_hz_was;
+    const char *bus_why;        /* bus_set -1: the step that failed on the raised clock */
 };
 extern struct sd_report sd_rep;

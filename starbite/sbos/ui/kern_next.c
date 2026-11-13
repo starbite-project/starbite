@@ -650,6 +650,14 @@ static void stats_add(void)
             ub_dec(&u, emp);
             ub_s(&u, " GPU MHz ");
             ub_dec(&u, gpucomp_mhz());
+            uint32_t tb = 0, tu = 0, tr = 0;         /* 8c: the CPU's binning, the bins' upload, the job's run */
+            gpucomp_last_times(&tb, &tu, &tr);
+            ub_s(&u, "; bin ");
+            ub_dec(&u, tb);
+            ub_s(&u, " up ");
+            ub_dec(&u, tu);
+            ub_s(&u, " run ");
+            ub_dec(&u, tr);
             ub_s(&u, ")");
         }
         sb_log(u.b);
@@ -2332,6 +2340,7 @@ static int glass_cal_step(void)
         return 0;
     }
     int v = gcal / 3, g = gcal % 3;
+    sbos_film_now = "glass stills";
     lens_gain = GAIN[g];
     if (g == 0) {
         sh_set("reset", "", 0);
@@ -2379,6 +2388,7 @@ static void film_start(int film)
     default: F.s = S_PAGES; F.n = 7; break;     /* 8a: 12 pages-half, 13 pages-full (a measurement, not the gate's) */
     }
     tk_gpu_no_half = film == 13;
+    sbos_film_now = FILM_NAME[film];
     /* each film from the plain lock screen */
     sh_set("reset", "", 0);
     need_full = 1;
@@ -2523,7 +2533,7 @@ int next_selftest_step(void)
     if (!ready) return 1;                            /* the bake is still running */
     if (!st_started) {
         st_started = 1;
-        K.user_turn_ms = 0; K.user_turn_what = 0; K.turns_100 = 0;
+        K.user_turn_ms = 0; K.user_turn_what = 0; K.turns_100 = 0; K.tl_n = 0;
         for (unsigned i_ = 0; i_ < 18; i_++) K.turns_100_by[i_] = 0;   /* cp7m: the summary counts from the films (7l: the
                                                                      * bake's own turns, timer 1/22, counted 40 / 515 ms) */
         /* the clock: a new minute must reach the panel through an ordinary frame (P2a-P2g kept the old one) */
