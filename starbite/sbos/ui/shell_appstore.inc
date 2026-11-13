@@ -30,8 +30,9 @@ static void lx_open_app(int ci);
 #define PILL_X (CONTENT_R - PILL_W)
 #define AQ_FIELD_Y CONTENT_TOP                   /* the search field, under Search's large title */
 #define AQ_PAD 110.0f                            /* under a page's last row: the tab bar's room */
-enum { AT_TODAY, AT_BROWSE, AT_UPDATES, AT_SEARCH };
-enum { H_NONE, H_APP, H_ACT, H_CAT, H_CHECK, H_UPALL, H_ROLLBACK, H_METHOD, H_MAIN, H_OPEN, H_REINSTALL, H_REMOVE, H_SUGGEST, H_OPTS };
+enum { AT_TODAY, AT_GAMES, AT_APPS, AT_SEARCH };   /* iOS 27's App Store: Today / Games / Apps + the search circle */
+#define AQ_ACCT "@account"                       /* AQ.cat of the Account page (pushed from the account button) */
+enum { H_NONE, H_APP, H_ACT, H_CAT, H_CHECK, H_UPALL, H_ROLLBACK, H_METHOD, H_MAIN, H_OPEN, H_REINSTALL, H_REMOVE, H_SUGGEST, H_OPTS, H_ACCT };
 static const char *const AQ_CATS[10] = { "Internet", "Office", "Graphics", "Media", "Games", "Utilities", "Development",
                                          "Education", "Science", "System" };
 static const uint32_t AQ_CATC[11] = { 0x0a84ff, 0xff9f0a, 0xff375f, 0xff453a, 0xbf5af2, 0x8e8e93, 0x5e5ce6, 0x30d158,
@@ -53,6 +54,7 @@ static tk_layer aqc[AQ_NCH], aqh, aqtb, aqtg;
 /* the cold start (Linux not up yet): a determinate bar under the words, two solid layers (no drawing per frame), paced
  * by the last start this boot (the phone's first: ~35 s to HELLO + the store's table, 7u's self test) */
 static tk_layer aqbt, aqbf;
+static tk_layer aqit;                            /* the inline title (17 / 600, centred) a root page's large title collapses into */
 static float aq_st0, aq_st_exp = 35000, aq_bar_y;
 static int aq_st_late;    /* the chunks, the fixed head, the tab bar's glass and its glyphs */
 static tk_bmp aq_dic;                            /* the app page's 100 pt icon */
@@ -347,7 +349,36 @@ static float aq_sec(pctx *c, float y, const char *t, const char *link, int what,
     if (link && at(c, CONTENT_R - 110, y, 110, 40)) aq_hitr(c, what, -1, arg, CONTENT_R - 110, y + 4, 116, 32, 10, 1);
     return y + 40;
 }
-static void aq_title(pctx *c, const char *t) { if (vis(c, SAFE_TOP + NAVBAR_H, LARGE_H)) d_h1(c->d, t); }
+static int aq_badge(void);
+/* a root page's large title, the account button at its right (iOS: a 36 pt circle level with the title, the updates'
+ * badge on it; it scrolls away with the title) */
+#define ACCT_D 36.0f
+#define ACCT_X (CONTENT_R - ACCT_D)
+#define ACCT_Y (LARGE_BASE - 29)
+static void aq_title(pctx *c, const char *t)
+{
+    if (vis(c, SAFE_TOP + NAVBAR_H, LARGE_H)) d_h1(c->d, t);
+}
+static void aq_title_acct(pctx *c, const char *t)
+{
+    if (vis(c, SAFE_TOP + NAVBAR_H, LARGE_H)) {
+        dc *d = c->d;
+        d_text_box(d, TK_IT700, 34, MARGIN, LARGE_BASE, CONTENT_W - ACCT_D - 12, 0, t, 0, 0, INK, 0);
+        float cx = ACCT_X + ACCT_D / 2, cy = ACCT_Y + ACCT_D / 2;
+        d_rrect(d, ACCT_X, ACCT_Y, ACCT_D, ACCT_D, ACCT_D / 2, W(.16f));
+        d_rrect(d, cx - 5, cy - 10, 10, 10, 5, W(.85f));             /* our person glyph: a head and shoulders */
+        d_rrect(d, cx - 9.5f, cy + 2, 19, 10, 5, W(.85f));
+        int b = aq_badge();
+        if (b > 0) {
+            char nb[8];
+            aq_dec(nb, tk_mini(b, 99));
+            float bw = tk_maxf(19, tw(TK_IT600, 12, nb, 0, 0) + 10);
+            d_rrect(d, ACCT_X + ACCT_D - 12, ACCT_Y - 5, bw, 19, 9.5f, C_RED);
+            d_text_box(d, TK_IT600, 12, ACCT_X + ACCT_D - 12 + bw / 2, bl(TK_IT600, 12, ACCT_Y - 2.5f), bw, 1, nb, 0, TK_TNUM, W(1), 0);
+        }
+    }
+    if (at(c, ACCT_X - 6, ACCT_Y - 6, ACCT_D + 12, ACCT_D + 12)) aq_hitr(c, H_ACCT, -1, 0, ACCT_X, ACCT_Y, ACCT_D, ACCT_D, ACCT_D / 2, 1);
+}
 
 /* Today: the date and the large title, the featured cards, "Top Apps in" the two biggest categories */
 #define CARD_H 264.0f
@@ -404,6 +435,7 @@ static void aq_topcats(int *a, int *b)
     int n[10];
     *a = *b = -1;
     for (int k = 0; k < 10; k++) n[k] = aq_cat_n(AQ_CATS[k]);
+    n[4] = 0;                                      /* (Games has its own tab) */
     for (int k = 0; k < 10; k++) if (n[k] && (*a < 0 || n[k] > n[*a])) *a = k;
     for (int k = 0; k < 10; k++) if (n[k] && k != *a && (*b < 0 || n[k] > n[*b])) *b = k;
 }
@@ -426,7 +458,7 @@ static float pg_today(pctx *c)
         for (char *q = t; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32);
         d_text(c->d, TK_IT600, 13, MARGIN, LARGE_BASE - 38, t, .3f, 0, C_LABEL2, 0);
     }
-    aq_title(c, "Today");
+    aq_title_acct(c, "Today");
     float y = CONTENT_TOP + 4;
     int ka, kb, nf = 0;
     aq_topcats(&ka, &kb);
@@ -440,14 +472,12 @@ static float pg_today(pctx *c)
     if (kb >= 0) y = aq_top(c, y + 4, kb);
     return y;
 }
-/* Browse: the categories (with All Apps first) as an inset group */
-static float pg_browse(pctx *c)
+/* the categories as an inset group (Apps' end: iOS's "Top Categories"), All Apps first; games: 1 only the Games row */
+static float aq_cats(pctx *c, float y)
 {
-    aq_title(c, "Browse");
-    float y = CONTENT_TOP + 4;
     int rows[11], n = 0;
     rows[n++] = 10;
-    for (int k = 0; k < 10; k++) if (aq_cat_n(AQ_CATS[k])) rows[n++] = k;
+    for (int k = 0; k < 10; k++) if (k != 4 && aq_cat_n(AQ_CATS[k])) rows[n++] = k;
     if (vis(c, y, 52.0f * n)) d_rrect(c->d, GROUP_X, y, GROUP_W, 52.0f * n, 16, C_CARD);
     for (int r = 0; r < n; r++) {
         float ry = y + 52 * r;
@@ -464,18 +494,51 @@ static float pg_browse(pctx *c)
         }
         if (at(c, GROUP_X, ry, GROUP_W, 52)) aq_hitr(c, H_CAT, -1, k, GROUP_X, ry, GROUP_W, 52, 0, 0);
     }
-    y += 52.0f * n + 18;
+    return y + 52.0f * n;
+}
+/* Apps (iOS 27): the featured non-game apps' cards, every category's top three (See All), the categories */
+static float pg_apps(pctx *c)
+{
+    aq_title_acct(c, "Apps");
+    float y = CONTENT_TOP + 4;
+    int nf = 0;
+    for (int i = 0; i < aq_n() && nf < 2; i++) {
+        const sh_lpkg_t *p = &LST->pkg[i];
+        if (!(p->flags & SH_PKG_FEATURED) || !tk_strcmp(p->category, "Games")) continue;
+        y = aq_card(c, y, i);
+        nf++;
+    }
+    for (int k = 0; k < 10; k++) if (k != 4 && aq_cat_n(AQ_CATS[k])) y = aq_top(c, y + 4, k);
+    y = aq_sec(c, y + 4, "Top Categories", 0, 0, 0);
+    y = aq_cats(c, y) + 18;
     if (vis(c, y, 40)) {
         char ln[4][96];
         float wm;
-        int m = wrapn(ln, 2, TK_IT400, 13, "Apps run in Linux on the phone's big cores. Each one installs from its latest release, from source or as a Debian package.", GROUP_W - 32, &wm);
+        int m = wrapn(ln, 2, TK_IT400, 13, "Apps run in Linux on the phone's big cores. Each one installs from the developer, builds on the phone or comes from Debian.", GROUP_W - 32, &wm);
         for (int j = 0; j < m; j++) d_text(c->d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 18.0f * j), ln[j], 0, 0, W(.5f), 0);
     }
     return y + 44;
 }
-/* a category's apps (pushed from Browse; "" all) */
+/* Games: a featured game's card, then every game */
+static float pg_games(pctx *c)
+{
+    aq_title_acct(c, "Games");
+    float y = CONTENT_TOP + 4;
+    int first = -1, tot = aq_cat_n("Games"), k = 0;
+    for (int i = 0; i < aq_n() && first < 0; i++)
+        if (!tk_strcmp(LST->pkg[i].category, "Games") && (LST->pkg[i].flags & SH_PKG_FEATURED)) first = i;
+    for (int i = 0; i < aq_n() && first < 0; i++) if (!tk_strcmp(LST->pkg[i].category, "Games")) first = i;
+    if (first >= 0) y = aq_card(c, y, first);
+    y = aq_sec(c, y + 4, "Top Games", 0, 0, 0);
+    for (int i = 0; i < aq_n(); i++)
+        if (!tk_strcmp(LST->pkg[i].category, "Games")) y = aq_row(c, y, i, 0, ++k < tot, 0);
+    return y + 22;
+}
+static float pg_updates(pctx *c);
+/* a category's apps (pushed from Apps' See All / Top Categories; "" all); the Account page */
 static float pg_cat(pctx *c)
 {
+    if (!tk_strcmp(AQ.cat, AQ_ACCT)) return pg_updates(c);
     aq_title(c, AQ.cat[0] ? AQ.cat : "All Apps");
     float y = CONTENT_TOP;
     int tot = aq_cat_n(AQ.cat), k = 0;
@@ -540,7 +603,7 @@ static void aq_checked(char *b, int cap)
 }
 static float pg_updates(pctx *c)
 {
-    aq_title(c, "Updates");
+    aq_title(c, "Account");
     float y = CONTENT_TOP + 4;
     if (vis(c, y, 50)) {
         dc *d = c->d;
@@ -934,9 +997,10 @@ static float aq_paint(pctx *c)
 {
     if (!LST || LST->n <= 0) return AQ.top;
     if (AQ.app) return pg_app(c);
+    if (AQ.cat_on) return pg_cat(c);
     if (AQ.tab == AT_TODAY) return pg_today(c);
-    if (AQ.tab == AT_BROWSE) return AQ.cat_on ? pg_cat(c) : pg_browse(c);
-    if (AQ.tab == AT_UPDATES) return pg_updates(c);
+    if (AQ.tab == AT_GAMES) return pg_games(c);
+    if (AQ.tab == AT_APPS) return pg_apps(c);
     return pg_search(c);
 }
 
@@ -1045,7 +1109,9 @@ static int aq_place(int max)
         l->alpha = al;
         l->clip = 1;
         l->clip_r = (tk_rect){ 0, PT(AQ.top), TK_W, PT(area) };
-        l->fade_top = s > 1 ? PT(30) : 0;           /* iOS 26's soft edge under the status bar and the back circle */
+        /* iOS 26's scroll edge: a soft fade under the status bar and the back circle; once the inline title shows,
+         * deep enough (the nav row) that the page fades out before it reaches the title */
+        l->fade_top = s > 1 ? PT(30) : 0;
         /* the bottom: over the keyboard a short fade; else iOS 26's scroll edge under the tab bar (the page fades
          * out behind the glass, nothing shows round its rounded ends) */
         l->fade_bot = AQ.bot < H_PT - 1 ? (AQ.top + AQ.h - s > AQ.bot + 1 ? PT(24) : 0) : PT(64);
@@ -1076,16 +1142,39 @@ static int aq_place(int max)
         if (AQ.bot >= H_PT - 1) l->clip_r.h = PT(TB_Y + 16 - AQ.top);
     }
     if (AQ.app || AQ.cat_on) { aqh.x = aqh.bx + tk_floorf(off + .5f); aqh.alpha = al; }
+    if (aqit.bmp.px) {                            /* iOS: the inline title cross-fades in over 20 pt once the large one is under the bar */
+        aqit.alpha = tk_clampf((s - 30) / 20, 0, 1) * al;
+        aqit.x = aqit.bx + tk_floorf(off + .5f);
+    }
     if (drew) relink();
     AQ.left = left;
     return left;
 }
 /* the fixed head: the back circle on a pushed page; Search's title and field; an empty store's words */
+static const char *aq_inline_t(void)
+{
+    if (AQ.app || AQ.empty) return 0;
+    if (AQ.cat_on) return !tk_strcmp(AQ.cat, AQ_ACCT) ? "Account" : AQ.cat[0] ? AQ.cat : "All Apps";
+    return AQ.tab == AT_TODAY ? "Today" : AQ.tab == AT_GAMES ? "Games" : AQ.tab == AT_APPS ? "Apps" : 0;
+}
 static void aq_head(void)
 {
     relayer(&aqh);
-    aqh.hidden = 1;
+    relayer(&aqit);
+    aqh.hidden = aqit.hidden = 1;
     if (!is_app("store")) return;
+    const char *it = aq_inline_t();
+    if (it) {                                     /* (shown by aq_place as the large title scrolls under the bar) */
+        /* iOS 26's scroll edge under the bar: the page's black over it, fading out 24 pt below the nav row */
+        float hh = SAFE_TOP + NAVBAR_H + 24;
+        dc d = mk(&aqit, "store-inline", 0, 0, 390, hh, 0, 0);
+        tk_stop st[3] = { { 0, tk_hex(0x000000, 1) }, { (SAFE_TOP + NAVBAR_H - 6) / hh, tk_hex(0x000000, .92f) }, { 1, tk_hex(0x000000, 0) } };
+        tk_paint pg = tk_linear(180, 0, 0, (float)d.b->w, (float)d.b->h, 3, st);
+        tk_fill_rrect(d.b, 0, 0, (float)d.b->w, (float)d.b->h, 0, &pg, 1);
+        d_text_box(&d, TK_IT600, 17, 195, NAV_BASE, 250, 1, it, 0, 0, INK, 0);
+        aqit.alpha = 0;
+        aqit.hidden = 0;
+    }
     if (AQ.empty) {
         const char *t, *l;
         if (LX.state == SH_LINUX_FAILED) { t = "Linux Didn't Start"; l = LX.why[0] ? LX.why : "The big cores did not start."; }
@@ -1159,30 +1248,28 @@ static void aq_tabs(void)
     if (!is_app("store") || (AQ.kb && AQ.tab == AT_SEARCH && !AQ.app)) return;
     aqtb.hidden = 0;
     dc d = mk(&aqtg, "store-tabs", MARGIN, TB_Y, CONTENT_W, TB_H, 2, 0);
-    static const char *const TL[3] = { "Today", "Browse", "Updates" };
+    static const char *const TL[3] = { "Today", "Games", "Apps" };
     for (int t = 0; t < 3; t++) {
         float bx = MARGIN + TB_TABW * t, cx = bx + TB_TABW / 2, cy = TB_Y + 22;
         int on = AQ.tab == t;
         tk_col c = on ? ACCENT() : W(.75f);
         if (on) d_rrect(&d, bx + 5, TB_Y + 5, TB_TABW - 10, TB_H - 10, (TB_H - 10) / 2, W(.1f));
-        if (t == 0) {
+        if (t == 0) {                             /* Today: a page with a picture and lines */
             d_rrect_stroke(&d, cx - 9, cy - 11, 18, 22, 4, 1.8f, c);
             d_rrect(&d, cx - 5, cy - 7, 10, 6, 1.5f, c);
             d_seg(&d, cx - 5, cy + 3, cx + 5, cy + 3, 1.6f, c);
             d_seg(&d, cx - 5, cy + 7, cx + 2, cy + 7, 1.6f, c);
-        } else if (t == 1) {
-            for (int q = 0; q < 4; q++) d_rrect(&d, cx - 10 + 11 * (q % 2), cy - 10 + 11 * (q / 2), 9, 9, 2.5f, c);
-        } else {
-            d_ring(&d, cx, cy, 10.5f, 1.8f, 1, c, 0);
-            d_seg(&d, cx, cy - 5.5f, cx, cy + 5, 1.9f, c);
-            d_seg(&d, cx - 4.5f, cy + .5f, cx, cy + 5, 1.9f, c);
-            d_seg(&d, cx + 4.5f, cy + .5f, cx, cy + 5, 1.9f, c);
-            if (AQ.badge > 0) {
-                char nb[8];
-                aq_dec(nb, tk_mini(AQ.badge, 99));
-                float bw = tk_maxf(19, tw(TK_IT600, 12, nb, 0, 0) + 10);
-                d_rrect(&d, cx + 6, cy - 16, bw, 19, 9.5f, C_RED);
-                d_text_box(&d, TK_IT600, 12, cx + 6 + bw / 2, bl(TK_IT600, 12, cy - 13.5f), bw, 1, nb, 0, TK_TNUM, W(1), 0);
+        } else if (t == 1) {                      /* Games: our controller (a rounded body, a cross and two buttons) */
+            d_rrect_stroke(&d, cx - 12, cy - 7, 24, 15, 7.5f, 1.8f, c);
+            d_seg(&d, cx - 7.5f, cy + .5f, cx - 2.5f, cy + .5f, 1.7f, c);
+            d_seg(&d, cx - 5, cy - 2, cx - 5, cy + 3, 1.7f, c);
+            d_rrect(&d, cx + 3, cy - 2.2f, 3, 3, 1.5f, c);
+            d_rrect(&d, cx + 6.2f, cy + .8f, 3, 3, 1.5f, c);
+        } else {                                  /* Apps: three stacked layers */
+            for (int q = 0; q < 3; q++) {
+                float yy = cy - 8 + 5.5f * q;
+                d_seg(&d, cx - 10, yy + 3, cx, yy - 1, 1.7f, c); d_seg(&d, cx, yy - 1, cx + 10, yy + 3, 1.7f, c);
+                d_seg(&d, cx - 10, yy + 3, cx, yy + 7, 1.7f, c); d_seg(&d, cx, yy + 7, cx + 10, yy + 3, 1.7f, c);
             }
         }
         d_text_box(&d, TK_IT600, 10.5f, cx, bl(TK_IT600, 10.5f, TB_Y + 39), TB_TABW - 8, 1, TL[t], 0, 0, c, 0);
@@ -1450,7 +1537,7 @@ static int st_route_app(const char *key)   /* 1 handled (a Linux app opened); 2 
 static void aq_push(int i)
 {
     const sh_lpkg_t *p = &LST->pkg[i];
-    if (!AQ.app) { if (AQ.cat_on && AQ.tab == AT_BROWSE) AQ.scat = AQ.scroll; else AQ.sroot[AQ.tab] = AQ.scroll; }
+    if (!AQ.app) { if (AQ.cat_on) AQ.scat = AQ.scroll; else AQ.sroot[AQ.tab] = AQ.scroll; }
     AQ.app = 1;
     lx_scopy(AQ.pkg, p->pkg, 40);
     AQ.pick = aq_inst(p) && p->method ? (int)p->method : p->def_method && (p->methods >> p->def_method & 1) ? (int)p->def_method : 0;
@@ -1462,7 +1549,7 @@ static void aq_push(int i)
 }
 static void aq_back(void)
 {
-    if (AQ.app) { AQ.app = 0; tk_bmp_free(&aq_dic); aq_dic_pkg[0] = 0; AQ.scroll = AQ.cat_on && AQ.tab == AT_BROWSE ? AQ.scat : AQ.sroot[AQ.tab]; }
+    if (AQ.app) { AQ.app = 0; tk_bmp_free(&aq_dic); aq_dic_pkg[0] = 0; AQ.scroll = AQ.cat_on ? AQ.scat : AQ.sroot[AQ.tab]; }
     else if (AQ.cat_on) { AQ.cat_on = 0; AQ.scroll = AQ.sroot[AQ.tab]; }
     aq_go(-1);
 }
@@ -1473,11 +1560,10 @@ static void aq_tab(int t)
         else if (AQ.scroll > 0) { AQ.scroll = 0; AQ.v = 0; aq_place(0); }
         return;
     }
-    if (!AQ.app && !(AQ.cat_on && AQ.tab == AT_BROWSE)) AQ.sroot[AQ.tab] = AQ.scroll;
+    if (!AQ.app && !AQ.cat_on) AQ.sroot[AQ.tab] = AQ.scroll;
     AQ.tab = t;
     AQ.app = 0;
-    AQ.cat_on = t == AT_BROWSE && AQ.cat_on;
-    if (t != AT_BROWSE) AQ.cat_on = 0;
+    AQ.cat_on = 0;                                /* (a tab opens at its root) */
     AQ.kb = 0;
     AQ.scroll = AQ.sroot[t];
     tk_bmp_free(&aq_dic);
@@ -1604,10 +1690,17 @@ static void aq_tap(float x, float y)
     case H_OPEN: { int a = st_app(i); if (a >= 0) lx_open_app(a); } break;
     case H_MAIN: aq_act(i, AQ.pick); break;
     case H_CAT:
-        AQ.sroot[AQ.tab] = AQ.scroll;
-        if (AQ.tab != AT_BROWSE) { AQ.tab = AT_BROWSE; aq_tabs(); }
+        AQ.sroot[AQ.tab] = AQ.scroll;           /* (pushed in this tab, as iOS's See All) */
         AQ.cat_on = 1;
         lx_scopy(AQ.cat, c.harg >= 10 ? "" : AQ_CATS[c.harg], 16);
+        AQ.scroll = 0;
+        aq_go(1);
+        break;
+    case H_ACCT:                                  /* the account button: Account (updates, installed apps) */
+        sh_haptic();
+        if (!AQ.cat_on) AQ.sroot[AQ.tab] = AQ.scroll;
+        AQ.cat_on = 1;
+        lx_scopy(AQ.cat, AQ_ACCT, 16);
         AQ.scroll = 0;
         aq_go(1);
         break;
@@ -1727,8 +1820,8 @@ static void aq_close(void)
 {
     for (int L = 0; L < AQ_NCH; L++) { relayer(&aqc[L]); aqc[L].hidden = 1; aqc[L].clip = 0; AQ.ck[L] = -1; }
     for (int k = 0; k < AQ_NLIVE; k++) { relayer(&aql[k]); aql[k].hidden = 1; aql[k].clip = 0; aql_it[k] = -1; }
-    relayer(&aqh); relayer(&aqtb); relayer(&aqtg); relayer(&aqbt); relayer(&aqbf);
-    aqh.hidden = aqtb.hidden = aqtg.hidden = aqbt.hidden = aqbf.hidden = 1;
+    relayer(&aqh); relayer(&aqtb); relayer(&aqtg); relayer(&aqbt); relayer(&aqbf); relayer(&aqit);
+    aqh.hidden = aqtb.hidden = aqtg.hidden = aqbt.hidden = aqbf.hidden = aqit.hidden = 1;
     aq_tb_baked = 0;
     AQ.kb = AQ.drag = AQ.hide = 0;
     AQ.v = 0;
@@ -1741,6 +1834,7 @@ static int aq_layers(tk_layer **o)
     for (int L = 0; L < AQ_NCH; L++) o[n++] = &aqc[L];
     for (int k = 0; k < AQ_NLIVE; k++) o[n++] = &aql[k];
     o[n++] = &aqh;
+    o[n++] = &aqit;
     o[n++] = &aqbt;
     o[n++] = &aqbf;
     o[n++] = &aqtb;
@@ -1760,13 +1854,17 @@ static int aq_set(const char *what, const char *key, float v)
     if (st || ((cat || ap || q) && !is_app("store"))) sh_set("app", "store", st ? v : 1);
     if (!is_app("store")) return 1;
     if (st) {
-        static const char *const TN[4] = { "today", "browse", "updates", "search" };
+        static const char *const TN[4] = { "today", "games", "apps", "search" };
         for (int t = 0; t < 4; t++) if (!tk_strcmp(key, TN[t])) { AQ.tab = t; AQ.app = AQ.cat_on = 0; AQ.scroll = 0; aq_still(); return 1; }
+        if (!tk_strcmp(key, "browse")) { AQ.tab = AT_APPS; AQ.app = AQ.cat_on = 0; AQ.scroll = 0; aq_still(); return 1; }
+        if (!tk_strcmp(key, "updates") || !tk_strcmp(key, "account")) {   /* (the old Updates tab: the Account page) */
+            AQ.tab = AT_TODAY; AQ.app = 0; AQ.cat_on = 1; lx_scopy(AQ.cat, AQ_ACCT, 16); AQ.scroll = 0; aq_still(); return 1;
+        }
         if (key[0] && st_find(key) >= 0) { aq_push(st_find(key)); aq_flush(); }
         return 1;
     }
     if (cat) {
-        AQ.tab = AT_BROWSE; AQ.app = 0; AQ.cat_on = 1; AQ.scroll = 0;
+        AQ.tab = AT_APPS; AQ.app = 0; AQ.cat_on = 1; AQ.scroll = 0;
         lx_scopy(AQ.cat, tk_strcmp(key, "All") ? key : "", 16);
         aq_tabs();
         aq_still();

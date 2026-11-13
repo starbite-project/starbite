@@ -65,3 +65,4 @@ gopts: wait 300; state storeapp=helix; wait 900; state storescroll=:400; wait 90
 gtoday: wait 300; state store=today; wait 1500; drag 195 700 195 300 300; wait 1200
 gcache: wait 300; state store=today; wait 1500; state storeapp=neovim; wait 1200; tap 178 190; wait 1500
 gcache2: wait 300; state storeapp=neovim; wait 900; tap 178 190; wait 900; tap 178 190; wait 900
+a1tabs: wait 300; state store=today; wait 1200; drag 195 600 195 420 400; wait 900; state store=games; wait 1200; state store=apps; wait 1200; drag 195 650 195 300 300; wait 1000; state store=account; wait 1200
