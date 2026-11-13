@@ -31,14 +31,14 @@ static void lx_open_app(int ci);
 #define AQ_FIELD_Y CONTENT_TOP                   /* the search field, under Search's large title */
 #define AQ_PAD 110.0f                            /* under a page's last row: the tab bar's room */
 enum { AT_TODAY, AT_BROWSE, AT_UPDATES, AT_SEARCH };
-enum { H_NONE, H_APP, H_ACT, H_CAT, H_CHECK, H_UPALL, H_ROLLBACK, H_METHOD, H_MAIN, H_OPEN, H_REINSTALL, H_REMOVE, H_SUGGEST };
+enum { H_NONE, H_APP, H_ACT, H_CAT, H_CHECK, H_UPALL, H_ROLLBACK, H_METHOD, H_MAIN, H_OPEN, H_REINSTALL, H_REMOVE, H_SUGGEST, H_OPTS };
 static const char *const AQ_CATS[10] = { "Internet", "Office", "Graphics", "Media", "Games", "Utilities", "Development",
                                          "Education", "Science", "System" };
 static const uint32_t AQ_CATC[11] = { 0x0a84ff, 0xff9f0a, 0xff375f, 0xff453a, 0xbf5af2, 0x8e8e93, 0x5e5ce6, 0x30d158,
                                       0x32ade6, 0x636366, 0x2c7be5 };   /* [10]: All Apps */
 static const char *const AQ_SUGG[6] = { "Games", "Text editor", "Graphics", "Office", "Terminal", "Media" };
 static struct {
-    int tab, cat_on, app, pick, kb, shift, num, rm_arm, badge, empty;
+    int tab, cat_on, app, pick, kb, shift, num, rm_arm, badge, empty, opts;   /* opts: Install Options expanded */
     char cat[16], pkg[40], q[24];
     float scroll, v, top, bot, h, rm_t, sroot[4], scat;
     int ck[AQ_NCH], dirty[AQ_NCH];               /* each chunk layer's chunk (-1 none), to be drawn again */
@@ -49,7 +49,12 @@ static struct {
     float y0, s0, ly, lt;                        /* the finger: down y, the scroll then, the last move's y and time */
     uint32_t sig, psig[SH_LPKGS];                /* what the pages show (structure), each package's progress */
 } AQ;
-static tk_layer aqc[AQ_NCH], aqh, aqtb, aqtg;    /* the chunks, the fixed head, the tab bar's glass and its glyphs */
+static tk_layer aqc[AQ_NCH], aqh, aqtb, aqtg;
+/* the cold start (Linux not up yet): a determinate bar under the words, two solid layers (no drawing per frame), paced
+ * by the last start this boot (the phone's first: ~35 s to HELLO + the store's table, 7u's self test) */
+static tk_layer aqbt, aqbf;
+static float aq_st0, aq_st_exp = 35000, aq_bar_y;
+static int aq_st_late;    /* the chunks, the fixed head, the tab bar's glass and its glyphs */
 static tk_bmp aq_dic;                            /* the app page's 100 pt icon */
 static char aq_dic_pkg[40];
 static struct { int icon; uint32_t key; tk_bmp b; } SIC[24];   /* the packages' 48 pt icons */
@@ -95,7 +100,16 @@ static int aq_cat_n(const char *cat)
     for (int i = 0; i < aq_n(); i++) n += !cat[0] || !tk_strcmp(LST->pkg[i].category, cat);
     return n;
 }
-static const char *aq_mname(unsigned m) { return m == SH_M_RELEASE ? "Latest release" : m == SH_M_SOURCE ? "Build from source" : m == SH_M_DISTRO ? "Debian package" : "Default"; }
+/* the methods in plain words (cp7z, the user's first minute: no "release / source / distro"): the card's title, the
+ * segment's label, one line on what it means */
+static const char *aq_mname(unsigned m) { return m == SH_M_RELEASE ? "Newest from the developer" : m == SH_M_SOURCE ? "Build on this phone" : m == SH_M_DISTRO ? "From Debian" : "Default"; }
+static const char *aq_mseg(unsigned m) { return m == SH_M_RELEASE ? "Newest" : m == SH_M_SOURCE ? "Build" : "Debian"; }
+static const char *aq_mwhy(unsigned m)
+{
+    return m == SH_M_RELEASE ? "The developer's own build of the newest version, checked before it installs." :
+           m == SH_M_SOURCE ? "Compiled on this phone from the developer's code: takes a while, needs Wi-Fi." :
+                              "Debian's package: tested with the rest of Linux, sometimes an older version.";
+}
 static const char *aq_mver(const sh_lpkg_t *p, unsigned m) { return m == SH_M_RELEASE ? p->ver_rel : m == SH_M_SOURCE ? p->ver_src : p->ver_distro; }
 /* a string built of parts (NULL-terminated), cut at cap */
 static void aq_cat(char *b, int cap, const char *const *parts)
@@ -137,8 +151,8 @@ static int aq_status(const sh_lpkg_t *p, char *b, int cap, tk_col *c)
         char t[96];
         aq_dec(y, (int)(p->pct > 99 ? 99 : p->pct));      /* cp6: the step moves visibly (the engine's overall %) */
         if (!p->eta_s) AQS(t, "Building ", y, " %");
-        else if (p->eta_s < 60) AQS(t, "Building ", y, " % \xc2\xb7 under a minute left");
-        else { aq_dec(x, (int)((p->eta_s + 59) / 60)); AQS(t, "Building ", y, " % \xc2\xb7 about ", x, " min left"); }
+        else if (p->eta_s < 60) AQS(t, "Building ", y, " % \xc2\xb7 <1 min");
+        else { aq_dec(x, (int)((p->eta_s + 59) / 60)); AQS(t, "Building ", y, " % \xc2\xb7 ", x, " min left"); }
         lx_scopy(b, t, cap);
     } else if (p->pct) { char t[96]; aq_dec(y, (int)(p->pct > 99 ? 99 : p->pct)); AQS(t, "Installing ", y, " %"); lx_scopy(b, t, cap); }
     else lx_scopy(b, "Installing\xe2\x80\xa6", cap);
@@ -286,7 +300,7 @@ static void aq_pill(dc *d, float x, float y, const sh_lpkg_t *p, int light)
         if (p->state != SH_PKG_REMOVING) d_rrect(d, cx - 4, cy - 4, 8, 8, 1.5f, light ? W(1) : ACCENT());
         return;
     }
-    int inst = aq_inst(p), dim = !inst && (p->flags & (SH_PKG_NO_SPACE | SH_PKG_NEEDS_NET));
+    int inst = aq_inst(p), dim = !inst && (p->flags & SH_PKG_NO_SPACE);   /* (never for "the network looked down": GET tries) */
     const char *t = aq_upd(p) ? "UPDATE" : inst ? "OPEN" : p->state == SH_PKG_FAILED ? "RETRY" : "GET";
     d_rrect(d, x, y, PILL_W, 30, 15, light ? W(.24f) : W(.14f));
     tk_col c = light ? W(1) : ACCENT();
@@ -770,12 +784,46 @@ static float pg_app(pctx *c)
         y += 34;
     }
     y += 14;
-    /* the install method picker (B2's kit): a segmented control of the offered methods, the chosen one's card */
+    /* the description, what it needs */
+    y = aq_textblock(c, y + 18, TK_IT400, 16, 22, p->desc[0] ? p->desc : p->summary[0] ? p->summary : p->name, INK) - 4;
+    if (p->needs) {
+        static const char *const NN[6] = { "Network", "Audio", "GPU", "Camera", "Files", "Keyboard" };
+        char s[96];
+        int n = 0;
+        s[0] = 0;
+        for (int k = 0; k < 6; k++)
+            if (p->needs & 1u << k) {
+                const char *parts[3] = { n ? ", " : "Needs: ", NN[k], 0 };
+                int l = (int)tk_strlen(s);
+                aq_cat(s + l, (int)sizeof s - l, parts);
+                n++;
+            }
+        if (vis(c, y, 24)) d_text_box(c->d, TK_IT400, 14, MARGIN, bl(TK_IT400, 14, y + 6), CONTENT_W, 0, s, 0, 0, C_LABEL2, 0);
+        y += 28;
+    }
+    y += 16;
+    /* Install Options (cp7z): collapsed under the description; GET uses the preselected (recommended, or the user's
+     * last) method without asking. Open: B2's segmented control of the offered methods and the chosen one's card */
     int nm = aq_mrow_n(p);
     if (nm) {
-        y = aq_sec(c, y, "Install Method", 0, 0, 0);
+        y += 6;
+        unsigned cur = AQ.pick ? (unsigned)AQ.pick : p->def_method;
+        if (vis(c, y, 52)) {
+            dc *d = c->d;
+            d_rrect(d, GROUP_X, y, GROUP_W, 52, 16, C_CARD);
+            d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 15), "Install Options", 0, 0, INK, 0);
+            if (nm > 1 || !AQ.opts) {
+                float vw = tw(TK_IT400, 17, aq_mname(cur), 0, 0);
+                d_text_box(d, TK_IT400, 17, CONTENT_R - 44 - tk_minf(vw, 190), bl(TK_IT400, 17, y + 15), 190, 0, aq_mname(cur), 0, 0, C_LABEL2, 0);
+            }
+            /* the chevron: right when shut, down when open */
+            if (AQ.opts) { d_seg(d, CONTENT_R - 34, y + 23, CONTENT_R - 28, y + 29, 2.2f, W(.3f)); d_seg(d, CONTENT_R - 28, y + 29, CONTENT_R - 22, y + 23, 2.2f, W(.3f)); }
+            else d_chev(d, CONTENT_R - 30, y + 26, W(.3f));
+        }
+        if (at(c, GROUP_X, y, GROUP_W, 52)) aq_hitr(c, H_OPTS, i, 0, GROUP_X, y, GROUP_W, 52, 16, 0);
+        y += 52 + 10;
+        if (AQ.opts) {
         static const unsigned ORD[3] = { SH_M_RELEASE, SH_M_SOURCE, SH_M_DISTRO };
-        static const char *const LBL[4] = { "", "Debian", "Latest Release", "From Source" };
         const char *labels[3];
         unsigned ms[3];
         int n = 0, sel = -1;
@@ -783,7 +831,7 @@ static float pg_app(pctx *c)
             unsigned m = ORD[q];
             if (!((p->methods >> m) & 1)) continue;
             if ((unsigned)AQ.pick == m) sel = n;
-            ms[n] = m, labels[n++] = LBL[m];
+            ms[n] = m, labels[n++] = aq_mseg(m);
         }
         if (n > 1) {
             float sw = (GROUP_W - 4) / n;
@@ -804,8 +852,8 @@ static float pg_app(pctx *c)
                 AQS(s, v[0] ? v : "Newest", p->source[0] && !deb ? " \xc2\xb7 " : "", p->source[0] && !deb ? p->source : "");
             } else if (m == SH_M_SOURCE) {
                 aq_dec(bm, (int)(p->build_min ? p->build_min : 10));
-                AQS(s, "About ", bm, " min on the M3 cores", v[0] ? " \xc2\xb7 " : "", v);
-            } else AQS(s, v[0] ? v : "Debian", " \xc2\xb7 Debian trixie");
+                AQS(s, "About ", bm, " min on this phone", v[0] ? " \xc2\xb7 " : "", v);
+            } else AQS(s, v[0] ? v : "Debian", " \xc2\xb7 Debian 13");
             d_rrect(d, GROUP_X, y, GROUP_W, 62, 16, C_CARD);
             d_text(d, TK_IT400, 17, ROW_TX, bl(TK_IT400, 17, y + 11), aq_mname(m), 0, 0, INK, 0);
             d_text_box(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 35), GROUP_W - 32, 0, s, 0, 0, C_LABEL2, 0);
@@ -821,31 +869,19 @@ static float pg_app(pctx *c)
             if (at(c, GROUP_X, y, GROUP_W, 50)) aq_hitr(c, H_REINSTALL, i, 0, GROUP_X, y, GROUP_W, 50, 16, 0);
             y += 60;
         } else if (busy) y += 4;
-        else if (vis(c, y, 20)) {
-            const char *f = inst ? "Choose another method, then Reinstall to switch." : "GET installs it the way chosen above.";
-            d_text_box(c->d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y), GROUP_W - 32, 0, f, 0, 0, W(.45f), 0);
-            y += 26;
-        } else y += 26;
-        y += 14;
+        else {
+            char ln[4][96];                       /* (wrapn's array is 4 rows: gcc 13 checks the size) */
+            float wm;
+            const char *f = inst ? "Choose another way, then Reinstall to switch." : aq_mwhy(m);
+            int k = wrapn(ln, 2, TK_IT400, 13, f, GROUP_W - 32, &wm);
+            for (int q = 0; q < k; q++)
+                if (vis(c, y + 17.0f * q, 20)) d_text(c->d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, y + 17.0f * q), ln[q], 0, 0, W(.45f), 0);
+            y += 9 + 17.0f * k;
+        }
+        y += 6;
+        }
+        y += 8;
     }
-    /* the description, what it needs */
-    y = aq_textblock(c, y + 18, TK_IT400, 16, 22, p->desc[0] ? p->desc : p->summary[0] ? p->summary : p->name, INK) - 4;
-    if (p->needs) {
-        static const char *const NN[6] = { "Network", "Audio", "GPU", "Camera", "Files", "Keyboard" };
-        char s[96];
-        int n = 0;
-        s[0] = 0;
-        for (int k = 0; k < 6; k++)
-            if (p->needs & 1u << k) {
-                const char *parts[3] = { n ? ", " : "Needs: ", NN[k], 0 };
-                int l = (int)tk_strlen(s);
-                aq_cat(s + l, (int)sizeof s - l, parts);
-                n++;
-            }
-        if (vis(c, y, 24)) d_text_box(c->d, TK_IT400, 14, MARGIN, bl(TK_IT400, 14, y + 6), CONTENT_W, 0, s, 0, 0, C_LABEL2, 0);
-        y += 28;
-    }
-    y += 16;
     /* Information: label and value rows */
     y = aq_sec(c, y, "Information", 0, 0, 0);
     {
@@ -1051,12 +1087,27 @@ static void aq_head(void)
     if (AQ.empty) {
         const char *t, *l;
         if (LX.state == SH_LINUX_FAILED) { t = "Linux Didn't Start"; l = LX.why[0] ? LX.why : "The big cores did not start."; }
-        else if (LX.state != SH_LINUX_RUNNING) { t = "Starting Linux"; l = "The App Store opens when Linux is up, in a few seconds."; }
+        else if (LX.state != SH_LINUX_RUNNING) {
+            static char sl[120];
+            char n[8];
+            aq_dec(n, (int)((aq_st_exp + 2500) / 5000) * 5);
+            t = "Starting Linux";
+            if (LX.why[0]) l = LX.why;            /* the start's own words (a disk check: Track E) */
+            else if (aq_st_late) l = "Taking longer than usual. After a restart, Linux checks its disk first: this can take a minute.";
+            else { AQS(sl, "The App Store's apps run in Linux on the big cores. Starting it takes about ", n, " seconds."); l = sl; }
+        }
         else if (!LST) { t = "Reading the Catalog"; l = "The apps' list comes from the memory card."; }
         else { t = "No Apps"; l = LST->repo_ok ? "The catalog is empty." : "The App Store's catalog isn't on the memory card yet."; }
         dc d = mk(&aqh, "store-head", 0, SAFE_TOP, 390, TB_Y - SAFE_TOP, 0, 0);
         d_h1(&d, "App Store");
         d_empty(&d, CONTENT_TOP, TB_Y, t, l);
+        {   /* (where d_empty put the words: the bar 22 pt under them) */
+            char ln[4][96];
+            float wm;
+            int n = wrapn(ln, 3, TK_IT400, 15, l, 300, &wm);
+            float h = 36 + 20.0f * n - (n ? 2 : 8);
+            aq_bar_y = tk_floorf((CONTENT_TOP + TB_Y - h) / 2) + h + 22;
+        }
         trim_layer(&aqh, 0, 0);
         aqh.hidden = 0;
         return;
@@ -1275,6 +1326,7 @@ static void aq_push(int i)
     if (!AQ.pick && p->methods) for (unsigned m = 1; m <= 3 && !AQ.pick; m++) if (p->methods >> m & 1) AQ.pick = (int)m;
     AQ.scroll = 0;
     AQ.kb = 0;
+    AQ.opts = 0;                                  /* (Install Options shut on every page) */
     aq_go(1);
 }
 static void aq_back(void)
@@ -1423,6 +1475,7 @@ static void aq_tap(float x, float y)
         if (AQ.pick != c.harg) { AQ.pick = c.harg; sh_haptic(); aq_area(); aq_redraw_all(); aq_place(0); }
         break;
     case H_REINSTALL: (void)aq_op(i, SH_PKG_OP_INSTALL, AQ.pick); break;
+    case H_OPTS: AQ.opts = !AQ.opts; sh_haptic(); aq_area(); aq_redraw_all(); aq_place(0); break;
     case H_REMOVE: {                              /* B2's action sheet: one red row, a tap outside cancels */
         static const kit_btn B[1] = { { "Remove App", KIT_DESTRUCTIVE } };
         static char t[64];
@@ -1463,10 +1516,31 @@ static int aq_touch(int ph, float x, float y)
 static int aq_moving(void)
 {
     if (!is_app("store")) return 0;
+    if (!aqbf.hidden) return 1;                   /* (the cold start's bar moves) */
     return AQ.drag || AQ.hide || AQ.left > 0 || AQ.rev < 1 || tk_fabsf(AQ.v) > 1 || AQ.scroll < 0 || AQ.scroll > aq_max() + .5f;
+}
+/* the cold start's bar: elapsed / the expected start, held at 95 % until Linux is up; the words change once when late */
+static int aq_bar(void)
+{
+    int on = is_app("store") && !ap_pending && AQ.empty && LX.state != SH_LINUX_RUNNING && LX.state != SH_LINUX_FAILED;
+    if (!on) {
+        if (aq_st0 > 0 && LX.state == SH_LINUX_RUNNING && now_ms > aq_st0)       /* this boot's real start: next time's pace */
+            aq_st_exp = tk_clampf(now_ms - aq_st0, 5000, 90000);
+        if (!AQ.empty || LX.state == SH_LINUX_RUNNING) aq_st0 = 0, aq_st_late = 0;
+        aqbt.hidden = aqbf.hidden = 1;
+        return 0;
+    }
+    if (aq_st0 <= 0) aq_st0 = now_ms;
+    float el = now_ms - aq_st0, p = tk_clampf(el / aq_st_exp, .02f, .95f);
+    if (!aq_st_late && el > aq_st_exp + 10000) { aq_st_late = 1; aq_head(); }
+    tk_rect tr = { 95, aq_bar_y, 200, 5 }, fr = { 95, aq_bar_y, tk_maxf(5, 200 * p), 5 };
+    hl_set(&aqbt, tr, tr, 2.5f, W(.16f));
+    hl_set(&aqbf, fr, fr, 2.5f, ACCENT());
+    return 1;
 }
 static int aq_tick(float dt)
 {
+    if (aq_bar()) return 1;
     if (!is_app("store") || ap_pending || AQ.empty) return 0;
     int pend = 0;
     if (!AQ.drag) {
@@ -1505,8 +1579,8 @@ static void aq_close(void)
 {
     for (int L = 0; L < AQ_NCH; L++) { relayer(&aqc[L]); aqc[L].hidden = 1; aqc[L].clip = 0; AQ.ck[L] = -1; }
     for (int k = 0; k < AQ_NLIVE; k++) { relayer(&aql[k]); aql[k].hidden = 1; aql[k].clip = 0; aql_it[k] = -1; }
-    relayer(&aqh); relayer(&aqtb); relayer(&aqtg);
-    aqh.hidden = aqtb.hidden = aqtg.hidden = 1;
+    relayer(&aqh); relayer(&aqtb); relayer(&aqtg); relayer(&aqbt); relayer(&aqbf);
+    aqh.hidden = aqtb.hidden = aqtg.hidden = aqbt.hidden = aqbf.hidden = 1;
     aq_tb_baked = 0;
     AQ.kb = AQ.drag = AQ.hide = 0;
     AQ.v = 0;
@@ -1519,6 +1593,8 @@ static int aq_layers(tk_layer **o)
     for (int L = 0; L < AQ_NCH; L++) o[n++] = &aqc[L];
     for (int k = 0; k < AQ_NLIVE; k++) o[n++] = &aql[k];
     o[n++] = &aqh;
+    o[n++] = &aqbt;
+    o[n++] = &aqbf;
     o[n++] = &aqtb;
     o[n++] = &aqtg;
     return n;
@@ -1557,6 +1633,6 @@ static int aq_set(const char *what, const char *key, float v)
     }
     if (ap) { if (st_find(key) >= 0) { aq_push(st_find(key)); aq_flush(); } return 1; }
     if (sc) { aq_area(); AQ.scroll = tk_clampf(v, 0, aq_max()); aq_redraw_all(); aq_flush(); return 1; }
-    if (pk && AQ.app) { AQ.pick = (int)v; aq_area(); aq_redraw_all(); aq_flush(); return 1; }
+    if (pk && AQ.app) { AQ.pick = (int)v; AQ.opts = 1; aq_area(); aq_redraw_all(); aq_flush(); return 1; }
     return 1;
 }

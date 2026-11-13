@@ -770,6 +770,19 @@ class DaemonTest(unittest.TestCase):
         part = [f for f in os.listdir(self.e.path("/var/lib/sbstore/dl/hello")) if f.endswith(".part")]
         self.assertTrue(part, "the partial download is kept for a resume")
 
+    def test_quiesce(self):
+        """Track E's snapshot: quiet when idle, then no job starts during the hold"""
+        publish_hello("1.0")
+        seq = int(self.line(lambda l: l.startswith("store ")).split()[1])
+        time.sleep(1)                                                     # (the start's apt update done)
+        self.c.sendall(b"op %d 7 %d\n" % (sbstore.SBSHM_NONE, seq))
+        self.assertEqual(self.line(lambda l: l.startswith("quiet ")), "quiet %d 1" % seq)
+        self.c.sendall(b"op 0 %d %d\n" % (1 | (2 << 8), seq))
+        self.line(lambda l: l.startswith("pkg 0 1"))                      # queued, not started
+        time.sleep(2)
+        self.c.sendall(b"op %d 7 %d\n" % (sbstore.SBSHM_NONE, seq + 1))
+        self.assertEqual(self.line(lambda l: l.startswith("quiet ")), "quiet %d 0" % (seq + 1))
+
     def test_failure_reported(self):
         publish_hello("1.0")
         FILES.d["/gh/repos/o/hello/releases/latest"]["assets"][0]["digest"] = "sha256:" + "1" * 64

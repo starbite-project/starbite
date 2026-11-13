@@ -60,7 +60,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 METHODS = ("distro", "release", "source")          # method numbers 1, 2, 3 (SBG_PKG_M_*)
 M_NUM = {"distro": 1, "release": 2, "source": 3}
 M_NAME = {v: k for k, v in M_NUM.items()}
@@ -2311,7 +2311,8 @@ SBSHM_NONE = 0xFFFFFFFF
 # sbshm_pkg.state
 PKG_IDLE, PKG_QUEUED, PKG_INSTALLING, PKG_REMOVING, PKG_FAILED = 0, 1, 2, 3, 4
 PKG_DOWNLOADING, PKG_BUILDING, PKG_VERIFYING = 5, 6, 7         # v3 (sbshm_pkg3.phase; sbshm_pkg.state stays <= 4)
-OP_INSTALL, OP_REMOVE, OP_CANCEL, OP_UPDATE, OP_ROLLBACK, OP_CHECK = 1, 2, 3, 4, 5, 6
+OP_INSTALL, OP_REMOVE, OP_CANCEL, OP_UPDATE, OP_ROLLBACK, OP_CHECK, OP_QUIESCE = 1, 2, 3, 4, 5, 6, 7
+QUIESCE_HOLD_S = 20             # after "quiet SEQ 1": no new job starts for this long (the snapshot's window)
 F_INSTALLED, F_SYSTEM, F_TOO_BIG, F_NO_SPACE, F_FEATURED = 1, 2, 4, 8, 16
 F_UPDATE, F_ROLLBACK, F_NEEDS_NET = 32, 64, 128
 PKG_FMT = "<40s32s96s16s32s8I"                      # struct sbshm_pkg, 248 bytes
@@ -2670,8 +2671,22 @@ class Daemon:
                 except ValueError:
                     pass
 
+    def quiesce(self, opseq):
+        """Track E's snapshot (cp7z): "op N 7 SEQ" -> "quiet SEQ 1" when nothing writes (no job, none queued, no apt
+        update) after a sync, and no new job starts for QUIESCE_HOLD_S; else "quiet SEQ 0" (busy: ask again later).
+        Never blocks. A snapshot must only be taken after a 1, and must never be restored over an overlay written since."""
+        busy = bool(self.job or self.queue or (self.aptup is not None and self.aptup.poll() is None))
+        if not busy:
+            os.sync()
+            self.hold_until = time.monotonic() + QUIESCE_HOLD_S
+        log("quiesce: %s" % ("quiet (no new job for %d s)" % QUIESCE_HOLD_S if not busy else "busy"))
+        self.send("quiet %d %d" % (opseq, 0 if busy else 1))
+
     def handle_op(self, idx, opword, opseq):
         op, method = opword & 0xFF, (opword >> 8) & 0xFF
+        if op == OP_QUIESCE:
+            self.quiesce(opseq)
+            return
         if op == OP_CHECK:                          # a = SBSHM_NONE: every installed app; else that app's methods
             if idx != SBSHM_NONE and (opseq < self.layout_seq or idx >= len(self.order)):
                 return
@@ -2705,6 +2720,8 @@ class Daemon:
     def start_next(self):
         if self.job or not self.queue:
             return
+        if time.monotonic() < getattr(self, "hold_until", 0):
+            return                                      # (quiesced for a snapshot: the queue waits)
         if getattr(self, "aptup", None) is not None:
             rc = self.aptup.poll()
             if rc is None and time.monotonic() - self.aptup_t0 < 120:
