@@ -1,0 +1,122 @@
+From: starbite <starbite@local>
+Date: Fri, 13 Nov 2026 22:00:00 +0200
+Subject: [PATCH] patch: 0447-sweet-topk-kernel-threads.patch - "STARLTE TOPK": with each
+ STARLTE TOP, the six busiest kernel_task threads (share of a core, name, continuation, saved kernel
+ lr/backtrace when not running)
+
+S3z4/S3z5 2026-11-13: kernel_task ~60 % of a core on the idle Sequoia desktop; the arm64e emulation
+traps are charged to the trapping processes, so something else in the kernel is busy. Diagnostic.
+Applies on 0446. Kernel seq1s = seq1r + this.
+---
+
+--- a/osfmk/kern/exception.c	2026-11-13 21:48:01
++++ b/osfmk/kern/exception.c	2026-11-13 21:48:01
+@@ -965,6 +965,7 @@
+ #include <vm/vm_shared_region_xnu.h>  /* 11417: vm_shared_region_get/deallocate, struct vm_shared_region */
+ #include <vm/vm_map_internal.h>      /* 11417: vm_map_region_recurse_64 */
+ #include <arm/thread.h>
++#include <kern/recount.h>   /* 0447: recount_thread_time_mach */
+ 
+ /*
+  * SWEET crash report on the console. The phone has no way to get crash
+@@ -1210,6 +1211,89 @@
+  * pointer backtrace of every thread of a task, from the saved user state.
+  */
+ void sweet_sample_task(const char *name, int pid, task_t task);
++
++/*
++ * 0447: the busiest kernel_task threads (S3z4/S3z5 2026-11-13: kernel_task ~60 % of a core on the idle Sequoia
++ * desktop, while the arm64e emulation traps count toward the trapping processes). Called by STARLTE TOP every
++ * 10 s: per thread its CPU time against the last call, the six busiest as "STARLTE TOPK: tid N% name cont 0x..
++ * [klr 0x.. kbt ..]" (unslid kernel addresses: symbolicate with nm on the kernel).
++ */
++#define SWEET_TOPK_MAX 512
++static struct { uint64_t tid, t; } sweet_topk_last[SWEET_TOPK_MAX], sweet_topk_now[SWEET_TOPK_MAX];
++static unsigned sweet_topk_last_n;
++
++void sweet_topk_report(uint64_t window_ns);
++void
++sweet_topk_report(uint64_t window_ns)
++{
++	struct { uint64_t tid, used; thread_t th; } best[6];
++	unsigned nb = 0, n = 0;
++	thread_t thread;
++	task_t task = kernel_task;
++	if (window_ns == 0) {
++		return;
++	}
++	task_lock(task);
++	queue_iterate(&task->threads, thread, thread_t, task_threads) {
++		if (n >= SWEET_TOPK_MAX) {
++			break;
++		}
++		uint64_t tid = thread_tid(thread), t = recount_thread_time_mach(thread);
++		sweet_topk_now[n].tid = tid;
++		sweet_topk_now[n].t = t;
++		n++;
++		uint64_t used = 0;
++		for (unsigned j = 0; j < sweet_topk_last_n; j++) {
++			if (sweet_topk_last[j].tid == tid && t >= sweet_topk_last[j].t) {
++				absolutetime_to_nanoseconds(t - sweet_topk_last[j].t, &used);
++				break;
++			}
++		}
++		if (used == 0) {
++			continue;
++		}
++		unsigned k = nb < 6 ? nb++ : 5;
++		if (k == 5 && nb == 6 && used <= best[5].used) {
++			continue;
++		}
++		best[k].tid = tid;
++		best[k].used = used;
++		best[k].th = thread;
++		while (k > 0 && best[k].used > best[k - 1].used) {
++			typeof(best[0]) tmp = best[k];
++			best[k] = best[k - 1];
++			best[k - 1] = tmp;
++			k--;
++		}
++	}
++	static char out[6][300];
++	for (unsigned i = 0; i < nb; i++) {
++		thread_t th = best[i].th;
++		char tname[MAXTHREADNAMESIZE] = "";
++		thread_get_thread_name(th, tname);
++		char *kl = out[i];
++		int m = snprintf(kl, sizeof(out[0]), "STARLTE TOPK: %llu %llu%% %s cont 0x%lx",
++		    best[i].tid, best[i].used * 100 / window_ns, tname[0] ? tname : "-",
++		    (unsigned long)VM_KERNEL_UNSLIDE(th->continuation));
++		vm_offset_t lo = th->kernel_stack, hi = lo + kernel_stack_size;
++		if (th != current_thread() && th->machine.kstackptr && lo && th->state != TH_RUN) {
++			arm_kernel_saved_state_t *ks = (arm_kernel_saved_state_t *)th->machine.kstackptr;
++			uint64_t kfp = ks->fp;
++			m += snprintf(kl + m, sizeof(out[0]) - m, " klr 0x%lx kbt", (unsigned long)VM_KERNEL_UNSLIDE(ks->lr));
++			for (int f = 0; f < 8 && kfp >= lo && kfp + 16 <= hi && (kfp & 7) == 0 && m < (int)sizeof(out[0]) - 20; f++) {
++				uint64_t *fr = (uint64_t *)kfp;
++				m += snprintf(kl + m, sizeof(out[0]) - m, " 0x%lx", (unsigned long)VM_KERNEL_UNSLIDE(fr[1]));
++				kfp = fr[0];
++			}
++		}
++	}
++	task_unlock(task);
++	for (unsigned i = 0; i < nb; i++) {
++		printf("%s\n", out[i]);
++	}
++	bcopy(sweet_topk_now, sweet_topk_last, sizeof(sweet_topk_now[0]) * n);
++	sweet_topk_last_n = n;
++}
+ 
+ void
+ sweet_sample_task(const char *name, int pid, task_t task)
+--- a/bsd/dev/starlte_smp.c	2026-11-13 21:48:01
++++ b/bsd/dev/starlte_smp.c	2026-11-13 21:48:01
+@@ -179,6 +179,8 @@
+ 				used[best] = 0;
+ 			}
+ 			printf("%s\n", line);
++			extern void sweet_topk_report(uint64_t window_ns);    /* 0447, osfmk/kern/exception.c */
++			sweet_topk_report(window_ns);
+ 			st_top_a64e(window_ns);
+ 			st_top_mem();
+ 		}

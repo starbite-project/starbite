@@ -36,3 +36,4 @@ tree was restored and relinked to sd432's sha256.
 | 0444-sweet-fb-cursor-surface-log.patch | "SWEET CURSOR" lines: the pointer surface's alpha/brightness (12 logs at most). Diagnostic for S3v's black box around the cursor. Kernel seq1o = seq1n + 0444 | daily OK (diagnostic) |
 | 0445-sweet-hid-trackpad.patch | macOS touch = real trackpad by default (sweettouchrel=2): relative motion, tap = click, tap-and-move = drag, two-finger tap = right click, two-finger drag = scroll; =1 keeps direct touch. Kernel seq1p = seq1o + 0445; seq1q = tap-then-drag threshold 30 px | after S3z4 passes on the phone |
 | 0446-sweet-a64e-hot-pcs.patch | "STARLTE LSE hot:" also lists arm64e-emulation trap PCs (which instructions cost the kernel ~60 % on the Sequoia desktop). Diagnostic. Kernel seq1r = seq1q + 0446 | diagnostic |
+| 0447-sweet-topk-kernel-threads.patch | "STARLTE TOPK" lines: the busiest kernel_task threads every 10 s. Diagnostic. Kernel seq1s = seq1r + 0447 | diagnostic |
