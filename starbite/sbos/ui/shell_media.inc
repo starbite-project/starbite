@@ -509,7 +509,7 @@ static void med_row_music(dc *d, int r)
     char b[160], sz[24];
     if (r == ML.ntr) {
         int n = md_count(b, ML.ntr, "song", "songs");
-        md_cat(b, n, sizeof b, " \xc2\xb7 Playback isn't available yet");
+        md_cat(b, n, sizeof b, " \xc2\xb7 WAV files play");
         float w = tw(TK_IT400, 13, b, 0, TK_TNUM);
         d_text(d, TK_IT400, 13, (390 - w) / 2, bl(TK_IT400, 13, cy + 16), b, 0, TK_TNUM, C_LABEL2, 0);
         return;
@@ -707,7 +707,7 @@ static void med_header(void)
         return;
     } else {
         d_h1(&d, "Library");
-        line = "Playback isn't available yet";
+        line = "WAV files play; MP3, AAC and FLAC not yet";
     }
     d_text(&d, TK_IT400, 13, MARGIN, LARGE_BASE + 20, line, 0, TK_TNUM, C_LABEL2, 0);
 }
@@ -1010,6 +1010,7 @@ static void ori_off(int o, float lx, float ly, float *dx, float *dy);
 static int vw_o(void) { return MD.view >= 0 ? ori_cur : 0; }
 static int vw_ui(void) { return MD.vui && !vw_o(); }
 static float vw_span(void) { return vw_o() ? H_PT : 390; }
+static void np_tap(float x);
 static float md_ease(float t) { t = tk_clampf(t, 0, 1); return 1 - (1 - t) * (1 - t) * (1 - t); }
 static void vw_place(void)
 {
@@ -1259,11 +1260,179 @@ static void np_free(void)
     relayer(&medpart); relayer(&medpnav); relayer(&medpinfo);
     np_place();
 }
+
+/* ---- cp7w: WAV playback on Track A's sound stream (sh_snd_open / write / space / close) ----------------------------
+ * 16-bit PCM (or its extensible form), mono or stereo, any rate from 8 to 96 kHz: read from the card 8 KB at a time
+ * (~3 ms at its 2.9 MB/s), made 48 kHz stereo (linear interpolation, a frame kept over each read's edge) and written
+ * as the stream has room, from the shell's refresh every 40 ms (the screen may be off: it plays on). One track at a
+ * time; it plays on when Now Playing or Music closes; the end, a pause or a refusal stops it. MP3 / AAC / FLAC: not
+ * read yet (Now Playing says so). */
+#define WP_IN 2048                       /* input frames a read */
+#define WP_OUT 1024                      /* output frames a write */
+static struct {
+    int on, paused, id, ch, track, err;  /* on: a track is loaded (playing or paused); track: ML.tr's index */
+    uint32_t rate;                       /* the file's rate */
+    uint64_t step, ph;                   /* the input frames per output frame and the place (32.32: no drift) */
+    uint64_t off, end;                   /* the file's next byte, the data's end */
+    uint32_t frames, done;               /* the track's input frames, those consumed */
+    int n;                               /* frames in in[] (in[0]: the last frame of the read before) */
+    char path[400];
+    float sec_shown;
+} WP = { .id = -1, .track = -1 };
+static int16_t wp_in[(WP_IN + 1) * 2], wp_out[WP_OUT * 2];
+static uint8_t wp_raw[WP_IN * 4];
+static int wp_is_wav(const char *name)
+{
+    int n = (int)tk_strlen(name);
+    return n > 4 && name[n - 4] == '.' && md_lc(name[n - 3]) == 'w' && md_lc(name[n - 2]) == 'a' && md_lc(name[n - 1]) == 'v';
+}
+static int wp_tag(const uint8_t *b, const char *t) { return b[0] == t[0] && b[1] == t[1] && b[2] == t[2] && b[3] == t[3]; }
+static uint32_t wp_le(const uint8_t *b, int n) { uint32_t v = 0; for (int i = n - 1; i >= 0; i--) v = v << 8 | b[i]; return v; }
+static void wp_stop(void)
+{
+    if (WP.id >= 0) sh_snd_close(WP.id);
+    WP.id = -1;
+    WP.on = WP.paused = 0;
+}
+/* the next read into in[1..] (in[0] the frame before); 0 at the data's end */
+static int wp_read(void)
+{
+    uint32_t ba = (uint32_t)WP.ch * 2, want = WP_IN * ba;
+    if (WP.off >= WP.end) return 0;
+    if (WP.off + want > WP.end) want = (uint32_t)(WP.end - WP.off) / ba * ba;
+    int got = want ? sh_card_read(WP.path, WP.off, wp_raw, want) : 0;
+    if (got <= 0) { WP.err = got < 0; return 0; }
+    int fr = got / (int)ba;
+    WP.off += (uint64_t)fr * ba;
+    if (WP.n > 0) { wp_in[0] = wp_in[(WP.n - 1) * 2]; wp_in[1] = wp_in[(WP.n - 1) * 2 + 1]; }
+    for (int i = 0; i < fr; i++) {
+        int16_t l = (int16_t)wp_le(wp_raw + i * ba, 2), r = WP.ch == 2 ? (int16_t)wp_le(wp_raw + i * ba + 2, 2) : l;
+        wp_in[(i + 1) * 2] = l; wp_in[(i + 1) * 2 + 1] = r;
+    }
+    if (WP.n == 0) { wp_in[0] = wp_in[2]; wp_in[1] = wp_in[3]; }   /* the first read: its first frame before it */
+    WP.n = fr + 1;
+    return 1;
+}
+/* load and start track i (a WAV); 0 started, < 0 not (a toast says why) */
+static int wp_play(int i)
+{
+    wp_stop();
+    WP.track = i;
+    WP.err = 0;
+    ml_path(WP.path, sizeof WP.path, &ML.tr[i].it);
+    uint8_t h[512];
+    int got = sh_card_read(WP.path, 0, h, sizeof h);
+    if (got < 44 || h[0] != 'R' || h[1] != 'I' || h[8] != 'W' || h[9] != 'A') { toast("This file isn't a WAV the phone can read"); return -1; }
+    int fmt = 0, at = 12;
+    WP.ch = 0; WP.rate = 0;
+    uint32_t bits = 0;
+    while (at + 8 <= got) {
+        uint32_t len = wp_le(h + at + 4, 4);
+        if (wp_tag(h + at, "fmt ") && at + 24 <= got) {
+            fmt = (int)wp_le(h + at + 8, 2);
+            if (fmt == 0xFFFE && at + 34 <= got) fmt = (int)wp_le(h + at + 32, 2);   /* extensible: its sub-format */
+            WP.ch = (int)wp_le(h + at + 10, 2);
+            WP.rate = wp_le(h + at + 12, 4);
+            bits = wp_le(h + at + 22, 2);
+        } else if (wp_tag(h + at, "data")) {
+            WP.off = (uint64_t)at + 8;
+            WP.end = WP.off + len;
+            break;
+        }
+        at += 8 + (int)((len + 1) & ~1u);
+    }
+    if (fmt != 1 || bits != 16 || WP.ch < 1 || WP.ch > 2 || WP.rate < 8000 || WP.rate > 96000 || !WP.off) {
+        toast("Only 16-bit PCM WAV plays so far");
+        return -1;
+    }
+    uint64_t size = ML.tr[i].it.size;
+    if (size && WP.end > size) WP.end = size;
+    WP.frames = (uint32_t)((WP.end - WP.off) / (uint32_t)(WP.ch * 2));
+    WP.done = 0;
+    WP.step = (((uint64_t)WP.rate << 32) + 24000) / 48000;
+    WP.ph = 1ull << 32;                  /* in[1] is the track's first frame (in[0] a copy of it: the read before) */
+    WP.n = 0;
+    WP.id = sh_snd_open();
+    if (WP.id < 0) { const char *w = sh_snd_why(); toast(w && w[0] ? w : "Sound isn't available now"); return -1; }
+    if (!wp_read()) { wp_stop(); toast("The file couldn't be read"); return -1; }
+    WP.on = 1;
+    return 0;
+}
+/* as much as the stream has room for (at most ~4 reads a call); 1 if the track ended */
+static int wp_pump(void)
+{
+    if (!WP.on || WP.paused || WP.id < 0) return 0;
+    for (int guard = 0; guard < 16; guard++) {
+        unsigned room = sh_snd_space(WP.id);
+        if (room < 64) return 0;
+        unsigned n = 0, max = room < WP_OUT ? room : WP_OUT;
+        while (n < max) {
+            uint32_t i = (uint32_t)(WP.ph >> 32);
+            if (i + 1 >= (uint32_t)WP.n) {
+                WP.ph -= (uint64_t)(WP.n - 1) << 32;   /* the read's last frame is the next one's first */
+                WP.done += (uint32_t)(WP.n - 1);
+                if (!wp_read()) break;
+                continue;
+            }
+            int32_t f = (int32_t)((WP.ph >> 16) & 0xffff);
+            for (int c = 0; c < 2; c++) {
+                int32_t a = wp_in[i * 2 + c], b = wp_in[(i + 1) * 2 + c];
+                wp_out[n * 2 + c] = (int16_t)(a + (((b - a) * f) >> 16));
+            }
+            n++;
+            WP.ph += WP.step;
+        }
+        if (n) sh_snd_write(WP.id, wp_out, n);
+        if (n < max) {                           /* the data's end (or a read error) */
+            int err = WP.err;
+            wp_stop();
+            if (err) toast("The card stopped reading this file");
+            return 1;
+        }
+    }
+    return 0;
+}
+static float wp_elapsed(void) { return WP.rate ? (float)(WP.done + (uint32_t)(WP.ph >> 32) - 1) / (float)WP.rate : 0; }
+static float wp_total(void) { return WP.rate ? (float)WP.frames / (float)WP.rate : 0; }
+static void np_info(void);
+/* the shell's refresh: the stream fed; Now Playing's time once a second; 1 if anything shown changed */
+static int wp_refresh(float t)
+{
+    (void)t;
+    int ended = wp_pump();
+    int shown = MD.play >= 0 && MD.pstage == 3 && MD.play == WP.track;
+    if (shown && (ended || (WP.on && (int)wp_elapsed() != (int)WP.sec_shown))) { WP.sec_shown = wp_elapsed(); np_info(); relink(); return 1; }
+    return 0;
+}
+static float wp_next_update(float t) { (void)t; return WP.on && !WP.paused ? 40 : -1; }
+static void md_mmss(char *b, float sec)
+{
+    int s = (int)sec, n = put_dec(b, s / 60);
+    b[n++] = ':'; b[n++] = (char)('0' + s % 60 / 10); b[n++] = (char)('0' + s % 10); b[n] = 0;
+}
+/* cp7w: Now Playing's transport: play / pause (the track starts if it isn't the one loaded), the start again, the next */
+static void np_tap(float x)
+{
+    if (!wp_is_wav(ML.tr[MD.play].it.name)) { toast("This file can't be played yet: only WAV files play so far"); return; }
+    int mine = WP.track == MD.play && WP.on;
+    if (x >= 160 && x < 232) {
+        if (!mine) wp_play(MD.play);
+        else { WP.paused = !WP.paused; }
+    } else if (x >= 70 && x < 150) {
+        wp_play(MD.play);                               /* the start again */
+    } else if (x >= 240 && x < 320) {
+        int nx = MD.play + 1 < ML.ntr ? MD.play + 1 : 0;   /* the next (Now Playing shows it) */
+        MD.play = nx; MD.pstage = 1;
+        if (wp_is_wav(ML.tr[nx].it.name)) wp_play(nx); else wp_stop();
+        return;
+    } else return;
+    sh_haptic_k(SH_HAP_LIGHT);
+    np_info();
+    relink();
+}
 /* drawn over two frames after the tap, not in it */
 static void np_build(void)
 {
-    const ml_track *t = &ML.tr[MD.play];
-    char b[160];
     if (MD.pstage == 1) {
         tk_layer_init(&medpbg, "med-pbg");
         medpbg.solid = sbc_argb(SBC_GROUND);
@@ -1289,12 +1458,44 @@ static void np_build(void)
         }
         MD.pstage = 2;
     } else {
-        relayer(&medpinfo);
-        dc d = mk(&medpinfo, "med-pinfo", 0, 396, 390, 300, 0, 0);
-        ellipsize(b, sizeof b, TK_IT700, 22, t->title[0] ? t->title : t->it.name, 326);
-        d_text(&d, TK_IT700, 22, 32, bl(TK_IT700, 22, 404), b, 0, 0, INK, 0);
-        ellipsize(b, sizeof b, TK_IT400, 17, t->artist[0] ? t->artist : "Unknown artist", 326);
-        d_text(&d, TK_IT400, 17, 32, bl(TK_IT400, 17, 434), b, 0, 0, C_LABEL2, 0);
+        np_info();
+        MD.pstage = 3;
+    }
+    relink();
+    np_place();
+}
+/* the title, artist, the scrubber, the times and the transport (cp7w: live for a WAV: play / pause, the time) */
+static void np_info(void)
+{
+    const ml_track *t = &ML.tr[MD.play];
+    char b[160];
+    int wav = wp_is_wav(t->it.name), mine = WP.track == MD.play && WP.on;
+    relayer(&medpinfo);
+    dc d = mk(&medpinfo, "med-pinfo", 0, 396, 390, 300, 0, 0);
+    ellipsize(b, sizeof b, TK_IT700, 22, t->title[0] ? t->title : t->it.name, 326);
+    d_text(&d, TK_IT700, 22, 32, bl(TK_IT700, 22, 404), b, 0, 0, INK, 0);
+    ellipsize(b, sizeof b, TK_IT400, 17, t->artist[0] ? t->artist : "Unknown artist", 326);
+    d_text(&d, TK_IT400, 17, 32, bl(TK_IT400, 17, 434), b, 0, 0, C_LABEL2, 0);
+    if (wav) {
+        float el = mine ? wp_elapsed() : 0, tot = mine ? wp_total() : 0;
+        d_rrect(&d, 32, 482, 326, 6, 3, W(.14f));
+        if (tot > 0) d_rrect(&d, 32, 482, tk_maxf(6, 326 * tk_clampf(el / tot, 0, 1)), 6, 3, W(.75f));
+        char ta[12], tb[12] = "--:--";
+        md_mmss(ta, el);
+        if (tot > 0) { tb[0] = '-'; md_mmss(tb + 1, tot - el); }
+        d_text(&d, TK_IT400, 12, 32, bl(TK_IT400, 12, 496), ta, 0, TK_TNUM, C_LABEL3, 0);
+        float w = tw(TK_IT400, 12, tb, 0, TK_TNUM);
+        d_text(&d, TK_IT400, 12, 358 - w, bl(TK_IT400, 12, 496), tb, 0, TK_TNUM, C_LABEL3, 0);
+        tk_col on = W(1);
+        if (mine && !WP.paused) { d_rrect(&d, 180, 549, 11, 42, 3, on); d_rrect(&d, 200, 549, 11, 42, 3, on); }   /* pause */
+        else d_tri(&d, 178, 548, 178, 592, 216, 570, on);                                                       /* play */
+        d_tri(&d, 112, 570, 134, 556, 134, 584, on);   /* previous: the start again */
+        d_tri(&d, 90, 570, 112, 556, 112, 584, on);
+        d_tri(&d, 278, 570, 256, 556, 256, 584, on);   /* next */
+        d_tri(&d, 300, 570, 278, 556, 278, 584, on);
+        return;
+    }
+
         /* the scrubber at its start, the times unknown; the transport, dimmed: nothing here can be pressed */
         d_rrect(&d, 32, 482, 326, 6, 3, W(.14f));
         d_text(&d, TK_IT400, 12, 32, bl(TK_IT400, 12, 496), "0:00", 0, TK_TNUM, C_LABEL3, 0);
@@ -1306,15 +1507,11 @@ static void np_build(void)
         d_tri(&d, 90, 570, 112, 556, 112, 584, dim);
         d_tri(&d, 278, 570, 256, 556, 256, 584, dim);                      /* next */
         d_tri(&d, 300, 570, 278, 556, 278, 584, dim);
-        w = tw(TK_IT600, 15, "Playback isn't available yet", 0, 0);
-        d_text(&d, TK_IT600, 15, 195 - w / 2, bl(TK_IT600, 15, 632), "Playback isn't available yet", 0, 0, W(.7f), 0);
-        const char *l2 = "Sound works; reading music files comes next.";
+        w = tw(TK_IT600, 15, "This file can't be played yet", 0, 0);
+        d_text(&d, TK_IT600, 15, 195 - w / 2, bl(TK_IT600, 15, 632), "This file can't be played yet", 0, 0, W(.7f), 0);
+        const char *l2 = "WAV plays; MP3, AAC and FLAC can't be read yet.";
         w = tw(TK_IT400, 13, l2, 0, 0);
         d_text(&d, TK_IT400, 13, 195 - w / 2, bl(TK_IT400, 13, 656), l2, 0, 0, C_LABEL2, 0);
-        MD.pstage = 3;
-    }
-    relink();
-    np_place();
 }
 
 /* ---- the work, a step at a time ------------------------------------------------------------------------------- */
@@ -1630,7 +1827,7 @@ static void med_tap(float x, float y)
     }
     if (MD.play >= 0) {
         if (back && MD.pstage == 3) MD.pstage = 4;       /* the list again in the next frame (med_tick) */
-        else if (MD.pstage == 3 && y >= 470 && y < 610) toast("Playback isn't available yet: music files can't be read so far");   /* cp6: the dimmed transport */
+        else if (MD.pstage == 3 && y >= 530 && y < 610) np_tap(x);   /* cp7w: the transport (a WAV's; the others say why) */
         return;
     }
     if (MD.app == MD_PHOTOS && (y < SAFE_TOP + 48 || y >= SEG_Y - 6)) { med_ptap(x, y); return; }

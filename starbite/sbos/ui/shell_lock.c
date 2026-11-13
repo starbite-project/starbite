@@ -3285,10 +3285,13 @@ static int ori_tick(float dt);
 static int ori_moving(void);
 static int hwk_refresh(void);                 /* cp7: shell_hwkey.inc */
 static float ck_ring_next(float t);           /* cp7w: shell_apps.inc (the timer's ring stops after two minutes) */
+static float wp_next_update(float t);         /* cp7w: shell_media.inc (a WAV playing: its stream fed) */
+static int wp_refresh(float t);
 int sh_next_update(float t)
 {
     int open = AP.on && is_app("clock");
     float best = ck_ring_next(t);
+    { float wb = wp_next_update(t); if (wb >= 0 && (best < 0 || wb < best)) best = wb; }
     if (CLK.sw_run && open) best = 100 - (float)((int)clk_sw_ms(t) % 100);
     if (CLK.tm_run) {
         float tl = CLK.tm_end - t, nx = open ? (float)((int)tl % 1000) + 1 : tl;
@@ -3324,6 +3327,7 @@ int sh_refresh(float t)
     ch |= se_refresh(t);                               /* Track B: Settings' Bluetooth list, the lux reading */
     ch |= ori_poll(t);                                 /* cp7: the phone turned (the app's new layout fades in) */
     ch |= hwk_refresh();                               /* cp7: a hardware key changed the page */
+    ch |= wp_refresh(t);                               /* cp7w: a WAV's stream fed, Now Playing's time */
     if (ch && AP.on) sw_dirty = 1;                     /* helper D: the switcher's snapshot is old now */
     return ch;
 }

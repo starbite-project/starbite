@@ -1343,7 +1343,13 @@ void sh_snd_tone_stop(void) { }
 int sh_snd_volume(void) { return host_vol; }
 void sh_snd_volume_set(int v) { host_vol = v < 0 ? 0 : v > 15 ? 15 : v; }
 int sh_snd_open(void) { return 0; }
-unsigned sh_snd_write(int id, const int16_t *frames, unsigned n) { (void)id; (void)frames; return n; }
+unsigned sh_snd_write(int id, const int16_t *frames, unsigned n)   /* cp7w: SBTK_SNDOUT=file keeps what is written (raw 48 kHz stereo s16) */
+{
+    (void)id;
+    const char *o = getenv("SBTK_SNDOUT");
+    if (o) { FILE *f = fopen(o, "ab"); if (f) { fwrite(frames, 4, n, f); fclose(f); } }
+    return n;
+}
 unsigned sh_snd_space(int id) { (void)id; return 4096; }
 void sh_snd_close(int id) { (void)id; }
 const char *sh_snd_why(void) { return "The host has no sound"; }
