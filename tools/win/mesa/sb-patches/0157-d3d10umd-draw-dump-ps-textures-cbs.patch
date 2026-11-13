@@ -1,0 +1,118 @@
+From f0d676ce628cbe21c9e303efcba8dfb33c797b7a Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Fri, 13 Nov 2026 12:36:53 +0200
+Subject: [PATCH] 0157: d3d10umd draw dump adds the pixel shader, its textures
+ (centre texel), VS/PS cb0-3 floats, viewport, clears
+
+---
+ src/gallium/frontends/d3d10umd/Device.cpp  |  3 ++
+ src/gallium/frontends/d3d10umd/DxgiFns.cpp | 39 ++++++++++++++++++++++
+ src/gallium/frontends/d3d10umd/Shader.cpp  |  5 +++
+ src/gallium/frontends/d3d10umd/State.h     |  4 +++
+ 4 files changed, 51 insertions(+)
+
+diff --git a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+index 7a9366f..cb8b9e0 100644
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -378,6 +378,9 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
+ 
+    pipe->flush(pipe, NULL, 0);
+    pipe_resource_reference(&pDevice->rot_temp, NULL);   /* sb-patches/0111 */
++   for (unsigned s = 0; s < 2; s++)   /* sb-patches/0157 */
++      for (unsigned i = 0; i < 4; i++)
++         pipe_resource_reference(&pDevice->sb_cb[s][i], NULL);
+ 
+    for (i = 0; i < PIPE_MAX_SO_BUFFERS; ++i) {
+       pipe_so_target_reference(&pDevice->so_targets[i], NULL);
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index eb43480..111790a 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -86,6 +86,45 @@ sb_trace_draw(struct Device *d, unsigned kind, unsigned count, unsigned instance
+                  d->fb.nr_cbufs, d->fb.width, d->fb.height,
+                  d->fb.nr_cbufs ? util_format_name(d->fb.cbufs[0].format) : "-");
+          (void)bs;
++         /* sb-patches/0157: what decides the pixels: the pixel shader, its textures (with a centre texel), the
++          * first 8 floats of each bound VS/PS constant buffer, the viewport and the clears seen so far */
++         fprintf(stderr, "sbumd:   ps %p (tokens %p) rt0 %p; vp %d,%d %dx%d; clears so far %u (last 0x%08x on %p)\n",
++                 (void *)d->sb_ps, d->sb_ps ? (const void *)d->sb_ps->state.tokens : NULL,
++                 d->fb.nr_cbufs ? (void *)d->fb.cbufs[0].texture : NULL, sbTrace.vp[0], sbTrace.vp[1], sbTrace.vp[2],
++                 sbTrace.vp[3], sbTrace.clears, sbTrace.last_clear_rgba, sbTrace.clear_tex);
++         for (unsigned i = 0; i < 4; i++) {
++            struct pipe_sampler_view *v = d->sampler_views[MESA_SHADER_FRAGMENT][i];
++            if (!v || !v->texture)
++               continue;
++            struct pipe_resource *t = v->texture;
++            uint32_t texel = 0;
++            bool got = false;
++            if (t->target != PIPE_BUFFER && util_format_get_blocksize(t->format) == 4) {
++               struct pipe_box box;
++               struct pipe_transfer *tr = NULL;
++               u_box_2d(t->width0 / 2, t->height0 / 2, 1, 1, &box);
++               const void *m = d->pipe->texture_map(d->pipe, t, 0, PIPE_MAP_READ, &box, &tr);
++               if (m) {
++                  texel = *(const uint32_t *)m;
++                  got = true;
++                  d->pipe->texture_unmap(d->pipe, tr);
++               }
++            }
++            fprintf(stderr, "sbumd:   ps tex %u: %p %ux%u %s, centre %s0x%08x\n", i, (void *)t, t->width0, t->height0,
++                    util_format_name(v->format), got ? "" : "(not read) ", texel);
++         }
++         for (unsigned st = 0; st < 2; st++) {
++            for (unsigned i = 0; i < 4; i++) {
++               struct pipe_resource *b = d->sb_cb[st][i];
++               if (!b)
++                  continue;
++               float f[8] = {0};
++               unsigned sz = b->width0 < sizeof f ? b->width0 : (unsigned)sizeof f;
++               pipe_buffer_read(d->pipe, b, 0, sz, f);
++               fprintf(stderr, "sbumd:   %s cb%u %p (%u B): %g %g %g %g | %g %g %g %g\n", st ? "ps" : "vs", i,
++                       (void *)b, b->width0, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
++            }
++         }
+       }
+    }
+    sbTrace.rt0 = d->fb.nr_cbufs ? d->fb.cbufs[0].texture : NULL;
+diff --git a/src/gallium/frontends/d3d10umd/Shader.cpp b/src/gallium/frontends/d3d10umd/Shader.cpp
+index 09d3b09..1e5ca65 100644
+--- a/src/gallium/frontends/d3d10umd/Shader.cpp
++++ b/src/gallium/frontends/d3d10umd/Shader.cpp
+@@ -40,6 +40,7 @@
+  * its frames came out empty. Slots 0..13 become 1..14 (PIPE_MAX_CONSTANT_BUFFERS 16). */
+ #define SB_CB_SHIFT 1
+ 
++#include "util/u_inlines.h"
+ #include "State.h"
+ #include "Query.h"
+ 
+@@ -181,6 +182,10 @@ SetConstantBuffers(mesa_shader_stage shader_type,    // IN
+       cb.buffer = CastPipeResource(phBuffers[i]);
+       cb.buffer_offset = 0;
+       cb.buffer_size = cb.buffer ? cb.buffer->width0 : 0;
++      /* sb-patches/0157: kept for the draw dump (test boots only) */
++      if ((shader_type == MESA_SHADER_VERTEX || shader_type == MESA_SHADER_FRAGMENT) && StartBuffer + i < 4 &&
++          sb_dump_on())
++         pipe_resource_reference(&pDevice->sb_cb[shader_type == MESA_SHADER_FRAGMENT][StartBuffer + i], cb.buffer);
+       pipe->set_constant_buffer(pipe,
+                                 shader_type,
+                                 StartBuffer + i + SB_CB_SHIFT,
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index 74c500f..fb9835c 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -134,6 +134,10 @@ struct Device
+    /* Starbite (sb-patches/0111): the temporary resource RotateResourceIdentities copies through, kept between
+     * presents (it was created and destroyed on every flip: a fresh 17 MB allocation through VidMm each time) */
+    struct pipe_resource *rot_temp;
++
++   /* sb-patches/0157: constant buffers 0-3 bound to the VS (0) and PS (1), referenced only while the draw dump is on
++    * (umdlog\trace or trace-<exe>): T58's DirectComposition surface draws wrote nothing visible */
++   struct pipe_resource *sb_cb[2][4];
+ };
+ 
+ 
+-- 
+2.43.0
+

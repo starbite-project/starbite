@@ -6,6 +6,9 @@ rem sbcomp.exe (a 1200x700 topmost window at 60,60) runs 12 s per mode, a screen
 rem DXGI, DxgKrnl (Base + Present) and Dwm-Core events; tracerpt turns each trace into CSV in the umdlog folder.
 rem   gdi (yellow, control)  hwnd (red, FLIP_SEQUENTIAL)  hwndblt (magenta, DISCARD)  dcsc (green, DComp swap chain)
 rem   dcsurf (blue, DComp surface)
+rem T60: the modes come from sb-comp-modes.txt when staged (one line, e.g. "hwnd dcsurf"); modes listed in
+rem sb-comp-trace.txt run with umdlog\trace-sbcomp.exe present: sbumd's draw dump (shaders, layouts, the first 64
+rem draws with their pixel shader, textures, constant buffers; sb-patches/0116 + 0157) for that sbcomp run only.
 setlocal
 set D=C:\starbite\auto\gpu
 set L=%D%\gputest.log
@@ -15,7 +18,12 @@ echo VIS2 start %time% >> %L%
 > %D%\sbpres.pf echo "Microsoft-Windows-DXGI" 0xFFFFFFFFFFFFFFFF 5
 >> %D%\sbpres.pf echo "Microsoft-Windows-DxgKrnl" 0x8000001 5
 >> %D%\sbpres.pf echo "Microsoft-Windows-Dwm-Core" 0xFFFFFFFFFFFFFFFF 4
-for %%M in (gdi hwnd hwndblt dcsc dcsurf) do call :one %%M
+set MODES=gdi hwnd hwndblt dcsc dcsurf
+if exist %D%\sb-comp-modes.txt for /f "usebackq delims=" %%a in ("%D%\sb-comp-modes.txt") do set MODES=%%a
+set TRACEM=
+if exist %D%\sb-comp-trace.txt for /f "usebackq delims=" %%a in ("%D%\sb-comp-trace.txt") do set TRACEM=%%a
+echo VIS2 modes: %MODES%; traced: %TRACEM% >> %L%
+for %%M in (%MODES%) do call :one %%M
 if exist %D%\sbcomp.log type %D%\sbcomp.log >> %L%
 echo VIS2 end %time% >> %L%
 endlocal
@@ -23,6 +31,9 @@ exit /b 0
 
 :one
 echo VIS2 %1 %time% >> %L%
+set TR=0
+for %%t in (%TRACEM%) do if /i "%%t"=="%1" set TR=1
+if "%TR%"=="1" (echo on> %U%\trace-sbcomp.exe& echo VIS2 %1 traced >> %L%)
 logman start sbpres -pf %D%\sbpres.pf -o %D%\pres-%1.etl -ets -max 64 >> %L% 2>&1
 start "sbcomp-%1" %D%\sbcomp.exe %1 12 %D%\sbcomp.log
 ping -n 7 127.0.0.1 > nul
@@ -32,6 +43,7 @@ logman stop sbpres -ets >> %L% 2>&1
 if exist %D%\pres-%1.etl tracerpt %D%\pres-%1.etl -o %U%\pres-%1.csv -of CSV -y > nul 2>&1
 if exist %U%\pres-%1.csv (for %%S in (%U%\pres-%1.csv) do echo VIS2 %1 trace csv %%~zS bytes >> %L%) else (echo VIS2 %1 no trace csv >> %L%)
 if exist %D%\pres-%1.etl del /f %D%\pres-%1.etl
+if exist %U%\trace-sbcomp.exe del /f %U%\trace-sbcomp.exe
 exit /b 0
 
 :waitexit

@@ -2289,6 +2289,29 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - **T59** = T57 + that ICD (`build/win/stage/sbwddm-t59`): B should log `cached allocations on`, no mmap errors, and
   show copy avg well under A's ~46 ms with a correct picture.
 
+### 6.65 T58 read: no-layout crash fixed; a DComp surface reaches the screen, black; T60 staged (2026-11-13)
+
+- **T58 (`build/win/results-t58`; sbumd 3a59aeec = 0155): clean, nothing installed.**
+  - `sbtex hw vertexid exit 0` (first pass); every other gputest program exit 0 as T57 (sbtex softpipe `cbindex`
+    fails as in every softpipe run). Drag 52.7/53.1 moves/s, sbfps 631/801 and 547/824, sbglzc zc 181 fps: as T57
+    within noise (PACE 2.27 ms vs 1.67, a single sample). The only sbcomp WER report is T56's crash (old sbumd).
+  - **Install candidate:** 3a59aeec with KMD 79ce848e (`--install-default` of the T58 stage), for the user to decide.
+- **VIS2 again:**
+  - gdi: shown (yellow). hwnd / hwndblt: 73 / 65 fps, 0 failures, window absent from the shot (console behind shows).
+  - dcsc: first Present 0x887a0005 (device removed), as T56.
+  - **dcsurf: 571 frames, 0 failures; the shot shows an opaque black 1200x700 rectangle** at the window's place: DWM
+    composes the DComp visual. sbumd's own samples of the presented atlas (1216x704, shared, BindFlags 0xa8) are all
+    zero, and between presents it saw **3 draws (prim 4, no layout, 96 vertices) and 0 ClearRenderTargetView** calls,
+    while sbcomp clears the BeginDraw texture each frame (hwnd mode: 1 clear per frame reaches sbumd).
+  - Reading: the runtime does not pass a clear of a DComp atlas surface as a clear. Likely a ClearView emulation
+    limited to the update rectangle (sbumd has no D3D11.1 ClearView) or a copy from a scratch texture; whichever,
+    its draws write nothing visible.
+- **0157** (sbumd fa68467d, dump only): with `umdlog\trace` or `trace-<exe>`, the first 64 draws also print the pixel
+  shader, its textures with a centre texel, VS/PS cb0-3 (first 8 floats, buffers referenced only in dump mode), the
+  viewport and clears so far. **sb-comp.bat** takes its modes from `sb-comp-modes.txt` and traced modes from
+  `sb-comp-trace.txt`.
+- **T60** (`build/win/stage/sbwddm-t60`): T58 + fa68467d, VIS2 = `hwnd dcsurf`, dcsurf traced.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
