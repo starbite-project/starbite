@@ -5,14 +5,21 @@ sheets / menus / sheets, §4 keyboard, §6 list geometry, §10 bars and bottom s
 colour, §16 motion, §17 haptics), [LIQUID-GLASS.md](../LIQUID-GLASS.md) §5, and [spec-settings.md](spec-settings.md)
 §2.0 (row / card / header geometry used here too).
 
-> **Platform decision (Track A, 2026-11-13): storage.** Notes become records in the settings state: 512 KB per half,
-> chunked into 4 KB records, with a size budget. **Build for "plenty, with a full state"**, not the trunk's 8 x 600 B:
-> - no fixed note count; one note up to ~64 KB (E);
-> - when the budget is reached, a **"Storage Full"** alert: "Delete some notes or empty Recently Deleted to make
->   room." (OK);
-> - a new note or edit that can't be saved keeps its text on screen with a footer line "Not saved: storage full"
->   (13 / 400, systemRed);
-> - Recently Deleted counts toward the budget, and its notes are purged after 30 days.
+> **Platform: storage (in the trunk, 9910ebf9).** Each note is one document in the shell's document store
+> (shell.h: `sh_doc_put / get / count / id_at / new_id / usage`, collection **`SH_DOC_NOTES`**).
+> - A document is the app's own bytes, **up to 32 KiB**, under a stable id. It is saved with the settings and
+>   survives restarts.
+> - The whole Notes collection has a **96 KiB budget**; Recently Deleted notes count towards it.
+> - `sh_doc_usage` gives used / budget. Build for "plenty, with a full state":
+>   - no fixed note count;
+>   - a note's text stops growing at 32 KiB, with a footer "This note is full." (13 / 400, secondaryLabel);
+>   - when the collection is full, a **"Storage Full"** alert: "Delete some notes or empty Recently Deleted to make
+>     room." (OK);
+>   - an edit that can't be saved keeps its text on screen with a footer "Not saved: storage full" (13 / 400,
+>     systemRed);
+>   - Recently Deleted notes are purged after 30 days.
+> - Our own format inside a document: the title line, the body with style runs and checklist states, flags (pinned,
+>   deleted + time), the folder id, and created / modified times.
 
 **Sources**
 - Apple iPhone User Guide, **iOS 27 edition** (fetched 2026-11-13): "Get started with Notes", "Create and format notes"
@@ -207,7 +214,7 @@ title 13 / 600 (2 lines max) and date 12 / 400 secondary, centred. Date sections
   (E; trunk uses "New Note").
 - Read-only (in Recently Deleted): tap anywhere → alert **"Recover Note?"** / "Notes in Recently Deleted can't be
   edited." (ours) / Cancel · **Recover** (E).
-- Very long note: fine up to ~64 KB per note (E); past the shared budget see the "Storage Full" state in the box at the top.
+- Very long note: up to 32 KiB per note ("This note is full."); past the 96 KiB collection see the "Storage Full" state in the box at the top.
 
 **Interactions**
 - Tap text → caret there + keyboard up. Double-tap word → select + the edit menu (IOS-REF §3.3 compact horizontal

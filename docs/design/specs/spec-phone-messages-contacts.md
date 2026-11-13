@@ -9,8 +9,11 @@ replaces the short IR §7 (Messages) and IR §13 (Phone) entries where they diff
 >    self tests never place a call. Track A has told the main session in case the user prefers the hold.
 > 2. **Hold** takes FaceTime's slot in the in-call grid.
 > 3. **SMS reactions are sent as text** (Loved "…" etc.), as iOS does for SMS.
-> 4. **The Contacts store exists.** Track A builds it before A2 reaches Contacts: settings-state records like Notes'
->    (chunked 4 KB records, a size budget). Spec and build Contacts as if the store is there, with a **full state**: a
+> 4. **The Contacts store exists** (trunk 9910ebf9): each contact is one document in the shell's document store
+>    (shell.h `sh_doc_put / get / count / id_at / new_id / usage`, collection **`SH_DOC_CONTACTS`**): up to 32 KiB
+>    under a stable id, within a **64 KiB** collection budget, saved with the settings. Use it for **names
+>    everywhere** (Calls, Messages, banners, in-call, the lock's notifications): look a number up through one helper,
+>    and match on normalised digits. Spec and build Contacts as if the store is there, with a **full state**: a
 >    "Storage Full" alert ("Delete some contacts or notes to make room.", OK). A save that fails keeps the edit form
 >    open with a footer "Not saved: storage full" (13 / 400, systemRed). Names then appear everywhere iOS shows them:
 >    Calls, Messages, banners, the in-call screen.
