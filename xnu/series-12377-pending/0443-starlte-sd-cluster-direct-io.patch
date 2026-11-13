@@ -1,0 +1,34 @@
+From: starbite <starbite@local>
+Date: Fri, 13 Nov 2026 14:00:00 +0200
+Subject: [PATCH] patch: 0443-starlte-sd-cluster-direct-io.patch - fix to 0436: the
+ kernel bounce buffer is for physio's bufs only, not the cluster layer's direct I/O
+ (B_PHYS with a UPL, B_CLUSTER), whose buf_map() address is a kernel mapping: the
+ bounce's copyout to it failed in copy_validate with EFAULT
+
+S3t/S3u 2026-11-13: every read() through cluster direct I/O on the card root returned EFAULT
+after the cached part (the per-user containermanagerd's 6626-byte sandbox profile: 4 KiB,
+then EFAULT, 35 starts a boot; no fault line, no copy window: 0442 showed neither). Without
+its sandbox containermanagerd exits 0, and Control Center, Finder (pkd), Notification Center
+(ChronoServices group container) and the camera service wait on it or crash.
+Applies on 0442 (seq-12377 line; starlte_sd.c is 0436's). Kernel seq1n = seq1m + this.
+---
+
+--- a/bsd/dev/starlte_sd.c	2026-11-13 13:42:33
++++ b/bsd/dev/starlte_sd.c	2026-11-13 13:42:33
+@@ -1761,7 +1761,15 @@
+ static inline bool
+ sd_buf_is_user(buf_t bp)
+ {
+-	return (buf_flags(bp) & B_PHYS) && (buf_dataptr(bp) >> 63) == 0;
++	/*
++	 * 0443: only physio's own bufs. The cluster layer's direct I/O (CL_DIRECT_IO: a read
++	 * or write straight into a user buffer, e.g. on an F_NOCACHE file) also sets B_PHYS,
++	 * but carries a UPL (B_CLUSTER) whose b_datap is the UPL offset, a small number:
++	 * buf_map() gives a kernel mapping of the user's pages, and the bounce's copyout to
++	 * that kernel address failed in copy_validate with EFAULT (S3t/S3u 2026-11-13: the
++	 * per-user containermanagerd's read of its sandbox profile, every start).
++	 */
++	return (buf_flags(bp) & (B_PHYS | B_CLUSTER)) == B_PHYS && (buf_dataptr(bp) >> 63) == 0;
+ }
+ 
+ static void
