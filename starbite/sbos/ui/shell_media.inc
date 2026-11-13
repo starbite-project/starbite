@@ -1411,6 +1411,23 @@ static void md_mmss(char *b, float sec)
     int s = (int)sec, n = put_dec(b, s / 60);
     b[n++] = ':'; b[n++] = (char)('0' + s % 60 / 10); b[n++] = (char)('0' + s % 10); b[n] = 0;
 }
+/* 8b: the Control Centre's Now Playing: the loaded track's words and whether it plays (0: nothing loaded); its
+ * play / pause (0: nothing to toggle) */
+static int cc_np_info(const char **title, const char **artist, int *playing)
+{
+    if (!WP.on || WP.track < 0 || WP.track >= ML.ntr) return 0;
+    const ml_track *t = &ML.tr[WP.track];
+    *title = t->title[0] ? t->title : t->it.name;
+    *artist = t->artist[0] ? t->artist : 0;
+    *playing = !WP.paused;
+    return 1;
+}
+static int cc_np_toggle(void)
+{
+    if (!WP.on) return 0;
+    WP.paused = !WP.paused;
+    return 1;
+}
 /* cp7w: Now Playing's transport: play / pause (the track starts if it isn't the one loaded), the start again, the next */
 static void np_tap(float x)
 {

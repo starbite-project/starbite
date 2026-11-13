@@ -2039,11 +2039,18 @@ static tk_spring sp_cc;
 #define CC_W2 (2 * CC_U + CC_GAP)                 /* a 2x2 / a tall slider's length: 150.5 */
 #define CC_COL(c) (37.25f + CC_P * (c))
 #define CC_ROW(r) (119.0f + CC_P * (r))
-#define CC_R3 CC_ROW(2)                            /* the round modules' rows (under the 2x2 and the sliders) */
-#define CC_R4 CC_ROW(3)
-static const float CCX[4] = { CC_COL(0), CC_COL(1), CC_COL(2), CC_COL(3) };
-#define CC_NV 11                                   /* the views: 0 connectivity, 1 Brightness, 2 Volume, 3..6 row 3, 7..10 row 4 */
-#define CC_NM 12                                   /* + 11: the chrome (the + and Power circles, the page icons) */
+/* 8b (top ten #9, IOS-REFERENCE 1's default page 1, iOS 27): the modules' places as (column, row, columns, rows) on
+ * the lattice: row 0-1 connectivity 2x2 | Now Playing 2x2; rows 2-3 Orientation Lock, Silent, Focus 2x1 | the two tall
+ * sliders; row 4 Flashlight, Timer, Calculator, Camera; row 5 ours (Emergency, Low Power). The indices stay B4's
+ * (0 connectivity, 1 Brightness, 2 Volume, 3 Flashlight, 4 Rotation, 5 Emergency, 6 Saving, 7 Timer, 8 Calculator,
+ * 9 Silent, 10 Camera) plus 11 Now Playing, 12 Focus; the chrome is CC_CHROME */
+#define CC_NV 13
+#define CC_NM 14
+#define CC_CHROME CC_NV                            /* the chrome (the + and Power circles, the page icons) */
+#define CC_ROWS 6
+static const signed char CCL[CC_NV][4] = {
+    { 0, 0, 2, 2 }, { 2, 2, 1, 2 }, { 3, 2, 1, 2 }, { 0, 4, 1, 1 }, { 0, 2, 1, 1 }, { 0, 5, 1, 1 }, { 1, 5, 1, 1 },
+    { 1, 4, 1, 1 }, { 2, 4, 1, 1 }, { 1, 2, 1, 1 }, { 3, 4, 1, 1 }, { 2, 0, 2, 2 }, { 0, 3, 2, 1 } };
 static tk_layer ccmod[CC_NM], ccview[CC_NV], cctop, ccpg;
 static void *cc_vhalf[CC_NV];                      /* the half copy each view was given (another one is the view's own) */
 /* the connectivity module's circles: Airplane, Cellular, Wi-Fi (55.6 pt), and the mini cluster (24.7 pt) */
@@ -2052,19 +2059,22 @@ static void *cc_vhalf[CC_NV];                      /* the half copy each view wa
 #define CN_MD 24.7f
 static void cc_mod_rect(int i, float *r)
 {
-    if (i == 11) { r[0] = 37.25f; r[1] = 16; r[2] = 315.5f; r[3] = 28; r[4] = 14; return; }
-    if (i == 0) { r[0] = CC_COL(0); r[1] = CC_ROW(0); r[2] = r[3] = CC_W2; r[4] = 30; return; }
-    if (i < 3) { r[0] = CC_COL(i + 1); r[1] = CC_ROW(0); r[2] = CC_U; r[3] = CC_W2; r[4] = 34; return; }
-    r[0] = CCX[(i - 3) % 4]; r[1] = i < 7 ? CC_R3 : CC_R4; r[2] = r[3] = CC_U; r[4] = 34;
+    if (i == CC_CHROME) { r[0] = 37.25f; r[1] = 16; r[2] = 315.5f; r[3] = 28; r[4] = 14; return; }
+    const signed char *L = CCL[i];
+    r[0] = CC_COL(L[0]); r[1] = CC_ROW(L[1]);
+    r[2] = L[2] * CC_U + (L[2] - 1) * CC_GAP; r[3] = L[3] * CC_U + (L[3] - 1) * CC_GAP;
+    r[4] = L[2] == 2 && L[3] == 2 ? 30 : 34;
 }
-/* the cell a module's view shows (they tile the bitmap: the gaps split down the middle) */
+/* the cell a module's view shows (they tile the bitmap: the gaps split down the middle; the outer ones run off) */
 static void cc_mod_cell(int i, float *c)
 {
-    static const float XB[5] = { -400, CC_COL(1) - CC_GAP / 2, CC_COL(2) - CC_GAP / 2, CC_COL(3) - CC_GAP / 2, 800 };
-    int c0 = i == 0 ? 0 : i < 3 ? i + 1 : (i - 3) % 4, c1 = i == 0 ? 2 : c0 + 1;
-    c[0] = XB[c0]; c[2] = XB[c1];
-    c[1] = i < 3 ? -400 : i < 7 ? CC_R3 - CC_GAP / 2 : CC_R4 - CC_GAP / 2;
-    c[3] = i < 3 ? CC_R3 - CC_GAP / 2 : i < 7 ? CC_R4 - CC_GAP / 2 : 1200;
+    float r[5];
+    cc_mod_rect(i, r);
+    const signed char *L = CCL[i];
+    c[0] = L[0] == 0 ? -400 : r[0] - CC_GAP / 2;
+    c[2] = L[0] + L[2] == 4 ? 800 : r[0] + r[2] + CC_GAP / 2;
+    c[1] = L[1] == 0 ? -400 : r[1] - CC_GAP / 2;
+    c[3] = L[1] + L[3] == CC_ROWS ? 1200 : r[1] + r[3] + CC_GAP / 2;
 }
 static void nc_blit_scaled(tk_bmp *dst, const tk_bmp *src, float X, float Y, float f);
 /* a glyph at scale s, its box's top-left at (x, y) pt */
@@ -2143,7 +2153,7 @@ static const float CXR[3][5] = { { 36, 200, 318, 262, 38 }, { 120, 160, 150, 400
 /* the press (the glass spec's gel, IOS-REFERENCE 1): a module under the finger grows by min(.12, 10 / its short side),
  * a slider being dragged to 1.05, on the press spring; back to 1 when it is let go */
 static tk_spring cc_ps[CC_NM];
-static float cc_pscale[CC_NM] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+static float cc_pscale[CC_NM] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
 static int cc_pressed = -1;
 static int cc_edge[2], cc_step[2];
 /* cp6: the press's glow (LIQUID-GLASS 5.1: +8 % white over the shape) on module cc_hlm's rect cc_hlr (pt: x y w h r),
@@ -2179,7 +2189,7 @@ static void cc_link(void)
     g[CC_NM] = &cchl;
     link(&ccg, g, CC_NM + 1);
     tk_layer *ch[] = { &cctop, &ccpg };
-    link(&ccmod[11], ch, 2);
+    link(&ccmod[CC_CHROME], ch, 2);
     for (int i = 0; i < CC_NV; i++) {
         tk_layer *k[3] = { &ccview[i], 0, 0 };
         int n = 1;
@@ -2212,9 +2222,45 @@ static void cc_unview(void)
 }
 /* cp7c: the grid in six parts (a tile or two each: their glass bakes), so build_cc's idle stages stay short; ccg_part:
  * the next part of a grid being drawn (0 none); a whole build_cc_grid (a toggle) ends any part-drawn one */
+/* 8b: Now Playing (2x2): the WAV player's track (shell_media.inc's cc_np_info) or "Not Playing", the art's place,
+ * the transport (back, play / pause, forward); Focus (2x1): Do Not Disturb (pref notif.dnd, shell_nc.inc's), lit */
+static int cc_np_info(const char **title, const char **artist, int *playing);
+static int cc_np_toggle(void);
+static void d_tri(dc *d, float ax, float ay, float bx, float by, float cx, float cy, tk_col col);
+static void d_note(dc *d, float x, float y, float s, tk_col c);
+static void cc_now_playing(dc *d)
+{
+    float r[5];
+    cc_mod_rect(11, r);
+    float x = r[0], y = r[1];
+    cc_tile(d, x, y, r[2], r[3], r[4], 0);
+    const char *ti = 0, *ar = 0;
+    int playing = 0, have = cc_np_info(&ti, &ar, &playing);
+    d_rrect(d, x + 16, y + 16, 48, 48, 10, have ? tk_hex(0xff375f, 1) : W(.16f));
+    d_note(d, x + 26, y + 26, 28, W(have ? 1 : .7f));
+    d_text_box(d, TK_IT600, 15, x + 16, y + 88, r[2] - 32, 0, have ? ti : "Not Playing", 0, 0, W(have ? 1 : .7f), 0);
+    if (have && ar) d_text_box(d, TK_IT400, 13, x + 16, y + 105, r[2] - 32, 0, ar, 0, 0, W(.6f), 0);
+    tk_col tc = W(have ? 1 : .35f);
+    float cy = y + 128, cx = x + r[2] / 2;
+    d_tri(d, cx - 36, cy, cx - 26, cy - 7, cx - 26, cy + 7, tc); d_tri(d, cx - 46, cy, cx - 36, cy - 7, cx - 36, cy + 7, tc);
+    if (playing) { d_rrect(d, cx - 6, cy - 8, 4.5f, 16, 1.5f, tc); d_rrect(d, cx + 1.5f, cy - 8, 4.5f, 16, 1.5f, tc); }
+    else d_tri(d, cx - 6, cy - 9, cx + 9, cy, cx - 6, cy + 9, tc);
+    d_tri(d, cx + 36, cy, cx + 26, cy - 7, cx + 26, cy + 7, tc); d_tri(d, cx + 46, cy, cx + 36, cy - 7, cx + 36, cy + 7, tc);
+}
+static void cc_focus(dc *d)
+{
+    float r[5];
+    cc_mod_rect(12, r);
+    int on = sh_pref_int("notif.dnd", 0) != 0;
+    cc_tile(d, r[0], r[1], r[2], r[3], r[4], on);
+    float cx = r[0] + 34, cy = r[1] + r[3] / 2;
+    tk_col mc = on ? tk_hex(0x5e5ce6, 1) : W(1);
+    cc_arc(d, cx + 1, cy, 7.5f, 4.5f, 3.4f, 4.1f, mc);           /* the moon: a thick crescent */
+    d_text(d, TK_IT600, 15, r[0] + 58, cy + 5.5f, "Focus", 0, 0, on ? tk_hex(0x1c1c1e, 1) : W(1), 0);
+}
 static dc ccg_d;
 static int ccg_part;
-#define CCG_PARTS 9
+#define CCG_PARTS 10
 static void cc_grid_part(int k)
 {
     if (k != 1 && k != ccg_part) return;         /* (that grid was made again whole meanwhile) */
@@ -2225,7 +2271,8 @@ static void cc_grid_part(int k)
     CCS.save = sh_low_power_on();                /* cp6: Track A's Low Power Mode lights its tile */
     CCS.sil = snd_silent();                      /* 8a: Silent Mode lights its bell */
     relayer(&ccgrid);
-    d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, 4 * CC_U + 3 * CC_GAP, 44, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
+    /* 8b: six rows now: the margin 32 (the 2x2s' shadows reach ~33 pt: sigma ~10 + 3.5 offset; 44 cost ~1 MB more) */
+    d = mk(&ccgrid, "cc-grid", CC_COL(0), CC_ROW(0), 4 * CC_U + 3 * CC_GAP, CC_ROWS * CC_U + (CC_ROWS - 1) * CC_GAP, 32, 1);   /* P3q (P3j-11): the tiles' shapes recorded, mask freed below */
     ccg_d = d;
     /* the connectivity 2x2: Airplane, Cellular, Wi-Fi and the mini cluster (Bluetooth, Nearby, Hotspot, VPN) */
     } else if (k == 2) {                         /* cp7p (7m: 43 ms): the grid's bitmap made, then its first tile */
@@ -2255,44 +2302,59 @@ static void cc_grid_part(int k)
     }
     } else if (k == 5) {
     /* the sliders' glass (their level and glyph are layers above) */
-    cc_tile(&d, CC_COL(2), CC_ROW(0), CC_U, CC_W2, 34, 0);
-    cc_tile(&d, CC_COL(3), CC_ROW(0), CC_U, CC_W2, 34, 0);
+    float r1[5], r2[5];
+    cc_mod_rect(1, r1); cc_mod_rect(2, r2);
+    cc_tile(&d, r1[0], r1[1], r1[2], r1[3], 34, 0);
+    cc_tile(&d, r2[0], r2[1], r2[2], r2[3], 34, 0);
     } else if (k == 6) {
-    /* row 3: Flashlight, Rotation, Emergency, Saving; row 4: Timer, Calculator, Silent (8a), Camera */
     /* P3i: the torch's tile baked off; its lit look is a small layer over it, so the tap shows it at once (the
      * whole grid's rebuild took ~300 ms at the tap) */
-    cc_tile(&d, CCX[0], CC_R3, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-light", CCX[0], CC_R3, 16, 24);
+    float r[5];
+    cc_mod_rect(3, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-light", r[0], r[1], 16, 24);
     {
         relayer(&cclit);
-        dc e = mk(&cclit, "cc-lit", CCX[0], CC_R3, CC_U, CC_U, 1, 0);
-        d_rrect(&e, CCX[0], CC_R3, CC_U, CC_U, 34, W(1));
-        cc_glyph(&e, "cc-light-on", CCX[0], CC_R3, 16, 24);
+        dc e = mk(&cclit, "cc-lit", r[0], r[1], CC_U, CC_U, 1, 0);
+        d_rrect(&e, r[0], r[1], CC_U, CC_U, 34, W(1));
+        cc_glyph(&e, "cc-light-on", r[0], r[1], 16, 24);
         tk_layer_prepare(&cclit);
         cclit.hidden = !Q[0].lit;
     }
-    cc_tile(&d, CCX[1], CC_R3, CC_U, CC_U, 34, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", CCX[1], CC_R3, 22, 22);
+    cc_mod_rect(4, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, CCS.rot); cc_glyph(&d, CCS.rot ? "cc-rot-on" : "cc-rot", r[0], r[1], 22, 22);
     } else if (k == 7) {
-    cc_tile(&d, CCX[2], CC_R3, CC_U, CC_U, 34, 0);
-    cc_glyph(&d, "cc-flame", CCX[2], CC_R3, 20, 24);
+    float r[5];
+    cc_mod_rect(5, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, 0);
+    cc_glyph(&d, "cc-flame", r[0], r[1], 20, 24);
     {
         /* B6: Emergency's red a small layer over its tile, as the torch's: the switch shows it (the grid's rebuild
          * was most of a frame); B4's module 5 holds it */
         relayer(&ccem);
-        dc e = mk(&ccem, "cc-em", CCX[2], CC_R3, CC_U, CC_U, 1, 0);
-        d_rrect(&e, CCX[2], CC_R3, CC_U, CC_U, 34, tk_hex(0xff5a4e, 1));
-        cc_glyph(&e, "cc-flame", CCX[2], CC_R3, 20, 24);
+        dc e = mk(&ccem, "cc-em", r[0], r[1], CC_U, CC_U, 1, 0);
+        d_rrect(&e, r[0], r[1], CC_U, CC_U, 34, tk_hex(0xff5a4e, 1));
+        cc_glyph(&e, "cc-flame", r[0], r[1], 20, 24);
         tk_layer_prepare(&ccem);
         ccem.hidden = !EMG;
     }
-    cc_tile(&d, CCX[3], CC_R3, CC_U, CC_U, 34, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", CCX[3], CC_R3, 24, 14);
+    cc_mod_rect(6, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, CCS.save); cc_glyph(&d, CCS.save ? "cc-save-on" : "cc-save", r[0], r[1], 24, 14);
     } else if (k == 8) {
-    cc_tile(&d, CCX[0], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-timer", CCX[0], CC_R4, 22, 22);
+    float r[5];
+    cc_mod_rect(7, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-timer", r[0], r[1], 22, 22);
     /* P3i: white glyphs like the other buttons (the app icons in colour looked out of place); P3p: baked ones */
-    cc_tile(&d, CCX[1], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-calc", CCX[1], CC_R4, 24, 24);
+    cc_mod_rect(8, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-calc", r[0], r[1], 24, 24);
+    } else if (k == 9) {
+    float r[5];
+    cc_mod_rect(9, r);                           /* 8a (top ten #8): Silent Mode */
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, CCS.sil); cc_bell(&d, r[0] + CC_U / 2, r[1] + CC_U / 2, CCS.sil);
+    cc_mod_rect(10, r);
+    cc_tile(&d, r[0], r[1], CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-camera", r[0], r[1], 24, 24);
     } else {
-    /* 8a (top ten #8): Silent Mode where the Mirror tile was (it opened the Camera, as the tile beside it) */
-    cc_tile(&d, CCX[2], CC_R4, CC_U, CC_U, 34, CCS.sil); cc_bell(&d, CCX[2] + CC_U / 2, CC_R4 + CC_U / 2, CCS.sil);
-    cc_tile(&d, CCX[3], CC_R4, CC_U, CC_U, 34, 0); cc_glyph(&d, "cc-camera", CCX[3], CC_R4, 24, 24);
+    cc_now_playing(&d);                          /* 8b: iOS 27's page 1: Now Playing and Focus */
+    cc_focus(&d);
     tk_a8_free(&ccgrid.glass);
     trim(&ccgrid);
     tk_layer_prepare(&ccgrid);
@@ -2306,8 +2368,9 @@ static void build_cc_grid(void)
 static void cc_levels(void)
 {
     for (int i = 0; i < 2; i++) {
-        float x = CC_COL(2 + i), v = CCS.lvl[i];
-        cclvl[i].clip_r = (tk_rect){ PT(x), PT(CC_ROW(0) + CC_W2 * (1 - v)), PT(CC_U), PT(CC_W2 * v) };
+        float r[5], v = CCS.lvl[i];
+        cc_mod_rect(1 + i, r);
+        cclvl[i].clip_r = (tk_rect){ PT(r[0]), PT(r[1] + CC_W2 * (1 - v)), PT(CC_U), PT(CC_W2 * v) };
     }
 }
 /* cp7c: build_cc in stages, one an idle call (sh_idle_pending while some are left: the whole was ~0.6-1.2 s on the
@@ -2419,7 +2482,9 @@ static void build_cc_stage(int st)
     }
     if (!cclvl[0].bmp.px) {
         for (int i = 0; i < 2; i++) {
-            float x = CC_COL(2 + i), y = CC_ROW(0);
+            float rr[5];
+            cc_mod_rect(1 + i, rr);
+            float x = rr[0], y = rr[1];
             dc l = mk(&cclvl[i], "cc-level", x, y, CC_U, CC_W2, 0, 0);
             d_rrect(&l, x, y, CC_U, CC_W2, 34, W(1));
             cclvl[i].clip = 1;
@@ -2496,8 +2561,8 @@ static void cc_mods(float p)
         tk_layer *m = &ccmod[i];
         float r[5];
         cc_mod_rect(i, r);
-        int row = i < 3 || i == 11 ? 0 : i < 7 ? 1 : 2;
-        float dl = .07f * row, q = tk_clampf((p - dl) / (1 - dl), 0, 1);
+        int row = i == CC_CHROME ? 0 : CCL[i][1];            /* 8b: six rows: .045 a row (B4's three were .07) */
+        float dl = .045f * row, q = tk_clampf((p - dl) / (1 - dl), 0, 1);
         float s = .9f + .1f * q, a = tk_clampf(q * 1.6f, 0, 1);
         s *= cc_pscale[i];
         if (e > 0) {
@@ -2785,7 +2850,7 @@ static void cc_release(void)
 /* cp6: a lit circle on the chrome's + or Power (they are one layer with the page icons: no grow, the glow only) */
 static void cc_chrome_press(float cx)
 {
-    cc_hlm = 11;
+    cc_hlm = CC_CHROME;
     cc_hlr[0] = cx - 14; cc_hlr[1] = 16; cc_hlr[2] = cc_hlr[3] = 28; cc_hlr[4] = 14;
     hl_set(&cchl, (tk_rect){ cx - 14, 16, 28, 28 }, (tk_rect){ cx - 14, 16, 28, 28 }, 14, PRESS_BTN);
     cc_mods(CCS.p);
@@ -2818,50 +2883,71 @@ static int cc_tap(float x, float y)
         int k = (x >= X + CN_PAD + CN_D + 14 + CN_MD + 2.75f) + 2 * (y >= Y + CN_PAD + CN_D + 14 + CN_MD + 3.1f);
         toast(k == 0 ? CC_NOT[4] : k == 1 ? CC_NOT[1] : k == 2 ? CC_NOT[5] : "VPN isn't available yet");
         return 1;
-    } else if (y >= CC_R3 && y < CC_R3 + CC_U) {
-        int c = x < CCX[1] - CC_GAP / 2 ? 0 : x < CCX[2] - CC_GAP / 2 ? 1 : x < CCX[3] - CC_GAP / 2 ? 2 : 3;
-        if (c == 0) {
-            Q[0].lit = !Q[0].lit; Q[0].facelit.hidden = Q[0].iconlit.hidden = !Q[0].lit; Q[0].face.hidden = Q[0].icon.hidden = Q[0].lit; sh_torch(Q[0].lit); lock_ver++;
-            cclit.hidden = !Q[0].lit || !cclit.bmp.px;
-            sh_haptic_k(SH_HAP_LIGHT);       /* B4: a toggle, felt */
-            return 1;
-        }
-        else if (c == 1) {                   /* cp7: Portrait Orientation Lock (Track A's pref; the apps that turn) */
-            int on = !sh_orientation_lock();
-            sh_orientation_lock_set(on);
-            sh_haptic_k(SH_HAP_LIGHT);
-            toast(on ? "Portrait Orientation Lock: On" : "Portrait Orientation Lock: Off");
-            build_cc_grid(); cc_link();
-            return 1;
-        }
-        else if (c == 3) {                   /* Track A, 1.0: Low Power Mode (kernel: the conservative clocks, kept) */
-            int on = !sh_low_power_on();
-            sh_low_power(on);
-            sh_haptic_k(SH_HAP_LIGHT);
-            toast(on ? "Low Power Mode On" : "Low Power Mode Off");
-            build_cc_grid(); cc_link();      /* cp6: the tile lit / unlit (a rare toggle: the grid's rects and glyphs, no bake on the GPU row) */
-            return 1;
-        }
-        else return 1;                       /* Emergency: a hold (G_CCEM) */
-    } else if (y >= CC_R4 && y < CC_R4 + CC_U && x >= CCX[0] && x < CCX[3] + CC_U) {
-        /* Track A, 1.0: Timer, Calculator, Mirror, Camera open their apps (Timer: Clock; Mirror: the front camera);
-         * on the lock screen they ask for the unlock first (no app over the lock without it) */
-        static const char *const K4[4] = { "clock", "calc", "camera", "camera" };
-        int c = x < CCX[1] - CC_GAP / 2 ? 0 : x < CCX[2] - CC_GAP / 2 ? 1 : x < CCX[3] - CC_GAP / 2 ? 2 : 3;
-        if (c == 2) {                        /* 8a: Silent Mode (works on the lock too, as iOS's) */
-            int on = !snd_silent();
-            sh_haptic_k(SH_HAP_LIGHT);
-            snd_silent_set(on);
-            toast(on ? "Silent Mode On" : "Silent Mode Off");
+    }
+    /* 8b: the round and wide modules by their index (CCL's places) */
+    int m = cc_mod_at(x, y);
+    if (m == 3) {                                /* Flashlight */
+        Q[0].lit = !Q[0].lit; Q[0].facelit.hidden = Q[0].iconlit.hidden = !Q[0].lit; Q[0].face.hidden = Q[0].icon.hidden = Q[0].lit; sh_torch(Q[0].lit); lock_ver++;
+        cclit.hidden = !Q[0].lit || !cclit.bmp.px;
+        sh_haptic_k(SH_HAP_LIGHT);               /* B4: a toggle, felt */
+        return 1;
+    }
+    if (m == 4) {                                /* cp7: Portrait Orientation Lock (Track A's pref; the apps that turn) */
+        int on = !sh_orientation_lock();
+        sh_orientation_lock_set(on);
+        sh_haptic_k(SH_HAP_LIGHT);
+        toast(on ? "Portrait Orientation Lock: On" : "Portrait Orientation Lock: Off");
+        build_cc_grid(); cc_link();
+        return 1;
+    }
+    if (m == 6) {                                /* Track A, 1.0: Low Power Mode (kernel: the conservative clocks, kept) */
+        int on = !sh_low_power_on();
+        sh_low_power(on);
+        sh_haptic_k(SH_HAP_LIGHT);
+        toast(on ? "Low Power Mode On" : "Low Power Mode Off");
+        build_cc_grid(); cc_link();              /* cp6: the tile lit / unlit (a rare toggle: the grid's rects and glyphs, no bake on the GPU row) */
+        return 1;
+    }
+    if (m == 5) return 1;                        /* Emergency: a hold (G_CCEM) */
+    if (m == 9) {                                /* 8a: Silent Mode (works on the lock too, as iOS's) */
+        int on = !snd_silent();
+        sh_haptic_k(SH_HAP_LIGHT);
+        snd_silent_set(on);
+        toast(on ? "Silent Mode On" : "Silent Mode Off");
+        return 1;
+    }
+    if (m == 12) {                               /* 8b: Focus: Do Not Disturb (no banners or sounds, the urgent ones still) */
+        int on = !sh_pref_int("notif.dnd", 0);
+        sh_pref_set_int("notif.dnd", on);
+        sh_haptic_k(SH_HAP_LIGHT);
+        toast(on ? "Do Not Disturb: On" : "Do Not Disturb: Off");
+        build_cc_grid(); cc_link();
+        return 1;
+    }
+    if (m == 11) {                               /* 8b: Now Playing: its play / pause; elsewhere on it, Music */
+        float r[5];
+        cc_mod_rect(11, r);
+        if (y >= r[1] + 108 && tk_fabsf(x - (r[0] + r[2] / 2)) < 20) {
+            if (cc_np_toggle()) { sh_haptic_k(SH_HAP_LIGHT); build_cc_grid(); cc_link(); }
+            else toast("Nothing is playing");
             return 1;
         }
         if (lockY > -H_PT * .5f) { toast("Unlock to open it"); return 1; }
         sh_haptic_k(SH_HAP_LIGHT);
         cc_close();
-        if (!open_app_key(K4[c])) toast("Not in this version yet");
+        if (!open_app_key("music")) toast("Not in this version yet");
         return 1;
-    } else
-        return 0;
+    }
+    if (m == 7 || m == 8 || m == 10) {
+        /* Track A, 1.0: Timer, Calculator, Camera open their apps (Timer: Clock); on the lock screen they ask for
+         * the unlock first (no app over the lock without it) */
+        if (lockY > -H_PT * .5f) { toast("Unlock to open it"); return 1; }
+        sh_haptic_k(SH_HAP_LIGHT);
+        cc_close();
+        if (!open_app_key(m == 7 ? "clock" : m == 8 ? "calc" : "camera")) toast("Not in this version yet");
+        return 1;
+    }
+    return m >= 0;
 }
 /* B4: a tap on the expanded panel's links (the Cellular one is a hold: G_CCCELL) */
 static void cc_x_tap(int k)
