@@ -439,7 +439,9 @@ static void test_full_cycle(int log_in_dram, int no_irq)
 
     /* VSS */
     unsigned n0 = F.nipc;
+    CHECK(!abox_vss_started(), "%s: vss_started before START_VSS", t);
     r = abox_vss_start();
+    CHECK(abox_vss_started(), "%s: vss_started after START_VSS", t);
     CHECK(r == 0 && F.nipc == n0 + 1 && F.ipc[n0].w[0] == 1 && F.ipc[n0].w[2] == 0xA0, "%s: START_VSS", t);
 
     /* a call */
@@ -507,8 +509,10 @@ static void test_full_cycle(int log_in_dram, int no_irq)
     /* off */
     n0 = F.nipc;
     unsigned ns = F.nsmc;
+    CHECK(abox_vss_started(), "%s: vss_started through the call", t);
     abox_off();
     CHECK(abox_state() == ABOX_ST_OFF, "%s: state after off", t);
+    CHECK(!abox_vss_started(), "%s: vss_started after off", t);
     CHECK(find_ipc(n0, 1, 0x01, -1) >= 0, "%s: SUSPEND sent", t);
     CHECK(!(reg(ABOX_PMU + 0x4164) >> 28 & 1) && !(reg(ABOX_PMU + 0x415C) & 1) && !(reg(ABOX_PMU + 0x4160) & 1),
           "%s: CPU off", t);
