@@ -1903,6 +1903,8 @@ static int snd_ring_who;
 static void snd_ring(int who, int kind) { if (sh_snd_tone(kind) == 0) snd_ring_who = who; }
 static void snd_ring_stop(int who) { if (snd_ring_who == who) { sh_snd_tone_stop(); snd_ring_who = 0; } }
 static void snd_once(int kind) { if (!snd_ring_who) (void)sh_snd_tone(kind); }
+/* cp7x (Track A): the kernel's alarm (alarm.c rings and stops it): owner 4; it takes over any other ring */
+void sh_alarm_sound(int on) { if (on) snd_ring(4, SH_SND_ALARM); else snd_ring_stop(4); }
 static int cc_vol = -1;         /* the volume (0..15) the Control Centre's slider last sent */
 /* the platform's brightness now (1..4; 0: the boot's own): the slider starts there */
 void sh_bright_now(int level)

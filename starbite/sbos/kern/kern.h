@@ -436,6 +436,7 @@ int alarm_ringing(void);
 void alarm_minute(const struct sbos_time *t);
 void alarm_timer(void);
 int alarm_stop(int snooze);
+void alarm_sound(int on);                     /* cp7x: the alarm's sound (weak no-op; the Next shell plays it) */
 /* Track A (2026-11-12): Next's Alarm tab (the list of up to four, labels), kept in the record "sbos.alarm" */
 #define ALARM_REC_SIZE (4 + 4 * 28)
 int alarm_count(void);

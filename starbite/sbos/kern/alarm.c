@@ -23,6 +23,9 @@ static uint8_t used[NALARM];
 static char label[NALARM][LABEL_MAX];
 static int kept;                            /* the list came from "sbos.alarm" (or was edited in Next) */
 static int ringing = -1;                    /* the alarm ringing (or -1) */
+/* cp7x (Track A): the alarm's sound. The Next shell plays snd's ALARM tone (kern_next.c -> shell_lock.c's
+ * sh_alarm_sound, the shell's ring owner 4) from the ring until Stop / Snooze / the 10 minutes; other shells: none */
+__attribute__((weak)) void alarm_sound(int on) { (void)on; }
 static uint64_t ring_t0;
 static int64_t snooze_utc;                  /* a snoozed alarm rings again at this time (0 none) */
 static int snooze_idx = -1;
@@ -92,6 +95,7 @@ static void ring(int i, const char *why)
         app_event_send(a, EV_APP_SERVICE, 3, i | al[i].h << 8 | al[i].m << 16);
     }
     (void)vib_buzz(3, 500, 300);
+    alarm_sound(1);
     kt_set(KT_CLOCK, 1, sb_ms(), RING_EVERY_MS, 0);
 }
 
@@ -152,6 +156,7 @@ int alarm_stop(int snooze)
     ringing = -1;
     kt_cancel(KT_CLOCK, 1);
     vib_off();
+    alarm_sound(0);
     if (snooze) {
         struct sbos_time t;
         if (clock_now(&t) && t.utc) {

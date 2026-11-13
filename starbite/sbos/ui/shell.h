@@ -630,6 +630,7 @@ void sh_hw_key(int usage, int down, uint32_t unicode);
  * (sh_snd_open, then sh_snd_write 48 kHz stereo int16 frames as sh_snd_space allows, never blocking; sh_snd_close).
  * sh_snd_why: plain words for what sound does or why not (e.g. a call has the hardware). Self test: refused. */
 enum { SH_SND_RING = 1, SH_SND_ALARM = 2, SH_SND_NOTIFY = 3, SH_SND_CLICK = 4 };
+void sh_alarm_sound(int on);    /* cp7x: the kernel's wake-up alarm rings (1) / stops (0): shell_lock.c, ring owner 4 */
 int sh_snd_tone(int kind);
 void sh_snd_tone_stop(void);
 int sh_snd_volume(void);

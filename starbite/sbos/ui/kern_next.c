@@ -3281,3 +3281,4 @@ unsigned sh_snd_write(int id, const int16_t *frames, unsigned n) { if (!snd_up) 
 unsigned sh_snd_space(int id) { return snd_up ? snd_space(id) : 0; }
 void sh_snd_close(int id) { if (snd_up) snd_close(id); }
 const char *sh_snd_why(void) { return snd_up ? snd_why() : "Sound starts when something plays"; }
+void alarm_sound(int on) { sh_alarm_sound(on); }   /* cp7x: alarm.c's ring -> the shell's ring owner 4 */
