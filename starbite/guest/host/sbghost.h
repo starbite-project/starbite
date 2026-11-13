@@ -128,7 +128,7 @@ void sbg_boot_extend(uint32_t ms);
 /* From the host's tick: the guest's messages and log, state changes, timeouts, the line checks. */
 void sbg_poll(void);
 /* One waiting block READ of at most max_sectors (nothing else: no 9P, no messages, no state; a write or a bigger
- * read waits for sbg_poll): 1 served, 0 none. For a host that calls it from inside long work (a frame's GPU wait)
+ * read waits for sbg_poll): the sectors served, 0 none. For a host that calls it from inside long work (a frame's GPU wait)
  * so a booting guest's reads do not each wait a whole loop turn, under its own time budget. */
 int sbg_pump(uint32_t max_sectors);
 /* The host received db_host (from its own interrupt loop). */

@@ -185,6 +185,22 @@ static void test_resolve(void)
     CHECK(gcard_overlay_why(L("T_OVERLAY_SECTOR"), 1) != 0, "a self-test image never gets a writable overlay");
     CHECK(gcard_overlap(100, 10, 105, 10) && !gcard_overlap(100, 10, 110, 10), "overlap helper");
     CHECK(!changed_outside(0, 0), "resolving wrote nothing");
+    /* cp7q: folders are read in 16 KiB pieces: a 200-file folder (two pieces, an entry set across the boundary),
+     * and a small one costs one short read */
+    {
+        static struct exfat_ent hit[1], lst[8];
+        struct exfat_ent d, f;
+        int total = 0;
+        CHECK(!exfat_walk(&fs, "/starbite/big", &d, hit, 1) && d.dir, "the big folder found");
+        CHECK(exfat_list(&fs, &d, lst, 8, &total) == 8 && total == 200, "the big folder lists 200 entries (%d)", total);
+        CHECK(!exfat_walk(&fs, "/starbite/big/f170.txt", &f, hit, 1) && !strcmp(f.name, "f170.txt"),
+              "f170.txt (its entry set across the 16 KiB piece boundary) found");
+        CHECK(!exfat_walk(&fs, "/starbite/big/f199.txt", &f, hit, 1), "f199.txt (the second piece) found");
+        CHECK(exfat_walk(&fs, "/starbite/big/f200.txt", &f, hit, 1), "f200.txt is not there");
+        int r0 = sd_reads;
+        CHECK(!exfat_walk(&fs, "/starbite/linux", &d, hit, 1) && exfat_list(&fs, &d, lst, 8, &total) >= 0 &&
+              sd_reads - r0 <= 3, "/starbite/linux: walked and listed in %d reads (one piece per level)", sd_reads - r0);
+    }
 }
 
 /* ---- cp7i: the stepped proof (batches of FAT sectors, as the phone's start does one per tick) gives the same

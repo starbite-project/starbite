@@ -165,10 +165,13 @@ static int list_impl(struct exfat *fs, const struct exfat_ent *dir, struct exfat
             break;                                     /* a cycle in the FAT (a corrupt card) */
         if (!valid(fs, c))
             break;
-        if (fs->rd(cl_sector(fs, c), 1U << fs->spc_shift, fs->buf))
-            return -1;
+        /* the cluster in pieces of at most 16 KiB, so a small folder (its end mark in the first piece) costs one
+         * short read: on the phone's microSD (~2.9 MB/s) a whole 128 KiB cluster was ~45 ms (cp7q) */
+        uint32_t spc = 1U << fs->spc_shift, piece = spc < 32U ? spc : 32U, pb = piece * 512U;
         for (uint32_t o = 0; o < fs->cluster_bytes; o += 32) {
-            const uint8_t *e = fs->buf + o;
+            if (o % pb == 0 && fs->rd(cl_sector(fs, c) + o / 512U, piece, fs->buf))
+                return -1;
+            const uint8_t *e = fs->buf + o % pb;
             uint8_t t = e[0];
             if (t == 0x00)
                 goto end;                              /* end of directory */
