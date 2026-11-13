@@ -23,6 +23,7 @@ void next_kinit(void), next_kdraw(void), next_kevent(const void *e), next_ktimer
 #endif
 #include "survival.h"
 #include "usb.h"
+#include "sd.h"
 
 struct kstate K;
 static uint64_t boot_ms;
@@ -151,6 +152,8 @@ void sb_main(void)
 {
 #ifndef SB_HOST
     sbos_spsel1();                          /* first: libsb's probe and crash vectors then use SP_EL1 */
+    sd_set_fast(SD_FAST_ON);                /* the card's fast reads (libsb sd.c: CMD6 high speed + IDMAC) from its first
+                                             * sd_up on; nothing touches the card here. A failure: 25 MHz PIO, one log line */
 #endif
     uint64_t t_entry = sb_ms();             /* the counter runs from power-on: S-Boot and the loader before this */
     kmodem_reserve();                       /* P3n: the modem's 2.25 MiB before the UI's heap takes the arena */

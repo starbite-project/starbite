@@ -40,6 +40,7 @@ track's 49eb6ae (`kern/drvprobe.h`).
 | Notification LED (MAX77705 RGB at 0x66, not 0x4A) | nled.c | nled-test | drivers/NLED.md |
 | Battery health (Maximum Capacity %, cycles; read only) | bathealth.c | bathealth-test 31 | drivers/BATTERY-HEALTH.md |
 | USB device: CDC-ACM console (Utility OS's DWC3 driver) | usb.c, usbacm.c | usb-test 19665 | drivers/USB.md |
+| microSD fast reads: CMD6 high speed (33.58 MHz) + IDMAC CMD18, read only; probe "sd" | libsb/sd.c (sd_set_fast), main.c, sdprobe.c | sd-test | libsb/sd.c header |
 | The combined on-phone probe | drvprobe.c, uitest.c SBOS_SELFTEST_NEXT_DRV | drvprobe-test | (drivers-request.md in the notes) |
 
 Still missing after this: rear camera, USB host, MFC video, NFC, DisplayPort, HRM measurement, SAR grip, our own GNSS
