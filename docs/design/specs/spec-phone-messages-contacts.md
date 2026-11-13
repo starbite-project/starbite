@@ -687,7 +687,7 @@ type a name → Done → the row and every thread now show the name.
 | 2 | Filter / Edit menus | button → glass panel morph; rows fade in over the second half | 0.40, bounce 0.20; close 0.35, bounce 0.10 | LG §5.3 |
 | 3 | Filter change | list cross-fade | 0.2 s ease | E |
 | 4 | Push (row → info / thread / card) | IR §16 push | 0.45 / 1.0 | IR §16 |
-| 5 | Swipe actions | row follows the finger 1:1; actions revealed; past 60 % width → full-swipe commit; release → snap open (action width) or closed | 0.35 / 0.85; commit: row slides out 0.25 s, list closes up 0.3 s | E |
+| 5 | Swipe actions | row turns into a grey rounded card and follows the finger 1:1; Ø 50 action circles scale 0.5 → 1 as they are revealed; past 60 % width → full-swipe commit (selection haptic at the threshold); release → snap open (circles' width + 10) or closed | 0.35 / 0.85; commit: row slides out 0.25 s, list closes up 0.3 s | M (shape) / E (timing) |
 | 6 | Long-press preview / context menu | content lifts 1.03 + shadow; background blur 0 → 20; menu grows from the touch side | 0.35 / 0.8 | IR §3.3, E |
 | 7 | Keypad key press | glass press (grow ≈ 1.06, light) | down 0.25 b .2; up 0.40 b .35 | LG §5.1 |
 | 8 | T9 capsule appear / change | materialise (0.8 → 1, lensing ramp); text cross-fade 0.15 s | 0.35, no bounce | LG §5.2 |
@@ -728,8 +728,9 @@ type a name → Done → the row and every thread now show the name.
 - Filter: Classic · Unified · Calls · Missed · Unknown Callers · Manage Filtering
 - Classic footer (ours): "Classic layout isn't available yet."
 - Rows: mobile · home · work · iPhone · unknown · Yesterday · (n) · Show All · Mark as Known
-- Swipe: Remind Me · Delete. Remind menu: In 1 hour · Tonight · Tomorrow · Custom…
-- Row menu: Call · Send Message · Add to Favorites · Create New Contact · Add to Existing Contact · Delete from Recents
+- Swipe: Remind Me · Delete. Remind menu: Call Back Reminder (header) · Remind Me in 1 Hour · Remind Me Tonight ·
+  Remind Me Tomorrow · Remind Me Later…
+- Row menu: Message · Call · Create New Contact · Add to Existing Contact · Delete
 - Empty: No Recent Calls · "Calls you make and receive appear here." · "Turn on Cellular to make and receive calls." ·
   Cellular Settings
 - Keypad: Paste · Create New Contact · Add to Existing Contact · " and n more" · emergency line (today's text)
@@ -744,7 +745,7 @@ type a name → Done → the row and every thread now show the name.
 **Messages**
 - List: Messages · Edit · Done · Select Messages · Edit Pins · Search · Pin · Unpin · Mark as Unread · Mark as Read ·
   Hide Alerts · Show Alerts · Delete · Read All · Read · Unread · Draft: · Not Delivered
-- Filter: Messages · Unread · Known Senders · Unknown Senders · Recently Deleted · Manage Filtering
+- Filter: Messages · Unread · Unknown Senders · Recently Deleted · Manage Filtering
 - Recently Deleted: Recover · Delete · "Permanently delete n conversations? This can't be undone." · n days
 - Empty: No Messages · "Your conversations appear here." · "Turn on Cellular to send and receive text messages." ·
   No Results · Conversations · Messages
@@ -828,13 +829,14 @@ type a name → Done → the row and every thread now show the name.
    galleries, Apple Newsroom WWDC25 call-screening renders.
 2. **Compact incoming call banner** (§2.7): height, button sizes, layout. iOS 26 review screenshots (MacStories iOS
    26 review, Phone section).
-3. **Messages pinned grid** (§2.9: Ø 86, 3 per row) and the **long-press row preview**: any iOS 26/27 screenshot with
-   pins.
-4. **Reaction bar geometry** (§2.10.6: 300 x 48, 28 pt emoji) and **menu items** for an SMS bubble: the UG27
-   "React with Tapbacks" art (`c472aee5…`, not yet measured) is the next image to measure.
-5. **Swipe-action colours and order** in Messages (Alerts indigo vs purple) and Phone (Remind Me blue): TB
-   "Phone-UI-Reminders" screenshot (downloaded, not yet measured) and a Messages swipe screenshot.
-6. **Filter menu order in Messages** (§2.9.3): the UG27 "Screen and filter texts" art (`3c7f0039…`).
+3. **Long-press conversation preview** in Messages (size of the lifted thread card, menu order). The pinned grid is
+   now measured.
+4. **Long-press menu items** under a bubble (Reply / Copy / Select / Translate / More… order) — the reaction bar is
+   measured, the menu is not (the UG27 art shows the bar only).
+5. **Messages trailing swipe** (Hide Alerts colour and position next to Delete): Phone's swipe and Messages' leading
+   swipe are measured; the Messages trailing pair is not.
+6. **Where "Unread" and "Unknown Senders" sit** in the Messages Filter menu (the art shows only Messages / Spam /
+   Recently Deleted).
 7. **Bubble metrics**: the UG27 art gives line pitch 20.7 with the 17 pt text assumed. Re-measure on a native
    3x screenshot (any review) to confirm 21 vs 22 and the 9.75 padding.
 8. **Search results layout** (Messages, Phone): the UG27 search art (`b7eaa123…`, `930c1bb1…`).

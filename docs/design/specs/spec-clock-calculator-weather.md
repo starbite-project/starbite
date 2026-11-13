@@ -12,7 +12,7 @@ adds what is specific to the three apps.
 > - **Scientific maths:** A3 ports the functions it needs from **musl's libm** (MIT).
 > - **Forecasts:** **Open-Meteo** (free, no key), cached in a blob, with the location **rounded to ~1 km** before any
 >   request.
->- **Currency rates:** **Frankfurter** (the ECB's reference rates; free, no key; Track A's decision). Cache and date them
+> - **Currency rates:** **Frankfurter** (the ECB's reference rates; free, no key; Track A's decision). Cache and date them
 >   like the forecasts. Convert's units work fully offline.
 > - **Haptics:** no haptic on Calculator keys (as iOS); remove the trunk's.
 
