@@ -309,6 +309,7 @@ static void bus_took(uint64_t hz)
 }
 
 static int fast_fail(const char *why);
+static void bus_back(void);
 static int hs_clock(int mode);
 
 static int up_once(void)
@@ -426,6 +427,8 @@ static int up_once(void)
     sd_rep.state = 1;
     if (fast_want)
         (void)fast_try();                      /* any failure: back to 25 MHz PIO, one log line */
+    else
+        bus_back();
     return 1;
 }
 
@@ -821,7 +824,26 @@ static int fast_fail(const char *why)
     if (set_clock(25000000))
         sd_rep.fast_why = why = "the clock update back to 25 MHz failed";
     fast_log(why);
+    bus_back();
     return 0;
+}
+
+/* No fast reads (a card without high speed, a fast-path failure, or fast reads not wanted) while the kernel raised the
+ * bus clock: S-Boot's CMU divider back, so the card runs exactly as before the fast path existed (the "25 MHz" setting
+ * = 6.25 MHz under S-Boot's /16; a true 25 MHz was never run on this phone). sd_rebus calls fast_fail only while
+ * fast reads are on: no recursion. */
+static void bus_back(void)
+{
+    if (!bus_hook || sd_rep.bus_set != 1 || sd_rep.state != 1 || sd_rep.fast)
+        return;
+    int r = sd_rebus(bus_hook, 1);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, r ? "sd: S-Boot's CMU divider back without fast reads FAILED: card "
+               : "sd: no fast reads: S-Boot's CMU divider back, card ");
+    ub_dec(&u, sd_rep.card_hz / 1000U);
+    ub_s(&u, " kHz");
+    sb_log(u.b);
 }
 
 /* High speed, then the IDMAC, each checked on sectors 0-7 against the old path. 1 on, 0 off. */

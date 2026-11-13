@@ -17,7 +17,8 @@ uint64_t sb_ticks(void) { return ++now; }
 uint64_t sb_freq(void) { return 1000000U; }
 void sb_mdelay(unsigned ms) { now += (uint64_t)ms * 1000U; }
 int sb_sd_rails(uint8_t *a, uint8_t *b) { *a = 0xe8; *b = 0xfc; return 1; }
-int sb_fence_active(void) { return 0; }
+static int fence_on;                        /* t_write_clock only: a write through the fence */
+int sb_fence_active(void) { return fence_on; }
 static int map_kind = 2;
 int sb_map_kind(uint64_t pa) { (void)pa; return map_kind; }
 static unsigned n_clean, n_inval;
@@ -38,6 +39,8 @@ static uint32_t regs[64];                    /* 0x00..0xfc */
 static uint64_t fifo[1 << 16];
 static unsigned fh, ft;
 static int app_next, hs_offer = 1, card_hs, query_said_yes, dma_fail_next, scr_spec = 2;
+static unsigned n_writes, write_clkdiv;
+static int write_hs = -1;
 static unsigned bad_cmds, cmd6_set, cmd6_query, n_cmd18_dma, n_cmd18_pio, n_cmd9, n_acmd51;
 static uint32_t clkdiv_now, clksel_last;
 static uint32_t cmu_div_reg;                 /* DIV_CLKCMU_FSYS1_MMC_CARD as the fake CMU has it */
@@ -53,13 +56,16 @@ static uint64_t cap_dbaddr;
 static uint64_t word(uint64_t sector, unsigned w) { return (sector << 32) ^ (w * 0x9e3779b97f4a7c15ULL) ^ 0x5d; }
 static void push(uint64_t v) { fifo[ft++ & 0xffff] = v; }
 
-static void status64(int set)
+static void status64(int set, uint32_t arg)
 {
     uint8_t b[64];
     memset(b, 0, sizeof b);
+    unsigned fn = arg & 0xfU;                   /* group 1's function: 1 high speed, 0 default speed (before writes) */
     b[13] = hs_offer ? 0x03 : 0x01;
-    b[16] = hs_offer ? 0x01 : 0x0f;
-    if (set && hs_offer)
+    b[16] = fn == 0 ? 0x00 : hs_offer ? 0x01 : 0x0f;
+    if (set && fn == 0)
+        card_hs = 0;
+    else if (set && hs_offer)
         card_hs = 1;
     for (unsigned i = 0; i < 8; ++i) {
         uint64_t v = 0;
@@ -123,6 +129,11 @@ static void command(uint32_t v)
     app_next = 0;
     if (ncmds < 256)
         log_cmds[ncmds++] = (app ? 100 : 0) + (int)idx;
+    if ((v & (1U << 10)) || (!app && (idx == 24 || idx == 25))) {   /* a write: the clock and card mode it ran with */
+        ++n_writes;
+        write_clkdiv = R(0x08);
+        write_hs = card_hs;
+    }
     if (v & (1U << 10)) ++bad_cmds;             /* any data write */
     if (!app && (idx == 20 || idx == 24 || idx == 25 || idx == 27 || idx == 28 || idx == 29 || idx == 32 ||
                  idx == 33 || idx == 38 || idx == 42 || idx == 56))
@@ -163,7 +174,7 @@ static void command(uint32_t v)
             if (arg != 0x00fffff1U) ++bad_cmds;
             query_said_yes = hs_offer;
         }
-        status64((arg & 0x80000000U) != 0);
+        status64((arg & 0x80000000U) != 0, arg);
         R(0x44) |= 1U << 3;
         break;
     case 17: case 18:
@@ -536,6 +547,62 @@ static void t_rebus(void)
     CHECK(bad_cmds == 0, "rebus: no write command");
 }
 
+/* Track A's question 2: a card without high speed while the kernel raised the bus clock: S-Boot's divider back,
+ * the card at the 6.25 MHz it always had */
+static void t_hook_no_hs(void)
+{
+    reset(HCON_OK);
+    hook_reset();
+    cmu_div_reg = 0x1000000fU;
+    hs_offer = 0;
+    sd_set_bus_hook(fake_hook);
+    sd_allow();
+    sd_set_fast(SD_FAST_ON);
+    CHECK(sd_up() == 1 && sd_rep.fast == 0, "no hs + hook: card up, no fast reads");
+    CHECK(hook_raise == 1 && hook_restore == 1 && hook_bad == 0, "no hs + hook: the divider raised, then back (clock stopped)");
+    CHECK(sd_rep.bus_hz == BUS_SBOOT && sd_rep.card_hz <= 6250000ULL && sd_rep.card_hz > 6200000ULL,
+          "no hs + hook: the card at 6.25 MHz, as before the fast path");
+    CHECK(strstr(lastlog, "S-Boot's CMU divider back") != 0, "no hs + hook: logged");
+    hs_offer = 1;
+}
+
+/* Track A's question 1: a write (the state slot's) with fast reads on and the bus clock raised: the write command goes
+ * out at 6.25 MHz (CLKDIV 16 from 200 MHz) with the card in default speed; high speed and 50 MHz again after */
+static void t_write_clock(void)
+{
+    reset(HCON_OK);
+    hook_reset();
+    cmu_div_reg = 0x1000000fU;
+    sd_set_bus_hook(fake_hook);
+    sd_allow();
+    sd_set_fast(SD_FAST_ON);
+    CHECK(sd_up() == 1 && sd_rep.fast == SD_FAST_ON && clkdiv_now == 2U, "write: fast reads on at 50 MHz");
+    fence_on = 1;
+    n_writes = 0, write_clkdiv = 0, write_hs = -1;
+    (void)sd_write(4096, 8, (uintptr_t)big);         /* the fake does not complete a write: the command is what counts */
+    fence_on = 0;
+    CHECK(n_writes >= 1, "write: no write command reached the card");
+    CHECK(write_clkdiv == 16U, "write: CLKDIV %u at the write (16 = 6.25 MHz from 200 MHz)");
+    CHECK(write_hs == 0, "write: the card was not in default speed at the write");
+    CHECK(card_hs == 1 && clkdiv_now == 2U && sd_rep.fast == SD_FAST_ON, "write: high speed and 50 MHz again after");
+    /* fast reads turned off while the bus stays raised: still 6.25 MHz for a write */
+    reset(HCON_OK);
+    hook_reset();
+    cmu_div_reg = 0x1000000fU;
+    hook_changes = 1;
+    sd_set_bus_hook(fake_hook);
+    sd_allow();
+    sd_set_fast(SD_FAST_ON);
+    CHECK(sd_up() == 1, "write 2: up");
+    CHECK(sd_set_fast(SD_FAST_OFF) == 0 && sd_rep.card_hz > 24900000ULL, "write 2: fast off, the bus still raised (25 MHz)");
+    fence_on = 1;
+    n_writes = 0, write_clkdiv = 0;
+    (void)sd_write(4096, 8, (uintptr_t)big);
+    fence_on = 0;
+    CHECK(n_writes >= 1 && write_clkdiv == 16U, "write 2: CLKDIV %u at the write (16 = 6.25 MHz)");
+    CHECK(clkdiv_now == 4U, "write 2: the 25 MHz setting back after the write");
+}
+
 int main(void)
 {
     t_default();
@@ -551,6 +618,8 @@ int main(void)
     t_hook(SD_FAST_HS50);
     t_hook_fail();
     t_rebus();
+    t_hook_no_hs();
+    t_write_clock();
     printf("sd-test: %s (%d failed)\n", fails ? "FAIL" : "ok", fails);
     return fails ? 1 : 0;
 }
