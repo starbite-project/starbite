@@ -1506,12 +1506,18 @@ void sh_lastos(const char *key)
         }
 }
 #define WCK_Y (HOME_TOP1 + 2 * ROW_PITCH)
+static void wclock_hands(dc *d, float cx, float cy, tk_col ink)
+{
+    float ha = 6.2831853f * ((ST.h % 12) + ST.mi / 60.0f) / 12, ma = 6.2831853f * ST.mi / 60;
+    d_seg(d, cx, cy, cx + 31 * tk_sinf(ha), cy - 31 * tk_cosf(ha), 5, ink);
+    d_seg(d, cx, cy, cx + 52 * tk_sinf(ma), cy - 52 * tk_cosf(ma), 3.4f, ink);
+    d_rrect(d, cx - 4.5f, cy - 4.5f, 9, 9, 4.5f, ink);
+    d_rrect(d, cx - 2, cy - 2, 4, 4, 2, C_ORANGE);
+}
 static void build_wclock(void)
 {
     tk_layer *l = &hparts[7];
-    relayer(l);
     float x = WID_X(0), y = WCK_Y, s = WID_W, cx = x + s / 2, cy = y + s / 2;
-    dc d = mk(l, "home-clock", x, y, WID_X(1) + WID_W - x, s + 30, 2, 0);
     tk_col ink = tk_hex(0x1c1c1e, 1);
     char at[16], line[40];
     int k = 0;
@@ -1523,16 +1529,30 @@ static void build_wclock(void)
     } else
         for (const char *p = "No alarm set"; *p;) line[k++] = *p++;
     line[k] = 0;
-    /* 8p (Track A; 8o's phone: "minute: clock widget 86 ms", the slowest idle turn): everything but the hands (the
-     * plates, the face's 60 ticks and 12 numerals, the labels' shadowed text, the Calendar widget) kept between
-     * minutes and copied back while the day, the alarm's line and the bitmap's place are the same; the hands and the
-     * centre drawn on it (they overlap none of the rest, so the pixels are a full draw's) */
-    static struct { int w, h, stride, wday, day; float ox, oy; char line[40]; uint32_t *px; } WC;
-    int same = d.b->px && WC.px && WC.w == d.b->w && WC.h == d.b->h && WC.stride == d.b->stride && WC.ox == d.ox &&
-               WC.oy == d.oy && WC.wday == ST.wday && WC.day == ST.day && !tk_strcmp(WC.line, line);
-    if (same)
-        tk_memcpy(d.b->px, WC.px, (size_t)d.b->h * (size_t)d.b->stride * 4u);
-    else {
+    /* 8p (Track A; 8o's phone: "minute: clock widget 86 ms", the slowest idle turn): a new minute keeps the drawn
+     * layer (the plates, the face's 60 ticks and 12 numerals, the labels' shadowed text, the Calendar widget) and only
+     * puts back the face's middle (a 112 pt square, kept without hands: ~0.7 MB, not a whole copy: the 160 MiB heap)
+     * before the new hands; while the day, the alarm's line and the layer are the same. The hands overlap none of the
+     * rest, so the pixels are a full draw's (checked on the host) */
+    static struct { int wday, day, X, Y, w, h; char line[40]; uint32_t *px; const uint32_t *lpx; } WC;
+    const float R = 56;                             /* the hands' reach (52 + their width + the edge) */
+    if (l->bmp.px && WC.px && WC.lpx == l->bmp.px && WC.wday == ST.wday && WC.day == ST.day && !tk_strcmp(WC.line, line)) {
+        int bx = (int)l->bx, by = (int)l->by;
+        if (WC.X - bx >= 0 && WC.Y - by >= 0 && WC.X - bx + WC.w <= l->bmp.w && WC.Y - by + WC.h <= l->bmp.h) {
+            for (int r = 0; r < WC.h; r++)
+                tk_memcpy(l->bmp.px + (size_t)(WC.Y - by + r) * (size_t)l->bmp.stride + (size_t)(WC.X - bx),
+                          WC.px + (size_t)r * (size_t)WC.w, (size_t)WC.w * 4u);
+            dc e = { &l->bmp, 0, l->bx, l->by };
+            wclock_hands(&e, cx, cy, ink);
+            tk_layer_dirty(l);
+            tk_layer_prepare(l);
+            l->hidden = 0;
+            return;
+        }
+    }
+    relayer(l);
+    dc d = mk(l, "home-clock", x, y, WID_X(1) + WID_W - x, s + 30, 2, 0);
+    {
         d_rrect(&d, x, y, s, s, 24, ink);                          /* iOS's Clock widget: a black plate, a white face */
         d_rrect(&d, cx - 66, cy - 66, 132, 132, 66, W(1));
         for (int i = 0; i < 60; i++) {
@@ -1566,22 +1586,26 @@ static void build_wclock(void)
             float kw = tw(TK_IT400, 12, "Calendar", 0, 0);
             d_text(&d, TK_IT400, 12, x1 + s / 2 - kw / 2, y + s + 18, "Calendar", 0, 0, INK, 1);
         }
-        tk_free(WC.px);
-        size_t nb = (size_t)d.b->h * (size_t)d.b->stride * 4u;
-        WC.px = d.b->px ? tk_alloc(nb) : 0;
+        /* the face's middle without hands, in panel px */
+        int X0 = (int)tk_floorf(PT(cx - R)), Y0 = (int)tk_floorf(PT(cy - R)), X1 = (int)-tk_floorf(-PT(cx + R)), Y1 = (int)-tk_floorf(-PT(cy + R));
+        int ok = d.b->px && X0 - (int)d.ox >= 0 && Y0 - (int)d.oy >= 0 && X1 - (int)d.ox <= d.b->w && Y1 - (int)d.oy <= d.b->h;
+        if (!ok || !WC.px || WC.w != X1 - X0 || WC.h != Y1 - Y0) {
+            tk_free(WC.px);
+            WC.px = ok ? tk_alloc((size_t)(X1 - X0) * (size_t)(Y1 - Y0) * 4u) : 0;
+        }
+        WC.lpx = 0;
         if (WC.px) {
-            tk_memcpy(WC.px, d.b->px, nb);
-            WC.w = d.b->w; WC.h = d.b->h; WC.stride = d.b->stride; WC.ox = d.ox; WC.oy = d.oy;
+            WC.X = X0; WC.Y = Y0; WC.w = X1 - X0; WC.h = Y1 - Y0;
+            for (int r = 0; r < WC.h; r++)
+                tk_memcpy(WC.px + (size_t)r * (size_t)WC.w,
+                          d.b->px + (size_t)(Y0 - (int)d.oy + r) * (size_t)d.b->stride + (size_t)(X0 - (int)d.ox), (size_t)WC.w * 4u);
             WC.wday = ST.wday; WC.day = ST.day;
             tk_memcpy(WC.line, line, sizeof WC.line);
         }
     }
-    float ha = 6.2831853f * ((ST.h % 12) + ST.mi / 60.0f) / 12, ma = 6.2831853f * ST.mi / 60;
-    d_seg(&d, cx, cy, cx + 31 * tk_sinf(ha), cy - 31 * tk_cosf(ha), 5, ink);
-    d_seg(&d, cx, cy, cx + 52 * tk_sinf(ma), cy - 52 * tk_cosf(ma), 3.4f, ink);
-    d_rrect(&d, cx - 4.5f, cy - 4.5f, 9, 9, 4.5f, ink);
-    d_rrect(&d, cx - 2, cy - 2, 4, 4, 2, C_ORANGE);
+    wclock_hands(&d, cx, cy, ink);
     trim(l);
+    if (WC.px) WC.lpx = l->bmp.px;                  /* (this layer's bitmap: a rebuild elsewhere starts it over) */
     tk_layer_prepare(l);
     l->hidden = 0;
     relink();
