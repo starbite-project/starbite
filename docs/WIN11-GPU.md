@@ -2529,8 +2529,9 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - **Measure after apply (T66):** sbwddm-t64 again on win11-big, compare with T63.
 - **Lost on the big-core row only:** notifications, mail/calendar sync, Connected Devices, telemetry, Windows
   Update, Store installs; both rows: Steam/OneDrive no longer start at logon, Steam's folder not scanned on access.
-- **Note:** build/win/results-t59 ... results-t65 are gone from the Mac (another session's disk cleanup, 97 % full);
-  6.66-6.76 hold the numbers.
+- **Note:** build/win/results-t60 ... results-t65 were moved (verified copies) to
+  /Volumes/SBWORK/starbite-build-archive/win-1114/ in the 11-14 disk emergency; t49-t58 and old stages are in
+  .../win-1113/.
 
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
