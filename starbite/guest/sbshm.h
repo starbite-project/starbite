@@ -479,6 +479,7 @@ enum {
     SBSHM_SVC_CLIP = 1U << 3,       /* struct sbshm_clip */
     SBSHM_SVC_NOTIF = 1U << 4,      /* struct sbshm_notifs */
     SBSHM_SVC_CLOCK = 1U << 5,      /* hdr.host_unix_s is real */
+    SBSHM_SVC_GPU = 1U << 6,        /* sbgpu (sbshm-gpu.h): the Mali through Starbite (Panfrost's UAPI in the guest) */
 };
 enum { SBSHM_MOD_CTRL = 1U << 0, SBSHM_MOD_ALT = 1U << 1, SBSHM_MOD_SUPER = 1U << 2, SBSHM_MOD_SHIFT = 1U << 3 };
 

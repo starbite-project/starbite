@@ -292,6 +292,7 @@ static void sbg_db_serve(bool wake_user)
 	sbnet_kick();				/* v3: each service checks its own rings */
 	sbp9_kick();
 	sbsnd_kick();
+	sbgpu_kick();
 	if (READ_ONCE(hdr->host_state) == SBG_HOST_STOPPING && !atomic_xchg(&sbg_stop_armed, 1))
 		schedule_delayed_work(&sbg_stop_work, SBG_STOP_GRACE_S * HZ);
 	sbg_freeze_db();
@@ -862,6 +863,7 @@ static int sbg_probe(struct platform_device *pdev)
 	sbnet_init(&pdev->dev, irq_ok);
 	sbp9_init(&pdev->dev, irq_ok);
 	sbsnd_init(&pdev->dev, irq_ok);
+	sbgpu_init(&pdev->dev, irq_ok);
 #ifdef CONFIG_SUSPEND
 	if (irq_ok)
 		WRITE_ONCE(hdr->guest_caps, READ_ONCE(hdr->guest_caps) | SBSHM_CAP_FREEZE);
@@ -904,6 +906,7 @@ static void __exit sbg_exit(void)
 #ifdef CONFIG_SUSPEND
 	cancel_work_sync(&sbg_freeze_work);
 #endif
+	sbgpu_exit();
 	sbp9_exit();				/* the 9p transport is registered with 9pnet: take it back */
 	platform_driver_unregister(&sbg_driver);
 }

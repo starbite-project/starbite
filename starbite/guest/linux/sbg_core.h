@@ -31,4 +31,7 @@ void sbp9_kick(void);
 void sbp9_exit(void);			/* the module's exit: unregister the 9p transport */
 void sbsnd_init(struct device *dev, bool irq_ok);
 void sbsnd_kick(void);
+void sbgpu_init(struct device *dev, bool irq_ok);
+void sbgpu_kick(void);
+void sbgpu_exit(void);			/* the module's exit: the DRM device unregistered */
 #endif

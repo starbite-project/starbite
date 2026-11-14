@@ -29,6 +29,7 @@ static int blk_ring_bad;
 #define H2G ((struct sbshm_ring *)SHM(SBSHM_H2G_OFF))
 #define G2H ((struct sbshm_ring *)SHM(SBSHM_G2H_OFF))
 #include "sbghost_int.h"
+#include "../sbshm-gpu.h"                         /* SBSHM_GPU_OFF: the surfaces stay below it */
 static void v3_reset(void);
 static void v3_notif_msg(const struct sbshm_msg *m);
 const struct sbg_os *sbg_os_(void) { return os; }
@@ -185,7 +186,7 @@ static uint64_t surf_base(uint64_t surf)
 {
     if (SBSHM_SURF_OFF + 2 * surf <= (cfg.v2 ? SBSHM_CAT_OFF : cfg.shm_size))
         return SBSHM_SURF_OFF;
-    if (cfg.v2 && SBSHM_V3_FREE_OFF + 2 * surf <= SBSHM_V3_END && SBSHM_V3_END <= cfg.shm_size)
+    if (cfg.v2 && SBSHM_V3_FREE_OFF + 2 * surf <= SBSHM_GPU_OFF && SBSHM_V3_END <= cfg.shm_size)
         return SBSHM_V3_FREE_OFF;
     if (cfg.v2 && SBSHM_V3_END + 2 * surf <= cfg.shm_size)
         return SBSHM_V3_END;
@@ -340,6 +341,8 @@ static int load(const void *image, uint64_t image_size, const void *dtb, uint64_
             svc |= cfg.services & SBSHM_SVC_SND;
         if (os->unix_s)
             svc |= cfg.services & SBSHM_SVC_CLOCK;
+        if (os->gpu)
+            svc |= cfg.services & SBSHM_SVC_GPU;
         if (!pz)
             zero_words(SHM(SBSHM_NET_OFF), SBSHM_V3_FREE_OFF - SBSHM_NET_OFF);
         v3_reset();
@@ -365,6 +368,7 @@ static int load(const void *image, uint64_t image_size, const void *dtb, uint64_
         sbg_net_load();
         sbg_p9_load();
         sbg_snd_load();
+        sbg_gpu_load();
     }
     h->hdr_size = sizeof(struct sbshm_hdr);
     h->boot_count = st.boots;
@@ -872,6 +876,8 @@ void sbg_poll(void)
         POLL_PART("9p");
         sbg_snd_poll();
         POLL_PART("snd");
+        sbg_gpu_poll();
+        POLL_PART("gpu");
     }
     struct sbshm_msg m;
     while (sbshm_get(G2H, &m)) {
@@ -1100,3 +1106,4 @@ int sbg_clip_set(const char *mime, const uint8_t *data, unsigned len)
 #include "sbg_net.c"
 #include "sbg_p9.c"
 #include "sbg_snd.c"
+#include "sbg_gpu.c"
