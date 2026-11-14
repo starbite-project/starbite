@@ -226,6 +226,7 @@ static int buf_ready[2];
  * unchanged by definition; the back buffer needs such a row only if it changed after the frame that buffer last
  * held (lastchg[y] > bufseq[back]), copied from the front's shadow, no compare */
 static uint32_t *lastchg;                  /* per row: the seq of the frame in which it last changed */
+static int pub_or;                         /* publish's source is an app's buffer: X / A set to 0xff while copying */
 static uint32_t bufseq[2];                 /* the seq of the frame each buffer holds whole */
 static uint64_t frames, rows_out;
 static unsigned nframe, nbuilt, nbuf, defers;
@@ -275,8 +276,16 @@ static int publish(const uint8_t *src, uint32_t src_stride, uint32_t nrows, uint
 		const uint8_t *s = src + (size_t)y * src_stride;
 		int changed = !hdr->surf_seq || memcmp(s, shadow[front] + (size_t)y * W, rb);
 		if (memcmp(s, shadow[back] + (size_t)y * W, rb)) {
-			memcpy(dst + (size_t)y * stride, s, rb);
-			memcpy(shadow[back] + (size_t)y * W, s, rb);
+			if (pub_or) {                      /* opaque for Starbite's XRGB (an app's ARGB: its alpha) */
+				const uint32_t *sp = (const uint32_t *)(const void *)s;
+				uint32_t *sh = shadow[back] + (size_t)y * W;
+				for (uint32_t x = 0; x < W; ++x)
+					sh[x] = sp[x] | 0xff000000U;
+				memcpy(dst + (size_t)y * stride, sh, rb);
+			} else {
+				memcpy(dst + (size_t)y * stride, s, rb);
+				memcpy(shadow[back] + (size_t)y * W, s, rb);
+			}
 		}
 		if (changed) {
 			if (H <= SBSHM_ROWS_MAX)
@@ -491,6 +500,74 @@ static uint64_t layout_sig(void)
 #undef MIX
 	return h;
 }
+static void count_surface(struct wlr_surface *surface, int sx, int sy, void *data)
+{
+	(void)surface, (void)sx, (void)sy;
+	++*(int *)data;
+}
+static unsigned long ndirect;              /* frames published straight from an app's buffer */
+static void window_state(void);
+/* 1 published (or nothing new), -1 the host reads the back buffer, 0 not this case (composite instead) */
+static int publish_direct(uint32_t b0, uint32_t b1)
+{
+	struct view *v, *only = NULL;
+	int nv = 0, ns = 0;
+	wl_list_for_each(v, &S.views, link)
+		if (v->mapped && view_active(v))
+			only = v, ++nv;
+	if (nv != 1 || only->dialog || getenv("SBWL_NO_DIRECT"))
+		return 0;
+	wlr_xdg_surface_for_each_surface(only->top->base, count_surface, &ns);
+	struct wlr_surface *surf = only->top->base->surface;
+	struct wlr_box geo;
+	wlr_xdg_surface_get_geometry(only->top->base, &geo);
+	if (ns != 1 || only->x - geo.x || only->y - geo.y || (uint32_t)surf->current.width * SC != W ||
+	    (uint32_t)surf->current.height * SC < VR)
+		return 0;
+	struct wlr_texture *tex = wlr_surface_get_texture(surf);
+	pixman_image_t *ti = tex && wlr_texture_is_pixman(tex) ? wlr_pixman_texture_get_image(tex) : NULL;
+	struct wlr_buffer *src = NULL;
+	const uint8_t *px = NULL;
+	uint32_t pstride = 0, bw = 0, bh = 0;
+	pixman_format_code_t pf = 0;
+	if (ti) {
+		px = (const uint8_t *)pixman_image_get_data(ti);
+		pstride = (uint32_t)pixman_image_get_stride(ti);
+		bw = (uint32_t)pixman_image_get_width(ti), bh = (uint32_t)pixman_image_get_height(ti);
+		pf = pixman_image_get_format(ti);
+	} else if (surf->buffer && surf->buffer->source) {
+		void *dp;
+		uint32_t f;
+		size_t bs;
+		src = surf->buffer->source;
+		if (!wlr_buffer_begin_data_ptr_access(src, WLR_BUFFER_DATA_PTR_ACCESS_READ, &dp, &f, &bs))
+			return 0;
+		px = dp, pstride = (uint32_t)bs, bw = (uint32_t)src->width, bh = (uint32_t)src->height;
+		pf = f == DRM_FORMAT_ARGB8888 ? PIXMAN_a8r8g8b8 : f == DRM_FORMAT_XRGB8888 ? PIXMAN_x8r8g8b8 : 0;
+	}
+	int r = 0;
+	if (px && bw == W && bh >= VR && (pf == PIXMAN_a8r8g8b8 || pf == PIXMAN_x8r8g8b8)) {
+		uint64_t f0 = frames;
+		pub_or = 1;
+		r = publish(px, pstride, VR, b0, b1) < 0 ? -1 : 1;
+		pub_or = 0;
+		if (r > 0) {
+			++ndirect;
+			last_px = ((const uint32_t *)(const void *)(px + (size_t)(VR / 8) * pstride))[W / 8] | 0xff000000U;
+			hdr->guest_rot = ROT;
+			if (!f0 && frames)
+				say("first frame published (%ux%u, viewport %ux%u, straight from the app's buffer)", W, H, VW, VR);
+			if (!win_shown) {
+				win_shown = 1;
+				window_state();
+			}
+		}
+	}
+	if (src)
+		wlr_buffer_end_data_ptr_access(src);
+	return r;
+}
+
 /* b0 .. b1: the rows (surface pixels) that changed since the last published frame (wlr_scene's damage); b1 = 0: all */
 static int publish_window(uint32_t b0, uint32_t b1)
 {
@@ -521,6 +598,14 @@ static int publish_window(uint32_t b0, uint32_t b1)
 		b0 = 0, b1 = tn ? H : VR;              /* a whole frame */
 	sig_last = sig;
 	int band = !tn && (b0 > 0 || b1 < VR);
+	/* 8o night ("super slow"): one opaque window covering the surface at the output's scale, with no popup or
+	 * subsurface (the common case: an app full screen): no fill, no composite, no alpha pass; publish compares
+	 * and copies the app's own buffer's rows (X / A set on the copy) */
+	if (!tn) {
+		int r = publish_direct(b0, b1);
+		if (r)
+			return r < 0 ? -1 : 1;
+	}
 	pixman_region32_t clip;
 	if (band) {                                /* only the band composited (fill, surfaces, scrim): pixman clips */
 		pixman_region32_init_rect(&clip, 0, (int)b0, (int)W, (int)(b1 - b0));
@@ -595,16 +680,32 @@ static void defer_frame(void)
 		wl_event_source_timer_update(defer_src, 2);
 }
 
+/* 8o night (measure): SBWL_NO_SCENE=1: wlr_scene is not rendered into the headless output (nobody reads that buffer;
+ * with GTK's whole-window damage it was a second full-frame render each frame); frames are paced by a timer that
+ * sends the frame callbacks a refresh after a published frame */
+static int no_scene = -1;
+static struct wl_event_source *pace_src;
+static int pace_cb(void *data)
+{
+	(void)data;
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	wlr_scene_output_send_frame_done(S.scene_output, &now);
+	return 0;
+}
 static void output_frame(struct wl_listener *l, void *data)
 {
 	(void)l, (void)data;
 	struct wlr_output_state st;
 	wlr_output_state_init(&st);
+	if (no_scene < 0)
+		no_scene = getenv("SBWL_NO_SCENE") != NULL;
 	/* the output is committed (the scene rendered) only on frames with something new: a commit with a buffer makes the
 	 * headless backend send the next frame event a refresh later, which paces an animating app at 60 Hz, and without
 	 * one the frames stop until the next mark_dirty (idle: no frame events at all; was ~20 renders / s) */
 	bool busy = S.dirty || nframe < 3;
-	bool built = busy && wlr_scene_output_build_state(S.scene_output, &st, NULL);
+	bool built = busy && !no_scene && wlr_scene_output_build_state(S.scene_output, &st, NULL);
+	int published = 0;
 	nbuilt += built;
 	nbuf += built && (st.committed & WLR_OUTPUT_STATE_BUFFER) && st.buffer;
 	if (++nframe <= 3)
@@ -633,6 +734,7 @@ static void output_frame(struct wl_listener *l, void *data)
 		} else {
 			dmg0 = dmg1 = -1;
 			dmg_all = 0;
+			published = 1;
 		}
 	}
 	if (!v2 && !frames && winimg) {            /* v1: a black frame until the app's first (as L1/L2's sbwl did) */
@@ -644,6 +746,14 @@ static void output_frame(struct wl_listener *l, void *data)
 	if (built)
 		wlr_output_commit_state(S.output, &st);
 	wlr_output_state_finish(&st);
+	if (no_scene && published) {               /* the apps' next frame a refresh from now */
+		if (!pace_src)
+			pace_src = wl_event_loop_add_timer(S.loop, pace_cb, NULL);
+		if (pace_src) {
+			wl_event_source_timer_update(pace_src, 16);
+			return;
+		}
+	}
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	wlr_scene_output_send_frame_done(S.scene_output, &now);
@@ -3288,8 +3398,8 @@ static int tick(void *data)
 	if (now - t_stat >= 10000) {
 		t_stat = now;
 		say("stats: frame events %u, built %u, with a buffer %u, published %llu, rows %llu, px %08x, apps %d, ring drops %u, "
-		    "deferred %u, background commits %lu, banded %lu", nframe, nbuilt, nbuf, (unsigned long long)frames,
-		    (unsigned long long)rows_out, last_px, napps, g2h_dropped, defers, hidden_commits, nband);
+		    "deferred %u, background commits %lu, banded %lu, direct %lu", nframe, nbuilt, nbuf, (unsigned long long)frames,
+		    (unsigned long long)rows_out, last_px, napps, g2h_dropped, defers, hidden_commits, nband, ndirect);
 	}
 	procs_tick();
 	clock_tick(now);
