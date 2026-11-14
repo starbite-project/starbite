@@ -2692,6 +2692,15 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   not really finished, the next phase fails with a NACK and the touch driver retries (25 ms x 5). I2cTelemetryVersion 5.
   `touch.sh hsi2c OUT 3`.
 
+### 6.88b touch-6 check (sbhsi2c-3): no hung read left
+
+- Check boot (A55, 15:4x): PASS, I2cTelemetryVersion 5. **DiagSelf 0/200 back to back and 0/200 spaced** (max 2.4 ms /
+  5.4 ms, avg 421 / 447 us; before: 1-2 per 200, each 250 ms). **I2cPollRescue 1, I2cPollSynthDone 1, I2cCancelCount 0**:
+  one lost interrupt and one finished-but-unreported transfer were each completed by the poll within a few ms, and no
+  read had to be cancelled. ISR 776 / DPC 778 / transfers 772.
+- Still to see: the big-core row under the user's drags (the M3 hang rate was ~10x the A55's): DiagI2cRetry should
+  drop to ~0, I2cPollRescue/SynthDone carry the rescues. touchdiag-3's 25 ms x 5 stays as the safety net.
+
 ### 6.85 Zero-copy on screen is the top track again: T66 (VIS3) = VIS2's ETW, finally elevated
 
 - **The user (11-14):** touch-4 works ("drags are fine"); GD ~30 fps, taps less late but still late; "wheres the work
