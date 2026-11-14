@@ -2554,6 +2554,23 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - Source and tools brought onto this branch from claude/win-m3-clean-947e73 7d67410d: starbite/win/s6touchdiag,
   tools/woa/win-m3/hive-touchdiag.py.
 
+### 6.79 The user's session after debloat-1 (big cores, 11-14 ~07:37-07:50 local): the loops are gone; sihost aborted
+
+- **debloat-1 works:** sbxta `6328cd2 v2`, State\Svc `M3: WpnService 2->4 ok; WpnUserService(_418b9) ... wuauserv 3->4
+  ok`, Saved holds the originals. In that boot: **0 service crashes and 0 7031/7034** (T63/T64: ~50 crashes and
+  ~20 group restarts per boot). One 7040: wuauserv disabled -> demand start at 05:46:51 (Windows' own update repair;
+  sbxta leaves a re-enabled service alone on the A55 row, harmless).
+- **GD (ARM64EC kit):** 38.6 fps avg over 10 s windows, gllows 33.6 fps, 1% low 14.7, 24 frames > 100 ms in 230 s;
+  the 3 worst (9.1, 7.0, 5.3 s) are again game-thread CPU with 47-100k page faults (loading/translation).
+- **The black taskbar/wallpaper:** sihost.exe (the shell infrastructure host) failed fast at 05:47:51 (ucrtbase
+  c0000409, code 7 = abort()); a new explorer.exe started 05:48:39. Before it: 05:45:08 DCOM 10010,
+  ShellExperienceHost did not register in time. sihost has no sbumd log (it did not open a D3D device through us);
+  DWM/Explorer/GD logs show 0 failed allocations; no Resource-Exhaustion event. Cause unknown; Edge also aborts at
+  start (3x c0000409, code 5).
+- **Next data:** touch.sh apply now also sets WER LocalDumps (full, 2 each, C:\sbdumps) for sihost.exe,
+  explorer.exe and ShellExperienceHost.exe (hive-localdumps.py from 7d67410d, rehearsed on the SOFTWARE backup);
+  user-pull.sh pulls the shell/Edge/DWM Report.wer files and the 4 newest C:\sbdumps dumps.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

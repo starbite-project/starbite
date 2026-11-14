@@ -24,7 +24,7 @@ for f in System.evtx Application.evtx "Microsoft-Windows-Diagnostics-Performance
 done
 for d in ReportArchive ReportQueue; do
     adb shell "ls -la --time-style=+%Y-%m-%dT%H:%M '$W/ProgramData/Microsoft/Windows/WER/$d' 2>/dev/null || ls -la '$W/ProgramData/Microsoft/Windows/WER/$d'" | tr -d '\r' > "$out/wer/$d.txt" 2>&1 || true
-    for r in $(grep -o -E '(AppCrash|AppHang)_(GeometryDash|steam)[^ ]*' "$out/wer/$d.txt" | tail -6); do
+    for r in $(grep -o -E '(AppCrash|AppHang)_(GeometryDash|steam|sihost|explorer|ShellExperienceHost|dwm|msedge)[^ ]*' "$out/wer/$d.txt" | tail -6); do
         adb pull "$W/ProgramData/Microsoft/Windows/WER/$d/$r/Report.wer" "$out/wer/$r.wer" >/dev/null 2>&1 || true
     done
 done
@@ -32,4 +32,9 @@ adb shell "ls -la '$W/Windows/Minidump' 2>&1" | tr -d '\r' > "$out/minidump.txt"
 adb shell "ls -la '$W/Program Files (x86)/Steam/steamapps/common/Geometry Dash/' 2>&1 | grep -i -E 'opengl|gallium|starbite|GeometryDash.exe'; sha256sum '$W/Program Files (x86)/Steam/steamapps/common/Geometry Dash/opengl32.dll' '$W/Program Files (x86)/Steam/steamapps/common/Geometry Dash/libgallium_wgl.dll' 2>&1" | tr -d '\r' > "$out/gd-folder.txt" || true
 adb shell "ls -la $W/pagefile.sys $W/hiberfil.sys $W/swapfile.sys 2>&1; df -h $W" | tr -d '\r' > "$out/disk.txt" || true
 echo "pulled into $out"
+# 11-14: WER LocalDumps of the shell processes (tools/win/touch.sh apply sets them), newest 4
+adb shell "ls -la '$W/sbdumps' 2>/dev/null" | tr -d '\r' > "$out/wer/sbdumps.txt" 2>&1 || true
+for f in $(adb shell "ls -t '$W/sbdumps' 2>/dev/null | head -4" | tr -d '\r'); do
+    mkdir -p "$out/dumps"; adb pull "$W/sbdumps/$f" "$out/dumps/$f" >/dev/null 2>&1 || true
+done
 python3 tools/win/user-report.py "$out" | tee "$out/report.txt"

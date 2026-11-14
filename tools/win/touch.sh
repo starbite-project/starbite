@@ -11,6 +11,9 @@
 #                                    (2) HKLM RunOnce StarbiteTouch -> C:\starbite\debloat\touch-online.cmd at the next
 #                                        logon: "press and hold for right-click" off for the user (old value saved),
 #                                        so a tap in Geometry Dash is a click at once.
+#                                (3) WER LocalDumps for sihost.exe, explorer.exe, ShellExperienceHost.exe into
+#                                        C:\sbdumps (2 full dumps each): the shell host's abort() after GD (11-14)
+#                                        leaves its stack for user-pull.sh.
 #   tools/win/touch.sh restore OUT   ImagePath back to the DriverStore driver; RunOnce StarbiteUntouch puts the
 #                                    press-and-hold setting back. The .sys file stays (unused).
 #   tools/win/touch.sh show OUT      read-only: ImagePath and every Diag* value with the decoded trace.
@@ -33,6 +36,8 @@ SOFT=Windows/System32/config/SOFTWARE
 HS=tools/win/hive-service.py
 TD=tools/woa/win-m3/hive-touchdiag.py
 RO=tools/win/hive-runonce.py
+LDT=tools/woa/win-m3/hive-localdumps.py
+DUMPS="sihost.exe explorer.exe ShellExperienceHost.exe"
 mkdir -p "$out/backup"
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$out/touch.log"; }
 [ "$(adb get-state 2>/dev/null)" = recovery ] || { log "the phone is not in TWRP"; exit 1; }
@@ -70,7 +75,9 @@ log "$mode: hives clean, backed up as *-$stamp"
 case $mode in
 apply)
     python3 "$TD" "$tmp/SYSTEM" "$tmp/S1" set >> "$out/touch.log" 2>&1
-    python3 "$RO" "$tmp/SOFTWARE" "$tmp/SW1" set StarbiteTouch 'cmd /c C:\starbite\debloat\touch-online.cmd' >> "$out/touch.log" 2>&1
+    # shellcheck disable=SC2086
+    python3 "$LDT" "$tmp/SOFTWARE" "$tmp/SW0" set $DUMPS >> "$out/touch.log" 2>&1
+    python3 "$RO" "$tmp/SW0" "$tmp/SW1" set StarbiteTouch 'cmd /c C:\starbite\debloat\touch-online.cmd' >> "$out/touch.log" 2>&1
     adb shell "mkdir -p $W/starbite/debloat" >/dev/null
     push_check "$DRV" "$W/Windows/System32/drivers/s6touchdiag.sys"
     push_check starbite/win/debloat/touch-online.cmd "$W/starbite/debloat/touch-online.cmd"
@@ -78,10 +85,12 @@ apply)
     push_check "$tmp/S1" "$W/$SYS"
     push_check "$tmp/SW1" "$W/$SOFT"
     python3 "$TD" "$tmp/S1" show | head -3 | tee -a "$out/touch.log"
-    log "apply done: touch service -> s6touchdiag.sys (touchdiag-2), RunOnce StarbiteTouch armed. Next: the unattended check boot" ;;
+    log "apply done: touch service -> s6touchdiag.sys (touchdiag-2), LocalDumps for the shell, RunOnce StarbiteTouch armed. Next: the unattended check boot" ;;
 restore)
     python3 "$TD" "$tmp/SYSTEM" "$tmp/S1" restore >> "$out/touch.log" 2>&1
-    python3 "$RO" "$tmp/SOFTWARE" "$tmp/SW0" remove StarbiteTouch >> "$out/touch.log" 2>&1 || cp "$tmp/SOFTWARE" "$tmp/SW0"
+    # shellcheck disable=SC2086
+    python3 "$LDT" "$tmp/SOFTWARE" "$tmp/SWd" remove $DUMPS >> "$out/touch.log" 2>&1 || cp "$tmp/SOFTWARE" "$tmp/SWd"
+    python3 "$RO" "$tmp/SWd" "$tmp/SW0" remove StarbiteTouch >> "$out/touch.log" 2>&1 || cp "$tmp/SWd" "$tmp/SW0"
     python3 "$RO" "$tmp/SW0" "$tmp/SW1" set StarbiteUntouch 'cmd /c C:\starbite\debloat\untouch-online.cmd' >> "$out/touch.log" 2>&1
     adb shell "mkdir -p $W/starbite/debloat" >/dev/null
     push_check starbite/win/debloat/untouch-online.cmd "$W/starbite/debloat/untouch-online.cmd"
