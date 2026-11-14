@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.starbite.applaunch</string>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>echo 'SBLAUNCH start' &gt;/dev/console; sleep 140; echo 'SBLAUNCH open System Settings' &gt;/dev/console; /usr/bin/open -a 'System Settings' 2&gt;/dev/console; sleep 70; echo 'SBLAUNCH open App Store' &gt;/dev/console; /usr/bin/open -a 'App Store' 2&gt;/dev/console; sleep 70; echo 'SBLAUNCH open TextEdit' &gt;/dev/console; /usr/bin/open -a TextEdit 2&gt;/dev/console; echo 'SBLAUNCH done' &gt;/dev/console</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+</dict>
+</plist>
