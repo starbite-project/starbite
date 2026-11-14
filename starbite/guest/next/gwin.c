@@ -751,7 +751,9 @@ int gwin_now(void)
         }
         if (ch & SBG_CH_TEXT) {
             int on = sbg_text_focus(0);
-            if (on != text_on) {
+            /* a repeated 1 too (8o): sbwl sends it for a tap in the focused field, so a keyboard the user dismissed
+             * comes back (the shell ignores it while its keyboard is up) */
+            if (on != text_on || on) {
                 text_on = on;
                 if (guest_shown()) {
                     sh_linux_textfocus(on);

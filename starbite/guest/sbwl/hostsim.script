@@ -87,6 +87,11 @@ tap_file /tmp/sbwl-gtk4test.txt entry
 expect_focus 1 3000
 type GTK4 sägt hallo
 expect_line /tmp/sbwl-gtk4test.txt text:GTK4 sägt hallo 3000
+# 8o: a tap in the field that already has the focus asks for the keyboard again (the host may have hidden it):
+# a new TEXT_FOCUS 1, even though nothing changed for the app
+sleep 600
+tap_file /tmp/sbwl-gtk4test.txt entry
+wait_new_msg 69 1 2000
 wait_frame 3000
 dump gtk4-typed
 viewport 916 720
