@@ -34,6 +34,17 @@ for f in sorted(glob.glob(os.path.join(d, 'umdlog', 'GeometryDash.exe-*.log')), 
         print(f'  fps avg {sum(fps)/len(fps):.1f}, min {min(fps):.1f}, max {max(fps):.1f}; '
               f'windows with a frame >= 100 ms: {sum(1 for m in mx if m >= 100)}/{len(mx)}, >= 500 ms: '
               f'{sum(1 for m in mx if m >= 500)}; worst intervals (ms): {" ".join(f"{m:.0f}" for m in mx[-8:])}')
+    # 0160: the zero-copy present's own 300-frame lines (glstats does not run on that path)
+    zc = re.findall(r'sb gl zc: 300 frames \(([^)]*)\): ([0-9.]+) fps;.*?slowest ([0-9.]+) ms, (\d+) over 100 ms; '
+                    r'present failures (\d+)', txt)
+    zc = [z for z in zc if float(z[1]) > 0]
+    if zc:
+        f2 = [float(z[1]) for z in zc]
+        print(f'  zero-copy present: {len(zc)} x 300 frames ({zc[0][0]}): fps avg {sum(f2)/len(f2):.1f}, min '
+              f'{min(f2):.1f}, max {max(f2):.1f}; frames over 100 ms {sum(int(z[3]) for z in zc)}; slowest '
+              f'{max(float(z[2]) for z in zc):.0f} ms; present failures {zc[-1][4]}')
+    for l in re.findall(r'sb gl zc: (?:window .*zero-copy present.*|.*GDI.*failed.*|3 presents failed.*)', txt)[:3]:
+        print('  ' + l)
     for l in re.findall(r'sbumd: gllows run .*', txt)[-1:]:
         print('  ' + l)
     worst = re.findall(r'sbumd: glworst ([0-9.]+) ms: (.*)', txt)

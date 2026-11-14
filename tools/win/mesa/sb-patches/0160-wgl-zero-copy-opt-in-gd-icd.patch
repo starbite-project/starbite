@@ -1,0 +1,77 @@
+From 4fc8736430bb034316d748a6119a0de7153d63b8 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Sat, 14 Nov 2026 21:51:24 +0200
+Subject: [PATCH 3/3] 0160: zero-copy present opt-in in the GD ICD
+ (SB_GL_PRESENT=zc or C:\ProgramData\Starbite\glzc), fps + frames over 100 ms
+ in its 300-frame log, log on with the flag
+
+---
+ src/gallium/targets/wgl/wgl_sb_zc.cpp | 29 ++++++++++++++++++++++-----
+ 1 file changed, 24 insertions(+), 5 deletions(-)
+
+diff --git a/src/gallium/targets/wgl/wgl_sb_zc.cpp b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+index ce03053..197ae3b 100644
+--- a/src/gallium/targets/wgl/wgl_sb_zc.cpp
++++ b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+@@ -17,7 +17,8 @@
+  * Any failure while the framebuffer is created returns NULL: stw then uses the GDI present (wgl.c, 0145), as before.
+  * A resize that cannot make its textures switches the window to plain Panfrost buffers presented through GDI.
+  *
+- * Environment: SB_GL_PRESENT=gdi|copy (the GDI paths; default: this one), SB_GL_ZC_SWAP=flip|flipdiscard|discard
++ * Environment: SB_GL_PRESENT=zc|gdi|copy (0160: zero-copy only with zc or the flag file
++ * C:\ProgramData\Starbite\glzc; otherwise the GDI paths), SB_GL_ZC_SWAP=flip|flipdiscard|discard
+  * (default flip = FLIP_SEQUENTIAL, 2 buffers), SB_GL_ZC_LOG=1 (setup steps and a timing line every 300 frames).
+  * The process environment variable SB_GL_ZC_STATE says what this file did (for tests): "zc", "off", "fail:<step>",
+  * "gdi-after-resize", "gdi-after-present-failures".
+@@ -173,6 +174,8 @@ struct sbzc_fb {
+    LARGE_INTEGER freq;
+    unsigned frames, fails;
+    double t_wait, t_copy, t_present, t_war, t_max;
++   LARGE_INTEGER t300;      /* sb-patches/0160: when the last 300-frame line was written (fps) */
++   unsigned over100;        /* 0160: frames over 100 ms since that line */
+ };
+ 
+ static struct sbzc_fb *
+@@ -516,11 +519,18 @@ sbzc_present(struct stw_winsys_framebuffer *pfb, int interval)
+    fb->t_war += (double)(t4.QuadPart - t3.QuadPart) * 1000.0 / (double)fb->freq.QuadPart;
+    if (total > fb->t_max)
+       fb->t_max = total;
++   if (total > 100.0)
++      fb->over100++;
+    if (zc_log && fb->frames % 300 == 0) {
+-      ZLOG("300 frames (%ux%u%s): per frame GL wait %.2f ms, copy+mark %.2f, Present %.2f, WAR wait %.2f; "
+-           "slowest %.1f ms; present failures %u\n", fb->w, fb->h, fb->gdi ? ", GDI" : "", fb->t_wait / 300,
+-           fb->t_copy / 300, fb->t_present / 300, fb->t_war / 300, fb->t_max, fb->fails);
++      /* 0160: the wall-clock rate over these 300 frames (game time included), for GD A/B runs */
++      double secs = fb->t300.QuadPart ? (double)(t4.QuadPart - fb->t300.QuadPart) / (double)fb->freq.QuadPart : 0;
++      ZLOG("300 frames (%ux%u%s): %.1f fps; per frame GL wait %.2f ms, copy+mark %.2f, Present %.2f, WAR wait %.2f; "
++           "slowest %.1f ms, %u over 100 ms; present failures %u\n", fb->w, fb->h, fb->gdi ? ", GDI" : "",
++           secs > 0 ? 300.0 / secs : 0.0, fb->t_wait / 300, fb->t_copy / 300, fb->t_present / 300, fb->t_war / 300,
++           fb->t_max, fb->over100, fb->fails);
+       fb->t_wait = fb->t_copy = fb->t_present = fb->t_war = fb->t_max = 0;
++      fb->over100 = 0;
++      fb->t300 = t4;
+    }
+    return true;
+ }
+@@ -550,7 +560,16 @@ wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFo
+       const char *p = getenv("SB_GL_PRESENT");
+       const char *l = getenv("SB_GL_ZC_LOG");
+       zc_log = l && *l && *l != '0';
+-      mode = !(p && (!strcmp(p, "gdi") || !strcmp(p, "copy")));
++      /* 0160: the flag file also turns the log on (a Steam-started game has no environment of ours) */
++      if (GetFileAttributesA("C:\\ProgramData\\Starbite\\glzc") != INVALID_FILE_ATTRIBUTES)
++         zc_log = 1;
++      /* sb-patches/0160 (GD ICD tree): opt-in. In src-zc (0151) zero-copy was the default; in the game kit the
++       * async GDI present (0153) stays the default until the user's windows are shown through DWM (sbumd 0159), so
++       * zero-copy only with SB_GL_PRESENT=zc or the flag file C:\ProgramData\Starbite\glzc (read at the first
++       * window, like glcached/glasync). */
++      mode = (p && !strcmp(p, "zc")) ||
++             (!(p && (!strcmp(p, "gdi") || !strcmp(p, "copy"))) &&
++              GetFileAttributesA("C:\\ProgramData\\Starbite\\glzc") != INVALID_FILE_ATTRIBUTES);
+       if (!mode)
+          zc_state("off");
+       ZLOG("SB_GL_PRESENT=%s: %s\n", p ? p : "(unset)", mode ? "zero-copy" : "GDI");
+-- 
+2.43.0
+
