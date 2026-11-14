@@ -41,3 +41,4 @@ tree was restored and relinked to sd432's sha256.
 | 0449-sweet-fb-changed-rows.patch | SweetFramebuffer rescales only changed rows of a full frame (S3z7: ~60 % of a core rescaling unchanged frames 11x a second). Kernel seq1u = seq1t + 0449 | with 0448 |
 | 0450-sweet-fb-dirty-bands-log.patch | "SWEET FB DIRTY": the changed bands/rows of sampled frames next to swap-record words (is 0x40 a damage mask?). Diagnostic. Kernel seq1v = seq1u + 0450 | diagnostic |
 | 0451-sweet-crash-deep-backtrace.patch | CRASH backtraces of 40 frames ("bt" + "bt+" lines). Kernel seq1w = seq1v + 0451 | daily OK (diagnostic) |
+| 0452-sweet-swap-without-corecrypto.patch | no corecrypto -> unencrypted swap instead of a panic at the first swap-out (S3ze). Kernel seq1x = seq1w + 0452 | daily candidate: any root without kexts can hit it |

@@ -1,0 +1,73 @@
+From: starbite <starbite@local>
+Date: Sat, 14 Nov 2026 09:40:00 +0200
+Subject: [PATCH] patch: 0452-sweet-swap-without-corecrypto.patch - with no corecrypto
+ registered (g_crypto_funcs NULL: no kernel extensions on these roots) the swap is written
+ unencrypted instead of asserting in swap_crypt_initialize at the first swap-out
+
+S3ze 2026-11-14: once every app had the Mali device, memory first ran short and the first swap-out
+panicked: "vm_compressor_backing_store.c:277 Assertion failed: !error" (cc_rand_generate -> -1)
+at 359 s. Applies on 0451. Kernel seq1x = seq1w + this.
+---
+
+--- a/osfmk/vm/vm_compressor_backing_store.c	2026-11-14 09:14:54
++++ b/osfmk/vm/vm_compressor_backing_store.c	2026-11-14 09:14:54
+@@ -238,6 +238,8 @@
+ #if ENCRYPTED_SWAP
+ 
+ #include <libkern/crypto/aesxts.h>
++#include <libkern/crypto/register_crypto.h>    /* 0452: g_crypto_funcs */
++extern crypto_functions_t g_crypto_funcs;      /* libkern/crypto/register_crypto.c */
+ 
+ extern int cc_rand_generate(void *, size_t);     /* from libkern/cyrpto/rand.h> */
+ 
+@@ -254,6 +256,15 @@
+ unsigned char   swap_crypt_test_page_encrypt[4096] __attribute__((aligned(4096)));
+ unsigned char   swap_crypt_test_page_decrypt[4096] __attribute__((aligned(4096)));
+ #endif /* DEVELOPMENT || DEBUG */
++
++/*
++ * 0452 (sweet): no corecrypto here. The macOS/iOS roots this port boots carry no kernel extensions, so
++ * corecrypto.kext never registers g_crypto_funcs: cc_rand_generate() and xts_start() fail, and the first
++ * swap-out (swap_crypt_initialize) asserted (S3ze 2026-11-14: "vm_compressor_backing_store.c:277 Assertion
++ * failed: !error" at 359 s, when every app had the Mali device and memory first ran short). Without it the
++ * swap is written unencrypted: decided once, for encryption and decryption alike.
++ */
++static boolean_t swap_crypt_off;
+ 
+ unsigned long   vm_page_encrypt_counter;
+ unsigned long   vm_page_decrypt_counter;
+@@ -268,6 +279,14 @@
+ 
+ 	assert(swap_crypt_initialized == FALSE);
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	if (g_crypto_funcs == NULL) {
++		swap_crypt_off = TRUE;
++		swap_crypt_initialized = TRUE;
++		printf("SWEET SWAP: no corecrypto: swap written unencrypted (0452)\n");
++		return;
++	}
++#endif
+ 	keylen1 = sizeof(swap_crypt_key1);
+ 	enckey1 = (uint8_t *)&swap_crypt_key1;
+ 	keylen2 = sizeof(swap_crypt_key2);
+@@ -367,6 +386,9 @@
+ 
+ 	if (swap_crypt_initialized == FALSE) {
+ 		swap_crypt_initialize();
++	}
++	if (swap_crypt_off) {
++		return;         /* 0452 */
+ 	}
+ 
+ 	/*
+@@ -407,6 +429,9 @@
+ 	int rc   = 0;
+ 
+ 	assert(swap_crypt_initialized);
++	if (swap_crypt_off) {
++		return;         /* 0452 */
++	}
+ 
+ 	/*
+ 	 * See comment in vm_swap_encrypt().
