@@ -1778,6 +1778,22 @@ static void st_build(void)
     else aq_flush();                             /* (a still, a rebuild: every chunk now) */
     for (int i = 0; i < aq_n(); i++) AQ.psig[i] = aq_psig(&LST->pkg[i]);
 }
+/* 8h (Track A; 8g's phone: "app t1/20 127" and "sleep t1/20 126", the store's open: its st_build in the extras
+ * frame was 7 ms on the Mac: the tab bar's glass 3, the top chunk 2): the open's strip frames draw nothing for the
+ * store (its own layers), so the glass is baked in strip frame 1 and the kept table read in frame 2; the extras
+ * frame keeps the page's top chunk. aq_tb_bake keeps a bake for the opening (aq_open clears it) */
+static void st_prebuild(int st)
+{
+    if (!is_app("store")) return;
+    if (st == 1) {
+        int h = aqtb.hidden;
+        aq_tb_bake();
+        aqtb.hidden = h;                          /* (shown by aq_tabs, from st_build, as before) */
+    } else if (st == 2 && (!LST || LST->n <= 0) && LX.state != SH_LINUX_FAILED && aqk_load()) {
+        LST = &aq_cache;
+        aq_cached = 1;
+    }
+}
 static void st_changed(void)
 {
     if (!is_app("store") || ap_pending) return;

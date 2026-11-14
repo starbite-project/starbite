@@ -1342,6 +1342,7 @@ static int lx_hit(float x0, float y);
 static int lx_strips(const char *k);
 static void lx_page(dc *d);
 static void lx_build(void);
+static void lx_prestep(int st);
 static void lx_open(int a);
 static void lx_close(void);
 static int lx_tap(float x, float y);
@@ -4176,7 +4177,7 @@ static void app_build_step(void)
     int st = ap_pending - 1;
     /* 8c (8c2's phone: app-open frames of 102-118 ms in the app, phone, wheels and sleep films): one strip a frame (two
      * were up to 7 ms on the Mac, the bottom one with a tab bar's flat glass ~5 of it), then the extras */
-    if (st < NST) { own_strip(AP.a, st); relink(); ap_pending++; return; }
+    if (st < NST) { own_strip(AP.a, st); lx_prestep(st); relink(); ap_pending++; return; }   /* 8h: the store's glass, table */
     own_extras(AP.a);
     ap_pending = 0;
 }
@@ -7081,10 +7082,16 @@ static void min_do(unsigned m)
     min_stale &= ~m;
     relink();
 }
-/* the idle's: the next stale one; 1 if one was made */
+/* the idle's: the next stale one; 1 if one was made. 8h: min_name says which (8g's glass stills: "minute 114 ms") */
+static const char *min_name = "minute";
 static int min_step(void)
 {
-    for (unsigned b = 1; b <= MS_HOMEW; b <<= 1) if (min_stale & b) { min_do(b); return 1; }
+    static const char *const MSN[9] = { "minute: lock clock", "minute: home status bar", "minute: app status bar",
+                                        "minute: NC ages", "minute: lock notifications", "minute: clock widget",
+                                        "minute: call screen", "minute: lock widgets", "minute: home widgets" };
+    int i = 0;
+    for (unsigned b = 1; b <= MS_HOMEW; b <<= 1, i++) if (min_stale & b) { min_name = MSN[i]; min_do(b); return 1; }
+    min_name = "minute";
     return 0;
 }
 void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
@@ -7148,7 +7155,7 @@ void sh_idle(void)
     /* P3j: an app page still being drawn (an open without frames, e.g. the host's stills): finish it now */
     IP_("app page", if (ap_pending) { while (ap_pending) app_build_step(); if (AP.on) set_app_rect(AP.R); });
     if (sh_moving()) return;
-    { int r_ = 0; IP_("minute", r_ = min_step()); if (r_) return; }   /* 8c: the minute's stale layers, one a call, first */
+    { int r_ = 0; IP_(min_name, r_ = min_step()); if (r_) return; }   /* 8c: the minute's stale layers, one a call, first */
     /* B6: a prepared switch nobody holds any more goes; a switch's rest, a slice a turn (sh_idle_pending) */
     if (EP.goal >= 0 && EP.goal != EMG && !ep_holding()) ep_cancel();
     /* cp7i / 7k: when only home's parts are left (home is not seen from the lock), what the lock shows and needs goes
