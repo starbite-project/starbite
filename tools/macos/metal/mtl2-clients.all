@@ -1,0 +1,4 @@
+# Processes that get the Mali Metal device (StarbiteMetal.bundle): names, "*" = all, "-NAME" = never.
+# S3ze 2026-11-14: all. An unlisted app got a nil device and Metal threw on it (Finder menus, Settings).
+*
+#                                               
