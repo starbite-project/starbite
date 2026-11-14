@@ -16,14 +16,16 @@
 #                                        leaves its stack for user-pull.sh.
 #   tools/win/touch.sh restore OUT   ImagePath back to the DriverStore driver; RunOnce StarbiteUntouch puts the
 #                                    press-and-hold setting back. The .sys file stays (unused).
-#   tools/win/touch.sh update OUT    after apply: only the driver FILE becomes touchdiag-3 (build/win/touch-3, 2529a7cf:
-#                                    touchdiag-2 + a 25 ms timeout for touch-event reads instead of 250 ms, so a stuck
+#   tools/win/touch.sh update OUT    after apply: only the driver FILE becomes touchdiag-3 (build/win/touch-3, fa9f2a52:
+#                                    touchdiag-2 + a 25 ms timeout for touch-event reads instead of 250 ms and 5 tries, so a stuck
 #                                    read freezes the finger ~25 ms, not ~265 ms, before the retry). Refused unless the
 #                                    service already points at s6touchdiag.sys. Check boot as after apply.
 #   tools/win/touch.sh update OUT 2  the same, back to the touchdiag-2 file.
 #   tools/win/touch.sh orient OUT N  the panel's saved Windows orientation (tools/win/hive-orientation.py): 4 = landscape
 #                                    as the user holds it, 2 = landscape (flipped), 1 = portrait. Windows applies it at
 #                                    the next start and turns touch with it. Run it last (after check boot + restore).
+#   tools/win/touch.sh steam OUT     HKLM RunOnce StarbiteSteamOn -> steam-autostart-online.cmd: Steam back in the user's
+#                                    autostart (debloat-1 removed it; a cold Steam start on the big cores = 5+ min to GD).
 #   tools/win/touch.sh show OUT      read-only: ImagePath and every Diag* value with the decoded trace.
 #
 # After apply, BEFORE anyone relies on touch, prove the driver loads with one unattended small-core boot:
@@ -33,12 +35,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
-mode=${1:?usage: touch.sh apply|update|orient|restore|show OUT}
+mode=${1:?usage: touch.sh apply|update|orient|steam|restore|show OUT}
 out=${2:?usage: touch.sh apply|update|restore|show OUT}
 DRV=$main/build/win/touch-1/s6touchdiag.sys
 DRV_SHA=070dad9aae60debcc2819b873dba92bec1f9a2b944fa70b09d9ec4b1738a61f0
 DRV3=$main/build/win/touch-3/s6touchdiag.sys
-DRV3_SHA=2529a7cf3d06113a0bbe50fdfc05f5c5a15cbb5836ecb83ea20d895649f31e74
+DRV3_SHA=fa9f2a52c9fb0aa866cc7ba66e9f20548ad311d418cddac844531224efa7a2a2
 NTFS=/dev/block/sda27
 W=/tmp/wwin
 SYS=Windows/System32/config/SYSTEM
@@ -65,6 +67,17 @@ show)
     adb pull "$W/$SYS" "$tmp/SYSTEM" >/dev/null
     python3 "$TD" "$tmp/SYSTEM" show | tee -a "$out/touch.log"
     adb shell "cat $W/ProgramData/Starbite/debloat/touch.log 2>/dev/null" | tr -d '\r' | tee -a "$out/touch.log"
+    exit 0 ;;
+steam)
+    adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null
+    adb pull "$W/$SOFT" "$tmp/SOFTWARE" >/dev/null
+    python3 "$HS" "$tmp/SOFTWARE" check >> "$out/touch.log" 2>&1 || { log "the SOFTWARE hive is dirty: run gpu-cycle.sh --clean-only first"; exit 3; }
+    cp "$tmp/SOFTWARE" "$out/backup/SOFTWARE-steam-$(date +%Y%m%d-%H%M%S)"
+    python3 "$RO" "$tmp/SOFTWARE" "$tmp/SW1" set StarbiteSteamOn 'cmd /c C:\starbite\debloat\steam-autostart-online.cmd' >> "$out/touch.log" 2>&1
+    adb shell "mkdir -p $W/starbite/debloat" >/dev/null
+    push_check starbite/win/debloat/steam-autostart-online.cmd "$W/starbite/debloat/steam-autostart-online.cmd"
+    push_check "$tmp/SW1" "$W/$SOFT"
+    log "steam done: RunOnce StarbiteSteamOn armed (Steam starts with Windows again from the logon after next)"
     exit 0 ;;
 orient)
     case ${3:-} in 1|2|3|4) ;; *) log "orient: N must be 1-4"; exit 1 ;; esac

@@ -81,6 +81,12 @@ RequestGetHidXferPacket_ToWriteToDevice(
 // (A55 check boot) had 2 reads that never completed: each waited the full 250 ms before its retry worked, a 265 ms
 // freeze in the drag. A good read takes ~0.4 ms (DiagSelf avg 424 us, max 489 us), so 25 ms is ~50x margin and a
 // stuck read now costs ~25 ms. Everything else (D0 entry, commands, the self-test) keeps 250 ms.
+// On the big-core row ~10 % of reads never complete (the user's 11-14 session: DiagSelf 15/200 and 22/200 timed out,
+// against 1/200 and 0/200 on the A55 row), so 3 tries of 250 ms each still ended contacts. 5 tries of 25 ms: an all-up
+// needs 5 hung reads in a row (~1e-5) and the worst stall is ~125 ms.
+#ifndef SBTOUCH_TRIES
+#define SBTOUCH_TRIES 5
+#endif
 #ifndef SBTOUCH_READ_TIMEOUT_MS
 #define SBTOUCH_READ_TIMEOUT_MS 25
 #endif
@@ -372,6 +378,7 @@ DiagFlush(
 	DiagAssignULong(key, L"DiagI2cRetryOk", (ULONG)DeviceContext->DiagI2cRetryOk);
 	DiagAssignULong(key, L"DiagRetryBuild", SBTOUCH_RETRY);
 	DiagAssignULong(key, L"DiagReadTimeoutMs", SBTOUCH_READ_TIMEOUT_MS);
+	DiagAssignULong(key, L"DiagTries", SBTOUCH_TRIES);
 	DiagAssignULong(key, L"DiagOverflow", (ULONG)DeviceContext->InputOverflowCount);
 	DiagAssignULong(key, L"DiagQueueFlush", (ULONG)DeviceContext->InputQueueFlushCount);
 	DiagAssignULong(key, L"DiagCoalesce", (ULONG)DeviceContext->InputReportCoalesceCount);
@@ -3074,7 +3081,7 @@ TouchReadWithRetry(
 	NTSTATUS status = STATUS_UNSUCCESSFUL;
 	ULONG tries;
 
-	for (tries = 0; tries < (SBTOUCH_RETRY ? 3u : 1u); tries++)
+	for (tries = 0; tries < (SBTOUCH_RETRY ? (ULONG)SBTOUCH_TRIES : 1u); tries++)
 	{
 		if (tries != 0)
 		{

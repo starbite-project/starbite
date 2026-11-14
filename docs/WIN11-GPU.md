@@ -2603,6 +2603,29 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - Touch follows: Windows turns the digitizer's coordinates with the display orientation (as it does now at 90).
   If the user ever picks another orientation in Settings, Windows saves that instead (their choice wins).
 
+### 6.82 touchdiag-2 on the big cores (the user, 11-14): ~10 % of touch reads hang there -> touchdiag-3 = 25 ms x 5 tries
+
+- **The user:** "touch is just as bad, lots of taps and selection box starting at new places while dragging"; Steam +
+  GD took 5+ minutes to come up.
+- **session2 (big-core boot, touchdiag-2):** DiagSelf back to back **15/200** reads timed out, 200 us apart **22/200**
+  (avg 19 / 31 ms, max 0.25 / 0.80 s; A55 check boot: 1/200 and 0/200). In the drags: DiagI2cRetry 67, RetryOk 37,
+  DiagI2cError 11 (all 3 tries failed -> ALL-UP), DiagSpbSlow 32, DiagGap100 22 (max 17.8 s idle aside, 0.5-1.1 s
+  inside drags), DiagEventsMax **64** = the chip's event stack ran full during those gaps, and the trace shows the
+  backlog coming out as release/press pairs at nearly the same spot within 0-3 ms (e.g. 122915 ms: release, press,
+  release after a 1145 ms gap), plus press-while-active after each gap. So on the M3 row the retry alone cannot keep
+  up: each hung read costs 250 ms, two or three in a row end the contact or let the chip's buffer overflow.
+- **touchdiag-3 (rebuilt):** touch-event reads 25 ms timeout (SBTOUCH_READ_TIMEOUT_MS) and **5 tries**
+  (SBTOUCH_TRIES; DiagTries records it): an all-up needs 5 hung reads in a row (~1e-5 at 10 %), the worst stall is
+  ~125 ms, so the chip's 64-event stack (~0.5 s of moves) no longer fills. build td3-25ms-5x, fa9f2a52, signed,
+  0 LSE words. `touch.sh update OUT` (check-boot PASS string `td3-25ms`).
+- **The cause underneath** is the HSI2C controller driver on the M3 row (a sequence whose completion never arrives,
+  ~10 % there vs ~0.5 % on the A55s; root-cause note mechanism 4/1). Fixing that driver (complete after MASTER_BUSY
+  clears / re-poll INT_STATUS before re-enabling) is the real cure; touchdiag-3 makes it tolerable meanwhile.
+- **Steam 5+ min:** debloat-1 removed Steam's autostart; a cold Steam start on the M3 row (no XtaCache there, 6.75)
+  translates Steam's Chromium helper from scratch (T63: steamwebhelper 40 % CPU for minutes after logon). Option:
+  `touch.sh steam OUT` (RunOnce StarbiteSteamOn re-adds `"...\steam.exe" -silent` to the user's Run key); the
+  lasting fix is the M3 translation cache (6.75: XtaCache needs its folder).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
