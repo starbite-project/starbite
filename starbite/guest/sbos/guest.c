@@ -429,6 +429,7 @@ static int guest_snd_tick(void) { return 0; }
 static void guest_snd_off(void) {}
 static int snd_fast;
 #endif
+#include "guest-gpu.h"                      /* sbgpu: Linux's GL / Vulkan on the Mali, address space 1 */
 static const struct sbg_os shim = {
     .ms = ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
     .m3_prep = m3_prep,
@@ -437,6 +438,7 @@ static const struct sbg_os shim = {
     .net_rx = sbos_nat_from_guest,          /* NULL until Track G's NAT is linked */
     .fs = GUEST_FS_OPS,
     .snd = GUEST_SND_OPS,                   /* NULL until Track I's snd.h is in the kernel */
+    .gpu = GUEST_GPU_OPS,                   /* sbgpu: the Mali for Linux's Mesa (guest-gpu.h; NULL off the phone) */
 };
 
 static uint8_t me_if;
@@ -459,7 +461,7 @@ static void cfg_init(void)
         /* v3 (Linux apps: hdr.version 3): sbghost leaves out what has no sbg_os part (NET without the NAT, P9
          * without guest-fs.h) */
         .services = mode == GUEST_WL ? SBSHM_SVC_CLIP | SBSHM_SVC_NOTIF | SBSHM_SVC_CLOCK | SBSHM_SVC_NET |
-                                           SBSHM_SVC_P9 | SBSHM_SVC_SND : 0,
+                                           SBSHM_SVC_P9 | SBSHM_SVC_SND | SBSHM_SVC_GPU : 0,
     };
     sbg_init(&shim, &cfg, me_if ? me_if : 1);
 }
