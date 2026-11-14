@@ -2513,6 +2513,25 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - **Kit:** `build/win/gd-kit-ec-0158/` (opengl32-gd.dll = EC bc64cc58, libgallium_wgl-gd.dll = EC bc2b9626) for
   `tools/win/gd-kit-push.sh`; proposed as the user's GD driver in place of the x64 b3befb40/ed17e3b3.
 
+### 6.77 debloat-1: one step for a lighter big-core Windows (the user's yes pending), with undo
+
+- **The user's "5-minute shutdown"** (their words, via the peer): the desktop was too slow to reach the Start menu
+  for ~5 min, then they shut down from a terminal; the shutdown itself was quick (34.5 s, 6.72). That session was
+  on the A55 row; T63/T64 show the big-core desktop overloaded the same way (6.72, 6.75).
+- **`tools/win/debloat.sh apply|undo|v1|show OUT`** (TWRP, no boot): sbxta v2 (6328cd28 source brought onto this
+  branch with its README and hive tool; built 6328cd2, b304123f, signed, 0 LSE/LDAPR) + DisableOnM3Services
+  WpnService WpnUserService PushToInstall DiagTrack OneSyncSvc CDPUserSvc UsoSvc wuauserv; HKLM RunOnce
+  StarbiteDebloat -> `starbite/win/debloat/debloat-online.cmd` (HKCU Run/RunOnce exported, Steam and OneDrive*
+  values removed; elevated: Defender exclusion for the Steam folder); GD kit = gd-kit-ec-0158. Undo: list off
+  (the next A55 boot restores sbxta\Saved), RunOnce StarbiteUndebloat (re-import, exclusion removed), x64 kit.
+  Rehearsed offline on the user's SYSTEM copy (set, param, off). The SOFTWARE edit is hive-runonce.py, used for
+  c-clean-win on 11-12 (ran elevated).
+- **Measure after apply (T66):** sbwddm-t64 again on win11-big, compare with T63.
+- **Lost on the big-core row only:** notifications, mail/calendar sync, Connected Devices, telemetry, Windows
+  Update, Store installs; both rows: Steam/OneDrive no longer start at logon, Steam's folder not scanned on access.
+- **Note:** build/win/results-t59 ... results-t65 are gone from the Mac (another session's disk cleanup, 97 % full);
+  6.66-6.76 hold the numbers.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
