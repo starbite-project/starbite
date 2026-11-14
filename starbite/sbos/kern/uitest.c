@@ -322,6 +322,11 @@ void selftest_timer(unsigned id)
             /* the quiet daytime sound image: snd's engine only (its Calliope boots from a powered-off domain), up to level 2 (tones the mic checks) */
             drv_run_select("audio");
             drv_run_begin(1);
+#elif defined(SBOS_SELFTEST_NEXT_DRV_IRIS)
+            /* the iris image (docs/drivers/IRIS.md 6), attended: P0 (levels 0-1, read only), then P1 at level 2 (the
+             * sensor up and its ID; ISPPRE, CSIS3 fault-safe, one dark frame without the LED; everything off) */
+            drv_run_select("iris");
+            drv_run_begin(1);
 #elif defined(SBOS_SELFTEST_NEXT_DRV_ATTENDED)
             drv_run_begin(1);
 #else

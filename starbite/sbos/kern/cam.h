@@ -116,6 +116,33 @@ int cam_flash_available(void);             /* 0: the front camera has no LED (us
 #define CAM_EMEM    -8                     /* the frames' memory is not mappable */
 #define CAM_EABORT  -9
 
+/* ---- the ISPPRE side lent to another CSIS port (kern/iris.c: CSIS3) ---------------------------------------------------
+ * The same domain, clocks, D-PHY / CSIS / WDMA set-up and the same reverse-order way down as the front camera, for a
+ * port other than CSIS1 (never while the camera is open; cam_open refuses while a port is up). A port's CSIS is not read
+ * by cam_port_up (its owner reads it fault-safe first). Every write still goes through cam.c's allow-list, which then
+ * names the port's CSIS / D-PHY / WDMA blocks instead of CSIS1's. */
+struct cam_port {
+    const char *name;
+    uint64_t csis, wdma, dphy;             /* the CSIS, its VC0 WDMA (its DMA common at +0x400), its D-PHY's registers */
+    uint32_t dphy_reset;                   /* its D-PHY's reset bit in SYSREG_ISPPRE 0x500 */
+    uint32_t settle;                       /* HSSETTLECTL (fimc-is-hw-settle-10nm-lpp.h) */
+    uint32_t skew;                         /* 0: below 1.5 Gb/s (HS_MODE_SEL 1, no skew calibration); 1..3 SKEW_DLYSEL
+                                            * with SKEWCAL_EN 1, HS_MODE_SEL 0 (csi_hw_s_phy_config) */
+    uint32_t dt;                           /* VC0's CSI-2 data type: 0x2B RAW10 (16 bits a pixel), 0x2A RAW8 (packet) */
+    unsigned w, h;
+};
+int cam_port_up(const struct cam_port *p);  /* 1: ISPPRE (+ the DTZPC restore SMC) and its clocks up for p; 0: refused
+                                             * or failed, everything put back (cam_why) */
+int cam_port_link(uint32_t buf_pa);         /* 1: the port's D-PHY, CSIS and VC0 WDMA set up, every frame pointer at
+                                             * buf_pa (32-bit, the DMA's view); not yet enabled */
+void cam_port_go(void);                     /* the link enabled (the sensor's stream may start 8 ms later) */
+uint32_t cam_port_dma_src(void);            /* the WDMA's interrupt source, read and cleared: bit 4 frame start, bit 8
+                                             * frame end, bit 12 error */
+void cam_port_diag(uint32_t d[6]);          /* CSIS INT_SRC0, INT_SRC1, FRM_CNT_CH0, PHY_STATUS; WDMA ERR, ACT_CTRL */
+void cam_port_dma_off(void);                /* the WDMA stopped (the frame in flight dropped) */
+void cam_port_down(void);                   /* the WDMA, the link, the D-PHY, the domain: off in that order; the port
+                                             * back to CSIS1 */
+
 /* ---- the probe ---------------------------------------------------------------------------------------------------- */
 int drv_cam_probe(int level, unsigned *wait_ms);
 void drv_cam_abort(void);

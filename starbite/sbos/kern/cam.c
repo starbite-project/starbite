@@ -90,11 +90,14 @@
 #define ISPPRE_USER     (CMU_ISPPRE + 0x100)
 #define SYSREG_ISPPRE   0x16210000ULL
 #define DPHY_RESET      (SYSREG_ISPPRE + 0x500)
-#define DPHY_RESET_CSIS1 (1U << 2)
+#define DPHY_RESET_CSIS1 (PT->dphy_reset)      /* the port's bit (CSIS1: bit 2) */
 #define DTZPC_ISPPRE    0x16210004ULL
 #define SMC_PD          0x82000410ULL       /* SMC_CMD_PREPARE_PD_ONOFF: a1 1 restore / 0 save, a2 the DTZPC */
 
-#define CSIS            0x16240000ULL
+/* the CSIS port in use: the front camera's CSIS1, or another port (cam_port_up: the iris's CSIS3). Every CSIS / D-PHY /
+ * WDMA address below goes through it, so the front camera's addresses and values are exactly the ones they were */
+static const struct cam_port *PT;
+#define CSIS            (PT->csis)
 #define CSIS_VERSION    (CSIS + 0x000)
 #define CSIS_CMN        (CSIS + 0x004)
 #define CSIS_MSK0       (CSIS + 0x010)
@@ -112,10 +115,11 @@
 #define CMN_QCH_EN      (1U << 20)
 #define CMN_PHY_SEL     (1U << 21)
 #define FMT_RAW10       0x2BU
+#define FMT_RAW8        0x2AU
 #define FMT_EMBEDDED    0x12U
 #define FMT_UNKNOWN     0x3FU
 
-#define DPHY            0x16180000ULL
+#define DPHY            (PT->dphy)
 #define DPHY_SC06       (DPHY + 0x1018)
 #define DPHY_SC02       (DPHY + 0x1084)
 #define DPHY_SD08(n)    (DPHY + 0x143C + 0x400 * (n))
@@ -124,7 +128,7 @@
 #define DPHY_SD13(n)    (DPHY + 0x14E0 + 0x400 * (n))
 #define SETTLE_720      36U
 
-#define WDMA            0x162C0000ULL
+#define WDMA            (PT->wdma)
 #define DMA_CTRL        (WDMA + 0x000)
 #define DMA_FMT         (WDMA + 0x004)
 #define DMA_ADDR(n)     (WDMA + 0x010 + 4 * (n))
@@ -194,6 +198,14 @@ static const uint16_t mode_a[][2] = {
     { 0xB134, 0x0000 }, { 0x307C, 0x0340 }, { 0x3052, 0x0104 }, { 0x6214, 0x7970 }, { 0x0216, 0x0000 },
 };
 #define MODE_N (sizeof(mode_a) / sizeof(mode_a[0]))
+
+/* ---- the CSIS ports ------------------------------------------------------------------------------------------------ */
+static const struct cam_port front_port = {
+    "CSIS1", 0x16240000ULL, 0x162C0000ULL, 0x16180000ULL, 1U << 2, SETTLE_720, 0, FMT_RAW10, CAM_FRAME_W, CAM_FRAME_H,
+};
+static const struct cam_port *PT = &front_port;
+static int port_on;                         /* cam_port_up .. cam_port_down: the ISPPRE side lent to another port */
+static uint32_t port_buf;                   /* that port's frame buffer: every WDMA frame pointer */
 
 /* ---- the HAL and the log ------------------------------------------------------------------------------------------ */
 static struct cam_hal H;
@@ -330,7 +342,7 @@ static int may_write(uint64_t pa)
         CIS1_MUX, CIS1_DIV, CIS1_GATE, CIS1_QCH, ISPB_MUX, ISPB_DIV, ISPB_GATE,
         PMU_DPHY_ISO, PMU_ISP_CONF, PMU_ISP_MEM, ISPPRE_USER, DPHY_RESET,
     };
-    static const uint64_t span[][2] = {
+    const uint64_t span[][2] = {           /* not static: CSIS / D-PHY / WDMA are the port's */
         { GPG2, 0x10 }, { GPP5, 0x10 }, { GPP6, 0x10 }, { GPC1, 0x10 },
         { CMU_ISPPRE + 0x3010, 0x64 },                          /* the Q-channels 0x3010..0x3070 */
         { CSIS, 0x1000 }, { DPHY, 0x3000 }, { WDMA, 0x1000 }, { CDMA, 0x40 },
@@ -932,6 +944,11 @@ static int isp_up(void)
     }
     for (unsigned i = 0; i < 8; ++i)
         upd(CMU_ISPPRE + qchs[i], 2U, 2U);
+    if (PT != &front_port) {                /* another port: its CSIS is read by its owner (fault-safe), not here */
+        say("ISPPRE clocks: CLKCMU_ISPPRE_BUS mux 0x%x div 0x%x gate 0x%x, BUS_USER 0x%x; for %s", rd(ISPB_MUX),
+            rd(ISPB_DIV), rd(ISPB_GATE), rd(ISPPRE_USER), PT->name);
+        return 1;
+    }
     uint32_t ver = rd(CSIS_VERSION);
     say("ISPPRE clocks: CLKCMU_ISPPRE_BUS mux 0x%x div 0x%x gate 0x%x, BUS_USER 0x%x; CSIS1 version 0x%x", rd(ISPB_MUX),
         rd(ISPB_DIV), rd(ISPB_GATE), rd(ISPPRE_USER), ver);
@@ -993,14 +1010,16 @@ static void phy_on(void)
     upd(PMU_DPHY_ISO, 1U, 1U);
     upd(DPHY_RESET, DPHY_RESET_CSIS1, 0);
     upd(DPHY_RESET, DPHY_RESET_CSIS1, DPHY_RESET_CSIS1);
-    /* the timing for 719 Mb/s a lane (csi_hw_s_phy_default_value, csi_hw_s_phy_config) */
+    /* the lane timing (csi_hw_s_phy_default_value, csi_hw_s_phy_config): CSIS1 at 719 Mb/s a lane: no skew
+     * calibration, HS_MODE_SEL 1, settle 36; at 1.5 Gb/s and more (the iris: 2041) SKEWCAL_EN 1, SKEW_DLYSEL the
+     * port's, HS_MODE_SEL 0 */
     wr(DPHY_SC06, 2U);
     upd(DPHY_SC02, 0xFFU, 1U);
     for (unsigned l = 0; l < 2; ++l) {
-        upd(DPHY_SD08(l), 3U << 5, 0);
-        upd(DPHY_SD13(l), 1U, 0);
-        upd(DPHY_SD05(l), 1U << 2, 1U << 2);
-        upd(DPHY_SD06(l), 0xFFU, SETTLE_720);
+        upd(DPHY_SD08(l), 3U << 5, (PT->skew & 3U) << 5);
+        upd(DPHY_SD13(l), 1U, PT->skew ? 1U : 0);
+        upd(DPHY_SD05(l), 1U << 2, PT->skew ? 0 : 1U << 2);
+        upd(DPHY_SD06(l), 0xFFU, PT->settle);
     }
 }
 
@@ -1028,19 +1047,27 @@ static int link_setup(void)
     wr(CSIS_SRC1, rd(CSIS_SRC1));
     upd(CSIS_CMN, (3U << 8) | (3U << 10), (1U << 8) | (3U << 10));       /* two lanes, VC_DT interleave */
     upd(CSIS_PHYCMN, 0xFU << 1, 3U << 1);                                 /* data lanes 0 and 1 */
-    upd(CSIS_CFG(0), 0x33FFU, (1U << 12) | (FMT_RAW10 << 2) | 0U);        /* VC0 RAW10, two pixels a clock */
-    wr(CSIS_RES(0), (CAM_FRAME_H << 16) | CAM_FRAME_W);
+    upd(CSIS_CFG(0), 0x33FFU, (1U << 12) | (PT->dt << 2) | 0U);           /* VC0 RAW10 (a port: RAW8), dual pixel */
+    wr(CSIS_RES(0), (PT->h << 16) | PT->w);
     upd(CSIS_CFG(1), 0x33FFU, (1U << 12) | (FMT_UNKNOWN << 2) | 1U);
     wr(CSIS_RES(1), 0);
     upd(CSIS_CFG(2), 0x33FFU, (1U << 12) | (FMT_EMBEDDED << 2) | 0U);     /* VC0's embedded data: not taken */
     wr(CSIS_RES(2), 0);
     upd(CSIS_CFG(3), 0x33FFU, (1U << 12) | (FMT_UNKNOWN << 2) | 3U);
     wr(CSIS_RES(3), 0);
-    /* VC0's WDMA: 2D, RAW10 in 16 bits (PACK12 off), the width; its common: OTF in, RAW10 */
-    upd(DMA_FMT, 0x3FU, 0);
-    upd(DMA_RESOL, 0x3FFFU, CAM_FRAME_W);
-    upd(VC_OTF, 3U, 0);
-    upd(VC_DATA, 1U, 0);
+    /* VC0's WDMA: 2D, RAW10 in 16 bits (PACK12 off), the width; its common: OTF in, RAW10. RAW8 (csi_hw_s_config_dma,
+     * csi_hw_s_config_dma_cmn): packet storage (DMA_FMT bit 4, a byte a pixel, RESOL not used), OTF format 3, input
+     * path PRL */
+    if (PT->dt == FMT_RAW8) {
+        upd(DMA_FMT, 0x3FU, 1U << 4);
+        upd(VC_OTF, 3U, 3U);
+        upd(VC_DATA, 1U, 1U);
+    } else {
+        upd(DMA_FMT, 0x3FU, 0);
+        upd(DMA_RESOL, 0x3FFFU, PT->w);
+        upd(VC_OTF, 3U, 0);
+        upd(VC_DATA, 1U, 0);
+    }
     wr(VC_MASK, VC_IRQ_MASK);
     wr(VC_SRC, rd(VC_SRC));
     if (rd(VC_CMN) & 1U)
@@ -1056,15 +1083,15 @@ static int link_setup(void)
     upd(DMA_CTRL, DMA_PTRS, 0);
     for (unsigned i = 0; i < 8; ++i) {
         C.map[i] = (uint8_t)(i % CAM_RING);
-        wr(DMA_ADDR(i), (uint32_t)slot_pa(C.map[i]));
+        wr(DMA_ADDR(i), PT == &front_port ? (uint32_t)slot_pa(C.map[i]) : port_buf);   /* a port: one buffer */
     }
     C.hold = 0;
     wr(VC_SRC, rd(VC_SRC));
     C.dma_on = 1;
     upd(DMA_CTRL, DMA_ON | DMA_UPDT, DMA_ON | DMA_UPDT);
-    say("CSIS1 set up: CMN 0x%x PHY 0x%x CH0 0x%x 0x%x; WDMA FMT 0x%x RESOL 0x%x CTRL 0x%x, ring at 0x%llx", rd(CSIS_CMN),
-        rd(CSIS_PHYCMN), rd(CSIS_CFG(0)), rd(CSIS_RES(0)), rd(DMA_FMT), rd(DMA_RESOL), rd(DMA_CTRL),
-        (unsigned long long)slot_pa(0));
+    say("%s set up: CMN 0x%x PHY 0x%x CH0 0x%x 0x%x; WDMA FMT 0x%x RESOL 0x%x CTRL 0x%x, ring at 0x%llx", PT->name,
+        rd(CSIS_CMN), rd(CSIS_PHYCMN), rd(CSIS_CFG(0)), rd(CSIS_RES(0)), rd(DMA_FMT), rd(DMA_RESOL), rd(DMA_CTRL),
+        PT == &front_port ? (unsigned long long)slot_pa(0) : (unsigned long long)port_buf);
     return 1;
 }
 
@@ -1535,7 +1562,7 @@ int cam_open(const struct cam_req *req)
     auto_hal();
     if (!hal_ok)
         return CAM_ESTATE;
-    if (C.phase != PH_OFF && C.phase != PH_FAILED)
+    if ((C.phase != PH_OFF && C.phase != PH_FAILED) || port_on)
         return CAM_ESTATE;
     if (!req || req->facing != CAM_FRONT || req->w < 8U || req->h < 8U || req->w > 816U || req->h > 816U ||
         req->w * req->h * 4U > CAM_PIC_BYTES || req->xform > 7U) {
@@ -1661,6 +1688,82 @@ uint32_t cam_model_id(void)
 int cam_flash_available(void)
 {
     return 0;
+}
+
+/* ---- another port (cam.h): the ISPPRE side without the front camera's sensor ------------------------------------- */
+int cam_port_up(const struct cam_port *p)
+{
+    auto_hal();
+    if (!hal_ok || !p || p == &front_port || port_on || (C.phase != PH_OFF && C.phase != PH_FAILED)) {
+        set_why(CAM_ESTATE, "The camera side is in use");
+        return 0;
+    }
+    reset_state();
+    C.phase = PH_OFF;
+    PT = p;
+    port_on = 1;
+    say("port %s: the ISPPRE side for it (CSIS 0x%llx, WDMA 0x%llx, D-PHY 0x%llx)", p->name,
+        (unsigned long long)p->csis, (unsigned long long)p->wdma, (unsigned long long)p->dphy);
+    if (!isp_up()) {
+        say("port %s: FAILED: %s", p->name, C.why ? C.why : "the domain");
+        cam_port_down();
+        return 0;
+    }
+    return 1;
+}
+
+int cam_port_link(uint32_t buf_pa)
+{
+    if (!port_on || !C.dom_up)
+        return 0;
+    port_buf = buf_pa;
+    phy_on();
+    if (!link_setup())
+        return 0;
+    return 1;
+}
+
+void cam_port_go(void)
+{
+    if (port_on && C.link_on)
+        link_enable();
+}
+
+uint32_t cam_port_dma_src(void)
+{
+    if (!port_on || !C.dom_up)
+        return 0;
+    uint32_t s = rd(VC_SRC);
+    if (s)
+        wr(VC_SRC, s);
+    return s;
+}
+
+void cam_port_diag(uint32_t d[6])
+{
+    for (unsigned i = 0; i < 6; ++i)
+        d[i] = 0;
+    if (!port_on || !C.dom_up)
+        return;
+    d[0] = rd(CSIS_SRC0), d[1] = rd(CSIS_SRC1), d[2] = rd(CSIS_FRMCNT), d[3] = rd(CSIS_PHYSTAT);
+    d[4] = rd(VC_ERR), d[5] = rd(DMA_ACT);
+}
+
+void cam_port_dma_off(void)
+{
+    if (port_on && C.dom_up)
+        dma_stop();
+}
+
+void cam_port_down(void)
+{
+    if (!port_on)
+        return;
+    shutdown();
+    say("port %s: down (%u writes refused)", PT->name, refused);
+    PT = &front_port;
+    port_on = 0;
+    port_buf = 0;
 }
 
 /* ---- the probe ---------------------------------------------------------------------------------------------------- */

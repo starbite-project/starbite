@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * Starbite OS: the iris scanner's read-only probe P0 (irisprobe.h; docs/drivers/IRIS.md). Facts from this phone's
+ * Starbite OS: the iris scanner's probes: P0 read only (levels 0-1), P1 attended (level 2, kern/iris.c) (irisprobe.h;
+ * docs/drivers/IRIS.md). Facts from this phone's
  * device tree (build/linux-bundle/lts.dts) and Samsung's GPL kernel (s2mps18-private.h, leds-s2mpb02.c,
- * fimc-is-device-module-5f1.c), read as facts only. Writes nothing to any iris part. */
+ * fimc-is-device-module-5f1.c), read as facts only. Levels 0-1 write nothing to any iris part. */
 #include "irisprobe.h"
 
 void iris_ldo_decode(uint8_t ctrl, struct iris_ldo *o)
@@ -30,6 +31,7 @@ void iris_irled_decode(const uint8_t r[7], struct iris_irled *o)
 
 #ifndef IRISPROBE_HOST
 #include "sb.h"
+#include "iris.h"
 
 int fled_reg_read(uint8_t r, uint8_t *v);       /* fled.c */
 
@@ -152,6 +154,8 @@ static int level1(void)
     return 1;
 }
 
+static int l2_running;
+
 int drv_iris_probe(int level, unsigned *wait_ms)
 {
     *wait_ms = 0;
@@ -160,12 +164,23 @@ int drv_iris_probe(int level, unsigned *wait_ms)
         return level0();
     if (level == 1)
         return level1();
-    sb_log("drvprobe: iris: PASS nothing at level 2 (the attended steps are P1-P3)");
-    return 1;
+    /* level 2, attended only: P1a (the sensor up, its ID, off) and P1b (ISPPRE, CSIS3 fault-safe, one dark frame
+     * without the LED), kern/iris.c; its last line is the PASS / FAIL with the key fact first */
+    if (!l2_running) {
+        l2_running = 1;
+        iris_p1_begin();
+    }
+    int fin = iris_p1_step(wait_ms);
+    if (fin)
+        l2_running = 0;
+    return fin;
 }
 
 void drv_iris_abort(void)
 {
-    plevel = -1;                                /* nothing to put back: P0 writes nothing to the iris parts */
+    if (l2_running)
+        iris_p1_abort();                        /* P1: everything off in reverse order */
+    l2_running = 0;
+    plevel = -1;                                /* levels 0-1 write nothing to the iris parts */
 }
 #endif

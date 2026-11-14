@@ -15,7 +15,8 @@
  * touched); the S2MPB02 gets only the camera's six registers; supplies come on as BUCK2, VDDAF, VDDA, VDDIO, VDDD and go
  * off as VDDAF, VDDD, VDDA, VDDIO, BUCK2, always with the reset low, MCLK off and the bus pins off; the probe at levels
  * 0 (no write, no I2C write), 1 and 2; a failure injected at each step ends in FAIL with everything as found; an abort
- * at every point of the start-up leaves everything as found. Exit status 0 = all passed. */
+ * at every point of the start-up leaves everything as found; the ISPPRE side lent to the iris's CSIS3 (cam_port_*) writes
+ * only CSIS3's blocks, with its settle / skew / RAW8 / buffer, and leaves everything as found. Exit status 0 = all passed. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +51,9 @@ static int verbose, fails, checks;
 #define DPHY 0x16180000ULL
 #define WDMA 0x162C0000ULL
 #define CDMA 0x162F0000ULL
+#define CSIS3 0x16260000ULL                 /* the iris's port (cam_port_*) */
+#define DPHY3 0x16190000ULL
+#define WDMA3 0x162E0000ULL
 #define HS_PMIC 0x10920000ULL
 #define HS_SENS 0x108F0000ULL
 
@@ -68,7 +72,8 @@ static struct {
     uint8_t pmic[256], pmic_ptr;
     uint8_t sens[65536];
     uint16_t sens_ptr;
-    int dom_on, smc_restored, streaming;
+    int dom_on, smc_restored, streaming, port;
+    unsigned port_csis1_rd;
     unsigned ptr, frames, sens_frames;
     uint64_t next_frame;
     unsigned violations, torch_touch, offdom_rd, offdom_wr, pmic_bad_wr, pmic_writes, i2c_writes, i2c_msgs, i2c_resets,
@@ -109,7 +114,8 @@ static int in_isp(uint64_t pa)
 {
     return (pa >= CMU_ISPPRE && pa < CMU_ISPPRE + 0x8000) || (pa >= SYSREG_ISPPRE && pa < SYSREG_ISPPRE + 0x1000) ||
            (pa >= CSIS && pa < CSIS + 0x1000) || (pa >= DPHY && pa < DPHY + 0x3000) || (pa >= WDMA && pa < WDMA + 0x1000) ||
-           (pa >= CDMA && pa < CDMA + 0x1000);
+           (pa >= CDMA && pa < CDMA + 0x1000) || (pa >= CSIS3 && pa < CSIS3 + 0x1000) ||
+           (pa >= DPHY3 && pa < DPHY3 + 0x3000) || (pa >= WDMA3 && pa < WDMA3 + 0x1000);
 }
 
 /* the ISPPRE blocks at their reset values (domain power-on) or gone (off) */
@@ -237,12 +243,17 @@ static int allowed_write(uint64_t pa, uint32_t old, uint32_t v)
     if ((pa >= CMU_ISPPRE + 0x3010 && pa <= CMU_ISPPRE + 0x3070 && pa != CMU_ISPPRE + 0x303C) ||
         (pa >= CSIS && pa < CSIS + 0x1000) || (pa >= DPHY && pa < DPHY + 0x3000) || (pa >= WDMA && pa < WDMA + 0x1000) ||
         (pa >= CDMA && pa < CDMA + 0x40))
+        return !F.port || (pa >= CDMA && pa < CDMA + 0x40) || pa < CSIS;   /* a port never writes CSIS1's blocks */
+    if (F.port && ((pa >= CSIS3 && pa < CSIS3 + 0x1000) || (pa >= DPHY3 && pa < DPHY3 + 0x3000) ||
+                   (pa >= WDMA3 && pa < WDMA3 + 0x1000)))
         return 1;
     return 0;
 }
 
 static int h_rd32(void *c, uint64_t pa, uint32_t *v)
 {
+    if (F.port && pa >= CSIS && pa < CSIS + 0x1000)
+        F.port_csis1_rd++;
     (void)c;
     tick();
     if (in_isp(pa) && !F.dom_on) {
@@ -292,7 +303,7 @@ static void h_wr32(void *c, uint64_t pa, uint32_t v)
             set(PMU + 0x404C, on ? 0xF : 0);
             isp_reset();
         }
-    } else if (pa == CSIS + 0x004 && (v & 2)) {
+    } else if ((pa == CSIS + 0x004 || pa == CSIS3 + 0x004) && (v & 2)) {
         set(pa, v & ~2u);                   /* the reset is done at once */
     } else if (pa == WDMA + 0x414 && (v & 1)) {
         set(WDMA + 0x408, reg(WDMA + 0x408) | (1u << 16));
@@ -903,6 +914,43 @@ static void test_level2(void)
 }
 
 /* the API: a picture and a still by hand, the arguments, an abort at every step of the start-up */
+/* the ISPPRE side lent to CSIS3 (cam_port_*, kern/iris.c): only CSIS3's blocks written, its settle / skew / format /
+ * buffer, everything as found afterwards, cam_open refused meanwhile */
+static void test_port(void)
+{
+    static const struct cam_port p3 = { "CSIS3", CSIS3, WDMA3, DPHY3, 1U << 3, 10U, 2U, 0x2AU, 2400U, 2400U };
+    phone_reset();
+    take(&before);
+    F.port = 1;
+    CHECK(cam_port_up(&p3) == 1 && F.dom_on, "port: ISPPRE up for CSIS3");
+    struct cam_req q = { CAM_FRONT, 160, 120, CAM_ROT0, 0, 500, 0x20 };
+    CHECK(cam_open(&q) == CAM_ESTATE, "port: cam_open refused while the port is up");
+    CHECK(cam_port_up(&p3) == 0, "port: a second port refused");
+    CHECK(cam_port_link(0xD8000000U) == 1, "port: the link set up");
+    cam_port_go();
+    for (unsigned l = 0; l < 2; ++l) {
+        CHECK((reg(DPHY3 + 0x14B0 + 0x400 * l) & 0xFF) == 10, "port: lane %u settle %u", l,
+              reg(DPHY3 + 0x14B0 + 0x400 * l) & 0xFF);
+        CHECK((reg(DPHY3 + 0x14E0 + 0x400 * l) & 1) == 1, "port: lane %u SKEWCAL_EN", l);
+        CHECK(((reg(DPHY3 + 0x143C + 0x400 * l) >> 5) & 3) == 2, "port: lane %u SKEW_DLYSEL", l);
+        CHECK((reg(DPHY3 + 0x14AC + 0x400 * l) & 4) == 0, "port: lane %u HS_MODE_SEL 0", l);
+    }
+    CHECK(((reg(CSIS3 + 0x40) >> 2) & 0x3F) == 0x2A && reg(CSIS3 + 0x44) == (2400U << 16 | 2400U),
+          "port: VC0 RAW8 2400 x 2400 (0x%x 0x%x)", reg(CSIS3 + 0x40), reg(CSIS3 + 0x44));
+    CHECK((reg(WDMA3 + 4) & 0x3F) == 0x10 && (reg(WDMA3 + 0x41C) & 3) == 3 && (reg(WDMA3 + 0x400) & 1) == 1,
+          "port: packet storage, OTF format 3, input PRL");
+    for (unsigned i = 0; i < 8; ++i)
+        CHECK(reg(WDMA3 + 0x10 + 4 * i) == 0xD8000000U, "port: frame pointer %u", i);
+    CHECK((reg(SYSREG_ISPPRE + 0x500) & 8) == 8 && (reg(CSIS3 + 4) & 1) == 1, "port: D-PHY out of reset, CSIS3 on");
+    cam_port_dma_off();
+    cam_port_down();
+    F.port = 0;
+    CHECK(!F.dom_on && F.port_csis1_rd == 0, "port: the domain off, CSIS1 never read (%u)", F.port_csis1_rd);
+    common_checks("port");
+    CHECK(cam_open(&q) == 0, "port: cam_open works again afterwards");
+    cam_close();
+}
+
 static void test_api(void)
 {
     phone_reset();
@@ -988,6 +1036,7 @@ int main(int argc, char **argv)
     test_level1_faults();
     test_level2();
     test_api();
+    test_port();
     printf("cam-test: %d checks, %d failed\n", checks, fails);
     free(F.ram);
     free(bars);

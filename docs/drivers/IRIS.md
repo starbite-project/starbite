@@ -3,7 +3,8 @@
 Goal (the user's words): "a nice and fast iris scanner so it feels just like apple's faceid". Target: the phone
 unlocked under ~0.5 s from wake, from the user simply looking at it.
 
-Status: **plan only**. Nothing has run on the phone. Every phone step below is attended (the user present), and
+Status: **P0 and P1 written, P1 not yet run** (2026-11-14; P1 = `kern/iris.c`, level 2 of the "iris" probe, image
+`starbite-next-drviris.img`, attended). Nothing beyond P0 has run on the phone. Every phone step below is attended (the user present), and
 never touches EFS / CPEFS / PARAM. Facts are from this phone's device tree (`build/linux-bundle/lts.dts`) and Samsung's
 GPL kernel for it (LineageOS `android_kernel_samsung_exynos9810`, lineage-20; files named below); an earlier port's iris
 capture driver (`build/refport27/refport-kernel/drivers/camera/exynos/exynos_iris.c`, APSL) is read as facts
@@ -15,7 +16,7 @@ only, never copied.
 |---|---|---|
 | Sensor | Samsung **S5K5F1** ("STAR IRIS Sensor", internal id 306), I2C **0x10** on `hsi2c@108D0000` (I2C ch 6, USI07's second channel, pins gpp4-6/7), 16-bit registers | DT `fimc-is-secure@10`; `fimc-is-device-module-5f1.c` |
 | Mode | one: **2400 x 2400 RAW8, 30 fps**, 2 MIPI lanes at 2041 Mb/s, VC0. Line length 0x0A38, frame length 0x13D7; 26 MHz MCLK | `config_5f1`, `setfile_vision_5f1_fps_30_26MHz` |
-| Receiver | **CSIS3** (0x16260000), DMA ch 3 (0x162E0300), behind its own SysMMU, ISPPRE power domain (as the front camera's CSIS1) | DT `fimc_is_sensor@16260000`, scenario 6 |
+| Receiver | **CSIS3** (0x16260000), D-PHY 0x16190000 (reset bit 3 of SYSREG_ISPPRE 0x500), DMA ch 3: VC0's WDMA **0x162E0000** (VC1-3 at +0x100/+0x200/+0x300, common +0x400), ISPPRE power domain (as the front camera's CSIS1) | DT `fimc_is_sensor@16260000` reg list, scenario 6 |
 | Supplies | S2MPS18 (the main PMIC, ACPM): **LDO41** VDDIO 1.8 V, **LDO40** VDDA 2.8 V, **LDO39** VDDD 1.05 V | DT regulators |
 | GPIOs | `gpio_iris_en` (bank phandle 0x4d pin 7), `gpio_reset` (0x7e pin 3), MCLK on mclk_ch 2 (0x7d pin 6) | DT |
 | IR LED | on the **S2MPB02** (camera PMIC, 0x59 on USI10, the same chip as the torch: `kern/fled.c`, `cam.c`): FLED_CTRL2 0x13, CUR2 0x16 (high nibble = IR current code), TIME2 0x17 (bit 0 = the IR max-time timer), IRON1/2 0x18/0x19 (10-bit pulse width; IRON2 [4:0] = max on-time), IRD1/2 0x1A/0x1B (10-bit delay; IRD2 bit 1 active discharge) | `leds-s2mpb02.c` |
@@ -129,6 +130,19 @@ is IEC 62471-certified with *their* per-shot values, which are not in the GPL so
 | **P3** one lit frame | attended, eyes at arm's length | the LED at the lowest current, one short pulse, the max timer armed: brightness, corneal reflections visible |
 | **P4** offline matcher | Mac | P3's frames (kept on the Mac only, deleted after) drive a host-tested pipeline (eye find, segment, encode, match) |
 | **P5** on-phone enrol + unlock | attended | the pipeline in the kernel; timing from wake logged per step |
+
+**P1 as written (kern/iris.c, host test kern/host/iris-test.c).** P1a: the stock power-on order, the bus picked by the
+first read of 0x0002 (HSI2C 0x108D0000 first, then bit-banged gpp4-6/7), reset + clock words, ID / version, the OTP
+page info tried without streaming, everything off. P1b: ISPPRE up through cam.c's `cam_port_*` (the same domain / SMC /
+clock code as the front camera), CSIS3 / WDMA3 / D-PHY read with `sb_probe32` (a fault ends P1: "CSIS3 FAULT: secure"),
+the sensor up again, the OTP the stock way (4 ms streaming, the link not yet on), 5.76 MB of 0xA5 at 0xD8000000 (the
+front camera's window), CSIS3 + WDMA for RAW8 2400 x 2400 (packet storage, OTF format 3, input path PRL as
+`csi_hw_s_config_dma_cmn` sets for RAW8; settle 10, SKEWCAL_EN 1, SKEW_DLYSEL 2, HS_MODE_SEL 0 for 2041 Mb/s), the
+52-write setfile + 0x0340 = 0x13D7, stream on until the first frame end (0.5 s at most), stream off + 40 ms, all off,
+statistics over every 4th row. The S2MPB02's IR registers are read before and after and must match: there is no write
+path to them. an earlier port's notes on this phone (facts only) are the main risk: without the secure PREPARE call its sensor did
+not answer at 0x10 and gpg0-7 / gpp4-6/7 ignored writes; and with PREPARE a frame end came but nothing reached memory
+(its RAW8 WDMA had the OTF input path, not PRL). P1 logs every pin that does not take a write.
 
 Code plan: `kern/iris.c` (power, sensor, CSIS3 capture: shares cam.c's ISPPRE / D-PHY helpers), `kern/irled.c` (the
 LED with the limits above, its own host test), `kern/irismatch.c` (pure C, host-tested: find, segment, encode,

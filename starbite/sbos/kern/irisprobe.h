@@ -1,13 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * Starbite OS: the iris scanner's first probe, P0 (docs/drivers/IRIS.md 6). READ ONLY towards the iris parts: nothing
- * is powered, no GPIO / PMIC / LED register is written, the sensor is not touched.
+ * Starbite OS: the iris scanner's probes (docs/drivers/IRIS.md 6). Levels 0-1 (P0) are READ ONLY towards the iris parts:
+ * nothing is powered, no GPIO / PMIC / LED register is written, the sensor is not touched. Level 2 is P1 (attended).
  *   level 0  register reads: the S2MPS18's LDO39/40/41 control words (VDDD 1.05 V, VDDA 2.8 V, VDDIO 1.8 V of the
  *            iris), the iris GPIOs (iris_en gpg0-7, reset gpg2-3, MCLK gpc1-6, the I2C pins gpp4-6/7) and their line
  *            levels, USI07's mode words, the ISPPRE domain's state and, only if it is already on, CSIS3's first
  *            registers through sb_probe32 (a fault there = the secure world holds CSIS3).
  *   level 1  silent: the S2MPB02's IR LED registers (0x13, 0x16-0x1B) read over the torch's I2C bus (fled.c brings the
  *            bus up as for the torch; nothing written to the chip): the LED's boot values, decoded.
- *   level 2  nothing (the attended steps are P1-P3).
+ *   level 2  attended only: P1 (kern/iris.c, iris.h): P1a the sensor up in the stock order, its ID and bus (HSI2C or
+ *            bit-banged), off; P1b ISPPRE on, CSIS3 read fault-safe (a fault: stop), one dark frame without the LED
+ *            (at most 0.5 s of streaming) into 0xD8000000, everything off, the frame's statistics. Never the LED.
  * The decoding below is pure C (host test kern/host/irisprobe-test.c). */
 #ifndef SBOS_IRISPROBE_H
 #define SBOS_IRISPROBE_H
@@ -38,6 +40,6 @@ void iris_irled_decode(const uint8_t r[7], struct iris_irled *o);   /* r: 0x13, 
 
 int drv_iris_probe(int level, unsigned *wait_ms);
 void drv_iris_abort(void);
-#define DRV_IRIS_BUDGET_MS 4000U
+#define DRV_IRIS_BUDGET_MS 10000U              /* level 2 (P1) stops itself at 9 s; levels 0-1 take < 1 s */
 
 #endif
