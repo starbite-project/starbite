@@ -238,6 +238,15 @@ static uint32_t bt_stamp(const char *l)     /* "[   12.345678] ..." -> 12345 + 1
         f *= 10U;
     return s * 1000U + f + 1U;
 }
+/* 8f (Track A): the HELLO lines kept, so the self test's end can log them again (the films push the boot's own
+ * lines out of the 16 KB pmsg ring: 8d's were lost) */
+static char keep_served[128], keep_bt[200];
+static void keep_line(char *d, unsigned cap, const char *s)
+{
+    unsigned i = 0;
+    for (; s[i] && i + 1 < cap; ++i) d[i] = s[i];
+    d[i] = 0;
+}
 static void bt_log(void)
 {
     struct ub u;
@@ -250,6 +259,7 @@ static void bt_log(void)
         else
             ub_s(&u, "-");
     }
+    keep_line(keep_bt, sizeof keep_bt, u.b);
     sb_log(u.b);
 }
 static void guest_log(const char *l)
@@ -900,6 +910,7 @@ void guest_timer(unsigned id)
             ub_dec(&u, bm_ticks[BM_DARK]);
             ub_s(&u, ", background (throttled) ");
             ub_dec(&u, bm_ticks[BM_BACKGROUND]);
+            keep_line(keep_served, sizeof keep_served, u.b);
             sb_log(u.b);
             gt_max = 0;
             if (bt_ms[BT_HELLO])
@@ -1137,6 +1148,19 @@ static const char *start_note(void)
     return b;
 }
 static uint32_t cluster_off_ms(void) { return (uint32_t)sbg_stats()->t_off; }
+/* 8f: the self test's end: HELLO's time and the kept lines again */
+void guest_relog(void)
+{
+    const struct sbg_stats *s = sbg_stats();
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "selftest: next: Linux this run: HELLO after ");
+    ub_dec(&u, s->t_hello);
+    ub_s(&u, " ms (0: no HELLO)");
+    sb_log(u.b);
+    if (keep_served[0]) sb_log(keep_served);
+    if (keep_bt[0]) sb_log(keep_bt);
+}
 #else
 /* ============================ the host's fake guest (preview, host tests) ============================ */
 /* SBOS_HOST_GUEST=1: the three store files exist; =fail: they exist and the start fails. The fake starts in
@@ -1362,6 +1386,7 @@ static uint32_t touches_seen(void) { return st == GUEST_RUNNING ? (uint32_t)fake
 static uint32_t surf_seq(void) { return (uint32_t)fake_seq; }
 static const char *start_note(void) { return "HELLO after 400 ms, 4 CPUs (fake)"; }
 static uint32_t cluster_off_ms(void) { return 100; }
+void guest_relog(void) { }   /* 8f: the host has no boot to log again */
 static int hw_m3_on_fake(void) { return fake_m3; }
 #define hw_m3_on hw_m3_on_fake
 #endif

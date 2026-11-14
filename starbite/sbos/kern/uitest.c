@@ -697,6 +697,7 @@ void selftest_timer(unsigned id)
         if (next_selftest_step())
             return;
         kt_cancel(KT_SELFTEST, 0);
+        guest_relog();  /* 8f: Linux's HELLO lines again (the films push them out of the 16 KB pmsg ring) */
         {   /* cp7k: the slowest loop turn of the whole run, kept to the end (the pmsg ring drops the early lines) */
             struct ub u;
             ub_init(&u);
