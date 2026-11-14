@@ -51,8 +51,9 @@ ping -n 6 127.0.0.1 > nul
 set /a W+=5
 if not defined STEAMUP tasklist /fi "imagename eq steam.exe" | find /i "steam.exe" > nul && (set STEAMUP=!W!& call :up "USR1 steam.exe up after !W! s")
 tasklist /fi "imagename eq GeometryDash.exe" | find /i "GeometryDash.exe" > nul && goto gd_up
-if !W! lss 360 goto wait
-echo USR1 GeometryDash.exe never appeared in 360 s >> %L%
+rem T67: Steam is no longer started at logon (debloat-1), so it starts cold here: up to 10 min (the user saw 5+)
+if !W! lss 600 goto wait
+echo USR1 GeometryDash.exe never appeared in 600 s >> %L%
 goto gd_restore
 :gd_up
 call :up "USR1 GeometryDash.exe up after !W! s"

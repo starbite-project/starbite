@@ -32,6 +32,11 @@ adb shell "ls -la '$W/Windows/Minidump' 2>&1" | tr -d '\r' > "$out/minidump.txt"
 adb shell "ls -la '$W/Program Files (x86)/Steam/steamapps/common/Geometry Dash/' 2>&1 | grep -i -E 'opengl|gallium|starbite|GeometryDash.exe'; sha256sum '$W/Program Files (x86)/Steam/steamapps/common/Geometry Dash/opengl32.dll' '$W/Program Files (x86)/Steam/steamapps/common/Geometry Dash/libgallium_wgl.dll' 2>&1" | tr -d '\r' > "$out/gd-folder.txt" || true
 adb shell "ls -la $W/pagefile.sys $W/hiberfil.sys $W/swapfile.sys 2>&1; df -h $W" | tr -d '\r' > "$out/disk.txt" || true
 echo "pulled into $out"
+# 11-14: the logon scripts' logs (debloat-online, touch-online, xta-m3-folder, ...)
+mkdir -p "$out/debloat"
+for f in $(adb shell "ls '$W/ProgramData/Starbite/debloat' 2>/dev/null" | tr -d '\r' | grep -i '\.log$'); do
+    adb pull "$W/ProgramData/Starbite/debloat/$f" "$out/debloat/$f" >/dev/null 2>&1 || true
+done
 # 11-14: WER LocalDumps of the shell processes (tools/win/touch.sh apply sets them), newest 4
 adb shell "ls -la '$W/sbdumps' 2>/dev/null" | tr -d '\r' > "$out/wer/sbdumps.txt" 2>&1 || true
 for f in $(adb shell "ls -t '$W/sbdumps' 2>/dev/null | head -4" | tr -d '\r'); do

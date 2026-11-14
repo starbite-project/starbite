@@ -2698,6 +2698,24 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   GDI/redirection bitmap reaches the panel at DWM's next composition (+~16-33 ms): ~80-120 ms, all of it shrinking
   with frame time (and zero-copy would drop the copy/GDI hop).
 
+### 6.87 T67 (XTA2): the big cores' own translation cache, with the folder the service needs
+
+- **Why now:** the user's Steam + GD took 5+ min on the big cores: debloat-1 took Steam out of autostart, and a cold
+  Steam start on the M3 row translates everything from scratch (no XtaCache there since 11-11; T64's SwapCache try
+  failed with 7023 because C:\Windows\XtaCache did not exist on the M3 boot).
+- **`starbite/win/debloat/xta-m3-folder.cmd`** (HKLM RunOnce StarbiteXtaM3, elevated): on a big-core boot in SwapCache
+  mode (XtaCache.a55 present, XtaCache missing) `mkdir C:\Windows\XtaCache`, copy the parked folder's access rules
+  (`SetSecurityDescriptorSddlForm(src.Sddl, 'Access')`; inherited SYSTEM-full rules if that fails), `sc start XtaCache`,
+  log to `C:\ProgramData\Starbite\debloat\xta.log`; on any other boot re-arm itself. After that, sbxta's renames keep
+  the M3's folder as XtaCache.m3 on small-core boots and bring it back on big-core boots (6.71).
+- **`tools/win/runonce-arm.sh NAME SCRIPT WINDIR OUT`:** the general "push a .cmd + HKLM RunOnce" step (vis-arm.sh is
+  the T66 special case). **user-pull.sh** now also pulls `C:\ProgramData\Starbite\debloat\*.log`.
+- **T67** (`sbwddm-t67` = T64 + sb-user.bat waiting up to 600 s for GD, since Steam now starts cold): runonce-arm, then
+  T67a (cold) and T67b (warm) with `--sbxta DisableOnM3=0,SwapCache=1`; restore with the mode off until read.
+- Risk: translations made on the M3 by xtajit64 with its ARMv8.0 latch (6.71); a bad one would crash steam/GD with
+  c000001d/c0000409 in T67a/b, never on the user's boots (the restore turns the mode off).
+- **For the analysis of T66:** `tools/win/etw-summary.py pres-<mode>.csv` (PIDs, event kinds, the app's present path).
+
 ### 6.86 BeamNG.drive on the S9: feasibility (the user's long goal; no phone time)
 
 Facts marked [K] are general knowledge about the game, not checked against a current release.
