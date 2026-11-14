@@ -2681,6 +2681,15 @@ int next_selftest_ready(void) { return ready || baking; }
 #endif
 
 /* ---- Track A, 1.0: the Linux window sampled in place by the GPU (Track E's zero-copy path) ---- */
+int sh_linux_gpu_reaches(const void *p)
+{
+#ifndef SBOS_NEXT_NOGPU
+    return p && gpucomp_va(p) != 0;
+#else
+    (void)p;
+    return 0;
+#endif
+}
 int sh_linux_zero_copy(void)
 {
 #ifndef SBOS_NEXT_NOGPU

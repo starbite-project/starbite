@@ -205,6 +205,8 @@ int sh_linux_viewport(int rows);         /* the rows the shell shows (SH_LINUX_H
 int sh_linux_rotate(int q, int rows);
 int sh_linux_rot_shown(void);
 int sh_linux_icon(int icon, uint32_t *px);     /* a pool icon into px (SH_LINUX_ICON squared); 0: none */
+int sh_linux_gpu_reaches(const void *p);  /* 8t: 1 when the GPU can address p (a front buffer the zero-copy layer is
+                                           * given): the window falls back to the strips, once logged, when not */
 int sh_linux_zero_copy(void);              /* 1.0: 1 when the GPU samples the guest's window surface in place: show it with
                                             * tk_layer_external (the front buffer from the header) instead of the strips */
 int sh_linux_hold(int on);               /* 1: the App Store is open: Linux started if off and not stopped while idle */

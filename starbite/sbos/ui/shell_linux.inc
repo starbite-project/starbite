@@ -341,6 +341,7 @@ static int lx_slot_icon(int s)
 static uint32_t *lrow[SH_LINUX_PH];              /* the window's bitmap rows, panel rows (a hidden strip's: lsink) */
 static uint32_t lsink[SH_LINUX_PW] __attribute__((aligned(16)));
 static tk_layer apkb;                            /* the keyboard (Linux apps, the App Store's search) */
+static int lx_zc_lost;                           /* 8t: the GPU could not address a front buffer (lx_zc_lose) */
 static tk_layer apkbbtn;                         /* 8q: "Keyboard", to bring a hidden keyboard back */
 /* 8q (the user, 8o: the keyboard is "hard to close"): the key bar's Done hides it (LX.kbhide) and the app gets the
  * whole window; a "Keyboard" pill at the window's bottom right brings it back; a new text focus or an open resets it */
@@ -423,7 +424,7 @@ static void lx_build_win(void)
     /* Track A's zero-copy path: the GPU samples the guest's front buffer in place (one external layer, no strips);
      * chosen at each build of the window (an open, the keyboard up / down), so a GPU that goes away mid-show falls
      * back to the strips at the next build */
-    LX.zc = sh_linux_zero_copy();
+    LX.zc = sh_linux_zero_copy() && !lx_zc_lost;
     if (LX.zc) {
         for (int k = 0; k < 4; k++) { relayer(&aplin[k]); aplin[k].hidden = 1; }
         for (int r = 0; r < SH_LINUX_PH; r++) lrow[r] = lsink;
@@ -467,6 +468,17 @@ static void lx_build_win(void)
     relink();
     (void)sh_linux_frame();                       /* what the app has drawn so far */
 }
+/* 8t: a front buffer the GPU could not address (8s: the surfaces moved out of its window, silently): the strips from
+ * then on (this boot), the window rebuilt on them */
+static void lx_zc_lose(void)
+{
+    lx_zc_lost = 1;
+#ifdef TK_HAS_LAYER_EXTERNAL
+    lx_ext_off();
+#endif
+    LX.zc = 0;
+    lx_build_win();
+}
 int sh_linux_frame(void)
 {
 #ifdef TK_HAS_LAYER_EXTERNAL
@@ -474,6 +486,11 @@ int sh_linux_frame(void)
         int stride = 0;
         const uint32_t *px = lx_is_lin() ? sh_linux_front(&stride) : 0;
         if (!px) return 0;
+        if (!sh_linux_gpu_reaches(px)) {          /* 8t (8s: the surfaces moved out of the GPU's window, silently) */
+            tk_log("linux: the GPU cannot address the window's front buffer: the CPU's copy instead (slower)");
+            lx_zc_lose();
+            return 0;
+        }
         tk_layer_external(&apext, px, SH_LINUX_W, LX.kb ? LX_KBROWS : SH_LINUX_H, stride);
         LX.first = 0;
         if (!LX.got) { LX.got = 1; lx_build_state(); }

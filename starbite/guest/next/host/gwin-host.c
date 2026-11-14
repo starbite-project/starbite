@@ -125,6 +125,7 @@ void guest_apps(int n) { if (n != apps_n) printf("[%6llu ms] fake guest: guest_a
 int guest_key(unsigned code, int down) { if (!guest_shown()) return 0; evlog("KEY %u %d;", code, down); return 1; }
 int sbg_keymod(uint32_t m) { evlog("KEYMOD %u;", m, 0); return 1; }
 int sh_linux_zero_copy(void) { return zc; }
+int sh_linux_gpu_reaches(const void *p) { return p != 0; }   /* 8t: the fake front buffers are all reachable */
 int clock_now(struct sbos_time *t)                 /* 21:05, the host stills' clock (sh_status) */
 {
     memset(t, 0, sizeof *t);
