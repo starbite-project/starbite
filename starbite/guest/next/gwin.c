@@ -300,6 +300,37 @@ int sh_linux_job(char *b, int cap)
 /* after each store snapshot: a package that was busy and is not any more ends with a notification (the Centre and a
  * banner: "Neovim Is Installed", "btop Couldn't Be Installed" + the guest's reason); the phone stays awake while any
  * job runs (not merely while the App Store is open) */
+/* 8j (Track A; the user, 8i: "installs still all fail", the reasons only in the overlay's /var/log/sbstore): each
+ * finished job in the pmsg, with the store's view of the repo, the network, the mirror and the overlay's room */
+static void job_log(const sh_lpkg_t *p, const char *what)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "gwin: store: ");
+    ub_s(&u, what);
+    ub_s(&u, " (");
+    ub_s(&u, p->pkg);
+    ub_s(&u, ", method ");
+    ub_dec(&u, p->method);
+    ub_s(&u, "; repo ");
+    ub_dec(&u, (uint64_t)(store.repo_ok != 0));
+    ub_s(&u, ", net ");
+    ub_dec(&u, store.net_ok);
+    ub_s(&u, " why ");
+    ub_dec(&u, store.net_why);
+    ub_s(&u, ", mirror ");
+    ub_dec(&u, store.mirror_ok);
+    ub_s(&u, ", overlay free MB ");
+    ub_dec(&u, store.overlay_free_kb / 1024U);
+    ub_s(&u, ")");
+    if (p->state == SH_PKG_FAILED) {
+        ub_s(&u, ": ");
+        ub_s(&u, p->err[0] ? p->err : "(no reason)");
+    }
+    sb_log(u.b);
+    if (p->state == SH_PKG_FAILED && p->hint[0])
+        sb_logf("gwin: store: what to do: ", p->hint);
+}
 static void jobs_update(void)
 {
     int any = 0;
@@ -323,6 +354,7 @@ static void jobs_update(void)
             const char *body = p->state == SH_PKG_FAILED ? (p->err[0] ? p->err : "See the App Store for details.") :
                                JP[k].state == SH_PKG_REMOVING ? "" : (p->flags & SH_PKG_INSTALLED) ? "Open it from the Linux page." : "";
             sh_notify("store", t, body, -1);
+            job_log(p, t);
             JP[k].pkg[0] = 0;               /* said once */
         }
     }
