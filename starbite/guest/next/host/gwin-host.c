@@ -593,8 +593,9 @@ int main(int argc, char **argv)
     if (!tk_comp_init(&C, 0, 0)) return 1;
     sh_init(&C);
     sh_set("unlock", "", 1);
-    /* 1. gwin.c's own check: the Terminal */
+    /* 1. gwin.c's own check: the Terminal (GWIN_ZC=1: on the zero-copy path, as 8d's phone with the GPU layer) */
     int r = 0, shot = 0;
+    if (getenv("GWIN_ZC")) zc = 1;
     for (int i = 0; i < 1500 && !r; i++) {
         now_ms += 100;
         guest_tick();
@@ -606,6 +607,7 @@ int main(int argc, char **argv)
             shot = 1;
         }
     }
+    zc = 0;
     printf("gwin-host: the self test %s after %llu ms (fake clock); frames drawn for the window %d; the guest's state %d, M3 %d\n",
            r > 0 ? "PASSED" : r < 0 ? "FAILED" : "NOT DONE", (unsigned long long)(now_ms - 1000), draws, st, hw_m3_on());
     if (r <= 0 || getenv("GWIN_L2") || getenv("GWIN_STORE")) return r > 0 ? 0 : 1;

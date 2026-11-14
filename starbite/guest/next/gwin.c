@@ -49,6 +49,8 @@ static int legacy;                         /* an L2 guest: no catalog */
 static int vp_rows = SH_LINUX_H, text_on, hold, busy;
 static uint64_t t_running;
 static int ext_reading;                    /* v3 + Track A: a front buffer handed to the shell's GPU layer */
+static const volatile uint32_t *ext_px;    /* that front buffer and its stride (px), for the self test's look */
+static unsigned ext_stride;
 #define CLIP_BYTES 8192U                   /* the shell's clipboard (shell_linux.inc LX_CLIP) */
 
 static void scopy(char *d, const volatile char *s, unsigned cap)
@@ -87,8 +89,10 @@ static int push_state(void)                /* 2: only the start's words changed 
         if (c && c[0])
             sh_linux_clip(c);
     }
-    if (s != GUEST_RUNNING)
+    if (s != GUEST_RUNNING) {
         ext_reading = 0;                   /* (the header is gone with the guest) */
+        ext_px = 0;
+    }
     if (last_state == GUEST_RUNNING && s != GUEST_RUNNING) {
         /* Linux went away: no app runs any more (the icons stay), nothing is in the surface */
         for (int i = 0; i < cat.n; i++)
@@ -655,6 +659,8 @@ const uint32_t *sh_linux_front(int *stride_px)
     ext_reading = 1;
     frames++;
     *stride_px = (int)stride;
+    ext_px = px;                           /* (the self test reads the window from here on the zero-copy path) */
+    ext_stride = stride;
     return (const uint32_t *)(uintptr_t)px;
 }
 static int is_text(const char *mime)
@@ -794,6 +800,19 @@ static int gs_failed(const char *why)
 /* rows of the window above the keyboard with anything other than its first pixel (the terminal's background) */
 static unsigned lit_rows(void)
 {
+    if (!win_rows && ext_px && ext_stride) {   /* 8d: the zero-copy path (no strips): the guest's front buffer, 1x */
+        uint32_t bg = ext_px[0] & 0xffffffU;
+        unsigned n = 0;
+        for (int y = 0; y < SH_LINUX_HKB; y += 2) {
+            const volatile uint32_t *r = ext_px + (size_t)y * ext_stride;
+            for (int x = 0; x < SH_LINUX_W; x++)
+                if ((r[x] & 0xffffffU) != bg) {
+                    n++;
+                    break;
+                }
+        }
+        return n;
+    }
     if (!win_rows)
         return 0;
     uint32_t bg = win_rows[0][0];
@@ -828,7 +847,7 @@ int gwin_selftest_step(void)
     case 1:                                /* Linux up, foot launched, its first frame in the window */
         if (st == GUEST_FAILED)
             return gs_failed(guest_why());
-        if (st == GUEST_RUNNING && frames > 0 && win_rows) {
+        if (st == GUEST_RUNNING && frames > 0 && (win_rows || ext_px)) {   /* (8d: the zero-copy path has no strips) */
             gs_log("Linux running, the window's first frame after ms ", dt, 1);
             gs_log(legacy ? "an L2 guest (no catalog): foot by itself" : "foot from the catalog; apps in it: ",
                    (uint64_t)cat.n, !legacy);
