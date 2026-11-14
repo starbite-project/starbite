@@ -1069,6 +1069,20 @@ int gwin_selftest_step(void)
                 return gs_failed("the M3 cluster still powered after the stop");
             gs_log("passed: the Terminal's window with foot, a typed command, a tap, the cluster off; seconds ",
                    (now - gs_t0) / 1000U, 1);
+            {   /* 8u: the lines the 16 KB pmsg ring drops by the end, again (the viewport, the GPU path, the kept list) */
+                struct ub u;
+                ub_init(&u);
+                ub_s(&u, "selftest: next-linux: recap: the surface ");
+                ub_dec(&u, SH_LINUX_W);
+                ub_s(&u, " x ");
+                ub_dec(&u, SH_LINUX_H);
+                ub_s(&u, ", the last viewport rows ");
+                ub_dec(&u, (uint64_t)vp_rows);
+                ub_s(&u, sh_linux_zero_copy() ? ", the GPU path (zero-copy)" : ", the CPU path (strips)");
+                ub_s(&u, "; the kept app list: ");
+                ub_s(&u, sh_linux_kept_said());
+                sb_log(u.b);
+            }
             gs_phase = 98;
             return 1;
         }

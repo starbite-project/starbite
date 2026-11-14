@@ -99,6 +99,8 @@ static void lx_bmp_fit(tk_bmp *dst, const tk_bmp *src)
  * and opens the app once its list has it (sh_linux_open by id). Written again only when the list changes */
 #define LXK_REC 76                                 /* id 40, name 32, flags 4 */
 static int lxk_restored, lxk_tried, lxk_cat_due;
+static const char *lxk_said = "not read yet";    /* 8u: what the kept list did this boot (the linuxtest's recap) */
+const char *sh_linux_kept_said(void) { return lxk_said; }
 static uint32_t lxk_saved;                         /* the kept list's signature (in the blob's header) */
 static uint8_t lxk_b[12 + SH_LAPPS * LXK_REC];
 static void lxk_load(void)
@@ -108,10 +110,11 @@ static void lxk_load(void)
     int r = sh_blob_get("linux.cat", lxk_b, sizeof lxk_b);
     if (r < 12 || lxk_b[0] != 'L' || lxk_b[1] != 'X' || lxk_b[2] != 'K' || lxk_b[3] != '1') {
         tk_log(r < 0 ? "linux: no kept app list yet (linux.cat): page 3 waits for Linux" : "linux: the kept app list is not usable");
+        lxk_said = r < 0 ? "none kept yet at power-on" : "not usable at power-on";
         return;
     }
     int n = lxk_b[4] | lxk_b[5] << 8;
-    if (n <= 0 || n > SH_LAPPS || r < 12 + n * LXK_REC) { tk_log("linux: the kept app list is not usable"); return; }
+    if (n <= 0 || n > SH_LAPPS || r < 12 + n * LXK_REC) { tk_log("linux: the kept app list is not usable"); lxk_said = "not usable at power-on"; return; }
     for (int i = 0; i < n; i++) {
         const uint8_t *q = lxk_b + 12 + i * LXK_REC;
         sh_lapp_t *a = &LCAT.app[i];
@@ -125,6 +128,7 @@ static void lxk_load(void)
     LCAT.n = n;
     lxk_restored = 1;
     tk_log("linux: page 3 from the kept app list (linux.cat) until Linux sends its own");
+    lxk_said = "read at power-on: page 3 shown before Linux";
     lxk_saved = (uint32_t)lxk_b[8] | (uint32_t)lxk_b[9] << 8 | (uint32_t)lxk_b[10] << 16 | (uint32_t)lxk_b[11] << 24;
 }
 static uint32_t lxk_sig(void)
@@ -156,8 +160,11 @@ static void lxk_step(void)                         /* the idle's: the list into 
     if (sh_blob_put("linux.cat", lxk_b, (unsigned)(12 + LCAT.n * LXK_REC)) != 0) {
         lxk_saved = 0;                             /* (again next change) */
         tk_log("linux: the app list was NOT kept (linux.cat: the store refused it)");
-    } else
+        lxk_said = lxk_restored ? "read at power-on; NOT kept again (the store refused)" : "NOT kept (the store refused it)";
+    } else {
         tk_log("linux: the app list kept for the next power-on (linux.cat)");
+        lxk_said = lxk_tried && LCAT.n ? "kept (written this boot)" : "kept";
+    }
 }
 static int lx_make_icon(tk_bmp *out, int px, int icon, const char *name, int badge)
 {
