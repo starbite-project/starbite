@@ -97,6 +97,11 @@ for job in jobs:
         aid, m, time.time() - t0, phases, bool(pk[i][8] & 1), p3[i][16].rstrip(b"\0").decode(),
         pk[i][4].rstrip(b"\0").decode()))
     say("rescan" in seen, "%s: rescan sent" % aid)
+    if ok and m == "distro":                           # 8o: Debian's own launcher only (Chess was listed twice)
+        la = "/usr/local/share/applications"
+        mine = sorted(os.listdir(la)) if os.path.isdir(la) else []
+        say("sbstore-%s.desktop" % aid not in mine, "%s: no second launcher (/usr/local/share/applications: %s)" %
+            (aid, " ".join(mine) or "empty"))
     if ok and m in ("release", "source"):              # the program itself runs (apps work, not only install)
         import json as _j
         cat = _j.load(open(sys.argv[1])) if sys.argv[1].endswith(".json") else {}

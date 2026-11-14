@@ -922,6 +922,67 @@ class QtPlugin(unittest.TestCase):
             e.close()
 
 
+DESK = "[Desktop Entry]\nType=Application\nName=%s\nName[fi]=%s\nExec=%s\nIcon=%s\n"
+
+
+def toml_gui(aid, name, exe, apt):
+    return 'id = "%s"\nname = "%s"\nsummary = "s"\ncategory = "Games"\nlicence = "MIT"\n\n[launcher]\nexec = "%s"\n' \
+           'terminal = false\n\n[distro]\napt = ["%s"]\n' % (aid, name, exe, apt)
+
+
+class Launchers(unittest.TestCase):
+    """8o (the user: Chess twice in the app list): a Debian package's own launcher, never a second sbstore-<id>"""
+    AV = {"chess-deb": {"version": "48", "desktop": {"org.x.Chess": DESK % ("Chess", "Shakki", "chess-deb", "org.x.Chess"),
+                                                     "chess-hidden": DESK % ("C", "C", "chess-deb --x", "c") + "NoDisplay=true\n"}},
+          "tux-deb": {"version": "0.6", "desktop": {"tux2": DESK % ("SuperTux 2", "SuperTux 2", "/usr/games/tux2 %U", "tux2")}}}
+
+    def env(self):
+        return Env(tomls=[toml_gui("chess", "Chess", "chess-deb", "chess-deb"),
+                          toml_gui("tux", "SuperTux", "tux2 --renderer sdl", "tux-deb")], available=self.AV)
+
+    def test_debian_launcher_alone(self):
+        e = self.env()
+        try:
+            e.run("install", "chess", "--method", "distro")
+            apps = e.path("/usr/local/share/applications")
+            self.assertEqual(sorted(os.listdir(apps)) if os.path.isdir(apps) else [], [])
+            self.assertTrue(os.path.exists(e.path("/usr/share/applications/org.x.Chess.desktop")))
+        finally:
+            e.close()
+
+    def test_recipe_exec_overrides_debians_under_its_id(self):
+        e = self.env()
+        try:
+            e.run("install", "tux", "--method", "distro")
+            apps = e.path("/usr/local/share/applications")
+            self.assertEqual(os.listdir(apps), ["tux2.desktop"])
+            t = open(os.path.join(apps, "tux2.desktop")).read()
+            self.assertIn("Exec=tux2 --renderer sdl\n", t)
+            self.assertIn("Name=SuperTux 2\n", t)
+            self.assertEqual(t.count("Exec="), 1)
+            self.assertEqual(e.state()["apps"]["tux"]["launcher"], os.path.join(apps, "tux2.desktop"))
+            e.run("remove", "tux")
+            self.assertEqual(os.listdir(apps), [])
+        finally:
+            e.close()
+
+    def test_older_stores_second_launcher_removed_at_start(self):
+        e = self.env()
+        try:
+            e.run("install", "chess", "--method", "distro")
+            apps = e.path("/usr/local/share/applications")
+            os.makedirs(apps, exist_ok=True)
+            with open(os.path.join(apps, "sbstore-chess.desktop"), "w") as f:         # what 1.1.6 wrote
+                f.write(DESK % ("Chess", "Chess", "chess-deb", "chess"))
+            p = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, %r); import sbstore; "
+                                "sbstore.launchers_fix(sbstore.load_catalog())" % os.path.dirname(SBSTORE)],
+                               env=e.env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(os.listdir(apps), [])
+        finally:
+            e.close()
+
+
 class Repair(unittest.TestCase):
     def test_dpkg_stale_file_handle_says_so(self):
         """8i: every dpkg run answered ESTALE on triggers/Lock (the overlay after a base change): plain words, no

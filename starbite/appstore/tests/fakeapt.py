@@ -40,6 +40,26 @@ def closure(pkgs):
         todo += db["available"].get(p, {}).get("depends", [])
     return out
 
+def files(p, add):
+    """a package's .desktop files ({"desktop": {id: text}}) and dpkg's file list, under SBSTORE_ROOT"""
+    root = os.environ.get("SBSTORE_ROOT")
+    desk = db["available"].get(p, {}).get("desktop") or {}
+    if not root or not desk:
+        return
+    lst = os.path.join(root, "var/lib/dpkg/info/%s.list" % p)
+    os.makedirs(os.path.dirname(lst), exist_ok=True)
+    os.makedirs(os.path.join(root, "usr/share/applications"), exist_ok=True)
+    for did, text in desk.items():
+        f = os.path.join(root, "usr/share/applications", did + ".desktop")
+        if add:
+            open(f, "w").write(text)
+        elif os.path.exists(f):
+            os.unlink(f)
+    if add:
+        open(lst, "w").write("".join("/usr/share/applications/%s.desktop\n" % d for d in desk))
+    elif os.path.exists(lst):
+        os.unlink(lst)
+
 once = os.environ.get("FAKEAPT_LISTS_BROKEN_ONCE")   # cp3: apt can't read its saved index until the lists are redone
 if once and tool == "apt-get" and "install" in args and os.path.exists(once):
     lists = os.path.dirname(once)
@@ -76,6 +96,7 @@ if tool == "apt-get":
         for n, p in enumerate(todo):
             st("pmstatus:%s:%d:Installing %s" % (p, 100 * (n + 1) // len(todo), p))
             db["installed"][p] = db["available"][p]["version"]
+            files(p, True)
             print("Setting up %s" % p)
         save(); sys.exit(0)
     if verb == "remove":
@@ -94,6 +115,7 @@ if tool == "apt-get":
         for p in gone:
             st("pmstatus:%s:50:Removing %s" % (p, p))
             del db["installed"][p]
+            files(p, False)
         save(); sys.exit(0)
     print("E: fake apt-get: %s" % verb); save(); sys.exit(100)
 if tool == "apt-cache":

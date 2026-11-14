@@ -60,7 +60,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-VERSION = "1.1.6"
+VERSION = "1.1.7"
 METHODS = ("distro", "release", "source")          # method numbers 1, 2, 3 (SBG_PKG_M_*)
 M_NUM = {"distro": 1, "release": 2, "source": 3}
 M_NAME = {v: k for k, v in M_NUM.items()}
@@ -1154,6 +1154,35 @@ def status_repair(app_id=None):
     return True
 
 
+def launchers_fix(cat):
+    """8o: stores up to 1.1.6 wrote sbstore-<id>.desktop next to a Debian package's own launcher (Chess twice in the
+    app list): redone for every Debian-packaged install, once at the daemon's start"""
+    try:
+        st = load_state()
+    except Exception:
+        return
+    changed = False
+    for aid, rec in list(st.get("apps", {}).items()):
+        app = cat.get(aid)
+        if not app or not os.path.exists(os.path.join(C.apps, "sbstore-%s.desktop" % aid)):
+            continue
+        m = rec.get("method")
+        if not (m == "distro" or rec.get("debian_source") or (app.get(m) or {}).get("format") == "deb"):
+            continue
+        try:
+            lau = write_launcher(app, None, "distro" if m == "distro" or rec.get("debian_source") else m,
+                                 rec.get("packages"))
+        except Exception as e:
+            log("launcher of %s: %s" % (aid, e), aid)
+            continue
+        if lau and not os.path.basename(lau).startswith("sbstore-"):
+            rec["launcher"] = lau
+        changed = True
+        log("%s: the store's second launcher removed (Debian's own is used)" % aid, aid)
+    if changed:
+        save_state(st)
+
+
 def repair(app_id=None, at_start=False):
     """put back what an interrupted job left (Linux stopped, the phone restarted, the screen slept and the guest was
     stopped mid-dpkg): dpkg's half-configured packages, then apt's broken dependencies; at the daemon's start also the
@@ -1631,8 +1660,9 @@ def guest_path(p):
     return "/" + os.path.relpath(p, r)
 
 
-def activate(app, ver, bins, method):
-    """links into /usr/local/bin, the launcher .desktop and its icon, for /opt/sbstore/<id>/current"""
+def activate(app, ver, bins, method, pkgs=None):
+    """links into /usr/local/bin, the launcher .desktop and its icon, for /opt/sbstore/<id>/current (pkgs: the Debian
+    packages a format = "deb" release installed)"""
     aid = app["id"]
     cur = os.path.join(app_dir(aid), "current")
     links = []
@@ -1646,7 +1676,7 @@ def activate(app, ver, bins, method):
             continue
         _rel_link(guest_path(tgt), ln)
         links.append(ln)
-    write_launcher(app, os.path.join(app_dir(aid), ver), method)
+    write_launcher(app, os.path.join(app_dir(aid), ver), method, pkgs)
     return links
 
 
@@ -1654,12 +1684,112 @@ def desktop_escape(s):
     return s.replace("\n", " ")
 
 
-def write_launcher(app, vdir, method):
-    """sbstore-<id>.desktop: from the app's own .desktop when the recipe names one, else from the recipe"""
+def pkg_desktops(pkgs):
+    """the visible launchers Debian packages installed: [(desktop id, path)], from dpkg's file lists"""
+    out = []
+    for p in pkgs or []:
+        for suf in ("", ":arm64", ":all"):
+            lp = rp("/var/lib/dpkg/info/%s%s.list" % (p, suf))
+            if not os.path.exists(lp):
+                continue
+            for ln in open(lp, errors="replace"):
+                m = re.match(r"^/usr/share/applications/([^/]+)\.desktop$", ln.strip())
+                if m and os.path.exists(rp(ln.strip())):
+                    k = desktop_keys(rp(ln.strip()))
+                    if k.get("NoDisplay") != "true" and k.get("Hidden") != "true" and k.get("Type") == "Application":
+                        out.append((m.group(1), rp(ln.strip())))
+            break
+    return out
+
+
+def desktop_keys(path):
+    """[Desktop Entry]'s keys (unlocalised)"""
+    k, sect = {}, False
+    try:
+        for ln in open(path, errors="replace"):
+            ln = ln.strip()
+            if ln.startswith("["):
+                sect = ln == "[Desktop Entry]"
+            elif sect and "=" in ln and not ln.startswith("#"):
+                a, b = ln.split("=", 1)
+                k.setdefault(a.strip(), b.strip())
+    except OSError:
+        pass
+    return k
+
+
+def _exec_words(s):
+    """an Exec line's words, the program by its name (/usr/games/sol = sol), no field codes (%U) or "--" """
+    try:
+        w = shlex.split(s)
+    except ValueError:
+        w = s.split()
+    w = [x for x in w if not re.match(r"^%[a-zA-Z]$", x) and x != "--"]
+    return [os.path.basename(w[0])] + w[1:] if w else w
+
+
+def debian_launcher(app, pkgs):
+    """8o (the user: Chess twice in the app list): Debian packages bring their own launcher, so the store never adds
+    a second (sbstore-<id>). When the recipe starts the program differently (SuperTux: --renderer sdl), the package's
+    own launcher is overridden under its own desktop id in /usr/local/share/applications (sbwl: a later directory
+    overrides the same id). Returns the override's path, "" when the package's launcher is used as it is, None when
+    the packages bring no launcher (then the store writes its own)."""
+    aid, L = app["id"], app.get("launcher") or {}
+    _unlink(os.path.join(C.apps, "sbstore-%s.desktop" % aid))   # (from an older store)
+    desks = pkg_desktops(pkgs)
+    if not desks:
+        return None
+    want = _exec_words(L.get("exec") or "")
+    envs = L.get("env") or {}
+    runs = [(did, path, _exec_words(desktop_keys(path).get("Exec", ""))) for did, path in desks]
+    runs = [r for r in runs if want and r[2] and r[2][0] == want[0]]
+    # only one launcher runs the program (LibreOffice's three are left alone), and the recipe adds to it (Debian's own
+    # extra arguments, calibre --detach, mpv's %U, stay)
+    for did, path, dw in runs if len(runs) == 1 else []:
+        if dw[:len(want)] == want and not envs:
+            break
+        exec_ = L["exec"]
+        if envs:
+            exec_ = "env " + " ".join("%s=%s" % (k, shlex.quote(v)) for k, v in envs.items()) + " " + exec_
+        out, sect = [], False
+        for ln in open(path, errors="replace"):
+            t = ln.strip()
+            if t.startswith("["):
+                sect = t == "[Desktop Entry]"
+            elif sect and re.match(r"^(Exec|TryExec|DBusActivatable)\s*=", t):
+                continue
+            out.append(ln.rstrip("\n"))
+            if t == "[Desktop Entry]":
+                out += ["Exec=" + exec_, "X-Starbite-Pkg=%s" % aid, "X-Starbite-Store=%s" % aid]
+        os.makedirs(C.apps, exist_ok=True)
+        dst = os.path.join(C.apps, did + ".desktop")
+        with open(dst + ".tmp", "w") as f:
+            f.write("\n".join(out) + "\n")
+        os.replace(dst + ".tmp", dst)
+        log("%s: Debian's launcher %s started as the recipe says (%s)" % (aid, did, exec_), aid)
+        return dst
+    return ""
+
+
+def _unlink(p):
+    try:
+        os.unlink(p)
+    except OSError:
+        pass
+
+
+def write_launcher(app, vdir, method, pkgs=None):
+    """sbstore-<id>.desktop: from the app's own .desktop when the recipe names one, else from the recipe; for Debian
+    packages (distro, Debian source, a .deb release) the packages' own launcher (debian_launcher)"""
     aid = app["id"]
     L = app.get("launcher") or {}
-    if not L and (method == "distro" or (app.get(method) or {}).get("format") == "deb"
-                  or (app.get(method) or {}).get("system") == "debian"):
+    deb = method == "distro" or (app.get(method) or {}).get("format") == "deb" or \
+        (app.get(method) or {}).get("system") == "debian"
+    if deb:
+        got = debian_launcher(app, pkgs)
+        if got is not None:
+            return got or None
+    if not L and deb:
         return None                                     # the Debian package(s) bring their own .desktop
     exec_ = (app.get(method) or {}).get("exec") or L.get("exec") or ((app.get(method) or {}).get("bin") or [aid])[0]
     exec_w = exec_.split()
@@ -1704,7 +1834,7 @@ def deactivate(app_id, st_app):
     for ln in st_app.get("links", []):
         if os.path.islink(ln):
             os.unlink(ln)
-    for p in [os.path.join(C.apps, "sbstore-%s.desktop" % app_id)]:
+    for p in [os.path.join(C.apps, "sbstore-%s.desktop" % app_id)] + ([st_app["launcher"]] if st_app.get("launcher") else []):
         if os.path.exists(p):
             os.unlink(p)
     for sub in ("scalable", "256x256"):
@@ -1973,7 +2103,7 @@ def _install_locked(app, st, aid, method, cur, prog, cancel, update):
             prev = cur["version"] if cur else None
             prev_dir = safe_ver(prev) if prev else None
             set_current(aid, ver)
-            links = activate(app, ver, bins, method)
+            links = activate(app, ver, bins, method, st.get("_deb_names", {}).get(aid))
         except BaseException as e:
             shutil.rmtree(tmpd, ignore_errors=True)
             if not cur:
@@ -2120,10 +2250,11 @@ def _install_distro(app, st, prog, cancel, update):
     qt_companions(st, aid, prog, cancel)
     ver = dpkg_installed().get(pkgs[0], rel.get("version"))
     links = []
-    if app.get("launcher"):
-        write_launcher(app, None, "distro")
+    lau = write_launcher(app, None, "distro", pkgs)
     rec = {"method": "distro", "version": ver, "packages": pkgs, "links": links, "installed_at": int(time.time()),
            "verified": "Debian signatures (apt)", "from": rel.get("from")}
+    if lau and not os.path.basename(lau).startswith("sbstore-"):
+        rec["launcher"] = lau
     if st["apps"].get(aid):
         rec["installed_at"] = st["apps"][aid].get("installed_at", rec["installed_at"])
     st["apps"][aid] = rec
@@ -2229,11 +2360,12 @@ def _install_debian_source(app, st, prog, cancel):
     qt_companions(st, aid, prog, cancel)
     rec = {"method": "source", "version": ver or "?", "packages": pkgs, "links": [], "debian_source": srcpkg,
            "installed_at": int(time.time()), "verified": "built from Debian source (signed .dsc)", "from": "net"}
+    lau = write_launcher(app, None, "source", pkgs)
+    if lau and not os.path.basename(lau).startswith("sbstore-"):
+        rec["launcher"] = lau
     st["apps"][aid] = rec
     st["prefs"][aid] = "source"
     save_state(st)
-    if app.get("launcher"):
-        write_launcher(app, None, "source")
     log("built and installed %s %s from Debian source" % (aid, ver))
     prog.event(ev="done", msg="%s %s built from Debian source" % (app["name"], ver))
     return rec
@@ -2884,6 +3016,7 @@ class Daemon:
         log("daemon: %d apps (%s), mirror %s, network %s" % (len(self.order), C.catalog, C.mirror,
                                                             "up" if up else "down (%s)" % why))
         repair(at_start=True)
+        launchers_fix(self.cat)
         ensure_mirror_source()
         ensure_net_sources()
         if env("SBSTORE_NO_APT_UPDATE") != "1":         # in the background: file: sources (repo, mirror debs)
