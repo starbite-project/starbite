@@ -508,9 +508,23 @@ int sh_linux_char(char c)
     return guest_type(c);                  /* the Linux key, with Shift around it ('\n' Return, '\b' BackSpace) */
 }
 
+static int rot_q;                          /* (the turn below: logged with the viewport) */
 int sh_linux_viewport(int rows)
 {
-    vp_rows = rows < 1 ? SH_LINUX_H : rows > SH_LINUX_H ? SH_LINUX_H : rows;
+    int r = rows < 1 ? SH_LINUX_H : rows > SH_LINUX_H ? SH_LINUX_H : rows;
+    if (r != vp_rows) {                    /* 8n (Track A; the user: Linux apps "half the screen, empty below") */
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "gwin: viewport rows ");
+        ub_dec(&u, (uint64_t)r);
+        ub_s(&u, " of ");
+        ub_dec(&u, SH_LINUX_H);
+        ub_s(&u, r < SH_LINUX_H ? " (the keyboard up)" : " (full)");
+        ub_s(&u, "; turned ");
+        ub_dec(&u, (uint64_t)rot_q);
+        sb_log(u.b);
+    }
+    vp_rows = r;
     if (guest_state() == GUEST_RUNNING && want >= 0)
         return sbg_viewport((uint32_t)vp_rows, SH_LINUX_W);
     return 1;                              /* sent with the next ACTIVATE */
