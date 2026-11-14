@@ -16,7 +16,9 @@
 #   every user's AppData\Local\Temp, Windows\Temp, ProgramData\Microsoft\Windows\WER\{ReportArchive,ReportQueue,
 #   Temp}, Windows\LiveKernelReports (only with --lkr), Windows\Minidump, Windows\MEMORY.DMP, Windows\SoftwareDistribution\Download
 #   (Windows Update's download cache), C:\starbite\auto\gpu (gpu-cycle's test files; it recreates them), and in
-#   ProgramData\Starbite\umdlog only *.log, dump-*, shot-*, sweep-* (the flag files there stay).
+#   ProgramData\Starbite\umdlog only *.log, dump-*, shot-*, sweep-*, pres-*.csv (the flag files there stay),
+#   C:\sbdumps (WER LocalDumps of the shell, touch.sh; copied to the Mac first), and Windows\XtaCache.m3 (the big
+#   cores' translation cache that T67 left parked) only while sbxta's SwapCache is 0 and no XtaCache.a55 exists.
 # Never touched, only reported: pagefile.sys / swapfile.sys / hiberfil.sys and their settings, Windows.old,
 #   Steam and its games and caches, anything under Users\* other than AppData\Local\Temp, any hive.
 # Needs: the phone in TWRP, no other phone job running (one at a time). Output: build/win/cleanup-<date>/.
@@ -64,6 +66,7 @@ TARGETS=(
 "Windows/Minidump"
 "Windows/SoftwareDistribution/Download"
 "starbite/auto/gpu"
+"sbdumps"
 )
 [ "$lkr" = 1 ] && TARGETS+=("Windows/LiveKernelReports")
 
@@ -94,8 +97,11 @@ for u in "${users[@]}"; do
 done
 k=$(adb shell "ls -l $W/Windows/MEMORY.DMP 2>/dev/null" | tr -d '\r' | awk '{print int($5/1024)}'); k=${k:-0}; total=$((total + k))
 printf '  %8s  %s\n' "$k" "Windows/MEMORY.DMP" | tee -a "$out/cleanup.log"
-k=$(adb shell "cd $W/ProgramData/Starbite/umdlog 2>/dev/null && du -ck *.log dump-* shot-* sweep-* 2>/dev/null | tail -1" | tr -d '\r' | awk '{print $1+0}'); total=$((total + k))
-printf '  %8s  %s\n' "$k" "ProgramData/Starbite/umdlog (*.log dump-* shot-* sweep-*)" | tee -a "$out/cleanup.log"
+k=$(adb shell "cd $W/ProgramData/Starbite/umdlog 2>/dev/null && du -ck *.log dump-* shot-* sweep-* pres-*.csv 2>/dev/null | tail -1" | tr -d '\r' | awk '{print $1+0}'); total=$((total + k))
+printf '  %8s  %s\n' "$k" "ProgramData/Starbite/umdlog (*.log dump-* shot-* sweep-* pres-*.csv)" | tee -a "$out/cleanup.log"
+# 11-15: the big cores' parked translation cache (T67), deletable only in the safe layout (see the header)
+k=$(kb "Windows/XtaCache.m3"); printf '  %8s  %s\n' "$k" "Windows/XtaCache.m3 (T67's parked M3 cache; deleted only if SwapCache 0 and no XtaCache.a55)" | tee -a "$out/cleanup.log"
+adb shell "ls -d $W/Windows/XtaCache* 2>/dev/null" | tr -d '\r' | sed 's/^/  present: /' | tee -a "$out/cleanup.log"
 log "--delete would free about $((total / 1024)) MB"
 log "REPORT ONLY (never changed by this script):"
 adb shell "ls -l $W/pagefile.sys $W/swapfile.sys $W/hiberfil.sys 2>/dev/null" | tr -d '\r' | awk '{printf "  %6d MB  %s\n", $5/1048576, $NF}' | tee -a "$out/cleanup.log"
@@ -121,7 +127,11 @@ done
 adb shell "ls $W/ProgramData/Starbite/umdlog 2>/dev/null" | tr -d '\r' | grep -E '\.log$' | while read -r f; do
     adb pull "$W/ProgramData/Starbite/umdlog/$f" "$out/umdlog/" >/dev/null 2>&1 || true
 done
-log "copied: $(ls "$out/wer" | wc -l | tr -d ' ') GD reports, $(ls "$out/umdlog" | wc -l | tr -d ' ') logs"
+mkdir -p "$out/sbdumps"
+adb shell "ls $W/sbdumps 2>/dev/null" | tr -d '\r' | grep -E '\.dmp$' | while read -r f; do
+    adb pull "$W/sbdumps/$f" "$out/sbdumps/" >/dev/null 2>&1 || true
+done
+log "copied: $(ls "$out/wer" | wc -l | tr -d ' ') GD reports, $(ls "$out/umdlog" | wc -l | tr -d ' ') logs, $(ls "$out/sbdumps" | wc -l | tr -d ' ') shell dumps"
 before=$(free_mb)
 mount_rw
 # one remote command under a deadline on the Mac too (an rm stuck in the FUSE driver ignores TWRP's timeout)
@@ -174,7 +184,14 @@ for u in "${users[@]}"; do
 done
 for t in "${TARGETS[@]}"; do clear_dir "$t"; done
 rsh 45 "$(to 30) rm -f $W/Windows/MEMORY.DMP; true" >/dev/null || stuck "rm MEMORY.DMP"
-rsh 45 "cd $W/ProgramData/Starbite/umdlog 2>/dev/null && $(to 30) rm -f *.log dump-* shot-* sweep-*; true" >/dev/null || stuck "rm in umdlog"
+rsh 45 "cd $W/ProgramData/Starbite/umdlog 2>/dev/null && $(to 30) rm -f *.log dump-* shot-* sweep-* pres-*.csv; true" >/dev/null || stuck "rm in umdlog"
+# 11-15: XtaCache.m3 only in the safe layout: SwapCache 0 in the hive pulled above and no XtaCache.a55 on disk
+swap=$(python3 "$main/tools/woa/hive.py" "$out/SYSTEM" 'ControlSet001\Services\sbxta\Parameters' 2>/dev/null | awk '$1 == "SwapCache" { print $NF }' | tr -d '()')
+if [ "${swap:-0}" = 0 ] && ! rsh 30 "[ -e $W/Windows/XtaCache.a55 ]" >/dev/null; then
+    clear_dir "Windows/XtaCache.m3"
+else
+    log "Windows/XtaCache.m3 kept: SwapCache=${swap:-?} or XtaCache.a55 present"
+fi
 log "cleared Windows/MEMORY.DMP and umdlog's logs and dumps (its flag files stay)"
 umount_w; mount_ro
 after=$(free_mb)
