@@ -268,6 +268,7 @@ static void lx_build_page3(void)
         for (int i = 0; i < n; i++) { LH.ix[i] -= (int)(hparts[5].x - ox); LH.iy[i] -= (int)(hparts[5].y - oy); }
 }
 /* the catalog's apps for page 3 again when what it shows changed (ids, names, icons; not the RUNNING flags) */
+static int st_same_name(const char *a, const char *b);   /* shell_appstore.inc */
 static void lx_page3_update(void)
 {
     uint32_t h = 2166136261u;
@@ -281,8 +282,14 @@ static void lx_page3_update(void)
     if (h == LH.sig && LH.sig) return;
     LH.sig = h;
     LH.n = 0;
-    for (int i = 0; i < LCAT.n && LH.n < LHOME; i++)
-        if (!lx_term_id(LCAT.app[i].id)) LH.cat[LH.n++] = i;
+    for (int i = 0; i < LCAT.n && LH.n < LHOME; i++) {
+        if (lx_term_id(LCAT.app[i].id)) continue;
+        /* 8q (the user, 8o: "Chess showed twice right after installing"): one icon a name (a package's own .desktop
+         * and the store's sbstore-<id>.desktop can both list the app); the first one in the catalog stays */
+        int dup = 0;
+        for (int k = 0; k < LH.n && !dup; k++) dup = st_same_name(LCAT.app[LH.cat[k]].name, LCAT.app[i].name);
+        if (!dup) LH.cat[LH.n++] = i;
+    }
     if (lx_ic_slot >= 0 && !is_app("linux")) lx_ic_slot = -1;   /* (an open app keeps its icon) */
     if (!lx_p3_seen()) {                         /* not in view: its icons in idle turns, then the page (lx_idle) */
         lx_p3_want = 1;
