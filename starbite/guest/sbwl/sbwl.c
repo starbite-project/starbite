@@ -839,6 +839,7 @@ struct surf_track {
 	struct dmab db[DMAB_PER_SURF];
 	int cur;                               /* the dmab of the last commit, -1 none */
 	int said;
+	uint32_t sw, sh, nsz;                  /* the last size logged, sizes logged (at most 4) */
 };
 static struct wl_list tracks = {&tracks, &tracks};
 static struct surf_track *track_of(struct wlr_surface *s)
@@ -870,7 +871,16 @@ static void dmab_commit(struct surf_track *t)
 	struct wlr_buffer *b = t->s->current.buffer;
 	struct wlr_dmabuf_attributes a;
 	t->cur = -1;
-	if (!b || !wlr_buffer_get_dmabuf(b, &a))
+	int dm = b && wlr_buffer_get_dmabuf(b, &a);
+	/* each new buffer size, the first 4 (the scale check, 11-14 night: an app at sbwl's scale SC draws its buffers
+	 * at SC x its logical size, wl_surface.set_buffer_scale SC; 1 there is the "fuzzy" stretch) */
+	static unsigned bsz_said;                  /* at most 40 such lines a run */
+	if (b && ((uint32_t)b->width != t->sw || (uint32_t)b->height != t->sh) && t->nsz < 4 && bsz_said++ < 40) {
+		t->sw = (uint32_t)b->width, t->sh = (uint32_t)b->height, ++t->nsz;
+		say("a buffer %dx%d (%s), the app's buffer scale %d, logical %dx%d; sbwl's scale %u", b->width, b->height,
+		    dm ? "dmabuf: GPU-drawn" : "shm", t->s->current.scale, t->s->current.width, t->s->current.height, SC);
+	}
+	if (!dm)
 		return;
 	for (int i = 0; i < DMAB_PER_SURF; ++i)
 		if (t->db[i].b == b) {
@@ -900,8 +910,7 @@ static void dmab_commit(struct surf_track *t)
 	d->destroy.notify = dmab_destroyed;
 	wl_signal_add(&b->events.destroy, &d->destroy);
 	t->cur = k;
-	if (t->said++ < 1)
-		say("a dmabuf frame (GPU-drawn): %ux%u, stride %u, format %08x", d->w, d->h, d->stride, a.format);
+	t->said++;
 }
 /* the surface's current dmabuf mapped for reading (sync start done: call dmab_done), else NULL */
 static const struct dmab *dmab_begin(struct wlr_surface *s)
@@ -3711,7 +3720,10 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	wlr_renderer_init_wl_display(S.renderer, S.display);
-	struct wlr_compositor *comp = wlr_compositor_create(S.display, 5, S.renderer);
+	/* version 6 (the 11-14 night's scale check): wl_surface.preferred_buffer_scale, which wlr_scene sends from the
+	 * output's scale when a surface enters it. GTK 4 at version 5 drew every buffer at 1 (360 x 672 for a 720 or 1080
+	 * wide surface: stretched x SC, the user's "super fuzzy"); foot followed wl_output's scale either way. */
+	struct wlr_compositor *comp = wlr_compositor_create(S.display, 6, S.renderer);
 	S.new_surface.notify = new_surface;
 	wl_signal_add(&comp->events.new_surface, &S.new_surface);
 	wlr_subcompositor_create(S.display);

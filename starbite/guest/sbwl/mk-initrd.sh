@@ -11,7 +11,8 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 WORK=${WORK:-/mnt/build/sbguest}
 KOUT=${KOUT:-$WORK/gout}
-"$here/build.sh" "$WORK/sbwl" >/dev/null
+# (desktop only: no sbwl in the initrd, the base's is used; the VM's Ubuntu wlroots lacks what sbwl now calls)
+[ "${DESKTOP_ONLY:-0}" = 1 ] || "$here/build.sh" "$WORK/sbwl" >/dev/null
 BUILD_ONLY=1 WORK="$WORK" KOUT="$KOUT" "$here/../run-qemu.sh" wl > "$WORK/out/mk-initrd-wl.log" 2>&1 ||
     { tail -20 "$WORK/out/mk-initrd-wl.log"; exit 1; }
 R=$WORK/rd-wl
