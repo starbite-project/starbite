@@ -26,6 +26,7 @@
 #include "store.h"
 #include "../guide/sbguide.h"
 #include "tzdb.h"                       /* Track A: time zones (kern/tzdb.c) */
+#include "../../guest/sbshm.h"           /* 8t: the Linux guest's shared region (the GPU maps all of it) */
 #include "tzcities.h"                   /* 8a: World Clock's and Weather's cities (GeoNames) */
 #include "bt.h"                         /* Track A: drivers for the shell (the end of this file) */
 #include "cam.h"
@@ -1253,7 +1254,9 @@ void next_kinit(void)
     gpucomp_add_ro(sbtk_pack_start, (uint64_t)(sbtk_pack_end - sbtk_pack_start));  /* icons point into the pack */
     /* 1.0 (Track E): the Linux guest's two window surfaces (guest/sbos/guest.h GUEST_WL: SBG_S9_SHM_BASE + 0x200000,
      * 8 MiB covers both), sampled by the GPU in place through tk_layer_external; Normal non-cacheable on both sides */
-    gpucomp_add_ext((const void *)(uintptr_t)0x8e0200000ULL, 0x800000ULL);
+    /* 8t: the whole shared region (8s put its 1080 surfaces in the v3 free tail, outside the old 8 MiB window: the
+     * front buffer had no GPU address, so the window fell back to the CPU's scaled copy: soft and slow) */
+    gpucomp_add_ext((const void *)(uintptr_t)SBG_S9_SHM_BASE, SBG_S9_SHM_SIZE);
     if (flip_on && heap_mem && gpucomp_init(heap_mem, heap_size)) {
         comp.gpu = next_gpu;
         comp.gpu_clean = next_gpu_clean;

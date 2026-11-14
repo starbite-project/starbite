@@ -132,14 +132,16 @@ int sh_card_read(const char *path, uint64_t off, void *dst, uint32_t len);      
  * the shell's bitmap and takes the input. Apps are named by their desktop id ("org.gnome.TextEditor"); the shell's
  * Terminal (page 2) is the catalog's foot, SH_LINUX_TERMINAL. States are the kernel's GUEST_* order. */
 enum { SH_LINUX_OFF, SH_LINUX_STARTING, SH_LINUX_RUNNING, SH_LINUX_STOPPING, SH_LINUX_FAILED };
-/* 8s (Track A + E; the user, 8o: "resolution is horrific"): the surface at the panel's own sharpness, 1080 x 2016 shown
- * at 4/3 (was 720 x 1344 at 2x); sbwl lays apps out at 360 x 672 logical, scale 3 (Track E's base-e8h) */
-#define SH_LINUX_W 1080
-#define SH_LINUX_H 2016                                   /* the surface: 44 to 772 pt at 4/3 */
-#define SH_LINUX_HKB 1374                                 /* the rows shown with the keyboard up: 44 to 540 pt */
-#define SH_LINUX_PW 1440                                  /* the window in panel px: the surface at 4/3 */
+/* 8t (Track A + E; the user, 8s: "still super fuzzy"): the surface IS the panel's pixels, 1440 x 2688 at 1:1, no
+ * scaling anywhere (8s: 1080 x 2016 at 4/3; before: 720 x 1344 at 2x); sbwl lays apps out at 360 x 672 logical, scale 4
+ * (surf_w / 360), in the 128 MiB shared region (the guest's DT says so: Track E's bundle) */
+#define SH_LINUX_W 1440
+#define SH_LINUX_H 2688                                   /* the surface: 44 to 772 pt at 1:1 */
+#define SH_LINUX_HKB 1832                                 /* the rows shown with the keyboard up: 44 to 540 pt */
+#define SH_LINUX_PW 1440                                  /* the window in panel px */
 #define SH_LINUX_PH 2688
-#define SH_LINUX_PX(v) ((v) * 4 / 3)                      /* surface px -> panel px */
+#define SH_LINUX_PX(v) ((v) * SH_LINUX_PW / SH_LINUX_W)   /* surface px -> panel px */
+#define SH_LINUX_SX(v) ((v) * SH_LINUX_W / SH_LINUX_PW)   /* panel px -> surface px */
 #define SH_LINUX_Y 162                                    /* the window's first panel row (44 pt) */
 #define SH_LINUX_ICON 160                                 /* catalog and store icons: 160 x 160 premultiplied ARGB */
 #define SH_LINUX_TERMINAL "org.codeberg.dnkl.foot"        /* the Terminal app's desktop id (also "foot") */
@@ -187,7 +189,7 @@ enum { SH_NET_OK = 0, SH_NET_NO_CONNECTION = 1, SH_NET_NO_DNS = 2, SH_NET_NO_ANS
 int sh_linux_open(const char *id);       /* start Linux if off, launch the app (once the catalog has it), put its window
                                           * in the surface; < 0 refused (sh_linux_state says why) */
 void sh_linux_hide(void);                /* home: no window in the surface (ACTIVATE none); the apps keep running */
-/* the active app's rows newer than the last copy, at 4/3 (nearest), into the shell's window: rows[y] is its
+/* the active app's rows newer than the last copy, at 1:1, into the shell's window: rows[y] is its
  * bitmap row y (SH_LINUX_PW px; SH_LINUX_PH rows, kept in strips); *y0..*y1 the bitmap rows written; returns the
  * surface rows copied (0: nothing new, or not the app's window yet). first: copy every row. */
 int sh_linux_blit(uint32_t *const *rows, int first, int *y0, int *y1);

@@ -1073,26 +1073,13 @@ static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, u
             continue;
         const volatile uint32_t *s = (const volatile uint32_t *)((uintptr_t)px + (uintptr_t)y * stride);
         if (mode == GUEST_WL && w == GUEST_WL_W) {
-            /* 8s: the native surface at 4/3, nearest: three surface px make four panel px (a a b c), surface row y
-             * the panel rows ceil(4y / 3) .. ceil(4(y + 1) / 3) - 1 (one or two); the row read once into cached RAM */
-            static uint32_t lb[GUEST_WL_W];
+            /* 8t: the native surface (the panel's own pixels): row y is the window's row y, 1:1, alpha forced */
+            uint32_t *d = TROW(y);
             for (uint32_t x = 0; x < w; ++x)
-                lb[x] = s[x] | 0xff000000U;
-            uint32_t ta = (4 * y + 2) / 3, tb = (4 * (y + 1) + 2) / 3;
-            uint32_t *d = TROW(ta);
-            for (uint32_t g = 0; g < w / 3; ++g) {
-                d[4 * g] = d[4 * g + 1] = lb[3 * g];
-                d[4 * g + 2] = lb[3 * g + 1];
-                d[4 * g + 3] = lb[3 * g + 2];
-            }
-            for (uint32_t r = ta + 1; r < tb; ++r) {
-                uint32_t *e = TROW(r);
-                for (uint32_t x = 0; x < w * 4 / 3; ++x)
-                    e[x] = d[x];
-            }
+                d[x] = s[x] | 0xff000000U;
             if (*py0 < 0)
-                *py0 = (int)(y0 + ta);
-            *py1 = (int)(y0 + tb - 1);
+                *py0 = (int)(y0 + y);
+            *py1 = (int)(y0 + y);
             ++n;
             continue;
         }
@@ -1331,8 +1318,8 @@ static int blit_any(uint32_t *const *rowt, uint32_t *back, unsigned stride_px, u
     seq_seen = seq_blit = (uint32_t)fake_seq;
     ++blits;
     uint32_t k = (uint32_t)guest_scale(), w = surf_w(), hh = surf_h();
-    /* 8s: the Linux apps' native surface at 4/3 (as the phone's blit), the others at k */
-    uint32_t num = mode == GUEST_WL && w == GUEST_WL_W ? 4 : k, den = mode == GUEST_WL && w == GUEST_WL_W ? 3 : 1;
+    /* 8t: the Linux apps' native surface at 1:1 (as the phone's blit), the others at k */
+    uint32_t num = mode == GUEST_WL && w == GUEST_WL_W ? 1 : k, den = 1;
     for (uint32_t y = 0; y < num * hh / den; ++y) {
         uint32_t *d = TROW(y);
         uint32_t sy = y * den / num;

@@ -429,7 +429,7 @@ static void lx_build_win(void)
         for (int r = 0; r < SH_LINUX_PH; r++) lrow[r] = lsink;
         if (!apext.name) tk_layer_init(&apext, "linux-window-gpu");
         apext.x = apext.bx = 0;
-        apext.y = apext.by = SH_LINUX_Y * .75f;  /* (scaled 4/3 about the origin) */
+        apext.y = apext.by = (float)SH_LINUX_SX(SH_LINUX_Y);   /* (scaled PW / W about the origin: 1 since 8t) */
         apext.sx = apext.sy = (float)SH_LINUX_PW / SH_LINUX_W;
         LX.first = 1;
         lx_build_kb(LX.kb, LX.shift, LX.num);
@@ -570,7 +570,7 @@ static int lx_at(float x, float y)
 }
 static void lx_win_touch(int phase, float x, float y)
 {
-    int sx = (int)(PT(x) * .75f), sy = (int)((PT(y) - SH_LINUX_Y) * .75f), hh = LX.kb ? LX_KBROWS : SH_LINUX_H;   /* 8s: 4/3 */
+    int sx = (int)SH_LINUX_SX(PT(x)), sy = (int)SH_LINUX_SX(PT(y) - SH_LINUX_Y), hh = LX.kb ? LX_KBROWS : SH_LINUX_H;
     sx = sx < 0 ? 0 : sx >= SH_LINUX_W ? SH_LINUX_W - 1 : sx;
     sy = sy < 0 ? 0 : sy >= hh ? hh - 1 : sy;
     sh_linux_touch(phase, sx, sy);
@@ -846,7 +846,7 @@ static void lx_card_snap_open(void)
 #endif
     for (int j = 0; j < LSNH; j++) {
         uint32_t *o = LC[s].snap.px + (size_t)j * LC[s].snap.stride;
-        int pr = 4 * j + 2 - SH_LINUX_Y, sy = pr * 3 / 4;   /* 8s: the panel row, its surface row (4/3) */
+        int pr = 4 * j + 2 - SH_LINUX_Y, sy = SH_LINUX_SX(pr);   /* the panel row, its surface row */
         uint32_t ground = LX.kb && 4 * j >= SH_LINUX_Y + SH_LINUX_PX(rows) && 4 * j < (int)PT(802) ? tk_premul(tk_hex(0x1e2030, 1)) :
                           0xff000000u | sv_ground(lx_app_index("linux"));
         if (4 * j + 2 < SH_LINUX_Y || sy >= rows) {
@@ -865,7 +865,7 @@ static void lx_card_snap_open(void)
         }
         for (int i = 0; i < LSNW; i++) {
 #ifdef TK_HAS_LAYER_EXTERNAL
-            if (ext) { o[i] = ext[(size_t)sy * es + (4 * i + 2) * 3 / 4] | 0xff000000u; continue; }
+            if (ext) { o[i] = ext[(size_t)sy * es + SH_LINUX_SX(4 * i + 2)] | 0xff000000u; continue; }
 #endif
             const uint32_t *r0 = lrow[pr], *r1 = lrow[pr + 1 < SH_LINUX_PH ? pr + 1 : pr];
             o[i] = lx_avg4(r0[4 * i], r0[4 * i + 2], r1[4 * i], r1[4 * i + 2]) | 0xff000000u;

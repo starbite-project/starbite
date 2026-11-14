@@ -26,8 +26,8 @@
 #define GUEST_WL_IMAGE    "guest-wl.img"
 #define GUEST_WL_DTB      "guest-wl.dtb"
 #define GUEST_WL_RD       "guest-wl-rd.img"
-#define GUEST_WL_W 1080U                    /* 8s: the panel's sharpness at 4/3 (was 720 x 1344 at 2x) */
-#define GUEST_WL_H 2016U
+#define GUEST_WL_W 1440U                    /* 8t: the panel's own pixels, 1:1 (8s: 1080 x 2016 at 4/3) */
+#define GUEST_WL_H 2688U
 enum { GUEST_APP = 0, GUEST_TERM = 1, GUEST_WL = 2 };
 
 enum { GUEST_OFF = 0, GUEST_STARTING, GUEST_RUNNING, GUEST_STOPPING, GUEST_FAILED };

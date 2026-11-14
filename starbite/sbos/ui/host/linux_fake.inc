@@ -24,7 +24,7 @@ static struct {
     tk_bmp w;                                   /* the window as the app drew it (720 x 1344) */
 } LF = { .want = -1, .win = -1, .vp = 1344 };
 /* 8s: the fake draws its windows at its own 720 x 1344 (2x to the panel, as before); the platform's surface is
- * SH_LINUX_W x SH_LINUX_H (1080 x 2016): the viewport and touches come in its px and are taken at 2/3 */
+ * SH_LINUX_W x SH_LINUX_H (1440 x 2688 since 8t): the viewport and touches come in its px, taken at LFW / SH_LINUX_W */
 #define LFW 720
 #define LFH 1344
 
@@ -568,7 +568,7 @@ int sh_linux_touch(int phase, int x, int y)
 {
     static int dy;
     fprintf(stderr, "linux: touch %s at %d,%d\n", phase == 0 ? "down" : phase == 1 ? "move" : "up", x, y);
-    x = x * 2 / 3, y = y * 2 / 3;                 /* (8s: into the fake's 720 x 1344) */
+    x = x * LFW / SH_LINUX_W, y = y * LFW / SH_LINUX_W;   /* (into the fake's 720 x 1344) */
     if (phase == 0) dy = y;
     if (phase != 2 || LF.win < 0) return 1;
     const char *id = FCAT.app[LF.win].id;
@@ -604,7 +604,7 @@ int sh_linux_char(char c)
 int sh_linux_viewport(int rows)
 {
     fprintf(stderr, "linux: viewport %d x %d\n", SH_LINUX_W, rows);
-    rows = rows * 2 / 3;                          /* (8s: into the fake's 720 x 1344) */
+    rows = rows * LFW / SH_LINUX_W;               /* (into the fake's 720 x 1344) */
     if (rows != LF.vp) { LF.vp = rows; LF.seq++; }
     return 1;
 }
