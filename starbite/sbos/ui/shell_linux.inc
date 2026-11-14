@@ -106,9 +106,12 @@ static void lxk_load(void)
     if (lxk_tried || LCAT.n > 0) return;
     lxk_tried = 1;
     int r = sh_blob_get("linux.cat", lxk_b, sizeof lxk_b);
-    if (r < 12 || lxk_b[0] != 'L' || lxk_b[1] != 'X' || lxk_b[2] != 'K' || lxk_b[3] != '1') return;
+    if (r < 12 || lxk_b[0] != 'L' || lxk_b[1] != 'X' || lxk_b[2] != 'K' || lxk_b[3] != '1') {
+        tk_log(r < 0 ? "linux: no kept app list yet (linux.cat): page 3 waits for Linux" : "linux: the kept app list is not usable");
+        return;
+    }
     int n = lxk_b[4] | lxk_b[5] << 8;
-    if (n <= 0 || n > SH_LAPPS || r < 12 + n * LXK_REC) return;
+    if (n <= 0 || n > SH_LAPPS || r < 12 + n * LXK_REC) { tk_log("linux: the kept app list is not usable"); return; }
     for (int i = 0; i < n; i++) {
         const uint8_t *q = lxk_b + 12 + i * LXK_REC;
         sh_lapp_t *a = &LCAT.app[i];
@@ -121,6 +124,7 @@ static void lxk_load(void)
     }
     LCAT.n = n;
     lxk_restored = 1;
+    tk_log("linux: page 3 from the kept app list (linux.cat) until Linux sends its own");
     lxk_saved = (uint32_t)lxk_b[8] | (uint32_t)lxk_b[9] << 8 | (uint32_t)lxk_b[10] << 16 | (uint32_t)lxk_b[11] << 24;
 }
 static uint32_t lxk_sig(void)
@@ -149,7 +153,11 @@ static void lxk_step(void)                         /* the idle's: the list into 
         unsigned f = LCAT.app[i].flags & (SH_LAPP_TERMINAL | SH_LAPP_KEYBOARD | SH_LAPP_SYSTEM);
         q[72] = (uint8_t)f, q[73] = (uint8_t)(f >> 8);
     }
-    if (sh_blob_put("linux.cat", lxk_b, (unsigned)(12 + LCAT.n * LXK_REC)) != 0) lxk_saved = 0;   /* (again next change) */
+    if (sh_blob_put("linux.cat", lxk_b, (unsigned)(12 + LCAT.n * LXK_REC)) != 0) {
+        lxk_saved = 0;                             /* (again next change) */
+        tk_log("linux: the app list was NOT kept (linux.cat: the store refused it)");
+    } else
+        tk_log("linux: the app list kept for the next power-on (linux.cat)");
 }
 static int lx_make_icon(tk_bmp *out, int px, int icon, const char *name, int badge)
 {
