@@ -47,6 +47,10 @@ if once and tool == "apt-get" and "install" in args and os.path.exists(once):
         print("E: Splitting of clearsigned file /var/lib/apt/lists/_repo_._Release failed as it doesn't contain all expected parts")
         print("E: The package lists or status file could not be parsed or opened.")
         save(); sys.exit(100)
+if os.environ.get("FAKEAPT_STALE") and tool == "apt-get" and "install" in args:   # 8i: the overlay's ESTALE
+    print("dpkg: error: unable to open/create triggers lock file '/var/lib/dpkg/triggers/Lock': Stale file handle")
+    print("E: Sub-process /usr/bin/dpkg returned an error code (2)")
+    save(); sys.exit(100)
 if tool == "apt-get":
     verb, pk = (words[0] if words else ""), words[1:]
     if verb == "update":
