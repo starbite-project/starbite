@@ -15,6 +15,7 @@
  *   expect_pkg NAME IDX|none T      the catalog's store index (sbshm_app.pkg) for that app within T
  *   dump FILE                       the front buffer: FILE.ppm and FILE.png (the viewport's rows)
  *   tap X Y | tap_file PATH KEY     (KEY: a line "KEY:x y w h" in PATH: a tap at its middle)
+ *   tap_scale N                     tap_file's coordinates x N (sbwl at SBWL_SCALE=N: they are logical)
  *   type TEXT                       SBG_MSG_TEXT, 8 bytes at most per message, whole characters
  *   key CODE                        down + up
  *   expect_focus 0|1 T              the last SBG_MSG_TEXT_FOCUS
@@ -251,6 +252,7 @@ static int cat_read(void)
 	return 0;
 }
 
+static int tap_scale = 1;                  /* tap_scale N: tap_file's logical coordinates to surface pixels */
 static int app_find(const char *name)
 {
 	if (!cat_read())
@@ -682,7 +684,9 @@ static void run_line(char *l)
 			return;
 		}
 		frame_mark = hdr->surf_seq;
-		tap(x + w / 2, y + h / 2);
+		tap((x + w / 2) * tap_scale, (y + h / 2) * tap_scale);
+	} else if (!strcmp(c, "tap_scale")) {   /* 8i: sbwl at scale N: the app's own (logical) coordinates x N */
+		tap_scale = atoi(a1) >= 1 ? atoi(a1) : 1;
 	} else if (!strcmp(c, "type")) {
 		frame_mark = hdr->surf_seq;
 		type_text(s + 5);

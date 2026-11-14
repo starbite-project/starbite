@@ -91,6 +91,12 @@ test)
         "$OUT/hostsim" -o "$OUT/hs" -s "$here/hostsim.script" -- "$OUT/sbwl" 2>&1 | tee "$OUT/hostsim.log" | \
         grep -a 'PASS\|FAIL\|RESULT\|hostsim:'
     chroot_kill                                       # anything an aborted run left
+    # 8i: the phone's default scale 2 (360 x 672 logical): a second, shorter run
+    sudo rm -f "$R"/tmp/sbwl-*.txt
+    sudo chroot "$R" env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/root LANG=C.UTF-8 SBWL_SCALE=2 \
+        "$OUT/hostsim" -o "$OUT/hs2" -s "$here/hostsim-scale2.script" -- "$OUT/sbwl" 2>&1 | tee "$OUT/hostsim-scale2.log" | \
+        grep -a 'PASS\|FAIL\|RESULT\|hostsim:'
+    chroot_kill
     ;;
 run)
     shift

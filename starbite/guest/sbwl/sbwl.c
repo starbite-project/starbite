@@ -114,6 +114,13 @@ static uint32_t ROT, LROWS;
 static int turned(void) { return ROT == 1 || ROT == 3; }
 static uint32_t AW(void) { return turned() ? H : VW; }
 static uint32_t AH(void) { return turned() ? (LROWS && LROWS <= W ? LROWS : W) : VR; }
+/* 8i (the user: "the UI is super small"): the apps' logical space is the surface's pixels / SC: sbwl.scale=N on the
+ * kernel command line (1..4), else SBWL_SCALE, else 2 on the phone (360 x 672 logical in the 720 x 1344 surface: a
+ * phone's ~360 dp, libadwaita's narrow layout) and 1 under hostsim (its pixel checks). wl_output says SC, so GTK, Qt and
+ * foot draw their buffers at SC; sbwl composites in surface pixels (positions and sizes x SC) and maps touches back. */
+static uint32_t SC = 1;
+static uint32_t LW(void) { return AW() / SC; }
+static uint32_t LH(void) { return AH() / SC; }
 
 static void say(const char *fmt, ...)
 {
@@ -417,8 +424,9 @@ static void comp_surface(struct wlr_surface *surface, int sx, int sy, void *data
 	}
 	if (si) {
 		int bw = pixman_image_get_width(si), bh = pixman_image_get_height(si);
-		/* the buffer's size vs the surface's (a client with a buffer scale): drawn at the surface's size */
-		int dw = surface->current.width, dh = surface->current.height;
+		/* the buffer's size vs the surface's in pixels (its logical size x SC): a client drawing at SC is copied
+		 * 1:1, one at another buffer scale is scaled to fit */
+		int dw = surface->current.width * (int)SC, dh = surface->current.height * (int)SC;
 		if (dw > 0 && dh > 0 && (dw != bw || dh != bh)) {
 			pixman_transform_t t;
 			pixman_transform_init_scale(&t, pixman_double_to_fixed((double)bw / dw), pixman_double_to_fixed((double)bh / dh));
@@ -427,7 +435,8 @@ static void comp_surface(struct wlr_surface *surface, int sx, int sy, void *data
 		} else {
 			dw = bw, dh = bh;
 		}
-		pixman_image_composite32(PIXMAN_OP_OVER, si, NULL, comp_dst, 0, 0, 0, 0, o->x + sx, o->y + sy, dw, dh);
+		pixman_image_composite32(PIXMAN_OP_OVER, si, NULL, comp_dst, 0, 0, 0, 0, (o->x + sx) * (int)SC,
+					 (o->y + sy) * (int)SC, dw, dh);
 		pixman_image_unref(si);
 		win_surfaces++;
 	} else {
@@ -572,6 +581,7 @@ static void new_output(struct wl_listener *l, void *data)
 	wlr_output_state_init(&st);
 	wlr_output_state_set_enabled(&st, true);
 	wlr_output_state_set_custom_mode(&st, (int32_t)W, (int32_t)H, 60000);
+	wlr_output_state_set_scale(&st, (float)SC);
 	bool ok = wlr_output_commit_state(out, &st);
 	wlr_output_state_finish(&st);
 	S.output = out;
@@ -579,8 +589,8 @@ static void new_output(struct wl_listener *l, void *data)
 		winframe = calloc((size_t)W * H, 4);
 		winimg = winframe ? pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8, (int)W, (int)H, winframe, (int)W * 4) : NULL;
 	}
-	say("output %s %dx%d: enable commit %s, enabled %d", out->name, out->width, out->height, ok ? "ok" : "FAILED",
-	    out->enabled);
+	say("output %s %dx%d scale %u (apps: %ux%u): enable commit %s, enabled %d", out->name, out->width, out->height, SC,
+	    W / SC, H / SC, ok ? "ok" : "FAILED", out->enabled);
 	S.output_frame.notify = output_frame;
 	wl_signal_add(&out->events.frame, &S.output_frame);
 	S.scene_output = wlr_scene_output_create(S.scene, out);
@@ -823,7 +833,7 @@ static void view_layout(struct view *v)
 	int dialog = v->top->parent || (cs->min_width && cs->min_width == cs->max_width && cs->min_height &&
 					cs->min_height == cs->max_height);
 	int w, h;
-	int aw = (int)AW(), ah = (int)AH();
+	int aw = (int)LW(), ah = (int)LH();
 	if (!dialog) {
 		w = aw, h = ah;
 	} else {
@@ -1139,7 +1149,7 @@ static void popup_place(struct wlr_xdg_popup *p)
 	while (x && x->role == WLR_XDG_SURFACE_ROLE_POPUP)
 		x = wlr_xdg_surface_try_from_wlr_surface(x->popup->parent);
 	struct view *v = x && x->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL ? view_of(x->toplevel) : NULL;
-	struct wlr_box box = {0, 0, (int)AW(), (int)AH()};
+	struct wlr_box box = {0, 0, (int)LW(), (int)LH()};
 	if (v) {
 		struct wlr_box geo;
 		wlr_xdg_surface_get_geometry(v->top->base, &geo);
@@ -1242,14 +1252,26 @@ static void touch(uint32_t phase, int32_t x, int32_t y, uint32_t t)
 		y = ROT == 1 ? (int32_t)W - 1 - px : px;
 	}
 	double sx = 0, sy = 0;
-	struct wlr_surface *s = surface_at(x, y, &sx, &sy);
+	struct wlr_surface *s = surface_at((double)x / SC, (double)y / SC, &sx, &sy);
 	if (phase == SBG_TOUCH_DOWN) {
 		if (!s) {
-			say("touch at %d,%d: no surface there", x, y);
+			static int t_none;
+			say("%stouch at %d,%d: no surface there", t_none++ < 3 ? "STARBITE-TOUCH: " : "", x, y);
 			return;
 		}
 		say("touch at %d,%d: surface %p at %.0f,%.0f, as %s", x, y, (void *)s, sx, sy,
 		    client_has_touch(s) ? "wl_touch" : "pointer (the client has no wl_touch)");
+		/* 8i ("no touch" on the phone, fine in hostsim): the first three per app into pmsg (guest.c keeps lines
+		 * with STARBITE): whether taps arrive, where, and how they are delivered */
+		static char t_app[128];
+		static int t_n;
+		if (strcmp(t_app, S.active)) {
+			snprintf(t_app, sizeof(t_app), "%s", S.active);
+			t_n = 0;
+		}
+		if (t_n++ < 3)
+			say("STARBITE-TOUCH: %s: px %d,%d -> logical %.0f,%.0f in its surface, %s (scale %u)", S.active[0] ? S.active : "-",
+			    x, y, sx, sy, client_has_touch(s) ? "wl_touch" : "pointer", SC);
 		if (client_has_touch(s)) {
 			S.touch_surface = s;
 			S.touch_down = 1;
@@ -3218,6 +3240,17 @@ int main(int argc, char **argv)
 	}
 	if (!v2 && !legacy)
 		legacy = def;                          /* v1: one app, foot by default */
+	{
+		char cmd[1024] = "";
+		int cf = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+		ssize_t n = cf >= 0 ? read(cf, cmd, sizeof(cmd) - 1) : -1;
+		if (cf >= 0)
+			close(cf);
+		cmd[n > 0 ? n : 0] = 0;
+		const char *a = strstr(cmd, "sbwl.scale="), *e = getenv("SBWL_SCALE");
+		int sc = a && !sim ? atoi(a + 11) : e ? atoi(e) : sim ? 1 : 2;
+		SC = sc >= 1 && sc <= 4 && !(W % (uint32_t)sc) && !(H % (uint32_t)sc) ? (uint32_t)sc : 1;
+	}
 	S.argv = legacy;
 	t0 = ms_now();
 	hdr->guest_state = SBG_GUEST_UP;
