@@ -297,6 +297,15 @@ static void fake_push_store(void)
     sh_linux_store(&FST);
 }
 static int fp_find(const char *pkg) { for (int i = 0; i < NFP; i++) if (!strcmp(FP[i].pkg, pkg)) return i; return -1; }
+/* the .desktop Name of a Debian-installed app where it isn't the store's name (Debian trixie, 2026-11-14) */
+static const char *fake_desk_name(const char *id, const char *name)
+{
+    static const char *const T[][2] = { { "firefox-esr", "Firefox ESR" }, { "gimp", "GNU Image Manipulation Program" },
+                                        { "vlc", "VLC media player" }, { "supertux2", "SuperTux 2" } };
+    for (unsigned k = 0; k < sizeof T / sizeof T[0]; k++) if (!strcmp(id, T[k][0])) return T[k][1];
+    return name;
+}
+static int fcat_pkg[SH_LAPPS];                  /* the fake's own link (sbwl publishes none) */
 static void fake_catalog_rebuild(void)
 {
     /* the installed packages' apps, in the store's order (foot first: the Terminal) */
@@ -311,12 +320,13 @@ static void fake_catalog_rebuild(void)
         if (i < 0 || (o >= 0 && i == foot) || !(FST.pkg[i].flags & SH_PKG_INSTALLED)) continue;
         sh_lapp_t *a = &FCAT.app[FCAT.n];
         snprintf(a->id, sizeof a->id, "%s", FP[i].app);
-        snprintf(a->name, sizeof a->name, "%s", i == foot ? "Foot" : FP[i].name);
+        snprintf(a->name, sizeof a->name, "%s", i == foot ? "Foot" : fake_desk_name(FP[i].app, FP[i].name));
         a->flags = i == foot || (FP[i].flags3 & SH_PKG3_TERMINAL) ? SH_LAPP_KEYBOARD : 0;
         if (FP[i].flags3 & SH_PKG3_TERMINAL) a->flags |= SH_LAPP_TERMINAL;
         if (FP[i].flags & SH_PKG_SYSTEM) a->flags |= SH_LAPP_SYSTEM;
         a->icon = FCAT.n;                       /* the catalog's pool icons 0..63 */
-        a->pkg = i;
+        a->pkg = -1;                            /* as sbwl's cat_publish: the store finds its app by id / name */
+        fcat_pkg[FCAT.n] = i;
         for (int k = 0; k < old.n; k++)
             if (!strcmp(old.app[k].id, a->id)) { a->flags |= old.app[k].flags & (SH_LAPP_RUNNING | SH_LAPP_WINDOW); a->rss_kb = old.app[k].rss_kb; }
         FCAT.n++;
@@ -326,7 +336,7 @@ static void fake_catalog_rebuild(void)
 static int fake_pkg_of_icon(int icon)
 {
     if (icon >= 64 && icon < 64 + NFP) return icon - 64;
-    if (icon >= 0 && icon < FCAT.n) return FCAT.app[icon].pkg;
+    if (icon >= 0 && icon < FCAT.n) return fcat_pkg[icon];
     return -1;
 }
 static void fake_publish(void)

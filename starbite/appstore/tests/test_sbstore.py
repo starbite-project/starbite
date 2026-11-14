@@ -923,6 +923,21 @@ class QtPlugin(unittest.TestCase):
 
 
 class Repair(unittest.TestCase):
+    def test_dpkg_stale_file_handle_says_so(self):
+        """8i: every dpkg run answered ESTALE on triggers/Lock (the overlay after a base change): plain words, no
+        "Install failed", and no network retry loop"""
+        e = Env()
+        try:
+            evs = e.run("install", "hello", "--method", "distro", expect=1, FAKEAPT_STALE="1")
+            self.assertEqual(evs[-1]["code"], "Linux storage error")
+            short, hint = sbstore.explain(sbstore.StoreError("Linux storage error"), "hello")
+            self.assertEqual(short, "Linux can't save installs")
+            self.assertIn("Latest Release", hint)
+            calls = [c for c in e.apt()["calls"] if c[0] == "apt-get" and "install" in c and "-s" not in c]
+            self.assertEqual(len(calls), 1, calls)                   # (the old `"…" or` test retried online)
+        finally:
+            e.close()
+
     def test_lists_apt_cant_read_are_started_afresh(self):
         e = Env()
         try:

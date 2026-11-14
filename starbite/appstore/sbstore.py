@@ -60,7 +60,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-VERSION = "1.1.5"
+VERSION = "1.1.6"
 METHODS = ("distro", "release", "source")          # method numbers 1, 2, 3 (SBG_PKG_M_*)
 M_NUM = {"distro": 1, "release": 2, "source": 3}
 M_NAME = {v: k for k, v in M_NUM.items()}
@@ -225,6 +225,10 @@ HINTS = {
                      "/var/log/sbstore/{id}.log."),
     "update failed": ("Update failed",
                       "The update stopped with an error; the installed version still works. Tap UPDATE to try again."),
+    "Linux storage error": ("Linux can't save installs",
+                            "Linux's space on the memory card gave an error (\"stale file handle\") after a Linux "
+                            "update, so Debian apps can't install until it is repaired. Latest Release installs still "
+                            "work. Details: /var/log/sbstore/{id}.log."),
     "interrupted": ("Stopped part-way",
                     "The install was interrupted (Linux stopped or the phone restarted). Tap Get again."),
 }
@@ -1111,6 +1115,17 @@ def lists_fresh(app_id=None):
     os.makedirs(os.path.join(d, "partial"), exist_ok=True)
 
 
+# dpkg's own files answering ESTALE (8i: the overlay's upper written under one base, the base then replaced): no retry
+# or repair of ours helps, so say so in plain words instead of "Install failed" (the fix is the guest's overlay)
+DPKG_STALE = re.compile(r"Stale file handle")
+
+
+def stale_check(out, app_id=None):
+    if DPKG_STALE.search(out or ""):
+        log("dpkg's files answer 'Stale file handle': Linux's overlay needs repair (not the store's to fix)", app_id)
+        raise StoreError("Linux storage error", "dpkg: %s" % out.strip().splitlines()[-1][:200] if out.strip() else "")
+
+
 def status_repair(app_id=None):
     """dpkg's status damaged by an unclean stop (NUL bytes): dpkg's own previous copy (status-old) back, the damaged one
     kept as status.broken. Returns True when restored."""
@@ -1155,6 +1170,8 @@ def repair(app_id=None, at_start=False):
                       envx={"DEBIAN_FRONTEND": "noninteractive"})
         if rc:
             log("dpkg --configure -a exited %d: %s" % (rc, out[-200:]), app_id)
+            if DPKG_STALE.search(out):                  # (only noted: repair also runs at the daemon's start)
+                log("dpkg's files answer 'Stale file handle': Linux's overlay needs repair", app_id)
         rc, out = run(C.apt + ["-y", "-q", "-f", "--no-install-recommends", "-o", "DPkg::Lock::Timeout=120",
                                "install"], logto=_logp(app_id), timeout=1800)
         if rc:
@@ -1246,7 +1263,8 @@ def apt_install(pkgs, app_id, prog=NOPROG, cancel=None, auto=False):
         lists_fresh(app_id)                             # (a file the checks pass, or one the filesystem won't delete)
         run(C.apt + ["-q"] + APT_NET_OPTS + ["update"], logto=_logp(app_id), timeout=900, cancel=cancel)
         rc, out = _apt_get_install(missing, app_id, prog, cancel)
-    if rc and ("Unable to locate package" or "has no installation candidate" in out) and net_up():
+    stale_check(out if rc else "", app_id)
+    if rc and ("Unable to locate package" in out or "has no installation candidate" in out) and net_up():
         ensure_net_sources()
         run(C.apt + ["-q", "update"], logto=_logp(app_id), timeout=900)
         rc, out = _apt_get_install(missing, app_id, prog, cancel)
@@ -1287,6 +1305,7 @@ def apt_remove(pkgs, app_id, prog=NOPROG, guard=True):
     rc, out = run(C.apt + ["-y", "-q", "-o", "APT::Status-Fd=@STATUSFD@", "remove"] + pkgs,
                   logto=_logp(app_id), status_fd_cb=apt_progress_cb(prog, 0, 0))
     if rc:
+        stale_check(out, app_id)
         raise StoreError("remove failed", "apt-get remove exited %d: %s" % (rc, out[-300:]))
     return pkgs
 
@@ -2036,6 +2055,7 @@ def _install_debs(app, path, st, prog, cancel):
     rc, out = run(C.apt + ["-y", "-q", "--allow-downgrades", "-o", "APT::Status-Fd=@STATUSFD@", "install"] +
                   [os.path.abspath(d) for d in debs], logto=_logp(aid), status_fd_cb=apt_progress_cb(prog), cancel=cancel)
     if rc:
+        stale_check(out, aid)
         raise StoreError("install failed", "apt-get install (debs) exited %d: %s" % (rc, out[-300:]))
     old = [p for p in (st["apps"].get(aid) or {}).get("packages", []) if p not in names]
     refs_add(st, names, aid)
@@ -2091,6 +2111,7 @@ def _install_distro(app, st, prog, cancel, update):
         rc, out = run(C.apt + ["-y", "-q", "--only-upgrade", "-o", "APT::Status-Fd=@STATUSFD@", "install"] + targets,
                       logto=_logp(aid), status_fd_cb=apt_progress_cb(prog), cancel=cancel)
         if rc:
+            stale_check(out, aid)
             raise StoreError("update failed", "apt-get upgrade exited %d: %s" % (rc, out[-300:]))
         added = []
     else:
@@ -2187,6 +2208,7 @@ def _install_debian_source(app, st, prog, cancel):
         rc, out = run(C.apt + ["-y", "-q", "--allow-downgrades", "--reinstall", "-o", "APT::Status-Fd=@STATUSFD@",
                                "install"] + want, logto=_logp(aid), status_fd_cb=apt_progress_cb(prog), cancel=cancel)
         if rc:
+            stale_check(out, aid)
             raise StoreError("install failed", "apt-get install (built debs): %s" % out[-300:])
         ver = subprocess.run(C.dpkg_deb + ["-f", want[0], "Version"], capture_output=True, text=True).stdout.strip()
     finally:
