@@ -2802,6 +2802,27 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   (opengl32 35ec684e, libgallium_wgl 0997dd1b).
 - **T68 GO** with that build: GD on the big cores, A/A2 async GDI present vs B/B2 zero-copy (blt model into DWM).
 
+### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
+
+- **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
+  big cores, GD running): exception c0000409 at ucrtbase+0x76ECC (`brk #0xF003`, fail-fast 7 = abort). Frame chain
+  (x29 walk, `mdstack.py` in the scratchpad): RtlUserThreadStart -> KERNELBASE+0x10B78 -> **sihost.exe+0x2FE0** (its
+  unhandled-exception filter) -> ucrtbase terminate -> abort. The stack below is full of **twinui.pcshell.dll** (the
+  taskbar/Start/shell experience), SHCore and combase return addresses; the only HRESULT on it is **0x80040154
+  REGDB_E_CLASSNOTREG** (x6). sihost had no D3D/DXGI/sbumd module loaded: not our GPU driver.
+- **The trigger, twice:** GD up 18:39:34 -> System 10010 DCOM `Windows.Gaming.GameBar.PresenceServer.Internal.
+  PresenceWriter` did not register in time (18:39:42) -> sihost abort 18:43:00. The user's 11-14 morning session: 10010
+  for the same server at 05:44:03, sihost abort at 05:47:51. Same ~3 min gap: the shell's game-presence path (Game Bar)
+  gets "class not registered" and the exception escapes twinui.pcshell. No sihost crash on 11-13 (GD ran there too);
+  both crashes are after debloat-1 (WpnService/WpnUserService off on the big cores), which Game Bar's presence
+  writer may need: a second suspect.
+- **Staged fix (user's yes):** `starbite/win/debloat/gamebar-off.cmd` (HKLM RunOnce via `tools/win/runonce-arm.sh
+  StarbiteGameBarOff starbite/win/debloat/gamebar-off.cmd 'starbite\debloat' OUT`): exports, then HKCU
+  GameConfigStore GameDVR_Enabled 0, GameDVR AppCaptureEnabled 0, GameBar UseNexusForGameBarEnabled 0 /
+  AutoGameModeEnabled 0 / ShowStartupPanel 0 (Game Bar's game detection off). Undo: `gamebar-on.cmd`
+  (StarbiteGameBarOn). If the abort persists with Game Bar off, the next test takes WpnService/WpnUserService off the
+  big-core list.
+
 ### 6.90 Disk housekeeping (11-14 night) and where things are now
 
 - **Archived to `/Volumes/SBWORK/archive/`** (one file per group, listing counts checked before deleting):
