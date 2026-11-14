@@ -114,6 +114,14 @@ static uint32_t ROT, LROWS;
 static int turned(void) { return ROT == 1 || ROT == 3; }
 static uint32_t AW(void) { return turned() ? H : VW; }
 static uint32_t AH(void) { return turned() ? (LROWS && LROWS <= W ? LROWS : W) : VR; }
+/* 8i (the user: "the UI is super small"): the apps' logical space is the surface's pixels / SC: sbwl.scale=N on the
+ * kernel command line (1..4), else SBWL_SCALE, else the surface's width / 360 on the phone (720 -> 2, 1080 -> 3,
+ * 1440 -> 4: 360 x 672 logical, a phone's ~360 dp, libadwaita's narrow layout) and 1 under hostsim (its pixel
+ * checks). wl_output says SC, so GTK, Qt and foot draw their buffers at SC; sbwl composites in surface pixels
+ * (positions and sizes x SC) and maps touches back. */
+static uint32_t SC = 1;
+static uint32_t LW(void) { return AW() / SC; }
+static uint32_t LH(void) { return AH() / SC; }
 
 static void say(const char *fmt, ...)
 {
@@ -214,10 +222,16 @@ static int h2g_get(struct sbshm_msg *m) { return sbshm_get(h2g, m); }
  * buffer hdr.host_surf_reading names: that frame is deferred (-1), retried 2 ms later from the event loop. */
 static uint32_t *shadow[2];                /* what each shared buffer holds (once buf_ready) */
 static int buf_ready[2];
+/* 8o (native resolution: a caret's blink cost a whole frame's compare): the rows outside the frame's damage band are
+ * unchanged by definition; the back buffer needs such a row only if it changed after the frame that buffer last
+ * held (lastchg[y] > bufseq[back]), copied from the front's shadow, no compare */
+static uint32_t *lastchg;                  /* per row: the seq of the frame in which it last changed */
+static uint32_t bufseq[2];                 /* the seq of the frame each buffer holds whole */
 static uint64_t frames, rows_out;
 static unsigned nframe, nbuilt, nbuf, defers;
+static unsigned long nband;                /* frames composited as a damage band (8o), not whole */
 static uint32_t last_px;
-static int publish(const uint8_t *src, uint32_t src_stride, uint32_t nrows)
+static int publish(const uint8_t *src, uint32_t src_stride, uint32_t nrows, uint32_t b0, uint32_t b1)
 {
 	volatile uint32_t *rows = (volatile uint32_t *)(shm + SBSHM_ROWS_OFF);
 	size_t rb = (size_t)W * 4;
@@ -230,8 +244,12 @@ static int publish(const uint8_t *src, uint32_t src_stride, uint32_t nrows)
 			shadow[0][i] = shadow[1][i] = 0xff000000U;
 		hdr->rows_valid = H <= SBSHM_ROWS_MAX;
 	}
+	if (!lastchg && !(lastchg = calloc(H, sizeof(*lastchg))))
+		return 0;
 	if (nrows > H)
 		nrows = H;
+	if (!hdr->surf_seq || b1 > nrows || b0 >= b1)
+		b0 = 0, b1 = nrows;                    /* the first frame, or no band: every row */
 	uint32_t front = hdr->surf_front & 1U, back = front ^ 1U, seq = hdr->surf_seq + 1U, n = 0;
 	if (v3) {
 		sbshm_dmb();
@@ -247,6 +265,13 @@ static int publish(const uint8_t *src, uint32_t src_stride, uint32_t nrows)
 		buf_ready[back] = 1;
 	}
 	for (uint32_t y = 0; y < nrows; ++y) {
+		if (y < b0 || y >= b1) {               /* outside the damage: the front's row, if the back is older */
+			if (lastchg[y] > bufseq[back]) {
+				memcpy(dst + (size_t)y * stride, shadow[front] + (size_t)y * W, rb);
+				memcpy(shadow[back] + (size_t)y * W, shadow[front] + (size_t)y * W, rb);
+			}
+			continue;
+		}
 		const uint8_t *s = src + (size_t)y * src_stride;
 		int changed = !hdr->surf_seq || memcmp(s, shadow[front] + (size_t)y * W, rb);
 		if (memcmp(s, shadow[back] + (size_t)y * W, rb)) {
@@ -256,17 +281,19 @@ static int publish(const uint8_t *src, uint32_t src_stride, uint32_t nrows)
 		if (changed) {
 			if (H <= SBSHM_ROWS_MAX)
 				rows[y] = seq;
+			lastchg[y] = seq;
 			++n;
 		}
 	}
 	/* rows past the viewport: the back buffer keeps whole frames (sbshm.h), so it gets the front's rows */
 	for (uint32_t y = nrows; y < H; ++y)
-		if (memcmp(shadow[front] + (size_t)y * W, shadow[back] + (size_t)y * W, rb)) {
+		if (lastchg[y] > bufseq[back] && memcmp(shadow[front] + (size_t)y * W, shadow[back] + (size_t)y * W, rb)) {
 			memcpy(dst + (size_t)y * stride, shadow[front] + (size_t)y * W, rb);
 			memcpy(shadow[back] + (size_t)y * W, shadow[front] + (size_t)y * W, rb);
 		}
 	if (!n)
 		return 0;
+	bufseq[back] = seq;
 	sbshm_dmb();
 	hdr->surf_front = back;
 	hdr->damage_x = 0;
@@ -304,6 +331,7 @@ struct view {                              /* one xdg toplevel */
 	char desk[128];                        /* its app ("" until it maps) */
 	pid_t pid;                             /* its client's */
 	int mapped, dialog, x, y, gw, gh;
+	int gtk;                               /* its client is GTK 3 / 4 (view_gtk): 0 not looked yet, 1 yes, 2 no */
 	int asked, aw, ah, adialog;            /* the last configure sbwl asked for */
 };
 
@@ -416,8 +444,9 @@ static void comp_surface(struct wlr_surface *surface, int sx, int sy, void *data
 	}
 	if (si) {
 		int bw = pixman_image_get_width(si), bh = pixman_image_get_height(si);
-		/* the buffer's size vs the surface's (a client with a buffer scale): drawn at the surface's size */
-		int dw = surface->current.width, dh = surface->current.height;
+		/* the buffer's size vs the surface's in pixels (its logical size x SC): a client drawing at SC is copied
+		 * 1:1, one at another buffer scale is scaled to fit */
+		int dw = surface->current.width * (int)SC, dh = surface->current.height * (int)SC;
 		if (dw > 0 && dh > 0 && (dw != bw || dh != bh)) {
 			pixman_transform_t t;
 			pixman_transform_init_scale(&t, pixman_double_to_fixed((double)bw / dw), pixman_double_to_fixed((double)bh / dh));
@@ -426,7 +455,8 @@ static void comp_surface(struct wlr_surface *surface, int sx, int sy, void *data
 		} else {
 			dw = bw, dh = bh;
 		}
-		pixman_image_composite32(PIXMAN_OP_OVER, si, NULL, comp_dst, 0, 0, 0, 0, o->x + sx, o->y + sy, dw, dh);
+		pixman_image_composite32(PIXMAN_OP_OVER, si, NULL, comp_dst, 0, 0, 0, 0, (o->x + sx) * (int)SC,
+					 (o->y + sy) * (int)SC, dw, dh);
 		pixman_image_unref(si);
 		win_surfaces++;
 	} else {
@@ -442,7 +472,27 @@ static int view_active(const struct view *v) { return S.active[0] && !strcmp(v->
  * window layer only once the surface holds that app's pixels, not the previous app's last frame) */
 static int win_shown;
 static void window_state(void);
-static int publish_window(void)
+/* the layout a band is valid for: the active app, the viewport, the turn, each shown window's place, size and
+ * dialog state; any change: a whole frame (a dialog's scrim covers the window; wlr_scene's damage knows no scrim) */
+static uint64_t layout_sig(void)
+{
+	uint64_t h = 1469598103934665603ULL;
+#define MIX(x) (h = (h ^ (uint64_t)(x)) * 1099511628211ULL)
+	for (const char *p = S.active; *p; ++p)
+		MIX((uint8_t)*p);
+	MIX(VR), MIX(VW), MIX(ROT), MIX(LROWS);
+	struct view *v;
+	wl_list_for_each(v, &S.views, link)
+		if (v->mapped && view_active(v)) {
+			struct wlr_box geo;
+			wlr_xdg_surface_get_geometry(v->top->base, &geo);
+			MIX((uintptr_t)v), MIX(v->x), MIX(v->y), MIX(v->dialog), MIX(geo.x), MIX(geo.y), MIX(geo.width), MIX(geo.height);
+		}
+#undef MIX
+	return h;
+}
+/* b0 .. b1: the rows (surface pixels) that changed since the last published frame (wlr_scene's damage); b1 = 0: all */
+static int publish_window(uint32_t b0, uint32_t b1)
 {
 	if (!winframe) {
 		winframe = calloc((size_t)W * H, 4);
@@ -465,7 +515,18 @@ static int publish_window(void)
 	}
 	comp_dst = tn ? limg : winimg;
 	uint32_t *cpx = tn ? lframe : winframe;
-	for (size_t i = 0; i < (tn ? (size_t)W * H : (size_t)W * VR); ++i)
+	static uint64_t sig_last;
+	uint64_t sig = layout_sig();
+	if (tn || sig != sig_last || b1 > VR || b0 >= b1)
+		b0 = 0, b1 = tn ? H : VR;              /* a whole frame */
+	sig_last = sig;
+	int band = !tn && (b0 > 0 || b1 < VR);
+	pixman_region32_t clip;
+	if (band) {                                /* only the band composited (fill, surfaces, scrim): pixman clips */
+		pixman_region32_init_rect(&clip, 0, (int)b0, (int)W, (int)(b1 - b0));
+		pixman_image_set_clip_region32(comp_dst, &clip);
+	}
+	for (size_t i = tn ? 0 : (size_t)W * b0; i < (tn ? (size_t)W * H : (size_t)W * b1); ++i)
 		cpx[i] = 0xff000000U;
 	win_surfaces = win_skipped = 0;
 	wl_list_for_each(v, &S.views, link) {  /* oldest first: the most recent ends on top */
@@ -481,6 +542,10 @@ static int publish_window(void)
 		struct comp_off o = {v->x - geo.x, v->y - geo.y};
 		wlr_xdg_surface_for_each_surface(v->top->base, comp_surface, &o);
 	}
+	if (band) {
+		pixman_image_set_clip_region32(comp_dst, NULL);
+		pixman_region32_fini(&clip);
+	}
 	if (!win_surfaces)
 		return 0;
 	uint32_t prows = VR;
@@ -495,11 +560,12 @@ static int publish_window(void)
 		}
 		prows = H;
 	}
-	for (size_t i = 0; i < (size_t)W * prows; ++i)
+	for (size_t i = tn ? 0 : (size_t)W * b0; i < (tn ? (size_t)W * prows : (size_t)W * b1); ++i)
 		winframe[i] |= 0xff000000U;            /* opaque: Starbite composites XRGB */
 	last_px = winframe[(size_t)(prows / 8) * W + W / 8];
 	uint64_t f0 = frames;
-	if (publish((const uint8_t *)winframe, W * 4, prows) < 0)
+	nband += band;
+	if (publish((const uint8_t *)winframe, W * 4, prows, tn ? 0 : b0, tn ? 0 : b1) < 0)
 		return -1;                             /* the host reads the back buffer: again in 2 ms */
 	hdr->guest_rot = ROT;                      /* (after the flip: the host turns its chrome with this frame) */
 	if (!f0 && frames)
@@ -543,15 +609,36 @@ static void output_frame(struct wl_listener *l, void *data)
 	nbuf += built && (st.committed & WLR_OUTPUT_STATE_BUFFER) && st.buffer;
 	if (++nframe <= 3)
 		say("frame event %u: built %d, buffer %d", nframe, built, (st.committed & WLR_OUTPUT_STATE_BUFFER) && st.buffer);
+	/* the rows wlr_scene re-rendered (its damage, in output pixels): kept until a frame is published (a deferred one
+	 * comes back with only its own new damage); none known: the whole frame */
+	static int32_t dmg0 = -1, dmg1 = -1;
+	static int dmg_all;
+	if (built && (st.committed & WLR_OUTPUT_STATE_DAMAGE) && !turned()) {
+		const pixman_box32_t *e = pixman_region32_extents(&st.damage);
+		if (pixman_region32_not_empty(&st.damage)) {
+			dmg0 = dmg0 < 0 || e->y1 < dmg0 ? e->y1 : dmg0;
+			dmg1 = e->y2 > dmg1 ? e->y2 : dmg1;
+		}
+	} else if (S.dirty) {
+		dmg_all = 1;
+	}
 	if (S.dirty) {
 		S.dirty = 0;
-		if (publish_window() < 0)
+		uint32_t b0 = 0, b1 = 0;
+		if (!dmg_all && dmg0 >= 0 && dmg1 > dmg0)
+			b0 = (uint32_t)dmg0, b1 = (uint32_t)dmg1;
+		int r = publish_window(b0, b1);
+		if (r < 0) {
 			defer_frame();
+		} else {
+			dmg0 = dmg1 = -1;
+			dmg_all = 0;
+		}
 	}
 	if (!v2 && !frames && winimg) {            /* v1: a black frame until the app's first (as L1/L2's sbwl did) */
 		for (size_t i = 0; i < (size_t)W * VR; ++i)
 			winframe[i] = 0xff000000U;
-		if (publish((const uint8_t *)winframe, W * 4, VR) < 0)
+		if (publish((const uint8_t *)winframe, W * 4, VR, 0, 0) < 0)
 			defer_frame();
 	}
 	if (built)
@@ -571,6 +658,7 @@ static void new_output(struct wl_listener *l, void *data)
 	wlr_output_state_init(&st);
 	wlr_output_state_set_enabled(&st, true);
 	wlr_output_state_set_custom_mode(&st, (int32_t)W, (int32_t)H, 60000);
+	wlr_output_state_set_scale(&st, (float)SC);
 	bool ok = wlr_output_commit_state(out, &st);
 	wlr_output_state_finish(&st);
 	S.output = out;
@@ -578,8 +666,8 @@ static void new_output(struct wl_listener *l, void *data)
 		winframe = calloc((size_t)W * H, 4);
 		winimg = winframe ? pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8, (int)W, (int)H, winframe, (int)W * 4) : NULL;
 	}
-	say("output %s %dx%d: enable commit %s, enabled %d", out->name, out->width, out->height, ok ? "ok" : "FAILED",
-	    out->enabled);
+	say("output %s %dx%d scale %u (apps: %ux%u): enable commit %s, enabled %d", out->name, out->width, out->height, SC,
+	    W / SC, H / SC, ok ? "ok" : "FAILED", out->enabled);
 	S.output_frame.notify = output_frame;
 	wl_signal_add(&out->events.frame, &S.output_frame);
 	S.scene_output = wlr_scene_output_create(S.scene, out);
@@ -673,6 +761,50 @@ static void text_focus_resend(void)
 	text_focus_send(S.ti_on ? 1 : 0, S.ti_on ? S.ti_purpose : 0);
 }
 
+/* 8o (the user: the keyboard "is hard to close"; Track A adds the dismiss): once the host has hidden its keyboard over
+ * a field that still has the focus, a tap on that field must bring it back. GTK asks for that with a text-input
+ * commit (not an enable: the field never lost it), and both sides dropped a repeated TEXT_FOCUS 1. So a touch on
+ * the client whose text input is enabled is taken as the request: 150 ms after the lift (the app's own focus change
+ * comes first), if that text input is still enabled, TEXT_FOCUS 1 again (gwin passes a repeated 1 to the shell). */
+static struct wl_event_source *retap_src;
+static struct wl_client *retap_client;
+static struct wlr_surface *retap_surface;
+static double retap_y;
+/* the tap was on the field's line: within 24 logical px of the caret's rectangle, vertically (GTK keeps a field's
+ * focus when the user taps a label or a button: no keyboard for those); no caret rectangle: any tap */
+static int retap_on_field(void)
+{
+	struct wlr_text_input_v3 *ti = S.ti_on->ti;
+	if (!(ti->active_features & WLR_TEXT_INPUT_V3_FEATURE_CURSOR_RECTANGLE) || ti->current.cursor_rectangle.height <= 0)
+		return 1;
+	if (ti->focused_surface != retap_surface)
+		return 0;
+	const struct wlr_box *r = &ti->current.cursor_rectangle;
+	return retap_y >= r->y - 24 && retap_y <= r->y + r->height + 24;
+}
+static int retap_cb(void *data)
+{
+	(void)data;
+	if (S.ti_on && retap_client && wl_resource_get_client(S.ti_on->ti->resource) == retap_client && retap_on_field()) {
+		say("text focus: a tap in the focused field: the keyboard asked again");
+		text_focus_resend();
+	}
+	retap_client = NULL;
+	return 0;
+}
+static void retap_arm(struct wl_client *c, struct wlr_surface *surf, double y)
+{
+	if (!c || !S.ti_on || wl_resource_get_client(S.ti_on->ti->resource) != c)
+		return;
+	if (!retap_src)
+		retap_src = wl_event_loop_add_timer(S.loop, retap_cb, NULL);
+	retap_client = c;
+	retap_surface = surf;
+	retap_y = y;
+	if (retap_src)
+		wl_event_source_timer_update(retap_src, 150);
+}
+
 static void ti_off(struct tinput *t)
 {
 	if (S.ti_on == t) {
@@ -756,6 +888,33 @@ static void new_text_input(struct wl_listener *l, void *data)
 	cat_dirty = 1;                             /* KEYBOARD may change */
 }
 
+/* 8i ("half the screen"): GTK 3 / 4 make their text-input-v3 object only when a text field first gets the focus, so
+ * Weather and Celluloid had none, were flagged KEYBOARD (the fallback for toolkits without text-input), and the shell
+ * raised its keyboard and gave them the rows above it. A GTK client never needs the fallback: its text fields ask for
+ * the keyboard themselves (SBG_MSG_TEXT_FOCUS). Looked up once per window in the process's mapped libraries. */
+static int view_gtk(struct view *v)
+{
+	if (v->gtk)
+		return v->gtk == 1;
+	v->gtk = 2;
+	if (v->pid <= 0)
+		return 0;
+	char fn[64], line[512];
+	snprintf(fn, sizeof(fn), "/proc/%d/maps", (int)v->pid);
+	FILE *f = fopen(fn, "re");
+	if (!f) {
+		v->gtk = 0;                        /* (not readable yet: again at the next look) */
+		return 0;
+	}
+	while (fgets(line, sizeof(line), f))
+		if (strstr(line, "/libgtk-4.so") || strstr(line, "/libgtk-3.so")) {
+			v->gtk = 1;
+			break;
+		}
+	fclose(f);
+	return v->gtk == 1;
+}
+
 static int client_has_text_input(struct wl_client *c)
 {
 	struct tinput *t;
@@ -795,7 +954,7 @@ static void view_layout(struct view *v)
 	int dialog = v->top->parent || (cs->min_width && cs->min_width == cs->max_width && cs->min_height &&
 					cs->min_height == cs->max_height);
 	int w, h;
-	int aw = (int)AW(), ah = (int)AH();
+	int aw = (int)LW(), ah = (int)LH();
 	if (!dialog) {
 		w = aw, h = ah;
 	} else {
@@ -1111,7 +1270,7 @@ static void popup_place(struct wlr_xdg_popup *p)
 	while (x && x->role == WLR_XDG_SURFACE_ROLE_POPUP)
 		x = wlr_xdg_surface_try_from_wlr_surface(x->popup->parent);
 	struct view *v = x && x->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL ? view_of(x->toplevel) : NULL;
-	struct wlr_box box = {0, 0, (int)AW(), (int)AH()};
+	struct wlr_box box = {0, 0, (int)LW(), (int)LH()};
 	if (v) {
 		struct wlr_box geo;
 		wlr_xdg_surface_get_geometry(v->top->base, &geo);
@@ -1214,14 +1373,36 @@ static void touch(uint32_t phase, int32_t x, int32_t y, uint32_t t)
 		y = ROT == 1 ? (int32_t)W - 1 - px : px;
 	}
 	double sx = 0, sy = 0;
-	struct wlr_surface *s = surface_at(x, y, &sx, &sy);
+	struct wlr_surface *s = surface_at((double)x / SC, (double)y / SC, &sx, &sy);
+	static struct wl_client *down_client;
+	static struct wlr_surface *down_surface;
+	static double down_y;
+	if (phase == SBG_TOUCH_UP && down_client) {
+		retap_arm(down_client, down_surface, down_y);
+		down_client = NULL;
+	}
 	if (phase == SBG_TOUCH_DOWN) {
+		down_client = s ? wl_resource_get_client(s->resource) : NULL;
+		down_surface = s;
+		down_y = sy;
 		if (!s) {
-			say("touch at %d,%d: no surface there", x, y);
+			static int t_none;
+			say("%stouch at %d,%d: no surface there", t_none++ < 3 ? "STARBITE-TOUCH: " : "", x, y);
 			return;
 		}
 		say("touch at %d,%d: surface %p at %.0f,%.0f, as %s", x, y, (void *)s, sx, sy,
 		    client_has_touch(s) ? "wl_touch" : "pointer (the client has no wl_touch)");
+		/* 8i ("no touch" on the phone, fine in hostsim): the first three per app into pmsg (guest.c keeps lines
+		 * with STARBITE): whether taps arrive, where, and how they are delivered */
+		static char t_app[128];
+		static int t_n;
+		if (strcmp(t_app, S.active)) {
+			snprintf(t_app, sizeof(t_app), "%s", S.active);
+			t_n = 0;
+		}
+		if (t_n++ < 3)
+			say("STARBITE-TOUCH: %s: px %d,%d -> logical %.0f,%.0f in its surface, %s (scale %u)", S.active[0] ? S.active : "-",
+			    x, y, sx, sy, client_has_touch(s) ? "wl_touch" : "pointer", SC);
 		if (client_has_touch(s)) {
 			S.touch_surface = s;
 			S.touch_down = 1;
@@ -2149,7 +2330,7 @@ static uint32_t app_flags(int i, uint32_t *rss)
 	wl_list_for_each(v, &S.views, link)
 		if (v->mapped && !strcmp(v->desk, a->id)) {
 			win = 1;
-			ti |= client_has_text_input(wl_resource_get_client(v->top->resource));
+			ti |= client_has_text_input(wl_resource_get_client(v->top->resource)) || view_gtk(v);
 		}
 	if (win) {
 		f |= SBSHM_APP_WINDOW | SBSHM_APP_RUNNING;
@@ -2167,10 +2348,58 @@ static uint32_t app_flags(int i, uint32_t *rss)
 	return f;
 }
 
+/* the App Store's map of its installed apps' launchers (sbstore / sbpkg write /run/sbpkg/apps.tsv: "store index
+ * <TAB> key <TAB> desktop id" per launcher; 8i: never read, so every app's .pkg stayed NONE and the store's OPEN
+ * said "It has no window of its own"). Read again whenever the file changes (an install's rescan comes after it). */
+#define AMAP_MAX 256
+static struct { char desk[128]; uint32_t idx; } amap[AMAP_MAX];
+static int amap_n;
+static void amap_load(void)
+{
+	static struct timespec mt;
+	static off_t sz = -1;
+	struct stat st;
+	if (stat("/run/sbpkg/apps.tsv", &st)) {
+		amap_n = 0, sz = -1;
+		return;
+	}
+	if (st.st_size == sz && st.st_mtim.tv_sec == mt.tv_sec && st.st_mtim.tv_nsec == mt.tv_nsec)
+		return;
+	sz = st.st_size, mt = st.st_mtim;
+	FILE *f = fopen("/run/sbpkg/apps.tsv", "re");
+	amap_n = 0;
+	if (!f)
+		return;
+	char line[512];
+	while (amap_n < AMAP_MAX && fgets(line, sizeof(line), f)) {
+		char *t1 = strchr(line, '\t'), *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
+		if (!t2)
+			continue;
+		char *e = t2 + 1 + strcspn(t2 + 1, "\r\n");
+		*e = 0;
+		char *end;
+		unsigned long idx = strtoul(line, &end, 10);
+		if (end == line || end != t1 || idx >= SBSHM_PKGS_MAX || !t2[1])
+			continue;
+		snprintf(amap[amap_n].desk, sizeof(amap[amap_n].desk), "%s", t2 + 1);
+		amap[amap_n++].idx = (uint32_t)idx;
+	}
+	fclose(f);
+	say("catalog: the App Store's launchers: %d (/run/sbpkg/apps.tsv)", amap_n);
+}
+static uint32_t amap_pkg(const char *desk)
+{
+	for (int i = 0; i < amap_n; ++i)
+		if (!strcmp(amap[i].desk, desk))
+			return amap[i].idx;
+	return SBSHM_NONE;
+}
+
 static void cat_publish(void)
 {
 	if (!v2)
 		return;
+	amap_load();
 	volatile struct sbshm_cat *c = (volatile struct sbshm_cat *)(shm + SBSHM_CAT_OFF);
 	static struct sbshm_app now[SBSHM_APPS_MAX];
 	memset(now, 0, sizeof(now));
@@ -2198,7 +2427,7 @@ static void cat_publish(void)
 		memcpy(o->name, apps[i].name, l);
 		o->flags = app_flags(i, &o->rss_kb);
 		o->icon = i < (int)SBSHM_ICONS_CAT && icon_px[i] ? (uint32_t)i : SBSHM_NONE;
-		o->pkg = SBSHM_NONE;
+		o->pkg = amap_pkg(apps[i].id);
 	}
 	uint32_t mt, ma, st, sf;
 	meminfo(&mt, &ma, &st, &sf);
@@ -3059,8 +3288,8 @@ static int tick(void *data)
 	if (now - t_stat >= 10000) {
 		t_stat = now;
 		say("stats: frame events %u, built %u, with a buffer %u, published %llu, rows %llu, px %08x, apps %d, ring drops %u, "
-		    "deferred %u, background commits %lu", nframe, nbuilt, nbuf, (unsigned long long)frames, (unsigned long long)rows_out,
-		    last_px, napps, g2h_dropped, defers, hidden_commits);
+		    "deferred %u, background commits %lu, banded %lu", nframe, nbuilt, nbuf, (unsigned long long)frames,
+		    (unsigned long long)rows_out, last_px, napps, g2h_dropped, defers, hidden_commits, nband);
 	}
 	procs_tick();
 	clock_tick(now);
@@ -3142,6 +3371,17 @@ int main(int argc, char **argv)
 	}
 	if (!v2 && !legacy)
 		legacy = def;                          /* v1: one app, foot by default */
+	{
+		char cmd[1024] = "";
+		int cf = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+		ssize_t n = cf >= 0 ? read(cf, cmd, sizeof(cmd) - 1) : -1;
+		if (cf >= 0)
+			close(cf);
+		cmd[n > 0 ? n : 0] = 0;
+		const char *a = strstr(cmd, "sbwl.scale="), *e = getenv("SBWL_SCALE");
+		int sc = a && !sim ? atoi(a + 11) : e ? atoi(e) : sim ? 1 : W >= 720 ? (int)(W / 360U) : 1;   /* ~360 logical wide */
+		SC = sc >= 1 && sc <= 4 && !(W % (uint32_t)sc) && !(H % (uint32_t)sc) ? (uint32_t)sc : 1;
+	}
 	S.argv = legacy;
 	t0 = ms_now();
 	hdr->guest_state = SBG_GUEST_UP;

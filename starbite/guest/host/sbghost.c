@@ -177,11 +177,26 @@ static void zero_words(uintptr_t d, uint64_t n)
  * with contract v2 the tables; with v3 services the v3 rings. prezeroed: all of it done since the last load. */
 static int prezeroed;
 static uint64_t prez_at;                            /* bytes of the list below done */
+/* where the two surface buffers go (8o, native resolution): below the v2 tables as always while they fit (720 x
+ * 1344: 2 x 3.9 MB); a larger surface (1080 x 2016: 2 x 8.7 MB) in the v3 free tail (SBSHM_V3_FREE_OFF ..
+ * 64 MiB, 18.7 MiB); larger still (1440 x 2688: 2 x 15.5 MB) past 64 MiB of a 128 MiB region. 0: it does not fit.
+ * The guest (sbwl) takes hdr.surf_off[] as given. */
+static uint64_t surf_base(uint64_t surf)
+{
+    if (SBSHM_SURF_OFF + 2 * surf <= (cfg.v2 ? SBSHM_CAT_OFF : cfg.shm_size))
+        return SBSHM_SURF_OFF;
+    if (cfg.v2 && SBSHM_V3_FREE_OFF + 2 * surf <= SBSHM_V3_END && SBSHM_V3_END <= cfg.shm_size)
+        return SBSHM_V3_FREE_OFF;
+    if (cfg.v2 && SBSHM_V3_END + 2 * surf <= cfg.shm_size)
+        return SBSHM_V3_END;
+    return 0;
+}
 static uint64_t prez_list(unsigned k, uint64_t *off)
 {
-    uint64_t surf = (uint64_t)cfg.surf_w * 4 * cfg.surf_h;
+    uint64_t surf = (uint64_t)cfg.surf_w * 4 * cfg.surf_h, sb = surf_base(surf);
     switch (k) {
-    case 0: *off = 0; return SBSHM_SURF_OFF + 2 * surf;
+    case 0: *off = 0; return SBSHM_SURF_OFF + (sb == SBSHM_SURF_OFF ? 2 * surf : 0);
+    case 5: *off = sb; return sb && sb != SBSHM_SURF_OFF ? 2 * surf : 0;   /* a surface past the tables */
     case 1: *off = SBSHM_CAT_OFF; return cfg.v2 ? sizeof(struct sbshm_cat) : 0;
     case 2: *off = SBSHM_STORE_OFF; return cfg.v2 ? sizeof(struct sbshm_store) : 0;
     case 3: *off = SBSHM_BLK_OFF; return cfg.v2 ? sizeof(struct sbshm_blk) : 0;
@@ -288,20 +303,16 @@ static int load(const void *image, uint64_t image_size, const void *dtb, uint64_
         fail("the Image, DTB or initrd does not fit the carve-out layout");
         return -3;
     }
-    uint64_t stride = (uint64_t)cfg.surf_w * 4, surf = stride * cfg.surf_h;
-    if (SBSHM_SURF_OFF + 2 * surf > cfg.shm_size) {
-        fail("the surface does not fit the shared region");
-        return -4;
-    }
-    if (SBSHM_SURF_OFF + 2 * surf > (cfg.v2 ? SBSHM_CAT_OFF : cfg.shm_size)) {
-        fail("the surface does not fit below the v2 tables");
+    uint64_t stride = (uint64_t)cfg.surf_w * 4, surf = stride * cfg.surf_h, sb = surf_base(surf);
+    if (!sb) {
+        fail("the surface does not fit the shared region (below the v2 tables, the v3 free tail, past 64 MiB)");
         return -4;
     }
     int pz = prezeroed;                             /* sbg_prep_step cleared it all already (in steps) */
     prezeroed = 0;
     if (!pz) {
         zero_words(SHM(0), SBSHM_SURF_OFF);          /* header, rings, the ramoops zone: a fresh log */
-        zero_words(SHM(SBSHM_SURF_OFF), 2 * surf);
+        zero_words(SHM(sb), 2 * surf);
     }
     v2_changes = 0;
     v2_window = SBSHM_NONE;
@@ -367,8 +378,8 @@ static int load(const void *image, uint64_t image_size, const void *dtb, uint64_
     h->surf_stride = (uint32_t)stride;
     h->surf_format = SBSHM_FMT_XRGB8888;
     h->surf_nbuf = 2;
-    h->surf_off[0] = SBSHM_SURF_OFF;
-    h->surf_off[1] = (uint32_t)(SBSHM_SURF_OFF + surf);
+    h->surf_off[0] = (uint32_t)sb;
+    h->surf_off[1] = (uint32_t)(sb + surf);
     h->oops_off = SBSHM_OOPS_OFF;
     h->oops_size = SBSHM_OOPS_SIZE;
     volatile uint32_t *tr = (volatile uint32_t *)(uintptr_t)tramp_pa();

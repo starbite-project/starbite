@@ -79,11 +79,19 @@ expect_focus 0 2000
 launch org.starbite.GtkTest4
 wait_window org.starbite.GtkTest4 1 20000
 wait_frame 5000
+# 8i ("half the screen"): GTK 4 makes its text-input only when a field gets the focus (here the button has it):
+# still no KEYBOARD flag, so the host keeps the whole screen for the window
+expect_flag org.starbite.GtkTest4 keyboard 0 2000
 expect_file /tmp/sbwl-gtk4test.txt size:720x1344 5000
 tap_file /tmp/sbwl-gtk4test.txt entry
 expect_focus 1 3000
 type GTK4 sägt hallo
 expect_line /tmp/sbwl-gtk4test.txt text:GTK4 sägt hallo 3000
+# 8o: a tap in the field that already has the focus asks for the keyboard again (the host may have hidden it):
+# a new TEXT_FOCUS 1, even though nothing changed for the app
+sleep 600
+tap_file /tmp/sbwl-gtk4test.txt entry
+wait_new_msg 69 1 2000
 wait_frame 3000
 dump gtk4-typed
 viewport 916 720
@@ -190,6 +198,16 @@ sh rm -f /usr/local/share/applications/sbwl-added.desktop
 sock rescan
 sleep 2000
 expect_no_app sbwl-added
+# 8i: the App Store's launchers (sbstore writes /run/sbpkg/apps.tsv before its "rescan") give the catalog's store
+# index, which the store's OPEN needs ("It has no window of its own" without it)
+expect_pkg org.gnome.Calculator none 1000
+sh mkdir -p /run/sbpkg && printf '7\tgnome-calculator\torg.gnome.Calculator\n12\tbroken\n' > /run/sbpkg/apps.tsv
+sock rescan
+expect_pkg org.gnome.Calculator 7 5000
+expect_pkg foot none 1000
+sh rm -f /run/sbpkg/apps.tsv
+sock rescan
+expect_pkg org.gnome.Calculator none 5000
 include hostsim-v3.script
 include hostsim-rot.script
 catalog catalog-end.txt

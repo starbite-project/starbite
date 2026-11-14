@@ -105,12 +105,20 @@ sudo cp "$ROOT/usr/share/starbite/base-packages.txt" "$OUT/base-packages.txt"
 } > "$OUT/base-sizes.txt"
 
 sudo rm -f "$OUT/$IMG.erofs"
+# The image's UUID from its tree (8i, 2026-11-14): every base had the same fixed UUID, so overlayfs decoded a
+# copy-up's origin (UUID + EROFS nid) recorded on an older base against the new one, where that nid is another
+# file; when that file was already in the inode cache, the copied-up file failed with ESTALE (dpkg's
+# /var/lib/dpkg/triggers/Lock: no Debian install worked). A UUID per tree: overlayfs ignores origins from any other
+# base; the same tree still gives the same image (no times, owners by number). BASE_UUID=... overrides.
+UUID=${BASE_UUID:-$(sudo tar --sort=name --mtime=@0 --numeric-owner --xattrs -C "$ROOT" -cf - . 2>/dev/null |
+    sha256sum | cut -c1-30 | sed -E 's/^(.{8})(.{4})(.{3})(.{3})(.{12})$/\1-\2-4\3-8\4-\5/')}
+case "$UUID" in 5b5b5b5b-0000-4000-8000-000000000001|"") echo "mk-base: no UUID for the image" >&2; exit 1 ;; esac
 sudo mkfs.erofs -zlz4hc,12 -C65536 -Efragments,dedupe -T"$SOURCE_DATE_EPOCH" -L sb-base \
-    -U 5b5b5b5b-0000-4000-8000-000000000001 "$OUT/$IMG.erofs" "$ROOT" > "$OUT/mkfs-$IMG.log" 2>&1 ||
+    -U "$UUID" "$OUT/$IMG.erofs" "$ROOT" > "$OUT/mkfs-$IMG.log" 2>&1 ||
     { tail "$OUT/mkfs-$IMG.log"; exit 1; }
 sudo chown "$(id -u):$(id -g)" "$OUT/$IMG.erofs"
 fsck.erofs "$OUT/$IMG.erofs" > "$OUT/fsck-$IMG.log" 2>&1 || { echo "mk-base: fsck.erofs failed"; tail "$OUT/fsck-$IMG.log"; exit 1; }
 (cd "$OUT" && sha256sum $IMG.erofs > $IMG.erofs.sha256)
 [ "${KEEP_ROOT:-0}" = 1 ] || sudo rm -rf "$ROOT"
-echo "mk-base: $OUT/$IMG.erofs $(($(stat -c %s "$OUT/$IMG.erofs") / 1048576)) MB," \
+echo "mk-base: $OUT/$IMG.erofs $(($(stat -c %s "$OUT/$IMG.erofs") / 1048576)) MB, UUID $UUID," \
     "$(wc -l < "$OUT/base-packages.txt") packages; sizes in $OUT/base-sizes.txt"

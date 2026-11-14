@@ -6,7 +6,7 @@
 # in shots.actions (keys, typing, taps). Then the overlay, its packages and downloads are deleted (the Mac's disk) and
 # the VM's file system trimmed. Run in the Lima VM (root for the mounts, one app at a time):
 #   limactl shell starbite -- flock /var/tmp/sbvm-heavy.lock .../starbite/guest/sbwl/shots.sh [ID...]
-# Environment: WORK (/mnt/build/sbguest3), OUT ($WORK/shots/png), REPO (the card's repo.erofs, offline packages
+# Environment: WORK (/mnt/build/sbguest3), OUT ($WORK/shots/png), SBWL_SCALE (1; 2 = the phone's since 8i), REPO (the card's repo.erofs, offline packages
 # first), NET=0 (no Debian mirror). Writes OUT/<id>-<n>.png and OUT/<id>.log (the run's PASS / FAIL lines).
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -120,6 +120,7 @@ for entry in $apps; do
     sudo chroot "$S/root" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games HOME=/root \
         LANG=C.UTF-8 GSK_RENDERER=cairo GDK_BACKEND=wayland NO_AT_BRIDGE=1 GTK_A11Y=none MOZ_ENABLE_WAYLAND=1 \
         LIBGL_ALWAYS_SOFTWARE=1 SAL_USE_VCLPLUGIN=gtk3 XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=Starbite \
+        SBWL_SCALE=${SBWL_SCALE:-1} \
         sh -c 'SBWL_SOCK=/run/sbwl.sock /hs/hostsim -o /out -s /hs/shot.script -- /usr/bin/sbwl' > "$S/run.log" 2>&1
     grep -aE '^(PASS|FAIL|RESULT)' "$S/run.log" > "$OUT/$id.log"
     grep -aq 'RESULT PASS' "$S/run.log" || sudo cp "$S/run.log" "$OUT/$id.run.log"   # (a failure's whole log)

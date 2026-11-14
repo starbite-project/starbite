@@ -4,7 +4,7 @@
  * It creates a plain file the size of the shared region, fills the header as starbite/guest/host/sbghost.c load()
  * does (contract v2, the surface 720 x 1344 by default), starts sbwl with SBWL_SHM=<that file> (sbwl maps it instead
  * of /dev/sbshm; no doorbells: both sides poll), then plays a script of host messages and checks expectations.
- *   hostsim [-o OUTDIR] [-s SCRIPT] [-W 720] [-H 1344] -- sbwl [args...]
+ *   hostsim [-o OUTDIR] [-s SCRIPT] [-W 720] [-H 1344] [-S MiB] -- sbwl [args...]
  * Every check prints "PASS ..." or "FAIL ...", the end "RESULT PASS|FAIL (n passed, m failed)".
  * Script lines (# comments; NAME = a catalog id, or a name, case-insensitive; T = timeout in ms):
  *   wait_hello T | wait_catalog T | catalog FILE | expect_app NAME | expect_no_app NAME | expect_icon NAME
@@ -12,8 +12,10 @@
  *   launch NAME | launch_stale NAME | activate NAME|none | close NAME | viewport ROWS WIDTH
  *   wait_window NAME 0|1 T          SBG_MSG_WINDOW with that app's index and b
  *   wait_frame T                    a new frame (surf_seq moved) after the last command
+ *   expect_pkg NAME IDX|none T      the catalog's store index (sbshm_app.pkg) for that app within T
  *   dump FILE                       the front buffer: FILE.ppm and FILE.png (the viewport's rows)
  *   tap X Y | tap_file PATH KEY     (KEY: a line "KEY:x y w h" in PATH: a tap at its middle)
+ *   tap_scale N                     tap_file's coordinates x N (sbwl at SBWL_SCALE=N: they are logical)
  *   type TEXT                       SBG_MSG_TEXT, 8 bytes at most per message, whole characters
  *   key CODE                        down + up
  *   expect_focus 0|1 T              the last SBG_MSG_TEXT_FOCUS
@@ -25,6 +27,7 @@
  *   sock_listen | expect_sock LINE T  a client that stays connected / a line it got
  *   pkg IDX OP SEQ                  SBG_MSG_PKG
  *   wait_msg TYPE A T               any guest -> host message of TYPE (A: or * for any)
+ *   wait_new_msg TYPE A T           the same, only one that comes after this command
  *   sh CMD                          a shell command (set-up steps)
  *   sleep T | stop T
  * Contract v3 (the default; -2: a v2 host): services CLIP | NOTIF | CLOCK, host_surf_reading, the wall clock.
@@ -75,7 +78,7 @@
 
 #include "../sbshm.h"
 
-#define SHM_SIZE SBG_QEMU_SHM_SIZE
+static uint64_t SHM_SIZE = SBG_QEMU_SHM_SIZE;   /* -S MiB: the shared region (128 for a native-resolution surface) */
 
 static uint8_t *shm;
 static volatile struct sbshm_hdr *hdr;
@@ -250,6 +253,7 @@ static int cat_read(void)
 	return 0;
 }
 
+static int tap_scale = 1;                  /* tap_scale N: tap_file's logical coordinates to surface pixels */
 static int app_find(const char *name)
 {
 	if (!cat_read())
@@ -586,6 +590,19 @@ static void run_line(char *l)
 			flags_str(catc.app[i].flags, fl, sizeof(fl));
 		result(i >= 0 && !!(catc.app[i].flags & bit) == !!want, "%s: %s %u (flags %s, rss %u kB)", a1, a2, want, fl,
 		       i >= 0 ? catc.app[i].rss_kb : 0);
+	} else if (!strcmp(c, "expect_pkg")) {   /* 8i: the catalog's store index of an app (sbstore's apps.tsv) */
+		uint32_t want = !strcmp(a2, "none") ? SBSHM_NONE : (uint32_t)atoi(a2);
+		T = (unsigned)atoi(a3);
+		uint64_t end = ms_now() + T;
+		int i;
+		for (;;) {
+			i = app_find(a1);
+			if ((i >= 0 && catc.app[i].pkg == want) || ms_now() >= end)
+				break;
+			wait_ms(20);
+		}
+		result(i >= 0 && catc.app[i].pkg == want, "%s: store index %s (catalog: %d)", a1, a2,
+		       i >= 0 ? (int)catc.app[i].pkg : -2);
 	} else if (!strcmp(c, "launch") || !strcmp(c, "launch_stale")) {
 		int i = app_find(a1);
 		if (i < 0) {
@@ -668,7 +685,9 @@ static void run_line(char *l)
 			return;
 		}
 		frame_mark = hdr->surf_seq;
-		tap(x + w / 2, y + h / 2);
+		tap((x + w / 2) * tap_scale, (y + h / 2) * tap_scale);
+	} else if (!strcmp(c, "tap_scale")) {   /* 8i: sbwl at scale N: the app's own (logical) coordinates x N */
+		tap_scale = atoi(a1) >= 1 ? atoi(a1) : 1;
 	} else if (!strcmp(c, "type")) {
 		frame_mark = hdr->surf_seq;
 		type_text(s + 5);
@@ -778,6 +797,21 @@ static void run_line(char *l)
 	} else if (!strcmp(c, "pkg")) {
 		put(SBG_MSG_PKG, (uint32_t)atoi(a1), (uint32_t)atoi(a2), (uint32_t)atoi(a3), 0, 0);
 		note("-> PKG %s %s %s", a1, a2, a3);
+	} else if (!strcmp(c, "wait_new_msg")) {   /* 8o: only a message that comes after this command */
+		unsigned type = (unsigned)atoi(a1), mark = nseen;
+		T = (unsigned)atoi(a3);
+		uint64_t end = ms_now() + T;
+		int ok = 0;
+		for (;;) {
+			for (unsigned k = mark; k < nseen && !ok; ++k) {
+				const struct sbshm_msg *m = &seen[k % 256];
+				ok = m->type == type && (a2[0] == '*' || m->a == (uint32_t)atoi(a2));
+			}
+			if (ok || ms_now() >= end)
+				break;
+			wait_ms(10);
+		}
+		result(ok, "a new message %s (%u) a=%s", msg_name(type), type, a2);
 	} else if (!strcmp(c, "wait_msg")) {
 		unsigned type = (unsigned)atoi(a1), mark = nseen;
 		(void)mark;
@@ -983,7 +1017,7 @@ int main(int argc, char **argv)
 {
 	const char *script = NULL;
 	int o;
-	while ((o = getopt(argc, argv, "o:s:W:H:2")) != -1) {
+	while ((o = getopt(argc, argv, "o:s:W:H:S:2")) != -1) {
 		if (o == '2')
 			v3 = 0;
 		else if (o == 'o')
@@ -994,6 +1028,8 @@ int main(int argc, char **argv)
 			W = (uint32_t)atoi(optarg);
 		else if (o == 'H')
 			H = (uint32_t)atoi(optarg);
+		else if (o == 'S')
+			SHM_SIZE = (uint64_t)atoi(optarg) << 20;
 	}
 	if (optind >= argc) {
 		fprintf(stderr, "hostsim [-o OUTDIR] [-s SCRIPT] [-W w] [-H h] -- sbwl [args]\n");
@@ -1013,8 +1049,14 @@ int main(int argc, char **argv)
 		return 1;
 	/* sbghost.c load(): the header, version 2, the tables empty */
 	uint64_t stride = (uint64_t)W * 4, surf = stride * H;
-	if (SBSHM_SURF_OFF + 2 * surf > SBSHM_CAT_OFF) {
-		fprintf(stderr, "hostsim: the surface does not fit below the v2 tables\n");
+	/* the buffers below the v2 tables as before; a larger surface (native resolution, Track E's proposal for the
+	 * host's sbghost load()) after the v3 rings: in the region's free tail, else past 64 MiB of a larger region */
+	uint64_t s0 = SBSHM_SURF_OFF;
+	if (SBSHM_SURF_OFF + 2 * surf > SBSHM_CAT_OFF)
+		s0 = SBSHM_V3_FREE_OFF + 2 * surf <= SHM_SIZE ? SBSHM_V3_FREE_OFF : (64ULL << 20);
+	if (s0 + 2 * surf > SHM_SIZE) {
+		fprintf(stderr, "hostsim: the surface (2 x %llu bytes) does not fit in the %llu MiB region (-S)\n",
+			(unsigned long long)surf, (unsigned long long)(SHM_SIZE >> 20));
 		return 1;
 	}
 	hdr = (volatile struct sbshm_hdr *)(shm + SBSHM_HDR_OFF);
@@ -1037,8 +1079,8 @@ int main(int argc, char **argv)
 	hdr->surf_stride = (uint32_t)stride;
 	hdr->surf_format = SBSHM_FMT_XRGB8888;
 	hdr->surf_nbuf = 2;
-	hdr->surf_off[0] = SBSHM_SURF_OFF;
-	hdr->surf_off[1] = (uint32_t)(SBSHM_SURF_OFF + surf);
+	hdr->surf_off[0] = (uint32_t)s0;
+	hdr->surf_off[1] = (uint32_t)(s0 + surf);
 	hdr->oops_off = SBSHM_OOPS_OFF;
 	hdr->oops_size = SBSHM_OOPS_SIZE;
 	hdr->host_state = SBG_HOST_STARTED;

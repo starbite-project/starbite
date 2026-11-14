@@ -1,0 +1,32 @@
+# hostsim with sbwl at scale 2 (trixie-chroot.sh test, a second run with SBWL_SCALE=2): the phone's default since 8i
+# ("the UI is super small"): the apps get 360 x 672 logical in the 720 x 1344 surface and draw their buffers at 2.
+wait_hello 5000
+wait_catalog 8000
+expect_log 3000 scale 2 (apps: 360x672)
+launch org.starbite.GtkTest4
+wait_window org.starbite.GtkTest4 1 20000
+wait_frame 5000
+expect_flag org.starbite.GtkTest4 keyboard 0 2000
+expect_file /tmp/sbwl-gtk4test.txt size:360x672 5000
+dump scale2-gtk4
+# a tap at the entry's middle (its logical coordinates x 2) gives it the focus; typing reaches it
+tap_scale 2
+tap_file /tmp/sbwl-gtk4test.txt entry
+expect_focus 1 3000
+type scale two
+expect_line /tmp/sbwl-gtk4test.txt text:scale two 3000
+wait_frame 3000
+dump scale2-gtk4-typed
+# the host's keyboard: 916 rows of pixels = 458 logical
+viewport 916 720
+expect_file /tmp/sbwl-gtk4test.txt size:360x458 5000
+viewport 1344 720
+expect_file /tmp/sbwl-gtk4test.txt size:360x672 5000
+close org.starbite.GtkTest4
+wait_window org.starbite.GtkTest4 0 8000
+# foot at scale 2: its window fills the logical space too
+launch foot
+wait_window foot 1 20000
+wait_frame 5000
+dump scale2-foot
+stop 5000
