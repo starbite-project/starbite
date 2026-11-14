@@ -35,6 +35,8 @@
 #   tools/win/touch.sh hsi2c OUT 2   the same with sbhsi2c-2 (build/win/hsi2c-2): + a 2 ms poll that services an interrupt
 #                                    the ISR missed (edge-triggered), and a register snapshot at each cancel
 #                                    (Enum\ACPI\SAMS9810\a\Device Parameters: I2cPollRescue, I2cCancelCount/Pending/Regs).
+#   tools/win/touch.sh hsi2c OUT 3   sbhsi2c-3 (build/win/hsi2c-3): + a transfer whose bytes all moved, with the master idle
+#                                    and nothing pending for 2 polls, is completed as done (I2cPollSynthDone).
 #   tools/win/touch.sh hsi2c-restore OUT   the DriverStore HSI2C driver again.
 #   tools/win/touch.sh show OUT      read-only: ImagePath and every Diag* value with the decoded trace.
 #
@@ -54,6 +56,7 @@ HSI2C=$main/build/win/hsi2c-1/sbhsi2c.sys
 HSI2C_SHA=8489ac43bdef2ce7ee37b7fdb64bae58a7e9e74639c6da1126d740e0679fa9ec
 IP=tools/win/hive-imagepath.py
 if [ "${1:-}" = hsi2c ] && [ "${3:-1}" = 2 ]; then HSI2C=$main/build/win/hsi2c-2/sbhsi2c.sys; HSI2C_SHA=a8c74b938ebf9baeb07dc2a9d6e728c078b2014186b46c7c8f11ee892f6db040; fi
+if [ "${1:-}" = hsi2c ] && [ "${3:-1}" = 3 ]; then HSI2C=$main/build/win/hsi2c-3/sbhsi2c.sys; HSI2C_SHA=5d976386ee07bca410954c3852a3dbc8453bc0f70b4d6f88eecf590c0225df0b; fi
 DRV3_SHA=fa9f2a52c9fb0aa866cc7ba66e9f20548ad311d418cddac844531224efa7a2a2
 NTFS=/dev/block/sda27
 W=/tmp/wwin

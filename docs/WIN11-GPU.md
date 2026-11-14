@@ -2678,6 +2678,20 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   the hang rate. I2cTelemetryVersion 3 (sbhsi2c-1), LastRequestStatus CANCELLED, ISR 5301 vs 4808 transfers.
   touch-5 (sbhsi2c-2: poll rescue + cancel snapshot) is the next step to tell a lost edge from a real bus stall.
 
+### 6.88 touch-5 check: lost interrupts exist (2 rescued); the remaining hang = a transfer done but no TRANSFER_DONE
+
+- **touch-5 check boot (A55, td3 + sbhsi2c-2):** PASS (I2cTelemetryVersion 4, D0 0, fresh clock). DiagSelf 1/200
+  back to back, 0/200 spaced. **I2cPollRescue 2** (DPC 241 vs ISR 239): two interrupt conditions sat unserviced and
+  the poll took them. **I2cCancelCount 1, I2cCancelPending 0**, I2cCancelRegs `is=00000000 ie=00000F80 ts=00080001
+  fifo=01000100 mask=00000F80 soft=00000000`: nothing pending, TRANS_STATUS = the same value as right after reset
+  (not MASTER_BUSY), both FIFOs empty, and the software mask without the data interrupt = every byte of the current
+  transfer had moved. So the transfer finished on the bus and TRANSFER_DONE never showed (or was cleared unseen).
+- **sbhsi2c-3** (5d976386, signed, 0 LSE): sbhsi2c-2 + in the 2 ms poll: if the active transfer has no bytes left,
+  nothing is pending, the ISR holds nothing and TRANS_STATUS is not MASTER_BUSY on **two consecutive polls** (>= 4 ms;
+  a touch transfer takes < 0.5 ms), it is completed as if TRANSFER_DONE had come (**I2cPollSynthDone**). If the bus had
+  not really finished, the next phase fails with a NACK and the touch driver retries (25 ms x 5). I2cTelemetryVersion 5.
+  `touch.sh hsi2c OUT 3`.
+
 ### 6.85 Zero-copy on screen is the top track again: T66 (VIS3) = VIS2's ETW, finally elevated
 
 - **The user (11-14):** touch-4 works ("drags are fine"); GD ~30 fps, taps less late but still late; "wheres the work

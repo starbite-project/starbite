@@ -129,6 +129,9 @@ struct _PBC_DEVICE {
     // and every cancel (the client's timeout) records the controller registers.
     WDFTIMER PollTimer;
     volatile LONG TelemetryPollRescue;
+    // sbhsi2c-3: transfers whose bytes all moved and whose controller went idle, but no TRANSFER_DONE came
+    volatile LONG TelemetryPollSynthDone;
+    ULONG PollIdleCount;
     volatile LONG TelemetryCancelCount;
     volatile LONG TelemetryCancelPending;
     volatile LONG TelemetryCancelRegs[6];

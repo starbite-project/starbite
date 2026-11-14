@@ -231,10 +231,11 @@ OnTelemetryWorkItem(
     AssignTelemetryValue(
         key,
         L"I2cTelemetryVersion",
-        4,
+        5,
         &firstFailure);
     // Starbite sbhsi2c-2
     AssignTelemetryValue(key, L"I2cPollRescue", ReadTelemetryValue(&device->TelemetryPollRescue), &firstFailure);
+    AssignTelemetryValue(key, L"I2cPollSynthDone", ReadTelemetryValue(&device->TelemetryPollSynthDone), &firstFailure);
     AssignTelemetryValue(key, L"I2cCancelCount", ReadTelemetryValue(&device->TelemetryCancelCount), &firstFailure);
     AssignTelemetryValue(key, L"I2cCancelPending", ReadTelemetryValue(&device->TelemetryCancelPending), &firstFailure);
     {
@@ -1315,6 +1316,7 @@ PbcRequestDoTransfer(
         ControllerCompleteTransfer(Device, Request, TRUE);
         return;
     }
+    Device->PollIdleCount = 0;
     (VOID)WdfTimerStart(Device->PollTimer, WDF_REL_TIMEOUT_IN_MS(2));
 }
 
@@ -1347,7 +1349,29 @@ OnPollTimer(
             ControllerAcknowledgeExact(device, pending);
             InterlockedOr(&device->InterruptStatus, (LONG)pending);
             InterlockedIncrement(&device->TelemetryPollRescue);
+            device->PollIdleCount = 0;
             rescued = TRUE;
+        }
+        else if ((pending == 0) && (device->InterruptStatus == 0) &&
+                 (PbcRequestGetInfoRemaining(device->CurrentTarget->CurrentRequest) == 0) &&
+                 !ExynosTestAnyBits(ControllerReadRegister(device, EHI2C_TRANSFER_STATUS),
+                                    EHI2C_TRANSFER_MASTER_BUSY))
+        {
+            // sbhsi2c-3 (docs/WIN11-GPU.md 6.88): every byte of this transfer moved, nothing is pending and the
+            // master is not busy - two polls in a row (>= 4 ms; a touch transfer takes < 0.5 ms) = the TRANSFER_DONE
+            // that never came (touch-5's cancel snapshot: is=0, FIFOs empty, not busy). Complete it as if it had.
+            if (++device->PollIdleCount >= 2)
+            {
+                ControllerDisableInterrupts(device);
+                InterlockedOr(&device->InterruptStatus, (LONG)EHI2C_INTERRUPT_TRANSFER_DONE);
+                InterlockedIncrement(&device->TelemetryPollSynthDone);
+                device->PollIdleCount = 0;
+                rescued = TRUE;
+            }
+        }
+        else
+        {
+            device->PollIdleCount = 0;
         }
         WdfInterruptReleaseLock(device->InterruptObject);
     }
