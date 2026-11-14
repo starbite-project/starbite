@@ -16,6 +16,10 @@
 #                                        leaves its stack for user-pull.sh.
 #   tools/win/touch.sh restore OUT   ImagePath back to the DriverStore driver; RunOnce StarbiteUntouch puts the
 #                                    press-and-hold setting back. The .sys file stays (unused).
+#   tools/win/touch.sh update OUT    after apply: only the driver FILE becomes touchdiag-3 (build/win/touch-3, 2529a7cf:
+#                                    touchdiag-2 + a 25 ms timeout for touch-event reads instead of 250 ms, so a stuck
+#                                    read freezes the finger ~25 ms, not ~265 ms, before the retry). Refused unless the
+#                                    service already points at s6touchdiag.sys. Check boot as after apply.
 #   tools/win/touch.sh show OUT      read-only: ImagePath and every Diag* value with the decoded trace.
 #
 # After apply, BEFORE anyone relies on touch, prove the driver loads with one unattended small-core boot:
@@ -25,10 +29,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
-mode=${1:?usage: touch.sh apply|restore|show OUT}
-out=${2:?usage: touch.sh apply|restore|show OUT}
+mode=${1:?usage: touch.sh apply|update|restore|show OUT}
+out=${2:?usage: touch.sh apply|update|restore|show OUT}
 DRV=$main/build/win/touch-1/s6touchdiag.sys
 DRV_SHA=070dad9aae60debcc2819b873dba92bec1f9a2b944fa70b09d9ec4b1738a61f0
+DRV3=$main/build/win/touch-3/s6touchdiag.sys
+DRV3_SHA=2529a7cf3d06113a0bbe50fdfc05f5c5a15cbb5836ecb83ea20d895649f31e74
 NTFS=/dev/block/sda27
 W=/tmp/wwin
 SYS=Windows/System32/config/SYSTEM
@@ -56,8 +62,17 @@ show)
     python3 "$TD" "$tmp/SYSTEM" show | tee -a "$out/touch.log"
     adb shell "cat $W/ProgramData/Starbite/debloat/touch.log 2>/dev/null" | tr -d '\r' | tee -a "$out/touch.log"
     exit 0 ;;
+update)
+    [ "$(shasum -a 256 "$DRV3" | cut -c1-64)" = "$DRV3_SHA" ] || { log "$DRV3 is not touchdiag-3 ($DRV3_SHA)"; exit 1; }
+    adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null
+    adb pull "$W/$SYS" "$tmp/SYSTEM" >/dev/null
+    python3 "$TD" "$tmp/SYSTEM" show | head -3 | grep -q 'ImagePath .*s6touchdiag.sys' || { log "the touch service does not use s6touchdiag.sys: run apply first"; exit 1; }
+    adb pull "$W/Windows/System32/drivers/s6touchdiag.sys" "$out/backup/s6touchdiag-$(date +%Y%m%d-%H%M%S).sys" >/dev/null
+    push_check "$DRV3" "$W/Windows/System32/drivers/s6touchdiag.sys"
+    log "update done: s6touchdiag.sys = touchdiag-3 (25 ms touch-read timeout). Next: the unattended check boot"
+    exit 0 ;;
 apply|restore) ;;
-*) echo "usage: touch.sh apply|restore|show OUT"; exit 1 ;;
+*) echo "usage: touch.sh apply|update|restore|show OUT"; exit 1 ;;
 esac
 [ "$(shasum -a 256 "$DRV" | cut -c1-64)" = "$DRV_SHA" ] || { log "$DRV is not touchdiag-2 ($DRV_SHA)"; exit 1; }
 for f in starbite/win/debloat/touch-online.cmd starbite/win/debloat/untouch-online.cmd; do [ -f "$f" ] || { log "missing $f"; exit 1; }; done

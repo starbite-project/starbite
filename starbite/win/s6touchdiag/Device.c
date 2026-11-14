@@ -77,6 +77,13 @@ RequestGetHidXferPacket_ToWriteToDevice(
 #define S6SY761_EVENT_SIZE  8
 #define S6SY761_EVENT_COUNT  (S6SY761_MASK_LEFT_EVENTS + 1)
 #define S6SY761_SPB_TIMEOUT_MS 250
+// touchdiag-3 (Track K 11-14): the touch-event reads get their own short timeout. touchdiag-2's first real drag
+// (A55 check boot) had 2 reads that never completed: each waited the full 250 ms before its retry worked, a 265 ms
+// freeze in the drag. A good read takes ~0.4 ms (DiagSelf avg 424 us, max 489 us), so 25 ms is ~50x margin and a
+// stuck read now costs ~25 ms. Everything else (D0 entry, commands, the self-test) keeps 250 ms.
+#ifndef SBTOUCH_READ_TIMEOUT_MS
+#define SBTOUCH_READ_TIMEOUT_MS 25
+#endif
 
 C_ASSERT(S6SY761_EVENT_COUNT == 64);
 C_ASSERT(S6SY761_INPUT_REPORT_QUEUE_DEPTH >= S6SY761_EVENT_COUNT);
@@ -364,6 +371,7 @@ DiagFlush(
 	DiagAssignULong(key, L"DiagI2cRetry", (ULONG)DeviceContext->DiagI2cRetry);
 	DiagAssignULong(key, L"DiagI2cRetryOk", (ULONG)DeviceContext->DiagI2cRetryOk);
 	DiagAssignULong(key, L"DiagRetryBuild", SBTOUCH_RETRY);
+	DiagAssignULong(key, L"DiagReadTimeoutMs", SBTOUCH_READ_TIMEOUT_MS);
 	DiagAssignULong(key, L"DiagOverflow", (ULONG)DeviceContext->InputOverflowCount);
 	DiagAssignULong(key, L"DiagQueueFlush", (ULONG)DeviceContext->InputQueueFlushCount);
 	DiagAssignULong(key, L"DiagCoalesce", (ULONG)DeviceContext->InputReportCoalesceCount);
@@ -3078,7 +3086,7 @@ TouchReadWithRetry(
 			delay.QuadPart = -5000;            // 0.5 ms
 			KeDelayExecutionThread(KernelMode, FALSE, &delay);
 		}
-		status = SpbDeviceWriteRead(pDevice, Command, Out, 1, OutLength);
+		status = SpbDeviceWriteReadTimeout(pDevice, Command, Out, 1, OutLength, SBTOUCH_READ_TIMEOUT_MS);
 		if (NT_SUCCESS(status))
 		{
 			if (tries != 0)
@@ -3458,6 +3466,20 @@ SpbDeviceWriteRead(
 	_In_ size_t outputBufferLength
 )
 {
+	return SpbDeviceWriteReadTimeout(pDevice, pInputBuffer, pOutputBuffer, inputBufferLength, outputBufferLength,
+		S6SY761_SPB_TIMEOUT_MS);
+}
+
+NTSTATUS
+SpbDeviceWriteReadTimeout(
+	_In_ PDEVICE_CONTEXT pDevice,
+	_In_ PVOID pInputBuffer,
+	_In_ PVOID pOutputBuffer,
+	_In_ size_t inputBufferLength,
+	_In_ size_t outputBufferLength,
+	_In_ ULONG timeoutMs
+)
+{
 	SPB_TRANSFER_LIST_AND_ENTRIES(2) sequence;
 	WDF_MEMORY_DESCRIPTOR sequenceDescriptor;
 	WDF_OBJECT_ATTRIBUTES requestAttributes;
@@ -3509,7 +3531,7 @@ SpbDeviceWriteRead(
 	WDF_REQUEST_SEND_OPTIONS_INIT(&options, 0);
 	WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(
 		&options,
-		WDF_REL_TIMEOUT_IN_MS(S6SY761_SPB_TIMEOUT_MS));
+		WDF_REL_TIMEOUT_IN_MS(timeoutMs));
 
 	status = WdfIoTargetSendIoctlSynchronously(
 		pDevice->SpbController,

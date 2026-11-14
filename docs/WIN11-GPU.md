@@ -2571,6 +2571,24 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   explorer.exe and ShellExperienceHost.exe (hive-localdumps.py from 7d67410d, rehearsed on the SOFTWARE backup);
   user-pull.sh pulls the shell/Edge/DWM Report.wer files and the 4 newest C:\sbdumps dumps.
 
+### 6.80 touch-1 check boot: the retry works; the 250 ms read timeouts remain -> touchdiag-3 (25 ms)
+
+- **Check boot (A55, unattended, 10:0x):** PASS: DiagBuild `s6touchdiag cbd9f5a`, TouchD0Status 0. Someone touched
+  the phone during it, so there is a real drag: 1 press, 511 moves, 1 release over 4.3 s, and inside it 2 reads
+  that never completed: status 0xC00000B5 (IO_TIMEOUT) after the full 250 ms (DiagSpbMaxUs 252348), each followed by a
+  successful retry (DiagI2cRetry 2, DiagI2cRetryOk 2) and a "266 ms without an event" gap. With the old driver each
+  would have been an all-up = the drag split in 3 (the user's symptom), on the small cores too. Self-test: back to
+  back 1/200 reads timed out (250 ms), 200 us apart 0/200 (avg 424 us, max 489 us): mechanism 4 of the root-cause
+  note (a sequence whose completion never arrives), more likely with sequences back to back.
+- **touchdiag-3** (`build/win/touch-3/s6touchdiag.sys` 2529a7cf, build td3-25ms, signed, 0 LSE words): the
+  touch-event reads (TouchReadWithRetry) use their own 25 ms timeout (SBTOUCH_READ_TIMEOUT_MS; ~50x a good read);
+  D0 entry, commands and the self-test keep 250 ms; DiagReadTimeoutMs records it. A stuck read now costs ~25 ms.
+  The same pipeline builds touchdiag-2's source to the same size (40448 B; the archived 11-11 file was 37888 B).
+- **`touch.sh update OUT`:** pushes only the touchdiag-3 file (service must already use s6touchdiag.sys); then the
+  same check boot (PASS = DiagBuild `s6touchdiag td3-25ms`, TouchD0Status 0).
+- The real fix of the cause is in the HSI2C controller driver (root-cause note: completion without waiting for the
+  bus to go idle; re-poll INT_STATUS before re-enabling), not ours yet.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

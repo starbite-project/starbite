@@ -305,6 +305,16 @@ SpbDeviceWriteRead(
 );
 
 NTSTATUS
+SpbDeviceWriteReadTimeout(
+	_In_ PDEVICE_CONTEXT pDevice,
+	_In_ PVOID pInputBuffer,
+	_In_ PVOID pOutputBuffer,
+	_In_ size_t inputBufferLength,
+	_In_ size_t outputBufferLength,
+	_In_ ULONG timeoutMs
+);
+
+NTSTATUS
 ReadDescriptorFromRegistry(
     WDFDEVICE Device
 );
