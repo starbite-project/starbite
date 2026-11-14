@@ -2802,6 +2802,24 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   (opengl32 35ec684e, libgallium_wgl 0997dd1b).
 - **T68 GO** with that build: GD on the big cores, A/A2 async GDI present vs B/B2 zero-copy (blt model into DWM).
 
+### 6.93 T68 read: GD zero-copy works on screen and stays stable, but is slower (Present waits); C: ran full
+
+- **T68** (big cores, sbumd 0159, GD ICD 0161 EC; 00:15-00:56): GD up 105 s cold, then 5 s each (Steam warm).
+  - A (async GDI): glstats steady **48.2 fps**, gllows 44.7 fps, 1% low 25.0; A2: 38.1 / 36.0 / 19.6.
+  - B / B2 (glzc, zero-copy, DISCARD): `zero-copy present, 2960x1440 B8G8R8A8, swap effect 0`, 26 / 24 lines of 300
+    frames at **~23 fps**: per frame GL wait ~5 ms, copy+mark 0.3-0.4 ms, **Present ~30 ms**, 0 present failures,
+    slowest ~50 ms. So the frame reaches DWM through DXGI's blt path every time, but Present() blocks ~2 vblanks.
+  - **No DWM or sihost crash** in the boot (only msedge c0000409): the blt path with 0159 holds up for a game.
+  - C: fell from 1126 MiB to 113 and **0 MiB free** during the GD runs (memory load 93 %, commit free 676 MiB: the
+    pagefile grew into the rest of C:); the B-run screen shots were skipped by sbshow's 600 MiB guard. After the boot
+    TWRP sees 1.2 GB free (11-13: 3.3 GB). `tools/win/c-cleanup.sh` now also covers C:\sbdumps (shell dumps; copied to
+    the Mac first), umdlog pres-*.csv (T66's ETW CSVs) and Windows\XtaCache.m3 (T67's parked cache, only in the safe
+    layout).
+- **0162** (src-tc 7f1e897, `sb-patches/0162-wgl-zero-copy-novsync-flag.patch`): `C:\ProgramData\Starbite\glzcnovsync`
+  turns zero-copy on and presents with sync interval 0 (logged once). ARM64EC `build/win/gd-zc-0162` (opengl32
+  d00863eb, libgallium_wgl 2254f46f).
+- **T69** (`sbwddm-t69` = T68 + 0162, sb-gd-ab.txt `glzcnovsync twice`): A/A2 GDI vs B/B2 zero-copy at interval 0.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,

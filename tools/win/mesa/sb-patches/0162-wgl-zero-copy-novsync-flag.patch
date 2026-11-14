@@ -1,0 +1,55 @@
+From 7f1e89745715d31349413e1d4894839c1a0964da Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Sun, 15 Nov 2026 00:57:51 +0200
+Subject: [PATCH] 0162: zero-copy present with sync interval 0 when
+ C:\ProgramData\Starbite\glzcnovsync exists (that flag alone also turns
+ zero-copy on)
+
+---
+ src/gallium/targets/wgl/wgl_sb_zc.cpp | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/targets/wgl/wgl_sb_zc.cpp b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+index 9440a38..c1d6011 100644
+--- a/src/gallium/targets/wgl/wgl_sb_zc.cpp
++++ b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+@@ -478,7 +478,14 @@ sbzc_present(struct stw_winsys_framebuffer *pfb, int interval)
+          fb->stg_pending[back] = true;
+          QueryPerformanceCounter(&t2);
+          /* 4. present */
+-         hr = fb->sc->Present(interval < 0 ? 0 : interval > 4 ? 4 : (UINT)interval, 0);
++         /* sb-patches/0162: with C:\ProgramData\Starbite\glzcnovsync, sync interval 0 (T68: GD's zero-copy Present
++          * took ~30 ms of each frame with the game's interval, 23 fps against 38-48 with the GDI present) */
++         static int novsync = -1;
++         if (novsync < 0) {
++            novsync = GetFileAttributesA("C:\\ProgramData\\Starbite\\glzcnovsync") != INVALID_FILE_ATTRIBUTES;
++            ZLOG("sync interval: %s\n", novsync ? "0 (glzcnovsync)" : "the game's");
++         }
++         hr = fb->sc->Present(novsync ? 0 : interval < 0 ? 0 : interval > 4 ? 4 : (UINT)interval, 0);
+       } else {
+          QueryPerformanceCounter(&t2);
+       }
+@@ -561,7 +568,8 @@ wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFo
+       const char *l = getenv("SB_GL_ZC_LOG");
+       zc_log = l && *l && *l != '0';
+       /* 0160: the flag file also turns the log on (a Steam-started game has no environment of ours) */
+-      if (GetFileAttributesA("C:\\ProgramData\\Starbite\\glzc") != INVALID_FILE_ATTRIBUTES)
++      if (GetFileAttributesA("C:\\ProgramData\\Starbite\\glzc") != INVALID_FILE_ATTRIBUTES ||
++          GetFileAttributesA("C:\\ProgramData\\Starbite\\glzcnovsync") != INVALID_FILE_ATTRIBUTES)
+          zc_log = 1;
+       /* sb-patches/0160 (GD ICD tree): opt-in. In src-zc (0151) zero-copy was the default; in the game kit the
+        * async GDI present (0153) stays the default until the user's windows are shown through DWM (sbumd 0159), so
+@@ -569,7 +577,9 @@ wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFo
+        * window, like glcached/glasync). */
+       mode = (p && !strcmp(p, "zc")) ||
+              (!(p && (!strcmp(p, "gdi") || !strcmp(p, "copy"))) &&
+-              GetFileAttributesA("C:\\ProgramData\\Starbite\\glzc") != INVALID_FILE_ATTRIBUTES);
++              (GetFileAttributesA("C:\\ProgramData\\Starbite\\glzc") != INVALID_FILE_ATTRIBUTES ||
++               /* 0162: glzcnovsync alone = zero-copy with sync interval 0 (one flag file per A/B run) */
++               GetFileAttributesA("C:\\ProgramData\\Starbite\\glzcnovsync") != INVALID_FILE_ATTRIBUTES));
+       if (!mode)
+          zc_state("off");
+       ZLOG("SB_GL_PRESENT=%s: %s\n", p ? p : "(unset)", mode ? "zero-copy" : "GDI");
+-- 
+2.43.0
+
