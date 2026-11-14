@@ -2500,6 +2500,19 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   so one c000001d restarts the whole netsvcs host. The service list for sbxta v2 (user's decision) should then be
   WpnService, WpnUserService, PushToInstall, DiagTrack, OneSyncSvc, CDPUserSvc, UsoSvc, wuauserv.
 
+### 6.76 T65 read: the ARM64EC GD driver is ~7 % faster, no crash; user kit gd-kit-ec-0158
+
+- **One big-core boot, Stereo Madness, A B A2 B2** (test logging rate LiveSec 1, so all four run a bit lower than
+  T64's ~35 fps): steady 10 s windows x64 A 28.6 / A2 28.4 fps, ARM64EC B 30.5 / B2 30.7; gllows run x64 26.7 /
+  26.5 fps (1% low 13.7 / 15.2, > 100 ms 66 / 21), EC 28.8 / 29.3 (1% low 15.6 / 15.6, > 100 ms 29 / 30). Interval
+  ~33 ms EC vs ~35 ms x64; copy ~17 ms both (uncached), ~5.5 ms GPU waits per frame both. GD up 5-10 s; no
+  exception in any GD log; the only Application crashes are the known winsqlite3 c000001d services.
+- **So the driver's own CPU was ~2 ms of the ~35 ms frame** after translation; the rest is the game (x64,
+  translated) and per-frame waits. Next levers: the per-frame blocking wait (1 submit + 1 wait per frame), the
+  present (7-9 ms in this boot), and the game's own translated CPU (XtaCache for the M3, 6.75).
+- **Kit:** `build/win/gd-kit-ec-0158/` (opengl32-gd.dll = EC bc64cc58, libgallium_wgl-gd.dll = EC bc2b9626) for
+  `tools/win/gd-kit-push.sh`; proposed as the user's GD driver in place of the x64 b3befb40/ed17e3b3.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
