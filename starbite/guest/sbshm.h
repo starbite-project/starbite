@@ -78,7 +78,9 @@
 #define SBSHM_SND_OFF       0x2C00000U          /* v3: sbsnd, PCM playback / capture (sbshm-snd.h), 1 MiB */
 #define SBSHM_CLIP_OFF      0x2D00000U          /* v3: struct sbshm_clip, the clipboard both ways, 256 KiB */
 #define SBSHM_NOTIF_OFF     0x2D40000U          /* v3: struct sbshm_notifs, notifications (guest writes), 64 KiB */
-#define SBSHM_V3_FREE_OFF   0x2D50000U          /* .. 0x4000000: free (reserved for zero-copy app buffers) */
+#define SBSHM_V3_FREE_OFF   0x2D50000U          /* .. 0x4000000: free; a surface larger than the space below the
+                                                 * v2 tables goes here (sbghost surf_base: 1080 x 2016, 2 x 8.7 MB) */
+#define SBSHM_V3_END        0x4000000U          /* 64 MiB: the end of the layout; a 128 MiB region's surfaces past it */
 
 #define SBSHM_MAGIC         0x31764d4853425353ULL   /* "SSBSHMv1" */
 #define SBSHM_VERSION       1U
