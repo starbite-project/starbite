@@ -6536,7 +6536,14 @@ static void sh_touch_(int phase, float x, float y, float t)
         case G_PAGE: {
             float dx = x - T.x0;
             tk_tracker_add(&T.tr, x, t);
-            if (!page_dir && dx * dx + dy * dy > 64) { page_dir = tk_fabsf(dx) > tk_fabsf(dy) ? 1 : 2; press_cancel(); }
+            if (!page_dir && dx * dx + dy * dy > 64) {
+                page_dir = tk_fabsf(dx) > tk_fabsf(dy) ? 1 : 2;
+                press_cancel();
+                /* 8q (the user, 8o: a swipe starting on an icon: "that icon doesn't move with the others and glitches"):
+                 * the pressed icon is an overlay at a fixed place; a page that starts moving drops it at once (iOS),
+                 * so the real icon moves with its page */
+                if (page_dir == 1) ico_free();
+            }
             if (page_dir == 1) {
                 page_dragging = 1;
                 float px = T.base + dx;
@@ -6797,8 +6804,9 @@ int sh_tick(float dt, float t)
     mv |= sysp_tick(dt);                          /* 8a: the Systems platter folding / fanning */
     mv |= cc_fill_tick();                         /* 8c: a pulled Control Centre's rest */
     if (EP.goal >= 0 && (EP.post & EP_APPS2) && (T.kind == G_PAGE || sp_page.live || page_x < -1)) {
-        /* 8b: page 2 being part-made while the pages move: two parts a frame (~10 ms each on the phone) */
-        for (int i = 0; i < 2 && (EP.post & EP_APPS2); i++) if (!home_apps2_step()) EP.post &= ~EP_APPS2;
+        /* 8b: page 2 being part-made while the pages move; 8q (the user, 8o: "home page swipe is laggy"): one part a
+         * frame (~10 ms on the phone; two were ~20 ms on top of the frame's own work) */
+        if (!home_apps2_step()) EP.post &= ~EP_APPS2;
         relink();
         mv = 1;
     }

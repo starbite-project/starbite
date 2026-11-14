@@ -291,7 +291,9 @@ static void lx_page3_update(void)
         if (!dup) LH.cat[LH.n++] = i;
     }
     if (lx_ic_slot >= 0 && !is_app("linux")) lx_ic_slot = -1;   /* (an open app keeps its icon) */
-    if (!lx_p3_seen()) {                         /* not in view: its icons in idle turns, then the page (lx_idle) */
+    /* 8q (the user, 8o: "home page swipe is laggy"): in view too, a page already drawn stays while the new icons are
+     * made one per idle turn (it was every icon in one turn: up to 19, e.g. when Linux's list replaced the kept one) */
+    if (!lx_p3_seen() || hparts[5].bmp.px) {     /* not in view: its icons in idle turns, then the page (lx_idle) */
         lx_p3_want = 1;
         return;
     }
@@ -304,7 +306,7 @@ static int lx_idle(void)
 {
     if (!lx_idle_pending()) return 0;
     if (!(lx_p3_want && lx_baked)) { lxk_step(); return 1; }   /* 8q: keeping Linux's list (page 3's icons first) */
-    if (lx_p3_seen()) { lx_build_page3(); relink(); return 1; }   /* in view now: the rest at once, as before */
+    if (lx_p3_seen() && !hparts[5].bmp.px) { lx_build_page3(); relink(); return 1; }   /* in view, nothing drawn yet: at once */
     int px = (int)(PT(ICON_PT) + .5f);
     if (!store_ic.px) { lx_make_store_icon(&store_ic, px); return 1; }
     for (int s = 0; s < LH.n; s++) {
