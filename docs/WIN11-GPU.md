@@ -2626,6 +2626,27 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   `touch.sh steam OUT` (RunOnce StarbiteSteamOn re-adds `"...\steam.exe" -silent` to the user's Run key); the
   lasting fix is the M3 translation cache (6.75: XtaCache needs its folder).
 
+### 6.83 The hung touch reads' cause: the HSI2C interrupt handler clears bits it never processes (sbhsi2c-1)
+
+- **Source:** ref/exynos9810-woa/drivers/Exynos9810Hsi2c (MS-PL; the installed driver's source per its README),
+  copied to `starbite/win/sbhsi2c/`. HSI2C10 serves only the touchscreen (ACPI\SAMS9810).
+- **The bug:** `OnInterruptIsr` reads `INT_STATUS & mask` into `interruptStatus`, disables interrupts, then calls
+  `ControllerAcknowledgeInterrupts`, which **reads INT_STATUS again** and writes back (clears) everything set by then;
+  only the first read is ORed into `device->InterruptStatus` for the DPC. A bit that arrives between the two reads is
+  cleared and lost. In a touch read (1-byte write + 8-byte read) the DPC drains the FIFO on RX_ALMOST_FULL and then
+  waits for TRANSFER_DONE (`ControllerProcessInterrupts`); a TRANSFER_DONE landing in that window is never seen, the
+  sequence never completes and the touch driver's timeout cancels it (I2cLastRequestStatus 0xC0000120 CANCELLED in
+  the user's session2 hive; the driver's own watchdog count 0). Timing-dependent, hence far more often on the M3s.
+- **Fix:** acknowledge exactly the captured bits (`ControllerAcknowledgeExact`, write-1-to-clear, no re-read); a later
+  bit stays pending and raises the interrupt again when the DPC re-enables it. Nothing else changed.
+- **Build:** `tools/win/build.sh kmdf` of driver/device/controller.cpp with SpbCx 1.0 headers + spbcxstubs.lib and WPP
+  stubbed (`sb_wpp_stub.h` + three `.tmh` stand-ins; the trace calls compile to nothing): `build/win/hsi2c-1/sbhsi2c.sys`
+  8489ac43 (build sbhsi2c-1), signed, 0 LSE words, imports ntoskrnl/HAL/WDFLDR (SpbCx binds through WDF).
+- **Install:** `touch.sh hsi2c OUT` = `tools/win/hive-imagepath.py` set Exynos9810Hsi2c -> sbhsi2c.sys (original in
+  Parameters\SbOrigImagePath; set/restore rehearsed on the user's session2 SYSTEM: restore leaves the key identical);
+  `touch.sh hsi2c-restore OUT`. Check boot PASS: a new DiagClock line, TouchD0Status 0, DiagSelf 200 reads per pass
+  (errors should drop to ~0 on both passes).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

@@ -26,6 +26,13 @@
 #                                    the next start and turns touch with it. Run it last (after check boot + restore).
 #   tools/win/touch.sh steam OUT     HKLM RunOnce StarbiteSteamOn -> steam-autostart-online.cmd: Steam back in the user's
 #                                    autostart (debloat-1 removed it; a cold Steam start on the big cores = 5+ min to GD).
+#   tools/win/touch.sh hsi2c OUT     the touch bus's controller driver (Exynos9810Hsi2c) -> sbhsi2c.sys (build/win/hsi2c-1):
+#                                    the same driver, but its interrupt handler acknowledges only the status bits it
+#                                    read (the original re-read INT_STATUS and cleared bits it never processed: a lost
+#                                    TRANSFER_DONE = a hung touch read). ImagePath switch (tools/win/hive-imagepath.py);
+#                                    the touch state before is saved to OUT/hsi2c-before.txt. Check boot PASS = a NEW
+#                                    DiagClock line (differs from hsi2c-before.txt), TouchD0Status 0, DiagSelf 200 reads.
+#   tools/win/touch.sh hsi2c-restore OUT   the DriverStore HSI2C driver again.
 #   tools/win/touch.sh show OUT      read-only: ImagePath and every Diag* value with the decoded trace.
 #
 # After apply, BEFORE anyone relies on touch, prove the driver loads with one unattended small-core boot:
@@ -35,11 +42,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
-mode=${1:?usage: touch.sh apply|update|orient|steam|restore|show OUT}
+mode=${1:?usage: touch.sh apply|update|hsi2c|hsi2c-restore|orient|steam|restore|show OUT}
 out=${2:?usage: touch.sh apply|update|restore|show OUT}
 DRV=$main/build/win/touch-1/s6touchdiag.sys
 DRV_SHA=070dad9aae60debcc2819b873dba92bec1f9a2b944fa70b09d9ec4b1738a61f0
 DRV3=$main/build/win/touch-3/s6touchdiag.sys
+HSI2C=$main/build/win/hsi2c-1/sbhsi2c.sys
+HSI2C_SHA=8489ac43bdef2ce7ee37b7fdb64bae58a7e9e74639c6da1126d740e0679fa9ec
+IP=tools/win/hive-imagepath.py
 DRV3_SHA=fa9f2a52c9fb0aa866cc7ba66e9f20548ad311d418cddac844531224efa7a2a2
 NTFS=/dev/block/sda27
 W=/tmp/wwin
@@ -67,6 +77,22 @@ show)
     adb pull "$W/$SYS" "$tmp/SYSTEM" >/dev/null
     python3 "$TD" "$tmp/SYSTEM" show | tee -a "$out/touch.log"
     adb shell "cat $W/ProgramData/Starbite/debloat/touch.log 2>/dev/null" | tr -d '\r' | tee -a "$out/touch.log"
+    exit 0 ;;
+hsi2c|hsi2c-restore)
+    adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null
+    adb pull "$W/$SYS" "$tmp/SYSTEM" >/dev/null
+    python3 "$HS" "$tmp/SYSTEM" check >> "$out/touch.log" 2>&1 || { log "the SYSTEM hive is dirty: run gpu-cycle.sh --clean-only first"; exit 3; }
+    cp "$tmp/SYSTEM" "$out/backup/SYSTEM-$mode-$(date +%Y%m%d-%H%M%S)"
+    if [ "$mode" = hsi2c ]; then
+        [ "$(shasum -a 256 "$HSI2C" | cut -c1-64)" = "$HSI2C_SHA" ] || { log "$HSI2C is not sbhsi2c-1 ($HSI2C_SHA)"; exit 1; }
+        python3 "$TD" "$tmp/SYSTEM" show > "$out/hsi2c-before.txt" 2>&1 || true
+        python3 "$IP" "$tmp/SYSTEM" "$tmp/S1" set Exynos9810Hsi2c '\SystemRoot\System32\drivers\sbhsi2c.sys' 2>&1 | tee -a "$out/touch.log"
+        push_check "$HSI2C" "$W/Windows/System32/drivers/sbhsi2c.sys"
+    else
+        python3 "$IP" "$tmp/SYSTEM" "$tmp/S1" restore Exynos9810Hsi2c 2>&1 | tee -a "$out/touch.log"
+    fi
+    push_check "$tmp/S1" "$W/$SYS"
+    log "$mode done. Next: the unattended check boot (touch depends on this bus: verify before anyone relies on touch)"
     exit 0 ;;
 steam)
     adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null

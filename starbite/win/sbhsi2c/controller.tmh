@@ -1,0 +1,2 @@
+/* WPP stand-in (Starbite build) */
+#include "sb_wpp_stub.h"
