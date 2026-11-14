@@ -24,7 +24,8 @@ for f in System.evtx Application.evtx "Microsoft-Windows-Diagnostics-Performance
 done
 for d in ReportArchive ReportQueue; do
     adb shell "ls -la --time-style=+%Y-%m-%dT%H:%M '$W/ProgramData/Microsoft/Windows/WER/$d' 2>/dev/null || ls -la '$W/ProgramData/Microsoft/Windows/WER/$d'" | tr -d '\r' > "$out/wer/$d.txt" 2>&1 || true
-    for r in $(grep -o -E '(AppCrash|AppHang)_(GeometryDash|steam|sihost|explorer|ShellExperienceHost|dwm|msedge)[^ ]*' "$out/wer/$d.txt" | tail -6); do
+    # the newest 3 per program (11-14: one tail over all of them let msedge's crowd out dwm's)
+    for r in $(for app in GeometryDash steam sihost explorer ShellExperienceHost dwm msedge; do grep -o -E "(AppCrash|AppHang)_${app}[^ ]*" "$out/wer/$d.txt" | tail -3; done); do
         adb pull "$W/ProgramData/Microsoft/Windows/WER/$d/$r/Report.wer" "$out/wer/$r.wer" >/dev/null 2>&1 || true
     done
 done
