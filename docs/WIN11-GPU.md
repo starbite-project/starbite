@@ -2589,6 +2589,20 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - The real fix of the cause is in the HSI2C controller driver (root-cause note: completion without waiting for the
   bus to go idle; re-poll INT_STATUS before re-enabling), not ours yet.
 
+### 6.81 Landscape the right way round by default (the user, 11-14)
+
+- **The user:** "i want windows to be in landscape and not landscape flipped by default".
+- **Where it lives:** Windows keeps the orientation per monitor in `Control\GraphicsDrivers\Configuration\<set>\00\00`
+  `Rotation` (D3DKMDT_VIDPN_PRESENT_PATH_ROTATION) and applies it at every start; sbwddm only offers all four
+  (Parameters\Rotation 1). The user's hive (11-14 session): our panel's set `NOEDID_42525453_32373030_...` has
+  Rotation **2** (90) = what the user calls landscape flipped; sbwddm State\Rotation 2 agrees. The other landscape
+  is **4** (270). (The MSNIL* set is Basic Display's, portrait, left alone.)
+- **`tools/win/hive-orientation.py IN show | IN OUT set N`:** sets Rotation in every saved path target of our panel;
+  rehearsed on the user's SYSTEM copy: only that value changes. **`touch.sh orient OUT 4`** applies it from TWRP
+  (backup, clean-hive check, read-back); run last, after the touch-3 check boot and restore.
+- Touch follows: Windows turns the digitizer's coordinates with the display orientation (as it does now at 90).
+  If the user ever picks another orientation in Settings, Windows saves that instead (their choice wins).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

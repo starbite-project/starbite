@@ -21,6 +21,9 @@
 #                                    read freezes the finger ~25 ms, not ~265 ms, before the retry). Refused unless the
 #                                    service already points at s6touchdiag.sys. Check boot as after apply.
 #   tools/win/touch.sh update OUT 2  the same, back to the touchdiag-2 file.
+#   tools/win/touch.sh orient OUT N  the panel's saved Windows orientation (tools/win/hive-orientation.py): 4 = landscape
+#                                    as the user holds it, 2 = landscape (flipped), 1 = portrait. Windows applies it at
+#                                    the next start and turns touch with it. Run it last (after check boot + restore).
 #   tools/win/touch.sh show OUT      read-only: ImagePath and every Diag* value with the decoded trace.
 #
 # After apply, BEFORE anyone relies on touch, prove the driver loads with one unattended small-core boot:
@@ -30,7 +33,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
-mode=${1:?usage: touch.sh apply|update|restore|show OUT}
+mode=${1:?usage: touch.sh apply|update|orient|restore|show OUT}
 out=${2:?usage: touch.sh apply|update|restore|show OUT}
 DRV=$main/build/win/touch-1/s6touchdiag.sys
 DRV_SHA=070dad9aae60debcc2819b873dba92bec1f9a2b944fa70b09d9ec4b1738a61f0
@@ -62,6 +65,16 @@ show)
     adb pull "$W/$SYS" "$tmp/SYSTEM" >/dev/null
     python3 "$TD" "$tmp/SYSTEM" show | tee -a "$out/touch.log"
     adb shell "cat $W/ProgramData/Starbite/debloat/touch.log 2>/dev/null" | tr -d '\r' | tee -a "$out/touch.log"
+    exit 0 ;;
+orient)
+    case ${3:-} in 1|2|3|4) ;; *) log "orient: N must be 1-4"; exit 1 ;; esac
+    adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null
+    adb pull "$W/$SYS" "$tmp/SYSTEM" >/dev/null
+    python3 "$HS" "$tmp/SYSTEM" check >> "$out/touch.log" 2>&1 || { log "the SYSTEM hive is dirty: run gpu-cycle.sh --clean-only first"; exit 3; }
+    cp "$tmp/SYSTEM" "$out/backup/SYSTEM-orient-$(date +%Y%m%d-%H%M%S)"
+    python3 tools/win/hive-orientation.py "$tmp/SYSTEM" "$tmp/S1" set "$3" 2>&1 | tee -a "$out/touch.log"
+    push_check "$tmp/S1" "$W/$SYS"
+    log "orient done: saved orientation $3 (applies at the next Windows start)"
     exit 0 ;;
 update)
     if [ "${3:-3}" = 2 ]; then DRV3=$DRV; DRV3_SHA=$DRV_SHA; fi
