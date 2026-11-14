@@ -202,10 +202,13 @@ static int send_level(int level);
 /* what the panel shows for the user's level: the panel's top while boosted (5: AOR 00 0C, the vendor's UI maximum,
  * 400 nits, the shortest emission-off time Samsung's driver ever sends; not HBM); at most Mid (2) in Emergency Mode
  * ("Boot" is S-Boot's normal, brighter than Mid) */
+static int dimmed;                         /* 8q: the idle dim before Auto-Lock (panel_dim) */
 static int effective(int level)
 {
     if (boost)
         return 5;
+    if (dimmed)
+        return 1;                           /* the lowest of the user's levels */
     if (em && (level == 0 || level > 2))
         return 2;
     return level;
@@ -447,6 +450,19 @@ int panel_brightness(int level)
         return 0;
     }
     return 1;
+}
+
+/* 8q (the user, 8o: dimming "feels wrong or too eager"; iOS's): the screen dims a few seconds before Auto-Lock and a
+ * touch brings the user's level back (services.c, main.c); never saved as the user's level */
+void panel_dim(int on)
+{
+    on = !!on;
+    if (on == dimmed)
+        return;
+    dimmed = on;
+    int eff = effective(panel_bright_level);
+    if (eff != applied && !(eff == 0 && applied < 0))
+        (void)send_level(eff);
 }
 
 /* SOS and Extreme: the panel's top level while either runs, the user's level after (never saved as the user's) */

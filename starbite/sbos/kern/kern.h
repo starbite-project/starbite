@@ -436,6 +436,8 @@ int panel_blank(int on);           /* Track A: the in-call proximity: display of
 unsigned panel_dcs_failures(void);
 extern int panel_bright_level;
 int panel_brightness(int level);    /* the user's level: 0 untouched, 1..4 low..high: 1 done */
+void panel_dim(int on);             /* 8q: the idle dim before Auto-Lock: the lowest level while on */
+int power_undim(void);              /* 8q: a touch on the dimmed screen: brightness back, 1 = the touch only woke it */
 void panel_boost(int who, int on);  /* 1 Extreme, 2 SOS: the top level while any asks */
 void panel_emergency(int on);       /* 0.6.1: Emergency Mode's power profile */
 int panel_lpm(int on);              /* 0.6.5: the panel's low-power mode (ALPM 10 nits); 1 done */

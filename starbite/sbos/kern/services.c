@@ -576,12 +576,17 @@ void power_heater_took_clocks(void)
 int pocket_lock;
 
 static void arm_screen_off(void);           /* Track A (below) */
+static int idle_dimmed;                     /* 8q: dimmed before Auto-Lock (see arm_screen_off) */
 static void screen(int on)
 {
     if (K.screen_on == on)
         return;
     pocket_lock = 0;
     K.screen_on = on;
+    if (on && idle_dimmed) {
+        idle_dimmed = 0;                    /* 8q: woken at the user's level */
+        panel_dim(0);
+    }
     int aod = !on && em_aod && look_emergency && !sos_active();
     if (on && panel_in_lpm) {
         (void)panel_lpm(0);                 /* 0.6.5: out of the dim clock first */
@@ -621,11 +626,20 @@ static void screen(int on)
         app_event_send(a, EV_APP_POWER, 0, on);
 }
 
+/* 8q (the user, 8o: dimming "feels wrong or too eager"; iOS's): DIM_LEAD_MS before Auto-Lock the screen dims (the
+ * lowest level); a touch then only brings the brightness back (main.c drops that touch) and Auto-Lock starts again.
+ * An Auto-Lock shorter than the lead plus 5 s has no dim (the whole time stays bright). */
+#define DIM_LEAD_MS 8000U
 /* Track A: the screen-off timer from now (Auto-Lock); 0 = Never: none */
 static void arm_screen_off(void)
 {
+    if (idle_dimmed) {
+        idle_dimmed = 0;
+        panel_dim(0);
+    }
+    uint32_t ms = K.screen_off_s * 1000U;
     if (K.screen_off_s)
-        kt_set(KT_POWER, 1, sb_ms(), K.screen_off_s * 1000U, 0);
+        kt_set(KT_POWER, 1, sb_ms(), ms >= DIM_LEAD_MS + 5000U ? ms - DIM_LEAD_MS : ms, 0);
     else
         kt_cancel(KT_POWER, 1);
 }
@@ -634,6 +648,15 @@ void power_input(void)
 {
     if (K.screen_on)
         arm_screen_off();
+}
+
+int power_undim(void)
+{
+    if (!idle_dimmed || !K.screen_on)
+        return 0;
+    arm_screen_off();                       /* the brightness back, Auto-Lock from now */
+    sb_log("power: a touch on the dimmed screen: brightness back (the touch only wakes it)");
+    return 1;
 }
 
 void power_key_short(void)
@@ -746,6 +769,12 @@ void power_timer(unsigned id)
             sb_log("power: heating: the screen stays on; touch locked until Power");
         }
         kt_set(KT_POWER, 1, sb_ms(), 5000, 0);
+        return;
+    }
+    if (!idle_dimmed && K.screen_off_s * 1000U >= DIM_LEAD_MS + 5000U) {
+        idle_dimmed = 1;                            /* 8q: dimmed first; Auto-Lock DIM_LEAD_MS later */
+        panel_dim(1);
+        kt_set(KT_POWER, 1, sb_ms(), DIM_LEAD_MS, 0);
         return;
     }
     if (kui_sleep_hook && kui_sleep_hook(0))

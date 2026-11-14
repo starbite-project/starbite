@@ -133,6 +133,18 @@ static void handle_input(void)
         }
         if (!K.screen_on || pocket_lock)
             continue;                       /* the screen is off, or touch locked: only the Power key counts */
+        /* 8q: a touch on the dimmed screen brings the brightness back and is not the UI's (iOS): dropped until lifted */
+        static int undim_touch;
+        if (e.id == 0 && e.type == KIN_PRESS && power_undim()) {
+            undim_touch = 1;
+            continue;
+        }
+        if (undim_touch && e.id == 0) {
+            if (e.type == KIN_RELEASE)
+                undim_touch = 0;
+            if (e.type == KIN_PRESS || e.type == KIN_MOVE || e.type == KIN_RELEASE)
+                continue;
+        }
         power_input();
         if (e.id != 0 && (e.type == KIN_PRESS || e.type == KIN_MOVE || e.type == KIN_RELEASE)) {
             if (kui_finger_hook)            /* 8a: a second (third...) finger: the UI's multi-touch, if it has one */
