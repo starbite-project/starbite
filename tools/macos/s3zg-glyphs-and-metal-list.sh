@@ -6,17 +6,27 @@
 # 1.4 GB until launchd's code could not be paged back in (S3zf panic at 423 s); (3) first remove the 512 MiB swap
 # file S3zf's kernel left on the root (0 blocks free: the first try's add failed "No space left on device"); the
 # S3zg payload (vm_compressor=2) does not swap.
-# Phone in TWRP.   tools/macos/s3zg-glyphs-and-metal-list.sh [IMG]
+# Phone in TWRP.   tools/macos/s3zg-glyphs-and-metal-list.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-I=${1:-build/macos15/s3zg/root-card2.img}
 T=tools/macos/card-root-meta-sync.py
+# Two cycles, never one: blocks freed by remove and taken again by add in the same image would not count as new
+# blocks, so the plan would carry only their non-zero 4 KiB blocks (as journal replays) and an all-zero block of the
+# new file would keep the swap file's old bytes on the card.
+I=build/macos15/s3zg/root-card-rm.img
 python3 $T pull "$I"
 python3 $T remove "$I" build/macos15/s3zg/remove.txt
+python3 $T plan "$I"
+python3 $T push "$I" --dry-run
+python3 $T push "$I"
+rm -f "$I" "$I".*
+I=build/macos15/s3zg/root-card-add.img
+python3 $T pull "$I"
 python3 $T add "$I" build/macos15/s3zg/src
 python3 $T plan "$I"
 python3 $T push "$I" --dry-run
 python3 $T push "$I"
+rm -f "$I" "$I".*
 NEW=$(shasum -a 256 tools/macos/metal/mtl2-clients.all | cut -d' ' -f1)
 F=/private/var/local/mtl2-clients
 python3 tools/macos/card-file-replace.py "$F" tools/macos/metal/mtl2-clients --expect-old "$NEW" --dry-run
