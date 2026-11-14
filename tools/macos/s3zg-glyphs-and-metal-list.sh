@@ -3,13 +3,16 @@
 # desktop build's size cap): without it AppKit's NSSearchFieldCell symbol-image dictionary gets a nil image and throws
 # (S3zf's 40-frame backtraces: Finder at its first menu/window, System Settings at launch); (2) put the original
 # mtl2-clients back (WindowServer only): S3ze's "*" fixed nothing and every app's GPU buffers pushed wired memory to
-# 1.4 GB until launchd's code could not be paged back in (S3zf panic at 423 s).
+# 1.4 GB until launchd's code could not be paged back in (S3zf panic at 423 s); (3) first remove the 512 MiB swap
+# file S3zf's kernel left on the root (0 blocks free: the first try's add failed "No space left on device"); the
+# S3zg payload (vm_compressor=2) does not swap.
 # Phone in TWRP.   tools/macos/s3zg-glyphs-and-metal-list.sh [IMG]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-I=${1:-build/macos15/s3zg/root-card.img}
+I=${1:-build/macos15/s3zg/root-card2.img}
 T=tools/macos/card-root-meta-sync.py
 python3 $T pull "$I"
+python3 $T remove "$I" build/macos15/s3zg/remove.txt
 python3 $T add "$I" build/macos15/s3zg/src
 python3 $T plan "$I"
 python3 $T push "$I" --dry-run
