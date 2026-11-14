@@ -747,12 +747,12 @@ void selftest_timer(unsigned id)
             ub_init(&u);
             ub_s(&u, "selftest: next: the turns of 100 ms or more:");
             for (unsigned i = 0; i < K.tl_n; i++) {
-                if (i == 6) {                   /* two lines of six: one would pass ub's 256 characters */
+                if (i && i % 3 == 0) {          /* lines of three (8v: with the pieces' names one would pass 256) */
                     sb_log(u.b);
                     ub_init(&u);
                     ub_s(&u, "selftest: next: ... and:");
                 }
-                ub_s(&u, i % 6 ? "; " : " ");
+                ub_s(&u, i % 3 ? "; " : " ");
                 ub_s(&u, K.tl_film[i] ? K.tl_film[i] : "(no film)");
                 ub_s(&u, " ");
                 ub_s(&u, K.tl_what[i] && K.tl_what[i][0] == 't' ? "t" : K.tl_what[i] ? K.tl_what[i] : "-");
@@ -764,6 +764,13 @@ void selftest_timer(unsigned id)
                 ub_s(&u, " ");
                 ub_dec(&u, K.tl_ms[i]);
                 if (K.tl_film[i]) { ub_s(&u, "@+"); ub_dec(&u, K.tl_at[i]); }   /* 8f: when, in the film */
+                if (K.tl_piece[i]) {           /* 8v: its slowest named piece (the ring drops the piece's own line) */
+                    ub_s(&u, " (");
+                    ub_s(&u, K.tl_piece[i]);
+                    ub_s(&u, " ");
+                    ub_dec(&u, K.tl_piece_ms[i]);
+                    ub_s(&u, ")");
+                }
             }
             sb_log(u.b);
         }

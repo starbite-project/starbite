@@ -383,10 +383,14 @@ struct kstate {
     uint8_t tl_n, tl_owner[12], tl_id[12];
     uint16_t tl_ms[12], tl_at[12];  /* 8f: tl_at, ms since the film's start (sbos_film_t0) */
     const char *tl_film[12], *tl_what[12];
+    const char *tl_piece[12];       /* 8v: the turn's slowest named shell piece (sh_slow_piece), and its ms */
+    uint16_t tl_piece_ms[12];
     uint64_t deadman_t0;            /* the 10-minute return to the menu counts from here (the start; the self-test
                                      * image: the last input) */
 };
 extern struct kstate K;
+extern const char *k_turn_piece;    /* 8v: this loop turn's slowest named shell piece (kern_next's sh_slow_piece) */
+extern unsigned k_turn_piece_ms;
 extern int pocket_lock;             /* 0.6: heating with the screen kept on: touch and keys locked until Power */
 
 /* tasks */

@@ -110,6 +110,9 @@ static void dispatch_timer(unsigned owner, unsigned id)
     }
 }
 
+const char *k_turn_piece;                   /* 8v: (kern.h) */
+unsigned k_turn_piece_ms;
+
 static void handle_input(void)
 {
     struct kin e;
@@ -280,6 +283,8 @@ void sb_main(void)
         hw_irq_poll();
         unsigned owner, id;
         uint64_t now = sb_ms(), turn0 = now;
+        k_turn_piece = 0;                   /* 8v: the turn's slowest named shell piece, from here */
+        k_turn_piece_ms = 0;
         /* cp7 (Track B's finding: 490-670 ms turns in most self-test films, not the shell's): the slowest piece of a
          * turn, named in its log line (a timer's owner / id, input, the apps, the UI's draw) */
         uint64_t slow_ms = 0, t_p;
@@ -328,6 +333,8 @@ void sb_main(void)
                         K.tl_at[j_] = at_ > 65535 ? 65535 : (uint16_t)at_;
                     }
                     K.tl_what[j_] = slow_what;
+                    K.tl_piece[j_] = k_turn_piece;
+                    K.tl_piece_ms[j_] = k_turn_piece_ms > 65535 ? 65535 : (uint16_t)k_turn_piece_ms;
                     K.tl_owner[j_] = (uint8_t)slow_owner;
                     K.tl_id[j_] = (uint8_t)slow_id;
                 }

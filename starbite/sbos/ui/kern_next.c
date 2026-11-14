@@ -838,6 +838,10 @@ static void shell_time(const char *what, uint64_t t0)
  * phone, 3-4 ms on the Mac: which piece) */
 void sh_slow_piece(const char *what, unsigned us)
 {
+    if (us / 1000 > k_turn_piece_ms) {           /* 8v: the turn's slowest named piece (the turn list keeps it) */
+        k_turn_piece = what;
+        k_turn_piece_ms = us / 1000;
+    }
     if (us <= 20000) return;
     struct ub u;
     ub_init(&u);
