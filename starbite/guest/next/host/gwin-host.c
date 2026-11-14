@@ -118,7 +118,8 @@ const char *guest_stage(void) { return st == GUEST_STARTING ? gstage : ""; }
 int guest_stop(void) { if (st == GUEST_RUNNING || st == GUEST_STARTING) { st = GUEST_STOPPING; t_state = now_ms; } return 0; }
 int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED; }
 int hw_m3_on(void) { return guest_owns_m3(); }
-const char *guest_net_line(void) { return ""; }        /* 8l: no network check here (no data, no Wi-Fi) */
+const char *guest_net_line(void) { return ""; }
+const char *guest_gpu_line(void) { return "STARBITE-GPU: PASS (the harness)"; }        /* 8l: no network check here (no data, no Wi-Fi) */
 void guest_show(int on) { shown = on; drawn = 0; }
 void guest_keep(int on) { busy = on; }
 void guest_apps(int n) { if (n != apps_n) printf("[%6llu ms] fake guest: guest_apps(%d) (Linux kept while hidden: %s)\n", (unsigned long long)now_ms, n, n > 0 ? "yes" : "no"); apps_n = n; }

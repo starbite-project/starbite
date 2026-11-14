@@ -1015,7 +1015,7 @@ int gwin_selftest_step(void)
                 return gs_failed("the tap did not reach the guest's ring");
             gs_t = now;
             gs_typed = 0;
-            gs_phase = gs_net == 1 || gs_net == 2 ? 30 : 5;
+            gs_phase = gs_net == 1 || gs_net == 2 ? 30 : 40;
         } else if (dt > 15000) {
             gs_log("the marker: ", (uint64_t)guest_term_ok(), 1);
             gs_log("window frames since the typing: ", frames - gs_frames, 1);
@@ -1047,6 +1047,33 @@ int gwin_selftest_step(void)
         sb_logf(ok ? "selftest: next-linux: network: PASS: " : "selftest: next-linux: network: FAILED: ",
                 l[0] ? l : "no answer from the guest's shell within 70 s");
         guestnet_log();
+        gs_t = now;
+        gs_typed = 0;
+        gs_phase = 40;
+        return 0;
+    }
+    case 40:                               /* 8u: Track E's GPU check (sbgpu: Mesa's Panfrost through Starbite) */
+        if (st != GUEST_RUNNING)
+            return gs_failed("Linux stopped by itself");
+        if (dt < 1000)
+            return 0;
+        for (int i = 0; i < 4 && SBG_GPUCHECK_CMD[gs_typed]; ++i, ++gs_typed)
+            if (!sh_linux_char(SBG_GPUCHECK_CMD[gs_typed]))
+                return gs_failed("a character of the GPU check could not be typed");
+        if (!SBG_GPUCHECK_CMD[gs_typed]) {
+            gs_log("typed: Linux's GPU check (netcheck-cmd.h)", 0, 0);
+            gs_t = now;
+            gs_phase = 41;
+        }
+        return 0;
+    case 41: {                             /* its verdict line: up to 30 s */
+        if (st != GUEST_RUNNING)
+            return gs_failed("Linux stopped by itself");
+        const char *l = guest_gpu_line();
+        if (!l[0] && dt < 30000)
+            return 0;
+        sb_logf(sb_prefix(l, SBG_GPUCHECK_PASS) ? "selftest: next-linux: gpu: PASS: " : "selftest: next-linux: gpu: FAILED: ",
+                l[0] ? l : "no answer within 30 s (no sbgl-probe on this base, or the GPU wedged)");
         gs_t = now - 1000;                 /* (case 5's wait is over) */
         gs_phase = 5;
         return 0;

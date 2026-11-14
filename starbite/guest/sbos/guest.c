@@ -93,6 +93,7 @@ static int apps;                            /* v3: guest_apps: Linux apps with a
  * (the guest kernel of its own, a shell on fbcon in Terminus 16 x 32, 720 x 1060 at 2x above Starbite's keyboard) */
 static int mode = GUEST_APP, term_ok;
 static char net_line[160];                  /* 8l: the network check's "STARBITE-NET: ..." line (netcheck-cmd.h) */
+static char gpu_line[160];                  /* 8u: the GPU check's verdict ("STARBITE-GPU: PASS ..." / "... FAIL ...") */
 static const char *const names[3][3] __attribute__((unused)) = {
     {GUEST_STORE_IMAGE, GUEST_STORE_DTB, GUEST_STORE_RD},
     {GUEST_TERM_IMAGE, GUEST_TERM_DTB, GUEST_TERM_RD},
@@ -104,6 +105,7 @@ int guest_mode(void) { return mode; }
 int guest_scale(void) { return 2; }      /* (the terminal: a 16 x 32 font instead of 8 x 16 at 4x) */
 int guest_term_ok(void) { return term_ok; }
 const char *guest_net_line(void) { return net_line; }
+const char *guest_gpu_line(void) { return gpu_line; }
 void guest_full_next(void) { seq_blit = 0; full_pos = 0; }   /* the next blits copy every row (in pieces) */
 
 static void arm(uint32_t period)
@@ -284,6 +286,11 @@ static void guest_log(const char *l)
     for (const char *s = l; *s && !has_echo; ++s)
         if (sb_prefix(s, "STARBITE-NET: ")) {   /* 8l: the network check's result (not the command's echo) */
             sb_strcpy(net_line, sizeof net_line, s);
+            break;
+        }
+    for (const char *s = l; *s && !has_echo; ++s)
+        if (sb_prefix(s, "STARBITE-GPU: PASS") || sb_prefix(s, "STARBITE-GPU: FAIL")) {   /* 8u: the GPU check's verdict */
+            sb_strcpy(gpu_line, sizeof gpu_line, s);
             break;
         }
     for (const char *s = l; *s; ++s)
@@ -541,6 +548,7 @@ int guest_start_mode(int m)
     mode = m;
     term_ok = 0;
     net_line[0] = 0;
+    gpu_line[0] = 0;
     st = GUEST_STARTING;                    /* the big cores are the guest's from here (the heater refuses) */
     loading = 1;
     ls = LS_BEGIN;                          /* load_step: one step per tick, 2 ms apart (the UI draws between) */
