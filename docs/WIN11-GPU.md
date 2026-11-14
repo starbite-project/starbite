@@ -2790,6 +2790,13 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
     flip, 56.5 fps discard vs GDI 148.6; its window was already gone at shot time; "2 failed" = the known readback limit.
   - tracerpt did not decode DxgKrnl's event names (task numbers only); a manifest-based decoder is needed to read the
     traces further.
+- **But DWM crashed 4 times in T66's boot** (Application 1000, Windows clock UTC; T66 VIS ran 18:22-18:26):
+  18:22:43 and 18:23:57 dwmcore.dll **0x8898008D** at +0x16AB84 (during sbcomp hwnd = flip model, and dcsc), 18:25:19
+  dwmcore.dll c0000005 at +0xE5780 (sbglzc default = flip), 18:26:06 **d3d11.dll c0000005** at +0x59434 in dwm.exe (at
+  the end of sbglzc discard). The flip model's "black screen" is DWM crashing and restarting. So with 0159 the
+  blt path works but flip-model / composition swap chains (and possibly a blt chain's teardown) crash DWM:
+  **0159 is not for the user's install until that is understood.** WER reports AppCrash_dwm.exe_* are in
+  results-t66/ours/pre/wer (listing); their Report.wer / dumps are the next read.
 - **0161** (src-tc da894e7, `sb-patches/0161-wgl-zero-copy-default-discard.patch`): the GD ICD's zero-copy swap chain
   defaults to DISCARD (blt model, 1 buffer); `SB_GL_ZC_SWAP=flip|flipdiscard` remain. ARM64EC build `build/win/gd-zc-0161`
   (opengl32 35ec684e, libgallium_wgl 0997dd1b).
