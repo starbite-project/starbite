@@ -840,6 +840,30 @@ static void dband(void *a, int i)
 }
 /* the half canvas follows the rest frames (what changed, 2x2 averaged), so a motion frame only composes what moves
  * and layers that never move never need half copies: in idle time, or before the next motion frame */
+/* 8g (Track A, Track B's find for 8e's "cc t1/20 326"): several layers can share one bitmap (the Control Centre's 13
+ * module views all show the ~7 MB grid). Each was cleaned and occupancy-scanned whole, so a frame right after the grid
+ * was rebuilt did the same 7 MB thirteen times. A bitmap already flushed in this pass by a still-valid layer is now
+ * reused: its occupancy map copied, no second clean. The memo lives for one pass only (one compose, or one idle
+ * turn's flushes), which nothing draws during; gpu_frames isn't enough: idle turns share it, with drawing between */
+#define FLUSH_MEMO 16
+static struct { const uint32_t *px; int w, h, stride; tk_layer *l; } fmemo[FLUSH_MEMO];
+static int fmemo_n;
+static void flush_memo_reset(void) { fmemo_n = 0; }
+static tk_layer *flush_memo_find(const tk_layer *l)
+{
+    for (int i = 0; i < fmemo_n; i++) {
+        tk_layer *m = fmemo[i].l;
+        if (fmemo[i].px == l->bmp.px && fmemo[i].w == l->bmp.w && fmemo[i].h == l->bmp.h &&
+            fmemo[i].stride == l->bmp.stride && m != l && m->bmp.px == l->bmp.px && m->gpu_gen == m->gen + 1u)
+            return m;
+    }
+    return 0;
+}
+static void flush_memo_add(tk_layer *l)
+{
+    if (fmemo_n < FLUSH_MEMO)
+        fmemo[fmemo_n++] = (typeof(fmemo[0])){ l->bmp.px, l->bmp.w, l->bmp.h, l->bmp.stride, l };
+}
 /* v10: idle time on the GPU path: every layer in the tree (hidden ones too: the Control Centre, an app's window
  * before they show) cleaned out to DRAM and its block map made, at most 5 ms a turn, so the first frame that shows
  * or moves it does not (ff0d466: first frames of a gesture 31-41 ms of CPU for 5-8 ms of GPU) */
@@ -861,6 +885,7 @@ void tk_comp_idle(tk_comp *c)
 {
     if (c->gpu) {                               /* P4: the GPU draws whole frames: no half canvas to keep */
         gidle_more = 0;
+        flush_memo_reset();
         if (c->gpu_clean) gidle_tree(c, c->root, tk_us());
         return;
     }
@@ -1011,6 +1036,31 @@ static void gpu_flush_layer(tk_comp *c, tk_layer *l)
 }
 static void gpu_flush_layer_(tk_comp *c, tk_layer *l)
 {
+    if (l->bmp.px && !l->external) {
+        tk_layer *m = flush_memo_find(l);
+        if (m) {
+            l->gpu_occ_frame = c->gpu_frames;
+            l->gpu_occ_seen = 1;
+            l->gpu_occ_ok = 0;
+            if (m->gpu_occ_ok) {
+                uint32_t nb = m->gpu_occ_w * m->gpu_occ_h;
+                if (nb > l->gpu_occ_cap) {
+                    tk_free(l->gpu_occ);
+                    l->gpu_occ = tk_alloc(nb);
+                    l->gpu_occ_cap = l->gpu_occ ? nb : 0;
+                }
+                if (l->gpu_occ) {
+                    tk_memcpy(l->gpu_occ, m->gpu_occ, nb);
+                    l->gpu_occ_w = m->gpu_occ_w;
+                    l->gpu_occ_h = m->gpu_occ_h;
+                    l->gpu_occ_ok = 1;
+                }
+            }
+            if (l->glass.v) c->gpu_clean(c->gpu_ctx, l->glass.v, (uint64_t)l->glass.w * (uint64_t)l->glass.h);
+            l->gpu_gen = l->gen + 1u;
+            return;
+        }
+    }
     if (l->external) {                          /* 1.0: uncached memory another core writes: nothing to clean or map */
         l->gpu_occ_ok = 0;
         l->gpu_gen = l->gen + 1u;
@@ -1043,10 +1093,12 @@ static void gpu_flush_layer_(tk_comp *c, tk_layer *l)
     }
     if (l->glass.v) c->gpu_clean(c->gpu_ctx, l->glass.v, (uint64_t)l->glass.w * (uint64_t)l->glass.h);
     l->gpu_gen = l->gen + 1u;
+    if (l->bmp.px) flush_memo_add(l);
 }
 static int gpu_frame(tk_comp *c, const tk_irect *D, int nd)
 {
     int n = 0;
+    flush_memo_reset();
     if (c->ground_gen + 1u != c->gpu_ground && c->gpu_clean) {
         clean_job J1 = { c, &c->base_half }, J2 = { c, &c->bw_half };
         tk_par_rows(0, c->base_half.h, clean_rows, &J1);

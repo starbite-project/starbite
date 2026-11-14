@@ -8,6 +8,7 @@
 #include "sb.h"
 #include "sbui.h"
 #include "kern.h"
+#include "snd.h"
 #ifdef SB_HOST
 #include <stdlib.h>
 #endif
@@ -27,7 +28,8 @@ void next_kinit(void), next_kdraw(void), next_kevent(const void *e), next_ktimer
 #include "sdclk.h"
 
 struct kstate K;
-const char *sbos_film_now;          /* 8c+: the self test's current film (kern_next.c); 0 outside the films */
+const char *sbos_film_now;
+uint64_t sbos_film_t0;          /* 8c+: the self test's current film (kern_next.c); 0 outside the films */
 static uint64_t boot_ms;
 
 static void dispatch_timer(unsigned owner, unsigned id)
@@ -155,6 +157,11 @@ void next_input_now(void)
 void sbos_spsel1(void);
 #endif
 
+/* 8d (Track A, the drivers' go: run 13 "same data, fast path 23.25 MB/s (old 3.01 MB/s)", CRC-equal over 8 MiB of the
+ * store; run 14 a write through sd_write's wrapper verified): the card's fast reads on. Writes keep 6.25 MHz default
+ * speed (sd.c's wrapper); a card without High Speed gets S-Boot's divider back (6.25 MHz, as before) */
+#define SBOS_SD_FAST
+
 void sb_main(void)
 {
 #ifndef SB_HOST
@@ -175,6 +182,9 @@ void sb_main(void)
 #endif
     uint64_t t_entry = sb_ms();             /* the counter runs from power-on: S-Boot and the loader before this */
     kmodem_reserve();                       /* P3n: the modem's 2.25 MiB before the UI's heap takes the arena */
+#ifdef SBOS_KERNEL
+    snd_reserve();                          /* the drivers' sound: Calliope's files' 3 MiB RAM copy, same reason */
+#endif
     if (!ui_init())
         sb_crash_show(ui_init_why(), 0);
     uint64_t t_ui = sb_ms();
@@ -301,6 +311,10 @@ void sb_main(void)
                     unsigned j_ = K.tl_n++;
                     K.tl_ms[j_] = took > 65535 ? 65535 : (uint16_t)took;
                     K.tl_film[j_] = sbos_film_now;
+                    {
+                        uint64_t at_ = sbos_film_now && turn0 > sbos_film_t0 ? turn0 - sbos_film_t0 : 0;
+                        K.tl_at[j_] = at_ > 65535 ? 65535 : (uint16_t)at_;
+                    }
                     K.tl_what[j_] = slow_what;
                     K.tl_owner[j_] = (uint8_t)slow_owner;
                     K.tl_id[j_] = (uint8_t)slow_id;

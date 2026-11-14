@@ -92,6 +92,7 @@ static int apps;                            /* v3: guest_apps: Linux apps with a
 /* 1.2-alpha3: two guests from the same service: the app demo (the S9 Linux, 720 x 1440 at 2x) and the terminal
  * (the guest kernel of its own, a shell on fbcon in Terminus 16 x 32, 720 x 1060 at 2x above Starbite's keyboard) */
 static int mode = GUEST_APP, term_ok;
+static char net_line[160];                  /* 8l: the network check's "STARBITE-NET: ..." line (netcheck-cmd.h) */
 static const char *const names[3][3] __attribute__((unused)) = {
     {GUEST_STORE_IMAGE, GUEST_STORE_DTB, GUEST_STORE_RD},
     {GUEST_TERM_IMAGE, GUEST_TERM_DTB, GUEST_TERM_RD},
@@ -102,6 +103,7 @@ static unsigned surf_h(void) { return mode == GUEST_TERM ? GUEST_TERM_H : mode =
 int guest_mode(void) { return mode; }
 int guest_scale(void) { return 2; }      /* (the terminal: a 16 x 32 font instead of 8 x 16 at 4x) */
 int guest_term_ok(void) { return term_ok; }
+const char *guest_net_line(void) { return net_line; }
 void guest_full_next(void) { seq_blit = 0; full_pos = 0; }   /* the next blits copy every row (in pieces) */
 
 static void arm(uint32_t period)
@@ -238,6 +240,15 @@ static uint32_t bt_stamp(const char *l)     /* "[   12.345678] ..." -> 12345 + 1
         f *= 10U;
     return s * 1000U + f + 1U;
 }
+/* 8f (Track A): the HELLO lines kept, so the self test's end can log them again (the films push the boot's own
+ * lines out of the 16 KB pmsg ring: 8d's were lost) */
+static char keep_served[128], keep_bt[200];
+static void keep_line(char *d, unsigned cap, const char *s)
+{
+    unsigned i = 0;
+    for (; s[i] && i + 1 < cap; ++i) d[i] = s[i];
+    d[i] = 0;
+}
 static void bt_log(void)
 {
     struct ub u;
@@ -250,6 +261,7 @@ static void bt_log(void)
         else
             ub_s(&u, "-");
     }
+    keep_line(keep_bt, sizeof keep_bt, u.b);
     sb_log(u.b);
 }
 static void guest_log(const char *l)
@@ -258,8 +270,8 @@ static void guest_log(const char *l)
     for (int k = 0; bt && k < BT_N; ++k)
         if (!bt_ms[k] && bt_has(l, bt_key[k])) {
             bt_ms[k] = bt;
-            if (k == BT_SVC && st == GUEST_RUNNING)
-                bt_log();                   /* (the services after HELLO: the line again, now with them) */
+            if ((k == BT_SVC || k == BT_HELLO) && st == GUEST_RUNNING)
+                bt_log();                   /* (sbwl's HELLO line after the host's HELLO; the services after it) */
         }
     static const char *const keep[] = {"guestd", "sbguest", "guest-init", "panic", "Oops", "BUG", "Unable",
                                        "failed", "error", "smp: Brought up", "STARBITE"};
@@ -269,6 +281,11 @@ static void guest_log(const char *l)
     for (const char *s = l; *s && !has_echo; ++s)
         if (sb_prefix(s, "STARBITE-TERM-OK"))
             term_ok = 1;                    /* the typed command ran (its kmsg line, not the command's echo) */
+    for (const char *s = l; *s && !has_echo; ++s)
+        if (sb_prefix(s, "STARBITE-NET: ")) {   /* 8l: the network check's result (not the command's echo) */
+            sb_strcpy(net_line, sizeof net_line, s);
+            break;
+        }
     for (const char *s = l; *s; ++s)
         if (sb_prefix(s, "guest-init: desktop: overlay check: ")) {
             s += 36;                        /* initramfs/init's fsck_overlay: "started", then "e2fsck RC (...)" */
@@ -521,6 +538,7 @@ int guest_start_mode(int m)
     why = "";
     mode = m;
     term_ok = 0;
+    net_line[0] = 0;
     st = GUEST_STARTING;                    /* the big cores are the guest's from here (the heater refuses) */
     loading = 1;
     ls = LS_BEGIN;                          /* load_step: one step per tick, 2 ms apart (the UI draws between) */
@@ -900,9 +918,11 @@ void guest_timer(unsigned id)
             ub_dec(&u, bm_ticks[BM_DARK]);
             ub_s(&u, ", background (throttled) ");
             ub_dec(&u, bm_ticks[BM_BACKGROUND]);
+            keep_line(keep_served, sizeof keep_served, u.b);
             sb_log(u.b);
             gt_max = 0;
-            bt_log();
+            if (bt_ms[BT_HELLO])
+                bt_log();                   /* (else at sbwl's own HELLO line, which comes just after the message) */
         }
         arm(shown ? 10 : 50);
         if (shown)
@@ -1136,6 +1156,19 @@ static const char *start_note(void)
     return b;
 }
 static uint32_t cluster_off_ms(void) { return (uint32_t)sbg_stats()->t_off; }
+/* 8f: the self test's end: HELLO's time and the kept lines again */
+void guest_relog(void)
+{
+    const struct sbg_stats *s = sbg_stats();
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "selftest: next: Linux this run: HELLO after ");
+    ub_dec(&u, s->t_hello);
+    ub_s(&u, " ms (0: no HELLO)");
+    sb_log(u.b);
+    if (keep_served[0]) sb_log(keep_served);
+    if (keep_bt[0]) sb_log(keep_bt);
+}
 #else
 /* ============================ the host's fake guest (preview, host tests) ============================ */
 /* SBOS_HOST_GUEST=1: the three store files exist; =fail: they exist and the start fails. The fake starts in
@@ -1361,6 +1394,7 @@ static uint32_t touches_seen(void) { return st == GUEST_RUNNING ? (uint32_t)fake
 static uint32_t surf_seq(void) { return (uint32_t)fake_seq; }
 static const char *start_note(void) { return "HELLO after 400 ms, 4 CPUs (fake)"; }
 static uint32_t cluster_off_ms(void) { return 100; }
+void guest_relog(void) { }   /* 8f: the host has no boot to log again */
 static int hw_m3_on_fake(void) { return fake_m3; }
 #define hw_m3_on hw_m3_on_fake
 #endif

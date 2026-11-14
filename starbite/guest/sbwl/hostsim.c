@@ -555,6 +555,7 @@ static void run_line(char *l)
 		int i = app_find(a1), want = !strcmp(c, "expect_app");
 		result((i >= 0) == want, "%s %s in the catalog (index %d)", a1, want ? "listed" : "not listed", i);
 	} else if (!strcmp(c, "expect_icon")) {
+		(void)cat_read();                      /* (the icons come with a later catalog: instant start) */
 		int i = app_find(a1);
 		int ok = i >= 0 && catc.app[i].icon < SBSHM_ICONS_CAT;
 		int opaque = 0;

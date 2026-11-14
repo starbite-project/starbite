@@ -57,6 +57,8 @@ struct sd_report {
     uint8_t l31, l2;
     uint32_t gate[3], cmu_div, verid, hcon, clksel, clksel_was;
     uint64_t bus_hz, card_hz;
+    uint64_t write_hz;                          /* the card clock the last write ran at (sd_write), 0 none yet */
+    int write_hs;                               /* the card's mode at that write: 0 default speed, 1 high speed */
     uint32_t r7, ocr, rca, cid[4];
     int high_capacity;          /* SDHC/SDXC: block addressing */
     uint32_t last_rintsts, last_status;

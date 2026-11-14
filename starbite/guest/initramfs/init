@@ -97,6 +97,21 @@ if [ "$mode" = desktop ]; then
     mount -o move /dev /newroot/dev
     mount -o move /proc /newroot/proc
     mount -o move /sys /newroot/sys
+    # instant start (8c on the phone: 6.1 s from the root switch to sbinit's first line, its mount / rm / mkdir /
+    # chmod / date paged in from the card): what sbinit would do with the root's programs, done here with this
+    # initramfs's busybox (already in RAM); sbinit finds them done (its mnt_t reads /proc/mounts)
+    mkdir -p /newroot/dev/pts /newroot/dev/shm /newroot/run /newroot/tmp /newroot/var/tmp
+    mount -t devpts -o gid=5,mode=0620,ptmxmode=0666 devpts /newroot/dev/pts
+    mount -t tmpfs -o mode=1777,nosuid,nodev shm /newroot/dev/shm
+    mount -t tmpfs -o mode=0755,nosuid,nodev,size=32m run /newroot/run
+    mkdir -p /newroot/run/lock
+    rm -rf /newroot/tmp/* /newroot/tmp/.[!.]* 2>/dev/null     # (sbinit's own clean then finds it empty)
+    chmod 1777 /newroot/tmp /newroot/var/tmp
+    chmod 0622 /newroot/dev/kmsg
+    for a in $(cat /newroot/proc/cmdline); do
+        case "$a" in sbinit.epoch=*) date -u -s "@${a#sbinit.epoch=}" >/dev/null 2>&1 ;; esac
+    done
+    : > /newroot/run/sbinit.early            # (sbinit: all this is done)
     new=/sbin/sbinit
     [ -x /newroot$new ] || [ -L /newroot$new ] || new=/sbin/init
     echo "guest-init: desktop: root = base (sbblk0) + $upper upper$([ -d /newroot/repo ] && grep -q ' /newroot/repo ' /newroot/proc/mounts && echo ', /repo (sbblk2)'); switch_root to $new" > /newroot/dev/kmsg

@@ -21,6 +21,7 @@
 #include "shell.h"
 #include "../host/sbghost.h"
 #include "../../appstore/sbshm-store3.h"           /* Track F: store3 */
+#include "../netcheck-cmd.h"                       /* Track E: Linux's network check (8l) */
 
 #define SAME(a, b) ((int)(a) == (int)(b))          /* (two enums: gcc's -Wenum-compare) */
 _Static_assert(SAME(SH_LAPP_RUNNING, SBSHM_APP_RUNNING) && SAME(SH_LAPP_KEYBOARD, SBSHM_APP_KEYBOARD) &&
@@ -49,6 +50,8 @@ static int legacy;                         /* an L2 guest: no catalog */
 static int vp_rows = SH_LINUX_H, text_on, hold, busy;
 static uint64_t t_running;
 static int ext_reading;                    /* v3 + Track A: a front buffer handed to the shell's GPU layer */
+static const volatile uint32_t *ext_px;    /* that front buffer and its stride (px), for the self test's look */
+static unsigned ext_stride;
 #define CLIP_BYTES 8192U                   /* the shell's clipboard (shell_linux.inc LX_CLIP) */
 
 static void scopy(char *d, const volatile char *s, unsigned cap)
@@ -87,8 +90,10 @@ static int push_state(void)                /* 2: only the start's words changed 
         if (c && c[0])
             sh_linux_clip(c);
     }
-    if (s != GUEST_RUNNING)
+    if (s != GUEST_RUNNING) {
         ext_reading = 0;                   /* (the header is gone with the guest) */
+        ext_px = 0;
+    }
     if (last_state == GUEST_RUNNING && s != GUEST_RUNNING) {
         /* Linux went away: no app runs any more (the icons stay), nothing is in the surface */
         for (int i = 0; i < cat.n; i++)
@@ -296,6 +301,37 @@ int sh_linux_job(char *b, int cap)
 /* after each store snapshot: a package that was busy and is not any more ends with a notification (the Centre and a
  * banner: "Neovim Is Installed", "btop Couldn't Be Installed" + the guest's reason); the phone stays awake while any
  * job runs (not merely while the App Store is open) */
+/* 8j (Track A; the user, 8i: "installs still all fail", the reasons only in the overlay's /var/log/sbstore): each
+ * finished job in the pmsg, with the store's view of the repo, the network, the mirror and the overlay's room */
+static void job_log(const sh_lpkg_t *p, const char *what)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "gwin: store: ");
+    ub_s(&u, what);
+    ub_s(&u, " (");
+    ub_s(&u, p->pkg);
+    ub_s(&u, ", method ");
+    ub_dec(&u, p->method);
+    ub_s(&u, "; repo ");
+    ub_dec(&u, (uint64_t)(store.repo_ok != 0));
+    ub_s(&u, ", net ");
+    ub_dec(&u, store.net_ok);
+    ub_s(&u, " why ");
+    ub_dec(&u, store.net_why);
+    ub_s(&u, ", mirror ");
+    ub_dec(&u, store.mirror_ok);
+    ub_s(&u, ", overlay free MB ");
+    ub_dec(&u, store.overlay_free_kb / 1024U);
+    ub_s(&u, ")");
+    if (p->state == SH_PKG_FAILED) {
+        ub_s(&u, ": ");
+        ub_s(&u, p->err[0] ? p->err : "(no reason)");
+    }
+    sb_log(u.b);
+    if (p->state == SH_PKG_FAILED && p->hint[0])
+        sb_logf("gwin: store: what to do: ", p->hint);
+}
 static void jobs_update(void)
 {
     int any = 0;
@@ -319,6 +355,7 @@ static void jobs_update(void)
             const char *body = p->state == SH_PKG_FAILED ? (p->err[0] ? p->err : "See the App Store for details.") :
                                JP[k].state == SH_PKG_REMOVING ? "" : (p->flags & SH_PKG_INSTALLED) ? "Open it from the Linux page." : "";
             sh_notify("store", t, body, -1);
+            job_log(p, t);
             JP[k].pkg[0] = 0;               /* said once */
         }
     }
@@ -655,6 +692,8 @@ const uint32_t *sh_linux_front(int *stride_px)
     ext_reading = 1;
     frames++;
     *stride_px = (int)stride;
+    ext_px = px;                           /* (the self test reads the window from here on the zero-copy path) */
+    ext_stride = stride;
     return (const uint32_t *)(uintptr_t)px;
 }
 static int is_text(const char *mime)
@@ -771,6 +810,20 @@ int gwin_now(void)
 static int gs_phase, gs_typed;
 static uint64_t gs_t, gs_t0;
 static unsigned gs_frames;
+/* 8l (Track A; the user's 8i installs: Linux's network was never checked on the phone): mobile data up before Linux
+ * (unattended, as next-celltest), then Track E's network check typed after the first command: one plain-HTTP request
+ * through the NAT. Its verdict is its own line ("network: PASS / FAILED / skipped"); the linuxtest's result stays the
+ * window, the command, the tap and the stop. gs_net: 1 mobile data up, 2 Wi-Fi joined (8m: the saved network when
+ * mobile data can't come up, e.g. the SIM in another phone), -1 skipped (neither) */
+static int gs_net;
+static void gs_data_off(void)
+{
+    if (gs_net == 1)
+        (void)kmodem_selftest_data(0);
+    if (gs_net == 2)
+        (void)wifi_power(0);
+    gs_net = gs_net ? gs_net : -1;
+}
 
 static void gs_log(const char *what, uint64_t v, int with_v)
 {
@@ -788,12 +841,26 @@ static int gs_failed(const char *why)
     sb_logf("selftest: next-linux: why: ", why);
     if (guest_state() == GUEST_RUNNING || guest_state() == GUEST_STARTING)
         guest_stop();                      /* the cluster off before the restart (guest_power_off waits too) */
+    gs_data_off();
     gs_phase = 99;
     return -1;
 }
 /* rows of the window above the keyboard with anything other than its first pixel (the terminal's background) */
 static unsigned lit_rows(void)
 {
+    if (!win_rows && ext_px && ext_stride) {   /* 8d: the zero-copy path (no strips): the guest's front buffer, 1x */
+        uint32_t bg = ext_px[0] & 0xffffffU;
+        unsigned n = 0;
+        for (int y = 0; y < SH_LINUX_HKB; y += 2) {
+            const volatile uint32_t *r = ext_px + (size_t)y * ext_stride;
+            for (int x = 0; x < SH_LINUX_W; x++)
+                if ((r[x] & 0xffffffU) != bg) {
+                    n++;
+                    break;
+                }
+        }
+        return n;
+    }
     if (!win_rows)
         return 0;
     uint32_t bg = win_rows[0][0];
@@ -814,8 +881,52 @@ int gwin_selftest_step(void)
     uint64_t now = sb_ms(), dt = now - gs_t;
     int st = guest_state();
     switch (gs_phase) {
-    case 0:
-        gs_t0 = now;
+    case 0:                                /* 8l: mobile data first (Cellular refuses to start beside a running Linux) */
+        gs_t0 = gs_t = now;
+        if (kmodem_selftest_data(1) == 0) {
+            gs_phase = 20;
+            return 0;
+        }
+        gs_log("mobile data did not start: Wi-Fi for the network check", 0, 0);
+        gs_t = now;
+        gs_phase = 22;
+        return 0;
+    case 20: {
+        struct kcell c;
+        kmodem_cell(&c);
+        if (c.state == KCELL_DATA) {
+            gs_log("mobile data up for Linux's network check after ms ", dt, 1);
+            gs_net = 1;
+            gs_phase = 21;
+        } else if (c.state == KCELL_NO_SIM || c.state == KCELL_SIM_LOCKED || c.state == KCELL_FAILED || dt > 120000) {
+            gs_log(c.state == KCELL_NO_SIM ? "no SIM: Wi-Fi for the network check" :
+                   c.state == KCELL_SIM_LOCKED ? "the SIM is locked: Wi-Fi for the network check" :
+                   c.state == KCELL_FAILED ? "Cellular failed: Wi-Fi for the network check" :
+                   "no mobile data within 120 s: Wi-Fi for the network check", 0, 0);
+            (void)kmodem_selftest_data(0);
+            gs_t = now;
+            gs_phase = 22;
+        }
+        return 0;
+    }
+    case 22: {                             /* 8m: the saved Wi-Fi network instead (wifi_selftest_uplink logs why not) */
+        int r = wifi_selftest_uplink();
+        if (r == 0 && dt < 100000)
+            return 0;
+        if (r == 1) {
+            gs_log("Wi-Fi joined for Linux's network check after ms ", dt, 1);
+            gs_net = 2;
+        } else {
+            gs_log("network check skipped: neither mobile data nor Wi-Fi", 0, 0);
+            if (r == 0)
+                (void)wifi_power(0);
+            gs_net = -1;
+        }
+        gs_phase = 21;
+        return 0;
+    }
+    case 21:
+        gs_t = now;
         if (!guest_available_mode(GUEST_WL))
             return gs_failed("the Linux apps' files are not in the store (guest-wl.img / .dtb / -rd.img)");
         sh_set("app", "terminal", 1);      /* as a tap on the icon: app_open -> sh_linux_open(foot) */
@@ -828,7 +939,7 @@ int gwin_selftest_step(void)
     case 1:                                /* Linux up, foot launched, its first frame in the window */
         if (st == GUEST_FAILED)
             return gs_failed(guest_why());
-        if (st == GUEST_RUNNING && frames > 0 && win_rows) {
+        if (st == GUEST_RUNNING && frames > 0 && (win_rows || ext_px)) {   /* (8d: the zero-copy path has no strips) */
             gs_log("Linux running, the window's first frame after ms ", dt, 1);
             gs_log(legacy ? "an L2 guest (no catalog): foot by itself" : "foot from the catalog; apps in it: ",
                    (uint64_t)cat.n, !legacy);
@@ -882,7 +993,8 @@ int gwin_selftest_step(void)
             if (sbg_stats()->touches_sent - sent < 2)
                 return gs_failed("the tap did not reach the guest's ring");
             gs_t = now;
-            gs_phase = 5;
+            gs_typed = 0;
+            gs_phase = gs_net == 1 || gs_net == 2 ? 30 : 5;
         } else if (dt > 15000) {
             gs_log("the marker: ", (uint64_t)guest_term_ok(), 1);
             gs_log("window frames since the typing: ", frames - gs_frames, 1);
@@ -890,6 +1002,34 @@ int gwin_selftest_step(void)
                                                "STARBITE-TERM-OK did not reach the guest's log within 15 s");
         }
         return 0;
+    case 30:                               /* 8l: Track E's network check, typed as the first command */
+        if (st != GUEST_RUNNING)
+            return gs_failed("Linux stopped by itself");
+        if (dt < 1000)
+            return 0;                      /* (the tap's events first) */
+        for (int i = 0; i < 4 && SBG_NETCHECK_CMD[gs_typed]; ++i, ++gs_typed)
+            if (!sh_linux_char(SBG_NETCHECK_CMD[gs_typed]))
+                return gs_failed("a character of the network check could not be typed");
+        if (!SBG_NETCHECK_CMD[gs_typed]) {
+            gs_log("typed: Linux's network check (netcheck-cmd.h)", 0, 0);
+            gs_t = now;
+            gs_phase = 31;
+        }
+        return 0;
+    case 31: {                             /* its line in the guest's log: up to 30 s for the link + 20 s curl */
+        if (st != GUEST_RUNNING)
+            return gs_failed("Linux stopped by itself");
+        const char *l = guest_net_line();
+        if (!l[0] && dt < 70000)
+            return 0;
+        int ok = sb_prefix(l, SBG_NETCHECK_PASS1) || sb_prefix(l, SBG_NETCHECK_PASS2);
+        sb_logf(ok ? "selftest: next-linux: network: PASS: " : "selftest: next-linux: network: FAILED: ",
+                l[0] ? l : "no answer from the guest's shell within 70 s");
+        guestnet_log();
+        gs_t = now - 1000;                 /* (case 5's wait is over) */
+        gs_phase = 5;
+        return 0;
+    }
     case 5:                                /* the tap's events delivered, then the Terminal closed, Linux stopped */
         if (dt < 1000)
             return 0;
@@ -902,6 +1042,7 @@ int gwin_selftest_step(void)
         return 0;
     case 6:
         if (st == GUEST_OFF) {
+            gs_data_off();
             gs_log("off; M3 cluster powered: ", (uint64_t)hw_m3_on(), 1);
             if (hw_m3_on() || guest_owns_m3())
                 return gs_failed("the M3 cluster still powered after the stop");

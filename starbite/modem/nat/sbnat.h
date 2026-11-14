@@ -100,6 +100,7 @@ struct sbnat_map {          /* internal */
 struct sbnat {
     uint8_t uplink[4];
     uint8_t dns[4];
+    uint8_t kept[4];                /* the address the mappings were made for (0: none yet) */
     uint16_t port_lo, port_hi;
     uint32_t cursor;
     uint32_t used;
@@ -110,7 +111,9 @@ struct sbnat {
 void sbnat_init(struct sbnat *n, const struct sbnat_cfg *cfg);
 int sbnat_from_guest(struct sbnat *n, uint8_t *pkt, uint32_t len, uint64_t now_ms);
 int sbnat_from_uplink(struct sbnat *n, uint8_t *pkt, uint32_t len, uint64_t now_ms);
-/* new uplink address / DNS (dns may be 0): every mapping is dropped; old connections die, as on a phone */
+/* new uplink address / DNS (dns may be 0). A new address drops every mapping (old connections die, as on a phone).
+ * Losing the uplink (addr 0) keeps them, and the same address coming back resumes them: a Wi-Fi reconnect of a few
+ * seconds no longer kills the guest's downloads (Track A, 2026-11-14: the user's App Store installs stopping at ~50 %) */
 void sbnat_uplink_changed(struct sbnat *n, const uint8_t addr[4], const uint8_t dns[4]);
 void sbnat_tick(struct sbnat *n, uint64_t now_ms);
 /* number of live mappings at now_ms (expires stale ones) */

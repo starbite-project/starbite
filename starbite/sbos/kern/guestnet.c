@@ -56,6 +56,26 @@ static void gn_pick(void)
     sb_log(u.b);
 }
 
+void guestnet_log(void)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "guestnet: uplink ");
+    ub_s(&u, gn_up == SBSHM_NET_UPLINK_WIFI ? "Wi-Fi" : gn_up == SBSHM_NET_UPLINK_CELL ? "mobile data" : "none");
+    ub_s(&u, ", forwarded ");
+    ub_dec(&u, gn_tx);
+    ub_s(&u, " out (");
+    ub_dec(&u, gn_tx_fail);
+    ub_s(&u, " failed), ");
+    ub_dec(&u, gn_rx);
+    ub_s(&u, " in; NAT mappings ");
+    ub_dec(&u, gn_init ? sbnat_count(&gn, sb_ms()) : 0);
+    ub_s(&u, ", flushed ");
+    ub_dec(&u, gn.st.flushed);
+    ub_s(&u, ", no uplink drops ");
+    ub_dec(&u, gn.st.drop_no_uplink);
+    sb_log(u.b);
+}
 void guestnet_uplink(int which, struct sbnet *n)
 {
     if (which != SBSHM_NET_UPLINK_WIFI && which != SBSHM_NET_UPLINK_CELL)
@@ -127,5 +147,6 @@ void sbos_nat_from_guest(const uint8_t *pkt, unsigned len)
 #else
 void guestnet_uplink(int which, struct sbnet *n) { (void)which; (void)n; }
 void guestnet_guest_started(void) { }
+void guestnet_log(void) { sb_log("guestnet: not built (no guest contract v3)"); }
 int guestnet_rx(int which, const uint8_t *ip, uint32_t len) { (void)which; (void)ip; (void)len; return 0; }
 #endif

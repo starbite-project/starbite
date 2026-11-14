@@ -887,6 +887,8 @@ static int lx_icon_rect(const char *k, arect *r)
 /* own_strip: no page strips (the window, the App Store: own layers) */
 static int lx_strips(const char *k) { (void)k; return 0; }
 static void lx_page(dc *d) { (void)d; }
+/* app_build_step's strip frames (none of ours draws a strip): the App Store's heavy parts there (8h) */
+static void lx_prestep(int st) { st_prebuild(st); }
 /* own_extras */
 static void lx_build(void)
 {

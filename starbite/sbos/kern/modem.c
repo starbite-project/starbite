@@ -1382,6 +1382,19 @@ static void st_line(const char *a, uint64_t ms)
 
 static const char *au_words(int v) { return v == 1 ? "ok" : v == -1 ? "FAILED" : "not run"; }
 
+/* 8l (Track A): the linuxtest's Linux network check: mobile data on (unattended, as next-celltest: the user allows
+ * data with the SIM in; no SMS, no calls) before Linux starts, off at the end. Its state through kmodem_cell */
+int kmodem_selftest_data(int on)
+{
+    if (on) {
+        cell_selftest = 1;
+        sb_log("selftest: cell: Cellular on for Linux's network check (unattended data; no SMS, no calls)");
+        return kmodem_cellular(1);
+    }
+    int r = kmodem_cellular(0);
+    cell_selftest = 0;
+    return r;
+}
 void kmodem_selftest_abort(void)
 {
     if (!cell_selftest)
@@ -2010,6 +2023,7 @@ int kmodem_cellular(int on) { (void)on; return SBOS_EAGAIN; }
 int kmodem_netif(struct sbnet **net, struct sbtcp **tcp) { (void)net; (void)tcp; return 0; }
 void kmodem_cell(struct kcell *c) { memset(c, 0, sizeof(*c)); c->bars = -1; }
 int kmodem_selftest_phase(int *done) { *done = 1; return 1; }
+int kmodem_selftest_data(int on) { (void)on; return SBOS_EAGAIN; }
 void kmodem_selftest_abort(void) { }
 #endif
 

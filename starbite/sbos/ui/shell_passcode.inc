@@ -122,14 +122,22 @@ static void pc_draw_keys(void)
     trim(&pckeys);                                 /* what it holds only (the heap) */
     tk_layer_prepare(&pckeys);
 }
+static int pc_bot_press;                        /* 8e (Track A): the word held: 1 Emergency, 2 Cancel / Delete (iOS dims it) */
+static int pc_bot_at(float x, float y)
+{
+    if (y < PC_BOT - 34 || y >= PC_BOT + 20) return 0;
+    if (x < 150 && (PC.purpose == PCP_UNLOCK || PC.purpose == PCP_LAUNCH)) return 1;
+    return x >= 270 ? 2 : 0;
+}
 static void pc_draw_bot(void)
 {
     relayer(&pcbot);
     dc d = mk(&pcbot, "pc-bot", 20, PC_BOT - 24, 350, 34, 0, 0);
     if (!d.b->px) return;
-    if (PC.purpose == PCP_UNLOCK || PC.purpose == PCP_LAUNCH) d_text(&d, TK_IT400, 17, 44, PC_BOT, "Emergency", 0, 0, W(1), 0);
+    if (PC.purpose == PCP_UNLOCK || PC.purpose == PCP_LAUNCH)
+        d_text(&d, TK_IT400, 17, 44, PC_BOT, "Emergency", 0, 0, W(pc_bot_press == 1 ? .35f : 1), 0);
     const char *r = PC.n && PC.mode != PCM_WAIT ? "Delete" : "Cancel";
-    d_text(&d, TK_IT400, 17, 346 - tw(TK_IT400, 17, r, 0, 0), PC_BOT, r, 0, 0, W(1), 0);
+    d_text(&d, TK_IT400, 17, 346 - tw(TK_IT400, 17, r, 0, 0), PC_BOT, r, 0, 0, W(pc_bot_press == 2 ? .35f : 1), 0);
     trim(&pcbot);                                 /* what it holds only (the heap) */
     tk_layer_prepare(&pcbot);
 }
@@ -422,13 +430,18 @@ static int pc_touch(int phase, float x, float y, float t)
             pchl.hidden = 0;
             pc_digit(PC.key);                        /* iOS: the digit at the touch, the light while held */
             pc_hl_left = .12f;                       /* cp6: a quick tap still shows its light (0.12 s at least) */
+        } else if ((pc_bot_press = pc_bot_at(x, y)) != 0) {
+            pc_draw_bot();                           /* 8e: the word dims at the touch, as on iOS */
+            pc_kids();
         }
         return 1;
     }
     if (phase == 1) {
         if (PC.key >= 0 && pc_key_at(x, y) != PC.key) { pchl.hidden = 1; pc_hl_left = 0; }
+        if (pc_bot_press && pc_bot_at(x, y) != pc_bot_press) { pc_bot_press = 0; pc_draw_bot(); pc_kids(); }
         return 1;
     }
+    if (pc_bot_press) { pc_bot_press = 0; pc_draw_bot(); pc_kids(); }   /* 8e: back to full white on the lift */
     if (pc_hl_left <= 0) pchl.hidden = 1;          /* cp6: else pc_tick turns it off when its time is up */
     int was = PC.key;
     PC.key = -1;

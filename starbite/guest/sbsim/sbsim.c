@@ -23,6 +23,12 @@
 #include <stdint.h>
 #include "../sbshm.h"
 #include "../host/sbghost.h"
+#include "../netcheck-cmd.h"
+#ifdef SBSIM_TERM_NET
+#define SBSIM_TERM_WAIT_MS 60000U           /* the network check: up to 30 s for the link, 20 s for curl */
+#else
+#define SBSIM_TERM_WAIT_MS 20000U
+#endif          /* SBSIM_TERM_NET: the linuxtest's network check */
 
 #define UART      0x09000000UL
 #define GICD      SBG_QEMU_GICD
@@ -265,6 +271,15 @@ static int blk_io(uint32_t dev, uint32_t op, uint64_t sector, uint32_t count, vo
         return -SBG_ENODEV;
     if (op == SBG_BLK_FLUSH)
         return 0;
+#ifdef SBSIM_CARD_US_PER_SECTOR
+    /* the phone's card as it is today (~2.9 MB/s: 176 us a sector, -DSBSIM_CARD_US_PER_SECTOR=176): each request
+     * takes as long as it would there, on the host's CPU, one at a time (the card is serial) */
+    {
+        uint64_t end = cnt() + (uint64_t)count * SBSIM_CARD_US_PER_SECTOR * frq / 1000000U;
+        while (cnt() < end)
+            ;
+    }
+#endif
     uint64_t sk[2] = {(uint64_t)blk_fd[dev], sector * 512U};
     if (sbsim_semi(0x0a, sk))                                           /* SYS_SEEK */
         return -SBG_EIO;
@@ -562,6 +577,12 @@ static int run_guest(unsigned run)
         irq_poll();
         uint64_t t = now_ms();
         own_check(t);
+#ifdef SBSIM_DB_MISROUTE
+        /* 8e (Track E): the phone's slow boots, as if the host's doorbell to the guest were lost: its line routed to
+         * this CPU (ITARGETSR byte), so only sbguest.ko's timer finds the completions */
+        if (mf->db_guest)
+            *(volatile uint8_t *)(uintptr_t)(GICD + 0x800 + mf->db_guest) = 1;
+#endif
 #ifdef SBSIM_PUMP
         /* cp7m: Starbite OS's GPU-wait hook (guest_pump -> sbg_pump, one block read <= 64 KiB per call) every 2 ms,
          * the full poll only every 40 ms (a long frame's turn): the block service mostly through the pump */
@@ -641,6 +662,10 @@ static int run_guest(unsigned run)
                                       "|PageTables|Mapped' /proc/meminfo | while read l; do echo \"MEM$1 $l\" > /dev/kmsg;"
                                       " done; }; m 0; (gnome-calculator >/dev/null 2>&1 &); sleep 9; m 1; "
                                       "echo STARBITE-TERM-OK > /dev/kmsg\n";
+#elif defined(SBSIM_TERM_NET)
+            /* Track E: the linuxtest's network check (../netcheck-cmd.h); sim_net answers DNS but no TCP, so the
+             * expected line here is "curl 7" or "curl 28" with link 1 (the FAIL path); a VM chroot gives the PASS */
+            static const char cmd[] = SBG_NETCHECK_CMD;
 #else
             static const char cmd[] = "echo STARBITE-TERM-OK > /dev/kmsg\n";
 #endif
@@ -740,7 +765,7 @@ static int run_guest(unsigned run)
                 puts_("sbsim: thawed ");
                 putu(t - t_touch);
                 puts_(" ms after the ask (CPUs back)\n");
-                if (frz_quiet <= 2)
+                if (frz_quiet <= 8)                 /* (the kernel answering a packet from the doorbell: no thaw) */
                     frz_ok++;
                 if (++frz_cycles < 2) {
                     tstep = 10;
@@ -768,8 +793,8 @@ static int run_guest(unsigned run)
                 damage_bad = 1;
                 tstep = 5;
                 sbg_stop();
-            } else if (tstep == 2 && t - t_touch > 20000) {
-                puts_("sbsim: no STARBITE-TERM-OK from the guest's shell in 20 s\n");
+            } else if (tstep == 2 && t - t_touch > SBSIM_TERM_WAIT_MS) {
+                puts_("sbsim: no STARBITE-TERM-OK from the guest's shell in time\n");
                 tstep = 5;
                 sbg_stop();
             }

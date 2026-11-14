@@ -186,6 +186,7 @@ extern const uint8_t sbtk_pack_start[], sbtk_pack_end[];
 static tk_comp comp;
 static int ready, baking, need_full, ticking, boosted;
 static uint64_t bd_us_frame;                /* (the frame log reads it before its definition below: a tentative one here) */
+static uint32_t cache_us_frame;             /* 8f: the same (its definition below) */
 static uint64_t last_tick, boot_t0;
 /* the frame statistics of the current gesture (logged per film in the self test, per gesture otherwise) */
 static struct { uint32_t n, nhalf, over16, maxus, nboost, nwait; uint64_t sumus, sumwait; uint32_t hist[64]; uint8_t ms[120];
@@ -658,6 +659,8 @@ static void stats_add(void)
             ub_dec(&u, tu);
             ub_s(&u, " run ");
             ub_dec(&u, tr);
+            ub_s(&u, " cache ");                    /* 8f: a bottom-cache compose in this frame (0 none) */
+            ub_dec(&u, cache_us_frame);
             ub_s(&u, ")");
         }
         sb_log(u.b);
@@ -1057,7 +1060,10 @@ static const tk_gpu_item *live_backdrops(const tk_gpu_item *it, int n, const tk_
         }
     if (!any) return it;
     tk_memcpy(lq, it, sizeof(tk_gpu_item) * (size_t)n);
-    int remade = 0, budget = comp.gpu_half ? 1 : GPUCOMP_LEVELS;   /* a big move's frame: one level a frame */
+    /* a big move's frame: one level a frame. 8f (Track A, 8c2's split: a full-resolution motion frame's backdrops
+     * took ~4.8 ms of its ~17-25, the GPU's run ~11.4): any frame while something moves, too; the glass over moving
+     * content catches up a level a frame, all of it at rest */
+    int remade = 0, budget = comp.gpu_half || sh_moving() ? 1 : GPUCOMP_LEVELS;
     for (int L = 0; L < nl; L++) {
         int p = lv[L];
         int same = lv_ok[L] && lvn[L] == p && !remade;
@@ -1117,9 +1123,11 @@ static const tk_gpu_item *live_backdrops(const tk_gpu_item *it, int n, const tk_
 
 static int next_gpu_(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us);
 static uint64_t bd_us_frame;               /* 1.0: this frame's live backdrops (the frame log) */
+static uint32_t cache_us_frame;            /* 8f: this frame's bottom-cache compose, if one ran (the frame log) */
 static int next_gpu(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, const tk_irect *dmg, int ndmg, uint64_t *us)
 {
     uint64_t t = sb_us();
+    cache_us_frame = 0;
     int r = next_gpu_(ctx, dst, it, n, dmg, ndmg, us);
     comp.us_platform = sb_us() - t;
     return r;
@@ -1146,9 +1154,13 @@ static int next_gpu_(void *ctx, uint32_t *dst, const tk_gpu_item *it, int n, con
         /* a longer still prefix than the cache holds, still for two frames: the cache again (all of it, at most
          * n - 1 items: the top one is usually what moves) */
         int want = p < n ? p : n - 1;
-        if (stable_k >= 2 && want >= 1 && (!valid || want > cache_n)) {
-            uint64_t u2 = 0;
-            if (gpucomp_compose(cache, 0xff000000U, (const struct gc_quad *)it, (unsigned)want, &u2)) {
+        /* 8f: a valid cache isn't grown while anything moves (a grow is a second full compose in that frame: 8c2's
+         * emergency frames at 17-22 ms with a GPU run of 3-6 ms); a broken one is rebuilt as before */
+        if (stable_k >= 2 && want >= 1 && (!valid || (want > cache_n && !sh_moving()))) {
+            uint64_t u2 = 0, tc0 = sb_us();
+            int okc = gpucomp_compose(cache, 0xff000000U, (const struct gc_quad *)it, (unsigned)want, &u2);
+            cache_us_frame = (uint32_t)(sb_us() - tc0);
+            if (okc) {
                 tk_memcpy(cacheq, it, sizeof(tk_gpu_item) * (size_t)want);
                 cache_n = want;
                 valid = 1;
@@ -2336,10 +2348,21 @@ static int glass_cal_step(void)
         need_full = 1;
         next_kdraw();
         sb_log("next: glass stills: done (gain back to 1)");
+        {   /* 8c+: the arena at the end (the drivers: snd's 3 MiB firmware cache at boot comes from it; the pmsg ring
+             * drops the boot's own "arena free" line) */
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "next: arena free at the self test's end: ");
+            ub_dec(&u, sb_arena_free() >> 10);
+            ub_s(&u, snd_reserved() ? " KiB; snd's firmware cache reserved at boot: yes (its 3 MiB already out of this)"
+                                    : " KiB; snd's firmware cache reserved at boot: NO");
+            sb_log(u.b);
+        }
         gcal = 10;
         return 0;
     }
     int v = gcal / 3, g = gcal % 3;
+    if (!sbos_film_now || sbos_film_now[0] != 'g' || sbos_film_now[1] != 'l') sbos_film_t0 = sb_ms();
     sbos_film_now = "glass stills";
     lens_gain = GAIN[g];
     if (g == 0) {
@@ -2397,6 +2420,7 @@ static void film_start(int film)
     sh_idle();
     F.t0 = sb_ms();   /* cp7: the film's clock after its reset and idle work (~0.5 s): its first steps no longer pass
                        * "during a stall" (the unlock swipe of the phone film was skipped so, Track B's finding) */
+    sbos_film_t0 = F.t0;                   /* 8f: the slow turns' times count from here (the films' scripts do) */
     {   /* P2w: a marker for the camera (the main session times its shots from the films' starts) */
         struct ub u;
         ub_init(&u);

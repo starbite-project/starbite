@@ -381,7 +381,7 @@ struct kstate {
     /* 8c+: the first twelve of those turns, each with the film it was in (sbos_film_now), its slowest piece and ms,
      * for the self test's end (the pmsg ring drops the early films' lines) */
     uint8_t tl_n, tl_owner[12], tl_id[12];
-    uint16_t tl_ms[12];
+    uint16_t tl_ms[12], tl_at[12];  /* 8f: tl_at, ms since the film's start (sbos_film_t0) */
     const char *tl_film[12], *tl_what[12];
     uint64_t deadman_t0;            /* the 10-minute return to the menu counts from here (the start; the self-test
                                      * image: the last input) */
@@ -651,7 +651,8 @@ struct gc_quad {
 int gpucomp_init(void *heap, uint64_t bytes);
 /* the last compose's bins: entries drawn, entries culled under opaque quads, entries skipped over empty blocks */
 void gpucomp_last_stats(uint32_t *entries, uint32_t *culled, uint32_t *empty);
-extern const char *sbos_film_now;   /* 8c+: the self test's current film (kern_next.c sets it; 0 none) */
+extern const char *sbos_film_now;
+extern uint64_t sbos_film_t0;       /* 8f: the current film's start (sb_ms), for the slow turns' times */   /* 8c+: the self test's current film (kern_next.c sets it; 0 none) */
 void gpucomp_last_times(uint32_t *bin_us, uint32_t *up_us, uint32_t *run_us);   /* 8c: the last compose's CPU parts */
 unsigned gpucomp_mhz(void);
 int gpucomp_ready(void);
@@ -716,6 +717,7 @@ int64_t hw_core_psci(unsigned w);   /* PSCI AFFINITY_INFO's raw answer for worke
  * 0 failed, -1 a dry run (nothing written) */
 int hw_slot_read(uint8_t *h0, uint8_t *h1);
 int hw_slot_write(int half, const uint8_t *src, uint32_t n);
+int hw_slot_medium(void);               /* SB_MED_SD / SB_MED_UFS, -1 no slot */
 void hw_slot_lend(void);            /* Track A update: the fence's one volatile grant was taken (slot.c takes it back) */
 /* Track A: Software Update (update.c; docs/STARBITE-FIRMWARE-LAYER.md 10.5): the card's /STARBITE/UPDATE/MANIFEST.TXT,
  * staged into the inactive update slot a chunk per call, armed for the loader, committed 10 s into the next start */
@@ -780,6 +782,7 @@ extern int wifi_autojoin;              /* 1.2-alpha21: join a known network auto
 int wifi_known(struct sbos_wifi_known *out, int max);
 int wifi_forget(int k);
 int wifi_selftest_phase(int *done);
+int wifi_selftest_uplink(void);             /* 8m: the linuxtest's Wi-Fi uplink: 0 working, 1 connected, -1 not possible */
 /* Track H: a listed network's security (from its RSN / WPA elements), the firmware's capabilities, leaving */
 enum { KWIFI_SEC_OPEN, KWIFI_SEC_WEP, KWIFI_SEC_WPA1, KWIFI_SEC_WPA2, KWIFI_SEC_WPA23, KWIFI_SEC_WPA3, KWIFI_SEC_ENT,
        KWIFI_SEC_OWE, KWIFI_SEC_OTHER };
@@ -899,6 +902,7 @@ void kmodem_get_apn(char *out, unsigned cap);
 int kmodem_cellular(int on);
 int kmodem_selftest_phase(int *done);  /* next-celltest (unattended data): every 500 ms; *done at the end, 0 = failed */
 void kmodem_selftest_abort(void);      /* next-celltest stopped by a touch or key: Cellular off */
+int kmodem_selftest_data(int on);      /* 8l: the linuxtest's mobile data on / off (unattended; state: kmodem_cell) */
 void kmodem_cell(struct kcell *c);
 struct sbnet;
 struct sbtcp;
@@ -910,6 +914,7 @@ enum { KNET_UPLINK_WIFI = 1, KNET_UPLINK_CELL = 2 };   /* = sbshm-net.h's SBSHM_
 void guestnet_uplink(int which, struct sbnet *n);
 int guestnet_rx(int which, const uint8_t *ip, uint32_t len);
 void guestnet_guest_started(void);         /* the guest's service, once sbghost runs: the uplink that is up */
+void guestnet_log(void);                   /* 8l: its uplink and counters in one line (the linuxtest's network check) */
 void wifi_fetch_poll_cell(void);
 void wifi_clock_checked_by(int how);        /* 1 checked, 2 corrected, 3 set (as Wi-Fi's NTP) */
 int kmodem_on(void);

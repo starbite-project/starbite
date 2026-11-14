@@ -41,9 +41,11 @@ int guest_mode(void);                      /* the last started */
 int guest_scale(void);                     /* the view's scale: 2 (both; the blit also does 4) */
 int guest_type(char c);                    /* one character as Linux keys (Shift around it): 1 sent */
 int guest_term_ok(void);                   /* the terminal's typed self-test command ran */
+const char *guest_net_line(void);          /* 8l: the network check's "STARBITE-NET: ..." line ("" none yet) */
 void guest_full_next(void);                /* the next guest_blit copies every row (the view redrawn whole) */
 int guest_stop(void);                      /* MSG_STOP; the cluster goes off by itself */
 int guest_state(void);                     /* GUEST_* */
+void guest_relog(void);                    /* 8f: the self test's end logs HELLO's time and lines again */
 int guest_frozen(void);                    /* instant start: running but frozen (idle, nothing shown): the heater may stop it */
 const char *guest_why(void);               /* GUEST_FAILED: the reason */
 const char *guest_stage(void);             /* GUEST_STARTING: what the start is doing, in the user's words ("": usual) */

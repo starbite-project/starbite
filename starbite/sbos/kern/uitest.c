@@ -26,6 +26,7 @@
 #include "kapp.h"
 #include "sbapp.h"
 #include "survival.h"
+#include "sd.h"                         /* 8f: the card's state at the self test's end */
 #if defined(SBOS_SELFTEST_SHUBPROBE) || defined(SBOS_SELFTEST_SHUB)
 #include "shub.h"
 #endif
@@ -697,6 +698,25 @@ void selftest_timer(unsigned id)
         if (next_selftest_step())
             return;
         kt_cancel(KT_SELFTEST, 0);
+        guest_relog();  /* 8f: Linux's HELLO lines again (the films push them out of the 16 KB pmsg ring) */
+        {   /* 8f (the main session's ask): the card's state this run, so the fast card's effect is in the log's end */
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "selftest: next: the card this run: ");
+            ub_s(&u, sd_rep.fast ? "fast reads on" : "fast reads off");
+            if (!sd_rep.fast && sd_rep.fast_why) { ub_s(&u, " ("); ub_s(&u, sd_rep.fast_why); ub_s(&u, ")"); }
+            ub_s(&u, ", card ");
+            ub_dec(&u, sd_rep.card_hz / 1000U);
+            ub_s(&u, " kHz, bus ");
+            ub_dec(&u, sd_rep.bus_hz / 1000000U);
+            ub_s(&u, " MHz, DMA chunks ");
+            ub_dec(&u, sd_rep.dma_chunks);
+            ub_s(&u, ", errors ");
+            ub_dec(&u, sd_rep.dma_errors);
+            ub_s(&u, ", recoveries ");
+            ub_dec(&u, sd_rep.recoveries);
+            sb_log(u.b);
+        }
         {   /* cp7k: the slowest loop turn of the whole run, kept to the end (the pmsg ring drops the early lines) */
             struct ub u;
             ub_init(&u);
@@ -743,6 +763,7 @@ void selftest_timer(unsigned id)
                 }
                 ub_s(&u, " ");
                 ub_dec(&u, K.tl_ms[i]);
+                if (K.tl_film[i]) { ub_s(&u, "@+"); ub_dec(&u, K.tl_at[i]); }   /* 8f: when, in the film */
             }
             sb_log(u.b);
         }
@@ -852,18 +873,22 @@ void selftest_timer(unsigned id)
         return;
 #endif
 #ifdef SBOS_SELFTEST_NEXT_LINUX
-    case 97: {                              /* every 100 ms once the shell is baked; 120 s at most */
+    case 97: {                              /* every 100 ms once the shell is baked; 450 s at most (8l / 8m: mobile
+                                             * data up to 120 s, else Wi-Fi up to 100 s, and Linux's network check) */
         int r = next_ready() ? gwin_selftest_step() : 0;
-        if (!r && sb_ms() - t0 < 120000U) {
+        if (!r && sb_ms() - t0 < 450000U) {
             kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
             return;
         }
         sb_logx(r > 0 ? "selftest: next-linux: PASSED; a restart into recovery (pmsg) after seconds " :
                 r < 0 ? "selftest: next-linux: FAILED (see above); a restart into recovery (pmsg) after seconds " :
-                        "selftest: next-linux: FAILED: not done within 120 s; a restart into recovery (pmsg) after seconds ",
+                        "selftest: next-linux: FAILED: not done within 450 s; a restart into recovery (pmsg) after seconds ",
                 (sb_ms() - t0) / 1000U);
-        if (!r)
+        if (!r) {
             guest_power_off();              /* the cluster off before the restart */
+            (void)kmodem_selftest_data(0);  /* 8l: and mobile data off */
+            (void)wifi_power(0);            /* 8m: and Wi-Fi */
+        }
         phase = 94;
         kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
         return;
