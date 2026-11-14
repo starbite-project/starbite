@@ -59,6 +59,11 @@
 #include <wlr/render/pixman.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_buffer.h>
+#include <wlr/types/wlr_linux_dmabuf_v1.h>
+#include <wlr/render/drm_format_set.h>
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
+#include <sys/sysmacros.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_keyboard.h>
@@ -226,6 +231,7 @@ static int buf_ready[2];
  * unchanged by definition; the back buffer needs such a row only if it changed after the frame that buffer last
  * held (lastchg[y] > bufseq[back]), copied from the front's shadow, no compare */
 static uint32_t *lastchg;                  /* per row: the seq of the frame in which it last changed */
+static int pub_or;                         /* publish's source is an app's buffer: X / A set to 0xff while copying */
 static uint32_t bufseq[2];                 /* the seq of the frame each buffer holds whole */
 static uint64_t frames, rows_out;
 static unsigned nframe, nbuilt, nbuf, defers;
@@ -275,8 +281,16 @@ static int publish(const uint8_t *src, uint32_t src_stride, uint32_t nrows, uint
 		const uint8_t *s = src + (size_t)y * src_stride;
 		int changed = !hdr->surf_seq || memcmp(s, shadow[front] + (size_t)y * W, rb);
 		if (memcmp(s, shadow[back] + (size_t)y * W, rb)) {
-			memcpy(dst + (size_t)y * stride, s, rb);
-			memcpy(shadow[back] + (size_t)y * W, s, rb);
+			if (pub_or) {                      /* opaque for Starbite's XRGB (an app's ARGB: its alpha) */
+				const uint32_t *sp = (const uint32_t *)(const void *)s;
+				uint32_t *sh = shadow[back] + (size_t)y * W;
+				for (uint32_t x = 0; x < W; ++x)
+					sh[x] = sp[x] | 0xff000000U;
+				memcpy(dst + (size_t)y * stride, sh, rb);
+			} else {
+				memcpy(dst + (size_t)y * stride, s, rb);
+				memcpy(shadow[back] + (size_t)y * W, s, rb);
+			}
 		}
 		if (changed) {
 			if (H <= SBSHM_ROWS_MAX)
@@ -418,6 +432,10 @@ struct comp_off {
 	int x, y;
 };
 
+/* (the dmabuf helpers below: a surface's current GPU-drawn frame, read between these two) */
+static const uint8_t *dmab_pixels(struct wlr_surface *s, uint32_t *w, uint32_t *h, uint32_t *stride, pixman_format_code_t *pf,
+				  int *fd);
+static void dmab_done(int fd);
 static void comp_surface(struct wlr_surface *surface, int sx, int sy, void *data)
 {
 	const struct comp_off *o = data;
@@ -442,6 +460,14 @@ static void comp_surface(struct wlr_surface *surface, int sx, int sy, void *data
 		if (pf)
 			si = pixman_image_create_bits_no_clear(pf, src->width, src->height, dp, (int)bs);
 	}
+	int dfd = -1;
+	if (!si) {                                 /* a GPU-drawn frame (a dmabuf: no texture, no data pointer) */
+		uint32_t w, h, st;
+		pixman_format_code_t pf;
+		const uint8_t *px = dmab_pixels(surface, &w, &h, &st, &pf, &dfd);
+		if (px)
+			si = pixman_image_create_bits_no_clear(pf, (int)w, (int)h, (uint32_t *)(uintptr_t)px, (int)st);
+	}
 	if (si) {
 		int bw = pixman_image_get_width(si), bh = pixman_image_get_height(si);
 		/* the buffer's size vs the surface's in pixels (its logical size x SC): a client drawing at SC is copied
@@ -464,6 +490,8 @@ static void comp_surface(struct wlr_surface *surface, int sx, int sy, void *data
 	}
 	if (src)
 		wlr_buffer_end_data_ptr_access(src);
+	if (dfd >= 0)
+		dmab_done(dfd);
 }
 
 static int view_active(const struct view *v) { return S.active[0] && !strcmp(v->desk, S.active); }
@@ -491,6 +519,79 @@ static uint64_t layout_sig(void)
 #undef MIX
 	return h;
 }
+static void count_surface(struct wlr_surface *surface, int sx, int sy, void *data)
+{
+	(void)surface, (void)sx, (void)sy;
+	++*(int *)data;
+}
+static unsigned long ndirect;              /* frames published straight from an app's buffer */
+static void window_state(void);
+/* 1 published (or nothing new), -1 the host reads the back buffer, 0 not this case (composite instead) */
+static int publish_direct(uint32_t b0, uint32_t b1)
+{
+	struct view *v, *only = NULL;
+	int nv = 0, ns = 0;
+	wl_list_for_each(v, &S.views, link)
+		if (v->mapped && view_active(v))
+			only = v, ++nv;
+	if (nv != 1 || only->dialog || getenv("SBWL_NO_DIRECT"))
+		return 0;
+	wlr_xdg_surface_for_each_surface(only->top->base, count_surface, &ns);
+	struct wlr_surface *surf = only->top->base->surface;
+	struct wlr_box geo;
+	wlr_xdg_surface_get_geometry(only->top->base, &geo);
+	if (ns != 1 || only->x - geo.x || only->y - geo.y || (uint32_t)surf->current.width * SC != W ||
+	    (uint32_t)surf->current.height * SC < VR)
+		return 0;
+	struct wlr_texture *tex = wlr_surface_get_texture(surf);
+	pixman_image_t *ti = tex && wlr_texture_is_pixman(tex) ? wlr_pixman_texture_get_image(tex) : NULL;
+	struct wlr_buffer *src = NULL;
+	const uint8_t *px = NULL;
+	uint32_t pstride = 0, bw = 0, bh = 0;
+	pixman_format_code_t pf = 0;
+	if (ti) {
+		px = (const uint8_t *)pixman_image_get_data(ti);
+		pstride = (uint32_t)pixman_image_get_stride(ti);
+		bw = (uint32_t)pixman_image_get_width(ti), bh = (uint32_t)pixman_image_get_height(ti);
+		pf = pixman_image_get_format(ti);
+	} else if (surf->buffer && surf->buffer->source) {
+		void *dp;
+		uint32_t f;
+		size_t bs;
+		src = surf->buffer->source;
+		if (!wlr_buffer_begin_data_ptr_access(src, WLR_BUFFER_DATA_PTR_ACCESS_READ, &dp, &f, &bs))
+			return 0;
+		px = dp, pstride = (uint32_t)bs, bw = (uint32_t)src->width, bh = (uint32_t)src->height;
+		pf = f == DRM_FORMAT_ARGB8888 ? PIXMAN_a8r8g8b8 : f == DRM_FORMAT_XRGB8888 ? PIXMAN_x8r8g8b8 : 0;
+	}
+	int dfd = -1;
+	if (!px)
+		px = dmab_pixels(surf, &bw, &bh, &pstride, &pf, &dfd);
+	int r = 0;
+	if (px && bw == W && bh >= VR && (pf == PIXMAN_a8r8g8b8 || pf == PIXMAN_x8r8g8b8)) {
+		uint64_t f0 = frames;
+		pub_or = 1;
+		r = publish(px, pstride, VR, b0, b1) < 0 ? -1 : 1;
+		pub_or = 0;
+		if (r > 0) {
+			++ndirect;
+			last_px = ((const uint32_t *)(const void *)(px + (size_t)(VR / 8) * pstride))[W / 8] | 0xff000000U;
+			hdr->guest_rot = ROT;
+			if (!f0 && frames)
+				say("first frame published (%ux%u, viewport %ux%u, straight from the app's buffer)", W, H, VW, VR);
+			if (!win_shown) {
+				win_shown = 1;
+				window_state();
+			}
+		}
+	}
+	if (src)
+		wlr_buffer_end_data_ptr_access(src);
+	if (dfd >= 0)
+		dmab_done(dfd);
+	return r;
+}
+
 /* b0 .. b1: the rows (surface pixels) that changed since the last published frame (wlr_scene's damage); b1 = 0: all */
 static int publish_window(uint32_t b0, uint32_t b1)
 {
@@ -521,6 +622,14 @@ static int publish_window(uint32_t b0, uint32_t b1)
 		b0 = 0, b1 = tn ? H : VR;              /* a whole frame */
 	sig_last = sig;
 	int band = !tn && (b0 > 0 || b1 < VR);
+	/* 8o night ("super slow"): one opaque window covering the surface at the output's scale, with no popup or
+	 * subsurface (the common case: an app full screen): no fill, no composite, no alpha pass; publish compares
+	 * and copies the app's own buffer's rows (X / A set on the copy) */
+	if (!tn) {
+		int r = publish_direct(b0, b1);
+		if (r)
+			return r < 0 ? -1 : 1;
+	}
 	pixman_region32_t clip;
 	if (band) {                                /* only the band composited (fill, surfaces, scrim): pixman clips */
 		pixman_region32_init_rect(&clip, 0, (int)b0, (int)W, (int)(b1 - b0));
@@ -595,16 +704,32 @@ static void defer_frame(void)
 		wl_event_source_timer_update(defer_src, 2);
 }
 
+/* 8o night (measure): SBWL_NO_SCENE=1: wlr_scene is not rendered into the headless output (nobody reads that buffer;
+ * with GTK's whole-window damage it was a second full-frame render each frame); frames are paced by a timer that
+ * sends the frame callbacks a refresh after a published frame */
+static int no_scene = -1;
+static struct wl_event_source *pace_src;
+static int pace_cb(void *data)
+{
+	(void)data;
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	wlr_scene_output_send_frame_done(S.scene_output, &now);
+	return 0;
+}
 static void output_frame(struct wl_listener *l, void *data)
 {
 	(void)l, (void)data;
 	struct wlr_output_state st;
 	wlr_output_state_init(&st);
+	if (no_scene < 0)
+		no_scene = getenv("SBWL_NO_SCENE") != NULL;
 	/* the output is committed (the scene rendered) only on frames with something new: a commit with a buffer makes the
 	 * headless backend send the next frame event a refresh later, which paces an animating app at 60 Hz, and without
 	 * one the frames stop until the next mark_dirty (idle: no frame events at all; was ~20 renders / s) */
 	bool busy = S.dirty || nframe < 3;
-	bool built = busy && wlr_scene_output_build_state(S.scene_output, &st, NULL);
+	bool built = busy && !no_scene && wlr_scene_output_build_state(S.scene_output, &st, NULL);
+	int published = 0;
 	nbuilt += built;
 	nbuf += built && (st.committed & WLR_OUTPUT_STATE_BUFFER) && st.buffer;
 	if (++nframe <= 3)
@@ -633,6 +758,7 @@ static void output_frame(struct wl_listener *l, void *data)
 		} else {
 			dmg0 = dmg1 = -1;
 			dmg_all = 0;
+			published = 1;
 		}
 	}
 	if (!v2 && !frames && winimg) {            /* v1: a black frame until the app's first (as L1/L2's sbwl did) */
@@ -644,6 +770,14 @@ static void output_frame(struct wl_listener *l, void *data)
 	if (built)
 		wlr_output_commit_state(S.output, &st);
 	wlr_output_state_finish(&st);
+	if (no_scene && published) {               /* the apps' next frame a refresh from now */
+		if (!pace_src)
+			pace_src = wl_event_loop_add_timer(S.loop, pace_cb, NULL);
+		if (pace_src) {
+			wl_event_source_timer_update(pace_src, 16);
+			return;
+		}
+	}
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	wlr_scene_output_send_frame_done(S.scene_output, &now);
@@ -685,10 +819,114 @@ static void new_output(struct wl_listener *l, void *data)
  * paces itself on wl_surface.frame, as GTK, Qt, foot and SDL do, stops drawing), and a commit of theirs (a client
  * drawing on its own timer) no longer makes sbwl composite and compare the active app's frame again.
  * SBWL_HIDDEN_COMMITS=1: the old behaviour (every commit composites), for measuring. */
+/* 8o night (sbgpu, GPU-drawn apps): a GL / Vulkan app presents dmabufs (linux-dmabuf, offered with the GPU's render
+ * node), which the pixman renderer cannot read: each surface's dmabufs are mapped read-only once (Mesa rotates 2-4
+ * of them) and read with DMA_BUF_IOCTL_SYNC around it; a mapping goes when its buffer does */
+#define DMAB_PER_SURF 4
+struct dmab {
+	struct wlr_buffer *b;                  /* NULL: free */
+	struct wl_listener destroy;
+	const uint8_t *map;
+	size_t len;
+	int fd;
+	uint32_t w, h, stride, off;
+	pixman_format_code_t pf;
+};
 struct surf_track {
 	struct wl_listener commit, destroy;
 	struct wlr_surface *s;
+	struct wl_list link;                   /* tracks */
+	struct dmab db[DMAB_PER_SURF];
+	int cur;                               /* the dmab of the last commit, -1 none */
+	int said;
 };
+static struct wl_list tracks = {&tracks, &tracks};
+static struct surf_track *track_of(struct wlr_surface *s)
+{
+	struct surf_track *t;
+	wl_list_for_each(t, &tracks, link)
+		if (t->s == s)
+			return t;
+	return NULL;
+}
+static void dmab_drop(struct dmab *d)
+{
+	if (!d->b)
+		return;
+	wl_list_remove(&d->destroy.link);
+	if (d->map)
+		munmap((void *)d->map, d->len);
+	d->b = NULL, d->map = NULL;
+}
+static void dmab_destroyed(struct wl_listener *l, void *data)
+{
+	(void)data;
+	struct dmab *d = wl_container_of(l, d, destroy);
+	dmab_drop(d);
+}
+/* the surface's committed buffer, when it is a dmabuf: mapped (cached), cur set; else cur -1 */
+static void dmab_commit(struct surf_track *t)
+{
+	struct wlr_buffer *b = t->s->current.buffer;
+	struct wlr_dmabuf_attributes a;
+	t->cur = -1;
+	if (!b || !wlr_buffer_get_dmabuf(b, &a))
+		return;
+	for (int i = 0; i < DMAB_PER_SURF; ++i)
+		if (t->db[i].b == b) {
+			t->cur = i;
+			return;
+		}
+	pixman_format_code_t pf = a.format == DRM_FORMAT_ARGB8888 ? PIXMAN_a8r8g8b8 : a.format == DRM_FORMAT_XRGB8888 ? PIXMAN_x8r8g8b8 : 0;
+	if (a.n_planes != 1 || !pf || (a.modifier != DRM_FORMAT_MOD_LINEAR && a.modifier != DRM_FORMAT_MOD_INVALID))
+		return;
+	int k = 0;
+	for (int i = 0; i < DMAB_PER_SURF; ++i)
+		if (!t->db[i].b) {
+			k = i;
+			break;
+		} else if (i == DMAB_PER_SURF - 1) {
+			k = (t->said + 1) % DMAB_PER_SURF;     /* all taken: replace one */
+		}
+	struct dmab *d = &t->db[k];
+	dmab_drop(d);
+	size_t len = (size_t)a.offset[0] + (size_t)a.stride[0] * (size_t)a.height;
+	len = (len + 4095U) & ~(size_t)4095U;
+	void *m = mmap(NULL, len, PROT_READ, MAP_SHARED, a.fd[0], 0);
+	if (m == MAP_FAILED)
+		return;
+	d->b = b, d->map = m, d->len = len, d->fd = a.fd[0], d->w = (uint32_t)a.width, d->h = (uint32_t)a.height;
+	d->stride = a.stride[0], d->off = a.offset[0], d->pf = pf;
+	d->destroy.notify = dmab_destroyed;
+	wl_signal_add(&b->events.destroy, &d->destroy);
+	t->cur = k;
+	if (t->said++ < 1)
+		say("a dmabuf frame (GPU-drawn): %ux%u, stride %u, format %08x", d->w, d->h, d->stride, a.format);
+}
+/* the surface's current dmabuf mapped for reading (sync start done: call dmab_done), else NULL */
+static const struct dmab *dmab_begin(struct wlr_surface *s)
+{
+	struct surf_track *t = track_of(s);
+	if (!t || t->cur < 0 || !t->db[t->cur].b)
+		return NULL;
+	struct dma_buf_sync sy = {DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
+	(void)ioctl(t->db[t->cur].fd, DMA_BUF_IOCTL_SYNC, &sy);
+	return &t->db[t->cur];
+}
+static const uint8_t *dmab_pixels(struct wlr_surface *s, uint32_t *w, uint32_t *h, uint32_t *stride, pixman_format_code_t *pf,
+				  int *fd)
+{
+	const struct dmab *d = dmab_begin(s);
+	if (!d)
+		return NULL;
+	*w = d->w, *h = d->h, *stride = d->stride, *pf = d->pf, *fd = d->fd;
+	return d->map + d->off;
+}
+static void dmab_done(int fd)
+{
+	struct dma_buf_sync sy = {DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ};
+	(void)ioctl(fd, DMA_BUF_IOCTL_SYNC, &sy);
+}
 static unsigned long hidden_commits;
 static struct view *view_of(struct wlr_xdg_toplevel *t);
 static int surface_hidden(struct wlr_surface *s)
@@ -710,6 +948,7 @@ static void surf_commit(struct wl_listener *l, void *data)
 {
 	(void)data;
 	struct surf_track *t = wl_container_of(l, t, commit);
+	dmab_commit(t);
 	if (surface_hidden(t->s)) {
 		++hidden_commits;
 		return;
@@ -722,6 +961,9 @@ static void surf_destroy(struct wl_listener *l, void *data)
 	struct surf_track *t = wl_container_of(l, t, destroy);
 	wl_list_remove(&t->commit.link);
 	wl_list_remove(&t->destroy.link);
+	wl_list_remove(&t->link);
+	for (int i = 0; i < DMAB_PER_SURF; ++i)
+		dmab_drop(&t->db[i]);
 	free(t);
 }
 static void new_surface(struct wl_listener *l, void *data)
@@ -732,6 +974,8 @@ static void new_surface(struct wl_listener *l, void *data)
 	if (!t)
 		return;
 	t->s = s;
+	t->cur = -1;
+	wl_list_insert(&tracks, &t->link);
 	t->commit.notify = surf_commit;
 	wl_signal_add(&s->events.commit, &t->commit);
 	t->destroy.notify = surf_destroy;
@@ -2511,6 +2755,56 @@ static void activate(const char *desk)
 /* ---- starting apps ------------------------------------------------------------------------------------- */
 static char tzenv[32];                     /* v3: TZ for the apps, POSIX form of hdr.host_tz_min ("" = none) */
 static int spawn_fd = -1;                  /* spawn(): passed to the child as fd 3 (sbnotify's line to sbwl) */
+/* 8o night (sbgpu): the apps get the Mali through sbguest.ko's render node ("panfrost": Mesa's Panfrost) when
+ * sbwl.gpu=1 is on the kernel command line, SBWL_GPU is set or ~/.config/starbite/gpu-apps exists, and the node is
+ * there: linux-dmabuf is offered (its
+ * main device the node; XRGB / ARGB, linear) and child_env no longer forces cairo / software GL. Off by default until
+ * the phone's probe (sbgl-probe) has passed. */
+static int gpu_apps;
+static bool dmab_check(struct wlr_dmabuf_attributes *a, void *data)
+{
+	(void)data;
+	return a->n_planes == 1 && (a->format == DRM_FORMAT_ARGB8888 || a->format == DRM_FORMAT_XRGB8888) &&
+	       (a->modifier == DRM_FORMAT_MOD_LINEAR || a->modifier == DRM_FORMAT_MOD_INVALID);
+}
+static void gpu_apps_init(void)
+{
+	char cmd[1024] = "";
+	int cf = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+	ssize_t n = cf >= 0 ? read(cf, cmd, sizeof(cmd) - 1) : -1;
+	if (cf >= 0)
+		close(cf);
+	cmd[n > 0 ? n : 0] = 0;
+	gpu_apps = (!sim && strstr(cmd, "sbwl.gpu=1")) || getenv("SBWL_GPU");
+	if (!gpu_apps && S.have_user) {            /* or the user's switch: touch ~/.config/starbite/gpu-apps (then a restart) */
+		char f[600];
+		snprintf(f, sizeof(f), "%s/.config/starbite/gpu-apps", S.user.pw_dir);
+		gpu_apps = !access(f, F_OK);
+	}
+	struct stat st;
+	if (!gpu_apps || stat("/dev/dri/renderD128", &st) || !S_ISCHR(st.st_mode)) {
+		gpu_apps = 0;
+		return;
+	}
+	struct wlr_linux_dmabuf_feedback_v1 fb = {.main_device = st.st_rdev};
+	wl_array_init(&fb.tranches);
+	struct wlr_linux_dmabuf_feedback_v1_tranche *tr = wlr_linux_dmabuf_feedback_add_tranche(&fb);
+	struct wlr_linux_dmabuf_v1 *dm = NULL;
+	if (tr) {
+		tr->target_device = st.st_rdev;
+		wlr_drm_format_set_add(&tr->formats, DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR);
+		wlr_drm_format_set_add(&tr->formats, DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR);
+		dm = wlr_linux_dmabuf_v1_create(S.display, 4, &fb);
+	}
+	wlr_linux_dmabuf_feedback_v1_finish(&fb);
+	if (!dm) {
+		say("GPU for the apps: linux-dmabuf could not be offered: software rendering");
+		gpu_apps = 0;
+		return;
+	}
+	wlr_linux_dmabuf_v1_set_check_dmabuf_callback(dm, dmab_check, NULL);
+	say("GPU for the apps: linux-dmabuf on /dev/dri/renderD128 (%u:%u)", major(st.st_rdev), minor(st.st_rdev));
+}
 static pid_t notify_pid;                   /* sbnotify */
 static void child_env(int as_user)
 {
@@ -2522,8 +2816,13 @@ static void child_env(int as_user)
 	setenv("QT_QPA_PLATFORM", "wayland", 1);
 	setenv("SDL_VIDEODRIVER", "wayland", 1);
 	setenv("MOZ_ENABLE_WAYLAND", "1", 1);
-	setenv("GSK_RENDERER", "cairo", 0);        /* no GPU in the guest */
-	setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
+	if (!gpu_apps) {                           /* no GPU for the apps (sbwl.gpu=1 and sbgpu's render node give one) */
+		setenv("GSK_RENDERER", "cairo", 0);
+		setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
+	} else {                                   /* (sbinit exports both for the session: the GPU's apps drop them) */
+		unsetenv("GSK_RENDERER");
+		unsetenv("LIBGL_ALWAYS_SOFTWARE");
+	}
 	setenv("NO_AT_BRIDGE", "1", 0);
 	setenv("GTK_A11Y", "none", 0);
 	setenv("GTK_IM_MODULE", "wayland", 1);     /* GTK3: text-input-v3 */
@@ -3288,8 +3587,8 @@ static int tick(void *data)
 	if (now - t_stat >= 10000) {
 		t_stat = now;
 		say("stats: frame events %u, built %u, with a buffer %u, published %llu, rows %llu, px %08x, apps %d, ring drops %u, "
-		    "deferred %u, background commits %lu, banded %lu", nframe, nbuilt, nbuf, (unsigned long long)frames,
-		    (unsigned long long)rows_out, last_px, napps, g2h_dropped, defers, hidden_commits, nband);
+		    "deferred %u, background commits %lu, banded %lu, direct %lu", nframe, nbuilt, nbuf, (unsigned long long)frames,
+		    (unsigned long long)rows_out, last_px, napps, g2h_dropped, defers, hidden_commits, nband, ndirect);
 	}
 	procs_tick();
 	clock_tick(now);
@@ -3416,6 +3715,7 @@ int main(int argc, char **argv)
 	S.new_surface.notify = new_surface;
 	wl_signal_add(&comp->events.new_surface, &S.new_surface);
 	wlr_subcompositor_create(S.display);
+	gpu_apps_init();                           /* sbgpu: before the first app starts (child_env reads gpu_apps) */
 	wlr_data_device_manager_create(S.display);
 	wlr_primary_selection_v1_device_manager_create(S.display);
 	S.scene = wlr_scene_create();
