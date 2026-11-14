@@ -901,6 +901,7 @@ void kmodem_get_apn(char *out, unsigned cap);
 int kmodem_cellular(int on);
 int kmodem_selftest_phase(int *done);  /* next-celltest (unattended data): every 500 ms; *done at the end, 0 = failed */
 void kmodem_selftest_abort(void);      /* next-celltest stopped by a touch or key: Cellular off */
+int kmodem_selftest_data(int on);      /* 8l: the linuxtest's mobile data on / off (unattended; state: kmodem_cell) */
 void kmodem_cell(struct kcell *c);
 struct sbnet;
 struct sbtcp;
@@ -912,6 +913,7 @@ enum { KNET_UPLINK_WIFI = 1, KNET_UPLINK_CELL = 2 };   /* = sbshm-net.h's SBSHM_
 void guestnet_uplink(int which, struct sbnet *n);
 int guestnet_rx(int which, const uint8_t *ip, uint32_t len);
 void guestnet_guest_started(void);         /* the guest's service, once sbghost runs: the uplink that is up */
+void guestnet_log(void);                   /* 8l: its uplink and counters in one line (the linuxtest's network check) */
 void wifi_fetch_poll_cell(void);
 void wifi_clock_checked_by(int how);        /* 1 checked, 2 corrected, 3 set (as Wi-Fi's NTP) */
 int kmodem_on(void);

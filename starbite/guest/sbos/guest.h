@@ -41,6 +41,7 @@ int guest_mode(void);                      /* the last started */
 int guest_scale(void);                     /* the view's scale: 2 (both; the blit also does 4) */
 int guest_type(char c);                    /* one character as Linux keys (Shift around it): 1 sent */
 int guest_term_ok(void);                   /* the terminal's typed self-test command ran */
+const char *guest_net_line(void);          /* 8l: the network check's "STARBITE-NET: ..." line ("" none yet) */
 void guest_full_next(void);                /* the next guest_blit copies every row (the view redrawn whole) */
 int guest_stop(void);                      /* MSG_STOP; the cluster goes off by itself */
 int guest_state(void);                     /* GUEST_* */

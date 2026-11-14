@@ -21,6 +21,7 @@
 #include "shell.h"
 #include "../host/sbghost.h"
 #include "../../appstore/sbshm-store3.h"           /* Track F: store3 */
+#include "../netcheck-cmd.h"                       /* Track E: Linux's network check (8l) */
 
 #define SAME(a, b) ((int)(a) == (int)(b))          /* (two enums: gcc's -Wenum-compare) */
 _Static_assert(SAME(SH_LAPP_RUNNING, SBSHM_APP_RUNNING) && SAME(SH_LAPP_KEYBOARD, SBSHM_APP_KEYBOARD) &&
@@ -809,6 +810,17 @@ int gwin_now(void)
 static int gs_phase, gs_typed;
 static uint64_t gs_t, gs_t0;
 static unsigned gs_frames;
+/* 8l (Track A; the user's 8i installs: Linux's network was never checked on the phone): mobile data up before Linux
+ * (unattended, as next-celltest), then Track E's network check typed after the first command: one plain-HTTP request
+ * through the NAT. Its verdict is its own line ("network: PASS / FAILED / skipped"); the linuxtest's result stays the
+ * window, the command, the tap and the stop. gs_net: 1 data up, -1 skipped (no SIM, no data in 120 s) */
+static int gs_net;
+static void gs_data_off(void)
+{
+    if (gs_net == 1)
+        (void)kmodem_selftest_data(0);
+    gs_net = gs_net ? gs_net : -1;
+}
 
 static void gs_log(const char *what, uint64_t v, int with_v)
 {
@@ -826,6 +838,7 @@ static int gs_failed(const char *why)
     sb_logf("selftest: next-linux: why: ", why);
     if (guest_state() == GUEST_RUNNING || guest_state() == GUEST_STARTING)
         guest_stop();                      /* the cluster off before the restart (guest_power_off waits too) */
+    gs_data_off();
     gs_phase = 99;
     return -1;
 }
@@ -865,8 +878,36 @@ int gwin_selftest_step(void)
     uint64_t now = sb_ms(), dt = now - gs_t;
     int st = guest_state();
     switch (gs_phase) {
-    case 0:
-        gs_t0 = now;
+    case 0:                                /* 8l: mobile data first (Cellular refuses to start beside a running Linux) */
+        gs_t0 = gs_t = now;
+        if (kmodem_selftest_data(1) == 0) {
+            gs_phase = 20;
+            return 0;
+        }
+        gs_log("network check skipped: mobile data did not start", 0, 0);
+        gs_net = -1;
+        gs_phase = 21;
+        return 0;
+    case 20: {
+        struct kcell c;
+        kmodem_cell(&c);
+        if (c.state == KCELL_DATA) {
+            gs_log("mobile data up for Linux's network check after ms ", dt, 1);
+            gs_net = 1;
+            gs_phase = 21;
+        } else if (c.state == KCELL_NO_SIM || c.state == KCELL_SIM_LOCKED || c.state == KCELL_FAILED || dt > 120000) {
+            gs_log(c.state == KCELL_NO_SIM ? "network check skipped: no SIM" :
+                   c.state == KCELL_SIM_LOCKED ? "network check skipped: the SIM is locked" :
+                   c.state == KCELL_FAILED ? "network check skipped: Cellular failed" :
+                   "network check skipped: no mobile data within 120 s", 0, 0);
+            (void)kmodem_selftest_data(0);
+            gs_net = -1;
+            gs_phase = 21;
+        }
+        return 0;
+    }
+    case 21:
+        gs_t = now;
         if (!guest_available_mode(GUEST_WL))
             return gs_failed("the Linux apps' files are not in the store (guest-wl.img / .dtb / -rd.img)");
         sh_set("app", "terminal", 1);      /* as a tap on the icon: app_open -> sh_linux_open(foot) */
@@ -933,7 +974,8 @@ int gwin_selftest_step(void)
             if (sbg_stats()->touches_sent - sent < 2)
                 return gs_failed("the tap did not reach the guest's ring");
             gs_t = now;
-            gs_phase = 5;
+            gs_typed = 0;
+            gs_phase = gs_net == 1 ? 30 : 5;
         } else if (dt > 15000) {
             gs_log("the marker: ", (uint64_t)guest_term_ok(), 1);
             gs_log("window frames since the typing: ", frames - gs_frames, 1);
@@ -941,6 +983,34 @@ int gwin_selftest_step(void)
                                                "STARBITE-TERM-OK did not reach the guest's log within 15 s");
         }
         return 0;
+    case 30:                               /* 8l: Track E's network check, typed as the first command */
+        if (st != GUEST_RUNNING)
+            return gs_failed("Linux stopped by itself");
+        if (dt < 1000)
+            return 0;                      /* (the tap's events first) */
+        for (int i = 0; i < 4 && SBG_NETCHECK_CMD[gs_typed]; ++i, ++gs_typed)
+            if (!sh_linux_char(SBG_NETCHECK_CMD[gs_typed]))
+                return gs_failed("a character of the network check could not be typed");
+        if (!SBG_NETCHECK_CMD[gs_typed]) {
+            gs_log("typed: Linux's network check (netcheck-cmd.h)", 0, 0);
+            gs_t = now;
+            gs_phase = 31;
+        }
+        return 0;
+    case 31: {                             /* its line in the guest's log: up to 30 s for the link + 20 s curl */
+        if (st != GUEST_RUNNING)
+            return gs_failed("Linux stopped by itself");
+        const char *l = guest_net_line();
+        if (!l[0] && dt < 70000)
+            return 0;
+        int ok = sb_prefix(l, SBG_NETCHECK_PASS1) || sb_prefix(l, SBG_NETCHECK_PASS2);
+        sb_logf(ok ? "selftest: next-linux: network: PASS: " : "selftest: next-linux: network: FAILED: ",
+                l[0] ? l : "no answer from the guest's shell within 70 s");
+        guestnet_log();
+        gs_t = now - 1000;                 /* (case 5's wait is over) */
+        gs_phase = 5;
+        return 0;
+    }
     case 5:                                /* the tap's events delivered, then the Terminal closed, Linux stopped */
         if (dt < 1000)
             return 0;
@@ -953,6 +1023,7 @@ int gwin_selftest_step(void)
         return 0;
     case 6:
         if (st == GUEST_OFF) {
+            gs_data_off();
             gs_log("off; M3 cluster powered: ", (uint64_t)hw_m3_on(), 1);
             if (hw_m3_on() || guest_owns_m3())
                 return gs_failed("the M3 cluster still powered after the stop");
