@@ -12,6 +12,7 @@
  *   launch NAME | launch_stale NAME | activate NAME|none | close NAME | viewport ROWS WIDTH
  *   wait_window NAME 0|1 T          SBG_MSG_WINDOW with that app's index and b
  *   wait_frame T                    a new frame (surf_seq moved) after the last command
+ *   expect_pkg NAME IDX|none T      the catalog's store index (sbshm_app.pkg) for that app within T
  *   dump FILE                       the front buffer: FILE.ppm and FILE.png (the viewport's rows)
  *   tap X Y | tap_file PATH KEY     (KEY: a line "KEY:x y w h" in PATH: a tap at its middle)
  *   type TEXT                       SBG_MSG_TEXT, 8 bytes at most per message, whole characters
@@ -586,6 +587,19 @@ static void run_line(char *l)
 			flags_str(catc.app[i].flags, fl, sizeof(fl));
 		result(i >= 0 && !!(catc.app[i].flags & bit) == !!want, "%s: %s %u (flags %s, rss %u kB)", a1, a2, want, fl,
 		       i >= 0 ? catc.app[i].rss_kb : 0);
+	} else if (!strcmp(c, "expect_pkg")) {   /* 8i: the catalog's store index of an app (sbstore's apps.tsv) */
+		uint32_t want = !strcmp(a2, "none") ? SBSHM_NONE : (uint32_t)atoi(a2);
+		T = (unsigned)atoi(a3);
+		uint64_t end = ms_now() + T;
+		int i;
+		for (;;) {
+			i = app_find(a1);
+			if ((i >= 0 && catc.app[i].pkg == want) || ms_now() >= end)
+				break;
+			wait_ms(20);
+		}
+		result(i >= 0 && catc.app[i].pkg == want, "%s: store index %s (catalog: %d)", a1, a2,
+		       i >= 0 ? (int)catc.app[i].pkg : -2);
 	} else if (!strcmp(c, "launch") || !strcmp(c, "launch_stale")) {
 		int i = app_find(a1);
 		if (i < 0) {

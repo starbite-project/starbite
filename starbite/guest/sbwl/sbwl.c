@@ -2167,10 +2167,58 @@ static uint32_t app_flags(int i, uint32_t *rss)
 	return f;
 }
 
+/* the App Store's map of its installed apps' launchers (sbstore / sbpkg write /run/sbpkg/apps.tsv: "store index
+ * <TAB> key <TAB> desktop id" per launcher; 8i: never read, so every app's .pkg stayed NONE and the store's OPEN
+ * said "It has no window of its own"). Read again whenever the file changes (an install's rescan comes after it). */
+#define AMAP_MAX 256
+static struct { char desk[128]; uint32_t idx; } amap[AMAP_MAX];
+static int amap_n;
+static void amap_load(void)
+{
+	static struct timespec mt;
+	static off_t sz = -1;
+	struct stat st;
+	if (stat("/run/sbpkg/apps.tsv", &st)) {
+		amap_n = 0, sz = -1;
+		return;
+	}
+	if (st.st_size == sz && st.st_mtim.tv_sec == mt.tv_sec && st.st_mtim.tv_nsec == mt.tv_nsec)
+		return;
+	sz = st.st_size, mt = st.st_mtim;
+	FILE *f = fopen("/run/sbpkg/apps.tsv", "re");
+	amap_n = 0;
+	if (!f)
+		return;
+	char line[512];
+	while (amap_n < AMAP_MAX && fgets(line, sizeof(line), f)) {
+		char *t1 = strchr(line, '\t'), *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
+		if (!t2)
+			continue;
+		char *e = t2 + 1 + strcspn(t2 + 1, "\r\n");
+		*e = 0;
+		char *end;
+		unsigned long idx = strtoul(line, &end, 10);
+		if (end == line || end != t1 || idx >= SBSHM_PKGS_MAX || !t2[1])
+			continue;
+		snprintf(amap[amap_n].desk, sizeof(amap[amap_n].desk), "%s", t2 + 1);
+		amap[amap_n++].idx = (uint32_t)idx;
+	}
+	fclose(f);
+	say("catalog: the App Store's launchers: %d (/run/sbpkg/apps.tsv)", amap_n);
+}
+static uint32_t amap_pkg(const char *desk)
+{
+	for (int i = 0; i < amap_n; ++i)
+		if (!strcmp(amap[i].desk, desk))
+			return amap[i].idx;
+	return SBSHM_NONE;
+}
+
 static void cat_publish(void)
 {
 	if (!v2)
 		return;
+	amap_load();
 	volatile struct sbshm_cat *c = (volatile struct sbshm_cat *)(shm + SBSHM_CAT_OFF);
 	static struct sbshm_app now[SBSHM_APPS_MAX];
 	memset(now, 0, sizeof(now));
@@ -2198,7 +2246,7 @@ static void cat_publish(void)
 		memcpy(o->name, apps[i].name, l);
 		o->flags = app_flags(i, &o->rss_kb);
 		o->icon = i < (int)SBSHM_ICONS_CAT && icon_px[i] ? (uint32_t)i : SBSHM_NONE;
-		o->pkg = SBSHM_NONE;
+		o->pkg = amap_pkg(apps[i].id);
 	}
 	uint32_t mt, ma, st, sf;
 	meminfo(&mt, &ma, &st, &sf);

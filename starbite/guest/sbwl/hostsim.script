@@ -190,6 +190,16 @@ sh rm -f /usr/local/share/applications/sbwl-added.desktop
 sock rescan
 sleep 2000
 expect_no_app sbwl-added
+# 8i: the App Store's launchers (sbstore writes /run/sbpkg/apps.tsv before its "rescan") give the catalog's store
+# index, which the store's OPEN needs ("It has no window of its own" without it)
+expect_pkg org.gnome.Calculator none 1000
+sh mkdir -p /run/sbpkg && printf '7\tgnome-calculator\torg.gnome.Calculator\n12\tbroken\n' > /run/sbpkg/apps.tsv
+sock rescan
+expect_pkg org.gnome.Calculator 7 5000
+expect_pkg foot none 1000
+sh rm -f /run/sbpkg/apps.tsv
+sock rescan
+expect_pkg org.gnome.Calculator none 5000
 include hostsim-v3.script
 include hostsim-rot.script
 catalog catalog-end.txt
