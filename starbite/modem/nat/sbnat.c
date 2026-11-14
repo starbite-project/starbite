@@ -281,6 +281,7 @@ void sbnat_init(struct sbnat *n, const struct sbnat_cfg *cfg)
     uint32_t i;
     cp4(n->uplink, cfg->uplink);
     cp4(n->dns, cfg->dns);
+    cp4(n->kept, cfg->uplink);
     n->port_lo = cfg->port_lo;
     n->port_hi = cfg->port_hi;
     if (n->port_lo == 0 || n->port_hi < n->port_lo) {
@@ -300,15 +301,19 @@ void sbnat_uplink_changed(struct sbnat *n, const uint8_t addr[4], const uint8_t 
 {
     static const uint8_t none[4] = { 0, 0, 0, 0 };
     uint32_t i;
+    int gone = !addr || eq4(addr, none);
     cp4(n->uplink, addr ? addr : none);
     cp4(n->dns, dns ? dns : none);
+    n->st.uplink_changes++;
+    if (gone || eq4(addr, n->kept))
+        return;                     /* no uplink for now, or the same address back: the mappings stay */
+    cp4(n->kept, addr);
     for (i = 0; i < SBNAT_ENTRIES; i++) {
         if (n->map[i].proto) {
             drop_entry(n, &n->map[i]);
             n->st.flushed++;
         }
     }
-    n->st.uplink_changes++;
 }
 
 void sbnat_tick(struct sbnat *n, uint64_t now_ms)

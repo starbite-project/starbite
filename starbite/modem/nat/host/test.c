@@ -547,6 +547,37 @@ static void test_uplink_change(void)
     CHECKEQ(U(b, len), SBNAT_NOT_OURS);
 }
 
+/* Track A (2026-11-14): a Wi-Fi reconnect (the uplink gone, then the same address back) keeps the guest's flows; a new
+ * address still drops them */
+static void test_uplink_return(void)
+{
+    uint8_t b[200], o[200];
+    unsigned len;
+    reset();
+    len = mk_tcp(b, GUEST, 50000, WEB, 80, 0x02, 0);
+    CHECKEQ(G(b, len), SBNAT_SEND);
+    memcpy(o, b, len);
+    CHECKEQ(sbnat_count(&nat, now), 1);
+    sbnat_uplink_changed(&nat, 0, 0);                   /* Wi-Fi lost */
+    CHECKEQ(sbnat_count(&nat, now), 1);
+    CHECKEQ(nat.st.flushed, 0);
+    len = mk_tcp(b, GUEST, 50000, WEB, 80, 0x10, 0);
+    CHECKEQ(G(b, len), SBNAT_DROP);                     /* nothing goes out meanwhile (the guest retransmits) */
+    sbnat_uplink_changed(&nat, UP, DNS);                /* back, the same address */
+    CHECKEQ(sbnat_count(&nat, now), 1);
+    CHECKEQ(nat.st.flushed, 0);
+    len = reply_tcp(b, o, 0x12, 0);
+    CHECKEQ(U(b, len), SBNAT_TO_GUEST);                 /* the server's answer reaches the guest's flow again */
+    CHECK(pkt_ok(b));
+    len = mk_tcp(b, GUEST, 50000, WEB, 80, 0x10, 0);
+    CHECKEQ(G(b, len), SBNAT_SEND);
+    CHECK(!memcmp(b + 12, UP, 4));
+    sbnat_uplink_changed(&nat, 0, 0);
+    sbnat_uplink_changed(&nat, UP2, DNS2);              /* back with a new address: the flows can't survive it */
+    CHECKEQ(sbnat_count(&nat, now), 0);
+    CHECKEQ(nat.st.flushed, 1);
+}
+
 static void test_expiry(void)
 {
     uint8_t b[200], o[200];
@@ -949,7 +980,8 @@ static void test_fuzz(void)
         unsigned len, k, pl = rnd() % 200, ep;
         int nocs = (rnd() & 7) == 0, res;
         now += rnd() % 3;
-        if (nfl == lim) {   /* flush before the table can fill */
+        if (nfl == lim) {   /* flush before the table can fill (another address flushes; the same one keeps them) */
+            sbnat_uplink_changed(&nat, UP2, DNS2);
             sbnat_uplink_changed(&nat, UP, DNS);
             nfl = 0;
         }
@@ -1104,6 +1136,7 @@ int main(void)
     test_icmp_echo();
     test_icmp_errors();
     test_uplink_change();
+    test_uplink_return();
     test_expiry();
     test_table_full();
     test_misc_drops();
