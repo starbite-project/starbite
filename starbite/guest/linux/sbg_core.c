@@ -55,6 +55,8 @@ static u32 fn_cpu_off = PSCI_0_2_FN_CPU_OFF;
 static atomic_t db_count = ATOMIC_INIT(0);
 static atomic_t sbg_db_on_cpu[8];		/* 8e: the doorbell's interrupts by CPU (sbblk_report) */
 static int sbg_db_irq_nr;
+static bool sbg_db_bad;				/* 8e: the doorbell found lost (sbg_db_lost_fn) */
+static atomic_t sbblk_found_by_timer = ATOMIC_INIT(0), sbblk_completions = ATOMIC_INIT(0);	/* 8e: sbblk_timer_fn */
 static void __iomem *fp_pmu, *fp_intr, *fp_mbox;	/* /psci starbite,flexpmu (the S9) */
 static DECLARE_WAIT_QUEUE_HEAD(db_wait);
 
@@ -263,6 +265,8 @@ static void sbg_freeze_fn(struct work_struct *w)
 static DECLARE_WORK(sbg_freeze_work, sbg_freeze_fn);
 static void sbg_freeze_db(void)
 {
+	if (READ_ONCE(sbg_db_bad))
+		return;				/* 8e: no freeze without a doorbell to thaw it (sbg_db_lost_fn) */
 	if (sbg_freeze_wanted()) {
 		if (!atomic_xchg(&sbg_freeze_busy, 1))
 			queue_work(system_unbound_wq, &sbg_freeze_work);
@@ -277,11 +281,13 @@ static void sbg_freeze_db(void) { }
 /* ---- /dev/sbshm ------------------------------------------------------------------------------------ */
 static void sbblk_kick(void);
 
-static irqreturn_t sbg_db_irq(int irq, void *dev)
+/* what a doorbell does (the interrupt, or the soft doorbell below when the interrupt does not come) */
+static void sbg_db_serve(bool wake_user)
 {
-	atomic_inc(&db_count);
-	atomic_inc(&sbg_db_on_cpu[raw_smp_processor_id() & 7]);
-	wake_up_interruptible(&db_wait);
+	if (wake_user) {
+		atomic_inc(&db_count);
+		wake_up_interruptible(&db_wait);
+	}
 	sbblk_kick();				/* the doorbell is shared: completions may be waiting */
 	sbnet_kick();				/* v3: each service checks its own rings */
 	sbp9_kick();
@@ -289,8 +295,50 @@ static irqreturn_t sbg_db_irq(int irq, void *dev)
 	if (READ_ONCE(hdr->host_state) == SBG_HOST_STOPPING && !atomic_xchg(&sbg_stop_armed, 1))
 		schedule_delayed_work(&sbg_stop_work, SBG_STOP_GRACE_S * HZ);
 	sbg_freeze_db();
+}
+
+static irqreturn_t sbg_db_irq(int irq, void *dev)
+{
+	atomic_inc(&sbg_db_on_cpu[raw_smp_processor_id() & 7]);
+	sbg_db_serve(true);
 	return IRQ_HANDLED;
 }
+
+/* 8e (Track E, Track A's ask): in some phone boots the host's doorbell never reaches Linux (sbblk_timer_fn). Once
+ * sbblk's counts say so, Linux (a) stops offering the freeze: a frozen Linux wakes only by that doorbell, and one
+ * that cannot thaw is worse than one that stays awake (the host's sbg_freeze then returns -1 and Starbite stops an
+ * unused Linux as before the instant start), and (b) serves itself a soft doorbell every 20 ms: the host's
+ * messages (a new entry in the host -> guest ring wakes /dev/sbshm's readers, sbwl), its stop, and the services'
+ * rings; user space is also woken every 250 ms in case the host changed something else. */
+#define SBG_SOFT_DB_MS 20
+#define SBG_SOFT_WAKE_MS 250
+static struct timer_list sbg_soft_db;
+static const volatile u32 *sbg_h2g_head;
+static u32 sbg_soft_head;
+static unsigned long sbg_soft_woke;
+static void sbg_soft_db_fn(struct timer_list *t)
+{
+	u32 h = sbg_h2g_head ? READ_ONCE(*sbg_h2g_head) : 0;
+	bool wake = h != sbg_soft_head || READ_ONCE(hdr->host_state) == SBG_HOST_STOPPING ||
+		    time_after(jiffies, sbg_soft_woke + msecs_to_jiffies(SBG_SOFT_WAKE_MS));
+
+	sbg_soft_head = h;
+	if (wake)
+		sbg_soft_woke = jiffies;
+	sbg_db_serve(wake);
+	mod_timer(&sbg_soft_db, jiffies + max(1UL, msecs_to_jiffies(SBG_SOFT_DB_MS)));
+}
+static void sbg_db_lost_fn(struct work_struct *w)
+{
+	pr_warn("sbguest: the host's doorbell does not reach Linux (sbblk: %d of %d completions found by the timer): no freeze offered (an unused Linux is stopped instead), a soft doorbell every %d ms\n",
+		atomic_read(&sbblk_found_by_timer), atomic_read(&sbblk_completions), SBG_SOFT_DB_MS);
+	WRITE_ONCE(hdr->guest_caps, READ_ONCE(hdr->guest_caps) & ~SBSHM_CAP_FREEZE);
+	sbg_h2g_head = sbg_vmap_wc(SBSHM_H2G_OFF, PAGE_SIZE);
+	timer_setup(&sbg_soft_db, sbg_soft_db_fn, 0);
+	sbg_soft_woke = jiffies;
+	mod_timer(&sbg_soft_db, jiffies + 1);
+}
+static DECLARE_WORK(sbg_db_lost_work, sbg_db_lost_fn);
 
 static int sbg_mmap(struct file *f, struct vm_area_struct *vma)
 {
@@ -413,12 +461,25 @@ static void sbblk_kick(void)
  * ~52 ms: 106, 262, 314 ms; the same steps 11-57 ms in other boots of the same build), as if the completions were
  * found by this timer (then every HZ / 20) and not by the doorbell. The timer now polls every jiffy while requests
  * are in flight, doorbell or not, and counts how often it finds completions waiting (sbblk_report at 15 s): */
-static atomic_t sbblk_found_by_timer = ATOMIC_INIT(0), sbblk_completions = ATOMIC_INIT(0);
 
 static void sbblk_timer_fn(struct timer_list *t)
 {
-	if (READ_ONCE(sbblk->done_head) != READ_ONCE(sbblk_done_tail))
-		atomic_inc(&sbblk_found_by_timer);
+	static int win_done, win_found;
+
+	if (READ_ONCE(sbblk->done_head) != READ_ONCE(sbblk_done_tail)) {
+		int done = atomic_read(&sbblk_completions), found = atomic_inc_return(&sbblk_found_by_timer);
+
+		/* the doorbell lost: over the last 64+ completions more than half were found here (QEMU: ~8 % with
+		 * the doorbell, ~93 % without); a window, so a doorbell lost later is seen too */
+		if (done - win_done >= 64) {
+			if (!sbblk_polled && !sbg_db_bad && 2 * (found - win_found) > done - win_done) {
+				WRITE_ONCE(sbg_db_bad, true);
+				schedule_work(&sbg_db_lost_work);
+			}
+			win_done = done;
+			win_found = found;
+		}
+	}
 	sbblk_kick();
 	if (!bitmap_empty(sbblk_busy, SBSHM_BLK_SLOTS))
 		mod_timer(&sbblk_timer, jiffies + sbblk_period);
@@ -837,6 +898,9 @@ static void __exit sbg_exit(void)
 		timer_shutdown_sync(&sbg_load_timer);
 	cancel_delayed_work_sync(&sbg_stop_work);
 	cancel_delayed_work_sync(&sbblk_report_work);
+	cancel_work_sync(&sbg_db_lost_work);
+	if (sbg_soft_db.function)
+		timer_shutdown_sync(&sbg_soft_db);
 #ifdef CONFIG_SUSPEND
 	cancel_work_sync(&sbg_freeze_work);
 #endif
