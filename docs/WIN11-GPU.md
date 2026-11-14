@@ -2701,6 +2701,20 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - Still to see: the big-core row under the user's drags (the M3 hang rate was ~10x the A55's): DiagI2cRetry should
   drop to ~0, I2cPollRescue/SynthDone carry the rescues. touchdiag-3's 25 ms x 5 stays as the safety net.
 
+### 6.88c The user's big-core session with touch-6: "basically fixed"; the chip ends a contact after ~24 s
+
+- session4 (BigCore 3, td3-25ms-5x + sbhsi2c-3): **I2cPollRescue 644, I2cPollSynthDone 255** over 12473 transfers
+  (~6200 reads): on the M3 roughly 1 transfer in 7 needed the poll, and all completed within a few ms.
+  DiagI2cRetry 9 (all ok), DiagI2cError 0, DiagSpbMaxUs 54 ms, DiagEventsMax 13, DiagSelf 0/200 + 0/200 (max 5.9 /
+  6.1 ms). I2cCancelCount 9 (= the 9 retries' cancelled first tries; one with soft=0x80: a TRANSFER_DONE taken by the
+  ISR but not yet processed when the client's 25 ms ran out).
+- **The drag that let go:** two long drags end in a chip RELEASE after 24.04 s (71375 -> 95415 ms) and 24.20 s
+  (96074 -> 120270 ms); the next press is 0.66 s later at another place (the user pressing again). No all-up, no
+  gap before them. A cutoff at the same ~24 s twice = the touch controller's firmware ending a long contact (Samsung
+  touch ICs re-baseline / drop long-held touches), not our drivers. Fix candidates: the chip's own settings (the Android
+  sec_ts driver's commands; not in the repo) or, in s6touchdiag, re-sending a contact the chip drops while it keeps
+  reporting moves (it doesn't here: the finger simply vanishes). Needs the chip documentation; parked.
+
 ### 6.85 Zero-copy on screen is the top track again: T66 (VIS3) = VIS2's ETW, finally elevated
 
 - **The user (11-14):** touch-4 works ("drags are fine"); GD ~30 fps, taps less late but still late; "wheres the work
