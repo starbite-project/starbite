@@ -11,7 +11,7 @@
  *   - the App Store: shell_appstore.inc (Track F: tabs, Today, Browse, Search, Updates, the app's page with its
  *     install methods; its own layers, no strips).
  * shell_lock.c calls only the lx_* hooks at the end of this file (and the shell.h callbacks come here). ---- */
-static struct { int state, got, first, shift, num, kb, text, zc; unsigned flags, mods; char why[64], id[40], name[32]; } LX;
+static struct { int state, got, first, shift, num, kb, text, zc, kbhide; unsigned flags, mods; char why[64], id[40], name[32]; } LX;
 static sh_lcat_t LCAT;                           /* the shell's copy of the catalog (kept while Linux is off) */
 static const sh_lstore_t *LST;                   /* the platform's packages (sh_linux_store) */
 static tk_layer aplin[4], aplst;
@@ -338,6 +338,31 @@ static int lx_slot_icon(int s)
 static uint32_t *lrow[2 * SH_LINUX_H];           /* the window's bitmap rows (a hidden strip's: lsink) */
 static uint32_t lsink[2 * SH_LINUX_W] __attribute__((aligned(16)));
 static tk_layer apkb;                            /* the keyboard (Linux apps, the App Store's search) */
+static tk_layer apkbbtn;                         /* 8q: "Keyboard", to bring a hidden keyboard back */
+/* 8q (the user, 8o: the keyboard is "hard to close"): the key bar's Done hides it (LX.kbhide) and the app gets the
+ * whole window; a "Keyboard" pill at the window's bottom right brings it back; a new text focus or an open resets it */
+#define KBB_X 286.0f
+#define KBB_Y 722.0f
+#define KBB_W 92.0f
+#define KBB_H 34.0f
+static int lx_kb_wanted(void) { return is_app("terminal") || (LX.flags & SH_LAPP_KEYBOARD) || LX.text; }
+static void lx_kbbtn_build(void)
+{
+    int want = lx_is_lin() && LX.kbhide && lx_kb_wanted();
+    if (want == (apkbbtn.bmp.px && !apkbbtn.hidden)) return;   /* (only on a change: the catalog comes every ~2 s) */
+    relayer(&apkbbtn);
+    apkbbtn.hidden = 1;
+    if (!want) return;
+    dc d = mk(&apkbbtn, "linux-kb-show", KBB_X, KBB_Y, KBB_W, KBB_H, 6, 0);
+    d_rrect(&d, KBB_X, KBB_Y, KBB_W, KBB_H, KBB_H / 2, TK_RGBA(40, 40, 46, .86f));
+    float w = tw(TK_IT600, 14, "Keyboard", 0, 0);
+    d_text(&d, TK_IT600, 14, KBB_X + (KBB_W - w) / 2, base_of(TK_IT600, 14, KBB_Y, KBB_H), "Keyboard", 0, 0, W(.95f), 0);
+    apkbbtn.hidden = 0;
+}
+static int lx_kbbtn_hit(float x, float y)
+{
+    return !apkbbtn.hidden && apkbbtn.bmp.px && x >= KBB_X - 6 && x <= KBB_X + KBB_W + 6 && y >= KBB_Y - 6 && y <= KBB_Y + KBB_H + 6;
+}
 /* B3: the shell keyboard (shell_kb.inc) on its own layers; apkb stays empty (kept for the layer list) */
 static void lx_build_kb(int on, int shift, int num)
 {
@@ -484,8 +509,9 @@ void sh_linux_state(int state, const char *why)
  * viewport follows it (the app gets a configure with the new size) */
 static void lx_kb_update(int rebuild)
 {
-    int kb = is_app("terminal") || (LX.flags & SH_LAPP_KEYBOARD) || LX.text;
-    if (kb == LX.kb) return;
+    int kb = lx_kb_wanted() && !LX.kbhide;
+    lx_kbbtn_build();
+    if (kb == LX.kb) { relink(); return; }
     LX.kb = kb;
     LX.shift = LX.num = 0;
     sh_linux_viewport(kb ? LX_KBROWS : SH_LINUX_H);
@@ -493,6 +519,7 @@ static void lx_kb_update(int rebuild)
 }
 void sh_linux_textfocus(int on)
 {
+    if (on && !LX.text) LX.kbhide = 0;            /* 8q: a new text field: the keyboard again */
     LX.text = !!on;
     if (lx_is_lin()) lx_kb_update(1);
 }
@@ -563,7 +590,7 @@ static void lx_prepare(int a)
     int ci = term ? lx_cat_find(SH_LINUX_TERMINAL) : lx_pick;
     lx_pick = -1;
     if (!term && (ci < 0 || ci >= LCAT.n)) ci = 0;
-    LX.shift = LX.num = LX.text = 0;
+    LX.shift = LX.num = LX.text = LX.kbhide = 0;
     LX.first = 1;
     LX.got = 0;
     lx_scopy(LX.id, term ? SH_LINUX_TERMINAL : ci < LCAT.n ? LCAT.app[ci].id : "", 40);
@@ -885,23 +912,25 @@ static __attribute__((unused)) int lx_sw_current(void) { return AP.on && lx_is_l
 
 /* ---- the key bar over the keyboard while a Linux window has it: Esc Tab Ctrl Alt and the arrows; Ctrl / Alt latch
  * for the next key (shown as CTRL / ALT while latched): KEYMOD, the key down + up, KEYMOD 0 ---- */
-static const char *const LXK[8] = { "Esc", "Tab", "Ctrl", "Alt", "\xe2\x86\x90", "\xe2\x86\x91", "\xe2\x86\x93", "\xe2\x86\x92" };
-static const int LXKC[8] = { 1, 15, 0, 0, 105, 103, 108, 106 };   /* KEY_ESC, KEY_TAB, -, -, LEFT, UP, DOWN, RIGHT */
-static const char *lxk_now[8];
+static const char *const LXK[9] = { "Esc", "Tab", "Ctrl", "Alt", "\xe2\x86\x90", "\xe2\x86\x91", "\xe2\x86\x93", "\xe2\x86\x92",
+                                    "Done" };   /* 8q: Done hides the keyboard */
+static const int LXKC[9] = { 1, 15, 0, 0, 105, 103, 108, 106, 0 };   /* KEY_ESC, KEY_TAB, -, -, LEFT, UP, DOWN, RIGHT, - */
+static const char *lxk_now[9];
 static int lx_acc_on;
 static void lx_acc_tap(int i);
 static void lx_acc_show(int on)
 {
     if (!on) { if (lx_acc_on) kb_accessory(0, 0, 0); lx_acc_on = 0; return; }
-    for (int i = 0; i < 8; i++) lxk_now[i] = LXK[i];
+    for (int i = 0; i < 9; i++) lxk_now[i] = LXK[i];
     if (LX.mods & SH_LMOD_CTRL) lxk_now[2] = "CTRL";
     if (LX.mods & SH_LMOD_ALT) lxk_now[3] = "ALT";
-    kb_accessory(lxk_now, 8, lx_acc_tap);
+    kb_accessory(lxk_now, 9, lx_acc_tap);
     lx_acc_on = 1;
 }
 static void lx_acc_tap(int i)
 {
     if (i == 2 || i == 3) { LX.mods ^= i == 2 ? SH_LMOD_CTRL : SH_LMOD_ALT; lx_acc_show(1); relink(); return; }
+    if (i == 8) { LX.kbhide = 1; LX.mods = 0; lx_kb_update(1); relink(); return; }   /* 8q: Done */
     if (i < 0 || i >= 8) return;
     (void)sh_linux_key(LXKC[i], LX.mods);
     if (LX.mods) { LX.mods = 0; lx_acc_show(1); relink(); }
@@ -1000,7 +1029,8 @@ static void lx_close(void)
     for (int k = 0; k < 4; k++) { relayer(&aplin[k]); aplin[k].hidden = 1; aplin[k].clip = 0; }
     relayer(&apkb); apkb.hidden = 1;
     relayer(&aplst); aplst.hidden = 1;
-    LX.text = 0; LX.kb = 0;
+    LX.text = 0; LX.kb = 0; LX.kbhide = 0;
+    relayer(&apkbbtn); apkbbtn.hidden = 1;        /* 8q */
     aq_close();                                   /* Track F: the App Store's layers */
 }
 /* app_tap: 1 taken */
@@ -1033,6 +1063,7 @@ static int lx_touch(int ph, float x, float y)
 {
     if (ph == 0) {
         LT.mode = 0;
+        if (lx_is_lin() && lx_kbbtn_hit(x, y)) { LT.mode = 3; return 1; }   /* 8q: the "Keyboard" pill (on its release) */
         if (lx_is_lin() && lx_at(x, y)) { LT.mode = 1; lx_win_touch(0, x, y); }
         else if (is_app("store") && aq_touch(0, x, y)) { LT.mode = 2; lx_press(x, y); }
         return LT.mode != 0;
@@ -1040,6 +1071,7 @@ static int lx_touch(int ph, float x, float y)
     if (LT.lit && (ph == 2 || tk_fabsf(x - LT.x0) > 8 || tk_fabsf(y - LT.y0) > 8)) lx_unpress();
     if (LT.mode == 1) lx_win_touch(ph, x, y);
     else if (LT.mode == 2) aq_touch(ph, x, y);
+    else if (LT.mode == 3 && ph == 2 && lx_kbbtn_hit(x, y)) { LX.kbhide = 0; lx_kb_update(1); relink(); }
     if (ph == 2) LT.mode = 0;
     return 1;
 }
@@ -1057,6 +1089,7 @@ static int lx_layers(tk_layer **o)
     o[n++] = &aplst;
     n += aq_layers(o + n);                        /* Track F: the App Store */
     o[n++] = &apkb;
+    if (apkbbtn.name) o[n++] = &apkbbtn;
     return n;
 }
 /* sh_set: "lapp=ID:v" a Linux app by its desktop id; the App Store's store=, storecat=, storeq=, storeapp=,
