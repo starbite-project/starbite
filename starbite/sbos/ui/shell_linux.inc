@@ -514,7 +514,7 @@ static void lx_kb_update(int rebuild)
 }
 void sh_linux_textfocus(int on)
 {
-    if (on && !LX.text) LX.kbhide = 0;            /* 8q: a new text field: the keyboard again */
+    if (on) LX.kbhide = 0;                        /* 8q: a text field (new, or tapped again: sbwl resends 1): the keyboard again */
     LX.text = !!on;
     if (lx_is_lin()) lx_kb_update(1);
 }
