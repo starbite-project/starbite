@@ -2354,7 +2354,8 @@ static int glass_cal_step(void)
             ub_init(&u);
             ub_s(&u, "next: arena free at the self test's end: ");
             ub_dec(&u, sb_arena_free() >> 10);
-            ub_s(&u, sb_arena_free() >= (3ULL << 20) ? " KiB (snd's 3 MiB cache would fit)" : " KiB (snd's 3 MiB cache would NOT fit)");
+            ub_s(&u, snd_reserved() ? " KiB; snd's firmware cache reserved at boot: yes (its 3 MiB already out of this)"
+                                    : " KiB; snd's firmware cache reserved at boot: NO");
             sb_log(u.b);
         }
         gcal = 10;

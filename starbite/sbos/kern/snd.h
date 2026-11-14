@@ -161,5 +161,6 @@ void drv_audio_abort(void);
 
 #ifdef SBOS_KERNEL
 void snd_reserve(void);                     /* boot, before the UI's heap: the firmware cache's 3 MiB (no I/O) */
+int snd_reserved(void);                     /* 1 when that cache's memory is held (Track A's self-test end line) */
 #endif
 #endif

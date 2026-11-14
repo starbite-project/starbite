@@ -2105,6 +2105,10 @@ static void fwc_add(const char *path, uint32_t len)
     fwc_used += (len + 63U) & ~63U;
     fwc_n++;
 }
+int snd_reserved(void)
+{
+    return fwc_buf != 0;
+}
 /* boot, before the UI's heap takes the arena (main.c, beside kmodem_reserve): the cache's 3 MiB, no I/O. Without it
  * the arena can be full by snd_init_libsb (drivers runs 13-14: snd's cache did not fit in the probe images). */
 void snd_reserve(void)
