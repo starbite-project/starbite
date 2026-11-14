@@ -46,6 +46,19 @@ Kinibi). The GPL code has nothing that locks CSIS3 *outside* the secure scenario
 TZASC / TZPC already guards CSIS3 or its DMA at boot can only be tested on the phone (probe P1b). If it is locked,
 there is no iris camera for us (the PREPARE path needs Samsung's TA) and this plan stops at a clear "not possible".
 
+**What the stock firmware says (2026-11-14, `build/fw-vg6/bl/sboot.bin`, G960FXXUHFVG6, strings only):** the
+secure-camera lock is applied **on request**, not at boot. Its messages sit with the other on-demand protections that
+the EL3 / S-Boot side applies when the stock kernel makes an SMC fast call ("Fingerprint", "MST", "eSE"):
+"Secure camera - %s: successfully protected %x", "Protection error in Secure camera %x", "Secure camera - invalid
+fastcall id %x", plus a `set_tzpc_secure_camera` routine and `sec_cam_sec_map()`. The kernel side matches:
+MC_SECURE_CAMERA_PREPARE (0x83000043) only for scenario 6, UNPREPARE (0x83000044) on errors and runtime suspend.
+Starbite never makes that call. And the four CSIS ports share one SysMMU (`sysmmu@16310000`, "3AAM, 3AA, PDP",
+normal base + a `secure_base` 0x16300000): the front camera's CSIS1 already wrote frames to our RAM through it on
+this phone. **So: very likely usable** (the lock is per session; CSIS3 is in the same domain and SysMMU as a port
+that works). What only the phone can settle: the per-IP default in ISPPRE's DTZPC (the table cam.c's "DTZPC restore"
+SMC re-applies when the domain powers on) for CSIS3 and its DMA. P0 reads CSIS3 fault-safe when ISPPRE is already on;
+P1 powers ISPPRE and reads it, then P1b captures one frame.
+
 ## 3. Our own matcher (stock's is in the TEE: we cannot use it)
 
 A classic Daugman pipeline, chosen because it is fast, small, well understood and needs no training data:
