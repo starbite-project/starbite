@@ -92,6 +92,65 @@ static void lx_bmp_fit(tk_bmp *dst, const tk_bmp *src)
 }
 /* a Linux app's icon as the home draws icons: the pool's icon at 74 % on a dark rounded tile (iOS's 22 % corner), a
  * small Tux badge in the corner (Linux apps beside Starbite's own); no icon: the name's first letter */
+/* 8q (Track A; the user, 8o: "starbite os shouldnt hide linux apps until linux has started"): Linux's app list kept in
+ * the home store (one blob, "linux.cat": ids, names, flags; ~80 bytes an app), so page 3, the App Library and a tap work
+ * from the power-on: each icon the usual tile with the app's initial until Linux's own list (with its icons) replaces
+ * the kept one. No icons are kept: the store holds 16 blobs and 160 KB for every app. A tap before Linux is up starts it
+ * and opens the app once its list has it (sh_linux_open by id). Written again only when the list changes */
+#define LXK_REC 76                                 /* id 40, name 32, flags 4 */
+static int lxk_restored, lxk_tried, lxk_cat_due;
+static uint32_t lxk_saved;                         /* the kept list's signature (in the blob's header) */
+static uint8_t lxk_b[12 + SH_LAPPS * LXK_REC];
+static void lxk_load(void)
+{
+    if (lxk_tried || LCAT.n > 0) return;
+    lxk_tried = 1;
+    int r = sh_blob_get("linux.cat", lxk_b, sizeof lxk_b);
+    if (r < 12 || lxk_b[0] != 'L' || lxk_b[1] != 'X' || lxk_b[2] != 'K' || lxk_b[3] != '1') return;
+    int n = lxk_b[4] | lxk_b[5] << 8;
+    if (n <= 0 || n > SH_LAPPS || r < 12 + n * LXK_REC) return;
+    for (int i = 0; i < n; i++) {
+        const uint8_t *q = lxk_b + 12 + i * LXK_REC;
+        sh_lapp_t *a = &LCAT.app[i];
+        tk_memset(a, 0, sizeof *a);
+        tk_memcpy(a->id, q, 39);
+        tk_memcpy(a->name, q + 40, 31);
+        a->flags = ((unsigned)q[72] | (unsigned)q[73] << 8) & (SH_LAPP_TERMINAL | SH_LAPP_KEYBOARD | SH_LAPP_SYSTEM);
+        a->icon = -1;                              /* (the tile with the initial until Linux sends its icons) */
+        a->pkg = -1;
+    }
+    LCAT.n = n;
+    lxk_restored = 1;
+    lxk_saved = (uint32_t)lxk_b[8] | (uint32_t)lxk_b[9] << 8 | (uint32_t)lxk_b[10] << 16 | (uint32_t)lxk_b[11] << 24;
+}
+static uint32_t lxk_sig(void)
+{
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < LCAT.n; i++) {
+        for (const char *t = LCAT.app[i].id; *t; t++) h = (h ^ (uint8_t)*t) * 16777619u;
+        for (const char *t = LCAT.app[i].name; *t; t++) h = (h ^ (uint8_t)*t) * 16777619u;
+        h = (h ^ (LCAT.app[i].flags & (SH_LAPP_TERMINAL | SH_LAPP_KEYBOARD | SH_LAPP_SYSTEM))) * 16777619u;
+    }
+    return (h ^ (uint32_t)LCAT.n) | 1u;
+}
+static int lxk_work(void) { return lxk_cat_due; }
+static void lxk_step(void)                         /* the idle's: the list into its blob */
+{
+    lxk_cat_due = 0;
+    tk_memset(lxk_b, 0, sizeof lxk_b);
+    lxk_b[0] = 'L', lxk_b[1] = 'X', lxk_b[2] = 'K', lxk_b[3] = '1';
+    lxk_b[4] = (uint8_t)LCAT.n, lxk_b[5] = (uint8_t)(LCAT.n >> 8);
+    lxk_b[8] = (uint8_t)lxk_saved, lxk_b[9] = (uint8_t)(lxk_saved >> 8);
+    lxk_b[10] = (uint8_t)(lxk_saved >> 16), lxk_b[11] = (uint8_t)(lxk_saved >> 24);
+    for (int i = 0; i < LCAT.n; i++) {
+        uint8_t *q = lxk_b + 12 + i * LXK_REC;
+        tk_memcpy(q, LCAT.app[i].id, 39);
+        tk_memcpy(q + 40, LCAT.app[i].name, 31);
+        unsigned f = LCAT.app[i].flags & (SH_LAPP_TERMINAL | SH_LAPP_KEYBOARD | SH_LAPP_SYSTEM);
+        q[72] = (uint8_t)f, q[73] = (uint8_t)(f >> 8);
+    }
+    if (sh_blob_put("linux.cat", lxk_b, (unsigned)(12 + LCAT.n * LXK_REC)) != 0) lxk_saved = 0;   /* (again next change) */
+}
 static int lx_make_icon(tk_bmp *out, int px, int icon, const char *name, int badge)
 {
     tk_bmp_free(out);
@@ -233,10 +292,11 @@ static void lx_page3_update(void)
     relink();
 }
 /* sh_idle: page 3's next icon, or the page once all are made; 1 if it did something */
-static int lx_idle_pending(void) { return lx_p3_want && lx_baked && !sh_sleeping(); }
+static int lx_idle_pending(void) { return ((lx_p3_want && lx_baked) || lxk_work()) && !sh_sleeping(); }
 static int lx_idle(void)
 {
     if (!lx_idle_pending()) return 0;
+    if (!(lx_p3_want && lx_baked)) { lxk_step(); return 1; }   /* 8q: keeping Linux's list (page 3's icons first) */
     if (lx_p3_seen()) { lx_build_page3(); relink(); return 1; }   /* in view now: the rest at once, as before */
     int px = (int)(PT(ICON_PT) + .5f);
     if (!store_ic.px) { lx_make_store_icon(&store_ic, px); return 1; }
@@ -439,11 +499,17 @@ void sh_linux_catalog(const sh_lcat_t *c)
     }
     int pk = h != pkgsig;
     pkgsig = h;
+    if (c->n <= 0 && lxk_restored) return;       /* 8q: an empty list while Linux starts: the kept one stays */
     LCAT = *c;
     if (LCAT.n > SH_LAPPS) LCAT.n = SH_LAPPS;
     if (LCAT.n < 0) LCAT.n = 0;
+    lxk_restored = 0;
     if (!lx_baked) return;
     lx_page3_update();
+    if (LCAT.n > 0) {                             /* 8q: kept for the next power-on when it changed (idle turns) */
+        uint32_t ks = lxk_sig();
+        if (ks != lxk_saved) { lxk_saved = ks; lxk_cat_due = 1; }
+    }
     if (lx_is_lin()) {
         int i = lx_cat_find(LX.id);
         if (i >= 0) { LX.flags = LCAT.app[i].flags; lx_kb_update(1); }
@@ -873,7 +939,7 @@ static int lx_icon(const char *k, float *pad, const tk_bmp **ic)
     return 1;
 }
 /* build_home: page 3 (hparts[5]) */
-static void lx_home(void) { lx_baked = 1; LH.sig = 0; lx_page3_update(); }
+static void lx_home(void) { lx_baked = 1; LH.sig = 0; lxk_load(); lx_page3_update(); }   /* 8q: the kept list first */
 /* app_hit on page 3 (x0: the page's own x): the APPS index of the App Store or of "linux" (lx_pick set), or -1 */
 static int lx_hit(float x0, float y)
 {
