@@ -20,6 +20,7 @@
 #                                    touchdiag-2 + a 25 ms timeout for touch-event reads instead of 250 ms, so a stuck
 #                                    read freezes the finger ~25 ms, not ~265 ms, before the retry). Refused unless the
 #                                    service already points at s6touchdiag.sys. Check boot as after apply.
+#   tools/win/touch.sh update OUT 2  the same, back to the touchdiag-2 file.
 #   tools/win/touch.sh show OUT      read-only: ImagePath and every Diag* value with the decoded trace.
 #
 # After apply, BEFORE anyone relies on touch, prove the driver loads with one unattended small-core boot:
@@ -63,13 +64,14 @@ show)
     adb shell "cat $W/ProgramData/Starbite/debloat/touch.log 2>/dev/null" | tr -d '\r' | tee -a "$out/touch.log"
     exit 0 ;;
 update)
-    [ "$(shasum -a 256 "$DRV3" | cut -c1-64)" = "$DRV3_SHA" ] || { log "$DRV3 is not touchdiag-3 ($DRV3_SHA)"; exit 1; }
+    if [ "${3:-3}" = 2 ]; then DRV3=$DRV; DRV3_SHA=$DRV_SHA; fi
+    [ "$(shasum -a 256 "$DRV3" | cut -c1-64)" = "$DRV3_SHA" ] || { log "$DRV3 is not the expected build ($DRV3_SHA)"; exit 1; }
     adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null
     adb pull "$W/$SYS" "$tmp/SYSTEM" >/dev/null
     python3 "$TD" "$tmp/SYSTEM" show | head -3 | grep -q 'ImagePath .*s6touchdiag.sys' || { log "the touch service does not use s6touchdiag.sys: run apply first"; exit 1; }
     adb pull "$W/Windows/System32/drivers/s6touchdiag.sys" "$out/backup/s6touchdiag-$(date +%Y%m%d-%H%M%S).sys" >/dev/null
     push_check "$DRV3" "$W/Windows/System32/drivers/s6touchdiag.sys"
-    log "update done: s6touchdiag.sys = touchdiag-3 (25 ms touch-read timeout). Next: the unattended check boot"
+    log "update done: s6touchdiag.sys = $([ "${3:-3}" = 2 ] && echo touchdiag-2 || echo "touchdiag-3 (25 ms touch-read timeout)"). Next: the unattended check boot"
     exit 0 ;;
 apply|restore) ;;
 *) echo "usage: touch.sh apply|update|restore|show OUT"; exit 1 ;;
