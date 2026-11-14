@@ -2775,6 +2775,26 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - Not addressed: the DComp swap chain's INVALIDHANDLE and the DComp surface's black clear (6.74); DXGI 1.2 flip model
   (true zero-copy to DWM) would need the DXGI 1.2 DDI; with 0159 a windowed frame costs one GPU blit, not a CPU copy.
 
+### 6.91 T66 read: with sbumd 0159 a windowed blt-model swap chain reaches the screen; flip model not yet
+
+- **T66** (big cores, sbumd cf13c58e, elevated VIS2 + ETW; 22:20-22:31): VIS-ELEV ran elevated (`elevated 1`), all four
+  ETW CSVs written (26-60 MB each).
+  - **sbcomp hwndblt (DISCARD, blt model): the magenta 1200x700 window is ON SCREEN** in the shot: the first windowed
+    D3D11 swap chain ever composed on this phone. 51.2 fps, 0 failures. 0159 was the cause.
+  - sbcomp hwnd (FLIP_SEQUENTIAL): 7.9 fps (T58: 73), and the shot is black apart from a small red patch: the flip
+    model still does not work (it would need the DXGI 1.2 DDI / flip support).
+  - dcsc (DComp swap chain): now runs, 43.7 fps, 0 failures (T56/T58: device removed at the first present); shot black.
+  - dcsurf: black rectangle as before (the clear emulation of 6.74).
+  - sbfps fullscreen-sized flip 279.7 fps / blt 41.8 fps; its BitBlt shots are all black (inconclusive).
+  - sbglzc (zero-copy GL, flip by default): the KMD now gets its presents (109 / 487 per run, before 0-9); 31.5 fps
+    flip, 56.5 fps discard vs GDI 148.6; its window was already gone at shot time; "2 failed" = the known readback limit.
+  - tracerpt did not decode DxgKrnl's event names (task numbers only); a manifest-based decoder is needed to read the
+    traces further.
+- **0161** (src-tc da894e7, `sb-patches/0161-wgl-zero-copy-default-discard.patch`): the GD ICD's zero-copy swap chain
+  defaults to DISCARD (blt model, 1 buffer); `SB_GL_ZC_SWAP=flip|flipdiscard` remain. ARM64EC build `build/win/gd-zc-0161`
+  (opengl32 35ec684e, libgallium_wgl 0997dd1b).
+- **T68 GO** with that build: GD on the big cores, A/A2 async GDI present vs B/B2 zero-copy (blt model into DWM).
+
 ### 6.90 Disk housekeeping (11-14 night) and where things are now
 
 - **Archived to `/Volumes/SBWORK/archive/`** (one file per group, listing counts checked before deleting):

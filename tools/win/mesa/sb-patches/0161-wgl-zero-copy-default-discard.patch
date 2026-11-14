@@ -1,0 +1,50 @@
+From da894e7c6604ca26f3970d7718426f8538b8e3f4 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Sat, 14 Nov 2026 22:32:30 +0200
+Subject: [PATCH] 0161: zero-copy present defaults to DISCARD (blt model): T66
+ shows windowed blt-model swap chains composed with sbumd 0159, flip model not
+
+---
+ src/gallium/targets/wgl/wgl_sb_zc.cpp | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/src/gallium/targets/wgl/wgl_sb_zc.cpp b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+index 197ae3b..9440a38 100644
+--- a/src/gallium/targets/wgl/wgl_sb_zc.cpp
++++ b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+@@ -19,7 +19,7 @@
+  *
+  * Environment: SB_GL_PRESENT=zc|gdi|copy (0160: zero-copy only with zc or the flag file
+  * C:\ProgramData\Starbite\glzc; otherwise the GDI paths), SB_GL_ZC_SWAP=flip|flipdiscard|discard
+- * (default flip = FLIP_SEQUENTIAL, 2 buffers), SB_GL_ZC_LOG=1 (setup steps and a timing line every 300 frames).
++ * (0161: default discard = DISCARD, 1 buffer; flip = FLIP_SEQUENTIAL, 2 buffers), SB_GL_ZC_LOG=1 (setup steps and a timing line every 300 frames).
+  * The process environment variable SB_GL_ZC_STATE says what this file did (for tests): "zc", "off", "fail:<step>",
+  * "gdi-after-resize", "gdi-after-present-failures".
+  */
+@@ -599,15 +599,18 @@ wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFo
+    fb->dfmt = dfmt;
+    QueryPerformanceFrequency(&fb->freq);
+    const char *se = getenv("SB_GL_ZC_SWAP");
+-   if (se && !strcmp(se, "discard")) {
+-      fb->effect = DXGI_SWAP_EFFECT_DISCARD;
+-      fb->nbuf = 1;
++   /* sb-patches/0161: DISCARD (blt model) is the default. T66 with sbumd 0159: a windowed blt-model swap chain is
++    * composed by DWM (sbcomp hwndblt shown), a FLIP_SEQUENTIAL one is not (black screen, 7.9 fps). flip /
++    * flipdiscard stay selectable with SB_GL_ZC_SWAP. */
++   if (se && !strcmp(se, "flip")) {
++      fb->effect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
++      fb->nbuf = 2;
+    } else if (se && !strcmp(se, "flipdiscard")) {
+       fb->effect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+       fb->nbuf = 2;
+    } else {
+-      fb->effect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+-      fb->nbuf = 2;
++      fb->effect = DXGI_SWAP_EFFECT_DISCARD;
++      fb->nbuf = 1;
+    }
+    RECT rc = {0, 0, 0, 0};
+    GetClientRect(hWnd, &rc);
+-- 
+2.43.0
+
