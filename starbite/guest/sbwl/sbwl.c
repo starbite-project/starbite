@@ -304,6 +304,7 @@ struct view {                              /* one xdg toplevel */
 	char desk[128];                        /* its app ("" until it maps) */
 	pid_t pid;                             /* its client's */
 	int mapped, dialog, x, y, gw, gh;
+	int gtk;                               /* its client is GTK 3 / 4 (view_gtk): 0 not looked yet, 1 yes, 2 no */
 	int asked, aw, ah, adialog;            /* the last configure sbwl asked for */
 };
 
@@ -754,6 +755,33 @@ static void new_text_input(struct wl_listener *l, void *data)
 	wl_list_insert(&S.tinputs, &t->link);
 	ti_follow();
 	cat_dirty = 1;                             /* KEYBOARD may change */
+}
+
+/* 8i ("half the screen"): GTK 3 / 4 make their text-input-v3 object only when a text field first gets the focus, so
+ * Weather and Celluloid had none, were flagged KEYBOARD (the fallback for toolkits without text-input), and the shell
+ * raised its keyboard and gave them the rows above it. A GTK client never needs the fallback: its text fields ask for
+ * the keyboard themselves (SBG_MSG_TEXT_FOCUS). Looked up once per window in the process's mapped libraries. */
+static int view_gtk(struct view *v)
+{
+	if (v->gtk)
+		return v->gtk == 1;
+	v->gtk = 2;
+	if (v->pid <= 0)
+		return 0;
+	char fn[64], line[512];
+	snprintf(fn, sizeof(fn), "/proc/%d/maps", (int)v->pid);
+	FILE *f = fopen(fn, "re");
+	if (!f) {
+		v->gtk = 0;                        /* (not readable yet: again at the next look) */
+		return 0;
+	}
+	while (fgets(line, sizeof(line), f))
+		if (strstr(line, "/libgtk-4.so") || strstr(line, "/libgtk-3.so")) {
+			v->gtk = 1;
+			break;
+		}
+	fclose(f);
+	return v->gtk == 1;
 }
 
 static int client_has_text_input(struct wl_client *c)
@@ -2149,7 +2177,7 @@ static uint32_t app_flags(int i, uint32_t *rss)
 	wl_list_for_each(v, &S.views, link)
 		if (v->mapped && !strcmp(v->desk, a->id)) {
 			win = 1;
-			ti |= client_has_text_input(wl_resource_get_client(v->top->resource));
+			ti |= client_has_text_input(wl_resource_get_client(v->top->resource)) || view_gtk(v);
 		}
 	if (win) {
 		f |= SBSHM_APP_WINDOW | SBSHM_APP_RUNNING;

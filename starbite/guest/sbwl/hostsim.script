@@ -79,6 +79,9 @@ expect_focus 0 2000
 launch org.starbite.GtkTest4
 wait_window org.starbite.GtkTest4 1 20000
 wait_frame 5000
+# 8i ("half the screen"): GTK 4 makes its text-input only when a field gets the focus (here the button has it):
+# still no KEYBOARD flag, so the host keeps the whole screen for the window
+expect_flag org.starbite.GtkTest4 keyboard 0 2000
 expect_file /tmp/sbwl-gtk4test.txt size:720x1344 5000
 tap_file /tmp/sbwl-gtk4test.txt entry
 expect_focus 1 3000
