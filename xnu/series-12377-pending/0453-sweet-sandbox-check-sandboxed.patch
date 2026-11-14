@@ -1,0 +1,91 @@
+From: starbite <starbite@local>
+Date: Sat, 14 Nov 2026 21:30:00 +0200
+Subject: [PATCH] patch: 0453-sweet-sandbox-check-sandboxed.patch - the Sandbox stand-in
+ answers sandbox_check(pid, NULL) ("is it sandboxed?") as macOS does: yes for the
+ app-sandbox entitlement or a profile the process applied itself (op 0); permission
+ checks stay allowed
+
+S3zg 2026-11-14: System Settings' panes (ExtensionKit, e.g. GeneralSettings, AppleIDSettings) and
+the wallpaper extension trap in xpc_main: "Configuration error: XPC service requested sandbox, but
+is not sandboxed!" (libxpc checks sandbox_check(getpid()) when the launch asked for a sandbox).
+Applies on 0452. Kernel seq1y = seq1x + this.
+---
+
+--- a/bsd/kern/sweet_amfi.c	2026-11-14 21:16:25
++++ b/bsd/kern/sweet_amfi.c	2026-11-14 21:16:25
+@@ -287,8 +287,43 @@
+  */
+ static uint64_t sweet_sandbox_seen;
+ 
++/*
++ * 0453: sandbox_check(pid, NULL, ...) = "is that process sandboxed?". libsystem_sandbox passes op 2 a block
++ * { u64 *result, u64 pid, const char *operation, ... } and reads *result after a successful syscall (non-zero =
++ * denied / sandboxed). The stand-in never wrote it, so every process looked unsandboxed, and libxpc's xpc_main()
++ * traps an XPC service whose launch requested a sandbox ("Configuration error: XPC service requested sandbox, but
++ * is not sandboxed!", S3zg 2026-11-14: System Settings' panes GeneralSettings / AppleIDSettings, the wallpaper
++ * extension). Answer that query as macOS would: sandboxed = the app-sandbox entitlement, or a profile the process
++ * applied itself (op 0). Permission checks (an operation name given) stay allowed.
++ */
++extern boolean_t IOTaskHasEntitlement(task_t task, const char *entitlement);
++extern task_t proc_task(proc_t);
++#define SWEET_SANDBOXED_PIDS 128
++static int sweet_sandboxed_pids[SWEET_SANDBOXED_PIDS];
++
++static bool
++sweet_sandbox_is_sandboxed(int pid)
++{
++	for (int i = 0; i < SWEET_SANDBOXED_PIDS; i++) {
++		if (sweet_sandboxed_pids[i] == pid && pid != 0) {
++			return true;
++		}
++	}
++	proc_t p = proc_find(pid);
++	if (p == PROC_NULL) {
++		return false;
++	}
++	bool yes = false;
++	task_t task = proc_task(p);
++	if (task != TASK_NULL) {
++		yes = IOTaskHasEntitlement(task, "com.apple.security.app-sandbox");
++	}
++	proc_rele(p);
++	return yes;
++}
++
+ static int
+-sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
++sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
+ {
+ 	if (call >= 0 && call < 64 && !(sweet_sandbox_seen & (1ULL << call))) {
+ 		sweet_sandbox_seen |= 1ULL << call;
+@@ -297,6 +332,30 @@
+ 		printf("SWEET Sandbox: %s op %d\n", name, call);
+ 	}
+ 	switch (call) {
++	case 0:         /* 0453: a profile applied by the process itself (sandbox_init*): remember it as sandboxed */
++	{
++		int pid = proc_pid(p);
++		static unsigned next;
++		for (int i = 0; i < SWEET_SANDBOXED_PIDS; i++) {
++			if (sweet_sandboxed_pids[i] == pid) {
++				return 0;
++			}
++		}
++		sweet_sandboxed_pids[next++ % SWEET_SANDBOXED_PIDS] = pid;
++		return 0;
++	}
++	case 2:         /* 0453: sandbox_check */
++	{
++		uint64_t a[3];
++		if (arg != USER_ADDR_NULL && copyin(arg, a, sizeof(a)) == 0 && a[2] == 0 && a[0] != 0) {
++			int pid = a[1] != 0 ? (int)a[1] : proc_pid(p);
++			if (sweet_sandbox_is_sandboxed(pid)) {
++				uint64_t one = 1;
++				(void)copyout(&one, (user_addr_t)a[0], sizeof(one));
++			}
++		}
++		return 0;
++	}
+ 	case 4:         /* container path (audit token / pid) */
+ 	case 5:         /* extension issue */
+ 	case 6:         /* extension consume */
