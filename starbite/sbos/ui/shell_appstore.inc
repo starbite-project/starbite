@@ -129,11 +129,30 @@ static int st_same_name(const char *a, const char *b)
         a++, b++;
     }
 }
+/* Track F, the catalog's GUI apps against Debian trixie's real .desktop files (2026-11-14): most Names equal the
+ * store's, but a few are the store's name and more ("VLC" / "VLC media player", "mpv Media Player", "SuperTux 2",
+ * "Firefox ESR"), and GIMP's is "GNU Image Manipulation Program" (its desktop id is the store's id, "gimp"). The
+ * store's own launchers (release / source installs) are "sbstore-<id>" with the store's name. */
+static int st_lower(char c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
+static int st_name_more(const char *desk, const char *store)          /* desk = store + " ..." */
+{
+    if (!store[0]) return 0;
+    while (*store && st_lower(*desk) == st_lower(*store)) desk++, store++;
+    return !*store && *desk == ' ';
+}
 static int st_app(int i)
 {
     for (int a = 0; a < LCAT.n; a++) if (LCAT.app[a].pkg == i) return a;
     if (i < 0 || !LST || i >= LST->n) return -1;
-    for (int a = 0; a < LCAT.n; a++) if (st_same_name(LCAT.app[a].name, LST->pkg[i].name)) return a;
+    const sh_lpkg_t *p = &LST->pkg[i];
+    for (int a = 0; a < LCAT.n; a++) {
+        const char *id = LCAT.app[a].id;
+        int sb = 0;
+        while (sb < 8 && id[sb] == "sbstore-"[sb]) sb++;
+        if (!tk_strcmp(id, p->pkg) || (sb == 8 && !tk_strcmp(id + 8, p->pkg))) return a;
+    }
+    for (int a = 0; a < LCAT.n; a++) if (st_same_name(LCAT.app[a].name, p->name)) return a;
+    for (int a = 0; a < LCAT.n; a++) if (st_name_more(LCAT.app[a].name, p->name)) return a;
     return -1;
 }
 static int aq_badge(void)
