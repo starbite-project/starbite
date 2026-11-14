@@ -17,6 +17,7 @@
 #include "shub_more.h"
 #include "haptic.h"
 #include "abox_media.h"
+#include "irisprobe.h"
 #include "sdprobe.h"
 
 /* ---- the list: filled in as each driver is merged ---- */
@@ -36,6 +37,8 @@ DRV_LIST_BEGIN
     { "sd", drv_sd_probe, drv_sd_abort, DRV_SD_BUDGET_MS },
     /* media through Calliope (abox_media.c), LAST so Calliope's boot and stream lines are in pmsg's tail (run 5: the
      * first Calliope boot on this phone; the bypass "audio" probe before it is known not to move, run 4) */
+    /* the iris scanner's P0 (irisprobe.c): read only (docs/drivers/IRIS.md) */
+    { "iris", drv_iris_probe, drv_iris_abort, DRV_IRIS_BUDGET_MS },
     { "calliope", drv_calliope_probe, drv_calliope_abort, DRV_CALLIOPE_BUDGET_MS },
     /* "audio" = snd's engine end to end through Calliope, LAST (run 7: its failure lines were cut from pmsg's tail
      * behind calliope's; calliope itself passed runs 6 and 7) */

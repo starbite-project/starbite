@@ -266,6 +266,14 @@ int fled_init(void)
     return st > 0;
 }
 
+/* one S2MPB02 register read (the drivers' iris probe: the IR LED's 0x13, 0x16-0x1B), bus up as fled_init; 0 ok */
+int fled_reg_read(uint8_t r, uint8_t *v)
+{
+    if (!fled_init())
+        return -1;
+    return reg_rd(r, v) ? 0 : -1;
+}
+
 int fled_r63(void)
 {
     return r63_val;                         /* the last read of 0x63 (-1 none); no chip access */
