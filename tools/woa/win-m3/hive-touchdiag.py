@@ -59,6 +59,11 @@ def show(h):
         print(f'{dev}: missing')
         return
     d = vals(h, dev)
+    # Track K 11-14: the driver's own start/D0 results too (both drivers write them), for a PASS check
+    for n in ('TouchStartStage', 'TouchStartStatus', 'TouchD0Status'):
+        if n in d and d[n][0] == 4:
+            x = int.from_bytes(d[n][1], 'little')
+            print(f'  {n} = {x} (0x{x:08X})')
     diag = {n: x for n, x in d.items() if n.startswith('Diag')}
     if not diag:
         print('no Diag* values (the diagnostic driver has not run, or never flushed)')
