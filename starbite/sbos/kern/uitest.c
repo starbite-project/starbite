@@ -26,6 +26,7 @@
 #include "kapp.h"
 #include "sbapp.h"
 #include "survival.h"
+#include "sd.h"                         /* 8f: the card's state at the self test's end */
 #if defined(SBOS_SELFTEST_SHUBPROBE) || defined(SBOS_SELFTEST_SHUB)
 #include "shub.h"
 #endif
@@ -34,7 +35,6 @@
 #endif
 #ifdef SBOS_SELFTEST_NEXT_DRV
 #include "drvprobe.h"
-#include "sd.h"                         /* 8f: the card's state at the end */
 #endif
 
 #ifdef SBOS_SELFTEST_ON
