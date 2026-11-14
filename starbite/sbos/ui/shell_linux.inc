@@ -454,7 +454,14 @@ void sh_linux_catalog(const sh_lcat_t *c)
 static int lx_at(float x, float y)
 {
     (void)x;
-    return aplin[0].bmp.px && !aplin[0].hidden && PT(y) >= SH_LINUX_Y && PT(y) < SH_LINUX_Y + 2 * (LX.kb ? LX_KBROWS : SH_LINUX_H);
+    int shown = aplin[0].bmp.px && !aplin[0].hidden;
+#ifdef TK_HAS_LAYER_EXTERNAL
+    /* 8o (Track A; the user, 8i + e8f: "weather works but no touch"): on the zero-copy path the window is the external
+     * layer (the strips stay hidden), so every touch on a Linux window was dropped here since 8d (the linuxtest's tap
+     * calls sh_linux_touch directly, past this check) */
+    shown |= LX.zc && !apext.hidden;
+#endif
+    return shown && PT(y) >= SH_LINUX_Y && PT(y) < SH_LINUX_Y + 2 * (LX.kb ? LX_KBROWS : SH_LINUX_H);
 }
 static void lx_win_touch(int phase, float x, float y)
 {

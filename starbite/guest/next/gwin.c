@@ -1001,9 +1001,14 @@ int gwin_selftest_step(void)
             if (lit < 4)
                 return gs_failed("the window shows no text");
             uint32_t sent = sbg_stats()->touches_sent;
-            sh_linux_touch(0, SH_LINUX_W / 2, SH_LINUX_HKB / 2);
-            sh_linux_touch(2, SH_LINUX_W / 2, SH_LINUX_HKB / 2);
-            gs_log("a tap in the window: touch messages sent ", sbg_stats()->touches_sent - sent, 1);
+            /* 8o: through the shell's own touch entry (its hit test on the window: the zero-copy path dropped every
+             * touch there since 8d while this test, calling sh_linux_touch directly, passed); the window's middle at
+             * the keyboard-up rows: 195 pt across, 162 + 2 * 458 panel rows down */
+            const float pt = 1440.0f / 390.0f;      /* panel px per pt (sbtk.h TK_PT) */
+            float tx = SH_LINUX_W / pt, ty = (SH_LINUX_Y + SH_LINUX_HKB) / pt;
+            sh_touch(0, tx, ty, (float)now);
+            sh_touch(2, tx, ty, (float)now + 60.0f);
+            gs_log("a tap in the window (the shell's touch path): touch messages sent ", sbg_stats()->touches_sent - sent, 1);
             if (sbg_stats()->touches_sent - sent < 2)
                 return gs_failed("the tap did not reach the guest's ring");
             gs_t = now;
