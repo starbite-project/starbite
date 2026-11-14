@@ -873,20 +873,21 @@ void selftest_timer(unsigned id)
         return;
 #endif
 #ifdef SBOS_SELFTEST_NEXT_LINUX
-    case 97: {                              /* every 100 ms once the shell is baked; 360 s at most (8l: mobile data
-                                             * up to 120 s and Linux's network check before the usual steps) */
+    case 97: {                              /* every 100 ms once the shell is baked; 450 s at most (8l / 8m: mobile
+                                             * data up to 120 s, else Wi-Fi up to 100 s, and Linux's network check) */
         int r = next_ready() ? gwin_selftest_step() : 0;
-        if (!r && sb_ms() - t0 < 360000U) {
+        if (!r && sb_ms() - t0 < 450000U) {
             kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
             return;
         }
         sb_logx(r > 0 ? "selftest: next-linux: PASSED; a restart into recovery (pmsg) after seconds " :
                 r < 0 ? "selftest: next-linux: FAILED (see above); a restart into recovery (pmsg) after seconds " :
-                        "selftest: next-linux: FAILED: not done within 360 s; a restart into recovery (pmsg) after seconds ",
+                        "selftest: next-linux: FAILED: not done within 450 s; a restart into recovery (pmsg) after seconds ",
                 (sb_ms() - t0) / 1000U);
         if (!r) {
             guest_power_off();              /* the cluster off before the restart */
             (void)kmodem_selftest_data(0);  /* 8l: and mobile data off */
+            (void)wifi_power(0);            /* 8m: and Wi-Fi */
         }
         phase = 94;
         kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);

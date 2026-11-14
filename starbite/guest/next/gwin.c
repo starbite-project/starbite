@@ -813,12 +813,15 @@ static unsigned gs_frames;
 /* 8l (Track A; the user's 8i installs: Linux's network was never checked on the phone): mobile data up before Linux
  * (unattended, as next-celltest), then Track E's network check typed after the first command: one plain-HTTP request
  * through the NAT. Its verdict is its own line ("network: PASS / FAILED / skipped"); the linuxtest's result stays the
- * window, the command, the tap and the stop. gs_net: 1 data up, -1 skipped (no SIM, no data in 120 s) */
+ * window, the command, the tap and the stop. gs_net: 1 mobile data up, 2 Wi-Fi joined (8m: the saved network when
+ * mobile data can't come up, e.g. the SIM in another phone), -1 skipped (neither) */
 static int gs_net;
 static void gs_data_off(void)
 {
     if (gs_net == 1)
         (void)kmodem_selftest_data(0);
+    if (gs_net == 2)
+        (void)wifi_power(0);
     gs_net = gs_net ? gs_net : -1;
 }
 
@@ -884,9 +887,9 @@ int gwin_selftest_step(void)
             gs_phase = 20;
             return 0;
         }
-        gs_log("network check skipped: mobile data did not start", 0, 0);
-        gs_net = -1;
-        gs_phase = 21;
+        gs_log("mobile data did not start: Wi-Fi for the network check", 0, 0);
+        gs_t = now;
+        gs_phase = 22;
         return 0;
     case 20: {
         struct kcell c;
@@ -896,14 +899,30 @@ int gwin_selftest_step(void)
             gs_net = 1;
             gs_phase = 21;
         } else if (c.state == KCELL_NO_SIM || c.state == KCELL_SIM_LOCKED || c.state == KCELL_FAILED || dt > 120000) {
-            gs_log(c.state == KCELL_NO_SIM ? "network check skipped: no SIM" :
-                   c.state == KCELL_SIM_LOCKED ? "network check skipped: the SIM is locked" :
-                   c.state == KCELL_FAILED ? "network check skipped: Cellular failed" :
-                   "network check skipped: no mobile data within 120 s", 0, 0);
+            gs_log(c.state == KCELL_NO_SIM ? "no SIM: Wi-Fi for the network check" :
+                   c.state == KCELL_SIM_LOCKED ? "the SIM is locked: Wi-Fi for the network check" :
+                   c.state == KCELL_FAILED ? "Cellular failed: Wi-Fi for the network check" :
+                   "no mobile data within 120 s: Wi-Fi for the network check", 0, 0);
             (void)kmodem_selftest_data(0);
-            gs_net = -1;
-            gs_phase = 21;
+            gs_t = now;
+            gs_phase = 22;
         }
+        return 0;
+    }
+    case 22: {                             /* 8m: the saved Wi-Fi network instead (wifi_selftest_uplink logs why not) */
+        int r = wifi_selftest_uplink();
+        if (r == 0 && dt < 100000)
+            return 0;
+        if (r == 1) {
+            gs_log("Wi-Fi joined for Linux's network check after ms ", dt, 1);
+            gs_net = 2;
+        } else {
+            gs_log("network check skipped: neither mobile data nor Wi-Fi", 0, 0);
+            if (r == 0)
+                (void)wifi_power(0);
+            gs_net = -1;
+        }
+        gs_phase = 21;
         return 0;
     }
     case 21:
@@ -975,7 +994,7 @@ int gwin_selftest_step(void)
                 return gs_failed("the tap did not reach the guest's ring");
             gs_t = now;
             gs_typed = 0;
-            gs_phase = gs_net == 1 ? 30 : 5;
+            gs_phase = gs_net == 1 || gs_net == 2 ? 30 : 5;
         } else if (dt > 15000) {
             gs_log("the marker: ", (uint64_t)guest_term_ok(), 1);
             gs_log("window frames since the typing: ", frames - gs_frames, 1);

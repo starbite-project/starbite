@@ -782,6 +782,7 @@ extern int wifi_autojoin;              /* 1.2-alpha21: join a known network auto
 int wifi_known(struct sbos_wifi_known *out, int max);
 int wifi_forget(int k);
 int wifi_selftest_phase(int *done);
+int wifi_selftest_uplink(void);             /* 8m: the linuxtest's Wi-Fi uplink: 0 working, 1 connected, -1 not possible */
 /* Track H: a listed network's security (from its RSN / WPA elements), the firmware's capabilities, leaving */
 enum { KWIFI_SEC_OPEN, KWIFI_SEC_WEP, KWIFI_SEC_WPA1, KWIFI_SEC_WPA2, KWIFI_SEC_WPA23, KWIFI_SEC_WPA3, KWIFI_SEC_ENT,
        KWIFI_SEC_OWE, KWIFI_SEC_OTHER };

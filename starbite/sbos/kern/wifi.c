@@ -2178,6 +2178,67 @@ static int h1_step(int *done)
  * its passphrase (WPA2 or open), an address, the router's ping and the clock check; then off. 1 passed, 0 failed */
 int wifi_selftest_scan_only;                /* Next's Wi-Fi self test: the scan only, never a join */
 
+/* 8m (Track A): the linuxtest's Wi-Fi uplink for Linux's network check, when mobile data can't come up (the SIM in
+ * another phone): Wi-Fi on, the saved network joined if heard, KEPT on (wifi_power(0) at the test's end). Polled:
+ * 0 still working, 1 connected (an address: guestnet takes Wi-Fi), -1 not possible (the reason logged, Wi-Fi off) */
+int wifi_selftest_uplink(void)
+{
+    static int js;                          /* 0 bringing up, 1 joining, 2 connected, 3 given up */
+    static uint64_t t0;
+    if (!t0)
+        t0 = sb_ms();
+    if (js == 2)
+        return 1;
+    if (js == 3)
+        return -1;
+    const char *no = 0;
+    if (js == 1) {
+        if (st == SBOS_WIFI_CONNECTED) {
+            js = 2;
+            logn("selftest: wifi: joined the saved network for Linux's network check in ", sb_ms() - t0, " ms");
+            return 1;
+        }
+        if (st == SBOS_WIFI_UP || st == SBOS_WIFI_FAILED || st == SBOS_WIFI_OFF)
+            no = why[0] ? why : "the join ended without an address";
+        else if (sb_ms() - t0 > 75000U)
+            no = "no address in 75 s";
+        else
+            return 0;
+    } else if (st == SBOS_WIFI_OFF) {
+        static int powered;
+        if (!powered) {
+            powered = 1;
+            if (wifi_power(1))
+                no = "Wi-Fi did not start";
+        } else if (sb_ms() - t0 > 10000U) {
+            no = "Wi-Fi stayed off";
+        }
+        if (!no)
+            return 0;
+    } else if (st == SBOS_WIFI_FAILED) {
+        no = why[0] ? why : "Wi-Fi failed";
+    } else if (st != SBOS_WIFI_UP) {
+        if (sb_ms() - t0 > 30000U)
+            no = "not up and scanned in 30 s";
+        else
+            return 0;                       /* the bring-up and its first scan */
+    } else {
+        int heard = -1;
+        for (int i = 0; sv_ok && i < nnets; ++i)
+            if (nets[i].ssid_len == sv_len && !memcmp(nets[i].ssid, sv_ssid, sv_len))
+                heard = i;
+        if (heard >= 0 && wifi_join(heard, 0) == 0) {
+            sb_log("selftest: wifi: joining the saved network for Linux's network check (name not logged)");
+            js = 1;
+            return 0;
+        }
+        no = !sv_ok ? "no saved network" : heard < 0 ? "the saved network was not heard" : "the join was refused";
+    }
+    sb_logf("selftest: wifi: no Wi-Fi for Linux's network check: ", no);
+    wifi_power(0);
+    js = 3;
+    return -1;
+}
 int wifi_selftest_phase(int *done)
 {
     static int started, jstate;            /* jstate: 0 not yet, 1 joining, 2 done */
