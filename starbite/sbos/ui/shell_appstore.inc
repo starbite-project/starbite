@@ -1957,7 +1957,8 @@ void sh_linux_store(const sh_lstore_t *s)
         if (aq_pend.pkg[0] && st_find(aq_pend.pkg) >= 0) {   /* the GET asked for while Linux started */
             int i = st_find(aq_pend.pkg);
             aq_pend.pkg[0] = 0;
-            if (!st_busy(&LST->pkg[i])) (void)sh_linux_pkg(i, SH_PKG_OPWORD(aq_pend.op, aq_pend.m));
+            if (!st_busy(&LST->pkg[i]) && sh_linux_pkg(i, SH_PKG_OPWORD(aq_pend.op, aq_pend.m)) < 0)
+                toast("Linux didn't take the install: tap Get again");   /* (never silent: Track A, 8i) */
         }
         (void)was;
     } else if (!aq_cached) LST = s && s->n >= 0 ? s : 0;
