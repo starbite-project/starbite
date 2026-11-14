@@ -1,0 +1,112 @@
+0454: sweetappsandbox=2 = hide com.apple.security.app-sandbox only in a process image's first full self entitlements copy (libsecinit); later copies (libxpc's xpc_main) keep it, so app-sandbox XPC services do not look for a sandbox profile resource (WallpaperVideoExtension, S3zi). Logs SWEET ENT lines. Default (0) unchanged.
+
+--- a/bsd/kern/kern_proc.c
++++ b/bsd/kern/kern_proc.c
+@@ -3678,8 +3678,53 @@
+  * WindowServer's checks of its clients left it spinning before its first frame (boot 152643).
+  */
+ #include <pexpert/device_tree.h>
++/*
++ * 0454 (sweetappsandbox=2): rename the key only in a process image's FIRST full copy that contains it.
++ * That first copy goes to libsecinit (libSystem's initializer, before main), which must not set up the
++ * App Sandbox; later copies are left intact, so libxpc's xpc_main sees an app-sandbox process and does
++ * not look for a sandbox profile resource the bundle does not have ("Service specifies a sandbox but
++ * does not have any Resources": WallpaperVideoExtension, S3zi). Images are told apart by pid +
++ * pid version + code signature blob (xpcproxy execs the service in the same pid).
++ */
++#define SWEET_ENT_SLOTS 256
++static struct {
++	int pid;
++	int idv;
++	const void *blob;
++	uint32_t n;
++} sweet_ent_seen[SWEET_ENT_SLOTS];
++static uint32_t sweet_ent_next;
++static uint32_t sweet_ent_logged;
++static LCK_GRP_DECLARE(sweet_ent_grp, "sweet_ent");
++static LCK_SPIN_DECLARE(sweet_ent_lock, &sweet_ent_grp);
++
++/* Number of earlier full copies with the key for this image (0 = this is the first). */
++static uint32_t
++sweet_ent_count(proc_t p, const void *blob)
++{
++	int pid = proc_getpid(p), idv = proc_pidversion(p);
++	uint32_t n = 0;
++	lck_spin_lock(&sweet_ent_lock);
++	uint32_t i;
++	for (i = 0; i < SWEET_ENT_SLOTS; i++) {
++		if (sweet_ent_seen[i].pid == pid && sweet_ent_seen[i].idv == idv && sweet_ent_seen[i].blob == blob) {
++			n = ++sweet_ent_seen[i].n;
++			break;
++		}
++	}
++	if (i == SWEET_ENT_SLOTS) {
++		i = sweet_ent_next++ % SWEET_ENT_SLOTS;
++		sweet_ent_seen[i].pid = pid;
++		sweet_ent_seen[i].idv = idv;
++		sweet_ent_seen[i].blob = blob;
++		sweet_ent_seen[i].n = 0;
++	}
++	lck_spin_unlock(&sweet_ent_lock);
++	return n;
++}
++
+ static void
+-sweet_strip_app_sandbox(uint8_t *buf, size_t len)
++sweet_strip_app_sandbox(uint8_t *buf, size_t len, proc_t p, const void *blob, size_t usize, int op)
+ {
+ 	static int keep = -1;
+ 	if (keep < 0) {
+@@ -3696,11 +3741,32 @@
+ 	}
+ 	static const char key[] = "com.apple.security.app-sandbox";
+ 	const size_t n = sizeof(key) - 1;
+-	if (keep || len < n) {
+-		return;
++	if (keep == 1 || len < n || usize < len) {
++		return;         /* header-only queries (usize < len) carry no key */
+ 	}
++	size_t at = len;
+ 	for (size_t i = 0; i + n <= len; i++) {
+ 		if (buf[i] == 'c' && memcmp(buf + i, key, n) == 0) {
++			at = i;
++			break;
++		}
++	}
++	if (at == len) {
++		return;
++	}
++	if (keep == 2) {
++		uint32_t seen = sweet_ent_count(p, blob);
++		if (sweet_ent_logged < 400 && seen < 4) {
++			sweet_ent_logged++;
++			printf("SWEET ENT: %s[%d] self entitlements copy %u (op %d, %zu bytes): app-sandbox %s\n",
++			    proc_best_name(p), proc_getpid(p), seen + 1, op, len, seen == 0 ? "hidden" : "kept");
++		}
++		if (seen != 0) {
++			return;
++		}
++	}
++	for (size_t i = at; i + n <= len; i++) {
++		if (buf[i] == 'c' && memcmp(buf + i, key, n) == 0) {
+ 			buf[i + n - 1] = 'X';
+ 		}
+ 	}
+@@ -3976,7 +4042,7 @@
+ 
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+ 		if (forself) {
+-			sweet_strip_app_sandbox((uint8_t *)start, length);
++			sweet_strip_app_sandbox((uint8_t *)start, length, pt, blob, usize, ops);
+ 		}
+ #endif
+ 		error = csops_copy_token(start, length, usize, uaddr);
+@@ -4028,7 +4094,7 @@
+ 			}
+ 			memcpy(copy, start, length);
+ 			if (forself) {
+-				sweet_strip_app_sandbox(copy, length);
++				sweet_strip_app_sandbox(copy, length, pt, blob, usize, ops);
+ 			}
+ 			error = csops_copy_token(copy, length, usize, uaddr);
+ 			kfree_data(copy, length);
