@@ -520,8 +520,29 @@ static void build_lclock(void)
     date[n] = 0;
     /* 8a (top ten #1, design-ref gaps-c #4): the date a weight lighter (iOS's reads semibold in SF; Inter 600 reads
      * bold), the clock solid white (no blue gradient), Inter 500, digits ~83 pt tall (110 pt type) */
-    float w = tw(TK_IT500, 22, date, 0, 0);
-    d_text(&d, TK_IT500, 22, (390 - w) / 2, 82 + 22 * INTER_CAP / 2, date, 0, 0, W(.9f), 1);
+    /* 8i (Track A; 8h's phone: "minute: lock clock 70 ms" in a 98 ms minute turn, most of it the date's shadow blur;
+     * 2 of the 3 ms on the Mac): the date's rows (from the top down to its last drawn row, shadow included) kept
+     * and copied back while the date and the bitmap's place are the same; the digits are drawn after, as before */
+    static struct { char date[48]; int w, h, stride, rows; float ox, oy; uint32_t *px; } LD;
+    if (d.b->px && LD.px && LD.w == d.b->w && LD.h == d.b->h && LD.stride == d.b->stride && LD.ox == d.ox &&
+        LD.oy == d.oy && !tk_strcmp(LD.date, date))
+        tk_memcpy(d.b->px, LD.px, (size_t)LD.rows * (size_t)LD.stride * 4u);
+    else {
+        float w = tw(TK_IT500, 22, date, 0, 0);
+        d_text(&d, TK_IT500, 22, (390 - w) / 2, 82 + 22 * INTER_CAP / 2, date, 0, 0, W(.9f), 1);
+        tk_free(LD.px);
+        LD.px = 0;
+        int rows = 0;                               /* the last row the date touched (the rest is still clear) */
+        for (int y = d.b->h - 1; y >= 0 && !rows; y--)
+            for (int x = 0; x < d.b->w; x++) if (d.b->px[(size_t)y * (size_t)d.b->stride + (size_t)x]) { rows = y + 1; break; }
+        if (rows && (LD.px = tk_alloc((size_t)rows * (size_t)d.b->stride * 4u))) {
+            tk_memcpy(LD.px, d.b->px, (size_t)rows * (size_t)d.b->stride * 4u);
+            LD.w = d.b->w; LD.h = d.b->h; LD.stride = d.b->stride; LD.rows = rows; LD.ox = d.ox; LD.oy = d.oy;
+            int k = 0;
+            for (; date[k] && k < 47; k++) LD.date[k] = date[k];
+            LD.date[k] = 0;
+        }
+    }
     char hm[8];
     fmt_hm(hm);
     /* P3j (audit 3): hours, colon and minutes as three runs: proportional figures at -1 pt (the -4 pt tabular
