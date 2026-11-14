@@ -132,9 +132,14 @@ int sh_card_read(const char *path, uint64_t off, void *dst, uint32_t len);      
  * the shell's bitmap and takes the input. Apps are named by their desktop id ("org.gnome.TextEditor"); the shell's
  * Terminal (page 2) is the catalog's foot, SH_LINUX_TERMINAL. States are the kernel's GUEST_* order. */
 enum { SH_LINUX_OFF, SH_LINUX_STARTING, SH_LINUX_RUNNING, SH_LINUX_STOPPING, SH_LINUX_FAILED };
-#define SH_LINUX_W 720
-#define SH_LINUX_H 1344                                   /* the surface: 44 to 772 pt at 2x */
-#define SH_LINUX_HKB 916                                  /* the rows shown with the keyboard up: 44 to 540 pt */
+/* 8s (Track A + E; the user, 8o: "resolution is horrific"): the surface at the panel's own sharpness, 1080 x 2016 shown
+ * at 4/3 (was 720 x 1344 at 2x); sbwl lays apps out at 360 x 672 logical, scale 3 (Track E's base-e8h) */
+#define SH_LINUX_W 1080
+#define SH_LINUX_H 2016                                   /* the surface: 44 to 772 pt at 4/3 */
+#define SH_LINUX_HKB 1374                                 /* the rows shown with the keyboard up: 44 to 540 pt */
+#define SH_LINUX_PW 1440                                  /* the window in panel px: the surface at 4/3 */
+#define SH_LINUX_PH 2688
+#define SH_LINUX_PX(v) ((v) * 4 / 3)                      /* surface px -> panel px */
 #define SH_LINUX_Y 162                                    /* the window's first panel row (44 pt) */
 #define SH_LINUX_ICON 160                                 /* catalog and store icons: 160 x 160 premultiplied ARGB */
 #define SH_LINUX_TERMINAL "org.codeberg.dnkl.foot"        /* the Terminal app's desktop id (also "foot") */
@@ -182,8 +187,8 @@ enum { SH_NET_OK = 0, SH_NET_NO_CONNECTION = 1, SH_NET_NO_DNS = 2, SH_NET_NO_ANS
 int sh_linux_open(const char *id);       /* start Linux if off, launch the app (once the catalog has it), put its window
                                           * in the surface; < 0 refused (sh_linux_state says why) */
 void sh_linux_hide(void);                /* home: no window in the surface (ACTIVATE none); the apps keep running */
-/* the active app's rows newer than the last copy, at 2x (pixel-doubled), into the shell's window: rows[y] is its
- * bitmap row y (2 SH_LINUX_W px; 2 SH_LINUX_H rows, kept in strips); *y0..*y1 the bitmap rows written; returns the
+/* the active app's rows newer than the last copy, at 4/3 (nearest), into the shell's window: rows[y] is its
+ * bitmap row y (SH_LINUX_PW px; SH_LINUX_PH rows, kept in strips); *y0..*y1 the bitmap rows written; returns the
  * surface rows copied (0: nothing new, or not the app's window yet). first: copy every row. */
 int sh_linux_blit(uint32_t *const *rows, int first, int *y0, int *y1);
 int sh_linux_touch(int phase, int x, int y);   /* surface px, phase 0 down / 1 move / 2 up */

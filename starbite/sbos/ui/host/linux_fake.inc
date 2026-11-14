@@ -22,7 +22,11 @@ static struct {
     int loaded[SH_LAPPS];
     uint8_t *foot;
     tk_bmp w;                                   /* the window as the app drew it (720 x 1344) */
-} LF = { .want = -1, .win = -1, .vp = SH_LINUX_H };
+} LF = { .want = -1, .win = -1, .vp = 1344 };
+/* 8s: the fake draws its windows at its own 720 x 1344 (2x to the panel, as before); the platform's surface is
+ * SH_LINUX_W x SH_LINUX_H (1080 x 2016): the viewport and touches come in its px and are taken at 2/3 */
+#define LFW 720
+#define LFH 1344
 
 /* ---- icons (160 x 160 premultiplied): simple shapes, anti-aliased, and the pack's fonts ---- */
 static uint32_t pm(uint32_t rgb, float a) { return tk_premul(tk_hex(rgb, a)); }
@@ -425,16 +429,16 @@ static void headerbar(const char *title, int h)
 static void draw_window(int ci)
 {
     if (!LF.w.px) {                              /* the guest's memory, not the UI heap */
-        LF.w.px = calloc((size_t)SH_LINUX_W * SH_LINUX_H, 4);
+        LF.w.px = calloc((size_t)LFW * LFH, 4);
         if (!LF.w.px) return;
-        LF.w.w = LF.w.stride = SH_LINUX_W;
-        LF.w.h = SH_LINUX_H;
+        LF.w.w = LF.w.stride = LFW;
+        LF.w.h = LFH;
     }
     const char *id = FCAT.app[ci].id, *t = LF.text[ci];
     int vp = LF.vp;
-    wfill(0, 0, 720, SH_LINUX_H, 0xffffff);
+    wfill(0, 0, 720, LFH, 0xffffff);
     if (!strcmp(id, SH_LINUX_TERMINAL)) {
-        wfill(0, 0, 720, SH_LINUX_H, 0x242424);
+        wfill(0, 0, 720, LFH, 0x242424);
         if (LF.foot) {
             for (int y = 0; y < 916 && y < vp; y++)
                 for (int x = 0; x < 720; x++) {
@@ -504,7 +508,7 @@ static void draw_window(int ci)
             wtext(TK_IT500, 40, x + 78 - wtw(TK_IT500, 40, K[i]) / 2, y + 66, K[i], i == 14 ? 0xffffff : 0x2e2e2e);
         }
     } else if (!strcmp(id, "htop")) {
-        wfill(0, 0, 720, SH_LINUX_H, 0x000000);
+        wfill(0, 0, 720, LFH, 0x000000);
         static const char *const P[] = { "  PID USER   RES CPU% Command", "  412 user  22M  3.1 foot", "  398 user  14M  1.2 sbwl",
                                          "  431 user  88M  0.4 gnome-text-editor", "    1 root 1.2M  0.0 sbinit" };
         for (int i = 0; i < 4; i++) {
@@ -523,7 +527,7 @@ static void draw_window(int ci)
         float w = wtw(TK_IT700, 40, FCAT.app[ci].name);
         wtext(TK_IT700, 40, 360 - w / 2, vp / 2, FCAT.app[ci].name, 0x77767b);
     }
-    if (vp < SH_LINUX_H) wfill(0, vp, 720, SH_LINUX_H - vp, 0x000000);   /* below the viewport: under the keyboard */
+    if (vp < LFH) wfill(0, vp, 720, LFH - vp, 0x000000);   /* below the viewport: under the keyboard */
 }
 
 /* ---- the platform (shell.h) ---- */
@@ -551,19 +555,20 @@ int sh_linux_blit(uint32_t *const *rows, int first, int *y0, int *y1)
     if (!first && LF.drawn == LF.seq) return 0;
     LF.drawn = LF.seq;
     draw_window(LF.win);
-    for (int y = 0; y < SH_LINUX_H; y++)
-        for (int x = 0; x < SH_LINUX_W; x++) {
+    for (int y = 0; y < LFH; y++)
+        for (int x = 0; x < LFW; x++) {
             uint32_t c = LF.w.px[(size_t)y * LF.w.stride + x] | 0xff000000u;
             rows[2 * y][2 * x] = rows[2 * y][2 * x + 1] = rows[2 * y + 1][2 * x] = rows[2 * y + 1][2 * x + 1] = c;
         }
     *y0 = 0;
-    *y1 = 2 * SH_LINUX_H - 1;
-    return SH_LINUX_H;
+    *y1 = 2 * LFH - 1;
+    return LFH;
 }
 int sh_linux_touch(int phase, int x, int y)
 {
     static int dy;
     fprintf(stderr, "linux: touch %s at %d,%d\n", phase == 0 ? "down" : phase == 1 ? "move" : "up", x, y);
+    x = x * 2 / 3, y = y * 2 / 3;                 /* (8s: into the fake's 720 x 1344) */
     if (phase == 0) dy = y;
     if (phase != 2 || LF.win < 0) return 1;
     const char *id = FCAT.app[LF.win].id;
@@ -599,6 +604,7 @@ int sh_linux_char(char c)
 int sh_linux_viewport(int rows)
 {
     fprintf(stderr, "linux: viewport %d x %d\n", SH_LINUX_W, rows);
+    rows = rows * 2 / 3;                          /* (8s: into the fake's 720 x 1344) */
     if (rows != LF.vp) { LF.vp = rows; LF.seq++; }
     return 1;
 }

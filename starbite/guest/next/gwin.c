@@ -881,9 +881,9 @@ static unsigned lit_rows(void)
         return 0;
     uint32_t bg = win_rows[0][0];
     unsigned n = 0;
-    for (int y = 0; y < 2 * SH_LINUX_HKB; y += 4) {
+    for (int y = 0; y < SH_LINUX_PX(SH_LINUX_HKB); y += 4) {   /* (8s: the strips' panel rows) */
         const uint32_t *r = win_rows[y];
-        for (int x = 0; x < 2 * SH_LINUX_W; x += 2)
+        for (int x = 0; x < SH_LINUX_PW; x += 2)
             if (r[x] != bg) {
                 n++;
                 break;
@@ -1007,7 +1007,7 @@ int gwin_selftest_step(void)
              * touch there since 8d while this test, calling sh_linux_touch directly, passed); the window's middle at
              * the keyboard-up rows: 195 pt across, 162 + 2 * 458 panel rows down */
             const float pt = 1440.0f / 390.0f;      /* panel px per pt (sbtk.h TK_PT) */
-            float tx = SH_LINUX_W / pt, ty = (SH_LINUX_Y + SH_LINUX_HKB) / pt;
+            float tx = SH_LINUX_PW / 2 / pt, ty = (SH_LINUX_Y + SH_LINUX_PX(SH_LINUX_HKB) / 2) / pt;   /* (8s: the middle) */
             sh_touch(0, tx, ty, (float)now);
             sh_touch(2, tx, ty, (float)now + 60.0f);
             gs_log("a tap in the window (the shell's touch path): touch messages sent ", sbg_stats()->touches_sent - sent, 1);

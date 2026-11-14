@@ -118,6 +118,7 @@ const char *guest_stage(void) { return st == GUEST_STARTING ? gstage : ""; }
 int guest_stop(void) { if (st == GUEST_RUNNING || st == GUEST_STARTING) { st = GUEST_STOPPING; t_state = now_ms; } return 0; }
 int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED; }
 int hw_m3_on(void) { return guest_owns_m3(); }
+const char *guest_net_line(void) { return ""; }        /* 8l: no network check here (no data, no Wi-Fi) */
 void guest_show(int on) { shown = on; drawn = 0; }
 void guest_keep(int on) { busy = on; }
 void guest_apps(int n) { if (n != apps_n) printf("[%6llu ms] fake guest: guest_apps(%d) (Linux kept while hidden: %s)\n", (unsigned long long)now_ms, n, n > 0 ? "yes" : "no"); apps_n = n; }
@@ -350,31 +351,30 @@ static uint32_t surf_px(int x, int y)
         int kx = x % 180, ky = (y - 420) % 180;
         c = y < 400 ? 0xff1c1c1cu : kx > 12 && kx < 168 && ky > 12 && ky < 168 ? (x >= 540 ? 0xffe66100u : 0xff3a3a3au) : 0xff1c1c1cu;
         if (y > 250 && y < 360 && x > 560 && x < 680) c = 0xffffffffu;   /* "0" */
-        if (vp && y >= (int)vp) c = 0xff000000u;
+        if (vp && y >= (int)vp * 2 / 3) c = 0xff000000u;
         return c;
     }
     if (win != 1 && rgb && y < 916) {
-        const uint8_t *p = rgb + ((size_t)y * SH_LINUX_W + x) * 3;
+        const uint8_t *p = rgb + ((size_t)y * 720 + x) * 3;
         c = 0xff000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
     }
     int cell = y >= 260 ? (y - 260) / 32 * 45 + x / 16 : -1, n = win == 1 ? (int)strlen(got.text_s) : ntyped;
     if (cell >= 0 && cell < n && (win == 1 ? got.text_s[cell] : typed[cell]) != ' ' && x % 16 < 12 && (y - 260) % 32 > 4 && (y - 260) % 32 < 28)
         c = win == 1 ? 0xff202020u : 0xffddddddu;
-    if (vp && y >= (int)vp) c = 0xff000000u;
+    if (vp && y >= (int)vp * 2 / 3) c = 0xff000000u;   /* (8s: vp in the 1080 surface's rows) */
     return c;
 }
+/* 8s (Track A): the fake still draws at 720 x 1344 (surf_px); the platform's surface is 1080 x 2016 at 4/3, so the
+ * panel rows are the old picture at 2x and the zero-copy front its 3/2 */
 int guest_blit_rows(uint32_t *const *rows, int *py0, int *py1)
 {
     *py0 = *py1 = -1;
     if (!guest_shown()) return 0;
     drawn = seq;
-    for (int y = 0; y < SH_LINUX_H; y++)
-        for (int x = 0; x < SH_LINUX_W; x++) {
-            uint32_t c = surf_px(x, y);
-            rows[2 * y][2 * x] = rows[2 * y][2 * x + 1] = rows[2 * y + 1][2 * x] = rows[2 * y + 1][2 * x + 1] = c;
-        }
+    for (int y = 0; y < SH_LINUX_PH; y++)
+        for (int x = 0; x < SH_LINUX_PW; x++) rows[y][x] = surf_px(x / 2, y / 2);
     *py0 = 0;
-    *py1 = 2 * SH_LINUX_H - 1;
+    *py1 = SH_LINUX_PH - 1;
     return SH_LINUX_H;
 }
 /* v3 + Track A: the zero-copy front buffer (two surfaces at 1x; a new frame goes into the other one) */
@@ -387,7 +387,7 @@ const volatile uint32_t *guest_front(int *idx, unsigned *stride_px)
     if (fseq != seq) {
         ffront ^= 1;
         for (int y = 0; y < SH_LINUX_H; y++)
-            for (int x = 0; x < SH_LINUX_W; x++) fsurf[ffront][y * SH_LINUX_W + x] = surf_px(x, y);
+            for (int x = 0; x < SH_LINUX_W; x++) fsurf[ffront][y * SH_LINUX_W + x] = surf_px(x * 2 / 3, y * 2 / 3);
         fseq = seq;
     }
     drawn = seq;
@@ -745,17 +745,18 @@ int main(int argc, char **argv)
     run(25);                                                /* (P3x, B3's keyboard: its keys and bar once its slide rests) */
     evon = 1;
     ev[0] = 0;
-    tap(121.9f, 520);                                       /* Ctrl */
+    /* (8q: nine keys since the bar's Done: 390 / 9 pt each) */
+    tap(108.3f, 520);                                       /* Ctrl */
     run(2);
     sh_tick(.016f, (float)now_ms);
     tk_comp_frame(&C, 0, 1);
     png_still(stills, "keybar-ctrl-latched");
     tap(156, 681);                                          /* c */
     run(1);
-    tap(219, 520);                                          /* left */
-    tap(170.6f, 520);                                       /* Alt */
-    tap(365, 520);                                          /* right */
-    tap(24, 520);                                           /* Esc */
+    tap(195, 520);                                          /* left */
+    tap(151.7f, 520);                                       /* Alt */
+    tap(325, 520);                                          /* right */
+    tap(21.7f, 520);                                        /* Esc */
     run(2);
     evon = 0;
     printf("gwin-host: the key bar sent: %s\n", ev);
@@ -822,7 +823,7 @@ int main(int argc, char **argv)
     printf("gwin-host: zero-copy: surf_reading %d (buffer %u), the panel px %08x, the surface's %08x\n", got.reading - rd, got.read_idx, p, want);
     check(got.reading > rd && p == want, "zero-copy: the window drawn from the front buffer (sbg_surf_reading)");
     sh_linux_frame();                                       /* (the newest front first) */
-    uint32_t *fp = &fsurf[ffront][120 * SH_LINUX_W + 600], keep[9];
+    uint32_t *fp = &fsurf[ffront][180 * SH_LINUX_W + 900], keep[9];   /* (8s: panel 1200, 402 at 4/3) */
     for (int k = 0; k < 9; k++) { keep[k] = fp[(k / 3 - 1) * SH_LINUX_W + k % 3 - 1]; fp[(k / 3 - 1) * SH_LINUX_W + k % 3 - 1] = 0xffff00ffu; }
     /* (3 x 3 px of the guest's front buffer changed in place: the 2x scale filters) */
     sh_linux_frame();                                       /* (the same buffer handed again: no copy anywhere) */

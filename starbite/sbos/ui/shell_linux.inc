@@ -329,9 +329,9 @@ static int lx_slot_icon(int s)
 }
 /* ---- the window: four strip layers of 672 bitmap rows (3.9 MiB each: no 15.5 MiB block in the UI heap), filled
  * through a row table; with the keyboard up the last strip is not kept (its rows are under the keyboard) ---- */
-#define LSTRIP (2 * SH_LINUX_H / 4)
-static uint32_t *lrow[2 * SH_LINUX_H];           /* the window's bitmap rows (a hidden strip's: lsink) */
-static uint32_t lsink[2 * SH_LINUX_W] __attribute__((aligned(16)));
+#define LSTRIP (SH_LINUX_PH / 4)
+static uint32_t *lrow[SH_LINUX_PH];              /* the window's bitmap rows, panel rows (a hidden strip's: lsink) */
+static uint32_t lsink[SH_LINUX_PW] __attribute__((aligned(16)));
 static tk_layer apkb;                            /* the keyboard (Linux apps, the App Store's search) */
 static tk_layer apkbbtn;                         /* 8q: "Keyboard", to bring a hidden keyboard back */
 /* 8q (the user, 8o: the keyboard is "hard to close"): the key bar's Done hides it (LX.kbhide) and the app gets the
@@ -376,7 +376,7 @@ static void lx_build_state(void)
     for (int k = 0; k < 4; k++) {
         aplin[k].hidden = LX.state != SH_LINUX_RUNNING || !aplin[k].bmp.px || !LX.got;
         aplin[k].clip = LX.kb;                   /* the keyboard up: the rows under it are not shown */
-        aplin[k].clip_r = (tk_rect){ 0, SH_LINUX_Y, TK_W, 2.0f * LX_KBROWS };   /* (v3: above the key bar) */
+        aplin[k].clip_r = (tk_rect){ 0, SH_LINUX_Y, TK_W, (float)SH_LINUX_PX(LX_KBROWS) };   /* (v3: above the key bar) */
     }
 #ifdef TK_HAS_LAYER_EXTERNAL
     apext.hidden = LX.state != SH_LINUX_RUNNING || !apext.external || !LX.got;   /* (its rows: the viewport's) */
@@ -418,11 +418,11 @@ static void lx_build_win(void)
     LX.zc = sh_linux_zero_copy();
     if (LX.zc) {
         for (int k = 0; k < 4; k++) { relayer(&aplin[k]); aplin[k].hidden = 1; }
-        for (int r = 0; r < 2 * SH_LINUX_H; r++) lrow[r] = lsink;
+        for (int r = 0; r < SH_LINUX_PH; r++) lrow[r] = lsink;
         if (!apext.name) tk_layer_init(&apext, "linux-window-gpu");
         apext.x = apext.bx = 0;
-        apext.y = apext.by = SH_LINUX_Y / 2.0f;   /* (scaled 2x about the origin) */
-        apext.sx = apext.sy = 2;
+        apext.y = apext.by = SH_LINUX_Y * .75f;  /* (scaled 4/3 about the origin) */
+        apext.sx = apext.sy = (float)SH_LINUX_PW / SH_LINUX_W;
         LX.first = 1;
         lx_build_kb(LX.kb, LX.shift, LX.num);
         lx_acc_show(LX.kb && lx_is_lin());
@@ -438,7 +438,7 @@ static void lx_build_win(void)
         if (want && !aplin[k].bmp.px) {
             relayer(&aplin[k]);
             tk_layer_init(&aplin[k], "linux-window");
-            if (!tk_bmp_new(&aplin[k].bmp, 2 * SH_LINUX_W, LSTRIP)) {
+            if (!tk_bmp_new(&aplin[k].bmp, SH_LINUX_PW, LSTRIP)) {
                 LX.state = SH_LINUX_FAILED;
                 lx_scopy(LX.why, "No memory for the window.", 64);
             }
@@ -558,11 +558,11 @@ static int lx_at(float x, float y)
      * calls sh_linux_touch directly, past this check) */
     shown |= LX.zc && !apext.hidden;
 #endif
-    return shown && PT(y) >= SH_LINUX_Y && PT(y) < SH_LINUX_Y + 2 * (LX.kb ? LX_KBROWS : SH_LINUX_H);
+    return shown && PT(y) >= SH_LINUX_Y && PT(y) < SH_LINUX_Y + SH_LINUX_PX(LX.kb ? LX_KBROWS : SH_LINUX_H);
 }
 static void lx_win_touch(int phase, float x, float y)
 {
-    int sx = (int)(PT(x) / 2), sy = (int)((PT(y) - SH_LINUX_Y) / 2), hh = LX.kb ? LX_KBROWS : SH_LINUX_H;
+    int sx = (int)(PT(x) * .75f), sy = (int)((PT(y) - SH_LINUX_Y) * .75f), hh = LX.kb ? LX_KBROWS : SH_LINUX_H;   /* 8s: 4/3 */
     sx = sx < 0 ? 0 : sx >= SH_LINUX_W ? SH_LINUX_W - 1 : sx;
     sy = sy < 0 ? 0 : sy >= hh ? hh - 1 : sy;
     sh_linux_touch(phase, sx, sy);
@@ -838,8 +838,8 @@ static void lx_card_snap_open(void)
 #endif
     for (int j = 0; j < LSNH; j++) {
         uint32_t *o = LC[s].snap.px + (size_t)j * LC[s].snap.stride;
-        int sy = (4 * j + 2 - SH_LINUX_Y) / 2;
-        uint32_t ground = LX.kb && 4 * j >= SH_LINUX_Y + 2 * rows && 4 * j < (int)PT(802) ? tk_premul(tk_hex(0x1e2030, 1)) :
+        int pr = 4 * j + 2 - SH_LINUX_Y, sy = pr * 3 / 4;   /* 8s: the panel row, its surface row (4/3) */
+        uint32_t ground = LX.kb && 4 * j >= SH_LINUX_Y + SH_LINUX_PX(rows) && 4 * j < (int)PT(802) ? tk_premul(tk_hex(0x1e2030, 1)) :
                           0xff000000u | sv_ground(lx_app_index("linux"));
         if (4 * j + 2 < SH_LINUX_Y || sy >= rows) {
             for (int i = 0; i < LSNW; i++) o[i] = ground;
@@ -857,9 +857,9 @@ static void lx_card_snap_open(void)
         }
         for (int i = 0; i < LSNW; i++) {
 #ifdef TK_HAS_LAYER_EXTERNAL
-            if (ext) { o[i] = ext[(size_t)sy * es + 2 * i] | 0xff000000u; continue; }
+            if (ext) { o[i] = ext[(size_t)sy * es + (4 * i + 2) * 3 / 4] | 0xff000000u; continue; }
 #endif
-            const uint32_t *r0 = lrow[2 * sy], *r1 = lrow[2 * sy + 1];
+            const uint32_t *r0 = lrow[pr], *r1 = lrow[pr + 1 < SH_LINUX_PH ? pr + 1 : pr];
             o[i] = lx_avg4(r0[4 * i], r0[4 * i + 2], r1[4 * i], r1[4 * i + 2]) | 0xff000000u;
         }
     }
