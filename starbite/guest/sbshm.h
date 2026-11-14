@@ -31,7 +31,8 @@
 #define SBG_S9_LINUX_BASE   0x880000000ULL
 #define SBG_S9_LINUX_SIZE   0x060000000ULL      /* 1.5 GiB */
 #define SBG_S9_SHM_BASE     0x8e0000000ULL
-#define SBG_S9_SHM_SIZE     0x004000000ULL      /* 64 MiB */
+#define SBG_S9_SHM_SIZE     0x008000000ULL      /* 128 MiB (8t: the native 1440 x 2688 surfaces past 64 MiB; libsb's
+                                                 * sb.h reserved 0x8_E400_0000.. for it; the guest's DT must say so) */
 #define SBG_S9_GICD         0x10101000ULL       /* GIC-400 */
 #define SBG_S9_GICC         0x10102000ULL
 #define SBG_S9_TRAMP        0x0a0100000ULL      /* below 4 GiB: Starbite's non-cacheable window (P1b) */
