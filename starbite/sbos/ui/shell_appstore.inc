@@ -114,9 +114,26 @@ static int aq_n(void) { return LST ? tk_mini(LST->n, SH_LPKGS) : 0; }
 static uint32_t aq_hash(uint32_t h, const char *s) { for (; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u; return h; }
 static uint32_t aq_hu(uint32_t h, uint32_t v) { return (h ^ v) * 16777619u; }
 /* the catalog app a package brought (its OPEN), or -1 */
+/* 8n (Track A; the user, 8i: Weather installed, then OPEN said "It has no window of its own" while the App Library
+ * opened it): the guest's catalog never carries the package (sbwl publishes pkg = NONE), so an installed app's launcher
+ * is also found by its name (the store's display name = the .desktop file's Name, case and spaces ignored) */
+static int st_same_name(const char *a, const char *b)
+{
+    if (!a[0] || !b[0]) return 0;
+    for (;;) {
+        while (*a == ' ') a++;
+        while (*b == ' ') b++;
+        char x = *a >= 'A' && *a <= 'Z' ? (char)(*a + 32) : *a, y = *b >= 'A' && *b <= 'Z' ? (char)(*b + 32) : *b;
+        if (x != y) return 0;
+        if (!x) return 1;
+        a++, b++;
+    }
+}
 static int st_app(int i)
 {
     for (int a = 0; a < LCAT.n; a++) if (LCAT.app[a].pkg == i) return a;
+    if (i < 0 || !LST || i >= LST->n) return -1;
+    for (int a = 0; a < LCAT.n; a++) if (st_same_name(LCAT.app[a].name, LST->pkg[i].name)) return a;
     return -1;
 }
 static int aq_badge(void)
