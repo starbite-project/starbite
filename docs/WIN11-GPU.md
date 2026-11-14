@@ -2775,6 +2775,18 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
 - Not addressed: the DComp swap chain's INVALIDHANDLE and the DComp surface's black clear (6.74); DXGI 1.2 flip model
   (true zero-copy to DWM) would need the DXGI 1.2 DDI; with 0159 a windowed frame costs one GPU blit, not a CPU copy.
 
+### 6.90 Disk housekeeping (11-14 night) and where things are now
+
+- **Archived to `/Volumes/SBWORK/archive/`** (one file per group, listing counts checked before deleting):
+  `win-1114-hive-scratch.tar` (build/win/hive rehearsal copies), `win-1114-stages-t60-t65.tar` (stages that ran; by the
+  main session), `win-1114-old-trackK.tar.gz` (hive-t13a..h, install-t32b/c*, gl-present/gl-present2/gl-zerocopy/
+  gl-kit/gl-tc, t54, user-t30-0715, user-1113, gd-0158, gd-ec-0158; 208 entries, gzip -t ok). results-t60..t65 are in
+  `starbite-build-archive/win-1114/`.
+- **VM (`~/sbmesa`):** the superseded worktrees src-zc (0150/0151, now ported into src-tc), src-glp2 and src-glp2ec
+  were removed with `git worktree remove` (branches sb-zc, sb-glp2, sb-glp2ec kept) together with build-zc-x64,
+  build-glp2-x64 and build-glp2-ec; then `fstrim` (Mac 1.8 -> 4.0 GB free). Live trees: src-int (sbumd: 0157 + 0159),
+  src-tc (GD ICD: 0158 + 0140 + 0150 + 0151 + 0160; build-tc-x64, build-tc-ec).
+
 ### 6.86 BeamNG.drive on the S9: feasibility (the user's long goal; no phone time)
 
 Facts marked [K] are general knowledge about the game, not checked against a current release.
