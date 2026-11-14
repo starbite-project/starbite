@@ -2668,6 +2668,16 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
     I2cCancelPending 0 and TRANS_STATUS busy = the bus/chip itself stalls (then the touch chip side is next).
 - `touch.sh hsi2c OUT 2` installs it (ImagePath already set by touch-4: only the file and the read-back change).
 
+### 6.84b The user's touch-4 session (big cores, 10:4x): drags whole, the hangs remain
+
+- session3 hive (BigCore 3, M3): td3-25ms-5x + sbhsi2c-1. **DiagI2cError 0** (no all-up in 41 presses / 2099 moves),
+  DiagI2cRetry 260, RetryOk 214 (the rest needed a 3rd+ try), DiagSpbMaxUs 108.7 ms (= 4 x 25 ms + retries),
+  DiagEventsMax 14 (the chip's buffer never filled; touchdiag-2: 64), DiagGapMaxMs 1016 (one gap, idle or a stall).
+  The user: "drags are fine on the desktop", one fluke.
+- But DiagSelf on the M3 still **15/200** back to back (2/200 spaced): sbhsi2c-1's exact acknowledge did not change
+  the hang rate. I2cTelemetryVersion 3 (sbhsi2c-1), LastRequestStatus CANCELLED, ISR 5301 vs 4808 transfers.
+  touch-5 (sbhsi2c-2: poll rescue + cancel snapshot) is the next step to tell a lost edge from a real bus stall.
+
 ### 6.85 Zero-copy on screen is the top track again: T66 (VIS3) = VIS2's ETW, finally elevated
 
 - **The user (11-14):** touch-4 works ("drags are fine"); GD ~30 fps, taps less late but still late; "wheres the work
