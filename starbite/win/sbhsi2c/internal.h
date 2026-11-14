@@ -124,6 +124,14 @@ struct _PBC_DEVICE {
     WDFSPINLOCK Lock;
     WDFTIMER DelayTimer;
     WDFTIMER RequestTimer;
+    // Starbite sbhsi2c-2 (docs/WIN11-GPU.md 6.84): while a transfer runs, a 2 ms high-resolution poll services an
+    // interrupt condition the ISR never saw (the HSI2C interrupt is EDGE in the DSDT: a missed edge never repeats),
+    // and every cancel (the client's timeout) records the controller registers.
+    WDFTIMER PollTimer;
+    volatile LONG TelemetryPollRescue;
+    volatile LONG TelemetryCancelCount;
+    volatile LONG TelemetryCancelPending;
+    volatile LONG TelemetryCancelRegs[6];
     WDFWORKITEM TelemetryWorkItem;
 
     volatile LONG TelemetrySequence;

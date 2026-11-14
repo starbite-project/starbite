@@ -58,6 +58,12 @@ ControllerAcknowledgeInterrupts(
     _In_ ULONG InterruptMask
     );
 
+ULONG
+ControllerReadRegister(
+    _In_ PPBC_DEVICE Device,
+    _In_ ULONG Offset
+    );
+
 VOID
 ControllerAcknowledgeExact(
     _In_ PPBC_DEVICE Device,

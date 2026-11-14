@@ -231,8 +231,26 @@ OnTelemetryWorkItem(
     AssignTelemetryValue(
         key,
         L"I2cTelemetryVersion",
-        3,
+        4,
         &firstFailure);
+    // Starbite sbhsi2c-2
+    AssignTelemetryValue(key, L"I2cPollRescue", ReadTelemetryValue(&device->TelemetryPollRescue), &firstFailure);
+    AssignTelemetryValue(key, L"I2cCancelCount", ReadTelemetryValue(&device->TelemetryCancelCount), &firstFailure);
+    AssignTelemetryValue(key, L"I2cCancelPending", ReadTelemetryValue(&device->TelemetryCancelPending), &firstFailure);
+    {
+        WCHAR cancelText[160];
+        if (NT_SUCCESS(RtlStringCbPrintfW(cancelText, sizeof(cancelText),
+                L"is=%08X ie=%08X ts=%08X fifo=%08X mask=%08X soft=%08X",
+                ReadTelemetryValue(&device->TelemetryCancelRegs[0]),
+                ReadTelemetryValue(&device->TelemetryCancelRegs[1]),
+                ReadTelemetryValue(&device->TelemetryCancelRegs[2]),
+                ReadTelemetryValue(&device->TelemetryCancelRegs[3]),
+                ReadTelemetryValue(&device->TelemetryCancelRegs[4]),
+                ReadTelemetryValue(&device->TelemetryCancelRegs[5]))))
+        {
+            AssignTelemetryString(key, L"I2cCancelRegs", cancelText, &firstFailure);
+        }
+    }
     AssignTelemetryValue(
         key,
         L"I2cSequence",
@@ -920,10 +938,30 @@ OnCancel(
 
     WdfTimerStop(device->DelayTimer, FALSE);
 
+    BOOLEAN snapshot = FALSE;
     if ((device->CurrentTarget == target) &&
         (target->CurrentRequest == request))
     {
         WdfInterruptAcquireLock(device->InterruptObject);
+        // Starbite sbhsi2c-2: what the controller looked like when the client gave up (docs/WIN11-GPU.md 6.84)
+        {
+            ULONG is = ControllerReadRegister(device, EHI2C_INTERRUPT_STATUS);
+            ULONG ie = ControllerReadRegister(device, EHI2C_INTERRUPT_ENABLE);
+            InterlockedIncrement(&device->TelemetryCancelCount);
+            if ((is & ie & EHI2C_INTERRUPT_ALL) != 0)
+            {
+                InterlockedIncrement(&device->TelemetryCancelPending);
+            }
+            InterlockedExchange(&device->TelemetryCancelRegs[0], (LONG)is);
+            InterlockedExchange(&device->TelemetryCancelRegs[1], (LONG)ie);
+            InterlockedExchange(&device->TelemetryCancelRegs[2],
+                (LONG)ControllerReadRegister(device, EHI2C_TRANSFER_STATUS));
+            InterlockedExchange(&device->TelemetryCancelRegs[3],
+                (LONG)ControllerReadRegister(device, EHI2C_FIFO_STATUS));
+            InterlockedExchange(&device->TelemetryCancelRegs[4], (LONG)PbcDeviceGetInterruptMask(device));
+            InterlockedExchange(&device->TelemetryCancelRegs[5], (LONG)device->InterruptStatus);
+            snapshot = TRUE;
+        }
         ControllerAbortTransfer(device);
         device->InterruptStatus = 0;
         WdfInterruptReleaseLock(device->InterruptObject);
@@ -940,6 +978,10 @@ OnCancel(
     }
 
     WdfSpinLockRelease(device->Lock);
+    if (snapshot)
+    {
+        PbcQueueTelemetry(device);
+    }
     PbcRequestComplete(request);
 }
 
@@ -1271,6 +1313,60 @@ PbcRequestDoTransfer(
         Request->Information = 0;
         ControllerAbortTransfer(Device);
         ControllerCompleteTransfer(Device, Request, TRUE);
+        return;
+    }
+    (VOID)WdfTimerStart(Device->PollTimer, WDF_REL_TIMEOUT_IN_MS(2));
+}
+
+// Starbite sbhsi2c-2 (docs/WIN11-GPU.md 6.84). Runs 2 ms after a transfer starts and every 2 ms while one is active.
+// If the controller shows an enabled interrupt condition that the ISR has not taken (InterruptStatus empty), it is
+// taken here exactly as the ISR would (disable, acknowledge those bits, hand them to the DPC routine). With the
+// interrupt declared edge-triggered, such a condition would otherwise sit there until the client's timeout.
+VOID
+OnPollTimer(
+    _In_ WDFTIMER Timer
+    )
+{
+    WDFDEVICE fxDevice = (WDFDEVICE)WdfTimerGetParentObject(Timer);
+    PPBC_DEVICE device = GetDeviceContext(fxDevice);
+    BOOLEAN active = FALSE;
+    BOOLEAN rescued = FALSE;
+
+    WdfSpinLockAcquire(device->Lock);
+    if ((device->CurrentTarget != NULL) &&
+        (device->CurrentTarget->CurrentRequest != NULL) &&
+        (device->Hsi2c.VirtualAddress != NULL))
+    {
+        active = TRUE;
+        WdfInterruptAcquireLock(device->InterruptObject);
+        ULONG mask = PbcDeviceGetInterruptMask(device);
+        ULONG pending = (mask != 0) ? ControllerGetInterruptStatus(device, mask) : 0;
+        if ((pending != 0) && (device->InterruptStatus == 0))
+        {
+            ControllerDisableInterrupts(device);
+            ControllerAcknowledgeExact(device, pending);
+            InterlockedOr(&device->InterruptStatus, (LONG)pending);
+            InterlockedIncrement(&device->TelemetryPollRescue);
+            rescued = TRUE;
+        }
+        WdfInterruptReleaseLock(device->InterruptObject);
+    }
+    WdfSpinLockRelease(device->Lock);
+
+    if (rescued)
+    {
+        OnInterruptDpc(device->InterruptObject, (WDFOBJECT)fxDevice);
+        PbcQueueTelemetry(device);
+    }
+
+    if (active)
+    {
+        WdfSpinLockAcquire(device->Lock);
+        if ((device->CurrentTarget != NULL) && (device->CurrentTarget->CurrentRequest != NULL))
+        {
+            (VOID)WdfTimerStart(device->PollTimer, WDF_REL_TIMEOUT_IN_MS(2));
+        }
+        WdfSpinLockRelease(device->Lock);
     }
 }
 

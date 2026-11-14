@@ -176,6 +176,19 @@ OnDeviceAdd(
         {
             return status;
         }
+
+        // Starbite sbhsi2c-2: the lost-interrupt poll (one-shot, re-armed while a transfer is active)
+        WDF_TIMER_CONFIG_INIT(&timerConfig, OnPollTimer);
+        timerConfig.AutomaticSerialization = FALSE;
+        timerConfig.UseHighResolutionTimer = WdfTrue;
+        status = WdfTimerCreate(
+            &timerConfig,
+            &timerAttributes,
+            &device->PollTimer);
+        if (!NT_SUCCESS(status))
+        {
+            return status;
+        }
     }
 
     {

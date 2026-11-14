@@ -969,6 +969,7 @@ ControllerCompleteTransfer(
     ControllerDisableInterrupts(Device);
     PbcDeviceSetInterruptMask(Device, 0);
     WdfTimerStop(Device->RequestTimer, FALSE);
+    WdfTimerStop(Device->PollTimer, FALSE);
 
     if (Request->Status != STATUS_CANCELLED)
     {
@@ -1081,4 +1082,18 @@ ControllerAcknowledgeExact(
             EHI2C_INTERRUPT_STATUS,
             Bits);
     }
+}
+
+// Starbite (docs/WIN11-GPU.md 6.84): one HSI2C register, for the poll and the cancel snapshot.
+ULONG
+ControllerReadRegister(
+    _In_ PPBC_DEVICE Device,
+    _In_ ULONG Offset
+    )
+{
+    if (Device->Hsi2c.VirtualAddress == NULL)
+    {
+        return 0;
+    }
+    return ReadRegister32(Device->Hsi2c.VirtualAddress, Offset);
 }

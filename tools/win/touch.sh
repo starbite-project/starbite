@@ -32,6 +32,9 @@
 #                                    TRANSFER_DONE = a hung touch read). ImagePath switch (tools/win/hive-imagepath.py);
 #                                    the touch state before is saved to OUT/hsi2c-before.txt. Check boot PASS = a NEW
 #                                    DiagClock line (differs from hsi2c-before.txt), TouchD0Status 0, DiagSelf 200 reads.
+#   tools/win/touch.sh hsi2c OUT 2   the same with sbhsi2c-2 (build/win/hsi2c-2): + a 2 ms poll that services an interrupt
+#                                    the ISR missed (edge-triggered), and a register snapshot at each cancel
+#                                    (Enum\ACPI\SAMS9810\a\Device Parameters: I2cPollRescue, I2cCancelCount/Pending/Regs).
 #   tools/win/touch.sh hsi2c-restore OUT   the DriverStore HSI2C driver again.
 #   tools/win/touch.sh show OUT      read-only: ImagePath and every Diag* value with the decoded trace.
 #
@@ -50,6 +53,7 @@ DRV3=$main/build/win/touch-3/s6touchdiag.sys
 HSI2C=$main/build/win/hsi2c-1/sbhsi2c.sys
 HSI2C_SHA=8489ac43bdef2ce7ee37b7fdb64bae58a7e9e74639c6da1126d740e0679fa9ec
 IP=tools/win/hive-imagepath.py
+if [ "${1:-}" = hsi2c ] && [ "${3:-1}" = 2 ]; then HSI2C=$main/build/win/hsi2c-2/sbhsi2c.sys; HSI2C_SHA=a8c74b938ebf9baeb07dc2a9d6e728c078b2014186b46c7c8f11ee892f6db040; fi
 DRV3_SHA=fa9f2a52c9fb0aa866cc7ba66e9f20548ad311d418cddac844531224efa7a2a2
 NTFS=/dev/block/sda27
 W=/tmp/wwin
@@ -84,7 +88,7 @@ hsi2c|hsi2c-restore)
     python3 "$HS" "$tmp/SYSTEM" check >> "$out/touch.log" 2>&1 || { log "the SYSTEM hive is dirty: run gpu-cycle.sh --clean-only first"; exit 3; }
     cp "$tmp/SYSTEM" "$out/backup/SYSTEM-$mode-$(date +%Y%m%d-%H%M%S)"
     if [ "$mode" = hsi2c ]; then
-        [ "$(shasum -a 256 "$HSI2C" | cut -c1-64)" = "$HSI2C_SHA" ] || { log "$HSI2C is not sbhsi2c-1 ($HSI2C_SHA)"; exit 1; }
+        [ "$(shasum -a 256 "$HSI2C" | cut -c1-64)" = "$HSI2C_SHA" ] || { log "$HSI2C is not the expected build ($HSI2C_SHA)"; exit 1; }
         python3 "$TD" "$tmp/SYSTEM" show > "$out/hsi2c-before.txt" 2>&1 || true
         python3 "$IP" "$tmp/SYSTEM" "$tmp/S1" set Exynos9810Hsi2c '\SystemRoot\System32\drivers\sbhsi2c.sys' 2>&1 | tee -a "$out/touch.log"
         push_check "$HSI2C" "$W/Windows/System32/drivers/sbhsi2c.sys"

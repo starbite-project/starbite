@@ -2647,6 +2647,27 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   `touch.sh hsi2c-restore OUT`. Check boot PASS: a new DiagClock line, TouchD0Status 0, DiagSelf 200 reads per pass
   (errors should drop to ~0 on both passes).
 
+### 6.84 touch-4 check: the exact-ack fix alone did not remove the hangs; sbhsi2c-2 (poll rescue + cancel snapshot)
+
+- **touch-4 check boot (A55, touchdiag-3 + sbhsi2c-1):** PASS (td3-25ms-5x, TouchD0Status 0, fresh DiagClock), but
+  DiagSelf 2/200 back to back and 2/200 spaced timed out (250 ms each; the self-test keeps 250 ms on purpose), vs
+  1/200 + 0/200 before. Small numbers, but no sign the exact-ack fix removed the cause.
+- **The HSI2C interrupt is EDGE-triggered** in the DSDT (`Interrupt (ResourceConsumer, Edge, ActiveHigh, Exclusive)`,
+  Device I2C0 SAMS9810): a firing the ISR does not claim, or a condition that rises while the line is already high,
+  never comes back; the controller just sits with INT_STATUS & INT_EN set until the client cancels. I found no such
+  path by reading (every re-enable is a 0->1 of INT_EN), so: measure and rescue at once.
+- **sbhsi2c-2** (a8c74b93, build sbhsi2c-2, signed, 0 LSE): sbhsi2c-1 +
+  - `OnPollTimer`: a one-shot high-resolution 2 ms timer armed when a transfer starts and re-armed while one is
+    active; if `INT_STATUS & mask` has bits and the ISR has not taken them (`InterruptStatus` 0), it does what the ISR
+    does (disable, exact-ack, OR into InterruptStatus) and runs the DPC routine; counted in **I2cPollRescue**. A lost
+    edge then costs ~2 ms instead of the client's timeout. Stopped in ControllerCompleteTransfer.
+  - `OnCancel`: before the abort, INT_STATUS, INT_EN, TRANS_STATUS, FIFO_STATUS, the software mask and InterruptStatus
+    into **I2cCancelRegs**; **I2cCancelCount**; **I2cCancelPending** counts cancels with `INT_STATUS & INT_EN` set (=
+    a condition nobody serviced). I2cTelemetryVersion 4.
+  - Reading the next pull: I2cPollRescue > 0 and the hangs gone = lost edges, fixed; I2cCancelCount > 0 with
+    I2cCancelPending 0 and TRANS_STATUS busy = the bus/chip itself stalls (then the touch chip side is next).
+- `touch.sh hsi2c OUT 2` installs it (ImagePath already set by touch-4: only the file and the read-back change).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
