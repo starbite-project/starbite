@@ -28,6 +28,7 @@
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
 #include <linux/io.h>
+#include <linux/irq.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/module.h>
@@ -52,6 +53,8 @@ static void __iomem *gicd;
 static bool use_hvc;
 static u32 fn_cpu_off = PSCI_0_2_FN_CPU_OFF;
 static atomic_t db_count = ATOMIC_INIT(0);
+static atomic_t sbg_db_on_cpu[8];		/* 8e: the doorbell's interrupts by CPU (sbblk_report) */
+static int sbg_db_irq_nr;
 static void __iomem *fp_pmu, *fp_intr, *fp_mbox;	/* /psci starbite,flexpmu (the S9) */
 static DECLARE_WAIT_QUEUE_HEAD(db_wait);
 
@@ -114,11 +117,13 @@ static void __noreturn sbg_last_cpu_off(u32 state)
 }
 
 static void sbblk_freeze_overlay(void);
+static void sbblk_report(struct work_struct *w);
 static int sbg_reboot_notify(struct notifier_block *nb, unsigned long action, void *data)
 {
 	unsigned int cpu, self = raw_smp_processor_id();
 
 	sbblk_freeze_overlay();			/* the card's overlay clean before the cluster goes off */
+	sbblk_report(NULL);			/* 8e: the doorbell's counts once more (a self test stops at ~25 s) */
 
 	/* process context, every CPU still online: take the others down properly (PSCI CPU_OFF each) */
 	for_each_online_cpu(cpu)
@@ -275,6 +280,7 @@ static void sbblk_kick(void);
 static irqreturn_t sbg_db_irq(int irq, void *dev)
 {
 	atomic_inc(&db_count);
+	atomic_inc(&sbg_db_on_cpu[raw_smp_processor_id() & 7]);
 	wake_up_interruptible(&db_wait);
 	sbblk_kick();				/* the doorbell is shared: completions may be waiting */
 	sbnet_kick();				/* v3: each service checks its own rings */
@@ -348,7 +354,7 @@ static struct miscdevice sbg_misc = {
  * Reap (one work item, so the completion ring has one consumer; kicked by the doorbell interrupt and by a
  * timer): read done_head, dmb, copy the entry, copy a read's payload out of the slot, free the slot, dmb,
  * done_tail, end the request. The timer is the only wake-up when there is no doorbell (every jiffy while
- * requests are in flight) and a safety net when there is one (every 50 ms).
+ * requests are in flight) and a safety net when there is one (every jiffy too since 8e: sbblk_timer_fn).
  * The id of a request is its slot plus a per-slot generation in the high bits: a completion for a slot that is
  * free, or with an old generation, is logged and dropped.
  */
@@ -403,8 +409,16 @@ static void sbblk_kick(void)
 		queue_work(sbblk_wq, &sbblk_work);
 }
 
+/* 8e (Track E): on the phone some boots take ~50 ms per block read (the steps of the initramfs in multiples of
+ * ~52 ms: 106, 262, 314 ms; the same steps 11-57 ms in other boots of the same build), as if the completions were
+ * found by this timer (then every HZ / 20) and not by the doorbell. The timer now polls every jiffy while requests
+ * are in flight, doorbell or not, and counts how often it finds completions waiting (sbblk_report at 15 s): */
+static atomic_t sbblk_found_by_timer = ATOMIC_INIT(0), sbblk_completions = ATOMIC_INIT(0);
+
 static void sbblk_timer_fn(struct timer_list *t)
 {
+	if (READ_ONCE(sbblk->done_head) != READ_ONCE(sbblk_done_tail))
+		atomic_inc(&sbblk_found_by_timer);
 	sbblk_kick();
 	if (!bitmap_empty(sbblk_busy, SBSHM_BLK_SLOTS))
 		mod_timer(&sbblk_timer, jiffies + sbblk_period);
@@ -550,6 +564,7 @@ static void sbblk_reap(struct work_struct *w)
 		}
 		sbshm_dmb();
 		WRITE_ONCE(sbblk->done_tail, ++sbblk_done_tail);
+		atomic_inc(&sbblk_completions);
 		if (rq)
 			blk_mq_end_request(rq, sts);
 		cond_resched();
@@ -581,6 +596,36 @@ void *sbg_vmap_wc(u64 off, size_t len)
 	kvfree(pages);
 	return p;
 }
+
+/* 8e: one line 15 s after sbblk starts (a slow cold start's HELLO was at ~12 s) and again at the power off: the completions, how many the timer
+ * found before the doorbell's work did, the doorbell's interrupts per CPU and its line as the distributor has it */
+static void sbblk_report(struct work_struct *w)
+{
+	char cpus[64];
+	unsigned int i, n = 0, hw = 0;
+	u8 tgt = 0;
+	int en = -1, pend = -1;
+	struct irq_data *d = sbg_db_irq_nr > 0 ? irq_get_irq_data(sbg_db_irq_nr) : NULL;
+
+	if (!READ_ONCE(sbblk_ready))
+		return;
+	cpus[0] = 0;
+	for (i = 0; i < 8 && n < sizeof(cpus) - 12; i++)
+		if (atomic_read(&sbg_db_on_cpu[i]))
+			n += scnprintf(cpus + n, sizeof(cpus) - n, "%s%u:%d", n ? " " : "", i,
+				       atomic_read(&sbg_db_on_cpu[i]));
+	if (d)
+		hw = (unsigned int)irqd_to_hwirq(d);
+	if (gicd && hw >= 32 && hw < 1020) {
+		tgt = readb(gicd + 0x800 + hw);
+		en = (readl(gicd + 0x100 + 4 * (hw / 32)) >> (hw % 32)) & 1;
+		pend = (readl(gicd + 0x200 + 4 * (hw / 32)) >> (hw % 32)) & 1;
+	}
+	pr_info("sbguest: sbblk: %d completions, %d found by the timer first; doorbell INTID %u: interrupts by CPU %s, target %#x, enabled %d, pending %d\n",
+		atomic_read(&sbblk_completions), atomic_read(&sbblk_found_by_timer), hw, n ? cpus : "none",
+		tgt, en, pend);
+}
+static DECLARE_DELAYED_WORK(sbblk_report_work, sbblk_report);
 
 static void sbblk_init(struct device *dev, bool irq_ok)
 {
@@ -625,9 +670,10 @@ static void sbblk_init(struct device *dev, bool irq_ok)
 	}
 	/* completions: the doorbell interrupt when both sides have one, else the timer alone */
 	sbblk_polled = !irq_ok || !READ_ONCE(hdr->db_to_guest) || !READ_ONCE(hdr->db_to_host);
-	sbblk_period = sbblk_polled ? 1 : max(1, HZ / 20);
+	sbblk_period = 1;			/* 8e: every jiffy (was HZ / 20 with a doorbell): see sbblk_timer_fn */
 	timer_setup(&sbblk_timer, sbblk_timer_fn, 0);
 	WRITE_ONCE(sbblk_ready, true);
+	schedule_delayed_work(&sbblk_report_work, 15 * HZ);
 	for (i = 0; i < SBSHM_BLK_DEVS; i++) {
 		bool ro = bd[i].flags & SBSHM_BLKDEV_RO;
 		struct queue_limits lim = {
@@ -738,6 +784,8 @@ static int sbg_probe(struct platform_device *pdev)
 		if (ret)
 			dev_warn(&pdev->dev, "doorbell irq %d: %d (polling)\n", irq, ret);
 		irq_ok = !ret;
+		if (irq_ok)
+			sbg_db_irq_nr = irq;
 	}
 	ret = misc_register(&sbg_misc);
 	if (ret)
@@ -788,6 +836,7 @@ static void __exit sbg_exit(void)
 	if (sbg_load_timer.function)
 		timer_shutdown_sync(&sbg_load_timer);
 	cancel_delayed_work_sync(&sbg_stop_work);
+	cancel_delayed_work_sync(&sbblk_report_work);
 #ifdef CONFIG_SUSPEND
 	cancel_work_sync(&sbg_freeze_work);
 #endif

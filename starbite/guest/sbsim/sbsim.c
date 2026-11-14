@@ -571,6 +571,12 @@ static int run_guest(unsigned run)
         irq_poll();
         uint64_t t = now_ms();
         own_check(t);
+#ifdef SBSIM_DB_MISROUTE
+        /* 8e (Track E): the phone's slow boots, as if the host's doorbell to the guest were lost: its line routed to
+         * this CPU (ITARGETSR byte), so only sbguest.ko's timer finds the completions */
+        if (mf->db_guest)
+            *(volatile uint8_t *)(uintptr_t)(GICD + 0x800 + mf->db_guest) = 1;
+#endif
 #ifdef SBSIM_PUMP
         /* cp7m: Starbite OS's GPU-wait hook (guest_pump -> sbg_pump, one block read <= 64 KiB per call) every 2 ms,
          * the full poll only every 40 ms (a long frame's turn): the block service mostly through the pump */
