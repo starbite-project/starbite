@@ -2533,6 +2533,27 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   /Volumes/SBWORK/starbite-build-archive/win-1114/ in the 11-14 disk emergency; t49-t58 and old stages are in
   .../win-1113/.
 
+### 6.78 touch-1: the split drags (touchdiag-2) and the late taps (press-and-hold off)
+
+- **The user (11-14, big cores, after debloat-1):** GD ~30 fps, uneven, taps ~1 s late; drags "always" split into
+  several press/release pairs and jump to other points; after quitting GD the taskbar and wallpaper stayed black for
+  minutes.
+- **Drags:** the installed touch driver is still the DriverStore S6SY761Touch (user hive 11-13: ImagePath unchanged,
+  no Diag* values): the big-core session's touchdiag-2 (cbd9f5a, 070dad9a, staged 11-11) never ran. Its root-cause
+  analysis (notes win-m3-clean-touch-rootcause.md): the driver turns ONE failed touch I2C read into "all fingers up"
+  (Device.c 2771/2804), and the still-held finger's next MOVE becomes a new down; Starbite's own touch code retries
+  3x. touchdiag-2 = the same driver + 3 tries 0.5 ms apart + Diag* counters and a press/release/all-up trace, so the
+  next drag either stops splitting (DiagI2cRetryOk > 0) or shows which of the other causes it is (chip releasing,
+  queue flush, Windows-side).
+- **Taps:** GD is not touch-aware, so Windows promotes taps to mouse clicks and, with "press and hold for right-click"
+  on, holds the click back until it knows the touch is not a hold. touch-online.cmd sets HKCU Wisp\Touch
+  TouchMode_hold = 0 (old value exported; untouch-online.cmd restores it). From the next sign-in.
+- **`tools/win/touch.sh apply|restore|show OUT`** (TWRP; hive-touchdiag.py + hive-runonce.py, rehearsed set/restore on
+  the user's SYSTEM copy); then one unattended small-core boot `gpu-cycle.sh --measure sbwddm-t61` proves the driver
+  loads (DiagBuild, TouchD0Status 0, DiagSelf) before the user relies on touch; then the usual restore.
+- Source and tools brought onto this branch from claude/win-m3-clean-947e73 7d67410d: starbite/win/s6touchdiag,
+  tools/woa/win-m3/hive-touchdiag.py.
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`

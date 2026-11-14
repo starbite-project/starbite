@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# touch.sh: Windows touch on the S9 (docs/WIN11-GPU.md 6.78), from TWRP, no boot. Touch is shared by BOTH rows.
+#
+#   tools/win/touch.sh apply OUT     (1) the touch service runs s6touchdiag.sys = touchdiag-2 (build/win/touch-1,
+#                                        070dad9a, source starbite/win/s6touchdiag = claude/win-m3-clean-947e73 cbd9f5a):
+#                                        the same S6SY761 driver plus up to 3 tries of a failed touch I2C read before
+#                                        it tells Windows "all fingers up" (one failed read used to cut a drag into
+#                                        several touches), and Diag* counters + a press/release/all-up trace in
+#                                        Enum\ACPI\SCSY0761\0\Device Parameters. Only the service's ImagePath changes
+#                                        (the original is kept in Parameters\SbOrigImagePath); DriverStore untouched.
+#                                    (2) HKLM RunOnce StarbiteTouch -> C:\starbite\debloat\touch-online.cmd at the next
+#                                        logon: "press and hold for right-click" off for the user (old value saved),
+#                                        so a tap in Geometry Dash is a click at once.
+#   tools/win/touch.sh restore OUT   ImagePath back to the DriverStore driver; RunOnce StarbiteUntouch puts the
+#                                    press-and-hold setting back. The .sys file stays (unused).
+#   tools/win/touch.sh show OUT      read-only: ImagePath and every Diag* value with the decoded trace.
+#
+# After apply, BEFORE anyone relies on touch, prove the driver loads with one unattended small-core boot:
+#   tools/win/gpu-cycle.sh --measure STAGE_T61 OUT/check   then   tools/win/touch.sh show OUT
+# (DiagBuild 's6touchdiag cbd9f5a', TouchD0Status 0, DiagSelf 0 errors; otherwise restore at once).
+# Refuses a dirty hive (exit 3). Backups in OUT/backup/. Every push read back by sha256 (exit 4).
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+mode=${1:?usage: touch.sh apply|restore|show OUT}
+out=${2:?usage: touch.sh apply|restore|show OUT}
+DRV=$main/build/win/touch-1/s6touchdiag.sys
+DRV_SHA=070dad9aae60debcc2819b873dba92bec1f9a2b944fa70b09d9ec4b1738a61f0
+NTFS=/dev/block/sda27
+W=/tmp/wwin
+SYS=Windows/System32/config/SYSTEM
+SOFT=Windows/System32/config/SOFTWARE
+HS=tools/win/hive-service.py
+TD=tools/woa/win-m3/hive-touchdiag.py
+RO=tools/win/hive-runonce.py
+mkdir -p "$out/backup"
+log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$out/touch.log"; }
+[ "$(adb get-state 2>/dev/null)" = recovery ] || { log "the phone is not in TWRP"; exit 1; }
+tmp=$(mktemp -d); trap 'adb shell "sync; umount '"$W"'" >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
+push_check() {
+    adb push "$1" "$2" >/dev/null
+    local a b
+    a=$(shasum -a 256 "$1" | cut -c1-64); b=$(adb shell "sha256sum '$2'" | tr -d '\r' | cut -c1-64)
+    [ "$a" = "$b" ] || { log "READ-BACK MISMATCH: $2"; exit 4; }
+    log "pushed $(basename "$1") -> $2 (${a:0:8})"
+}
+case $mode in
+show)
+    adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o ro $NTFS $W" >/dev/null
+    adb pull "$W/$SYS" "$tmp/SYSTEM" >/dev/null
+    python3 "$TD" "$tmp/SYSTEM" show | tee -a "$out/touch.log"
+    adb shell "cat $W/ProgramData/Starbite/debloat/touch.log 2>/dev/null" | tr -d '\r' | tee -a "$out/touch.log"
+    exit 0 ;;
+apply|restore) ;;
+*) echo "usage: touch.sh apply|restore|show OUT"; exit 1 ;;
+esac
+[ "$(shasum -a 256 "$DRV" | cut -c1-64)" = "$DRV_SHA" ] || { log "$DRV is not touchdiag-2 ($DRV_SHA)"; exit 1; }
+for f in starbite/win/debloat/touch-online.cmd starbite/win/debloat/untouch-online.cmd; do [ -f "$f" ] || { log "missing $f"; exit 1; }; done
+adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null
+adb pull "$W/$SYS" "$tmp/SYSTEM" >/dev/null
+adb pull "$W/$SOFT" "$tmp/SOFTWARE" >/dev/null
+for h in SYSTEM SOFTWARE; do
+    if ! python3 "$HS" "$tmp/$h" check >> "$out/touch.log" 2>&1; then
+        log "the $h hive is dirty (the last Windows boot did not end cleanly): run gpu-cycle.sh --clean-only first"; exit 3
+    fi
+done
+stamp=$(date +%Y%m%d-%H%M%S)
+cp "$tmp/SYSTEM" "$out/backup/SYSTEM-$stamp"; cp "$tmp/SOFTWARE" "$out/backup/SOFTWARE-$stamp"
+log "$mode: hives clean, backed up as *-$stamp"
+case $mode in
+apply)
+    python3 "$TD" "$tmp/SYSTEM" "$tmp/S1" set >> "$out/touch.log" 2>&1
+    python3 "$RO" "$tmp/SOFTWARE" "$tmp/SW1" set StarbiteTouch 'cmd /c C:\starbite\debloat\touch-online.cmd' >> "$out/touch.log" 2>&1
+    adb shell "mkdir -p $W/starbite/debloat" >/dev/null
+    push_check "$DRV" "$W/Windows/System32/drivers/s6touchdiag.sys"
+    push_check starbite/win/debloat/touch-online.cmd "$W/starbite/debloat/touch-online.cmd"
+    push_check starbite/win/debloat/untouch-online.cmd "$W/starbite/debloat/untouch-online.cmd"
+    push_check "$tmp/S1" "$W/$SYS"
+    push_check "$tmp/SW1" "$W/$SOFT"
+    python3 "$TD" "$tmp/S1" show | head -3 | tee -a "$out/touch.log"
+    log "apply done: touch service -> s6touchdiag.sys (touchdiag-2), RunOnce StarbiteTouch armed. Next: the unattended check boot" ;;
+restore)
+    python3 "$TD" "$tmp/SYSTEM" "$tmp/S1" restore >> "$out/touch.log" 2>&1
+    python3 "$RO" "$tmp/SOFTWARE" "$tmp/SW0" remove StarbiteTouch >> "$out/touch.log" 2>&1 || cp "$tmp/SOFTWARE" "$tmp/SW0"
+    python3 "$RO" "$tmp/SW0" "$tmp/SW1" set StarbiteUntouch 'cmd /c C:\starbite\debloat\untouch-online.cmd' >> "$out/touch.log" 2>&1
+    adb shell "mkdir -p $W/starbite/debloat" >/dev/null
+    push_check starbite/win/debloat/untouch-online.cmd "$W/starbite/debloat/untouch-online.cmd"
+    push_check "$tmp/S1" "$W/$SYS"
+    push_check "$tmp/SW1" "$W/$SOFT"
+    python3 "$TD" "$tmp/S1" show | head -3 | tee -a "$out/touch.log"
+    log "restore done: touch service back on the DriverStore driver, RunOnce StarbiteUntouch armed" ;;
+esac
