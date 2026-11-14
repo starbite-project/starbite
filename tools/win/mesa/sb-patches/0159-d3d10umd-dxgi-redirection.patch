@@ -1,0 +1,54 @@
+From 770743de74ef779db0621c1f4a318b466497f679 Mon Sep 17 00:00:00 2001
+From: Starbite <starbite@localhost>
+Date: Sat, 14 Nov 2026 15:39:41 +0200
+Subject: [PATCH] 0159: d3d10umd: DXGI shared-resource presentation (no
+ DXGI_STATUS_NO_REDIRECTION) on the Mali; flush Present blts
+
+---
+ src/gallium/frontends/d3d10umd/Device.cpp  | 9 ++++++++-
+ src/gallium/frontends/d3d10umd/DxgiFns.cpp | 9 +++++++++
+ 2 files changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+index cb8b9e0..907824e 100644
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -345,7 +345,14 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
+    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnBlt =
+       _Blt;
+ 
+-   if (0) {
++   /* Starbite (sb-patches/0159, docs/WIN11-GPU.md 6.89): on the Mali, let DXGI use the shared resource
++    * presentation path. Upstream (a software rasterizer's UMD) always returned DXGI_STATUS_NO_REDIRECTION, which the
++    * DDI reserves for rasterizers that do not share hardware with DWM; DXGI then presented every windowed swap chain
++    * with PresentDXGI (Blt, no destination) - the DWM-off path - and nothing reached the screen (T52-T60: no windowed
++    * D3D11 swap chain was ever composed). With S_OK, DXGI opens DWM's shared surface for the window and calls BltDXGI
++    * (our _Blt, a GPU blit) with the Present flag. Devices not on the Mali keep the old value. */
++   if (malikm_use(pDevice->sbDev)) {
++      DebugPrintf("sbumd: CreateDevice: DXGI shared-resource presentation (redirection) on\n");
+       return S_OK;
+    } else {
+       // Tell DXGI to not use the shared resource presentation path when
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index 111790a..e3bc048 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -703,6 +703,15 @@ _Blt(DXGI_DDI_ARG_BLT *Blt)
+    b.filter = (b.src.box.width != b.dst.box.width || b.src.box.height != b.dst.box.height) ?
+               PIPE_TEX_FILTER_LINEAR : PIPE_TEX_FILTER_NEAREST;
+    pipe->blit(pipe, &b);
++   /* sb-patches/0159: a windowed swap chain's frame into DWM's shared surface (Flags.Present): flush it now so the
++    * GPU runs it before DWM samples the surface (the producer's present is this Blt; no PresentDXGI follows). */
++   if (Blt->Flags.Present) {
++      static unsigned said_present;
++      pipe->flush(pipe, NULL, 0);
++      if (!said_present++)
++         DebugPrintf("sbumd: Blt with Present: a windowed swap chain frame into DWM's shared surface\n");
++      malikm_note_count(30);                 /* UmdNote_30: redirected presents (Blt with Present) */
++   }
+    if (logged < 8 || Blt->Rotate != DXGI_DDI_MODE_ROTATION_IDENTITY) {
+       logged++;
+       DebugPrintf("sbumd: Blt %ux%u fmt %u (alloc 0x%x) -> %ux%u fmt %u (alloc 0x%x) rect %d,%d-%d,%d flags 0x%x "
+-- 
+2.43.0
+

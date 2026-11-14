@@ -2730,6 +2730,28 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   c000001d/c0000409 in T67a/b, never on the user's boots (the restore turns the mode off).
 - **For the analysis of T66:** `tools/win/etw-summary.py pres-<mode>.csv` (PIDs, event kinds, the app's present path).
 
+### 6.89 Why no windowed swap chain was ever shown: sbumd said DXGI_STATUS_NO_REDIRECTION (sb-patches/0159)
+
+- **Microsoft's DXGI presentation path** ([DXGI Presentation Path](https://learn.microsoft.com/en-us/Windows-hardware/drivers/display/dxgi-presentation-path)):
+  with DWM on, DXGI "opens a view of a shared resource that is a render target for the DXGI producer and a texture for
+  DWM" and calls the driver's BltDXGI with the Present flag; only with DWM off does it call PresentDXGI with the Blt
+  flag and no destination. Every windowed present we logged since T52 was the latter (Flags 0x1, no destination).
+- **The reason, in our source:** d3d10umd's `CreateDevice` ends with `return DXGI_STATUS_NO_REDIRECTION;` (upstream
+  Mesa: the UMD comes from a software rasterizer). [Supporting the DXGI DDI](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/supporting-the-dxgi-ddi)
+  reserves that value for "software rasterizers" that do not share hardware with DWM: it tells DXGI not to use the
+  shared resource presentation path. So DXGI took the DWM-off path for every windowed swap chain on our adapter, the
+  present went nowhere (no KMD present, DWM never opened the buffers), and the window stayed invisible: T52 GD
+  zero-copy, T54 sbfps flip/blt, T56/T58 VIS2 hwnd/hwndblt; very likely Edge's GPU process failures too.
+- **0159** (src-int 770743d, `tools/win/mesa/sb-patches/0159-d3d10umd-dxgi-redirection.patch`): `CreateDevice` returns
+  S_OK when `malikm_use(pDevice->sbDev)` (the device is on the Mali; logged "DXGI shared-resource presentation
+  (redirection) on"), NO_REDIRECTION otherwise; `_Blt` (our 0107 GPU blit) flushes when `Flags.Present` is set and
+  counts UmdNote_30. **sbumd cf13c58e** = the 0157 tree + 0159 (build-int-a64/ec + build-int-x link, verify 35/35, 0
+  fails), `build/win/umd-0159/`. Unsigned like every sbumd so far.
+- **T66 now carries it:** VIS2 (ETW, elevated) + sbglzc64 fps + sb-vis.bat shots with sbumd cf13c58e, so the shots
+  answer directly whether windowed swap chains (and the zero-copy GL present) now reach the screen.
+- Not addressed: the DComp swap chain's INVALIDHANDLE and the DComp surface's black clear (6.74); DXGI 1.2 flip model
+  (true zero-copy to DWM) would need the DXGI 1.2 DDI; with 0159 a windowed frame costs one GPU blit, not a CPU copy.
+
 ### 6.86 BeamNG.drive on the S9: feasibility (the user's long goal; no phone time)
 
 Facts marked [K] are general knowledge about the game, not checked against a current release.

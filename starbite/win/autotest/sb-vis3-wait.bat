@@ -5,11 +5,11 @@ setlocal EnableDelayedExpansion
 set D=C:\starbite\auto\gpu
 set L=%D%\gputest.log
 echo VIS3 waiter start %time% >> %L%
-for /l %%T in (1,1,100) do (
+for /l %%T in (1,1,180) do (
   if exist %D%\vis-elev.done goto done
   ping -n 6 127.0.0.1 > nul
 )
-echo VIS3: no vis-elev.done after ~8 min (the RunOnce did not run?) >> %L%
+echo VIS3: no vis-elev.done after ~15 min (the RunOnce did not run?) >> %L%
 :done
 echo VIS3 waiter end %time% >> %L%
 ping -n 4 127.0.0.1 > nul
