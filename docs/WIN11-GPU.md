@@ -2668,6 +2668,51 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
     I2cCancelPending 0 and TRANS_STATUS busy = the bus/chip itself stalls (then the touch chip side is next).
 - `touch.sh hsi2c OUT 2` installs it (ImagePath already set by touch-4: only the file and the read-back change).
 
+### 6.85 Zero-copy on screen is the top track again: T66 (VIS3) = VIS2's ETW, finally elevated
+
+- **The user (11-14):** touch-4 works ("drags are fine"); GD ~30 fps, taps less late but still late; "wheres the work
+  on the zero copy ... which pushes 300". Honest scope: zero-copy removes the frame copy + GDI hop (sbglzc 51 -> 149
+  fps on the A55s, a light program), but GD on the M3s is bound by its own translated game-thread CPU (~20 of ~28-33
+  ms per frame, 6.73/6.76): there it would mainly cut latency and the copy's memory traffic, not triple fps.
+- **Where it stands:** windowed swap chains (flip and blt model) draw right; sbumd's `pfnPresentCb(src, dst 0)`
+  returns S_OK; the KMD never gets a present for them; DWM never opens their buffers (6.59/6.61/6.63); DComp swap chain
+  first Present -> INVALIDHANDLE; DComp surface composes but its runtime-emulated clear writes nothing (6.74). The
+  missing evidence is what dxgkrnl does with the windowed present: VIS2 has had an ETW session for that since T56, but
+  `logman` needs administrator rights and the autotest is not elevated.
+- **T66 (`sbwddm-t66`, T61 drivers):** `tools/win/vis-arm.sh OUT` sets HKLM RunOnce StarbiteVis ->
+  `C:\starbite\vis\sb-vis-elev.cmd` (`starbite/win/autotest/`), which waits for the gputest files and runs
+  `sb-comp.bat` (modes hwnd hwndblt dcsc dcsurf) elevated; the stage's `sb-user.bat` (`sb-vis3-wait.bat`) waits for
+  `vis-elev.done` and restarts. Output: `pres-<mode>.csv` (tracerpt) per mode in umdlog.
+- **GD tap latency now (one line):** no longer Windows' press-and-hold wait; what is left is frames in flight at ~30
+  fps: GD reads input once per frame (~33 ms), the async present shows frame N while N+1 is drawn (+1 frame), and the
+  GDI/redirection bitmap reaches the panel at DWM's next composition (+~16-33 ms): ~80-120 ms, all of it shrinking
+  with frame time (and zero-copy would drop the copy/GDI hop).
+
+### 6.86 BeamNG.drive on the S9: feasibility (the user's long goal; no phone time)
+
+Facts marked [K] are general knowledge about the game, not checked against a current release.
+- **GPU API, the first blocker.** BeamNG's Windows renderer is Direct3D 11 at **feature level 11_0** [K] (it also
+  has a Vulkan renderer [K]). Ours is D3D11 at **FL 10_0** (sbumd offers the D3D10.0 DDI, 6.6; 10_1 is a switch away),
+  and FL 11_0 needs SM5 + tessellation: the Mali-G72 has no tessellation and d3d10umd translates SM4 only
+  (WIN11-GPU-CAPS.md, "Not FL 11_0"). Vulkan would need PanVK on Bifrost v6/v7, which upstream does not cover as a
+  conformant driver [K]. So today the game would refuse to create its device or fall to WARP (CPU rendering).
+- **CPU: x64 translated on 3 M3 cores.** The Chromebook's Celeron N4000 runs it natively [the user]. The M3s at
+  1.8-2.0 GHz run x64 through xtajit64 with no persistent cache on the big-core row (6.75) and XtaCache's 7023 to fix
+  first; BeamNG's soft-body physics is CPU-heavy [K]. Expect well below the N4000's native speed until the cache works,
+  and the 80 C guard throttling under sustained load (T61: 81 C, 6 throttles in a GD run).
+- **Memory:** 4 GB RAM; the big-core desktop already sat at ~3.75 GB committed idle before debloat-1 (T63), GD took
+  it to 4.65 GB. BeamNG asks for 8 GB [K] (the Chromebook runs it in 4 GB, so it can start lower). The pagefile is on
+  C: with ~3 GB free.
+- **Install location:** C: (sda27) is 22 GB with ~3.3 GB free; BeamNG needs tens of GB [K]. Options: (1) USB storage
+  through the S9's port in host mode under Windows: the xHCI controller enumerates under Windows (T2, 6.x), but a USB
+  stick as a Windows drive has never been tried here, and host mode needs OTG power to the port; (2) the microSD card:
+  Windows has no SD host driver on this phone that we know of (the card holds the OS store, owned by Starbite);
+  (3) shrink something on UFS. (1) is the one to test first: plug the user's 64 GB stick, see if Windows mounts it.
+- **What blocks first:** the renderer (FL 11_0 / Vulkan), before CPU or memory matter. Without it, the only route is
+  a renderer-level translation to what we have (e.g. D3D11 FL 11 on top of GL 3.x/ES 3.1 does not exist without
+  tessellation) or WARP at a few fps. Realistic order if the user wants to pursue it: USB storage test (cheap), the
+  M3 translation cache (helps everything), then a hard look at Vulkan on Bifrost (big project).
+
 ## 7. Stage 2: the display-only driver (`sbdisplay.sys`)
 
 A WDDM 1.2 display-only driver in the shape of Microsoft's KMDOD sample and wddm-mali-g52's `malidod`
