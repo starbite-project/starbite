@@ -42,9 +42,25 @@ struct sbg_os {
     const struct sbg_fs *fs;
     /* sbsnd (host/sbg_snd.h): the speaker / mic for the guest's PCM streams; NULL = none */
     const struct sbg_snd *snd;
+    /* sbgpu (sbshm-gpu.h, host/sbg_gpu.c): the GPU that runs the guest's job chains; NULL = none */
+    const struct sbg_gpu *gpu;
 };
 struct sbg_fs;
 struct sbg_snd;
+/* sbgpu's backend (Starbite OS: the Mali in a second GPU address space; sbsim: a stand-in). Called from sbg_poll.
+ *   params: fill p[DRM_PANFROST_PARAM_*] (GPU_PROD_ID, SHADER_PRESENT, ...); 0 = no GPU (the service is not offered)
+ *   map: the guest's pages pfn[0..n) at GPU VA va..va + n pages (flags SBGPU_MAP_*; sbg_gpu.c has checked every PFN
+ *        lies in the guest's RAM); 0 ok, < 0 -errno
+ *   unmap: those pages gone from the GPU (after the guest's last job using them finished)
+ *   submit: run the job chain at jc (flags SBGPU_SUBMIT_FS: a fragment chain), the guest's job seq; when it has run,
+ *        the backend calls sbg_gpu_done(seq, exception code or 0); 0 accepted, < 0 -errno (then done at once, failed) */
+struct sbg_gpu {
+    int (*params)(uint64_t *p, unsigned n);
+    int (*map)(uint64_t va, const volatile uint64_t *pfn, uint32_t n, uint32_t flags);
+    int (*unmap)(uint64_t va, uint32_t n);
+    int (*submit)(uint64_t jc, uint32_t flags, uint64_t seq);
+};
+void sbg_gpu_done(uint64_t seq, uint32_t status);   /* the backend: the guest's job seq finished (in order) */
 /* the Linux errno values sbblk's completions use */
 enum { SBG_EIO = 5, SBG_ENODEV = 19, SBG_EINVAL = 22, SBG_ENOSPC = 28, SBG_EROFS = 30 };
 

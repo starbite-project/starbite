@@ -28,4 +28,13 @@
 #define SBG_NETCHECK_PASS1 "STARBITE-NET: curl 0 http 2"
 #define SBG_NETCHECK_PASS2 "STARBITE-NET: curl 0 http 3"
 
+/* sbgpu (Track E, 2026-11-14): GL on Starbite's Mali through sbguest.ko's render node. sbgl-probe (base-e9a on) makes
+ * an EGL context, names GL's renderer, clears a 64 x 64 target and reads a pixel back (right only when the Mali ran
+ * the job chains), times 100 frames, and logs "STARBITE-GPU: ..." lines; LIBGL_ALWAYS_SOFTWARE (sbwl's default for the
+ * apps) is dropped for it. PASS: a line starting SBG_GPUCHECK_PASS; FAIL: "STARBITE-GPU: FAIL ..."; no line in 30 s
+ * of the typing's end: FAIL. Starbite's own side logs "guest: sbgpu: job N on slot S in us T" for the first jobs. */
+#define SBG_GPUCHECK_CMD "env -u LIBGL_ALWAYS_SOFTWARE sbgl-probe >/dev/null 2>&1; echo STARBITE-TERM-OK > /dev/kmsg\n"
+#define SBG_GPUCHECK_LINE "STARBITE-GPU: "
+#define SBG_GPUCHECK_PASS "STARBITE-GPU: PASS"
+
 #endif

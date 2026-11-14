@@ -40,6 +40,7 @@ EARLY=0
 [ -e /run/sbinit.early ] && EARLY=1
 if [ "$EARLY" = 0 ]; then
     chmod 0622 /dev/kmsg
+    chmod 0666 /dev/dri/renderD* 2>/dev/null     # sbgpu: the apps (user) use the GPU's render node
     mkdir -p /run/lock /tmp /var/tmp && chmod 1777 /tmp /var/tmp
     rm -rf /tmp/* /tmp/.[!.]* 2>/dev/null   # /tmp is on the overlay (no RAM for a tmpfs): start clean
 fi

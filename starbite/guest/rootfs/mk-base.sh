@@ -38,6 +38,8 @@ PKGS=(
     xdg-utils desktop-file-utils shared-mime-info libglib2.0-bin gtk-update-icon-cache
     # fonts: DejaVu (the terminal's mono) and Inter (the UI)
     fontconfig fonts-dejavu-core fonts-inter
+    # GL / GLES for the apps on Starbite's Mali (sbguest.ko's sbgpu: Mesa's Panfrost through the render node)
+    libgl1-mesa-dri libegl-mesa0
     # toolkits and their look
     libgtk-3-0t64 libgtk-4-1 libadwaita-1-0 adwaita-icon-theme hicolor-icon-theme librsvg2-common
     libgdk-pixbuf2.0-bin gnome-themes-extra-data

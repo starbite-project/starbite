@@ -108,6 +108,7 @@ if [ "$mode" = desktop ]; then
     rm -rf /newroot/tmp/* /newroot/tmp/.[!.]* 2>/dev/null     # (sbinit's own clean then finds it empty)
     chmod 1777 /newroot/tmp /newroot/var/tmp
     chmod 0622 /newroot/dev/kmsg
+    chmod 0666 /newroot/dev/dri/renderD* 2>/dev/null   # sbgpu: the apps (user) use the GPU's render node
     for a in $(cat /newroot/proc/cmdline); do
         case "$a" in sbinit.epoch=*) date -u -s "@${a#sbinit.epoch=}" >/dev/null 2>&1 ;; esac
     done

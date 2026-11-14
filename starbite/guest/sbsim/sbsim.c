@@ -24,7 +24,7 @@
 #include "../sbshm.h"
 #include "../host/sbghost.h"
 #include "../netcheck-cmd.h"
-#ifdef SBSIM_TERM_NET
+#if defined(SBSIM_TERM_NET) || defined(SBSIM_TERM_GPU)
 #define SBSIM_TERM_WAIT_MS 60000U           /* the network check: up to 30 s for the link, 20 s for curl */
 #else
 #define SBSIM_TERM_WAIT_MS 20000U
@@ -489,7 +489,7 @@ static const struct sbg_os shim = {
 static const struct sbg_os shim_blk = {     /* with block devices in the manifest */
     .ms = now_ms, .log = host_log, .guest_log = guest_log, .cpu_on = cpu_on, .cluster_off = cluster_off,
     .blk_io = blk_io,
-    .unix_s = sim_unix_s, .net_rx = sim_net_rx, .fs = SIM_FS, .snd = SIM_SND,
+    .unix_s = sim_unix_s, .net_rx = sim_net_rx, .fs = SIM_FS, .snd = SIM_SND, .gpu = SIM_GPU,
 };
 static void blk_report(unsigned run)
 {
@@ -662,6 +662,10 @@ static int run_guest(unsigned run)
                                       "|PageTables|Mapped' /proc/meminfo | while read l; do echo \"MEM$1 $l\" > /dev/kmsg;"
                                       " done; }; m 0; (gnome-calculator >/dev/null 2>&1 &); sleep 9; m 1; "
                                       "echo STARBITE-TERM-OK > /dev/kmsg\n";
+#elif defined(SBSIM_TERM_GPU)
+            /* Track E: GL through sbgpu (sbgl-probe in the base): Mesa's Panfrost on the forwarded render node;
+             * sim_gpu.c runs no job, so the renderer is the check here (the pixel is the phone's) */
+            static const char cmd[] = "env -u LIBGL_ALWAYS_SOFTWARE sbgl-probe >/dev/null 2>&1; echo STARBITE-TERM-OK > /dev/kmsg\n";
 #elif defined(SBSIM_TERM_NET)
             /* Track E: the linuxtest's network check (../netcheck-cmd.h); sim_net answers DNS but no TCP, so the
              * expected line here is "curl 7" or "curl 28" with link 1 (the FAIL path); a VM chroot gives the PASS */

@@ -670,8 +670,9 @@ extern void (*sb_before_reset)(void);
 #define SB_GPU 0x17500000UL
 /* DRAM bank 2's high end (Track A, 2026-11-13): Linux's carve-out 0x8_8000_0000..0x8_DFFF_FFFF (1.5 GiB), its shared
  * region 0x8_E000_0000..0x8_E3FF_FFFF (64 MiB), then RESERVED for the region's growth to 128 MiB (Track E's v4
- * contract: Linux apps' surfaces at the panel's resolution) 0x8_E400_0000..0x8_E7FF_FFFF; nothing else may use it.
- * 0x8_E800_0000..0x8_EFFF_FFFF is free. */
+ * contract: Linux apps' surfaces at the panel's resolution) 0x8_E400_0000..0x8_E7FF_FFFF; nothing else may use it
+ * (in use since 8t: the 1440 x 2688 surfaces). 0x8_E800_0000..0x8_E83F_FFFF: Track E's sbgpu, the GPU's address space 1
+ * page tables (4 MiB, the guest's GPU jobs). 0x8_E840_0000..0x8_EFFF_FFFF is free. */
 #define SB_GUEST_SHM_HI 0x8e4000000ULL      /* the reserved 64 MiB (see above) */
 #define SB_GUEST_SHM_HI_SIZE 0x4000000ULL
 #define SB_GPU_MEM 0x8f0000000ULL           /* 32 MiB of DRAM bank 2: page tables + data */

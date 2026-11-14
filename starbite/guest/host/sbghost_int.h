@@ -23,4 +23,6 @@ void sbg_p9_load(void);
 void sbg_p9_poll(void);
 void sbg_snd_load(void);
 void sbg_snd_poll(void);
+void sbg_gpu_load(void);
+void sbg_gpu_poll(void);
 #endif

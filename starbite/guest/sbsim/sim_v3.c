@@ -3,6 +3,7 @@
  *   sim_net.c  sim_net_rx (+ a responder: ICMP echo, UDP echo, a DNS stub) and sim_net_tick
  *   sim_p9.c   SIM_FS (a struct sbg_fs * over a small in-memory tree, or NULL) and sim_p9_tick
  *   sim_snd.c  SIM_SND (a struct sbg_snd *, or NULL) and sim_snd_tick
+ *   sim_gpu.c  SIM_GPU (sbgpu's backend: a Mali-G72's parameters, jobs "run" at once) and sim_gpu_tick
  * The tests themselves run in the guest (a test root logs "v3-test: <svc>: PASS|FAIL ..." and "V3-TEST-DONE"). */
 static uint32_t sim_unix_s(int32_t *tz_min)
 {
@@ -12,9 +13,11 @@ static uint32_t sim_unix_s(int32_t *tz_min)
 #include "sim_net.c"
 #include "sim_p9.c"
 #include "sim_snd.c"
+#include "sim_gpu.c"
 static void sim_v3_tick(uint64_t t)
 {
     sim_net_tick(t);
     sim_p9_tick(t);
     sim_snd_tick(t);
+    sim_gpu_tick(t);
 }
