@@ -1513,54 +1513,74 @@ static void build_wclock(void)
     float x = WID_X(0), y = WCK_Y, s = WID_W, cx = x + s / 2, cy = y + s / 2;
     dc d = mk(l, "home-clock", x, y, WID_X(1) + WID_W - x, s + 30, 2, 0);
     tk_col ink = tk_hex(0x1c1c1e, 1);
-    d_rrect(&d, x, y, s, s, 24, ink);                              /* iOS's Clock widget: a black plate, a white face */
-    d_rrect(&d, cx - 66, cy - 66, 132, 132, 66, W(1));
-    for (int i = 0; i < 60; i++) {
-        float a = 6.2831853f * i / 60, sn = tk_sinf(a), cs = tk_cosf(a), r0 = i % 5 ? 61.5f : 58;
-        d_seg(&d, cx + r0 * sn, cy - r0 * cs, cx + 63.5f * sn, cy - 63.5f * cs, i % 5 ? .7f : 1.8f, i % 5 ? tk_hex(0x9a9aa0, 1) : ink);
-    }
-    for (int h = 1; h <= 12; h++) {
-        char n[4];
-        n[put_dec(n, h)] = 0;
-        float a = 6.2831853f * h / 12, w = tw(TK_IT600, 12, n, 0, 0);
-        d_text(&d, TK_IT600, 12, cx + 47 * tk_sinf(a) - w / 2, cy - 47 * tk_cosf(a) + 4.4f, n, 0, 0, ink, 0);
+    char at[16], line[40];
+    int k = 0;
+    if (ALM.on) {
+        fmt_time(at, ALM.h, ALM.m, 1);
+        const char *pre = ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? "Alarm " : "Tomorrow ";
+        for (const char *p = pre; *p;) line[k++] = *p++;
+        for (const char *p = at; *p && k < 38;) line[k++] = *p++;
+    } else
+        for (const char *p = "No alarm set"; *p;) line[k++] = *p++;
+    line[k] = 0;
+    /* 8p (Track A; 8o's phone: "minute: clock widget 86 ms", the slowest idle turn): everything but the hands (the
+     * plates, the face's 60 ticks and 12 numerals, the labels' shadowed text, the Calendar widget) kept between
+     * minutes and copied back while the day, the alarm's line and the bitmap's place are the same; the hands and the
+     * centre drawn on it (they overlap none of the rest, so the pixels are a full draw's) */
+    static struct { int w, h, stride, wday, day; float ox, oy; char line[40]; uint32_t *px; } WC;
+    int same = d.b->px && WC.px && WC.w == d.b->w && WC.h == d.b->h && WC.stride == d.b->stride && WC.ox == d.ox &&
+               WC.oy == d.oy && WC.wday == ST.wday && WC.day == ST.day && !tk_strcmp(WC.line, line);
+    if (same)
+        tk_memcpy(d.b->px, WC.px, (size_t)d.b->h * (size_t)d.b->stride * 4u);
+    else {
+        d_rrect(&d, x, y, s, s, 24, ink);                          /* iOS's Clock widget: a black plate, a white face */
+        d_rrect(&d, cx - 66, cy - 66, 132, 132, 66, W(1));
+        for (int i = 0; i < 60; i++) {
+            float a = 6.2831853f * i / 60, sn = tk_sinf(a), cs = tk_cosf(a), r0 = i % 5 ? 61.5f : 58;
+            d_seg(&d, cx + r0 * sn, cy - r0 * cs, cx + 63.5f * sn, cy - 63.5f * cs, i % 5 ? .7f : 1.8f, i % 5 ? tk_hex(0x9a9aa0, 1) : ink);
+        }
+        for (int h = 1; h <= 12; h++) {
+            char n[4];
+            n[put_dec(n, h)] = 0;
+            float a = 6.2831853f * h / 12, w = tw(TK_IT600, 12, n, 0, 0);
+            d_text(&d, TK_IT600, 12, cx + 47 * tk_sinf(a) - w / 2, cy - 47 * tk_cosf(a) + 4.4f, n, 0, 0, ink, 0);
+        }
+        float cw = tw(TK_IT400, 12, "Clock", 0, 0);
+        d_text(&d, TK_IT400, 12, cx - cw / 2, y + s + 18, "Clock", 0, 0, INK, 1);
+        /* 8a (top ten #5): page 1 filled as iOS's: the Calendar widget beside the Clock (iOS's small Calendar widget in
+         * dark mode: a #1c1c1e plate, the weekday 12 / 700 red, the day 44 / 400, then the day's line), so the row is
+         * two widgets, not a widget and a hole */
+        {
+            float x1 = WID_X(1), tx = x1 + 16;
+            d_rrect(&d, x1, y, s, s, 24, ink);
+            char wd[12];
+            int n = 0;
+            for (const char *p = WD[ST.wday % 7]; *p && n < 11; p++) wd[n++] = *p >= 'a' && *p <= 'z' ? (char)(*p - 32) : *p;
+            wd[n] = 0;
+            d_text(&d, TK_IT700, 12, tx, base_of(TK_IT700, 12, y + 16, 0), wd, .3f, 0, C_RED, 0);
+            char dn[4];
+            dn[put_dec(dn, ST.day)] = 0;
+            d_text(&d, TK_IT400, 44, tx - 2, base_of(TK_IT400, 44, y + 34, 0), dn, -.8f, TK_TNUM, INK, 0);
+            d_text(&d, TK_IT600, 12.5f, tx, y + s - 38, "No events today", 0, 0, W(.6f), 0);
+            d_text(&d, TK_IT400, 12.5f, tx, y + s - 20, line, 0, TK_TNUM, W(.6f), 0);
+            float kw = tw(TK_IT400, 12, "Calendar", 0, 0);
+            d_text(&d, TK_IT400, 12, x1 + s / 2 - kw / 2, y + s + 18, "Calendar", 0, 0, INK, 1);
+        }
+        tk_free(WC.px);
+        size_t nb = (size_t)d.b->h * (size_t)d.b->stride * 4u;
+        WC.px = d.b->px ? tk_alloc(nb) : 0;
+        if (WC.px) {
+            tk_memcpy(WC.px, d.b->px, nb);
+            WC.w = d.b->w; WC.h = d.b->h; WC.stride = d.b->stride; WC.ox = d.ox; WC.oy = d.oy;
+            WC.wday = ST.wday; WC.day = ST.day;
+            tk_memcpy(WC.line, line, sizeof WC.line);
+        }
     }
     float ha = 6.2831853f * ((ST.h % 12) + ST.mi / 60.0f) / 12, ma = 6.2831853f * ST.mi / 60;
     d_seg(&d, cx, cy, cx + 31 * tk_sinf(ha), cy - 31 * tk_cosf(ha), 5, ink);
     d_seg(&d, cx, cy, cx + 52 * tk_sinf(ma), cy - 52 * tk_cosf(ma), 3.4f, ink);
     d_rrect(&d, cx - 4.5f, cy - 4.5f, 9, 9, 4.5f, ink);
     d_rrect(&d, cx - 2, cy - 2, 4, 4, 2, C_ORANGE);
-    float cw = tw(TK_IT400, 12, "Clock", 0, 0);
-    d_text(&d, TK_IT400, 12, cx - cw / 2, y + s + 18, "Clock", 0, 0, INK, 1);
-    /* 8a (top ten #5): page 1 filled as iOS's: the Calendar widget beside the Clock (iOS's small Calendar widget in
-     * dark mode: a #1c1c1e plate, the weekday 12 / 700 red, the day 44 / 400, then the day's line), so the row is
-     * two widgets, not a widget and a hole */
-    {
-        float x1 = WID_X(1), tx = x1 + 16;
-        d_rrect(&d, x1, y, s, s, 24, ink);
-        char wd[12];
-        int n = 0;
-        for (const char *p = WD[ST.wday % 7]; *p && n < 11; p++) wd[n++] = *p >= 'a' && *p <= 'z' ? (char)(*p - 32) : *p;
-        wd[n] = 0;
-        d_text(&d, TK_IT700, 12, tx, base_of(TK_IT700, 12, y + 16, 0), wd, .3f, 0, C_RED, 0);
-        char dn[4];
-        dn[put_dec(dn, ST.day)] = 0;
-        d_text(&d, TK_IT400, 44, tx - 2, base_of(TK_IT400, 44, y + 34, 0), dn, -.8f, TK_TNUM, INK, 0);
-        char at[16], line[40];
-        int k = 0;
-        if (ALM.on) {
-            fmt_time(at, ALM.h, ALM.m, 1);
-            const char *pre = ALM.h * 60 + ALM.m > ST.h * 60 + ST.mi ? "Alarm " : "Tomorrow ";
-            for (const char *p = pre; *p;) line[k++] = *p++;
-            for (const char *p = at; *p && k < 38;) line[k++] = *p++;
-        } else
-            for (const char *p = "No alarm set"; *p;) line[k++] = *p++;
-        line[k] = 0;
-        d_text(&d, TK_IT600, 12.5f, tx, y + s - 38, "No events today", 0, 0, W(.6f), 0);
-        d_text(&d, TK_IT400, 12.5f, tx, y + s - 20, line, 0, TK_TNUM, W(.6f), 0);
-        float kw = tw(TK_IT400, 12, "Calendar", 0, 0);
-        d_text(&d, TK_IT400, 12, x1 + s / 2 - kw / 2, y + s + 18, "Calendar", 0, 0, INK, 1);
-    }
     trim(l);
     tk_layer_prepare(l);
     l->hidden = 0;
