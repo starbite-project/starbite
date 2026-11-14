@@ -43,6 +43,7 @@
 #include <string.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -3585,6 +3586,48 @@ static int icons_tick(void *data)
 	return 0;
 }
 
+/* Linux apps' CPU cost on the phone (Track A's question, 11-14 night: 1440 x 2688 at scale 4 on the M3s): every 10 s
+ * with frames published, at most 18 lines a run, one kernel log line Starbite keeps in pmsg (it has STARBITE):
+ *   STARBITE-PERF: 10 s: N frames (F.F fps), sbwl cpu X ms (Y.Y ms a frame), cpus busy B% of C (apps, sbwl, kernel)
+ * sbwl's own CPU from getrusage; "busy" from /proc/stat (everything but idle and iowait, all the guest's CPUs). */
+static void perf_tick(uint64_t now)
+{
+	static uint64_t t_last, f_last, cpu_last, busy_last, all_last;
+	static unsigned said;
+	struct rusage ru;
+	getrusage(RUSAGE_SELF, &ru);
+	uint64_t cpu = (uint64_t)ru.ru_utime.tv_sec * 1000 + (uint64_t)ru.ru_utime.tv_usec / 1000 +
+		       (uint64_t)ru.ru_stime.tv_sec * 1000 + (uint64_t)ru.ru_stime.tv_usec / 1000;
+	unsigned long long v[10] = {0}, busy = 0, all = 0;
+	int ncpu = 0;
+	FILE *f = fopen("/proc/stat", "re");
+	if (f) {
+		char line[256];
+		while (fgets(line, sizeof(line), f)) {
+			if (!strncmp(line, "cpu ", 4))
+				sscanf(line + 4, "%llu %llu %llu %llu %llu %llu %llu %llu %llu %llu", &v[0], &v[1], &v[2], &v[3],
+				       &v[4], &v[5], &v[6], &v[7], &v[8], &v[9]);
+			else if (!strncmp(line, "cpu", 3))
+				++ncpu;
+		}
+		fclose(f);
+		for (int i = 0; i < 8; ++i)
+			all += v[i];
+		busy = all - v[3] - v[4];
+	}
+	if (t_last && frames > f_last && said < 18) {
+		uint64_t dt = now - t_last, n = frames - f_last;
+		unsigned long long da = all - all_last, db = busy - busy_last;
+		++said;
+		say("STARBITE-PERF: %llu s: %llu frames (%llu.%llu fps), sbwl cpu %llu ms (%llu.%llu ms a frame), cpus busy %llu%% of %d"
+		    " (apps, sbwl, kernel); %ux%u at scale %u", (unsigned long long)(dt / 1000), (unsigned long long)n,
+		    (unsigned long long)(n * 1000 / dt), (unsigned long long)(n * 10000 / dt % 10),
+		    (unsigned long long)(cpu - cpu_last), (unsigned long long)((cpu - cpu_last) / n),
+		    (unsigned long long)((cpu - cpu_last) * 10 / n % 10), da ? db * 100 / da : 0ULL, ncpu, W, H, SC);
+	}
+	t_last = now, f_last = frames, cpu_last = cpu, busy_last = busy, all_last = all;
+}
+
 static int tick(void *data)
 {
 	(void)data;
@@ -3598,6 +3641,7 @@ static int tick(void *data)
 		say("stats: frame events %u, built %u, with a buffer %u, published %llu, rows %llu, px %08x, apps %d, ring drops %u, "
 		    "deferred %u, background commits %lu, banded %lu, direct %lu", nframe, nbuilt, nbuf, (unsigned long long)frames,
 		    (unsigned long long)rows_out, last_px, napps, g2h_dropped, defers, hidden_commits, nband, ndirect);
+		perf_tick(now);
 	}
 	procs_tick();
 	clock_tick(now);
