@@ -132,8 +132,17 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
   generation, which the current translator's path has too). 71 hand-written shaders check the arithmetic and
   control-flow results by constant folding. Not yet in the driver; nothing run on the phone. Details and the bugs it
   found in the old translator: `docs/WIN11-GPU-NIR-FRONTEND.md`.
-- **Phase 2 (running):** behind a flag file (`nirshaders`, default off) in the driver, the Bifrost gaps fixed, a
-  Windows build from that branch for an A/B conformance run.
+- **11-15 23:40, phase 2 (offline):** wired into `Shader.cpp` behind the flag file
+  `C:\ProgramData\Starbite\nirshaders` (default off; a refused shader falls back to the old path, logged); Panfrost
+  on this GPU generation now lowers mip-count and sample-count queries and sample positions by index, so all 244
+  corpus vertex/pixel shaders compile (was 227). Running the OLD path through the same harness showed what the
+  shipping driver does today: **a shader with a `switch` statement aborts the process** (`tgsi_to_nir` has no
+  SWITCH; 7 corpus shaders), a dynamically indexed immediate constant buffer reads the wrong element (2 shaders,
+  silently), mip-count queries miscompile (9), and Shader Model 4.1 instructions emitted an invalid opcode (now
+  refused). sbumd 98e9e6a6 (ARM64X verify FAILS: 0) from branch `sb-nir` cf67267, `build/win/umd-nir` in the
+  worktree. Not run on Windows.
+- **T76 staged:** the d3d10core suite on that driver, pass A flag off, pass B flag on (`sb-wt-ab.bat`), to compare
+  with T74 (the user's driver).
 
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.
