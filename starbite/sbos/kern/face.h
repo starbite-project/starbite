@@ -25,7 +25,10 @@
 #define FACE_NTPL 5                     /* the enrolment's poses: centre, left, right, up, down */
 #define FACE_FRAME_W 360U               /* the camera's preview for Face Unlock: portrait, not mirrored */
 #define FACE_FRAME_H 480U
-#define FACE_DET_SCALE 3U               /* detection on a 120 x 160 copy (padded to 128 x 160) */
+#define FACE_DET_SCALE 3U
+/* face size = eye distance / frame width. The S9's front camera (~80 degrees wide): ~0.12 at 30 cm, ~0.09 at 40 cm */
+#define FACE_MIN_SIZE 0.06f             /* smaller: not embedded (the 112 x 112 crop would be mostly upscaled) */
+#define FACE_CLOSER_SIZE 0.07f          /* smaller: the "Move a little closer" hint */               /* detection on a 120 x 160 copy (padded to 128 x 160) */
 
 enum { FACE_SPEED = 0, FACE_SECURITY = 1 };
 
@@ -139,13 +142,13 @@ enum { FB_CENTRE = 0, FB_LEFT, FB_RIGHT, FB_UP, FB_DOWN };
 struct face_enrol {
     int have;                           /* bit per pose */
     float q[FACE_NTPL];                 /* each pose's kept quality */
-    float pitch0;                       /* the centre pose's pitch (up / down are relative to it) */
+    float pitch0, yaw0;                 /* the centre pose's pitch and yaw (the others are relative to them) */
     int centre_n;
     float eye_sum;
     int eye_n;
     struct face_tpl t;
     int want;                           /* the pose whose embedding is being made, or -1 */
-    float pend_pitch, pend_q, pend_eye; /* that detection's signals */
+    float pend_pitch, pend_yaw, pend_q, pend_eye;   /* that detection's signals */
 };
 void face_enrol_begin(struct face_enrol *en);
 /* a detection: the pose it fills (FB_*) when it is a better one than kept (then embed it), else -1 */

@@ -12,11 +12,13 @@ Writes OUT.bin, little-endian:
            score), or all 0;
     OpenCV's aligned crop of it (112 x 112 x 3 u8, B G R) and onnxruntime's SFace embedding of it (128 float);
     the person's id (u32) and the image's index in the person's set (u32).
+FACE_REF_MANY="Name,Name" N: the first N photos of each of those people instead (many head poses: face-svc-test's set-up).
 Only for the host test: LFW stays in the scratchpad, never in git or on the phone.
 """
 import os, struct, sys
 import numpy as np
 import onnx, onnxruntime as ort, cv2
+ort.set_default_logger_severity(3)
 
 pk, lfw, out = sys.argv[1], sys.argv[2], sys.argv[3]
 N = int(sys.argv[4]) if len(sys.argv) > 4 else 60
@@ -45,13 +47,21 @@ sface_in = [i.name for i in ss.get_inputs()][0]
 
 people = sorted(p for p in os.listdir(lfw) if len(os.listdir(os.path.join(lfw, p))) >= 4)
 rng = np.random.default_rng(7)
-pick = list(rng.choice(len(people), size=min(len(people), (N + 2) // 3), replace=False))
 items = []
-for pid in pick:
-    fs = sorted(os.listdir(os.path.join(lfw, people[pid])))
-    for k in range(min(3, len(fs))):
-        items.append((int(pid), k, os.path.join(lfw, people[pid], fs[k])))
-items = items[:N]
+many = os.environ.get('FACE_REF_MANY')     # "Name,Name": every N-th photo of these people (many poses each)
+if many:
+    for name in many.split(','):
+        pid = people.index(name)
+        fs = sorted(os.listdir(os.path.join(lfw, name)))
+        for k in range(min(N, len(fs))):
+            items.append((pid, k, os.path.join(lfw, name, fs[k])))
+else:
+    pick = list(rng.choice(len(people), size=min(len(people), (N + 2) // 3), replace=False))
+    for pid in pick:
+        fs = sorted(os.listdir(os.path.join(lfw, people[pid])))
+        for k in range(min(3, len(fs))):
+            items.append((int(pid), k, os.path.join(lfw, people[pid], fs[k])))
+    items = items[:N]
 
 recs = []
 for pid, k, f in items:

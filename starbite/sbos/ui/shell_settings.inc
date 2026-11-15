@@ -301,7 +301,7 @@ static void se_rows(int p)
         nav(SE_SOUNDS, SEI_SOUNDS, "Sounds & Haptics", 0);
         nav(SE_NOTIF, SEI_NOTIF, "Notifications", 0);
         sec(0);
-        nav(A_PASSCODE, SEI_PASS, "Passcode", 0);
+        nav(A_PASSCODE, SEI_PASS, "Face Unlock & Passcode", 0);   /* Face Unlock (shell_face.inc) */
         nav(SE_EMERGENCY, SEI_SOS, "Emergency", EMG ? "On" : 0);
         nav(SE_PRIVACY, SEI_PRIV, "Privacy", 0);
         nav(A_STARTUP, SEI_START, "Startup", 0)->sub = "OS, firmware, recovery";
@@ -587,7 +587,7 @@ static void se_rows(int p)
             { "Battery", SE_BATTERY, SEI_BATT, 0 },
             { "General", SE_GENERAL, SEI_GENERAL, 0 }, { "Display & Brightness", SE_DISPLAY, SEI_DISPLAY, 0 },
             { "Wallpaper", SE_WALL, SEI_WALL, 0 }, { "Sounds & Haptics", SE_SOUNDS, SEI_SOUNDS, 0 },
-            { "Notifications", SE_NOTIF, SEI_NOTIF, 0 }, { "Passcode", A_PASSCODE, SEI_PASS, 0 }, { "Emergency", SE_EMERGENCY, SEI_SOS, 0 },
+            { "Notifications", SE_NOTIF, SEI_NOTIF, 0 }, { "Face Unlock & Passcode", A_PASSCODE, SEI_PASS, 0 }, { "Emergency", SE_EMERGENCY, SEI_SOS, 0 },
             { "Privacy", SE_PRIVACY, SEI_PRIV, 0 }, { "Startup", A_STARTUP, SEI_START, 0 }, { "Linux Apps", SE_LINUX, SEI_LINUX, 0 },
             { "App Store", A_STORE, SEI_STORE, 0 }, { "About", SE_ABOUT, 0, "General" }, { "Software Update", A_UPDATE, 0, "General" },
             { "Date & Time", SE_DATETIME, 0, "General" }, { "Keyboard", SE_KEYBOARD, 0, "General" },

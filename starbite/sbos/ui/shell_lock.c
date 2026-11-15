@@ -512,6 +512,9 @@ static void nc_clock_stale(void);
 static void nc_cards_gone(void);
 static float nc_next_update(float t);
 static float pc_next_update(float t);                /* Track A: shell_passcode.inc */
+static void fx_glyph(void);                          /* Face Unlock: shell_face.inc */
+static void fx_wake(void);
+static void fx_sleep(void);
 /* Track A update (shell_update.inc): Settings > Software Update, opened from About's Software row for now */
 static void su_page(dc *d);
 static int su_app_tap(float x, float y);
@@ -5484,6 +5487,7 @@ static void set_lock(float y)
     mark_t = p > .02f || EMG ? 0 : 1;
     glyph_t = p > .02f && !EMG ? 1 : 0;
     glyph_open = p > .06f;
+    fx_glyph();                                      /* Face Unlock: the padlock while it looks, open on a match */
     if (y == 0) {
         lockg.hidden = 0;
         lockflat.hidden = 1;
@@ -6990,6 +6994,7 @@ static int se_lock_snd(void);
 void sh_sleep(int now)
 {
     T.kind = G_NONE;
+    fx_sleep();                                      /* Face Unlock: the camera off, no match kept */
     pw_reset();
     if (!SL.black && SL.dir >= 0 && se_lock_snd()) snd_once(SH_SND_LOCK);   /* 8a: iOS's Lock Sound (Settings) */                                    /* P3x: the Power key (or the screen's timer) cancels the power sheet */
     if (now) {
@@ -7019,6 +7024,7 @@ void sh_wake(void)
     SL.t = SL.back ? (1 - tk_sqrtf(tk_clampf(a, 0, 1))) / 1.6f : 0;    /* the wake's opacity curve inverted */
     if (!EMG && !sh_last2()) sh_perf_hold(700);   /* cp6: no touch started it: the top clocks for the scale-in */
     sl_place();
+    fx_wake();                                       /* Face Unlock: a scan when it is ready */
 }
 
 static int tween(float *v, float target, float dur_s, float dt)

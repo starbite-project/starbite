@@ -277,7 +277,7 @@ static void test_scan(void)
     /* hints */
     face_scan_begin(&s, FACE_SPEED, 0);
     struct face_sig far = g;
-    far.size = 0.08f;
+    far.size = 0.05f;
     face_scan_det(&s, 1, &d, &far, 10);
     CHECK(s.hint == FS_HINT_CLOSER, "a small face asks to come closer");
     struct face_sig dark = g;
@@ -328,7 +328,7 @@ static void test_enrol(void)
     struct face_sig g = sig(0.15f, 0.3f);
     CHECK(face_enrol_det(&en, &g, 0.9f) < 0, "the first pose must be the centre one");
     g = sig(0.01f, 0.3f);
-    g.size = 0.06f;
+    g.size = 0.05f;
     CHECK(face_enrol_det(&en, &g, 0.9f) < 0, "a face too far away is not taken");
     g.size = 0.2f;
     CHECK(face_enrol_det(&en, &g, 0.9f) == FB_CENTRE, "a straight face fills the centre");

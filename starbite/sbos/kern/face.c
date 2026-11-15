@@ -539,7 +539,7 @@ void face_scan_det(struct face_scan *s, int found, const struct face_det *d, con
         if (e < 0.55f * s->eye_base) s->eye_min_after = e > 0 ? e : 0.0001f;
         else if (s->eye_min_after > 0 && e > 0.8f * s->eye_base) s->blink = 1;
     }
-    s->hint = g->size < 0.12f ? FS_HINT_CLOSER : g->bright < 35 ? FS_HINT_LIGHT : FS_HINT_NONE;
+    s->hint = g->size < FACE_CLOSER_SIZE ? FS_HINT_CLOSER : g->bright < 35 ? FS_HINT_LIGHT : FS_HINT_NONE;
 }
 void face_scan_emb(struct face_scan *s, float score, uint64_t now_ms)
 {
@@ -572,28 +572,32 @@ void face_enrol_begin(struct face_enrol *en)
     zero(en, sizeof *en);
     en->want = -1;
 }
+/* the pose of a detection: the centre first (roughly straight on: |yaw| < 0.10); the others relative to the centre's
+ * own yaw and pitch (landmarks have a small bias per face, and "straight" is the person's own) */
 static int pose_of(const struct face_enrol *en, const struct face_sig *g)
 {
-    if (!(en->have & 1)) return g->yaw > -0.06f && g->yaw < 0.06f ? FB_CENTRE : -1;
-    if (g->yaw < -0.13f) return FB_LEFT;
-    if (g->yaw > 0.13f) return FB_RIGHT;
-    if (g->yaw > -0.10f && g->yaw < 0.10f) {
-        if (g->pitch < en->pitch0 - 0.09f) return FB_UP;
-        if (g->pitch > en->pitch0 + 0.09f) return FB_DOWN;
-        if (g->yaw > -0.06f && g->yaw < 0.06f) return FB_CENTRE;
+    if (!(en->have & 1)) return g->yaw > -0.10f && g->yaw < 0.10f ? FB_CENTRE : -1;
+    float dy = g->yaw - en->yaw0, dp = g->pitch - en->pitch0;
+    if (dy < -0.12f) return FB_LEFT;
+    if (dy > 0.12f) return FB_RIGHT;
+    if (dy > -0.08f && dy < 0.08f) {
+        if (dp < -0.07f) return FB_UP;
+        if (dp > 0.07f) return FB_DOWN;
+        if (dy > -0.04f && dy < 0.04f && dp > -0.03f && dp < 0.03f) return FB_CENTRE;
     }
     return -1;
 }
 int face_enrol_det(struct face_enrol *en, const struct face_sig *g, float score)
 {
     if (en->want >= 0) return -1;              /* one embedding at a time */
-    if (g->size < 0.10f) return -1;            /* too far for a good template */
+    if (g->size < FACE_CLOSER_SIZE) return -1; /* too far for a good template */
     int p = pose_of(en, g);
     if (p < 0) return -1;
-    float q = score * (g->size < 0.2f ? g->size / 0.2f : 1);
+    float q = score * (g->size < 0.15f ? g->size / 0.15f : 1);
     if ((en->have >> p & 1) && q <= en->q[p] + 0.02f) return -1;
     en->want = p;
     en->pend_pitch = g->pitch;
+    en->pend_yaw = g->yaw;
     en->pend_q = q;
     en->pend_eye = g->eye;
     return p;
@@ -612,7 +616,7 @@ int face_enrol_emb(struct face_enrol *en, const float *emb)
     en->q[p] = en->pend_q;
     en->have |= 1 << p;
     if (p == FB_CENTRE) {
-        en->pitch0 = en->centre_n ? (en->pitch0 * (float)en->centre_n + en->pend_pitch) / (float)(en->centre_n + 1) : en->pend_pitch;
+        if (!en->centre_n) { en->pitch0 = en->pend_pitch; en->yaw0 = en->pend_yaw; }   /* the first centre sets "straight" */
         en->centre_n++;
         en->eye_sum += en->pend_eye;
         en->eye_n++;

@@ -408,6 +408,33 @@ int sh_pass_wait(void);                       /* seconds until the next try is a
 int sh_pass_fails(void);                      /* wrong tries in a row */
 int sh_autolock(void);                        /* the screen-off time, s; 0 = never */
 void sh_autolock_set(int seconds);
+/* Face Unlock (docs/FACE-UNLOCK.md; ui/face_svc.c on kern/face.c, the same file on the host): the front camera, a
+ * face found and matched on the phone. The templates are sealed under a key the passcode unwraps: after a restart the
+ * passcode comes first. The passcode is also required after 5 failed scans, after 48 h without it, and during a
+ * passcode back-off. Nothing here blocks: the work runs on the platform's timer, a little a turn. */
+#define SH_FACE_AVAIL 1                       /* sh_face_status bits: in this build (the face pack is there) */
+#define SH_FACE_ENROLLED 2                    /* a face is set up */
+#define SH_FACE_ON 4                          /* "Unlock with Face" (pref face.on) */
+#define SH_FACE_READY 8                       /* a scan may unlock now (sh_face_why says why not) */
+#define SH_FACE_SPEED 0                       /* modes: the fastest unlock, a lenient match */
+#define SH_FACE_SECURITY 1                    /* a strict match on two frames and a blink or a head turn */
+enum { SH_FS_IDLE = 0, SH_FS_RUN, SH_FS_MATCH, SH_FS_FAIL, SH_FS_NOFACE };          /* a scan's state */
+enum { SH_FH_NONE = 0, SH_FH_TURN, SH_FH_CLOSER, SH_FH_LIGHT, SH_FH_STILL };        /* hints */
+int sh_face_status(void);
+const char *sh_face_why(void);                /* why not ready ("" when ready) */
+void sh_face_prepare(void);                   /* Settings shows Face Unlock: what set-up needs is loaded now */
+int sh_face_mode(void);
+void sh_face_set_mode(int mode);
+void sh_face_set_on(int on);
+int sh_face_scan(int start);                  /* 1: start a scan (the lock's wake): 0 or < 0 (not ready); 0: stop it */
+int sh_face_poll(int *hint);                  /* SH_FS_*: a finished scan's result stays until the next start */
+int sh_face_enrol(int mode);                  /* the camera for set-up: 0 or < 0 (sh_face_why) */
+int sh_face_enrol_poll(int *poses, int *hint);   /* 0 running, 1 done and kept, < 0 stopped / failed; poses: bit per pose
+                                                  * (centre, left, right, up, down; left / right as the person turns) */
+const uint32_t *sh_face_frame(int *w, int *h, unsigned *seq);   /* during set-up: the newest frame, NOT mirrored */
+void sh_face_stop(void);                      /* the camera off, whatever ran */
+void sh_face_reset(void);                     /* forget the face (the templates and the switch) */
+
 /* Track A lifecycle (sbos-core-api.md 6): the platform calls this right before a restart or a switch-off: every app
  * in the shell's table with an on_save runs it (pages keep their data with sh_blob_put) */
 void sh_save_all(void);
