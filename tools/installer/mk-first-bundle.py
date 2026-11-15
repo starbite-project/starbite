@@ -69,6 +69,11 @@ def main():
     ap.add_argument('--store-from', type=Path, required=True)
     ap.add_argument('--catalog', type=Path, required=True)
     ap.add_argument('--keep', nargs='+', default=['starbite-next-gpu', 'engineer', 'utility'])
+    ap.add_argument('--extra', nargs='*', default=[], metavar='NAME',
+                    help='store entries no kept row names (Starbite OS\'s Linux-app guest kernels, rescue.*): copied too')
+    ap.add_argument('--volatile', nargs='*', default=['sbos-state=1048576'], metavar='NAME=BYTES',
+                    help='fresh (zeroed) volatile entries (Starbite OS settings, update slots, photos)')
+    ap.add_argument('--card-layout', default='sd64', help='sd64 (64 MiB store area) or sd64l (1 GiB, macOS Sequoia slot)')
     a = ap.parse_args()
     out = a.out
     if out.exists() and any(out.iterdir()):
@@ -102,9 +107,16 @@ def main():
         if not root.startswith(('none', '-', 'initramfs')) and r.get('method') != 'bare':
             sys.exit(f'{r["key"]}: its root is {root!r}: S9 #2 has none of S9 #1\'s OS roots; keep RAM-only rows')
     store = {name: blob for name, _, blob in sb.read_store(a.store_from)}
+    typ = {name: t for name, t, _ in sb.read_store(a.store_from)}       # each entry keeps its type (image, initrd ...)
+    tname = {v: k for k, v in sb.TYPES.items()}
     (out / 'store' / 'files').mkdir(parents=True)
     (out / 'store' / 'catalog.toml').write_text(rows_text)
     names = []
+    for x in a.extra:
+        if x not in store:
+            sys.exit(f'--extra {x}: not in {a.store_from}')
+        (out / 'store' / 'files' / x).write_bytes(store[x])
+        names.append(x)
     for r in rows:
         for f in r['files']:
             alts = [x.split(':', 1)[-1] for x in f.split('|') if not x.startswith('@')]
@@ -115,9 +127,11 @@ def main():
                 (out / 'store' / 'files' / got).write_bytes(store[got])
                 names.append(got)
     img = out / 'store' / 'sd-store.img'
-    subprocess.run([sys.executable, str(REPO / 'tools' / 'store' / 'sbstore2.py'), 'build', str(img), '--medium', 'sd64',
-                    '--home', '--catalog', str(out / 'store' / 'catalog.toml'), '--volatile', 'sbos-state=1048576',
-                    *[f'{n}={out / "store" / "files" / n}' for n in names]], check=True)
+    vol = [x for v in a.volatile for x in ('--volatile', v)]
+    subprocess.run([sys.executable, str(REPO / 'tools' / 'store' / 'sbstore2.py'), 'build', str(img), '--medium', a.card_layout,
+                    '--home', '--catalog', str(out / 'store' / 'catalog.toml'), *vol,
+                    *[f'{n}={out / "store" / "files" / n}' + (f':{tname[typ[n]]}' if typ.get(n) in tname else '')
+                      for n in names]], check=True)
     subprocess.run([sys.executable, str(REPO / 'tools' / 'store' / 'sbstore2.py'), 'list', str(img)], check=True)
     shutil.rmtree(out / 'store' / 'files')
 
@@ -129,7 +143,7 @@ def main():
              ('boot', 'Starbite loader + menu (BOOT)', 'starbite', 'boot/starbite-boot.img', 'part:BOOT')]
     m = ['format = 1', f'name = "First install, S9 #2: Starbite loader (BOOT) + card store ({", ".join(a.keep)})"',
          'catalog = "store/catalog.toml"', '', '[phone]', 'models = ["SM-G960F"]', 'devices = ["starlte"]',
-         'min_battery = 50', '', '[card]', 'min_bytes = 60000000000', 'layout = "sd64"', '',
+         'min_battery = 50', '', '[card]', 'min_bytes = 60000000000', f'layout = "{a.card_layout}"', '',
          '[env]', 'cmdline = "sb.installer=1"', '']
     for key, title, os_, f, dest in items:
         m += ['[[item]]', f'key = "{key}"', f'title = "{title}"', f'os = "{os_}"', f'file = "{f}"', 'size = 0',

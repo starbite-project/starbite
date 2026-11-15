@@ -1120,3 +1120,13 @@ identical) and the install (card MBR, exFAT, card store read back, BOOT skipped 
 GPT copies, USERDATA and RECOVERY unchanged; a second run writes nothing. `rehearse-bundle.sh BUNDLE` runs one real
 bundle through the same steps on a fake stock S9. Run 2026-11-15 (macOS): unit tests 137 OK; `rehearse.sh` 220
 passed, 0 failed; `rehearse-bundle.sh build/installer/bundle-s9b`: every step passed.
+
+**`sd64l` (2026-11-15, afternoon): the 64 GB card for today's lineup.** `sd64`'s 64 MiB store area cannot hold
+the lineup's RAM-only systems (Starbite OS's update slots and photo store alone are 3 x 64 MiB), and its root slot
+is macOS Ventura's. `tools/store/cardlayout.py` now also has `sd64l`: p2 at 8192 = a 1 GiB card store (a home store
+with its data from block 7, written as it is by `store-flash-sd.sh`), the macOS Sequoia root (`mac15`, 16 GiB, at
+2105344), the tail; p1 exFAT from 35790848 (42.41 GiB on a SanDisk 64 GB card, 38.81 GiB on the smallest one).
+`sbstore2.py --medium sd64l`; `mk-first-bundle.py --card-layout sd64l --extra NAME... --volatile NAME=BYTES...`
+(entries keep their store type). S9 #2's core bundle (`build/installer/bundle-s9b`): 27 entries, 364 MiB, passes
+`rehearse-bundle.sh`. `sd64` is unchanged (no card uses either yet). The whole-lineup space plan for 64 GB UFS + a
+64 GB card, its options and the per-OS order are in the shared notes (`installer-s9b-space-plan.md`).

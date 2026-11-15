@@ -60,7 +60,7 @@ class Table(unittest.TestCase):
             self.assertEqual((L.areas[0].kind, L.areas[0].start), ('store', s2))
             self.assertEqual((L.tail.start, L.tail.sectors), (s2 + c2 - cl.TAIL_SECTORS, cl.TAIL_SECTORS))
             self.assertEqual(L.clock_sector, s2 + c2 - 1)
-            self.assertTrue(L.root('mac13'), f'{L.name}: macOS Ventura (the active stable pair) has a root')
+            self.assertTrue(L.root('mac13') or L.root('mac15'), f'{L.name}: a macOS root (Ventura, or Sequoia on sd64l)')
 
     def test_sd128_is_s9_1s_card_unchanged(self):
         L = cl.get('sd128')
@@ -192,7 +192,7 @@ class Catalog(unittest.TestCase):
         e = {x['key']: x for x in tomlmini.loads(out)['entry']}
         self.assertEqual(e['mac13']['root'], 'sd:lba 139264+31457280 (HFSX 15 GiB, sdrw)')
         ios26 = [k for k in cl.LAYOUTS['sd128'].root('ios26').keys if k in e]     # the catalog's rows on that root
-        self.assertIn('ios26', ios26)
+        self.assertTrue(ios26, 'no catalog row on the sd128 iOS 26 / Sequoia slot')
         for k in ios26:
             self.assertEqual(e[k]['flags'], ['hidden'])
             self.assertNotIn('sd:lba', e[k]['root'])
@@ -351,9 +351,32 @@ class Manifest(unittest.TestCase):
         m = self.load(item('m', 'card:root:mac13', 'm.img', 1 << 20), head128)
         self.assertEqual((str(m.item('m').dest), m.card['sectors']), ('card:lba:216442880', 249999360))
 
+    # a fixed catalog (not tools/store/catalog.toml, whose rows change every day): one row per sd128 root
+    CAT = '''
+[[entry]]
+key = "mac13"
+name = "macOS Ventura"
+version = "test"
+category = "apple"
+method = "xnu"
+tag = "beta"
+files = ["mac13-v33.xnu"]
+root = "sd:lba 216442880+31457280 (HFSX 15 GiB, sdrw)"
+
+[[entry]]
+key = "ios26"
+name = "iOS 26"
+version = "test"
+category = "apple"
+method = "xnu"
+tag = "beta"
+files = ["ios26-sd.xnu"]
+root = "sd:lba 182888448+33554432 (HFSX 16 GiB, sdrw)"
+'''
+
     def bundle(self, layout, payload_layout, catalog_layout=None):
         """A bundle with a catalog and a UFS store holding the mac13 / ios26 payloads."""
-        cat = cl.catalog_text((STORE / 'catalog.toml').read_text(), catalog_layout or layout)
+        cat = cl.catalog_text(self.CAT, catalog_layout or layout)
         (self.b / 'catalog.toml').write_text(cat)
         files = {'mac13-v33.xnu': cl.retarget_payload(fake_payload(MAC_LINE), payload_layout, 'mac13'),
                  'ios26-sd.xnu': fake_payload(MAC_LINE.replace('216442880,31457280', '182888448,33554432'))}
@@ -387,3 +410,32 @@ class Manifest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SD64L(unittest.TestCase):
+    """sd64l (2026-11-15): the 64 GB card for today's lineup: a 1 GiB store, macOS Sequoia, p1 the rest."""
+    def test_geometry(self):
+        L = cl.get('sd64l')
+        self.assertEqual((L.store.start, L.store.sectors), (8192, 2097152))
+        self.assertEqual((L.root('mac15').start, L.root('mac15').sectors), (2105344, 33554432))
+        self.assertIsNone(L.root('mac13'))
+        self.assertEqual(L.tail.end, L.p2_start + L.p2_sectors)
+        self.assertEqual(L.p1_start, 35790848)
+        self.assertEqual(L.parts(124735488)[0], (0x07, 35790848, 88944640))      # SanDisk 64 GB: p1 42.41 GiB
+        self.assertGreater(L.p1_size(cl.MIN_CARD_SECTORS) * 512, 38 * (1 << 30))
+        self.assertEqual(cl.identify(L.parts(124735488), 124735488), 'sd64l')
+        self.assertEqual(L.store_area_blocks, 262144)
+
+    def test_store_fits_and_overflow_refused(self):
+        sb = load_path('sbstore2_l', STORE / 'sbstore2.py')
+        with tempfile.TemporaryDirectory() as t:
+            big = Path(t, 'big.img'); big.write_bytes(b'\x01' * (600 << 20))
+            out = Path(t, 's.img')
+            r = subprocess.run([sys.executable, str(STORE / 'sbstore2.py'), 'build', str(out), '--medium', 'sd64l', '--home',
+                                f'big.img={big}'], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            big.write_bytes(b'\x01' * (1100 << 20))
+            r = subprocess.run([sys.executable, str(STORE / 'sbstore2.py'), 'build', str(out), '--medium', 'sd64l',
+                                f'big.img={big}'], capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn('macOS Sequoia root', r.stderr + r.stdout)
