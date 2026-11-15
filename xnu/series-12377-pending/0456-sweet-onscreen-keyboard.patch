@@ -1,0 +1,686 @@
+0456: an on-screen keyboard for macOS on the phone. SweetHIDKeyboard (a HID keyboard service, macOS boots only) sends USB HID keyboard events; touches that begin on the shown keyboard are key presses (one-shot/locked Shift, latched control/option/command for the next key, three pages), a swipe up from the panel's bottom edge shows it, its hide key hides it. SweetFramebuffer draws it over the panel's bottom rows (the desktop and the pointer are not drawn there while it is shown; the rows return from the last frame when it hides) and copies 1:1 rows whole (native canvas through the scaled path). Boot-args: sweetkbd=0 off, sweetkbdshow=1 shown from the start, sweetkbddump=N panel dump of the keyboard, sweetkbdtest=N self test (taps Shift, command, n, h, i, return). iokit/Kernel/arm/sweet_kbd_data.h (layout + glyphs) is generated: tools/macos/kbd/mk-kbd-data.py OUT.h
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -56,6 +56,11 @@
+ #include <kern/clock.h>
+ #include <kern/thread.h>
+ #include <sys/proc.h>
++#define SWEET_KBD_WANT_ALPHA 1
++#include "sweet_kbd.h"
++extern "C" {
++struct sweet_kbd_shared sweet_kbd;      /* 0456: the on-screen keyboard's state (SweetHID.cpp writes, this file draws) */
++}
+ 
+ #if defined(ARM64_BOARD_CONFIG_HEROLTE)
+ static void sweet_fb_copy_init(void);
+@@ -194,6 +199,9 @@
+ 	void sweetSaveUnder(bool save);
+ 	uint64_t scaledCopy(uintptr_t src, uint32_t srcRowBytes, int32_t dx, int32_t dy,
+ 	    int32_t w, int32_t h);
++	void kbdService(void);          /* 0456: the on-screen keyboard, once a vsync */
++	void kbdDrawKey(uint32_t page, uint32_t i);
++	void kbdRepaint(int32_t py0, int32_t py1);
+ #if defined(ARM64_BOARD_CONFIG_HEROLTE)
+ 	bool gpuPresent(SweetSurface *s, int32_t sx, int32_t sy, int32_t w, int32_t h);
+ #endif
+@@ -359,6 +367,8 @@
+ #endif
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 
++	sweet_kbd.panel_w = fWidth;
++	sweet_kbd.panel_h = fHeight;
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+@@ -463,6 +473,9 @@
+ 		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 		return;
+ 	}
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	fb->kbdService();
++#endif
+ 	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
+ #if defined(ARM64_BOARD_CONFIG_HEROLTE)
+ 	/* bsd/dev/herolte_gpu.c holds the panel for its GPU-drawn test frames. */
+@@ -792,6 +805,8 @@
+ 	}
+ 	int32_t sprev = -1;
+ 	uint32_t *sprevRow = NULL;
++	const int32_t kbdTop = sweet_kbd.top > 0 ? sweet_kbd.top : 0x7fffffff;
++	const bool unit = outW == lw && outH == lh;     /* 0456: 1:1 (the native canvas): rows are copied whole */
+ 	/* 0449: a full frame of layer 0: compare each source row with the last one shown */
+ 	bool diff = !sweet_fb_blend && dx == 0 && dy == 0 && w == lw && h == lh;
+ 	uint32_t rowBytes = (uint32_t)w * 4;
+@@ -841,6 +856,10 @@
+ 			sprevRow = NULL;        /* the panel row already holds this source row */
+ 			continue;
+ 		}
++		if (py >= kbdTop) {
++			sprevRow = NULL;        /* 0456: the on-screen keyboard covers this row */
++			continue;
++		}
+ 		if (sweet_fb_blend) {
+ 			/* layers above the first (the pointer, overlays): premultiplied BGRA over what is
+ 			 * there, so a transparent pixel leaves the frame below instead of a black box */
+@@ -863,7 +882,9 @@
+ 			}
+ 			continue;
+ 		}
+-		if (r == sprev && sprevRow != NULL) {
++		if (unit) {
++			memcpy(out, (const uint32_t *)(src + (uint64_t)r * srcRowBytes) + column[0], (size_t)spw * 4);
++		} else if (r == sprev && sprevRow != NULL) {
+ 			memcpy(out, sprevRow, (size_t)spw * 4);
+ 		} else {
+ 			const uint32_t *in = (const uint32_t *)(src + (uint64_t)r * srcRowBytes);
+@@ -957,7 +978,8 @@
+ 		sweet_su_have = false;
+ 		return;
+ 	}
+-	for (int32_t y = 0; y < sweet_su_h; y++) {
++	const int32_t kbdTop = sweet_kbd.top > 0 ? sweet_kbd.top : 0x7fffffff;
++	for (int32_t y = 0; y < sweet_su_h && sweet_su_y + y < kbdTop; y++) {   /* 0456: not under the keyboard */
+ 		uint32_t *panel = (uint32_t *)(fPixels + (uint64_t)(sweet_su_y + y) * fRowBytes + (uint64_t)sweet_su_x * 4);
+ 		uint32_t *buf = &sweet_su_buf[y * SWEET_SU_MAX];
+ 		if (save) {
+@@ -969,7 +991,198 @@
+ 	sweet_su_have = save;
+ }
+ #endif
++
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++/*
++ * 0456: the on-screen keyboard (sweet_kbd.h). Drawn straight onto the panel, over its bottom rows; while it is
++ * shown scaledCopy() leaves those rows alone (sweet_kbd.top), the pointer is not drawn there, and when it hides
++ * the rows come back from the last frame (sweet_fb_prev). Called once a vsync on the thread that presents.
++ */
++#define SWEET_KBD_BG       0xff1c1c1eu
++#define SWEET_KBD_KEY      0xff6a6a6eu
++#define SWEET_KBD_KEY_DOWN 0xffa6a6aau
++#define SWEET_KBD_DARK     0xff3e3e42u
++#define SWEET_KBD_DARK_DOWN 0xff707075u
++
++void
++AppleCLCD::kbdRepaint(int32_t py0, int32_t py1)
++{
++	int32_t lw = (int32_t)fLogicalW, lh = (int32_t)fLogicalH;
++	int32_t outW = (int32_t)((int64_t)lw * fHeight / lh), outH = (int32_t)fHeight;
++	if (outW > (int32_t)fWidth) {
++		outW = (int32_t)fWidth;
++		outH = (int32_t)((int64_t)lh * fWidth / lw);
++	}
++	int32_t barX = ((int32_t)fWidth - outW) / 2, barY = ((int32_t)fHeight - outH) / 2;
++	bool have = sweet_fb_prev != NULL && sweet_fb_prev_valid && sweet_fb_prev_size == (uint32_t)lw * 4 * (uint32_t)lh;
++	py0 = py0 < 0 ? 0 : py0;
++	py1 = py1 > (int32_t)fHeight ? (int32_t)fHeight : py1;
++	for (int32_t py = py0; py < py1; py++) {
++		uint32_t *out = (uint32_t *)(fPixels + (uint64_t)py * fRowBytes);
++		if (!have || py < barY || py >= barY + outH) {
++			memset(out, 0, (size_t)fWidth * 4);
++			continue;
++		}
++		int32_t r = (int32_t)((int64_t)(py - barY) * lh / outH);
++		const uint32_t *in = (const uint32_t *)(sweet_fb_prev + (size_t)(r >= lh ? lh - 1 : r) * (size_t)lw * 4);
++		if (outW == lw) {
++			memcpy(out + barX, in, (size_t)lw * 4);
++		} else {
++			for (int32_t x = 0; x < outW; x++) {
++				out[barX + x] = in[(int32_t)((int64_t)x * lw / outW)];
++			}
++		}
++	}
++	if (!have) {
++		sweet_fb_prev_valid = false;    /* black until the next frame, which then draws every row */
++	}
++}
+ 
++void
++AppleCLCD::kbdDrawKey(uint32_t page, uint32_t i)
++{
++	const struct sweet_kbd_keydef *k = &sweet_kbd_keys[sweet_kbd_first[page] + i];
++	int32_t cx, cy, cw, ch;
++	sweet_kbd_cell(k, fWidth, fHeight, &cx, &cy, &cw, &ch);
++	if (cx < 0 || cy < 0 || cw <= 0 || ch <= 0 || cx + cw > (int32_t)fWidth || cy + ch > (int32_t)fHeight) {
++		return;
++	}
++	bool down = ((sweet_kbd.pressed >> i) & 1) != 0;
++	bool latched = (k->flags & SKF_SHIFTKEY) ? sweet_kbd.shift != 0 :
++	    ((k->flags & SKF_MOD) && (sweet_kbd.mods & (k->usage == 0xe0 ? 1u : (k->usage == 0xe2 ? 2u : 4u))) != 0);
++	uint32_t fill = latched ? 0xffffffffu : ((k->flags & SKF_DARK) ? (down ? SWEET_KBD_DARK_DOWN : SWEET_KBD_DARK) :
++	    (down ? SWEET_KBD_KEY_DOWN : SWEET_KBD_KEY));
++	uint32_t text = latched ? 0xff000000u : 0xffffffffu;
++	int32_t ix = (int32_t)(6 * fWidth / SWEET_KBD_REF_W), iy = (int32_t)(8 * fWidth / SWEET_KBD_REF_W);
++	int32_t rad = (int32_t)(16 * fWidth / SWEET_KBD_REF_W), kw = cw - 2 * ix, kh = ch - 2 * iy;
++	for (int32_t yy = 0; yy < ch; yy++) {
++		uint32_t *row = (uint32_t *)(fPixels + (uint64_t)(cy + yy) * fRowBytes + (uint64_t)cx * 4);
++		for (int32_t x = 0; x < cw; x++) {
++			row[x] = SWEET_KBD_BG;
++		}
++		int32_t ky = yy - iy;
++		if (ky < 0 || ky >= kh) {
++			continue;
++		}
++		/* rounded corners: how far this row is inside the corner circle's rows */
++		int32_t d = ky < rad ? rad - ky : (ky >= kh - rad ? ky - (kh - rad) + 1 : 0), inset = 0;
++		while (d > 0 && inset < rad && (rad - inset) * (rad - inset) + d * d > rad * rad + rad) {
++			inset++;
++		}
++		for (int32_t x = ix + inset; x < ix + kw - inset; x++) {
++			row[x] = fill;
++		}
++	}
++	uint32_t gi = (sweet_kbd.shift != 0 && k->glyph_shift != k->glyph) ? k->glyph_shift : k->glyph;
++	const struct sweet_kbd_glyphdef *g = &sweet_kbd_glyphs[gi];
++	int32_t gx = cx + (cw - (int32_t)g->w) / 2, gy = cy + ch / 2 + g->dy;
++	for (int32_t yy = 0; yy < (int32_t)g->h; yy++) {
++		int32_t py = gy + yy;
++		if (py < cy || py >= cy + ch) {
++			continue;
++		}
++		uint32_t *row = (uint32_t *)(fPixels + (uint64_t)py * fRowBytes);
++		const uint8_t *al = &sweet_kbd_alpha[g->off + (uint32_t)yy * g->w];
++		for (int32_t xx = 0; xx < (int32_t)g->w; xx++) {
++			int32_t px = gx + xx;
++			uint32_t a = al[xx];
++			if (a == 0 || px < cx || px >= cx + cw) {
++				continue;
++			}
++			uint32_t res = 0xff000000u;
++			for (uint32_t sh = 0; sh < 24; sh += 8) {
++				res |= ((((fill >> sh) & 0xff) * (255 - a) + ((text >> sh) & 0xff) * a + 127) / 255) << sh;
++			}
++			row[px] = res;
++		}
++	}
++}
++
++void
++AppleCLCD::kbdService(void)
++{
++	static bool shown;
++	static uint32_t dumpAt, dumped;
++	if (!sweet_kbd.enabled || !fScaled || fPixels == 0) {
++		return;
++	}
++	bool want = sweet_kbd.visible != 0;
++	int32_t top = (int32_t)fHeight - sweet_kbd_height(fWidth);
++	if (top <= 0) {
++		return;
++	}
++	if (want && !shown) {
++		if (sweet_su_have) {
++			sweetSaveUnder(false);          /* the pointer comes off before the rows are taken */
++			sweet_su_have = false;
++		}
++		sweet_kbd.top = top;
++		sweet_kbd.full = 1;
++		shown = true;
++		IOLog("SWEET KBD: shown on panel rows %d..%u\n", top, fHeight - 1);
++	} else if (!want && shown) {
++		int32_t from = top;
++		shown = false;
++		sweet_kbd.top = 0;
++		if (sweet_su_have) {
++			from = sweet_su_y < from ? sweet_su_y : from;   /* the pointer's rows too: drawn again with the next frame */
++			sweet_su_have = false;
++		}
++		kbdRepaint(from, (int32_t)fHeight);
++		IOLog("SWEET KBD: hidden\n");
++		return;
++	}
++	if (!shown) {
++		return;
++	}
++	uint32_t page = sweet_kbd.page < SWEET_KBD_PAGES ? sweet_kbd.page : 0;
++	uint32_t n = (uint32_t)sweet_kbd_first[page + 1] - sweet_kbd_first[page];
++	uint64_t dirty = __atomic_exchange_n(&sweet_kbd.dirty, 0, __ATOMIC_ACQ_REL);
++	if (__atomic_exchange_n(&sweet_kbd.full, 0, __ATOMIC_ACQ_REL) != 0) {
++		for (int32_t y = top; y < (int32_t)fHeight; y++) {
++			uint32_t *row = (uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
++			for (uint32_t x = 0; x < fWidth; x++) {
++				row[x] = SWEET_KBD_BG;
++			}
++		}
++		dirty = ~0ULL;
++	}
++	for (uint32_t i = 0; i < n && dirty != 0; i++) {
++		if (dirty & (1ULL << i)) {
++			kbdDrawKey(page, i);
++		}
++	}
++	/* sweetkbddump=N: once after N s of uptime, the keyboard's panel rows at 1/4 scale, in the frame dump's
++	 * format under another name: "SWEET KBDUMP W H y x0 hex" (tools/macos/fbdump-png.py after s/KBDUMP/FBDUMP/) */
++	if (dumpAt == 0) {
++		dumpAt = 0xffffffffu;
++		PE_parse_boot_argn("sweetkbddump", &dumpAt, sizeof(dumpAt));
++	}
++	uint64_t up = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &up);
++	if (dumped < 2 && dumpAt != 0xffffffffu && up / NSEC_PER_SEC >= (uint64_t)dumpAt + 30ULL * dumped) {
++		dumped++;
++		uint32_t W = fWidth / 4, H = (fHeight - (uint32_t)top) / 4;
++		static const char hx[] = "0123456789abcdef";
++		char line[69 * 3 + 1];
++		for (uint32_t y = 0; y < H; y++) {
++			for (uint32_t x0 = 0; x0 < W; x0 += 69) {
++				uint32_t c = 0;
++				for (uint32_t x = x0; x < W && x < x0 + 69; x++) {
++					uint32_t v = *(const volatile uint32_t *)(fPixels + (uint64_t)((uint32_t)top + y * 4 + 2) * fRowBytes + (x * 4 + 2) * 4);
++					line[c++] = hx[(v >> 20) & 0xf];
++					line[c++] = hx[(v >> 12) & 0xf];
++					line[c++] = hx[(v >> 4) & 0xf];
++				}
++				line[c] = 0;
++				IOLog("SWEET KBDUMP %u %u %u %u %s\n", W, H, y, x0, line);
++			}
++		}
++		IOLog("SWEET KBDUMP end %u\n", dumped);
++	}
++}
++#endif
++
+ uint64_t
+ AppleCLCD::present(const uint8_t *rec)
+ {
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -30,6 +30,7 @@
+ #include "IOHIDKeys.h"
+ #include "IOHIDPrivateKeys.h"
+ #include "IOHIDUsageTables.h"
++#include "../sweet_kbd.h"
+ 
+ extern "C" uint64_t mach_absolute_time(void);
+ 
+@@ -403,6 +404,30 @@
+ static SweetHIDButtons *gSweetButtons;
+ static SweetHIDTouch *gSweetTouch;
+ 
++/*
++ * 0456: the on-screen keyboard's HID side (sweet_kbd.h): a keyboard service of its own, as a USB keyboard's
++ * IOHIDEventDriver is one. Only on a macOS boot: on iOS a keyboard service would hide iOS's own keyboard.
++ */
++class SweetHIDKeyboard : public IOHIDEventService {
++	OSDeclareDefaultStructors(SweetHIDKeyboard);
++public:
++	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void key(UInt32 usage, bool down);
++protected:
++	virtual UInt32 getPrimaryUsagePage() APPLE_KEXT_OVERRIDE { return kHIDPage_GenericDesktop; }
++	virtual UInt32 getPrimaryUsage() APPLE_KEXT_OVERRIDE { return kHIDUsage_GD_Keyboard; }
++	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 3; }
++private:
++	/* sweetkbdtest=N: N s after boot, taps on the keys Shift, command, n, then h, i, return (in the Finder:
++	 * a new folder named "hi"), as touches, so an unattended boot shows the whole path working */
++	static void testFired(OSObject *owner, IOTimerEventSource *sender);
++	IOTimerEventSource *fTest;
++	UInt32 fTestStep;
++};
++OSDefineMetaClassAndStructors(SweetHIDKeyboard, IOHIDEventService);
++static SweetHIDKeyboard *gSweetKeyboard;
++static bool sweet_touch_is_mouse(void);
++
+ bool
+ SweetHIDButtons::start(IOService *provider)
+ {
+@@ -475,6 +500,281 @@
+ }
+ 
+ bool
++SweetHIDKeyboard::start(IOService *provider)
++{
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	uint32_t on = 1, show = 0;
++	PE_parse_boot_argn("sweetkbd", &on, sizeof(on));
++	if (!on || !sweet_touch_is_mouse() || !IOHIDEventService::start(provider)) {
++		return false;
++	}
++	PE_parse_boot_argn("sweetkbdshow", &show, sizeof(show));
++	gSweetKeyboard = this;
++	sweet_kbd.full = 1;
++	sweet_kbd.visible = show != 0;
++	sweet_kbd.enabled = 1;
++	uint32_t test = 0;
++	if (PE_parse_boot_argn("sweetkbdtest", &test, sizeof(test)) && test != 0) {
++		fTest = IOTimerEventSource::timerEventSource(this, &SweetHIDKeyboard::testFired);
++		if (fTest != NULL && _hidWorkLoop->addEventSource(fTest) == kIOReturnSuccess) {
++			fTest->setTimeoutMS(test * 1000);
++		}
++	}
++	registerService();
++	IOLog("SWEET KBD: on-screen keyboard registered (%s; swipe up from the bottom edge shows it)\n",
++	    show ? "shown" : "hidden");
++	return true;
++#else
++	(void)provider;
++	return false;
++#endif
++}
++
++void
++SweetHIDKeyboard::key(UInt32 usage, bool down)
++{
++	IOHIDEvent *event = IOHIDEvent::keyboardEvent(mach_absolute_time(), kHIDPage_KeyboardOrKeypad, usage, down);
++
++	if (event) {
++		dispatchEvent(event);
++		event->release();
++	}
++}
++
++extern "C" void sweet_hid_touch(int finger, int down, int x, int y);
++
++void
++SweetHIDKeyboard::testFired(OSObject *owner, IOTimerEventSource *sender)
++{
++	static const struct { uint8_t usage, flags; uint16_t wait_ms; } steps[] = {
++		{ 0xe1, SKF_SHIFTKEY, 1000 }, { 0xe3, SKF_MOD, 1000 }, { 0x11, 0, 6000 },       /* Shift, command, n */
++		{ 0x0b, 0, 1000 }, { 0x0c, 0, 1000 }, { 0x28, 0, 0 },                           /* h, i, return */
++	};
++	SweetHIDKeyboard *self = (SweetHIDKeyboard *)owner;
++	UInt32 step = self->fTestStep / 2;
++	bool press = (self->fTestStep & 1) == 0;
++	if (step >= sizeof(steps) / sizeof(steps[0])) {
++		return;
++	}
++	if (press && step == 0) {
++		sweet_kbd.page = 0;
++		sweet_kbd.full = 1;
++		sweet_kbd.visible = 1;
++	}
++	int32_t x = 0, y = 0, w = 0, h = 0;
++	for (int i = sweet_kbd_first[0]; i < sweet_kbd_first[1]; i++) {
++		const struct sweet_kbd_keydef *k = &sweet_kbd_keys[i];
++		if (k->usage == steps[step].usage && (k->flags & (SKF_SHIFTKEY | SKF_MOD | SKF_PAGE | SKF_HIDE)) == steps[step].flags) {
++			sweet_kbd_cell(k, sweet_kbd.panel_w, sweet_kbd.panel_h, &x, &y, &w, &h);
++			break;
++		}
++	}
++	if (w > 0) {
++		if (press) {
++			IOLog("SWEET KBD: test tap %u: key 0x%02x at %d,%d\n", step, steps[step].usage, x + w / 2, y + h / 2);
++		}
++		sweet_hid_touch(9, press, x + w / 2, y + h / 2);
++	}
++	self->fTestStep++;
++	if (press) {
++		sender->setTimeoutMS(80);
++	} else if (steps[step].wait_ms != 0) {
++		sender->setTimeoutMS(steps[step].wait_ms);
++	}
++}
++
++#define SWEET_KBD_EDGE   70     /* a touch that begins this close to the bottom edge may be the summon swipe */
++#define SWEET_KBD_TRAVEL 220    /* ... once it has moved up this far (panel pixels) */
++struct sweet_kbd_finger {
++	uint8_t owner;          /* 0 not the keyboard's, 1 on a key, 2 the summon swipe, 3 ignored until it lifts */
++	int8_t  key;            /* index in the page, -1 none */
++	uint8_t page, usage, flags, mods;
++	bool    shifted;        /* Shift was sent around this key */
++	int     startY;
++};
++static struct sweet_kbd_finger sweet_kbd_fingers[SWEET_TOUCH_FINGERS];
++
++static uint32_t
++sweet_kbd_modbit(uint32_t usage)
++{
++	return usage == 0xe0 ? 1 : (usage == 0xe2 ? 2 : (usage == 0xe3 ? 4 : 0));
++}
++
++/* the key of the current page at a panel position: its cell, else the nearest key of that row */
++static int
++sweet_kbd_hit(int x, int y)
++{
++	uint32_t page = sweet_kbd.page < SWEET_KBD_PAGES ? sweet_kbd.page : 0;
++	int first = sweet_kbd_first[page], n = sweet_kbd_first[page + 1] - first, best = -1, bestd = 0x7fffffff;
++	int32_t kx, ky, kw, kh;
++	sweet_kbd_cell(&sweet_kbd_keys[first], sweet_kbd.panel_w, sweet_kbd.panel_h, &kx, &ky, &kw, &kh);
++	if (y < ky) {
++		y = ky;         /* the padding above the first row */
++	}
++	sweet_kbd_cell(&sweet_kbd_keys[first + n - 1], sweet_kbd.panel_w, sweet_kbd.panel_h, &kx, &ky, &kw, &kh);
++	if (y >= ky + kh) {
++		y = ky + kh - 1;        /* ... and below the last */
++	}
++	for (int i = 0; i < n; i++) {
++		sweet_kbd_cell(&sweet_kbd_keys[first + i], sweet_kbd.panel_w, sweet_kbd.panel_h, &kx, &ky, &kw, &kh);
++		if (y < ky || y >= ky + kh) {
++			continue;
++		}
++		if (x >= kx && x < kx + kw) {
++			return i;
++		}
++		int d = x < kx ? kx - x : x - (kx + kw - 1);
++		if (d < bestd) {
++			bestd = d;
++			best = i;
++		}
++	}
++	return best;
++}
++
++static void
++sweet_kbd_press(struct sweet_kbd_finger *f, int key)
++{
++	uint32_t page = sweet_kbd.page < SWEET_KBD_PAGES ? sweet_kbd.page : 0;
++	const struct sweet_kbd_keydef *k = &sweet_kbd_keys[sweet_kbd_first[page] + key];
++
++	f->key = (int8_t)key;
++	f->page = (uint8_t)page;
++	f->usage = k->usage;
++	f->flags = k->flags;
++	f->mods = 0;
++	f->shifted = false;
++	if (k->flags & SKF_PAGE) {
++		sweet_kbd.page = k->usage;
++		__atomic_store_n(&sweet_kbd.pressed, 0, __ATOMIC_RELEASE);
++		sweet_kbd.full = 1;
++		f->key = -1;
++		return;
++	}
++	__atomic_fetch_or(&sweet_kbd.pressed, 1ULL << key, __ATOMIC_RELEASE);
++	__atomic_fetch_or(&sweet_kbd.dirty, 1ULL << key, __ATOMIC_RELEASE);
++	if (k->flags & SKF_SHIFTKEY) {
++		/* a tap: the next key only; a second tap within 400 ms: locked; a tap while on: off */
++		static uint64_t last_ns;
++		uint64_t now_ns = 0;
++		absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
++		uint32_t s = sweet_kbd.shift;
++		sweet_kbd.shift = s == 0 ? 1 : (s == 1 && now_ns - last_ns < 400ULL * NSEC_PER_MSEC ? 2 : 0);
++		last_ns = now_ns;
++		sweet_kbd.full = 1;
++	} else if (k->flags & SKF_MOD) {
++		sweet_kbd.mods = sweet_kbd.mods ^ sweet_kbd_modbit(k->usage);
++	} else if (!(k->flags & SKF_HIDE) && gSweetKeyboard != NULL) {
++		uint32_t m = sweet_kbd.mods;
++		bool sh = (k->flags & SKF_SHIFT) != 0 || sweet_kbd.shift != 0;
++		if (m & 1) {
++			gSweetKeyboard->key(0xe0, true);
++		}
++		if (m & 2) {
++			gSweetKeyboard->key(0xe2, true);
++		}
++		if (m & 4) {
++			gSweetKeyboard->key(0xe3, true);
++		}
++		if (sh) {
++			gSweetKeyboard->key(0xe1, true);
++		}
++		gSweetKeyboard->key(k->usage, true);
++		f->mods = (uint8_t)m;
++		f->shifted = sh;
++		IOLog("SWEET KBD: key 0x%02x down%s mods %u\n", k->usage, sh ? " shift" : "", m);
++	}
++}
++
++static void
++sweet_kbd_release(struct sweet_kbd_finger *f)
++{
++	if (f->key < 0) {
++		return;
++	}
++	if (f->flags & SKF_HIDE) {
++		sweet_kbd.visible = 0;
++	} else if (!(f->flags & (SKF_SHIFTKEY | SKF_MOD)) && gSweetKeyboard != NULL) {
++		gSweetKeyboard->key(f->usage, false);
++		if (f->shifted) {
++			gSweetKeyboard->key(0xe1, false);
++		}
++		if (f->mods & 4) {
++			gSweetKeyboard->key(0xe3, false);
++		}
++		if (f->mods & 2) {
++			gSweetKeyboard->key(0xe2, false);
++		}
++		if (f->mods & 1) {
++			gSweetKeyboard->key(0xe0, false);
++		}
++		if (sweet_kbd.shift == 1) {
++			sweet_kbd.shift = 0;    /* Shift was for this key only */
++			sweet_kbd.full = 1;
++		}
++		if (f->mods != 0) {
++			sweet_kbd.mods = 0;     /* ... and so were the latched modifiers */
++			sweet_kbd.full = 1;
++		}
++	}
++	if (f->page == sweet_kbd.page) {
++		__atomic_fetch_and(&sweet_kbd.pressed, ~(1ULL << f->key), __ATOMIC_RELEASE);
++		__atomic_fetch_or(&sweet_kbd.dirty, 1ULL << f->key, __ATOMIC_RELEASE);
++	}
++	f->key = -1;
++}
++
++/* A touch sample in panel pixels. True: it belongs to the keyboard (the trackpad does not see it). */
++static bool
++sweet_kbd_touch(int finger, bool down, int x, int y)
++{
++	if (!sweet_kbd.enabled || sweet_kbd.panel_w == 0 || finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
++		return false;
++	}
++	struct sweet_kbd_finger *f = &sweet_kbd_fingers[finger];
++	if (f->owner == 0) {
++		if (!down) {
++			return false;
++		}
++		int32_t ph = (int32_t)sweet_kbd.panel_h;
++		if (sweet_kbd.visible) {
++			if (y < ph - sweet_kbd_height(sweet_kbd.panel_w)) {
++				return false;
++			}
++			f->owner = 1;
++			f->key = -1;
++			int key = sweet_kbd_hit(x, y);
++			if (key >= 0) {
++				sweet_kbd_press(f, key);
++			}
++			return true;
++		}
++		if (y >= ph - SWEET_KBD_EDGE) {
++			f->owner = 2;
++			f->key = -1;
++			f->startY = y;
++			return true;
++		}
++		return false;
++	}
++	if (down) {
++		if (f->owner == 2 && f->startY - y >= SWEET_KBD_TRAVEL) {
++			f->owner = 3;
++			__atomic_store_n(&sweet_kbd.pressed, 0, __ATOMIC_RELEASE);
++			sweet_kbd.full = 1;
++			sweet_kbd.visible = 1;
++			IOLog("SWEET KBD: show (swipe up from the bottom edge)\n");
++		}
++		return true;
++	}
++	if (f->owner == 1) {
++		sweet_kbd_release(f);
++	}
++	f->owner = 0;
++	return true;
++}
++
++bool
+ SweetHIDTouch::start(IOService *provider)
+ {
+ 	fLock = IOLockAlloc();
+@@ -1256,6 +1556,9 @@
+ 	}
+ 	x = x < 0 ? 0 : (x >= fPanelW ? fPanelW - 1 : x);
+ 	y = y < 0 ? 0 : (y >= fPanelH ? fPanelH - 1 : y);
++	if (fMouse && sweet_kbd_touch(finger, down, x, y)) {
++		return;         /* 0456: a key of the on-screen keyboard, or the swipe that shows it */
++	}
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -99,6 +99,11 @@
+     "     'IOMatchCategory' = SweetHIDTouch;"
+     "   },"
+     "   {"
++    "     'IOClass'         = SweetHIDKeyboard;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetHIDKeyboard;"
++    "   },"
++    "   {"
+     "     'IOClass'         = IOHIDSystem;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = IOHIDSystem;"
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_kbd.h
+@@ -0,0 +1,51 @@
++/*
++ * 0456: the on-screen keyboard for macOS on the phone (the touch screen is a trackpad there, and macOS has no
++ * touch keyboard). SweetHID.cpp owns the logic: touches that begin on the shown keyboard are key presses, sent as
++ * USB HID keyboard events by the SweetHIDKeyboard service; a swipe up from the panel's bottom edge shows it, its
++ * "hide" key hides it. SweetFramebuffer.cpp draws it over the bottom of the panel (the desktop under it is not
++ * drawn while it is shown). The layout and the key-cap glyphs are generated: sweet_kbd_data.h
++ * (tools/macos/kbd/mk-kbd-data.py). Boot-args: sweetkbd=0 off, sweetkbdshow=1 shown from the start.
++ */
++#ifndef SWEET_KBD_H
++#define SWEET_KBD_H
++#include <stdint.h>
++#include "sweet_kbd_data.h"
++
++struct sweet_kbd_shared {
++	volatile uint32_t enabled;      /* the keyboard exists (a macOS boot) */
++	volatile uint32_t visible;      /* wanted: shown */
++	volatile uint32_t page;         /* 0 letters, 1 numbers, 2 symbols */
++	volatile uint32_t shift;        /* 0 off, 1 next key only, 2 locked */
++	volatile uint32_t mods;         /* latched for the next key: 1 control, 2 option, 4 command */
++	volatile uint64_t pressed;      /* keys of the page held down (bit = index in the page) */
++	volatile uint64_t dirty;        /* keys to draw again */
++	volatile uint32_t full;         /* draw everything again */
++	volatile int32_t  top;          /* first panel row the keyboard covers while drawn, else INT32_MAX */
++	uint32_t panel_w, panel_h;      /* set by the framebuffer */
++};
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern struct sweet_kbd_shared sweet_kbd;
++#ifdef __cplusplus
++}
++#endif
++
++static inline int32_t
++sweet_kbd_height(uint32_t pw)
++{
++	return (int32_t)((uint64_t)SWEET_KBD_REF_H * pw / SWEET_KBD_REF_W);
++}
++
++/* a key's cell in panel pixels */
++static inline void
++sweet_kbd_cell(const struct sweet_kbd_keydef *k, uint32_t pw, uint32_t ph, int32_t *x, int32_t *y, int32_t *w, int32_t *h)
++{
++	int32_t ry = SWEET_KBD_PAD_TOP + (k->row == 0 ? 0 : SWEET_KBD_FN_H + (k->row - 1) * SWEET_KBD_ROW_H);
++	int32_t rh = k->row == 0 ? SWEET_KBD_FN_H : SWEET_KBD_ROW_H;
++	*x = (int32_t)((uint64_t)k->x * pw / 1000);
++	*w = (int32_t)((uint64_t)(k->x + k->w) * pw / 1000) - *x;
++	*y = (int32_t)ph - sweet_kbd_height(pw) + (int32_t)((uint64_t)ry * pw / SWEET_KBD_REF_W);
++	*h = (int32_t)((uint64_t)rh * pw / SWEET_KBD_REF_W);
++}
++#endif

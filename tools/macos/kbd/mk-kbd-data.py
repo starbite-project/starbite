@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""mk-kbd-data.py OUT.h [--preview OUT.png]: the on-screen keyboard's layout and key-cap glyphs for the kernel
+(xnu 0456: iokit/Kernel/arm/sweet_kbd_data.h, included by SweetHID.cpp for the touch logic and by
+SweetFramebuffer.cpp for the drawing).
+
+An iOS-like keyboard for macOS on the phone: three pages (letters, numbers, symbols) of four key rows, under a row of
+Mac keys (esc, tab, control, option, command, arrows, hide). Each key sends a USB HID keyboard usage, with Shift
+where the U.S. layout needs it. Geometry is for a 1440-pixel-wide panel (one key cell = 144 px); the kernel scales
+the key rectangles to the panel width, the glyphs stay as drawn. Glyphs: Inter (tools/brand/fonts, OFL), 8-bit alpha.
+Needs Pillow."""
+import sys
+from PIL import Image, ImageDraw, ImageFont
+
+FONT = __file__.rsplit('/tools/', 1)[0] + '/tools/brand/fonts/Inter[opsz,wght].ttf'
+REF_W, PAD_TOP, FN_H, ROW_H, PAD_BOTTOM = 1440, 14, 108, 184, 30
+REF_H = PAD_TOP + FN_H + 4 * ROW_H + PAD_BOTTOM
+SHIFT, MOD, PAGE, HIDE, DARK, SHIFTKEY = 1, 2, 4, 8, 16, 32
+
+U = {c: 0x04 + i for i, c in enumerate('abcdefghijklmnopqrstuvwxyz')}
+U.update({c: 0x1e + i for i, c in enumerate('123456789')})
+U.update({'0': 0x27, '-': 0x2d, '=': 0x2e, '[': 0x2f, ']': 0x30, '\\': 0x31, ';': 0x33, "'": 0x34, '`': 0x35,
+          ',': 0x36, '.': 0x37, '/': 0x38})
+SH = {'!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7', '*': '8', '(': '9', ')': '0', '_': '-',
+      '+': '=', '{': '[', '}': ']', '|': '\\', ':': ';', '"': "'", '~': '`', '<': ',', '>': '.', '?': '/'}
+
+glyphs = {}     # (text, size, weight, kind) -> index
+
+
+def glyph(text, size, weight=450, kind='cap'):
+    return glyphs.setdefault((text, size, weight, kind), len(glyphs))
+
+
+def char(c):
+    """A character key: (glyph, shifted glyph, usage, flags, width in 1/100 cell)."""
+    if c in SH:
+        return (glyph(c, 78), None, U[SH[c]], SHIFT, 100)
+    if c.isalpha():
+        return (glyph(c, 84, kind='lower'), glyph(c.upper(), 84), U[c], 0, 100)
+    return (glyph(c, 78), None, U[c], 0, 100)
+
+
+def word(t, usage, flags, w, size=46):
+    return (glyph(t, size, 520), None, usage, flags | DARK, w)
+
+
+def icon(t, usage, flags, w, size=68):
+    return (glyph(t, size, 400, 'icon'), None, usage, flags | DARK, w)
+
+
+FN = [word('esc', 0x29, 0, 100), word('tab', 0x2b, 0, 100), word('ctrl', 0xe0, MOD, 100), word('opt', 0xe2, MOD, 100),
+      word('cmd', 0xe3, MOD, 100), icon('←', 0x50, 0, 100, 60), icon('↓', 0x51, 0, 100, 60),
+      icon('↑', 0x52, 0, 100, 60), icon('→', 0x4f, 0, 100, 60), icon('⌄', 0, HIDE, 100, 76)]
+BKSP = icon('⌫', 0x2a, 0, 150, 76)
+RET = word('return', 0x28, 0, 200, 50)
+
+
+def space(w):
+    return (glyph('space', 44, 450), None, 0x2c, 0, w)
+
+
+def page_key(label, target, w=150):
+    return word(label, target, PAGE, w, 50)
+
+
+PAGES = [
+    [FN, [char(c) for c in 'qwertyuiop'], [char(c) for c in 'asdfghjkl'],
+     [icon('⇧', 0xe1, SHIFTKEY, 150, 76)] + [char(c) for c in 'zxcvbnm'] + [BKSP],
+     [page_key('123', 1), char(','), space(450), char('.'), RET]],
+    [FN, [char(c) for c in '1234567890'], [char(c) for c in '-/:;()$&@"'],
+     [page_key('#+=', 2)] + [char(c)[:4] + (140,) for c in ".,?!'"] + [BKSP],
+     [page_key('ABC', 0), char(','), space(450), char('.'), RET]],
+    [FN, [char(c) for c in '[]{}#%^*+='], [char(c)[:4] + (125,) for c in '_\\|~<>`/'],
+     [page_key('123', 1)] + [char(c)[:4] + (140,) for c in ".,?!'"] + [BKSP],
+     [page_key('ABC', 0), char(','), space(450), char('.'), RET]],
+]
+
+keys, first = [], [0]
+for page in PAGES:
+    for r, row in enumerate(page):
+        total = sum(k[4] for k in row)
+        assert total <= 1000, (r, total)
+        x = (1000 - total) // 2
+        for g, gs, usage, flags, w in row:
+            keys.append((x, w, r, usage, flags, g, g if gs is None else gs))
+            x += w
+    first.append(len(keys))
+assert max(b - a for a, b in zip(first, first[1:])) <= 64
+
+font_cache = {}
+alpha, gdefs, images = bytearray(), [], []
+for (text, size, weight, kind), idx in sorted(glyphs.items(), key=lambda kv: kv[1]):
+    f = font_cache.get((size, weight))
+    if f is None:
+        f = ImageFont.truetype(FONT, size)
+        f.set_variation_by_axes([28 if size >= 28 else 14, weight])
+        font_cache[(size, weight)] = f
+    asc, desc = f.getmetrics()
+    im = Image.new('L', (size * (len(text) + 2), size * 3), 0)
+    base = size * 2
+    ImageDraw.Draw(im).text((size, base), text, font=f, fill=255, anchor='ls')
+    box = im.getbbox()
+    assert box, text
+    cap = -f.getbbox('H', anchor='ls')[1]            # cap height
+    xh = -f.getbbox('x', anchor='ls')[1]             # x height
+    if kind == 'lower':
+        centre = base - int(xh * 0.62)
+    elif kind == 'icon':
+        centre = (box[1] + box[3]) // 2
+    else:
+        centre = base - cap // 2
+    crop = im.crop(box)
+    gdefs.append((crop.width, crop.height, box[1] - centre, len(alpha)))
+    alpha += crop.tobytes()
+    images.append(crop)
+
+out = ['/* Generated by tools/macos/kbd/mk-kbd-data.py: do not edit. The on-screen keyboard (xnu 0456). */',
+       '#ifndef SWEET_KBD_DATA_H', '#define SWEET_KBD_DATA_H',
+       f'#define SWEET_KBD_REF_W {REF_W}', f'#define SWEET_KBD_REF_H {REF_H}', f'#define SWEET_KBD_PAD_TOP {PAD_TOP}',
+       f'#define SWEET_KBD_FN_H {FN_H}', f'#define SWEET_KBD_ROW_H {ROW_H}',
+       'enum { SKF_SHIFT = 1, SKF_MOD = 2, SKF_PAGE = 4, SKF_HIDE = 8, SKF_DARK = 16, SKF_SHIFTKEY = 32 };',
+       '/* x, w: thousandths of the panel width; row 0 = the Mac key row */',
+       'struct sweet_kbd_keydef { uint16_t x, w; uint8_t row, usage, flags, glyph, glyph_shift; };',
+       '/* dy: the bitmap\'s top row relative to the key\'s vertical centre */',
+       'struct sweet_kbd_glyphdef { uint16_t w, h; int16_t dy; uint32_t off; };',
+       f'#define SWEET_KBD_PAGES {len(PAGES)}',
+       'static const uint8_t sweet_kbd_first[SWEET_KBD_PAGES + 1] = { ' + ', '.join(map(str, first)) + ' };',
+       'static const struct sweet_kbd_keydef sweet_kbd_keys[] = {']
+out += ['\t{ %d, %d, %d, 0x%02x, %d, %d, %d },' % k for k in keys]
+out += ['};', '#ifdef SWEET_KBD_WANT_ALPHA', 'static const struct sweet_kbd_glyphdef sweet_kbd_glyphs[] = {']
+out += ['\t{ %d, %d, %d, %d },' % g for g in gdefs]
+out += ['};', 'static const uint8_t sweet_kbd_alpha[] = {']
+for i in range(0, len(alpha), 32):
+    out.append('\t' + ','.join(str(b) for b in alpha[i:i + 32]) + ',')
+out += ['};', '#endif', '#endif', '']
+open(sys.argv[1], 'w').write('\n'.join(out))
+print(f'{sys.argv[1]}: {len(keys)} keys on {len(PAGES)} pages, {len(gdefs)} glyphs, {len(alpha)} alpha bytes, '
+      f'keyboard {REF_W} x {REF_H}')
+
+if '--preview' in sys.argv:
+    # the kernel's drawing, re-done here: page by page, side by side
+    BG, KEY, DARKKEY, TEXT = (28, 28, 30), (106, 106, 110), (62, 62, 66), (255, 255, 255)
+    pv = Image.new('RGB', (REF_W * len(PAGES) + 40 * (len(PAGES) - 1), REF_H), (0, 0, 0))
+    d = ImageDraw.Draw(pv)
+    for p in range(len(PAGES)):
+        ox = p * (REF_W + 40)
+        d.rectangle([ox, 0, ox + REF_W - 1, REF_H - 1], fill=BG)
+        for x, w, r, usage, flags, g, gs in keys[first[p]:first[p + 1]]:
+            x0 = ox + x * REF_W // 1000
+            y0 = PAD_TOP + (0 if r == 0 else FN_H + (r - 1) * ROW_H)
+            h = FN_H if r == 0 else ROW_H
+            w0 = w * REF_W // 1000
+            col = DARKKEY if flags & DARK else KEY
+            d.rounded_rectangle([x0 + 6, y0 + 8, x0 + w0 - 7, y0 + h - 9], radius=16, fill=col)
+            gw, gh, dy, off = gdefs[g]
+            mask = images[g]
+            pv.paste(Image.new('RGB', mask.size, TEXT), (x0 + (w0 - gw) // 2, y0 + h // 2 + dy), mask)
+    pv.save(sys.argv[sys.argv.index('--preview') + 1])
