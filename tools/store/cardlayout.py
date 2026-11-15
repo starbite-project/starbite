@@ -11,6 +11,8 @@ tools/macos/card-range-flash.py (--layout), the installer (tools/installer/sbins
          the 64 MiB tail), then p1 exFAT from sector 31727616 to the card's last whole MiB. The
          root sits at the same sector on every card, so one set of payloads serves every card size;
          a bigger card only gives p1 more room. No iOS 26 slot: the parked edge pair needs sd128.
+  sd64l  any card of at least 60,000,000,000 bytes, for the 2026-11 lineup (S9 #2): p2 0xDA at 8192 = a 1 GiB card
+         store (data from block 7), the macOS Sequoia root (16 GiB), the tail; p1 exFAT from sector 35790848.
 
 Rules every layout keeps (tools/installer/tests/test_cardlayout.py checks them): 1 MiB alignment;
 MBR entry 1 = p1 (type 0x07, exFAT "STARBITE"), entry 2 = p2 (type 0xDA, raw); the areas tile p2
@@ -183,7 +185,32 @@ def _sd64():
             'iOS 26 (parked edge pair) has no root slot on sd64: its menu entry is hidden and its payload is left out'))
 
 
-LAYOUTS = {L.name: L for L in (_sd128(), _sd64())}
+def _sd64l():
+    """sd64l (2026-11-15): a 64 GB card for today's lineup (S9 #2). The store keeps its data at block 7 in a 1 GiB
+    store area (the whole live store with Starbite OS's slots and photos is ~0.5 GiB; S9 #1's sd128 data area is
+    961 MiB), then macOS Sequoia's 16 GiB root (S9 #1's mac15 slot is 16 GiB too), then the tail. No Ventura or
+    iOS 26 slot (both out of the lineup / parked). p1 exFAT takes the rest: 42.4 GiB on a SanDisk 64 GB card,
+    38.8 GiB on the smallest card accepted."""
+    store, mac, start = 1024 * MIB_SECTORS, 33554432, 8192
+    p2 = store + mac + TAIL_SECTORS
+    return Layout(
+        name='sd64l', title='a card of at least 64 GB for the 2026-11 lineup: 1 GiB store, macOS Sequoia root, p1 the rest',
+        exact=0, min_sectors=MIN_CARD_SECTORS,
+        p1_start=start + p2, p1_sectors=0, p2_start=start, p2_sectors=p2,
+        areas=(Area('store', 'store', start, store, (), 'card OS store (1 GiB, data from block 7: a home store '
+                    'written as it is, store-flash-sd.sh)'),
+               Area('mac15', 'root', start + store, mac, ('mac15',), 'macOS Sequoia root, HFSX 16 GiB'),
+               Area('tail', 'tail', start + store + mac, TAIL_SECTORS, (), 'tail: XNU test range + sdlog ring; last sector SBTIME01 clock')),
+        pending=(
+            'XNU kernel: the SBTIME01 clock and the sdlog ring are read/written only on the 249999360-sector '
+            'card (patches 0370, 0377, 0393, 0395): on sd64l macOS Sequoia starts with no clock from the card '
+            "and leaves no kernel log until a kernel that takes the tail from the 0xDA partition's end is built "
+            '(docs/INSTALLER.md 11.5)',
+            'tools/store/boot-next.sh writes the clock and reads the sdlog ring only on the 128 GB card (sd128)',
+            'macOS Ventura (mac13) and iOS 26 (parked) have no root slot on sd64l: their menu entries are hidden'))
+
+
+LAYOUTS = {L.name: L for L in (_sd128(), _sd64(), _sd64l())}
 
 
 def names():

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The Starbite OS store, version 2 (read by shim/starlte/store.c; layout in store.h).
 
-  sbstore2.py build OUT.img (--capacity BLOCKS | --medium ufs|sd|sd64) [--catalog catalog.toml]
+  sbstore2.py build OUT.img (--capacity BLOCKS | --medium ufs|sd|sd64|sd64l) [--catalog catalog.toml]
               [--import OLD.img|DIR] [NAME=FILE[:TYPE] ...]
       Packs a store: the catalog (as entry "catalog"), the entries of an older store image or a
       directory of pulled entries (tools/overlay/sbstore-pull.py), then NAME=FILE arguments
@@ -82,7 +82,7 @@ DIR_BLOCK, DIR_BLOCKS, SETTINGS_BLOCK = 3, 4, 2
 DATA_BLOCK = DIR_BLOCK + DIR_BLOCKS
 MAX_ENTRIES = DIR_BLOCKS * BLOCK // 64
 V1_BLOCKS = 262144
-SD_LAYOUTS = {'sd': cardlayout.get('sd128'), 'sd64': cardlayout.get('sd64')}
+SD_LAYOUTS = {'sd': cardlayout.get('sd128'), 'sd64': cardlayout.get('sd64'), 'sd64l': cardlayout.get('sd64l')}
 # S9 #1: USERDATA after 16 GiB; card p2 182886400..249999359 (sd = sd128: 8389120); sd64: p2 8192..31727615 (3964928)
 MEDIA = {'ufs': 721024, **{m: L.store_blocks for m, L in SD_LAYOUTS.items()}}
 HEROLOG_BLOCKS = 1025                     # herolte_ufs.c: 4 MiB ring + header block at the end of the root partition
@@ -429,9 +429,9 @@ def build(a):
                      f'({lay.store_data.start}..{lay.store_data.end} on the card)')
     elif data_at != DATA_BLOCK and lay is not None:
         sys.exit(f'--data-at: the {lay.name} layout has no store data area')
-    if a.medium == 'sd64' and blk > lay.store_area_blocks and data_at == DATA_BLOCK:
+    if lay is not None and lay.store_data is None and blk > lay.store_area_blocks and data_at == DATA_BLOCK:
         sys.exit(f'store needs {blk} blocks: past {lay.store_area_blocks} it would overlap the {lay.name} '
-                 f'macOS Ventura root ({lay.root("mac13").sdroot()})')
+                 f'{lay.roots()[0].what.split(",")[0]} ({lay.roots()[0].sdroot()})')
     struct.pack_into('<8sIIQ', v1, 0, b'SBSTORE1', 1, nv1, min(blk, V1_BLOCKS))
     n = len(items)
     hdr = bytearray(BLOCK)
