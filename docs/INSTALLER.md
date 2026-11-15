@@ -44,6 +44,8 @@ tools/installer/mk-first-bundle.py OUT --boot-from ... --loader ... --env-dir ..
 tools/installer/rehearse-bundle.sh BUNDLE                        # one real bundle through the first-install flow (fakes)
 tools/installer/stream-copy.py --from-serial S1 --to-serial S2 --source SPEC --target SPEC [--real]   # section 16
 tools/installer/rehearse-stream.sh                               # stream-copy.py between two fake phones
+tools/installer/store-update.py --serial S2 --catalog NEW.toml NAME=FILE ... [--real]   # section 17
+tools/installer/rehearse-store-update.sh                         # store-update.py on a fake S9 #2
 python3 -m unittest discover -s tools/installer/tests            # unit tests
 ```
 
@@ -1168,3 +1170,37 @@ environment** (ssh), 64 MiB at a time through the Mac's RAM:
 - a 130 MiB p1 file;
 - the journal record;
 - S9 #1 byte-identical, and S9 #2's protected partitions unchanged.
+
+## 17. Updating a live card store: `store-update.py` (2026-11-15)
+
+After the core install, each of S9 #2's later steps adds store entries (`android.*`, the Sequoia and iOS 27 payloads,
+the Windows `.uefi` files, `linux.*`) and catalog rows. The card store by then also holds what the phone wrote into it:
+the loader's crash log, Starbite OS's `sbos-state`, update slots and photos (volatile entries) and the settings block. A
+plain rebuild + `store-flash-sd.sh` would zero all of that. `tools/installer/store-update.py`, against the installer
+environment (ssh, serial checked):
+1. pulls the store's used range from card p2 (hashed by the phone and the Mac, every CRC checked) and keeps it as the
+   rollback image (`<state>/<phone id>/store/pull-*.img`);
+2. builds the new store with `sbstore2.py build --medium LAYOUT --home --catalog NEW.toml --import PULL NAME=FILE ...`, so
+   every entry stays and the volatile ones keep their bytes. `--omit` drops an entry; a catalog that loses a key needs
+   `--drop KEY`. The plan lists each entry: add, replace, kept, volatile kept, REMOVE;
+3. dry run first: it records this exact result's SHA-256. `--real` pulls and builds again, needs the same SHA-256 (the
+   card has not changed since), and asks for a typed `update store on phone-XXXXXXXXXX`;
+4. writes the data first, in 16 MiB pieces (only those that differ, each read back), then the 7 head blocks with the
+   card's own settings block put back, then compares the whole store area. Until the head lands, the old header stays.
+   The new image is saved first, so a cable pull resumes without a new pull. `--restore PULL.img` writes a pulled image
+   back the same way.
+
+Only for stores laid out as on the card (`sd64`, `sd64l`); S9 #1's compact `sd128` store stays with
+`tools/store/card-store.sh`. Writes only card p2's store area. On the Mac it needs the pull and the new image (at most
+2 x 1 GiB on `sd64l`); a dry run keeps neither.
+
+`tools/installer/rehearse-store-update.sh`, a fake S9 #2 with an sd64l home store whose volatile entries and settings
+block hold the phone's bytes, 26 checks:
+- refusals: another phone's serial, no catalog, a catalog that drops a key (then allowed with `--drop`), no dry run of
+  this result, an sd128 card;
+- the dry run (p2 byte-identical, no images left);
+- an update adding `android.cmdline` and the One UI row, with a cable pull in the data (the head still the old store)
+  and the resume;
+- afterwards: the volatile entries' bytes, the settings block and every CRC;
+- the rollback (`--restore`);
+- UFS untouched.
