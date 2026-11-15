@@ -24,7 +24,7 @@
 #include "../sbshm.h"
 #include "../host/sbghost.h"
 #include "../netcheck-cmd.h"
-#if defined(SBSIM_TERM_NET) || defined(SBSIM_TERM_GPU)
+#if defined(SBSIM_TERM_NET) || defined(SBSIM_TERM_GPU) || defined(SBSIM_TERM_GTKBENCH)
 #define SBSIM_TERM_WAIT_MS 60000U           /* the network check: up to 30 s for the link, 20 s for curl */
 #else
 #define SBSIM_TERM_WAIT_MS 20000U
@@ -662,6 +662,10 @@ static int run_guest(unsigned run)
                                       "|PageTables|Mapped' /proc/meminfo | while read l; do echo \"MEM$1 $l\" > /dev/kmsg;"
                                       " done; }; m 0; (gnome-calculator >/dev/null 2>&1 &); sleep 9; m 1; "
                                       "echo STARBITE-TERM-OK > /dev/kmsg\n";
+#elif defined(SBSIM_TERM_GTKBENCH)
+            /* Track E: GTK 4 in software vs GL (sbgpu-ab: gtkbench 12 s each, ../netcheck-cmd.h); the flow here, the
+             * numbers on the phone */
+            static const char cmd[] = SBG_GTKBENCH_CMD;
 #elif defined(SBSIM_TERM_GPU)
             /* Track E: GL through sbgpu (sbgl-probe in the base): Mesa's Panfrost on the forwarded render node;
              * sim_gpu.c runs no job, so the renderer is the check here (the pixel is the phone's) */

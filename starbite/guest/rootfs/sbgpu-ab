@@ -1,0 +1,18 @@
+#!/bin/sh
+# sbgpu-ab (Track E, 2026-11-15): GTK 4 in software vs on Starbite's Mali, the same full-screen window (gtkbench: a
+# grid of cards relaid out and repainted every frame) for 12 s with each renderer; one kernel log line Starbite keeps:
+#   STARBITE-GTKBENCH: cairo fps F renderer R; ngl fps F renderer R; cards N
+# (the last 2 s of each run; "renderer" names what GTK really used: GskNglRenderer = the GPU, GskCairoRenderer = the
+# CPU). sbwl's STARBITE-PERF lines meanwhile give its own cost (the GPU frames are read back). Typed by the
+# linuxtest after the GPU check (netcheck-cmd.h SBG_GTKBENCH_CMD); ends with STARBITE-TERM-OK.
+cards=${1:-96}
+res=""
+for r in cairo ngl; do
+    rm -f "/tmp/gb-$r.txt"
+    env -u LIBGL_ALWAYS_SOFTWARE GSK_RENDERER=$r timeout 12 gtkbench "/tmp/gb-$r.txt" "$cards" >/dev/null 2>&1
+    f=$(tail -n 1 "/tmp/gb-$r.txt" 2>/dev/null)
+    res="$res $r ${f:-no result};"
+    sleep 1
+done
+echo "STARBITE-GTKBENCH:$res cards $cards" > /dev/kmsg
+echo STARBITE-TERM-OK > /dev/kmsg
