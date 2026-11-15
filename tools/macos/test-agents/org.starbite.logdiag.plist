@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.starbite.logdiag</string>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>echo 'SBLOG start' &gt;/dev/console; sleep 130; /usr/bin/log show --last 4m --style compact --predicate '(process == "NotificationCenter" OR process == "containermanagerd" OR process == "chronod") AND (messageType == error OR messageType == fault OR eventMessage CONTAINS[c] "container" OR eventMessage CONTAINS[c] "group")' 2&gt;&amp;1 | /usr/bin/head -120 &gt;/dev/console; echo 'SBLOG nc done' &gt;/dev/console; /usr/bin/log show --last 5m --style compact --predicate '(process == "WallpaperAgent" OR process == "WallpaperVideoExtension" OR process == "WallpaperImageExtension") AND (messageType == error OR messageType == fault OR eventMessage CONTAINS[c] "image" OR eventMessage CONTAINS[c] "choice" OR eventMessage CONTAINS[c] "fail")' 2&gt;&amp;1 | /usr/bin/head -120 &gt;/dev/console; echo 'SBLOG done' &gt;/dev/console</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+</dict>
+</plist>

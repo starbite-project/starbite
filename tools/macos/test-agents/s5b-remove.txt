@@ -1,0 +1,2 @@
+# S5b: the S3zy display diagnostic agent (it also opens System Settings by itself)
+/Library/LaunchAgents/org.starbite.dispdiag.plist
