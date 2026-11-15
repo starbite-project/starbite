@@ -5379,6 +5379,10 @@ void sh_restore(void)
  * (the left edge), 1.5 s then a fade; a screenshot (Power + Volume Up, kept by the platform first) is a white flash,
  * the shutter and a toast ---- */
 static tk_layer volhud, shotfl;
+/* 9f: USB Control's indicator: a blue "USB Control" capsule in the status bar of every screen (lock, home, apps) while a
+ * computer has a session */
+static tk_layer usbind;
+static int usb_ind_on;
 static struct { float vol, fl; } KH = { -1, -1 };   /* seconds since the slider / the flash began, -1 none */
 #define KH_VOL_X 6.f
 #define KH_VOL_Y 196.f
@@ -5392,6 +5396,25 @@ static void kh_vol_draw(int v)
     float h = KH_VOL_H * (float)v / 15.0f;
     if (h > 0) d_rrect(&d, KH_VOL_X, KH_VOL_Y + KH_VOL_H - h, KH_VOL_W, h, tk_minf(KH_VOL_W / 2, h / 2), W(1));
 }
+void sh_usb_indicator(int on)
+{
+    on = !!on;
+    if (on == usb_ind_on) return;
+    usb_ind_on = on;
+    relayer(&usbind);
+    if (on) {
+        /* in the status bar's free middle (the clock left, the battery right), centred on its line (y 30) */
+        static const char t[] = "USB Control";
+        float w = tw(TK_IT600, 13, t, 0, 0) + 24, h = 24, x = tk_floorf(195 - w / 2), y = 18;
+        dc d = mk(&usbind, "usb-ind", x, y, w, h, 2, 0);
+        d_rrect(&d, x, y, w, h, h / 2, TK_RGBA(0x0a, 0x84, 0xff, 1));
+        d_text(&d, TK_IT600, 13, x + 12, bl(TK_IT600, 13, y + 6), t, 0, 0, W(1), 0);
+    }
+    usbind.hidden = !on;
+    relink();
+    lock_ver++;
+}
+int sh_is_locked(void) { return locked; }
 void sh_key(int key)
 {
     if (key == SH_KEY_VOL_UP || key == SH_KEY_VOL_DOWN) {
@@ -5560,7 +5583,7 @@ static void relink(void)
     if (!apdim.name) { tk_layer_init(&apdim, "app-dim"); apdim.hidden = 1; }
     if (!emfade.name) { tk_layer_init(&emfade, "em-fade"); emfade.hidden = 1; }   /* cp7u: Emergency's fade on the GPU row */
     tk_layer *r[] = { &emfade, &star, &star_e, &home, &swg, &lockg, &lockflat, &apdim, &appg, &apicon, &swcover, &ncl, &focus, &ccl, &bnl, &cfl, &kitl, &cvl,
-                      &boot, &homebar, &pwl, &toastl, &volhud, &shotfl, &slp };   /* P3x: pwl the power sheet; 8w: sh_key's */
+                      &boot, &homebar, &pwl, &toastl, &volhud, &shotfl, &usbind, &slp };   /* P3x: pwl the power sheet; 8w: sh_key's */
     nc_link();                                       /* helper D: the Notification Centre (ncl), the banner (bnl) */
     sw_link();                                       /* helper D: the switcher's cards (swg), a card's snapshot over its opening window */
     cm_link();                                       /* helper I: the call screen (cvl) */
@@ -5658,6 +5681,8 @@ void sh_init_begin(tk_comp *c)
     slp.hidden = 1;
     tk_layer_init(&volhud, "vol-hud");             /* 8w: sh_key's volume slider, the screenshot's flash */
     volhud.hidden = 1;
+    tk_layer_init(&usbind, "usb-ind");             /* 9f: USB Control's indicator */
+    usbind.hidden = 1;
     tk_layer_init(&shotfl, "shot-flash");
     shotfl.solid = 0xffffffffu;
     shotfl.solid_w = TK_W;

@@ -32,6 +32,7 @@
 #include "cam.h"
 #include "snd.h"                         /* Track A, cp7: sound for the shell (the end of this file) */
 #include "usb.h"                         /* 8b: the USB console (Settings > Developer) */
+#include "usbctl.h"                      /* 9f: USB Control */
 #include "shub_more.h"
 #include "bathealth.h"
 #include "haptic.h"
@@ -3218,6 +3219,13 @@ void sh_usb_console(int on)
 #endif
 }
 int sh_usb_console_on(void) { return sh_pref_int("dev.usb", 0) == 1; }
+/* 9f: USB Control (kern/usbctl.c): what it asks the shell, what Settings asks it */
+int sh_usbctl_locked(void) { return sh_is_locked(); }
+void sh_usbctl_state(int on, const char *fp) { (void)fp; sh_usb_indicator(on); }
+int sh_usbctl_keys(void) { return usbctl_key_count(); }
+void sh_usbctl_key_fp(int i, char *fp17) { usbctl_key_fp(i, fp17); }
+int sh_usbctl_revoke(int i) { return usbctl_revoke(i); }
+int sh_usbctl_session(char *fp17) { return usbctl_session(fp17); }
 static void drv_after_bake(void)
 {
 #ifndef SBOS_SELFTEST_NEXT

@@ -36,6 +36,7 @@ enum { SE_ROOT = 0, SE_DISPLAY = 1, SE_WIFI = 2, SE_CELL = 3, SE_CARD = 4,
 /* actions (row ids from 100; a row id < 100 pushes that page) */
 enum { A_NONE = 100, A_CARD, A_PASSCODE, A_STARTUP, A_STORE, A_LAST2, A_TEXTSIZE, A_RESET, A_EMG, A_BRIGHT,
        A_RANGE, A_TERMINAL, A_TZ, A_AUTOLOCK, A_UPDATE, A_BTDEV, A_BTKBD, A_HAPLVL, A_VOLUME, A_TONE_RING, A_TONE_TEXT, A_TONE_ALARM,
+       A_USBKEY0, A_USBKEY3 = A_USBKEY0 + 3,   /* 9f: revoke a paired computer */
        T_FIRST = 200, T_SYSHAP = T_FIRST, T_KBHAP, T_AUTOCAP, T_TIMERVIB, T_LAST2AUTO, T_NALLOW, T_NBANNER, T_CALLVIB, T_SMSVIB,
        T_CLOCK24, T_BT, T_AUTOBRIGHT, T_KBSND, T_LOCKSND, T_SILENT, T_USBCON };
 
@@ -313,7 +314,7 @@ static void se_rows(int p)
         break;
     case SE_DEV:                                     /* 8b (Track A's sh_usb_console: the drivers' usb.c; pref dev.usb) */
         sec(0);
-        tog(T_USBCON, "USB Console", sh_usb_console_on());
+        tog(T_USBCON, "USB Control", sh_usb_console_on());   /* 9f: the same switch as Privacy > USB Control */
         foot("When this is on, the phone shows up as a read-only serial console while it's plugged into a computer. "
              "The first time, a Mac asks \xe2\x80\x9c" "Allow accessory to connect?\xe2\x80\x9d" " Turning it off is the same as unplugging it.");
         break;
@@ -496,6 +497,24 @@ static void se_rows(int p)
         val("Accounts", "None");
         foot("Nothing leaves this phone except what you turn on; Wi-Fi and Cellular Data are off at every start. No "
              "accounts, no analytics, no tracking: your notes, cards and places stay on the phone.");
+        {
+            /* 9f: USB Control: the switch (8b's dev.usb), who has a session, the paired computers (a tap revokes) */
+            static char fpv[17], lab[USBCTL_UI_KEYS][40];
+            sec("USB Control");
+            tog(T_USBCON, "USB Control", sh_usb_console_on());
+            if (sh_usbctl_session(fpv)) val("Connected Now", fpv);
+            int nk = sh_usbctl_keys();
+            for (int i = 0; i < nk && i < USBCTL_UI_KEYS; i++) {
+                char fp[17];
+                sh_usbctl_key_fp(i, fp);
+                tk_memcpy(lab[i], "Revoke Computer ", 16);
+                tk_memcpy(lab[i] + 16, fp, 17);
+                row(SR_ACT, A_USBKEY0 + i, lab[i], 0)->red = 1;
+            }
+            foot("A paired computer can restart the phone into any system, read its logs and switch it off, even while "
+                 "it is locked. It never sees your notes, photos, messages or passcode. To pair one, connect it while "
+                 "the phone is unlocked and run tools/sbctl.py; the phone asks first.");
+        }
         break;
     case SE_EMERGENCY:
         sec(0);
@@ -1372,7 +1391,11 @@ static void se_act(se_row *r)
     case A_STORE: se_open_app("store"); break;
     case A_TERMINAL: se_open_app("terminal"); break;
     case A_LAST2: se_open_app("power"); break;
-    case A_BTDEV: se_bt_pair(r); break;           /* cp7: a keyboard's pairing (the code in an alert) */
+    case A_BTDEV: se_bt_pair(r); break;
+    case A_USBKEY0: case A_USBKEY0 + 1: case A_USBKEY0 + 2: case A_USBKEY3:   /* 9f */
+        toast(sh_usbctl_revoke(r->id - A_USBKEY0) == 0 ? "Computer revoked" : "Not revoked");
+        se_build();
+        break;           /* cp7: a keyboard's pairing (the code in an alert) */
     case A_BTKBD: se_bt_kbd(); break;
     case A_TONE_RING: case A_TONE_ALARM:           /* cp7w: a repeating tone: three seconds of it */
         snd_ring_stop(3);

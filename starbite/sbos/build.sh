@@ -62,6 +62,8 @@ if [ "$native" = 1 ]; then
     CC=gcc sh "$here/kern/host/sbfw-health-test.sh"       # Track J FW4: Settings > Startup's checks (kern/sbfw_health.c)
     CC=gcc sh "$here/kern/host/photos-test.sh"            # Track A: the Camera's photo store (kern/photos.c)
     CC=gcc sh "$here/kern/host/nledpol-test.sh"           # Track A: the notification LED's policy (kern/nledpol.c)
+    if command -v openssl >/dev/null 2>&1 && command -v xxd >/dev/null 2>&1; then sh "$here/kern/host/usbctl-test.sh"; fi   # 9f: USB Control (kern/usbctl.c)
+    sh "$here/kern/host/usb-test.sh"                      # the USB console (usb.c, usbacm.c), behind USB Control
     gcc -std=gnu11 -O2 -Wall -Wextra -Werror -I "$here/kern" "$here/kern/host/lens-test.c" -lm -o "$ob/lens-test" &&
         "$ob/lens-test"                                   # Track A: Liquid Glass V3's model (kern/lens.h)
     CC=gcc sh "$here/kern/host/tzdb-test.sh"     # Track A: the time zones against zoneinfo, the 12-hour text

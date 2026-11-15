@@ -736,6 +736,12 @@ static int os_random(void *ctx, uint8_t *out, uint32_t n)
     return 0;
 }
 
+/* 9f: USB Control's nonces and the phone's id (usbctl.c): the same pool */
+void sbos_random(void *out, uint32_t n)
+{
+    (void)os_random(0, (uint8_t *)out, n);
+}
+
 static void ent_seed_io(uint8_t out[32], int ask_radio)
 {
     static volatile uint8_t walk[8192];

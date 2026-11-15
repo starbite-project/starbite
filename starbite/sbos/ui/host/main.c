@@ -518,6 +518,12 @@ int sh_city_get(int i, const char **name, const char **country, int *tz, int *la
 static int host_usb;
 void sh_usb_console(int on) { host_usb = !!on; }
 int sh_usb_console_on(void) { return host_usb; }
+/* 9f: USB Control's pretend computers (state usbctl=:N: N paired, a session for the first; usbctl=:0 none) */
+static int host_uc_keys, host_uc_sess;
+int sh_usbctl_keys(void) { return host_uc_keys; }
+void sh_usbctl_key_fp(int i, char *fp17) { snprintf(fp17, 17, "%08x5bd0e1a7", 0x3c91f2e4u + (unsigned)i); }
+int sh_usbctl_revoke(int i) { (void)i; if (host_uc_keys) host_uc_keys--; host_uc_sess = 0; sh_usb_indicator(0); return 0; }
+int sh_usbctl_session(char *fp17) { if (!host_uc_sess) return 0; sh_usbctl_key_fp(0, fp17); return 1; }
 int sh_tz_count(void) { return tzdb_n; }
 const char *sh_tz_name(int i, const char **city)
 {
@@ -645,6 +651,11 @@ static void apply_state(const char *st)
     else snprintf(key, sizeof key, "%s", eq + 1);   /* helper D: a long notification text fits */
     /* date=WDAY:DAY (P3p): a new day as the phone's clock reports it (the Calendar icon follows) */
     if (!strcmp(what, "calls")) { sh_cell_calls((int)v); return; }   /* 8z: calls=:1 "Calls and SMS" on (pretend registered) */
+    if (!strcmp(what, "usbctl")) {                  /* 9f: usbctl=:N N computers paired, a session for the first */
+        host_uc_keys = (int)v; host_uc_sess = v > 0; host_usb = v > 0;
+        sh_usb_indicator(v > 0);
+        return;
+    }
     if (!strcmp(what, "chg")) {                     /* 9c: chg=:MA charging at MA mA (chg=:-1 hot, :-2 full, :0 unplugged) */
         int st = v == 0 ? 0 : v == -1 ? 2 : v == -2 ? 4 : 1;
         sh_charge((int)v, 3000, st);

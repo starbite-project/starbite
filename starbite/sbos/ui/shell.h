@@ -62,7 +62,16 @@ void sh_brightness(int level);
 void sh_bright_now(int level);
 /* P2y: the apps' live values besides sh_status: charging or not, the software's name and version */
 void sh_sysinfo(int charging, const char *version);
-void sh_charge(int ma, int full_mah, int st);   /* Track A 9c: the real charge rate (0 none, 1 charging, 2 hot, 3 cold, 4 full) */
+void sh_charge(int ma, int full_mah, int st);
+/* 9f: USB Control (kern/usbctl.c). The kernel: the indicator while a computer has a session; the lock state it asks.
+ * The shell asks: the paired computers (fingerprints, 16 hex), revoke one, the session's computer (1 a session) */
+#define USBCTL_UI_KEYS 4                    /* = kern/usbctl.h USBCTL_KEYS */
+void sh_usb_indicator(int on);
+int sh_is_locked(void);
+int sh_usbctl_keys(void);
+void sh_usbctl_key_fp(int i, char *fp17);
+int sh_usbctl_revoke(int i);
+int sh_usbctl_session(char *fp17);   /* Track A 9c: the real charge rate (0 none, 1 charging, 2 hot, 3 cold, 4 full) */
 void sh_alarm(int on, int h, int m);
 /* B5: the Clock's alarm list to the kernel (alarm.c's alarm_set: slot i of 4, days a bit per weekday, 0 once); < 0
  * refused (the self test) */

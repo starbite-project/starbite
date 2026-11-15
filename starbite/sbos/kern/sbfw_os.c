@@ -216,6 +216,26 @@ static void restart_done(int ok)
     }
 }
 
+/* 9f: USB Control's "reboot <target>" (usbctl.c, an authenticated computer): Restart Into's targets without the sheet
+ * (the computer's key was approved on the phone; the command is its confirmation). -1 an unknown target */
+int sbfw_os_restart_to(const char *target)
+{
+    static const struct { const char *t; int rs; } m[] = { { "menu", RS_MENU }, { "recovery", RS_RECOVERY },
+        { "recovery-repair", RS_REPAIR }, { "maint", RS_MAINT }, { "maint-rescue", RS_RESCUE },
+        { "fastboot", RS_FASTBOOT }, { "download", RS_DOWNLOAD } };
+    for (unsigned i = 0; i < sizeof(m) / sizeof(m[0]); ++i)
+        if (same(target, m[i].t)) {
+            if (pend.what)
+                return -1;                  /* a question is open on the phone: not under it */
+            pend.what = m[i].rs;
+            pend.action = 0;
+            pend.key[0] = 0;
+            restart_done(1);
+            return 0;
+        }
+    return -1;
+}
+
 static int ask(int what, const char *key, unsigned action, const char *title, const char *l1, const char *l2)
 {
     if (pend.what)

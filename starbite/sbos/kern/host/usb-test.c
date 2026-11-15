@@ -20,6 +20,21 @@
 #include "usbacm.h"
 #include "usb_dwc3.h"
 #include "usb_phy.h"
+#include "usbctl.h"
+
+/* 9f: a fake USB Control (usbctl.c has its own host test): "AUTH test" opens a session, anything else before it is
+ * refused, a session's commands are all the console's */
+static int fake_authed, fake_closes;
+void usbctl_open(usbctl_put_fn put) { fake_authed = 0; put("SBCTL1 fake-nonce fake-id\r\n"); }
+void usbctl_close(const char *why) { (void)why; if (fake_authed) ++fake_closes; fake_authed = 0; }
+int usbctl_authed(void) { return fake_authed; }
+void usbctl_line(const char *line, usbctl_put_fn put)
+{
+    if (!strcmp(line, "AUTH test")) { fake_authed = 1; put("OK fakefp\r\n"); }
+    else put("REFUSED not authenticated\r\n");
+}
+int usbctl_exec(const char *line, usbctl_put_fn put) { (void)line; (void)put; return 0; }
+void usbctl_tick(uint64_t now, usbctl_put_fn put) { (void)now; (void)put; }
 
 static int verbose, fails, checks;
 #define CHECK(c, ...)                                                                                                  \
@@ -777,8 +792,20 @@ static void test_lifecycle(void)
     CHECK(st.configured && st.address == 9 && st.terminal, "enumerated: configured, address 9, terminal open");
     CHECK(D.cfg_len == USBACM_CONFIG_LEN, "the host read a %u-byte configuration", D.cfg_len);
     check_config(D.cfg_desc, D.cfg_len, 0);
-    CHECK(got("Starbite OS " SBOS_VERSION " console (read only)"), "banner");
+    CHECK(got("SBCTL1 "), "the challenge when the port opens");
     CHECK(G.gated_dwc_reads == 0, "no DWC3 read with its clock gated");
+
+    /* 9f: before a session only the handshake answers; no log streams */
+    got_clear();
+    sb_log("before the session");
+    host_type("ver\r");
+    run(30);
+    CHECK(got("REFUSED") && !got("Starbite OS " SBOS_VERSION ", up ") && !got("before the session"),
+          "no command and no log before a session: [%s]", D.got);
+    got_clear();
+    host_type("AUTH test\r");
+    run(20);
+    CHECK(got("OK fakefp") && fake_authed, "AUTH opens a session");
 
     /* the console */
     got_clear();
@@ -810,6 +837,8 @@ static void test_lifecycle(void)
     run(20);
     CHECK(got("Connected to a computer") || got("console open"), "usb: [%s]", D.got);
     CHECK(got("D+/D- switch 0x09"), "usb shows the switch");
+    host_type("follow on\r");             /* 9f: off when the port opens */
+    run(20);
     got_clear();
     sb_log("hello from the test");
     run(30);
@@ -860,6 +889,7 @@ static void test_lifecycle(void)
     run(10);
     usb_status(&st);
     CHECK(!st.terminal, "DTR off closes the console");
+    CHECK(!fake_authed && fake_closes >= 1, "DTR off ends the session");
     CHECK(!D.ep[5].busy, "no IN left in flight after DTR off");
     D.reads = 1;
     got_clear();
@@ -868,7 +898,7 @@ static void test_lifecycle(void)
     CHECK(!got("after close"), "nothing sent with the port closed");
     host_set_dtr(1);
     run(50);
-    CHECK(got("console (read only)"), "DTR on again: a new banner");
+    CHECK(got("SBCTL1 "), "DTR on again: a new challenge");
 
     /* unplug: two low readings, then everything as found */
     unsigned stops = D.stops;

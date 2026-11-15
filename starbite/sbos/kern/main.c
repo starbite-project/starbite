@@ -8,6 +8,7 @@
 #include "sb.h"
 #include "sbui.h"
 #include "kern.h"
+#include "usbctl.h"
 #include "snd.h"
 #ifdef SB_HOST
 #include <stdlib.h>
@@ -249,6 +250,7 @@ void sb_main(void)
 #ifndef SB_HOST
     charge_init();                          /* Track A 9c: after surv_init (its USB output owns the charger) */
     usb_init();                             /* USB device mode (usb.c): watches the cable when SBOS_USB_AUTO */
+    usbctl_init();                          /* 9f: USB Control: the link when Settings has it on */
 #endif
     settings_restore();                     /* after power_init: the screen-off time it restores re-arms the timer */
     clock_boot_log();                       /* 1.2-alpha26: the PMIC clock, or the last known time */

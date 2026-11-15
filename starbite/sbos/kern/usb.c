@@ -49,6 +49,7 @@
 #include "survival.h"
 #include "usb.h"
 #include "usbacm.h"
+#include "usbctl.h"                        /* 9f: USB Control, the console's authenticated half */
 #include "usb_dwc3.h"
 #include "usb_phy.h"
 
@@ -205,7 +206,7 @@ static struct {
 static struct {
     char tx[TXCAP];
     unsigned th, tn;
-    char line[128];
+    char line[USBCTL_LINE_MAX];              /* 9f: an AUTH line is ~290 characters */
     unsigned n;
     int cr, open, follow, catchup, prompt, mark_set;
     char mark[128];
@@ -497,15 +498,16 @@ static void con_open(void)
 {
     con_clear();
     C.open = 1;
-    C.follow = 1;
+    C.follow = 0;                           /* 9f: nothing of the log before a session (follow on in one) */
     mark_newest();
-    con_put("\r\nStarbite OS " SBOS_VERSION " console (read only): the kernel log follows as it is written. "
-            "Type help for the commands.\r\n");
+    con_put("\r\n");
+    usbctl_open(con_put);                   /* the challenge: only the handshake is answered until a session */
     con_prompt();
 }
 
 static void con_close(void)
 {
+    usbctl_close("the port closed");
     if (usbd_busy(PH_IN))
         usbd_cancel(PH_IN);                 /* nobody reads it any more */
     con_clear();
@@ -653,6 +655,12 @@ static void con_exec(void)
     for (; i < C.n && i + 1 < sizeof(l); ++i)
         l[i] = C.line[i];
     l[i] = 0;
+    if (!usbctl_authed()) {                 /* 9f: before a session, the handshake only */
+        usbctl_line(l, con_put);
+        return;
+    }
+    if (usbctl_exec(l, con_put))
+        return;
     switch (usb_cmd_parse(l, &arg)) {
     case USB_CMD_NONE:
         break;
@@ -760,6 +768,7 @@ static void tx_pump(void)
 /* ---- the link ---------------------------------------------------------------------------------------------------- */
 static void acm_reset(void)
 {
+    usbctl_close("the USB link went down");
     L.configured = 0;
     C.open = 0;
     con_clear();
@@ -1017,6 +1026,9 @@ void usb_timer(unsigned id)
         return;
     uint64_t now = sb_ms();
     unsigned w = link_step(now);
+    usbctl_tick(now, C.open ? con_put : 0);   /* 9f: the pairing's answer, idle, a deferred restart */
+    if (usbctl_authed() || C.open)
+        w = w > 100U ? 100U : w;             /* (a pairing answer or a restart waits at most 0.1 s) */
     kt_set(KT_USB, 0, sb_ms(), w, 0);
 }
 
@@ -1028,7 +1040,7 @@ void usb_enable(int on)
         L.t_rd = 0;
         L.retry_ms = 5000U;
         L.relink_ms = 10000U;
-        sb_log("usb: watching the cable (USB device mode: a read-only serial console)");
+        sb_log("usb: watching the cable (USB device mode: the USB Control console)");
         kt_set(KT_USB, 0, sb_ms(), 1, 0);
     } else if (!on && L.enabled) {
         link_down("USB switched off");
