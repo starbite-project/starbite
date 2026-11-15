@@ -1,0 +1,199 @@
+From b8730f0653fd4153342475998b31238c4a2b7a4f Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 00:58:19 +0200
+Subject: [PATCH] 0167: an allocation opened from another process is listed as
+ written only when the submission writes it (Panfrost names its written BOs;
+ fixes the flip-model DWM device stop, T70); MSAA (0165) behind the flag file
+ msaa
+
+---
+ include/win32-compat/malikm_drm.c         | 44 +++++++++++++++++++++--
+ src/gallium/drivers/panfrost/pan_jm.c     | 19 ++++++++++
+ src/gallium/frontends/d3d10umd/Device.cpp | 21 +++++++++--
+ 3 files changed, 80 insertions(+), 4 deletions(-)
+
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index c3420df..19be571 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -889,6 +889,13 @@ struct sbdev {
+     * zcnolist2: kind 2 allocations are not forced into every submission (0138 off). */
+    int devstate, ro2, nolist2;
+    unsigned last_state;
++   /* sb-patches/0167 (T70 read, docs/WIN11-GPU.md 6.97): the BOs the next PANFROST_SUBMIT writes, from Panfrost's
++    * own batch flags (malikm_submit_writes, called right before the ioctl on the same thread). An allocation opened
++    * from another process is listed with WriteOperation only if it is in this set: DWM reads an app's flip-model
++    * buffers, and the system stops a device (execution state 4) that lists them as written. wr_n == ~0u: unknown
++    * (no call, or more than fit): written, as before 0167. */
++   uint32_t wr[96];
++   unsigned wr_n;
+    /* T30 (sb-patches/0124): a vertex/tiler chain held back to go to the KMD in one Render with the fragment chain
+     * that Panfrost submits right after it (SB_REQ_MERGE_NEXT). Its command, allocation-list entries (pend_n), the
+     * BOs it named and its out_sync wait in the runtime's buffers until then; any other call sends it alone. */
+@@ -927,6 +934,7 @@ sb_new_dev(void)
+    if (d) {
+       InitializeSRWLock(&d->lock);
+       d->id = (unsigned)InterlockedIncrement(&sb_ndev);
++      d->wr_n = ~0u;                      /* 0167: no write set yet */
+    }
+    return d;
+ }
+@@ -1378,6 +1386,37 @@ sb_devstate_note(struct sbdev *d, const char *what, unsigned arg)
+    return s;
+ }
+ 
++/* sb-patches/0167: Panfrost names the BOs its next submit writes (gem handles; n == ~0u: more than it could name) */
++void
++malikm_submit_writes(const uint32_t *handles, unsigned n)
++{
++   struct sbdev *d = sb_cur;
++   if (!d || !d->on)
++      return;
++   AcquireSRWLockExclusive(&d->lock);
++   if (n > sizeof(d->wr) / sizeof(d->wr[0])) {
++      d->wr_n = ~0u;
++   } else {
++      memcpy(d->wr, handles, n * sizeof(d->wr[0]));
++      d->wr_n = n;
++   }
++   ReleaseSRWLockExclusive(&d->lock);
++}
++
++/* 0167: does the submit being handled write this BO? Only asked for allocations opened from another process. */
++static int
++sb_opened_written(const struct sbdev *d, uint32_t handle)
++{
++   if (d->ro2)
++      return 0;
++   if (d->wr_n == ~0u)
++      return 1;
++   for (unsigned i = 0; i < d->wr_n; i++)
++      if (d->wr[i] == handle)
++         return 1;
++   return 0;
++}
++
+ /* 0163: for d3d10umd's entry points (the thread's current device) */
+ void
+ malikm_devstate_note(const char *what, unsigned arg)
+@@ -2005,7 +2044,7 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+          if (!bo)
+             return -MK_ENOENT;
+          if (bo->listed == d->mark) {
+-            if (joining && bo->list_idx < n && !(d->ro2 && bo->kind == 2))
++            if (joining && bo->list_idx < n && (bo->kind != 2 || sb_opened_written(d, bos[i])))
+                d->alloc[bo->list_idx].WriteOperation = 1;   /* listed by the held chain, maybe for residency */
+             continue;
+          }
+@@ -2013,9 +2052,10 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+          bo->list_idx = n;
+          memset(&d->alloc[n], 0, sizeof(d->alloc[n]));
+          d->alloc[n].hAllocation = bo->h;
+-         d->alloc[n].WriteOperation = (d->ro2 && bo->kind == 2) ? 0 : 1;   /* 0163 */
++         d->alloc[n].WriteOperation = bo->kind != 2 || sb_opened_written(d, bos[i]);   /* 0163, 0167 */
+          n++;
+       }
++      d->wr_n = ~0u;                      /* 0167: the set was for this submit only */
+       /* Every other live BO of this device too. Linux's panfrost maps a BO into the GPU VM when it is
+        * created, so a job may touch BOs it does not name, and Mesa relies on that. VidMm only pages in (and
+        * maliwddm only maps) what is in the allocation list, so such a job faulted: PE, 2026-10-17, two read
+diff --git a/src/gallium/drivers/panfrost/pan_jm.c b/src/gallium/drivers/panfrost/pan_jm.c
+index b0951e4..8b14474 100644
+--- a/src/gallium/drivers/panfrost/pan_jm.c
++++ b/src/gallium/drivers/panfrost/pan_jm.c
+@@ -110,6 +110,12 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
+ 
+    pan_bo_access *flags = util_dynarray_begin(&batch->bos);
+    unsigned end_bo = util_dynarray_num_elements(&batch->bos, pan_bo_access);
++#ifdef _WIN32
++   /* sb-patches/0167: the WDDM shim lists an allocation opened from another process as written only when this
++    * batch writes it (the pools, the tiler heap and the sample positions below are this device's own). */
++   uint32_t sb_wr[96];
++   unsigned sb_wr_n = 0;
++#endif
+ 
+    for (int i = 0; i < end_bo; ++i) {
+       if (!flags[i])
+@@ -117,6 +123,13 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
+ 
+       assert(submit.bo_handle_count < batch->num_bos);
+       bo_handles[submit.bo_handle_count++] = i;
++#ifdef _WIN32
++      if (flags[i] & PAN_BO_ACCESS_WRITE) {
++         if (sb_wr_n < ARRAY_SIZE(sb_wr))
++            sb_wr[sb_wr_n] = i;
++         sb_wr_n++;
++      }
++#endif
+ 
+       /* Update the BO access flags so that panfrost_bo_wait() knows
+        * about all pending accesses.
+@@ -150,6 +163,12 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
+       panfrost_bo_handle(dev->sample_positions);
+ 
+    submit.bo_handles = (uint64_t)(uintptr_t)bo_handles;
++#ifdef _WIN32
++   {
++      void malikm_submit_writes(const uint32_t *handles, unsigned n);
++      malikm_submit_writes(sb_wr, sb_wr_n <= ARRAY_SIZE(sb_wr) ? sb_wr_n : ~0u);
++   }
++#endif
+    if (ctx->is_noop)
+       ret = 0;
+    else
+diff --git a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+index 51220ef..29ebe4c 100644
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -66,6 +66,19 @@ static void APIENTRY RelocateDeviceFuncs1(D3D10DDI_HDEVICE hDevice,
+ static void APIENTRY Flush(D3D10DDI_HDEVICE hDevice);
+ static void APIENTRY CheckFormatSupport(D3D10DDI_HDEVICE hDevice, DXGI_FORMAT Format,
+                                __out UINT *pFormatCaps);
++/* sb-patches/0167: MSAA (0165) is offered only with the flag file C:/ProgramData/Starbite/msaa until the conformance
++ * run has checked it: DWM and Direct2D take multisampled targets as soon as a driver offers them. */
++static bool
++SbMsaaOn(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      on = malikm_switch("msaa") ? 1 : 0;
++      DebugPrintf("sbumd: MSAA %s\n", on ? "offered (flag file msaa)" : "not offered (no flag file msaa)");
++   }
++   return on > 0;
++}
++
+ static void APIENTRY CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,
+                                           DXGI_FORMAT Format,
+                                           UINT SampleCount,
+@@ -563,7 +576,8 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
+       *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_BLENDABLE;
+ 
+ #if SUPPORT_MSAA
+-      if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 4, 4,
++      if (SbMsaaOn() &&
++          screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 4, 4,
+                                       PIPE_BIND_RENDER_TARGET)) {
+          *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
+       }
+@@ -575,7 +589,8 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
+       *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_SHADER_SAMPLE;
+ 
+ #if SUPPORT_MSAA
+-      if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 4, 4,
++      if (SbMsaaOn() &&
++          screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 4, 4,
+                                       PIPE_BIND_RENDER_TARGET)) {
+          *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_LOAD;
+       }
+@@ -615,6 +630,8 @@ CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,        // IN
+       *pNumQualityLevels = 1;
+       return;
+    }
++   if (!SbMsaaOn())
++      return;
+    enum pipe_format color = FormatTranslate(Format, false), depth = FormatTranslate(Format, true);
+    if ((color != PIPE_FORMAT_NONE && !util_format_is_depth_or_stencil(color) &&
+         screen->is_format_supported(screen, color, PIPE_TEXTURE_2D, SampleCount, SampleCount,
+-- 
+2.43.0
+

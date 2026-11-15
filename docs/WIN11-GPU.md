@@ -2911,6 +2911,37 @@ GDI present.
 - `tools/win/mesa/tests/build-test.sh NAME` builds a test program the way sbcomp/sbdrag were built (VM clang-cl,
   ARM64, ~/sbwin kit).
 
+### 6.97 T70 read: DWM's device is stopped for listing an app's flip buffers as written; read-only fixes it (0167)
+
+(2026-11-16 01:00) **T70** (`build/win/results-t70`, big cores, sbumd d7285e58 = 0163; menu after 257 s):
+
+| run (sbumd switches) | sbcomp hwnd | DWM | DWM's own frame |
+|---|---|---|---|
+| base (devstate) | 2.5 fps | restarted (0x8898008D) | - |
+| ro2: opened allocations listed without WriteOperation | **56.8 fps** | **survived** | the red window (82.9 % of the frame) |
+| nolist2: opened allocations not forced into every submission | 6.3 fps | restarted | - |
+| both | **61.3 fps** | **survived** | the red window |
+| control: hwndblt (blt model), base | 52.3 fps | survived | magenta window |
+
+- **The reason, from the device-state log:** `device 1 execution state 1 -> 4 at a Render` (4 =
+  D3DDDI_DEVICEEXECUTION_STOPPED), the first Render after `OpenResource` of the two 1200x700 buffers, and that
+  Render's list has them marked written (`400079c0w*`). Every recreated device dies the same way at its 4th-10th
+  submission. With the write mark off there is no state change at all. So the system stops a device that claims to
+  write a flip-model buffer it only opened to read; DXGI then reports device removed, and DWM gives up after ~9
+  devices. The missing `ResolveSharedResource` (filled in all runs) and the forced listing (0138) are not the cause.
+- **Why we marked it:** the shim marked every buffer a submit names as written, because Panfrost's submit ioctl
+  carries no access flags.
+- **0167** (src-int b8730f0, `sb-patches/0167-...patch`, sbumd d39b83ab, ARM64X verify FAILS: 0):
+  - Panfrost tells the shim which buffers the batch writes (`malikm_submit_writes`, from its own per-batch access
+    flags, right before the submit); an allocation opened from another process is listed with WriteOperation only
+    if it is in that set. A blt-model app still writes DWM's surface (it is the blit's destination); DWM reading an
+    app's buffer no longer does. Everything else is listed as before. 0138's forced listing stays (read).
+  - MSAA (0165) is offered only with the flag file `msaa`, until the conformance run has checked it.
+  - 0166: geometry shaders are refused cleanly on a driver without a geometry stage.
+- **T71 (FLIPGD)**, `build/win/stage/sbwddm-t71`: `sb-flipgd.bat` runs sbcomp hwnd / hwndblt / dcsc / dcsurf with
+  no flag files (the fix itself, incl. DirectComposition), then Geometry Dash A (async GDI), B (`glzcflip`:
+  zero-copy on FLIP_SEQUENTIAL, interval 0; GD ICD 0164), B2 (`glzcflipd`: FLIP_DISCARD), A2.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
