@@ -124,6 +124,20 @@ grep -q '^### step E done' "$W/night.log" && grep -q '^### step F done' "$W/nigh
 	grep -q '^### step ONLY(P E F) done' "$W/night.log" && ok "E and F done, C not touched, the ONLY marker" || bad "ONLY markers"
 [ "$(python3 -c "import sys, hashlib; f=open(sys.argv[1],'rb'); h=f.read(6*4096); f.seek(-5*4096,2); print(hashlib.sha256(h+f.read()).hexdigest())" "$W/s2/dev/block/sda")" = "$GPT0" ] &&
 	ok "S9 #2's GPT untouched by P E F" || bad "the GPT changed"
+echo; echo "######## step C with the link dropping while the phone's detached GPT write runs (the poll fails, the dd goes on)"
+FAKE_FAIL='cat /tmp/sbinst-gpt/primary.rc' FAKE_FAIL_TIMES=200 "${NIGHT[@]}" > "$W/run-c.txt" 2>&1
+rc=$?; rm -f "$W/s2/fail-count"
+[ $rc != 0 ] && grep -q '^### step C failed' "$W/night.log" && ok "step C stopped when the link dropped (exit $rc)" || { bad "no C stop"; tail -8 "$W/night.log"; }
+sleep 1
+python3 - "$W" <<'PY' && ok "...but the detached dd on the phone finished: the primary copy is the new table" || bad "the primary write did not finish"
+import sys
+sys.path.insert(0, 'tools/installer')
+from sbinst import gpt, ufslayout
+with open(sys.argv[1] + '/s2/dev/block/sda', 'rb') as f:
+    head = f.read(6 * 4096); f.seek(-5 * 4096, 2); tail = f.read()
+d = gpt.read(head, tail, 15616000)
+assert d.valid and not [r for r in gpt.plan(d, ufslayout.get('starbite-oneui')).rows if r.status != 'same']
+PY
 echo; echo "######## the night, with a cable pull in step G"
 FAKE_FAIL='sbsc.chunk of=/dev/block/sda27' FAKE_FAIL_TIMES=1 "${NIGHT[@]}" > "$W/run1.txt" 2>&1
 rc=$?; rm -f "$W/s2/fail-count"
