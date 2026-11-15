@@ -64,6 +64,11 @@ def parse(argv):
                     help='the phone to work on (adb devices / fastboot devices); every adb and fastboot call names '
                          'it, other phones are ignored, and a Download-mode flash needs every other phone unplugged. '
                          'Required with --real')
+    ap.add_argument('--battery-ok-on-usb', action='store_true',
+                    help='the user accepts a low battery: only while the phone is charging, and never for a partition-'
+                         'table write (shown as USER OVERRIDE on the preflight)')
+    ap.add_argument('--reboot-env', action='store_true',
+                    help='restart a phone that is in the installer environment (sb-reboot menu: Starbite starts)')
     ap.add_argument('--backup-only', action='store_true',
                     help='with --bundle: start the phone as usual, take the backup (step 1, read only on the phone), '
                          'check every file on this computer, and stop')
@@ -236,6 +241,18 @@ def main(argv=None):
         if a.verify_bundle:
             return 0
         runner = Runner(ui, a.mode)
+        if a.reboot_env:
+            inst = Installer(ui, runner, m, a, state_dir)
+            st = inst.phone.detect()
+            if st.kind != 'env':
+                raise Refused(f'--reboot-env: the phone is not in the installer environment (found: {st.kind})')
+            if a.mode == 'dry-run':
+                ui.cmd('ssh root@172.16.42.1 sb-reboot menu    [dry run: not run; --real restarts the phone]')
+                return 0
+            inst.env.activate()
+            inst.reboot_env()
+            ui.ok('rebooting: Starbite starts after the Samsung splash')
+            return 0
         if a.start_env:
             st = Installer(ui, runner, m, a, state_dir).bring_up()
             ui.ok(f'phone: {st.kind if st else "not started (dry run)"}')

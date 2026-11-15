@@ -41,13 +41,21 @@ def battery_estimate(volts, charging):
     return pct
 
 
-def battery_check(f, min_pct, writes_gpt):
+def battery_check(f, min_pct, writes_gpt, user_ok=False):
     """(ok, value shown, why) for preflight. The gauge's capacity, unless it is clearly uncalibrated: the installer
     environment's fuel gauge is not set up like stock Android's and can report 0-2 % on a charged cell. Then the cell
     voltage decides: a conservative OCV estimate must reach min_pct, or the phone must be charging at >= 3.70 V, which
     is only accepted when this run writes no partition table (a power loss during a GPT write is the one thing the 50 %
-    rule is for; card and partition writes resume)."""
+    rule is for; card and partition writes resume). user_ok (--battery-ok-on-usb, the user's decision at the phone):
+    a low charge is accepted, but still only while charging and never for a partition-table write."""
     cap, v = f.battery, f.volts
+    if user_ok:
+        shown = (f'{cap}%' if cap is not None else '?') + (f', {v:.2f} V' if v else '') + (' charging' if f.charging else '')
+        if f.charging and not writes_gpt:
+            return True, shown + ': USER OVERRIDE (--battery-ok-on-usb: on USB power, no partition-table write)', ''
+        if not f.charging:
+            return False, shown, f'--battery-ok-on-usb applies only while charging: {shown}, not charging'
+        return False, shown, '--battery-ok-on-usb never covers a partition-table write: charge to the minimum first'
     if cap is not None and cap > 2 or v is None or v < 3.6:
         return ((cap or 0) >= min_pct, f'{cap}%' if cap is not None else '?', f'below {min_pct}%: charge first')
     est = battery_estimate(v, f.charging)
@@ -422,9 +430,10 @@ class Installer:
             f' vbstate={pr.get("ro.boot.verifiedbootstate") or "?"}', pr.get('ro.boot.flash.locked') != '1',
             'ro.boot.flash.locked=1', hard=False)
         b_ok, b_val, b_why = battery_check(f, self.m.phone['min_battery'],
-                                           self.m.ufs_layout is not None and getattr(self.o, 'repartition', False))
+                                           self.m.ufs_layout is not None and getattr(self.o, 'repartition', False),
+                                           getattr(self.o, 'battery_ok_on_usb', False))
         row('battery', b_val, b_ok, b_why)
-        if b_val.startswith('gauge uncalibrated'):
+        if b_val.startswith('gauge uncalibrated') or 'USER OVERRIDE' in b_val:
             u.info(f'battery: {b_val}')
         want_ufs = self.m.phone.get('ufs_blocks')
         row('UFS', f'{human((f.sda or 0) * 512)} ({(f.sda or 0) // 8} blocks)',
@@ -1029,6 +1038,16 @@ class Installer:
             time.sleep(1)
         else:
             raise Stopped('the kernel did not pick up the new card partitions (run the installer again: it restarts the environment)')
+        # the installer environment has no udev: sb-byname makes /dev/block/NAME from sysfs (as after a GPT re-read).
+        # S9 #2's first install (2026-11-15) stopped at "no /dev/block/mmcblk0p2" without it. TWRP's ueventd does it itself.
+        p.sh('command -v sb-byname >/dev/null 2>&1 && sb-byname; true', write=True, check=False)
+        for _ in range(10):
+            if p.sh('[ -b /dev/block/mmcblk0p1 ] && [ -b /dev/block/mmcblk0p2 ] && echo yes', check=False) == 'yes':
+                break
+            time.sleep(1)
+        else:
+            raise Stopped('/dev/block/mmcblk0p1 or p2 did not appear after the re-read (the kernel lists them in '
+                          '/proc/partitions): run the installer again')
         u.ok('card MBR written and read back; partitions re-read')
 
     def do_card_format(self, s):
@@ -1248,8 +1267,24 @@ class Installer:
             u.warn(w)
         if self.mode == 'dry-run':
             return
-        if self.o.no_reboot or not u.confirm('Reboot into the Starbite menu now?'):
-            u.info('not rebooted: adb reboot when ready')
+        env = os.environ.get('SBINST_ENV_UP') == '1'
+        how = ('hold Power 3 s on the phone (the environment\'s reboot), or run tools/installer/starbite-install --bundle B '
+               '--serial S --reboot-env' if env else 'adb reboot when ready')
+        if self.o.no_reboot or not u.confirm('Reboot into Starbite now?'):
+            u.info(f'not rebooted: {how}. (A plain `reboot` over ssh does nothing there: the environment has no init '
+                   'system; sb-reboot is its reboot)')
             return
-        self.phone.adb('reboot')
-        u.ok('rebooting: the Starbite menu should appear after the Samsung splash')
+        self.reboot_env() if env else self.phone.adb('reboot')
+        u.ok('rebooting: Starbite starts after the Samsung splash')
+
+    def reboot_env(self):
+        """The installer environment's own reboot (sb-reboot menu: the boot-next mailbox cleared, then the restart).
+        The ssh session dies with the phone, so the command's exit status says nothing: the environment going away
+        within 30 s is the proof."""
+        self.phone.adb('reboot', check=False)
+        for _ in range(15):
+            time.sleep(2)
+            if not self.env.reachable():
+                return
+        raise Stopped('the environment still answers 30 s after sb-reboot: hold Power 3 s on the phone, or Volume Down '
+                      '+ Power 7 s')

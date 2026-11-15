@@ -33,11 +33,22 @@ step 0 "dry run, stock Android" -- "${SI[@]}" "${C[@]}" --dry-run --yes
 FAKE_ROOT=$R/ph tools/installer/fakes/adb -s FAKE0000SERIAL reboot download
 step 0 "dry run, Download mode (PIT)" -- "${SI[@]}" "${C[@]}" --dry-run --yes
 step 2 "the flash, then the dry-run gate" -- "${SI[@]}" "${C[@]}" --rehearse --yes
-step 0 "backup only" -- "${SI[@]}" "${C[@]}" --rehearse --yes --backup-only
+PS=$R/ph/sys/class/power_supply/battery
+echo 7 > "$PS/capacity"; echo Charging > "$PS/status"          # S9 #2 on 2026-11-15: a real-looking 7 %, on USB
+step 2 "battery 7 %, charging: refused" -- "${SI[@]}" "${C[@]}" --rehearse --yes --backup-only
+step 0 "...with --battery-ok-on-usb (the user's decision)" -- "${SI[@]}" "${C[@]}" --rehearse --yes --backup-only --battery-ok-on-usb
+grep -q 'USER OVERRIDE (--battery-ok-on-usb' "$R/out-...with---battery-ok-on-usb-(the-user's-decision).txt" ||
+	{ echo "FAIL the override is not shown on the preflight"; fail=1; }
+echo Discharging > "$PS/status"
+step 2 "...but not when it is not charging" -- "${SI[@]}" "${C[@]}" --rehearse --yes --dry-run --battery-ok-on-usb
+echo 87 > "$PS/capacity"; rm -f "$PS/status"
 step 0 "check the backup" -- "${SI[@]}" --check-backup "$(ls -d "$R"/state/phone-*/backups/* | head -1)"
 step 0 "dry run, environment" -- "${SI[@]}" "${C[@]}" --dry-run --yes
 step 0 "install" -- "${SI[@]}" "${C[@]}" --rehearse --yes --no-reboot
 step 0 "again" -- "${SI[@]}" "${C[@]}" --rehearse --yes --no-reboot
+[ -b "$R/ph/dev/block/mmcblk0p2" ] || [ -e "$R/ph/dev/block/mmcblk0p2" ] || { echo "FAIL no mmcblk0p2"; fail=1; }
+step 0 "--reboot-env: the environment restarts the phone" -- "${SI[@]}" "${C[@]}" --rehearse --reboot-env
+[ "$(cat "$R/ph/state")" = menu ] || { echo "FAIL the phone did not restart (state $(cat "$R/ph/state"))"; fail=1; }
 grep -q '; 0 write commands ran' "$R/out-again.txt" || { echo "FAIL the second install still wrote"; fail=1; }
 [ "$(shasum -a 256 < "$R/ph/dev/block/by-name/USERDATA")" = "$ud" ] || { echo "FAIL USERDATA changed"; fail=1; }
 [ "$(shasum -a 256 < "$R/ph/dev/block/by-name/RECOVERY")" = "$rec" ] || { echo "FAIL RECOVERY changed"; fail=1; }

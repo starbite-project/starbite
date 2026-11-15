@@ -1125,6 +1125,24 @@ GPT copies, USERDATA and RECOVERY unchanged; a second run writes nothing. `rehea
 bundle through the same steps on a fake stock S9. Run 2026-11-15 (macOS): unit tests 137 OK; `rehearse.sh` 220
 passed, 0 failed; `rehearse-bundle.sh build/installer/bundle-s9b`: every step passed.
 
+**S9 #2's first real install (2026-11-15, 14:50-15:15: step A, the core, done; Starbite OS lock screen at power-on).**
+Found on the phone and fixed:
+- macOS's `ioreg` lists `idProduct` before `idVendor`, so Download mode was never seen (fixed by the main session).
+- The Download-mode `heimdall detect` called a bare `heimdall` (fixed by the main session).
+- **Battery:** the installer environment's fuel gauge is not set up like stock Android's. It said 1 %, then 7 %, on a
+  charging cell at 3.74-3.82 V.
+  - A 0-2 % reading with the cell at >= 3.6 V is now judged by a conservative OCV estimate (0.10 V off while
+    charging), shown as "gauge uncalibrated ...". On USB power at >= 3.70 V it passes, but only without a
+    partition-table write.
+  - `--battery-ok-on-usb` records the user's own decision for a low reading (USER OVERRIDE on the preflight). It too
+    applies only while charging and never to a partition-table write.
+- **Card nodes:** the environment has no udev, so after the card's MBR and `blockdev --rereadpt`, `/dev/block/mmcblk0p2`
+  did not exist (the main session made it with mknod). The card step now runs `sb-byname`, as the GPT step does, and
+  waits for both nodes.
+- **The reboot:** the finish's "Reboot now?" got no answer, and a plain `reboot` over ssh does nothing (no init system
+  in the environment). `--reboot-env` restarts a phone in the environment with `sb-reboot menu` and checks that it goes
+  away; the finish uses the same.
+
 **`sd64l` (2026-11-15, afternoon): the 64 GB card for today's lineup.** `sd64`'s 64 MiB store area cannot hold
 the lineup's RAM-only systems (Starbite OS's update slots and photo store alone are 3 x 64 MiB), and its root slot
 is macOS Ventura's. `tools/store/cardlayout.py` now also has `sd64l`: p2 at 8192 = a 1 GiB card store (a home store
