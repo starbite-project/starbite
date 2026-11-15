@@ -109,7 +109,7 @@ has 'volatile, kept +sbos-state' "plan: sbos-state kept"
 has 'volatile, kept +crashlog' "plan: the crash log kept"
 [ "$(p2hash)" = "$B" ] && ok "dry run: card p2 byte-identical" || bad "dry run changed p2"
 [ -z "$(ls "$W"/state/phone-*/store/*.img 2>/dev/null)" ] && ok "dry run: no images left on the Mac" || bad "dry run left images"
-FAKE_FAIL='sbsu.piece of=' run 3 "the write, with a cable pull in the data" -- "${SU[@]}" --catalog "$W/in/catalog2.toml" android.cmdline="$W/in/android.cmdline" --rehearse --yes
+FAKE_FAIL='sbsu-[0-9]+.piece of=' run 3 "the write, with a cable pull in the data" -- "${SU[@]}" --catalog "$W/in/catalog2.toml" android.cmdline="$W/in/android.cmdline" --rehearse --yes
 rm -f "$W/s2/fail-count"
 python3 - "$W/s2/dev/block/mmcblk0p2" <<'PY' && ok "after the pull: the card's head is still the old store (2 + the crash log + 3 entries... unchanged header)" || bad "the head changed before the data was written"
 import struct, sys
@@ -136,6 +136,27 @@ assert b'android' in e['catalog'][0]
 PY
 PULL=$(ls "$W"/state/phone-*/store/pull-*.img | head -1)
 [ -f "$PULL" ] && ok "the rollback image stays: $(basename "$PULL")" || bad "no rollback image"
+
+echo; echo "######## the link down while the phone's detached head write runs"
+cat >> "$W/in/catalog2.toml" <<'TOML'
+
+[[entry]]
+key = "utility"
+name = "Utility OS"
+version = "test"
+category = "starbite"
+method = "bare"
+tag = "beta"
+files = ["ufs:utility.img|sd:utility.img"]
+root = "none (RAM only)"
+TOML
+head -c $((1 << 20)) /dev/urandom > "$W/in/utility.img"
+run 0 "dry run (+ utility)" -- "${SU[@]}" --catalog "$W/in/catalog2.toml" android.cmdline="$W/in/android.cmdline" utility.img="$W/in/utility.img":image
+SBINST_DETACH_TIMEOUT=4 FAKE_FAIL='cat /tmp/sbsu-head.rc' FAKE_FAIL_TIMES=1000 run 3 "no answer during the head write: STOPPED" -- "${SU[@]}" --catalog "$W/in/catalog2.toml" android.cmdline="$W/in/android.cmdline" utility.img="$W/in/utility.img":image --rehearse --yes
+has 'the write goes on on the phone' "...the write goes on on the phone"
+rm -f "$W/s2/fail-count"
+run 0 "the same command again: resumes from the saved image" -- "${SU[@]}" --catalog "$W/in/catalog2.toml" android.cmdline="$W/in/android.cmdline" utility.img="$W/in/utility.img":image --rehearse --yes
+has 'reads back as the new image' "the whole store area read back"
 
 echo; echo "######## rollback: the pulled image back"
 run 0 "--restore dry run" -- "${SU[@]}" --restore "$PULL"

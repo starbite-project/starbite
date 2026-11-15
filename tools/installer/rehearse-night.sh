@@ -139,7 +139,7 @@ d = gpt.read(head, tail, 15616000)
 assert d.valid and not [r for r in gpt.plan(d, ufslayout.get('starbite-oneui')).rows if r.status != 'same']
 PY
 echo; echo "######## the night, with a cable pull in step G"
-FAKE_FAIL='sbsc.chunk of=/dev/block/sda27' FAKE_FAIL_TIMES=1 "${NIGHT[@]}" > "$W/run1.txt" 2>&1
+FAKE_FAIL='sbsc-[0-9]+.chunk of=/dev/block/sda27' FAKE_FAIL_TIMES=1 "${NIGHT[@]}" > "$W/run1.txt" 2>&1
 rc=$?; rm -f "$W/s2/fail-count"
 [ $rc != 0 ] && ok "the night stopped (exit $rc)" || bad "the night did not stop at the pull"
 grep -q '^### step G failed' "$W/night.log" && ok "### step G failed in the log" || { bad "no G failed marker"; tail -20 "$W/night.log"; }

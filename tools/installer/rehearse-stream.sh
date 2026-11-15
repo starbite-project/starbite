@@ -134,7 +134,7 @@ B2=$(tree_hash "$W/s2")
 run 0 "dry run" -- "${SC[@]}" --source part:SYSTEM --target part:SYSTEM --size $((220 << 20))
 has '4 chunks of 64 MiB' "4 chunks"
 [ "$(tree_hash "$W/s2")" = "$B2" ] && ok "dry run: S9 #2 byte-identical" || bad "dry run changed S9 #2"
-FAKE_FAIL='sbsc.chunk of=' FAKE_FAIL_TIMES=1 run 3 "a cable pull at the first data write" -- "${SC[@]}" --source part:SYSTEM --target part:SYSTEM --size $((220 << 20)) --rehearse --yes
+FAKE_FAIL='sbsc-[0-9]+.chunk of=' FAKE_FAIL_TIMES=1 run 3 "a cable pull at the first data write" -- "${SC[@]}" --source part:SYSTEM --target part:SYSTEM --size $((220 << 20)) --rehearse --yes
 rm -f "$W/s2/fail-count"
 ls "$W"/state/phone-*/stream/*.json >/dev/null 2>&1 && ok "the state file is there" || bad "no state file"
 run 0 "the same command again: resumes and finishes" -- "${SC[@]}" --source part:SYSTEM --target part:SYSTEM --size $((220 << 20)) --rehearse --yes
@@ -147,10 +147,23 @@ r = j['steps']['stream:part:SYSTEM']
 assert r['status'] == 'done' and r['size'] == 220 << 20 and len(r['sha256']) == 64 and r['source'] == 'part:SYSTEM'
 PY
 
+echo; echo "######## the link down while the target's detached chunk write runs (the cable): the write finishes there"
+python3 - "$W/s1" <<'PY'
+import os, sys
+p = os.path.realpath(os.path.join(sys.argv[1], 'dev/block/by-name/VENDOR'))
+with open(p, 'r+b') as f: f.write(os.urandom(130 << 20))
+PY
+run 0 "dry run (VENDOR, 130 MiB)" -- "${SC[@]}" --source part:VENDOR --target part:VENDOR --size $((130 << 20))
+SBINST_DETACH_TIMEOUT=4 FAKE_FAIL='cat /tmp/sbsc-[0-9]+.rc' FAKE_FAIL_TIMES=1000 run 3 "the poll gets no answer for 4 s: STOPPED" -- "${SC[@]}" --source part:VENDOR --target part:VENDOR --size $((130 << 20)) --rehearse --yes
+has 'the write goes on on the phone' "...and says the write goes on on the phone"
+rm -f "$W/s2/fail-count"
+run 0 "the same command again: resumes, both phones agree" -- "${SC[@]}" --source part:VENDOR --target part:VENDOR --size $((130 << 20)) --rehearse --yes
+same "$(python3 -c "import os;print(os.path.realpath('$W/s1/dev/block/by-name/VENDOR'))")" 0 "$(python3 -c "import os;print(os.path.realpath('$W/s2/dev/block/by-name/VENDOR'))")" 0 $((130 << 20)) && ok "VENDOR = S9 #1's, byte for byte" || bad "VENDOR differs"
+
 echo; echo "######## macOS Sequoia slot: S9 #1's card range -> S9 #2's sd64l root slot mac15"
 run 0 "dry run" -- "${SC[@]}" --source card:lba:182888448+143360 --target card:root:mac15
 has 'root slot mac15 2105344\+33554432' "the target is the mac15 slot"
-FAKE_FAIL='sbsc.chunk of=' FAKE_FAIL_TIMES=1 run 3 "stopped midway" -- "${SC[@]}" --source card:lba:182888448+143360 --target card:root:mac15 --rehearse --yes
+FAKE_FAIL='sbsc-[0-9]+.chunk of=' FAKE_FAIL_TIMES=1 run 3 "stopped midway" -- "${SC[@]}" --source card:lba:182888448+143360 --target card:root:mac15 --rehearse --yes
 rm -f "$W/s2/fail-count"
 python3 -c "
 f=open('$W/s1/dev/block/mmcblk0','r+b'); f.seek(182888448*512); f.write(b'changed!')"

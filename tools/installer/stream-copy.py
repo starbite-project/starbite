@@ -158,6 +158,33 @@ class Target(Side):
     def sh(self, cmd, data=None, binary=False, check=True):
         return self.run(self.ie.ssh_argv(cmd, 5), data=data, binary=binary, check=check)
 
+    def detached(self, cmd, tag, timeout=None):
+        """`cmd` runs on the phone in a subshell that ignores SIGHUP (a dropped ssh link cannot cut the write in half);
+        its exit status lands in /tmp/TAG.rc, polled here. A link down past `timeout` stops the run (a re-run resumes)."""
+        rc = f'/tmp/{tag}.rc'
+        timeout = timeout or int(os.environ.get('SBINST_DETACH_TIMEOUT', 180))   # (rehearsals shorten it)
+        self.sh(f'rm -f {rc} {rc}.tmp; ( trap "" HUP INT; {cmd}; echo $? > {rc}.tmp; sync; mv {rc}.tmp {rc} ) '
+                '</dev/null >/dev/null 2>&1 &')
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            r = self.sh(f'cat {rc} 2>/dev/null', check=False).stdout.strip()
+            if r:
+                self.sh(f'rm -f {rc}', check=False)
+                return r
+            time.sleep(0.5)
+        raise Stopped(f'no answer from the target for {timeout} s while {tag} was being written there (the link?): '
+                      'the write goes on on the phone; run the same command again to resume')
+
+    def wait_leftovers(self, timeout=180):
+        """An earlier run that lost its link may have left a detached dd running: let it finish first."""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if not self.sh("ps -o args 2>/dev/null | grep '[d]d if=/tmp/sbsc-' || true", check=False).stdout.strip() and \
+                    not self.sh("ps -o args 2>/dev/null | grep '[d]d of=.*sbsc-zero' || true", check=False).stdout.strip():
+                return
+            time.sleep(1)
+        raise Stopped(f'an earlier chunk write is still running on the target after {timeout} s')
+
     def reachable(self):
         if not self.ie.key.is_file():
             return False
@@ -324,7 +351,7 @@ class Copy:
         self.say(f'   $ adb -s {self.a.from_serial} shell "{range_cmd(self.snode, self.soff, CHUNK, True)}"   (source hash)')
         self.say(f'   $ adb -s {self.a.from_serial} exec-out "{range_cmd(self.snode, self.soff, CHUNK, False)}"   (the bytes, '
                  'unless the chunk is all zeros)')
-        self.say('   $ ssh root@172.16.42.1 "cat > /tmp/sbsc.chunk; dd if=/tmp/sbsc.chunk of=' + self.tnode +
+        self.say('   $ ssh root@172.16.42.1 "cat > /tmp/sbsc-N.chunk; (trap \'\' HUP; dd if=/tmp/sbsc-N.chunk of=' + self.tnode +
                  f' bs=1048576 seek=<{self.toff // MIB}+64*i> conv=notrunc,fsync"   (zero chunks: head -c LEN /dev/zero | dd ...)')
         self.say(f'   $ ssh root@172.16.42.1 "{range_cmd(self.tnode, self.toff, CHUNK, True)}"   (read back)')
         self.say(f'   at the end: both phones hash all {human(self.size)}; the target journal records it')
@@ -365,6 +392,7 @@ class Copy:
             self.tgt.sh(f'mkdir -p {q(os.path.dirname(self.final))}; rm -f {q(self.tnode)}')
         sp.parent.mkdir(parents=True, exist_ok=True)
         sp.write_text(json.dumps(st))             # before the first write: a pull in chunk 0 still resumes (and is checked)
+        self.tgt.wait_leftovers()
         self.journal.mark_step(f'stream:{self.tspec.text}', 'started', **self.ident())
         n = (self.size + CHUNK - 1) // CHUNK
         t0, moved = time.time(), 0
@@ -376,15 +404,22 @@ class Copy:
             want = self.src.sh(range_cmd(self.snode, soff, ln, True)).stdout.split()[0]
             seek = toff // MIB
             if want == zero_sha(ln):
-                self.tgt.sh(f'head -c {ln} /dev/zero | dd of={q(self.tnode)} bs=1048576 seek={seek} conv=notrunc,fsync 2>/dev/null')
+                r = self.tgt.detached(f': sbsc-zero; head -c {ln} /dev/zero | dd of={q(self.tnode)} bs=1048576 seek={seek} '
+                                      'conv=notrunc,fsync 2>/dev/null', f'sbsc-{seek}')
+                if r != '0':
+                    raise Stopped(f'chunk {i}: zero write failed on the target (dd exit {r}): a re-run resumes here')
             else:
                 data = self.src.sh(range_cmd(self.snode, soff, ln, False), binary=True).stdout
                 if len(data) != ln or hashlib.sha256(data).hexdigest() != want:
                     raise Stopped(f'chunk {i}: the bytes read ({len(data)}) do not match the source phone\'s hash: '
                                   'stopped (a re-run resumes here)')
-                self.tgt.sh('cat > /tmp/sbsc.chunk', data=data)
-                self.tgt.sh(f'dd if=/tmp/sbsc.chunk of={q(self.tnode)} bs=1048576 seek={seek} conv=notrunc,fsync '
-                            '2>/dev/null; rm -f /tmp/sbsc.chunk')
+                tmp = f'/tmp/sbsc-{seek}.chunk'
+                self.tgt.sh(f'cat > {tmp}', data=data)
+                r = self.tgt.detached(f'dd if={tmp} of={q(self.tnode)} bs=1048576 seek={seek} conv=notrunc,fsync 2>/dev/null',
+                                      f'sbsc-{seek}')
+                self.tgt.sh(f'rm -f {tmp}', check=False)
+                if r != '0':
+                    raise Stopped(f'chunk {i}: the write failed on the target (dd exit {r}): a re-run resumes here')
                 moved += ln
             back = self.tgt.sh(range_cmd(self.tnode, toff, ln, True)).stdout.split()
             if not back or back[0] != want:

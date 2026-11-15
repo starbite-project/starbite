@@ -72,6 +72,33 @@ class Phone:
             raise Stopped(f'{cmd[:120]} failed ({p.returncode}): {p.stderr.decode(errors="replace").strip()[-300:]}')
         return p.stdout if binary else p.stdout.decode(errors='replace')
 
+    def detached(self, cmd, tag, timeout=None):
+        """`cmd` runs on the phone in a subshell that ignores SIGHUP, so a dropped ssh link cannot cut a write in half
+        (S9 #2's cable, 2026-11-15); its exit status lands in /tmp/TAG.rc, which is polled here. A link that stays
+        down past `timeout` stops the run (STOPPED): the same command resumes, and the write itself finishes."""
+        rc = f'/tmp/{tag}.rc'
+        timeout = timeout or int(os.environ.get('SBINST_DETACH_TIMEOUT', 180))   # (rehearsals shorten it)
+        self.sh(f'rm -f {rc} {rc}.tmp; ( trap "" HUP INT; {cmd}; echo $? > {rc}.tmp; sync; mv {rc}.tmp {rc} ) '
+                '</dev/null >/dev/null 2>&1 &')
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            r = self.sh(f'cat {rc} 2>/dev/null', check=False).strip()
+            if r:
+                self.sh(f'rm -f {rc}', check=False)
+                return r
+            time.sleep(0.5)
+        raise Stopped(f'no answer from the phone for {timeout} s while {tag} was being written there (the link?): '
+                      'the write goes on on the phone; run the same command again to resume')
+
+    def wait_leftovers(self, pattern, timeout=180):
+        """An earlier run that lost its link may have left a detached dd running: let it finish first."""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if not self.sh(f"ps -o args 2>/dev/null | grep '[d]d if={pattern}' || true", check=False).strip():
+                return
+            time.sleep(1)
+        raise Stopped(f'an earlier write ({pattern}) is still running on the phone after {timeout} s')
+
 
 class Update:
     def __init__(self, a):
@@ -184,6 +211,7 @@ class Update:
         img = bytearray(new.read_bytes())
         st_path = self.dir / 'writing.json'
         st_path.write_text(json.dumps({'image': str(new), 'sha256': sha}))
+        self.p.wait_leftovers('/tmp/sbsu-')
         blocks = len(img) // BLOCK
         wrote = 0
         for b0 in range(HEAD_BLOCKS, blocks, PIECE // BLOCK):          # the data, head untouched
@@ -193,9 +221,11 @@ class Update:
             rd = f'dd if={P2} bs=4096 skip={b0} count={nb} 2>/dev/null | sha256sum'
             if self.p.sh(rd).split()[0] == want:
                 continue
-            self.p.sh('cat > /tmp/sbsu.piece', data=piece)
-            self.p.sh(f'dd if=/tmp/sbsu.piece of={P2} bs=4096 seek={b0} conv=notrunc,fsync 2>/dev/null; rm -f /tmp/sbsu.piece')
-            if self.p.sh(rd).split()[0] != want:
+            tmp = f'/tmp/sbsu-{b0}.piece'
+            self.p.sh(f'cat > {tmp}', data=piece)
+            r = self.p.detached(f'dd if={tmp} of={P2} bs=4096 seek={b0} conv=notrunc,fsync 2>/dev/null', f'sbsu-{b0}')
+            self.p.sh(f'rm -f {tmp}', check=False)
+            if r != '0' or self.p.sh(rd).split()[0] != want:
                 raise Stopped(f'store block {b0}: read back differs: stopped (the same --real resumes)')
             wrote += nb
         # the head last, with the card's own settings block (the loader's and Starbite OS's settings)
@@ -203,8 +233,11 @@ class Update:
         if len(cur) == BLOCK and cur[:8] == b'SBSETTNG':
             img[SETTINGS * BLOCK:(SETTINGS + 1) * BLOCK] = cur
         head = bytes(img[:HEAD_BLOCKS * BLOCK])
-        self.p.sh('cat > /tmp/sbsu.head', data=head)
-        self.p.sh(f'dd if=/tmp/sbsu.head of={P2} bs=4096 conv=notrunc,fsync 2>/dev/null; rm -f /tmp/sbsu.head')
+        self.p.sh('cat > /tmp/sbsu-head.piece', data=head)
+        r = self.p.detached(f'dd if=/tmp/sbsu-head.piece of={P2} bs=4096 conv=notrunc,fsync 2>/dev/null', 'sbsu-head')
+        self.p.sh('rm -f /tmp/sbsu-head.piece', check=False)
+        if r != '0':
+            raise Stopped(f'the head write failed on the phone (dd exit {r}): the same command writes it again')
         back = self.p.sh(f'dd if={P2} bs=4096 count={blocks} 2>/dev/null | sha256sum').split()[0]
         if back != hashlib.sha256(bytes(img)).hexdigest():
             raise Stopped('the card store does not read back as the new image (its settings block kept): stopped')
