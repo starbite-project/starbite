@@ -1172,3 +1172,254 @@ $H --tgsi $W/d3d10core.c $W/d3d11.c > harness-p4-tgsi.txt            # old path,
 $H --selftest --no-fork --no-compile --print-nir --only sm5_hull_phases   # one shader's NIR
 ~/sbmesa/build-nir-x/compile-check.sh    # Windows: ARM64 and ARM64EC, result in compile-check.exit
 ```
+
+# Phase 5: the Direct3D 11 DDI
+
+State: 2026-11-16 01:26 EET. Branch `sb-nir`, on top of phase 4 (dbf9ef4), nothing pushed:
+
+- `1b3e560` 0166 cherry-picked (geometry shaders refused cleanly without a geometry stage)
+- `114a42e` 0167 cherry-picked (written BOs named to the shim, MSAA behind `msaa`)
+- `08ac11c` d3d10umd: the Direct3D 11.0 DDI behind the flag file d3d11ddi
+- `789393a` d3d10umd: the query types of Direct3D 11
+- `1c0a515` d3d10umd: Shader Model 5 never reaches the old translator; fl11 needs msaa
+
+**None of this has run.** There is no Windows here: both Windows configurations compile and
+link, the ARM64X verification passes, and everything about how the runtime behaves is read
+from `d3d10umddi.h` (10.0.26100.0) or reasoned. Where my memory and the header disagreed the
+header won; those places are marked.
+
+## P5.1 Part 0: the merge
+
+Both commits applied without conflict. 0166 merged into the phase 2/3 structure of
+`Shader.cpp` by itself; read afterwards: the NIR path of the two geometry create functions is
+only reached when the driver reports a NIR geometry stage (`gsemu`), every other path reaches
+0166's test of `pipe->create_gs_state` before the hook is called, `GsSetShader`,
+`DestroyShader` and `ResolveState` test their hooks. So with `gsemu` off a geometry shader is
+refused with E_OUTOFMEMORY and a log line, never a call through a null pointer.
+
+0167 and the geometry shader draw path: a draw with a geometry shader issues **no submit of
+its own**. Its capture job, index kernel and rasterization jobs are added to the framebuffer
+batch's vertex/tiler chain and go out with that batch, which is submitted by `jm_submit_jc`
+(the only place in the driver with the submit ioctl; called once for the vertex/tiler chain
+and once for the fragment job). Both calls are preceded by `malikm_submit_writes` with the
+batch's written BOs. What the geometry path itself writes is memory of the batch's pool,
+which is the device's own and, as 0167's comment says, needs no listing.
+
+Harness after the merge: identical to phase 4, both paths.
+
+## P5.2 Switches
+
+| Flag file | Effect | Needs |
+|---|---|---|
+| `d3d11ddi` | the Direct3D 11.0 DDI is offered; pipeline level 10_0 | `nirshaders`; without it a log line says the DDI is NOT offered |
+| `msaa` (0167) | with `d3d11ddi`: pipeline level 10_1 as well | |
+| `fl11` | pipeline level 11_0 as well | `d3d11ddi` and `msaa` (11_0 contains 10_1; logged if `msaa` is missing) |
+
+All are read once per process. With none of them the adapter lists what it listed, answers
+the caps with zeros as before, and no Direct3D 11 function can be reached.
+
+## P5.3 Adapter and caps (Adapter.cpp, D3D11.cpp)
+
+- `GetSupportedVersions` appends `D3D11_0_DDI_SUPPORTED` and `D3D11_0_7_DDI_SUPPORTED`.
+- `OpenAdapter10` / `CreateDevice` accept the two interface versions; the device size is the
+  same `Device`.
+- `GetCaps`: `D3D11DDICAPS_THREADING` = 0 (not free-threaded, no driver command lists: the
+  runtime serializes and emulates deferred contexts); `D3D11DDICAPS_SHADER` = 0 (no doubles;
+  compute below 11_0 is optional and not offered); `D3D11DDICAPS_3DPIPELINESUPPORT` from the
+  switches. Every other caps type (the 11.1 and later ones, which belong to DDI versions that
+  are not listed) is answered with zeros as before.
+- `CreateDevice` reads the level from the flags (`D3D11DDI_EXTRACT_3DPIPELINELEVEL_FROM_FLAGS`),
+  refuses a level that was not offered, and checks the screen (`SbLevelPossible`).
+- The core layer callbacks of Direct3D 11 start with the Direct3D 10 ones (header), so the
+  device keeps using its copy of those. The DXGI base table gets its eighth entry by the
+  header's `IS_DXGI1_1_BASE_FUNCTIONS`.
+
+Header against the task text: the deferred context and command list entry points are members
+of the *device* function table, not adapter functions.
+
+## P5.4 Pipeline levels: what 10_1 and 11_0 need
+
+10_1 over 10_0, and where each stands:
+
+| Requirement | State |
+|---|---|
+| Shader Model 4.1 (`gather4`, `lod`, `sample_pos`, `sample_info`, per-sample inputs) | in the NIR translator (phase 1/2); `d3d11ddi` requires `nirshaders` |
+| 4x multisampling for every render target format, sample-rate shading, multisample depth reads | behind `msaa`, not yet checked on the phone: **the gate** |
+| cube map arrays | driver cap, checked at CreateDevice |
+| blend state per render target | `CreateBlendState1` exists; driver caps checked at CreateDevice |
+| the 10.1 shader resource view (cube arrays) | `CreateShaderResourceView1` exists |
+
+Not checked anywhere, so possibly missing: the exact list of formats 10_1 requires
+multisampling for, and the BC4/BC5 and 16-bit formats it makes mandatory.
+
+11_0 over 10_1: Shader Model 5 (translator, phase 4), compute, UAVs, indirect draws (this
+phase), tessellation (**refused**), 8x multisampling and its format list (**not checked**),
+stream output with four streams (**refused**: nothing does stream output), 16384 textures
+and the other raised limits (**not checked against Panfrost's**). `fl11` is therefore a
+switch for trying things, not a claim of conformance.
+
+## P5.5 The device function table (Device.cpp)
+
+`D3D11DDI_DEVICEFUNCS` has 150 members (static-asserted against the header; `D3D10PSGP` is
+not defined). They are set **by member name**; the table is cleared first, then looked at as
+150 pointers, and a device whose table has an empty member is not created (the count is
+logged at every CreateDevice).
+
+| Members | What serves them |
+|---|---|
+| 89 | the Direct3D 10 function itself (the member's type is a `PFND3D10DDI_` one) |
+| 4 | the Direct3D 10.1 function (blend state, ResourceConvert, ResourceConvertRegion) |
+| 10 | Direct3D 11's form of an existing function, below |
+| 47 | new in Direct3D 11, below |
+
+Changed form:
+
+| Function | What it does |
+|---|---|
+| `SetRenderTargets` | Direct3D 10's, then the pixel stage's UAVs for the changed range |
+| `RelocateDeviceFuncs` | nothing, as before |
+| `CalcPrivateResourceSize`, `CreateResource` | the 11 structure extends the 10 one (static-asserted member by member); the stride and misc flags are kept; `D3D11_DDI_BIND_UNORDERED_ACCESS` becomes `PIPE_BIND_SHADER_IMAGE | SHADER_BUFFER`; a structured stride that is 0 or not a multiple of 4 is refused |
+| `CreateShaderResourceView` (+Calc) | raw or structured buffer: an R32_UINT buffer view (the phase 4 binding model); anything else the 10.1 function |
+| `CreateDepthStencilView` (+Calc) | Direct3D 10's; the read-only flags have nothing to do in gallium |
+| `CreateGeometryShaderWithStreamOutput` (+Calc) | one stride, stream 0 only, rasterized stream 0: Direct3D 10's; otherwise **refused** by name |
+
+New:
+
+| Function | State |
+|---|---|
+| `CreateComputeShader`, `CsSetShader`, `CsSetConstantBuffers/ShaderResources/Samplers` | implemented: NIR translator, `create_compute_state`, the stage helpers Direct3D 10's stages use |
+| `Dispatch` | implemented (`launch_grid`) |
+| `DispatchIndirect`, `DrawInstancedIndirect`, `DrawIndexedInstancedIndirect` | implemented by reading the arguments on the CPU and calling the direct function |
+| `CalcPrivateUnorderedAccessViewSize`, `CreateUnorderedAccessView`, `DestroyUnorderedAccessView` | implemented: buffers (raw, structured, typed, with append/counter) and 1D/2D/3D textures; a format without image support in the driver, a counter on a buffer that is not structured, a range past the buffer are **refused** by name |
+| `CsSetUnorderedAccessViews`, UAVs of `SetRenderTargets` | implemented for slots 0 to 7; a view in a higher slot is logged and NOT bound |
+| `ClearUnorderedAccessViewUint/Float` | implemented (`clear_buffer`, `clear_texture`) |
+| `CopyStructureCount` | implemented (copy of the counter buffer) |
+| `SetResourceMinLOD` | **stub**: logged, not applied (gallium views have no minimum level; the DDI has no error for it) |
+| `CreateHullShader`, `CreateDomainShader` | **refused** (E_OUTOFMEMORY, logged) until tessellation exists; `CalcPrivateTessellationShaderSize` is real |
+| `Hs*` and `Ds*` set functions (8) | state kept in the device, not handed to the driver |
+| `*SetShaderWithIfaces` (6) | set the shader; class instances are logged and NOT applied (a shader with interfaces is refused at creation, so none can arrive) |
+| deferred context and command list functions (13) | sizes 0, creations **fail** (E_OUTOFMEMORY, logged); the threading caps keep the runtime from calling them |
+
+Queries (shared `CreateQuery` / `QueryGetData`): the Direct3D 11 pipeline statistics (eleven
+counters) and the per-stream stream output statistics and overflow predicates map to the
+pipe query with the stream as index. Whether Panfrost has those queries is what it was for
+Direct3D 10: a type the driver has no query for returns zeros.
+
+`CheckFormatSupport`: unchanged. The header has no format support bits for the 11.0 DDI
+beyond Direct3D 10's (UAV writes, gather and the others are `D3D11_1DDI_` bits).
+
+Map, unmap and the UpdateSubresource entries have Direct3D 10's types in the 11.0 table and
+are the Direct3D 10 functions.
+
+## P5.6 Binding model, and no remap
+
+What phase 4 defined is what the frontend binds: cbN at constant buffer N + 1, tN at sampler
+view N (raw and structured as R32_UINT buffer views), sN at sampler N, typed uN at image N,
+raw and structured uN at shader buffer N, the counter of uN at shader buffer N + 8.
+
+No remap was needed: the Direct3D 11.0 DDI has unordered access only in the compute stage
+and at the output merger (pixel stage), which are exactly the two stages Panfrost gives
+images and shader buffers. UAVs in the other stages are Direct3D 11.1.
+
+## P5.7 Where it reads back or flushes
+
+- Indirect draws and `DispatchIndirect`: the argument buffer is mapped for reading. If the GPU
+  wrote it (a compute shader filling the arguments), that flushes the batch that writes it
+  and waits.
+- `Dispatch`: Panfrost's `launch_grid` flushes all batches before and after every dispatch
+  (upstream behaviour).
+- A UAV's initial count and counter creation write four bytes through `pipe_buffer_write`.
+
+## P5.8 Left out or unfinished, with the reason
+
+1. Tessellation: refused (next phase).
+2. Stream output with streams, or without a rasterized stream: refused; plain Direct3D 10
+   stream output is as (not) functional as it was.
+3. `SetResourceMinLOD`: not applied.
+4. Shader Model 5 through the old translator: now refused up front (`Shader_tgsi_translate`
+   returns NULL for anything but Shader Model 4 vertex, pixel, geometry), so a Direct3D 11
+   shader the NIR translator refuses fails its creation instead of reaching a translator that
+   does not know its opcodes.
+5. The signatures given to the translator carry no stream and no patch constants (the
+   Direct3D 10 signature structure has neither): a multi-stream geometry shader's outputs in
+   streams above 0 get no system value names.
+6. Level 10_1 and 11_0 requirements that are not checked (P5.4).
+7. No host-side unit harness: the function table, the caps and the size functions are built
+   from DDK types, and a native build of them would need the Windows headers on Linux. In
+   its place: the static assertions (table size, the create structures' layouts), the
+   by-name fill that the compiler type-checks member by member, and the count of empty
+   members at every CreateDevice.
+
+## P5.9 All new switches absent: what differs from after Part 0
+
+Read from the diff, not run:
+
+- One more log line at the first `GetSupportedVersions` (`Direct3D 11 DDI not offered`).
+- `Device`, `Resource` and `Shader` are larger (the runtime allocates them by the Calc
+  functions, which return the new sizes).
+- `DestroyShader` looks at two more fields; `CreateQuery` computes an index that is 0;
+  the resource bind flag translation knows one more bit, which only the Direct3D 11 runtime
+  sets; `Shader_tgsi_translate` checks the version first.
+- Nothing else: the Direct3D 10 table is filled by the same code into the same place.
+
+## P5.10 The Windows build
+
+`~/sbmesa/build-nir-x/build-all.sh`: ARM64 and ARM64EC exit 0, link log empty, 35 `ok`
+lines, `FAILS: 0`, built from 1c0a515:
+
+```
+/Users/dev/project-starbite/.claude/worktrees/win-mali-gpu-87c7b0/build/win/umd-nir-d3d11/
+  sbumd.dll  27480064 bytes  sha256 1572d243c328158a3461623e50683281fbcb342d02a455235d8332bea8e2f81d
+  sbumd.map   6840919 bytes  sha256 060387187ccaf873cfa2a59ed866a94475837d11b2ff7688f817515cad4b8775
+```
+
+The other three directories are untouched (`umd-nir` 98e9e6a6..., `umd-nir-gs` e9e9d067...).
+
+`strings` finds `d3d11ddi`, `fl11`, `msaa`, `nirshaders`, `gsemu` and the log lines of P5.2.
+
+## P5.11 What the Direct3D 11 conformance run is likely to hit first
+
+Reasoned, in the order I would expect them:
+
+1. Without `fl11` every test that asks for feature level 11_0 gets a 10_x device or skips;
+   with `gsemu` off every geometry shader creation fails.
+2. Hull and domain shader creation (refused), then everything that draws with them.
+3. Stream output: declarations with streams refused, the rest not functional.
+4. Typed UAV formats: a format the driver has no image support for is refused at view
+   creation, where the test expects success.
+5. `Dispatch` cost and ordering: every dispatch flushes.
+6. Query results that are zeros (pipeline statistics, stream output statistics).
+7. `SetResourceMinLOD`, class instances: accepted and not applied.
+8. Multisampling at 8x and the format lists of 10_1 and 11_0.
+9. Anything of mine that is plainly wrong because it never ran: the UAV range handling in
+   `SetRenderTargets`, the counter semantics, the compute stage's resource binding.
+
+## P5.12 What tessellation must add on the frontend side
+
+- `CreateHullShader` / `CreateDomainShader`: translate with the tessellation signatures
+  (`D3D11DDIARG_TESSELLATION_IO_SIGNATURES` has the patch constant list; the translator's
+  signature structure already takes it), keep the NIR, and copy the hull shader's
+  `info.tess` into the domain shader's when the two are bound (P4.4).
+- Hand the kept hull and domain stage state (`Device::sb_tess`) to the driver: constant
+  buffers, views and samplers of two more stages.
+- The patch list topologies of `IaSetTopology` (1 to 32 control points), and the draw path
+  that runs the tessellator.
+- Pipeline statistics for the two stages.
+
+## P5.13 What 11.1 and WDDM 1.3 would take
+
+- 11.1 (`D3D11_1_DDI_SUPPORTED`): `D3D11_1DDI_DEVICEFUNCS` has 158 members: the 150, of
+  which several change type (constant buffers with offsets, UpdateSubresource and CopyRegion
+  with flags, blend state with logic ops, rasterizer state with a forced sample count), plus
+  `AssignDebugBinary`, `CheckDirectFlipSupport`, `ClearView`, `Discard`,
+  `DynamicConstantBufferMapNoOverwrite`. Caps `D3D11_1DDICAPS_D3D11_OPTIONS`,
+  `ARCHITECTURE_INFO` and `SHADER_MIN_PRECISION_SUPPORT` must be answered. The DXGI table
+  becomes `DXGI1_2_DDI_BASE_FUNCTIONS` (`IS_DXGI1_2_BASE_FUNCTIONS`): `Blt1`,
+  `OfferResources`, `ReclaimResources`, and the multiplane overlay functions
+  (`GetMultiplaneOverlayCaps`, `GetMultiplaneOverlayFilterRange`,
+  `CheckMultiplaneOverlaySupport`, `PresentMultiplaneOverlay`). UAVs in every stage arrive
+  here, which is where Panfrost's vertex and geometry stages would need a remap or would
+  have to refuse.
+- WDDM 1.3: `D3DWDDM1_3DDI_DEVICEFUNCS` (tiled resources, markers), caps
+  `D3DWDDM1_3DDICAPS_D3D11_OPTIONS1` and `MARKER`, and `DXGI1_3_DDI_BASE_FUNCTIONS`
+  (`Present1`, `CheckPresentDurationSupport`, a changed multiplane overlay set).

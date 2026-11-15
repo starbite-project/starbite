@@ -164,6 +164,20 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
   above 8. Several D3D rules were implemented from memory and are listed as unsure in the write-up (Phase 4).
   Nothing calls it yet: the D3D11 DDI is the missing half.
 
+- **11-16 01:12, item 2:** the first conformance run (T74) on the user's driver: d3d10core 74 pass, 17 fail, 20
+  crash (`WIN11-GPU.md` 6.99). The runner works; the fail/crash list is the stability work plan.
+- **11-16 01:28, the Direct3D 11 DDI (offline, compiled only):** d3d10umd offers the D3D11.0 DDI behind the flag
+  file `d3d11ddi` (needs `nirshaders`; level 10_0, 10_1 with `msaa`, 11_0 with `fl11`): all 150 members of the
+  device function table filled by name (89 shared with D3D10, 47 new), compute shaders and `Dispatch`, UAVs on the
+  compute and pixel stages (slots 0-7), indirect draws (arguments read on the CPU), raw/structured buffers, the 11
+  query types. Refused cleanly: hull and domain shaders (no tessellation yet), deferred contexts and command lists
+  (the runtime emulates them), multi-stream stream output. The 10_1 and 11_0 claims are not fully gated: `fl11` is
+  for trying things, not a conformance claim. Branch `sb-nir` 1c0a515 (with 0166 and 0167 merged), sbumd 1572d243
+  (`build/win/umd-nir-d3d11`). **T77 staged:** five conformance passes on it (new translator, geometry shaders,
+  the D3D11 DDI at 10_1 and at 11_0, dxgi).
+- **Running:** fixes for the wrong-result and crash bugs of T74 (multiple render targets, culling, colour masks,
+  instanced draws, copy region, texture crashes, ...).
+
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.
 - **BeamNG.drive:** item 6 (feature level 11_0) is the gate; before that the game cannot create its device. Items
