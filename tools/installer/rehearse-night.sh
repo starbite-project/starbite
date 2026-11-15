@@ -107,12 +107,23 @@ for i in range(n):
     if fl & 1:
         m = b'PHONE WROTE ' + name.rstrip(b'\0'); b2[blk * 4096:blk * 4096 + len(m)] = m
 put(os.path.join(s2, 'dev/block/mmcblk0p2'), 0, bytes(b2))
+# S9 #2's real stock GPT has no backup copy (the last 5 blocks are zeros): the fake gets the same
+sda = os.path.join(s2, 'dev/block/sda')
+with open(sda, 'r+b') as f:
+    f.seek(-5 * 4096, 2); f.write(bytes(5 * 4096))
 PY
 S1H=$(tree_hash "$W/s1")
 prot2() { cat "$W/s2/dev/block/by-name/"{EFS,PARAM,KEYSTORAGE,PERSISTENT,STEADY,RECOVERY,BOOT,DTB,DTBO,BOTA0,BOTA1,UP_PARAM} "$W/s2/dev/block/"sd{b,c,d,e} | shasum -a 256; }
 P2=$(prot2)
 NIGHT=(bash tools/installer/night-s9b.sh S9ONE01 S9TWO02 --rehearse "$W/s1" "$W/s2")
 
+echo; echo "######## NIGHT_ONLY=\"P E F\" first (the card-only steps; C waits): the GPT stays stock"
+GPT0=$(python3 -c "import sys, hashlib; f=open(sys.argv[1],'rb'); h=f.read(6*4096); f.seek(-5*4096,2); print(hashlib.sha256(h+f.read()).hexdigest())" "$W/s2/dev/block/sda")
+NIGHT_ONLY="P E F" "${NIGHT[@]}" > "$W/run0.txt" 2>&1 && ok "P E F ran (exit 0)" || { bad "P E F"; tail -20 "$W/night.log"; }
+grep -q '^### step E done' "$W/night.log" && grep -q '^### step F done' "$W/night.log" && ! grep -q '^### step C ' "$W/night.log" &&
+	grep -q '^### step ONLY(P E F) done' "$W/night.log" && ok "E and F done, C not touched, the ONLY marker" || bad "ONLY markers"
+[ "$(python3 -c "import sys, hashlib; f=open(sys.argv[1],'rb'); h=f.read(6*4096); f.seek(-5*4096,2); print(hashlib.sha256(h+f.read()).hexdigest())" "$W/s2/dev/block/sda")" = "$GPT0" ] &&
+	ok "S9 #2's GPT untouched by P E F" || bad "the GPT changed"
 echo; echo "######## the night, with a cable pull in step G"
 FAKE_FAIL='sbsc.chunk of=/dev/block/sda27' FAKE_FAIL_TIMES=1 "${NIGHT[@]}" > "$W/run1.txt" 2>&1
 rc=$?; rm -f "$W/s2/fail-count"
@@ -120,14 +131,15 @@ rc=$?; rm -f "$W/s2/fail-count"
 grep -q '^### step G failed' "$W/night.log" && ok "### step G failed in the log" || { bad "no G failed marker"; tail -20 "$W/night.log"; }
 for s in P C D E F; do grep -q "^### step $s done" "$W/night.log" && ok "### step $s done" || bad "step $s not done"; done
 NBW=$W/state/night-s9b
-# fix 3 (review 515c6928): an interruption between F-store's done marker and its catalog copy must not lose F's rows
-rm -f "$NBW/done-F"; cp "$NBW/catalog-E-store.toml" "$NBW/catalog-cur.toml"
-grep -q 'key = "mac15"' "$NBW/catalog-cur.toml" && bad "the simulated lost copy did not take" || ok "simulated: F-store done, but its catalog copy lost"
+# fix 3 (review 515c6928): an interruption between D-store's done marker and its catalog copy must not lose D's rows
+# (the last store step before G here: E and F ran first, then C and D)
+rm -f "$NBW/done-D"; cp "$NBW/catalog-F-store.toml" "$NBW/catalog-cur.toml"
+grep -q 'key = "android"' "$NBW/catalog-cur.toml" && bad "the simulated lost copy did not take" || ok "simulated: D-store done, but its catalog copy lost"
 echo; echo "######## the same command again: resumes"
 "${NIGHT[@]}" > "$W/run2.txt" 2>&1 && ok "the second run finished (exit 0)" || { bad "second run"; tail -25 "$W/night.log"; }
 grep -q 'D-system: done earlier' "$W/night.log" || grep -q '^### step G done' "$W/night.log" && ok "...skipping what was done" || bad "no skip lines"
 for s in G H ALL; do grep -q "^### step $s done" "$W/night.log" && ok "### step $s done" || bad "step $s not done"; done
-grep -q 'F-store: done earlier' "$W/night.log" && grep -q 'key = "mac15"' "$NBW/catalog-cur.toml" && ok "...F's catalog copy redone; G and H's store updates kept mac15" || bad "lost catalog copy"
+grep -q 'D-store: done earlier' "$W/night.log" && grep -q 'key = "android"' "$NBW/catalog-cur.toml" && ok "...D's catalog copy redone; G and H's store updates kept One UI's row" || bad "lost catalog copy"
 # fix 1: the _tools.img probe answers yes / no explicitly; anything else (here: no /external_sd/distros) is neither
 probe='if [ -f /external_sd/distros/_tools.img ]; then echo yes; elif [ -d /external_sd/distros ]; then echo no; fi'
 grep -qF "$probe" tools/installer/night-s9b.sh && ok "night-s9b.sh uses the explicit probe" || bad "probe text"

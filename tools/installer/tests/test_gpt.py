@@ -193,6 +193,28 @@ class FakeStock(unittest.TestCase):
         self.assertTrue(nd.valid, nd.problems)
         self.assertEqual([e.name for e in nd.table][-4:], ['USERDATA', 'WINESP', 'WINDOWS', 'A16DATA'])
 
+    def test_backup_never_written(self):
+        """S9 #2 (2026-11-15): a valid primary and a backup region of zeros (Samsung wrote no backup copy). Planned from
+        the primary; the new backup is made whole; any other damage still refuses."""
+        head, tail = mk_gpt(stock_entries(5))
+        d = gpt.read(head, bytes(len(tail)), TOTAL)
+        self.assertFalse(d.valid)
+        self.assertTrue(d.primary_only, d.problems)
+        p = gpt.plan(d, ufslayout.get('starbite-a'))
+        nd = gpt.read(head[:BS] + p.primary, p.backup, TOTAL)
+        self.assertTrue(nd.valid, nd.problems)
+        self.assertEqual(p.primary[BS:BS + 17 * 128], head[2 * BS:2 * BS + 17 * 128])
+        self.assertEqual(gpt.next_action('orig', gpt.classify(bytes(len(tail)), bytes(len(tail)), p.backup, 'backup',
+                                                              TOTAL, BS)), 'write-both')
+        self.assertEqual(gpt.next_action('orig', gpt.classify(p.backup, bytes(len(tail)), p.backup, 'backup', TOTAL, BS)),
+                         'write-primary')
+        junk = bytearray(len(tail)); junk[100] = 1
+        self.assertFalse(gpt.read(head, bytes(junk), TOTAL).primary_only)          # not zeros: refused as before
+        bad = bytearray(head); bad[BS + 20] ^= 1                                     # a damaged primary as well
+        self.assertFalse(gpt.read(bytes(bad), bytes(len(tail)), TOTAL).primary_only)
+        with self.assertRaises(gpt.GPTError):
+            gpt.plan(gpt.read(head, bytes(junk), TOTAL), ufslayout.get('starbite-a'))
+
     def test_bigger_ufs_fills_the_last_row(self):
         total = TOTAL + (1 << 20)
         head, tail = mk_gpt(stock_entries(3, total), total=total)

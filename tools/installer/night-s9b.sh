@@ -15,6 +15,7 @@
 # start tonight (and no other). S9 #2 stays in its installer environment at the end.
 # Stops at the first failure ("### step X failed: ..." in the log). Run it again to resume: finished steps and
 # sub-steps are skipped (done markers), and an interrupted copy or write resumes inside its tool.
+# NIGHT_ONLY="P E F": only those steps (the others are left as they are, done or not).
 # Log: build/installer/logs/night-1115.log: each command's proof lines + "### step X done/failed" for a watcher.
 # Rehearsal: --rehearse FAKE_S1 FAKE_S2 (tools/installer/fakes, tools/installer/rehearse-night.sh).
 # NIGHT_REPO = the checkout whose tools run (default: this script's ../..); build/ (state, logs, bundles, catalog)
@@ -37,6 +38,8 @@ LOG=${NIGHT_LOG:-$ST/logs/night-1115.log}
 CAT_LIVE=${NIGHT_CATALOG:-$BUILD/build/store/catalog-live.toml}
 CAT_A=${NIGHT_CATALOG_A:-$ST/bundle-s9b/store/catalog.toml}
 CAP=${NIGHT_SIZE_CAP:-}                       # rehearsal only: copy this many bytes of each big source
+ONLY=${NIGHT_ONLY:-}                          # e.g. "P E F": only these steps (E, F write only the card, not UFS)
+want() { [ -z "$ONLY" ] || case " $ONLY " in *" $1 "*) true ;; *) false ;; esac; }
 mkdir -p "$NB/logs" "$NB/entries" "$(dirname "$LOG")"
 PID=$(python3 -c 'import hashlib,sys;print("phone-"+hashlib.sha256(sys.argv[1].encode()).hexdigest()[:10])' "$S2")
 SI=(python3 -B tools/installer/starbite-install --serial "$S2" --state-dir "$ST")
@@ -129,7 +132,7 @@ fi
 
 # ---- P: S9 #1's card store, read only
 STEP=P
-if ! done_p P; then
+if want P && ! done_p P; then
 	mark P started
 	[ "$("${ADBENV[@]}" adb -s "$S1" get-state 2>/dev/null)" = recovery ] || die "S9 #1 ($S1) is not in TWRP"
 	run P-pull '' -- "${ADBENV[@]}" bash tools/store/store-pull.sh "$NB/s1-store.img" sd
@@ -156,11 +159,12 @@ PY
 	set_done P
 	mark P done
 fi
-MAC15=$(cat "$NB/mac15-file")
+MAC15=$(cat "$NB/mac15-file" 2>/dev/null)
+[ -n "$MAC15" ] || die "no entries from S9 #1 (step P has not run)"
 
 # ---- C: the partition table
 STEP=C
-if ! done_p C; then
+if want C && ! done_p C; then
 	mark C started
 	twice C-gpt "y\ny\ninstall $PID\nrepartition $PID\n" si -- --bundle "$BUN/bundle-c" --repartition
 	grep -q 'the kernel sees the starbite-oneui table\|skip  UFS partition table' "$NB/logs/C-gpt.txt" || die "no proof of the new table in the log"
@@ -171,7 +175,7 @@ fi
 
 # ---- D: One UI 8
 STEP=D
-if ! done_p D; then
+if want D && ! done_p D; then
 	mark D started
 	stream D-system part:SYSTEM part:SYSTEM $(cap)
 	stream D-vendor part:VENDOR part:VENDOR $(cap)
@@ -182,7 +186,7 @@ fi
 
 # ---- E: the Linux distros on p1
 STEP=E
-if ! done_p E; then
+if want E && ! done_p E; then
 	mark E started
 	for f in chromeos ubuntu pmos; do stream "E-$f" "file:/distros/$f.img" "file:/distros/$f.img"; done
 	keys="chromeos linux-ubuntu linux-pmos"
@@ -202,7 +206,7 @@ fi
 
 # ---- F: macOS Sequoia
 STEP=F
-if ! done_p F; then
+if want F && ! done_p F; then
 	mark F started
 	stream F-root card:lba:182888448+33554432 card:root:mac15 $(cap)
 	if ! done_p F-payload; then
@@ -224,7 +228,7 @@ fi
 
 # ---- G: Windows 11 (+ the big cores)
 STEP=G
-if ! done_p G; then
+if want G && ! done_p G; then
 	mark G started
 	stream G-esp part:WINESP part:WINESP $(cap)
 	stream G-windows part:WINDOWS part:WINDOWS $(cap)
@@ -234,7 +238,7 @@ fi
 
 # ---- H: iOS 27
 STEP=H
-if ! done_p H; then
+if want H && ! done_p H; then
 	mark H started
 	stream H-userdata part:USERDATA part:USERDATA $(cap)
 	store H-store "ios27" ios27-refport-t8.xnu ios.overlay
@@ -242,5 +246,9 @@ if ! done_p H; then
 fi
 
 STEP=end
-mark ALL "done: S9 #2 has C-H; it stays in its installer environment (no reboot tonight)"
+if [ -n "$ONLY" ]; then
+	mark "ONLY($ONLY)" "done: S9 #2 stays in its installer environment (no reboot tonight)"
+else
+	mark ALL "done: S9 #2 has C-H; it stays in its installer environment (no reboot tonight)"
+fi
 exit 0

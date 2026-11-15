@@ -120,9 +120,12 @@ class Repart:
             elif (ps, bs) == ('orig', 'orig'):
                 a = Assessment('repartition', 'write-both', p, now, (ps, bs), '', p.fresh)
         if a is None:
-            if not now.valid:
+            if not now.usable:
                 raise Refused('the GPT on the phone is not valid in both copies, and there is no saved copy of it on '
                               'this computer: ' + '; '.join(now.problems) + '. Nothing is written.')
+            if now.primary_only:
+                self.ui.info('the backup GPT copy was never written on this phone (the last 5 blocks are zeros); the '
+                             'primary is valid. The plan comes from the primary; both copies are written (backup first)')
             try:
                 p = gpt.plan(now, self.layout)
             except gpt.GPTError as e:
@@ -172,7 +175,7 @@ class Repart:
             return
         head, tail = self.read_copies(verify_on_phone=True)
         d = gpt.read(head, tail, self.total)
-        if not d.valid:
+        if not d.usable:
             raise Stopped('the GPT read for the backup is not valid in both copies: ' + '; '.join(d.problems))
         if d.primary_bytes() != self.a.disk.primary_bytes() or tail != self.a.disk.tail:
             raise Stopped('the GPT changed between the preflight read and the backup read: stopping')
@@ -200,7 +203,7 @@ class Repart:
             with open(Path(bk) / 'backups.txt', 'a') as fh:
                 fh.write(f'{sha(head)}  gpt-orig-head.bin (sda LBA 0-5: protective MBR + primary GPT)\n'
                          f'{sha(tail)}  gpt-orig-tail.bin (sda last 5 LBAs: backup GPT)\n')
-        self.ui.ok(f'GPT backup: both copies valid, phone and computer agree (head {sha(head)[:12]}..., '
+        self.ui.ok(f'GPT backup: {"the primary valid, the backup never written (zeros)" if d.primary_only else "both copies valid"}, phone and computer agree (head {sha(head)[:12]}..., '
                    f'tail {sha(tail)[:12]}...) in {self.i.rel(self.dir)}')
 
     def write_commands(self, p):
@@ -345,7 +348,7 @@ class Repart:
         if meta['total'] != self.total:
             raise Refused('the saved GPT is for a disk of another size')
         orig = gpt.read(head, tail, self.total)
-        if not orig.valid:
+        if not orig.usable:
             raise Refused('the saved GPT is not valid: ' + '; '.join(orig.problems))
         h_now, t_now = self.read_copies()
         now = gpt.read(h_now, t_now, self.total)

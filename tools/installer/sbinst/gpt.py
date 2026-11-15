@@ -111,6 +111,18 @@ class Disk:
         return self.primary is not None and self.backup is not None and not self.problems
 
     @property
+    def primary_only(self):
+        """A valid primary and a backup region that was never written (all zeros), and nothing else wrong. S9 #2's
+        stock GPT (2026-11-15): Samsung's firmware wrote no backup copy, though the primary names LBA total-1.
+        The engine plans from the primary and writes both copies (the backup first, as always)."""
+        return (self.primary is not None and self.backup is None and self.tail and not any(self.tail)
+                and bool(self.berr) and all(p == self.berr for p in self.problems))
+
+    @property
+    def usable(self):
+        return self.valid or self.primary_only
+
+    @property
     def table(self):
         return (self.primary or self.backup).entries
 
@@ -331,7 +343,7 @@ class Plan:
 
 def plan(disk, layout):
     """The new table for `disk` from `layout` (a ufslayout.Layout). Raises GPTError on any refusal."""
-    if not disk.valid:
+    if not disk.usable:
         raise GPTError('the GPT on the phone is not valid in both copies: ' + '; '.join(disk.problems))
     if disk.lba != ufslayout.BLOCK:
         raise GPTError(f'the disk has {disk.lba}-byte blocks; the UFS layouts are in {ufslayout.BLOCK}-byte blocks')
@@ -411,8 +423,10 @@ def check_preserved(p):
     old_p, old_b = d.primary_bytes(), d.tail[-len(p.backup):]
     if len(old_b) != len(p.backup):
         raise GPTError('the tail read is shorter than the backup copy')
-    for name, old_c, new_c, hoff, aoff in (('primary', old_p, p.primary, 0, lba),
-                                           ('backup', old_b, p.backup, len(p.backup) - lba, 0)):
+    pairs = [('primary', old_p, p.primary, 0, lba)]
+    if not d.primary_only:                    # a never-written backup has no old bytes to keep: it is made new
+        pairs.append(('backup', old_b, p.backup, len(p.backup) - lba, 0))
+    for name, old_c, new_c, hoff, aoff in pairs:
         allowed = set()
         for a, b in CRC_FIELDS:
             allowed |= set(range(hoff + a, hoff + b))
