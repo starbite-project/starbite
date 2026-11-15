@@ -2820,6 +2820,22 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   d00863eb, libgallium_wgl 2254f46f).
 - **T69** (`sbwddm-t69` = T68 + 0162, sb-gd-ab.txt `glzcnovsync twice`): A/A2 GDI vs B/B2 zero-copy at interval 0.
 
+### 6.94 T69 read: interval 0 does not help - the blt-model zero-copy present is paced by DWM; keep the GDI present
+
+- **C: cleanup first** (`c-cleanup.sh --delete`, 01:3x): 1184 -> **2152 MB free** (freed 968 MB: Users\...\Temp
+  598 MB, C:\sbdumps 213 MB, T67's XtaCache.m3 128 MB, starbite\auto\gpu 19 MB, ...; copies on SBWORK). During T69's
+  GD runs C: still fell to 808 MiB (pagefile growth), not to 0.
+- **T69** (big cores, sbumd 0159, GD ICD 0162 EC; 01:36-02:19): A 46.8 / A2 38.6 fps (glstats steady; gllows 43.5 /
+  36.4, 1% low 23.8 / 20.0) vs B 23.8 / B2 22.9 fps zero-copy with **sync interval 0** (`sync interval: 0
+  (glzcnovsync)`): Present still ~25 ms per frame (T68: ~30 ms with the game's interval). In the same process sbumd
+  blocks little (540-560 submits, 4-13 ms blocked per 10 s). So the time is DXGI's windowed blt present waiting until
+  DWM has taken the previous frame from the redirection surface: the game is paced at DWM's composition rate (the
+  KMD's PresentsPerSecMax 56, last 46), while the GDI present is not paced (its extra frames are simply not shown).
+- **Conclusion for now:** the GDI async present stays the user's mode; zero-copy (0151/0160-0162) stays opt-in. A
+  real gain needs the flip model (DXGI 1.2 DDI: DWM composes from the app's buffers / independent flip), whose
+  windows still crash DWM with 0159 (6.91) - a larger project. The frame rate the user sees is bounded by DWM's
+  composition rate on our driver in landscape, which is the next thing to measure (DWM's own frame times).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
