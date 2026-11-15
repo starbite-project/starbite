@@ -71,6 +71,12 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
 - **Who needs it:** Minecraft Java, emulators, SDL/LWJGL games, older CAD/tools.
 - **Missing:** registration (`OpenGLDriverName`, `...Wow`), x64 + ARM64 + x86 builds in the driver package, GL 3.3
   on by default once geometry shaders exist (item 3), the present path of item 1 instead of GDI.
+- **Scoped (11-15):** the GL driver exists as ARM64EC and x64 builds only (`build-tc-ec`, `build-tc-x64`) and is
+  copied into one game's folder (`gd-kit-push.sh`) **[src]**. System-wide needs: a native ARM64 build of the same
+  tree; one ARM64X forwarder DLL in System32 that loads the ARM64 or the ARM64EC build by process type (the
+  documented pattern for ARM64 drivers); `OpenGLDriverName` / `OpenGLVersion` / `OpenGLFlags` in the adapter's class
+  key, set offline by a hive tool (our drivers are installed from TWRP, not by PnP); then a test with a GL program
+  that is not Geometry Dash.
 
 ### 6. Direct3D 11 at feature level 11_0 (XL: larger than everything above together)
 - **Who needs it:** most D3D11 games after ~2013 (Unreal 4, BeamNG), and it is the floor for D3D12.
