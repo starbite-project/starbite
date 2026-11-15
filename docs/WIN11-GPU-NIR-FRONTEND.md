@@ -618,3 +618,291 @@ $H --print-tgsi $W/d3d10core.c $W/d3d11.c > harness-p2-tgsi.txt         # old pa
 To try it on a device: install the DLL, create the empty file
 `C:\ProgramData\Starbite\nirshaders`, and look for the `shader translator` line and any
 `NIR translation refused` lines in the umdlog.
+
+# Phase 3: geometry shaders
+
+State: 2026-11-16 00:28 EET. Branch `sb-nir`, seven commits on top of phase 2 (cf67267 and the
+harness-only bc37c61), nothing pushed:
+
+- `b4003da` poly: build for Panfrost, and on Windows
+- `5b0383e` panfrost: lower geometry shaders with src/poly (pan_nir_lower_gs.c)
+- `b062195` d3d10umd: the harness lowers and compiles geometry shaders
+- `3a4a2af` panfrost: geometry shaders on Bifrost behind gsemu (rasterization only)
+- `fd92c68` d3d10umd: geometry shaders through the NIR translator where the driver takes them
+- `a658e21` panfrost: a geometry shader draw without a count is skipped
+- `4c517c3` panfrost: the jobs of a geometry shader draw depend on each other
+
+**Nothing of this has drawn anything.** What ran is the lowering and the Bifrost compiler on the
+Linux host. The draw path, the switch and the frontend change are compiled only (P3.9).
+
+Switches: `C:\ProgramData\Starbite\gsemu` on Windows (read once at screen creation, like
+`noafbc`), `PAN_MESA_DEBUG=gsemu` on Linux. Off by default. Geometry shaders reach the driver
+only as NIR, so `gsemu` does something only together with `nirshaders`.
+
+## P3.1 What src/poly does, as asahi uses it (read)
+
+`poly_nir_lower_gs` (src/poly/nir/poly_nir_lower_gs.c) turns one geometry shader into four:
+
+| poly's shader | What it is | asahi runs it as |
+|---|---|---|
+| rasterization shader (`gs_copy`) | a vertex shader: runs the geometry shader for one input primitive and keeps one emitted vertex, chosen by vertex ID (and instance ID or an index buffer, by shape). It also does the stream output writes | the hardware vertex shader of the final draw |
+| main | per input primitive: writes that primitive's part of the index buffer when the output topology depends on data | compute kernel |
+| count | per input primitive: how many vertices/primitives it emits, when that is not static | compute kernel, then a prefix sum kernel over the counts |
+| pre-GS | once per draw: sizes stream output, advances its offsets, adds to the statistics queries | compute kernel |
+
+Ahead of them asahi runs the vertex shader as a compute kernel with input assembly in software
+(`poly_nir_lower_sw_vs`, one invocation per index and instance), and for an indirect draw a
+set-up kernel that reads the draw on the GPU and allocates from a GPU-side heap
+(`agx_launch_gs_prerast` in asahi's agx_state.c). Primitive restart in the input is unrolled
+first by one more kernel. Everything the shaders need at run time is in two structures,
+`struct poly_vertex_params` (64 bytes) and `struct poly_geometry_params` (316 bytes).
+
+poly sorts the rasterization draw into four shapes (`enum poly_gs_shape`): three with a
+topology known at compile time (no main kernel, no index buffer from the GPU) and one dynamic.
+It only finds a static topology if the geometry shader is straight-line code up to its emits.
+
+## P3.2 What Panfrost's job manager back end has (read)
+
+- A vertex shader variant that only has side effects and runs as a compute-type job in the
+  draw's own batch, attributes fetched by the hardware: the transform feedback variant
+  (`pan_nir_lower_xfb`, `jm_launch_xfb`). No IDVS for it.
+- Compute jobs can be added to the framebuffer's batch (`panfrost_launch_grid_on_batch`).
+- 64-bit `load_global`/`store_global` compile on Bifrost; sysvals carry per-draw values.
+- The order of jobs in a chain is **not** the order of execution; a job waits for the (at most
+  two) jobs it names as dependencies (the rules in src/panfrost/lib/pan_jc.h).
+- No indirect draws or dispatches on the GPU before Valhall, no GPU-side allocator, no layered
+  rendering in the Gallium driver.
+
+## P3.3 The design
+
+The vertex shader stays a hardware job. That is the one departure from asahi, and it removes
+the software input assembly: no index-driven compute kernel, no vertex fetch emulation.
+
+| Piece | Made | Runs as | Size of the job |
+|---|---|---|---|
+| capture variant of the bound vertex shader (`pan_nir_lower_vs_for_gs`, key `vs.gs_capture`): every output is stored at `output_buffer + (instance * captured + raw vertex ID) * outputs * 16` | first draw with a geometry shader that uses this vertex shader | compute-type vertex job, as the transform feedback variant | the draw's vertex range (max index - min index + 1, or the count) x instances |
+| index kernel (poly's main) | `create_gs_state`, dynamic topology only | compute job | one invocation per input primitive and instance |
+| rasterization shader | `create_gs_state`, as an ordinary vertex shader CSO (variants, IDVS as any other) | the draw | by shape, below |
+| count, pre-GS | made by poly, freed again | never | - |
+
+`lower_gs_input` (pan_nir_lower_gs.c) replaces poly's input lowering: the geometry shader looks
+its vertices up in the application's index buffer itself (8/16/32 bit without a branch),
+subtracts the index the capture started at, clamps, and reads the captured outputs. Being
+branch-free matters: with it poly proves a static topology for 18 of the 23 corpus shaders.
+The capture's first index travels in the one unused word of `struct poly_vertex_params`.
+
+The rasterization draw, by shape (corpus count):
+
+| Shape | Draw |
+|---|---|
+| static per primitive (9) | not indexed, `max_indices` vertices, input primitives x instances as hardware instances |
+| static per instance (9) | not indexed, `max_indices` x input primitives vertices, the draw's instances |
+| static indexed (0) | 8-bit index buffer that is the shader's fixed topology (at most 64 entries), instances as per primitive |
+| dynamic indexed (5) | 32-bit index buffer, `max_indices` x input primitives x instances entries, written by the index kernel and padded with restart indices; one instance; vertex IDs up to (instances << ceil(log2(input primitives))) x vertices_out rounded up to a power of two |
+
+One draw with a geometry shader (`panfrost_single_draw_gs`, pan_cmdstream.c), all in the batch
+of the framebuffer:
+
+1. capture job;
+2. index kernel, if any; it depends on 1;
+3. vertex job (or indexed vertex job) of the rasterization draw; it depends on 2, or on 1 if
+   there is no 2; the tiler job depends on its vertex job as always.
+
+The dependencies are explicit job dependencies (`sb_gs.job_dep`), added in 4c517c3 after
+reading pan_jc.h: the first version relied on the order of the chain, which orders nothing.
+
+The rasterization shader and the index kernel are the geometry shader, so they read the
+geometry stage's constant buffers, textures and samplers: those are swapped into the stage the
+job runs under for its duration (`panfrost_gs_swap_stage`).
+
+Memory per draw, all from the batch's transient pool (freed with the batch, nothing allocated
+from the kernel per draw, nothing the CPU reads back):
+
+- the two parameter structures, 64 + 316 bytes;
+- the capture: captured vertices x instances x vertex shader outputs x 16 bytes
+  (3000 vertices with 4 outputs: 192,000 bytes);
+- dynamic topology: 4 bytes x `max_indices` x input primitives x instances;
+- the rasterization draw's varyings as for any draw, for the vertex count of the table above.
+
+### Where the CPU reads, waits or flushes
+
+| Draw with a geometry shader | What happens |
+|---|---|
+| not indexed | nothing: no flush, no readback, no wait |
+| indexed, no restart | the min/max index scan of the index buffer that every indexed draw has (`panfrost_get_index_buffer_bounded`, cached) |
+| indexed with primitive restart | `util_draw_vbo_without_prim_restart`: the index buffer is mapped for reading and scanned (index count, every draw, no cache), and the draw is split at the restart indices into one geometry shader draw per run. The map flushes and waits only if a batch writes the index buffer. **d3d10umd sets `primitive_restart` on every indexed draw (Draw.cpp:223 and 328), so every indexed draw from Direct3D 10 takes this.** |
+| indirect | `util_draw_indirect`: the indirect buffer is mapped and read; a flush and a wait if the GPU wrote it. d3d10umd issues none |
+| count from a stream output target (DrawAuto) | dropped with a `perf_debug` line (a658e21; it read a null pointer before). Doing it would be a readback of the count: flush and wait |
+| any | descriptors are emitted three times instead of once (`panfrost_dirty_state_all` between the jobs); the capture variant is compiled at the first such draw of a vertex shader |
+
+No draw with a geometry shader flushes the batch or starts another one between its jobs.
+
+## P3.4 Implemented, and not
+
+Implemented (compiled; lowering and shader compilation ran):
+
+- `gsemu` switch; with it, for Bifrost (arch 6 and 7) only: geometry stage caps (NIR only,
+  1024 output vertices and components, no side effects), `create_gs_state`, `bind_gs_state`,
+  `delete_gs_state`, the draw path above for all four shapes, with instancing, indexed draws
+  and the geometry stage's own resources.
+- Frontend: with `nirshaders` and a driver that takes NIR geometry shaders, both
+  `CreateGeometryShader` and `CreateGeometryShaderWithStreamOutput` go through
+  `Shader_nir_translate`; otherwise TGSI as before.
+
+Not implemented, on purpose rather than by half:
+
+- **Stream output.** A geometry shader created with stream output declarations rasterizes
+  only (one `mesa_logw` line at creation, a `perf_debug` line per draw with targets bound).
+  A shader state without code (Direct3D 10's stream output of the vertex shader) is refused
+  with its own warning and nothing is bound. poly does stream output in the rasterization
+  shader plus the count kernel, a prefix sum and the pre-GS kernel. Here that needs: NIR
+  transform feedback info built from `pipe_stream_output_info`, the rasterization shader run a
+  second time as a side-effect job (a vertex job with IDVS may not write memory), poly's
+  prefix sum kernel on Bifrost, stream output offsets that live on the GPU where Panfrost
+  keeps them on the CPU, and a readback for DrawAuto. The count and pre-GS kernels compile
+  (harness) and are thrown away by the driver.
+- Pipeline statistics for the geometry stage (poly's query addresses are lowered to nothing).
+  The primitives-generated count is taken from the rasterization draw's vertex count and is
+  wrong with a geometry shader.
+- Render target layer and viewport index written by a geometry shader: stored as varyings,
+  not acted on (the Gallium driver has no layered rendering on these GPUs; read, not run).
+- A geometry shader in TGSI: `create_gs_state` returns NULL with a warning, draws then run
+  without it. (Without `gsemu` the hooks do not exist at all, as before.)
+- Midgard and Valhall: `panfrost_device_has_gs()` is false there.
+
+## P3.5 Harness: geometry shaders (ran at 4c517c3)
+
+`~/sbmesa/build-nir-host/harness-p3.txt` (corpus + self tests: 346 OK, 1 refused as it must
+be, 0 failures) and `harness-p3-corpus.txt` (267 OK: 67 vertex, 177 pixel, 23 geometry).
+For each geometry shader the harness runs `panfrost_nir_lower_gs`, validates the pieces,
+lowers a generated pass-through vertex shader writing the geometry shader's inputs with
+`pan_nir_lower_vs_for_gs` (not the test's own vertex shader), and compiles all five results
+for Bifrost arch 6 (gpu id 0x62210000). Bytes of Bifrost code:
+
+| Shape, indices per input primitive | Shaders | vs capture | rast | index kernel | count | pre-GS |
+|---|---|---|---|---|---|---|
+| static per primitive, 4 | 8 (7 gs_4_0, 1 gs_4_1) | 544-880 | 1904-3616 | 0 | - | 544 |
+| static per primitive, 3 | 1 | 544 | 3488 | 0 | - | 544 |
+| static per instance, 1 | 6 | 880-1488 | 1840-2400, one 0 | 0 | - | 528 |
+| static per instance, 3 | 3 | 544-880 | 3056-5280 | 0 | - | 528 |
+| dynamic indexed, 16 | 2 | 544 | 3328 | 2528 | 208 | 640 |
+| dynamic indexed, 8 | 2 | 544 | 3408 | 1376 | 208 | 640 |
+| dynamic indexed, 4 | 1 | 544 | 2992 | 800 | 208 | 640 |
+| all | 23 of 23 lower and compile | | | | | |
+
+The one rasterization shader of 0 bytes is d3d11.c:27485, which writes no SV_Position (it
+exists for stream output). A static topology has no count shader and an empty index kernel.
+The static indexed shape does not occur in the corpus: its draw path has no shader behind it
+even at this level.
+
+The OpenCL helpers (`src/poly/cl`, built with `mesa_clc` and `vtn_bindgen2` from
+`~/sbmesa/native`, which both build directories already used as system tools) build on the
+host and in both Windows cross configurations. One source change was needed for Windows:
+`uint` in src/poly/geometry.h (b4003da). Nothing was installed or downloaded.
+
+## P3.6 What tessellation could reuse
+
+libpoly and libpoly_nir in the Panfrost build, including Windows; the parameter structures
+reached through a sysval (`struct poly_vertex_params` is also what poly's tessellation
+lowering reads); the capture variant as the source of control point data; kernels in the
+framebuffer's batch with explicit job dependencies; the stage swap for running one stage's
+shader under another job type; the harness path that compiles lowered pieces. What it adds
+and geometry shaders did not need: poly's tessellator kernel produces an amount of geometry
+known only on the GPU, and these GPUs have no indirect draw, so each such draw costs either a
+readback or a worst-case allocation.
+
+## P3.7 Risks, most serious first
+
+1. No job of this has run on a GPU. In particular: the capture job with more than one
+   instance (it is the transform feedback job's layout, which upstream has; unrun here), the
+   explicit dependencies, a compute job between draws of one batch.
+2. Every rasterized vertex runs the whole geometry shader (poly's design). A shader that
+   emits 16 vertices runs 16 times per input primitive, and for a dynamic topology the vertex
+   IDs are padded to powers of two.
+3. Indexed draws from d3d10umd always go through the CPU restart scan (P3.3). Setting
+   `primitive_restart` only for strip topologies in the frontend would remove it for lists; that
+   is a frontend change in behaviour, so not done.
+4. The first-index word reuses a padding field of poly's structure; a Mesa update that gives
+   the field a meaning breaks it (a `_pad` rename fails to compile, which is the alarm).
+5. Three full state emissions per draw, and transient memory proportional to vertices x
+   outputs: many small geometry shader draws are much more expensive than ordinary ones.
+6. With `gsemu` but without `nirshaders`, a geometry shader is silently not applied.
+
+## P3.8 Switch off: what differs from cf67267
+
+Read from the diff, not run on Windows. Nothing in behaviour:
+
+- No geometry caps, no geometry hooks: `create_gs_state`, `bind_gs_state` and
+  `delete_gs_state` stay unset on Panfrost. d3d10umd therefore still calls a null pointer in
+  `CreateGeometryShader` and `GsSetShader` on Panfrost, exactly as before (phase 2 noted it;
+  left alone because the instruction was no change with the switch off).
+- Code that now runs and decides nothing: a test of `sb_gs.bound` per `draw_vbo` and of
+  `sb_gs.rast_indices` per indexed draw (arch 6/7 builds), `sb_gs.job_dep`, which is 0, where
+  three `pan_jc_add_job` calls had a literal 0, a test of `key->vs.gs_capture` (false) per
+  vertex shader compile.
+- Data: `struct panfrost_context` and `struct panfrost_uncompiled_shader` grew; the vertex
+  shader key has one more field that is always false; two sysval numbers exist and are not used.
+- Frontend: `SbTranslateNir` is now asked for geometry shaders too and returns NULL at its
+  first test (no `nirshaders`, or a geometry stage without NIR, which is what Panfrost
+  reports without `gsemu`); the TGSI path follows as before. `GsSetShader` and
+  `output_resolved` ask `ShaderHasCode()` where they asked `state.tokens`: the same for a
+  TGSI shader.
+- The DLL is 144,384 bytes larger (libpoly), and `gsemu` is a new name in `PAN_MESA_DEBUG`.
+- The build of Panfrost now needs `mesa_clc` and `vtn_bindgen2`.
+
+Found and left alone: on Panfrost `DrawAuto` without a geometry shader passes a NULL draw list
+to `panfrost_multi_draw_direct` (d3d10umd Draw.cpp:379), with or without these changes.
+
+## P3.9 Verified by running / only compiled / reasoned
+
+Ran (Linux host, assertions on): `panfrost_nir_lower_gs` on all 23 corpus geometry shaders
+with NIR validation of every piece; the Bifrost arch 6 compile of every piece and of the
+capture lowering on pass-through vertex shaders; the whole harness again (no change in the
+vertex and pixel numbers of phase 2); native builds of libpoly and of Panfrost for every
+architecture; ARM64 and ARM64EC builds of the driver; the ARM64X link and its verification;
+`strings` on the DLL.
+
+Compiled only, never executed: everything in pan_cmdstream.c, pan_jm.c, pan_shader.c and
+pan_screen.c of this phase (the draw path, the job dependencies, the hooks, the caps, the
+switch), the capture variant as the driver compiles it (`panfrost_shader_compile` with the
+key; the harness calls the lowering pass itself), the sysval upload, and the frontend change.
+No lowered shader was executed either, so that the lowered code computes the right thing is
+by reading: nothing here checks an output vertex.
+
+Reasoned from source: the meaning of job dependencies, the flush and wait behaviour of the
+buffer maps in P3.3, that an empty rasterization shader skips rasterization
+(`panfrost_batch_skip_rasterization`), that layer and viewport outputs are not acted on.
+
+## P3.10 The Windows build
+
+`~/sbmesa/build-nir-x/build-all.sh`, from 4c517c3: ARM64 and ARM64EC builds exit 0, the link
+log is empty, `verify.txt` has 35 `ok` lines and `FAILS: 0`.
+
+```
+/Users/dev/project-starbite/.claude/worktrees/win-mali-gpu-87c7b0/build/win/umd-nir-gs/
+  sbumd.dll  27372032 bytes  sha256 e9e9d06723a0eeb6e7c3d66ebd7c0c8c320f4dc9475f662bf250799cbc6e89e9
+  sbumd.map   6734469 bytes  sha256 6ff3a476f67848882421049886fa0cbd4fad9f89bcf8d45d2f710e50be8820b9
+```
+
+`build/win/umd-nir/sbumd.dll` is untouched (still 98e9e6a6...). `strings` finds `gsemu`,
+`sbumd: geometry shader emulation on (C:\ProgramData\Starbite\gsemu)` and the warnings of
+P3.4 in the new DLL.
+
+## P3.11 Rerun
+
+```sh
+export PATH=~/sbmesa/native:~/sbmesa/venv/bin:$PATH
+cd ~/sbmesa && ninja -j6 -C build-nir-host src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness
+cd build-nir-host
+W=/Users/dev/project-starbite/build/win/winetests/src
+H=./src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness
+$H --selftest --stats $W/d3d10core.c $W/d3d11.c > harness-p3.txt
+grep "gs_4_"  harness-p3.txt          # one line per geometry shader: shape and code sizes
+~/sbmesa/build-nir-x/build-all.sh     # Windows; result in build-nir-x/build-all.exit, verify.txt
+```
+
+To try it on a device: install the DLL, create the empty files
+`C:\ProgramData\Starbite\nirshaders` and `C:\ProgramData\Starbite\gsemu`, and look for the
+`geometry shader emulation on` line in the umdlog. Start with a draw that is not indexed and
+has a static topology (a point-to-quad shader): it is the shortest path, two jobs and no
+index buffer. On Linux the switch is `PAN_MESA_DEBUG=gsemu`.

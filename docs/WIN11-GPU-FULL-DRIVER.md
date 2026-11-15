@@ -144,6 +144,17 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
 - **T76 staged:** the d3d10core suite on that driver, pass A flag off, pass B flag on (`sb-wt-ab.bat`), to compare
   with T74 (the user's driver).
 
+- **11-16 00:55, geometry shaders (offline):** Panfrost on this GPU generation gets a geometry stage through
+  `src/poly` behind the flag file `gsemu` (off by default; needs `nirshaders`): the vertex shader runs as a capture
+  job, the geometry shader's rasterization part as an ordinary vertex shader, poly's index kernel as a compute job
+  only for dynamic output topologies. All 23 corpus geometry shaders lower, validate and compile in every piece on
+  Bifrost v6. **Compiled only: no draw has run.** Not done: stream output (with or without a geometry shader),
+  pipeline statistics, layered rendering. Every indexed D3D10 draw with a geometry shader scans its index buffer
+  on the CPU (the frontend always enables primitive restart). Branch `sb-nir` 4c517c3, sbumd e9e9d067
+  (`build/win/umd-nir-gs`, ARM64X verify FAILS: 0). Design: `docs/WIN11-GPU-NIR-FRONTEND.md`, "Phase 3".
+  Also noted: with no geometry stage (today's driver), `CreateGeometryShader` / `GsSetShader` call a null driver
+  hook on Panfrost, and DrawAuto without a geometry shader passes a NULL draw list.
+
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.
 - **BeamNG.drive:** item 6 (feature level 11_0) is the gate; before that the game cannot create its device. Items
