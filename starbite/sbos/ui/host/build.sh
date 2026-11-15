@@ -23,5 +23,9 @@ $CC -c -O2 -std=gnu11 $WARN -I"$here/../../utility" "$here/../../utility/tz.c" -
 $CC -c -O2 -std=gnu11 $WARN "$here/../guide/survival_host.c" -o "$out/survival_host.o"
 # Track A: the passcode (kern/passcode.c, pure) behind the host's sh_pass_* fakes
 $CC -c -O2 -std=gnu11 $WARN "$here/../kern/passcode.c" -o "$out/passcode.o"
-$CC -o "$out/sbtk-host" "$out"/tk_*.o "$out/shell_lock.o" "$out/plat.o" "$out/main.o" "$out/survival_host.o" "$out/passcode.o" "$out/tzdb.o" "$out/tzcities.o" "$out/tzcity.o" "$out/tz.o"
+# Face Unlock: the service and the pipeline as the phone has them (host/main.c gives the platform)
+$CC -c -O2 -std=gnu11 -ffreestanding -fno-builtin -fno-math-errno -ffp-contract=fast $WARN -I"$here" -I"$here/../kern" "$here/face_svc.c" -o "$out/face_svc.o"
+$CC -c -O2 -std=gnu11 -fno-math-errno -ffp-contract=fast $WARN -I"$here/../kern" "$here/../kern/face.c" -o "$out/face.o"
+$CC -c -O2 -std=gnu11 -fno-math-errno -ffp-contract=fast $WARN -I"$here/../kern" "$here/../kern/facenet.c" -o "$out/facenet.o"
+$CC -o "$out/sbtk-host" "$out"/tk_*.o "$out/shell_lock.o" "$out/plat.o" "$out/main.o" "$out/survival_host.o" "$out/passcode.o" "$out/face_svc.o" "$out/face.o" "$out/facenet.o" "$out/tzdb.o" "$out/tzcities.o" "$out/tzcity.o" "$out/tz.o"
 echo "$out/sbtk-host"

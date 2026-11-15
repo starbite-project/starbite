@@ -36,6 +36,7 @@
 #include "bathealth.h"
 #include "haptic.h"
 #include "nledpol.h"
+#include "face_svc.h"                     /* Face Unlock (ui/face_svc.c on kern/face.c) */
 static void drv_timer(unsigned id);             /* Track A: drivers for the shell (the end of this file) */
 static void snd_tick(unsigned id);              /* Track A, cp7: sound (the end of this file) */
 static void snd_boot(void);                     /* cp7y: snd up (Calliope's files into RAM) at the bake's end */
@@ -49,7 +50,10 @@ static int drv_touch_dark(void);
 #define KT_DRV_SND 34                           /* cp7: sound's poll (5 ms while busy) */
 #define KT_DRV_JACK 35                          /* cp7: the headphone jack (50 ms while sound plays or the screen is on) */
 #define KT_DRV_PREWARM 36                       /* 8a: Linux prewarmed in the dark (Track E's guest_prewarm) */
+#define KT_DRV_FACE 37                          /* Face Unlock: the camera's poll + the face's work (~10 ms while busy) */
 static void prewarm_arm(int screen_on);
+static void face_tick(void);                    /* Face Unlock (its block after the camera's) */
+static void face_init(void);
 
 /* ---- the heap (tk_heap.c) on one block of the arena ---------------------------------------------------- */
 void tk_heap_init(void *mem, uint64_t size);
@@ -1317,6 +1321,7 @@ static void bake_step(void)
     boot_notes();                                    /* Track A, 1.0: a safe start, or the last start's crash */
     perf_low = sh_pref_int("power.low", 0) == 1;     /* Track A, 1.0: Low Power Mode kept */
     drv_after_bake();                                /* Track A: the haptic level, Auto-Brightness, the LED policy */
+    face_init();                                     /* Face Unlock: the pack checked, the kept face found */
     ready = need_full = 1;
     boost(0);
     kt_set(KT_UI, 23, sb_ms(), 5000, 0);            /* the workers off after 5 s unless a finger comes */
@@ -1450,6 +1455,7 @@ void next_ktimer(unsigned id)
     if (baking && id == 22) { bake_step(); return; }
     if (ready && id == 20) { frame(); return; }
     if (ready && id == 21) {
+        if (fsvc_busy()) { kt_set(KT_UI, 21, sb_ms(), 300, 0); return; }   /* Face Unlock's work: the top clock */
         if (!ticking && !sh_moving()) boost(0);
         return;
     }
@@ -1478,11 +1484,12 @@ void next_ktimer(unsigned id)
         return;
     }
     if (ready && id == 23) {
+        if (fsvc_busy()) { kt_set(KT_UI, 23, sb_ms(), 2000, 0); return; }   /* Face Unlock's work uses the cores */
         if (!ticking && !sh_moving()) workers_stop();
         return;
     }
     if (ready && id == 26) { (void)kupdate_after_start(); return; }   /* Track A update: 10 s after the home screen */
-    if (id >= KT_DRV_BT && id <= KT_DRV_PREWARM) { drv_timer(id); return; }   /* Track A: drivers for the shell */
+    if (id >= KT_DRV_BT && id <= KT_DRV_FACE) { drv_timer(id); return; }   /* Track A: drivers for the shell */
     ui_ktimer(id);
 }
 
@@ -1649,6 +1656,7 @@ int sh_pass_check(const char *digits)
     uint64_t t0 = sb_ms();
     int r = pass_check(digits, t0, pass_utc());
     if (r == 1) {
+        fsvc_passcode(digits);                       /* Face Unlock's key (its own turn, ~45 ms) */
         struct ub u;
         ub_init(&u);
         ub_s(&u, "next: passcode: right (the hash took ");
@@ -1679,6 +1687,7 @@ int sh_pass_set(const char *old, const char *nw)
     pass_salt(salt);
     int r = pass_set(old, nw, salt, sb_ms(), pass_utc());
     tk_memset(salt, 0, sizeof salt);
+    if (!r) fsvc_passcode_set(old, nw);              /* Face Unlock's key rewrapped (or forgotten with the passcode) */
     if (!r) {
         struct ub u;
         ub_init(&u);
@@ -2988,6 +2997,7 @@ int sh_bt_get(int i, char *name, int cap, int *rssi)
 
 /* -- the front camera: cam_poll every 10 ms while it runs (each poll at most ~100 ms) */
 static int cam_running;
+static int face_cam;                            /* Face Unlock has the camera (its block below) */
 static void cam_tick(void)
 {
     int r = cam_poll();
@@ -2999,6 +3009,7 @@ int sh_cam_open(int w, int h)
 {
     DRV_DRY("the front camera", -1);
     if (w < 8 || h < 8) return CAM_EARG;
+    if (face_cam) return CAM_ESTATE;               /* Face Unlock has it (the lock or its set-up) */
     struct cam_req q = { CAM_FRONT, (unsigned)w, (unsigned)h, CAM_PORTRAIT_SELFIE, 1, 0, 0 };
     int r = cam_open(&q);
     if (r < 0) { sb_logf("next: camera: not opened: ", cam_why()); return r; }
@@ -3044,6 +3055,274 @@ void sh_cam_close(void)
     if (cam_running || cam_state() != CAM_ST_OFF) cam_close();   /* synchronous: everything off, as found */
     cam_running = 0;
 }
+
+/* -- Face Unlock (docs/FACE-UNLOCK.md): ui/face_svc.c's platform. The face pack (tools/face-pack.py, 7.3 MB) is a
+ * file on the card, /starbite/face/sbface.pak (the image stays within its 32 MiB budget): loaded into the UI heap
+ * when Face Unlock is set up (at the start) or its Settings page shows, 256 KiB a turn, and kept; its SHA-256 (the
+ * pack's own, in its header) checked as it comes. The camera portrait 360 x 480 NOT mirrored; the face's work on the
+ * band workers (kpar) from this timer, <= ~30 ms a turn; the prefs' blobs face.k / face.t. The self test (the dry
+ * build) never reads the card: Face Unlock is "not there" in it; the face test image (SBOS_SELFTEST_NEXT_FACE in
+ * uitest.c, the normal kern_next) runs face_selftest_step. */
+#define FACE_PAK_DIR "/starbite/face"
+#define FACE_PAK_NAME "sbface.pak"
+#define FACE_PAK_CHUNK (256U << 10)
+static struct {
+    int st;                             /* -1 not there, 0 not tried, 1 loading, 2 in memory */
+    uint8_t *p;
+    uint32_t len, got;
+    struct pass_sha sha;
+    uint64_t t0, t_fail;
+    uint32_t load_ms;                   /* the last full load's time */
+} FP;
+static void fp_fail(const char *why)
+{
+    if (FP.p) tk_free(FP.p);
+    FP.p = 0;
+    FP.st = -1;
+    FP.t_fail = sb_ms();
+    sb_logf("next: face: the pack: ", why);
+}
+/* one turn of the load: the card mounted, the file found, then a chunk read and hashed */
+static void fp_step(void)
+{
+#ifdef SBOS_SELFTEST_NEXT
+    fp_fail("not read (the self test never reads the card)");
+#else
+    if (!FP.p) {
+        const char *why = 0;
+        int cs = kfile_state(&why);
+        if (cs == 0) { hw_wdt_feed(); kfile_mount(); cs = kfile_state(&why); }
+        if (cs <= 0) { fp_fail(cs == -1 ? "no card" : "the card cannot be read"); return; }
+        static struct kfile_ent e[16];
+        int n = kfile_list_at(FACE_PAK_DIR, e, 16, 0);
+        uint64_t size = 0;
+        for (int i = 0; i < n; i++)
+            if (!e[i].dir && !tk_strcmp(e[i].name, FACE_PAK_NAME)) size = e[i].size;
+        if (size < 64 || size > (16ULL << 20)) { fp_fail("no " FACE_PAK_DIR "/" FACE_PAK_NAME " on the card"); return; }
+        FP.p = tk_alloc((size_t)size);
+        if (!FP.p) { fp_fail("no memory for it"); return; }
+        FP.len = (uint32_t)size;
+        FP.got = 0;
+        FP.t0 = sb_ms();
+        pass_sha_init(&FP.sha);
+    }
+    uint32_t want = FP.len - FP.got < FACE_PAK_CHUNK ? FP.len - FP.got : FACE_PAK_CHUNK;
+    int r = kfile_read_at(FACE_PAK_DIR "/" FACE_PAK_NAME, FP.got, FP.p + FP.got, want);
+    if (r != (int)want) { fp_fail("a read failed"); return; }
+    /* the digest covers bytes 64.. (the header holds it at 32..63) */
+    uint32_t from = FP.got < 64 ? 64 : FP.got;
+    if (FP.got + want > from) pass_sha_update(&FP.sha, FP.p + from, FP.got + want - from);
+    FP.got += want;
+    if (FP.got < FP.len) return;
+    uint8_t d[32];
+    pass_sha_final(&FP.sha, d);
+    int bad = 0;
+    for (int i = 0; i < 32; i++) bad |= d[i] ^ FP.p[32 + i];
+    if (bad || fn_pack_check(FP.p, FP.len, 0) < 0) { fp_fail("its SHA-256 or header is wrong (a damaged copy)"); return; }
+    FP.st = 2;
+    FP.load_ms = (uint32_t)(sb_ms() - FP.t0);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: face: the pack in memory: ");
+    ub_dec(&u, FP.len >> 10);
+    ub_s(&u, " KiB from the card in ");
+    ub_dec(&u, sb_ms() - FP.t0);
+    ub_s(&u, " ms, SHA-256 good");
+    sb_log(u.b);
+#endif
+}
+static int fs_pack_state(void) { return FP.st; }
+/* the unlock (Track A: the pack must not stay while home and apps run; a1btn peaks at 134 MiB of the 135 allowed) */
+static void fs_pack_release(void)
+{
+    uint32_t kib = FP.st == 2 ? FP.len >> 10 : FP.got >> 10;
+    int was = FP.st;
+    if (FP.p) tk_free(FP.p);
+    FP.p = 0;
+    FP.len = FP.got = 0;
+    FP.st = 0;
+    if (was == 2) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: face: pack freed (unlock): ");
+        ub_dec(&u, kib);
+        ub_s(&u, " KiB back");
+        sb_log(u.b);
+    }
+    else if (was == 1) sb_log("next: face: the pack's load stopped (unlock)");
+}
+static int fs_pack_get(const uint8_t **p, size_t *len)
+{
+    if (FP.st == 2) { *p = FP.p; *len = FP.len; return 1; }
+    if (FP.st < 0 && sb_ms() - FP.t_fail > 60000) FP.st = 0;   /* a card put in later: try again after a minute */
+    if (FP.st < 0) return -1;
+    if (FP.st == 0) { FP.st = 1; FP.p = 0; kt_set(KT_UI, KT_DRV_FACE, sb_ms(), 1, 0); }
+    return 0;
+}
+static void fs_arm(unsigned ms) { kt_set(KT_UI, KT_DRV_FACE, sb_ms(), ms ? ms : 1, 0); }
+static int fs_cam_open(unsigned w, unsigned h)
+{
+    DRV_DRY("the front camera (Face Unlock)", -1);
+    if (cam_running || face_cam) return CAM_ESTATE;        /* the Camera app has it */
+    struct cam_req q = { CAM_FRONT, w, h, CAM_ROT270, 1, 0, 0 };   /* CAM_PORTRAIT_SELFIE without the mirror */
+    int r = cam_open(&q);
+    if (r < 0) { sb_logf("next: face: the camera did not open: ", cam_why()); return r; }
+    face_cam = 1;
+    return 0;
+}
+static const uint32_t *fs_cam_frame(unsigned *seq)
+{
+    struct cam_pic p;
+    if (!face_cam || !cam_frame(&p) || p.stride != p.w) return 0;
+    *seq = p.seq;
+    return p.px;
+}
+static void fs_cam_close(void)
+{
+    if (face_cam && cam_state() != CAM_ST_OFF) cam_close();
+    face_cam = 0;
+}
+/* random bytes: the counter's jitter over memory walks, the clocks, a running count, hashed (pass_salt's way) */
+static void fs_random(uint8_t *out, unsigned n)
+{
+    static volatile uint8_t walk[4096];
+    static uint32_t made;
+    while (n) {
+        uint8_t pool[256 + 24], h[32];
+        for (unsigned i = 0; i < 256; i++) {
+            uint64_t a = sb_ticks();
+            for (unsigned k = 0; k < 24; k++) walk[(i * 131u + k * 523u + made) & 4095u] += (uint8_t)(a >> (k & 7));
+            pool[i] = (uint8_t)(sb_ticks() - a) ^ (uint8_t)a ^ walk[(i * 7u) & 4095u];
+        }
+        uint64_t t = sb_ticks(), ms = sb_ms();
+        made++;
+        tk_memcpy(pool + 256, &t, 8);
+        tk_memcpy(pool + 264, &ms, 8);
+        tk_memcpy(pool + 272, &made, 4);
+        tk_memset(pool + 276, 0, 4);
+        pass_sha256(pool, sizeof pool, h);
+        unsigned k = n < 32 ? n : 32;
+        tk_memcpy(out, h, k);
+        out += k;
+        n -= k;
+        tk_memset(h, 0, sizeof h);
+    }
+}
+static void fs_log(const char *line) { sb_logf("next: ", line); }
+static uint64_t fs_ms(void) { return sb_ms(); }
+static void *fs_alloc(size_t n) { return tk_alloc(n); }
+static void fs_par(void (*fn)(void *, int), void *arg, int n) { kpar(fn, arg, n); }
+static int face_up;
+static void face_init(void)
+{
+    struct fsvc_plat p;
+    tk_memset(&p, 0, sizeof p);
+    p.pack_get = fs_pack_get;
+    p.pack_state = fs_pack_state;
+    p.pack_release = fs_pack_release;
+    p.fn.alloc = fs_alloc;
+    p.fn.free = tk_free;
+    p.fn.par = fs_par;
+    p.fn.now_us = tk_us;
+    p.now_ms = fs_ms;
+    p.cam_open = fs_cam_open;
+    p.cam_frame = fs_cam_frame;
+    p.cam_close = fs_cam_close;
+    p.blob_get = sh_blob_get;
+    p.blob_put = sh_blob_put;
+    p.pref_int = sh_pref_int;
+    p.pref_set_int = sh_pref_set_int;
+    p.random = fs_random;
+    p.pass_on = sh_pass_on;
+    p.pass_wait = sh_pass_wait;
+    p.log = fs_log;
+    p.arm = fs_arm;
+    uint64_t t0 = sb_ms();
+    fsvc_init(&p);
+    face_up = 1;
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "next: face: up in ");
+    ub_dec(&u, sb_ms() - t0);
+    ub_s(&u, " ms; status ");
+    ub_dec(&u, (uint64_t)sh_face_status());
+    ub_s(&u, FP.st == 1 ? " (the pack loading from the card)" : "");
+    sb_log(u.b);
+}
+static void face_tick(void)
+{
+    if (!face_up) return;
+    if (FP.st == 1) {                                /* the pack's load: a chunk a turn */
+        fp_step();
+        if (FP.st == 1) { kt_set(KT_UI, KT_DRV_FACE, sb_ms(), 2, 0); return; }
+    }
+    if (face_cam) {
+        int r = cam_poll();
+        if (r <= 0) {
+            if (r < 0) sb_logf("next: face: the camera stopped: ", cam_why());
+            face_cam = 0;
+            sh_face_stop();
+            return;
+        }
+    }
+    if (fsvc_busy()) {
+        workers_start();
+        if (!boosted) boost(1);                     /* the A55 at its top step while the face's work runs */
+    }
+    fsvc_tick();
+    if (!fsvc_busy()) kt_set(KT_UI, 21, sb_ms(), perf_tail_ms(), 0);   /* then down as after a gesture */
+}
+#ifndef SBOS_SELFTEST_NEXT
+/* the face test image (uitest.c SBOS_SELFTEST_NEXT_FACE, unattended, nothing written): the pack from the card, the
+ * networks on a made-up frame (the A55's times), the camera for 4 s with nobody enrolled (its first frame's time, the
+ * detections); 1 passed, -1 failed, 0 running. The loop's turns of 100 ms or more are counted by uitest.c's caller. */
+static int ftest_phase;
+static uint64_t ftest_t;
+int face_selftest_step(void)
+{
+    switch (ftest_phase) {
+    case 0:
+        if (!face_up) return 0;
+        ftest_t = sb_ms();
+        {
+            const uint8_t *p;
+            size_t n;
+            (void)fs_pack_get(&p, &n);
+        }
+        ftest_phase = 1;
+        return 0;
+    case 1:
+        if (FP.st == 1 || FP.st == 0) return sb_ms() - ftest_t < 60000 ? 0 : (sb_log("selftest: next-face: FAILED: the pack did not load within 60 s"), -1);
+        if (FP.st < 0) { sb_log("selftest: next-face: FAILED: no face pack (" FACE_PAK_DIR "/" FACE_PAK_NAME " on the card?)"); return -1; }
+        if (!fsvc_bench_start()) { sb_log("selftest: next-face: FAILED: the bench did not start"); return -1; }
+        ftest_phase = 2;
+        return 0;
+    case 2:
+        if (fsvc_busy()) return 0;
+        if (!fsvc_camera_test(4000)) { sb_log("selftest: next-face: FAILED: the camera test did not start (the camera?)"); return -1; }
+        ftest_phase = 3;
+        return 0;
+    case 3:
+        if (fsvc_busy()) return 0;
+        ftest_phase = 4;
+        if (!fsvc_result_first_frame_ms()) { sb_log("selftest: next-face: FAILED: no camera frame"); return -1; }
+        {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "selftest: next-face: the pack ");
+            ub_dec(&u, FP.len >> 10);
+            ub_s(&u, " KiB from the card in ");
+            ub_dec(&u, FP.load_ms);
+            ub_s(&u, " ms, SHA-256 good; the camera's first frame after ");
+            ub_dec(&u, (uint64_t)fsvc_result_first_frame_ms());
+            ub_s(&u, " ms (bench and camera lines above)");
+            sb_log(u.b);
+        }
+        return 1;
+    }
+    return -1;
+}
+#endif
 
 /* -- the hub's sensors (each getter keeps its sensor on for 10 s; the hub starts through survival.c) */
 int sh_light_lux(void)
@@ -3195,6 +3474,7 @@ static void drv_timer(unsigned id)
     else if (id == KT_DRV_PROX) px_tick();
     else if (id == KT_DRV_SND || id == KT_DRV_JACK) snd_tick(id);
     else if (id == KT_DRV_PREWARM) prewarm_arm(-1);
+    else if (id == KT_DRV_FACE) face_tick();
 }
 static void drv_screen(int on)
 {

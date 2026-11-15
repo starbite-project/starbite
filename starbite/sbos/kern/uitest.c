@@ -199,6 +199,9 @@ static void logline(const char *what, int a)
 int next_ready(void), gwin_selftest_step(void);     /* ui/kern_next.c, starbite/guest/next/gwin.c */
 void guest_power_off(void);
 #endif
+#ifdef SBOS_SELFTEST_NEXT_FACE
+int next_ready(void), face_selftest_step(void);     /* ui/kern_next.c: Face Unlock's test image */
+#endif
 #ifdef SBOS_SELFTEST_NEXT
 void next_selftest_begin(void);
 int next_selftest_step(void), next_selftest_ready(void), next_selftest_failed(void), next_selftest_clock_ok(void);
@@ -336,6 +339,20 @@ void selftest_timer(unsigned id)
             sb_logx(w ? "selftest: shub: the watchdog at 30 s, fed by the loop: seconds " :
                         "selftest: shub: the watchdog could not be set (the loader's stays): ", w);
             phase = 110;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
+            return;
+        }
+#endif
+#ifdef SBOS_SELFTEST_NEXT_FACE
+        {
+            /* Face Unlock (docs/FACE-UNLOCK.md), unattended, nothing written: the pack from the card
+             * (/starbite/face/sbface.pak, SHA-256 checked), the networks on a made-up frame (the A55's times), the front
+             * camera for 4 s with nobody enrolled (its first frame, the detections); the loop's turns of 100 ms or
+             * more counted; then recovery (pmsg). The watchdog at 30 s, fed by the loop. */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: next-face: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: next-face: the watchdog could not be set (the loader's stays): ", w);
+            phase = 145;
             kt_set(KT_SELFTEST, 0, sb_ms(), 1000, 0);
             return;
         }
@@ -932,6 +949,32 @@ void selftest_timer(unsigned id)
     case 43:
         active = 0;
         vib_off();
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_NEXT_FACE
+    case 145: {                             /* every 100 ms once the shell is baked; 120 s at most */
+        static uint32_t turns0;
+        static int started;
+        if (!started && next_ready()) { started = 1; turns0 = K.turns_100; }
+        int r = started ? face_selftest_step() : 0;
+        if (!r && sb_ms() - t0 < 120000U) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), 100, 0);
+            return;
+        }
+        uint32_t slow = K.turns_100 - turns0;
+        sb_logx("selftest: next-face: loop turns of 100 ms or more during the test: ", slow);
+        if (r > 0 && slow) r = -1;
+        sb_logx(r > 0 ? "selftest: next-face: PASSED; a restart into recovery (pmsg) after seconds " :
+                r < 0 ? "selftest: next-face: FAILED (see above); a restart into recovery (pmsg) after seconds " :
+                        "selftest: next-face: FAILED: not done within 120 s; a restart into recovery (pmsg) after seconds ",
+                (sb_ms() - t0) / 1000U);
+        phase = 146;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
+        return;
+    }
+    case 146:
+        active = 0;
         power_restart_recovery();
         return;
 #endif

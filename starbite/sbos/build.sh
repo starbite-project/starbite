@@ -269,7 +269,7 @@ nobjs=""
 if [ -n "$PAK" ]; then
     NFLAGS="$CFLAGS -I$ui -DSBOS_KERNEL"
     nui=""
-    for f in tk_math tk_raster tk_text tk_glass tk_comp tk_motion tk_pack tk_heap shell_lock kern_next; do
+    for f in tk_math tk_raster tk_text tk_glass tk_comp tk_motion tk_pack tk_heap shell_lock kern_next face_svc; do
         "${CROSS}gcc" $NFLAGS "$ui/$f.c" -o "$ob/n_$f.o"
         nui="$nui $ob/n_$f.o"
     done
@@ -302,6 +302,10 @@ if [ -n "$PAK" ]; then
     # Track G: Next with the unattended Cellular self test (mobile data on, HTTPS GETs, off, on again; no SMS, no calls)
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_CELL "$here/kern/uitest.c" -o "$ob/k_uitest_ncell.o"
     ncobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ncell.o#")
+    # Face Unlock's test image (unattended, nothing written): the pack from the card, the A55's times, the camera's
+    # first frame and 4 s of detections with nobody enrolled (docs/FACE-UNLOCK.md)
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_FACE "$here/kern/uitest.c" -o "$ob/k_uitest_nface.o"
+    nfobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_nface.o#")
     # 9e, USB Control Phase 0: Next with USB device mode on from the start (kern/usb.c's read-only CDC-ACM console,
     # 1209:0001 bcdDevice 3.00): does the port enumerate on the Mac from Starbite OS (attended: the Mac's "Allow" once)
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_USB_AUTO=1 "$here/kern/usb.c" -o "$ob/k_usb_auto.o"
@@ -422,10 +426,10 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
 "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
 if [ -n "$nobjs" ]; then
-    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended next-drvsound next-celltest next-cellsnd next-usb; do
+    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended next-drvsound next-celltest next-cellsnd next-usb next-facetest; do
         case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;;
         next-drvprobe) vo=$ndobjs ;; next-drvattended) vo=$ndaobjs ;; next-drvsound) vo=$ndsobjs ;; next-celltest) vo=$ncobjs ;;
-        next-cellsnd) vo=$ncsobjs ;; next-usb) vo=$nuobjs ;; *) vo=$nwobjs ;; esac
+        next-cellsnd) vo=$ncsobjs ;; next-usb) vo=$nuobjs ;; next-facetest) vo=$nfobjs ;; *) vo=$nwobjs ;; esac
         "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
         und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)
         if [ -n "$und" ]; then
@@ -447,6 +451,15 @@ if [ -n "$nobjs" ]; then
         echo "sbos: $(cat "$out/starbite-$v.img.sha256") (Starbite OS Next, $(wc -c < "$out/starbite-$v.img") bytes)"
     done
 fi
+# Face Unlock's pack (tools/face-pack.py, not in git): beside the images for the card (/starbite/face/sbface.pak)
+for c in "$root/build/face/sbface.pak" "$root/../../../build/face/sbface.pak"; do
+    if [ -f "$c" ]; then
+        cp "$c" "$out/sbface.pak"
+        sha256sum "$out/sbface.pak" | sed "s#  .*#  sbface.pak#" > "$out/sbface.pak.sha256"
+        echo "sbos: $(cat "$out/sbface.pak.sha256") (Face Unlock's pack for the card: /starbite/face/sbface.pak)"
+        break
+    fi
+done
 "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $shubprobeobjs -o "$out/starbite-os-shubprobe.elf"
 relocs_only_relative "$out/starbite-os-shubprobe.elf"
 "${CROSS}objcopy" -O binary "$out/starbite-os-shubprobe.elf" "$out/starbite-os-shubprobe.bin"

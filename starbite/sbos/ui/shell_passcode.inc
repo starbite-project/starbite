@@ -27,6 +27,22 @@ static struct {
 static tk_layer pcl, pcbg, pchead, pcdots, pckeys, pcbot, pchl;
 static tk_bmp pckey;                /* one key's glass circle, baked once a show, copied ten times */
 static float pc_hl_left;            /* cp6: the lit key's least time left (s) */
+/* Face Unlock (shell_face.inc, included at the end of this file) */
+static void fx_reset(void);
+static void fx_rescan(void);
+static void fx_stop_scan(void);
+static int fx_tick(float dt);
+static int fx_moving(void);
+static float fx_next_update(void);
+static int fx_refresh(void);
+static void fx_link(void);
+static int fx_touch(int phase, float x, float y);
+static int fx_ok(void);
+static float fx_h(void);
+static void fx_page(dc *d);
+static int fx_page_tap(float x, float y);
+static int fx_page_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col *c);
+static int fx_set(const char *key, float v);
 
 #define PC_KY 318.0f                /* the keypad's first row (its circles' tops) */
 #define PC_KP 94.0f                 /* the rows' pitch */
@@ -178,6 +194,7 @@ static void pc_kids(void)
  * under the call screen); while an app comes back on the unlock (no passcode), the lock's sliding cover over it */
 static void pc_link(void)
 {
+    fx_link();                                       /* Face Unlock's set-up: under the passcode screen */
     if (PC.built) {
         pc_kids();
         tk_layer *p = 0;
@@ -243,6 +260,7 @@ static void pc_hide(void)
 /* at once (the lock in the dark, a film's reset): nothing of it left */
 static void pc_reset(void)
 {
+    fx_reset();
     pc_hide();
     PC.a = 0;
     PC.sh = -1;
@@ -276,10 +294,12 @@ static void pc_resume_now(int under_cover)
 /* the lock's swipe up was decided (shell_lock.c's G_LOCK): 1 the passcode first (the lock stays locked), 0 unlocked */
 static int pc_unlock_begin(void)
 {
-    if (sh_pass_on()) {
+    if (sh_pass_on() && !fx_ok()) {                  /* Face Unlock's match goes straight in */
         pc_show(PCP_UNLOCK);
+        fx_rescan();                                 /* and it looks again behind the passcode screen */
         return 1;
     }
+    fx_stop_scan();
     locked = 0;
     pc_resume_now(1);
     return 0;
@@ -289,6 +309,7 @@ static int pc_holds(void) { return PC.on && locked; }
 /* the right code: unlocked, the notification's app or the kept app or home */
 static void pc_unlocked(void)
 {
+    fx_stop_scan();
     sp_lock.live = 0;
     set_lock(-H_PT);
     locked = 0;
@@ -306,7 +327,7 @@ static void pc_unlocked(void)
 /* shell_nc.inc's nc_launch from the lock: 1 the passcode first (the launch runs after the right code) */
 static int pc_gate_launch(unsigned id)
 {
-    if (!locked || !sh_pass_on()) return 0;
+    if (!locked || !sh_pass_on() || fx_ok()) return 0;
     PC.nc = 1;
     PC.nc_id = id;
     pc_show(PCP_LAUNCH);
@@ -421,6 +442,7 @@ static int pc_key_at(float x, float y)
 static int pc_touch(int phase, float x, float y, float t)
 {
     (void)t;
+    if (fx_touch(phase, x, y)) return 1;            /* Face Unlock's set-up (over everything) */
     if (!PC.on) return 0;
     if (phase == 0) {
         PC.key = pc_key_at(x, y);
@@ -477,7 +499,7 @@ static int pc_touch(int phase, float x, float y, float t)
 static int pc_tick(float dt, float t)
 {
     (void)t;
-    int mv = 0;
+    int mv = fx_tick(dt);
     if (pc_hl_left > 0) {                          /* cp6: a key's light, its least time */
         pc_hl_left -= dt;
         if (pc_hl_left <= 0) { pc_hl_left = 0; if (PC.key < 0) pchl.hidden = 1; }
@@ -518,11 +540,13 @@ static int pc_tick(float dt, float t)
     }
     return mv | PC.reorder;
 }
-static int pc_moving(void) { return PC.a != PC.at || PC.sh >= 0 || PC.ev > 0 || PC.reorder || pc_hl_left > 0; }
+static int pc_moving(void) { return PC.a != PC.at || PC.sh >= 0 || PC.ev > 0 || PC.reorder || pc_hl_left > 0 || fx_moving(); }
 /* the back-off's words change by the minute: the platform comes back then (sh_next_update / sh_refresh) */
 static float pc_next_update(float t)
 {
     (void)t;
+    float f = fx_next_update();                      /* Face Unlock: a scan's or the set-up's poll */
+    if (f >= 0) return f;
     if (!PC.on || PC.mode != PCM_WAIT) return -1;
     int w = sh_pass_wait();
     return w <= 0 ? 50 : (float)((w % 60 ? w % 60 : 60) * 1000 + 50);
@@ -530,7 +554,8 @@ static float pc_next_update(float t)
 static int pc_refresh(float t)
 {
     (void)t;
-    if (!PC.on || PC.mode != PCM_WAIT) return 0;
+    int f = fx_refresh();                            /* Face Unlock */
+    if (!PC.on || PC.mode != PCM_WAIT) return f;
     int w = sh_pass_wait(), m = (w + 59) / 60;
     if (w <= 0) {
         PC.mode = PCM_ENTER;
@@ -554,7 +579,7 @@ static int pc_refresh(float t)
 #define PC_FOOT1 "Emergency mode, SOS, the Medical Card and the torch always work without the passcode."
 #define PC_FOOT2 "The screen turns off and the phone locks after this long without a touch."
 static int pc_n1(void) { return sh_pass_on() ? 2 : 1; }
-static float pc_g2(void) { return PC_G1 + LG_ROW * pc_n1() + d_group_foot(0, 0, PC_FOOT1) + LG_GAP + 12; }
+static float pc_g2(void) { return PC_G1 + LG_ROW * pc_n1() + d_group_foot(0, 0, PC_FOOT1) + LG_GAP + 12 + fx_h(); }
 static const int PC_AL[7] = { 30, 60, 120, 180, 240, 300, 0 };
 static const char *const PC_ALN[7] = { "30 Seconds", "1 Minute", "2 Minutes", "3 Minutes", "4 Minutes", "5 Minutes", "Never" };
 static const char *pc_live(const char *s)
@@ -565,12 +590,13 @@ static const char *pc_live(const char *s)
 static void pc_page(dc *d)
 {
     d_back(d, W(1));
-    d_navtitle(d, "Passcode");                    /* (B2's row: the S9 has no Face ID) */
+    d_navtitle(d, "Face Unlock & Passcode");      /* Face Unlock: the front camera (shell_face.inc) */
     int on = sh_pass_on(), n1 = pc_n1();
     d_group(d, PC_G1, LG_ROW * n1);
     d_row(d, PC_G1, LG_ROW, 0, on ? "Turn Passcode Off" : "Turn Passcode On", 0, 0, n1 == 1, KIT_BLUE(), 0);
     if (on) d_row(d, PC_G1 + LG_ROW, LG_ROW, 0, "Change Passcode", 0, 0, 1, KIT_BLUE(), 0);
     d_group_foot(d, PC_G1 + LG_ROW * n1, PC_FOOT1);
+    fx_page(d);
     float g2 = pc_g2();
     d_group_head(d, g2, "Auto-Lock");
     d_group(d, g2, LG_ROW * 7);
@@ -612,6 +638,7 @@ static int pc_app_tap(float x, float y)
     float g2 = pc_g2();
     if (y >= PC_G1 && y < PC_G1 + LG_ROW) { pc_show(on ? PCP_OFF : PCP_SET); return 1; }
     if (on && y >= PC_G1 + LG_ROW && y < PC_G1 + 2 * LG_ROW) { pc_show(PCP_CHANGE); return 1; }
+    if (fx_page_tap(x, y)) return 1;
     if (y >= g2 && y < g2 + LG_ROW * 7) {
         int i = (int)((y - g2) / LG_ROW);
         if (PC_AL[i] != sh_autolock()) sh_haptic_k(SH_HAP_SELECT);   /* cp6: a picker's choice */
@@ -636,7 +663,7 @@ static int pc_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
         if (x < LG_X || x >= LG_RE) return 0;
         if (y >= PC_G1 && y < PC_G1 + LG_ROW * n1) return sep_row(r, g, rad, c, PC_G1 + LG_ROW * (int)((y - PC_G1) / LG_ROW), LG_ROW, PC_G1, LG_ROW * n1);
         if (y >= g2 && y < g2 + LG_ROW * 7) return sep_row(r, g, rad, c, g2 + LG_ROW * (int)((y - g2) / LG_ROW), LG_ROW, g2, LG_ROW * 7);
-        return 0;
+        return fx_page_press(x, y, r, g, rad, c);
     }
     if (top < 0) return 0;
     *r = (tk_rect){ GROUP_X, top, GROUP_W, 47 };
@@ -651,6 +678,7 @@ static int pc_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
  * passcode=settings   Settings' Face ID & Passcode page (with app=settings) */
 static int pc_set(const char *what, const char *key, float v)
 {
+    if (!tk_strcmp(what, "face")) return fx_set(key, v);   /* Face Unlock's stills (shell_face.inc) */
     if (tk_strcmp(what, "passcode")) return 0;
     if (!tk_strcmp(key, "off")) { pc_reset(); return 1; }
     if (!tk_strcmp(key, "settings")) {                       /* Settings > Face ID & Passcode (Settings open) */
@@ -685,3 +713,5 @@ void sh_save_all(void)
     for (int i = 0; APPHOOK[i].k; i++)
         if (APPHOOK[i].on_save) APPHOOK[i].on_save();
 }
+
+#include "shell_face.inc"                          /* Face Unlock: the lock's scan, Settings' group, the set-up */

@@ -12,6 +12,8 @@
  * pretend network's incoming call MS ms later) and "sms TEXT" (a message received now from a made-up number). */
 #include "../sbtk.h"
 #include "../shell.h"
+#include "../face_svc.h"
+#include "face.h"                 /* Face Unlock (ui/face_svc.c) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -438,6 +440,7 @@ int sh_pass_fails(void) { return pass_fails(); }
 int sh_pass_check(const char *d)
 {
     int r = pass_check(d, surv_host_now_ms, 0);
+    if (r == 1) fsvc_passcode(d);
     fprintf(stderr, "passcode: %s (wrong tries in a row %d, wait %u s)\n", r == 1 ? "right" : r == 0 ? "wrong" : "refused: a wait runs",
             pass_fails(), pass_wait(surv_host_now_ms));
     return r;
@@ -447,6 +450,7 @@ int sh_pass_set(const char *old, const char *nw)
     uint8_t salt[PASS_SALT];
     for (unsigned i = 0; i < PASS_SALT; i++) salt[i] = (uint8_t)rand();
     int r = pass_set(old, nw, salt, surv_host_now_ms, 0);
+    if (!r) fsvc_passcode_set(old, nw);
     fprintf(stderr, "passcode: %s\n", r ? "not changed" : pass_len() ? "set" : "removed");
     return r;
 }
@@ -686,6 +690,7 @@ static void apply_state(const char *st)
     }
     if (!strcmp(what, "comms")) { comms_fake_state(key, v); return; }          /* helper I: comms=incoming, ... */
     if (!strcmp(what, "pass")) { (void)sh_pass_set("", key); return; }         /* Track A: pass=246810 */
+    if (!strcmp(what, "faceset")) { fsvc_host_enrolled(); return; }            /* Face Unlock: faceset=: set up */
     if (!strcmp(what, "hupd")) {                 /* Track A update: hupd=none|found|bad|old|installed (the host's card) */
         static const char *const M[5] = { "none", "found", "bad", "old", "installed" };
         for (int i = 0; i < 5; i++) if (!strcmp(key, M[i])) hupd_mode = i;
@@ -893,6 +898,7 @@ static int film(tk_comp *c, const char *out, const char *script, int half)
         lin_fake_poll(t);                     /* L3: the pretend Linux (gwin_now's part on the phone) */
         comms_fake_poll(t);                   /* helper I: the pretend network (comms_now's part on the phone) */
         surv_host_now_ms = (uint64_t)t;          /* survival-next: the simulated USB burst, SOS and the clock */
+        if (fsvc_busy()) fsvc_tick();            /* Face Unlock (the phone: its own timer) */
         int mv = sh_tick(dt / 1000, t);
         double shell_ms = (tk_us() - sh0) / 1000.0, shell_cpu = cpu_ms() - cpu0;
         int motion = mv || sh_moving();
@@ -1259,6 +1265,87 @@ void sh_cam_close(void)
     HCAM.on = 0;
     HCAM.still = 0;
 }
+/* Face Unlock (ui/face_svc.c, the phone's own logic): the host's camera fake has no face, so without a pack scans are
+ * faked: SBTK_FACE=fail makes them fail, anything else matches after 0.3 s. SBTK_FACE_PACK=build/face/sbface.pak runs
+ * the real networks on the fake frames (no face: "no face"). */
+static uint64_t hf_now_ms(void) { return surv_host_now_ms; }
+static uint64_t hf_now_us(void) { return tk_us(); }
+static void *hf_alloc(size_t n) { return tk_alloc(n); }
+static int hf_cam_open(unsigned w, unsigned h) { return sh_cam_open((int)w, (int)h); }
+static const uint32_t *hf_cam_frame(unsigned *seq) { return sh_cam_frame(0, 0, seq); }
+static void hf_cam_close(void) { sh_cam_close(); }
+static void hf_random(uint8_t *p, unsigned n) { for (unsigned i = 0; i < n; i++) p[i] = (uint8_t)rand(); }
+static void hf_log(const char *l) { fprintf(stderr, "%s\n", l); }
+static const uint8_t *hf_pak;                   /* the file (outside the UI heap) */
+static size_t hf_pak_len;
+static uint8_t *hf_res;                         /* the copy in the UI heap while resident (the phone's load) */
+static struct face_eng hf_eng;                  /* SBTK_FACE_HOLD: a scan's buffers held with it (the heap check's worst case) */
+static int hf_eng_on;
+static struct fsvc_plat hf_plat;
+static int hf_pack_get(const uint8_t **p, size_t *n)
+{
+    if (!hf_pak) return -1;
+    if (!hf_res) {
+        hf_res = tk_alloc(hf_pak_len);
+        if (!hf_res) return -1;
+        memcpy(hf_res, hf_pak, hf_pak_len);
+        fprintf(stderr, "face: the pack in the UI heap: %zu KiB\n", hf_pak_len >> 10);
+        if (getenv("SBTK_FACE_HOLD") && face_eng_open(&hf_eng, hf_res, hf_pak_len, &hf_plat.fn) == 0) {
+            hf_eng_on = 1;
+            fprintf(stderr, "face: a scan's buffers held too (SBTK_FACE_HOLD)\n");
+        }
+    }
+    *p = hf_res;
+    *n = hf_pak_len;
+    return 1;
+}
+static int hf_pack_state(void) { return !hf_pak ? -1 : hf_res ? 2 : 0; }
+static void hf_pack_release(void)
+{
+    if (hf_eng_on) face_eng_close(&hf_eng);
+    hf_eng_on = 0;
+    if (hf_res) { tk_free(hf_res); fprintf(stderr, "face: pack freed (unlock): %zu KiB back\n", hf_pak_len >> 10); }
+    hf_res = 0;
+}
+static void face_host_init(void)
+{
+    struct fsvc_plat p;
+    memset(&p, 0, sizeof p);
+    const char *fp = getenv("SBTK_FACE_PACK");
+    if (fp) {
+        FILE *f = fopen(fp, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long n = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            uint8_t *b = NULL;
+            if (n > 0 && !posix_memalign((void **)&b, 64, (size_t)n) && fread(b, 1, (size_t)n, f) == (size_t)n) { hf_pak = b; hf_pak_len = (size_t)n; }
+            fclose(f);
+        }
+    }
+    p.fake = hf_pak ? 0 : hd_env("SBTK_FACE", "fail") ? 2 : 1;
+    p.pack_get = hf_pack_get;
+    p.pack_state = hf_pack_state;
+    p.pack_release = hf_pack_release;
+    p.fn.alloc = hf_alloc;
+    p.fn.free = tk_free;
+    p.fn.now_us = hf_now_us;
+    p.now_ms = hf_now_ms;
+    p.cam_open = hf_cam_open;
+    p.cam_frame = hf_cam_frame;
+    p.cam_close = hf_cam_close;
+    p.blob_get = sh_blob_get;
+    p.blob_put = sh_blob_put;
+    p.pref_int = sh_pref_int;
+    p.pref_set_int = sh_pref_set_int;
+    p.random = hf_random;
+    p.pass_on = sh_pass_on;
+    p.pass_wait = sh_pass_wait;
+    p.log = hf_log;
+    hf_plat = p;
+    fsvc_init(&p);
+    if (getenv("SBTK_FACE_HOLD")) sh_face_prepare();   /* the heap check: the pack (+ a scan's buffers) from the start, as when locked */
+}
 /* the sensors: an office (about 320 lux, 1013.2 hPa), the phone on a desk */
 int sh_light_lux(void) { return 320 + (int)(hd_now() / 700 % 9) - 4; }
 int sh_pressure_hpa10(void) { return 10132 + (int)(hd_now() / 5000 % 3) - 1; }
@@ -1493,6 +1580,7 @@ int main(int argc, char **argv)
     host_memdump("bake");
     lin_fake_init();
     hp_load();                                 /* Track A: SBTK_PREFS's store, then what the shell keeps */
+    face_host_init();
     sh_restore();
     if (!strcmp(argv[2], "still") && argc >= 4) {
         for (int i = 4; i < argc; i++) { apply_state(argv[i]); lin_fake_settle(); }
