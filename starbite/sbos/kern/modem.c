@@ -1056,7 +1056,8 @@ static int au_hal_set, au_amp, au_codec, au_abox, au_vss, au_on, au_speaker;
  * Weak: a kernel without snd.c links, and these are then skipped. */
 void snd_suspend_for_call(void) __attribute__((weak));
 void snd_resume_after_call(void) __attribute__((weak));
-static int au_snd_held;
+void snd_calliope_shared(int on) __attribute__((weak));   /* 9a */
+static int au_snd_held, au_snd_call;          /* 9a: Calliope shared with media; media paused for a call's routes */
 
 static long au_file(void *ctx, const char *path, void *dst, uint32_t cap)
 {
@@ -1082,7 +1083,12 @@ static void audio_prepare(void)
 {
     if (!au_snd_held) {
         au_snd_held = 1;
-        if (snd_suspend_for_call) {         /* before our HAL is set: a pending media boot finishes on snd's */
+        /* before our HAL is set: a pending media boot finishes on snd's. 9a (main 11-15): media is not paused for
+         * all of Cellular any more (no ringtone, no alarm sound): it plays through our Calliope while no call routes */
+        if (snd_calliope_shared) {
+            snd_calliope_shared(1);
+            sb_log("audio: media sound shares Calliope with Cellular (paused only while a call's audio is routed)");
+        } else if (snd_suspend_for_call) {
             snd_suspend_for_call();
             sb_log("audio: media sound paused while Cellular is on (ABOX is the modem's)");
         }
@@ -1140,6 +1146,11 @@ static void audio_route(int on)
         return;
     if (on) {
         int sp = kc.audio == KAUDIO_SPEAKER;
+        if (!au_on && snd_calliope_shared && snd_suspend_for_call && !au_snd_call) {
+            snd_suspend_for_call();          /* 9a: the ringtone / media off before the call takes the routes */
+            au_snd_call = 1;
+            sb_log("audio: media sound paused for the call");
+        }
         if (!au_on && au_abox == 1)
             au_log("ABOX call routes", abox_call(1), abox_why());
         if (au_amp == 1) {
@@ -1164,6 +1175,11 @@ static void audio_route(int on)
             abox_call(0);
         au_on = 0;
         sb_log("audio: the call's routes off");
+        if (au_snd_call) {                   /* 9a: media through Calliope again while Cellular stays on */
+            au_snd_call = 0;
+            if (snd_resume_after_call)
+                snd_resume_after_call();
+        }
     }
 }
 
@@ -1172,6 +1188,8 @@ static void audio_stop(void)
     if (au_on)
         audio_route(0);
     kt_cancel(KT_MODEM, 7);
+    if (au_snd_held && snd_calliope_shared)
+        snd_calliope_shared(0);             /* 9a: media stopped cleanly before Calliope goes */
     if (au_abox == 1) {
         abox_off();
         sb_log("audio: ABOX off (with the modem)");

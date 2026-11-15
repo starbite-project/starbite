@@ -122,6 +122,14 @@ int snd_busy(void);                     /* 1: poll every 5 ms */
 /* calls: modem.c calls these two around abox_boot() / abox_off() */
 void snd_suspend_for_call(void);
 void snd_resume_after_call(void);
+/* 9a (main 11-15: ringing calls and alarms with Cellular on): Cellular holds Calliope (the CP's VSS needs it booted
+ * before the CP starts) for as long as it runs, not only during a call. snd_calliope_shared(1) when Cellular starts
+ * (before the modem's abox_boot: as snd_suspend_for_call, media stopped and a staged boot of snd's finished), but
+ * media is NOT paused: tones and streams play through the modem's Calliope (RDMA0, UAIF1 / UAIF0) while no call routes;
+ * snd never boots it or switches it off then. The modem calls snd_suspend_for_call / snd_resume_after_call around a
+ * call's routes only. snd_calliope_shared(0) when Cellular stops, before its abox_off(): media stopped, Calliope the
+ * modem's to switch off; snd boots its own again on the next sound. */
+void snd_calliope_shared(int on);
 
 const char *snd_why(void);              /* plain words for the UI: what sound is doing or why it is not */
 

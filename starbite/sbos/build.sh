@@ -296,6 +296,9 @@ if [ -n "$PAK" ]; then
     # drivers track: the quiet daytime sound image (snd's engine and Calliope up to level 2; the mic checks the tones)
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_DRV -DSBOS_SELFTEST_NEXT_DRV_SOUND "$here/kern/uitest.c" -o "$ob/k_uitest_ndrvs.o"
     ndsobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrvs.o#")
+    # 9a: Next's sound with Cellular on (DAYTIME only: three key clicks through the modem's Calliope, then on snd's own)
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_CELLSND "$here/kern/uitest.c" -o "$ob/k_uitest_ncellsnd.o"
+    ncsobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ncellsnd.o#")
     # Track G: Next with the unattended Cellular self test (mobile data on, HTTPS GETs, off, on again; no SMS, no calls)
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_CELL "$here/kern/uitest.c" -o "$ob/k_uitest_ncell.o"
     ncobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ncell.o#")
@@ -415,9 +418,10 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
 "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
 if [ -n "$nobjs" ]; then
-    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended next-drvsound next-celltest; do
+    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended next-drvsound next-celltest next-cellsnd; do
         case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;;
-        next-drvprobe) vo=$ndobjs ;; next-drvattended) vo=$ndaobjs ;; next-drvsound) vo=$ndsobjs ;; next-celltest) vo=$ncobjs ;; *) vo=$nwobjs ;; esac
+        next-drvprobe) vo=$ndobjs ;; next-drvattended) vo=$ndaobjs ;; next-drvsound) vo=$ndsobjs ;; next-celltest) vo=$ncobjs ;;
+        next-cellsnd) vo=$ncsobjs ;; *) vo=$nwobjs ;; esac
         "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
         und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)
         if [ -n "$und" ]; then

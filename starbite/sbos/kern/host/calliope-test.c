@@ -1457,6 +1457,61 @@ static void test_vss_guard(void)
     drv_audio_abort();
 }
 
+/* 9a (main 11-15): Cellular holds Calliope for as long as it runs (snd_calliope_shared): the ringtone and the alarm
+ * play through it while no call routes; snd pauses for a call's routes only; never boots or switches it off then;
+ * Cellular off hands media back (snd boots its own again) */
+static void test_snd_shared(void)
+{
+    snd_setup();
+    snd_calliope_shared(1);                                 /* Cellular starts, before the modem's abox_boot */
+    CHECK(logged("Calliope is the modem's while Cellular runs"), "shared: not said");
+    CHECK(snd_tone(SND_TONE_RING) == 0, "shared: a tone before the modem's Calliope is up");
+    polls(300);
+    CHECK(abox_state() == ABOX_ST_OFF && !F.r_run && !logged("engine: Calliope booted for media"),
+          "shared: snd booted Calliope under the modem (state %d)", abox_state());
+    CHECK(abox_boot() == 0 && abox_state() == ABOX_ST_READY, "shared: the modem's boot (state %d)", abox_state());
+    CHECK(abox_vss_start() == 0 && abox_vss_started(), "shared: VSS");
+    CHECK(snd_tone(SND_TONE_RING) == 0, "shared: the ringtone");
+    polls(2500);                                            /* (the earlier refusal's retry time first) */
+    CHECK(F.r_run && spk_on && ring_nonzero(), "shared: the ringtone does not play through the modem's Calliope");
+    /* the call is answered: media paused before its routes (modem.c's audio_route) */
+    snd_suspend_for_call();
+    CHECK(!F.r_run && !spk_on && abox_state() == ABOX_ST_READY, "shared: not paused for the call");
+    CHECK(abox_call(1) == 0, "shared: the call's routes");
+    CHECK(snd_tone(SND_TONE_NOTIFY) == 0, "shared: a tone during the call");
+    polls(300);
+    CHECK(!F.r_run, "shared: media played during the call");
+    snd_tone_stop();
+    CHECK(abox_call(0) == 0, "shared: the call's routes off");
+    snd_resume_after_call();
+    CHECK(snd_tone(SND_TONE_ALARM) == 0, "shared: the alarm after the call");
+    polls(300);
+    CHECK(F.r_run && spk_on, "shared: no alarm through the modem's Calliope after the call");
+    snd_tone_stop();
+    polls(2600);
+    CHECK(!F.r_run && abox_state() == ABOX_ST_READY, "shared: the stream did not stop");
+    polls(31000);
+    CHECK(abox_state() == ABOX_ST_READY && !logged("Calliope off (30 s"), "shared: snd switched the modem's Calliope off");
+    /* Cellular stops while a tone plays: stopped cleanly first, then the modem's abox_off */
+    CHECK(snd_tone(SND_TONE_TEST) == 0, "shared: tone 3");
+    polls(300);
+    CHECK(F.r_run, "shared: tone 3 not playing");
+    snd_calliope_shared(0);
+    CHECK(!F.r_run && !spk_on && logged("Calliope goes with the modem"), "shared: not stopped before the modem's off");
+    abox_off();
+    polls(50);
+    CHECK(!logged("Calliope stopped while media played"), "shared: a dropped stream instead of a clean stop");
+    CHECK(snd_tone(SND_TONE_TEST) == 0, "shared: tone 4");
+    polls(800);
+    CHECK(F.r_run && logged("engine: Calliope booted for media"), "shared: snd does not boot its own after Cellular");
+    snd_tone_stop();
+    polls(2600);
+    abox_off();
+    polls(50);
+    CHECK(abox_state() == ABOX_ST_OFF && F.violations == 0 && !logged("REFUSED"), "shared: end state");
+    drv_audio_abort();
+}
+
 int main(int argc, char **argv)
 {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
@@ -1476,6 +1531,7 @@ int main(int argc, char **argv)
     test_snd_probe();
     test_probe_order();
     test_vss_guard();
+    test_snd_shared();
     printf("calliope host test: %d checks, %d failed\n", checks, fails);
     free(F.w);
     free(F.rmem);

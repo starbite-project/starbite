@@ -45,6 +45,37 @@ const int sbos_selftest_enabled = 0;
 
 #define STEP_MS 700U
 
+#ifdef SBOS_SELFTEST_NEXT_CELLSND
+#include "abox.h"                       /* 9a: the modem's Calliope (abox_state) */
+#include "snd.h"
+int sh_snd_tone(int kind);              /* kern_next.c's: snd up on the first sound */
+static struct snd_stats cs_s0;
+static uint64_t cs_t;
+static int cs_fail, cs_after;
+static void cs_log(const char *what, const struct snd_stats *a, const struct snd_stats *b)
+{
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "selftest: next-cellsnd: ");
+    ub_s(&u, what);
+    ub_s(&u, ": periods ");
+    ub_dec(&u, b->periods - a->periods);
+    ub_s(&u, ", starts ");
+    ub_dec(&u, b->starts - a->starts);
+    ub_s(&u, ", xruns ");
+    ub_dec(&u, b->xruns - a->xruns);
+    ub_s(&u, "; ABOX state ");
+    ub_dec(&u, (uint64_t)abox_state());
+    ub_s(&u, ", VSS ");
+    ub_dec(&u, (uint64_t)abox_vss_started());
+    sb_log(u.b);
+}
+static void cs_clicks(void)                 /* three key clicks, the quietest sound there is: RDMA0 runs 2 s after */
+{
+    (void)sh_snd_tone(SND_TONE_CLICK);
+}
+#endif
+
 #if defined(SBOS_SELFTEST_GUEST) || defined(SB_HOST)
 #define GST_BUILD 1
 #include "sbui.h"
@@ -196,6 +227,10 @@ void selftest_input(void)
     if (phase == 120)
         kmodem_selftest_abort();            /* stopped mid-test: Cellular off (data off, detach, park) */
 #endif
+#ifdef SBOS_SELFTEST_NEXT_CELLSND
+    if (phase >= 130 && phase <= 135)
+        kmodem_selftest_abort();            /* 9a: stopped mid-test: Cellular off */
+#endif
 #if defined(SBOS_SELFTEST_SHUBPROBE) || defined(SBOS_SELFTEST_SHUB)
     shub_leave();                           /* stopped mid-probe: the hub in standby, every register as found */
 #endif
@@ -329,6 +364,20 @@ void selftest_timer(unsigned id)
             drv_run_begin(0);
 #endif
             phase = 85;
+            kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
+            return;
+        }
+#endif
+#ifdef SBOS_SELFTEST_NEXT_CELLSND
+        {
+            /* 9a (main 11-15, DAYTIME only: a sound): Starbite's own sounds while Cellular holds Calliope. Cellular on
+             * (unattended data, the user's consent 2026-11-11; without a SIM the modem's start alone: its Calliope is
+             * booted before the SIM is read), three key clicks through the modem's Calliope (RDMA0 must run), Cellular
+             * off, three clicks again (snd's own Calliope); then recovery (pmsg). The watchdog at 30 s. */
+            unsigned w = hw_wdt_selftest(30);
+            sb_logx(w ? "selftest: next-cellsnd: the watchdog at 30 s, fed by the loop: seconds " :
+                        "selftest: next-cellsnd: the watchdog could not be set (the loader's stays): ", w);
+            phase = 130;
             kt_set(KT_SELFTEST, 0, sb_ms(), 3000, 0);
             return;
         }
@@ -926,6 +975,98 @@ void selftest_timer(unsigned id)
     case 86:
         active = 0;
         drv_run_abort();
+        power_restart_recovery();
+        return;
+#endif
+#ifdef SBOS_SELFTEST_NEXT_CELLSND
+    case 130:                               /* Cellular on */
+        if (kmodem_selftest_data(1) != 0) {
+            sb_log("selftest: next-cellsnd: FAILED: Cellular did not start");
+            cs_fail = 1;
+            phase = 136;
+        } else {
+            sb_log("selftest: next-cellsnd: Cellular on; waiting for the modem's Calliope (ABOX + VSS)");
+            cs_t = sb_ms();
+            phase = 131;
+        }
+        kt_set(KT_SELFTEST, 0, sb_ms(), 200, 0);
+        return;
+    case 131: {                             /* the modem's Calliope up (booted before the CP starts) */
+        if (kmodem_on() && abox_state() == ABOX_ST_READY && sb_ms() - cs_t > 3000) {
+            sb_logx("selftest: next-cellsnd: the modem's Calliope is up after ms ", sb_ms() - cs_t);
+            snd_stats(&cs_s0);
+            cs_clicks();
+            cs_t = sb_ms();
+            phase = 132;
+        } else if (sb_ms() - cs_t > 30000 || (!kmodem_on() && sb_ms() - cs_t > 5000)) {
+            sb_log("selftest: next-cellsnd: FAILED: the modem's Calliope did not come up within 30 s (or the modem "
+                   "stopped first)");
+            cs_fail = 1;
+            phase = 134;
+        }
+        kt_set(KT_SELFTEST, 0, sb_ms(), 200, 0);
+        return;
+    }
+    case 132:                               /* two more clicks, 300 ms apart; then the count */
+        if (sb_ms() - cs_t < 900) {
+            cs_clicks();
+            kt_set(KT_SELFTEST, 0, sb_ms(), 300, 0);
+            return;
+        }
+        {
+            struct snd_stats s;
+            snd_stats(&s);
+            int moved = s.periods - cs_s0.periods >= 20 && s.starts > cs_s0.starts;
+            cs_log(moved ? "PASS: clicks through the modem's Calliope with Cellular on" :
+                           "FAILED: no sound with Cellular on", &cs_s0, &s);
+            if (!moved)
+                cs_fail = 1;
+        }
+        phase = 134;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 2500, 0);   /* (the stream's 2 s of silence first) */
+        return;
+    case 134:                               /* Cellular off */
+        (void)kmodem_selftest_data(0);
+        cs_t = sb_ms();
+        phase = 135;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 500, 0);
+        return;
+    case 135:                               /* off, then clicks on snd's own Calliope */
+        if (kmodem_on() && sb_ms() - cs_t < 15000) {
+            kt_set(KT_SELFTEST, 0, sb_ms(), 500, 0);
+            return;
+        }
+        sb_logx(kmodem_on() ? "selftest: next-cellsnd: Cellular not off within 15 s; ms " :
+                              "selftest: next-cellsnd: Cellular off after ms ", sb_ms() - cs_t);
+        snd_stats(&cs_s0);
+        cs_clicks();
+        cs_t = sb_ms();
+        cs_after = 1;
+        phase = 136;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 2500, 0);   /* (snd boots its own Calliope: ~1.5 s) */
+        return;
+    case 136:
+        if (cs_after) {
+            struct snd_stats s;
+            snd_stats(&s);
+            if (s.starts == cs_s0.starts && sb_ms() - cs_t < 6000) {   /* the first click started the boot: again */
+                cs_clicks();
+                kt_set(KT_SELFTEST, 0, sb_ms(), 1500, 0);
+                return;
+            }
+            int ok = s.starts > cs_s0.starts && s.periods - cs_s0.periods >= 20;
+            cs_log(ok ? "after Cellular: clicks on snd's own Calliope" : "after Cellular: FAILED: no sound", &cs_s0, &s);
+            if (!ok)
+                cs_fail = 1;
+        }
+        sb_logx(cs_fail ? "selftest: next-cellsnd: FAILED (see above); a restart into recovery (pmsg) after seconds " :
+                          "selftest: next-cellsnd: PASSED; a restart into recovery (pmsg) after seconds ",
+                (sb_ms() - t0) / 1000U);
+        phase = 137;
+        kt_set(KT_SELFTEST, 0, sb_ms(), 2000, 0);
+        return;
+    case 137:
+        active = 0;
         power_restart_recovery();
         return;
 #endif

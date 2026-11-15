@@ -139,6 +139,8 @@ static struct {
     int cal_boot, cal_settling, cap_want;   /* snd's staged boot pending; its 300 ms settle; a capture waits for it */
     uint64_t cal_t0, cal_settle_at;
     int cc;                                 /* capture runs through Calliope (WDMA1) */
+    int modem;                              /* 9a: Cellular holds Calliope (snd_calliope_shared): snd never boots or
+                                             * switches it off, and plays through it while no call routes */
     int silent;                             /* the probe's silent run: output_on() leaves the amps / codec off */
     uint64_t cal_off_at;
     unsigned vol[4];
@@ -790,6 +792,8 @@ static int cal_up(void)
         return SND_EBUSY;
     if (st == ABOX_ST_READY || st == ABOX_ST_CALL)
         return 0;
+    if (G.modem)                                    /* 9a: the modem's Calliope is not up (yet, or it failed) */
+        return SND_EBUSY;
     G.cal_t0 = now();
     (void)cal_map();                                /* again: a probe may have taken its own windows away */
     /* snd's own HAL for its boot (its RAM copy, file_part), also when another user (the Calliope probe, the modem)
@@ -1240,7 +1244,8 @@ void snd_poll(uint64_t t)
         cal_cap_stop();
         if (G.cc && G.cap_codec && O.codec_mic)
             (void)O.codec_mic(0);
-        abox_off();
+        if (!G.modem)                           /* 9a: the modem's Calliope: its own poll sees it and stops */
+            abox_off();
         G.eng = G.ce = G.cal_own = 0;
         if (G.cc)
             G.cap = G.cc = G.cap_codec = 0;
@@ -1351,6 +1356,31 @@ void snd_suspend_for_call(void)
         say("call: media sound stopped and ABOX given back");
     }
     why("Sound is paused for a call");
+}
+
+void snd_calliope_shared(int on)
+{
+    if (!inited)
+        return;
+    if (on) {
+        snd_suspend_for_call();                 /* media stopped, a staged boot finished, Calliope not ours */
+        G.suspended = 0;                        /* ... but media plays through the modem's Calliope */
+        G.modem = 1;
+        G.retry_at = 0;
+        say("cellular: Calliope is the modem's while Cellular runs: media plays through it while no call routes");
+        why("Sound is ready (nothing playing)");
+        return;
+    }
+    if (!G.modem)
+        return;
+    if (G.ce || G.cc || G.eng || G.cap)
+        snd_suspend_for_call();                 /* before the modem's abox_off(): stopped cleanly, not dropped */
+    G.suspended = 0;
+    G.modem = 0;
+    G.cal_own = 0;
+    G.retry_at = 0;
+    say("cellular: off: Calliope goes with the modem; media boots its own again");
+    why("Sound is ready (nothing playing)");
 }
 
 void snd_resume_after_call(void)
