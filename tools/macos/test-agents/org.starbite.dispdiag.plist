@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.starbite.dispdiag</string>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>echo 'SBDISP start' &gt;/dev/console; sleep 40; (/usr/sbin/system_profiler SPDisplaysDataType 2&gt;&amp;1 | /usr/bin/head -60 &gt;/dev/console; echo 'SBDISP profiler done' &gt;/dev/console) &amp; sleep 50; (/usr/bin/log show --last 5m --style compact --predicate 'process == "WindowServer" AND eventMessage CONTAINS "Display:"' 2&gt;&amp;1 | /usr/bin/tail -150 &gt;/dev/console; echo 'SBDISP log done' &gt;/dev/console) &amp; sleep 50; echo 'SBDISP open System Settings' &gt;/dev/console; /usr/bin/open -a 'System Settings' 2&gt;/dev/console; echo 'SBDISP done' &gt;/dev/console</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+</dict>
+</plist>

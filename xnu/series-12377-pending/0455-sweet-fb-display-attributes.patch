@@ -1,0 +1,63 @@
+0455: AppleCLCD publishes DisplayAttributes (ProductAttributes: LegacyManufacturerID 0x4c83, ProductID 0x960, names; 6 x 13 cm), as a Mac's AppleCLCD2 does. WindowServer finds the display's override file by these IDs; that file selects the 2x (Retina) default. sweetfb_attrs=0 turns it off.
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -362,6 +362,58 @@
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++	/*
++	 * 0455: the panel's identity and size, the way a Mac's AppleCLCD2 publishes them ("DisplayAttributes":
++	 * QuartzCore reads it with IOMobileFramebufferCopyProperty, a registry search). WindowServer finds a
++	 * display's override file by these IDs (/Library/Displays/Contents/Resources/Overrides/
++	 * DisplayVendorID-4c83/DisplayProductID-960: scaled modes and the default point density), which is how
++	 * the 2x (Retina) mode gets chosen: a panel under 6.5 inches wide is otherwise taken for 72 dpi (S3zr).
++	 * Vendor = Samsung Display ("SDC", EDID id 0x4c83), product 0x960 (SM-G960), 6 x 13 cm. sweetfb_attrs=0: off.
++	 */
++	{
++		uint32_t attrs_on = 1;
++		PE_parse_boot_argn("sweetfb_attrs", &attrs_on, sizeof(attrs_on));
++		OSDictionary *attrs = attrs_on ? OSDictionary::withCapacity(8) : NULL;
++		OSDictionary *prod = attrs_on ? OSDictionary::withCapacity(8) : NULL;
++		if (attrs != NULL && prod != NULL) {
++			static const struct { const char *key; uint32_t value; } pn[] = {
++				{ "LegacyManufacturerID", 0x4c83 }, { "ProductID", 0x960 }, { "YearOfManufacture", 2018 },
++				{ "WeekOfManufacture", 10 }, { "SerialNumber", 0 },
++			}, an[] = {
++				{ "MaxHorizontalImageSize", 6 }, { "MaxVerticalImageSize", 13 }, { "MaximumRefreshRate", 60 },
++			};
++			for (unsigned int i = 0; i < sizeof(pn) / sizeof(pn[0]); i++) {
++				OSNumber *n = OSNumber::withNumber(pn[i].value, 32);
++				if (n != NULL) {
++					prod->setObject(pn[i].key, n);
++					n->release();
++				}
++			}
++			for (unsigned int i = 0; i < sizeof(an) / sizeof(an[0]); i++) {
++				OSNumber *n = OSNumber::withNumber(an[i].value, 32);
++				if (n != NULL) {
++					attrs->setObject(an[i].key, n);
++					n->release();
++				}
++			}
++			OSString *s = OSString::withCString("SDC");
++			if (s != NULL) {
++				prod->setObject("ManufacturerID", s);
++				s->release();
++			}
++			s = OSString::withCString("Galaxy S9");
++			if (s != NULL) {
++				prod->setObject("ProductName", s);
++				s->release();
++			}
++			attrs->setObject("ProductAttributes", prod);
++			setProperty("DisplayAttributes", attrs);
++		}
++		OSSafeReleaseNULL(attrs);
++		OSSafeReleaseNULL(prod);
++	}
++#endif
+ 	registerService();
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
