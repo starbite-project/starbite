@@ -652,8 +652,13 @@ static int load_step(void)
         ls = LS_CARD;
         break;
     case LS_CARD:
-        if (gcard_tick())
+        if (gcard_tick()) {
             ls = LS_FS;
+            if (gcard_missing()) {          /* 9c: no root on the card: said now, not a guest waiting for ever */
+                why = gcard_missing();
+                r = -5;
+            }
+        }
         break;
     case LS_FS:
 #ifdef GUEST_FS_H

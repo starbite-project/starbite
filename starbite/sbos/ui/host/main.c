@@ -645,6 +645,12 @@ static void apply_state(const char *st)
     else snprintf(key, sizeof key, "%s", eq + 1);   /* helper D: a long notification text fits */
     /* date=WDAY:DAY (P3p): a new day as the phone's clock reports it (the Calendar icon follows) */
     if (!strcmp(what, "calls")) { sh_cell_calls((int)v); return; }   /* 8z: calls=:1 "Calls and SMS" on (pretend registered) */
+    if (!strcmp(what, "chg")) {                     /* 9c: chg=:MA charging at MA mA (chg=:-1 hot, :-2 full, :0 unplugged) */
+        int st = v == 0 ? 0 : v == -1 ? 2 : v == -2 ? 4 : 1;
+        sh_charge((int)v, 3000, st);
+        sh_sysinfo(st != 0, "Starbite OS Next");
+        return;
+    }
     if (!strcmp(what, "batt")) { sh_status(21, 6, 2, 10, 11, (int)v, 41); return; }   /* 8x: batt=:N a new charge (the widgets' minute rebuild) */
     if (!strcmp(what, "date")) { sh_status(21, 6, atoi(key), (int)v, 11, 87, 41); return; }
     if (!strcmp(what, "hostms")) { surv_host_now_ms = (uint64_t)v; return; }   /* survival-next: the simulation's clock */

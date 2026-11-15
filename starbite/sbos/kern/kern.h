@@ -20,7 +20,7 @@ int sbos_safe_start(void);           /* Track A, 1.0: this start is a safe start
 
 /* ---- timers (timer.c, pure) ------------------------------------------------------------------ */
 /* Owners: kernel tasks 0..15, apps 16 + app index. */
-enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_MODEM, KT_SURV, KT_USB /* usb.c */, KT_APP0 = 16 };
+enum { KT_INPUT = 0, KT_UI, KT_POWER, KT_BATTERY, KT_HEATER, KT_SOS, KT_HOUSE, KT_CLOCK, KT_SELFTEST, KT_STATE, KT_WIFI, KT_GUEST, KT_MODEM, KT_SURV, KT_USB /* usb.c */, KT_CHARGE /* charge.c */, KT_APP0 = 16 };
 #define KT_MAX 64
 #define KT_RESERVE 24                /* entries apps cannot take: the kernel's tasks always get theirs */
 struct ktimer {
@@ -909,6 +909,17 @@ void kmodem_get_apn(char *out, unsigned cap);
 int kmodem_cellular(int on);
 #define KMODEM_CALLS_ONLY 1                /* 8z: kmodem_calls: registered for calls and SMS, no data context */
 int kmodem_calls(int on);
+
+/* Track A 9c: charging as stock (charge.c): the charger watchdog fed, the stock input / charge currents for the
+ * source, the cell's temperature limits (45 C stop), a "charge: ..." log line a minute with a cable in */
+struct kcharge {
+    int32_t in, src;                /* src: 1 SDP, 2 CDP, 3 DCP, 4 USB-C 1.5 A, 5 USB-C 3.0 A, 6 unknown */
+    int32_t stopped_hot, stopped_cold;
+    int32_t il_ma, cc_ma, dtls, iin_ma;
+};
+void charge_init(void);
+void charge_timer(unsigned id);
+void charge_get(struct kcharge *k);
 int kmodem_selftest_phase(int *done);  /* next-celltest (unattended data): every 500 ms; *done at the end, 0 = failed */
 void kmodem_selftest_abort(void);      /* next-celltest stopped by a touch or key: Cellular off */
 int kmodem_selftest_data(int on);      /* 8l: the linuxtest's mobile data on / off (unattended; state: kmodem_cell) */

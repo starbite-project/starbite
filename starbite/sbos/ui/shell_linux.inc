@@ -385,6 +385,7 @@ static void lx_build_kb(int on, int shift, int num)
     KB.want = on;
     kb_set(on);
 }
+static int lx_prefix(const char *s, const char *p) { while (*p && *s == *p) s++, p++; return !*p; }
 static void lx_build_state(void)
 {
     relayer(&aplst);
@@ -400,7 +401,14 @@ static void lx_build_state(void)
     if (!lx_is_lin() || (LX.state == SH_LINUX_RUNNING && LX.got)) return;
     char t[64], l[96];
     const char *nm = LX.name[0] ? LX.name : "the app";
-    if (LX.state == SH_LINUX_FAILED) { lx_scopy(t, "Linux Didn't Start", 64); lx_scopy(l, LX.why[0] ? LX.why : "The big cores did not start.", 96); }
+    if (LX.state == SH_LINUX_FAILED && lx_prefix(LX.why, "Linux isn't installed")) {
+        /* 9c (guest-card.h GCARD_NO_*): the card has no Linux: said plainly, not "Didn't Start" */
+        lx_scopy(t, "Linux Isn't Installed", 64);
+        lx_scopy(l, "This microSD card has no Linux files (starbite/linux on the card).", 96);
+    } else if (LX.state == SH_LINUX_FAILED && lx_prefix(LX.why, "There's no microSD card")) {
+        lx_scopy(t, "No microSD Card", 64);
+        lx_scopy(l, "Linux apps run from the microSD card. Put the card in and open the app again.", 96);
+    } else if (LX.state == SH_LINUX_FAILED) { lx_scopy(t, "Linux Didn't Start", 64); lx_scopy(l, LX.why[0] ? LX.why : "The big cores did not start.", 96); }
     else if (LX.state == SH_LINUX_OFF || LX.state == SH_LINUX_STOPPING) {
         lx_scopy(t, LX.state == SH_LINUX_OFF ? "Linux Is Off" : "Linux Is Stopping", 64);
         lx_scopy(l, "Open the app again to start it.", 96);

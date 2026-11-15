@@ -420,6 +420,10 @@ static void prep_tree(tk_layer *l);   /* P3g: home's half copies again right aft
 static void build_apsb(void);
 static int sys_charging;           /* P2y: sh_sysinfo's (the status bar's battery is green while charging) */
 #define SYS_CHARGING() sys_charging
+/* Track A 9c: the charge as it really goes (sh_charge, once a minute): the Battery widget's and the Battery app's
+ * "Charging" ("+38 %/h", "Full", "Paused", "+0 %/h"; "Yes" until the first report), Settings > Battery's
+ * "Charge Rate" (the current too) */
+static char sys_rate[16] = "Yes", sys_rate_long[48] = "";
 static void d_text_box(dc *d, int f, float size, float x, float base, float maxw, int align, const char *s, float ls, int fl, tk_col c, int shadow);
 /* P3p (P3j-5): iOS's status bar metrics: the left text 17 pt / 600 at MARGIN + 16, cap-centred on y 30 (baseline
  * 36.2); the battery centred on y 30 with its right edge at 390 - MARGIN - 16; the Wi-Fi glyph and the bars (with
@@ -1556,7 +1560,7 @@ static void home_w_part(int k)
         char tb[12];
         int tn = put_dec(tb, ST.temp);
         tk_memcpy(tb + tn, " \xc2\xb0" "C", 5);
-        const char *R[2] = { tb, sys_charging ? "Yes" : "No" };
+        const char *R[2] = { tb, sys_charging ? sys_rate : "No" };
         float y = 74 + 14 + 4 + 46;
         for (int i = 0; i < 2; i++) {
             y += 3;
@@ -4186,7 +4190,7 @@ static const char *live_text(const char *s, char *buf)
     if (s[0] != '@') return s;
     int n = 0;
     if (!tk_strcmp(s, "@pct")) { n = put_dec(buf, ST.pct); buf[n++] = ' '; buf[n++] = '%'; buf[n] = 0; }
-    else if (!tk_strcmp(s, "@chg")) return SYS.charging ? "Yes" : "No";
+    else if (!tk_strcmp(s, "@chg")) return SYS.charging ? sys_rate : "No";
     else if (!tk_strcmp(s, "@temp")) { n = put_dec(buf, ST.temp); tk_memcpy(buf + n, " \xc2\xb0" "C", 5); }
     else if (!tk_strcmp(s, "@torch")) return Q[0].lit ? "On" : "Off";
     else if (!tk_strcmp(s, "@bright")) {
@@ -7375,6 +7379,35 @@ static int min_step(void)
         }
     min_name = "minute";
     return 0;
+}
+/* Track A 9c: ma the cell's average current (+ charging), full its full charge (mAh), st 0 none, 1 charging, 2 paused
+ * hot, 3 paused cold, 4 full. A new text redoes the widgets in the minute's idle slices (as a new percentage does) */
+void sh_charge(int ma, int full_mah, int st)
+{
+    char t[16], l[48];
+    int n = 0, k = 0;
+    if (full_mah < 1000) full_mah = 3000;
+    static const char hot[] = "Paused: the battery is above 45 \xc2\xb0" "C", cold[] = "Paused: the battery is below 0 \xc2\xb0" "C";
+    if (st == 2) { tk_memcpy(t, "Paused", 7); tk_memcpy(l, hot, sizeof hot); }
+    else if (st == 3) { tk_memcpy(t, "Paused", 7); tk_memcpy(l, cold, sizeof cold); }
+    else if (st == 4) { tk_memcpy(t, "Full", 5); tk_memcpy(l, "Full", 5); }
+    else if (st == 1 && ma >= 30) {
+        int ph = (ma * 100 + full_mah / 2) / full_mah;
+        t[n++] = '+'; n += put_dec(t + n, ph); tk_memcpy(t + n, " %/h", 5);
+        l[k++] = '+'; k += put_dec(l + k, ma / 1000); l[k++] = '.';
+        { int c = (ma % 1000 + 5) / 10; if (c > 99) c = 99; l[k++] = (char)('0' + c / 10); l[k++] = (char)('0' + c % 10); }
+        tk_memcpy(l + k, " A, +", 5); k += 5; k += put_dec(l + k, ph); tk_memcpy(l + k, " % an hour", 11);
+    } else if (st == 1) {
+        tk_memcpy(t, "+0 %/h", 7);
+        tk_memcpy(l, "Not gaining (", 13); k = 13; k += put_dec(l + k, ma); tk_memcpy(l + k, " mA)", 5);
+    } else { tk_memcpy(t, "Yes", 4); l[0] = 0; }   /* none: the placeholder for the next cable (sh_sysinfo says "No") */
+    int same = !tk_strcmp(t, sys_rate) && !tk_strcmp(l, sys_rate_long);
+    tk_memcpy(sys_rate, t, sizeof t);
+    tk_memcpy(sys_rate_long, l, sizeof l);
+    if (same || !st) return;
+    min_stale |= MS_LW | MS_HOMEW; lw_min_drop(); hw_min_drop();
+    prep_left = 1;
+    lock_ver++;
 }
 void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
 {

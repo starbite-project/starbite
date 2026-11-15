@@ -466,6 +466,7 @@ static void se_rows(int p)
         row(SR_BIG, A_NONE, se_num(ST.pct, " %"), SYS.charging ? "Charging" : "On battery");
         sec(0);
         val("Battery Temperature", se_str(live_text("@temp", b), 0));
+        if (SYS.charging && sys_rate_long[0]) val("Charge Rate", sys_rate_long);   /* Track A 9c */
         {
             int mx = 0, cy = 0;
             char w[160];

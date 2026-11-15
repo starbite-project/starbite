@@ -62,6 +62,7 @@ void sh_brightness(int level);
 void sh_bright_now(int level);
 /* P2y: the apps' live values besides sh_status: charging or not, the software's name and version */
 void sh_sysinfo(int charging, const char *version);
+void sh_charge(int ma, int full_mah, int st);   /* Track A 9c: the real charge rate (0 none, 1 charging, 2 hot, 3 cold, 4 full) */
 void sh_alarm(int on, int h, int m);
 /* B5: the Clock's alarm list to the kernel (alarm.c's alarm_set: slot i of 4, days a bit per weekday, 0 once); < 0
  * refused (the self test) */

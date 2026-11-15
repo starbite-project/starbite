@@ -405,6 +405,7 @@ static int fake_start(void)
     const char *e = getenv("SBTK_LINUX");
     if (LF.state == SH_LINUX_RUNNING || LF.state == SH_LINUX_STARTING) return 0;
     if (e && !strcmp(e, "fail")) { fake_state(SH_LINUX_FAILED, "The Linux files are not on this phone yet."); return -4; }
+    if (e && !strcmp(e, "nocard")) { fake_state(SH_LINUX_FAILED, "Linux isn't installed on this card."); return -4; }   /* 9c */
     LF.nstart++;
     fake_state(SH_LINUX_STARTING, "");
     return 0;

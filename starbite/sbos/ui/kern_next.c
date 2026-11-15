@@ -444,6 +444,14 @@ static void status_now(void)
     battery_get(&b);
     int pct = b.ok ? b.pct : 0, temp = b.ok && b.temp_c10 > -1000 ? b.temp_c10 / 10 : 0;
     sh_status(h, mi, wd, d, mo, pct, temp);
+    {
+        /* Track A 9c: the real charge rate (before sh_sysinfo: a plug-in's widget shows it at once) */
+        struct kcharge kc;
+        charge_get(&kc);
+        int st = !(b.ok && b.charger) ? 0 : kc.stopped_hot ? 2 : kc.stopped_cold ? 3 :
+                 (b.pct >= 100 || kc.dtls == 3 || kc.dtls == 4) ? 4 : 1;
+        sh_charge(b.ok ? b.avg_ma : 0, b.ok ? b.full_mah : 0, st);
+    }
     sh_sysinfo(b.ok && b.charger, "Starbite OS Next P4a");     /* P2y: the apps' live values */
     {
         int ah = 0, am = 0, on = alarm_first(&ah, &am);

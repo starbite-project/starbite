@@ -72,6 +72,9 @@ static void dispatch_timer(unsigned owner, unsigned id)
         selftest_timer(id);
         break;
 #ifndef SB_HOST
+    case KT_CHARGE:
+        charge_timer(id);                   /* Track A 9c: the charger watchdog, the stock currents (charge.c) */
+        break;
     case KT_USB:
         usb_timer(id);                      /* USB device mode: the cable, the DWC3, the console (usb.c) */
         break;
@@ -244,6 +247,7 @@ void sb_main(void)
     sos_init();
     surv_init();                            /* 1.2-alpha27 */
 #ifndef SB_HOST
+    charge_init();                          /* Track A 9c: after surv_init (its USB output owns the charger) */
     usb_init();                             /* USB device mode (usb.c): watches the cable when SBOS_USB_AUTO */
 #endif
     settings_restore();                     /* after power_init: the screen-off time it restores re-arms the timer */

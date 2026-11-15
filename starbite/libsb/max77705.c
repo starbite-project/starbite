@@ -138,6 +138,8 @@ int sb_usbc_read(uint8_t reg, uint8_t *v)
 /* A register write (2-byte message reg, value, STOP), with the gate: the caller's policy
  * (engineer/policy.c max_tier) gives the tier, at least 1; an open authorisation must cover
  * SB_SP_MAX addr7 << 8 | reg. Never CHG_INT (0xB0), read back unless the register is write-only. */
+int sb_max_quiet;                       /* Track A 9c: 1 = no log line for a write that went through (the charger
+                                         * watchdog's feed every 10 s); refusals and missing ACKs are still logged */
 int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier)
 {
     const char *why;
@@ -150,6 +152,8 @@ int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier)
     if (!sb_max_init())
         return 0;
     int ok = sb_i2c_msg(&sb_max_bus, addr7, 0, m, 2, 1);
+    if (ok && sb_max_quiet)
+        return ok;
     struct ub u;
     ub_init(&u);
     ub_s(&u, "max77705 write ");

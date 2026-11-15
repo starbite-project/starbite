@@ -612,6 +612,7 @@ int sb_therms_read(struct sb_therm *t, unsigned max, const char **why);
  * (address << 8 | reg) at the tier the caller's policy gives (engineer/policy.c). */
 int sb_pmic_write(uint32_t type, uint32_t reg, uint8_t val, int tier);
 int sb_max_write(unsigned addr7, uint8_t reg, uint8_t val, int tier);
+extern int sb_max_quiet;                   /* 1: a write that went through is not logged (9c: the watchdog feed) */
 /* ACPM DVFS request { domain, kHz, FREQ_REQ, 0 } on the first ACPM channel (as the vendor kernel
  * and Starbite's iOS port send it; g3d = 4), with the gate: SB_SP_DVFS, first = domain, at the
  * caller's tier (at least 3). 1 sent and answered. */

@@ -39,6 +39,7 @@ static struct { uint32_t reads, cached, walked; } gc;
 static void gcard_begin(void) {}
 static int gcard_tick(void) { return 1; }
 static void gcard_abort(void) {}
+static const char *gcard_missing(void) { return 0; }
 static int gcard_io(uint32_t dev, uint32_t op, uint64_t sector, uint32_t count, void *buf)
 {
     (void)dev, (void)op, (void)sector, (void)count, (void)buf;
@@ -326,9 +327,27 @@ static void gc_reset(void)
     gc.reads = gc.cached = gc.walked = 0;
 }
 
+/* Track A 9c (main 11-15: S9 #2's card had no Linux files and the Linux apps said "Starting Linux" for ever): why this
+ * start has no root, in the user's words (GCARD_NO_*), or NULL; guest.c fails the start with it instead of booting a
+ * guest that waits for a disk that is not there */
+#define GCARD_NO_LINUX "Linux isn't installed on this card."
+#define GCARD_NO_CARD "There's no microSD card, or it didn't start."
+#define GCARD_NO_FS "The microSD card isn't exFAT."
+#define GCARD_NO_CHECK "Linux's files on this card didn't check out."
+static const char *gc_none;
+static const char *gcard_missing(void)
+{
+#ifdef GUEST_WL_IMAGE                       /* (only the Linux apps' guest has its root on the card) */
+    return mode == GUEST_WL && gc.phase == GC_DONE ? gc_none : 0;
+#else
+    return 0;
+#endif
+}
+
 static void gc_finish(void)
 {
     if (!(gc_dev[SBSHM_BLK_BASE].flags & SBSHM_BLKDEV_PRESENT)) {    /* no root: offer nothing at all */
+        gc_none = gc.have[SBSHM_BLK_BASE] ? GCARD_NO_CHECK : GCARD_NO_LINUX;
         sb_card_grant_clear();
         gc_writable = 0;
         for (unsigned i = 0; i < SBSHM_BLK_DEVS; ++i)
@@ -341,8 +360,10 @@ static void gc_finish(void)
 static void gcard_begin(void)
 {
     const char *no = 0;
+    int card = 0;
     gc_reset();
     gc.phase = GC_DONE;
+    gc_none = 0;
 #ifdef GUEST_WL_IMAGE                       /* with the Linux apps' guest (next-linux.patch): only that one has a root there */
     if (mode != GUEST_WL) {
         sbg_set_blk(gc_dev);
@@ -356,13 +377,14 @@ static void gcard_begin(void)
     gc.p_start = gc.p_len = 0;
     if (!gc_buf)
         no = "no memory for the cluster buffer";
-    else if (!sd_up())
+    else if (!(card = sd_up()))
         no = "no card, or it did not start";
     else if (!(no = gcard_partition(gc_rd, (uint8_t *)gc_sec, &gc.p_start, &gc.p_len)) &&
              exfat_mount(&gc_fs, gc_rd, gc.p_start, gc_buf, 1U << 17))
         no = "the partition does not mount as exFAT (512-byte sectors, clusters up to 128 KiB)";
     if (no) {
         gc_say(": ", "no Linux block devices", no);
+        gc_none = !gc_buf ? GCARD_NO_CHECK : !card ? GCARD_NO_CARD : GCARD_NO_FS;
         sbg_set_blk(gc_dev);
         return;
     }
