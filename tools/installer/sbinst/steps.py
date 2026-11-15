@@ -25,6 +25,50 @@ STORE_UFS_OFFSET = 16 * GIB                 # store-flash.sh: USERDATA + 16 GiB
 PROVEN_SBOOT = 'G960FXXUHFVG6'
 
 
+# Li-ion open-circuit voltage -> charge, read conservatively (a typical cell's curve, rounded down).
+OCV = ((3.50, 0), (3.60, 5), (3.68, 10), (3.73, 20), (3.77, 30), (3.80, 40), (3.84, 50), (3.88, 60), (3.93, 70),
+       (3.98, 80), (4.05, 90), (4.15, 100))
+CHARGE_MARGIN = 0.10          # volts: while charging, the terminal voltage stands this much (or more) above the OCV
+
+
+def battery_estimate(volts, charging):
+    """A conservative charge estimate from the cell voltage: % from OCV, with CHARGE_MARGIN taken off while charging."""
+    v = volts - (CHARGE_MARGIN if charging else 0)
+    pct = 0
+    for ov, p in OCV:
+        if v >= ov:
+            pct = p
+    return pct
+
+
+def battery_check(f, min_pct, writes_gpt, user_ok=False):
+    """(ok, value shown, why) for preflight. The gauge's capacity, unless it is clearly uncalibrated: the installer
+    environment's fuel gauge is not set up like stock Android's and can report 0-2 % on a charged cell. Then the cell
+    voltage decides: a conservative OCV estimate must reach min_pct, or the phone must be charging at >= 3.70 V, which
+    is only accepted when this run writes no partition table (a power loss during a GPT write is the one thing the 50 %
+    rule is for; card and partition writes resume). user_ok (--battery-ok-on-usb, the user's decision at the phone):
+    a low charge is accepted, but still only while charging and never for a partition-table write."""
+    cap, v = f.battery, f.volts
+    if user_ok:
+        shown = (f'{cap}%' if cap is not None else '?') + (f', {v:.2f} V' if v else '') + (' charging' if f.charging else '')
+        if f.charging and not writes_gpt:
+            return True, shown + ': USER OVERRIDE (--battery-ok-on-usb: on USB power, no partition-table write)', ''
+        if not f.charging:
+            return False, shown, f'--battery-ok-on-usb applies only while charging: {shown}, not charging'
+        return False, shown, '--battery-ok-on-usb never covers a partition-table write: charge to the minimum first'
+    if cap is not None and cap > 2 or v is None or v < 3.6:
+        return ((cap or 0) >= min_pct, f'{cap}%' if cap is not None else '?', f'below {min_pct}%: charge first')
+    est = battery_estimate(v, f.charging)
+    shown = (f'gauge uncalibrated ({cap}%), {v:.2f} V{" charging" if f.charging else ""} -> ~{est}% '
+             f'(OCV{", -0.10 V while charging" if f.charging else ""})')
+    if est >= min_pct:
+        return True, shown, ''
+    if f.charging and v >= 3.70 and not writes_gpt:
+        return True, shown + '; on USB power at >= 3.70 V and no partition-table write: ok', ''
+    return False, shown, (f'battery: {shown}: below {min_pct}%' + (' (a GPT write needs a real charge)' if writes_gpt else
+                                                                   '; charge to >= 3.70 V on USB, or higher'))
+
+
 def phone_id_of(serial):
     """phone-<first 10 hex digits of SHA-256(serial)>: the serial itself is never stored or printed."""
     return 'phone-' + hashlib.sha256(serial.encode()).hexdigest()[:10]
@@ -277,7 +321,7 @@ class Installer:
             if not any(i.dest.kind == 'env' and i.dest.name == k[4:] and i.present for i in self.m.items):
                 raise Refused(f'the bundle has no installer environment ({k}): after the loader nothing could go on')
         u.info('Download mode. First, read only: is this an SM-G960F? (heimdall detect, heimdall download-pit)')
-        if self.r.run(['heimdall', 'detect'], check=False).returncode:
+        if self.r.run([Heimdall.exe(), 'detect'], check=False).returncode:
             raise Refused('heimdall does not see the phone in Download mode (heimdall detect). Install heimdall '
                           '(macOS: brew install heimdall; Linux: the heimdall-flash package), use a data USB cable, '
                           'and on Linux allow USB access (udev rule for 04e8:685d) or run as root')
@@ -385,8 +429,12 @@ class Installer:
         row('unlocked', f'{shell} runs; flash.locked={pr.get("ro.boot.flash.locked") or "?"}'
             f' vbstate={pr.get("ro.boot.verifiedbootstate") or "?"}', pr.get('ro.boot.flash.locked') != '1',
             'ro.boot.flash.locked=1', hard=False)
-        row('battery', f'{f.battery}%' if f.battery is not None else '?',
-            (f.battery or 0) >= self.m.phone['min_battery'], f'below {self.m.phone["min_battery"]}%: charge first')
+        b_ok, b_val, b_why = battery_check(f, self.m.phone['min_battery'],
+                                           self.m.ufs_layout is not None and getattr(self.o, 'repartition', False),
+                                           getattr(self.o, 'battery_ok_on_usb', False))
+        row('battery', b_val, b_ok, b_why)
+        if b_val.startswith('gauge uncalibrated') or 'USER OVERRIDE' in b_val:
+            u.info(f'battery: {b_val}')
         want_ufs = self.m.phone.get('ufs_blocks')
         row('UFS', f'{human((f.sda or 0) * 512)} ({(f.sda or 0) // 8} blocks)',
             not want_ufs or (f.sda or 0) == want_ufs * 8, f'not {want_ufs} blocks')
@@ -990,6 +1038,16 @@ class Installer:
             time.sleep(1)
         else:
             raise Stopped('the kernel did not pick up the new card partitions (run the installer again: it restarts the environment)')
+        # the installer environment has no udev: sb-byname makes /dev/block/NAME from sysfs (as after a GPT re-read).
+        # S9 #2's first install (2026-11-15) stopped at "no /dev/block/mmcblk0p2" without it. TWRP's ueventd does it itself.
+        p.sh('command -v sb-byname >/dev/null 2>&1 && sb-byname; true', write=True, check=False)
+        for _ in range(10):
+            if p.sh('[ -b /dev/block/mmcblk0p1 ] && [ -b /dev/block/mmcblk0p2 ] && echo yes', check=False) == 'yes':
+                break
+            time.sleep(1)
+        else:
+            raise Stopped('/dev/block/mmcblk0p1 or p2 did not appear after the re-read (the kernel lists them in '
+                          '/proc/partitions): run the installer again')
         u.ok('card MBR written and read back; partitions re-read')
 
     def do_card_format(self, s):
@@ -1209,8 +1267,24 @@ class Installer:
             u.warn(w)
         if self.mode == 'dry-run':
             return
-        if self.o.no_reboot or not u.confirm('Reboot into the Starbite menu now?'):
-            u.info('not rebooted: adb reboot when ready')
+        env = os.environ.get('SBINST_ENV_UP') == '1'
+        how = ('hold Power 3 s on the phone (the environment\'s reboot), or run tools/installer/starbite-install --bundle B '
+               '--serial S --reboot-env' if env else 'adb reboot when ready')
+        if self.o.no_reboot or not u.confirm('Reboot into Starbite now?'):
+            u.info(f'not rebooted: {how}. (A plain `reboot` over ssh does nothing there: the environment has no init '
+                   'system; sb-reboot is its reboot)')
             return
-        self.phone.adb('reboot')
-        u.ok('rebooting: the Starbite menu should appear after the Samsung splash')
+        self.reboot_env() if env else self.phone.adb('reboot')
+        u.ok('rebooting: Starbite starts after the Samsung splash')
+
+    def reboot_env(self):
+        """The installer environment's own reboot (sb-reboot menu: the boot-next mailbox cleared, then the restart).
+        The ssh session dies with the phone, so the command's exit status says nothing: the environment going away
+        within 30 s is the proof."""
+        self.phone.adb('reboot', check=False)
+        for _ in range(15):
+            time.sleep(2)
+            if not self.env.reachable():
+                return
+        raise Stopped('the environment still answers 30 s after sb-reboot: hold Power 3 s on the phone, or Volume Down '
+                      '+ Power 7 s')

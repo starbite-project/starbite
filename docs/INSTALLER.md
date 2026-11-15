@@ -42,6 +42,10 @@ tools/installer/starbite-install --bundle B --serial S --real --backup-only   # 
 tools/installer/starbite-install --check-backup DIR              # a backup re-read on this computer (no phone)
 tools/installer/mk-first-bundle.py OUT --boot-from ... --loader ... --env-dir ... --store-from ... --catalog ...
 tools/installer/rehearse-bundle.sh BUNDLE                        # one real bundle through the first-install flow (fakes)
+tools/installer/stream-copy.py --from-serial S1 --to-serial S2 --source SPEC --target SPEC [--real]   # section 16
+tools/installer/rehearse-stream.sh                               # stream-copy.py between two fake phones
+tools/installer/store-update.py --serial S2 --catalog NEW.toml NAME=FILE ... [--real]   # section 17
+tools/installer/rehearse-store-update.sh                         # store-update.py on a fake S9 #2
 python3 -m unittest discover -s tools/installer/tests            # unit tests
 ```
 
@@ -1121,6 +1125,24 @@ GPT copies, USERDATA and RECOVERY unchanged; a second run writes nothing. `rehea
 bundle through the same steps on a fake stock S9. Run 2026-11-15 (macOS): unit tests 137 OK; `rehearse.sh` 220
 passed, 0 failed; `rehearse-bundle.sh build/installer/bundle-s9b`: every step passed.
 
+**S9 #2's first real install (2026-11-15, 14:50-15:15: step A, the core, done; Starbite OS lock screen at power-on).**
+Found on the phone and fixed:
+- macOS's `ioreg` lists `idProduct` before `idVendor`, so Download mode was never seen (fixed by the main session).
+- The Download-mode `heimdall detect` called a bare `heimdall` (fixed by the main session).
+- **Battery:** the installer environment's fuel gauge is not set up like stock Android's. It said 1 %, then 7 %, on a
+  charging cell at 3.74-3.82 V.
+  - A 0-2 % reading with the cell at >= 3.6 V is now judged by a conservative OCV estimate (0.10 V off while
+    charging), shown as "gauge uncalibrated ...". On USB power at >= 3.70 V it passes, but only without a
+    partition-table write.
+  - `--battery-ok-on-usb` records the user's own decision for a low reading (USER OVERRIDE on the preflight). It too
+    applies only while charging and never to a partition-table write.
+- **Card nodes:** the environment has no udev, so after the card's MBR and `blockdev --rereadpt`, `/dev/block/mmcblk0p2`
+  did not exist (the main session made it with mknod). The card step now runs `sb-byname`, as the GPT step does, and
+  waits for both nodes.
+- **The reboot:** the finish's "Reboot now?" got no answer, and a plain `reboot` over ssh does nothing (no init system
+  in the environment). `--reboot-env` restarts a phone in the environment with `sb-reboot menu` and checks that it goes
+  away; the finish uses the same.
+
 **`sd64l` (2026-11-15, afternoon): the 64 GB card for today's lineup.** `sd64`'s 64 MiB store area cannot hold
 the lineup's RAM-only systems (Starbite OS's update slots and photo store alone are 3 x 64 MiB), and its root slot
 is macOS Ventura's. `tools/store/cardlayout.py` now also has `sd64l`: p2 at 8192 = a 1 GiB card store (a home store
@@ -1130,3 +1152,73 @@ with its data from block 7, written as it is by `store-flash-sd.sh`), the macOS 
 (entries keep their store type). S9 #2's core bundle (`build/installer/bundle-s9b`): 27 entries, 364 MiB, passes
 `rehearse-bundle.sh`. `sd64` is unchanged (no card uses either yet). The whole-lineup space plan for 64 GB UFS + a
 64 GB card, its options and the per-OS order are in the shared notes (`installer-s9b-space-plan.md`).
+
+## 16. Phone to phone: `stream-copy.py` (2026-11-15)
+
+S9 #2's big systems (One UI's SYSTEM 6 GiB, Windows 22 GiB, iOS 27's USERDATA 18.75 GiB, macOS Sequoia's 16 GiB card
+root, the Linux distros) don't fit on the Mac (about 5 GB free), so they are not bundle items. `tools/installer/stream-copy.py`
+copies one partition, card range or card file from **S9 #1 in TWRP** (`adb -s`, read only) to **S9 #2 in the installer
+environment** (ssh), 64 MiB at a time through the Mac's RAM:
+- per chunk, the source phone hashes it; an all-zero chunk is written on the target from `/dev/zero`; otherwise the
+  bytes cross the Mac (hashed here = the source's), go to the target's `/tmp`, are `dd`'d with `conv=notrunc,fsync`,
+  and are read back and hashed by the target;
+- a state file (`<state>/<phone id>/stream/*.json`) is written before the first chunk and after each one. A cable pull
+  resumes; a source whose first or last chunk changed meanwhile is refused (`--restart` starts over);
+- at the end both phones hash the whole range, a file target is moved from `NAME.part` into place, and the target's
+  journal records `stream:<target>` with the source, size and SHA-256.
+
+**Specs:** `part:NAME`, `card:lba:START+SECTORS` (source), `card:lba:START` / `card:root:KEY` (target),
+`file:/distros/...` / `file:/starbite/...` (card p1). **Safety:**
+- source commands only from a read-only list (`dd if=`, `sha256sum`, `readlink`, `blockdev --getsize64`, `wc -c`,
+  `cat`); anything else is refused before it runs. A source partition mounted rw is refused;
+- target partitions SYSTEM VENDOR ODM A16DATA WINESP WINDOWS USERDATA only, not mounted; card targets only inside a root
+  slot of the layout the target card has; files only under `/distros/` and `/starbite/`;
+- the target is reached only by ssh, and its `sb.serial` must be `--to-serial`;
+- no copy while any phone is in Download mode;
+- `--dry-run` (the default) is required before `--real` (same source, target and size); `--real` asks for a typed
+  `stream to phone-XXXXXXXXXX`.
+
+`tools/installer/rehearse-stream.sh`: two fake phones (S9 #1 sd128 in TWRP, S9 #2 sd64l in the environment), 39 checks:
+- refusals: RECOVERY, BOOT, EFS, the card store area, p1, a file outside the two folders, the same serial twice, a
+  phone in Download mode, another phone's environment, the source not in TWRP, write commands on the source side, no
+  dry run;
+- a 220 MiB SYSTEM copy (data, two zero chunks, data) with a cable pull and the resume;
+- S9 #1's Sequoia range into S9 #2's sd64l `mac15` slot, including a source changed before the resume (refused,
+  then `--restart`);
+- a 130 MiB p1 file;
+- the journal record;
+- S9 #1 byte-identical, and S9 #2's protected partitions unchanged.
+
+## 17. Updating a live card store: `store-update.py` (2026-11-15)
+
+After the core install, each of S9 #2's later steps adds store entries (`android.*`, the Sequoia and iOS 27 payloads,
+the Windows `.uefi` files, `linux.*`) and catalog rows. The card store by then also holds what the phone wrote into it:
+the loader's crash log, Starbite OS's `sbos-state`, update slots and photos (volatile entries) and the settings block. A
+plain rebuild + `store-flash-sd.sh` would zero all of that. `tools/installer/store-update.py`, against the installer
+environment (ssh, serial checked):
+1. pulls the store's used range from card p2 (hashed by the phone and the Mac, every CRC checked) and keeps it as the
+   rollback image (`<state>/<phone id>/store/pull-*.img`);
+2. builds the new store with `sbstore2.py build --medium LAYOUT --home --catalog NEW.toml --import PULL NAME=FILE ...`, so
+   every entry stays and the volatile ones keep their bytes. `--omit` drops an entry; a catalog that loses a key needs
+   `--drop KEY`. The plan lists each entry: add, replace, kept, volatile kept, REMOVE;
+3. dry run first: it records this exact result's SHA-256. `--real` pulls and builds again, needs the same SHA-256 (the
+   card has not changed since), and asks for a typed `update store on phone-XXXXXXXXXX`;
+4. writes the data first, in 16 MiB pieces (only those that differ, each read back), then the 7 head blocks with the
+   card's own settings block put back, then compares the whole store area. Until the head lands, the old header stays.
+   The new image is saved first, so a cable pull resumes without a new pull. `--restore PULL.img` writes a pulled image
+   back the same way.
+
+Only for stores laid out as on the card (`sd64`, `sd64l`); S9 #1's compact `sd128` store stays with
+`tools/store/card-store.sh`. Writes only card p2's store area. On the Mac it needs the pull and the new image (at most
+2 x 1 GiB on `sd64l`); a dry run keeps neither.
+
+`tools/installer/rehearse-store-update.sh`, a fake S9 #2 with an sd64l home store whose volatile entries and settings
+block hold the phone's bytes, 26 checks:
+- refusals: another phone's serial, no catalog, a catalog that drops a key (then allowed with `--drop`), no dry run of
+  this result, an sd128 card;
+- the dry run (p2 byte-identical, no images left);
+- an update adding `android.cmdline` and the One UI row, with a cable pull in the data (the head still the old store)
+  and the resume;
+- afterwards: the volatile entries' bytes, the settings block and every CRC;
+- the rollback (`--restore`);
+- UFS untouched.
