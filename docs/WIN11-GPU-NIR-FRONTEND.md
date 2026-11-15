@@ -906,3 +906,269 @@ To try it on a device: install the DLL, create the empty files
 `geometry shader emulation on` line in the umdlog. Start with a draw that is not indexed and
 has a static topology (a point-to-quad shader): it is the shortest path, two jobs and no
 index buffer. On Linux the switch is `PAN_MESA_DEBUG=gsemu`.
+
+# Phase 4: Shader Model 5
+
+State: 2026-11-16 01:04 EET. Branch `sb-nir`, three commits on top of phase 3 (4c517c3),
+nothing pushed:
+
+- `f453dd8` d3d10umd: Shader Model 5.0 in the token parser and the NIR translator
+- `9606fa1` d3d10umd: self tests for Shader Model 5
+- `dbf9ef4` d3d10umd: a hull shader input that is a clip or cull distance is refused
+
+Translator and harness only. `Shader.cpp` is untouched: nothing in the driver hands the
+translator a Shader Model 5 stream, there is no Direct3D 11 DDI, and no switch changed. No
+DLL was built for delivery (P4.9 says what was compiled for Windows).
+
+## P4.1 What there is
+
+| File | What |
+|---|---|
+| `ShaderParse.c/.h` | operand counts for every opcode up to Direct3D 11.1; chained extended opcode tokens (sample controls, resource dimension, return type); extended operand tokens on destinations (minimum precision); the declarations of 11 (streams, control point counts, tessellator, phase instance counts, thread group, UAVs, raw and structured resources, shared memory, GS instance count); all global flags; `sync` flags; the precise mask; 64-bit immediates (skipped). An instruction in a form the parser does not read is skipped by its length and marked (`opcode->unsupported`). Every difference is behind `major_version >= 5` |
+| `ShaderNIR.c/.h` | Shader Model 5.0 for vertex, pixel, geometry, compute, hull and domain shaders; `cs_4_0`; the signature gained the patch constant list and a stream per entry |
+| `tests/dxbc_nir_harness.c` | all of the corpus in scope, PCSG / PSG1 chunks and OSG5 streams read, tables by stage and model, statistics over all opcodes |
+| `tests/dxbc_nir_selftest.c` | 38 more hand-assembled shaders |
+
+## P4.2 Binding model
+
+Chosen so that a Direct3D 11 frontend binds by register number, without a table per shader:
+
+| HLSL register | Gallium | Note |
+|---|---|---|
+| `cbN` | constant buffer slot N + 1 | as in Shader Model 4 (slot 0 is the driver's) |
+| `sN` | sampler slot N | |
+| `tN`, typed | sampler view slot N | |
+| `tN`, raw or structured buffer | sampler view slot N, **as a buffer view of format R32_UINT** | read with `txf`, one word per lane: element (byte offset / 4) + lane |
+| `uN`, typed (texture or typed buffer) | shader image slot N | index-based image intrinsics, format NONE (Panfrost has `image_load_formatted`); atomics use R32_UINT / R32_SINT |
+| `uN`, raw or structured buffer | shader buffer slot N | `load_ssbo` / `store_ssbo` / `ssbo_atomic` with byte offsets |
+| counter of structured `uN` | shader buffer slot N + 8, word 0 | `imm_atomic_alloc` / `imm_atomic_consume`; the frontend owns a 4-byte buffer per view and copies the count in and out |
+| `gN` (thread group shared memory) | NIR shared memory, the blocks one after the other from offset 0 | `info.shared_size`, explicit layout |
+
+Why raw and structured shader resources are buffer textures and not shader buffers: tN and
+uN are two namespaces, and Panfrost gives the vertex and geometry stages no shader buffers at
+all (`allow_side_effects` in pan_screen.c sets `max_shader_buffers` and `max_shader_images`
+to 0 there, 16 and 64 for pixel and compute). A buffer texture keeps tN = sampler view N in
+every stage. Its limit on Bifrost is 2^27 elements (`pan_get_max_texel_buffer_elements`),
+which is Direct3D 11's own limit in words.
+
+Limits that follow: eight UAV slots (`SN_MAX_UAVS`, Direct3D 11.0's number; 11.1's 64 would
+need a table, since counters and buffers share gallium's 32 shader buffer slots, of which
+Panfrost has 16); UAVs in vertex, geometry, hull and domain shaders (11.1) translate but
+Panfrost cannot run them; a structured stride must be a multiple of four bytes.
+
+Reads and writes outside a buffer are not made safe here: Direct3D wants zero from such a
+read and the write dropped; NIR leaves both to the driver.
+
+## P4.3 Tessellation: the NIR shape
+
+A hull shader is one NIR tessellation control shader in the GLSL form:
+
+```
+main() {
+   control point phase                      // per invocation = per output control point
+   cp_out[invocation].* = its o registers
+   barrier(shader_out)                      // only if there are fork or join phases
+   if (invocation == 0) {
+      fork phases, each instance; join phases, each instance   // in stream order
+      patch outputs, tess levels = the patch constant registers
+   }
+}
+```
+
+- Each phase is translated as a function with its own temporaries (a `ret` ends the phase,
+  not the shader) and inlined; an instanced phase is called once per instance with the
+  instance number as a constant, so `o[vForkInstanceID + n]` folds to one register per copy.
+- Control point outputs: `vec4[output control points]` at VARYING_SLOT_VAR0 + register (POS
+  for SV_Position). Patch constants: `patch vec4` at VARYING_SLOT_PATCH0 + register. The
+  tessellation factors go to `gl_TessLevelOuter/Inner` (compact float arrays) by their system
+  value: Direct3D names an edge by the coordinate that is constant along it, GL numbers the
+  edges the same way, so quad and triangle factors map index for index; the two isoline
+  factors swap (density is outer[0], detail outer[1]).
+- `vicp` and the control point phase's `v[][]` are per-vertex inputs, `vocp` reads the
+  per-vertex outputs (hence the barrier), `vpc` in a join phase reads the patch constant
+  registers the fork phases wrote, `vOutputControlPointID` is the invocation ID.
+- A hull shader without a control point phase copies input to output control points; which
+  registers those are is only in the input signature.
+- `dcl_hs_max_tessfactor`: the factors are clamped from above with `fmin` at the store.
+- `info.tess`: `tcs_vertices_out`, and from the hull shader's declarations the primitive mode,
+  spacing, winding and point mode. The domain shader only knows the domain.
+
+A domain shader is a tessellation evaluation shader: `vDomain` is `load_tess_coord`,
+`vcp[][]` per-vertex inputs, `vpc` patch inputs or the tessellation level arrays, outputs
+as a vertex shader's.
+
+Why this fits `poly_nir_lower_tess.c` (read): `poly_nir_lower_tcs` runs the whole shader once
+per output control point as a compute invocation and lowers exactly these things:
+`load_invocation_id` (the local invocation), per-vertex input loads, per-vertex and patch
+output stores and loads to its patch buffer, and a `barrier` whose modes include
+`nir_var_shader_out` (dropped or narrowed to a subgroup barrier). `poly_nir_lower_tes` takes
+`load_tess_coord`, patch and per-vertex input loads, the level loads and
+`info.tess._primitive_mode`. Neither was run on these shaders: they validate, that is all.
+
+## P4.4 What a Direct3D 11 frontend has to pass and do
+
+- The signatures, as `struct Shader_nir_signature`: input and output (with the stream of
+  each output for a geometry shader: OSG5), and the patch constant signature (PCSG) of a hull
+  or domain shader. The token stream names the tessellation factors itself, so PCSG only
+  matters for a register declared without a name. **The input signature is required for a
+  hull shader without a control point phase.**
+- Bind by the table of P4.2: R32_UINT buffer views for raw and structured SRVs, shader
+  buffers for raw and structured UAVs, a counter buffer per structured UAV at slot N + 8.
+- Copy `info.tess` (spacing, winding, point mode) from the hull shader's NIR to the domain
+  shader's when the two are paired, as Vulkan drivers merge the two stages' info.
+- Geometry: the translator leaves every stream's outputs in the shader (`var->data.stream`,
+  `active_stream_mask`); which stream is rasterized (RasterizedStream) is the driver's
+  business, and pan_nir_lower_gs.c rasterizes stream 0. Instancing is `info.gs.invocations`;
+  the `gsemu` caps say 1 today.
+- Compute needs nothing beyond `create_compute_state` with the NIR; the thread group is
+  `info.workgroup_size`.
+
+## P4.5 Refused, with the message
+
+| What | Message contains |
+|---|---|
+| Shader Model 5.1 and later | `Shader Model 5.1 is not supported` |
+| 64-bit floats: the global flag, the `d*` opcodes, a 64-bit immediate | `enableDoublePrecisionFloatOps`, `opcode DADD (64-bit floats are not supported)`. Panfrost has no `doubles` cap, and the Bifrost options only name `nir_lower_dmod` with a TODO |
+| interfaces (`dcl_function_body`, `dcl_function_table`, `dcl_interface`, `fcall`) | `opcode INTERFACE_CALL is not supported` (parsed by length only) |
+| what came after Direct3D 11.1: the feedback and clamp sample opcodes of tiled resources, `check_access_fully_mapped` | `an opcode the parser does not know` |
+| an operand with three indices or a 64-bit index | `an operand with three indices or a 64-bit index` |
+| UAV slot 8 and up | `unordered access view slot 8 out of range` |
+| a hull shader input that is a clip or cull distance | `clip or cull distance input of a hull shader` (as a control point *output* and a domain shader input it is plain data and works) |
+| a hull shader without a control point phase and without a signature | `needs its input signature` |
+| clip or cull distance in a geometry stream other than 0 | `clip or cull distance in geometry stream` |
+| `sync` of the threads of a group outside a compute shader, a store to a read-only buffer, an atomic on a float UAV, raw/structured mixed up | named in the message |
+| subroutines (`label`, `call`), as before | `opcode CALL is not supported` |
+
+Accepted and ignored: `abort`, `debug_break`, the minimum precision of operands, the
+skipOptimization and shader-extension global flags.
+
+## P4.6 Harness tables (ran at dbf9ef4, Bifrost arch 6)
+
+Corpus only, `~/sbmesa/build-nir-host/harness-p4-corpus.txt`:
+
+| | 4.x all | vs_4_0 | vs_4_1 | ps_4_0 | ps_4_1 | gs_4_0 | gs_4_1 | cs_4_0 |
+|---|---|---|---|---|---|---|---|---|
+| OK, compiled | 270 | 66 | 1 | 172 | 7 | 22 | 1 | 1 |
+| anything else | 0 | | | | | | | |
+
+| | 5.0 all | vs_5_0 | ps_5_0 | gs_5_0 | hs_5_0 | ds_5_0 | cs_5_0 |
+|---|---|---|---|---|---|---|---|
+| OK, compiled | 83 | 1 | 57 | 3 | - | - | 22 |
+| OK, validated only | 9 | - | - | - | 5 | 4 | - |
+| failed or refused | 0 | | | | | | |
+
+362 containers, all in scope, 362 translate and validate, 353 compile, 0 fail. The three
+4.x shaders that were out of scope before (`cs_4_0` and two ps_4_0 with Direct3D 11 opcodes)
+are in the 270.
+
+With the self tests, `harness-p4.txt`: 480 containers; 4.x 349 OK + 1 refused as intended;
+5.0 108 compiled, 11 validated only (6 hull, 5 domain), 11 refused as intended; 0 failures,
+0 wrong results.
+
+Shader Model 4 did not move: every 4.x line of `harness-p4.txt` equals its line in
+phase 3's `harness-p3.txt`, apart from the three shaders that came into scope. The old path
+(`--tgsi`, `harness-p4-tgsi.txt`) is line for line phase 2's: 233 compiled, 23 geometry
+shaders validated, 13 failures, the same 13.
+
+The three gs_5_0 shaders go through `panfrost_nir_lower_gs` like the 4.x ones: one static per
+primitive, two dynamic (one with 32 indices per primitive and no SV_Position: it has four
+streams for stream output). The self test with two streams and two instances is the first
+shader with the static indexed shape.
+
+What the corpus uses of Shader Model 5 (shaders/uses, from `--stats`): every UAV, raw,
+structured and atomic opcode, both shared memory declarations, `sync`, `bufinfo`, the three
+new gather4 forms, the bit field and first-bit instructions, `swapc`, the half conversions,
+`emit_stream`, a GS instance count, hull shaders with fork phases (one with a control point
+phase). Not in the corpus, covered by self tests only: `rcp`, `uaddc`, `usubb`, `msad`, the
+`eval_*` instructions, the x derivatives, `cut_stream` and `emitthencut_stream`, a join
+phase, `dcl_hs_max_tessfactor`, an instanced phase with an indexed output, atomics on shared
+memory.
+
+## P4.7 Self tests
+
+Value checks (the shader's inputs are immediates, NIR constant folding stands in for running
+it): `rcp`, `f32tof16` (two tests), `f16tof32`, `uaddc` and `usubb` (both results),
+`countbits`, `firstbit_hi`, `firstbit_lo`, `firstbit_shi` (two tests), `ubfe`, `ibfe` (two
+tests), `bfi`, `bfrev`, `swapc` (both results, and with destinations that are its sources),
+`msad`.
+
+Translate, validate and compile: a pixel shader with the three `eval_*`, the four
+derivatives, SV_Coverage in, conservative depth out, early depth-stencil; a geometry shader
+with two streams sharing a register, all three stream opcodes and an instance count; a
+compute shader with the four thread system values, raw and structured shared memory with
+loads, stores and atomics, a structured UAV with its counter, an atomic on a typed UAV, two
+kinds of `sync`.
+
+Translate and validate: a hull shader with a control point phase, an instanced fork phase,
+a fork phase reading `vocp`, a join phase reading `vpc`, a maximum factor (the NIR was read:
+outer levels 4, 4, 4, inner level min(4+4+4, 8) = 8, the barrier, invocation 0); a domain
+shader.
+
+Refusals: eleven shaders, each expecting the message of its row in P4.5 (64-bit float flag
+and opcode, interface call and function body, a feedback opcode, Shader Model 5.1, UAV slot
+8, `sync` of threads in a pixel shader, a compute shader without a thread group, a store to
+a read-only buffer, a hull shader without control point phase or signature).
+
+## P4.8 Where I was not sure
+
+The Direct3D 11 functional specification was not available here; these are from memory and
+from how other translators do it. In each case the self test checks what the translator
+does, not that it is what Direct3D does.
+
+1. `f32tof16` rounding: round to nearest even is what is implemented and tested.
+2. `firstbit_hi` / `firstbit_shi` count from the most significant bit (the HLSL intrinsics
+   count from the least; the compiler subtracts from 31). `firstbit_shi` of 0 and of -1 is
+   all ones. Fairly sure.
+3. `ubfe` / `ibfe` / `bfi`: width and offset are the low five bits; a width of 0 extracts 0;
+   width + offset >= 32 is a plain shift right by the offset. Fairly sure.
+4. `msad`: no saturation of the sum assumed.
+5. `swapc`: first destination gets the *second* value where the condition is non-zero.
+6. `imm_atomic_consume` returns the counter after the decrement, `imm_atomic_alloc` before
+   the increment.
+7. Isoline factors: detail (segments per line) is GL's outer[1], density outer[0].
+8. Winding: `triangle_cw` is `info.tess.ccw = false`, as `spirv_to_nir` stores Vulkan's
+   VertexOrderCw; this assumes the consumer treats the domain as Vulkan's default
+   upper-left origin, which is Direct3D's. A consumer with GL's convention must flip it.
+9. Power-of-two partitioning is given equal spacing: NIR has nothing closer. The factors are
+   then not rounded up to a power of two.
+10. The maximum tessellation factor is applied as an upper clamp only.
+11. `eval_snapped`: four signed bits per lane, sixteenths of a pixel from the centre.
+    `gather4_po`: six signed bits per lane.
+12. SV_DepthGreaterEqual is GL's `depth_greater` layout, SV_DepthLessEqual `depth_less`.
+13. fxc pads `sample_pos` of a texture with one word (two corpus shaders): for Shader Model 5
+    the parser accepts an instruction shorter than its length, never a longer one.
+14. Operand type 41 (the stencil reference output of Direct3D 11.3) is not in the SDK header
+    the build uses; one corpus shader has it. It is translated to FRAG_RESULT_STENCIL.
+
+## P4.9 Verified by running / only compiled / reasoned
+
+Ran (Linux host, assertions on): parser and translator over all 362 corpus containers and
+118 self tests; NIR validation of every result; the Bifrost arch 6 compile of every vertex,
+pixel and compute shader and, through `panfrost_nir_lower_gs`, of every piece of every
+geometry shader; the value checks; the old path over the same corpus.
+
+Compiled only: `ShaderParse.c` and `ShaderNIR.c` in the ARM64 and ARM64EC Windows
+configurations at dbf9ef4 (both builds exit 0 and link `libgallium_d3d10.dll`; no ARM64X DLL
+was linked or delivered, because the Shader Model 4 path is the same code under
+`major_version < 5` and nothing calls the new paths).
+
+Not run, not checkable here: any shader on a GPU; what the resource instructions do at run
+time (their NIR was read for the compute self test: slots, offsets and atomics are as P4.2
+says); hull and domain shaders past validation (Panfrost has no tessellation, the poly
+passes were not run on them); UAVs in vertex or geometry shaders on Panfrost (the caps say
+no); geometry shader stream output and instancing in the driver.
+
+## P4.10 Rerun
+
+```sh
+export PATH=~/sbmesa/native:~/sbmesa/venv/bin:$PATH
+cd ~/sbmesa && ninja -j6 -C build-nir-host src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness
+cd build-nir-host
+W=/Users/dev/project-starbite/build/win/winetests/src
+H=./src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness
+$H --selftest --stats $W/d3d10core.c $W/d3d11.c > harness-p4.txt     # everything
+$H $W/d3d10core.c $W/d3d11.c > harness-p4-corpus.txt                 # corpus only
+$H --tgsi $W/d3d10core.c $W/d3d11.c > harness-p4-tgsi.txt            # old path, 4.x only
+$H --selftest --no-fork --no-compile --print-nir --only sm5_hull_phases   # one shader's NIR
+~/sbmesa/build-nir-x/compile-check.sh    # Windows: ARM64 and ARM64EC, result in compile-check.exit
+```

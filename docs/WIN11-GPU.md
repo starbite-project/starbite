@@ -2942,6 +2942,35 @@ GDI present.
   no flag files (the fix itself, incl. DirectComposition), then Geometry Dash A (async GDI), B (`glzcflip`:
   zero-copy on FLIP_SEQUENTIAL, interval 0; GD ICD 0164), B2 (`glzcflipd`: FLIP_DISCARD), A2.
 
+### 6.98 T72 read (SMOOTH1): the desktop composes at 60 fps with one frame of input delay; what costs CPU
+
+(2026-11-16 01:15) **T72** (`build/win/results-t72`, the user's T61 drivers, big cores; sbsmooth at logon, +1, +2.5,
++5 min; all four runs alike, so the desktop is not slower right after logon in this boot):
+- **Frame pace:** a repainting window gets 61.8-62.5 fps, interval p50 16.0 ms, p95 16.6-17.3, p99 17.1-19.7, worst
+  21-64 ms, none over 100 ms; full screen the same (p99 18.6-22.5). The panel reports 60.3-61.8 Hz. DWM's own frame
+  counter still does not advance (`cFrame`, known).
+- **Input:** an injected mouse move reaches the window in 0.5-0.7 ms and is on a composed frame after 15-20 ms on
+  average (p95 20-28 ms): one refresh.
+- **Scheduler and timer:** a waiting thread runs 6-11 us after its event (p99 14-27 us, worst 294 us); the timer
+  resolution is already 1 ms; `Sleep(1)` takes 2.0 ms.
+- **CPUs:** three cores, each **1794 MHz fixed** (the same fixed loop takes 120 ms on each; 130-153 ms at logon
+  while they are busy). No frequency scaling: Windows sees max = now = 1794.
+- **KMD:** GPU busy 21-30 %, present wait 28-34 ms/s, present copy 50-64 ms/s, 70-84 presents/s, 3.3-3.6 jobs per
+  present, no thermal holds.
+- **Window drag** (sbdrag): 53.9 moves/s, 18.5 ms per move (worst 35 ms), but **present copy 355 ms/s** and 14.1
+  jobs per present: moving a window costs a third of a core in the KMD's CPU blts.
+- **Who uses the CPU on an idle desktop** (CPU time over the ~5 min session): System 1:47 (the kernel, our present
+  path included), one svchost 0:55, **sblinkd 0:52 (a steady ~17 % of a core, 107 MB)**, dwm 0:35, Defender 0:26.
+  Total load 9-30 % idle, 60-72 % while the test window animates. Memory: 1.2-1.4 GB available, 2.2-2.3 GB
+  committed, pagefile 0-5 %.
+- **Read:** composition and input are at the display's rate; the desktop's smoothness problems are CPU supply
+  (three cores at 1.8 GHz, a quarter of one taken by background work) and the CPU cost of GDI window moves, not the
+  compositor's pace. Levers, in order: sblinkd's 17 %, the svchost (which service: tasklist /svc next time), the
+  big cores' clock (thermal permitting), GPU blts for window moves instead of CPU copies.
+- **msedge** crashed three times in T70's boot (c0000409 in ucrtbase, i.e. abort). Chromium aborts on purpose when
+  its GPU process cannot be kept alive; with the user's sbumd it has no working windowed present. To re-test on
+  0167 (flip model and DirectComposition working): a browser start is the next real-app test.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,

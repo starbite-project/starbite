@@ -155,6 +155,15 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
   Also noted: with no geometry stage (today's driver), `CreateGeometryShader` / `GsSetShader` call a null driver
   hook on Panfrost, and DrawAuto without a geometry shader passes a NULL draw list.
 
+- **11-16 01:00, item 1:** T70 found the flip-model crash (the shim listed an app's flip buffers as written in
+  DWM's submissions; the system stops such a device). Fixed in 0167; T71 staged (`WIN11-GPU.md` 6.97).
+- **11-16 01:06, Shader Model 5 in the translator (offline):** vertex, pixel, geometry, compute, hull and domain
+  shaders of SM 5.0 parse and translate (branch `sb-nir` dbf9ef4). All 92 SM5 corpus shaders validate; the 83
+  vertex/pixel/geometry/compute ones compile on Bifrost v6 (compute: 22), the 9 hull/domain ones are validated
+  only (tessellation's Panfrost side is not started). Refused by name: SM 5.1, 64-bit floats, interfaces, UAV slots
+  above 8. Several D3D rules were implemented from memory and are listed as unsure in the write-up (Phase 4).
+  Nothing calls it yet: the D3D11 DDI is the missing half.
+
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.
 - **BeamNG.drive:** item 6 (feature level 11_0) is the gate; before that the game cannot create its device. Items
