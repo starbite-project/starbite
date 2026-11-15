@@ -652,8 +652,10 @@ static void lw_draw(dc *d, int emg, int part)
     }
 }
 static dc lw_mk(tk_layer *l) { return mk(l, "lock-widgets", 0, WROW_Y - 10, 390, 92, 0, 1); }   /* B9: the widgets row */
+static void lw_min_drop(void);
 static void build_lwidgets(void)
 {
+    lw_min_drop();
     relayer(&lwidgets);
     dc d = lw_mk(&lwidgets);
     lw_draw(&d, EMG, -1);
@@ -1522,13 +1524,14 @@ static void d_systile(dc *d, const char *k, float x, float y)
  * build_home_w / build_home_apps2 still make them whole (a part-made one is then made again) */
 static dc hw_d;
 static int hw_next;                               /* the next part of a part-made home-w, 0 none */
+static tk_layer *hw_L = &hparts[1];               /* 8x: where its parts draw (hw_off while the minute's is made aside) */
 static void home_w_part(int k)
 {
     if (k != 1 && k != hw_next) return;
     dc d = hw_d;
     if (k == 1) {
-    relayer(&hparts[1]);
-    d = mk(&hparts[1], "home-w", 0, 50, 390, 200, 44, 1);
+    relayer(hw_L);
+    d = mk(hw_L, "home-w", 0, 50, 390, 200, 44, 1);
     hw_d = d;
     d_glass(&d, WID_X(0), 60, WID_W, WID_W, 24, 0, 1);
     } else if (k == 2) {
@@ -1586,17 +1589,79 @@ static void home_w_part(int k)
     d_text(&d, TK_IT400, 12, WID_X(0) + WID_W / 2 - cw / 2, 224 + 12, "Battery", 0, 0, INK, 1);
     cw = tw(TK_IT400, 12, "Systems", 0, 0);
     d_text(&d, TK_IT400, 12, WID_X(1) + WID_W / 2 - cw / 2, 224 + 12, "Systems", 0, 0, INK, 1);
-    trim(&hparts[1]);
+    trim(hw_L);
     }
     hw_next = k < 5 ? k + 1 : 0;
 }
-static void build_home_w(void) { for (int k = 1; k <= 5; k++) home_w_part(k); }
+static void hw_min_drop(void);
+static void build_home_w(void) { hw_min_drop(); for (int k = 1; k <= 5; k++) home_w_part(k); }
 /* a part a call (relink after the first: the layer was made again); 1 while parts are left */
 static int home_w_step(void)
 {
+    hw_min_drop();
     int k = hw_next ? hw_next : 1;
     home_w_part(k);
     return hw_next != 0;
+}
+/* 8x (cp8w failed: "minute: home widgets 113 ms" in one turn; 8u: "lock widgets 104"): the minute's widget rows are
+ * made aside a part an idle turn (the shown ones stay whole), then taken in place at once (lay_take) */
+static tk_layer hw_off, lw_off;
+static int hw_min;                                /* hw_off being made (its parts: hw_next) */
+static int lw_min = -1, lw_min_emg;               /* lw_off's next part (0..2), -1 none; the mode it is made for */
+static dc lw_min_d;
+/* b's picture into a (a keeps its place in the tree, its transform, its GPU bookkeeping; a new gen), b emptied */
+static void lay_take(tk_layer *a, tk_layer *b)
+{
+    tk_layer k = *a;
+    uint32_t g = a->gen > b->gen ? a->gen : b->gen;
+    relayer(a);
+    *a = *b;
+    a->name = k.name; a->child = k.child; a->next = k.next;
+    a->sx = k.sx; a->sy = k.sy; a->ox = k.ox; a->oy = k.oy; a->alpha = k.alpha; a->hidden = k.hidden;
+    a->gpu_occ = k.gpu_occ; a->gpu_occ_cap = k.gpu_occ_cap; a->gpu_occ_ok = 0; a->gpu_occ_seen = 0;
+    a->last = k.last; a->last_gen = k.last_gen;
+    tk_memcpy(a->last_key, k.last_key, sizeof a->last_key);
+    a->gen = g + 1;
+    a->gpu_gen = 0;
+    tk_layer_init(b, "aside");
+}
+static void hw_min_drop(void)
+{
+    if (!hw_min) return;
+    hw_min = 0;
+    hw_next = 0;
+    relayer(&hw_off);
+}
+static void lw_min_drop(void)
+{
+    if (lw_min < 0) return;
+    lw_min = -1;
+    relayer(&lw_off);
+}
+/* a part a call; 1 while parts are left (0: taken in place) */
+static int hw_min_step(void)
+{
+    if (!hw_min && hw_next) return home_w_step();   /* Emergency's part-made one in flight: it finishes in place */
+    if (!hw_min) hw_min = 1;
+    hw_L = &hw_off;
+    home_w_part(hw_next ? hw_next : 1);
+    hw_L = &hparts[1];
+    if (hw_next) return 1;
+    hw_min = 0;
+    lay_take(&hparts[1], &hw_off);
+    return 0;
+}
+static int lw_min_step(void)
+{
+    if (lw_min >= 0 && lw_min_emg != EMG) lw_min_drop();     /* the mode changed meanwhile: again */
+    if (lw_min < 0) { relayer(&lw_off); lw_min_d = lw_mk(&lw_off); lw_min = 0; lw_min_emg = EMG; }
+    lw_draw(&lw_min_d, lw_min_emg, lw_min);
+    if (++lw_min <= 2) return 1;
+    lw_min = -1;
+    trim(&lw_off);
+    lay_take(&lwidgets, &lw_off);
+    tk_layer_prepare(&lwidgets);                  /* (its half copy now: the lock may move next) */
+    return 0;
 }
 /* page 2's parts: 0 the layers, 1..NP2 an icon each (its tile or icon and its name), NP2 + 1 moved and trimmed */
 static dc a2_d, a2_d3;
@@ -4912,6 +4977,7 @@ static void ep_card(void)
             d_icon(&e, "call", x0, EM112_Y + 7, 1);
             d_text(&e, TK_IT600, 17, x0 + 34, bl(TK_IT600, 17, EM112_Y + 11), "Call 112", 0, 0, W(1), 0);
             trim(&em112);
+            tk_layer_prepare(&em112);                /* 8x: its half copy now, not in the unlock's first motion frame */
         }
         tk_a8_free(&ecard[0].glass);
         trim(&ecard[0]);
@@ -4958,6 +5024,7 @@ static void ep_lw_step(void)
 /* the made widgets in place of the shown ones (relink after: the tree's links are the shown layer's) */
 static void ep_lw_swap(void)
 {
+    lw_min_drop();                                  /* 8x: a minute's aside is the old mode's */
     uint32_t g = lwidgets.gen > ep_lw.gen ? lwidgets.gen : ep_lw.gen;
     relayer(&lwidgets);
     lwidgets = ep_lw;
@@ -7287,7 +7354,16 @@ static int min_step(void)
                                         "minute: NC ages", "minute: lock notifications", "minute: clock widget",
                                         "minute: call screen", "minute: lock widgets", "minute: home widgets" };
     int i = 0;
-    for (unsigned b = 1; b <= MS_HOMEW; b <<= 1, i++) if (min_stale & b) { min_name = MSN[i]; min_do(b); return 1; }
+    for (unsigned b = 1; b <= MS_HOMEW; b <<= 1, i++)
+        if (min_stale & b) {
+            min_name = MSN[i];
+            if (b == MS_LW || b == MS_HOMEW) {        /* 8x: made aside a part a turn, then taken in place */
+                if (!(b == MS_LW ? lw_min_step() : hw_min_step())) { min_stale &= ~b; relink(); prep_left = 1; }
+                return 1;
+            }
+            min_do(b);
+            return 1;
+        }
     min_name = "minute";
     return 0;
 }
@@ -7306,7 +7382,7 @@ void sh_status(int h, int mi, int wday, int day, int mon, int pct, int temp)
         if (calic_key != cal_key()) cal_newday();
         min_stale |= MS_LCLOCK | MS_HOMESB | MS_APSB | MS_NC | MS_LKN | MS_WCLOCK | MS_CM;
     }
-    if (wchange) min_stale |= MS_LW | MS_HOMEW;
+    if (wchange) { min_stale |= MS_LW | MS_HOMEW; lw_min_drop(); hw_min_drop(); }   /* 8x: new values: an aside starts again */
     if (tchange || wchange) {
         int lock_vis = locked || lockY > -H_PT + 1, home_vis = !locked && (!AP.on || AP.closing) && !CCS.on;
         unsigned now = 0;
@@ -7418,6 +7494,7 @@ void sh_idle(void)
         tk_layer_prepare(&Q[i].icon); tk_layer_prepare(&Q[i].iconlit);
     }
     tk_layer_prepare(&mark); tk_layer_prepare(&glyph_c); tk_layer_prepare(&glyph_o); tk_layer_prepare(&hint);
+    if (em112.bmp.px) tk_layer_prepare(&em112);  /* 8x */
     sh_slow_piece("layer prepares", (unsigned)(tk_us() - lp0_));
 }
 #undef IP_

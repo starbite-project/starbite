@@ -628,6 +628,7 @@ static void apply_state(const char *st)
     if (colon) { memcpy(key, eq + 1, (size_t)(colon - eq - 1 < 255 ? colon - eq - 1 : 255)); v = (float)atof(colon + 1); }
     else snprintf(key, sizeof key, "%s", eq + 1);   /* helper D: a long notification text fits */
     /* date=WDAY:DAY (P3p): a new day as the phone's clock reports it (the Calendar icon follows) */
+    if (!strcmp(what, "batt")) { sh_status(21, 6, 2, 10, 11, (int)v, 41); return; }   /* 8x: batt=:N a new charge (the widgets' minute rebuild) */
     if (!strcmp(what, "date")) { sh_status(21, 6, atoi(key), (int)v, 11, 87, 41); return; }
     if (!strcmp(what, "hostms")) { surv_host_now_ms = (uint64_t)v; return; }   /* survival-next: the simulation's clock */
     if (!strcmp(what, "last2")) { surv_last2_set(v > 0, "a state"); return; }   /* helper J: last2=:1 (the Compass refused) */
