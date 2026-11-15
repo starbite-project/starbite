@@ -51,6 +51,7 @@ class Repart:
         self.layout = layout
         self.dir = installer.state_dir / installer.phone_id / 'gpt'
         self.a = None
+        self.move_keep = tuple(getattr(installer, 'move_keep', ()) or ())
 
     # ---------------------------------------------------------------- reading
     @property
@@ -103,7 +104,7 @@ class Repart:
         if an is not None and an[2].get('total') == self.total:
             odisk = gpt.read(an[0], an[1], self.total)
             try:
-                p = gpt.plan(odisk, self.layout)
+                p = gpt.plan(odisk, self.layout, self.move_keep)
             except gpt.GPTError as e:
                 raise Refused(f'the saved GPT backup no longer plans with layout {self.layout.name}: {e}') from None
             old_new = (an[2].get('new_primary_sha256'), an[2].get('new_backup_sha256'))
@@ -127,7 +128,7 @@ class Repart:
                 self.ui.info('the backup GPT copy was never written on this phone (the last 5 blocks are zeros); the '
                              'primary is valid. The plan comes from the primary; both copies are written (backup first)')
             try:
-                p = gpt.plan(now, self.layout)
+                p = gpt.plan(now, self.layout, self.move_keep)
             except gpt.GPTError as e:
                 raise Refused(str(e)) from None
             if not p.changed:
@@ -205,6 +206,36 @@ class Repart:
                          f'{sha(tail)}  gpt-orig-tail.bin (sda last 5 LBAs: backup GPT)\n')
         self.ui.ok(f'GPT backup: {"the primary valid, the backup never written (zeros)" if d.primary_only else "both copies valid"}, phone and computer agree (head {sha(head)[:12]}..., '
                    f'tail {sha(tail)[:12]}...) in {self.i.rel(self.dir)}')
+
+    def save_keep(self, p, a):
+        """The keep rows that move by the allowance: each one read whole from its OLD place, while the old table is
+        still the one the kernel uses, hashed on the phone and here, saved as gpt/keep-NAME.img (+ keep.json)."""
+        moving = [r for r in p.rows if r.name in self.move_keep and r.status in ('moved', 'resized') and r.old]
+        if not moving:
+            return
+        kp = self.dir / 'keep.json'
+        meta = json.loads(kp.read_text()) if kp.exists() else {}
+        for r in moving:
+            f = self.dir / f'keep-{r.name}.img'
+            m = meta.get(r.name)
+            if m and f.exists() and sha(f.read_bytes()) == m['sha256']:
+                continue
+            if a.states and a.states[0] not in ('orig', ''):
+                raise Stopped(f'{r.name}: no saved copy, and the primary GPT is no longer the original one: its old '
+                              'place cannot be read any more. Restore the GPT (--restore-gpt) first')
+            node, size = f'/dev/block/sda{r.old.index}', r.old.blocks * BS
+            data = self.phone.exec_out(f'dd if={node} bs=1048576 2>/dev/null')
+            there = self.phone.sh(f'dd if={node} bs=1048576 2>/dev/null | sha256sum').split()[0]
+            if len(data) != size or sha(data) != there:
+                raise Stopped(f'{r.name}: read {len(data)} of {size} bytes, phone {there[:16]}... vs here '
+                              f'{sha(data)[:16]}...: stopping before the GPT write')
+            f.write_bytes(data)
+            meta[r.name] = {'sha256': there, 'size': size, 'old_index': r.old.index, 'old_first': r.old.first,
+                            'old_last': r.old.last, 'new_first': r.new.first, 'new_last': r.new.last}
+            kp.write_text(json.dumps(meta, indent=1))
+            self.ui.ok(f'{r.name} saved before the move: {size >> 20} MiB from sda{r.old.index}, sha256 {there[:12]}... '
+                       f'(phone and computer agree) -> {self.i.rel(f)}')
+        self.i.journal.mark_step('move-keep', 'saved', names=sorted(meta), dir=str(self.dir))
 
     def write_commands(self, p):
         return {'backup': f': sbinst-gpt-backup; dd if={D}/backup.bin of=/dev/block/sda bs={BS} '
@@ -317,6 +348,7 @@ class Repart:
             return
         if a.status != 'reread':
             self.save_anchor()
+            self.save_keep(p, a)
             if typed and not u.typed(f'Write the new UFS partition table ({self.layout.name})? Partitions marked new/moved/'
                                      f'resized above lose their contents.', f'repartition {self.i.phone_id}'):
                 raise Refused('the partition table was not confirmed: nothing written')

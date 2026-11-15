@@ -64,6 +64,10 @@ def parse(argv):
                     help='the phone to work on (adb devices / fastboot devices); every adb and fastboot call names '
                          'it, other phones are ignored, and a Download-mode flash needs every other phone unplugged. '
                          'Required with --real')
+    ap.add_argument('--move-keep', metavar='NAMES', default='',
+                    help='with --repartition: let these Samsung keep rows move (comma list). Only what the phone\'s '
+                         'allowance in sbinst/common.py MOVE_KEEP_ALLOWED names (S9 #2: CACHE,HIDDEN,OMR,CP_DEBUG); '
+                         'they are saved first and written back after (CACHE from S9 #1 by stream-copy)')
     ap.add_argument('--battery-ok-on-usb', action='store_true',
                     help='the user accepts a low battery: only while the phone is charging, and never for a partition-'
                          'table write (shown as USER OVERRIDE on the preflight)')

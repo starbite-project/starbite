@@ -81,6 +81,10 @@ class MemPhone:
             else:
                 self.disk[seek:seek + len(self.pushed)] = self.pushed
             return ''
+        if re.fullmatch(r'cat /tmp/\S+\.rc 2>/dev/null', cmd):           # the detached write's exit status
+            return '0'
+        if cmd.startswith('rm -f '):
+            return ''
         skip = int(re.search(r'skip=(\d+)', cmd).group(1)) << 20
         n = int(re.search(r'head -c (\d+)', cmd).group(1))
         return hashlib.sha256(bytes(self.disk[skip:skip + n])).hexdigest() + '  -'

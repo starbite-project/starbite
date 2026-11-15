@@ -451,6 +451,25 @@ def open_text(p):
         return f.read()
 
 
+def detached(phone, cmd, tag, timeout=None):
+    """`cmd` on the phone in a subshell that ignores SIGHUP (a dropped link cannot cut the write in half: S9 #2's
+    cable, 2026-11-15), its exit status in /tmp/TAG.rc, polled here. A link down past the timeout (SBINST_DETACH_TIMEOUT,
+    default 180 s) stops the run; the write itself finishes on the phone, and a re-run checks and resumes."""
+    timeout = timeout or int(os.environ.get('SBINST_DETACH_TIMEOUT', 180))
+    rc = f'/tmp/{tag}.rc'
+    phone.sh(f'rm -f {rc} {rc}.tmp; ( trap "" HUP INT; {cmd}; echo $? > {rc}.tmp; sync; mv {rc}.tmp {rc} ) '
+             '</dev/null >/dev/null 2>&1 &', write=True, quiet=True)
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        r = phone.sh(f'cat {rc} 2>/dev/null', check=False, quiet=True)
+        if r:
+            phone.sh(f'rm -f {rc}', check=False, quiet=True)
+            return r.strip()
+        time.sleep(0.5)
+    raise Stopped(f'no answer from the phone for {timeout} s while {tag} was being written (the link?): the write goes '
+                  'on there; run the same command again to resume')
+
+
 def chunk_write(phone, ui, src, size, node, offset, state_path, label, file_mode=False):
     """The installer's own verified writer (the algorithm of tools/android/pixel/part-write.py and
     tools/macos/card-range-flash.py, for the targets those tools do not take: BOOT, RECOVERY,
@@ -481,15 +500,18 @@ def chunk_write(phone, ui, src, size, node, offset, state_path, label, file_mode
                 continue
             seek = offset // MIB + i * (CHUNK // MIB)
             if data == zero[:len(data)]:
-                phone.sh(f'head -c {len(data)} /dev/zero | dd of={node} bs=1048576 seek={seek} conv=notrunc,fsync 2>/dev/null',
-                         write=True, quiet=True)
+                rc = detached(phone, f'head -c {len(data)} /dev/zero | dd of={node} bs=1048576 seek={seek} '
+                                     'conv=notrunc,fsync 2>/dev/null', 'sbinst-chunk')
             else:
                 gz = os.path.join(tmp, 'chunk.gz')
                 with gzip.open(gz, 'wb', compresslevel=1) as g:
                     g.write(data)
                 phone.push(gz, '/tmp/sbinst-chunk.gz')
-                phone.sh(f'gzip -dc /tmp/sbinst-chunk.gz | dd of={node} bs=1048576 seek={seek} conv=notrunc,fsync 2>/dev/null;'
-                         ' rm -f /tmp/sbinst-chunk.gz', write=True, quiet=True)
+                rc = detached(phone, f'gzip -dc /tmp/sbinst-chunk.gz | dd of={node} bs=1048576 seek={seek} '
+                                     'conv=notrunc,fsync 2>/dev/null', 'sbinst-chunk')
+                phone.sh('rm -f /tmp/sbinst-chunk.gz', quiet=True, check=False)
+            if rc != '0':
+                raise Stopped(f'{label}: chunk {i}: the write failed on the phone (dd exit {rc}): a re-run resumes here')
             back = phone.sh(f'dd if={node} bs=1048576 skip={seek} count={(len(data) + MIB - 1) // MIB} 2>/dev/null'
                             f' | head -c {len(data)} | sha256sum', quiet=True).split()
             want = hashlib.sha256(data).hexdigest()

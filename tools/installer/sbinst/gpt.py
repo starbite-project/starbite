@@ -341,8 +341,9 @@ class Plan:
         return (self.disk.total - len(self.backup) // self.disk.lba) * self.disk.lba
 
 
-def plan(disk, layout):
-    """The new table for `disk` from `layout` (a ufslayout.Layout). Raises GPTError on any refusal."""
+def plan(disk, layout, move_keep=()):
+    """The new table for `disk` from `layout` (a ufslayout.Layout). Raises GPTError on any refusal. `move_keep`: keep rows
+    the caller is allowed to move on this phone (common.MOVE_KEEP_ALLOWED; their contents are the caller's job)."""
     if not disk.usable:
         raise GPTError('the GPT on the phone is not valid in both copies: ' + '; '.join(disk.problems))
     if disk.lba != ufslayout.BLOCK:
@@ -398,7 +399,10 @@ def plan(disk, layout):
         if st in ('new', 'moved', 'resized'):
             fresh.append(p.name)
             if p.content == ufslayout.KEEP and oe is not None:
-                lost.append(p.name)
+                if p.name in move_keep:
+                    note += ' (moves by the allowance: saved first, written back)'
+                else:
+                    lost.append(p.name)
         rows.append(Row(i, p.name, oe, ne, st, p.content, note))
     for e in disk.primary.entries:
         if e.name not in names:

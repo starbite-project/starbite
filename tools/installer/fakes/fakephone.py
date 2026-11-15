@@ -87,7 +87,7 @@ def gpt_bytes(layout_name, rnd, total=UFS_BLOCKS):
     ents = []
     for i, p, s, e in L.resolve(6, total - 6):
         g = p.unique_guid()
-        if layout_name == 'stock' and p.content != ufslayout.PROTECTED:
+        if layout_name.startswith('stock') and p.content != ufslayout.PROTECTED:
             g = str(uuid.UUID(bytes=bytes(rnd.getrandbits(8) for _ in range(16)), version=4))
         ents.append(gpt.Entry(i, p.name, s, e, p.type, g, p.attrs))
     hdr = bytearray(BS)

@@ -70,6 +70,25 @@ BACKUP_RAW = (('sda-head-4M', 'sda', 'head'), ('sda-tail-gpt', 'sda', 'tail'),
               ('sdb', 'sdb', 'whole'), ('sdc', 'sdc', 'whole'), ('sdd', 'sdd', 'whole'),
               ('sde', 'sde', 'whole'))
 
+# Samsung's rows after SYSTEM (content = keep in ufslayout.py) that may move on ONE phone, by the user's decision.
+# S9 #2's stock table puts CACHE, HIDDEN, OMR and CP_DEBUG elsewhere than starbite-oneui (shared notes
+# installer-s9b-space-plan.md 7). The user, 2026-11-15 22:55 (relayed by the main session): "you can do it".
+# The installer then takes a fresh backup of the four (phone and Mac hashes) before the GPT write, writes OMR,
+# HIDDEN and CP_DEBUG back at their new places (same sizes), and CACHE (600 -> 12 MiB) is copied from S9 #1
+# (night-s9b.sh, stream-copy.py --allow-keep-target CACHE). --restore-gpt writes all four back to their old places.
+MOVE_KEEP_ALLOWED = {'phone-4beca2ff25': ('CACHE', 'CP_DEBUG', 'HIDDEN', 'OMR')}
+MOVE_KEEP_FAKE = 'phone-1eb5470905'     # the rehearsals' fake S9 #2 (serial S9TWO02): only with a fake phone
+
+
+def move_keep_allowed(phone_id, fake=False):
+    """The keep rows this phone may move (the allowance above), or ()."""
+    if phone_id in MOVE_KEEP_ALLOWED:
+        return MOVE_KEEP_ALLOWED[phone_id]
+    if fake and phone_id == MOVE_KEEP_FAKE:
+        return MOVE_KEEP_ALLOWED['phone-4beca2ff25']
+    return ()
+
+
 MODELS = ('SM-G960F',)            # Exynos S9; a Snapdragon S9 is another platform
 DEVICES = ('starlte',)
 

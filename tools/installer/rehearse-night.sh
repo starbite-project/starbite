@@ -50,7 +50,7 @@ PY
 
 echo "######## two fake phones"
 "${FP[@]}" create "$W/s1" --state recovery --gpt starbite-oneui --card starbite --layout sd128 >/dev/null
-"${FP[@]}" create "$W/s2" --state env --gpt stock --card starbite --layout sd64l --card-sectors 124735488 >/dev/null
+"${FP[@]}" create "$W/s2" --state env --gpt stock-s9b --card starbite --layout sd64l --card-sectors 124735488 >/dev/null
 sed -i.bak 's/^ro.boot.serialno=.*/ro.boot.serialno=S9TWO02/' "$W/s2/props" && rm "$W/s2/props.bak"
 mkdir -p "$W/state/env" "$W/in"
 ssh-keygen -q -t ed25519 -N '' -C night-rehearsal -f "$W/state/env/id_ed25519"
@@ -112,6 +112,20 @@ sda = os.path.join(s2, 'dev/block/sda')
 with open(sda, 'r+b') as f:
     f.seek(-5 * 4096, 2); f.write(bytes(5 * 4096))
 PY
+# S9 #2's Samsung keep rows (they move in step C by the allowance) and S9 #1's CACHE: marked content
+python3 - "$W" <<'PY'
+import hashlib, json, os, sys
+w = sys.argv[1]
+out = {}
+for r, names in (('s2', ('CACHE', 'HIDDEN', 'OMR', 'CP_DEBUG')), ('s1', ('CACHE',))):
+    for n in names:
+        p = os.path.realpath(os.path.join(w, r, 'dev/block/by-name', n))
+        d = os.urandom(os.path.getsize(p))
+        open(p, 'wb').write(d)
+        out[f'{r}-{n}'] = hashlib.sha256(d).hexdigest()
+json.dump(out, open(os.path.join(w, 'keep-before.json'), 'w'))
+PY
+echo "/dev/block/sda21 /cache ext4 rw,seclabel,nosuid,nodev,noatime 0 0" >> "$W/s1/proc/mounts"   # TWRP mounts /cache
 S1H=$(tree_hash "$W/s1")
 prot2() { cat "$W/s2/dev/block/by-name/"{EFS,PARAM,KEYSTORAGE,PERSISTENT,STEADY,RECOVERY,BOOT,DTB,DTBO,BOTA0,BOTA1,UP_PARAM} "$W/s2/dev/block/"sd{b,c,d,e} | shasum -a 256; }
 P2=$(prot2)
@@ -124,6 +138,14 @@ grep -q '^### step E done' "$W/night.log" && grep -q '^### step F done' "$W/nigh
 	grep -q '^### step ONLY(P E F) done' "$W/night.log" && ok "E and F done, C not touched, the ONLY marker" || bad "ONLY markers"
 [ "$(python3 -c "import sys, hashlib; f=open(sys.argv[1],'rb'); h=f.read(6*4096); f.seek(-5*4096,2); print(hashlib.sha256(h+f.read()).hexdigest())" "$W/s2/dev/block/sda")" = "$GPT0" ] &&
 	ok "S9 #2's GPT untouched by P E F" || bad "the GPT changed"
+echo; echo "######## step C without the allowance, and with a name outside it: refused, nothing written"
+GPTB=$(python3 -c "import sys, hashlib; f=open(sys.argv[1],'rb'); h=f.read(6*4096); f.seek(-5*4096,2); print(hashlib.sha256(h+f.read()).hexdigest())" "$W/s2/dev/block/sda")
+NIGHT_MOVE_KEEP="" NIGHT_ONLY="C" "${NIGHT[@]}" > "$W/run-nk.txt" 2>&1
+grep -q 'moves or resizes CACHE, HIDDEN, OMR, CP_DEBUG' "$W/state/night-s9b/logs/C-gpt-dry.txt" && ok "no --move-keep: the four Samsung rows may not move (refused)" || bad "no keep refusal"
+NIGHT_MOVE_KEEP="CACHE,HIDDEN,OMR,CP_DEBUG,EFS" NIGHT_ONLY="C" "${NIGHT[@]}" > "$W/run-efs.txt" 2>&1
+grep -q "EFS not in this phone's allowance" "$W/state/night-s9b/logs/C-gpt-dry.txt" && ok "--move-keep with EFS: refused (not in the allowance)" || bad "EFS not refused"
+[ "$(python3 -c "import sys, hashlib; f=open(sys.argv[1],'rb'); h=f.read(6*4096); f.seek(-5*4096,2); print(hashlib.sha256(h+f.read()).hexdigest())" "$W/s2/dev/block/sda")" = "$GPTB" ] && ok "...the GPT untouched by both" || bad "the GPT changed"
+
 echo; echo "######## step C with the link dropping while the phone's detached GPT write runs (the poll fails, the dd goes on)"
 FAKE_FAIL='cat /tmp/sbinst-gpt/primary.rc' FAKE_FAIL_TIMES=200 "${NIGHT[@]}" > "$W/run-c.txt" 2>&1
 rc=$?; rm -f "$W/s2/fail-count"
@@ -238,6 +260,34 @@ PY
 [ "$(tree_hash "$W/s1")" = "$S1H" ] && ok "S9 #1 byte-identical (only read)" || bad "S9 #1 changed"
 [ "$(prot2)" = "$P2" ] && ok "S9 #2's RECOVERY, BOOT, EFS, PARAM, KEYSTORAGE, PERSISTENT, STEADY, DTB, DTBO, BOTA, UP_PARAM, sdb-sde unchanged" || bad "a protected area changed"
 [ "$(cat "$W/s2/state")" = env ] && ok "S9 #2 still in its installer environment (no reboot)" || bad "S9 #2 state $(cat "$W/s2/state")"
+python3 - "$W" <<'PY' && ok "after the move: HIDDEN, OMR, CP_DEBUG hold their own old bytes again (written back); CACHE = S9 #1's" || bad "keep rows"
+import hashlib, json, os, sys
+w = sys.argv[1]
+b = json.load(open(os.path.join(w, 'keep-before.json')))
+h = lambda r, n: hashlib.sha256(open(os.path.realpath(os.path.join(w, r, 'dev/block/by-name', n)), 'rb').read()).hexdigest()
+for n in ('HIDDEN', 'OMR', 'CP_DEBUG'):
+    assert h('s2', n) == b['s2-' + n], n
+assert h('s2', 'CACHE') == b['s1-CACHE'], 'CACHE'
+PY
+grep -q '"move-keep"' "$W"/state/phone-*/journal.json && grep -q 'you can do it' "$W"/state/phone-*/journal.json && ok "the journal records the allowance (and the user's words)" || bad "journal allowance"
+
+echo; echo "######## the way back: --restore-gpt (the stock table, and the four rows at their old places)"
+SBINST_STATE="$W/state" python3 -B tools/installer/starbite-install --restore-gpt --rehearse --yes --fake-root "$W/s2" --state-dir "$W/state" --serial S9TWO02 > "$W/restore.txt" 2>&1 && ok "--restore-gpt (exit 0)" || { bad "restore-gpt"; tail -8 "$W/restore.txt"; }
+python3 - "$W" <<'PY' && ok "the table is S9 #2's stock one again, and CACHE (600 MiB), HIDDEN, OMR, CP_DEBUG hold their saved bytes" || bad "restore"
+import hashlib, json, os, sys
+sys.path.insert(0, 'tools/installer')
+from sbinst import gpt, ufslayout
+w = sys.argv[1]
+b = json.load(open(os.path.join(w, 'keep-before.json')))
+with open(os.path.join(w, 's2/dev/block/sda'), 'rb') as f:
+    head = f.read(6 * 4096)
+d = gpt.read(head, bytes(5 * 4096), 15616000)
+L = ufslayout.get('stock-s9b')
+assert [(e.name, e.first, e.last) for e in d.primary.entries] == [(p.name, s, e) for i, p, s, e in L.resolve(6, 15615994)]
+h = lambda n: hashlib.sha256(open(os.path.realpath(os.path.join(w, 's2/dev/block/by-name', n)), 'rb').read()).hexdigest()
+for n in ('CACHE', 'HIDDEN', 'OMR', 'CP_DEBUG'):
+    assert h(n) == b['s2-' + n], n
+PY
 echo; echo "--- the night log (rehearsal) ---"; grep -E '^###' "$W/night.log"
 echo; echo "######## result: $pass passed, $fail failed"
 [ "${KEEP:-0}" = 1 ] || [ "$fail" != 0 ] || rm -rf "$W"

@@ -39,6 +39,8 @@ CAT_LIVE=${NIGHT_CATALOG:-$BUILD/build/store/catalog-live.toml}
 CAT_A=${NIGHT_CATALOG_A:-$ST/bundle-s9b/store/catalog.toml}
 CAP=${NIGHT_SIZE_CAP:-}                       # rehearsal only: copy this many bytes of each big source
 ONLY=${NIGHT_ONLY:-}                          # e.g. "P E F": only these steps (E, F write only the card, not UFS)
+MOVE_KEEP=${NIGHT_MOVE_KEEP-CACHE,HIDDEN,OMR,CP_DEBUG}  # C: Samsung rows S9 #2 may move (the user, 2026-11-15; the
+                                              # installer checks the phone's allowance); "" = none
 want() { [ -z "$ONLY" ] || case " $ONLY " in *" $1 "*) true ;; *) false ;; esac; }
 mkdir -p "$NB/logs" "$NB/entries" "$(dirname "$LOG")"
 PID=$(python3 -c 'import hashlib,sys;print("phone-"+hashlib.sha256(sys.argv[1].encode()).hexdigest()[:10])' "$S2")
@@ -166,10 +168,14 @@ MAC15=$(cat "$NB/mac15-file" 2>/dev/null)
 STEP=C
 if want C && ! done_p C; then
 	mark C started
-	twice C-gpt "y\ny\ninstall $PID\nrepartition $PID\n" si -- --bundle "$BUN/bundle-c" --repartition
+	twice C-gpt "y\ny\ninstall $PID\nrepartition $PID\n" si -- --bundle "$BUN/bundle-c" --repartition \
+		${MOVE_KEEP:+--move-keep "$MOVE_KEEP"}
 	grep -q 'the kernel sees the starbite-oneui table\|skip  UFS partition table' "$NB/logs/C-gpt.txt" || die "no proof of the new table in the log"
 	grep -q 'oneui-data: verified on the phone.*TYPE ext4 LABEL data\|keep .*One UI 8 /data' "$NB/logs/C-gpt.txt" ||
 		die "no proof that One UI's /data was made (A16DATA)"
+	case ",$MOVE_KEEP," in *,CACHE,*)    # CACHE moved and shrank (600 -> 12 MiB): S9 #1's, the state One UI runs with there
+		stream C-cache part:CACHE part:CACHE --allow-keep-target CACHE --allow-mounted-source ;;   # TWRP mounts /cache
+	esac
 	set_done C; mark C done
 fi
 

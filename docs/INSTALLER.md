@@ -1222,3 +1222,32 @@ block hold the phone's bytes, 26 checks:
 - afterwards: the volatile entries' bytes, the settings block and every CRC;
 - the rollback (`--restore`);
 - UFS untouched.
+
+## 18. S9 #2's step C: its own stock table, and the allowance to move four Samsung rows (2026-11-15)
+
+S9 #2's stock GPT (another stock firmware than S9 #1's original) differs from S9 #1's from SYSTEM on, and its backup
+copy was never written (ufslayout `stock-s9b`, positions read from its step-A backup; the shared notes
+`installer-s9b-space-plan.md` 7):
+- **The backup copy:** a valid primary + an all-zero backup region is planned from the primary (`gpt.Disk.primary_only`);
+  both copies are written, the backup first; the zero tail is the saved original.
+- **The four keep rows:** `starbite-oneui` moves CACHE (600 -> 12 MiB), HIDDEN, OMR and CP_DEBUG, which the engine
+  refuses unless the phone has an allowance.
+  - The allowance: `common.MOVE_KEEP_ALLOWED`, for phone-4beca2ff25 only. The user, 2026-11-15 22:55: "you can do it".
+  - Plus `--move-keep CACHE,HIDDEN,OMR,CP_DEBUG` with `--repartition`; a name outside the allowance, or another
+    phone, refuses.
+  - Shown on the preflight (ALLOWED ...) and in the journal (`move-keep`, with the user's words).
+  - Before the GPT write, each of the four is read whole from its old place, while the old table is still the
+    kernel's, hashed on the phone and here: `gpt/keep-NAME.img` + `keep.json`.
+  - After the write, OMR, HIDDEN and CP_DEBUG (same sizes) are written back at their new places and read back.
+  - CACHE, now 12 MiB, is copied from S9 #1 (`stream-copy.py --allow-keep-target CACHE --allow-mounted-source`: TWRP
+    keeps /cache mounted) by `night-s9b.sh` step C.
+  - `--restore-gpt` writes all four back to their old places after the stock table.
+- **The flaky cable:** the installer's own chunk writer, `stream-copy.py` and `store-update.py` now run every write as
+  a detached subshell on the phone that ignores SIGHUP, with a result file the Mac polls. The GPT write already did.
+  A link down past `SBINST_DETACH_TIMEOUT` (180 s) stops the step; the write finishes on the phone; a re-run resumes.
+
+`tools/installer/rehearse-night.sh` (38 checks), with the fake S9 #2 on `stock-s9b` and its backup GPT zeroed:
+- refusals: without the allowance; with EFS;
+- the link down while the GPT write runs, then the resume;
+- the four rows saved, three written back with their own bytes, CACHE = S9 #1's, mounted rw in TWRP;
+- `--restore-gpt`: the stock table and all four rows at their old places.

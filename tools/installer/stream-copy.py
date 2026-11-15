@@ -55,7 +55,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from sbinst.common import CHUNK, DOWNLOAD_MODE_USB, MIB, Refused, Stopped, cardlayout, default_state_dir, human  # noqa: E402
+from sbinst.common import (CHUNK, DOWNLOAD_MODE_USB, MIB, Refused, Stopped, cardlayout, default_state_dir, human,  # noqa: E402
+                           move_keep_allowed)
 from sbinst.device import InstallerEnv, usb_list  # noqa: E402
 from sbinst.journal import Journal  # noqa: E402
 from sbinst.steps import mbr_parts, phone_id_of  # noqa: E402
@@ -85,13 +86,13 @@ def range_cmd(node, off, ln, sha):
 
 
 class Spec:
-    def __init__(self, text, side):
-        self.text, self.side = text, side
+    def __init__(self, text, side, extra_parts=()):
+        self.text, self.side, self.extra = text, side, tuple(extra_parts)
         self.kind, self.name, self.start, self.sectors, self.path = None, None, None, None, None
         m = re.fullmatch(r'part:([A-Z0-9_]+)', text)
         if m:
             self.kind, self.name = 'part', m.group(1)
-            if side == 'target' and self.name not in TARGET_PARTS:      # checked before either phone is asked anything
+            if side == 'target' and self.name not in TARGET_PARTS + tuple(extra_parts):   # before either phone is asked
                 raise Refused(f'target part:{self.name}: only {", ".join(TARGET_PARTS)} (never RECOVERY, BOOT, EFS, '
                               'PARAM ...)')
             return
@@ -220,8 +221,17 @@ class Copy:
         self.state_dir = Path(a.state_dir or default_state_dir()).resolve()
         self.src = Source(a.from_serial, senv)
         self.tgt = Target(a.to_serial, tenv, Path(os.environ.get('SBINST_STATE', default_state_dir())) / 'env')
-        self.sspec, self.tspec = Spec(a.source, 'source'), Spec(a.target, 'target')
         self.pid = phone_id_of(a.to_serial)
+        extra = ()
+        if a.allow_keep_target:                   # a Samsung keep row this phone may have moved (common.MOVE_KEEP_ALLOWED)
+            want = tuple(x.strip().upper() for x in a.allow_keep_target.split(',') if x.strip())
+            allowed = move_keep_allowed(self.pid, fake=bool(a.fake_dst))
+            bad = [x for x in want if x not in allowed]
+            if bad:
+                raise Refused(f'--allow-keep-target {", ".join(bad)}: not in {self.pid}\'s allowance '
+                              f'({", ".join(allowed) or "none"})')
+            extra = want
+        self.sspec, self.tspec = Spec(a.source, 'source'), Spec(a.target, 'target', extra)
         self.journal = Journal(self.state_dir / self.pid / 'journal.json')
 
     def say(self, s):
@@ -258,6 +268,10 @@ class Copy:
             for ln in self.src.sh('cat /proc/mounts').stdout.splitlines():
                 b = ln.split()
                 if len(b) >= 4 and b[0] in (node, f'/dev/block/by-name/{s.name}') and 'rw' in b[3].split(','):
+                    if self.a.allow_mounted_source:
+                        self.say(f'WARN source: {s.name} is mounted read-write at {b[1]} in TWRP: copied as it is '
+                                 '(--allow-mounted-source; nothing on S9 #1 is written by this tool)')
+                        continue
                     raise Refused(f'source: {s.name} is mounted read-write at {b[1]} in TWRP: unmount it first '
                                   '(the copy would not be one consistent image)')
         elif s.kind == 'card':
@@ -281,7 +295,7 @@ class Copy:
     def resolve_target(self):
         t, size = self.tspec, self.size
         if t.kind == 'part':
-            if t.name not in TARGET_PARTS:
+            if t.name not in TARGET_PARTS + t.extra:
                 raise Refused(f'target part:{t.name}: only {", ".join(TARGET_PARTS)} (never RECOVERY, BOOT, EFS, PARAM ...)')
             node = self.tgt.sh(f'readlink -f /dev/block/by-name/{t.name}').stdout.strip()
             if not re.fullmatch(r'/dev/block/sda\d+', node):
@@ -462,6 +476,12 @@ def main(argv=None):
     m.add_argument('--real', action='store_true')
     m.add_argument('--rehearse', action='store_true')
     ap.add_argument('--restart', action='store_true', help='forget a finished-chunk state and copy from chunk 0')
+    ap.add_argument('--allow-mounted-source', action='store_true',
+                    help='copy a source partition even though TWRP has it mounted read-write (TWRP mounts /cache): '
+                         'the copy is then of a live file system; still read only')
+    ap.add_argument('--allow-keep-target', default='', metavar='NAMES',
+                    help='also allow these Samsung keep rows as the target, within the target phone\'s allowance '
+                         '(sbinst/common.py MOVE_KEEP_ALLOWED: S9 #2 CACHE after its move)')
     ap.add_argument('--state-dir')
     ap.add_argument('--fake-src')
     ap.add_argument('--fake-dst')

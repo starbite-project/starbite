@@ -173,6 +173,20 @@ def _stock():
                   min_blocks=15616000)
 
 
+def _stock_s9b():
+    """S9 #2's stock table (2026-11-15, another stock firmware than S9 #1's original): rows 1-17 as everywhere, then
+    SYSTEM 4.3 GiB, VENDOR, ODM, a 600 MiB CACHE, HIDDEN, OMR, CP_DEBUG at other places, and a USERDATA that stops
+    short of the last usable block. Read from S9 #2's step-A backup (positions only). A reference for the fakes and
+    the tests, never a target."""
+    at = {'SYSTEM': (68736, 1126400), 'VENDOR': (1195136, 166400), 'ODM': (1361536, 165376), 'CACHE': (1526912, 153600),
+          'HIDDEN': (1680512, 2560), 'OMR': (1683072, 12800), 'CP_DEBUG': (1695872, 1280)}
+    mid = tuple(replace(p, start=at[p.name][0], blocks=at[p.name][1]) for p in SAMSUNG_MID)
+    return Layout('stock-s9b', "Samsung stock SM-G960F as on S9 #2 (another firmware's table)",
+                  SAMSUNG_HEAD + mid + (
+                      Part('USERDATA', 1697152, 13917184, SCRATCH, 'stock Android /data (S9 #2)', guid=USERDATA_GUID),),
+                  min_blocks=15616000)
+
+
 def _starbite_a():
     """Layout A: S9 #1 since 2026-10-25 (tools/woa/gpt-split.sh). docs/ANDROID-PIXEL.md 2.1."""
     return Layout('starbite-a', 'Starbite layout A (S9 #1 today): USERDATA 18.75 GiB, WINESP, WINDOWS 25.84 GiB, '
@@ -238,7 +252,7 @@ def _starbite_oneui():
                          'while Windows does not grow its volume past the partition.'))
 
 
-LAYOUTS = {L.name: L for L in (_stock(), _starbite_a(), _starbite_a16g(), _starbite_oneui())}
+LAYOUTS = {L.name: L for L in (_stock(), _stock_s9b(), _starbite_a(), _starbite_a16g(), _starbite_oneui())}
 ACTIVE = 'starbite-a'          # the table a Starbite install lays out unless the bundle names another
 TARGETS = ('starbite-a', 'starbite-a16g', 'starbite-oneui')      # layouts a bundle may name (stock is a reference only)
 

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import nopassword, pit, repart, rescue
-from .common import (BACKUP_OPTIONAL, BACKUP_RAW, BACKUP_REQUIRED, DOWNLOAD_MODE_USB, GIB, MIB, NATIVE_PARTS,
+from .common import (move_keep_allowed, BACKUP_OPTIONAL, BACKUP_RAW, BACKUP_REQUIRED, DOWNLOAD_MODE_USB, GIB, MIB, NATIVE_PARTS,
                      ONEUI_DATA_RESERVE, PART_WRITE_PY, PROTECTED, REPO, Refused, Stopped, cardlayout,
                      default_state_dir, human)
 from .device import (Heimdall, InstallerEnv, Phone, android_props, chunk_write, is_stock_samsung, target_serial,
@@ -186,6 +186,7 @@ class Installer:
         self.warnings = []
         self.card_parts = None      # [p1, p2] dicts for this card (the manifest's, or its card layout's)
         self.rp = None              # repart.Repart when the bundle names a UFS layout ([ufs] layout)
+        self.move_keep = ()         # keep rows this run may move (--move-keep, within the phone's allowance)
         self.heimdall = Heimdall(runner, str(self.state_dir / 'download' / 'heimdall-session-open'))
         self.env = InstallerEnv(runner, default_state_dir() / 'env')   # one key per computer, whatever --state-dir
         self.phone.env = self.env
@@ -500,6 +501,22 @@ class Installer:
         self.phone_id = phone_id_of(serial)
         rows.append(('phone id', f'{self.phone_id} (a hash of the serial number)', 'ok'))
         self.journal = Journal(self.state_dir / self.phone_id / 'journal.json')
+        want = tuple(sorted({x.strip().upper() for x in getattr(self.o, 'move_keep', '').split(',') if x.strip()}))
+        if want:
+            allowed = move_keep_allowed(self.phone_id, fake=bool(os.environ.get('FAKE_ROOT')))
+            extra = [x for x in want if x not in allowed]
+            if extra or not getattr(self.o, 'repartition', False):
+                row('move-keep', ', '.join(want), False,
+                    f'--move-keep {",".join(want)}: ' + (f'{", ".join(extra)} not in this phone\'s allowance '
+                    f'({", ".join(allowed) or "none"}; sbinst/common.py MOVE_KEEP_ALLOWED)' if extra else
+                    'only with --repartition'))
+            else:
+                self.move_keep = want
+                row('move-keep', f'ALLOWED for {self.phone_id}: {", ".join(want)} may move (the user, 2026-11-15; saved '
+                    'first, written back after)', True)
+                if self.mode != 'dry-run':
+                    self.journal.mark_step('move-keep', 'allowed', names=list(want),
+                                           why='the user, 2026-11-15 22:55: "you can do it" (S9 #2\'s stock table)')
         if self.m.ufs_layout is not None and not fatal:
             self.rp = repart.Repart(self, self.m.ufs_layout)
             try:
@@ -995,6 +1012,47 @@ class Installer:
         self.rp.run()
         if self.mode != 'dry-run' and s.status != 'skip':
             self.facts = self.phone.facts()
+        self.write_back_keep(self.rp.dir)
+
+    def write_back_keep(self, gdir, old_places=False):
+        """The keep rows saved by the GPT step (gpt/keep.json) written back: at their new places after the move (rows
+        whose size stayed; CACHE's changes and is copied from S9 #1 by stream-copy), or at their old places after
+        --restore-gpt (old_places). Each verified on the phone by SHA-256. Resumable (chunk state, journal)."""
+        kp = Path(gdir) / 'keep.json'
+        if not kp.exists():
+            return
+        import json
+        meta = json.loads(kp.read_text())
+        step = 'keep-restore-old' if old_places else 'keep-restore'
+        done = set(self.journal.step(step).get('names', [])) if self.journal else set()
+        for name, m in sorted(meta.items()):
+            if name in done:
+                self.ui.ok(f'{name}: written back earlier')
+                continue
+            node, size = self.facts.node(name), self.facts.size(name)
+            if node is None:
+                raise Stopped(f'{name}: no such partition now')
+            if size != m['size']:
+                self.ui.info(f'{name}: {m["size"] >> 20} MiB saved, the partition is now {(size or 0) >> 20} MiB: not '
+                             'written back here' + (' (CACHE: night-s9b.sh copies S9 #1\'s)' if name == 'CACHE' else ''))
+                continue
+            f = Path(gdir) / f'keep-{name}.img'
+            if self.mode == 'dry-run':
+                self.ui.cmd(f'(chunk writer) {self.rel(f)} -> {node} ({size >> 20} MiB), read back    [dry run: not run]')
+                continue
+            if hashlib.sha256(f.read_bytes()).hexdigest() != m['sha256']:
+                raise Stopped(f'{f}: does not match its recorded SHA-256: not writing it')
+            self.unmount_target(node, name)
+            chunk_write(self.phone, self.ui, f, size, node, 0,
+                        str(self.journal.path.parent / 'chunks' / f'{step}-{name}-{m["sha256"][:12]}.state'), name)
+            if self.phone.range_sha(node, 0, size) != m['sha256']:
+                raise Stopped(f'{name}: written back, but it does not read back as the saved copy: stopping')
+            done.add(name)
+            self.journal.mark_step(step, 'started', names=sorted(done))
+            self.ui.ok(f'{name}: written back at {"its old" if old_places else "its new"} place ({node}), read back = '
+                       f'the saved copy (sha256 {m["sha256"][:12]}...)')
+        if self.mode != 'dry-run':
+            self.journal.mark_step(step, 'done', names=sorted(done))
 
     def restore_gpt(self):
         """--restore-gpt: the phone's own GPT, as saved before the repartitioning, written back."""
@@ -1012,6 +1070,9 @@ class Installer:
         self.phone_id = 'phone-' + hashlib.sha256(serial.encode()).hexdigest()[:10]
         self.journal = Journal(self.state_dir / self.phone_id / 'journal.json')
         repart.Repart(self, None).restore()
+        if self.mode != 'dry-run':
+            self.facts = self.phone.facts()
+        self.write_back_keep(self.state_dir / self.phone_id / 'gpt', old_places=True)
         return 0
 
     def do_card_layout(self, s):
