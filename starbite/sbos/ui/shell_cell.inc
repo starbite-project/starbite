@@ -17,10 +17,11 @@ static int data_on(void) { return CELL.data_want && radio_up(); }
 /* 8z: the radio is on for calls (either switch) */
 static int calls_on(void) { return (CELL.calls || CELL.data_want) && radio_up(); }
 /* 8z: "Calls and SMS" (the user's calls / SMS sitting, main 11-15): the radio without mobile data, kept, at the start.
- * Its default stays off until Starbite's own sounds can play beside the modem (modem.c's audio_prepare holds ABOX:
- * no ringtone, alarm or click while Cellular runs) */
+ * 9h: on by default (main 11-15) since 9g's cellsnd PASSED on the phone: Starbite's own sounds (ringtone, alarms,
+ * clicks) play through the modem's Calliope while no call routes. The self-test images never start it (kmodem_calls
+ * refuses there); a safe start does not either */
 #ifndef CELL_CALLS_DEFAULT
-#define CELL_CALLS_DEFAULT 0
+#define CELL_CALLS_DEFAULT 1
 #endif
 static void calls_on_answer(int i)
 {
@@ -39,7 +40,7 @@ static void calls_toggle(void)
     } else {
         static const kit_btn B[2] = { { "Cancel", KIT_CANCEL }, { "Turn On", KIT_PREFERRED } };
         kit_alert("Turn On Calls and SMS?", "The modem stays on the mobile network for calls and texts, from every start. "
-                  "For now Starbite OS's own sounds (ringtone, alarms) are silent while it runs.", B, 2, calls_on_answer);
+                  "The phone rings for calls; alarms and other sounds play as usual.", B, 2, calls_on_answer);
         return;
     }
     if (is_app("settings")) build_app_page(AP.a);
@@ -104,8 +105,8 @@ static void page_cell(dc *d)
         d_row(d, CL_NET + 3 * LG_ROW, LG_ROW, 0, "Data", dl, 0, 1, INK, 0);
         y = CL_NET + LG_ROW * 4;
     }
-    d_group_foot(d, y + 4, sh_comms_ok() ? "Calls and SMS keep the phone on the mobile network, from every start; Starbite OS's own sounds are "
-                                            "silent while it runs, for now. Cellular Data is off at every start." :
+    d_group_foot(d, y + 4, sh_comms_ok() ? "Calls and SMS keep the phone on the mobile network, from every start, so it can ring for "
+                                            "calls. Cellular Data is off at every start." :
                                             "Calls and SMS are not available yet. Cellular Data is off at every start.");
 }
 
