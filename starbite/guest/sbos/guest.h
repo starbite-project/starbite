@@ -43,6 +43,7 @@ int guest_type(char c);                    /* one character as Linux keys (Shift
 int guest_term_ok(void);                   /* the terminal's typed self-test command ran */
 const char *guest_net_line(void);          /* 8l: the network check's "STARBITE-NET: ..." line ("" none yet) */
 const char *guest_gpu_line(void);          /* 8u: the GPU check's "STARBITE-GPU: PASS / FAIL ..." line ("" none yet) */
+const char *guest_bench_line(void);        /* 9b: sbgpu-ab's "STARBITE-GTKBENCH: ..." result ("" none yet) */
 void guest_full_next(void);                /* the next guest_blit copies every row (the view redrawn whole) */
 int guest_stop(void);                      /* MSG_STOP; the cluster goes off by itself */
 int guest_state(void);                     /* GUEST_* */

@@ -125,6 +125,7 @@ int guest_stop(void) { if (st == GUEST_RUNNING || st == GUEST_STARTING) { st = G
 int guest_owns_m3(void) { return st != GUEST_OFF && st != GUEST_FAILED; }
 int hw_m3_on(void) { return guest_owns_m3(); }
 const char *guest_net_line(void) { return ""; }
+const char *guest_bench_line(void) { return "STARBITE-GTKBENCH: cairo fps 0 renderer (the harness); ngl fps 0 renderer (the harness); cards 96"; }   /* 9b */
 const char *guest_gpu_line(void) { return "STARBITE-GPU: PASS (the harness)"; }        /* 8l: no network check here (no data, no Wi-Fi) */
 void guest_show(int on) { shown = on; drawn = 0; }
 void guest_keep(int on) { busy = on; }

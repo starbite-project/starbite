@@ -1115,6 +1115,32 @@ int gwin_selftest_step(void)
         sb_logf(sb_prefix(l, SBG_GPUCHECK_PASS) ? "selftest: next-linux: gpu: PASS: " : "selftest: next-linux: gpu: FAILED: ",
                 l[0] ? l : "no answer within 30 s (no sbgl-probe on this base, or the GPU wedged)");
         gs_t = now;
+        gs_typed = 0;
+        gs_phase = 42;
+        return 0;
+    }
+    case 42:                               /* 9b (Track E): GTK 4 in software, then on the Mali: a result, not a verdict */
+        if (st != GUEST_RUNNING)
+            return gs_failed("Linux stopped by itself");
+        if (dt < 1000)
+            return 0;
+        for (int i = 0; i < 4 && SBG_GTKBENCH_CMD[gs_typed]; ++i, ++gs_typed)
+            if (!sh_linux_char(SBG_GTKBENCH_CMD[gs_typed]))
+                return gs_failed("a character of the GTK benchmark could not be typed");
+        if (!SBG_GTKBENCH_CMD[gs_typed]) {
+            gs_log("typed: the GTK benchmark (sbgpu-ab: 12 s software, 12 s on the Mali)", 0, 0);
+            gs_t = now;
+            gs_phase = 43;
+        }
+        return 0;
+    case 43: {                             /* its line: up to 45 s */
+        if (st != GUEST_RUNNING)
+            return gs_failed("Linux stopped by itself");
+        const char *l = guest_bench_line();
+        if (!l[0] && dt < 45000)
+            return 0;
+        sb_logf("selftest: next-linux: gtkbench: ", l[0] ? l : "no answer within 45 s");
+        gs_t = now;
         gs_phase = 50;
         return 0;
     }
