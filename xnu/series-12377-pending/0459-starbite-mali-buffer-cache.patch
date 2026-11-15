@@ -1,0 +1,317 @@
+0459: StarbiteMali recycles its buffers.
+
+S5a 2026-11-15 (macOS Sequoia at 2x, 300 s): "STARLTE GPU CALLS" summed over the run: 12192 GPU jobs in 9.7 s,
+but 844 buffer creates in 36 s (43 ms each) and 1248 closes in 122 s (98 ms each), all inside WindowServer's
+calls. "STARLTE GPU BIG": WindowServer creates 34099200-byte buffers (1440 x 2960 x 8: a full-screen 64-bit render
+target) again and again. A create allocates wired write-combined memory, flushes and zeroes it and maps it for
+the GPU; a close puts every page's cache attribute back and flushes the GPU's address space. This, not the GPU
+and not the display path, is why animations, window drags and scrolling are slow.
+
+A closed buffer of ours (over 64 KiB) now goes to a cache of 48 slots as it is: memory, GPU address, GPU mapping.
+A worker thread zeroes it; a create of exactly that size takes it (zeroing it itself if the worker has not yet).
+Buffers always come out zeroed, so all clients share the cache. Not reused within 3 s, or over sbmcache MiB
+(boot-arg, default 160, 0 = off): freed by the worker the old way (sbm_free_buffer). New line every 10 s:
+"STARLTE GPU CACHE: creates from the cache N (M zeroed by the caller), not in it N; freed N; no slot N; holding N MiB".
+Kernel seq2e = seq2d + 0459.
+
+--- a/iokit/Kernel/arm/StarbiteMali.cpp
++++ b/iokit/Kernel/arm/StarbiteMali.cpp
+@@ -235,9 +235,202 @@
+ 		unsigned c = sbm_size_class(bo->pages);
+ 		OSAddAtomic64(sign, &sbm_size_bos[c]);
+ 		OSAddAtomic64(sign * (int64_t)bo->pages, &sbm_size_pages[c]);
++	}
++}
++
++/*
++ * 0459: buffers of ours are recycled. S5a 2026-11-15 (macOS at 2x): WindowServer creates and closes a full-screen
++ * 34 MB render target for almost every frame ("STARLTE GPU BIG: WindowServer create 34099200 bytes"), and here a
++ * create took 43 ms and a close 98 ms on average ("STARLTE GPU CALLS": 36 s + 122 s of a 300 s session, against
++ * 9.7 s of GPU jobs): wired write-combined memory is allocated, flushed, zeroed and mapped, and on close every
++ * page's cache attribute is put back and the GPU's address space flushed. That, not the GPU, was the slow macOS.
++ *
++ * A closed buffer now goes to a small cache as it is: its memory (still write-combined) and its GPU address and
++ * mapping. A worker thread zeroes it there, off the caller's time. A create of exactly that size takes it (zeroing
++ * it itself if the worker has not yet): no allocation, no attribute change, no GPU map. Buffers always come
++ * out zeroed, as before, so the cache is shared by all clients. Buffers not reused within 3 s, and the oldest
++ * ones when the cache holds more than sbmcache MiB (boot-arg, default 160, 0 = off), are freed by the worker
++ * the old way. "STARLTE GPU CALLS" ends with the cache's numbers.
++ */
++#define SBM_CACHE_SLOTS 48
++enum { SBM_C_FREE = 0, SBM_C_DIRTY, SBM_C_BUSY, SBM_C_READY, SBM_C_EVICT };
++static struct {
++	IOBufferMemoryDescriptor *mem;
++	uint64_t va;
++	uint32_t pages;                 /* 4 KiB pages */
++	uint32_t state;
++	uint64_t stamp;                 /* mach time it was closed */
++} sbm_cache[SBM_CACHE_SLOTS];
++static IOLock *sbm_cache_lock;
++static uint64_t sbm_cache_pages;        /* held and reusable: dirty, being zeroed, ready */
++static uint64_t sbm_cache_limit;        /* pages; 0 = no cache */
++static uint64_t sbm_cache_hits, sbm_cache_hits_dirty, sbm_cache_misses, sbm_cache_evicted, sbm_cache_full;
++
++/* the end of a buffer of ours: out of the GPU's address space, its pages' cache attribute back, released */
++static void
++sbm_free_buffer(IOMemoryDescriptor *mem, uint64_t va, uint32_t pages)
++{
++	starlte_gpu_user_unmap(va, pages);
++	sbm_va_free(va, (uint64_t)pages * 0x1000);
++	/*
++	 * A buffer of ours was write-combined: its pages keep that attribute when freed
++	 * (kernel-object pages are not reset by vm_page_free), and came back as Normal-NC
++	 * heap in some task, where atomics take an external abort. Default them first.
++	 */
++	IOByteCount length = mem->getLength();
++	for (IOByteCount offset = 0; offset < length; offset += PAGE_SIZE) {
++		IOByteCount len = 0;
++		addr64_t pa = mem->getPhysicalSegment(offset, &len, kIOMemoryMapperNone);
++		if (pa != 0) {
++			pmap_set_cache_attributes((ppnum_t)atop_64(pa), 0);
++		}
++	}
++	mem->release();
++}
++
++/* a closed buffer into the cache; false: no room, the caller frees it */
++static bool
++sbm_cache_put(IOMemoryDescriptor *mem, uint64_t va, uint32_t pages)
++{
++	IOBufferMemoryDescriptor *buf = OSDynamicCast(IOBufferMemoryDescriptor, mem);
++	if (sbm_cache_lock == NULL || sbm_cache_limit == 0 || buf == NULL || pages <= 16 || pages > sbm_cache_limit) {      /* (not the many 64 KiB pool pieces) */
++		return false;
++	}
++	IOLockLock(sbm_cache_lock);
++	int slot = -1;
++	for (int i = 0; i < SBM_CACHE_SLOTS; i++) {
++		if (sbm_cache[i].state == SBM_C_FREE) {
++			slot = i;
++			break;
++		}
+ 	}
++	if (slot < 0) {
++		sbm_cache_full++;
++		IOLockUnlock(sbm_cache_lock);
++		return false;
++	}
++	sbm_cache[slot].mem = buf;
++	sbm_cache[slot].va = va;
++	sbm_cache[slot].pages = pages;
++	sbm_cache[slot].stamp = mach_absolute_time();
++	sbm_cache[slot].state = SBM_C_DIRTY;
++	sbm_cache_pages += pages;
++	/* over the limit: the oldest others go (the worker frees them) */
++	while (sbm_cache_pages > sbm_cache_limit) {
++		int oldest = -1;
++		for (int i = 0; i < SBM_CACHE_SLOTS; i++) {
++			if (i != slot && (sbm_cache[i].state == SBM_C_DIRTY || sbm_cache[i].state == SBM_C_READY) &&
++			    (oldest < 0 || sbm_cache[i].stamp < sbm_cache[oldest].stamp)) {
++				oldest = i;
++			}
++		}
++		if (oldest < 0) {
++			break;
++		}
++		sbm_cache[oldest].state = SBM_C_EVICT;
++		sbm_cache_pages -= sbm_cache[oldest].pages;
++	}
++	IOLockWakeup(sbm_cache_lock, &sbm_cache, false);
++	IOLockUnlock(sbm_cache_lock);
++	return true;
+ }
+ 
++/* a cached buffer of exactly pages 4 KiB pages; *zeroed: the worker has zeroed it already */
++static bool
++sbm_cache_get(uint32_t pages, IOBufferMemoryDescriptor **mem, uint64_t *va, bool *zeroed)
++{
++	if (sbm_cache_lock == NULL || sbm_cache_limit == 0) {
++		return false;
++	}
++	IOLockLock(sbm_cache_lock);
++	int best = -1;
++	for (int i = 0; i < SBM_CACHE_SLOTS; i++) {
++		if (sbm_cache[i].pages != pages) {
++			continue;
++		}
++		if (sbm_cache[i].state == SBM_C_READY) {
++			best = i;
++			break;
++		}
++		if (sbm_cache[i].state == SBM_C_DIRTY && best < 0) {
++			best = i;
++		}
++	}
++	if (best < 0) {
++		sbm_cache_misses++;
++		IOLockUnlock(sbm_cache_lock);
++		return false;
++	}
++	*zeroed = sbm_cache[best].state == SBM_C_READY;
++	*mem = sbm_cache[best].mem;
++	*va = sbm_cache[best].va;
++	sbm_cache_pages -= pages;
++	sbm_cache_hits++;
++	sbm_cache_hits_dirty += !*zeroed;
++	bzero(&sbm_cache[best], sizeof(sbm_cache[best]));
++	IOLockUnlock(sbm_cache_lock);
++	return true;
++}
++
++/* the worker: frees what is to go, zeroes what waits */
++static void
++sbm_cache_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	uint64_t max_age = 0, second = 0;
++	nanoseconds_to_absolutetime(3ull * NSEC_PER_SEC, &max_age);
++	nanoseconds_to_absolutetime(NSEC_PER_SEC, &second);
++	IOLockLock(sbm_cache_lock);
++	for (;;) {
++		uint64_t now = mach_absolute_time();
++		int pick = -1;
++		bool evict = false, any = false;
++		for (int i = 0; i < SBM_CACHE_SLOTS && pick < 0; i++) {
++			uint32_t st = sbm_cache[i].state;
++			if (st == SBM_C_EVICT) {
++				pick = i;
++				evict = true;
++			} else if ((st == SBM_C_DIRTY || st == SBM_C_READY) && now - sbm_cache[i].stamp > max_age) {
++				sbm_cache_pages -= sbm_cache[i].pages;
++				pick = i;
++				evict = true;
++			}
++			any = any || st != SBM_C_FREE;
++		}
++		for (int i = 0; i < SBM_CACHE_SLOTS && pick < 0; i++) {
++			if (sbm_cache[i].state == SBM_C_DIRTY) {
++				pick = i;
++			}
++		}
++		if (pick < 0) {
++			if (any) {
++				AbsoluteTime deadline;
++				deadline = now + second;
++				(void)IOLockSleepDeadline(sbm_cache_lock, &sbm_cache, deadline, THREAD_UNINT);
++			} else {
++				(void)IOLockSleep(sbm_cache_lock, &sbm_cache, THREAD_UNINT);
++			}
++			continue;
++		}
++		IOBufferMemoryDescriptor *mem = sbm_cache[pick].mem;
++		uint64_t va = sbm_cache[pick].va;
++		uint32_t pages = sbm_cache[pick].pages;
++		sbm_cache[pick].state = SBM_C_BUSY;
++		IOLockUnlock(sbm_cache_lock);
++		if (evict) {
++			sbm_free_buffer(mem, va, pages);
++		} else {
++			bzero(mem->getBytesNoCopy(), (size_t)pages * 0x1000);
++		}
++		IOLockLock(sbm_cache_lock);
++		if (evict) {
++			bzero(&sbm_cache[pick], sizeof(sbm_cache[pick]));
++			sbm_cache_evicted++;
++		} else {
++			sbm_cache[pick].state = SBM_C_READY;
++		}
++	}
++}
++
+ class StarbiteMali : public IOService {
+ 	OSDeclareDefaultStructors(StarbiteMali);
+ };
+@@ -313,28 +506,20 @@
+ StarbiteMaliUserClient::closeBO(sbm_bo *bo)
+ {
+ 	sbm_count_pages(bo, -1, fSlot);
+-	starlte_gpu_user_unmap(bo->va, bo->pages);
+-	sbm_va_free(bo->va, (uint64_t)bo->pages * 0x1000);
+ 	OSSafeReleaseNULL(bo->map);
+-	/* an imported surface's pages were wired for the GPU (importSurface) */
+ 	if ((bo->surface != 0 || bo->host) && bo->mem != NULL) {
++		/* an imported surface's pages were wired for the GPU (importSurface) */
++		starlte_gpu_user_unmap(bo->va, bo->pages);
++		sbm_va_free(bo->va, (uint64_t)bo->pages * 0x1000);
+ 		bo->mem->complete();
++		OSSafeReleaseNULL(bo->mem);
+ 	} else if (bo->mem != NULL) {
+-		/*
+-		 * A buffer of ours was write-combined: its pages keep that attribute when freed
+-		 * (kernel-object pages are not reset by vm_page_free), and came back as Normal-NC
+-		 * heap in some task, where atomics take an external abort. Default them first.
+-		 */
+-		IOByteCount length = bo->mem->getLength();
+-		for (IOByteCount offset = 0; offset < length; offset += PAGE_SIZE) {
+-			IOByteCount len = 0;
+-			addr64_t pa = bo->mem->getPhysicalSegment(offset, &len, kIOMemoryMapperNone);
+-			if (pa != 0) {
+-				pmap_set_cache_attributes((ppnum_t)atop_64(pa), 0);
+-			}
++		/* 0459: a buffer of ours is kept for the next create of its size, or freed (sbm_free_buffer) */
++		if (!sbm_cache_put(bo->mem, bo->va, bo->pages)) {
++			sbm_free_buffer(bo->mem, bo->va, bo->pages);
+ 		}
++		bo->mem = NULL;
+ 	}
+-	OSSafeReleaseNULL(bo->mem);
+ 	bo->va = 0;
+ 	bo->pages = 0;
+ 	bo->surface = 0;
+@@ -373,6 +558,22 @@
+ 			proc_selfname(who, sizeof(who));
+ 			IOLog("STARLTE GPU BIG: %s create %llu bytes (%llu KiB) flags 0x%x\n", who, (uint64_t)a->size,
+ 			    (uint64_t)a->size >> 10, (unsigned)a->flags);
++		}
++	}
++	{
++		/* 0459: a recycled buffer of this size: memory, GPU address and mapping are all there */
++		IOBufferMemoryDescriptor *cached = NULL;
++		uint64_t cva = 0;
++		bool zeroed = false;
++		if (sbm_cache_get(pages, &cached, &cva, &zeroed)) {
++			if (!zeroed) {
++				bzero(cached->getBytesNoCopy(), (size_t)bytes);
++			}
++			fBos[handle - 1] = (sbm_bo){ .mem = cached, .map = NULL, .va = cva, .pages = pages };
++			sbm_count_pages(&fBos[handle - 1], 1, fSlot);
++			a->handle = handle;
++			a->offset = cva;
++			return kIOReturnSuccess;
+ 		}
+ 	}
+ 	uint64_t va = sbm_va_alloc(bytes);
+@@ -767,6 +968,15 @@
+ 		sbm_calls_since = t1;
+ 		IOLockUnlock(sbm_va_lock);
+ 		IOLog("%s\n", line);
++		if (sbm_cache_lock != NULL && sbm_cache_limit != 0) {
++			IOLockLock(sbm_cache_lock);
++			uint64_t h = sbm_cache_hits, hd = sbm_cache_hits_dirty, mi = sbm_cache_misses, ev = sbm_cache_evicted,
++			    fu = sbm_cache_full, held = sbm_cache_pages;
++			sbm_cache_hits = sbm_cache_hits_dirty = sbm_cache_misses = sbm_cache_evicted = sbm_cache_full = 0;
++			IOLockUnlock(sbm_cache_lock);
++			IOLog("STARLTE GPU CACHE: creates from the cache %llu (%llu zeroed by the caller), not in it %llu; freed %llu; "
++			    "no slot %llu; holding %llu MiB\n", h, hd, mi, ev, fu, held / 256);
++		}
+ 		{
+ 			char who[600];
+ 			int m = snprintf(who, sizeof(who), "STARLTE GPU HOLDERS: sizes <=64K %lld (%lld MiB) <=1M %lld (%lld MiB) "
+@@ -824,6 +1034,19 @@
+ starbite_mali_publish(void)
+ {
+ 	sbm_va_lock = IOLockAlloc();
++	{
++		/* 0459: the buffer cache and its worker */
++		uint32_t mib = 160;
++		thread_t th;
++		PE_parse_boot_argn("sbmcache", &mib, sizeof(mib));
++		sbm_cache_lock = IOLockAlloc();
++		if (mib != 0 && sbm_cache_lock != NULL &&
++		    kernel_thread_start(sbm_cache_thread, NULL, &th) == KERN_SUCCESS) {
++			thread_deallocate(th);
++			sbm_cache_limit = (uint64_t)mib * 256;
++		}
++		IOLog("STARLTE GPU: buffer cache %s (%u MiB)\n", sbm_cache_limit ? "on" : "off", mib);
++	}
+ 	StarbiteMali *service = OSTypeAlloc(StarbiteMali);
+ 	IOService *provider = IOService::getResourceService();
+ 	if (sbm_va_lock == NULL || service == NULL || !service->init() || provider == NULL ||
