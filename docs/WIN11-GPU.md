@@ -2971,6 +2971,31 @@ GDI present.
   its GPU process cannot be kept alive; with the user's sbumd it has no working windowed present. To re-test on
   0167 (flip model and DirectComposition working): a browser start is the next real-app test.
 
+### 6.99 T74 read (WT1): the first conformance score of the user's driver - 74 of 111 d3d10core tests pass, 20 crash
+
+(2026-11-16 01:12) **T74** (`build/win/results-t74`, the user's T61 drivers, big cores): Wine 10.0's d3d10core suite
+through `sbwt.exe`, each test function in its own process. The runner worked first time: the whole suite took about
+two minutes. **74 pass, 17 fail, 20 crash, 0 time out.**
+- **Crashes (20), by kind:**
+  - a call through address 0 where the test creates or sets a geometry shader or stream output
+    (`test_create_shader`, `test_index_buffer_offset`, and by their content `test_geometry_shader`,
+    `test_stream_output*`, `test_layered_rendering`, `test_clear_state`, `test_multiple_viewports`, ...): the missing
+    geometry stage (0166 turns these into clean refusals; `gsemu` is the fix);
+  - `abort` (c0000409) in `test_cube_maps`, `test_sample_c_lz`, `test_unbound_multisample_texture`, and an illegal
+    instruction in `test_combined_clip_and_cull_distances`: the old shader translator's path (the offline harness
+    predicted `abort()` for `switch` and undefined behaviour for cull distances);
+  - access violations inside the driver in `test_texture`, `test_texture1d`, `test_update_subresource`,
+    `test_resinfo_instruction`, `test_shader_input_registers_limits`: not yet resolved to a function.
+- **Wrong results (17):** multiple render targets (targets 1-3 keep the clear colour), fragment coordinates, face
+  culling in some winding/cull combinations, colour write masks, independent blend, instanced draws (per-instance
+  data), `CopySubresourceRegion`, relative addressing of vertex inputs, the immediate constant buffer, depth bias
+  (832 of 21002 checks), depth-stencil sampling, alpha-to-coverage, pipeline statistics, two format-compatibility
+  cases, one clear of a render-target view.
+- **What it means:** this is the list behind "unstable": a D3D10 app that uses a geometry shader, a `switch`, a
+  cube map with comparison sampling or more than one render target either dies or draws wrong on the user's driver
+  today. T76 runs the same suite on the next tree with the old and the new shader translator
+  (`tools/win/winetests/wt-compare.py` puts the logs side by side).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
