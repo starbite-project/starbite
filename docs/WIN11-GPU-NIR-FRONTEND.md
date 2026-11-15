@@ -1423,3 +1423,73 @@ Reasoned, in the order I would expect them:
 - WDDM 1.3: `D3DWDDM1_3DDI_DEVICEFUNCS` (tiled resources, markers), caps
   `D3DWDDM1_3DDICAPS_D3D11_OPTIONS1` and `MARKER`, and `DXGI1_3_DDI_BASE_FUNCTIONS`
   (`Present1`, `CheckPresentDurationSupport`, a changed multiplane overlay set).
+
+# Phase 6: conformance fixes
+
+State: 2026-11-16 01:37 EET. Branch `sb-nir`, seven commits on top of phase 5 (1c0a515), one
+topic each, nothing pushed. Input: the d3d10core run on the user's driver (old translator,
+Direct3D 10.0 DDI, no geometry stage, no MSAA): 74 pass, 17 fail, 20 crash.
+
+**Not finished.** Fixed: the causes behind 7 of the 17 wrong results and 4 of the 20 crashes
+(one crash fixed, three aborts turned into refused shaders; as far as reading can tell,
+nothing ran). Classified without a fix: the missing-feature
+tests. Not found or not looked at: listed at the end. No fix special-cases a value.
+
+## P6.1 Fixed
+
+| Test | Cause | Fix | Confidence | Translator |
+|---|---|---|---|---|
+| test_multiple_render_targets, test_color_mask, test_independent_blend, test_instanced_draw (second target) | `pipe_blend_state::max_rt` was never set (0). Panfrost takes the number of blended targets from it (`pan_cmdstream.c`: `rt_count = blend->max_rt + 1`), so only target 0 was written | `079eabc` (OutputMerger.cpp, both blend create functions) | high: read on both sides; the symptom (targets 1 to 7 keep the clear colour) is exactly this | both |
+| test_instanced_draw (per-instance data of the second draw) | Panfrost divided the base instance by the step rate (`base * stride / divisor`); the element is base + instance / divisor | `6969a97` (pan_cmdstream.c) | high for the cause: the old formula gives the elements the log shows for step rate 2 (2, 2, 3, 3 where 4, 4, 5, 5 are expected) | both |
+| test_face_culling (the SV_IsFrontFace half; the culling half passed) | the old translator maps the face with a compare meant for the float +1/-1 face; Panfrost's is an integer system value (all ones / 0), on which the compare swaps front and back | `6d50e08` (ShaderTGSI.c, `Shader_tgsi_driver` set by CreateDevice) | high: the harness shows the NIR of the test's shader before (inverted) and after | old only (NIR was right) |
+| test_copy_subresource_region | a source box of zero depth was handed to the driver, which copied the whole region; Direct3D copies nothing | `458207f` (Resource.cpp) | high: the last copy of the test has that box and the readback is the whole source | both |
+| test_update_subresource (crash) | a box that ends before it starts (4,4,0 - 3,1,1 in the test) became a negative width and height in the map | `aec5da4` (Resource.cpp) | high | both |
+| test_cube_maps, test_sample_c_lz, test_unbound_multisample_texture (abort) | their shaders have a `switch`; tgsi_to_nir aborts on TGSI SWITCH | `139d0c4`: on a NIR-only driver the old translator refuses the shader. The tests then fail cleanly on the old translator and need `nirshaders` to pass (their shaders translate and compile there) | high for the cause (harness: the same three shaders, "unknown TGSI opcode: SWITCH") | old: refused; NIR: works |
+| test_depth_bias | the rasterizer state set the bias values but none of `offset_tri/line/point`; Panfrost's `depth_bias_enable` is `offset_tri`, so no bias was ever applied | `91faa99` (Rasterizer.cpp) | high for the cause; whether every format then matches is not checked | both |
+
+## P6.2 Classified, not fixed
+
+| Test | What it is |
+|---|---|
+| test_create_shader, test_clear_state, test_index_buffer_offset, test_multiple_viewports | the access violation at address 0 is the call through the missing `create_gs_state` hook: the last test seen is the line before a geometry shader creation in each (read). Refused cleanly since 0166; real with `gsemu` + `nirshaders` (never run) |
+| test_layered_rendering, test_geometry_shader, test_stream_output, test_stream_output_resume, test_stream_output_vs, test_clip_distance | same family by their subject and, for test_clip_distance, by the address 0; not each read. Stream output and layered rendering stay missing features even with `gsemu` |
+| test_combined_clip_and_cull_distances (illegal instruction) | the old translator's cull distance output (harness: its vertex shader ends tgsi_to_nir with an out-of-range opcode). The NIR translator has it; the old path is not fixed |
+| test_alpha_to_coverage | needs multisampling (`msaa`) |
+| test_pipeline_statistics_query | Panfrost has no pipeline statistics query: zeros. A missing feature, left failing |
+| test_immediate_constant_buffer | the old translator's immediate constant buffer base, fixed in phase 2 on this branch (not in the tree that ran) |
+| test_vs_input_relative_addressing | old translator; expected to need `nirshaders`, not verified |
+
+## P6.3 Probable, unverified
+
+- test_texture, test_texture1d (same crash address), test_resinfo_instruction: a size query
+  on a slot with nothing bound. `panfrost_upload_txs_sysval` dereferenced the missing view;
+  phase 2's c640c16 made it answer zeros. Low to medium confidence: I did not match the
+  crashing iteration to a test case.
+
+## P6.4 Not found, or not looked at
+
+- test_shader_input_registers_limits (crash after its last check passed, during the
+  releases): checked the array bounds for t127 and s15 in the old translator, tgsi_to_nir
+  and Panfrost's empty-slot handling, all fine; cause not found.
+- test_shader_stage_input_output_matching (crash in a draw with two render targets): not
+  found.
+- test_fragment_coords, test_depth_stencil_sampling, test_clear_render_target_view_2d,
+  test_format_compatibility, test_compressed_format_compatibility,
+  test_texture_compressed_3d: not looked at.
+- The mistakes I listed in phases 1 and 2 for paths the suite does not crash on: not
+  revisited in this phase.
+
+## P6.5 Verification
+
+- Harness: the NIR path is identical to phase 5 (`harness-p6.txt`). The old path
+  (`harness-p6-tgsi.txt`) differs in the seven `switch` shaders, which are now refused
+  instead of ending tgsi_to_nir, and in the NIR of the front face shader.
+- The blend, copy, update and depth bias fixes are in Windows-only files: compiled, not run.
+  No host test was written for them.
+- Windows build from 91faa99: ARM64 and ARM64EC exit 0, 35 `ok`, `FAILS: 0`.
+
+```
+/Users/dev/project-starbite/.claude/worktrees/win-mali-gpu-87c7b0/build/win/umd-nir-fix1/
+  sbumd.dll  27475968 bytes  sha256 90fe47b0fe01de2092b4ab0f8a7fab0087acd3a75c94df98143ca68f8322edbb
+  sbumd.map   6844636 bytes  sha256 c8f8afd383572f7de928bc0209a84014090cf6a0572a197e82f19bd467e4d211
+```

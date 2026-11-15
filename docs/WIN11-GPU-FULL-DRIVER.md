@@ -175,8 +175,18 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
   for trying things, not a conformance claim. Branch `sb-nir` 1c0a515 (with 0166 and 0167 merged), sbumd 1572d243
   (`build/win/umd-nir-d3d11`). **T77 staged:** five conformance passes on it (new translator, geometry shaders,
   the D3D11 DDI at 10_1 and at 11_0, dxgi).
-- **Running:** fixes for the wrong-result and crash bugs of T74 (multiple render targets, culling, colour masks,
-  instanced draws, copy region, texture crashes, ...).
+- **11-16 01:38, first conformance fixes (offline, compiled only; `sb-nir` 91faa99, sbumd 90fe47b0 in
+  `build/win/umd-nir-fix1`):** causes found by reading the failing tests against the code:
+  - only render target 0 was ever blended/written (`max_rt` never set in blend states): multiple render targets,
+    colour masks and independent blend;
+  - Panfrost divided the base instance of per-instance vertex data by the step rate: instanced draws;
+  - depth bias values were set but never switched on;
+  - a copy or update with an empty or inverted box copied the whole region or crashed;
+  - the old translator compared an integer front-face value as a float (front/back swapped) and aborted the
+    process on `switch` (now refused cleanly there; the new translator handles it).
+  Still open: fragment coordinates, depth-stencil sampling, format-compatibility copies, two crashes without a
+  cause, stream output, pipeline statistics.
+- **Running:** the rest of T74's list, then stream output.
 
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.
