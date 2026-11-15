@@ -1,0 +1,351 @@
+0460: the trackpad's gestures as a Mac trackpad has them (boot-arg sweetpad=1; off by default), and two fixes.
+
+The user wants macOS on the phone to feel made for touch. Until now two fingers scrolled in whole lines
+(scrollEvent, 24 panel pixels a line): AppKit jumps three lines at a time, with no inertia.
+
+With sweetpad=1 (SweetHIDTouch::padTouch / padTick):
+- Two fingers: scroll events in points with pixel units, 1:1 with the fingers, with the gesture phases
+  (Began / Changed / Ended in the event options) and, when the fingers leave while moving, momentum events from
+  the 16 ms timer (Start, Continue with the speed falling 5 % a tick, End). A touch stops the momentum.
+  The gesture starts after 40 px of two-finger movement, so a two-finger tap is still a right click.
+- Three fingers: one swipe a gesture (150 px): up = control-up (Mission Control), down = control-down (the app's
+  windows), left / right = control-right / -left (next / previous Space or full-screen app), sent through the
+  on-screen keyboard's HID service. Three fingers never scroll or click.
+- The finger left over after a scroll or swipe does not move the pointer.
+- sweetuiscale=N: canvas pixels a point (default 2 for a canvas 1200 or more wide).
+Always:
+- When the primary finger lifts and another stays, the new primary's first sample is its start: the pointer no
+  longer jumps by the distance between the two fingers (the lifted finger's position was taken as its last).
+- The keyboard's summon swipe gives up on "downwards" only after 120 px, not 40 (S5y: a landing finger settled
+  42 px lower within 24 ms and the swipe was handed to the trackpad).
+
+Host test: tools/macos/padtest/run.sh (the driver's own pad and keyboard-touch code against touch sequences, both
+modes). Not compiled for the kernel yet (the build tree was away): tools/macos/s5z-finish.sh compiles it into seq2f.
+
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -793,11 +793,13 @@
+ 			    ns / NSEC_PER_MSEC);
+ 			return 1;
+ 		}
+-		if (!down || ns > (uint64_t)SWEET_KBD_SWIPE_MS * NSEC_PER_MSEC || side > SWEET_KBD_SIDE || up < -40) {
++		/* 0460: 120 px down, not 40: a landing finger settles 40 px lower within 24 ms (S5y: "not the swipe
++		 * (downwards; 876,2801 to 877,2843 in 24 ms)") */
++		if (!down || ns > (uint64_t)SWEET_KBD_SWIPE_MS * NSEC_PER_MSEC || side > SWEET_KBD_SIDE || up < -120) {
+ 			if (logged < 40) {
+ 				logged++;
+ 				IOLog("SWEET KBD: not the swipe (%s; %d,%d to %d,%d in %llu ms): the trackpad's\n",
+-				    !down ? "lifted" : (side > SWEET_KBD_SIDE ? "sideways" : (up < -40 ? "downwards" : "slow")),
++				    !down ? "lifted" : (side > SWEET_KBD_SIDE ? "sideways" : (up < -120 ? "downwards" : "slow")),
+ 				    f->startX, f->startY, x, y, ns / NSEC_PER_MSEC);
+ 			}
+ 			f->owner = 4;
+@@ -1299,8 +1301,78 @@
+ 	int pendingClicks;              /* one-finger taps waiting for the double-tap window */
+ 	uint64_t pendingAt;
+ 	UInt32 buttons;
++	/* 0460 (sweetpad=1): two-finger scrolling in points with phases and momentum, three-finger swipes */
++	bool scrolling;                 /* a scroll gesture is on (Began was sent) */
++	int scAccX, scAccY;             /* two-finger movement not sent yet (panel pixels) */
++	int64_t velX, velY;             /* scroll speed, 16.16 points a millisecond */
++	uint64_t lastMoveAt;
++	int momentum;                   /* 0 none, 1 to start with the next tick, 2 running */
++	int64_t momX, momY;
++	int g3x, g3y;                   /* three fingers: the movement since the third came down */
++	bool swipe3;                    /* ... and its swipe has been sent */
+ } pad = { 0, -1 };
++
++/*
++ * 0460: the trackpad's gestures as a Mac trackpad has them (boot-arg sweetpad=1; 0, the default for now, keeps
++ * 0445's line scrolling):
++ *   two fingers: scrolling in points, 1:1 with the fingers, as scroll events with pixel units and gesture
++ *     phases (Began / Changed / Ended) and, after a quick lift, momentum events that die away (the timer);
++ *     AppKit then scrolls smoothly and rubber-bands instead of jumping three lines at a time;
++ *   three fingers: one swipe a gesture: up = Mission Control (control-up), down = the app's windows
++ *     (control-down), left / right = the next / previous Space or full-screen app (control-right / -left),
++ *     sent as keys of the on-screen keyboard's HID service.
++ * sweetuiscale=N: canvas pixels a point (default 2 for a canvas 1200 or more wide, else 1).
++ */
++static int
++sweet_pad_gestures(void)
++{
++	static int on = -1;
++	if (on < 0) {
++		on = 0;
++		PE_parse_boot_argn("sweetpad", &on, sizeof(on));
++	}
++	return on;
++}
++
++static int
++sweet_ui_scale(int canvas_w)
++{
++	static int scale = -1;
++	if (scale < 0) {
++		scale = 0;
++		PE_parse_boot_argn("sweetuiscale", &scale, sizeof(scale));
++		if (scale < 1 || scale > 4) {
++			scale = canvas_w >= 1200 ? 2 : 1;
++		}
++	}
++	return scale;
++}
++
++#define SWEET_PAD_SCROLL_START  40      /* panel pixels of two-finger movement before it is a scroll (a tap's jitter is less) */
++#define SWEET_PAD_SWIPE3        150     /* panel pixels of three-finger movement that make a swipe */
++#define SWEET_PAD_MOM_MIN       13107   /* 0.2 points/ms (16.16): slower lifts leave no momentum */
++#define SWEET_PAD_MOM_STOP      1966    /* 0.03 points/ms: momentum ends */
++#define SWEET_PAD_OPT_PIXELS    kIOHIDEventOptionIsPixelUnits
++#define SWEET_PAD_PHASE(p)      ((IOOptionBits)(p) << kIOHIDEventEventOptionPhaseShift)
++#define SWEET_PAD_MOMENTUM(m)   ((IOOptionBits)(m) << kIOHIDEventScrollMomentumShift)
+ 
++/* the scroll gesture ends (lock held): the Ended event, and momentum if the fingers left fast */
++static IOHIDEvent *
++sweet_pad_scroll_end(uint64_t now)
++{
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(now - pad.lastMoveAt, &ns);
++	int64_t ax = pad.velX < 0 ? -pad.velX : pad.velX, ay = pad.velY < 0 ? -pad.velY : pad.velY;
++	pad.scrolling = false;
++	pad.scAccX = pad.scAccY = 0;
++	if (ns < 80ULL * NSEC_PER_MSEC && ax + ay >= SWEET_PAD_MOM_MIN) {
++		pad.momentum = 1;
++		pad.momX = pad.velX;
++		pad.momY = pad.velY;
++	}
++	return IOHIDEvent::scrollEventWithFixed(now, 0, 0, 0, SWEET_PAD_OPT_PIXELS | SWEET_PAD_PHASE(kIOHIDEventPhaseEnded));
++}
++
+ static int
+ sweet_popcount(uint32_t v)
+ {
+@@ -1315,13 +1387,16 @@
+ SweetHIDTouch::padTouch(int finger, bool down, int x, int y)
+ {
+ 	uint64_t now = mach_absolute_time();
+-	IOHIDEvent *events[4] = { NULL, NULL, NULL, NULL };
++	IOHIDEvent *events[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+ 	int ne = 0;
+ 	const char *what = NULL;
+ 	bool arm = false;
+ 	int cw, ch;
+ 	sweet_canvas(&cw, &ch);
+ 	int strip = fLogicalW > 0 ? fLogicalW : fPanelW;
++	const bool gest = sweet_pad_gestures() != 0;
++	UInt32 swipeKey = 0;            /* 0460: the arrow key of a three-finger swipe, sent with control */
++	bool tick = false;
+ 
+ 	IOLockLock(fLock);
+ 	uint32_t bit = 1u << finger;
+@@ -1332,6 +1407,19 @@
+ 		pad.downMask &= ~bit;
+ 	}
+ 	int n = sweet_popcount(pad.downMask);
++	if (down && !was && pad.momentum != 0) {
++		/* 0460: a finger stops the momentum */
++		if (pad.momentum == 2) {
++			events[ne++] = IOHIDEvent::scrollEventWithFixed(now, 0, 0, 0, SWEET_PAD_OPT_PIXELS |
++			    SWEET_PAD_MOMENTUM(kIOHIDEventScrollMomentumEnd));
++		}
++		pad.momentum = 0;
++	}
++	if (!down && was && pad.scrolling && n < 2) {
++		events[ne++] = sweet_pad_scroll_end(now);       /* 0460: fewer than two fingers left */
++		tick = pad.momentum != 0;
++		what = pad.momentum ? "scroll end, momentum" : "scroll end";
++	}
+ 	if (down && !was) {
+ 		if (pad.primary < 0) {
+ 			pad.primary = finger;
+@@ -1345,19 +1433,82 @@
+ 			uint64_t ns = 0;
+ 			absolutetime_to_nanoseconds(now - pad.pendingAt, &ns);
+ 			pad.armDrag = pad.pendingClicks > 0 && ns < 250000000ULL;
++			pad.scrolling = false;
++			pad.scAccX = pad.scAccY = 0;
++			pad.swipe3 = false;
+ 			what = pad.armDrag ? "down after a tap" : "down";
+ 		} else if (n > pad.maxFingers) {
+ 			pad.maxFingers = n;
+ 			pad.accX = pad.accY = 0;
++			pad.scAccX = pad.scAccY = 0;
++			pad.lastMoveAt = now;
++			if (gest && n >= 3) {
++				/* 0460: a third finger: no longer a scroll; its swipe is counted from here */
++				if (pad.scrolling) {
++					events[ne++] = sweet_pad_scroll_end(now);
++					pad.momentum = 0;
++				}
++				pad.g3x = pad.g3y = 0;
++			}
+ 			what = "another finger";
+ 		}
+ 	} else if (down && finger == pad.primary) {
++		if (pad.lastX < 0) {
++			pad.lastX = x;          /* 0460: a new primary finger: its first sample is the start, not a movement */
++			pad.lastY = y;
++		}
+ 		int dx = x - pad.lastX, dy = y - pad.lastY;
+ 		pad.lastX = x;
+ 		pad.lastY = y;
+ 		int speed = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+ 		pad.travel += speed;
+-		if (n >= 2) {
++		if (n >= 2 && gest && pad.maxFingers >= 3) {
++			/* 0460: three fingers: one swipe */
++			pad.g3x += dx;
++			pad.g3y += dy;
++			int ax = pad.g3x < 0 ? -pad.g3x : pad.g3x, ay = pad.g3y < 0 ? -pad.g3y : pad.g3y;
++			if (!pad.swipe3 && n >= 3 && (ax >= SWEET_PAD_SWIPE3 || ay >= SWEET_PAD_SWIPE3)) {
++				pad.swipe3 = true;
++				/* as a Mac trackpad: up = Mission Control, down = the app's windows, left = the Space to the right
++				 * (keyboard usages: 0x52 up, 0x51 down, 0x4f right, 0x50 left arrow; 0xe0 left control) */
++				swipeKey = ay >= ax ? (pad.g3y < 0 ? 0x52 : 0x51) :
++				    (pad.g3x < 0 ? 0x4f : 0x50);
++				what = ay >= ax ? (pad.g3y < 0 ? "three-finger swipe up = Mission Control" :
++				    "three-finger swipe down = app windows") : (pad.g3x < 0 ? "three-finger swipe left = next Space" :
++				    "three-finger swipe right = previous Space");
++			}
++		} else if (n >= 2 && gest) {
++			/* 0460: two fingers: scroll in points, with phases */
++			pad.scAccX += dx;
++			pad.scAccY += dy;
++			int ax = pad.scAccX < 0 ? -pad.scAccX : pad.scAccX, ay = pad.scAccY < 0 ? -pad.scAccY : pad.scAccY;
++			IOHIDEventPhaseBits phase = kIOHIDEventPhaseChanged;
++			if (!pad.scrolling && ax + ay >= SWEET_PAD_SCROLL_START) {
++				pad.scrolling = true;
++				pad.velX = pad.velY = 0;
++				phase = kIOHIDEventPhaseBegan;
++				what = "scroll start";
++			}
++			if (pad.scrolling && (pad.scAccX != 0 || pad.scAccY != 0)) {
++				int64_t unit = (int64_t)strip * sweet_ui_scale(cw);
++				int64_t fx = -(int64_t)pad.scAccX * cw * 65536 / unit, fy = -(int64_t)pad.scAccY * cw * 65536 / unit;
++				uint64_t ns = 0;
++				absolutetime_to_nanoseconds(now - pad.lastMoveAt, &ns);
++				int64_t ms = (int64_t)(ns / NSEC_PER_MSEC);
++				ms = ms < 1 ? 1 : (ms > 100 ? 100 : ms);
++				if (phase == kIOHIDEventPhaseBegan) {
++					pad.velX = fx / ms;
++					pad.velY = fy / ms;
++				} else {
++					pad.velX = (pad.velX * 2 + fx / ms) / 3;
++					pad.velY = (pad.velY * 2 + fy / ms) / 3;
++				}
++				pad.lastMoveAt = now;
++				pad.scAccX = pad.scAccY = 0;
++				events[ne++] = IOHIDEvent::scrollEventWithFixed(now, (IOFixed)fx, (IOFixed)fy, 0,
++				    SWEET_PAD_OPT_PIXELS | SWEET_PAD_PHASE(phase));
++			}
++		} else if (n >= 2) {
+ 			pad.accX += dx;
+ 			pad.accY += dy;
+ 			int sx = pad.accX / 24, sy = pad.accY / 24;
+@@ -1366,6 +1517,8 @@
+ 				pad.accY -= sy * 24;
+ 				events[ne++] = IOHIDEvent::scrollEvent(now, -sx, -sy, 0);
+ 			}
++		} else if (gest && pad.maxFingers >= 2) {
++			/* 0460: the finger left over after a scroll or swipe does not move the pointer */
+ 		} else if (speed) {
+ 			/* 30 panel px: S3z3 2026-11-13, a second tap's 11 px of jitter started a drag */
+ 			if (pad.armDrag && !pad.dragging && pad.travel > 30) {
+@@ -1400,12 +1553,17 @@
+ 			pad.buttons = 0;
+ 			pad.dragging = false;
+ 			what = "drag end";
++		} else if (gest && pad.maxFingers >= 3) {
++			pad.pendingClicks = 0;          /* 0460: three fingers never click */
++			if (!what) {
++				what = pad.swipe3 ? "swipe end" : "three fingers up";
++			}
+ 		} else if (pad.maxFingers >= 2) {
+ 			if (tap || (ns < 350000000ULL && pad.travel < 40)) {
+ 				events[ne++] = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 2, 0);
+ 				events[ne++] = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 0, 2);
+ 				what = "two-finger tap = right click";
+-			} else {
++			} else if (!what) {
+ 				what = "scroll end";
+ 			}
+ 			pad.pendingClicks = 0;
+@@ -1423,8 +1581,9 @@
+ 		for (int i = 0; i < SWEET_TOUCH_FINGERS; i++) {
+ 			if (pad.downMask & (1u << i)) {
+ 				pad.primary = i;
+-				pad.lastX = x;
+-				pad.lastY = y;
++				/* 0460: where the new primary is is not known yet (the lifted finger's position made the
++				 * pointer jump by the distance between the fingers) */
++				pad.lastX = pad.lastY = -1;
+ 				break;
+ 			}
+ 		}
+@@ -1434,10 +1593,20 @@
+ 		IOLog("SWEET HID: pad %s (finger %d, %d down) at %d,%d travel %d\n", what, finger, n, x, y, pad.travel);
+ 	}
+ 	for (int i = 0; i < ne; i++) {
+-		dispatchEvent(events[i]);
+-		events[i]->release();
++		if (events[i]) {
++			dispatchEvent(events[i]);
++			events[i]->release();
++		}
+ 	}
+-	if (arm && fSteer) {
++	if (swipeKey != 0 && gSweetKeyboard != NULL) {
++		gSweetKeyboard->key(0xe0, true);
++		gSweetKeyboard->key(swipeKey, true);
++		gSweetKeyboard->key(swipeKey, false);
++		gSweetKeyboard->key(0xe0, false);
++	}
++	if (tick && fSteer) {
++		fSteer->setTimeoutMS(16);       /* 0460: momentum */
++	} else if (arm && fSteer) {
+ 		fSteer->setTimeoutMS(260);
+ 	}
+ }
+@@ -1456,7 +1625,32 @@
+ 		pad.pendingClicks = 0;
+ 	}
+ 	bool again = pad.pendingClicks > 0;
++	/* 0460: momentum after a scroll: every 16 ms what the speed gives, 5 % slower each time */
++	IOHIDEvent *mom = NULL;
++	bool coast = false;
++	if (pad.momentum != 0) {
++		int64_t ax = pad.momX < 0 ? -pad.momX : pad.momX, ay = pad.momY < 0 ? -pad.momY : pad.momY;
++		if (ax + ay < SWEET_PAD_MOM_STOP) {
++			if (pad.momentum == 2) {
++				mom = IOHIDEvent::scrollEventWithFixed(now, 0, 0, 0, SWEET_PAD_OPT_PIXELS |
++				    SWEET_PAD_MOMENTUM(kIOHIDEventScrollMomentumEnd));
++			}
++			pad.momentum = 0;
++		} else {
++			mom = IOHIDEvent::scrollEventWithFixed(now, (IOFixed)(pad.momX * 16), (IOFixed)(pad.momY * 16), 0,
++			    SWEET_PAD_OPT_PIXELS | SWEET_PAD_MOMENTUM(pad.momentum == 1 ? kIOHIDEventScrollMomentumStart :
++			    kIOHIDEventScrollMomentumContinue));
++			pad.momentum = 2;
++			pad.momX = pad.momX * 61 / 64;
++			pad.momY = pad.momY * 61 / 64;
++			coast = true;
++		}
++	}
+ 	IOLockUnlock(fLock);
++	if (mom) {
++		dispatchEvent(mom);
++		mom->release();
++	}
+ 	for (int i = 0; i < clicks; i++) {
+ 		IOHIDEvent *d = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 1, 0);
+ 		IOHIDEvent *u = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 0, 1);
+@@ -1472,7 +1666,9 @@
+ 	if (clicks) {
+ 		IOLog("SWEET HID: pad click x%d\n", clicks);
+ 	}
+-	if (again && fSteer) {
++	if (coast && fSteer) {
++		fSteer->setTimeoutMS(16);
++	} else if (again && fSteer) {
+ 		fSteer->setTimeoutMS(50);
+ 	}
+ }
