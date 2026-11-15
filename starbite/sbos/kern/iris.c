@@ -801,8 +801,10 @@ enum {
     Q_B_MODE, Q_B_GO, Q_B_STREAM, Q_B_WAIT, Q_B_STOP, Q_B_DOWN, Q_B_STATS, Q_END
 };
 
+int iris_use_prepare;
+
 static struct {
-    int q, isp, streaming, pass;
+    int q, isp, streaming, pass, prepared;
     uint64_t t0, t_q, t_stream;
     unsigned wait_us, k;
     uint8_t led0[7], led1[7];
@@ -847,6 +849,16 @@ static void diag_line(const char *when)
 }
 
 /* everything off in reverse order: the stream, the WDMA, the link and the domain, then the sensor */
+/* the secure camera session back (UNPREPARE), once, whatever happened: on every way out of P1 */
+static void unprepare(void)
+{
+    if (!P.prepared || !H.smc)
+        return;
+    P.prepared = 0;
+    int64_t r = H.smc(H.ctx, IRIS_SMC_UNPREPARE, 0, 0, 0);
+    say("SMC MC_SECURE_CAMERA_UNPREPARE (0x83000044): %lld%s", (long long)r, r ? " (an error)" : " (ok)");
+}
+
 static void teardown(void)
 {
     if (P.streaming) {
@@ -859,6 +871,7 @@ static void teardown(void)
         P.isp = 0;
     }
     power_down();
+    unprepare();
 }
 
 static void led_check(void)
@@ -882,6 +895,7 @@ static void led_check(void)
 /* the summary: the key fact first */
 static int finish(const char *why)
 {
+    unprepare();                                /* also on the way out without a teardown */
     led_check();
     char key[160];
     unsigned n = 0;
@@ -1064,6 +1078,14 @@ int iris_p1_step(unsigned *wait_ms)
         P.mem = (volatile uint8_t *)H.ram(H.ctx, IRIS_MEM_PA, IRIS_FRAME_BYTES);
         if (!P.mem)
             return fail("the frame's memory (0xD8000000) is not mappable");
+        if (iris_use_prepare) {                 /* P1c: the stock kernel's PREPARE before the sensor's power-up */
+            if (!H.smc)
+                return fail("P1c asked for PREPARE but there is no SMC hook");
+            int64_t r = H.smc(H.ctx, IRIS_SMC_PREPARE, 0, 0, 0);
+            say("SMC MC_SECURE_CAMERA_PREPARE (0x83000043): %lld%s", (long long)r,
+                r ? " (refused: P1 goes on as without it)" : " (ok: the secure camera session is open)");
+            P.prepared = r == 0;
+        }
         go(Q_A_POWER, 0);
         break;
     case Q_A_POWER: {
@@ -1404,6 +1426,12 @@ static void k_isp_down(void *c)
     cam_port_down();
 }
 
+static int64_t k_smc(void *c, uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
+{
+    (void)c;
+    return sb_psci(fn, a1, a2, a3);
+}
+
 void iris_hal_libsb(struct iris_hal *h)
 {
     h->ctx = 0;
@@ -1412,5 +1440,6 @@ void iris_hal_libsb(struct iris_hal *h)
     h->delay_us = k_delay, h->now_us = k_now, h->log = k_log, h->ram = k_ram;
     h->isp_up = k_isp_up, h->link_up = k_link_up, h->link_go = k_link_go, h->dma_src = k_dma_src, h->diag = k_diag;
     h->dma_off = k_dma_off, h->isp_down = k_isp_down;
+    h->smc = k_smc;
 }
 #endif

@@ -81,7 +81,15 @@ struct iris_hal {
     void (*diag)(void *ctx, uint32_t d[6]);
     void (*dma_off)(void *ctx);
     void (*isp_down)(void *ctx);
+    /* optional (P1c): an SMC to the secure monitor (libsb sb_psci); NULL: P1 never calls PREPARE / UNPREPARE */
+    int64_t (*smc)(void *ctx, uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3);
 };
+/* P1c (run 17: the iris pins and CSIS3 are the secure world's from boot): 1 = call MC_SECURE_CAMERA_PREPARE
+ * (0x83000043, as the stock kernel does before it powers the sensor) first, and UNPREPARE (0x83000044) on every way
+ * out. 0 (the default) = P1 as before, no SMC. */
+extern int iris_use_prepare;
+#define IRIS_SMC_PREPARE   0x83000043ULL
+#define IRIS_SMC_UNPREPARE 0x83000044ULL
 void iris_hal_set(const struct iris_hal *h);
 #ifdef SBOS_KERNEL
 void iris_hal_libsb(struct iris_hal *h);

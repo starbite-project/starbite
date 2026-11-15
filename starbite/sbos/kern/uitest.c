@@ -326,6 +326,14 @@ void selftest_timer(unsigned id)
             /* the iris image (docs/drivers/IRIS.md 6), attended: P0 (levels 0-1, read only), then P1 at level 2 (the
              * sensor up and its ID; ISPPRE, CSIS3 fault-safe, one dark frame without the LED; everything off) */
             drv_run_select("iris");
+#ifdef SBOS_SELFTEST_NEXT_DRV_IRIS_SMC
+            {
+                /* P1c (run 17: the iris pins and CSIS3 the secure world's from boot): the stock kernel's
+                 * MC_SECURE_CAMERA_PREPARE before the sensor's power-up, UNPREPARE on every way out */
+                extern int iris_use_prepare;
+                iris_use_prepare = 1;
+            }
+#endif
             drv_run_begin(1);
 #elif defined(SBOS_SELFTEST_NEXT_DRV_ATTENDED)
             drv_run_begin(1);

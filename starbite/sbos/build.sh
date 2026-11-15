@@ -299,6 +299,9 @@ if [ -n "$PAK" ]; then
     # drivers track: the iris image (attended): P0 read only, then P1 (the sensor's ID, one dark frame on CSIS3, no LED)
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_DRV -DSBOS_SELFTEST_NEXT_DRV_IRIS "$here/kern/uitest.c" -o "$ob/k_uitest_ndrvi.o"
     ndiobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrvi.o#")
+    # drivers track: the iris image with P1c (the stock PREPARE / UNPREPARE SMC around P1), attended
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_DRV -DSBOS_SELFTEST_NEXT_DRV_IRIS -DSBOS_SELFTEST_NEXT_DRV_IRIS_SMC "$here/kern/uitest.c" -o "$ob/k_uitest_ndrvic.o"
+    ndicobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ndrvic.o#")
     # Track G: Next with the unattended Cellular self test (mobile data on, HTTPS GETs, off, on again; no SMS, no calls)
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_CELL "$here/kern/uitest.c" -o "$ob/k_uitest_ncell.o"
     ncobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ncell.o#")
@@ -418,9 +421,9 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
 "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
 if [ -n "$nobjs" ]; then
-    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended next-drvsound next-drviris next-celltest; do
+    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended next-drvsound next-drviris next-drviris-smc next-celltest; do
         case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;;
-        next-drvprobe) vo=$ndobjs ;; next-drvattended) vo=$ndaobjs ;; next-drvsound) vo=$ndsobjs ;; next-drviris) vo=$ndiobjs ;;
+        next-drvprobe) vo=$ndobjs ;; next-drvattended) vo=$ndaobjs ;; next-drvsound) vo=$ndsobjs ;; next-drviris) vo=$ndiobjs ;; next-drviris-smc) vo=$ndicobjs ;;
         next-celltest) vo=$ncobjs ;; *) vo=$nwobjs ;; esac
         "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
         und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)

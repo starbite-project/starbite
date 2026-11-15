@@ -497,6 +497,18 @@ static void h_isp_down(void *c)
     F.isp_on = 0, F.link_go = 0;
 }
 
+/* P1c: the SMCs P1 makes (PREPARE / UNPREPARE), in order */
+static uint64_t smc_fn[8];
+static unsigned nsmc;
+static int64_t h_smc(void *c, uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
+{
+    (void)c, (void)a1, (void)a2, (void)a3;
+    if (nsmc < 8)
+        smc_fn[nsmc] = fn;
+    nsmc++;
+    return 0;
+}
+
 static void fake_reset(void)
 {
     uint8_t *ram = F.ram;
@@ -513,8 +525,9 @@ static void fake_reset(void)
     st_en = st_rst = st_mclk = st_i2c = 0;
     iris_test_fail_step = -1;
     lastline[0] = 0;
+    nsmc = 0;
     struct iris_hal h = { 0, h_rd32, h_wr32, h_pmic_rd, h_pmic_wr, h_hs_init, h_hs_msg, h_led_rd, h_delay, h_now, h_log,
-                          h_ram, h_isp_up, h_link_up, h_link_go, h_dma_src, h_diag, h_dma_off, h_isp_down };
+                          h_ram, h_isp_up, h_link_up, h_link_go, h_dma_src, h_diag, h_dma_off, h_isp_down, h_smc };
     iris_hal_set(&h);
 }
 
@@ -820,6 +833,36 @@ int main(int argc, char **argv)
         check_restored(nm);
     }
     CHECK(aborted > 20, "aborts tried: %u", aborted);
+
+    /* ---- P1c: PREPARE first, UNPREPARE exactly once on every way out ---- */
+    iris_use_prepare = 0;
+    fake_reset();
+    CHECK(run(100000) && nsmc == 0, "P1 without P1c: no SMC (%u)", nsmc);
+    iris_use_prepare = 1;
+    fake_reset();
+    CHECK(run(100000), "P1c: did not finish");
+    CHECK(nsmc == 2 && smc_fn[0] == IRIS_SMC_PREPARE && smc_fn[1] == IRIS_SMC_UNPREPARE,
+          "P1c happy path: PREPARE then one UNPREPARE (%u SMCs)", nsmc);
+    CHECK(starts(lastline, "drvprobe: iris: PASS"), "P1c happy path: %s", lastline);
+    check_restored("P1c happy");
+    for (int k = 0; k < 6; ++k) {
+        fake_reset();
+        iris_test_fail_step = k;
+        CHECK(run(100000), "P1c fail %d: did not finish", k);
+        CHECK(nsmc == 2 && smc_fn[0] == IRIS_SMC_PREPARE && smc_fn[1] == IRIS_SMC_UNPREPARE,
+              "P1c fail at step %d: PREPARE then one UNPREPARE (%u SMCs)", k, nsmc);
+        check_restored("P1c fail");
+    }
+    fake_reset();
+    iris_p1_begin();
+    for (unsigned i = 0; i < 8; ++i) {
+        unsigned w = 0;
+        (void)iris_p1_step(&w);
+        F.now += (uint64_t)w * 1000U + 100U;
+    }
+    iris_p1_abort();
+    CHECK(nsmc == 2 && smc_fn[1] == IRIS_SMC_UNPREPARE, "P1c abort: one UNPREPARE (%u SMCs)", nsmc);
+    iris_use_prepare = 0;
 
     printf("iris-test: %d checks, %d failed\n", checks, fails);
     free(F.ram);
