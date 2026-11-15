@@ -1,0 +1,2 @@
+# S3zt cycle 1: the wallpaper store WallpaperAgent wrote (default choice = the missing Sequoia Sunrise video)
+/Users/starbite/Library/Application Support/com.apple.wallpaper/Store/Index.plist

@@ -395,9 +395,11 @@ def fsck_image(img):
 
 
 def add(a):
-    """Mac side: copy the tree SRC (paths relative to the volume root) into IMG; owners root:wheel, dirs 0755, files
-    0644; every other record keeps the card's owners (dumped first)."""
+    """Mac side: copy the tree SRC (paths relative to the volume root) into IMG; owners root:wheel (or --owner
+    UID:GID, e.g. 501:20 for files in the user's home), dirs 0755, files 0644; every other record keeps the card's
+    owners (dumped first)."""
     img, src = Path(a.image), Path(a.src)
+    uid, gid = (int(x) for x in a.owner.split(':'))
     st = json.loads(Path(str(img) + '.pull.json').read_text())
     own_path = Path(str(img) + '.owners.json')
     if not own_path.exists():
@@ -435,13 +437,13 @@ def add(a):
     if own_device(img):
         sys.exit(f'{img} still attached after detaching {mnt}: stopping')
     for p, mode in added:
-        own[p.replace('/./', '/')] = [0, 0, mode]
+        own[p.replace('/./', '/')] = [uid, gid, mode]
     new_own = Path(str(img) + '.owners-new.json')
     new_own.write_text(json.dumps(own))
     subprocess.run(['python3', '-I', str(ROOT / 'tools/macos/hfs-owners.py'), str(img), str(new_own)], check=True)
     fsck_image(img)
     for p, mode in added:
-        print(f'  added {p} ({oct(mode)})')
+        print(f'  added {p} ({oct(mode)}, {uid}:{gid})')
     print(f'{len(added)} item(s) added to {img}; next: plan')
 
 
@@ -512,6 +514,7 @@ def main():
     ap.add_argument('--start', type=int, default=182888448)
     ap.add_argument('--count', type=int, default=33554432)
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--owner', default='0:0', help='add: UID:GID of the new files and directories (default 0:0)')
     a = ap.parse_args()
     if a.cmd in ('add', 'remove') and not a.src:
         sys.exit(f'{a.cmd} needs SRC')
