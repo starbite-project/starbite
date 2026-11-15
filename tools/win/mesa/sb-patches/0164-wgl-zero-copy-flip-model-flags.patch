@@ -1,0 +1,96 @@
+From 5218bdc844d4aa7ec553c5a4f43ba7c570fc3526 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Sun, 15 Nov 2026 21:53:18 +0200
+Subject: [PATCH] 0164: zero-copy present on a flip-model swap chain by flag
+ file (glzcflip = FLIP_SEQUENTIAL, glzcflipd = FLIP_DISCARD; sync interval 0
+ unless glzcflipvsync)
+
+---
+ src/gallium/targets/wgl/wgl_sb_zc.cpp | 34 +++++++++++++++++++--------
+ 1 file changed, 24 insertions(+), 10 deletions(-)
+
+diff --git a/src/gallium/targets/wgl/wgl_sb_zc.cpp b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+index c1d6011..b6140af 100644
+--- a/src/gallium/targets/wgl/wgl_sb_zc.cpp
++++ b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+@@ -19,7 +19,8 @@
+  *
+  * Environment: SB_GL_PRESENT=zc|gdi|copy (0160: zero-copy only with zc or the flag file
+  * C:\ProgramData\Starbite\glzc; otherwise the GDI paths), SB_GL_ZC_SWAP=flip|flipdiscard|discard
+- * (0161: default discard = DISCARD, 1 buffer; flip = FLIP_SEQUENTIAL, 2 buffers), SB_GL_ZC_LOG=1 (setup steps and a timing line every 300 frames).
++ * (0161: default discard = DISCARD, 1 buffer; flip = FLIP_SEQUENTIAL, 2 buffers; 0164: flag files glzcflip /
++ * glzcflipd select flip / flipdiscard with sync interval 0, glzcflipvsync keeps the game's interval), SB_GL_ZC_LOG=1 (setup steps and a timing line every 300 frames).
+  * The process environment variable SB_GL_ZC_STATE says what this file did (for tests): "zc", "off", "fail:<step>",
+  * "gdi-after-resize", "gdi-after-present-failures".
+  */
+@@ -65,6 +66,15 @@ static bool zc_log;
+ #define ZLOG(...) do { if (zc_log) { fprintf(stderr, "sb gl zc: " __VA_ARGS__); fflush(stderr); } } while (0)
+ #define ZERR(...) do { fprintf(stderr, "sb gl zc: " __VA_ARGS__); fflush(stderr); } while (0)
+ 
++/* a test switch: the flag file C:\ProgramData\Starbite\<name> exists (a Steam-started game has no environment of ours) */
++static bool
++zc_flag(const char *name)
++{
++   char path[96];
++   snprintf(path, sizeof(path), "C:\\ProgramData\\Starbite\\%s", name);
++   return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
++}
++
+ static void
+ zc_state(const char *s)
+ {
+@@ -482,8 +492,10 @@ sbzc_present(struct stw_winsys_framebuffer *pfb, int interval)
+           * took ~30 ms of each frame with the game's interval, 23 fps against 38-48 with the GDI present) */
+          static int novsync = -1;
+          if (novsync < 0) {
+-            novsync = GetFileAttributesA("C:\\ProgramData\\Starbite\\glzcnovsync") != INVALID_FILE_ATTRIBUTES;
+-            ZLOG("sync interval: %s\n", novsync ? "0 (glzcnovsync)" : "the game's");
++            /* sb-patches/0164: the flip-model flags present at interval 0 too (a flip-model present does not wait
++             * for DWM to take the frame; glzcflipvsync keeps the game's interval for comparison) */
++            novsync = zc_flag("glzcnovsync") || ((zc_flag("glzcflip") || zc_flag("glzcflipd")) && !zc_flag("glzcflipvsync"));
++            ZLOG("sync interval: %s\n", novsync ? "0 (flag)" : "the game's");
+          }
+          hr = fb->sc->Present(novsync ? 0 : interval < 0 ? 0 : interval > 4 ? 4 : (UINT)interval, 0);
+       } else {
+@@ -568,8 +580,8 @@ wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFo
+       const char *l = getenv("SB_GL_ZC_LOG");
+       zc_log = l && *l && *l != '0';
+       /* 0160: the flag file also turns the log on (a Steam-started game has no environment of ours) */
+-      if (GetFileAttributesA("C:\\ProgramData\\Starbite\\glzc") != INVALID_FILE_ATTRIBUTES ||
+-          GetFileAttributesA("C:\\ProgramData\\Starbite\\glzcnovsync") != INVALID_FILE_ATTRIBUTES)
++      bool any = zc_flag("glzc") || zc_flag("glzcnovsync") || zc_flag("glzcflip") || zc_flag("glzcflipd");
++      if (any)
+          zc_log = 1;
+       /* sb-patches/0160 (GD ICD tree): opt-in. In src-zc (0151) zero-copy was the default; in the game kit the
+        * async GDI present (0153) stays the default until the user's windows are shown through DWM (sbumd 0159), so
+@@ -577,9 +589,9 @@ wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFo
+        * window, like glcached/glasync). */
+       mode = (p && !strcmp(p, "zc")) ||
+              (!(p && (!strcmp(p, "gdi") || !strcmp(p, "copy"))) &&
+-              (GetFileAttributesA("C:\\ProgramData\\Starbite\\glzc") != INVALID_FILE_ATTRIBUTES ||
+-               /* 0162: glzcnovsync alone = zero-copy with sync interval 0 (one flag file per A/B run) */
+-               GetFileAttributesA("C:\\ProgramData\\Starbite\\glzcnovsync") != INVALID_FILE_ATTRIBUTES));
++              /* 0162: glzcnovsync alone = zero-copy with sync interval 0 (one flag file per A/B run);
++               * 0164: glzcflip / glzcflipd alone = zero-copy on a flip-model swap chain, interval 0 */
++              any);
+       if (!mode)
+          zc_state("off");
+       ZLOG("SB_GL_PRESENT=%s: %s\n", p ? p : "(unset)", mode ? "zero-copy" : "GDI");
+@@ -612,10 +624,12 @@ wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFo
+    /* sb-patches/0161: DISCARD (blt model) is the default. T66 with sbumd 0159: a windowed blt-model swap chain is
+     * composed by DWM (sbcomp hwndblt shown), a FLIP_SEQUENTIAL one is not (black screen, 7.9 fps). flip /
+     * flipdiscard stay selectable with SB_GL_ZC_SWAP. */
+-   if (se && !strcmp(se, "flip")) {
++   /* sb-patches/0164: flag files glzcflip (FLIP_SEQUENTIAL) and glzcflipd (FLIP_DISCARD), 2 buffers, for the game
++    * (needs an sbumd whose flip-model windows DWM composes: 0163+, docs/WIN11-GPU.md 6.95) */
++   if ((se && !strcmp(se, "flip")) || (!se && zc_flag("glzcflip"))) {
+       fb->effect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+       fb->nbuf = 2;
+-   } else if (se && !strcmp(se, "flipdiscard")) {
++   } else if ((se && !strcmp(se, "flipdiscard")) || (!se && zc_flag("glzcflipd"))) {
+       fb->effect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+       fb->nbuf = 2;
+    } else {
+-- 
+2.43.0
+

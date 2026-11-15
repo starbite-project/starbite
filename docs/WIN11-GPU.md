@@ -2881,6 +2881,36 @@ kernel's reason; a config with "DWM SURVIVED", the red window in its shot and sb
 (T66: 7.9 fps while DWM looped). Next after that: the GD ICD's zero-copy chain as FLIP_SEQUENTIAL against the async
 GDI present.
 
+### 6.96 Night of 11-15: what the flip model can give GD (frame budget), GD ICD 0164, T72 (SMOOTH1) staged
+
+(2026-11-15 22:50) The user's goal, via the peer: "Windows super smooth ... hundreds of fps in Geometry Dash".
+
+- **GD's frame budget, re-read from T68/T69** (big cores, in the level):
+  - async GDI present: 38-48 fps, i.e. 21-26 ms per frame. The game thread hands a frame to the copy thread and waits
+    when that thread is still busy; copy (5-17 ms) + GDI (4-10 ms) is what sets the pace.
+  - zero-copy on the blt model: 23 fps = ~43 ms per frame, of which Present ~25-30 ms (DWM-paced) and the GL wait
+    ~5 ms. **What is left for the game and the driver's CPU is ~8-12 ms**, not the ~20 ms 6.73 derived from the GDI
+    path (that figure included the wait for the copy thread).
+  - So a present that does not block (flip model, interval 0) should land at ~13-17 ms per frame = **60-75 fps**
+    with the 5 ms GL wait still on the game thread, and ~80-120 fps once that wait moves off it (a present thread,
+    as the async GDI present has). Beyond that the game's own translated x64 CPU is the bound (XtaCache on the M3,
+    6.87), and the panel shows 60 Hz whatever the game's counter says. Estimates until T71 measures them.
+- **GD ICD 0164** (src-tc 5218bdc, `sb-patches/0164-wgl-zero-copy-flip-model-flags.patch`): flag files
+  `C:\ProgramData\Starbite\glzcflip` (FLIP_SEQUENTIAL, 2 buffers) and `glzcflipd` (FLIP_DISCARD) turn zero-copy on
+  with a flip-model swap chain and sync interval 0 (`glzcflipvsync` keeps the game's interval). ARM64EC
+  `build/win/gd-zc-0164` (opengl32 87bf8955, libgallium_wgl f0a90dcb). T71 = this against the async GDI present,
+  on the sbumd that T70 says keeps DWM alive.
+- **T72 (SMOOTH1)**, `build/win/stage/sbwddm-t72` (T61 drivers = the user's install): `sb-smooth.bat` (as
+  sb-user.bat) runs the new `sbsmooth.exe` (`tools/win/mesa/tests/sbsmooth.cpp`, 6051a36e) at logon and ~1, 2.5 and
+  5 min later, sbdrag at the end, typeperf every 2 s. sbsmooth per run: each CPU's MHz and a fixed loop's time pinned
+  to it (a throttled core shows), the timer resolution and what Sleep(1) takes (a game's 1 ms sleep), thread wake-up
+  times, DWM's refresh, the frame pace of a repainting 1200x700 window and of a full-screen one (fps, p50/p95/p99/max,
+  DWM late/dropped/missed, KMD GPU busy and present wait/copy, per-CPU busy with DPC+interrupt), and the time from an
+  injected mouse move to the window and to the composed frame. It answers: does DWM hold 60 fps here, what stops it
+  when it does not (GPU, the present copy, a CPU), how late is input, and how long after logon the desktop is slow.
+- `tools/win/mesa/tests/build-test.sh NAME` builds a test program the way sbcomp/sbdrag were built (VM clang-cl,
+  ARM64, ~/sbwin kit).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
