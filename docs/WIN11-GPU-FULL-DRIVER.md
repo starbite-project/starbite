@@ -123,6 +123,18 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
 - D3D11 video processing for players and browsers (NV12/P010 textures, colour conversion on the GPU); hardware
   decode is the Exynos MFC, a separate driver. OpenCL: rarely needed.
 
+## Progress log
+- **11-15 23:15, shader front end, phase 1 (offline):** a direct DXBC -> NIR translator for vertex, pixel and geometry
+  shaders, Shader Model 4.0/4.1 (`ShaderNIR.c`, ~3000 lines, branch `sb-nir` in `~/sbmesa/src-nir`, commits
+  fc9d48d + d9185f0), with a Linux harness over the 362 shaders in Wine's d3d10core/d3d11 test sources: all 267
+  in-scope shaders translate and pass NIR validation; 227 of the 244 vertex/pixel ones compile with the Bifrost
+  compiler for this GPU; the other 17 hit one driver gap (reading a texture's mip count is not lowered on this GPU
+  generation, which the current translator's path has too). 71 hand-written shaders check the arithmetic and
+  control-flow results by constant folding. Not yet in the driver; nothing run on the phone. Details and the bugs it
+  found in the old translator: `docs/WIN11-GPU-NIR-FRONTEND.md`.
+- **Phase 2 (running):** behind a flag file (`nirshaders`, default off) in the driver, the Bifrost gaps fixed, a
+  Windows build from that branch for an A/B conformance run.
+
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.
 - **BeamNG.drive:** item 6 (feature level 11_0) is the gate; before that the game cannot create its device. Items
