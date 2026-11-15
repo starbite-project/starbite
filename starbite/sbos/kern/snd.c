@@ -315,6 +315,8 @@ static uint64_t now(void) { return O.now_us(); }
 static int call_has(void) { return O.call_owns_abox && O.call_owns_abox(); }
 /* the Calliope engine (abox_media.c) when the HAL can read VENDOR (its firmware); else bypass only, as before */
 static int cal_avail;
+/* 9g: the modem's share told before snd_init (Cellular started before the shell's first sound): kept for snd_init */
+static int modem_pending;
 /* a call is on: with the Calliope engine only abox_call(1) counts (a booted Calliope is shared), else as before */
 static int in_call(void) { return cal_avail ? abox_state() == ABOX_ST_CALL : call_has(); }
 static uint8_t *eng_buf(void) { return G.ce ? cal_play_buf() : apcm_play_buf(); }
@@ -343,6 +345,7 @@ int snd_init(const struct snd_ops *ops, const struct abox_hal *hal)
     }
     memset(&G, 0, sizeof G);
     memset(st, 0, sizeof st);
+    G.modem = modem_pending;                    /* 9g: Cellular already holds Calliope */
     G.vol[SND_OUT_SPEAKER] = 10, G.vol[SND_OUT_EARPIECE] = 10, G.vol[SND_OUT_HEADPHONES] = 8;
     G.cur_out = SND_OUT_SPEAKER;
     G.amp_override = -1;
@@ -923,6 +926,12 @@ static int engine_start(void)
         why("Sound is paused: a call has the audio hardware");
         return SND_EBUSY;
     }
+    if (!cal_avail && snd_hal_ok && abox_state() == ABOX_ST_OFF && apcm_state() == APCM_ST_OFF) {
+        /* 9g: snd_init came while Calliope ran (cal_map refuses then): the Calliope engine again once it is off,
+         * never the bypass engine (its RDMA0 does not move on this phone) when Calliope's files are there */
+        cal_avail = !cal_hal_set(&snd_hal) && !cal_map();
+        say("engine: Calliope's windows %s now that Calliope is off", cal_avail ? "mapped" : "still refused");
+    }
     if (cal_avail && !G.cal_bad && apcm_state() == APCM_ST_OFF) {
         if ((r = cal_engine_start(out))) {
             if (r > 0)
@@ -1360,6 +1369,7 @@ void snd_suspend_for_call(void)
 
 void snd_calliope_shared(int on)
 {
+    modem_pending = !!on;                       /* 9g: snd_init takes it if snd is not up yet */
     if (!inited)
         return;
     if (on) {

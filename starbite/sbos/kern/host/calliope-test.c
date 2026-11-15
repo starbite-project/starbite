@@ -1188,6 +1188,7 @@ static void test_goertzel(void)
 }
 
 /* snd with the Calliope engine and a mic */
+static int setup_cal = 1;                   /* 9g: snd_setup's use_calliope */
 static void snd_setup(void)
 {
     reset(0);
@@ -1199,7 +1200,7 @@ static void snd_setup(void)
     struct snd_ops o;
     memset(&o, 0, sizeof o);
     o.log = s_log, o.now_us = s_now, o.call_owns_abox = s_owns, o.amp_speaker = s_spk, o.amp_receiver = s_rcv;
-    o.amp_off = s_off, o.codec_mic = c_mic, o.codec_off = c_off, o.use_calliope = 1;
+    o.amp_off = s_off, o.codec_mic = c_mic, o.codec_off = c_off, o.use_calliope = setup_cal;
     CHECK(snd_init(&o, &h) == 0, "snd: init");
 }
 /* poll for ms, reading the mic into g (if given) after skip samples */
@@ -1512,6 +1513,45 @@ static void test_snd_shared(void)
     drv_audio_abort();
 }
 
+/* 9g (9d's cellsnd on the phone): Cellular booted Calliope before snd's first sound, so snd_init's cal_map was
+ * refused (abox_map_extra: ESTATE while Calliope runs) and snd stayed on the bypass engine (its RDMA0 never moves
+ * on the phone). Now: once Calliope is off, a tone maps the windows and boots Calliope for media */
+static void test_snd_late_init(void)
+{
+    setup_cal = 0;
+    snd_setup();                                            /* cal_avail 0, the windows unmapped */
+    setup_cal = 1;
+    CHECK(abox_boot() == 0 && abox_state() == ABOX_ST_READY, "late: the modem's boot (state %d)", abox_state());
+    struct abox_hal h;
+    memset(&h, 0, sizeof h);
+    h.rd32 = f_rd32, h.wr32 = f_wr32, h.smc = f_smc, h.delay_us = f_delay, h.log = f_log, h.file = f_file;
+    h.ram = f_ram, h.now_us = f_now;
+    struct snd_ops o;
+    memset(&o, 0, sizeof o);
+    o.log = s_log, o.now_us = s_now, o.call_owns_abox = s_owns, o.amp_speaker = s_spk, o.amp_receiver = s_rcv;
+    o.amp_off = s_off, o.codec_mic = c_mic, o.codec_off = c_off, o.use_calliope = 1;
+    snd_calliope_shared(1);                                 /* (not up yet: kept for snd_init) */
+    CHECK(snd_init(&o, &h) == 0, "late: snd_init while the modem's Calliope runs");
+    CHECK(snd_tone(SND_TONE_TEST) == 0, "late: a tone under the modem");
+    polls(300);
+    CHECK(abox_state() == ABOX_ST_READY && !logged("engine: Calliope booted for media"), "late: snd booted Calliope under "
+          "the modem");
+    snd_tone_stop();
+    polls(2600);
+    snd_calliope_shared(0);
+    abox_off();
+    polls(50);
+    CHECK(snd_tone(SND_TONE_TEST) == 0, "late: a tone after Cellular");
+    polls(800);
+    CHECK(logged("Calliope's windows mapped now that Calliope is off") && logged("engine: Calliope booted for media") &&
+          F.r_run, "late: no Calliope for media after Cellular (the bypass engine?)");
+    snd_tone_stop();
+    polls(2600);
+    abox_off();
+    polls(50);
+    drv_audio_abort();
+}
+
 int main(int argc, char **argv)
 {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
@@ -1532,6 +1572,7 @@ int main(int argc, char **argv)
     test_probe_order();
     test_vss_guard();
     test_snd_shared();
+    test_snd_late_init();
     printf("calliope host test: %d checks, %d failed\n", checks, fails);
     free(F.w);
     free(F.rmem);

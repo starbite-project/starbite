@@ -1057,6 +1057,9 @@ static int au_hal_set, au_amp, au_codec, au_abox, au_vss, au_on, au_speaker;
 void snd_suspend_for_call(void) __attribute__((weak));
 void snd_resume_after_call(void) __attribute__((weak));
 void snd_calliope_shared(int on) __attribute__((weak));   /* 9a */
+/* 9g (9d's cellsnd: periods 0 with Cellular on, the bypass engine after it): snd up BEFORE our abox_boot, so its media
+ * ring windows (cal_map, refused once Calliope runs) are in the SysMMU tables the boot writes; kern_next.c's */
+int snd_media_early(void) __attribute__((weak));
 static int au_snd_held, au_snd_call;          /* 9a: Calliope shared with media; media paused for a call's routes */
 
 static long au_file(void *ctx, const char *path, void *dst, uint32_t cap)
@@ -1081,6 +1084,8 @@ static void au_log(const char *what, int r, const char *why)
 
 static void audio_prepare(void)
 {
+    if (!au_snd_held && snd_media_early && abox_state() == ABOX_ST_OFF && !snd_media_early())
+        sb_log("audio: media sound is not up (a self test without sound): Calliope boots without its ring");
     if (!au_snd_held) {
         au_snd_held = 1;
         /* before our HAL is set: a pending media boot finishes on snd's. 9a (main 11-15): media is not paused for

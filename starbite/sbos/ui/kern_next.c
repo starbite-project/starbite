@@ -3527,6 +3527,9 @@ static int snd_ready(void)
     return 1;
 #endif
 }
+/* 9g: modem.c's audio_prepare, before it boots Calliope: snd up first (its ring windows into the boot's tables);
+ * 1 up, 0 refused (a self test without sound) */
+int snd_media_early(void) { return snd_ready(); }
 int sh_snd_tone(int kind)
 {
     if (!snd_ready()) return -1;
