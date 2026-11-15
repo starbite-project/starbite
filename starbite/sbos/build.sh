@@ -302,6 +302,10 @@ if [ -n "$PAK" ]; then
     # Track G: Next with the unattended Cellular self test (mobile data on, HTTPS GETs, off, on again; no SMS, no calls)
     "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_SELFTEST_ON -DSBOS_SELFTEST_NEXT_CELL "$here/kern/uitest.c" -o "$ob/k_uitest_ncell.o"
     ncobjs=$(echo "$nobjs" | sed "s#$ob/k_uitest_c.o#$ob/k_uitest_ncell.o#")
+    # 9e, USB Control Phase 0: Next with USB device mode on from the start (kern/usb.c's read-only CDC-ACM console,
+    # 1209:0001 bcdDevice 3.00): does the port enumerate on the Mac from Starbite OS (attended: the Mac's "Allow" once)
+    "${CROSS}gcc" $CFLAGS -DSBOS_KERNEL -DSBOS_USB_AUTO=1 "$here/kern/usb.c" -o "$ob/k_usb_auto.o"
+    nuobjs=$(echo "$nobjs" | sed "s#$ob/k_usb_c.o#$ob/k_usb_auto.o#")
 else
     echo "sbos: no build/sbtk/sbtk-phone.pak: the starbite-next images are not built" >&2
 fi
@@ -418,10 +422,10 @@ relocs_only_relative "$out/starbite-os-gpualu.elf"
 "${CROSS}nm" "$out/starbite-os-gpualu.elf" | sort > "$out/starbite-os-gpualu.map"
 python3 "$root/starbite/tools/check-image.py" "$out/starbite-os-gpualu.bin" "$out/starbite-os-gpualu.img" "$out/starbite-os-gpualu.map"
 if [ -n "$nobjs" ]; then
-    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended next-drvsound next-celltest next-cellsnd; do
+    for v in next next-selftest next-wifitest next-linuxtest next-drvprobe next-drvattended next-drvsound next-celltest next-cellsnd next-usb; do
         case $v in next) vo=$nobjs ;; next-selftest) vo=$nstobjs ;; next-linuxtest) vo=$nlobjs ;;
         next-drvprobe) vo=$ndobjs ;; next-drvattended) vo=$ndaobjs ;; next-drvsound) vo=$ndsobjs ;; next-celltest) vo=$ncobjs ;;
-        next-cellsnd) vo=$ncsobjs ;; *) vo=$nwobjs ;; esac
+        next-cellsnd) vo=$ncsobjs ;; next-usb) vo=$nuobjs ;; *) vo=$nwobjs ;; esac
         "${CROSS}ld" $KLD --defsym=SB_LINK_BASE=0 $vo -o "$out/starbite-$v.elf"
         und=$("${CROSS}nm" -u "$out/starbite-$v.elf" || true)
         if [ -n "$und" ]; then
