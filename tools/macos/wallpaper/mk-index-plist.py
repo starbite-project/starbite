@@ -4,7 +4,8 @@ Index.plist) whose desktop, on every display and space, is one still image (prov
 configuration {type: imageFile, url: {relative: file URL}}). Layout = what macOS 15.6's WallpaperAgent writes
 itself (card copy read 2026-11-15, S3zt): Type "linked" with one "Linked" entry, no EncodedOptionValues; the macOS 27
 layout ("individual" + "Desktop"/"Idle") was rejected and replaced by the default (S3zt). SystemDefault stays the
-default choice. Default image: Sequoia Sunrise's still frame, which is on the card root, unlike the 171 MiB video
+default choice. Files lists the image too (S3zu, empty Files: the agent kept the choice but drew its
+"in-process.error" wallpaper, plain yellow, and never started the image extension). Default image: Sequoia Sunrise's still frame, which is on the card root, unlike the 171 MiB video
 that the default choice wants (S3zs)."""
 import datetime, plistlib, sys, urllib.parse
 
@@ -22,7 +23,7 @@ def linked(choice):
                        'Content': {'Choices': [choice], 'Shuffle': '$null'}}}
 
 
-image = {'Provider': 'com.apple.wallpaper.choice.image', 'Files': [], 'Configuration': cfg}
+image = {'Provider': 'com.apple.wallpaper.choice.image', 'Files': [{'relative': url}], 'Configuration': cfg}
 default = {'Provider': 'default', 'Files': [], 'Configuration': b''}
 d = {'AllSpacesAndDisplays': linked(image), 'SystemDefault': linked(default), 'Spaces': {}, 'Displays': {}}
 with open(out, 'wb') as f:
