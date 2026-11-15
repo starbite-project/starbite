@@ -408,12 +408,14 @@ static void recover(void)
  * then a raw-IP sbnet + sbtcp (starbite/wifi) that wifi_fetch uses when Wi-Fi is not joined. Addresses, the
  * operator code and its name never reach the log; the name is for the screen. */
 enum { CS_IDLE, CS_SIM, CS_RADIO, CS_ATTACH, CS_REG, CS_CYCLE_OFF, CS_CYCLE_ON, CS_DEFINE, CS_ACT, CS_IP, CS_UP,
-       CS_RETRY, CS_DEACT, CS_DETACH };
+       CS_RETRY, CS_DEACT, CS_DETACH, CS_VOICE };   /* 8z: CS_VOICE registered for calls and SMS, no data context */
 #define CELL_APN_DEFAULT "internet"        /* Elisa, DNA, Telia (FI) */
 static char cell_apn[64] = CELL_APN_DEFAULT;   /* Settings > Cellular > APN (kmodem_set_apn); the state slot keeps it */
 #define CELL_APN cell_apn
 static int cell_want, cst = KCELL_OFF, cstep = CS_IDLE, c_lf, c_esc, cnet_up, c_check, c_ntp, c_sms_ready;
 static int cell_selftest;                  /* next-celltest: the unattended data self test (kmodem_selftest_phase) */
+static int cell_calls;                     /* 8z: the user's "Calls and SMS": the radio registered without mobile data
+                                            * (cell_want is mobile data; the radio runs while either is on) */
 static int c_check_ok;                     /* the session's HTTPS check passed */
 static uint32_t c_nitz_seen;               /* the NITZ time already looked at */
 static uint64_t c_ntp_t;
@@ -577,6 +579,7 @@ static void cell_stopped(const char *w, int failed)
     if (mo.attended != SBM_ATTENDED_DATA)
         return;
     cell_want = 0;
+    cell_calls = 0;
     cgo(CS_IDLE);
     if (failed)
         cset(KCELL_FAILED, w);
@@ -635,13 +638,13 @@ static void cell_step(void)
     case CS_SIM:
         if (sn.sim == SBM_SIM_ABSENT && cin() > 8000) {
             cset(KCELL_NO_SIM, "No SIM card");
-            cell_want = 0;
+            cell_want = cell_calls = 0;
             cgo(CS_IDLE);
             kmodem_stop("No SIM card");
         } else if (sn.sim == SBM_SIM_LOCK_SC) {
             cset(KCELL_SIM_LOCKED, mo.b.cell.sim_key == 2 ? "The SIM is PUK-locked" :
                  "The SIM's PIN is on (PIN entry is not built yet)");
-            cell_want = 0;
+            cell_want = cell_calls = 0;
             cgo(CS_IDLE);
             kmodem_stop("SIM locked");
         } else if (sn.sim == SBM_SIM_READY || sn.sim == SBM_SIM_INIT_COMPLETE || sn.sim == SBM_SIM_PB_INIT_COMPLETE) {
@@ -650,7 +653,7 @@ static void cell_step(void)
             cgo(CS_RADIO);
         } else if (cin() > 60000) {
             cset(KCELL_FAILED, "The SIM did not answer");
-            cell_want = 0;
+            cell_want = cell_calls = 0;
             cgo(CS_IDLE);
             kmodem_stop("The SIM did not answer");
         }
@@ -682,6 +685,11 @@ static void cell_step(void)
             if (!c_sms_ready && !cell_selftest) {   /* unattended: no SMS reaches the AP (nothing to acknowledge) */
                 c_sms_ready = 1;
                 sbm_modem_sms_ready(&mo);   /* the AP takes SMS (and the SIM's SMSC) */
+            }
+            if (!cell_want) {               /* 8z: calls and SMS only: no data context */
+                cset(KCELL_REGISTERED, "Calls and SMS (mobile data off)");
+                cgo(CS_VOICE);
+                break;
             }
             sbm_modem_pdp_define(&mo, CELL_APN);
             cgo(CS_DEFINE);
@@ -814,8 +822,29 @@ static void cell_step(void)
         break;
     case CS_DEACT:
         if (mo.b.pdp.act_seen || cin() > 5000) {
-            sbm_modem_radio(&mo, 0);         /* low power: the CP detaches, then RF off */
-            cgo(CS_DETACH);
+            if (cell_want) {                 /* 8z: mobile data on again meanwhile */
+                c_t0 = sb_ms();
+                c_esc = 3;
+                cgo(CS_REG);
+            } else if (cell_calls) {         /* 8z: mobile data off, the radio stays for calls and SMS */
+                cset(KCELL_REGISTERED, "Calls and SMS (mobile data off)");
+                cgo(CS_VOICE);
+            } else {
+                sbm_modem_radio(&mo, 0);     /* low power: the CP detaches, then RF off */
+                cgo(CS_DETACH);
+            }
+        }
+        break;
+    case CS_VOICE:                           /* 8z: registered for calls and SMS; data waits for its switch */
+        if (!c_registered(&sn)) {
+            cset(KCELL_SEARCHING, "Reconnecting");
+            c_t0 = sb_ms();
+            c_esc = 3;                       /* no escalation on a reconnect: the CP tries by itself */
+            cgo(CS_REG);
+        } else if (cell_want) {
+            cset(KCELL_REGISTERED, "Starting mobile data");
+            sbm_modem_pdp_define(&mo, CELL_APN);
+            cgo(CS_DEFINE);
         }
         break;
     case CS_DETACH:
@@ -848,13 +877,25 @@ void kmodem_reserve(void)
     sb_log(u.b);
 }
 
+static int cell_start(const char *who);
 int kmodem_cellular(int on)
 {
     if (!on) {
         cell_want = 0;
         if (!kmodem_on() || mo.attended != SBM_ATTENDED_DATA) {
-            cset(KCELL_OFF, "Off");
+            if (!cell_calls)
+                cset(KCELL_OFF, "Off");
             return 0;
+        }
+        if (cell_calls) {                   /* 8z: mobile data off; the radio stays registered for calls and SMS */
+            cell_net_down("Mobile data off");
+            if (cstep == CS_DEFINE || cstep == CS_ACT || cstep == CS_IP || cstep == CS_UP || cstep == CS_RETRY) {
+                cset(KCELL_REGISTERED, "Mobile data off");
+                sbm_modem_pdp_activate(&mo, 0, 0);
+                cgo(CS_DEACT);
+                kt_set(KT_MODEM, 5, sb_ms(), 100, 1);
+            }
+            return 0;                       /* (earlier steps: CS_REG goes to CS_VOICE without data) */
         }
         cell_net_down("Cellular off");
         if (mo.up && cstep != CS_IDLE && cstep != CS_SIM) {
@@ -873,14 +914,57 @@ int kmodem_cellular(int on)
         return 0;
     if (sbos_selftest_enabled && !cell_selftest)
         return SBOS_EAGAIN;
-    if (heater_running_ui() || guest_busy()) {
-        cset(KCELL_FAILED, "Stop Heat and Linux first");
+    if (kmodem_on() && mo.attended == SBM_ATTENDED_DATA && cell_calls) {
+        cell_want = 1;                      /* 8z: the radio is up for calls: data from where it is (CS_VOICE / CS_REG) */
+        return 0;
+    }
+    int e = cell_start("Cellular on");
+    if (e)
+        return e;
+    cell_want = 1;
+    return 0;
+}
+
+/* 8z (the user's calls / SMS sitting, main 11-15): the radio for calls and SMS without mobile data ("Calls and SMS",
+ * at the start when kept on). Off: the radio stops unless mobile data keeps it. */
+int kmodem_calls(int on)
+{
+    if (!on) {
+        cell_calls = 0;
+        if (cell_want)
+            return 0;                       /* mobile data keeps the radio (and calls) */
+        return kmodem_cellular(0);
+    }
+    if (cell_calls && kmodem_on())
+        return 0;
+    if (sbos_selftest_enabled && !cell_selftest)
+        return SBOS_EAGAIN;
+    if (kmodem_on() && mo.attended == SBM_ATTENDED_DATA) {
+        cell_calls = 1;                     /* mobile data runs the radio already */
+        return 0;
+    }
+    int e = cell_start("Calls on");
+    if (e)
+        return e;
+    cell_calls = 1;
+    return 0;
+}
+
+/* the start for mobile data or calls: Heat refuses (8z: Linux no longer does in Next: the guest's RAM, its shared
+ * region and sbgpu's tables are DRAM bank 2's top, 0x8_8000_0000..0x8_E83F_FFFF; the modem's modem_if, VSS and
+ * cp_ram_logging are 0xF000_0000..0xFB1F_FFFF; its mailbox is polled on Starbite's cores, no interrupt; the classic
+ * Modem app's receive-only start keeps its own Linux guard) */
+static int cell_start(const char *who)
+{
+    if (heater_running_ui()) {
+        cset(KCELL_FAILED, "Stop Heat first");
         return SBOS_EAGAIN;
     }
     if (kmodem_on())
-        kmodem_stop("Cellular on");         /* a receive-only session: restarted for data */
-    cell_want = 1;
-    mo.attended = SBM_ATTENDED_DATA;        /* the user's switch: the only place this kernel sets it */
+        kmodem_stop(who);                   /* a receive-only session: restarted for calls and data */
+    mo.attended = SBM_ATTENDED_DATA;        /* the user's switches (Cellular Data, Calls and SMS): the only places */
+    if (guest_busy())
+        sb_log("cell: starting beside a running Linux (8z)");
     cset(KCELL_STARTING, "Starting the modem");
     ++starts;
     /* Track G (2026-11-12): no storage hold for the user's Cellular: Starbite OS saves settings and messages while
@@ -909,6 +993,7 @@ void kmodem_cell(struct kcell *c)
     memset(c, 0, sizeof(*c));
     c->state = cst;
     c->want = cell_want;
+    c->calls = cell_calls;
     c->bars = -1;
     sb_strcpy(c->why, sizeof(c->why), c_why);
     c->tx_packets = c_tx;
@@ -2020,6 +2105,7 @@ int kmodem_set_apn(const char *apn) { (void)apn; return 0; }
 void kmodem_get_apn(char *out, unsigned cap) { sb_strcpy(out, cap, "internet"); }
 
 int kmodem_cellular(int on) { (void)on; return SBOS_EAGAIN; }
+int kmodem_calls(int on) { (void)on; return SBOS_EAGAIN; }
 int kmodem_netif(struct sbnet **net, struct sbtcp **tcp) { (void)net; (void)tcp; return 0; }
 void kmodem_cell(struct kcell *c) { memset(c, 0, sizeof(*c)); c->bars = -1; }
 int kmodem_selftest_phase(int *done) { *done = 1; return 1; }

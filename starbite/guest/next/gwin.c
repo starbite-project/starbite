@@ -832,8 +832,43 @@ static unsigned gs_frames;
  * window, the command, the tap and the stop. gs_net: 1 mobile data up, 2 Wi-Fi joined (8m: the saved network when
  * mobile data can't come up, e.g. the SIM in another phone), -1 skipped (neither) */
 static int gs_net;
+/* 8z (main, 11-15: Cellular beside a running Linux): after the GPU check, Cellular on while Linux runs (unattended data
+ * as next-celltest; without a SIM the radio stage only), its verdict its own line ("cellular: PASS / FAILED"), the
+ * longest gap between this test's steps while it started (the modem's start blocks the loop) and the battery */
+static int gs_cell;
+static uint64_t gs_cell_last, gs_cell_gap;
+static void gs_batt(const char *when)
+{
+    struct sbos_battery b;
+    battery_get(&b);
+    struct ub u;
+    ub_init(&u);
+    ub_s(&u, "selftest: next-linux: battery ");
+    ub_s(&u, when);
+    ub_s(&u, ": ");
+    if (!b.ok) {
+        ub_s(&u, "no reading");
+    } else {
+        ub_dec(&u, (uint64_t)b.pct);
+        ub_s(&u, " %, ");
+        ub_dec(&u, (uint64_t)b.mv);
+        ub_s(&u, " mV, ");
+        ub_sdec(&u, b.ma);
+        ub_s(&u, " mA (average ");
+        ub_sdec(&u, b.avg_ma);
+        ub_s(&u, "), ");
+        ub_sdec(&u, b.temp_c10);
+        ub_s(&u, " (0.1 C)");
+    }
+    ub_s(&u, b.charger ? "; charging" : "; not charging");
+    sb_log(u.b);
+}
 static void gs_data_off(void)
 {
+    if (gs_cell) {
+        (void)kmodem_selftest_data(0);
+        gs_cell = 0;
+    }
     if (gs_net == 1)
         (void)kmodem_selftest_data(0);
     if (gs_net == 2)
@@ -897,8 +932,13 @@ int gwin_selftest_step(void)
     uint64_t now = sb_ms(), dt = now - gs_t;
     int st = guest_state();
     switch (gs_phase) {
-    case 0:                                /* 8l: mobile data first (Cellular refuses to start beside a running Linux) */
+    case 0:                                /* 8z: the saved Wi-Fi for Linux's network check; Cellular comes beside the
+                                            * running Linux after the GPU check (case 50). (8l: mobile data first, as
+                                            * Cellular refused to start beside a running Linux) */
         gs_t0 = gs_t = now;
+        gs_phase = 22;
+        return 0;
+    case 19:                               /* (8l's mobile data first: kept, unused) */
         if (kmodem_selftest_data(1) == 0) {
             gs_phase = 20;
             return 0;
@@ -1074,6 +1114,77 @@ int gwin_selftest_step(void)
             return 0;
         sb_logf(sb_prefix(l, SBG_GPUCHECK_PASS) ? "selftest: next-linux: gpu: PASS: " : "selftest: next-linux: gpu: FAILED: ",
                 l[0] ? l : "no answer within 30 s (no sbgl-probe on this base, or the GPU wedged)");
+        gs_t = now;
+        gs_phase = 50;
+        return 0;
+    }
+    case 50:                               /* 8z: Cellular on beside the running Linux */
+        if (st != GUEST_RUNNING)
+            return gs_failed("Linux stopped by itself");
+        gs_batt("before Cellular (Linux running)");
+        {
+            int r = kmodem_selftest_data(1);
+            if (r != 0) {
+                struct ub u;
+                ub_init(&u);
+                ub_s(&u, "selftest: next-linux: cellular: FAILED: refused beside a running Linux (");
+                ub_sdec(&u, r);
+                ub_s(&u, ")");
+                sb_log(u.b);
+                gs_t = now - 1000;
+                gs_phase = 5;
+                return 0;
+            }
+        }
+        gs_cell = 1;
+        gs_cell_last = now;
+        gs_cell_gap = 0;
+        gs_t = now;
+        gs_phase = 51;
+        return 0;
+    case 51: {                             /* a clean state: data up, registered, no SIM / SIM locked; Linux still runs */
+        if (now - gs_cell_last > gs_cell_gap)
+            gs_cell_gap = now - gs_cell_last;
+        gs_cell_last = now;
+        if (st != GUEST_RUNNING)
+            return gs_failed("Linux stopped while Cellular started beside it");
+        struct kcell c;
+        kmodem_cell(&c);
+        const char *v = c.state == KCELL_DATA ? "PASS: mobile data up beside Linux" :
+                        c.state == KCELL_NO_SIM ? "PASS: no SIM: the modem started and stopped cleanly beside Linux" :
+                        c.state == KCELL_SIM_LOCKED ? "PASS: the SIM is locked: the modem started and stopped cleanly beside Linux" :
+                        c.state == KCELL_REGISTERED && dt > 60000 ? "PASS: registered beside Linux (no data context within 60 s)" :
+                        c.state == KCELL_FAILED ? "FAILED: " :
+                        dt > 120000 ? "FAILED: no clean state within 120 s: " : 0;
+        if (!v)
+            return 0;
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "selftest: next-linux: cellular: ");
+        ub_s(&u, v);
+        if (v[0] == 'F')
+            ub_s(&u, c.why[0] ? c.why : "?");
+        ub_s(&u, "; after ms ");
+        ub_dec(&u, dt);
+        ub_s(&u, "; the longest gap between steps ms ");
+        ub_dec(&u, gs_cell_gap);
+        sb_log(u.b);
+        gs_batt("with Cellular and Linux");
+        gs_data_off();                     /* Cellular off (data off, detach, park) */
+        gs_t = now;
+        gs_phase = 52;
+        return 0;
+    }
+    case 52: {                             /* Cellular off again, Linux still running */
+        if (st != GUEST_RUNNING)
+            return gs_failed("Linux stopped while Cellular stopped beside it");
+        struct kcell c;
+        kmodem_cell(&c);
+        if (c.state != KCELL_OFF && c.state != KCELL_NO_SIM && c.state != KCELL_SIM_LOCKED && c.state != KCELL_FAILED &&
+            dt < 15000)
+            return 0;
+        gs_log(c.state == KCELL_OFF || c.state == KCELL_NO_SIM || c.state == KCELL_SIM_LOCKED ?
+               "cellular: off again, Linux still running, after ms " : "cellular: not off within 15 s; ms ", dt, 1);
         gs_t = now - 1000;                 /* (case 5's wait is over) */
         gs_phase = 5;
         return 0;

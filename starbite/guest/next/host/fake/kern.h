@@ -17,8 +17,12 @@ int clock_now(struct sbos_time *t);
  * neither: data never comes up (no SIM), Wi-Fi refuses, so the check says "skipped" */
 enum { KCELL_OFF = 0, KCELL_STARTING, KCELL_NO_SIM, KCELL_SIM_LOCKED, KCELL_SEARCHING, KCELL_REGISTERED,
        KCELL_DATA, KCELL_STOPPING, KCELL_FAILED };
-struct kcell { int32_t state, want, bars; };
-static inline void kmodem_cell(struct kcell *c) { c->state = KCELL_NO_SIM; c->want = 0; c->bars = -1; }
+struct kcell { int32_t state, want, bars; char why[64]; };
+static inline void kmodem_cell(struct kcell *c) { c->state = KCELL_NO_SIM; c->want = 0; c->bars = -1; c->why[0] = 0; }
+/* 8z: the linuxtest's battery line */
+struct sbos_battery { int32_t ok, pct, pct_x10, mv, ma, avg_ma, temp_c10, charger, cap_mah, full_mah; };
+static inline void battery_get(struct sbos_battery *b) { b->ok = 1; b->pct = 80; b->pct_x10 = 800; b->mv = 3900; b->ma = -450; b->avg_ma = -420;
+                                                         b->temp_c10 = 312; b->charger = 0; b->cap_mah = 2400; b->full_mah = 3000; }
 static inline int kmodem_selftest_data(int on) { (void)on; return 0; }
 static inline int wifi_power(int on) { (void)on; return 0; }
 static inline int wifi_selftest_uplink(void) { return -1; }

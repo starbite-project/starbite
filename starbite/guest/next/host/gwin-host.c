@@ -52,6 +52,12 @@ void ub_dec(struct ub *u, uint64_t v)
     snprintf(t, sizeof t, "%llu", (unsigned long long)v);
     ub_s(u, t);
 }
+void ub_sdec(struct ub *u, int64_t v)   /* 8z */
+{
+    char t[24];
+    snprintf(t, sizeof t, "%lld", (long long)v);
+    ub_s(u, t);
+}
 
 /* ---- the fake guest (kern/guest.c's API as gwin.c uses it) ---- */
 static int st = GUEST_OFF, shown, mode = GUEST_APP, term_ok, busy;

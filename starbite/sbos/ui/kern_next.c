@@ -246,17 +246,19 @@ static int has(const char *s, const char *w)
 }
 static int cell_now(void)
 {
-    static sh_cell_t last = { -1, 0, 0, 0, 0, 0, "", "" };
+    static sh_cell_t last = { -1, 0, 0, 0, 0, 0, "", "", 0, 0 };
     struct sbos_phone ph;
     kmodem_status(&ph);
-    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars, 0, "", "" };
+    sh_cell_t c = { SH_CELL_OFF, ph.sim, 0, 0, ph.bars, 0, "", "", 0, 0 };
     struct kcell kc;
     kmodem_cell(&kc);
     c.data = kc.state;                      /* KCELL_* = SH_DATA_* */
+    c.data_want = kc.want;                  /* 8z: the switches */
+    c.calls = kc.calls;
     sb_strcpy(c.oper, sizeof(c.oper), kc.oper);
     if (kc.state == KCELL_FAILED)
         sb_strcpy(c.why, sizeof(c.why), kc.why);
-    if (kc.want || kc.state != KCELL_OFF) {
+    if (kc.want || kc.calls || kc.state != KCELL_OFF) {
         c.state = kc.state == KCELL_STARTING || kc.state == KCELL_STOPPING ? SH_CELL_STARTING :
                   kc.state == KCELL_SEARCHING || kc.state == KCELL_REGISTERED || kc.state == KCELL_DATA ? SH_CELL_ON :
                   kc.state == KCELL_OFF ? SH_CELL_OFF : SH_CELL_FAILED;
@@ -371,6 +373,7 @@ int sh_wifi_fetch(const char *url) { return wifi_fetch(url); }
  * a self-test image, not while Heat or Linux runs) */
 int sh_modem(int on) { return kmodem_power(on); }
 int sh_cellular(int on) { return kmodem_cellular(on); }
+int sh_cell_calls(int on) { return kmodem_calls(on); }   /* 8z */
 static void (*cf_done)(int);
 static int next_confirm(const char *t, const char *l1, const char *l2, const char *l3, const char *hold, void (*done)(int))
 {

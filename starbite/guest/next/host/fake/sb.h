@@ -12,6 +12,7 @@ struct ub {
 void ub_init(struct ub *u);
 void ub_s(struct ub *u, const char *s);
 void ub_dec(struct ub *u, uint64_t v);
+void ub_sdec(struct ub *u, int64_t v);   /* 8z */
 /* 8l (Track A): the network check's line matched by its start (libsb's) */
 static inline int sb_prefix(const char *s, const char *pre)
 {

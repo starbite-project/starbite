@@ -108,7 +108,7 @@ static int cm_emergency(const char *n)
 static int cm_live(int st) { return st != SH_CALL_IDLE && st != SH_CALL_ENDED; }
 static int cm_now_hm(void) { return ST.h * 100 + ST.mi; }
 static void cm_hm(char *b, int hm) { fmt_time(b, hm / 100, hm % 100, 1); }   /* Track A: "9:41 AM" in 12-hour (b: 9) */
-static int cm_cell_on(void) { return data_on(); }
+static int cm_cell_on(void) { return calls_on(); }   /* 8z: either switch (Calls and SMS, Cellular Data) */
 static int cm_registered(void) { return CELL.data == SH_DATA_REGISTERED || CELL.data == SH_DATA_UP; }
 static void cm_open_cellular(void);
 

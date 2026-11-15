@@ -5258,7 +5258,9 @@ static const char *md_text(void)
     switch (CELL.data) {
     case SH_DATA_STARTING: return "Starting\xe2\x80\xa6";
     case SH_DATA_SEARCHING: return "Searching\xe2\x80\xa6";
-    case SH_DATA_REGISTERED: return CELL.oper[0] ? md_join(CELL.oper, " \xc2\xb7 connecting") : "Connecting\xe2\x80\xa6";
+    case SH_DATA_REGISTERED:
+        if (!CELL.data_want) return md_join(CELL.oper[0] ? CELL.oper : "On", " \xc2\xb7 calls and SMS");   /* 8z */
+        return CELL.oper[0] ? md_join(CELL.oper, " \xc2\xb7 connecting") : "Connecting\xe2\x80\xa6";
     case SH_DATA_UP: return md_join(CELL.oper[0] ? CELL.oper : "On", CELL.rat == 7 ? " \xc2\xb7 LTE" : CELL.rat == 4 ? " \xc2\xb7 3G" :
                                     CELL.rat ? " \xc2\xb7 2G" : "");
     case SH_DATA_STOPPING: return "Turning off\xe2\x80\xa6";
@@ -5280,7 +5282,8 @@ static void build_home_sb(void);
 void sh_cell(const sh_cell_t *c)
 {
     if (c->state == CELL.state && c->sim == CELL.sim && c->emergency_only == CELL.emergency_only && c->rat == CELL.rat &&
-        c->bars == CELL.bars && c->data == CELL.data && !tk_strcmp(c->oper, CELL.oper) && !tk_strcmp(c->why, CELL.why))
+        c->bars == CELL.bars && c->data == CELL.data && !tk_strcmp(c->oper, CELL.oper) && !tk_strcmp(c->why, CELL.why) &&
+        c->data_want == CELL.data_want && c->calls == CELL.calls)   /* 8z: the switches too */
         return;
     CELL = *c;
     /* the lock's status bar: the network's honest line (the operator's name once registered) */
@@ -5296,6 +5299,7 @@ void sh_cell(const sh_cell_t *c)
     SB_CELL.rat = CELL.rat;
     const char *h = CELL.data == SH_DATA_UP ? md_join(CELL.oper[0] ? CELL.oper : "Mobile", " \xc2\xb7 cellular data on") :
                     data_on() ? "Cellular data \xc2\xb7 connecting" :
+                    CELL.calls && CELL.data == SH_DATA_REGISTERED ? md_join(CELL.oper[0] ? CELL.oper : "Mobile", " \xc2\xb7 calls and SMS") :   /* 8z */
                     CELL.data == SH_DATA_NO_SIM ? "No SIM \xc2\xb7 emergency calls only" :
                     CELL.state == SH_CELL_ON && !CELL.emergency_only && CELL.bars <= 0 ? "Searching\xe2\x80\xa6" :
                     CELL.state == SH_CELL_ON ? "Emergency calls only" : "Cellular off";
@@ -5361,7 +5365,9 @@ void sh_restore(void)
     sw_restore();
     sysp_mode = -1;                                  /* 8a: the Systems platter's pref as kept (read again now) */
     if (sysp_on()) { sysp_build(); place_list(); relink(); }
-    if (sh_pref_int("cc.wifi", 0) == 1 && !sh_safe_mode()) (void)sh_wifi_power(1);   /* a refusal leaves it off; the choice stays; not in a safe start (Track A) */
+    if (sh_pref_int("cc.wifi", 0) == 1 && !sh_safe_mode()) (void)sh_wifi_power(1);
+    /* 8z: "Calls and SMS" kept on: the radio at the start (a self-test image refuses; not in a safe start) */
+    if (sh_pref_int("cell.calls", CELL_CALLS_DEFAULT) == 1 && !sh_safe_mode()) (void)sh_cell_calls(1);   /* a refusal leaves it off; the choice stays; not in a safe start (Track A) */
 }
 #include "shell_island.inc"                         /* B7: the status capsule, the live pill (toasts) */
 
@@ -5853,7 +5859,7 @@ void sh_set(const char *what, const char *key, float v)
         isl_settle();                                /* B7: its toast whole */
     } else if (!tk_strcmp(what, "cell")) {
         /* the modem's state for the host's stills: "on" (emergency-only, GSM, v bars), "starting", "off" */
-        sh_cell_t c = { SH_CELL_OFF, -1, 0, 0, -1, SH_DATA_OFF, "", "" };
+        sh_cell_t c = { SH_CELL_OFF, -1, 0, 0, -1, SH_DATA_OFF, "", "", 0, 0 };
         if (!tk_strcmp(key, "on")) { c.state = SH_CELL_ON; c.sim = 0x80; c.emergency_only = 1; c.rat = 1; c.bars = (int)v; }
         else if (!tk_strcmp(key, "starting")) c.state = SH_CELL_STARTING;
         sh_cell(&c);

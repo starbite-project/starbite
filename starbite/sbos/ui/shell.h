@@ -38,9 +38,13 @@ enum { SH_CELL_OFF, SH_CELL_ON, SH_CELL_RESTARTING, SH_CELL_GUARD, SH_CELL_FAILE
  * data = SH_DATA_* (the kernel's KCELL_* order), oper the operator's name (screen only) */
 enum { SH_DATA_OFF, SH_DATA_STARTING, SH_DATA_NO_SIM, SH_DATA_LOCKED, SH_DATA_SEARCHING, SH_DATA_REGISTERED,
        SH_DATA_UP, SH_DATA_STOPPING, SH_DATA_FAILED };
-typedef struct { int state, sim, emergency_only, rat, bars, data; char oper[24]; char why[48]; } sh_cell_t;   /* why: a failure */
+typedef struct { int state, sim, emergency_only, rat, bars, data; char oper[24]; char why[48];
+                 int data_want, calls; } sh_cell_t;   /* why: a failure; 8z: the two switches (Cellular Data, Calls and SMS) */
 void sh_cell(const sh_cell_t *c);
 int sh_cellular(int on);                /* the switch: 1 on (radio, registration, data), 0 off (detach, park) */
+/* 8z: "Calls and SMS": the radio registered for calls and SMS without mobile data (on at the start when kept on);
+ * off parks the radio unless Cellular Data keeps it. < 0 refused (Heat runs, a self-test image) */
+int sh_cell_calls(int on);
 /* the platform's modem power (the kernel: kmodem_power: 1 asks for its hold confirmation, 0 stops); < 0 refused */
 int sh_modem(int on);
 /* a hold confirmation drawn by the shell (the kernel's kui_confirm): the answer goes to the platform's

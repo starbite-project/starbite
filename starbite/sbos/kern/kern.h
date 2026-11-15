@@ -856,6 +856,7 @@ struct kcell {
     char oper[24];                          /* the operator's name: SCREEN ONLY, never logged */
     char why[64];                           /* the last failure or step, in words */
     uint32_t tx_packets, rx_packets;
+    int32_t calls;                          /* 8z: "Calls and SMS" on (the radio without mobile data) */
 };
 void kmodem_reserve(void);              /* boot, before the UI's heap: the modem's buffers (no I/O) */
 /* calls + SMS (kern/modem.c, Next; the notes' modem-calls-sms-api.md). Only while Cellular is on and registered.
@@ -906,6 +907,8 @@ void kmodem_sms_restore(const uint8_t *half);   /* settings.c's restore: the new
 int kmodem_set_apn(const char *apn);       /* [A-Za-z0-9.-] 1..63, "" = "internet"; from the next Cellular on; saved */
 void kmodem_get_apn(char *out, unsigned cap);
 int kmodem_cellular(int on);
+#define KMODEM_CALLS_ONLY 1                /* 8z: kmodem_calls: registered for calls and SMS, no data context */
+int kmodem_calls(int on);
 int kmodem_selftest_phase(int *done);  /* next-celltest (unattended data): every 500 ms; *done at the end, 0 = failed */
 void kmodem_selftest_abort(void);      /* next-celltest stopped by a touch or key: Cellular off */
 int kmodem_selftest_data(int on);      /* 8l: the linuxtest's mobile data on / off (unattended; state: kmodem_cell) */

@@ -35,13 +35,29 @@ void sh_confirmed(int ok)
 }
 /* a pretend network for the previews: on -> searching -> data up on "Operator" LTE, 3 bars */
 static int fc_net;                          /* helper I: comms_fake.inc's calls and SMS work while it is on */
+static int fc_data, fc_calls;               /* 8z: the two switches */
+static void fc_cell_push(void)
+{
+    int on = fc_data || fc_calls;
+    fc_net = on;
+    sh_cell_t c = { on ? 1 : 0, 0, 0, on ? 7 : 0, on ? 3 : -1, fc_data ? SH_DATA_UP : fc_calls ? SH_DATA_REGISTERED : SH_DATA_OFF, "", "", 0, 0 };
+    c.data_want = fc_data;
+    c.calls = fc_calls;
+    if (on) memcpy(c.oper, "Operator", 9);
+    sh_cell(&c);
+}
 int sh_cellular(int on)
 {
-    fc_net = !!on;
-    sh_cell_t c = { on ? 1 : 0, 0, 0, on ? 7 : 0, on ? 3 : -1, on ? SH_DATA_UP : SH_DATA_OFF, "", "" };
-    if (on) memcpy(c.oper, "Operator", 9);
+    fc_data = !!on;
     fprintf(stderr, "cellular: %s\n", on ? "on (pretend: data up)" : "off");
-    sh_cell(&c);
+    fc_cell_push();
+    return 0;
+}
+int sh_cell_calls(int on)
+{
+    fc_calls = !!on;
+    fprintf(stderr, "cellular: calls and SMS %s\n", on ? "on (pretend: registered)" : "off");
+    fc_cell_push();
     return 0;
 }
 void sh_brightness(int level) { fprintf(stderr, "brightness: level %d\n", level); }
@@ -628,6 +644,7 @@ static void apply_state(const char *st)
     if (colon) { memcpy(key, eq + 1, (size_t)(colon - eq - 1 < 255 ? colon - eq - 1 : 255)); v = (float)atof(colon + 1); }
     else snprintf(key, sizeof key, "%s", eq + 1);   /* helper D: a long notification text fits */
     /* date=WDAY:DAY (P3p): a new day as the phone's clock reports it (the Calendar icon follows) */
+    if (!strcmp(what, "calls")) { sh_cell_calls((int)v); return; }   /* 8z: calls=:1 "Calls and SMS" on (pretend registered) */
     if (!strcmp(what, "batt")) { sh_status(21, 6, 2, 10, 11, (int)v, 41); return; }   /* 8x: batt=:N a new charge (the widgets' minute rebuild) */
     if (!strcmp(what, "date")) { sh_status(21, 6, atoi(key), (int)v, 11, 87, 41); return; }
     if (!strcmp(what, "hostms")) { surv_host_now_ms = (uint64_t)v; return; }   /* survival-next: the simulation's clock */
