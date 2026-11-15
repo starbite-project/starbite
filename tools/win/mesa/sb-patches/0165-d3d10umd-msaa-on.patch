@@ -1,0 +1,138 @@
+From e071162a8668718237b703a6d64bf9ac88235a1e Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Sun, 15 Nov 2026 22:15:39 +0200
+Subject: [PATCH] 0165: d3d10umd MSAA on: quality levels from the gallium
+ driver, the resolve as a blit, multisample rasterization (SUPPORT_MSAA 1)
+
+---
+ src/gallium/frontends/d3d10umd/Device.cpp     | 25 +++++++++++-
+ src/gallium/frontends/d3d10umd/Rasterizer.cpp |  4 +-
+ src/gallium/frontends/d3d10umd/Resource.cpp   | 39 ++++++++++++++++++-
+ src/gallium/frontends/d3d10umd/State.h        |  2 +-
+ 4 files changed, 66 insertions(+), 4 deletions(-)
+
+diff --git a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+index 81cf306..51220ef 100644
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -604,8 +604,31 @@ CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,        // IN
+ {
+    //LOG_ENTRYPOINT();
+ 
+-   /* XXX: Disable MSAA */
++   /* sb-patches/0165 (docs/WIN11-GPU-FULL-DRIVER.md item 3): one quality level for every sample count the gallium
++    * driver takes for this format as a render target or a depth buffer (Panfrost on the G72: 4x, more by format).
++    * Upstream answered 0 for everything ("Disable MSAA"). */
++   struct pipe_screen *screen = CastPipeContext(hDevice)->screen;
+    *pNumQualityLevels = 0;
++   if (SampleCount == 0 || SampleCount > 16 || (SampleCount & (SampleCount - 1)))
++      return;
++   if (SampleCount == 1) {
++      *pNumQualityLevels = 1;
++      return;
++   }
++   enum pipe_format color = FormatTranslate(Format, false), depth = FormatTranslate(Format, true);
++   if ((color != PIPE_FORMAT_NONE && !util_format_is_depth_or_stencil(color) &&
++        screen->is_format_supported(screen, color, PIPE_TEXTURE_2D, SampleCount, SampleCount,
++                                    PIPE_BIND_RENDER_TARGET)) ||
++       (depth != PIPE_FORMAT_NONE && util_format_is_depth_or_stencil(depth) &&
++        screen->is_format_supported(screen, depth, PIPE_TEXTURE_2D, SampleCount, SampleCount,
++                                    PIPE_BIND_DEPTH_STENCIL)))
++      *pNumQualityLevels = 1;
++   static unsigned said;
++   if (said < 24) {
++      said++;
++      DebugPrintf("sbumd: CheckMultisampleQualityLevels %s x%u: %u\n", FormatToName(Format), SampleCount,
++                  *pNumQualityLevels);
++   }
+ }
+ 
+ 
+diff --git a/src/gallium/frontends/d3d10umd/Rasterizer.cpp b/src/gallium/frontends/d3d10umd/Rasterizer.cpp
+index 7bb6ef6..bdb4f20 100644
+--- a/src/gallium/frontends/d3d10umd/Rasterizer.cpp
++++ b/src/gallium/frontends/d3d10umd/Rasterizer.cpp
+@@ -234,7 +234,9 @@ CreateRasterizerState(
+    state.offset_units = (float)pRasterizerDesc->DepthBias;
+    state.offset_scale = pRasterizerDesc->SlopeScaledDepthBias;
+    state.offset_clamp = pRasterizerDesc->DepthBiasClamp;
+-   state.multisample = /* pRasterizerDesc->MultisampleEnable */ 0;
++   /* sb-patches/0165: multisample rasterization whenever the render target has samples (D3D10's MultisampleEnable
++    * only picks the line algorithm; with 0 here every sample of an MSAA target got the centre's coverage) */
++   state.multisample = 1;
+    state.half_pixel_center = 1;
+    state.bottom_edge_rule = 0;
+    state.clip_halfz = 1;
+diff --git a/src/gallium/frontends/d3d10umd/Resource.cpp b/src/gallium/frontends/d3d10umd/Resource.cpp
+index 7b81d67..2a841b4 100644
+--- a/src/gallium/frontends/d3d10umd/Resource.cpp
++++ b/src/gallium/frontends/d3d10umd/Resource.cpp
+@@ -44,6 +44,7 @@
+ #include "drm-uapi/drm_fourcc.h"
+ #include "util/u_rect.h"
+ #include "util/u_surface.h"
++#include "util/u_box.h"
+ 
+ 
+ /*
+@@ -947,7 +948,43 @@ ResourceResolveSubResource(D3D10DDI_HDEVICE hDevice,        // IN
+                            UINT SrcSubResource,             // IN
+                            DXGI_FORMAT ResolveFormat)       // IN
+ {
+-   LOG_UNSUPPORTED_ENTRYPOINT();
++   LOG_ENTRYPOINT();
++
++   /* sb-patches/0165: the resolve, as a gallium blit of the multisampled level into the single-sampled one
++    * (upstream left this unimplemented, with MSAA off everywhere). */
++   Device *pDevice = CastDevice(hDevice);
++   struct pipe_context *pipe = pDevice->pipe;
++   Resource *pDstResource = CastResource(hDstResource);
++   Resource *pSrcResource = CastResource(hSrcResource);
++   struct pipe_resource *dst = pDstResource ? pDstResource->resource : NULL;
++   struct pipe_resource *src = pSrcResource ? pSrcResource->resource : NULL;
++   if (!dst || !src)
++      return;
++
++   unsigned dst_level = DstSubResource % (dst->last_level + 1);
++   unsigned dst_layer = DstSubResource / (dst->last_level + 1);
++   unsigned src_level = SrcSubResource % (src->last_level + 1);
++   unsigned src_layer = SrcSubResource / (src->last_level + 1);
++   enum pipe_format fmt = FormatTranslate(ResolveFormat, false);
++
++   struct pipe_blit_info b;
++   memset(&b, 0, sizeof b);
++   b.dst.resource = dst;
++   b.dst.level = dst_level;
++   b.dst.format = fmt != PIPE_FORMAT_NONE && !util_format_is_depth_or_stencil(dst->format) ? fmt : dst->format;
++   u_box_3d(0, 0, dst_layer, u_minify(dst->width0, dst_level), u_minify(dst->height0, dst_level), 1, &b.dst.box);
++   b.src.resource = src;
++   b.src.level = src_level;
++   b.src.format = fmt != PIPE_FORMAT_NONE && !util_format_is_depth_or_stencil(src->format) ? fmt : src->format;
++   u_box_3d(0, 0, src_layer, u_minify(src->width0, src_level), u_minify(src->height0, src_level), 1, &b.src.box);
++   b.mask = util_format_get_mask(b.dst.format);
++   b.filter = PIPE_TEX_FILTER_NEAREST;
++   if (b.src.box.width != b.dst.box.width || b.src.box.height != b.dst.box.height) {
++      DebugPrintf("sbumd: ResolveSubresource: sizes differ (%dx%d -> %dx%d), not done\n", b.src.box.width,
++                  b.src.box.height, b.dst.box.width, b.dst.box.height);
++      return;
++   }
++   pipe->blit(pipe, &b);
+ }
+ 
+ 
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index d762b49..8e75b6a 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -35,7 +35,7 @@
+ #include "util/u_hash_table.h"
+ #include "cso_cache/cso_context.h"
+ 
+-#define SUPPORT_MSAA 0
++#define SUPPORT_MSAA 1   /* sb-patches/0165 */
+ #define SUPPORT_D3D10_1 0
+ #define SUPPORT_D3D11 0
+ 
+-- 
+2.43.0
+

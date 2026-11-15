@@ -13,7 +13,7 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
 | Piece | Today |
 |---|---|
 | Kernel driver `sbwddm.sys` | WDDM **1.3** full driver: one aperture segment (system memory mapped into the Mali MMU), one GPU node, preemption-aware scheduling, reset-from-timeout and reset-engine entry points, DECON scan-out with real flips, four rotations, pointer DDIs **[src]** |
-| D3D user-mode driver `sbumd.dll` | Mesa d3d10umd on Panfrost, ARM64X (native ARM64 and x64 apps). **D3D10.0 DDI only**: `SUPPORT_D3D10_1 0`, `SUPPORT_D3D11 0`, `SUPPORT_MSAA 0`; `GetCaps` answers zeros; so apps get D3D11 at **feature level 10_0** **[src]** |
+| D3D user-mode driver `sbumd.dll` | Mesa d3d10umd on Panfrost, ARM64X (native ARM64 and x64 apps). **D3D10.0 DDI only**: `SUPPORT_D3D10_1 0`, `SUPPORT_D3D11 0`, `SUPPORT_MSAA 0` (no anti-aliasing at all); so apps get D3D11 at **feature level 10_0** **[src]** |
 | Shader stages | vertex, pixel, compute in Panfrost. **No geometry or tessellation stage**: the Mali has none and Panfrost does not emulate them. sbumd has the geometry-shader entry points, with nothing behind them **[src]** |
 | Presentation | Full-screen/DWM primaries flip. Windowed blt-model swap chains compose with sbumd 0159 (not on the user's install); **flip-model and DirectComposition swap chains crash DWM** (T70 is the diagnosis) **[shown]** |
 | 32-bit x86 apps | **No GPU**: the INF has `UserModeDriverName` only, no `UserModeDriverNameWow` **[src]** |
@@ -43,14 +43,24 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
 ### 3. The D3D10-level surface complete and honestly reported (start tonight; S to M each)
 - **Who needs it:** Unity's D3D11 player, Chromium's ANGLE, XAML, older D3D10/11 titles. Many probe caps first and
   refuse or fall back to software on zeros.
-- **Missing, cheap:** real `GetCaps` (threading, format support, shader caps); feature level **10_1**
-  (`SUPPORT_D3D10_1`); **MSAA** (`SUPPORT_MSAA`; Panfrost has 4x, more by format) **[src]**; a checked format table
-  (BC1-BC5 are required at 10_0: hardware bits or a CPU decode at upload).
+- **Missing, smaller:**
+  - **MSAA.** Off everywhere upstream: zero quality levels, the resolve call unimplemented, multisample
+    rasterization forced off, and a multisampled texture load reads sample 0 only **[src]**. Panfrost has 4x (more by
+    format). `sb-patches/0165` turns on quality levels, the resolve (a blit) and rasterization; per-sample loads come
+    with the new shader front end.
+  - **Feature level 10_1** (`SUPPORT_D3D10_1`): needs MSAA plus the Shader Model 4.1 instructions, which the
+    translator logs as unsupported (`lod`, `gather4`, `samplepos`, `sampleinfo`) **[src]**. Not a switch.
+  - **Capability answers:** at the D3D10 level the runtime only asks one question (`GetCaps` type 130, which
+    pipeline levels beyond the DDI's own), and "none" is the correct answer today **[src][shown]**. Real answers
+    matter once the D3D11 DDI exists (item 6). The per-format answers (`CheckFormatSupport`) are real already; the
+    format table itself has not been checked against the required list (BC1-BC5 at 10_0).
+  - **The shader translator** is the common weak point: SM4 bytecode -> TGSI, with a list of logged-unsupported
+    cases. Items 3 and 6 both want it replaced (see item 6), rather than extended.
 - **Missing, hard:** **geometry shaders and stream output**, which feature level 10_0 formally requires. Mesa 26.2
   has `src/poly`, the compute-based geometry/tessellation lowering made for Apple GPUs (used by asahi and
   kosmickrisp, **not** by Panfrost) **[src]**. Wiring it into Panfrost on Bifrost is the route (L), and the same
   work gives tessellation for item 6.
-- **Tonight:** build sbumd with 10_1 + MSAA + real caps (T73, measured by item 2's suite).
+- **Tonight:** MSAA (0165), built into the next sbumd; T73 = item 2's suite on it, against T74's baseline.
 
 ### 4. 32-bit x86 apps (M)
 - **Who needs it:** the older half of the PC catalogue, most launchers, many tools. Today they get nothing from us.
@@ -114,5 +124,5 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
 
 ## Tonight (in order; one phone test at a time)
 1. T70: flip-model diagnosis (staged). 2. T72: desktop smoothness numbers (staged). 3. T71: Geometry Dash on the
-flip model (after T70's read). 4. T73: sbumd with feature level 10_1 + MSAA + real caps. 5. T74: the conformance
-baseline (Wine d3d10core first).
+flip model (after T70's read). 4. T74: the conformance baseline (Wine d3d10core) on the user's drivers. 5. T73: the
+same suite on the next sbumd (flip fix + MSAA).
