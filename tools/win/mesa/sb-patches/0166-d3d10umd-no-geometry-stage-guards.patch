@@ -1,0 +1,100 @@
+From 91f1916116cc8357b192d7ac63bbc47792bac446 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 00:30:56 +0200
+Subject: [PATCH] 0166: d3d10umd refuses geometry shaders cleanly on a driver
+ without a geometry stage (was a call through a null hook)
+
+---
+ src/gallium/frontends/d3d10umd/Draw.cpp   |  5 ++--
+ src/gallium/frontends/d3d10umd/Shader.cpp | 33 +++++++++++++++++++++--
+ 2 files changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/src/gallium/frontends/d3d10umd/Draw.cpp b/src/gallium/frontends/d3d10umd/Draw.cpp
+index 5a60692..5f63d02 100644
+--- a/src/gallium/frontends/d3d10umd/Draw.cpp
++++ b/src/gallium/frontends/d3d10umd/Draw.cpp
+@@ -104,13 +104,14 @@ ResolveState(Device *pDevice)
+                remapped = true;
+             }
+          }
+-         if (remapped) {
++         if (remapped && pipe->create_gs_state) {   /* sb-patches/0166: only with a geometry stage */
+             pipe->delete_gs_state(pipe, gs->handle);
+             gs->handle = pipe->create_gs_state(pipe, &gs->state);
+          }
+          gs->output_resolved = true;
+       }
+-      pipe->bind_gs_state(pipe, gs->handle);
++      if (pipe->bind_gs_state)
++         pipe->bind_gs_state(pipe, gs->handle);
+    }
+    update_velems(pDevice);
+ 
+diff --git a/src/gallium/frontends/d3d10umd/Shader.cpp b/src/gallium/frontends/d3d10umd/Shader.cpp
+index 1e5ca65..b3983bc 100644
+--- a/src/gallium/frontends/d3d10umd/Shader.cpp
++++ b/src/gallium/frontends/d3d10umd/Shader.cpp
+@@ -333,7 +333,8 @@ DestroyShader(D3D10DDI_HDEVICE hDevice,   // IN
+          pipe->delete_vs_state(pipe, pShader->handle);
+          break;
+       case MESA_SHADER_GEOMETRY:
+-         pipe->delete_gs_state(pipe, pShader->handle);
++         if (pipe->delete_gs_state)
++            pipe->delete_gs_state(pipe, pShader->handle);
+          break;
+       default:
+          assert(0);
+@@ -712,6 +713,18 @@ CreateGeometryShader(D3D10DDI_HDEVICE hDevice,                                //
+    memset(&pShader->state, 0, sizeof pShader->state);
+    pShader->state.tokens = Shader_tgsi_translate(pShaderCode, pShader->output_mapping);
+ 
++   /* sb-patches/0166: a driver without a geometry stage (Panfrost on the G72) has no create_gs_state: the call
++    * went through a null pointer and took the application down. Fail the creation instead (E_OUTOFMEMORY is the
++    * error a shader creation may report without the device being removed). */
++   if (!pipe->create_gs_state) {
++      static unsigned said;
++      if (said++ < 4)
++         DebugPrintf("sbumd: geometry shader refused: this GPU driver has no geometry stage\n");
++      pShader->handle = NULL;
++      SetError(hDevice, E_OUTOFMEMORY);
++      return;
++   }
++
+    pShader->handle = pipe->create_gs_state(pipe, &pShader->state);
+ }
+ 
+@@ -738,7 +751,11 @@ GsSetShader(D3D10DDI_HDEVICE hDevice,  // IN
+    void *state = CastPipeShader(hShader);
+    Shader *pShader = CastShader(hShader);
+ 
+-   assert(pipe->bind_gs_state);
++   /* sb-patches/0166: no geometry stage in the driver: nothing to bind (see CreateGeometryShader) */
++   if (!pipe->bind_gs_state) {
++      pDevice->bound_empty_gs = NULL;
++      return;
++   }
+ 
+    if (pShader && !pShader->state.tokens) {
+       pDevice->bound_empty_gs = pShader;
+@@ -930,6 +947,18 @@ CreateGeometryShaderWithStreamOutput(
+       }
+    }
+ 
++   /* sb-patches/0166: a driver without a geometry stage (Panfrost on the G72) has no create_gs_state: the call
++    * went through a null pointer and took the application down. Fail the creation instead (E_OUTOFMEMORY is the
++    * error a shader creation may report without the device being removed). */
++   if (!pipe->create_gs_state) {
++      static unsigned said;
++      if (said++ < 4)
++         DebugPrintf("sbumd: geometry shader refused: this GPU driver has no geometry stage\n");
++      pShader->handle = NULL;
++      SetError(hDevice, E_OUTOFMEMORY);
++      return;
++   }
++
+    pShader->handle = pipe->create_gs_state(pipe, &pShader->state);
+ }
+ 
+-- 
+2.43.0
+
