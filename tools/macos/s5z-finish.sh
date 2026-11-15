@@ -12,6 +12,7 @@ export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
 K=$S/kbuild
 # 0460 was written while the build tree was away: compile it now (the host tests first)
 sh tools/macos/padtest/run.sh "$S/seq1j-src" "$S/padtest-out"
+sh tools/macos/sbmcachetest/run.sh "$S/seq1j-src" "$S/sbmcache-out"
 (cd "$K" && python3 cc4.py "$S/seq1j-src" "$K/obj" iokit/Kernel/arm/hid/SweetHID.cpp) | tee "$K/cc-0460.log" | grep -E 'exit|error' | head -20
 grep -q 'iokit/Kernel/arm/hid/SweetHID.cpp exit 0' "$K/cc-0460.log" || { echo "SweetHID.cpp did not compile"; exit 1; }
 # every object compiled in the scratch directory must be the one that is linked
