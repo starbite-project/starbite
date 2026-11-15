@@ -95,6 +95,15 @@ sudo mmdebstrap --variant=apt --mode=root \
     "$SUITE" "$ROOT" "$MIRROR" > "$OUT/mk-base.log" 2>&1 || { tail -30 "$OUT/mk-base.log"; exit 1; }
 
 fi
+# the GPU tools (sbgpu, 11-14 / 11-15): sbgl-probe (the linuxtest's GPU check), gtkbench + sbgpu-ab (GTK in software
+# vs on the Mali), built in sbwl's trixie chroot (trixie-chroot.sh build, sbgl-probe: cc ... -lEGL -lGLESv2) into
+# GPUTOOLS; a tool missing there is left out (a note)
+GPUTOOLS=${GPUTOOLS:-$(dirname "${SBWL:-/nonexistent/x}")}
+for t in sbgl-probe gtkbench; do
+    if [ -f "$GPUTOOLS/$t" ]; then sudo install -m 0755 "$GPUTOOLS/$t" "$ROOT/usr/local/bin/$t"
+    else echo "mk-base: no $GPUTOOLS/$t: not in the image" >&2; fi
+done
+sudo install -m 0755 "$here/sbgpu-ab" "$ROOT/usr/local/bin/sbgpu-ab"
 sudo cp "$ROOT/usr/share/starbite/base-packages.txt" "$OUT/base-packages.txt"
 # what takes the space (unpacked), for the report
 {

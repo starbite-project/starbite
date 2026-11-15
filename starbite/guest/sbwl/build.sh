@@ -55,4 +55,13 @@ for g in gtk+-3.0:gtk3 gtk4:gtk4; do                 # hostsim's GTK test apps, 
         extra="$extra, $OUT/sbwl-${g#*:}test"
     fi
 done
+if pkg-config --exists gtk4; then                    # the GPU tools (mk-base's GPUTOOLS): GTK in software vs GL
+    # shellcheck disable=SC2046
+    gcc -O2 -Wall "$here/gtkbench.c" -o "$OUT/gtkbench" $(pkg-config --cflags --libs gtk4) && extra="$extra, $OUT/gtkbench"
+fi
+if pkg-config --exists egl glesv2; then              # sbgl-probe: the linuxtest's GPU check
+    # shellcheck disable=SC2046
+    gcc -O2 -Wall "$here/../rootfs/sbgl-probe.c" -o "$OUT/sbgl-probe" $(pkg-config --cflags --libs egl glesv2) &&
+        extra="$extra, $OUT/sbgl-probe"
+fi
 echo "sbwl ($WLR$([ -n "$ICONLIBS" ] && echo ', icons')): $OUT/sbwl ($(stat -c %s "$OUT/sbwl") bytes), $OUT/popuptest$extra"

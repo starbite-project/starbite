@@ -2792,10 +2792,12 @@ static void gpu_apps_init(void)
 		gpu_apps = !access(f, F_OK);
 	}
 	struct stat st;
-	if (!gpu_apps || stat("/dev/dri/renderD128", &st) || !S_ISCHR(st.st_mode)) {
+	if (stat("/dev/dri/renderD128", &st) || !S_ISCHR(st.st_mode)) {
 		gpu_apps = 0;
 		return;
 	}
+	/* (11-15, after the phone's probe passed: linux-dmabuf whenever the node is there, so an app started with GL on
+	 * purpose works, e.g. the A/B test sbgpu-ab from foot; the switch only decides the apps' environment) */
 	struct wlr_linux_dmabuf_feedback_v1 fb = {.main_device = st.st_rdev};
 	wl_array_init(&fb.tranches);
 	struct wlr_linux_dmabuf_feedback_v1_tranche *tr = wlr_linux_dmabuf_feedback_add_tranche(&fb);
@@ -2813,7 +2815,8 @@ static void gpu_apps_init(void)
 		return;
 	}
 	wlr_linux_dmabuf_v1_set_check_dmabuf_callback(dm, dmab_check, NULL);
-	say("GPU for the apps: linux-dmabuf on /dev/dri/renderD128 (%u:%u)", major(st.st_rdev), minor(st.st_rdev));
+	say("GPU for the apps: linux-dmabuf on /dev/dri/renderD128 (%u:%u); the apps %s", major(st.st_rdev),
+	    minor(st.st_rdev), gpu_apps ? "draw with GL (the switch is on)" : "draw in software (the switch is off)");
 }
 static pid_t notify_pid;                   /* sbnotify */
 static void child_env(int as_user)

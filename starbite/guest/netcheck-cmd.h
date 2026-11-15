@@ -37,4 +37,14 @@
 #define SBG_GPUCHECK_LINE "STARBITE-GPU: "
 #define SBG_GPUCHECK_PASS "STARBITE-GPU: PASS"
 
+/* GTK 4 in software vs on the Mali (Track E, 2026-11-15, after the probe passed; base-e9e on): sbgpu-ab runs the same
+ * full-screen GTK 4 window (gtkbench: 96 cards relaid out and repainted every frame) 12 s with GSK_RENDERER=cairo,
+ * then 12 s with ngl (GL on the Mali), and logs ONE line:
+ *   STARBITE-GTKBENCH: cairo fps F renderer GskCairoRenderer; ngl fps F renderer GskNglRenderer; cards 96
+ * A result, not a verdict: the host logs it (a line starting SBG_GTKBENCH_LINE; none in 45 s: "no answer"). "renderer
+ * GskCairoRenderer" after ngl means GTK fell back to software (no GL). sbwl's STARBITE-PERF lines in the same 24 s
+ * give sbwl's own cost per frame (GPU frames are read back with the CPU). */
+#define SBG_GTKBENCH_CMD "sbgpu-ab\n"
+#define SBG_GTKBENCH_LINE "STARBITE-GTKBENCH: "
+
 #endif
