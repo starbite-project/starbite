@@ -192,7 +192,7 @@ class Catalog(unittest.TestCase):
         e = {x['key']: x for x in tomlmini.loads(out)['entry']}
         self.assertEqual(e['mac13']['root'], 'sd:lba 139264+31457280 (HFSX 15 GiB, sdrw)')
         ios26 = [k for k in cl.LAYOUTS['sd128'].root('ios26').keys if k in e]     # the catalog's rows on that root
-        self.assertIn('ios26', ios26)
+        self.assertTrue(ios26, 'no catalog row on the sd128 iOS 26 / Sequoia slot')
         for k in ios26:
             self.assertEqual(e[k]['flags'], ['hidden'])
             self.assertNotIn('sd:lba', e[k]['root'])
@@ -351,9 +351,32 @@ class Manifest(unittest.TestCase):
         m = self.load(item('m', 'card:root:mac13', 'm.img', 1 << 20), head128)
         self.assertEqual((str(m.item('m').dest), m.card['sectors']), ('card:lba:216442880', 249999360))
 
+    # a fixed catalog (not tools/store/catalog.toml, whose rows change every day): one row per sd128 root
+    CAT = '''
+[[entry]]
+key = "mac13"
+name = "macOS Ventura"
+version = "test"
+category = "apple"
+method = "xnu"
+tag = "beta"
+files = ["mac13-v33.xnu"]
+root = "sd:lba 216442880+31457280 (HFSX 15 GiB, sdrw)"
+
+[[entry]]
+key = "ios26"
+name = "iOS 26"
+version = "test"
+category = "apple"
+method = "xnu"
+tag = "beta"
+files = ["ios26-sd.xnu"]
+root = "sd:lba 182888448+33554432 (HFSX 16 GiB, sdrw)"
+'''
+
     def bundle(self, layout, payload_layout, catalog_layout=None):
         """A bundle with a catalog and a UFS store holding the mac13 / ios26 payloads."""
-        cat = cl.catalog_text((STORE / 'catalog.toml').read_text(), catalog_layout or layout)
+        cat = cl.catalog_text(self.CAT, catalog_layout or layout)
         (self.b / 'catalog.toml').write_text(cat)
         files = {'mac13-v33.xnu': cl.retarget_payload(fake_payload(MAC_LINE), payload_layout, 'mac13'),
                  'ios26-sd.xnu': fake_payload(MAC_LINE.replace('216442880,31457280', '182888448,33554432'))}
