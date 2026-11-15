@@ -103,17 +103,19 @@ def usb_list(runner=None):
             out = subprocess.run(['ioreg', '-p', 'IOUSB', '-l', '-w0'], capture_output=True, text=True).stdout
         except FileNotFoundError:
             return ids
-        vid = None
+        vid = pid = None                              # ioreg lists idProduct before or after idVendor
         for line in out.splitlines():
-            if '+-o ' in line:                        # a new device node: forget the last one's vendor
-                vid = None
+            if '+-o ' in line:                        # a new device node: forget the last one's ids
+                vid = pid = None
             m = re.search(r'"idVendor" = (\d+)', line)
             if m:
                 vid = int(m.group(1))
             m = re.search(r'"idProduct" = (\d+)', line)
-            if m and vid is not None:
-                ids.append((f'{vid:04x}', f'{int(m.group(1)):04x}'))
-                vid = None
+            if m:
+                pid = int(m.group(1))
+            if vid is not None and pid is not None:
+                ids.append((f'{vid:04x}', f'{pid:04x}'))
+                vid = pid = None
         return ids
     base = '/sys/bus/usb/devices'
     if not os.path.isdir(base):                       # no sysfs: lsusb's "ID vvvv:pppp"
@@ -279,6 +281,8 @@ class Phone:
 for p in ro.product.model ro.product.device ro.boot.bootloader ro.boot.serialno ro.boot.flash.locked \
          ro.boot.verifiedbootstate ro.boot.warranty_bit ro.twrp.version; do echo "prop=$p=$(getprop $p)"; done
 echo "battery=$(cat /sys/class/power_supply/battery/capacity 2>/dev/null || cat /sys/class/power_supply/*/capacity 2>/dev/null | head -1)"
+for ps in /sys/class/power_supply/*; do [ -d "$ps" ] || continue
+  echo "psu=${ps##*/} ty=$(cat $ps/type 2>/dev/null) cap=$(cat $ps/capacity 2>/dev/null) uv=$(cat $ps/voltage_now 2>/dev/null) st=$(cat $ps/status 2>/dev/null) on=$(cat $ps/online 2>/dev/null)"; done
 echo "sda=$(cat /sys/block/sda/size 2>/dev/null)"
 echo "lbs=$(cat /sys/block/sda/queue/logical_block_size 2>/dev/null)"
 echo "card=$(cat /sys/block/mmcblk0/size 2>/dev/null)"
@@ -312,6 +316,13 @@ df -k /external_sd 2>/dev/null | tail -1 | while read a b c d e f; do echo "sdfr
                 setattr(f, k, int(v) if v.strip().isdigit() else None)
             elif k == 'card_name':
                 f.card_name = v
+            elif k == 'psu':
+                d = dict(x.split('=', 1) for x in ('name=' + v).split() if '=' in x)
+                is_cell = d.get('ty', '').lower() == 'battery' or 'batt' in d['name'].lower()
+                if is_cell and d.get('uv', '').isdigit() and 2_500_000 < int(d['uv']) < 4_600_000 and f.volts is None:
+                    f.volts = int(d['uv']) / 1e6                  # the fuel gauge's cell voltage
+                if d.get('st', '').lower() in ('charging', 'full') or d.get('on') == '1':
+                    f.charging = True
         return f
 
     # -- reading ranges ------------------------------------------------------------------------
@@ -415,6 +426,8 @@ class Facts:
     card_name: str = ''
     sdfree: int = None                               # KiB free on /external_sd
     lbs: int = None                                  # sda's logical block size (4096 on this UFS)
+    volts: float = None                              # the cell voltage (a power supply's voltage_now)
+    charging: bool = False                           # a charger online, or a supply says Charging / Full
 
     def node(self, name):
         p = self.parts.get(name)
