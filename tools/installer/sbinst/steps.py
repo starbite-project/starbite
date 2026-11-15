@@ -56,8 +56,17 @@ def battery_check(f, min_pct, writes_gpt, user_ok=False):
         if not f.charging:
             return False, shown, f'--battery-ok-on-usb applies only while charging: {shown}, not charging'
         return False, shown, '--battery-ok-on-usb never covers a partition-table write: charge to the minimum first'
-    if cap is not None and cap > 2 or v is None or v < 3.6:
+    if cap is not None and cap >= min_pct or v is None or v < 3.6:
         return ((cap or 0) >= min_pct, f'{cap}%' if cap is not None else '?', f'below {min_pct}%: charge first')
+    if cap is not None and cap > 2:
+        # a real-looking reading below the minimum: the environment's gauge has also lagged a charged cell (S9 #2,
+        # 2026-11-15: 7-10 % at 3.82 V). The conservative voltage estimate may still show the minimum is reached.
+        est = battery_estimate(v, f.charging)
+        shown = (f'gauge {cap}%, cell {v:.2f} V{" charging" if f.charging else ""} -> ~{est}% '
+                 f'(OCV{", -0.10 V while charging" if f.charging else ""})')
+        if est >= min_pct:
+            return True, shown + ': the cell voltage shows the minimum', ''
+        return False, shown, f'battery: {shown}: below {min_pct}%: charge first'
     est = battery_estimate(v, f.charging)
     shown = (f'gauge uncalibrated ({cap}%), {v:.2f} V{" charging" if f.charging else ""} -> ~{est}% '
              f'(OCV{", -0.10 V while charging" if f.charging else ""})')
@@ -433,7 +442,7 @@ class Installer:
                                            self.m.ufs_layout is not None and getattr(self.o, 'repartition', False),
                                            getattr(self.o, 'battery_ok_on_usb', False))
         row('battery', b_val, b_ok, b_why)
-        if b_val.startswith('gauge uncalibrated') or 'USER OVERRIDE' in b_val:
+        if b_val.startswith('gauge') or 'USER OVERRIDE' in b_val:
             u.info(f'battery: {b_val}')
         want_ufs = self.m.phone.get('ufs_blocks')
         row('UFS', f'{human((f.sda or 0) * 512)} ({(f.sda or 0) // 8} blocks)',
