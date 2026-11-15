@@ -1,0 +1,313 @@
+From 22012bd0ad77546f23245f967fa82a41423fb4a9 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Sun, 15 Nov 2026 13:27:02 +0200
+Subject: [PATCH] 0163: device execution state log (devstate), zcro2 /
+ zcnolist2 switches for opened allocations (re-read at every open), LockCb
+ failure log, DXGI 1.1 ResolveSharedResource
+
+---
+ include/win32-compat/malikm_drm.c          | 125 ++++++++++++++++++++-
+ src/gallium/frontends/d3d10umd/Device.cpp  |   7 ++
+ src/gallium/frontends/d3d10umd/DxgiFns.cpp |  25 ++++-
+ src/gallium/frontends/d3d10umd/DxgiFns.h   |   1 +
+ src/gallium/frontends/d3d10umd/State.h     |   1 +
+ 5 files changed, 153 insertions(+), 6 deletions(-)
+
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index fb484d3..c3420df 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -882,6 +882,13 @@ struct sbdev {
+    double st_blocked_ms, st_longest_ms;
+    unsigned submits_n;     /* T25 */
+    int list_all;           /* T25: SB_LIST_ALL=1, every live BO in every submission (as before) */
++   /* sb-patches/0163 (T70, the flip-model DWM device loss; flag files in C:\ProgramData\Starbite, read per device):
++    * devstate: ask the system for this device's execution state (D3DDDI_ESCAPEFLAGS.DeviceStatusQuery) after every
++    * Render, present and open, and log each change with the allocations just submitted;
++    * zcro2: an allocation opened from another process (kind 2) is listed without WriteOperation;
++    * zcnolist2: kind 2 allocations are not forced into every submission (0138 off). */
++   int devstate, ro2, nolist2;
++   unsigned last_state;
+    /* T30 (sb-patches/0124): a vertex/tiler chain held back to go to the KMD in one Render with the fragment chain
+     * that Panfrost submits right after it (SB_REQ_MERGE_NEXT). Its command, allocation-list entries (pend_n), the
+     * BOs it named and its out_sync wait in the runtime's buffers until then; any other call sends it alone. */
+@@ -1260,6 +1267,24 @@ w_destroy(struct sbdev *d, D3DKMT_HANDLE h)
+    kmt.DestroyAllocation(&da);
+ }
+ 
++static unsigned sb_devstate_note(struct sbdev *d, const char *what, unsigned arg);   /* 0163, below */
++
++/* 0163: the test switches (flag files) of a device, read at its creation and again at every open of another
++ * process's allocation, so a running DWM takes a changed set without a restart; logged when they change. */
++static void
++sb_read_flags(struct sbdev *d, const char *when)
++{
++   int ds = GetFileAttributesA("C:\\ProgramData\\Starbite\\devstate") != INVALID_FILE_ATTRIBUTES;
++   int ro = GetFileAttributesA("C:\\ProgramData\\Starbite\\zcro2") != INVALID_FILE_ATTRIBUTES;
++   int nl = GetFileAttributesA("C:\\ProgramData\\Starbite\\zcnolist2") != INVALID_FILE_ATTRIBUTES;
++
++   if (ds != d->devstate || ro != d->ro2 || nl != d->nolist2)
++      fprintf(stderr, "sbumd: device %u flags at %s: devstate %d, zcro2 %d, zcnolist2 %d\n", d->id, when, ds, ro, nl);
++   d->devstate = ds;
++   d->ro2 = ro;
++   d->nolist2 = nl;
++}
++
+ static void *
+ w_lock(struct sbdev *d, D3DKMT_HANDLE h)
+ {
+@@ -1267,7 +1292,17 @@ w_lock(struct sbdev *d, D3DKMT_HANDLE h)
+       D3DDDICB_LOCK l = {0};
+       l.hAllocation = h;
+       l.Flags.IgnoreSync = 1;
+-      return d->cb.pfnLockCb(d->device, &l) >= 0 ? l.pData : NULL;
++      {
++         /* 0163: a failed lock was silent */
++         HRESULT lhr = d->cb.pfnLockCb(d->device, &l);
++         static unsigned said;
++         if (lhr < 0 && said++ < 12)
++            fprintf(stderr, "sbumd: LockCb failed 0x%08lx for allocation 0x%x (device %u)\n", (unsigned long)lhr,
++                    (unsigned)h, d->id);
++         if (lhr < 0)
++            (void)sb_devstate_note(d, "a failed lock of allocation", (unsigned)h);
++         return lhr >= 0 ? l.pData : NULL;
++      }
+    }
+    D3DKMT_LOCK l = {0};
+    l.hDevice = d->kdevice;
+@@ -1307,6 +1342,51 @@ ring_push(struct sbdev *d, uint64_t seq, HANDLE ev)
+    d->ring_n++;
+ }
+ 
++/* sb-patches/0163: the system's view of this device (1 active, 2 reset, 3 hung, 4 stopped, 5 out of memory,
++ * 6 DMA fault; 0x8000xxxx: the query itself failed). */
++static unsigned
++sb_devstate(struct sbdev *d)
++{
++   D3DDDICB_ESCAPE e = {0};
++   struct { UINT State; } st = {0};
++   HRESULT hr;
++
++   if (!d || !d->on)
++      return 0;
++   e.hDevice = d->device;
++   e.Flags.Value = 0x2;                    /* DeviceStatusQuery */
++   e.pPrivateDriverData = &st;
++   e.PrivateDriverDataSize = sizeof(st);
++   hr = d->cb.pfnEscapeCb(d->adapter, &e);
++   return hr >= 0 ? st.State : 0x80000000u | ((unsigned)hr & 0xffffu);
++}
++
++/* 0163: with the devstate flag, log when the state changed across `what`; returns the state. */
++static unsigned
++sb_devstate_note(struct sbdev *d, const char *what, unsigned arg)
++{
++   unsigned s;
++
++   if (!d || !d->devstate)
++      return 1;
++   s = sb_devstate(d);
++   if (s != d->last_state) {
++      fprintf(stderr, "sbumd: device %u execution state %u -> %u at %s 0x%x (submissions %llu)\n", d->id,
++              d->last_state, s, what, arg, (unsigned long long)d->seq);
++      d->last_state = s;
++   }
++   return s;
++}
++
++/* 0163: for d3d10umd's entry points (the thread's current device) */
++void
++malikm_devstate_note(const char *what, unsigned arg)
++{
++   struct sbdev *d = sb_cur;
++   if (d && d->on && d->devstate)
++      (void)sb_devstate_note(d, what, arg);
++}
++
+ /* Render what is in the command buffer and allocation list; on return the buffers are the new ones the
+  * runtime handed back and d->seq counts this submission. */
+ static NTSTATUS
+@@ -1314,10 +1394,41 @@ w_render(struct sbdev *d, UINT commandLength, UINT allocations)
+ {
+    if (d->on) {
+       D3DDDICB_RENDER r = {0};
++      /* 0163: the allocation list as submitted (the runtime hands back a new one), for the devstate log */
++      struct { D3DKMT_HANDLE h; unsigned w; } listed[40];
++      unsigned nlisted = 0;
++      HRESULT rhr;
++      if (d->devstate)
++         for (; nlisted < allocations && nlisted < 40; nlisted++) {
++            listed[nlisted].h = d->alloc[nlisted].hAllocation;
++            listed[nlisted].w = d->alloc[nlisted].WriteOperation;
++         }
+       r.hContext = d->context;
+       r.CommandLength = commandLength;
+       r.NumAllocations = allocations;
+-      if (d->cb.pfnRenderCb(d->device, &r) < 0)
++      rhr = d->cb.pfnRenderCb(d->device, &r);
++      if (d->devstate) {
++         unsigned before = d->last_state;
++         unsigned s = sb_devstate_note(d, rhr < 0 ? "a FAILED Render, hr" : "a Render, allocations", rhr < 0 ? (unsigned)rhr : allocations);
++         if (s != before || rhr < 0) {
++            char line[40 * 14 + 8];
++            unsigned o = 0;
++            for (unsigned i = 0; i < nlisted && o + 14 < sizeof(line); i++) {
++               unsigned kind = 0;
++               for (uint32_t j = 0; j < d->bo_cap; j++)
++                  if (d->bo[j].h == listed[i].h) {
++                     kind = (unsigned)d->bo[j].kind;
++                     break;
++                  }
++               o += (unsigned)snprintf(line + o, sizeof(line) - o, " %x%s%s", listed[i].h, listed[i].w ? "w" : "",
++                                       kind == 2 ? "*" : "");
++            }
++            line[o] = 0;
++            fprintf(stderr, "sbumd:   that Render listed %u allocations (w = written, * = opened from another process):%s\n",
++                    allocations, line);
++         }
++      }
++      if (rhr < 0)
+          return (NTSTATUS)0xC0000001;
+       d->cmd = r.pNewCommandBuffer;
+       d->cmd_size = r.NewCommandBufferSize;
+@@ -1639,6 +1750,8 @@ malikm_bind_d3dddi(HANDLE hRTAdapter, HANDLE hRTDevice, const void *pKTCallbacks
+       d->list_all = la && *la == '1';
+       const char *nm = getenv("SB_NO_MERGE");
+       d->no_merge = nm && *nm == '1';   /* T30: SB_NO_MERGE=1, every chain its own Render */
++      sb_read_flags(d, "its creation");
++      d->last_state = 1;
+       D3DDDICB_CREATECONTEXT c = {0};
+       c.NodeOrdinal = 0;
+       c.EngineAffinity = 1;
+@@ -1892,7 +2005,7 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+          if (!bo)
+             return -MK_ENOENT;
+          if (bo->listed == d->mark) {
+-            if (joining && bo->list_idx < n)
++            if (joining && bo->list_idx < n && !(d->ro2 && bo->kind == 2))
+                d->alloc[bo->list_idx].WriteOperation = 1;   /* listed by the held chain, maybe for residency */
+             continue;
+          }
+@@ -1900,7 +2013,7 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+          bo->list_idx = n;
+          memset(&d->alloc[n], 0, sizeof(d->alloc[n]));
+          d->alloc[n].hAllocation = bo->h;
+-         d->alloc[n].WriteOperation = 1;
++         d->alloc[n].WriteOperation = (d->ro2 && bo->kind == 2) ? 0 : 1;   /* 0163 */
+          n++;
+       }
+       /* Every other live BO of this device too. Linux's panfrost maps a BO into the GPU VM when it is
+@@ -1925,7 +2038,7 @@ wddm_drm(struct sbdev *d, uint32_t nr, uint8_t *b, uint32_t size)
+           * allocations: owned by explorer / TextInputHost, unmapped by VidMm (mapped 0, unmaps > 0), not listed by
+           * the faulting DWM fragment job (last listed thousands of renders before). Under memory pressure VidMm
+           * evicts what a submission does not name, and listing once plus every 64th submission (T25) left gaps. */
+-         if (!bo->h || bo->listed == d->mark || (bo->listed_once && !refresh && bo->kind != 2))
++         if (!bo->h || bo->listed == d->mark || (bo->listed_once && !refresh && (bo->kind != 2 || d->nolist2)))
+             continue;
+          bo->listed = d->mark;
+          bo->listed_once = 1;
+@@ -2293,6 +2406,7 @@ malikm_import_alloc(unsigned hAllocation, uint64_t size)
+    if (!d || !d->on)
+       return -1;
+    AcquireSRWLockExclusive(&d->lock);
++   sb_read_flags(d, "an open");   /* 0163 */
+    for (uint32_t i = 0; i < d->bo_cap; i++)
+       if (d->bo[i].h == hAllocation) {
+          h = i + 1;                      /* already ours (opened twice) */
+@@ -2312,6 +2426,7 @@ malikm_import_alloc(unsigned hAllocation, uint64_t size)
+    if (trace_on() || sb_log_active)
+       fprintf(stderr, "sbumd: opened allocation 0x%x as bo %u va 0x%llx (device %u)\n", hAllocation, h,
+               (unsigned long long)d->bo[h - 1].va, d->id);
++   (void)sb_devstate_note(d, "the open of allocation", hAllocation);   /* 0163 */
+ out:
+    ReleaseSRWLockExclusive(&d->lock);
+    return fd;
+diff --git a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+index 907824e..81cf306 100644
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -344,6 +344,13 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
+       _RotateResourceIdentities;
+    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnBlt =
+       _Blt;
++   /* sb-patches/0163: the 8th slot of DXGI1_1_DDI_BASE_FUNCTIONS, when the runtime passed that table
++    * (IS_DXGI1_1_BASE_FUNCTIONS: D3D10 DDI and Version >= 6000 | DXGI_RESOLVE_SHARED_RESOURCE (9)) */
++   if ((pCreateData->Interface >> 16) == 10 && (pCreateData->Version & 0xffff) >= (6000 | 9)) {
++      ((DXGI1_1_DDI_BASE_FUNCTIONS *)pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions)->pfnResolveSharedResource =
++         _ResolveSharedResource;
++      DebugPrintf("sbumd: CreateDevice: DXGI 1.1 base functions (ResolveSharedResource filled)\n");
++   }
+ 
+    /* Starbite (sb-patches/0159, docs/WIN11-GPU.md 6.89): on the Mali, let DXGI use the shared resource
+     * presentation path. Upstream (a software rasterizer's UMD) always returned DXGI_STATUS_NO_REDIRECTION, which the
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index e3bc048..dcef2ac 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -409,9 +409,13 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
+       Resource *pDstResource = pPresentData->hDstResource ? CastResource(pPresentData->hDstResource) : NULL;
+       sb_sample_present(device->pipe, pSrcResource, pSrcResource->sbAllocation, pPresentData->Flags.Value);
+       device->pipe->flush(device->pipe, NULL, 0);
++      malikm_devstate_note("before the present of allocation", pSrcResource->sbAllocation);   /* 0163 */
+       if (malikm_present_allocs(pSrcResource->sbAllocation, pDstResource ? pDstResource->sbAllocation : 0,
+-                                pPresentData->pDXGIContext) == 0)
++                                pPresentData->pDXGIContext) == 0) {
++         malikm_devstate_note("after the present of allocation", pSrcResource->sbAllocation);
+          return S_OK;
++      }
++      malikm_devstate_note("a FAILED present of allocation", pSrcResource->sbAllocation);
+       return E_FAIL;
+    }
+ 
+@@ -425,6 +429,25 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
+ }
+ 
+ 
++/* sb-patches/0163: DXGI 1.1 base function (the Windows 7 D3D10 DDI, which is what the runtime uses with us:
++ * IS_DXGI1_1_BASE_FUNCTIONS is true for interface 0x000a0009 version 0x177a). DXGI calls it before another device
++ * (DWM) reads a shared surface this device rendered: everything recorded for it must be on its way to the GPU.
++ * Upstream never filled the slot. */
++HRESULT APIENTRY
++_ResolveSharedResource(DXGI_DDI_ARG_RESOLVESHAREDRESOURCE *ResolveSharedResource)
++{
++   static unsigned said;
++   struct pipe_context *pipe = CastPipeDevice(ResolveSharedResource->hDevice);
++
++   LOG_ENTRYPOINT();
++   if (pipe)
++      pipe->flush(pipe, NULL, 0);
++   if (said++ < 4)
++      DebugPrintf("sbumd: ResolveSharedResource: flushed\n");
++   return S_OK;
++}
++
++
+ /*
+  * ----------------------------------------------------------------------
+  *
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.h b/src/gallium/frontends/d3d10umd/DxgiFns.h
+index 3689faa..78d82fe 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.h
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.h
+@@ -42,5 +42,6 @@ HRESULT APIENTRY _SetResourcePriority( DXGI_DDI_ARG_SETRESOURCEPRIORITY * );
+ HRESULT APIENTRY _QueryResourceResidency( DXGI_DDI_ARG_QUERYRESOURCERESIDENCY * );
+ HRESULT APIENTRY _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES * );
+ HRESULT APIENTRY _Blt( DXGI_DDI_ARG_BLT * );
++HRESULT APIENTRY _ResolveSharedResource( DXGI_DDI_ARG_RESOLVESHAREDRESOURCE * );   /* sb-patches/0163 */
+ 
+ #endif
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index fb9835c..d762b49 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -223,6 +223,7 @@ struct Resource
+ extern "C" {
+ #endif
+ int malikm_hw(void);
++void malikm_devstate_note(const char *what, unsigned arg);   /* sb-patches/0163 */
+ int malikm_use(void *dev);   /* sb-patches/0113: this thread's shim device; 1 if it is on the Mali */
+ int sb_dump_on(void);   /* sb-patches/0116: Debug.cpp */
+ void malikm_next_alloc(void *hres, int primary, unsigned vidpn, unsigned w, unsigned h, unsigned pitch, unsigned fmt);
+-- 
+2.43.0
+

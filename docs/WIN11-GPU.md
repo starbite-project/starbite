@@ -2836,6 +2836,51 @@ Settings > Display > Display orientation in full mode. Until now sbwddm's path o
   windows still crash DWM with 0159 (6.91) - a larger project. The frame rate the user sees is bounded by DWM's
   composition rate on our driver in landscape, which is the next thing to measure (DWM's own frame times).
 
+### 6.95 The flip-model DWM device loss: what T66's logs say, sbumd 0163 (diagnostics + three candidates), T70 staged
+
+(2026-11-15 13:35) The real zero-copy gain for Geometry Dash needs a flip-model swap chain (6.94: the blt model is
+paced by DWM). With 0159 a flip-model window makes DWM lose its device (6.91). Reading T66's DWM umdlogs and the
+DxgKrnl ETW again, in order:
+
+1. sbcomp creates a 2-buffer FLIP_SEQUENTIAL chain; the buffers are created shared (misc 0x20002: SHARED +
+   displayable). DWM's device opens both (OpenResource, 1200x700).
+2. DWM's next submission that touches them enters the kernel (DxgKrnl Render, id 169) and is never queued (no
+   QueuePacket 178 for it). pfnRenderCb returned success to the shim; sbwddm saw no failing DDI call.
+3. From then on DWM's device is removed: its DXGI Present returns 0x887A0005 within 23 us. DWM recreates the device;
+   on each new device the removal comes back while it rebuilds its swap chain (it reopens the same two buffers), and
+   after ~9 rounds DWM fails fast with 0x8898008D (WGXERR_NO_HARDWARE_DEVICE). The other crash shapes (c0000005 in
+   dwmcore / d3d11.dll) are the same loss hit at other moments.
+
+So the kernel puts DWM's device into an error state for a submission that references the opened flip buffers, without
+failing a call we can see. What the shim does with an opened (kind 2) allocation that a stock driver would not:
+- it lists every named BO with WriteOperation = 1; DWM only reads an app's flip buffer;
+- 0138 forces every opened allocation into every submission of the device (so the KMD always has its address),
+  whether or not that submission uses it: after the open, each DWM Render "writes" both flip buffers;
+- and one DDI hole: the runtime uses D3D10 DDI 0x000a0009 / version 0x177a, so the DXGI base table is the DXGI 1.1
+  one with an 8th slot, pfnResolveSharedResource, which upstream d3d10umd never fills. DXGI calls it on a shared
+  surface's owner before another device reads it.
+
+**sb-patches/0163** (src-int, on 0157 + 0159; sbumd d7285e58, ARM64X verify FAILS: 0), diagnostic, not for the user:
+- flag `devstate`: after every Render, open, failed lock and present the shim asks the system for the device's
+  execution state (D3DDDICB_ESCAPE with Flags.DeviceStatusQuery, a `{UINT State}` buffer; 1 active, 2 reset, 3 hung,
+  4 stopped, 5 out of memory, 6 DMA fault) and logs each change, with the allocation list of the Render that
+  changed it (handles; w = written, * = opened from another process);
+- flag `zcro2`: kind 2 allocations are listed without WriteOperation;
+- flag `zcnolist2`: kind 2 allocations are not forced into every submission;
+- `_ResolveSharedResource` (flushes the pipe) fills the DXGI 1.1 slot when the interface is 10.x and the version is
+  at least WDDM 1.1's;
+- LockCb failures are logged (first 12); flags are read at device creation and again at every open, so a running DWM
+  takes a new set without a restart.
+
+**T70 (FLIP1)**, `build/win/stage/sbwddm-t70` (T61 drivers + sbumd 0163): `sb-flip.bat` (staged as sb-elev.bat, run
+elevated by the generic `sb-elev-run.cmd` from HKLM RunOnce; `sb-elev-wait.bat` as sb-user.bat) runs sbcomp hwnd 12 s
+under base / ro2 / nolist2 / both, then hwndblt as the control: a shot in each, DWM's pid before / at the shot /
+after. `runonce-arm.sh ... dwm.exe` also sets WER LocalDumps for dwm.exe (mini dumps: `SB_DUMP_TYPE=1` in
+hive-localdumps.py; C: is tight). Reading it: the state code and the Render that caused it in the base run name the
+kernel's reason; a config with "DWM SURVIVED", the red window in its shot and sbcomp at vsync rate is the fix
+(T66: 7.9 fps while DWM looped). Next after that: the GD ICD's zero-copy chain as FLIP_SEQUENTIAL against the async
+GDI present.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,

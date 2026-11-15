@@ -4,6 +4,7 @@
   hive-localdumps.py IN show [EXE...]
   hive-localdumps.py IN OUT set [EXE...]     LocalDumps\\<EXE> for each EXE (default sbcpu-x64.exe sbcpu-x86.exe):
                                        DumpType 2 (full), DumpFolder C:\\sbdumps (REG_EXPAND_SZ), DumpCount 2
+                                       (SB_DUMP_TYPE=1 in the environment: mini dumps)
   hive-localdumps.py IN OUT remove [EXE...]  delete those app keys again; LocalDumps itself goes too when it has no
                                        values and no other subkeys (pull-1111 had no LocalDumps key at all)
 
@@ -26,7 +27,9 @@ _spec.loader.exec_module(hs)
 
 LD = 'Microsoft\\Windows\\Windows Error Reporting\\LocalDumps'
 APPS = ('sbcpu-x64.exe', 'sbcpu-x86.exe')     # default; e.g. GeometryDash.exe on the command line
-VALUES = {'DumpType': hs.dword(2), 'DumpFolder': hs.sz(2, 'C:\\sbdumps'), 'DumpCount': hs.dword(2)}
+# SB_DUMP_TYPE=1: mini dumps (stacks + module list, a few MB) instead of full ones, e.g. for dwm.exe (T70; C: is tight)
+VALUES = {'DumpType': hs.dword(int(os.environ.get('SB_DUMP_TYPE', '2'))), 'DumpFolder': hs.sz(2, 'C:\\sbdumps'),
+          'DumpCount': hs.dword(2)}
 
 
 def show(h):

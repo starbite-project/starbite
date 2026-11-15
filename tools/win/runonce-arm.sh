@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# runonce-arm.sh NAME SCRIPT WINDIR OUT: from TWRP, push SCRIPT (a .cmd from this repo) to C:\WINDIR\ and set
+# runonce-arm.sh NAME SCRIPT WINDIR OUT [EXE...]: from TWRP, push SCRIPT (a .cmd from this repo) to C:\WINDIR\ and set
 # HKLM RunOnce NAME = "cmd /c C:\WINDIR\<script>" (runs once, elevated, at the next logon; docs/WIN11-GPU.md 6.87).
 # SOFTWARE hive: clean check, backup in OUT/backup, read-back of both pushes. e.g.
 #   tools/win/runonce-arm.sh StarbiteXtaM3 starbite/win/debloat/xta-m3-folder.cmd starbite\\xta OUT
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-name=${1:?usage: runonce-arm.sh NAME SCRIPT WINDIR OUT}; src=${2:?}; windir=${3:?}; out=${4:?}
+name=${1:?usage: runonce-arm.sh NAME SCRIPT WINDIR OUT [EXE...]}; src=${2:?}; windir=${3:?}; out=${4:?}
 [ -f "$src" ] || { echo "no $src"; exit 1; }
 NTFS=/dev/block/sda27; W=/tmp/wwin; SOFT=Windows/System32/config/SOFTWARE
 unixdir=$(echo "$windir" | tr '\\' '/'); base=$(basename "$src")
@@ -17,7 +17,15 @@ adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W
 adb pull "$W/$SOFT" "$tmp/SOFTWARE" >/dev/null
 python3 tools/win/hive-service.py "$tmp/SOFTWARE" check >> "$out/runonce-arm.log" 2>&1 || { log "SOFTWARE is dirty: gpu-cycle --clean-only first"; exit 3; }
 cp "$tmp/SOFTWARE" "$out/backup/SOFTWARE-$name-$(date +%Y%m%d-%H%M%S)"
-python3 tools/win/hive-runonce.py "$tmp/SOFTWARE" "$tmp/SW1" set "$name" "cmd /c C:\\$windir\\$base" >> "$out/runonce-arm.log" 2>&1
+shift 4 || true
+if [ $# -gt 0 ]; then
+    # further arguments: programs that get WER LocalDumps (mini, 2 each, C:\sbdumps), e.g. dwm.exe (T70)
+    SB_DUMP_TYPE=1 python3 tools/woa/win-m3/hive-localdumps.py "$tmp/SOFTWARE" "$tmp/SW0" set "$@" >> "$out/runonce-arm.log" 2>&1
+    log "LocalDumps for: $*"
+else
+    cp "$tmp/SOFTWARE" "$tmp/SW0"
+fi
+python3 tools/win/hive-runonce.py "$tmp/SW0" "$tmp/SW1" set "$name" "cmd /c C:\\$windir\\$base" >> "$out/runonce-arm.log" 2>&1
 adb shell "mkdir -p '$W/$unixdir'" >/dev/null
 for pair in "$src:$W/$unixdir/$base" "$tmp/SW1:$W/$SOFT"; do
     s=${pair%%:*}; d=${pair#*:}
