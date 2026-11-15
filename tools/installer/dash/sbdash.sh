@@ -157,7 +157,8 @@ while [ ! -e "$D/stop" ]; do
 		spark(srx, ns, 5, "46", "Mac -> phone")
 		spark(stx, ns, 3, "45", "phone -> Mac")
 		rule("RAW usb0 FRAMES  (sampled every 3 s, read only)")
-		np = 0; while ((getline l < PEEK) > 0 && np < 3) { np++; line(c("32", substr(l, 1, W))) }
+		np = 0; while ((getline l < PEEK) > 0 && np < 3) { np++; k = index(l, "|")
+			if (k) { line(c("32", substr(l, 1, k - 1))); line(c("2;32", "    " substr(l, k + 1, W - 4))) } else line(c("32", substr(l, 1, W))) }
 		if (!np) line(c("2", "(no sample yet)"))
 		rule("STORAGE I/O  (/proc/diskstats)")
 		spark(swr, ns, 4, "41", "writes")
@@ -176,7 +177,8 @@ while [ ! -e "$D/stop" ]; do
 		rule("PHONE")
 		split(BAT, bt, " ")
 		line(sprintf("battery %s%% %s  %.2f V  %+d mA  %.1f C   SoC temp %.1f C   backlight %s/%s%s", bt[1] != "" ? bt[1] : "?", bt[5],
-		     bt[2] / 1e6, bt[3] / 1000, bt[4] / 10, THERM / 1000, BLS, BLO, IDLE >= DIMA ? c("33", "  (dimmed: tap to wake)") : ""))
+		     bt[2] / 1e6, bt[3] / 1000, bt[4] / 10, THERM / 1000, BLO != "" ? BLS : "none", BLO != "" ? BLO : "saver after " int(DIMA / 60) " min",
+		     IDLE >= DIMA ? c("33", "  (dimmed: tap to wake)") : ""))
 		rule("NIGHT LOG  (build/installer/logs/night-1115.log on the Mac)")
 		for (i = (nlog > 14 ? nlog - 13 : 1); i <= nlog; i++) { l = logs[i]; col = l ~ /failed|STOPPED|REFUSED/ ? "1;31" : l ~ /^### .*done/ ? "1;32" : l ~ /^###/ ? "1;33" : l ~ /^      ok/ ? "32" : "37"; line(c(col, substr(l, 1, W))) }
 		rule("SUBSTEP OUTPUT  (" f["sub"] ")")
