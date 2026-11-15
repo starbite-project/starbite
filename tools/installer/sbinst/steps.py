@@ -14,11 +14,61 @@ from . import nopassword, pit, repart, rescue
 from .common import (BACKUP_OPTIONAL, BACKUP_RAW, BACKUP_REQUIRED, DOWNLOAD_MODE_USB, GIB, MIB, NATIVE_PARTS,
                      ONEUI_DATA_RESERVE, PART_WRITE_PY, PROTECTED, REPO, Refused, Stopped, cardlayout,
                      default_state_dir, human)
-from .device import Heimdall, InstallerEnv, Phone, android_props, chunk_write, is_stock_samsung, usb_ids
+from .device import (Heimdall, InstallerEnv, Phone, android_props, chunk_write, is_stock_samsung, target_serial,
+                     usb_ids)
 from .journal import Journal
 from .manifest import MKFS_ACTIONS, coverage, writer_of
 
 STORE_UFS_OFFSET = 16 * GIB                 # store-flash.sh: USERDATA + 16 GiB
+# S-Boot of the one S9 the Starbite loader has run under (S9 #1, firmware G960FXXUHFVG6). Another S-Boot is not
+# refused, but the plan warns: the loader reads S-Boot's FDT and log pages, and only this version is proven.
+PROVEN_SBOOT = 'G960FXXUHFVG6'
+
+
+def phone_id_of(serial):
+    """phone-<first 10 hex digits of SHA-256(serial)>: the serial itself is never stored or printed."""
+    return 'phone-' + hashlib.sha256(serial.encode()).hexdigest()[:10]
+
+
+def check_backup_dir(d, required=True):
+    """Re-read a finished backup on this computer: every file named in backups.txt hashed again (.img.gz
+    decompressed) and compared with the SHA-256 the phone computed when it was taken; with `required`,
+    every name the installer must back up has to be there. Returns (ok_lines, problems)."""
+    import gzip as _gz
+    d = Path(d)
+    oks, problems = [], []
+    log = d / 'backups.txt'
+    if not log.is_file():
+        return oks, [f'{log}: missing']
+    seen = {}
+    for line in log.read_text().splitlines():
+        bits = line.split()
+        if len(bits) < 2:
+            continue
+        want, name = bits[0], bits[1]
+        base = name[:-4] if name.endswith('.img') else name
+        seen[base] = (want, name)
+    for base, (want, name) in sorted(seen.items()):
+        f = d / name
+        gz = d / (name + '.gz')
+        src = f if f.is_file() else gz if gz.is_file() else None
+        if src is None:
+            problems.append(f'{base}: no {name}(.gz) in {d}')
+            continue
+        h = hashlib.sha256()
+        with (_gz.open(src, 'rb') if src.suffix == '.gz' else open(src, 'rb')) as fh:
+            for b in iter(lambda: fh.read(1 << 20), b''):
+                h.update(b)
+        if h.hexdigest() != want:
+            problems.append(f'{base}: {src.name} hashes to {h.hexdigest()[:16]}..., the phone said {want[:16]}...')
+        else:
+            oks.append(f'{base}: {src.name} sha256 {want[:16]}... = the phone\'s')
+    if required:
+        need = [n for n in BACKUP_REQUIRED] + [n for n, _, _ in BACKUP_RAW]
+        miss = [n for n in need if n not in seen]
+        if miss:
+            problems.append('not backed up: ' + ' '.join(miss))
+    return oks, problems
 TOOL = {k: str(REPO / v) for k, v in {
     'part-write': 'tools/android/pixel/part-write.py',
     'part-backup': 'tools/android/pixel/part-backup.sh',
@@ -154,7 +204,7 @@ class Installer:
                 raise Refused('the bootloader is locked (ro.boot.flash.locked=1 / verifiedbootstate green): unlock it '
                               'first (Developer options > OEM unlocking, then Download mode: long-press Volume Up)')
             if is_stock_samsung(props):
-                return self.from_stock_android()
+                return self.from_stock_android(props)
             if legacy:
                 cmd = ['adb', 'reboot', 'recovery']
             else:
@@ -180,13 +230,21 @@ class Installer:
             raise Refused(f'TWRP did not come up within 3 minutes (state: {st.kind})')
         return st
 
-    def from_stock_android(self):
+    def from_stock_android(self, props=None):
         """Stock Samsung Android with USB debugging: `adb reboot download`, then from_download_mode()."""
         u = self.ui
+        props = props or {}
+        bl = props.get('ro.boot.bootloader', '')
+        u.info(f'S-Boot (bootloader) {bl or "?"}, firmware {props.get("ro.build.PDA") or "?"}: keep this; the rollback '
+               'for BOOT is that firmware\'s boot.img (heimdall cannot read partitions)')
+        if bl and bl != PROVEN_SBOOT:
+            u.warn(f'S-Boot {bl} is not {PROVEN_SBOOT}, the only S-Boot the Starbite loader has run under (S9 #1)')
         u.info('stock Samsung firmware: the Starbite loader is not on this phone yet. The way in is Download mode:')
-        u.cmd('adb reboot download' + ('    [dry run: not run]' if self.mode == 'dry-run' else ''))
+        u.cmd(f'adb {"-s " + self.phone.serial + " " if self.phone.serial else ""}reboot download' +
+              ('    [dry run: not run]' if self.mode == 'dry-run' else ''))
         if self.mode == 'dry-run':
-            u.warn('dry run: the phone is not rebooted, so the plan below has no phone checks')
+            u.warn('dry run: the phone is not rebooted. Next: put it in Download mode (the command above, or the keys) '
+                   'and run the same dry run again: it reads the PIT (read only) and checks it')
             return None
         if not u.confirm('Reboot the phone into Download mode now? (it shows a blue "Downloading..." screen)'):
             raise Refused('the phone has to be in Download mode or the Starbite loader\'s fastboot')
@@ -236,6 +294,14 @@ class Installer:
         if not ok:
             raise Refused('the PIT is not an SM-G960F\'s (an S9+ SM-G965F, or another phone): nothing was flashed')
         u.ok(f'PIT: an SM-G960F ({self.rel(pf)})')
+        serial = self.phone.serial
+        jr = Journal(self.state_dir / phone_id_of(serial) / 'journal.json') if serial else None
+        gate = f'download:{self.m.sha256}'
+        alone = self.phone.download_alone()
+        if alone:
+            (u.warn if self.mode == 'dry-run' else u.info)(f'before a flash: {alone}')
+        else:
+            u.ok('only this phone is on USB (one Download-mode device, no other phone): heimdall cannot pick another')
         cmd = ['flash', '--BOOT', str(boot.path), '--no-reboot']
         u.info('The Starbite loader goes into BOOT. It is the only thing written in Download mode; RECOVERY keeps')
         u.info('Samsung\'s stock recovery (the installer never writes it). BOOT\'s stock image is in the backup')
@@ -243,8 +309,21 @@ class Installer:
         u.cmd('heimdall ' + ' '.join(cmd) + ('    [dry run: not run]' if self.mode == 'dry-run' else ''))
         self.key_instructions()
         if self.mode == 'dry-run':
+            if jr is not None:
+                jr.record_dry_run(gate)
+                u.ok(f'Download-mode dry run recorded for {phone_id_of(serial)}: the PIT is an SM-G960F\'s. '
+                     '--real may now flash BOOT on this phone (the same bundle)')
             u.warn('dry run: BOOT is not flashed, so the plan below has no phone checks')
             return None
+        if self.mode == 'real' and jr is None:
+            raise Refused('--real needs --serial SERIAL (the phone\'s serial, from adb devices)')
+        if jr is not None:          # --real always; a rehearsal when it names a serial
+            if not jr.had_dry_run(gate):
+                raise Refused(f'no Download-mode dry run of this bundle on {phone_id_of(serial)}: with the phone in '
+                              'Download mode, run the same command with --dry-run first (it reads the PIT, writes '
+                              'nothing), then --real')
+        if alone:
+            raise Refused(f'not flashing: {alone}')
         if not u.typed('Flash the Starbite loader into BOOT now?', 'flash boot'):
             raise Refused('BOOT not flashed')
         self.heimdall.run(cmd, write=True)
@@ -359,7 +438,9 @@ class Installer:
         if free < 2 * GIB:
             self.warnings.append(f'host: only {human(free)} free at {self.state_dir}')
         serial = pr.get('ro.boot.serialno') or st.serial
-        self.phone_id = 'phone-' + hashlib.sha256(serial.encode()).hexdigest()[:10]
+        if self.phone.serial and serial != self.phone.serial:
+            fatal.append(f'serial: the phone reports {serial or "none"}, this run is for {self.phone.serial}')
+        self.phone_id = phone_id_of(serial)
         rows.append(('phone id', f'{self.phone_id} (a hash of the serial number)', 'ok'))
         self.journal = Journal(self.state_dir / self.phone_id / 'journal.json')
         if self.m.ufs_layout is not None and not fatal:
@@ -677,6 +758,8 @@ class Installer:
         if st is None:
             return self.offline_plan()
         self.preflight(st)
+        if getattr(self.o, 'backup_only', False):
+            return self.backup_only()
         if self.mode in ('real', 'rehearse') and not self.journal.had_dry_run(self.m.sha256):
             raise Refused(f'no finished dry run of this bundle on {self.phone_id}: run the same command with '
                           '--dry-run first (it writes nothing), then again')
@@ -703,6 +786,33 @@ class Installer:
             self.ui.h1('Dry run finished')
             self.ui.ok(f'nothing was written ({len(self.r.planned)} write commands printed). '
                        'The real mode (--real, or --rehearse on a fake phone) is now allowed for this bundle on this phone.')
+        return 0
+
+    def backup_only(self):
+        """--backup-only: step 1 alone (it reads the phone and writes only to this computer), then every
+        file is read back here and checked against the phone's SHA-256. No dry run needed; nothing else runs."""
+        u = self.ui
+        b = self.journal.step('backup')
+        if b.get('status') == 'done' and not self.o.fresh_backup:
+            u.ok(f'a complete backup exists ({b["at"]}, {self.rel(b["dir"])}); --fresh-backup takes another')
+            d = Path(b['dir'])
+        else:
+            u.h1('Back up the protected areas (read only on the phone)')
+            self.do_backup(Step('backup', 'Back up the protected areas', 'this computer', 'host'))
+            if self.mode == 'dry-run':
+                return 0
+            d = Path(self.journal.step('backup')['dir'])
+        return self.report_backup(d)
+
+    def report_backup(self, d):
+        u = self.ui
+        oks, problems = check_backup_dir(d)
+        for ln in oks:
+            u.ok(ln)
+        if problems:
+            raise Stopped(f'the backup in {self.rel(d)} does not check out:\n  ' + '\n  '.join(problems))
+        u.ok(f'backup verified on this computer: {len(oks)} files, each equal to the phone\'s SHA-256 '
+             f'({self.rel(d)})')
         return 0
 
     def show_card_layout(self):
@@ -814,8 +924,12 @@ class Installer:
             done.add(name)
             j.mark_step('backup', 'started', dir=str(d), names=sorted(done))
         if self.mode != 'dry-run':
+            oks, problems = check_backup_dir(d)
+            if problems:
+                raise Stopped(f'backup in {self.rel(d)}: read back on this computer, it does not check out:\n  ' +
+                              '\n  '.join(problems) + '\nnothing was written to the phone')
             j.mark_step('backup', 'done', dir=str(d), names=sorted(done))
-            u.ok(f'backup complete: {len(done)} items in {self.rel(d)}')
+            u.ok(f'backup complete: {len(done)} items in {self.rel(d)}, every file re-read here = the phone\'s SHA-256')
 
     def do_gpt(self, s):
         u = self.ui

@@ -19,6 +19,23 @@ VARS = {'product': 'starlte', 'version-bootloader': 'starbite-fb1', 'serialno': 
 MAX_DOWNLOAD = 0x04ff0000
 a = sys.argv[1:]
 on = fakephone.read_state(R) == 'fastboot'
+want = os.environ.get('ANDROID_SERIAL') or None
+while a[:1] == ['-s']:
+    want, a = a[1], a[2:]
+_o = os.environ.get('FAKE_OTHER_PHONE', '')
+oser, ost = _o.split(':', 1) if ':' in _o else (None, None)
+other_on = ost == 'fastboot'
+if a[:1] != ['devices'] and a[:1] != ['--version']:
+    if want and want == oser:
+        if a[:1] == ['getvar'] and other_on:      # detect() asks every fastboot device what it is
+            sys.stderr.write(f'{a[1]}: {dict(VARS, serialno=oser).get(a[1], "")}\nFinished. Total time: 0.001s\n')
+            sys.exit(0)
+        sys.exit(f'fake fastboot: {a} was sent to the OTHER phone ({oser}): the installer must name its own serial')
+    if want and want != VARS['serialno']:
+        sys.stderr.write('< waiting for ' + want + ' >\n')
+        sys.exit(1)
+    if not want and on and other_on:
+        sys.exit('fastboot: error: more than one device')
 
 
 def cpio_member(data, name):
@@ -43,6 +60,8 @@ def cpio_member(data, name):
 if a[:1] == ['devices']:
     if on:
         print('FAKE0000SERIAL\tfastboot')
+    if other_on:
+        print(f'{oser}\tfastboot')
 elif a[:1] == ['getvar'] and on:
     sys.stderr.write(f'{a[1]}: {VARS.get(a[1], "")}\nFinished. Total time: 0.001s\n')
 elif a[:2] == ['oem', 'boot-next'] and on:

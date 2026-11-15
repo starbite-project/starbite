@@ -133,11 +133,32 @@ def run_shell(cmd, binary, via='adb'):
     sys.exit(p.returncode)
 
 
+SERIAL = 'FAKE0000SERIAL'
+
+
+def other_phone():
+    """FAKE_OTHER_PHONE=SERIAL:STATE: a second phone on the same computer (S9 #1 next to the one being
+    installed). It is only listed (adb devices / fastboot devices); any command sent to it fails loudly."""
+    v = os.environ.get('FAKE_OTHER_PHONE', '')
+    return tuple(v.split(':', 1)) if ':' in v else (None, None)
+
+
 def main(a):
+    want = os.environ.get('ANDROID_SERIAL') or None
     while a and a[0] in ('-s', '-t'):
+        if a[0] == '-s':
+            want = a[1]
         a = a[2:]
     cmd = a[0] if a else ''
     st = visible_state()
+    oser, ost = other_phone()
+    if cmd not in ('version', 'start-server', 'devices', 'kill-server') and not cmd.startswith('wait-for-'):
+        if want and want == oser:
+            sys.exit(f'fake adb: "{cmd}" was sent to the OTHER phone ({oser}): the installer must name its own serial')
+        if want and want != SERIAL:
+            sys.exit(f"adb: device '{want}' not found")
+        if not want and oser and ost in ('recovery', 'device', 'unauthorized'):
+            sys.exit('adb: error: more than one device/emulator')
     if cmd == 'version':
         print('Android Debug Bridge version 1.0.41 (starbite fake adb)')
     elif cmd == 'start-server' or cmd.startswith('wait-for-'):
@@ -145,7 +166,9 @@ def main(a):
     elif cmd == 'devices':
         print('List of devices attached')
         if st:
-            print(f'FAKE0000SERIAL\t{st}')
+            print(f'{SERIAL}\t{st}')
+        if oser and ost in ('recovery', 'device', 'unauthorized'):
+            print(f'{oser}\t{ost}')
     elif cmd == 'get-state':
         if not st:
             sys.stderr.write('error: no devices/emulators found\n')
