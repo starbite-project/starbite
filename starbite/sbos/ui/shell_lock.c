@@ -5279,6 +5279,72 @@ void sh_restore(void)
 }
 #include "shell_island.inc"                         /* B7: the status capsule, the live pill (toasts) */
 
+/* ---- 8w: the hardware keys (sh_key): the volume keys step the sound's volume and show a slim slider by the keys
+ * (the left edge), 1.5 s then a fade; a screenshot (Power + Volume Up, kept by the platform first) is a white flash,
+ * the shutter and a toast ---- */
+static tk_layer volhud, shotfl;
+static struct { float vol, fl; } KH = { -1, -1 };   /* seconds since the slider / the flash began, -1 none */
+#define KH_VOL_X 6.f
+#define KH_VOL_Y 196.f
+#define KH_VOL_W 10.f
+#define KH_VOL_H 150.f
+static void kh_vol_draw(int v)
+{
+    relayer(&volhud);
+    dc d = mk(&volhud, "vol-hud", KH_VOL_X, KH_VOL_Y, KH_VOL_W, KH_VOL_H, 2, 0);
+    d_rrect(&d, KH_VOL_X, KH_VOL_Y, KH_VOL_W, KH_VOL_H, KH_VOL_W / 2, TK_RGBA(0, 0, 0, .45f));
+    float h = KH_VOL_H * (float)v / 15.0f;
+    if (h > 0) d_rrect(&d, KH_VOL_X, KH_VOL_Y + KH_VOL_H - h, KH_VOL_W, h, tk_minf(KH_VOL_W / 2, h / 2), W(1));
+}
+void sh_key(int key)
+{
+    if (key == SH_KEY_VOL_UP || key == SH_KEY_VOL_DOWN) {
+        int v = sh_snd_volume() + (key == SH_KEY_VOL_UP ? 1 : -1);
+        v = tk_maxi(0, tk_mini(15, v));
+        if (v != sh_snd_volume()) sh_snd_volume_set(v);
+        cc_vol = v;                                     /* the Control Centre's slider follows */
+        CCS.lvl[1] = v / 15.0f;
+        if (CCS.built) cc_levels();
+        kh_vol_draw(v);
+        KH.vol = 0;
+        volhud.alpha = 1;
+        volhud.hidden = 0;
+        relink();
+        return;
+    }
+    if (key == SH_KEY_SHOT) {
+        KH.fl = 0;
+        shotfl.alpha = 1;
+        shotfl.hidden = 0;
+        snd_once(SH_SND_SHUTTER);
+        toast("Screenshot saved to Photos");
+        return;
+    }
+    if (key == SH_KEY_SHOT_FAILED) {
+        char b[120];
+        int n = md_cat(b, 0, sizeof b, "Screenshot not saved: ");
+        md_cat(b, n, sizeof b, sh_photo_why());
+        toast(b);
+    }
+}
+static int kh_tick(float dt)
+{
+    int mv = 0;
+    if (KH.vol >= 0) {
+        KH.vol += dt;
+        float a = KH.vol < 1.5f ? 1 : 1 - (KH.vol - 1.5f) / .3f;
+        if (a <= 0) { KH.vol = -1; volhud.hidden = 1; relayer(&volhud); } else volhud.alpha = a;
+        mv = 1;
+    }
+    if (KH.fl >= 0) {
+        KH.fl += dt;
+        float a = 1 - KH.fl / .35f;
+        if (a <= 0) { KH.fl = -1; shotfl.hidden = 1; } else shotfl.alpha = a * a;
+        mv = 1;
+    }
+    return mv;
+}
+
 /* ---- the unlock -------------------------------------------------------------------------------------------- */
 static int lk_hint;             /* cp7: the lock's spring is a tap's hint bounce (set_lock moves the live lock) */
 /* cp7q (7r: the unlock drag's first move 85-100 ms and the ticks after it on the phone: the flat copy made whole there,
@@ -5398,13 +5464,13 @@ static void relink(void)
     if (!apdim.name) { tk_layer_init(&apdim, "app-dim"); apdim.hidden = 1; }
     if (!emfade.name) { tk_layer_init(&emfade, "em-fade"); emfade.hidden = 1; }   /* cp7u: Emergency's fade on the GPU row */
     tk_layer *r[] = { &emfade, &star, &star_e, &home, &swg, &lockg, &lockflat, &apdim, &appg, &apicon, &swcover, &ncl, &focus, &ccl, &bnl, &cfl, &kitl, &cvl,
-                      &boot, &homebar, &pwl, &toastl, &slp };   /* P3x: pwl the power sheet */
+                      &boot, &homebar, &pwl, &toastl, &volhud, &shotfl, &slp };   /* P3x: pwl the power sheet; 8w: sh_key's */
     nc_link();                                       /* helper D: the Notification Centre (ncl), the banner (bnl) */
     sw_link();                                       /* helper D: the switcher's cards (swg), a card's snapshot over its opening window */
     cm_link();                                       /* helper I: the call screen (cvl) */
     kit_link();                                      /* helper B2: an alert, an action sheet, a sheet (kitl) */
     pw_link();                                       /* P3x: the power sheet (pwl) */
-    link(&root, r, 23);
+    link(&root, r, (int)(sizeof r / sizeof r[0]));
     pc_link();                                       /* Track A: the passcode screen (under the call screen) */
     isl_link();                                      /* B7: the capsule, the pill and its words */
     tk_layer *ag[] = { &appbg, &appc, &apkey, &apnum, &apdel, &apsw, &aptm, &apctl, &apcalc, &apnote, &apsrch, &emsel, &kbg, &emp, &apsb, &apphl };
@@ -5493,6 +5559,13 @@ void sh_init_begin(tk_comp *c)
     slp.solid_h = TK_H;
     slp.opaque = 1;
     slp.hidden = 1;
+    tk_layer_init(&volhud, "vol-hud");             /* 8w: sh_key's volume slider, the screenshot's flash */
+    volhud.hidden = 1;
+    tk_layer_init(&shotfl, "shot-flash");
+    shotfl.solid = 0xffffffffu;
+    shotfl.solid_w = TK_W;
+    shotfl.solid_h = TK_H;
+    shotfl.hidden = 1;
     tk_layer_init(&lockg, "lock");
     lockg.ox = PT(195);                            /* the wake grows it about the middle */
     lockg.oy = PT(401);
@@ -5700,6 +5773,8 @@ void sh_set(const char *what, const char *key, float v)
     } else if (!tk_strcmp(what, "tab")) {
         static const char *const TK[4] = { "fav", "rec", "con", "pad" };
         for (int t = 0; t < 4; t++) if (!tk_strcmp(TK[t], key)) { AS.tab = t; build_app_page(AP.a); }
+    } else if (!tk_strcmp(what, "hwkey")) {    /* 8w: the stills: a hardware key (SH_KEY_*) */
+        sh_key((int)v);
 #ifdef SH_HAS_STARTUP
     } else if (!tk_strcmp(what, "suview")) {   /* 8w: the stills: Startup's view (key: the list's page) */
         startup_still_view((int)v, key && key[0] ? key[0] - '0' : 0);
@@ -7124,6 +7199,7 @@ int sh_tick(float dt, float t)
     mv |= cm_tick(dt, t);                       /* helper I: the call button's hold, the call screen */
     mv |= pw_tick(dt, t);                       /* P3x: the power sheet */
     mv |= cam_tick(dt, t);                      /* the Camera: its frames, a shot (shell_camera.inc) */
+    mv |= kh_tick(dt);                          /* 8w: the volume slider's fade, the screenshot's flash */
     mv |= kb_tick(dt, t);                       /* B3: delete held */
     if (T.kind == G_APPTAP && !T.moved && t - T.t0 >= 500) {    /* B3: a long press on a text field: the edit menu */
         emt e;

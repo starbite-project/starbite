@@ -10,7 +10,8 @@ enum {
     KIN_BACK,                       /* Bixby held */
     KIN_POWER,                      /* Power short: screen off / on */
     KIN_POWER_LONG,                 /* Power held 1 s: the power menu */
-    KIN_PRESS, KIN_MOVE, KIN_RELEASE   /* touch, with the position */
+    KIN_PRESS, KIN_MOVE, KIN_RELEASE,  /* touch, with the position */
+    KIN_SHOT                        /* 8w: Power + Volume Up together (iOS's screenshot); neither key's own action */
 };
 struct kin {
     int type, x, y;

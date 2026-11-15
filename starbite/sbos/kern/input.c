@@ -96,6 +96,15 @@ static void keys_poll(uint64_t now)
         power_long_sent = 0;
         keys_seen |= 0;
     }
+    /* 8w: Power + Volume Up together, either one first (iOS's screenshot): KIN_SHOT; Power's release then is not a press
+     * (no screen off) and no long press follows, Volume Up does not repeat */
+    if (((pressed & SB_K_UP) && (stable & SB_K_POWER)) || ((pressed & SB_K_POWER) && (stable & SB_K_UP))) {
+        kin_push(KIN_SHOT, 0, 0);
+        t_power = 0;
+        power_long_sent = 1;
+        vol_key = 0;
+        pressed &= ~(SB_K_UP | SB_K_POWER);
+    }
     if ((stable & SB_K_POWER) && !power_long_sent && t_power && now - t_power >= POWER_LONG_MS) {
         power_long_sent = 1;
         kin_push(KIN_POWER_LONG, 0, 0);

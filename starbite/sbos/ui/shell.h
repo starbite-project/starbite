@@ -442,6 +442,10 @@ int sh_crash_get(int i, sh_crash_t *c);   /* 0 ok */
 int sh_restart_menu(void);
 int sh_restart_recovery(void);
 int sh_restart_download(void);
+/* 8w: the hardware keys the shell gets: the volume keys (it steps sh_snd_volume and shows its slider), the screenshot
+ * (Power + Volume Up: the platform keeps the frame in Photos first, then tells the shell how it went: a flash) */
+enum { SH_KEY_VOL_UP = 1, SH_KEY_VOL_DOWN = 2, SH_KEY_SHOT = 3, SH_KEY_SHOT_FAILED = 4 };
+void sh_key(int key);
 int sh_restart_maint(int rescue);         /* 8w: Starbite Maintenance ("maint"), or its rescue copy ("maint-rescue") */
 int sh_restart_fastboot(void);            /* 8w: the loader's USB fastboot ("fastboot"); never Samsung's RECOVERY */
 /* the loader's table for this start: medium 0 UFS, 1 the card, -1 none; why: why this start, in words */

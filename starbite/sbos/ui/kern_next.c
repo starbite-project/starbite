@@ -1405,6 +1405,19 @@ void next_kevent(const void *evp)
     if (baking) return;                              /* touches before the lock screen is whole: ignored */
     if (!ready) { ui_kevent(evp); return; }
     const struct kin *e = evp;
+    if (e->type == KIN_UP || e->type == KIN_DOWN) {   /* 8w: the volume keys: the shell's volume (and its slider) */
+        sh_key(e->type == KIN_UP ? SH_KEY_VOL_UP : SH_KEY_VOL_DOWN);
+        start_ticking();
+        return;
+    }
+    if (e->type == KIN_SHOT) {                       /* 8w: Power + Volume Up: the frame on screen into Photos */
+        const tk_bmp *f = tk_comp_shown(&comp);
+        int r = f && f->px && f->stride == f->w ? sh_photo_save(f->px, f->w, f->h) : -1;
+        sb_log(r == 0 ? "next: a screenshot, kept in Photos" : "next: a screenshot was not kept");
+        sh_key(r == 0 ? SH_KEY_SHOT : SH_KEY_SHOT_FAILED);
+        start_ticking();
+        return;
+    }
     int ph = e->type == KIN_PRESS ? 0 : e->type == KIN_MOVE ? 1 : e->type == KIN_RELEASE ? 2 : -1;
     if (ph < 0) return;
     static int dark_gesture;                         /* Track A: a touch that began with the panel dark at the ear */
