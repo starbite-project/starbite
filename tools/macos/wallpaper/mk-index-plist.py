@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """mk-index-plist.py OUT [IMAGE_PATH]: a wallpaper store (~/Library/Application Support/com.apple.wallpaper/Store/
 Index.plist) whose desktop, on every display and space, is one still image (provider com.apple.wallpaper.choice.image,
-configuration {type: imageFile, url: {relative: file URL}}; layout as macOS writes it). Default image: Sequoia
-Sunrise's still frame, which is on the card root, unlike the 171 MiB video that the default choice wants (S3zs)."""
+configuration {type: imageFile, url: {relative: file URL}}). Layout = what macOS 15.6's WallpaperAgent writes
+itself (card copy read 2026-11-15, S3zt): Type "linked" with one "Linked" entry, no EncodedOptionValues; the macOS 27
+layout ("individual" + "Desktop"/"Idle") was rejected and replaced by the default (S3zt). SystemDefault stays the
+default choice. Default image: Sequoia Sunrise's still frame, which is on the card root, unlike the 171 MiB video
+that the default choice wants (S3zs)."""
 import datetime, plistlib, sys, urllib.parse
 
 out = sys.argv[1]
@@ -11,18 +14,17 @@ img = sys.argv[2] if len(sys.argv) > 2 else \
 url = 'file://' + urllib.parse.quote(img)
 now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 cfg = plistlib.dumps({'type': 'imageFile', 'url': {'relative': url}}, fmt=plistlib.FMT_BINARY)
-opts = plistlib.dumps({'values': {}}, fmt=plistlib.FMT_BINARY)
 
 
-def desktop():
-    return {'Desktop': {'Content': {'Choices': [{'Configuration': cfg, 'Files': [],
-                                                 'Provider': 'com.apple.wallpaper.choice.image'}],
-                                    'EncodedOptionValues': opts, 'Shuffle': '$null'},
-                        'LastSet': now, 'LastUse': now},
-            'Type': 'individual'}
+def linked(choice):
+    return {'Type': 'linked',
+            'Linked': {'LastSet': now, 'LastUse': now,
+                       'Content': {'Choices': [choice], 'Shuffle': '$null'}}}
 
 
-d = {'AllSpacesAndDisplays': desktop(), 'SystemDefault': desktop(), 'Displays': {}, 'Spaces': {}}
+image = {'Provider': 'com.apple.wallpaper.choice.image', 'Files': [], 'Configuration': cfg}
+default = {'Provider': 'default', 'Files': [], 'Configuration': b''}
+d = {'AllSpacesAndDisplays': linked(image), 'SystemDefault': linked(default), 'Spaces': {}, 'Displays': {}}
 with open(out, 'wb') as f:
     plistlib.dump(d, f, fmt=plistlib.FMT_BINARY)
 print(out, url)
