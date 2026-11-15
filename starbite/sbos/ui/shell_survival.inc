@@ -424,7 +424,7 @@ static void page_sos(dc *d)
     sv_switch_row(d, SOS_ROW, "Torch", 0);
     sv_switch_row(d, SOS_ROW + 47, "Vibration", 1);
     d_text(d, TK_IT400, 13, ROW_TX, bl(TK_IT400, 13, SOS_SEG_Y - 22), "THE SCREEN", .52f, 0, W(.55f), 0);
-    sv_text(d, TK_IT400, 13, ROW_TX, SOS_SEG_Y + 50, CONTENT_R - 16 - ROW_TX, 18, "Calls to 112 need a SIM and the modem: not in this version.", W(.4f));
+    sv_text(d, TK_IT400, 13, ROW_TX, SOS_SEG_Y + 50, CONTENT_R - 16 - ROW_TX, 18, "Calls to 112: Call 112 on the lock restarts into Android (One UI) to call.", W(.4f));
 }
 static void sos_extras(void)
 {

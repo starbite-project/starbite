@@ -1059,6 +1059,12 @@ static void build_etool(void)
 #define NEC 7                           /* 0 cards 0..3, 4 Exit, 5 cards 4..5, 6 cards 6..7 */
 #define EC_LAYER(i) (&ecard[5 + ((i) - 4) / 2])   /* the layer of card i (4..7) */
 static tk_layer ecard[NEC], empill;
+/* 8w (the user, 11-15): Emergency's "Call 112" capsule, fixed between the lock's two holds (it never scrolls): restarts
+ * into One UI after the platform's hold to confirm (shell_comms.inc: cm_call112) */
+static tk_layer em112;
+#define EM112_W 132.0f
+#define EM112_H 44.0f
+#define EM112_Y 705.0f
 static int ec_next = 8;                 /* survival-next: cards 4..7 drawn so far */
 static int ec_wait;                     /* B6: Emergency's first cards or Exit not drawn yet (hidden till then) */
 typedef struct { const char *icon, *t, *s, *act; } ecard_t;   /* act: the app it opens (none: a toast) */
@@ -1089,7 +1095,7 @@ static void ec_card_part(dc *d, int i, float top, int part)
 static void ec_card(dc *d, int i, float top) { ec_card_part(d, i, top, -1); }
 /* (the first four cards in one layer, each card's backdrop what is drawn before it, as in the list; then Exit, then
  * the layers of cards 4..7: B6's ep_card, a piece at a time, below set_emergency) */
-static void free_ecards(void) { for (int i = 0; i < NEC; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } ec_next = 8; }
+static void free_ecards(void) { for (int i = 0; i < NEC; i++) { relayer(&ecard[i]); ecard[i].hidden = 1; } ec_next = 8; relayer(&em112); em112.hidden = 1; }
 static int cards_pending;       /* the platter glass, the vendor cards and the tools still to make again after Emergency (one per idle turn) */
 static void build_lockpart(int i) { if (i == 0) build_platter_gh(); else if (i == 1) build_platter_face(); else if (i <= NG + 1) build_vcard(i - 2); else build_etool(); }
 #define LOCK_PARTS (NG + 3)
@@ -1297,6 +1303,7 @@ static void place_list(void)
     ecard[0].hidden = ecard[4].hidden = !EMG || ec_wait;
     ecard[5].hidden = !EMG || ec_next <= 4;          /* survival-next: shown from its first card */
     ecard[6].hidden = !EMG || ec_next <= 6;
+    em112.hidden = !EMG || ec_wait || !em112.bmp.px;  /* 8w */
     list.y = PT(-scroll);
     float lh = EMG ? LIST_H : list_h();
     list.clip_r = (tk_rect){ 0, PT(LIST_TOP), PT(390), PT(lh) };
@@ -4897,6 +4904,15 @@ static void ep_card(void)
         ecard[4].hidden = 1;
         d_glass(&d, x, top, w, 32, 16, 1, 1);
         d_text(&d, TK_IT600, 13, x + 14, top + 8 + 13, "Exit Emergency", 0, 0, INK, 0);
+        {   /* 8w: Call 112 (a phone and the words, white on red) */
+            dc e = mk(&em112, "em112", 195 - EM112_W / 2, EM112_Y, EM112_W, EM112_H, 2, 0);
+            em112.hidden = 1;
+            d_rrect(&e, 195 - EM112_W / 2, EM112_Y, EM112_W, EM112_H, EM112_H / 2, C_RED);
+            float tw0 = tw(TK_IT600, 17, "Call 112", 0, 0), x0 = 195 - (30 + 4 + tw0) / 2;   /* "call": 30 pt */
+            d_icon(&e, "call", x0, EM112_Y + 7, 1);
+            d_text(&e, TK_IT600, 17, x0 + 34, bl(TK_IT600, 17, EM112_Y + 11), "Call 112", 0, 0, W(1), 0);
+            trim(&em112);
+        }
         tk_a8_free(&ecard[0].glass);
         trim(&ecard[0]);
         trim(&ecard[4]);
@@ -5484,11 +5500,12 @@ static void relink(void)
     link(&appc, st, na + cm_layers(st + na));    /* helper I: the keypad's line and ring, Messages' fields */
     /* B9: the notifications' stack is the lock's (lkng, over the list: fanned out it takes the list's room); the
      * Centre's "N Notifications" pill only in Emergency */
-    tk_layer *lk[] = { &lkground, &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &sysplat, &sysless, &lkng, &Q[0].grp, &Q[1].grp, &hint, &ncpill };
+    tk_layer *lk[] = { &lkground, &lstatus, &lclock, &lwidgets, &mark, &glyph_c, &glyph_o, &empill, &list, &sysplat, &sysless, &lkng, &Q[0].grp, &Q[1].grp, &hint, &em112, &ncpill };   /* 8w: em112 (Emergency only) */
     if (!lkground.name) { tk_layer_init(&lkground, "lock-ground"); lkground.hidden = 1; }   /* cp7q: the moving lock's ground */
     if (!sysplat.name) { tk_layer_init(&sysplat, "lock-systems"); sysplat.hidden = 1; }   /* 8a */
     if (!sysless.name) { tk_layer_init(&sysless, "lock-systems-less"); sysless.hidden = 1; }
-    link(&lockg, lk, EMG ? 16 : 15);
+    if (!em112.name) { tk_layer_init(&em112, "em112"); em112.hidden = 1; }
+    link(&lockg, lk, EMG ? 17 : 15);
     lkn_link();
     /* B10: the vendor cards in the list as B4 had them: the lower cards, the members' platters and words under the
      * head card, "Show less" above it, the chevron on top */
@@ -5847,7 +5864,7 @@ static int em_target(float x, float y, emt *o)
 
 /* ---- gestures ---------------------------------------------------------------------------------------------- */
 enum { G_NONE, G_LOCK, G_LIST, G_TAP_HEAD, G_TAP_ROW, G_HOLD, G_THUMB, G_SCRIM, G_RELOCK, G_PAGE, G_CC, G_CCTAP, G_CCSL, G_APP, G_APPTAP, G_DOCK, G_ETAP, G_CCEM, G_CF, G_CCCELL,
-       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX, G_NC, G_SW, G_KB, G_CCX, G_SET, G_LKN, G_SYSP };   /* B3: G_KB the keyboard's (shell_kb.inc); B4: G_CCX the Control Centre's expanded module; helper B2: G_SET Settings' own pages; B9: G_LKN the lock's notifications (shell_lknote.inc) */   /* helper D: G_NC shell_nc.inc's (the Centre, the banner, the
+       G_CCDRAG, G_FOCUSDRAG, G_MEDIA, G_LINUX, G_NC, G_SW, G_KB, G_CCX, G_SET, G_LKN, G_SYSP, G_E112 };   /* B3: G_KB the keyboard's (shell_kb.inc); B4: G_CCX the Control Centre's expanded module; helper B2: G_SET Settings' own pages; B9: G_LKN the lock's notifications (shell_lknote.inc) */   /* helper D: G_NC shell_nc.inc's (the Centre, the banner, the
                                                      * lock's pill), G_SW shell_switcher.inc's (the cards) */
 static struct {
     int kind, arg, arg2, moved;
@@ -6462,6 +6479,12 @@ static void sh_touch_(int phase, float x, float y, float t)
                 return;
             }
         }
+        if (EMG && !em112.hidden && tk_fabsf(x - 195) <= EM112_W / 2 + 6 && y >= EM112_Y - 6 && y < EM112_Y + EM112_H + 6) {
+            T.kind = G_E112;                         /* 8w: Call 112 (dimmed under the finger) */
+            em112.alpha = .6f;
+            tk_tracker_add(&T.tr, y, t);
+            return;
+        }
         tp_mark("touch down: lock, list");
         int gi = -1, r;
         if (EMG && y >= LIST_TOP && y < LIST_TOP + LIST_H && y < H_PT - 30) {
@@ -6594,6 +6617,10 @@ static void sh_touch_(int phase, float x, float y, float t)
             break;
         case G_DOCK:
             if (T.moved) press_cancel();
+            break;
+        case G_E112:                              /* 8w: a drag from Call 112 is the lock's swipe */
+            if (T.moved) { em112.alpha = 1; T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0; }
+            tk_tracker_add(&T.tr, y, t);
             break;
         case G_SYSP:                              /* 8a: a drag from the platter is the lock's swipe */
             if (T.moved) { hl_off(); T.kind = G_LOCK; T.base = lockY; sp_lock.live = 0; lk_hint = 0; }
@@ -6737,6 +6764,10 @@ static void sh_touch_(int phase, float x, float y, float t)
     }
     case G_ETAP:
         if (!T.moved && T.arg >= 0) sv_ec_tap(T.arg);   /* survival-next */
+        break;
+    case G_E112:                                    /* 8w */
+        em112.alpha = 1;
+        if (!T.moved) cm_call112();
         break;
     case G_CCEM:
         if (!T.arg) toast("Press and hold");

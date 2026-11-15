@@ -144,6 +144,7 @@ int sh_restart_menu(void) { return sf_ask("Restart to the boot menu?", "The load
 int sh_restart_recovery(void) { return sf_ask("Restart to Starbite Recovery?", "The loader's recovery.", "would restart to Starbite Recovery"); }
 int sh_restart_repair(void) { return sf_ask("Restart to Repair and Reset?", "Starbite Recovery's repair page.", "would restart to recovery-repair"); }
 int sh_restart_maint(int rescue) { fprintf(stderr, "startup: would restart to %s (asks first)\n", rescue ? "maint-rescue" : "maint"); return 0; }
+int sh_call_emergency_android(void) { fprintf(stderr, "startup: would restart into One UI for 112 (asks first)\n"); return 0; }
 int sh_restart_fastboot(void) { fprintf(stderr, "startup: would restart to the loader's USB fastboot (asks first)\n"); return 0; }
 int sh_restart_download(void) { return sf_ask("Restart to Download mode?", "S-Boot's Odin mode.", "would restart to Download mode"); }
 int sh_crash_count(void) { return 2; }

@@ -17,7 +17,23 @@
  * Nothing dials, answers or sends but the user's own hold or tap; no glass is baked here (the kept glass circles are
  * copied); numbers and texts go to the screen only, never to the log. */
 
-#define CM_EMERGENCY "Emergency calls are not supported on Starbite OS: use another phone"
+#define CM_EMERGENCY "Starbite OS can't place emergency calls"
+/* 8w (the user, 11-15): emergency calls are Android's: "Call 112" (the keypad's red pill left of the call button, the
+ * line under a typed emergency number, the call button on one, Emergency mode's capsule) restarts into One UI after
+ * the platform's hold to confirm (sh_call_emergency_android) */
+#define E112_CX 91.0f                        /* the keypad's pill: mirrored from the delete (299) about the call button */
+#define E112_W 76.0f
+#define E112_H 34.0f
+static void cm_call112(void)
+{
+    if (sh_call_emergency_android() < 0) toast("One UI isn't on this phone: call 112 from another phone");
+}
+static void d_call112(dc *d, float cx, float cy, float w, float h, float fs)
+{
+    d_rrect(d, cx - w / 2, cy - h / 2, w, h, h / 2, C_RED);
+    float tw0 = tw(TK_IT600, fs, "Call 112", 0, 0);
+    d_text(d, TK_IT600, fs, cx - tw0 / 2, bl(TK_IT600, fs, cy - fs * .62f), "Call 112", 0, 0, W(1), 0);
+}
 static void hl_set(tk_layer *l, tk_rect r, tk_rect clip, float rad, tk_col c);   /* shell_lock.c's press light */
 static void hl_off(void);
 
@@ -242,21 +258,28 @@ static int cm_wrap(char ln[CM_ML][100], const char *s, float fs, float maxw, flo
 #define PAD_CY 605.0f                       /* the call button's centre (78 pt) */
 #define HINT_Y 134.0f                       /* the line under the number (two lines at most) */
 static int hint_cell;                       /* the line is "Cellular is off" (its tap opens Settings > Cellular) */
+static int hint_emg;                        /* 8w: the line is the emergency number's (its tap: Call 112 in Android) */
 static void cm_hint_build(void)
 {
     relayer(&cmhint);
-    hint_cell = 0;
+    hint_cell = hint_emg = 0;
     if (!is_app("phone") || AS.tab != 3) { cmhint.hidden = 1; return; }
     const char *s = 0;
     int red = 0;
     if (CM.why[0]) { s = CM.why; red = 1; }
-    else if (AS.num[0] && cm_emergency(AS.num)) { s = CM_EMERGENCY; red = 1; }
+    else if (AS.num[0] && cm_emergency(AS.num)) hint_emg = 1;
     else if (!sh_comms_ok()) s = "Calls aren't in this version yet";
     else if (!cm_cell_on()) hint_cell = 1;
     else if (!cm_registered()) s = md_text();               /* Starting, Searching, No SIM, SIM PIN on ... */
-    if (!s && !hint_cell) { cmhint.hidden = 1; return; }
+    if (!s && !hint_cell && !hint_emg) { cmhint.hidden = 1; return; }
     dc d = mk(&cmhint, "dial-line", MARGIN, HINT_Y, CONTENT_W, 40, 2, 0);
-    if (hint_cell) {
+    if (hint_emg) {
+        /* 8w: "Starbite OS can't place emergency calls · Call in Android", the second part red (its tap asks) */
+        const char *a = CM_EMERGENCY " \xc2\xb7 ", *b = "Call in Android";
+        float wa = tw(TK_IT400, 13, a, 0, 0), wb = tw(TK_IT600, 13, b, 0, 0), x = 195 - (wa + wb) / 2;
+        d_text(&d, TK_IT400, 13, x, bl(TK_IT400, 13, HINT_Y + 9), a, 0, 0, C_LABEL2, 0);
+        d_text(&d, TK_IT600, 13, x + wa, bl(TK_IT400, 13, HINT_Y + 9), b, 0, 0, C_RED, 0);
+    } else if (hint_cell) {
         /* "Cellular is off · Turn On in Settings", the second part in the accent (it opens Settings > Cellular) */
         const char *a = "Cellular is off \xc2\xb7 ", *b = "Turn On in Settings";
         float wa = tw(TK_IT400, 14, a, 0, 0), wb = tw(TK_IT600, 14, b, 0, 0), x = 195 - (wa + wb) / 2;
@@ -330,7 +353,7 @@ static void cv_show(int mode);
 /* the hold is full: the number goes to the kernel (never an emergency number: the screen says why instead) */
 static void cm_dial(void)
 {
-    if (cm_emergency(AS.num)) { cm_refuse(CM_EMERGENCY); toast("Can't call this number"); return; }
+    if (cm_emergency(AS.num)) { cm_call112(); return; }   /* 8w: never sent down: Android's instead */
     char why[SH_WHY] = "";
     if (sh_dial(AS.num, why) < 0) { cm_refuse(why); toast("The call didn't start"); return; }
     CM.why[0] = 0;
@@ -368,7 +391,7 @@ static void cm_hold_up(int moved)
     cm_hold_end();
     if (moved) return;
     if (!AS.num[0]) toast("Enter a number");
-    else if (cm_emergency(AS.num)) { cm_refuse(CM_EMERGENCY); }
+    else if (cm_emergency(AS.num)) cm_call112();           /* 8w: the call button on 112: Android's */
     else if (!sh_comms_ok()) toast("Calls aren't in this version yet");
     else if (!cm_cell_on()) toast("Cellular is off: turn it on in Settings");
     else if (was) toast("Hold to call");
@@ -542,6 +565,7 @@ static void page_phone(dc *d)
         }
         d_rrect(d, PAD_CX - 39, PAD_CY - 39, 78, 78, 39, C_GREEN);
         d_icon(d, "call", PAD_CX - 15, PAD_CY - 15, 1);
+        d_call112(d, E112_CX, PAD_CY, E112_W, E112_H, 14);   /* 8w */
     } else if (AS.tab == 1) {
         if (!nrc && !nfav) {                         /* else the list (its title the first item) */
             d_h1(d, "Calls");
@@ -634,6 +658,8 @@ static void cm_phone_tap(float x, float y)
     }
     if (AS.tab != 3) return;
     if (hint_cell && y >= HINT_Y - 4 && y < HINT_Y + 34) { cm_open_cellular(); return; }
+    if (hint_emg && y >= HINT_Y - 4 && y < HINT_Y + 34) { cm_call112(); return; }
+    if (tk_fabsf(x - E112_CX) <= E112_W / 2 + 6 && tk_fabsf(y - PAD_CY) <= E112_H / 2 + 8) { sh_haptic(); cm_call112(); return; }
     int i = key_hit(x, y);
     int n = (int)tk_strlen(AS.num);
     if (i >= 0) {
@@ -2114,7 +2140,10 @@ static int cm_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
             }
         }
         if (AS.tab != 3) return 0;
-        if (hint_cell && y >= HINT_Y - 4 && y < HINT_Y + 34) { *r = *g = (tk_rect){ MARGIN, HINT_Y, CONTENT_W, 30 }; *rad = 8; *c = APR_DIM; return 1; }
+        if ((hint_cell || hint_emg) && y >= HINT_Y - 4 && y < HINT_Y + 34) { *r = *g = (tk_rect){ MARGIN, HINT_Y, CONTENT_W, 30 }; *rad = 8; *c = APR_DIM; return 1; }
+        if (tk_fabsf(x - E112_CX) <= E112_W / 2 + 6 && tk_fabsf(y - PAD_CY) <= E112_H / 2 + 8) {   /* 8w: Call 112 */
+            *r = *g = (tk_rect){ E112_CX - E112_W / 2, PAD_CY - E112_H / 2, E112_W, E112_H }; *rad = E112_H / 2; *c = APR_DIM; return 1;
+        }
         float ex = x - 299, ey = y - 605;
         if (AS.num[0] && ex * ex + ey * ey <= 30 * 30) { *r = *g = (tk_rect){ 299 - 24, 605 - 18, 48, 36 }; *rad = 10; *c = APR_DIM; return 1; }
         return 0;

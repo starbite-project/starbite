@@ -448,6 +448,9 @@ enum { SH_KEY_VOL_UP = 1, SH_KEY_VOL_DOWN = 2, SH_KEY_SHOT = 3, SH_KEY_SHOT_FAIL
 void sh_key(int key);
 int sh_restart_maint(int rescue);         /* 8w: Starbite Maintenance ("maint"), or its rescue copy ("maint-rescue") */
 int sh_restart_fastboot(void);            /* 8w: the loader's USB fastboot ("fastboot"); never Samsung's RECOVERY */
+/* 8w (the user, 11-15): "Call 112": Starbite never dials an emergency number; this restarts into One UI ("android")
+ * once, at any hour, after the usual hold to confirm. 0 asked, < 0 no One UI on this phone or a question already open */
+int sh_call_emergency_android(void);
 /* the loader's table for this start: medium 0 UFS, 1 the card, -1 none; why: why this start, in words */
 typedef struct {
     int valid, loader_version, medium, card_only, shell_mode, req_action, post_fails, post_warns, crash_sev;

@@ -117,7 +117,7 @@ static int known(const char *key)
 
 /* ---- confirmations and restarts ---------------------------------------------------------------------------------- */
 
-enum { RS_ONCE = 1, RS_REQ, RS_MENU, RS_RECOVERY, RS_DOWNLOAD, RS_REPAIR, RS_MAINT, RS_RESCUE, RS_FASTBOOT };
+enum { RS_ONCE = 1, RS_REQ, RS_MENU, RS_RECOVERY, RS_DOWNLOAD, RS_REPAIR, RS_MAINT, RS_RESCUE, RS_FASTBOOT, RS_EMG112 };
 static struct { int what; unsigned action; char key[24]; } pend;
 
 static void download_now(void)
@@ -202,6 +202,11 @@ static void restart_done(int ok)
         say("restart to the loader's USB fastboot (\"fastboot\")", 0);
         if (!dry())
             power_boot_os("fastboot");
+        break;
+    case RS_EMG112:                         /* 8w (the user, 11-15): emergency calls are Android's; no hour rule */
+        say("restart into One UI for an emergency call", pend.key);
+        if (!dry())
+            power_boot_os(pend.key);
         break;
     case RS_DOWNLOAD:
         say("restart to Download mode", 0);
@@ -372,6 +377,18 @@ int sh_restart_fastboot(void)
 {
     return ask(RS_FASTBOOT, 0, 0, "Restart to USB Fastboot?", "The loader waits for a computer (fastboot over USB).",
                "Power or the side button leaves it to the boot menu.");
+}
+
+/* 8w (the user, 11-15): Starbite never dials an emergency number (modem.c refuses it); "Call 112" restarts into One UI
+ * once, at any hour (a user's emergency is not a night-time One UI boot), after the usual hold */
+#define EMG_OS_KEY "android"
+int sh_call_emergency_android(void)
+{
+    if (!known(EMG_OS_KEY))
+        return -1;
+    return ask(RS_EMG112, EMG_OS_KEY, 0, "Call 112 from Android?",
+               "Starbite OS can't place emergency calls. The phone restarts into One UI (Android) to call 112.",
+               "Its lock screen's Emergency call works without unlocking.");
 }
 
 int sh_restart_download(void)
