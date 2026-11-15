@@ -1,0 +1,2 @@
+# S3zx: the S3zi app-launch test agent (opens Settings/App Store/TextEdit by itself after every login)
+/Library/LaunchAgents/org.starbite.applaunch.plist
