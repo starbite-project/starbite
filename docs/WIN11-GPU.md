@@ -2944,7 +2944,7 @@ GDI present.
 
 ### 6.98 T72 read (SMOOTH1): the desktop composes at 60 fps with one frame of input delay; what costs CPU
 
-(2026-11-16 01:15) **T72** (`build/win/results-t72`, the user's T61 drivers, big cores; sbsmooth at logon, +1, +2.5,
+(2026-11-16 01:08) **T72** (`build/win/results-t72`, the user's T61 drivers, big cores; sbsmooth at logon, +1, +2.5,
 +5 min; all four runs alike, so the desktop is not slower right after logon in this boot):
 - **Frame pace:** a repainting window gets 61.8-62.5 fps, interval p50 16.0 ms, p95 16.6-17.3, p99 17.1-19.7, worst
   21-64 ms, none over 100 ms; full screen the same (p99 18.6-22.5). The panel reports 60.3-61.8 Hz. DWM's own frame
