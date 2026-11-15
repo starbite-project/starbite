@@ -117,7 +117,7 @@ static int known(const char *key)
 
 /* ---- confirmations and restarts ---------------------------------------------------------------------------------- */
 
-enum { RS_ONCE = 1, RS_REQ, RS_MENU, RS_RECOVERY, RS_DOWNLOAD, RS_REPAIR };
+enum { RS_ONCE = 1, RS_REQ, RS_MENU, RS_RECOVERY, RS_DOWNLOAD, RS_REPAIR, RS_MAINT, RS_RESCUE, RS_FASTBOOT };
 static struct { int what; unsigned action; char key[24]; } pend;
 
 static void download_now(void)
@@ -187,6 +187,21 @@ static void restart_done(int ok)
         say("restart to Starbite Recovery's repair page (\"recovery-repair\")", 0);
         if (!dry())
             power_boot_os("recovery-repair");
+        break;
+    case RS_MAINT:                          /* 8w: keys the loader takes itself (its mailbox), never RECOVERY */
+        say("restart to Starbite Maintenance (\"maint\")", 0);
+        if (!dry())
+            power_boot_os("maint");
+        break;
+    case RS_RESCUE:
+        say("restart to Starbite Maintenance's rescue (\"maint-rescue\")", 0);
+        if (!dry())
+            power_boot_os("maint-rescue");
+        break;
+    case RS_FASTBOOT:
+        say("restart to the loader's USB fastboot (\"fastboot\")", 0);
+        if (!dry())
+            power_boot_os("fastboot");
         break;
     case RS_DOWNLOAD:
         say("restart to Download mode", 0);
@@ -341,6 +356,22 @@ int sh_restart_repair(void)
 {
     return ask(RS_REPAIR, 0, 0, "Restart to Repair and Reset?", "Starbite Recovery opens its repair page (an older loader: its main page).",
                "Restart from there to come back.");
+}
+
+int sh_restart_maint(int rescue)
+{
+    return rescue ? ask(RS_RESCUE, 0, 0, "Restart to Maintenance (Rescue)?",
+                        "Starbite Maintenance's last-known-good copy: when the normal one does not start.",
+                        "Restart from there to come back.")
+                  : ask(RS_MAINT, 0, 0, "Restart to Starbite Maintenance?",
+                        "Checks and repairs the phone's partitions, every step with its plan first.",
+                        "Restart from there to come back.");
+}
+
+int sh_restart_fastboot(void)
+{
+    return ask(RS_FASTBOOT, 0, 0, "Restart to USB Fastboot?", "The loader waits for a computer (fastboot over USB).",
+               "Power or the side button leaves it to the boot menu.");
 }
 
 int sh_restart_download(void)

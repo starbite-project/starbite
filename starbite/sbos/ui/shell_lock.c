@@ -92,9 +92,13 @@ static float lkn_bot(void);                          /* 8a: above the Systems ca
 
 /* ---- the catalog as the concept groups it (P2: from the store's catalog, as the boot menu) ----------------- */
 typedef struct { const char *k, *name, *meta, *tag; int self; } sys_t;
-typedef struct { const char *key, *name; int n; sys_t it[3]; } grp_t;
+#define GMAX 4                                  /* 8w: the systems a group's card lists */
+typedef struct { const char *key, *name; int n; sys_t it[GMAX]; } grp_t;
 static const char *LAST = "win11";
-static const grp_t G[5] = {
+/* 8w (the user's goal: Next replaces the boot menu once it is a whole OS): the cards from the live catalog
+ * (sh_os_get, sys_load at the shell's start: iOS 27, Sequoia, the big-core Windows...), this table only when the
+ * platform has no catalog */
+static grp_t G[5] = {
     { "apple", "Apple", 3, { { "ios16", "iOS 16", "Version 16.5", 0, 0 }, { "mac13", "macOS Ventura", "Version 13.5 \xc2\xb7 on the memory card", 0, 0 },
                              { "ios26", "iOS 26", "Version 26.6.2", "BETA", 0 } } },
     { "microsoft", "Microsoft", 1, { { "win11", "Windows 11", "Version 23H2", 0, 0 } } },
@@ -104,6 +108,48 @@ static const grp_t G[5] = {
                                    { "utility", "Utility OS", "Version 2.0 \xc2\xb7 keys, gamepad, sensors", 0, 0 } } },
 };
 #define NG 5
+#define SYS_SELF "starbite-next-gpu"            /* this system's catalog key (the Next GPU row) */
+static char sys_k[NG][GMAX][24], sys_n[NG][GMAX][32];
+static const struct { const char *k, *meta, *tag; } SYS_META[] = {
+    { "ios27", "Version 27", "BETA" }, { "ios26", "Version 26.6.2", "BETA" }, { "ios16", "Version 16.5", 0 },
+    { "mac13", "Version 13.5 \xc2\xb7 on the memory card", 0 }, { "mac15", "Version 15", "BETA" },
+    { "win11", "Version 23H2", 0 }, { "win11-big", "Version 23H2 \xc2\xb7 all eight cores", 0 },
+    { "android", "Android 16", 0 }, { "chromeos", "Version 158", 0 }, { "linux-ubuntu", "26.04 LTS", 0 },
+    { "linux-pmos", "Edge", 0 }, { SYS_SELF, "This phone", 0 }, { "starbite-next", "Without the GPU", 0 },
+    { "starbite-os", "Starbite OS 1", 0 }, { "engineer", "Version 2.1 \xc2\xb7 hardware tests", 0 },
+    { "utility", "Version 2.0 \xc2\xb7 keys, gamepad, sensors", 0 },
+};
+static void sys_cpy(char *d, const char *s, int cap) { int i = 0; while (s[i] && i < cap - 1) { d[i] = s[i]; i++; } d[i] = 0; }
+static void sys_put(int g, const char *k, const char *nm, int ready)
+{
+    grp_t *gr = &G[g];
+    if (gr->n >= GMAX) return;
+    int j = gr->n++;
+    sys_cpy(sys_k[g][j], k, 24);
+    sys_cpy(sys_n[g][j], nm, 32);
+    sys_t *t = &gr->it[j];
+    t->k = sys_k[g][j];
+    t->name = sys_n[g][j];
+    t->meta = ready ? "" : "Not installed";
+    t->tag = 0;
+    t->self = !tk_strcmp(k, SYS_SELF);
+    for (unsigned m = 0; m < sizeof SYS_META / sizeof SYS_META[0]; m++)
+        if (!tk_strcmp(SYS_META[m].k, k)) { if (ready) t->meta = SYS_META[m].meta; t->tag = SYS_META[m].tag; }
+}
+static void sys_load(void)
+{
+    int n = sh_os_count(0);
+    if (n <= 0) return;                          /* (no catalog: the table above) */
+    for (int g = 0; g < NG; g++) G[g].n = 0;
+    char k[24], nm[32];
+    int cat, method, ready, def;
+    for (int pass = 0; pass < 2; pass++)         /* this system first in its group, then the catalog's order */
+        for (int i = 0; i < n; i++) {
+            if (sh_os_get(i, k, nm, &cat, &method, &ready, &def) < 0) break;
+            if (cat < 0 || cat >= NG || (pass == 0) != !tk_strcmp(k, SYS_SELF)) continue;
+            sys_put(cat, k, nm, ready);
+        }
+}
 
 static const tk_col INK = { 0xee, 0xf1, 0xf6, 1 };
 static tk_col W(float a) { return TK_RGBA(255, 255, 255, a); }
@@ -293,7 +339,7 @@ static card_t K[NG];
  * nothing of a card's glass is baked per card); a card's own pixels are its head (icon, name, systems), its chevron
  * and, while it is open, its member rows and "Show less" */
 typedef struct {
-    tk_layer gh, face, head, chev, members, rows[3];   /* gh: the stack's lower cards (a view of K[0].gh) */
+    tk_layer gh, face, head, chev, members, rows[GMAX];   /* gh: the stack's lower cards (a view of K[0].gh) */
     tk_layer mpl[3], sl;        /* B4 (P3j-8): each member's own platter (a view of the face), the "Show less" pill */
     tk_bmp chev0;               /* the chevron unrotated */
     float y;                    /* top in content pt (scroll 0, every card closed): where its head was drawn */
@@ -1514,13 +1560,19 @@ static void home_w_part(int k)
     d_icon(&d, "home-star", WID_X(1) + 16, 74 + 1.5f, 1);
     d_text(&d, TK_IT700, 11.5f, WID_X(1) + 34, base_of(TK_IT700, 11.5f, 74, 0), "Recent", .345f, 0, W(.7f), 0);
     {
-        /* helper D: the boot menu's last choice first (sh_lastos), then the concept's */
-        static const char *T4[4] = { "win11", "ios26", "engineer", "ios16" };
+        /* helper D: the boot menu's last choice first (sh_lastos); 8w: then the catalog's systems (one a group, then
+         * the rest), not this one */
         const char *rk[4];
         int n = 0;
         if (LAST) rk[n++] = LAST;
-        for (int i = 0; i < 4 && n < 4; i++) if (!LAST || tk_strcmp(T4[i], LAST)) rk[n++] = T4[i];
-        for (int i = 0; i < 4; i++) d_systile(&d, rk[i], WID_X(1) + 16 + (i & 1) * (WID_W - 32 - 52), 74 + 14 + 9 + (i >> 1) * 60);
+        for (int round = 0; round < GMAX && n < 4; round++)
+            for (int g = 0; g < NG && n < 4; g++) {
+                if (round >= G[g].n || G[g].it[round].self) continue;
+                const char *k = G[g].it[round].k;
+                if (LAST && !tk_strcmp(k, LAST)) continue;
+                rk[n++] = k;
+            }
+        for (int i = 0; i < n; i++) d_systile(&d, rk[i], WID_X(1) + 16 + (i & 1) * (WID_W - 32 - 52), 74 + 14 + 9 + (i >> 1) * 60);
     }
     } else {
     float cw = tw(TK_IT400, 12, "Battery", 0, 0);
@@ -5406,6 +5458,7 @@ static void relink(void)
 static int init_step;
 void sh_init_begin(tk_comp *c)
 {
+    sys_load();                                  /* 8w: the lock's cards from the live catalog, first */
     C = c;
     tb = tk_us();
     init_step = 0;
@@ -5576,6 +5629,9 @@ static void back_to_lock(int exit_em)
 void sh_sleep(int now);
 void sh_wake(void);
 
+#ifdef SH_HAS_STARTUP
+static void startup_still_view(int v, int pg);
+#endif
 void sh_set(const char *what, const char *key, float v)
 {
     if (!tk_strcmp(what, "unlock")) {
@@ -5644,6 +5700,11 @@ void sh_set(const char *what, const char *key, float v)
     } else if (!tk_strcmp(what, "tab")) {
         static const char *const TK[4] = { "fav", "rec", "con", "pad" };
         for (int t = 0; t < 4; t++) if (!tk_strcmp(TK[t], key)) { AS.tab = t; build_app_page(AP.a); }
+#ifdef SH_HAS_STARTUP
+    } else if (!tk_strcmp(what, "suview")) {   /* 8w: the stills: Startup's view (key: the list's page) */
+        startup_still_view((int)v, key && key[0] ? key[0] - '0' : 0);
+        if (AP.on) build_app_page(AP.a);
+#endif
     } else if (!tk_strcmp(what, "sub")) {
         /* the stills: a Settings page (display, wifi, cell, general, about, ...: se_sub_key; nothing is switched on) */
         AS.sub = se_sub_key(key);

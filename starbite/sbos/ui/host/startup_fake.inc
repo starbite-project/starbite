@@ -2,29 +2,57 @@
  * sh_fw_info; FW4: sh_health_os, sh_store_check, sh_logs_save, sh_slots_get, sh_shell_set,
  * sh_req_why, sh_req_label, sh_boot_os_req): a made-up catalog, the loader's settings in RAM, two crash reports, a
  * loader table that says "shell mode, the card", made-up check results and slots. Nothing restarts: a held confirmation prints what the phone would do. */
-typedef struct { const char *key, *name; int cat, method, ready; } sf_os_t;
+/* 8w: the phone's catalog as of 2026-11-15 (the main checkout's tools/store/catalog.toml: 32 rows, 19 hidden), so
+ * the lock's cards and Startup are tried on the real list; hidden rows only with SH_OS_ALL (as the kernel's) */
+typedef struct { const char *key, *name; int cat, method, ready, hidden; } sf_os_t;
 static const sf_os_t SF_OS[] = {
-    { "starbite-os", "Starbite OS", 4, 5, 1 }, { "ios26", "iOS 26", 0, 1, 1 }, { "macos-sequoia", "macOS Sequoia", 0, 1, 0 },
-    { "win11", "Windows 11", 1, 4, 1 }, { "android", "One UI 8", 2, 3, 1 }, { "linux-pmos", "postmarketOS", 3, 2, 1 },
-    { "linux-ubuntu", "Ubuntu", 3, 2, 1 }, { "engineer", "Engineer OS", 4, 5, 1 }, { "utility", "Utility OS", 4, 5, 1 },
+    { "ios27", "iOS 27", 0, 1, 1, 0 }, { "mac13", "macOS Ventura", 0, 1, 1, 0 }, { "win11", "Windows 11", 1, 4, 1, 0 },
+    { "win11-big", "Windows 11 (big cores)", 1, 4, 1, 0 }, { "android", "One UI 8", 2, 3, 1, 0 },
+    { "chromeos", "ChromiumOS", 2, 2, 1, 0 }, { "linux-shell", "Starbite shell", 3, 2, 1, 1 },
+    { "linux-ubuntu", "Ubuntu", 3, 2, 1, 0 }, { "linux-ubuntu-gnome", "Ubuntu Desktop", 3, 2, 0, 1 },
+    { "linux-ubuntu-lomiri", "Ubuntu Lomiri", 3, 2, 0, 1 }, { "linux", "Ubuntu", 3, 2, 1, 1 },
+    { "win11-m3probe", "Windows 11 (big-core probe)", 6, 4, 1, 1 }, { "linux-debian", "Debian", 3, 2, 0, 1 },
+    { "linux-pmos", "postmarketOS", 3, 2, 1, 0 }, { "linux-arch", "Arch Linux ARM", 3, 2, 0, 1 },
+    { "store2card", "Card store test", 6, 5, 1, 1 }, { "linux-kali", "Kali Linux", 3, 2, 0, 1 },
+    { "uefishell", "UEFI Shell", 1, 4, 1, 1 }, { "ios27t", "iOS 27 (log run)", 6, 1, 1, 1 },
+    { "engineer", "Engineer OS", 4, 5, 1, 0 }, { "utility", "Utility OS", 4, 5, 1, 0 },
+    { "fwlayer", "Firmware layer test", 6, 5, 1, 1 }, { "maint", "Starbite Maintenance", 4, 5, 1, 1 },
+    { "maint-rescue", "Starbite Maintenance (rescue)", 4, 5, 1, 1 }, { "win11-gpu", "Windows 11 (GPU test)", 6, 4, 1, 1 },
+    { "starbite-os", "Starbite OS", 4, 5, 1, 0 }, { "modemsim", "Modem SIM test (attended)", 6, 5, 1, 1 },
+    { "applem1", "Apple M1 test (chained loader)", 6, 5, 0, 1 }, { "starbite-next-gpu", "Starbite OS Next (GPU)", 4, 5, 1, 0 },
+    { "starbite-next", "Starbite OS Next", 4, 5, 1, 0 }, { "win11-auto", "Windows 11 (unattended)", 6, 4, 1, 1 },
+    { "mac15", "macOS Sequoia", 0, 1, 1, 1 },
 };
 #define SF_N ((int)(sizeof SF_OS / sizeof SF_OS[0]))
-static sh_fw_t SF_FW = { "starbite-os", 5, 1, 1, 0, 0, 0, 0, 0, 1, "" };
+static sh_fw_t SF_FW = { "starbite-next-gpu", 5, 1, 1, 0, 0, 0, 0, 0, 1, "" };
+static int sf_all;                                /* the flags sh_os_count was last given (as the kernel's) */
 static int sf_find(const char *key)
 {
     for (int i = 0; i < SF_N; i++) if (!strcmp(SF_OS[i].key, key)) return i;
     return -1;
 }
-int sh_os_count(int flags) { (void)flags; return SF_N; }
+static int sf_row(int i)                          /* the i-th row as listed (hidden rows only with SH_OS_ALL) */
+{
+    for (int k = 0; k < SF_N; k++) if (sf_all || !SF_OS[k].hidden) { if (!i) return k; i--; }
+    return -1;
+}
+int sh_os_count(int flags)
+{
+    sf_all = flags & SH_OS_ALL;
+    int n = 0;
+    for (int k = 0; k < SF_N; k++) n += sf_all || !SF_OS[k].hidden;
+    return n;
+}
 int sh_os_get(int i, char *key, char *name, int *category, int *method, int *ready, int *is_default)
 {
-    if (i < 0 || i >= SF_N) return -1;
-    snprintf(key, 24, "%s", SF_OS[i].key);
-    snprintf(name, 32, "%s", SF_OS[i].name);
-    if (category) *category = SF_OS[i].cat;
-    if (method) *method = SF_OS[i].method;
-    if (ready) *ready = SF_OS[i].ready;
-    if (is_default) *is_default = !strcmp(SF_FW.default_key, SF_OS[i].key);
+    int k = i >= 0 ? sf_row(i) : -1;
+    if (k < 0) return -1;
+    snprintf(key, 24, "%s", SF_OS[k].key);
+    snprintf(name, 32, "%s", SF_OS[k].name);
+    if (category) *category = SF_OS[k].cat;
+    if (method) *method = SF_OS[k].method;
+    if (ready) *ready = SF_OS[k].ready;
+    if (is_default) *is_default = !strcmp(SF_FW.default_key, SF_OS[k].key);
     return 0;
 }
 int sh_fw_get(sh_fw_t *f) { *f = SF_FW; return 1; }
@@ -115,6 +143,8 @@ int sh_req_start(const char *key, int a)
 int sh_restart_menu(void) { return sf_ask("Restart to the boot menu?", "The loader's own menu, this once.", "would restart to the boot menu"); }
 int sh_restart_recovery(void) { return sf_ask("Restart to Starbite Recovery?", "The loader's recovery.", "would restart to Starbite Recovery"); }
 int sh_restart_repair(void) { return sf_ask("Restart to Repair and Reset?", "Starbite Recovery's repair page.", "would restart to recovery-repair"); }
+int sh_restart_maint(int rescue) { fprintf(stderr, "startup: would restart to %s (asks first)\n", rescue ? "maint-rescue" : "maint"); return 0; }
+int sh_restart_fastboot(void) { fprintf(stderr, "startup: would restart to the loader's USB fastboot (asks first)\n"); return 0; }
 int sh_restart_download(void) { return sf_ask("Restart to Download mode?", "S-Boot's Odin mode.", "would restart to Download mode"); }
 int sh_crash_count(void) { return 2; }
 int sh_crash_get(int i, sh_crash_t *c)

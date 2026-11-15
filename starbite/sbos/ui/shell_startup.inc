@@ -22,15 +22,17 @@
 #define SHELL_STARTUP 1
 #define SHELL_STARTUP_TICK 1
 
-enum { SU_ROOT, SU_OSL, SU_OSD, SU_FW, SU_PICK, SU_REC, SU_HEALTH };
+enum { SU_ROOT, SU_OSL, SU_OSD, SU_FW, SU_PICK, SU_REC, SU_HEALTH, SU_RST };
 enum { PK_DEFAULT, PK_TIMEOUT, PK_DEBUG, PK_POST, PK_WDT, PK_CRASH, PK_AFTER };
-#define SU_ROWS 12                          /* OS rows that fit the screen */
+#define SU_ROWS 12                          /* OS rows that fit the screen (the default's picker) */
+#define SU_MAX 40                           /* 8w: every catalog row (the catalog holds 32) */
+#define SU_PG 9                             /* 8w: the list's rows a page (with its page rows and footnote) */
 #define SU_CRASHES 3
-typedef struct { char key[24], name[32]; int cat, method, ready, def; } su_os_t;
+typedef struct { char key[24], name[32]; int cat, method, ready, def, hidden; } su_os_t;
 static struct {
     int view, os, pick, loaded;
-    int nos, more, have_fw, ncrash;
-    su_os_t o[SU_ROWS];
+    int nos, nvis, pg, have_fw, ncrash;    /* 8w: nos every row (the visible first, then the hidden), pg the list's page */
+    su_os_t o[SU_MAX];
     sh_fw_t fw;
     sh_crash_t cr[SU_CRASHES];
     sh_fwinfo_t inf;
@@ -44,13 +46,29 @@ static struct { int pend, done, r, back; sh_health_t h; char title[32]; } SJ;
 static void su_load(void)
 {
     SU.loaded = 1;
-    int n = sh_os_count(0);
-    SU.nos = n < SU_ROWS ? n : SU_ROWS;
-    SU.more = n - SU.nos;
-    for (int i = 0; i < SU.nos; i++) {
-        su_os_t *o = &SU.o[i];
-        if (sh_os_get(i, o->key, o->name, &o->cat, &o->method, &o->ready, &o->def) < 0) { SU.nos = i; break; }
+    /* 8w (the user's goal: Next replaces the boot menu): every catalog row, the visible ones first, then the hidden
+     * ones (the loader's menu shows these behind its own switch); the platform's list as it was left: visible */
+    int nv = sh_os_count(0), k = 0;
+    for (int i = 0; i < nv && k < SU_MAX; i++) {
+        su_os_t *o = &SU.o[k];
+        if (sh_os_get(i, o->key, o->name, &o->cat, &o->method, &o->ready, &o->def) < 0) break;
+        o->hidden = 0;
+        k++;
     }
+    SU.nvis = k;
+    int na = sh_os_count(SH_OS_ALL);
+    for (int i = 0; i < na && k < SU_MAX; i++) {
+        su_os_t *o = &SU.o[k];
+        if (sh_os_get(i, o->key, o->name, &o->cat, &o->method, &o->ready, &o->def) < 0) break;
+        int seen = 0;
+        for (int j = 0; j < SU.nvis && !seen; j++) seen = !tk_strcmp(SU.o[j].key, o->key);
+        if (seen) continue;
+        o->hidden = 1;
+        k++;
+    }
+    SU.nos = k;
+    (void)sh_os_count(0);
+    if (SU.pg * SU_PG >= SU.nos) SU.pg = 0;
     SU.have_fw = sh_fw_get(&SU.fw);
     if (SU.have_fw < 0) tk_memset(&SU.fw, 0, sizeof SU.fw);
     int c = sh_crash_count();
@@ -152,7 +170,8 @@ static const char *su_kind(const char *k)
 #define SU_SWX (LG_RE - 16 - KSW_W)          /* the switch, where Settings puts its switches */
 #define SU_MAXHIT 32
 enum { R_NONE, R_OSL, R_FW, R_REC, R_SHELL, R_ONCE, R_MKDEF, R_WINRE, R_RST_MENU, R_RST_REC, R_RST_DL,
-       R_UPDATE, R_DISK, R_STORE, R_LOGS, R_REPAIR, R_OS0 = 20, R_REQ0 = 40, R_PICK0 = 50, R_OPT0 = 60 };
+       R_UPDATE, R_DISK, R_STORE, R_LOGS, R_REPAIR, R_PG_PREV, R_PG_NEXT, R_RSTP, R_RST_MAINT, R_RST_RESCUE, R_RST_FB,
+       R_OS0 = 24, R_REQ0 = 40, R_PICK0 = 50, R_OPT0 = 60 };
 static struct { float y, h, gy, gh; int id, sw, dim; } SUH[SU_MAXHIT];   /* cp6: gy / gh its card; sw a switch row; dim no press */
 static struct { float y, rh, gy; int nh, i, n, first, foot; } SUL;
 static void su_begin(void) { SUL.y = SU_Y0; SUL.nh = 0; SUL.first = 1; SUL.foot = 0; SUL.n = SUL.i = 0; }
@@ -242,8 +261,9 @@ static void su_page_root(dc *d)
     su_head(d, "Startup");
     char b[96];
     su_sec(d, 0, 3, LG_ROW);
-    int n = put_dec(b, SU.nos + SU.more);
-    b[n] = 0;
+    int n = put_dec(b, SU.nvis);
+    if (SU.nos > SU.nvis) { su_catn(b + n, (int)sizeof b - n, " \xc2\xb7 ", 0); n = tk_strlen(b); n += put_dec(b + n, SU.nos - SU.nvis); su_catn(b + n, (int)sizeof b - n, " hidden", 0); }
+    else b[n] = 0;
     su_row(d, R_OSL, "Operating Systems", INK, b, 1);
     su_row(d, R_FW, "Firmware", INK, "", 1);
     if (SU.ncrash > 0) { n = put_dec(b, SU.ncrash); su_cat(b + n, SU.ncrash == 1 ? " crash" : " crashes", 0); }
@@ -265,19 +285,23 @@ static void su_page_osl(dc *d)
 {
     su_head(d, "Operating Systems");
     if (!SU.nos) { if (d) d_empty(d, CONTENT_TOP, EMPTY_BOT, "No Systems", "The store's catalog lists no OS."); return; }
-    su_sec(d, 0, SU.nos, LG_ROW);
-    for (int i = 0; i < SU.nos; i++) {
+    /* 8w: every system, SU_PG a page (the hidden ones after the visible, marked), the page rows around them */
+    int a = SU.pg * SU_PG, b_ = a + SU_PG < SU.nos ? a + SU_PG : SU.nos, prev = SU.pg > 0, next = b_ < SU.nos;
+    su_sec(d, 0, b_ - a + prev + next, LG_ROW);
+    if (prev) su_row(d, R_PG_PREV, "Previous Page", KIT_BLUE(), "", 0);
+    for (int i = a; i < b_; i++) {
         const su_os_t *o = &SU.o[i];
-        su_row(d, R_OS0 + i, o->name, o->ready ? INK : C_LABEL3, o->def ? "Default" : o->ready ? "" : "Not Installed", 1);
+        su_row(d, R_OS0 + (i - a), o->name, o->ready ? INK : C_LABEL3,
+               o->def ? "Default" : !o->ready ? "Not Installed" : o->hidden ? "Hidden" : "", 1);
     }
-    char b[96], f[192];
-    b[0] = 0;
-    if (SU.more > 0) {
-        int n = put_dec(b, SU.more);
-        su_catn(b + n, (int)sizeof b - n, " more in the catalog: the loader's menu lists them all. ", 0);
+    char b[24];
+    if (next) {
+        int n = put_dec(b, SU.nos - b_);
+        su_catn(b + n, (int)sizeof b - n, " more", 0);
+        su_row(d, R_PG_NEXT, "More Systems", KIT_BLUE(), b, 1);
     }
-    su_catn(f, (int)sizeof f, b, "The default starts by itself after the menu's timeout. Tap a system to start it once or make it the default.");
-    su_foot(d, f);
+    su_foot(d, "Hidden systems are the loader's tools and tests; they start as any other. The default starts by itself "
+               "after the menu's timeout. Tap a system to start it once or make it the default.");
 }
 
 static int su_req_n(const su_os_t *o, int *acts)
@@ -339,7 +363,7 @@ static int su_pick_opts(int p, const char **lab, int *cur)
     *cur = -1;
     switch (p) {
     case PK_DEFAULT:
-        for (int i = 0; i < SU.nos && n < SU_ROWS; i++) {
+        for (int i = 0; i < SU.nvis && n < SU_ROWS; i++) {   /* (8w: the visible systems) */
             if (!tk_strcmp(SU.o[i].key, SU.fw.default_key)) *cur = n;
             lab[n++] = SU.o[i].name;
         }
@@ -425,11 +449,25 @@ static void su_page_rec(dc *d)
     su_row(d, R_REPAIR, "Repair & Reset", INK, "", 1);
     su_foot(d, "Repair & Reset restarts into Starbite Recovery: check and repair the OS store, restore the boot "
                "partition, reset a system's data, every step with its plan first.");
-    su_sec(d, "Restart", 3, LG_ROW);
-    su_row(d, R_RST_MENU, "Restart to Boot Menu", KIT_BLUE(), "", 0);
-    su_row(d, R_RST_REC, "Restart to Starbite Recovery", KIT_BLUE(), "", 0);
-    su_row(d, R_RST_DL, "Restart to Download Mode", KIT_RED(), "", 0);
-    su_foot(d, "Each asks first. The boot menu and Recovery are this once; the next start is as before.");
+    su_sec(d, "Restart", 1, LG_ROW);
+    su_row(d, R_RSTP, "Restart Into", INK, "", 1);
+}
+/* 8w: the restart targets on a page of their own: the loader's menu, Starbite's own Recovery, Maintenance, its
+ * rescue, the loader's USB fastboot, S-Boot's Download mode (never Samsung's RECOVERY partition) */
+static void su_page_rst(dc *d)
+{
+    su_head(d, "Restart Into");
+    su_sec(d, "This once", 5, LG_ROW);
+    su_row(d, R_RST_MENU, "Boot Menu", KIT_BLUE(), "", 0);
+    su_row(d, R_RST_REC, "Starbite Recovery", KIT_BLUE(), "", 0);
+    su_row(d, R_RST_MAINT, "Starbite Maintenance", KIT_BLUE(), "", 0);
+    su_row(d, R_RST_RESCUE, "Maintenance (Rescue)", KIT_BLUE(), "", 0);
+    su_row(d, R_RST_FB, "USB Fastboot", KIT_BLUE(), "", 0);
+    su_foot(d, "Each asks first and is this once: the next start is as before. Maintenance checks and repairs the "
+               "phone's partitions; Rescue is its last-known-good copy; USB Fastboot waits for a computer.");
+    su_sec(d, 0, 1, LG_ROW);
+    su_row(d, R_RST_DL, "Download Mode", KIT_RED(), "", 0);
+    su_foot(d, "S-Boot's Odin mode, for flashing from a computer. Volume Down + Power leaves it.");
 }
 
 /* a check's result (SJ): "Checking..." until startup_tick ran it */
@@ -498,6 +536,7 @@ static void su_lay(dc *d)
     case SU_PICK: su_page_pick(d); break;
     case SU_REC: su_page_rec(d); break;
     case SU_HEALTH: su_page_health(d); break;
+    case SU_RST: su_page_rst(d); break;
     default: su_page_root(d); break;
     }
 }
@@ -505,6 +544,14 @@ static void page_startup(dc *d)
 {
     if (!SU.loaded) su_load();               /* the first strip of a fresh open reads; the other three draw */
     su_lay(d);
+}
+
+/* 8w: the stills: Startup's view (sh_set "suview": 0 root, 1 the systems, 5 Recovery, 7 Restart Into; pg the list's page) */
+static void startup_still_view(int v, int pg)
+{
+    SU.view = v;
+    SU.pg = pg;
+    su_load();
 }
 
 /* ---- taps -------------------------------------------------------------------------------------------------------- */
@@ -575,6 +622,7 @@ static int startup_tap(float x, float y)
         case SU_OSD: su_go(SU_OSL); return 1;
         case SU_PICK: su_go(SU_FW); return 1;
         case SU_HEALTH: SJ.pend = 0; su_go(SJ.back); return 1;
+        case SU_RST: su_go(SU_REC); return 1;
         default: su_go(SU_ROOT); return 1;
         }
     }
@@ -589,6 +637,12 @@ static int startup_tap(float x, float y)
     case R_RST_MENU: su_asked(sh_restart_menu(), "Can't restart now"); return 1;
     case R_RST_REC: su_asked(sh_restart_recovery(), "Can't restart now"); return 1;
     case R_RST_DL: su_asked(sh_restart_download(), "Can't restart now"); return 1;
+    case R_RSTP: su_go(SU_RST); return 1;
+    case R_RST_MAINT: su_asked(sh_restart_maint(0), "Can't restart now"); return 1;
+    case R_RST_RESCUE: su_asked(sh_restart_maint(1), "Can't restart now"); return 1;
+    case R_RST_FB: su_asked(sh_restart_fastboot(), "Can't restart now"); return 1;
+    case R_PG_PREV: if (SU.pg > 0) SU.pg--; build_app_page(AP.a); return 1;
+    case R_PG_NEXT: if ((SU.pg + 1) * SU_PG < SU.nos) SU.pg++; build_app_page(AP.a); return 1;
     case R_UPDATE:
 #ifdef SJ_HAS_UPDATE
         su_open();
@@ -605,7 +659,12 @@ static int startup_tap(float x, float y)
     case R_REPAIR: su_asked(sh_restart_repair(), "Can't restart now"); return 1;
     default: break;
     }
-    if (id >= R_OS0 && id < R_OS0 + SU.nos) { SU.os = id - R_OS0; SU.view = SU_OSD; build_app_page(AP.a); return 1; }
+    if (id >= R_OS0 && id < R_OS0 + SU_PG && SU.pg * SU_PG + id - R_OS0 < SU.nos) {
+        SU.os = SU.pg * SU_PG + id - R_OS0;    /* (8w: the row on this page) */
+        SU.view = SU_OSD;
+        build_app_page(AP.a);
+        return 1;
+    }
     if (id >= R_PICK0 && id <= R_PICK0 + PK_AFTER) { SU.pick = id - R_PICK0; SU.view = SU_PICK; build_app_page(AP.a); return 1; }
     if (SU.view == SU_OSD && SU.os >= 0 && SU.os < SU.nos) {
         const su_os_t *o = &SU.o[SU.os];

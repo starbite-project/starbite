@@ -442,6 +442,8 @@ int sh_crash_get(int i, sh_crash_t *c);   /* 0 ok */
 int sh_restart_menu(void);
 int sh_restart_recovery(void);
 int sh_restart_download(void);
+int sh_restart_maint(int rescue);         /* 8w: Starbite Maintenance ("maint"), or its rescue copy ("maint-rescue") */
+int sh_restart_fastboot(void);            /* 8w: the loader's USB fastboot ("fastboot"); never Samsung's RECOVERY */
 /* the loader's table for this start: medium 0 UFS, 1 the card, -1 none; why: why this start, in words */
 typedef struct {
     int valid, loader_version, medium, card_only, shell_mode, req_action, post_fails, post_warns, crash_sev;
