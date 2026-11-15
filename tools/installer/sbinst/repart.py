@@ -255,6 +255,11 @@ class Repart:
                 u.ok(f'the kernel sees the {getattr(self.layout, "name", "original")} table: {len(p.entries)} '
                      'partitions, by-name nodes, starts and sizes as planned')
                 return
+            if getattr(self.i.o, 'no_reboot', False):
+                # --no-reboot (an unattended night: no restarts, no fastboot wait, no new USB identity on the Mac)
+                raise Stopped('the table is written (both copies read back), but the kernel did not re-read it in place; '
+                              '--no-reboot: not restarting the environment. Resume after a restart (loader fastboot, '
+                              '--start-env, then the same command): the GPT step checks the table and goes on')
             u.info('not re-read in place: the environment restarts (loader fastboot, then the environment again)')
             self.phone.adb('reboot', 'bootloader', write=True)
             st = self.phone.wait_for('fastboot-starbite', 180)

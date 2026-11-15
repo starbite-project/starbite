@@ -119,10 +119,48 @@ rc=$?; rm -f "$W/s2/fail-count"
 [ $rc != 0 ] && ok "the night stopped (exit $rc)" || bad "the night did not stop at the pull"
 grep -q '^### step G failed' "$W/night.log" && ok "### step G failed in the log" || { bad "no G failed marker"; tail -20 "$W/night.log"; }
 for s in P C D E F; do grep -q "^### step $s done" "$W/night.log" && ok "### step $s done" || bad "step $s not done"; done
+NBW=$W/state/night-s9b
+# fix 3 (review 515c6928): an interruption between F-store's done marker and its catalog copy must not lose F's rows
+rm -f "$NBW/done-F"; cp "$NBW/catalog-E-store.toml" "$NBW/catalog-cur.toml"
+grep -q 'key = "mac15"' "$NBW/catalog-cur.toml" && bad "the simulated lost copy did not take" || ok "simulated: F-store done, but its catalog copy lost"
 echo; echo "######## the same command again: resumes"
 "${NIGHT[@]}" > "$W/run2.txt" 2>&1 && ok "the second run finished (exit 0)" || { bad "second run"; tail -25 "$W/night.log"; }
 grep -q 'D-system: done earlier' "$W/night.log" || grep -q '^### step G done' "$W/night.log" && ok "...skipping what was done" || bad "no skip lines"
 for s in G H ALL; do grep -q "^### step $s done" "$W/night.log" && ok "### step $s done" || bad "step $s not done"; done
+grep -q 'F-store: done earlier' "$W/night.log" && grep -q 'key = "mac15"' "$NBW/catalog-cur.toml" && ok "...F's catalog copy redone; G and H's store updates kept mac15" || bad "lost catalog copy"
+# fix 1: the _tools.img probe answers yes / no explicitly; anything else (here: no /external_sd/distros) is neither
+probe='if [ -f /external_sd/distros/_tools.img ]; then echo yes; elif [ -d /external_sd/distros ]; then echo no; fi'
+grep -qF "$probe" tools/installer/night-s9b.sh && ok "night-s9b.sh uses the explicit probe" || bad "probe text"
+a1=$(env PATH="$REPO/tools/installer/fakes:$PATH" FAKE_ROOT="$W/s1" FAKE_SERIAL=S9ONE01 adb -s S9ONE01 shell "$probe" | tr -d '\r')
+mv "$W/s1/external_sd/distros/_tools.img" "$W/s1/_tools.keep"
+a2=$(env PATH="$REPO/tools/installer/fakes:$PATH" FAKE_ROOT="$W/s1" FAKE_SERIAL=S9ONE01 adb -s S9ONE01 shell "$probe" | tr -d '\r')
+mv "$W/s1/external_sd/distros" "$W/s1/distros.keep"
+a3=$(env PATH="$REPO/tools/installer/fakes:$PATH" FAKE_ROOT="$W/s1" FAKE_SERIAL=S9ONE01 adb -s S9ONE01 shell "$probe" | tr -d '\r')
+mv "$W/s1/distros.keep" "$W/s1/external_sd/distros"; mv "$W/s1/_tools.keep" "$W/s1/external_sd/distros/_tools.img"
+[ "$a1/$a2/$a3" = "yes/no/" ] && ok "the probe: yes / no / nothing (the night dies on nothing)" || bad "probe answers $a1/$a2/$a3"
+grep -q "\*) die \"could not tell whether S9 #1 has" tools/installer/night-s9b.sh && ok "...and anything but yes/no ends the night" || bad "no die branch"
+# fix 2: --no-reboot: a table the kernel does not re-read in place stops the run instead of restarting S9 #2
+python3 - <<'PY' && ok "repart: --no-reboot + no in-place re-read -> STOPPED, no adb reboot" || bad "repart no_reboot"
+import os, sys, types
+sys.path.insert(0, 'tools/installer')
+from sbinst import repart
+from sbinst.common import Stopped
+os.environ['SBINST_ENV_UP'] = '1'
+calls = []
+r = repart.Repart.__new__(repart.Repart)
+r.ui = types.SimpleNamespace(info=lambda *a: None, ok=lambda *a: None, cmd=lambda *a: None)
+r.phone = types.SimpleNamespace(sh=lambda *a, **k: '', facts=lambda: None, adb=lambda *a, **k: calls.append(a),
+                                wait_for=lambda *a: types.SimpleNamespace(kind='none'))
+r.i = types.SimpleNamespace(o=types.SimpleNamespace(no_reboot=True), facts=None)
+r.layout = types.SimpleNamespace(name='starbite-oneui')
+r.kernel_diff = lambda p, f: ['A16DATA: not as planned']
+try:
+    r.reboot_and_check(types.SimpleNamespace(entries=[]))
+    sys.exit('no Stopped')
+except Stopped as e:
+    assert 'not restarting' in str(e), e
+assert not calls, calls
+PY
 "${NIGHT[@]}" > "$W/run3.txt" 2>&1 && ! grep -q 'stream to\|update store on' "$W/run3.txt" && ok "a third run does nothing" || bad "third run"
 
 echo; echo "######## S9 #2 afterwards"

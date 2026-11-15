@@ -86,7 +86,10 @@ stream() {    # SUBSTEP SOURCE TARGET [--size N]
 # the card store: the rows S9 #2 has + the step's rows (from S9 #1's catalog, roots moved to sd64l) + entry files
 store() {     # SUBSTEP "KEY ..." NAME ...
 	local sub=$1 keys=$2; shift 2
-	done_p "$sub" && { log "   $sub: done earlier"; return; }
+	if done_p "$sub"; then      # also after an interruption between the done marker and the copy below
+		[ -f "$NB/catalog-$sub.toml" ] && cp "$NB/catalog-$sub.toml" "$NB/catalog-cur.toml"
+		log "   $sub: done earlier"; return
+	fi
 	[ -f "$NB/catalog-cur.toml" ] || cp "$CAT_A" "$NB/catalog-cur.toml"
 	python3 - "$NB/catalog-cur.toml" "$CAT_LIVE" "$keys" "$NB/catalog-$sub.toml" <<'PY' || die "catalog for $sub"
 import re, sys
@@ -118,17 +121,18 @@ PY
 log ""
 log "######## night-s9b ($MODE) $(date '+%F %T'): S9 #1 = source (TWRP, read only), S9 #2 = $PID (installer environment)"
 
+if [ $MODE = rehearse ]; then           # adb for S9 #1 (read only): the real one, or the fake for FAKE_S1
+	ADBENV=(env PATH="$REPO/tools/installer/fakes:$PATH" FAKE_ROOT="$F1" FAKE_SERIAL="$S1" ANDROID_SERIAL="$S1")
+else
+	ADBENV=(env ANDROID_SERIAL="$S1")
+fi
+
 # ---- P: S9 #1's card store, read only
 STEP=P
 if ! done_p P; then
 	mark P started
-	if [ $MODE = rehearse ]; then
-		PULLENV=(env PATH="$REPO/tools/installer/fakes:$PATH" FAKE_ROOT="$F1" FAKE_SERIAL="$S1" ANDROID_SERIAL="$S1")
-	else
-		PULLENV=(env ANDROID_SERIAL="$S1")
-		[ "$(adb -s "$S1" get-state 2>/dev/null)" = recovery ] || die "S9 #1 ($S1) is not in TWRP"
-	fi
-	run P-pull '' -- "${PULLENV[@]}" bash tools/store/store-pull.sh "$NB/s1-store.img" sd
+	[ "$("${ADBENV[@]}" adb -s "$S1" get-state 2>/dev/null)" = recovery ] || die "S9 #1 ($S1) is not in TWRP"
+	run P-pull '' -- "${ADBENV[@]}" bash tools/store/store-pull.sh "$NB/s1-store.img" sd
 	CAT_LIVE_PATH=$CAT_LIVE python3 - "$NB/s1-store.img" "$NB/entries" <<'PY' || die "taking the entries out of S9 #1's store"
 import importlib.util, os, sys
 spec = importlib.util.spec_from_file_location('sb', 'tools/store/sbstore2.py'); sb = importlib.util.module_from_spec(spec)
@@ -182,13 +186,16 @@ if ! done_p E; then
 	mark E started
 	for f in chromeos ubuntu pmos; do stream "E-$f" "file:/distros/$f.img" "file:/distros/$f.img"; done
 	keys="chromeos linux-ubuntu linux-pmos"
-	if done_p E-tools || { [ $MODE = rehearse ] && [ -f "$F1/external_sd/distros/_tools.img" ]; } ||
-	   { [ $MODE = real ] && [ "$(adb -s "$S1" shell '[ -f /external_sd/distros/_tools.img ] && echo yes' 2>/dev/null | tr -d '\r')" = yes ]; }; then
-		stream E-tools file:/distros/_tools.img file:/distros/_tools.img
-		keys="$keys linux-shell"
-	else
-		log "   E-tools: S9 #1 has no /distros/_tools.img: the hidden Starbite shell row is left out"
+	if done_p E-tools; then
+		tools=yes
+	else       # an explicit answer: an adb hiccup or an unmounted card must not read as "S9 #1 has none"
+		tools=$("${ADBENV[@]}" adb -s "$S1" shell 'if [ -f /external_sd/distros/_tools.img ]; then echo yes; elif [ -d /external_sd/distros ]; then echo no; fi' 2>/dev/null | tr -d '\r')
 	fi
+	case $tools in
+	yes) stream E-tools file:/distros/_tools.img file:/distros/_tools.img; keys="$keys linux-shell" ;;
+	no) log "   E-tools: S9 #1 has /external_sd/distros but no _tools.img: the hidden Starbite shell row is left out" ;;
+	*) die "could not tell whether S9 #1 has /external_sd/distros/_tools.img (adb said '${tools}'; is p1 mounted in TWRP?)" ;;
+	esac
 	store E-store "$keys" linux.image linux.dtb linux.initrd
 	set_done E; mark E done
 fi
