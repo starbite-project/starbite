@@ -4130,8 +4130,11 @@ static void build_apnum(void)
 {
     relayer(&apnum);
     relayer(&apdel);
-    apnum.hidden = apdel.hidden = !AS.num[0];
-    if (!AS.num[0]) return;
+    /* 8y (the user, cp8x: "the 112 text stays on screen in every app"): the typed number is the Phone keypad's only;
+     * every own page's build came here and showed a kept number over any app */
+    int show = AS.num[0] && is_app("phone") && AS.tab == 3;
+    apnum.hidden = apdel.hidden = !show;
+    if (!show) return;
     {
         /* P3j (audit 12): iOS's delete beside the call button once a number is typed (a chevron and a cross) */
         dc e = mk(&apdel, "dial-del", 280, 594, 40, 22, 1, 0);
