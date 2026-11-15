@@ -144,7 +144,7 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
 - **T76 staged:** the d3d10core suite on that driver, pass A flag off, pass B flag on (`sb-wt-ab.bat`), to compare
   with T74 (the user's driver).
 
-- **11-16 00:55, geometry shaders (offline):** Panfrost on this GPU generation gets a geometry stage through
+- **11-16 00:29, geometry shaders (offline):** Panfrost on this GPU generation gets a geometry stage through
   `src/poly` behind the flag file `gsemu` (off by default; needs `nirshaders`): the vertex shader runs as a capture
   job, the geometry shader's rasterization part as an ordinary vertex shader, poly's index kernel as a compute job
   only for dynamic output topologies. All 23 corpus geometry shaders lower, validate and compile in every piece on
