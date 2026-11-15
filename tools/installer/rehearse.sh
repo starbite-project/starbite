@@ -21,6 +21,8 @@
 #   - One UI 8 (the starbite-oneui UFS layout): an ODM image refused with another layout; a layout-A phone
 #     repartitioned to starbite-oneui, SYSTEM/VENDOR/ODM images and /data made on the phone (mkfs-oneui-data:
 #     ext4 "data", partition blocks - 5), nothing left to do; a phone already on starbite-oneui keeps its /data
+#   - S9 #2 (17): a stock phone next to S9 #1, --serial on every step, a bundle of BOOT + the card store only
+#     (no repartition), the Download-mode dry-run gate, --backup-only / --check-backup; ONLY_S9B=1 runs it alone
 # About 450 MB in WORKDIR (default build/installer-rehearsal; sparse files), removed at the end unless KEEP=1.
 # Long runs are shown in summary (headers, plan rows, ok/WARN/REFUSED/STOPPED lines); their full logs
 # are in WORKDIR/state*/logs/.
@@ -98,6 +100,108 @@ for n in ('sdb', 'sdc', 'sdd', 'sde'):
 print(h.hexdigest())
 PY
 }
+
+s9b_section() {   # 17: S9 #2 (2026-11-15): a stock phone next to S9 #1, --serial, a bundle of BOOT + the card store only
+hdr "17. S9 #2: a stock phone next to S9 #1, --serial on every step, BOOT + the card store only (no repartition)"
+local BS=$W/bundle-s9b PB=$W/phone-s9b SB=$W/state-s9b SER=FAKE0000SERIAL
+[ -d "$W/bundle64" ] || python3 -B tools/installer/fakes/mkbundle.py "$W/bundle64" --layout sd64 | tail -1
+python3 - "$W/bundle64" "$BS" <<'PY'
+# the S9 #2 bundle: the installer environment, BOOT (the loader) and the card store, from the sd64 rehearsal bundle
+import shutil, sys, tomllib
+from pathlib import Path
+src, out = Path(sys.argv[1]), Path(sys.argv[2])
+m = tomllib.loads((src / 'installer-manifest.toml').read_text())
+keep = [i for i in m['item'] if i['dest'].startswith('env:') or i['dest'] in ('part:BOOT', 'store:sd')]
+assert len(keep) == 5, [i['key'] for i in keep]
+def val(v):
+    return f'"{v}"' if isinstance(v, str) else str(v).lower() if isinstance(v, bool) else str(v)
+lines = ['format = 1', 'name = "S9 #2 first install (rehearsal): loader + card store"', '',
+         '[phone]', 'models = ["SM-G960F"]', 'devices = ["starlte"]', 'min_battery = 50', '',
+         '[card]', f'min_bytes = {m["card"]["min_bytes"]}', 'layout = "sd64"', '']
+if 'env' in m:
+    lines += ['[env]'] + [f'{k} = {val(v)}' for k, v in m['env'].items()] + ['']
+for i in keep:
+    lines.append('[[item]]')
+    lines += [f'{k} = {val(v)}' for k, v in i.items()]
+    lines.append('')
+    (out / i['file']).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src / i['file'], out / i['file'])
+(out / 'installer-manifest.toml').write_text('\n'.join(lines))
+print(f'S9 #2 bundle: {", ".join(i["key"] for i in keep)}')
+PY
+"${FP[@]}" create "$PB" --state android --stock --gpt stock --card blank --card-sectors 124735488 >/dev/null
+C2=(--bundle "$BS" --fake-root "$PB" --state-dir "$SB")
+prot=$(protected "$PB"); ud=$(shasum -a 256 < "$PB/dev/block/by-name/USERDATA"); rec=$(shasum -a 256 < "$PB/dev/block/by-name/RECOVERY")
+boot0=$(shasum -a 256 < "$PB/dev/block/by-name/BOOT")
+run 0 "the S9 #2 bundle verifies" -- "${SI[@]}" --verify-bundle "$BS" --state-dir "$SB"
+export FAKE_OTHER_PHONE=OTHER1S9:recovery          # S9 #1 in TWRP on the same Mac
+run 2 "two phones and no --serial: refused" -- "${SI[@]}" "${C2[@]}" --dry-run --yes
+has 'more than one phone .* --serial SERIAL' "says to name the phone with --serial"
+run 0 "dry run --serial in stock Android: S9 #1 ignored, stock firmware read" -- "${SI[@]}" "${C2[@]}" --dry-run --yes --serial $SER
+has "adb -s $SER reboot download  \[dry run: not run\]" "the reboot to Download mode names the serial"
+has 'S-Boot \(bootloader\) G960FXXUHFVG6' "shows S-Boot and the firmware (the BOOT rollback is that firmware's boot.img)"
+FAKE_ROOT=$PB tools/installer/fakes/adb -s $SER reboot download && ok "the main session's own step: adb -s SERIAL reboot download" || bad "adb -s reboot download"
+SBINST_FAKE_USB_EXTRA=04e8:685d FAKE_OTHER_PHONE=OTHER1S9:download run 2 "both phones in Download mode: refused (heimdall cannot pick one)" -- "${SI[@]}" "${C2[@]}" --dry-run --yes --serial $SER
+has '2 phones are in Download mode' "...and says why"
+run 2 "rehearsal --serial without a Download-mode dry run: refused before any flash" -- "${SI[@]}" "${C2[@]}" --rehearse --yes --serial $SER
+has 'no Download-mode dry run of this bundle' "asks for the Download-mode dry run"
+run 0 "Download-mode dry run --serial (S9 #1 still in TWRP): PIT checked, gate recorded, the other phone named" -- "${SI[@]}" "${C2[@]}" --dry-run --yes --serial $SER
+has 'PIT: an SM-G960F' "the PIT is read (read only) and checked"
+has 'Download-mode dry run recorded for phone-' "the gate is recorded for this phone"
+has 'WARN before a flash: another phone is connected \(serial OTHER1S9\)' "warns: S9 #1 must be unplugged before the flash"
+run 2 "rehearsal while S9 #1 is still plugged in: not flashed" -- "${SI[@]}" "${C2[@]}" --rehearse --yes --serial $SER
+has 'not flashing: another phone is connected' "refused: unplug S9 #1 first"
+[ "$(shasum -a 256 < "$PB/dev/block/by-name/BOOT")" = "$boot0" ] && ok "BOOT not written" || bad "BOOT changed"
+unset FAKE_OTHER_PHONE                              # S9 #1 unplugged for the flash
+run 2 "rehearsal --serial, S9 #1 unplugged: BOOT via heimdall, loader fastboot, the environment, then the dry-run gate" -- "${SI[@]}" "${C2[@]}" --rehearse --yes --serial $SER
+has 'only this phone is on USB' "checked: one Download-mode device, no other phone"
+has 'the installer environment is up' "the environment runs from RAM"
+has 'no finished dry run' "asks for the dry run in the environment"
+grep -q "sb.serial=$SER" "$PB/env-cmdline" && ok "the environment was started with sb.serial= of this phone" || bad "env cmdline: $(cat "$PB/env-cmdline")"
+export FAKE_OTHER_PHONE=OTHER1S9:fastboot           # S9 #1 back on USB, in its loader's fastboot
+run 0 "--backup-only --serial with S9 #1 back on USB: backup taken and every file checked on this computer" -- "${SI[@]}" "${C2[@]}" --rehearse --yes --serial $SER --backup-only
+has 'backup verified on this computer: 24 files' "24 files re-read here, each = the phone's SHA-256"
+has 'EFS: EFS.img.gz sha256' "EFS among them"
+BKD=$(ls -d "$SB"/phone-*/backups/* | head -1)
+run 0 "--check-backup on that directory" -- "${SI[@]}" --check-backup "$BKD"
+cp -R "$BKD" "$W/bk-bad"; python3 - "$W/bk-bad/EFS.img.gz" <<'PY'
+import gzip, sys
+d = bytearray(gzip.open(sys.argv[1]).read()); d[100] ^= 1
+gzip.open(sys.argv[1], 'wb').write(bytes(d))
+PY
+run 3 "--check-backup on a copy with one bit of EFS flipped: caught" -- "${SI[@]}" --check-backup "$W/bk-bad"
+has 'FAIL EFS: EFS.img.gz hashes to' "names EFS"
+rm -rf "$W/bk-bad"
+sed -i.bak "s/^ro.boot.serialno=.*/ro.boot.serialno=OTHER1S9/" "$PB/props"
+run 2 "an environment that reports another serial: refused" -- "${SI[@]}" "${C2[@]}" --dry-run --yes --serial $SER
+has 'it is not this phone' "...not this phone's environment"
+mv "$PB/props.bak" "$PB/props"
+before=$(fakehash "$PB")
+run 0 "dry run --serial in the environment: card MBR, exFAT, card store; BOOT identical; no GPT step" -- "${SI[@]}" "${C2[@]}" --dry-run --yes --serial $SER
+[ "$(fakehash "$PB")" = "$before" ] && ok "dry run: the fake phone is byte-identical" || bad "dry run changed the fake phone"
+has 'verify  Check the UFS layout \(GPT\)' "the GPT is only checked (no [ufs] layout, no --repartition)"
+has 'skip  Back up the protected areas' "the backup from --backup-only counts"
+has 'write  OS store \(microSD p2\)' "the card store is written"
+run 0 "rehearsal --serial: the card laid out, the store written and read back" -- "${SI[@]}" "${C2[@]}" --rehearse --yes --serial $SER --no-reboot
+has 'card MBR written and read back' "card MBR"
+has 'sd-store: verified on the phone' "card store read back"
+has 'skip  Starbite loader \+ menu \(BOOT\)' "BOOT: skipped, identical"
+[ "$(protected "$PB")" = "$prot" ] && ok "protected areas, both GPT copies, sdb-sde: byte-identical" || bad "a protected area or the GPT changed"
+[ "$(shasum -a 256 < "$PB/dev/block/by-name/USERDATA")" = "$ud" ] && ok "USERDATA (stock Android's data) untouched" || bad "USERDATA changed"
+[ "$(shasum -a 256 < "$PB/dev/block/by-name/RECOVERY")" = "$rec" ] && ok "RECOVERY untouched (Samsung's stock recovery)" || bad "RECOVERY changed"
+run 0 "and again: nothing left to do" -- "${SI[@]}" "${C2[@]}" --rehearse --yes --serial $SER --no-reboot
+has '; 0 write commands ran' "0 write commands"
+unset FAKE_OTHER_PHONE
+rm -rf "$PB" "$SB" "$BS"
+}
+
+if [ "${ONLY_S9B:-0}" = 1 ]; then   # ONLY_S9B=1 tools/installer/rehearse.sh: section 17 alone (a few minutes)
+	s9b_section
+	hdr "result: $pass passed, $fail failed"
+	[ "${KEEP:-0}" = 1 ] || rm -rf "$W"
+	[ "$fail" = 0 ]
+	exit
+fi
 
 hdr "1. a rehearsal bundle (fake images; real OS stores and ext4 roots) and a fake phone (blank 128 GB card)"
 python3 -B tools/installer/fakes/mkbundle.py "$B" | tail -1
@@ -513,6 +617,8 @@ run 0 "...with --replace oneui-data" -- "${SI[@]}" "${O1[@]}" --dry-run --yes --
 has 'REPLACE  One UI 8 /data' "/data: REPLACE"
 has "mke2fs -t ext4 -F -L data -b 4096 /dev/block/sda28 2825462'" "the same mke2fs"
 rm -rf "$W/phone-oneui1" "$W/state-oneui1"
+
+s9b_section
 
 hdr "result: $pass passed, $fail failed"
 [ "${KEEP:-0}" = 1 ] || rm -rf "$W"

@@ -28,11 +28,24 @@ print(cap, used)
 PY
 )
 [ "$want_cap" = "$cap" ] || { echo "store capacity $want_cap, partition 2 has $cap blocks: rebuild with --capacity $cap"; exit 1; }
-# A compact image (sbstore2.py --data-at: the card home store) is NOT laid out as on the card: writing it
-# from block 0 would put its data over the iOS 26 root. tools/store/card-store.sh writes those.
-if [ "$(dd if="$img" bs=1 skip=$((4096 + 64)) count=8 2>/dev/null)" = SBSTHOME ]; then
-    echo "$img is a home / compact card store (SBSTHOME): use tools/store/card-store.sh flash"; exit 1
-fi
+# A compact image (sbstore2.py --data-at: S9 #1's sd128 home store) is NOT laid out as on the card: writing it
+# from block 0 would put its data over the iOS 26 root. tools/store/card-store.sh writes those. A home store
+# whose data starts at block 7 (sd64: sbstore2.py build --medium sd64 --home) is laid out as on the card and
+# is written here. home_data7 FILE|-: "yes" = SBSTHOME with the first data block 7, "compact" = SBSTHOME with
+# another one, "no" = not a home store (the extension: block 1 bytes 64..91, "SBSTHOME", u32, u32, u64 first).
+home_data7() {
+    python3 -c '
+import struct, sys
+d = (open(sys.argv[1], "rb") if sys.argv[1] != "-" else sys.stdin.buffer).read(8192)[4096:]
+if d[64:72] != b"SBSTHOME":
+    print("no")
+else:
+    print("yes" if struct.unpack_from("<Q", d, 80)[0] == 7 else "compact")' "$1"
+}
+case $(home_data7 "$img") in
+compact) echo "$img is a compact home card store (SBSTHOME, data past block 7): use tools/store/card-store.sh flash"; exit 1 ;;
+yes) echo "$img: a home card store laid out as on the card (data from block 7)" ;;
+esac
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -45,8 +58,9 @@ if v1 not in (b'SBSTORE1', bytes(8)) and v2 != b'SBSTORE2':
     sys.exit(f'partition 2 holds unknown data ({v1.hex()}): refusing')
 if v2 != b'SBSTORE2' and any(head):
     sys.exit('partition 2 not empty: refusing')
-if v2 == b'SBSTORE2' and head[4096 + 64:4096 + 72] == b'SBSTHOME':
-    sys.exit('partition 2 holds the HOME card store (SBSTHOME): use tools/store/card-store.sh flash: refusing')
+if v2 == b'SBSTORE2' and head[4096 + 64:4096 + 72] == b'SBSTHOME' and struct.unpack_from('<Q', head, 4096 + 80)[0] != 7:
+    sys.exit('partition 2 holds a compact HOME card store (SBSTHOME, data past block 7): use tools/store/card-store.sh '
+             'flash: refusing')
 img = bytearray(open(sys.argv[2], 'rb').read())
 if v2 == b'SBSTORE2' and st[:8] == b'SBSETTNG' and zlib.crc32(st[16:256]) == struct.unpack_from('<I', st, 12)[0]:
     img[8192:12288] = st

@@ -191,13 +191,15 @@ class Catalog(unittest.TestCase):
         out = cl.catalog_text(text, 'sd64')
         e = {x['key']: x for x in tomlmini.loads(out)['entry']}
         self.assertEqual(e['mac13']['root'], 'sd:lba 139264+31457280 (HFSX 15 GiB, sdrw)')
-        for k in ('ios26', 'ios26sdt'):
+        ios26 = [k for k in cl.LAYOUTS['sd128'].root('ios26').keys if k in e]     # the catalog's rows on that root
+        self.assertIn('ios26', ios26)
+        for k in ios26:
             self.assertEqual(e[k]['flags'], ['hidden'])
             self.assertNotIn('sd:lba', e[k]['root'])
         old = {x['key']: x for x in tomlmini.loads(text)['entry']}
         self.assertEqual(sorted(e), sorted(old))                    # no key lost (sbstore2 --import refuses that)
         for k in old:
-            if k not in ('mac13', 'ios26', 'ios26sdt'):
+            if k not in ['mac13'] + ios26:
                 self.assertEqual(e[k], old[k], k)
         sb = load_path('sbstore2_c', STORE / 'sbstore2.py')
         with tempfile.TemporaryDirectory() as t:

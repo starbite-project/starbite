@@ -14,8 +14,10 @@ writes or boots RECOVERY (section 13). Bundles are made by `--build-bundle` (sec
 
 **Status: host side done and rehearsed against fake phones and fake disks. Nothing has run against the
 real phone. The installer environment is now Starbite Maintenance in installer mode (docs/MAINTENANCE.md):
-built 2026-11-06 (`tools/installer/env/mk-env.sh` -> `tools/maint/env/mk-maint.sh`), rehearsed in the VM,
-not run on the phone.**
+built 2026-11-06 (`tools/installer/env/mk-env.sh` -> `tools/maint/env/mk-maint.sh`), rehearsed in the VM.
+Starbite Maintenance itself has run on S9 #1, started from the OS store (2026-11-06: USB ECM, ssh, by-name,
+`build/maint/logs/20261106-*`); the loader's `fastboot boot` of a Linux kernel (how the installer starts it)
+has not. First real install: S9 #2, 2026-11-15, section 15.**
 Section 10 lists exactly what needs the phone.
 
 ## 1. Quick start
@@ -35,6 +37,11 @@ python3 tools/installer/sbinst/gpt.py show|plan HEAD TAIL [LAYOUT]   # the GPT e
 tools/installer/starbite-install --make-rescue-image FILE        # the rescue USB disk as an image file
 tools/installer/starbite-install --make-rescue-usb /dev/diskN [--image FILE] [--real]
 tools/installer/rehearse.sh                                      # everything below against fakes (no phone)
+tools/installer/starbite-install --bundle B --serial SERIAL ...   # name the phone (required with --real): section 15
+tools/installer/starbite-install --bundle B --serial S --real --backup-only   # step 1 alone, every file re-checked
+tools/installer/starbite-install --check-backup DIR              # a backup re-read on this computer (no phone)
+tools/installer/mk-first-bundle.py OUT --boot-from ... --loader ... --env-dir ... --store-from ... --catalog ...
+tools/installer/rehearse-bundle.sh BUNDLE                        # one real bundle through the first-install flow (fakes)
 python3 -m unittest discover -s tools/installer/tests            # unit tests
 ```
 
@@ -1056,3 +1063,60 @@ The no-password check (section 6) lists One UI 8 with the journal check of Andro
   /data was made by hand, docs/ANDROID-ONEUI.md 4); `blockdev --getsize64`, `blkid` and `dumpe2fs -h` in the
   environment as the step reads them; `part-write.py` writing the 36864-byte ODM image (one short chunk) and
   the 6 GiB system over USB networking; a full install from a stock phone with the One UI set.
+
+## 15. A second phone on the same computer (S9 #2, 2026-11-15)
+
+Written 2026-11-15 for the first real install: a stock S9 (stock firmware and GPT, bootloader unlocked) while
+S9 #1 stays connected to the same Mac. Step by step for the phone: the shared notes' `installer-s9b-runbook.md`.
+
+**`--serial SERIAL`** (required with `--real`; `adb devices` shows it; S9 #1's loader reports the same
+`androidboot.serialno` in fastboot). `main()` puts it in `ANDROID_SERIAL` (adb, fastboot and every tool the installer
+runs honour it), and:
+- every `adb` and `fastboot` call of the installer names it (`adb -s`, `fastboot -s`); `detect()` ignores phones with
+  another serial (without `--serial`, two phones still refuse, and the message names the option);
+- **Download mode has no serial on USB, and Heimdall has no device selector** (it flashes the first Download-mode
+  device). With a serial, one Download-mode device is taken as this phone only if the serial is not visible
+  elsewhere; two refuse. Right before the flash `Phone.download_alone()` wants exactly one 04e8:685d on USB and no
+  other phone at all (no adb or fastboot device, no other 04e8 / 18d1 USB device): "unplug every other phone". The
+  dry run shows the same check as a warning;
+- the environment is started with `fastboot -s SERIAL boot ... sb.serial=SERIAL`, and once ssh answers on
+  172.16.42.1 its `getprop ro.boot.serialno` (= `sb.serial`) must be SERIAL: another phone's Starbite Maintenance or
+  installer environment on the same address is refused, before and after the start;
+- Heimdall is the project's own build (`build/heimdall-src/build/bin/heimdall`, v2.2.2, this checkout or the main
+  one; `SBINST_HEIMDALL` overrides; rehearsals use the fake on PATH).
+
+**Two dry-run gates.** (A) New: a dry run with the phone in Download mode reads and checks the PIT (read only) and
+records `download:<manifest sha256>` in the phone's journal (phone id from the serial); `--real` (and a rehearsal
+with `--serial`) refuses the BOOT flash without it. (B) Unchanged: the full dry run in the environment before
+any storage write. On a stock phone BOOT is still the first write and comes before the backup: Heimdall cannot
+read partitions, and the environment needs the loader in BOOT. Its rollback is the firmware's `boot.img`.
+
+**Backups, verified twice.** Step 1 already compared each partition's SHA-256 on the phone with the local copy
+(`part-backup.sh`, raw regions in the installer). Now the whole backup directory is read back on the computer at
+the end of the step (`check_backup_dir`: every file in `backups.txt` hashed again, `.img.gz` decompressed, and every
+required name present: the PROTECTED list, BOOT, the GPT head and tail, sdb-sde); a mismatch is `STOPPED` before
+anything is written. `--backup-only` runs just this step (no dry run needed: it writes only to the computer);
+`--check-backup DIR` repeats the check later, e.g. on a copy.
+
+**A bundle without `[ufs]`** (no repartitioning): BOOT, the environment and the card store only. The GPT is only
+checked, USERDATA (stock Android's /data) is never touched. `tools/installer/mk-first-bundle.py` makes it: BOOT from
+S9 #1's BOOT and a loader Image (`tools/store/boot-card.py`: + `sbstore=card`), padded to 4 KiB; the environment
+from `build/maint/store` (`maint.image/.initrd/.dtb`); a fresh `--medium sd64 --home` card store with only the kept
+catalog rows (RAM-only OSes; default `starbite-next-gpu`, `engineer`, `utility`) and their files from a pull of S9
+#1's store, a fresh `sbos-state` and crash log. Never S9 #1's settings, crash log, Starbite OS state, `wifinet` or
+photos. The sd64 store area is 64 MiB: those three take 35.8 MiB; Starbite Maintenance (36 MiB) and Starbite OS's
+64 MiB update slots and photo store do not fit.
+
+**`store-flash-sd.sh` and home stores.** It refused every home store (SBSTHOME), because S9 #1's sd128 home store is
+a compact image. Now it refuses only a compact one (first data block past 7), on the computer and on the card; an
+sd64 home store (data from block 7, laid out as on the card) is written as any other card store.
+
+**Tests.** `rehearse.sh` section 17 (45 checks; `ONLY_S9B=1` runs it alone): two phones and no `--serial` refused;
+S9 #1 ignored; `adb -s SERIAL reboot download`; both phones in Download mode refused; the flash refused without
+the Download-mode dry run and while S9 #1 is still plugged in (BOOT unchanged); the flash with S9 #1 unplugged;
+`sb.serial=` on the environment's command line; `--backup-only` with S9 #1 back on USB (24 files checked);
+`--check-backup` and a flipped EFS bit caught; an environment with another serial refused; the dry run (byte
+identical) and the install (card MBR, exFAT, card store read back, BOOT skipped as identical); protected areas, both
+GPT copies, USERDATA and RECOVERY unchanged; a second run writes nothing. `rehearse-bundle.sh BUNDLE` runs one real
+bundle through the same steps on a fake stock S9. Run 2026-11-15 (macOS): unit tests 137 OK; `rehearse.sh` 220
+passed, 0 failed; `rehearse-bundle.sh build/installer/bundle-s9b`: every step passed.

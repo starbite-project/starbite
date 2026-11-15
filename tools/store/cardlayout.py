@@ -157,7 +157,7 @@ def _sd128():
         name='sd128', title="S9 #1's 128 GB card, unchanged", exact=249999360, min_sectors=249999360,
         p1_start=8192, p1_sectors=182878208, p2_start=p2[0], p2_sectors=p2[1],
         areas=(Area('store', 'store', 182886400, 2048, (), 'card OS store (1 MiB: iOS 26 follows)'),
-               Area('ios26', 'root', 182888448, 33554432, ('ios26', 'ios26sdt'), 'iOS 26 root, HFSX 16 GiB (parked edge pair)'),
+               Area('ios26', 'root', 182888448, 33554432, ('ios26', 'ios26sdt', 'ios26t1', 'ios26t1h'), 'iOS 26 root, HFSX 16 GiB (parked edge pair)'),
                Area('mac13', 'root', 216442880, 31457280, ('mac13',), 'macOS Ventura root, HFSX 15 GiB'),
                Area('storedata', 'store', 247900160, 1968128, (), 'card OS store data, 961 MiB (the home store since '
                     '2026-11-11: sbstore2.py --home --data-at, tools/store/card-store.sh; docs/STORE-ON-CARD.md)'),

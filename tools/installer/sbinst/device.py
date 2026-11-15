@@ -84,15 +84,20 @@ class State:
     detail: str = ''
 
 
-def usb_ids(runner=None):
-    """vid:pid pairs on the host's USB (for Download mode, which neither adb nor fastboot sees)."""
+def usb_list(runner=None):
+    """vid:pid pairs on the host's USB, one per device (two phones in Download mode give two
+    ('04e8', '685d')): Download mode is seen neither by adb nor by fastboot, and heimdall has no
+    device selector. Rehearsals: SBINST_FAKE_USB (a file of vvvv:pppp words) plus SBINST_FAKE_USB_EXTRA
+    (more words: a second fake phone)."""
     fake = os.environ.get('SBINST_FAKE_USB')
     if fake:
         try:
-            return {tuple(l.split(':')) for l in open(fake).read().split()}
+            words = open(fake).read().split()
         except OSError:
-            return set()
-    ids = set()
+            words = []
+        words += os.environ.get('SBINST_FAKE_USB_EXTRA', '').split()
+        return [tuple(w.split(':')) for w in words if ':' in w]
+    ids = []
     if platform.system() == 'Darwin':
         try:
             out = subprocess.run(['ioreg', '-p', 'IOUSB', '-l', '-w0'], capture_output=True, text=True).stdout
@@ -100,12 +105,15 @@ def usb_ids(runner=None):
             return ids
         vid = None
         for line in out.splitlines():
+            if '+-o ' in line:                        # a new device node: forget the last one's vendor
+                vid = None
             m = re.search(r'"idVendor" = (\d+)', line)
             if m:
                 vid = int(m.group(1))
             m = re.search(r'"idProduct" = (\d+)', line)
             if m and vid is not None:
-                ids.add((f'{vid:04x}', f'{int(m.group(1)):04x}'))
+                ids.append((f'{vid:04x}', f'{int(m.group(1)):04x}'))
+                vid = None
         return ids
     base = '/sys/bus/usb/devices'
     if not os.path.isdir(base):                       # no sysfs: lsusb's "ID vvvv:pppp"
@@ -113,27 +121,49 @@ def usb_ids(runner=None):
             out = subprocess.run(['lsusb'], capture_output=True, text=True).stdout
         except FileNotFoundError:
             return ids
-        return {tuple(m.split(':')) for m in re.findall(r'ID ([0-9a-f]{4}:[0-9a-f]{4})', out)}
-    if os.path.isdir(base):
-        for d in os.listdir(base):
-            try:
-                v = open(f'{base}/{d}/idVendor').read().strip()
-                p = open(f'{base}/{d}/idProduct').read().strip()
-                ids.add((v, p))
-            except OSError:
-                pass
+        return [tuple(m.split(':')) for m in re.findall(r'ID ([0-9a-f]{4}:[0-9a-f]{4})', out)]
+    for d in os.listdir(base):
+        if ':' in d:                                  # interfaces (1-1:1.0), not devices
+            continue
+        try:
+            v = open(f'{base}/{d}/idVendor').read().strip()
+            p = open(f'{base}/{d}/idProduct').read().strip()
+            ids.append((v, p))
+        except OSError:
+            pass
     return ids
 
 
+def usb_ids(runner=None):
+    """The set of vid:pid pairs on the host's USB."""
+    return set(usb_list(runner))
+
+
+# USB vendors a phone shows up under: Samsung (Android, MTP, Download mode) and Google's 18d1 (adb,
+# fastboot, the Starbite loader's fastboot 18d1:4ee0).
+PHONE_VENDORS = ('04e8', '18d1')
+
+
+def target_serial():
+    """The phone this run is for (--serial, which main() puts in ANDROID_SERIAL; adb and fastboot honour
+    it too). '' = not given: then exactly one phone may be connected."""
+    return os.environ.get('SBINST_SERIAL') or os.environ.get('ANDROID_SERIAL') or ''
+
+
 class Phone:
-    def __init__(self, runner, env=None):
+    def __init__(self, runner, env=None, serial=None):
         self.r = runner
         self.env = env              # InstallerEnv: detect() looks for it first
+        self.serial = target_serial() if serial is None else serial    # every adb/fastboot call names it
+        self.ignored = []           # other phones seen by detect() (not this run's serial)
+
+    def _s(self):
+        return ['-s', self.serial] if self.serial else []
 
     # -- transport -----------------------------------------------------------------------------
     def adb(self, *args, write=False, binary=False, check=True, quiet=False):
         for attempt in range(4):
-            res = self.r.run(['adb', *args], write=write, binary=binary, check=False, quiet=quiet)
+            res = self.r.run(['adb', *self._s(), *args], write=write, binary=binary, check=False, quiet=quiet)
             err = res.stderr if isinstance(res.stderr, str) else res.stderr.decode(errors='replace')
             if not (res.returncode and any(s in err for s in ('device offline', 'no devices', 'cannot connect'))):
                 break
@@ -155,12 +185,22 @@ class Phone:
         self.adb('push', local, remote, write=True, quiet=True)
 
     def fastboot(self, *args, write=False, check=False):
-        return self.r.run(['fastboot', *args], write=write, check=check)
+        return self.r.run(['fastboot', *self._s(), *args], write=write, check=check)
 
     # -- state ---------------------------------------------------------------------------------
     def detect(self):
+        """The phone's state. With a serial (--serial), phones with another serial are ignored (and listed
+        in self.ignored); without one, more than one phone refuses. Download mode has no serial on USB:
+        with a serial it is taken as this phone only when this serial is not visible elsewhere and only
+        one phone is in Download mode (heimdall cannot pick one: Phone.download_alone() before a flash)."""
+        self.ignored = []
         if self.env is not None and self.env.reachable():
-            return State('env', self.env.serial, 'Starbite installer environment (ssh root@172.16.42.1)')
+            es = self.env.remote_serial() if self.serial else ''
+            if self.serial and es != self.serial:
+                raise Refused(f'an installer environment answers on {self.env.HOST}, but it is not this phone\'s '
+                              f'(its serial {es or "unknown"}, this run is for {self.serial}). Another phone is in '
+                              'Starbite Maintenance or the installer environment: unplug it, then run again')
+            return State('env', self.serial or self.env.serial, 'Starbite installer environment (ssh root@172.16.42.1)')
         found = []
         res = self.r.run(['adb', 'devices'], check=False)
         for line in (res.stdout or '').splitlines()[1:]:
@@ -173,21 +213,57 @@ class Phone:
         for line in (res.stdout or '').splitlines():
             parts = line.split()
             if len(parts) >= 2 and parts[1] == 'fastboot':
-                v = self.fastboot('getvar', 'version-bootloader')
+                v = self.r.run(['fastboot', '-s', parts[0], 'getvar', 'version-bootloader'], check=False)
                 text = (v.stdout or '') + (v.stderr or '')
                 m = re.search(r'version-bootloader:\s*(\S+)', text)
                 vb = m.group(1) if m else ''
                 found.append(State('fastboot-starbite' if vb.startswith('starbite') else 'fastboot-other',
                                    parts[0], vb))
-        ids = usb_ids()
-        if DOWNLOAD_MODE_USB in ids:
+        ids = usb_list()
+        n_dl = ids.count(DOWNLOAD_MODE_USB)
+        for _ in range(n_dl):
             found.append(State('download', '', 'Samsung Download mode (04e8:685d)'))
         if not found and STARBITE_FASTBOOT_USB in ids:
             found.append(State('none', '', 'a Starbite fastboot device is on USB but fastboot does not list it'))
+        if self.serial:
+            mine = [f for f in found if f.serial == self.serial]
+            self.ignored = [f for f in found if f.serial and f.serial != self.serial]
+            dl = [f for f in found if f.kind == 'download']
+            if len(mine) > 1:
+                raise Refused(f'phone {self.serial} shows up twice: ' + ', '.join(f.kind for f in mine))
+            if mine:
+                if dl:
+                    raise Refused(f'phone {self.serial} is in {mine[0].kind}, and another phone is in Download mode: '
+                                  'take that one out of Download mode (Volume Down + Power) or unplug it')
+                return mine[0]
+            if len(dl) > 1:
+                raise Refused(f'{len(dl)} phones are in Download mode, and heimdall cannot tell them apart: unplug '
+                              'all but the one to flash')
+            if dl:
+                return State('download', self.serial, 'Samsung Download mode (04e8:685d): taken as ' + self.serial +
+                             ' (its serial is not visible in Download mode; nothing else shows that serial)')
+            return State('none')
         if len(found) > 1:
             raise Refused('more than one phone (or mode) is connected: ' +
-                          ', '.join(f'{f.kind} {f.serial}' for f in found) + '. Connect only the S9.')
+                          ', '.join(f'{f.kind} {f.serial}' for f in found) + '. Connect only the S9, or name the '
+                          'phone with --serial SERIAL (adb devices / fastboot devices show it)')
         return found[0] if found else State('none')
+
+    def download_alone(self):
+        """Right before heimdall writes: heimdall flashes the first Samsung Download-mode device it finds,
+        so exactly one may be on USB, and no other phone at all (no adb or fastboot device, no other
+        Samsung or 18d1 USB device). Returns '' when that holds, else why not."""
+        ids = usb_list()
+        if ids.count(DOWNLOAD_MODE_USB) != 1:
+            return f'{ids.count(DOWNLOAD_MODE_USB)} phones in Download mode on USB (exactly 1 needed)'
+        others = [f'{v}:{p}' for v, p in ids if v in PHONE_VENDORS and (v, p) != DOWNLOAD_MODE_USB]
+        lines = [l.split()[0] for c in (['adb', 'devices'], ['fastboot', 'devices'])
+                 for l in (self.r.run(c, check=False).stdout or '').splitlines()
+                 if l.strip() and not l.startswith('List of') and len(l.split()) >= 2]
+        if others or lines:
+            return ('another phone is connected (' + ', '.join(others + [f'serial {x}' for x in lines]) +
+                    '): unplug every other phone before a Download-mode flash')
+        return ''
 
     def wait_for(self, kind, seconds, poll=3):
         t0 = time.time()
@@ -269,6 +345,22 @@ class Heimdall:
     def __init__(self, runner, marker):
         self.r, self.marker = runner, marker
 
+    @staticmethod
+    def exe():
+        """The project's own Heimdall build (v2.2.2, build/heimdall-src/build/bin/heimdall, in this checkout
+        or the main one), else SBINST_HEIMDALL, else `heimdall` on PATH. Rehearsals (FAKE_ROOT set) always
+        take the fake on PATH."""
+        if os.environ.get('FAKE_ROOT'):
+            return 'heimdall'
+        if os.environ.get('SBINST_HEIMDALL'):
+            return os.environ['SBINST_HEIMDALL']
+        main = Path(str(REPO).split(os.sep + '.claude' + os.sep + 'worktrees' + os.sep)[0])
+        for root in (REPO, main):
+            p = root / 'build' / 'heimdall-src' / 'build' / 'bin' / 'heimdall'
+            if p.is_file() and os.access(p, os.X_OK):
+                return str(p)
+        return 'heimdall'
+
     def run(self, args, write=False):
         if args[0] == 'flash' and (len(args) < 3 or args[1] != '--BOOT' or any(a.startswith('--') and a not in (
                 '--BOOT', '--no-reboot') for a in args[1:])):
@@ -276,7 +368,7 @@ class Heimdall:
                           '(never RECOVERY or anything else)')
         resume = os.path.exists(self.marker)
         for attempt in (resume, not resume):
-            argv = ['heimdall', args[0], *(['--resume'] if attempt else []), *args[1:]]
+            argv = [self.exe(), args[0], *(['--resume'] if attempt else []), *args[1:]]
             res = self.r.run(argv, write=write, check=False, stream=False)
             if self.r.mode == 'dry-run' and write:
                 return res
@@ -466,14 +558,28 @@ class InstallerEnv:
         out.write_bytes(data)
         return out
 
+    def remote_serial(self):
+        """The serial the environment was started with (sb.serial= on its command line, which the getprop
+        stand-in reports as ro.boot.serialno)."""
+        res = self.r.run(self.ssh_argv('getprop ro.boot.serialno', 3), check=False, quiet=True, timeout=20)
+        return (res.stdout or '').strip() if res.returncode == 0 else ''
+
+    def _fs(self):
+        s = target_serial()
+        return ['-s', s] if s else []
+
     def fastboot_info(self):
         vals = {}
         for v in ('serialno', 'product', 'version-bootloader'):
-            res = self.r.run(['fastboot', 'getvar', v], check=False)
+            res = self.r.run(['fastboot', *self._fs(), 'getvar', v], check=False)
             m = re.search(rf'{v}:\s*(\S*)', f'{res.stdout}{res.stderr}')
             vals[v] = m.group(1) if m else ''
         if not vals['version-bootloader'].startswith('starbite'):
             raise Refused(f'the fastboot device is not the Starbite loader ({vals["version-bootloader"] or "?"})')
+        want = target_serial()
+        if want and vals['serialno'] != want:
+            raise Refused(f'the Starbite loader\'s fastboot reports serial {vals["serialno"] or "?"}, this run is for '
+                          f'{want}: not the right phone')
         self.serial = vals['serialno']
         return vals['serialno'], vals['product']
 
@@ -484,12 +590,17 @@ class InstallerEnv:
         if size > 0x04ff0000:
             raise Refused(f'the installer environment is {size} bytes; the loader\'s download buffer holds 0x04ff0000')
         # a reboot of the environment (or a crash) comes back to the loader's fastboot, not the menu
-        self.r.run(['fastboot', 'oem', 'boot-next', 'fastboot'], check=False)
-        self.r.run(['fastboot', 'boot', str(kernel), str(ird), '--dtb', str(dtb), '--header-version', '2',
+        self.r.run(['fastboot', *self._fs(), 'oem', 'boot-next', 'fastboot'], check=False)
+        self.r.run(['fastboot', *self._fs(), 'boot', str(kernel), str(ird), '--dtb', str(dtb), '--header-version', '2',
                     '--cmdline', f'{cmdline} sb.serial={serial or "unknown"}'])
         t0 = time.time()
         while time.time() - t0 < wait:
             if self.reachable():
+                got = self.remote_serial()
+                if serial and got != serial:
+                    raise Refused(f'the environment that answers on {self.HOST} reports serial {got or "unknown"}, '
+                                  f'not {serial} (the phone just started): another phone answers there. Unplug it, '
+                                  'then run again')
                 self.activate()
                 return
             time.sleep(2)

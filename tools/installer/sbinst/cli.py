@@ -60,6 +60,15 @@ def parse(argv):
     ap.add_argument('--only', action='append', default=[], metavar='KEY', help='--build-bundle: just these items')
     ap.add_argument('--skip', action='append', default=[], metavar='KEY', help='--build-bundle: leave these out')
     ap.add_argument('--fresh-backup', action='store_true', help='take a new backup even if a complete one exists')
+    ap.add_argument('--serial', metavar='SERIAL', default=os.environ.get('SBINST_SERIAL') or None,
+                    help='the phone to work on (adb devices / fastboot devices); every adb and fastboot call names '
+                         'it, other phones are ignored, and a Download-mode flash needs every other phone unplugged. '
+                         'Required with --real')
+    ap.add_argument('--backup-only', action='store_true',
+                    help='with --bundle: start the phone as usual, take the backup (step 1, read only on the phone), '
+                         'check every file on this computer, and stop')
+    ap.add_argument('--check-backup', type=Path, metavar='DIR',
+                    help='check a backup directory on this computer (backups.txt vs every file), no phone')
     ap.add_argument('--rescue-usb', metavar='DEV', help='at the end, write the rescue USB disk to DEV (shown and typed first)')
     ap.add_argument('--no-reboot', action='store_true', help='do not offer the reboot at the end')
     ap.add_argument('--yes', action='store_true', help='answer yes to questions (dry run and rehearsal only)')
@@ -151,8 +160,24 @@ def main(argv=None):
         return 2
     ui = UI(assume_yes=a.yes, allow_yes_typed=(a.mode == 'rehearse'))
     state_dir = (a.state_dir or default_state_dir()).resolve()
+    if a.serial:
+        os.environ['SBINST_SERIAL'] = os.environ['ANDROID_SERIAL'] = a.serial    # adb and fastboot honour it too
     try:
         setup_fake(a, ui)
+        if a.check_backup:
+            from .steps import check_backup_dir
+            oks, problems = check_backup_dir(a.check_backup)
+            for ln in oks:
+                ui.ok(ln)
+            for ln in problems:
+                ui.bad(ln)
+            if problems:
+                return 3
+            ui.ok(f'backup verified: {len(oks)} files, each equal to the SHA-256 the phone computed')
+            return 0
+        if a.mode == 'real' and not a.serial and not a.make_rescue_usb:
+            raise Refused('--real needs --serial SERIAL: every adb, fastboot and Download-mode step is then for that '
+                          'phone only (adb devices shows the serial)')
         if a.make_rescue_image:
             open_log(ui, state_dir, 'rescue-image')
             rescue.build_image(a.make_rescue_image, ui)
