@@ -556,6 +556,7 @@ extern int kui_stat_n, kui_stat_ms, kui_stat_frames, ui_overflow, ui_scroll_max;
 const char *kui_screen_name(void);
 /* the self test (uitest.c, docs/STARBITE-OS.md 12.6): only in starbite-os-selftest.img */
 extern const int sbos_selftest_enabled;
+extern const int sbos_selftest_sound;      /* 9d: 1 in the cellsnd self test only: its sounds are real */
 void selftest_start(void);
 void selftest_timer(unsigned id);
 void selftest_input(void);

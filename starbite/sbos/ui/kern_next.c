@@ -3516,7 +3516,7 @@ static int snd_ready(void)
     if (!said) { said = 1; sb_log("next: sound: refused (a dry run: the self test)"); }
     return 0;
 #else
-    if (sbos_selftest_enabled) return 0;
+    if (sbos_selftest_enabled && !sbos_selftest_sound) return 0;   /* 9d: the cellsnd test's sounds are real */
     if (!snd_up) {
         snd_init_libsb();
         snd_up = 1;

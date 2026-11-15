@@ -42,6 +42,13 @@ const int sbos_selftest_enabled = 1;
 #else
 const int sbos_selftest_enabled = 0;
 #endif
+/* 9d: the one self test that must make sound (the cellsnd image, daytime only): kern_next.c's snd_ready lets it
+ * through (9a's run refused its clicks silently: "periods 0, starts 0" in both halves) */
+#ifdef SBOS_SELFTEST_NEXT_CELLSND
+const int sbos_selftest_sound = 1;
+#else
+const int sbos_selftest_sound = 0;
+#endif
 
 #define STEP_MS 700U
 
