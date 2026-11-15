@@ -133,7 +133,7 @@ def run_shell(cmd, binary, via='adb'):
     sys.exit(p.returncode)
 
 
-SERIAL = 'FAKE0000SERIAL'
+SERIAL = os.environ.get('FAKE_SERIAL', 'FAKE0000SERIAL')   # a second fake phone sets its own
 
 
 def other_phone():

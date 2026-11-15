@@ -42,6 +42,8 @@ tools/installer/starbite-install --bundle B --serial S --real --backup-only   # 
 tools/installer/starbite-install --check-backup DIR              # a backup re-read on this computer (no phone)
 tools/installer/mk-first-bundle.py OUT --boot-from ... --loader ... --env-dir ... --store-from ... --catalog ...
 tools/installer/rehearse-bundle.sh BUNDLE                        # one real bundle through the first-install flow (fakes)
+tools/installer/stream-copy.py --from-serial S1 --to-serial S2 --source SPEC --target SPEC [--real]   # section 16
+tools/installer/rehearse-stream.sh                               # stream-copy.py between two fake phones
 python3 -m unittest discover -s tools/installer/tests            # unit tests
 ```
 
@@ -1130,3 +1132,39 @@ with its data from block 7, written as it is by `store-flash-sd.sh`), the macOS 
 (entries keep their store type). S9 #2's core bundle (`build/installer/bundle-s9b`): 27 entries, 364 MiB, passes
 `rehearse-bundle.sh`. `sd64` is unchanged (no card uses either yet). The whole-lineup space plan for 64 GB UFS + a
 64 GB card, its options and the per-OS order are in the shared notes (`installer-s9b-space-plan.md`).
+
+## 16. Phone to phone: `stream-copy.py` (2026-11-15)
+
+S9 #2's big systems (One UI's SYSTEM 6 GiB, Windows 22 GiB, iOS 27's USERDATA 18.75 GiB, macOS Sequoia's 16 GiB card
+root, the Linux distros) don't fit on the Mac (about 5 GB free), so they are not bundle items. `tools/installer/stream-copy.py`
+copies one partition, card range or card file from **S9 #1 in TWRP** (`adb -s`, read only) to **S9 #2 in the installer
+environment** (ssh), 64 MiB at a time through the Mac's RAM:
+- per chunk, the source phone hashes it; an all-zero chunk is written on the target from `/dev/zero`; otherwise the
+  bytes cross the Mac (hashed here = the source's), go to the target's `/tmp`, are `dd`'d with `conv=notrunc,fsync`,
+  and are read back and hashed by the target;
+- a state file (`<state>/<phone id>/stream/*.json`) is written before the first chunk and after each one. A cable pull
+  resumes; a source whose first or last chunk changed meanwhile is refused (`--restart` starts over);
+- at the end both phones hash the whole range, a file target is moved from `NAME.part` into place, and the target's
+  journal records `stream:<target>` with the source, size and SHA-256.
+
+**Specs:** `part:NAME`, `card:lba:START+SECTORS` (source), `card:lba:START` / `card:root:KEY` (target),
+`file:/distros/...` / `file:/starbite/...` (card p1). **Safety:**
+- source commands only from a read-only list (`dd if=`, `sha256sum`, `readlink`, `blockdev --getsize64`, `wc -c`,
+  `cat`); anything else is refused before it runs. A source partition mounted rw is refused;
+- target partitions SYSTEM VENDOR ODM A16DATA WINESP WINDOWS USERDATA only, not mounted; card targets only inside a root
+  slot of the layout the target card has; files only under `/distros/` and `/starbite/`;
+- the target is reached only by ssh, and its `sb.serial` must be `--to-serial`;
+- no copy while any phone is in Download mode;
+- `--dry-run` (the default) is required before `--real` (same source, target and size); `--real` asks for a typed
+  `stream to phone-XXXXXXXXXX`.
+
+`tools/installer/rehearse-stream.sh`: two fake phones (S9 #1 sd128 in TWRP, S9 #2 sd64l in the environment), 39 checks:
+- refusals: RECOVERY, BOOT, EFS, the card store area, p1, a file outside the two folders, the same serial twice, a
+  phone in Download mode, another phone's environment, the source not in TWRP, write commands on the source side, no
+  dry run;
+- a 220 MiB SYSTEM copy (data, two zero chunks, data) with a cable pull and the resume;
+- S9 #1's Sequoia range into S9 #2's sd64l `mac15` slot, including a source changed before the resume (refused,
+  then `--restart`);
+- a 130 MiB p1 file;
+- the journal record;
+- S9 #1 byte-identical, and S9 #2's protected partitions unchanged.
