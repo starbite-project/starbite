@@ -422,13 +422,16 @@ enum { SH_FS_IDLE = 0, SH_FS_RUN, SH_FS_MATCH, SH_FS_FAIL, SH_FS_NOFACE };      
 enum { SH_FH_NONE = 0, SH_FH_TURN, SH_FH_CLOSER, SH_FH_LIGHT, SH_FH_STILL };        /* hints */
 int sh_face_status(void);
 const char *sh_face_why(void);                /* why not ready ("" when ready) */
-void sh_face_prepare(void);                   /* Settings shows Face Unlock: what set-up needs is loaded now */
+void sh_face_prepare(void);                   /* set-up is about to start: its pack is loaded now (from the card) */
+/* the lock's state (the shell, at every change): locked: the pack is loaded (in the background) so a wake can scan;
+ * unlocked: the pack and every buffer of the face's are freed before home and apps build (set-up keeps them) */
+void sh_face_lock(int locked);
 int sh_face_mode(void);
 void sh_face_set_mode(int mode);
 void sh_face_set_on(int on);
 int sh_face_scan(int start);                  /* 1: start a scan (the lock's wake): 0 or < 0 (not ready); 0: stop it */
 int sh_face_poll(int *hint);                  /* SH_FS_*: a finished scan's result stays until the next start */
-int sh_face_enrol(int mode);                  /* the camera for set-up: 0 or < 0 (sh_face_why) */
+int sh_face_enrol(int mode);                  /* the camera for set-up: 0, -2 the pack still loading (ask again), < 0 */
 int sh_face_enrol_poll(int *poses, int *hint);   /* 0 running, 1 done and kept, < 0 stopped / failed; poses: bit per pose
                                                   * (centre, left, right, up, down; left / right as the person turns) */
 const uint32_t *sh_face_frame(int *w, int *h, unsigned *seq);   /* during set-up: the newest frame, NOT mirrored */

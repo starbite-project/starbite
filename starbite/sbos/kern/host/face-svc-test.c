@@ -102,12 +102,15 @@ static void cam_close(void) { cam_is_on = 0; }
 static struct fsvc_plat PL;
 static uint8_t *pak;
 static size_t pak_len;
-static int pk_get(const uint8_t **p, size_t *n) { *p = pak; *n = pak_len; return 1; }
-static int pk_state(void) { return 2; }
+static int pk_in, pk_gets, pk_frees;              /* the pack "in memory" (the phone: the heap), loads, frees */
+static int pk_get(const uint8_t **p, size_t *n) { if (!pk_in) { pk_in = 1; pk_gets++; } *p = pak; *n = pak_len; return 1; }
+static int pk_state(void) { return pk_in ? 2 : 0; }
+static void pk_release(void) { if (pk_in) pk_frees++; pk_in = 0; }
 static void restart(void)                           /* a restart: RAM gone, the store kept */
 {
     memset(&PL, 0, sizeof PL);
-    PL.pack_get = pk_get; PL.pack_state = pk_state;
+    PL.pack_get = pk_get; PL.pack_state = pk_state; PL.pack_release = pk_release;
+    pk_in = 0;
     PL.fn.alloc = h_alloc; PL.fn.free = h_free; PL.fn.now_us = real_us;
     PL.now_ms = now_ms;
     PL.cam_open = cam_open; PL.cam_frame = cam_frame; PL.cam_close = cam_close;
@@ -320,6 +323,22 @@ int main(int argc, char **argv)
     fsvc_passcode("135790");
     run_ms(50);
     CHECK(sh_face_status() & SH_FACE_READY, "a changed passcode keeps the face (rewrapped key)");
+
+    /* the pack only while locked (Track A: home and apps get the heap) */
+    int g0 = pk_gets, f0 = pk_frees;
+    sh_face_lock(0);
+    CHECK(!pk_in && pk_frees == f0 + 1, "unlocked: the pack is given back");
+    CHECK(scan(A1, 0, 0) < 0, "unlocked: no scan (and no pack)");
+    sh_face_lock(1);
+    CHECK(pk_in && pk_gets == g0 + 1, "locked again: the pack is loaded again");
+    sh_face_lock(0);
+    cur = A0; pose = 5; scene = scene_person;
+    CHECK(sh_face_enrol(SH_FACE_SPEED) == 0 && pk_in, "set-up while unlocked: the pack comes for it");
+    sh_face_stop();
+    CHECK(!pk_in, "set-up cancelled while unlocked: the pack goes again");
+    sh_face_lock(1);
+    fsvc_passcode("135790");
+    run_ms(50);
 
     /* Security */
     sh_face_set_mode(SH_FACE_SECURITY);

@@ -3072,6 +3072,7 @@ static struct {
     uint32_t len, got;
     struct pass_sha sha;
     uint64_t t0, t_fail;
+    uint32_t load_ms;                   /* the last full load's time */
 } FP;
 static void fp_fail(const char *why)
 {
@@ -3119,6 +3120,7 @@ static void fp_step(void)
     for (int i = 0; i < 32; i++) bad |= d[i] ^ FP.p[32 + i];
     if (bad || fn_pack_check(FP.p, FP.len, 0) < 0) { fp_fail("its SHA-256 or header is wrong (a damaged copy)"); return; }
     FP.st = 2;
+    FP.load_ms = (uint32_t)(sb_ms() - FP.t0);
     struct ub u;
     ub_init(&u);
     ub_s(&u, "next: face: the pack in memory: ");
@@ -3130,6 +3132,25 @@ static void fp_step(void)
 #endif
 }
 static int fs_pack_state(void) { return FP.st; }
+/* the unlock (Track A: the pack must not stay while home and apps run; a1btn peaks at 134 MiB of the 135 allowed) */
+static void fs_pack_release(void)
+{
+    uint32_t kib = FP.st == 2 ? FP.len >> 10 : FP.got >> 10;
+    int was = FP.st;
+    if (FP.p) tk_free(FP.p);
+    FP.p = 0;
+    FP.len = FP.got = 0;
+    FP.st = 0;
+    if (was == 2) {
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "next: face: pack freed (unlock): ");
+        ub_dec(&u, kib);
+        ub_s(&u, " KiB back");
+        sb_log(u.b);
+    }
+    else if (was == 1) sb_log("next: face: the pack's load stopped (unlock)");
+}
 static int fs_pack_get(const uint8_t **p, size_t *len)
 {
     if (FP.st == 2) { *p = FP.p; *len = FP.len; return 1; }
@@ -3198,6 +3219,7 @@ static void face_init(void)
     tk_memset(&p, 0, sizeof p);
     p.pack_get = fs_pack_get;
     p.pack_state = fs_pack_state;
+    p.pack_release = fs_pack_release;
     p.fn.alloc = fs_alloc;
     p.fn.free = tk_free;
     p.fn.par = fs_par;
@@ -3284,6 +3306,18 @@ int face_selftest_step(void)
         if (fsvc_busy()) return 0;
         ftest_phase = 4;
         if (!fsvc_result_first_frame_ms()) { sb_log("selftest: next-face: FAILED: no camera frame"); return -1; }
+        {
+            struct ub u;
+            ub_init(&u);
+            ub_s(&u, "selftest: next-face: the pack ");
+            ub_dec(&u, FP.len >> 10);
+            ub_s(&u, " KiB from the card in ");
+            ub_dec(&u, FP.load_ms);
+            ub_s(&u, " ms, SHA-256 good; the camera's first frame after ");
+            ub_dec(&u, (uint64_t)fsvc_result_first_frame_ms());
+            ub_s(&u, " ms (bench and camera lines above)");
+            sb_log(u.b);
+        }
         return 1;
     }
     return -1;

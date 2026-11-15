@@ -18,6 +18,8 @@ static struct {
     int hint;                       /* the scan's hint shown (SH_FH_*) */
     /* set-up */
     int on, built, poses, done, fail, ehint;
+    int wait;                       /* set-up asked for while the pack loads: its mode + 1 */
+    int was_locked;                 /* the lock state last told to the platform (sh_face_lock) */
     unsigned seq;
     float a, at;
     char msg[96];
@@ -31,6 +33,14 @@ static tk_layer fxl, fxbg, fxcam, fxring, fxtext, fxbot;
 
 /* ---- the lock ------------------------------------------------------------------------------------------------- */
 static int fx_ok(void) { return FX.ok && locked && !EMG; }
+/* the lock's state to the platform at each change: the pack is kept only while locked (home and apps get the heap) */
+static void fx_lockstate(void)
+{
+    int l = locked ? 1 : 2;
+    if (l == FX.was_locked) return;
+    FX.was_locked = l;
+    sh_face_lock(locked);
+}
 static void fx_glyph(void)
 {
     if (EMG) return;
@@ -57,6 +67,7 @@ static void fx_set_hint(int h)
 }
 static void fx_wake(void)
 {
+    fx_lockstate();
     FX.ok = 0;
     if (!locked || EMG || FX.on) return;
     if (FX.scan) return;
@@ -73,6 +84,7 @@ static void fx_sleep(void)
 {
     fx_stop_scan();
     FX.ok = 0;
+    fx_lockstate();
 }
 /* the scan's state: 1 something changed on the screen */
 static int fx_poll(void)
@@ -125,6 +137,7 @@ static void fx_draw_text(void)
                   : FX.done ? (sh_face_mode() == SH_FACE_SECURITY ? "Security: look at the phone and blink or turn your head slightly." : "Speed: look at the phone to unlock.")
                   : FX.ehint == SH_FH_CLOSER ? "Move a little closer."
                   : FX.ehint == SH_FH_LIGHT ? "More light is needed."
+                  : FX.wait ? "Loading Face Unlock..."
                   : !(FX.poses & 1) ? "Look straight at the phone."
                   : "Move your head slowly in a circle.";
     d_text_box(&d, TK_IT400, 17, 195, 150, 330, 1, m, 0, 0, FX.fail ? tk_hex(0xff6961, 1) : W(.8f), 0);
@@ -244,11 +257,13 @@ static void fx_close(void)
 }
 static void fx_start(int mode)
 {
-    if (sh_face_enrol(mode) < 0) {
+    int r = sh_face_enrol(mode);
+    if (r < 0 && r != -2) {
         const char *w = sh_face_why();
         toast(w && w[0] ? w : "Face Unlock could not start");
         return;
     }
+    FX.wait = r == -2 ? mode + 1 : 0;              /* the pack still coming from the card: the screen waits for it */
     FX.on = 1;
     FX.poses = FX.done = FX.fail = FX.ehint = 0;
     FX.seq = 0;
@@ -267,6 +282,7 @@ static void fx_mode_cb(int i)
 static void fx_setup(void)
 {
     if (!sh_pass_on()) { toast("Set a passcode first"); return; }
+    sh_face_prepare();                               /* the pack from the card while the alert is read (~2.5 s) */
     static const kit_btn B[3] = { { "Speed", KIT_PREFERRED }, { "Security", KIT_DEFAULT }, { "Cancel", KIT_CANCEL } };
     kit_alert("Speed or Security?",
               "Speed unlocks as soon as it sees you, with a more lenient match. Security matches more strictly and "
@@ -287,6 +303,20 @@ static int fx_touch(int phase, float x, float y)
 static int fx_setup_poll(void)
 {
     if (!FX.on || FX.done || FX.fail) return 0;
+    if (FX.wait) {                                   /* the pack arrived? then the camera */
+        int r = sh_face_enrol(FX.wait - 1);
+        if (r == -2) return 0;
+        FX.wait = 0;
+        if (r < 0) {
+            FX.fail = 1;
+            const char *w = sh_face_why();
+            int n = 0;
+            while (w && w[n] && n < (int)sizeof FX.msg - 1) { FX.msg[n] = w[n]; n++; }
+            FX.msg[n] = 0;
+            fx_draw_text(); fx_draw_bot(); fx_kids();
+            return 1;
+        }
+    }
     int poses = 0, h = 0, r = sh_face_enrol_poll(&poses, &h);
     int ch = fx_pull();
     if (poses != FX.poses) {
@@ -320,6 +350,7 @@ static int fx_setup_poll(void)
 /* ---- time ------------------------------------------------------------------------------------------------------ */
 static int fx_tick(float dt)
 {
+    fx_lockstate();
     int mv = 0;
     if (FX.a != FX.at) {
         FX.a = FX.at > FX.a ? tk_minf(FX.at, FX.a + dt / .25f) : tk_maxf(FX.at, FX.a - dt / .25f);
@@ -330,8 +361,8 @@ static int fx_tick(float dt)
     return mv;
 }
 static int fx_moving(void) { return FX.a != FX.at; }
-static float fx_next_update(void) { return FX.scan ? 33 : FX.on && !FX.done && !FX.fail ? 40 : -1; }
-static int fx_refresh(void) { return fx_poll() | fx_setup_poll(); }
+static float fx_next_update(void) { return FX.scan ? 33 : FX.on && !FX.done && !FX.fail ? (FX.wait ? 100 : 40) : -1; }
+static int fx_refresh(void) { fx_lockstate(); return fx_poll() | fx_setup_poll(); }
 static void fx_reset(void)
 {
     fx_sleep();
@@ -369,7 +400,6 @@ static float fx_g(void) { return PC_G1 + LG_ROW * pc_n1() + d_group_foot(0, 0, P
 static float fx_h(void) { int n = fx_rows(); return n ? LG_ROW * n + d_group_foot(0, 0, fx_foot()) + LG_GAP + 12 : 0; }
 static void fx_page(dc *d)
 {
-    sh_face_prepare();                               /* the pack from the card while the page is read */
     int n = fx_rows();
     if (!n) return;
     float g = fx_g();

@@ -13,6 +13,7 @@ struct fsvc_plat {
      * The phone keeps it on the card (/starbite/face/sbface.pak) and loads it into the heap, checked, on demand */
     int (*pack_get)(const uint8_t **p, size_t *len);
     int (*pack_state)(void);            /* the same without starting anything: -1 not there, 0 not tried, 1 loading, 2 in */
+    void (*pack_release)(void);         /* give the pack's memory back (a load in progress stops); the next pack_get loads again */
     struct fn_plat fn;                  /* memory, the other cores, the clock in us */
     uint64_t (*now_ms)(void);
     /* the front camera: portrait 360 x 480, NOT mirrored; 0 started; the newest frame (stride = w) or 0 */

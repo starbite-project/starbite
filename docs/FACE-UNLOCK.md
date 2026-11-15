@@ -80,13 +80,20 @@ The pack is **not in git** and **not in the image**. Next is 27.5 MB against che
 kernel's arena has ~1.9 MiB free at "ready". Instead the pack is a file on the card's exFAT partition:
 **`/starbite/face/sbface.pak`**. build.sh copies it beside the images (`starbite/out/sbface.pak` + `.sha256`).
 
-kern_next.c loads it into the UI heap, 256 KiB a turn, and checks its own SHA-256 (in its header) as it comes. The
-load starts:
-- at the start, when a face is set up;
-- or when Settings' Face Unlock page shows.
+kern_next.c loads it into the UI heap, 256 KiB a turn, and checks its own SHA-256 (in its header) as it comes.
 
-After that the pack stays in memory. Without the file, Face Unlock's group does not show in Settings. The self test's
-dry build never reads the card.
+**Only while locked** (Track A's condition: a1btn already peaks at 134 of the 135 MiB allowed). The shell tells the
+service each change of the lock (`sh_face_lock`):
+- **Locked** (the start, every screen-off): the pack loads in the background (~2.5 s at 256 KiB a turn, est.), when a
+  face is set up and Unlock with Face is on. A wake before it is in falls back to the passcode silently and logs
+  "a wake before the pack was in memory".
+- **Unlocked:** the pack and every face buffer are freed before home and apps build (`next: face: pack freed
+  (unlock): N KiB back`).
+- **Set-up from Settings** (unlocked): the pack loads when *Set Up Face Unlock* is tapped (while the Speed / Security
+  alert is read; the set-up screen says "Loading Face Unlock..." until it is in). It is freed when set-up ends.
+
+Without the file, set-up says so. The self test's dry build never reads the card. store-update.sh does not carry the
+pack: it goes to the card separately.
 
 **Accuracy against the references** (host, 60 LFW faces):
 - YuNet's 12 outputs match onnxruntime's within 1.9e-6;
@@ -114,7 +121,12 @@ dry build never reads the card.
 ## Memory and time
 
 - **Image:** about +40 KB of code; the pack is on the card.
-- **Heap:** the pack, 7.3 MB of the UI heap, once Face Unlock is set up (or its page was opened).
+- **Heap:** the pack, 7.3 MB of the UI heap, only while locked or during set-up. Host check (`SBTK_HEAP_MB=160`
+  films, the pack + a scan's buffers held while locked: `SBTK_FACE_HOLD=1 SBTK_FACE_PACK=build/face/sbface.pak`):
+  - locked: 80 MiB at rest (the baseline is 66);
+  - freed at the first unlock;
+  - all 85 films then peak as the baseline (a1btn 134), 0 refusals;
+  - a1btn's largest free block is 9 MiB (16 in the baseline): the freed hole.
 - **Working memory:** ~6.9 MiB from the UI heap, only during a scan or set-up:
   - activations 2 × 3.2 MB;
   - a 256 KB pool of weight tiles;

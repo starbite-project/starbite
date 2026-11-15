@@ -1276,10 +1276,37 @@ static const uint32_t *hf_cam_frame(unsigned *seq) { return sh_cam_frame(0, 0, s
 static void hf_cam_close(void) { sh_cam_close(); }
 static void hf_random(uint8_t *p, unsigned n) { for (unsigned i = 0; i < n; i++) p[i] = (uint8_t)rand(); }
 static void hf_log(const char *l) { fprintf(stderr, "%s\n", l); }
-static const uint8_t *hf_pak;
+static const uint8_t *hf_pak;                   /* the file (outside the UI heap) */
 static size_t hf_pak_len;
-static int hf_pack_get(const uint8_t **p, size_t *n) { if (!hf_pak) return -1; *p = hf_pak; *n = hf_pak_len; return 1; }
-static int hf_pack_state(void) { return hf_pak ? 2 : -1; }
+static uint8_t *hf_res;                         /* the copy in the UI heap while resident (the phone's load) */
+static struct face_eng hf_eng;                  /* SBTK_FACE_HOLD: a scan's buffers held with it (the heap check's worst case) */
+static int hf_eng_on;
+static struct fsvc_plat hf_plat;
+static int hf_pack_get(const uint8_t **p, size_t *n)
+{
+    if (!hf_pak) return -1;
+    if (!hf_res) {
+        hf_res = tk_alloc(hf_pak_len);
+        if (!hf_res) return -1;
+        memcpy(hf_res, hf_pak, hf_pak_len);
+        fprintf(stderr, "face: the pack in the UI heap: %zu KiB\n", hf_pak_len >> 10);
+        if (getenv("SBTK_FACE_HOLD") && face_eng_open(&hf_eng, hf_res, hf_pak_len, &hf_plat.fn) == 0) {
+            hf_eng_on = 1;
+            fprintf(stderr, "face: a scan's buffers held too (SBTK_FACE_HOLD)\n");
+        }
+    }
+    *p = hf_res;
+    *n = hf_pak_len;
+    return 1;
+}
+static int hf_pack_state(void) { return !hf_pak ? -1 : hf_res ? 2 : 0; }
+static void hf_pack_release(void)
+{
+    if (hf_eng_on) face_eng_close(&hf_eng);
+    hf_eng_on = 0;
+    if (hf_res) { tk_free(hf_res); fprintf(stderr, "face: pack freed (unlock): %zu KiB back\n", hf_pak_len >> 10); }
+    hf_res = 0;
+}
 static void face_host_init(void)
 {
     struct fsvc_plat p;
@@ -1299,6 +1326,7 @@ static void face_host_init(void)
     p.fake = hf_pak ? 0 : hd_env("SBTK_FACE", "fail") ? 2 : 1;
     p.pack_get = hf_pack_get;
     p.pack_state = hf_pack_state;
+    p.pack_release = hf_pack_release;
     p.fn.alloc = hf_alloc;
     p.fn.free = tk_free;
     p.fn.now_us = hf_now_us;
@@ -1314,15 +1342,9 @@ static void face_host_init(void)
     p.pass_on = sh_pass_on;
     p.pass_wait = sh_pass_wait;
     p.log = hf_log;
+    hf_plat = p;
     fsvc_init(&p);
-    if (getenv("SBTK_FACE_HOLD")) {            /* the heap check's worst case: the pack + a scan's working set held all along */
-        static struct face_eng e;
-        size_t n = hf_pak ? hf_pak_len : 7269152;
-        void *pk = tk_alloc(n);
-        if (pk && hf_pak) memcpy(pk, hf_pak, n);
-        int r = pk && hf_pak ? face_eng_open(&e, pk, n, &p.fn) : -1;
-        fprintf(stderr, "face: held in the UI heap: the pack %zu KiB + the engine %s\n", n >> 10, r == 0 ? "(open)" : "(NOT open: SBTK_FACE_PACK?)");
-    }
+    if (getenv("SBTK_FACE_HOLD")) sh_face_prepare();   /* the heap check: the pack (+ a scan's buffers) from the start, as when locked */
 }
 /* the sensors: an office (about 320 lux, 1013.2 hPa), the phone on a desk */
 int sh_light_lux(void) { return 320 + (int)(hd_now() / 700 % 9) - 4; }

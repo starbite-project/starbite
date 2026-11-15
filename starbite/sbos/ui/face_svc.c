@@ -43,6 +43,8 @@ static struct {
     char d_old[8], d_new[8];
     char why[64];
     int last_first;                     /* the camera test's first frame (ms) */
+    int unlocked;                       /* the shell says the phone is unlocked: no pack kept */
+    int told_loading;                   /* a wake before the pack was in: logged once a lock */
 } F;
 enum { J_NONE = 0, J_SCAN, J_ENROL, J_BENCH, J_CAMTEST };
 
@@ -66,6 +68,8 @@ static int pack(int start)
     return r;
 }
 static int avail(void) { return P.fake || pack(0) >= 0; }
+
+static int tk_like_streq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a != *b; }   /* 0 equal */
 
 /* ---- small helpers ----------------------------------------------------------------------------------------------- */
 static void wipe(void *p, unsigned n) { for (unsigned i = 0; i < n; i++) ((volatile uint8_t *)p)[i] = 0; }
@@ -202,12 +206,21 @@ void fsvc_passcode_set(const char *old, const char *nw)
 }
 
 /* ---- the job: camera + engine ---------------------------------------------------------------------------------- */
+static void release_pack(void)
+{
+    if (!P.pak && !(P.pack_state && P.pack_state() == 1)) return;
+    P.pak = 0;
+    P.pak_len = 0;
+    if (P.pack_release) P.pack_release();
+}
 static void job_end(void)
 {
     if (F.cam_on && P.cam_close) P.cam_close();
     if (F.eng_on) face_eng_close(&F.eng);
     F.cam_on = F.eng_on = 0;
+    int was = F.job;
     F.job = J_NONE;
+    if (F.unlocked && (was == J_ENROL || was == J_SCAN)) release_pack();   /* set-up ended in Settings: memory back */
 }
 static int job_begin(int job)
 {
@@ -504,7 +517,7 @@ static int ready(void)
 {
     if (!avail()) { scpy(F.why, sizeof F.why, "Face Unlock's files are not on the card"); return 0; }
     if (!P.pass_on || !P.pass_on()) { scpy(F.why, sizeof F.why, "Set a passcode first"); return 0; }
-    if (!P.fake && pack(F.enrolled) <= 0) { scpy(F.why, sizeof F.why, "Face Unlock is loading"); return 0; }
+    if (!P.fake && pack(F.enrolled && !F.unlocked) <= 0) { scpy(F.why, sizeof F.why, "Face Unlock is loading"); return 0; }   /* (unlocked: never loads) */
     if (!F.enrolled) { scpy(F.why, sizeof F.why, "Face Unlock is not set up"); return 0; }
     if (!P.pref_int("face.on", 1)) { scpy(F.why, sizeof F.why, "Unlock with Face is off"); return 0; }
     if (!F.key_ok || !F.tpl_ok || !F.pass_ms) { scpy(F.why, sizeof F.why, "Your passcode is required to enable Face Unlock"); return 0; }
@@ -537,7 +550,13 @@ int sh_face_scan(int start)
     if (F.job == J_SCAN) return 0;
     F.result = SH_FS_IDLE;
     F.hint = SH_FH_NONE;
-    if (!F.inited || F.job || !ready()) return -1;
+    if (!F.inited || F.job || !ready()) {
+        if (F.inited && !F.told_loading && !tk_like_streq(F.why, "Face Unlock is loading")) {
+            F.told_loading = 1;
+            log1("a wake before the pack was in memory: the passcode only this time");
+        }
+        return -1;
+    }
     face_scan_begin(&F.scan, sh_face_mode() == SH_FACE_SECURITY ? FACE_SECURITY : FACE_SPEED, P.now_ms());
     int r = job_begin(J_SCAN);
     if (r == 0) F.result = SH_FS_RUN;
@@ -552,7 +571,9 @@ int sh_face_enrol(int mode)
 {
     if (!F.inited || !avail()) { scpy(F.why, sizeof F.why, "Face Unlock's files are not on the card"); return -1; }
     if (!P.pass_on || !P.pass_on()) { scpy(F.why, sizeof F.why, "Set a passcode first"); return -1; }
-    if (!P.fake && pack(1) <= 0) { scpy(F.why, sizeof F.why, "Face Unlock is still loading. Try again in a moment."); return -1; }
+    int pk = P.fake ? 1 : pack(1);
+    if (pk < 0) { scpy(F.why, sizeof F.why, "Face Unlock's files are not on the card"); return -1; }
+    if (!pk) { scpy(F.why, sizeof F.why, "Loading Face Unlock..."); return -2; }
     if (!F.key_ok) { scpy(F.why, sizeof F.why, "Lock the phone and unlock it with your passcode first"); return -1; }
     if (F.job) job_end();
     sh_face_set_mode(mode);
@@ -584,6 +605,7 @@ void sh_face_stop(void)
     if (F.job == J_SCAN && !P.fake) scan_log(FS_RUN);
     if (F.job == J_ENROL && !F.enrol_result) F.enrol_result = -1;
     if (F.job != J_BENCH) job_end();
+    if (F.unlocked && !F.job) release_pack();        /* a set-up left (or never started) in Settings */
 }
 void sh_face_reset(void)
 {
@@ -602,4 +624,17 @@ void fsvc_host_enrolled(void)
     if (!P.fake) return;
     F.key_ok = F.tpl_ok = F.enrolled = 1;
     F.pass_ms = P.now_ms() ? P.now_ms() : 1;
+}
+
+void sh_face_lock(int locked)
+{
+    if (!F.inited || P.fake) { F.unlocked = !locked; return; }
+    F.unlocked = !locked;
+    if (locked) {
+        F.told_loading = 0;
+        if (F.enrolled && P.pref_int("face.on", 1) && P.pass_on && P.pass_on()) (void)pack(1);
+        return;
+    }
+    if (F.job == J_SCAN) { scan_log(FS_RUN); job_end(); }
+    if (F.job != J_ENROL && F.job != J_BENCH && F.job != J_CAMTEST) release_pack();
 }
