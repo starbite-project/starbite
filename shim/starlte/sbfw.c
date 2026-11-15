@@ -21,6 +21,9 @@
 #include "menu.h"
 #include "catalog.h"
 #include "fbbg.h"
+#include "crash.h"
+#include "post.h"
+#include "sd.h"
 
 void star_pmsg(const char *s);
 
@@ -359,6 +362,95 @@ static void windows_health(struct fw_out *o, struct bcd_plan *plan, int want_pla
     check_store(o);
 }
 
+/* a card range (sd:lba FIRST+COUNT in 512-byte sectors) through the same 4 KiB cache */
+struct cio {
+    uint64_t first, count;
+};
+static int crd(void *u, uint64_t off, void *buf, uint32_t len)
+{
+    const struct cio *c = (const struct cio *)u;
+    uint8_t *d = (uint8_t *)buf;
+    while (len) {
+        uint64_t sec = (off / 4096U) * 8U;
+        uint32_t in = (uint32_t)(off % 4096U), n = 4096U - in;
+        if (n > len)
+            n = len;
+        if (sec + 8 > c->count)
+            return -1;
+        uint64_t key = (1ULL << 63) | (c->first + sec);
+        if (key != blk_lba) {
+            uint8_t *dst = blk;
+            __asm__("" : "+r"(dst));
+            if (sd_read(c->first + sec, 8, (uintptr_t)dst))
+                return -1;
+            blk_lba = key;
+        }
+        for (uint32_t i = 0; i < n; ++i)
+            d[i] = blk[in + i];
+        d += n;
+        off += n;
+        len -= n;
+    }
+    return 0;
+}
+
+static uint64_t parse_u(const char **p)
+{
+    uint64_t v = 0;
+    while (**p >= '0' && **p <= '9')
+        v = v * 10U + (uint64_t)(*(*p)++ - '0');
+    return v;
+}
+
+/* The OS's root (the catalog's root field): its file system checked, read only. */
+static void root_health(struct fw_out *o, const char *root)
+{
+    struct fw_io io;
+    if (root[0] == 's' && root[1] == 'd' && root[2] == ':' && root[3] == 'l' && root[4] == 'b' && root[5] == 'a') {
+        const char *p = root + 6;
+        while (*p == ' ')
+            ++p;
+        static struct cio c;
+        c.first = parse_u(&p);
+        c.count = *p == '+' ? (++p, parse_u(&p)) : 0;
+        sd_allow();
+        if (!c.count || !sd_up()) {
+            o->line(o->u, "PROBLEM: the card range does not read");
+            ++o->bad;
+            return;
+        }
+        io.rd = crd;
+        io.u = &c;
+        io.size = c.count * 512U;
+        blk_lba = ~0ULL;
+        o->line(o->u, "Root: a microSD card range");
+        (void)fs_health(&io, o);
+        return;
+    }
+    if (root[0] == 'u' && root[1] == 'f' && root[2] == 's' && root[3] == ':') {
+        char name[24];
+        unsigned k = 0;
+        for (const char *p = root + 4; k + 1 < sizeof(name) &&
+             ((*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_'); ++p)
+            name[k++] = *p;
+        name[k] = 0;
+        static struct pio pp;
+        if (!k || !part_io(name, &pp, &io)) {
+            o->line(o->u, "PROBLEM: the root partition is not in the GPT");
+            ++o->bad;
+            return;
+        }
+        struct fwb s;
+        fwb_init(&s);
+        fwb_s(&s, "Root: UFS partition ");
+        fwb_s(&s, name);
+        o->line(o->u, s.b);
+        (void)fs_health(&io, o);
+        return;
+    }
+    o->line(o->u, "Root: a file inside the card's exFAT, or RAM only: not checked here");
+}
+
 static void generic_health(struct fw_out *o, const struct cat_ent *e)
 {
     struct fwb s;
@@ -369,7 +461,8 @@ static void generic_health(struct fw_out *o, const struct cat_ent *e)
     ufs_up();
     o->line(o->u, gpt_load() ? "GPT: LU0 partition table read" : "PROBLEM: LU0 partition table unreadable");
     check_store(o);
-    o->line(o->u, "(file-system checks for this OS: docs/STARBITE-FIRMWARE-LAYER.md 5, later)");
+    if (e && e->root[0])
+        root_health(o, e->root);
 }
 
 /* ---- the page ---- */
@@ -518,4 +611,296 @@ int sbfw_page(int cat)
     }
     star_pmsg("STARBITE fw: page closed\n");
     return changed;
+}
+
+/* ---- Starbite OS as the boot menu: requests, shell mode, the table (section 10) ---------------- */
+
+static int str_eq(const char *a, const char *b)
+{
+    unsigned k = 0;
+    while (k < 23 && a[k] && a[k] == b[k])
+        ++k;
+    return k == 23 || a[k] == b[k];
+}
+
+static void fw_log(const char *a, const char *b)
+{
+    struct fwb s;
+    fwb_init(&s);
+    fwb_s(&s, "STARBITE fw: ");
+    fwb_s(&s, a);
+    if (b)
+        fwb_s(&s, b);
+    fwb_s(&s, "\n");
+    star_pmsg(s.b);
+}
+
+/* the record as the store has it, and a save of a changed copy */
+static struct star_settings fw_set;
+static struct sbfw_rec fw_rec;
+static int fw_have;
+
+static void fw_load(void)
+{
+    if (!settings_load(&fw_set))
+        sbset_defaults(&fw_set);
+    (void)settings_fw(&fw_rec);
+    fw_have = 1;
+}
+
+static void fw_save(const char *what)
+{
+    int r = settings_fw_save(&fw_set, &fw_rec);
+    fw_log(what, r ? " (settings NOT saved)" : " (saved)");
+    crash_reload_settings();
+}
+
+void sbfw_boot_start(void)
+{
+    fw_load();
+    unsigned a = sbfw_boot_age(&fw_rec);
+    if (!a)
+        return;
+    fw_save(a == SBFW_AGE_SEEN ? "request armed for this boot" : a == SBFW_AGE_EXPIRED ? "request expired unused"
+            : a == SBFW_AGE_DONE ? "request done (one boot)"
+            : a == SBFW_AGE_ROLLBACK ? "update rolled back: its start was never confirmed, the previous version stays"
+                                     : "update expired unused: the previous version stays");
+}
+
+/* ---- the update slots (section 10.5) ---- */
+static uint8_t slot_hdr[4096];
+static int slot_state[3];               /* per slot: 0 not read, 1 valid header, -1 none */
+static struct store_ent slot_ent[3];
+static struct sbslot_info slot_inf[3];
+static unsigned slot_last;              /* the slot the last "@slot" resolve used (0 none) */
+
+static void ent_cpy(struct store_ent *d, const struct store_ent *s)   /* no struct copies: no libc memcpy */
+{
+    volatile const uint8_t *a = (volatile const uint8_t *)s;
+    uint8_t *b = (uint8_t *)d;
+    for (unsigned i = 0; i < sizeof(*s); ++i)
+        b[i] = a[i];
+}
+
+void sbfw_slot_reset(void)
+{
+    slot_last = 0;
+}
+
+int sbfw_slot_source(const char *key, struct store_ent *out)
+{
+    if (!fw_have)
+        fw_load();
+    unsigned slot = fw_rec.slot_active;
+    if (fw_rec.req_action == SBFW_REQ_UPDATE && fw_rec.slot_try &&
+        (fw_rec.req_state == SBFW_ST_ARMED || fw_rec.req_state == SBFW_ST_SEEN) && str_eq(fw_rec.req_key, key))
+        slot = fw_rec.slot_try;
+    if (slot != 1 && slot != 2)
+        return 0;
+    if (!slot_state[slot]) {
+        slot_state[slot] = -1;
+        struct store_ent e;
+        uint8_t *buf = slot_hdr;
+        __asm__("" : "+r"(buf));
+        if (store_find(slot == 1 ? "sbos-slot-a" : "sbos-slot-b", &e) && (e.flags & SF_VOLATILE) &&
+            !store_head(&e, (uintptr_t)buf) && sbslot_check(buf, e.size, key, &slot_inf[slot])) {
+            ent_cpy(&slot_ent[slot], &e);
+            slot_state[slot] = 1;
+        }
+    }
+    if (slot_state[slot] < 0 || !str_eq(slot_inf[slot].key, key))
+        return 0;
+    ent_cpy(out, &slot_ent[slot]);
+    out->lba += 1;                       /* the image after the header block */
+    out->size = slot_inf[slot].size;
+    out->crc = slot_inf[slot].crc;       /* store_load checks the image's CRC */
+    out->flags = 0;
+    slot_last = slot;
+    return 1;
+}
+
+static int req_live(void)
+{
+    return fw_rec.req_state == SBFW_ST_ARMED || fw_rec.req_state == SBFW_ST_SEEN;
+}
+
+/* the boot-next mailbox (menu.c's): a pending key means the menu path starts it */
+#define FW_NEXT_MAILBOX 0xFED17FE0UL
+#define FW_NEXT2_MAGIC  0x21325458454e4253ULL
+
+/* the shell entry: the record's shell key, else the first Starbite OS row the catalog has (FW4: today's phone
+ * calls the 1.0 line starbite-next-gpu; the classic one is starbite-os) */
+static int shell_row(void)
+{
+    if (fw_rec.shell_key[0])
+        return cat_find(fw_rec.shell_key);
+    int i = cat_find("starbite-next-gpu");
+    if (i < 0)
+        i = cat_find("starbite-next");
+    if (i < 0)
+        i = cat_find("starbite-os");
+    return i;
+}
+
+/* the last chance for the plain menu: Volume Down held (or pressed) during this window; POST's own skip only
+ * works while POST runs (and not at all with POST off) */
+#ifndef SBFW_SHELL_GRACE_MS
+#define SBFW_SHELL_GRACE_MS 700U
+#endif
+static int shell_grace(void)
+{
+    for (unsigned t = 0; t < SBFW_SHELL_GRACE_MS; t += 20U) {
+        if (hw_keys() & K_DOWN)
+            return 1;
+        hw_wait_ms(20);
+    }
+    return 0;
+}
+
+unsigned sbfw_shell_flags(void)
+{
+    if (!fw_have)
+        fw_load();
+    return sbfw_shell_eff(fw_rec.fw_flags, SBFW_SHELL_DEFAULT);
+}
+
+int sbfw_shell_pick(int skip, const char **why)
+{
+    if (!fw_have)
+        fw_load();
+    unsigned fl = sbfw_shell_eff(fw_rec.fw_flags, SBFW_SHELL_DEFAULT);
+    int i = (fl & SBFW_FLAG_SHELL) ? shell_row() : -1;
+    const char *nr = 0;
+    int ready = i >= 0 && star_entry_ready((unsigned)i, &nr);
+    int next = *(volatile uint64_t *)FW_NEXT_MAILBOX == FW_NEXT2_MAGIC || fw_set.next_key[0];
+    unsigned d = sbfw_shell_decide(fl, skip, fw_rec.req_state, fw_rec.req_action, crash_hold_autoboot(),
+                                   next, i, ready);
+    if (d == SBFW_SH_START && shell_grace())
+        d = SBFW_SH_SKIP;
+    *why = d == SBFW_SH_NOT_READY && nr ? nr : sbfw_shell_why(d);
+    if (d == SBFW_SH_NO_SHELL) {
+        fw_rec.req_state = SBFW_ST_DONE;
+        fw_save("no-shell request: the plain menu this boot");
+    }
+    if (d == SBFW_SH_OFF)
+        *why = 0;
+    return d == SBFW_SH_START ? i : -1;
+}
+
+unsigned sbfw_req_for(const struct cat_ent *e)
+{
+    if (!fw_have)
+        fw_load();
+    if (!req_live() || !str_eq(fw_rec.req_key, e->key) || fw_rec.req_action == SBFW_REQ_NO_SHELL)
+        return 0;
+    return fw_rec.req_action;
+}
+
+static int has_store(const char *name)
+{
+    struct store_ent se;
+    return store_find(name, &se);
+}
+
+unsigned sbfw_req_apply(unsigned req, struct cat_ent *e, char *xfrag, unsigned xcap)
+{
+    int ok = sbfw_req_fits(req, e->method);
+    if (ok && req == SBFW_REQ_SINGLE)
+        ok = sb_line_edit(e->cmdline, sizeof(e->cmdline), "single systemd.unit=rescue.target", 0) != 0;
+    if (ok && req == SBFW_REQ_XNU_SINGLE)
+        ok = sb_line_edit(xfrag, xcap, "-s", 0) != 0;
+    if (ok && req == SBFW_REQ_PREV) {
+        /* the previous kernel: "linux-prev.image" in the store */
+        ok = has_store("linux-prev.image");
+        if (ok) {
+            const char *p = "linux-prev.image";
+            unsigned k = 0;
+            for (; p[k] && k + 1 < sizeof(e->file[0]); ++k)
+                e->file[0][k] = p[k];
+            e->file[0][k] = 0;
+        }
+    }
+    if (!ok) {
+        fw_rec.req_state = SBFW_ST_REFUSED;
+        fw_save("request refused for this entry: ");
+        fw_log("  request ", sbfw_req_name(req));
+        return 0;
+    }
+    fw_log("request applied to this start: ", sbfw_req_name(req));
+    return req;
+}
+
+static uint8_t tbl_lines[0x4000];
+static void build_table(uint8_t *page, const char *key, unsigned req, unsigned why, unsigned level);
+
+void sbfw_handoff(const char *key, unsigned req, unsigned why, unsigned level)
+{
+    if (req == SBFW_REQ_UPDATE && req_live() && fw_rec.req_action == req && slot_last != fw_rec.slot_try) {
+        fw_rec.slot_try = 0;               /* the new image did not load (bad header / CRC): the old one runs */
+        fw_rec.req_state = SBFW_ST_REFUSED;
+        fw_save("update image did not load: the previous version started");
+        req = 0;
+    }
+    if (req && req_live() && fw_rec.req_action == req) {
+        fw_rec.req_state = SBFW_ST_APPLIED;
+        fw_save("request applied, undone at the next start");
+    }
+    uint8_t *page = (uint8_t *)SBFW_TABLE_PA;
+    __asm__("" : "+r"(page));
+    build_table(page, key, req, why, level);
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+unsigned sbfw_table_preview(uint8_t *out, unsigned cap)
+{
+    if (cap < SBFW_TABLE_SIZE)
+        return 0;
+    if (!fw_have)
+        fw_load();
+    build_table(out, "", 0, SBFW_WHY_FASTBOOT, sbfw_level());
+    return SBFW_TABLE_SIZE;
+}
+
+static void build_table(uint8_t *page, const char *key, unsigned req, unsigned why, unsigned level)
+{
+    struct sbfw_table_in in;
+    uint8_t *q = (uint8_t *)&in;
+    for (unsigned i = 0; i < sizeof(in); ++i)
+        q[i] = 0;
+    in.debug_level = level;
+    in.req_action = req;
+    in.key = key;
+    int y0 = sbfw_console_y0(level);
+    if (y0 < UI_H) {
+        in.console_y0 = (uint32_t)y0;
+        in.console_y1 = UI_H;
+    }
+    in.fb_base = 0xcc000000ULL;
+    in.stride = 1440U * 4U;
+    in.fb_fmt = 0;
+    in.loader_version = 10;               /* SBFW ABI v1, loader 1.0 */
+    in.boot_reason = why;
+    int h = store_home();
+    if (h >= 0) {
+        in.store_medium = (uint32_t)h;
+        in.store_flags = store_marked_home((unsigned)h) ? 1U : 0U;
+        in.store_base = store_base((unsigned)h);
+        in.store_capacity = store_capacity((unsigned)h);
+    } else {
+        in.store_medium = 0xffffffffU;
+    }
+    unsigned sev = 0;
+    char ck[24];
+    in.crash_kind = crash_last(&sev, ck, sizeof(ck));
+    in.crash_sev = sev;
+    in.crash_key = ck;
+    const struct post_report *pr = post_last();
+    if (pr && pr->magic == POST_MAGIC) {
+        in.post_fails = pr->fails;
+        in.post_warns = pr->warns;
+    }
+    in.settings_status = (uint32_t)settings_status();
+    in.flags = (store_card_only() ? SBFW_TF_CARD_ONLY : 0U) | ((sbfw_shell_eff(fw_rec.fw_flags, SBFW_SHELL_DEFAULT) & SBFW_FLAG_SHELL) ? SBFW_TF_SHELL : 0U);
+    unsigned n = sb_ring_text((const uint8_t *)PMSG_ZONE, PMSG_ZONE_BYTES, (char *)tbl_lines, sizeof(tbl_lines) - 1);
+    sbfw_table_build(page, &in, (const char *)tbl_lines, n);
 }

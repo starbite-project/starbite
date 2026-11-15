@@ -25,6 +25,8 @@ void crash_snapshot(uintptr_t fdt);
 int crash_after(int *retry);
 /* 1 once this boot found a crash: the menus start no auto-start countdown. */
 int crash_hold_autoboot(void);
+/* The last start's verdict this boot (after crash_after): kind (sbfmt sb_classify), severity, key. */
+unsigned crash_last(unsigned *sev, char *key, unsigned cap);
 
 /* The launch record, the last thing before an OS starts (xnu_boot.c launch_go). method: catalog
  * M_*; lflags: CLF_* (sbfmt.h). A failed write is logged and ignored. */

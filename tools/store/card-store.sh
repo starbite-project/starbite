@@ -127,6 +127,14 @@ write_img() {
     psh "dd if=/tmp/cs.head of=$dev bs=4096 conv=notrunc,fsync 2>/dev/null; sync; rm /tmp/cs.head"
     [ "$(sha_card 0 7)" = "$want" ] || die "head (p2 blocks 0..6) read back wrong"
     echo "  head written (p2 blocks 0..6)"
+    # the head's backup at p2 blocks 64..70 (Starbite Recovery > Repair and reset > repair the card
+    # store's head, shim/starlte/repair.c RP_HEAD_BAK), only where the data starts beyond it
+    if [ "$data_at" -gt 71 ]; then
+        adb push "$tmp/head" /tmp/cs.head >/dev/null
+        psh "dd if=/tmp/cs.head of=$dev bs=4096 seek=64 conv=notrunc,fsync 2>/dev/null; sync; rm /tmp/cs.head"
+        [ "$(sha_card 64 7)" = "$want" ] || die "head backup (p2 blocks 64..70) read back wrong"
+        echo "  head backup written (p2 blocks 64..70)"
+    fi
 }
 
 verify_img() {

@@ -717,7 +717,8 @@ static const char oem_help[] =
 static int loader_key(const char *k)
 {
     return fb_streq(k, "fastboot") || fb_streq(k, "rescue") || fb_streq(k, "maint") || fb_streq(k, "maint-prev") ||
-           fb_streq(k, "maint-rescue");
+           fb_streq(k, "maint-rescue") || fb_streq(k, "menu") || fb_streq(k, "recovery") ||
+           fb_streq(k, "recovery-repair");
 }
 
 static void oem(const char *a)
@@ -798,6 +799,16 @@ static void oem(const char *a)
         }
         okay("starting Starbite Maintenance");
         fb.act = FB_ACT_BOOT;
+    } else if (fb_streq(a, "sbfw-table")) {   /* docs/STARBITE-FIRMWARE-LAYER.md 10.2: tools/menu/sbfw-table.py */
+        unsigned n = fbp_sbfw_table((uint8_t *)fb.stg, fb.stg_cap);
+        if (!n) {
+            failr("no room");
+            return;
+        }
+        fb.stg_len = n;
+        fb.up = fb.stg;
+        fb.up_len = n;
+        okay("staged (binary): fastboot get_staged <file>");
     } else if (fb_streq(a, "catalog")) {
         struct tb t;
         tb_init(&t, fb.scr, fb.scr_cap);

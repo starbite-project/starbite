@@ -54,6 +54,13 @@ static const char fake_log[] =
     "a line that is longer than sixty characters so the INFO splitter has to cut it in two\n"
     "\n"
     "last line without newline";
+unsigned fbp_sbfw_table(uint8_t *out, unsigned cap)
+{
+    (void)out;
+    (void)cap;
+    return 0;
+}
+
 unsigned fbp_log(const char *which, char *out, unsigned cap)
 {
     if (strcmp(which, "pmsg") && strcmp(which, "usb"))

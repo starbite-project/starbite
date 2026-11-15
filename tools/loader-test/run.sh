@@ -48,4 +48,8 @@ $CC -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -I tools/loader-
     -fsanitize=address,undefined -fno-sanitize-recover=all \
     tools/loader-test/store_test.c "$T/store_host.c" $S/sbfmt.c -o "$T/store_test"
 "$T/store_test" "$T"
+# SBFW formats (docs/STARBITE-FIRMWARE-LAYER.md section 10)
+$CC -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -I $S -I shim \
+    -fsanitize=address,undefined -fno-sanitize-recover=all tools/loader-test/sbfw_test.c $S/sbfmt.c -o "$T/sbfw_test"
+"$T/sbfw_test" "$T" "$T/card-home.img"
 echo "loader-test: all passed"

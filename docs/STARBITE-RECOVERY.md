@@ -235,3 +235,26 @@ First boot, three cases:
 2. Hold Bixby: the recovery menu. Try Continue, Run POST (full) and Boot entry.
 3. Rescue with no rescue system installed: "NO RESCUE SYSTEM: NO RESCUE BUNDLE IN BOOT, NO
    RESCUE.INITRD IN THE STORE", and the menu stays.
+
+## 8. Repair and reset (2026-11-12, `repair.c`)
+
+Starbite Recovery > **REPAIR AND RESET...**. Every write has the same shape as the firmware layer's actions: a
+**plan** (read only, what would change and where), **Power** to confirm (any other key cancels), the write, a
+read-back of every block. Gold rows write; the others only read.
+
+| Row | What it does | Writes |
+|---|---|---|
+| Check the OS store (quick) | the home store (card or UFS): entries, used size, the settings record, the crash log entry, the card head's backup | nothing |
+| Check every entry's CRC | the above, then every non-volatile entry read and CRC-checked (about a minute for 480 MiB on the card); lists the bad ones ("reflash them from the Mac") | nothing |
+| Repair the card store's head | when the card store's header or directory is damaged (the loader then says "NO OS STORE ON THE CARD"), blocks 0, 1, 3..6 come back from the backup copy at **p2 blocks 64..70** that `tools/store/card-store.sh` writes with every migrate/flash. Block 2 (settings) stays. The plan refuses when the head is fine or the backup is not a valid home head | card p2 blocks 0..6 (the SD fence opens for exactly those during the write) |
+| Restore BOOT from the store | the store entry **`boot-good.img`** (a full BOOT image, CRC-checked, "ANDROID!" header, no bigger than BOOT) against the BOOT partition: the plan counts the differing 4 KiB blocks; the apply writes only those, each read back, never outside BOOT's GPT range. If it stops half way, Download mode (Volume Down + Bixby) still works: S-Boot is not in BOOT. Put the image there from the Mac: `tools/store/store-update.sh WORK boot-good.img=build/menu/BOOT-card.img` | BOOT |
+| Reset Starbite OS data | the volatile entry `sbos-state` (Starbite OS's settings and saved data) set to zero: Starbite OS starts fresh | that entry |
+| Save logs to the store | a bundle "SBLOGS01" (pmsg, dmesg, the loader's log page, the crash log, the last POST report) into the volatile entry **`loader-logs`** (add it once: `store-update.sh WORK --volatile loader-logs=262144`). Read it on the Mac: `store-pull.sh X sd && sbstore2.py logs X OUTDIR`; Starbite OS can show it | that entry |
+| Firmware options for an OS... | the firmware layer's per-OS page (debug level, disk health, the one-shot plans) for a catalog entry | as that page |
+
+Installed phones have no TWRP (RECOVERY is never written, docs/INSTALLER.md), so these rows plus the loader's
+USB fastboot and Download mode are the repair path there.
+
+The startup settings page has a new row **STARBITE OS AS MENU** (on: the loader starts Starbite OS instead of the
+boot menu, docs/STARBITE-FIRMWARE-LAYER.md section 10). Mailbox keys an OS can use: `recovery` (this menu, "ASKED FOR BY
+THE OS"), `menu` (the plain boot menu once).

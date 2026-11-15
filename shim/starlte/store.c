@@ -461,6 +461,33 @@ int settings_load(struct star_settings *st)
 }
 
 static uint8_t set_blk[CL_BLOCK];
+static int fw_dirty;     /* settings_fw_save put a new SBFW part into set_tail */
+
+int settings_fw(struct sbfw_rec *r)
+{
+    struct star_settings st;
+    int ok = settings_load(&st);
+    if (ok) {
+        sbfw_rec_decode(set_tail, r);
+    } else {
+        uint8_t *q = (uint8_t *)r;             /* no record yet: all zero */
+        for (unsigned i = 0; i < sizeof(*r); ++i)
+            q[i] = 0;
+    }
+    return ok;
+}
+
+int settings_fw_save(struct star_settings *st, const struct sbfw_rec *r)
+{
+    if (set_status != 1) {          /* no record yet: start from this one's bytes */
+        sbset_encode(set_blk, st);  /* 4 KiB: the tail keeps its first 256 */
+        for (unsigned i = 0; i < SBSET_BYTES; ++i)
+            set_tail[i] = set_blk[i];
+    }
+    sbfw_rec_encode(set_tail, r);
+    fw_dirty = 1;
+    return settings_save(st);
+}
 
 int settings_save(struct star_settings *st)
 {
@@ -471,7 +498,7 @@ int settings_save(struct star_settings *st)
     ++st->seq;
     sbset_encode(set_blk, st);
     /* fields a newer tool wrote after ours: kept as they were (the CRC covers them again) */
-    if (set_status == 1 && set_tail[0] == 'S') {
+    if ((set_status == 1 && set_tail[0] == 'S') || fw_dirty) {
         for (unsigned i = 112; i < SBSET_BYTES; ++i)
             set_blk[i] = set_tail[i];
         uint32_t c = sb_crc32(set_blk + 16, SBSET_BYTES - 16);
@@ -491,6 +518,7 @@ int settings_save(struct star_settings *st)
     for (unsigned i = 0; i < SBSET_BYTES; ++i)
         set_tail[i] = set_blk[i];
     set_status = 1;
+    fw_dirty = 0;
     return 0;
 }
 
@@ -517,6 +545,53 @@ int store_crashlog_write(const struct store_ent *e, unsigned index, uintptr_t sr
         if (*(volatile uint64_t *)(READBACK + i) != *(volatile uint64_t *)(src + i))
             return -3;
     return 0;
+}
+
+int store_volatile_write(const char *name, uint64_t index, uint64_t count, uintptr_t src)
+{
+    int h = store_home();
+    struct store_ent e;
+    char full[40];
+    const char *pre = h == (int)STORE_SD ? "sd:" : "ufs:";
+    unsigned k = 0;
+    for (; pre[k]; ++k)
+        full[k] = pre[k];
+    for (unsigned j = 0; name[j] && k + 1 < sizeof(full); ++j)
+        full[k++] = name[j];
+    full[k] = 0;
+    if (h < 0 || !store_find(full, &e) || !(e.flags & SF_VOLATILE) || e.medium != (unsigned)h)
+        return -1;
+    uint64_t blocks = (e.size + 4095U) / 4096U;
+    if (!count || index > blocks || count > blocks - index)
+        return -1;
+    int r = 0;
+    if (h == (int)STORE_SD)
+        sd_fence(2, e.lba + index, count);
+    for (uint64_t i = 0; i < count && !r; ++i) {
+        uintptr_t s = src + (uintptr_t)i * 4096U;
+        if (med_write(e.medium, e.lba + index + i, s) || med_read(e.medium, e.lba + index + i, 1, READBACK)) {
+            r = -2;
+            break;
+        }
+        for (unsigned j = 0; j < 4096U; j += 8)
+            if (*(volatile uint64_t *)(READBACK + j) != *(volatile uint64_t *)(s + j)) {
+                r = -3;
+                break;
+            }
+    }
+    if (h == (int)STORE_SD)
+        sd_fence(2, 0, 0);
+    return r;
+}
+
+void store_rehome(void)
+{
+    home = -2;
+    for (unsigned m = 0; m < STORE_MEDIA; ++m)
+        med[m].state = 0;
+    for (unsigned i = 0; i < SD_FENCES; ++i)
+        sd_fence(i, 0, 0);
+    set_status = -2;
 }
 
 int store_read(const struct store_ent *e, uint64_t index, uint64_t count, uintptr_t dst)

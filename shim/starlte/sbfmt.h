@@ -417,3 +417,114 @@ unsigned sb_crash_stamp(const char *line, unsigned n);
  * many of the last lines as fit, in their original order, without "<N>" prefixes; skipped lines
  * become one "[...]" line. Like cl_tail otherwise (printable ASCII, '\n' ended). */
 unsigned cl_excerpt(char *dst, unsigned cap, const char *src, unsigned len, uint16_t *lines);
+
+/* ---- SBFW: the firmware layer's part of the settings record (bytes 112..255) and the table it
+ * hands to every OS at 0x91FFE000 (docs/STARBITE-FIRMWARE-LAYER.md section 10) ---------------- */
+#define SBFW_FLAG_SHELL     1U   /* start the shell entry instead of drawing the menu */
+#define SBFW_FLAG_CON_NEVER 2U
+#define SBFW_FLAG_CON_ALWAYS 4U
+#define SBFW_FLAG_SHELL_SET 8U   /* SBFW_FLAG_SHELL is the user's choice; without it the build's default (FW4) */
+#ifndef SBFW_SHELL_DEFAULT
+#define SBFW_SHELL_DEFAULT 0     /* -DSBFW_SHELL_DEFAULT=1: Starbite OS at power-on unless switched off */
+#endif
+/* fw_flags with SBFW_FLAG_SHELL as it applies: the user's choice once set, else the build's default */
+unsigned sbfw_shell_eff(unsigned fl, int dflt);
+#define SBFW_REQ_NONE       0U
+#define SBFW_REQ_VERBOSE    1U
+#define SBFW_REQ_SAFE       2U
+#define SBFW_REQ_SINGLE     3U
+#define SBFW_REQ_PREV       4U
+#define SBFW_REQ_XNU_SINGLE 5U
+#define SBFW_REQ_WINRE      6U
+#define SBFW_REQ_DRIVER_OFF 7U
+#define SBFW_REQ_NO_SHELL   8U
+#define SBFW_REQ_UPDATE     9U   /* try the update slot slot_try once (section 10.5) */
+#define SBFW_REQ_MAX        9U
+#define SBFW_ST_NONE        0U   /* req_state */
+#define SBFW_ST_ARMED       1U   /* the OS asked (written by the OS) */
+#define SBFW_ST_APPLIED     2U   /* its start had it */
+#define SBFW_ST_DONE        3U   /* cleared (undone) at the next loader start */
+#define SBFW_ST_REFUSED     4U   /* not possible for that entry, or it expired unused */
+#define SBFW_ST_SEEN        5U   /* armed, and one loader start went by (the next one expires it) */
+struct sbfw_rec {
+    uint8_t fw_flags, req_action, req_state;
+    uint16_t req_seq;
+    char req_key[24], shell_key[24];
+    uint8_t undo[64];
+    uint8_t slot_active, slot_try, slot_tries;   /* bytes 232..234: the A/B update slots (section 10.5) */
+};
+/* bytes 112..255 of a settings block: all zero when they do not start with "FW" version 1 */
+void sbfw_rec_decode(const uint8_t *blk, struct sbfw_rec *r);
+/* into bytes 112..255 of blk (the caller recomputes the record's CRC: sbset_crc_fix) */
+void sbfw_rec_encode(uint8_t *blk, const struct sbfw_rec *r);
+void sbset_crc_fix(uint8_t *blk);
+const char *sbfw_req_name(unsigned req);      /* "verbose", "safe" ... 0 for an unknown one */
+/* What a request means for an entry of method m (catalog.h M_*): 1 can apply, 0 not for that kind */
+int sbfw_req_fits(unsigned req, unsigned method);
+
+#define SBFW_TABLE_PA   0x91FFE000UL
+#define SBFW_TABLE_SIZE 4096U
+#define SBFW_WHY_MENU     0U
+#define SBFW_WHY_AUTO     1U
+#define SBFW_WHY_NEXT     2U
+#define SBFW_WHY_SHELL    3U
+#define SBFW_WHY_RETRY    4U
+#define SBFW_WHY_FASTBOOT 5U
+#define SBFW_TF_CARD_ONLY 1U
+#define SBFW_TF_SHELL     2U
+#define SBFW_LINES        24U
+#define SBFW_LINE         120U
+struct sbfw_table_in {
+    uint32_t debug_level, req_action;
+    const char *key;
+    uint32_t console_y0, console_y1;
+    uint64_t fb_base;
+    uint32_t stride, fb_fmt, loader_version, boot_reason;
+    uint32_t store_medium, store_flags;
+    uint64_t store_base, store_capacity;
+    uint32_t crash_kind, crash_sev;
+    const char *crash_key;
+    uint32_t post_fails, post_warns, settings_status, flags;
+};
+/* The 4 KiB table into page (header, fields, CRC); lines (newest last, '\n' separated text of n
+ * bytes) fill the last-lines area with its last SBFW_LINES lines. */
+void sbfw_table_build(uint8_t *page, const struct sbfw_table_in *in, const char *lines, unsigned n);
+/* 1 if page holds a valid table (magic, version, CRC): what libsb checks */
+int sbfw_table_check(const uint8_t *page);
+/* The request's state at a loader start (armed -> seen, seen -> refused (expired), applied -> done);
+ * the same state if nothing changes. */
+unsigned sbfw_age(unsigned state);
+/* The whole record's ageing at a loader start, update rollback included (section 10.5): changes r and
+ * returns what happened (SBFW_AGE_*, 0 nothing). */
+#define SBFW_AGE_SEEN      1U
+#define SBFW_AGE_EXPIRED   2U
+#define SBFW_AGE_DONE      3U
+#define SBFW_AGE_ROLLBACK  4U   /* the update's start was never committed by the OS: back to slot_active */
+#define SBFW_AGE_UPD_EXPIRED 5U
+unsigned sbfw_boot_age(struct sbfw_rec *r);
+
+/* ---- update slots (section 10.5): a volatile store entry, block 0 the header, the image from +4096 ----
+ *   0 "SBSLOT01"  8 u32 version 1  12 u32 CRC32 of bytes 16..4095  16 u64 image size  24 u32 image CRC32
+ *  28 u32 0  32 char version[32]  64 char key[24] (the catalog row it is for)  88.. zero */
+struct sbslot_info { uint32_t version; uint64_t size; uint32_t crc; char vstr[32], key[24]; };
+/* 1 if hdr is a valid slot header for key whose image fits entry_bytes - 4096 */
+int sbslot_check(const uint8_t *hdr, uint64_t entry_bytes, const char *key, struct sbslot_info *si);
+void sbslot_build(uint8_t *hdr4k, const struct sbslot_info *si);
+/* Shell mode's decision (section 10.1), as plain inputs. Returns SBFW_SH_START or why not. */
+#define SBFW_SH_START     0U
+#define SBFW_SH_OFF       1U
+#define SBFW_SH_SKIP      2U   /* Volume Down or the "menu" key */
+#define SBFW_SH_NO_SHELL  3U   /* the no-shell one-shot */
+#define SBFW_SH_CRASH     4U   /* the last start crashed: the menu shows it */
+#define SBFW_SH_NEXT      5U   /* a boot-next key or a one-shot next entry */
+#define SBFW_SH_MISSING   6U   /* no shell entry in the catalog */
+#define SBFW_SH_NOT_READY 7U
+unsigned sbfw_shell_decide(unsigned fw_flags, int skip, unsigned req_state, unsigned req_action, int crash_hold,
+                           int next_pending, int shell_index, int shell_ready);
+const char *sbfw_shell_why(unsigned d);
+
+/* A store's head (blocks 0..6, 28 KiB: v1 view, SBSTORE2 header, settings, directory) checked as
+ * the loader opens it: header magic/version/CRC, the directory layout and CRC, the home extension's
+ * CRC when present, capacity == cap (0: any). 1 valid (fills what it can), 0 not. */
+struct sbhead_info { uint32_t count; uint64_t capacity, used, data_block; int home; };
+int sbstore_head_check(const uint8_t *head, uint64_t cap, struct sbhead_info *hi);

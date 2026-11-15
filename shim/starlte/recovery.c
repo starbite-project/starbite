@@ -28,6 +28,8 @@
 #include "sbfmt.h"
 #include "crash.h"
 #include "fbbg.h"
+#include "repair.h"
+#include "sbfw.h"
 
 #define ALIVE_GPA0_DAT 0x14050024UL
 #define ALIVE_GPA2_DAT 0x14050064UL
@@ -270,6 +272,8 @@ int rec_next_take(void)
         return REC_NEXT_NONE;
     int r = mb_key_is("rescue") ? REC_NEXT_RESCUE : mb_key_is("maint") ? REC_NEXT_MAINT
           : mb_key_is("maint-prev") ? REC_NEXT_MAINT_PREV : mb_key_is("maint-rescue") ? REC_NEXT_MAINT_RESCUE
+          : mb_key_is("menu") ? REC_NEXT_MENU : mb_key_is("recovery") ? REC_NEXT_RECOVERY
+          : mb_key_is("recovery-repair") ? REC_NEXT_REPAIR
           : REC_NEXT_NONE;
     if (r != REC_NEXT_NONE)
         mb_clear();          /* before the start: a system that crashes is not started again */
@@ -313,10 +317,10 @@ static void rescue_reboot(void)
 #define ROW_TITLE 0U
 #define ROW_SUB   1U
 #define ROW_ITEM0 3U
-#define ROW_MSG   16U
-#define ROW_BODY  19U
+#define ROW_MSG   17U
+#define ROW_BODY  20U
 #define ROW_HINT  44U
-#define N_ITEMS   13U
+#define N_ITEMS   14U
 
 #define IT_CONTINUE 0U
 #define IT_RESCUE   1U
@@ -331,6 +335,7 @@ static void rescue_reboot(void)
 #define IT_ENTRY    10U
 #define IT_SETTINGS 11U
 #define IT_CRASHES  12U
+#define IT_REPAIR   13U
 
 static const char *item_name(unsigned i)
 {
@@ -347,6 +352,7 @@ static const char *item_name(unsigned i)
     case IT_FASTBOOT: return "USB FASTBOOT / CONSOLE";
     case IT_SETTINGS: return "STARTUP SETTINGS...";
     case IT_CRASHES:  return "CRASH REPORTS...";
+    case IT_REPAIR:   return "REPAIR AND RESET...";
     default:          return "BOOT ENTRY...";
     }
 }
@@ -550,9 +556,11 @@ static int pick_entry(void)
 #define SR_AFTER   4U
 #define SR_TIMEOUT 5U
 #define SR_WDT     6U
-#define SR_SAVE    7U
-#define SR_BACK    8U
-#define SR_N       9U
+#define SR_SHELL   7U
+#define SR_SAVE    8U
+#define SR_BACK    9U
+#define SR_N       10U
+static struct sbfw_rec sr_fw;      /* the record's SBFW part (shell mode), saved with the rest */
 
 static const char *sr_name(unsigned r)
 {
@@ -564,6 +572,7 @@ static const char *sr_name(unsigned r)
     case SR_AFTER:   return "AFTER A CRASH";
     case SR_TIMEOUT: return "CRASH SCREEN WAITS";
     case SR_WDT:     return "WATCHDOG";
+    case SR_SHELL:   return "STARBITE OS AS MENU";
     case SR_SAVE:    return "SAVE";
     default:         return "BACK (KEEP AS IT WAS)";
     }
@@ -591,6 +600,9 @@ static void sr_value(struct line *l, unsigned r, const struct star_settings *s)
     case SR_TIMEOUT:
         ln_u(l, sbset_crash_timeout(s));
         ln_s(l, " S");
+        break;
+    case SR_SHELL:
+        ln_s(l, (sbfw_shell_eff(sr_fw.fw_flags, SBFW_SHELL_DEFAULT) & SBFW_FLAG_SHELL) ? "ON" : "OFF (BOOT MENU)");
         break;
     case SR_WDT:
         if (s->wdt_mode == SET_WDT_OFF) {
@@ -628,6 +640,10 @@ static void sr_next(unsigned r, struct star_settings *s)
     case SR_TIMEOUT:   /* 60, 120, 300, 600, 30 s */
         s->crash_timeout = (uint8_t)(!s->crash_timeout ? 12 : s->crash_timeout == 12 ? 30 : s->crash_timeout == 30 ? 60
                                      : s->crash_timeout == 60 ? 3 : 0);
+        break;
+    case SR_SHELL:
+        sr_fw.fw_flags = (uint8_t)(((sbfw_shell_eff(sr_fw.fw_flags, SBFW_SHELL_DEFAULT) ^ SBFW_FLAG_SHELL) &
+                                     SBFW_FLAG_SHELL) | (sr_fw.fw_flags & ~SBFW_FLAG_SHELL) | SBFW_FLAG_SHELL_SET);
         break;
     case SR_WDT:       /* per entry, off, 30, 60, 82 s */
         if (s->wdt_mode == SET_WDT_CATALOG) {
@@ -667,7 +683,8 @@ static void settings_page(void)
     struct star_settings s;
     star_fb_fill(C_BLACK);
     star_fb_text_c(ROW_TITLE, "STARBITE RECOVERY: STARTUP", C_GOLD, C_BLACK);
-    star_fb_text_c(ROW_SUB, "READING THE SETTINGS (UFS)...", C_MUTED, C_BLACK);
+    star_fb_text_c(ROW_SUB, "READING THE SETTINGS...", C_MUTED, C_BLACK);
+    (void)settings_fw(&sr_fw);
     int ok = settings_load(&s);
     int st = settings_status();
     if (!ok)
@@ -694,7 +711,7 @@ static void settings_page(void)
             if (sel == SR_BACK)
                 return;
             if (sel == SR_SAVE) {
-                int r = settings_save(&s);
+                int r = settings_fw_save(&s, &sr_fw);
                 crash_reload_settings();
                 msg(r ? "COULD NOT SAVE THE SETTINGS" : "SAVED: USED FROM THE NEXT START", 0, r ? C_RED : C_GREEN);
                 star_pmsg(r ? "STARBITE: recovery: settings save failed\n" : "STARBITE: recovery: settings saved\n");
@@ -707,6 +724,133 @@ static void settings_page(void)
         if (old != sel) {
             sr_draw(old, 0, &s);
             sr_draw(sel, 1, &s);
+        }
+    }
+}
+
+/* ---- repair and reset (repair.c, docs/STARBITE-RECOVERY.md section 8) ------------------------ */
+
+#define RP_CHECK   0U
+#define RP_CHECKF  1U
+#define RP_HEAD    2U
+#define RP_BOOT    3U
+#define RP_RESET   4U
+#define RP_LOGS    5U
+#define RP_FW      6U
+#define RP_BACK    7U
+#define RP_N       8U
+
+static const char *rp_name(unsigned r)
+{
+    switch (r) {
+    case RP_CHECK:  return "CHECK THE OS STORE (QUICK)";
+    case RP_CHECKF: return "CHECK EVERY ENTRY'S CRC";
+    case RP_HEAD:   return "REPAIR THE CARD STORE'S HEAD";
+    case RP_BOOT:   return "RESTORE BOOT FROM THE STORE";
+    case RP_RESET:  return "RESET STARBITE OS DATA";
+    case RP_LOGS:   return "SAVE LOGS TO THE STORE";
+    case RP_FW:     return "FIRMWARE OPTIONS FOR AN OS...";
+    default:        return "BACK";
+    }
+}
+
+static unsigned rp_row;
+static void rp_line(void *u, const char *t)
+{
+    (void)u;
+    if (rp_row < ROW_HINT - 1)
+        star_fb_text_c(rp_row++, t, C_WHITE, C_BLACK);
+}
+
+static void rp_draw(unsigned r, int sel)
+{
+    struct line l;
+    ln_init(&l);
+    ln_s(&l, sel ? "> " : "  ");
+    ln_s(&l, rp_name(r));
+    uint32_t fg = r == RP_HEAD || r == RP_BOOT || r == RP_RESET ? C_GOLD : C_WHITE;
+    star_fb_text_c(ROW_ITEM0 + r, l.b, sel ? C_WHITE : fg, sel ? C_BLUE : C_BLACK);
+}
+
+/* Power: yes; anything else: no. The question on the message rows. */
+static int rp_confirm(const char *what)
+{
+    msg(what, 0, C_GOLD);
+    star_fb_text_c(ROW_HINT, "POWER: DO IT   ANY OTHER KEY: CANCEL", C_GOLD, C_BLACK);
+    unsigned k = r_key_wait();
+    star_fb_text_c(ROW_HINT, "VOL UP/DOWN: MOVE   POWER: SELECT", C_MUTED, C_BLACK);
+    return (k & K_POWER) && !(k & K_USBBOOT);
+}
+
+static void repair_page(void)
+{
+    star_fb_fill(C_BLACK);
+    star_fb_text_c(ROW_TITLE, "STARBITE RECOVERY: REPAIR AND RESET", C_GOLD, C_BLACK);
+    star_fb_text_c(ROW_SUB, "GOLD: WRITES, AFTER A PLAN AND POWER", C_MUTED, C_BLACK);
+    unsigned sel = 0;
+    for (unsigned r = 0; r < RP_N; ++r)
+        rp_draw(r, r == sel);
+    star_fb_text_c(ROW_HINT, "VOL UP/DOWN: MOVE   POWER: SELECT", C_MUTED, C_BLACK);
+    struct fw_out o = { rp_line, 0, 0 };
+    for (;;) {
+        unsigned k = r_key_wait();
+        unsigned old = sel;
+        if (k & K_USBBOOT)
+            return;
+        if (k & K_UP) {
+            sel = sel ? sel - 1 : RP_N - 1;
+        } else if (k & K_DOWN) {
+            sel = sel + 1 < RP_N ? sel + 1 : 0;
+        } else if (k & (K_POWER | K_BIXBY)) {
+            if (sel == RP_BACK)
+                return;
+            clear_rows(ROW_MSG, ROW_HINT);
+            rp_row = ROW_BODY;
+            o.bad = 0;
+            if (sel == RP_CHECK || sel == RP_CHECKF) {
+                msg(sel == RP_CHECKF ? "READING EVERY ENTRY (A MINUTE)..." : "CHECKING...", 0, C_MUTED);
+                int b = rp_store_check(&o, sel == RP_CHECKF);
+                msg(b ? "PROBLEMS FOUND: SEE BELOW" : "THE OS STORE LOOKS GOOD", 0, b ? C_RED : C_GREEN);
+            } else if (sel == RP_HEAD) {
+                if (rp_head_plan(&o) && rp_confirm("WRITE THE HEAD FROM THE BACKUP?")) {
+                    rp_row = ROW_BODY;
+                    clear_rows(ROW_BODY, ROW_HINT);
+                    int r = rp_head_apply(&o);
+                    msg(r ? "REPAIR FAILED: SEE BELOW" : "REPAIRED", 0, r ? C_RED : C_GREEN);
+                }
+            } else if (sel == RP_BOOT) {
+                msg("READING BOOT-GOOD.IMG AND BOOT...", 0, C_MUTED);
+                if (rp_boot_plan(&o) && rp_confirm("WRITE BOOT NOW? DO NOT POWER OFF")) {
+                    msg("WRITING BOOT...", 0, C_GOLD);
+                    int r = rp_boot_apply(&o);
+                    msg(r ? "BOOT WRITE FAILED: SEE BELOW" : "BOOT RESTORED: REBOOT TO USE IT", 0, r ? C_RED : C_GREEN);
+                }
+            } else if (sel == RP_RESET) {
+                if (rp_reset_plan(&o, "sbos-state") && rp_confirm("ERASE STARBITE OS'S DATA?")) {
+                    int r = rp_reset_apply(&o, "sbos-state");
+                    msg(r ? "RESET FAILED" : "STARBITE OS STARTS FRESH NEXT TIME", 0, r ? C_RED : C_GREEN);
+                }
+            } else if (sel == RP_LOGS) {
+                int r = rp_logs_save(&o);
+                msg(r ? "LOGS NOT SAVED: SEE BELOW" : "LOGS SAVED", 0, r ? C_RED : C_GREEN);
+            } else if (sel == RP_FW) {
+                int e = pick_entry();
+                if (e >= 0)
+                    (void)sbfw_page(e);
+                star_fb_mute(0);
+                star_fb_row_base(0);
+                star_fb_fill(C_BLACK);
+                star_fb_text_c(ROW_TITLE, "STARBITE RECOVERY: REPAIR AND RESET", C_GOLD, C_BLACK);
+                star_fb_text_c(ROW_SUB, "GOLD: WRITES, AFTER A PLAN AND POWER", C_MUTED, C_BLACK);
+                for (unsigned r = 0; r < RP_N; ++r)
+                    rp_draw(r, r == sel);
+                star_fb_text_c(ROW_HINT, "VOL UP/DOWN: MOVE   POWER: SELECT", C_MUTED, C_BLACK);
+            }
+            continue;
+        }
+        if (old != sel) {
+            rp_draw(old, 0);
+            rp_draw(sel, 1);
         }
     }
 }
@@ -735,6 +879,12 @@ static void leave(void)
         star_fb_fill(C_BLACK);
 }
 
+static int open_repair;
+void rec_open_repair(void)
+{
+    open_repair = 1;
+}
+
 int recovery_main(const char *why, int *pick)
 {
     unsigned base = rec_row_base();
@@ -747,6 +897,13 @@ int recovery_main(const char *why, int *pick)
     unsigned sel = 0;
     draw_menu(sel, why);
     fbbg_enable();                      /* the Mac can drive this menu over USB too */
+    if (open_repair) {                  /* "recovery-repair": Settings > Startup > Recovery's Repair & Reset */
+        open_repair = 0;
+        star_pmsg("STARBITE: recovery: REPAIR AND RESET, asked for by the OS\n");
+        sel = IT_REPAIR;
+        repair_page();
+        draw_menu(sel, 0);
+    }
     for (;;) {
         unsigned k = r_key_wait();
         unsigned old = sel;
@@ -876,6 +1033,10 @@ int recovery_main(const char *why, int *pick)
                 break;
             case IT_CRASHES:
                 crash_browse();
+                draw_menu(sel, 0);
+                break;
+            case IT_REPAIR:
+                repair_page();
                 draw_menu(sel, 0);
                 break;
             default: {

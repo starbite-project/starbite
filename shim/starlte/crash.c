@@ -612,6 +612,17 @@ static int read_log(struct store_ent *e, struct cl_head *h)
     return cl_head_decode((const uint8_t *)CR_LOG, h);
 }
 
+/* What settle judged this boot (the SBFW table, sbfw.c): kind, severity, the key; 0 / "" if nothing. */
+static unsigned last_kind, last_sev;
+static char last_key[24];
+
+unsigned crash_last(unsigned *sev, char *key, unsigned cap)
+{
+    *sev = last_sev;
+    scopy(key, cap, last_key);
+    return last_kind;
+}
+
 /* Evaluate the pending launch once per boot. show: the crash screen and the configured action
  * (the boot path); 0: only save (a start from Starbite Recovery or fastboot comes first). */
 static int settled;
@@ -648,6 +659,9 @@ static int settle(int show, int *retry)
     unsigned sev = SEV_INFO;
     uint32_t seen0 = h.seen_dmesg, seen1 = h.seen_pmsg, seen2 = h.seen_secmagic, hf = h.hflags;
     unsigned kind = evaluate(&h, &sev);
+    last_kind = kind;
+    last_sev = sev;
+    scopy(last_key, sizeof(last_key), key);
     unsigned marked = consume(&h);
     if (marked) {
         char b[96];

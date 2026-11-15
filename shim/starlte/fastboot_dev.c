@@ -21,6 +21,7 @@
 #include "crash.h"
 #include "sbfmt.h"
 #include "recovery.h"          /* star_pmsg */
+#include "sbfw.h"
 
 _Static_assert(K_UP == 1U && K_DOWN == 2U && K_BIXBY == 4U && K_POWER == 8U, "sbfmt.c kq_key_bit");
 _Static_assert(KQ_PRESS_MS > 40U && KQ_PRESS_MS < 300U, "a plain press for every menu (sbfmt.h)");
@@ -251,6 +252,11 @@ static void ring_text(struct tb *t, uintptr_t base, const char *name)
     }
     if (t->n && t->b[t->n - 1] != '\n')
         tb_c(t, '\n');
+}
+
+unsigned fbp_sbfw_table(uint8_t *out, unsigned cap)
+{
+    return sbfw_table_preview(out, cap);
 }
 
 unsigned fbp_log(const char *which, char *out, unsigned cap)

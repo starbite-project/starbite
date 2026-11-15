@@ -90,6 +90,12 @@ int store_marked_home(unsigned medium);
 /* One pmsg line (flushed) about a failed read of e: what, r, blocks, the card's sector and driver
  * state, the first 16 bytes at dst. store_load / store_head call it on every failure. */
 void store_read_diag(const char *what, const struct store_ent *e, uint64_t lba, uint64_t count, int r, uintptr_t dst);
+/* Blocks [index, index + count) of a VOLATILE entry of the home store from src, each read back:
+ * 0, -1 no such volatile entry / outside it, -2 write, -3 read-back mismatch. On the card the write
+ * fence opens for that entry only during the call (sd.h slot 2). Starbite Recovery: logs, data reset. */
+int store_volatile_write(const char *name, uint64_t index, uint64_t count, uintptr_t src);
+/* Read the home store again (after Starbite Recovery repaired the card store's head). */
+void store_rehome(void);
 /* Blocks [index, index + count) of entry e to dst (no CRC): 0, -1 read error or outside the entry. */
 int store_read(const struct store_ent *e, uint64_t index, uint64_t count, uintptr_t dst);
 
@@ -141,6 +147,11 @@ int settings_load(struct star_settings *s);
 int settings_status(void);
 /* Write and read back: 0 on success. Keeps every field it does not know of (bytes 112..255). */
 int settings_save(struct star_settings *s);
+/* The SBFW part (bytes 112..255, sbfmt.h struct sbfw_rec) of the record: loads it; zeros without one. */
+struct sbfw_rec;
+int settings_fw(struct sbfw_rec *r);
+/* s's fields plus r as the SBFW part, written and read back: 0 on success. */
+int settings_fw_save(struct star_settings *s, const struct sbfw_rec *r);
 
 /* The crash log (sbfmt.h): the home store's "crashlog" entry, 16 blocks, SF_VOLATILE. 1 found. */
 int store_crashlog(struct store_ent *e);
