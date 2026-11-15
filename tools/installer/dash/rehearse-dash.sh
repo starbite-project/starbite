@@ -96,6 +96,17 @@ b=$(cat "$R/sys/class/backlight/panel/brightness")
 sed -i.bak 's/^step=.*/step=H: iOS 27 (started)/' "$R/tmp/sbdash/feed"; sleep 2
 [ "$b" -lt 200 ] && [ "$(cat "$R/sys/class/backlight/panel/brightness")" = 200 ] && ok "dimmed again ($b), then a new step: back to 200" || bad "new-step wake ($b -> $(cat "$R/sys/class/backlight/panel/brightness"))"
 
+echo; echo "######## no backlight class (S9 #2's kernel): the saver instead of the dim"
+touch "$R/tmp/sbdash/stop"; sleep 3; rm -f "$R/tmp/sbdash/stop" "$R/tmp/sbdash/touch"
+mv "$R/sys/class/backlight" "$R/sys/class/backlight.off"
+bash -c "cd '$R' && sh '$REPO/tools/installer/dash/sbdash.sh' '$R/tmp/sbdash' '$R/tmp/sbdash/screen' '$R/sys/' '/proc/' 3 4 </dev/null >/dev/null 2>&1 &"
+sleep 6
+txt=$(sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$S" | tr -d '\n')
+case $txt in *"STARBITE "*"tap to wake"*) ok "idle without a backlight: one dim moving line (the saver)" ;; *) bad "no saver: $(echo "$txt" | cut -c1-80)" ;; esac
+[ "$(wc -c < "$S")" -lt 400 ] && ok "...and nothing else on the screen ($(wc -c < "$S") bytes)" || bad "the saver frame is $(wc -c < "$S") bytes"
+date +%s > "$R/tmp/sbdash/touch"; sleep 2
+sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$S" | grep -q '== STEPS' && ok "a touch: the full dashboard again" || bad "touch did not end the saver"
+mv "$R/sys/class/backlight.off" "$R/sys/class/backlight"
 echo; echo "######## --stop"
 SBDASH_PIDFILE=$W/sbdash-mac.pid bash tools/installer/dash/sbdash-mac.sh S9TWO02 --fake-root "$R" --stop >/dev/null
 sleep 3

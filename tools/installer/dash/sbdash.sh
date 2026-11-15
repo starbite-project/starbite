@@ -9,7 +9,9 @@
 #   DIR/stop       touch it to end: the backlight, the font and sb-status's screen are put back
 # Screen: the 16x32 font (90 columns on the 1440 px panel), ANSI colours only (bars and sparklines are coloured
 # cells, so no font glyph beyond ASCII is needed). After 30 min with no new step and no touch, the backlight ramps
-# down over 10 min to 6 % of what it was; a new step or a touch brings it back at once.
+# down over 10 min to 6 % of what it was; a new step or a touch brings it back at once. A kernel without a backlight
+# class (S9 #2's environment, 2026-11-15) gets a saver instead: a black screen with one dim status line that moves
+# every minute (no static image on the OLED panel), until a touch or a new step.
 D=${1:-/tmp/sbdash}
 T=${2:-/dev/tty0}
 SYS=${3:-/sys/}
@@ -93,6 +95,15 @@ while [ ! -e "$D/stop" ]; do
 		fi
 	fi
 	cols=$(stty size < "$T" 2>/dev/null | awk '{ print $2 }'); rows=$(stty size < "$T" 2>/dev/null | awk '{ print $1 }')
+	if [ -z "$BL" ] && [ $idle -ge $DIM_AFTER ]; then          # no backlight to dim: the saver
+		r=$(( (t / 60) % ${rows:-90} + 1 )); c=$(( (t / 60) * 7 % 30 + 1 ))
+		msg=$(awk -F= '/^(step|sub|at)=/ { v[$1] = $2 } /^done=/ { d = $2 } /^total=/ { tt = $2 }
+			END { printf "STARBITE %s  %s  %s%s  tap to wake", v["at"], v["step"], v["sub"], (tt + 0 > 0 ? sprintf("  %.0f%%", d * 100 / tt) : "") }' "$D/feed" 2>/dev/null)
+		printf '\033[0m\033[2J\033[%d;%dH\033[2;37m%s\033[0m' "$r" "$c" "$(echo "$msg" | cut -c1-$(( ${cols:-90} - c )))" > "$T" 2>/dev/null
+		cp "$T" "$D/frame.tmp" 2>/dev/null
+		sleep 1
+		continue
+	fi
 	# ---- one frame
 	awk -v W="${cols:-90}" -v HROWS="${rows:-90}" -v NOW="$t" -v USB="$usb" -v UDC="$udc" -v SPD="$spd" -v MTU="$mtu" \
 	    -v CAR="$carrier" -v BAT="$bat" -v THERM="$therm" -v LOAD="$load" -v MEM="$mem" -v UP="$up" -v IDLE="$idle" -v DIMA="$DIM_AFTER" \
@@ -123,7 +134,7 @@ while [ ! -e "$D/stop" ]; do
 			srx[i - 1] = (rx[i] - rx[i - 1]) / dt; stx[i - 1] = (tx[i] - tx[i - 1]) / dt; swr[i - 1] = (wr[i] - wr[i - 1]) * 512 / dt; srd[i - 1] = (rd[i] - rd[i - 1]) * 512 / dt
 			if (srx[i - 1] < 0) srx[i - 1] = 0; if (stx[i - 1] < 0) stx[i - 1] = 0; if (swr[i - 1] < 0) swr[i - 1] = 0; if (srd[i - 1] < 0) srd[i - 1] = 0 }
 		ns = m - 1
-		cmd = "date +%H:%M:%S"; cmd | getline clock; close(cmd)
+		clock = f["at"] != "" ? f["at"] : "--:--:--"          # the Mac clock (the phone clock is not set)
 		line(c("1;97;44", pad(" STARBITE INSTALLER  -  S9 #2  -  the night of 15 November", W - 10) pad(clock, 10)))
 		line(c("2", pad("phone " (f["phone"] != "" ? f["phone"] : "?") "   env up " int(UP / 60) " min   load " LOAD "   free RAM " MEM " MiB   feed " (f["at"] != "" ? f["at"] : "none yet"), W)))
 		rule("STEPS")
