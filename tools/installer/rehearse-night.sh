@@ -271,8 +271,15 @@ assert h('s2', 'CACHE') == b['s1-CACHE'], 'CACHE'
 PY
 grep -q '"move-keep"' "$W"/state/phone-*/journal.json && grep -q 'you can do it' "$W"/state/phone-*/journal.json && ok "the journal records the allowance (and the user's words)" || bad "journal allowance"
 
-echo; echo "######## the way back: --restore-gpt (the stock table, and the four rows at their old places)"
-SBINST_STATE="$W/state" python3 -B tools/installer/starbite-install --restore-gpt --rehearse --yes --fake-root "$W/s2" --state-dir "$W/state" --serial S9TWO02 > "$W/restore.txt" 2>&1 && ok "--restore-gpt (exit 0)" || { bad "restore-gpt"; tail -8 "$W/restore.txt"; }
+echo; echo "######## the way back: --restore-gpt, first with the link down while its GPT write runs (review 1)"
+RG=(python3 -B tools/installer/starbite-install --restore-gpt --rehearse --yes --fake-root "$W/s2" --state-dir "$W/state" --serial S9TWO02)
+SBINST_STATE="$W/state" FAKE_FAIL='cat /tmp/sbinst-gpt/primary.rc' FAKE_FAIL_TIMES=1000 "${RG[@]}" > "$W/restore1.txt" 2>&1
+rc=$?; rm -f "$W/s2/fail-count"
+[ $rc = 3 ] && grep -q 'STOPPED' "$W/restore1.txt" && ok "--restore-gpt stopped when the link dropped (exit 3)" || { bad "restore 1 (exit $rc)"; tail -5 "$W/restore1.txt"; }
+SBINST_STATE="$W/state" "${RG[@]}" > "$W/restore.txt" 2>&1 && ok "--restore-gpt again (exit 0)" || { bad "restore-gpt"; tail -8 "$W/restore.txt"; }
+grep -q 'the phone already has the saved original GPT' "$W/restore.txt" && grep -q 'the kernel sees the original table' "$W/restore.txt" &&
+	ok "...the table was already written: the kernel re-read it before anything was written at the old places" || { bad "no re-read on 'done'"; grep -E 'ok   |STOPPED' "$W/restore.txt" | tail -5; }
+grep -q 'CACHE: written back at its old place' "$W/restore.txt" && ok "...CACHE (600 MiB) written back at its old place too" || bad "CACHE not written back"
 python3 - "$W" <<'PY' && ok "the table is S9 #2's stock one again, and CACHE (600 MiB), HIDDEN, OMR, CP_DEBUG hold their saved bytes" || bad "restore"
 import hashlib, json, os, sys
 sys.path.insert(0, 'tools/installer')
@@ -288,6 +295,39 @@ h = lambda n: hashlib.sha256(open(os.path.realpath(os.path.join(w, 's2/dev/block
 for n in ('CACHE', 'HIDDEN', 'OMR', 'CP_DEBUG'):
     assert h(n) == b['s2-' + n], n
 PY
+echo; echo "######## a second repartition after the restore: a new cycle, fresh copies, written back again (review 2)"
+SBINST_STATE="$W/state" python3 -B tools/installer/starbite-install --bundle "$NIGHT_BUNDLES/bundle-c" --fake-root "$W/s2" --state-dir "$W/state" --serial S9TWO02 --dry-run --yes --repartition --move-keep CACHE,HIDDEN,OMR,CP_DEBUG > "$W/rep2-dry.txt" 2>&1
+SBINST_STATE="$W/state" python3 -B tools/installer/starbite-install --bundle "$NIGHT_BUNDLES/bundle-c" --fake-root "$W/s2" --state-dir "$W/state" --serial S9TWO02 --rehearse --yes --no-reboot --repartition --move-keep CACHE,HIDDEN,OMR,CP_DEBUG > "$W/rep2.txt" 2>&1 && ok "repartitioned again (exit 0)" || { bad "second repartition"; tail -6 "$W/rep2.txt"; }
+[ "$(grep -c 'saved before the move' "$W/rep2.txt")" = 4 ] && ok "...the four rows saved again (a new cycle; the old copies set aside)" || bad "copies not taken again"
+for n in HIDDEN OMR CP_DEBUG; do grep -q "$n: written back at its new place" "$W/rep2.txt" || bad "$n not written back in cycle 2"; done
+python3 - "$W" <<'PY' && ok "...HIDDEN, OMR, CP_DEBUG hold their own bytes at the new places again; two cycles in the journal" || bad "cycle 2 contents"
+import glob, hashlib, json, os, sys
+w = sys.argv[1]
+b = json.load(open(os.path.join(w, 'keep-before.json')))
+h = lambda n: hashlib.sha256(open(os.path.realpath(os.path.join(w, 's2/dev/block/by-name', n)), 'rb').read()).hexdigest()
+for n in ('HIDDEN', 'OMR', 'CP_DEBUG'):
+    assert h(n) == b['s2-' + n], n
+j = json.load(open(glob.glob(w + '/state/phone-*/journal.json')[0]))
+assert len([k for k in j['steps'] if k.startswith('keep-restore-') and not k.startswith('keep-restore-old')]) == 2, j['steps'].keys()
+assert glob.glob(w + '/state/phone-*/gpt/older-*')
+PY
+
+echo; echo "######## D, G, H need C; every step needs P (review 3, 4)"
+rm -f "$NBW/done-C" "$NBW/done-H"
+NIGHT_ONLY="H" "${NIGHT[@]}" > "$W/run-h.txt" 2>&1
+grep -q '### step H failed: step H needs step C' "$W/night.log" && ok "NIGHT_ONLY=H without C done: refused" || bad "H ran without C"
+rm -f "$NBW/done-P"
+NIGHT_ONLY="E" "${NIGHT[@]}" > "$W/run-e.txt" 2>&1
+grep -q "### step P failed: step P (S9 #1's entries) is not done" "$W/night.log" && ok "without P done: refused" || bad "ran without P"
+
+echo; echo "######## a leftover zero-chunk writer from an earlier run: a new copy waits for it (review 5)"
+bash -c 'sleep 6; : /tmp/sbsc-4242.rc' &
+t0=$(date +%s)
+SC=(python3 -B tools/installer/stream-copy.py --from-serial S9ONE01 --to-serial S9TWO02 --state-dir "$W/state" --fake-src "$W/s1" --fake-dst "$W/s2" --source file:/distros/_tools.img --target file:/distros/tools-copy.img)
+SBINST_STATE="$W/state" "${SC[@]}" --dry-run > /dev/null 2>&1; SBINST_STATE="$W/state" "${SC[@]}" --rehearse --yes > "$W/sc-wait.txt" 2>&1
+t1=$(date +%s); wait
+grep -q 'waiting for a chunk write an earlier run left running' "$W/sc-wait.txt" && [ $((t1 - t0)) -ge 5 ] && grep -q 'both phones agree' "$W/sc-wait.txt" && ok "waited for it ($((t1 - t0)) s), then copied" || { bad "did not wait ($((t1 - t0)) s)"; head -4 "$W/sc-wait.txt"; }
+
 echo; echo "--- the night log (rehearsal) ---"; grep -E '^###' "$W/night.log"
 echo; echo "######## result: $pass passed, $fail failed"
 [ "${KEEP:-0}" = 1 ] || [ "$fail" != 0 ] || rm -rf "$W"

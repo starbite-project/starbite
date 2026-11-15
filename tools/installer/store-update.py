@@ -94,7 +94,8 @@ class Phone:
         """An earlier run that lost its link may have left a detached dd running: let it finish first."""
         t0 = time.time()
         while time.time() - t0 < timeout:
-            if not self.sh(f"ps -o args 2>/dev/null | grep '[d]d if={pattern}' || true", check=False).strip():
+            # the detached subshell's command line names its result file (/tmp/sbsu-TAG.rc)
+            if not self.sh("{ ps -A -o args 2>/dev/null || ps -o args 2>/dev/null; } | grep -E '[s]bsu-[a-z0-9]+[.]rc' || true", check=False).strip():
                 return
             time.sleep(1)
         raise Stopped(f'an earlier write ({pattern}) is still running on the phone after {timeout} s')

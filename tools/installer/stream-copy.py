@@ -180,9 +180,12 @@ class Target(Side):
         """An earlier run that lost its link may have left a detached dd running: let it finish first."""
         t0 = time.time()
         while time.time() - t0 < timeout:
-            if not self.sh("ps -o args 2>/dev/null | grep '[d]d if=/tmp/sbsc-' || true", check=False).stdout.strip() and \
-                    not self.sh("ps -o args 2>/dev/null | grep '[d]d of=.*sbsc-zero' || true", check=False).stdout.strip():
+            # the detached subshell's command line names its result file (/tmp/sbsc-SEEK.rc): data and zero chunks alike
+            if not self.sh("{ ps -A -o args 2>/dev/null || ps -o args 2>/dev/null; } | grep -E '[s]bsc-[0-9]+[.]rc' || true", check=False).stdout.strip():
                 return
+            self.say_wait = getattr(self, 'say_wait', 0) + 1
+            if self.say_wait == 1:
+                print('   waiting for a chunk write an earlier run left running on the target...', flush=True)
             time.sleep(1)
         raise Stopped(f'an earlier chunk write is still running on the target after {timeout} s')
 

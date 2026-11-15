@@ -1251,3 +1251,18 @@ copy was never written (ufslayout `stock-s9b`, positions read from its step-A ba
 - the link down while the GPT write runs, then the resume;
 - the four rows saved, three written back with their own bytes, CACHE = S9 #1's, mounted rw in TWRP;
 - `--restore-gpt`: the stock table and all four rows at their old places.
+
+**Review fixes (2026-11-16, an independent 4-lens review of `b986a2c9` / `2f81266f`):**
+1. A `--restore-gpt` that finds the original table already written (an earlier restore lost its link, or stopped with
+   `--no-reboot`) now still re-reads and checks the kernel's table before anything is written at the old places.
+   The write-back checks each partition's start and size against `keep.json` (old places for a restore, new ones
+   forward) and stops on any difference. Only the forward CACHE, whose size changes by design, is left to the S9 #1
+   copy.
+2. The keep copies, their journal steps (`keep-restore-<cycle>`, `keep-restore-old-<cycle>`) and their chunk state belong to one GPT cycle
+   (the anchor's time + the original table's hash). A new repartition sets the old copies aside with the old anchor
+   and takes fresh ones.
+3. `night-s9b.sh`: D, G and H need step C done; every step needs P done.
+4. Leftover detached writers are found by their result-file name on the command line, which zero chunks carry too
+   (`ps -A` first, then plain `ps` for busybox).
+`rehearse-night.sh` 47/47 adds the reproductions: a restore whose link drops during its GPT write, then again; a
+second repartition after the restore; H without C; any step without P; a leftover zero-chunk writer.

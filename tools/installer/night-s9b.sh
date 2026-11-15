@@ -162,7 +162,8 @@ PY
 	mark P done
 fi
 MAC15=$(cat "$NB/mac15-file" 2>/dev/null)
-[ -n "$MAC15" ] || die "no entries from S9 #1 (step P has not run)"
+done_p P && [ -n "$MAC15" ] || { STEP=P; die "step P (S9 #1's entries) is not done: run it first (NIGHT_ONLY with P)"; }
+needs_c() { done_p C || { STEP=$1; die "step $1 needs step C (the partition table) done first"; }; }
 
 # ---- C: the partition table
 STEP=C
@@ -182,6 +183,7 @@ fi
 # ---- D: One UI 8
 STEP=D
 if want D && ! done_p D; then
+	needs_c D
 	mark D started
 	stream D-system part:SYSTEM part:SYSTEM $(cap)
 	stream D-vendor part:VENDOR part:VENDOR $(cap)
@@ -235,6 +237,7 @@ fi
 # ---- G: Windows 11 (+ the big cores)
 STEP=G
 if want G && ! done_p G; then
+	needs_c G
 	mark G started
 	stream G-esp part:WINESP part:WINESP $(cap)
 	stream G-windows part:WINDOWS part:WINDOWS $(cap)
@@ -245,6 +248,7 @@ fi
 # ---- H: iOS 27
 STEP=H
 if want H && ! done_p H; then
+	needs_c H
 	mark H started
 	stream H-userdata part:USERDATA part:USERDATA $(cap)
 	store H-store "ios27" ios27-refport-t8.xnu ios.overlay

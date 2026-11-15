@@ -184,7 +184,8 @@ class Repart:
         if (self.dir / 'anchor.json').exists():                    # an older anchor (an earlier re-layout)
             old = self.dir / time.strftime('older-%Y%m%d-%H%M%S')
             old.mkdir()
-            for f in ('anchor.json', 'orig-head.bin', 'orig-tail.bin', 'new-primary.bin', 'new-backup.bin'):
+            for f in ('anchor.json', 'orig-head.bin', 'orig-tail.bin', 'new-primary.bin', 'new-backup.bin', 'keep.json',
+                      *[k.name for k in self.dir.glob('keep-*.img')]):
                 if (self.dir / f).exists():
                     os.replace(self.dir / f, old / f)
         (self.dir / 'orig-head.bin').write_bytes(head)
@@ -207,6 +208,12 @@ class Repart:
         self.ui.ok(f'GPT backup: {"the primary valid, the backup never written (zeros)" if d.primary_only else "both copies valid"}, phone and computer agree (head {sha(head)[:12]}..., '
                    f'tail {sha(tail)[:12]}...) in {self.i.rel(self.dir)}')
 
+    def cycle(self):
+        """One GPT write cycle (one anchor): its time + the original table's hash. The keep copies, their journal
+        steps and their chunk state belong to one cycle, so a second repartition (after a restore) starts clean."""
+        an = self.anchor()
+        return sha((an[2]['at'] + an[2]['orig_head_sha256']).encode())[:12] if an else ''
+
     def save_keep(self, p, a):
         """The keep rows that move by the allowance: each one read whole from its OLD place, while the old table is
         still the one the kernel uses, hashed on the phone and here, saved as gpt/keep-NAME.img (+ keep.json)."""
@@ -214,10 +221,19 @@ class Repart:
         if not moving:
             return
         kp = self.dir / 'keep.json'
+        cyc = self.cycle()
         meta = json.loads(kp.read_text()) if kp.exists() else {}
+        if meta.get('cycle') != cyc:                              # another cycle's copies: set aside, start clean
+            if kp.exists():
+                old = self.dir / time.strftime('older-keep-%Y%m%d-%H%M%S')
+                old.mkdir()
+                for f in [kp, *self.dir.glob('keep-*.img')]:
+                    os.replace(f, old / f.name)
+            meta = {'cycle': cyc, 'parts': {}}
+        parts = meta['parts']
         for r in moving:
             f = self.dir / f'keep-{r.name}.img'
-            m = meta.get(r.name)
+            m = parts.get(r.name)
             if m and f.exists() and sha(f.read_bytes()) == m['sha256']:
                 continue
             if a.states and a.states[0] not in ('orig', ''):
@@ -230,12 +246,12 @@ class Repart:
                 raise Stopped(f'{r.name}: read {len(data)} of {size} bytes, phone {there[:16]}... vs here '
                               f'{sha(data)[:16]}...: stopping before the GPT write')
             f.write_bytes(data)
-            meta[r.name] = {'sha256': there, 'size': size, 'old_index': r.old.index, 'old_first': r.old.first,
-                            'old_last': r.old.last, 'new_first': r.new.first, 'new_last': r.new.last}
+            parts[r.name] = {'sha256': there, 'size': size, 'old_index': r.old.index, 'old_first': r.old.first,
+                             'old_last': r.old.last, 'new_first': r.new.first, 'new_last': r.new.last}
             kp.write_text(json.dumps(meta, indent=1))
             self.ui.ok(f'{r.name} saved before the move: {size >> 20} MiB from sda{r.old.index}, sha256 {there[:12]}... '
                        f'(phone and computer agree) -> {self.i.rel(f)}')
-        self.i.journal.mark_step('move-keep', 'saved', names=sorted(meta), dir=str(self.dir))
+        self.i.journal.mark_step('move-keep', 'saved', names=sorted(parts), dir=str(self.dir), cycle=cyc)
 
     def write_commands(self, p):
         return {'backup': f': sbinst-gpt-backup; dd if={D}/backup.bin of=/dev/block/sda bs={BS} '
@@ -399,6 +415,10 @@ class Repart:
         u.info('\n   '.join(gpt.table_lines(orig.primary.entries)))
         if action == 'done':
             u.ok('the phone already has the saved original GPT')
+            if self.r.mode != 'dry-run':
+                # an earlier restore may have stopped before the kernel re-read it (a link drop, --no-reboot): the
+                # kernel's partitions must be the original ones before anything is written at their places
+                self.reboot_and_check(p)
             return
         cmds = self.write_commands(p)
         if self.r.mode == 'dry-run':

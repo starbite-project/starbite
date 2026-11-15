@@ -1023,19 +1023,37 @@ class Installer:
             return
         import json
         meta = json.loads(kp.read_text())
-        step = 'keep-restore-old' if old_places else 'keep-restore'
+        cyc = meta.get('cycle', 'c0')
+        parts = meta.get('parts', meta)
+        step = f'keep-restore{"-old" if old_places else ""}-{cyc}'
         done = set(self.journal.step(step).get('names', [])) if self.journal else set()
-        for name, m in sorted(meta.items()):
+        for name, m in sorted(parts.items()):
             if name in done:
-                self.ui.ok(f'{name}: written back earlier')
+                self.ui.ok(f'{name}: written back earlier (this cycle)')
                 continue
-            node, size = self.facts.node(name), self.facts.size(name)
-            if node is None:
+            if self.mode == 'dry-run' and name not in self.facts.parts:
+                self.ui.cmd(f'(chunk writer) keep-{name}.img -> {name} after the table is written    [dry run: not run]')
+                continue
+            got = self.facts.parts.get(name)
+            if got is None:
                 raise Stopped(f'{name}: no such partition now')
+            node, size = f'/dev/block/{got[0]}', got[2] * 512
+            first, last = (m['old_first'], m['old_last']) if old_places else (m['new_first'], m['new_last'])
+            if (got[1] // 8, got[2] // 8) != (first, last - first + 1):
+                if self.mode == 'dry-run':
+                    self.ui.cmd(f'(chunk writer) keep-{name}.img -> {name} at {first}..{last} once the kernel has '
+                                f'that table    [dry run: not run]')
+                    continue
+                raise Stopped(f'{name}: the kernel shows it at {got[1] // 8}+{got[2] // 8} blocks, not at {first}..{last} '
+                              f'({"the original" if old_places else "the new"} table): it has not re-read the table. '
+                              'Restart the environment (loader fastboot, --start-env), then the same command again')
             if size != m['size']:
-                self.ui.info(f'{name}: {m["size"] >> 20} MiB saved, the partition is now {(size or 0) >> 20} MiB: not '
-                             'written back here' + (' (CACHE: night-s9b.sh copies S9 #1\'s)' if name == 'CACHE' else ''))
-                continue
+                if not old_places and name == 'CACHE':
+                    self.ui.info(f'CACHE: {m["size"] >> 20} MiB saved, now {size >> 20} MiB at its new place: S9 #1\'s '
+                                 'CACHE is copied there (night-s9b.sh, stream-copy.py)')
+                    continue
+                raise Stopped(f'{name}: {m["size"]} bytes saved, the partition at {first}..{last} has {size}: not '
+                              'writing it')
             f = Path(gdir) / f'keep-{name}.img'
             if self.mode == 'dry-run':
                 self.ui.cmd(f'(chunk writer) {self.rel(f)} -> {node} ({size >> 20} MiB), read back    [dry run: not run]')
