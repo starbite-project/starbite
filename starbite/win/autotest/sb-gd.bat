@@ -19,6 +19,8 @@ if exist C:\ProgramData\Starbite\glcached (echo GD2 [%R%] cached back buffers fl
 if exist C:\ProgramData\Starbite\glsync echo GD2 [%R%] glsync flag ON: async present off >> %L%
 if exist C:\ProgramData\Starbite\glzc (echo GD2 [%R%] zero-copy present flag ON ^(glzc^) >> %L%) else (echo GD2 [%R%] zero-copy present flag off >> %L%)
 if exist C:\ProgramData\Starbite\glzcnovsync echo GD2 [%R%] zero-copy present with sync interval 0 ON ^(glzcnovsync^) >> %L%
+if exist C:\ProgramData\Starbite\glzcflip echo GD2 [%R%] zero-copy on a FLIP-MODEL swap chain ON ^(glzcflip, sync interval 0^) >> %L%
+if exist C:\ProgramData\Starbite\glzcflipd echo GD2 [%R%] zero-copy on a FLIP_DISCARD swap chain ON ^(glzcflipd, sync interval 0^) >> %L%
 rem T65: flag file glec = this run uses the ARM64EC build of the same GL driver (native code in the x64 game)
 set GDDLL=gd
 if exist C:\ProgramData\Starbite\glec if exist %D%\opengl32-gd-ec.dll set GDDLL=gd-ec
