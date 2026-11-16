@@ -1,6 +1,6 @@
 #!/bin/bash
 # overnight-check.sh STEP KERNEL_LOG [SECONDS]: a pass/stop verdict for an unattended macOS run, for a chain script.
-#   STEP: s6n | s6p | ab (S6s, S6t, S6l, S6m) | soak (S6r);  SECONDS = the payload's sweetreboot (default from the log)
+#   STEP: s6n | s6p | s6w | ab (S6s, S6t, S6l, S6m) | soak (S6r);  SECONDS = the payload's sweetreboot (default from the log)
 # Prints one line "CHECK <step>: PASS|SOFT|UNSAFE ..." plus the numbers it looked at. Exit code:
 #   0 PASS    go on
 #   1 SOFT    the run did not show what it should; the root is fine: go on, but skip runs that build on this one
@@ -56,6 +56,18 @@ s6p)
 	[ "$done_" -ge 1 ] || soft "the diagnostics did not finish"
 	[ "$nc" -le 3 ] || soft "NotificationCenter still crash-loops ($nc)"
 	[ "$ica" -le 2 ] || soft "iconservicesagent crash-loops with the Metal device ($ica)"
+	;;
+s6w)
+	pad=$(n 'SWEET HID: pad test [0-9]+')
+	mon=$(n 'CRASH (Finder|System Settings|Dock|TextEdit|Calculator)\[')
+	lp=$(n 'pad long press = right click')
+	kb=$(n 'four-finger tap = keyboard (shown|hidden)')
+	wake=$(n 'a touch while the display sleeps')
+	info="$info | pad test lines $pad, long presses $lp, keyboard toggles $kb, app crashes $mon, wake-on-touch lines $wake"
+	[ "$pad" -ge 24 ] || soft "the scripted gestures did not all run ($pad lines)"
+	[ "$lp" -ge 2 ] || soft "the long press did not fire"
+	[ "$kb" -ge 4 ] || soft "the four-finger tap did not toggle the keyboard"
+	[ "$mon" -eq 0 ] || soft "an app crashed during the scripted gestures"
 	;;
 ab|soak)
 	sub=$(LC_ALL=C sed -n -E 's/.*STARLTE GPU CALLS[^:]*: submit ([0-9]+) x.*/\1/p' "$T" | awk '{s += $1} END {print s + 0}')

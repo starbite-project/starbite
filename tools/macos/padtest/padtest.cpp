@@ -103,7 +103,8 @@ static void test_scroll() {
 	printf("  scroll: 300 points by hand, then %lld points of momentum in %d ticks\n", (long long)(-my / 65536), n);
 	// slow end: no momentum
 	reset(); scroll2(600, 10, 200);
-	CHECK(T.steer.ms == 0, "slow lift: momentum timer %d", T.steer.ms);
+	// (0468: the first finger's long-press timer may still be armed; it must do nothing: the next check)
+	CHECK(T.steer.ms == 0 || T.steer.ms >= 500, "slow lift: momentum timer %d", T.steer.ms);
 	{ size_t b2 = out.size(); ticks(1000); CHECK(out.size() == b2, "slow lift: %zu events after the lift", out.size() - b2); }
 	// a finger stops the momentum
 	reset(); scroll2(600, 10, 5); T.steer.ms = 0; ms(16); T.padTick(); ms(16); T.padTick();
@@ -186,12 +187,78 @@ static void test_kbd_swipe() {
 	CHECK(sweet_kbd_touch(1, true, 700, 2700, &rx, &ry) == 0, "above the zone");
 }
 
+// 0468: a resting finger is a right click (the context menu), sent while the finger is still down
+static int rights() { int n = 0; for (auto &e : out) n += e.kind == 'p' && e.a == 2 && e.b == 0; return n; }
+static int lefts() { int n = 0; for (auto &e : out) n += e.kind == 'p' && e.a == 1 && e.b == 0; return n; }
+static void test_long_press() {
+	// still finger: one right click after 550 ms, nothing at the lift
+	reset(); touch(0, true, 400, 400); ms(300); T.padTick();
+	CHECK(rights() == 0, "a right click after 300 ms");
+	ticks(1000);
+	CHECK(rights() == 1 && lefts() == 0, "long press: right clicks %d, left %d", rights(), lefts());
+	ms(200); touch(0, false, 400, 400); ticks(1000);
+	CHECK(rights() == 1 && lefts() == 0 && count('p') == 2, "after the lift: right %d left %d pointer events %d", rights(), lefts(), count('p'));
+	// a finger that trembles a few pixels still counts
+	reset(); touch(0, true, 400, 400); ms(100); touch(0, true, 404, 397); ms(100); touch(0, true, 398, 402); ticks(1000);
+	CHECK(rights() == 1, "trembling finger: right clicks %d", rights());
+	touch(0, false, 398, 402); ticks(1000);
+	// after the menu is up the same finger moves the pointer (no button held)
+	reset(); touch(0, true, 400, 400); ticks(1000); out.clear();
+	for (int i = 1; i <= 10; i++) { ms(10); touch(0, true, 400, 400 + 10 * i); }
+	int64_t y = 0; for (auto &e : out) if (e.kind == 'p') { y += e.y; CHECK(e.a == 0, "a button while moving after the long press"); }
+	CHECK(y == 100, "pointer moved %lld after the long press", (long long)y);
+	touch(0, false, 400, 500); ticks(1000);
+	CHECK(lefts() == 0 && rights() == 0, "a click at the lift after the long press");
+	// a finger that moved away and then rests is not a long press
+	reset(); touch(0, true, 400, 400);
+	for (int i = 1; i <= 10; i++) { ms(10); touch(0, true, 400 + 10 * i, 400); }
+	ticks(2000);
+	CHECK(rights() == 0, "moved then rested: right clicks %d", rights());
+	touch(0, false, 500, 400); ticks(1000);
+	// tap, then touch and rest: that is the drag gesture's start, never a right click
+	reset(); touch(0, true, 400, 400); ms(60); touch(0, false, 400, 400); ms(100); touch(0, true, 400, 400); ticks(1500);
+	CHECK(rights() == 0, "tap then hold: right clicks %d", rights());
+	touch(0, false, 400, 400); ticks(1000);
+	// a quick tap stays a left click
+	reset(); touch(0, true, 400, 400); ms(60); touch(0, false, 400, 400); ticks(1000);
+	CHECK(lefts() == 1 && rights() == 0, "tap: left %d right %d", lefts(), rights());
+	// two fingers resting: no long press (their tap is the right click, a rest is nothing)
+	reset(); touch(0, true, 400, 400); ms(20); touch(1, true, 700, 400); ticks(1500);
+	CHECK(rights() == 0, "two fingers resting: right clicks %d", rights());
+	touch(1, false, 700, 400); touch(0, false, 400, 400); ticks(1000);
+}
+
+// 0468: a four-finger tap shows / hides the on-screen keyboard; four fingers never click or scroll
+static void test_four_finger_tap() {
+	sweet_kbd.enabled = 1; sweet_kbd.visible = 0;
+	reset();
+	for (int f = 0; f < 4; f++) { touch(f, true, 300 + 200 * f, 1000); ms(6); }
+	ms(80);
+	for (int f = 3; f >= 0; f--) { touch(f, false, 300 + 200 * f, 1000); ms(5); }
+	ticks(1000);
+	CHECK(sweet_kbd.visible == 1 && sweet_kbd.full == 1, "four-finger tap: visible %u", (unsigned)sweet_kbd.visible);
+	CHECK(count('p') == 0 && count('f') == 0 && count('s') == 0 && count('k') == 0, "four-finger tap sent %zu events", out.size());
+	reset();
+	for (int f = 0; f < 4; f++) { touch(f, true, 300 + 200 * f, 1000); ms(6); }
+	ms(80);
+	for (int f = 0; f < 4; f++) { touch(f, false, 300 + 200 * f, 1000); ms(5); }
+	ticks(1000);
+	CHECK(sweet_kbd.visible == 0, "second four-finger tap: visible %u", (unsigned)sweet_kbd.visible);
+	// four fingers resting for a second: nothing
+	reset();
+	for (int f = 0; f < 4; f++) { touch(f, true, 300 + 200 * f, 1000); ms(6); }
+	ticks(1500); ms(1000);
+	for (int f = 0; f < 4; f++) { touch(f, false, 300 + 200 * f, 1000); ms(5); }
+	ticks(1000);
+	CHECK(sweet_kbd.visible == 0 && out.size() == 0, "four fingers resting: visible %u, %zu events", (unsigned)sweet_kbd.visible, out.size());
+}
+
 int main(int argc, char **argv) {
 	cfg_gestures = argc > 1 ? atoi(argv[1]) : 1; verbose = argc > 2;
 	// 0465: whatever the mode, no event may carry a gesture phase or a momentum flag
 	test_one_finger(); test_two_finger_tap(); test_scroll();
 	test_swipe3(0, -300, 0x52); test_swipe3(0, 300, 0x51); test_swipe3(-300, 0, 0x4f); test_swipe3(300, 20, 0x50);
-	test_leftover_finger(); test_one_finger(); test_kbd_swipe();
+	test_leftover_finger(); test_one_finger(); test_long_press(); test_one_finger(); test_two_finger_tap(); test_four_finger_tap(); test_one_finger(); test_kbd_swipe();
 	if (phase_events) { printf("FAIL: %d scroll events with phase or momentum bits\n", phase_events); fails++; }
 	printf("%s: sweetpad=%d, %d failures\n", fails ? "FAILED" : "ok", cfg_gestures, fails);
 	return fails != 0;

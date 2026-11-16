@@ -1,0 +1,196 @@
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-16 22:14:10
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-16 22:18:51
+@@ -1054,15 +1054,27 @@
+ {
+ 	static const struct { int fingers, moves, dy, wait_ms; } segs[] = {
+ 		{ 2, 30, -25, 3000 }, { 2, 30, 25, 20000 }, { 3, 12, -30, 4000 }, { 3, 12, -30, 5000 },
+-		{ 2, 30, -25, 25000 }, { 2, 30, 25, 30000 },
++		{ 2, 30, -25, 25000 }, { 2, 30, 25, 6000 },
++		/* 0468: two four-finger taps (keyboard shown, hidden), one resting finger for 800 ms (a long press = the
++		 * context menu), then Escape closes the menu */
++		{ 4, 3, 0, 3000 }, { 4, 3, 0, 3000 }, { 1, 50, 0, 2500 }, { 0, 0, 0, 30000 },
+ 	};
+ 	const int nsegs = (int)(sizeof(segs) / sizeof(segs[0]));
+ 	SweetHIDTouch *self = (SweetHIDTouch *)owner;
+ 	int seg = self->fPadTestSeg % nsegs, i = self->fTouchTestStep++;
+ 	int n = segs[seg].moves;
+ 	if (i == 0) {
+-		IOLog("SWEET HID: pad test %d: %s\n", self->fPadTestSeg, segs[seg].fingers == 2 ? "two-finger scroll" : "three-finger swipe");
++		IOLog("SWEET HID: pad test %d: %s\n", self->fPadTestSeg, segs[seg].fingers == 2 ? "two-finger scroll" :
++		    segs[seg].fingers == 3 ? "three-finger swipe" : segs[seg].fingers == 4 ? "four-finger tap" :
++		    segs[seg].fingers == 1 ? "long press" : "Escape");
+ 	}
++	if (segs[seg].fingers == 0) {
++		if (gSweetKeyboard != NULL) {
++			gSweetKeyboard->key(0x29, true);        /* Escape */
++			gSweetKeyboard->key(0x29, false);
++		}
++		i = n + 1;
++	}
+ 	if (i <= n) {
+ 		for (int f = 0; f < segs[seg].fingers; f++) {
+ 			self->touch(f, true, 420 + 300 * f, 1700 + segs[seg].dy * i);
+@@ -1373,6 +1385,9 @@
+ 	int64_t momX, momY;
+ 	int g3x, g3y;                   /* three fingers: the movement since the third came down */
+ 	bool swipe3;                    /* ... and its swipe has been sent */
++	/* 0468: a long press is a right click */
++	bool hold;                      /* one finger is down and may still become a long press */
++	int downX, downY;               /* where it came down */
+ } pad = { 0, -1 };
+ 
+ /*
+@@ -1423,6 +1438,28 @@
+ #define SWEET_PAD_MOM_MIN       13107   /* 0.2 points/ms (16.16): slower lifts leave no momentum */
+ #define SWEET_PAD_MOM_STOP      1966    /* 0.03 points/ms: momentum ends */
+ #define SWEET_PAD_OPT_PIXELS    kIOHIDEventOptionIsPixelUnits
++/*
++ * 0468: a finger that rests for 550 ms without moving (40 panel px from where it landed, one finger only, not the
++ * touch after a tap, which is the drag) is a right click where the pointer is: the context menu, as a long press is
++ * everywhere else on a phone. The click is sent when the time is up, with the finger still down; lifting does
++ * nothing more, and moving the finger afterwards moves the pointer into the menu. Boot-arg sweetpadhold=MS changes
++ * the time, sweetpadhold=0 turns it off. The two-finger tap stays a right click too.
++ */
++static int
++sweet_pad_hold_ms(void)
++{
++	static int ms = -1;
++	if (ms < 0) {
++		ms = 550;
++		PE_parse_boot_argn("sweetpadhold", &ms, sizeof(ms));
++		if (ms < 0 || ms > 5000) {
++			ms = 550;
++		}
++	}
++	return ms;
++}
++#define SWEET_PAD_HOLD_SLOP     40      /* panel pixels a resting finger may wander */
++
+ #define SWEET_PAD_SWIPES         1       /* sweetpad bit: three-finger swipes */
+ #define SWEET_PAD_POINTS        2       /* sweetpad bit: two-finger scrolling in points (no phases: 0465) */
+ 
+@@ -1468,6 +1505,7 @@
+ 	const bool gest = gestures != 0, swipes = (gestures & SWEET_PAD_SWIPES) != 0, points = (gestures & SWEET_PAD_POINTS) != 0;
+ 	UInt32 swipeKey = 0;            /* 0460: the arrow key of a three-finger swipe, sent with control */
+ 	bool tick = false;
++	bool holdArm = false;           /* 0468: start the long-press timer */
+ 
+ 	IOLockLock(fLock);
+ 	uint32_t bit = 1u << finger;
+@@ -1503,9 +1541,14 @@
+ 			pad.scrolling = false;
+ 			pad.scAccX = pad.scAccY = 0;
+ 			pad.swipe3 = false;
++			pad.downX = x;
++			pad.downY = y;
++			pad.hold = !pad.armDrag && sweet_pad_hold_ms() > 0;         /* 0468 */
++			holdArm = pad.hold;
+ 			what = pad.armDrag ? "down after a tap" : "down";
+ 		} else if (n > pad.maxFingers) {
+ 			pad.maxFingers = n;
++			pad.hold = false;               /* 0468: two fingers are never a long press */
+ 			pad.accX = pad.accY = 0;
+ 			pad.scAccX = pad.scAccY = 0;
+ 			pad.lastMoveAt = now;
+@@ -1529,6 +1572,12 @@
+ 		pad.lastY = y;
+ 		int speed = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+ 		pad.travel += speed;
++		if (pad.hold) {
++			int wx = x - pad.downX, wy = y - pad.downY;
++			if ((wx < 0 ? -wx : wx) + (wy < 0 ? -wy : wy) > SWEET_PAD_HOLD_SLOP) {
++				pad.hold = false;       /* 0468: it moved: a pointer movement, not a long press */
++			}
++		}
+ 		if (n >= 2 && swipes && pad.maxFingers >= 3) {
+ 			/* 0460: three fingers: one swipe */
+ 			pad.g3x += dx;
+@@ -1619,6 +1668,19 @@
+ 			pad.buttons = 0;
+ 			pad.dragging = false;
+ 			what = "drag end";
++		} else if (pad.maxFingers >= 4 && sweet_kbd.enabled && ns < 600000000ULL && pad.travel < 60) {
++			/* 0468: a four-finger tap shows or hides the on-screen keyboard (the edge swipe and the keyboard's own
++			 * hide key stay) */
++			pad.pendingClicks = 0;
++			if (sweet_kbd.visible) {
++				sweet_kbd.visible = 0;
++				what = "four-finger tap = keyboard hidden";
++			} else {
++				__atomic_store_n(&sweet_kbd.pressed, 0, __ATOMIC_RELEASE);
++				sweet_kbd.full = 1;
++				sweet_kbd.visible = 1;
++				what = "four-finger tap = keyboard shown";
++			}
+ 		} else if (swipes && pad.maxFingers >= 3) {
+ 			pad.pendingClicks = 0;          /* 0460: three fingers never click */
+ 			if (!what) {
+@@ -1643,6 +1705,7 @@
+ 		}
+ 		pad.primary = -1;
+ 		pad.armDrag = false;
++		pad.hold = false;
+ 	} else if (!down && was && finger == pad.primary) {
+ 		for (int i = 0; i < SWEET_TOUCH_FINGERS; i++) {
+ 			if (pad.downMask & (1u << i)) {
+@@ -1674,6 +1737,9 @@
+ 		fSteer->setTimeoutMS(16);       /* 0460: momentum */
+ 	} else if (arm && fSteer) {
+ 		fSteer->setTimeoutMS(260);
++	} else if (holdArm && fSteer) {
++		/* 0468: a tap still waiting for its double-tap window is looked at first (padTick comes back for the hold) */
++		fSteer->setTimeoutMS(pad.pendingClicks > 0 ? 50 : (uint32_t)sweet_pad_hold_ms());
+ 	}
+ }
+ 
+@@ -1691,6 +1757,23 @@
+ 		pad.pendingClicks = 0;
+ 	}
+ 	bool again = pad.pendingClicks > 0;
++	/* 0468: the long press */
++	bool rightClick = false;
++	uint32_t holdLeft = 0;
++	if (pad.hold) {
++		uint64_t held = 0;
++		absolutetime_to_nanoseconds(now - pad.downAt, &held);
++		uint64_t need = (uint64_t)sweet_pad_hold_ms() * NSEC_PER_MSEC;
++		if (pad.primary < 0 || pad.maxFingers != 1 || pad.dragging || pad.downMask != (1u << pad.primary)) {
++			pad.hold = false;
++		} else if (held >= need) {
++			pad.hold = false;
++			pad.pendingClicks = 0;
++			rightClick = true;
++		} else {
++			holdLeft = (uint32_t)((need - held) / NSEC_PER_MSEC) + 1;
++		}
++	}
+ 	/* 0460: momentum after a scroll: every 16 ms what the speed gives, 5 % slower each time */
+ 	IOHIDEvent *mom = NULL;
+ 	bool coast = false;
+@@ -1726,11 +1809,26 @@
+ 	}
+ 	if (clicks) {
+ 		IOLog("SWEET HID: pad click x%d\n", clicks);
++	}
++	if (rightClick) {
++		IOHIDEvent *d = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 2, 0);
++		IOHIDEvent *u = IOHIDEvent::relativePointerEvent(now, 0, 0, 0, 0, 2);
++		if (d) {
++			dispatchEvent(d);
++			d->release();
++		}
++		if (u) {
++			dispatchEvent(u);
++			u->release();
++		}
++		IOLog("SWEET HID: pad long press = right click\n");
+ 	}
+ 	if (coast && fSteer) {
+ 		fSteer->setTimeoutMS(16);
+ 	} else if (again && fSteer) {
+ 		fSteer->setTimeoutMS(50);
++	} else if (holdLeft && fSteer) {
++		fSteer->setTimeoutMS(holdLeft);
+ 	}
+ }
+ 
