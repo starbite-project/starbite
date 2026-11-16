@@ -3740,6 +3740,31 @@ drivers; measured.)
   not respond). (3) Fix round B is in work on this data: the environment override, the 0x51 encodings, the 12
   tests left in pass O, and the shader dump for the new tree.
 
+### 6.127 Fix build B: switches per process, and a dump of the shaders the GPU rejects (T94s, T94, T95 staged)
+
+(2026-11-16 22:51; Mesa branch `sb-nir` f36a7ef = build A + 2 commits, `sb-patches/0180`, `build/win/umd-nir-fixB/sbumd.dll`
+7bd85fde; ARM64X check and the initializer check pass; **compiled only**. The full round B (the 0x51 encodings, the
+12 tests left in pass O) was cut short when the night's model limit was reached; what is here is what the
+morning's tests need first.)
+
+- **Every switch per process tree** (`fixB-1`): `SBSW_<NAME>=1` in a process's environment turns the switch on there
+  (and in its children), `=0` off even if the flag file exists; no variable = the flag file decides, as before.
+  Covers every switch read through `malikm_switch` (nirshaders, gsemu, msaa, d3d11ddi, fl11, tessemu, noidvs,
+  noafbc, devstate, zcro2, zcnolist2, the umdlog trace files) and the three that read the file directly before
+  (noidvs in Panfrost, the trace in Debug.cpp, the device flags). One log line per switch the environment decides.
+  `sb-wt-env.bat` uses it: a conformance pass's features reach the test programs only.
+- **The shader dump** (`fixB-2`): with the switch `nirdump`, every shader the NIR translator is given is written to
+  `umdlog\dxbc-<pid>-<n>.dxbc` as a DXBC container (the token stream + a chunk "SBSG" with the DDI's signature
+  entries), and every compiled variant of every stage logs `sbumd: <stage> variant <ptr> code 0x<gpu address>,
+  <n> bytes`; with `nirdump` also its NIR and binary in `umdlog\nir-<pid>-<n>.txt`. The host harness reads `.dxbc`
+  files (round trip checked: 40 Wine shaders converted to that format translate, validate and compile exactly as
+  their originals). So the shaders that gave INSTR_INVALID_ENC on the phone can be compiled on the Mac with the
+  compiler's assertions on, which names the instruction.
+- **Staged:** `sbwddm-t94s` (boot check), `sbwddm-t94` (the eight passes O N G M D F T X through `sb-wt-env.bat`,
+  with the heartbeat), `sbwddm-t95` (`sb-apps3.bat` with the flag FILES `nirshaders` and `nirdump` set from TWRP for
+  the whole boot, as T88 did: DWM, Settings and Calculator through the new translator, every shader dumped). All with
+  the user's kernel drivers.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,

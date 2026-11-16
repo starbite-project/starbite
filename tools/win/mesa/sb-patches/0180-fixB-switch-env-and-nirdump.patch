@@ -1,0 +1,622 @@
+From 06b406c475d8240afb6dbc4b4206e5175fe43c6e Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 22:46:23 +0200
+Subject: [PATCH 1/2] fixB-1: every driver switch can be set per process tree:
+ SBSW_<NAME>=1 / 0 in the environment overrides the flag file
+ C:\ProgramData\Starbite\<name> (T90: the flag file nirshaders reached Windows
+ Settings, a XAML app, and the run stalled); one log line per override
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/win32-compat/malikm_drm.c         | 150 +++++++++++++++++++---
+ src/gallium/drivers/panfrost/pan_screen.c |   6 +-
+ src/gallium/drivers/panfrost/pan_shader.c |   5 +-
+ src/gallium/frontends/d3d10umd/D3D11.cpp  |  12 +-
+ src/gallium/frontends/d3d10umd/Debug.cpp  |   9 +-
+ src/gallium/frontends/d3d10umd/Device.cpp |   2 +-
+ src/gallium/frontends/d3d10umd/Shader.cpp |   2 +-
+ src/gallium/frontends/d3d10umd/State.h    |   4 +-
+ 8 files changed, 156 insertions(+), 34 deletions(-)
+
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index a5c87f8..082d752 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -284,18 +284,18 @@ sb_veh_install(void)
+    sb_raw("sbumd: %s, first-chance exception log on (up to 12)\n", icd ? "OpenGL ICD" : "test program");
+ }
+ 
++static int sb_log_ready;            /* sb_log_open is through: stderr is where it will stay */
++static void sb_sw_report(void);     /* the switch overrides found before that */
++int malikm_switch(const char *name);
++
+ static void
+-sb_log_open(void)
++sb_log_open_once(void)
+ {
+-   static int done;
+    char path[MAX_PATH], exe[MAX_PATH] = "?";
+    const char *base;
+    SYSTEMTIME st;
+    DWORD a;
+ 
+-   if (done)
+-      return;
+-   done = 1;
+    a = GetFileAttributesA("C:\\ProgramData\\Starbite\\umdlog");
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY))
+       return;
+@@ -318,12 +318,12 @@ sb_log_open(void)
+    sb_log_active = 1;
+    signal(SIGABRT, sb_on_abort);
+    sb_veh_install();
+-   sb_log_trace = GetFileAttributesA("C:\\ProgramData\\Starbite\\umdlog\\trace") != INVALID_FILE_ATTRIBUTES;
++   sb_log_trace = malikm_switch("umdlog\\trace");
+    /* sb-patches/0129: umdlog\trace-<image name> traces only processes of that name (T36: File Explorer) */
+    if (!sb_log_trace) {
+-      char tp[MAX_PATH];
+-      snprintf(tp, sizeof(tp), "C:\\ProgramData\\Starbite\\umdlog\\trace-%s", base);
+-      sb_log_trace = GetFileAttributesA(tp) != INVALID_FILE_ATTRIBUTES;
++      char tp[96];
++      snprintf(tp, sizeof(tp), "umdlog\\trace-%s", base);
++      sb_log_trace = malikm_switch(tp);
+    }
+    GetLocalTime(&st);
+    fprintf(stderr, "sbumd: %s pid %lu at %02u:%02u:%02u.%03u, driver-call trace %s\n", exe,
+@@ -331,6 +331,20 @@ sb_log_open(void)
+            sb_log_trace ? "on" : "off");
+ }
+ 
++static void
++sb_log_open(void)
++{
++   static int done;
++
++   if (done)
++      return;
++   done = 1;
++   sb_log_open_once();
++   /* the lines of the switches an environment variable decided so far come after the first line of the log */
++   sb_log_ready = 1;
++   sb_sw_report();
++}
++
+ static int
+ trace_on(void)
+ {
+@@ -1175,15 +1189,121 @@ malikm_stat(unsigned id)
+ }
+ 
+ /* sb-patches/0126 (docs/WIN11-GPU.md 6.42): file switches under C:\ProgramData\Starbite (every process sees them,
+- * DWM and the shell included, unlike environment variables), this process's image name, and the resource canary. */
+-int
+-malikm_switch(const char *name)
++ * DWM and the shell included, unlike environment variables), this process's image name, and the resource canary.
++ *
++ * T90: a flag file is a switch for the whole system. The conformance run created nirshaders for its own test
++ * programs, Windows started the Settings app a minute later, and that got the new shader translator too. So every
++ * switch can be set for one process tree instead: the environment variable SBSW_<NAME> (the name in upper case,
++ * anything that is not a letter or a digit as '_': SBSW_NIRSHADERS, SBSW_UMDLOG_DUMP) = 1 turns the switch on in
++ * this process whether the file is there or not, = 0 turns it off even if the file is there, and children inherit
++ * it. No variable (or any other value): the file decides, as before. The variable is read once per process per
++ * name; the file is looked at on every call, as before. One log line per switch an override decides. */
++struct sb_sw {
++   char name[80];
++   signed char ov;      /* 1 on, 0 off, -1 no variable, -2 a value that is neither 0 nor 1 */
++   char logged;
++   char val[8];
++};
++static struct sb_sw sb_sw_tab[40];
++static unsigned sb_sw_n;
++static SRWLOCK sb_sw_lock = SRWLOCK_INIT;
++
++static void
++sb_sw_var(const char *name, char *var, size_t size)
++{
++   size_t n = (size_t)snprintf(var, size, "SBSW_");
++
++   for (; *name && n + 1 < size; name++, n++) {
++      char c = *name;
++      if (c >= 'a' && c <= 'z')
++         c = (char)(c - 'a' + 'A');
++      else if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')))
++         c = '_';
++      var[n] = c;
++   }
++   var[n] = 0;
++}
++
++static int
++sb_sw_file(const char *name)
+ {
+    char p[MAX_PATH];
+    snprintf(p, sizeof(p), "C:\\ProgramData\\Starbite\\%s", name);
+    return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
+ }
+ 
++/* with sb_sw_lock held */
++static void
++sb_sw_log(struct sb_sw *s)
++{
++   char var[96];
++
++   if (s->logged || !sb_log_ready || s->ov == -1)
++      return;
++   s->logged = 1;
++   sb_sw_var(s->name, var, sizeof(var));
++   if (s->ov == -2)
++      fprintf(stderr, "sbumd: switch %s: %s=%s is neither 0 nor 1 and is ignored, the flag file decides\n",
++              s->name, var, s->val);
++   else
++      fprintf(stderr, "sbumd: switch %s: %s by the environment of this process (%s=%d; the flag file is %s)\n",
++              s->name, s->ov ? "ON" : "OFF", var, s->ov, sb_sw_file(s->name) ? "present" : "absent");
++}
++
++static void
++sb_sw_report(void)
++{
++   AcquireSRWLockExclusive(&sb_sw_lock);
++   for (unsigned i = 0; i < sb_sw_n; i++)
++      sb_sw_log(&sb_sw_tab[i]);
++   ReleaseSRWLockExclusive(&sb_sw_lock);
++}
++
++/* 1 / 0: the environment decides; -1: it does not */
++static int
++sb_sw_override(const char *name)
++{
++   struct sb_sw *s = NULL, tmp;
++   int ov;
++
++   AcquireSRWLockExclusive(&sb_sw_lock);
++   for (unsigned i = 0; i < sb_sw_n && !s; i++)
++      if (!strcmp(sb_sw_tab[i].name, name))
++         s = &sb_sw_tab[i];
++   if (!s) {
++      char var[96], val[8];
++      DWORD n;
++
++      /* a name too long for the table, or a full table: read every time, said once per call */
++      s = sb_sw_n < sizeof(sb_sw_tab) / sizeof(sb_sw_tab[0]) && strlen(name) < sizeof(s->name) ?
++          &sb_sw_tab[sb_sw_n++] : &tmp;
++      memset(s, 0, sizeof(*s));
++      snprintf(s->name, sizeof(s->name), "%s", name);
++      sb_sw_var(name, var, sizeof(var));
++      n = GetEnvironmentVariableA(var, val, sizeof(val));
++      if (n == 0) {
++         s->ov = -1;                     /* not set, or set to nothing */
++      } else if (n == 1 && (val[0] == '0' || val[0] == '1')) {
++         s->ov = val[0] == '1';
++      } else {
++         s->ov = -2;
++         snprintf(s->val, sizeof(s->val), "%s", n < sizeof(val) ? val : "...");
++      }
++   }
++   sb_sw_log(s);
++   ov = s->ov;
++   ReleaseSRWLockExclusive(&sb_sw_lock);
++   return ov >= 0 ? ov : -1;
++}
++
++int
++malikm_switch(const char *name)
++{
++   int ov = sb_sw_override(name);
++
++   return ov >= 0 ? ov : sb_sw_file(name);
++}
++
+ const char *
+ malikm_exe(void)
+ {
+@@ -1283,9 +1403,9 @@ static unsigned sb_devstate_note(struct sbdev *d, const char *what, unsigned arg
+ static void
+ sb_read_flags(struct sbdev *d, const char *when)
+ {
+-   int ds = GetFileAttributesA("C:\\ProgramData\\Starbite\\devstate") != INVALID_FILE_ATTRIBUTES;
+-   int ro = GetFileAttributesA("C:\\ProgramData\\Starbite\\zcro2") != INVALID_FILE_ATTRIBUTES;
+-   int nl = GetFileAttributesA("C:\\ProgramData\\Starbite\\zcnolist2") != INVALID_FILE_ATTRIBUTES;
++   int ds = malikm_switch("devstate");
++   int ro = malikm_switch("zcro2");
++   int nl = malikm_switch("zcnolist2");
+ 
+    if (ds != d->devstate || ro != d->ro2 || nl != d->nolist2)
+       fprintf(stderr, "sbumd: device %u flags at %s: devstate %d, zcro2 %d, zcnolist2 %d\n", d->id, when, ds, ro, nl);
+diff --git a/src/gallium/drivers/panfrost/pan_screen.c b/src/gallium/drivers/panfrost/pan_screen.c
+index a78d85c..4a79bbd 100644
+--- a/src/gallium/drivers/panfrost/pan_screen.c
++++ b/src/gallium/drivers/panfrost/pan_screen.c
+@@ -1066,17 +1066,17 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
+       int malikm_switch(const char *name);
+       if (malikm_switch("noafbc")) {
+          dev->debug |= PAN_DBG_NO_AFBC;
+-         fprintf(stderr, "sbumd: AFBC off (C:\\ProgramData\\Starbite\\noafbc)\n");
++         fprintf(stderr, "sbumd: AFBC off (switch noafbc)\n");
+       }
+       /* geometry shaders (pan_gs.h): off unless the file is there */
+       if (malikm_switch("gsemu")) {
+          dev->debug |= PAN_DBG_GSEMU;
+-         fprintf(stderr, "sbumd: geometry shader emulation on (C:\\ProgramData\\Starbite\\gsemu)\n");
++         fprintf(stderr, "sbumd: geometry shader emulation on (switch gsemu)\n");
+       }
+       /* hull and domain shaders (pan_tess.h): off unless the file is there */
+       if (malikm_switch("tessemu")) {
+          dev->debug |= PAN_DBG_TESSEMU;
+-         fprintf(stderr, "sbumd: tessellation emulation on (C:\\ProgramData\\Starbite\\tessemu)\n");
++         fprintf(stderr, "sbumd: tessellation emulation on (switch tessemu)\n");
+       }
+    }
+ #endif
+diff --git a/src/gallium/drivers/panfrost/pan_shader.c b/src/gallium/drivers/panfrost/pan_shader.c
+index 20c9021..1315f9b 100644
+--- a/src/gallium/drivers/panfrost/pan_shader.c
++++ b/src/gallium/drivers/panfrost/pan_shader.c
+@@ -96,8 +96,7 @@ lower_sample_mask_writes(nir_builder *b, nir_intrinsic_instr *intrin,
+ static bool sb_retype_int_attribs(nir_builder *b, nir_intrinsic_instr *intr, void *data);
+ 
+ #ifdef _WIN32
+-/* only this one call: windows.h's macros clash with Mesa's headers */
+-__declspec(dllimport) unsigned long __stdcall GetFileAttributesA(const char *lpFileName);
++int malikm_switch(const char *name);   /* the shim: SBSW_<NAME> of this process, else the flag file */
+ #endif
+ static bool
+ sb_no_idvs(void)
+@@ -109,7 +108,7 @@ sb_no_idvs(void)
+          v = *e == '1';
+ #ifdef _WIN32
+       else
+-         v = GetFileAttributesA("C:\\ProgramData\\Starbite\\noidvs") != 0xFFFFFFFFul;
++         v = malikm_switch("noidvs") != 0;
+ #else
+       else
+          v = 0;
+diff --git a/src/gallium/frontends/d3d10umd/D3D11.cpp b/src/gallium/frontends/d3d10umd/D3D11.cpp
+index 2494150..f0fd373 100644
+--- a/src/gallium/frontends/d3d10umd/D3D11.cpp
++++ b/src/gallium/frontends/d3d10umd/D3D11.cpp
+@@ -44,10 +44,10 @@ SbD3D11Ddi(void)
+ 
+       on = ddi && nir;
+       if (ddi && !nir) {
+-         DebugPrintf("sbumd: flag file d3d11ddi without nirshaders: the Direct3D 11 DDI is NOT offered "
++         DebugPrintf("sbumd: switch d3d11ddi without nirshaders: the Direct3D 11 DDI is NOT offered "
+                      "(Shader Model 5 only exists in the NIR translator)\n");
+       } else {
+-         DebugPrintf("sbumd: Direct3D 11 DDI %s\n", on ? "offered (flag file d3d11ddi)" : "not offered");
++         DebugPrintf("sbumd: Direct3D 11 DDI %s\n", on ? "offered (switch d3d11ddi)" : "not offered");
+       }
+    }
+    return on > 0;
+@@ -66,7 +66,7 @@ SbFl11(void)
+        */
+       on = fl11 && malikm_switch("msaa");
+       if (fl11 && !on) {
+-         DebugPrintf("sbumd: flag file fl11 without msaa: pipeline level 11_0 is NOT offered "
++         DebugPrintf("sbumd: switch fl11 without msaa: pipeline level 11_0 is NOT offered "
+                      "(it includes 10_1, which needs multisampling)\n");
+       } else if (SbD3D11Ddi()) {
+          /* Level 11_0 requires tessellation. The driver has it behind the flag file tessemu (Panfrost, write-up
+@@ -76,9 +76,9 @@ SbFl11(void)
+ 
+          DebugPrintf("sbumd: pipeline level 11_0 %s\n",
+                      !on ? "not offered"
+-                         : tess ? "offered (flag files fl11, msaa, tessemu), with tessellation"
+-                                : "offered (flag files fl11, msaa) WITHOUT tessellation: hull and domain shader "
+-                                  "creation is refused (flag file tessemu)");
++                         : tess ? "offered (switches fl11, msaa, tessemu), with tessellation"
++                                : "offered (switches fl11, msaa) WITHOUT tessellation: hull and domain shader "
++                                  "creation is refused (switch tessemu)");
+       }
+    }
+    return on > 0;
+diff --git a/src/gallium/frontends/d3d10umd/Debug.cpp b/src/gallium/frontends/d3d10umd/Debug.cpp
+index a2d20c0..933e2e1 100644
+--- a/src/gallium/frontends/d3d10umd/Debug.cpp
++++ b/src/gallium/frontends/d3d10umd/Debug.cpp
+@@ -26,18 +26,19 @@ st_debug_parse(void)
+ /* Starbite (sb-patches/0116, docs/WIN11-GPU.md 6.27): shader, element-layout and draw dumps, only while
+  * C:\ProgramData\Starbite\umdlog\trace exists (gpu-cycle's test boots; never the user's install). */
+ extern "C" const char *malikm_exe(void);   /* sb-patches/0126 (the shim) */
++extern "C" int malikm_switch(const char *name);   /* the file, or SBSW_UMDLOG_TRACE... of this process */
+ 
+ extern "C" int
+ sb_dump_on(void)
+ {
+    static int on = -1;
+    if (on < 0) {
+-      char tp[MAX_PATH];
+-      on = GetFileAttributesA("C:\\ProgramData\\Starbite\\umdlog\\trace") != INVALID_FILE_ATTRIBUTES;
++      char tp[96];
++      on = malikm_switch("umdlog\\trace");
+       /* sb-patches/0129: or umdlog\trace-<image name> for this process only */
+-      snprintf(tp, sizeof(tp), "C:\\ProgramData\\Starbite\\umdlog\\trace-%s", malikm_exe());
++      snprintf(tp, sizeof(tp), "umdlog\\trace-%s", malikm_exe());
+       if (!on)
+-         on = GetFileAttributesA(tp) != INVALID_FILE_ATTRIBUTES;
++         on = malikm_switch(tp);
+    }
+    return on;
+ }
+diff --git a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+index 85c7d8a..a53ca08 100644
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -77,7 +77,7 @@ SbMsaaOn(void)
+    static int on = -1;
+    if (on < 0) {
+       on = malikm_switch("msaa") ? 1 : 0;
+-      DebugPrintf("sbumd: MSAA %s\n", on ? "offered (flag file msaa)" : "not offered (no flag file msaa)");
++      DebugPrintf("sbumd: MSAA %s\n", on ? "offered (switch msaa)" : "not offered (switch msaa is off)");
+    }
+    return on > 0;
+ }
+diff --git a/src/gallium/frontends/d3d10umd/Shader.cpp b/src/gallium/frontends/d3d10umd/Shader.cpp
+index c18cf40..7c50f60 100644
+--- a/src/gallium/frontends/d3d10umd/Shader.cpp
++++ b/src/gallium/frontends/d3d10umd/Shader.cpp
+@@ -74,7 +74,7 @@ SbNirShaders(void)
+    if (on < 0) {
+       on = malikm_switch("nirshaders") ? 1 : 0;
+       DebugPrintf("sbumd: shader translator: %s\n",
+-                  on ? "DXBC -> NIR (C:\\ProgramData\\Starbite\\nirshaders)" : "DXBC -> TGSI");
++                  on ? "DXBC -> NIR (switch nirshaders)" : "DXBC -> TGSI");
+    }
+    return on > 0;
+ }
+diff --git a/src/gallium/frontends/d3d10umd/State.h b/src/gallium/frontends/d3d10umd/State.h
+index 59b6bd0..f5f6752 100644
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -317,7 +317,9 @@ int malikm_set_display_mode(unsigned hPrimaryAllocation);
+ void malikm_note(unsigned id, unsigned value);
+ void malikm_note_count(unsigned id);
+ const char *malikm_exe(void);   /* sb-patches/0126: this process image name */
+-int malikm_switch(const char *name);   /* sb-patches/0126: C:\ProgramData\Starbite\<name> exists */
++/* sb-patches/0126: the switch <name>: the environment variable SBSW_<NAME> = 1 / 0 of this process if it is set
++ * (read once), else whether the flag file C:\ProgramData\Starbite\<name> exists (whole system) */
++int malikm_switch(const char *name);
+ void SbLogSetError(long hr, const char *fn);   /* sb-patches/0126: Debug.cpp */
+ /* sb-patches/0112: in the Panfrost build (pan_resource.c); the softpipe build gets sb_rotate_bos_none */
+ bool panfrost_sb_rotate_bos(struct pipe_context *pctx, struct pipe_resource **res, unsigned n);
+-- 
+2.43.0
+
+From f36a7ef9b153ce187656e89584054ceeec406bd0 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 22:49:20 +0200
+Subject: [PATCH 2/2] fixB-2: with the switch nirdump every shader given to the
+ NIR translator is written to umdlog as a DXBC container the host harness
+ reads (SHDR/SHEX + an SBSG chunk with the DDI signature entries); every
+ compiled variant (all stages) logs its stage, address and size, and with
+ nirdump its NIR and binary; harness reads .dxbc files (T90: 134 fragment jobs
+ INSTR_INVALID_ENC from XAML shaders through the NIR translator, no copy of
+ the shaders off the phone)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/gallium/drivers/panfrost/pan_shader.c     | 37 ++++++++++
+ src/gallium/frontends/d3d10umd/Shader.cpp     | 70 +++++++++++++++++++
+ .../d3d10umd/tests/dxbc_nir_harness.c         | 53 ++++++++++++++
+ 3 files changed, 160 insertions(+)
+
+diff --git a/src/gallium/drivers/panfrost/pan_shader.c b/src/gallium/drivers/panfrost/pan_shader.c
+index 1315f9b..6a6cb88 100644
+--- a/src/gallium/drivers/panfrost/pan_shader.c
++++ b/src/gallium/drivers/panfrost/pan_shader.c
+@@ -97,6 +97,12 @@ static bool sb_retype_int_attribs(nir_builder *b, nir_intrinsic_instr *intr, voi
+ 
+ #ifdef _WIN32
+ int malikm_switch(const char *name);   /* the shim: SBSW_<NAME> of this process, else the flag file */
++__declspec(dllimport) unsigned long __stdcall GetCurrentProcessId(void);
++static unsigned long
++sb_pid(void)
++{
++   return GetCurrentProcessId();
++}
+ #endif
+ static bool
+ sb_no_idvs(void)
+@@ -338,6 +344,37 @@ panfrost_shader_get(struct pipe_screen *pscreen,
+                                  res.binary.size, 128));
+    }
+ 
++#ifdef _WIN32
++   /* fixB (from sb-b78 c3b663c, all stages): a line per compiled variant, so a failing job's shader address can be
++    * matched; with the switch nirdump its NIR and binary go to umdlog\nir-<pid>-<n>.txt */
++   if (res.binary.size) {
++      static int dump = -1;
++      static unsigned seq;
++      if (dump < 0)
++         dump = malikm_switch("nirdump") != 0;
++      fprintf(stderr, "sbumd: %s variant %p code 0x%llx, %u bytes%s\n",
++              mesa_shader_stage_name(uncompiled->nir->info.stage), (void *)state,
++              (unsigned long long)state->bin.gpu, (unsigned)res.binary.size, dump ? " (nirdump)" : "");
++      if (dump && seq < 600) {
++         char path[160];
++         snprintf(path, sizeof(path), "C:\\ProgramData\\Starbite\\umdlog\\nir-%lu-%u.txt",
++                  sb_pid(), seq++);
++         FILE *f = fopen(path, "w");
++         if (f) {
++            const uint8_t *d = (const uint8_t *)res.binary.data;
++            fprintf(f, "%s variant %p code 0x%llx size %u\n", mesa_shader_stage_name(uncompiled->nir->info.stage),
++                    (void *)state, (unsigned long long)state->bin.gpu, (unsigned)res.binary.size);
++            nir_print_shader(uncompiled->nir, f);
++            fprintf(f, "\nBINARY %u bytes:", (unsigned)res.binary.size);
++            for (unsigned i = 0; i < res.binary.size; i++)
++               fprintf(f, "%s%02x", (i % 32) ? "" : "\n", d[i]);
++            fprintf(f, "\nEND\n");
++            fclose(f);
++         }
++      }
++   }
++#endif
++
+    util_dynarray_fini(&res.binary);
+ 
+    /* Don't upload RSD for fragment shaders since they need draw-time
+diff --git a/src/gallium/frontends/d3d10umd/Shader.cpp b/src/gallium/frontends/d3d10umd/Shader.cpp
+index 7c50f60..2fb653d 100644
+--- a/src/gallium/frontends/d3d10umd/Shader.cpp
++++ b/src/gallium/frontends/d3d10umd/Shader.cpp
+@@ -165,6 +165,74 @@ static struct nir_shader *
+ SbTranslateNirSig(Device *pDevice, mesa_shader_stage stage, const UINT *pCode,
+                   const struct Shader_nir_signature *signature, unsigned *output_mapping, bool force = false);
+ 
++/* fixB (T90: 134 fragment jobs failed with INSTR_INVALID_ENC once a XAML app's shaders went through the NIR
++ * translator; no copy of those shaders exists off the phone). With the switch nirdump, every shader the NIR
++ * translator is given is written to umdlog\dxbc-<pid>-<n>.dxbc as a DXBC container the host harness reads
++ * (tests/dxbc_nir_harness.c): the token stream as an SHDR / SHEX chunk, and the DDI's signature entries as a chunk
++ * "SBSG" (counts in, out, patch constants, then 4 words per entry: system value, register, mask, stream). The hash in
++ * the log line is FNV-1a of the tokens. At most 600 files a process. */
++static void
++SbDumpDxbc(mesa_shader_stage stage, const UINT *pCode, const struct Shader_nir_signature *sig)
++{
++   static int on = -1;
++   static unsigned seq;
++   if (on < 0)
++      on = malikm_switch("nirdump") ? 1 : 0;
++   if (!on || !pCode || pCode[1] < 2 || pCode[1] > (1u << 22) || seq >= 600)
++      return;
++
++   unsigned words = pCode[1];
++   unsigned nsig = sig->num_inputs + sig->num_outputs + sig->num_patch_constants;
++   unsigned sig_words = 3 + 4 * nsig;
++   unsigned major = DECODE_D3D10_SB_TOKENIZED_PROGRAM_MAJOR_VERSION(pCode[0]);
++   unsigned total = 8 + 2 + 2 + words + 2 + sig_words;   /* header, 2 offsets, 2 chunk heads, the chunks */
++   uint32_t *c = (uint32_t *)calloc(total, 4);
++   if (!c)
++      return;
++   uint32_t h = 2166136261u;
++   for (unsigned i = 0; i < words; i++)
++      for (unsigned b = 0; b < 4; b++)
++         h = (h ^ ((pCode[i] >> (8 * b)) & 0xff)) * 16777619u;
++
++   c[0] = 0x43425844;                            /* DXBC */
++   c[5] = 1;
++   c[6] = total * 4;
++   c[7] = 2;
++   c[8] = 10 * 4;                                /* the code chunk */
++   c[9] = (10 + 2 + words) * 4;                  /* the signature chunk */
++   c[10] = major >= 5 ? 0x58454853 : 0x52444853; /* SHEX / SHDR */
++   c[11] = words * 4;
++   memcpy(c + 12, pCode, words * 4);
++   uint32_t *s = c + 12 + words;
++   s[0] = 0x47534253;                            /* SBSG */
++   s[1] = sig_words * 4;
++   s[2] = sig->num_inputs;
++   s[3] = sig->num_outputs;
++   s[4] = sig->num_patch_constants;
++   uint32_t *e = s + 5;
++   const struct Shader_nir_signature_entry *lists[3] = { sig->inputs, sig->outputs, sig->patch_constants };
++   const unsigned counts[3] = { sig->num_inputs, sig->num_outputs, sig->num_patch_constants };
++   for (unsigned l = 0; l < 3; l++)
++      for (unsigned i = 0; i < counts[l]; i++, e += 4) {
++         e[0] = lists[l][i].system_value;
++         e[1] = lists[l][i].reg;
++         e[2] = lists[l][i].mask;
++         e[3] = lists[l][i].stream;
++      }
++
++   char path[160];
++   unsigned n = seq++;
++   snprintf(path, sizeof(path), "C:\\ProgramData\\Starbite\\umdlog\\dxbc-%lu-%u.dxbc", GetCurrentProcessId(), n);
++   FILE *f = fopen(path, "wb");
++   if (f) {
++      fwrite(c, 4, total, f);
++      fclose(f);
++   }
++   DebugPrintf("sbumd: nirdump: %s shader %u (model %u.%u, %u tokens, hash 0x%08x) -> %s\n", mesa_shader_stage_name(stage),
++               n, major, DECODE_D3D10_SB_TOKENIZED_PROGRAM_MINOR_VERSION(pCode[0]), words, h, f ? path : "NOT written");
++   free(c);
++}
++
+ /* force: also without the nirshaders switch (SbTranslateNirAfterTgsiRefusal) */
+ static struct nir_shader *
+ SbTranslateNir(Device *pDevice, mesa_shader_stage stage, const UINT *pCode,
+@@ -197,6 +265,8 @@ SbTranslateNirSig(Device *pDevice, mesa_shader_stage stage, const UINT *pCode,
+    unsigned mapping[PIPE_MAX_SHADER_OUTPUTS];
+    memset(mapping, 0xff, sizeof mapping);
+ 
++   SbDumpDxbc(stage, pCode, signature);   /* fixB: nirdump */
++
+    char *error = NULL;
+    struct nir_shader *nir = Shader_nir_translate(pCode, screen->nir_options[stage], signature, mapping, &error);
+    if (!nir) {
+diff --git a/src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness.c b/src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness.c
+index 79b50cf..276bb89 100644
+--- a/src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness.c
++++ b/src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness.c
+@@ -192,10 +192,41 @@ array_name(const char *text, const char *pos, char *name, size_t size)
+       snprintf(name, size, "%.*s", (int)(end - p), p);
+ }
+ 
++static void
++extract_blobs(const char *path);
++
++/* fixB: a binary DXBC container, e.g. one the driver wrote with the nirdump switch (umdlog\dxbc-<pid>-<n>.dxbc) */
++static void
++add_binary_blob(const char *path)
++{
++   size_t size;
++   char *data = read_file(path, &size);
++   const char *base = strrchr(path, '/');
++   struct dxbc_blob blob = { 0 };
++
++   base = base ? base + 1 : path;
++   blob.file = strdup(base);
++   blob.line = 1;
++   snprintf(blob.name, sizeof blob.name, "%s", base);
++   blob.num_words = size / 4;
++   blob.words = (uint32_t *)data;
++   if (blob.num_words >= 8 && blob.words[0] == DXBC_MAGIC && blob.words[6] <= blob.num_words * 4) {
++      blobs = realloc(blobs, (num_blobs + 1) * sizeof *blobs);
++      blobs[num_blobs++] = blob;
++   } else {
++      fprintf(stderr, "%s: not a DXBC container, ignored\n", base);
++   }
++}
++
+ static void
+ extract_blobs(const char *path)
+ {
+    size_t size;
++   const char *dot = strrchr(path, '.');
++   if (dot && !strcmp(dot, ".dxbc")) {
++      add_binary_blob(path);
++      return;
++   }
+    char *text = read_file(path, &size);
+    const char *base = strrchr(path, '/');
+    const char *p = text;
+@@ -318,6 +349,28 @@ read_signature(const struct dxbc_blob *blob, unsigned kind,
+       { FOURCC('P', 'S', 'G', '1'), 8, 1, 2 },
+    };
+ 
++   /* fixB: the driver's own dump (SbDumpDxbc in Shader.cpp): the DDI's entries as they were */
++   {
++      unsigned size;
++      const uint32_t *sb = find_chunk(blob, FOURCC('S', 'B', 'S', 'G'), &size);
++      if (sb && size >= 12) {
++         unsigned skip = 0, count = sb[kind];
++         for (unsigned k = 0; k < kind; k++)
++            skip += sb[k];
++         if (12 + (skip + count) * 16 > size)
++            return 0;
++         count = MIN2(count, max);
++         for (unsigned i = 0; i < count; i++) {
++            const uint32_t *e = sb + 3 + (skip + i) * 4;
++            entries[i].system_value = e[0];
++            entries[i].reg = e[1];
++            entries[i].mask = e[2];
++            entries[i].stream = e[3];
++         }
++         return count;
++      }
++   }
++
+    for (unsigned f = 0; f < ARRAY_SIZE(forms); f++) {
+       const uint32_t *data;
+       unsigned size, count;
+-- 
+2.43.0
+
