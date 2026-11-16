@@ -1,0 +1,99 @@
+0464: GPU job durations ("STARLTE GPU JOBS") and an optional spin before the 10 us polling sleeps (sgspin=N us).
+
+S5z: WindowServer waits for ~9.5 GPU jobs a frame, 0.77 ms each on average, inside StarbiteMali's synchronous
+submit; sg_run() reads the job status and sleeps 10 us between reads, and WindowServer's profile shows that loop's
+block/wake churn. How much of the 0.77 ms is the job and how much the sleeping is not known.
+- bsd/dev/starlte_gpu.c: starlte_gpu_user_submit() counts each job's duration in 7 buckets; StarbiteMali prints
+  them with its 10 s call statistics.
+- sgspin=N (default 0 = as before, at most 5000): for the first N us of a job sg_run() reads the status in a
+  tight loop without sleeping.
+Kernel seq2i = seq2h + 0464 (starlte_gpu.o now linked from the scratch objects).
+
+--- a/bsd/dev/starlte_gpu.c
++++ b/bsd/dev/starlte_gpu.c
+@@ -340,12 +340,28 @@
+ 	sg_wr(sg_gpu, slot + 0x60, 1);                          /* COMMAND_NEXT START */
+ 
+ 	uint32_t jirq = 0, mirq = 0, girq = 0;
++	/*
++	 * 0464: sgspin=N (boot-arg, microseconds, default 0): for the first N us of a job the status is read in a
++	 * tight loop instead of sleeping 10 us between reads. S5z: WindowServer waits for ~9.5 jobs a frame, 0.77 ms
++	 * each on average, and its profile is full of block/wake churn from this loop; the experiment shows how
++	 * much of those 0.77 ms is the job and how much the sleeping (see "STARLTE GPU JOBS").
++	 */
++	static uint64_t spin_abs = ~0ULL;
++	if (spin_abs == ~0ULL) {
++		uint32_t us = 0;
++		PE_parse_boot_argn("sgspin", &us, sizeof(us));
++		nanoseconds_to_absolutetime((uint64_t)(us > 5000 ? 5000 : us) * NSEC_PER_USEC, &spin_abs);
++	}
+ 	for (unsigned i = 0; i < sg_run_polls; i++) {
+ 		jirq = sg_rd(sg_gpu, JOB_IRQ_RAWSTAT);
+ 		mirq = sg_rd(sg_gpu, MMU_IRQ_RAWSTAT);
+ 		girq = sg_rd(sg_gpu, GPU_IRQ_RAWSTAT);
+ 		if ((jirq & ((1u << js) | (1u << (js + 16)))) || mirq || (girq & 0x81)) {
+ 			break;
++		}
++		if (spin_abs != 0 && mach_absolute_time() - t0 < spin_abs) {
++			i--;                    /* spinning: these reads do not count against the poll bound */
++			continue;
+ 		}
+ 		delay(10);
+ 	}
+@@ -1041,6 +1057,20 @@
+  * (PANFROST_JD_REQ_FS) on JS0, the rest on JS1, all shader cores, up to
+  * 2 s. 0, or an errno (EIO: the job faulted, ETIMEDOUT).
+  */
++/* 0464: job durations since the last call: < 100 us, < 250, < 500, < 1 ms, < 2 ms, < 5 ms, longer */
++static uint32_t sgu_hist[7];
++void starlte_gpu_user_hist(uint32_t out[7]);
++void
++starlte_gpu_user_hist(uint32_t out[7])
++{
++	lck_mtx_lock(&sg_lock);
++	for (int i = 0; i < 7; i++) {
++		out[i] = sgu_hist[i];
++		sgu_hist[i] = 0;
++	}
++	lck_mtx_unlock(&sg_lock);
++}
++
+ int
+ starlte_gpu_user_submit(uint64_t jc, uint32_t requirements)
+ {
+@@ -1060,6 +1090,11 @@
+ 	sg_run_polls = 20000;
+ 	sg_run_as = 0;
+ 	sgu_jobs++;
++	{
++		/* 0464: how long apps' jobs take, start to seen-done */
++		uint64_t us = ns / 1000;
++		sgu_hist[us < 100 ? 0 : us < 250 ? 1 : us < 500 ? 2 : us < 1000 ? 3 : us < 2000 ? 4 : us < 5000 ? 5 : 6]++;
++	}
+ 	if (!ok) {
+ 		sgu_faults++;
+ 		sgu_recover();
+--- a/iokit/Kernel/arm/StarbiteMali.cpp
++++ b/iokit/Kernel/arm/StarbiteMali.cpp
+@@ -44,6 +44,7 @@
+ bool starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n);
+ void starlte_gpu_user_unmap(uint64_t va, unsigned n);
+ int starlte_gpu_user_submit(uint64_t jc, uint32_t requirements);
++void starlte_gpu_user_hist(uint32_t out[7]);    /* 0464 */
+ void starbite_mali_publish(void);
+ }
+ 
+@@ -968,6 +969,13 @@
+ 		sbm_calls_since = t1;
+ 		IOLockUnlock(sbm_va_lock);
+ 		IOLog("%s\n", line);
++		{
++			/* 0464: the jobs' durations (bsd/dev/starlte_gpu.c) */
++			uint32_t h[7];
++			starlte_gpu_user_hist(h);
++			IOLog("STARLTE GPU JOBS: under 100 us %u, 250 us %u, 500 us %u, 1 ms %u, 2 ms %u, 5 ms %u, longer %u\n",
++			    h[0], h[1], h[2], h[3], h[4], h[5], h[6]);
++		}
+ 		if (sbm_cache_lock != NULL && sbm_cache_limit != 0) {
+ 			IOLockLock(sbm_cache_lock);
+ 			uint64_t h = sbm_cache_hits, hd = sbm_cache_hits_dirty, mi = sbm_cache_misses, ev = sbm_cache_evicted,
