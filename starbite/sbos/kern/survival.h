@@ -52,7 +52,8 @@ struct surv_usb {
     int32_t fs_why;             /* SURV_FS_WHY_*: why the last hold ended (or was refused) */
     int32_t fs_vbyp_mv, fs_cellw10;
     int32_t fs_load_w10, fs_chip_w10;
-    int32_t fs_rearms, fs_vb_code, fs_elapsed_ms, fs_open;   /* MAX: re-arms in this hold, the boost's code, the time on */ /* the last pulse: 0.1 W into the load (mA x the port band's middle), in the chip */ /* the last pulse: the boost's mean output (the gauge's VBYP); 0.1 W from the cell */
+    int32_t fs_rearms, fs_vb_code, fs_elapsed_ms, fs_open;
+    int32_t fs_ohm10;           /* the last window's load in 0.1 ohm (VBYP / I, no limit event); -1 ?, -2 at the limit */   /* MAX: re-arms in this hold, the boost's code, the time on */ /* the last pulse: 0.1 W into the load (mA x the port band's middle), in the chip */ /* the last pulse: the boost's mean output (the gauge's VBYP); 0.1 W from the cell */
 };
 /* after the UI's hold-to-arm: start one burst. 0 started, < 0 refused (why in the status) */
 int surv_usb_start(void);
@@ -91,6 +92,12 @@ int surv_fs_start_ov(uint32_t pulse_ms, int repeat, int ilim_ma, int ov, int vby
  * dips are let run as the chip designs them; its switch-off, thermal shutdown, battery overcurrent, 45 C, 3.3 V stop */
 int surv_fs_start_x(uint32_t pulse_ms, int repeat, int ilim_ma, int ov, int vbyp, int tol);
 void surv_fs_release(void);                        /* the finger lifted (ui.c): the output off now */
+/* Starbite OS Next's shell: its fire control's finger (1 down, 0 lifted: the output off at once). Classic uses
+ * kern/ui.c's kui_finger_down (touch) and input.c's fire key mode (Power) instead */
+void surv_fs_finger(int down);
+/* 1 when the override modes may run on this phone (the card's /STARBITE/FIRE/OVERRIDE.TXT says "I accept the risk";
+ * only the test phone S9 #2's card has it). surv_fs_start_* refuse ov > 0 otherwise. UIs only hide the choices */
+int surv_fs_override_allowed(void);
 void surv_usb_status(struct surv_usb *s);
 extern const char *const surv_usb_guide[];   /* the on-screen guidance, NULL-terminated */
 

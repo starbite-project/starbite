@@ -443,6 +443,21 @@ static void show_fire(void)
         else
             ui_textline(" ", GREY);     /* the layout stays fixed */
     }
+    {
+        int oh = setting_get(SET_SURV_FS_OHM);
+        fmt_init(&f);
+        fmt_s(&f, "Load: ");
+        if (oh >= 0) {
+            fmt_s(&f, "about ");
+            dec1(&f, oh);
+            fmt_s(&f, oh < 34 ? " ohm (at the edge: a little longer)" : oh <= 45 ? " ohm (ideal: 3.4-4.5)" :
+                                                                       " ohm (high: shorten the coil for more heat)");
+        } else {
+            fmt_s(&f, oh == -2 ? "under ~3.4 ohm, the chip limits it: make the wire / coil longer" :
+                                 "not measured yet (needs a pulse over 100 mA)");
+        }
+        ui_textline(f.b, oh >= 34 && oh <= 45 ? GREEN : oh == -2 ? ORANGE : 0xffffffffU);
+    }
     fmt_init(&f);
     fmt_s(&f, "Re-arms ");
     fmt_d(&f, rearms);
@@ -468,11 +483,18 @@ static void show_fire(void)
     ui_textline("Current limit (the charger chip's own steps; 1.5 A is its top, it trips near 1.6 A)", GREY);
     ui_level(52, "0.9 A|1.2 A|1.5 A", fs_lim);
     ui_textline("Override (test phone S9 #2 only; pulses 1 s at most; risks the charger chip)", ORANGE);
-    ui_level(55, "Off|Re-arm|MAX", fs_ov == 3 ? 2 : fs_ov ? 1 : 0);
+    if (setting_get(SET_SURV_FS_OVOK) == 1) {
+        ui_level(55, "Off|Re-arm|MAX / heater wire", fs_ov == 3 ? 2 : fs_ov ? 1 : 0);
+    } else {
+        fs_ov = 0;                          /* the kernel refuses it anyway: the test phone only */
+        ui_level(55, "Off (Re-arm / MAX: test phone only)", 0);
+    }
     ui_textline("The ceiling: about 5.0 V x 1.5 A = 7 W (measured: the boost voltage cannot be raised in this mode).",
                 GREY);
     ui_textline("Keys: Volume Up / Down move, Power short selects (Arm, the choices), hold Power 1 s to fire: it fires "
                 "while Power stays down. Bixby held = back.", 0xffffffffU);
+    ui_textline("Heater wire: nichrome / kanthal (a hair dryer's or a vape coil), trimmed to 3.4-4.5 ohm by the Load "
+                "line, MAX: steady about 7 W while held. A USB arc lighter also runs on MAX.", 0xffffffffU);
     ui_textline("Wire: 0.5 mm pencil lead, each bare wire wrapped 3-4 tight turns round it, 5-7 cm apart to start. "
                 "Tinder (toilet paper) loosely round the middle.", 0xffffffffU);
     ui_textline("Tune: 'drew more than the limit' = wires 5 mm apart. Under ~1000 mA and no glow = 5 mm closer. Aim "

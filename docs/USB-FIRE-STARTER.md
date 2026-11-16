@@ -128,7 +128,23 @@ headers). What the override does, for pulses of at most 1 s:
 - **Steel wool preset (30e):** 3 s at 1.5 A, no override: the chip's own limit-and-retry (30 ms on, 300 ms off) is
   let run as designed, for a few strands of fine steel wool (a near-short that lights from sparks).
 
-## 6. How to use it (0.5 mm pencil lead)
+### The override is the test phone's only (30i)
+
+`surv_fs_override_allowed()` (survival.c) allows Re-arm and MAX only when the card's exFAT holds
+`/STARBITE/FIRE/OVERRIDE.TXT` containing "I accept the risk" (read once, cached). Only S9 #2's card has it; S9 #1's
+must never get it. Every start with an override is refused in the kernel otherwise; the Fire starter page then shows
+"Off (Re-arm / MAX: test phone only)". Starbite OS Next uses the same kernel API (survival.h: surv_fs_start_x,
+surv_fs_finger for its fire control, surv_usb_status).
+
+## 6. Heater wire (30h): the reliable path
+
+Override **MAX / heater wire**: steady output while held, no length, no cooldown, LOAD OPEN under 50 mA. The **Load**
+line shows the resistance live: VBYP / I over each 1 s window without a limit event (the chip's switch drops little
+below its limit), or "under ~3.4 ohm, the chip limits it". Trim a nichrome / kanthal wire (an old hair dryer's or
+toaster's element, a vape coil) to **3.4-4.5 ohm**: that is where the port gives its full ~7 W (5.0 V x 1.5 A at
+3.4 ohm, 5.6 W at 4.5 ohm), and a thin coil glows. A USB arc lighter also runs on MAX.
+
+## 7. How to use it (0.5 mm pencil lead)
 
 1. Unplug any charger or computer. Work over stone, soil or a metal tray, with water ready.
 2. Cut USB cable: red = +5 V, black = ground. Wrap each bare wire 3-4 tight turns around the lead, **6 cm apart**.
