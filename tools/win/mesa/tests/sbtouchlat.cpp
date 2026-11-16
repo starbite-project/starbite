@@ -12,6 +12,9 @@
 //               flicks and tap feedback for this window
 //    nogesture  as plain, but every gesture blocked with SetGestureConfig at WM_GESTURENOTIFY
 //    touchwin   RegisterTouchWindow (the window asks for raw WM_TOUCH)
+// sbtouchlat.exe LOG gl: one plain window with an OpenGL context that clears and swaps in its message loop, as a
+// game does. Built for x64 (ARM64EC) and started next to our GL kit (opengl32.dll + libgallium_wgl.dll) it measures
+// the kit's own touch handling (sb-patches/0170, SB_GL_TOUCH=1): the click should then come with the touch-down.
 // If WM_LBUTTONDOWN comes at the release (+60 / +400 / +1500 ms) while WM_POINTERDOWN comes at once, Windows is
 // holding the click back, and a program (or our GL driver inside the game) that turns WM_POINTERDOWN into the click
 // itself would react that much sooner.
@@ -20,6 +23,8 @@
 #include <string.h>
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "opengl32.lib")
+#include <GL/gl.h>
 
 #ifndef WM_TABLET_QUERYSYSTEMGESTURESTATUS
 #define WM_TABLET_QUERYSYSTEMGESTURESTATUS 0x02CC
@@ -41,6 +46,8 @@ static volatile LONG promoted;            // 1: the mouse messages carried the t
 static int wkind;
 static HWND hwnd;
 static FILE *lf;
+static int glmode;            // 1: the window has a GL context and swaps in its loop
+static const char *tag = "";
 
 static LONGLONG qpc(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
 
@@ -107,6 +114,53 @@ static DWORD WINAPI window_thread(void *ready)
    if (wkind == W_TOUCHWIN)
       RegisterTouchWindow(hwnd, TWF_WANTPALM);
    SetForegroundWindow(hwnd);
+   if (glmode) {
+      HDC dc = GetDC(hwnd);
+      PIXELFORMATDESCRIPTOR pfd = {};
+      pfd.nSize = sizeof(pfd);
+      pfd.nVersion = 1;
+      pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+      pfd.iPixelType = PFD_TYPE_RGBA;
+      pfd.cColorBits = 32;
+      pfd.cDepthBits = 24;
+      int pf = ChoosePixelFormat(dc, &pfd);
+      HGLRC rc = pf && SetPixelFormat(dc, pf, &pfd) ? wglCreateContext(dc) : NULL;
+      if (!rc || !wglMakeCurrent(dc, rc)) {
+         fprintf(lf, "TOUCHLAT gl: no GL context (pixel format %d, error %lu)\n", pf, GetLastError());
+         fflush(lf);
+      } else {
+         const char *r = (const char *)glGetString(GL_RENDERER);
+         fprintf(lf, "TOUCHLAT gl: renderer %s\n", r ? r : "?");
+         fflush(lf);
+      }
+      SetEvent((HANDLE)ready);
+      unsigned frame = 0;
+      for (;;) {
+         MSG msg;
+         bool quit = false;
+         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT)
+               quit = true;
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+         }
+         if (quit)
+            break;
+         if (rc) {
+            glClearColor(0.1f, 0.2f + 0.2f * (frame++ & 1), 0.5f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            SwapBuffers(dc);
+         } else {
+            Sleep(4);
+         }
+      }
+      if (rc) {
+         wglMakeCurrent(NULL, NULL);
+         wglDeleteContext(rc);
+      }
+      UnregisterClassW(L"sbtouchlat", wc.hInstance);
+      return 0;
+   }
    SetEvent((HANDLE)ready);
    MSG msg;
    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
@@ -145,7 +199,7 @@ static int trial(const char *pattern, int n, int x, int y, int hold_ms, int dx)
    LONGLONG start = qpc();
    t0 = start;
    if (!inject(x, y, POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT)) {
-      fprintf(lf, "TOUCHLAT %s %s #%d: InjectTouchInput(down) failed, error %lu\n", wname[wkind], pattern, n, GetLastError());
+      fprintf(lf, "TOUCHLAT %s%s %s #%d: InjectTouchInput(down) failed, error %lu\n", tag, wname[wkind], pattern, n, GetLastError());
       t0 = 0;
       return 0;
    }
@@ -159,9 +213,9 @@ static int trial(const char *pattern, int n, int x, int y, int hold_ms, int dx)
    }
    LONG up_us = (LONG)((qpc() - start) * 1000000 / qf.QuadPart);
    if (!inject(x + dx, y, POINTER_FLAG_UP))
-      fprintf(lf, "TOUCHLAT %s %s #%d: InjectTouchInput(up) failed, error %lu\n", wname[wkind], pattern, n, GetLastError());
+      fprintf(lf, "TOUCHLAT %s%s %s #%d: InjectTouchInput(up) failed, error %lu\n", tag, wname[wkind], pattern, n, GetLastError());
    Sleep(900);      // late messages (a click sent after the release, a press-and-hold right click)
-   fprintf(lf, "TOUCHLAT %s %s #%d: inject down took %.1f ms, release at %.1f ms |", wname[wkind], pattern, n,
+   fprintf(lf, "TOUCHLAT %s%s %s #%d: inject down took %.1f ms, release at %.1f ms |", tag, wname[wkind], pattern, n,
            down_us / 1000.0, up_us / 1000.0);
    for (int k = 0; k < K_N; k++)
       if (first_us[k] >= 0)
@@ -180,6 +234,10 @@ int main(int argc, char **argv)
    lf = argc > 1 ? fopen(argv[1], "a") : stdout;
    if (!lf)
       return 2;
+   glmode = argc > 2 && !strcmp(argv[2], "gl");
+   const char *sw_touch = getenv("SB_GL_TOUCH");
+   if (glmode)
+      tag = sw_touch && *sw_touch == '1' ? "gl-kit-touch-on " : "gl-kit-touch-off ";
    SetProcessDPIAware();
    QueryPerformanceFrequency(&qf);
    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
@@ -190,11 +248,11 @@ int main(int argc, char **argv)
       fclose(lf);
       return 1;
    }
-   for (wkind = 0; wkind < W_N; wkind++) {
+   for (wkind = 0; wkind < (glmode ? 1 : W_N); wkind++) {
       HANDLE ready = CreateEventW(NULL, TRUE, FALSE, NULL);
       HANDLE th = CreateThread(NULL, 0, window_thread, ready, 0, NULL);
-      WaitForSingleObject(ready, 5000);
-      Sleep(700);
+      WaitForSingleObject(ready, 20000);
+      Sleep(glmode ? 2500 : 700);
       int x = sw / 2 - 100, y = sh / 2, ok = 1;
       for (int i = 0; ok && i < 5; i++)
          ok = trial("tap60", i, x, y + 10 * i, 60, 0);

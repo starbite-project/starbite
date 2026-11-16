@@ -1,0 +1,185 @@
+From 3d8ee0f6d4c79f1fc71bac252e037cbe1620fa09 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 15:21:16 +0200
+Subject: [PATCH] 0170: a touch is a mouse click at once (flag file gltouch or
+ SB_GL_TOUCH=1): the game window procedure is wrapped; a touch pointer down
+ becomes WM_MOUSEMOVE + WM_LBUTTONDOWN at that moment, its release
+ WM_LBUTTONUP, the pointer message is answered so Windows promotes nothing; a
+ second finger is a new press
+
+---
+ src/gallium/targets/wgl/wgl_sb_zc.cpp | 155 ++++++++++++++++++++++++++
+ 1 file changed, 155 insertions(+)
+
+diff --git a/src/gallium/targets/wgl/wgl_sb_zc.cpp b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+index 970ede7..325e69a 100644
+--- a/src/gallium/targets/wgl/wgl_sb_zc.cpp
++++ b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+@@ -792,9 +792,164 @@ color_format(enum pipe_format f, DXGI_FORMAT *d)
+    }
+ }
+ 
++/* ---- sb-patches/0170: a touch is a mouse click at once (flag file gltouch, or SB_GL_TOUCH=1) ----
++ *
++ * A game that only reads the mouse (Geometry Dash: GLFW's WM_LBUTTONDOWN / WM_LBUTTONUP) gets a touch only after
++ * Windows has promoted it to a click, and Windows decides that late (tap, hold or drag?). The game's window is
++ * ours to see: its GL framebuffer is made here. With the switch on, the window procedure is wrapped: a touch
++ * pointer going down becomes WM_MOUSEMOVE + WM_LBUTTONDOWN at that moment, its moves WM_MOUSEMOVE, its release
++ * WM_LBUTTONUP, and the pointer message is answered (not passed to DefWindowProc), so Windows promotes nothing.
++ * A second finger landing while one is down is a new press (button up, then down: two thumbs alternating);
++ * the button goes up when the last finger lifts. Mouse messages Windows still derives from touch are dropped
++ * while this is active. A real mouse and every other message pass through untouched. */
++#define SBT_WINDOWS 4
++#define SBT_CONTACTS 10
++#define SBT_TOUCH_SIGNATURE(x) (((x) & 0xFFFFFF00) == 0xFF515700)   /* GetMessageExtraInfo of touch-made mouse input */
++
++struct sbt_win {
++   HWND hwnd;
++   WNDPROC old;
++   bool unicode;
++   UINT32 ids[SBT_CONTACTS];
++   unsigned n;                /* fingers down */
++   LPARAM last;               /* client position of the latest touch message */
++   unsigned long downs, ups, moves, dropped;
++};
++static struct sbt_win sbt[SBT_WINDOWS];
++
++static struct sbt_win *
++sbt_find(HWND h)
++{
++   for (unsigned i = 0; i < SBT_WINDOWS; i++)
++      if (sbt[i].hwnd == h)
++         return &sbt[i];
++   return NULL;
++}
++
++static LRESULT
++sbt_call(struct sbt_win *t, HWND h, UINT m, WPARAM w, LPARAM l)
++{
++   return t->unicode ? CallWindowProcW(t->old, h, m, w, l) : CallWindowProcA(t->old, h, m, w, l);
++}
++
++static LRESULT CALLBACK
++sbt_proc(HWND h, UINT m, WPARAM w, LPARAM l)
++{
++   struct sbt_win *t = sbt_find(h);
++   if (!t)
++      return DefWindowProcW(h, m, w, l);
++   switch (m) {
++   case WM_POINTERDOWN:
++   case WM_POINTERUPDATE:
++   case WM_POINTERUP:
++   case WM_POINTERCAPTURECHANGED: {
++      UINT32 id = GET_POINTERID_WPARAM(w);
++      POINTER_INPUT_TYPE type = PT_POINTER;
++      unsigned k;
++      if (!GetPointerType(id, &type) || type != PT_TOUCH)
++         break;
++      for (k = 0; k < t->n && t->ids[k] != id; k++)
++         ;
++      if (m != WM_POINTERCAPTURECHANGED) {
++         POINT pt = {(short)LOWORD(l), (short)HIWORD(l)};
++         ScreenToClient(h, &pt);
++         t->last = MAKELPARAM(pt.x, pt.y);
++      }
++      if (m == WM_POINTERDOWN) {
++         if (k < t->n || t->n == SBT_CONTACTS)
++            return 0;
++         sbt_call(t, h, WM_MOUSEMOVE, t->n ? MK_LBUTTON : 0, t->last);
++         if (t->n) {               /* another finger: a new press */
++            sbt_call(t, h, WM_LBUTTONUP, 0, t->last);
++            t->ups++;
++         }
++         t->ids[t->n++] = id;
++         sbt_call(t, h, WM_LBUTTONDOWN, MK_LBUTTON, t->last);
++         t->downs++;
++      } else if (k == t->n) {
++         return 0;                  /* a contact we never saw go down */
++      } else if (m == WM_POINTERUPDATE) {
++         if (id == t->ids[t->n - 1]) {      /* the newest finger is the pointer */
++            sbt_call(t, h, WM_MOUSEMOVE, MK_LBUTTON, t->last);
++            t->moves++;
++         }
++      } else {
++         t->ids[k] = t->ids[--t->n];
++         if (!t->n) {
++            sbt_call(t, h, WM_MOUSEMOVE, MK_LBUTTON, t->last);
++            sbt_call(t, h, WM_LBUTTONUP, 0, t->last);
++            t->ups++;
++         }
++      }
++      return 0;
++   }
++   case WM_MOUSEMOVE:
++   case WM_LBUTTONDOWN:
++   case WM_LBUTTONUP:
++   case WM_LBUTTONDBLCLK:
++   case WM_RBUTTONDOWN:
++   case WM_RBUTTONUP:
++      if (SBT_TOUCH_SIGNATURE((ULONG_PTR)GetMessageExtraInfo())) {
++         t->dropped++;
++         return 0;
++      }
++      break;
++   case WM_NCDESTROY: {
++      WNDPROC old = t->old;
++      bool uni = t->unicode;
++      fprintf(stderr, "sb gl touch: window %p gone: %lu presses, %lu releases, %lu moves, %lu touch-made mouse messages dropped\n",
++              (void *)h, t->downs, t->ups, t->moves, t->dropped);
++      fflush(stderr);
++      if (uni)
++         SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)old);
++      else
++         SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)old);
++      memset(t, 0, sizeof(*t));
++      return uni ? CallWindowProcW(old, h, m, w, l) : CallWindowProcA(old, h, m, w, l);
++   }
++   }
++   return sbt_call(t, h, m, w, l);
++}
++
++static void
++sbt_attach(HWND h)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("SB_GL_TOUCH");
++      on = e ? (*e && *e != '0') : zc_flag("gltouch");
++   }
++   if (!on || !h || sbt_find(h))
++      return;
++   DWORD pid = 0;
++   if (GetWindowThreadProcessId(h, &pid) != GetCurrentThreadId() || pid != GetCurrentProcessId())
++      return;                       /* only from the window's own thread: nothing races the swap of the procedure */
++   char cls[16] = "";
++   if (GetClassNameA(h, cls, sizeof(cls)) && !strcmp(cls, "wglpbuffer"))
++      return;
++   struct sbt_win *t = sbt_find(NULL);
++   if (!t)
++      return;
++   t->unicode = IsWindowUnicode(h) != 0;
++   t->old = (WNDPROC)(t->unicode ? GetWindowLongPtrW(h, GWLP_WNDPROC) : GetWindowLongPtrA(h, GWLP_WNDPROC));
++   if (!t->old) {
++      memset(t, 0, sizeof(*t));
++      return;
++   }
++   t->hwnd = h;
++   if (t->unicode)
++      SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)sbt_proc);
++   else
++      SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)sbt_proc);
++   fprintf(stderr, "sb gl touch: window %p (%s): a touch is a click at once (0170)\n", (void *)h,
++           t->unicode ? "unicode" : "ansi");
++   fflush(stderr);
++}
++
+ struct stw_winsys_framebuffer *
+ wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFormat)
+ {
++   sbt_attach(hWnd);
+    static int mode = -1;   /* 1: zero-copy, 0: GDI */
+    if (mode < 0) {
+       const char *p = getenv("SB_GL_PRESENT");
+-- 
+2.43.0
+
