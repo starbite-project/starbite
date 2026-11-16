@@ -208,6 +208,24 @@ typedef struct _MW_FAULT {
 #define MW_HANG_DESC_UNKNOWN    2   /* JS_HEAD is in no allocation a chain of this submission starts in */
 #define MW_HANG_DESC_MISMATCH   3   /* the view is of another page, or the GPU's page is not that allocation's */
 #define MW_HANG_DESC_ALIGN      4   /* JS_HEAD not 64-byte aligned (a job header always is) */
+/* b78 (T78: 404 DWM vertex/tiler jobs still ACTIVE at the limit, no MMU fault): what the hung job points at, read
+ * from its descriptor through the same view, and how the GPU's own page table has each address at that moment. */
+#define MW_HANG_JOB_DWORDS      96  /* a Bifrost Indexed Vertex Job: 384 bytes (Tiler Job: 256) */
+#define MW_HANG_PTRS            20
+#define MW_HPF_LIVE             0x01    /* Va is inside a live allocation */
+#define MW_HPF_MAPPED           0x02    /* ... which VidMm has mapped (resident) */
+#define MW_HPF_SCRATCH          0x04    /* ... which is evicted onto the read-only scratch page */
+typedef struct _MW_HANG_PTR {
+    ULONG64 Va;
+    UCHAR What;                 /* index into MwHangLog's field names */
+    UCHAR Pte;                  /* MW_PTE_* at Va */
+    UCHAR Flags;                /* MW_HPF_* */
+    UCHAR Creator0;             /* first letter of the owning allocation's creator */
+    ULONG PteAttr;              /* the PTE's low 12 bits (0x2C1 read-write, 0x241 read-only) */
+    ULONG Pages;                /* the owning allocation's size (0: in no live allocation) */
+    ULONG UnmapAgoMs;           /* its last unmap, ms before the hang (0xFFFFFFFF: never unmapped) */
+    LONG ListedAgo;             /* hung submission's render sequence - its LastListed (0: listed by the hung one) */
+} MW_HANG_PTR;
 typedef struct _MW_HANG {
     volatile LONG Seq;          /* record number + 1, stored last; 0 while it is being written */
     ULONG Ms, ChainMs, SubMs;   /* when (ms since start), and how long the chain and the submission had run */
@@ -221,6 +239,19 @@ typedef struct _MW_HANG {
     ULONG64 AllocVa;            /* the known allocation JS_HEAD is in (0: none) */
     ULONG Creator[2];
     ULONG Desc[MW_HANG_DESC_DWORDS];
+    /* b78 */
+    ULONG AsStatus, MmuIntMask, JobRawStat, JobDwords, NPtrs;
+    ULONG64 AsLockAddr, AsTranstab;
+    ULONG64 HeadHalf;           /* JS_HEAD when the chain had used half its limit (0: not sampled) */
+    LONG RunSeq;                /* the hung submission's render sequence */
+    MW_HANG_PTR Ptr[MW_HANG_PTRS];
+    /* the creator's (= the hung job's process) allocations: all, resident, on the scratch page, listed by the hung
+     * submission; and its biggest one of 16 MiB or more (DWM's tiler heap is its only 64 MiB allocation) */
+    ULONG OwnLive, OwnMapped, OwnScratched, OwnListed;
+    ULONG64 BigVa;
+    ULONG BigPages, BigMaps, BigUnmaps, BigUnmapAgoMs;
+    LONG BigListedAgo;
+    UCHAR BigMapped, BigScratched, BigPte[3];   /* MW_PTE_* at its first, middle and last page */
 } MW_HANG;
 
 /* T44: a CPU view of JS_HEAD's page, made by PollDpc at DISPATCH_LEVEL (mapping is not allowed at DIRQL) when the
@@ -419,6 +450,10 @@ struct _MW_ADAPTER {
     struct { MDL Mdl; PFN_NUMBER Pfn[1]; } HangMdl;   /* the one-page MDL mapped there (PollDpc only) */
     volatile LONG HangViewBusy;
     ULONG HangViews, HangViewFails;
+    /* b78: JS_HEAD at half the limit of the chain that started at HalfHeadFor (Reap, interrupt level) */
+    ULONG64 HalfHead, HalfHeadFor;
+    /* b78: Parameters\VtTimeoutMs, the limit of a vertex/tiler (slot 1) chain; default MW_JOB_TIMEOUT_MS = no change */
+    ULONG VtTimeoutMs;
     ULONG RamRuns;                          /* the PFN ranges that are RAM (MmGetPhysicalMemoryRanges at AddDevice) */
     struct { ULONG64 First, End; } RamRun[32];
     /* T46: fault forensics. Every live allocation (changed under the interrupt lock only), the render sequence, the

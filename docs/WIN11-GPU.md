@@ -3073,6 +3073,8 @@ wait 1.5 ms). **0168** (src-tc da5173f, `sb-patches/0168-wgl-zero-copy-present-t
 
 ### 6.104 T78 read: on the candidate driver Edge sets off a storm of DWM job timeouts and screen shots go black - candidate on hold
 
+> **Corrected by 6.112:** the onset was not Edge. The timeouts start seconds after Calculator opened and last while it stays open.
+
 (2026-11-16 05:06) **T78** (`build/win/results-t78`, the candidate: T61 kernel drivers + sbumd d39b83ab):
 - **What the two captures show (they disagree, so "works" is not established):**
   - DWM's own composed frames (`dump-dwm-app-*`): every app's window is there. Edge with its page (CSS animation,
@@ -3329,6 +3331,57 @@ every second, so they are in every entry. The copy says (state 285 s into that b
   counters from `Services\sbwddm\State`, where they are not (they are in the device key `Enum\ACPI\STRB0072\0\
   Device Parameters\sbwddm`, and two of the four names did not exist). T80/T80b would have reported 0 timeouts
   after every step whatever happened. Fixed and restaged (T80, T80b, T81, T83) before any of them ran.
+
+### 6.112 T78 re-read: not Edge. One compositor draw hangs while a XAML window (Calculator) is shown; diagnostics staged
+
+(2026-11-16 17:17; a second, independent read of T78's data and of both drivers' code: `docs/WIN11-GPU-T78-REREAD.md`. It
+**corrects 6.104**. The new builds are compiled only.)
+
+- **Not Edge.** DWM's own log is clean for 100 s with Edge up and after Edge was killed. The first blocked window
+  is 02:50:46-02:50:56; `calc.exe` was started at 02:50:43.8. 6.104 read the KMD's "190.9 s" as seconds since boot;
+  the KMD counts from its own start (`adapter.c` `StartTime`), which puts the first hung chain 1.5-6 s after
+  Calculator's start (the offset is inferred from where the blocked windows fall, hence the range).
+- **Calculator was never closed in T78** (the script looked for `CalculatorApp.exe`; `Calculator.exe` is in the end
+  task list), and the storm lasted from its start to the session's end. It paused only while sbsmooth's full-screen
+  window covered the desktop (61.7 fps) and was back for the windowed test (0.5 fps).
+- **The hung job is the same draw every time**: in all 31 hang records recovered from the hive (of 404), a DWM
+  indexed-vertex job of 60 vertices and 144 indices, IDVS with a varying shader, at chain position 6-20, still
+  ACTIVE at the 752 ms limit. Not one MMU fault in the session; memory was not short (836-1352 MiB free).
+- **T71 had the same hang**: its hive holds 10 identical records in the session's last seconds, placed after the
+  sign-out screen (LogonUI, also XAML) started. T79 (0167, 33 min of Geometry Dash) 0; T70, T72, T74 0. No boot on
+  the user's T61 driver ever opened a XAML app beyond the shell, so T61 is not cleared.
+- **The black screen shots are a consequence**: shots before the first hang are fine on the same driver; at a
+  timeout the KMD drops the rest of that submission (`command.c` Reap) and reports it complete, so what DWM reads
+  back was never drawn. The panel itself was not black (`Live_FbLiveSecs` 538 of 585 s).
+- **Cause: not known.** Three cases the T78 data cannot tell apart: the job touches an address with no page; it
+  writes an allocation that is on the read-only scratch page; or memory is fine and the vertex shader / tiler does
+  not finish for this draw (a shader the old translator compiles wrongly would look exactly like this: ACTIVE, no
+  fault). 0167 itself is unlikely (the KMD never reads the write bit) but not excluded.
+- **Diagnostic kernel driver** (`build/win/kmd-b78/sbwddm.sys` be555bb4, signed, 0 LSE words; the unchanged tree
+  rebuilds to the installed d85e0d3a apart from stamp and signature): at a job timeout it also records the hung
+  job's 20 pointers with the GPU page-table state of each (none / page / scratch, the PTE attributes, the owning
+  allocation, mapped or evicted, when last unmapped and listed), the state of the process's biggest allocation
+  (DWM's tiler heap), the address-space status and lock registers, the MMU interrupt mask, and JS_HEAD at half
+  the limit (stuck vs slow). Registry: `Live_HangPtrs`, `Live_HangPtrsFirst`. `Parameters\VtTimeoutMs` exists as a
+  mitigation switch (default 750 = unchanged). I reviewed the diff line by line before building it.
+- **Diagnostic sbumd b78** (Mesa branch `sb-b78` e2037d3 = 0167 + `sb-patches/0173`; `build/win/umd-b78` 57502837):
+  log only (wall clock on the stats lines, a line when the KMD's timeout counter moves, opens and closes of other
+  processes' allocations with the clock, a full-allocation-list counter, and after a timeout a bounded per-draw
+  trace giving each job's GPU address, to match the KMD's JS_HEAD), plus one behaviour change: a resource's
+  allocation is no longer destroyed after an idle wait that gave up (flag `b78nowait` = old way).
+- **`sb-apps3.bat`**: the three clocks tied together; counters 5 and 12 s after every app start and after its close;
+  the hang records saved to `umdlog\hang-<step>.txt` whenever the count grew; a step that keeps Calculator open
+  (with Notepad on top, two shots, a task list) and then closes it.
+- **Stages** (`tools/win/b78-stage.sh`, all with the diagnostic KMD): `sbwddm-t87s` (boot check of the pair),
+  `sbwddm-t87` (apps3 on the pair; run a second time with the flag `noidvs`: does the hang need the IDVS path),
+  `sbwddm-t87c` (the user's T61 sbumd: the control), `sbwddm-t88` (the new-tree sbumd with the flag `nirshaders`:
+  DWM's shaders through the new translator; only after T81 passed). `tools/win/sbflag.sh on|off NAME` sets such
+  flags from TWRP (they must exist before DWM starts).
+- **Found on the way:** flag files under `C:\ProgramData\Starbite` and the umdlog are probably invisible to
+  AppContainer processes (Calculator, Edge's GPU process: no sbumd log exists for them), so `noafbc` may read as
+  absent exactly there. Not verified. And the new tree carries a follow-up to 0167 (`sb-nir` 75514cd: the write
+  set goes to the device of the submit's fd, not the thread's last device) that the candidate d39b83ab lacks;
+  found by reading, never run.
 
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 

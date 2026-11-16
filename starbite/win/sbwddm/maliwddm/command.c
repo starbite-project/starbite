@@ -25,6 +25,10 @@ NTKERNELAPI PCHAR PsGetProcessImageFileName(PEPROCESS Process);   /* T27: export
  * submission 1500 ms; past either, the GPU is hard-stopped and the rest of the submission completes (dropped). */
 #define MW_JOB_TIMEOUT_MS       750
 #define MW_SUB_TIMEOUT_MS       1500
+/* b78: a vertex/tiler chain (slot 1) normally takes a few ms; Parameters\VtTimeoutMs (50..750, default 750) lets a
+ * test give it a shorter limit, so a hang of the T78 kind costs less. The fragment slot keeps MW_JOB_TIMEOUT_MS. */
+#define MW_CHAIN_LIMIT_MS(A, Slot) \
+    ((Slot) == 1 && (A)->VtTimeoutMs >= 50 && (A)->VtTimeoutMs < MW_JOB_TIMEOUT_MS ? (A)->VtTimeoutMs : MW_JOB_TIMEOUT_MS)
 #define MW_POLL_MS              1
 
 /* ---- devices and contexts ---- */
@@ -1276,7 +1280,7 @@ static BOOLEAN HangViewMake(MW_ADAPTER *A, MW_HANG_VIEW *V)
     RtlZeroMemory(V, sizeof(*V));
     if (A->HangMapVa == NULL || !A->Running || !A->GpuUp || A->Gpu.Regs == NULL || slot > 1)
         return FALSE;
-    if ((now - start) / 10000 + 2 <= MW_JOB_TIMEOUT_MS && (now - A->SubStart) / 10000 + 2 <= MW_SUB_TIMEOUT_MS)
+    if ((now - start) / 10000 + 2 <= MW_CHAIN_LIMIT_MS(A, slot) && (now - A->SubStart) / 10000 + 2 <= MW_SUB_TIMEOUT_MS)
         return FALSE;                     /* Reap's own test (below), 2 ms early: it runs microseconds after this */
     if (InterlockedCompareExchange(&A->HangViewBusy, 1, 0) != 0)
         return FALSE;
@@ -1338,6 +1342,102 @@ static ULONG HangDesc(MW_ADAPTER *A, MW_HANG *H, const MW_ALLOCATION *Al, const 
     return MW_HANG_DESC_OK;
 }
 
+/* b78: the hung job's pointers and the state of what they point at. Interrupt level (HangCapture). The descriptor is
+ * read only when HangDesc could read its first 64 bytes (same view, same page, same checks), and only as far as that
+ * page goes; everything else is the GPU's page table and one walk of the live list, as FaultRecord does. Dword
+ * offsets: Mesa genxml v6.xml, Indexed Vertex Job (Header 0, Primitive 10, Tiler 18, Fragment Draw 32, Vertex Draw
+ * 64) and Draw (Position 4, Uniform buffers 6, Textures 8, Samplers 10, Push uniforms 12, State 14, Attribute buffers
+ * 16, Attributes 18, Varying buffers 20, Varyings 22, Viewport 24, Occlusion 26, Thread Storage 28). */
+static void HangPointers(MW_ADAPTER *A, MW_HANG *H, const MW_ALLOCATION *Al, const MW_HANG_VIEW *V)
+{
+    static const UCHAR at[MW_HANG_PTRS] = { 6, 14, 18, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60,
+                                            78, 70, 76, 92 };
+    MK_GPU *gpu = &A->Gpu;
+    ULONG d[MW_HANG_JOB_DWORDS];
+    ULONG off = (ULONG)(H->Head & (PAGE_SIZE - 1)), words = 0, type, limit, np = 0, walked = 0;
+    const MW_ALLOCATION *big = NULL;
+
+    H->JobDwords = H->NPtrs = 0;
+    H->OwnLive = H->OwnMapped = H->OwnScratched = H->OwnListed = 0;
+    H->BigVa = 0;
+    H->BigPages = H->BigMaps = H->BigUnmaps = 0;
+    H->BigUnmapAgoMs = 0xFFFFFFFF;
+    H->BigListedAgo = 0;
+    H->BigMapped = H->BigScratched = 0;
+    H->BigPte[0] = H->BigPte[1] = H->BigPte[2] = MW_PTE_NONE;
+    RtlZeroMemory(H->Ptr, sizeof(H->Ptr));
+    if (H->DescState == MW_HANG_DESC_OK && V != NULL && V->Va != NULL) {
+        words = (PAGE_SIZE - off) / sizeof(ULONG);
+        if (words > MW_HANG_JOB_DWORDS)
+            words = MW_HANG_JOB_DWORDS;
+        for (ULONG i = 0; i < words; i++)
+            d[i] = ((const volatile ULONG *)(V->Va + off))[i];
+    }
+    H->JobDwords = words;
+    type = words > 4 ? (d[4] >> 1) & 0x7F : 0;
+    /* 10 indexed-vertex: all 20 fields; 7 tiler: the first 16 (no Vertex Draw); anything else: the next pointer */
+    limit = type == 10 ? MW_HANG_PTRS : type == 7 ? 16 : 1;
+    for (ULONG i = 0; i < limit && np < MW_HANG_PTRS; i++) {
+        ULONG64 va;
+        ULONG64 pte;
+        if ((ULONG)at[i] + 1 >= words)
+            continue;
+        va = d[at[i]] | (ULONG64)d[at[i] + 1] << 32;
+        if (va == 0)
+            continue;
+        pte = va >= MK_VA_START && va < MK_VA_END ? GpuPte(gpu, va) : 0;
+        H->Ptr[np].Va = va;
+        H->Ptr[np].What = (UCHAR)i;
+        H->Ptr[np].Pte = GpuPteState(gpu, va & ~(ULONG64)(PAGE_SIZE - 1));
+        H->Ptr[np].PteAttr = (ULONG)(pte & 0xFFF);
+        H->Ptr[np].UnmapAgoMs = 0xFFFFFFFF;
+        np++;
+    }
+    H->NPtrs = np;
+    /* one walk: who owns each address, and the creator's allocations */
+    for (PLIST_ENTRY e = A->LiveAllocs.Flink; e != &A->LiveAllocs && walked < 0x10000; e = e->Flink, walked++) {
+        const MW_ALLOCATION *x = CONTAINING_RECORD(e, MW_ALLOCATION, Live);
+        ULONG64 end = x->GpuVa + ((ULONG64)x->Pages << PAGE_SHIFT);
+        if (x->GpuVa == 0)
+            continue;
+        if (Al != NULL && x->Creator[0] == Al->Creator[0] && x->Creator[1] == Al->Creator[1]) {
+            H->OwnLive++;
+            if (x->Mapped)
+                H->OwnMapped++;
+            if (x->Scratched)
+                H->OwnScratched++;
+            if (x->LastListed == H->RunSeq)
+                H->OwnListed++;
+            if (x->Pages >= 4096 && (big == NULL || x->Pages > big->Pages))
+                big = x;
+        }
+        for (ULONG i = 0; i < np; i++) {
+            MW_HANG_PTR *p = &H->Ptr[i];
+            if ((p->Flags & MW_HPF_LIVE) || p->Va < x->GpuVa || p->Va >= end)
+                continue;
+            p->Flags = MW_HPF_LIVE | (x->Mapped ? MW_HPF_MAPPED : 0) | (x->Scratched ? MW_HPF_SCRATCH : 0);
+            p->Creator0 = (UCHAR)(x->Creator[0] & 0xFF);
+            p->Pages = x->Pages;
+            p->UnmapAgoMs = x->UnmapCount ? H->Ms - x->LastUnmapMs : 0xFFFFFFFF;
+            p->ListedAgo = H->RunSeq - x->LastListed;
+        }
+    }
+    if (big != NULL) {
+        ULONG64 last = big->GpuVa + ((ULONG64)(big->Pages - 1) << PAGE_SHIFT);
+        H->BigVa = big->GpuVa;
+        H->BigPages = big->Pages;
+        H->BigMaps = big->MapCount;
+        H->BigUnmaps = big->UnmapCount;
+        H->BigUnmapAgoMs = big->UnmapCount ? H->Ms - big->LastUnmapMs : 0xFFFFFFFF;
+        H->BigListedAgo = H->RunSeq - big->LastListed;
+        H->BigMapped = big->Mapped;
+        H->BigScratched = big->Scratched;
+        H->BigPte[0] = GpuPteState(gpu, big->GpuVa);
+        H->BigPte[1] = GpuPteState(gpu, big->GpuVa + ((ULONG64)(big->Pages / 2) << PAGE_SHIFT));
+        H->BigPte[2] = GpuPteState(gpu, last);
+    }
+}
+
 /* A hung chain's state, before Reap hard-stops it. Interrupt level, inside SyncPoll (DxgkCbSynchronizeExecution),
  * like the rest of Reap: register reads and plain stores into the ring; no allocation, no registry (the guard thread
  * prints the ring at PASSIVE_LEVEL, MwHangLog). */
@@ -1387,6 +1487,15 @@ static void HangCapture(MW_ADAPTER *A, ULONG Slot, const MW_HANG_VIEW *V)
     h->Creator[1] = al ? al->Creator[1] : 0;
     RtlZeroMemory(h->Desc, sizeof(h->Desc));
     h->DescState = HangDesc(A, h, al, V);
+    /* b78: is the address space locked or busy, are MMU interrupts unmasked, did the chain move in its second half */
+    h->AsStatus = MK_RD(gpu, AS0 + AS_STATUS);
+    h->AsLockAddr = MK_RD(gpu, AS0 + AS_LOCKADDR_LO) | (ULONG64)MK_RD(gpu, AS0 + AS_LOCKADDR_HI) << 32;
+    h->AsTranstab = MK_RD(gpu, AS0 + AS_TRANSTAB_LO) | (ULONG64)MK_RD(gpu, AS0 + AS_TRANSTAB_HI) << 32;
+    h->MmuIntMask = MK_RD(gpu, MMU_INT_MASK);
+    h->JobRawStat = MK_RD(gpu, JOB_INT_RAWSTAT);
+    h->HeadHalf = A->HalfHeadFor == A->JobStart ? A->HalfHead : 0;
+    h->RunSeq = s->RenderSeq;
+    HangPointers(A, h, al, V);
     KeMemoryBarrier();
     h->Seq = n + 1;
     A->HangCount = n + 1;
@@ -1592,7 +1701,7 @@ static BOOLEAN Reap(MW_ADAPTER *A, BOOLEAN CheckTimeout, const MW_HANG_VIEW *Vie
         failed = TRUE;
     } else if (bits & (1u << slot)) {
         failed = FALSE;
-    } else if (CheckTimeout && ((KeQueryInterruptTime() - A->JobStart) / 10000 > MW_JOB_TIMEOUT_MS ||
+    } else if (CheckTimeout && ((KeQueryInterruptTime() - A->JobStart) / 10000 > MW_CHAIN_LIMIT_MS(A, slot) ||
                                 (KeQueryInterruptTime() - A->SubStart) / 10000 > MW_SUB_TIMEOUT_MS)) {
         HangCapture(A, slot, View);       /* T44: before the hard stop changes anything */
         A->LastJsStatus = MkJobSlotStatus(gpu, slot);
@@ -1600,6 +1709,13 @@ static BOOLEAN Reap(MW_ADAPTER *A, BOOLEAN CheckTimeout, const MW_HANG_VIEW *Vie
         A->JobsTimedOut++;
         failed = TRUE;
     } else {
+        /* b78: where the chain is at half its limit. A chain that is merely slow has moved on by the limit; a job
+         * that is stuck has JS_HEAD in the same place both times. */
+        if (CheckTimeout && A->HalfHeadFor != A->JobStart &&
+            (KeQueryInterruptTime() - A->JobStart) / 10000 > MW_CHAIN_LIMIT_MS(A, slot) / 2) {
+            A->HalfHead = MK_RD(gpu, JS_SLOT(slot) + JS_HEAD_LO) | (ULONG64)MK_RD(gpu, JS_SLOT(slot) + JS_HEAD_HI) << 32;
+            A->HalfHeadFor = A->JobStart;
+        }
         return FALSE;
     }
 
@@ -2089,7 +2205,8 @@ NTSTATUS APIENTRY MwQueryEngineStatus(IN_CONST_HANDLE hAdapter, DXGKARG_QUERYENG
 {
     MW_ADAPTER *a = (MW_ADAPTER *)hAdapter;
     /* T41: not responsive while a chain is overdue (was always 1) */
-    BOOLEAN overdue = a->Running && (KeQueryInterruptTime() - a->JobStart) / 10000 > MW_JOB_TIMEOUT_MS;
+    BOOLEAN overdue = a->Running &&
+                      (KeQueryInterruptTime() - a->JobStart) / 10000 > MW_CHAIN_LIMIT_MS(a, a->RunningSlot);
     Arg->EngineStatus.Responsive = overdue ? 0 : 1;
     if (overdue)
         a->TdrQueriedHung++;

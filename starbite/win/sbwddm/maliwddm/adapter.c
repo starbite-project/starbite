@@ -177,6 +177,63 @@ static const char *JobTypeName(ULONG T)
     return T < RTL_NUMBER_OF(n) ? n[T] : "type?";
 }
 
+/* b78: the newest three hangs' pointer records as Live_HangPtrs (and, while there are at most three hangs in all,
+ * as Live_HangPtrsFirst, which then keeps the storm's first ones). Per hang: the address-space registers, JS_HEAD at
+ * half the limit, the creator's allocations, its biggest one (DWM: the tiler heap), then each pointer of the job as
+ *   name=va[pte 0|1|S attr owner-initial +pages M(apped)/S(cratch)/- unmapped-ms-ago listed-renders-ago]
+ * ("none": the address is in no live allocation). Guard thread, PASSIVE_LEVEL, from MwHangLog. */
+static void MwHangPtrLog(MW_ADAPTER *A, LONG N)
+{
+    static char t[8000];
+    static const char *const pte[] = { "0", "1", "S" };
+    static const char *const nm[MW_HANG_PTRS] = {
+        "next", "indices", "tiler", "f.position", "f.ubos", "f.textures", "f.samplers", "f.push", "f.state",
+        "f.attrbufs", "f.attrs", "f.varybufs", "f.varyings", "f.viewport", "f.occlusion", "f.tls",
+        "v.state", "v.ubos", "v.push", "v.tls" };
+    LONG first = N > 3 ? N - 3 : 0;
+    size_t used = 0;
+    MW_HANG h;
+
+    t[0] = 0;
+    for (LONG k = first; k < N && used + 2500 < sizeof(t); k++) {
+        const MW_HANG *r = &A->Hangs[k & (MW_HANGS - 1)];
+        LONG seq = r->Seq;
+        KeMemoryBarrier();
+        RtlCopyMemory(&h, (const void *)r, sizeof(h));
+        KeMemoryBarrier();
+        if (seq != k + 1 || r->Seq != seq)
+            continue;
+        (void)RtlStringCbPrintfA(t + used, sizeof(t) - used,
+            "#%ld as 0x%lx lock 0x%llx transtab 0x%llx mmumask 0x%lx jobraw 0x%lx half-head 0x%llx (head 0x%llx) | "
+            "own %lu live, %lu mapped, %lu scratch, %lu listed by run %ld | big 0x%llx+%lup mapped %u scratch %u "
+            "pte %s/%s/%s maps %lu unmaps %lu (last %ld ms ago) listed %ld ago | job %lu dwords:",
+            k + 1, h.AsStatus, h.AsLockAddr, h.AsTranstab, h.MmuIntMask, h.JobRawStat, h.HeadHalf, h.Head,
+            h.OwnLive, h.OwnMapped, h.OwnScratched, h.OwnListed, h.RunSeq, h.BigVa, h.BigPages,
+            (unsigned)h.BigMapped, (unsigned)h.BigScratched, pte[h.BigPte[0] % 3], pte[h.BigPte[1] % 3],
+            pte[h.BigPte[2] % 3], h.BigMaps, h.BigUnmaps, h.BigUnmaps ? (LONG)h.BigUnmapAgoMs : -1L, h.BigListedAgo,
+            h.JobDwords);
+        used = strlen(t);
+        for (ULONG i = 0; i < h.NPtrs && i < MW_HANG_PTRS && used + 96 < sizeof(t); i++) {
+            const MW_HANG_PTR *p = &h.Ptr[i];
+            if (p->Flags & MW_HPF_LIVE)
+                (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, " %s=0x%llx[%s %03lx %c +%lup %s %ld %ld]",
+                    nm[p->What % MW_HANG_PTRS], p->Va, pte[p->Pte % 3], p->PteAttr,
+                    p->Creator0 >= 32 && p->Creator0 < 127 ? (char)p->Creator0 : '?', p->Pages,
+                    (p->Flags & MW_HPF_MAPPED) ? "M" : (p->Flags & MW_HPF_SCRATCH) ? "S" : "-",
+                    p->UnmapAgoMs == 0xFFFFFFFF ? -1L : (LONG)p->UnmapAgoMs, p->ListedAgo);
+            else
+                (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, " %s=0x%llx[%s %03lx none]",
+                    nm[p->What % MW_HANG_PTRS], p->Va, pte[p->Pte % 3], p->PteAttr);
+            used = strlen(t);
+        }
+        (void)RtlStringCbCatA(t, sizeof(t), "\n");
+        used = strlen(t);
+    }
+    MwLogSz(A, L"Live_HangPtrs", t);
+    if (N <= 3)
+        MwLogSz(A, L"Live_HangPtrsFirst", t);
+}
+
 /* T44: the newest MW_HANGS job timeouts (MW_HANG, recorded by Reap before the hard stop), one line each, when there
  * are new ones (guard thread, PASSIVE_LEVEL, once a second). A record Reap rewrote while it was copied is skipped. */
 void MwHangLog(MW_ADAPTER *A)
@@ -233,6 +290,7 @@ void MwHangLog(MW_ADAPTER *A)
         used = strlen(t);
     }
     MwLogSz(A, L"Live_HangLog", t);
+    MwHangPtrLog(A, n);                   /* b78 */
     MwLog(A, L"Live_HangCount", (ULONG)n);
     MwLog(A, L"Live_HangViews", A->HangViews);
     MwLog(A, L"Live_HangViewFails", A->HangViewFails);
@@ -397,6 +455,9 @@ static NTSTATUS APIENTRY MwStartDevice(IN_CONST_PVOID Context, IN_PDXGK_START_IN
     /* KMD-scratch: evictions point PTEs at a read-only zero page (default on; 0 = PTE 0 as before) */
     a->ScratchUnmap = S9GetDword(L"Parameters", L"ScratchUnmap", 1) != 0 && a->Gpu.ScratchPa != 0;
     MwLog(a, L"ScratchUnmap", a->ScratchUnmap);
+    /* b78: the limit of a vertex/tiler chain (command.c MW_CHAIN_LIMIT_MS); 750 = as before */
+    a->VtTimeoutMs = S9GetDword(L"Parameters", L"VtTimeoutMs", 750);
+    MwLog(a, L"VtTimeoutMs", a->VtTimeoutMs);
     /* Fences complete from the GPU interrupt (and the poll goes through DxgkCbSynchronizeExecution, which
      * needs one). Without the Mali's interrupt lines (the stage-2 SSDT declares none) work would never
      * complete: repeated TDRs, then bugcheck 0x116. So after the whole bring-up (logged), refuse. */
