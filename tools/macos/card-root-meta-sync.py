@@ -430,7 +430,10 @@ def add(a):
                 if os.path.lexists(t):
                     sys.exit(f'{t} exists on the card root: add only adds new files')
                 subprocess.run(['cp', '-X', s, t], check=True)
-                added.append(('/' + os.path.normpath(os.path.join(rel, name)), 0o644))
+                # an executable source file stays executable (S6e: app executables; they were 0644 before,
+                # which only data files and plists had needed)
+                added.append(('/' + os.path.normpath(os.path.join(rel, name)),
+                              0o755 if os.access(s, os.X_OK) else 0o644))
         subprocess.run(['sync'], check=True)
     finally:
         subprocess.run(['hdiutil', 'detach', mnt], capture_output=True)     # by mount point
