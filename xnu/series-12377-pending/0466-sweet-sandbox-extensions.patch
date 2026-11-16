@@ -1,0 +1,117 @@
+--- a/bsd/kern/sweet_amfi.c	2026-11-16 17:23:25
++++ b/bsd/kern/sweet_amfi.c	2026-11-16 17:23:25
+@@ -26,6 +26,8 @@
+ #include <kern/debug.h>
+ #include <kern/startup.h>
+ #include <libkern/amfi/amfi.h>
++#include <libkern/OSAtomic.h>
++#include <kern/kalloc.h>
+ #include <mach/kern_return.h>
+ #include <pexpert/pexpert.h>
+ #include <sys/codesign.h>
+@@ -322,7 +324,92 @@
+ 	return yes;
+ }
+ 
++/*
++ * 0466: sandbox extensions (boot-arg sweetsbext=1). An extension is a token one process gets from the kernel
++ * (issue) and hands to another, which consumes it to widen its own sandbox. SWEET enforces no sandbox, but the
++ * stand-in answered both calls with ENOENT, and macOS takes that as a hard failure: containermanagerd logs
++ * "sandbox_extension_issue_file failed for class com.apple.sandbox.application-group ...: 2" and answers its
++ * clients with error 90, so they get no group container URL (S6j 2026-11-16: NotificationCenter's crash loop, the
++ * wallpaper programs' "Failed to consume sandbox extension. Token is NULL", and daemons that exit at once and are
++ * started again every 10 s). Now both succeed: the token is a string in the shape of Sandbox.kext's, the handle a
++ * counter. Nothing is recorded, since nothing is checked later.
++ *
++ * libsystem_sandbox 15.6 (0x18ca88f0c _sandbox_extension_issue, 0x18ca89028 sandbox_extension_consume):
++ *   issue   (op 5): { const char *class; u64 type; const char *data; u64 flags; char *token (2048 bytes);
++ *                     s64 pid; u64 pidversion }, 0 = the token string is in the buffer
++ *   consume (op 6): { const char *token; u64 length with the NUL; s64 *handle }, 0 = *handle is set
++ *   release (op 7): { s64 handle; 0; 0 } (the default case: success)
++ */
++static TUNABLE(uint32_t, sweet_sbext, "sweetsbext", 0);
++#define SWEET_SBEXT_TOKEN 2048
++static SInt64 sweet_sbext_issued;
++static SInt64 sweet_sbext_consumed;
++
+ static int
++sweet_sandbox_ext_issue(struct proc *p, user_addr_t arg)
++{
++	uint64_t a[7];
++	if (arg == USER_ADDR_NULL || copyin(arg, a, sizeof(a)) != 0) {
++		return EFAULT;
++	}
++	if (a[0] == 0 || a[4] == 0) {
++		return EINVAL;
++	}
++	char *buf = kalloc_data(SWEET_SBEXT_TOKEN + 256 + 1024, Z_WAITOK | Z_ZERO);
++	if (buf == NULL) {
++		return ENOMEM;
++	}
++	char *cls = buf + SWEET_SBEXT_TOKEN, *data = cls + 256;
++	size_t n = 0;
++	int err = copyinstr((user_addr_t)a[0], cls, 256, &n);
++	if (err == 0 && a[2] != 0) {
++		err = copyinstr((user_addr_t)a[2], data, 1024, &n);
++	}
++	if (err == 0) {
++		uint64_t id = (uint64_t)OSAddAtomic64(1, &sweet_sbext_issued) + 1;
++		/* 64 hex digits where the kext has its HMAC, then its fields: flags, class, type, a file id, the data */
++		int len = snprintf(buf, SWEET_SBEXT_TOKEN,
++		    "5357454554000000000000000000000000000000000000000000%012llx;00;00000000;00000000;00000000;"
++		    "%016llx;%s;%02x;01000004;%016llx;01;%s",
++		    id, (uint64_t)(a[3] & 0xffff) | 0x20, cls, (unsigned)(a[1] & 0xff) + 1, id, data);
++		if (len <= 0 || len >= SWEET_SBEXT_TOKEN) {
++			err = ENAMETOOLONG;
++		} else {
++			err = copyout(buf, (user_addr_t)a[4], (size_t)len + 1);
++		}
++		if (err == 0 && id <= 12) {
++			char name[32];
++			proc_name(proc_pid(p), name, sizeof(name));
++			printf("SWEET Sandbox: extension %llu issued by %s: class %s type %llu\n", id, name, cls, a[1]);
++		}
++	}
++	kfree_data(buf, SWEET_SBEXT_TOKEN + 256 + 1024);
++	return err;
++}
++
++static int
++sweet_sandbox_ext_consume(struct proc *p, user_addr_t arg)
++{
++	uint64_t a[3];
++	if (arg == USER_ADDR_NULL || copyin(arg, a, sizeof(a)) != 0) {
++		return EFAULT;
++	}
++	if (a[0] == 0) {
++		return EINVAL;
++	}
++	int64_t handle = (int64_t)OSAddAtomic64(1, &sweet_sbext_consumed) + 1;
++	if (a[2] != 0 && copyout(&handle, (user_addr_t)a[2], sizeof(handle)) != 0) {
++		return EFAULT;
++	}
++	if (handle <= 12) {
++		char name[32];
++		proc_name(proc_pid(p), name, sizeof(name));
++		printf("SWEET Sandbox: extension consumed by %s (handle %lld)\n", name, handle);
++	}
++	return 0;
++}
++
++static int
+ sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
+ {
+ 	if (call >= 0 && call < 64 && !(sweet_sandbox_seen & (1ULL << call))) {
+@@ -357,9 +444,11 @@
+ 		return 0;
+ 	}
+ 	case 4:         /* container path (audit token / pid) */
++		return ENOENT;
+ 	case 5:         /* extension issue */
++		return sweet_sbext ? sweet_sandbox_ext_issue(p, arg) : ENOENT;
+ 	case 6:         /* extension consume */
+-		return ENOENT;
++		return sweet_sbext ? sweet_sandbox_ext_consume(p, arg) : ENOENT;
+ 	case 0x43:
+ 		/* container expected: libsystem_sandbox passes two out-pointers
+ 		 * it has zeroed and aborts _container_init() on any error (iOS 18:

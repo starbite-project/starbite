@@ -1,0 +1,4 @@
+# Processes that get the Mali Metal device (StarbiteMetal.bundle): names, "*" = all, "-NAME" = never.
+# S6p 2026-11-16: + iconservicesagent (Core Image there: "No Metal renderer available").
+WindowServer sbmtltest iconservicesagent
+#                        

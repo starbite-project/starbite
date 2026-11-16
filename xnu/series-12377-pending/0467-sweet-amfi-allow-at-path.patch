@@ -1,0 +1,21 @@
+--- a/bsd/kern/sweet_amfi.c	2026-11-16 17:28:50
++++ b/bsd/kern/sweet_amfi.c	2026-11-16 17:28:50
+@@ -486,6 +486,18 @@
+ 	if (call == 90) {
+ 		struct { uint64_t input; uint64_t output; } a;
+ 		uint64_t flags = 1ULL << 8;
++		/*
++		 * 0467: AMFI_DYLD_OUTPUT_ALLOW_AT_PATH (1 << 0) and ALLOW_FALLBACK_PATHS (1 << 3), as macOS answers for
++		 * an ordinary program. Without bit 0 dyld drops every @executable_path / @loader_path run path, so an
++		 * app that carries its own frameworks cannot load them (S6j 2026-11-16, Books: "Library not loaded:
++		 * @rpath/AEBookPlugins.framework ... (security policy does not allow @ path expansion)"; the framework
++		 * is in Books.app/Contents/Frameworks). Boot-arg sweetatpath=0 gives the old answer.
++		 */
++		uint32_t at_path = 1;
++		(void)PE_parse_boot_argn("sweetatpath", &at_path, sizeof(at_path));
++		if (at_path) {
++			flags |= (1ULL << 0) | (1ULL << 3);
++		}
+ 		if (PE_parse_boot_argn("sweetinject", NULL, 0)) {
+ 			flags |= (1ULL << 1) | (1ULL << 4) | (1ULL << 5) | (1ULL << 6);
+ 		}
