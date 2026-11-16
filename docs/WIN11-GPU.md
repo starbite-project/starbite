@@ -3627,6 +3627,21 @@ three test programs, T61's D3D driver set; measured. `GLSYS VERDICT: PASS`.)
   present path (GDI, ~45 fps here; the zero-copy path is behind the game kit's flags), GL 3.1 only, no 32-bit
   build, and a first real program other than our test.
 
+### 6.122 Chain results, part 9: T89, the shader cache did not switch on (the run measured nothing about it)
+
+(2026-11-16 20:22; `build/win/results-t89`: T61's drivers, GL kit `gd-kit-ec-cache`; measured.)
+
+- Runs A and B (no flag files) both log only `sbumd: shader cache: off (switched off, or its directory cannot be
+  used)` and `off; first frame, 21.5 s / 19.2 s after process start`. There is no `gl shader cache:` decision line
+  and no `on, <dir>` line. Run C (`glnocache`) prints its own off line as designed and was cut short by the test's
+  time limit (each game run takes ~12 minutes, three do not fit in 1800 s).
+- So on Windows the cache is refused somewhere between "not switched off" and "directory usable", without saying
+  why. The Win32 file code had only been compiled, never run; this is that gap. Sent back with the evidence:
+  find the failing step, log every failure with its error code, fall back to a directory under
+  `C:\ProgramData\Starbite` when the per-user one cannot be made.
+- Useful by-product: the game runs on this kit (the 0170 code base) on a standard row through the GDI present as
+  before; Steam's cold start took 135 s to the game, the second start 10 s.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
