@@ -246,8 +246,11 @@ static void show_light(void)
         ui_button(12, "Whistle", "Not in a test image", UI_DIM);
     else
         ui_hold(12, "Hold for the whistle (3 blasts)", 500, 0);
-    if (setting_get(SET_KIT_SIREN) >= 0) {      /* Track D 11-16: the loudspeaker at full volume */
-        ui_toggle(39, "Siren (loud, until switched off)", setting_get(SET_KIT_SIREN) == 1);
+    if (setting_get(SET_KIT_SIREN) == 1)        /* Track D 11-16: the loudspeaker at full volume */
+        ui_button(39, "Stop the siren", 0, UI_RED);
+    else if (setting_get(SET_KIT_SIREN) == 0)
+        ui_hold(39, "Hold for the siren (loud, until stopped)", 1000, 0);
+    if (setting_get(SET_KIT_SIREN) >= 0) {
         ui_textline("Three blasts, a pause, three again: the international distress signal. Save the battery: "
                     "whistle in bursts.", GREY);
     }
@@ -591,6 +594,9 @@ void app_event(const struct sbos_event *ev)
             else
                 (void)setting_set(SET_SURV_FS, fs_pulse | (fs_rep ? 1 : 0) << 4 | (fs_lim + 1) << 8 | 1 << 12 |
                                                fs_ov << 16);
+        } else if (page == P_LIGHT && ev->id == 39) {  /* Track D 11-16: the siren starts only from a hold */
+            if (setting_set(SET_KIT_SIREN, 1) != 0)
+                ui_toast_app("The speaker is busy (a call?)", 2500);
         } else if (page == P_LIGHT && ev->id == 12 && setting_set(SET_SURV_WHISTLE, 1) == 0) {
             whistle_k = 1;
             timer_set(3, 1000, 0);
@@ -653,8 +659,7 @@ void app_event(const struct sbos_event *ev)
             setting_set(SET_SURV_SAVER, (int)ev->value);
         else if (ev->id == 13)
             fire_ok = (int)ev->value;
-        else if (ev->id == 39 && setting_set(SET_KIT_SIREN, (int)ev->value) != 0)
-            ui_toast_app("The speaker is busy (a call?)", 2500);
+
         else if (ev->id == 57)
             fs_wool = (int)ev->value;
         else if (ev->id == 53) {
@@ -698,6 +703,8 @@ void app_event(const struct sbos_event *ev)
             setting_set(SET_SURV_FS_KEYS, 54);
             timer_set(4, 200, 1);
         }
+        else if (ev->id == 39 && page == P_LIGHT)
+            setting_set(SET_KIT_SIREN, 0);  /* Stop the siren */
         else if (ev->id == 11 && page == P_LIGHT) {
             setting_set(SET_SURV_LIGHT, 1);
             ui_light(0xffffffffU);          /* any touch or key ends it: EV_APP_SHOW then */

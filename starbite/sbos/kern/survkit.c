@@ -291,6 +291,17 @@ static uint64_t timer_end_ms;
 
 static int64_t now_s(void) { return (int64_t)(sb_ms() / 1000U); }
 static unsigned hist_pick;
+static int bank_refused;
+
+/* the user's rule (11-16, "I sleep next to the computer"): 22:00-09:00 nothing buzzes or sounds by itself; an unknown
+ * clock counts as night */
+static int quiet_hours(void)
+{
+    struct sbos_time t;
+    if (!clock_now(&t) || !t.utc)
+        return 1;
+    return t.h >= 22 || t.h < 9;
+}
 
 static int page_open(void) { return page_t && sb_ms() - page_t < PAGE_MS; }
 
@@ -323,8 +334,8 @@ static void maybe_warn(void)
     else
         notif_post_app("survkit", "Weather getting worse",
                        "The air pressure is falling: rain or wind likely within a day. Plan shelter and water.", 0);
-    if (vib_ready())
-        (void)vib_buzz(2, 400, 300);
+    if (vib_ready() && !quiet_hours())
+        (void)vib_buzz(2, 400, 300);        /* 22:00-09:00: the notification only */
     sb_log(lv == KIT_STORM ? "survkit: storm watch: storm likely (fast pressure fall)" :
                              "survkit: storm watch: worse weather (pressure falling)");
 }
@@ -417,8 +428,8 @@ static void timer_end(void)
     if (k <= 0 || k >= KIT_T_N)
         return;
     notif_post_app("survkit", title[k], text[k], 0);
-    if (vib_ready())
-        (void)vib_buzz(3, 500, 400);
+    if (vib_ready() && !quiet_hours())
+        (void)vib_buzz(3, 500, 400);        /* 22:00-09:00: the notification only */
     sb_logf("survkit: timer done: ", title[k]);
 }
 
@@ -436,6 +447,7 @@ void sh_snd_close(int id) __attribute__((weak));
 #define KT_SURV_KIT_TONE 12U
 #define TONE_RATE 48000U
 static int tone_id = -1, tone_hz, own_snd_up, tone_vol_was = -1;
+static uint64_t tone_armed_ms;
 static uint32_t tone_ph, tone_n;
 static int16_t tone_tab[256];
 
@@ -486,6 +498,15 @@ int survkit_tone(int hz, int on)
     }
     if (sbos_selftest_enabled && !sbos_selftest_sound)
         return -1;                          /* no sounds from a test image */
+    /* the user's rule (11-16): only from a deliberate act: a finger on the screen as the tone starts (a hold ends
+     * under it), or within 10 s of one (the whistle's 3 blasts); never by a timer or anything automatic */
+    uint64_t nowm = sb_ms();
+    if (surv_user_finger())
+        tone_armed_ms = nowm ? nowm : 1;
+    else if (!tone_armed_ms || nowm - tone_armed_ms > 10000U) {
+        sb_log("survkit: a tone refused: no finger on the screen (sounds start only from a hold)");
+        return -1;
+    }
     if (tone_id >= 0) {
         tone_hz = hz;
         return 0;
@@ -625,6 +646,23 @@ int64_t survkit_get(unsigned key)
                (int64_t)(s.seconds > 255 ? 255 : s.seconds) << 14 | (int64_t)sig << 22;
     }
     case SET_KIT_SIREN: return sbos_selftest_enabled && !sbos_selftest_sound ? -1 : (tone_id >= 0 && !tone_hz);
+    case SET_KIT_BANK: {
+        struct surv_usb u;
+        surv_usb_status(&u);
+        if (u.fire != 3 || u.state != SURV_USB_ON)
+            return u.fire == 3 || bank_refused ? (u.refused && bank_refused ? -1 : 0) : 0;
+        int ma = u.est_ma < 0 ? 0 : u.est_ma > 4095 ? 4095 : u.est_ma;
+        int mah = u.bank_mah > 16383 ? 16383 : u.bank_mah;
+        return 1 | (int64_t)ma << 1 | (int64_t)mah << 13;
+    }
+    case SET_KIT_BANK_INFO: {
+        struct surv_usb u;
+        surv_usb_status(&u);
+        int on = u.fire == 3 && u.state == SURV_USB_ON;
+        int64_t min = on && u.ms_left > 0 ? (u.ms_left + 59999) / 60000 : 0xffff;
+        int64_t band = on && u.vbus_hi_mv >= 0 ? (u.vbus_hi_mv - 3500) / 1000 : 0xf;
+        return (min > 0xfffe ? 0xffff : min) | (int64_t)(u.bank_floor & 0x7f) << 16 | (band & 0xf) << 23;
+    }
     case SET_KIT_HR_INFO: {
         struct hrm_status s;
         hrm_status(&s);
@@ -683,6 +721,17 @@ int64_t survkit_set(unsigned key, int64_t v)
     case SET_KIT_HIST_AT:
         hist_pick = v < 0 ? 0 : (unsigned)v;
         return 0;
+    case SET_KIT_BANK: {
+        if (!v) {
+            struct surv_usb u;
+            surv_usb_status(&u);
+            if (u.fire == 3 && u.state == SURV_USB_ON)
+                surv_usb_stop("Stop on the screen");
+            return 0;
+        }
+        bank_refused = surv_usb_bank_start((int)(v & 0xff), (int)((v >> 8) & 0xffff)) != 0;
+        return bank_refused ? SBOS_EAGAIN : 0;
+    }
     case SET_KIT_SIREN:
         if (!v)
             return tone_hz ? 0 : survkit_tone(0, 0);
@@ -722,6 +771,65 @@ int64_t survkit_set(unsigned key, int64_t v)
     default:
         return SBOS_EINVAL;
     }
+}
+
+/* ---- named calls for Starbite OS Next's pages (survkit.h) ---- */
+int surv_baro(int32_t *hpa_x10)
+{
+    if (survkit_set(SET_KIT_BARO, 1) != 0)
+        return -2;
+    int64_t r = survkit_get(SET_KIT_BARO);
+    if (r > 0) {
+        *hpa_x10 = (int32_t)r;
+        return 1;
+    }
+    return r == -1 ? 0 : (int)r;
+}
+void surv_baro_close(void) { (void)survkit_set(SET_KIT_BARO, 0); }
+int surv_baro_alt(int *alt_m, int *from_known)
+{
+    *alt_m = alt_now();
+    *from_known = p0_set;
+    return *alt_m > -100000;
+}
+int surv_baro_alt_set(int known_alt_m) { return (int)survkit_set(SET_KIT_ALT, known_alt_m); }
+int surv_baro_trend(int *level, int32_t *d3_x10, int32_t *d1_x10, int *have3, int *have1)
+{
+    *level = trend(d3_x10, d1_x10, have3, have1);
+    return *level;
+}
+int surv_baro_hist(int i, int32_t *hpa_x10, int *age_min)
+{
+    int64_t t;
+    int32_t p;
+    if (i < 0 || !hist_at((unsigned)i, &t, &p))
+        return 0;
+    *hpa_x10 = p;
+    *age_min = (int)((now_s() - t) / 60);
+    return 1;
+}
+int surv_baro_hist_n(void) { return (int)H.n; }
+int surv_storm_watch(int on)
+{
+    if (on >= 0)
+        watch_set(on);
+    return (int)survkit_get(SET_KIT_WATCH);
+}
+int surv_sun_pos_now(int *az_x10, int *el_x10)
+{
+    int64_t r = survkit_get(SET_KIT_SUN);
+    if (r < 0)
+        return (int)r;
+    *az_x10 = (int)(r & 0xfff);
+    *el_x10 = (int)((r >> 12) & 0x7ff) - 900;
+    return 0;
+}
+int surv_water_timer(int kind) { return (int)survkit_set(SET_KIT_TIMER, kind); }
+int surv_water_left(int *kind)
+{
+    int64_t r = survkit_get(SET_KIT_TIMER);
+    *kind = (int)(r & 0xff);
+    return (int)(r >> 8);
 }
 
 int survkit_saved_key(unsigned key)

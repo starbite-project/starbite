@@ -236,6 +236,10 @@ static struct {
     uint8_t cnfg11;
     int vbyp_written;
     unsigned fs_rearms, fs_rearms_pulse, fs_btrips;
+    /* Track D 11-16: the power bank (fire == 3) */
+    int bank_floor;
+    uint64_t bank_until, bank_mas;          /* the end (0 none); mA x 0.1 s given */
+    unsigned bank_open_ticks;
 } U;
 static struct sb_auth au;
 static void (*prev_before_reset)(void);
@@ -324,6 +328,7 @@ static void fs_pulse_end(void);
 /* the trigger: classic's finger or Power (kern/ui.c, input.c), or Starbite OS Next's shell (surv_fs_finger) */
 static int fs_finger_ext;
 static int fs_trigger(void) { return kui_finger_down() || fs_finger_ext; }
+int surv_user_finger(void) { return fs_trigger(); }   /* Track D 11-16: a finger on the screen now (classic or Next) */
 static void fs_tick(uint64_t now);
 static void fs_max_second(void);
 
@@ -445,6 +450,16 @@ void surv_usb_stop(const char *why)
     sb_log(u.b);
     if (fault)
         notif_post("survival", "USB power out stopped", U.why);
+    else if (U.fire == 3 && U.why)          /* the power bank ends quietly otherwise: say why and how much */
+        notif_post("survival", "Power bank stopped", U.why);
+    if (U.fire == 3) {
+        struct ub v;
+        ub_init(&v);
+        ub_s(&v, "survival: bank: about ");
+        ub_dec(&v, U.bank_mas / 36000U);
+        ub_s(&v, " mAh given at 5 V");
+        sb_log(v.b);
+    }
 }
 
 static int refuse(const char *why)
@@ -473,7 +488,7 @@ static int usb_start(int fire)
         return r;
     }
     U.state = SURV_USB_OFF;
-    if (saver_applied && !fire)
+    if (saver_applied && (!fire || fire == 3))
         return refuse("Extreme power saving (or Last 2 %) is on");
     if (fire && sbos_selftest_enabled)
         return refuse("never in a self-test image");
@@ -491,6 +506,8 @@ static int usb_start(int fire)
     struct sbos_battery b;
     battery_get(&b);
     U.bat_c10 = bat_temp_c10();
+    if (fire == 3 && (!b.ok || b.pct < U.bank_floor + 2))
+        return refuse("the battery is at (or within 2 % of) the floor you set for the power bank");
     if (!b.ok || b.pct < (fire == 1 ? 1 : 5))
         return refuse(fire == 1 ? "the battery is empty (below 1 %)" : "the battery is below 5 %");
     if (b.mv && b.mv < (fire == 1 ? 3300 : 3500))
@@ -609,6 +626,10 @@ static int usb_start(int fire)
         sb_log("survival: fire: Extreme fire mode: continuous while held (at most 2 min), the chip's own 1.5 A limit "
                "and protections, radios off, the screen dim");
     }
+    if (fire == 3) {                        /* Track D 11-16: the power bank */
+        U.bank_mas = 0;
+        U.bank_open_ticks = 0;
+    }
     U.est_ma = -1;
     U.why = 0;
     ++U.bursts;
@@ -650,6 +671,29 @@ int surv_usb_start(void)
 int surv_usb_fire_start(void)
 {
     return usb_start(1);
+}
+
+/* Track D 11-16: the power bank (survival.h) */
+int surv_usb_bank_start(int floor_pct, int minutes)
+{
+    U.bank_floor = floor_pct < 5 ? 5 : floor_pct > 80 ? 80 : floor_pct;
+    int r = usb_start(3);
+    if (!r) {
+        U.bank_until = minutes > 0 ? sb_ms() + (uint64_t)(minutes > 1440 ? 1440 : minutes) * 60000U : 0;
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "survival: bank: on until the battery is at ");
+        ub_dec(&u, (uint64_t)U.bank_floor);
+        ub_s(&u, " %");
+        if (minutes > 0) {
+            ub_s(&u, " or ");
+            ub_dec(&u, (uint64_t)minutes);
+            ub_s(&u, " min");
+        }
+        ub_s(&u, "; the chip's own 1.5 A limit");
+        sb_log(u.b);
+    }
+    return r;
 }
 
 void surv_usb_hold(void)
@@ -1213,19 +1257,23 @@ static void usb_tick(void)
         surv_usb_stop("the 10 s burst is over");
         return;
     }
-    if (U.fire && now - U.t_hold > FIRE_HOLD_MS) {
+    if (U.fire == 1 && now - U.t_hold > FIRE_HOLD_MS) {
         surv_usb_stop("released");
         return;
     }
-    if (U.fire && !K.screen_on) {
+    if (U.fire == 1 && !K.screen_on) {
         surv_usb_stop("the screen went off");
         return;
     }
-    if (U.fire && now - U.t_on >= FIRE_MAX_MS) {
+    if (U.fire == 1 && now - U.t_on >= FIRE_MAX_MS) {
         surv_usb_stop("2 minutes of continuous output: 15 s for the port and the charger to cool");
         return;
     }
-    if (U.fire && U.paused) {               /* resting: on again when the time is up and nothing is hot */
+    if (U.fire == 3 && U.bank_until && now >= U.bank_until) {
+        surv_usb_stop("the time you set is over");
+        return;
+    }
+    if (U.fire == 1 && U.paused) {               /* resting: on again when the time is up and nothing is hot */
         if (now < U.t_pause)
             return;
         if (!fire_resume()) {
@@ -1262,8 +1310,10 @@ static void usb_tick(void)
         return;
     }
     if ((c0 & 0x0fU) != MODE_OTG) {
-        if (!U.fire) {
-            surv_usb_stop("!the charger switched its output off by itself (its protection)");
+        if (U.fire != 1) {
+            surv_usb_stop(U.fire == 3 ? "!the charger switched its output off by itself (the device asked for more "
+                                        "than its 1.5 A, or a short)" :
+                                        "!the charger switched its output off by itself (its protection)");
             return;
         }
         if (++U.resets >= 3U) {
@@ -1276,7 +1326,7 @@ static void usb_tick(void)
     vbus_read();
     if (U.vhi >= 5500)
         U.vbus_seen = 1;
-    if (!U.fire) {                          /* fire mode leaves a short to the chip's own limit and retry */
+    if (U.fire != 1) {                      /* fire mode leaves a short to the chip's own limit and retry */
         if (U.vbus_seen && U.vhi >= 0 && U.vhi <= 3500) {   /* VBUS below 3.5 V: the load holds it down (a short) */
             if (++U.low_ticks >= 30) {
                 surv_usb_stop("!the output was held below 3.5 V for 3 s (a short): off");
@@ -1291,7 +1341,11 @@ static void usb_tick(void)
             surv_usb_stop("!the battery dropped below 3.3 V");
             return;
         }
-        if (U.fire) {
+        if (U.fire == 3 && U.mv < 3400) {
+            surv_usb_stop("!the battery dropped below 3.4 V");
+            return;
+        }
+        if (U.fire == 1) {
             U.sag_ticks = U.mv < FIRE_SAG_MV ? U.sag_ticks + 1U : 0U;
             if (U.sag_ticks >= 3U) {
                 surv_usb_stop("!the battery sagged below 3.2 V (the brown-out floor)");
@@ -1302,6 +1356,17 @@ static void usb_tick(void)
             int extra = U.base_ma - U.ma;   /* more discharge: the boost's input */
             int est = extra > 0 ? extra * U.mv / 5000 * 85 / 100 : 0;
             U.est_ma = est;
+        }
+    }
+    if (U.fire == 3 && U.est_ma >= 0) {     /* the power bank: what it gave, and LOAD OPEN */
+        U.bank_mas += (uint64_t)U.est_ma;
+        if (now - U.t_on >= 15000U && K.screen_on && U.est_ma < 40)
+            ++U.bank_open_ticks;
+        else
+            U.bank_open_ticks = 0;          /* (with the screen off the estimate's baseline is off: not judged) */
+        if (U.bank_open_ticks >= 300U) {
+            surv_usb_stop("nothing drew current for 30 s (the device is full or unplugged)");
+            return;
         }
     }
     if ((now - U.t_on) % 1000U < 100U) {    /* once a second: the temperatures and the charge */
@@ -1322,11 +1387,15 @@ static void usb_tick(void)
             surv_usb_stop("!the charger reached 75 C");
             return;
         }
+        if (U.fire == 3 && b.ok && b.pct <= U.bank_floor) {
+            surv_usb_stop("the battery reached the floor you set");
+            return;
+        }
         if (b.ok && b.pct < (U.fire ? 1 : 3)) {
             surv_usb_stop(U.fire ? "!the battery is empty (1 %)" : "!the battery is at 3 %");
             return;
         }
-        if (U.fire) {
+        if (U.fire == 1) {
             int draw = U.ma < 0 ? -U.ma : 0;
             int usable = b.ok ? b.cap_mah - b.full_mah / 100 : 0;
             U.fire_min_left = draw > 200 && usable > 0 ? usable * 60 / draw : -1;
@@ -1338,9 +1407,11 @@ static void usb_tick(void)
                 return;
             }
         }
+        if (U.fire == 3 && (now - U.t_on) % 30000U >= 100U)
+            return;                         /* the power bank logs every 30 s (a long run would fill pmsg) */
         struct ub u;
         ub_init(&u);
-        ub_s(&u, U.fire ? "survival: fire: t " : "survival: usb out: t ");
+        ub_s(&u, U.fire == 3 ? "survival: bank: t " : U.fire ? "survival: fire: t " : "survival: usb out: t ");
         ub_dec(&u, (now - U.t_on) / 1000U);
         ub_s(&u, " s, battery ");
         ub_dec(&u, (uint64_t)U.mv);
@@ -1367,7 +1438,8 @@ void surv_usb_status(struct surv_usb *s)
     uint64_t now = sb_ms();
     memset(s, 0, sizeof(*s));
     s->state = U.state;
-    s->ms_left = U.state == SURV_USB_ON ? (int32_t)((U.fire ? FIRE_MAX_MS : SURV_USB_BURST_MS) - (uint32_t)(now - U.t_on)) :
+    s->ms_left = U.state == SURV_USB_ON && U.fire == 3 ? (int32_t)(U.bank_until > now ? U.bank_until - now : 0) :
+                 U.state == SURV_USB_ON ? (int32_t)((U.fire ? FIRE_MAX_MS : SURV_USB_BURST_MS) - (uint32_t)(now - U.t_on)) :
                  U.state == SURV_USB_COOL && U.t_cool > now ? (int32_t)(U.t_cool - now) : 0;
     if (s->ms_left < 0)
         s->ms_left = 0;
@@ -1410,6 +1482,8 @@ void surv_usb_status(struct surv_usb *s)
     s->fs_vb_code = U.fs_vb_code;
     s->fs_open = U.fs_open;
     s->fs_ohm10 = U.fs_ohm10;
+    s->bank_floor = U.bank_floor;
+    s->bank_mah = (int32_t)(U.bank_mas / 36000U);
     s->fs_elapsed_ms = U.state == SURV_USB_ON && U.fire == 2 ? (int32_t)(now - U.t_on) : 0;
     s->fs_chip_w10 = U.fs_chip_w10;
     if (U.state == SURV_USB_ON && U.fire == 2) {   /* the time left of this pulse, or of the rest before the next */
@@ -1489,7 +1563,7 @@ static void last2_keep(void)
     const char *w = last2 ? "Last 2 % mode" : "Extreme power saving";
     if (heater_running_ui())
         heater_stop_all(w);
-    if (U.state == SURV_USB_ON && !U.fire)
+    if (U.state == SURV_USB_ON && (!U.fire || U.fire == 3))
         surv_usb_stop(w);
     if (wifi_on())
         (void)wifi_power(0);

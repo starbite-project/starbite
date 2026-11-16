@@ -53,6 +53,7 @@ struct surv_usb {
     int32_t fs_vbyp_mv, fs_cellw10;
     int32_t fs_load_w10, fs_chip_w10;
     int32_t fs_rearms, fs_vb_code, fs_elapsed_ms, fs_open;
+    int32_t bank_floor, bank_mah;   /* Track D 11-16, the power bank (fire == 3): its battery floor %; mAh given */
     int32_t fs_ohm10;           /* the last window's load in 0.1 ohm (VBYP / I, no limit event); -1 ?, -2 at the limit */   /* MAX: re-arms in this hold, the boost's code, the time on */ /* the last pulse: 0.1 W into the load (mA x the port band's middle), in the chip */ /* the last pulse: the boost's mean output (the gauge's VBYP); 0.1 W from the cell */
 };
 /* after the UI's hold-to-arm: start one burst. 0 started, < 0 refused (why in the status) */
@@ -65,6 +66,12 @@ void surv_usb_stop(const char *why);
  * off by itself it rests 2 s and tries again, 3 times at most. Never during a self test. */
 int surv_usb_fire_start(void);
 void surv_usb_hold(void);
+/* Track D 11-16, the power bank (fire == 3): steady 5 V at the chip's own 1.5 A limit to charge another device, with
+ * the screen on or off, until it is stopped, the battery reaches floor_pct (5..80 %), `minutes` pass (0: no limit),
+ * or nothing draws current for 30 s while the screen is on (LOAD OPEN, after 15 s for the device to negotiate). The
+ * chip switching its output off (a device asking above 1.5 A, a short) stops it, as do the normal mode's
+ * temperature stops, a short (under 3.5 V for 3 s) and 3.4 V. Not in Extreme power saving or a self test. */
+int surv_usb_bank_start(int floor_pct, int minutes);
 int surv_usb_active(void);                         /* 1 while the output is on (or being put back) */
 /* 1.2-alpha30, the fire starter (docs/USB-FIRE-STARTER.md): pulses of 0.5 / 1 / 2 s at the chip's 0.9 / 1.2 / 1.5 A
  * step, once or repeated (at most SURV_FS_MAX_PULSES, a rest of max(1 s, the pulse) between), ONLY while a finger
@@ -95,6 +102,7 @@ void surv_fs_release(void);                        /* the finger lifted (ui.c): 
 /* Starbite OS Next's shell: its fire control's finger (1 down, 0 lifted: the output off at once). Classic uses
  * kern/ui.c's kui_finger_down (touch) and input.c's fire key mode (Power) instead */
 void surv_fs_finger(int down);
+int surv_user_finger(void);     /* Track D 11-16: 1 while a finger is on the screen (kui_finger_down or surv_fs_finger) */
 /* 1 when the override modes may run on this phone (the card's /STARBITE/FIRE/OVERRIDE.TXT says "I accept the risk";
  * only the test phone S9 #2's card has it). surv_fs_start_* refuse ov > 0 otherwise. UIs only hide the choices */
 int surv_fs_override_allowed(void);

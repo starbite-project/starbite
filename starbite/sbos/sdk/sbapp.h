@@ -367,6 +367,12 @@ enum { SET_KIT_FIRST = 80,
        SET_KIT_HR_INFO = 91 /* read: the IR LED's current, 0.1 mA (12 bits) | samples a second << 12 (10 bits) */,
        SET_KIT_SIREN = 92 /* write 1 / 0: the siren (650-1650 Hz, full volume on the loudspeaker; the whistle is
                              SET_SURV_WHISTLE). Read: 1 on, 0 off, -1 not possible here (a test image) */,
+       SET_KIT_BANK = 93 /* the power bank (survival.h surv_usb_bank_start): write the battery floor % (5..80) | the
+                            minutes << 8 (0 no limit) to start (after the app's hold), 0 to stop. Read: 1 on (0 off, -1
+                            the last start was refused: why in the notification) | about mA out << 1 (12 bits) | mAh
+                            given << 13 (14 bits) */,
+       SET_KIT_BANK_INFO = 94 /* read: the minutes left (0xffff none) | the floor % << 16 (7 bits) | the port's
+                                 voltage band code << 23 (4 bits: 2 = about 5 V, 0xf unknown) */,
        SET_KIT_LAST = 99 };
 enum { KIT_T_NONE_, KIT_T_BOIL_, KIT_T_SODIS_, KIT_T_SODIS_CLOUD_, KIT_T_CHLORINE_, KIT_T_CHLORINE_COLD_, KIT_T_CLO2_,
        KIT_T_IODINE_, KIT_T_SHADOW_ };     /* = kern/survkit.h's KIT_T_* (the app's names) */

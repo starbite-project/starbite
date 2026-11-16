@@ -57,6 +57,20 @@ void kit_hist_clear(void);
 int kit_change(int minutes, int32_t *d_x10, int *covered_min);
 int kit_trend_level(int32_t d3h_x10, int32_t d1h_x10, int have3, int have1);
 
+/* ---- named calls for Starbite OS Next's pages (Track A); the same as the SET_KIT_* keys ---- */
+int surv_baro(int32_t *hpa_x10);            /* 1 a fresh reading; also the page's keep-alive (call ~1/s on screen);
+                                             * 0 none yet, -2 refused (Extreme saving / Last 2 %), -3 the hub failed */
+void surv_baro_close(void);
+int surv_baro_alt(int *alt_m, int *from_known);    /* 1 known */
+int surv_baro_alt_set(int known_alt_m);     /* 0 set; -100000 back to 1013.25 hPa; <0 no reading / nonsense */
+int surv_baro_trend(int *level, int32_t *d3_x10, int32_t *d1_x10, int *have3, int *have1);   /* returns level */
+int surv_baro_hist(int i, int32_t *hpa_x10, int *age_min);     /* i 0 the newest; 1 there is one */
+int surv_baro_hist_n(void);
+int surv_storm_watch(int on);               /* -1 reads; 1 / 0 sets; returns on | paused << 1 */
+int surv_sun_pos_now(int *az_x10, int *el_x10);    /* 0, -2 no location, -3 no clock */
+int surv_water_timer(int kind);             /* KIT_T_* starts (one at a time), 0 stops; 0 or <0 */
+int surv_water_left(int *kind);             /* seconds left (0 none) */
+
 /* the timers */
 enum { KIT_T_NONE, KIT_T_BOIL, KIT_T_SODIS, KIT_T_SODIS_CLOUD, KIT_T_CHLORINE, KIT_T_CHLORINE_COLD, KIT_T_CLO2,
        KIT_T_IODINE, KIT_T_SHADOW, KIT_T_N };

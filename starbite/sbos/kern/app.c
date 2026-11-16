@@ -1162,7 +1162,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         case SET_SURV_FIRE: {
             struct surv_usb u;
             surv_usb_status(&u);
-            return u.fire ? u.state : 0;
+            return u.fire == 1 ? u.state : 0;   /* Extreme fire mode only (3 = the power bank) */
         }
         case SET_SURV_USB_ILIM: {
             struct surv_usb u;

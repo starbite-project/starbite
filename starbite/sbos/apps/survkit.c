@@ -13,8 +13,10 @@ SBAPP_DEFINE("survkit", "Survival kit", SBOS_P_SENSORS, 0xff30d158U, 207);
 #define RED 0xffff453aU
 #define WHITE 0xffffffffU
 
-enum { P_MAIN, P_BARO, P_NORTH, P_WATER, P_PULSE };
+enum { P_MAIN, P_BARO, P_NORTH, P_WATER, P_PULSE, P_BANK };
 static int page, alt_typing, compass_check;
+static int bank_floor_i = 1, bank_time_i;         /* 20 %, no time limit */
+static const int bank_floors[4] = { 10, 20, 30, 50 }, bank_mins[4] = { 0, 30, 60, 120 };
 
 static void dec1(struct fmt *f, int v_x10)
 {
@@ -256,7 +258,8 @@ static void show_water(void)
         hms(&f, tm >> 8);
         fmt_s(&f, " left");
         ui_big(name, f.b, ORANGE);
-        ui_textline("You'll get a notification and three buzzes when it is done, also with the screen off.", GREY);
+        ui_textline("You'll get a notification and three buzzes when it is done, also with the screen off (no buzz "
+                    "22:00-09:00).", GREY);
         ui_button(41, "Stop", 0, 0);
     }
     ui_textline("Filter cloudy water through cloth first; let it settle. Then one of these:", WHITE);
@@ -320,6 +323,51 @@ static void show_pulse(void)
                 "Not a medical device.", ORANGE);
 }
 
+/* ---- the power bank (USB power out, steady) ---- */
+static void show_bank(void)
+{
+    struct fmt f;
+    int r = setting_get(SET_KIT_BANK);
+    ui_title("Power bank");
+    if (r > 0 && (r & 1)) {
+        int ma = (r >> 1) & 0xfff, mah = (r >> 13) & 0x3fff, inf = setting_get(SET_KIT_BANK_INFO);
+        int min = inf & 0xffff, floor = (inf >> 16) & 0x7f, band = (inf >> 23) & 0xf;
+        fmt_init(&f);
+        fmt_s(&f, "about ");
+        fmt_u(&f, (uint64_t)ma);
+        fmt_s(&f, " mA");
+        ui_big("GIVING POWER", f.b, GREEN);
+        fmt_init(&f);
+        fmt_u(&f, (uint64_t)mah);
+        fmt_s(&f, " mAh given so far. Port ");
+        fmt_s(&f, band == 2 ? "about 5 V." : band < 2 ? "LOW (a short or too much load)." : "voltage unknown.");
+        ui_textline(f.b, WHITE);
+        fmt_init(&f);
+        fmt_s(&f, "Stops at ");
+        fmt_u(&f, (uint64_t)floor);
+        fmt_s(&f, " % battery");
+        if (min != 0xffff) {
+            fmt_s(&f, " or in ");
+            fmt_u(&f, (uint64_t)min);
+            fmt_s(&f, " min");
+        }
+        fmt_s(&f, ", when nothing draws for 30 s (screen on), or at the chip's 1.5 A limit.");
+        ui_textline(f.b, GREY);
+        ui_textline("It keeps going with the screen off. The mA is estimated from this phone's battery (about 15 %).",
+                    GREY);
+        ui_button(62, "Stop", 0, UI_RED);
+        return;
+    }
+    ui_textline("Charge another phone, a lamp or a radio from this battery: 5 V, up to the charger chip's 1.5 A.",
+                WHITE);
+    ui_textline("Unplug any charger first. Use an OTG adapter (USB-C to USB-A) or a USB-C to USB-C cable.", GREY);
+    ui_level(60, "Stop at 10 %|20 %|30 %|50 %", bank_floor_i);
+    ui_level(63, "No time limit|30 min|1 h|2 h", bank_time_i);
+    ui_hold(61, "Hold to start the power bank", 1000, 0);
+    ui_textline("Keep 20 % or more for SOS, the torch and a call. The other device's own charger decides how much "
+                "it takes.", GREY);
+}
+
 static void show(void)
 {
     ui_begin();
@@ -328,6 +376,7 @@ static void show(void)
     case P_NORTH: show_north(); break;
     case P_WATER: show_water(); break;
     case P_PULSE: show_pulse(); break;
+    case P_BANK: show_bank(); break;
     default:
         ui_title("Survival kit");
         ui_button(10, "Barometer", "Pressure, altitude, storm warning", 0);
@@ -335,6 +384,7 @@ static void show(void)
         ui_button(12, "Water purification", "Boil, tablets, sun: timers", 0);
         ui_button(13, "Heart rate", "Pulse check", UI_HALF);
         ui_button(14, "Knots", "In the Survival guide", UI_HALF);
+        ui_button(15, "Power bank", "Charge another device from this phone", 0);
         ui_textline("More in Emergency: SOS, the compass and level, the sun's times, power saving, USB power.", GREY);
         ui_end();
         return;
@@ -399,6 +449,19 @@ void app_event(const struct sbos_event *ev)
             show();
         }
         break;
+    case EV_APP_LEVEL:
+        if (ev->id == 60)
+            bank_floor_i = ev->value > 3 ? 3 : (int)ev->value;
+        else if (ev->id == 63)
+            bank_time_i = ev->value > 3 ? 3 : (int)ev->value;
+        show();
+        break;
+    case EV_APP_HOLD:
+        if (page == P_BANK && ev->id == 61 &&
+            setting_set(SET_KIT_BANK, bank_floors[bank_floor_i] | bank_mins[bank_time_i] << 8) != 0)
+            ui_toast_app("The power bank did not start: the reason is in the notifications", 3000);
+        show();
+        break;
     case EV_APP_TOGGLE:
         if (ev->id == 20)
             setting_set(SET_KIT_WATCH, (int)ev->value);
@@ -417,6 +480,11 @@ void app_event(const struct sbos_event *ev)
             timer_set(1, 1000, 1);
         } else if (ev->id == 14) {
             app_open("guide");
+        } else if (ev->id == 15) {
+            page = P_BANK;
+            timer_set(1, 1000, 1);
+        } else if (ev->id == 62) {
+            setting_set(SET_KIT_BANK, 0);
         } else if (ev->id == 40) {
             leave_page();
         } else if (ev->id == 22) {
