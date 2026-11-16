@@ -3570,6 +3570,22 @@ switches are from reading; not run.)
 - **T91** (`sbwddm-t91`, diagnostic KMD + b78c, `sb-apps3.bat`): three runs, one flag each. Read: the Calculator
   steps' timeout counts against T87's (22 and 100).
 
+### 6.119 Chain results, part 6: T88, the new translator in the compositor: the tiler hang stays, and the desktop is black (the known texture bug)
+
+(2026-11-16 19:30; `build/win/results-t88`: sbumd 63cb8404 with the flag `nirshaders` present at boot, diagnostic KMD; measured.)
+
+- **The Calculator hang is unchanged:** job timeouts 0 until Calculator, 28 when it is closed, 105 after the
+  kept-open step, nothing from the other apps; the hung job is again the indexed-vertex job. A different shader
+  compiler for the same draw does not help, as T87n already implied (it is the tiler's input, not the shader).
+- **The desktop itself is broken with this build's new translator:** 2418 failed jobs before the first test step,
+  9994 by the end, all without a timeout: fragment jobs ending with job status **0x5A (address range fault)**; the
+  first failure of the boot was 0x51 (invalid instruction encoding). Every screen shot is 100 % black.
+  This is fix 1 of build A seen from the compositor's side (the translator did not declare the shader's textures,
+  so the shader descriptor says "0 textures" and every lookup is out of range). T90 measures build A; a run of
+  this test on build A with `nirshaders` is the check that the desktop composes with the new translator.
+  The single 0x51 is not explained by that fix and has to be looked for in T90's records.
+- So `nirshaders` must stay off for DWM on 63cb8404 (it is off by default; this run set it on purpose).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
