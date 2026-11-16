@@ -1,0 +1,143 @@
+0461: the kernel log goes to the card while the system runs (boot-arg sdlogevery=N seconds, 30 or more; off by default).
+
+The card log (sdlog) was written only at the sweetreboot reset. A boot without sweetreboot (the everyday payloads)
+or one the user switches off by hand left no log: S5v and the S5zday day gave verdicts and no numbers.
+bsd/dev/starlte_sd.c: a thread writes the same "SBLOG001" record every N s: the first time the whole msgbuf ring,
+afterwards only the sectors the log grew into (the ring is written forwards, wrapping), then the header with the new
+write index and the root's dirty-chunk bitmap. The card lock is taken like any I/O and released; nothing is written
+once the reset path owns the card. Logs "STARBITE SD: log checkpoint N: K KiB in M ms: r" for the first, every 20th
+and every failed one.
+
+--- a/bsd/dev/starlte_sd.c
++++ b/bsd/dev/starlte_sd.c
+@@ -59,6 +59,7 @@
+ #include <pexpert/device_tree.h>
+ #include <libkern/libkern.h>
+ #include <libkern/crc.h>
++#include <sys/msgbuf.h>    /* 0461 */
+ 
+ /* osfmk/arm/machine_routines.h, not exported to the BSD layer */
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -990,6 +991,114 @@
+ 		done += n;
+ 	}
+ 	return r;                       /* the lock stays held until the reset (0404) */
++}
++
++/*
++ * 0461: the kernel log to the card while the system runs (boot-arg sdlogevery=N seconds, 30 or more; off by
++ * default). The card log above is written only at the sweetreboot reset, so a boot without sweetreboot (the
++ * everyday payloads) or one the user switches off by hand left no log at all (S5v and S5zday, 2026-11-15/16: two
++ * hands-on days with a verdict and no numbers). Every N s a thread writes the same "SBLOG001" record: the first
++ * time the whole ring, afterwards only the sectors the log grew into since the last time (the msgbuf is written
++ * forwards, wrapping), then the header with the new write index. The card lock is taken like any I/O and
++ * released again; nothing is written once the reset path owns the card. TWRP then pulls the log as after a
++ * timed boot; it ends at most N s before the shutdown.
++ */
++static int
++sd_log_sectors(const uint8_t *ring, uint32_t size, uint32_t from, uint32_t to)
++{
++	const uint64_t first = 249868288ULL, count = 131072ULL;
++	uint32_t s0 = from / SECTOR, s1 = (to + SECTOR - 1) / SECTOR, whole = size / SECTOR;
++	int r = 0;
++	s1 = s1 > whole ? whole : s1;           /* whole sectors only: the reader ignores the ring's short tail */
++	while (!r && s0 < s1) {
++		uint32_t n = MIN(s1 - s0, CHUNK);
++		if (1 + (uint64_t)s0 + n > count) {
++			return -9;
++		}
++		r = write_chunk(first + 1 + s0, n, (const uint64_t *)(const void *)(ring + (size_t)s0 * SECTOR));
++		s0 += n;
++	}
++	return r;
++}
++
++static void
++sd_log_checkpoint_thread(void *arg, __unused wait_result_t wr)
++{
++	extern struct msgbuf *msgbufp;
++	extern int hz;
++	uint32_t every = (uint32_t)(uintptr_t)arg, last = 0, n = 0;
++	bool have = false;
++	static int chan;
++	for (;;) {
++		(void)tsleep(&chan, PZERO, "sdlogevery", (int)(every * hz));
++		const uint8_t *ring = (const uint8_t *)msgbufp->msg_bufc;
++		uint32_t size = (uint32_t)msgbufp->msg_size, bufx = (uint32_t)msgbufp->msg_bufx;
++		if (((uintptr_t)ring & 7) || size == 0 || size > (64u << 20) - SECTOR || bufx > size) {
++			continue;
++		}
++		if (have && bufx == last) {
++			continue;               /* nothing was logged */
++		}
++		lck_mtx_lock(&starlte_sd_lock);
++		if (sd_reset_locked || sd.state != 1 || !sd.ready || sd.card_sectors != 249999360ULL) {
++			lck_mtx_unlock(&starlte_sd_lock);
++			continue;
++		}
++		uint64_t t0 = mach_absolute_time();
++		int r;
++		uint32_t bytes;
++		if (!have) {
++			r = sd_log_sectors(ring, size, 0, size);
++			bytes = size;
++		} else if (bufx > last) {
++			r = sd_log_sectors(ring, size, last, bufx);
++			bytes = bufx - last;
++		} else {
++			r = sd_log_sectors(ring, size, last, size);     /* it wrapped */
++			if (!r) {
++				r = sd_log_sectors(ring, size, 0, bufx);
++			}
++			bytes = size - last + bufx;
++		}
++		if (!r) {
++			uint64_t hdr[SECTOR / 8] = { 0 };
++			memcpy(hdr, "SBLOG001", 8);
++			hdr[1] = size;
++			hdr[2] = bufx;
++			hdr[3] = mach_absolute_time();
++			memcpy(&hdr[4], "SBDIRTY1", 8);
++			hdr[5] = sd_dirty[0];
++			hdr[6] = sd_dirty[1];
++			hdr[7] = sd_dirty[2];
++			hdr[8] = sd_dirty[3];
++			r = write_chunk(249868288ULL, 1, hdr);
++		}
++		lck_mtx_unlock(&starlte_sd_lock);
++		if (!r) {
++			have = true;
++			last = bufx;
++		} else {
++			have = false;           /* the next one writes everything again */
++		}
++		/* the first, then every 20th, and every failure: not a line each time in the log it saves */
++		if (r || n % 20 == 0) {
++			printf("STARBITE SD: log checkpoint %u: %u KiB in %llu ms: %d (every %u s)\n", n, bytes >> 10,
++			    elapsed_us(t0) / 1000, r, every);
++		}
++		n++;
++	}
++}
++
++static void
++sd_log_checkpoint_start(void)
++{
++	uint32_t every = 0;
++	thread_t t = THREAD_NULL;
++	if (PE_parse_boot_argn("sdlogevery", &every, sizeof(every)) && every >= 30 &&
++	    kernel_thread_start(sd_log_checkpoint_thread, (void *)(uintptr_t)every, &t) == KERN_SUCCESS) {
++		thread_deallocate(t);
++		printf("STARBITE SD: the kernel log goes to the card every %u s (0461)\n", every);
++	}
+ }
+ 
+ /*
+@@ -2040,6 +2149,7 @@
+ 				sdq_on = 0;
+ 			}
+ 			printf("STARBITE SD: I/O queue %s (0400)\n", sdq_on ? "on: async strategy, one worker" : "off");
++			sd_log_checkpoint_start();      /* 0461 */
+ 		}
+ 		lck_mtx_unlock(&sdq_lock);
+ 	}

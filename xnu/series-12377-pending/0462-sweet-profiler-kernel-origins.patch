@@ -1,0 +1,75 @@
+0462: the process profiler says who is behind kernel samples, and lists more.
+
+S5z: the top kernel bucket of WindowServer (19.5 %) was the instruction after interrupts come back on, with itself
+as the link register: a sample taken while interrupts were off, which names nobody. And the 260 user buckets printed
+covered 39 % of the samples.
+- "SWEET PROF c:": for a kernel sample, the return addresses 2 and 4 frames up the interrupted thread's kernel stack
+  (frame pointers, only inside that stack).
+- "SWEET PROF s:": for a kernel sample, the user pc and lr the thread entered the kernel with (the system call stub
+  or trapping instruction, and its caller).
+- 600 user and 120 kernel buckets a window (were 260 and 80). tools/macos/prof-report.py prints the new tables.
+Kernel seq2g = seq2f + 0461 + 0462.
+
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1405,6 +1405,10 @@
+ #define SWEET_PROF_TIDS   64
+ struct sweet_prof_slot { uint64_t key; uint32_t count; };
+ static struct sweet_prof_slot sweet_prof_u[SWEET_PROF_USLOTS], sweet_prof_k[SWEET_PROF_KSLOTS], sweet_prof_t[SWEET_PROF_TIDS];
++/* 0462: for a sample in the kernel, who is behind it: "c" = two return addresses further up the kernel stack
++ * (frames 2 and 4: S5z's top kernel bucket was the instruction after interrupts come back on, which says nothing),
++ * "s" = the user pc and lr the thread entered the kernel with (the system call or trap, and its caller) */
++static struct sweet_prof_slot sweet_prof_c[SWEET_PROF_KSLOTS], sweet_prof_s[SWEET_PROF_KSLOTS];
+ static task_t sweet_prof_task;                  /* compared only, never followed */
+ static char sweet_prof_name[32];
+ static uint32_t sweet_prof_user, sweet_prof_kern, sweet_prof_other, sweet_prof_idle, sweet_prof_dropped;
+@@ -1456,6 +1460,27 @@
+ 		pc = VM_KERNEL_UNSLIDE(pc) - 0xfffffff000000000ULL;
+ 		lr = VM_KERNEL_UNSLIDE(lr) - 0xfffffff000000000ULL;
+ 		sweet_prof_add(sweet_prof_k, SWEET_PROF_KSLOTS, ((pc >> 4) & 0xffffffffULL) | (((lr >> 4) & 0xffffffffULL) << 32) | 1ULL << 63);
++		/* 0462: up the interrupted thread's kernel stack by frame pointers (only inside that stack) */
++		uint64_t fp = get_saved_state_fp(st), ret[5] = { 0, 0, 0, 0, 0 };
++		vm_offset_t lo = th->kernel_stack, hi = lo + kernel_stack_size;
++		for (int i = 0; i < 5 && lo != 0 && fp >= lo && fp + 16 <= hi && (fp & 7) == 0; i++) {
++			const uint64_t *f = (const uint64_t *)fp;
++			ret[i] = f[1];
++			if (f[0] <= fp) {
++				break;
++			}
++			fp = f[0];
++		}
++		if (ret[1] != 0) {
++			uint64_t a = VM_KERNEL_UNSLIDE(ret[1]) - 0xfffffff000000000ULL;
++			uint64_t b = ret[3] != 0 ? VM_KERNEL_UNSLIDE(ret[3]) - 0xfffffff000000000ULL : 0;
++			sweet_prof_add(sweet_prof_c, SWEET_PROF_KSLOTS, ((a >> 4) & 0xffffffffULL) | (((b >> 4) & 0xffffffffULL) << 32) | 1ULL << 63);
++		}
++		arm_saved_state_t *us = find_user_regs(th);
++		if (us != NULL && is_saved_state64(us)) {
++			uint64_t upc = get_saved_state_pc(us), ulr = get_saved_state_lr(us);
++			sweet_prof_add(sweet_prof_s, SWEET_PROF_KSLOTS, ((upc >> 4) & 0xffffffffULL) | (((ulr >> 4) & 0xffffffffULL) << 32) | 1ULL << 63);
++		}
+ 	}
+ 	sweet_prof_add(sweet_prof_t, SWEET_PROF_TIDS, thread_tid(th) | 1ULL << 63);
+ }
+@@ -1601,8 +1626,10 @@
+ 			}
+ 		}
+ 		printf("SWEET PROF t:%s\n", line);
+-		sweet_prof_dump("u", sweet_prof_u, SWEET_PROF_USLOTS, 260, 0, 2);
+-		sweet_prof_dump("k", sweet_prof_k, SWEET_PROF_KSLOTS, 80, 0xfffffff000000000ULL, 2);
++		sweet_prof_dump("u", sweet_prof_u, SWEET_PROF_USLOTS, 600, 0, 2);       /* 0462: 600, was 260 (39 % covered) */
++		sweet_prof_dump("k", sweet_prof_k, SWEET_PROF_KSLOTS, 120, 0xfffffff000000000ULL, 2);
++		sweet_prof_dump("c", sweet_prof_c, SWEET_PROF_KSLOTS, 60, 0xfffffff000000000ULL, 2);
++		sweet_prof_dump("s", sweet_prof_s, SWEET_PROF_KSLOTS, 60, 0, 2);
+ 		/* once per process: where its images outside the shared cache are (dyld's all_image_infos) */
+ 		if (imgs_pid != pid && task->all_image_info_addr != 0) {
+ 			vm_map_t map = get_task_map(task);
+@@ -1635,6 +1662,8 @@
+ 	if (user + kern < 250) {
+ 		bzero(sweet_prof_u, sizeof(sweet_prof_u));
+ 		bzero(sweet_prof_k, sizeof(sweet_prof_k));
++		bzero(sweet_prof_c, sizeof(sweet_prof_c));
++		bzero(sweet_prof_s, sizeof(sweet_prof_s));
+ 	}
+ 	os_atomic_store(&sweet_prof_paused, 0, relaxed);
+ }

@@ -61,7 +61,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('log')
     ap.add_argument('--kernel')
-    ap.add_argument('--a2s', default='/Volumes/SBWORK/claude-scratch-apple/a2s.cache')
+    ap.add_argument('--a2s', default='/Users/dev/project-starbite/build/apple-kbuild/a2s.cache')
     ap.add_argument('--image', action='append', default=[])
     ap.add_argument('--windows', action='store_true', help='one summary line per 10 s window too')
     ap.add_argument('--top', type=int, default=45)
@@ -78,6 +78,8 @@ def main():
     slide = mh = 0
     user = collections.Counter()    # (pc, lr) -> samples
     kern = collections.Counter()
+    kcall = collections.Counter()   # 0462: (return address 2 frames up, 4 frames up) of kernel samples
+    kuser = collections.Counter()   # 0462: (user pc, user lr) the thread entered the kernel with
     threads = collections.Counter()
     tot = collections.Counter()
     windows = []
@@ -103,7 +105,7 @@ def main():
             if len(p) >= 5:
                 imgs[int(p[3], 16)] = p[4]
             continue
-        m = re.match(r'SWEET PROF ([tuk]):(.*)', l)
+        m = re.match(r'SWEET PROF ([tukcs]):(.*)', l)
         if not m:
             continue
         for item in m.group(2).split():
@@ -111,7 +113,7 @@ def main():
             if m.group(1) == 't' and len(f) >= 3:
                 threads[(f[0], f[2])] += int(f[1])
             elif len(f) == 3:
-                (user if m.group(1) == 'u' else kern)[(int(f[0], 16), int(f[1], 16))] += int(f[2])
+                {'u': user, 'k': kern, 'c': kcall, 's': kuser}[m.group(1)][(int(f[0], 16), int(f[1], 16))] += int(f[2])
     if not tot['windows']:
         print('no "SWEET PROF name[pid]: N samples" lines in', a.log)
         return 1
@@ -137,6 +139,7 @@ def main():
         return 'kernel`' + (s or f'{x:#x}')
 
     n = tot['samples']
+    a_top = a.top
     cores = tot['samples'] + tot['other'] + tot['idle']
     print(f'{who}: {n} samples in {tot["windows"]} busy windows of 10 s = {n / 500:.1f} s of CPU '
           f'({100 * tot["user"] / n:.0f} % user, {100 * tot["kernel"] / n:.0f} % kernel); other processes {tot["other"]}, '
@@ -170,6 +173,20 @@ def main():
     print('\nfunction <- link register:')
     for (f, g), c in pair.most_common(a.top):
         print(f'  {100 * c / n:5.1f} %  {c:6d}  {f}  <-  {g}')
+    if kcall:
+        print('\nkernel samples by who called (return addresses 2 and 4 frames up the kernel stack):')
+        c2 = collections.Counter()
+        for (a, b), c in kcall.items():
+            c2[(kname(a + 8), kname(b + 8) if b > 0xfffffff000000000 else '-')] += c
+        for (f, g), c in c2.most_common(a_top):
+            print(f'  {100 * c / n:5.1f} %  {c:6d}  {f}  <-  {g}')
+    if kuser:
+        print('\nkernel samples by the user code that entered the kernel (pc = the system call stub or the trapping instruction):')
+        c2 = collections.Counter()
+        for (a, b), c in kuser.items():
+            c2[(uname(a + 8), uname(b + 8))] += c
+        for (f, g), c in c2.most_common(a_top):
+            print(f'  {100 * c / n:5.1f} %  {c:6d}  {f}  <-  {g}')
     print('\nby image:')
     for f, c in img.most_common(12):
         print(f'  {100 * c / n:5.1f} %  {f}')

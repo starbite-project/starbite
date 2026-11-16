@@ -2,13 +2,13 @@
 # S5z: compile 0460, link kernel seq2f (= seq2d + 0459 really linked + 0460; S5y's seq2e was linked from the old
 # StarbiteMali object)
 # and pack its payloads. Needs the USB stick (the kernel build tree is the image
-# /Volumes/SBWORK/claude-scratch-apple/dxb.sparseimage) and the Apple side session's scratch build directory.
+# /Users/dev/project-starbite/build/apple-kbuild/dxb.sparseimage) and the Apple side session's scratch build directory.
 #   tools/macos/s5z-finish.sh SCRATCH      (SCRATCH = that session's scratchpad: kbuild/, dxbmnt/)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 S=$1
 export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
-[ -d "$S/dxbmnt/dxb-12377" ] || hdiutil attach -nobrowse -mountpoint "$S/dxbmnt" /Volumes/SBWORK/claude-scratch-apple/dxb.sparseimage >/dev/null
+[ -d "$S/dxbmnt/dxb-12377" ] || hdiutil attach -nobrowse -mountpoint "$S/dxbmnt" /Users/dev/project-starbite/build/apple-kbuild/dxb.sparseimage >/dev/null
 K=$S/kbuild
 # 0460 was written while the build tree was away: compile it now (the host tests first)
 sh tools/macos/padtest/run.sh "$S/seq1j-src" "$S/padtest-out"
