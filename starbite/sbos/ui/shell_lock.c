@@ -5000,9 +5000,9 @@ static void ep_card(void)
         relink();
     } else {
         /* survival-next: cards 4..7 below the fold: their layers now, the cards at the next idle turns (sv_idle) */
-        for (int k = 0; k < 3; k++) {       /* 9k: the third holds the ninth card alone */
-            mk(&ecard[5 + k], k == 2 ? "ecards4" : k ? "ecards3" : "ecards2", CARD_X, LIST_TOP + 10 + 78 * (4 + 2 * k), CARD_W,
-               k == 2 ? 68 : 78 + 68, FACE_MG, 0);
+        for (int k = 0; k < 2; k++) {       /* (9k: the ninth card's layer later, when sv_idle reaches it: entering's own
+                                             * big layers first, the island film's 11 MB one was refused in the holes) */
+            mk(&ecard[5 + k], k ? "ecards3" : "ecards2", CARD_X, LIST_TOP + 10 + 78 * (4 + 2 * k), CARD_W, 78 + 68, FACE_MG, 0);
             ecard[5 + k].hidden = 1;
         }
         ec_next = 4;

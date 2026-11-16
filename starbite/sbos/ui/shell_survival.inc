@@ -257,7 +257,15 @@ static int sv_icon_rect(int a, arect *r)
 }
 /* idle time: the next of the lock's cards 4..7 (one glass card a turn), the lock's widgets after Last 2 % changed
  * (the switch, or the kernel at 3 %: looked at every idle turn, a minute at the latest) */
-static void sv_ec_skip(void) { while (EMG && ec_next < NECARD && !EC_LAYER(ec_next)->bmp.px) ec_next++; }   /* a refused layer's cards */
+static void sv_ec_skip(void)
+{
+    if (EMG && ec_next == 8 && !EC_LAYER(8)->bmp.px) {   /* 9k: the ninth card's own layer, made when it is next */
+        mk(EC_LAYER(8), "ecards4", CARD_X, LIST_TOP + 10 + 78 * 8, CARD_W, 68, FACE_MG, 0);
+        EC_LAYER(8)->hidden = 1;
+        relink();
+    }
+    while (EMG && ec_next < NECARD && !EC_LAYER(ec_next)->bmp.px) ec_next++;   /* a refused layer's cards */
+}
 static int sv_idle_pending(void) { sv_ec_skip(); return (EMG && ec_next < NECARD) || (SV.lw_stale && !AP.on); }
 static void sun_fix_ask(void);
 static void sv_idle(void)
