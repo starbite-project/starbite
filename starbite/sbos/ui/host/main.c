@@ -413,6 +413,30 @@ void sh_usb(sh_usb_t *u)
     u->ms_left = s.ms_left, u->est_ma = s.est_ma, u->vbus_lo_mv = s.vbus_lo_mv, u->vbus_hi_mv = s.vbus_hi_mv;
     u->bat_c10 = s.bat_c10, u->limit_c10 = s.limit_c10, u->ilim_ma = s.ilim_ma, u->refused = s.refused, u->why = s.why, u->events = s.events;
 }
+/* 9l: the Survival Kit's pretend sensors (a falling barometer, a resting pulse) */
+static int hk_watch, hk_alt = 212, hk_water, hk_tone;
+static uint64_t hk_water_t0;
+int sh_baro(sh_baro_t *b)
+{
+    memset(b, 0, sizeof(*b));
+    b->code = 1, b->hpa_x10 = 10087, b->alt_m = hk_alt, b->alt_known = 1, b->level = 3, b->d3_x10 = -41, b->d1_x10 = -14;
+    b->have3 = b->have1 = 1, b->watch = hk_watch, b->n = 60;
+    return 1;
+}
+void sh_baro_close(void) { }
+int sh_baro_hist(int i, int *hpa_x10, int *age_min) { if (i >= 60) return 0; *age_min = i * 15; *hpa_x10 = 10087 + i * 4 - (i * i) / 40; return 1; }
+int sh_baro_watch(int on) { if (on >= 0) hk_watch = on; return hk_watch; }
+int sh_baro_alt_set(int alt_m) { hk_alt = alt_m == -100000 ? 37 : alt_m; return 0; }
+int sh_sun_pos(int *az_x10, int *el_x10) { *az_x10 = 2134; *el_x10 = 187; return 0; }
+int sh_water(int kind) { hk_water = kind; hk_water_t0 = surv_host_now_ms; return 0; }
+int sh_water_left(int *kind) { *kind = hk_water; return hk_water ? 30 * 60 - 254 - (int)((surv_host_now_ms - hk_water_t0) / 1000) : 0; }
+int sh_water_secs(int kind) { static const int S[9] = { 0, 60, 21600, 172800, 1800, 3600, 14400, 1800, 900 }; return kind >= 0 && kind < 9 ? S[kind] : 0; }
+int sh_hrm(sh_hrm_t *h) { memset(h, 0, sizeof(*h)); h->state = 1, h->finger = 1, h->bpm = 68, h->quality = 2, h->seconds = 14; return 0; }
+void sh_hrm_stop(void) { }
+const char *sh_hrm_why(void) { return ""; }
+int sh_tone(int hz, int on) { fprintf(stderr, "kit: tone %d Hz %s (pretend)\n", hz, on ? "on" : "off"); hk_tone = on; return 0; }
+void sh_finger(int down) { (void)down; }
+int sh_bank_start(int floor_pct, int minutes) { fprintf(stderr, "kit: power bank to %d %%, %d min (pretend)\n", floor_pct, minutes); return 0; }
 /* 9k: the fire starter's pretend output (a 5 ohm lead, a pulse in progress while the finger stays) */
 static struct { int on, down, ov; uint64_t t0; } hfire;
 int sh_fire_start(int pulse_ms, int repeat, int ilim_ma, int ov, int wool)

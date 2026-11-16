@@ -32,6 +32,8 @@
 #include "cam.h"
 #include "snd.h"                         /* Track A, cp7: sound for the shell (the end of this file) */
 #include "usb.h"                         /* 8b: the USB console (Settings > Developer) */
+#include "survkit.h"                     /* 9l: the Survival Kit (Track D) */
+#include "hrm.h"
 #include "shub_more.h"
 #include "bathealth.h"
 #include "haptic.h"
@@ -3553,7 +3555,54 @@ void sh_fire(sh_fire_t *f)
     f->n = u.fs_n, f->max = u.fs_max, f->out = u.fs_out, f->rearms = u.fs_rearms, f->elapsed_ms = u.fs_elapsed_ms;
     f->avg_ma = u.fs_avg_ma, f->peak_ma = u.fs_peak_ma, f->w10 = u.fs_w10, f->load_w10 = u.fs_load_w10;
     f->ohm10 = u.fs_ohm10, f->open = u.fs_open, f->why_code = u.fs_why, f->bat_c10 = u.bat_c10, f->why = u.why;
+    f->bank_floor = u.bank_floor, f->bank_mah = u.bank_mah;
 }
+/* 9l: the Survival Kit. The barometer and heart rate drive hardware: dry in the self test (its films and gates) */
+#ifdef SBOS_SELFTEST_NEXT
+#define KIT_DRY 1
+#else
+#define KIT_DRY sbos_selftest_enabled
+#endif
+int sh_baro(sh_baro_t *b)
+{
+    int32_t p = 0, d3 = 0, d1 = 0;
+    int alt = 0, known = 0, lvl = 0, h3 = 0, h1 = 0;
+    b->code = KIT_DRY ? 0 : surv_baro(&p);
+    b->hpa_x10 = (int)p;
+    b->alt_known = surv_baro_alt(&alt, &known) == 1 && known;
+    b->alt_m = alt;
+    (void)surv_baro_trend(&lvl, &d3, &d1, &h3, &h1);
+    b->level = lvl, b->d3_x10 = (int)d3, b->d1_x10 = (int)d1, b->have3 = h3, b->have1 = h1;
+    b->watch = surv_storm_watch(-1);
+    b->n = surv_baro_hist_n();
+    return b->code;
+}
+void sh_baro_close(void) { if (!KIT_DRY) surv_baro_close(); }
+int sh_baro_hist(int i, int *hpa_x10, int *age_min) { int32_t p = 0; int r = surv_baro_hist(i, &p, age_min); *hpa_x10 = (int)p; return r; }
+int sh_baro_watch(int on) { return on < 0 || !KIT_DRY ? surv_storm_watch(on) : -1; }
+int sh_baro_alt_set(int alt_m) { return KIT_DRY ? -1 : surv_baro_alt_set(alt_m); }
+int sh_sun_pos(int *az_x10, int *el_x10) { return surv_sun_pos_now(az_x10, el_x10); }
+int sh_water(int kind) { return surv_water_timer(kind); }
+int sh_water_left(int *kind) { return surv_water_left(kind); }
+int sh_water_secs(int kind)
+{
+    int alt = -100000, known = 0;
+    if (surv_baro_alt(&alt, &known) != 1) alt = -100000;
+    return (int)kit_timer_seconds(kind, alt);
+}
+int sh_hrm(sh_hrm_t *h)
+{
+    int r = KIT_DRY ? -1 : hrm_want();
+    struct hrm_status s;
+    hrm_status(&s);
+    h->state = s.state, h->finger = s.finger, h->bpm = s.bpm, h->quality = s.quality, h->seconds = s.seconds;
+    return r;
+}
+void sh_hrm_stop(void) { if (!KIT_DRY) hrm_stop("the page closed"); }
+const char *sh_hrm_why(void) { return KIT_DRY ? "A dry run: the self test" : hrm_why(); }
+int sh_tone(int hz, int on) { return survkit_tone(hz, on); }   /* (the kernel refuses in the test images and without a finger) */
+void sh_finger(int down) { surv_fs_finger(down); }
+int sh_bank_start(int floor_pct, int minutes) { return KIT_DRY ? -1 : surv_usb_bank_start(floor_pct, minutes) < 0 ? -1 : 0; }
 int sh_fire_override_ok(void)
 {
 #ifdef SBOS_SELFTEST_NEXT

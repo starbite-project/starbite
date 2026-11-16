@@ -1067,7 +1067,7 @@ static void build_etool(void)
  * cards a layer below the fold (5 MB each, not one 8 MB layer: the 160 MiB heap's holes refused it in Emergency) */
 #define NEC 8                           /* 0 cards 0..3, 4 Exit, 5 cards 4..5, 6 cards 6..7, 7 card 8 (9k: Fire Starter) */
 #define EC_LAYER(i) (&ecard[5 + ((i) - 4) / 2])   /* the layer of card i (4..8) */
-#define NECARD 9                        /* 9k: the cards (the Fire Starter the ninth) */
+#define NECARD 9                        /* 9k / 9l: the cards (the ninth the Survival Kit, its first tool the fire starter) */
 static tk_layer ecard[NEC], empill;
 /* 8w (the user, 11-15): Emergency's "Call 112" capsule, fixed between the lock's two holds (it never scrolls): restarts
  * into One UI after the platform's hold to confirm (shell_comms.inc: cm_call112) */
@@ -1087,7 +1087,7 @@ static const ecard_t EC[NECARD] = {
     { "sun", "Sun", 0, "sun" },
     { "guide", "Survival Guide", "First aid, water, shelter, signals: offline", "guide" },
     { "compass", "Compass / Level", "Heading, level and steps: live from the sensors", "compass" },
-    { "fire", "Fire Starter", "Heats a wire or steel wool from the USB-C port", "fire" } };   /* 9k */
+    { "kit", "Survival Kit", "Fire starter, barometer, water, heart rate, siren", "kit" } };   /* 9l (9k's Fire Starter inside) */
 /* cp7i: a card in two parts (0 its glass, 1 its icon and words; -1 both): sv_idle makes one an idle turn */
 static void ec_card_part(dc *d, int i, float top, int part)
 {
@@ -3223,6 +3223,7 @@ static const appdef APPS[] = {
     { "power", "Last 2 %", 0xe09f1f, 1, { { "", 1, { { "", "" } } } } },      /* survival-next: shell_survival.inc */
     { "usb", "USB Power", 0xe0461f, 1, { { "", 1, { { "", "" } } } } },
     { "fire", "Fire Starter", 0xd70015, 1, { { "", 1, { { "", "" } } } } },     /* 9k: shell_survival.inc */
+    { "kit", "Survival Kit", 0x0a6fd8, 1, { { "", 1, { { "", "" } } } } },     /* 9l: shell_survival.inc */
     { "sun", "Sun", 0xff8a00, 1, { { "", 1, { { "", "" } } } } },
     { "guide", "Survival Guide", 0x1f8a4c, 1, { { "", 1, { { "", "" } } } } },
     { "compass", "Compass / Level", 0x55555c, 1, { { "", 1, { { "", "" } } } } },

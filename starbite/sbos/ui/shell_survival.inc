@@ -69,13 +69,20 @@ static struct {
     float fire_next, fire_watch;
     int fs_p, fs_i, fs_rep, fs_wool, fs_ov, fs_ok, fs_down;   /* pulse, limit, repeat, steel wool, override; allowed; finger */
     unsigned fire_sig;                  /* what the live text shows (redrawn when it changes) */
-} SV = { .gch = -1, .gpg = -1, .cf = -1, .heat_dur = 1, .fs_p = 1, .fs_i = 2 };
+    int kit;                            /* 9l: the Survival Kit's tool (-1 its list) */
+    float kit_next, kit_t0;
+    unsigned kit_sig;
+    sh_baro_t baro;
+    sh_hrm_t hrm;
+    int kit_snd, tone_on, bank_floor, bank_dur;   /* the sound chosen (0 whistle, 1 siren); playing; the bank's choices */
+    float tone_t0;
+} SV = { .gch = -1, .gpg = -1, .cf = -1, .heat_dur = 1, .fs_p = 1, .fs_i = 2, .kit = -1, .bank_floor = 1, .bank_dur = 1 };
 
 static int sv_key(const char *k)
 {
     return !tk_strcmp(k, "sos") || !tk_strcmp(k, "medical") || !tk_strcmp(k, "power") || !tk_strcmp(k, "usb") ||
            !tk_strcmp(k, "sun") || !tk_strcmp(k, "guide") || !tk_strcmp(k, "compass") || !tk_strcmp(k, "heat") ||
-           !tk_strcmp(k, "fire");
+           !tk_strcmp(k, "fire") || !tk_strcmp(k, "kit");
 }
 static int sv_own(const char *k) { return sv_key(k); }
 static uint32_t sv_ground(int a) { return sv_key(APPS[a].k) ? SV_GROUND : sbc_rgb(SBC_GROUND); }
@@ -162,6 +169,7 @@ static int sv_tile(dc *d, const char *k, float x, float y, float s)
     else if (!tk_strcmp(k, "guide")) { a = 0x5bd77a; b = 0x1f8a4c; kind = 2; }
     else if (!tk_strcmp(k, "compass")) { a = 0xa1a1a8; b = 0x55555c; kind = 3; }
     else if (!tk_strcmp(k, "fire")) { a = 0xff9f0a; b = 0xd70015; kind = 4; }   /* 9k */
+    else if (!tk_strcmp(k, "kit")) { a = 0x64d2ff; b = 0x0a6fd8; kind = 5; }    /* 9l: the Survival Kit */
     else return 0;
     float u = s / 100, r = s * .225f, X = PT(x) - d->ox, Y = PT(y) - d->oy;
     tk_stop st[2] = { { 0, tk_hex(a, 1) }, { 1, tk_hex(b, 1) } };
@@ -183,6 +191,9 @@ static int sv_tile(dc *d, const char *k, float x, float y, float s)
     } else if (kind == 2) {             /* an open book */
         G(16, 26, 32, 50, 5); G(52, 26, 32, 50, 5);
         for (int i = 0; i < 3; i++) { C(22, 36 + 9 * i, i == 2 ? 13 : 20, 3.5f, 1.75f); C(58, 36 + 9 * i, i == 2 ? 13 : 20, 3.5f, 1.75f); }
+    } else if (kind == 5) {             /* 9l: a kit's case and its handle */
+        G(18, 34, 64, 46, 9); C(24, 40, 52, 34, 6); G(38, 22, 24, 14, 5); C(43, 27, 14, 9, 3);
+        G(46, 48, 8, 20, 2); G(40, 54, 20, 8, 2);
     } else if (kind == 4) {             /* 9k: a flame */
         G(36, 40, 28, 40, 14); G(41, 26, 18, 30, 9); G(46, 16, 8, 16, 4);
         C(44, 56, 12, 20, 6);
@@ -805,6 +816,8 @@ static void usb_tap(float x, float y)
 }
 
 static void fs_seg(dc *d, float y, const char *const *L, int n, int sel, int red);
+#define KIT_FIRE 6                      /* 9l: the Survival Kit's Fire starter (its page the fire app's) */
+static int fire_shown(void) { return is_app("fire") || (is_app("kit") && SV.kit == KIT_FIRE); }
 /* ---- Survival Heat (9j, 9k: kern/heater.c through sh_heat_*) ------------------------------------------------------
  * Off: the levels as rows (a tap starts it; the kernel asks first: its first use, Extreme's, Keep warm's, Survival's
  * three holds or four with the trip off), the duration for Low / Medium / High, Survival's group (start; All out,
@@ -1040,8 +1053,10 @@ static void fs_seg(dc *d, float y, const char *const *L, int n, int sel, int red
 static void fs_cap(dc *d, float y, const char *s) { d_text(d, TK_IT400, 13, ROW_TX, y + 13, s, 0, 0, W(.5f), 0); }
 static void page_fire(dc *d)
 {
-    d_h1(d, "Fire Starter");
-    d_text(d, TK_IT400, 13, MARGIN, LARGE_BASE + 20, "Heats a wire or steel wool from the USB-C port", 0, 0, W(.55f), 0);
+    if (is_app("fire")) {               /* (in the Survival Kit: its back and inline title instead) */
+        d_h1(d, "Fire Starter");
+        d_text(d, TK_IT400, 13, MARGIN, LARGE_BASE + 20, "Heats a wire or steel wool from the USB-C port", 0, 0, W(.55f), 0);
+    }
     fs_cap(d, FS_C1, SV.fs_ov == 2 ? "Pulse (MAX: on while held)" : "Pulse");
     fs_seg(d, FS_C1 + 20, FS_PL, 5, SV.fs_p, 0);
     fs_cap(d, FS_C2, "Current limit (the charger chip's steps)");
@@ -1174,6 +1189,369 @@ static void fire_go(void)
     }
     SV.fire_watch = now_ms + 3000;
     fire_poll(now_ms);
+}
+
+/* ---- Survival Kit (9l: Track D's kern/survkit.h and hrm.h) ----------------------------------------------------------
+ * A list of tools, each a pushed page: the barometer (1 Hz keep-alive while open: the sensor hub), north from the sun,
+ * the water timers, heart rate (1 Hz keep-alive: the IR LED), the whistle / siren (a hold with the finger down: the
+ * kernel's start rule; a tap stops) and the power bank (a hold). Every limit and refusal is the kernel's */
+#define KIT_N 7
+#define KIT_LIST (CONTENT_TOP + 20)
+static const char *const KIT_T[KIT_N] = { "Barometer", "North from the sun", "Water timers", "Heart rate", "Whistle and siren", "Power bank",
+                                          "Fire starter" };
+static const char *const KIT_S[KIT_N] = { "Pressure, its trend, altitude, storm watch", "Where north is, from the sun", "Boiling, sunlight, tablets, shadow stick",
+                                          "A fingertip on the sensor by the rear camera", "Loud signals from the loudspeaker", "Charge another phone over USB-C",
+                                          "Heats a wire or steel wool from the USB-C port" };
+static const uint32_t KIT_C[KIT_N] = { 0x0a84ff, 0xff9f0a, 0x30b0c7, 0xff375f, 0xbf5af2, 0x34c759, 0xd70015 };
+static const int KIT_ORD[KIT_N] = { KIT_FIRE, 0, 1, 2, 3, 4, 5 };   /* the list's order: the fire starter first */
+static const char *const KIT_TREND[6] = { "Steady", "Rising", "Falling", "Falling fast: worse weather likely within a day",
+                                          "A storm is likely", "Rising fast" };
+static const char *const WT_L[8] = { "Boil", "Sunlight in a bottle (SODIS)", "SODIS, cloudy", "Chlorine tablets", "Chlorine, cold water",
+                                     "Chlorine dioxide", "Iodine", "Shadow stick (north)" };
+#define KIT_Y PUSHED_TOP
+#define KIT_HOLD_CY 610.0f
+#define KIT_HOLD_R 58.0f
+static int kit_dur(char *b, int n, int s)
+{
+    if (s >= 3600) { n += put_dec(b + n, s / 3600); n = sv_cat(b, n, " h"); if (s % 3600 / 60) { b[n++] = ' '; n += put_dec(b + n, s % 3600 / 60); n = sv_cat(b, n, " min"); } }
+    else { n += put_dec(b + n, s / 60); n = sv_cat(b, n, " min"); }
+    return n;
+}
+static void kit_row(dc *d, float y, const char *l, const char *v, tk_col lc, int rule)
+{
+    d_text(d, TK_IT400, 16, ROW_TX, y + 13 + 16, l, 0, 0, lc, 0);
+    if (v && v[0]) { float w = tw(TK_IT400, 15, v, 0, 0); d_text(d, TK_IT400, 15, CONTENT_R - 16 - w, y + 13 + 16, v, 0, 0, W(.5f), 0); }
+    if (rule) SV_RULE(d, y + 46);
+}
+static void page_kit(dc *d)
+{
+    if (SV.kit < 0) {
+        d_h1(d, "Survival Kit");
+        d_text(d, TK_IT400, 13, MARGIN, LARGE_BASE + 20, "Tools from the phone's sensors and speaker", 0, 0, W(.55f), 0);
+        d_rrect(d, GROUP_X, KIT_LIST, GROUP_W, 62.0f * KIT_N - 1, 16, SVC(SV_GROUP));
+        for (int r = 0; r < KIT_N; r++) {
+            int i = KIT_ORD[r];
+            float y = KIT_LIST + 62.0f * r, tx = GROUP_X + 58;
+            d_rrect(d, GROUP_X + 14, y + 16, 30, 30, 8, tk_hex(KIT_C[i], 1));
+            d_text_box(d, TK_IT600, 17, tx, bl(TK_IT600, 17, y + 11), CONTENT_R - 36 - tx, 0, KIT_T[i], 0, 0, INK, 0);
+            d_text_box(d, TK_IT400, 13, tx, bl(TK_IT400, 13, y + 34), CONTENT_R - 36 - tx, 0, KIT_S[i], 0, 0, W(.55f), 0);
+            d_icon(d, "chev", CONTENT_R - 30, y + 24, .45f);
+            if (r + 1 < KIT_N) d_rrect(d, tx, y + 61, CONTENT_R - tx, .5f, 0, W(.08f));
+        }
+        return;
+    }
+    sv_back(d, SV.kit == KIT_FIRE ? "Fire Starter" : KIT_T[SV.kit]);
+    if (SV.kit == KIT_FIRE) { page_fire(d); return; }
+    char b[64];
+    switch (SV.kit) {
+    case 0:                             /* the barometer: the live text and the graph are layers; here the rows */
+        d_rrect(d, GROUP_X, KIT_Y + 330, GROUP_W, 3 * 47 - 1, 16, SVC(SV_GROUP));
+        sv_switch_row(d, KIT_Y + 330, "Storm watch (every 15 min)", 0);
+        kit_row(d, KIT_Y + 377, "Known altitude", "left \xe2\x88\x92 10 m \xc2\xb7 right + 10 m", INK, 1);
+        kit_row(d, KIT_Y + 424, "Reset to sea-level standard", 0, SVC(SV_TINT), 0);
+        sv_text(d, TK_IT400, 13, ROW_TX, KIT_Y + 482, CONTENT_R - 16 - ROW_TX, 18,
+                "The sensor hub runs while this page is open (about 15-30 mA). Storm watch wakes it for a moment every 15 minutes.", W(.45f));
+        break;
+    case 1:
+        sv_text(d, TK_IT400, 15, MARGIN, KIT_Y + 250, CONTENT_W, 21,
+                "Stand facing the sun, then turn right by that angle: you face north. It uses the place set on the Sun page and the clock.", W(.6f));
+        break;
+    case 2:
+        d_rrect(d, GROUP_X, KIT_Y + 120, GROUP_W, 8 * 47 - 1, 16, SVC(SV_GROUP));
+        for (int i = 0; i < 8; i++) {
+            int n = kit_dur(b, 0, sh_water_secs(i + 1));
+            b[n] = 0;
+            kit_row(d, KIT_Y + 120 + 47 * i, WT_L[i], b, INK, i < 7);
+        }
+        sv_text(d, TK_IT400, 13, ROW_TX, KIT_Y + 120 + 8 * 47 + 10, CONTENT_R - 16 - ROW_TX, 18,
+                "A tap starts one (one at a time). The phone buzzes when it is done (silent 22:00-09:00).", W(.45f));
+        break;
+    case 3:
+        sv_text(d, TK_IT400, 15, MARGIN, KIT_Y + 300, CONTENT_W, 21,
+                "Rest a fingertip lightly on the sensor beside the rear camera and keep still. It stops after 2 minutes or when you leave this page.", W(.6f));
+        break;
+    case 4: {
+        static const char *const SL[2] = { "Whistle (3 blasts)", "Siren" };
+        fs_seg(d, KIT_Y + 20, SL, 2, SV.kit_snd, 0);
+        sv_text(d, TK_IT400, 14, ROW_TX, KIT_Y + 72, CONTENT_R - 16 - ROW_TX, 19,
+                "Hold the button 1.5 s to start: the phone only sounds while you are touching it to start. A tap on Stop ends it.", W(.55f));
+        break;
+    }
+    case 5: {
+        static const char *const FL[3] = { "Keep 20 %", "Keep 30 %", "Keep 50 %" };
+        static const char *const DL[4] = { "30 min", "1 hour", "2 hours", "Until then" };
+        d_text(d, TK_IT400, 13, ROW_TX, KIT_Y + 13, "Stop when this phone gets down to", 0, 0, W(.5f), 0);
+        fs_seg(d, KIT_Y + 20, FL, 3, SV.bank_floor, 0);
+        d_text(d, TK_IT400, 13, ROW_TX, KIT_Y + 66 + 13, "For at most", 0, 0, W(.5f), 0);
+        fs_seg(d, KIT_Y + 86, DL, 4, SV.bank_dur, 0);
+        sv_text(d, TK_IT400, 14, ROW_TX, KIT_Y + 140, CONTENT_R - 16 - ROW_TX, 19,
+                "Plug the other phone in with a USB-C cable, then hold 1.5 s. 5 V at up to 1.5 A; about 1.2 mA from this battery for each mA given.", W(.55f));
+        break;
+    }
+    }
+}
+static int kit_secs_left(int *kind) { return sh_water_left(kind); }
+static unsigned kit_sig_now(void)
+{
+    unsigned s = (unsigned)SV.kit * 7919u;
+    if (SV.kit == 0) s ^= (unsigned)SV.baro.hpa_x10 * 31u ^ (unsigned)SV.baro.level * 131u ^ (unsigned)SV.baro.watch * 17u ^ (unsigned)SV.baro.n * 97u ^ (unsigned)SV.baro.alt_m * 3u ^ (unsigned)SV.baro.code * 101u;
+    else if (SV.kit == 2) { int k = 0; s ^= (unsigned)kit_secs_left(&k) * 13u ^ (unsigned)k * 7u; }
+    else if (SV.kit == 3) s ^= (unsigned)SV.hrm.bpm * 31u ^ (unsigned)SV.hrm.finger * 7u ^ (unsigned)SV.hrm.quality * 3u ^ (unsigned)SV.hrm.state * 101u ^ (unsigned)SV.hrm.seconds * 5u;
+    else if (SV.kit == 4) s ^= (unsigned)SV.tone_on * 7u;
+    else if (SV.kit == 5) s ^= (unsigned)SV.fire.state * 7u ^ (unsigned)SV.fire.bank_mah * 13u ^ (unsigned)(SV.fire.est_ma / 10) * 31u ^ (unsigned)(SV.fire.ms_left / 1000) * 3u ^ (unsigned)SV.fire.why_code * 101u;
+    return s;
+}
+static void kit_graph(void)                 /* the barometer's 24 h (96 readings), newest right */
+{
+    tk_layer *l = &svl[SVL_DIAL];
+    relayer(l);
+    int n = SV.baro.n;
+    if (n < 2) return;
+    float x0 = GROUP_X + 12, x1 = CONTENT_R - 12, y0 = KIT_Y + 210, y1 = KIT_Y + 300;
+    dc d = mk(l, "sv-kit-graph", GROUP_X, y0 - 12, GROUP_W, y1 - y0 + 24, 1, 0);
+    int lo = 1 << 30, hi = -(1 << 30), p, age;
+    for (int i = 0; i < n; i++) if (sh_baro_hist(i, &p, &age)) { lo = tk_mini(lo, p); hi = tk_maxi(hi, p); }
+    if (hi - lo < 20) { int m = (hi + lo) / 2; lo = m - 10; hi = m + 10; }
+    d_rrect(&d, x0, y1, x1 - x0, 1, 0, W(.15f));
+    for (int i = 0; i < n; i++) {
+        if (!sh_baro_hist(i, &p, &age)) continue;
+        float x = x1 - (x1 - x0) * (float)age / (24.0f * 60.0f), y = y1 - (y1 - y0) * (float)(p - lo) / (float)(hi - lo);
+        if (x < x0) continue;
+        d_rrect(&d, x - 2.5f, y - 2.5f, 5, 5, 2.5f, tk_hex(0x64d2ff, 1));
+    }
+    d_text(&d, TK_IT400, 12, x0, y1 + 14, "24 h ago", 0, 0, W(.4f), 0);
+    { float w = tw(TK_IT400, 12, "now", 0, 0); d_text(&d, TK_IT400, 12, x1 - w, y1 + 14, "now", 0, 0, W(.4f), 0); }
+}
+static void kit_text(void)
+{
+    tk_layer *l = &svl[SVL_TXT];
+    relayer(l);
+    if (SV.kit < 0) return;
+    char b[128];
+    int n;
+    switch (SV.kit) {
+    case 0: {
+        dc d = mk(l, "sv-kit-txt", GROUP_X, KIT_Y, GROUP_W, 200, 1, 0);
+        const sh_baro_t *B = &SV.baro;
+        if (B->code < 0) {
+            sv_text(&d, TK_IT400, 15, ROW_TX, KIT_Y + 30, CONTENT_R - 16 - ROW_TX, 21, B->code == -2 ? "The barometer is off in Extreme saving / Last 2 %." :
+                    "The sensor hub did not start (its firmware on the card: /STARBITE/FW/BCM4775.BIN).", SVC(SV_WARN));
+            break;
+        }
+        if (B->hpa_x10 <= 0) { sv_centre(&d, TK_IT600, 17, KIT_Y + 40, "Reading the pressure\xe2\x80\xa6", W(.7f)); break; }
+        n = sv_dec(b, 0, B->hpa_x10, 1);
+        sv_cat(b, n, " hPa");
+        float w = tw(TK_IT700, 52, b, 0, TK_TNUM);
+        d_text(&d, TK_IT700, 52, 195 - w / 2, bl(TK_IT700, 52, KIT_Y + 14), b, 0, TK_TNUM, INK, 0);
+        int lv = B->level < 0 || B->level > 5 ? 0 : B->level;
+        n = sv_cat(b, 0, B->have3 || B->have1 ? KIT_TREND[lv] : "The trend needs an hour of readings");
+        if (B->have3) { n = sv_cat(b, n, " \xc2\xb7 "); if (B->d3_x10 >= 0) b[n++] = '+'; n = sv_dec(b, n, B->d3_x10, 1); sv_cat(b, n, " in 3 h"); }
+        sv_text(&d, TK_IT600, 15, ROW_TX, KIT_Y + 84, CONTENT_R - 16 - ROW_TX, 20, b, lv >= 3 && lv <= 4 ? SVC(SV_WARN) : INK);
+        n = sv_cat(b, 0, "Altitude about ");
+        n += put_dec(b + n, B->alt_m);
+        sv_cat(b, n, B->alt_known ? " m (from your known altitude)" : " m (standard sea-level pressure)");
+        sv_centre(&d, TK_IT400, 14, KIT_Y + 140, b, W(.65f));
+        break;
+    }
+    case 1: {
+        dc d = mk(l, "sv-kit-txt", GROUP_X, KIT_Y, GROUP_W, 230, 1, 0);
+        int az = 0, el = 0, r = sh_sun_pos(&az, &el);
+        if (r == -2) { sv_text(&d, TK_IT400, 16, ROW_TX, KIT_Y + 40, CONTENT_R - 16 - ROW_TX, 22, "Set where you are on the Sun page first.", SVC(SV_WARN)); break; }
+        if (r == -3) { sv_text(&d, TK_IT400, 16, ROW_TX, KIT_Y + 40, CONTENT_R - 16 - ROW_TX, 22, "The clock isn't set.", SVC(SV_WARN)); break; }
+        if (el < 0) { sv_text(&d, TK_IT400, 16, ROW_TX, KIT_Y + 40, CONTENT_R - 16 - ROW_TX, 22, "The sun is below the horizon now. At night: the North Star, or the Guide's methods.", W(.75f)); break; }
+        int rel = (3600 - az) % 3600;
+        n = put_dec(b, rel / 10);
+        sv_cat(b, n, "\xc2\xb0");
+        float w = tw(TK_IT700, 64, b, 0, TK_TNUM);
+        d_text(&d, TK_IT700, 64, 195 - w / 2, bl(TK_IT700, 64, KIT_Y + 20), b, 0, TK_TNUM, INK, 0);
+        sv_centre(&d, TK_IT600, 16, KIT_Y + 108, "to your right of the sun is north", INK);
+        n = sv_cat(b, 0, "The sun: ");
+        n += put_dec(b + n, az / 10);
+        n = sv_cat(b, n, "\xc2\xb0 from north, ");
+        n += put_dec(b + n, el / 10);
+        sv_cat(b, n, "\xc2\xb0 up");
+        sv_centre(&d, TK_IT400, 14, KIT_Y + 144, b, W(.6f));
+        break;
+    }
+    case 2: {
+        dc d = mk(l, "sv-kit-txt", GROUP_X, KIT_Y, GROUP_W, 110, 1, 0);
+        int kind = 0, s = kit_secs_left(&kind);
+        if (s <= 0 || kind < 1 || kind > 8) { sv_text(&d, TK_IT400, 15, ROW_TX, KIT_Y + 30, CONTENT_R - 16 - ROW_TX, 21, "No timer running.", W(.6f)); break; }
+        n = 0;
+        if (s >= 3600) { n += put_dec(b + n, s / 3600); b[n++] = ':'; n = sv_2(b, n, s / 60 % 60); }
+        else n += put_dec(b + n, s / 60);
+        b[n++] = ':'; n = sv_2(b, n, s % 60);
+        float w = tw(TK_IT700, 48, b, 0, TK_TNUM);
+        d_text(&d, TK_IT700, 48, 195 - w / 2, bl(TK_IT700, 48, KIT_Y + 4), b, 0, TK_TNUM, INK, 0);
+        n = sv_cat(b, 0, WT_L[kind - 1]);
+        sv_cat(b, n, " \xc2\xb7 tap it again to stop");
+        sv_centre(&d, TK_IT400, 14, KIT_Y + 74, b, W(.65f));
+        break;
+    }
+    case 3: {
+        dc d = mk(l, "sv-kit-txt", GROUP_X, KIT_Y, GROUP_W, 280, 1, 0);
+        const sh_hrm_t *H = &SV.hrm;
+        if (H->state == 2 || (H->state == 0 && sh_hrm_why() && sh_hrm_why()[0] && now_ms - SV.kit_t0 > 1500)) {
+            const char *w = sh_hrm_why();
+            sv_text(&d, TK_IT400, 15, ROW_TX, KIT_Y + 40, CONTENT_R - 16 - ROW_TX, 21, w && w[0] ? w : "The sensor did not start.", SVC(SV_WARN));
+            break;
+        }
+        if (H->finger && H->bpm > 0) { n = put_dec(b, H->bpm); b[n] = 0; } else { n = sv_cat(b, 0, "\xe2\x80\x94"); }
+        float w = tw(TK_IT700, 80, b, 0, TK_TNUM);
+        d_text(&d, TK_IT700, 80, 195 - w / 2, bl(TK_IT700, 80, KIT_Y + 30), b, 0, TK_TNUM, tk_hex(0xff375f, 1), 0);
+        sv_centre(&d, TK_IT600, 16, KIT_Y + 140, "beats a minute", W(.7f));
+        sv_centre(&d, TK_IT400, 15, KIT_Y + 176, !H->finger ? "No finger on the sensor" : H->quality >= 2 ? "A steady reading" :
+                  H->quality == 1 ? "Settling: keep still" : "Finding your pulse\xe2\x80\xa6", H->finger ? INK : SVC(SV_WARN));
+        break;
+    }
+    case 4: {
+        dc d = mk(l, "sv-kit-txt", GROUP_X, KIT_Y + 130, GROUP_W, 60, 1, 0);
+        sv_centre(&d, TK_IT600, 17, KIT_Y + 140, SV.tone_on ? (SV.kit_snd ? "The siren is on" : "Whistling") : "", SVC(SV_RED));
+        break;
+    }
+    case 5: {
+        dc d = mk(l, "sv-kit-txt", GROUP_X, KIT_Y + 230, GROUP_W, 170, 1, 0);
+        const sh_fire_t *f = &SV.fire;
+        float y = KIT_Y + 240;
+        if (f->state == SH_FIRE_ON && f->fire == 3) {
+            n = sv_cat(b, 0, "Charging the other device");
+            sv_centre(&d, TK_IT700, 20, y, b, tk_hex(0x34c759, 1));
+            y += 32;
+            n = 0;
+            if (f->est_ma >= 0) { n += put_dec(b + n, f->est_ma); n = sv_cat(b, n, " mA \xc2\xb7 "); }
+            n += put_dec(b + n, f->bank_mah);
+            n = sv_cat(b, n, " mAh given");
+            if (f->ms_left > 0) { n = sv_cat(b, n, " \xc2\xb7 "); n = kit_dur(b, n, f->ms_left / 1000); }
+            sv_centre(&d, TK_IT600, 16, y, b, INK);
+        } else if (f->why && f->why[0] && f->fire == 3) {
+            sv_text(&d, TK_IT400, 14, ROW_TX, y, CONTENT_R - 16 - ROW_TX, 19, f->why, f->why_code == SH_FW_REFUSED ? SVC(SV_WARN) : W(.6f));
+        }
+        break;
+    }
+    }
+}
+static void kit_controls(void)
+{
+    tk_layer *l = &svl[SVL_CTL];
+    relayer(l);
+    if (SV.kit != 4 && SV.kit != 5) { sv_ring_free(); return; }
+    int on = SV.kit == 4 ? SV.tone_on : SV.fire.state == SH_FIRE_ON && SV.fire.fire == 3;
+    if (on) {
+        dc d = mk(l, "sv-kit-ctl", 24, 690, 342, 66, 1, 0);
+        d_rrect(&d, 24, 690, 342, 66, 33, tk_hex(0xff3b30, 1));
+        float w = tw(TK_IT700, 24, "Stop", 0, 0);
+        d_text(&d, TK_IT700, 24, 195 - w / 2, bl(TK_IT700, 24, 690 + 18), "Stop", 0, 0, W(1), 0);
+        sv_ring_free();
+        return;
+    }
+    int can = SV.kit == 4 || SV.fire.state == SH_FIRE_OFF;
+    dc d = mk(l, "sv-kit-ctl", 195 - KIT_HOLD_R - 30, KIT_HOLD_CY - KIT_HOLD_R - 30, 2 * KIT_HOLD_R + 60, 2 * KIT_HOLD_R + 60, 1, 0);
+    sv_hold_button(&d, 195, KIT_HOLD_CY, KIT_HOLD_R, can ? "Hold" : "Wait", 26, can);
+    if (can && !SR_.n) sv_ring_build(195, KIT_HOLD_CY, KIT_HOLD_R + 9, 4);
+    if (!can) sv_ring_free();
+}
+static void kit_extras(void)
+{
+    if (SV.kit == KIT_FIRE) { fire_extras(); return; }
+    SV.kit_t0 = now_ms;
+    SV.kit_next = now_ms + 1000;
+    if (SV.kit == 0) { sh_baro(&SV.baro); sv_switch(SVL_A, KIT_Y + 330, SV.baro.watch & 1); kit_graph(); }
+    if (SV.kit == 3) sh_hrm(&SV.hrm);
+    if (SV.kit == 5) sh_fire(&SV.fire);
+    SV.kit_sig = kit_sig_now();
+    kit_controls();
+    kit_text();
+}
+static int kit_polling(void) { return SV.kit >= 0 && SV.kit != 4 && SV.kit != KIT_FIRE ? 1 : SV.kit == 4 && SV.tone_on; }
+static void kit_poll(float t)
+{
+    SV.kit_next = t + (SV.kit == 5 ? 500 : 1000);
+    int n0 = SV.baro.n, st0 = SV.fire.state;
+    if (SV.kit == 0) sh_baro(&SV.baro);                  /* (the keep-alive) */
+    else if (SV.kit == 3) sh_hrm(&SV.hrm);               /* (the keep-alive) */
+    else if (SV.kit == 5) sh_fire(&SV.fire);
+    else if (SV.kit == 4 && SV.tone_on && !SV.kit_snd && t - SV.tone_t0 > 6000) { SV.tone_on = 0; kit_controls(); }   /* the 3 blasts ended */
+    if (SV.kit == 0 && SV.baro.n != n0) kit_graph();
+    if (SV.kit == 5 && SV.fire.state != st0) kit_controls();
+    unsigned s = kit_sig_now();
+    if (s != SV.kit_sig) { SV.kit_sig = s; kit_text(); relink(); }
+}
+static void kit_leave(void)                 /* a tool's page left (back, another app, the close): its hardware off */
+{
+    if (SV.kit == KIT_FIRE && SV.fs_down) { SV.fs_down = 0; sh_fire_finger(0); }
+    if (SV.kit == 0) sh_baro_close();
+    if (SV.kit == 3) sh_hrm_stop();
+    if (SV.kit == 4 && SV.tone_on) { (void)sh_tone(SV.kit_snd ? 0 : 3150, 0); SV.tone_on = 0; }
+}
+static void kit_go(void)                    /* the hold finished (the finger still down) */
+{
+    if (SV.kit == 4) {
+        if (sh_tone(SV.kit_snd ? 0 : 3150, 1) < 0) toast("The loudspeaker can't sound now");
+        else { SV.tone_on = 1; SV.tone_t0 = now_ms; }
+    } else if (SV.kit == 5) {
+        static const int FP[3] = { 20, 30, 50 }, DM[4] = { 30, 60, 120, 0 };
+        if (sh_bank_start(FP[SV.bank_floor], DM[SV.bank_dur]) < 0) {
+            sh_fire(&SV.fire);
+            toast(SV.fire.why && SV.fire.why[0] ? SV.fire.why : "The power bank can't start now");
+        } else sh_fire(&SV.fire);
+    }
+    kit_controls();
+    kit_text();
+    relink();
+}
+static void kit_tap(float x, float y)
+{
+    if (SV.kit < 0) {
+        if (x >= GROUP_X && x < CONTENT_R && y >= KIT_LIST && y < KIT_LIST + 62.0f * KIT_N) { SV.kit = KIT_ORD[(int)((y - KIT_LIST) / 62)]; sv_rebuild(); }
+        return;
+    }
+    if (sv_back_hit(x, y)) { kit_leave(); SV.kit = -1; sv_rebuild(); return; }
+    if (SV.kit == KIT_FIRE) { fire_tap(x, y); return; }
+    int in = x >= GROUP_X && x < CONTENT_R;
+    if ((SV.kit == 4 || SV.kit == 5) && x >= 24 && x < 366 && y >= 690 && y < 756) {    /* Stop */
+        if (SV.kit == 4 && SV.tone_on) { (void)sh_tone(SV.kit_snd ? 0 : 3150, 0); SV.tone_on = 0; }
+        else if (SV.kit == 5) sh_fire_stop();
+        if (SV.kit == 5) sh_fire(&SV.fire);
+        kit_controls(); kit_text(); relink();
+        return;
+    }
+    switch (SV.kit) {
+    case 0:
+        if (!in) return;
+        if (y >= KIT_Y + 330 && y < KIT_Y + 377) {
+            if (sh_baro_watch(!(SV.baro.watch & 1)) < 0) toast("Storm watch can't change now");
+            sh_baro(&SV.baro);
+            sv_switch(SVL_A, KIT_Y + 330, SV.baro.watch & 1);
+            relink();
+        } else if (y >= KIT_Y + 377 && y < KIT_Y + 424) {
+            if (sh_baro_alt_set(SV.baro.alt_m + (x < 195 ? -10 : 10)) < 0) toast("Needs a pressure reading first");
+            sh_baro(&SV.baro); kit_text(); relink();
+        } else if (y >= KIT_Y + 424 && y < KIT_Y + 471) {
+            (void)sh_baro_alt_set(-100000);
+            sh_baro(&SV.baro); kit_text(); relink();
+        }
+        return;
+    case 2:
+        if (in && y >= KIT_Y + 120 && y < KIT_Y + 120 + 8 * 47) {
+            int kind = (int)((y - KIT_Y - 120) / 47) + 1, cur = 0;
+            (void)sh_water_left(&cur);
+            if (cur == kind) { (void)sh_water(0); toast("Timer stopped"); }
+            else if (sh_water(kind) < 0) toast("The timer can't start now");
+            else toast("Timer started");
+            kit_text(); relink();
+        }
+        return;
+    case 4:
+        if (in && y >= KIT_Y + 20 && y < KIT_Y + 56 && !SV.tone_on) { SV.kit_snd = x >= 195; sv_rebuild(); }
+        return;
+    case 5:
+        if (!in || SV.fire.state != SH_FIRE_OFF) return;
+        if (y >= KIT_Y + 20 && y < KIT_Y + 56) SV.bank_floor = tk_maxi(0, tk_mini(2, (int)((x - GROUP_X - 2) / ((GROUP_W - 4) / 3))));
+        else if (y >= KIT_Y + 86 && y < KIT_Y + 122) SV.bank_dur = tk_maxi(0, tk_mini(3, (int)((x - GROUP_X - 2) / ((GROUP_W - 4) / 4))));
+        else return;
+        sv_rebuild();
+        return;
+    }
 }
 
 /* ---- Sun ----------------------------------------------------------------------------------------------------------- */
@@ -1939,6 +2317,7 @@ static int sv_page(const char *k, dc *d)
     else if (!tk_strcmp(k, "compass")) page_compass(d);
     else if (!tk_strcmp(k, "heat")) page_heat(d);   /* 9j */
     else if (!tk_strcmp(k, "fire")) page_fire(d);   /* 9k */
+    else if (!tk_strcmp(k, "kit")) page_kit(d);     /* 9l */
     else return 0;
     return 1;
 }
@@ -1960,6 +2339,7 @@ static void sv_extras(const char *k)
     else if (!tk_strcmp(k, "compass")) compass_extras();    /* helper J: starts the sensor hub */
     else if (!tk_strcmp(k, "heat")) heat_extras();          /* 9j */
     else if (!tk_strcmp(k, "fire")) fire_extras();          /* 9k */
+    else if (!tk_strcmp(k, "kit") && SV.kit >= 0) kit_extras();   /* 9l */
     else if (!tk_strcmp(k, "settings") && AS.sub == 4 && SV.cf >= 0) sv_field(ROW_TX, CE_FLD + 10, CONTENT_R - 16 - ROW_TX, SV.ebuf, 1, INK);
 }
 /* an app opened (app_open): every tool opens on its first view */
@@ -1972,6 +2352,8 @@ static void sv_opened(void)
     SV.fix_asked = 0;                   /* helper J: the GPS fix asked again at the page's build */
     if (CP.on) compass_close();         /* (another app straight over the Compass: its hub off) */
     CP.view = 0;
+    if (SV.kit >= 0) kit_leave();       /* 9l: the kit opens on its list (a tool left open: its hardware off) */
+    SV.kit = -1;
     SV.fs_ok = sh_fire_override_ok();   /* 9k: the override's choices only where the kernel allows them */
     if (!SV.fs_ok) SV.fs_ov = 0;
     sh_heat(&SV.heat);                  /* 9j: Survival Heat opens on its running view while it runs */
@@ -1983,6 +2365,7 @@ static void sv_closed(void)
 {
     if (CP.on) compass_close();         /* helper J: the sensor hub off when the Compass closes */
     if (SV.fs_down) { SV.fs_down = 0; sh_fire_finger(0); }   /* 9k: never a finger left down */
+    if (SV.kit >= 0) { kit_leave(); SV.kit = -1; }          /* 9l: the barometer / heart rate / sound off with the app */
     sv_free();
     if (SV.from_lock) { SV.from_lock = 0; if (locked) set_lock(lockY); }
 }
@@ -2081,6 +2464,7 @@ static int sv_tap(float x, float y)
     else if (!tk_strcmp(k, "compass")) compass_tap(x, y);
     else if (!tk_strcmp(k, "heat")) heat_tap(x, y);         /* 9j */
     else if (!tk_strcmp(k, "fire")) fire_tap(x, y);         /* 9k */
+    else if (!tk_strcmp(k, "kit")) kit_tap(x, y);           /* 9l */
     return 1;
 }
 /* which hold is under the finger: 1 SOS, 2 USB power (only while it can start) */
@@ -2088,7 +2472,11 @@ static int sv_hold_hit(float x, float y)
 {
     if (is_app("sos")) { float dx = x - SOS_CX, dy = y - SOS_CY; return dx * dx + dy * dy <= (SOS_R + 8) * (SOS_R + 8) ? 1 : 0; }
     if (is_app("usb") && SV.usb.state == SH_USB_OFF) { float dx = x - 195, dy = y - USB_CY; return dx * dx + dy * dy <= (USB_R + 8) * (USB_R + 8) ? 2 : 0; }
-    if (is_app("fire") && SV.fire.state == SH_FIRE_OFF) { float dx = x - 195, dy = y - FS_CY; return dx * dx + dy * dy <= (FS_R + 8) * (FS_R + 8) ? 3 : 0; }   /* 9k */
+    if (fire_shown() && SV.fire.state == SH_FIRE_OFF) { float dx = x - 195, dy = y - FS_CY; return dx * dx + dy * dy <= (FS_R + 8) * (FS_R + 8) ? 3 : 0; }   /* 9k */
+    if (is_app("kit") && ((SV.kit == 4 && !SV.tone_on) || (SV.kit == 5 && SV.fire.state == SH_FIRE_OFF))) {   /* 9l: the sound's, the bank's */
+        float dx = x - 195, dy = y - KIT_HOLD_CY;
+        return dx * dx + dy * dy <= (KIT_HOLD_R + 8) * (KIT_HOLD_R + 8) ? (SV.kit == 4 ? 4 : 5) : 0;
+    }
     return 0;
 }
 static void sv_hold_end(void)
@@ -2124,17 +2512,18 @@ static int sv_touch(int phase, float x, float y, float t)
         SV.hold_done = 0;
         SV.hold_t0 = t; SV.hold_x = x; SV.hold_y = y;
         if (SV.hold && y >= H_PT - 30) SV.hold = 0;
-        if (SV.hold == 3) { SV.fs_down = 1; sh_fire_finger(1); }   /* 9k: the fire starter's finger, from its press */
+        if (SV.hold == 3 || SV.hold == 4) { SV.fs_down = 1; sh_fire_finger(1); }   /* 9k / 9l: the finger, from its press (fire, sound) */
     } else if (phase == 1) {
         if (SV.hold && (tk_fabsf(x - SV.hold_x) > 14 || tk_fabsf(y - SV.hold_y) > 14)) {
-            if (SV.hold == 3) { SV.fs_down = 0; sh_fire_finger(0); }   /* (the arming hold slid away: no finger) */
+            if (SV.hold == 3 || SV.hold == 4) { SV.fs_down = 0; sh_fire_finger(0); }   /* (the arming hold slid away: no finger) */
             sv_hold_end();
         }
     } else if (SV.fs_down) {            /* 9k: the lift: the output off at once */
         SV.fs_down = 0;
         sh_fire_finger(0);
         if (SV.hold) sv_hold_end();
-        if (is_app("fire")) fire_poll(now_ms);
+        if (fire_shown()) fire_poll(now_ms);
+        else if (is_app("kit")) kit_controls();
         if (SV.hold_done) { SV.hold_done = 0; return 1; }
     } else if (SV.hold) {
         if (!SV.hold_done) toast("Press and hold");
@@ -2151,6 +2540,7 @@ static void sv_fire(int which)
     SV.hold_done = 1;
     sh_haptic();
     if (which == 3) { fire_go(); return; }   /* 9k */
+    if (which == 4 || which == 5) { kit_go(); return; }   /* 9l */
     if (which == 1) {
         if (sh_sos_set(1) < 0) { toast("SOS can't start now"); return; }
         sv_sos_show();
@@ -2184,7 +2574,8 @@ static int sv_refresh(float t)
     }
     if (AP.on && !AP.closing && is_app("usb") && SV.usb.state != SH_USB_OFF && t >= SV.usb_next) { usb_poll(t); any = 1; }
     if (AP.on && !AP.closing && is_app("heat") && heat_polling() && t >= SV.heat_next) { heat_poll(t); any = 1; }   /* 9j */
-    if (AP.on && !AP.closing && is_app("fire") && fire_polling() && t >= SV.fire_next) { fire_poll(t); any = 1; }   /* 9k */
+    if (AP.on && !AP.closing && fire_shown() && fire_polling() && t >= SV.fire_next) { fire_poll(t); any = 1; }   /* 9k */
+    if (AP.on && !AP.closing && is_app("kit") && kit_polling() && t >= SV.kit_next) { kit_poll(t); any = 1; }   /* 9l */
     if (cp_visible() && (t >= CP.next || t < CP.next - 200)) any |= cp_poll(t);   /* helper J: the sensors at 10 Hz */
     return any;
 }
@@ -2218,7 +2609,11 @@ static float sv_next_update(float t)
         float n = tk_maxf(1, SV.usb_next - t);
         if (best < 0 || n < best) best = n;
     }
-    if (AP.on && !AP.closing && is_app("fire") && fire_polling()) {   /* 9k: the fire starter at 4 Hz */
+    if (AP.on && !AP.closing && is_app("kit") && kit_polling()) {   /* 9l: the kit's tool at 1-2 Hz */
+        float n = tk_maxf(1, SV.kit_next - t);
+        if (best < 0 || n < best) best = n;
+    }
+    if (AP.on && !AP.closing && fire_shown() && fire_polling()) {   /* 9k: the fire starter at 4 Hz */
         float n = tk_maxf(1, SV.fire_next - t);
         if (best < 0 || n < best) best = n;
     }
@@ -2248,9 +2643,15 @@ static void sv_set(const char *k, float v)
         fire_poll(now_ms);
         return;
     }
+    if (!tk_strcmp(k, "kit")) {         /* 9l: sv=kit:N a tool's page (-1 the list) */
+        if (SV.kit >= 0) kit_leave();
+        SV.kit = (int)v < 0 ? -1 : (int)v;
+        if (AP.on && is_app("kit")) { build_app_page(AP.a); appg.clip = 0; SV.rb = 0; }
+        return;
+    }
     if (!tk_strcmp(k, "fireov")) {      /* (the stills: the override's choices as on S9 #2) */
         SV.fs_ok = v > 0; SV.fs_ov = v > 0 ? 2 : 0;
-        if (AP.on && is_app("fire")) { build_app_page(AP.a); appg.clip = 0; SV.rb = 0; }
+        if (AP.on && fire_shown()) { build_app_page(AP.a); appg.clip = 0; SV.rb = 0; }
         return;
     }
     if (!tk_strcmp(k, "heat")) {   /* 9j: sv=heat:N starts level N (the host's pretend heater), 0 stops */

@@ -295,12 +295,34 @@ typedef struct {
     int avg_ma, peak_ma, w10, load_w10, ohm10, open;   /* the last pulse (MAX: the last 1 s): ohm10 -1 ?, -2 at the limit */
     int why_code, bat_c10;
     const char *why;                          /* words (NULL none) */
+    int bank_floor, bank_mah;                 /* 9l: the power bank (fire 3) */
 } sh_fire_t;
 int sh_fire_start(int pulse_ms, int repeat, int ilim_ma, int ov, int wool);   /* < 0 refused (why in sh_fire) */
 void sh_fire_finger(int down);
 void sh_fire_stop(void);
 void sh_fire(sh_fire_t *f);
 int sh_fire_override_ok(void);
+/* 9l: the Survival Kit (Track D's kern/survkit.h, hrm.h): the barometer, north from the sun, the water timers, heart
+ * rate, the whistle / siren, the power bank. Hardware calls are dry in the self-test images; sound only with a finger
+ * down (sh_finger: the kernel refuses a tone otherwise) and never 22-09 for the kernel's own buzzes */
+typedef struct { int code, hpa_x10, alt_m, alt_known, level, d3_x10, d1_x10, have3, have1, watch, n; } sh_baro_t;
+int sh_baro(sh_baro_t *b);                    /* the page's keep-alive (~1/s): 1 fresh, 0 none yet, < 0 refused / failed */
+void sh_baro_close(void);
+int sh_baro_hist(int i, int *hpa_x10, int *age_min);   /* i 0 newest: 1 there is one */
+int sh_baro_watch(int on);                    /* -1 reads: on | paused << 1 */
+int sh_baro_alt_set(int alt_m);               /* -100000: the standard 1013.25 hPa again */
+int sh_sun_pos(int *az_x10, int *el_x10);     /* 0; -2 no location; -3 no clock */
+enum { SH_WT_BOIL = 1, SH_WT_SODIS, SH_WT_SODIS_CLOUD, SH_WT_CHLORINE, SH_WT_CHLORINE_COLD, SH_WT_CLO2, SH_WT_IODINE, SH_WT_SHADOW };
+int sh_water(int kind);                       /* starts (one at a time), 0 stops */
+int sh_water_left(int *kind);                 /* seconds (0 none) */
+int sh_water_secs(int kind);                  /* its length here (the boil's at altitude) */
+typedef struct { int state, finger, bpm, quality, seconds; } sh_hrm_t;   /* state 0 off, 1 running, 2 failed */
+int sh_hrm(sh_hrm_t *h);                      /* the keep-alive (~1/s): < 0 refused (sh_hrm_why) */
+void sh_hrm_stop(void);
+const char *sh_hrm_why(void);
+int sh_tone(int hz, int on);                  /* 3150 the whistle, 0 the siren; -1 refused */
+void sh_finger(int down);                     /* a sound / fire control's finger (the kernel's start rule) */
+int sh_bank_start(int floor_pct, int minutes);   /* the power bank; < 0 refused (why in sh_fire) */
 int sh_heat_start(int level, int minutes);    /* < 0 refused (why in sh_heat); 0 asked (a confirmation may show) */
 void sh_heat_stop(void);
 void sh_heat(sh_heat_t *h);
