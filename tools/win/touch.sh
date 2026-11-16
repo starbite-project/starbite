@@ -21,6 +21,9 @@
 #                                    read freezes the finger ~25 ms, not ~265 ms, before the retry). Refused unless the
 #                                    service already points at s6touchdiag.sys. Check boot as after apply.
 #   tools/win/touch.sh update OUT 2  the same, back to the touchdiag-2 file.
+#   tools/win/touch.sh update OUT 4  touchdiag-4 (build/win/touch-4): touchdiag-3 + the touch chip's edge zone off
+#                                    (docs/WIN11-GPU.md 6.110). Check boot PASS: DiagBuild "td4-edge0", TouchD0Status 0,
+#                                    DiagEdgeZone 0, DiagEdgeStatus 0. Back: touch.sh update OUT (touchdiag-3).
 #   tools/win/touch.sh orient OUT N  the panel's saved Windows orientation (tools/win/hive-orientation.py): 4 = landscape
 #                                    as the user holds it, 2 = landscape (flipped), 1 = portrait. Windows applies it at
 #                                    the next start and turns touch with it. Run it last (after check boot + restore).
@@ -124,13 +127,18 @@ orient)
     exit 0 ;;
 update)
     if [ "${3:-3}" = 2 ]; then DRV3=$DRV; DRV3_SHA=$DRV_SHA; fi
+    # touchdiag-4 (docs/WIN11-GPU.md 6.110): touchdiag-3 + the chip's edge zone off (taps at the long edges came at finger-up)
+    if [ "${3:-3}" = 4 ]; then DRV3=$main/build/win/touch-4/s6touchdiag.sys; DRV3_SHA=5b2cfc3f351ae8ca4a06b1aecb02d45a4954ca0df08e03d3675bac8e9056f322; fi
     [ "$(shasum -a 256 "$DRV3" | cut -c1-64)" = "$DRV3_SHA" ] || { log "$DRV3 is not the expected build ($DRV3_SHA)"; exit 1; }
     adb shell "mkdir -p $W; umount $W 2>/dev/null; mount.ntfs -o rw,inherit $NTFS $W" >/dev/null
     adb pull "$W/$SYS" "$tmp/SYSTEM" >/dev/null
     python3 "$TD" "$tmp/SYSTEM" show | head -3 | grep -q 'ImagePath .*s6touchdiag.sys' || { log "the touch service does not use s6touchdiag.sys: run apply first"; exit 1; }
     adb pull "$W/Windows/System32/drivers/s6touchdiag.sys" "$out/backup/s6touchdiag-$(date +%Y%m%d-%H%M%S).sys" >/dev/null
     push_check "$DRV3" "$W/Windows/System32/drivers/s6touchdiag.sys"
-    log "update done: s6touchdiag.sys = $([ "${3:-3}" = 2 ] && echo touchdiag-2 || echo "touchdiag-3 (25 ms touch-read timeout)"). Next: the unattended check boot"
+    which="touchdiag-3 (25 ms touch-read timeout)"
+    if [ "${3:-3}" = 2 ]; then which=touchdiag-2; fi
+    if [ "${3:-3}" = 4 ]; then which="touchdiag-4 (edge zone off)"; fi
+    log "update done: s6touchdiag.sys = $which. Next: the unattended check boot"
     exit 0 ;;
 apply|restore) ;;
 *) echo "usage: touch.sh apply|update|restore|show OUT"; exit 1 ;;

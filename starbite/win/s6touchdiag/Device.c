@@ -91,6 +91,19 @@ RequestGetHidXferPacket_ToWriteToDevice(
 #define SBTOUCH_READ_TIMEOUT_MS 25
 #endif
 
+// touchdiag-4 (docs/WIN11-GPU.md 6.110): the chip's grip rejection. Out of reset the S6SY761 treats a strip along
+// each long edge as an "edge zone" (60 panel pixels: the Samsung sec_ts driver only sends SEC_TS_CMD_EDGE_AREA when its
+// value is not 60). A touch that lands there is held back and comes out as press + release one scan apart when the
+// finger LIFTS (a hold there is taken for the hand gripping the phone and never reported). In the user's 11-16
+// session every tap with x < ~160/4096 has a contact time of 8-10 ms; taps elsewhere 75-130 ms. In landscape that
+// strip is the bottom (or top) edge of the screen, where the thumbs are: every tap there arrives when the finger
+// lifts. Android sets these zones per orientation and app; nothing on Windows did. So: no edge zone.
+// SBTOUCH_EDGE_ZONE: the zone in panel pixels (0 = none); -1 = leave the chip's default.
+#ifndef SBTOUCH_EDGE_ZONE
+#define SBTOUCH_EDGE_ZONE 0
+#endif
+#define S6SY761_CMD_EDGE_AREA 0xAB        // sec_ts.h SEC_TS_CMD_EDGE_AREA: 2 data bytes, big-endian pixels
+
 C_ASSERT(S6SY761_EVENT_COUNT == 64);
 C_ASSERT(S6SY761_INPUT_REPORT_QUEUE_DEPTH >= S6SY761_EVENT_COUNT);
 
@@ -379,6 +392,8 @@ DiagFlush(
 	DiagAssignULong(key, L"DiagRetryBuild", SBTOUCH_RETRY);
 	DiagAssignULong(key, L"DiagReadTimeoutMs", SBTOUCH_READ_TIMEOUT_MS);
 	DiagAssignULong(key, L"DiagTries", SBTOUCH_TRIES);
+	DiagAssignULong(key, L"DiagEdgeZone", (ULONG)DeviceContext->DiagEdgeZone);
+	DiagAssignULong(key, L"DiagEdgeStatus", (ULONG)DeviceContext->DiagEdgeStatus);
 	DiagAssignULong(key, L"DiagOverflow", (ULONG)DeviceContext->InputOverflowCount);
 	DiagAssignULong(key, L"DiagQueueFlush", (ULONG)DeviceContext->InputQueueFlushCount);
 	DiagAssignULong(key, L"DiagCoalesce", (ULONG)DeviceContext->InputReportCoalesceCount);
@@ -3394,6 +3409,21 @@ SpbDeviceOpen(
 		else
 		{
 			RecordStartValues(pDevice->Device, 35, status);
+		}
+		// touchdiag-4: the edge zone (see SBTOUCH_EDGE_ZONE). Its failure is recorded, never fatal: touch then
+		// works as before, with the chip's default zone.
+		InterlockedExchange(&pDevice->DiagEdgeZone, -1);
+		InterlockedExchange(&pDevice->DiagEdgeStatus, 1);
+		if (NT_SUCCESS(status) && (SBTOUCH_EDGE_ZONE) >= 0)
+		{
+			BYTE edge[3] = { S6SY761_CMD_EDGE_AREA, (BYTE)(((SBTOUCH_EDGE_ZONE) >> 8) & 0xFF), (BYTE)((SBTOUCH_EDGE_ZONE) & 0xFF) };
+			NTSTATUS edgeStatus = SpbDeviceWrite(pDevice, edge, sizeof(edge));
+
+			InterlockedExchange(&pDevice->DiagEdgeStatus, (LONG)edgeStatus);
+			if (NT_SUCCESS(edgeStatus))
+			{
+				InterlockedExchange(&pDevice->DiagEdgeZone, (SBTOUCH_EDGE_ZONE));
+			}
 		}
 	}
 	else

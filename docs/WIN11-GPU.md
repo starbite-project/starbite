@@ -3253,6 +3253,45 @@ late. Mouse-to-frame was ~15 ms in T72, so the suspect is the touch path.
 - **T84 part 2** (same boot): `sbtouchlat-x64.exe ... gl`, an x64 program with a GL window on kit 0170 (files in the
   test folder only), the switch off, then on. On should show the click with the touch-down.
 
+### 6.110 The late touches' first cause, from the user's own session: the touch chip's edge zone (touchdiag-4)
+
+(2026-11-16 16:04; read from `build/win/results-touch-user`, the pull of the user's 11-16 session; touchdiag-4 built, **not
+run**.) The session ended without a clean shutdown, so the hive is dirty and its logs do not connect to the
+primary file (primary sequence 262254, log entries 262622..262692: `hive-replay.py` applies none). For reading
+only, all 71 log entries were applied to a scratch copy in sequence order; the touch driver rewrites its values
+every second, so they are in every entry. The copy says (state 285 s into that boot):
+
+- **The driver chain is not late.** 4840 interrupts, 132 presses, 131 releases, 4575 moves; DiagI2cError 0,
+  DiagI2cRetry 0, DiagSpbSlow 0; the slowest touch read 9.4 ms, the slowest whole interrupt pass 9.5 ms; the chip's
+  event stack never held more than 3 events (DiagEventsMax 3); reports completed 4835. So from the chip's interrupt
+  to the HID report: about 1 ms, worst 10 ms.
+- **The trace (last 64 events) shows two kinds of tap.** Away from the edge (x 554..3976 of 4096) a tap is press,
+  then release 74..133 ms later: a finger. With **x < ~160** (twelve taps: x 38..154) the release follows the press
+  after **8..10 ms, every time**: one scan of the chip, shorter than any finger can touch. They come at a tapping
+  rhythm (every 0.5..0.7 s), and in runs at one spot (y ~3970: a corner of the panel).
+- **What that is.** x < 160/4096 is the 56 panel pixels along one long edge. The Samsung driver for this chip
+  (`ref/starlte-kernel/drivers/input/touchscreen/sec_ts`) has a grip "edge zone" whose chip default is **60**
+  (`sec_ts_set_grip_type`: the zone is only sent when it is not 60; `SEC_TS_CMD_EDGE_AREA` 0xAB). The chip holds a
+  touch that lands there back, to tell a tap from the hand gripping the phone, and reports press + release together
+  once the finger has lifted; a hold there is a grip and is not reported. On Android the system sets these zones
+  per orientation; on Windows nothing did. In landscape the long edge is the bottom (or top) of the screen, where
+  the thumbs rest: a tap there reaches Windows when the finger LIFTS, i.e. late by the whole contact (~0.1 s and
+  more), and holding there does nothing. That fits "touches arrive a lot late" while the game runs smoothly.
+  Inference from the trace and the source; the chip has no public documentation.
+- **touchdiag-4** (`build/win/touch-4/s6touchdiag.sys` 5b2cfc3f, build `td4-edge0`, signed, 0 LSE words, same
+  pipeline as touchdiag-3): after sense-on at D0 it writes `AB 00 00` (edge zone 0 pixels). The write's status and
+  the value go to `DiagEdgeStatus` / `DiagEdgeZone`; a failed write is not fatal (touch then works as before).
+  Nothing else changed. `tools/win/touch.sh update OUT 4` pushes the file (the service already uses
+  s6touchdiag.sys); `touch.sh update OUT` goes back to touchdiag-3.
+- **Not known:** whether the chip takes 0 as "no zone" (the Android sysfs example uses 200), and whether the dead
+  zone (0xAC) or the landscape command (0xAD) also matter. The answer is in the next user trace: taps with x < 160
+  lasting as long as the others = fixed. Only a finger can test this; the check boot only shows the driver loads
+  and the command is acknowledged.
+- **Still open beside it:** Windows' own touch-to-click promotion for a mouse-only game (T84, 6.109) and the GL
+  kit's switch (0170). Each is measured separately.
+- **Also seen in the pull:** C: has 1.3 GB free of 22 GB (94 % used). No hibernation involved (HiberbootEnabled 0,
+  no hiberfil.sys): the dirty hive is from the session's end, not from Fast Startup.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,

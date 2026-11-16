@@ -146,6 +146,8 @@ typedef struct _DEVICE_CONTEXT
     volatile LONG           DiagReleaseInactive;
     volatile LONG           DiagStatusEvent;
     volatile LONG           DiagI2cLastStatus;
+    volatile LONG           DiagEdgeStatus;      // touchdiag-4: status of the edge-zone command at D0 (1 = not sent)
+    volatile LONG           DiagEdgeZone;        // the edge zone written, in panel pixels (-1 = not sent)
     volatile LONG           DiagSpbMaxUs;
     volatile LONG           DiagSpbSlow;
     volatile LONG           DiagIsrMaxUs;
