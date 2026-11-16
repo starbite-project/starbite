@@ -3383,6 +3383,30 @@ every second, so they are in every entry. The copy says (state 285 s into that b
   set goes to the device of the submit's fd, not the thread's last device) that the candidate d39b83ab lacks;
   found by reading, never run.
 
+### 6.113 A shader cache on disk for the GL kit (T89 staged)
+
+(2026-11-16 17:42; write-up: `docs/WIN11-GPU-SHADER-CACHE.md`. The cache logic, entry format and driver identity ran on the
+Linux host; the Win32 file code is **compiled only**.)
+
+- **Why:** our Mesa builds had `-Dshader-cache=disabled`, so every start recompiles every shader (GLSL to NIR to
+  the Bifrost compiler, on three slow cores). Mesa 26.2 has no disk cache on Windows at all: meson refuses the
+  option there, `disk_cache_os.c` is a TODO, and Panfrost's driver id comes from an ELF note a PE file lacks.
+- **Added** (Mesa branch `sb-cache`, `sb-patches/0174` and `0175`): a Windows backend for the multi-file cache with
+  the same layout and entry bytes as Linux, entries uncompressed (no zlib needed); the driver id = a hash of the PE
+  link stamp, section table and Mesa commit, so every relink invalidates the cache and re-pushing the same kit does
+  not; a damaged or truncated entry is rejected, deleted and rewritten; location
+  `%LOCALAPPDATA%\Starbite\shader-cache`, 64 MiB limit, fails soft; off by `C:\ProgramData\Starbite\glnocache`.
+  0175 fixes a Mesa bug the cache exposed (cached programs never reached `link_shader`, so the second start still
+  recompiled every fragment shader: 96 hits / 48 misses on the host, 144 / 0 with the fix).
+- **Host results:** Mesa's cache unit tests pass on the new backend; a GLES program on Panfrost over drm-shim gives
+  identical output cold, warm, with every entry damaged, a broken index, an unusable directory, two processes, kills
+  and a tiny limit; 300 programs: 362 ms without the cache, 63 ms warm (on the Mac: only the ratio carries over).
+- **T89** (`sbwddm-t89`, T61's drivers, `sb-gdruns.bat`, kit `build/win/gd-kit-ec-cache`): Geometry Dash three
+  times: A cold (cache empty), B warm, C with `glnocache`. Read: the kit's `shader cache: first frame, N s after
+  process start` line of each run and its hit/miss counts (B should have 0 misses).
+- **For sbumd (D3D):** Panfrost's binary cache would be hit as it is once the option is on; still needed there: the
+  `noidvs` switch in the key, a per-half tag for the ARM64X DLL, and DWM / logon excluded at first. Not built.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,

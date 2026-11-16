@@ -24,5 +24,7 @@ exit /b 0
 echo GDRUNS run %1: flags %~2 >> %L%
 for %%F in (%~2) do echo on> %P%\%%F
 call %D%\sb-gd.bat %1
+rem T89: the GL kit's shader cache lines of every run so far (each run is its own log file, named by pid)
+findstr /c:"shader cache" %P%\umdlog\GeometryDash.exe-*.log >> %L% 2>nul
 for %%F in (%~2) do del /f %P%\%%F > nul 2>&1
 exit /b 0

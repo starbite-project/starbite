@@ -1,0 +1,2833 @@
+From e7fcee5da6f0ec4cb31ef01969eedf3c678712d2 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 17:31:45 +0200
+Subject: [PATCH 1/2] 0171: the on-disk shader cache on Windows (GL kit):
+ -Dshader-cache=enabled builds there
+
+Mesa refuses the shader cache on Windows (meson) and has no file code for it
+(disk_cache_os.c: "TODO"); Panfrost names a driver build by its ELF build-id
+note, which a PE image does not have.
+
+- util: disk_cache_os_portable.c, the multi-file cache on a dozen file
+  primitives (Win32 on UTF-8 paths; POSIX only for the unit tests, with
+  -DSB_DISK_CACHE_PORTABLE_TEST). Same directory layout and entry bytes as on
+  Linux. An entry that does not check out is deleted and written again; the
+  size counter is counted again once per process on the cache thread; the
+  time of last use is written by us; default directory
+  %LOCALAPPDATA%\Starbite\shader-cache\mesa_shader_cache.
+- util: no zlib/zstd needed: entries are stored as they are (CRC and length
+  checked on every read).
+- util: disk_cache_pe_image_identifier / disk_cache_get_module_identifier:
+  the identity of a driver build from the PE headers (link time stamp, sizes,
+  section table), the same for the file, the loaded image, and both views of
+  an ARM64X image.
+- panfrost: that identity + Mesa version + git commit is the driver id on
+  Windows; a cache that is off is dropped (state tracker path as before);
+  log lines: on/off with directory, limit and id; counters every 32 lookups,
+  at the first frame and at process end.
+- wgl: C:\ProgramData\Starbite\glnocache or SB_GL_SHADER_CACHE=0 turns it off.
+- tests: cache_test.cpp: damaged entries, driver id change, unusable
+  directory, recount at start, the limit, the PE identity.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ meson.build                                   |   11 +-
+ src/gallium/drivers/panfrost/meson.build      |    1 +
+ src/gallium/drivers/panfrost/pan_context.c    |    6 +
+ src/gallium/drivers/panfrost/pan_context.h    |    5 +
+ src/gallium/drivers/panfrost/pan_disk_cache.c |  181 ++-
+ src/gallium/targets/wgl/wgl.c                 |   14 +
+ src/util/disk_cache.c                         |   47 +-
+ src/util/disk_cache.h                         |   13 +
+ src/util/disk_cache_os.c                      |  185 ++-
+ src/util/disk_cache_os.h                      |   32 +-
+ src/util/disk_cache_os_portable.c             | 1101 +++++++++++++++++
+ src/util/meson.build                          |    1 +
+ src/util/tests/cache_test.cpp                 |  744 +++++++++++
+ 13 files changed, 2305 insertions(+), 36 deletions(-)
+ create mode 100644 src/util/disk_cache_os_portable.c
+
+diff --git a/meson.build b/meson.build
+index 4e1879c..5479ac7 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1171,9 +1171,9 @@ if with_split_debug.allowed() and get_option('debug')
+   add_project_link_arguments('-Wl,--gdb-index', language : ['c', 'cpp'])
+ endif
+ 
+-with_shader_cache = get_option('shader-cache') \
+-  .require(host_machine.system() != 'windows', error_message : 'Shader Cache does not currently work on Windows') \
+-  .allowed()
++# sb-patches/0171: the multi-file shader cache works on Windows
++# (src/util/disk_cache_os_portable.c), so the option is no longer refused there.
++with_shader_cache = get_option('shader-cache').allowed()
+ 
+ if with_shader_cache
+   pre_args += '-DENABLE_SHADER_CACHE'
+@@ -1816,7 +1816,10 @@ with_compression = dep_zlib.found() or dep_zstd.found()
+ if with_compression
+   pre_args += '-DHAVE_COMPRESSION'
+ elif with_shader_cache
+-  error('Shader Cache requires compression')
++  # sb-patches/0171: without zlib and zstd the cache stores its entries as
++  # they are (disk_cache.c sets compression_disabled; an entry is still
++  # checked by its CRC and its length when it is read).
++  message('Shader cache without compression: entries are stored uncompressed')
+ endif
+ 
+ if host_machine.system() == 'windows'
+diff --git a/src/gallium/drivers/panfrost/meson.build b/src/gallium/drivers/panfrost/meson.build
+index 4118b24..e714815 100644
+--- a/src/gallium/drivers/panfrost/meson.build
++++ b/src/gallium/drivers/panfrost/meson.build
+@@ -58,6 +58,7 @@ panfrost_tracepoints = custom_target(
+ )
+ 
+ files_panfrost += panfrost_tracepoints
++files_panfrost += sha1_h   # sb-patches/0171: pan_disk_cache.c names the commit in the cache identity
+ 
+ idep_panfrost_tracepoints = declare_dependency(
+   sources: panfrost_tracepoints,
+diff --git a/src/gallium/drivers/panfrost/pan_context.c b/src/gallium/drivers/panfrost/pan_context.c
+index a585074..043a35f 100644
+--- a/src/gallium/drivers/panfrost/pan_context.c
++++ b/src/gallium/drivers/panfrost/pan_context.c
+@@ -102,6 +102,12 @@ panfrost_flush(struct pipe_context *pipe, struct pipe_fence_handle **fence,
+    /* Submit all pending jobs */
+    panfrost_flush_all_batches(ctx, "Gallium flush");
+ 
++#ifdef _WIN32
++   /* sb-patches/0171: the shader cache says what it did until the first frame */
++   if (flags & PIPE_FLUSH_END_OF_FRAME)
++      panfrost_disk_cache_first_frame(pan_screen(pipe->screen));
++#endif
++
+    if (fence) {
+       struct pipe_fence_handle *f = panfrost_fence_create(ctx);
+       pipe->screen->fence_reference(pipe->screen, fence, NULL);
+diff --git a/src/gallium/drivers/panfrost/pan_context.h b/src/gallium/drivers/panfrost/pan_context.h
+index fab54b4..d72313a 100644
+--- a/src/gallium/drivers/panfrost/pan_context.h
++++ b/src/gallium/drivers/panfrost/pan_context.h
+@@ -500,6 +500,11 @@ bool panfrost_disk_cache_retrieve(
+ 
+ void panfrost_disk_cache_init(struct panfrost_screen *screen);
+ 
++#ifdef _WIN32
++/* sb-patches/0171: one log line with the cache counters at the first complete frame */
++void panfrost_disk_cache_first_frame(struct panfrost_screen *screen);
++#endif
++
+ bool panfrost_nir_remove_fragcolor_stores(nir_shader *s, unsigned nr_cbufs);
+ 
+ bool panfrost_nir_lower_sysvals(nir_shader *s, unsigned arch,
+diff --git a/src/gallium/drivers/panfrost/pan_disk_cache.c b/src/gallium/drivers/panfrost/pan_disk_cache.c
+index b192093..bdb159d 100644
+--- a/src/gallium/drivers/panfrost/pan_disk_cache.c
++++ b/src/gallium/drivers/panfrost/pan_disk_cache.c
+@@ -22,8 +22,105 @@
+ static bool debug = false;
+ #endif
+ 
++#ifdef _WIN32
++/* sb-patches/0171: the on-disk shader cache on Windows, and what it says in the log (stderr, which the shim sends to
++ * C:\ProgramData\Starbite\umdlog when that folder exists):
++ *
++ *  - one line when the screen is made: on or off, the directory, the size limit, the driver identity;
++ *  - one line with the counters at every 32nd compiled-shader lookup, at the first frame, and when the process ends
++ *    (with the cache off: the first-frame line alone, so that an on/off comparison has the same time in both logs).
++ *
++ * "lookups" counts every disk_cache_get of the process: the linked GLSL programs of the GL state tracker and the
++ * compiled shaders of this file. "compiled shaders" are the lookups of this file alone, with the time the hits took
++ * to read and the time the misses took to compile (the Bifrost compiler: the work a hit saves).
++ */
++#include <stdlib.h>
++#include <windows.h>
++
++#include "util/u_atomic.h"
++
++static double
++sb_cache_process_seconds(void)
++{
++   FILETIME made, gone, kernel, user, now;
++   if (!GetProcessTimes(GetCurrentProcess(), &made, &gone, &kernel, &user))
++      return 0.0;
++   GetSystemTimeAsFileTime(&now);
++   uint64_t a = ((uint64_t)made.dwHighDateTime << 32) | made.dwLowDateTime;
++   uint64_t b = ((uint64_t)now.dwHighDateTime << 32) | now.dwLowDateTime;
++   return b > a ? (double)(b - a) / 1e7 : 0.0;
++}
++
++#if defined(ENABLE_SHADER_CACHE)
++#include "util/disk_cache_os.h" /* struct disk_cache: the path, the limit and the counters */
++#include "util/os_time.h"
++#include "c11/threads.h"
++#include "git_sha1.h"
++
++static struct {
++   int on;                     /* a screen has a cache */
++   unsigned hits, misses;      /* compiled shaders */
++   int64_t read_ns, compile_ns;
++   unsigned all_hits, all_misses, puts; /* the cache's own counters, as last seen */
++} sb_cache;
++
++static thread_local int64_t sb_cache_miss_start;
++
++static void
++sb_cache_log(const char *when)
++{
++   fprintf(stderr,
++           "sbumd: shader cache: %s, %.1f s after process start: %u lookups, %u hits, %u misses; compiled shaders: "
++           "%u hits (%.0f ms reading), %u misses (%.0f ms compiling); %u entries written\n",
++           when, sb_cache_process_seconds(), sb_cache.all_hits + sb_cache.all_misses, sb_cache.all_hits,
++           sb_cache.all_misses, sb_cache.hits, (double)p_atomic_read(&sb_cache.read_ns) / 1e6, sb_cache.misses,
++           (double)p_atomic_read(&sb_cache.compile_ns) / 1e6, sb_cache.puts);
++   fflush(stderr);
++}
++
++static void
++sb_cache_seen(struct disk_cache *cache)
++{
++   sb_cache.all_hits = cache->stats.hits;
++   sb_cache.all_misses = cache->stats.misses;
++   sb_cache.puts = cache->stats.puts;
++}
++
++static void
++sb_cache_at_exit(void)
++{
++   /* the counters as last seen: the screen and its cache may be gone by now */
++   if (sb_cache.on)
++      sb_cache_log("process end");
++}
++#endif /* ENABLE_SHADER_CACHE */
++
++/* the first PIPE_FLUSH_END_OF_FRAME of the process (panfrost_flush): how far the process was when its first frame
++ * was complete, and what the cache had done until then */
++void
++panfrost_disk_cache_first_frame(struct panfrost_screen *screen)
++{
++   static int done;
++
++   if (done || p_atomic_xchg(&done, 1))
++      return;
++
++#ifdef ENABLE_SHADER_CACHE
++   if (screen->disk_cache) {
++      sb_cache_seen(screen->disk_cache);
++      sb_cache_log("first frame");
++      return;
++   }
++#endif
++   fprintf(stderr, "sbumd: shader cache: off; first frame, %.1f s after process start\n",
++           sb_cache_process_seconds());
++   fflush(stderr);
++}
++#endif /* _WIN32 */
++
+ extern int midgard_debug;
+ extern int bifrost_debug;
++void bifrost_init_debug_options(void); /* sb-patches/0171: src/panfrost/compiler/bifrost/bi_debug.c */
+ 
+ /**
+  * Compute a disk cache key for the given uncompiled shader and shader key.
+@@ -60,6 +157,15 @@ panfrost_disk_cache_store(struct disk_cache *cache,
+ 
+    PAN_TRACE_FUNC(PAN_TRACE_GL_DISK_CACHE);
+ 
++#ifdef _WIN32
++   /* sb-patches/0171: a store follows a miss on the same thread (panfrost_shader_get); between the two the shader
++    * was compiled */
++   if (sb_cache_miss_start) {
++      p_atomic_add(&sb_cache.compile_ns, os_time_get_nano() - sb_cache_miss_start);
++      sb_cache_miss_start = 0;
++   }
++#endif
++
+    cache_key cache_key;
+    panfrost_disk_cache_compute_key(cache, uncompiled, key, cache_key);
+ 
+@@ -113,12 +219,33 @@ panfrost_disk_cache_retrieve(struct disk_cache *cache,
+       fprintf(stderr, "[mesa disk cache] retrieving %s: ", blake3);
+    }
+ 
++#ifdef _WIN32
++   const int64_t sb_start = os_time_get_nano(); /* sb-patches/0171 */
++#endif
++
+    size_t size;
+    void *buffer = disk_cache_get(cache, cache_key, &size);
+ 
+    if (debug)
+       fprintf(stderr, "%s\n", buffer ? "found" : "missing");
+ 
++#ifdef _WIN32
++   {  /* sb-patches/0171: count, and say where we are at every 32nd lookup */
++      const int64_t now = os_time_get_nano();
++      unsigned n;
++      if (buffer) {
++         p_atomic_add(&sb_cache.read_ns, now - sb_start);
++         n = p_atomic_inc_return(&sb_cache.hits) + sb_cache.misses;
++      } else {
++         sb_cache_miss_start = now; /* panfrost_disk_cache_store ends the measurement */
++         n = p_atomic_inc_return(&sb_cache.misses) + sb_cache.hits;
++      }
++      sb_cache_seen(cache);
++      if (n % 32 == 0)
++         sb_cache_log("so far");
++   }
++#endif
++
+    if (!buffer)
+       return false;
+ 
+@@ -150,7 +277,29 @@ panfrost_disk_cache_init(struct panfrost_screen *screen)
+ {
+ #ifdef ENABLE_SHADER_CACHE
+    const char *renderer = screen->base.get_name(&screen->base);
++   char timestamp[BLAKE3_HEX_LEN];
+ 
++#ifdef _WIN32
++   /* sb-patches/0171: a PE image has no build-id note. What names this build of the driver: the identity of the
++    * module this function is in (its link time stamp and section layout, util/disk_cache_os.c) and the Mesa version
++    * with the git commit. Every cache key starts from this, so shaders compiled by another build are never found.
++    * Without an identity there is no cache. */
++   uint32_t sb_link_stamp = 0;
++   {
++      static const char version[] = PACKAGE_VERSION MESA_GIT_SHA1;
++      blake3_hasher hasher;
++      blake3_hash id;
++
++      _mesa_blake3_init(&hasher);
++      if (!disk_cache_get_module_identifier(panfrost_disk_cache_init, &hasher, &sb_link_stamp)) {
++         fprintf(stderr, "sbumd: shader cache: off (no build identity for this module)\n");
++         return;
++      }
++      _mesa_blake3_update(&hasher, version, sizeof(version));
++      _mesa_blake3_final(&hasher, id);
++      _mesa_blake3_format(timestamp, id);
++   }
++#else
+    const struct build_id_note *note =
+       build_id_find_nhdr_for_addr(panfrost_disk_cache_init);
+    assert(note && build_id_length(note) == BUILD_ID_EXPECTED_HASH_LENGTH); /* sha1 */
+@@ -158,13 +307,43 @@ panfrost_disk_cache_init(struct panfrost_screen *screen)
+    const uint8_t *id_sha1 = build_id_data(note);
+    assert(id_sha1);
+ 
+-   char timestamp[BLAKE3_HEX_LEN];
+    _mesa_sha1_format(timestamp, id_sha1);
++#endif
++
++   /* sb-patches/0171: BIFROST_MESA_DEBUG is read at the first compile, which is after this: read it now, or a
++    * cache filled without it would serve its shaders to a run with (say) BIFROST_MESA_DEBUG=noopt. */
++   bifrost_init_debug_options();
+ 
+    /* Consider any flags affecting the compile when caching */
+    uint64_t driver_flags = screen->dev.debug;
+    driver_flags |= ((uint64_t)(midgard_debug | bifrost_debug) << 32);
+ 
+    screen->disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
++
++#ifdef _WIN32
++   {  /* sb-patches/0171: a cache that is switched off (MESA_SHADER_CACHE_DISABLE, which the GL target sets for the
++       * flag file glnocache) or has no usable directory comes back as an object that stores nothing. Drop it: with
++       * no cache at all the state tracker takes exactly the path of the builds without -Dshader-cache. */
++      struct disk_cache *cache = screen->disk_cache;
++      if (cache && cache->path_init_failed) {
++         disk_cache_destroy(cache);
++         screen->disk_cache = cache = NULL;
++      }
++      if (cache) {
++         cache->stats.enabled = true;
++         fprintf(stderr,
++                 "sbumd: shader cache: on, %s, limit %llu MiB, driver id %s (link stamp 0x%08x, Mesa "
++                 PACKAGE_VERSION MESA_GIT_SHA1 "), flags 0x%llx; %.1f s after process start\n",
++                 cache->path, (unsigned long long)(cache->max_size >> 20), timestamp, (unsigned)sb_link_stamp,
++                 (unsigned long long)driver_flags, sb_cache_process_seconds());
++         if (!p_atomic_xchg(&sb_cache.on, 1))
++            atexit(sb_cache_at_exit);
++      } else {
++         fprintf(stderr, "sbumd: shader cache: off (switched off, or its directory cannot be used); %.1f s after "
++                         "process start\n", sb_cache_process_seconds());
++      }
++      fflush(stderr);
++   }
++#endif
+ #endif
+ }
+diff --git a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
+index 96aab4c..fa856eb 100644
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -73,6 +73,7 @@
+ #include <stdlib.h>
+ #include "panfrost/drm/panfrost_drm_public.h"
+ #include "util/driconf.h"
++#include "util/os_misc.h"   /* sb-patches/0171: os_set_option */
+ #include "util/macros.h"
+ #include "util/xmlconfig.h"
+ #include "util/u_inlines.h"
+@@ -110,6 +111,19 @@ wgl_panfrost_create(void)
+       fprintf(stderr, "sbumd: gl present: cached back buffers %s (%s)\n", on ? "on" : "off",
+               e ? "SB_GL_CACHED" : "C:\\ProgramData\\Starbite\\glcached");
+    }
++   /* sb-patches/0171: the on-disk shader cache (%LOCALAPPDATA%\Starbite\shader-cache, util/disk_cache_os_portable.c)
++    * is on unless C:\ProgramData\Starbite\glnocache exists or SB_GL_SHADER_CACHE=0. Off is Mesa's own switch,
++    * read when the screen makes its cache (pan_disk_cache.c says in the log what came of it). */
++   {
++      const char *e = getenv("SB_GL_SHADER_CACHE");
++      int on = e ? e[0] != '0'
++                 : GetFileAttributesA("C:\\ProgramData\\Starbite\\glnocache") == INVALID_FILE_ATTRIBUTES;
++      if (!on) {
++         os_set_option("MESA_SHADER_CACHE_DISABLE", "true", true);
++         fprintf(stderr, "sbumd: gl shader cache: off (%s)\n",
++                 e ? "SB_GL_SHADER_CACHE" : "C:\\ProgramData\\Starbite\\glnocache");
++      }
++   }
+    struct pipe_screen *screen = panfrost_drm_screen_create(fd, &config);
+    _close(fd); /* the screen keeps its own duplicate */
+    return screen;
+diff --git a/src/util/disk_cache.c b/src/util/disk_cache.c
+index 3aaa4a8..73ea830 100644
+--- a/src/util/disk_cache.c
++++ b/src/util/disk_cache.c
+@@ -23,19 +23,23 @@
+ 
+ #ifdef ENABLE_SHADER_CACHE
+ 
++#include "util/detect_os.h"
++
+ #include <ctype.h>
+-#include <ftw.h>
+ #include <string.h>
+ #include <stdlib.h>
+ #include <stdio.h>
+-#include <sys/file.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+-#include <sys/mman.h>
+ #include <fcntl.h>
+ #include <errno.h>
+-#include <dirent.h>
+ #include <inttypes.h>
++#if !DETECT_OS_WINDOWS /* sb-patches/0171: nothing below needs these */
++#include <ftw.h>
++#include <sys/file.h>
++#include <sys/mman.h>
++#include <dirent.h>
++#endif
+ 
+ #include "util/compress.h"
+ #include "util/crc32.h"
+@@ -87,7 +91,16 @@ disk_cache_init_queue(struct disk_cache *cache)
+     * The queue will resize automatically when it's full, so adding new jobs
+     * doesn't stall.
+     */
+-   return util_queue_init(&cache->cache_queue, "disk$", 32, 4,
++#if DISK_CACHE_OS_PORTABLE
++   /* sb-patches/0171: one thread.  Entries are stored as they are, so a job
++    * is file I/O only, and disk_cache_recompute_size_async counts on this
++    * thread without an entry of ours being written meanwhile. */
++   const unsigned num_threads = 1;
++#else
++   const unsigned num_threads = 4;
++#endif
++
++   return util_queue_init(&cache->cache_queue, "disk$", 32, num_threads,
+                           UTIL_QUEUE_INIT_RESIZE_IF_FULL |
+                           UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY |
+                           UTIL_QUEUE_INIT_SET_FULL_THREAD_AFFINITY, NULL);
+@@ -139,6 +152,14 @@ disk_cache_type_create(const char *gpu_name,
+    if (strcmp(driver_id, "make_check_uncompressed") == 0)
+       cache->compression_disabled = true;
+ 
++#ifndef HAVE_COMPRESSION
++   /* sb-patches/0171: a build without zlib and zstd stores entries as they
++    * are.  A build with compression does not take such an entry for one of
++    * its own (and the other way round): the inflate fails, or the length in
++    * the header does not match. */
++   cache->compression_disabled = true;
++#endif
++
+    if (cache_type == DISK_CACHE_SINGLE_FILE) {
+       if (!disk_cache_load_cache_index_foz(local, cache))
+          goto path_fail;
+@@ -168,6 +189,12 @@ disk_cache_type_create(const char *gpu_name,
+    if (!disk_cache_init_queue(cache))
+       goto fail;
+ 
++#if DISK_CACHE_OS_PORTABLE
++   /* sb-patches/0171: see disk_cache_os_portable.c */
++   if (cache->type == DISK_CACHE_MULTI_FILE)
++      disk_cache_recompute_size_async(cache);
++#endif
++
+    cache->path_init_failed = false;
+ 
+  path_fail:
+@@ -493,6 +520,11 @@ blob_put_compressed(struct disk_cache *cache, const cache_key key,
+ {
+    MESA_TRACE_FUNC();
+ 
++#ifndef HAVE_COMPRESSION
++   /* sb-patches/0171: the blob callbacks (EGL_ANDROID_blob_cache) exchange
++    * compressed entries; without a compressor they store nothing. */
++   return;
++#else
+    size_t max_buf = util_compress_max_compressed_len(size);
+    struct blob_cache_entry *entry = malloc(max_buf + sizeof(*entry));
+    if (!entry)
+@@ -514,6 +546,7 @@ blob_put_compressed(struct disk_cache *cache, const cache_key key,
+ 
+ out:
+    free(entry);
++#endif
+ }
+ 
+ static void *
+@@ -522,6 +555,9 @@ blob_get_compressed(struct disk_cache *cache, const cache_key key,
+ {
+    MESA_TRACE_FUNC();
+ 
++#ifndef HAVE_COMPRESSION
++   return NULL;
++#else
+    /* This is what Android EGL defines as the maxValueSize in egl_cache_t
+     * class implementation.
+     */
+@@ -563,6 +599,7 @@ blob_get_compressed(struct disk_cache *cache, const cache_key key,
+    free(entry);
+ 
+    return data;
++#endif
+ }
+ 
+ void
+diff --git a/src/util/disk_cache.h b/src/util/disk_cache.h
+index 94681b7..5ec47f4 100644
+--- a/src/util/disk_cache.h
++++ b/src/util/disk_cache.h
+@@ -30,6 +30,7 @@
+ #include "util/build_id.h"
+ #endif
+ #include <assert.h>
++#include <stddef.h>
+ #include <stdint.h>
+ #include <stdbool.h>
+ #include <sys/stat.h>
+@@ -123,6 +124,12 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
+ #elif DETECT_OS_WINDOWS
+ bool
+ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx);
++
++/* sb-patches/0171: the identity of a build from the PE headers of the loaded
++ * module (see disk_cache_os.c) */
++bool
++disk_cache_get_module_identifier(void *ptr, blake3_hasher *ctx,
++                                 uint32_t *link_stamp);
+ #else
+ static inline bool
+ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
+@@ -131,6 +138,12 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
+ }
+ #endif
+ 
++/* sb-patches/0171: the identity of a build of a PE image from its headers
++ * (disk_cache_os.c; on any host, for the unit tests) */
++bool
++disk_cache_pe_image_identifier(const void *image_start, size_t size,
++                               blake3_hasher *ctx, uint32_t *link_stamp);
++
+ /* Provide inlined stub functions if the shader cache is disabled. */
+ 
+ #ifdef ENABLE_SHADER_CACHE
+diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
+index 15b6a81..acfc74f 100644
+--- a/src/util/disk_cache_os.c
++++ b/src/util/disk_cache_os.c
+@@ -38,6 +38,83 @@
+ #include "util/disk_cache.h"
+ #include "util/disk_cache_os.h"
+ 
++/* sb-patches/0171: what tells one build of a PE image (a Windows DLL) from
++ * the next, from its headers: the link time stamp, the size of the image and
++ * of its code and data, and the name, place and size of every section.  The
++ * linker writes a new time stamp at every link (lld-link and link.exe; with
++ * /Brepro it is a hash of the output instead), so a rebuilt driver never
++ * keeps the identity of the one before.
++ *
++ * `image` is the start of the image as the loader maps it, or the start of
++ * the file (the headers are the same bytes); `size` is how much of it may be
++ * read.  Fields that the loader rewrites in memory are left out (ImageBase;
++ * for ARM64X images the machine and the entry point), so a loaded module
++ * gives the same value in every process, and the same value as its file.
++ * Read byte by byte at the offsets of the PE format, without <windows.h>:
++ * the unit tests run this on a Linux build host against real DLLs.
++ *
++ * *link_stamp (optional) receives the raw time stamp for logs: it can be
++ * compared with what llvm-readobj --file-headers prints for a file.
++ */
++static bool
++pe_read(const uint8_t *image, size_t size, size_t at, void *out, size_t n)
++{
++   if (at > size || n > size - at)
++      return false;
++   memcpy(out, image + at, n);
++   return true;
++}
++
++bool
++disk_cache_pe_image_identifier(const void *image_start, size_t size,
++                               blake3_hasher *ctx, uint32_t *link_stamp)
++{
++   const uint8_t *image = (const uint8_t *)image_start;
++   uint16_t mz, num_sections, optional_size;
++   uint32_t pe_at, signature;
++
++   if (!pe_read(image, size, 0, &mz, 2) || mz != 0x5a4d /* MZ */ ||
++       !pe_read(image, size, 0x3c, &pe_at, 4) ||
++       !pe_read(image, size, pe_at, &signature, 4) ||
++       signature != 0x00004550 /* PE\0\0 */)
++      return false;
++
++   const size_t file_header = (size_t)pe_at + 4;  /* IMAGE_FILE_HEADER */
++   const size_t optional = file_header + 20;      /* IMAGE_OPTIONAL_HEADER */
++
++   /* TimeDateStamp, SizeOfCode, SizeOfInitializedData, SizeOfImage, CheckSum
++    * (the last two are at the same place in PE32 and PE32+), and the count
++    * of sections */
++   uint32_t fields[6];
++   if (!pe_read(image, size, file_header + 2, &num_sections, 2) ||
++       !pe_read(image, size, file_header + 4, &fields[0], 4) ||
++       !pe_read(image, size, file_header + 16, &optional_size, 2) ||
++       optional_size < 68 ||
++       !pe_read(image, size, optional + 4, &fields[1], 4) ||
++       !pe_read(image, size, optional + 8, &fields[2], 4) ||
++       !pe_read(image, size, optional + 56, &fields[3], 4) ||
++       !pe_read(image, size, optional + 64, &fields[4], 4))
++      return false;
++   fields[5] = num_sections;
++
++   /* every IMAGE_SECTION_HEADER (40 bytes) starts with Name[8], VirtualSize,
++    * VirtualAddress, SizeOfRawData */
++   const size_t sections = optional + optional_size;
++   uint8_t probe;
++   if (num_sections == 0 ||
++       !pe_read(image, size, sections + 40 * (size_t)num_sections - 1, &probe, 1))
++      return false;
++
++   _mesa_blake3_update(ctx, fields, sizeof(fields));
++   for (unsigned i = 0; i < num_sections; i++)
++      _mesa_blake3_update(ctx, image + sections + 40 * (size_t)i, 20);
++
++   if (link_stamp)
++      *link_stamp = fields[0];
++
++   return true;
++}
++
+ #if DETECT_OS_WINDOWS
+ 
+ #include <windows.h>
+@@ -77,14 +154,54 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
+    return ret;
+ }
+ 
++/* sb-patches/0171: the identity of this build of the module that `ptr` points
++ * into, from the PE headers of the loaded image
++ * (disk_cache_pe_image_identifier above).  Unlike the file time above it does
++ * not change when the same file is copied to the machine again, which would
++ * throw a good cache away.  The file time is still mixed in when the image
++ * has no usable link time stamp.
++ */
++bool
++disk_cache_get_module_identifier(void *ptr, blake3_hasher *ctx,
++                                 uint32_t *link_stamp)
++{
++   HMODULE mod = NULL;
++   GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                      (LPCWSTR)ptr,
++                      &mod);
++   if (!mod)
++      return false;
++
++   /* a module handle is the address the image is mapped at; the loader has
++    * checked the headers, so no length to hold them against */
++   uint32_t stamp = 0;
++   if (!disk_cache_pe_image_identifier(mod, SIZE_MAX, ctx, &stamp))
++      return false;
++
++   if (link_stamp)
++      *link_stamp = stamp;
++
++   if (stamp == 0 || stamp == 0xffffffffu)
++      return disk_cache_get_function_identifier(ptr, ctx);
++
++   return true;
++}
++
+ #endif
+ 
+ #ifdef ENABLE_SHADER_CACHE
+ 
+-#if DETECT_OS_WINDOWS
+-/* TODO: implement disk cache support on windows */
++#include <stdio.h>
+ 
+-#else
++#include "util/blob.h"
++#include "util/ralloc.h"
++
++/* sb-patches/0171: the blocks marked !DISK_CACHE_OS_PORTABLE are the POSIX
++ * file handling; disk_cache_os_portable.c has the same functions for Windows.
++ * What is outside those blocks (the bytes of an entry, the switches, the
++ * single-file and database wrappers) is shared.
++ */
++#if !DISK_CACHE_OS_PORTABLE
+ 
+ #include <dirent.h>
+ #include <errno.h>
+@@ -624,9 +741,11 @@ disk_cache_evict_item(struct disk_cache *cache, char *filename)
+       p_atomic_add(&cache->size->value, - (uint64_t)sb.st_blocks * 512);
+ }
+ 
+-static void *
+-parse_and_validate_cache_item(struct disk_cache *cache, void *cache_item,
+-                              size_t cache_item_size, size_t *size)
++#endif /* !DISK_CACHE_OS_PORTABLE */
++
++void *
++disk_cache_parse_and_validate_item(struct disk_cache *cache, void *cache_item,
++                                   size_t cache_item_size, size_t *size)
+ {
+    uint8_t *uncompressed_data = NULL;
+ 
+@@ -679,20 +798,27 @@ parse_and_validate_cache_item(struct disk_cache *cache, void *cache_item,
+    if (cf_data->crc32 != util_hash_crc32(data, cache_data_size))
+       goto fail;
+ 
++   /* sb-patches/0171: an entry stored as it is must have the length its
++    * header says, checked before that length is trusted for the malloc */
++   if (cache->compression_disabled &&
++       cf_data->uncompressed_size != cache_data_size)
++      goto fail;
++
+    /* Uncompress the cache data */
+    uncompressed_data = malloc(cf_data->uncompressed_size);
+    if (!uncompressed_data)
+       goto fail;
+ 
+    if (cache->compression_disabled) {
+-      if (cf_data->uncompressed_size != cache_data_size)
+-         goto fail;
+-
+       memcpy(uncompressed_data, data, cache_data_size);
+    } else {
++#ifdef HAVE_COMPRESSION
+       if (!util_compress_inflate(data, cache_data_size, uncompressed_data,
+                                  cf_data->uncompressed_size))
+          goto fail;
++#else
++      goto fail;
++#endif
+    }
+ 
+    if (size)
+@@ -706,6 +832,8 @@ parse_and_validate_cache_item(struct disk_cache *cache, void *cache_item,
+    return NULL;
+ }
+ 
++#if !DISK_CACHE_OS_PORTABLE
++
+ void *
+ disk_cache_load_item(struct disk_cache *cache, char *filename, size_t *size)
+ {
+@@ -729,7 +857,7 @@ disk_cache_load_item(struct disk_cache *cache, char *filename, size_t *size)
+       goto fail;
+ 
+     uint8_t *uncompressed_data =
+-       parse_and_validate_cache_item(cache, data, sb.st_size, size);
++       disk_cache_parse_and_validate_item(cache, data, sb.st_size, size);
+    if (!uncompressed_data)
+       goto fail;
+ 
+@@ -769,13 +897,14 @@ disk_cache_get_cache_filename(struct disk_cache *cache, const cache_key key)
+    return filename;
+ }
+ 
+-static bool
+-create_cache_item_header_and_blob(struct disk_cache_put_job *dc_job,
+-                                  struct blob *cache_blob)
++#endif /* !DISK_CACHE_OS_PORTABLE */
++
++bool
++disk_cache_create_item_blob(struct disk_cache_put_job *dc_job,
++                            struct blob *cache_blob)
+ {
+ 
+    /* Compress the cache item data */
+-   size_t max_buf = util_compress_max_compressed_len(dc_job->size);
+    size_t compressed_size;
+    void *compressed_data;
+ 
+@@ -783,6 +912,8 @@ create_cache_item_header_and_blob(struct disk_cache_put_job *dc_job,
+       compressed_size = dc_job->size;
+       compressed_data = dc_job->data;
+    } else {
++#ifdef HAVE_COMPRESSION
++      size_t max_buf = util_compress_max_compressed_len(dc_job->size);
+       compressed_data = malloc(max_buf);
+       if (compressed_data == NULL)
+          return false;
+@@ -791,6 +922,10 @@ create_cache_item_header_and_blob(struct disk_cache_put_job *dc_job,
+                               compressed_data, max_buf);
+       if (compressed_size == 0)
+          goto fail;
++#else
++      /* sb-patches/0171: disk_cache.c never leaves compression on then */
++      return false;
++#endif
+    }
+ 
+    /* Copy the driver_keys_blob, this can be used find information about the
+@@ -845,6 +980,8 @@ create_cache_item_header_and_blob(struct disk_cache_put_job *dc_job,
+    return false;
+ }
+ 
++#if !DISK_CACHE_OS_PORTABLE
++
+ void
+ disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
+                               char *filename)
+@@ -910,7 +1047,7 @@ disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
+     * not in the cache, and is also not being written out to the cache
+     * by some other process.
+     */
+-   if (!create_cache_item_header_and_blob(dc_job, &cache_blob)) {
++   if (!disk_cache_create_item_blob(dc_job, &cache_blob)) {
+       unlink(filename_tmp);
+       goto done;
+    }
+@@ -1076,6 +1213,8 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
+    return path;
+ }
+ 
++#endif /* !DISK_CACHE_OS_PORTABLE */
++
+ bool
+ disk_cache_enabled()
+ {
+@@ -1126,7 +1265,7 @@ disk_cache_load_item_foz(struct disk_cache *cache, const cache_key key,
+       return NULL;
+ 
+    uint8_t *uncompressed_data =
+-       parse_and_validate_cache_item(cache, cache_item, cache_tem_size, size);
++       disk_cache_parse_and_validate_item(cache, cache_item, cache_tem_size, size);
+    free(cache_item);
+ 
+    return uncompressed_data;
+@@ -1138,7 +1277,7 @@ disk_cache_write_item_to_disk_foz(struct disk_cache_put_job *dc_job)
+    struct blob cache_blob;
+    blob_init(&cache_blob);
+ 
+-   if (!create_cache_item_header_and_blob(dc_job, &cache_blob))
++   if (!disk_cache_create_item_blob(dc_job, &cache_blob))
+       return false;
+ 
+    bool r = foz_write_entry(&dc_job->cache->foz_db, dc_job->key,
+@@ -1156,6 +1295,8 @@ disk_cache_load_cache_index_foz(void *mem_ctx, struct disk_cache *cache)
+ }
+ 
+ 
++#if !DISK_CACHE_OS_PORTABLE
++
+ void
+ disk_cache_touch_cache_user_marker(char *path)
+ {
+@@ -1270,6 +1411,8 @@ disk_cache_destroy_mmap(struct disk_cache *cache)
+    munmap(cache->index_reserve, cache->index_reserve_size);
+ }
+ 
++#endif /* !DISK_CACHE_OS_PORTABLE */
++
+ void *
+ disk_cache_db_load_item(struct disk_cache *cache, const cache_key key,
+                         size_t *size)
+@@ -1281,7 +1424,7 @@ disk_cache_db_load_item(struct disk_cache *cache, const cache_key key,
+       return NULL;
+ 
+    uint8_t *uncompressed_data =
+-       parse_and_validate_cache_item(cache, cache_item, cache_tem_size, size);
++       disk_cache_parse_and_validate_item(cache, cache_item, cache_tem_size, size);
+    free(cache_item);
+ 
+    return uncompressed_data;
+@@ -1293,7 +1436,7 @@ disk_cache_db_write_item_to_disk(struct disk_cache_put_job *dc_job)
+    struct blob cache_blob;
+    blob_init(&cache_blob);
+ 
+-   if (!create_cache_item_header_and_blob(dc_job, &cache_blob))
++   if (!disk_cache_create_item_blob(dc_job, &cache_blob))
+       return false;
+ 
+    bool r = mesa_cache_db_multipart_entry_write(&dc_job->cache->cache_db,
+@@ -1310,6 +1453,8 @@ disk_cache_db_load_cache_index(void *mem_ctx, struct disk_cache *cache)
+    return mesa_cache_db_multipart_open(&cache->cache_db, cache->path);
+ }
+ 
++#if !DISK_CACHE_OS_PORTABLE
++
+ static void
+ delete_dir(const char* path)
+ {
+@@ -1372,6 +1517,6 @@ disk_cache_delete_old_cache(void)
+ finish:
+    ralloc_free(ctx);
+ }
+-#endif
++#endif /* !DISK_CACHE_OS_PORTABLE */
+ 
+ #endif /* ENABLE_SHADER_CACHE */
+diff --git a/src/util/disk_cache_os.h b/src/util/disk_cache_os.h
+index 40251f3..281445a 100644
+--- a/src/util/disk_cache_os.h
++++ b/src/util/disk_cache_os.h
+@@ -27,12 +27,19 @@
+ #include "util/u_queue.h"
+ #include "util/disk_cache.h"
+ 
+-#if DETECT_OS_WINDOWS
+-
+-/* TODO: implement disk cache support on windows */
+-
++/* sb-patches/0171: on Windows the multi-file cache is implemented by
++ * disk_cache_os_portable.c in place of the POSIX code in disk_cache_os.c (the
++ * single-file and the database cache stay POSIX only: their Windows stubs
++ * fail, which turns the cache off).  SB_DISK_CACHE_PORTABLE_TEST selects the
++ * same code on a POSIX build host, for the unit tests.
++ */
++#if DETECT_OS_WINDOWS || defined(SB_DISK_CACHE_PORTABLE_TEST)
++#define DISK_CACHE_OS_PORTABLE 1
+ #else
++#define DISK_CACHE_OS_PORTABLE 0
++#endif
+ 
++#include "util/blob.h"
+ #include "util/fossilize_db.h"
+ #include "util/mesa_cache_db.h"
+ #include "util/mesa_cache_db_multipart.h"
+@@ -102,6 +109,7 @@ struct disk_cache {
+       bool enabled;
+       unsigned hits;
+       unsigned misses;
++      unsigned puts; /* sb-patches/0171: entries written (portable backend) */
+    } stats;
+ 
+    /* Internal RO FOZ cache for combined use of RO and RW caches. */
+@@ -193,10 +201,22 @@ disk_cache_db_load_cache_index(void *mem_ctx, struct disk_cache *cache);
+ void
+ disk_cache_delete_old_cache(void);
+ 
+-#ifdef __cplusplus
+-}
++/* sb-patches/0171: the bytes of an entry, shared by both backends */
++void *
++disk_cache_parse_and_validate_item(struct disk_cache *cache, void *cache_item,
++                                   size_t cache_item_size, size_t *size);
++
++bool
++disk_cache_create_item_blob(struct disk_cache_put_job *dc_job,
++                            struct blob *cache_blob);
++
++#if DISK_CACHE_OS_PORTABLE
++void
++disk_cache_recompute_size_async(struct disk_cache *cache);
+ #endif
+ 
++#ifdef __cplusplus
++}
+ #endif
+ 
+ #endif /* DISK_CACHE_OS_H */
+diff --git a/src/util/disk_cache_os_portable.c b/src/util/disk_cache_os_portable.c
+new file mode 100644
+index 0000000..8a2441b
+--- /dev/null
++++ b/src/util/disk_cache_os_portable.c
+@@ -0,0 +1,1101 @@
++/*
++ * Copyright © 2014 Intel Corporation
++ * SPDX-License-Identifier: MIT
++ *
++ * sb-patches/0171: the multi-file disk cache on systems without the POSIX
++ * calls that disk_cache_os.c is written with (Windows).
++ *
++ * The cache directory has the same layout as on Linux
++ * (<dir>/index, <dir>/xx/<rest of the key in hex>), and an entry has the same
++ * bytes (disk_cache_create_item_blob / disk_cache_parse_and_validate_item in
++ * disk_cache_os.c).  Everything in this file is written on top of a dozen
++ * file primitives (dc_*), which exist twice:
++ *
++ *  - for Windows, with Win32 calls on UTF-8 paths;
++ *  - for POSIX, only so that the rest of this file can be run by the unit
++ *    tests (src/util/tests/cache_test.cpp) on a build host: compile with
++ *    -DSB_DISK_CACHE_PORTABLE_TEST.  Without that define a POSIX build uses
++ *    disk_cache_os.c as before and this file is empty.
++ *
++ * Differences from disk_cache_os.c, all on purpose:
++ *
++ *  - an entry that does not check out when it is read (cut short, damaged,
++ *    not ours) is deleted, so that it is written again; disk_cache_os.c
++ *    leaves it and the entry stays a miss for ever;
++ *  - the total size in the index is counted again once per process, on the
++ *    cache's own thread (disk_cache_recompute_size_async): the counter lives
++ *    in a mapped file, and a machine that is switched off or crashes loses
++ *    the last updates, which would add up to a cache that is larger than its
++ *    limit says;
++ *  - the time of last use is written by us (at most once a day per entry):
++ *    Windows may not keep last-access times;
++ *  - a file counts with its size rounded up to 4 KiB (there is no st_blocks).
++ */
++
++#include "util/disk_cache_os.h"
++
++#if defined(ENABLE_SHADER_CACHE) && DISK_CACHE_OS_PORTABLE
++
++#include <assert.h>
++#include <inttypes.h>
++#include <stdarg.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "util/blob.h"
++#include "util/macros.h"
++#include "util/os_misc.h"
++#include "util/ralloc.h"
++#include "util/rand_xor.h"
++#include "util/u_atomic.h"
++#include "util/u_debug.h"
++#include "util/u_math.h"
++
++/* What one file is taken to cost on the volume. */
++#define DC_CLUSTER 4096u
++
++/* A file larger than this is not an entry of ours (a linked GLSL program is
++ * some hundred KiB at most); it is not read into memory. */
++#define DC_MAX_ENTRY ((uint64_t)64 << 20)
++
++/* File times are counted in steps of 100 ns (what Windows keeps), so that
++ * entries written in one burst still have an order for the eviction. */
++#define DC_TICKS_PER_SECOND ((int64_t)10000000)
++
++/* A .tmp file older than this was left behind by a writer that died. */
++#define DC_STALE_TMP_AGE (60 * 60 * DC_TICKS_PER_SECOND)
++
++/* The time of last use of an entry is brought up to date when it is older
++ * than this (one metadata write a day per entry, not one per read). */
++#define DC_USE_TIME_STEP (24 * 60 * 60 * DC_TICKS_PER_SECOND)
++
++/* Where the cache lives on Windows when MESA_SHADER_CACHE_DIR is not set:
++ * %LOCALAPPDATA%\<this>\mesa_shader_cache */
++#define DC_WIN_DEFAULT_SUBDIR "Starbite\\shader-cache"
++
++struct dc_dirent {
++   const char *name;   /* UTF-8, without the directory */
++   bool is_dir;
++   uint64_t size;
++   int64_t use_time;   /* last access, in 100 ns steps */
++   int64_t write_time; /* last write, in 100 ns steps */
++};
++
++typedef void (*dc_list_cb)(const struct dc_dirent *e, void *data);
++
++enum dc_read {
++   DC_READ_NONE, /* no such file, or it cannot be opened */
++   DC_READ_OK,   /* *data (malloc) and *size are set */
++   DC_READ_BAD,  /* the file is there but cannot be an entry; *size is set */
++};
++
++enum dc_write {
++   DC_WRITE_DONE,
++   DC_WRITE_SKIPPED, /* the entry exists, another writer has it, or an error */
++   DC_WRITE_NO_DIR,  /* the directory of the file does not exist */
++};
++
++static char *
++dc_asprintf(const char *fmt, ...)
++{
++   va_list ap;
++   va_start(ap, fmt);
++   int n = vsnprintf(NULL, 0, fmt, ap);
++   va_end(ap);
++   if (n < 0)
++      return NULL;
++
++   char *s = malloc((size_t)n + 1);
++   if (s) {
++      va_start(ap, fmt);
++      vsnprintf(s, (size_t)n + 1, fmt, ap);
++      va_end(ap);
++   }
++   return s;
++}
++
++static uint64_t
++dc_cost(uint64_t file_size)
++{
++   return align64(MAX2(file_size, 1), DC_CLUSTER);
++}
++
++/* ------------------------------------------------------------------------
++ * The file primitives
++ * ------------------------------------------------------------------------ */
++
++#if DETECT_OS_WINDOWS
++
++#include <windows.h>
++
++/* A UTF-8 path as the wide string the W calls take (malloc), or NULL. */
++static WCHAR *
++dc_wide(const char *path)
++{
++   int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
++   if (n <= 0)
++      return NULL;
++
++   WCHAR *w = malloc((size_t)n * sizeof(WCHAR));
++   if (w && MultiByteToWideChar(CP_UTF8, 0, path, -1, w, n) != n) {
++      free(w);
++      w = NULL;
++   }
++   return w;
++}
++
++/* FILETIME: 100 ns steps since 1601. */
++static int64_t
++dc_ticks(FILETIME ft)
++{
++   return (int64_t)(((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime);
++}
++
++static int64_t
++dc_now(void)
++{
++   FILETIME ft;
++   GetSystemTimeAsFileTime(&ft);
++   return dc_ticks(ft);
++}
++
++static bool
++dc_is_dir(const char *path)
++{
++   WCHAR *w = dc_wide(path);
++   if (!w)
++      return false;
++
++   DWORD a = GetFileAttributesW(w);
++   free(w);
++   return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
++}
++
++/* True when `path` is a directory afterwards (its parent must exist). */
++static bool
++dc_mkdir(const char *path)
++{
++   WCHAR *w = dc_wide(path);
++   if (!w)
++      return false;
++
++   bool ok = CreateDirectoryW(w, NULL) ||
++             GetLastError() == ERROR_ALREADY_EXISTS;
++   free(w);
++   return ok && dc_is_dir(path);
++}
++
++/* True (and *size) when `path` is a file. */
++static bool
++dc_file_size(const char *path, uint64_t *size)
++{
++   WCHAR *w = dc_wide(path);
++   if (!w)
++      return false;
++
++   WIN32_FILE_ATTRIBUTE_DATA d;
++   bool ok = GetFileAttributesExW(w, GetFileExInfoStandard, &d) &&
++             !(d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
++   free(w);
++   if (ok)
++      *size = ((uint64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow;
++   return ok;
++}
++
++static bool
++dc_delete(const char *path)
++{
++   WCHAR *w = dc_wide(path);
++   if (!w)
++      return false;
++
++   bool ok = DeleteFileW(w);
++   free(w);
++   return ok;
++}
++
++/* Calls cb for everything in the directory except "." and "..". */
++static bool
++dc_list(const char *path, dc_list_cb cb, void *data)
++{
++   char *pattern = dc_asprintf("%s/*", path);
++   WCHAR *w = pattern ? dc_wide(pattern) : NULL;
++   free(pattern);
++   if (!w)
++      return false;
++
++   WIN32_FIND_DATAW fd;
++   HANDLE h = FindFirstFileW(w, &fd);
++   free(w);
++   if (h == INVALID_HANDLE_VALUE)
++      return false;
++
++   do {
++      char name[MAX_PATH * 3 + 1];
++      if (!WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name,
++                               sizeof(name), NULL, NULL))
++         continue;
++      if (!strcmp(name, ".") || !strcmp(name, ".."))
++         continue;
++
++      struct dc_dirent e = {
++         .name = name,
++         .is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
++         .size = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow,
++         .use_time = dc_ticks(fd.ftLastAccessTime),
++         .write_time = dc_ticks(fd.ftLastWriteTime),
++      };
++      cb(&e, data);
++   } while (FindNextFileW(h, &fd));
++
++   FindClose(h);
++   return true;
++}
++
++/* Reads a whole file, and notes that it was used. */
++static enum dc_read
++dc_read_file(const char *path, void **data, size_t *size)
++{
++   WCHAR *w = dc_wide(path);
++   if (!w)
++      return DC_READ_NONE;
++
++   /* Everything is shared: a reader must not stand in the way of another
++    * process that deletes the entry (eviction) while we read it. */
++   const DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
++   HANDLE h = CreateFileW(w, GENERIC_READ | FILE_WRITE_ATTRIBUTES, share, NULL,
++                          OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
++   if (h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED) {
++      /* a cache we may read but not write: no time of last use then */
++      h = CreateFileW(w, GENERIC_READ, share, NULL, OPEN_EXISTING,
++                      FILE_FLAG_SEQUENTIAL_SCAN, NULL);
++   }
++   free(w);
++   if (h == INVALID_HANDLE_VALUE)
++      return DC_READ_NONE;
++
++   enum dc_read ret = DC_READ_BAD;
++   uint8_t *buf = NULL;
++   LARGE_INTEGER len;
++   if (!GetFileSizeEx(h, &len)) {
++      ret = DC_READ_NONE;
++      goto out;
++   }
++   *size = (size_t)len.QuadPart;
++   if (len.QuadPart <= 0 || (uint64_t)len.QuadPart > DC_MAX_ENTRY)
++      goto out;
++
++   buf = malloc((size_t)len.QuadPart);
++   if (!buf) {
++      ret = DC_READ_NONE;
++      goto out;
++   }
++
++   size_t done = 0;
++   while (done < (size_t)len.QuadPart) {
++      DWORD got = 0;
++      DWORD want = (DWORD)MIN2((size_t)len.QuadPart - done, (size_t)1 << 30);
++      if (!ReadFile(h, buf + done, want, &got, NULL) || got == 0)
++         goto out; /* shorter than its size says: not an entry */
++      done += got;
++   }
++
++   FILETIME used, now;
++   GetSystemTimeAsFileTime(&now);
++   if (GetFileTime(h, NULL, &used, NULL) &&
++       dc_ticks(now) - dc_ticks(used) > DC_USE_TIME_STEP)
++      SetFileTime(h, NULL, &now, NULL);
++
++   *data = buf;
++   buf = NULL;
++   ret = DC_READ_OK;
++
++out:
++   free(buf);
++   CloseHandle(h);
++   return ret;
++}
++
++/* Writes `final` by way of `tmp` so that no reader ever sees a part of it. */
++static enum dc_write
++dc_write_new_file(const char *tmp, const char *final, const void *data,
++                  size_t size)
++{
++   enum dc_write ret = DC_WRITE_SKIPPED;
++   WCHAR *wt = dc_wide(tmp);
++   WCHAR *wf = dc_wide(final);
++   if (!wt || !wf)
++      goto out;
++
++   /* Share mode 0 is the lock that disk_cache_os.c takes with flock(): a
++    * second writer of the same entry (another process) fails right here and
++    * leaves the entry to the first.  CREATE_ALWAYS empties a .tmp file that a
++    * dead writer left. */
++   HANDLE h = CreateFileW(wt, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
++                          FILE_ATTRIBUTE_NORMAL, NULL);
++   if (h == INVALID_HANDLE_VALUE) {
++      if (GetLastError() == ERROR_PATH_NOT_FOUND)
++         ret = DC_WRITE_NO_DIR;
++      goto out;
++   }
++
++   /* With the .tmp file ours: did somebody finish the entry meanwhile? */
++   bool ok = GetFileAttributesW(wf) == INVALID_FILE_ATTRIBUTES;
++
++   const uint8_t *p = data;
++   size_t done = 0;
++   while (ok && done < size) {
++      DWORD put = 0;
++      DWORD want = (DWORD)MIN2(size - done, (size_t)1 << 30);
++      ok = WriteFile(h, p + done, want, &put, NULL) && put > 0;
++      done += put;
++   }
++   CloseHandle(h);
++
++   /* Without MOVEFILE_REPLACE_EXISTING: an entry that exists stays.  A file
++    * cut short by a full disk never gets its final name.  Something that
++    * looks at every new file (a virus scanner) can hold the .tmp file for a
++    * moment after we closed it: try again a few times (this is the cache's
++    * own thread; nobody waits for it). */
++   for (unsigned attempt = 0; ok && ret != DC_WRITE_DONE; attempt++) {
++      if (MoveFileExW(wt, wf, 0)) {
++         ret = DC_WRITE_DONE;
++      } else {
++         DWORD err = GetLastError();
++         if (attempt == 3 || (err != ERROR_SHARING_VIOLATION &&
++                              err != ERROR_ACCESS_DENIED))
++            break;
++         Sleep(20);
++      }
++   }
++   if (ret != DC_WRITE_DONE)
++      DeleteFileW(wt);
++
++out:
++   free(wt);
++   free(wf);
++   return ret;
++}
++
++/* Maps a file of exactly `size` bytes read-write, shared between processes.
++ * A file of another size starts again as zeroes. */
++static void *
++dc_map_shared(const char *path, size_t size)
++{
++   WCHAR *w = dc_wide(path);
++   if (!w)
++      return NULL;
++
++   HANDLE f = CreateFileW(w, GENERIC_READ | GENERIC_WRITE,
++                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                          NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
++   free(w);
++   if (f == INVALID_HANDLE_VALUE)
++      return NULL;
++
++   void *map = NULL;
++   LARGE_INTEGER len, zero = {.QuadPart = 0}, want = {.QuadPart = (LONGLONG)size};
++   if (!GetFileSizeEx(f, &len))
++      goto out;
++   if ((uint64_t)len.QuadPart != size) {
++      /* SetEndOfFile takes the clusters now: a full disk fails here and not
++       * later at a write into the mapping. */
++      if (!SetFilePointerEx(f, zero, NULL, FILE_BEGIN) || !SetEndOfFile(f) ||
++          !SetFilePointerEx(f, want, NULL, FILE_BEGIN) || !SetEndOfFile(f))
++         goto out;
++   }
++
++   HANDLE m = CreateFileMappingW(f, NULL, PAGE_READWRITE, 0, 0, NULL);
++   if (m) {
++      map = MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0, size);
++      CloseHandle(m); /* the view keeps the mapping */
++   }
++
++out:
++   CloseHandle(f);
++   return map;
++}
++
++static void
++dc_unmap(void *map, UNUSED size_t size)
++{
++   UnmapViewOfFile(map);
++}
++
++/* The size of the volume `path` is on, 0 when unknown. */
++static uint64_t
++dc_volume_bytes(const char *path)
++{
++   WCHAR *w = dc_wide(path);
++   if (!w)
++      return 0;
++
++   ULARGE_INTEGER total;
++   bool ok = GetDiskFreeSpaceExW(w, NULL, &total, NULL);
++   free(w);
++   return ok ? total.QuadPart : 0;
++}
++
++/* The directory the cache directory is made in when MESA_SHADER_CACHE_DIR is
++ * not set (ralloc), or NULL.  The W call: a user name need not fit the ANSI
++ * code page. */
++static char *
++dc_default_root(void *mem_ctx)
++{
++   WCHAR w[MAX_PATH];
++   DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", w, ARRAY_SIZE(w));
++   if (n == 0 || n >= ARRAY_SIZE(w))
++      return NULL;
++
++   char u[MAX_PATH * 3 + 1];
++   if (!WideCharToMultiByte(CP_UTF8, 0, w, -1, u, sizeof(u), NULL, NULL))
++      return NULL;
++
++   return ralloc_asprintf(mem_ctx, "%s\\%s", u, DC_WIN_DEFAULT_SUBDIR);
++}
++
++static bool
++dc_is_sep(char c)
++{
++   return c == '/' || c == '\\';
++}
++
++#else /* !DETECT_OS_WINDOWS: the same primitives for the unit tests */
++
++#include <dirent.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <sys/file.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <sys/statvfs.h>
++#include <sys/time.h>
++#include <time.h>
++#include <unistd.h>
++
++static int64_t
++dc_ticks(struct timespec ts)
++{
++   return (int64_t)ts.tv_sec * DC_TICKS_PER_SECOND + ts.tv_nsec / 100;
++}
++
++static int64_t
++dc_now(void)
++{
++   struct timespec ts;
++   clock_gettime(CLOCK_REALTIME, &ts);
++   return dc_ticks(ts);
++}
++
++static bool
++dc_is_dir(const char *path)
++{
++   struct stat sb;
++   return stat(path, &sb) == 0 && S_ISDIR(sb.st_mode);
++}
++
++static bool
++dc_mkdir(const char *path)
++{
++   return (mkdir(path, 0700) == 0 || errno == EEXIST) && dc_is_dir(path);
++}
++
++static bool
++dc_file_size(const char *path, uint64_t *size)
++{
++   struct stat sb;
++   if (stat(path, &sb) != 0 || S_ISDIR(sb.st_mode))
++      return false;
++   *size = sb.st_size;
++   return true;
++}
++
++static bool
++dc_delete(const char *path)
++{
++   return unlink(path) == 0;
++}
++
++static bool
++dc_list(const char *path, dc_list_cb cb, void *data)
++{
++   DIR *dir = opendir(path);
++   if (!dir)
++      return false;
++
++   struct dirent *d;
++   while ((d = readdir(dir)) != NULL) {
++      if (!strcmp(d->d_name, ".") || !strcmp(d->d_name, ".."))
++         continue;
++
++      struct stat sb;
++      if (fstatat(dirfd(dir), d->d_name, &sb, 0) != 0)
++         continue;
++
++      struct dc_dirent e = {
++         .name = d->d_name,
++         .is_dir = S_ISDIR(sb.st_mode),
++         .size = sb.st_size,
++         .use_time = dc_ticks(sb.st_atim),
++         .write_time = dc_ticks(sb.st_mtim),
++      };
++      cb(&e, data);
++   }
++   closedir(dir);
++   return true;
++}
++
++static enum dc_read
++dc_read_file(const char *path, void **data, size_t *size)
++{
++   int fd = open(path, O_RDONLY | O_CLOEXEC);
++   if (fd == -1)
++      return DC_READ_NONE;
++
++   enum dc_read ret = DC_READ_BAD;
++   uint8_t *buf = NULL;
++   struct stat sb;
++   if (fstat(fd, &sb) == -1) {
++      ret = DC_READ_NONE;
++      goto out;
++   }
++   *size = sb.st_size;
++   if (sb.st_size <= 0 || (uint64_t)sb.st_size > DC_MAX_ENTRY)
++      goto out;
++
++   buf = malloc(sb.st_size);
++   if (!buf) {
++      ret = DC_READ_NONE;
++      goto out;
++   }
++
++   size_t done = 0;
++   while (done < (size_t)sb.st_size) {
++      ssize_t got = read(fd, buf + done, sb.st_size - done);
++      if (got <= 0)
++         goto out;
++      done += got;
++   }
++
++   if (dc_now() - dc_ticks(sb.st_atim) > DC_USE_TIME_STEP) {
++      struct timespec times[2] = {{.tv_nsec = UTIME_NOW}, {.tv_nsec = UTIME_OMIT}};
++      futimens(fd, times);
++   }
++
++   *data = buf;
++   buf = NULL;
++   ret = DC_READ_OK;
++
++out:
++   free(buf);
++   close(fd);
++   return ret;
++}
++
++static enum dc_write
++dc_write_new_file(const char *tmp, const char *final, const void *data,
++                  size_t size)
++{
++   int fd = open(tmp, O_WRONLY | O_CLOEXEC | O_CREAT, 0644);
++   if (fd == -1)
++      return errno == ENOENT ? DC_WRITE_NO_DIR : DC_WRITE_SKIPPED;
++
++   enum dc_write ret = DC_WRITE_SKIPPED;
++   if (flock(fd, LOCK_EX | LOCK_NB) == -1)
++      goto out;
++
++   bool ok = access(final, F_OK) != 0 && ftruncate(fd, 0) == 0;
++
++   const uint8_t *p = data;
++   size_t done = 0;
++   while (ok && done < size) {
++      ssize_t put = write(fd, p + done, size - done);
++      ok = put > 0;
++      if (ok)
++         done += put;
++   }
++
++   if (ok && rename(tmp, final) == 0)
++      ret = DC_WRITE_DONE;
++   else
++      unlink(tmp);
++
++out:
++   close(fd);
++   return ret;
++}
++
++static void *
++dc_map_shared(const char *path, size_t size)
++{
++   int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
++   if (fd == -1)
++      return NULL;
++
++   void *map = NULL;
++   struct stat sb;
++   if (fstat(fd, &sb) == -1)
++      goto out;
++   if ((size_t)sb.st_size != size &&
++       (ftruncate(fd, 0) == -1 || ftruncate(fd, size) == -1))
++      goto out;
++
++   map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++   if (map == MAP_FAILED)
++      map = NULL;
++
++out:
++   close(fd);
++   return map;
++}
++
++static void
++dc_unmap(void *map, size_t size)
++{
++   munmap(map, size);
++}
++
++static uint64_t
++dc_volume_bytes(const char *path)
++{
++   struct statvfs vfs;
++   if (statvfs(path, &vfs) != 0)
++      return 0;
++   return (uint64_t)vfs.f_blocks * vfs.f_frsize;
++}
++
++static char *
++dc_default_root(void *mem_ctx)
++{
++   const char *xdg = os_get_option_secure("XDG_CACHE_HOME");
++   if (xdg)
++      return ralloc_strdup(mem_ctx, xdg);
++
++   const char *home = os_get_option("HOME");
++   return home ? ralloc_asprintf(mem_ctx, "%s/.cache", home) : NULL;
++}
++
++static bool
++dc_is_sep(char c)
++{
++   return c == '/';
++}
++
++#endif /* DETECT_OS_WINDOWS */
++
++/* ------------------------------------------------------------------------
++ * The cache on top of the primitives
++ * ------------------------------------------------------------------------ */
++
++/* Makes `path` and the parents it lacks.  Starts at the leaf, so a drive
++ * root or a share is never something we try to create. */
++static bool
++dc_mkdir_p(const char *path)
++{
++   if (dc_is_dir(path) || dc_mkdir(path))
++      return true;
++
++   size_t n = strlen(path);
++   while (n > 0 && dc_is_sep(path[n - 1]))
++      n--;
++   while (n > 0 && !dc_is_sep(path[n - 1]))
++      n--;
++   while (n > 0 && dc_is_sep(path[n - 1]))
++      n--;
++   if (n == 0)
++      return false;
++
++   char *parent = malloc(n + 1);
++   if (!parent)
++      return false;
++   memcpy(parent, path, n);
++   parent[n] = '\0';
++
++   bool ok = dc_mkdir_p(parent);
++   free(parent);
++   return ok && dc_mkdir(path);
++}
++
++static bool
++dc_is_tmp(const char *name)
++{
++   size_t len = strlen(name);
++   return len >= 4 && strcmp(&name[len - 4], ".tmp") == 0;
++}
++
++struct dc_file {
++   char *name;
++   uint64_t size;
++   int64_t use_time;
++};
++
++struct dc_scan {
++   const char *dir;
++   int64_t now;
++   bool want_files;       /* collect the entries in `files` */
++   bool remove_stale_tmp; /* delete .tmp files of dead writers */
++
++   uint64_t total; /* what the entries cost together */
++   struct dc_file *files;
++   unsigned count, capacity;
++};
++
++static void
++dc_scan_cb(const struct dc_dirent *e, void *data)
++{
++   struct dc_scan *s = data;
++
++   if (e->is_dir)
++      return;
++
++   if (dc_is_tmp(e->name)) {
++      if (s->remove_stale_tmp && s->now - e->write_time > DC_STALE_TMP_AGE) {
++         /* On Windows the delete fails while a writer still has the file,
++          * which is what we want. */
++         char *p = dc_asprintf("%s/%s", s->dir, e->name);
++         if (p) {
++            dc_delete(p);
++            free(p);
++         }
++      }
++      return;
++   }
++
++   s->total += dc_cost(e->size);
++
++   if (!s->want_files)
++      return;
++
++   if (s->count == s->capacity) {
++      unsigned capacity = s->capacity ? s->capacity * 2 : 64;
++      struct dc_file *files = realloc(s->files, capacity * sizeof(*files));
++      if (!files)
++         return;
++      s->files = files;
++      s->capacity = capacity;
++   }
++
++   char *name = strdup(e->name);
++   if (!name)
++      return;
++   s->files[s->count++] = (struct dc_file){
++      .name = name,
++      .size = e->size,
++      .use_time = e->use_time,
++   };
++}
++
++static int
++dc_oldest_first(const void *a, const void *b)
++{
++   const struct dc_file *fa = a, *fb = b;
++   if (fa->use_time != fb->use_time)
++      return fa->use_time < fb->use_time ? -1 : 1;
++   return strcmp(fa->name, fb->name);
++}
++
++/* Deletes the tenth of the entries in one xx directory that was not used for
++ * the longest time (one entry at least).  Returns what that frees. */
++static uint64_t
++dc_evict_from_directory(const char *dir)
++{
++   struct dc_scan s = {.dir = dir, .want_files = true};
++   uint64_t freed = 0;
++
++   if (dc_list(dir, dc_scan_cb, &s) && s.count) {
++      qsort(s.files, s.count, sizeof(*s.files), dc_oldest_first);
++
++      unsigned victims = s.count > 10 ? s.count / 10 : 1;
++      for (unsigned i = 0; i < victims; i++) {
++         char *p = dc_asprintf("%s/%s", dir, s.files[i].name);
++         if (p && dc_delete(p))
++            freed += dc_cost(s.files[i].size);
++         free(p);
++      }
++   }
++
++   for (unsigned i = 0; i < s.count; i++)
++      free(s.files[i].name);
++   free(s.files);
++   return freed;
++}
++
++/* Evict least recently used cache items: as in disk_cache_os.c a random xx
++ * directory stands for the whole cache.  When that one has nothing (a nearly
++ * empty cache, the unit tests), the following ones are tried. */
++bool
++disk_cache_evict_lru_item(struct disk_cache *cache)
++{
++   uint64_t rand64 = rand_xorshift128plus(cache->seed_xorshift128plus);
++
++   for (unsigned i = 0; i < 256; i++) {
++      char *dir = dc_asprintf("%s/%02x", cache->path,
++                              (unsigned)((rand64 + i) & 0xff));
++      if (!dir)
++         return false;
++
++      uint64_t freed = dc_evict_from_directory(dir);
++      free(dir);
++
++      if (freed) {
++         p_atomic_add(&cache->size->value, -freed);
++         return true;
++      }
++   }
++
++   return false;
++}
++
++bool
++disk_cache_size_is_valid(struct disk_cache *cache)
++{
++   uint64_t size = p_atomic_read_relaxed(&cache->size->value);
++
++   if (size % 512)
++      return false;
++
++   uint64_t volume = dc_volume_bytes(cache->path);
++   if (volume && size > volume)
++      return false;
++
++   return true;
++}
++
++void
++disk_cache_recompute_size(struct disk_cache *cache)
++{
++   uint64_t total = 0;
++   int64_t now = dc_now();
++
++   for (unsigned i = 0; i < 256; i++) {
++      char *dir = dc_asprintf("%s/%02x", cache->path, i);
++      if (!dir)
++         continue;
++
++      struct dc_scan s = {.dir = dir, .now = now, .remove_stale_tmp = true};
++      dc_list(dir, dc_scan_cb, &s);
++      total += s.total;
++      free(dir);
++   }
++
++   p_atomic_set(&cache->size->value, total);
++}
++
++struct dc_recompute_job {
++   struct util_queue_fence fence;
++   struct disk_cache *cache;
++};
++
++static void
++dc_recompute_execute(void *job, UNUSED void *gdata, UNUSED int thread_index)
++{
++   disk_cache_recompute_size(((struct dc_recompute_job *)job)->cache);
++}
++
++static void
++dc_recompute_cleanup(void *job, UNUSED void *gdata, UNUSED int thread_index)
++{
++   free(job);
++}
++
++/* Counts the cache again on its queue thread (see the top of this file).
++ * The queue has one thread here (disk_cache_init_queue), so no entry of this
++ * process is written while the count runs. */
++void
++disk_cache_recompute_size_async(struct disk_cache *cache)
++{
++   struct dc_recompute_job *job = malloc(sizeof(*job));
++   if (!job)
++      return;
++
++   job->cache = cache;
++   util_queue_fence_init(&job->fence);
++   util_queue_add_job(&cache->cache_queue, job, &job->fence,
++                      dc_recompute_execute, dc_recompute_cleanup, 0);
++}
++
++void
++disk_cache_evict_item(struct disk_cache *cache, char *filename)
++{
++   uint64_t size;
++   if (dc_file_size(filename, &size) && dc_delete(filename))
++      p_atomic_add(&cache->size->value, -dc_cost(size));
++
++   free(filename);
++}
++
++void *
++disk_cache_load_item(struct disk_cache *cache, char *filename, size_t *size)
++{
++   void *file = NULL;
++   size_t file_size = 0;
++   uint8_t *item = NULL;
++
++   enum dc_read r = dc_read_file(filename, &file, &file_size);
++   if (r == DC_READ_OK)
++      item = disk_cache_parse_and_validate_item(cache, file, file_size, size);
++
++   /* A file that is there but is no entry (cut short, damaged, zeroes after
++    * a power loss): away with it, so that the shader is stored again.  Only
++    * complete files ever get the final name, so this is not a file that
++    * somebody is still writing. */
++   if (r != DC_READ_NONE && !item && dc_delete(filename))
++      p_atomic_add(&cache->size->value, -dc_cost(file_size));
++
++   free(file);
++   free(filename);
++   return item;
++}
++
++/* Return a filename within the cache's directory corresponding to 'key'.
++ *
++ * Returns NULL if out of memory.
++ */
++char *
++disk_cache_get_cache_filename(struct disk_cache *cache, const cache_key key)
++{
++   char buf[BLAKE3_HEX_LEN];
++
++   if (cache->path_init_failed)
++      return NULL;
++
++   _mesa_blake3_format(buf, key);
++   return dc_asprintf("%s/%c%c/%s", cache->path, buf[0], buf[1], buf + 2);
++}
++
++void
++disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
++                              char *filename)
++{
++   struct disk_cache *cache = dc_job->cache;
++   struct blob cache_blob;
++   blob_init(&cache_blob);
++
++   char *filename_tmp = dc_asprintf("%s.tmp", filename);
++   if (!filename_tmp)
++      goto done;
++
++   /* Nothing to do when the entry exists (checked once more by
++    * dc_write_new_file when it holds the .tmp file). */
++   uint64_t existing;
++   if (dc_file_size(filename, &existing))
++      goto done;
++
++   if (!disk_cache_create_item_blob(dc_job, &cache_blob))
++      goto done;
++
++   enum dc_write w = dc_write_new_file(filename_tmp, filename,
++                                       cache_blob.data, cache_blob.size);
++   if (w == DC_WRITE_NO_DIR) {
++      /* Make the two-character subdirectory within the cache as needed. */
++      char buf[BLAKE3_HEX_LEN];
++      _mesa_blake3_format(buf, dc_job->key);
++      char *dir = dc_asprintf("%s/%c%c", cache->path, buf[0], buf[1]);
++      if (dir) {
++         dc_mkdir(dir);
++         free(dir);
++      }
++      w = dc_write_new_file(filename_tmp, filename, cache_blob.data,
++                            cache_blob.size);
++   }
++
++   if (w == DC_WRITE_DONE) {
++      p_atomic_add(&cache->size->value, dc_cost(cache_blob.size));
++      p_atomic_inc(&cache->stats.puts);
++   }
++
++done:
++   free(filename_tmp);
++   blob_finish(&cache_blob);
++}
++
++/* Determine path for cache based on the first defined name as follows:
++ *
++ *   $MESA_SHADER_CACHE_DIR/mesa_shader_cache
++ *   Windows: %LOCALAPPDATA%\Starbite\shader-cache\mesa_shader_cache
++ *   (POSIX, unit tests: $XDG_CACHE_HOME or $HOME/.cache, then the same name)
++ *
++ * MESA_SHADER_CACHE_DIR is taken as UTF-8.  Returns NULL when the directory
++ * is not there and cannot be made: the cache is then off for this process.
++ */
++const char *
++disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
++                              const char *driver_id,
++                              const char *cache_dir_name_custom,
++                              enum disk_cache_type cache_type,
++                              bool mkdir)
++{
++   const char *cache_dir_name = CACHE_DIR_NAME;
++   if (cache_dir_name_custom)
++      cache_dir_name = cache_dir_name_custom;
++   else if (cache_type == DISK_CACHE_SINGLE_FILE)
++      cache_dir_name = CACHE_DIR_NAME_SF;
++   else if (cache_type == DISK_CACHE_DATABASE)
++      cache_dir_name = CACHE_DIR_NAME_DB;
++
++   /* os_get_option's result does not outlive the next call on Windows */
++   const char *env = os_get_option_secure("MESA_SHADER_CACHE_DIR");
++   char *root = env ? ralloc_strdup(mem_ctx, env) : dc_default_root(mem_ctx);
++   if (!root)
++      return NULL;
++
++   char *path = ralloc_asprintf(mem_ctx, "%s/%s", root, cache_dir_name);
++   if (path && cache_type == DISK_CACHE_SINGLE_FILE)
++      path = ralloc_asprintf(mem_ctx, "%s/%s/%s", path, driver_id, gpu_name);
++   if (!path)
++      return NULL;
++
++   if (mkdir ? dc_mkdir_p(path) : dc_is_dir(path))
++      return path;
++
++   if (mkdir)
++      fprintf(stderr, "Failed to create %s for shader cache---disabling.\n",
++              path);
++   return NULL;
++}
++
++/* The marker file is only read by disk_cache_delete_old_cache, which has
++ * nothing to delete here: this backend never had another default cache. */
++void
++disk_cache_touch_cache_user_marker(UNUSED char *path)
++{
++}
++
++void
++disk_cache_delete_old_cache(void)
++{
++}
++
++bool
++disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
++{
++   char *path = ralloc_asprintf(mem_ctx, "%s/index", cache->path);
++   if (path == NULL)
++      return false;
++
++   /* The index: the total size, then one key per slot.  Shared between the
++    * processes that use the cache, as in disk_cache_os.c. */
++   size_t size = sizeof(*cache->size) + CACHE_INDEX_MAX_KEYS * CACHE_KEY_SIZE;
++   uint8_t *map = dc_map_shared(path, size);
++   if (!map)
++      return false;
++
++   cache->index_mmap = map;
++   cache->index_reserve = map;
++   cache->index_reserve_size = size;
++   cache->size = (p_atomic_uint64_t *)map;
++   cache->stored_keys = map + sizeof(uint64_t);
++   return true;
++}
++
++void
++disk_cache_destroy_mmap(struct disk_cache *cache)
++{
++   if (cache->index_reserve)
++      dc_unmap(cache->index_reserve, cache->index_reserve_size);
++}
++
++#endif /* ENABLE_SHADER_CACHE && DISK_CACHE_OS_PORTABLE */
+diff --git a/src/util/meson.build b/src/util/meson.build
+index b11f0c4..76f6da7 100644
+--- a/src/util/meson.build
++++ b/src/util/meson.build
+@@ -40,6 +40,7 @@ files_mesa_util = files(
+   'disk_cache.h',
+   'disk_cache_os.c',
+   'disk_cache_os.h',
++  'disk_cache_os_portable.c',
+   'double.c',
+   'double.h',
+   'enum_operators.h',
+diff --git a/src/util/tests/cache_test.cpp b/src/util/tests/cache_test.cpp
+index 7bfa08f..6173453 100644
+--- a/src/util/tests/cache_test.cpp
++++ b/src/util/tests/cache_test.cpp
+@@ -1483,6 +1483,9 @@ TEST_F(Cache, DeleteOldCache)
+ {
+ #ifndef ENABLE_SHADER_CACHE
+    GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
++#elif DISK_CACHE_OS_PORTABLE
++   /* sb-patches/0171 */
++   GTEST_SKIP() << "disk_cache_os_portable.c never had an older default cache to delete.";
+ #else
+ 
+ #ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
+@@ -1521,3 +1524,744 @@ TEST_F(Cache, DeleteOldCache)
+    rmdir(dir_name);
+ #endif
+ }
++
++/* ------------------------------------------------------------------------
++ * sb-patches/0171: what the shader cache must do for a driver that is rebuilt
++ * often on a machine that is switched off without warning.  These run against
++ * the multi-file cache of either backend (disk_cache_os.c, or with
++ * -DSB_DISK_CACHE_PORTABLE_TEST the code Windows uses,
++ * disk_cache_os_portable.c).
++ * ------------------------------------------------------------------------ */
++
++#include <dirent.h>
++#include <string>
++#include <sys/stat.h>
++
++#include "util/u_atomic.h"
++
++#ifdef ENABLE_SHADER_CACHE
++
++static struct disk_cache *
++sb_cache_create(const char *driver_id)
++{
++#ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
++   os_set_option("MESA_SHADER_CACHE_DISABLE", "false", true);
++#endif
++   os_set_option("MESA_DISK_CACHE_MULTI_FILE", "true", true);
++   os_set_option("MESA_SHADER_CACHE_DIR", CACHE_TEST_TMP "/sb", true);
++   os_unset_option("MESA_SHADER_CACHE_MAX_SIZE");
++   return disk_cache_create("test", driver_id, 0);
++}
++
++static void
++sb_cache_cleanup(void)
++{
++   os_unset_option("MESA_SHADER_CACHE_DIR");
++   os_set_option("MESA_DISK_CACHE_MULTI_FILE", "false", true);
++   rmrf_local(CACHE_TEST_TMP);
++}
++
++/* the file an entry is stored in (a std::string so nobody has to free) */
++static std::string
++sb_entry_path(struct disk_cache *cache, const cache_key key)
++{
++   char *f = disk_cache_get_cache_filename(cache, key);
++   std::string s(f ? f : "");
++   free(f);
++   return s;
++}
++
++static long
++sb_file_size(const std::string &path)
++{
++   struct stat sb;
++   return stat(path.c_str(), &sb) == 0 ? (long)sb.st_size : -1;
++}
++
++static void
++sb_put(struct disk_cache *cache, const cache_key key, const void *data,
++       size_t size)
++{
++   disk_cache_put(cache, key, data, size, NULL);
++   disk_cache_wait_for_idle(cache);
++}
++
++enum sb_damage {
++   SB_CUT_HALF,       /* the file ends in the middle */
++   SB_CUT_ONE,        /* the last byte is missing */
++   SB_EMPTY,          /* the name is there, no bytes */
++   SB_ZEROES,         /* the right length, all zero (data lost at power off) */
++   SB_FLIP_LAST,      /* one bit of the payload */
++   SB_FLIP_CRC,       /* one bit of the stored CRC */
++   SB_FLIP_LENGTH,    /* one bit of the stored length */
++   SB_FLIP_HEADER,    /* one bit of the driver keys at the start */
++   SB_ONE_MORE,       /* a byte after the end */
++   SB_DAMAGE_COUNT,
++};
++
++static const char *const sb_damage_name[] = {
++   "cut in half", "last byte missing", "empty", "all zeroes",
++   "payload bit flipped", "crc bit flipped", "length bit flipped",
++   "header bit flipped",
++   "one byte appended",
++};
++
++static void
++sb_damage_file(const std::string &path, enum sb_damage how, size_t payload)
++{
++   long len = sb_file_size(path);
++   ASSERT_GT(len, (long)payload);
++
++   switch (how) {
++   case SB_CUT_HALF:
++      ASSERT_EQ(truncate(path.c_str(), len / 2), 0);
++      return;
++   case SB_CUT_ONE:
++      ASSERT_EQ(truncate(path.c_str(), len - 1), 0);
++      return;
++   case SB_EMPTY:
++      ASSERT_EQ(truncate(path.c_str(), 0), 0);
++      return;
++   default:
++      break;
++   }
++
++   FILE *f = fopen(path.c_str(), "r+b");
++   ASSERT_NE(f, nullptr);
++   if (how == SB_ZEROES) {
++      for (long i = 0; i < len; i++)
++         fputc(0, f);
++   } else if (how == SB_ONE_MORE) {
++      fseek(f, 0, SEEK_END);
++      fputc(0x5a, f);
++   } else {
++      /* the entry ends with: crc32, uncompressed size, payload */
++      long at = how == SB_FLIP_LAST ? len - 1
++              : how == SB_FLIP_CRC ? len - (long)payload - 6
++              : how == SB_FLIP_LENGTH ? len - (long)payload - 3
++              : 3;
++      fseek(f, at, SEEK_SET);
++      int c = fgetc(f);
++      fseek(f, at, SEEK_SET);
++      fputc(c ^ 0x10, f);
++   }
++   fclose(f);
++}
++
++#endif /* ENABLE_SHADER_CACHE */
++
++/* An entry that is not what was written is not handed out, whatever
++ * happened to it. */
++TEST_F(Cache, SbDamagedEntryRejected)
++{
++#ifndef ENABLE_SHADER_CACHE
++   GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
++#else
++   /* text that does not compress to nothing: the payload offsets above
++    * assume the stored payload has the length of the data only when the
++    * cache stores entries as they are, so use the uncompressed driver id */
++   const char *driver_id = "make_check_uncompressed";
++   uint8_t data[3000];
++   for (unsigned i = 0; i < sizeof(data); i++)
++      data[i] = (uint8_t)(i * 7 + (i >> 5));
++
++   for (int how = 0; how < SB_DAMAGE_COUNT; how++) {
++#ifndef NDEBUG
++      /* a wrong header is an assert in builds with asserts */
++      if (how == SB_FLIP_HEADER || how == SB_ZEROES)
++         continue;
++#endif
++      rmrf_local(CACHE_TEST_TMP);
++      struct disk_cache *cache = sb_cache_create(driver_id);
++      ASSERT_NE(cache, nullptr);
++      ASSERT_EQ(cache->type, DISK_CACHE_MULTI_FILE);
++
++      cache_key key;
++      disk_cache_compute_key(cache, data, sizeof(data), key);
++      sb_put(cache, key, data, sizeof(data));
++
++      size_t size = 0;
++      void *back = disk_cache_get(cache, key, &size);
++      ASSERT_NE(back, nullptr) << "entry readable before the damage";
++      EXPECT_EQ(size, sizeof(data));
++      EXPECT_EQ(memcmp(back, data, sizeof(data)), 0);
++      free(back);
++
++      const std::string path = sb_entry_path(cache, key);
++      sb_damage_file(path, (enum sb_damage)how, sizeof(data));
++
++      /* a new process: nothing of the entry is kept in memory anyway, but
++       * this is what a restart of the game does */
++      disk_cache_destroy(cache);
++      cache = sb_cache_create(driver_id);
++      ASSERT_NE(cache, nullptr);
++
++      size = 123;
++      back = disk_cache_get(cache, key, &size);
++      EXPECT_EQ(back, nullptr) << "damaged entry handed out: " << sb_damage_name[how];
++      EXPECT_EQ(size, 0u) << sb_damage_name[how];
++      free(back);
++
++#if DISK_CACHE_OS_PORTABLE
++      /* the Windows backend removes it, so the next store brings it back */
++      EXPECT_EQ(sb_file_size(path), -1) << "damaged file still there: " << sb_damage_name[how];
++      sb_put(cache, key, data, sizeof(data));
++      back = disk_cache_get(cache, key, &size);
++      EXPECT_NE(back, nullptr) << "entry not stored again after: " << sb_damage_name[how];
++      if (back) {
++         EXPECT_EQ(size, sizeof(data));
++         EXPECT_EQ(memcmp(back, data, sizeof(data)), 0);
++      }
++      free(back);
++#endif
++
++      disk_cache_destroy(cache);
++   }
++
++   sb_cache_cleanup();
++#endif
++}
++
++/* What one build of the driver stored is never found by another build: the
++ * driver id is part of every key, and it is written into every entry. */
++TEST_F(Cache, SbDriverIdChangeMisses)
++{
++#ifndef ENABLE_SHADER_CACHE
++   GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
++#else
++   const char shader[] = "the same shader source, compiled by two builds";
++   const char binary_1[] = "binary of build 1";
++   const char binary_2[] = "binary of build 2, which differs";
++   cache_key key_1, key_2, key_1_again;
++
++   rmrf_local(CACHE_TEST_TMP);
++
++   struct disk_cache *cache = sb_cache_create("build-1");
++   ASSERT_NE(cache, nullptr);
++   disk_cache_compute_key(cache, shader, sizeof(shader), key_1);
++   sb_put(cache, key_1, binary_1, sizeof(binary_1));
++   disk_cache_destroy(cache);
++
++   /* the driver was rebuilt */
++   cache = sb_cache_create("build-2");
++   ASSERT_NE(cache, nullptr);
++   disk_cache_compute_key(cache, shader, sizeof(shader), key_2);
++   EXPECT_NE(memcmp(key_1, key_2, sizeof(key_1)), 0) << "same key for two driver ids";
++   EXPECT_EQ(disk_cache_get(cache, key_2, NULL), nullptr) << "build 2 found an entry before storing one";
++   sb_put(cache, key_2, binary_2, sizeof(binary_2));
++
++   size_t size = 0;
++   char *back = (char *)disk_cache_get(cache, key_2, &size);
++   ASSERT_NE(back, nullptr);
++   EXPECT_STREQ(back, binary_2);
++   free(back);
++
++#ifdef NDEBUG
++   /* even with the very key of build 1 (which no caller can compute), the
++    * entry of build 1 is refused by build 2: its header names build 1 */
++   EXPECT_EQ(disk_cache_get(cache, key_1, NULL), nullptr) << "entry of another driver id handed out";
++#endif
++   disk_cache_destroy(cache);
++
++   /* the gpu name and the driver flags are part of the key in the same way */
++   struct disk_cache *other_gpu = disk_cache_create("test2", "build-2", 0);
++   struct disk_cache *other_flags = disk_cache_create("test", "build-2", 1);
++   ASSERT_NE(other_gpu, nullptr);
++   ASSERT_NE(other_flags, nullptr);
++   cache_key k;
++   disk_cache_compute_key(other_gpu, shader, sizeof(shader), k);
++   EXPECT_NE(memcmp(k, key_2, sizeof(k)), 0);
++   EXPECT_EQ(disk_cache_get(other_gpu, k, NULL), nullptr);
++   disk_cache_compute_key(other_flags, shader, sizeof(shader), k);
++   EXPECT_NE(memcmp(k, key_2, sizeof(k)), 0);
++   EXPECT_EQ(disk_cache_get(other_flags, k, NULL), nullptr);
++   disk_cache_destroy(other_gpu);
++   disk_cache_destroy(other_flags);
++
++   /* back to build 2 (the same binary installed again): a hit */
++   cache = sb_cache_create("build-2");
++   ASSERT_NE(cache, nullptr);
++   disk_cache_compute_key(cache, shader, sizeof(shader), key_1_again);
++   EXPECT_EQ(memcmp(key_1_again, key_2, sizeof(key_2)), 0) << "key not stable for one driver id";
++   back = (char *)disk_cache_get(cache, key_2, &size);
++   EXPECT_NE(back, nullptr) << "no hit for the build that stored the entry";
++   if (back) {
++      EXPECT_STREQ(back, binary_2);
++   }
++   free(back);
++   disk_cache_destroy(cache);
++
++   sb_cache_cleanup();
++#endif
++}
++
++/* A directory that cannot be made or written: a cache object that stores
++ * nothing and finds nothing, and no crash. */
++TEST_F(Cache, SbUnusableDirectoryFailsSoft)
++{
++#ifndef ENABLE_SHADER_CACHE
++   GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
++#else
++   const char data[] = "some data";
++   cache_key key;
++
++   rmrf_local(CACHE_TEST_TMP);
++   ASSERT_EQ(mkdir(CACHE_TEST_TMP, 0755), 0);
++
++#ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
++   os_set_option("MESA_SHADER_CACHE_DISABLE", "false", true);
++#endif
++   os_set_option("MESA_DISK_CACHE_MULTI_FILE", "true", true);
++
++   /* 1: the path runs through a file */
++   FILE *f = fopen(CACHE_TEST_TMP "/a-file", "w");
++   ASSERT_NE(f, nullptr);
++   fclose(f);
++   os_set_option("MESA_SHADER_CACHE_DIR", CACHE_TEST_TMP "/a-file/below", true);
++
++   struct disk_cache *cache = disk_cache_create("test", "build-1", 0);
++   ASSERT_NE(cache, nullptr);
++   EXPECT_TRUE(cache->path_init_failed);
++   disk_cache_compute_key(cache, data, sizeof(data), key);
++   disk_cache_put(cache, key, data, sizeof(data), NULL);
++   EXPECT_EQ(disk_cache_get(cache, key, NULL), nullptr);
++   disk_cache_put_key(cache, key);
++   EXPECT_FALSE(disk_cache_has_key(cache, key));
++   disk_cache_destroy(cache);
++
++   /* 2: the directory exists but nothing can be created in it */
++   if (geteuid() != 0) {
++      ASSERT_EQ(mkdir(CACHE_TEST_TMP "/locked", 0755), 0);
++      ASSERT_EQ(mkdir(CACHE_TEST_TMP "/locked/" CACHE_DIR_NAME, 0555), 0);
++      os_set_option("MESA_SHADER_CACHE_DIR", CACHE_TEST_TMP "/locked", true);
++
++      cache = disk_cache_create("test", "build-1", 0);
++      ASSERT_NE(cache, nullptr);
++      EXPECT_TRUE(cache->path_init_failed);
++      disk_cache_put(cache, key, data, sizeof(data), NULL);
++      EXPECT_EQ(disk_cache_get(cache, key, NULL), nullptr);
++      disk_cache_put_key(cache, key);
++      EXPECT_FALSE(disk_cache_has_key(cache, key));
++      disk_cache_destroy(cache);
++
++      chmod(CACHE_TEST_TMP "/locked/" CACHE_DIR_NAME, 0755);
++   }
++
++   sb_cache_cleanup();
++#endif
++}
++
++/* The Windows backend counts the cache again at every start, so a size
++ * counter that lost its last updates (or is plain wrong) does not let the
++ * cache grow past its limit; and .tmp files of dead writers go away. */
++TEST_F(Cache, SbSizeCountedAgainAtStart)
++{
++#ifndef ENABLE_SHADER_CACHE
++   GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
++#elif !DISK_CACHE_OS_PORTABLE
++   GTEST_SKIP() << "only disk_cache_os_portable.c does this.";
++#else
++   rmrf_local(CACHE_TEST_TMP);
++
++   struct disk_cache *cache = sb_cache_create("build-1");
++   ASSERT_NE(cache, nullptr);
++   ASSERT_EQ(cache->type, DISK_CACHE_MULTI_FILE);
++
++   uint8_t data[5000];
++   std::string a_path;
++   uint64_t expected = 0;
++   for (unsigned i = 0; i < 40; i++) {
++      cache_key key;
++      size_t size = 100 + i * 120; /* 100 .. 4780 bytes of payload */
++      memset(data, i + 1, sizeof(data));
++      disk_cache_compute_key(cache, data, size, key);
++      sb_put(cache, key, data, size);
++      const std::string path = sb_entry_path(cache, key);
++      long len = sb_file_size(path);
++      ASSERT_GT(len, 0);
++      expected += ((uint64_t)len + 4095) & ~(uint64_t)4095;
++      if (i == 0)
++         a_path = path;
++   }
++   EXPECT_EQ(p_atomic_read(&cache->size->value), expected) << "running count";
++   disk_cache_destroy(cache);
++
++   /* a .tmp file from long ago and one from just now */
++   const std::string old_tmp = a_path + "-old.tmp", new_tmp = a_path + "-new.tmp";
++   for (const std::string &p : {old_tmp, new_tmp}) {
++      FILE *f = fopen(p.c_str(), "w");
++      ASSERT_NE(f, nullptr);
++      fputs("half an entry", f);
++      fclose(f);
++   }
++   struct utimbuf long_ago = {};
++   long_ago.actime = long_ago.modtime = time(NULL) - 3 * 60 * 60;
++   ASSERT_EQ(utime(old_tmp.c_str(), &long_ago), 0);
++
++   /* three wrong counters: lost updates, far too much (but possible on the
++    * volume), and not a number this code ever writes */
++   const uint64_t wrong[] = {0, expected * 3 + 512 * 1000, 12345};
++   for (uint64_t w : wrong) {
++      FILE *f = fopen(CACHE_TEST_TMP "/sb/" CACHE_DIR_NAME "/index", "r+b");
++      ASSERT_NE(f, nullptr);
++      ASSERT_EQ(fwrite(&w, sizeof(w), 1, f), 1u);
++      fclose(f);
++
++      cache = sb_cache_create("build-1");
++      ASSERT_NE(cache, nullptr);
++      disk_cache_wait_for_idle(cache);
++      EXPECT_EQ(p_atomic_read(&cache->size->value), expected) << "counter was " << w;
++      disk_cache_destroy(cache);
++   }
++
++   EXPECT_EQ(sb_file_size(old_tmp), -1) << "stale .tmp file kept";
++   EXPECT_GT(sb_file_size(new_tmp), 0) << "fresh .tmp file (a writer at work) removed";
++
++   sb_cache_cleanup();
++#endif
++}
++
++/* The size limit holds over many entries (the unit tests above evict one or
++ * two files). */
++TEST_F(Cache, SbLimitHolds)
++{
++#ifndef ENABLE_SHADER_CACHE
++   GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
++#else
++   rmrf_local(CACHE_TEST_TMP);
++
++   /* sets the directory and the cache type; the limit comes after it */
++   struct disk_cache *cache = sb_cache_create("build-1");
++   ASSERT_NE(cache, nullptr);
++   disk_cache_destroy(cache);
++   os_set_option("MESA_SHADER_CACHE_MAX_SIZE", "1M", true);
++   cache = disk_cache_create("test", "build-1", 0);
++   ASSERT_NE(cache, nullptr);
++   ASSERT_EQ(cache->type, DISK_CACHE_MULTI_FILE);
++
++   /* 600 entries of 6000 bytes: 2 disk blocks each, 4.7 MiB together */
++   static uint8_t data[6000];
++   cache_key last_key;
++   for (unsigned i = 0; i < 600; i++) {
++      memset(data, 0, sizeof(data));
++      memcpy(data, &i, sizeof(i));
++      disk_cache_compute_key(cache, data, sizeof(data), last_key);
++      disk_cache_put(cache, last_key, data, sizeof(data), NULL);
++   }
++   disk_cache_wait_for_idle(cache);
++
++   /* what is on disk, counted here and not by the cache */
++   uint64_t on_disk = 0;
++   unsigned files = 0;
++   for (unsigned d = 0; d < 256; d++) {
++      char dir[256];
++      snprintf(dir, sizeof(dir), CACHE_TEST_TMP "/sb/" CACHE_DIR_NAME "/%02x", d);
++      DIR *dp = opendir(dir);
++      if (!dp)
++         continue;
++      struct dirent *de;
++      while ((de = readdir(dp)) != NULL) {
++         struct stat sb;
++         std::string p = std::string(dir) + "/" + de->d_name;
++         if (stat(p.c_str(), &sb) == 0 && S_ISREG(sb.st_mode)) {
++            on_disk += ((uint64_t)sb.st_size + 4095) & ~(uint64_t)4095;
++            files++;
++         }
++      }
++      closedir(dp);
++   }
++
++   EXPECT_GT(files, 20u) << "everything was evicted";
++   /* the limit is checked with the payload size before a file is written,
++    * so the last file may stand a little over it */
++   const uint64_t limit = 1024 * 1024 + 64 * 1024;
++   EXPECT_LE(on_disk, limit) << files << " files on disk";
++   EXPECT_LE(p_atomic_read(&cache->size->value), limit);
++
++#if DISK_CACHE_OS_PORTABLE
++   /* one writer thread, and file times finer than a second: what was written
++    * last is not what gets evicted (disk_cache_os.c writes with four threads
++    * and orders by whole seconds, so it promises less) */
++   void *back = disk_cache_get(cache, last_key, NULL);
++   EXPECT_NE(back, nullptr) << "the entry stored last is gone";
++   free(back);
++#endif
++
++   disk_cache_destroy(cache);
++   os_unset_option("MESA_SHADER_CACHE_MAX_SIZE");
++   sb_cache_cleanup();
++#endif
++}
++
++/* ------------------------------------------------------------------------
++ * sb-patches/0171: the identity of a Windows driver build
++ * (disk_cache_pe_image_identifier).  It needs no cache, so no
++ * ENABLE_SHADER_CACHE here.
++ * ------------------------------------------------------------------------ */
++
++#include <vector>
++
++static void
++sb_put16(std::vector<uint8_t> &b, size_t at, uint16_t v)
++{
++   memcpy(&b[at], &v, sizeof(v));
++}
++
++static void
++sb_put32(std::vector<uint8_t> &b, size_t at, uint32_t v)
++{
++   memcpy(&b[at], &v, sizeof(v));
++}
++
++/* the offsets disk_cache_pe_image_identifier reads, written down a second
++ * time from the PE format: a PE32+ image with two sections */
++enum {
++   SB_PE_AT = 0x80,               /* e_lfanew */
++   SB_PE_FILE = SB_PE_AT + 4,     /* IMAGE_FILE_HEADER */
++   SB_PE_OPT = SB_PE_FILE + 20,   /* IMAGE_OPTIONAL_HEADER64, 240 bytes */
++   SB_PE_SEC = SB_PE_OPT + 240,   /* two IMAGE_SECTION_HEADER */
++   SB_PE_HEADERS = 0x400,
++};
++
++static std::vector<uint8_t>
++sb_pe_headers(void)
++{
++   std::vector<uint8_t> b(SB_PE_HEADERS, 0);
++   b[0] = 'M';
++   b[1] = 'Z';
++   sb_put32(b, 0x3c, SB_PE_AT);
++   memcpy(&b[SB_PE_AT], "PE\0\0", 4);
++   sb_put16(b, SB_PE_FILE + 0, 0xA641);      /* Machine: ARM64EC */
++   sb_put16(b, SB_PE_FILE + 2, 2);           /* NumberOfSections */
++   sb_put32(b, SB_PE_FILE + 4, 0x6AFB0303);  /* TimeDateStamp */
++   sb_put16(b, SB_PE_FILE + 16, 240);        /* SizeOfOptionalHeader */
++   sb_put16(b, SB_PE_OPT + 0, 0x20b);        /* Magic: PE32+ */
++   sb_put32(b, SB_PE_OPT + 4, 0x873200);     /* SizeOfCode */
++   sb_put32(b, SB_PE_OPT + 8, 0xA23800);     /* SizeOfInitializedData */
++   sb_put32(b, SB_PE_OPT + 16, 0x875000);    /* AddressOfEntryPoint */
++   sb_put32(b, SB_PE_OPT + 24, 0x80000000);  /* ImageBase, low half */
++   sb_put32(b, SB_PE_OPT + 28, 0x1);         /* ImageBase, high half */
++   sb_put32(b, SB_PE_OPT + 56, 0x12DB000);   /* SizeOfImage */
++   sb_put32(b, SB_PE_OPT + 64, 0);           /* CheckSum */
++   memcpy(&b[SB_PE_SEC], ".text", 5);
++   sb_put32(b, SB_PE_SEC + 8, 0x873036);     /* VirtualSize */
++   sb_put32(b, SB_PE_SEC + 12, 0x1000);      /* VirtualAddress */
++   sb_put32(b, SB_PE_SEC + 16, 0x873200);    /* SizeOfRawData */
++   sb_put32(b, SB_PE_SEC + 20, 0x400);       /* PointerToRawData */
++   memcpy(&b[SB_PE_SEC + 40], ".rdata", 6);
++   sb_put32(b, SB_PE_SEC + 40 + 8, 0x9E58A0);
++   sb_put32(b, SB_PE_SEC + 40 + 12, 0x875000);
++   sb_put32(b, SB_PE_SEC + 40 + 16, 0x9E5A00);
++   return b;
++}
++
++/* "" when the bytes are not taken for a PE image */
++static std::string
++sb_pe_id(const std::vector<uint8_t> &b, size_t size, uint32_t *stamp = nullptr)
++{
++   blake3_hasher ctx;
++   blake3_hash hash;
++   char hex[BLAKE3_HEX_LEN];
++
++   _mesa_blake3_init(&ctx);
++   if (!disk_cache_pe_image_identifier(b.data(), size, &ctx, stamp))
++      return "";
++   _mesa_blake3_final(&ctx, hash);
++   _mesa_blake3_format(hex, hash);
++   return hex;
++}
++
++static std::vector<uint8_t>
++sb_read_file(const char *path)
++{
++   std::vector<uint8_t> b;
++   FILE *f = fopen(path, "rb");
++   if (!f)
++      return b;
++   uint8_t chunk[65536];
++   size_t n;
++   while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0)
++      b.insert(b.end(), chunk, chunk + n);
++   fclose(f);
++   return b;
++}
++
++TEST(SbPeIdentity, HeaderFields)
++{
++   const std::vector<uint8_t> base = sb_pe_headers();
++   uint32_t stamp = 0;
++   const std::string id = sb_pe_id(base, base.size(), &stamp);
++   ASSERT_NE(id, "");
++   EXPECT_EQ(stamp, 0x6AFB0303u);
++   EXPECT_EQ(sb_pe_id(base, base.size()), id) << "not the same twice";
++
++   /* what a new link changes, one field at a time: each gives a new id */
++   const struct { const char *what; size_t at; } changes[] = {
++      {"TimeDateStamp", SB_PE_FILE + 4},
++      {"SizeOfCode", SB_PE_OPT + 4},
++      {"SizeOfInitializedData", SB_PE_OPT + 8},
++      {"SizeOfImage", SB_PE_OPT + 56},
++      {"CheckSum", SB_PE_OPT + 64},
++      {".text VirtualSize", SB_PE_SEC + 8},
++      {".text SizeOfRawData", SB_PE_SEC + 16},
++      {".rdata name", SB_PE_SEC + 40 + 1},
++      {".rdata VirtualSize", SB_PE_SEC + 40 + 8},
++      {".rdata VirtualAddress", SB_PE_SEC + 40 + 12},
++   };
++   for (const auto &c : changes) {
++      std::vector<uint8_t> b = base;
++      b[c.at] ^= 1;
++      const std::string other = sb_pe_id(b, b.size());
++      EXPECT_NE(other, "") << c.what;
++      EXPECT_NE(other, id) << c.what << " changed, same id";
++   }
++
++   /* one second later, nothing else: a new id (two links of the same code) */
++   {
++      std::vector<uint8_t> b = base;
++      sb_put32(b, SB_PE_FILE + 4, 0x6AFB0304);
++      EXPECT_NE(sb_pe_id(b, b.size()), id);
++   }
++
++   /* a section more */
++   {
++      std::vector<uint8_t> b = base;
++      sb_put16(b, SB_PE_FILE + 2, 3);
++      memcpy(&b[SB_PE_SEC + 80], ".data", 5);
++      EXPECT_NE(sb_pe_id(b, b.size()), "");
++      EXPECT_NE(sb_pe_id(b, b.size()), id);
++   }
++
++   /* what the loader rewrites in a mapped image must not matter: the base
++    * address (ASLR), and for ARM64X images the machine and the entry point */
++   const struct { const char *what; size_t at; } same[] = {
++      {"ImageBase low", SB_PE_OPT + 24},
++      {"ImageBase high", SB_PE_OPT + 28},
++      {"Machine", SB_PE_FILE + 0},
++      {"AddressOfEntryPoint", SB_PE_OPT + 16},
++   };
++   for (const auto &c : same) {
++      std::vector<uint8_t> b = base;
++      b[c.at] ^= 0x40;
++      EXPECT_EQ(sb_pe_id(b, b.size()), id) << c.what << " changed the id";
++   }
++}
++
++TEST(SbPeIdentity, NotAnImage)
++{
++   const std::vector<uint8_t> base = sb_pe_headers();
++   ASSERT_NE(sb_pe_id(base, base.size()), "");
++
++   /* cut anywhere before the end of the section table: refused, and nothing
++    * is read past `size` (the copies are exactly that long: ASan/valgrind
++    * would see a read behind them) */
++   for (size_t size = 0; size < SB_PE_SEC + 80; size++) {
++      std::vector<uint8_t> cut(base.begin(), base.begin() + size);
++      EXPECT_EQ(sb_pe_id(cut, cut.size()), "") << "accepted with " << size << " bytes";
++   }
++   {
++      std::vector<uint8_t> whole(base.begin(), base.begin() + SB_PE_SEC + 80);
++      EXPECT_NE(sb_pe_id(whole, whole.size()), "");
++   }
++
++   std::vector<uint8_t> b = base;
++   b[0] = 'N';
++   EXPECT_EQ(sb_pe_id(b, b.size()), "") << "no MZ";
++
++   b = base;
++   b[SB_PE_AT] = 'N';
++   EXPECT_EQ(sb_pe_id(b, b.size()), "") << "no PE signature";
++
++   b = base;
++   sb_put32(b, 0x3c, 0xfffffff0u);
++   EXPECT_EQ(sb_pe_id(b, b.size()), "") << "e_lfanew outside";
++
++   b = base;
++   sb_put16(b, SB_PE_FILE + 2, 0);
++   EXPECT_EQ(sb_pe_id(b, b.size()), "") << "no sections";
++
++   b = base;
++   sb_put16(b, SB_PE_FILE + 2, 0xffff);
++   EXPECT_EQ(sb_pe_id(b, b.size()), "") << "section table outside";
++
++   b = base;
++   sb_put16(b, SB_PE_FILE + 16, 8);
++   EXPECT_EQ(sb_pe_id(b, b.size()), "") << "optional header too small";
++
++   std::vector<uint8_t> zeroes(4096, 0);
++   EXPECT_EQ(sb_pe_id(zeroes, zeroes.size()), "");
++}
++
++/* Real driver builds: SB_TEST_PE_FILES is a ':' separated list of DLLs that
++ * are different builds; SB_TEST_PE_STAMPS (optional) their link time stamps
++ * in hex as llvm-readobj prints them, in the same order.  SB_TEST_PE_SAME
++ * (optional) is a list of files that are one build and must have one
++ * identity: an ARM64X DLL and the view of it that an x64 process gets (the
++ * loader rewrites the machine, the entry point and some directories). */
++TEST(SbPeIdentity, RealBuildsDiffer)
++{
++   const char *list = getenv("SB_TEST_PE_FILES");
++   if (!list)
++      GTEST_SKIP() << "SB_TEST_PE_FILES not set.";
++
++   std::vector<std::string> files, stamps, ids;
++   for (std::string rest = list; !rest.empty();) {
++      size_t colon = rest.find(':');
++      files.push_back(rest.substr(0, colon));
++      rest = colon == std::string::npos ? "" : rest.substr(colon + 1);
++   }
++   if (const char *s = getenv("SB_TEST_PE_STAMPS")) {
++      for (std::string rest = s; !rest.empty();) {
++         size_t colon = rest.find(':');
++         stamps.push_back(rest.substr(0, colon));
++         rest = colon == std::string::npos ? "" : rest.substr(colon + 1);
++      }
++   }
++   ASSERT_GE(files.size(), 2u);
++
++   for (size_t i = 0; i < files.size(); i++) {
++      const std::vector<uint8_t> b = sb_read_file(files[i].c_str());
++      ASSERT_GT(b.size(), 4096u) << files[i];
++
++      uint32_t stamp = 0;
++      const std::string id = sb_pe_id(b, b.size(), &stamp);
++      ASSERT_NE(id, "") << files[i];
++      printf("            %s  stamp 0x%08X  %s\n", id.c_str(), stamp, files[i].c_str());
++
++      /* the headers alone (what is mapped at the module handle) give the
++       * same id as the whole file */
++      EXPECT_EQ(sb_pe_id(b, 4096), id) << files[i];
++
++      /* the same bytes at another base address (what ASLR does in memory) */
++      std::vector<uint8_t> moved(b.begin(), b.begin() + 4096);
++      uint32_t pe_at;
++      memcpy(&pe_at, &moved[0x3c], 4);
++      moved[pe_at + 24 + 24 + 2] ^= 0x7f;
++      EXPECT_EQ(sb_pe_id(moved, moved.size()), id) << files[i];
++
++      if (i < stamps.size()) {
++         EXPECT_EQ(stamp, (uint32_t)strtoul(stamps[i].c_str(), NULL, 16)) << files[i];
++      }
++
++      for (size_t j = 0; j < ids.size(); j++)
++         EXPECT_NE(ids[j], id) << files[j] << " and " << files[i] << " have one identity";
++      ids.push_back(id);
++   }
++
++   if (const char *s = getenv("SB_TEST_PE_SAME")) {
++      std::string first;
++      for (std::string rest = s; !rest.empty();) {
++         size_t colon = rest.find(':');
++         const std::string file = rest.substr(0, colon);
++         rest = colon == std::string::npos ? "" : rest.substr(colon + 1);
++
++         const std::vector<uint8_t> b = sb_read_file(file.c_str());
++         const std::string id = sb_pe_id(b, b.size());
++         ASSERT_NE(id, "") << file;
++         printf("       same %s  %s\n", id.c_str(), file.c_str());
++         if (first.empty())
++            first = id;
++         EXPECT_EQ(id, first) << file << " is the same build, another identity";
++      }
++   }
++}
+-- 
+2.43.0
+
