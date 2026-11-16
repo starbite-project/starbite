@@ -1,0 +1,65 @@
+From c3b663c752a2211f8d4be1031f111dbd4378a90d Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 18:53:25 +0200
+Subject: [PATCH] b78: each vertex-shader variant logs its pointer and GPU code
+ address; with the flag file nirdump its NIR and binary go to umdlog (T87:
+ every hung DWM job uses one vertex shader)
+
+---
+ src/gallium/drivers/panfrost/pan_shader.c | 33 +++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/src/gallium/drivers/panfrost/pan_shader.c b/src/gallium/drivers/panfrost/pan_shader.c
+index 9d19b28..6cd2b8e 100644
+--- a/src/gallium/drivers/panfrost/pan_shader.c
++++ b/src/gallium/drivers/panfrost/pan_shader.c
+@@ -96,6 +96,7 @@ static bool sb_retype_int_attribs(nir_builder *b, nir_intrinsic_instr *intr, voi
+ #ifdef _WIN32
+ /* only this one call: windows.h's macros clash with Mesa's headers */
+ __declspec(dllimport) unsigned long __stdcall GetFileAttributesA(const char *lpFileName);
++__declspec(dllimport) unsigned long __stdcall GetCurrentProcessId(void);
+ #endif
+ static bool
+ sb_no_idvs(void)
+@@ -311,6 +312,38 @@ panfrost_shader_get(struct pipe_screen *pscreen,
+                                  res.binary.size, 128));
+    }
+ 
++#ifdef _WIN32
++   /* b78 (T87): every hung DWM job uses one vertex shader. Which one, and what is in it? With the flag file
++    * C:\ProgramData\Starbite\nirdump each vertex-shader variant writes its NIR and its compiled binary (hex) to
++    * umdlog\nir-<pid>-<n>.txt, headed by the variant pointer and GPU code address the draw trace prints. */
++   if (uncompiled->nir->info.stage == MESA_SHADER_VERTEX && res.binary.size) {
++      static int dump = -1;
++      static unsigned seq;
++      if (dump < 0)
++         dump = GetFileAttributesA("C:\\ProgramData\\Starbite\\nirdump") != 0xFFFFFFFFul;
++      fprintf(stderr, "sbumd: vs variant %p code 0x%llx, %u bytes, idvs %u%s\n", (void *)state,
++              (unsigned long long)state->bin.gpu, (unsigned)res.binary.size, (unsigned)state->info.vs.idvs,
++              dump ? " (nirdump)" : "");
++      if (dump && seq < 400) {
++         char path[160];
++         snprintf(path, sizeof(path), "C:\\ProgramData\\Starbite\\umdlog\\nir-%lu-%u.txt",
++                  GetCurrentProcessId(), seq++);
++         FILE *f = fopen(path, "w");
++         if (f) {
++            const uint8_t *d = (const uint8_t *)res.binary.data;
++            fprintf(f, "vs variant %p code 0x%llx size %u idvs %u\n", (void *)state,
++                    (unsigned long long)state->bin.gpu, (unsigned)res.binary.size, (unsigned)state->info.vs.idvs);
++            nir_print_shader(uncompiled->nir, f);
++            fprintf(f, "\nBINARY %u bytes:", (unsigned)res.binary.size);
++            for (unsigned i = 0; i < res.binary.size; i++)
++               fprintf(f, "%s%02x", (i % 32) ? "" : "\n", d[i]);
++            fprintf(f, "\nEND\n");
++            fclose(f);
++         }
++      }
++   }
++#endif
++
+    util_dynarray_fini(&res.binary);
+ 
+    /* Don't upload RSD for fragment shaders since they need draw-time
+-- 
+2.43.0
+

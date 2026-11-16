@@ -3476,6 +3476,41 @@ Linux host; the Win32 file code is **compiled only**.)
   (`--omit store-to-card-2.img: no such entry`), so the selector was not installed and T83/T83b are still to come.
 - In work offline, on this data: the 13 translator regressions, the msaa refusal, the remaining crashes.
 
+### 6.116 Chain results, part 3: T87 pins the stall on one compositor vertex shader that does not finish
+
+(2026-11-16 18:54; `build/win/results-t87s`, `build/win/results-t87`; measured with the diagnostic KMD be555bb4 and sbumd b78.)
+
+- **T87s, PASS:** the diagnostic pair boots (blt 49.6 fps, flip 58.8 fps, 12/12, counters 0).
+- **T87 reproduces T78 on purpose, step by step** (job timeouts after each step): logon 0; Settings 0; **Calculator:
+  1 after 5 s, 10 after 12 s, 22 when closed**; Notepad, Paint, Explorer, Task Manager: stays 22; **Calculator
+  kept open: 24, 34, 46 (20 s), 60 with Notepad on top, 85 after two shots**; 5 s after closing it 96, 15 s after
+  100; then nothing more, **Edge included (stays 100)**. So: Calculator on screen = about one timeout a second;
+  Calculator gone = it stops within seconds. Not Edge, not the other classic apps.
+- **What the hung job's memory looks like** (`umdlog/hang-*.txt`, `Live_HangPtrs`, every record alike): all 16
+  pointers of the job (next, indices, tiler context, position, uniform buffers, samplers, push uniforms, state,
+  varying buffers and descriptors, viewport, thread storage, the vertex draw's state, uniforms, push, thread
+  storage) are `[1 2c1 d ... M -1]`: a page is there, read-write, owned by DWM, mapped, never unmapped. DWM's
+  tiler heap (64 MiB) is mapped at its first, middle and last page. None of DWM's 419 allocations is on the scratch
+  page. The address space is not busy (`as 0x0`), MMU interrupts are unmasked (`mmumask 0xff00ff`), no fault is
+  pending. **`half-head` = `head`**: at half the limit the job slot is at the same job as at the limit.
+  So it is not missing memory, not an evicted allocation, not a locked address space and not a slow chain:
+  **one job is stuck with everything it points at in place.**
+- **Which job:** an indexed-vertex (IDVS) job of 60 vertices and 144 indices, as in T78. DWM's draw trace (sbumd
+  b78, 1222 draws logged after the first timeout) has 377 draws of exactly that shape, **all with one vertex
+  shader** (`vs 00000209B5379880`, code at GPU 0xa246000; that shader is used by 387 draws in all, 377 of them
+  60/144). Most of those draws complete; about one a second does not.
+- **Reading:** the remaining explanation is the vertex shader itself (as the old translator and the Bifrost
+  compiler turn it out) or the tiler on its output: for some input the job never ends. Which shader it is and what
+  is in it is not known yet. The record does not include the vertex buffers behind the attribute descriptors
+  (one indirection further than the pointers recorded), so "the vertex data is missing" is excluded only by the
+  absence of any MMU fault, not by a direct look.
+- **Next, staged:** sbumd b78b (`sb-b78` c3b663c, `sb-patches/0176`, e506e2bd): every vertex-shader variant logs its
+  pointer and GPU code address, and with the flag file `nirdump` writes its NIR and compiled binary to
+  `umdlog\nir-<pid>-<n>.txt`. **T87d** (`sbwddm-t87d`, the same test with `nirdump`) names the shader and shows its
+  code. Already queued and now more telling: T87c (does the user's T61 driver hang the same way), T87n (`noidvs`:
+  the same shader as separate vertex and tiler jobs: which half sticks), T88 (the new translator compiles the
+  shader differently: does the hang go away).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
