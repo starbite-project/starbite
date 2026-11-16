@@ -232,8 +232,8 @@ uint32_t cam_isp_bmp(const uint32_t *px, unsigned w, unsigned h, unsigned stride
 }
 
 /* ==== the pipeline v2 (cam.h): area resample, lens shading, white balance, colour matrix, sRGB-like tone ========== */
-#define V2_MAXW 1024U                       /* cells across (816) and output pixels across (<= 816) */
-#define V2_TILE 8U
+#define V2_MAXW 832U                        /* cells across (816) and output pixels across (<= 816) */
+#define V2_TILE 4U
 #define V2_BANDS 4U                         /* the rows in four bands, one a core (cam_isp_set_par) */
 struct v2band {
     uint16_t la[2U * V2_MAXW + 8U] __attribute__((aligned(16))), lb[2U * V2_MAXW + 8U] __attribute__((aligned(16)));
@@ -520,7 +520,7 @@ void cam_isp_process(const struct cam_raw *r, const struct cam_wb *wb, const str
     J.r = r, J.wb = wb, J.tu = tu, J.o = o, J.roi = roi, J.want_st = st != 0;
     unsigned nb = v2_par && y1 - y0 >= 64U ? V2_BANDS : 1U;
     for (unsigned b = 0; b <= nb; ++b) {
-        unsigned y = y0 + (unsigned)(((uint64_t)(y1 - y0) * b / nb) & ~7ULL);   /* whole tiles a band */
+        unsigned y = y0 + (unsigned)(((uint64_t)(y1 - y0) * b / nb) & ~(uint64_t)(V2_TILE - 1U));   /* whole tiles a band */
         J.y[b] = b == nb ? y1 : y;
     }
     for (unsigned b = 0; b < nb; ++b) {

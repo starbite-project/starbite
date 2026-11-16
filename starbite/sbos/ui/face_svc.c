@@ -298,7 +298,7 @@ static void scan_det(void)
     if (!frame_usable()) return;
     face_scan_det(&F.scan, F.eng.nfaces, &F.eng.det, &F.eng.sig, P.now_ms());
     /* an embedding of this frame when none is running and the face is big and bright enough to be worth it */
-    if (F.eng.nfaces && !F.eng.emb_busy && F.eng.sig.size >= FACE_MIN_SIZE && F.eng.sig.bright >= 20) (void)face_eng_embed(&F.eng);
+    if (F.eng.nfaces && !F.eng.emb_busy && F.eng.sig.size >= FACE_MIN_SIZE && F.eng.sig.bright >= FACE_MIN_BRIGHT) (void)face_eng_embed(&F.eng);
 }
 static void scan_emb(void) { face_scan_emb(&F.scan, face_tpl_score(&F.tpl, F.eng.emb), P.now_ms()); }
 static void scan_log(int r)
@@ -362,6 +362,7 @@ static void enrol_det(void)
     tell_roi();
     if (!F.eng.nfaces) { F.hint = SH_FH_NONE; return; }
     if (P.cam_settled && !P.cam_settled()) return;     /* the set-up only from settled frames */
+    if (F.eng.sig.size < FACE_MIN_SIZE || F.eng.sig.bright < FACE_MIN_BRIGHT) return;   /* the scans' own rule */
     F.hint = F.eng.sig.size < FACE_CLOSER_SIZE ? SH_FH_CLOSER : F.eng.sig.bright < 35 ? SH_FH_LIGHT : SH_FH_NONE;
     if (!F.eng.emb_busy && face_enrol_det(&F.en, &F.eng.sig, F.eng.det.score) >= 0) {
         if (face_eng_embed(&F.eng) < 0) F.en.want = -1;

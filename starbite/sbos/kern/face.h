@@ -25,10 +25,13 @@
 #define FACE_NTPL 5                     /* the enrolment's poses: centre, left, right, up, down */
 #define FACE_FRAME_W 360U               /* the camera's preview for Face Unlock: portrait, not mirrored */
 #define FACE_FRAME_H 480U
-#define FACE_DET_SCALE 3U
+#define FACE_DET_SCALE 3U               /* detection on a 120 x 160 copy (padded to 128 x 160) */
 /* face size = eye distance / frame width. The S9's front camera (~80 degrees wide): ~0.12 at 30 cm, ~0.09 at 40 cm */
 #define FACE_MIN_SIZE 0.06f             /* smaller: not embedded (the 112 x 112 crop would be mostly upscaled) */
-#define FACE_CLOSER_SIZE 0.07f          /* smaller: the "Move a little closer" hint */               /* detection on a 120 x 160 copy (padded to 128 x 160) */
+#define FACE_CLOSER_SIZE 0.07f          /* smaller: the "Move a little closer" hint */
+/* the face box's mean grey below which no embedding is made, in scans AND set-up alike (9i: scans wanted >= 20 and
+ * set-up nothing; in a dim room v1's dark picture gave faces at < 20: "detections 24, embeddings 0", never a match) */
+#define FACE_MIN_BRIGHT 8.0f
 
 enum { FACE_SPEED = 0, FACE_SECURITY = 1 };
 
