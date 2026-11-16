@@ -3444,6 +3444,38 @@ Linux host; the Win32 file code is **compiled only**.)
   (6.110), and Windows holds every tap's click until finger-up for a mouse-only game. The second is the bigger
   one (it applies everywhere on the screen). The fix for the second is the kit switch, per game.
 
+### 6.115 Chain results, part 2: T82, the new tree's first conformance scores
+
+(2026-11-16 18:31; `build/win/results-t82`, sbumd 63cb8404; measured. 14 minutes for eight passes: a test function takes
+0.1-2 s.)
+
+| pass | flags | suite | pass | fail | crash | note |
+|---|---|---|---|---|---|---|
+| (T74) | the user's T61 driver | d3d10core | 74 | 17 | 20 | the baseline of 11-16 |
+| O | none (old translator) | d3d10core | **95** | 5 | 11 | 21 more pass, none lost |
+| N | nirshaders | d3d10core | 84 | 19 | 8 | 13 tests that pass in O fail here; 2 better |
+| N | nirshaders | d3d11 (163) | 122 | 31 | 10 | the D3D11 suite at the D3D10-level interface |
+| G | nirshaders gsemu | d3d10core | 88 | 23 | **0** | geometry_shader, stream_output, clear_state, create_shader newly pass |
+| M, D, F, T | ... msaa ... | | | | | **do not count: ran on Microsoft Basic Render Driver** |
+| X | nirshaders | dxgi (55) | 37 | 12 | 6 | |
+
+- **The conformance fixes work on the phone:** with every new feature off, the new tree passes 95 of 111 against the
+  user's 74, and nothing that passed before fails. Left in O: 5 fails (combined_clip_and_cull_distances, depth_bias,
+  immediate_constant_buffer, pipeline_statistics_query, stream_output) and 11 crashes (clear_state, clip_distance,
+  create_shader, cube_maps, geometry_shader, index_buffer_offset, layered_rendering, multiple_viewports,
+  sample_c_lz, stream_output_resume, unbound_multisample_texture).
+- **The new translator is not ready to be the default:** 13 tests that pass with the old one fail with it
+  (buffer_srv, copy_subresource_region, depth_stencil_sampling, initial_texture_data, null_sampler,
+  rtv_depth_slice, shader_input_registers_limits, swapchain_flip, texture1d, texture, texture_compressed_3d,
+  unbind_shader_resource_view, update_subresource): they look like one or two common texture load/sample bugs.
+- **Geometry shaders run on the phone** (pass G: no crash left, geometry_shader and stream_output pass).
+- **`msaa` makes Windows refuse our driver** (every test of M, D, F, T on the Basic Render Driver, as in T76b), so
+  the D3D11 interface, feature level 11 and tessellation were **not tested**. T82b (`sbwddm-t82b`) repeats D, F, T
+  without `msaa`, plus the d3d11 and dxgi suites on the old translator.
+- **Step 3 of the chain did not run:** the store update for the new row failed on the main session's side
+  (`--omit store-to-card-2.img: no such entry`), so the selector was not installed and T83/T83b are still to come.
+- In work offline, on this data: the 13 translator regressions, the msaa refusal, the remaining crashes.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
