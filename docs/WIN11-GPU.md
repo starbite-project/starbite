@@ -3027,6 +3027,25 @@ two minutes. **74 pass, 17 fail, 20 crash, 0 time out.**
   they are what bounds it (~8 ms of waits + the game's own time). A present thread, as the GDI path has, moves
   them off it.
 
+### 6.101 T76b does not count: the runtime rejected that driver and the suite ran on the Basic Render Driver
+
+(2026-11-16 02:18) **T76b** (`build/win/results-t76b`, sbumd 98e9e6a6) printed 110 pass / 1 fail in both passes,
+but every one of the 112 test outputs says `Adapter: L"Microsoft Basic Render Driver"`: Direct3D could not create a
+device on our adapter and the tests fell back to WARP. So T76b says nothing about either shader translator. (T74
+ran on "Starbite Display", T71's programs too.) Side result: the suite's expectations are met 110/111 by WARP on
+this phone, so the tests themselves are sound here.
+- **Why the device was refused:** that DLL had MSAA (0165) on unconditionally. In each process our log ends right
+  after `CheckMultisampleQualityLevels R32G32B32_FLOAT x4: 1`. The working theory (inferred, not shown): the
+  runtime cross-checks multisample answers inside a format family, and `R32G32B32_TYPELESS` was translated to a
+  non-renderable UNORM format (0 levels) while its FLOAT member answered 1. sb-nir 1e2a6c6 creates the typeless
+  format as FLOAT. 0167's `msaa` flag (off by default) keeps this away from every other test.
+- **Tooling:** `sbwt.exe` now marks a test `[NOT OUR ADAPTER: ...]` and prints a WARNING line under the summary;
+  `wt-compare.py` prints `!!` for a log whose tests ran on another adapter. `winetests/build.sh` waits until the VM
+  reads what the Mac wrote (a just-rewritten source was twice seen truncated in the VM).
+- **T77 updated** (`build/win/stage/sbwddm-t77`): sbumd 35bae4d5 (sb-nir 1e2a6c6, all conformance fixes so far),
+  the new runner, seven passes: O (no flags), N (nirshaders), G (+gsemu), M (+msaa: is the device accepted now?),
+  D (+d3d11ddi), F (+fl11), X (dxgi).
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,

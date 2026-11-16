@@ -17,6 +17,17 @@ def load(path):
         m = LINE.match(line.replace('\r', ''))
         if m:
             res[m.group(2)] = (m.group(3), m.group(4), int(m.group(5)), int(m.group(6)))
+    # T76b: a run where the device fell back to the Basic Render Driver scored 110/111 and meant nothing. Newer sbwt
+    # logs say so per line; for older ones look at the per-test outputs next to the log.
+    import glob, os
+    foreign = 0
+    for f in glob.glob(os.path.join(path + '.out', '*.txt')):
+        for line in open(f, encoding='utf-8', errors='replace'):
+            if 'Adapter: L"' in line:
+                foreign += 'Starbite' not in line
+                break
+    if foreign:
+        print(f'!! {os.path.basename(path)}: {foreign} tests ran on ANOTHER ADAPTER (not our driver): this log is not a driver score')
     return res
 
 

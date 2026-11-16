@@ -186,7 +186,16 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
     process on `switch` (now refused cleanly there; the new translator handles it).
   Still open: fragment coordinates, depth-stencil sampling, format-compatibility copies, two crashes without a
   cause, stream output, pipeline statistics.
-- **Running:** the rest of T74's list, then stream output.
+- **11-16 02:18, more conformance fixes (offline, compiled only; `sb-nir` 1e2a6c6, sbumd 35bae4d5 in
+  `build/win/umd-nir-fix3`):** nine more causes, several found by resolving T74's crash addresses in the installed
+  DLL: the blitter saved 32 sampler views where Panfrost passes up to 128 (crash with a view at slot 127); the
+  empty input layout was never bound when an app sets none (crash); SV_Position was half a pixel low in every
+  pixel shader (Bifrost gives integer pixel coordinates); clears of array and 3D views cleared one layer; stencil
+  views sampled depth; same-format copies of 32-bit-per-channel typeless textures wrote nothing; the old
+  translator dropped the index of an indirectly addressed vertex input. The texture/`resinfo` crashes are confirmed
+  as the size and mip-count queries already fixed. Stream output: design only.
+- **T76b did not count** (the suite ran on the Basic Render Driver; `WIN11-GPU.md` 6.101). T77 carries all of the
+  above in seven passes.
 
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.

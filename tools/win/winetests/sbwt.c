@@ -113,7 +113,8 @@ int main(int argc, char **argv)
     if (!ntests)
         return 1;
 
-    unsigned pass = 0, fail = 0, crash = 0, tmo = 0, nostart = 0;
+    unsigned pass = 0, fail = 0, crash = 0, tmo = 0, nostart = 0, other_adapter = 0;
+    char adapter_name[96] = "";
     for (unsigned i = first; i < ntests && i - first < count; i++) {
         snprintf(path, sizeof(path), "%s\\%s.txt", dir, names[i]);
         SetEnvironmentVariableA("SBWT_ONLY", names[i]);
@@ -121,6 +122,7 @@ int main(int argc, char **argv)
         unsigned executed = 0, failures = 0, todo = 0, skipped = 0, have = 0;
         char fails[12][300];
         unsigned nf = 0;
+        char adapter[96] = "";     // T76b: every test had silently run on the Basic Render Driver (WARP)
         f = fopen(path, "r");
         while (f && fgets(line, sizeof(line), f)) {
             char *p = strstr(line, " tests executed (");
@@ -136,6 +138,15 @@ int main(int argc, char **argv)
                     sscanf(q, "%u tests executed (%u marked as todo, %u %*[a-z]), %u skipped", &executed, &todo,
                            &failures, &skipped) == 4)
                     have = 1;
+            }
+            char *ad = strstr(line, "Adapter: L\"");
+            if (ad && !adapter[0]) {
+                ad += 11;
+                size_t k = strcspn(ad, "\"\r\n");
+                if (k >= sizeof(adapter))
+                    k = sizeof(adapter) - 1;
+                memcpy(adapter, ad, k);
+                adapter[k] = 0;
             }
             if (nf < 12 && (strstr(line, "Test failed") || strstr(line, "unhandled exception") ||
                             strstr(line, "Test succeeded inside todo"))) {
@@ -164,12 +175,22 @@ int main(int argc, char **argv)
             res = "PASS";
             pass++;
         }
-        say("SBWT %s %s: %s; exit 0x%lx; executed %u, failures %u, todo %u, skipped %u; %.1f s\n", suite, names[i], res,
-            code, executed, failures, todo, skipped, secs);
+        int foreign = adapter[0] && !strstr(adapter, "Starbite");
+        if (foreign) {
+            other_adapter++;
+            if (!adapter_name[0])
+                strcpy(adapter_name, adapter);
+        }
+        say("SBWT %s %s: %s; exit 0x%lx; executed %u, failures %u, todo %u, skipped %u; %.1f s%s%s%s\n", suite, names[i],
+            res, code, executed, failures, todo, skipped, secs, foreign ? " [NOT OUR ADAPTER: " : "",
+            foreign ? adapter : "", foreign ? "]" : "");
         for (unsigned k = 0; k < nf; k++)
             say("    %s\n", fails[k]);
     }
     say("SBWT %s SUMMARY: %u pass, %u fail, %u crash, %u timeout, %u nostart of %u run (%u listed)\n", suite, pass, fail,
         crash, tmo, nostart, pass + fail + crash + tmo + nostart, ntests);
+    if (other_adapter)
+        say("SBWT %s WARNING: %u tests ran on another adapter (\"%s\"), not on our driver: their results do not count\n",
+            suite, other_adapter, adapter_name);
     return 0;
 }

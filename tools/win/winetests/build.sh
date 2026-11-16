@@ -22,6 +22,14 @@ mkdir -p "$out/gen/wine" "$out/gen/ddk"; cp "$out/src/test.h" "$out/gen/wine/tes
 cc() { # out.exe src.c libs...
   local exe=$1 src=$2; shift 2
   rm -f "$out/$exe"
+  # the VM's view of a file the Mac has just rewritten can lag (seen twice: a truncated sbwt.c, "expected '}'"):
+  # wait until the VM reads what the Mac wrote
+  local want got i; want=$(shasum -a 256 "$out/gen/$src" | cut -c1-64)
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    got=$(limactl shell starbite -- sha256sum "$out/gen/$src" 2>/dev/null | cut -c1-64)
+    [ "$got" = "$want" ] && break; sleep 1
+  done
+  [ "$got" = "$want" ] || { echo "$src: the VM does not see the file as written"; exit 1; }
   rm -f "$out/$exe"
   limactl shell starbite -- bash -c "cd '$out/gen' && ~/sbmesa/tc/clang-cl /nologo /O1 /MT /TC /FIsbwt-prelude.h -DSTANDALONE -D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_WARNINGS -w -I. /Fe:../$exe $src /link /LIBPATH:$K/msvc/lib/arm64 /LIBPATH:$K/kit/Lib/$KV/um/arm64 /LIBPATH:$K/kit/Lib/$KV/ucrt/arm64 $* 2>&1 | grep -E 'error|undefined' | head -40; rm -f *.obj"
   [ -s "$out/$exe" ] || { echo "$exe: build failed"; exit 1; }

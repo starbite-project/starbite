@@ -1493,3 +1493,353 @@ tests. Not found or not looked at: listed at the end. No fix special-cases a val
   sbumd.dll  27475968 bytes  sha256 90fe47b0fe01de2092b4ab0f8a7fab0087acd3a75c94df98143ca68f8322edbb
   sbumd.map   6844636 bytes  sha256 c8f8afd383572f7de928bc0209a84014090cf6a0572a197e82f19bd467e4d211
 ```
+
+## P6.6 Continued (second round): what was done and what was not
+
+This round stopped early: I ran out of room to investigate further in this session. One fix,
+one narrowing, the rest of the list is open.
+
+| Item | Result |
+|---|---|
+| DrawAuto with a NULL draw list (my phase 3/5 note) | **fixed**, `b908e17` (pan_cmdstream.c `panfrost_draw_vbo`): a draw whose count comes from a stream output target is turned into a direct draw of the vertices Panfrost has counted for that target on the CPU (`pan_so_target()->offset`). Confidence: high that the null read is gone; that the count is right for Direct3D is reasoned (it is the count GL transform feedback keeps). Compiled natively for arch 6, 9 and 10. Both translators |
+| test_fragment_coords | **narrowed, not fixed.** Both translators give the same NIR for the test's shader (`flt(cb0.xy, load_frag_coord.xy)`, printed with the harness, d3d10core.c:9504), so the cause is below the translators: Panfrost's fragment coordinate for this draw or the constant buffer. The log's colour (black everywhere) says both compares are false at every pixel. Not found |
+| test_clear_render_target_view_2d, test_depth_stencil_sampling, test_format_compatibility, test_compressed_format_compatibility, test_texture_compressed_3d | not looked at |
+| test_shader_stage_input_output_matching, test_shader_input_registers_limits | not looked at again |
+| test_texture, test_texture1d, test_resinfo_instruction | still "probable" (P6.3); the iteration was not matched |
+| test_vs_input_relative_addressing, the rest of test_face_culling | not looked at. For test_face_culling: the four failing lines (13643, 13648, 13664, 13670) are all in the SV_IsFrontFace part of the test, which 6d50e08 addresses; the culling loop before it passed |
+| the other open mistakes from phases 1 and 2 (cube array `resinfo` reciprocal, `ld_ms` on the old path) | not done |
+| stream output (design and implementation) | **not started**, not even the design |
+
+Windows build from b908e17: in the phase 6 report.
+
+---
+
+# Phase 6, round 3
+
+State: 2026-11-16 02:16 EET. Branch `sb-nir`, nine commits on top of b908e17, one topic each,
+nothing pushed, tree clean at `1e2a6c6`. Input: the T74 run (old tree) for everything up to
+R3.7. The T76b logs arrived at 02:12, after that work was done: they are in R3.8 (the run did
+not test our driver at all). No T77 log existed at 02:16.
+
+## R3.0 The crash addresses of T74 can be resolved
+
+The T74 log only gives absolute addresses. The DLL's load base follows from one crash whose
+function is known: test_combined_clip_and_cull_distances dies in `tgsi_to_nir` (P6.2). Trying
+every 64 KiB-aligned base that puts all addresses inside `.text` of
+`stage/sbwddm-t74/maps/sbumd.map`, exactly one puts that address in a tgsi_to_nir function
+(`ttn_compile_init+0xe48`): **base 0x7ff96e5f0000** for that boot. With it:
+
+| Test | Address | Function (T74 map) |
+|---|---|---|
+| test_texture, test_texture1d | 7FF96E82A160 | `panfrost_emit_const_buf+0x348` (pan_cmdstream.c) |
+| test_update_subresource | 7FF96E9B0438 | `memcpy` (the negative box, fixed in aec5da4: consistent) |
+| test_shader_stage_input_output_matching | 7FF96E826F5C | `panfrost_draw_vbo+0x72c` |
+| test_shader_input_registers_limits | 7FF96E719C68 | `panfrost_blitter_save+0x30c` (pan_blit.c) |
+| test_resinfo_instruction | 7FF96E92D8FC | `emit_cf_list+0x8f4` (bifrost_compile.c) |
+
+The instructions at those addresses were read with `llvm-objdump-20 -d` on
+`stage/sbwddm-t74/sbumd.dll` (RVA = address - base). The little script is not in the tree
+(scan all bases, print the function of each address); it is twenty lines of Python over the
+map's `0001:` lines.
+
+## R3.1 Fixed
+
+| Test | Cause | Fix | Confidence | Translator |
+|---|---|---|---|---|
+| test_shader_input_registers_limits (crash) | `u_blitter.h`: `saved_sampler_views[PIPE_MAX_SAMPLERS]` has 32 entries; Panfrost saves all its bound fragment views before a blit and has 128 slots (`PIPE_MAX_SHADER_SAMPLER_VIEWS`). The test binds a view at t127, draws, and the readback copy is a blit: `util_blitter_save_fragment_sampler_views` unreferenced whatever lay behind the array. The faulting instruction is the load of the old entry's reference count in that loop. (Not "in the releases": the last line seen is the draw, the crash is in the `check_texture_color` after it.) | `c4018b1` (the array has 128 entries) | high: address, disassembly and source agree | both |
+| test_shader_stage_input_output_matching (crash) | The test never calls IASetInputLayout. 0155's empty vertex-elements state is only bound when `velems_changed` is set, which only IaSetInputLayout / IaSetVertexBuffers did; it started FALSE. Panfrost's `panfrost_emit_vertex_data` then read `ctx->vertex->nr_bufs` through NULL (offset 0x348, the same site 0155's comment names) | `3a2befe` (Device.cpp: a new device starts with `velems_changed = TRUE`) | high | both |
+| test_fragment_coords; test_texture_compressed_3d | Panfrost from Bifrost on reports `fs_coord_pixel_center_integer` only, and its compiler makes `load_frag_coord.xy` from the integer pixel coordinate (`nir_lower_frag_coord_to_pixel_coord`, whose comment says the frontend has to have applied the centre; GL's state tracker does). Neither translator did: SV_Position.xy was 0.5 too small in every pixel shader. That is exactly the four failing lines (320.0 > 320 false, 18 > 16 true, `frac` = 0), and the one in test_texture_compressed_3d (its shader samples at `position / size`: y = 9 gives texel row 4.8 instead of 5.07, the neighbouring row's value 0x40) | `5220fb5`: `Shader_tgsi_driver.pixel_center_integer` from the caps (integer without half-integer); both translators add (0.5, 0.5), the NIR one the sample position instead when SV_Position is declared with a sample interpolation mode | high. Harness: NIR of both test shaders on both paths | both |
+| test_clear_render_target_view_2d | `util_blitter_clear_render_target` draws once, into the first layer, when the driver has no layered rendering from the vertex shader (`has_layered` false on Panfrost): a clear through a view of layers 0-4 cleared layer 0, one of layers 1-3 layer 1. Layers 3 and 4 stayed 0 | `7634345`: one draw per layer through a surface of that layer; the same in `util_blitter_clear_depth_stencil` | high for the cause; the fix is compiled only | both |
+| test_depth_stencil_sampling | `FormatTranslate` gives `X24_TYPELESS_G8_UINT` and `X32_TYPELESS_G8X24_UINT` the combined depth-stencil format, and that was the sampler view's format: it samples the depth. The values in the log are the bits of the depth clear value read as an integer (0.2f = 0x3e4ccccd = 1.045e9; 0.3f; 1.0f) | `fdc4c64` (Shader.cpp `SbStencilView`): `PIPE_FORMAT_X24S8_UINT` / `X32_S8X24_UINT`, stencil swizzled to green. Panfrost has both (pan_format.c; the Z32F_S8 stencil is the separate stencil resource) and replicates x for depth/stencil views | high for the cause, medium-high for the fix (Windows only code, not run) | both |
+| test_format_compatibility (test 24), test_compressed_format_compatibility (0x46 -> 0x1) | Not the copies under test: the tests' **readback** of an `R32G32_TYPELESS` / `R32G32B32A32_TYPELESS` texture. Those resources are `R32G32_UNORM` / `R32G32B32A32_UNORM` here, and a same-format 2D copy is a blit (`sb_resource_copy_region`, 0105): a 32-bit normalized texel through a 32-bit float. The values read are bit-exact copies of earlier contents, at unshifted positions, and in the second test only one of fifteen identical cases fails: the staging texture was not written at all and showed recycled memory. Why the draw into a 32-bit UNORM target leaves nothing is **not established** (GL has no such render target, so that row of pan_format.c may never have run); a float round trip could not be exact in any case | `385d0de` (pan_resource.c): the blit uses the UINT format of the same layout for both views for R32/R32G32/R32G32B32A32 UNORM and SNORM. UINT blits of these sizes pass in the same test (tests 22, 23) | medium: the reading of the evidence is firm, the fix avoids the unexplained path rather than explaining it | both |
+| test_vs_input_relative_addressing | old path only: ShaderTGSI.c emits `IN[TEMP[0].x+1]` correctly, `tgsi_to_nir` dropped the index ("Indirection on input arrays isn't supported by TTN") and read `IN[1]` | `c973330` (tgsi_to_nir.c): a compare-and-select over the declared input registers, as the NIR translator does | high. Harness: before/after NIR of the test's shader on `--tgsi`, compiled; the NIR path was already right | old (NIR was right) |
+| (no test) `resinfo_rcpFloat` of a cube array, old path | `texture_dim_from_tgsi_target` had no cube array case | `a499371` | high, trivial | old |
+
+## R3.2 Now certain, no new change needed
+
+| Test | What it is |
+|---|---|
+| test_texture, test_texture1d | The faulting code is `ldr x11, [ctx->sampler_views[stage][id & 0x7f]]; ldr w9, [x11, #0xc]`: the `txs` sysval upload on an empty slot, x11 = NULL. The last check seen (7672 / 6753) is the end of an iteration; the next table entry is the first one with a NULL texture and `ps_ld`, whose shader calls GetDimensions. Fixed by c640c16 (phase 2: zeros for an empty slot) |
+| test_resinfo_instruction | A crash in the Bifrost compiler (`emit_cf_list`), inside the first CreatePixelShader of the loop (the last check seen is the one before the loop): `query_levels` on Bifrost v6, the backend failure the harness showed for 9 corpus shaders on the old driver. Fixed by c640c16 (`PAN_SYSVAL_TEXTURE_LEVELS`) |
+| test_format_compatibility, test_compressed_format_compatibility: the copy rules themselves | The runtime filters the copies Direct3D 10.0 forbids before the DDI (all "must not copy" cases pass). Between formats of one family `areResourcesCompatible` is false for differing channel types and the copy goes through `util_resource_copy_region` on the CPU, which is exact. All five BC families are reported by this GPU (`CheckFormatSupport ... caps 0x1` for formats 70 to 84 in the T74 umdlog), so nothing the feature level requires is missing |
+
+## R3.3 Looked at, not done
+
+- **`ld_ms` sample index on the old path.** `tgsi_to_nir` (0114) has `SAMPLE_I_MS` with the index
+  in src2.x, and emitting it from ShaderTGSI.c is ten lines; I wrote them and took them out
+  again: the only corpus shaders with `ld_ms` on Shader Model 4 also have a `switch` and are
+  refused on the old path, so nothing here would have executed the new code, and it is the
+  default path of the installed driver. With `msaa` off every multisampled texture has one
+  sample, so sample 0 is right there. Needs `nirshaders` with `msaa`.
+- **Why a draw into a 32-bit UNORM target writes nothing** (R3.1). Candidates, none checked:
+  the blend descriptor's fixed-function conversion for `RG32_UNORM` / `RGBA32_UNORM` memory
+  formats on the G72; `pan_pack` in pan_nir_lower_framebuffer.c scales by 2^32-1 in a float
+  and converts with `f2u32`, which overflows for 1.0. Either way no Direct3D view format is a
+  32-bit UNORM, so after 385d0de nothing renders to one.
+- Float formats copied by blit (R32_FLOAT for `R32_TYPELESS`, R16G16B16A16_FLOAT...) go through
+  float registers; the tests' patterns (including 0xffffffff) survive on this GPU. Signalling
+  NaN patterns are not tested by the suite and I did not reason about them.
+- `Tex3D.WSize = -1` and similar "all remaining" values in view creation (OutputMerger.cpp
+  `last_layer = WSize - 1 + FirstW`): the tests pass, so the runtime resolves them before the
+  DDI; not checked against the DDI documentation.
+
+## R3.4 What changes with all flag files absent
+
+Bug fixes only, but three of them are visible beyond the tests:
+
+1. SV_Position.xy in every pixel shader is now x + 0.5, y + 0.5 (was x, y). Shaders that use
+   it for `Load` coordinates are unaffected (same texel); shaders that compare it, take its
+   fraction or scale it into texture coordinates change by half a pixel, to what Direct3D
+   specifies. The old translator's shaders have one more MOV and ADD and the property
+   `FS_COORD_PIXEL_CENTER INTEGER`.
+2. Clears of array and 3D views clear every layer (one draw and one framebuffer state per
+   layer).
+3. Copies between two `R32G32B32A32_TYPELESS` / `R32G32_TYPELESS` textures are bit-exact.
+
+`struct blitter_context` grew by 96 pointers. Nothing else differs in size or call order.
+
+## R3.5 Verification
+
+- Harness at a499371 (`harness-r3.txt`, `harness-r3-tgsi.txt`, both `.err` empty): the
+  summary tables and every per-shader result line are identical to `harness-p6.txt` and
+  `harness-p6-tgsi.txt` (NIR path: 468 in scope, 457 compiled, 11 validated only, 12 refused
+  as intended, 0 failures, self tests as before; old path: 233 compiled, 13 refused). The TGSI
+  text against phase 2's differs in the 62 pixel shaders that read SV_Position (property, MOV,
+  ADD, renumbered immediates) and in the `switch` shaders refused since 139d0c4.
+- Ran on the host: the two translators on the shaders of test_fragment_coords and
+  test_vs_input_relative_addressing (`--print-nir`, both paths, Bifrost compile); host
+  compiles of u_blitter.c, pan_resource.c, pan_cmdstream.c (all architectures), tgsi_to_nir.c.
+- Reasoned and compiled only (Windows code or draw-time code, nothing here can draw): the
+  blitter array, the initial input layout, the layered clears, the stencil views, the integer
+  copy views. Resolved from the T74 binaries: the five crash sites.
+- Windows build from 1e2a6c6 (a499371 plus the one-line Format.cpp change of R3.8): ARM64
+  and ARM64EC exit 0, link without warnings, 35 `ok`, `FAILS: 0`.
+
+```
+/Users/dev/project-starbite/.claude/worktrees/win-mali-gpu-87c7b0/build/win/umd-nir-fix3/
+  sbumd.dll  27484160 bytes  sha256 35bae4d5c4b9d6aa45d612adf7e8a0d423029c3b6ff03562b498a02a59043001
+  sbumd.map   6845052 bytes  sha256 3133885ef6636d85ec324b54e5aee7c584d6c7c3d8cdd40ea66a692b63c7566d
+```
+
+## R3.6 What the old-tree list looks like now
+
+Of T74's 17 failures and 20 crashes, by expected state with this DLL (none of it run):
+
+- fixed for both translators: test_multiple_render_targets, test_color_mask,
+  test_independent_blend, test_instanced_draw, test_copy_subresource_region,
+  test_update_subresource, test_depth_bias, test_fragment_coords,
+  test_clear_render_target_view_2d, test_depth_stencil_sampling, test_format_compatibility,
+  test_compressed_format_compatibility, test_texture_compressed_3d, test_texture,
+  test_texture1d, test_resinfo_instruction, test_shader_stage_input_output_matching,
+  test_shader_input_registers_limits, test_face_culling, test_vs_input_relative_addressing,
+  test_immediate_constant_buffer (base; a dynamic index still needs `nirshaders`, P2.5);
+- need `nirshaders`: test_cube_maps, test_sample_c_lz, test_unbound_multisample_texture
+  (refused cleanly on the old path), test_combined_clip_and_cull_distances (**still an illegal
+  instruction on the old path**: tgsi_to_nir's unknown property, not touched);
+- need `gsemu` + `nirshaders`: test_create_shader, test_clear_state, test_index_buffer_offset,
+  test_multiple_viewports, test_geometry_shader, test_clip_distance;
+- missing features: stream output (test_stream_output, _resume, _vs: design below),
+  test_layered_rendering, test_alpha_to_coverage (`msaa`), test_pipeline_statistics_query.
+
+## R3.7 Stream output: design (nothing implemented)
+
+### What Direct3D 10 asks for
+
+- `CreateGeometryShaderWithStreamOutput`: up to 64 declaration entries (output slot 0-3,
+  register, component mask, or a gap), one stride. Either a real geometry shader, or **no
+  shader code**: the application passed vertex shader bytecode (or only its signature), and
+  the entries name vertex shader output registers. d3d10umd keeps that as a `Shader` with
+  `stream_output` and no code (`bound_empty_gs`); `ResolveState` (Draw.cpp) remaps the
+  register numbers through the bound vertex shader's `output_mapping` and re-creates the
+  geometry CSO, which is the draw module's convention ("a geometry shader state without
+  tokens carries the stream output of the stage before it").
+- `SoSetTargets`: up to 4 buffers, each with a **byte** offset, or -1 to continue where the
+  last stream output into that buffer stopped.
+- Output is always a list of whole primitives (strips are unrolled, adjacency dropped);
+  writing stops when the next whole primitive does not fit in any one bound buffer;
+  rasterization of stream 0 goes on unless there is no pixel shader and no depth/stencil.
+- `DrawAuto`: draw the buffer bound at vertex slot 0, vertex count = bytes filled by the last
+  stream output into it / the vertex stride, no CPU-visible count.
+- Queries: SO_STATISTICS (primitives written, primitives that would have been written with
+  room), SO_OVERFLOW_PREDICATE.
+
+### What is there
+
+- Panfrost's GL transform feedback (`so->xfb`, `panfrost_launch_xfb`, `pan_nir_lower_xfb`,
+  `PAN_SYSVAL_XFB`): a second variant of the **vertex shader** that only writes memory, run as
+  a compute-type job over the draw's vertices before the draw, a barrier in the job chain.
+  Record index = instance x vertices + raw vertex ID: right for **non-indexed point, line and
+  triangle lists**, which is all GLES allows. The fill level is a CPU-side vertex count per
+  target (`panfrost_streamout_target::offset`), advanced by the draw's vertex count; no clamp
+  to the buffer size (GL makes overflow an error before the draw). It is built only when the
+  NIR has `xfb_info`; `pipe_shader_state::stream_output` alone does nothing.
+  `set_stream_output_targets` takes its `offsets` as that vertex count, not bytes.
+  PRIMITIVES_EMITTED / GENERATED are CPU counters; SO_STATISTICS and the overflow predicate
+  fall into `default`.
+- Phase 3's geometry path: capture job, optional index kernel, rasterization draw. poly's
+  rasterization shader contains the stream output writes (poly_nir_lower_gs.c:770-840:
+  `poly_xfb_vertex_copy_in_strip`, `poly_previous_xfb_primitives`, bounded by
+  `xfb_verts[stream]`), and poly makes a count kernel, expects a prefix sum over the counts
+  (`info->prefix_sum`) and a pre-GS kernel that sizes the output and advances the offsets in
+  GPU memory. The driver drops `xfb_info` before lowering (pan_nir_lower_gs.c:247) and frees
+  the count and pre-GS kernels.
+- b908e17: DrawAuto as a direct draw of the CPU-side count.
+
+### Tier 1: vertex shader only, non-indexed lists (test_stream_output_vs is a point list)
+
+1. **Frontend, shader.** The stream output belongs to the vertex shader as far as the driver
+   is concerned. Keep what is needed to build a second vertex CSO: on the NIR path a
+   `nir_shader_clone` taken lazily from a retained clone (as `sb_dual_nir` does for dual
+   source), on the old path the tokens (`tgsi_dup_tokens`). In `ResolveState`, when
+   `bound_empty_gs` and a vertex shader with code are bound and the driver has no stage that
+   takes a code-less geometry state, look up (vertex shader, stream output shader) in a small
+   cache on the vertex `Shader` (the pair changes rarely; key on the SO shader pointer and
+   invalidate in `DestroyShader` of either) and bind the variant; bind the plain vertex
+   shader again when the pair goes away. `output_resolved` and the delete/create of the
+   geometry CSO stay for drivers with a geometry stage (softpipe/llvmpipe).
+2. **Frontend, xfb info.** The variant's `pipe_shader_state::stream_output` is the SO
+   shader's, with `register_index` remapped (already done) - Panfrost needs it for the
+   strides. For NIR it also needs `nir->xfb_info`: a helper `SbNirSetStreamOutput(nir, info)`
+   that builds `nir_xfb_info` (buffer strides in bytes, per output: buffer, byte offset,
+   `location` of the output variable whose `driver_location` is `register_index`,
+   `component_offset`, `component_mask`), sets `info.has_transform_feedback_varyings` and
+   `info.xfb_stride[]`. For the old path the same has to happen after `tgsi_to_nir`, inside
+   Panfrost's `panfrost_create_shader_state` (it has `cso->stream_output` and the NIR): put
+   the helper in Panfrost (`pan_shader.c`, "xfb info from pipe_stream_output_info when the
+   NIR has none") so both paths share it; `output_mapping` gives `driver_location` =
+   TGSI output index on both.
+3. **Offsets in bytes.** Change `panfrost_streamout_target::offset` to bytes (GL passes 0 or
+   -1, so GL is unaffected; `panfrost_xfb_offset` then adds it unscaled and
+   `panfrost_update_streamout_offsets` adds count x stride of the bound variant). d3d10umd
+   already passes Direct3D's byte offsets through.
+4. **Whole primitives, buffer end.** In `panfrost_launch_xfb`: vertices that fit =
+   min over bound targets of (buffer_size - offset) / stride, rounded down to whole
+   primitives of the draw's mode; run the job over that many, advance the offsets by that
+   many, and add written / needed to two CPU counters. All on the CPU, no readback.
+5. **Queries.** `PIPE_QUERY_SO_STATISTICS` = (written, needed) deltas of those counters;
+   `SO_OVERFLOW_PREDICATE` = needed > written. Query.cpp already maps both.
+6. **DrawAuto.** b908e17's count becomes offset / the vertex buffer stride of slot 0 (bytes
+   now). d3d10umd sets `draw_so_target` from the buffer bound at slot 0.
+7. Refuse the rest of the vertex-only case cleanly until tier 2: indexed draws, strips,
+   adjacency and instanced draws with an SO-only shader log once and draw without capture
+   (as today), rather than writing vertices in the wrong order.
+
+Cost: no extra flush, one compute-type job per captured draw (it exists in GL). Risk: the
+xfb variant's attribute fetch uses `offset_start`; with `StartVertexLocation` != 0 check
+`cfg.compute.attribute_offset` / `load_raw_vertex_offset_pan` on arch 6 (GL exercises it).
+
+### Tier 2: everything through the geometry path
+
+A vertex-only stream output of a strip, an indexed draw or an instanced draw is the same
+problem as a geometry shader's: the k-th output vertex is not the k-th input vertex. Do not
+grow a second mechanism: synthesize a pass-through geometry shader (one per input primitive
+type: point, line, triangle, and the two adjacency types; it copies the captured vertex
+outputs to its outputs and emits one primitive) in NIR in Panfrost when an SO-only shader is
+bound with such a draw, and run the geometry path with stream output.
+
+For the geometry path itself:
+
+1. Keep `xfb_info` on the geometry shader (built as in tier 1, from the SO declaration on
+   the geometry `Shader`); let poly put the writes into the rasterization shader.
+2. **A side-effect run of the rasterization shader.** A vertex job with IDVS may not write
+   memory, so compile an `is_xfb`-style variant of the rasterization shader (no IDVS, no
+   varyings) and run it as a compute-type job over the same vertex range as the draw, after
+   the capture job and the index kernel and before the draw's vertex job, with an explicit
+   job dependency (`sb_gs.job_dep`). The draw's own variant has the xfb stores removed.
+3. **Static output count** (18 of 23 corpus shaders): vertices per input primitive are known
+   at compile time, so the count, the clamp to the buffer end and the new offsets are CPU
+   arithmetic as in tier 1 (`xfb_verts[stream]` and the base addresses go into
+   `struct poly_geometry_params`). No count kernel, no prefix sum, no readback; DrawAuto and
+   the queries work from CPU counters.
+4. **Dynamic output count** (5 of 23): needs poly's count kernel per input primitive, a
+   prefix sum over the counts (`poly_previous_xfb_primitives` reads it), and the total. The
+   prefix sum kernel poly ships is written for asahi's compute model; on Bifrost it is one
+   more compute job (serial in one invocation is enough for a first version: one invocation
+   that walks the count buffer). The total is only on the GPU, and three things want it on
+   the CPU: the next append into the same buffer (its base address), DrawAuto (the vertex
+   count of a direct draw; no indirect draws before Valhall), and the statistics query. So:
+   after such a draw mark the target "fill level on the GPU"; the next use of that level
+   flushes the batch, waits and reads one word. That is the single readback of the design,
+   and only for geometry shaders whose emit count depends on data. Keeping offsets in GPU
+   memory (asahi's pre-GS kernel) would save the readback for appends but not for DrawAuto
+   on this hardware, so it is not worth a second representation.
+5. Statistics with a geometry shader: PrimitivesStorageNeeded is the count total (static:
+   CPU; dynamic: the same readback).
+6. Up to 4 buffers: Direct3D 10 allows several buffers only with one element each; poly's
+   per-buffer strides cover it. `RasterizedStream` other than 0 and multiple streams
+   (Direct3D 11) stay refused as in D3D11.cpp.
+
+### Order of work, and what each step unlocks
+
+1. Tier 1 steps 1-6: test_stream_output_vs, the SO statistics of vertex-only draws, DrawAuto
+   after them. About 250 lines (frontend variant cache 80, xfb helper 60, Panfrost byte
+   offsets, clamp, counters and queries 110).
+2. Geometry path, static count (tier 2 steps 1-3, 5): test_stream_output_resume
+   (its shader emits a fixed two triangles), most real uses (particle systems expanding
+   points). The side-effect variant is the new mechanism; everything else exists.
+3. Pass-through shader for vertex-only strips/indexed/instanced.
+4. Dynamic count with the readback.
+
+test_stream_output itself is mostly creation checks done by the runtime; it crashed in T74 at
+the first `create_gs_state` and needs only that creation with stream output succeeds, which
+steps 1 and 2 give.
+
+### Open points to check before writing code
+
+- `nir_io_add_intrinsic_xfb_info` needs `xfb_info` before `nir_lower_io`; Panfrost calls it
+  at pan_shader.c:171 on already lowered IO, as GL's does - confirm that the helper's
+  `location` / `component_offset` are what it matches against for our `vec4` outputs at
+  `VARYING_SLOT_VAR0 + register` and for SV_Position.
+- Whether the xfb variant may run when the vertex shader has no SV_Position (11 corpus
+  vertex shaders compile to an empty binary without it): the variant only stores to memory,
+  so it should, but the "empty binary" shortcut has to be looked at.
+- The SO buffer bound as a vertex buffer in the same batch as the capture: compute-type jobs
+  are added as barriers, so a later vertex job waits; confirm in pan_jc.h for a draw that
+  both captures and reads (Direct3D forbids the same buffer as input and output of one draw).
+
+## R3.8 T76b: the run did not reach our driver (read 02:12-02:16)
+
+`results-t76b/ours/pre/umdlog/sbwt-d3d10core-A.log` and `-B.log` both say 110 pass, 1 fail
+(test_alpha_to_coverage). **Neither pass tested sbumd**: every test's output has
+`Adapter: L"Microsoft Basic Render Driver", 1414:008c`. So T76b says nothing about either
+translator, and its A/B comparison is void.
+
+What happened, from the per-process driver logs (450 of them, two device creations per
+process, all alike): the runtime opens the adapter, calls CreateDevice, asks
+CheckFormatSupport / CheckMultisampleQualityLevels format by format, and stops after
+
+```
+sbumd: CheckFormatSupport DXGI_FORMAT_R32G32B32_TYPELESS (5) -> PIPE_FORMAT_R32G32B32_UNORM: caps 0x1
+sbumd: CheckMultisampleQualityLevels DXGI_FORMAT_R32G32B32_TYPELESS x4: 0
+sbumd: CheckFormatSupport DXGI_FORMAT_R32G32B32_FLOAT (6) -> PIPE_FORMAT_R32G32B32_FLOAT: caps 0x1f
+sbumd: CheckMultisampleQualityLevels DXGI_FORMAT_R32G32B32_FLOAT x2: 0
+sbumd: CheckMultisampleQualityLevels DXGI_FORMAT_R32G32B32_FLOAT x4: 1
+```
+
+Nothing from the driver follows (no format 7, no x8), and the test's `create_device` falls
+back to WARP. In T74 (same runtime, MSAA compiled out) the runtime walks all formats. The
+T76 driver is cf67267, where MSAA (0165) is on unconditionally.
+
+Reading: the runtime drops a device whose driver reports multisampling for a format but not
+for the typeless format of its family. In T74's full list of answers that family (R32G32B32)
+is the only one whose typeless stand-in (`R32G32B32_UNORM`, not a Direct3D format, not
+renderable on Panfrost) differs from its members (FLOAT, UINT, SINT: render targets), and it
+is exactly where the runtime stops. Not shown: the rule itself. The other candidate is that
+the runtime does not accept multisampling on R32G32B32_FLOAT at all; the fix below does not
+cover that.
+
+Fix: `1e2a6c6` (Format.cpp): `R32G32B32_TYPELESS` is created as `R32G32B32_FLOAT`, as
+`R32_TYPELESS` already is `R32_FLOAT`. With the flags off this changes one answer:
+CheckFormatSupport of format 5 becomes that of format 6 (0x7 instead of 0x1). Confidence:
+medium-low; compiled only.
+
+Consequences for tonight's queue:
+
+- **T77** is built from 1c0a515, where MSAA is behind the `msaa` flag file. Its passes without
+  `msaa` should reach the driver; every pass with `msaa` (and `fl11`, which needs it) will
+  most likely end on the Basic Render Driver in the same way. Check the `Adapter:` line of
+  any test output before reading a T77 score; `wt-compare.py` does not look at it.
+- A rerun of the A/B comparison needs either a driver with `msaa` off or this fix; the DLL in
+  `umd-nir-fix3` has both (MSAA off without the flag file, and 1e2a6c6).
+- `CheckMultisampleQualityLevels` logs only its first 24 calls per process (`said < 24`), so
+  the log alone cannot show a later format being refused once this one passes.
