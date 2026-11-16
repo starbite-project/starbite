@@ -3642,6 +3642,33 @@ three test programs, T61's D3D driver set; measured. `GLSYS VERDICT: PASS`.)
 - Useful by-product: the game runs on this kit (the 0170 code base) on a standard row through the GDI present as
   before; Steam's cold start took 135 s to the game, the second start 10 s.
 
+### 6.123 Chain results, part 10: T83 / T83b, both rows boot the right driver
+
+(2026-11-16 21:04; `build/win/results-t83/ng` and `/std`; the selector 7f6214b0 installed, row `win11-ng` in the store; measured.)
+
+| | T83, row `win11-ng` | T83b, row `win11-big` |
+|---|---|---|
+| WtDat that Windows recorded | **63476** = new GPU | **65063** = standard |
+| selector lines (one per process) | 14 x `-> sbumd-ng.dll`, 0 x `sbumd.dll` | 13 x `-> sbumd.dll`, 0 x `sbumd-ng.dll` |
+| DWM | `row NEW-GPU -> sbumd-ng.dll`, survived | `row standard -> sbumd.dll`, survived |
+| loaded at the end (this account) | ng 2, std 0 | ng 0, std 2 |
+| blt window / flip window | 51.2 / 61.1 fps | 64.7 / 67.2 fps |
+| Geometry Dash, GL kit 0169, no flag files | `row: new GPU`, zero-copy + present thread, **57-58 fps** in its 300-frame windows, 0 present failures | no zero-copy lines = GDI present, **32.0 fps** average (as with kit 0158) |
+| KMD counters | timeouts 0, resets 2, failed 2 | all 0 |
+| verdict | `ROWS VERDICT PASS` | `ROWS VERDICT PASS` |
+
+- **The row signal works:** the loader's 80 s reaches Windows as WtDat 63476 through the firmware, and the 82 s
+  rows read 65063. The selector picks by it in every process that logged a line, DWM included (so the State key is
+  readable from DWM's account).
+- **The standard row is unchanged in what it loads** (`System32\sbumd.dll` 6d759c44, checked by hash before and
+  after the install) and now loads it through the selector; nothing in T83b differs from earlier runs on that row.
+- **The game kit is row-aware as designed:** the same two files give the fast path on the new row and the old
+  path on the standard one. Kit 0170 (the same plus the touch switch) is the one to install.
+- Cosmetic: on the new row sbcomp prints "sbumd NOT loaded" because it looks for a module called sbumd.dll.
+- The 2 failed jobs on the new row are not explained (no timeout; the records were not saved by this script).
+- Not tested: the plain `win11` row (no watchdog, cannot run unattended); it reads whatever S-Boot left in the
+  watchdog register, which is not 80 s.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
