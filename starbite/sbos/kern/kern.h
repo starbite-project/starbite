@@ -921,6 +921,7 @@ struct kcharge {
     int32_t stopped_hot, stopped_cold;
     int32_t il_ma, cc_ma, dtls, iin_ma;
 };
+int64_t ksetting_set(uint64_t id, uint64_t v);   /* 9k: app.c's setting_set_k for Next's shell (its confirmations) */
 void charge_init(void);
 void charge_timer(unsigned id);
 void charge_get(struct kcharge *k);

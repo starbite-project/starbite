@@ -62,12 +62,20 @@ static struct {
     int fix_asked, fix_have;            /* helper J: Android's last GPS fix (sh_gnss: the card's, cached by the kernel) */
     float fix_t;
     sh_gnss_t fix;
-} SV = { .gch = -1, .gpg = -1, .cf = -1 };
+    sh_heat_t heat;                     /* 9j: Survival Heat's last status */
+    float heat_next, heat_watch;        /* its next poll; polled until then after a tap (a confirmation may show) */
+    int heat_dur, heat_on, heat_secs;   /* the duration chosen (0..2), the page's layout (running), the shown second */
+    sh_fire_t fire;                     /* 9k: the fire starter's last status */
+    float fire_next, fire_watch;
+    int fs_p, fs_i, fs_rep, fs_wool, fs_ov, fs_ok, fs_down;   /* pulse, limit, repeat, steel wool, override; allowed; finger */
+    unsigned fire_sig;                  /* what the live text shows (redrawn when it changes) */
+} SV = { .gch = -1, .gpg = -1, .cf = -1, .heat_dur = 1, .fs_p = 1, .fs_i = 2 };
 
 static int sv_key(const char *k)
 {
     return !tk_strcmp(k, "sos") || !tk_strcmp(k, "medical") || !tk_strcmp(k, "power") || !tk_strcmp(k, "usb") ||
-           !tk_strcmp(k, "sun") || !tk_strcmp(k, "guide") || !tk_strcmp(k, "compass");
+           !tk_strcmp(k, "sun") || !tk_strcmp(k, "guide") || !tk_strcmp(k, "compass") || !tk_strcmp(k, "heat") ||
+           !tk_strcmp(k, "fire");
 }
 static int sv_own(const char *k) { return sv_key(k); }
 static uint32_t sv_ground(int a) { return sv_key(APPS[a].k) ? SV_GROUND : sbc_rgb(SBC_GROUND); }
@@ -153,6 +161,7 @@ static int sv_tile(dc *d, const char *k, float x, float y, float s)
     else if (!tk_strcmp(k, "sun")) { a = 0xffd60a; b = 0xff8a00; kind = 1; }
     else if (!tk_strcmp(k, "guide")) { a = 0x5bd77a; b = 0x1f8a4c; kind = 2; }
     else if (!tk_strcmp(k, "compass")) { a = 0xa1a1a8; b = 0x55555c; kind = 3; }
+    else if (!tk_strcmp(k, "fire")) { a = 0xff9f0a; b = 0xd70015; kind = 4; }   /* 9k */
     else return 0;
     float u = s / 100, r = s * .225f, X = PT(x) - d->ox, Y = PT(y) - d->oy;
     tk_stop st[2] = { { 0, tk_hex(a, 1) }, { 1, tk_hex(b, 1) } };
@@ -174,6 +183,9 @@ static int sv_tile(dc *d, const char *k, float x, float y, float s)
     } else if (kind == 2) {             /* an open book */
         G(16, 26, 32, 50, 5); G(52, 26, 32, 50, 5);
         for (int i = 0; i < 3; i++) { C(22, 36 + 9 * i, i == 2 ? 13 : 20, 3.5f, 1.75f); C(58, 36 + 9 * i, i == 2 ? 13 : 20, 3.5f, 1.75f); }
+    } else if (kind == 4) {             /* 9k: a flame */
+        G(36, 40, 28, 40, 14); G(41, 26, 18, 30, 9); G(46, 16, 8, 16, 4);
+        C(44, 56, 12, 20, 6);
     } else {                            /* a compass rose's ring */
         sv_ring_d(d, x + 50 * u, y + 52 * u, 27 * u, 5 * u, 1, W(1), 0);
         G(45, 47, 10, 10, 5);
@@ -190,7 +202,7 @@ static int sv_tile(dc *d, const char *k, float x, float y, float s)
 }
 
 /* ---- the lock's Emergency list: eight cards (0..3 at entering, 4..7 one per idle turn), Exit at the end -------- */
-#define SV_EC_EXIT (LIST_TOP + 10 + 78 * 8 - 10 + 12)          /* the Exit pill's top at scroll 0 */
+#define SV_EC_EXIT (LIST_TOP + 10 + 78 * NECARD - 10 + 12)          /* the Exit pill's top at scroll 0 */
 static float sv_ec_max_scroll(void) { return tk_maxf(0, (SV_EC_EXIT - LIST_TOP) + 32 + 44 - LIST_H); }
 static const char *sv_ec_sub(int i, char *b)
 {
@@ -212,19 +224,19 @@ static int sv_ec_hit(float x, float y)
 {
     float cy = y - LIST_TOP + scroll;
     if (x < CARD_X || x >= CARD_X + CARD_W) return -1;
-    for (int i = 0; i < 8; i++) if (cy >= 10 + 78 * i && cy < 10 + 78 * i + 68) return i;
-    if (cy >= SV_EC_EXIT - LIST_TOP - 6 && cy < SV_EC_EXIT - LIST_TOP + 38 && x >= 110 && x < 280) return 8;
+    for (int i = 0; i < NECARD; i++) if (cy >= 10 + 78 * i && cy < 10 + 78 * i + 68) return i;
+    if (cy >= SV_EC_EXIT - LIST_TOP - 6 && cy < SV_EC_EXIT - LIST_TOP + 38 && x >= 110 && x < 280) return NECARD;
     return -1;
 }
 static void sv_exit_answer(int i) { if (i == 1 && EMG) set_emergency(0, 0); }
 static void sv_ec_tap(int i)
 {
-    if (i == 8) {                       /* helper B2: Exit Emergency asks first (iOS's alert) */
+    if (i == NECARD) {                  /* helper B2: Exit Emergency asks first (iOS's alert) */
         static const kit_btn B[2] = { { "Cancel", KIT_CANCEL }, { "Exit", KIT_DESTRUCTIVE } };
         kit_alert("Exit Emergency Mode?", "The lock screen and home go back to normal. SOS stops if it is on.", B, 2, sv_exit_answer);
         return;
     }
-    if (i < 0 || i >= 8) return;
+    if (i < 0 || i >= NECARD) return;
     int a = sv_app(EC[i].act);
     if (a < 0) {                        /* Survival Heat: as it was (it runs in the classic Starbite OS) */
         char m[48] = "Opens ";
@@ -245,8 +257,8 @@ static int sv_icon_rect(int a, arect *r)
 }
 /* idle time: the next of the lock's cards 4..7 (one glass card a turn), the lock's widgets after Last 2 % changed
  * (the switch, or the kernel at 3 %: looked at every idle turn, a minute at the latest) */
-static void sv_ec_skip(void) { while (EMG && ec_next < 8 && !EC_LAYER(ec_next)->bmp.px) ec_next++; }   /* a refused layer's cards */
-static int sv_idle_pending(void) { sv_ec_skip(); return (EMG && ec_next < 8) || (SV.lw_stale && !AP.on); }
+static void sv_ec_skip(void) { while (EMG && ec_next < NECARD && !EC_LAYER(ec_next)->bmp.px) ec_next++; }   /* a refused layer's cards */
+static int sv_idle_pending(void) { sv_ec_skip(); return (EMG && ec_next < NECARD) || (SV.lw_stale && !AP.on); }
 static void sun_fix_ask(void);
 static void sv_idle(void)
 {
@@ -260,7 +272,7 @@ static void sv_idle(void)
     int l2 = sh_last2();
     if (l2 != SV.l2_seen) { SV.l2_seen = l2; if (EMG) SV.lw_stale = 1; }
     sv_ec_skip();
-    if (EMG && ec_next < 8) {
+    if (EMG && ec_next < NECARD) {
         /* cp7i (7g: sv_idle 26-39 ms on the phone, a card a turn): a card in two turns, its glass then its words; the
          * layer is marked changed only when the card is whole (its glass alone never shows) */
         static int part, part_of = -1;
@@ -281,7 +293,7 @@ static void sv_idle(void)
         ec_next++;
         tk_layer_dirty(l);
         l->hidden = 0;
-        if (ec_next == 6 || ec_next == 8) { trim(l); tk_layer_prepare(l); }   /* P3s: cut to its two cards */
+        if (ec_next == 6 || ec_next == 8 || ec_next == NECARD) { trim(l); tk_layer_prepare(l); }   /* P3s: cut to its two cards */
         lock_ver++;
         return;
     }
@@ -782,6 +794,378 @@ static void usb_tap(float x, float y)
         usb_poll(now_ms);
         toast("USB power off");
     }
+}
+
+static void fs_seg(dc *d, float y, const char *const *L, int n, int sel, int red);
+/* ---- Survival Heat (9j, 9k: kern/heater.c through sh_heat_*) ------------------------------------------------------
+ * Off: the levels as rows (a tap starts it; the kernel asks first: its first use, Extreme's, Keep warm's, Survival's
+ * three holds or four with the trip off), the duration for Low / Medium / High, Survival's group (start; All out,
+ * Unlimited and the hardware trip off as switches; the battery limit: the kernel asks for each the classic way), the
+ * last stop's or refusal's words. Running: the time, the temperatures, the battery, a big Stop. Polled at 1 Hz while it
+ * runs, and for 20 s after a tap (a confirmation answered meanwhile). Manual (clocks picked per cluster) stays classic */
+#define HT_NL 5
+#define HT_ROW (CONTENT_TOP + 8)        /* the levels' group */
+#define HT_SEG (HT_ROW + HT_NL * 47 + 12)   /* the duration */
+#define HT_SURV (HT_SEG + 36 + 40)      /* Survival Heat's group: start, All out, Unlimited, trip off */
+#define HT_BAT (HT_SURV + 4 * 47 + 12)  /* its battery limit (caption, the segments under it) */
+#define HT_TXT (HT_BAT + 20 + 36 + 10)  /* the last stop's words */
+static const char *const HT_L[HT_NL] = { "Low", "Medium", "High", "Extreme", "Keep the battery warm" };
+static const char *const HT_V[HT_NL] = { "Warm hands", "Warmer", "Hot", "Everything flat out", "In deep cold" };
+static const int HT_LV[HT_NL] = { SH_HEAT_LOW, SH_HEAT_MEDIUM, SH_HEAT_HIGH, SH_HEAT_EXTREME, SH_HEAT_KEEPWARM };
+static const char *const HT_D[3] = { "15 min", "30 min", "1 hour" };
+static const int HT_DM[3] = { 15, 30, 60 };
+static const char *const HT_B[4] = { "55 \xc2\xb0" "C", "58 \xc2\xb0" "C", "60 \xc2\xb0" "C", "65 \xc2\xb0" "C" };
+static const int HT_BC[4] = { 550, 580, 600, 650 };
+static int ht_running(const sh_heat_t *h) { return h->state == SH_HEAT_RUNNING || h->state == SH_HEAT_HOLDING || h->state == SH_HEAT_PAUSED; }
+static int ht_tripoff(void) { return sh_pref_int("heat.tripoff", 0) == 1; }   /* Next's own (classic keeps its app state) */
+static void ht_row(dc *d, float y, const char *l, const char *v, tk_col lc, int rule)
+{
+    d_text(d, TK_IT400, 16, ROW_TX, y + 13 + 16, l, 0, 0, lc, 0);
+    if (v) { float w = tw(TK_IT400, 15, v, 0, 0); d_text(d, TK_IT400, 15, CONTENT_R - 16 - w, y + 13 + 16, v, 0, 0, W(.5f), 0); }
+    if (rule) SV_RULE(d, y + 46);
+}
+static void page_heat(dc *d)
+{
+    d_h1(d, "Survival Heat");
+    d_text(d, TK_IT400, 13, MARGIN, LARGE_BASE + 20, "Heat from the processors \xc2\xb7 it stops by itself", 0, 0, W(.55f), 0);
+    if (SV.heat_on) {                   /* running: the live layer and the Stop draw over the ground */
+        d_rrect(d, GROUP_X, HT_ROW, GROUP_W, 300, 16, SVC(SV_GROUP));
+        return;
+    }
+    d_rrect(d, GROUP_X, HT_ROW, GROUP_W, HT_NL * 47 - 1, 16, SVC(SV_GROUP));
+    for (int i = 0; i < HT_NL; i++) ht_row(d, HT_ROW + 47 * i, HT_L[i], HT_V[i], i == 3 ? SVC(SV_TINT) : INK, i < HT_NL - 1);
+    d_rrect(d, GROUP_X, HT_SEG, GROUP_W, 36, 10, W(.1f));
+    float sw = (GROUP_W - 4) / 3;
+    d_rrect(d, GROUP_X + 2 + sw * SV.heat_dur, HT_SEG + 2, sw, 32, 8, tk_hex(0x5a3a3c, 1));
+    for (int i = 0; i < 3; i++) {
+        float tx = tw(TK_IT600, 13, HT_D[i], 0, 0);
+        d_text(d, TK_IT600, 13, GROUP_X + 2 + sw * i + (sw - tx) / 2, bl(TK_IT600, 13, HT_SEG + 9.5f), HT_D[i], 0, 0, i == SV.heat_dur ? INK : W(.65f), 0);
+    }
+    d_text(d, TK_IT400, 13, ROW_TX, HT_SEG + 36 + 20, "How long Low, Medium and High run", 0, 0, W(.45f), 0);
+    d_rrect(d, GROUP_X, HT_SURV, GROUP_W, 4 * 47 - 1, 16, SVC(SV_GROUP));
+    d_text(d, TK_IT600, 16, ROW_TX, HT_SURV + 13 + 16, "Survival Heat", 0, 0, SVC(SV_RED), 0);
+    { float w = tw(TK_IT400, 15, "Last resort", 0, 0); d_text(d, TK_IT400, 15, CONTENT_R - 16 - w, HT_SURV + 13 + 16, "Last resort", 0, 0, W(.5f), 0); }
+    SV_RULE(d, HT_SURV + 46);
+    sv_switch_row(d, HT_SURV + 47, "All out (no hold, no throttle)", 0);
+    sv_switch_row(d, HT_SURV + 94, "Unlimited (every limit off)", 0);
+    sv_switch_row(d, HT_SURV + 141, "Hardware trip off", 1);
+    d_text(d, TK_IT400, 13, ROW_TX, HT_BAT + 13, "Survival stops at this battery temperature", 0, 0, W(.45f), 0);
+    int bi = 0;
+    for (int i = 0; i < 4; i++) if (HT_BC[i] == sh_heat_opt(SH_HO_BAT_C10)) bi = i;
+    fs_seg(d, HT_BAT + 20, HT_B, 4, bi, bi == 3);
+}
+static void heat_switches(void)
+{
+    if (SV.heat_on) return;
+    sv_switch(SVL_A, HT_SURV + 47, sh_heat_opt(SH_HO_ALL_OUT));
+    sv_switch(SVL_B, HT_SURV + 94, sh_heat_opt(SH_HO_UNLIMITED));
+    sv_switch(SVL_FLD, HT_SURV + 141, ht_tripoff() || sh_heat_opt(SH_HO_UNLIMITED));   /* (Unlimited switches the trip off too) */
+}
+static void heat_text(void)
+{
+    tk_layer *l = &svl[SVL_TXT];
+    relayer(l);
+    char b[96];
+    int n;
+    const sh_heat_t *h = &SV.heat;
+    SV.heat_secs = h->secs_run;
+    if (SV.heat_on) {
+        dc d = mk(l, "sv-heat-txt", GROUP_X, HT_ROW, GROUP_W, 300, 1, 0);
+        int s = h->secs_left > 0 ? h->secs_left : h->secs_run;
+        n = 0;
+        if (s >= 3600) { n += put_dec(b + n, s / 3600); b[n++] = ':'; n = sv_2(b, n, s / 60 % 60); }
+        else n += put_dec(b + n, s / 60);
+        b[n++] = ':'; n = sv_2(b, n, s % 60);
+        float w = tw(TK_IT700, 64, b, 0, TK_TNUM);
+        d_text(&d, TK_IT700, 64, 195 - w / 2, bl(TK_IT700, 64, HT_ROW + 16), b, 0, TK_TNUM, INK, 0);
+        static const char *const LV[9] = { "", "Low", "Medium", "High", "Extreme", "Manual", "Keeping the battery warm", "Survival Heat",
+                                           "Survival Heat, trip off" };
+        n = sv_cat(b, 0, h->level >= 0 && h->level < 9 ? LV[h->level] : "");
+        n = sv_cat(b, n, h->state == SH_HEAT_HOLDING ? " \xc2\xb7 holding (warm enough)" : h->state == SH_HEAT_PAUSED ? " \xc2\xb7 paused (a charger)" :
+                         h->secs_left > 0 ? " \xc2\xb7 time left" : " \xc2\xb7 running");
+        sv_centre(&d, TK_IT600, 16, HT_ROW + 96, b, h->level >= SH_HEAT_EXTREME && h->level != SH_HEAT_KEEPWARM ? SVC(SV_RED) : INK);
+        float y = HT_ROW + 136;
+        static const char *const TL[3] = { "Battery", "Back of the phone", "Processor" };
+        int tv[3] = { h->bat_c10, h->skin_c10, h->soc_c10 };
+        int lim = h->level >= SH_HEAT_SURVIVAL ? h->surv_bat_c10 : h->level == SH_HEAT_EXTREME || h->level == SH_HEAT_KEEPWARM ? 550 : 420;
+        for (int i = 0; i < 3; i++, y += 30) {
+            d_text(&d, TK_IT400, 16, ROW_TX, y, TL[i], 0, 0, W(.75f), 0);
+            if (tv[i] <= -1000) n = sv_cat(b, 0, "\xe2\x80\x94");
+            else { n = sv_dec(b, 0, tv[i], 1); n = sv_cat(b, n, " \xc2\xb0" "C"); }
+            float tw0 = tw(TK_IT600, 16, b, 0, TK_TNUM);
+            int hot = i == 0 && tv[0] > -1000 && tv[0] >= lim - 30;
+            d_text(&d, TK_IT600, 16, CONTENT_R - 16 - tw0, y, b, 0, TK_TNUM, hot ? SVC(SV_WARN) : INK, 0);
+        }
+        d_text(&d, TK_IT400, 16, ROW_TX, y, "Charge", 0, 0, W(.75f), 0);
+        n = 0;
+        n += put_dec(b + n, h->pct < 0 ? 0 : h->pct);
+        n = sv_cat(b, n, " %");
+        if (h->ma < 0) { n = sv_cat(b, n, " \xc2\xb7 "); n += put_dec(b + n, -h->ma); n = sv_cat(b, n, " mA"); }
+        { float tw0 = tw(TK_IT600, 16, b, 0, TK_TNUM); d_text(&d, TK_IT600, 16, CONTENT_R - 16 - tw0, y, b, 0, TK_TNUM, INK, 0); }
+        y += 34;
+        sv_text(&d, TK_IT400, 13, ROW_TX, y, CONTENT_R - 16 - ROW_TX, 18,
+                h->level >= SH_HEAT_SURVIVAL ? "Hold it through a pocket or a glove, never against bare skin. It runs to 2 % battery." :
+                h->level == SH_HEAT_EXTREME ? "Flat out until you stop it: it stops only at 55 \xc2\xb0" "C battery or the reserve." :
+                "It stops by itself at 42 \xc2\xb0" "C battery, 46 \xc2\xb0" "C on the back or 15 % battery.", W(.5f));
+        return;
+    }
+    dc d = mk(l, "sv-heat-txt", GROUP_X, HT_TXT, GROUP_W, 60, 1, 0);
+    if (h->why[0] && (h->state == SH_HEAT_STOPPED || h->state == SH_HEAT_REFUSED)) {
+        n = sv_cat(b, 0, h->state == SH_HEAT_REFUSED ? "Refused: " : "Last stop: ");
+        int k = 0;
+        while (h->why[k] && n < 94) b[n++] = h->why[k++];
+        b[n] = 0;
+        sv_text(&d, TK_IT400, 14, ROW_TX, HT_TXT, CONTENT_R - 16 - ROW_TX, 19, b, h->state == SH_HEAT_REFUSED ? SVC(SV_WARN) : W(.6f));
+    } else
+        sv_text(&d, TK_IT400, 13, ROW_TX, HT_TXT, CONTENT_R - 16 - ROW_TX, 18,
+                "Survival turns the whole battery into heat, to 2 %: nothing is kept for a call, the light or SOS.", W(.45f));
+}
+static void heat_controls(void)
+{
+    tk_layer *l = &svl[SVL_CTL];
+    relayer(l);
+    if (!SV.heat_on) return;
+    dc d = mk(l, "sv-heat-ctl", 24, 690, 342, 66, 1, 0);
+    d_rrect(&d, 24, 690, 342, 66, 33, tk_hex(0xff3b30, 1));
+    float w = tw(TK_IT700, 24, "Stop", 0, 0);
+    d_text(&d, TK_IT700, 24, 195 - w / 2, bl(TK_IT700, 24, 690 + 18), "Stop", 0, 0, W(1), 0);
+}
+static void heat_extras(void)
+{
+    sh_heat(&SV.heat);
+    SV.heat_next = now_ms + 1000;
+    heat_switches();
+    heat_controls();
+    heat_text();
+}
+static int heat_polling(void) { return ht_running(&SV.heat) || SV.heat.state == SH_HEAT_CONFIRM || now_ms < SV.heat_watch; }
+static void heat_poll(float t)
+{
+    SV.heat_next = t + 1000;
+    int was = ht_running(&SV.heat), st = SV.heat.state;
+    sh_heat(&SV.heat);
+    int on = ht_running(&SV.heat);
+    if (on != SV.heat_on) { SV.heat_on = on; sv_rebuild(); return; }   /* the other layout: the page again */
+    if (on != was || SV.heat.state != st || SV.heat.secs_run != SV.heat_secs) { heat_text(); relink(); }
+    if (!on && now_ms < SV.heat_watch) { heat_switches(); relink(); }   /* (an option's confirmation answered) */
+}
+static void heat_tap(float x, float y)
+{
+    if (SV.heat_on) {
+        if (x >= 24 && x < 366 && y >= 690 && y < 756) {
+            sh_heat_stop();
+            SV.heat_watch = now_ms + 3000;
+            heat_poll(now_ms);
+            toast("Survival Heat stopped");
+        }
+        return;
+    }
+    if (x < GROUP_X || x >= CONTENT_R) return;
+    int lv = 0, min = 0;
+    if (y >= HT_ROW && y < HT_ROW + HT_NL * 47) {
+        int i = (int)((y - HT_ROW) / 47);
+        lv = HT_LV[i];
+        min = lv <= SH_HEAT_HIGH ? HT_DM[SV.heat_dur] : 0;
+    } else if (y >= HT_SEG && y < HT_SEG + 36) {
+        int i = (int)((x - GROUP_X - 2) / ((GROUP_W - 4) / 3));
+        SV.heat_dur = i < 0 ? 0 : i > 2 ? 2 : i;
+        sv_rebuild();
+        return;
+    } else if (y >= HT_SURV && y < HT_SURV + 47) {
+        lv = ht_tripoff() ? SH_HEAT_SURVIVAL_X : SH_HEAT_SURVIVAL;
+    } else if (y >= HT_SURV + 47 && y < HT_SURV + 188) {   /* the options: the kernel asks where classic asks */
+        int r = (int)((y - HT_SURV - 47) / 47);
+        if (r == 2) {
+            sh_pref_set_int("heat.tripoff", !ht_tripoff());
+            toast(ht_tripoff() ? "Survival Heat: the hardware trip off (four holds)" : "Survival Heat: the hardware trip stays on");
+        } else if (sh_heat_opt_set(r == 0 ? SH_HO_ALL_OUT : SH_HO_UNLIMITED, !sh_heat_opt(r == 0 ? SH_HO_ALL_OUT : SH_HO_UNLIMITED)) < 0)
+            toast("Can't change it now");
+        SV.heat_watch = now_ms + 20000;
+        heat_switches();
+        relink();
+        return;
+    } else if (y >= HT_BAT + 20 && y < HT_BAT + 56) {
+        int i = (int)((x - GROUP_X - 2) / ((GROUP_W - 4) / 4));
+        i = i < 0 ? 0 : i > 3 ? 3 : i;
+        if (sh_heat_opt_set(SH_HO_BAT_C10, HT_BC[i]) < 0) toast("Can't change it now");
+        SV.heat_watch = now_ms + 20000;
+        sv_rebuild();                   /* (a limit above 55 C asks first: the page again when it is answered) */
+        return;
+    } else return;
+    if (sh_heat_start(lv, min) < 0) {
+        sh_heat(&SV.heat);
+        toast(SV.heat.why[0] ? SV.heat.why : "Survival Heat can't start now");
+        heat_text();
+        relink();
+        return;
+    }
+    SV.heat_watch = now_ms + 20000;     /* the kernel's confirmation may be on screen: watch for the start */
+    heat_poll(now_ms);
+}
+
+/* ---- Fire Starter (9k: kern/survival.c's surv_fs_*, the fire-starter session's 1.2-alpha30) -----------------------
+ * Settings as segments and switches (drawn with the page; a tap asks for it again), the override's choices only where
+ * the kernel allows them (S9 #2's card), a hold button: 1.5 s arms it with the finger kept down, then the kernel pulses
+ * while the finger stays; the lift cuts it at once (sh_fire_finger). The live text at 4 Hz while it runs or cools */
+#define FS_C1 (CONTENT_TOP + 12)        /* the pulse's caption, its segments 20 under */
+#define FS_C2 (FS_C1 + 66)              /* the current limit */
+#define FS_SW (FS_C2 + 66)              /* Repeat, Steel wool */
+#define FS_OV (FS_SW + 104)             /* the override (S9 #2) */
+#define FS_TXT (FS_OV + 66)
+#define FS_CY 650.0f
+#define FS_R 58.0f
+static const char *const FS_PL[5] = { "0.5 s", "1 s", "2 s", "3 s", "5 s" };
+static const int FS_PMS[5] = { 500, 1000, 2000, 3000, 5000 };
+static const char *const FS_IL[3] = { "0.9 A", "1.2 A", "1.5 A" };
+static const int FS_IMA[3] = { 900, 1200, 1500 };
+static const char *const FS_OVL[3] = { "Off", "Re-arm", "MAX" };
+static void fs_seg(dc *d, float y, const char *const *L, int n, int sel, int red)
+{
+    d_rrect(d, GROUP_X, y, GROUP_W, 36, 10, W(.1f));
+    float w = (GROUP_W - 4) / n;
+    d_rrect(d, GROUP_X + 2 + w * sel, y + 2, w, 32, 8, red && sel ? tk_hex(0xb3261e, 1) : tk_hex(0x5a3a3c, 1));
+    for (int i = 0; i < n; i++) {
+        float tx = tw(TK_IT600, 13, L[i], 0, 0);
+        d_text(d, TK_IT600, 13, GROUP_X + 2 + w * i + (w - tx) / 2, bl(TK_IT600, 13, y + 9.5f), L[i], 0, 0, i == sel ? INK : W(.65f), 0);
+    }
+}
+static void fs_cap(dc *d, float y, const char *s) { d_text(d, TK_IT400, 13, ROW_TX, y + 13, s, 0, 0, W(.5f), 0); }
+static void page_fire(dc *d)
+{
+    d_h1(d, "Fire Starter");
+    d_text(d, TK_IT400, 13, MARGIN, LARGE_BASE + 20, "Heats a wire or steel wool from the USB-C port", 0, 0, W(.55f), 0);
+    fs_cap(d, FS_C1, SV.fs_ov == 2 ? "Pulse (MAX: on while held)" : "Pulse");
+    fs_seg(d, FS_C1 + 20, FS_PL, 5, SV.fs_p, 0);
+    fs_cap(d, FS_C2, "Current limit (the charger chip's steps)");
+    fs_seg(d, FS_C2 + 20, FS_IL, 3, SV.fs_i, 0);
+    d_rrect(d, GROUP_X, FS_SW, GROUP_W, 93, 16, SVC(SV_GROUP));
+    sv_switch_row(d, FS_SW, "Repeat (up to 6 pulses)", 0);
+    sv_switch_row(d, FS_SW + 47, "Steel wool", 1);
+    if (SV.fs_ok) {
+        fs_cap(d, FS_OV, "Override \xc2\xb7 this test phone only");
+        fs_seg(d, FS_OV + 20, FS_OVL, 3, SV.fs_ov, 1);
+    }
+}
+static const char *fs_why_words(int w)
+{
+    switch (w) {
+    case SH_FW_DONE: return "Done";
+    case SH_FW_RELEASED: return "Stopped: the finger lifted";
+    case SH_FW_ILIM: return "The chip's current limit cut in (too low a resistance?)";
+    case SH_FW_VBUS: return "The port's voltage fell (the load is too heavy)";
+    case SH_FW_FAULT: return "The charger chip reported a fault";
+    case SH_FW_HOT: return "Too hot: the battery is at its limit";
+    case SH_FW_LOWBAT: return "The battery is too low";
+    case SH_FW_STOP: return "Stopped";
+    case SH_FW_COOL: return "Wait: it is cooling down";
+    case SH_FW_FINGER: return "Keep your finger on the button";
+    default: return 0;
+    }
+}
+static int fs_a10(char *b, int n, int ma) { n += put_dec(b + n, ma / 1000); b[n++] = '.'; n = sv_2(b, n, ma % 1000 / 10); b[n] = 0; return n; }
+static void fire_controls(void)
+{
+    tk_layer *l = &svl[SVL_CTL];
+    relayer(l);
+    dc d = mk(l, "sv-fire-ctl", 195 - FS_R - 30, FS_CY - FS_R - 30, 2 * FS_R + 60, 2 * FS_R + 60, 1, 0);
+    int on = SV.fire.state == SH_FIRE_ON;
+    sv_hold_button(&d, 195, FS_CY, FS_R, on ? "Fire" : SV.fire.state == SH_FIRE_COOL ? "Wait" : "Hold", 26, SV.fire.state == SH_FIRE_OFF || on);
+    if (SV.fire.state == SH_FIRE_OFF && !SR_.n) sv_ring_build(195, FS_CY, FS_R + 9, 4);
+    if (SV.fire.state != SH_FIRE_OFF) sv_ring_free();
+}
+static void fire_text(void)
+{
+    tk_layer *l = &svl[SVL_TXT];
+    relayer(l);
+    const sh_fire_t *f = &SV.fire;
+    char b[96];
+    int n;
+    dc d = mk(l, "sv-fire-txt", GROUP_X, FS_TXT, GROUP_W, 120, 1, 0);
+    float y = FS_TXT + 6;
+    if (f->state == SH_FIRE_ON) {
+        n = sv_cat(b, 0, f->out ? "Firing" : "Resting");
+        if (f->max > 1) { n = sv_cat(b, n, " \xc2\xb7 pulse "); n += put_dec(b + n, f->n); n = sv_cat(b, n, " of "); n += put_dec(b + n, f->max); }
+        if (f->rearms > 0) { n = sv_cat(b, n, " \xc2\xb7 re-armed "); n += put_dec(b + n, f->rearms); }
+        sv_centre(&d, TK_IT700, 22, y, b, SVC(SV_RED));
+        y += 32;
+    } else if (f->state == SH_FIRE_COOL) {
+        n = sv_cat(b, 0, "Cooling down \xc2\xb7 ");
+        n += put_dec(b + n, (f->ms_left + 999) / 1000);
+        sv_cat(b, n, " s");
+        sv_centre(&d, TK_IT600, 17, y, b, INK);
+        y += 28;
+    }
+    if (f->open) { sv_centre(&d, TK_IT700, 17, y, "LOAD OPEN: nothing is connected", SVC(SV_WARN)); y += 26; }
+    if (f->avg_ma > 0) {
+        n = fs_a10(b, 0, f->avg_ma);
+        n = sv_cat(b, n, " A");
+        if (f->load_w10 > 0) { n = sv_cat(b, n, " \xc2\xb7 "); n = sv_dec(b, n, f->load_w10, 1); n = sv_cat(b, n, " W into the load"); }
+        sv_centre(&d, TK_IT600, 16, y, b, INK);
+        y += 24;
+        if (f->ohm10 != -1) {
+            n = sv_cat(b, 0, "Load ");
+            if (f->ohm10 == -2) n = sv_cat(b, n, "at the chip's limit (a short?)");
+            else { n = sv_dec(b, n, f->ohm10, 1); n = sv_cat(b, n, " ohm"); }
+            if (f->bat_c10 > -1000) { n = sv_cat(b, n, " \xc2\xb7 battery "); n = sv_dec(b, n, f->bat_c10, 1); sv_cat(b, n, " \xc2\xb0" "C"); }
+            sv_centre(&d, TK_IT400, 15, y, b, W(.7f));
+            y += 22;
+        }
+    }
+    if (f->state == SH_FIRE_OFF) {
+        const char *w = f->why_code == SH_FW_REFUSED ? f->why : fs_why_words(f->why_code);
+        if (w && w[0]) { sv_text(&d, TK_IT400, 14, ROW_TX, y, CONTENT_R - 16 - ROW_TX, 19, w, f->why_code == SH_FW_REFUSED ? SVC(SV_WARN) : W(.6f)); }
+        else sv_text(&d, TK_IT400, 14, ROW_TX, y, CONTENT_R - 16 - ROW_TX, 19,
+                     "Hold 1.5 s, then keep holding: it heats only while your finger stays. It stops at a 45 \xc2\xb0" "C battery.", W(.5f));
+    }
+}
+static unsigned fire_sig_of(const sh_fire_t *f)
+{
+    return (unsigned)f->state * 2654435761u ^ (unsigned)f->n * 40503u ^ (unsigned)f->out * 977u ^ (unsigned)(f->avg_ma / 10) * 31u ^
+           (unsigned)f->ohm10 * 131u ^ (unsigned)f->open * 7u ^ (unsigned)(f->ms_left / 1000) * 13u ^ (unsigned)f->why_code * 1009u ^
+           (unsigned)f->rearms * 17u;
+}
+static void fire_extras(void)
+{
+    sh_fire(&SV.fire);
+    SV.fire_next = now_ms + 250;
+    SV.fire_sig = fire_sig_of(&SV.fire);
+    sv_switch(SVL_A, FS_SW, SV.fs_rep);
+    sv_switch(SVL_B, FS_SW + 47, SV.fs_wool);
+    fire_controls();
+    fire_text();
+}
+static int fire_polling(void) { return SV.fire.state != SH_FIRE_OFF || SV.fs_down || now_ms < SV.fire_watch; }
+static void fire_poll(float t)
+{
+    SV.fire_next = t + 250;
+    int was = SV.fire.state;
+    sh_fire(&SV.fire);
+    if (SV.fire.state != was) fire_controls();
+    unsigned sig = fire_sig_of(&SV.fire);
+    if (sig != SV.fire_sig || SV.fire.state != was) { SV.fire_sig = sig; fire_text(); relink(); }
+}
+static void fire_tap(float x, float y)
+{
+    if (x < GROUP_X || x >= CONTENT_R || SV.fire.state != SH_FIRE_OFF) return;
+    if (y >= FS_C1 + 20 && y < FS_C1 + 56) SV.fs_p = tk_maxi(0, tk_mini(4, (int)((x - GROUP_X - 2) / ((GROUP_W - 4) / 5))));
+    else if (y >= FS_C2 + 20 && y < FS_C2 + 56) SV.fs_i = tk_maxi(0, tk_mini(2, (int)((x - GROUP_X - 2) / ((GROUP_W - 4) / 3))));
+    else if (y >= FS_SW && y < FS_SW + 47) { SV.fs_rep = !SV.fs_rep; sv_switch(SVL_A, FS_SW, SV.fs_rep); relink(); return; }
+    else if (y >= FS_SW + 47 && y < FS_SW + 94) { SV.fs_wool = !SV.fs_wool; sv_switch(SVL_B, FS_SW + 47, SV.fs_wool); relink(); return; }
+    else if (SV.fs_ok && y >= FS_OV + 20 && y < FS_OV + 56) SV.fs_ov = tk_maxi(0, tk_mini(2, (int)((x - GROUP_X - 2) / ((GROUP_W - 4) / 3))));
+    else return;
+    sv_rebuild();
+}
+/* the arming hold finished with the finger still down: the kernel starts (and pulses while the finger stays) */
+static void fire_go(void)
+{
+    if (!SV.fs_down) { toast("Keep your finger on the button"); return; }
+    int ov = SV.fs_ok ? (SV.fs_ov == 2 ? 3 : SV.fs_ov) : 0;
+    if (sh_fire_start(FS_PMS[SV.fs_p], SV.fs_rep, FS_IMA[SV.fs_i], ov, SV.fs_wool) < 0) {
+        sh_fire(&SV.fire);
+        toast(SV.fire.why && SV.fire.why[0] ? SV.fire.why : "The fire starter can't start now");
+    }
+    SV.fire_watch = now_ms + 3000;
+    fire_poll(now_ms);
 }
 
 /* ---- Sun ----------------------------------------------------------------------------------------------------------- */
@@ -1545,6 +1929,8 @@ static int sv_page(const char *k, dc *d)
     else if (!tk_strcmp(k, "sun")) page_sun(d);
     else if (!tk_strcmp(k, "guide")) page_guide(d);
     else if (!tk_strcmp(k, "compass")) page_compass(d);
+    else if (!tk_strcmp(k, "heat")) page_heat(d);   /* 9j */
+    else if (!tk_strcmp(k, "fire")) page_fire(d);   /* 9k */
     else return 0;
     return 1;
 }
@@ -1564,6 +1950,8 @@ static void sv_extras(const char *k)
     else if (!tk_strcmp(k, "usb")) usb_extras();
     else if (!tk_strcmp(k, "sun") && SV.sun_edit) sun_fields();
     else if (!tk_strcmp(k, "compass")) compass_extras();    /* helper J: starts the sensor hub */
+    else if (!tk_strcmp(k, "heat")) heat_extras();          /* 9j */
+    else if (!tk_strcmp(k, "fire")) fire_extras();          /* 9k */
     else if (!tk_strcmp(k, "settings") && AS.sub == 4 && SV.cf >= 0) sv_field(ROW_TX, CE_FLD + 10, CONTENT_R - 16 - ROW_TX, SV.ebuf, 1, INK);
 }
 /* an app opened (app_open): every tool opens on its first view */
@@ -1576,11 +1964,17 @@ static void sv_opened(void)
     SV.fix_asked = 0;                   /* helper J: the GPS fix asked again at the page's build */
     if (CP.on) compass_close();         /* (another app straight over the Compass: its hub off) */
     CP.view = 0;
+    SV.fs_ok = sh_fire_override_ok();   /* 9k: the override's choices only where the kernel allows them */
+    if (!SV.fs_ok) SV.fs_ov = 0;
+    sh_heat(&SV.heat);                  /* 9j: Survival Heat opens on its running view while it runs */
+    SV.heat_on = ht_running(&SV.heat);
+    SV.heat_watch = 0;
 }
 /* the app closed (app_finish_close): over the lock, the lock is as it was */
 static void sv_closed(void)
 {
     if (CP.on) compass_close();         /* helper J: the sensor hub off when the Compass closes */
+    if (SV.fs_down) { SV.fs_down = 0; sh_fire_finger(0); }   /* 9k: never a finger left down */
     sv_free();
     if (SV.from_lock) { SV.from_lock = 0; if (locked) set_lock(lockY); }
 }
@@ -1625,6 +2019,10 @@ static int sv_press(float x, float y, tk_rect *r, tk_rect *g, float *rad, tk_col
         }
         else if (!tk_strcmp(k, "power") && in && y >= L2_ROW && y < L2_ROW + 94) { q = (tk_rect){ SV_SW_X, (y < L2_ROW + 47 ? L2_ROW : L2_ROW + 47) + 8, 51, 31 }; qr = 15.5f; hit = 1; }
         else if (!tk_strcmp(k, "usb") && SV.usb.state == SH_USB_ON && x >= 24 && x < 366 && y >= 690 && y < 756) { q = (tk_rect){ 24, 690, 342, 66 }; qr = 33; hit = 1; }
+        else if (!tk_strcmp(k, "heat") && SV.heat_on && x >= 24 && x < 366 && y >= 690 && y < 756) { q = (tk_rect){ 24, 690, 342, 66 }; qr = 33; hit = 1; }   /* 9j */
+        else if (!tk_strcmp(k, "heat") && !SV.heat_on && in && y >= HT_ROW && y < HT_ROW + HT_NL * 47) { q = (tk_rect){ GROUP_X, HT_ROW + 47 * (int)((y - HT_ROW) / 47), GROUP_W, 46 }; qr = 16; hit = 2; }
+        else if (!tk_strcmp(k, "heat") && !SV.heat_on && in && y >= HT_SURV + 47 && y < HT_SURV + 188) { float ry = HT_SURV + 47 * (int)((y - HT_SURV) / 47); q = (tk_rect){ SV_SW_X, ry + 8, 51, 31 }; qr = 15.5f; hit = 1; }
+        else if (!tk_strcmp(k, "heat") && !SV.heat_on && in && y >= HT_SURV && y < HT_SURV + 47) { q = (tk_rect){ GROUP_X, HT_SURV, GROUP_W, 46 }; qr = 16; hit = 2; }
         else if (!tk_strcmp(k, "sun") && x >= CONTENT_R - 120 && y >= SUN_LOC && y < SUN_LOC + 47) { q = (tk_rect){ GROUP_X, SUN_LOC, GROUP_W, 47 }; qr = 16; hit = 2; }
         else if (!tk_strcmp(k, "sun") && SV.fix_have && in && y >= SUN_LOC + 47 && y < SUN_LOC + 47 + SUN_FIX_ROW) { q = (tk_rect){ GROUP_X, SUN_LOC + 47, GROUP_W, SUN_FIX_ROW }; qr = 16; hit = 2; }
         else if (!tk_strcmp(k, "guide") && SV.gpg >= 0 && BACK_HIT(x, y)) { q = (tk_rect){ BACK_X, SAFE_TOP, BACK_D, BACK_D }; qr = BACK_D / 2; hit = 1; }
@@ -1673,6 +2071,8 @@ static int sv_tap(float x, float y)
     else if (!tk_strcmp(k, "sun")) sun_tap(x, y);
     else if (!tk_strcmp(k, "guide")) guide_tap(x, y);
     else if (!tk_strcmp(k, "compass")) compass_tap(x, y);
+    else if (!tk_strcmp(k, "heat")) heat_tap(x, y);         /* 9j */
+    else if (!tk_strcmp(k, "fire")) fire_tap(x, y);         /* 9k */
     return 1;
 }
 /* which hold is under the finger: 1 SOS, 2 USB power (only while it can start) */
@@ -1680,6 +2080,7 @@ static int sv_hold_hit(float x, float y)
 {
     if (is_app("sos")) { float dx = x - SOS_CX, dy = y - SOS_CY; return dx * dx + dy * dy <= (SOS_R + 8) * (SOS_R + 8) ? 1 : 0; }
     if (is_app("usb") && SV.usb.state == SH_USB_OFF) { float dx = x - 195, dy = y - USB_CY; return dx * dx + dy * dy <= (USB_R + 8) * (USB_R + 8) ? 2 : 0; }
+    if (is_app("fire") && SV.fire.state == SH_FIRE_OFF) { float dx = x - 195, dy = y - FS_CY; return dx * dx + dy * dy <= (FS_R + 8) * (FS_R + 8) ? 3 : 0; }   /* 9k */
     return 0;
 }
 static void sv_hold_end(void)
@@ -1715,8 +2116,18 @@ static int sv_touch(int phase, float x, float y, float t)
         SV.hold_done = 0;
         SV.hold_t0 = t; SV.hold_x = x; SV.hold_y = y;
         if (SV.hold && y >= H_PT - 30) SV.hold = 0;
+        if (SV.hold == 3) { SV.fs_down = 1; sh_fire_finger(1); }   /* 9k: the fire starter's finger, from its press */
     } else if (phase == 1) {
-        if (SV.hold && (tk_fabsf(x - SV.hold_x) > 14 || tk_fabsf(y - SV.hold_y) > 14)) sv_hold_end();
+        if (SV.hold && (tk_fabsf(x - SV.hold_x) > 14 || tk_fabsf(y - SV.hold_y) > 14)) {
+            if (SV.hold == 3) { SV.fs_down = 0; sh_fire_finger(0); }   /* (the arming hold slid away: no finger) */
+            sv_hold_end();
+        }
+    } else if (SV.fs_down) {            /* 9k: the lift: the output off at once */
+        SV.fs_down = 0;
+        sh_fire_finger(0);
+        if (SV.hold) sv_hold_end();
+        if (is_app("fire")) fire_poll(now_ms);
+        if (SV.hold_done) { SV.hold_done = 0; return 1; }
     } else if (SV.hold) {
         if (!SV.hold_done) toast("Press and hold");
         sv_hold_end();
@@ -1731,6 +2142,7 @@ static void sv_fire(int which)
     sv_hold_end();
     SV.hold_done = 1;
     sh_haptic();
+    if (which == 3) { fire_go(); return; }   /* 9k */
     if (which == 1) {
         if (sh_sos_set(1) < 0) { toast("SOS can't start now"); return; }
         sv_sos_show();
@@ -1763,6 +2175,8 @@ static int sv_refresh(float t)
         }
     }
     if (AP.on && !AP.closing && is_app("usb") && SV.usb.state != SH_USB_OFF && t >= SV.usb_next) { usb_poll(t); any = 1; }
+    if (AP.on && !AP.closing && is_app("heat") && heat_polling() && t >= SV.heat_next) { heat_poll(t); any = 1; }   /* 9j */
+    if (AP.on && !AP.closing && is_app("fire") && fire_polling() && t >= SV.fire_next) { fire_poll(t); any = 1; }   /* 9k */
     if (cp_visible() && (t >= CP.next || t < CP.next - 200)) any |= cp_poll(t);   /* helper J: the sensors at 10 Hz */
     return any;
 }
@@ -1796,6 +2210,14 @@ static float sv_next_update(float t)
         float n = tk_maxf(1, SV.usb_next - t);
         if (best < 0 || n < best) best = n;
     }
+    if (AP.on && !AP.closing && is_app("fire") && fire_polling()) {   /* 9k: the fire starter at 4 Hz */
+        float n = tk_maxf(1, SV.fire_next - t);
+        if (best < 0 || n < best) best = n;
+    }
+    if (AP.on && !AP.closing && is_app("heat") && heat_polling()) {   /* 9j: Survival Heat at 1 Hz */
+        float n = tk_maxf(1, SV.heat_next - t);
+        if (best < 0 || n < best) best = n;
+    }
     if (cp_visible()) {                 /* helper J: the Compass's next poll (10 Hz) */
         float n = tk_maxf(1, CP.next - t);
         if (best < 0 || n < best) best = n;
@@ -1813,6 +2235,22 @@ static void sv_set(const char *k, float v)
         return;
     }
     if (!tk_strcmp(k, "usbpoll")) { usb_poll(now_ms); return; }
+    if (!tk_strcmp(k, "fire")) {        /* 9k: sv=fire:1 a pretend pulse (the host's), 0 off; sv=fireov:1 the override */
+        if (v > 0) { SV.fs_down = 1; sh_fire_finger(1); fire_go(); } else { SV.fs_down = 0; sh_fire_finger(0); }
+        fire_poll(now_ms);
+        return;
+    }
+    if (!tk_strcmp(k, "fireov")) {      /* (the stills: the override's choices as on S9 #2) */
+        SV.fs_ok = v > 0; SV.fs_ov = v > 0 ? 2 : 0;
+        if (AP.on && is_app("fire")) { build_app_page(AP.a); appg.clip = 0; SV.rb = 0; }
+        return;
+    }
+    if (!tk_strcmp(k, "heat")) {   /* 9j: sv=heat:N starts level N (the host's pretend heater), 0 stops */
+        if (v > 0) (void)sh_heat_start((int)v, 30); else sh_heat_stop();
+        heat_poll(now_ms);
+        if (AP.on && is_app("heat")) { build_app_page(AP.a); appg.clip = 0; SV.rb = 0; }   /* a still: whole at once */
+        return;
+    }
     /* helper J: sv=cpoll:1 the Compass's sensors read now (after hostms=), the dial where they are; sv=cview:1 Level */
     if (!tk_strcmp(k, "cpoll") || !tk_strcmp(k, "cview")) {
         if (!is_app("compass")) return;

@@ -500,6 +500,16 @@ static void linux_done(int ok)
 }
 
 /* SYS_SETTING_SET for the app in front: 0 done */
+static int64_t setting_set_k(uint64_t id, uint64_t v);
+/* 9k: Starbite OS Next's shell (kern_next.c): a setting as an app in front sets it, with the same confirmations
+ * (Survival's Unlimited, its battery limit above 55 C) and saving */
+int64_t ksetting_set(uint64_t id, uint64_t v)
+{
+    int64_t r = setting_set_k(id, v);
+    if (r == 0)
+        settings_changed();
+    return r;
+}
 static int64_t setting_set_k(uint64_t id, uint64_t v)
 {
     uint64_t arg[2] = { id, v };

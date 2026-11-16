@@ -413,6 +413,50 @@ void sh_usb(sh_usb_t *u)
     u->ms_left = s.ms_left, u->est_ma = s.est_ma, u->vbus_lo_mv = s.vbus_lo_mv, u->vbus_hi_mv = s.vbus_hi_mv;
     u->bat_c10 = s.bat_c10, u->limit_c10 = s.limit_c10, u->ilim_ma = s.ilim_ma, u->refused = s.refused, u->why = s.why, u->events = s.events;
 }
+/* 9k: the fire starter's pretend output (a 5 ohm lead, a pulse in progress while the finger stays) */
+static struct { int on, down, ov; uint64_t t0; } hfire;
+int sh_fire_start(int pulse_ms, int repeat, int ilim_ma, int ov, int wool)
+{
+    fprintf(stderr, "fire starter: start %d ms, repeat %d, %d mA, override %d, steel wool %d (pretend)\n", pulse_ms, repeat, ilim_ma, ov, wool);
+    if (!hfire.down) return -1;
+    hfire.on = 1, hfire.ov = ov, hfire.t0 = surv_host_now_ms;
+    return 0;
+}
+void sh_fire_finger(int down) { hfire.down = down; if (!down && hfire.on) { hfire.on = 0; fprintf(stderr, "fire starter: the finger lifted: off\n"); } }
+void sh_fire_stop(void) { hfire.on = 0; }
+void sh_fire(sh_fire_t *f)
+{
+    memset(f, 0, sizeof(*f));
+    f->state = hfire.on ? SH_FIRE_ON : SH_FIRE_OFF;
+    f->fire = 2, f->out = hfire.on, f->n = 1, f->max = hfire.ov ? 1 : 6;
+    f->avg_ma = 1420, f->peak_ma = 1490, f->load_w10 = 57, f->ohm10 = 50, f->bat_c10 = 331;
+    f->why_code = hfire.on ? SH_FW_NONE : SH_FW_RELEASED;
+}
+int sh_fire_override_ok(void) { return 0; }
+/* 9j: Survival Heat's pretend heater (the kernel's confirmations are not simulated: it starts at once) */
+static struct { int on, level, min; uint64_t t0; } hheat;
+int sh_heat_start(int level, int minutes)
+{
+    fprintf(stderr, "heat: start level %d for %d min (pretend)\n", level, minutes);
+    hheat.on = 1, hheat.level = level, hheat.min = minutes, hheat.t0 = surv_host_now_ms;
+    return 0;
+}
+void sh_heat_stop(void) { if (hheat.on) fprintf(stderr, "heat: stop\n"); hheat.on = 0; }
+static int hho[3] = { 1, 0, 550 };
+int sh_heat_opt(int which) { return hho[which]; }
+int sh_heat_opt_set(int which, int v) { fprintf(stderr, "heat: option %d = %d (pretend; the kernel would ask)\n", which, v); hho[which] = v; return 0; }
+void sh_heat(sh_heat_t *h)
+{
+    memset(h, 0, sizeof(*h));
+    int run = (int)((surv_host_now_ms - hheat.t0) / 1000) + 754;   /* (a session 12 min in, for the stills) */
+    h->state = hheat.on ? SH_HEAT_RUNNING : SH_HEAT_OFF;
+    h->level = hheat.on ? hheat.level : 0;
+    h->secs_run = hheat.on ? run : 0;
+    h->secs_left = hheat.on && hheat.min ? hheat.min * 60 - run : 0;
+    h->bat_c10 = 318, h->soc_c10 = 724, h->skin_c10 = 379, h->pct = 63, h->ma = -1840;
+    h->target_c10 = 200, h->surv_bat_c10 = 550;
+    if (!hheat.on) snprintf(h->why, sizeof(h->why), "Stopped");
+}
 const char *sh_usb_guide(int i)
 {
     for (int k = 0; k <= i; k++) if (!surv_usb_guide[k]) return 0;
