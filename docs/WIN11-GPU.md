@@ -3765,6 +3765,29 @@ morning's tests need first.)
   the whole boot, as T88 did: DWM, Settings and Calculator through the new translator, every shader dumped). All with
   the user's kernel drivers.
 
+### 6.128 Chain results, part 14: T93s / T93, the stuck draw's indices are valid; its positions are all zero
+
+(2026-11-17 01:52; `build/win/results-t93s`, `build/win/results-t93`: diagnostic KMD b78e d6e4a0c6 + sbumd b78d; measured.)
+
+- **T93s, PASS:** the KMD that maps the hung draw's data boots (blt 48.3 fps, flip 60.9 fps, 12/12, counters 0).
+- **T93:** the storm as always (Calculator: 2 after 5 s, 23 when closed, 115 after the kept-open step); 11 hang
+  records with the new data (`umdlog\hang-*.txt`, `Live_HangData`):
+  - **indices valid in every record:** 144 indices of 16 bits, values 840..899 with base vertex offset -840, so the
+    tiler addresses vertices 0..59 of a 60-vertex draw; none outside. (So `idxcopy`, T92, is already answered.)
+  - **positions:** in **7 of the 9 records** that captured them, all 60 positions are **exactly (0, 0, 0, 0)**: w = 0,
+    no screen position at all. The other two hold values that look like leftover memory ((1,1,1,1) alternating
+    with (x, 0.5, 0, 0)), not positions of this draw. Two records had no position view (the page was not mapped).
+- **Reading.** With IDVS the position shading happens inside the stuck job, so this alone does not tell "the vertex
+  shader computed zeros and the tiler cannot bin w = 0" from "the job stuck before it wrote anything". Two runs
+  decide, both staged:
+  - **T93n** = T93 with `noidvs` (asked of the main session for tonight): the vertex job ends first (T87n), so its
+    positions are what the tiler read. Zeros there = the vertex shader really outputs zeros for this draw.
+  - **T96** (`sbwddm-t96`, sbumd **b78f** a11903c1 = b78d + `sb-patches/0181`, flag `posguard`): a vertex position
+    of exactly (0,0,0,0) is replaced by (0,0,0,1) (a zero-area point, culled). Timeouts gone = the tiler hangs on
+    w = 0 input, and the guard is a working fix while the reason for the zeros is looked for (a constant buffer
+    the shader reads as zero is the first suspect: w = 0 for every vertex needs the transform's last row to be 0).
+  The T92 `nirdump` run (tonight) writes that vertex shader's NIR and binary.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,

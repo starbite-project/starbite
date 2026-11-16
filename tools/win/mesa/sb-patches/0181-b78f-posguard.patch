@@ -1,0 +1,79 @@
+From 79a363c56ce5cd9e61a287aed6aff91aabb762e8 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Tue, 17 Nov 2026 01:51:43 +0200
+Subject: [PATCH] b78f: switch posguard: a vertex position of exactly (0,0,0,0)
+ becomes (0,0,0,1) (T93: 7 of 9 records of the DWM tiler stall had all 60
+ positions zero)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/gallium/drivers/panfrost/pan_shader.c | 46 +++++++++++++++++++++++
+ 1 file changed, 46 insertions(+)
+
+diff --git a/src/gallium/drivers/panfrost/pan_shader.c b/src/gallium/drivers/panfrost/pan_shader.c
+index 6cd2b8e..2595dc7 100644
+--- a/src/gallium/drivers/panfrost/pan_shader.c
++++ b/src/gallium/drivers/panfrost/pan_shader.c
+@@ -93,6 +93,50 @@ lower_sample_mask_writes(nir_builder *b, nir_intrinsic_instr *intrin,
+ 
+ static bool sb_retype_int_attribs(nir_builder *b, nir_intrinsic_instr *intr, void *data);
+ 
++/* b78f (T93: in 7 of 9 hang records of the DWM tiler stall all 60 positions of the stuck draw were exactly zero, w = 0
++ * included), flag file C:\\ProgramData\\Starbite\\posguard: a vertex shader's position output that is exactly
++ * (0, 0, 0, 0) becomes (0, 0, 0, 1). A triangle of such vertices then has zero area at a defined point and is culled,
++ * instead of reaching the tiler with w = 0 (no screen position at all). Any other position is untouched. If the
++ * timeouts stop with it, the tiler hangs on w = 0 input; why the shader computes zeros is the next question. */
++static bool
++sb_guard_zero_position(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   (void)data;
++   if (intr->intrinsic != nir_intrinsic_store_output ||
++       nir_intrinsic_io_semantics(intr).location != VARYING_SLOT_POS ||
++       intr->src[0].ssa->num_components != 4 || nir_intrinsic_write_mask(intr) != 0xf ||
++       intr->src[0].ssa->bit_size != 32)
++      return false;
++   b->cursor = nir_before_instr(&intr->instr);
++   nir_def *p = intr->src[0].ssa;
++   nir_def *zero = nir_imm_float(b, 0.0f);
++   nir_def *all0 = nir_iand(b, nir_iand(b, nir_feq(b, nir_channel(b, p, 0), zero), nir_feq(b, nir_channel(b, p, 1), zero)),
++                            nir_iand(b, nir_feq(b, nir_channel(b, p, 2), zero), nir_feq(b, nir_channel(b, p, 3), zero)));
++   nir_def *w = nir_bcsel(b, all0, nir_imm_float(b, 1.0f), nir_channel(b, p, 3));
++   nir_def *q = nir_vec4(b, nir_channel(b, p, 0), nir_channel(b, p, 1), nir_channel(b, p, 2), w);
++   nir_src_rewrite(&intr->src[0], q);
++   return true;
++}
++
++#ifdef _WIN32
++__declspec(dllimport) unsigned long __stdcall GetFileAttributesA(const char *lpFileName);
++#endif
++static bool
++sb_posguard(void)
++{
++#ifdef _WIN32
++   static int v = -1;
++   if (v < 0) {
++      v = GetFileAttributesA("C:\\ProgramData\\Starbite\\posguard") != 0xFFFFFFFFul;
++      if (v)
++         fprintf(stderr, "sbumd: b78f switch posguard: a vertex position of exactly (0,0,0,0) becomes (0,0,0,1)\n");
++   }
++   return v;
++#else
++   return false;
++#endif
++}
++
+ #ifdef _WIN32
+ /* only this one call: windows.h's macros clash with Mesa's headers */
+ __declspec(dllimport) unsigned long __stdcall GetFileAttributesA(const char *lpFileName);
+@@ -132,6 +176,8 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
+ 
+    if (s->info.stage == MESA_SHADER_VERTEX && key->vs.int_attribs)
+       NIR_PASS(_, s, nir_shader_intrinsics_pass, sb_retype_int_attribs, nir_metadata_all, &key->vs.int_attribs);
++   if (s->info.stage == MESA_SHADER_VERTEX && sb_posguard())
++      NIR_PASS(_, s, nir_shader_intrinsics_pass, sb_guard_zero_position, nir_metadata_control_flow, NULL);
+ 
+    /* While graphics shaders are preprocessed at CSO create time, compute
+     * kernels are not preprocessed until they're cloned since the driver does
+-- 
+2.43.0
+
