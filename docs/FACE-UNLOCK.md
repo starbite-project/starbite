@@ -162,3 +162,46 @@ LFW is used only on the Mac, for these tests. It never goes into git or onto the
    - the parallax threshold against real landmark noise (host: ±0.7 px noise gives 0.028 < 0.035);
    - the blink signal;
    - low light (the screen as fill light is not done yet).
+
+## Round 2 (2026-11-16): after 9i on S9 #1
+
+**The user's report on 9i:** set-up worked, but it never recognised them, and the camera picture was "like a really
+old Nokia".
+
+**Camera pipeline v2** (`kern/cam_isp.c` `cam_isp_process`, default in `cam.c`; `cam_set_pipeline(1)` = v1):
+
+| | v1 (9i) | v2 |
+|---|---|---|
+| Resampling | one Bayer cell per pixel, nearest: aliasing, all the noise | every cell averaged in (area resample) |
+| Raw reads | column-wise from uncached memory | rows in bulk, the sensor's order; the rotated output in tiles of 8 |
+| Lens shading | none (dark corners) | radial gain, 1.4x at the corners |
+| White balance | grey world over every pixel (skin pulls it) | grey world over the near-grey pixels |
+| Colour | no matrix (dull) | a 3 x 3 matrix |
+| Tone | gamma 2.0 | sRGB with a mild S |
+| Exposure | 18 % of the whole frame's greens | **the face's box** at 24 % when a face is found, else frame + middle at 16 %; whole steps when far off |
+
+**Host lab** (`kern/host/face-isp-lab.sh synth`): LFW faces made into raw sensor frames, then each pipeline's
+embedding compared with the clean face's (cosine):
+
+| Light | v1 | v2 |
+|---|---|---|
+| bright | 0.954 | 0.948 |
+| dim | 0.890 | 0.920 |
+| dark | 0.727 | 0.820 |
+
+The lens shading and the colour matrix are first guesses. The face test image's raw frames calibrate them.
+
+**Recognition changes:**
+- Scans use a frame only once the exposure has settled, or 0.5 s after the first frame.
+- Set-up uses settled frames only, and averages 3 looks for the centre and 2 for each turn. One early dark frame no
+  longer defines the template.
+- **After installing round 2, reset Face Unlock and set it up again.** The 9i templates come from v1 pictures.
+
+**Face test image round 2** (`starbite-next-*-facetest.img`, attended: the user looks at the phone ~20 s after the
+start, for ~10 s):
+- the pack, the bench, then the camera for 9 s;
+- at 0.4 / 1.5 / 3 / 5 / 7.5 s it captures the whole raw frame (1632 x 1224) and the preview;
+- it saves them into the store entry **`sbos-facedbg`** (made once:
+  `tools/store/store-update.sh WORKDIR --volatile sbos-facedbg=67108864`; never the user's photos);
+- pull with `python3 tools/face/facedbg-pull.py` in TWRP;
+- compare with `sh starbite/sbos/kern/host/face-isp-lab.sh raw OUTDIR .../NN-raw.bin`.
