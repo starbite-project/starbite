@@ -3407,6 +3407,43 @@ Linux host; the Win32 file code is **compiled only**.)
 - **For sbumd (D3D):** Panfrost's binary cache would be hit as it is once the option is on; still needed there: the
   `noidvs` switch in the key, a per-half tag for the ARM64X DLL, and DWM / logon excluded at first. Not built.
 
+### 6.114 Chain results, part 1: T81 (the new tree boots) and T84 (Windows holds a touch's click until the finger lifts; kit 0170 fixes it)
+
+(2026-11-16 18:11; `build/win/results-t81`, `build/win/results-t84`; both measured on the phone.)
+
+- **T81, PASS.** sbumd 63cb8404 (`sb-nir` 430b803: the new translator, geometry shaders, stream output,
+  tessellation, the D3D11 DDI, the conformance fixes; all flags off) reaches the logon, DWM is the same process at
+  the end, a blt-model window runs at 49.0 fps and a flip-model window at 60.3 fps on our adapter, the first 12
+  d3d10core tests pass 12/12, and the KMD's counters are 0 (timeouts, resets, failed jobs, TDR engine resets). The
+  boot crash of T77 is gone. This is the tree's first run on the phone.
+- **T84 part 1: for a mouse-only window Windows sends the click when the finger LIFTS.** Injected touches
+  (InjectTouchInput), times after the touch-down:
+
+  | touch | WM_POINTERDOWN | WM_LBUTTONDOWN | verdict |
+  |---|---|---|---|
+  | tap, 60 ms | +10 ms | +65 ms (release +63) | at the release |
+  | hold, 400 ms | +10 ms | +404..413 ms (release +402..408) | at the release |
+  | hold, 1500 ms | +10 ms | +1503..1507 ms (release +1501..1505) | at the release |
+  | drag, 150 px in 300 ms | +10 ms | +55 ms | when it starts to move |
+
+  The same in all four window kinds: nothing registered; press-and-hold disabled by the tablet window property
+  (and it is already off for the user: TouchMode_hold 0); every gesture blocked; RegisterTouchWindow (which does
+  get WM_TOUCH at +10 ms, but the promoted click still comes at the release). So in a game that reads only the
+  mouse (Geometry Dash) every tap arrives late by the whole time the finger is down, and a hold does nothing
+  until the finger lifts, when down and up arrive together. The touch itself is there after 10 ms.
+- **T84 part 2: GL kit 0170 turns the touch into the click itself.** A GL window on the kit (Mali-G72, Panfrost),
+  switch off: as above (click at +68..90 ms for a 60 ms tap, +408..416 for 400 ms, +1513..1521 for 1500 ms). Switch
+  on (`SB_GL_TOUCH=1` / flag file `gltouch`): **WM_LBUTTONDOWN at +10..27 ms** for every tap, hold and drag,
+  WM_LBUTTONUP at the release; the kit's own count: 13 presses, 13 releases, 333 moves, 0 stray touch-made mouse
+  messages. Not yet run inside the game itself (the test window is ours; GLFW's handling of the handed-over
+  messages is by reading only).
+- **touchdiag-4 check, PASS:** DiagBuild `td4-edge0`, TouchD0Status 0, **DiagEdgeStatus 0** (the chip acknowledged
+  `AB 00 00`), DiagEdgeZone 0, both self-tests 0 errors of 200. Whether "0" really removes the edge zone needs a
+  finger: the user's next session's trace (taps with x < 160 lasting as long as the others).
+- **So "touches arrive a lot late" had two causes on top of each other:** the chip held edge taps until finger-up
+  (6.110), and Windows holds every tap's click until finger-up for a mouse-only game. The second is the bigger
+  one (it applies everywhere on the screen). The fix for the second is the kit switch, per game.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
