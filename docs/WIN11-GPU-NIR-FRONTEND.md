@@ -1843,3 +1843,459 @@ Consequences for tonight's queue:
   `umd-nir-fix3` has both (MSAA off without the flag file, and 1e2a6c6).
 - `CheckMultisampleQualityLevels` logs only its first 24 calls per process (`said < 24`), so
   the log alone cannot show a later format being refused once this one passes.
+
+# Phase 7: stream output
+
+State: 2026-11-16 03:02 EET. Branch `sb-nir`, on top of round 3 (1e2a6c6), nothing pushed:
+
+- `057f691` poly: stream output only from vertices that were emitted; static counts exported
+- `68c7bce` panfrost: stream output with Direct3D semantics, from vertex and geometry shaders
+- `c87a244` d3d10umd: the harness lowers and compiles stream output, and checks its bookkeeping
+- `4008acb` d3d10umd: every shader starts without a compute NIR (**a fault in 1e2a6c6, see P7.8**)
+- `0dc3e0d` panfrost, poly: two warnings of the Windows build
+- `ee1da6b` d3d10umd: stream output is wired to the driver
+
+**Nothing of this has run on a GPU, and no draw path has run at all.** What ran is on the Linux
+host: the lowering, NIR validation, the Bifrost arch 6 compile of every piece, and 35 checks of
+the bookkeeping arithmetic. P7.9 lists it.
+
+No new switch. Stream output from a vertex shader for lists that are not indexed works without
+any flag file (it did not exist before: the creation failed). Everything through the geometry
+path needs `gsemu` and `nirshaders` as before.
+
+## P7.1 Where the design of R3.7 was changed, and why
+
+1. **The rasterization shader has to know which vertex IDs are real.** poly's stream output
+   writes sit in the rasterization shader and run for whatever vertex ID the shader is run for
+   (poly_nir_lower_gs.c, `create_gs_rast_shader`): copy 0 of a vertex is written
+   unconditionally (`poly_xfb_vertex_copy_in_strip` in src/poly/cl/geometry.cl: `copy == 0 ||`).
+   asahi only shades the IDs an index buffer names. A Mali job shades a range, which also
+   holds IDs of strips too short for a primitive, IDs no primitive uses, and for a dynamic
+   topology the IDs the range is padded with to powers of two: each would have written a record
+   over somebody else's. 057f691 adds a flag per shaded vertex (part of a complete emitted
+   primitive of its stream) and a test of the primitive ID against the count. asahi's result is
+   unchanged (the test is always true there). R3.7 did not see this.
+2. **Vertex-shader-only stream output beyond tier 1 captures through a pass-through geometry
+   shader but is rasterized by its ordinary draw.** R3.7 wanted to draw through the geometry
+   path as well. Capturing only (`sb_gs.xfb_only`) leaves the picture of such a draw exactly
+   what it is today, and the pass-through shader exists in src/poly
+   (`poly_nir_passthrough_gs`). Cost: the vertex shader runs twice, as in tier 1.
+3. **Dynamic counts use poly's pre-GS kernel as it is**, offsets and statistics in GPU memory,
+   instead of reading a total back per draw: consecutive draws into the same targets need no
+   readback at all, only the first use of a fill level or a statistic on the CPU does (P7.5).
+   The prefix sum is a serial loop put in front of the pre-GS kernel
+   (pan_nir_lower_gs.c:279 `prepend_prefix_sum`), not a kernel of its own.
+4. **Later vertex jobs depend on the last stream output job of the batch** (`sb_so_dep`,
+   pan_job.h; `sb_job_dep()` pan_jm.c:31). R3.7's open point said compute-type jobs are added
+   as barriers; what the barrier bit orders is not written down anywhere I could read, and
+   phase 3 found that the chain orders nothing. DrawAuto right after the capture, in the same
+   batch, is the normal Direct3D use, so the dependency is explicit.
+5. Multiple streams and a rasterized stream other than 0 are done (poly has both), not refused.
+
+## P7.2 Bookkeeping (pan_so.h, pan_context.c, pan_cmdstream.c)
+
+- `panfrost_streamout_target::offset` is bytes filled from the start of the target. Upstream
+  counted vertices and advanced **every bound target on every draw**, capturing or not, by the
+  draw's vertex count (`panfrost_update_streamout_offsets`, removed); it never looked at the
+  buffer size. Now only a capturing draw moves the level, by what it wrote.
+- `set_stream_output_targets`: an offset replaces the level, -1 keeps it (pan_context.c:1088).
+- Whole primitives: `pan_so_clamp` gives, per stream, min(needed, room in each bound buffer of
+  that stream), room being poly's own formula (the last vertex needs space up to its last
+  captured component, not a whole stride). A buffer the shader writes with no target bound
+  takes nothing and limits nothing, unless the stream has no bound buffer: then nothing is
+  written and everything is still counted as needed (d3d11.c:6653 expects written 0, needed 5
+  with no targets).
+- Statistics: `ctx->sb_so.needed[4]`, `written[4]`, per stream. `PIPE_QUERY_SO_STATISTICS`
+  (index = stream), `SO_OVERFLOW_PREDICATE` (needed > written) and `SO_OVERFLOW_ANY_PREDICATE`
+  are served from them; they returned zeros before.
+- DrawAuto (pan_cmdstream.c:4360 `panfrost_draw_vbo`): count = (fill level - offset of vertex
+  buffer 0) / stride of the first vertex element that reads vertex buffer 0. b908e17 took the
+  level as a vertex count. No vertex element on slot 0 means no draw.
+
+## P7.3 Vertex shader stream output
+
+Frontend (Shader.cpp, Draw.cpp): on a driver whose geometry stage does not take TGSI
+(`SbVsStreamOutput`, Shader.cpp:236: Panfrost with or without `gsemu`) the shader of
+`CreateGeometryShaderWithStreamOutput` without code is only its declaration
+(`Shader::sb_so_only`, no pipe object, an id that is never reused). `ResolveState`
+(Draw.cpp:90) binds, in place of the bound vertex shader, a pipe vertex shader created from the
+same code with `pipe_shader_state::stream_output` (`SbVsStreamOutputVariant`, Shader.cpp:284;
+one kept per vertex shader, for the declaration it was last drawn with). Old translator: the
+kept tokens. NIR: the token stream and signature are kept per vertex shader
+(`SbKeepVertexShaderSource`) and translated again, which is cheaper than keeping a clone of
+every vertex shader's NIR. Drivers with the draw module (softpipe, llvmpipe) keep the geometry
+state without code, unchanged.
+
+Driver: `panfrost_create_shader_state` builds `nir->xfb_info` from the declaration when the NIR
+has none (`panfrost_nir_set_stream_output`, pan_nir_lower_gs.c:323; `register_index` is the
+`driver_location` of the output variable, on both translators), and the upstream transform
+feedback variant does the rest.
+
+| Draw | What happens |
+|---|---|
+| point, line, triangle list, not indexed, one instance | the transform feedback variant, clamped to whole primitives that fit (`panfrost_launch_xfb`, pan_cmdstream.c:3438) |
+| the same, instanced | the same; when not everything fits, capture stops at a **whole instance** (the records of an instance are contiguous and a partial instance would need a second job with another instance ID): fewer primitives than Direct3D writes, `perf_debug` line. With `gsemu` this case goes the next row's way and is exact |
+| indexed, strips, fans, adjacency, instanced, with `gsemu` | captured by the pass-through geometry shader of the primitive class (`panfrost_get_so_gs`, pan_shader.c:1012; one per class, cached on the vertex shader), capture only; then the ordinary draw without capture |
+| the same without `gsemu`, or a vertex shader writing clip or cull distances (no pass-through for those) | **nothing is captured**; counted as needed, not written; one `mesa_logw` line |
+
+Refused at creation, with the reason in the log: an entry naming a system value that is one
+integer (primitive ID, render target or viewport index), a clip or cull distance, a register
+the shader does not write (NIR path), a component mask with a hole, a stream other than 0
+without a geometry shader. A declaration the driver cannot express fails the variant
+(`stream output of a vertex shader NOT set up`): the draws go on without capture, counted as
+nothing.
+
+Not done: with no rasterized stream (Direct3D 11's `D3D11_SO_NO_RASTERIZED_STREAM`) and no
+geometry shader, rasterization is **not** switched off (the frontend has no rasterizer discard
+variant; the rasterizer state object keeps only its handle). Logged at creation. It makes a
+difference only when a pixel shader and a render target or depth buffer are bound.
+
+## P7.4 Geometry shader stream output (gsemu)
+
+`panfrost_create_gs_state` builds the xfb info from the declaration and lowers with it
+(`panfrost_gs_from_nir`, pan_shader.c:890). From poly's rasterization shader two shaders are
+made (pan_nir_lower_gs.c:257 `keep_only`): the draw's, without the stream output stores, and
+the writer, without outputs, a vertex shader CSO that compiles without IDVS because it writes
+memory and has no outputs (pan_shader.c:174).
+
+One draw (`panfrost_single_draw_gs`, pan_cmdstream.c:4114), each job depending on the one
+before:
+
+1. capture job (as before);
+2. counts on the GPU only: count kernel (one invocation per input primitive and instance),
+   then pre-GS with its prefix sum (one invocation);
+3. index kernel, only if the draw rasterizes and the topology is dynamic;
+4. the writer, a compute-type vertex job over **every** vertex ID the rasterization draw can
+   use: its vertex count for the two shapes that are not indexed, `vertex_id_stride x streams`
+   for a static index buffer, `(instances << primitives_log2) x vertex_id_stride x streams` for
+   a dynamic one. Skipped when nothing can be written;
+5. the rasterization draw, unless the shader was created with no rasterized stream, has no
+   SV_Position, or the draw only captures.
+
+Counts known at compile time (19 of the 26 corpus shaders with the harness's declarations):
+`panfrost_gs_stream_output` (pan_cmdstream.c:4013) does the arithmetic on the CPU and puts
+final addresses and vertex limits into `struct poly_geometry_params`. Counts that depend on
+data (7): the structure gets the buffer bases and sizes, the address of each target's fill
+level word and of the counters; the pre-GS kernel does the same arithmetic on the GPU.
+
+Streams: the vertex ID carries the stream in its low bits (poly); the vertex bound is
+multiplied by the stream multiplier (phase 3 did not: its bound was wrong for a multi-stream
+shader, which it could not draw usefully anyway). The rasterized stream is a compile-time
+constant of the CSO (new `sb_rasterized_stream` / `sb_no_rasterized_stream` in
+`pipe_stream_output_info`, zero meaning stream 0 for every other frontend).
+
+Frontend: both DDIs go through `SbCreateGeometryShaderWithStreamOutput` (Shader.cpp:1304).
+The Direct3D 11 one (Shader.cpp:2210) no longer refuses streams, several strides or a
+rasterized stream. An entry is resolved to the vec4 output variable of its register **and
+stream** (`SbNirSoLocation`, Shader.cpp:251); the first-match lookup of `output_mapping` was
+wrong for a register shared by two streams or by a varying and a system value.
+
+Old translator: a geometry shader with code never reaches Panfrost as TGSI (the driver takes
+NIR only). With `gsemu` and without `nirshaders` its creation now **fails** with a log line
+(`geometry shader refused by the GPU driver`); it used to succeed and be ignored (P3.7 item 6).
+
+## P7.5 Every place a draw now reads back, waits or flushes
+
+| When | What | Cost |
+|---|---|---|
+| vertex shader stream output; geometry shader stream output with static counts | nothing | none: CPU arithmetic, one more job |
+| a draw whose geometry shader has data-dependent counts and stream output | nothing at the draw: two more kernels | none, as long as the next draws into the same targets are of the same kind |
+| first `pipe_buffer_write` of a target's fill level before such a draw (`panfrost_so_prepare`, pan_cmdstream.c:3194) | 4 bytes into a 64-byte buffer | a flush and wait only if an earlier batch still writes that buffer (an explicit offset set while a dynamic draw is in flight) |
+| after such a draw, the first of: a draw with CPU-side counts into the same target, DrawAuto from it (`panfrost_so_target_fill`, pan_context.c:1045) | reads one word | **flush of the batch that wrote it, and a wait**; then nothing until the next dynamic draw |
+| after such a draw, the first `begin_query` or `end_query` of a stream output statistics query or predicate (`panfrost_so_sync_counters`, pan_context.c:1066) | reads 16 words | **flush and wait**; `end_query` therefore blocks when a dynamic draw happened inside the query |
+| indexed draws with a pass-through shader | as every geometry shader draw from d3d10umd: the CPU restart scan of P3.3 | as before |
+
+All readbacks happen before the draw asks for its batch.
+
+## P7.6 Harness tables (ran at cd7d8a9, Bifrost arch 6, `harness-p8*.txt`)
+
+The declarations of the tests are C arrays the harness does not read: every shader gets one
+made from its own outputs (every vec4 output whole, each stream to the buffer of its number),
+in the form Shader.cpp hands the driver.
+
+Geometry shaders, created with stream output (bytes of Bifrost code; "rast" is the draw's
+shader, unchanged from P3.5 / P4.6 in every row):
+
+| Shape, indices | Shaders | Counts | writer | rast | count kernel | pre-GS + prefix sum |
+|---|---|---|---|---|---|---|
+| static per primitive, 4 | 9 | CPU | 3168-4432 | 1904-3616 | - | - |
+| static per primitive, 3 | 1 | CPU | 4272 | 3488 | - | - |
+| static per instance, 1 | 6 | CPU | 2608-3952 | 1840-2400, one 0 | - | - |
+| static per instance, 3 | 3 | CPU | 4048-4352 | 3056-5280 | - | - |
+| dynamic indexed, 4 / 8 / 16 | 1 / 2 / 3 | GPU | 3904-6928 | 2992-3408 | 272 | 2384-2400 |
+| dynamic indexed, 32, four streams (d3d11.c, gs_5_0) | 1 | GPU | 8944 | 0 (no SV_Position) | 640 | 6320 |
+| all | 26 of 26 lower, validate and compile | | | | | |
+
+Vertex shaders, created with stream output (68 in the corpus):
+
+| Piece | Shaders | Bytes |
+|---|---|---|
+| transform feedback variant | 68 | 336-1104 |
+| capture variant of the shader itself (phase 3 only compiled a generated one) | 62 | 544-1424 |
+| pass-through writer: points / lines / triangles / lines adj. / triangles adj. | 62 each | 1888-3952 / 2640-5568 / 3584-7424 / 2576-5472 / 3472-7296 |
+| no pass-through: the shader writes clip or cull distances | 6 | - |
+
+Through the old translator (`--tgsi`) 64 vertex shaders get the same three kinds of pieces and 4
+have no pass-through. Every pass-through shader comes out with one primitive per input
+primitive and static counts (checked).
+
+Bookkeeping, `--selftest`: `stream output bookkeeping: 35 checks, 0 failed`: offsets and
+append, room in a buffer (points, lines, triangles, a full buffer, an offset past the end, a
+trailing gap), **the CPU formula against a transcription of poly's `setup_xfb_buffer` over
+1.7 million combinations**, several buffers and streams, a sequence with overflow and its
+statistics, DrawAuto counts, whole instances, folding GPU counters.
+
+Totals: `harness-p8.txt` 468 containers in scope, 468 compile, 12 refused as intended, 0
+failures (hull and domain shaders now compile, phase 8: they were "validated only");
+`harness-p8-corpus.txt` 362 of 362; `harness-p8-tgsi.txt` 233 compiled, 23 validated, the same
+13 failures. Stripped of the new notes, every line equals round 3's except the pre-GS size of
+geometry shaders **without** stream output (544 to 592, 640 to 704, 528 to 576: that kernel is
+never run without stream output; its statistics pointers are now a word of the parameter
+structure instead of address 0).
+
+## P7.7 All flag files absent: what differs from 1e2a6c6
+
+Read from the diff, not run on Windows. In behaviour, for applications that do not use stream
+output: nothing. For those that do, it now exists.
+
+- `CreateGeometryShaderWithStreamOutput` **without code now succeeds** on Panfrost (it failed
+  with E_OUTOFMEMORY: no geometry stage), and non-indexed list draws with it capture. This is
+  the feature; it is not behind a flag because nothing worked there before. With code it
+  still fails the same way without `gsemu`.
+- SO statistics queries and overflow predicates return counts instead of zeros; DrawAuto draws
+  bytes / stride instead of a vertex count that was always 0.
+- A stream output target bound across draws that do not capture no longer has its fill level
+  advanced by them.
+- Code that runs and decides nothing: in `ResolveState` one comparison of two pointers that are
+  both NULL; in `panfrost_draw_vbo` a test of `vs->xfb`; `sb_job_dep()` returning 0 where
+  `sb_gs.job_dep` (0) was passed.
+- Data: `Shader`, `Device`, `panfrost_context`, `panfrost_batch`, `panfrost_query`,
+  `panfrost_streamout_target`, `panfrost_uncompiled_shader`, `panfrost_gs`,
+  `pipe_stream_output_info` (2 bytes) and `poly_gs_info` grew.
+- With `nirshaders`: every vertex shader keeps a copy of its token stream and signature.
+- `DestroyShader` clears `bound_vs` / `bound_empty_gs` when they point at the shader destroyed
+  (they could dangle; nothing read them then).
+- The bug fix of P7.8.
+
+## P7.8 Found on the way
+
+- **`Shader::sb_cs_nir` was read uninitialised** (fixed, 4008acb). `DestroyShader` tests and
+  `ralloc_free`s it for a shader of any stage (since 08ac11c, phase 5), only
+  `CreateComputeShader` set it. For every vertex, pixel and geometry shader it was whatever
+  the runtime left in the object's memory, which is not zeroed: the fault of sb-patches/0128
+  (LogonUI, T33) again. **The DLL staged for T77 (35bae4d5) has it.** If T77 shows a crash in
+  `DestroyShader` / `ralloc_free`, this is it; `umd-nir-so` does not have it.
+- Phase 3's vertex bound for multi-stream geometry shaders ignored the stream multiplier (P7.4).
+- `output_mapping` first-match for stream output entries (P7.4).
+- Upstream Panfrost advances transform feedback offsets by `u_stream_outputs_for_vertices` of
+  a vertex count that includes `abs(index_bias)`; gone with the rewrite.
+
+## P7.9 Verified by running / only compiled / reasoned
+
+Ran (Linux host, assertions on): the three harness runs of P7.6; poly's lowering with stream
+output on 26 geometry shaders and on the pass-through shaders of 62 vertex shaders x 5
+classes, NIR validation of every piece, the Bifrost compile of every piece; the 35 bookkeeping
+checks; native Panfrost for every architecture builds; ARM64 and ARM64EC builds, the ARM64X
+link, the verifier.
+
+Compiled only, never executed: everything in pan_cmdstream.c, pan_context.c, pan_jm.c and
+pan_shader.c of this phase (jobs, dependencies, readbacks, queries, DrawAuto), and the whole
+frontend part. No shader was executed: that a record lands where it should is by reading
+poly's code and mine. The most likely places to be wrong, in my order: the writer job's vertex
+and instance IDs for the per-primitive shape (hardware instances = primitives x instances,
+taken from a compute-type job's coordinates as the transform feedback job does); the emitted
+flag for points; `StartVertexLocation` != 0 with the transform feedback variant (R3.7's open
+point, still open); the meaning of the barrier bit, which the explicit dependency makes
+irrelevant if dependencies work as phase 3 read them.
+
+Reasoned: that Direct3D leaves a buffer alone when a stream has an unbound buffer (I could not
+find the rule; the choice is in pan_so.h); that a write to the sink address is dropped on
+Bifrost (upstream uses it for the same purpose).
+
+## P7.10 The Windows build
+
+`~/sbmesa/build-nir-x/build-all.sh` at cd7d8a9: ARM64 and ARM64EC exit 0, link log empty, 35
+`ok` lines, `FAILS: 0`.
+
+```
+/Users/dev/project-starbite/.claude/worktrees/win-mali-gpu-87c7b0/build/win/umd-nir-so/
+  sbumd.dll  27554304 bytes  sha256 24ec17d933a25d57298ce7c70fb8e511c186413365825057274ff7a92ac3855c
+  sbumd.map   6862968 bytes  sha256 b9bcca605ea9a080f514f69c7341d3ec3041f63c779185ea87d33ac13dcb9dd8
+```
+
+`umd-nir` (98e9e6a6...), `umd-nir-gs` (e9e9d067...), `umd-nir-d3d11` (1572d243...) are
+untouched. `strings`: no new flag file name; the flag names are the same nine; new log lines
+`stream output of a vertex shader NOT set up`, `geometry shader refused by the GPU driver`,
+`is done through the geometry path (gsemu)`, `WITHOUT tessellation`.
+
+To try on a device: nothing to create for a non-indexed list with a vertex-shader-only
+declaration (test_stream_output_vs); `nirshaders` + `gsemu` for the rest. First test:
+test_stream_output_vs, then test_stream_output_resume (static counts, DrawAuto), then the
+multi-stream statistics test of d3d11.c:6610 (dynamic counts, the readbacks of P7.5).
+
+## P7.11 Rerun
+
+```sh
+export PATH=~/sbmesa/native:~/sbmesa/venv/bin:$PATH
+cd ~/sbmesa && ninja -j6 -C build-nir-host src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness
+cd build-nir-host
+W=/Users/dev/project-starbite/build/win/winetests/src
+H=./src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness
+$H --selftest --stats $W/d3d10core.c $W/d3d11.c > harness-p8.txt
+$H $W/d3d10core.c $W/d3d11.c > harness-p8-corpus.txt
+$H --tgsi $W/d3d10core.c $W/d3d11.c > harness-p8-tgsi.txt
+grep "SO " harness-p8-corpus.txt            # one note per vertex and geometry shader
+grep "bookkeeping" harness-p8.txt
+~/sbmesa/build-nir-x/build-all.sh
+```
+
+# Phase 8: tessellation (designed, not implemented)
+
+State: 2026-11-16 03:02 EET. `6678707` (harness) and `cd7d8a9` (a log line). **There is no
+tessellation in the driver.** Hull and domain shader creation is refused as before
+(E_OUTOFMEMORY, logged), there is no `tessemu` flag file, and the `fl11` log line now says that
+11_0 is offered without tessellation. What exists is the design below and harness evidence for
+its three shader pieces.
+
+## P8.1 How asahi drives it (read: agx_state.c:4500-4720, src/asahi/libagx, src/poly)
+
+1. vertex shader as a compute kernel with software input assembly, outputs to memory;
+2. hull shader as a compute kernel, a workgroup of one thread per output control point, writing
+   per patch: tessellation factors, patch constants, control points (`poly_nir_lower_tcs`);
+3. tessellator, count pass: one thread per patch, writes the patch's index count;
+4. prefix sum over the counts; allocates the index buffer from a GPU-side heap and writes an
+   indirect draw;
+5. tessellator, second pass: allocates the patch's domain points from the heap, writes them
+   and the indices (vertex ID = patch x 8192 + point);
+6. an indexed **indirect** draw whose vertex shader is the domain shader
+   (`poly_nir_lower_tes`): it finds patch and point from its vertex ID and reads the hull
+   shader's output from memory.
+
+The tessellator is Microsoft's reference tessellator in OpenCL C (src/poly/cl/tessellator.h).
+It is **not** in libpoly: asahi and kosmickrisp each build it into their own kernel library.
+
+## P8.2 What Bifrost with the job manager lacks, and what follows
+
+No indirect draw, no GPU-side allocator, and a vertex job (or the position storage of an IDVS
+job) covers a **range** of vertex IDs. Two amounts are known only after the tessellator ran:
+the number of indices and the number of domain points. Three consequences:
+
+- the draw's index count and vertex range must be known on the CPU when the draw is emitted;
+- vertex IDs of patch x 8192 + point cannot be used: the range would be 8192 IDs per patch
+  (131 KB of positions per patch before varyings). IDs have to be dense;
+- everything the second batch of a readback design needs must outlive the first batch (the
+  batch pool does not).
+
+Two designs; neither needs anything Bifrost cannot do.
+
+**B, worst case, no readback (do this first).** The hull shader declares its maximum factor
+(`dcl_hs_max_tessfactor`, 64 if absent), which bounds points and indices per patch:
+
+| Domain at factor n | points | indices |
+|---|---|---|
+| quad | (n+1)^2: 4225 at 64, 289 at 16 | 6n^2: 24576 at 64, 1536 at 16 |
+| triangle | 1 + 3(n/2)(n/2+1): 3169 at 64 | 4.5n^2: 18432 at 64 |
+| isoline | n(n+1): 4160 at 64 | 2n^2: 8192 at 64 |
+
+Jobs of one draw, in the framebuffer's batch, each depending on the one before:
+
+1. capture job of the vertex shader (exists);
+2. hull kernel: grid = patches x instances, **one thread per patch** (P8.3);
+3. tessellator, second pass only: the count pass is replaced by a count buffer the CPU fills
+   with the fixed stride (i + 1) x max indices, so every patch writes its indices at
+   patch x max indices; the heap is a region of patches x max points x 8 bytes;
+4. the draw: domain shader as the vertex shader, 32-bit indices, count = patches x max
+   indices, vertex range = patches x max points.
+
+Buffers, all from the batch pool: capture (as phase 3), hull output (patches x 72 to 216 bytes
+in the corpus), point allocations (4 bytes per patch), points, indices. The index buffer is
+cleared by the CPU first so that unused entries are degenerate triangles of vertex 0. poly
+changes: the 8192 becomes a field of `struct poly_tess_params` (three uses), nothing else.
+Cost: memory and tiler work for the declared maximum whatever the factors are: about 200 KB
+per quad patch at 64 plus its varyings, 13 KB at 16. No flush, no readback, no wait.
+
+**A, exact, one readback per draw (when B's memory is too much).** Jobs 1 to 3 with the real
+count pass and a prefix sum kernel (the serial loop of phase 7 will do); then **flush the
+batch, wait, read one word** (the total index count, which also bounds the points); in the
+next batch the second pass and the draw. The framebuffer is reloaded for the second batch.
+The hull output and the counts have to live in a buffer of the context, not in the batch pool.
+Dense vertex IDs need the tessellator to number points from the patch's allocation and a
+point-to-patch word per point (about 30 lines of OpenCL in tessellator.h and
+tessellation.cl). The readback is unavoidable here: it is the price of not allocating for the
+worst case, on a GPU that cannot be told the count of a draw by another job.
+
+**With a geometry shader after the domain shader:** the domain shader runs as a capture job
+(`poly_nir_lower_tes(tes, false)`, the form asahi uses ahead of a geometry shader) and
+`panfrost_single_draw_gs` takes the tessellator's index buffer where it takes the
+application's. Design B's padding does not work there (a geometry shader would emit geometry
+for a degenerate triangle), so this case needs design A or a pad index the geometry path
+skips. Open.
+
+**Stream output after tessellation** is the pass-through geometry shader of phase 7 behind the
+domain capture: same remark.
+
+## P8.3 The hull shader as one thread per patch
+
+poly runs the hull shader with one thread per output control point and relies on a barrier
+inside a workgroup for the patch constant phases (which read every control point). Here the
+body is wrapped in a loop over the output control point **from N-1 down to 0**
+(`serialize_hull_invocations` in the harness): ShaderNIR.c puts the patch constant phases
+under `invocation == 0`, so counting down they run last, after every control point is in
+memory. No barrier, no assumption about how a compute job groups its threads, grid =
+(patches, instances) like the geometry kernels. Its control point inputs would be fetched
+through the index buffer from the capture, as `lower_gs_input` does for a geometry shader
+(patch class: vertex = patch x control points + i); the harness uses poly's own fetch.
+
+## P8.4 Harness (ran at cd7d8a9, Bifrost arch 6)
+
+Hull shader: `nir_lower_io`, the loop of P8.3, `poly_nir_lower_tcs`, compiled as a compute
+kernel. Domain shader: `nir_lower_io`, `poly_nir_lower_tes(tes, true)`, compiled as a vertex
+shader. Pairs by the test source (line numbers in d3d11.c):
+
+| Test | Hull | bytes | control points out | bytes per patch | Domain | bytes |
+|---|---|---|---|---|---|---|
+| test_device_context_state (7124 / 7144) `simple_hs` / `simple_ds` | 7124 | 2688 | 3 | 72 | 7144 | 2032 |
+| test_clear_state (12101 / 12121) `simple_hs` / `simple_ds` | 12101 | 2688 | 3 | 72 | 12121 | 2032 |
+| test_quad_tessellation, ccw and cw hull with one domain (26282, 26336 / 26307) | 26282, 26336 | 6320 each | 4 | 88 | 26307 | 2496 |
+| test_clip_distance (29890 / 29926) `hs_code` / `ds_code` | 29890 | 11408 | 4 | 216 | 29926 | 4544 |
+| all | 5 of 5 | | | | 4 of 4 | |
+
+The six hull and five domain self tests (control point phase, instanced fork phase, `vocp`,
+join phase, maximum factor) compile the same way. The summary tables therefore show hull and
+domain shaders under "OK" where they were "validated, not compiled".
+
+The tessellator, with `-Dd3d10umd-nir-tests-tessellator=true` (off by default: vtn_bindgen2
+makes 1.1 GB of C++ from it), as NIR builder functions (`tests/sb_tess_kernels.cl`), one
+compute invocation per patch:
+
+| Domain | count pass | points and indices |
+|---|---|---|
+| isoline | 1824 bytes | 6224 bytes |
+| triangle | 3360 bytes | 80128 bytes |
+| quad | **fails before the compiler**: the generated builder code leaves a control flow list that `nir_validate` rejects (`collect_blocks: Invalid CF node type`) | the same |
+
+So the Bifrost compiler takes the tessellator (global atomics, private arrays, its loops) for
+two of three domains; the quad failure is in the form I built it in, not in Bifrost. The form
+to use in the driver is the one Panfrost already has for kernels: entry points in
+src/panfrost/libpan (as `indirect_dispatch.cl`), compiled per architecture at build time by
+`panfrost_compile`, which is also how asahi and kosmickrisp build theirs. Not tried.
+
+## P8.5 What the implementation consists of (nothing below exists)
+
+Driver: `PAN_DBG_TESSEMU` / flag file `tessemu` (needs `gsemu`'s machinery and `nirshaders`);
+tessellation stage caps (NIR only), `max_patch_vertices` 32; `create_tcs_state` /
+`create_tes_state` and binds; a sysval for the tessellation parameters;
+`load_vs_outputs_poly` from `struct poly_vertex_params`; the three tessellator kernels in
+libpan; `panfrost_single_draw_tess` (design B) for `MESA_PRIM_PATCHES`; the domain shader's
+resources swapped into the vertex stage as the geometry stage's are. Frontend: the list of
+P5.12 (creation through `Shader_nir_translate` with the patch constant signature, the hull
+and domain stage state handed to the driver, the patch topologies of `IaSetTopology`, the
+hull shader's `info.tess` copied into the domain shader's). `fl11` would then require
+`tessemu`.
+
+## P8.6 Verified by running / reasoned
+
+Ran: the harness table of P8.4 and the tessellator compile of P8.4, nothing else. Reasoned
+from source: everything in P8.1 and P8.2, the worst-case formulas (from the reference
+tessellator's structure, not checked against its output), that counting control points down
+is equivalent to the barrier for what ShaderNIR.c generates.

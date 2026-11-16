@@ -197,6 +197,18 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
 - **T76b did not count** (the suite ran on the Basic Render Driver; `WIN11-GPU.md` 6.101). T77 carries all of the
   above in seven passes.
 
+- **11-16 03:05, stream output (offline, compiled only; `sb-nir` cd7d8a9, sbumd 24ec17d9 in
+  `build/win/umd-nir-so`):** Direct3D stream-output bookkeeping (append, whole primitives only, overflow, the
+  statistics queries, DrawAuto); from the vertex shader on Panfrost's transform feedback for non-indexed lists with
+  no flag; from geometry shaders, with several streams, and for indexed/strip/instanced vertex-shader draws through
+  the geometry path (`gsemu` + `nirshaders`). The only readback is after a draw whose output count depends on data
+  (when a later draw or query needs the count). Found on the way and fixed: every shader destroy read an
+  uninitialised field (in the DLL first staged for T77, now replaced).
+- **Tessellation: design only.** Hull shaders as one-thread-per-patch kernels and domain shaders as vertex shaders
+  compile for Bifrost (5 of 5, 4 of 4); the isoline and triangle tessellators compile, the quad tessellator fails
+  NIR validation in the form tried (to be written as libpan kernels). Recommended first version: worst-case
+  allocation from the hull shader's maximum factor, no readback (`docs/WIN11-GPU-NIR-FRONTEND.md`, Phase 8).
+
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.
 - **BeamNG.drive:** item 6 (feature level 11_0) is the gate; before that the game cannot create its device. Items
