@@ -9,6 +9,7 @@
 #include "kern.h"
 #include "kapp.h"
 #include "survival.h"
+#include "survkit.h"                         /* Track D 2026-11-16 */
 #include "kinput.h"
 #include "gnssfix.h"
 
@@ -503,6 +504,8 @@ static int64_t setting_set_k(uint64_t id, uint64_t v)
 {
     uint64_t arg[2] = { id, v };
     switch (arg[0]) {
+    case SET_KIT_FIRST ... SET_KIT_LAST:    /* Track D 2026-11-16: the Survival kit (survkit.c) */
+        return survkit_set((unsigned)arg[0], (int64_t)arg[1]);
     case SET_PANEL_SAVE:
         panel_save_set(arg[1] != 0);
         sb_log(arg[1] ? "settings: panel refresh only on change: on" : "settings: panel refresh only on change: off");
@@ -1097,6 +1100,7 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
     }
     case SYS_SETTING_GET:
         switch (arg[0]) {
+        case SET_KIT_FIRST ... SET_KIT_LAST: return survkit_get((unsigned)arg[0]);   /* Track D: survkit.c */
         case SET_PANEL_SAVE: return panel_save_on;
         case SET_PANEL_OFF: return panel_off_on;
         case SET_SOS_LED: return sos_led_on;
@@ -1256,7 +1260,8 @@ int64_t sys_dispatch(int a, uint64_t nr, const uint64_t *arg)
         int64_t r = setting_set_k(arg[0], arg[1]);
         if (r == 0 && arg[0] != SET_GPU_HEAT && arg[0] != SET_SURV_USB && arg[0] != SET_SURV_LAST2 &&
             arg[0] != SET_SURV_SENSORS && arg[0] != SET_SURV_LIGHT && arg[0] != SET_SURV_WHISTLE &&
-            arg[0] != SET_SURV_FIRE && arg[0] != SET_SURV_FS && arg[0] != SET_SURV_FS_KEYS)
+            arg[0] != SET_SURV_FIRE && arg[0] != SET_SURV_FS && arg[0] != SET_SURV_FS_KEYS &&
+            (arg[0] < SET_KIT_FIRST || arg[0] > SET_KIT_LAST || survkit_saved_key((unsigned)arg[0])))
             settings_changed();             /* saved in 3 s where there is a state slot (the GPU never is) */
         return r;
     }

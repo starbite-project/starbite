@@ -508,6 +508,7 @@ static void show(void)
         ui_button(37, "Fire starter", "Pulses for a pencil lead", UI_HALF);
         ui_button(34, "Survival guide", "First aid, water, shelter, signals", 0);
         ui_button(35, "Compass and level", "Heading, tilt, steps", 0);
+        ui_button(38, "Survival kit", "Barometer, north from the sun, water timers, pulse", 0);   /* Track D 11-16 */
         ui_textline("Calls and messages: emergency calls need the modem; nothing here calls or sends.", GREY);
     }
     ui_end();
@@ -658,6 +659,8 @@ void app_event(const struct sbos_event *ev)
             app_open("info");
         else if (ev->id == 34)
             app_open("guide");              /* 1.2-alpha28 */
+        else if (ev->id == 38)
+            app_open("survkit");            /* Track D 2026-11-16 */
         else if (ev->id == 36)
             page = P_LIGHT;
         else if (ev->id == 37) {

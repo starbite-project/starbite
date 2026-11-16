@@ -19,6 +19,7 @@
 #include "survival.h"
 #include "gnssfix.h"
 #include "shub.h"
+#include "survkit.h"                        /* Track D 2026-11-16: the Survival kit */
 
 #define KT_SURV_USB 1U
 #define KT_SURV_TICK 2U                     /* the slow tick (last 2 %'s keeper), 5 s */
@@ -1740,6 +1741,8 @@ void surv_timer(unsigned id)
         last2_keep();
     else if (id == KT_SURV_SHUB)
         shub_tick();
+    else if (id >= KT_SURV_KIT0)
+        survkit_timer(id);                  /* Track D 2026-11-16: the Survival kit's (survkit.c) */
 }
 
 /* the saved options (settings.c's "sbos.surv" record): v1, sos options, last-2 auto, the location */
@@ -1752,6 +1755,7 @@ void surv_pack(uint8_t o[16])
     o[3] = (uint8_t)saver_n;                /* 1.2-alpha29: Extreme power saving's learned current */
     o[12] = (uint8_t)saver_ma;
     o[13] = (uint8_t)(saver_ma >> 8);
+    survkit_pack(o);                        /* o[2] bit 2, o[14..15]: Storm watch, the altitude reference */
     for (int i = 0; i < 4; ++i) {
         o[4 + i] = (uint8_t)((uint32_t)surv_lat_x100 >> (8 * i));
         o[8 + i] = (uint8_t)((uint32_t)surv_lon_x100 >> (8 * i));
@@ -1777,6 +1781,8 @@ void surv_unpack(const uint8_t in[16])
     }
     surv_lat_x100 = (int32_t)a;
     surv_lon_x100 = (int32_t)b;
+    if (!sbos_selftest_enabled)
+        survkit_unpack(in);                 /* Storm watch, the altitude reference (not in test images) */
 }
 
 /* ---- the silent self-test (uitest.c's survival variant): one step a call, 1 when done ------------------------ */
@@ -1976,8 +1982,9 @@ int surv_selftest_step(void)
         int s5 = surv_sensors_state();
         if (s5 == SHUB_STARTING && sb_ms() - st_t < 12000U)
             return 0;
-        if (s5 == SHUB_RUNNING && sb_ms() - st_t < 6000U) {
+        if (s5 == SHUB_RUNNING && sb_ms() - st_t < 9000U) {
             surv_sensors_on(1);             /* a few seconds of samples */
+            (void)survkit_set(SET_KIT_BARO, 1);  /* Track D 11-16: the barometer as its page asks for it */
             return 0;
         }
         int h = 0, a = 0, pi = 0, ro = 0;
@@ -1997,10 +2004,38 @@ int surv_selftest_step(void)
         ub_s(&u, "; ");
         ub_s(&u, surv_sensors_why());
         sb_log(u.b);
-        if (s5 == SHUB_FAILED && shub_why() && !memcmp(shub_why(), "the sensor hub's firmware is not on the card", 44))
+        int nofw = s5 == SHUB_FAILED && shub_why() &&
+                   !memcmp(shub_why(), "the sensor hub's firmware is not on the card", 44);
+        if (nofw)
             sb_log("selftest: survival: (not counted: the firmware file is not on this card yet)");
         else
             st_check("the sensor hub ran on demand and gave a level reading", s5 == SHUB_RUNNING && tv);
+        {                                   /* Track D 11-16: the Survival kit (survkit.c) */
+            int64_t p10 = survkit_get(SET_KIT_BARO), alt = survkit_get(SET_KIT_ALT), sun = survkit_get(SET_KIT_SUN);
+            ub_init(&u);
+            ub_s(&u, "selftest: survival: kit: pressure hPa x10 ");
+            ub_dec(&u, (uint64_t)(p10 < 0 ? 0 : p10));
+            ub_s(&u, p10 < 0 ? " (none)" : "");
+            ub_s(&u, ", altitude m ");
+            ub_dec(&u, (uint64_t)(alt < 0 ? -alt : alt));
+            ub_s(&u, alt < 0 ? " below / unknown" : "");
+            ub_s(&u, ", the sun: ");
+            if (sun >= 0) {
+                ub_s(&u, "azimuth x10 ");
+                ub_dec(&u, (uint64_t)(sun & 0xfff));
+                ub_s(&u, " elevation x10 + 900 ");
+                ub_dec(&u, (uint64_t)((sun >> 12) & 0x7ff));
+            } else {
+                ub_s(&u, sun == -2 ? "no location set" : "no clock");
+            }
+            sb_log(u.b);
+            if (!nofw && s5 == SHUB_RUNNING)
+                st_check("the barometer gave 300-1100 hPa", p10 >= 3000 && p10 <= 11000);
+            (void)survkit_set(SET_KIT_BARO, 0);
+            st_check("a water timer starts and stops", survkit_set(SET_KIT_TIMER, KIT_T_BOIL) == 0 &&
+                     (survkit_get(SET_KIT_TIMER) & 0xff) == KIT_T_BOIL && survkit_set(SET_KIT_TIMER, 0) == 0 &&
+                     survkit_get(SET_KIT_TIMER) == 0);
+        }
         surv_sensors_on(0);
         st_check("the sensor hub off again", surv_sensors_state() == SHUB_OFF);
         sb_logx(st_fails ? "selftest: survival: done, FAILED checks: " : "selftest: survival: done, every check passed ",

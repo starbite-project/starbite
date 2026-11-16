@@ -64,6 +64,8 @@ if [ "$native" = 1 ]; then
     CC=gcc sh "$here/kern/host/nledpol-test.sh"           # Track A: the notification LED's policy (kern/nledpol.c)
     gcc -std=gnu11 -O2 -Wall -Wextra -Werror -I "$here/kern" "$here/kern/host/lens-test.c" -lm -o "$ob/lens-test" &&
         "$ob/lens-test"                                   # Track A: Liquid Glass V3's model (kern/lens.h)
+    gcc -std=gnu11 -O1 -Wall -Wextra -Werror -DSURVKIT_HOST -I "$here/kern" "$here/kern/host/survkit-test.c" \
+        "$here/kern/survkit.c" -o "$ob/survkit-test" && "$ob/survkit-test"   # Track D: the Survival kit's sums
     CC=gcc sh "$here/kern/host/tzdb-test.sh"     # Track A: the time zones against zoneinfo, the 12-hour text
 fi
 
@@ -149,7 +151,7 @@ relocs_only_relative() {
 "${CROSS}gcc" $CFLAGS "$here/sdk/sbapp_lib.c" -o "$ob/app_lib.o"
 "${CROSS}gcc" $CFLAGS "$ut/tz.c" -o "$ob/app_tz.o"
 apps=""
-for a in emergency light heat sos info clock battery settings wifi modem calc notes files guide test-loop test-fault; do
+for a in emergency survkit light heat sos info clock battery settings wifi modem calc notes files guide test-loop test-fault; do
     "${CROSS}gcc" $CFLAGS "$here/apps/$a.c" -o "$ob/app_$a.o"
     extra=""
     [ "$a" = clock ] && extra="$ob/app_tz.o"

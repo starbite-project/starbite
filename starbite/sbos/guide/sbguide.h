@@ -222,7 +222,56 @@ static const struct sbg_page sbg_food[] = {
     { "Weather", SBG_L(
         "Thunder: lightning reach is about 10 km. Count seconds from flash to thunder: under 30, take shelter.",
         "In the open: off ridges and summits, away from lone trees, crouch on your pack, feet together.",
-        "Fast-falling cloud, rising wind, a sudden temperature drop: shelter before the weather arrives.") },
+        "Fast-falling cloud, rising wind, a sudden temperature drop: shelter before the weather arrives.",
+        "Survival kit > Barometer: a fall of 3.5 hPa in 3 hours means worse weather within a day; 6 hPa, a storm.") },
+};
+
+static const struct sbg_page sbg_knots[] = {
+    { "Knots: the basics", SBG_L(
+        "Working end: the end you tie with. Standing part: the rest. Bight: a U-shaped fold. Loop: a crossed bight.",
+        "Tie slowly, then dress it (strands lying neatly side by side) and pull every strand tight.",
+        "Leave a tail at least 10 times the rope's thickness. Test every knot with your weight before trusting it.",
+        "Eight knots cover almost everything outdoors: the next pages, one each.") },
+    { "Bowline (a fixed loop)", SBG_L(
+        "A loop that does not slip or jam: around a waist, a tree, a post; it unties easily even after a load.",
+        "Make a small loop in the standing part, the standing part underneath ('the rabbit hole').",
+        "Working end up through the hole, around behind the standing part, and back down the hole.",
+        "Hold the end against the loop's side and pull the standing part to tighten.",
+        "! It can shake loose when slack: tie the tail off with a half hitch. Not for climbing without training.") },
+    { "Clove hitch (to a pole)", SBG_L(
+        "Quick to tie and adjust: a line to a pole, a post or a tent pole.",
+        "Wrap the working end around the pole, cross it over its own first turn, wrap around again,",
+        "and tuck the end under that second wrap. Pull both sides: an X on the front, two turns behind.",
+        "It can roll off under a sideways pull: finish with two half hitches around the standing part.") },
+    { "Two half hitches", SBG_L(
+        "Tie a line to a tree, a ring or a stake fast; it holds well under a steady pull.",
+        "Pass the end around the tree, then around the standing part and through between them (one half hitch).",
+        "Do the same again, in the same direction, next to the first. Slide both snug against the tree.") },
+    { "Taut-line hitch (guylines)", SBG_L(
+        "An adjustable loop that holds under load and slides when you push it: tent and tarp guylines.",
+        "Pass the end around the stake. Inside the loop, wrap it twice around the standing part, toward the stake.",
+        "Then once around the standing part outside those wraps (away from the stake), and tuck it under itself.",
+        "Slide the knot up the line to tighten it; it grips once the line is loaded.") },
+    { "Sheet bend (join two ropes)", SBG_L(
+        "Joins two ropes, even of different thickness or material.",
+        "Make a bight (U) in the thicker rope. Pass the thinner end up through the bight,",
+        "around behind both legs of the bight, and tuck it under itself, not back through the bight.",
+        "Both short ends should come out on the same side. Slippery rope: go around twice (double sheet bend).") },
+    { "Figure-eight loop", SBG_L(
+        "The strongest simple fixed loop, easy to check: anchoring, hauling, a loop in a rope's middle or end.",
+        "Fold the end back into a bight about 50 cm long. With the doubled rope tie a figure eight:",
+        "a loop, then around the standing part, then down through the first loop. Two strands side by side.",
+        "It can be hard to untie after a heavy load. Leave a tail of a hand's width.") },
+    { "Trucker's hitch (pull tight)", SBG_L(
+        "Tightens a ridge line or ties a load down with a pulley's 3 to 1 pull.",
+        "In the standing part, about an arm's length from the anchor, make a fixed loop (a slipped knot or a "
+        "figure eight on a bight).",
+        "Pass the end around the anchor, back up through that loop, and pull down hard.",
+        "Hold it with a pinch and finish with two half hitches below the loop.") },
+    { "Reef knot (bandages only)", SBG_L(
+        "Right over left and under, then left over right and under: the ends come out side by side.",
+        "Flat and easy to untie: for slings, bandages and bundles.",
+        "! It slips or flips under load: never use it to join ropes you rely on. Use the sheet bend.") },
 };
 
 static const struct sbg_chapter sbg_chapters[] = {
@@ -233,6 +282,7 @@ static const struct sbg_chapter sbg_chapters[] = {
     { "Signalling", "Be seen, ground signs, sound", 0xffffd60aU, sbg_signal, 4 },
     { "Navigation", "Sun, stars, walking out", 0xff30d158U, sbg_nav, 3 },
     { "Food and weather", "What not to eat, storms", 0xffbf5af2U, sbg_food, 2 },
+    { "Knots", "Bowline, hitches, joining ropes", 0xff64d2ffU, sbg_knots, 9 },   /* Track D 2026-11-16 */
 };
 #define SBG_NCH ((int)(sizeof(sbg_chapters) / sizeof(sbg_chapters[0])))
 

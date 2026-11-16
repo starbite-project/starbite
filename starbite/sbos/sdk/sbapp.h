@@ -333,6 +333,32 @@ enum { SET_PANEL_SAVE = 1, SET_PANEL_OFF = 2, SET_SOS_LED = 3, SET_SCREEN_OFF_S 
 enum { FS_WHY_NONE, FS_WHY_DONE, FS_WHY_RELEASED, FS_WHY_ILIM, FS_WHY_VBUS, FS_WHY_FAULT, FS_WHY_HOT, FS_WHY_LOWBAT,
        FS_WHY_STOP, FS_WHY_REFUSED, FS_WHY_COOL, FS_WHY_FINGER };
 
+/* Track D, 2026-11-16: the Survival kit (kern/survkit.h; apps/survkit.c). Keys 80-99 are Track D's (the fire starter
+ * keeps 55-79). */
+enum { SET_KIT_FIRST = 80,
+       SET_KIT_BARO = 80 /* write 1 each second while the barometer is on screen (keeps the sensor on), 0 when it
+                            closes. Read: the pressure now, hPa x10; -1 starting (no reading yet); -2 refused (Extreme
+                            power saving or Last 2 %); -3 the sensor hub did not start (why: the notifications) */,
+       SET_KIT_ALT = 81 /* read: the altitude in m from the pressure and the reference, -100000 no reading. Write a
+                           known altitude in m now to set the reference from it; -100000 back to 1013.25 hPa */,
+       SET_KIT_REF = 82 /* read: the sea-level reference, hPa x10 | 1 << 16 when set from a known altitude */,
+       SET_KIT_TREND = 83 /* read: the level (KIT_* 0 steady, 1 rising, 2 falling, 3 falling fast, 4 storm likely,
+                             5 rising fast; 3 bits) | 3 h known << 3 | 1 h known << 4 | (3 h change hPa x10 + 2048)
+                             << 8 (12 bits) | (1 h change + 2048) << 20 (12 bits) */,
+       SET_KIT_WATCH = 84 /* read / write: Storm watch (a reading every 15 min, a notification on a fast fall);
+                             read bit 1: paused now (Extreme power saving) */,
+       SET_KIT_HIST = 85 /* read: the readings kept (up to 96) | the minutes they span << 8 */,
+       SET_KIT_SUN = 86 /* read: the sun now: azimuth 0.1 degrees from true north (12 bits) | (elevation 0.1 degrees
+                           + 900) << 12 (11 bits); -2 no location (set it in Emergency > Sun), -3 no clock */,
+       SET_KIT_TIMER = 87 /* write KIT_T_* to start that timer (one at a time), 0 to stop. Read: the kind | the
+                             seconds left << 8 (0 none) */,
+       SET_KIT_BOIL_S = 88 /* read: the boil time in s for here (60; 180 above 2000 m when the barometer knows) */,
+       SET_KIT_HIST_AT = 89 /* write i (0 the newest) to pick a reading; read it: hPa x10 | its age in minutes << 16
+                               (-1 none) */,
+       SET_KIT_LAST = 99 };
+enum { KIT_T_NONE_, KIT_T_BOIL_, KIT_T_SODIS_, KIT_T_SODIS_CLOUD_, KIT_T_CHLORINE_, KIT_T_CHLORINE_COLD_, KIT_T_CLO2_,
+       KIT_T_IODINE_, KIT_T_SHADOW_ };     /* = kern/survkit.h's KIT_T_* (the app's names) */
+
 /* 1.0-rc3: the full-heat battery data for the minutes-left estimates (Heat's confirmation and its live readout).
  * Measured on the phone (rc2, 2026-11-08, Manual flat out, 7 cores + GPU): 2.8 A at 3.67 V (about 10 W; peak 2.86 A),
  * and the fuel gauge fell 100 -> 91 % in 183 s and to 90 % at the hardware cut: about 3 % a minute. In coulombs that is
