@@ -228,6 +228,19 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
   table. Zero sanitizer reports on either translator over the corpus.
 - **Running:** tessellation (hull and domain shaders) on the geometry path's machinery, behind `tessemu`.
 
+- **11-16 05:06, tessellation implemented (offline, compiled only; `sb-nir` 35003e5, sbumd e0a6e561 in
+  `build/win/umd-nir-tess`):** hull and domain shaders behind the flag `tessemu` (needs `nirshaders` and
+  `d3d11ddi`): the three tessellators (isoline, triangle, quad) as precompiled kernels, worst-case room per patch
+  from the hull shader's maximum factor (132 KB per quad patch at factor 64, 8 KB at 16), four jobs per draw, no
+  readback. Refused: a geometry shader or stream output after the domain shader. Found on the way: precompiled
+  kernels could not have worked in the Windows DLL at all (a header laid out differently by the two compilers), a
+  stale geometry-shader pointer after every blit with `gsemu`, thread storage sized by the first job only.
+  With this, every stage of level 11_0 exists in code; none of it has run.
+- **11-16 05:06, T78 (first real apps on the candidate driver): a blocker.** Apps open, but Edge's start set off
+  404 DWM GPU-job timeouts and the desktop fell to about one frame a second (`WIN11-GPU.md` 6.104). The candidate
+  is on hold; T80 / T80b find the trigger and compare with the user's driver. This is now item 1's open part and
+  the first priority: a driver that passes tests but stalls the desktop when a browser starts is not usable.
+
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.
 - **BeamNG.drive:** item 6 (feature level 11_0) is the gate; before that the game cannot create its device. Items

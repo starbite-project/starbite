@@ -3071,6 +3071,38 @@ wait 1.5 ms). **0168** (src-tc da5173f, `sb-patches/0168-wgl-zero-copy-present-t
 - **T79** (`build/win/stage/sbwddm-t79`, candidate drivers, `sb-gdruns.bat` + `sb-gd-runs.txt`): B (`glzcflipd`),
   C (`glzcflipd glzcasync`), B2, C2.
 
+### 6.104 T78 read: apps start on the candidate driver, but Edge sets off a storm of DWM job timeouts - candidate on hold
+
+(2026-11-16 05:06) **T78** (`build/win/results-t78`, the candidate: T61 kernel drivers + sbumd d39b83ab):
+- **What works:** Edge opens and shows the page (CSS animation, 2D canvas, WebGL all drawn; shot), Settings,
+  Notepad, Paint, a File Explorer window and Task Manager open and draw; Calculator runs (its process is
+  `Calculator.exe`, the script looked for another name); one DWM process for the whole boot.
+- **Edge is not accelerated:** the page's title says `WebGL: ANGLE (Google, Vulkan 1.2.0 (SwiftShader ...))`, 27-31
+  fps: Chromium fell back to its software renderer. Crash events: `msedge.exe` c0000409 in ucrtbase three times at
+  logon and once later, and a `bad_module_info` c0000409 three seconds after the test started Edge. c0000409 in
+  ucrtbase is `abort()`: most likely Mesa aborting inside Edge's GPU process (the old shader translator aborts on
+  `switch`, 6.99), after which Chromium gives up on the GPU. Its GPU process is sandboxed, so sbumd could not write
+  a log there.
+- **The blocker:** from the moment Edge started (190.9 s into the boot) to the end, **404 GPU job timeouts and 404
+  GPU resets**: every hang record is a `dwm.exe` `indexed-vertex` job in the vertex/tiler slot that was still
+  running at the KMD's 752 ms limit (js 0x08, no MMU fault, the job's draw looks ordinary: 144 indices). DWM's own
+  log shows it blocked on the GPU for more than half of each 10 s window in 25 of 49 windows, with waits of 1.5-2.2
+  s. sbsmooth right after the apps: **0.5 fps** for the windowed test, GPU "101 % busy"; the full-screen test, which
+  hides the desktop, 61.7 fps. Closing Edge did not end it.
+  - T71 (40 min on the same sbumd, GD and the four test windows) and T72 / T74 (the user's sbumd) have none of
+    these in DWM's log. The counters come from leftover cells in the pulled hive (the follow-up display-only boot
+    overwrites the State key), so from T80 on the test saves the key itself.
+  - History: the same signature (DWM IDVS jobs timing out) in T46-T48 was the GPU stalling on memory VidMm had
+    unmapped; the scratch page fixed reads (6.56, 6.58). What stalls here is not known yet: memory pressure with
+    seven apps, something Edge's dying GPU process leaves behind in DWM's scene, or the tiler heap.
+- **Consequence:** the candidate (`sbwddm-user-0167`) is **on hold**. It makes the game path and every window kind
+  work, but a browser start made the desktop unusable in this test. Whether the user's current driver does the
+  same is not known (they reported a desktop too slow to reach the Start menu).
+- **T80 / T80b** (`sbwddm-t80` = candidate, `sbwddm-t80b` = the user's T61): `sb-apps2.bat` reads the KMD's
+  Live_JobsTimedOut / GpuResets / FaultCount / HangCount after every step: the WinUI apps first, then Edge without
+  GPU, Edge with its GPU process unsandboxed (so sbumd logs there), Edge as normal; sbsmooth before and after; the
+  whole State key saved at the end.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,

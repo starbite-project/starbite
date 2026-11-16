@@ -2151,6 +2151,8 @@ grep "bookkeeping" harness-p8.txt
 
 # Phase 8: tessellation (designed, not implemented)
 
+(Implemented since: Phase 9, at the end of this file. What follows is the design as it was written.)
+
 State: 2026-11-16 03:02 EET. `6678707` (harness) and `cd7d8a9` (a log line). **There is no
 tessellation in the driver.** Hull and domain shader creation is refused as before
 (E_OUTOFMEMORY, logged), there is no `tessemu` flag file, and the `fl11` log line now says that
@@ -2299,3 +2301,365 @@ Ran: the harness table of P8.4 and the tessellator compile of P8.4, nothing else
 from source: everything in P8.1 and P8.2, the worst-case formulas (from the reference
 tessellator's structure, not checked against its output), that counting control points down
 is equivalent to the barrier for what ShaderNIR.c generates.
+
+# Phase 9: tessellation implemented
+
+State: 2026-11-16 04:56 EET. Branch `sb-nir`, nine commits on top of d4cb682 (HEAD 35003e5, tree clean), nothing pushed:
+
+| Milestone | Commits |
+|---|---|
+| (a) the tessellator as kernels | `6d8b8ca` poly: the stride of tess eval vertex IDs is a parameter; `1209491` panfrost: a precompiled kernel is described in a layout every compiler has; `0d2fd2b` libpan: the tessellator as three kernels for Bifrost |
+| (b) lowering and harness | `abb3186` d3d10umd: a hull shader's maximum factor, and where it hands control points on; `d000009` panfrost: hull and domain shaders lowered with src/poly; `7f5ca30` d3d10umd: the harness lowers hull and domain shaders as the driver does |
+| (c) Panfrost | `91718d4` panfrost: three faults in the way of kernels inside a framebuffer's batch; `e062275` panfrost: tessellation on Bifrost behind tessemu |
+| (d) frontend | `35003e5` d3d10umd: hull and domain shaders reach a driver that has the stages |
+| (e) Windows DLL | built from 35003e5, P9.9 |
+
+**Nothing of this has run on a GPU, and no draw path has run at all.** What ran is on the Linux
+host: the lowering, NIR validation, the Bifrost arch 6 compile of every hull kernel and domain
+vertex shader, the build-time compile of the three tessellator kernels, and the arithmetic of the
+room of a patch against the reference tessellator. P9.8 lists it.
+
+Switch: `C:\ProgramData\Starbite\tessemu` (read once at screen creation, like `gsemu`),
+`PAN_MESA_DEBUG=tessemu` on Linux, architectures 6 and 7. It does not need the `gsemu` flag (it
+uses that path's code, not its switch) but hull and domain shaders exist only through the NIR
+translator, so it does something only with `nirshaders` (and `d3d11ddi`, which is where the two
+entry points are). `fl11` logs "with tessellation" only when `tessemu` is there.
+
+## P9.1 What design B became
+
+As P8.2 B, with these differences, each for a reason found while writing it:
+
+1. **The kernels are precompiled** (`src/panfrost/libpan/tessellator.cl`, built per architecture
+   by `panfrost_compile`, as P8.4 named). All three domains compile, quad included: the quad
+   failure of P8.4 was the vtn_bindgen2 form, as suspected. Partitioning and point mode are
+   parameters of a kernel at run time (poly's design), so three binaries cover every Direct3D
+   combination; Direct3D pow2 is integer to the tessellator (the reference says so itself, and
+   ShaderNIR.c maps it that way).
+2. **Padding is the restart index, written on the GPU.** P8.2 had the CPU clear the index buffer
+   to degenerate triangles of vertex 0. That is a memset of up to 98 KB per patch per draw on
+   the CPU and does not work for point mode (a degenerate point is a point). Each kernel
+   invocation first fills its patch's index region with 0xffffffff and the draw has primitive
+   restart on, for triangles, lines and points alike.
+3. **The point region is zeroed too, and `coord_allocs` is written for every patch.** The domain
+   shader runs for every vertex ID of the draw's range, also for points a patch does not have
+   and for patches the tessellator culls (which write nothing): without this it would read a
+   point offset the pool left there, an address anywhere.
+4. **The kernels clamp the tessellation factors to the hull shader's maximum themselves**, in
+   place, before tessellating. The hull shader clamps what it stores, but a factor it does not
+   store on some path is whatever was in the buffer, and a factor above the maximum would make
+   the tessellator write past the patch's room into the next patch or past the buffer.
+5. **Points are at a fixed place, no heap.** `struct poly_tess_params` gained `patch_id_stride`
+   (0: poly as it was, asahi and kosmickrisp see no change): vertex ID = patch x stride + point,
+   and the points of patch i are at element i x stride of the point buffer. No atomics.
+6. **Winding is the front face.** The tessellator emits one order (Direct3D `triangle_cw`); for
+   `triangle_ccw` the draw's front face is flipped (`sb_tess.flip_winding`, pan_jm.c), which is
+   what asahi does. The provoking vertex is the first either way.
+7. **The domain shader does not depend on the hull shader.** Everything it needs of it (layout
+   of the hull output, patches per instance, stride) is in `struct poly_tess_params` at run
+   time, so one vertex shader CSO per domain shader, and nothing copies `info.tess` (P4.4, P5.12
+   wanted that; it is not needed).
+
+One draw of patches (`panfrost_single_draw_tess`, pan_cmdstream.c), all in the framebuffer's
+batch, each job depending on the one before through `sb_gs.job_dep` as in the geometry path:
+
+| Job | What | Size |
+|---|---|---|
+| 1 capture | capture variant of the vertex shader (`panfrost_get_gs_capture`, phase 3) | vertex range x instances |
+| 2 hull | the hull shader as a compute kernel (`panfrost_nir_lower_tcs`), under the hull stage's constant buffers, views and samplers (`panfrost_gs_swap_stage`) | grid (patches, instances), one thread per patch |
+| 3 tessellator | `panlib_tess_isoline` / `_tri` / `_quad` (`GENX(panfrost_launch_precomp)` with the dependency in the grid) | patches x instances |
+| 4 draw | domain shader as the vertex shader (`panfrost_nir_lower_tes`), under the domain stage's resources; 32-bit indices from the GPU buffer (`sb_gs.rast_indices`), restart on, one instance | indices = patches x instances x max indices; vertex range = patches x instances x max points |
+
+The hull kernel reads its control points from the capture through the application's index
+buffer with the code a geometry shader uses (`pan_nir_load_captured_input`, split out of
+`lower_gs_input`; the geometry pieces compile to the same bytes as before, harness). Patch p of
+an instance is elements p x n .. p x n + n - 1 of the draw; an incomplete last patch is dropped.
+
+Every buffer is transient memory of the batch: the two parameter structures (64 + 140 bytes),
+the capture, the hull output (patches x 72 to 216 bytes in the corpus), 4 + 4 bytes per patch
+(`coord_allocs`, and the count buffer the CPU fills with (i + 1) x max indices: where the
+tessellator puts a patch's indices), the points and the indices. The CPU writes 4 bytes per
+patch and the two structures; everything else is written by the GPU.
+
+**Every submit carries its write set** as before: the path adds no submit. All its jobs are in
+the framebuffer's batch, which is submitted by `jm_submit_jc` (pan_jm.c:181,
+`malikm_submit_writes` from the batch's own BO flags), and everything it allocates is the
+batch's pool, which is this device's own memory (not an allocation opened from another process,
+the only kind the write set is about). The geometry path satisfies it the same way.
+
+## P9.2 The room of a patch (pan_tess.h)
+
+n = the largest number of segments an edge can get: the maximum factor F (declared
+`dcl_hs_max_tessfactor` rounded up, 64 if none) for integer and pow2; the next odd number up to
+63 for fractional odd; the next even number from 2 for fractional even. Lines of an isoline
+patch: F.
+
+| Domain | points | indices (lines / triangles) |
+|---|---|---|
+| isoline | F (n + 1) | 2 F n |
+| triangle | n odd: 3 ((n + 1) / 2)^2; n even: 1 + 3 (n / 2)(n / 2 + 1) | 3 x triangles; triangles = 6 k^2 - 6 k + 1 with k = (n + 1) / 2 for n odd, 1.5 n^2 for n even |
+| quad | (n + 1)^2 | 6 n^2 |
+
+Point mode: one index per point. (P8.2's table had these for integer partitioning; fractional
+odd needs more at most maxima: 324 points at 16 against 289.)
+
+Memory per patch for the tessellator output (points x 8 + indices x 4 bytes), triangle or line
+output; the draw then shades max points vertices (16 bytes of position each, plus its varyings):
+
+| Domain | partitioning | factor 16: points / indices / bytes | factor 64: points / indices / bytes |
+|---|---|---|---|
+| quad | integer, pow2, fractional even | 289 / 1536 / 8,456 | 4225 / 24576 / 132,104 |
+| quad | fractional odd | 324 / 1734 / 9,528 | 4096 / 23814 / 128,024 |
+| triangle | integer, pow2, fractional even | 217 / 1152 / 6,344 | 3169 / 18432 / 99,080 |
+| triangle | fractional odd | 243 / 1299 / 7,140 | 3072 / 17859 / 96,012 |
+| isoline | integer, pow2, fractional even | 272 / 512 / 4,224 | 4160 / 8192 / 66,048 |
+| isoline | fractional odd | 288 / 544 / 4,480 | 4096 / 8064 / 65,024 |
+| quad, point mode | integer | 289 / 289 / 3,468 | 4225 / 4225 / 50,700 |
+
+Plus the hull output (72 to 216 bytes in the corpus) and 8 bytes per patch. **Every hull shader
+of the corpus declares no maximum**, so each gets the factor 64 row: 132 KB per quad patch
+whatever factors it computes. A draw whose room would pass 2^20 patches, 2^22 vertices, 2^25
+indices or 256 MiB (tessellator output + hull output + capture) is dropped with a log line
+(`PAN_TESS_MAX_DRAW_*`, pan_cmdstream.c): at factor 64 that is about 990 quad patches a draw
+(the vertex limit), at a declared 16 about 14,500. Design A of P8.2 (one readback per draw) is
+what lifts that; not done.
+
+## P9.3 Implemented, refused, not done
+
+Implemented (compiled; lowering and shader compilation ran):
+
+- The tessellator: three domains, integer / pow2 / fractional odd / fractional even, point /
+  line / triangle_cw / triangle_ccw.
+- Driver, with `tessemu`: caps of the two stages (NIR only, no buffers or images, 32 patch
+  constants), `create_tcs_state` / `create_tes_state`, binds, deletes, `set_patch_vertices`,
+  patches of 1 to 32 control points, indexed draws, instancing (grid and capture per instance,
+  drawn as one instance; `SV_InstanceID` in a domain shader is recomputed from the patch
+  number), the stages' own constant buffers, textures and samplers.
+- Frontend: `CreateHullShader` / `CreateDomainShader` through `Shader_nir_translate` with the
+  three signatures, set-shader and the three resource entry points per stage, patch list
+  topologies, destroy and unbind, `SbInitShader` first as for every shader.
+
+Refused with a line in the log, never drawn wrong:
+
+| What | Where | Line contains |
+|---|---|---|
+| a geometry shader bound with tessellation | draw, driver | `a geometry shader behind tessellation is not supported, the draw is dropped` |
+| stream output with tessellation (the vertex shader variant with a declaration is bound) | draw, driver | `stream output behind tessellation is not supported` |
+| hull and domain shader of different domains; patches without both shaders; a draw that is not of patches while either is bound; patch size outside 1..32 | draw, driver | `is dropped` |
+| a draw beyond the limits of P9.2, or one of whose jobs could not be made | draw, driver | `is dropped` |
+| a hull or domain shader on a driver without the stages, without `nirshaders`, or one the translator or the driver refuses | creation, frontend (E_OUTOFMEMORY, as every refused shader) | `hull shader refused:` / `domain shader refused:` and the reason |
+| a hull or domain shader in which a tessellation intrinsic survives the lowering | creation, driver | `panfrost: hull shader refused: <intrinsic>` |
+
+Each draw-time line is printed once per process (`mesa_logw_once`).
+
+A geometry shader or stream output behind the domain shader (task item 4) is refused, not
+done: with design B a patch's unused room is padding, which a geometry shader or a stream
+output writer would have to be told about per primitive. A count kernel over the tessellator
+output is not cheap with what exists: the count is known per patch only on the GPU, so it needs
+the readback of design A or a second, dense index buffer built by a kernel with a prefix sum
+over the patches; that is design A's work.
+
+Not done: pipeline statistics of the two stages (hull and domain invocations are not counted,
+and the primitive count of a tessellated draw counts the padding); `set_tess_state` (default
+levels without a hull shader: Direct3D has no such draw); design A.
+
+## P9.4 Found on the way
+
+- **A precompiled kernel could not have worked in the Windows driver** (fixed, 1209491). The
+  blob of a kernel starts with `struct bifrost_precompiled_kernel_info` in the layout of the
+  machine that ran `panfrost_compile`; pan_precomp.c read it with its own layout and looked for
+  the code at its own `sizeof`. Checked with the cross compiler: the structure is 1104 bytes
+  for clang-cl ARM64 and 1096 for the Linux tool (`struct pan_shader_info` 1088 against 1080),
+  so the code was taken from 8 bytes too far and the fields behind the difference were
+  misread. Nothing but an indirect compute dispatch used a precompiled kernel there before.
+  `panfrost_compile` now prints a table of 32-bit words per kernel
+  (`libpan_shaders_portable_v<arch>`) and the Gallium driver takes everything from it.
+  **This needs a `panfrost_compile` built from this tree**: `~/sbmesa/native-nir/` (built in
+  `~/sbmesa/build-nir-tools`), first on the PATH in `build-nir-a64/build.sh` and
+  `build-nir-ec/build.sh` (their old versions are `build.sh.before-p9`); `~/sbmesa/native` is
+  untouched. With the old tool the driver does not compile (no table), which is intended.
+- **With `gsemu`, every blit left a wild geometry shader bound** (fixed, 91718d4). u_blitter
+  unbinds the geometry (and tessellation) shaders for its draw and restores what the driver
+  saved; `panfrost_blitter_save` saved nothing, so u_blitter's "not saved" marker, the pointer
+  1, became `sb_gs.bound` and the next draw would have used it as a `struct panfrost_gs`. In
+  the tree since phase 3; read, not run.
+- **A batch's thread storage was sized by the first job that asked** (fixed, 91718d4). A kernel
+  launched into a framebuffer's batch asks at launch; a later job with a larger stack got the
+  same buffer (an assertion in a debug build, a stack running past its buffer in the release
+  DLL). Also the geometry path's index, count and pre-GS kernels.
+- **A hull shader without a control point phase stored a position where the domain shader does
+  not read it** (fixed, abb3186): the output took the input's slot (POS, the vertex shader's
+  SV_Position), the domain shader reads the register as plain data (VAR0 + register). Four of
+  the five corpus hull shaders. The validator cannot see this; pairing hull and domain shaders
+  in the harness did.
+- `fmin(level, maximum)` at the store of a tessellation factor (phase 4) turns a NaN factor
+  into the maximum, where a NaN outer factor should cull the patch. Left as it is: whether the
+  clamp to `dcl_hs_max_tessfactor` is a Direct3D `min` (which returns the other operand) I
+  could not settle. Without a declared maximum a NaN reaches the tessellator and culls.
+
+## P9.5 Harness tables (ran at 35003e5, Bifrost arch 6, `~/sbmesa/build-nir-host/harness-p9*.txt`)
+
+Hull shader: `panfrost_nir_lower_tcs`, compiled as the compute CSO. Domain shader:
+`panfrost_nir_lower_tes`, compiled as the vertex shader CSO. Bytes of Bifrost code:
+
+| Shader (d3d11.c line) | Hull kernel | domain, partitioning, output, maximum | control points out | hull output per patch | Domain vertex shader |
+|---|---|---|---|---|---|
+| test_device_context_state `simple_hs` 7124 / `simple_ds` 7144 | 6336 | triangle, integer, triangle_ccw, 64 | 3 | 72 | 2464 |
+| test_clear_state 12101 / 12121 | 6336 | the same | 3 | 72 | 2464 |
+| test_quad_tessellation `hs_quad_ccw_code` 26282 / `ds_quad_code` 26307 | 8432 | quad, integer, triangle_ccw, 64 | 4 | 88 | 2928 |
+| test_quad_tessellation `hs_quad_cw_code` 26336 / 26307 | 8432 | quad, integer, triangle_cw, 64 | 4 | 88 | (the same shader) |
+| test_clip_distance `hs_code` 29890 / `ds_code` 29926 | 15648 | quad, integer, triangle_cw, 64 | 4 | 216 | 5488 |
+| self test `sm5_hull_phases` / `sm5_domain` | 6784 | triangle, fractional odd, triangle_cw, 8 (75 points, 363 indices) | 3 | 152 | 2992 |
+| all | 5 of 5 corpus, the one self test that is to translate (`sm5_hull_pass_through` is refused as it must be) | | | | 4 of 4 corpus, the one self test |
+
+(The hull kernels grew against P8.4, 2688 to 6336 for `simple_hs`: they now fetch through the
+index buffer. The domain shaders grew by the division by the stride, 2032 to 2464.)
+
+Pairs: each corpus hull shader with the domain shader nearest to it in the file (its test).
+The domains must agree and the domain shader must read no control point output and no patch
+constant the hull shader does not write: `pairs: 5, 0 failed` (4 failed before abb3186).
+
+Tessellator kernels, from the table the driver reads (`--selftest`):
+
+| Kernel | code | thread storage | workgroup |
+|---|---|---|---|
+| `panlib_tess_isoline` | 8160 bytes | 0 | 1x1x1 |
+| `panlib_tess_tri` | 102624 bytes | 1052 bytes | 1x1x1 |
+| `panlib_tess_quad` | 140336 bytes | 1420 bytes | 1x1x1 |
+
+The room of a patch against the reference tessellator (`src/gallium/auxiliary/tessellator`,
+the Microsoft code the kernels are a port of, run on the CPU), for each of the 32 combinations
+of domain (3), partitioning (4, pow2 run as integer) and output primitive (point and line for
+isolines; point, triangle_cw, triangle_ccw for the others), for every maximum 1..64: with all
+factors at the maximum the reference gives **exactly** the room (64 of 64 maxima, in all 32),
+and 64 further factor sets per maximum, drawn from (0, maximum] with the values the tessellator
+treats specially mixed in, never exceed it: 4160 sets per combination, 133,120 tessellations,
+`tessellator: 32 combinations, 0 failed`. The check is sensitive: a generator that let a factor
+pass the maximum by 0.001 was caught in 7 combinations.
+
+Totals: `harness-p9.txt` 468 containers in scope, 468 compile, 12 refused as intended, 0
+failures; `harness-p9-corpus.txt` 362 of 362; `harness-p9-tgsi.txt` 235 compiled, 23
+validated, 11 refused. Against the run the reviewer left at d4cb682
+(`build-nir-asan/harness-asan2*.txt`): the old path is identical, byte for byte; the NIR path
+differs only in the hull and domain lines and the new tessellator and pair tables.
+
+Sanitizer build (`build-nir-asan`, address + undefined, rebuilt at 35003e5, the corpus and
+self tests on the NIR path and the corpus on the old path): both runs exit 0 with the same totals as the plain build (468 / 12 / 0; 235 / 23 / 11), no sanitizer report file (`sanlogs-p9/` is empty) and nothing on stderr. That covers the translator, both lowerings, the compiler and the reference check; no driver draw code is in the harness.
+
+## P9.6 Every place a draw of patches reads back, waits or flushes
+
+| Draw | What happens |
+|---|---|
+| not indexed | nothing: no flush, no readback, no wait |
+| indexed | the min/max scan of the index buffer every indexed draw has (`panfrost_get_index_buffer_bounded`, cached). Unlike the geometry path the restart indices are **not** taken out on the CPU: Direct3D has no cut in a list, the scan skips the cut value and the hull kernel clamps what it fetches to the captured range |
+| indirect | `util_draw_indirect`: the buffer is mapped and read; a flush and a wait if the GPU wrote it |
+| count from a stream output target (DrawAuto) | as any DrawAuto (P7.5): one word read back if the fill level is on the GPU |
+| any | descriptors are emitted four times (`panfrost_dirty_state_all` between the jobs); the capture variant is compiled at the first such draw of a vertex shader; `prepare_draw` starts a new batch on the conditions it always had |
+
+No draw of patches flushes the batch or starts another between its jobs.
+
+## P9.7 All flag files absent: what differs from d4cb682
+
+Read from the diff, not run on Windows. In behaviour: nothing, with one exception that is a fix.
+
+- **Precompiled kernels** (an indirect compute dispatch on architectures 6 to 9, the only user
+  without `tessemu`): the kernel is described by the new table. On Linux the same values as
+  before; on Windows the values it should always have had (P9.4). A launch that cannot
+  allocate logs and does nothing where it read a null pointer.
+- Hull and domain shader creation is refused as before; the log line now reads `hull shader
+  refused: the GPU driver has no tessellation stages (flag file tessemu)`, up to 8 times
+  instead of 4. The `fl11` line ends in `(flag file tessemu)`.
+- Code that runs and decides nothing: `SbDriverTess()` (false) at the start of the hull and
+  domain entry points and in `IaSetTopology`'s default case (patch topologies stay what they
+  were: an assertion and `MESA_PRIM_COUNT`); in `panfrost_draw_vbo` a test of the primitive
+  type for patches and of two pointers that are NULL; `front_ccw != false`; a scratchpad that
+  is large enough is returned as before; `panfrost_blitter_save` tests two flags that are off.
+- Data: `panfrost_context`, `shader_info` (one byte in existing padding), `struct
+  poly_tess_params` (35 words) and libpoly's tessellation helpers changed; libpan for
+  architectures 6 and 7 has three more kernels, which is why the DLL is 1,081,856 bytes larger
+  than rev2; a sysval number and a `PAN_MESA_DEBUG` name exist and are not used.
+- Translator: the hull pass-through slot and `sb_max_tess_factor` only touch hull shaders,
+  which are not translated without `tessemu` (the creation is refused before the translator).
+- The build needs `panfrost_compile` from this tree (P9.4).
+
+## P9.8 Verified by running / only compiled / reasoned
+
+Ran (Linux host, assertions on): the three harness runs and the sanitizer runs of P9.5;
+`panfrost_nir_lower_tcs` and `panfrost_nir_lower_tes` on every hull and domain shader of the
+corpus and the self tests with NIR validation and the Bifrost arch 6 compile; the pairing; the
+133,120 reference tessellations; `panfrost_compile` over libpan for every architecture (the
+tessellator kernels for 6 and 7); native Panfrost for every architecture; ARM64 and ARM64EC
+builds, the ARM64X link, the verifier; the size of the kernel info structure under the Windows
+ABI.
+
+Compiled only, never executed: **the tessellator kernels themselves** (the reference they are a
+port of ran on the CPU, not the OpenCL code: that poly's port writes exactly the reference's
+counts is asahi's experience, not something checked here, and my additions to it, the fixed
+point allocation, the fill and the clamp, ran nowhere); every hull kernel and domain shader;
+everything in pan_cmdstream.c, pan_shader.c, pan_precomp.c, pan_job.c, pan_blit.c, pan_jm.c and
+pan_screen.c of this phase; the whole frontend part.
+
+Reasoned from source: that primitive restart drops the padding for lists and points on this
+tiler (GL requires it of the hardware path Panfrost uses; nothing here draws with it); that
+counting control points down orders the phases (P8.3, unchanged); that the winding of
+`triangle_cw` is the tessellator's own order (from the reference: its clockwise output is the
+unswapped one) and that flipping the front face is equivalent to swapping two indices; that
+the batch's pool memory is not in the write set's scope.
+
+What I expect to fail first on the phone, most likely first:
+
+1. **The first precompiled kernel ever launched by this driver on Windows.** The table, the
+   push uniform layout (sysvals, then the arguments at offset 16), the thread storage of 1052
+   and 1420 bytes. A fault here is a job fault in job 3 of the first tessellated draw.
+2. **Primitive restart as padding.** If the tiler does not skip 0xffffffff in a triangle list
+   it fetches vertex 4294967295: garbage triangles or a fault in the tiler job. The fallback
+   is a pad index of a vertex that is certainly clipped, which costs one vertex per draw.
+3. The domain shader's vertex ID (the index value, with `offset_start` 0) and the vertex range
+   of patches x max points: the geometry path's dynamic shape uses the same mechanism and has
+   not run either.
+4. The explicit job dependencies across four jobs (phase 3's risk 1, now one job longer).
+5. Winding and the orientation of the domain: test_quad_tessellation draws the same quad with
+   `triangle_cw` and `triangle_ccw` hull shaders under both cull modes and is the test for it.
+6. Memory: 132 KB per quad patch with no declared maximum, and a draw of more than about 990
+   such patches is dropped. The tests draw one patch; an application will hit this.
+7. A hull shader whose patch constant phases do not sit under "control point == 0" as
+   ShaderNIR.c writes them (nothing else produces hull shaders here).
+
+## P9.9 The Windows build
+
+`~/sbmesa/build-nir-x/build-all.sh` at 35003e5: ARM64 and ARM64EC exit 0, 35 `ok` lines,
+`FAILS: 0`.
+
+```
+/Users/dev/project-starbite/.claude/worktrees/win-mali-gpu-87c7b0/build/win/umd-nir-tess/
+  sbumd.dll  28640256 bytes  sha256 e0a6e56137e566dc61d76656f5239b288805194f20fed98c47df3f75a0539d70
+  sbumd.map   6897705 bytes  sha256 085de28edfca5d32c647b8715fd4fa14ae31f7a0b0bbfc7575bb50d196d5fdda
+```
+
+The other `umd-nir*` directories are untouched. `strings`: `tessemu`, `sbumd: tessellation
+emulation on (C:\ProgramData\Starbite\tessemu)`, `offered (flag files fl11, msaa, tessemu),
+with tessellation`, and the refusal lines of P9.3.
+
+To try on a device: the flag files `nirshaders`, `d3d11ddi`, `msaa`, `fl11` and `tessemu`
+(`gsemu` is not needed for this). First test_quad_tessellation (one quad patch, integer,
+both windings), then test_clip_distance (a hull shader with fork phases and clip distances
+through the domain shader), then test_device_context_state / test_clear_state (state only).
+
+## P9.10 Rerun
+
+```sh
+export PATH=~/sbmesa/native-nir:~/sbmesa/native:~/sbmesa/venv/bin:$PATH   # native-nir first
+cd ~/sbmesa && ninja -j6 -C build-nir-host src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness
+cd build-nir-host
+W=/Users/dev/project-starbite/build/win/winetests/src
+H=./src/gallium/frontends/d3d10umd/tests/dxbc_nir_harness
+$H --selftest --stats $W/d3d10core.c $W/d3d11.c > harness-p9.txt
+$H $W/d3d10core.c $W/d3d11.c > harness-p9-corpus.txt
+$H --tgsi $W/d3d10core.c $W/d3d11.c > harness-p9-tgsi.txt
+grep "hs_5_0\|ds_5_0" harness-p9.txt                 # one line per hull and domain shader
+sed -n '/^Tessellator kernels/,/^pairs/p' harness-p9.txt
+~/sbmesa/build-nir-asan/p9-asan-run.sh               # sanitizer runs; logs in sanlogs-p9/
+~/sbmesa/build-nir-x/build-all.sh                    # Windows
+# the tool, after a change to src/panfrost/clc or the compiler:
+ninja -j6 -C build-nir-tools src/panfrost/clc/panfrost_compile && \
+  cp build-nir-tools/src/panfrost/clc/panfrost_compile native-nir/
+```
