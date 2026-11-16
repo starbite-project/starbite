@@ -355,6 +355,13 @@ enum { SET_KIT_FIRST = 80,
        SET_KIT_BOIL_S = 88 /* read: the boil time in s for here (60; 180 above 2000 m when the barometer knows) */,
        SET_KIT_HIST_AT = 89 /* write i (0 the newest) to pick a reading; read it: hPa x10 | its age in minutes << 16
                                (-1 none) */,
+       SET_KIT_HR = 90 /* the heart-rate sensor (kern/hrm.c): write 1 each second while the pulse page is open (starts
+                          it; a refusal posts its reason once), 0 to stop. Read: the state (0 off, 1 running, 2 failed)
+                          | a finger on it << 2 | the quality (0 none, 1 settling, 2 steady) << 3 | beats a minute << 5
+                          (9 bits) | seconds with the finger << 14 (8 bits) | the IR level in % << 22 (7 bits) */,
+       SET_KIT_HR_INFO = 91 /* read: the IR LED's current, 0.1 mA (12 bits) | samples a second << 12 (10 bits) */,
+       SET_KIT_SIREN = 92 /* write 1 / 0: the siren (650-1650 Hz, full volume on the loudspeaker; the whistle is
+                             SET_SURV_WHISTLE). Read: 1 on, 0 off, -1 not possible here (a test image) */,
        SET_KIT_LAST = 99 };
 enum { KIT_T_NONE_, KIT_T_BOIL_, KIT_T_SODIS_, KIT_T_SODIS_CLOUD_, KIT_T_CHLORINE_, KIT_T_CHLORINE_COLD_, KIT_T_CLO2_,
        KIT_T_IODINE_, KIT_T_SHADOW_ };     /* = kern/survkit.h's KIT_T_* (the app's names) */

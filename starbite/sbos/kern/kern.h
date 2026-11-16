@@ -233,6 +233,8 @@ enum { FLED_GATE = 1, FLED_NOANSWER_NOACK, FLED_NOANSWER_NOCLOCK, FLED_NOANSWER,
 int fled_torch_max(void);
 int fled_pulse(void);
 void fled_timer(void);
+int fled_ldo8_read(uint8_t *v);       /* Track D 11-16: the S2MPB02's LDO8 (the heart-rate sensor's VDD), hrm.c only */
+int fled_ldo8_write(uint8_t v, uint8_t found);
 void fled_off(void);
 /* 0.6.3: the heating session's record in the state slot ("heat"), every 30 s and at the stop: a forced power-off
  * (the 0.6.2 tour: the SoC at 128 C) leaves its last state for the next start */

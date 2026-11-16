@@ -20,6 +20,7 @@
 #include "gnssfix.h"
 #include "shub.h"
 #include "survkit.h"                        /* Track D 2026-11-16: the Survival kit */
+#include "hrm.h"
 
 #define KT_SURV_USB 1U
 #define KT_SURV_TICK 2U                     /* the slow tick (last 2 %'s keeper), 5 s */
@@ -1591,14 +1592,13 @@ int (*surv_tone_hook)(int hz, int on);
 
 int surv_whistle(int on)
 {
-    if (!surv_tone_hook)
-        return -1;
-    return surv_tone_hook(3150, on);        /* a pea whistle's pitch, about 3.15 kHz */
+    /* a pea whistle's pitch, about 3.15 kHz; Track D 11-16: survkit.c's loudspeaker tone unless a hook replaced it */
+    return (surv_tone_hook ? surv_tone_hook : survkit_tone)(3150, on);
 }
 
 const char *surv_whistle_why(void)
 {
-    return surv_tone_hook ? 0 : "The whistle needs the speaker's driver (not in this version yet).";
+    return sbos_selftest_enabled && !sbos_selftest_sound ? "No sounds from a test image." : 0;
 }
 
 /* services.c's battery check: in Last 2 % the phone runs to 1 % (or 3.4 V on average) instead of 3 %; 1 = off now */
@@ -1790,6 +1790,7 @@ static int st_phase;
 static uint64_t st_t;
 static unsigned st_fails;
 static const char *st_first_fail;           /* named again in the last line: pmsg may keep only the run's end */
+static int st_hr_ok, st_hr_l38, st_hr_l8;  /* Track D 11-16: the heart-rate step */
 
 static void st_check(const char *what, int ok)
 {
@@ -2038,11 +2039,57 @@ int surv_selftest_step(void)
         }
         surv_sensors_on(0);
         st_check("the sensor hub off again", surv_sensors_state() == SHUB_OFF);
+        /* Track D 11-16: the heart-rate sensor (no finger: the rails, the chip, the sample rate, all back after) */
+        {
+            uint8_t l38 = 0, l8 = 0;
+            st_hr_l38 = sb_pmic_read(1, 0x6F, &l38) ? l38 : -1;
+            st_hr_l8 = fled_ldo8_read(&l8) ? l8 : -1;
+        }
+        sb_log("selftest: survival: the heart-rate sensor for 4 s (no finger expected)");
+        st_hr_ok = hrm_want() == 0;
+        if (!st_hr_ok)
+            sb_logf("selftest: survival: heart rate: not started: ", hrm_why() ? hrm_why() : "?");
+        st_t = sb_ms();
+        st_phase = 6;
+        return 0;
+    }
+    case 6: {
+        if (st_hr_ok && sb_ms() - st_t < 4000U) {
+            (void)hrm_want();               /* the keep-alive, as the page sends it */
+            return 0;
+        }
+        struct hrm_status hs;
+        hrm_status(&hs);
+        struct ub u;
+        ub_init(&u);
+        ub_s(&u, "selftest: survival: heart rate: state ");
+        ub_dec(&u, (uint64_t)hs.state);
+        ub_s(&u, ", IR level ");
+        ub_dec(&u, (uint64_t)(hs.dc < 0 ? 0 : hs.dc));
+        ub_s(&u, ", finger ");
+        ub_dec(&u, (uint64_t)hs.finger);
+        ub_s(&u, ", samples a second ");
+        ub_dec(&u, hs.rate_hz);
+        ub_s(&u, ", LED 0.1 mA ");
+        ub_dec(&u, (uint64_t)hs.led_ma10);
+        sb_log(u.b);
+        ub_init(&u);
+        ub_s(&u, "selftest: survival: heart rate: samples read ");
+        ub_dec(&u, hs.samples);
+        sb_log(u.b);
+        st_check("the heart-rate sensor ran (MAX86915 answered, samples came)", st_hr_ok && hs.state == HRM_RUN &&
+                 hs.samples >= 100U);
+        hrm_stop("the self test");
+        {
+            uint8_t l38 = 0, l8 = 0;
+            int a = sb_pmic_read(1, 0x6F, &l38) ? l38 : -2, b = fled_ldo8_read(&l8) ? l8 : -2;
+            st_check("the heart-rate rails back as found (LDO38, LDO8)", a == st_hr_l38 && b == st_hr_l8);
+        }
         sb_logx(st_fails ? "selftest: survival: done, FAILED checks: " : "selftest: survival: done, every check passed ",
                 st_fails);
         if (st_fails)
             sb_logf("selftest: survival: the first failed check: ", st_first_fail ? st_first_fail : "(not named)");
-        st_phase = 6;
+        st_phase = 7;
         return 1;
     }
     default:

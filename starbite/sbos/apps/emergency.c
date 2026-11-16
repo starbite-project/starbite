@@ -243,9 +243,14 @@ static void show_light(void)
                 "outstretched fingers; the flash is seen for kilometres.", GREY);
     ui_textline("Strobe and Morse: Emergency > SOS options.", GREY);
     if (setting_get(SET_SURV_WHISTLE) < 0)
-        ui_button(12, "Whistle", "Needs the speaker's driver (not in this version yet)", UI_DIM);
+        ui_button(12, "Whistle", "Not in a test image", UI_DIM);
     else
         ui_hold(12, "Hold for the whistle (3 blasts)", 500, 0);
+    if (setting_get(SET_KIT_SIREN) >= 0) {      /* Track D 11-16: the loudspeaker at full volume */
+        ui_toggle(39, "Siren (loud, until switched off)", setting_get(SET_KIT_SIREN) == 1);
+        ui_textline("Three blasts, a pause, three again: the international distress signal. Save the battery: "
+                    "whistle in bursts.", GREY);
+    }
 }
 
 /* 1.2-alpha28: the sensor hub (compass, level, steps); started while this page is open */
@@ -626,6 +631,8 @@ void app_event(const struct sbos_event *ev)
             setting_set(SET_SURV_SAVER, (int)ev->value);
         else if (ev->id == 13)
             fire_ok = (int)ev->value;
+        else if (ev->id == 39 && setting_set(SET_KIT_SIREN, (int)ev->value) != 0)
+            ui_toast_app("The speaker is busy (a call?)", 2500);
         else if (ev->id == 57)
             fs_wool = (int)ev->value;
         else if (ev->id == 53) {
@@ -693,6 +700,8 @@ void app_event(const struct sbos_event *ev)
                 timer_cancel(2);
                 setting_set(SET_SURV_SENSORS, 0);
             }
+            if (page == P_LIGHT)
+                setting_set(SET_KIT_SIREN, 0);
             page = P_MAIN;
             loc_field = 0;
             timer_cancel(1);
@@ -729,6 +738,8 @@ void app_event(const struct sbos_event *ev)
         }
         break;
     case EV_APP_BACK:                       /* the kernel closes the app: start at the main page next time */
+        if (setting_get(SET_KIT_SIREN) == 1)
+            setting_set(SET_KIT_SIREN, 0);
         if (setting_get(SET_SURV_FIRE) == 1)
             setting_set(SET_SURV_FIRE, 0);
         if (setting_get(SET_SURV_FS) == 1)

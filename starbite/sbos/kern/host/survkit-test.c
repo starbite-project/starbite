@@ -2,10 +2,15 @@
  * Host test of the Survival kit's sums (kern/survkit.c built with -DSURVKIT_HOST): altitude and its reference, the
  * pressure trend and its levels, the sun's position against NOAA's solar calculator (an independent algorithm, the
  * expected values from tools in Python), the timers' lengths.
- *   cc -O1 -Wall -Wextra -Werror -DSURVKIT_HOST -I kern kern/host/survkit-test.c kern/survkit.c -o /tmp/t && /tmp/t */
+ * The pulse detector (kern/hrm.c, -DHRM_HOST) on synthetic fingertip signals: 48, 72, 150 a minute with baseline drift,
+ * a dicrotic notch and noise; a flat signal gives nothing.
+ *   cc -O1 -Wall -Wextra -Werror -DSURVKIT_HOST -DHRM_HOST -I kern kern/host/survkit-test.c kern/survkit.c kern/hrm.c
+ *      -lm -o /tmp/t && /tmp/t */
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include "survkit.h"
+#include "hrm.h"
 
 static int fails, checks;
 
@@ -30,6 +35,36 @@ static const struct { int lat, lon; long long utc; int az, el; } sun[] = {
     { -5480, -6830, 1782928800LL, 3407, 101 },  /* 2026-07-01 18:00 UTC, Ushuaia */
     { 3500, 13900, 1776295800LL, 1074, 394 },   /* 2026-04-15 23:30 UTC, Tokyo */
 };
+
+
+/* a fingertip's IR signal: light back falls with each pulse (a fast rise of blood, a slower fall, a notch) */
+static double pulse_shape(double ph)
+{
+    double p = ph < 0.12 ? ph / 0.12 : exp(-(ph - 0.12) * 5.0);
+    p += 0.25 * exp(-((ph - 0.42) / 0.05) * ((ph - 0.42) / 0.05));
+    return p;
+}
+
+static unsigned seed = 12345;
+static int noise(int amp)
+{
+    seed = seed * 1103515245U + 12345U;
+    return (int)((seed >> 16) % (unsigned)(2 * amp + 1)) - amp;
+}
+
+static int run_pulse(double bpm, int secs, int amp, int noise_amp, int *quality)
+{
+    struct hrm_algo a;
+    hrm_algo_reset(&a, 100);
+    for (int i = 0; i < secs * 100; ++i) {
+        double t = i / 100.0, ph = fmod(t * bpm / 60.0, 1.0);
+        int32_t ir = 250000 + (int32_t)(8000 * sin(2 * M_PI * 0.15 * t)) - (int32_t)(amp * pulse_shape(ph)) +
+                     noise(noise_amp);
+        hrm_algo_push(&a, ir);
+    }
+    *quality = a.quality;
+    return a.bpm;
+}
 
 int main(void)
 {
@@ -99,6 +134,33 @@ int main(void)
     check("chlorine dioxide 4 h", kit_timer_seconds(KIT_T_CLO2, 0) == 14400);
     check("shadow stick 15 min", kit_timer_seconds(KIT_T_SHADOW, 0) == 900);
     check("no such timer", kit_timer_seconds(KIT_T_N, 0) == 0);
+
+
+    /* the pulse */
+    {
+        static const double rates[] = { 48, 72, 95, 150 };
+        for (unsigned i = 0; i < 4; ++i) {
+            int q = 0, b = run_pulse(rates[i], 20, 3000, 150, &q);
+            char m[80];
+            snprintf(m, sizeof(m), "pulse %.0f: got %d, quality %d", rates[i], b, q);
+            check(m, near(b, (int)rates[i], 3) && q == 2);
+        }
+        {
+            int q2 = 0, b2 = run_pulse(66, 25, 2000, 400, &q2);
+            char m2[80];
+            snprintf(m2, sizeof(m2), "a noisy pulse 66: got %d, quality %d", b2, q2);
+            check(m2, near(b2, 66, 3) && q2 >= 1);
+        }
+        int q = 0, b = run_pulse(72, 20, 600, 300, &q);
+        char m[80];
+        snprintf(m, sizeof(m), "a weak, noisy pulse 72: got %d, quality %d", b, q);
+        check(m, b == 0 || near(b, 72, 5));
+        struct hrm_algo a;
+        hrm_algo_reset(&a, 100);
+        for (int i = 0; i < 2000; ++i)
+            hrm_algo_push(&a, 250000 + noise(40));
+        check("a flat signal: no rate", a.bpm == 0 && a.quality == 0);
+    }
 
     printf("survkit host test: %d checks, %d failed\n", checks, fails);
     return fails != 0;

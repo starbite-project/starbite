@@ -18,7 +18,10 @@
 #define KT_SURV_KIT_WATCH 8U                /* Storm watch: one reading every 15 min */
 #define KT_SURV_KIT_POLL 9U                 /* a reading being taken: a look every second, up to 30 s */
 #define KT_SURV_KIT_TIMER 10U               /* the purification / shadow-stick timer's end */
+#define KT_SURV_KIT_HRM 11U                 /* the heart-rate sensor's FIFO, every 100 ms (hrm.c) */
 void survkit_timer(unsigned id);
+/* the loudspeaker's whistle (hz) or siren (0): survival.c's surv_whistle uses it; -1 refused (a test image, busy) */
+int survkit_tone(int hz, int on);
 
 /* the app's settings (sdk/sbapp.h SET_KIT_FIRST..SET_KIT_LAST) */
 int64_t survkit_get(unsigned key);

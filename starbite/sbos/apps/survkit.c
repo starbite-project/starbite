@@ -283,14 +283,41 @@ static void show_water(void)
 /* ---- the heart rate (MAX86915 on the back, next to the camera) ---- */
 static void show_pulse(void)
 {
+    struct fmt f;
+    int r = setting_get(SET_KIT_HR);
+    int st = r & 3, finger = (r >> 2) & 1, q = (r >> 3) & 3, bpm = (r >> 5) & 0x1ff, secs = (r >> 14) & 0xff,
+        sig = (r >> 22) & 0x7f;
     ui_title("Heart rate");
-    ui_big("PULSE", "Not yet", ORANGE);
-    ui_textline("The heart-rate sensor next to the camera needs its driver: it is being tested on the test phone. "
-                "Until then, count by hand:", GREY);
-    ui_textline("Two fingers on the wrist (thumb side) or the side of the neck. Count the beats for 15 seconds and "
-                "multiply by 4. At rest an adult has 60-100 a minute.", WHITE);
-    ui_textline("Over 120 at rest, under 50 with dizziness, or irregular with chest pain or breathlessness: get help.",
-                ORANGE);
+    if (st == 2) {
+        ui_big("PULSE", "Sensor not started", ORANGE);
+        ui_textline("The reason is in the notifications. Count by hand meanwhile (below).", GREY);
+    } else if (st == 0) {
+        ui_big("PULSE", "Starting...", WHITE);
+    } else if (!finger) {
+        ui_big("PULSE", "Finger on the sensor", WHITE);
+        ui_textline("Rest a fingertip lightly on the small dark window next to the rear camera (the heart-rate sensor). "
+                    "Do not press hard; keep still.", WHITE);
+    } else {
+        fmt_init(&f);
+        if (bpm && q) {
+            fmt_u(&f, (uint64_t)bpm);
+            fmt_s(&f, " a minute");
+        } else {
+            fmt_s(&f, "Measuring...");
+        }
+        ui_big(q == 2 ? "PULSE (STEADY)" : "PULSE", f.b, q == 2 ? GREEN : WHITE);
+        fmt_init(&f);
+        fmt_s(&f, q == 2 ? "Steady reading after " : q == 1 ? "Settling, keep still: " : "Finding the beat: ");
+        fmt_u(&f, (uint64_t)secs);
+        fmt_s(&f, " s. Signal ");
+        fmt_u(&f, (uint64_t)sig);
+        fmt_s(&f, " %.");
+        ui_textline(f.b, GREY);
+    }
+    ui_textline("By hand: two fingers on the wrist (thumb side) or the side of the neck; count 15 seconds, times 4. "
+                "At rest an adult has 60-100 a minute.", GREY);
+    ui_textline("Over 120 at rest, under 50 with dizziness, or irregular with chest pain or breathlessness: get help. "
+                "Not a medical device.", ORANGE);
 }
 
 static void show(void)
@@ -322,6 +349,10 @@ static void leave_page(void)
         setting_set(SET_KIT_BARO, 0);
     if (page == P_NORTH && compass_check)
         setting_set(SET_SURV_SENSORS, 0);
+    if (page == P_PULSE) {
+        setting_set(SET_KIT_HR, 0);
+        ui_awake(0);
+    }
     compass_check = 0;
     alt_typing = 0;
     timer_cancel(1);
@@ -361,6 +392,8 @@ void app_event(const struct sbos_event *ev)
                 setting_set(SET_KIT_BARO, 1);
             if (page == P_NORTH && compass_check)
                 setting_set(SET_SURV_SENSORS, 1);
+            if (page == P_PULSE)
+                setting_set(SET_KIT_HR, 1);
             if (page == P_MAIN || alt_typing)
                 break;
             show();
@@ -379,6 +412,9 @@ void app_event(const struct sbos_event *ev)
             timer_set(1, page == P_NORTH ? 2000 : 1000, 1);
         } else if (ev->id == 13) {
             page = P_PULSE;
+            setting_set(SET_KIT_HR, 1);
+            ui_awake(1);                    /* the screen stays on while the pulse is read */
+            timer_set(1, 1000, 1);
         } else if (ev->id == 14) {
             app_open("guide");
         } else if (ev->id == 40) {

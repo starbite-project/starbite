@@ -64,8 +64,8 @@ if [ "$native" = 1 ]; then
     CC=gcc sh "$here/kern/host/nledpol-test.sh"           # Track A: the notification LED's policy (kern/nledpol.c)
     gcc -std=gnu11 -O2 -Wall -Wextra -Werror -I "$here/kern" "$here/kern/host/lens-test.c" -lm -o "$ob/lens-test" &&
         "$ob/lens-test"                                   # Track A: Liquid Glass V3's model (kern/lens.h)
-    gcc -std=gnu11 -O1 -Wall -Wextra -Werror -DSURVKIT_HOST -I "$here/kern" "$here/kern/host/survkit-test.c" \
-        "$here/kern/survkit.c" -o "$ob/survkit-test" && "$ob/survkit-test"   # Track D: the Survival kit's sums
+    gcc -std=gnu11 -O1 -Wall -Wextra -Werror -DSURVKIT_HOST -DHRM_HOST -I "$here/kern" "$here/kern/host/survkit-test.c" \
+        "$here/kern/survkit.c" "$here/kern/hrm.c" -lm -o "$ob/survkit-test" && "$ob/survkit-test"   # Track D: the kit's sums, the pulse
     CC=gcc sh "$here/kern/host/tzdb-test.sh"     # Track A: the time zones against zoneinfo, the 12-hour text
 fi
 

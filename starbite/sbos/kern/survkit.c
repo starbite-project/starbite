@@ -21,6 +21,8 @@
 #include "shub.h"
 #include "shub_more.h"
 #include "sbapp.h"
+#include "hrm.h"
+#include "snd.h"
 #endif
 
 /* ---- small maths (no libm in the kernel) ---- */
@@ -420,6 +422,114 @@ static void timer_end(void)
     sb_logf("survkit: timer done: ", title[k]);
 }
 
+
+/* ---- the whistle and the siren on the loudspeaker (Track D 11-16) ----
+ * A 3.15 kHz whistle tone (survival.c's surv_whistle) or a 650-1650 Hz wail (the siren), synthesized here at the
+ * speaker's 48 kHz, at full volume on the loudspeaker; the route and volume put back at the end. Under Starbite OS
+ * Next the shell's own sound glue is used (sh_snd_*, linked only there: weak here); the classic OS starts the sound
+ * driver itself on the first use and polls it every 5 ms while a tone plays. Never in a test image (no sounds). */
+int sh_snd_open(void) __attribute__((weak));
+unsigned sh_snd_write(int id, const int16_t *frames, unsigned n) __attribute__((weak));
+unsigned sh_snd_space(int id) __attribute__((weak));
+void sh_snd_close(int id) __attribute__((weak));
+
+#define KT_SURV_KIT_TONE 12U
+#define TONE_RATE 48000U
+static int tone_id = -1, tone_hz, own_snd_up, tone_vol_was = -1;
+static uint32_t tone_ph, tone_n;
+static int16_t tone_tab[256];
+
+static unsigned t_space(void) { return sh_snd_space ? sh_snd_space(tone_id) : snd_space(tone_id); }
+static unsigned t_write(const int16_t *f, unsigned n) { return sh_snd_write ? sh_snd_write(tone_id, f, n) : snd_write(tone_id, f, n); }
+
+static void tone_fill(void)
+{
+    int16_t b[2 * 256];
+    unsigned space = t_space();
+    while (space) {
+        unsigned k = space > 256U ? 256U : space;
+        for (unsigned i = 0; i < k; ++i) {
+            uint32_t hz = (uint32_t)tone_hz;
+            if (!hz) {                      /* the siren: up for 1.5 s, down for 1.5 s */
+                uint32_t c = tone_n % (3U * TONE_RATE), u = c < 3U * TONE_RATE / 2U ? c : 3U * TONE_RATE - c;
+                hz = 650U + (uint32_t)((uint64_t)u * 1000U / (3U * TONE_RATE / 2U));
+            }
+            tone_ph += (uint32_t)(((uint64_t)hz << 32) / TONE_RATE);
+            int32_t v = tone_tab[tone_ph >> 24] * 3 / 2;     /* a little clipped: louder for the same peak */
+            v = v > 30000 ? 30000 : v < -30000 ? -30000 : v;
+            b[2 * i] = b[2 * i + 1] = (int16_t)v;
+            ++tone_n;
+        }
+        if (t_write(b, k) < k)
+            break;
+        space -= k;
+    }
+}
+
+int survkit_tone(int hz, int on)
+{
+    if (!on) {
+        if (tone_id < 0)
+            return 0;
+        kt_cancel(KT_SURV, KT_SURV_KIT_TONE);
+        if (sh_snd_close)
+            sh_snd_close(tone_id);
+        else
+            snd_close(tone_id);
+        tone_id = -1;
+        snd_route(SND_OUT_AUTO);
+        if (tone_vol_was >= 0)
+            snd_volume(SND_OUT_SPEAKER, (unsigned)tone_vol_was);
+        tone_vol_was = -1;
+        sb_log("survkit: the tone off (the speaker's route and volume back)");
+        return 0;
+    }
+    if (sbos_selftest_enabled && !sbos_selftest_sound)
+        return -1;                          /* no sounds from a test image */
+    if (tone_id >= 0) {
+        tone_hz = hz;
+        return 0;
+    }
+    if (!tone_tab[64])
+        for (int i = 0; i < 256; ++i)
+            tone_tab[i] = (int16_t)(k_sin(2 * K_PI * i / 256.0) * 26000.0);
+    if (sh_snd_open) {
+        tone_id = sh_snd_open();
+    } else {
+        if (!own_snd_up) {
+            snd_init_libsb();
+            own_snd_up = 1;
+            sb_log("survkit: sound started for the whistle / siren");
+        }
+        tone_id = snd_open();
+    }
+    if (tone_id < 0) {
+        tone_id = -1;
+        sb_log("survkit: the tone refused: no free sound stream (a call has the speaker?)");
+        return -1;
+    }
+    tone_vol_was = (int)snd_get_volume(SND_OUT_SPEAKER);
+    snd_route(SND_OUT_SPEAKER);
+    snd_volume(SND_OUT_SPEAKER, SND_VOL_MAX);
+    tone_hz = hz;
+    tone_ph = tone_n = 0;
+    tone_fill();
+    kt_set(KT_SURV, KT_SURV_KIT_TONE, sb_ms(), sh_snd_open ? 20U : 5U, 1);
+    sb_log(hz ? "survkit: the whistle on (3.15 kHz, full volume)" : "survkit: the siren on (650-1650 Hz, full volume)");
+    return 0;
+}
+
+static void tone_tick(void)
+{
+    if (tone_id < 0) {
+        kt_cancel(KT_SURV, KT_SURV_KIT_TONE);
+        return;
+    }
+    if (!sh_snd_open)
+        snd_poll(sb_us());
+    tone_fill();
+}
+
 void survkit_timer(unsigned id)
 {
     if (id == KT_SURV_KIT_WATCH)
@@ -428,6 +538,10 @@ void survkit_timer(unsigned id)
         poll_tick();
     else if (id == KT_SURV_KIT_TIMER)
         timer_end();
+    else if (id == KT_SURV_KIT_HRM)
+        hrm_tick();
+    else if (id == KT_SURV_KIT_TONE)
+        tone_tick();
 }
 
 static void watch_set(int on)
@@ -503,6 +617,19 @@ int64_t survkit_get(unsigned key)
         return timer_kind | (int64_t)left << 8;
     }
     case SET_KIT_BOIL_S: return kit_timer_seconds(KIT_T_BOIL, alt_now());
+    case SET_KIT_HR: {
+        struct hrm_status s;
+        hrm_status(&s);
+        int sig = s.dc <= 0 ? 0 : s.dc >= 524287 ? 100 : (int)((int64_t)s.dc * 100 / 524287);
+        return s.state | s.finger << 2 | s.quality << 3 | (int64_t)(s.bpm & 0x1ff) << 5 |
+               (int64_t)(s.seconds > 255 ? 255 : s.seconds) << 14 | (int64_t)sig << 22;
+    }
+    case SET_KIT_SIREN: return sbos_selftest_enabled && !sbos_selftest_sound ? -1 : (tone_id >= 0 && !tone_hz);
+    case SET_KIT_HR_INFO: {
+        struct hrm_status s;
+        hrm_status(&s);
+        return (s.led_ma10 & 0xfff) | (int64_t)(s.rate_hz & 0x3ff) << 12;
+    }
     case SET_KIT_HIST_AT: {
         int64_t t;
         int32_t p;
@@ -556,6 +683,23 @@ int64_t survkit_set(unsigned key, int64_t v)
     case SET_KIT_HIST_AT:
         hist_pick = v < 0 ? 0 : (unsigned)v;
         return 0;
+    case SET_KIT_SIREN:
+        if (!v)
+            return tone_hz ? 0 : survkit_tone(0, 0);
+        return survkit_tone(0, 1) == 0 ? 0 : SBOS_EAGAIN;
+    case SET_KIT_HR: {
+        static int told;
+        if (!v) {
+            hrm_stop("its page closed");
+            told = 0;
+            return 0;
+        }
+        if (hrm_want() == 0)
+            return 0;
+        if (!told++)
+            notif_post_app("survkit", "Heart rate: the sensor did not start", hrm_why(), 0);
+        return SBOS_EINVAL;
+    }
     case SET_KIT_TIMER: {
         int k = (int)v;
         if (k == 0) {

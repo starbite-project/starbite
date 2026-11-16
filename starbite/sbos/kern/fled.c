@@ -354,3 +354,19 @@ void fled_off(void)
         flash_pin(0);
     pulse_on = 0;
 }
+
+/* Track D 2026-11-16: the heart-rate sensor's VDD (HRM_1.8V_AP) is this chip's LDO8: L8CTRL 0x25, bit 7 on, [6:0]
+ * 600 mV + 25 mV n, so 1.8 V = 0x30 (Samsung's s2mpb02-regulator.c; the DT fixes it at 1.8 V). hrm.c reads and
+ * writes only that register through here, and only 0x30 / 0xB0 or the value it found. */
+#define R_L8 0x25U
+int fled_ldo8_read(uint8_t *v)
+{
+    return fled_init() && reg_rd(R_L8, v);
+}
+
+int fled_ldo8_write(uint8_t v, uint8_t found)
+{
+    if (v != 0x30U && v != 0xB0U && v != found)
+        return 0;
+    return fled_init() && reg_upd(R_L8, 0xffU, v);
+}
