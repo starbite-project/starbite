@@ -3126,6 +3126,49 @@ and no conformance pass ran (the `sbwt-*.log.out` folders in that pull are T74's
 - **Process change:** a driver build from a tree that has never booted gets a short boot-and-logon check first
   (a few minutes, one small test), before any long test is queued on it. T77 cost an hour of phone time for nothing.
 
+### 6.106 T77's boot crash found: a C++ initializer from generated code, run by the wrong half of the ARM64X DLL
+
+(2026-11-16 07:12) DWM's mini dumps from T77's boot (`results-t79/ours/user/dumps/dwm.exe.2112.dmp`, `.2984.dmp`; walked with a
+small mini-dump reader against the build's lld map) both show the same stack:
+`dxgi -> LoadLibrary -> sbumd!_DllMainCRTStartup -> dllmain_crt_process_attach -> _initterm ->
+[initializer of vtn_bindgen_dummy_instance] -> atexit -> _onexit -> ucrtbase -> heap corruption (c0000374)`.
+- **The object:** `vtn_bindgen2` (Mesa's generator for precompiled OpenCL kernel bindings) puts a static object
+  with a constructor and a destructor into the C++ file it generates, to register the kernels' printf strings.
+  The geometry-shader work linked `src/poly`'s generated `libpoly.cpp` into the driver, the first such object in
+  sbumd. (The builds that load, 0167 and T76b's, have none.)
+- **Why it corrupts the heap:** sbumd.dll is ARM64X (an ARM64 and an ARM64EC half linked by our own
+  `link-arm64x.sh`). Both halves' `.CRT$XCU` initializer entries end up in one table between both halves'
+  `__xc_a` / `__xc_z` markers, so the native start-up also calls the **ARM64EC** copy of the initializer
+  (`...@@$$hYAXXZ` in the map). That copy calls the ARM64EC CRT's `atexit`, whose exit table
+  (`module_local_atexit_table`, the second copy at +0x1A6E730) the native start-up never initialised: ucrtbase
+  decodes zeros as pointers and frees garbage. It happens at DLL load in every process that loads the driver, before
+  any driver code runs, which is why there was no driver log.
+- **Fix (sb-nir 430b803 + the build):** no static object in a Windows build (the generator's block goes inside
+  `#ifndef _WIN32`; the prebuilt tool is wrapped by `~/sbmesa/native-nir/vtn_bindgen2`, which the sb-nir cross
+  builds now find first), and **`build-nir-x/check-init-tables.py`** in the build: it fails the build if the image has
+  any C++ dynamic initializer (run on old maps: T77's and the tessellation build fail it, 0167 and T76b's pass).
+  The underlying merge of the two halves' initializer tables is still there, so any future C++ static with a
+  constructor would do the same; the check is what guards it.
+- **Lesson kept:** `tools/win/smoke-stage.sh` + `sb-smoke.bat`: a five-minute boot check before any long test on
+  a build from a tree that has not booted.
+
+### 6.107 T79 read: with the present thread the game thread waits 0.2 ms per frame; Geometry Dash sits at its 60 cap
+
+(2026-11-16 07:12) **T79** (`build/win/results-t79`, candidate drivers, GD ICD 0168, Stereo Madness, ~5 min each):
+
+| run | present | fps (median of 300-frame windows / max) | per frame |
+|---|---|---|---|
+| B | FLIP_DISCARD, in line | 54.7 / 58.7 | GL wait 5.7 ms + copy 0.6 + Present 0.7 + copy wait 1.5, all on the game thread |
+| C | + present thread (`glzcasync`) | **58.3 / 59.6** | game thread waits **0.22 ms** at the hand-over; the thread: GL wait 5.6, copy 0.5, Present 0.5, copy wait 4.5 |
+| B2 | in line | 55.0 / 57.7 | as B |
+| C2 | + present thread | **58.3 / 59.6** | game thread 0.16 ms |
+
+- No present failures, no crash, in all four; frames over 100 ms: 5 / 5 / 3 / 3.
+- So the present path now costs the game ~0.2 ms a frame, and the game runs at its own 60 fps limit (the windows
+  average 58 because of level restarts). Going above 60 is the game's frame-rate setting, not the driver.
+- This is with the candidate sbumd (0167), which is on hold for the desktop problem of 6.104; the game result
+  itself stands.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,
