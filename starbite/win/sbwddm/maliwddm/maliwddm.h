@@ -211,6 +211,11 @@ typedef struct _MW_FAULT {
 /* b78 (T78: 404 DWM vertex/tiler jobs still ACTIVE at the limit, no MMU fault): what the hung job points at, read
  * from its descriptor through the same view, and how the GPU's own page table has each address at that moment. */
 #define MW_HANG_JOB_DWORDS      96  /* a Bifrost Indexed Vertex Job: 384 bytes (Tiler Job: 256) */
+/* b78e (T87n: the stuck stage is the tiler; T91: not a buffer reused after DISCARD, not the chain merge): the tiler's
+ * input itself, as the GPU has it when the job hangs: the draw's indices and the start of its position buffer. */
+#define MW_HANG_DATA_PAGES      4
+#define MW_HANG_IDX_BYTES       512     /* 256 16-bit indices */
+#define MW_HANG_POS_BYTES       1024    /* 64 positions of 4 floats */
 #define MW_HANG_PTRS            20
 #define MW_HPF_LIVE             0x01    /* Va is inside a live allocation */
 #define MW_HPF_MAPPED           0x02    /* ... which VidMm has mapped (resident) */
@@ -252,6 +257,11 @@ typedef struct _MW_HANG {
     ULONG BigPages, BigMaps, BigUnmaps, BigUnmapAgoMs;
     LONG BigListedAgo;
     UCHAR BigMapped, BigScratched, BigPte[3];   /* MW_PTE_* at its first, middle and last page */
+    /* b78e */
+    ULONG64 IdxVa, PosVa;
+    ULONG IdxSize, IdxCount, IdxGot, PosGot;    /* Got: bytes copied (0: no view of it) */
+    UCHAR Idx[MW_HANG_IDX_BYTES];
+    UCHAR Pos[MW_HANG_POS_BYTES];
 } MW_HANG;
 
 /* T44: a CPU view of JS_HEAD's page, made by PollDpc at DISPATCH_LEVEL (mapping is not allowed at DIRQL) when the
@@ -262,6 +272,11 @@ typedef struct _MW_HANG_VIEW {
     ULONG64 Page;               /* its GPU address */
     PFN_NUMBER Pfn;
     ULONG64 JobStart;           /* the chain it was made for (MW_ADAPTER.JobStart) */
+    /* b78e: views of the hung draw's index data (0, 1) and of its position buffer (2, 3), a page each: the bytes
+     * may cross one page boundary. NULL: not mapped. Made by PollDpc with the main view, read by Reap. */
+    const volatile UCHAR *Data[MW_HANG_DATA_PAGES];
+    ULONG64 IdxVa, PosVa;       /* the job's index pointer and its Fragment Draw's position pointer (0: none) */
+    ULONG IdxSize, IdxCount;    /* bytes per index (0: not indexed), number of indices */
 } MW_HANG_VIEW;
 
 struct _MW_ADAPTER {
@@ -450,6 +465,9 @@ struct _MW_ADAPTER {
     struct { MDL Mdl; PFN_NUMBER Pfn[1]; } HangMdl;   /* the one-page MDL mapped there (PollDpc only) */
     volatile LONG HangViewBusy;
     ULONG HangViews, HangViewFails;
+    /* b78e: a page of system address space and a one-page MDL for each data view (as HangMapVa / HangMdl) */
+    PVOID HangDataVa[MW_HANG_DATA_PAGES];
+    struct { MDL Mdl; PFN_NUMBER Pfn[1]; } HangDataMdl[MW_HANG_DATA_PAGES];
     /* b78: JS_HEAD at half the limit of the chain that started at HalfHeadFor (Reap, interrupt level) */
     ULONG64 HalfHead, HalfHeadFor;
     /* b78: Parameters\VtTimeoutMs, the limit of a vertex/tiler (slot 1) chain; default MW_JOB_TIMEOUT_MS = no change */

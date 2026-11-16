@@ -3689,6 +3689,26 @@ measured.)
   vertex stage hands the tiler (then: dump them).
 - Still worth running: `nomerge` and `seqfix` on `sbwddm-t91`, and `nirdump` (which also runs on the t92 build).
 
+### 6.125 Chain results, part 12: `nomerge` and `seqfix` unchanged too; the kernel driver now saves the hung draw's indices and positions (T93)
+
+(2026-11-16 21:45; `build/win/results-t91-nomerge`, `results-t91-seqfix`; measured. The new KMD is compiled only.)
+
+- **`nomerge`** (no vertex/tiler chain held back; `b78c switches: nomerge 1` in DWM's log): Calculator 21, kept open
+  85, after closing 111. **`seqfix`**: 21, 85, 95. Both as without any switch. With `newbo` (6.124) that is three
+  suspects of our own buffer and submission handling cleared: not a buffer reused after DISCARD, not the chain
+  merge, not the wait order.
+- **Stop guessing, look at the data.** Diagnostic KMD **b78e** (`build/win/kmd-b78e/sbwddm.sys` d6e4a0c6, signed, 0 LSE
+  words): when a vertex/tiler chain is about to time out, the poll routine also maps (as it already maps the job's
+  page: only RAM pages the GPU's own page table has there, into address space reserved at AddDevice) the pages of
+  the hung draw's **index data** and of its **position buffer**, and the hang record takes up to 512 bytes of
+  indices and 1024 bytes of positions. Registry: `Live_HangData` (the newest hang) and `Live_HangDataFirst`:
+  the indices as numbers, the job's base vertex offset and invocation word, the positions as hex dwords.
+  Read offline: are all indices inside the vertex range the job was built for (index + base in 0..count-1)? Are
+  the positions finite and sane?
+- **T93s / T93** (`sbwddm-t93s`: boot check of KMD b78e + sbumd b78d; `sbwddm-t93`: `sb-apps3.bat`, no flag files; the
+  script now also saves the two new values in `umdlog\hang-<step>.txt`). T93 answers what T92 (`idxcopy`) tests
+  indirectly, and for the positions as well.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,

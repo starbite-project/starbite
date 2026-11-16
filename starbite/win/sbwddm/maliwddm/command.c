@@ -1265,6 +1265,49 @@ static BOOLEAN IsRam(const MW_ADAPTER *A, PFN_NUMBER Pfn)
     return FALSE;
 }
 
+/* b78e. PollDpc, DISPATCH_LEVEL, with the main view just made: views of the pages the hung draw's indices and
+ * positions are in. The two pointers are read from the job through the main view (a RAM page we mapped: reading it
+ * cannot fault; whether its content is still the job is checked by Reap for what it records). Each page is mapped
+ * only if the GPU's page table has a RAM page there, exactly as the main view. Dword offsets: Mesa genxml v6.xml,
+ * Indexed Vertex Job / Tiler Job: Header 0 (type in dword 4, bits 1-7), Primitive 10 (index type in bits 8-10 of
+ * its first dword, index count minus one in its fourth, indices in its fifth and sixth), Fragment Draw 32
+ * (position in its dwords 4-5). */
+static void HangDataMake(MW_ADAPTER *A, MW_HANG_VIEW *V, ULONG64 Head)
+{
+    ULONG off = (ULONG)(Head & (PAGE_SIZE - 1)), type, itype;
+    const volatile ULONG *d;
+
+    if ((Head & 63) || off + 38 * sizeof(ULONG) > PAGE_SIZE)
+        return;
+    d = (const volatile ULONG *)(V->Va + off);
+    type = (d[4] >> 1) & 0x7F;
+    if (type != 10 && type != 7)          /* indexed vertex, tiler */
+        return;
+    itype = (d[10] >> 8) & 7;
+    V->IdxSize = itype == 1 ? 1 : itype == 2 ? 2 : itype == 3 ? 4 : 0;
+    V->IdxCount = d[13] + 1;
+    V->IdxVa = V->IdxSize ? (d[14] | (ULONG64)d[15] << 32) : 0;
+    V->PosVa = d[36] | (ULONG64)d[37] << 32;
+    for (ULONG i = 0; i < MW_HANG_DATA_PAGES; i++) {
+        ULONG64 base = i < 2 ? V->IdxVa : V->PosVa, va;
+        PFN_NUMBER pfn;
+
+        if (base == 0 || A->HangDataVa[i] == NULL)
+            continue;
+        va = (base & ~(ULONG64)(PAGE_SIZE - 1)) + (ULONG64)(i & 1) * PAGE_SIZE;
+        if (va < MK_VA_START || va >= MK_VA_END)
+            continue;
+        pfn = GpuPfn(&A->Gpu, va);
+        if (pfn == 0 || !IsRam(A, pfn))
+            continue;
+        MmInitializeMdl(&A->HangDataMdl[i].Mdl, NULL, PAGE_SIZE);
+        A->HangDataMdl[i].Mdl.MdlFlags |= MDL_PAGES_LOCKED;
+        MmGetMdlPfnArray(&A->HangDataMdl[i].Mdl)[0] = pfn;
+        V->Data[i] = (const volatile UCHAR *)MmMapLockedPagesWithReservedMapping(A->HangDataVa[i], MW_TAG,
+                                                                              &A->HangDataMdl[i].Mdl, MmWriteCombined);
+    }
+}
+
 /* PollDpc, DISPATCH_LEVEL, just before SyncPoll: if the running chain is (within 2 ms of being) overdue, a CPU view
  * of the page JS_HEAD is in, for Reap's hang record. The page is the one the GPU's own page table maps there, mapped
  * only if it is RAM, write-combined like VidMm's views of our non-coherent segment, through a one-page MDL built here
@@ -1305,6 +1348,7 @@ static BOOLEAN HangViewMake(MW_ADAPTER *A, MW_HANG_VIEW *V)
     V->Pfn = pfn;
     V->JobStart = start;
     A->HangViews++;
+    HangDataMake(A, V, head);             /* b78e */
     return TRUE;
 }
 
@@ -1313,6 +1357,11 @@ static void HangViewDrop(MW_ADAPTER *A, MW_HANG_VIEW *V)
 {
     if (V->Va == NULL)
         return;
+    for (ULONG i = 0; i < MW_HANG_DATA_PAGES; i++)      /* b78e */
+        if (V->Data[i] != NULL) {
+            MmUnmapReservedMapping(A->HangDataVa[i], MW_TAG, &A->HangDataMdl[i].Mdl);
+            V->Data[i] = NULL;
+        }
     MmUnmapReservedMapping(A->HangMapVa, MW_TAG, &A->HangMdl.Mdl);
     V->Va = NULL;
     InterlockedExchange(&A->HangViewBusy, 0);
@@ -1438,6 +1487,43 @@ static void HangPointers(MW_ADAPTER *A, MW_HANG *H, const MW_ALLOCATION *Al, con
     }
 }
 
+/* b78e: Bytes from GPU address Va through the two page views P0 (Va's page) and P1 (the next). Interrupt level. */
+static ULONG HangCopy(UCHAR *Dst, ULONG Bytes, ULONG64 Va, const volatile UCHAR *P0, const volatile UCHAR *P1)
+{
+    ULONG off = (ULONG)(Va & (PAGE_SIZE - 1)), n = 0;
+
+    if (Va == 0 || P0 == NULL)
+        return 0;
+    for (; n < Bytes; n++) {
+        ULONG o = off + n;
+        const volatile UCHAR *p = o < PAGE_SIZE ? P0 : P1;
+        if (p == NULL || o >= 2 * PAGE_SIZE)
+            break;
+        Dst[n] = p[o & (PAGE_SIZE - 1)];
+    }
+    return n;
+}
+
+/* b78e: the hung draw's indices and the first positions, when PollDpc made views of them for this chain. */
+static void HangData(MW_ADAPTER *A, MW_HANG *H, const MW_HANG_VIEW *V)
+{
+    ULONG want;
+
+    H->IdxVa = H->PosVa = 0;
+    H->IdxSize = H->IdxCount = H->IdxGot = H->PosGot = 0;
+    if (V == NULL || V->Va == NULL || V->JobStart != A->JobStart)
+        return;
+    H->IdxVa = V->IdxVa;
+    H->PosVa = V->PosVa;
+    H->IdxSize = V->IdxSize;
+    H->IdxCount = V->IdxCount;
+    want = V->IdxCount > MW_HANG_IDX_BYTES ? MW_HANG_IDX_BYTES : V->IdxCount * V->IdxSize;
+    if (want > MW_HANG_IDX_BYTES)
+        want = MW_HANG_IDX_BYTES;
+    H->IdxGot = HangCopy(H->Idx, want, V->IdxVa, V->Data[0], V->Data[1]);
+    H->PosGot = HangCopy(H->Pos, MW_HANG_POS_BYTES, V->PosVa, V->Data[2], V->Data[3]);
+}
+
 /* A hung chain's state, before Reap hard-stops it. Interrupt level, inside SyncPoll (DxgkCbSynchronizeExecution),
  * like the rest of Reap: register reads and plain stores into the ring; no allocation, no registry (the guard thread
  * prints the ring at PASSIVE_LEVEL, MwHangLog). */
@@ -1496,6 +1582,7 @@ static void HangCapture(MW_ADAPTER *A, ULONG Slot, const MW_HANG_VIEW *V)
     h->HeadHalf = A->HalfHeadFor == A->JobStart ? A->HalfHead : 0;
     h->RunSeq = s->RenderSeq;
     HangPointers(A, h, al, V);
+    HangData(A, h, V);                    /* b78e */
     KeMemoryBarrier();
     h->Seq = n + 1;
     A->HangCount = n + 1;
@@ -1991,6 +2078,8 @@ void MwCommandInit(MW_ADAPTER *A)
         if (r != NULL)
             ExFreePool(r);
         A->HangMapVa = MmAllocateMappingAddress(PAGE_SIZE, MW_TAG);
+        for (ULONG i = 0; i < MW_HANG_DATA_PAGES; i++)       /* b78e */
+            A->HangDataVa[i] = MmAllocateMappingAddress(PAGE_SIZE, MW_TAG);
     }
     A->Stopping = FALSE;
     KeInitializeTimer(&A->PollTimer);
@@ -2018,6 +2107,11 @@ void MwCommandFini(MW_ADAPTER *A)
         MmFreeMappingAddress(A->HangMapVa, MW_TAG);
         A->HangMapVa = NULL;
     }
+    for (ULONG i = 0; i < MW_HANG_DATA_PAGES; i++)           /* b78e */
+        if (A->HangDataVa[i] != NULL) {
+            MmFreeMappingAddress(A->HangDataVa[i], MW_TAG);
+            A->HangDataVa[i] = NULL;
+        }
 }
 
 NTSTATUS APIENTRY MwSubmitCommand(IN_CONST_HANDLE hAdapter, const DXGKARG_SUBMITCOMMAND *Arg)

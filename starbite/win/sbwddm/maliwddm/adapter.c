@@ -234,6 +234,48 @@ static void MwHangPtrLog(MW_ADAPTER *A, LONG N)
         MwLogSz(A, L"Live_HangPtrsFirst", t);
 }
 
+/* b78e: the newest hang's indices and positions as Live_HangData, and the boot's first hang's as Live_HangDataFirst:
+ *   #N idx 0x<va> size S count C got G: i0 i1 ... | base <the job's base vertex offset> vertices <invocation word>
+ *   | pos 0x<va> got G: <dwords in hex, four per vertex: x y z w as IEEE floats>
+ * Guard thread, PASSIVE_LEVEL, from MwHangLog. */
+static void MwHangDataLog(MW_ADAPTER *A, LONG N)
+{
+    static char t[8000];
+    static MW_HANG h;
+    const MW_HANG *r;
+    LONG seq;
+    size_t used;
+
+    if (N <= 0)
+        return;
+    r = &A->Hangs[(N - 1) & (MW_HANGS - 1)];
+    seq = r->Seq;
+    KeMemoryBarrier();
+    RtlCopyMemory(&h, (const void *)r, sizeof(h));
+    KeMemoryBarrier();
+    if (seq != N || r->Seq != seq)
+        return;
+    (void)RtlStringCbPrintfA(t, sizeof(t), "#%ld idx 0x%llx size %lu count %lu got %lu:", N, h.IdxVa, h.IdxSize,
+                             h.IdxCount, h.IdxGot);
+    used = strlen(t);
+    for (ULONG i = 0; h.IdxSize && (i + 1) * h.IdxSize <= h.IdxGot && used + 12 < sizeof(t) - 2600; i++) {
+        ULONG v = h.IdxSize == 1 ? h.Idx[i] : h.IdxSize == 2 ? *(const USHORT UNALIGNED *)&h.Idx[i * 2]
+                                                             : *(const ULONG UNALIGNED *)&h.Idx[i * 4];
+        (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, " %lu", v);
+        used = strlen(t);
+    }
+    (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, " | base %ld vertices 0x%lx | pos 0x%llx got %lu:",
+                             (LONG)h.Desc[11], h.Desc[8], h.PosVa, h.PosGot);
+    used = strlen(t);
+    for (ULONG i = 0; (i + 1) * 4 <= h.PosGot && used + 10 < sizeof(t); i++) {
+        (void)RtlStringCbPrintfA(t + used, sizeof(t) - used, " %08lx", *(const ULONG UNALIGNED *)&h.Pos[i * 4]);
+        used = strlen(t);
+    }
+    MwLogSz(A, L"Live_HangData", t);
+    if (N == 1)
+        MwLogSz(A, L"Live_HangDataFirst", t);
+}
+
 /* T44: the newest MW_HANGS job timeouts (MW_HANG, recorded by Reap before the hard stop), one line each, when there
  * are new ones (guard thread, PASSIVE_LEVEL, once a second). A record Reap rewrote while it was copied is skipped. */
 void MwHangLog(MW_ADAPTER *A)
@@ -291,6 +333,7 @@ void MwHangLog(MW_ADAPTER *A)
     }
     MwLogSz(A, L"Live_HangLog", t);
     MwHangPtrLog(A, n);                   /* b78 */
+    MwHangDataLog(A, n);                  /* b78e */
     MwLog(A, L"Live_HangCount", (ULONG)n);
     MwLog(A, L"Live_HangViews", A->HangViews);
     MwLog(A, L"Live_HangViewFails", A->HangViewFails);

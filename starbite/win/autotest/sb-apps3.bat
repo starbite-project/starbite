@@ -102,7 +102,7 @@ if "!T!"=="?" exit /b 0
 if !T! gtr !LASTT! (
   echo APPS3 stat %1: timeouts grew from !LASTT! to !T!: hang records saved in umdlog\hang-%1.txt >> %L%
   echo step %1 at %time%: job timeouts !LASTT! to !T! > %U%\hang-%1.txt
-  for %%V in (Live_HangLog Live_HangPtrs Live_HangPtrsFirst Live_FaultLog Live_HangCount) do reg query "%K%" /v %%V >> %U%\hang-%1.txt 2>&1
+  for %%V in (Live_HangLog Live_HangPtrs Live_HangPtrsFirst Live_HangData Live_HangDataFirst Live_FaultLog Live_HangCount) do reg query "%K%" /v %%V >> %U%\hang-%1.txt 2>&1
   set LASTT=!T!
 )
 exit /b 0
