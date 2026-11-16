@@ -1,0 +1,39 @@
+<!doctype html>
+<!-- sb-web.html (Track K T78): a page that moves, for the browser test: a CSS animation, a 2D canvas and a WebGL
+     triangle, with the frame rate and the WebGL renderer string in the title and on the page. No network. -->
+<html><head><meta charset="utf-8"><title>sb-web starting</title>
+<style>
+body { margin: 0; background: #102040; color: #fff; font: 28px sans-serif; }
+#bar { width: 200px; height: 60px; background: #40c040; animation: slide 2s linear infinite alternate; }
+@keyframes slide { from { transform: translateX(0); } to { transform: translateX(900px); } }
+canvas { border: 2px solid #fff; margin: 12px; }
+</style></head><body>
+<div id="info">starting</div><div id="bar"></div>
+<canvas id="c2d" width="500" height="300"></canvas><canvas id="gl" width="500" height="300"></canvas>
+<script>
+var info = document.getElementById('info'), c2 = document.getElementById('c2d').getContext('2d');
+var glc = document.getElementById('gl'), gl = null, renderer = 'no WebGL', prog, t0 = performance.now(), frames = 0, fps = 0;
+try {
+  gl = glc.getContext('webgl') || glc.getContext('experimental-webgl');
+  if (gl) {
+    var ext = gl.getExtension('WEBGL_debug_renderer_info');
+    renderer = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+    var vs = gl.createShader(gl.VERTEX_SHADER); gl.shaderSource(vs, 'attribute vec2 p; uniform float a; void main(){ float c=cos(a), s=sin(a); gl_Position=vec4(p.x*c-p.y*s, p.x*s+p.y*c, 0.0, 1.0); }'); gl.compileShader(vs);
+    var fs = gl.createShader(gl.FRAGMENT_SHADER); gl.shaderSource(fs, 'precision mediump float; void main(){ gl_FragColor=vec4(1.0,0.5,0.1,1.0); }'); gl.compileShader(fs);
+    prog = gl.createProgram(); gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog); gl.useProgram(prog);
+    var b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0,0.8,-0.7,-0.6,0.7,-0.6]), gl.STATIC_DRAW);
+    var loc = gl.getAttribLocation(prog, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  }
+} catch (e) { renderer = 'WebGL error: ' + e; }
+function frame(now) {
+  frames++;
+  if (now - t0 >= 1000) { fps = Math.round(frames * 1000 / (now - t0)); frames = 0; t0 = now; }
+  c2.fillStyle = '#203060'; c2.fillRect(0, 0, 500, 300);
+  c2.fillStyle = '#ffd040'; c2.fillRect(250 + 200 * Math.sin(now / 400) - 30, 120, 60, 60);
+  if (gl && prog) { gl.viewport(0, 0, 500, 300); gl.clearColor(0.1, 0.1, 0.3, 1); gl.clear(gl.COLOR_BUFFER_BIT); gl.uniform1f(gl.getUniformLocation(prog, 'a'), now / 700); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+  var s = 'sb-web ' + fps + ' fps; WebGL: ' + renderer;
+  info.textContent = s; document.title = s;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script></body></html>
