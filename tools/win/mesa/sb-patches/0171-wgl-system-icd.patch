@@ -1,0 +1,270 @@
+From 50576917f5cc773729fb1702bf428ee86fbb3f9a Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 16:51:11 +0200
+Subject: [PATCH] 0171: the same DLL as the system-wide ICD (file name
+ sbgl-*.dll, loaded by the system opengl32 through sbglicd.dll): flag files
+ from C:\ProgramData\Starbite\glsys instead of the game kit's, the new-GPU
+ row's zero-copy default (0169) only in the kit, no softpipe under a process
+ that cannot reach the Mali (no ICD pixel formats = Microsoft's OpenGL as
+ before; glsys\softpipe brings it back), wgl.c's log lines only while the
+ umdlog folder exists, first-chance exception log also under the sbgl-* names;
+ the kit (libgallium_wgl.dll) behaves as before
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ include/win32-compat/malikm_drm.c     |   4 +-
+ src/gallium/targets/wgl/wgl.c         | 104 ++++++++++++++++++++++----
+ src/gallium/targets/wgl/wgl_sb_zc.cpp |   8 +-
+ src/gallium/targets/wgl/wgl_sb_zc.h   |   6 ++
+ 4 files changed, 102 insertions(+), 20 deletions(-)
+
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index dc74c59..e4cf20a 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -268,7 +268,9 @@ sb_veh_install(void)
+                            (LPCSTR)(void *)sb_veh_install, &self) || !GetModuleFileNameA(self, name, sizeof(name)))
+       return;
+    const char *b = strrchr(name, '\\');
+-   if (_stricmp(b ? b + 1 : name, "libgallium_wgl.dll") != 0)
++   b = b ? b + 1 : name;
++   /* 0171: the system-wide ICD is the same DLL under the names sbgl-arm64.dll / sbgl-x64.dll */
++   if (_stricmp(b, "libgallium_wgl.dll") != 0 && _strnicmp(b, "sbgl-", 5) != 0)
+       return;
+    AddVectoredExceptionHandler(1, sb_veh);
+    sb_raw("sbumd: OpenGL ICD, first-chance exception log on (up to 12)\n");
+diff --git a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
+index 96aab4c..b9b6249 100644
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -76,7 +76,9 @@
+ #include "util/macros.h"
+ #include "util/xmlconfig.h"
+ #include "util/u_inlines.h"
++#include "util/u_atomic.h"
+ #include "util/format/u_format.h"
++#include "wgl_sb_zc.h"
+ extern int panfrost_sb_cached_display_targets;   /* sb-patches/0154, pan_resource.c */
+ int malikm_open(void);
+ void glsl_type_singleton_init_or_ref(void);
+@@ -86,6 +88,64 @@ static const driOptionDescription wgl_pan_driconf[] = {
+ static driOptionCache wgl_pan_info, wgl_pan_cache;
+ static bool use_panfrost = false;
+ 
++/* sb-patches/0171 (the system-wide ICD, build/win/patchwork/glsys-report.md): this DLL is used two ways.
++ *  - The game kit: libgallium_wgl.dll next to Mesa's opengl32.dll in ONE game's folder. Its switches are the flag
++ *    files C:\ProgramData\Starbite\<name> (glzc*, glsync, glcached, gltouch, ...), tuned for that game.
++ *  - The system ICD: the same code installed as System32\sbgl-arm64.dll / sbgl-x64.dll and loaded by the
++ *    system opengl32.dll (through sbglicd.dll) into ANY program. There the game's switches must not apply: the
++ *    flag files are read from C:\ProgramData\Starbite\glsys\<name> instead, the new-GPU row's zero-copy default
++ *    (0169) is off, and a process that cannot reach the Mali gets no ICD pixel formats (= Microsoft's OpenGL, as
++ *    before the ICD was registered) instead of softpipe, unless glsys\softpipe exists.
++ * Which one this is: the DLL's own file name starts with "sbgl-" (system) or not (kit). */
++int
++wgl_sb_system_icd(void)
++{
++   static int v = -1;
++   int c = p_atomic_read(&v);
++   if (c < 0) {
++      HMODULE self = NULL;
++      char name[MAX_PATH];
++      c = 0;
++      if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                             (LPCSTR)(void *)wgl_sb_system_icd, &self)) {
++         DWORD n = GetModuleFileNameA(self, name, sizeof(name));
++         if (n && n < sizeof(name)) {
++            const char *b = strrchr(name, '\\');
++            c = _strnicmp(b ? b + 1 : name, "sbgl-", 5) == 0;
++         }
++      }
++      p_atomic_set(&v, c);
++   }
++   return c;
++}
++
++/* sb-patches/0171: this file's log lines ("sbumd: gl ...", the glstats every 10 s). The kit writes them to
++ * stderr as before. The system ICD is in any program, console programs and launchers that keep a child's stderr
++ * included, so there they are written only while the test log folder C:\\ProgramData\\Starbite\\umdlog exists (the
++ * shim then has stderr in this process's file there). */
++static int
++wgl_sb_log_on(void)
++{
++   static int v = -1;
++   int c = p_atomic_read(&v);
++   if (c < 0) {
++      DWORD a = GetFileAttributesA("C:\\ProgramData\\Starbite\\umdlog");
++      c = !wgl_sb_system_icd() || (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY));
++      p_atomic_set(&v, c);
++   }
++   return c;
++}
++#define WGL_SB_LOG(...) do { if (wgl_sb_log_on()) fprintf(stderr, __VA_ARGS__); } while (0)
++
++/* the flag file <name> of this mode exists */
++int
++wgl_sb_flag_file(const char *name)
++{
++   char path[128];
++   snprintf(path, sizeof(path), "C:\\ProgramData\\Starbite\\%s%s", wgl_sb_system_icd() ? "glsys\\" : "", name);
++   return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
++}
++
+ static struct pipe_screen *
+ wgl_panfrost_create(void)
+ {
+@@ -104,11 +164,12 @@ wgl_panfrost_create(void)
+     * invalidate by the KMD) when SB_GL_CACHED=1 or C:\ProgramData\Starbite\glcached exists */
+    {
+       const char *e = getenv("SB_GL_CACHED");
+-      int on = e ? e[0] == '1'
+-                 : GetFileAttributesA("C:\\ProgramData\\Starbite\\glcached") != INVALID_FILE_ATTRIBUTES;
++      int on = e ? e[0] == '1' : wgl_sb_flag_file("glcached");
+       panfrost_sb_cached_display_targets = on;
+-      fprintf(stderr, "sbumd: gl present: cached back buffers %s (%s)\n", on ? "on" : "off",
+-              e ? "SB_GL_CACHED" : "C:\\ProgramData\\Starbite\\glcached");
++      WGL_SB_LOG("sbumd: gl: %s\n", wgl_sb_system_icd() ? "system ICD (flag files in C:\\ProgramData\\Starbite\\glsys)"
++                                                             : "game kit (flag files in C:\\ProgramData\\Starbite)");
++      WGL_SB_LOG("sbumd: gl present: cached back buffers %s (%s)\n", on ? "on" : "off",
++              e ? "SB_GL_CACHED" : "flag file glcached");
+    }
+    struct pipe_screen *screen = panfrost_drm_screen_create(fd, &config);
+    _close(fd); /* the screen keeps its own duplicate */
+@@ -220,7 +281,7 @@ wgl_pan_pool_threads(void)
+    HMODULE self;
+    if (want < 2 || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                                        (LPCWSTR)(void *)wgl_pan_pool_main, &self)) {
+-      fprintf(stderr, "sbumd: gl present: no copy threads (%u wanted, pin error %lu); one thread copies\n", want,
++      WGL_SB_LOG("sbumd: gl present: no copy threads (%u wanted, pin error %lu); one thread copies\n", want,
+               want < 2 ? 0ul : (unsigned long)GetLastError());
+       return 1;
+    }
+@@ -231,7 +292,7 @@ wgl_pan_pool_threads(void)
+       CloseHandle(t);
+       wgl_pan_pool.threads++;
+    }
+-   fprintf(stderr, "sbumd: gl present: %u copy threads (this one + %u kept), %s loads\n", wgl_pan_pool.threads,
++   WGL_SB_LOG("sbumd: gl present: %u copy threads (this one + %u kept), %s loads\n", wgl_pan_pool.threads,
+            wgl_pan_pool.threads - 1, SB_PRESENT_SIMD);
+    return wgl_pan_pool.threads;
+ }
+@@ -453,7 +514,7 @@ wgl_pan_stats_frame(int64_t start, int64_t map, int64_t copy, int64_t gdi, int m
+          wt[1] = ' ';
+          wgl_pan_stat_print(wt + 2, sizeof(wt) - 2, "async wait", &wgl_pan_stats.wait);
+       }
+-      fprintf(stderr,
++      WGL_SB_LOG(
+               "sbumd: glstats %.1f s: %u frames (%.1f fps, %u hidden); %s; %s; %s; %s; %s%s; mode %s, %u threads, "
+               "%ux%u (frames parallel %u, direct %u, copy %u, async %u)\n",
+               secs, wgl_pan_stats.frames, wgl_pan_stats.frames / secs, wgl_pan_stats.hidden, m, c, g, i, t, wt,
+@@ -468,10 +529,10 @@ wgl_pan_stats_frame(int64_t start, int64_t map, int64_t copy, int64_t gdi, int m
+          wgl_pan_hist_print(hw, sizeof(hw), &wgl_pan_hist_win);
+          wgl_pan_hist_print(hr, sizeof(hr), &wgl_pan_hist_run);
+          double run_s = (double)(end - wgl_pan_low.run_start) / (double)wgl_pan_stats.freq;
+-         fprintf(stderr, "sbumd: gllows %.1f s: %s\n", secs, hw);
+-         fprintf(stderr, "sbumd: gllows run %.0f s, %u frames (%.1f fps avg): %s\n", run_s, wgl_pan_low.run_frames,
++         WGL_SB_LOG("sbumd: gllows %.1f s: %s\n", secs, hw);
++         WGL_SB_LOG("sbumd: gllows run %.0f s, %u frames (%.1f fps avg): %s\n", run_s, wgl_pan_low.run_frames,
+                  run_s > 0 ? wgl_pan_low.run_frames / run_s : 0.0, hr);
+-         fprintf(stderr,
++         WGL_SB_LOG(
+                  "sbumd: glworst %.1f ms: game thread cpu %.1f ms, page faults %u; frame before: map %.1f copy %.1f "
+                  "gdi %.1f wait %.1f present %.1f; frame after: map %.1f copy %.1f gdi %.1f wait %.1f present %.1f\n",
+                  wgl_pan_low.worst_ms, wgl_pan_low.worst_cpu_ms, wgl_pan_low.worst_faults, WGL_PAN_PMS(a[0]),
+@@ -587,11 +648,10 @@ wgl_panfrost_async_enabled(void)
+       /* sb-patches/0154: on by default since T55 (GD menu 13.9 -> 18.9 fps); off with SB_GL_ASYNC=0 or the file
+        * C:\ProgramData\Starbite\glsync */
+       const char *env = getenv("SB_GL_ASYNC");
+-      on = env ? env[0] == '1'
+-               : GetFileAttributesA("C:\\ProgramData\\Starbite\\glsync") == INVALID_FILE_ATTRIBUTES;
++      on = env ? env[0] == '1' : !wgl_sb_flag_file("glsync");
+       p_atomic_set(&wgl_pan_async_on, on);
+-      fprintf(stderr, "sbumd: gl present: async %s (%s)\n", on ? "on" : "off",
+-              env ? "SB_GL_ASYNC" : "C:\\ProgramData\\Starbite\\glsync");
++      WGL_SB_LOG("sbumd: gl present: async %s (%s)\n", on ? "on" : "off",
++              env ? "SB_GL_ASYNC" : "flag file glsync");
+    }
+    return on;
+ }
+@@ -692,7 +752,7 @@ wgl_pan_async_thread(void)
+       t = CreateThread(NULL, 64 * 1024, wgl_pan_async_main, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    if (!t) {
+       wgl_pan_async.failed = true;
+-      fprintf(stderr, "sbumd: gl present: no async thread (error %lu): presents as before\n",
++      WGL_SB_LOG("sbumd: gl present: no async thread (error %lu): presents as before\n",
+               (unsigned long)GetLastError());
+       return false;
+    }
+@@ -750,7 +810,7 @@ wgl_panfrost_present_async(struct pipe_context *pipe, struct pipe_resource *res,
+       static int said;
+       if (!hidden && !said) {
+          said = 1;
+-         fprintf(stderr, "sbumd: gl present: async not possible for this frame (%s); synchronous present\n",
++         WGL_SB_LOG("sbumd: gl present: async not possible for this frame (%s); synchronous present\n",
+                  !direct ? "the map is not the BO itself" : "format conversion");
+       }
+       if (!hidden)
+@@ -956,6 +1016,18 @@ wgl_screen_create(HDC hDC)
+     * sorted list. Don't do this if GALLIUM_DRIVER is specified.
+     */
+    for (unsigned i = 0; i < ARRAY_SIZE(drivers); ++i) {
++#ifdef GALLIUM_PANFROST
++      /* sb-patches/0171: the system ICD does not put softpipe (seconds per frame at this screen size) under a
++       * program whose process cannot reach the Mali: no screen = no ICD pixel formats = the system opengl32
++       * goes on with Microsoft's implementation, as before the ICD was registered. Asked for by name
++       * (GALLIUM_DRIVER, LIBGL_ALWAYS_SOFTWARE) or by the flag file glsys\softpipe, softpipe still comes. */
++      if (i > 0 && !sw_only && wgl_sb_system_icd() && strcmp(drivers[i], "softpipe") == 0 &&
++          !wgl_sb_flag_file("softpipe")) {
++         WGL_SB_LOG("sbumd: gl: no Mali in this process and no softpipe in the system ICD: "
++                         "Microsoft's OpenGL takes over\n");
++         continue;
++      }
++#endif
+       struct pipe_screen* screen = wgl_screen_create_by_name(hDC, drivers[i], winsys);
+       if (screen) {
+          created_driver_name = drivers[i];
+diff --git a/src/gallium/targets/wgl/wgl_sb_zc.cpp b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+index 325e69a..4a998a6 100644
+--- a/src/gallium/targets/wgl/wgl_sb_zc.cpp
++++ b/src/gallium/targets/wgl/wgl_sb_zc.cpp
+@@ -76,9 +76,7 @@ static bool zc_log;
+ static bool
+ zc_file(const char *name)
+ {
+-   char path[96];
+-   snprintf(path, sizeof(path), "C:\\ProgramData\\Starbite\\%s", name);
+-   return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
++   return wgl_sb_flag_file(name) != 0;   /* 0171: the kit's folder, or glsys\ in the system ICD */
+ }
+ 
+ static bool
+@@ -86,6 +84,10 @@ zc_new_gpu_row(void)
+ {
+    static LONG v = -1;
+    LONG c = v;
++   /* 0171: the row's default belongs to the game kit. In the system ICD (any program's windows) every row
++    * presents through GDI unless glsys\glzc* asks for zero-copy. */
++   if (wgl_sb_system_icd())
++      return false;
+    if (c < 0) {
+       HKEY k;
+       DWORD dat = 0, type = 0, n = sizeof(dat);
+diff --git a/src/gallium/targets/wgl/wgl_sb_zc.h b/src/gallium/targets/wgl/wgl_sb_zc.h
+index 8646cd4..8c0886d 100644
+--- a/src/gallium/targets/wgl/wgl_sb_zc.h
++++ b/src/gallium/targets/wgl/wgl_sb_zc.h
+@@ -16,6 +16,12 @@ struct stw_winsys_framebuffer;
+  * present) when SB_GL_PRESENT=gdi|copy, for unsuitable pixel formats, or when any step of making it fails. */
+ struct stw_winsys_framebuffer *wgl_sb_zc_create_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelFormat);
+ 
++/* wgl.c (sb-patches/0171): 1 when this DLL is the system-wide ICD (file name sbgl-*.dll), 0 in the game kit; and
++ * whether the flag file <name> of that mode exists (kit: C:\ProgramData\Starbite\<name>, system:
++ * C:\ProgramData\Starbite\glsys\<name>). */
++int wgl_sb_system_icd(void);
++int wgl_sb_flag_file(const char *name);
++
+ /* wgl.c: show a Panfrost resource in the window through GDI (0145's present), with the current GL context. */
+ void wgl_sb_gdi_present(struct pipe_resource *res, HWND hwnd);
+ 
+-- 
+2.43.0
+

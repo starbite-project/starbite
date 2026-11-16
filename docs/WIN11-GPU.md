@@ -3292,6 +3292,44 @@ every second, so they are in every entry. The copy says (state 285 s into that b
 - **Also seen in the pull:** C: has 1.3 GB free of 22 GB (94 % used). No hibernation involved (HiberbootEnabled 0,
   no hiberfil.sys): the dirty hive is from the session's end, not from Fast Startup.
 
+### 6.111 Two gap-list items built offline: a 32-bit driver (T85) and OpenGL for every program (T86)
+
+(2026-11-16 17:06; both **compiled only**, staged, never run. Full write-ups: `docs/WIN11-GPU-X86.md`, `docs/WIN11-GPU-GLSYS.md`.)
+
+- **32-bit x86 sbumd** (gap list item 4; Mesa branch `sb-x86` = 0167 + 3 commits, `sb-patches/0172`;
+  `build/win/umd-x86/sbumd.dll` cc015f8e, PE32). Today 32-bit programs get no GPU: the adapter has no
+  `UserModeDriverNameWow`. The audit found the UMD-to-KMD structures 32/64-clean (fixed-width, no pointers, 64-bit
+  members on multiples of 8; checked by a compile-time layout test for i686, x86_64, aarch64 and arm64ec), so the
+  kernel driver needs no change. GPU addresses stay 64-bit. Known limit: every visible buffer stays CPU-mapped, so
+  a 32-bit game's GPU memory competes for its 2 GB of address space. Not known until a boot: whether ARM64
+  Windows reads `UserModeDriverNameWow` for x86 processes at all (the test prints the names dxgkrnl.sys knows).
+  Install: `tools/win/sbextra-install.sh x86 install|clear` (`tools/win/hive-umdname-wow.py`). **T85**
+  (`sbwddm-t85`, the 0167 driver set so DWM is the same generation; `sb-x86.bat`): a 32-bit D3D11 program
+  (`sbd3d32.exe`: exit 0 = on our driver with the right pixels), the kernel driver's own record of a 32-bit bind
+  (`UmdNote_48/49`), then the first 12 d3d10core tests as 32-bit programs.
+- **System-wide OpenGL** (gap list item 5; Mesa branch `sb-glsys` = the GL kit tree + `sb-patches/0171`). The
+  adapter's `OpenGLDriverName` names `sbglicd.dll` (60 KB, ARM64X, C only, no initializer tables), which loads
+  `sbgl-arm64.dll` or `sbgl-x64.dll` (ARM64EC) by process type and forwards the 19 `Drv*` entry points. Mesa's GL
+  driver itself cannot be one ARM64X file with our linker recipe: each half has a C++ dynamic initializer (the
+  GLSL compiler's `builtins`), the T77 pattern (6.106). Switch files in `C:\ProgramData\Starbite\glsys\`: `off`,
+  `off-<exe>`, and `only` + `on-<exe>` (an allow list: the first test gives the driver to the test program
+  alone). With a system DLL name the driver reads its flag files from `glsys\`, so the game's `glzc*`/`gltouch`
+  switches do not reach other programs, and a process that cannot reach the Mali gets Microsoft's OpenGL instead
+  of softpipe. Install: `tools/win/sbextra-install.sh gl install STAGE OUT [EXE...]|clear`
+  (`tools/win/hive-opengl-icd.py`: three values, clear removes exactly those). **T86** (`sbwddm-t86`, T61's driver
+  set; `sb-glsys.bat`): `sbgltest` as a native, an ARM64EC and an x64 program through the SYSTEM opengl32
+  (renderer/version, 30 shader frames read back, swap timing), then the two ways back (switched off by file; no
+  Mali in the process) and DWM unchanged. Not known until a boot: whether opengl32 falls back when the ICD
+  refuses, REG_MULTI_SZ vs REG_SZ, whether a bare file name resolves to System32. GL tops out at 3.1; 32-bit
+  programs are unchanged.
+- `sbextra-install.sh` was rehearsed end to end on a fake phone folder with a copy of the user's hive (show, x86
+  install, gl install with an allow list, show, gl clear, x86 clear): after both clears the adapter key equals
+  the original and `System32\sbumd.dll` is untouched.
+- **A mistake of mine found on the way:** `sb-smoke.bat`, `sb-rows.bat` and `sb-apps2.bat` read the KMD's live
+  counters from `Services\sbwddm\State`, where they are not (they are in the device key `Enum\ACPI\STRB0072\0\
+  Device Parameters\sbwddm`, and two of the four names did not exist). T80/T80b would have reported 0 timeouts
+  after every step whatever happened. Fixed and restaged (T80, T80b, T81, T83) before any of them ran.
+
 ### 6.92 The black taskbar after Geometry Dash: sihost aborts after Game Bar's presence server fails (dump read)
 
 - **The dump** (`results-t67/a/user/dumps/sihost.exe.3376.dmp`, 223 MB, WER LocalDumps from touch-1; T67a 18:43 UTC,

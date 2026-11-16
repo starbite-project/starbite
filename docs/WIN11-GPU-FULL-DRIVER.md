@@ -249,6 +249,13 @@ or more. Earlier analysis: `WIN11-GPU-CAPS.md` (11-11), `WIN11-GPU.md` 6.86 (Bea
 - **Rule from T77:** offline checks do not execute the Windows-only code or the DLL load; every build from an
   unbooted tree gets the boot check first (`tools/win/smoke-stage.sh`).
 
+- **11-16 17:06, items 4 and 5 (offline, compiled only):** a 32-bit x86 sbumd (`sb-x86`, cc015f8e; the kernel
+  interface needed no change) and the system-wide OpenGL driver (`sbglicd.dll` front + `sbgl-arm64.dll` /
+  `sbgl-x64.dll`, allow-list switch for the first boot). Staged as T85 and T86 with install/clear scripts rehearsed
+  on a hive copy (`WIN11-GPU.md` 6.111). Running offline: the T78 stall/black-window analysis and a shader disk cache.
+- **Still nothing of the `sb-nir` tree has run on the phone** (first step: T81, then T82): the user's Windows was
+  left without a clean restart on 11-16 and no install is possible until they restart it once.
+
 ## What this means for the two test apps
 - **Geometry Dash:** items 1 and 9. T71 measures the first step.
 - **BeamNG.drive:** item 6 (feature level 11_0) is the gate; before that the game cannot create its device. Items

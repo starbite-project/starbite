@@ -1,0 +1,176 @@
+From 8c048ca7d2f553c2057b2d0a65d65eb75297e936 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 16:51:17 +0200
+Subject: [PATCH 1/3] sb-x86: the sbwddm private ABI is checked at compile time
+ (one layout for 32-bit and 64-bit callers); a 32-bit x86 bind says so (umdlog
+ line, UmdNote_48/49)
+
+No layout changes: MW_ALLOCATION_INFO, MW_COMMAND and the escape structures were already fixed-width with every
+64-bit member at a multiple of 8. The asserts stop a build in which that is no longer true.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ include/win32-compat/malikm_drm.c | 31 +++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/include/win32-compat/malikm_drm.c b/include/win32-compat/malikm_drm.c
+index 19be571..b86115f 100644
+--- a/include/win32-compat/malikm_drm.c
++++ b/include/win32-compat/malikm_drm.c
+@@ -21,6 +21,7 @@
+ #include <io.h>
+ #include <fcntl.h>
+ #include <errno.h>
++#include <stddef.h>
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -36,6 +37,25 @@
+ #include "xf86drm.h"
+ #include "sys/mman.h"
+ 
++/* sb-x86 (the 32-bit x86 sbumd, 2026-11-16): sbwddm does not know whether a 32-bit or a 64-bit process is calling,
++ * so everything of ours that reaches it (allocation private data, a render's command buffer, escapes) must have
++ * one layout for both: fixed-width members only, no pointer, size_t or HANDLE, and every 64-bit member at a multiple
++ * of 8 (so no ABI's alignment rule can move it). A build for which that is not true stops here. The same numbers
++ * are checked against the kernel driver's copy of the header by build/win/patchwork/x86-abi-layout.sh. */
++#define SB_ABI(t, size, last, last_off)                                                                              \
++   _Static_assert(sizeof(t) == (size) && _Alignof(t) == 8 && offsetof(t, last) == (last_off), "sbwddm ABI: " #t)
++SB_ABI(MW_ALLOCATION_INFO, 32, Format, 28);
++SB_ABI(MW_COMMAND, 16, Jc, 8);
++SB_ABI(MW_ESCAPE_ALLOC_INFO_DATA, 24, Size, 16);
++SB_ABI(MW_ESCAPE_GPU_INFO_DATA, 376, Valid, 368);
++SB_ABI(MW_ESCAPE_STATS_DATA, 232, FlipCopySkips, 228);
++_Static_assert(offsetof(MW_ALLOCATION_INFO, Size) == 8 && offsetof(MW_ESCAPE_ALLOC_INFO_DATA, GpuVa) == 8 &&
++               offsetof(MW_ESCAPE_STATS_DATA, LastFaultAddress) == 64 && offsetof(MW_ESCAPE_STATS_DATA, LastMapVa) == 160 &&
++               offsetof(MW_ESCAPE_STATS_DATA, PatchAddress0) == 192, "sbwddm ABI: 64-bit members");
++/* the shim's own structures of the marshalled DRM calls (never seen by sbwddm, but by MALIKM_FAKE and malikm) */
++_Static_assert(sizeof(MALIKM_DRM_HEADER) == 16 && sizeof(MALIKM_MAP) == 24 && sizeof(MALIKM_UNMAP) == 8 &&
++               sizeof(MALIKM_SYNCOBJ_SEQ) == 16, "malikm ABI");
++
+ /* The maliwddm backend, below. */
+ static int wddm_on(void);
+ static int wddm_init(void);
+@@ -329,6 +349,9 @@ sb_log_open(void)
+    fprintf(stderr, "sbumd: %s pid %lu at %02u:%02u:%02u.%03u, driver-call trace %s\n", exe,
+            (unsigned long)GetCurrentProcessId(), st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+            sb_log_trace ? "on" : "off");
++#if defined(_M_IX86)
++   fprintf(stderr, "sbumd: this is the 32-bit x86 build (sb-x86), pointers %u bits\n", (unsigned)(8 * sizeof(void *)));
++#endif
+ }
+ 
+ static int
+@@ -1146,6 +1169,7 @@ void
+ malikm_note(unsigned id, unsigned value)
+ {
+    struct { uint32_t Code, Id, Value, Reserved; } n = { SB_ESCAPE_NOTE, id, value, 0 };
++   _Static_assert(sizeof(n) == 16, "sbwddm ABI: MW_ESCAPE_SB_NOTE_DATA");   /* sb-x86 */
+    struct sbdev *d = sb_cur && sb_cur->on ? sb_cur : sb_last_on;
+    if (!d || id >= 64)
+       return;
+@@ -1824,6 +1848,13 @@ malikm_bind_d3dddi(HANDLE hRTAdapter, HANDLE hRTDevice, const void *pKTCallbacks
+       malikm_note(1, sb_log_status);
+       malikm_note(2, (unsigned)GetCurrentProcessId());
+       malikm_note_count(3);
++#if defined(_M_IX86)
++      /* sb-x86: a 32-bit x86 process (Windows' emulator) bound to the Mali through the runtime's callbacks. The
++       * kernel driver's registry trace then has UmdNote_48 (binds from this process: 1-4, then each power of two) and
++       * UmdNote_49 (its pid): the proof, without any file access, that the 32-bit sbumd reached sbwddm. */
++      malikm_note_count(48);
++      malikm_note(49, (unsigned)GetCurrentProcessId());
++#endif
+    }
+    if (trace_on() || sb_log_active)
+       fprintf(stderr, "malikm: bind to the runtime device %p: %s (device %u)\n", hRTDevice,
+-- 
+2.43.0
+
+
+From fa24465c499caac6990792359d99e399e00ac71a Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 16:51:17 +0200
+Subject: [PATCH 2/3] sb-x86: /alternatename fallbacks with the leading
+ underscore of 32-bit x86 C symbols
+
+The two weak-default directives (malikm_fd_dup, panfrost_sb_rotate_bos) named undecorated symbols, which do not
+exist on x86: harmless in the Panfrost build (both real functions are linked), a link error in a build without them.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/gallium/frontends/d3d10umd/DxgiFns.cpp | 4 ++++
+ src/util/os_file.c                         | 6 ++++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+index dcef2ac..d75ce31 100644
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -66,7 +66,11 @@ struct SbTrace sbTrace;
+ 
+ /* sb-patches/0112: the default when the driver has no BO rotation (softpipe build) */
+ extern "C" bool sb_rotate_bos_none(struct pipe_context *, struct pipe_resource **, unsigned) { return false; }
++#if defined(_M_IX86)   /* sb-x86: the leading underscore of 32-bit x86 C symbols (see os_file.c) */
++#pragma comment(linker, "/alternatename:_panfrost_sb_rotate_bos=_sb_rotate_bos_none")
++#else
+ #pragma comment(linker, "/alternatename:panfrost_sb_rotate_bos=sb_rotate_bos_none")
++#endif
+ 
+ void
+ sb_trace_draw(struct Device *d, unsigned kind, unsigned count, unsigned instances, unsigned index_size,
+diff --git a/src/util/os_file.c b/src/util/os_file.c
+index d2a3f7c..08f0d65 100644
+--- a/src/util/os_file.c
++++ b/src/util/os_file.c
+@@ -50,7 +50,13 @@ os_file_create_unique(const char *filename, int filemode)
+  * device, named by the fd; a duplicate names the same one. Builds without the shim get the no-op. */
+ void malikm_fd_dup(int oldfd, int newfd);
+ void sb_fd_dup_none(int oldfd, int newfd) { (void)oldfd; (void)newfd; }
++/* sb-x86: 32-bit x86 C symbols carry a leading underscore, and the linker matches /alternatename literally: without
++ * it the fallback never applied there (a link without the shim would have failed instead of using the no-op). */
++#if defined(_M_IX86)
++#pragma comment(linker, "/alternatename:_malikm_fd_dup=_sb_fd_dup_none")
++#else
+ #pragma comment(linker, "/alternatename:malikm_fd_dup=sb_fd_dup_none")
++#endif
+ 
+ int
+ os_dupfd_cloexec(int fd)
+-- 
+2.43.0
+
+
+From afea139e92afae447ab344f7076a74b11f187645 Mon Sep 17 00:00:00 2001
+From: Starbite build <build@starbite.invalid>
+Date: Mon, 16 Nov 2026 16:56:22 +0200
+Subject: [PATCH 3/3] sb-x86: no run-time x86 code generation (translate_sse2)
+ in the 32-bit x86 Windows build
+
+That build runs only under Windows on ARM x86 emulation; the C translate path is the one the ARM64 sbumd uses.
+Other targets are unchanged.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/gallium/auxiliary/translate/translate.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/auxiliary/translate/translate.c b/src/gallium/auxiliary/translate/translate.c
+index d649791..76b87ec 100644
+--- a/src/gallium/auxiliary/translate/translate.c
++++ b/src/gallium/auxiliary/translate/translate.c
+@@ -38,7 +38,11 @@ struct translate *translate_create( const struct translate_key *key )
+ {
+    struct translate *translate = NULL;
+ 
+-#if DETECT_ARCH_X86 || DETECT_ARCH_X86_64
++/* sb-x86: not in the 32-bit x86 Windows build. translate_sse2 writes x86 machine code at run time (rtasm, RWX
++ * memory); that build only ever runs under Windows on ARM's x86 emulator, where generated code is emulated again
++ * and gains nothing over the C path below, which is the one every ARM64 sbumd has always used (u_vbuf's vertex
++ * conversions for Panfrost). One code path less that has never run on the phone. */
++#if (DETECT_ARCH_X86 && !DETECT_OS_WINDOWS) || DETECT_ARCH_X86_64
+    translate = translate_sse2_create( key );
+    if (translate)
+       return translate;
+-- 
+2.43.0
+
